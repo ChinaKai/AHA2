@@ -1,0 +1,14 @@
+.data/
+.data-integration/
+.tools/
+dist/
+coverage/
+web/node_modules/
+web/dist/
+!internal/webassets/dist/
+internal/webassets/dist/*
+!internal/webassets/dist/.gitkeep
+*.exe
+*.test
+*.db
+*.db-*
