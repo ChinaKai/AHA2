@@ -46,7 +46,7 @@ func (s *Server) createProject(writer http.ResponseWriter, request *http.Request
 	now := time.Now().UTC()
 	item := domain.Project{
 		ID: domain.NewID("project"), Name: payload.Name, Description: strings.TrimSpace(payload.Description),
-		ProjectType: projectType,
+		ProjectType:        projectType,
 		RepositoryIdentity: strings.TrimSpace(payload.RepositoryIdentity), DefaultBranch: strings.TrimSpace(payload.DefaultBranch),
 		CreatedAt: now, UpdatedAt: now,
 	}
@@ -114,17 +114,17 @@ func (s *Server) listWorkspaces(writer http.ResponseWriter, request *http.Reques
 
 func (s *Server) createWorkspace(writer http.ResponseWriter, request *http.Request) {
 	var payload struct {
-		ProjectID    string `json:"project_id"`
-		Name         string `json:"name"`
-		Locality     string `json:"locality"`
-		Transport    string `json:"transport"`
-		RootPath     string `json:"root_path"`
-		SSHHost      string `json:"ssh_host"`
-		SSHUser      string `json:"ssh_user"`
-		SSHPort      int    `json:"ssh_port"`
-		Distro       string `json:"distro"`
-		Isolation    string `json:"isolation"`
-		WorktreeDir  string `json:"worktree_dir"`
+		ProjectID   string `json:"project_id"`
+		Name        string `json:"name"`
+		Locality    string `json:"locality"`
+		Transport   string `json:"transport"`
+		RootPath    string `json:"root_path"`
+		SSHHost     string `json:"ssh_host"`
+		SSHUser     string `json:"ssh_user"`
+		SSHPort     int    `json:"ssh_port"`
+		Distro      string `json:"distro"`
+		Isolation   string `json:"isolation"`
+		WorktreeDir string `json:"worktree_dir"`
 	}
 	if err := decodeJSON(request, &payload); err != nil {
 		writeError(writer, http.StatusBadRequest, "invalid_json")
@@ -170,7 +170,7 @@ func (s *Server) createWorkspace(writer http.ResponseWriter, request *http.Reque
 		ID: domain.NewID("workspace"), ProjectID: payload.ProjectID, Name: strings.TrimSpace(payload.Name),
 		Locality: payload.Locality, Transport: payload.Transport, RootPath: strings.TrimSpace(payload.RootPath),
 		SSHHost: strings.TrimSpace(payload.SSHHost), SSHUser: strings.TrimSpace(payload.SSHUser), SSHPort: payload.SSHPort,
-		Distro: strings.TrimSpace(payload.Distro),
+		Distro:    strings.TrimSpace(payload.Distro),
 		Isolation: isolation, WorktreeDir: strings.TrimSpace(payload.WorktreeDir),
 		Health: "unknown", CreatedAt: now, UpdatedAt: now,
 	}

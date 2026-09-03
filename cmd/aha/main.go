@@ -134,6 +134,9 @@ func serve(args []string) error {
 	}
 	appService := app.NewService(database, secretStore, executor)
 	appService.SetWorkspacePreparer(execution.WorkspacePreparer{})
+	if err := appService.ResumePending(ctx); err != nil {
+		return fmt.Errorf("resume pending agent inbox: %w", err)
+	}
 	removeLegacyStubConfiguration(ctx, database)
 	if coded, err := database.BackfillTaskCodes(ctx); err != nil {
 		logger.Warn("task code backfill failed", "error", err)

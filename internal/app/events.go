@@ -17,7 +17,7 @@ func NewEventHub() *EventHub {
 }
 
 func (h *EventHub) Subscribe(taskID string) (<-chan domain.Event, func()) {
-	channel := make(chan domain.Event, 64)
+	channel := make(chan domain.Event, 1024)
 	h.mu.Lock()
 	if h.subscribers[taskID] == nil {
 		h.subscribers[taskID] = map[chan domain.Event]struct{}{}

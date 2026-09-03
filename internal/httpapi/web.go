@@ -32,7 +32,7 @@ func (s *Server) serveWeb(writer http.ResponseWriter, request *http.Request) {
 	if requestPath == "index.html" {
 		writer.Header().Set("Cache-Control", "no-store")
 	} else {
-		writer.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		writer.Header().Set("Cache-Control", "no-cache")
 	}
 	writer.WriteHeader(http.StatusOK)
 	_, _ = writer.Write(data)

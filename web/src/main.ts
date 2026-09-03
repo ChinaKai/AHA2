@@ -1,7 +1,26 @@
 import {api} from "./api.js";
+import {renderConversationList} from "./conversation_ui.js";
 import {icon} from "./icons.js";
+import {bindPromptAdmin, loadPromptCatalog, renderPromptAdmin} from "./prompt_admin.js";
+import {renderComposerAgentOptions, renderComposerTools} from "./task_composer.js";
+import {renderTaskToolButtons, renderTaskToolContent, renderTaskToolPanel} from "./task_tools.js";
+import type {TaskTool} from "./task_tools.js";
+import {TASK_SLASH_COMMANDS, bindMessageBubbleControls, clearNavigationSnapshot, exactSlashCommand, executeAgentSessionAction, loadNavigationSnapshot, matchingSlashCommands, saveNavigationSnapshot} from "./ui_helpers.js";
+import {
+  compactNumber,
+  contextPercent,
+  formatDuration,
+  isActiveTurn,
+  latestAgentTurns,
+  renderAgentConfigDialog,
+  renderAgentTurnCard,
+  renderContextMetrics,
+  usageNumber,
+} from "./task_agents.js";
 import type {
   AuthStatus,
+  ConversationCategory,
+  ConversationItem,
   DetectedModel,
   Knowledge,
   Model,
@@ -9,12 +28,11 @@ import type {
   Provider,
   SystemInfo,
   Task,
+  TaskContextDetail,
   TaskDetail,
   Workspace,
 } from "./types.js";
-
-type View = "projects" | "models" | "tasks" | "knowledge";
-
+type View = "projects" | "models" | "tasks" | "knowledge" | "prompts";
 interface State {
   auth: AuthStatus | null;
   view: View;
@@ -30,9 +48,20 @@ interface State {
   tasks: Task[];
   knowledge: Knowledge[];
   selectedTask: TaskDetail | null;
+  taskConversation: ConversationItem[];
+  taskConversationHasMore: boolean;
+  taskConversationBefore: number;
+  taskConversationLatest: number;
+  taskEventCursor: number;
+  taskCategories: Record<ConversationCategory, boolean>;
+  taskContext: TaskContextDetail | null;
+  taskRealtimeState: "connecting" | "live" | "fallback";
+  taskDraft: string;
+  taskDrafts: Record<string, string>;
+  selectedTaskAgent: string;
   selectedProject: Project | null;
   dialogProjectID: string;
-  contextOpen: boolean;
+  taskTool: TaskTool | "";
   taskProjectFilter: string;
   taskStatusFilter: string;
 }
@@ -52,15 +81,33 @@ const state: State = {
   tasks: [],
   knowledge: [],
   selectedTask: null,
+  taskConversation: [],
+  taskConversationHasMore: false,
+  taskConversationBefore: 0,
+  taskConversationLatest: 0,
+  taskEventCursor: 0,
+  taskCategories: {chat: true, update: true, tool: true, error: true},
+  taskContext: null,
+  taskRealtimeState: "connecting",
+  taskDraft: "",
+  taskDrafts: {},
+  selectedTaskAgent: "main",
   selectedProject: null,
   dialogProjectID: "",
-  contextOpen: false,
+  taskTool: "",
   taskProjectFilter: "",
   taskStatusFilter: "",
 };
 
 const app = document.querySelector<HTMLDivElement>("#app");
 let events: EventSource | null = null;
+let taskRefreshTimer: number | null = null;
+let taskClockFrame: number | null = null;
+let taskClockSecond = -1;
+let taskMonitorTimer: number | null = null;
+let taskFallbackTimer: number | null = null;
+let taskLastSignalAt = 0;
+let scrollConversationToBottom = false;
 
 function escapeHTML(value: unknown): string {
   return String(value ?? "")
@@ -88,6 +135,7 @@ function statusLabel(status: string): string {
     queued: "排队",
     starting: "启动中",
     running: "执行中",
+    waiting: "等待 Agent",
     succeeded: "成功",
     interrupted: "已中断",
     candidate: "Candidate",
@@ -463,6 +511,7 @@ async function bootstrap(): Promise<void> {
     api.setCSRF(state.auth.csrf_token);
     if (state.auth.authenticated) {
       await loadAll();
+      await restoreNavigationState();
       openGlobalEvents();
     }
   } catch (error) {
@@ -484,12 +533,192 @@ async function loadAll(): Promise<void> {
   state.tasks = tasks.tasks || [];
   state.knowledge = knowledge.knowledge || [];
   if (system?.system) state.system = system.system;
+  await loadPromptCatalog();
+}
+function persistNavigationState(): void {
+  saveNavigationSnapshot({
+    view: state.view, projectID: state.selectedProject?.id, taskID: state.selectedTask?.task.id,
+    agentID: state.selectedTaskAgent, draft: state.taskDraft, drafts: state.taskDrafts,
+  });
+}
+async function restoreNavigationState(): Promise<void> {
+  const saved = loadNavigationSnapshot();
+  if (["projects", "models", "tasks", "knowledge", "prompts"].includes(saved.view || "")) state.view = saved.view as View;
+  state.selectedProject = state.projects.find(project => project.id === saved.projectID) || null;
+  if (!saved.taskID || !state.tasks.some(task => task.id === saved.taskID)) return;
+  state.view = "tasks"; state.selectedProject = null;
+  await openTask(saved.taskID);
+  if (saved.agentID && saved.agentID !== "main" && state.selectedTask?.agents.some(agent => agent.agent_id === saved.agentID)) {
+    await selectTaskAgent(saved.agentID);
+  }
+  state.taskDrafts = saved.drafts || {};
+  state.taskDraft = saved.draft || state.taskDrafts[state.selectedTaskAgent] || "";
+}
+function syncVisualViewportHeight(): void {
+  const height = Math.round(window.visualViewport?.height || window.innerHeight);
+  document.documentElement.style.setProperty("--visual-viewport-height", `${height}px`);
+}
+
+function selectedConversationCategories(): ConversationCategory[] {
+  return (Object.keys(state.taskCategories) as ConversationCategory[]).filter(category => state.taskCategories[category]);
+}
+
+async function openTask(taskID: string): Promise<void> {
+  const [detail, page] = await Promise.all([
+    api.task(taskID),
+    api.agentConversation(taskID, "main", {limit: 50, categories: selectedConversationCategories()}),
+  ]);
+  detail.agents ||= [];
+  state.selectedTask = detail;
+  state.selectedTaskAgent = "main";
+  state.taskConversation = page.conversation.items || [];
+  state.taskConversationHasMore = page.conversation.has_more;
+  state.taskConversationBefore = page.conversation.next_before || 0;
+  state.taskConversationLatest = page.conversation.latest_sequence || 0;
+  state.taskEventCursor = detail.event_cursor || 0;
+  state.taskContext = null;
+  state.taskTool = "";
+  state.taskDraft = "";
+  state.taskDrafts = {};
+  scrollConversationToBottom = true;
+  openEvents(taskID, state.taskEventCursor);
+}
+
+async function selectTaskAgent(agentID: string): Promise<void> {
+  if (!state.selectedTask || agentID === state.selectedTaskAgent) return;
+  state.taskDrafts[state.selectedTaskAgent] = state.taskDraft;
+  state.selectedTaskAgent = agentID;
+  state.taskDraft = state.taskDrafts[agentID] || "";
+  const page = await api.agentConversation(state.selectedTask.task.id, agentID, {
+    limit: 50,
+    categories: selectedConversationCategories(),
+  });
+  state.taskConversation = page.conversation.items || [];
+  state.taskConversationHasMore = page.conversation.has_more;
+  state.taskConversationBefore = page.conversation.next_before || 0;
+  state.taskConversationLatest = page.conversation.latest_sequence || 0;
+  const agent = state.selectedTask.agents.find(item => item.agent_id === agentID);
+  if (agent) agent.unread_count = 0;
+  state.taskContext = state.taskTool === "context"
+    ? await api.agentContext(state.selectedTask.task.id, agentID)
+    : null;
+  scrollConversationToBottom = true;
+}
+
+function syncAgentConfigFields(): void {
+  const backend = String((document.querySelector<HTMLSelectElement>("#agent-config-backend"))?.value || "codex");
+  const modelSelect = document.querySelector<HTMLSelectElement>("#agent-config-model");
+  if (modelSelect) {
+    const previous = modelSelect.value;
+    const models = state.models.filter(model => model.backend === backend);
+    modelSelect.innerHTML = models.map(model =>
+      `<option value="${model.id}" ${model.id === previous ? "selected" : ""}>${escapeHTML(model.display_name)}</option>`
+    ).join("") || `<option value="">该 Backend 暂无模型</option>`;
+    if (!models.some(model => model.id === previous) && models.length) modelSelect.value = models[0].id;
+  }
+  const effortSelect = document.querySelector<HTMLSelectElement>("#agent-config-effort");
+  if (effortSelect) {
+    const previous = effortSelect.value;
+    const levels = EFFORT_LEVELS[backend] || EFFORT_LEVELS.codex;
+    effortSelect.innerHTML = levels.map(level => `<option value="${level}">${level}</option>`).join("");
+    effortSelect.value = levels.includes(previous) ? previous : "medium";
+  }
+  const inherited = Boolean(document.querySelector<HTMLInputElement>('[name="inherit_main"]')?.checked);
+  document.querySelectorAll<HTMLElement>(".agent-runtime-fields").forEach(element => {
+    element.classList.toggle("disabled", inherited);
+    element.querySelectorAll<HTMLInputElement | HTMLSelectElement>("input,select").forEach(input => {
+      input.disabled = inherited;
+    });
+  });
+}
+
+function bindTaskAgentControls(): void {
+  document.querySelectorAll<HTMLElement>("[data-agent-select]").forEach(button => button.addEventListener("click", async () => {
+    await selectTaskAgent(button.dataset.agentSelect || "main");
+    render();
+  }));
+  document.querySelectorAll<HTMLElement>("[data-agent-config]").forEach(button => button.addEventListener("click", async () => {
+    await selectTaskAgent(button.dataset.agentConfig || "main");
+    render();
+    const dialog = document.querySelector<HTMLDialogElement>("#agent-config-dialog");
+    dialog?.showModal();
+    syncAgentConfigFields();
+  }));
+}
+
+async function reloadConversation(): Promise<void> {
+  if (!state.selectedTask) return;
+  const page = await api.agentConversation(state.selectedTask.task.id, state.selectedTaskAgent, {
+    limit: 50,
+    categories: selectedConversationCategories(),
+  });
+  state.taskConversation = page.conversation.items || [];
+  state.taskConversationHasMore = page.conversation.has_more;
+  state.taskConversationBefore = page.conversation.next_before || 0;
+  state.taskConversationLatest = page.conversation.latest_sequence || 0;
+}
+
+function taskRuntimeSignature(detail: TaskDetail | null): string {
+  if (!detail) return "";
+  return JSON.stringify({
+    task: [detail.task.status, detail.task.updated_at],
+    round: detail.latest_round ? [
+      detail.latest_round.id, detail.latest_round.status, detail.latest_round.started_at, detail.latest_round.finished_at,
+    ] : null,
+    turns: (detail.turns || []).map(turn => [
+      turn.id, turn.status, turn.attempt, turn.generation, turn.started_at, turn.finished_at,
+      turn.context_window, turn.prompt_chars, turn.backend_session_id, turn.usage, turn.error,
+    ]),
+    agents: (detail.agents || []).map(agent => [
+      agent.agent_id, agent.status, agent.runtime_config_snapshot_id, agent.unread_count, agent.updated_at,
+    ]),
+    memory: detail.memory,
+  });
+}
+
+async function refreshTaskRuntime(taskID: string): Promise<boolean> {
+  if (state.selectedTask?.task.id !== taskID) return false;
+  const previousSignature = taskRuntimeSignature(state.selectedTask);
+  const previousContext = state.taskContext ? JSON.stringify(state.taskContext) : "";
+  const [detail, page] = await Promise.all([
+    api.task(taskID),
+    api.agentConversation(taskID, state.selectedTaskAgent, {
+      after: state.taskConversationLatest,
+      limit: 100,
+      categories: selectedConversationCategories(),
+    }),
+  ]);
+  detail.agents ||= [];
+  state.selectedTask = detail;
+  let changed = taskRuntimeSignature(detail) !== previousSignature;
+  state.taskEventCursor = Math.max(state.taskEventCursor, detail.event_cursor || 0);
+  if (page.conversation.items?.length) {
+    const seen = new Set(state.taskConversation.map(item => item.sequence));
+    const appended = page.conversation.items.filter(item => !seen.has(item.sequence));
+    if (appended.length) {
+      state.taskConversation.push(...appended);
+      changed = true;
+    }
+    if (state.taskConversation.length > 300) {
+      state.taskConversation = state.taskConversation.slice(-300);
+      state.taskConversationHasMore = true;
+      state.taskConversationBefore = state.taskConversation[0]?.sequence || 0;
+    }
+  }
+  state.taskConversationLatest = Math.max(state.taskConversationLatest, page.conversation.latest_sequence || 0);
+  const selectedAgent = detail.agents.find(agent => agent.agent_id === state.selectedTaskAgent);
+  if (selectedAgent) selectedAgent.unread_count = 0;
+  if (state.taskTool === "context" && state.taskContext) {
+    state.taskContext = await api.agentContext(taskID, state.selectedTaskAgent);
+    changed ||= JSON.stringify(state.taskContext) !== previousContext;
+  }
+  return changed;
 }
 
 async function refresh(): Promise<void> {
   try {
     await loadAll();
-    if (state.selectedTask) state.selectedTask = await api.task(state.selectedTask.task.id);
+    if (state.selectedTask) await refreshTaskRuntime(state.selectedTask.task.id);
   } catch (error) {
     setMessage("error", error instanceof Error ? error.message : String(error));
   }
@@ -524,6 +753,7 @@ function shell(content: string): string {
     ["tasks", "tasks", "任务"],
     ["knowledge", "knowledge", "知识库"],
     ["models", "model", "模型"],
+    ["prompts", "bot", "提示词"],
   ] as const;
   return `<div class="app-shell">
     <aside class="sidebar">
@@ -669,30 +899,205 @@ function tasksView(): string {
 }
 
 function taskDialog(): string {
-  return `<dialog id="task-dialog" class="wide"><form id="task-form" method="dialog"><div class="dialog-head"><h2>创建任务</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div><label>标题<input name="title" required></label><label>需求<textarea name="request" required></textarea></label><div class="two"><label>项目<select name="project_id" id="task-project">${state.projects.map(item => `<option value="${item.id}">${escapeHTML(item.name)}</option>`).join("")}</select></label><label>Workspace<select name="workspace_id" id="task-workspace"></select></label></div><div class="two"><label>Backend<select id="task-backend"></select></label><label>模型<select name="model_id" id="task-model"></select></label></div><div class="two"><label>推理强度<select name="reasoning_effort" id="task-effort"></select></label><label>沙箱（文件访问）<select name="filesystem"><option value="workspace-write">工作区可写</option><option value="read-only">只读</option><option value="danger-full-access">完全访问</option></select></label></div><label>审批<select name="approval"><option value="never">无需确认</option><option value="auto">自动批准（跳过权限检查）</option></select></label><div class="two" id="task-branches"><label>目标分支<input name="target_branch" placeholder="默认当前分支"></label><label>任务分支<input name="task_branch" placeholder="aha/task-name"></label></div><div class="dialog-actions"><button type="button" data-close>取消</button><button class="primary" value="default">创建任务</button></div></form></dialog>`;
+  return `<dialog id="task-dialog" class="wide"><form id="task-form" method="dialog"><div class="dialog-head"><h2>创建任务</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div><label>标题<input name="title" required></label><label>需求<textarea name="request" required></textarea></label><div class="two"><label>项目<select name="project_id" id="task-project">${state.projects.map(item => `<option value="${item.id}">${escapeHTML(item.name)}</option>`).join("")}</select></label><label>Workspace<select name="workspace_id" id="task-workspace"></select></label></div><div class="two"><label>Backend<select id="task-backend"></select></label><label>模型<select name="model_id" id="task-model"></select></label></div><div class="two"><label>推理强度<select name="reasoning_effort" id="task-effort"></select></label><label>沙箱（文件访问）<select name="filesystem"><option value="workspace-write">工作区可写</option><option value="read-only">只读</option><option value="danger-full-access">完全访问</option></select></label></div><div class="two"><label>协作模式<select name="collaboration_mode"><option value="auto">Auto</option><option value="single">Single</option></select></label><label>最大 Agent 数<input name="max_agents" type="number" min="1" value="3"></label></div><label>审批<select name="approval"><option value="never">无需确认</option><option value="auto">自动批准（跳过权限检查）</option></select></label><div class="two" id="task-branches"><label>目标分支<input name="target_branch" placeholder="默认当前分支"></label><label>任务分支<input name="task_branch" placeholder="aha/task-name"></label></div><div class="dialog-actions"><button type="button" data-close>取消</button><button class="primary" value="default">创建任务</button></div></form></dialog>`;
+}
+
+let slashCommandSelection = 0;
+
+function availableTaskSlashCommands(): typeof TASK_SLASH_COMMANDS[number][] {
+  const detail = state.selectedTask;
+  if (!detail) return [];
+  const active = (detail.turns || []).some(turn => isActiveTurn(turn.status));
+  const selectedActive = (detail.turns || []).some(turn => turn.agent_id === state.selectedTaskAgent && isActiveTurn(turn.status));
+  return TASK_SLASH_COMMANDS.filter(command => {
+    if (command.name === "/interrupt") return active;
+    if (command.name === "/complete") return !active && detail.task.status !== "completed";
+    if (command.name === "/compact" || command.name === "/reset") return !selectedActive;
+    if (command.name === "/reopen") return ["completed", "failed", "blocked", "cancelled"].includes(detail.task.status);
+    return false;
+  });
+}
+
+function matchingTaskSlashCommands(value: string): typeof TASK_SLASH_COMMANDS[number][] {
+  return matchingSlashCommands(value, availableTaskSlashCommands());
+}
+
+function slashCommandMenuHtml(value: string): string {
+  const commands = matchingTaskSlashCommands(value);
+  slashCommandSelection = Math.min(slashCommandSelection, Math.max(0, commands.length - 1));
+  return commands.map((command, index) => `<button type="button" class="${index === slashCommandSelection ? "active" : ""}" data-slash-command="${escapeHTML(command.insert)}"><span>task</span><strong>${escapeHTML(command.name)}</strong><small>${escapeHTML(command.desc)}</small></button>`).join("");
+}
+
+function exactTaskSlashCommand(value: string): typeof TASK_SLASH_COMMANDS[number] | undefined {
+  return exactSlashCommand(value, availableTaskSlashCommands());
+}
+
+function renderTaskSlashCommandMenu(textarea: HTMLTextAreaElement | null): void {
+  const menu = document.querySelector<HTMLElement>("#slash-command-menu");
+  if (!menu || !textarea) return;
+  const html = slashCommandMenuHtml(textarea.value);
+  menu.innerHTML = html;
+  menu.hidden = !html;
+}
+
+function syncTaskComposerState(textarea: HTMLTextAreaElement | null): void {
+  if (!textarea) return;
+  renderTaskSlashCommandMenu(textarea);
+  const send = document.querySelector<HTMLButtonElement>("#message-send");
+  if (send) send.disabled = !textarea.value.trim();
+}
+
+function applyTaskSlashCommand(value: string): void {
+  const textarea = document.querySelector<HTMLTextAreaElement>("#message-form textarea");
+  if (!textarea) return;
+  textarea.value = value;
+  state.taskDraft = value;
+  state.taskDrafts[state.selectedTaskAgent] = value;
+  const menu = document.querySelector<HTMLElement>("#slash-command-menu");
+  if (menu) menu.hidden = true;
+  syncTaskComposerState(textarea);
+  textarea.focus();
+}
+
+async function executeTaskSlashCommand(value: string): Promise<boolean> {
+  const text = String(value || "").trim().toLowerCase();
+  if (!text.startsWith("/")) return false;
+  const command = TASK_SLASH_COMMANDS.find(item => item.name === text);
+  if (!command) throw new Error(`未知命令：${text}`);
+  const detail = state.selectedTask;
+  if (!detail) throw new Error("未选择 Task");
+  const taskID = detail.task.id;
+  if (command.name === "/interrupt") {
+    const round = detail.latest_round;
+    if (!round || !(detail.turns || []).some(turn => isActiveTurn(turn.status))) {
+      throw new Error("当前没有运行中的 Round");
+    }
+    await api.interruptRound(round.id);
+  } else if (command.name === "/complete") {
+    await api.completeTask(taskID);
+  } else if (command.name === "/reopen") {
+    await api.reopenTask(taskID);
+  } else {
+    const action = command.name === "/compact" ? "compact" : "reset";
+    if (!await executeAgentSessionAction(api, taskID, state.selectedTaskAgent, action)) return true;
+  }
+  await refreshTaskRuntime(taskID);
+  updateTaskLiveRegions();
+  return true;
+}
+
+function updateLiveDurations(): void {
+  const now = performance.now();
+  document.querySelectorAll<HTMLElement>("[data-live-elapsed-ms]").forEach(element => {
+    const base = Number(element.dataset.liveElapsedMs || 0);
+    const syncedAt = Number(element.dataset.liveSyncedAt || now);
+    const elapsed = base + (element.dataset.liveRunning === "true" ? Math.max(0, now - syncedAt) : 0);
+    element.textContent = formatDuration(elapsed);
+  });
+}
+
+function runTaskClock(): void {
+  const second = Math.floor(Date.now() / 1000);
+  if (second !== taskClockSecond) {
+    taskClockSecond = second;
+    updateLiveDurations();
+  }
+  if (state.selectedTask) {
+    taskClockFrame = window.requestAnimationFrame(runTaskClock);
+  } else {
+    taskClockFrame = null;
+  }
+}
+
+function startTaskClock(): void {
+  if (taskClockFrame !== null) window.cancelAnimationFrame(taskClockFrame);
+  taskClockSecond = -1;
+  taskClockFrame = window.requestAnimationFrame(runTaskClock);
+}
+function conversationListHtml(): string {
+  return renderConversationList(state.taskConversation, state.selectedTask, state.taskConversationHasMore);
+}
+function taskFailureBannerHtml(detail: TaskDetail): string {
+  if (!["failed", "blocked"].includes(detail.task.status)) return "";
+  const failure = [...(detail.turns || [])].reverse().find(turn => turn.status === "failed" || turn.status === "blocked");
+  if (!failure) return "";
+  return `<div class="task-failure-banner"><strong>失败原因</strong><span>${escapeHTML(failure.error || "Backend 执行失败，未返回详细原因")}</span><small>可直接发送下一条消息创建新 Round 重试</small></div>`;
+}
+
+function taskCtxHtml(): string {
+  const value = state.taskContext;
+  if (!value) return `<div class="ctx-loading">${icon("refresh")}正在加载 Context...</div>`;
+  const context = value.context || {};
+  const sessionActionDisabled = Boolean(state.selectedTask?.turns.some(turn => turn.agent_id === state.selectedTaskAgent && isActiveTurn(turn.status)));
+  return `<div class="ctx-view">
+    ${renderContextMetrics(context, sessionActionDisabled)}
+    <details class="prompt-snapshot" open><summary>查看本轮 Prompt Snapshot</summary><pre>${escapeHTML(context.prompt || "尚无 Prompt Snapshot")}</pre></details>
+    <div class="ctx-columns evidence-only">
+      <section><h3>Context Evidence</h3>${[...(value.project_knowledge || []), ...(value.global_knowledge || [])].map(item => `<div class="knowledge-mini"><strong>${escapeHTML(item.title)}</strong><small>${escapeHTML(item.scope)} · ${escapeHTML(item.type)}</small><p>${escapeHTML(item.body)}</p></div>`).join("") || "<p>暂无已验证知识</p>"}</section>
+    </div>
+  </div>`;
 }
 
 function taskDetailView(detail: TaskDetail): string {
-  const taskTurns = detail.turns || [];
-  const taskMessages = detail.messages || [];
-  const candidates = detail.knowledge_candidates || [];
-  const activeTurn = [...taskTurns].reverse().find(item => !["succeeded", "failed", "interrupted", "blocked"].includes(item.status));
-  const messages = taskMessages.map(item => `<article class="message ${item.role === "user" ? "user" : "agent"}"><header><strong>${escapeHTML(item.sender)}</strong><time>${new Date(item.created_at).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"})}</time></header><div>${escapeHTML(item.content).replaceAll("\n", "<br>")}</div></article>`).join("");
-  const turns = [...taskTurns].reverse().slice(0, 8).map(item => `<div class="turn-line"><span class="status ${statusClass(item.status)}">Turn ${item.sequence} · ${statusLabel(item.status)}</span><small>${escapeHTML(item.backend_session_id || "new session")}</small></div>`).join("");
-  const memory = detail.memory || {facts: [], decisions: [], progress: [], verification: [], next_actions: []};
+  const activeTurn = (detail.turns || []).find(item => item.agent_id === state.selectedTaskAgent && isActiveTurn(item.status));
+  const taskFailed = detail.task.status === "failed";
+  const project = state.projects.find(item => item.id === detail.task.project_id);
+  const workspace = state.workspaces.find(item => item.id === detail.task.workspace_id);
+  const taskMeta = `${project?.name || "-"} · ${workspace?.name || "-"} · ${detail.task.collaboration_mode || "auto"} · ${detail.task.max_agents || 3} Agents`;
+  const chat = `<section class="conversation">
+    <div id="task-failure-slot">${taskFailureBannerHtml(detail)}</div>
+    <div class="messages" id="conversation-list">${conversationListHtml()}</div>
+    <div id="agent-turn-slot">${renderAgentTurnCard(detail, state.taskRealtimeState)}</div>
+    <form id="message-form" class="composer">${renderComposerTools(detail, state.selectedTaskAgent, state.taskCategories, state.taskConversation.length)}<div id="slash-command-menu" class="slash-command-menu" ${matchingTaskSlashCommands(state.taskDraft).length ? "" : "hidden"}>${slashCommandMenuHtml(state.taskDraft)}</div><textarea name="content" placeholder="${activeTurn ? `${state.selectedTaskAgent} 正在执行，发送后将排队` : taskFailed ? "输入消息重试，或输入 /reopen" : `发送给 ${state.selectedTaskAgent}，输入 / 查看命令`}" required>${escapeHTML(state.taskDraft)}</textarea><button id="message-send" class="primary" aria-label="发送">${icon("send")}<span class="send-label">发送</span></button></form>
+  </section>`;
   return shell(`<section class="task-screen">
-    <header class="task-head"><button id="back-tasks">←</button><div><h1><span class="task-code">${escapeHTML(detail.task.code || "")}</span> ${escapeHTML(detail.task.title)}</h1><p><span class="status ${statusClass(detail.task.status)}">${statusLabel(detail.task.status)}</span> ${escapeHTML(detail.task.task_branch || "")}</p></div><div class="actions">${activeTurn ? `<button id="interrupt">${icon("close")}中断 Turn</button>` : ""}<button id="complete-task">完成 Task</button><button id="delete-task" class="danger">${icon("close")}删除 Task</button><button id="toggle-context" class="mobile-only">${icon("menu")}</button></div></header>
+    <header class="task-head"><button id="back-tasks">←</button><div class="task-title-block"><h1><span class="task-code">${escapeHTML(detail.task.code || "")}</span><span class="task-title-text">${escapeHTML(detail.task.title)}</span></h1><div class="task-head-subline"><span class="task-head-meta" title="${escapeHTML(taskMeta)}">${escapeHTML(taskMeta)}</span><span id="task-detail-status" class="status ${statusClass(detail.task.status)}">${statusLabel(detail.task.status)}</span><span class="task-branch">${escapeHTML(detail.task.task_branch || "")}</span></div></div><div class="actions task-tool-actions">${renderTaskToolButtons(state.taskTool)}</div></header>
     <div class="task-grid">
-      <aside class="task-summary"><h3>执行上下文</h3><dl><dt>Project</dt><dd>${escapeHTML(state.projects.find(item => item.id === detail.task.project_id)?.name || "-")}</dd><dt>Workspace</dt><dd>${escapeHTML(state.workspaces.find(item => item.id === detail.task.workspace_id)?.name || "-")}</dd><dt>Branch</dt><dd>${escapeHTML(detail.task.task_branch || "-")}</dd></dl><h3>Turn 历史</h3>${turns || "<p>尚无 Turn</p>"}</aside>
-      <section class="conversation"><div class="turn-card ${activeTurn ? "active" : ""}">${activeTurn ? `<strong>Turn ${activeTurn.sequence} · ${statusLabel(activeTurn.status)}</strong><small>权威状态来自持久化 Turn Projection</small>` : `<strong>等待下一条消息</strong><small>新消息将创建独立 Turn，并尝试复用 Backend Session</small>`}</div><div class="messages">${messages || `<div class="empty">发送第一条消息开始任务。</div>`}</div><form id="message-form" class="composer"><textarea name="content" placeholder="${activeTurn ? "当前 Turn 执行中，新消息将在完成后发送" : "输入下一步要求"}" required></textarea><button class="primary" aria-label="发送" ${activeTurn ? "disabled" : ""}>${icon("send")}<span class="send-label">发送</span></button></form></section>
-      <aside class="context-panel ${state.contextOpen ? "open" : ""}"><button id="close-context" class="mobile-only icon-button">${icon("close")}</button><h3>Task Memory</h3>${memoryList("事实", memory.facts)}${memoryList("决策", memory.decisions)}${memoryList("进度", memory.progress)}${memoryList("验证", memory.verification)}${memoryList("下一步", memory.next_actions)}<h3>Knowledge Candidate</h3>${candidates.filter(item => item.status === "candidate").slice(0, 4).map(item => `<div class="knowledge-mini"><strong>${escapeHTML(item.title)}</strong><small>${escapeHTML(item.body)}</small></div>`).join("") || "<p>暂无 Candidate</p>"}</aside>
+      ${chat}
+      ${renderTaskToolPanel(state.taskTool, detail, state.selectedTaskAgent, taskCtxHtml())}
     </div>
+    ${renderAgentConfigDialog(detail, state.selectedTaskAgent, state.models)}
   </section>`);
 }
 
-function memoryList(title: string, values: string[] = []): string {
-  const items = values || [];
-  return `<section class="memory-block"><strong>${title}</strong>${items.length ? `<ul>${items.map(item => `<li>${escapeHTML(item)}</li>`).join("")}</ul>` : "<small>-</small>"}</section>`;
+function updateTaskLiveRegions(): void {
+  const detail = state.selectedTask;
+  if (!detail) return;
+  const activeTurn = (detail.turns || []).find(item => item.agent_id === state.selectedTaskAgent && isActiveTurn(item.status));
+  const list = document.querySelector<HTMLElement>("#conversation-list");
+  if (list) {
+    const previousHeight = list.scrollHeight;
+    const previousTop = list.scrollTop;
+    const wasAtBottom = previousHeight - previousTop - list.clientHeight < 80;
+    list.innerHTML = conversationListHtml();
+    if (wasAtBottom) list.scrollTop = list.scrollHeight;
+    else list.scrollTop = previousTop;
+    bindConversationLiveControls();
+  }
+  const turnSlot = document.querySelector<HTMLElement>("#agent-turn-slot");
+  if (turnSlot) turnSlot.innerHTML = renderAgentTurnCard(detail, state.taskRealtimeState);
+  const failureSlot = document.querySelector<HTMLElement>("#task-failure-slot");
+  if (failureSlot) failureSlot.innerHTML = taskFailureBannerHtml(detail);
+  const agentSelect = document.querySelector<HTMLSelectElement>("#composer-agent");
+  if (agentSelect) agentSelect.innerHTML = renderComposerAgentOptions(detail, state.selectedTaskAgent);
+  const taskStatus = document.querySelector<HTMLElement>("#task-detail-status");
+  if (taskStatus) {
+    taskStatus.className = `status ${statusClass(detail.task.status)}`;
+    taskStatus.textContent = statusLabel(detail.task.status);
+  }
+  const toolBody = document.querySelector<HTMLElement>("#task-tool-panel-body");
+  if (toolBody && state.taskTool) {
+    toolBody.innerHTML = renderTaskToolContent(state.taskTool, detail, taskCtxHtml());
+    bindSessionActions();
+  }
+  const count = document.querySelector<HTMLElement>("#conversation-filter-loaded");
+  if (count) count.textContent = `${state.taskConversation.length} 条已加载`;
+  const textarea = document.querySelector<HTMLTextAreaElement>("#message-form textarea");
+  if (textarea) {
+    textarea.placeholder = activeTurn ? `${state.selectedTaskAgent} 正在执行，发送后将排队` : detail.task.status === "failed" ? "输入消息重试，或输入 /reopen" : `发送给 ${state.selectedTaskAgent}，输入 / 查看命令`;
+    syncTaskComposerState(textarea);
+  }
+  updateLiveDurations();
 }
 
 function knowledgeView(): string {
@@ -711,6 +1116,7 @@ function knowledgeDialog(): string {
 
 function render(): void {
   if (!app) return;
+  document.body.classList.toggle("task-view-active", Boolean(state.selectedTask));
   if (state.loading) {
     app.innerHTML = `<div class="loading">AHA2 正在加载...</div>`;
     return;
@@ -726,7 +1132,18 @@ function render(): void {
     state.renderPending = true;
     return;
   }
+  persistNavigationState();
+  if (document.activeElement instanceof HTMLTextAreaElement && document.activeElement.closest("#message-form")) {
+    state.renderPending = true;
+    return;
+  }
   state.renderPending = false;
+  const previousConversation = document.querySelector<HTMLElement>("#conversation-list");
+  const previousScrollTop = previousConversation?.scrollTop || 0;
+  const previousScrollHeight = previousConversation?.scrollHeight || 0;
+  const wasAtConversationBottom = previousConversation
+    ? previousConversation.scrollHeight - previousConversation.scrollTop - previousConversation.clientHeight < 80
+    : false;
   let content: string;
   if (state.selectedProject) {
     content = projectDetailView(state.selectedProject);
@@ -736,11 +1153,26 @@ function render(): void {
       models: modelsView,
       tasks: tasksView,
       knowledge: knowledgeView,
+      prompts: () => shell(renderPromptAdmin()),
     };
     content = views[state.view]();
   }
   app.innerHTML = content;
   bindCommon();
+  if (state.selectedTask) {
+    window.scrollTo(0, 0);
+    document.documentElement.scrollTop = 0;
+    document.body.scrollTop = 0;
+  }
+  const nextConversation = document.querySelector<HTMLElement>("#conversation-list");
+  if (nextConversation) {
+    if (scrollConversationToBottom || wasAtConversationBottom) {
+      nextConversation.scrollTop = nextConversation.scrollHeight;
+    } else {
+      nextConversation.scrollTop = previousScrollTop;
+    }
+  }
+  scrollConversationToBottom = false;
 }
 
 function bindAuth(): void {
@@ -778,6 +1210,7 @@ function bindCommon(): void {
       state.auth = {...state.auth!, authenticated: false};
       state.selectedTask = null;
       state.selectedProject = null;
+      clearNavigationSnapshot();
       closeEvents();
       closeGlobalEvents();
       render();
@@ -932,7 +1365,13 @@ function bindCommon(): void {
         const picks = checked.map(id => {
           const row = document.querySelector<HTMLInputElement>(`#model-detect-results input.detected-model[value="${CSS.escape(id)}"]`)?.closest(".detected-item");
           const wireAPIs = [...(row?.querySelectorAll<HTMLInputElement>(".proto-checks input:checked") || [])].map(input => input.value);
-          return {id, wire_apis: wireAPIs.length ? wireAPIs : ["responses"]};
+          const detected = models.find(item => item.id === id);
+          return {
+            id,
+            wire_apis: wireAPIs.length ? wireAPIs : ["responses"],
+            max_input_tokens: detected?.max_input_tokens || 0,
+            max_output_tokens: detected?.max_output_tokens || 0,
+          };
         });
         const addButton = document.querySelector<HTMLElement>("#add-selected-models");
         void runWithFeedback(addButton, "添加中", async () => {
@@ -1059,20 +1498,6 @@ function bindCommon(): void {
       render();
     });
   });
-  document.querySelector("#delete-task")?.addEventListener("click", () => {
-    if (!state.selectedTask) return;
-    const id = state.selectedTask.task.id;
-    if (!window.confirm("删除该任务？此操作不可恢复。")) return;
-    const button = document.querySelector<HTMLElement>("#delete-task");
-    void runWithFeedback(button, "删除中", async () => {
-      await api.deleteTask(id);
-      state.selectedTask = null;
-      closeEvents();
-      setMessage("notice", "任务已删除");
-      await loadAll();
-      render();
-    });
-  });
   document.querySelectorAll<HTMLElement>("[data-delete-model]").forEach(button => button.addEventListener("click", () => {
     const id = button.dataset.deleteModel!;
     if (!window.confirm("删除该模型及其 Env Group？")) return;
@@ -1127,9 +1552,8 @@ function bindCommon(): void {
   document.querySelector("#task-model")?.addEventListener("change", syncTaskEffort);
   bindForm("#task-form", async form => {
     const payload = Object.fromEntries(form.entries()) as Record<string, string>;
-    const result = await api.createTask(payload);
-    state.selectedTask = await api.task(result.task.id);
-    openEvents(result.task.id);
+    const result = await api.createTask({...payload, max_agents: Number(payload.max_agents || 3)});
+    await openTask(result.task.id);
     if (result.start_error) setMessage("error", `Task 已创建，但首个 Turn 启动失败：${result.start_error}`);
   });
   bindForm("#knowledge-form", async form => {
@@ -1146,10 +1570,39 @@ function bindCommon(): void {
     });
   }));
   document.querySelectorAll<HTMLElement>("[data-task]").forEach(button => button.addEventListener("click", async () => {
-    state.selectedTask = await api.task(button.dataset.task!);
-    openEvents(button.dataset.task!);
+    await openTask(button.dataset.task!);
     render();
   }));
+  bindTaskAgentControls();
+  document.querySelector<HTMLSelectElement>("#composer-agent")?.addEventListener("change", async event => {
+    await selectTaskAgent(event.currentTarget.value);
+    render();
+  });
+  document.querySelector("#agent-config-backend")?.addEventListener("change", syncAgentConfigFields);
+  document.querySelector<HTMLInputElement>('[name="inherit_main"]')?.addEventListener("change", syncAgentConfigFields);
+  bindForm("#agent-config-form", async form => {
+    if (!state.selectedTask) return;
+    const agentID = String(form.get("agent_id") || state.selectedTaskAgent);
+    if (agentID === "main") {
+      await api.updateTask(state.selectedTask.task.id, {
+        collaboration_mode: String(form.get("collaboration_mode") || "auto"),
+        max_agents: Number(form.get("max_agents") || 3),
+      });
+    }
+    const inheritMain = agentID !== "main" && form.get("inherit_main") === "on";
+    await api.updateTaskAgent(state.selectedTask.task.id, agentID, inheritMain ? {
+      inherit_main: true,
+    } : {
+      inherit_main: false,
+      backend: String(form.get("backend") || ""),
+      model_id: String(form.get("model_id") || ""),
+      reasoning_effort: String(form.get("reasoning_effort") || ""),
+      filesystem: String(form.get("filesystem") || ""),
+      approval: String(form.get("approval") || ""),
+    });
+    await refreshTaskRuntime(state.selectedTask.task.id);
+    setMessage("notice", `${agentID} 配置已更新，下一个 Turn 生效`);
+  });
   document.querySelector("#back-tasks")?.addEventListener("click", () => {
     state.selectedTask = null;
     closeEvents();
@@ -1158,30 +1611,132 @@ function bindCommon(): void {
   document.querySelector<HTMLFormElement>("#message-form")?.addEventListener("submit", async event => {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
-    const content = String(form.get("content") || "");
+    const content = String(form.get("content") || "").trim();
     if (!state.selectedTask) return;
-    await api.message(state.selectedTask.task.id, content);
-    state.selectedTask = await api.task(state.selectedTask.task.id);
+    const textarea = document.querySelector<HTMLTextAreaElement>("#message-form textarea");
+    try {
+      const handled = await executeTaskSlashCommand(content);
+      if (!handled) {
+        await api.agentMessage(state.selectedTask.task.id, state.selectedTaskAgent, content);
+        await refreshTaskRuntime(state.selectedTask.task.id);
+        updateTaskLiveRegions();
+      }
+      state.taskDraft = "";
+      state.taskDrafts[state.selectedTaskAgent] = "";
+      if (textarea) {
+        textarea.value = "";
+        textarea.style.height = "auto";
+        syncTaskComposerState(textarea);
+      }
+      const menu = document.querySelector<HTMLElement>("#slash-command-menu");
+      if (menu) menu.hidden = true;
+    } catch (error) {
+      state.taskDraft = content;
+      state.taskDrafts[state.selectedTaskAgent] = content;
+      if (textarea) textarea.value = content;
+      setMessage("error", error instanceof Error ? error.message : String(error));
+    }
+  });
+  document.querySelector<HTMLTextAreaElement>("#message-form textarea")?.addEventListener("input", event => {
+    const textarea = event.target as HTMLTextAreaElement;
+    state.taskDraft = textarea.value;
+    state.taskDrafts[state.selectedTaskAgent] = textarea.value;
+    persistNavigationState();
+    slashCommandSelection = 0;
+    textarea.style.height = "auto";
+    textarea.style.height = `${Math.min(textarea.scrollHeight, 160)}px`;
+    syncTaskComposerState(textarea);
+  });
+  document.querySelector<HTMLTextAreaElement>("#message-form textarea")?.addEventListener("focus", () => {
+    document.body.classList.add("composer-focused");
+    syncVisualViewportHeight();
+    syncTaskComposerState(document.querySelector<HTMLTextAreaElement>("#message-form textarea"));
+  });
+  document.querySelector<HTMLTextAreaElement>("#message-form textarea")?.addEventListener("keydown", event => {
+    if (event.isComposing || event.keyCode === 229) return;
+    const textarea = event.currentTarget;
+    const commands = matchingTaskSlashCommands(textarea.value);
+    if (commands.length && event.key === "ArrowDown") {
+      event.preventDefault();
+      slashCommandSelection = (slashCommandSelection + 1) % commands.length;
+      renderTaskSlashCommandMenu(textarea);
+      return;
+    }
+    if (commands.length && event.key === "ArrowUp") {
+      event.preventDefault();
+      slashCommandSelection = (slashCommandSelection + commands.length - 1) % commands.length;
+      renderTaskSlashCommandMenu(textarea);
+      return;
+    }
+    if (commands.length && event.key === "Tab") {
+      event.preventDefault();
+      applyTaskSlashCommand(commands[slashCommandSelection].insert);
+      return;
+    }
+    if (commands.length && event.key === "Escape") {
+      const menu = document.querySelector<HTMLElement>("#slash-command-menu");
+      if (menu) menu.hidden = true;
+      return;
+    }
+    const plainEnter = event.key === "Enter" && !event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey;
+    const touchInput = window.matchMedia("(max-width: 760px), (pointer: coarse)").matches || navigator.maxTouchPoints > 0;
+    if (plainEnter && !touchInput) {
+      event.preventDefault();
+      if (commands.length && !exactTaskSlashCommand(textarea.value)) {
+        applyTaskSlashCommand(commands[slashCommandSelection].insert);
+      } else {
+        event.currentTarget.form?.requestSubmit();
+      }
+    }
+  });
+  document.querySelector<HTMLElement>("#slash-command-menu")?.addEventListener("pointerdown", event => {
+    const button = event.target instanceof Element ? event.target.closest<HTMLElement>("[data-slash-command]") : null;
+    if (!button) return;
+    event.preventDefault();
+    applyTaskSlashCommand(button.dataset.slashCommand || "");
+  });
+  document.querySelector<HTMLTextAreaElement>("#message-form textarea")?.addEventListener("blur", () => {
+    window.setTimeout(() => {
+      if (!(document.activeElement instanceof HTMLTextAreaElement && document.activeElement.closest("#message-form"))) {
+        document.body.classList.remove("composer-focused");
+        const menu = document.querySelector<HTMLElement>("#slash-command-menu");
+        if (menu) menu.hidden = true;
+      }
+      syncVisualViewportHeight();
+      flushDeferredRender();
+    }, 0);
+  });
+  syncTaskComposerState(document.querySelector<HTMLTextAreaElement>("#message-form textarea"));
+  document.querySelectorAll<HTMLElement>("[data-conversation-category]").forEach(button => button.addEventListener("click", async () => {
+    const category = button.dataset.conversationCategory as ConversationCategory;
+    state.taskCategories[category] = !state.taskCategories[category];
+    if (!selectedConversationCategories().length) state.taskCategories.chat = true;
+    await reloadConversation();
     render();
-  });
-  document.querySelector("#interrupt")?.addEventListener("click", () => {
-    const button = document.querySelector<HTMLElement>("#interrupt");
-    const turn = [...(state.selectedTask?.turns || [])].reverse().find(item => !["succeeded", "failed", "interrupted", "blocked"].includes(item.status));
-    if (!turn) return;
-    void runWithFeedback(button, "中断中", async () => {
-      await api.interruptTurn(turn.id);
-    });
-  });
-  document.querySelector("#complete-task")?.addEventListener("click", () => {
-    const button = document.querySelector<HTMLElement>("#complete-task");
-    if (!state.selectedTask) return;
-    const taskID = state.selectedTask.task.id;
-    void runWithFeedback(button, "完成中", async () => {
-      await api.completeTask(taskID);
-      state.selectedTask = await api.task(taskID);
+  }));
+  bindConversationLiveControls();
+  document.querySelectorAll<HTMLElement>("[data-task-tool]").forEach(button => button.addEventListener("click", async () => {
+    const tool = button.dataset.taskTool as TaskTool;
+    if (state.taskTool === tool) {
+      state.taskTool = "";
       render();
-    });
-  });
+      return;
+    }
+    state.taskTool = tool;
+    if (tool !== "context" || !state.selectedTask) {
+      render();
+      return;
+    }
+    state.taskContext = null;
+    render();
+    try {
+      state.taskContext = await api.agentContext(state.selectedTask.task.id, state.selectedTaskAgent);
+    } catch (error) {
+      setMessage("error", error instanceof Error ? error.message : String(error));
+    }
+    render();
+  }));
+  bindSessionActions();
   document.querySelectorAll<HTMLElement>("[data-verify]").forEach(button => button.addEventListener("click", () => {
     const id = button.dataset.verify!;
     void runWithFeedback(button, "验证中", async () => {
@@ -1190,14 +1745,29 @@ function bindCommon(): void {
       render();
     });
   }));
-  document.querySelector("#toggle-context")?.addEventListener("click", () => {
-    state.contextOpen = true;
+  document.querySelector("#close-task-tool")?.addEventListener("click", () => {
+    state.taskTool = "";
     render();
   });
-  document.querySelector("#close-context")?.addEventListener("click", () => {
-    state.contextOpen = false;
-    render();
-  });
+  if (state.view === "prompts") bindPromptAdmin(render, setMessage);
+}
+
+function bindSessionActions(): void {
+  document.querySelectorAll<HTMLElement>("[data-session-action]").forEach(button => button.addEventListener("click", () => {
+    if (!state.selectedTask) return;
+    const action = button.dataset.sessionAction === "reset" ? "reset" : "compact";
+    void runWithFeedback(button, action === "compact" ? "压缩中" : "重置中", async () => {
+      const changed = await executeAgentSessionAction(api, state.selectedTask!.task.id, state.selectedTaskAgent, action);
+      if (!changed) return;
+      state.taskContext = await api.agentContext(state.selectedTask!.task.id, state.selectedTaskAgent);
+      await refreshTaskRuntime(state.selectedTask!.task.id);
+      const content = document.querySelector<HTMLElement>("#task-tool-panel-body");
+      if (content) {
+        content.innerHTML = renderTaskToolContent(state.taskTool, state.selectedTask!, taskCtxHtml());
+        bindSessionActions();
+      }
+    });
+  }));
 }
 
 function bindForm(selector: string, action: (form: FormData) => Promise<void>): void {
@@ -1215,28 +1785,155 @@ function bindForm(selector: string, action: (form: FormData) => Promise<void>): 
   });
 }
 
-function openEvents(taskID: string): void {
-  closeEvents();
-  events = new EventSource(`/api/v1/tasks/${taskID}/events`);
-  events.addEventListener("update", async () => {
-    if (state.selectedTask?.task.id === taskID) {
-      state.selectedTask = await api.task(taskID);
-      render();
+function updateRealtimeState(value: State["taskRealtimeState"]): void {
+  state.taskRealtimeState = value;
+  const element = document.querySelector<HTMLElement>("[data-realtime-state]");
+  if (element) {
+    element.className = `realtime-state ${value}`;
+    element.textContent = value === "live" ? "SSE 实时" : value === "fallback" ? "增量拉取兜底" : "连接中";
+  }
+  const badge = document.querySelector<HTMLElement>("[data-round-channel]");
+  if (badge) {
+    badge.className = `round-channel ${value}`;
+    badge.textContent = value === "live" ? "SSE" : value === "fallback" ? "2s" : "...";
+  }
+}
+
+function scheduleTaskRefresh(taskID: string): void {
+  if (taskRefreshTimer !== null) window.clearTimeout(taskRefreshTimer);
+  taskRefreshTimer = window.setTimeout(async () => {
+    taskRefreshTimer = null;
+    try {
+      if (await refreshTaskRuntime(taskID)) updateTaskLiveRegions();
+    } catch {
+      startTaskFallback(taskID);
     }
+  }, 100);
+}
+
+function stopTaskFallback(): void {
+  if (taskFallbackTimer !== null) window.clearInterval(taskFallbackTimer);
+  taskFallbackTimer = null;
+}
+
+function startTaskFallback(taskID: string, announce = true): void {
+  if (state.selectedTask?.task.id !== taskID) return;
+  if (announce) updateRealtimeState("fallback");
+  if (taskFallbackTimer !== null) return;
+  const refresh = async () => {
+    if (state.selectedTask?.task.id !== taskID) return;
+    try {
+      if (await refreshTaskRuntime(taskID)) updateTaskLiveRegions();
+    } catch {
+      // Keep the existing UI and retry while the task remains open.
+    }
+  };
+  void refresh();
+  taskFallbackTimer = window.setInterval(() => void refresh(), 2000);
+}
+
+function noteTaskStreamSignal(taskID: string): void {
+  if (state.selectedTask?.task.id !== taskID) return;
+  taskLastSignalAt = Date.now();
+  stopTaskFallback();
+  updateRealtimeState("live");
+}
+
+async function loadOlderConversation(): Promise<void> {
+  if (!state.selectedTask || !state.taskConversationBefore) return;
+  const list = document.querySelector<HTMLElement>("#conversation-list");
+  const previousHeight = list?.scrollHeight || 0;
+  const previousTop = list?.scrollTop || 0;
+  const page = await api.agentConversation(state.selectedTask.task.id, state.selectedTaskAgent, {
+    before: state.taskConversationBefore,
+    limit: 50,
+    categories: selectedConversationCategories(),
+  });
+  const older = page.conversation.items || [];
+  const seen = new Set(state.taskConversation.map(item => item.sequence));
+  state.taskConversation = [...older.filter(item => !seen.has(item.sequence)), ...state.taskConversation];
+  if (state.taskConversation.length > 300) {
+    state.taskConversation = state.taskConversation.slice(0, 300);
+  }
+  state.taskConversationHasMore = page.conversation.has_more && state.taskConversation.length < 300;
+  state.taskConversationBefore = page.conversation.next_before || 0;
+  if (list) {
+    list.innerHTML = conversationListHtml();
+    list.scrollTop = previousTop + Math.max(0, list.scrollHeight - previousHeight);
+    bindConversationLiveControls();
+  }
+  const count = document.querySelector<HTMLElement>("#conversation-filter-count");
+  if (count) count.textContent = `${state.taskConversation.length} 条已加载`;
+}
+
+function bindConversationLiveControls(): void {
+  bindMessageBubbleControls(document.querySelector("#conversation-list") || document);
+  document.querySelector("#load-older-conversation")?.addEventListener("click", () => {
+    void loadOlderConversation();
+  });
+}
+
+function openEvents(taskID: string, after = 0): void {
+  closeEvents();
+  taskLastSignalAt = Date.now();
+  updateRealtimeState("connecting");
+  startTaskClock();
+  taskMonitorTimer = window.setInterval(() => {
+    if (state.selectedTask?.task.id === taskID && Date.now() - taskLastSignalAt > 15000) {
+      startTaskFallback(taskID);
+    }
+  }, 5000);
+  events = new EventSource(`/api/v1/tasks/${taskID}/events?after=${after}`);
+  startTaskFallback(taskID, false);
+  events.addEventListener("open", () => {
+    taskLastSignalAt = Date.now();
+    updateRealtimeState("connecting");
+  });
+  events.addEventListener("heartbeat", () => {
+    noteTaskStreamSignal(taskID);
+    updateLiveDurations();
+  });
+  events.addEventListener("error", () => startTaskFallback(taskID));
+  events.addEventListener("update", event => {
+    if (state.selectedTask?.task.id !== taskID) return;
+    noteTaskStreamSignal(taskID);
+    try {
+      const payload = JSON.parse((event as MessageEvent).data) as {sequence?: number};
+      const sequence = Number(payload.sequence || 0);
+      if (sequence && sequence <= state.taskEventCursor) return;
+      state.taskEventCursor = Math.max(state.taskEventCursor, sequence);
+    } catch {
+      // The incremental refresh below remains authoritative.
+    }
+    scheduleTaskRefresh(taskID);
   });
 }
 
 function closeEvents(): void {
   events?.close();
   events = null;
+  if (taskRefreshTimer !== null) window.clearTimeout(taskRefreshTimer);
+  if (taskClockFrame !== null) window.cancelAnimationFrame(taskClockFrame);
+  if (taskMonitorTimer !== null) window.clearInterval(taskMonitorTimer);
+  stopTaskFallback();
+  taskRefreshTimer = null;
+  taskClockFrame = null;
+  taskClockSecond = -1;
+  taskMonitorTimer = null;
+  taskLastSignalAt = 0;
+  document.body.classList.remove("composer-focused");
 }
 
 // If a render was deferred while a dialog was open, apply it once the dialog
 // closes so the UI never goes stale but the dialog is never yanked away.
+function flushDeferredRender(): void {
+  if (!state.renderPending || document.querySelector("dialog[open]")) return;
+  if (document.activeElement instanceof HTMLTextAreaElement && document.activeElement.closest("#message-form")) return;
+  render();
+}
+
 document.addEventListener("close", event => {
-  if (event.target instanceof HTMLDialogElement && state.renderPending) {
-    render();
-  }
+  if (event.target instanceof HTMLDialogElement) flushDeferredRender();
 }, true);
 
 // Event-driven list refresh: one global SSE stream keeps the task list (and
@@ -1282,4 +1979,8 @@ function closeGlobalEvents(): void {
   globalEvents = null;
 }
 
+syncVisualViewportHeight();
+window.addEventListener("resize", syncVisualViewportHeight);
+window.visualViewport?.addEventListener("resize", syncVisualViewportHeight);
+window.visualViewport?.addEventListener("scroll", syncVisualViewportHeight);
 void bootstrap();

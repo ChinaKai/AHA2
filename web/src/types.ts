@@ -91,6 +91,8 @@ export interface Task {
   status: string;
   target_branch?: string;
   task_branch?: string;
+  collaboration_mode: "single" | "auto";
+  max_agents: number;
   created_at: string;
   updated_at: string;
 }
@@ -98,25 +100,95 @@ export interface Task {
 export interface Turn {
   id: string;
   task_id: string;
+  round_id: string;
+  agent_id: string;
   sequence: number;
+  parent_turn_id?: string;
+  attempt: number;
+  generation: number;
+  required: boolean;
+  title?: string;
   status: string;
   waiting_reason?: string;
   backend_session_id?: string;
+  context_window?: number;
+  prompt_chars?: number;
+  usage?: Record<string, number>;
   queued_at: string;
+  queued_at_ms: number;
+  prepared_at?: string;
+  prepared_at_ms?: number;
   started_at?: string;
+  started_at_ms?: number;
   finished_at?: string;
+  finished_at_ms?: number;
+  elapsed_ms: number;
+  queue_duration_ms: number;
+  prepare_duration_ms: number;
+  run_duration_ms: number;
   result?: string;
   error?: string;
 }
 
-export interface Message {
+export interface TaskRound {
   id: string;
   task_id: string;
-  turn_id?: string;
-  role: "user" | "assistant" | string;
-  sender: string;
-  content: string;
+  sequence: number;
+  input_message_id: string;
+  status: string;
   created_at: string;
+  created_at_ms: number;
+  started_at?: string;
+  started_at_ms?: number;
+  finished_at?: string;
+  finished_at_ms?: number;
+  elapsed_ms: number;
+}
+
+export type ConversationCategory = "chat" | "update" | "tool" | "error";
+
+export interface ConversationItem {
+  sequence: number;
+  id: string;
+  task_id: string;
+  round_id?: string;
+  turn_id?: string;
+  agent_id?: string;
+  stream_agent_id?: string;
+  from_agent_id?: string;
+  to_agent_id?: string;
+  route_kind?: string;
+  category: ConversationCategory;
+  kind: string;
+  summary: string;
+  payload?: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface TaskAgent {
+  task_id: string;
+  agent_id: string;
+  role: "main" | "sub";
+  status: string;
+  title: string;
+  runtime_config_snapshot_id: string;
+  inherit_main: boolean;
+  backend?: string;
+  model_id?: string;
+  model_name?: string;
+  reasoning_effort?: string;
+  filesystem?: string;
+  approval?: string;
+  unread_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ConversationPage {
+  items: ConversationItem[];
+  has_more: boolean;
+  next_before?: number;
+  latest_sequence?: number;
 }
 
 export interface TaskMemory {
@@ -144,8 +216,61 @@ export interface Knowledge {
 
 export interface TaskDetail {
   task: Task;
-  messages: Message[];
+  latest_round?: TaskRound;
+  turns: Turn[];
+  agents: TaskAgent[];
+  memory?: TaskMemory;
+  event_cursor: number;
+  server_time_ms: number;
+}
+
+export interface TaskContextDetail {
+  task: Task;
+  latest_round?: TaskRound;
   turns: Turn[];
   memory: TaskMemory;
-  knowledge_candidates: Knowledge[];
+  project_knowledge: Knowledge[];
+  global_knowledge: Knowledge[];
+  context: {
+    turn_id?: string;
+    agent_id?: string;
+    prompt?: string;
+    prompt_chars?: number;
+    context_window?: number;
+    usage?: Record<string, number>;
+    context_percent?: number;
+    metrics?: {
+      total_tokens?: number;
+      history_tokens?: number;
+      current_total_tokens?: number;
+      input_tokens?: number;
+      cached_input_tokens?: number;
+      output_tokens?: number;
+      reasoning_output_tokens?: number;
+      aha_prompt_chars?: number;
+      aha_prompt_tokens?: number;
+      context_tokens?: number;
+      context_window?: number;
+      context_percent?: number;
+      session_size_bytes?: number;
+      session_exists?: boolean;
+      session_active?: boolean;
+      session_id?: string;
+      session_status?: string;
+      session_count?: number;
+    };
+  };
+}
+
+export interface PromptTemplate {
+  id: string;
+  name: string;
+  layer: "core" | "role" | "identity" | "channel" | "policy" | "protocol" | string;
+  description: string;
+  content: string;
+  source: "builtin" | "override" | string;
+  editable: boolean;
+  required: boolean;
+  version: number;
+  updated_at?: string;
 }

@@ -6,9 +6,14 @@ import type {
   Model,
   Project,
   Provider,
+  PromptTemplate,
   SystemInfo,
   Task,
+  TaskContextDetail,
   TaskDetail,
+  TaskAgent,
+  ConversationCategory,
+  ConversationPage,
   Workspace,
 } from "./types.js";
 
@@ -25,7 +30,7 @@ class APIClient {
     if (this.csrf && options.method && !["GET", "HEAD"].includes(options.method)) {
       headers.set("X-CSRF-Token", this.csrf);
     }
-    const response = await fetch(path, {...options, headers, credentials: "same-origin"});
+    const response = await fetch(path, {...options, headers, credentials: "same-origin", cache: "no-store"});
     const body = await response.json().catch(() => ({})) as Record<string, unknown>;
     if (!response.ok) {
       throw new Error(String(body.message || body.error || `HTTP ${response.status}`));
@@ -151,6 +156,43 @@ class APIClient {
     return this.request(`/api/v1/tasks/${id}`);
   }
 
+  conversation(
+    id: string,
+    options: {before?: number; after?: number; limit?: number; categories?: ConversationCategory[]} = {},
+  ): Promise<{conversation: ConversationPage}> {
+    const query = new URLSearchParams();
+    if (options.before) query.set("before", String(options.before));
+    if (options.after) query.set("after", String(options.after));
+    if (options.limit) query.set("limit", String(options.limit));
+    if (options.categories?.length) query.set("categories", options.categories.join(","));
+    return this.request(`/api/v1/tasks/${id}/conversation?${query}`);
+  }
+
+  agentConversation(
+    id: string,
+    agentID: string,
+    options: {before?: number; after?: number; limit?: number; categories?: ConversationCategory[]} = {},
+  ): Promise<{conversation: ConversationPage}> {
+    const query = new URLSearchParams();
+    if (options.before) query.set("before", String(options.before));
+    if (options.after) query.set("after", String(options.after));
+    if (options.limit) query.set("limit", String(options.limit));
+    if (options.categories?.length) query.set("categories", options.categories.join(","));
+    return this.request(`/api/v1/tasks/${id}/agents/${encodeURIComponent(agentID)}/conversation?${query}`);
+  }
+
+  taskContext(id: string): Promise<TaskContextDetail> {
+    return this.request(`/api/v1/tasks/${id}/context`);
+  }
+
+  agentContext(id: string, agentID: string): Promise<TaskContextDetail> {
+    return this.request(`/api/v1/tasks/${id}/agents/${encodeURIComponent(agentID)}/context`);
+  }
+
+  taskAgents(id: string): Promise<{agents: TaskAgent[]}> {
+    return this.request(`/api/v1/tasks/${id}/agents`);
+  }
+
   deleteTask(id: string): Promise<{ok: boolean}> {
     return this.request(`/api/v1/tasks/${encodeURIComponent(id)}`, {method: "DELETE"});
   }
@@ -159,16 +201,54 @@ class APIClient {
     return this.request(`/api/v1/tasks/${taskID}/messages`, {method: "POST", body: JSON.stringify({content})});
   }
 
+  agentMessage(taskID: string, agentID: string, content: string): Promise<{turn?: {id: string}; queued: boolean; started: boolean}> {
+    return this.request(`/api/v1/tasks/${taskID}/agents/${encodeURIComponent(agentID)}/messages`, {
+      method: "POST",
+      body: JSON.stringify({content}),
+    });
+  }
+
   completeTask(id: string): Promise<{ok: boolean}> {
     return this.request(`/api/v1/tasks/${id}/complete`, {method: "POST", body: "{}"});
+  }
+
+  reopenTask(id: string): Promise<{ok: boolean}> {
+    return this.request(`/api/v1/tasks/${id}/reopen`, {method: "POST", body: "{}"});
   }
 
   updateTaskTitle(id: string, title: string): Promise<{task: Task}> {
     return this.request(`/api/v1/tasks/${encodeURIComponent(id)}`, {method: "PATCH", body: JSON.stringify({title})});
   }
 
+  updateTask(id: string, payload: Record<string, unknown>): Promise<{task: Task}> {
+    return this.request(`/api/v1/tasks/${encodeURIComponent(id)}`, {method: "PATCH", body: JSON.stringify(payload)});
+  }
+
+  updateTaskAgent(id: string, agentID: string, payload: Record<string, unknown>): Promise<{agent: TaskAgent}> {
+    return this.request(`/api/v1/tasks/${id}/agents/${encodeURIComponent(agentID)}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    });
+  }
+
+  compactAgentSession(id: string, agentID: string): Promise<{old_backend_session_id: string; status: string}> {
+    return this.request(`/api/v1/tasks/${id}/agents/${encodeURIComponent(agentID)}/session/compact`, {
+      method: "POST", body: "{}",
+    });
+  }
+
+  resetAgentSession(id: string, agentID: string): Promise<{old_backend_session_id: string; status: string}> {
+    return this.request(`/api/v1/tasks/${id}/agents/${encodeURIComponent(agentID)}/session/reset`, {
+      method: "POST", body: "{}",
+    });
+  }
+
   interruptTurn(id: string): Promise<{ok: boolean}> {
     return this.request(`/api/v1/turns/${id}/interrupt`, {method: "POST", body: "{}"});
+  }
+
+  interruptRound(id: string): Promise<{ok: boolean}> {
+    return this.request(`/api/v1/rounds/${id}/interrupt`, {method: "POST", body: "{}"});
   }
 
   knowledge(scope = "", projectID = ""): Promise<{knowledge: Knowledge[]}> {
@@ -185,6 +265,21 @@ class APIClient {
   verifyKnowledge(id: string): Promise<{ok: boolean}> {
     return this.request(`/api/v1/knowledge/${id}/verify`, {method: "POST", body: "{}"});
   }
+
+  promptTemplates(): Promise<{templates: PromptTemplate[]}> {
+    return this.request("/api/v1/prompts/templates");
+  }
+
+  updatePromptTemplate(id: string, content: string): Promise<{ok: boolean}> {
+    return this.request(`/api/v1/prompts/templates/${encodeURIComponent(id)}`, {
+      method: "PUT", body: JSON.stringify({content}),
+    });
+  }
+
+  resetPromptTemplate(id: string): Promise<{ok: boolean}> {
+    return this.request(`/api/v1/prompts/templates/${encodeURIComponent(id)}/reset`, {method: "POST", body: "{}"});
+  }
+
 }
 
 export const api = new APIClient();

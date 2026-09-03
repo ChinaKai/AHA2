@@ -29,10 +29,43 @@ func (s *Store) RecoverInterrupted(ctx context.Context, now time.Time) (Recovery
 	if err != nil {
 		return RecoveryResult{}, fmt.Errorf("recover turns: %w", err)
 	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE agent_inbox
+		SET status='pending',batch_id='',claimed_at=''
+		WHERE status='claimed' AND batch_id IN (
+			SELECT inbox_batch_id FROM turns
+			WHERE status=? AND finished_at=? AND inbox_batch_id<>''
+		)`,
+		domain.TurnInterrupted, finishedAt,
+	); err != nil {
+		return RecoveryResult{}, fmt.Errorf("recover inbox: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE task_agents
+		SET status='idle',updated_at=?
+		WHERE status IN ('queued','preparing','starting','running','waiting')`,
+		finishedAt,
+	); err != nil {
+		return RecoveryResult{}, fmt.Errorf("recover agents: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE task_rounds
+		SET status=?,finished_at=?
+		WHERE status IN ('running','waiting')
+		  AND NOT EXISTS (
+			SELECT 1 FROM agent_inbox
+			WHERE agent_inbox.round_id=task_rounds.id AND agent_inbox.status='pending'
+		  )`,
+		domain.RoundInterrupted, finishedAt,
+	); err != nil {
+		return RecoveryResult{}, fmt.Errorf("recover rounds: %w", err)
+	}
 	taskResult, err := tx.ExecContext(ctx, `
 		UPDATE tasks SET status=?,updated_at=?
 		WHERE status IN (?,?) AND EXISTS (
 			SELECT 1 FROM turns WHERE turns.task_id=tasks.id AND turns.status=? AND turns.finished_at=?
+		) AND NOT EXISTS (
+			SELECT 1 FROM agent_inbox WHERE agent_inbox.task_id=tasks.id AND agent_inbox.status='pending'
 		)`,
 		domain.TaskWaitingUser, finishedAt, domain.TaskActive, domain.TaskPreparing, domain.TurnInterrupted, finishedAt,
 	)

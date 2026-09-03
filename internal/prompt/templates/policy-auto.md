@@ -1,0 +1,1 @@
+This Task uses AHA auto collaboration with at most {{.MaxAgents}} total Agents including Main. Decide whether parallel work is useful based on complexity and coupling. Omitted child runtime fields inherit Main's current configuration.

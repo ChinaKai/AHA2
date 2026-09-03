@@ -7,51 +7,6 @@ import (
 	"github.com/ChinaKai/AHA2/internal/domain"
 )
 
-type PackInput struct {
-	SystemPolicy     string
-	Project          domain.Project
-	Workspace        domain.Workspace
-	Task             domain.Task
-	Memory           domain.TaskMemory
-	GlobalKnowledge  []domain.KnowledgeEntry
-	ProjectKnowledge []domain.KnowledgeEntry
-	UserMessage      string
-}
-
-func Build(input PackInput) string {
-	sections := []string{
-		section("AHA system policy", input.SystemPolicy),
-		section("Project and workspace", fmt.Sprintf(
-			"- project: %s\n- workspace: %s\n- path: %s\n- transport: %s\n- branch: %s",
-			input.Project.Name,
-			input.Workspace.Name,
-			input.Workspace.RootPath,
-			input.Workspace.Transport,
-			input.Task.TaskBranch,
-		)),
-		section("Task", fmt.Sprintf(
-			"- original request: %s\n- current goal: %s\n- task id: %s",
-			input.Task.OriginalRequest,
-			input.Task.CurrentGoal,
-			input.Task.ID,
-		)),
-		section("Task memory", memoryText(input.Memory)),
-		section("Global knowledge", knowledgeText(input.GlobalKnowledge)),
-		section("Project knowledge", knowledgeText(input.ProjectKnowledge)),
-		section("Current user message", input.UserMessage),
-		section("Turn checkpoint protocol", checkpointProtocol),
-	}
-	return strings.Join(sections, "\n\n")
-}
-
-func section(title, body string) string {
-	body = strings.TrimSpace(body)
-	if body == "" {
-		body = "-"
-	}
-	return "## " + title + "\n" + body
-}
-
 func memoryText(memory domain.TaskMemory) string {
 	return strings.Join([]string{
 		list("decisions", memory.Decisions),
@@ -90,8 +45,11 @@ func list(title string, values []string) string {
 const checkpointProtocol = `Before ending this turn, append exactly one machine-readable checkpoint after the user-facing response:
 
 <aha2_checkpoint>
-{"decisions":[],"facts":[],"excluded":[],"progress":[],"verification":[],"next_actions":[],"knowledge_candidates":[{"scope":"project","type":"practice","title":"","body":"","confidence":0.8}]}
+{"decisions":[],"facts":[],"excluded":[],"progress":[],"verification":[],"next_actions":[],"knowledge_candidates":[{"scope":"project","type":"practice","title":"","body":"","confidence":0.8}],"main_followup":"","agent_actions":[{"agent_id":"sub-001","title":"focused assignment","assignment":"complete, self-contained work with disjoint ownership and validation target","required":true,"backend":"","model_id":"","reasoning_effort":"","filesystem":"","approval":""}]}
 </aha2_checkpoint>
 
 Only include durable, evidence-backed information. Omit empty knowledge candidates.
+Only the main agent may request agent_actions. Set main_followup when main should immediately continue its own disjoint work in parallel after AHA starts the requested sub-agents; otherwise leave it empty. Omitted runtime fields inherit the main Agent's current configuration. AHA enforces the Task's collaboration mode and maximum Agent count. Sub-agents must leave agent_actions empty and main_followup empty.
+Never call backend-native spawn-agent, collaboration, fanout, or delegation tools. AHA is the only Agent orchestrator.
+Send concise intermediate assistant progress messages as separate messages when work state changes. If the user requests timed or repeated updates, emit every actual update separately at the requested interval. Never claim that updates were sent when no corresponding assistant messages were emitted.
 Do not expose credentials or secret environment values in the response, events, artifacts, task memory, or knowledge.`

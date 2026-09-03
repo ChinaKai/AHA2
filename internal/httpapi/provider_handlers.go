@@ -114,7 +114,7 @@ func (s *Server) updateProvider(writer http.ResponseWriter, request *http.Reques
 	item := domain.Provider{
 		ID: newID, Name: name, BaseURL: baseURL,
 		AnthropicBaseURL: strings.TrimRight(strings.TrimSpace(payload.AnthropicBaseURL), "/"),
-		AuthStyle: authStyle, CreatedAt: existing.CreatedAt, UpdatedAt: now,
+		AuthStyle:        authStyle, CreatedAt: existing.CreatedAt, UpdatedAt: now,
 	}
 	oldCredentialRef := "provider/" + id + "/credential"
 	if strings.TrimSpace(payload.APIKey) != "" {
@@ -332,14 +332,16 @@ func probeCapabilities(provider domain.Provider, apiKey, authStyle string, model
 
 func (s *Server) addModelsHandler(writer http.ResponseWriter, request *http.Request) {
 	var payload struct {
-		ProviderID       string `json:"provider_id"`
-		WireAPI          string `json:"wire_api"`
-		AnthropicBaseURL string `json:"anthropic_base_url"`
+		ProviderID       string   `json:"provider_id"`
+		WireAPI          string   `json:"wire_api"`
+		AnthropicBaseURL string   `json:"anthropic_base_url"`
 		ModelIDs         []string `json:"model_ids"`
 		Models           []struct {
-			ID       string   `json:"id"`
-			WireAPI  string   `json:"wire_api"`
-			WireAPIs []string `json:"wire_apis"`
+			ID              string   `json:"id"`
+			WireAPI         string   `json:"wire_api"`
+			WireAPIs        []string `json:"wire_apis"`
+			MaxInputTokens  int64    `json:"max_input_tokens"`
+			MaxOutputTokens int64    `json:"max_output_tokens"`
 		} `json:"models"`
 	}
 	if err := decodeJSON(request, &payload); err != nil {
@@ -357,8 +359,10 @@ func (s *Server) addModelsHandler(writer http.ResponseWriter, request *http.Requ
 		_ = s.store.UpsertProvider(request.Context(), provider)
 	}
 	type pick struct {
-		id      string
-		wireAPI string
+		id              string
+		wireAPI         string
+		maxInputTokens  int64
+		maxOutputTokens int64
 	}
 	var picks []pick
 	seenPick := make(map[string]bool)
@@ -381,14 +385,14 @@ func (s *Server) addModelsHandler(writer http.ResponseWriter, request *http.Requ
 				continue
 			}
 			seenPick[key] = true
-			picks = append(picks, pick{id, wire})
+			picks = append(picks, pick{id, wire, item.MaxInputTokens, item.MaxOutputTokens})
 		}
 	}
 	if len(picks) == 0 {
 		wire := normalizeWireAPI(payload.WireAPI)
 		for _, id := range payload.ModelIDs {
 			if id = strings.TrimSpace(id); id != "" {
-				picks = append(picks, pick{id, wire})
+				picks = append(picks, pick{id: id, wireAPI: wire})
 			}
 		}
 	}
@@ -421,6 +425,7 @@ func (s *Server) addModelsHandler(writer http.ResponseWriter, request *http.Requ
 		item := domain.Model{
 			ID: domain.NewID("model"), DisplayName: pick.id, ProviderID: provider.ID, Backend: backendName,
 			WireModel: pick.id, WireAPI: pick.wireAPI, DefaultEnvGroupID: envGroup.ID,
+			ContextWindow: pick.maxInputTokens, MaxOutputTokens: pick.maxOutputTokens,
 			Capabilities: map[string]any{}, CreatedAt: now, UpdatedAt: now,
 		}
 		if err := s.store.UpsertModel(request.Context(), item); err != nil {

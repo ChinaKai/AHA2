@@ -9,6 +9,7 @@ import (
 )
 
 func (s *Store) CreateTask(ctx context.Context, item domain.Task) error {
+	normalizeTaskCollaboration(&item)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -20,10 +21,11 @@ func (s *Store) CreateTask(ctx context.Context, item domain.Task) error {
 	}
 	item.Code = code
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO tasks(id,code,project_id,workspace_id,title,original_request,current_goal,status,target_branch,base_commit,task_branch,task_workspace_path,runtime_config_snapshot_id,created_at,updated_at,completed_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		INSERT INTO tasks(id,code,project_id,workspace_id,title,original_request,current_goal,status,target_branch,base_commit,task_branch,task_workspace_path,runtime_config_snapshot_id,collaboration_mode,max_agents,created_at,updated_at,completed_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		item.ID, item.Code, item.ProjectID, item.WorkspaceID, item.Title, item.OriginalRequest, item.CurrentGoal, item.Status,
 		item.TargetBranch, item.BaseCommit, item.TaskBranch, item.TaskWorkspacePath, item.RuntimeConfigSnapshotID,
+		item.CollaborationMode, item.MaxAgents,
 		timeString(item.CreatedAt), timeString(item.UpdatedAt), timeString(item.CompletedAt),
 	)
 	if err != nil {
@@ -33,10 +35,19 @@ func (s *Store) CreateTask(ctx context.Context, item domain.Task) error {
 	if err != nil {
 		return err
 	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO task_agents(task_id,agent_id,role,status,title,runtime_config_snapshot_id,inherit_main,last_read_sequence,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?)`,
+		item.ID, "main", "main", "idle", "Main agent", item.RuntimeConfigSnapshotID, 0, 0,
+		timeString(item.CreatedAt), timeString(item.UpdatedAt),
+	); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
 func (s *Store) CreateTaskWithSnapshot(ctx context.Context, snapshot domain.RuntimeConfigSnapshot, item domain.Task) (domain.Task, error) {
+	normalizeTaskCollaboration(&item)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return domain.Task{}, err
@@ -57,10 +68,11 @@ func (s *Store) CreateTaskWithSnapshot(ctx context.Context, snapshot domain.Runt
 	}
 	item.Code = code
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO tasks(id,code,project_id,workspace_id,title,original_request,current_goal,status,target_branch,base_commit,task_branch,task_workspace_path,runtime_config_snapshot_id,created_at,updated_at,completed_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		INSERT INTO tasks(id,code,project_id,workspace_id,title,original_request,current_goal,status,target_branch,base_commit,task_branch,task_workspace_path,runtime_config_snapshot_id,collaboration_mode,max_agents,created_at,updated_at,completed_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		item.ID, item.Code, item.ProjectID, item.WorkspaceID, item.Title, item.OriginalRequest, item.CurrentGoal, item.Status,
 		item.TargetBranch, item.BaseCommit, item.TaskBranch, item.TaskWorkspacePath, item.RuntimeConfigSnapshotID,
+		item.CollaborationMode, item.MaxAgents,
 		timeString(item.CreatedAt), timeString(item.UpdatedAt), timeString(item.CompletedAt),
 	); err != nil {
 		return domain.Task{}, err
@@ -68,7 +80,24 @@ func (s *Store) CreateTaskWithSnapshot(ctx context.Context, snapshot domain.Runt
 	if _, err := tx.ExecContext(ctx, `INSERT INTO task_memory(task_id,current_goal,updated_at) VALUES(?,?,?)`, item.ID, item.CurrentGoal, timeString(item.CreatedAt)); err != nil {
 		return domain.Task{}, err
 	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO task_agents(task_id,agent_id,role,status,title,runtime_config_snapshot_id,inherit_main,last_read_sequence,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?)`,
+		item.ID, "main", "main", "idle", "Main agent", item.RuntimeConfigSnapshotID, 0, 0,
+		timeString(item.CreatedAt), timeString(item.UpdatedAt),
+	); err != nil {
+		return domain.Task{}, err
+	}
 	return item, tx.Commit()
+}
+
+func normalizeTaskCollaboration(item *domain.Task) {
+	if item.CollaborationMode == "" {
+		item.CollaborationMode = "auto"
+	}
+	if item.MaxAgents < 1 {
+		item.MaxAgents = 3
+	}
 }
 
 // nextTaskCodeTx computes the next human-friendly code (task-001, task-002, ...)
@@ -124,13 +153,13 @@ func scanTask(scanner interface{ Scan(...any) error }) (domain.Task, error) {
 	err := scanner.Scan(
 		&item.ID, &item.Code, &item.ProjectID, &item.WorkspaceID, &item.Title, &item.OriginalRequest, &item.CurrentGoal,
 		&item.Status, &item.TargetBranch, &item.BaseCommit, &item.TaskBranch, &item.TaskWorkspacePath,
-		&item.RuntimeConfigSnapshotID, &createdAt, &updatedAt, &completedAt,
+		&item.RuntimeConfigSnapshotID, &item.CollaborationMode, &item.MaxAgents, &createdAt, &updatedAt, &completedAt,
 	)
 	item.CreatedAt, item.UpdatedAt, item.CompletedAt = parseTime(createdAt), parseTime(updatedAt), parseTime(completedAt)
 	return item, err
 }
 
-const taskColumns = `id,code,project_id,workspace_id,title,original_request,current_goal,status,target_branch,base_commit,task_branch,task_workspace_path,runtime_config_snapshot_id,created_at,updated_at,completed_at`
+const taskColumns = `id,code,project_id,workspace_id,title,original_request,current_goal,status,target_branch,base_commit,task_branch,task_workspace_path,runtime_config_snapshot_id,collaboration_mode,max_agents,created_at,updated_at,completed_at`
 
 func (s *Store) Task(ctx context.Context, id string) (domain.Task, error) {
 	return scanTask(s.db.QueryRowContext(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=?`, id))
@@ -185,6 +214,22 @@ func (s *Store) UpdateTaskTitle(ctx context.Context, id, title, updatedAt string
 	return err
 }
 
+func (s *Store) UpdateTaskCollaboration(ctx context.Context, id, mode string, maxAgents int, updatedAt string) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE tasks SET collaboration_mode=?,max_agents=?,updated_at=? WHERE id=?`,
+		mode, maxAgents, updatedAt, id,
+	)
+	return err
+}
+
+func (s *Store) UpdateTaskRuntimeSnapshot(ctx context.Context, id, snapshotID, updatedAt string) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE tasks SET runtime_config_snapshot_id=?,updated_at=? WHERE id=?`,
+		snapshotID, updatedAt, id,
+	)
+	return err
+}
+
 func (s *Store) DeleteTask(ctx context.Context, id string) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM tasks WHERE id=?`, id)
 	return err
@@ -234,53 +279,15 @@ func (s *Store) ListMessages(ctx context.Context, taskID string) ([]domain.Messa
 }
 
 func (s *Store) CreateTurn(ctx context.Context, item domain.Turn) error {
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO turns(id,task_id,agent_id,sequence,input_message_id,status,waiting_reason,backend_session_id,runtime_config_snapshot_id,queued_at,prepared_at,started_at,finished_at,exit_code,result,error)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		item.ID, item.TaskID, item.AgentID, item.Sequence, item.InputMessageID, item.Status, item.WaitingReason,
-		item.BackendSessionID, item.RuntimeConfigSnapshotID, timeString(item.QueuedAt), timeString(item.PreparedAt),
-		timeString(item.StartedAt), timeString(item.FinishedAt), item.ExitCode, item.Result, item.Error,
-	)
-	return err
-}
-
-func (s *Store) CreateMessageAndTurn(ctx context.Context, message domain.Message, turn domain.Turn) (domain.Turn, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return domain.Turn{}, err
+		return err
 	}
 	defer tx.Rollback()
-	var active int
-	if err := tx.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM turns
-		WHERE task_id=? AND status IN ('queued','preparing','starting','running','waiting')`,
-		turn.TaskID,
-	).Scan(&active); err != nil {
-		return domain.Turn{}, err
+	if err := insertTurnTx(ctx, tx, item); err != nil {
+		return err
 	}
-	if active > 0 {
-		return domain.Turn{}, ErrActiveTurn
-	}
-	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(sequence),0)+1 FROM turns WHERE task_id=?`, turn.TaskID).
-		Scan(&turn.Sequence); err != nil {
-		return domain.Turn{}, err
-	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO messages(id,task_id,turn_id,role,sender,content,created_at) VALUES(?,?,?,?,?,?,?)`,
-		message.ID, message.TaskID, turn.ID, message.Role, message.Sender, message.Content, timeString(message.CreatedAt)); err != nil {
-		return domain.Turn{}, err
-	}
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO turns(id,task_id,agent_id,sequence,input_message_id,status,waiting_reason,backend_session_id,runtime_config_snapshot_id,queued_at,prepared_at,started_at,finished_at,exit_code,result,error)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		turn.ID, turn.TaskID, turn.AgentID, turn.Sequence, message.ID, turn.Status, turn.WaitingReason,
-		turn.BackendSessionID, turn.RuntimeConfigSnapshotID, timeString(turn.QueuedAt), timeString(turn.PreparedAt),
-		timeString(turn.StartedAt), timeString(turn.FinishedAt), turn.ExitCode, turn.Result, turn.Error); err != nil {
-		return domain.Turn{}, err
-	}
-	if err := tx.Commit(); err != nil {
-		return domain.Turn{}, err
-	}
-	return turn, nil
+	return tx.Commit()
 }
 
 func (s *Store) ActiveTurn(ctx context.Context, taskID string) (domain.Turn, error) {
@@ -296,13 +303,23 @@ func scanTurn(scanner interface{ Scan(...any) error }) (domain.Turn, error) {
 	var item domain.Turn
 	var queuedAt, preparedAt, startedAt, finishedAt string
 	var exitCode sql.NullInt64
+	var required int
+	var usage string
 	err := scanner.Scan(
 		&item.ID, &item.TaskID, &item.AgentID, &item.Sequence, &item.InputMessageID, &item.Status,
 		&item.WaitingReason, &item.BackendSessionID, &item.RuntimeConfigSnapshotID,
 		&queuedAt, &preparedAt, &startedAt, &finishedAt, &exitCode, &item.Result, &item.Error,
+		&item.RoundID, &item.ParentTurnID, &item.Attempt, &item.Generation, &required, &item.Title, &item.Instruction,
+		&item.ContextWindow, &item.PromptChars, &item.PromptSnapshot, &item.InboxBatchID, &usage,
 	)
 	item.QueuedAt, item.PreparedAt = parseTime(queuedAt), parseTime(preparedAt)
 	item.StartedAt, item.FinishedAt = parseTime(startedAt), parseTime(finishedAt)
+	item.QueuedAtMS = unixMilli(item.QueuedAt)
+	item.PreparedAtMS = unixMilli(item.PreparedAt)
+	item.StartedAtMS = unixMilli(item.StartedAt)
+	item.FinishedAtMS = unixMilli(item.FinishedAt)
+	item.Required = required != 0
+	item.Usage = decodeJSON(usage, map[string]any{})
 	if exitCode.Valid {
 		value := int(exitCode.Int64)
 		item.ExitCode = &value
@@ -310,7 +327,7 @@ func scanTurn(scanner interface{ Scan(...any) error }) (domain.Turn, error) {
 	return item, err
 }
 
-const turnColumns = `id,task_id,agent_id,sequence,input_message_id,status,waiting_reason,backend_session_id,runtime_config_snapshot_id,queued_at,prepared_at,started_at,finished_at,exit_code,result,error`
+const turnColumns = `id,task_id,agent_id,sequence,input_message_id,status,waiting_reason,backend_session_id,runtime_config_snapshot_id,queued_at,prepared_at,started_at,finished_at,exit_code,result,error,round_id,parent_turn_id,attempt,generation,required,title,instruction,context_window,prompt_chars,prompt_snapshot,inbox_batch_id,usage_json`
 
 func (s *Store) Turn(ctx context.Context, id string) (domain.Turn, error) {
 	return scanTurn(s.db.QueryRowContext(ctx, `SELECT `+turnColumns+` FROM turns WHERE id=?`, id))
@@ -333,15 +350,37 @@ func (s *Store) ListTurns(ctx context.Context, taskID string) ([]domain.Turn, er
 	return result, rows.Err()
 }
 
+func (s *Store) PreviousTurnUsage(ctx context.Context, turn domain.Turn) (map[string]any, error) {
+	previous, err := s.PreviousTurnForSession(ctx, turn)
+	if err != nil {
+		return nil, err
+	}
+	return previous.Usage, nil
+}
+
+func (s *Store) PreviousTurnForSession(ctx context.Context, turn domain.Turn) (domain.Turn, error) {
+	if turn.BackendSessionID == "" {
+		return domain.Turn{}, sql.ErrNoRows
+	}
+	return scanTurn(s.db.QueryRowContext(ctx, `
+		SELECT `+turnColumns+` FROM turns
+		WHERE task_id=? AND agent_id=? AND sequence<? AND backend_session_id=?
+		  AND status IN ('succeeded','failed','interrupted','blocked')
+		ORDER BY sequence DESC LIMIT 1`,
+		turn.TaskID, turn.AgentID, turn.Sequence, turn.BackendSessionID,
+	))
+}
+
 func (s *Store) UpdateTurn(ctx context.Context, item domain.Turn, from domain.TurnStatus) error {
 	if err := domain.ValidateTurnTransition(from, item.Status); err != nil {
 		return err
 	}
 	result, err := s.db.ExecContext(ctx, `
-		UPDATE turns SET status=?,waiting_reason=?,backend_session_id=?,prepared_at=?,started_at=?,finished_at=?,exit_code=?,result=?,error=?
+		UPDATE turns SET status=?,waiting_reason=?,backend_session_id=?,prepared_at=?,started_at=?,finished_at=?,exit_code=?,result=?,error=?,context_window=?,prompt_chars=?,prompt_snapshot=?,usage_json=?
 		WHERE id=? AND status=?`,
 		item.Status, item.WaitingReason, item.BackendSessionID, timeString(item.PreparedAt), timeString(item.StartedAt),
-		timeString(item.FinishedAt), item.ExitCode, item.Result, item.Error, item.ID, from,
+		timeString(item.FinishedAt), item.ExitCode, item.Result, item.Error, item.ContextWindow, item.PromptChars,
+		item.PromptSnapshot, encodeJSON(item.Usage), item.ID, from,
 	)
 	if err != nil {
 		return err
@@ -365,19 +404,52 @@ func (s *Store) UpsertBackendSession(ctx context.Context, item domain.BackendSes
 	return err
 }
 
-func (s *Store) ReusableBackendSession(ctx context.Context, taskID, agentID, workspaceID, backend, modelID string, envRevision int) (domain.BackendSession, error) {
+const backendSessionColumns = `id,task_id,agent_id,workspace_id,backend,model_id,env_group_revision,provider_session_id,status,context_usage_json,created_at,last_used_at`
+
+func scanBackendSession(scanner interface{ Scan(...any) error }) (domain.BackendSession, error) {
 	var item domain.BackendSession
 	var createdAt, lastUsedAt string
-	err := s.db.QueryRowContext(ctx, `
-		SELECT id,task_id,agent_id,workspace_id,backend,model_id,env_group_revision,provider_session_id,status,context_usage_json,created_at,last_used_at
-		FROM backend_sessions
-		WHERE task_id=? AND agent_id=? AND workspace_id=? AND backend=? AND model_id=? AND env_group_revision=?
-		ORDER BY last_used_at DESC LIMIT 1`,
-		taskID, agentID, workspaceID, backend, modelID, envRevision,
-	).Scan(&item.ID, &item.TaskID, &item.AgentID, &item.WorkspaceID, &item.Backend, &item.ModelID,
-		&item.EnvGroupRevision, &item.ProviderSession, &item.Status, &item.ContextUsageJSON, &createdAt, &lastUsedAt)
+	err := scanner.Scan(
+		&item.ID, &item.TaskID, &item.AgentID, &item.WorkspaceID, &item.Backend, &item.ModelID,
+		&item.EnvGroupRevision, &item.ProviderSession, &item.Status, &item.ContextUsageJSON,
+		&createdAt, &lastUsedAt,
+	)
 	item.CreatedAt, item.LastUsedAt = parseTime(createdAt), parseTime(lastUsedAt)
 	return item, err
+}
+
+func (s *Store) ReusableBackendSession(ctx context.Context, taskID, agentID, workspaceID, backend, modelID string, envRevision int) (domain.BackendSession, error) {
+	return scanBackendSession(s.db.QueryRowContext(ctx, `
+		SELECT `+backendSessionColumns+`
+		FROM backend_sessions
+		WHERE task_id=? AND agent_id=? AND workspace_id=? AND backend=? AND model_id=? AND env_group_revision=?
+		  AND status='active'
+		ORDER BY last_used_at DESC LIMIT 1`,
+		taskID, agentID, workspaceID, backend, modelID, envRevision,
+	))
+}
+
+func (s *Store) ListBackendSessionsForAgent(ctx context.Context, taskID, agentID string) ([]domain.BackendSession, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT `+backendSessionColumns+`
+		FROM backend_sessions
+		WHERE task_id=? AND agent_id=?
+		ORDER BY created_at`,
+		taskID, agentID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []domain.BackendSession
+	for rows.Next() {
+		item, err := scanBackendSession(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, item)
+	}
+	return result, rows.Err()
 }
 
 func (s *Store) TaskMemory(ctx context.Context, taskID string) (domain.TaskMemory, error) {

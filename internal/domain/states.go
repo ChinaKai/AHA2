@@ -20,7 +20,10 @@ var taskTransitions = map[TaskStatus]map[TaskStatus]bool{
 	TaskPreparing:   {TaskActive: true, TaskBlocked: true, TaskFailed: true, TaskCancelled: true},
 	TaskActive:      {TaskWaitingUser: true, TaskBlocked: true, TaskCompleted: true, TaskFailed: true, TaskCancelled: true},
 	TaskWaitingUser: {TaskActive: true, TaskCompleted: true, TaskCancelled: true},
-	TaskBlocked:     {TaskActive: true, TaskFailed: true, TaskCancelled: true},
+	TaskBlocked:     {TaskActive: true, TaskWaitingUser: true, TaskFailed: true, TaskCancelled: true},
+	TaskFailed:      {TaskActive: true, TaskWaitingUser: true, TaskCompleted: true, TaskCancelled: true},
+	TaskCompleted:   {TaskWaitingUser: true},
+	TaskCancelled:   {TaskWaitingUser: true},
 }
 
 func ValidateTaskTransition(from, to TaskStatus) error {

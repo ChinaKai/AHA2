@@ -125,28 +125,50 @@ type Task struct {
 	TaskBranch              string     `json:"task_branch,omitempty"`
 	TaskWorkspacePath       string     `json:"task_workspace_path,omitempty"`
 	RuntimeConfigSnapshotID string     `json:"runtime_config_snapshot_id"`
+	CollaborationMode       string     `json:"collaboration_mode"`
+	MaxAgents               int        `json:"max_agents"`
 	CreatedAt               time.Time  `json:"created_at"`
 	UpdatedAt               time.Time  `json:"updated_at"`
 	CompletedAt             time.Time  `json:"completed_at,omitempty"`
 }
 
 type Turn struct {
-	ID                      string     `json:"id"`
-	TaskID                  string     `json:"task_id"`
-	AgentID                 string     `json:"agent_id"`
-	Sequence                int        `json:"sequence"`
-	InputMessageID          string     `json:"input_message_id"`
-	Status                  TurnStatus `json:"status"`
-	WaitingReason           string     `json:"waiting_reason,omitempty"`
-	BackendSessionID        string     `json:"backend_session_id,omitempty"`
-	RuntimeConfigSnapshotID string     `json:"runtime_config_snapshot_id"`
-	QueuedAt                time.Time  `json:"queued_at"`
-	PreparedAt              time.Time  `json:"prepared_at,omitempty"`
-	StartedAt               time.Time  `json:"started_at,omitempty"`
-	FinishedAt              time.Time  `json:"finished_at,omitempty"`
-	ExitCode                *int       `json:"exit_code,omitempty"`
-	Result                  string     `json:"result,omitempty"`
-	Error                   string     `json:"error,omitempty"`
+	ID                      string         `json:"id"`
+	TaskID                  string         `json:"task_id"`
+	RoundID                 string         `json:"round_id"`
+	AgentID                 string         `json:"agent_id"`
+	Sequence                int            `json:"sequence"`
+	ParentTurnID            string         `json:"parent_turn_id,omitempty"`
+	Attempt                 int            `json:"attempt"`
+	Generation              int            `json:"generation"`
+	Required                bool           `json:"required"`
+	Title                   string         `json:"title,omitempty"`
+	Instruction             string         `json:"-"`
+	InputMessageID          string         `json:"input_message_id"`
+	Status                  TurnStatus     `json:"status"`
+	WaitingReason           string         `json:"waiting_reason,omitempty"`
+	BackendSessionID        string         `json:"backend_session_id,omitempty"`
+	RuntimeConfigSnapshotID string         `json:"runtime_config_snapshot_id"`
+	ContextWindow           int64          `json:"context_window,omitempty"`
+	PromptChars             int            `json:"prompt_chars,omitempty"`
+	PromptSnapshot          string         `json:"-"`
+	InboxBatchID            string         `json:"inbox_batch_id,omitempty"`
+	Usage                   map[string]any `json:"usage,omitempty"`
+	QueuedAt                time.Time      `json:"queued_at"`
+	QueuedAtMS              int64          `json:"queued_at_ms"`
+	PreparedAt              time.Time      `json:"prepared_at,omitempty"`
+	PreparedAtMS            int64          `json:"prepared_at_ms,omitempty"`
+	StartedAt               time.Time      `json:"started_at,omitempty"`
+	StartedAtMS             int64          `json:"started_at_ms,omitempty"`
+	FinishedAt              time.Time      `json:"finished_at,omitempty"`
+	FinishedAtMS            int64          `json:"finished_at_ms,omitempty"`
+	ElapsedMS               int64          `json:"elapsed_ms"`
+	QueueDurationMS         int64          `json:"queue_duration_ms"`
+	PrepareDurationMS       int64          `json:"prepare_duration_ms"`
+	RunDurationMS           int64          `json:"run_duration_ms"`
+	ExitCode                *int           `json:"exit_code,omitempty"`
+	Result                  string         `json:"result,omitempty"`
+	Error                   string         `json:"error,omitempty"`
 }
 
 type Message struct {

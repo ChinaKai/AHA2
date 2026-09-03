@@ -27,7 +27,7 @@ func (adapter Codex) Execute(ctx context.Context, request Request, emit func(Eve
 	}
 	args := codexArguments(request)
 	environment := filterEnvironment(request.Environment)
-	var reply, sessionID string
+	var reply, sessionID, providerError string
 	result, err := request.Runner.Run(ctx, workspace.Command{
 		Executable: binary,
 		Args:       args,
@@ -43,6 +43,12 @@ func (adapter Codex) Execute(ctx context.Context, request Request, emit func(Eve
 		if parsedSession != "" {
 			sessionID = parsedSession
 		}
+		if event.Type == "agent_error" {
+			providerError = strings.TrimSpace(fmt.Sprint(event.Data["message"]))
+			if providerError == "<nil>" {
+				providerError = ""
+			}
+		}
 		if event.Type != "" && emit != nil {
 			emit(event)
 		}
@@ -56,8 +62,12 @@ func (adapter Codex) Execute(ctx context.Context, request Request, emit func(Eve
 	if result.ExitCode != 0 {
 		message := strings.TrimSpace(result.Stderr)
 		if message == "" {
+			message = providerError
+		}
+		if message == "" {
 			message = fmt.Sprintf("codex exited with code %d", result.ExitCode)
 		}
+		message = tail(message, 2000)
 		return Result{Reply: reply, ExitCode: result.ExitCode, ProviderSessionID: sessionID}, fmt.Errorf("%s", message)
 	}
 	if strings.TrimSpace(reply) == "" {
@@ -100,6 +110,7 @@ func codexArguments(request Request) []string {
 	if request.Model != "" {
 		args = append(args, "-m", request.Model)
 	}
+	args = append(args, "--disable", "multi_agent")
 	args = append(args, "exec", "--skip-git-repo-check", "--sandbox", codexSandbox(request.Filesystem), "-C", request.WorkDir)
 	if request.ProviderSessionID != "" {
 		args = append(args, "resume")

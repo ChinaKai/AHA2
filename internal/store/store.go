@@ -77,3 +77,10 @@ func parseTime(value string) time.Time {
 	result, _ := time.Parse(time.RFC3339Nano, value)
 	return result
 }
+
+func unixMilli(value time.Time) int64 {
+	if value.IsZero() {
+		return 0
+	}
+	return value.UnixMilli()
+}

@@ -16,7 +16,7 @@ func TestCodexArgumentsResumeAndProvider(t *testing.T) {
 		},
 	})
 	joined := strings.Join(args, " ")
-	for _, expected := range []string{"model_provider", "exec", "resume", "session-1", "--json"} {
+	for _, expected := range []string{"model_provider", "--disable multi_agent", "exec", "resume", "session-1", "--json"} {
 		if !strings.Contains(joined, expected) {
 			t.Fatalf("arguments missing %q: %s", expected, joined)
 		}

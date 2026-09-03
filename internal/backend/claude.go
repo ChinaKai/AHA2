@@ -24,7 +24,10 @@ func (adapter Claude) Execute(ctx context.Context, request Request, emit func(Ev
 	if timeout == 0 {
 		timeout = 2 * time.Hour
 	}
-	args := []string{"-p", "--output-format", "stream-json", "--verbose"}
+	args := []string{
+		"-p", "--output-format", "stream-json", "--verbose",
+		"--disallowedTools", "Task,Agent",
+	}
 	if request.Model != "" {
 		args = append(args, "--model", request.Model)
 	}
@@ -35,7 +38,7 @@ func (adapter Claude) Execute(ctx context.Context, request Request, emit func(Ev
 	if request.ProviderSessionID != "" {
 		args = append(args, "--resume", request.ProviderSessionID)
 	}
-	var reply, sessionID string
+	var reply, sessionID, providerError string
 	result, err := request.Runner.Run(ctx, workspace.Command{
 		Executable: binary,
 		Args:       args,
@@ -51,7 +54,16 @@ func (adapter Claude) Execute(ctx context.Context, request Request, emit func(Ev
 		if parsedSession != "" {
 			sessionID = parsedSession
 		}
+		if event.Type == "agent_error" {
+			providerError = strings.TrimSpace(fmt.Sprint(event.Data["message"]))
+			if providerError == "<nil>" {
+				providerError = ""
+			}
+		}
 		if event.Type != "" && emit != nil {
+			if usage, ok := event.Data["usage"].(map[string]any); ok && len(usage) > 0 {
+				emit(Event{Type: "agent_usage", Data: map[string]any{"usage": usage}})
+			}
 			emit(event)
 		}
 	})
@@ -64,8 +76,12 @@ func (adapter Claude) Execute(ctx context.Context, request Request, emit func(Ev
 	if result.ExitCode != 0 {
 		message := strings.TrimSpace(result.Stderr)
 		if message == "" {
+			message = providerError
+		}
+		if message == "" {
 			message = fmt.Sprintf("claude exited with code %d", result.ExitCode)
 		}
+		message = tail(message, 2000)
 		return Result{Reply: reply, ExitCode: result.ExitCode, ProviderSessionID: sessionID}, fmt.Errorf("%s", message)
 	}
 	if strings.TrimSpace(reply) == "" {
@@ -109,7 +125,11 @@ func parseClaudeLine(line string) (Event, string, string) {
 		subtype, _ := payload["subtype"].(string)
 		if subtype == "success" {
 			if text, ok := payload["result"].(string); ok && text != "" {
-				return Event{Type: "agent_message", Data: map[string]any{"text": text}}, text, sessionID
+				data := map[string]any{"text": text, "final": true}
+				if usage, ok := payload["usage"].(map[string]any); ok {
+					data["usage"] = usage
+				}
+				return Event{Type: "agent_message", Data: data}, text, sessionID
 			}
 		} else if message, ok := payload["error"].(string); ok && message != "" {
 			return Event{Type: "agent_error", Data: map[string]any{"message": message}}, "", sessionID
@@ -119,11 +139,37 @@ func parseClaudeLine(line string) (Event, string, string) {
 		content, _ := message["content"].([]any)
 		for _, item := range content {
 			block, _ := item.(map[string]any)
+			if block["type"] == "tool_use" {
+				input, _ := block["input"].(map[string]any)
+				command := strings.TrimSpace(fmt.Sprint(input["command"]))
+				if command == "<nil>" {
+					command = ""
+				}
+				return Event{Type: "agent_command_started", Data: map[string]any{
+					"tool_name": block["name"], "tool_use_id": block["id"], "command": command, "status": "in_progress",
+				}}, "", ""
+			}
 			if block["type"] == "text" {
 				if text, ok := block["text"].(string); ok && text != "" {
-					return Event{Type: "agent_progress", Data: map[string]any{"phase": "streaming"}}, "", ""
+					return Event{Type: "agent_message", Data: map[string]any{"text": text, "intermediate": true}}, "", ""
 				}
 			}
+		}
+	case "user":
+		message, _ := payload["message"].(map[string]any)
+		content, _ := message["content"].([]any)
+		for _, item := range content {
+			block, _ := item.(map[string]any)
+			if block["type"] != "tool_result" {
+				continue
+			}
+			output := strings.TrimSpace(fmt.Sprint(block["content"]))
+			if output == "<nil>" {
+				output = ""
+			}
+			return Event{Type: "agent_command_finished", Data: map[string]any{
+				"tool_use_id": block["tool_use_id"], "status": "completed", "output_tail": tail(output, 2000),
+			}}, "", ""
 		}
 	}
 	return Event{}, "", ""

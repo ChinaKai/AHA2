@@ -11,6 +11,8 @@ func TestTaskTransitions(t *testing.T) {
 		{TaskWaitingUser, TaskActive},
 		{TaskWaitingUser, TaskCompleted},
 		{TaskBlocked, TaskActive},
+		{TaskFailed, TaskActive},
+		{TaskCompleted, TaskWaitingUser},
 	}
 	for _, pair := range valid {
 		if err := ValidateTaskTransition(pair[0], pair[1]); err != nil {
