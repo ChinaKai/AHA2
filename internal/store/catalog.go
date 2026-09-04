@@ -62,11 +62,11 @@ func (s *Store) UpdateProject(ctx context.Context, item domain.Project) error {
 func (s *Store) CreateWorkspace(ctx context.Context, item domain.Workspace) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO workspaces(
-			id,project_id,name,locality,transport,root_path,ssh_host,ssh_user,ssh_port,distro,isolation,worktree_dir,platform,health,
+			id,project_id,name,locality,transport,root_path,ssh_host,ssh_user,ssh_port,distro,platform,health,
 			capabilities_json,repository_json,last_detected_at,created_at,updated_at
-		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		item.ID, item.ProjectID, item.Name, item.Locality, item.Transport, item.RootPath,
-		item.SSHHost, item.SSHUser, item.SSHPort, item.Distro, item.Isolation, item.WorktreeDir, item.Platform, item.Health,
+		item.SSHHost, item.SSHUser, item.SSHPort, item.Distro, item.Platform, item.Health,
 		encodeJSON(item.Capabilities), encodeJSON(item.Repository), timeString(item.LastDetectedAt),
 		timeString(item.CreatedAt), timeString(item.UpdatedAt),
 	)
@@ -78,7 +78,7 @@ func scanWorkspace(scanner interface{ Scan(...any) error }) (domain.Workspace, e
 	var capabilities, repository, detectedAt, createdAt, updatedAt string
 	err := scanner.Scan(
 		&item.ID, &item.ProjectID, &item.Name, &item.Locality, &item.Transport, &item.RootPath,
-		&item.SSHHost, &item.SSHUser, &item.SSHPort, &item.Distro, &item.Isolation, &item.WorktreeDir, &item.Platform, &item.Health,
+		&item.SSHHost, &item.SSHUser, &item.SSHPort, &item.Distro, &item.Platform, &item.Health,
 		&capabilities, &repository, &detectedAt, &createdAt, &updatedAt,
 	)
 	item.Capabilities = decodeJSON(capabilities, map[string]any{})
@@ -88,7 +88,7 @@ func scanWorkspace(scanner interface{ Scan(...any) error }) (domain.Workspace, e
 	return item, err
 }
 
-const workspaceColumns = `id,project_id,name,locality,transport,root_path,ssh_host,ssh_user,ssh_port,distro,isolation,worktree_dir,platform,health,capabilities_json,repository_json,last_detected_at,created_at,updated_at`
+const workspaceColumns = `id,project_id,name,locality,transport,root_path,ssh_host,ssh_user,ssh_port,distro,platform,health,capabilities_json,repository_json,last_detected_at,created_at,updated_at`
 
 func (s *Store) Workspace(ctx context.Context, id string) (domain.Workspace, error) {
 	return scanWorkspace(s.db.QueryRowContext(ctx, `SELECT `+workspaceColumns+` FROM workspaces WHERE id=?`, id))
@@ -306,11 +306,11 @@ func (s *Store) RemapProvider(ctx context.Context, oldID, newID string) error {
 func (s *Store) UpdateWorkspaceConfig(ctx context.Context, item domain.Workspace) error {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE workspaces SET
-			name=?,locality=?,transport=?,root_path=?,ssh_host=?,ssh_user=?,ssh_port=?,distro=?,isolation=?,worktree_dir=?,
+			name=?,locality=?,transport=?,root_path=?,ssh_host=?,ssh_user=?,ssh_port=?,distro=?,
 			platform='',health='unknown',capabilities_json='{}',repository_json='{}',last_detected_at='',updated_at=?
 		WHERE id=?`,
 		item.Name, item.Locality, item.Transport, item.RootPath, item.SSHHost, item.SSHUser, item.SSHPort, item.Distro,
-		item.Isolation, item.WorktreeDir, timeString(item.UpdatedAt), item.ID,
+		timeString(item.UpdatedAt), item.ID,
 	)
 	return err
 }

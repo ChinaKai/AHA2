@@ -176,28 +176,6 @@ function workspaceTransportOptions(locality: string): Array<[string, string]> {
   return options;
 }
 
-function syncWorkspaceGitIsolation(): void {
-  const projectSelect = document.querySelector<HTMLSelectElement>("#ws-project");
-  const project = state.projects.find(item => item.id === projectSelect?.value);
-  const section = document.querySelector<HTMLElement>(".git-isolation");
-  const isoSelect = document.querySelector<HTMLSelectElement>("#ws-isolation");
-  if (!section || !isoSelect) return;
-  const isGit = project?.project_type === "git";
-  section.style.display = isGit ? "" : "none";
-  if (!isGit) {
-    isoSelect.value = "inplace";
-    const worktreeDir = document.querySelector<HTMLInputElement>("#ws-worktree-dir");
-    if (worktreeDir) worktreeDir.value = "";
-    return;
-  }
-  const root = String((document.querySelector("#ws-root-path") as HTMLInputElement)?.value || "");
-  const worktreeDir = document.querySelector<HTMLInputElement>("#ws-worktree-dir");
-  if (worktreeDir && !worktreeDir.value && root) {
-    const parent = root.replace(/[\\/]+$/, "").replace(/[\\/][^\\/]*$/, "");
-    worktreeDir.value = parent + "/.aha2-worktrees";
-  }
-}
-
 function populateWSLDistros(): void {
   const select = document.querySelector<HTMLSelectElement>("#ws-distro");
   if (!select) return;
@@ -241,12 +219,6 @@ function openWorkspaceDialog(ws: Workspace | null): void {
   if (sshUser) sshUser.value = ws?.ssh_user || "";
   if (sshPort) sshPort.value = String(ws?.ssh_port || 22);
   syncWorkspaceFields();
-  const isoSelect = dialog.querySelector<HTMLSelectElement>("#ws-isolation");
-  const worktreeDir = dialog.querySelector<HTMLInputElement>("#ws-worktree-dir");
-  const project = state.projects.find(item => item.id === (projectSelect?.value || ""));
-  if (isoSelect) isoSelect.value = ws?.isolation || (project?.project_type === "git" ? "worktree" : "inplace");
-  if (worktreeDir) worktreeDir.value = ws?.worktree_dir || "";
-  syncWorkspaceGitIsolation();
   const title = dialog.querySelector(".dialog-head h2");
   if (title) title.textContent = ws ? "编辑 Workspace" : "添加 Workspace";
   dialog.showModal();
@@ -326,7 +298,7 @@ function syncTaskBackend(): void {
   else backendSelect.value = "";
   refreshTaskModels();
   syncTaskEffort();
-  syncTaskBranches();
+  syncTaskGitIsolation();
 }
 
 function syncTaskEffort(): void {
@@ -342,12 +314,34 @@ function syncTaskEffort(): void {
   effortSelect.value = levels.includes(desired) ? desired : (levels.includes(previous) ? previous : "medium");
 }
 
-function syncTaskBranches(): void {
+function defaultTaskWorktreeDir(workspace: Workspace | undefined): string {
+  const root = String(workspace?.root_path || "").replace(/[\\/]+$/, "");
+  if (!root) return "";
+  const separator = root.includes("\\") && !root.includes("/") ? "\\" : "/";
+  const lastSeparator = Math.max(root.lastIndexOf("/"), root.lastIndexOf("\\"));
+  const parent = lastSeparator >= 0 ? root.slice(0, lastSeparator) : root;
+  return `${parent}${separator}.aha2-worktrees`;
+}
+
+function syncTaskGitIsolation(): void {
   const projectID = String((document.querySelector("#task-project") as HTMLSelectElement)?.value || "");
   const project = state.projects.find(item => item.id === projectID);
+  const workspaceID = String((document.querySelector("#task-workspace") as HTMLSelectElement)?.value || "");
+  const workspace = state.workspaces.find(item => item.id === workspaceID);
+  const section = document.querySelector<HTMLElement>("#task-git-isolation");
+  const isolation = document.querySelector<HTMLSelectElement>("#task-isolation");
+  const worktreeSettings = document.querySelector<HTMLElement>("#task-worktree-settings");
+  const worktreeDir = document.querySelector<HTMLInputElement>("#task-worktree-dir");
   const branches = document.querySelector<HTMLElement>("#task-branches");
-  if (!branches) return;
-  branches.style.display = project?.project_type === "git" ? "" : "none";
+  if (!section || !isolation || !worktreeSettings || !worktreeDir || !branches) return;
+  const isGit = project?.project_type === "git";
+  section.style.display = isGit ? "" : "none";
+  if (!isGit) isolation.value = "inplace";
+  const useWorktree = isGit && isolation.value === "worktree";
+  worktreeSettings.style.display = useWorktree ? "" : "none";
+  branches.style.display = useWorktree ? "" : "none";
+  if (useWorktree && !worktreeDir.value) worktreeDir.value = defaultTaskWorktreeDir(workspace);
+  if (!useWorktree) worktreeDir.value = "";
 }
 
 function syncTaskWorkspaces(): void {
@@ -362,6 +356,11 @@ function syncTaskWorkspaces(): void {
   if (items.some(item => item.id === current)) wsSelect.value = current;
   else if (items.length) wsSelect.value = items[0].id;
   else wsSelect.value = "";
+  const project = state.projects.find(item => item.id === projectID);
+  const isolation = document.querySelector<HTMLSelectElement>("#task-isolation");
+  if (isolation) isolation.value = project?.project_type === "git" ? "worktree" : "inplace";
+  const worktreeDir = document.querySelector<HTMLInputElement>("#task-worktree-dir");
+  if (worktreeDir) worktreeDir.value = "";
   syncTaskBackend();
 }
 
@@ -800,7 +799,7 @@ function projectDetailView(project: Project): string {
   const tasks = state.tasks.filter(item => item.project_id === project.id);
   const rows = workspaces.map(item => `<article class="list-row ws-row">
     <div class="item-title">${item.locality === "remote" ? icon("server") : icon("monitor")}<div><strong>${escapeHTML(item.name)}</strong><small>${escapeHTML(item.root_path)}</small></div></div>
-    <div class="ws-meta"><small title="${item.worktree_dir ? escapeHTML(item.worktree_dir) : ""}">${escapeHTML(item.transport)}${item.distro ? ` · ${escapeHTML(item.distro)}` : ""}${item.isolation === "inplace" ? " · 原地执行" : item.isolation === "worktree" ? ` · Worktree隔离${item.worktree_dir ? " @ " + escapeHTML(item.worktree_dir) : ""}` : ""}</small><strong>${escapeHTML(item.platform || "-")}</strong></div>
+    <div class="ws-meta"><small>${escapeHTML(item.transport)}${item.distro ? ` · ${escapeHTML(item.distro)}` : ""}</small><strong>${escapeHTML(item.platform || "-")}</strong></div>
     ${workspaceBackendInfo(item)}
     <button data-detect="${item.id}">${icon("refresh")}检测</button>
     <span class="row-actions"><button type="button" data-edit-workspace="${item.id}" class="icon-button" title="编辑 Workspace">${icon("edit")}</button><button type="button" data-delete-workspace="${item.id}" class="icon-button" title="删除 Workspace">${icon("close")}</button></span>
@@ -818,7 +817,7 @@ function projectDialog(): string {
 }
 
 function workspaceDialog(): string {
-  return `<dialog id="workspace-dialog"><form id="workspace-form" method="dialog"><div class="dialog-head"><h2>添加 Workspace</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div><input type="hidden" id="ws-edit-id" name="ws_edit_id" value=""><label>项目<select name="project_id" id="ws-project">${state.projects.map(item => `<option value="${item.id}" ${item.id === state.dialogProjectID ? "selected" : ""}>${escapeHTML(item.name)}</option>`).join("")}</select></label><label>名称<input name="name" id="ws-name" value="本地开发" required></label><div class="two"><label>位置<select name="locality" id="ws-locality"><option value="local">本地</option><option value="remote">远程</option></select></label><label>Transport<select name="transport" id="ws-transport"></select></label></div><label>Root Path<input name="root_path" id="ws-root-path" placeholder="E:\project 或 /home/user/project" required></label><div class="wsl-fields" style="display:none"><label>WSL Distro<select name="distro" id="ws-distro"></select></label><div class="field-help">Root Path 填 WSL 内的路径，如 /home/user/project</div></div><div class="ssh-fields" style="display:none"><div class="two"><label>SSH Host<input name="ssh_host" placeholder="192.168.1.10"></label><label>SSH User<input name="ssh_user" placeholder="root"></label></div><label>SSH Port<input name="ssh_port" type="number" value="22"></label></div><div class="git-isolation" style="display:none"><div class="two"><label>任务隔离<select name="isolation" id="ws-isolation"><option value="worktree">独立 Worktree（推荐）</option><option value="inplace">原地执行</option></select></label><label>Worktree 目录<input name="worktree_dir" id="ws-worktree-dir" placeholder="默认：仓库上一级/.aha2-worktrees"></label></div><div class="field-help">任务将在此目录建独立 worktree+分支（task-001），主工作区不动。</div></div><div class="dialog-actions"><button type="button" data-close>取消</button><button class="primary" value="default">添加 Workspace</button></div></form></dialog>`;
+  return `<dialog id="workspace-dialog"><form id="workspace-form" method="dialog"><div class="dialog-head"><h2>添加 Workspace</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div><input type="hidden" id="ws-edit-id" name="ws_edit_id" value=""><label>项目<select name="project_id" id="ws-project">${state.projects.map(item => `<option value="${item.id}" ${item.id === state.dialogProjectID ? "selected" : ""}>${escapeHTML(item.name)}</option>`).join("")}</select></label><label>名称<input name="name" id="ws-name" value="本地开发" required></label><div class="two"><label>位置<select name="locality" id="ws-locality"><option value="local">本地</option><option value="remote">远程</option></select></label><label>Transport<select name="transport" id="ws-transport"></select></label></div><label>Root Path<input name="root_path" id="ws-root-path" placeholder="E:\project 或 /home/user/project" required></label><div class="wsl-fields" style="display:none"><label>WSL Distro<select name="distro" id="ws-distro"></select></label><div class="field-help">Root Path 填 WSL 内的路径，如 /home/user/project</div></div><div class="ssh-fields" style="display:none"><div class="two"><label>SSH Host<input name="ssh_host" placeholder="192.168.1.10"></label><label>SSH User<input name="ssh_user" placeholder="root"></label></div><label>SSH Port<input name="ssh_port" type="number" value="22"></label></div><div class="dialog-actions"><button type="button" data-close>取消</button><button class="primary" value="default">添加 Workspace</button></div></form></dialog>`;
 }
 
 function modelsView(): string {
@@ -900,7 +899,7 @@ function tasksView(): string {
 }
 
 function taskDialog(): string {
-  return `<dialog id="task-dialog" class="wide"><form id="task-form" method="dialog"><div class="dialog-head"><h2>创建任务</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div><label>标题<input name="title" required></label><label>需求<textarea name="request" required></textarea></label><div class="two"><label>项目<select name="project_id" id="task-project">${state.projects.map(item => `<option value="${item.id}">${escapeHTML(item.name)}</option>`).join("")}</select></label><label>Workspace<select name="workspace_id" id="task-workspace"></select></label></div><div class="two"><label>Backend<select id="task-backend"></select></label><label>模型<select name="model_id" id="task-model"></select></label></div><div class="two"><label>推理强度<select name="reasoning_effort" id="task-effort"></select></label><label>沙箱（文件访问）<select name="filesystem"><option value="workspace-write">工作区可写</option><option value="read-only">只读</option><option value="danger-full-access">完全访问</option></select></label></div><div class="two"><label>协作模式<select name="collaboration_mode"><option value="auto">Auto</option><option value="single">Single</option></select></label><label>最大 Agent 数<input name="max_agents" type="number" min="1" value="3"></label></div><label>审批<select name="approval"><option value="never">无需确认</option><option value="auto">自动批准（跳过权限检查）</option></select></label><div class="two" id="task-branches"><label>目标分支<input name="target_branch" placeholder="默认当前分支"></label><label>任务分支<input name="task_branch" placeholder="aha/task-name"></label></div><div class="dialog-actions"><button type="button" data-close>取消</button><button class="primary" value="default">创建任务</button></div></form></dialog>`;
+  return `<dialog id="task-dialog" class="wide"><form id="task-form" method="dialog"><div class="dialog-head"><h2>创建任务</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div><label>标题<input name="title" required></label><label>需求<textarea name="request" required></textarea></label><div class="two"><label>项目<select name="project_id" id="task-project">${state.projects.map(item => `<option value="${item.id}">${escapeHTML(item.name)}</option>`).join("")}</select></label><label>Workspace<select name="workspace_id" id="task-workspace"></select></label></div><div class="two"><label>Backend<select id="task-backend"></select></label><label>模型<select name="model_id" id="task-model"></select></label></div><div class="two"><label>推理强度<select name="reasoning_effort" id="task-effort"></select></label><label>沙箱（文件访问）<select name="filesystem"><option value="workspace-write">工作区可写</option><option value="read-only">只读</option><option value="danger-full-access">完全访问</option></select></label></div><div class="two"><label>协作模式<select name="collaboration_mode"><option value="auto">Auto</option><option value="single">Single</option></select></label><label>最大 Agent 数<input name="max_agents" type="number" min="1" value="3"></label></div><label>审批<select name="approval"><option value="never">无需确认</option><option value="auto">自动批准（跳过权限检查）</option></select></label><div id="task-git-isolation"><label>任务隔离<select name="isolation" id="task-isolation"><option value="worktree">独立 Worktree（推荐）</option><option value="inplace">原地执行</option></select></label><div id="task-worktree-settings"><label>Worktree 根目录<input name="worktree_dir" id="task-worktree-dir" placeholder="默认：仓库上一级/.aha2-worktrees"></label><div class="field-help">系统会在根目录下追加 Task ID；切换为原地执行后不使用此配置。</div></div><div class="two" id="task-branches"><label>目标分支<input name="target_branch" placeholder="默认当前分支"></label><label>任务分支<input name="task_branch" placeholder="aha/task-name"></label></div></div><div class="dialog-actions"><button type="button" data-close>取消</button><button class="primary" value="default">创建任务</button></div></form></dialog>`;
 }
 
 let slashCommandSelection = 0;
@@ -1265,7 +1264,6 @@ function bindCommon(): void {
   document.querySelector<HTMLSelectElement>("#project-type")?.addEventListener("change", syncProjectTypeFields);
   document.querySelector<HTMLSelectElement>("#ws-locality")?.addEventListener("change", syncWorkspaceFields);
   document.querySelector<HTMLSelectElement>("#ws-transport")?.addEventListener("change", syncWorkspaceFields);
-  document.querySelector<HTMLSelectElement>("#ws-project")?.addEventListener("change", syncWorkspaceGitIsolation);
   document.querySelector("#provider-preset")?.addEventListener("change", applyProviderPreset);
   document.querySelectorAll<HTMLElement>("[data-close]").forEach(button => button.addEventListener("click", () => {
     button.closest("dialog")?.close();
@@ -1545,7 +1543,12 @@ function bindCommon(): void {
     });
   });
   document.querySelector("#task-project")?.addEventListener("change", syncTaskWorkspaces);
-  document.querySelector("#task-workspace")?.addEventListener("change", syncTaskBackend);
+  document.querySelector("#task-workspace")?.addEventListener("change", () => {
+    const worktreeDir = document.querySelector<HTMLInputElement>("#task-worktree-dir");
+    if (worktreeDir) worktreeDir.value = "";
+    syncTaskBackend();
+  });
+  document.querySelector("#task-isolation")?.addEventListener("change", syncTaskGitIsolation);
   document.querySelector("#task-backend")?.addEventListener("change", () => {
     refreshTaskModels();
     syncTaskEffort();

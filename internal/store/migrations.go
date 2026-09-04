@@ -510,6 +510,27 @@ const schemaV14 = `
 ALTER TABLE hardware_groups ADD COLUMN ssh_auth TEXT NOT NULL DEFAULT 'auto';
 `
 
+const schemaV15 = `
+ALTER TABLE tasks ADD COLUMN isolation TEXT NOT NULL DEFAULT '';
+ALTER TABLE tasks ADD COLUMN worktree_dir TEXT NOT NULL DEFAULT '';
+
+UPDATE tasks
+SET isolation = CASE
+        WHEN (SELECT isolation FROM workspaces WHERE workspaces.id=tasks.workspace_id) IN ('worktree','inplace')
+            THEN (SELECT isolation FROM workspaces WHERE workspaces.id=tasks.workspace_id)
+        WHEN (SELECT project_type FROM projects WHERE projects.id=tasks.project_id)='git' THEN 'worktree'
+        ELSE 'inplace'
+    END,
+    worktree_dir = CASE
+        WHEN (SELECT isolation FROM workspaces WHERE workspaces.id=tasks.workspace_id)='worktree'
+            THEN COALESCE((SELECT worktree_dir FROM workspaces WHERE workspaces.id=tasks.workspace_id),'')
+        ELSE ''
+    END
+WHERE isolation='';
+
+UPDATE workspaces SET isolation='', worktree_dir='';
+`
+
 func (s *Store) migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, schemaV1); err != nil {
 		return fmt.Errorf("apply schema v1: %w", err)
@@ -687,6 +708,19 @@ func (s *Store) migrate(ctx context.Context) error {
 		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(14, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
 	); err != nil {
 		return fmt.Errorf("record schema v14: %w", err)
+	}
+	var hasV15 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=15)`).Scan(&hasV15)
+	if !hasV15 {
+		if _, err := s.db.ExecContext(ctx, schemaV15); err != nil {
+			return fmt.Errorf("apply schema v15: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(
+		ctx,
+		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(15, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
+	); err != nil {
+		return fmt.Errorf("record schema v15: %w", err)
 	}
 	return nil
 }

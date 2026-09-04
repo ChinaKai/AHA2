@@ -623,6 +623,8 @@ Primary Workspace
 - 不同写 Task 不共享同一个 worktree。
 - 同一 Task 的所有 Turn 使用同一个 Task Workspace。
 - 分析型只读 Task 可以不创建分支。
+- Workspace 只描述运行位置与连接方式；隔离策略和 Worktree 根目录由 New Task 选择并固化到 Task。
+- 选择原地执行时不使用 Worktree 根目录、目标分支或任务分支配置。
 - Task 完成不等于分支自动合并。
 - 合并、推送、强制更新和删除必须显式执行。
 

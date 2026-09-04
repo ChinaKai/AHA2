@@ -133,6 +133,10 @@ test("built web contains responsive application", async () => {
   assert.match(script, /\/complete/);
   assert.match(script, /\/reopen/);
   assert.match(script, /taskFailureBannerHtml/);
+  assert.match(script, /id="task-isolation"/);
+  assert.match(script, /id="task-worktree-settings"/);
+  assert.match(script, /syncTaskGitIsolation/);
+  assert.doesNotMatch(script, /id="ws-isolation"|id="ws-worktree-dir"/);
   assert.match(conversation, /agent-update-message/);
   assert.match(conversation, /agent-tool-message/);
   assert.match(conversation, /agent-routed-message/);
