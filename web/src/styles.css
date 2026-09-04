@@ -580,8 +580,8 @@ dialog form, .dialog-body { padding: 18px; }
 .skill-instructions { display: -webkit-box; overflow: hidden; min-height: 48px; color: var(--muted); font: 9px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; -webkit-box-orient: vertical; -webkit-line-clamp: 3; white-space: pre-wrap; }
 .skill-package-files { display: grid; gap: 6px; padding: 10px; border: 1px solid var(--line); border-radius: 7px; background: #f8fafc; }
 .skill-package-files > strong { font-size: 10px; }
-.skill-package-files > span { display: flex; flex-wrap: wrap; gap: 5px; }
-.skill-package-files code { padding: 2px 5px; border-radius: 4px; background: #e2e8f0; color: #475569; font-size: 9px; }
+.skill-package-files > span { display: grid; gap: 5px; min-width: 0; }
+.skill-package-files code { display: block; max-width: 100%; padding: 2px 5px; overflow-wrap: anywhere; border-radius: 4px; background: #e2e8f0; color: #475569; font-size: 9px; white-space: normal; }
 .skill-card footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 12px; padding-top: 10px; border-top: 1px solid #eef0f2; }
 .skill-card footer > span { overflow: hidden; color: var(--muted); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
 .skill-card footer > div { display: flex; gap: 5px; }
@@ -634,7 +634,8 @@ dialog form, .dialog-body { padding: 18px; }
   .knowledge-section-rail nav button { flex: 0 0 auto; width: auto; min-height: 32px; padding: 0 10px; }
   .knowledge-hero, .knowledge-section-head, .knowledge-setting-card { align-items: stretch; flex-direction: column; }
   .knowledge-policy { width: 100%; }
-  .knowledge-metrics, .knowledge-binding-grid, .skill-grid { grid-template-columns: 1fr 1fr; }
+  .knowledge-metrics, .knowledge-binding-grid { grid-template-columns: 1fr 1fr; }
+  .skill-grid { grid-template-columns: 1fr; }
   .knowledge-entry-card > footer { align-items: flex-start; flex-direction: column; }
   .knowledge-entry-actions { width: 100%; }
   .task-skill-picker > div { grid-template-columns: 1fr; }

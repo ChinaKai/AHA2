@@ -47,6 +47,9 @@ test("built web contains responsive application", async () => {
   assert.match(knowledgeWorkspace, /Product Lines/);
   assert.match(knowledgeWorkspace, /SKILL\.md/);
   assert.match(knowledgeWorkspace, /skill-package-files/);
+  assert.match(css, /\.skill-package-files > span \{ display: grid;/);
+  assert.match(css, /\.skill-package-files code \{[^}]*overflow-wrap: anywhere;/);
+  assert.match(css, /@media \(max-width: 760px\)[\s\S]*?\.skill-grid \{ grid-template-columns: 1fr; \}/);
   assert.doesNotMatch(knowledgeWorkspace, /Source Path/);
   assert.doesNotMatch(knowledgeWorkspace, /knowledge graph/i);
   assert.match(script, /"prompts",\s*"bot"/);
