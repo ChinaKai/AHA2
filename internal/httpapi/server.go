@@ -142,7 +142,17 @@ func (s *Server) Handler() http.Handler {
 
 	mux.Handle("GET /api/v1/knowledge", s.withAuth(http.HandlerFunc(s.listKnowledge)))
 	mux.Handle("POST /api/v1/knowledge", s.withAuth(http.HandlerFunc(s.createKnowledge)))
+	mux.Handle("PUT /api/v1/knowledge/{id}", s.withAuth(http.HandlerFunc(s.updateKnowledge)))
+	mux.Handle("DELETE /api/v1/knowledge/{id}", s.withAuth(http.HandlerFunc(s.deleteKnowledge)))
 	mux.Handle("POST /api/v1/knowledge/{id}/verify", s.withAuth(http.HandlerFunc(s.verifyKnowledge)))
+	mux.Handle("POST /api/v1/knowledge/{id}/feedback", s.withAuth(http.HandlerFunc(s.feedbackKnowledge)))
+	mux.Handle("GET /api/v1/projects/{id}/product-lines", s.withAuth(http.HandlerFunc(s.listProductLines)))
+	mux.Handle("POST /api/v1/projects/{id}/product-lines", s.withAuth(http.HandlerFunc(s.createProductLine)))
+	mux.Handle("DELETE /api/v1/projects/{id}/product-lines/{line}", s.withAuth(http.HandlerFunc(s.deleteProductLine)))
+	mux.Handle("GET /api/v1/skills", s.withAuth(http.HandlerFunc(s.listSkills)))
+	mux.Handle("POST /api/v1/skills", s.withAuth(http.HandlerFunc(s.createSkill)))
+	mux.Handle("PUT /api/v1/skills/{id}", s.withAuth(http.HandlerFunc(s.updateSkill)))
+	mux.Handle("DELETE /api/v1/skills/{id}", s.withAuth(http.HandlerFunc(s.deleteSkill)))
 
 	mux.HandleFunc("/", s.serveWeb)
 	return s.securityHeaders(s.requestLog(mux))

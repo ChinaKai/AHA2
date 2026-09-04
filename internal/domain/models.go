@@ -35,8 +35,20 @@ type Project struct {
 	RepositoryIdentity string    `json:"repository_identity,omitempty"`
 	DefaultWorkspaceID string    `json:"default_workspace_id,omitempty"`
 	DefaultBranch      string    `json:"default_branch,omitempty"`
+	KnowledgePolicy    string    `json:"knowledge_policy"`
+	KnowledgeRevision  int       `json:"knowledge_revision"`
 	CreatedAt          time.Time `json:"created_at"`
 	UpdatedAt          time.Time `json:"updated_at"`
+}
+
+type ProductLine struct {
+	ID            string    `json:"id"`
+	ProjectID     string    `json:"project_id"`
+	Name          string    `json:"name"`
+	BranchPattern string    `json:"branch_pattern"`
+	Default       bool      `json:"default"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
 type Workspace struct {
@@ -208,6 +220,8 @@ type Task struct {
 	RuntimeConfigSnapshotID string     `json:"runtime_config_snapshot_id"`
 	CollaborationMode       string     `json:"collaboration_mode"`
 	MaxAgents               int        `json:"max_agents"`
+	KnowledgePolicy         string     `json:"knowledge_policy"`
+	SkillIDs                []string   `json:"skill_ids"`
 	TotalTokens             int64      `json:"total_tokens"`
 	CreatedAt               time.Time  `json:"created_at"`
 	UpdatedAt               time.Time  `json:"updated_at"`
@@ -301,13 +315,43 @@ type KnowledgeEntry struct {
 	Body           string          `json:"body"`
 	Status         KnowledgeStatus `json:"status"`
 	BranchScope    string          `json:"branch_scope,omitempty"`
+	ProductLineID  string          `json:"product_line_id,omitempty"`
 	EvidenceJSON   string          `json:"-"`
 	Confidence     float64         `json:"confidence"`
+	Revision       int             `json:"revision"`
+	ContentHash    string          `json:"content_hash"`
+	VerifiedCommit string          `json:"verified_commit,omitempty"`
+	HelpedCount    int             `json:"helped_count"`
+	StaleCount     int             `json:"stale_count"`
+	FeedbackState  string          `json:"feedback_state,omitempty"`
 	SourceTaskID   string          `json:"source_task_id,omitempty"`
 	SourceTurnID   string          `json:"source_turn_id,omitempty"`
 	CreatedAt      time.Time       `json:"created_at"`
 	UpdatedAt      time.Time       `json:"updated_at"`
 	LastVerifiedAt time.Time       `json:"last_verified_at,omitempty"`
+}
+
+type Skill struct {
+	ID           string      `json:"id"`
+	PackageSlug  string      `json:"package_slug"`
+	Scope        string      `json:"scope"`
+	ProjectID    string      `json:"project_id,omitempty"`
+	Name         string      `json:"name"`
+	Description  string      `json:"description"`
+	Instructions string      `json:"instructions"`
+	Version      int         `json:"version"`
+	Status       string      `json:"status"`
+	Enabled      bool        `json:"enabled"`
+	SourcePath   string      `json:"source_path,omitempty"`
+	Files        []string    `json:"files,omitempty"`
+	PackageFiles []SkillFile `json:"-"`
+	CreatedAt    time.Time   `json:"created_at"`
+	UpdatedAt    time.Time   `json:"updated_at"`
+}
+
+type SkillFile struct {
+	Path    string
+	Content string
 }
 
 type Event struct {

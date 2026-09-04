@@ -2,10 +2,12 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path"
 	"strings"
 	"sync"
 	"time"
@@ -49,11 +51,18 @@ type MemoryPatch struct {
 }
 
 type KnowledgeCandidate struct {
-	Scope      string
-	Type       string
-	Title      string
-	Body       string
-	Confidence float64
+	EntryID       string
+	Scope         string
+	Type          string
+	Title         string
+	Body          string
+	Confidence    float64
+	ProductLineID string
+}
+
+type KnowledgeFeedback struct {
+	EntryID string
+	Kind    string
 }
 
 type AgentAction struct {
@@ -75,6 +84,7 @@ type ExecutionResult struct {
 	MainFollowup        string
 	MemoryPatch         MemoryPatch
 	KnowledgeCandidates []KnowledgeCandidate
+	KnowledgeFeedback   []KnowledgeFeedback
 	AgentActions        []AgentAction
 }
 
@@ -144,6 +154,8 @@ type CreateTaskInput struct {
 	ProxyEnabled      bool
 	CollaborationMode string
 	MaxAgents         int
+	KnowledgePolicy   string
+	SkillIDs          []string
 }
 
 func NewService(database *store.Store, secretStore *secrets.FileStore, executor Executor) *Service {
@@ -228,6 +240,10 @@ func (s *Service) CreateTask(ctx context.Context, input CreateTaskInput) (domain
 	if err != nil {
 		return domain.Task{}, err
 	}
+	skillIDs, err := s.validateTaskSkillIDs(ctx, project.ID, input.SkillIDs)
+	if err != nil {
+		return domain.Task{}, err
+	}
 	task := domain.Task{
 		ID:                      domain.NewID("task"),
 		ProjectID:               project.ID,
@@ -244,6 +260,8 @@ func (s *Service) CreateTask(ctx context.Context, input CreateTaskInput) (domain
 		RuntimeConfigSnapshotID: snapshot.ID,
 		CollaborationMode:       collaborationMode,
 		MaxAgents:               input.MaxAgents,
+		KnowledgePolicy:         normalizeKnowledgePolicy(input.KnowledgePolicy),
+		SkillIDs:                skillIDs,
 		CreatedAt:               now,
 		UpdatedAt:               now,
 	}
@@ -276,6 +294,86 @@ func (s *Service) CreateTask(ctx context.Context, input CreateTaskInput) (domain
 	task.Status = domain.TaskActive
 	s.emit(ctx, task.ID, "task", task.ID, "task_created", map[string]any{"title": task.Title, "workspace_id": task.WorkspaceID})
 	return task, nil
+}
+
+func normalizeKnowledgePolicy(value string) string {
+	switch strings.TrimSpace(value) {
+	case "enabled":
+		return "enabled"
+	case "disabled":
+		return "disabled"
+	default:
+		return "inherit"
+	}
+}
+
+func knowledgeEnabled(project domain.Project, task domain.Task) bool {
+	if task.KnowledgePolicy == "enabled" {
+		return true
+	}
+	if task.KnowledgePolicy == "disabled" {
+		return false
+	}
+	return project.KnowledgePolicy != "disabled"
+}
+
+func (s *Service) validateTaskSkillIDs(ctx context.Context, projectID string, ids []string) ([]string, error) {
+	result := make([]string, 0, len(ids))
+	seen := map[string]bool{}
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" || seen[id] {
+			continue
+		}
+		item, err := s.store.Skill(ctx, id)
+		if err != nil {
+			return nil, fmt.Errorf("skill %s is unavailable", id)
+		}
+		if !item.Enabled || item.Status != "active" || (item.Scope != "global" && (item.Scope != "project" || item.ProjectID != projectID)) {
+			return nil, fmt.Errorf("skill %s is not enabled for this project", id)
+		}
+		seen[id] = true
+		result = append(result, id)
+	}
+	return result, nil
+}
+
+func (s *Service) UpdateTaskSkills(ctx context.Context, taskID string, ids []string) (domain.Task, error) {
+	task, err := s.store.Task(ctx, taskID)
+	if err != nil {
+		return domain.Task{}, err
+	}
+	validated, err := s.validateTaskSkillIDs(ctx, task.ProjectID, ids)
+	if err != nil {
+		return domain.Task{}, err
+	}
+	if err := s.store.UpdateTaskSkills(ctx, taskID, validated, timeString(s.now().UTC())); err != nil {
+		return domain.Task{}, err
+	}
+	return s.store.Task(ctx, taskID)
+}
+
+func (s *Service) activeTaskSkills(ctx context.Context, task domain.Task) []domain.Skill {
+	items, err := s.store.SkillsByIDs(ctx, task.SkillIDs)
+	if err != nil {
+		items = nil
+		for _, id := range task.SkillIDs {
+			item, itemErr := s.store.Skill(ctx, id)
+			if itemErr == nil {
+				items = append(items, item)
+			}
+		}
+	}
+	result := make([]domain.Skill, 0, len(items))
+	for _, item := range items {
+		if !item.Enabled || item.Status != "active" {
+			continue
+		}
+		if item.Scope == "global" || (item.Scope == "project" && item.ProjectID == task.ProjectID) {
+			result = append(result, item)
+		}
+	}
+	return result
 }
 
 func (s *Service) SubmitMessage(ctx context.Context, taskID, content string) (domain.Turn, error) {
@@ -509,8 +607,17 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 		return
 	}
 	handoff, _ := s.store.PendingAgentSessionHandoff(ctx, task.ID, turn.AgentID)
-	globalKB, _ := s.store.ListKnowledge(ctx, "global", "", []domain.KnowledgeStatus{domain.KnowledgeVerified})
-	projectKB, _ := s.store.ListKnowledge(ctx, "project", project.ID, []domain.KnowledgeStatus{domain.KnowledgeVerified})
+	var globalKB, projectKB []domain.KnowledgeEntry
+	var skills []domain.Skill
+	var productLine domain.ProductLine
+	kbEnabled := knowledgeEnabled(project, task)
+	if kbEnabled {
+		lines, _ := s.store.ListProductLines(ctx, project.ID)
+		productLine = resolveProductLine(lines, task.TargetBranch, project.DefaultBranch)
+		globalKB, _ = s.store.ListKnowledge(ctx, "global", "", []domain.KnowledgeStatus{domain.KnowledgeVerified})
+		projectKB, _ = s.store.ListApplicableKnowledge(ctx, project.ID, productLine.ID, []domain.KnowledgeStatus{domain.KnowledgeVerified})
+	}
+	skills = s.activeTaskSkills(ctx, task)
 	agent, err := s.store.TaskAgent(ctx, task.ID, turn.AgentID)
 	if err != nil {
 		s.failTurn(ctx, &turn, task, err)
@@ -521,7 +628,8 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 	hardwareGroups, _ := s.store.HardwareGroups(ctx, task.ID)
 	preview, err := s.prompts.Build(ctx, prompt.BuildInput{
 		Project: project, Workspace: workspace, Task: task, Agent: agent, Snapshot: snapshot,
-		Memory: memory, GlobalKnowledge: globalKB, ProjectKnowledge: projectKB,
+		Memory: memory, GlobalKnowledge: globalKB, ProjectKnowledge: projectKB, Skills: skills,
+		ProductLine: productLine, KnowledgeEnabled: kbEnabled,
 		Conversation: conversation.Items, Turns: allTurns, Hardware: hardwareGroups, UserMessage: userMessage,
 		Handoff: handoff.Summary,
 	})
@@ -687,7 +795,12 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 	}
 	if turn.Status == domain.TurnSucceeded && turn.AgentID == "main" {
 		s.applyMemoryPatch(context.Background(), task, memory, result.MemoryPatch)
-		s.createKnowledgeCandidates(context.Background(), project.ID, task.ID, turn.ID, task.TaskBranch, result.KnowledgeCandidates)
+		if knowledgeEnabled(project, task) {
+			lines, _ := s.store.ListProductLines(context.Background(), project.ID)
+			line := resolveProductLine(lines, task.TargetBranch, project.DefaultBranch)
+			s.createKnowledgeCandidates(context.Background(), project.ID, task.ID, turn.ID, task.TaskBranch, line.ID, result.KnowledgeCandidates)
+			s.applyKnowledgeFeedback(context.Background(), task.ID, result.KnowledgeFeedback)
+		}
 	}
 	if turn.Status == domain.TurnSucceeded && handoff.ID != "" {
 		_ = s.store.ConsumeAgentSessionHandoff(context.Background(), handoff.ID, now)
@@ -835,7 +948,7 @@ func (s *Service) applyMemoryPatch(ctx context.Context, task domain.Task, memory
 	_ = s.store.UpsertTaskMemory(ctx, memory)
 }
 
-func (s *Service) createKnowledgeCandidates(ctx context.Context, projectID, taskID, turnID, branch string, candidates []KnowledgeCandidate) {
+func (s *Service) createKnowledgeCandidates(ctx context.Context, projectID, taskID, turnID, branch, productLineID string, candidates []KnowledgeCandidate) {
 	now := s.now().UTC()
 	for _, candidate := range candidates {
 		if strings.TrimSpace(candidate.Title) == "" || strings.TrimSpace(candidate.Body) == "" {
@@ -845,17 +958,116 @@ func (s *Service) createKnowledgeCandidates(ctx context.Context, projectID, task
 		if scope != "global" {
 			scope = "project"
 		}
+		lineID := strings.TrimSpace(candidate.ProductLineID)
+		if lineID == "" && scope == "project" {
+			lineID = productLineID
+		}
+		status := domain.KnowledgeCandidate
+		if scope == "project" && candidate.Confidence >= 0.8 {
+			status = domain.KnowledgeVerified
+		}
 		entry := domain.KnowledgeEntry{
 			ID: domain.NewID("knowledge"), Scope: scope, Type: candidate.Type, Title: candidate.Title,
-			Body: candidate.Body, Status: domain.KnowledgeCandidate, Confidence: candidate.Confidence,
-			SourceTaskID: taskID, SourceTurnID: turnID, BranchScope: branch, CreatedAt: now, UpdatedAt: now,
+			Body: candidate.Body, Status: status, Confidence: candidate.Confidence, Revision: 1,
+			ContentHash:  fmt.Sprintf("%x", sha256.Sum256([]byte(strings.TrimSpace(candidate.Title)+"\n"+strings.TrimSpace(candidate.Body)))),
+			SourceTaskID: taskID, SourceTurnID: turnID, BranchScope: branch, ProductLineID: lineID, CreatedAt: now, UpdatedAt: now,
 		}
 		if scope == "project" {
 			entry.ProjectID = projectID
 		}
+		if status == domain.KnowledgeVerified {
+			entry.LastVerifiedAt = now
+		}
+		if strings.TrimSpace(candidate.EntryID) != "" {
+			if existing, err := s.store.Knowledge(ctx, candidate.EntryID); err == nil {
+				entry.ID, entry.CreatedAt = existing.ID, existing.CreatedAt
+				entry.HelpedCount, entry.StaleCount = existing.HelpedCount, existing.StaleCount
+				entry.Revision = existing.Revision + 1
+				_ = s.store.UpdateKnowledge(ctx, entry)
+				s.linkTaskMemoryKnowledge(ctx, taskID, entry)
+				s.emit(ctx, taskID, "knowledge", entry.ID, "knowledge_updated", map[string]any{"title": entry.Title, "revision": entry.Revision})
+				continue
+			}
+		}
+		if existing, err := s.store.MatchingKnowledge(ctx, scope, entry.ProjectID, entry.ProductLineID, entry.Type, entry.Title); err == nil {
+			entry.ID, entry.CreatedAt = existing.ID, existing.CreatedAt
+			entry.HelpedCount, entry.StaleCount = existing.HelpedCount, existing.StaleCount
+			entry.Revision = existing.Revision + 1
+			_ = s.store.UpdateKnowledge(ctx, entry)
+			s.linkTaskMemoryKnowledge(ctx, taskID, entry)
+			s.emit(ctx, taskID, "knowledge", entry.ID, "knowledge_updated", map[string]any{"title": entry.Title, "revision": entry.Revision})
+			continue
+		}
 		_ = s.store.CreateKnowledge(ctx, entry)
-		s.emit(ctx, taskID, "knowledge", entry.ID, "knowledge_candidate_created", map[string]any{"title": entry.Title, "scope": entry.Scope})
+		s.linkTaskMemoryKnowledge(ctx, taskID, entry)
+		s.emit(ctx, taskID, "knowledge", entry.ID, "knowledge_created", map[string]any{"title": entry.Title, "scope": entry.Scope, "status": entry.Status})
 	}
+}
+
+func (s *Service) linkTaskMemoryKnowledge(ctx context.Context, taskID string, entry domain.KnowledgeEntry) {
+	memory, err := s.store.TaskMemory(ctx, taskID)
+	if err != nil {
+		return
+	}
+	if memory.Extra == nil {
+		memory.Extra = map[string]any{}
+	}
+	refs := []map[string]any{}
+	if raw, ok := memory.Extra["knowledge_refs"]; ok {
+		encoded, _ := json.Marshal(raw)
+		_ = json.Unmarshal(encoded, &refs)
+	}
+	ref := map[string]any{
+		"id": entry.ID, "scope": entry.Scope, "title": entry.Title, "type": entry.Type,
+		"revision": entry.Revision, "status": entry.Status, "product_line_id": entry.ProductLineID,
+	}
+	found := false
+	for index := range refs {
+		if fmt.Sprint(refs[index]["id"]) == entry.ID {
+			refs[index] = ref
+			found = true
+			break
+		}
+	}
+	if !found {
+		refs = append(refs, ref)
+	}
+	memory.Extra["knowledge_refs"] = refs
+	memory.UpdatedAt = s.now().UTC()
+	_ = s.store.UpsertTaskMemory(ctx, memory)
+}
+
+func (s *Service) applyKnowledgeFeedback(ctx context.Context, taskID string, feedback []KnowledgeFeedback) {
+	for _, item := range feedback {
+		entryID, kind := strings.TrimSpace(item.EntryID), strings.TrimSpace(item.Kind)
+		if entryID == "" || (kind != "helped" && kind != "stale" && kind != "wrong") {
+			continue
+		}
+		entry, err := s.store.FeedbackKnowledge(ctx, entryID, kind, timeString(s.now().UTC()))
+		if err == nil {
+			s.linkTaskMemoryKnowledge(ctx, taskID, entry)
+			s.emit(ctx, taskID, "knowledge", entry.ID, "knowledge_feedback_recorded", map[string]any{"kind": kind, "title": entry.Title})
+		}
+	}
+}
+
+func resolveProductLine(lines []domain.ProductLine, branches ...string) domain.ProductLine {
+	var fallback domain.ProductLine
+	for _, line := range lines {
+		if line.Default {
+			fallback = line
+		}
+		for _, branch := range branches {
+			branch = strings.TrimSpace(branch)
+			if branch == "" || strings.TrimSpace(line.BranchPattern) == "" {
+				continue
+			}
+			if matched, _ := path.Match(line.BranchPattern, branch); matched || line.BranchPattern == branch {
+				return line
+			}
+		}
+	}
+	return fallback
 }
 
 func (s *Service) startTurn(turn domain.Turn) {

@@ -7,6 +7,7 @@ import type {
   Knowledge,
   Model,
   Project,
+  ProductLine,
   Provider,
   ProxySettings,
   PromptTemplate,
@@ -22,6 +23,7 @@ import type {
   HardwareTerminalStatus,
   SerialPort,
   Workspace,
+  Skill,
 } from "./types.js";
 
 class APIClient {
@@ -349,10 +351,11 @@ class APIClient {
     return this.request(`/api/v1/rounds/${id}/interrupt`, {method: "POST", body: "{}"});
   }
 
-  knowledge(scope = "", projectID = ""): Promise<{knowledge: Knowledge[]}> {
+  knowledge(scope = "", projectID = "", status = ""): Promise<{knowledge: Knowledge[]}> {
     const query = new URLSearchParams();
     if (scope) query.set("scope", scope);
     if (projectID) query.set("project_id", projectID);
+    if (status) query.set("status", status);
     return this.request(`/api/v1/knowledge?${query}`);
   }
 
@@ -360,8 +363,51 @@ class APIClient {
     return this.request("/api/v1/knowledge", {method: "POST", body: JSON.stringify(payload)});
   }
 
+  updateKnowledge(id: string, payload: Record<string, unknown>): Promise<{knowledge: Knowledge}> {
+    return this.request(`/api/v1/knowledge/${encodeURIComponent(id)}`, {method: "PUT", body: JSON.stringify(payload)});
+  }
+
+  deleteKnowledge(id: string): Promise<{ok: boolean}> {
+    return this.request(`/api/v1/knowledge/${encodeURIComponent(id)}`, {method: "DELETE"});
+  }
+
   verifyKnowledge(id: string): Promise<{ok: boolean}> {
     return this.request(`/api/v1/knowledge/${id}/verify`, {method: "POST", body: "{}"});
+  }
+
+  feedbackKnowledge(id: string, kind: "helped" | "stale" | "wrong"): Promise<{knowledge: Knowledge}> {
+    return this.request(`/api/v1/knowledge/${encodeURIComponent(id)}/feedback`, {method: "POST", body: JSON.stringify({kind})});
+  }
+
+  productLines(projectID: string): Promise<{product_lines: ProductLine[]}> {
+    return this.request(`/api/v1/projects/${encodeURIComponent(projectID)}/product-lines`);
+  }
+
+  createProductLine(projectID: string, payload: Record<string, unknown>): Promise<{product_line: ProductLine}> {
+    return this.request(`/api/v1/projects/${encodeURIComponent(projectID)}/product-lines`, {method: "POST", body: JSON.stringify(payload)});
+  }
+
+  deleteProductLine(projectID: string, id: string): Promise<{ok: boolean}> {
+    return this.request(`/api/v1/projects/${encodeURIComponent(projectID)}/product-lines/${encodeURIComponent(id)}`, {method: "DELETE"});
+  }
+
+  skills(scope = "", projectID = ""): Promise<{skills: Skill[]}> {
+    const query = new URLSearchParams();
+    if (scope) query.set("scope", scope);
+    if (projectID) query.set("project_id", projectID);
+    return this.request(`/api/v1/skills?${query}`);
+  }
+
+  createSkill(payload: Record<string, unknown>): Promise<{skill: Skill}> {
+    return this.request("/api/v1/skills", {method: "POST", body: JSON.stringify(payload)});
+  }
+
+  updateSkill(id: string, payload: Record<string, unknown>): Promise<{skill: Skill}> {
+    return this.request(`/api/v1/skills/${encodeURIComponent(id)}`, {method: "PUT", body: JSON.stringify(payload)});
+  }
+
+  deleteSkill(id: string): Promise<{ok: boolean}> {
+    return this.request(`/api/v1/skills/${encodeURIComponent(id)}`, {method: "DELETE"});
   }
 
   promptTemplates(): Promise<{templates: PromptTemplate[]}> {

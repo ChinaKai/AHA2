@@ -14,16 +14,16 @@ import (
 func (s *Store) CreateProject(ctx context.Context, project domain.Project) error {
 	_, err := s.db.ExecContext(
 		ctx,
-		`INSERT INTO projects(id,name,description,project_type,repository_identity,default_workspace_id,default_branch,created_at,updated_at)
-		 VALUES(?,?,?,?,?,?,?,?,?)`,
+		`INSERT INTO projects(id,name,description,project_type,repository_identity,default_workspace_id,default_branch,knowledge_policy,knowledge_revision,created_at,updated_at)
+		 VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
 		project.ID, project.Name, project.Description, project.ProjectType, project.RepositoryIdentity, project.DefaultWorkspaceID,
-		project.DefaultBranch, timeString(project.CreatedAt), timeString(project.UpdatedAt),
+		project.DefaultBranch, project.KnowledgePolicy, project.KnowledgeRevision, timeString(project.CreatedAt), timeString(project.UpdatedAt),
 	)
 	return err
 }
 
 func (s *Store) ListProjects(ctx context.Context) ([]domain.Project, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,name,description,project_type,repository_identity,default_workspace_id,default_branch,created_at,updated_at FROM projects ORDER BY updated_at DESC`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,name,description,project_type,repository_identity,default_workspace_id,default_branch,knowledge_policy,knowledge_revision,created_at,updated_at FROM projects ORDER BY updated_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -32,7 +32,7 @@ func (s *Store) ListProjects(ctx context.Context) ([]domain.Project, error) {
 	for rows.Next() {
 		var item domain.Project
 		var createdAt, updatedAt string
-		if err := rows.Scan(&item.ID, &item.Name, &item.Description, &item.ProjectType, &item.RepositoryIdentity, &item.DefaultWorkspaceID, &item.DefaultBranch, &createdAt, &updatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.Name, &item.Description, &item.ProjectType, &item.RepositoryIdentity, &item.DefaultWorkspaceID, &item.DefaultBranch, &item.KnowledgePolicy, &item.KnowledgeRevision, &createdAt, &updatedAt); err != nil {
 			return nil, err
 		}
 		item.CreatedAt, item.UpdatedAt = parseTime(createdAt), parseTime(updatedAt)
@@ -44,16 +44,16 @@ func (s *Store) ListProjects(ctx context.Context) ([]domain.Project, error) {
 func (s *Store) Project(ctx context.Context, id string) (domain.Project, error) {
 	var item domain.Project
 	var createdAt, updatedAt string
-	err := s.db.QueryRowContext(ctx, `SELECT id,name,description,project_type,repository_identity,default_workspace_id,default_branch,created_at,updated_at FROM projects WHERE id=?`, id).
-		Scan(&item.ID, &item.Name, &item.Description, &item.ProjectType, &item.RepositoryIdentity, &item.DefaultWorkspaceID, &item.DefaultBranch, &createdAt, &updatedAt)
+	err := s.db.QueryRowContext(ctx, `SELECT id,name,description,project_type,repository_identity,default_workspace_id,default_branch,knowledge_policy,knowledge_revision,created_at,updated_at FROM projects WHERE id=?`, id).
+		Scan(&item.ID, &item.Name, &item.Description, &item.ProjectType, &item.RepositoryIdentity, &item.DefaultWorkspaceID, &item.DefaultBranch, &item.KnowledgePolicy, &item.KnowledgeRevision, &createdAt, &updatedAt)
 	item.CreatedAt, item.UpdatedAt = parseTime(createdAt), parseTime(updatedAt)
 	return item, err
 }
 
 func (s *Store) UpdateProject(ctx context.Context, item domain.Project) error {
 	_, err := s.db.ExecContext(ctx, `
-		UPDATE projects SET name=?,description=?,project_type=?,repository_identity=?,default_branch=?,updated_at=? WHERE id=?`,
-		item.Name, item.Description, item.ProjectType, item.RepositoryIdentity, item.DefaultBranch,
+		UPDATE projects SET name=?,description=?,project_type=?,repository_identity=?,default_branch=?,knowledge_policy=?,updated_at=? WHERE id=?`,
+		item.Name, item.Description, item.ProjectType, item.RepositoryIdentity, item.DefaultBranch, item.KnowledgePolicy,
 		timeString(item.UpdatedAt), item.ID,
 	)
 	return err

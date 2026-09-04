@@ -27,6 +27,18 @@ export interface Project {
   project_type?: string;
   repository_identity?: string;
   default_branch?: string;
+  knowledge_policy: "enabled" | "disabled" | string;
+  knowledge_revision: number;
+  updated_at: string;
+}
+
+export interface ProductLine {
+  id: string;
+  project_id: string;
+  name: string;
+  branch_pattern: string;
+  default: boolean;
+  created_at: string;
   updated_at: string;
 }
 
@@ -172,6 +184,8 @@ export interface Task {
   task_workspace_path?: string;
   collaboration_mode: "single" | "auto";
   max_agents: number;
+  knowledge_policy: "inherit" | "enabled" | "disabled" | string;
+  skill_ids: string[];
   total_tokens: number;
   created_at: string;
   updated_at: string;
@@ -363,6 +377,35 @@ export interface Knowledge {
   status: string;
   confidence: number;
   branch_scope?: string;
+  product_line_id?: string;
+  revision: number;
+  content_hash?: string;
+  verified_commit?: string;
+  helped_count: number;
+  stale_count: number;
+  feedback_state?: string;
+  source_task_id?: string;
+  source_turn_id?: string;
+  created_at: string;
+  updated_at: string;
+  last_verified_at?: string;
+}
+
+export interface Skill {
+  id: string;
+  package_slug: string;
+  scope: "global" | "project";
+  project_id?: string;
+  name: string;
+  description: string;
+  instructions: string;
+  version: number;
+  status: string;
+  enabled: boolean;
+  source_path?: string;
+  files?: string[];
+  created_at: string;
+  updated_at: string;
 }
 
 export interface TaskDetail {

@@ -10,7 +10,7 @@ await rm(output, {recursive: true, force: true});
 await mkdir(output, {recursive: true});
 await mkdir(resolve(output, "vendor"), {recursive: true});
 
-for (const name of ["api", "icons", "types", "runtime_picker", "task_agents", "task_composer", "hardware_terminal", "hardware_panel", "task_tools", "conversation_ui", "ui_helpers", "prompt_admin", "proxy_settings", "codex_accounts", "main"]) {
+for (const name of ["api", "icons", "types", "runtime_picker", "task_agents", "task_composer", "hardware_terminal", "hardware_panel", "task_tools", "conversation_ui", "ui_helpers", "prompt_admin", "proxy_settings", "codex_accounts", "knowledge_workspace", "main"]) {
   const input = await readFile(resolve(source, "src", `${name}.ts`), "utf8");
   const transformed = stripTypeScriptTypes(input, {mode: "transform", sourceMap: false});
   const outputName = name === "main" ? "app" : name;
@@ -37,6 +37,7 @@ const versionSource = await Promise.all([
   readFile(resolve(output, "prompt_admin.js")),
   readFile(resolve(output, "proxy_settings.js")),
   readFile(resolve(output, "codex_accounts.js")),
+  readFile(resolve(output, "knowledge_workspace.js")),
   readFile(resolve(output, "styles.css")),
   readFile(resolve(output, "vendor", "xterm.js")),
   readFile(resolve(output, "vendor", "xterm.css")),
@@ -58,7 +59,9 @@ const versionedAppWithHelpers = versionedApp
   .replaceAll('"./prompt_admin.js"', `"./prompt_admin.js?v=${version}"`)
   .replaceAll('"./proxy_settings.js"', `"./proxy_settings.js?v=${version}"`)
   .replaceAll('"./codex_accounts.js"', `"./codex_accounts.js?v=${version}"`);
-await writeFile(appPath, versionedAppWithHelpers);
+const versionedAppWithKnowledge = versionedAppWithHelpers
+  .replaceAll('"./knowledge_workspace.js"', `"./knowledge_workspace.js?v=${version}"`);
+await writeFile(appPath, versionedAppWithKnowledge);
 const agentsPath = resolve(output, "task_agents.js");
 const versionedAgents = (await readFile(agentsPath, "utf8"))
   .replaceAll('"./icons.js"', `"./icons.js?v=${version}"`)
@@ -99,6 +102,11 @@ const versionedCodexAccounts = (await readFile(codexAccountsPath, "utf8"))
   .replaceAll('"./api.js"', `"./api.js?v=${version}"`)
   .replaceAll('"./icons.js"', `"./icons.js?v=${version}"`);
 await writeFile(codexAccountsPath, versionedCodexAccounts);
+const knowledgeWorkspacePath = resolve(output, "knowledge_workspace.js");
+const versionedKnowledgeWorkspace = (await readFile(knowledgeWorkspacePath, "utf8"))
+  .replaceAll('"./api.js"', `"./api.js?v=${version}"`)
+  .replaceAll('"./icons.js"', `"./icons.js?v=${version}"`);
+await writeFile(knowledgeWorkspacePath, versionedKnowledgeWorkspace);
 const indexPath = resolve(output, "index.html");
 const versionedIndex = (await readFile(indexPath, "utf8"))
   .replace('href="/vendor/xterm.css"', `href="/vendor/xterm.css?v=${version}"`)

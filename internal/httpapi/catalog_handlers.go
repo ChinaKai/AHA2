@@ -26,6 +26,7 @@ func (s *Server) createProject(writer http.ResponseWriter, request *http.Request
 		ProjectType        string `json:"project_type"`
 		RepositoryIdentity string `json:"repository_identity"`
 		DefaultBranch      string `json:"default_branch"`
+		KnowledgePolicy    string `json:"knowledge_policy"`
 	}
 	if err := decodeJSON(request, &payload); err != nil {
 		writeError(writer, http.StatusBadRequest, "invalid_json")
@@ -49,7 +50,8 @@ func (s *Server) createProject(writer http.ResponseWriter, request *http.Request
 		ID: domain.NewID("project"), Name: payload.Name, Description: strings.TrimSpace(payload.Description),
 		ProjectType:        projectType,
 		RepositoryIdentity: strings.TrimSpace(payload.RepositoryIdentity), DefaultBranch: strings.TrimSpace(payload.DefaultBranch),
-		CreatedAt: now, UpdatedAt: now,
+		KnowledgePolicy: normalizeProjectKnowledgePolicy(payload.KnowledgePolicy),
+		CreatedAt:       now, UpdatedAt: now,
 	}
 	if err := s.store.CreateProject(request.Context(), item); err != nil {
 		writeError(writer, http.StatusInternalServerError, "create_project_failed")
@@ -72,6 +74,7 @@ func (s *Server) updateProject(writer http.ResponseWriter, request *http.Request
 		ProjectType        string `json:"project_type"`
 		RepositoryIdentity string `json:"repository_identity"`
 		DefaultBranch      string `json:"default_branch"`
+		KnowledgePolicy    string `json:"knowledge_policy"`
 	}
 	if err := decodeJSON(request, &payload); err != nil {
 		writeError(writer, http.StatusBadRequest, "invalid_json")
@@ -95,6 +98,7 @@ func (s *Server) updateProject(writer http.ResponseWriter, request *http.Request
 	existing.ProjectType = projectType
 	existing.RepositoryIdentity = strings.TrimSpace(payload.RepositoryIdentity)
 	existing.DefaultBranch = strings.TrimSpace(payload.DefaultBranch)
+	existing.KnowledgePolicy = normalizeProjectKnowledgePolicy(payload.KnowledgePolicy)
 	existing.UpdatedAt = time.Now().UTC()
 	if err := s.store.UpdateProject(request.Context(), existing); err != nil {
 		writeError(writer, http.StatusInternalServerError, "update_project_failed")
@@ -102,6 +106,13 @@ func (s *Server) updateProject(writer http.ResponseWriter, request *http.Request
 	}
 	s.audit(request, "project.update", "project", id, map[string]any{"project_type": existing.ProjectType})
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "project": existing})
+}
+
+func normalizeProjectKnowledgePolicy(value string) string {
+	if strings.TrimSpace(value) == "disabled" {
+		return "disabled"
+	}
+	return "enabled"
 }
 
 func (s *Server) listWorkspaces(writer http.ResponseWriter, request *http.Request) {

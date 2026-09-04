@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -197,10 +198,29 @@ func TestTaskMultiTurnFlow(t *testing.T) {
 	if err := database.UpsertEnvGroup(ctx, envGroup); err != nil {
 		t.Fatal(err)
 	}
+	selectedSkill := domain.Skill{ID: "skill-selected", Scope: "global", Name: "Selected", Description: "Selected skill", Instructions: "Use selected skill.", Version: 1, Status: "active", Enabled: true, CreatedAt: now, UpdatedAt: now}
+	otherSkill := domain.Skill{ID: "skill-other", Scope: "project", ProjectID: project.ID, Name: "Other", Description: "Other skill", Instructions: "Do not use this skill.", Version: 1, Status: "active", Enabled: true, CreatedAt: now, UpdatedAt: now}
+	if err := database.CreateSkill(ctx, selectedSkill); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CreateSkill(ctx, otherSkill); err != nil {
+		t.Fatal(err)
+	}
+	selectedSkill, err = database.Skill(ctx, selectedSkill.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherSkill, err = database.Skill(ctx, otherSkill.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(selectedSkill.SourcePath, "scripts", "check.sh"), []byte("echo selected\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	service := NewService(database, secretStore, &stubExecutor{})
 	task, err := service.CreateTask(ctx, CreateTaskInput{
 		ProjectID: project.ID, WorkspaceID: workspace.ID, Title: "test", Request: "run test",
-		ModelID: model.ID, ProxyEnabled: true,
+		ModelID: model.ID, ProxyEnabled: true, SkillIDs: []string{selectedSkill.ID},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -234,12 +254,30 @@ func TestTaskMultiTurnFlow(t *testing.T) {
 	if data, err := os.ReadFile(manifest); err != nil || strings.Contains(string(data), "stub completed") {
 		t.Fatalf("context manifest invalid: %q %v", data, err)
 	}
+	selectedSkillEntry := filepath.Join(workspace.RootPath, ".aha2-context", task.ID, "main", "skills", selectedSkill.PackageSlug, "SKILL.md")
+	if data, err := os.ReadFile(selectedSkillEntry); err != nil || !strings.Contains(string(data), "Use selected skill.") {
+		t.Fatalf("selected skill entry was not materialized: %q %v", data, err)
+	}
+	if data, err := os.ReadFile(filepath.Join(workspace.RootPath, ".aha2-context", task.ID, "main", "skills", selectedSkill.PackageSlug, "scripts", "check.sh")); err != nil || !strings.Contains(string(data), "selected") {
+		t.Fatalf("selected skill script was not materialized: %q %v", data, err)
+	}
+	if _, err := os.Stat(filepath.Join(workspace.RootPath, ".aha2-context", task.ID, "main", "skills", otherSkill.PackageSlug, "SKILL.md")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unselected skill was materialized: %v", err)
+	}
 	knowledge, err := database.ListKnowledge(ctx, "project", project.ID, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(knowledge) != 2 {
-		t.Fatalf("expected 2 turn candidates, got %d", len(knowledge))
+	if len(knowledge) != 1 || knowledge[0].Revision != 2 || knowledge[0].Status != domain.KnowledgeVerified {
+		t.Fatalf("expected one verified knowledge entry at revision 2, got %#v", knowledge)
+	}
+	memory, err := database.TaskMemory(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encodedRefs, _ := json.Marshal(memory.Extra["knowledge_refs"])
+	if !strings.Contains(string(encodedRefs), knowledge[0].ID) || !strings.Contains(string(encodedRefs), `"revision":2`) {
+		t.Fatalf("task memory did not reference the latest knowledge revision: %s", encodedRefs)
 	}
 	current, err := database.Task(ctx, task.ID)
 	if err != nil {

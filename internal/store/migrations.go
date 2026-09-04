@@ -603,6 +603,57 @@ ALTER TABLE models ADD COLUMN deleted_at TEXT NOT NULL DEFAULT '';
 CREATE INDEX idx_models_visible ON models(deleted_at,provider_id,display_name);
 `
 
+const schemaV22 = `
+ALTER TABLE projects ADD COLUMN knowledge_policy TEXT NOT NULL DEFAULT 'enabled';
+ALTER TABLE projects ADD COLUMN knowledge_revision INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE tasks ADD COLUMN knowledge_policy TEXT NOT NULL DEFAULT 'inherit';
+
+ALTER TABLE knowledge_entries ADD COLUMN product_line_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE knowledge_entries ADD COLUMN revision INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE knowledge_entries ADD COLUMN content_hash TEXT NOT NULL DEFAULT '';
+ALTER TABLE knowledge_entries ADD COLUMN verified_commit TEXT NOT NULL DEFAULT '';
+ALTER TABLE knowledge_entries ADD COLUMN helped_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE knowledge_entries ADD COLUMN stale_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE knowledge_entries ADD COLUMN feedback_state TEXT NOT NULL DEFAULT '';
+
+CREATE TABLE product_lines (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    branch_pattern TEXT NOT NULL DEFAULT '',
+    is_default INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX idx_product_lines_project ON product_lines(project_id,is_default,name);
+
+CREATE TABLE skills (
+    id TEXT PRIMARY KEY,
+    scope TEXT NOT NULL,
+    project_id TEXT NOT NULL DEFAULT '',
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    instructions TEXT NOT NULL,
+    version INTEGER NOT NULL DEFAULT 1,
+    status TEXT NOT NULL DEFAULT 'active',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    source_path TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX idx_skills_scope ON skills(scope,project_id,status,enabled,name);
+`
+
+const schemaV23 = `
+ALTER TABLE tasks ADD COLUMN skill_ids_json TEXT NOT NULL DEFAULT '[]';
+`
+
+const schemaV24 = `
+ALTER TABLE skills ADD COLUMN package_slug TEXT NOT NULL DEFAULT '';
+UPDATE skills SET package_slug=id WHERE package_slug='';
+CREATE UNIQUE INDEX idx_skills_package_slug ON skills(package_slug);
+`
+
 func (s *Store) migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, schemaV1); err != nil {
 		return fmt.Errorf("apply schema v1: %w", err)
@@ -871,6 +922,45 @@ func (s *Store) migrate(ctx context.Context) error {
 		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(21, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
 	); err != nil {
 		return fmt.Errorf("record schema v21: %w", err)
+	}
+	var hasV22 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=22)`).Scan(&hasV22)
+	if !hasV22 {
+		if _, err := s.db.ExecContext(ctx, schemaV22); err != nil {
+			return fmt.Errorf("apply schema v22: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(
+		ctx,
+		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(22, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
+	); err != nil {
+		return fmt.Errorf("record schema v22: %w", err)
+	}
+	var hasV23 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=23)`).Scan(&hasV23)
+	if !hasV23 {
+		if _, err := s.db.ExecContext(ctx, schemaV23); err != nil {
+			return fmt.Errorf("apply schema v23: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(
+		ctx,
+		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(23, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
+	); err != nil {
+		return fmt.Errorf("record schema v23: %w", err)
+	}
+	var hasV24 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=24)`).Scan(&hasV24)
+	if !hasV24 {
+		if _, err := s.db.ExecContext(ctx, schemaV24); err != nil {
+			return fmt.Errorf("apply schema v24: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(
+		ctx,
+		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(24, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
+	); err != nil {
+		return fmt.Errorf("record schema v24: %w", err)
 	}
 	return nil
 }

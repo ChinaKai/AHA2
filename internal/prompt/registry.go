@@ -37,6 +37,9 @@ type BuildInput struct {
 	Memory           domain.TaskMemory
 	GlobalKnowledge  []domain.KnowledgeEntry
 	ProjectKnowledge []domain.KnowledgeEntry
+	Skills           []domain.Skill
+	ProductLine      domain.ProductLine
+	KnowledgeEnabled bool
 	Conversation     []domain.ConversationItem
 	Turns            []domain.Turn
 	Hardware         []domain.HardwareGroup
@@ -51,6 +54,7 @@ type ContextResource struct {
 	Description string `json:"description"`
 	Chars       int    `json:"chars"`
 	Content     string `json:"content,omitempty"`
+	EntryPoint  bool   `json:"entry_point,omitempty"`
 }
 
 type BuildResult struct {
@@ -270,10 +274,12 @@ func buildResources(input BuildInput, root, workDir string) []ContextResource {
 	if len(input.Hardware) > 0 {
 		resources = append(resources, resource(input, "hardware", joinContextPath(input, root, "hardware.md"), "Task 硬件调试配置（不含密码）", hardwareResource(input.Hardware)))
 	}
-	resources = append(resources,
-		resource(input, "knowledge-global", joinContextPath(input, root, "knowledge-global.md"), "Global verified knowledge", knowledgeText(input.GlobalKnowledge)),
-		resource(input, "knowledge-project", joinContextPath(input, root, "knowledge-project.md"), "Project verified knowledge", knowledgeText(input.ProjectKnowledge)),
-	)
+	if input.KnowledgeEnabled {
+		resources = append(resources, knowledgeResources(input, root)...)
+	}
+	if len(input.Skills) > 0 {
+		resources = append(resources, skillResources(input, root)...)
+	}
 	metadata := append([]ContextResource(nil), resources...)
 	for index := range metadata {
 		metadata[index].Content = ""
@@ -292,16 +298,72 @@ func joinContextPath(input BuildInput, values ...string) string {
 func resource(input BuildInput, id, path, description, content string) ContextResource {
 	return ContextResource{
 		ID: id, URI: fmt.Sprintf("aha://tasks/%s/agents/%s/context/%s", input.Task.ID, input.Agent.AgentID, id),
-		Path: path, Description: description, Chars: len([]rune(content)), Content: content,
+		Path: path, Description: description, Chars: len([]rune(content)), Content: content, EntryPoint: true,
 	}
+}
+
+func detailResource(input BuildInput, id, path, description, content string) ContextResource {
+	item := resource(input, id, path, description, content)
+	item.EntryPoint = false
+	return item
 }
 
 func manifestText(resources []ContextResource) string {
 	lines := []string{"Large context is available as workspace files. Read only what is needed:"}
 	for _, item := range resources {
+		if !item.EntryPoint {
+			continue
+		}
 		lines = append(lines, fmt.Sprintf("- `%s` (%s, %d chars)", item.Path, item.Description, item.Chars))
 	}
 	return strings.Join(lines, "\n")
+}
+
+func knowledgeResources(input BuildInput, root string) []ContextResource {
+	directory := joinContextPath(input, root, "knowledge")
+	entries := append([]domain.KnowledgeEntry(nil), input.ProjectKnowledge...)
+	entries = append(entries, input.GlobalKnowledge...)
+	lines := []string{"# Knowledge", "", "Read only entries relevant to the current task. Report actual usage in knowledge_feedback."}
+	if input.ProductLine.ID != "" {
+		lines = append(lines, "", fmt.Sprintf("Active product line: %s (%s)", input.ProductLine.Name, input.ProductLine.BranchPattern))
+	}
+	resources := []ContextResource{}
+	for _, entry := range entries {
+		entryPath := joinContextPath(input, directory, entry.ID+".md")
+		lines = append(lines, fmt.Sprintf("- [%s] `%s` · %s/%s · revision %d · confidence %.2f", entry.ID, entryPath, entry.Scope, entry.Type, entry.Revision, entry.Confidence))
+		body := fmt.Sprintf("# %s\n\n- id: %s\n- scope: %s\n- type: %s\n- revision: %d\n- content_hash: %s\n- product_line_id: %s\n- verified_commit: %s\n\n%s\n", entry.Title, entry.ID, entry.Scope, entry.Type, entry.Revision, entry.ContentHash, entry.ProductLineID, entry.VerifiedCommit, entry.Body)
+		resources = append(resources, detailResource(input, "knowledge-"+entry.ID, entryPath, entry.Title, body))
+	}
+	if len(entries) == 0 {
+		lines = append(lines, "", "No verified knowledge is currently available.")
+	}
+	index := resource(input, "knowledge-index", joinContextPath(input, directory, "index.md"), "Knowledge entrypoint", strings.Join(lines, "\n"))
+	return append([]ContextResource{index}, resources...)
+}
+
+func skillResources(input BuildInput, root string) []ContextResource {
+	directory := joinContextPath(input, root, "skills")
+	resources := []ContextResource{}
+	for _, skill := range input.Skills {
+		slug := skill.PackageSlug
+		if slug == "" {
+			slug = skill.ID
+		}
+		packageDirectory := joinContextPath(input, directory, slug)
+		files := skill.PackageFiles
+		if len(files) == 0 {
+			files = []domain.SkillFile{{Path: "SKILL.md", Content: fmt.Sprintf("---\nname: %s\ndescription: %s\n---\n\n%s\n", skill.Name, skill.Description, skill.Instructions)}}
+		}
+		for index, file := range files {
+			filePath := joinContextPath(input, packageDirectory, file.Path)
+			item := detailResource(input, fmt.Sprintf("skill-%s-file-%d", skill.ID, index), filePath, skill.Name+" package file", file.Content)
+			if file.Path == "SKILL.md" {
+				item = resource(input, "skill-"+skill.ID, filePath, fmt.Sprintf("Selected Skill: %s - %s", skill.Name, skill.Description), file.Content)
+			}
+			resources = append(resources, item)
+		}
+	}
+	return resources
 }
 
 func taskResource(input BuildInput, workDir string) string {
@@ -311,7 +373,13 @@ func taskResource(input BuildInput, workDir string) string {
 }
 
 func fullMemory(memory domain.TaskMemory) string {
-	return "# Task Memory\n\n" + memoryText(memory)
+	value := "# Task Memory\n\n" + memoryText(memory)
+	if refs, ok := memory.Extra["knowledge_refs"]; ok {
+		if data, err := json.MarshalIndent(refs, "", "  "); err == nil && string(data) != "null" && string(data) != "[]" {
+			value += "\n\n## Knowledge references\n\n```json\n" + string(data) + "\n```"
+		}
+	}
+	return value
 }
 
 func conversationResource(items []domain.ConversationItem) string {

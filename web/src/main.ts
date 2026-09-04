@@ -2,6 +2,7 @@ import {api} from "./api.js";
 import {renderConversationList} from "./conversation_ui.js";
 import {bindCodexAccounts, renderCodexAccounts} from "./codex_accounts.js";
 import {icon} from "./icons.js";
+import {bindKnowledgeWorkspace, renderKnowledgeWorkspace} from "./knowledge_workspace.js";
 import {bindHardwarePanel, stopHardwarePanel} from "./hardware_panel.js";
 import {bindPromptAdmin, loadPromptCatalog, renderPromptAdmin} from "./prompt_admin.js";
 import {bindProxySettings, renderProxySettings} from "./proxy_settings.js";
@@ -32,6 +33,7 @@ import type {
   Project,
   Provider,
   ProxySettings,
+  Skill,
   SystemInfo,
   Task,
   TaskContextDetail,
@@ -55,6 +57,7 @@ interface State {
   models: Model[];
   tasks: Task[];
   knowledge: Knowledge[];
+  skills: Skill[];
   selectedTask: TaskDetail | null;
   taskConversation: ConversationItem[];
   taskConversationHasMore: boolean;
@@ -90,6 +93,7 @@ const state: State = {
   models: [],
   tasks: [],
   knowledge: [],
+  skills: [],
   selectedTask: null,
   taskConversation: [],
   taskConversationHasMore: false,
@@ -351,7 +355,25 @@ function syncTaskWorkspaces(): void {
   if (isolation) isolation.value = project?.project_type === "git" ? "worktree" : "inplace";
   const worktreeDir = document.querySelector<HTMLInputElement>("#task-worktree-dir");
   if (worktreeDir) worktreeDir.value = "";
+  syncTaskSkills();
   syncTaskBackend();
+}
+
+function availableTaskSkills(projectID: string): Skill[] {
+  return state.skills.filter(item => item.enabled && item.status === "active" && (item.scope === "global" || item.project_id === projectID));
+}
+
+function taskSkillOptions(projectID: string, selected: string[] = []): string {
+  const items = availableTaskSkills(projectID);
+  return items.map(item => `<label class="task-skill-option"><input type="checkbox" name="skill_ids" value="${item.id}" ${selected.includes(item.id) ? "checked" : ""}><span><strong>${escapeHTML(item.name)}</strong><small>${escapeHTML(item.scope)} \u00b7 ${escapeHTML(item.description || "\u65e0\u63cf\u8ff0")}</small></span></label>`).join("") || `<div class="field-help">\u5f53\u524d Project \u6ca1\u6709\u53ef\u7528 Skill\uff0cTask \u4e0d\u4f1a\u6ce8\u5165\u4efb\u4f55 Skill \u8def\u5f84\u3002</div>`;
+}
+
+function syncTaskSkills(): void {
+  const projectID = String((document.querySelector<HTMLSelectElement>("#task-project"))?.value || "");
+  const container = document.querySelector<HTMLElement>("#task-skill-options");
+  if (!container) return;
+  const selected = [...container.querySelectorAll<HTMLInputElement>('input[name="skill_ids"]:checked')].map(input => input.value);
+  container.innerHTML = taskSkillOptions(projectID, selected);
 }
 
 function openProjectDialog(project: Project | null): void {
@@ -534,8 +556,8 @@ async function bootstrap(): Promise<void> {
 }
 
 async function loadAll(): Promise<void> {
-  const [projects, workspaces, providers, codexAccounts, models, tasks, knowledge, system, proxy] = await Promise.all([
-    api.projects(), api.workspaces(), api.providers(), api.codexAccounts(), api.models(), api.tasks(), api.knowledge(), api.system(), api.proxySettings(),
+  const [projects, workspaces, providers, codexAccounts, models, tasks, knowledge, skills, system, proxy] = await Promise.all([
+    api.projects(), api.workspaces(), api.providers(), api.codexAccounts(), api.models(), api.tasks(), api.knowledge(), api.skills(), api.system(), api.proxySettings(),
   ]);
   state.projects = projects.projects || [];
   state.workspaces = workspaces.workspaces || [];
@@ -544,6 +566,7 @@ async function loadAll(): Promise<void> {
   state.models = models.models || [];
   state.tasks = tasks.tasks || [];
   state.knowledge = knowledge.knowledge || [];
+  state.skills = skills.skills || [];
   if (system?.system) state.system = system.system;
   if (proxy?.proxy) state.proxySettings = proxy.proxy;
   await loadPromptCatalog();
@@ -901,9 +924,10 @@ function tasksView(): string {
 }
 
 function taskDialog(): string {
+  const projectID = state.projects[0]?.id || "";
   return taskDialogBase().replace(
     '<div id="task-git-isolation">',
-    '<label class="proxy-toggle"><input name="proxy_enabled" type="checkbox">Backend 使用共享代理</label><div id="task-git-isolation">',
+    `<div class="two"><label>Knowledge<select name="knowledge_policy"><option value="inherit">\u7ee7\u627f Project</option><option value="enabled">\u5f00\u542f</option><option value="disabled">\u5173\u95ed</option></select></label><label class="proxy-toggle"><input name="proxy_enabled" type="checkbox">Backend \u4f7f\u7528\u5171\u4eab\u4ee3\u7406</label></div><fieldset class="task-skill-picker"><legend>Task Skills</legend><p>\u4ec5\u5c06\u9009\u4e2d Skill \u7684\u8def\u5f84\u5199\u5165 Context\uff0c\u672a\u9009\u4e2d\u7684 Skill \u4e0d\u4f1a\u88ab Agent \u770b\u5230\u3002</p><div id="task-skill-options">${taskSkillOptions(projectID)}</div></fieldset><div id="task-git-isolation">`,
   );
 }
 
@@ -1073,7 +1097,7 @@ function taskDetailView(detail: TaskDetail): string {
       ${chat}
       ${renderTaskToolPanel(state.taskTool, detail, state.selectedTaskAgent, taskCtxHtml())}
     </div>
-    ${renderAgentConfigDialog(detail, state.selectedTaskAgent, state.models, state.codexAccounts)}
+    ${renderAgentConfigDialog(detail, state.selectedTaskAgent, state.models, state.codexAccounts, state.skills)}
   </section>`);
 }
 
@@ -1117,20 +1141,6 @@ function updateTaskLiveRegions(): void {
   updateLiveDurations();
 }
 
-function knowledgeView(): string {
-  const rows = state.knowledge.map(item => `<article class="knowledge-row"><div><span class="status ${statusClass(item.status)}">${statusLabel(item.status)}</span><strong>${escapeHTML(item.title)}</strong><p>${escapeHTML(item.body)}</p><small>${escapeHTML(item.scope)} · ${escapeHTML(item.type)} · confidence ${item.confidence.toFixed(2)}</small></div>${item.status === "candidate" ? `<button data-verify="${item.id}">验证</button>` : ""}</article>`).join("");
-  return shell(`<section class="page">
-    ${pageHead("知识库", "Global 保存通用经验，Project 保存项目专用认知。知识在 Turn 中持续产生。", `<button data-dialog="knowledge">${icon("plus")}新建知识</button>`)}
-    <div class="knowledge-tabs"><button class="active">全部</button><span>Candidate ${state.knowledge.filter(item => item.status === "candidate").length}</span><span>Verified ${state.knowledge.filter(item => item.status === "verified").length}</span></div>
-    <div class="panel">${rows || `<div class="empty">知识会在 Task Turn 中持续增长。</div>`}</div>
-    ${knowledgeDialog()}
-  </section>`);
-}
-
-function knowledgeDialog(): string {
-  return `<dialog id="knowledge-dialog"><form id="knowledge-form" method="dialog"><div class="dialog-head"><h2>新建知识</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div><div class="two"><label>作用域<select name="scope"><option value="project">Project</option><option value="global">Global</option></select></label><label>项目<select name="project_id">${state.projects.map(item => `<option value="${item.id}">${escapeHTML(item.name)}</option>`).join("")}</select></label></div><label>类型<select name="type"><option>practice</option><option>navigation</option><option>decision</option><option>solution</option></select></label><label>标题<input name="title" required></label><label>正文<textarea name="body" required></textarea></label><label>置信度<input name="confidence" type="number" min="0" max="1" step="0.1" value="0.7"></label><div class="dialog-actions"><button type="button" data-close>取消</button><button class="primary" value="default">保存 Candidate</button></div></form></dialog>`;
-}
-
 function render(): void {
   if (!app) return;
   document.body.classList.toggle("task-view-active", Boolean(state.selectedTask));
@@ -1169,7 +1179,14 @@ function render(): void {
       projects: projectsView,
       models: modelsView,
       tasks: tasksView,
-      knowledge: knowledgeView,
+      knowledge: () => shell(renderKnowledgeWorkspace({
+        projects: state.projects,
+        workspaces: state.workspaces,
+        knowledge: state.knowledge,
+        refreshData: loadAll,
+        render,
+        setMessage,
+      })),
       prompts: () => shell(renderPromptAdmin()),
       proxy: () => shell(renderProxySettings(state.proxySettings)),
     };
@@ -1596,13 +1613,9 @@ function bindCommon(): void {
   document.querySelector("#task-isolation")?.addEventListener("change", syncTaskGitIsolation);
   bindForm("#task-form", async form => {
     const payload = Object.fromEntries(form.entries()) as Record<string, string>;
-    const result = await api.createTask({...payload, max_agents: Number(payload.max_agents || 3), proxy_enabled: payload.proxy_enabled === "on"});
+    const result = await api.createTask({...payload, skill_ids: form.getAll("skill_ids").map(String), max_agents: Number(payload.max_agents || 3), proxy_enabled: payload.proxy_enabled === "on"});
     await openTask(result.task.id);
     if (result.start_error) setMessage("error", `Task 已创建，但首个 Turn 启动失败：${result.start_error}`);
-  });
-  bindForm("#knowledge-form", async form => {
-    const payload = Object.fromEntries(form.entries()) as Record<string, string>;
-    await api.createKnowledge({...payload, confidence: Number(payload.confidence || 0)});
   });
   document.querySelectorAll<HTMLElement>("[data-detect]").forEach(button => button.addEventListener("click", () => {
     const id = button.dataset.detect!;
@@ -1630,6 +1643,8 @@ function bindCommon(): void {
       await api.updateTask(state.selectedTask.task.id, {
         collaboration_mode: String(form.get("collaboration_mode") || "auto"),
         max_agents: Number(form.get("max_agents") || 3),
+        knowledge_policy: String(form.get("knowledge_policy") || "inherit"),
+        skill_ids: form.getAll("skill_ids").map(String),
       });
     }
     const inheritMain = agentID !== "main" && form.get("inherit_main") === "on";
@@ -1785,20 +1800,20 @@ function bindCommon(): void {
     render();
   }));
   bindSessionActions();
-  document.querySelectorAll<HTMLElement>("[data-verify]").forEach(button => button.addEventListener("click", () => {
-    const id = button.dataset.verify!;
-    void runWithFeedback(button, "验证中", async () => {
-      await api.verifyKnowledge(id);
-      await loadAll();
-      render();
-    });
-  }));
   document.querySelector("#close-task-tool")?.addEventListener("click", () => {
     if (state.taskTool === "hardware") stopHardwarePanel();
     state.taskTool = "";
     render();
   });
   if (state.taskTool === "hardware" && state.selectedTask) bindHardwarePanel(state.selectedTask, setMessage);
+  if (state.view === "knowledge" && !state.selectedProject && !state.selectedTask) bindKnowledgeWorkspace({
+    projects: state.projects,
+    workspaces: state.workspaces,
+    knowledge: state.knowledge,
+    refreshData: loadAll,
+    render,
+    setMessage,
+  });
   if (state.view === "prompts") bindPromptAdmin(render, setMessage);
 }
 

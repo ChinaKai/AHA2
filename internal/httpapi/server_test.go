@@ -262,9 +262,13 @@ func TestTaskAgentAPIIsolationAndConfigInheritance(t *testing.T) {
 		}
 	}
 	appService := app.NewService(database, secretStore, app.StubExecutor{})
+	skill := domain.Skill{ID: "skill-task-api", Scope: "global", Name: "API skill", Description: "Task selected", Instructions: "Use it.", Version: 1, Status: "active", Enabled: true, CreatedAt: now, UpdatedAt: now}
+	if err := database.CreateSkill(ctx, skill); err != nil {
+		t.Fatal(err)
+	}
 	task, err := appService.CreateTask(ctx, app.CreateTaskInput{
 		ProjectID: project.ID, WorkspaceID: workspace.ID, Title: "agent api", Request: "test routing",
-		ModelID: model1.ID, CollaborationMode: "auto", MaxAgents: 3,
+		ModelID: model1.ID, CollaborationMode: "auto", MaxAgents: 3, SkillIDs: []string{skill.ID},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -303,6 +307,27 @@ func TestTaskAgentAPIIsolationAndConfigInheritance(t *testing.T) {
 	if memory["current_goal"] != "test routing" {
 		t.Fatalf("task detail memory missing: %#v", taskDetail)
 	}
+	response = requestJSON(t, client, http.MethodPatch, server.URL+"/api/v1/tasks/"+task.ID, map[string]any{
+		"knowledge_policy": "disabled", "skill_ids": []string{skill.ID},
+	}, csrf)
+	var updatedTask map[string]any
+	decodeResponse(t, response, &updatedTask)
+	if response.StatusCode != http.StatusOK || updatedTask["task"].(map[string]any)["knowledge_policy"] != "disabled" {
+		t.Fatalf("task knowledge policy update failed: %d %#v", response.StatusCode, updatedTask)
+	}
+	if ids := updatedTask["task"].(map[string]any)["skill_ids"].([]any); len(ids) != 1 || ids[0] != skill.ID {
+		t.Fatalf("task skills update failed: %#v", updatedTask)
+	}
+	skill.Enabled = false
+	skill.UpdatedAt = now.Add(time.Second)
+	if err := database.UpdateSkill(ctx, skill); err != nil {
+		t.Fatal(err)
+	}
+	response = requestJSON(t, client, http.MethodPatch, server.URL+"/api/v1/tasks/"+task.ID, map[string]any{"skill_ids": []string{skill.ID}}, csrf)
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("disabled skill update was accepted: %d", response.StatusCode)
+	}
+	response.Body.Close()
 
 	response = requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/prompts/templates", nil, "")
 	var templatesResponse map[string]any
@@ -777,6 +802,94 @@ func TestLatestTurnForAgentUsesTaskHistory(t *testing.T) {
 	}
 	if got := latestTurnForAgent(turns, "main"); got.ID != "main-latest" {
 		t.Fatalf("latest main turn = %#v", got)
+	}
+}
+
+func TestKnowledgeWorkspaceAPI(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	secretStore, err := secrets.Open(filepath.Join(t.TempDir(), "secrets.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	authService := auth.NewService(database, "setup-test", time.Hour)
+	server := httptest.NewServer(New(Config{Store: database, Auth: authService, App: app.NewService(database, secretStore, app.StubExecutor{})}).Handler())
+	defer server.Close()
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	csrf := registerOwner(t, client, server.URL)
+
+	response := requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/projects", map[string]any{
+		"name": "Knowledge", "project_type": "git", "default_branch": "main", "knowledge_policy": "disabled",
+	}, csrf)
+	var payload map[string]any
+	decodeResponse(t, response, &payload)
+	project := payload["project"].(map[string]any)
+	projectID := project["id"].(string)
+	if response.StatusCode != http.StatusCreated || project["knowledge_policy"] != "disabled" {
+		t.Fatalf("knowledge project creation failed: %d %#v", response.StatusCode, payload)
+	}
+
+	response = requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/projects/"+projectID+"/product-lines", map[string]any{
+		"name": "Main", "branch_pattern": "main", "default": true,
+	}, csrf)
+	decodeResponse(t, response, &payload)
+	lineID := payload["product_line"].(map[string]any)["id"].(string)
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("product line creation failed: %d %#v", response.StatusCode, payload)
+	}
+
+	response = requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/skills", map[string]any{
+		"scope": "project", "project_id": projectID, "name": "Review", "description": "Review changes",
+		"instructions": "Run focused tests.", "enabled": true,
+	}, csrf)
+	decodeResponse(t, response, &payload)
+	skill := payload["skill"].(map[string]any)
+	skillID := skill["id"].(string)
+	if response.StatusCode != http.StatusCreated || skill["version"].(float64) != 1 {
+		t.Fatalf("skill creation failed: %d %#v", response.StatusCode, payload)
+	}
+	response = requestJSON(t, client, http.MethodPut, server.URL+"/api/v1/skills/"+skillID, map[string]any{
+		"scope": "project", "project_id": projectID, "name": "Review", "description": "Updated",
+		"instructions": "Run all tests.", "status": "active", "enabled": false,
+	}, csrf)
+	decodeResponse(t, response, &payload)
+	if response.StatusCode != http.StatusOK || payload["skill"].(map[string]any)["version"].(float64) != 2 {
+		t.Fatalf("skill update failed: %d %#v", response.StatusCode, payload)
+	}
+
+	response = requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/knowledge", map[string]any{
+		"scope": "project", "project_id": projectID, "product_line_id": lineID, "type": "navigation",
+		"title": "Main route", "body": "Read the main package.", "confidence": .9, "status": "verified",
+	}, csrf)
+	decodeResponse(t, response, &payload)
+	entry := payload["knowledge"].(map[string]any)
+	entryID := entry["id"].(string)
+	if response.StatusCode != http.StatusCreated || entry["revision"].(float64) != 1 {
+		t.Fatalf("knowledge creation failed: %d %#v", response.StatusCode, payload)
+	}
+	response = requestJSON(t, client, http.MethodPut, server.URL+"/api/v1/knowledge/"+entryID, map[string]any{
+		"scope": "project", "project_id": projectID, "product_line_id": lineID, "type": "navigation",
+		"title": "Main route", "body": "Read cmd and internal.", "confidence": .95, "status": "verified",
+	}, csrf)
+	decodeResponse(t, response, &payload)
+	if response.StatusCode != http.StatusOK || payload["knowledge"].(map[string]any)["revision"].(float64) != 2 {
+		t.Fatalf("knowledge update failed: %d %#v", response.StatusCode, payload)
+	}
+	response = requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/knowledge/"+entryID+"/feedback", map[string]any{"kind": "helped"}, csrf)
+	decodeResponse(t, response, &payload)
+	if response.StatusCode != http.StatusOK || payload["knowledge"].(map[string]any)["helped_count"].(float64) != 1 {
+		t.Fatalf("knowledge feedback failed: %d %#v", response.StatusCode, payload)
+	}
+	response = requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/knowledge?scope=project&project_id="+projectID, nil, "")
+	decodeResponse(t, response, &payload)
+	if response.StatusCode != http.StatusOK || len(payload["knowledge"].([]any)) != 1 {
+		t.Fatalf("knowledge list failed: %d %#v", response.StatusCode, payload)
 	}
 }
 

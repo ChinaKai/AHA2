@@ -19,6 +19,7 @@ test("built web contains responsive application", async () => {
   const promptAdmin = await readFile(resolve(root, "dist", "prompt_admin.js"), "utf8");
   const proxySettings = await readFile(resolve(root, "dist", "proxy_settings.js"), "utf8");
   const codexAccounts = await readFile(resolve(root, "dist", "codex_accounts.js"), "utf8");
+  const knowledgeWorkspace = await readFile(resolve(root, "dist", "knowledge_workspace.js"), "utf8");
   const css = await readFile(resolve(root, "dist", "styles.css"), "utf8");
   const index = await readFile(resolve(root, "dist", "index.html"), "utf8");
   assert.match(script, /api\.authStatus/);
@@ -39,6 +40,15 @@ test("built web contains responsive application", async () => {
   assert.doesNotMatch(agents, /virtual-agent-batch/);
   assert.match(css, /\.aha-orchestration-card/);
   assert.match(script, /renderPromptAdmin/);
+  assert.match(script, /renderKnowledgeWorkspace/);
+  assert.match(script, /name="knowledge_policy"/);
+  assert.match(agents, /name="knowledge_policy"/);
+  assert.match(knowledgeWorkspace, /Workspace Bindings/);
+  assert.match(knowledgeWorkspace, /Product Lines/);
+  assert.match(knowledgeWorkspace, /SKILL\.md/);
+  assert.match(knowledgeWorkspace, /skill-package-files/);
+  assert.doesNotMatch(knowledgeWorkspace, /Source Path/);
+  assert.doesNotMatch(knowledgeWorkspace, /knowledge graph/i);
   assert.match(script, /"prompts",\s*"bot"/);
   assert.match(script, /agent-config-form/);
   assert.match(taskComposer, /id="composer-agent"/);
@@ -226,6 +236,38 @@ test("built web contains responsive application", async () => {
   assert.match(agents, /\.\/runtime_picker\.js\?v=[a-f0-9]{12}/);
   assert.match(codexAccounts, /button\.innerHTML = icon\("spinner", true\)/);
   assert.match(codexAccounts, /refreshAccount\(id, true\)[\s\S]*undefined, true/);
+});
+
+test("knowledge workspace separates global areas from project settings", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const {renderKnowledgeWorkspace} = await import(pathToFileURL(resolve(root, "dist", "knowledge_workspace.js")));
+  const html = renderKnowledgeWorkspace({
+    projects: [{id: "project-1", name: "AHA2", description: "", project_type: "git", knowledge_policy: "enabled", knowledge_revision: 3, updated_at: ""}],
+    workspaces: [{id: "workspace-1", project_id: "project-1", name: "Native", locality: "local", transport: "native", root_path: "C:/repo", ssh_password_configured: false, health: "ready"}],
+    knowledge: [{id: "knowledge-1", scope: "project", project_id: "project-1", type: "navigation", title: "Entry", body: "Read internal/app.", status: "verified", confidence: .9, revision: 2, helped_count: 1, stale_count: 0, created_at: "", updated_at: ""}],
+    refreshData: async () => {}, render: () => {}, setMessage: () => {},
+  });
+  assert.match(html, /PROJECT KNOWLEDGE/);
+  assert.match(html, /Workspace Bindings/);
+  assert.match(html, /Agent Pull/);
+  assert.match(html, /data-knowledge-area="global"/);
+  assert.match(html, /data-knowledge-area="skills"/);
+  assert.match(html, /data-knowledge-area="updates"/);
+  assert.doesNotMatch(html, /data-knowledge-section="skills"/);
+  assert.match(html, /data-knowledge-section="settings"/);
+  assert.doesNotMatch(html, /graph-canvas|knowledge-graph/);
+});
+
+test("task agent config selects skills explicitly", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const {renderAgentConfigDialog} = await import(pathToFileURL(resolve(root, "dist", "task_agents.js")));
+  const html = renderAgentConfigDialog({
+    task: {id: "task-1", project_id: "project-1", workspace_id: "workspace-1", title: "Task", original_request: "", current_goal: "", status: "active", isolation: "inplace", collaboration_mode: "auto", max_agents: 3, knowledge_policy: "inherit", skill_ids: ["skill-1"], total_tokens: 0, created_at: "", updated_at: ""},
+    agents: [{agent_id: "main", role: "main", title: "Main", backend: "codex", model_source: "env", model_id: "model-1", reasoning_effort: "high", filesystem: "workspace-write", approval: "never", proxy_enabled: false}],
+    turns: [], memory: {task_id: "task-1", current_goal: ""},
+  }, "main", [], [], [{id: "skill-1", scope: "global", project_id: "", name: "Review", description: "Review changes", instructions: "Review", version: 1, status: "active", enabled: true, source_path: "", created_at: "", updated_at: ""}]);
+  assert.match(html, /Task Skills/);
+  assert.match(html, /name="skill_ids" value="skill-1" checked/);
 });
 
 test("codex accounts render compact weekly quota", async () => {

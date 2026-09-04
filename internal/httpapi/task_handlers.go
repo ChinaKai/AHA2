@@ -120,26 +120,28 @@ func latestUsageTurn(turns []domain.Turn) domain.Turn {
 
 func (s *Server) createTask(writer http.ResponseWriter, request *http.Request) {
 	var payload struct {
-		ProjectID         string `json:"project_id"`
-		WorkspaceID       string `json:"workspace_id"`
-		Title             string `json:"title"`
-		Request           string `json:"request"`
-		TargetBranch      string `json:"target_branch"`
-		BaseCommit        string `json:"base_commit"`
-		TaskBranch        string `json:"task_branch"`
-		Isolation         string `json:"isolation"`
-		WorktreeDir       string `json:"worktree_dir"`
-		Backend           string `json:"backend"`
-		ModelSource       string `json:"model_source"`
-		ModelID           string `json:"model_id"`
-		WireModel         string `json:"wire_model"`
-		CodexAccountID    string `json:"codex_account_id"`
-		ReasoningEffort   string `json:"reasoning_effort"`
-		Filesystem        string `json:"filesystem"`
-		Approval          string `json:"approval"`
-		ProxyEnabled      bool   `json:"proxy_enabled"`
-		CollaborationMode string `json:"collaboration_mode"`
-		MaxAgents         int    `json:"max_agents"`
+		ProjectID         string   `json:"project_id"`
+		WorkspaceID       string   `json:"workspace_id"`
+		Title             string   `json:"title"`
+		Request           string   `json:"request"`
+		TargetBranch      string   `json:"target_branch"`
+		BaseCommit        string   `json:"base_commit"`
+		TaskBranch        string   `json:"task_branch"`
+		Isolation         string   `json:"isolation"`
+		WorktreeDir       string   `json:"worktree_dir"`
+		Backend           string   `json:"backend"`
+		ModelSource       string   `json:"model_source"`
+		ModelID           string   `json:"model_id"`
+		WireModel         string   `json:"wire_model"`
+		CodexAccountID    string   `json:"codex_account_id"`
+		ReasoningEffort   string   `json:"reasoning_effort"`
+		Filesystem        string   `json:"filesystem"`
+		Approval          string   `json:"approval"`
+		ProxyEnabled      bool     `json:"proxy_enabled"`
+		CollaborationMode string   `json:"collaboration_mode"`
+		MaxAgents         int      `json:"max_agents"`
+		KnowledgePolicy   string   `json:"knowledge_policy"`
+		SkillIDs          []string `json:"skill_ids"`
 	}
 	if err := decodeJSON(request, &payload); err != nil {
 		writeError(writer, http.StatusBadRequest, "invalid_json")
@@ -172,7 +174,8 @@ func (s *Server) createTask(writer http.ResponseWriter, request *http.Request) {
 		ModelSource: payload.ModelSource, ModelID: payload.ModelID, WireModel: payload.WireModel,
 		CodexAccountID: payload.CodexAccountID, ReasoningEffort: payload.ReasoningEffort,
 		Filesystem: filesystem, Approval: approval, CollaborationMode: payload.CollaborationMode,
-		MaxAgents: payload.MaxAgents, ProxyEnabled: payload.ProxyEnabled,
+		MaxAgents: payload.MaxAgents, ProxyEnabled: payload.ProxyEnabled, KnowledgePolicy: payload.KnowledgePolicy,
+		SkillIDs: payload.SkillIDs,
 	})
 	if err != nil {
 		writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "create_task_failed", "message": err.Error()})
@@ -798,15 +801,17 @@ func (s *Server) rotateAgentSession(writer http.ResponseWriter, request *http.Re
 func (s *Server) updateTaskTitle(writer http.ResponseWriter, request *http.Request) {
 	id := request.PathValue("id")
 	var payload struct {
-		Title             *string `json:"title"`
-		CollaborationMode *string `json:"collaboration_mode"`
-		MaxAgents         *int    `json:"max_agents"`
+		Title             *string   `json:"title"`
+		CollaborationMode *string   `json:"collaboration_mode"`
+		MaxAgents         *int      `json:"max_agents"`
+		KnowledgePolicy   *string   `json:"knowledge_policy"`
+		SkillIDs          *[]string `json:"skill_ids"`
 	}
 	if err := decodeJSON(request, &payload); err != nil {
 		writeError(writer, http.StatusBadRequest, "invalid_json")
 		return
 	}
-	if payload.Title == nil && payload.CollaborationMode == nil && payload.MaxAgents == nil {
+	if payload.Title == nil && payload.CollaborationMode == nil && payload.MaxAgents == nil && payload.KnowledgePolicy == nil && payload.SkillIDs == nil {
 		writeError(writer, http.StatusBadRequest, "task_update_required")
 		return
 	}
@@ -839,6 +844,23 @@ func (s *Server) updateTaskTitle(writer http.ResponseWriter, request *http.Reque
 			writeJSON(writer, http.StatusBadRequest, map[string]any{
 				"ok": false, "error": "update_collaboration_failed", "message": err.Error(),
 			})
+			return
+		}
+	}
+	if payload.KnowledgePolicy != nil {
+		policy := strings.TrimSpace(*payload.KnowledgePolicy)
+		if policy != "inherit" && policy != "enabled" && policy != "disabled" {
+			writeError(writer, http.StatusBadRequest, "invalid_knowledge_policy")
+			return
+		}
+		if err := s.store.UpdateTaskKnowledgePolicy(request.Context(), id, policy, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+			writeError(writer, http.StatusInternalServerError, "update_knowledge_policy_failed")
+			return
+		}
+	}
+	if payload.SkillIDs != nil {
+		if _, err := s.app.UpdateTaskSkills(request.Context(), id, *payload.SkillIDs); err != nil {
+			writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "update_task_skills_failed", "message": err.Error()})
 			return
 		}
 	}

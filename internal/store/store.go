@@ -13,7 +13,8 @@ import (
 )
 
 type Store struct {
-	db *sql.DB
+	db      *sql.DB
+	dataDir string
 }
 
 func Open(ctx context.Context, path string) (*Store, error) {
@@ -29,7 +30,7 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	}
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
-	result := &Store{db: db}
+	result := &Store{db: db, dataDir: filepath.Dir(path)}
 	if err := result.migrate(ctx); err != nil {
 		db.Close()
 		return nil, err

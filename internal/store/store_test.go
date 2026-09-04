@@ -378,3 +378,73 @@ func TestMigrationV20RemovesUnusedAccountBoundOfficialModels(t *testing.T) {
 		t.Fatalf("legacy official rows were retained: snapshots=%d providers=%d", snapshotCount, providerCount)
 	}
 }
+
+func TestKnowledgeCatalogV22(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database, err := Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var migrated bool
+	if err := database.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=22)`).Scan(&migrated); err != nil || !migrated {
+		t.Fatalf("schema v22 missing: migrated=%t err=%v", migrated, err)
+	}
+	if err := database.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=23)`).Scan(&migrated); err != nil || !migrated {
+		t.Fatalf("schema v23 missing: migrated=%t err=%v", migrated, err)
+	}
+	now := time.Now().UTC()
+	project := domain.Project{ID: "project-kb", Name: "Knowledge", KnowledgePolicy: "enabled", CreatedAt: now, UpdatedAt: now}
+	if err := database.CreateProject(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	line := domain.ProductLine{ID: "line-main", ProjectID: project.ID, Name: "Main", BranchPattern: "main", Default: true, CreatedAt: now, UpdatedAt: now}
+	if err := database.CreateProductLine(ctx, line); err != nil {
+		t.Fatal(err)
+	}
+	lines, err := database.ListProductLines(ctx, project.ID)
+	if err != nil || len(lines) != 1 || !lines[0].Default {
+		t.Fatalf("product lines = %#v, %v", lines, err)
+	}
+	skill := domain.Skill{ID: "skill-review", Scope: "project", ProjectID: project.ID, Name: "Review", Description: "Review changes", Instructions: "Run focused tests.", Version: 1, Status: "active", Enabled: true, CreatedAt: now, UpdatedAt: now}
+	if err := database.CreateSkill(ctx, skill); err != nil {
+		t.Fatal(err)
+	}
+	skills, err := database.ListSkills(ctx, "project", project.ID, true)
+	if err != nil || len(skills) != 1 || skills[0].Name != skill.Name {
+		t.Fatalf("skills = %#v, %v", skills, err)
+	}
+	entries := []domain.KnowledgeEntry{
+		{ID: "knowledge-common", Scope: "project", ProjectID: project.ID, Type: "practice", Title: "Common", Body: "Shared", Status: domain.KnowledgeVerified, Confidence: .9, CreatedAt: now, UpdatedAt: now},
+		{ID: "knowledge-main", Scope: "project", ProjectID: project.ID, ProductLineID: line.ID, Type: "navigation", Title: "Main", Body: "Main route", Status: domain.KnowledgeVerified, Confidence: .9, CreatedAt: now, UpdatedAt: now},
+		{ID: "knowledge-other", Scope: "project", ProjectID: project.ID, ProductLineID: "line-other", Type: "navigation", Title: "Other", Body: "Other route", Status: domain.KnowledgeVerified, Confidence: .9, CreatedAt: now, UpdatedAt: now},
+	}
+	for _, entry := range entries {
+		if err := database.CreateKnowledge(ctx, entry); err != nil {
+			t.Fatal(err)
+		}
+	}
+	applicable, err := database.ListApplicableKnowledge(ctx, project.ID, line.ID, []domain.KnowledgeStatus{domain.KnowledgeVerified})
+	if err != nil || len(applicable) != 2 {
+		t.Fatalf("applicable knowledge = %#v, %v", applicable, err)
+	}
+	updated, err := database.FeedbackKnowledge(ctx, "knowledge-main", "helped", now.Add(time.Second).Format(time.RFC3339Nano))
+	if err != nil || updated.HelpedCount != 1 || updated.FeedbackState != "helped" {
+		t.Fatalf("helped feedback = %#v, %v", updated, err)
+	}
+	updated, err = database.FeedbackKnowledge(ctx, "knowledge-main", "stale", now.Add(2*time.Second).Format(time.RFC3339Nano))
+	if err != nil || updated.StaleCount != 1 || updated.Status != domain.KnowledgeStale {
+		t.Fatalf("stale feedback = %#v, %v", updated, err)
+	}
+	skill.Description = "Updated"
+	skill.Version = 2
+	skill.Enabled = false
+	skill.UpdatedAt = now.Add(time.Second)
+	if err := database.UpdateSkill(ctx, skill); err != nil {
+		t.Fatal(err)
+	}
+	if item, err := database.Skill(ctx, skill.ID); err != nil || item.Enabled || item.Version != 2 {
+		t.Fatalf("updated skill = %#v, %v", item, err)
+	}
+}
