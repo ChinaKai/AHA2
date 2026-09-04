@@ -311,17 +311,28 @@ func TestTaskAgentAPIIsolationAndConfigInheritance(t *testing.T) {
 		{
 			ID: "session-api-main", TaskID: task.ID, AgentID: "main", WorkspaceID: workspace.ID,
 			Backend: "stub", ModelID: model2.ID, EnvGroupRevision: env2.Revision,
-			ProviderSession: "provider-main", Status: "active", CreatedAt: now, LastUsedAt: now,
+			ProviderSession: "provider-main", Status: "active",
+			ContextUsageJSON: `{"input_tokens":120,"output_tokens":15}`,
+			CreatedAt:        now, LastUsedAt: now,
 		},
 		{
 			ID: "session-api-child", TaskID: task.ID, AgentID: "sub-001", WorkspaceID: workspace.ID,
 			Backend: "stub", ModelID: model2.ID, EnvGroupRevision: env2.Revision,
-			ProviderSession: "provider-child", Status: "active", CreatedAt: now, LastUsedAt: now,
+			ProviderSession: "provider-child", Status: "active",
+			ContextUsageJSON: `{"input_tokens":50,"output_tokens":5}`,
+			CreatedAt:        now, LastUsedAt: now,
 		},
 	} {
 		if err := database.UpsertBackendSession(ctx, session); err != nil {
 			t.Fatal(err)
 		}
+	}
+	response = requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/tasks", nil, "")
+	var taskList map[string]any
+	decodeResponse(t, response, &taskList)
+	listedTasks := taskList["tasks"].([]any)
+	if len(listedTasks) != 1 || listedTasks[0].(map[string]any)["total_tokens"] != float64(190) {
+		t.Fatalf("task total tokens missing main/sub usage: %#v", taskList)
 	}
 	response = requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/tasks/"+task.ID+"/agents/main/session/compact", nil, csrf)
 	var compactResponse map[string]any
@@ -555,37 +566,90 @@ func TestApplyTurnTimingsUsesServerClock(t *testing.T) {
 	}
 }
 
-func TestContextUsageUsesCodexTurnDelta(t *testing.T) {
+func TestContextUsageUsesBackendSpecificFormula(t *testing.T) {
 	t.Parallel()
 	current := map[string]any{"input_tokens": float64(1200082)}
-	previous := map[string]any{"input_tokens": float64(1149164)}
-	if actual := contextTokensForUsage("codex", current, previous); actual != 50918 {
-		t.Fatalf("context token delta = %v", actual)
+	if actual := contextTokensForUsage("codex", current); actual != 1200082 {
+		t.Fatalf("codex context input = %v", actual)
 	}
-	if baseline := contextTokensForUsage("codex", previous, map[string]any{"input_tokens": float64(1100038)}); baseline != 49126 {
-		t.Fatalf("active turn baseline = %v", baseline)
+	claude := map[string]any{
+		"input_tokens": float64(100), "cache_read_input_tokens": float64(80),
+		"cache_creation_input_tokens": float64(5),
 	}
-	if active := activeCodexContextTokens(
-		1200082,
-		map[string]any{"input_tokens": float64(1200082)},
-		map[string]any{"input_tokens": float64(1149164)},
-		4000,
-	); active != 51918 {
-		t.Fatalf("active context reused cumulative input: %v", active)
+	if actual := contextTokensForUsage("claude", claude); actual != 185 {
+		t.Fatalf("claude effective context input = %v", actual)
 	}
 	turn := domain.Turn{
-		ContextWindow: 1050000,
+		ContextWindow: 258400,
 		Usage: map[string]any{
-			"input_tokens":   float64(1200082),
-			"context_tokens": float64(50918),
+			"context_tokens": float64(128592),
 		},
 	}
-	if actual := turnContextPercent(turn); actual != 4.8 {
+	if actual := turnContextPercent(turn); actual != 49.8 {
 		t.Fatalf("context percent = %v", actual)
 	}
-	turn.Usage = map[string]any{"input_tokens": float64(1200082)}
-	if actual := turnContextPercent(turn); actual != 100 {
-		t.Fatalf("context percent was not clamped: %v", actual)
+	turn.Usage["context_inconsistent"] = float64(1)
+	if actual := turnContextPercent(turn); actual != 0 {
+		t.Fatalf("inconsistent context percent = %v", actual)
+	}
+}
+
+func TestCodexContextSampleUsesLastTokenUsageAndRuntimeWindow(t *testing.T) {
+	t.Parallel()
+	var record map[string]any
+	if err := json.Unmarshal([]byte(`{
+		"payload":{"type":"token_count","info":{
+			"model_context_window":258400,
+			"last_token_usage":{"input_tokens":128592,"cached_input_tokens":127872},
+			"total_token_usage":{"input_tokens":4724223}
+		}}
+	}`), &record); err != nil {
+		t.Fatal(err)
+	}
+	sample, ok := codexContextSample(record)
+	if !ok || sample.InputTokens != 128592 || sample.ContextWindow != 258400 {
+		t.Fatalf("runtime context sample = %#v, ok=%v", sample, ok)
+	}
+}
+
+func TestTaskTotalTokensIncludesMainAndSubSessions(t *testing.T) {
+	t.Parallel()
+	turns := []domain.Turn{
+		{
+			ID: "main-old", AgentID: "main", Sequence: 1, BackendSessionID: "main-session",
+			Usage: map[string]any{"input_tokens": float64(110), "output_tokens": float64(10)},
+		},
+		{
+			ID: "main-new", AgentID: "main", Sequence: 2, BackendSessionID: "main-session",
+			Usage: map[string]any{"input_tokens": float64(120), "output_tokens": float64(15)},
+		},
+		{
+			ID: "sub-first", AgentID: "sub-001", Sequence: 3, BackendSessionID: "sub-session",
+			Usage: map[string]any{
+				"input_tokens": float64(10), "cache_read_input_tokens": float64(2),
+				"cache_creation_input_tokens": float64(7), "output_tokens": float64(3),
+			},
+		},
+		{
+			ID: "sub-second", AgentID: "sub-001", Sequence: 4, BackendSessionID: "sub-session",
+			Usage: map[string]any{
+				"input_tokens": float64(5), "cache_read_input_tokens": float64(1),
+				"cache_creation_input_tokens": float64(4), "output_tokens": float64(7),
+			},
+		},
+	}
+	sessions := []domain.BackendSession{
+		{
+			ID: "main-session", AgentID: "main", Backend: "codex",
+			ContextUsageJSON: `{"input_tokens":100,"output_tokens":10}`,
+		},
+		{
+			ID: "sub-session", AgentID: "sub-001", Backend: "claude",
+			ContextUsageJSON: `{"input_tokens":999,"cache_read_input_tokens":999,"output_tokens":999}`,
+		},
+	}
+	if actual := taskTotalTokens(turns, sessions, nil); actual != 163 {
+		t.Fatalf("task total tokens = %v", actual)
 	}
 }
 
@@ -612,7 +676,7 @@ func TestContextMetricsAggregateSessionHistory(t *testing.T) {
 			CreatedAt:        now, LastUsedAt: now,
 		},
 	}
-	metrics := contextMetrics(turn, sessions, domain.Workspace{Transport: "ssh"})
+	metrics := contextMetrics(turn, sessions, domain.Workspace{Transport: "ssh"}, []domain.Turn{turn})
 	for key, want := range map[string]float64{
 		"total_tokens": 340, "history_tokens": 110, "current_total_tokens": 230,
 		"input_tokens": 300, "cached_input_tokens": 240, "output_tokens": 40,
@@ -635,12 +699,12 @@ func TestContextMetricsAggregateSessionHistory(t *testing.T) {
 	}
 	turn.Status = domain.TurnSucceeded
 	sessions[1].Status = "reset"
-	metrics = contextMetrics(turn, sessions, domain.Workspace{Transport: "ssh"})
+	metrics = contextMetrics(turn, sessions, domain.Workspace{Transport: "ssh"}, []domain.Turn{turn})
 	if got := usageNumber(metrics, "context_tokens"); got != 0 || metrics["session_active"] != false {
 		t.Fatalf("reset session retained active context: %#v", metrics)
 	}
-	if got := usageNumber(metrics, "total_tokens"); got != 280 {
-		t.Fatalf("reset history total = %v, want 280; metrics=%#v", got, metrics)
+	if got := usageNumber(metrics, "total_tokens"); got != 340 {
+		t.Fatalf("reset history total = %v, want 340; metrics=%#v", got, metrics)
 	}
 }
 

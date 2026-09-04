@@ -28,14 +28,10 @@ func (runner WSLRunner) Run(parent context.Context, command Command, onLine Line
 	if err != nil {
 		return Result{}, err
 	}
-	// User-local bins (nvm, cargo, pip --user, .local/bin) are not on the
-	// default non-login PATH inside the distro; surface them so codex/claude
-	// installed under ~/.local/bin resolve by name.
-	pathBootstrap := "export PATH=\"$HOME/.local/bin:$HOME/bin:$PATH\"\n"
 	return runProcess(parent, Command{
 		Executable: findWSLExecutable(),
 		Args:       []string{"-d", distro, "--", "bash", "-s"},
-		Stdin:      pathBootstrap + script,
+		Stdin:      script,
 		Timeout:    command.Timeout,
 	}, wslHostEnvironment(), onLine)
 }

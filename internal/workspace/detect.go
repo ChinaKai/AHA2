@@ -17,7 +17,10 @@ func RunnerFor(item domain.Workspace) Runner {
 	case item.Transport == "wsl":
 		return WSLRunner{Distro: item.Distro}
 	case item.Transport == "ssh" || item.Locality == "remote":
-		return SSHRunner{Host: item.SSHHost, User: item.SSHUser, Port: item.SSHPort}
+		return SSHRunner{
+			Host: item.SSHHost, User: item.SSHUser, Port: item.SSHPort,
+			Auth: item.SSHAuth, Password: item.SSHPassword,
+		}
 	default:
 		return LocalRunner{}
 	}

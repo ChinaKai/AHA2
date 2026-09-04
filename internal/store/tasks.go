@@ -452,6 +452,27 @@ func (s *Store) ListBackendSessionsForAgent(ctx context.Context, taskID, agentID
 	return result, rows.Err()
 }
 
+func (s *Store) ListBackendSessionsForTask(ctx context.Context, taskID string) ([]domain.BackendSession, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT `+backendSessionColumns+`
+		FROM backend_sessions
+		WHERE task_id=?
+		ORDER BY created_at`, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []domain.BackendSession
+	for rows.Next() {
+		item, err := scanBackendSession(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
 func (s *Store) TaskMemory(ctx context.Context, taskID string) (domain.TaskMemory, error) {
 	var item domain.TaskMemory
 	var decisions, facts, excluded, progress, verification, nextActions, extra, updatedAt string

@@ -34,23 +34,27 @@ type Project struct {
 }
 
 type Workspace struct {
-	ID             string         `json:"id"`
-	ProjectID      string         `json:"project_id"`
-	Name           string         `json:"name"`
-	Locality       string         `json:"locality"`
-	Transport      string         `json:"transport"`
-	RootPath       string         `json:"root_path"`
-	SSHHost        string         `json:"ssh_host,omitempty"`
-	SSHUser        string         `json:"ssh_user,omitempty"`
-	SSHPort        int            `json:"ssh_port,omitempty"`
-	Distro         string         `json:"distro,omitempty"`
-	Platform       string         `json:"platform,omitempty"`
-	Health         string         `json:"health"`
-	Capabilities   map[string]any `json:"capabilities,omitempty"`
-	Repository     map[string]any `json:"repository,omitempty"`
-	LastDetectedAt time.Time      `json:"last_detected_at,omitempty"`
-	CreatedAt      time.Time      `json:"created_at"`
-	UpdatedAt      time.Time      `json:"updated_at"`
+	ID                    string         `json:"id"`
+	ProjectID             string         `json:"project_id"`
+	Name                  string         `json:"name"`
+	Locality              string         `json:"locality"`
+	Transport             string         `json:"transport"`
+	RootPath              string         `json:"root_path"`
+	SSHHost               string         `json:"ssh_host,omitempty"`
+	SSHUser               string         `json:"ssh_user,omitempty"`
+	SSHPort               int            `json:"ssh_port,omitempty"`
+	SSHAuth               string         `json:"ssh_auth,omitempty"`
+	SSHCredentialRef      string         `json:"-"`
+	SSHPasswordConfigured bool           `json:"ssh_password_configured"`
+	SSHPassword           string         `json:"-"`
+	Distro                string         `json:"distro,omitempty"`
+	Platform              string         `json:"platform,omitempty"`
+	Health                string         `json:"health"`
+	Capabilities          map[string]any `json:"capabilities,omitempty"`
+	Repository            map[string]any `json:"repository,omitempty"`
+	LastDetectedAt        time.Time      `json:"last_detected_at,omitempty"`
+	CreatedAt             time.Time      `json:"created_at"`
+	UpdatedAt             time.Time      `json:"updated_at"`
 }
 
 type Model struct {
@@ -127,6 +131,7 @@ type Task struct {
 	RuntimeConfigSnapshotID string     `json:"runtime_config_snapshot_id"`
 	CollaborationMode       string     `json:"collaboration_mode"`
 	MaxAgents               int        `json:"max_agents"`
+	TotalTokens             int64      `json:"total_tokens"`
 	CreatedAt               time.Time  `json:"created_at"`
 	UpdatedAt               time.Time  `json:"updated_at"`
 	CompletedAt             time.Time  `json:"completed_at,omitempty"`

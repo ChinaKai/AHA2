@@ -2,8 +2,12 @@ package backend
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"os"
+	pathpkg "path"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -12,8 +16,9 @@ import (
 )
 
 type Codex struct {
-	Binary  string
-	Timeout time.Duration
+	Binary          string
+	Timeout         time.Duration
+	ModelsCachePath string
 }
 
 func (adapter Codex) Execute(ctx context.Context, request Request, emit func(Event)) (Result, error) {
@@ -25,7 +30,8 @@ func (adapter Codex) Execute(ctx context.Context, request Request, emit func(Eve
 	if timeout == 0 {
 		timeout = 2 * time.Hour
 	}
-	args := codexArguments(request)
+	catalogPath := adapter.ensureModelCatalog(ctx, request)
+	args := codexArguments(request, catalogPath)
 	environment := filterEnvironment(request.Environment)
 	var reply, sessionID, providerError string
 	result, err := request.Runner.Run(ctx, workspace.Command{
@@ -76,7 +82,7 @@ func (adapter Codex) Execute(ctx context.Context, request Request, emit func(Eve
 	return Result{Reply: strings.TrimSpace(reply), ExitCode: result.ExitCode, ProviderSessionID: sessionID}, nil
 }
 
-func codexArguments(request Request) []string {
+func codexArguments(request Request, catalogPath string) []string {
 	args := []string{}
 	providerID := request.Environment["AHA_PROVIDER_ID"]
 	baseURL := request.Environment["OPENAI_BASE_URL"]
@@ -94,7 +100,9 @@ func codexArguments(request Request) []string {
 	if effort := strings.TrimSpace(request.ReasoningEffort); effort != "" {
 		args = append(args, "-c", "model_reasoning_effort="+strconv.Quote(effort))
 	}
-	if request.ContextWindow > 0 {
+	if catalogPath != "" {
+		args = append(args, "-c", "model_catalog_json="+strconv.Quote(catalogPath))
+	} else if request.ContextWindow > 0 {
 		args = append(args, "-c", fmt.Sprintf("model_context_window=%d", request.ContextWindow))
 	}
 	if baseURL != "" {
@@ -122,6 +130,140 @@ func codexArguments(request Request) []string {
 		args = append(args, "-")
 	}
 	return args
+}
+
+func (adapter Codex) ensureModelCatalog(ctx context.Context, request Request) string {
+	if request.Model == "" || request.ContextWindow <= 0 {
+		return ""
+	}
+	raw, local := adapter.readModelsCache(ctx, request)
+	if len(raw) == 0 {
+		return ""
+	}
+	var cache struct {
+		Models []map[string]any `json:"models"`
+	}
+	if json.Unmarshal(raw, &cache) != nil {
+		return ""
+	}
+	var template map[string]any
+	for _, item := range cache.Models {
+		if item["slug"] == request.Model && completeCodexModelTemplate(item) {
+			template = item
+			break
+		}
+	}
+	if template == nil {
+		for _, item := range cache.Models {
+			if item["slug"] == "gpt-5.5" && completeCodexModelTemplate(item) {
+				template = item
+				break
+			}
+		}
+	}
+	if template == nil {
+		return ""
+	}
+	entry := make(map[string]any, len(template))
+	for key, value := range template {
+		entry[key] = value
+	}
+	entry["slug"] = request.Model
+	entry["display_name"] = request.Model
+	entry["context_window"] = request.ContextWindow
+	maxWindow := int64(numberValue(entry["max_context_window"]))
+	if maxWindow < request.ContextWindow {
+		maxWindow = request.ContextWindow
+	}
+	entry["max_context_window"] = maxWindow
+	delete(entry, "auto_compact_token_limit")
+	payload, err := json.MarshalIndent(map[string]any{"models": []map[string]any{entry}}, "", "  ")
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%s:%d", request.Model, request.ContextWindow)))
+	name := fmt.Sprintf("%x.json", sum[:8])
+	if local {
+		path := filepath.Join(request.WorkDir, ".aha2-context", "runtime", "codex-models", name)
+		if os.MkdirAll(filepath.Dir(path), 0o700) != nil {
+			return ""
+		}
+		if existing, err := os.ReadFile(path); err == nil && string(existing) == string(payload) {
+			return path
+		}
+		if os.WriteFile(path, payload, 0o600) != nil {
+			return ""
+		}
+		return path
+	}
+	dir := pathpkg.Join(strings.ReplaceAll(request.WorkDir, `\`, "/"), ".aha2-context", "runtime", "codex-models")
+	path := pathpkg.Join(dir, name)
+	result, err := request.Runner.Run(ctx, workspace.Command{
+		Executable: "sh",
+		Args: []string{
+			"-c", `umask 077; mkdir -p "$1"; cat > "$2"`,
+			"aha2-catalog", dir, path,
+		},
+		Dir: request.WorkDir, Stdin: string(payload), Timeout: 20 * time.Second,
+	}, nil)
+	if err != nil || result.ExitCode != 0 {
+		return ""
+	}
+	return path
+}
+
+func (adapter Codex) readModelsCache(ctx context.Context, request Request) ([]byte, bool) {
+	if _, ok := request.Runner.(workspace.LocalRunner); ok {
+		cachePath := adapter.ModelsCachePath
+		if cachePath == "" {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				return nil, true
+			}
+			cachePath = filepath.Join(home, ".codex", "models_cache.json")
+		}
+		raw, _ := os.ReadFile(cachePath)
+		return raw, true
+	}
+	result, err := request.Runner.Run(ctx, workspace.Command{
+		Executable: "sh",
+		Args:       []string{"-c", `cat "$HOME/.codex/models_cache.json"`},
+		Dir:        request.WorkDir,
+		Timeout:    20 * time.Second,
+	}, nil)
+	if err != nil || result.ExitCode != 0 {
+		return nil, false
+	}
+	return []byte(result.Stdout), false
+}
+
+func completeCodexModelTemplate(value map[string]any) bool {
+	for _, key := range []string{
+		"slug", "display_name", "base_instructions", "supported_reasoning_levels",
+		"default_reasoning_level", "shell_type", "visibility", "supported_in_api",
+		"priority", "context_window",
+	} {
+		if _, ok := value[key]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func numberValue(value any) float64 {
+	switch typed := value.(type) {
+	case float64:
+		return typed
+	case int:
+		return float64(typed)
+	case int64:
+		return float64(typed)
+	case json.Number:
+		result, _ := typed.Float64()
+		return result
+	default:
+		return 0
+	}
 }
 
 func parseCodexLine(line string) (Event, string, string) {

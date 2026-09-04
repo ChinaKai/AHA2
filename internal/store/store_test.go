@@ -81,6 +81,20 @@ func TestMigrationV8BackfillsRoundsAndConversation(t *testing.T) {
 	if legacyIsolation != "" || legacyWorktreeDir != "" {
 		t.Fatalf("legacy workspace config was retained: isolation=%q worktree_dir=%q", legacyIsolation, legacyWorktreeDir)
 	}
+	var sshAuth, sshCredentialRef string
+	var sshPasswordConfigured bool
+	if err := database.db.QueryRowContext(
+		ctx,
+		`SELECT ssh_auth,ssh_credential_ref,ssh_password_configured FROM workspaces WHERE id='workspace-v7'`,
+	).Scan(&sshAuth, &sshCredentialRef, &sshPasswordConfigured); err != nil {
+		t.Fatal(err)
+	}
+	if sshAuth != "auto" || sshCredentialRef != "" || sshPasswordConfigured {
+		t.Fatalf(
+			"workspace SSH migration defaults are invalid: auth=%q ref=%q configured=%v",
+			sshAuth, sshCredentialRef, sshPasswordConfigured,
+		)
+	}
 	if err := database.migrate(ctx); err != nil {
 		t.Fatalf("repeat migration failed: %v", err)
 	}

@@ -33,6 +33,8 @@ export interface Workspace {
   ssh_host?: string;
   ssh_user?: string;
   ssh_port?: number;
+  ssh_auth?: "auto" | "password" | "key";
+  ssh_password_configured: boolean;
   distro?: string;
   platform?: string;
   health: string;
@@ -94,6 +96,7 @@ export interface Task {
   task_workspace_path?: string;
   collaboration_mode: "single" | "auto";
   max_agents: number;
+  total_tokens: number;
   created_at: string;
   updated_at: string;
 }

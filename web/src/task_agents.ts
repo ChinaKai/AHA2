@@ -125,11 +125,10 @@ export function contextPercent(turn: Turn): number {
   const window = Number(turn.context_window || 0);
   if (!window) return 0;
   const usage = turn.usage;
+  if (usageNumber(usage, "context_inconsistent")) return 0;
   const contextTokens = usageNumber(usage, "context_tokens");
-  const actual = contextTokens || usageNumber(usage, "input_tokens") +
-    usageNumber(usage, "cache_read_input_tokens") + usageNumber(usage, "cache_creation_input_tokens");
   const estimated = Number(turn.prompt_chars || 0) / 4;
-  return Math.max(0, Math.min(100, (actual || estimated) / window * 100));
+  return Math.max(0, Math.min(100, (contextTokens || estimated) / window * 100));
 }
 
 export function latestAgentTurns(turns: Turn[]): Turn[] {

@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -114,15 +115,18 @@ func (s *Server) listWorkspaces(writer http.ResponseWriter, request *http.Reques
 
 func (s *Server) createWorkspace(writer http.ResponseWriter, request *http.Request) {
 	var payload struct {
-		ProjectID string `json:"project_id"`
-		Name      string `json:"name"`
-		Locality  string `json:"locality"`
-		Transport string `json:"transport"`
-		RootPath  string `json:"root_path"`
-		SSHHost   string `json:"ssh_host"`
-		SSHUser   string `json:"ssh_user"`
-		SSHPort   int    `json:"ssh_port"`
-		Distro    string `json:"distro"`
+		ProjectID        string `json:"project_id"`
+		Name             string `json:"name"`
+		Locality         string `json:"locality"`
+		Transport        string `json:"transport"`
+		RootPath         string `json:"root_path"`
+		SSHHost          string `json:"ssh_host"`
+		SSHUser          string `json:"ssh_user"`
+		SSHPort          int    `json:"ssh_port"`
+		SSHAuth          string `json:"ssh_auth"`
+		SSHPassword      string `json:"ssh_password"`
+		ClearSSHPassword bool   `json:"clear_ssh_password"`
+		Distro           string `json:"distro"`
 	}
 	if err := decodeJSON(request, &payload); err != nil {
 		writeError(writer, http.StatusBadRequest, "invalid_json")
@@ -153,7 +157,33 @@ func (s *Server) createWorkspace(writer http.ResponseWriter, request *http.Reque
 		Distro: strings.TrimSpace(payload.Distro),
 		Health: "unknown", CreatedAt: now, UpdatedAt: now,
 	}
+	if item.Transport == "ssh" {
+		item.SSHAuth = normalizeWorkspaceSSHAuth(payload.SSHAuth)
+		if payload.SSHPassword != "" {
+			if s.secrets == nil {
+				writeError(writer, http.StatusInternalServerError, "secret_store_unavailable")
+				return
+			}
+			item.SSHCredentialRef = workspaceSSHCredentialRef(item.ID)
+			item.SSHPasswordConfigured = true
+		}
+		if err := validateWorkspaceSSH(item); err != nil {
+			writeJSON(writer, http.StatusBadRequest, map[string]any{
+				"ok": false, "error": "workspace_ssh_invalid", "message": err.Error(),
+			})
+			return
+		}
+		if payload.SSHPassword != "" {
+			if err := s.secrets.PutMany(map[string]string{item.SSHCredentialRef: payload.SSHPassword}); err != nil {
+				writeError(writer, http.StatusInternalServerError, "store_secrets_failed")
+				return
+			}
+		}
+	}
 	if err := s.store.CreateWorkspace(request.Context(), item); err != nil {
+		if item.SSHCredentialRef != "" && s.secrets != nil {
+			_ = s.secrets.DeleteMany([]string{item.SSHCredentialRef})
+		}
 		writeError(writer, http.StatusInternalServerError, "create_workspace_failed")
 		return
 	}
@@ -169,14 +199,17 @@ func (s *Server) updateWorkspace(writer http.ResponseWriter, request *http.Reque
 		return
 	}
 	var payload struct {
-		Name      string `json:"name"`
-		Locality  string `json:"locality"`
-		Transport string `json:"transport"`
-		RootPath  string `json:"root_path"`
-		SSHHost   string `json:"ssh_host"`
-		SSHUser   string `json:"ssh_user"`
-		SSHPort   int    `json:"ssh_port"`
-		Distro    string `json:"distro"`
+		Name             string `json:"name"`
+		Locality         string `json:"locality"`
+		Transport        string `json:"transport"`
+		RootPath         string `json:"root_path"`
+		SSHHost          string `json:"ssh_host"`
+		SSHUser          string `json:"ssh_user"`
+		SSHPort          int    `json:"ssh_port"`
+		SSHAuth          string `json:"ssh_auth"`
+		SSHPassword      string `json:"ssh_password"`
+		ClearSSHPassword bool   `json:"clear_ssh_password"`
+		Distro           string `json:"distro"`
 	}
 	if err := decodeJSON(request, &payload); err != nil {
 		writeError(writer, http.StatusBadRequest, "invalid_json")
@@ -205,10 +238,57 @@ func (s *Server) updateWorkspace(writer http.ResponseWriter, request *http.Reque
 	existing.SSHUser = strings.TrimSpace(payload.SSHUser)
 	existing.SSHPort = payload.SSHPort
 	existing.Distro = strings.TrimSpace(payload.Distro)
+	oldCredentialRef := existing.SSHCredentialRef
+	oldPassword, hadOldPassword := "", false
+	if oldCredentialRef != "" && s.secrets != nil {
+		oldPassword, hadOldPassword = s.secrets.Get(oldCredentialRef)
+	}
+	wroteCredential := false
+	if existing.Transport == "ssh" {
+		existing.SSHAuth = normalizeWorkspaceSSHAuth(payload.SSHAuth)
+		if payload.ClearSSHPassword {
+			existing.SSHCredentialRef = ""
+			existing.SSHPasswordConfigured = false
+		} else if payload.SSHPassword != "" {
+			if s.secrets == nil {
+				writeError(writer, http.StatusInternalServerError, "secret_store_unavailable")
+				return
+			}
+			existing.SSHCredentialRef = workspaceSSHCredentialRef(existing.ID)
+			existing.SSHPasswordConfigured = true
+		}
+		if err := validateWorkspaceSSH(existing); err != nil {
+			writeJSON(writer, http.StatusBadRequest, map[string]any{
+				"ok": false, "error": "workspace_ssh_invalid", "message": err.Error(),
+			})
+			return
+		}
+		if payload.SSHPassword != "" && !payload.ClearSSHPassword {
+			if err := s.secrets.PutMany(map[string]string{existing.SSHCredentialRef: payload.SSHPassword}); err != nil {
+				writeError(writer, http.StatusInternalServerError, "store_secrets_failed")
+				return
+			}
+			wroteCredential = true
+		}
+	} else {
+		existing.SSHAuth = ""
+		existing.SSHCredentialRef = ""
+		existing.SSHPasswordConfigured = false
+	}
 	existing.UpdatedAt = time.Now().UTC()
 	if err := s.store.UpdateWorkspaceConfig(request.Context(), existing); err != nil {
+		if wroteCredential && s.secrets != nil {
+			if oldCredentialRef == existing.SSHCredentialRef && hadOldPassword {
+				_ = s.secrets.PutMany(map[string]string{oldCredentialRef: oldPassword})
+			} else {
+				_ = s.secrets.DeleteMany([]string{existing.SSHCredentialRef})
+			}
+		}
 		writeError(writer, http.StatusInternalServerError, "update_workspace_failed")
 		return
+	}
+	if oldCredentialRef != "" && oldCredentialRef != existing.SSHCredentialRef && s.secrets != nil {
+		_ = s.secrets.DeleteMany([]string{oldCredentialRef})
 	}
 	s.audit(request, "workspace.update", "workspace", id, map[string]any{"transport": existing.Transport})
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "workspace": existing})
@@ -224,6 +304,9 @@ func (s *Server) detectWorkspaceHandler(writer http.ResponseWriter, request *htt
 		writeError(writer, http.StatusNotFound, "workspace_not_found")
 		return
 	}
+	if item.SSHCredentialRef != "" && s.secrets != nil {
+		item.SSHPassword, _ = s.secrets.Get(item.SSHCredentialRef)
+	}
 	detected, err := s.detectWorkspace(request.Context(), item)
 	if err != nil {
 		item.Health = "error"
@@ -238,6 +321,37 @@ func (s *Server) detectWorkspaceHandler(writer http.ResponseWriter, request *htt
 		return
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "workspace": detected})
+}
+
+func workspaceSSHCredentialRef(workspaceID string) string {
+	return "workspace/" + workspaceID + "/ssh/credential"
+}
+
+func normalizeWorkspaceSSHAuth(value string) string {
+	switch strings.TrimSpace(value) {
+	case "password":
+		return "password"
+	case "key":
+		return "key"
+	default:
+		return "auto"
+	}
+}
+
+func validateWorkspaceSSH(item domain.Workspace) error {
+	if item.SSHHost == "" {
+		return fmt.Errorf("SSH Host 不能为空")
+	}
+	if item.SSHUser == "" {
+		return fmt.Errorf("SSH User 不能为空")
+	}
+	if item.SSHPort < 1 || item.SSHPort > 65535 {
+		return fmt.Errorf("SSH Port 必须在 1 到 65535 之间")
+	}
+	if item.SSHAuth == "password" && !item.SSHPasswordConfigured {
+		return fmt.Errorf("密码认证需要配置 SSH 密码")
+	}
+	return nil
 }
 
 func (s *Server) listModels(writer http.ResponseWriter, request *http.Request) {

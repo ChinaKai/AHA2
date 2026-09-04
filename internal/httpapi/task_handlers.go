@@ -23,7 +23,101 @@ func (s *Server) listTasks(writer http.ResponseWriter, request *http.Request) {
 		writeError(writer, http.StatusInternalServerError, "list_tasks_failed")
 		return
 	}
+	s.applyTaskTokenTotals(request.Context(), items)
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "tasks": items})
+}
+
+func (s *Server) applyTaskTokenTotals(ctx context.Context, tasks []domain.Task) {
+	for index := range tasks {
+		turns, turnsErr := s.store.ListTurns(ctx, tasks[index].ID)
+		sessions, sessionsErr := s.store.ListBackendSessionsForTask(ctx, tasks[index].ID)
+		if turnsErr != nil || sessionsErr != nil {
+			continue
+		}
+		backends := map[string]string{}
+		for _, turn := range turns {
+			if _, ok := backends[turn.RuntimeConfigSnapshotID]; ok {
+				continue
+			}
+			if snapshot, err := s.store.RuntimeSnapshot(ctx, turn.RuntimeConfigSnapshotID); err == nil {
+				backends[turn.RuntimeConfigSnapshotID] = snapshot.Backend
+			}
+		}
+		tasks[index].TotalTokens = int64(taskTotalTokens(turns, sessions, backends))
+	}
+}
+
+func taskTotalTokens(
+	turns []domain.Turn,
+	sessions []domain.BackendSession,
+	backendBySnapshot map[string]string,
+) float64 {
+	turnsBySession := map[string][]domain.Turn{}
+	withoutSession := make([]domain.Turn, 0)
+	for _, turn := range turns {
+		if len(turn.Usage) == 0 {
+			continue
+		}
+		if turn.BackendSessionID == "" {
+			withoutSession = append(withoutSession, turn)
+			continue
+		}
+		turnsBySession[turn.BackendSessionID] = append(turnsBySession[turn.BackendSessionID], turn)
+	}
+	total := float64(0)
+	for _, session := range sessions {
+		var usage map[string]any
+		_ = json.Unmarshal([]byte(session.ContextUsageJSON), &usage)
+		usage = backendSessionUsage(session.Backend, turnsBySession[session.ID], usage)
+		delete(turnsBySession, session.ID)
+		total += usageTotalTokens(usage, session.Backend)
+	}
+	for _, sessionTurns := range turnsBySession {
+		latest := latestUsageTurn(sessionTurns)
+		backend := backendBySnapshot[latest.RuntimeConfigSnapshotID]
+		total += usageTotalTokens(backendSessionUsage(backend, sessionTurns, nil), backend)
+	}
+	for _, turn := range withoutSession {
+		total += usageTotalTokens(turn.Usage, backendBySnapshot[turn.RuntimeConfigSnapshotID])
+	}
+	return total
+}
+
+func backendSessionUsage(backend string, turns []domain.Turn, fallback map[string]any) map[string]any {
+	if len(turns) == 0 {
+		return fallback
+	}
+	if backend != "claude" {
+		return latestUsageTurn(turns).Usage
+	}
+	result := map[string]any{}
+	for _, key := range []string{
+		"input_tokens", "cached_input_tokens", "cache_read_input_tokens",
+		"cache_creation_input_tokens", "output_tokens", "reasoning_output_tokens",
+	} {
+		total := float64(0)
+		present := false
+		for _, turn := range turns {
+			if _, ok := turn.Usage[key]; ok {
+				present = true
+			}
+			total += usageNumber(turn.Usage, key)
+		}
+		if present {
+			result[key] = total
+		}
+	}
+	return result
+}
+
+func latestUsageTurn(turns []domain.Turn) domain.Turn {
+	var latest domain.Turn
+	for _, turn := range turns {
+		if latest.ID == "" || turn.Sequence > latest.Sequence {
+			latest = turn
+		}
+	}
+	return latest
 }
 
 func (s *Server) createTask(writer http.ResponseWriter, request *http.Request) {
@@ -186,7 +280,7 @@ func (s *Server) contextForAgent(writer http.ResponseWriter, request *http.Reque
 	latest := latestTurnForAgent(agentTurns, agentID)
 	sessions, _ := s.store.ListBackendSessionsForAgent(request.Context(), taskID, agentID)
 	workspace, _ := s.store.Workspace(request.Context(), task.WorkspaceID)
-	metrics := contextMetrics(latest, sessions, workspace)
+	metrics := contextMetrics(latest, sessions, workspace, agentTurns)
 	contextUsage := latest.Usage
 	contextPercent := turnContextPercent(latest)
 	if active, _ := metrics["session_active"].(bool); !active && latest.Status.Terminal() {
@@ -216,7 +310,12 @@ func latestTurnForAgent(turns []domain.Turn, agentID string) domain.Turn {
 	return latest
 }
 
-func contextMetrics(turn domain.Turn, sessions []domain.BackendSession, workspace domain.Workspace) map[string]any {
+func contextMetrics(
+	turn domain.Turn,
+	sessions []domain.BackendSession,
+	workspace domain.Workspace,
+	turns []domain.Turn,
+) map[string]any {
 	backend := ""
 	var active domain.BackendSession
 	var latestSession domain.BackendSession
@@ -237,9 +336,15 @@ func contextMetrics(turn domain.Turn, sessions []domain.BackendSession, workspac
 	for _, session := range sessions {
 		var usage map[string]any
 		_ = json.Unmarshal([]byte(session.ContextUsageJSON), &usage)
+		sessionTurns := make([]domain.Turn, 0)
+		for _, candidate := range turns {
+			if candidate.BackendSessionID == session.ID && len(candidate.Usage) > 0 {
+				sessionTurns = append(sessionTurns, candidate)
+			}
+		}
+		usage = backendSessionUsage(session.Backend, sessionTurns, usage)
 		isCurrent := active.ID != "" && session.ID == active.ID
-		if isCurrent && session.ID == turn.BackendSessionID && len(turn.Usage) > 0 {
-			usage = turn.Usage
+		if isCurrent && session.ID == turn.BackendSessionID && len(usage) > 0 {
 			currentIncluded = true
 		}
 		total := usageTotalTokens(usage, session.Backend)
@@ -382,15 +487,10 @@ func elapsedMilliseconds(start, end, now time.Time) int64 {
 }
 
 func turnContextPercent(turn domain.Turn) float64 {
-	if turn.ContextWindow <= 0 {
+	if turn.ContextWindow <= 0 || usageNumber(turn.Usage, "context_inconsistent") > 0 {
 		return 0
 	}
 	input := usageNumber(turn.Usage, "context_tokens")
-	if input <= 0 {
-		input = usageNumber(turn.Usage, "input_tokens")
-		input += usageNumber(turn.Usage, "cache_read_input_tokens")
-		input += usageNumber(turn.Usage, "cache_creation_input_tokens")
-	}
 	if input <= 0 {
 		return 0
 	}
@@ -408,8 +508,8 @@ func (s *Server) applyTurnContextUsage(ctx context.Context, turns []domain.Turn)
 		if turn.Usage == nil {
 			turn.Usage = map[string]any{}
 		}
-		totalInput := usageNumber(turn.Usage, "input_tokens")
-		if totalInput <= 0 {
+		rawInput := usageNumber(turn.Usage, "input_tokens")
+		if rawInput <= 0 {
 			if !turn.Status.Terminal() && turn.PromptChars > 0 {
 				turn.Usage["context_tokens"] = float64(turn.PromptChars) / 4
 			}
@@ -423,53 +523,94 @@ func (s *Server) applyTurnContextUsage(ctx context.Context, turns []domain.Turn)
 			}
 			backends[turn.RuntimeConfigSnapshotID] = backend
 		}
-		contextTokens := totalInput
-		var previous map[string]any
-		if backend == "codex" {
-			previousTurn, err := s.store.PreviousTurnForSession(ctx, *turn)
-			if err == nil {
-				previous = previousTurn.Usage
-				if !turn.Status.Terminal() && totalInput <= usageNumber(previous, "input_tokens") {
-					var before map[string]any
-					if beforeTurn, beforeErr := s.store.PreviousTurnForSession(ctx, previousTurn); beforeErr == nil {
-						before = beforeTurn.Usage
-					}
-					contextTokens = activeCodexContextTokens(totalInput, previous, before, turn.PromptChars)
-					previous = nil
-				}
+		contextTokens := contextTokensForUsage(backend, turn.Usage)
+		turn.Usage["total_input_tokens"] = rawInput
+		if turn.ContextWindow > 0 && contextTokens > float64(turn.ContextWindow) {
+			delete(turn.Usage, "context_tokens")
+			turn.Usage["context_inconsistent"] = float64(1)
+			continue
+		}
+		turn.Usage["context_tokens"] = contextTokens
+		delete(turn.Usage, "context_inconsistent")
+	}
+	s.applyCodexRuntimeContext(ctx, turns)
+}
+
+func (s *Server) applyCodexRuntimeContext(ctx context.Context, turns []domain.Turn) {
+	if len(turns) == 0 {
+		return
+	}
+	task, err := s.store.Task(ctx, turns[0].TaskID)
+	if err != nil {
+		return
+	}
+	workspace, err := s.store.Workspace(ctx, task.WorkspaceID)
+	if err != nil {
+		return
+	}
+	sessions, err := s.store.ListBackendSessionsForTask(ctx, task.ID)
+	if err != nil {
+		return
+	}
+	byID := map[string]domain.BackendSession{}
+	byAgent := map[string]domain.BackendSession{}
+	for _, session := range sessions {
+		if session.Backend != "codex" || session.Status != "active" {
+			continue
+		}
+		byID[session.ID] = session
+		byAgent[session.AgentID] = session
+	}
+	latest := map[string]int{}
+	for index := range turns {
+		current, ok := latest[turns[index].AgentID]
+		if !ok || turns[index].Sequence > turns[current].Sequence {
+			latest[turns[index].AgentID] = index
+		}
+	}
+	samples := map[string]runtimeContextSample{}
+	missing := map[string]bool{}
+	for _, index := range latest {
+		turn := &turns[index]
+		session, ok := byID[turn.BackendSessionID]
+		if !ok {
+			session, ok = byAgent[turn.AgentID]
+		}
+		if !ok {
+			continue
+		}
+		sample, cached := samples[session.ID]
+		if !cached && !missing[session.ID] {
+			var found bool
+			sample, found = codexRuntimeContext(ctx, session, workspace)
+			if found {
+				samples[session.ID] = sample
+			} else {
+				missing[session.ID] = true
 			}
 		}
-		if previous != nil || backend != "codex" {
-			contextTokens = contextTokensForUsage(backend, turn.Usage, previous)
+		if sample.ContextWindow <= 0 || sample.InputTokens <= 0 {
+			continue
 		}
-		turn.Usage["total_input_tokens"] = totalInput
-		turn.Usage["context_tokens"] = contextTokens
+		turn.ContextWindow = sample.ContextWindow
+		if turn.Usage == nil {
+			turn.Usage = map[string]any{}
+		}
+		if sample.InputTokens > float64(sample.ContextWindow) {
+			delete(turn.Usage, "context_tokens")
+			turn.Usage["context_inconsistent"] = float64(1)
+			continue
+		}
+		turn.Usage["context_tokens"] = sample.InputTokens
+		delete(turn.Usage, "context_inconsistent")
 	}
 }
 
-func activeCodexContextTokens(totalInput float64, previous, before map[string]any, promptChars int) float64 {
-	previousInput := usageNumber(previous, "input_tokens")
-	if delta := totalInput - previousInput; delta > 0 {
-		return delta
-	}
-	previousContext := usageNumber(previous, "context_tokens")
-	if previousContext <= 0 && len(before) > 0 {
-		previousContext = contextTokensForUsage("codex", previous, before)
-	}
-	promptEstimate := float64(promptChars) / 4
-	if previousContext > 0 {
-		return previousContext + promptEstimate
-	}
-	return promptEstimate
-}
-
-func contextTokensForUsage(backend string, current, previous map[string]any) float64 {
+func contextTokensForUsage(backend string, current map[string]any) float64 {
 	currentInput := usageNumber(current, "input_tokens")
-	if backend != "codex" || len(previous) == 0 {
-		return currentInput
-	}
-	if delta := currentInput - usageNumber(previous, "input_tokens"); delta > 0 {
-		return delta
+	if backend == "claude" {
+		return currentInput + usageNumber(current, "cache_read_input_tokens") +
+			usageNumber(current, "cache_creation_input_tokens")
 	}
 	return currentInput
 }

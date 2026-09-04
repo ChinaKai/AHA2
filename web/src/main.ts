@@ -160,6 +160,11 @@ function formatDateTime(value?: string): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
+function formatTokenCount(value: number): string {
+  const number = Number(value || 0);
+  return new Intl.NumberFormat("en-US").format(Number.isFinite(number) && number > 0 ? Math.round(number) : 0);
+}
+
 function syncProjectTypeFields(): void {
   const select = document.querySelector<HTMLSelectElement>("#project-type");
   const gitFields = document.querySelector<HTMLElement>(".git-fields");
@@ -203,6 +208,9 @@ function openWorkspaceDialog(ws: Workspace | null): void {
   const sshHost = dialog.querySelector<HTMLInputElement>('[name="ssh_host"]');
   const sshUser = dialog.querySelector<HTMLInputElement>('[name="ssh_user"]');
   const sshPort = dialog.querySelector<HTMLInputElement>('[name="ssh_port"]');
+  const sshAuth = dialog.querySelector<HTMLSelectElement>('[name="ssh_auth"]');
+  const sshPassword = dialog.querySelector<HTMLInputElement>('[name="ssh_password"]');
+  const clearSSHPassword = dialog.querySelector<HTMLInputElement>('[name="clear_ssh_password"]');
   if (editId) editId.value = ws ? ws.id : "";
   if (projectSelect && ws) projectSelect.value = ws.project_id;
   if (nameInput) nameInput.value = ws ? ws.name : "本地开发";
@@ -218,6 +226,16 @@ function openWorkspaceDialog(ws: Workspace | null): void {
   if (sshHost) sshHost.value = ws?.ssh_host || "";
   if (sshUser) sshUser.value = ws?.ssh_user || "";
   if (sshPort) sshPort.value = String(ws?.ssh_port || 22);
+  if (sshAuth) sshAuth.value = ws?.ssh_auth || "auto";
+  if (sshPassword) {
+    sshPassword.value = "";
+    sshPassword.dataset.configured = ws?.ssh_password_configured ? "true" : "false";
+    sshPassword.placeholder = ws?.ssh_password_configured ? "已配置，留空保持不变" : "可选";
+  }
+  if (clearSSHPassword) {
+    clearSSHPassword.checked = false;
+    clearSSHPassword.disabled = !ws?.ssh_password_configured;
+  }
   syncWorkspaceFields();
   const title = dialog.querySelector(".dialog-head h2");
   if (title) title.textContent = ws ? "编辑 Workspace" : "添加 Workspace";
@@ -391,6 +409,11 @@ function syncWorkspaceFields(): void {
   const rootInput = document.querySelector<HTMLInputElement>("#ws-root-path");
   const sshFields = document.querySelector<HTMLElement>(".ssh-fields");
   const wslFields = document.querySelector<HTMLElement>(".wsl-fields");
+  const sshHost = document.querySelector<HTMLInputElement>('[name="ssh_host"]');
+  const sshUser = document.querySelector<HTMLInputElement>('[name="ssh_user"]');
+  const sshAuth = document.querySelector<HTMLSelectElement>('[name="ssh_auth"]');
+  const sshPassword = document.querySelector<HTMLInputElement>('[name="ssh_password"]');
+  const clearSSHPassword = document.querySelector<HTMLInputElement>('[name="clear_ssh_password"]');
   if (!localitySelect || !transportSelect) return;
   const locality = localitySelect.value;
   const allowed = workspaceTransportOptions(locality);
@@ -401,6 +424,22 @@ function syncWorkspaceFields(): void {
   const transport = transportSelect.value;
   if (sshFields) sshFields.style.display = transport === "ssh" ? "" : "none";
   if (wslFields) wslFields.style.display = transport === "wsl" ? "" : "none";
+  const configured = sshPassword?.dataset.configured === "true";
+  const clearPassword = Boolean(clearSSHPassword?.checked);
+  if (sshHost) sshHost.required = transport === "ssh";
+  if (sshUser) sshUser.required = transport === "ssh";
+  if (sshPassword) {
+    sshPassword.disabled = transport !== "ssh" || clearPassword;
+    sshPassword.required = transport === "ssh" && sshAuth?.value === "password" && !configured;
+  }
+  if (sshAuth) {
+    sshAuth.disabled = transport !== "ssh";
+    sshAuth.setCustomValidity(
+      transport === "ssh" && sshAuth.value === "password" && clearPassword
+        ? "密码认证不能同时清除已保存密码"
+        : "",
+    );
+  }
   if (transport === "wsl") populateWSLDistros();
   if (rootInput) rootInput.placeholder = transport === "wsl" ? "/home/user/project（WSL 内路径）" : transport === "ssh" ? "/workspace 或远程路径" : "E:\\project 或本机路径";
 }
@@ -817,7 +856,7 @@ function projectDialog(): string {
 }
 
 function workspaceDialog(): string {
-  return `<dialog id="workspace-dialog"><form id="workspace-form" method="dialog"><div class="dialog-head"><h2>添加 Workspace</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div><input type="hidden" id="ws-edit-id" name="ws_edit_id" value=""><label>项目<select name="project_id" id="ws-project">${state.projects.map(item => `<option value="${item.id}" ${item.id === state.dialogProjectID ? "selected" : ""}>${escapeHTML(item.name)}</option>`).join("")}</select></label><label>名称<input name="name" id="ws-name" value="本地开发" required></label><div class="two"><label>位置<select name="locality" id="ws-locality"><option value="local">本地</option><option value="remote">远程</option></select></label><label>Transport<select name="transport" id="ws-transport"></select></label></div><label>Root Path<input name="root_path" id="ws-root-path" placeholder="E:\project 或 /home/user/project" required></label><div class="wsl-fields" style="display:none"><label>WSL Distro<select name="distro" id="ws-distro"></select></label><div class="field-help">Root Path 填 WSL 内的路径，如 /home/user/project</div></div><div class="ssh-fields" style="display:none"><div class="two"><label>SSH Host<input name="ssh_host" placeholder="192.168.1.10"></label><label>SSH User<input name="ssh_user" placeholder="root"></label></div><label>SSH Port<input name="ssh_port" type="number" value="22"></label></div><div class="dialog-actions"><button type="button" data-close>取消</button><button class="primary" value="default">添加 Workspace</button></div></form></dialog>`;
+  return `<dialog id="workspace-dialog"><form id="workspace-form" method="dialog"><div class="dialog-head"><h2>添加 Workspace</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div><input type="hidden" id="ws-edit-id" name="ws_edit_id" value=""><label>项目<select name="project_id" id="ws-project">${state.projects.map(item => `<option value="${item.id}" ${item.id === state.dialogProjectID ? "selected" : ""}>${escapeHTML(item.name)}</option>`).join("")}</select></label><label>名称<input name="name" id="ws-name" value="本地开发" required></label><div class="two"><label>位置<select name="locality" id="ws-locality"><option value="local">本地</option><option value="remote">远程</option></select></label><label>Transport<select name="transport" id="ws-transport"></select></label></div><label>Root Path<input name="root_path" id="ws-root-path" placeholder="E:\project 或 /home/user/project" required></label><div class="wsl-fields" style="display:none"><label>WSL Distro<select name="distro" id="ws-distro"></select></label><div class="field-help">Root Path 填 WSL 内的路径，如 /home/user/project</div></div><div class="ssh-fields" style="display:none"><div class="two"><label>SSH Host<input name="ssh_host" placeholder="192.168.1.10"></label><label>SSH User<input name="ssh_user" placeholder="root"></label></div><div class="two"><label>SSH Port<input name="ssh_port" type="number" min="1" max="65535" value="22"></label><label>SSH 登录方式<select name="ssh_auth"><option value="auto">自动（有密码时优先密码）</option><option value="password">密码</option><option value="key">Key (~/.ssh)</option></select></label></div><label>登录密码<input name="ssh_password" type="password" autocomplete="new-password" placeholder="可选"></label><label class="workspace-clear-secret"><input name="clear_ssh_password" type="checkbox">清除已保存密码</label><div class="field-help">密码保存在 Secret Store；编辑时留空会保留原密码。</div></div><div class="dialog-actions"><button type="button" data-close>取消</button><button class="primary" value="default">添加 Workspace</button></div></form></dialog>`;
 }
 
 function modelsView(): string {
@@ -867,6 +906,7 @@ function taskCardHtml(task: Task): string {
         <span title="所属项目">${icon("projects")}<span>${escapeHTML(project?.name || task.project_id)}</span></span>
         <span title="工作目录">${icon("monitor")}<span>${escapeHTML(ws?.root_path || "-")}</span></span>
         ${task.task_branch ? `<span title="任务分支">${icon("branch")}<span>${escapeHTML(task.task_branch)}</span></span>` : ""}
+        <span title="Main 与 Sub Agent 累计 Token">${icon("model")}<span>${formatTokenCount(task.total_tokens)} tokens</span></span>
         ${task.created_at ? `<span title="创建时间">${icon("clock")}<span>${formatDateTime(task.created_at)}</span></span>` : ""}
       </div>
     </div>
@@ -1264,6 +1304,8 @@ function bindCommon(): void {
   document.querySelector<HTMLSelectElement>("#project-type")?.addEventListener("change", syncProjectTypeFields);
   document.querySelector<HTMLSelectElement>("#ws-locality")?.addEventListener("change", syncWorkspaceFields);
   document.querySelector<HTMLSelectElement>("#ws-transport")?.addEventListener("change", syncWorkspaceFields);
+  document.querySelector<HTMLSelectElement>('[name="ssh_auth"]')?.addEventListener("change", syncWorkspaceFields);
+  document.querySelector<HTMLInputElement>('[name="clear_ssh_password"]')?.addEventListener("change", syncWorkspaceFields);
   document.querySelector("#provider-preset")?.addEventListener("change", applyProviderPreset);
   document.querySelectorAll<HTMLElement>("[data-close]").forEach(button => button.addEventListener("click", () => {
     button.closest("dialog")?.close();
@@ -1293,9 +1335,20 @@ function bindCommon(): void {
     const editId = payload["ws_edit_id"] || "";
     delete payload["ws_edit_id"];
     if (editId) delete payload["project_id"];
-    const body = {...payload, ssh_port: Number(payload.ssh_port || 22)};
-    if (editId) await api.updateWorkspace(editId, body);
-    else await api.createWorkspace(body);
+    const body = {
+      ...payload,
+      ssh_port: Number(payload.ssh_port || 22),
+    };
+    delete body.ws_edit_id;
+    if (editId) {
+      await api.updateWorkspace(editId, {
+        ...body,
+        clear_ssh_password: payload.clear_ssh_password === "on",
+      });
+    } else {
+      delete body.clear_ssh_password;
+      await api.createWorkspace(body);
+    }
   });
   document.querySelector("#save-provider")?.addEventListener("click", () => {
     const button = document.querySelector<HTMLElement>("#save-provider");

@@ -531,6 +531,12 @@ WHERE isolation='';
 UPDATE workspaces SET isolation='', worktree_dir='';
 `
 
+const schemaV16 = `
+ALTER TABLE workspaces ADD COLUMN ssh_auth TEXT NOT NULL DEFAULT 'auto';
+ALTER TABLE workspaces ADD COLUMN ssh_credential_ref TEXT NOT NULL DEFAULT '';
+ALTER TABLE workspaces ADD COLUMN ssh_password_configured INTEGER NOT NULL DEFAULT 0;
+`
+
 func (s *Store) migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, schemaV1); err != nil {
 		return fmt.Errorf("apply schema v1: %w", err)
@@ -721,6 +727,19 @@ func (s *Store) migrate(ctx context.Context) error {
 		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(15, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
 	); err != nil {
 		return fmt.Errorf("record schema v15: %w", err)
+	}
+	var hasV16 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=16)`).Scan(&hasV16)
+	if !hasV16 {
+		if _, err := s.db.ExecContext(ctx, schemaV16); err != nil {
+			return fmt.Errorf("apply schema v16: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(
+		ctx,
+		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(16, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
+	); err != nil {
+		return fmt.Errorf("record schema v16: %w", err)
 	}
 	return nil
 }

@@ -468,6 +468,9 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 		s.failTurn(ctx, &turn, task, err)
 		return
 	}
+	if workspace.SSHCredentialRef != "" && s.secrets != nil {
+		workspace.SSHPassword, _ = s.secrets.Get(workspace.SSHCredentialRef)
+	}
 	snapshot, err := s.store.RuntimeSnapshot(ctx, turn.RuntimeConfigSnapshotID)
 	if err != nil {
 		s.failTurn(ctx, &turn, task, err)

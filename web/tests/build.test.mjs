@@ -22,6 +22,14 @@ test("built web contains responsive application", async () => {
   assert.match(script, /EventSource/);
   assert.match(script, /api\.agentConversation/);
   assert.match(script, /api\.agentMessage/);
+  assert.match(script, /name="ssh_auth"/);
+  assert.match(script, /name="ssh_password"/);
+  assert.match(script, /name="clear_ssh_password"/);
+  assert.match(script, /workspace-clear-secret/);
+  assert.match(css, /\.hardware-clear-secret, \.workspace-clear-secret/);
+  assert.match(script, /ssh_password_configured/);
+  assert.match(script, /clear_ssh_password:\s*payload\.clear_ssh_password === "on"/);
+  assert.match(script, /delete body\.clear_ssh_password/);
   assert.match(script, /data-conversation-category/);
   assert.match(agents, /agent-turn-card/);
   assert.match(agents, /AHA 系统路由/);
@@ -133,6 +141,9 @@ test("built web contains responsive application", async () => {
   assert.match(script, /\/complete/);
   assert.match(script, /\/reopen/);
   assert.match(script, /taskFailureBannerHtml/);
+  assert.match(script, /formatTokenCount\(task\.total_tokens\)/);
+  assert.match(script, /Intl\.NumberFormat\("en-US"\)/);
+  assert.match(agents, /context_inconsistent/);
   assert.match(script, /id="task-isolation"/);
   assert.match(script, /id="task-worktree-settings"/);
   assert.match(script, /syncTaskGitIsolation/);

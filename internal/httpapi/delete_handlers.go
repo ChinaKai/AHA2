@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"net/http"
+
+	"github.com/ChinaKai/AHA2/internal/domain"
 )
 
 func (s *Server) deleteTask(writer http.ResponseWriter, request *http.Request) {
@@ -39,7 +41,8 @@ func (s *Server) deleteTask(writer http.ResponseWriter, request *http.Request) {
 
 func (s *Server) deleteWorkspace(writer http.ResponseWriter, request *http.Request) {
 	id := request.PathValue("id")
-	if _, err := s.store.Workspace(request.Context(), id); err != nil {
+	item, err := s.store.Workspace(request.Context(), id)
+	if err != nil {
 		writeError(writer, http.StatusNotFound, "workspace_not_found")
 		return
 	}
@@ -78,6 +81,7 @@ func (s *Server) deleteWorkspace(writer http.ResponseWriter, request *http.Reque
 		writeError(writer, http.StatusInternalServerError, "delete_workspace_failed")
 		return
 	}
+	s.cleanupWorkspaceSecret(item)
 	s.audit(request, "workspace.delete", "workspace", id, nil)
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true})
 }
@@ -123,6 +127,7 @@ func (s *Server) deleteProject(writer http.ResponseWriter, request *http.Request
 	for _, workspace := range workspaces {
 		if workspace.ProjectID == id {
 			_ = s.store.DeleteWorkspace(request.Context(), workspace.ID)
+			s.cleanupWorkspaceSecret(workspace)
 		}
 	}
 	if err := s.store.DeleteProject(request.Context(), id); err != nil {
@@ -131,6 +136,12 @@ func (s *Server) deleteProject(writer http.ResponseWriter, request *http.Request
 	}
 	s.audit(request, "project.delete", "project", id, nil)
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) cleanupWorkspaceSecret(workspace domain.Workspace) {
+	if s.secrets != nil && workspace.SSHCredentialRef != "" {
+		_ = s.secrets.DeleteMany([]string{workspace.SSHCredentialRef})
+	}
 }
 
 func (s *Server) cleanupTaskHardware(ctx context.Context, taskID string) {
