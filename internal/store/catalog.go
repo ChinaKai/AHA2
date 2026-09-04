@@ -132,16 +132,20 @@ func (s *Store) UpdateWorkspaceDetection(ctx context.Context, item domain.Worksp
 }
 
 func (s *Store) UpsertModel(ctx context.Context, item domain.Model) error {
+	if item.Source == "" {
+		item.Source = domain.ModelSourceProvider
+	}
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO models(id,display_name,provider_id,backend,wire_model,wire_api,context_window,max_output_tokens,default_effort,capabilities_json,default_env_group_id,created_at,updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+		INSERT INTO models(id,display_name,provider_id,source,codex_account_id,backend,wire_model,wire_api,context_window,max_output_tokens,default_effort,capabilities_json,default_env_group_id,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET
-			display_name=excluded.display_name,provider_id=excluded.provider_id,backend=excluded.backend,
+			display_name=excluded.display_name,provider_id=excluded.provider_id,source=excluded.source,
+			codex_account_id=excluded.codex_account_id,backend=excluded.backend,
 			wire_model=excluded.wire_model,wire_api=excluded.wire_api,context_window=excluded.context_window,
 			max_output_tokens=excluded.max_output_tokens,default_effort=excluded.default_effort,
 			capabilities_json=excluded.capabilities_json,default_env_group_id=excluded.default_env_group_id,
 			updated_at=excluded.updated_at`,
-		item.ID, item.DisplayName, item.ProviderID, item.Backend, item.WireModel, item.WireAPI,
+		item.ID, item.DisplayName, item.ProviderID, item.Source, item.CodexAccountID, item.Backend, item.WireModel, item.WireAPI,
 		item.ContextWindow, item.MaxOutputTokens, item.DefaultEffort, encodeJSON(item.Capabilities),
 		item.DefaultEnvGroupID, timeString(item.CreatedAt), timeString(item.UpdatedAt),
 	)
@@ -149,7 +153,7 @@ func (s *Store) UpsertModel(ctx context.Context, item domain.Model) error {
 }
 
 func (s *Store) ListModels(ctx context.Context) ([]domain.Model, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,display_name,provider_id,backend,wire_model,wire_api,context_window,max_output_tokens,default_effort,capabilities_json,default_env_group_id,created_at,updated_at FROM models ORDER BY display_name`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,display_name,provider_id,source,codex_account_id,backend,wire_model,wire_api,context_window,max_output_tokens,default_effort,capabilities_json,default_env_group_id,created_at,updated_at FROM models ORDER BY display_name`)
 	if err != nil {
 		return nil, err
 	}
@@ -158,7 +162,7 @@ func (s *Store) ListModels(ctx context.Context) ([]domain.Model, error) {
 	for rows.Next() {
 		var item domain.Model
 		var capabilities, createdAt, updatedAt string
-		if err := rows.Scan(&item.ID, &item.DisplayName, &item.ProviderID, &item.Backend, &item.WireModel, &item.WireAPI, &item.ContextWindow, &item.MaxOutputTokens, &item.DefaultEffort, &capabilities, &item.DefaultEnvGroupID, &createdAt, &updatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.DisplayName, &item.ProviderID, &item.Source, &item.CodexAccountID, &item.Backend, &item.WireModel, &item.WireAPI, &item.ContextWindow, &item.MaxOutputTokens, &item.DefaultEffort, &capabilities, &item.DefaultEnvGroupID, &createdAt, &updatedAt); err != nil {
 			return nil, err
 		}
 		item.Capabilities = decodeJSON(capabilities, map[string]any{})
@@ -171,8 +175,8 @@ func (s *Store) ListModels(ctx context.Context) ([]domain.Model, error) {
 func (s *Store) Model(ctx context.Context, id string) (domain.Model, error) {
 	var item domain.Model
 	var capabilities, createdAt, updatedAt string
-	err := s.db.QueryRowContext(ctx, `SELECT id,display_name,provider_id,backend,wire_model,wire_api,context_window,max_output_tokens,default_effort,capabilities_json,default_env_group_id,created_at,updated_at FROM models WHERE id=?`, id).
-		Scan(&item.ID, &item.DisplayName, &item.ProviderID, &item.Backend, &item.WireModel, &item.WireAPI, &item.ContextWindow, &item.MaxOutputTokens, &item.DefaultEffort, &capabilities, &item.DefaultEnvGroupID, &createdAt, &updatedAt)
+	err := s.db.QueryRowContext(ctx, `SELECT id,display_name,provider_id,source,codex_account_id,backend,wire_model,wire_api,context_window,max_output_tokens,default_effort,capabilities_json,default_env_group_id,created_at,updated_at FROM models WHERE id=?`, id).
+		Scan(&item.ID, &item.DisplayName, &item.ProviderID, &item.Source, &item.CodexAccountID, &item.Backend, &item.WireModel, &item.WireAPI, &item.ContextWindow, &item.MaxOutputTokens, &item.DefaultEffort, &capabilities, &item.DefaultEnvGroupID, &createdAt, &updatedAt)
 	item.Capabilities = decodeJSON(capabilities, map[string]any{})
 	item.CreatedAt, item.UpdatedAt = parseTime(createdAt), parseTime(updatedAt)
 	return item, err
@@ -251,7 +255,7 @@ func scanProvider(scanner interface{ Scan(...any) error }) (domain.Provider, err
 }
 
 func (s *Store) ListProviders(ctx context.Context) ([]domain.Provider, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,name,base_url,anthropic_base_url,auth_style,credential_ref,credential_configured,created_at,updated_at FROM providers ORDER BY name`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,name,base_url,anthropic_base_url,auth_style,credential_ref,credential_configured,created_at,updated_at FROM providers WHERE id<>? ORDER BY name`, domain.OfficialCodexProviderID)
 	if err != nil {
 		return nil, err
 	}
@@ -321,8 +325,23 @@ func (s *Store) UpdateWorkspaceConfig(ctx context.Context, item domain.Workspace
 }
 
 func (s *Store) DeleteModel(ctx context.Context, id string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM models WHERE id=?`, id)
-	return err
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM runtime_config_snapshots
+		WHERE model_id=?
+		  AND NOT EXISTS(SELECT 1 FROM tasks WHERE runtime_config_snapshot_id=runtime_config_snapshots.id)
+		  AND NOT EXISTS(SELECT 1 FROM task_agents WHERE runtime_config_snapshot_id=runtime_config_snapshots.id)
+		  AND NOT EXISTS(SELECT 1 FROM turns WHERE runtime_config_snapshot_id=runtime_config_snapshots.id)`, id); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM models WHERE id=?`, id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) DeleteEnvGroup(ctx context.Context, id string) error {
@@ -342,13 +361,29 @@ func (s *Store) DeleteProject(ctx context.Context, id string) error {
 
 func (s *Store) ModelInUse(ctx context.Context, id string) (bool, error) {
 	var exists bool
-	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM runtime_config_snapshots WHERE model_id=?)`, id).Scan(&exists)
+	err := s.db.QueryRowContext(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM runtime_config_snapshots snapshot
+			WHERE snapshot.model_id=? AND (
+				EXISTS(SELECT 1 FROM tasks WHERE runtime_config_snapshot_id=snapshot.id) OR
+				EXISTS(SELECT 1 FROM task_agents WHERE runtime_config_snapshot_id=snapshot.id) OR
+				EXISTS(SELECT 1 FROM turns WHERE runtime_config_snapshot_id=snapshot.id)
+			)
+		) OR EXISTS(SELECT 1 FROM backend_sessions WHERE model_id=?)`, id, id).Scan(&exists)
 	return exists, err
 }
 
 func (s *Store) EnvGroupInUse(ctx context.Context, id string) (bool, error) {
 	var exists bool
-	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM runtime_config_snapshots WHERE env_group_id=?)`, id).Scan(&exists)
+	err := s.db.QueryRowContext(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM runtime_config_snapshots snapshot
+			WHERE snapshot.env_group_id=? AND (
+				EXISTS(SELECT 1 FROM tasks WHERE runtime_config_snapshot_id=snapshot.id) OR
+				EXISTS(SELECT 1 FROM task_agents WHERE runtime_config_snapshot_id=snapshot.id) OR
+				EXISTS(SELECT 1 FROM turns WHERE runtime_config_snapshot_id=snapshot.id)
+			)
+		)`, id).Scan(&exists)
 	return exists, err
 }
 
@@ -372,7 +407,7 @@ func (s *Store) BackfillProviders(ctx context.Context) (int, error) {
 	seen := make(map[string]bool)
 	for _, group := range envGroups {
 		id := group.ProviderID
-		if id == "" || id == "stub" || existing[id] || seen[id] {
+		if id == "" || id == "stub" || id == domain.OfficialCodexProviderID || existing[id] || seen[id] {
 			continue
 		}
 		seen[id] = true
@@ -402,10 +437,10 @@ func boolInt(value bool) int {
 
 func (s *Store) CreateRuntimeSnapshot(ctx context.Context, item domain.RuntimeConfigSnapshot) error {
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO runtime_config_snapshots(id,workspace_id,backend,backend_version,model_id,wire_model,env_group_id,env_group_revision,reasoning_effort,permissions_json,created_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+		INSERT INTO runtime_config_snapshots(id,workspace_id,backend,backend_version,model_id,wire_model,env_group_id,env_group_revision,codex_account_id,proxy_enabled,reasoning_effort,permissions_json,created_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		item.ID, item.WorkspaceID, item.Backend, item.BackendVersion, item.ModelID, item.WireModel,
-		item.EnvGroupID, item.EnvGroupRevision, item.ReasoningEffort, item.PermissionsJSON, timeString(item.CreatedAt),
+		item.EnvGroupID, item.EnvGroupRevision, item.CodexAccountID, boolInt(item.ProxyEnabled), item.ReasoningEffort, item.PermissionsJSON, timeString(item.CreatedAt),
 	)
 	return err
 }
@@ -422,8 +457,8 @@ func sortedKeys(values map[string]string) []string {
 func (s *Store) RuntimeSnapshot(ctx context.Context, id string) (domain.RuntimeConfigSnapshot, error) {
 	var item domain.RuntimeConfigSnapshot
 	var createdAt string
-	err := s.db.QueryRowContext(ctx, `SELECT id,workspace_id,backend,backend_version,model_id,wire_model,env_group_id,env_group_revision,reasoning_effort,permissions_json,created_at FROM runtime_config_snapshots WHERE id=?`, id).
-		Scan(&item.ID, &item.WorkspaceID, &item.Backend, &item.BackendVersion, &item.ModelID, &item.WireModel, &item.EnvGroupID, &item.EnvGroupRevision, &item.ReasoningEffort, &item.PermissionsJSON, &createdAt)
+	err := s.db.QueryRowContext(ctx, `SELECT id,workspace_id,backend,backend_version,model_id,wire_model,env_group_id,env_group_revision,codex_account_id,proxy_enabled,reasoning_effort,permissions_json,created_at FROM runtime_config_snapshots WHERE id=?`, id).
+		Scan(&item.ID, &item.WorkspaceID, &item.Backend, &item.BackendVersion, &item.ModelID, &item.WireModel, &item.EnvGroupID, &item.EnvGroupRevision, &item.CodexAccountID, &item.ProxyEnabled, &item.ReasoningEffort, &item.PermissionsJSON, &createdAt)
 	item.CreatedAt = parseTime(createdAt)
 	return item, err
 }

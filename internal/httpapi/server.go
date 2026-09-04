@@ -10,6 +10,7 @@ import (
 
 	"github.com/ChinaKai/AHA2/internal/app"
 	"github.com/ChinaKai/AHA2/internal/auth"
+	"github.com/ChinaKai/AHA2/internal/codexaccount"
 	"github.com/ChinaKai/AHA2/internal/domain"
 	"github.com/ChinaKai/AHA2/internal/hardware"
 	"github.com/ChinaKai/AHA2/internal/store"
@@ -28,6 +29,7 @@ type Config struct {
 	DetectWorkspace  func(context.Context, domain.Workspace) (domain.Workspace, error)
 	Secrets          SecretStore
 	Hardware         *hardware.Manager
+	CodexAccounts    *codexaccount.Manager
 }
 
 type Server struct {
@@ -41,6 +43,7 @@ type Server struct {
 	detectWorkspace  func(context.Context, domain.Workspace) (domain.Workspace, error)
 	secrets          SecretStore
 	hardware         *hardware.Manager
+	codexAccounts    *codexaccount.Manager
 	authLimiter      *authLimiter
 }
 
@@ -55,6 +58,7 @@ func New(config Config) *Server {
 		detectWorkspace: config.DetectWorkspace,
 		secrets:         config.Secrets,
 		hardware:        config.Hardware,
+		codexAccounts:   config.CodexAccounts,
 		authLimiter:     newAuthLimiter(),
 	}
 }
@@ -68,6 +72,9 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/auth/logout", s.withAuth(http.HandlerFunc(s.authLogout)))
 
 	mux.Handle("GET /api/v1/system", s.withAuth(http.HandlerFunc(s.systemInfo)))
+	mux.Handle("GET /api/v1/settings/proxy", s.withAuth(http.HandlerFunc(s.proxySettings)))
+	mux.Handle("PUT /api/v1/settings/proxy", s.withAuth(http.HandlerFunc(s.updateProxySettings)))
+	mux.Handle("POST /api/v1/settings/proxy/test", s.withAuth(http.HandlerFunc(s.testProxySettings)))
 	mux.Handle("GET /api/v1/projects", s.withAuth(http.HandlerFunc(s.listProjects)))
 	mux.Handle("POST /api/v1/projects", s.withAuth(http.HandlerFunc(s.createProject)))
 	mux.Handle("PUT /api/v1/projects/{id}", s.withAuth(http.HandlerFunc(s.updateProject)))
@@ -89,6 +96,15 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/env-groups", s.withAuth(http.HandlerFunc(s.createEnvGroup)))
 	mux.Handle("POST /api/v1/providers/detect-models", s.withAuth(http.HandlerFunc(s.detectModelsHandler)))
 	mux.Handle("POST /api/v1/providers/add-models", s.withAuth(http.HandlerFunc(s.addModelsHandler)))
+	mux.Handle("GET /api/v1/codex-accounts", s.withAuth(http.HandlerFunc(s.listCodexAccounts)))
+	mux.Handle("POST /api/v1/codex-accounts/import-local", s.withAuth(http.HandlerFunc(s.importLocalCodexAccount)))
+	mux.Handle("POST /api/v1/codex-accounts/import", s.withAuth(http.HandlerFunc(s.importCodexAccount)))
+	mux.Handle("POST /api/v1/codex-accounts/login", s.withAuth(http.HandlerFunc(s.startCodexAccountLogin)))
+	mux.Handle("GET /api/v1/codex-accounts/login/{id}", s.withAuth(http.HandlerFunc(s.codexAccountLoginStatus)))
+	mux.Handle("POST /api/v1/codex-accounts/login/{id}/callback", s.withAuth(http.HandlerFunc(s.submitCodexAccountCallback)))
+	mux.Handle("DELETE /api/v1/codex-accounts/login/{id}", s.withAuth(http.HandlerFunc(s.cancelCodexAccountLogin)))
+	mux.Handle("DELETE /api/v1/codex-accounts/{id}", s.withAuth(http.HandlerFunc(s.deleteCodexAccount)))
+	mux.Handle("POST /api/v1/codex-accounts/{id}/refresh", s.withAuth(http.HandlerFunc(s.refreshCodexAccount)))
 	mux.Handle("GET /api/v1/prompts/templates", s.withAuth(http.HandlerFunc(s.promptTemplates)))
 	mux.Handle("PUT /api/v1/prompts/templates/{id}", s.withAuth(http.HandlerFunc(s.updatePromptTemplate)))
 	mux.Handle("POST /api/v1/prompts/templates/{id}/reset", s.withAuth(http.HandlerFunc(s.resetPromptTemplate)))

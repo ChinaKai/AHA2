@@ -242,6 +242,10 @@ func (s *Server) deleteModel(writer http.ResponseWriter, request *http.Request) 
 			envGroupsToDelete = append(envGroupsToDelete, model.DefaultEnvGroupID)
 		}
 	}
+	if err := s.store.DeleteModel(request.Context(), id); err != nil {
+		writeError(writer, http.StatusInternalServerError, "delete_model_failed")
+		return
+	}
 	var secretKeys []string
 	for _, envID := range envGroupsToDelete {
 		envInUse, err := s.store.EnvGroupInUse(request.Context(), envID)
@@ -258,10 +262,6 @@ func (s *Server) deleteModel(writer http.ResponseWriter, request *http.Request) 
 			}
 		}
 		_ = s.store.DeleteEnvGroup(request.Context(), envID)
-	}
-	if err := s.store.DeleteModel(request.Context(), id); err != nil {
-		writeError(writer, http.StatusInternalServerError, "delete_model_failed")
-		return
 	}
 	if s.secrets != nil {
 		_ = s.secrets.DeleteMany(secretKeys)
@@ -423,7 +423,7 @@ func (s *Server) addModelsHandler(writer http.ResponseWriter, request *http.Requ
 			return
 		}
 		item := domain.Model{
-			ID: domain.NewID("model"), DisplayName: pick.id, ProviderID: provider.ID, Backend: backendName,
+			ID: domain.NewID("model"), DisplayName: pick.id, ProviderID: provider.ID, Source: "provider", Backend: backendName,
 			WireModel: pick.id, WireAPI: pick.wireAPI, DefaultEnvGroupID: envGroup.ID,
 			ContextWindow: pick.maxInputTokens, MaxOutputTokens: pick.maxOutputTokens,
 			Capabilities: map[string]any{}, CreatedAt: now, UpdatedAt: now,

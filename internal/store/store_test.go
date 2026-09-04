@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -95,6 +96,41 @@ func TestMigrationV8BackfillsRoundsAndConversation(t *testing.T) {
 			sshAuth, sshCredentialRef, sshPasswordConfigured,
 		)
 	}
+	model, err := database.Model(ctx, "model-v7")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if model.Source != "provider" || model.CodexAccountID != "" {
+		t.Fatalf("Codex account migration defaults are invalid: %#v", model)
+	}
+	proxy, err := database.ProxySettings(ctx)
+	if err != nil || proxy.HTTPProxy != "http://127.0.0.1:7897" || proxy.HTTPSProxy != proxy.HTTPProxy || proxy.NoProxy == "" {
+		t.Fatalf("proxy migration defaults are invalid: %#v %v", proxy, err)
+	}
+	account := domain.CodexAccount{
+		ID: "codex-account-1", Label: "Work", Email: "owner@example.com", AccountID: "account-1",
+		PlanType: "plus", Status: "ready", CredentialRef: "codex-account/codex-account-1/auth",
+		ProxyEnabled: true, CredentialConfigured: true, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+		Usage: &domain.CodexUsage{
+			RateLimits: []domain.CodexRateLimit{{
+				ID: "codex", Name: "Codex", Allowed: true,
+				PrimaryWindow: &domain.CodexUsageWindow{UsedPercent: 7, LimitWindowSeconds: 604800},
+			}},
+			Credits: domain.CodexCredits{HasCredits: true, Balance: "10"},
+		},
+		UsageUpdatedAt: time.Now().UTC(), AvailableModels: []domain.CodexModelOption{{
+			WireModel: "gpt-5.6-sol", DisplayName: "GPT-5.6-Sol", MaxContextWindow: 872000,
+		}}, ModelsUpdatedAt: time.Now().UTC(),
+	}
+	if err := database.UpsertCodexAccount(ctx, account); err != nil {
+		t.Fatal(err)
+	}
+	storedAccount, err := database.CodexAccount(ctx, account.ID)
+	if err != nil || storedAccount.Email != account.Email || !storedAccount.CredentialConfigured || !storedAccount.ProxyEnabled ||
+		storedAccount.Usage == nil || storedAccount.Usage.RateLimits[0].PrimaryWindow.UsedPercent != 7 ||
+		len(storedAccount.AvailableModels) != 1 || storedAccount.AvailableModels[0].WireModel != "gpt-5.6-sol" {
+		t.Fatalf("Codex account was not persisted: %#v %v", storedAccount, err)
+	}
 	if err := database.migrate(ctx); err != nil {
 		t.Fatalf("repeat migration failed: %v", err)
 	}
@@ -134,5 +170,195 @@ func TestStorePersistsProject(t *testing.T) {
 	}
 	if stored.Name != "AHA2" {
 		t.Fatalf("unexpected project: %#v", stored)
+	}
+}
+
+func TestCatalogUsageIgnoresOrphanRuntimeSnapshots(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database, err := Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	now := time.Now().UTC()
+	if err := database.CreateProject(ctx, domain.Project{
+		ID: "project-usage", Name: "Usage", ProjectType: "local", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CreateWorkspace(ctx, domain.Workspace{
+		ID: "workspace-usage", ProjectID: "project-usage", Name: "Usage", Locality: "local",
+		Transport: "native", RootPath: t.TempDir(), SSHPort: 22, Health: "ready", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpsertEnvGroup(ctx, domain.EnvGroup{
+		ID: "env-usage", Name: "Usage", ProviderID: "provider-usage", Backend: "codex", Revision: 1,
+		Environment: map[string]string{}, SecretRefs: map[string]string{}, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpsertModel(ctx, domain.Model{
+		ID: "model-usage", DisplayName: "Usage", ProviderID: "provider-usage", Backend: "codex",
+		WireModel: "gpt-test", DefaultEnvGroupID: "env-usage", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpsertCodexAccount(ctx, domain.CodexAccount{
+		ID: "account-usage", Status: "ready", CredentialRef: "codex/account/auth",
+		CredentialConfigured: true, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CreateRuntimeSnapshot(ctx, domain.RuntimeConfigSnapshot{
+		ID: "snapshot-usage", WorkspaceID: "workspace-usage", Backend: "codex", ModelID: "model-usage",
+		WireModel: "gpt-test", EnvGroupID: "env-usage", EnvGroupRevision: 1,
+		CodexAccountID: "account-usage", PermissionsJSON: "{}", CreatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	assertUsage := func(want bool) {
+		t.Helper()
+		modelInUse, err := database.ModelInUse(ctx, "model-usage")
+		if err != nil || modelInUse != want {
+			t.Fatalf("ModelInUse() = %v, %v; want %v", modelInUse, err, want)
+		}
+		envInUse, err := database.EnvGroupInUse(ctx, "env-usage")
+		if err != nil || envInUse != want {
+			t.Fatalf("EnvGroupInUse() = %v, %v; want %v", envInUse, err, want)
+		}
+		accountInUse, err := database.CodexAccountInUse(ctx, "account-usage")
+		if err != nil || accountInUse != want {
+			t.Fatalf("CodexAccountInUse() = %v, %v; want %v", accountInUse, err, want)
+		}
+	}
+	assertUsage(false)
+	if err := database.CreateTask(ctx, domain.Task{
+		ID: "task-usage", ProjectID: "project-usage", WorkspaceID: "workspace-usage", Title: "Usage",
+		OriginalRequest: "test", CurrentGoal: "test", Status: domain.TaskDraft,
+		RuntimeConfigSnapshotID: "snapshot-usage", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	assertUsage(true)
+	if err := database.DeleteTask(ctx, "task-usage"); err != nil {
+		t.Fatal(err)
+	}
+	assertUsage(false)
+	if err := database.DeleteModel(ctx, "model-usage"); err != nil {
+		t.Fatalf("DeleteModel() with orphan snapshot failed: %v", err)
+	}
+	var snapshotCount int
+	if err := database.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM runtime_config_snapshots WHERE id='snapshot-usage'`).Scan(&snapshotCount); err != nil {
+		t.Fatal(err)
+	}
+	if snapshotCount != 0 {
+		t.Fatalf("orphan runtime snapshot was retained: %d", snapshotCount)
+	}
+}
+
+func TestOfficialCodexProviderIsInternal(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database, err := Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	now := time.Now().UTC()
+	for _, group := range []domain.EnvGroup{
+		{ID: "env-official", Name: "Official Codex", ProviderID: domain.OfficialCodexProviderID, Backend: "codex"},
+		{ID: "env-visible", Name: "Visible / Model", ProviderID: "visible", Backend: "codex"},
+	} {
+		group.Revision = 1
+		group.Environment = map[string]string{}
+		group.SecretRefs = map[string]string{}
+		group.CreatedAt, group.UpdatedAt = now, now
+		if err := database.UpsertEnvGroup(ctx, group); err != nil {
+			t.Fatal(err)
+		}
+	}
+	created, err := database.BackfillProviders(ctx)
+	if err != nil || created != 1 {
+		t.Fatalf("BackfillProviders() = %d, %v; want 1", created, err)
+	}
+	if err := database.UpsertProvider(ctx, domain.Provider{
+		ID: domain.OfficialCodexProviderID, Name: domain.OfficialCodexProviderID, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	providers, err := database.ListProviders(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(providers) != 1 || providers[0].ID != "visible" {
+		t.Fatalf("internal Codex provider leaked into list: %#v", providers)
+	}
+}
+
+func TestMigrationV20RemovesUnusedAccountBoundOfficialModels(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database, err := Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	now := time.Now().UTC()
+	if err := database.CreateProject(ctx, domain.Project{
+		ID: "project-v20", Name: "V20", ProjectType: "folder", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CreateWorkspace(ctx, domain.Workspace{
+		ID: "workspace-v20", ProjectID: "project-v20", Name: "V20", Locality: "local", Transport: "native",
+		RootPath: t.TempDir(), SSHPort: 22, Health: "ready", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpsertEnvGroup(ctx, domain.EnvGroup{
+		ID: "env-v20", Name: "Official", ProviderID: domain.OfficialCodexProviderID, Backend: "codex", Revision: 1,
+		Environment: map[string]string{}, SecretRefs: map[string]string{}, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpsertModel(ctx, domain.Model{
+		ID: "model-v20", DisplayName: "Legacy Official", ProviderID: domain.OfficialCodexProviderID,
+		Source: domain.ModelSourceOfficial, CodexAccountID: "account-v20", Backend: "codex",
+		WireModel: "gpt-legacy", DefaultEnvGroupID: "env-v20", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CreateRuntimeSnapshot(ctx, domain.RuntimeConfigSnapshot{
+		ID: "snapshot-v20", WorkspaceID: "workspace-v20", Backend: "codex", ModelID: "model-v20",
+		WireModel: "gpt-legacy", EnvGroupID: "env-v20", EnvGroupRevision: 1,
+		CodexAccountID: "account-v20", PermissionsJSON: "{}", CreatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpsertProvider(ctx, domain.Provider{
+		ID: domain.OfficialCodexProviderID, Name: domain.OfficialCodexProviderID, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.db.ExecContext(ctx, `DELETE FROM schema_migrations WHERE version=20`); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Model(ctx, "model-v20"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("legacy official model was retained: %v", err)
+	}
+	var snapshotCount, providerCount int
+	if err := database.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM runtime_config_snapshots WHERE id='snapshot-v20'`).Scan(&snapshotCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM providers WHERE id=?`, domain.OfficialCodexProviderID).Scan(&providerCount); err != nil {
+		t.Fatal(err)
+	}
+	if snapshotCount != 0 || providerCount != 0 {
+		t.Fatalf("legacy official rows were retained: snapshots=%d providers=%d", snapshotCount, providerCount)
 	}
 }

@@ -65,11 +65,15 @@ type TaskAgent struct {
 	RuntimeConfigSnapshotID string    `json:"runtime_config_snapshot_id"`
 	InheritMain             bool      `json:"inherit_main"`
 	Backend                 string    `json:"backend,omitempty"`
+	ModelSource             string    `json:"model_source,omitempty"`
 	ModelID                 string    `json:"model_id,omitempty"`
 	ModelName               string    `json:"model_name,omitempty"`
+	WireModel               string    `json:"wire_model,omitempty"`
+	CodexAccountID          string    `json:"codex_account_id,omitempty"`
 	ReasoningEffort         string    `json:"reasoning_effort,omitempty"`
 	Filesystem              string    `json:"filesystem,omitempty"`
 	Approval                string    `json:"approval,omitempty"`
+	ProxyEnabled            bool      `json:"proxy_enabled"`
 	UnreadCount             int       `json:"unread_count"`
 	CreatedAt               time.Time `json:"created_at"`
 	UpdatedAt               time.Time `json:"updated_at"`

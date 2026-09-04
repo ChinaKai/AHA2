@@ -24,6 +24,7 @@ type stubExecutor struct {
 	block          <-chan struct{}
 	prompts        []string
 	providerInputs []string
+	environments   []map[string]string
 }
 
 type multiAgentExecutor struct {
@@ -63,6 +64,11 @@ func (s *stubExecutor) Execute(_ context.Context, request ExecutionRequest, emit
 	defer s.mu.Unlock()
 	s.prompts = append(s.prompts, request.Prompt)
 	s.providerInputs = append(s.providerInputs, request.ProviderSessionID)
+	environment := make(map[string]string, len(request.Environment))
+	for key, value := range request.Environment {
+		environment[key] = value
+	}
+	s.environments = append(s.environments, environment)
 	if request.ProviderSessionID != "" {
 		s.session = request.ProviderSessionID
 	} else {
@@ -83,6 +89,12 @@ func (s *stubExecutor) requestHistory() ([]string, []string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]string(nil), s.prompts...), append([]string(nil), s.providerInputs...)
+}
+
+func (s *stubExecutor) environmentHistory() []map[string]string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]map[string]string(nil), s.environments...)
 }
 
 func TestMessagesQueueWhileAgentIsBusy(t *testing.T) {
@@ -188,7 +200,7 @@ func TestTaskMultiTurnFlow(t *testing.T) {
 	service := NewService(database, secretStore, &stubExecutor{})
 	task, err := service.CreateTask(ctx, CreateTaskInput{
 		ProjectID: project.ID, WorkspaceID: workspace.ID, Title: "test", Request: "run test",
-		ModelID: model.ID,
+		ModelID: model.ID, ProxyEnabled: true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -212,6 +224,11 @@ func TestTaskMultiTurnFlow(t *testing.T) {
 	if len(prompts) < 2 || !strings.Contains(prompts[0], "## AHA Core") ||
 		!strings.Contains(prompts[0], ".aha2-context") {
 		t.Fatalf("routed prompt was not used: %#v", prompts)
+	}
+	environments := service.executor.(*stubExecutor).environmentHistory()
+	if len(environments) < 2 || environments[0]["HTTP_PROXY"] != "http://127.0.0.1:7897" ||
+		environments[0]["HTTPS_PROXY"] != "http://127.0.0.1:7897" || environments[0]["NO_PROXY"] == "" {
+		t.Fatalf("shared proxy was not injected: %#v", environments)
 	}
 	manifest := filepath.Join(workspace.RootPath, ".aha2-context", task.ID, "main", "manifest.json")
 	if data, err := os.ReadFile(manifest); err != nil || strings.Contains(string(data), "stub completed") {

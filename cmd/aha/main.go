@@ -18,6 +18,7 @@ import (
 	"github.com/ChinaKai/AHA2/internal/app"
 	"github.com/ChinaKai/AHA2/internal/auth"
 	"github.com/ChinaKai/AHA2/internal/backend"
+	"github.com/ChinaKai/AHA2/internal/codexaccount"
 	"github.com/ChinaKai/AHA2/internal/execution"
 	"github.com/ChinaKai/AHA2/internal/hardware"
 	"github.com/ChinaKai/AHA2/internal/httpapi"
@@ -129,12 +130,14 @@ func serve(args []string) error {
 		logger.Warn("owner registration is open", "setup_token_file", *setupTokenFile)
 	}
 	authService := auth.NewService(database, *setupToken, 14*24*time.Hour)
+	codexAccounts := codexaccount.New(ctx, database, secretStore, absoluteDataDir, *codexBinary)
 	executor := execution.Executor{
 		Codex:  backend.Codex{Binary: *codexBinary},
 		Claude: backend.Claude{Binary: *claudeBinary},
 	}
 	appService := app.NewService(database, secretStore, executor)
 	appService.SetWorkspacePreparer(execution.WorkspacePreparer{})
+	appService.SetCodexAccountManager(codexAccounts)
 	hardwareManager := hardware.NewManager(database)
 	defer hardwareManager.Close()
 	if err := appService.ResumePending(ctx); err != nil {
@@ -157,6 +160,7 @@ func serve(args []string) error {
 		DetectWorkspace: workspace.Detect,
 		Secrets:         secretStore,
 		Hardware:        hardwareManager,
+		CodexAccounts:   codexAccounts,
 	})
 	if *allowCrossOrigin {
 		logger.Warn("Origin host validation disabled")

@@ -13,6 +13,13 @@ export interface SystemInfo {
   wsl_distros: string[];
 }
 
+export interface ProxySettings {
+  http_proxy: string;
+  https_proxy: string;
+  no_proxy: string;
+  updated_at?: string;
+}
+
 export interface Project {
   id: string;
   name: string;
@@ -45,12 +52,80 @@ export interface Model {
   id: string;
   display_name: string;
   provider_id: string;
+  source: "provider" | "official" | string;
+  codex_account_id?: string;
   backend: string;
   wire_model: string;
   wire_api?: string;
   context_window?: number;
   max_output_tokens?: number;
   default_reasoning_effort?: string;
+}
+
+export interface CodexAccount {
+  id: string;
+  label: string;
+  email?: string;
+  account_id?: string;
+  plan_type?: string;
+  status: string;
+  proxy_enabled: boolean;
+  credential_configured: boolean;
+  usage?: CodexUsage;
+  usage_updated_at?: string;
+  usage_error?: string;
+  available_models?: CodexModelOption[];
+  models_updated_at?: string;
+  models_error?: string;
+  created_at: string;
+  updated_at: string;
+  last_used_at?: string;
+}
+
+export interface CodexUsage {
+  rate_limits: CodexRateLimit[];
+  credits: {
+    has_credits: boolean;
+    unlimited: boolean;
+    overage_limit_reached: boolean;
+    balance?: string;
+  };
+  reset_credits_available?: number;
+}
+
+export interface CodexRateLimit {
+  id: string;
+  name: string;
+  allowed: boolean;
+  limit_reached: boolean;
+  primary_window?: CodexUsageWindow;
+  secondary_window?: CodexUsageWindow;
+}
+
+export interface CodexUsageWindow {
+  used_percent: number;
+  limit_window_seconds: number;
+  reset_at?: number;
+}
+
+export interface CodexModelOption {
+  wire_model: string;
+  display_name: string;
+  description?: string;
+  context_window?: number;
+  max_context_window?: number;
+  default_reasoning_effort?: string;
+  reasoning_efforts?: string[];
+}
+
+export interface CodexLogin {
+  id: string;
+  status: string;
+  auth_url: string;
+  account?: CodexAccount;
+  error?: string;
+  started_at: string;
+  updated_at: string;
 }
 
 export interface DetectedModel {
@@ -178,11 +253,15 @@ export interface TaskAgent {
   runtime_config_snapshot_id: string;
   inherit_main: boolean;
   backend?: string;
+  model_source?: "env" | "official" | string;
   model_id?: string;
   model_name?: string;
+  wire_model?: string;
+  codex_account_id?: string;
   reasoning_effort?: string;
   filesystem?: string;
   approval?: string;
+  proxy_enabled: boolean;
   unread_count: number;
   created_at: string;
   updated_at: string;

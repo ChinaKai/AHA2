@@ -8,6 +8,7 @@ test("built web contains responsive application", async () => {
   const root = resolve(import.meta.dirname, "..");
   const script = await readFile(resolve(root, "dist", "app.js"), "utf8");
   const api = await readFile(resolve(root, "dist", "api.js"), "utf8");
+  const runtimePicker = await readFile(resolve(root, "dist", "runtime_picker.js"), "utf8");
   const agents = await readFile(resolve(root, "dist", "task_agents.js"), "utf8");
   const taskComposer = await readFile(resolve(root, "dist", "task_composer.js"), "utf8");
   const taskTools = await readFile(resolve(root, "dist", "task_tools.js"), "utf8");
@@ -16,6 +17,8 @@ test("built web contains responsive application", async () => {
   const conversation = await readFile(resolve(root, "dist", "conversation_ui.js"), "utf8");
   const helpers = await readFile(resolve(root, "dist", "ui_helpers.js"), "utf8");
   const promptAdmin = await readFile(resolve(root, "dist", "prompt_admin.js"), "utf8");
+  const proxySettings = await readFile(resolve(root, "dist", "proxy_settings.js"), "utf8");
+  const codexAccounts = await readFile(resolve(root, "dist", "codex_accounts.js"), "utf8");
   const css = await readFile(resolve(root, "dist", "styles.css"), "utf8");
   const index = await readFile(resolve(root, "dist", "index.html"), "utf8");
   assert.match(script, /api\.authStatus/);
@@ -112,9 +115,43 @@ test("built web contains responsive application", async () => {
   assert.match(taskComposer, /conversation-filter-popover/);
   assert.match(taskComposer, /data-conversation-category/);
   assert.match(promptAdmin, /prompt-template-layout/);
+  assert.match(script, /renderCodexAccounts/);
+  assert.match(script, /api\.codexAccounts/);
+  assert.match(codexAccounts, /startCodexLogin/);
+  assert.match(codexAccounts, /codex-login-proxy/);
+  assert.match(codexAccounts, /OAuth Token/);
+  assert.match(codexAccounts, /refreshCodexAccount/);
+  assert.doesNotMatch(codexAccounts, /data-codex-model|official-model-dialog|添加官方 Codex 模型/);
+  assert.doesNotMatch(api, /codex-accounts\/.*\/models/);
+  assert.match(runtimePicker, /模型使用方式/);
+  assert.match(runtimePicker, />Env</);
+  assert.match(runtimePicker, />Official</);
+  assert.match(runtimePicker, /Codex 账号/);
+  assert.match(runtimePicker, /available_models/);
+  assert.match(script, /model_source/);
+  assert.match(script, /codex_account_id/);
+  assert.match(script, /wire_model/);
+  assert.match(api, /codex-accounts\/.*\/refresh/);
+  assert.match(codexAccounts, /submitCodexCallback/);
+  assert.match(codexAccounts, /Callback URL/);
+  assert.match(codexAccounts, /正在校验 Callback 并添加账号/);
+  assert.match(codexAccounts, /onError\?\.\(message\)/);
+  assert.match(codexAccounts, /limit\.id === "codex"/);
+  assert.match(codexAccounts, /return "月额度"/);
+  assert.match(codexAccounts, /周额度/);
+  assert.match(codexAccounts, /重置券/);
+  assert.doesNotMatch(codexAccounts, /codex-quota-grid|flatMap\(limit/);
+  assert.match(css, /\.codex-limit-row/);
+  assert.match(css, /\.provider-sidebar/);
+  assert.doesNotMatch(codexAccounts, /device-auth|setInterval/);
   assert.doesNotMatch(promptAdmin, /prompt-route-list|Effective Prompt|Context Manifest/);
   assert.doesNotMatch(api, /prompts\/routes|prompts\/preview|context\/resources/);
   assert.match(script, /shell\(renderPromptAdmin\(\)\)/);
+  assert.match(script, /shell\(renderProxySettings\(state\.proxySettings\)\)/);
+  assert.match(script, /name=\\?"proxy_enabled/);
+  assert.match(agents, /name="proxy_enabled"/);
+  assert.match(proxySettings, /HTTP_PROXY/);
+  assert.match(proxySettings, /testProxySettings/);
   assert.match(script, /heartbeat/);
   assert.doesNotMatch(css, /\.conversation-event/);
   assert.match(css, /\.message\.agent-tool-message/);
@@ -182,6 +219,91 @@ test("built web contains responsive application", async () => {
   assert.match(script, /\.\/ui_helpers\.js\?v=[a-f0-9]{12}/);
   assert.match(script, /\.\/prompt_admin\.js\?v=[a-f0-9]{12}/);
   assert.match(promptAdmin, /\.\/api\.js\?v=[a-f0-9]{12}/);
+  assert.match(script, /\.\/codex_accounts\.js\?v=[a-f0-9]{12}/);
+  assert.match(script, /\.\/runtime_picker\.js\?v=[a-f0-9]{12}/);
+  assert.match(codexAccounts, /\.\/api\.js\?v=[a-f0-9]{12}/);
+  assert.match(codexAccounts, /\.\/icons\.js\?v=[a-f0-9]{12}/);
+  assert.match(agents, /\.\/runtime_picker\.js\?v=[a-f0-9]{12}/);
+  assert.match(codexAccounts, /button\.innerHTML = icon\("spinner", true\)/);
+  assert.match(codexAccounts, /refreshAccount\(id, true\)[\s\S]*undefined, true/);
+});
+
+test("codex accounts render compact weekly quota", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const {renderCodexAccounts} = await import(pathToFileURL(resolve(root, "dist", "codex_accounts.js")));
+  const html = renderCodexAccounts([{
+    id: "account-1",
+    label: "工作账号",
+    email: "user@example.com",
+    plan_type: "pro",
+    status: "ready",
+    proxy_enabled: true,
+    credential_configured: true,
+    usage_updated_at: "2026-09-04T09:00:00Z",
+    usage: {
+      rate_limits: [{
+        id: "codex",
+        name: "Codex",
+        allowed: true,
+        limit_reached: false,
+        primary_window: {used_percent: 13, limit_window_seconds: 604800, reset_at: 1789099897},
+      }, {
+        id: "spark",
+        name: "GPT-5.3-Codex-Spark",
+        allowed: true,
+        limit_reached: false,
+        primary_window: {used_percent: 0, limit_window_seconds: 18000, reset_at: 1789099897},
+      }],
+      credits: {has_credits: false, unlimited: false, overage_limit_reached: false},
+      reset_credits_available: 1,
+    },
+    created_at: "2026-09-04T09:00:00Z",
+    updated_at: "2026-09-04T09:00:00Z",
+  }]);
+  assert.match(html, /user@example\.com/);
+  assert.match(html, /重置券 1/);
+  assert.match(html, /周额度/);
+  assert.match(html, /87% 剩余/);
+  assert.match(html, /重置/);
+  assert.doesNotMatch(html, /GPT-5\.3-Codex-Spark/);
+  assert.doesNotMatch(html, /codex-quota-item/);
+
+  const monthly = renderCodexAccounts([{
+    id: "account-2", label: "", email: "free@example.com", plan_type: "free", status: "ready",
+    proxy_enabled: true, credential_configured: true,
+    usage: {
+      rate_limits: [{id: "codex", name: "Codex", allowed: true, limit_reached: false,
+        primary_window: {used_percent: 0, limit_window_seconds: 2592000, reset_at: 1791106835}}],
+      credits: {has_credits: false, unlimited: false, overage_limit_reached: false},
+    },
+    created_at: "2026-09-04T09:00:00Z", updated_at: "2026-09-04T09:00:00Z",
+  }]);
+  assert.match(monthly, /月额度/);
+  assert.match(monthly, /100% 剩余/);
+  assert.doesNotMatch(monthly, /暂不可用/);
+});
+
+test("runtime picker separates Env and Official Codex models", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const {runtimeFieldsHTML} = await import(pathToFileURL(resolve(root, "dist", "runtime_picker.js")));
+  const html = runtimeFieldsHTML("task", [{
+    id: "model-env", display_name: "Env Model", provider_id: "gateway", source: "provider",
+    backend: "codex", wire_model: "env-model", created_at: "", updated_at: "",
+  }], [{
+    id: "account-1", label: "Work", status: "ready", proxy_enabled: true,
+    credential_configured: true, available_models: [{wire_model: "gpt-5.6-sol", display_name: "GPT-5.6-Sol"}],
+    created_at: "", updated_at: "",
+  }], {
+    backend: "codex", model_source: "official", codex_account_id: "account-1", wire_model: "gpt-5.6-sol",
+  });
+  assert.match(html, /name="model_source"/);
+  assert.match(html, /value="env"/);
+  assert.match(html, /value="official" selected/);
+  assert.match(html, /name="codex_account_id"/);
+  assert.match(html, /value="account-1" selected/);
+  assert.match(html, /name="wire_model"/);
+  assert.match(html, /value="gpt-5\.6-sol" selected/);
+  assert.match(html, /Env Model/);
 });
 
 test("hardware terminal accepts WebView Blob binary frames", async () => {

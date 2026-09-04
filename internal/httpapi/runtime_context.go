@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,13 +26,14 @@ func codexRuntimeContext(
 	ctx context.Context,
 	session domain.BackendSession,
 	item domain.Workspace,
+	workDir string,
 ) (runtimeContextSample, bool) {
 	if session.ProviderSession == "" {
 		return runtimeContextSample{}, false
 	}
-	if path, ok := codexSessionPath(session.ProviderSession, item); ok {
+	if sessionPath, ok := backendSessionArtifactPath(session, item, workDir); ok {
 		var sample runtimeContextSample
-		found := scanJSONLinesReverse(path, runtimeContextScanLines, func(record map[string]any) bool {
+		found := scanJSONLinesReverse(sessionPath, runtimeContextScanLines, func(record map[string]any) bool {
 			var ok bool
 			sample, ok = codexContextSample(record)
 			return ok
@@ -43,7 +46,8 @@ func codexRuntimeContext(
 	return codexRuntimeContextFromRunner(
 		ctx,
 		workspace.RunnerFor(item),
-		item.RootPath,
+		workDir,
+		remoteBackendSessionRoot(session, workDir),
 		session.ProviderSession,
 	)
 }
@@ -51,15 +55,16 @@ func codexRuntimeContext(
 func codexRuntimeContextFromRunner(
 	ctx context.Context,
 	runner workspace.Runner,
-	workDir, sessionID string,
+	workDir, root, sessionID string,
 ) (runtimeContextSample, bool) {
 	result, err := runner.Run(ctx, workspace.Command{
 		Executable: "sh",
 		Args: []string{
 			"-c",
-			`file=$(find "$HOME/.codex/sessions" -type f -name "*$1*.jsonl" 2>/dev/null | head -n 1); ` +
+			`root="$1"; [ "$root" = "__HOME_CODEX__" ] && root="$HOME/.codex/sessions"; ` +
+				`file=$(find "$root" -type f -name "*$2*.jsonl" 2>/dev/null | head -n 1); ` +
 				`[ -n "$file" ] || exit 1; tail -n 4000 "$file"`,
-			"aha2-context", sessionID,
+			"aha2-context", root, sessionID,
 		},
 		Dir: workDir, Timeout: 20 * time.Second,
 	}, nil)
@@ -90,25 +95,82 @@ func codexContextSample(record map[string]any) (runtimeContextSample, bool) {
 	return runtimeContextSample{InputTokens: input, ContextWindow: window}, true
 }
 
-func codexSessionPath(sessionID string, workspace domain.Workspace) (string, bool) {
-	var homes []string
-	if workspace.Transport == "native" {
-		if home, err := os.UserHomeDir(); err == nil {
-			homes = append(homes, home)
+func backendSessionArtifactSize(
+	ctx context.Context,
+	session domain.BackendSession,
+	item domain.Workspace,
+	workDir string,
+) (int64, bool) {
+	if session.ProviderSession == "" {
+		return 0, false
+	}
+	if sessionPath, ok := backendSessionArtifactPath(session, item, workDir); ok {
+		if info, err := os.Stat(sessionPath); err == nil {
+			return info.Size(), true
 		}
-	} else if workspace.Transport == "wsl" && workspace.Distro != "" {
-		if home := linuxHomeFromWorkspace(workspace.RootPath); home != "" {
-			suffix := strings.ReplaceAll(strings.TrimPrefix(home, "/"), "/", `\`)
-			homes = append(homes,
-				`\\wsl.localhost\`+workspace.Distro+`\`+suffix,
-				`\\wsl$\`+workspace.Distro+`\`+suffix,
+	}
+	if item.Transport != "wsl" && item.Transport != "ssh" && item.Locality != "remote" {
+		return 0, false
+	}
+	return backendSessionArtifactSizeFromRunner(
+		ctx,
+		workspace.RunnerFor(item),
+		workDir,
+		remoteBackendSessionRoot(session, workDir),
+		session.ProviderSession,
+	)
+}
+
+func backendSessionArtifactSizeFromRunner(
+	ctx context.Context,
+	runner workspace.Runner,
+	workDir, root, sessionID string,
+) (int64, bool) {
+	result, err := runner.Run(ctx, workspace.Command{
+		Executable: "sh",
+		Args: []string{
+			"-c",
+			`root="$1"; case "$root" in ` +
+				`"__HOME_CODEX__") root="$HOME/.codex/sessions" ;; ` +
+				`"__HOME_CLAUDE__") root="$HOME/.claude/projects" ;; esac; ` +
+				`file=$(find "$root" -type f -name "*$2*.jsonl" 2>/dev/null | head -n 1); ` +
+				`[ -n "$file" ] || exit 1; wc -c < "$file"`,
+			"aha2-session-file", root, sessionID,
+		},
+		Dir: workDir, Timeout: 20 * time.Second,
+	}, nil)
+	if err != nil || result.ExitCode != 0 {
+		return 0, false
+	}
+	size, err := strconv.ParseInt(strings.TrimSpace(result.Stdout), 10, 64)
+	return size, err == nil
+}
+
+func backendSessionArtifactPath(
+	session domain.BackendSession,
+	item domain.Workspace,
+	workDir string,
+) (string, bool) {
+	var roots []string
+	if item.Transport == "native" {
+		root := nativeBackendSessionRoot(session, workDir)
+		if root != "" {
+			roots = append(roots, root)
+		}
+	} else if item.Transport == "wsl" && item.Distro != "" {
+		root := linuxBackendSessionRoot(session, item.RootPath, workDir)
+		if root != "" {
+			suffix := strings.ReplaceAll(strings.TrimPrefix(root, "/"), "/", `\`)
+			roots = append(roots,
+				`\\wsl.localhost\`+item.Distro+`\`+suffix,
+				`\\wsl$\`+item.Distro+`\`+suffix,
 			)
 		}
 	}
 	var newest string
 	var newestTime int64
-	for _, home := range homes {
-		pattern := filepath.Join(home, ".codex", "sessions", "*", "*", "*", "*"+sessionID+"*.jsonl")
+	for _, root := range roots {
+		pattern := backendSessionGlob(root, session.Backend, session.ProviderSession)
 		matches, _ := filepath.Glob(pattern)
 		for _, match := range matches {
 			info, err := os.Stat(match)
@@ -122,6 +184,51 @@ func codexSessionPath(sessionID string, workspace domain.Workspace) (string, boo
 		}
 	}
 	return newest, newest != ""
+}
+
+func nativeBackendSessionRoot(session domain.BackendSession, workDir string) string {
+	if session.Backend == "codex" && session.CodexAccountID != "" {
+		return filepath.Join(workDir, ".aha2-context", "runtime", "codex-auth", session.ID, "sessions")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	if session.Backend == "claude" {
+		return filepath.Join(home, ".claude", "projects")
+	}
+	return filepath.Join(home, ".codex", "sessions")
+}
+
+func linuxBackendSessionRoot(session domain.BackendSession, workspaceRoot, workDir string) string {
+	if session.Backend == "codex" && session.CodexAccountID != "" {
+		return path.Join(strings.ReplaceAll(workDir, `\`, "/"), ".aha2-context", "runtime", "codex-auth", session.ID, "sessions")
+	}
+	home := linuxHomeFromWorkspace(workspaceRoot)
+	if home == "" {
+		return ""
+	}
+	if session.Backend == "claude" {
+		return path.Join(home, ".claude", "projects")
+	}
+	return path.Join(home, ".codex", "sessions")
+}
+
+func remoteBackendSessionRoot(session domain.BackendSession, workDir string) string {
+	if session.Backend == "codex" && session.CodexAccountID != "" {
+		return path.Join(strings.ReplaceAll(workDir, `\`, "/"), ".aha2-context", "runtime", "codex-auth", session.ID, "sessions")
+	}
+	if session.Backend == "claude" {
+		return "__HOME_CLAUDE__"
+	}
+	return "__HOME_CODEX__"
+}
+
+func backendSessionGlob(root, backend, sessionID string) string {
+	if backend == "claude" {
+		return filepath.Join(root, "*", "*"+sessionID+"*.jsonl")
+	}
+	return filepath.Join(root, "*", "*", "*", "*"+sessionID+"*.jsonl")
 }
 
 func linuxHomeFromWorkspace(root string) string {

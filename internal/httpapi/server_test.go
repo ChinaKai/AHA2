@@ -84,6 +84,43 @@ func TestAuthenticationAndCSRF(t *testing.T) {
 	}
 }
 
+func TestProxySettingsAPI(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	secretStore, err := secrets.Open(filepath.Join(t.TempDir(), "secrets.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	authService := auth.NewService(database, "setup-test", time.Hour)
+	server := httptest.NewServer(New(Config{
+		Store: database, Auth: authService, App: app.NewService(database, secretStore, app.StubExecutor{}),
+	}).Handler())
+	defer server.Close()
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	csrf := registerOwner(t, client, server.URL)
+
+	response := requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/settings/proxy", nil, "")
+	var payload map[string]any
+	decodeResponse(t, response, &payload)
+	if response.StatusCode != http.StatusOK || payload["proxy"].(map[string]any)["http_proxy"] != "http://127.0.0.1:7897" {
+		t.Fatalf("unexpected default proxy: status=%d payload=%v", response.StatusCode, payload)
+	}
+	response = requestJSON(t, client, http.MethodPut, server.URL+"/api/v1/settings/proxy", map[string]any{
+		"http_proxy": "http://192.168.1.2:7897", "https_proxy": "http://192.168.1.2:7897",
+		"no_proxy": "localhost,127.0.0.1",
+	}, csrf)
+	decodeResponse(t, response, &payload)
+	if response.StatusCode != http.StatusOK || payload["proxy"].(map[string]any)["https_proxy"] != "http://192.168.1.2:7897" {
+		t.Fatalf("proxy update failed: status=%d payload=%v", response.StatusCode, payload)
+	}
+}
+
 func TestCatalogProjectTypeAndManualModels(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -148,6 +185,25 @@ func TestCatalogProjectTypeAndManualModels(t *testing.T) {
 	if _, present := model["model"].(map[string]any)["default_env_group_id"]; present {
 		t.Fatalf("default_env_group_id leaked to browser: %v", model)
 	}
+	if err := database.UpsertModel(ctx, domain.Model{
+		ID: "model-hidden-official", DisplayName: "Hidden Official", ProviderID: domain.OfficialCodexProviderID,
+		Source: domain.ModelSourceOfficial, Backend: "codex", WireModel: "gpt-hidden",
+		DefaultEnvGroupID: envGroupID, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	response = requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/models", nil, "")
+	var modelsPayload map[string]any
+	decodeResponse(t, response, &modelsPayload)
+	models := modelsPayload["models"].([]any)
+	if response.StatusCode != http.StatusOK || len(models) != 1 || models[0].(map[string]any)["display_name"] != "Opus" {
+		t.Fatalf("official runtime model leaked into catalog: %d %v", response.StatusCode, modelsPayload)
+	}
+	response = requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/codex-accounts/account/models", map[string]any{}, csrf)
+	if response.StatusCode != http.StatusNotFound {
+		t.Fatalf("legacy official model endpoint is still registered: %d", response.StatusCode)
+	}
+	response.Body.Close()
 
 	response = requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/models", map[string]any{
 		"display_name": "Bad", "provider_id": "x", "backend": "codex", "wire_model": "x",

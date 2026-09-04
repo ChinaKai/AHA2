@@ -10,8 +10,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ChinaKai/AHA2/internal/codexaccount"
 	"github.com/ChinaKai/AHA2/internal/domain"
 	"github.com/ChinaKai/AHA2/internal/prompt"
+	"github.com/ChinaKai/AHA2/internal/proxyconfig"
 	"github.com/ChinaKai/AHA2/internal/secrets"
 	"github.com/ChinaKai/AHA2/internal/store"
 	workspacepkg "github.com/ChinaKai/AHA2/internal/workspace"
@@ -102,6 +104,7 @@ type Service struct {
 	hub      *EventHub
 	now      func() time.Time
 	prompts  *prompt.Engine
+	codex    *codexaccount.Manager
 
 	mu          sync.Mutex
 	cancels     map[string]context.CancelFunc
@@ -116,6 +119,10 @@ func (s *Service) SetWorkspacePreparer(preparer WorkspacePreparer) {
 	s.preparer = preparer
 }
 
+func (s *Service) SetCodexAccountManager(manager *codexaccount.Manager) {
+	s.codex = manager
+}
+
 type CreateTaskInput struct {
 	ProjectID         string
 	WorkspaceID       string
@@ -126,10 +133,15 @@ type CreateTaskInput struct {
 	TaskBranch        string
 	Isolation         string
 	WorktreeDir       string
+	Backend           string
+	ModelSource       string
 	ModelID           string
+	WireModel         string
+	CodexAccountID    string
 	ReasoningEffort   string
 	Filesystem        string
 	Approval          string
+	ProxyEnabled      bool
 	CollaborationMode string
 	MaxAgents         int
 }
@@ -187,20 +199,12 @@ func (s *Service) CreateTask(ctx context.Context, input CreateTaskInput) (domain
 	} else if worktreeDir == "" {
 		worktreeDir = workspacepkg.DefaultWorktreeDir(workspace)
 	}
-	model, err := s.store.Model(ctx, input.ModelID)
+	model, envGroup, accountID, err := s.resolveRuntimeSelection(ctx, runtimeSelectionInput{
+		Backend: input.Backend, ModelSource: input.ModelSource, ModelID: input.ModelID,
+		WireModel: input.WireModel, CodexAccountID: input.CodexAccountID,
+	})
 	if err != nil {
-		return domain.Task{}, fmt.Errorf("model: %w", err)
-	}
-	envGroupID := model.DefaultEnvGroupID
-	if envGroupID == "" {
-		return domain.Task{}, fmt.Errorf("model has no default env group")
-	}
-	envGroup, err := s.store.EnvGroup(ctx, envGroupID)
-	if err != nil {
-		return domain.Task{}, fmt.Errorf("env group: %w", err)
-	}
-	if model.ProviderID != "" && envGroup.ProviderID != "" && model.ProviderID != envGroup.ProviderID {
-		return domain.Task{}, fmt.Errorf("env group provider does not match model provider")
+		return domain.Task{}, err
 	}
 	now := s.now().UTC()
 	snapshot := domain.RuntimeConfigSnapshot{
@@ -211,6 +215,8 @@ func (s *Service) CreateTask(ctx context.Context, input CreateTaskInput) (domain
 		WireModel:        model.WireModel,
 		EnvGroupID:       envGroup.ID,
 		EnvGroupRevision: envGroup.Revision,
+		CodexAccountID:   accountID,
+		ProxyEnabled:     input.ProxyEnabled,
 		ReasoningEffort:  input.ReasoningEffort,
 		PermissionsJSON:  permissionsJSON(input.Filesystem, input.Approval),
 		CreatedAt:        now,
@@ -536,7 +542,10 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 		return
 	}
 	var providerSession string
-	session, err := s.store.ReusableBackendSession(ctx, task.ID, turn.AgentID, workspace.ID, snapshot.Backend, model.ID, snapshot.EnvGroupRevision)
+	session, err := s.store.ReusableBackendSession(
+		ctx, task.ID, turn.AgentID, workspace.ID, snapshot.Backend, model.ID,
+		snapshot.EnvGroupRevision, snapshot.CodexAccountID,
+	)
 	if err == nil {
 		providerSession = session.ProviderSession
 		turn.BackendSessionID = session.ID
@@ -544,6 +553,12 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 			_ = json.Unmarshal([]byte(session.ContextUsageJSON), &turn.Usage)
 			_ = s.store.UpdateTurn(ctx, turn, turn.Status)
 		}
+	}
+	sessionID := turn.BackendSessionID
+	if sessionID == "" {
+		sessionID = domain.NewID("backend_session")
+		turn.BackendSessionID = sessionID
+		_ = s.store.UpdateTurn(ctx, turn, turn.Status)
 	}
 	environment := make(map[string]string, len(envGroup.Environment)+len(envGroup.SecretNames))
 	for key, value := range envGroup.Environment {
@@ -553,6 +568,36 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 		if value, ok := s.secrets.Get(secretRef); ok {
 			environment[environmentName] = value
 		}
+	}
+	if snapshot.ProxyEnabled {
+		settings, settingsErr := s.store.ProxySettings(ctx)
+		if settingsErr != nil {
+			s.failTurn(ctx, &turn, task, fmt.Errorf("读取代理设置失败: %w", settingsErr))
+			return
+		}
+		settings, settingsErr = proxyconfig.Normalize(settings)
+		if settingsErr != nil {
+			s.failTurn(ctx, &turn, task, fmt.Errorf("代理设置无效: %w", settingsErr))
+			return
+		}
+		proxyconfig.ApplyEnvironment(environment, settings)
+	}
+	if snapshot.CodexAccountID != "" {
+		if snapshot.Backend != "codex" || s.codex == nil {
+			s.failTurn(ctx, &turn, task, fmt.Errorf("Codex 官方账号运行时不可用"))
+			return
+		}
+		unlock := s.codex.LockAccount(snapshot.CodexAccountID)
+		defer unlock()
+		profileDir, profileErr := s.codex.PrepareProfile(
+			ctx, snapshot.CodexAccountID, workspace, workDir, sessionID,
+		)
+		if profileErr != nil {
+			s.failTurn(ctx, &turn, task, profileErr)
+			return
+		}
+		environment["CODEX_HOME"] = profileDir
+		defer s.codex.SyncProfile(context.Background(), snapshot.CodexAccountID, workspace, profileDir)
 	}
 	if err := s.transitionTurn(ctx, &turn, domain.TurnRunning, "turn_running"); err != nil {
 		return
@@ -580,13 +625,10 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 		return
 	}
 	now := s.now().UTC()
-	sessionID := turn.BackendSessionID
-	if sessionID == "" {
-		sessionID = domain.NewID("backend_session")
-	}
 	backendSession := domain.BackendSession{
 		ID: sessionID, TaskID: task.ID, AgentID: turn.AgentID, WorkspaceID: workspace.ID,
 		Backend: snapshot.Backend, ModelID: model.ID, EnvGroupRevision: snapshot.EnvGroupRevision,
+		CodexAccountID:  snapshot.CodexAccountID,
 		ProviderSession: result.ProviderSessionID, Status: "active", CreatedAt: now, LastUsedAt: now,
 	}
 	if len(turn.Usage) > 0 {

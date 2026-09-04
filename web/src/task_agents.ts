@@ -1,5 +1,6 @@
 import {icon} from "./icons.js";
-import type {ConversationItem, Model, TaskAgent, TaskContextDetail, TaskDetail, TaskMemory, Turn} from "./types.js";
+import {runtimeFieldsHTML} from "./runtime_picker.js";
+import type {CodexAccount, ConversationItem, Model, TaskAgent, TaskContextDetail, TaskDetail, TaskMemory, Turn} from "./types.js";
 
 export type TaskRealtimeState = "connecting" | "live" | "fallback";
 
@@ -255,15 +256,12 @@ export function renderConversationWithOrchestration(
   ).join("");
 }
 
-export function renderAgentConfigDialog(detail: TaskDetail, agentID: string, models: Model[]): string {
+export function renderAgentConfigDialog(detail: TaskDetail, agentID: string, models: Model[], accounts: CodexAccount[]): string {
   const agent = (detail.agents || []).find(item => item.agent_id === agentID);
   if (!agent) return "";
   const effortLevels = agent.backend === "claude"
     ? ["low", "medium", "high", "xhigh", "max"]
     : ["low", "medium", "high", "xhigh"];
-  const modelOptions = models.map(model =>
-    `<option value="${escapeHTML(model.id)}" data-backend="${escapeHTML(model.backend)}" ${model.id === agent.model_id ? "selected" : ""}>${escapeHTML(model.display_name)} · ${escapeHTML(model.backend)}</option>`
-  ).join("");
   const mainSettings = agent.agent_id === "main" ? `<fieldset class="agent-collaboration-settings"><legend>Task 协作</legend><div class="two">
     <label>模式<select name="collaboration_mode"><option value="single" ${detail.task.collaboration_mode === "single" ? "selected" : ""}>Single</option><option value="auto" ${detail.task.collaboration_mode !== "single" ? "selected" : ""}>Auto</option></select></label>
     <label>最大 Agent 数<input name="max_agents" type="number" min="1" value="${Math.max(1, Number(detail.task.max_agents || 3))}"></label>
@@ -272,15 +270,13 @@ export function renderAgentConfigDialog(detail: TaskDetail, agentID: string, mod
     <div class="dialog-head"><div><h2>${escapeHTML(agent.agent_id)} 配置</h2><small>${escapeHTML(agent.title || agent.role)}</small></div><button type="button" data-close class="icon-button">${icon("close")}</button></div>
     <input type="hidden" name="agent_id" value="${escapeHTML(agent.agent_id)}">
     ${mainSettings}
-    <div class="two agent-runtime-fields">
-      <label>Backend<select name="backend" id="agent-config-backend"><option value="codex" ${agent.backend === "codex" ? "selected" : ""}>Codex</option><option value="claude" ${agent.backend === "claude" ? "selected" : ""}>Claude Code</option></select></label>
-      <label>模型<select name="model_id" id="agent-config-model">${modelOptions}</select></label>
-    </div>
+    ${runtimeFieldsHTML("agent-config", models, accounts, agent, "agent-runtime-fields")}
     <div class="two agent-runtime-fields">
       <label>推理强度<select name="reasoning_effort" id="agent-config-effort">${effortLevels.map(level => `<option value="${level}" ${level === agent.reasoning_effort ? "selected" : ""}>${level}</option>`).join("")}</select></label>
       <label>沙箱<select name="filesystem"><option value="read-only" ${agent.filesystem === "read-only" ? "selected" : ""}>只读</option><option value="workspace-write" ${agent.filesystem === "workspace-write" ? "selected" : ""}>工作区可写</option><option value="danger-full-access" ${agent.filesystem === "danger-full-access" ? "selected" : ""}>完全访问</option></select></label>
     </div>
     <label class="agent-runtime-fields">审批<select name="approval"><option value="never" ${agent.approval !== "auto" ? "selected" : ""}>无需确认</option><option value="auto" ${agent.approval === "auto" ? "selected" : ""}>自动批准</option></select></label>
+    <label class="agent-runtime-fields proxy-toggle"><input name="proxy_enabled" type="checkbox" ${agent.proxy_enabled ? "checked" : ""}>Backend 使用共享代理</label>
     <div class="dialog-actions"><button type="button" data-close>取消</button><button class="primary" value="default">保存</button></div>
   </form></dialog>`;
 }

@@ -54,10 +54,10 @@ func (s *Store) CreateTaskWithSnapshot(ctx context.Context, snapshot domain.Runt
 	}
 	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO runtime_config_snapshots(id,workspace_id,backend,backend_version,model_id,wire_model,env_group_id,env_group_revision,reasoning_effort,permissions_json,created_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+		INSERT INTO runtime_config_snapshots(id,workspace_id,backend,backend_version,model_id,wire_model,env_group_id,env_group_revision,codex_account_id,proxy_enabled,reasoning_effort,permissions_json,created_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		snapshot.ID, snapshot.WorkspaceID, snapshot.Backend, snapshot.BackendVersion, snapshot.ModelID,
-		snapshot.WireModel, snapshot.EnvGroupID, snapshot.EnvGroupRevision, snapshot.ReasoningEffort,
+		snapshot.WireModel, snapshot.EnvGroupID, snapshot.EnvGroupRevision, snapshot.CodexAccountID, boolInt(snapshot.ProxyEnabled), snapshot.ReasoningEffort,
 		snapshot.PermissionsJSON, timeString(snapshot.CreatedAt),
 	); err != nil {
 		return domain.Task{}, err
@@ -394,38 +394,38 @@ func (s *Store) UpdateTurn(ctx context.Context, item domain.Turn, from domain.Tu
 
 func (s *Store) UpsertBackendSession(ctx context.Context, item domain.BackendSession) error {
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO backend_sessions(id,task_id,agent_id,workspace_id,backend,model_id,env_group_revision,provider_session_id,status,context_usage_json,created_at,last_used_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+		INSERT INTO backend_sessions(id,task_id,agent_id,workspace_id,backend,model_id,env_group_revision,codex_account_id,provider_session_id,status,context_usage_json,created_at,last_used_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET provider_session_id=excluded.provider_session_id,status=excluded.status,
 			context_usage_json=excluded.context_usage_json,last_used_at=excluded.last_used_at`,
 		item.ID, item.TaskID, item.AgentID, item.WorkspaceID, item.Backend, item.ModelID, item.EnvGroupRevision,
-		item.ProviderSession, item.Status, item.ContextUsageJSON, timeString(item.CreatedAt), timeString(item.LastUsedAt),
+		item.CodexAccountID, item.ProviderSession, item.Status, item.ContextUsageJSON, timeString(item.CreatedAt), timeString(item.LastUsedAt),
 	)
 	return err
 }
 
-const backendSessionColumns = `id,task_id,agent_id,workspace_id,backend,model_id,env_group_revision,provider_session_id,status,context_usage_json,created_at,last_used_at`
+const backendSessionColumns = `id,task_id,agent_id,workspace_id,backend,model_id,env_group_revision,codex_account_id,provider_session_id,status,context_usage_json,created_at,last_used_at`
 
 func scanBackendSession(scanner interface{ Scan(...any) error }) (domain.BackendSession, error) {
 	var item domain.BackendSession
 	var createdAt, lastUsedAt string
 	err := scanner.Scan(
 		&item.ID, &item.TaskID, &item.AgentID, &item.WorkspaceID, &item.Backend, &item.ModelID,
-		&item.EnvGroupRevision, &item.ProviderSession, &item.Status, &item.ContextUsageJSON,
+		&item.EnvGroupRevision, &item.CodexAccountID, &item.ProviderSession, &item.Status, &item.ContextUsageJSON,
 		&createdAt, &lastUsedAt,
 	)
 	item.CreatedAt, item.LastUsedAt = parseTime(createdAt), parseTime(lastUsedAt)
 	return item, err
 }
 
-func (s *Store) ReusableBackendSession(ctx context.Context, taskID, agentID, workspaceID, backend, modelID string, envRevision int) (domain.BackendSession, error) {
+func (s *Store) ReusableBackendSession(ctx context.Context, taskID, agentID, workspaceID, backend, modelID string, envRevision int, codexAccountID string) (domain.BackendSession, error) {
 	return scanBackendSession(s.db.QueryRowContext(ctx, `
 		SELECT `+backendSessionColumns+`
 		FROM backend_sessions
-		WHERE task_id=? AND agent_id=? AND workspace_id=? AND backend=? AND model_id=? AND env_group_revision=?
+		WHERE task_id=? AND agent_id=? AND workspace_id=? AND backend=? AND model_id=? AND env_group_revision=? AND codex_account_id=?
 		  AND status='active'
 		ORDER BY last_used_at DESC LIMIT 1`,
-		taskID, agentID, workspaceID, backend, modelID, envRevision,
+		taskID, agentID, workspaceID, backend, modelID, envRevision, codexAccountID,
 	))
 }
 

@@ -6,8 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -131,10 +129,15 @@ func (s *Server) createTask(writer http.ResponseWriter, request *http.Request) {
 		TaskBranch        string `json:"task_branch"`
 		Isolation         string `json:"isolation"`
 		WorktreeDir       string `json:"worktree_dir"`
+		Backend           string `json:"backend"`
+		ModelSource       string `json:"model_source"`
 		ModelID           string `json:"model_id"`
+		WireModel         string `json:"wire_model"`
+		CodexAccountID    string `json:"codex_account_id"`
 		ReasoningEffort   string `json:"reasoning_effort"`
 		Filesystem        string `json:"filesystem"`
 		Approval          string `json:"approval"`
+		ProxyEnabled      bool   `json:"proxy_enabled"`
 		CollaborationMode string `json:"collaboration_mode"`
 		MaxAgents         int    `json:"max_agents"`
 	}
@@ -165,9 +168,11 @@ func (s *Server) createTask(writer http.ResponseWriter, request *http.Request) {
 	item, err := s.app.CreateTask(request.Context(), app.CreateTaskInput{
 		ProjectID: payload.ProjectID, WorkspaceID: payload.WorkspaceID, Title: payload.Title, Request: payload.Request,
 		TargetBranch: payload.TargetBranch, BaseCommit: payload.BaseCommit, TaskBranch: payload.TaskBranch,
-		Isolation: payload.Isolation, WorktreeDir: payload.WorktreeDir, ModelID: payload.ModelID, ReasoningEffort: payload.ReasoningEffort,
+		Isolation: payload.Isolation, WorktreeDir: payload.WorktreeDir, Backend: payload.Backend,
+		ModelSource: payload.ModelSource, ModelID: payload.ModelID, WireModel: payload.WireModel,
+		CodexAccountID: payload.CodexAccountID, ReasoningEffort: payload.ReasoningEffort,
 		Filesystem: filesystem, Approval: approval, CollaborationMode: payload.CollaborationMode,
-		MaxAgents: payload.MaxAgents,
+		MaxAgents: payload.MaxAgents, ProxyEnabled: payload.ProxyEnabled,
 	})
 	if err != nil {
 		writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "create_task_failed", "message": err.Error()})
@@ -279,8 +284,15 @@ func (s *Server) contextForAgent(writer http.ResponseWriter, request *http.Reque
 	globalKB, _ := s.store.ListKnowledge(request.Context(), "global", "", []domain.KnowledgeStatus{domain.KnowledgeVerified})
 	latest := latestTurnForAgent(agentTurns, agentID)
 	sessions, _ := s.store.ListBackendSessionsForAgent(request.Context(), taskID, agentID)
-	workspace, _ := s.store.Workspace(request.Context(), task.WorkspaceID)
+	workspace, _ := s.runtimeWorkspace(request.Context(), task.WorkspaceID)
 	metrics := contextMetrics(latest, sessions, workspace, agentTurns)
+	if active, ok := activeBackendSession(sessions); ok {
+		size, exists := backendSessionArtifactSize(
+			request.Context(), active, workspace, taskRuntimeWorkDir(task, workspace),
+		)
+		metrics["session_size_bytes"] = size
+		metrics["session_exists"] = exists
+	}
 	contextUsage := latest.Usage
 	contextPercent := turnContextPercent(latest)
 	if active, _ := metrics["session_active"].(bool); !active && latest.Status.Terminal() {
@@ -371,7 +383,6 @@ func contextMetrics(
 		contextTokens = 0
 		contextPercent = 0
 	}
-	sessionSize, sessionExists := backendSessionArtifactSize(active, workspace)
 	sessionStatus := active.Status
 	if sessionStatus == "" {
 		sessionStatus = latestSession.Status
@@ -389,13 +400,22 @@ func contextMetrics(
 		"context_tokens":          contextTokens,
 		"context_window":          turn.ContextWindow,
 		"context_percent":         contextPercent,
-		"session_size_bytes":      sessionSize,
-		"session_exists":          sessionExists,
+		"session_size_bytes":      int64(0),
+		"session_exists":          false,
 		"session_active":          active.ID != "",
 		"session_id":              active.ProviderSession,
 		"session_status":          sessionStatus,
 		"session_count":           len(sessions),
 	}
+}
+
+func activeBackendSession(sessions []domain.BackendSession) (domain.BackendSession, bool) {
+	for _, session := range sessions {
+		if session.Status == "active" {
+			return session, true
+		}
+	}
+	return domain.BackendSession{}, false
 }
 
 func cloneUsage(usage map[string]any) map[string]any {
@@ -424,29 +444,6 @@ func usageCachedTokens(usage map[string]any) float64 {
 		cacheRead = usageNumber(usage, "cache_read_input_tokens")
 	}
 	return cacheRead + usageNumber(usage, "cache_creation_input_tokens")
-}
-
-func backendSessionArtifactSize(session domain.BackendSession, workspace domain.Workspace) (int64, bool) {
-	if session.ProviderSession == "" || workspace.Transport != "native" {
-		return 0, false
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return 0, false
-	}
-	var pattern string
-	if session.Backend == "claude" {
-		pattern = filepath.Join(home, ".claude", "projects", "*", "*"+session.ProviderSession+"*.jsonl")
-	} else {
-		pattern = filepath.Join(home, ".codex", "sessions", "*", "*", "*", "*"+session.ProviderSession+"*.jsonl")
-	}
-	matches, _ := filepath.Glob(pattern)
-	for _, path := range matches {
-		if stat, err := os.Stat(path); err == nil {
-			return stat.Size(), true
-		}
-	}
-	return 0, false
 }
 
 func applyRoundTiming(round *domain.TaskRound, now time.Time) {
@@ -544,7 +541,7 @@ func (s *Server) applyCodexRuntimeContext(ctx context.Context, turns []domain.Tu
 	if err != nil {
 		return
 	}
-	workspace, err := s.store.Workspace(ctx, task.WorkspaceID)
+	workspace, err := s.runtimeWorkspace(ctx, task.WorkspaceID)
 	if err != nil {
 		return
 	}
@@ -582,7 +579,9 @@ func (s *Server) applyCodexRuntimeContext(ctx context.Context, turns []domain.Tu
 		sample, cached := samples[session.ID]
 		if !cached && !missing[session.ID] {
 			var found bool
-			sample, found = codexRuntimeContext(ctx, session, workspace)
+			sample, found = codexRuntimeContext(
+				ctx, session, workspace, taskRuntimeWorkDir(task, workspace),
+			)
 			if found {
 				samples[session.ID] = sample
 			} else {
@@ -604,6 +603,24 @@ func (s *Server) applyCodexRuntimeContext(ctx context.Context, turns []domain.Tu
 		turn.Usage["context_tokens"] = sample.InputTokens
 		delete(turn.Usage, "context_inconsistent")
 	}
+}
+
+func (s *Server) runtimeWorkspace(ctx context.Context, workspaceID string) (domain.Workspace, error) {
+	item, err := s.store.Workspace(ctx, workspaceID)
+	if err != nil {
+		return domain.Workspace{}, err
+	}
+	if item.SSHCredentialRef != "" && s.secrets != nil {
+		item.SSHPassword, _ = s.secrets.Get(item.SSHCredentialRef)
+	}
+	return item, nil
+}
+
+func taskRuntimeWorkDir(task domain.Task, workspace domain.Workspace) string {
+	if task.TaskWorkspacePath != "" {
+		return task.TaskWorkspacePath
+	}
+	return workspace.RootPath
 }
 
 func contextTokensForUsage(backend string, current map[string]any) float64 {
@@ -709,10 +726,14 @@ func (s *Server) updateTaskCollaboration(writer http.ResponseWriter, request *ht
 func (s *Server) updateAgentConfig(writer http.ResponseWriter, request *http.Request) {
 	var payload struct {
 		Backend         string `json:"backend"`
+		ModelSource     string `json:"model_source"`
 		ModelID         string `json:"model_id"`
+		WireModel       string `json:"wire_model"`
+		CodexAccountID  string `json:"codex_account_id"`
 		ReasoningEffort string `json:"reasoning_effort"`
 		Filesystem      string `json:"filesystem"`
 		Approval        string `json:"approval"`
+		ProxyEnabled    *bool  `json:"proxy_enabled"`
 		InheritMain     *bool  `json:"inherit_main"`
 	}
 	if err := decodeJSON(request, &payload); err != nil {
@@ -722,8 +743,9 @@ func (s *Server) updateAgentConfig(writer http.ResponseWriter, request *http.Req
 	agent, err := s.app.UpdateAgentConfig(
 		request.Context(), request.PathValue("id"), request.PathValue("agent"),
 		app.UpdateAgentConfigInput{
-			Backend: payload.Backend, ModelID: payload.ModelID, ReasoningEffort: payload.ReasoningEffort,
-			Filesystem: payload.Filesystem, Approval: payload.Approval, InheritMain: payload.InheritMain,
+			Backend: payload.Backend, ModelSource: payload.ModelSource, ModelID: payload.ModelID,
+			WireModel: payload.WireModel, CodexAccountID: payload.CodexAccountID, ReasoningEffort: payload.ReasoningEffort,
+			Filesystem: payload.Filesystem, Approval: payload.Approval, ProxyEnabled: payload.ProxyEnabled, InheritMain: payload.InheritMain,
 		},
 	)
 	if err != nil {

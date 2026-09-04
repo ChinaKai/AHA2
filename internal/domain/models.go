@@ -2,6 +2,12 @@ package domain
 
 import "time"
 
+const (
+	OfficialCodexProviderID = "official-codex"
+	ModelSourceProvider     = "provider"
+	ModelSourceOfficial     = "official"
+)
+
 type Owner struct {
 	ID           string    `json:"id"`
 	Username     string    `json:"username"`
@@ -61,6 +67,8 @@ type Model struct {
 	ID                string         `json:"id"`
 	DisplayName       string         `json:"display_name"`
 	ProviderID        string         `json:"provider_id"`
+	Source            string         `json:"source"`
+	CodexAccountID    string         `json:"codex_account_id,omitempty"`
 	Backend           string         `json:"backend"`
 	WireModel         string         `json:"wire_model"`
 	WireAPI           string         `json:"wire_api,omitempty"`
@@ -71,6 +79,72 @@ type Model struct {
 	DefaultEnvGroupID string         `json:"-"`
 	CreatedAt         time.Time      `json:"created_at"`
 	UpdatedAt         time.Time      `json:"updated_at"`
+}
+
+type CodexAccount struct {
+	ID                   string             `json:"id"`
+	Label                string             `json:"label"`
+	Email                string             `json:"email,omitempty"`
+	AccountID            string             `json:"account_id,omitempty"`
+	PlanType             string             `json:"plan_type,omitempty"`
+	Status               string             `json:"status"`
+	ProxyEnabled         bool               `json:"proxy_enabled"`
+	CredentialRef        string             `json:"-"`
+	CredentialConfigured bool               `json:"credential_configured"`
+	Usage                *CodexUsage        `json:"usage,omitempty"`
+	UsageUpdatedAt       time.Time          `json:"usage_updated_at,omitempty"`
+	UsageError           string             `json:"usage_error,omitempty"`
+	AvailableModels      []CodexModelOption `json:"available_models,omitempty"`
+	ModelsUpdatedAt      time.Time          `json:"models_updated_at,omitempty"`
+	ModelsError          string             `json:"models_error,omitempty"`
+	CreatedAt            time.Time          `json:"created_at"`
+	UpdatedAt            time.Time          `json:"updated_at"`
+	LastUsedAt           time.Time          `json:"last_used_at,omitempty"`
+}
+
+type CodexUsage struct {
+	RateLimits            []CodexRateLimit `json:"rate_limits"`
+	Credits               CodexCredits     `json:"credits"`
+	ResetCreditsAvailable int              `json:"reset_credits_available,omitempty"`
+}
+
+type CodexRateLimit struct {
+	ID              string            `json:"id"`
+	Name            string            `json:"name"`
+	Allowed         bool              `json:"allowed"`
+	LimitReached    bool              `json:"limit_reached"`
+	PrimaryWindow   *CodexUsageWindow `json:"primary_window,omitempty"`
+	SecondaryWindow *CodexUsageWindow `json:"secondary_window,omitempty"`
+}
+
+type CodexUsageWindow struct {
+	UsedPercent        int   `json:"used_percent"`
+	LimitWindowSeconds int64 `json:"limit_window_seconds"`
+	ResetAt            int64 `json:"reset_at,omitempty"`
+}
+
+type CodexCredits struct {
+	HasCredits          bool   `json:"has_credits"`
+	Unlimited           bool   `json:"unlimited"`
+	OverageLimitReached bool   `json:"overage_limit_reached"`
+	Balance             string `json:"balance,omitempty"`
+}
+
+type CodexModelOption struct {
+	WireModel        string   `json:"wire_model"`
+	DisplayName      string   `json:"display_name"`
+	Description      string   `json:"description,omitempty"`
+	ContextWindow    int64    `json:"context_window,omitempty"`
+	MaxContextWindow int64    `json:"max_context_window,omitempty"`
+	DefaultEffort    string   `json:"default_reasoning_effort,omitempty"`
+	ReasoningEfforts []string `json:"reasoning_efforts,omitempty"`
+}
+
+type ProxySettings struct {
+	HTTPProxy  string    `json:"http_proxy"`
+	HTTPSProxy string    `json:"https_proxy"`
+	NoProxy    string    `json:"no_proxy"`
+	UpdatedAt  time.Time `json:"updated_at,omitempty"`
 }
 
 type Provider struct {
@@ -108,6 +182,8 @@ type RuntimeConfigSnapshot struct {
 	WireModel        string    `json:"wire_model"`
 	EnvGroupID       string    `json:"env_group_id"`
 	EnvGroupRevision int       `json:"env_group_revision"`
+	CodexAccountID   string    `json:"codex_account_id,omitempty"`
+	ProxyEnabled     bool      `json:"proxy_enabled"`
 	ReasoningEffort  string    `json:"reasoning_effort"`
 	PermissionsJSON  string    `json:"-"`
 	CreatedAt        time.Time `json:"created_at"`
@@ -194,6 +270,7 @@ type BackendSession struct {
 	Backend          string    `json:"backend"`
 	ModelID          string    `json:"model_id"`
 	EnvGroupRevision int       `json:"env_group_revision"`
+	CodexAccountID   string    `json:"codex_account_id,omitempty"`
 	ProviderSession  string    `json:"provider_session_id,omitempty"`
 	Status           string    `json:"status"`
 	ContextUsageJSON string    `json:"-"`

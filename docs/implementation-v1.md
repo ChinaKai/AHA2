@@ -153,3 +153,10 @@ POST   /api/v1/knowledge/{id}/verify
 - 未登录访问业务 API 返回 `401`。
 - 重启服务后 Project、Task、Turn、Session 和 Knowledge 仍可读取。
 - Codex Backend 使用 Model 默认 Env Group，API Key 不出现在日志或 API。
+
+## 共享代理
+
+- 全局代理设置只保存一份 `HTTP_PROXY`、`HTTPS_PROXY` 和 `NO_PROXY`，默认指向 `http://127.0.0.1:7897`。
+- Task/Agent 的 `proxy_enabled` 固化在不可变 Runtime Config Snapshot 中；开启时才向 Codex 或 Claude Backend 注入共享代理环境变量。
+- Codex Account 的 `proxy_enabled` 独立控制 OAuth Token 交换，并随账号保存，浏览器打开授权链接是否使用代理仍由浏览器或系统代理决定。
+- 一期仅接受不含凭据的 `http://`、`https://` 代理 URL，不解析订阅或实现代理协议。

@@ -14,10 +14,14 @@ import (
 
 type UpdateAgentConfigInput struct {
 	Backend         string
+	ModelSource     string
 	ModelID         string
+	WireModel       string
+	CodexAccountID  string
 	ReasoningEffort string
 	Filesystem      string
 	Approval        string
+	ProxyEnabled    *bool
 	InheritMain     *bool
 }
 
@@ -173,9 +177,16 @@ func (s *Service) TaskAgents(ctx context.Context, taskID string) ([]domain.TaskA
 			continue
 		}
 		agents[index].Backend = snapshot.Backend
+		agents[index].ModelSource = domain.ModelSourceProvider
+		if snapshot.CodexAccountID != "" {
+			agents[index].ModelSource = domain.ModelSourceOfficial
+		}
 		agents[index].ModelID = snapshot.ModelID
+		agents[index].WireModel = snapshot.WireModel
+		agents[index].CodexAccountID = snapshot.CodexAccountID
 		agents[index].ReasoningEffort = snapshot.ReasoningEffort
 		agents[index].Filesystem, agents[index].Approval = parsePermissionsJSON(snapshot.PermissionsJSON)
+		agents[index].ProxyEnabled = snapshot.ProxyEnabled
 		if model, modelErr := s.store.Model(ctx, snapshot.ModelID); modelErr == nil {
 			agents[index].ModelName = model.DisplayName
 		}
@@ -291,31 +302,36 @@ func (s *Service) deriveRuntimeSnapshot(
 	base domain.RuntimeConfigSnapshot,
 	input UpdateAgentConfigInput,
 ) (domain.RuntimeConfigSnapshot, error) {
-	modelID := strings.TrimSpace(input.ModelID)
-	if modelID == "" {
-		modelID = base.ModelID
-	}
-	model, err := s.store.Model(ctx, modelID)
-	if err != nil {
-		return domain.RuntimeConfigSnapshot{}, fmt.Errorf("model: %w", err)
-	}
 	backend := strings.TrimSpace(input.Backend)
 	if backend == "" {
-		backend = model.Backend
+		backend = base.Backend
 	}
-	if backend != model.Backend {
-		return domain.RuntimeConfigSnapshot{}, fmt.Errorf("backend does not match model backend")
+	modelSource := strings.TrimSpace(input.ModelSource)
+	if modelSource == "" {
+		modelSource = domain.ModelSourceProvider
+		if base.CodexAccountID != "" {
+			modelSource = domain.ModelSourceOfficial
+		}
 	}
-	envGroupID := model.DefaultEnvGroupID
-	if modelID == base.ModelID && envGroupID == "" {
-		envGroupID = base.EnvGroupID
+	modelID := strings.TrimSpace(input.ModelID)
+	wireModel := strings.TrimSpace(input.WireModel)
+	accountID := strings.TrimSpace(input.CodexAccountID)
+	if modelSource == domain.ModelSourceOfficial {
+		if wireModel == "" {
+			wireModel = base.WireModel
+		}
+		if accountID == "" {
+			accountID = base.CodexAccountID
+		}
+	} else if modelID == "" {
+		modelID = base.ModelID
 	}
-	if envGroupID == "" {
-		return domain.RuntimeConfigSnapshot{}, fmt.Errorf("model has no default env group")
-	}
-	envGroup, err := s.store.EnvGroup(ctx, envGroupID)
+	model, envGroup, accountID, err := s.resolveRuntimeSelection(ctx, runtimeSelectionInput{
+		Backend: backend, ModelSource: modelSource, ModelID: modelID,
+		WireModel: wireModel, CodexAccountID: accountID,
+	})
 	if err != nil {
-		return domain.RuntimeConfigSnapshot{}, fmt.Errorf("env group: %w", err)
+		return domain.RuntimeConfigSnapshot{}, err
 	}
 	effort := strings.TrimSpace(input.ReasoningEffort)
 	if effort == "" {
@@ -338,10 +354,15 @@ func (s *Service) deriveRuntimeSnapshot(
 	default:
 		return domain.RuntimeConfigSnapshot{}, fmt.Errorf("invalid approval")
 	}
+	proxyEnabled := base.ProxyEnabled
+	if input.ProxyEnabled != nil {
+		proxyEnabled = *input.ProxyEnabled
+	}
 	return domain.RuntimeConfigSnapshot{
 		ID: domain.NewID("runtime"), WorkspaceID: task.WorkspaceID, Backend: backend,
 		ModelID: model.ID, WireModel: model.WireModel, EnvGroupID: envGroup.ID,
-		EnvGroupRevision: envGroup.Revision, ReasoningEffort: effort,
+		EnvGroupRevision: envGroup.Revision, CodexAccountID: accountID, ReasoningEffort: effort,
+		ProxyEnabled:    proxyEnabled,
 		PermissionsJSON: permissionsJSON(filesystem, approval), CreatedAt: s.now().UTC(),
 	}, nil
 }

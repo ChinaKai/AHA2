@@ -1,8 +1,11 @@
 import {api} from "./api.js";
 import {renderConversationList} from "./conversation_ui.js";
+import {bindCodexAccounts, renderCodexAccounts} from "./codex_accounts.js";
 import {icon} from "./icons.js";
 import {bindHardwarePanel, stopHardwarePanel} from "./hardware_panel.js";
 import {bindPromptAdmin, loadPromptCatalog, renderPromptAdmin} from "./prompt_admin.js";
+import {bindProxySettings, renderProxySettings} from "./proxy_settings.js";
+import {bindRuntimeFields, runtimeFieldsHTML, setRuntimeBackends, syncRuntimeFields} from "./runtime_picker.js";
 import {renderComposerAgentOptions, renderComposerTools} from "./task_composer.js";
 import {renderTaskToolButtons, renderTaskToolContent, renderTaskToolPanel} from "./task_tools.js";
 import type {TaskTool} from "./task_tools.js";
@@ -20,6 +23,7 @@ import {
 } from "./task_agents.js";
 import type {
   AuthStatus,
+  CodexAccount,
   ConversationCategory,
   ConversationItem,
   DetectedModel,
@@ -27,13 +31,14 @@ import type {
   Model,
   Project,
   Provider,
+  ProxySettings,
   SystemInfo,
   Task,
   TaskContextDetail,
   TaskDetail,
   Workspace,
 } from "./types.js";
-type View = "projects" | "models" | "tasks" | "knowledge" | "prompts";
+type View = "projects" | "models" | "tasks" | "knowledge" | "prompts" | "proxy";
 interface State {
   auth: AuthStatus | null;
   view: View;
@@ -42,9 +47,11 @@ interface State {
   notice: string;
   renderPending: boolean;
   system: SystemInfo;
+  proxySettings: ProxySettings;
   projects: Project[];
   workspaces: Workspace[];
   providers: Provider[];
+  codexAccounts: CodexAccount[];
   models: Model[];
   tasks: Task[];
   knowledge: Knowledge[];
@@ -75,9 +82,11 @@ const state: State = {
   notice: "",
   renderPending: false,
   system: {os: "windows", arch: "", wsl_available: false, wsl_distros: []},
+  proxySettings: {http_proxy: "http://127.0.0.1:7897", https_proxy: "http://127.0.0.1:7897", no_proxy: "localhost,127.0.0.1,::1"},
   projects: [],
   workspaces: [],
   providers: [],
+  codexAccounts: [],
   models: [],
   tasks: [],
   knowledge: [],
@@ -269,11 +278,6 @@ function openProviderDialog(provider: Provider | null): void {
   dialog.showModal();
 }
 
-const EFFORT_LEVELS: Record<string, string[]> = {
-  codex: ["low", "medium", "high", "xhigh"],
-  claude: ["low", "medium", "high", "xhigh", "max"],
-};
-
 // backendOptionsForWorkspace derives the task's allowed backends from the
 // selected workspace's detection results. Falls back to the backends that have
 // configured models when the workspace has not been detected yet.
@@ -287,49 +291,17 @@ function backendOptionsForWorkspace(ws?: Workspace): string[] {
     if (ws.health !== "unknown") return ready; // detected, none ready
   }
   const present = new Set(state.models.map(item => item.backend));
+  if (state.codexAccounts.length) present.add("codex");
   return ["codex", "claude"].filter(backend => present.has(backend));
-}
-
-function refreshTaskModels(): void {
-  const backend = String((document.querySelector("#task-backend") as HTMLSelectElement)?.value || "");
-  const modelSelect = document.querySelector<HTMLSelectElement>("#task-model");
-  if (!modelSelect) return;
-  const items = backend ? state.models.filter(item => item.backend === backend) : state.models;
-  modelSelect.innerHTML = items.length
-    ? items.map(item => `<option value="${item.id}">${escapeHTML(item.display_name)}</option>`).join("")
-    : `<option value="">${backend ? "该 Backend 下暂无模型" : "请先选择 Backend"}</option>`;
 }
 
 function syncTaskBackend(): void {
   const wsID = String((document.querySelector<HTMLSelectElement>("#task-workspace"))?.value || "");
   const ws = state.workspaces.find(item => item.id === wsID);
   const options = backendOptionsForWorkspace(ws);
-  const backendSelect = document.querySelector<HTMLSelectElement>("#task-backend");
-  if (!backendSelect) return;
-  const labels: Record<string, string> = {codex: "Codex", claude: "Claude Code"};
-  const previous = backendSelect.value;
-  backendSelect.innerHTML = options.length
-    ? options.map(backend => `<option value="${backend}">${labels[backend] || backend}</option>`).join("")
-    : `<option value="">该 Workspace 无可用的 Backend（请先检测）</option>`;
-  if (options.includes(previous)) backendSelect.value = previous;
-  else if (options.length) backendSelect.value = options[0];
-  else backendSelect.value = "";
-  refreshTaskModels();
-  syncTaskEffort();
+  setRuntimeBackends("task", options);
+  syncRuntimeFields("task", state.models, state.codexAccounts);
   syncTaskGitIsolation();
-}
-
-function syncTaskEffort(): void {
-  const backend = String((document.querySelector("#task-backend") as HTMLSelectElement)?.value || "codex");
-  const modelID = String((document.querySelector("#task-model") as HTMLSelectElement)?.value || "");
-  const model = state.models.find(item => item.id === modelID);
-  const levels = EFFORT_LEVELS[backend] || EFFORT_LEVELS.codex;
-  const effortSelect = document.querySelector<HTMLSelectElement>("#task-effort");
-  if (!effortSelect) return;
-  const previous = effortSelect.value;
-  const desired = model?.default_reasoning_effort || "";
-  effortSelect.innerHTML = levels.map(level => `<option value="${level}">${level}</option>`).join("");
-  effortSelect.value = levels.includes(desired) ? desired : (levels.includes(previous) ? previous : "medium");
 }
 
 function defaultTaskWorktreeDir(workspace: Workspace | undefined): string {
@@ -562,16 +534,18 @@ async function bootstrap(): Promise<void> {
 }
 
 async function loadAll(): Promise<void> {
-  const [projects, workspaces, providers, models, tasks, knowledge, system] = await Promise.all([
-    api.projects(), api.workspaces(), api.providers(), api.models(), api.tasks(), api.knowledge(), api.system(),
+  const [projects, workspaces, providers, codexAccounts, models, tasks, knowledge, system, proxy] = await Promise.all([
+    api.projects(), api.workspaces(), api.providers(), api.codexAccounts(), api.models(), api.tasks(), api.knowledge(), api.system(), api.proxySettings(),
   ]);
   state.projects = projects.projects || [];
   state.workspaces = workspaces.workspaces || [];
   state.providers = providers.providers || [];
+  state.codexAccounts = codexAccounts.accounts || [];
   state.models = models.models || [];
   state.tasks = tasks.tasks || [];
   state.knowledge = knowledge.knowledge || [];
   if (system?.system) state.system = system.system;
+  if (proxy?.proxy) state.proxySettings = proxy.proxy;
   await loadPromptCatalog();
 }
 function persistNavigationState(): void {
@@ -582,7 +556,7 @@ function persistNavigationState(): void {
 }
 async function restoreNavigationState(): Promise<void> {
   const saved = loadNavigationSnapshot();
-  if (["projects", "models", "tasks", "knowledge", "prompts"].includes(saved.view || "")) state.view = saved.view as View;
+  if (["projects", "models", "tasks", "knowledge", "prompts", "proxy"].includes(saved.view || "")) state.view = saved.view as View;
   state.selectedProject = state.projects.find(project => project.id === saved.projectID) || null;
   if (!saved.taskID || !state.tasks.some(task => task.id === saved.taskID)) return;
   state.view = "tasks"; state.selectedProject = null;
@@ -645,23 +619,6 @@ async function selectTaskAgent(agentID: string): Promise<void> {
 }
 
 function syncAgentConfigFields(): void {
-  const backend = String((document.querySelector<HTMLSelectElement>("#agent-config-backend"))?.value || "codex");
-  const modelSelect = document.querySelector<HTMLSelectElement>("#agent-config-model");
-  if (modelSelect) {
-    const previous = modelSelect.value;
-    const models = state.models.filter(model => model.backend === backend);
-    modelSelect.innerHTML = models.map(model =>
-      `<option value="${model.id}" ${model.id === previous ? "selected" : ""}>${escapeHTML(model.display_name)}</option>`
-    ).join("") || `<option value="">该 Backend 暂无模型</option>`;
-    if (!models.some(model => model.id === previous) && models.length) modelSelect.value = models[0].id;
-  }
-  const effortSelect = document.querySelector<HTMLSelectElement>("#agent-config-effort");
-  if (effortSelect) {
-    const previous = effortSelect.value;
-    const levels = EFFORT_LEVELS[backend] || EFFORT_LEVELS.codex;
-    effortSelect.innerHTML = levels.map(level => `<option value="${level}">${level}</option>`).join("");
-    effortSelect.value = levels.includes(previous) ? previous : "medium";
-  }
   const inherited = Boolean(document.querySelector<HTMLInputElement>('[name="inherit_main"]')?.checked);
   document.querySelectorAll<HTMLElement>(".agent-runtime-fields").forEach(element => {
     element.classList.toggle("disabled", inherited);
@@ -669,6 +626,7 @@ function syncAgentConfigFields(): void {
       input.disabled = inherited;
     });
   });
+  if (!inherited) syncRuntimeFields("agent-config", state.models, state.codexAccounts);
 }
 
 function bindTaskAgentControls(): void {
@@ -793,6 +751,7 @@ function shell(content: string): string {
     ["knowledge", "knowledge", "知识库"],
     ["models", "model", "模型"],
     ["prompts", "bot", "提示词"],
+    ["proxy", "proxy", "代理"],
   ] as const;
   return `<div class="app-shell">
     <aside class="sidebar">
@@ -867,9 +826,12 @@ function modelsView(): string {
   </article>`).join("");
   const models = state.models.map(item => `<tr><td><strong>${escapeHTML(item.display_name)}</strong><small>${escapeHTML(item.wire_model)}</small></td><td>${escapeHTML(item.provider_id)}</td><td>${escapeHTML(backendProtocolLabel(item))}</td><td>${item.context_window ? Math.round(item.context_window / 1000) + "K" : "-"}</td><td class="row-actions"><button type="button" data-edit-model="${item.id}" class="icon-button" title="编辑模型">${icon("edit")}</button><button type="button" data-delete-model="${item.id}" class="icon-button" title="删除模型">${icon("close")}</button></td></tr>`).join("");
   return shell(`<section class="page">
-    ${pageHead("模型", "左侧配置 Provider（API Base URL + API Key），右侧选择 Provider 检测并添加模型。Env Group 由系统自动生成。")}
+    ${pageHead("模型", "Models 仅管理 Provider / Env 模型；官方模型在创建 Task 时按账号选择。")}
     <div class="provider-layout">
-      <section class="panel"><div class="panel-head"><strong>Providers</strong><button data-dialog="provider">${icon("plus")}添加 Provider</button></div>${providers || `<div class="empty">先添加 Provider（API Base URL + API Key）。</div>`}</section>
+      <div class="provider-sidebar">
+        ${renderCodexAccounts(state.codexAccounts)}
+        <section class="panel"><div class="panel-head"><strong>Providers</strong><button data-dialog="provider">${icon("plus")}添加 Provider</button></div>${providers || `<div class="empty">先添加 Provider（API Base URL + API Key）。</div>`}</section>
+      </div>
       <section class="panel"><div class="panel-head"><strong>Models</strong><button data-dialog="model">${icon("plus")}添加模型</button></div><div class="table-wrap"><table><thead><tr><th>模型</th><th>Provider</th><th>Backend</th><th>Context</th><th></th></tr></thead><tbody>${models || `<tr><td colspan="5">选择 Provider 后添加模型。</td></tr>`}</tbody></table></div></section>
     </div>
     ${providerDialog()}${modelDialog()}${editModelDialog()}
@@ -939,7 +901,14 @@ function tasksView(): string {
 }
 
 function taskDialog(): string {
-  return `<dialog id="task-dialog" class="wide"><form id="task-form" method="dialog"><div class="dialog-head"><h2>创建任务</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div><label>标题<input name="title" required></label><label>需求<textarea name="request" required></textarea></label><div class="two"><label>项目<select name="project_id" id="task-project">${state.projects.map(item => `<option value="${item.id}">${escapeHTML(item.name)}</option>`).join("")}</select></label><label>Workspace<select name="workspace_id" id="task-workspace"></select></label></div><div class="two"><label>Backend<select id="task-backend"></select></label><label>模型<select name="model_id" id="task-model"></select></label></div><div class="two"><label>推理强度<select name="reasoning_effort" id="task-effort"></select></label><label>沙箱（文件访问）<select name="filesystem"><option value="workspace-write">工作区可写</option><option value="read-only">只读</option><option value="danger-full-access">完全访问</option></select></label></div><div class="two"><label>协作模式<select name="collaboration_mode"><option value="auto">Auto</option><option value="single">Single</option></select></label><label>最大 Agent 数<input name="max_agents" type="number" min="1" value="3"></label></div><label>审批<select name="approval"><option value="never">无需确认</option><option value="auto">自动批准（跳过权限检查）</option></select></label><div id="task-git-isolation"><label>任务隔离<select name="isolation" id="task-isolation"><option value="worktree">独立 Worktree（推荐）</option><option value="inplace">原地执行</option></select></label><div id="task-worktree-settings"><label>Worktree 根目录<input name="worktree_dir" id="task-worktree-dir" placeholder="默认：仓库上一级/.aha2-worktrees"></label><div class="field-help">系统会在根目录下追加 Task ID；切换为原地执行后不使用此配置。</div></div><div class="two" id="task-branches"><label>目标分支<input name="target_branch" placeholder="默认当前分支"></label><label>任务分支<input name="task_branch" placeholder="aha/task-name"></label></div></div><div class="dialog-actions"><button type="button" data-close>取消</button><button class="primary" value="default">创建任务</button></div></form></dialog>`;
+  return taskDialogBase().replace(
+    '<div id="task-git-isolation">',
+    '<label class="proxy-toggle"><input name="proxy_enabled" type="checkbox">Backend 使用共享代理</label><div id="task-git-isolation">',
+  );
+}
+
+function taskDialogBase(): string {
+  return `<dialog id="task-dialog" class="wide"><form id="task-form" method="dialog"><div class="dialog-head"><h2>创建任务</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div><label>标题<input name="title" required></label><label>需求<textarea name="request" required></textarea></label><div class="two"><label>项目<select name="project_id" id="task-project">${state.projects.map(item => `<option value="${item.id}">${escapeHTML(item.name)}</option>`).join("")}</select></label><label>Workspace<select name="workspace_id" id="task-workspace"></select></label></div>${runtimeFieldsHTML("task", state.models, state.codexAccounts)}<div class="two"><label>推理强度<select name="reasoning_effort" id="task-effort"></select></label><label>沙箱（文件访问）<select name="filesystem"><option value="workspace-write">工作区可写</option><option value="read-only">只读</option><option value="danger-full-access">完全访问</option></select></label></div><div class="two"><label>协作模式<select name="collaboration_mode"><option value="auto">Auto</option><option value="single">Single</option></select></label><label>最大 Agent 数<input name="max_agents" type="number" min="1" value="3"></label></div><label>审批<select name="approval"><option value="never">无需确认</option><option value="auto">自动批准（跳过权限检查）</option></select></label><div id="task-git-isolation"><label>任务隔离<select name="isolation" id="task-isolation"><option value="worktree">独立 Worktree（推荐）</option><option value="inplace">原地执行</option></select></label><div id="task-worktree-settings"><label>Worktree 根目录<input name="worktree_dir" id="task-worktree-dir" placeholder="默认：仓库上一级/.aha2-worktrees"></label><div class="field-help">系统会在根目录下追加 Task ID；切换为原地执行后不使用此配置。</div></div><div class="two" id="task-branches"><label>目标分支<input name="target_branch" placeholder="默认当前分支"></label><label>任务分支<input name="task_branch" placeholder="aha/task-name"></label></div></div><div class="dialog-actions"><button type="button" data-close>取消</button><button class="primary" value="default">创建任务</button></div></form></dialog>`;
 }
 
 let slashCommandSelection = 0;
@@ -1096,7 +1065,7 @@ function taskDetailView(detail: TaskDetail): string {
       ${chat}
       ${renderTaskToolPanel(state.taskTool, detail, state.selectedTaskAgent, taskCtxHtml())}
     </div>
-    ${renderAgentConfigDialog(detail, state.selectedTaskAgent, state.models)}
+    ${renderAgentConfigDialog(detail, state.selectedTaskAgent, state.models, state.codexAccounts)}
   </section>`);
 }
 
@@ -1194,6 +1163,7 @@ function render(): void {
       tasks: tasksView,
       knowledge: knowledgeView,
       prompts: () => shell(renderPromptAdmin()),
+      proxy: () => shell(renderProxySettings(state.proxySettings)),
     };
     content = views[state.view]();
   }
@@ -1235,6 +1205,17 @@ function bindAuth(): void {
 }
 
 function bindCommon(): void {
+  bindCodexAccounts({
+    accounts: state.codexAccounts,
+    onChanged: async () => { await loadAll(); render(); },
+    setMessage,
+  });
+  bindProxySettings({
+    onChanged: settings => { state.proxySettings = settings; },
+    setMessage,
+  });
+  bindRuntimeFields("task", state.models, state.codexAccounts, syncTaskGitIsolation);
+  bindRuntimeFields("agent-config", state.models, state.codexAccounts, syncAgentConfigFields);
   document.querySelectorAll<HTMLElement>("[data-view]").forEach(button => button.addEventListener("click", () => {
     state.view = button.dataset.view as View;
     state.selectedTask = null;
@@ -1570,7 +1551,10 @@ function bindCommon(): void {
     const contextInput = document.querySelector<HTMLInputElement>("#model-edit-context");
     const maxoutInput = document.querySelector<HTMLInputElement>("#model-edit-maxout");
     if (nameInput) nameInput.value = model.display_name;
-    if (wireInput) wireInput.value = model.backend === "claude" ? "anthropic_messages" : (model.wire_api || "responses");
+    if (wireInput) {
+      wireInput.value = model.backend === "claude" ? "anthropic_messages" : (model.wire_api || "responses");
+      wireInput.disabled = false;
+    }
     if (effortInput) effortInput.value = model.default_reasoning_effort || "";
     if (contextInput) contextInput.value = String(model.context_window || 0);
     if (maxoutInput) maxoutInput.value = String(model.max_output_tokens || 0);
@@ -1602,14 +1586,9 @@ function bindCommon(): void {
     syncTaskBackend();
   });
   document.querySelector("#task-isolation")?.addEventListener("change", syncTaskGitIsolation);
-  document.querySelector("#task-backend")?.addEventListener("change", () => {
-    refreshTaskModels();
-    syncTaskEffort();
-  });
-  document.querySelector("#task-model")?.addEventListener("change", syncTaskEffort);
   bindForm("#task-form", async form => {
     const payload = Object.fromEntries(form.entries()) as Record<string, string>;
-    const result = await api.createTask({...payload, max_agents: Number(payload.max_agents || 3)});
+    const result = await api.createTask({...payload, max_agents: Number(payload.max_agents || 3), proxy_enabled: payload.proxy_enabled === "on"});
     await openTask(result.task.id);
     if (result.start_error) setMessage("error", `Task 已创建，但首个 Turn 启动失败：${result.start_error}`);
   });
@@ -1635,7 +1614,6 @@ function bindCommon(): void {
     await selectTaskAgent(event.currentTarget.value);
     render();
   });
-  document.querySelector("#agent-config-backend")?.addEventListener("change", syncAgentConfigFields);
   document.querySelector<HTMLInputElement>('[name="inherit_main"]')?.addEventListener("change", syncAgentConfigFields);
   bindForm("#agent-config-form", async form => {
     if (!state.selectedTask) return;
@@ -1652,10 +1630,14 @@ function bindCommon(): void {
     } : {
       inherit_main: false,
       backend: String(form.get("backend") || ""),
+      model_source: String(form.get("model_source") || "env"),
       model_id: String(form.get("model_id") || ""),
+      wire_model: String(form.get("wire_model") || ""),
+      codex_account_id: String(form.get("codex_account_id") || ""),
       reasoning_effort: String(form.get("reasoning_effort") || ""),
       filesystem: String(form.get("filesystem") || ""),
       approval: String(form.get("approval") || ""),
+      proxy_enabled: form.get("proxy_enabled") === "on",
     });
     await refreshTaskRuntime(state.selectedTask.task.id);
     setMessage("notice", `${agentID} 配置已更新，下一个 Turn 生效`);

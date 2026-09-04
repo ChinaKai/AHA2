@@ -537,6 +537,67 @@ ALTER TABLE workspaces ADD COLUMN ssh_credential_ref TEXT NOT NULL DEFAULT '';
 ALTER TABLE workspaces ADD COLUMN ssh_password_configured INTEGER NOT NULL DEFAULT 0;
 `
 
+const schemaV17 = `
+CREATE TABLE codex_accounts (
+    id TEXT PRIMARY KEY,
+    label TEXT NOT NULL,
+    email TEXT NOT NULL DEFAULT '',
+    account_id TEXT NOT NULL DEFAULT '',
+    plan_type TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'ready',
+    credential_ref TEXT NOT NULL,
+    credential_configured INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    last_used_at TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX idx_codex_accounts_email ON codex_accounts(email);
+
+ALTER TABLE models ADD COLUMN source TEXT NOT NULL DEFAULT 'provider';
+ALTER TABLE models ADD COLUMN codex_account_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE runtime_config_snapshots ADD COLUMN codex_account_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE backend_sessions ADD COLUMN codex_account_id TEXT NOT NULL DEFAULT '';
+`
+
+const schemaV18 = `
+CREATE TABLE proxy_settings (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    http_proxy TEXT NOT NULL DEFAULT '',
+    https_proxy TEXT NOT NULL DEFAULT '',
+    no_proxy TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT ''
+);
+INSERT INTO proxy_settings(id,http_proxy,https_proxy,no_proxy,updated_at)
+VALUES(1,'http://127.0.0.1:7897','http://127.0.0.1:7897','localhost,127.0.0.1,::1',strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+
+ALTER TABLE runtime_config_snapshots ADD COLUMN proxy_enabled INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE codex_accounts ADD COLUMN proxy_enabled INTEGER NOT NULL DEFAULT 0;
+`
+
+const schemaV19 = `
+ALTER TABLE codex_accounts ADD COLUMN usage_json TEXT NOT NULL DEFAULT '{}';
+ALTER TABLE codex_accounts ADD COLUMN usage_updated_at TEXT NOT NULL DEFAULT '';
+ALTER TABLE codex_accounts ADD COLUMN usage_error TEXT NOT NULL DEFAULT '';
+ALTER TABLE codex_accounts ADD COLUMN models_json TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE codex_accounts ADD COLUMN models_updated_at TEXT NOT NULL DEFAULT '';
+ALTER TABLE codex_accounts ADD COLUMN models_error TEXT NOT NULL DEFAULT '';
+`
+
+const schemaV20 = `
+DELETE FROM runtime_config_snapshots
+WHERE model_id IN (SELECT id FROM models WHERE source='official' AND codex_account_id<>'')
+  AND NOT EXISTS(SELECT 1 FROM tasks WHERE runtime_config_snapshot_id=runtime_config_snapshots.id)
+  AND NOT EXISTS(SELECT 1 FROM task_agents WHERE runtime_config_snapshot_id=runtime_config_snapshots.id)
+  AND NOT EXISTS(SELECT 1 FROM turns WHERE runtime_config_snapshot_id=runtime_config_snapshots.id);
+
+DELETE FROM models
+WHERE source='official' AND codex_account_id<>''
+  AND NOT EXISTS(SELECT 1 FROM runtime_config_snapshots WHERE model_id=models.id)
+  AND NOT EXISTS(SELECT 1 FROM backend_sessions WHERE model_id=models.id);
+
+DELETE FROM providers WHERE id='official-codex';
+`
+
 func (s *Store) migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, schemaV1); err != nil {
 		return fmt.Errorf("apply schema v1: %w", err)
@@ -740,6 +801,58 @@ func (s *Store) migrate(ctx context.Context) error {
 		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(16, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
 	); err != nil {
 		return fmt.Errorf("record schema v16: %w", err)
+	}
+	var hasV17 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=17)`).Scan(&hasV17)
+	if !hasV17 {
+		if _, err := s.db.ExecContext(ctx, schemaV17); err != nil {
+			return fmt.Errorf("apply schema v17: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(
+		ctx,
+		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(17, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
+	); err != nil {
+		return fmt.Errorf("record schema v17: %w", err)
+	}
+	var hasV18 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=18)`).Scan(&hasV18)
+	if !hasV18 {
+		if _, err := s.db.ExecContext(ctx, schemaV18); err != nil {
+			return fmt.Errorf("apply schema v18: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(
+		ctx,
+		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(18, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
+	); err != nil {
+		return fmt.Errorf("record schema v18: %w", err)
+	}
+	var hasV19 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=19)`).Scan(&hasV19)
+	if !hasV19 {
+		if _, err := s.db.ExecContext(ctx, schemaV19); err != nil {
+			return fmt.Errorf("apply schema v19: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(
+		ctx,
+		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(19, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
+	); err != nil {
+		return fmt.Errorf("record schema v19: %w", err)
+	}
+	var hasV20 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=20)`).Scan(&hasV20)
+	if !hasV20 {
+		if _, err := s.db.ExecContext(ctx, schemaV20); err != nil {
+			return fmt.Errorf("apply schema v20: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(
+		ctx,
+		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(20, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
+	); err != nil {
+		return fmt.Errorf("record schema v20: %w", err)
 	}
 	return nil
 }

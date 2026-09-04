@@ -1,11 +1,14 @@
 import type {
   AuthStatus,
+  CodexAccount,
+  CodexLogin,
   DetectedModel,
   EnvGroup,
   Knowledge,
   Model,
   Project,
   Provider,
+  ProxySettings,
   PromptTemplate,
   SystemInfo,
   Task,
@@ -60,6 +63,18 @@ class APIClient {
 
   system(): Promise<{system: SystemInfo}> {
     return this.request("/api/v1/system");
+  }
+
+  proxySettings(): Promise<{proxy: ProxySettings}> {
+    return this.request("/api/v1/settings/proxy");
+  }
+
+  updateProxySettings(payload: ProxySettings): Promise<{proxy: ProxySettings}> {
+    return this.request("/api/v1/settings/proxy", {method: "PUT", body: JSON.stringify(payload)});
+  }
+
+  testProxySettings(payload: ProxySettings): Promise<{ok: boolean; status_code: number; elapsed_ms: number}> {
+    return this.request("/api/v1/settings/proxy/test", {method: "POST", body: JSON.stringify(payload)});
   }
 
   projects(): Promise<{projects: Project[]}> {
@@ -145,6 +160,32 @@ class APIClient {
 
   updateModel(id: string, payload: Record<string, unknown>): Promise<{model: Model}> {
     return this.request(`/api/v1/models/${encodeURIComponent(id)}`, {method: "PUT", body: JSON.stringify(payload)});
+  }
+
+  codexAccounts(): Promise<{accounts: CodexAccount[]}> {
+    return this.request("/api/v1/codex-accounts");
+  }
+
+  startCodexLogin(proxyEnabled: boolean): Promise<{login: CodexLogin}> {
+    return this.request("/api/v1/codex-accounts/login", {
+      method: "POST", body: JSON.stringify({proxy_enabled: proxyEnabled}),
+    });
+  }
+
+  submitCodexCallback(id: string, callbackURL: string, label: string): Promise<{login: CodexLogin; account: CodexAccount}> {
+    return this.request(`/api/v1/codex-accounts/login/${encodeURIComponent(id)}/callback`, {
+      method: "POST", body: JSON.stringify({callback_url: callbackURL, label}),
+    });
+  }
+
+  deleteCodexAccount(id: string): Promise<{ok: boolean}> {
+    return this.request(`/api/v1/codex-accounts/${encodeURIComponent(id)}`, {method: "DELETE"});
+  }
+
+  refreshCodexAccount(id: string): Promise<{account: CodexAccount; warnings?: string[]}> {
+    return this.request(`/api/v1/codex-accounts/${encodeURIComponent(id)}/refresh`, {
+      method: "POST", body: "{}",
+    });
   }
 
   tasks(projectID = ""): Promise<{tasks: Task[]}> {

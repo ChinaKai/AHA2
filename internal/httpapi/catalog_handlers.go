@@ -360,7 +360,13 @@ func (s *Server) listModels(writer http.ResponseWriter, request *http.Request) {
 		writeError(writer, http.StatusInternalServerError, "list_models_failed")
 		return
 	}
-	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "models": items})
+	visible := make([]domain.Model, 0, len(items))
+	for _, item := range items {
+		if item.Source != domain.ModelSourceOfficial {
+			visible = append(visible, item)
+		}
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "models": visible})
 }
 
 func (s *Server) createModel(writer http.ResponseWriter, request *http.Request) {

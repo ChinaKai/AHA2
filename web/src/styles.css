@@ -131,7 +131,32 @@ button.danger:hover { background: #fff1f0; }
 .task-title-input { width: min(420px, 80%); }
 
 .provider-layout { display: grid; grid-template-columns: 1fr 1.5fr; gap: 16px; }
+.provider-sidebar { display: grid; align-content: start; gap: 16px; min-width: 0; }
 .provider-layout .list-row { grid-template-columns: minmax(0,1fr) auto auto; }
+.codex-account-panel { min-width: 0; }
+.codex-account-card { padding: 10px 14px; border-top: 1px solid var(--line); }
+.codex-account-card:first-of-type { border-top: 0; }
+.codex-account-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.codex-account-meta { display: flex; align-items: center; justify-content: flex-end; gap: 6px; flex: 0 0 auto; }
+.codex-reset-credit { padding: 3px 6px; border: 1px solid #d8c9a7; border-radius: 4px; color: #72531a; background: #fff9e8; font-size: 10px; font-weight: 700; white-space: nowrap; }
+.codex-limit-row { display: grid; grid-template-columns: auto minmax(70px,1fr) auto; align-items: center; gap: 7px; margin: 6px 0 0 32px; font-size: 11px; }
+.codex-limit-row progress { display: block; width: 100%; height: 7px; accent-color: var(--green); }
+.codex-limit-row.warn progress { accent-color: var(--amber); }
+.codex-limit-row.bad progress { accent-color: var(--red); }
+.codex-limit-row strong { font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.codex-limit-row small { grid-column: 2 / -1; justify-self: end; color: var(--muted); font-size: 10px; white-space: nowrap; }
+.codex-limit-row.empty { grid-template-columns: auto 1fr; color: var(--muted); }
+.codex-account-error { margin: 7px 0 0 32px; color: var(--danger); font-size: 12px; overflow-wrap: anywhere; }
+.codex-auth-link { display: grid; grid-template-columns: minmax(0,1fr) 36px; align-items: start; gap: 8px; }
+.proxy-toggle { display: flex; align-items: center; gap: 8px; }
+.proxy-toggle input { width: 14px; height: 14px; padding: 0; flex: 0 0 auto; }
+.proxy-settings-panel { width: min(760px,100%); }
+.proxy-settings-body { padding: 18px; }
+.proxy-settings-body .detect-status { min-height: 20px; }
+.proxy-actions { padding: 0 18px 18px; }
+.codex-auth-link textarea { margin: 0; overflow-wrap: anywhere; }
+.codex-auth-link .icon-button { width: 36px; min-height: 36px; }
+.codex-auth-link .icon-button.copied { color: var(--green); border-color: var(--green); }
 .provider-row > .icon-button { justify-self: end; }
 .panel.spaced .list-row { grid-template-columns: minmax(0,1fr) auto; }
 .row-actions { display: flex; justify-content: flex-end; gap: 4px; }
@@ -351,6 +376,7 @@ dialog form, .dialog-body { padding: 18px; }
 .proto-checks input { width: auto; height: auto; }
 .detect-status { margin-top: 10px; color: var(--muted); font-size: 11px; }
 .two { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; }
+.runtime-picker[hidden] { display: none !important; }
 .mobile-only { display: none; }
 
 .task-screen .task-grid { height: calc(100% - 60px); }
@@ -472,7 +498,7 @@ dialog form, .dialog-body { padding: 18px; }
   .app-shell { display: block; }
   .sidebar { display: none; }
   .mobile-header { display: none; }
-  .bottom-nav { position: fixed; left: 0; right: 0; bottom: 0; z-index: 30; display: grid; grid-template-columns: repeat(5,1fr); min-height: 62px; padding-bottom: env(safe-area-inset-bottom); border-top: 1px solid var(--line); background: #fff; }
+  .bottom-nav { position: fixed; left: 0; right: 0; bottom: 0; z-index: 30; display: grid; grid-template-columns: repeat(6,1fr); min-height: 62px; padding-bottom: env(safe-area-inset-bottom); border-top: 1px solid var(--line); background: #fff; }
   .bottom-nav button { display: grid; place-items: center; gap: 2px; min-height: 58px; padding: 5px; border: 0; border-radius: 0; color: var(--muted); font-size: 9px; }
   .bottom-nav button.active { color: var(--blue); }
   .page { padding: 18px 14px 28px; }
@@ -599,4 +625,8 @@ dialog form, .dialog-body { padding: 18px; }
   body.composer-focused .turn-stage-grid { display: none; }
   .knowledge-row { grid-template-columns: 1fr; }
   .two { grid-template-columns: 1fr; gap: 0; }
+  .codex-account-head { align-items: flex-start; }
+  .codex-account-meta { flex-wrap: wrap; gap: 4px; }
+  .codex-limit-row { margin-left: 0; }
+  .codex-account-error { margin-left: 0; }
 }
