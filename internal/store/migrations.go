@@ -467,6 +467,27 @@ const schemaV12 = `
 DROP TABLE IF EXISTS prompt_route_overrides;
 `
 
+const schemaV13 = `
+ALTER TABLE tasks ADD COLUMN isolation TEXT NOT NULL DEFAULT '';
+ALTER TABLE tasks ADD COLUMN worktree_dir TEXT NOT NULL DEFAULT '';
+
+UPDATE tasks
+SET isolation = CASE
+        WHEN (SELECT isolation FROM workspaces WHERE workspaces.id=tasks.workspace_id) IN ('worktree','inplace')
+            THEN (SELECT isolation FROM workspaces WHERE workspaces.id=tasks.workspace_id)
+        WHEN (SELECT project_type FROM projects WHERE projects.id=tasks.project_id)='git' THEN 'worktree'
+        ELSE 'inplace'
+    END,
+    worktree_dir = CASE
+        WHEN (SELECT isolation FROM workspaces WHERE workspaces.id=tasks.workspace_id)='worktree'
+            THEN COALESCE((SELECT worktree_dir FROM workspaces WHERE workspaces.id=tasks.workspace_id),'')
+        ELSE ''
+    END
+WHERE isolation='';
+
+UPDATE workspaces SET isolation='', worktree_dir='';
+`
+
 func (s *Store) migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, schemaV1); err != nil {
 		return fmt.Errorf("apply schema v1: %w", err)
@@ -618,6 +639,19 @@ func (s *Store) migrate(ctx context.Context) error {
 		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(12, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
 	); err != nil {
 		return fmt.Errorf("record schema v12: %w", err)
+	}
+	var hasV13 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=13)`).Scan(&hasV13)
+	if !hasV13 {
+		if _, err := s.db.ExecContext(ctx, schemaV13); err != nil {
+			return fmt.Errorf("apply schema v13: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(
+		ctx,
+		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(13, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
+	); err != nil {
+		return fmt.Errorf("record schema v13: %w", err)
 	}
 	return nil
 }

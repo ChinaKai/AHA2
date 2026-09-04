@@ -21,10 +21,10 @@ func (s *Store) CreateTask(ctx context.Context, item domain.Task) error {
 	}
 	item.Code = code
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO tasks(id,code,project_id,workspace_id,title,original_request,current_goal,status,target_branch,base_commit,task_branch,task_workspace_path,runtime_config_snapshot_id,collaboration_mode,max_agents,created_at,updated_at,completed_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		INSERT INTO tasks(id,code,project_id,workspace_id,title,original_request,current_goal,status,target_branch,base_commit,task_branch,isolation,worktree_dir,task_workspace_path,runtime_config_snapshot_id,collaboration_mode,max_agents,created_at,updated_at,completed_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		item.ID, item.Code, item.ProjectID, item.WorkspaceID, item.Title, item.OriginalRequest, item.CurrentGoal, item.Status,
-		item.TargetBranch, item.BaseCommit, item.TaskBranch, item.TaskWorkspacePath, item.RuntimeConfigSnapshotID,
+		item.TargetBranch, item.BaseCommit, item.TaskBranch, item.Isolation, item.WorktreeDir, item.TaskWorkspacePath, item.RuntimeConfigSnapshotID,
 		item.CollaborationMode, item.MaxAgents,
 		timeString(item.CreatedAt), timeString(item.UpdatedAt), timeString(item.CompletedAt),
 	)
@@ -68,10 +68,10 @@ func (s *Store) CreateTaskWithSnapshot(ctx context.Context, snapshot domain.Runt
 	}
 	item.Code = code
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO tasks(id,code,project_id,workspace_id,title,original_request,current_goal,status,target_branch,base_commit,task_branch,task_workspace_path,runtime_config_snapshot_id,collaboration_mode,max_agents,created_at,updated_at,completed_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		INSERT INTO tasks(id,code,project_id,workspace_id,title,original_request,current_goal,status,target_branch,base_commit,task_branch,isolation,worktree_dir,task_workspace_path,runtime_config_snapshot_id,collaboration_mode,max_agents,created_at,updated_at,completed_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		item.ID, item.Code, item.ProjectID, item.WorkspaceID, item.Title, item.OriginalRequest, item.CurrentGoal, item.Status,
-		item.TargetBranch, item.BaseCommit, item.TaskBranch, item.TaskWorkspacePath, item.RuntimeConfigSnapshotID,
+		item.TargetBranch, item.BaseCommit, item.TaskBranch, item.Isolation, item.WorktreeDir, item.TaskWorkspacePath, item.RuntimeConfigSnapshotID,
 		item.CollaborationMode, item.MaxAgents,
 		timeString(item.CreatedAt), timeString(item.UpdatedAt), timeString(item.CompletedAt),
 	); err != nil {
@@ -152,14 +152,14 @@ func scanTask(scanner interface{ Scan(...any) error }) (domain.Task, error) {
 	var createdAt, updatedAt, completedAt string
 	err := scanner.Scan(
 		&item.ID, &item.Code, &item.ProjectID, &item.WorkspaceID, &item.Title, &item.OriginalRequest, &item.CurrentGoal,
-		&item.Status, &item.TargetBranch, &item.BaseCommit, &item.TaskBranch, &item.TaskWorkspacePath,
+		&item.Status, &item.TargetBranch, &item.BaseCommit, &item.TaskBranch, &item.Isolation, &item.WorktreeDir, &item.TaskWorkspacePath,
 		&item.RuntimeConfigSnapshotID, &item.CollaborationMode, &item.MaxAgents, &createdAt, &updatedAt, &completedAt,
 	)
 	item.CreatedAt, item.UpdatedAt, item.CompletedAt = parseTime(createdAt), parseTime(updatedAt), parseTime(completedAt)
 	return item, err
 }
 
-const taskColumns = `id,code,project_id,workspace_id,title,original_request,current_goal,status,target_branch,base_commit,task_branch,task_workspace_path,runtime_config_snapshot_id,collaboration_mode,max_agents,created_at,updated_at,completed_at`
+const taskColumns = `id,code,project_id,workspace_id,title,original_request,current_goal,status,target_branch,base_commit,task_branch,isolation,worktree_dir,task_workspace_path,runtime_config_snapshot_id,collaboration_mode,max_agents,created_at,updated_at,completed_at`
 
 func (s *Store) Task(ctx context.Context, id string) (domain.Task, error) {
 	return scanTask(s.db.QueryRowContext(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=?`, id))

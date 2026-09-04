@@ -114,24 +114,21 @@ func (s *Server) listWorkspaces(writer http.ResponseWriter, request *http.Reques
 
 func (s *Server) createWorkspace(writer http.ResponseWriter, request *http.Request) {
 	var payload struct {
-		ProjectID   string `json:"project_id"`
-		Name        string `json:"name"`
-		Locality    string `json:"locality"`
-		Transport   string `json:"transport"`
-		RootPath    string `json:"root_path"`
-		SSHHost     string `json:"ssh_host"`
-		SSHUser     string `json:"ssh_user"`
-		SSHPort     int    `json:"ssh_port"`
-		Distro      string `json:"distro"`
-		Isolation   string `json:"isolation"`
-		WorktreeDir string `json:"worktree_dir"`
+		ProjectID string `json:"project_id"`
+		Name      string `json:"name"`
+		Locality  string `json:"locality"`
+		Transport string `json:"transport"`
+		RootPath  string `json:"root_path"`
+		SSHHost   string `json:"ssh_host"`
+		SSHUser   string `json:"ssh_user"`
+		SSHPort   int    `json:"ssh_port"`
+		Distro    string `json:"distro"`
 	}
 	if err := decodeJSON(request, &payload); err != nil {
 		writeError(writer, http.StatusBadRequest, "invalid_json")
 		return
 	}
-	project, err := s.store.Project(request.Context(), payload.ProjectID)
-	if err != nil {
+	if _, err := s.store.Project(request.Context(), payload.ProjectID); err != nil {
 		writeError(writer, http.StatusBadRequest, "project_not_found")
 		return
 	}
@@ -148,30 +145,12 @@ func (s *Server) createWorkspace(writer http.ResponseWriter, request *http.Reque
 		writeError(writer, http.StatusBadRequest, "workspace_name_and_path_required")
 		return
 	}
-	// Git isolation is a first-class, visible workspace property. Default: git
-	// projects isolate into worktrees; plain-folder projects run in place.
-	isolation := strings.TrimSpace(payload.Isolation)
-	if isolation == "" {
-		if project.ProjectType == "git" {
-			isolation = "worktree"
-		} else {
-			isolation = "inplace"
-		}
-	}
-	if isolation != "worktree" && isolation != "inplace" {
-		writeError(writer, http.StatusBadRequest, "invalid_isolation")
-		return
-	}
-	if isolation == "inplace" {
-		payload.WorktreeDir = ""
-	}
 	now := time.Now().UTC()
 	item := domain.Workspace{
 		ID: domain.NewID("workspace"), ProjectID: payload.ProjectID, Name: strings.TrimSpace(payload.Name),
 		Locality: payload.Locality, Transport: payload.Transport, RootPath: strings.TrimSpace(payload.RootPath),
 		SSHHost: strings.TrimSpace(payload.SSHHost), SSHUser: strings.TrimSpace(payload.SSHUser), SSHPort: payload.SSHPort,
-		Distro:    strings.TrimSpace(payload.Distro),
-		Isolation: isolation, WorktreeDir: strings.TrimSpace(payload.WorktreeDir),
+		Distro: strings.TrimSpace(payload.Distro),
 		Health: "unknown", CreatedAt: now, UpdatedAt: now,
 	}
 	if err := s.store.CreateWorkspace(request.Context(), item); err != nil {
@@ -190,16 +169,14 @@ func (s *Server) updateWorkspace(writer http.ResponseWriter, request *http.Reque
 		return
 	}
 	var payload struct {
-		Name        string `json:"name"`
-		Locality    string `json:"locality"`
-		Transport   string `json:"transport"`
-		RootPath    string `json:"root_path"`
-		SSHHost     string `json:"ssh_host"`
-		SSHUser     string `json:"ssh_user"`
-		SSHPort     int    `json:"ssh_port"`
-		Distro      string `json:"distro"`
-		Isolation   string `json:"isolation"`
-		WorktreeDir string `json:"worktree_dir"`
+		Name      string `json:"name"`
+		Locality  string `json:"locality"`
+		Transport string `json:"transport"`
+		RootPath  string `json:"root_path"`
+		SSHHost   string `json:"ssh_host"`
+		SSHUser   string `json:"ssh_user"`
+		SSHPort   int    `json:"ssh_port"`
+		Distro    string `json:"distro"`
 	}
 	if err := decodeJSON(request, &payload); err != nil {
 		writeError(writer, http.StatusBadRequest, "invalid_json")
@@ -220,26 +197,6 @@ func (s *Server) updateWorkspace(writer http.ResponseWriter, request *http.Reque
 	if payload.SSHPort == 0 {
 		payload.SSHPort = 22
 	}
-	project, projectErr := s.store.Project(request.Context(), existing.ProjectID)
-	isolation := strings.TrimSpace(payload.Isolation)
-	if isolation == "" {
-		isolation = existing.Isolation
-	}
-	if isolation == "" {
-		if projectErr == nil && project.ProjectType == "git" {
-			isolation = "worktree"
-		} else {
-			isolation = "inplace"
-		}
-	}
-	if isolation != "worktree" && isolation != "inplace" {
-		writeError(writer, http.StatusBadRequest, "invalid_isolation")
-		return
-	}
-	worktreeDir := strings.TrimSpace(payload.WorktreeDir)
-	if isolation == "inplace" {
-		worktreeDir = ""
-	}
 	existing.Name = name
 	existing.Locality = payload.Locality
 	existing.Transport = payload.Transport
@@ -248,8 +205,6 @@ func (s *Server) updateWorkspace(writer http.ResponseWriter, request *http.Reque
 	existing.SSHUser = strings.TrimSpace(payload.SSHUser)
 	existing.SSHPort = payload.SSHPort
 	existing.Distro = strings.TrimSpace(payload.Distro)
-	existing.Isolation = isolation
-	existing.WorktreeDir = worktreeDir
 	existing.UpdatedAt = time.Now().UTC()
 	if err := s.store.UpdateWorkspaceConfig(request.Context(), existing); err != nil {
 		writeError(writer, http.StatusInternalServerError, "update_workspace_failed")

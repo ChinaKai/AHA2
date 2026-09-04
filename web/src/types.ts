@@ -34,8 +34,6 @@ export interface Workspace {
   ssh_user?: string;
   ssh_port?: number;
   distro?: string;
-  isolation?: string;
-  worktree_dir?: string;
   platform?: string;
   health: string;
   capabilities?: Record<string, unknown>;
@@ -91,6 +89,9 @@ export interface Task {
   status: string;
   target_branch?: string;
   task_branch?: string;
+  isolation: "worktree" | "inplace";
+  worktree_dir?: string;
+  task_workspace_path?: string;
   collaboration_mode: "single" | "auto";
   max_agents: number;
   created_at: string;

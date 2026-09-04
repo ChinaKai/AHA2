@@ -35,7 +35,8 @@ func (s *Server) createTask(writer http.ResponseWriter, request *http.Request) {
 		TargetBranch      string `json:"target_branch"`
 		BaseCommit        string `json:"base_commit"`
 		TaskBranch        string `json:"task_branch"`
-		WorkspacePath     string `json:"task_workspace_path"`
+		Isolation         string `json:"isolation"`
+		WorktreeDir       string `json:"worktree_dir"`
 		ModelID           string `json:"model_id"`
 		ReasoningEffort   string `json:"reasoning_effort"`
 		Filesystem        string `json:"filesystem"`
@@ -70,7 +71,7 @@ func (s *Server) createTask(writer http.ResponseWriter, request *http.Request) {
 	item, err := s.app.CreateTask(request.Context(), app.CreateTaskInput{
 		ProjectID: payload.ProjectID, WorkspaceID: payload.WorkspaceID, Title: payload.Title, Request: payload.Request,
 		TargetBranch: payload.TargetBranch, BaseCommit: payload.BaseCommit, TaskBranch: payload.TaskBranch,
-		WorkspacePath: payload.WorkspacePath, ModelID: payload.ModelID, ReasoningEffort: payload.ReasoningEffort,
+		Isolation: payload.Isolation, WorktreeDir: payload.WorktreeDir, ModelID: payload.ModelID, ReasoningEffort: payload.ReasoningEffort,
 		Filesystem: filesystem, Approval: approval, CollaborationMode: payload.CollaborationMode,
 		MaxAgents: payload.MaxAgents,
 	})

@@ -35,8 +35,8 @@ func TestMigrationV8BackfillsRoundsAndConversation(t *testing.T) {
 		query string
 		args  []any
 	}{
-		{`INSERT INTO projects(id,name,description,repository_identity,default_workspace_id,default_branch,created_at,updated_at,project_type) VALUES(?,?,?,?,?,?,?,?,?)`, []any{"project-v7", "P", "", "", "", "", now, now, "folder"}},
-		{`INSERT INTO workspaces(id,project_id,name,locality,transport,root_path,ssh_host,ssh_user,ssh_port,platform,health,capabilities_json,repository_json,last_detected_at,created_at,updated_at,distro,isolation,worktree_dir) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, []any{"workspace-v7", "project-v7", "W", "local", "native", "/tmp", "", "", 22, "", "ready", "{}", "{}", "", now, now, "", "inplace", ""}},
+		{`INSERT INTO projects(id,name,description,repository_identity,default_workspace_id,default_branch,created_at,updated_at,project_type) VALUES(?,?,?,?,?,?,?,?,?)`, []any{"project-v7", "P", "", "", "", "", now, now, "git"}},
+		{`INSERT INTO workspaces(id,project_id,name,locality,transport,root_path,ssh_host,ssh_user,ssh_port,platform,health,capabilities_json,repository_json,last_detected_at,created_at,updated_at,distro,isolation,worktree_dir) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, []any{"workspace-v7", "project-v7", "W", "local", "native", "/tmp", "", "", 22, "", "ready", "{}", "{}", "", now, now, "", "worktree", "/tmp/task-roots"}},
 		{`INSERT INTO models(id,display_name,provider_id,backend,wire_model,wire_api,context_window,max_output_tokens,default_effort,capabilities_json,default_env_group_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, []any{"model-v7", "M", "p", "stub", "stub", "", 1000, 0, "", "{}", "env-v7", now, now}},
 		{`INSERT INTO env_groups(id,name,provider_id,backend,revision,environment_json,secret_names_json,secret_configured,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, []any{"env-v7", "E", "p", "stub", 1, "{}", "[]", 0, now, now}},
 		{`INSERT INTO runtime_config_snapshots(id,workspace_id,backend,backend_version,model_id,wire_model,env_group_id,env_group_revision,reasoning_effort,permissions_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, []any{"runtime-v7", "workspace-v7", "stub", "", "model-v7", "stub", "env-v7", 1, "", "{}", now}},
@@ -69,6 +69,17 @@ func TestMigrationV8BackfillsRoundsAndConversation(t *testing.T) {
 	page, err := database.ConversationPage(ctx, "task-v7", 0, 0, 50, nil)
 	if err != nil || len(page.Items) != 1 || page.Items[0].Summary != "hello" {
 		t.Fatalf("legacy conversation was not backfilled: %#v %v", page, err)
+	}
+	task, err := database.Task(ctx, "task-v7")
+	if err != nil || task.Isolation != "worktree" || task.WorktreeDir != "/tmp/task-roots" {
+		t.Fatalf("legacy workspace isolation was not migrated to task: %#v %v", task, err)
+	}
+	var legacyIsolation, legacyWorktreeDir string
+	if err := database.db.QueryRowContext(ctx, `SELECT isolation,worktree_dir FROM workspaces WHERE id='workspace-v7'`).Scan(&legacyIsolation, &legacyWorktreeDir); err != nil {
+		t.Fatal(err)
+	}
+	if legacyIsolation != "" || legacyWorktreeDir != "" {
+		t.Fatalf("legacy workspace config was retained: isolation=%q worktree_dir=%q", legacyIsolation, legacyWorktreeDir)
 	}
 	if err := database.migrate(ctx); err != nil {
 		t.Fatalf("repeat migration failed: %v", err)

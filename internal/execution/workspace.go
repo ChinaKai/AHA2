@@ -10,7 +10,7 @@ import (
 
 type WorkspacePreparer struct{}
 
-func (WorkspacePreparer) Prepare(ctx context.Context, item domain.Workspace, taskID, targetBranch, taskBranch string, isolateGit bool) (app.PreparedWorkspace, error) {
-	prepared, err := workspace.PrepareTaskWorkspace(ctx, item, taskID, targetBranch, taskBranch, isolateGit)
+func (WorkspacePreparer) Prepare(ctx context.Context, item domain.Workspace, taskID, targetBranch, taskBranch, isolation, worktreeDir string) (app.PreparedWorkspace, error) {
+	prepared, err := workspace.PrepareTaskWorkspace(ctx, item, taskID, targetBranch, taskBranch, isolation, worktreeDir)
 	return app.PreparedWorkspace{Path: prepared.Path, BaseCommit: prepared.BaseCommit, Branch: prepared.Branch}, err
 }

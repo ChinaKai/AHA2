@@ -87,7 +87,7 @@ type PreparedWorkspace struct {
 }
 
 type WorkspacePreparer interface {
-	Prepare(context.Context, domain.Workspace, string, string, string, bool) (PreparedWorkspace, error)
+	Prepare(context.Context, domain.Workspace, string, string, string, string, string) (PreparedWorkspace, error)
 }
 
 type SecretResolver interface {
@@ -124,7 +124,8 @@ type CreateTaskInput struct {
 	TargetBranch      string
 	BaseCommit        string
 	TaskBranch        string
-	WorkspacePath     string
+	Isolation         string
+	WorktreeDir       string
 	ModelID           string
 	ReasoningEffort   string
 	Filesystem        string
@@ -167,6 +168,24 @@ func (s *Service) CreateTask(ctx context.Context, input CreateTaskInput) (domain
 	}
 	if workspace.ProjectID != project.ID {
 		return domain.Task{}, fmt.Errorf("workspace does not belong to project")
+	}
+	isolation := strings.TrimSpace(input.Isolation)
+	worktreeDir := strings.TrimSpace(input.WorktreeDir)
+	if project.ProjectType != "git" {
+		isolation = "inplace"
+	}
+	if isolation == "" {
+		isolation = "worktree"
+	}
+	if isolation != "worktree" && isolation != "inplace" {
+		return domain.Task{}, fmt.Errorf("invalid task isolation")
+	}
+	if isolation == "inplace" {
+		worktreeDir = ""
+		input.TargetBranch = ""
+		input.TaskBranch = ""
+	} else if worktreeDir == "" {
+		worktreeDir = workspacepkg.DefaultWorktreeDir(workspace)
 	}
 	model, err := s.store.Model(ctx, input.ModelID)
 	if err != nil {
@@ -214,7 +233,8 @@ func (s *Service) CreateTask(ctx context.Context, input CreateTaskInput) (domain
 		TargetBranch:            input.TargetBranch,
 		BaseCommit:              input.BaseCommit,
 		TaskBranch:              input.TaskBranch,
-		TaskWorkspacePath:       input.WorkspacePath,
+		Isolation:               isolation,
+		WorktreeDir:             worktreeDir,
 		RuntimeConfigSnapshotID: snapshot.ID,
 		CollaborationMode:       collaborationMode,
 		MaxAgents:               input.MaxAgents,
@@ -230,8 +250,7 @@ func (s *Service) CreateTask(ctx context.Context, input CreateTaskInput) (domain
 	}
 	task = created
 	if s.preparer != nil {
-		isolateGit := workspace.Isolation == "worktree" || (workspace.Isolation == "" && project.ProjectType == "git")
-		prepared, prepareErr := s.preparer.Prepare(ctx, workspace, task.ID, task.TargetBranch, task.TaskBranch, isolateGit)
+		prepared, prepareErr := s.preparer.Prepare(ctx, workspace, task.ID, task.TargetBranch, task.TaskBranch, task.Isolation, task.WorktreeDir)
 		if prepareErr != nil {
 			_ = s.store.UpdateTaskStatus(ctx, task.ID, domain.TaskPreparing, domain.TaskBlocked, timeString(now), "")
 			task.Status = domain.TaskBlocked

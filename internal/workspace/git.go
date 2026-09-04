@@ -19,10 +19,10 @@ type PreparedTaskWorkspace struct {
 	Branch     string
 }
 
-func PrepareTaskWorkspace(ctx context.Context, item domain.Workspace, taskID, targetBranch, taskBranch string, isolateGit bool) (PreparedTaskWorkspace, error) {
+func PrepareTaskWorkspace(ctx context.Context, item domain.Workspace, taskID, targetBranch, taskBranch, isolation, worktreeDir string) (PreparedTaskWorkspace, error) {
 	runner := RunnerFor(item)
 	// Plain-folder projects (or any non-git workspace) run directly in place.
-	if !isolateGit {
+	if isolation != "worktree" {
 		return PreparedTaskWorkspace{Path: item.RootPath}, nil
 	}
 	if targetBranch == "" {
@@ -65,7 +65,7 @@ func PrepareTaskWorkspace(ctx context.Context, item domain.Workspace, taskID, ta
 			return PreparedTaskWorkspace{Path: item.RootPath}, nil
 		}
 	}
-	worktree := worktreePath(item, taskID)
+	worktree := worktreePath(item, taskID, worktreeDir)
 	if item.Locality == "remote" || item.Transport == "ssh" || item.Transport == "wsl" {
 		parent := path.Dir(worktree)
 		if result, err := runner.Run(ctx, Command{Executable: "mkdir", Args: []string{"-p", parent}, Timeout: 20 * time.Second}, nil); err != nil || result.ExitCode != 0 {
@@ -93,13 +93,26 @@ func PrepareTaskWorkspace(ctx context.Context, item domain.Workspace, taskID, ta
 	}, nil
 }
 
-func worktreePath(item domain.Workspace, taskID string) string {
-	if strings.TrimSpace(item.WorktreeDir) != "" {
-		base := strings.ReplaceAll(strings.TrimSpace(item.WorktreeDir), "\\", "/")
+func worktreePath(item domain.Workspace, taskID, worktreeDir string) string {
+	if strings.TrimSpace(worktreeDir) != "" {
+		base := strings.ReplaceAll(strings.TrimSpace(worktreeDir), "\\", "/")
 		return path.Join(base, taskID)
 	}
+	return worktreePathFromRoot(DefaultWorktreeDir(item), taskID, item)
+}
+
+// DefaultWorktreeDir returns the stable task-worktree root beside the primary
+// repository, using the path rules of the workspace host.
+func DefaultWorktreeDir(item domain.Workspace) string {
 	if item.Locality == "remote" || item.Transport == "ssh" || item.Transport == "wsl" || runtime.GOOS != "windows" {
-		return path.Join(path.Dir(strings.ReplaceAll(item.RootPath, "\\", "/")), ".aha2-worktrees", taskID)
+		return path.Join(path.Dir(strings.ReplaceAll(item.RootPath, "\\", "/")), ".aha2-worktrees")
 	}
-	return filepath.Join(filepath.Dir(item.RootPath), ".aha2-worktrees", taskID)
+	return filepath.Join(filepath.Dir(item.RootPath), ".aha2-worktrees")
+}
+
+func worktreePathFromRoot(root, taskID string, item domain.Workspace) string {
+	if item.Locality == "remote" || item.Transport == "ssh" || item.Transport == "wsl" || runtime.GOOS != "windows" {
+		return path.Join(strings.ReplaceAll(root, "\\", "/"), taskID)
+	}
+	return filepath.Join(root, taskID)
 }

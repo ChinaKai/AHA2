@@ -44,8 +44,6 @@ type Workspace struct {
 	SSHUser        string         `json:"ssh_user,omitempty"`
 	SSHPort        int            `json:"ssh_port,omitempty"`
 	Distro         string         `json:"distro,omitempty"`
-	Isolation      string         `json:"isolation,omitempty"`
-	WorktreeDir    string         `json:"worktree_dir,omitempty"`
 	Platform       string         `json:"platform,omitempty"`
 	Health         string         `json:"health"`
 	Capabilities   map[string]any `json:"capabilities,omitempty"`
@@ -123,6 +121,8 @@ type Task struct {
 	TargetBranch            string     `json:"target_branch,omitempty"`
 	BaseCommit              string     `json:"base_commit,omitempty"`
 	TaskBranch              string     `json:"task_branch,omitempty"`
+	Isolation               string     `json:"isolation"`
+	WorktreeDir             string     `json:"worktree_dir,omitempty"`
 	TaskWorkspacePath       string     `json:"task_workspace_path,omitempty"`
 	RuntimeConfigSnapshotID string     `json:"runtime_config_snapshot_id"`
 	CollaborationMode       string     `json:"collaboration_mode"`
