@@ -519,6 +519,18 @@ func TestMultiAgentRoundCreatesIntegrationTurn(t *testing.T) {
 	if orchestrationCards != 1 {
 		t.Fatalf("AHA orchestration card missing: %#v", page.Items)
 	}
+	turnDurationCards := 0
+	for _, item := range page.Items {
+		if item.Kind == "turn_duration" {
+			turnDurationCards++
+			if item.Payload["elapsed_ms"] == nil || item.Payload["run_duration_ms"] == nil {
+				t.Fatalf("turn duration payload incomplete: %#v", item)
+			}
+		}
+	}
+	if turnDurationCards == 0 {
+		t.Fatalf("turn duration card missing: %#v", page.Items)
+	}
 	childPage, err := database.ConversationPageForAgent(ctx, task.ID, "sub-001", 0, 0, 100, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -548,6 +560,22 @@ func TestMultiAgentRoundCreatesIntegrationTurn(t *testing.T) {
 	if _, err := service.UpdateAgentConfig(ctx, task.ID, "main", UpdateAgentConfigInput{ModelID: model2.ID}); err != nil {
 		t.Fatal(err)
 	}
+	page, err = database.ConversationPageForAgent(ctx, task.ID, "main", 0, 0, 100, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configCardFound := false
+	for _, item := range page.Items {
+		if item.Kind == "agent_config_updated" {
+			configCardFound = true
+			if item.Payload["model_name"] != model2.DisplayName {
+				t.Fatalf("agent config card model missing: %#v", item)
+			}
+		}
+	}
+	if !configCardFound {
+		t.Fatalf("agent config update card missing: %#v", page.Items)
+	}
 	agents, err = service.TaskAgents(ctx, task.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -559,6 +587,21 @@ func TestMultiAgentRoundCreatesIntegrationTurn(t *testing.T) {
 		if agent.AgentID != "main" && !agent.InheritMain {
 			t.Fatalf("new sub-agent should inherit main config: %#v", agent)
 		}
+	}
+	if err := database.DeleteModel(ctx, model2.ID); err != nil {
+		t.Fatal(err)
+	}
+	agents, err = service.TaskAgents(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, agent := range agents {
+		if agent.RuntimeConfigValid || !strings.Contains(agent.RuntimeConfigError, "模型已删除") {
+			t.Fatalf("deleted model did not invalidate agent config: %#v", agent)
+		}
+	}
+	if _, err := service.SubmitAgentMessage(ctx, task.ID, "main", "must be blocked"); err == nil || !strings.Contains(err.Error(), "模型已删除") {
+		t.Fatalf("message submission was not blocked for deleted model: %v", err)
 	}
 }
 

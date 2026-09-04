@@ -298,6 +298,17 @@ func (s *Service) SubmitAgentMessage(ctx context.Context, taskID, agentID, conte
 	if task.CollaborationMode == "single" && agentID != "main" {
 		return domain.Turn{}, fmt.Errorf("task is in single-agent mode")
 	}
+	agent, err := s.store.TaskAgent(ctx, taskID, agentID)
+	if err != nil {
+		return domain.Turn{}, err
+	}
+	snapshot, err := s.store.RuntimeSnapshot(ctx, agent.RuntimeConfigSnapshotID)
+	if err != nil {
+		return domain.Turn{}, fmt.Errorf("运行配置不存在，请修改 %s 配置", agentID)
+	}
+	if _, err := s.store.Model(ctx, snapshot.ModelID); err != nil {
+		return domain.Turn{}, fmt.Errorf("模型已删除，请修改 %s 模型配置", agentID)
+	}
 	if task.Status == domain.TaskCompleted || task.Status == domain.TaskCancelled || task.Status == domain.TaskBlocked {
 		return domain.Turn{}, fmt.Errorf("task is %s", task.Status)
 	}
@@ -682,6 +693,7 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 		_ = s.store.ConsumeAgentSessionHandoff(context.Background(), handoff.ID, now)
 	}
 	if turn.Status == domain.TurnSucceeded {
+		s.recordTurnDuration(context.Background(), turn)
 		s.emitTurn(context.Background(), turn, "turn_succeeded", map[string]any{"exit_code": result.ExitCode})
 	} else {
 		if turn.Error == "" {
@@ -692,6 +704,7 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 			AgentID: turn.AgentID, Category: "error", Kind: "turn_failed", Summary: turn.Error,
 			Payload: map[string]any{"attempt": turn.Attempt, "exit_code": result.ExitCode}, CreatedAt: now,
 		})
+		s.recordTurnDuration(context.Background(), turn)
 		s.emitTurn(context.Background(), turn, "turn_failed", map[string]any{
 			"exit_code": result.ExitCode, "error": turn.Error,
 		})
@@ -758,6 +771,7 @@ func (s *Service) failTurn(ctx context.Context, turn *domain.Turn, task domain.T
 		AgentID: turn.AgentID, Category: "error", Kind: "turn_failed", Summary: cause.Error(),
 		Payload: map[string]any{"attempt": turn.Attempt}, CreatedAt: now,
 	})
+	s.recordTurnDuration(ctx, *turn)
 	s.emitTurn(ctx, *turn, "turn_failed", map[string]any{"error": cause.Error()})
 	s.afterTurnTerminal(ctx, task, *turn, nil, "")
 }
@@ -777,8 +791,35 @@ func (s *Service) interruptTurn(ctx context.Context, turn *domain.Turn, task dom
 		AgentID: turn.AgentID, Category: "update", Kind: "turn_interrupted",
 		Summary: turn.AgentID + " 已中断", CreatedAt: now,
 	})
+	s.recordTurnDuration(ctx, *turn)
 	s.emitTurn(ctx, *turn, "turn_interrupted", nil)
 	s.afterTurnTerminal(ctx, task, *turn, nil, "")
+}
+
+func (s *Service) recordTurnDuration(ctx context.Context, turn domain.Turn) {
+	total := elapsedBetween(turn.QueuedAt, turn.FinishedAt)
+	queue := elapsedBetween(turn.QueuedAt, turn.PreparedAt)
+	prepare := elapsedBetween(turn.PreparedAt, turn.StartedAt)
+	run := elapsedBetween(turn.StartedAt, turn.FinishedAt)
+	_, _ = s.store.AddConversationItem(ctx, domain.ConversationItem{
+		ID: "conversation-turn-duration-" + turn.ID, TaskID: turn.TaskID, RoundID: turn.RoundID, TurnID: turn.ID,
+		AgentID: "aha", StreamAgentID: turn.AgentID, FromAgentID: "aha", ToAgentID: turn.AgentID,
+		RouteKind: "turn_status", Category: "update", Kind: "turn_duration",
+		Summary: fmt.Sprintf("Turn %d 已结束，耗时 %s", turn.Sequence, time.Duration(total)*time.Millisecond),
+		Payload: map[string]any{
+			"agent_id": turn.AgentID, "turn_sequence": turn.Sequence, "attempt": turn.Attempt,
+			"status": turn.Status, "elapsed_ms": total, "queue_duration_ms": queue,
+			"prepare_duration_ms": prepare, "run_duration_ms": run,
+		},
+		CreatedAt: turn.FinishedAt,
+	})
+}
+
+func elapsedBetween(start, end time.Time) int64 {
+	if start.IsZero() || end.IsZero() || end.Before(start) {
+		return 0
+	}
+	return end.Sub(start).Milliseconds()
 }
 
 func (s *Service) applyMemoryPatch(ctx context.Context, task domain.Task, memory domain.TaskMemory, patch MemoryPatch) {

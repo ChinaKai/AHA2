@@ -221,13 +221,6 @@ func (s *Server) deleteModel(writer http.ResponseWriter, request *http.Request) 
 		writeError(writer, http.StatusNotFound, "model_not_found")
 		return
 	}
-	inUse, inUseErr := s.store.ModelInUse(request.Context(), id)
-	if inUseErr == nil && inUse {
-		writeJSON(writer, http.StatusConflict, map[string]any{
-			"ok": false, "error": "model_in_use", "message": "该模型已被任务使用，无法删除",
-		})
-		return
-	}
 	var envGroupsToDelete []string
 	if model.DefaultEnvGroupID != "" {
 		models, _ := s.store.ListModels(request.Context())

@@ -246,14 +246,42 @@ function renderOrchestrationCard(item: ConversationItem, detail: TaskDetail): st
   return `<article class="aha-orchestration-card"><header><strong>${icon("bot")}AHA 系统路由</strong><time>${time}</time></header><p>${escapeHTML(item.summary || `AHA 已向 ${agentIDs.length} 个子 Agent 路由任务`)}</p><div>${rows}</div></article>`;
 }
 
+function systemCardTime(item: ConversationItem): string {
+  return new Date(item.created_at).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"});
+}
+
+function renderAgentConfigCard(item: ConversationItem): string {
+  const payload = item.payload || {};
+  const inherited = Boolean(payload.inherit_main);
+  const rows = inherited ? [["配置", "继承 Main"]] : [
+    ["Backend", String(payload.backend || "-")],
+    ["模型", `${String(payload.model_source || "env") === "official" ? "Official" : "Env"} · ${String(payload.model_name || payload.wire_model || "-")}`],
+    ...(payload.codex_account_name ? [["账号", String(payload.codex_account_name)]] : []),
+    ["推理", String(payload.reasoning_effort || "-")],
+    ["权限", `${String(payload.filesystem || "-")} · ${String(payload.approval || "-")}`],
+    ["代理", payload.proxy_enabled ? "启用" : "关闭"],
+  ];
+  return `<article class="aha-status-card aha-config-card"><header><strong>${icon("edit")}Agent 配置更新</strong><time>${systemCardTime(item)}</time></header><div class="aha-status-grid">${rows.map(([label, value]) => `<span><small>${escapeHTML(label)}</small><b>${escapeHTML(value)}</b></span>`).join("")}</div></article>`;
+}
+
+function renderTurnDurationCard(item: ConversationItem): string {
+  const payload = item.payload || {};
+  const status = String(payload.status || "completed");
+  const elapsed = Number(payload.elapsed_ms || 0);
+  return `<article class="aha-status-card aha-duration-card"><header><strong>${icon("clock")}Turn ${escapeHTML(payload.turn_sequence || "")} 耗时</strong><span class="${statusClass(status)}">${statusLabel(status)}</span><time>${systemCardTime(item)}</time></header><div class="aha-status-grid duration"><span><small>总计</small><b>${formatDuration(elapsed)}</b></span><span><small>排队</small><b>${formatDuration(Number(payload.queue_duration_ms || 0))}</b></span><span><small>准备</small><b>${formatDuration(Number(payload.prepare_duration_ms || 0))}</b></span><span><small>执行</small><b>${formatDuration(Number(payload.run_duration_ms || 0))}</b></span></div></article>`;
+}
+
 export function renderConversationWithOrchestration(
   items: ConversationItem[],
   detail: TaskDetail | null,
   renderItem: (item: ConversationItem) => string,
 ): string {
-  return items.map(item =>
-    item.kind === "agent_batch_dispatched" && detail ? renderOrchestrationCard(item, detail) : renderItem(item)
-  ).join("");
+  return items.map(item => {
+    if (item.kind === "agent_batch_dispatched" && detail) return renderOrchestrationCard(item, detail);
+    if (item.kind === "agent_config_updated") return renderAgentConfigCard(item);
+    if (item.kind === "turn_duration") return renderTurnDurationCard(item);
+    return renderItem(item);
+  }).join("");
 }
 
 export function renderAgentConfigDialog(detail: TaskDetail, agentID: string, models: Model[], accounts: CodexAccount[]): string {

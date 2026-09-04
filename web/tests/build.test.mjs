@@ -287,11 +287,14 @@ test("runtime picker separates Env and Official Codex models", async () => {
   const root = resolve(import.meta.dirname, "..");
   const {runtimeFieldsHTML} = await import(pathToFileURL(resolve(root, "dist", "runtime_picker.js")));
   const html = runtimeFieldsHTML("task", [{
-    id: "model-env", display_name: "Env Model", provider_id: "gateway", source: "provider",
+    id: "model-env", display_name: "Env Model", provider_id: "gateway", provider_name: "Gateway A", source: "provider",
     backend: "codex", wire_model: "env-model", created_at: "", updated_at: "",
   }], [{
     id: "account-1", label: "Work", status: "ready", proxy_enabled: true,
     credential_configured: true, available_models: [{wire_model: "gpt-5.6-sol", display_name: "GPT-5.6-Sol"}],
+    usage: {rate_limits: [{id: "codex", name: "Codex", allowed: true, limit_reached: false,
+      primary_window: {used_percent: 13, limit_window_seconds: 604800}}],
+      credits: {has_credits: false, unlimited: false, overage_limit_reached: false}},
     created_at: "", updated_at: "",
   }], {
     backend: "codex", model_source: "official", codex_account_id: "account-1", wire_model: "gpt-5.6-sol",
@@ -304,6 +307,31 @@ test("runtime picker separates Env and Official Codex models", async () => {
   assert.match(html, /name="wire_model"/);
   assert.match(html, /value="gpt-5\.6-sol" selected/);
   assert.match(html, /Env Model/);
+  assert.match(html, /<optgroup label="Gateway A">/);
+  assert.match(html, /Work · 周额度已用 13%/);
+});
+
+test("conversation renders agent config and turn duration cards", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const {renderConversationList} = await import(pathToFileURL(resolve(root, "dist", "conversation_ui.js")));
+  const items = [{
+    sequence: 1, id: "config-1", task_id: "task-1", agent_id: "aha", stream_agent_id: "main",
+    category: "update", kind: "agent_config_updated", summary: "main 配置已更新",
+    payload: {backend: "codex", model_source: "env", model_name: "GPT-5.6", reasoning_effort: "high",
+      filesystem: "workspace-write", approval: "never", proxy_enabled: true},
+    created_at: "2026-09-04T09:00:00Z",
+  }, {
+    sequence: 2, id: "duration-1", task_id: "task-1", agent_id: "aha", stream_agent_id: "main",
+    category: "update", kind: "turn_duration", summary: "Turn 1 已结束",
+    payload: {turn_sequence: 1, status: "succeeded", elapsed_ms: 5200, queue_duration_ms: 100,
+      prepare_duration_ms: 600, run_duration_ms: 4500},
+    created_at: "2026-09-04T09:00:05Z",
+  }];
+  const html = renderConversationList(items, null, false);
+  assert.match(html, /Agent 配置更新/);
+  assert.match(html, /GPT-5\.6/);
+  assert.match(html, /Turn 1 耗时/);
+  assert.match(html, /5s/);
 });
 
 test("hardware terminal accepts WebView Blob binary frames", async () => {

@@ -172,8 +172,10 @@ func (s *Service) TaskAgents(ctx context.Context, taskID string) ([]domain.TaskA
 		return nil, err
 	}
 	for index := range agents {
+		agents[index].RuntimeConfigValid = false
 		snapshot, snapshotErr := s.store.RuntimeSnapshot(ctx, agents[index].RuntimeConfigSnapshotID)
 		if snapshotErr != nil {
+			agents[index].RuntimeConfigError = "运行配置不存在，请重新配置 Agent"
 			continue
 		}
 		agents[index].Backend = snapshot.Backend
@@ -187,9 +189,13 @@ func (s *Service) TaskAgents(ctx context.Context, taskID string) ([]domain.TaskA
 		agents[index].ReasoningEffort = snapshot.ReasoningEffort
 		agents[index].Filesystem, agents[index].Approval = parsePermissionsJSON(snapshot.PermissionsJSON)
 		agents[index].ProxyEnabled = snapshot.ProxyEnabled
-		if model, modelErr := s.store.Model(ctx, snapshot.ModelID); modelErr == nil {
-			agents[index].ModelName = model.DisplayName
+		model, modelErr := s.store.Model(ctx, snapshot.ModelID)
+		if modelErr != nil {
+			agents[index].RuntimeConfigError = "模型已删除，请修改模型配置"
+			continue
 		}
+		agents[index].ModelName = model.DisplayName
+		agents[index].RuntimeConfigValid = true
 	}
 	return agents, nil
 }
@@ -281,19 +287,60 @@ func (s *Service) UpdateAgentConfig(
 			}
 		}
 	}
-	s.emit(ctx, taskID, "agent", agentID, "agent_config_updated", map[string]any{
-		"agent_id": agentID, "runtime_config_snapshot_id": snapshot.ID, "inherit_main": inheritMain,
-	})
 	agents, err := s.TaskAgents(ctx, taskID)
 	if err != nil {
 		return domain.TaskAgent{}, err
 	}
 	for _, item := range agents {
 		if item.AgentID == agentID {
+			s.recordAgentConfigUpdate(ctx, item, now)
+			s.emit(ctx, taskID, "agent", agentID, "agent_config_updated", map[string]any{
+				"agent_id": agentID, "runtime_config_snapshot_id": snapshot.ID, "inherit_main": inheritMain,
+			})
 			return item, nil
 		}
 	}
 	return domain.TaskAgent{}, sql.ErrNoRows
+}
+
+func (s *Service) recordAgentConfigUpdate(ctx context.Context, agent domain.TaskAgent, now time.Time) {
+	modelName := agent.ModelName
+	if agent.ModelSource == domain.ModelSourceOfficial || modelName == "" {
+		modelName = agent.WireModel
+	}
+	accountName := ""
+	if agent.CodexAccountID != "" {
+		if account, err := s.store.CodexAccount(ctx, agent.CodexAccountID); err == nil {
+			accountName = account.Label
+			if accountName == "" {
+				accountName = account.Email
+			}
+			if accountName == "" {
+				accountName = account.AccountID
+			}
+		}
+	}
+	source := "Env"
+	if agent.ModelSource == domain.ModelSourceOfficial {
+		source = "Official"
+	}
+	summary := fmt.Sprintf("%s 配置已更新：%s · %s · %s", agent.AgentID, agent.Backend, source, modelName)
+	if agent.InheritMain {
+		summary = fmt.Sprintf("%s 配置已更新：继承 Main", agent.AgentID)
+	}
+	_, _ = s.store.AddConversationItem(ctx, domain.ConversationItem{
+		ID: domain.NewID("conversation"), TaskID: agent.TaskID, AgentID: "aha", StreamAgentID: agent.AgentID,
+		FromAgentID: "aha", ToAgentID: agent.AgentID, RouteKind: "config_update",
+		Category: "update", Kind: "agent_config_updated", Summary: summary,
+		Payload: map[string]any{
+			"agent_id": agent.AgentID, "backend": agent.Backend, "model_source": agent.ModelSource,
+			"model_id": agent.ModelID, "model_name": modelName, "wire_model": agent.WireModel,
+			"codex_account_id": agent.CodexAccountID, "codex_account_name": accountName,
+			"reasoning_effort": agent.ReasoningEffort, "filesystem": agent.Filesystem,
+			"approval": agent.Approval, "proxy_enabled": agent.ProxyEnabled, "inherit_main": agent.InheritMain,
+		},
+		CreatedAt: now,
+	})
 }
 
 func (s *Service) deriveRuntimeSnapshot(

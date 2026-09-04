@@ -136,15 +136,15 @@ func (s *Store) UpsertModel(ctx context.Context, item domain.Model) error {
 		item.Source = domain.ModelSourceProvider
 	}
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO models(id,display_name,provider_id,source,codex_account_id,backend,wire_model,wire_api,context_window,max_output_tokens,default_effort,capabilities_json,default_env_group_id,created_at,updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		INSERT INTO models(id,display_name,provider_id,source,codex_account_id,backend,wire_model,wire_api,context_window,max_output_tokens,default_effort,capabilities_json,default_env_group_id,created_at,updated_at,deleted_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'')
 		ON CONFLICT(id) DO UPDATE SET
 			display_name=excluded.display_name,provider_id=excluded.provider_id,source=excluded.source,
 			codex_account_id=excluded.codex_account_id,backend=excluded.backend,
 			wire_model=excluded.wire_model,wire_api=excluded.wire_api,context_window=excluded.context_window,
 			max_output_tokens=excluded.max_output_tokens,default_effort=excluded.default_effort,
 			capabilities_json=excluded.capabilities_json,default_env_group_id=excluded.default_env_group_id,
-			updated_at=excluded.updated_at`,
+			updated_at=excluded.updated_at,deleted_at=''`,
 		item.ID, item.DisplayName, item.ProviderID, item.Source, item.CodexAccountID, item.Backend, item.WireModel, item.WireAPI,
 		item.ContextWindow, item.MaxOutputTokens, item.DefaultEffort, encodeJSON(item.Capabilities),
 		item.DefaultEnvGroupID, timeString(item.CreatedAt), timeString(item.UpdatedAt),
@@ -153,7 +153,13 @@ func (s *Store) UpsertModel(ctx context.Context, item domain.Model) error {
 }
 
 func (s *Store) ListModels(ctx context.Context) ([]domain.Model, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,display_name,provider_id,source,codex_account_id,backend,wire_model,wire_api,context_window,max_output_tokens,default_effort,capabilities_json,default_env_group_id,created_at,updated_at FROM models ORDER BY display_name`)
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT m.id,m.display_name,m.provider_id,COALESCE(NULLIF(p.name,''),m.provider_id),m.source,m.codex_account_id,
+		       m.backend,m.wire_model,m.wire_api,m.context_window,m.max_output_tokens,m.default_effort,
+		       m.capabilities_json,m.default_env_group_id,m.created_at,m.updated_at
+		FROM models m LEFT JOIN providers p ON p.id=m.provider_id
+		WHERE m.deleted_at=''
+		ORDER BY COALESCE(NULLIF(p.name,''),m.provider_id),m.display_name`)
 	if err != nil {
 		return nil, err
 	}
@@ -162,7 +168,7 @@ func (s *Store) ListModels(ctx context.Context) ([]domain.Model, error) {
 	for rows.Next() {
 		var item domain.Model
 		var capabilities, createdAt, updatedAt string
-		if err := rows.Scan(&item.ID, &item.DisplayName, &item.ProviderID, &item.Source, &item.CodexAccountID, &item.Backend, &item.WireModel, &item.WireAPI, &item.ContextWindow, &item.MaxOutputTokens, &item.DefaultEffort, &capabilities, &item.DefaultEnvGroupID, &createdAt, &updatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.DisplayName, &item.ProviderID, &item.ProviderName, &item.Source, &item.CodexAccountID, &item.Backend, &item.WireModel, &item.WireAPI, &item.ContextWindow, &item.MaxOutputTokens, &item.DefaultEffort, &capabilities, &item.DefaultEnvGroupID, &createdAt, &updatedAt); err != nil {
 			return nil, err
 		}
 		item.Capabilities = decodeJSON(capabilities, map[string]any{})
@@ -175,8 +181,13 @@ func (s *Store) ListModels(ctx context.Context) ([]domain.Model, error) {
 func (s *Store) Model(ctx context.Context, id string) (domain.Model, error) {
 	var item domain.Model
 	var capabilities, createdAt, updatedAt string
-	err := s.db.QueryRowContext(ctx, `SELECT id,display_name,provider_id,source,codex_account_id,backend,wire_model,wire_api,context_window,max_output_tokens,default_effort,capabilities_json,default_env_group_id,created_at,updated_at FROM models WHERE id=?`, id).
-		Scan(&item.ID, &item.DisplayName, &item.ProviderID, &item.Source, &item.CodexAccountID, &item.Backend, &item.WireModel, &item.WireAPI, &item.ContextWindow, &item.MaxOutputTokens, &item.DefaultEffort, &capabilities, &item.DefaultEnvGroupID, &createdAt, &updatedAt)
+	err := s.db.QueryRowContext(ctx, `
+		SELECT m.id,m.display_name,m.provider_id,COALESCE(NULLIF(p.name,''),m.provider_id),m.source,m.codex_account_id,
+		       m.backend,m.wire_model,m.wire_api,m.context_window,m.max_output_tokens,m.default_effort,
+		       m.capabilities_json,m.default_env_group_id,m.created_at,m.updated_at
+		FROM models m LEFT JOIN providers p ON p.id=m.provider_id
+		WHERE m.id=? AND m.deleted_at=''`, id).
+		Scan(&item.ID, &item.DisplayName, &item.ProviderID, &item.ProviderName, &item.Source, &item.CodexAccountID, &item.Backend, &item.WireModel, &item.WireAPI, &item.ContextWindow, &item.MaxOutputTokens, &item.DefaultEffort, &capabilities, &item.DefaultEnvGroupID, &createdAt, &updatedAt)
 	item.Capabilities = decodeJSON(capabilities, map[string]any{})
 	item.CreatedAt, item.UpdatedAt = parseTime(createdAt), parseTime(updatedAt)
 	return item, err
@@ -325,23 +336,16 @@ func (s *Store) UpdateWorkspaceConfig(ctx context.Context, item domain.Workspace
 }
 
 func (s *Store) DeleteModel(ctx context.Context, id string) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	now := timeString(time.Now().UTC())
+	result, err := s.db.ExecContext(ctx, `UPDATE models SET deleted_at=?,updated_at=? WHERE id=? AND deleted_at=''`, now, now, id)
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `
-		DELETE FROM runtime_config_snapshots
-		WHERE model_id=?
-		  AND NOT EXISTS(SELECT 1 FROM tasks WHERE runtime_config_snapshot_id=runtime_config_snapshots.id)
-		  AND NOT EXISTS(SELECT 1 FROM task_agents WHERE runtime_config_snapshot_id=runtime_config_snapshots.id)
-		  AND NOT EXISTS(SELECT 1 FROM turns WHERE runtime_config_snapshot_id=runtime_config_snapshots.id)`, id); err != nil {
-		return err
+	count, _ := result.RowsAffected()
+	if count == 0 {
+		return sql.ErrNoRows
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM models WHERE id=?`, id); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return nil
 }
 
 func (s *Store) DeleteEnvGroup(ctx context.Context, id string) error {

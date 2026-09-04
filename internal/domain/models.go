@@ -67,6 +67,7 @@ type Model struct {
 	ID                string         `json:"id"`
 	DisplayName       string         `json:"display_name"`
 	ProviderID        string         `json:"provider_id"`
+	ProviderName      string         `json:"provider_name,omitempty"`
 	Source            string         `json:"source"`
 	CodexAccountID    string         `json:"codex_account_id,omitempty"`
 	Backend           string         `json:"backend"`

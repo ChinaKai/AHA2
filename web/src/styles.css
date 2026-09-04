@@ -318,7 +318,24 @@ dd { margin: 3px 0 0; overflow-wrap: anywhere; font-size: 11px; }
 .aha-orchestration-card b.info { color: #1d4ed8; }
 .aha-orchestration-card b.bad { color: var(--red); }
 .aha-orchestration-card b.warn { color: var(--amber); }
+.aha-status-card { margin: 0 8px 14px; overflow: hidden; border: 1px solid #ccd5df; border-left: 3px solid #64748b; border-radius: 4px; background: #fff; }
+.aha-status-card header { display: flex; align-items: center; gap: 8px; padding: 7px 9px; border-bottom: 1px solid #e3e7ec; color: #475569; font-size: 9px; }
+.aha-status-card header strong { display: inline-flex; align-items: center; gap: 5px; margin-right: auto; }
+.aha-status-card header > span { font-weight: 800; }
+.aha-status-card header > span.good { color: var(--green); }
+.aha-status-card header > span.bad { color: var(--red); }
+.aha-status-card header > span.warn { color: var(--amber); }
+.aha-status-card header > span.info { color: var(--blue); }
+.aha-status-grid { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); }
+.aha-status-grid span { display: grid; min-width: 0; gap: 2px; padding: 7px 9px; border-right: 1px solid #edf0f3; border-bottom: 1px solid #edf0f3; }
+.aha-status-grid small { color: var(--muted); font-size: 8px; }
+.aha-status-grid b { overflow: hidden; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.aha-status-grid.duration { grid-template-columns: repeat(4,minmax(0,1fr)); }
+.aha-config-card { border-left-color: var(--blue); background: #f8fbff; }
+.aha-duration-card { background: #fafbfc; }
 .composer { position: relative; z-index: 2; display: grid; grid-template-columns: 190px 38px minmax(0,1fr) 78px; align-items: end; gap: 8px; padding: 10px 12px; border-top: 1px solid var(--line); background: #fff; }
+.composer-runtime-warning { grid-column: 1 / -1; padding: 7px 9px; border-left: 3px solid var(--red); background: #fff7f6; color: #7f302b; font-size: 10px; }
+.composer.runtime-invalid textarea { border-color: #efc5c2; background: #f7f7f8; color: var(--muted); }
 .composer-target-wrap { display: grid; grid-template-columns: minmax(0,1fr) 34px; gap: 5px; min-width: 0; }
 .composer-target-wrap select { min-width: 0; height: 42px; font-size: 10px; }
 .composer-agent-config { width: 34px; min-height: 42px; padding: 0; }

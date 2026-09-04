@@ -824,7 +824,7 @@ function modelsView(): string {
     <span class="status ${item.credential_configured ? "good" : "warn"}">${item.credential_configured ? "Key Ready" : "No Key"}</span>
     <span class="row-actions"><button type="button" data-edit-provider="${item.id}" class="icon-button" title="编辑 Provider">${icon("edit")}</button><button type="button" data-delete-provider="${item.id}" class="icon-button" title="删除 Provider">${icon("close")}</button></span>
   </article>`).join("");
-  const models = state.models.map(item => `<tr><td><strong>${escapeHTML(item.display_name)}</strong><small>${escapeHTML(item.wire_model)}</small></td><td>${escapeHTML(item.provider_id)}</td><td>${escapeHTML(backendProtocolLabel(item))}</td><td>${item.context_window ? Math.round(item.context_window / 1000) + "K" : "-"}</td><td class="row-actions"><button type="button" data-edit-model="${item.id}" class="icon-button" title="编辑模型">${icon("edit")}</button><button type="button" data-delete-model="${item.id}" class="icon-button" title="删除模型">${icon("close")}</button></td></tr>`).join("");
+  const models = state.models.map(item => `<tr><td><strong>${escapeHTML(item.display_name)}</strong><small>${escapeHTML(item.wire_model)}</small></td><td><strong>${escapeHTML(item.provider_name || item.provider_id)}</strong><small>${escapeHTML(item.provider_id)}</small></td><td>${escapeHTML(backendProtocolLabel(item))}</td><td>${item.context_window ? Math.round(item.context_window / 1000) + "K" : "-"}</td><td class="row-actions"><button type="button" data-edit-model="${item.id}" class="icon-button" title="编辑模型">${icon("edit")}</button><button type="button" data-delete-model="${item.id}" class="icon-button" title="删除模型">${icon("close")}</button></td></tr>`).join("");
   return shell(`<section class="page">
     ${pageHead("模型", "Models 仅管理 Provider / Env 模型；官方模型在创建 Task 时按账号选择。")}
     <div class="provider-layout">
@@ -951,9 +951,14 @@ function renderTaskSlashCommandMenu(textarea: HTMLTextAreaElement | null): void 
 
 function syncTaskComposerState(textarea: HTMLTextAreaElement | null): void {
   if (!textarea) return;
+  const agent = state.selectedTask?.agents.find(item => item.agent_id === state.selectedTaskAgent);
+  const runtimeError = agent?.runtime_config_valid === false
+    ? (agent.runtime_config_error || "模型配置不可用，请修改模型配置") : "";
+  textarea.disabled = Boolean(runtimeError);
+  if (runtimeError) textarea.placeholder = runtimeError;
   renderTaskSlashCommandMenu(textarea);
   const send = document.querySelector<HTMLButtonElement>("#message-send");
-  if (send) send.disabled = !textarea.value.trim();
+  if (send) send.disabled = Boolean(runtimeError) || !textarea.value.trim();
 }
 
 function applyTaskSlashCommand(value: string): void {
@@ -1050,6 +1055,9 @@ function taskCtxHtml(): string {
 function taskDetailView(detail: TaskDetail): string {
   const activeTurn = (detail.turns || []).find(item => item.agent_id === state.selectedTaskAgent && isActiveTurn(item.status));
   const taskFailed = detail.task.status === "failed";
+  const selectedAgent = detail.agents.find(item => item.agent_id === state.selectedTaskAgent);
+  const runtimeError = selectedAgent?.runtime_config_valid === false
+    ? (selectedAgent.runtime_config_error || "模型配置不可用，请修改模型配置") : "";
   const project = state.projects.find(item => item.id === detail.task.project_id);
   const workspace = state.workspaces.find(item => item.id === detail.task.workspace_id);
   const taskMeta = `${project?.name || "-"} · ${workspace?.name || "-"} · ${detail.task.collaboration_mode || "auto"} · ${detail.task.max_agents || 3} Agents`;
@@ -1057,7 +1065,7 @@ function taskDetailView(detail: TaskDetail): string {
     <div id="task-failure-slot">${taskFailureBannerHtml(detail)}</div>
     <div class="messages" id="conversation-list">${conversationListHtml()}</div>
     <div id="agent-turn-slot">${renderAgentTurnCard(detail, state.taskRealtimeState)}</div>
-    <form id="message-form" class="composer">${renderComposerTools(detail, state.selectedTaskAgent, state.taskCategories, state.taskConversation.length)}<div id="slash-command-menu" class="slash-command-menu" ${matchingTaskSlashCommands(state.taskDraft).length ? "" : "hidden"}>${slashCommandMenuHtml(state.taskDraft)}</div><textarea name="content" placeholder="${activeTurn ? `${state.selectedTaskAgent} 正在执行，发送后将排队` : taskFailed ? "输入消息重试，或输入 /reopen" : `发送给 ${state.selectedTaskAgent}，输入 / 查看命令`}" required>${escapeHTML(state.taskDraft)}</textarea><button id="message-send" class="primary" aria-label="发送">${icon("send")}<span class="send-label">发送</span></button></form>
+    <form id="message-form" class="composer${runtimeError ? " runtime-invalid" : ""}">${runtimeError ? `<div class="composer-runtime-warning">${escapeHTML(runtimeError)}</div>` : ""}${renderComposerTools(detail, state.selectedTaskAgent, state.taskCategories, state.taskConversation.length)}<div id="slash-command-menu" class="slash-command-menu" ${matchingTaskSlashCommands(state.taskDraft).length ? "" : "hidden"}>${slashCommandMenuHtml(state.taskDraft)}</div><textarea name="content" placeholder="${escapeHTML(runtimeError || (activeTurn ? `${state.selectedTaskAgent} 正在执行，发送后将排队` : taskFailed ? "输入消息重试，或输入 /reopen" : `发送给 ${state.selectedTaskAgent}，输入 / 查看命令`))}" ${runtimeError ? "disabled" : ""} required>${escapeHTML(state.taskDraft)}</textarea><button id="message-send" class="primary" aria-label="发送" ${runtimeError ? "disabled" : ""}>${icon("send")}<span class="send-label">发送</span></button></form>
   </section>`;
   return shell(`<section class="task-screen">
     <header class="task-head"><button id="back-tasks">←</button><div class="task-title-block"><h1><span class="task-code">${escapeHTML(detail.task.code || "")}</span><span class="task-title-text">${escapeHTML(detail.task.title)}</span></h1><div class="task-head-subline"><span class="task-head-meta" title="${escapeHTML(taskMeta)}">${escapeHTML(taskMeta)}</span><span id="task-detail-status" class="status ${statusClass(detail.task.status)}">${statusLabel(detail.task.status)}</span><span class="task-branch">${escapeHTML(detail.task.task_branch || "")}</span></div></div><div class="actions task-tool-actions">${renderTaskToolButtons(state.taskTool)}</div></header>
@@ -1533,7 +1541,7 @@ function bindCommon(): void {
   });
   document.querySelectorAll<HTMLElement>("[data-delete-model]").forEach(button => button.addEventListener("click", () => {
     const id = button.dataset.deleteModel!;
-    if (!window.confirm("删除该模型及其 Env Group？")) return;
+    if (!window.confirm("删除该模型？使用此模型的任务将暂停输入，直到修改 Agent 模型配置。")) return;
     void runWithFeedback(button, "删除中", async () => {
       await api.deleteModel(id);
       setMessage("notice", "模型已删除");

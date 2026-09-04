@@ -52,6 +52,7 @@ export interface Model {
   id: string;
   display_name: string;
   provider_id: string;
+  provider_name?: string;
   source: "provider" | "official" | string;
   codex_account_id?: string;
   backend: string;
@@ -262,6 +263,8 @@ export interface TaskAgent {
   filesystem?: string;
   approval?: string;
   proxy_enabled: boolean;
+  runtime_config_valid: boolean;
+  runtime_config_error?: string;
   unread_count: number;
   created_at: string;
   updated_at: string;

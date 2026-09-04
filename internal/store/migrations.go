@@ -598,6 +598,11 @@ WHERE source='official' AND codex_account_id<>''
 DELETE FROM providers WHERE id='official-codex';
 `
 
+const schemaV21 = `
+ALTER TABLE models ADD COLUMN deleted_at TEXT NOT NULL DEFAULT '';
+CREATE INDEX idx_models_visible ON models(deleted_at,provider_id,display_name);
+`
+
 func (s *Store) migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, schemaV1); err != nil {
 		return fmt.Errorf("apply schema v1: %w", err)
@@ -853,6 +858,19 @@ func (s *Store) migrate(ctx context.Context) error {
 		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(20, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
 	); err != nil {
 		return fmt.Errorf("record schema v20: %w", err)
+	}
+	var hasV21 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=21)`).Scan(&hasV21)
+	if !hasV21 {
+		if _, err := s.db.ExecContext(ctx, schemaV21); err != nil {
+			return fmt.Errorf("apply schema v21: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(
+		ctx,
+		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(21, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
+	); err != nil {
+		return fmt.Errorf("record schema v21: %w", err)
 	}
 	return nil
 }

@@ -193,6 +193,11 @@ func TestCatalogUsageIgnoresOrphanRuntimeSnapshots(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if err := database.UpsertProvider(ctx, domain.Provider{
+		ID: "provider-usage", Name: "Usage Provider", BaseURL: "https://example.invalid", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
 	if err := database.UpsertEnvGroup(ctx, domain.EnvGroup{
 		ID: "env-usage", Name: "Usage", ProviderID: "provider-usage", Backend: "codex", Revision: 1,
 		Environment: map[string]string{}, SecretRefs: map[string]string{}, CreatedAt: now, UpdatedAt: now,
@@ -204,6 +209,10 @@ func TestCatalogUsageIgnoresOrphanRuntimeSnapshots(t *testing.T) {
 		WireModel: "gpt-test", DefaultEnvGroupID: "env-usage", CreatedAt: now, UpdatedAt: now,
 	}); err != nil {
 		t.Fatal(err)
+	}
+	models, err := database.ListModels(ctx)
+	if err != nil || len(models) != 1 || models[0].ProviderName != "Usage Provider" {
+		t.Fatalf("model provider display missing: %#v %v", models, err)
 	}
 	if err := database.UpsertCodexAccount(ctx, domain.CodexAccount{
 		ID: "account-usage", Status: "ready", CredentialRef: "codex/account/auth",
@@ -242,20 +251,27 @@ func TestCatalogUsageIgnoresOrphanRuntimeSnapshots(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertUsage(true)
+	if err := database.DeleteModel(ctx, "model-usage"); err != nil {
+		t.Fatalf("DeleteModel() with active task failed: %v", err)
+	}
+	if _, err := database.Model(ctx, "model-usage"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("deleted model is still selectable: %v", err)
+	}
+	var snapshotCount, deletedCount int
+	if err := database.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM runtime_config_snapshots WHERE id='snapshot-usage'`).Scan(&snapshotCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM models WHERE id='model-usage' AND deleted_at<>''`).Scan(&deletedCount); err != nil {
+		t.Fatal(err)
+	}
+	if snapshotCount != 1 || deletedCount != 1 {
+		t.Fatalf("deleted model did not preserve task snapshot: snapshots=%d deleted=%d", snapshotCount, deletedCount)
+	}
+	assertUsage(true)
 	if err := database.DeleteTask(ctx, "task-usage"); err != nil {
 		t.Fatal(err)
 	}
 	assertUsage(false)
-	if err := database.DeleteModel(ctx, "model-usage"); err != nil {
-		t.Fatalf("DeleteModel() with orphan snapshot failed: %v", err)
-	}
-	var snapshotCount int
-	if err := database.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM runtime_config_snapshots WHERE id='snapshot-usage'`).Scan(&snapshotCount); err != nil {
-		t.Fatal(err)
-	}
-	if snapshotCount != 0 {
-		t.Fatalf("orphan runtime snapshot was retained: %d", snapshotCount)
-	}
 }
 
 func TestOfficialCodexProviderIsInternal(t *testing.T) {
