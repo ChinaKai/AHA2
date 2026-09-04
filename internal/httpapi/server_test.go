@@ -21,6 +21,20 @@ import (
 	"github.com/ChinaKai/AHA2/internal/store"
 )
 
+func TestSecurityHeadersAllowXTermStylesWithoutInlineScripts(t *testing.T) {
+	t.Parallel()
+	request := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	response := httptest.NewRecorder()
+	New(Config{}).Handler().ServeHTTP(response, request)
+	policy := response.Header().Get("Content-Security-Policy")
+	if !strings.Contains(policy, "style-src 'self' 'unsafe-inline'") {
+		t.Fatalf("xterm inline styles are blocked: %s", policy)
+	}
+	if !strings.Contains(policy, "script-src 'self'") || strings.Contains(policy, "script-src 'self' 'unsafe-inline'") {
+		t.Fatalf("inline scripts were allowed: %s", policy)
+	}
+}
+
 func TestAuthenticationAndCSRF(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

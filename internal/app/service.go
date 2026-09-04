@@ -479,10 +479,11 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 	}
 	conversation, _ := s.store.ConversationPageForAgent(ctx, task.ID, turn.AgentID, 0, 0, 100, nil)
 	allTurns, _ := s.store.ListTurns(ctx, task.ID)
+	hardwareGroups, _ := s.store.HardwareGroups(ctx, task.ID)
 	preview, err := s.prompts.Build(ctx, prompt.BuildInput{
 		Project: project, Workspace: workspace, Task: task, Agent: agent, Snapshot: snapshot,
 		Memory: memory, GlobalKnowledge: globalKB, ProjectKnowledge: projectKB,
-		Conversation: conversation.Items, Turns: allTurns, UserMessage: userMessage,
+		Conversation: conversation.Items, Turns: allTurns, Hardware: hardwareGroups, UserMessage: userMessage,
 		Handoff: handoff.Summary,
 	})
 	if err != nil {

@@ -202,6 +202,71 @@ export interface TaskMemory {
   next_actions: string[];
 }
 
+export interface HardwareSerialConfig {
+  device: string;
+  baudrate: number;
+}
+
+export interface HardwareNetworkConfig {
+  host: string;
+  port: number;
+  protocol: "telnet" | "raw" | "ssh";
+  ssh_auth: "auto" | "password" | "key";
+}
+
+export interface HardwareGroup {
+  task_id: string;
+  id: string;
+  position: number;
+  description: string;
+  mode: "off" | "serial" | "network" | "both";
+  serial: HardwareSerialConfig;
+  network: HardwareNetworkConfig;
+  username?: string;
+  password_configured: boolean;
+  access: "read_only" | "read_write";
+  created_at: string;
+  updated_at: string;
+}
+
+export interface HardwareTerminalStatus {
+  task_id: string;
+  hardware_id: string;
+  transport: "serial" | "network";
+  endpoint: string;
+  status: string;
+  connected: boolean;
+  read_only: boolean;
+  error?: string;
+  started_at?: string;
+  updated_at?: string;
+}
+
+export interface HardwareIOEvent {
+  sequence: number;
+  id: string;
+  task_id: string;
+  hardware_id: string;
+  transport: "serial" | "network";
+  direction: "rx" | "tx" | "system";
+  data: string;
+  encoding: string;
+  source?: string;
+  created_at: string;
+}
+
+export interface HardwareIOPage {
+  items: HardwareIOEvent[];
+  latest_sequence: number;
+  has_more: boolean;
+}
+
+export interface SerialPort {
+  device: string;
+  description: string;
+  hardware_id?: string;
+}
+
 export interface Knowledge {
   id: string;
   scope: "global" | "project";
@@ -220,6 +285,7 @@ export interface TaskDetail {
   turns: Turn[];
   agents: TaskAgent[];
   memory?: TaskMemory;
+  hardware?: HardwareGroup[];
   event_cursor: number;
   server_time_ms: number;
 }

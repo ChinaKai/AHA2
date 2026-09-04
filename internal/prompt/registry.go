@@ -39,6 +39,7 @@ type BuildInput struct {
 	ProjectKnowledge []domain.KnowledgeEntry
 	Conversation     []domain.ConversationItem
 	Turns            []domain.Turn
+	Hardware         []domain.HardwareGroup
 	UserMessage      string
 	Handoff          string
 }
@@ -265,9 +266,14 @@ func buildResources(input BuildInput, root, workDir string) []ContextResource {
 		resource(input, "task-memory", joinContextPath(input, root, "task-memory.md"), "完整 Task Memory", fullMemory(input.Memory)),
 		resource(input, "conversation", joinContextPath(input, root, "conversation.md"), "当前 Agent 最近 Conversation", conversationResource(input.Conversation)),
 		resource(input, "turns", joinContextPath(input, root, "turns.md"), "当前 Agent Turn 历史", turnsResource(input.Turns, input.Agent.AgentID)),
+	}
+	if len(input.Hardware) > 0 {
+		resources = append(resources, resource(input, "hardware", joinContextPath(input, root, "hardware.md"), "Task 硬件调试配置（不含密码）", hardwareResource(input.Hardware)))
+	}
+	resources = append(resources,
 		resource(input, "knowledge-global", joinContextPath(input, root, "knowledge-global.md"), "Global verified knowledge", knowledgeText(input.GlobalKnowledge)),
 		resource(input, "knowledge-project", joinContextPath(input, root, "knowledge-project.md"), "Project verified knowledge", knowledgeText(input.ProjectKnowledge)),
-	}
+	)
 	metadata := append([]ContextResource(nil), resources...)
 	for index := range metadata {
 		metadata[index].Content = ""
@@ -335,4 +341,45 @@ func turnsResource(turns []domain.Turn, agentID string) string {
 		return "# Turns\n\n-"
 	}
 	return "# Turns\n\n" + strings.Join(lines, "\n")
+}
+
+func hardwareResource(groups []domain.HardwareGroup) string {
+	lines := []string{"# Hardware", "", "Credentials are never included in this file."}
+	for _, group := range groups {
+		lines = append(lines,
+			"",
+			fmt.Sprintf("## %s", group.ID),
+			fmt.Sprintf("- description: %s", group.Description),
+			fmt.Sprintf("- mode: %s", group.Mode),
+			fmt.Sprintf("- access: %s", group.Access),
+		)
+		if group.Supports(domain.HardwareTransportSerial) {
+			lines = append(lines, fmt.Sprintf("- serial: %s @ %d", group.Serial.Device, group.Serial.Baudrate))
+		}
+		if group.Supports(domain.HardwareTransportNetwork) {
+			lines = append(lines, fmt.Sprintf(
+				"- network: %s:%d (%s)", group.Network.Host, group.Network.Port, group.Network.Protocol,
+			))
+			if group.Network.Protocol == domain.HardwareProtocolSSH {
+				lines = append(lines, fmt.Sprintf("- ssh authentication: %s", normalizeHardwareSSHAuth(group.Network.SSHAuth)))
+			}
+		}
+		if group.Username != "" {
+			lines = append(lines, fmt.Sprintf("- username: %s", group.Username))
+		}
+		lines = append(lines, fmt.Sprintf("- password configured: %t", group.PasswordConfigured))
+	}
+	if len(groups) == 0 {
+		lines = append(lines, "", "No hardware groups configured.")
+	}
+	return strings.Join(lines, "\n")
+}
+
+func normalizeHardwareSSHAuth(value string) string {
+	switch value {
+	case domain.HardwareSSHAuthPassword, domain.HardwareSSHAuthKey:
+		return value
+	default:
+		return domain.HardwareSSHAuthAuto
+	}
 }

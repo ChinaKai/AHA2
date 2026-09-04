@@ -11,6 +11,7 @@ import (
 	"github.com/ChinaKai/AHA2/internal/app"
 	"github.com/ChinaKai/AHA2/internal/auth"
 	"github.com/ChinaKai/AHA2/internal/domain"
+	"github.com/ChinaKai/AHA2/internal/hardware"
 	"github.com/ChinaKai/AHA2/internal/store"
 )
 
@@ -26,6 +27,7 @@ type Config struct {
 	AllowCrossOrigin bool
 	DetectWorkspace  func(context.Context, domain.Workspace) (domain.Workspace, error)
 	Secrets          SecretStore
+	Hardware         *hardware.Manager
 }
 
 type Server struct {
@@ -38,6 +40,7 @@ type Server struct {
 	allowCrossOrigin bool
 	detectWorkspace  func(context.Context, domain.Workspace) (domain.Workspace, error)
 	secrets          SecretStore
+	hardware         *hardware.Manager
 	authLimiter      *authLimiter
 }
 
@@ -51,6 +54,7 @@ func New(config Config) *Server {
 		logger: logger, secureCookie: config.SecureCookie, allowCrossOrigin: config.AllowCrossOrigin,
 		detectWorkspace: config.DetectWorkspace,
 		secrets:         config.Secrets,
+		hardware:        config.Hardware,
 		authLimiter:     newAuthLimiter(),
 	}
 }
@@ -88,6 +92,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/prompts/templates", s.withAuth(http.HandlerFunc(s.promptTemplates)))
 	mux.Handle("PUT /api/v1/prompts/templates/{id}", s.withAuth(http.HandlerFunc(s.updatePromptTemplate)))
 	mux.Handle("POST /api/v1/prompts/templates/{id}/reset", s.withAuth(http.HandlerFunc(s.resetPromptTemplate)))
+	mux.Handle("GET /api/v1/hardware/serial-ports", s.withAuth(http.HandlerFunc(s.hardwareSerialPorts)))
 
 	mux.Handle("GET /api/v1/tasks", s.withAuth(http.HandlerFunc(s.listTasks)))
 	mux.Handle("POST /api/v1/tasks", s.withAuth(http.HandlerFunc(s.createTask)))
@@ -104,6 +109,13 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("PATCH /api/v1/tasks/{id}/agents/{agent}", s.withAuth(http.HandlerFunc(s.updateAgentConfig)))
 	mux.Handle("POST /api/v1/tasks/{id}/agents/{agent}/session/compact", s.withAuth(http.HandlerFunc(s.compactAgentSession)))
 	mux.Handle("POST /api/v1/tasks/{id}/agents/{agent}/session/reset", s.withAuth(http.HandlerFunc(s.resetAgentSession)))
+	mux.Handle("GET /api/v1/tasks/{id}/hardware", s.withAuth(http.HandlerFunc(s.taskHardware)))
+	mux.Handle("PUT /api/v1/tasks/{id}/hardware", s.withAuth(http.HandlerFunc(s.updateTaskHardware)))
+	mux.Handle("GET /api/v1/tasks/{id}/hardware/{hardware}/terminal", s.withAuth(http.HandlerFunc(s.hardwareTerminal)))
+	mux.Handle("GET /api/v1/tasks/{id}/hardware/{hardware}/terminal/ws", s.withAuth(http.HandlerFunc(s.hardwareTerminalWebSocket)))
+	mux.Handle("POST /api/v1/tasks/{id}/hardware/{hardware}/connect", s.withAuth(http.HandlerFunc(s.connectHardware)))
+	mux.Handle("POST /api/v1/tasks/{id}/hardware/{hardware}/disconnect", s.withAuth(http.HandlerFunc(s.disconnectHardware)))
+	mux.Handle("POST /api/v1/tasks/{id}/hardware/{hardware}/send", s.withAuth(http.HandlerFunc(s.sendHardware)))
 	mux.Handle("PATCH /api/v1/tasks/{id}", s.withAuth(http.HandlerFunc(s.updateTaskTitle)))
 	mux.Handle("POST /api/v1/tasks/{id}/complete", s.withAuth(http.HandlerFunc(s.completeTask)))
 	mux.Handle("POST /api/v1/tasks/{id}/reopen", s.withAuth(http.HandlerFunc(s.reopenTask)))
@@ -126,7 +138,7 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 		writer.Header().Set("X-Frame-Options", "DENY")
 		writer.Header().Set("Referrer-Policy", "no-referrer")
 		writer.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
-		writer.Header().Set("Content-Security-Policy", "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'")
+		writer.Header().Set("Content-Security-Policy", "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'")
 		next.ServeHTTP(writer, request)
 	})
 }

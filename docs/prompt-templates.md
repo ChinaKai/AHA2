@@ -47,6 +47,7 @@ Main/Sub、Auto/Single 等模板的运行时选择由 Prompt Engine 按当前 Ag
 - `task-memory.md`：完整 Task Memory。
 - `conversation.md`：当前 Agent 最近的 Conversation。
 - `turns.md`：当前 Agent 的 Turn 历史。
+- `hardware.md`：Task 硬件组、Serial/Network 连接事实和权限；不包含密码。
 - `knowledge-global.md`：已验证 Global Knowledge。
 - `knowledge-project.md`：已验证 Project Knowledge。
 

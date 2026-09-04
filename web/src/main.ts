@@ -1,6 +1,7 @@
 import {api} from "./api.js";
 import {renderConversationList} from "./conversation_ui.js";
 import {icon} from "./icons.js";
+import {bindHardwarePanel, stopHardwarePanel} from "./hardware_panel.js";
 import {bindPromptAdmin, loadPromptCatalog, renderPromptAdmin} from "./prompt_admin.js";
 import {renderComposerAgentOptions, renderComposerTools} from "./task_composer.js";
 import {renderTaskToolButtons, renderTaskToolContent, renderTaskToolPanel} from "./task_tools.js";
@@ -1086,7 +1087,7 @@ function updateTaskLiveRegions(): void {
     taskStatus.textContent = statusLabel(detail.task.status);
   }
   const toolBody = document.querySelector<HTMLElement>("#task-tool-panel-body");
-  if (toolBody && state.taskTool) {
+  if (toolBody && state.taskTool && state.taskTool !== "hardware") {
     toolBody.innerHTML = renderTaskToolContent(state.taskTool, detail, taskCtxHtml());
     bindSessionActions();
   }
@@ -1717,6 +1718,7 @@ function bindCommon(): void {
   bindConversationLiveControls();
   document.querySelectorAll<HTMLElement>("[data-task-tool]").forEach(button => button.addEventListener("click", async () => {
     const tool = button.dataset.taskTool as TaskTool;
+    if (state.taskTool === "hardware") stopHardwarePanel();
     if (state.taskTool === tool) {
       state.taskTool = "";
       render();
@@ -1746,9 +1748,11 @@ function bindCommon(): void {
     });
   }));
   document.querySelector("#close-task-tool")?.addEventListener("click", () => {
+    if (state.taskTool === "hardware") stopHardwarePanel();
     state.taskTool = "";
     render();
   });
+  if (state.taskTool === "hardware" && state.selectedTask) bindHardwarePanel(state.selectedTask, setMessage);
   if (state.view === "prompts") bindPromptAdmin(render, setMessage);
 }
 

@@ -100,12 +100,14 @@ func (s *Server) taskDetail(writer http.ResponseWriter, request *http.Request) {
 	turns, _ := s.store.TurnsForRound(request.Context(), round.ID)
 	agents, _ := s.app.TaskAgents(request.Context(), taskID)
 	memory, _ := s.store.TaskMemory(request.Context(), taskID)
+	hardwareGroups, _ := s.store.HardwareGroups(request.Context(), taskID)
 	now := time.Now().UTC()
 	applyRoundTiming(&round, now)
 	applyTurnTimings(turns, now)
 	s.applyTurnContextUsage(request.Context(), turns)
 	writeJSON(writer, http.StatusOK, map[string]any{
 		"ok": true, "task": task, "latest_round": round, "turns": turns, "agents": agents, "memory": memory,
+		"hardware":       hardwareGroups,
 		"event_cursor":   s.store.MaxEventSequence(request.Context(), taskID),
 		"server_time_ms": now.UnixMilli(),
 	})

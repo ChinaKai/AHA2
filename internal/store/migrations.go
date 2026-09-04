@@ -467,6 +467,49 @@ const schemaV12 = `
 DROP TABLE IF EXISTS prompt_route_overrides;
 `
 
+const schemaV13 = `
+CREATE TABLE IF NOT EXISTS hardware_groups (
+    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    id TEXT NOT NULL,
+    position INTEGER NOT NULL DEFAULT 0,
+    description TEXT NOT NULL DEFAULT '',
+    mode TEXT NOT NULL DEFAULT 'off',
+    serial_device TEXT NOT NULL DEFAULT '',
+    serial_baudrate INTEGER NOT NULL DEFAULT 115200,
+    network_host TEXT NOT NULL DEFAULT '',
+    network_port INTEGER NOT NULL DEFAULT 23,
+    network_protocol TEXT NOT NULL DEFAULT 'telnet',
+    username TEXT NOT NULL DEFAULT '',
+    credential_ref TEXT NOT NULL DEFAULT '',
+    password_configured INTEGER NOT NULL DEFAULT 0,
+    access TEXT NOT NULL DEFAULT 'read_write',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(task_id,id)
+);
+CREATE INDEX IF NOT EXISTS idx_hardware_groups_task
+ON hardware_groups(task_id,position);
+
+CREATE TABLE IF NOT EXISTS hardware_io (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    id TEXT NOT NULL UNIQUE,
+    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    hardware_id TEXT NOT NULL,
+    transport TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    data TEXT NOT NULL,
+    encoding TEXT NOT NULL DEFAULT 'text',
+    source TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_hardware_io_stream
+ON hardware_io(task_id,hardware_id,transport,sequence);
+`
+
+const schemaV14 = `
+ALTER TABLE hardware_groups ADD COLUMN ssh_auth TEXT NOT NULL DEFAULT 'auto';
+`
+
 func (s *Store) migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, schemaV1); err != nil {
 		return fmt.Errorf("apply schema v1: %w", err)
@@ -618,6 +661,32 @@ func (s *Store) migrate(ctx context.Context) error {
 		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(12, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
 	); err != nil {
 		return fmt.Errorf("record schema v12: %w", err)
+	}
+	var hasV13 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=13)`).Scan(&hasV13)
+	if !hasV13 {
+		if _, err := s.db.ExecContext(ctx, schemaV13); err != nil {
+			return fmt.Errorf("apply schema v13: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(
+		ctx,
+		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(13, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
+	); err != nil {
+		return fmt.Errorf("record schema v13: %w", err)
+	}
+	var hasV14 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=14)`).Scan(&hasV14)
+	if !hasV14 {
+		if _, err := s.db.ExecContext(ctx, schemaV14); err != nil {
+			return fmt.Errorf("apply schema v14: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(
+		ctx,
+		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(14, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
+	); err != nil {
+		return fmt.Errorf("record schema v14: %w", err)
 	}
 	return nil
 }

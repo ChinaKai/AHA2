@@ -19,6 +19,7 @@ import (
 	"github.com/ChinaKai/AHA2/internal/auth"
 	"github.com/ChinaKai/AHA2/internal/backend"
 	"github.com/ChinaKai/AHA2/internal/execution"
+	"github.com/ChinaKai/AHA2/internal/hardware"
 	"github.com/ChinaKai/AHA2/internal/httpapi"
 	"github.com/ChinaKai/AHA2/internal/secrets"
 	"github.com/ChinaKai/AHA2/internal/store"
@@ -134,6 +135,8 @@ func serve(args []string) error {
 	}
 	appService := app.NewService(database, secretStore, executor)
 	appService.SetWorkspacePreparer(execution.WorkspacePreparer{})
+	hardwareManager := hardware.NewManager(database)
+	defer hardwareManager.Close()
 	if err := appService.ResumePending(ctx); err != nil {
 		return fmt.Errorf("resume pending agent inbox: %w", err)
 	}
@@ -153,6 +156,7 @@ func serve(args []string) error {
 		Logger: logger, SecureCookie: *secureCookie, AllowCrossOrigin: *allowCrossOrigin,
 		DetectWorkspace: workspace.Detect,
 		Secrets:         secretStore,
+		Hardware:        hardwareManager,
 	})
 	if *allowCrossOrigin {
 		logger.Warn("Origin host validation disabled")

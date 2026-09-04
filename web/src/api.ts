@@ -14,6 +14,10 @@ import type {
   TaskAgent,
   ConversationCategory,
   ConversationPage,
+  HardwareGroup,
+  HardwareIOPage,
+  HardwareTerminalStatus,
+  SerialPort,
   Workspace,
 } from "./types.js";
 
@@ -240,6 +244,59 @@ class APIClient {
   resetAgentSession(id: string, agentID: string): Promise<{old_backend_session_id: string; status: string}> {
     return this.request(`/api/v1/tasks/${id}/agents/${encodeURIComponent(agentID)}/session/reset`, {
       method: "POST", body: "{}",
+    });
+  }
+
+  serialPorts(): Promise<{ports: SerialPort[]}> {
+    return this.request("/api/v1/hardware/serial-ports");
+  }
+
+  updateTaskHardware(id: string, groups: Record<string, unknown>[]): Promise<{groups: HardwareGroup[]}> {
+    return this.request(`/api/v1/tasks/${id}/hardware`, {
+      method: "PUT", body: JSON.stringify({groups}),
+    });
+  }
+
+  hardwareTerminal(
+    taskID: string,
+    hardwareID: string,
+    transport: "serial" | "network",
+    after = 0,
+  ): Promise<{group: HardwareGroup; status: HardwareTerminalStatus; stream: HardwareIOPage}> {
+    const query = new URLSearchParams({transport, limit: "1000"});
+    if (after > 0) query.set("after", String(after));
+    return this.request(`/api/v1/tasks/${taskID}/hardware/${encodeURIComponent(hardwareID)}/terminal?${query}`);
+  }
+
+  connectHardware(
+    taskID: string,
+    hardwareID: string,
+    transport: "serial" | "network",
+  ): Promise<{status: HardwareTerminalStatus}> {
+    return this.request(`/api/v1/tasks/${taskID}/hardware/${encodeURIComponent(hardwareID)}/connect?transport=${transport}`, {
+      method: "POST", body: "{}",
+    });
+  }
+
+  disconnectHardware(
+    taskID: string,
+    hardwareID: string,
+    transport: "serial" | "network",
+  ): Promise<{status: HardwareTerminalStatus}> {
+    return this.request(`/api/v1/tasks/${taskID}/hardware/${encodeURIComponent(hardwareID)}/disconnect?transport=${transport}`, {
+      method: "POST", body: "{}",
+    });
+  }
+
+  sendHardware(
+    taskID: string,
+    hardwareID: string,
+    transport: "serial" | "network",
+    data: string,
+    encoding: "text" | "hex" | "base64",
+  ): Promise<{ok: boolean}> {
+    return this.request(`/api/v1/tasks/${taskID}/hardware/${encodeURIComponent(hardwareID)}/send?transport=${transport}`, {
+      method: "POST", body: JSON.stringify({data, encoding}),
     });
   }
 

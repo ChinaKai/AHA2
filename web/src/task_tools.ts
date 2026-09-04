@@ -1,4 +1,5 @@
 import {icon} from "./icons.js";
+import {renderHardwarePanel} from "./hardware_panel.js";
 import {renderTaskMemory} from "./task_agents.js";
 import type {TaskDetail} from "./types.js";
 
@@ -32,7 +33,8 @@ export function renderTaskToolContent(
 ): string {
   if (tool === "context") return contextHTML;
   if (tool === "memory") return `<div class="task-memory-tool">${renderTaskMemory(detail.memory)}</div>`;
-  if (tool === "hardware" || tool === "browser") {
+  if (tool === "hardware") return renderHardwarePanel(detail);
+  if (tool === "browser") {
     const label = taskToolTitle(tool);
     return `<div class="task-tool-placeholder">${icon(tool)}<h3>${escapeHTML(label)}</h3><p>该工具将在后续版本接入。</p></div>`;
   }

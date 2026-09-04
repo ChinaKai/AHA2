@@ -3,9 +3,12 @@ module github.com/ChinaKai/AHA2
 go 1.27
 
 require (
+	github.com/coder/websocket v1.8.14
 	golang.org/x/crypto v0.55.0
 	modernc.org/sqlite v1.57.0
 )
+
+replace github.com/coder/websocket => ./third_party/coder-websocket
 
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect

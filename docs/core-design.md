@@ -973,7 +973,6 @@ session
 - 多用户协作
 - 多 Agent 编排
 - 飞书和微信
-- Hardware
 - Browser Bridge
 - 自动双向文件同步
 - 自动部署
@@ -1037,3 +1036,14 @@ Current user request
 - 登录页属于认证边界，可以不使用应用导航壳层；进入应用后的业务模块不得例外。
 
 提示词模块是普通一级业务模块，只负责查看、编辑和恢复当前 AHA2 使用的提示词模板。Prompt 的运行时选择和组装属于内部执行逻辑，不在 Web 中提供路由、有效 Prompt 或诊断管理页面。
+
+## 17. Hardware 调试边界
+
+Hardware 是 Task 的可选执行资源，不是 Workspace 属性。Task 保存多个同构硬件组，
+每组独立声明 Serial/Network 连接事实和 `read_only|read_write` 权限；密码只保存
+Secret Store 引用。
+
+真实连接由进程内 Hardware Manager 按物理端点管理，Web 通过受认证 API 连接和
+断开，并使用 xterm.js + WebSocket 交换原始终端字节、状态与 resize；HTTP 增量历史
+保留为查询和兜底。Agent Prompt 只获得 `hardware.md` 的路径，不内联
+密码和完整 I/O 历史。详细约束见 `docs/hardware-debug.md`。

@@ -25,6 +25,7 @@ func (s *Server) deleteTask(writer http.ResponseWriter, request *http.Request) {
 		})
 		return
 	}
+	s.cleanupTaskHardware(request.Context(), id)
 	if err := s.store.DeleteTask(request.Context(), id); err != nil {
 		writeError(writer, http.StatusInternalServerError, "delete_task_failed")
 		return
@@ -67,6 +68,7 @@ func (s *Server) deleteWorkspace(writer http.ResponseWriter, request *http.Reque
 		if task.WorkspaceID != id {
 			continue
 		}
+		s.cleanupTaskHardware(request.Context(), task.ID)
 		_ = s.store.DeleteTask(request.Context(), task.ID)
 		if task.RuntimeConfigSnapshotID != "" {
 			_ = s.store.DeleteRuntimeSnapshot(request.Context(), task.RuntimeConfigSnapshotID)
@@ -111,6 +113,7 @@ func (s *Server) deleteProject(writer http.ResponseWriter, request *http.Request
 		if task.ProjectID != id {
 			continue
 		}
+		s.cleanupTaskHardware(request.Context(), task.ID)
 		_ = s.store.DeleteTask(request.Context(), task.ID)
 		if task.RuntimeConfigSnapshotID != "" {
 			_ = s.store.DeleteRuntimeSnapshot(request.Context(), task.RuntimeConfigSnapshotID)
@@ -128,6 +131,25 @@ func (s *Server) deleteProject(writer http.ResponseWriter, request *http.Request
 	}
 	s.audit(request, "project.delete", "project", id, nil)
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) cleanupTaskHardware(ctx context.Context, taskID string) {
+	if s.hardware != nil {
+		s.hardware.DisconnectTask(taskID)
+	}
+	if s.secrets == nil {
+		return
+	}
+	groups, _ := s.store.HardwareGroups(ctx, taskID)
+	var refs []string
+	for _, group := range groups {
+		if group.CredentialRef != "" {
+			refs = append(refs, group.CredentialRef)
+		}
+	}
+	if len(refs) > 0 {
+		_ = s.secrets.DeleteMany(refs)
+	}
 }
 
 func (s *Server) taskHasActiveTurn(ctx context.Context, taskID string) (bool, error) {

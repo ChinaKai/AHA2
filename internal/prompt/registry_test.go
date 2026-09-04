@@ -39,7 +39,14 @@ func TestEngineRoutesTemplatesAndBuildsContextManifest(t *testing.T) {
 			Facts: []string{"fact one"}, Decisions: []string{"decision one"},
 		},
 		GlobalKnowledge: []domain.KnowledgeEntry{{Title: "Global", Body: strings.Repeat("knowledge", 200)}},
-		UserMessage:     "fixed inbox",
+		Hardware: []domain.HardwareGroup{{
+			ID: "board", Description: "Main board", Mode: domain.HardwareModeBoth,
+			Serial:   domain.HardwareSerialConfig{Device: "COM3", Baudrate: 115200},
+			Network:  domain.HardwareNetworkConfig{Host: "192.0.2.10", Port: 23, Protocol: domain.HardwareProtocolTelnet},
+			Username: "root", CredentialRef: "hardware/task-1/board/credential",
+			PasswordConfigured: true, Access: domain.HardwareAccessReadOnly,
+		}},
+		UserMessage: "fixed inbox",
 	}
 	preview, err := engine.Build(ctx, input)
 	if err != nil {
@@ -59,7 +66,7 @@ func TestEngineRoutesTemplatesAndBuildsContextManifest(t *testing.T) {
 		strings.Contains(preview.EffectivePrompt, "fact one") {
 		t.Fatal("task memory was injected inline")
 	}
-	var knowledgeFound bool
+	var knowledgeFound, hardwareFound bool
 	var manifest ContextResource
 	for _, resource := range preview.ContextManifest {
 		if resource.ID == "knowledge-global" && strings.Contains(resource.Content, "Global") {
@@ -68,9 +75,17 @@ func TestEngineRoutesTemplatesAndBuildsContextManifest(t *testing.T) {
 		if resource.ID == "manifest" {
 			manifest = resource
 		}
+		if resource.ID == "hardware" && strings.Contains(resource.Content, "COM3") &&
+			strings.Contains(resource.Content, "password configured: true") &&
+			!strings.Contains(resource.Content, "credential") {
+			hardwareFound = true
+		}
 	}
 	if !knowledgeFound {
 		t.Fatal("global knowledge resource missing")
+	}
+	if !hardwareFound {
+		t.Fatal("sanitized hardware resource missing")
 	}
 	var memoryFound bool
 	for _, resource := range preview.ContextManifest {
