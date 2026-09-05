@@ -658,6 +658,15 @@ const schemaV25 = `
 ALTER TABLE tasks ADD COLUMN agent_capabilities_json TEXT NOT NULL DEFAULT '{}';
 `
 
+const schemaV26 = `
+ALTER TABLE turns ADD COLUMN context_ready_at TEXT NOT NULL DEFAULT '';
+ALTER TABLE turns ADD COLUMN session_ready_at TEXT NOT NULL DEFAULT '';
+ALTER TABLE turns ADD COLUMN first_event_at TEXT NOT NULL DEFAULT '';
+ALTER TABLE turns ADD COLUMN last_activity_at TEXT NOT NULL DEFAULT '';
+ALTER TABLE turns ADD COLUMN stalled_at TEXT NOT NULL DEFAULT '';
+ALTER TABLE turns ADD COLUMN backend_finished_at TEXT NOT NULL DEFAULT '';
+`
+
 func (s *Store) migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, schemaV1); err != nil {
 		return fmt.Errorf("apply schema v1: %w", err)
@@ -978,6 +987,16 @@ func (s *Store) migrate(ctx context.Context) error {
 		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(25, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
 	); err != nil {
 		return fmt.Errorf("record schema v25: %w", err)
+	}
+	var hasV26 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=26)`).Scan(&hasV26)
+	if !hasV26 {
+		if _, err := s.db.ExecContext(ctx, schemaV26); err != nil {
+			return fmt.Errorf("apply schema v26: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(26, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v26: %w", err)
 	}
 	return nil
 }

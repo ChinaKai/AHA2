@@ -38,6 +38,7 @@ function statusLabel(status: string): string {
     succeeded: "成功",
     interrupted: "已中断",
     blocked: "阻塞",
+    stalled: "停滞",
   };
   return labels[status] || status;
 }
@@ -104,7 +105,7 @@ export function renderContextMetrics(context: TaskContextDetail["context"], sess
   const rows = [
     ["Total", metricNumber(Number(metrics.total_tokens || 0)), "history + current (input + output)"],
     ["Input", metricNumber(Number(metrics.input_tokens || 0)), "agent usage"],
-    ["Cached", metricNumber(Number(metrics.cached_input_tokens || 0)), "agent usage"],
+    ["累计 Cache", metricNumber(Number(metrics.cached_input_tokens || 0)), "backend session history"],
     ["Output", metricNumber(Number(metrics.output_tokens || 0)), "model output"],
     ["Reasoning", metricNumber(Number(metrics.reasoning_output_tokens || 0)), "subset of output"],
     ["AHA", metricNumber(Number(metrics.aha_prompt_tokens || 0)), `${metricNumber(Number(metrics.aha_prompt_chars || context.prompt_chars || 0))} chars`],
@@ -155,14 +156,15 @@ export function renderAgentTurnCard(detail: TaskDetail, realtimeState: TaskRealt
   ));
   const rows = turns.map(turn => {
     const percent = contextPercent(turn);
-    const state = turn.attempt > 1 && isActiveTurn(turn.status) ? "retrying" : turn.status;
+    const stalled = isActiveTurn(turn.status) && timestampMs(turn.stalled_at_ms || turn.stalled_at) > 0;
+    const state = stalled ? "stalled" : turn.attempt > 1 && isActiveTurn(turn.status) ? "retrying" : turn.status;
     const elapsed = Number(turn.elapsed_ms || durationMs(
       turn.started_at_ms || turn.started_at || turn.queued_at_ms || turn.queued_at,
       turn.finished_at_ms || turn.finished_at,
     ));
     return `<div class="agent-turn-row">
       <strong>${escapeHTML(turn.agent_id)}</strong>
-      <span class="agent-state ${statusClass(turn.status)}">${escapeHTML(state)}</span>
+      <span class="agent-state ${statusClass(state)}">${escapeHTML(state)}</span>
       <time${liveElapsedAttributes(elapsed, isActiveTurn(turn.status))}>${formatDuration(elapsed)}</time>
       <progress class="context-meter" max="100" value="${percent.toFixed(1)}"></progress>
       <code>ctx ${percent ? percent.toFixed(1) + "%" : "?"}</code>
@@ -177,10 +179,15 @@ export function renderAgentTurnCard(detail: TaskDetail, realtimeState: TaskRealt
       <div class="agent-turn-rows">${rows}</div>
       <div class="turn-stage-grid">
         <span><small>排队</small><strong>${formatDuration(Number(focus.queue_duration_ms || 0))}</strong></span>
-        <span><small>构建 / 启动</small><strong>${formatDuration(Number(focus.prepare_duration_ms || 0))}</strong></span>
-        <span><small>Agent 执行</small><strong${liveElapsedAttributes(Number(focus.run_duration_ms || 0), isActiveTurn(focus.status) && Boolean(focus.started_at_ms || focus.started_at))}>${formatDuration(Number(focus.run_duration_ms || 0))}</strong></span>
+        <span><small>Context 准备</small><strong>${formatDuration(Number(focus.context_prepare_duration_ms || 0))}</strong></span>
+        <span><small>Session 唤醒</small><strong>${formatDuration(Number(focus.session_wake_duration_ms || 0))}</strong></span>
+        <span><small>Backend 启动</small><strong>${formatDuration(Number(focus.backend_start_duration_ms || 0))}</strong></span>
+        <span><small>Agent 活跃</small><strong${liveElapsedAttributes(Number(focus.active_duration_ms || 0), isActiveTurn(focus.status) && Boolean(focus.first_event_at_ms || focus.first_event_at))}>${formatDuration(Number(focus.active_duration_ms || 0))}</strong></span>
+        <span><small>结果收尾</small><strong>${formatDuration(Number(focus.finalize_duration_ms || 0))}</strong></span>
+      </div>
+      <div class="turn-stage-grid turn-token-grid">
         <span><small>Input</small><strong>${compactNumber(usageNumber(usage, "context_tokens") || usageNumber(usage, "input_tokens"))}</strong></span>
-        <span><small>Cache</small><strong>${compactNumber(usageNumber(usage, "cached_input_tokens") || usageNumber(usage, "cache_read_input_tokens"))}</strong></span>
+        <span><small>Turn Cache</small><strong>${compactNumber(usageNumber(usage, "cached_input_tokens") || usageNumber(usage, "cache_read_input_tokens"))}</strong></span>
         <span><small>Output</small><strong>${compactNumber(usageNumber(usage, "output_tokens"))}</strong></span>
       </div>
       ${failure ? `<div class="turn-failure"><strong>${escapeHTML(failure.agent_id)} 失败</strong><span>${escapeHTML(failure.error || "Backend 执行失败，未返回详细原因")}</span></div>` : ""}
@@ -262,7 +269,7 @@ function renderTurnDurationCard(item: ConversationItem): string {
   const payload = item.payload || {};
   const status = String(payload.status || "completed");
   const elapsed = Number(payload.elapsed_ms || 0);
-  return `<article class="aha-status-card aha-duration-card"><header><strong>${icon("clock")}Turn ${escapeHTML(payload.turn_sequence || "")} 耗时</strong><span class="${statusClass(status)}">${statusLabel(status)}</span><time>${systemCardTime(item)}</time></header><div class="aha-status-grid duration"><span><small>总计</small><b>${formatDuration(elapsed)}</b></span><span><small>排队</small><b>${formatDuration(Number(payload.queue_duration_ms || 0))}</b></span><span><small>准备</small><b>${formatDuration(Number(payload.prepare_duration_ms || 0))}</b></span><span><small>执行</small><b>${formatDuration(Number(payload.run_duration_ms || 0))}</b></span></div></article>`;
+  return `<article class="aha-status-card aha-duration-card"><header><strong>${icon("clock")}Turn ${escapeHTML(payload.turn_sequence || "")} 耗时</strong><span class="${statusClass(status)}">${statusLabel(status)}</span><time>${systemCardTime(item)}</time></header><div class="aha-status-grid duration"><span><small>总计</small><b>${formatDuration(elapsed)}</b></span><span><small>排队</small><b>${formatDuration(Number(payload.queue_duration_ms || 0))}</b></span><span><small>Context</small><b>${formatDuration(Number(payload.context_prepare_duration_ms || 0))}</b></span><span><small>Session</small><b>${formatDuration(Number(payload.session_wake_duration_ms || 0))}</b></span><span><small>Backend</small><b>${formatDuration(Number(payload.backend_start_duration_ms || 0))}</b></span><span><small>活跃</small><b>${formatDuration(Number(payload.active_duration_ms || 0))}</b></span><span><small>收尾</small><b>${formatDuration(Number(payload.finalize_duration_ms || 0))}</b></span></div></article>`;
 }
 
 export function renderConversationWithOrchestration(

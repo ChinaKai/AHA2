@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ChinaKai/AHA2/internal/agentapi"
+	"github.com/ChinaKai/AHA2/internal/backend"
 	"github.com/ChinaKai/AHA2/internal/domain"
 	"github.com/ChinaKai/AHA2/internal/secrets"
 	"github.com/ChinaKai/AHA2/internal/store"
@@ -32,6 +33,21 @@ type multiAgentExecutor struct {
 	mu      sync.Mutex
 	turns   []domain.Turn
 	service *Service
+}
+
+type idleThenSuccessExecutor struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (executor *idleThenSuccessExecutor) Execute(_ context.Context, _ ExecutionRequest, _ func(ExecutionEvent)) (ExecutionResult, error) {
+	executor.mu.Lock()
+	defer executor.mu.Unlock()
+	executor.calls++
+	if executor.calls == 1 {
+		return ExecutionResult{}, backend.ErrCodexIdleTimeout
+	}
+	return ExecutionResult{Reply: "recovered", ProviderSessionID: "retry-session"}, nil
 }
 
 func (s *multiAgentExecutor) Execute(_ context.Context, request ExecutionRequest, emit func(ExecutionEvent)) (ExecutionResult, error) {
@@ -235,6 +251,12 @@ func TestTaskMultiTurnFlow(t *testing.T) {
 	}
 	if len(turns) != 2 || turns[1].BackendSessionID != turns[0].BackendSessionID {
 		t.Fatalf("session was not reused: %#v", turns)
+	}
+	for _, item := range turns {
+		if item.ContextReadyAt.IsZero() || item.SessionReadyAt.IsZero() || item.StartedAt.IsZero() ||
+			item.FirstEventAt.IsZero() || item.LastActivityAt.IsZero() || item.BackendFinishedAt.IsZero() {
+			t.Fatalf("turn stage timestamps were not persisted: %#v", item)
+		}
 	}
 	prompts, _ := service.executor.(*stubExecutor).requestHistory()
 	if len(prompts) < 2 || !strings.Contains(prompts[0], "## AHA Core") ||
@@ -706,6 +728,68 @@ func TestSingleModeRejectsAgentActions(t *testing.T) {
 func usageNumberForTest(usage map[string]any, key string) float64 {
 	value, _ := usage[key].(float64)
 	return value
+}
+
+func TestTurnUsageSubtractsCodexSessionBaseline(t *testing.T) {
+	current := map[string]any{"input_tokens": float64(1000), "cached_input_tokens": float64(800), "output_tokens": float64(50)}
+	baseline := map[string]any{"input_tokens": float64(700), "cached_input_tokens": float64(600), "output_tokens": float64(20)}
+	delta := turnUsage("codex", current, baseline)
+	if usageValue(delta["input_tokens"]) != 300 || usageValue(delta["cached_input_tokens"]) != 200 || usageValue(delta["output_tokens"]) != 30 {
+		t.Fatalf("codex turn delta = %#v", delta)
+	}
+	claude := turnUsage("claude", current, baseline)
+	if usageValue(claude["cached_input_tokens"]) != 800 {
+		t.Fatalf("claude usage was incorrectly differenced: %#v", claude)
+	}
+	reset := turnUsage("codex", map[string]any{"input_tokens": float64(100)}, baseline)
+	if usageValue(reset["input_tokens"]) != 100 {
+		t.Fatalf("reset cumulative usage became negative: %#v", reset)
+	}
+}
+
+func TestMainTurnRetriesOnceAfterBackendIdleTimeout(t *testing.T) {
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	secretStore, err := secrets.Open(filepath.Join(t.TempDir(), "secrets.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	project := domain.Project{ID: "project-idle", Name: "Idle", CreatedAt: now, UpdatedAt: now}
+	workspace := domain.Workspace{ID: "workspace-idle", ProjectID: project.ID, Name: "local", Locality: "local", Transport: "native", RootPath: t.TempDir(), Health: "ready", CreatedAt: now, UpdatedAt: now}
+	env := domain.EnvGroup{ID: "env-idle", Name: "Env", ProviderID: "test", Backend: "codex", Revision: 1, Environment: map[string]string{}, SecretRefs: map[string]string{}, CreatedAt: now, UpdatedAt: now}
+	model := domain.Model{ID: "model-idle", DisplayName: "Model", ProviderID: "test", Backend: "codex", WireModel: "model", DefaultEnvGroupID: env.ID, CreatedAt: now, UpdatedAt: now}
+	for _, operation := range []func() error{
+		func() error { return database.CreateProject(ctx, project) },
+		func() error { return database.CreateWorkspace(ctx, workspace) },
+		func() error { return database.UpsertEnvGroup(ctx, env) },
+		func() error { return database.UpsertModel(ctx, model) },
+	} {
+		if err := operation(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	executor := &idleThenSuccessExecutor{}
+	service := NewService(database, secretStore, executor)
+	task, err := service.CreateTask(ctx, CreateTaskInput{ProjectID: project.ID, WorkspaceID: workspace.ID, Title: "idle", Request: "retry idle", ModelID: model.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.SubmitMessage(ctx, task.ID, task.OriginalRequest); err != nil {
+		t.Fatal(err)
+	}
+	waitForTask(t, database, task.ID, domain.TaskWaitingUser)
+	turns, err := database.ListTurns(ctx, task.ID)
+	if err != nil || len(turns) != 2 {
+		t.Fatalf("retry turns=%#v err=%v", turns, err)
+	}
+	if turns[0].Status != domain.TurnFailed || turns[0].WaitingReason != "backend_idle_timeout" || turns[1].Status != domain.TurnSucceeded || turns[1].Attempt != 2 {
+		t.Fatalf("idle retry state=%#v", turns)
+	}
 }
 
 func waitForTask(t *testing.T, database *store.Store, taskID string, expected domain.TaskStatus) {

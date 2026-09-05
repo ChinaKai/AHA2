@@ -397,6 +397,9 @@ func TestKnowledgeCatalogV22(t *testing.T) {
 	if err := database.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=25)`).Scan(&migrated); err != nil || !migrated {
 		t.Fatalf("schema v25 missing: migrated=%t err=%v", migrated, err)
 	}
+	if err := database.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=26)`).Scan(&migrated); err != nil || !migrated {
+		t.Fatalf("schema v26 missing: migrated=%t err=%v", migrated, err)
+	}
 	now := time.Now().UTC()
 	project := domain.Project{ID: "project-kb", Name: "Knowledge", KnowledgePolicy: "enabled", CreatedAt: now, UpdatedAt: now}
 	if err := database.CreateProject(ctx, project); err != nil {

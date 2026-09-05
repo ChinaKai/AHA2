@@ -122,7 +122,21 @@ func TestAgentStateKnowledgeAndSkillAPIs(t *testing.T) {
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	executor := &blockingAgentAPIExecutor{started: make(chan app.ExecutionRequest, 2), release: make(chan struct{})}
+	claudeEnv := domain.EnvGroup{
+		ID: domain.NewID("env"), Name: "Claude Env", ProviderID: "claude-provider", Backend: "claude", Revision: 1,
+		Environment: map[string]string{}, SecretRefs: map[string]string{}, CreatedAt: now, UpdatedAt: now,
+	}
+	claudeModel := domain.Model{
+		ID: domain.NewID("model"), DisplayName: "Claude Test", ProviderID: "claude-provider", Source: domain.ModelSourceProvider,
+		Backend: "claude", WireModel: "claude-test", DefaultEnvGroupID: claudeEnv.ID, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := database.UpsertEnvGroup(ctx, claudeEnv); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpsertModel(ctx, claudeModel); err != nil {
+		t.Fatal(err)
+	}
+	executor := &blockingAgentAPIExecutor{started: make(chan app.ExecutionRequest, 4), release: make(chan struct{})}
 	service := app.NewService(database, secretStore, executor)
 	if _, err := service.UpdateTaskSkills(ctx, task.ID, []string{skill.ID}); err != nil {
 		t.Fatal(err)
@@ -158,6 +172,12 @@ func TestAgentStateKnowledgeAndSkillAPIs(t *testing.T) {
 	if response.StatusCode != http.StatusOK || len(workspacesPayload["workspaces"].([]any)) != 1 {
 		t.Fatalf("workspaces status=%d payload=%#v", response.StatusCode, workspacesPayload)
 	}
+	response = agentRequest(t, server.URL+"/api/v1/agent/project/runtimes", http.MethodGet, token, nil)
+	var runtimesPayload map[string]any
+	decodeResponse(t, response, &runtimesPayload)
+	if response.StatusCode != http.StatusOK || len(runtimesPayload["runtimes"].([]any)) < 2 {
+		t.Fatalf("runtimes status=%d payload=%#v", response.StatusCode, runtimesPayload)
+	}
 	response = agentRequest(t, server.URL+"/api/v1/agent/tasks", http.MethodPost, token, map[string]any{
 		"workspace_id": task.WorkspaceID, "title": "cloned hardware", "request": "test cloned hardware", "clone_hardware": true,
 	})
@@ -179,6 +199,25 @@ func TestAgentStateKnowledgeAndSkillAPIs(t *testing.T) {
 	}
 	if value, ok := secretStore.Get(clonedGroups[0].CredentialRef); !ok || value != "test-secret" {
 		t.Fatal("hardware credential was not cloned server-side")
+	}
+
+	response = agentRequest(t, server.URL+"/api/v1/agent/tasks", http.MethodPost, token, map[string]any{
+		"workspace_id": task.WorkspaceID, "title": "claude runtime", "request": "test alternate backend",
+		"backend": "claude", "model_source": "provider", "model_id": claudeModel.ID,
+	})
+	var alternatePayload map[string]any
+	decodeResponse(t, response, &alternatePayload)
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("alternate runtime task status=%d payload=%#v", response.StatusCode, alternatePayload)
+	}
+	alternateTaskID := alternatePayload["task"].(map[string]any)["id"].(string)
+	alternateTask, err := database.Task(ctx, alternateTaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alternateSnapshot, err := database.RuntimeSnapshot(ctx, alternateTask.RuntimeConfigSnapshotID)
+	if err != nil || alternateSnapshot.Backend != "claude" || alternateSnapshot.ModelID != claudeModel.ID {
+		t.Fatalf("alternate snapshot=%#v err=%v", alternateSnapshot, err)
 	}
 
 	response = agentRequest(t, server.URL+"/api/v1/agent/turn/memory", http.MethodPatch, token, map[string]any{"append": map[string]any{"facts": []string{"API fact"}}})

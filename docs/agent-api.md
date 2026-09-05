@@ -24,6 +24,7 @@ PATCH /api/v1/agent/turn/memory
 POST  /api/v1/agent/turn/messages
 POST  /api/v1/agent/collaboration/batches
 GET   /api/v1/agent/project/workspaces
+GET   /api/v1/agent/project/runtimes
 POST  /api/v1/agent/tasks
 GET   /api/v1/agent/tasks/{task}
 ```
@@ -38,6 +39,11 @@ Owner 在 Task Main 配置中显式开启持久化的 `workspace_read/task_creat
 创建 Task 时可使用 `clone_hardware:true`，由服务端复制当前 Task 的硬件组和 Secret，
 Secret 使用新 Task 专属引用且不会进入响应。新 Task 固定使用单 Agent 模式，并继承当前
 Main 的运行时与权限上限，避免为调用 Agent API 意外关闭网络能力。
+
+`GET /api/v1/agent/project/runtimes` 只返回已配置 Runtime 的非敏感选择字段，不返回环境变量或凭据。
+`POST /api/v1/agent/tasks` 省略 Runtime 字段时继承当前 Main；需要覆盖时，先读取 Runtime 列表，
+再原样提交 `backend`、`model_source`、`model_id`、`wire_model`、`codex_account_id` 和可选的
+`reasoning_effort`。服务端重新校验模型与账号，并始终继承当前 Main 的文件系统和审批权限。
 
 ## Knowledge 与 Skill
 

@@ -86,6 +86,9 @@ func backendSessionUsage(backend string, turns []domain.Turn, fallback map[strin
 		return fallback
 	}
 	if backend != "claude" {
+		if len(fallback) > 0 {
+			return fallback
+		}
 		return latestUsageTurn(turns).Usage
 	}
 	result := map[string]any{}
@@ -460,6 +463,7 @@ func applyRoundTiming(round *domain.TaskRound, now time.Time) {
 func applyTurnTimings(turns []domain.Turn, now time.Time) {
 	for index := range turns {
 		turn := &turns[index]
+		terminal := turn.Status.Terminal()
 		turn.ElapsedMS = elapsedMilliseconds(turn.QueuedAt, turn.FinishedAt, now)
 		if !turn.PreparedAt.IsZero() {
 			turn.QueueDurationMS = elapsedMilliseconds(turn.QueuedAt, turn.PreparedAt, now)
@@ -467,10 +471,26 @@ func applyTurnTimings(turns []domain.Turn, now time.Time) {
 		} else if turn.Status == domain.TurnQueued {
 			turn.QueueDurationMS = elapsedMilliseconds(turn.QueuedAt, time.Time{}, now)
 		}
+		turn.ContextPrepareDurationMS = stageElapsedMilliseconds(turn.PreparedAt, turn.ContextReadyAt, terminal, now)
+		turn.SessionWakeDurationMS = stageElapsedMilliseconds(turn.ContextReadyAt, turn.SessionReadyAt, terminal, now)
 		if !turn.StartedAt.IsZero() {
 			turn.RunDurationMS = elapsedMilliseconds(turn.StartedAt, turn.FinishedAt, now)
+			backendStartEnd := turn.FirstEventAt
+			if backendStartEnd.IsZero() {
+				backendStartEnd = turn.BackendFinishedAt
+			}
+			turn.BackendStartDurationMS = stageElapsedMilliseconds(turn.StartedAt, backendStartEnd, terminal, now)
 		}
+		turn.ActiveDurationMS = stageElapsedMilliseconds(turn.FirstEventAt, turn.BackendFinishedAt, terminal, now)
+		turn.FinalizeDurationMS = stageElapsedMilliseconds(turn.BackendFinishedAt, turn.FinishedAt, terminal, now)
 	}
+}
+
+func stageElapsedMilliseconds(start, end time.Time, terminal bool, now time.Time) int64 {
+	if start.IsZero() || end.IsZero() && terminal {
+		return 0
+	}
+	return elapsedMilliseconds(start, end, now)
 }
 
 func elapsedMilliseconds(start, end, now time.Time) int64 {

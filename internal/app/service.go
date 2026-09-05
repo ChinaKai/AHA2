@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/ChinaKai/AHA2/internal/agentapi"
+	"github.com/ChinaKai/AHA2/internal/backend"
 	"github.com/ChinaKai/AHA2/internal/codexaccount"
 	"github.com/ChinaKai/AHA2/internal/domain"
 	"github.com/ChinaKai/AHA2/internal/prompt"
@@ -659,6 +660,7 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 	turn.ContextWindow = model.ContextWindow
 	turn.PromptChars = len([]rune(packedPrompt))
 	turn.PromptSnapshot = packedPrompt
+	turn.ContextReadyAt = s.now().UTC()
 	if err := s.store.UpdateTurn(ctx, turn, turn.Status); err != nil {
 		s.failTurn(ctx, &turn, task, err)
 		return
@@ -667,6 +669,7 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 		return
 	}
 	var providerSession string
+	var sessionUsageBaseline map[string]any
 	session, err := s.store.ReusableBackendSession(
 		ctx, task.ID, turn.AgentID, workspace.ID, snapshot.Backend, model.ID,
 		snapshot.EnvGroupRevision, snapshot.CodexAccountID,
@@ -674,9 +677,8 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 	if err == nil {
 		providerSession = session.ProviderSession
 		turn.BackendSessionID = session.ID
-		if len(turn.Usage) == 0 && strings.TrimSpace(session.ContextUsageJSON) != "" {
-			_ = json.Unmarshal([]byte(session.ContextUsageJSON), &turn.Usage)
-			_ = s.store.UpdateTurn(ctx, turn, turn.Status)
+		if strings.TrimSpace(session.ContextUsageJSON) != "" {
+			_ = json.Unmarshal([]byte(session.ContextUsageJSON), &sessionUsageBaseline)
 		}
 	}
 	sessionID := turn.BackendSessionID
@@ -740,27 +742,55 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 			s.codex.SyncProfile(context.Background(), snapshot.CodexAccountID, workspace, profileDir)
 		}()
 	}
+	turn.SessionReadyAt = s.now().UTC()
+	if err := s.store.UpdateTurn(ctx, turn, turn.Status); err != nil {
+		s.failTurn(ctx, &turn, task, err)
+		return
+	}
 	if err := s.transitionTurn(ctx, &turn, domain.TurnRunning, "turn_running"); err != nil {
 		return
 	}
 	filesystem, approval := parsePermissionsJSON(snapshot.PermissionsJSON)
+	latestSessionUsage := cloneUsageMap(sessionUsageBaseline)
 	result, executeErr := s.executor.Execute(ctx, ExecutionRequest{
 		Turn: turn, Task: task, Project: project, Workspace: workspace, Snapshot: snapshot,
 		Model: model, EnvGroup: envGroup, Environment: environment, Prompt: packedPrompt,
 		ProviderSessionID: providerSession, Filesystem: filesystem, Approval: approval,
 	}, func(event ExecutionEvent) {
+		now := s.now().UTC()
+		watchdogEvent := event.Type == "agent_stalled" || event.Type == "agent_heartbeat" || event.Type == "agent_idle_timeout"
+		if !watchdogEvent {
+			if turn.FirstEventAt.IsZero() {
+				turn.FirstEventAt = now
+			}
+			turn.LastActivityAt = now
+		}
+		switch event.Type {
+		case "agent_stalled", "agent_idle_timeout":
+			if turn.StalledAt.IsZero() {
+				turn.StalledAt = now
+			}
+		case "agent_resumed":
+			turn.StalledAt = time.Time{}
+		}
 		if event.Type == "agent_usage" {
 			if usage, ok := event.Data["usage"].(map[string]any); ok {
-				turn.Usage = usage
-				_ = s.store.UpdateTurn(context.Background(), turn, turn.Status)
+				latestSessionUsage = cloneUsageMap(usage)
+				turn.Usage = turnUsage(snapshot.Backend, usage, sessionUsageBaseline)
 			}
 		}
+		_ = s.store.UpdateTurn(context.Background(), turn, turn.Status)
 		s.recordExecutionEvent(context.Background(), turn, event)
 	})
+	turn.BackendFinishedAt = s.now().UTC()
+	_ = s.store.UpdateTurn(context.Background(), turn, turn.Status)
 	if executeErr != nil {
 		if errors.Is(executeErr, context.Canceled) {
 			s.interruptTurn(context.Background(), &turn, task)
 			return
+		}
+		if errors.Is(executeErr, backend.ErrCodexIdleTimeout) {
+			turn.WaitingReason = "backend_idle_timeout"
 		}
 		s.failTurn(context.Background(), &turn, task, executeErr)
 		return
@@ -772,8 +802,8 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 		CodexAccountID:  snapshot.CodexAccountID,
 		ProviderSession: result.ProviderSessionID, Status: "active", CreatedAt: now, LastUsedAt: now,
 	}
-	if len(turn.Usage) > 0 {
-		usageJSON, _ := json.Marshal(turn.Usage)
+	if len(latestSessionUsage) > 0 {
+		usageJSON, _ := json.Marshal(latestSessionUsage)
 		backendSession.ContextUsageJSON = string(usageJSON)
 	}
 	if !session.CreatedAt.IsZero() {
@@ -836,6 +866,48 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 		})
 	}
 	s.afterTurnTerminal(context.Background(), task, turn)
+}
+
+func cloneUsageMap(input map[string]any) map[string]any {
+	if len(input) == 0 {
+		return map[string]any{}
+	}
+	result := make(map[string]any, len(input))
+	for key, value := range input {
+		result[key] = value
+	}
+	return result
+}
+
+func turnUsage(backendName string, current, baseline map[string]any) map[string]any {
+	result := cloneUsageMap(current)
+	if backendName != "codex" || len(baseline) == 0 {
+		return result
+	}
+	for _, key := range []string{"input_tokens", "cached_input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "output_tokens", "reasoning_output_tokens"} {
+		currentValue := usageValue(current[key])
+		baselineValue := usageValue(baseline[key])
+		if currentValue >= baselineValue {
+			result[key] = currentValue - baselineValue
+		}
+	}
+	return result
+}
+
+func usageValue(value any) float64 {
+	switch typed := value.(type) {
+	case float64:
+		return typed
+	case int:
+		return float64(typed)
+	case int64:
+		return float64(typed)
+	case json.Number:
+		result, _ := typed.Float64()
+		return result
+	default:
+		return 0
+	}
 }
 
 func appendAgentAPIToNoProxy(environment map[string]string, rawURL string) {
@@ -945,6 +1017,15 @@ func (s *Service) recordTurnDuration(ctx context.Context, turn domain.Turn) {
 	queue := elapsedBetween(turn.QueuedAt, turn.PreparedAt)
 	prepare := elapsedBetween(turn.PreparedAt, turn.StartedAt)
 	run := elapsedBetween(turn.StartedAt, turn.FinishedAt)
+	contextPrepare := elapsedBetween(turn.PreparedAt, turn.ContextReadyAt)
+	sessionWake := elapsedBetween(turn.ContextReadyAt, turn.SessionReadyAt)
+	backendStartEnd := turn.FirstEventAt
+	if backendStartEnd.IsZero() {
+		backendStartEnd = turn.BackendFinishedAt
+	}
+	backendStart := elapsedBetween(turn.StartedAt, backendStartEnd)
+	active := elapsedBetween(turn.FirstEventAt, turn.BackendFinishedAt)
+	finalize := elapsedBetween(turn.BackendFinishedAt, turn.FinishedAt)
 	_, _ = s.store.AddConversationItem(ctx, domain.ConversationItem{
 		ID: "conversation-turn-duration-" + turn.ID, TaskID: turn.TaskID, RoundID: turn.RoundID, TurnID: turn.ID,
 		AgentID: "aha", StreamAgentID: turn.AgentID, FromAgentID: "aha", ToAgentID: turn.AgentID,
@@ -954,6 +1035,9 @@ func (s *Service) recordTurnDuration(ctx context.Context, turn domain.Turn) {
 			"agent_id": turn.AgentID, "turn_sequence": turn.Sequence, "attempt": turn.Attempt,
 			"status": turn.Status, "elapsed_ms": total, "queue_duration_ms": queue,
 			"prepare_duration_ms": prepare, "run_duration_ms": run,
+			"context_prepare_duration_ms": contextPrepare, "session_wake_duration_ms": sessionWake,
+			"backend_start_duration_ms": backendStart, "active_duration_ms": active,
+			"finalize_duration_ms": finalize,
 		},
 		CreatedAt: turn.FinishedAt,
 	})
@@ -1265,6 +1349,22 @@ func (s *Service) recordExecutionEvent(ctx context.Context, turn domain.Turn, ev
 	case "agent_error":
 		category = "error"
 		summary = firstText(event.Data, "message", "error")
+	case "agent_stalled":
+		category = "update"
+		kind = "agent_stalled"
+		summary = fmt.Sprintf("Backend 已连续 %s 没有活动，仍在等待响应", time.Duration(usageValue(event.Data["idle_ms"]))*time.Millisecond)
+	case "agent_heartbeat":
+		category = "update"
+		kind = "agent_stalled_heartbeat"
+		summary = fmt.Sprintf("Backend 仍无活动，已等待 %s", time.Duration(usageValue(event.Data["idle_ms"]))*time.Millisecond)
+	case "agent_resumed":
+		category = "update"
+		kind = "agent_resumed"
+		summary = "Backend 已恢复活动"
+	case "agent_idle_timeout":
+		category = "error"
+		kind = "agent_idle_timeout"
+		summary = fmt.Sprintf("Backend 空闲超过 %s，AHA 已中断并准备重试", time.Duration(usageValue(event.Data["idle_ms"]))*time.Millisecond)
 	}
 	if category != "" {
 		if summary == "" {

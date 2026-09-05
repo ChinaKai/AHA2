@@ -455,6 +455,7 @@ dialog form, .dialog-body { padding: 18px; }
 .turn-stage-grid small, .turn-stage-grid strong { display: block; white-space: nowrap; }
 .turn-stage-grid small { color: var(--muted); font-size: 8px; }
 .turn-stage-grid strong { margin-top: 2px; font-size: 10px; }
+.turn-token-grid { grid-template-columns: repeat(3,minmax(0,1fr)); border-top: 1px solid var(--line); }
 .ctx-conversation { grid-template-rows: auto minmax(0,1fr); overflow: hidden; }
 .ctx-scroll { min-height: 0; overflow: auto; }
 .ctx-loading { display: flex; align-items: center; justify-content: center; min-height: 240px; gap: 8px; color: var(--muted); }

@@ -649,11 +649,16 @@ func TestApplyTurnTimingsUsesServerClock(t *testing.T) {
 	start := time.Date(2026, 9, 2, 10, 0, 0, 0, time.UTC)
 	turns := []domain.Turn{{
 		Status: domain.TurnRunning, QueuedAt: start, PreparedAt: start.Add(time.Second),
-		StartedAt: start.Add(2 * time.Second),
+		ContextReadyAt: start.Add(2 * time.Second), SessionReadyAt: start.Add(4 * time.Second),
+		StartedAt: start.Add(5 * time.Second), FirstEventAt: start.Add(7 * time.Second),
+		BackendFinishedAt: start.Add(11 * time.Second),
 	}}
 	applyTurnTimings(turns, start.Add(12*time.Second))
 	if turns[0].ElapsedMS != 12000 || turns[0].QueueDurationMS != 1000 ||
-		turns[0].PrepareDurationMS != 1000 || turns[0].RunDurationMS != 10000 {
+		turns[0].PrepareDurationMS != 4000 || turns[0].RunDurationMS != 7000 ||
+		turns[0].ContextPrepareDurationMS != 1000 || turns[0].SessionWakeDurationMS != 2000 ||
+		turns[0].BackendStartDurationMS != 2000 || turns[0].ActiveDurationMS != 4000 ||
+		turns[0].FinalizeDurationMS != 1000 {
 		t.Fatalf("unexpected server timings: %#v", turns[0])
 	}
 }
@@ -740,7 +745,7 @@ func TestTaskTotalTokensIncludesMainAndSubSessions(t *testing.T) {
 			ContextUsageJSON: `{"input_tokens":999,"cache_read_input_tokens":999,"output_tokens":999}`,
 		},
 	}
-	if actual := taskTotalTokens(turns, sessions, nil); actual != 163 {
+	if actual := taskTotalTokens(turns, sessions, nil); actual != 138 {
 		t.Fatalf("task total tokens = %v", actual)
 	}
 }
@@ -764,14 +769,14 @@ func TestContextMetricsAggregateSessionHistory(t *testing.T) {
 		},
 		{
 			ID: "current", Backend: "codex", Status: "active",
-			ContextUsageJSON: `{"input_tokens":150,"cached_input_tokens":120,"output_tokens":20}`,
+			ContextUsageJSON: `{"input_tokens":150,"cached_input_tokens":120,"output_tokens":20,"reasoning_output_tokens":5}`,
 			CreatedAt:        now, LastUsedAt: now,
 		},
 	}
 	metrics := contextMetrics(turn, sessions, domain.Workspace{Transport: "ssh"}, []domain.Turn{turn})
 	for key, want := range map[string]float64{
-		"total_tokens": 340, "history_tokens": 110, "current_total_tokens": 230,
-		"input_tokens": 300, "cached_input_tokens": 240, "output_tokens": 40,
+		"total_tokens": 280, "history_tokens": 110, "current_total_tokens": 170,
+		"input_tokens": 250, "cached_input_tokens": 200, "output_tokens": 30,
 		"reasoning_output_tokens": 5, "context_tokens": 50,
 	} {
 		if got := usageNumber(metrics, key); got != want {
@@ -795,8 +800,8 @@ func TestContextMetricsAggregateSessionHistory(t *testing.T) {
 	if got := usageNumber(metrics, "context_tokens"); got != 0 || metrics["session_active"] != false {
 		t.Fatalf("reset session retained active context: %#v", metrics)
 	}
-	if got := usageNumber(metrics, "total_tokens"); got != 340 {
-		t.Fatalf("reset history total = %v, want 340; metrics=%#v", got, metrics)
+	if got := usageNumber(metrics, "total_tokens"); got != 280 {
+		t.Fatalf("reset history total = %v, want 280; metrics=%#v", got, metrics)
 	}
 }
 

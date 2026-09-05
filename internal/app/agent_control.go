@@ -23,10 +23,28 @@ type AgentCallContext struct {
 }
 
 type AgentTaskCreateInput struct {
-	WorkspaceID   string `json:"workspace_id"`
-	Title         string `json:"title"`
-	Request       string `json:"request"`
-	CloneHardware bool   `json:"clone_hardware"`
+	WorkspaceID     string `json:"workspace_id"`
+	Title           string `json:"title"`
+	Request         string `json:"request"`
+	CloneHardware   bool   `json:"clone_hardware"`
+	Backend         string `json:"backend,omitempty"`
+	ModelSource     string `json:"model_source,omitempty"`
+	ModelID         string `json:"model_id,omitempty"`
+	WireModel       string `json:"wire_model,omitempty"`
+	CodexAccountID  string `json:"codex_account_id,omitempty"`
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+}
+
+type AgentRuntimeOption struct {
+	Backend          string   `json:"backend"`
+	ModelSource      string   `json:"model_source"`
+	ModelID          string   `json:"model_id,omitempty"`
+	WireModel        string   `json:"wire_model"`
+	CodexAccountID   string   `json:"codex_account_id,omitempty"`
+	DisplayName      string   `json:"display_name"`
+	ProviderName     string   `json:"provider_name,omitempty"`
+	DefaultEffort    string   `json:"default_reasoning_effort,omitempty"`
+	ReasoningEfforts []string `json:"reasoning_efforts,omitempty"`
 }
 
 func (s *Service) AgentCallContext(ctx context.Context, claims agentapi.Claims, mainOnly bool) (AgentCallContext, error) {
@@ -196,6 +214,58 @@ func (s *Service) AgentProjectWorkspaces(ctx context.Context, claims agentapi.Cl
 	return s.store.ListWorkspaces(ctx, call.Project.ID)
 }
 
+func (s *Service) AgentProjectRuntimes(ctx context.Context, claims agentapi.Claims) ([]AgentRuntimeOption, error) {
+	call, err := s.AgentCallContext(ctx, claims, true)
+	if err != nil {
+		return nil, err
+	}
+	if !call.Task.AgentCapabilities["task_create"] {
+		return nil, ErrAgentCallForbidden
+	}
+	models, err := s.store.ListModels(ctx)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]AgentRuntimeOption, 0, len(models))
+	for _, model := range models {
+		if model.Source == domain.ModelSourceOfficial || model.DefaultEnvGroupID == "" {
+			continue
+		}
+		efforts, _ := model.Capabilities["reasoning_efforts"].([]string)
+		if len(efforts) == 0 {
+			if values, ok := model.Capabilities["reasoning_efforts"].([]any); ok {
+				for _, value := range values {
+					if effort, ok := value.(string); ok {
+						efforts = append(efforts, effort)
+					}
+				}
+			}
+		}
+		result = append(result, AgentRuntimeOption{
+			Backend: model.Backend, ModelSource: domain.ModelSourceProvider, ModelID: model.ID,
+			WireModel: model.WireModel, DisplayName: model.DisplayName, ProviderName: model.ProviderName,
+			DefaultEffort: model.DefaultEffort, ReasoningEfforts: efforts,
+		})
+	}
+	accounts, err := s.store.ListCodexAccounts(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, account := range accounts {
+		if !account.CredentialConfigured || account.Status != "ready" {
+			continue
+		}
+		for _, model := range account.AvailableModels {
+			result = append(result, AgentRuntimeOption{
+				Backend: "codex", ModelSource: domain.ModelSourceOfficial, WireModel: model.WireModel,
+				CodexAccountID: account.ID, DisplayName: model.DisplayName, ProviderName: account.Label,
+				DefaultEffort: model.DefaultEffort, ReasoningEfforts: model.ReasoningEfforts,
+			})
+		}
+	}
+	return result, nil
+}
+
 func (s *Service) CreateAgentTask(ctx context.Context, claims agentapi.Claims, input AgentTaskCreateInput) (domain.Task, domain.Turn, error) {
 	call, err := s.AgentCallContext(ctx, claims, true)
 	if err != nil {
@@ -219,12 +289,24 @@ func (s *Service) CreateAgentTask(ctx context.Context, claims agentapi.Claims, i
 	if snapshot.CodexAccountID != "" {
 		modelSource = domain.ModelSourceOfficial
 	}
+	backend, modelID, wireModel := snapshot.Backend, snapshot.ModelID, snapshot.WireModel
+	codexAccountID, reasoningEffort := snapshot.CodexAccountID, snapshot.ReasoningEffort
+	if strings.TrimSpace(input.Backend) != "" || strings.TrimSpace(input.ModelID) != "" || strings.TrimSpace(input.WireModel) != "" || strings.TrimSpace(input.CodexAccountID) != "" {
+		backend, modelSource, modelID = strings.TrimSpace(input.Backend), strings.TrimSpace(input.ModelSource), strings.TrimSpace(input.ModelID)
+		wireModel, codexAccountID = strings.TrimSpace(input.WireModel), strings.TrimSpace(input.CodexAccountID)
+		if modelSource == "" {
+			modelSource = domain.ModelSourceProvider
+		}
+	}
+	if strings.TrimSpace(input.ReasoningEffort) != "" {
+		reasoningEffort = strings.TrimSpace(input.ReasoningEffort)
+	}
 	filesystem, approval := parsePermissionsJSON(snapshot.PermissionsJSON)
 	item, err := s.CreateTask(ctx, CreateTaskInput{
 		ProjectID: call.Project.ID, WorkspaceID: workspace.ID, Title: input.Title, Request: input.Request,
-		Isolation: "inplace", Backend: snapshot.Backend, ModelSource: modelSource,
-		ModelID: snapshot.ModelID, WireModel: snapshot.WireModel,
-		CodexAccountID: snapshot.CodexAccountID, ReasoningEffort: snapshot.ReasoningEffort,
+		Isolation: "inplace", Backend: backend, ModelSource: modelSource,
+		ModelID: modelID, WireModel: wireModel,
+		CodexAccountID: codexAccountID, ReasoningEffort: reasoningEffort,
 		Filesystem: filesystem, Approval: approval, ProxyEnabled: snapshot.ProxyEnabled,
 		CollaborationMode: "single", MaxAgents: 1, KnowledgePolicy: call.Task.KnowledgePolicy,
 	})

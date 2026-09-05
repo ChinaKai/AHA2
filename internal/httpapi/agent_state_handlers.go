@@ -39,6 +39,16 @@ func (s *Server) agentProjectWorkspaces(writer http.ResponseWriter, request *htt
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "workspaces": items})
 }
 
+func (s *Server) agentProjectRuntimes(writer http.ResponseWriter, request *http.Request) {
+	claims, _ := agentClaimsFromContext(request.Context())
+	items, err := s.app.AgentProjectRuntimes(request.Context(), claims)
+	if err != nil {
+		writeAgentControlError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "runtimes": items})
+}
+
 func (s *Server) createAgentTask(writer http.ResponseWriter, request *http.Request) {
 	claims, _ := agentClaimsFromContext(request.Context())
 	var payload app.AgentTaskCreateInput

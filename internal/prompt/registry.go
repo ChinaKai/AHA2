@@ -472,8 +472,11 @@ Send JSON with Content-Type: application/json. The final assistant response must
 - POST /api/v1/agent/turn/messages with {"message":"concise user-facing progress"}
 - POST /api/v1/agent/collaboration/batches with {"actions":[{"agent_id":"sub-001","title":"...","assignment":"...","required":true}],"main_followup":"..."}
 - GET /api/v1/agent/project/workspaces
-- POST /api/v1/agent/tasks with {"workspace_id":"...","title":"...","request":"...","clone_hardware":true}
+- GET /api/v1/agent/project/runtimes
+- POST /api/v1/agent/tasks with {"workspace_id":"...","title":"...","request":"...","clone_hardware":true,"backend":"claude","model_source":"provider","model_id":"..."}
 - GET /api/v1/agent/tasks/{task}
+
+Task creation inherits the current Turn runtime when runtime fields are omitted. To select another configured runtime, first list project runtimes and pass back the exact backend/model fields; credentials and permissions are never accepted in this payload.
 
 Only Main may change Memory, Knowledge, Skills, or collaboration. Send material progress promptly through turn/messages. Do not claim an update was sent unless the API returned success.
 

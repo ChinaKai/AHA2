@@ -737,8 +737,9 @@ func (s *Service) recordOrchestrationError(ctx context.Context, taskID string, t
 	s.emitTurn(ctx, turn, "agent_action_rejected", map[string]any{"error": message})
 }
 
-func (s *Service) retrySubAgent(ctx context.Context, turn domain.Turn) bool {
-	if turn.AgentID == "main" || turn.Status != domain.TurnFailed || turn.Attempt >= 2 {
+func (s *Service) retryTurn(ctx context.Context, turn domain.Turn) bool {
+	mainIdleRetry := turn.AgentID == "main" && turn.WaitingReason == "backend_idle_timeout"
+	if turn.Status != domain.TurnFailed || turn.Attempt >= 2 || turn.AgentID == "main" && !mainIdleRetry {
 		return false
 	}
 	retry := turn
@@ -751,7 +752,13 @@ func (s *Service) retrySubAgent(ctx context.Context, turn domain.Turn) bool {
 	retry.InboxBatchID = ""
 	retry.QueuedAt = s.now().UTC()
 	retry.PreparedAt = time.Time{}
+	retry.ContextReadyAt = time.Time{}
+	retry.SessionReadyAt = time.Time{}
 	retry.StartedAt = time.Time{}
+	retry.FirstEventAt = time.Time{}
+	retry.LastActivityAt = time.Time{}
+	retry.StalledAt = time.Time{}
+	retry.BackendFinishedAt = time.Time{}
 	retry.FinishedAt = time.Time{}
 	retry.ExitCode = nil
 	retry.Result = ""
@@ -779,7 +786,7 @@ func (s *Service) retrySubAgent(ctx context.Context, turn domain.Turn) bool {
 
 func (s *Service) afterTurnTerminal(ctx context.Context, task domain.Task, turn domain.Turn) {
 	_ = s.store.MarkInboxBatchProcessed(ctx, turn.InboxBatchID, s.now().UTC())
-	if s.retrySubAgent(ctx, turn) {
+	if s.retryTurn(ctx, turn) {
 		s.settleRound(ctx, task.ID, turn.RoundID)
 		return
 	}

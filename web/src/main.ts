@@ -1684,7 +1684,8 @@ function bindCommon(): void {
     try {
       const handled = await executeTaskSlashCommand(content);
       if (!handled) {
-        await api.agentMessage(state.selectedTask.task.id, state.selectedTaskAgent, content);
+        const submission = await api.agentMessage(state.selectedTask.task.id, state.selectedTaskAgent, content);
+        if (!submission.started) setMessage("notice", `${state.selectedTaskAgent} 正在执行，消息已排队；输入 /interrupt 可中断当前 Round`);
         await refreshTaskRuntime(state.selectedTask.task.id);
         updateTaskLiveRegions();
       }

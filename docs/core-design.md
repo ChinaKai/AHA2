@@ -276,7 +276,14 @@ Turn
 |- backend_session_id
 |- runtime_config_snapshot_id
 |- queued_at
+|- prepared_at
+|- context_ready_at
+|- session_ready_at
 |- started_at
+|- first_event_at
+|- last_activity_at
+|- stalled_at
+|- backend_finished_at
 |- finished_at
 |- exit_code
 `- result_artifact_id
@@ -309,7 +316,10 @@ waiting_external
 waiting_backend
 ```
 
-排队耗时、启动耗时、执行耗时和等待耗时分别记录，不能压缩成一个模糊的 elapsed。
+排队、Context 准备、Session 唤醒、Backend 启动到首事件、Agent 活跃执行和结果收尾
+分别记录，不能压缩成一个模糊的 elapsed。Codex 在输出部分响应后超过 90 秒没有任何
+事件时标记 stalled 并发送 update；每分钟发送心跳，5 分钟 idle timeout 后中断并自动
+重试一次。
 
 ### 4.6 Agent
 
@@ -909,7 +919,7 @@ Web 服务重启后根据持久化状态恢复，不依赖内存中的 worker �
 
 - 一个 Agent 同时只能有一个 Active Turn。
 - 同一 Task 默认串行处理用户 Turn。
-- 执行中收到新用户消息时，只能显式排队或中断当前 Turn。
+- 执行中收到新用户消息时，只能显式排队或中断当前 Turn；Web 必须明确提示消息已排队。
 - 不同 Task 使用独立 Workspace 时可以并行。
 - 多 Agent 编排不属于第一版实现范围。
 
@@ -935,15 +945,20 @@ Turn 卡片直接读取持久化 Turn Projection：
 ```text
 phase
 result
-queued_duration
-startup_duration
-execution_duration
-waiting_duration
+queue_duration
+context_prepare_duration
+session_wake_duration
+backend_start_duration
+active_duration
+finalize_duration
 waiting_reason
 backend
 model
 session
 ```
+
+Round 卡片的 Token 指标只显示当前 Turn 增量；Backend Session 累计 Cache 在 Context
+指标中单独展示，不能把上一 Session usage 注入新 Turn 后误标为当前 Round Cache。
 
 ## 12. 第一版范围
 

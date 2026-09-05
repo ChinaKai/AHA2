@@ -325,6 +325,7 @@ func (s *Store) ActiveTurn(ctx context.Context, taskID string) (domain.Turn, err
 func scanTurn(scanner interface{ Scan(...any) error }) (domain.Turn, error) {
 	var item domain.Turn
 	var queuedAt, preparedAt, startedAt, finishedAt string
+	var contextReadyAt, sessionReadyAt, firstEventAt, lastActivityAt, stalledAt, backendFinishedAt string
 	var exitCode sql.NullInt64
 	var required int
 	var usage string
@@ -334,13 +335,23 @@ func scanTurn(scanner interface{ Scan(...any) error }) (domain.Turn, error) {
 		&queuedAt, &preparedAt, &startedAt, &finishedAt, &exitCode, &item.Result, &item.Error,
 		&item.RoundID, &item.ParentTurnID, &item.Attempt, &item.Generation, &required, &item.Title, &item.Instruction,
 		&item.ContextWindow, &item.PromptChars, &item.PromptSnapshot, &item.InboxBatchID, &usage,
+		&contextReadyAt, &sessionReadyAt, &firstEventAt, &lastActivityAt, &stalledAt, &backendFinishedAt,
 	)
 	item.QueuedAt, item.PreparedAt = parseTime(queuedAt), parseTime(preparedAt)
 	item.StartedAt, item.FinishedAt = parseTime(startedAt), parseTime(finishedAt)
+	item.ContextReadyAt, item.SessionReadyAt = parseTime(contextReadyAt), parseTime(sessionReadyAt)
+	item.FirstEventAt, item.LastActivityAt = parseTime(firstEventAt), parseTime(lastActivityAt)
+	item.StalledAt, item.BackendFinishedAt = parseTime(stalledAt), parseTime(backendFinishedAt)
 	item.QueuedAtMS = unixMilli(item.QueuedAt)
 	item.PreparedAtMS = unixMilli(item.PreparedAt)
 	item.StartedAtMS = unixMilli(item.StartedAt)
 	item.FinishedAtMS = unixMilli(item.FinishedAt)
+	item.ContextReadyAtMS = unixMilli(item.ContextReadyAt)
+	item.SessionReadyAtMS = unixMilli(item.SessionReadyAt)
+	item.FirstEventAtMS = unixMilli(item.FirstEventAt)
+	item.LastActivityAtMS = unixMilli(item.LastActivityAt)
+	item.StalledAtMS = unixMilli(item.StalledAt)
+	item.BackendFinishedAtMS = unixMilli(item.BackendFinishedAt)
 	item.Required = required != 0
 	item.Usage = decodeJSON(usage, map[string]any{})
 	if exitCode.Valid {
@@ -350,7 +361,7 @@ func scanTurn(scanner interface{ Scan(...any) error }) (domain.Turn, error) {
 	return item, err
 }
 
-const turnColumns = `id,task_id,agent_id,sequence,input_message_id,status,waiting_reason,backend_session_id,runtime_config_snapshot_id,queued_at,prepared_at,started_at,finished_at,exit_code,result,error,round_id,parent_turn_id,attempt,generation,required,title,instruction,context_window,prompt_chars,prompt_snapshot,inbox_batch_id,usage_json`
+const turnColumns = `id,task_id,agent_id,sequence,input_message_id,status,waiting_reason,backend_session_id,runtime_config_snapshot_id,queued_at,prepared_at,started_at,finished_at,exit_code,result,error,round_id,parent_turn_id,attempt,generation,required,title,instruction,context_window,prompt_chars,prompt_snapshot,inbox_batch_id,usage_json,context_ready_at,session_ready_at,first_event_at,last_activity_at,stalled_at,backend_finished_at`
 
 func (s *Store) Turn(ctx context.Context, id string) (domain.Turn, error) {
 	return scanTurn(s.db.QueryRowContext(ctx, `SELECT `+turnColumns+` FROM turns WHERE id=?`, id))
@@ -399,11 +410,12 @@ func (s *Store) UpdateTurn(ctx context.Context, item domain.Turn, from domain.Tu
 		return err
 	}
 	result, err := s.db.ExecContext(ctx, `
-		UPDATE turns SET status=?,waiting_reason=?,backend_session_id=?,prepared_at=?,started_at=?,finished_at=?,exit_code=?,result=?,error=?,context_window=?,prompt_chars=?,prompt_snapshot=?,usage_json=?
+		UPDATE turns SET status=?,waiting_reason=?,backend_session_id=?,prepared_at=?,started_at=?,finished_at=?,exit_code=?,result=?,error=?,context_window=?,prompt_chars=?,prompt_snapshot=?,usage_json=?,context_ready_at=?,session_ready_at=?,first_event_at=?,last_activity_at=?,stalled_at=?,backend_finished_at=?
 		WHERE id=? AND status=?`,
 		item.Status, item.WaitingReason, item.BackendSessionID, timeString(item.PreparedAt), timeString(item.StartedAt),
 		timeString(item.FinishedAt), item.ExitCode, item.Result, item.Error, item.ContextWindow, item.PromptChars,
-		item.PromptSnapshot, encodeJSON(item.Usage), item.ID, from,
+		item.PromptSnapshot, encodeJSON(item.Usage), timeString(item.ContextReadyAt), timeString(item.SessionReadyAt),
+		timeString(item.FirstEventAt), timeString(item.LastActivityAt), timeString(item.StalledAt), timeString(item.BackendFinishedAt), item.ID, from,
 	)
 	if err != nil {
 		return err
