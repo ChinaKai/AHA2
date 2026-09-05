@@ -20,6 +20,39 @@ export interface ProxySettings {
   updated_at?: string;
 }
 
+export interface SyncSettings {
+  scope: string;
+  enabled: boolean;
+  endpoint: string;
+  device_id: string;
+  interval_seconds: number;
+  token_configured: boolean;
+  passphrase_configured: boolean;
+  provider_ids?: string[];
+  env_group_ids?: string[];
+  codex_account_ids?: string[];
+  updated_at?: string;
+}
+
+export interface SyncState {
+  scope: string;
+  cursor: string;
+  last_push_at?: string;
+  last_pull_at?: string;
+  last_error: string;
+  updated_at?: string;
+}
+
+export interface SyncConflict {
+  id: string;
+  object_type: string;
+  object_id: string;
+  local_version: string;
+  remote_version: string;
+  status: string;
+  created_at: string;
+}
+
 export interface Project {
   id: string;
   name: string;

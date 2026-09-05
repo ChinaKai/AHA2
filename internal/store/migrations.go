@@ -5,6 +5,68 @@ import (
 	"fmt"
 )
 
+const schemaV27 = `
+CREATE TABLE IF NOT EXISTS sync_settings (
+    scope TEXT PRIMARY KEY,
+    enabled INTEGER NOT NULL DEFAULT 0,
+    endpoint TEXT NOT NULL DEFAULT '',
+    device_id TEXT NOT NULL DEFAULT '',
+    interval_seconds INTEGER NOT NULL DEFAULT 300,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sync_state (
+    scope TEXT PRIMARY KEY,
+    cursor TEXT NOT NULL DEFAULT '',
+    last_push_at TEXT NOT NULL DEFAULT '',
+    last_pull_at TEXT NOT NULL DEFAULT '',
+    last_error TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sync_outbox (
+    id TEXT PRIMARY KEY,
+    scope TEXT NOT NULL,
+    object_type TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    operation TEXT NOT NULL,
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    base_version TEXT NOT NULL DEFAULT '',
+    idempotency_key TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT NOT NULL DEFAULT '',
+    last_error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sync_outbox_pending ON sync_outbox(scope,status,next_attempt_at,created_at);
+CREATE TABLE IF NOT EXISTS sync_conflicts (
+    id TEXT PRIMARY KEY,
+    scope TEXT NOT NULL,
+    object_type TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    local_payload_json TEXT NOT NULL DEFAULT '{}',
+    remote_payload_json TEXT NOT NULL DEFAULT '{}',
+    local_version TEXT NOT NULL DEFAULT '',
+    remote_version TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'open',
+    created_at TEXT NOT NULL,
+    resolved_at TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_sync_conflicts_open ON sync_conflicts(scope,status,created_at);
+CREATE TABLE IF NOT EXISTS sync_applied (
+    idempotency_key TEXT PRIMARY KEY,
+    scope TEXT NOT NULL,
+    object_type TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    remote_version TEXT NOT NULL DEFAULT '',
+    applied_at TEXT NOT NULL
+);
+`
+
+const schemaV28 = `
+ALTER TABLE sync_settings ADD COLUMN secret_selection_json TEXT NOT NULL DEFAULT '{}';
+`
+
 const schemaV1 = `
 PRAGMA foreign_keys = ON;
 PRAGMA journal_mode = WAL;
@@ -997,6 +1059,26 @@ func (s *Store) migrate(ctx context.Context) error {
 	}
 	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(26, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
 		return fmt.Errorf("record schema v26: %w", err)
+	}
+	var hasV27 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=27)`).Scan(&hasV27)
+	if !hasV27 {
+		if _, err := s.db.ExecContext(ctx, schemaV27); err != nil {
+			return fmt.Errorf("apply schema v27: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(27, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v27: %w", err)
+	}
+	var hasV28 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=28)`).Scan(&hasV28)
+	if !hasV28 {
+		if _, err := s.db.ExecContext(ctx, schemaV28); err != nil {
+			return fmt.Errorf("apply schema v28: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(28, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v28: %w", err)
 	}
 	return nil
 }

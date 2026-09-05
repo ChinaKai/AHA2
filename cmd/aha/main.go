@@ -28,11 +28,12 @@ import (
 	"github.com/ChinaKai/AHA2/internal/managedprocess"
 	"github.com/ChinaKai/AHA2/internal/secrets"
 	"github.com/ChinaKai/AHA2/internal/store"
+	syncer "github.com/ChinaKai/AHA2/internal/sync"
 	"github.com/ChinaKai/AHA2/internal/webassets"
 	"github.com/ChinaKai/AHA2/internal/workspace"
 )
 
-const version = "0.1.0"
+const version = "0.2.0"
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "version" {
@@ -118,6 +119,7 @@ func serve(args []string) error {
 	if err != nil {
 		return err
 	}
+	go (syncer.Runner{Store: database, Secrets: secretStore, TokenRef: syncer.DefaultTokenRef}).Loop(ctx)
 	registrationOpen, err := database.OwnerExists(ctx)
 	if err != nil {
 		return err

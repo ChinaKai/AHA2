@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"time"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
@@ -32,6 +33,20 @@ func (s *Store) UpsertPromptTemplateOverride(ctx context.Context, id, content st
 		INSERT INTO prompt_template_overrides(id,content,version,updated_at) VALUES(?,?,1,?)
 		ON CONFLICT(id) DO UPDATE SET content=excluded.content,version=prompt_template_overrides.version+1,updated_at=excluded.updated_at`,
 		id, content, timeString(updatedAt),
+	)
+	return err
+}
+
+// ImportPromptTemplateOverride stores an already-versioned portable override.
+// Callers are responsible for checking the expected base version first.
+func (s *Store) ImportPromptTemplateOverride(ctx context.Context, id, content string, version int, updatedAt time.Time) error {
+	if id == "" || version < 1 {
+		return fmt.Errorf("prompt override id and positive version are required")
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO prompt_template_overrides(id,content,version,updated_at) VALUES(?,?,?,?)
+		ON CONFLICT(id) DO UPDATE SET content=excluded.content,version=excluded.version,updated_at=excluded.updated_at`,
+		id, content, version, timeString(updatedAt),
 	)
 	return err
 }

@@ -18,6 +18,7 @@ test("built web contains responsive application", async () => {
   const helpers = await readFile(resolve(root, "dist", "ui_helpers.js"), "utf8");
   const promptAdmin = await readFile(resolve(root, "dist", "prompt_admin.js"), "utf8");
   const proxySettings = await readFile(resolve(root, "dist", "proxy_settings.js"), "utf8");
+  const syncSettings = await readFile(resolve(root, "dist", "sync_settings.js"), "utf8");
   const codexAccounts = await readFile(resolve(root, "dist", "codex_accounts.js"), "utf8");
   const knowledgeWorkspace = await readFile(resolve(root, "dist", "knowledge_workspace.js"), "utf8");
   const css = await readFile(resolve(root, "dist", "styles.css"), "utf8");
@@ -167,6 +168,10 @@ test("built web contains responsive application", async () => {
   assert.match(agents, /name="proxy_enabled"/);
   assert.match(proxySettings, /HTTP_PROXY/);
   assert.match(proxySettings, /testProxySettings/);
+  assert.match(script, /renderSyncSettings/);
+  assert.match(syncSettings, /token_configured/);
+  assert.match(syncSettings, /runSync/);
+  assert.doesNotMatch(syncSettings, /value="\$\{[^}]*token/);
   assert.match(script, /heartbeat/);
   assert.doesNotMatch(css, /\.conversation-event/);
   assert.match(css, /\.message\.agent-tool-message/);

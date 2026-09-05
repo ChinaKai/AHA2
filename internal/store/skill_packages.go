@@ -210,8 +210,9 @@ func (s *Store) UpdateSkillPackage(ctx context.Context, item domain.Skill, baseV
 	item.Version++
 	item.SourcePath = root
 	result, err := s.db.ExecContext(ctx, `
-		UPDATE skills SET name=?,description=?,instructions=?,version=?,source_path=?,updated_at=? WHERE id=? AND version=?`,
-		item.Name, item.Description, item.Instructions, item.Version, root, timeString(item.UpdatedAt), item.ID, baseVersion,
+		UPDATE skills SET package_slug=?,scope=?,project_id=?,name=?,description=?,instructions=?,version=?,status=?,enabled=?,source_path=?,updated_at=? WHERE id=? AND version=?`,
+		item.PackageSlug, item.Scope, item.ProjectID, item.Name, item.Description, item.Instructions, item.Version,
+		item.Status, boolInt(item.Enabled), root, timeString(item.UpdatedAt), item.ID, baseVersion,
 	)
 	if err != nil {
 		_ = os.RemoveAll(root)

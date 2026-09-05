@@ -154,6 +154,15 @@ button.danger:hover { background: #fff1f0; }
 .proxy-settings-body { padding: 18px; }
 .proxy-settings-body .detect-status { min-height: 20px; }
 .proxy-actions { padding: 0 18px 18px; }
+.sync-layout { display: grid; grid-template-columns: minmax(320px, 1.2fr) minmax(280px, .8fr); gap: 16px; }
+.sync-settings-body { display: grid; gap: 12px; padding: 18px; }
+.sync-actions { padding: 0 18px 18px; }
+.sync-status-grid { display: grid; gap: 0; margin: 0; padding: 8px 18px 18px; }
+.sync-status-grid div { display: grid; grid-template-columns: 110px 1fr; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+.sync-status-grid dt { color: var(--muted); }
+.sync-status-grid dd { margin: 0; overflow-wrap: anywhere; }
+.sync-status-grid dd.bad { color: var(--red); }
+.sync-conflicts { margin-top: 16px; }
 .codex-auth-link textarea { margin: 0; overflow-wrap: anywhere; }
 .codex-auth-link .icon-button { width: 36px; min-height: 36px; }
 .codex-auth-link .icon-button.copied { color: var(--green); border-color: var(--green); }
@@ -658,7 +667,8 @@ dialog form, .dialog-body { padding: 18px; }
   .app-shell { display: block; }
   .sidebar { display: none; }
   .mobile-header { display: none; }
-  .bottom-nav { position: fixed; left: 0; right: 0; bottom: 0; z-index: 30; display: grid; grid-template-columns: repeat(6,1fr); min-height: 62px; padding-bottom: env(safe-area-inset-bottom); border-top: 1px solid var(--line); background: #fff; }
+  .bottom-nav { position: fixed; left: 0; right: 0; bottom: 0; z-index: 30; display: grid; grid-template-columns: repeat(7,1fr); min-height: 62px; padding-bottom: env(safe-area-inset-bottom); border-top: 1px solid var(--line); background: #fff; }
+  .sync-layout { grid-template-columns: 1fr; }
   .bottom-nav button { display: grid; place-items: center; gap: 2px; min-height: 58px; padding: 5px; border: 0; border-radius: 0; color: var(--muted); font-size: 9px; }
   .bottom-nav button.active { color: var(--blue); }
   .page { padding: 18px 14px 28px; }

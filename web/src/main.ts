@@ -6,6 +6,7 @@ import {bindKnowledgeWorkspace, renderKnowledgeWorkspace} from "./knowledge_work
 import {bindHardwarePanel, stopHardwarePanel} from "./hardware_panel.js";
 import {bindPromptAdmin, loadPromptCatalog, renderPromptAdmin} from "./prompt_admin.js";
 import {bindProxySettings, renderProxySettings} from "./proxy_settings.js";
+import {bindSyncSettings, renderSyncSettings} from "./sync_settings.js";
 import {bindRuntimeFields, runtimeFieldsHTML, setRuntimeBackends, syncRuntimeFields} from "./runtime_picker.js";
 import {renderComposerAgentOptions, renderComposerTools} from "./task_composer.js";
 import {renderTaskToolButtons, renderTaskToolContent, renderTaskToolPanel} from "./task_tools.js";
@@ -28,11 +29,15 @@ import type {
   ConversationCategory,
   ConversationItem,
   DetectedModel,
+  EnvGroup,
   Knowledge,
   Model,
   Project,
   Provider,
   ProxySettings,
+  SyncConflict,
+  SyncSettings,
+  SyncState,
   Skill,
   SystemInfo,
   Task,
@@ -40,7 +45,7 @@ import type {
   TaskDetail,
   Workspace,
 } from "./types.js";
-type View = "projects" | "models" | "tasks" | "knowledge" | "prompts" | "proxy";
+type View = "projects" | "models" | "tasks" | "knowledge" | "prompts" | "proxy" | "sync";
 interface State {
   auth: AuthStatus | null;
   view: View;
@@ -50,9 +55,14 @@ interface State {
   renderPending: boolean;
   system: SystemInfo;
   proxySettings: ProxySettings;
+  syncSettings: SyncSettings;
+  syncState: SyncState;
+  syncPending: number;
+  syncConflicts: SyncConflict[];
   projects: Project[];
   workspaces: Workspace[];
   providers: Provider[];
+  envGroups: EnvGroup[];
   codexAccounts: CodexAccount[];
   models: Model[];
   tasks: Task[];
@@ -86,9 +96,14 @@ const state: State = {
   renderPending: false,
   system: {os: "windows", arch: "", wsl_available: false, wsl_distros: []},
   proxySettings: {http_proxy: "http://127.0.0.1:7897", https_proxy: "http://127.0.0.1:7897", no_proxy: "localhost,127.0.0.1,::1"},
+  syncSettings: {scope:"default",enabled:false,endpoint:"",device_id:"",interval_seconds:300,token_configured:false,passphrase_configured:false},
+  syncState: {scope:"default",cursor:"",last_error:""},
+  syncPending: 0,
+  syncConflicts: [],
   projects: [],
   workspaces: [],
   providers: [],
+  envGroups: [],
   codexAccounts: [],
   models: [],
   tasks: [],
@@ -556,12 +571,13 @@ async function bootstrap(): Promise<void> {
 }
 
 async function loadAll(): Promise<void> {
-  const [projects, workspaces, providers, codexAccounts, models, tasks, knowledge, skills, system, proxy] = await Promise.all([
-    api.projects(), api.workspaces(), api.providers(), api.codexAccounts(), api.models(), api.tasks(), api.knowledge(), api.skills(), api.system(), api.proxySettings(),
+  const [projects, workspaces, providers, envGroups, codexAccounts, models, tasks, knowledge, skills, system, proxy, syncSettings, syncStatus, syncConflicts] = await Promise.all([
+    api.projects(), api.workspaces(), api.providers(), api.envGroups(), api.codexAccounts(), api.models(), api.tasks(), api.knowledge(), api.skills(), api.system(), api.proxySettings(), api.syncSettings(), api.syncStatus(), api.syncConflicts(),
   ]);
   state.projects = projects.projects || [];
   state.workspaces = workspaces.workspaces || [];
   state.providers = providers.providers || [];
+  state.envGroups = envGroups.env_groups || [];
   state.codexAccounts = codexAccounts.accounts || [];
   state.models = models.models || [];
   state.tasks = tasks.tasks || [];
@@ -569,6 +585,9 @@ async function loadAll(): Promise<void> {
   state.skills = skills.skills || [];
   if (system?.system) state.system = system.system;
   if (proxy?.proxy) state.proxySettings = proxy.proxy;
+  if (syncSettings?.sync) state.syncSettings = syncSettings.sync;
+  if (syncStatus?.state) { state.syncState = syncStatus.state; state.syncPending = syncStatus.pending || 0; }
+  state.syncConflicts = syncConflicts.conflicts || [];
   await loadPromptCatalog();
 }
 function persistNavigationState(): void {
@@ -579,7 +598,7 @@ function persistNavigationState(): void {
 }
 async function restoreNavigationState(): Promise<void> {
   const saved = loadNavigationSnapshot();
-  if (["projects", "models", "tasks", "knowledge", "prompts", "proxy"].includes(saved.view || "")) state.view = saved.view as View;
+  if (["projects", "models", "tasks", "knowledge", "prompts", "proxy", "sync"].includes(saved.view || "")) state.view = saved.view as View;
   state.selectedProject = state.projects.find(project => project.id === saved.projectID) || null;
   if (!saved.taskID || !state.tasks.some(task => task.id === saved.taskID)) return;
   state.view = "tasks"; state.selectedProject = null;
@@ -774,6 +793,7 @@ function shell(content: string): string {
     ["models", "model", "模型"],
     ["prompts", "bot", "提示词"],
     ["proxy", "proxy", "代理"],
+    ["sync", "sync", "\u540c\u6b65"],
   ] as const;
   return `<div class="app-shell">
     <aside class="sidebar">
@@ -1249,6 +1269,7 @@ function render(): void {
       })),
       prompts: () => shell(renderPromptAdmin()),
       proxy: () => shell(renderProxySettings(state.proxySettings)),
+      sync: () => shell(renderSyncSettings(state.syncSettings, state.syncState, state.syncPending, state.syncConflicts, state.providers, state.envGroups, state.codexAccounts)),
     };
     content = views[state.view]();
   }
@@ -1297,6 +1318,14 @@ function bindCommon(): void {
   });
   bindProxySettings({
     onChanged: settings => { state.proxySettings = settings; },
+    setMessage,
+  });
+  bindSyncSettings({
+    refresh: async () => {
+      const [settings, status, conflicts] = await Promise.all([api.syncSettings(), api.syncStatus(), api.syncConflicts()]);
+      state.syncSettings = settings.sync; state.syncState = status.state; state.syncPending = status.pending || 0; state.syncConflicts = conflicts.conflicts || [];
+      render();
+    },
     setMessage,
   });
   bindRuntimeFields("task", state.models, state.codexAccounts, syncTaskGitIsolation);

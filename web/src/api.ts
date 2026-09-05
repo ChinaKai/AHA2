@@ -10,6 +10,9 @@ import type {
   ProductLine,
   Provider,
   ProxySettings,
+  SyncSettings,
+  SyncState,
+  SyncConflict,
   PromptTemplate,
   SystemInfo,
   Task,
@@ -77,6 +80,26 @@ class APIClient {
 
   testProxySettings(payload: ProxySettings): Promise<{ok: boolean; status_code: number; elapsed_ms: number}> {
     return this.request("/api/v1/settings/proxy/test", {method: "POST", body: JSON.stringify(payload)});
+  }
+
+  syncSettings(): Promise<{sync: SyncSettings}> {
+    return this.request("/api/v1/settings/sync");
+  }
+
+  updateSyncSettings(payload: Record<string, unknown>): Promise<{sync: SyncSettings}> {
+    return this.request("/api/v1/settings/sync", {method: "PUT", body: JSON.stringify(payload)});
+  }
+
+  syncStatus(): Promise<{state: SyncState; pending: number}> {
+    return this.request("/api/v1/settings/sync/status");
+  }
+
+  runSync(): Promise<{state: SyncState; pending: number}> {
+    return this.request("/api/v1/settings/sync/run", {method: "POST", body: "{}"});
+  }
+
+  syncConflicts(): Promise<{conflicts: SyncConflict[]}> {
+    return this.request("/api/v1/settings/sync/conflicts");
   }
 
   projects(): Promise<{projects: Project[]}> {
