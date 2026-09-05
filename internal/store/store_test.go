@@ -394,6 +394,9 @@ func TestKnowledgeCatalogV22(t *testing.T) {
 	if err := database.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=23)`).Scan(&migrated); err != nil || !migrated {
 		t.Fatalf("schema v23 missing: migrated=%t err=%v", migrated, err)
 	}
+	if err := database.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=25)`).Scan(&migrated); err != nil || !migrated {
+		t.Fatalf("schema v25 missing: migrated=%t err=%v", migrated, err)
+	}
 	now := time.Now().UTC()
 	project := domain.Project{ID: "project-kb", Name: "Knowledge", KnowledgePolicy: "enabled", CreatedAt: now, UpdatedAt: now}
 	if err := database.CreateProject(ctx, project); err != nil {
@@ -446,5 +449,17 @@ func TestKnowledgeCatalogV22(t *testing.T) {
 	}
 	if item, err := database.Skill(ctx, skill.ID); err != nil || item.Enabled || item.Version != 2 {
 		t.Fatalf("updated skill = %#v, %v", item, err)
+	}
+	skill, _ = database.Skill(ctx, skill.ID)
+	skill.UpdatedAt = now.Add(2 * time.Second)
+	packaged, err := database.UpdateSkillPackage(ctx, skill, 2, []domain.SkillFile{
+		{Path: "SKILL.md", Content: "---\nname: review\ndescription: Review changes\n---\n\nRun package tests.\n"},
+		{Path: "scripts/check.sh", Content: "echo checked\n"},
+	})
+	if err != nil || packaged.Version != 3 || len(packaged.PackageFiles) != 2 {
+		t.Fatalf("packaged skill = %#v, %v", packaged, err)
+	}
+	if _, err := database.UpdateSkillPackage(ctx, packaged, 2, packaged.PackageFiles); err == nil {
+		t.Fatal("stale skill package version was accepted")
 	}
 }

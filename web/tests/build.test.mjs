@@ -127,6 +127,7 @@ test("built web contains responsive application", async () => {
   assert.match(taskComposer, /composer-target-wrap/);
   assert.match(taskComposer, /conversation-filter-popover/);
   assert.match(taskComposer, /data-conversation-category/);
+  assert.match(script, /taskCategories:\s*\{[\s\S]{0,200}tool:\s*false/);
   assert.match(promptAdmin, /prompt-template-layout/);
   assert.match(script, /renderCodexAccounts/);
   assert.match(script, /api\.codexAccounts/);
@@ -203,6 +204,11 @@ test("built web contains responsive application", async () => {
   assert.match(conversation, /agent-routed-message/);
   assert.doesNotMatch(conversation, /conversation-event/);
   assert.match(conversation, /visibleAgentText/);
+  assert.doesNotMatch(agents, /aha2_checkpoint/);
+  assert.match(agents, /cap_workspace_read/);
+  assert.match(agents, /cap_task_create/);
+  assert.match(agents, /cap_clone_hardware/);
+  assert.match(css, /\.task-agent-capabilities/);
   assert.match(css, /overflow-wrap: anywhere/);
   assert.doesNotMatch(script, /data-task-action="delete"/);
   assert.match(script, /requestAnimationFrame\(runTaskClock\)/);

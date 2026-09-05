@@ -654,6 +654,10 @@ UPDATE skills SET package_slug=id WHERE package_slug='';
 CREATE UNIQUE INDEX idx_skills_package_slug ON skills(package_slug);
 `
 
+const schemaV25 = `
+ALTER TABLE tasks ADD COLUMN agent_capabilities_json TEXT NOT NULL DEFAULT '{}';
+`
+
 func (s *Store) migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, schemaV1); err != nil {
 		return fmt.Errorf("apply schema v1: %w", err)
@@ -961,6 +965,19 @@ func (s *Store) migrate(ctx context.Context) error {
 		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(24, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
 	); err != nil {
 		return fmt.Errorf("record schema v24: %w", err)
+	}
+	var hasV25 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=25)`).Scan(&hasV25)
+	if !hasV25 {
+		if _, err := s.db.ExecContext(ctx, schemaV25); err != nil {
+			return fmt.Errorf("apply schema v25: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(
+		ctx,
+		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(25, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
+	); err != nil {
+		return fmt.Errorf("record schema v25: %w", err)
 	}
 	return nil
 }

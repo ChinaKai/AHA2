@@ -12,6 +12,10 @@ type Command struct {
 	Env        map[string]string
 	Stdin      string
 	Timeout    time.Duration
+	// OutputLimit keeps only the latest bytes from stdout and stderr. Zero means unlimited.
+	OutputLimit int
+	// KillTree terminates the local process tree when the command context is cancelled.
+	KillTree bool
 }
 
 type Result struct {

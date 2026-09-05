@@ -137,6 +137,8 @@ export interface CodexLogin {
   auth_url: string;
   account?: CodexAccount;
   error?: string;
+  login_status?: string;
+  login_error?: string;
   started_at: string;
   updated_at: string;
 }
@@ -186,6 +188,7 @@ export interface Task {
   max_agents: number;
   knowledge_policy: "inherit" | "enabled" | "disabled" | string;
   skill_ids: string[];
+  agent_capabilities: Record<string, boolean>;
   total_tokens: number;
   created_at: string;
   updated_at: string;

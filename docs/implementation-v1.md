@@ -36,7 +36,7 @@ internal/domain
   Project、Workspace、Task、Turn、Session、Knowledge 等实体和状态机
 
 internal/app
-  用例编排、Prompt Pack、Turn 生命周期、Knowledge checkpoint
+  用例编排、Prompt Pack、Turn 生命周期、Knowledge Agent API
 
 internal/store
   SQLite Schema、Migration、Repository、事务

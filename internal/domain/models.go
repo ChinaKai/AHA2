@@ -203,29 +203,30 @@ type RuntimeConfigSnapshot struct {
 }
 
 type Task struct {
-	ID                      string     `json:"id"`
-	Code                    string     `json:"code,omitempty"`
-	ProjectID               string     `json:"project_id"`
-	WorkspaceID             string     `json:"workspace_id"`
-	Title                   string     `json:"title"`
-	OriginalRequest         string     `json:"original_request"`
-	CurrentGoal             string     `json:"current_goal"`
-	Status                  TaskStatus `json:"status"`
-	TargetBranch            string     `json:"target_branch,omitempty"`
-	BaseCommit              string     `json:"base_commit,omitempty"`
-	TaskBranch              string     `json:"task_branch,omitempty"`
-	Isolation               string     `json:"isolation"`
-	WorktreeDir             string     `json:"worktree_dir,omitempty"`
-	TaskWorkspacePath       string     `json:"task_workspace_path,omitempty"`
-	RuntimeConfigSnapshotID string     `json:"runtime_config_snapshot_id"`
-	CollaborationMode       string     `json:"collaboration_mode"`
-	MaxAgents               int        `json:"max_agents"`
-	KnowledgePolicy         string     `json:"knowledge_policy"`
-	SkillIDs                []string   `json:"skill_ids"`
-	TotalTokens             int64      `json:"total_tokens"`
-	CreatedAt               time.Time  `json:"created_at"`
-	UpdatedAt               time.Time  `json:"updated_at"`
-	CompletedAt             time.Time  `json:"completed_at,omitempty"`
+	ID                      string          `json:"id"`
+	Code                    string          `json:"code,omitempty"`
+	ProjectID               string          `json:"project_id"`
+	WorkspaceID             string          `json:"workspace_id"`
+	Title                   string          `json:"title"`
+	OriginalRequest         string          `json:"original_request"`
+	CurrentGoal             string          `json:"current_goal"`
+	Status                  TaskStatus      `json:"status"`
+	TargetBranch            string          `json:"target_branch,omitempty"`
+	BaseCommit              string          `json:"base_commit,omitempty"`
+	TaskBranch              string          `json:"task_branch,omitempty"`
+	Isolation               string          `json:"isolation"`
+	WorktreeDir             string          `json:"worktree_dir,omitempty"`
+	TaskWorkspacePath       string          `json:"task_workspace_path,omitempty"`
+	RuntimeConfigSnapshotID string          `json:"runtime_config_snapshot_id"`
+	CollaborationMode       string          `json:"collaboration_mode"`
+	MaxAgents               int             `json:"max_agents"`
+	KnowledgePolicy         string          `json:"knowledge_policy"`
+	SkillIDs                []string        `json:"skill_ids"`
+	AgentCapabilities       map[string]bool `json:"agent_capabilities"`
+	TotalTokens             int64           `json:"total_tokens"`
+	CreatedAt               time.Time       `json:"created_at"`
+	UpdatedAt               time.Time       `json:"updated_at"`
+	CompletedAt             time.Time       `json:"completed_at,omitempty"`
 }
 
 type Turn struct {
@@ -350,8 +351,8 @@ type Skill struct {
 }
 
 type SkillFile struct {
-	Path    string
-	Content string
+	Path    string `json:"path"`
+	Content string `json:"content"`
 }
 
 type Event struct {

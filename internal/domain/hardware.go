@@ -86,16 +86,18 @@ type HardwareIOPage struct {
 }
 
 type HardwareTerminalStatus struct {
-	TaskID     string    `json:"task_id"`
-	HardwareID string    `json:"hardware_id"`
-	Transport  string    `json:"transport"`
-	Endpoint   string    `json:"endpoint"`
-	Status     string    `json:"status"`
-	Connected  bool      `json:"connected"`
-	ReadOnly   bool      `json:"read_only"`
-	Error      string    `json:"error,omitempty"`
-	StartedAt  time.Time `json:"started_at,omitempty"`
-	UpdatedAt  time.Time `json:"updated_at,omitempty"`
+	TaskID      string    `json:"task_id"`
+	HardwareID  string    `json:"hardware_id"`
+	Transport   string    `json:"transport"`
+	Endpoint    string    `json:"endpoint"`
+	Status      string    `json:"status"`
+	Connected   bool      `json:"connected"`
+	ReadOnly    bool      `json:"read_only"`
+	Error       string    `json:"error,omitempty"`
+	LoginStatus string    `json:"login_status,omitempty"`
+	LoginError  string    `json:"login_error,omitempty"`
+	StartedAt   time.Time `json:"started_at,omitempty"`
+	UpdatedAt   time.Time `json:"updated_at,omitempty"`
 }
 
 type SerialPort struct {

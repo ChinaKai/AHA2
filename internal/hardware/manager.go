@@ -35,6 +35,17 @@ type ConnectRequest struct {
 	ReadOnly   bool
 }
 
+type LoginOptions struct {
+	UsernamePrompts []string `json:"username_prompts"`
+	PasswordPrompts []string `json:"password_prompts"`
+	SuccessPrompts  []string `json:"success_prompts"`
+	FailurePrompts  []string `json:"failure_prompts"`
+	LineEnding      string   `json:"line_ending"`
+	Wakeup          bool     `json:"wakeup"`
+	TimeoutSeconds  int      `json:"timeout_seconds"`
+	Retries         int      `json:"retries"`
+}
+
 type LiveEvent struct {
 	Sequence int64
 	Type     string
@@ -68,17 +79,23 @@ type terminalSession struct {
 	decoder   streamDecoder
 	startedAt time.Time
 
-	mu             sync.RWMutex
-	writeMu        sync.Mutex
-	attachments    map[string]attachment
-	subscribers    map[string]liveSubscriber
-	status         string
-	lastError      string
-	updatedAt      time.Time
-	closing        bool
-	usernameSent   bool
-	passwordSent   bool
-	automaticWrite bool
+	mu              sync.RWMutex
+	writeMu         sync.Mutex
+	attachments     map[string]attachment
+	subscribers     map[string]liveSubscriber
+	status          string
+	lastError       string
+	updatedAt       time.Time
+	closing         bool
+	usernameSent    bool
+	passwordSent    bool
+	automaticWrite  bool
+	loginBuffer     string
+	loginStatus     string
+	loginError      string
+	loginOptions    LoginOptions
+	loginAttempts   int
+	loginGeneration int
 }
 
 type Manager struct {
@@ -180,6 +197,16 @@ func (manager *Manager) Connect(ctx context.Context, request ConnectRequest) (do
 		},
 		subscribers: map[string]liveSubscriber{},
 	}
+	session.loginOptions = normalizeLoginOptions(LoginOptions{})
+	if protocol == domain.HardwareProtocolSSH {
+		session.loginStatus = "authenticated"
+	} else if session.username != "" || session.password != "" {
+		session.loginStatus = "waiting"
+		session.loginAttempts = 1
+		session.loginGeneration = 1
+	} else {
+		session.loginStatus = "not_configured"
+	}
 	if protocol == domain.HardwareProtocolTelnet {
 		session.codec = newTelnetCodec(100, 28)
 	}
@@ -191,8 +218,61 @@ func (manager *Manager) Connect(ctx context.Context, request ConnectRequest) (do
 	if session.codec != nil {
 		_ = session.writeRaw(session.codec.InitialNegotiation())
 	}
+	session.mu.RLock()
+	loginWaiting := session.loginStatus == "waiting"
+	session.mu.RUnlock()
 	go session.readLoop()
+	if loginWaiting {
+		go session.loginTimeout(session.loginGeneration, session.loginOptions.TimeoutSeconds)
+	}
 	return session.statusFor(request.TaskID, request.HardwareID, request.ReadOnly), nil
+}
+
+func (manager *Manager) Login(taskID, hardwareID, transport string, options LoginOptions) (domain.HardwareTerminalStatus, error) {
+	key := attachmentKey(taskID, hardwareID, transport)
+	manager.mu.Lock()
+	session := manager.attachments[key]
+	manager.mu.Unlock()
+	if session == nil {
+		return domain.HardwareTerminalStatus{}, ErrNotConnected
+	}
+	session.mu.Lock()
+	if session.protocol == domain.HardwareProtocolSSH {
+		status := session.statusForLocked(taskID, hardwareID, false)
+		session.mu.Unlock()
+		return status, nil
+	}
+	attachment, ok := session.attachments[key]
+	if !ok || session.closing {
+		session.mu.Unlock()
+		return domain.HardwareTerminalStatus{}, ErrNotConnected
+	}
+	if attachment.readOnly {
+		session.mu.Unlock()
+		return domain.HardwareTerminalStatus{}, ErrReadOnly
+	}
+	if session.username == "" && session.password == "" {
+		session.mu.Unlock()
+		return domain.HardwareTerminalStatus{}, fmt.Errorf("hardware login credentials are not configured")
+	}
+	session.loginOptions = normalizeLoginOptions(options)
+	session.usernameSent = false
+	session.passwordSent = false
+	session.loginBuffer = ""
+	session.loginStatus = "waiting"
+	session.loginError = ""
+	session.loginAttempts = 1
+	session.loginGeneration++
+	generation := session.loginGeneration
+	wakeup := session.loginOptions.Wakeup
+	ending := loginLineEnding(session.loginOptions.LineEnding)
+	timeout := session.loginOptions.TimeoutSeconds
+	session.mu.Unlock()
+	if wakeup {
+		session.automaticSend(ending, "<wakeup>")
+	}
+	go session.loginTimeout(generation, timeout)
+	return session.statusFor(taskID, hardwareID, attachment.readOnly), nil
 }
 
 func (manager *Manager) Status(taskID, hardwareID, transport string, readOnly bool) domain.HardwareTerminalStatus {
@@ -410,10 +490,15 @@ func (session *terminalSession) isConnected() bool {
 func (session *terminalSession) statusFor(taskID, hardwareID string, readOnly bool) domain.HardwareTerminalStatus {
 	session.mu.RLock()
 	defer session.mu.RUnlock()
+	return session.statusForLocked(taskID, hardwareID, readOnly)
+}
+
+func (session *terminalSession) statusForLocked(taskID, hardwareID string, readOnly bool) domain.HardwareTerminalStatus {
 	return domain.HardwareTerminalStatus{
 		TaskID: taskID, HardwareID: hardwareID, Transport: session.transport,
 		Endpoint: session.endpoint, Status: session.status, Connected: !session.closing && session.status == "running",
 		ReadOnly: readOnly, Error: session.lastError, StartedAt: session.startedAt, UpdatedAt: session.updatedAt,
+		LoginStatus: session.loginStatus, LoginError: session.loginError,
 	}
 }
 
@@ -446,24 +531,130 @@ func (session *terminalSession) readLoop() {
 }
 
 func (session *terminalSession) maybeAutoLogin(text string) {
-	lower := strings.ToLower(text)
 	session.mu.Lock()
+	session.loginBuffer = appendLoginBuffer(session.loginBuffer, text)
+	lower := strings.ToLower(session.loginBuffer)
+	options := session.loginOptions
 	username := session.username
 	password := session.password
-	sendUsername := username != "" && !session.usernameSent && (strings.Contains(lower, "login:") || strings.Contains(lower, "username:"))
-	sendPassword := password != "" && !session.passwordSent && strings.Contains(lower, "password:")
+	if matchesLoginPrompt(lower, options.FailurePrompts) {
+		session.loginStatus = "failed"
+		session.loginError = "hardware reported a login failure"
+		session.mu.Unlock()
+		return
+	}
+	if matchesLoginPrompt(lower, options.SuccessPrompts) {
+		session.loginStatus = "authenticated"
+		session.loginError = ""
+		session.mu.Unlock()
+		return
+	}
+	sendUsername := username != "" && !session.usernameSent && matchesLoginPrompt(lower, options.UsernamePrompts)
+	sendPassword := password != "" && !session.passwordSent && matchesLoginPrompt(lower, options.PasswordPrompts)
+	if password != "" && session.passwordSent && matchesLoginPrompt(lower, options.PasswordPrompts) && session.loginAttempts < options.Retries {
+		session.passwordSent = false
+		session.loginAttempts++
+		sendPassword = true
+	}
 	if sendUsername {
 		session.usernameSent = true
+		session.loginStatus = "username_sent"
 	}
 	if sendPassword {
 		session.passwordSent = true
+		session.loginStatus = "credentials_sent"
 	}
+	if sendUsername || sendPassword {
+		session.loginBuffer = ""
+	}
+	ending := loginLineEnding(options.LineEnding)
 	session.mu.Unlock()
 	if sendUsername {
-		session.automaticSend(username+"\r\n", username+"\\r\\n")
+		session.automaticSend(username+ending, username+displayLineEnding(options.LineEnding))
 	}
 	if sendPassword {
-		session.automaticSend(password+"\r\n", "<password>\\r\\n")
+		session.automaticSend(password+ending, "<password>"+displayLineEnding(options.LineEnding))
+	}
+}
+
+func (session *terminalSession) loginTimeout(generation, seconds int) {
+	timer := time.NewTimer(time.Duration(seconds) * time.Second)
+	defer timer.Stop()
+	<-timer.C
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	if generation == session.loginGeneration && session.loginStatus != "authenticated" && session.loginStatus != "failed" {
+		session.loginStatus = "timeout"
+		session.loginError = "hardware login timed out"
+	}
+}
+
+func normalizeLoginOptions(options LoginOptions) LoginOptions {
+	if len(options.UsernamePrompts) == 0 {
+		options.UsernamePrompts = []string{"login:", "username:"}
+	}
+	if len(options.PasswordPrompts) == 0 {
+		options.PasswordPrompts = []string{"password:"}
+	}
+	if len(options.SuccessPrompts) == 0 {
+		options.SuccessPrompts = []string{"# ", "$ "}
+	}
+	if len(options.FailurePrompts) == 0 {
+		options.FailurePrompts = []string{"login incorrect", "authentication failed", "access denied"}
+	}
+	switch options.LineEnding {
+	case "cr", "lf", "crlf":
+	default:
+		options.LineEnding = "crlf"
+	}
+	if options.TimeoutSeconds < 3 || options.TimeoutSeconds > 300 {
+		options.TimeoutSeconds = 30
+	}
+	if options.Retries < 1 {
+		options.Retries = 1
+	}
+	if options.Retries > 3 {
+		options.Retries = 3
+	}
+	return options
+}
+
+func matchesLoginPrompt(lower string, prompts []string) bool {
+	for _, prompt := range prompts {
+		if value := strings.ToLower(strings.TrimSpace(prompt)); value != "" && strings.Contains(lower, value) {
+			return true
+		}
+	}
+	return false
+}
+
+func appendLoginBuffer(current, value string) string {
+	current += value
+	if len(current) > 2048 {
+		current = current[len(current)-2048:]
+	}
+	return current
+}
+
+func loginLineEnding(value string) string {
+	switch value {
+	case "cr":
+		return "\r"
+	case "lf":
+		return "\n"
+	default:
+		return "\r\n"
+	}
+}
+
+func displayLineEnding(value string) string {
+	switch value {
+	case "cr":
+		return "\\r"
+	case "lf":
+		return "\\n"
+	default:
+		return "\\r\\n"
 	}
 }
 

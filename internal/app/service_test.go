@@ -3,7 +3,6 @@ package app
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -13,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ChinaKai/AHA2/internal/agentapi"
 	"github.com/ChinaKai/AHA2/internal/domain"
 	"github.com/ChinaKai/AHA2/internal/secrets"
 	"github.com/ChinaKai/AHA2/internal/store"
@@ -29,8 +29,9 @@ type stubExecutor struct {
 }
 
 type multiAgentExecutor struct {
-	mu    sync.Mutex
-	turns []domain.Turn
+	mu      sync.Mutex
+	turns   []domain.Turn
+	service *Service
 }
 
 func (s *multiAgentExecutor) Execute(_ context.Context, request ExecutionRequest, emit func(ExecutionEvent)) (ExecutionResult, error) {
@@ -42,13 +43,13 @@ func (s *multiAgentExecutor) Execute(_ context.Context, request ExecutionRequest
 	emit(ExecutionEvent{Type: "agent_command_finished", Data: map[string]any{"command": "verify " + request.Turn.AgentID, "status": "completed"}})
 	switch {
 	case request.Turn.AgentID == "main" && request.Turn.Generation == 0:
-		return ExecutionResult{
-			Reply: "delegating",
-			AgentActions: []AgentAction{
+		if s.service != nil {
+			_, _ = s.service.SubmitAgentCollaboration(context.Background(), agentapi.Claims{TaskID: request.Task.ID, AgentID: request.Turn.AgentID, TurnID: request.Turn.ID}, []AgentAction{
 				{AgentID: "sub-001", Title: "Store", Assignment: "implement store", Required: true},
 				{AgentID: "sub-002", Title: "Web", Assignment: "implement web", Required: true},
-			},
-		}, nil
+			}, "")
+		}
+		return ExecutionResult{Reply: "delegating"}, nil
 	case request.Turn.AgentID == "main":
 		return ExecutionResult{Reply: "integrated result", ProviderSessionID: "main-session"}, nil
 	default:
@@ -76,14 +77,7 @@ func (s *stubExecutor) Execute(_ context.Context, request ExecutionRequest, emit
 		s.sessionCounter++
 		s.session = fmt.Sprintf("stub-session-%d", s.sessionCounter)
 	}
-	return ExecutionResult{
-		Reply:             "stub reply",
-		ProviderSessionID: s.session,
-		MemoryPatch:       MemoryPatch{Facts: []string{"stub completed"}},
-		KnowledgeCandidates: []KnowledgeCandidate{{
-			Scope: "project", Type: "practice", Title: "Stub fact", Body: "The stub completed.", Confidence: 0.8,
-		}},
-	}, nil
+	return ExecutionResult{Reply: "stub reply", ProviderSessionID: s.session}, nil
 }
 
 func (s *stubExecutor) requestHistory() ([]string, []string) {
@@ -218,6 +212,8 @@ func TestTaskMultiTurnFlow(t *testing.T) {
 		t.Fatal(err)
 	}
 	service := NewService(database, secretStore, &stubExecutor{})
+	capabilities := agentapi.NewCapabilities()
+	service.SetAgentAPI(capabilities, "https://aha.example.test")
 	task, err := service.CreateTask(ctx, CreateTaskInput{
 		ProjectID: project.ID, WorkspaceID: workspace.ID, Title: "test", Request: "run test",
 		ModelID: model.ID, ProxyEnabled: true, SkillIDs: []string{selectedSkill.ID},
@@ -242,13 +238,25 @@ func TestTaskMultiTurnFlow(t *testing.T) {
 	}
 	prompts, _ := service.executor.(*stubExecutor).requestHistory()
 	if len(prompts) < 2 || !strings.Contains(prompts[0], "## AHA Core") ||
-		!strings.Contains(prompts[0], ".aha2-context") {
+		!strings.Contains(prompts[0], ".aha2-context") || !strings.Contains(prompts[0], "agent-api.md") {
 		t.Fatalf("routed prompt was not used: %#v", prompts)
 	}
 	environments := service.executor.(*stubExecutor).environmentHistory()
 	if len(environments) < 2 || environments[0]["HTTP_PROXY"] != "http://127.0.0.1:7897" ||
-		environments[0]["HTTPS_PROXY"] != "http://127.0.0.1:7897" || environments[0]["NO_PROXY"] == "" {
+		environments[0]["HTTPS_PROXY"] != "http://127.0.0.1:7897" || !strings.Contains(environments[0]["NO_PROXY"], "aha.example.test") {
 		t.Fatalf("shared proxy was not injected: %#v", environments)
+	}
+	if environments[0]["AHA2_AGENT_API_URL"] != "https://aha.example.test" || environments[0]["AHA2_AGENT_API_TOKEN"] == "" ||
+		environments[0]["AHA2_AGENT_API_TOKEN"] == environments[1]["AHA2_AGENT_API_TOKEN"] {
+		t.Fatalf("per-turn Agent API capability was not injected: %#v", environments)
+	}
+	if _, err := capabilities.Authenticate(environments[0]["AHA2_AGENT_API_TOKEN"]); err == nil {
+		t.Fatal("finished Turn capability was not revoked")
+	}
+	for index := range prompts {
+		if strings.Contains(prompts[index], environments[index]["AHA2_AGENT_API_TOKEN"]) {
+			t.Fatal("Agent API capability leaked into the prompt")
+		}
 	}
 	manifest := filepath.Join(workspace.RootPath, ".aha2-context", task.ID, "main", "manifest.json")
 	if data, err := os.ReadFile(manifest); err != nil || strings.Contains(string(data), "stub completed") {
@@ -263,21 +271,6 @@ func TestTaskMultiTurnFlow(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(workspace.RootPath, ".aha2-context", task.ID, "main", "skills", otherSkill.PackageSlug, "SKILL.md")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("unselected skill was materialized: %v", err)
-	}
-	knowledge, err := database.ListKnowledge(ctx, "project", project.ID, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(knowledge) != 1 || knowledge[0].Revision != 2 || knowledge[0].Status != domain.KnowledgeVerified {
-		t.Fatalf("expected one verified knowledge entry at revision 2, got %#v", knowledge)
-	}
-	memory, err := database.TaskMemory(ctx, task.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	encodedRefs, _ := json.Marshal(memory.Extra["knowledge_refs"])
-	if !strings.Contains(string(encodedRefs), knowledge[0].ID) || !strings.Contains(string(encodedRefs), `"revision":2`) {
-		t.Fatalf("task memory did not reference the latest knowledge revision: %s", encodedRefs)
 	}
 	current, err := database.Task(ctx, task.ID)
 	if err != nil {
@@ -480,6 +473,7 @@ func TestMultiAgentRoundCreatesIntegrationTurn(t *testing.T) {
 	}
 	executor := &multiAgentExecutor{}
 	service := NewService(database, secretStore, executor)
+	executor.service = service
 	task, err := service.CreateTask(ctx, CreateTaskInput{
 		ProjectID: project.ID, WorkspaceID: workspace.ID, Title: "agents", Request: "coordinate agents",
 		ModelID: model.ID,
@@ -679,7 +673,9 @@ func TestSingleModeRejectsAgentActions(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	service := NewService(database, secretStore, &multiAgentExecutor{})
+	executor := &multiAgentExecutor{}
+	service := NewService(database, secretStore, executor)
+	executor.service = service
 	task, err := service.CreateTask(ctx, CreateTaskInput{
 		ProjectID: project.ID, WorkspaceID: workspace.ID, Title: "single",
 		Request: "do not delegate", ModelID: model.ID, CollaborationMode: "single", MaxAgents: 3,

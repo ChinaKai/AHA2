@@ -801,17 +801,18 @@ func (s *Server) rotateAgentSession(writer http.ResponseWriter, request *http.Re
 func (s *Server) updateTaskTitle(writer http.ResponseWriter, request *http.Request) {
 	id := request.PathValue("id")
 	var payload struct {
-		Title             *string   `json:"title"`
-		CollaborationMode *string   `json:"collaboration_mode"`
-		MaxAgents         *int      `json:"max_agents"`
-		KnowledgePolicy   *string   `json:"knowledge_policy"`
-		SkillIDs          *[]string `json:"skill_ids"`
+		Title             *string          `json:"title"`
+		CollaborationMode *string          `json:"collaboration_mode"`
+		MaxAgents         *int             `json:"max_agents"`
+		KnowledgePolicy   *string          `json:"knowledge_policy"`
+		SkillIDs          *[]string        `json:"skill_ids"`
+		AgentCapabilities *map[string]bool `json:"agent_capabilities"`
 	}
 	if err := decodeJSON(request, &payload); err != nil {
 		writeError(writer, http.StatusBadRequest, "invalid_json")
 		return
 	}
-	if payload.Title == nil && payload.CollaborationMode == nil && payload.MaxAgents == nil && payload.KnowledgePolicy == nil && payload.SkillIDs == nil {
+	if payload.Title == nil && payload.CollaborationMode == nil && payload.MaxAgents == nil && payload.KnowledgePolicy == nil && payload.SkillIDs == nil && payload.AgentCapabilities == nil {
 		writeError(writer, http.StatusBadRequest, "task_update_required")
 		return
 	}
@@ -864,6 +865,13 @@ func (s *Server) updateTaskTitle(writer http.ResponseWriter, request *http.Reque
 			return
 		}
 	}
+	if payload.AgentCapabilities != nil {
+		capabilities := normalizeTaskAgentCapabilities(*payload.AgentCapabilities)
+		if err := s.store.UpdateTaskAgentCapabilities(request.Context(), id, capabilities, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+			writeError(writer, http.StatusInternalServerError, "update_agent_capabilities_failed")
+			return
+		}
+	}
 	task, err = s.store.Task(request.Context(), id)
 	if err != nil {
 		writeError(writer, http.StatusNotFound, "task_not_found")
@@ -871,6 +879,22 @@ func (s *Server) updateTaskTitle(writer http.ResponseWriter, request *http.Reque
 	}
 	s.audit(request, "task.update", "task", id, nil)
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "task": task})
+}
+
+func normalizeTaskAgentCapabilities(input map[string]bool) map[string]bool {
+	result := map[string]bool{}
+	for _, name := range []string{"workspace_read", "task_create", "clone_hardware"} {
+		if input[name] {
+			result[name] = true
+		}
+	}
+	if result["clone_hardware"] {
+		result["task_create"] = true
+	}
+	if result["task_create"] {
+		result["workspace_read"] = true
+	}
+	return result
 }
 
 func (s *Server) completeTask(writer http.ResponseWriter, request *http.Request) {

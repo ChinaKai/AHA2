@@ -244,7 +244,11 @@ func (s *Server) sendHardware(writer http.ResponseWriter, request *http.Request)
 		writeError(writer, http.StatusBadRequest, "invalid_json")
 		return
 	}
-	if err := s.hardware.Send(task.ID, group.ID, transport, payload.Data, payload.Encoding, "web"); err != nil {
+	source := "web"
+	if claims, ok := agentClaimsFromContext(request.Context()); ok {
+		source = "agent:" + claims.AgentID
+	}
+	if err := s.hardware.Send(task.ID, group.ID, transport, payload.Data, payload.Encoding, source); err != nil {
 		status := http.StatusConflict
 		if errors.Is(err, hardware.ErrReadOnly) {
 			status = http.StatusForbidden

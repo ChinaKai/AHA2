@@ -307,8 +307,12 @@ func TestTaskAgentAPIIsolationAndConfigInheritance(t *testing.T) {
 	if memory["current_goal"] != "test routing" {
 		t.Fatalf("task detail memory missing: %#v", taskDetail)
 	}
+	if capabilities := taskDetail["task"].(map[string]any)["agent_capabilities"].(map[string]any); len(capabilities) != 0 {
+		t.Fatalf("new Task agent capabilities were not default-off: %#v", capabilities)
+	}
 	response = requestJSON(t, client, http.MethodPatch, server.URL+"/api/v1/tasks/"+task.ID, map[string]any{
 		"knowledge_policy": "disabled", "skill_ids": []string{skill.ID},
+		"agent_capabilities": map[string]bool{"clone_hardware": true, "unknown": true},
 	}, csrf)
 	var updatedTask map[string]any
 	decodeResponse(t, response, &updatedTask)
@@ -317,6 +321,13 @@ func TestTaskAgentAPIIsolationAndConfigInheritance(t *testing.T) {
 	}
 	if ids := updatedTask["task"].(map[string]any)["skill_ids"].([]any); len(ids) != 1 || ids[0] != skill.ID {
 		t.Fatalf("task skills update failed: %#v", updatedTask)
+	}
+	capabilities := updatedTask["task"].(map[string]any)["agent_capabilities"].(map[string]any)
+	if capabilities["workspace_read"] != true || capabilities["task_create"] != true || capabilities["clone_hardware"] != true {
+		t.Fatalf("task agent capabilities were not normalized: %#v", capabilities)
+	}
+	if _, ok := capabilities["unknown"]; ok {
+		t.Fatalf("unknown capability persisted: %#v", capabilities)
 	}
 	skill.Enabled = false
 	skill.UpdatedAt = now.Add(time.Second)

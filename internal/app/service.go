@@ -7,11 +7,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"path"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/ChinaKai/AHA2/internal/agentapi"
 	"github.com/ChinaKai/AHA2/internal/codexaccount"
 	"github.com/ChinaKai/AHA2/internal/domain"
 	"github.com/ChinaKai/AHA2/internal/prompt"
@@ -42,50 +44,46 @@ type ExecutionEvent struct {
 }
 
 type MemoryPatch struct {
-	Decisions    []string
-	Facts        []string
-	Excluded     []string
-	Progress     []string
-	Verification []string
-	NextActions  []string
+	Decisions    []string `json:"decisions"`
+	Facts        []string `json:"facts"`
+	Excluded     []string `json:"excluded"`
+	Progress     []string `json:"progress"`
+	Verification []string `json:"verification"`
+	NextActions  []string `json:"next_actions"`
 }
 
 type KnowledgeCandidate struct {
-	EntryID       string
-	Scope         string
-	Type          string
-	Title         string
-	Body          string
-	Confidence    float64
-	ProductLineID string
+	EntryID       string  `json:"entry_id"`
+	BaseRevision  int     `json:"base_revision"`
+	Scope         string  `json:"scope"`
+	Type          string  `json:"type"`
+	Title         string  `json:"title"`
+	Body          string  `json:"body"`
+	Confidence    float64 `json:"confidence"`
+	ProductLineID string  `json:"product_line_id"`
 }
 
 type KnowledgeFeedback struct {
-	EntryID string
-	Kind    string
+	EntryID string `json:"entry_id"`
+	Kind    string `json:"kind"`
 }
 
 type AgentAction struct {
-	AgentID         string
-	Title           string
-	Assignment      string
-	Required        bool
-	Backend         string
-	ModelID         string
-	ReasoningEffort string
-	Filesystem      string
-	Approval        string
+	AgentID         string `json:"agent_id"`
+	Title           string `json:"title"`
+	Assignment      string `json:"assignment"`
+	Required        bool   `json:"required"`
+	Backend         string `json:"backend"`
+	ModelID         string `json:"model_id"`
+	ReasoningEffort string `json:"reasoning_effort"`
+	Filesystem      string `json:"filesystem"`
+	Approval        string `json:"approval"`
 }
 
 type ExecutionResult struct {
-	Reply               string
-	ExitCode            int
-	ProviderSessionID   string
-	MainFollowup        string
-	MemoryPatch         MemoryPatch
-	KnowledgeCandidates []KnowledgeCandidate
-	KnowledgeFeedback   []KnowledgeFeedback
-	AgentActions        []AgentAction
+	Reply             string
+	ExitCode          int
+	ProviderSessionID string
 }
 
 type Executor interface {
@@ -104,17 +102,20 @@ type WorkspacePreparer interface {
 
 type SecretResolver interface {
 	Get(string) (string, bool)
+	PutMany(map[string]string) error
 }
 
 type Service struct {
-	store    *store.Store
-	secrets  SecretResolver
-	executor Executor
-	preparer WorkspacePreparer
-	hub      *EventHub
-	now      func() time.Time
-	prompts  *prompt.Engine
-	codex    *codexaccount.Manager
+	store       *store.Store
+	secrets     SecretResolver
+	executor    Executor
+	preparer    WorkspacePreparer
+	hub         *EventHub
+	now         func() time.Time
+	prompts     *prompt.Engine
+	codex       *codexaccount.Manager
+	agentAPI    *agentapi.Capabilities
+	agentAPIURL string
 
 	mu          sync.Mutex
 	cancels     map[string]context.CancelFunc
@@ -131,6 +132,11 @@ func (s *Service) SetWorkspacePreparer(preparer WorkspacePreparer) {
 
 func (s *Service) SetCodexAccountManager(manager *codexaccount.Manager) {
 	s.codex = manager
+}
+
+func (s *Service) SetAgentAPI(capabilities *agentapi.Capabilities, baseURL string) {
+	s.agentAPI = capabilities
+	s.agentAPIURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
 }
 
 type CreateTaskInput struct {
@@ -631,7 +637,7 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 		Memory: memory, GlobalKnowledge: globalKB, ProjectKnowledge: projectKB, Skills: skills,
 		ProductLine: productLine, KnowledgeEnabled: kbEnabled,
 		Conversation: conversation.Items, Turns: allTurns, Hardware: hardwareGroups, UserMessage: userMessage,
-		Handoff: handoff.Summary,
+		Handoff: handoff.Summary, AgentAPIURL: s.agentAPIURL,
 	})
 	if err != nil {
 		s.failTurn(ctx, &turn, task, err)
@@ -688,6 +694,17 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 			environment[environmentName] = value
 		}
 	}
+	capabilityToken := ""
+	if s.agentAPI != nil && s.agentAPIURL != "" {
+		capabilityToken, err = s.agentAPI.Issue(task.ID, turn.AgentID, turn.ID, 4*time.Hour)
+		if err != nil {
+			s.failTurn(ctx, &turn, task, fmt.Errorf("issue Agent API capability: %w", err))
+			return
+		}
+		defer s.agentAPI.Revoke(capabilityToken)
+		environment["AHA2_AGENT_API_URL"] = s.agentAPIURL
+		environment["AHA2_AGENT_API_TOKEN"] = capabilityToken
+	}
 	if snapshot.ProxyEnabled {
 		settings, settingsErr := s.store.ProxySettings(ctx)
 		if settingsErr != nil {
@@ -701,22 +718,27 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 		}
 		proxyconfig.ApplyEnvironment(environment, settings)
 	}
+	appendAgentAPIToNoProxy(environment, s.agentAPIURL)
 	if snapshot.CodexAccountID != "" {
 		if snapshot.Backend != "codex" || s.codex == nil {
 			s.failTurn(ctx, &turn, task, fmt.Errorf("Codex 官方账号运行时不可用"))
 			return
 		}
 		unlock := s.codex.LockAccount(snapshot.CodexAccountID)
-		defer unlock()
 		profileDir, profileErr := s.codex.PrepareProfile(
 			ctx, snapshot.CodexAccountID, workspace, workDir, sessionID,
 		)
+		unlock()
 		if profileErr != nil {
 			s.failTurn(ctx, &turn, task, profileErr)
 			return
 		}
 		environment["CODEX_HOME"] = profileDir
-		defer s.codex.SyncProfile(context.Background(), snapshot.CodexAccountID, workspace, profileDir)
+		defer func() {
+			unlock := s.codex.LockAccount(snapshot.CodexAccountID)
+			defer unlock()
+			s.codex.SyncProfile(context.Background(), snapshot.CodexAccountID, workspace, profileDir)
+		}()
 	}
 	if err := s.transitionTurn(ctx, &turn, domain.TurnRunning, "turn_running"); err != nil {
 		return
@@ -783,7 +805,7 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 		_ = s.store.AddMessage(context.Background(), message)
 		category := "chat"
 		kind := "agent_message"
-		if turn.AgentID != "main" || s.agentActionsMayRun(context.Background(), task, result.AgentActions) || s.mainReplyIsIntermediate(context.Background(), turn) {
+		if turn.AgentID != "main" || s.mainReplyIsIntermediate(context.Background(), turn) {
 			category = "update"
 			kind = "agent_result"
 		}
@@ -792,15 +814,6 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 			AgentID: turn.AgentID, Category: category, Kind: kind, Summary: turn.Result,
 			Payload: map[string]any{"attempt": turn.Attempt, "generation": turn.Generation}, CreatedAt: now,
 		})
-	}
-	if turn.Status == domain.TurnSucceeded && turn.AgentID == "main" {
-		s.applyMemoryPatch(context.Background(), task, memory, result.MemoryPatch)
-		if knowledgeEnabled(project, task) {
-			lines, _ := s.store.ListProductLines(context.Background(), project.ID)
-			line := resolveProductLine(lines, task.TargetBranch, project.DefaultBranch)
-			s.createKnowledgeCandidates(context.Background(), project.ID, task.ID, turn.ID, task.TaskBranch, line.ID, result.KnowledgeCandidates)
-			s.applyKnowledgeFeedback(context.Background(), task.ID, result.KnowledgeFeedback)
-		}
 	}
 	if turn.Status == domain.TurnSucceeded && handoff.ID != "" {
 		_ = s.store.ConsumeAgentSessionHandoff(context.Background(), handoff.ID, now)
@@ -822,7 +835,25 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 			"exit_code": result.ExitCode, "error": turn.Error,
 		})
 	}
-	s.afterTurnTerminal(context.Background(), task, turn, result.AgentActions, result.MainFollowup)
+	s.afterTurnTerminal(context.Background(), task, turn)
+}
+
+func appendAgentAPIToNoProxy(environment map[string]string, rawURL string) {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || parsed.Hostname() == "" {
+		return
+	}
+	host := parsed.Hostname()
+	for _, value := range strings.Split(environment["NO_PROXY"], ",") {
+		if strings.EqualFold(strings.TrimSpace(value), host) {
+			return
+		}
+	}
+	if environment["NO_PROXY"] == "" {
+		environment["NO_PROXY"] = host
+	} else {
+		environment["NO_PROXY"] += "," + host
+	}
 }
 
 func (s *Service) mainReplyIsIntermediate(ctx context.Context, turn domain.Turn) bool {
@@ -886,7 +917,7 @@ func (s *Service) failTurn(ctx context.Context, turn *domain.Turn, task domain.T
 	})
 	s.recordTurnDuration(ctx, *turn)
 	s.emitTurn(ctx, *turn, "turn_failed", map[string]any{"error": cause.Error()})
-	s.afterTurnTerminal(ctx, task, *turn, nil, "")
+	s.afterTurnTerminal(ctx, task, *turn)
 }
 
 func (s *Service) interruptTurn(ctx context.Context, turn *domain.Turn, task domain.Task) {
@@ -906,7 +937,7 @@ func (s *Service) interruptTurn(ctx context.Context, turn *domain.Turn, task dom
 	})
 	s.recordTurnDuration(ctx, *turn)
 	s.emitTurn(ctx, *turn, "turn_interrupted", nil)
-	s.afterTurnTerminal(ctx, task, *turn, nil, "")
+	s.afterTurnTerminal(ctx, task, *turn)
 }
 
 func (s *Service) recordTurnDuration(ctx context.Context, turn domain.Turn) {
@@ -948,8 +979,9 @@ func (s *Service) applyMemoryPatch(ctx context.Context, task domain.Task, memory
 	_ = s.store.UpsertTaskMemory(ctx, memory)
 }
 
-func (s *Service) createKnowledgeCandidates(ctx context.Context, projectID, taskID, turnID, branch, productLineID string, candidates []KnowledgeCandidate) {
+func (s *Service) createKnowledgeCandidates(ctx context.Context, projectID, taskID, turnID, branch, productLineID string, candidates []KnowledgeCandidate) []domain.KnowledgeEntry {
 	now := s.now().UTC()
+	result := make([]domain.KnowledgeEntry, 0, len(candidates))
 	for _, candidate := range candidates {
 		if strings.TrimSpace(candidate.Title) == "" || strings.TrimSpace(candidate.Body) == "" {
 			continue
@@ -986,6 +1018,7 @@ func (s *Service) createKnowledgeCandidates(ctx context.Context, projectID, task
 				_ = s.store.UpdateKnowledge(ctx, entry)
 				s.linkTaskMemoryKnowledge(ctx, taskID, entry)
 				s.emit(ctx, taskID, "knowledge", entry.ID, "knowledge_updated", map[string]any{"title": entry.Title, "revision": entry.Revision})
+				result = append(result, entry)
 				continue
 			}
 		}
@@ -996,12 +1029,15 @@ func (s *Service) createKnowledgeCandidates(ctx context.Context, projectID, task
 			_ = s.store.UpdateKnowledge(ctx, entry)
 			s.linkTaskMemoryKnowledge(ctx, taskID, entry)
 			s.emit(ctx, taskID, "knowledge", entry.ID, "knowledge_updated", map[string]any{"title": entry.Title, "revision": entry.Revision})
+			result = append(result, entry)
 			continue
 		}
 		_ = s.store.CreateKnowledge(ctx, entry)
 		s.linkTaskMemoryKnowledge(ctx, taskID, entry)
 		s.emit(ctx, taskID, "knowledge", entry.ID, "knowledge_created", map[string]any{"title": entry.Title, "scope": entry.Scope, "status": entry.Status})
+		result = append(result, entry)
 	}
+	return result
 }
 
 func (s *Service) linkTaskMemoryKnowledge(ctx context.Context, taskID string, entry domain.KnowledgeEntry) {
@@ -1217,7 +1253,7 @@ func (s *Service) recordExecutionEvent(ctx context.Context, turn domain.Turn, ev
 		summary = firstText(event.Data, "message", "phase", "status")
 	case "agent_message":
 		text := firstText(event.Data, "text", "message")
-		if final, _ := event.Data["final"].(bool); final || strings.Contains(text, "<aha2_checkpoint>") {
+		if final, _ := event.Data["final"].(bool); final {
 			break
 		}
 		category = "update"

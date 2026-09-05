@@ -30,9 +30,5 @@ func (StubExecutor) Execute(ctx context.Context, request ExecutionRequest, emit 
 	return ExecutionResult{
 		Reply:             fmt.Sprintf("Stub Backend 已完成 Turn %d。\n\n当前 Prompt 尾部：%s", request.Turn.Sequence, message),
 		ProviderSessionID: session,
-		MemoryPatch: MemoryPatch{
-			Progress:    []string{fmt.Sprintf("Turn %d completed by stub backend", request.Turn.Sequence)},
-			NextActions: []string{"Continue with the next user instruction"},
-		},
 	}, nil
 }

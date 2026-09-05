@@ -5,13 +5,7 @@ import type {CodexAccount, ConversationItem, Model, Skill, TaskAgent, TaskContex
 export type TaskRealtimeState = "connecting" | "live" | "fallback";
 
 export function visibleAgentText(value: string): string {
-  const startMarker = "<aha2_checkpoint>";
-  const endMarker = "</aha2_checkpoint>";
-  const start = value.lastIndexOf(startMarker);
-  if (start < 0) return value.trim();
-  const end = value.indexOf(endMarker, start + startMarker.length);
-  const visible = (value.slice(0, start) + (end >= 0 ? value.slice(end + endMarker.length) : "")).trim();
-  return visible || "Agent 已提交结构化结果";
+	return value.trim();
 }
 
 function escapeHTML(value: unknown): string {
@@ -298,7 +292,7 @@ export function renderAgentConfigDialog(detail: TaskDetail, agentID: string, mod
   const mainSettings = agent.agent_id === "main" ? `<fieldset class="agent-collaboration-settings"><legend>Task \u7b56\u7565</legend><div class="two">
     <label>\u534f\u4f5c\u6a21\u5f0f<select name="collaboration_mode"><option value="single" ${detail.task.collaboration_mode === "single" ? "selected" : ""}>Single</option><option value="auto" ${detail.task.collaboration_mode !== "single" ? "selected" : ""}>Auto</option></select></label>
     <label>\u6700\u5927 Agent \u6570<input name="max_agents" type="number" min="1" value="${Math.max(1, Number(detail.task.max_agents || 3))}"></label>
-  </div><label>Knowledge<select name="knowledge_policy"><option value="inherit" ${detail.task.knowledge_policy === "inherit" ? "selected" : ""}>\u7ee7\u627f Project</option><option value="enabled" ${detail.task.knowledge_policy === "enabled" ? "selected" : ""}>\u5f00\u542f</option><option value="disabled" ${detail.task.knowledge_policy === "disabled" ? "selected" : ""}>\u5173\u95ed</option></select></label><div class="task-skill-picker compact"><strong>Task Skills</strong><p>\u53ea\u6709\u9009\u4e2d\u7684 Skill \u4f1a\u5728\u4e0b\u4e00\u4e2a Turn \u4e2d\u53ef\u7528\u3002</p><div>${renderTaskSkills(skills, detail.task.project_id, detail.task.skill_ids || [])}</div></div></fieldset>` : `<label class="agent-inherit-toggle"><input name="inherit_main" type="checkbox" ${agent.inherit_main ? "checked" : ""}>\u7ee7\u627f Main \u5f53\u524d\u914d\u7f6e</label>`;
+  </div><label>Knowledge<select name="knowledge_policy"><option value="inherit" ${detail.task.knowledge_policy === "inherit" ? "selected" : ""}>\u7ee7\u627f Project</option><option value="enabled" ${detail.task.knowledge_policy === "enabled" ? "selected" : ""}>\u5f00\u542f</option><option value="disabled" ${detail.task.knowledge_policy === "disabled" ? "selected" : ""}>\u5173\u95ed</option></select></label><div class="task-agent-capabilities"><strong>Agent \u9879\u76ee\u7ea7\u6388\u6743</strong><p>\u9ed8\u8ba4\u5173\u95ed\uff1b\u4ec5 Main Agent \u53ef\u7528\u3002</p><label><input type="checkbox" name="cap_workspace_read" ${detail.task.agent_capabilities?.workspace_read ? "checked" : ""}>\u8bfb\u53d6\u540c Project Workspace</label><label><input type="checkbox" name="cap_task_create" ${detail.task.agent_capabilities?.task_create ? "checked" : ""}>\u521b\u5efa\u540c Project Task</label><label><input type="checkbox" name="cap_clone_hardware" ${detail.task.agent_capabilities?.clone_hardware ? "checked" : ""}>\u514b\u9686\u5f53\u524d Task \u786c\u4ef6\u4e0e\u51ed\u636e</label></div><div class="task-skill-picker compact"><strong>Task Skills</strong><p>\u53ea\u6709\u9009\u4e2d\u7684 Skill \u4f1a\u5728\u4e0b\u4e00\u4e2a Turn \u4e2d\u53ef\u7528\u3002</p><div>${renderTaskSkills(skills, detail.task.project_id, detail.task.skill_ids || [])}</div></div></fieldset>` : `<label class="agent-inherit-toggle"><input name="inherit_main" type="checkbox" ${agent.inherit_main ? "checked" : ""}>\u7ee7\u627f Main \u5f53\u524d\u914d\u7f6e</label>`;
   return `<dialog id="agent-config-dialog"><form id="agent-config-form" method="dialog">
     <div class="dialog-head"><div><h2>${escapeHTML(agent.agent_id)} 配置</h2><small>${escapeHTML(agent.title || agent.role)}</small></div><button type="button" data-close class="icon-button">${icon("close")}</button></div>
     <input type="hidden" name="agent_id" value="${escapeHTML(agent.agent_id)}">

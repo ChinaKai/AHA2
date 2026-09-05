@@ -3,6 +3,7 @@ package prompt
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"embed"
 	"encoding/json"
 	"fmt"
@@ -43,6 +44,7 @@ type BuildInput struct {
 	Conversation     []domain.ConversationItem
 	Turns            []domain.Turn
 	Hardware         []domain.HardwareGroup
+	AgentAPIURL      string
 	UserMessage      string
 	Handoff          string
 }
@@ -92,7 +94,7 @@ var builtinTemplates = []domain.PromptTemplate{
 	{ID: "channel.web", Name: "AHA Web Channel", Layer: "channel", Description: "Web 渠道消息行为", Editable: true, Required: false, Version: 1},
 	{ID: "policy.auto", Name: "Auto Collaboration", Layer: "policy", Description: "AHA 自动协作策略", Editable: true, Required: false, Version: 1},
 	{ID: "policy.single", Name: "Single Agent", Layer: "policy", Description: "单 Agent 策略", Editable: true, Required: false, Version: 1},
-	{ID: "protocol.checkpoint", Name: "Turn Checkpoint Protocol", Layer: "protocol", Description: "与 checkpoint 解析器绑定的输出协议", Content: checkpointProtocol, Editable: false, Required: true, Version: 1},
+	{ID: "protocol.agent-api", Name: "Agent Control API Protocol", Layer: "protocol", Description: "通过 Agent API 提交结构化状态，最终回复仅保留自然语言", Content: agentAPIProtocol, Editable: false, Required: true, Version: 1},
 }
 
 func (engine *Engine) Templates(ctx context.Context) ([]domain.PromptTemplate, error) {
@@ -199,7 +201,7 @@ func (engine *Engine) Build(ctx context.Context, input BuildInput) (BuildResult,
 		"## Available context\n"+manifestText(resources),
 		"## Current Inbox Batch\n"+strings.TrimSpace(input.UserMessage),
 	)
-	protocol := templateByID["protocol.checkpoint"]
+	protocol := templateByID["protocol.agent-api"]
 	protocolContent, err := renderTemplate(protocol.ID, protocol.Content, data)
 	if err != nil {
 		return BuildResult{}, err
@@ -274,6 +276,9 @@ func buildResources(input BuildInput, root, workDir string) []ContextResource {
 	if len(input.Hardware) > 0 {
 		resources = append(resources, resource(input, "hardware", joinContextPath(input, root, "hardware.md"), "Task 硬件调试配置（不含密码）", hardwareResource(input.Hardware)))
 	}
+	if strings.TrimSpace(input.AgentAPIURL) != "" {
+		resources = append(resources, resource(input, "agent-api", joinContextPath(input, root, "agent-api.md"), "当前 Turn 的受限 Agent API 使用说明", agentAPIResource(input.AgentAPIURL)))
+	}
 	if input.KnowledgeEnabled {
 		resources = append(resources, knowledgeResources(input, root)...)
 	}
@@ -323,7 +328,7 @@ func knowledgeResources(input BuildInput, root string) []ContextResource {
 	directory := joinContextPath(input, root, "knowledge")
 	entries := append([]domain.KnowledgeEntry(nil), input.ProjectKnowledge...)
 	entries = append(entries, input.GlobalKnowledge...)
-	lines := []string{"# Knowledge", "", "Read only entries relevant to the current task. Report actual usage in knowledge_feedback."}
+	lines := []string{"# Knowledge", "", "Read only entries relevant to the current task. Report actual usage through the Agent Knowledge feedback API."}
 	if input.ProductLine.ID != "" {
 		lines = append(lines, "", fmt.Sprintf("Active product line: %s (%s)", input.ProductLine.Name, input.ProductLine.BranchPattern))
 	}
@@ -354,6 +359,15 @@ func skillResources(input BuildInput, root string) []ContextResource {
 		if len(files) == 0 {
 			files = []domain.SkillFile{{Path: "SKILL.md", Content: fmt.Sprintf("---\nname: %s\ndescription: %s\n---\n\n%s\n", skill.Name, skill.Description, skill.Instructions)}}
 		}
+		fileHashes := map[string]string{}
+		for _, file := range files {
+			fileHashes[file.Path] = fmt.Sprintf("%x", sha256.Sum256([]byte(file.Content)))
+		}
+		metadata, _ := json.MarshalIndent(map[string]any{
+			"skill_id": skill.ID, "version": skill.Version, "scope": skill.Scope,
+			"project_id": skill.ProjectID, "files": fileHashes, "writeback": "agent_api",
+		}, "", "  ")
+		resources = append(resources, detailResource(input, "skill-"+skill.ID+"-manifest", joinContextPath(input, packageDirectory, "skill-manifest.json"), skill.Name+" package metadata", string(metadata)))
 		for index, file := range files {
 			filePath := joinContextPath(input, packageDirectory, file.Path)
 			item := detailResource(input, fmt.Sprintf("skill-%s-file-%d", skill.ID, index), filePath, skill.Name+" package file", file.Content)
@@ -441,6 +455,59 @@ func hardwareResource(groups []domain.HardwareGroup) string {
 		lines = append(lines, "", "No hardware groups configured.")
 	}
 	return strings.Join(lines, "\n")
+}
+
+func agentAPIResource(baseURL string) string {
+	return fmt.Sprintf(`# Agent API
+
+The AHA2 control plane exposes a Task-scoped API at %s.
+Use the value of environment variable AHA2_AGENT_API_TOKEN as a Bearer token. Never print, persist, or include that token in a response. The capability expires when this Turn finishes.
+
+Send JSON with Content-Type: application/json. The final assistant response must be natural language only; never append a checkpoint.
+
+## Turn state
+
+- GET /api/v1/agent/capabilities
+- PATCH /api/v1/agent/turn/memory with {"append":{"decisions":[],"facts":[],"excluded":[],"progress":[],"verification":[],"next_actions":[]}}
+- POST /api/v1/agent/turn/messages with {"message":"concise user-facing progress"}
+- POST /api/v1/agent/collaboration/batches with {"actions":[{"agent_id":"sub-001","title":"...","assignment":"...","required":true}],"main_followup":"..."}
+- GET /api/v1/agent/project/workspaces
+- POST /api/v1/agent/tasks with {"workspace_id":"...","title":"...","request":"...","clone_hardware":true}
+- GET /api/v1/agent/tasks/{task}
+
+Only Main may change Memory, Knowledge, Skills, or collaboration. Send material progress promptly through turn/messages. Do not claim an update was sent unless the API returned success.
+
+## Knowledge and Skills
+
+- GET /api/v1/agent/knowledge
+- GET /api/v1/agent/knowledge/{id}
+- POST /api/v1/agent/knowledge/candidates with {"candidates":[{"entry_id":"","base_revision":0,"scope":"project","type":"practice","title":"...","body":"...","confidence":0.8,"product_line_id":""}]}
+- POST /api/v1/agent/knowledge/{id}/feedback with {"kind":"helped|stale|wrong"}
+- GET /api/v1/agent/skills
+- GET /api/v1/agent/skills/{id}
+- PUT /api/v1/agent/skills/{id} with {"base_version":1,"name":"...","description":"...","files":[{"path":"SKILL.md","content":"..."}]}
+
+For an existing Knowledge entry, base_revision is required and conflicts return HTTP 409. Skill updates replace the complete text package, require its current base_version, and are limited to Skills selected by this Task.
+
+## Managed processes
+
+- GET /api/v1/agent/processes
+- POST /api/v1/agent/processes with JSON {"name":"dev-server","executable":"...","args":[],"cwd":"...","env":{}}
+- GET /api/v1/agent/processes/{name}
+- POST /api/v1/agent/processes/{name}/stop
+
+Managed processes are owned by the AHA2 service rather than the Agent subprocess, so they continue after the current Turn. They stop when explicitly requested or when AHA2 itself shuts down. cwd must stay inside the selected Task workspace.
+
+## Hardware
+
+- GET /api/v1/agent/hardware
+- GET /api/v1/agent/hardware/{hardware}/terminal?transport=serial|network&after=0&limit=500
+- POST /api/v1/agent/hardware/{hardware}/connect?transport=serial|network
+- POST /api/v1/agent/hardware/{hardware}/disconnect?transport=serial|network
+- POST /api/v1/agent/hardware/{hardware}/send?transport=serial|network with JSON {"data":"...","encoding":"text|hex"}
+- POST /api/v1/agent/hardware/{hardware}/login?transport=serial|network with configurable prompts, line_ending, wakeup, timeout_seconds, and retries
+
+All requests require Authorization: Bearer $AHA2_AGENT_API_TOKEN. The API cannot change hardware configuration and enforces the Task/hardware read-only rules.`, strings.TrimRight(baseURL, "/"))
 }
 
 func normalizeHardwareSSHAuth(value string) string {

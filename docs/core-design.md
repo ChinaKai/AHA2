@@ -847,7 +847,7 @@ Receive user message
 -> Wait for next user message
 ```
 
-知识更新发生在 Turn 内的重要节点和 Turn checkpoint，而不是只在 Task 完成时执行。
+知识更新通过 Agent API 发生在 Turn 内的重要节点，而不是只在 Task 完成时执行。
 
 ### 9.6 多轮 Session 复用
 
@@ -880,7 +880,7 @@ Agent provides result
 -> Verify goal and evidence
 -> User confirms completion
 -> Save Task Result
--> Final Task Memory checkpoint
+-> Agent API durable Task Memory updates
 -> Reconcile Knowledge Candidates
 -> Record branch and dirty state
 -> User chooses merge / keep / delete branch
@@ -1045,7 +1045,7 @@ Hardware 是 Task 的可选执行资源，不是 Workspace 属性。Task 保存�
 每组独立声明 Serial/Network 连接事实和 `read_only|read_write` 权限；密码只保存
 Secret Store 引用。
 
-真实连接由进程内 Hardware Manager 按物理端点管理，Web 通过受认证 API 连接和
-断开，并使用 xterm.js + WebSocket 交换原始终端字节、状态与 resize；HTTP 增量历史
-保留为查询和兜底。Agent Prompt 只获得 `hardware.md` 的路径，不内联
-密码和完整 I/O 历史。详细约束见 `docs/hardware-debug.md`。
+真实连接由进程内 Hardware Manager 按物理端点管理，Web 通过 Session API 连接；
+Agent 通过 Turn 级 Task-scoped Bearer capability 使用 Agent API。Agent Prompt 获得
+`hardware.md` 与 `agent-api.md` 路径，不内联密码、capability 或完整 I/O 历史。
+详细约束见 `docs/hardware-debug.md` 和 `docs/agent-api.md`。

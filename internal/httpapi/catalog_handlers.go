@@ -472,8 +472,13 @@ func (s *Server) createEnvGroup(writer http.ResponseWriter, request *http.Reques
 }
 
 func (s *Server) audit(request *http.Request, action, resourceType, resourceID string, data map[string]any) {
-	session, _ := sessionFromContext(request.Context())
-	_ = s.store.AppendAudit(request.Context(), session.OwnerID, action, resourceType, resourceID, data, time.Now().UTC().Format(time.RFC3339Nano))
+	actor := ""
+	if session, ok := sessionFromContext(request.Context()); ok {
+		actor = session.OwnerID
+	} else if claims, ok := agentClaimsFromContext(request.Context()); ok {
+		actor = "agent:" + claims.AgentID
+	}
+	_ = s.store.AppendAudit(request.Context(), actor, action, resourceType, resourceID, data, time.Now().UTC().Format(time.RFC3339Nano))
 }
 
 func queryInt(request *http.Request, key string, fallback int64) int64 {

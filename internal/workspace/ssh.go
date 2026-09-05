@@ -1,7 +1,6 @@
 package workspace
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
@@ -72,11 +71,11 @@ func (runner SSHRunner) Run(parent context.Context, command Command, onLine Line
 	if err != nil {
 		return Result{}, err
 	}
-	var stdout, stderr bytes.Buffer
+	stdout, stderr := newOutputBuffer(command.OutputLimit), newOutputBuffer(command.OutputLimit)
 	var wait sync.WaitGroup
 	wait.Add(2)
-	go scanOutput(stdoutPipe, &stdout, onLine, &wait)
-	go scanOutput(stderrPipe, &stderr, nil, &wait)
+	go scanOutput(stdoutPipe, stdout, onLine, &wait)
+	go scanOutput(stderrPipe, stderr, nil, &wait)
 	done := make(chan error, 1)
 	go func() { done <- session.Run("sh -s") }()
 	var runErr error

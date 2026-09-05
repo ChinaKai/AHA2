@@ -472,30 +472,6 @@ func (s *Service) scheduleAgent(ctx context.Context, taskID, agentID string) (do
 	return turn, true, nil
 }
 
-func (s *Service) agentActionsMayRun(ctx context.Context, task domain.Task, actions []AgentAction) bool {
-	if task.CollaborationMode != "auto" || len(actions) == 0 {
-		return false
-	}
-	agents, err := s.store.ListTaskAgents(ctx, task.ID)
-	if err != nil {
-		return false
-	}
-	existing := make(map[string]bool, len(agents))
-	for _, item := range agents {
-		existing[item.AgentID] = true
-	}
-	for index, action := range actions {
-		if strings.TrimSpace(action.Assignment) == "" {
-			continue
-		}
-		agentID := normalizedSubAgentID(action.AgentID, index+1)
-		if existing[agentID] || len(agents) < task.MaxAgents {
-			return true
-		}
-	}
-	return false
-}
-
 func inboxInstruction(items []domain.AgentInboxItem) string {
 	var sections []string
 	sections = append(sections, "Process the following messages routed to you by AHA. They are a fixed inbox batch. Preserve their order and source boundaries.")
@@ -801,13 +777,7 @@ func (s *Service) retrySubAgent(ctx context.Context, turn domain.Turn) bool {
 	return true
 }
 
-func (s *Service) afterTurnTerminal(
-	ctx context.Context,
-	task domain.Task,
-	turn domain.Turn,
-	actions []AgentAction,
-	mainFollowup string,
-) {
+func (s *Service) afterTurnTerminal(ctx context.Context, task domain.Task, turn domain.Turn) {
 	_ = s.store.MarkInboxBatchProcessed(ctx, turn.InboxBatchID, s.now().UTC())
 	if s.retrySubAgent(ctx, turn) {
 		s.settleRound(ctx, task.ID, turn.RoundID)
@@ -821,19 +791,6 @@ func (s *Service) afterTurnTerminal(
 		status = "interrupted"
 	}
 	_ = s.store.UpdateTaskAgentStatus(ctx, task.ID, turn.AgentID, status, s.now().UTC())
-	createdAgents := 0
-	if turn.AgentID == "main" && turn.Status == domain.TurnSucceeded && len(actions) > 0 {
-		createdAgents = s.spawnAgentTurns(ctx, task, turn, actions)
-	}
-	if createdAgents > 0 && strings.TrimSpace(mainFollowup) != "" {
-		now := s.now().UTC()
-		_, _ = s.store.EnqueueAgentRoute(ctx, domain.AgentInboxItem{
-			ID: domain.NewID("inbox"), TaskID: task.ID, RoundID: turn.RoundID,
-			TargetAgentID: "main", SourceAgentID: "aha", SourceKind: "main_followup",
-			SourceTurnID: turn.ID, Content: strings.TrimSpace(mainFollowup),
-			Payload: map[string]any{"parent_turn_id": turn.ID}, Status: "pending", CreatedAt: now,
-		})
-	}
 	routedOutcome := false
 	if turn.AgentID != "main" {
 		routedOutcome = s.routeAgentOutcome(ctx, task, turn)

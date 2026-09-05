@@ -30,6 +30,9 @@ func runProcess(parent context.Context, command Command, env []string, onLine Li
 	defer cancel()
 	start := time.Now()
 	process := exec.CommandContext(ctx, command.Executable, command.Args...)
+	if command.KillTree {
+		configureProcessTree(process)
+	}
 	process.Dir = command.Dir
 	process.Env = env
 	process.Stdin = strings.NewReader(command.Stdin)
@@ -44,11 +47,11 @@ func runProcess(parent context.Context, command Command, env []string, onLine Li
 	if err := process.Start(); err != nil {
 		return Result{}, err
 	}
-	var stdout, stderr bytes.Buffer
+	stdout, stderr := newOutputBuffer(command.OutputLimit), newOutputBuffer(command.OutputLimit)
 	var wait sync.WaitGroup
 	wait.Add(2)
-	go scanOutput(stdoutPipe, &stdout, onLine, &wait)
-	go scanOutput(stderrPipe, &stderr, nil, &wait)
+	go scanOutput(stdoutPipe, stdout, onLine, &wait)
+	go scanOutput(stderrPipe, stderr, nil, &wait)
 	processErr := process.Wait()
 	wait.Wait()
 	result := Result{Stdout: stdout.String(), Stderr: stderr.String(), Duration: time.Since(start)}
@@ -68,18 +71,45 @@ func runProcess(parent context.Context, command Command, env []string, onLine Li
 	return result, nil
 }
 
-func scanOutput(reader io.Reader, destination *bytes.Buffer, handler LineHandler, wait *sync.WaitGroup) {
+func scanOutput(reader io.Reader, destination io.Writer, handler LineHandler, wait *sync.WaitGroup) {
 	defer wait.Done()
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	for scanner.Scan() {
 		line := scanner.Text()
-		destination.WriteString(line)
-		destination.WriteByte('\n')
+		_, _ = io.WriteString(destination, line+"\n")
 		if handler != nil {
 			handler(line)
 		}
 	}
+}
+
+type outputBuffer struct {
+	bytes.Buffer
+	limit int
+}
+
+func newOutputBuffer(limit int) *outputBuffer { return &outputBuffer{limit: limit} }
+
+func (buffer *outputBuffer) Write(value []byte) (int, error) {
+	written := len(value)
+	if buffer.limit <= 0 {
+		_, err := buffer.Buffer.Write(value)
+		return written, err
+	}
+	if len(value) >= buffer.limit {
+		buffer.Buffer.Reset()
+		_, err := buffer.Buffer.Write(value[len(value)-buffer.limit:])
+		return written, err
+	}
+	overflow := buffer.Len() + len(value) - buffer.limit
+	if overflow > 0 {
+		current := append([]byte(nil), buffer.Buffer.Bytes()[overflow:]...)
+		buffer.Buffer.Reset()
+		_, _ = buffer.Buffer.Write(current)
+	}
+	_, err := buffer.Buffer.Write(value)
+	return written, err
 }
 
 func mergeEnvironment(base []string, overrides map[string]string) []string {

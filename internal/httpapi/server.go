@@ -8,43 +8,49 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ChinaKai/AHA2/internal/agentapi"
 	"github.com/ChinaKai/AHA2/internal/app"
 	"github.com/ChinaKai/AHA2/internal/auth"
 	"github.com/ChinaKai/AHA2/internal/codexaccount"
 	"github.com/ChinaKai/AHA2/internal/domain"
 	"github.com/ChinaKai/AHA2/internal/hardware"
+	"github.com/ChinaKai/AHA2/internal/managedprocess"
 	"github.com/ChinaKai/AHA2/internal/store"
 )
 
 const sessionCookieName = "aha2_session"
 
 type Config struct {
-	Store            *store.Store
-	Auth             *auth.Service
-	App              *app.Service
-	Web              fs.FS
-	Logger           *slog.Logger
-	SecureCookie     bool
-	AllowCrossOrigin bool
-	DetectWorkspace  func(context.Context, domain.Workspace) (domain.Workspace, error)
-	Secrets          SecretStore
-	Hardware         *hardware.Manager
-	CodexAccounts    *codexaccount.Manager
+	Store             *store.Store
+	Auth              *auth.Service
+	App               *app.Service
+	Web               fs.FS
+	Logger            *slog.Logger
+	SecureCookie      bool
+	AllowCrossOrigin  bool
+	DetectWorkspace   func(context.Context, domain.Workspace) (domain.Workspace, error)
+	Secrets           SecretStore
+	Hardware          *hardware.Manager
+	CodexAccounts     *codexaccount.Manager
+	AgentCapabilities *agentapi.Capabilities
+	ManagedProcesses  *managedprocess.Manager
 }
 
 type Server struct {
-	store            *store.Store
-	auth             *auth.Service
-	app              *app.Service
-	web              fs.FS
-	logger           *slog.Logger
-	secureCookie     bool
-	allowCrossOrigin bool
-	detectWorkspace  func(context.Context, domain.Workspace) (domain.Workspace, error)
-	secrets          SecretStore
-	hardware         *hardware.Manager
-	codexAccounts    *codexaccount.Manager
-	authLimiter      *authLimiter
+	store             *store.Store
+	auth              *auth.Service
+	app               *app.Service
+	web               fs.FS
+	logger            *slog.Logger
+	secureCookie      bool
+	allowCrossOrigin  bool
+	detectWorkspace   func(context.Context, domain.Workspace) (domain.Workspace, error)
+	secrets           SecretStore
+	hardware          *hardware.Manager
+	codexAccounts     *codexaccount.Manager
+	agentCapabilities *agentapi.Capabilities
+	managedProcesses  *managedprocess.Manager
+	authLimiter       *authLimiter
 }
 
 func New(config Config) *Server {
@@ -55,11 +61,13 @@ func New(config Config) *Server {
 	return &Server{
 		store: config.Store, auth: config.Auth, app: config.App, web: config.Web,
 		logger: logger, secureCookie: config.SecureCookie, allowCrossOrigin: config.AllowCrossOrigin,
-		detectWorkspace: config.DetectWorkspace,
-		secrets:         config.Secrets,
-		hardware:        config.Hardware,
-		codexAccounts:   config.CodexAccounts,
-		authLimiter:     newAuthLimiter(),
+		detectWorkspace:   config.DetectWorkspace,
+		secrets:           config.Secrets,
+		hardware:          config.Hardware,
+		codexAccounts:     config.CodexAccounts,
+		agentCapabilities: config.AgentCapabilities,
+		managedProcesses:  config.ManagedProcesses,
+		authLimiter:       newAuthLimiter(),
 	}
 }
 
@@ -132,6 +140,30 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/tasks/{id}/hardware/{hardware}/connect", s.withAuth(http.HandlerFunc(s.connectHardware)))
 	mux.Handle("POST /api/v1/tasks/{id}/hardware/{hardware}/disconnect", s.withAuth(http.HandlerFunc(s.disconnectHardware)))
 	mux.Handle("POST /api/v1/tasks/{id}/hardware/{hardware}/send", s.withAuth(http.HandlerFunc(s.sendHardware)))
+	mux.Handle("GET /api/v1/agent/hardware", s.withAgentCapability(http.HandlerFunc(s.agentHardware)))
+	mux.Handle("GET /api/v1/agent/hardware/{hardware}/terminal", s.withAgentCapability(http.HandlerFunc(s.agentHardwareTerminal)))
+	mux.Handle("POST /api/v1/agent/hardware/{hardware}/connect", s.withAgentCapability(http.HandlerFunc(s.agentConnectHardware)))
+	mux.Handle("POST /api/v1/agent/hardware/{hardware}/disconnect", s.withAgentCapability(http.HandlerFunc(s.agentDisconnectHardware)))
+	mux.Handle("POST /api/v1/agent/hardware/{hardware}/send", s.withAgentCapability(http.HandlerFunc(s.agentSendHardware)))
+	mux.Handle("POST /api/v1/agent/hardware/{hardware}/login", s.withAgentCapability(http.HandlerFunc(s.agentLoginHardware)))
+	mux.Handle("GET /api/v1/agent/processes", s.withAgentCapability(http.HandlerFunc(s.agentProcesses)))
+	mux.Handle("POST /api/v1/agent/processes", s.withAgentCapability(http.HandlerFunc(s.startAgentProcess)))
+	mux.Handle("GET /api/v1/agent/processes/{name}", s.withAgentCapability(http.HandlerFunc(s.agentProcessStatus)))
+	mux.Handle("POST /api/v1/agent/processes/{name}/stop", s.withAgentCapability(http.HandlerFunc(s.stopAgentProcess)))
+	mux.Handle("GET /api/v1/agent/capabilities", s.withAgentCapability(http.HandlerFunc(s.agentCapabilitiesInfo)))
+	mux.Handle("PATCH /api/v1/agent/turn/memory", s.withAgentCapability(http.HandlerFunc(s.updateAgentMemory)))
+	mux.Handle("POST /api/v1/agent/turn/messages", s.withAgentCapability(http.HandlerFunc(s.addAgentProgressMessage)))
+	mux.Handle("GET /api/v1/agent/knowledge", s.withAgentCapability(http.HandlerFunc(s.agentKnowledge)))
+	mux.Handle("GET /api/v1/agent/knowledge/{knowledge}", s.withAgentCapability(http.HandlerFunc(s.agentKnowledgeEntry)))
+	mux.Handle("POST /api/v1/agent/knowledge/candidates", s.withAgentCapability(http.HandlerFunc(s.submitAgentKnowledge)))
+	mux.Handle("POST /api/v1/agent/knowledge/{knowledge}/feedback", s.withAgentCapability(http.HandlerFunc(s.submitAgentKnowledgeFeedback)))
+	mux.Handle("POST /api/v1/agent/collaboration/batches", s.withAgentCapability(http.HandlerFunc(s.submitAgentCollaboration)))
+	mux.Handle("GET /api/v1/agent/skills", s.withAgentCapability(http.HandlerFunc(s.agentSkills)))
+	mux.Handle("GET /api/v1/agent/skills/{skill}", s.withAgentCapability(http.HandlerFunc(s.agentSkill)))
+	mux.Handle("PUT /api/v1/agent/skills/{skill}", s.withAgentCapability(http.HandlerFunc(s.updateAgentSkill)))
+	mux.Handle("GET /api/v1/agent/project/workspaces", s.withAgentCapability(http.HandlerFunc(s.agentProjectWorkspaces)))
+	mux.Handle("POST /api/v1/agent/tasks", s.withAgentCapability(http.HandlerFunc(s.createAgentTask)))
+	mux.Handle("GET /api/v1/agent/tasks/{task}", s.withAgentCapability(http.HandlerFunc(s.agentTaskStatus)))
 	mux.Handle("PATCH /api/v1/tasks/{id}", s.withAuth(http.HandlerFunc(s.updateTaskTitle)))
 	mux.Handle("POST /api/v1/tasks/{id}/complete", s.withAuth(http.HandlerFunc(s.completeTask)))
 	mux.Handle("POST /api/v1/tasks/{id}/reopen", s.withAuth(http.HandlerFunc(s.reopenTask)))

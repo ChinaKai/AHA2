@@ -42,15 +42,9 @@ func list(title string, values []string) string {
 	return "- " + title + ":\n  - " + strings.Join(values, "\n  - ")
 }
 
-const checkpointProtocol = `Before ending this turn, append exactly one machine-readable checkpoint after the user-facing response:
+const agentAPIProtocol = `Use the Task-scoped Agent Control API described in agent-api.md for all structured state changes.
 
-<aha2_checkpoint>
-{"decisions":[],"facts":[],"excluded":[],"progress":[],"verification":[],"next_actions":[],"knowledge_candidates":[{"entry_id":"","scope":"project","type":"practice","title":"","body":"","confidence":0.8,"product_line_id":""}],"knowledge_feedback":[{"entry_id":"","kind":"helped"}],"main_followup":"","agent_actions":[{"agent_id":"sub-001","title":"focused assignment","assignment":"complete, self-contained work with disjoint ownership and validation target","required":true,"backend":"","model_id":"","reasoning_effort":"","filesystem":"","approval":""}]}
-</aha2_checkpoint>
-
-Only include durable, evidence-backed information. Omit empty knowledge candidates.
-When Knowledge resources are available, report actual usage as helped, stale, or wrong. Update an existing entry by setting entry_id. Project knowledge with strong verified evidence is published in the same turn; global knowledge remains review-gated.
-Only the main agent may request agent_actions. Set main_followup when main should immediately continue its own disjoint work in parallel after AHA starts the requested sub-agents; otherwise leave it empty. Omitted runtime fields inherit the main Agent's current configuration. AHA enforces the Task's collaboration mode and maximum Agent count. Sub-agents must leave agent_actions empty and main_followup empty.
-Never call backend-native spawn-agent, collaboration, fanout, or delegation tools. AHA is the only Agent orchestrator.
-Send concise intermediate assistant progress messages as separate messages when work state changes. If the user requests timed or repeated updates, emit every actual update separately at the requested interval. Never claim that updates were sent when no corresponding assistant messages were emitted.
-Do not expose credentials or secret environment values in the response, events, artifacts, task memory, or knowledge.`
+Submit durable Task Memory updates, Knowledge candidates and feedback, Skill package changes, collaboration requests, and intermediate user-facing progress through the API while working. The API token binds the current Task, Agent, and Turn; never print, persist, or include it in a response.
+Only the main agent may update Task Memory, publish Knowledge, change Skills, or request collaboration. Sub-agents send their result naturally and may submit progress and Knowledge feedback.
+Never use backend-native spawn, fanout, delegation, or multi-agent tools. AHA is the only Agent orchestrator.
+The final response must contain only the concise user-facing natural-language conclusion. Do not append JSON, XML, checkpoints, hidden state, or machine-readable protocols.`

@@ -10,14 +10,42 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ChinaKai/AHA2/internal/agentapi"
 	"github.com/ChinaKai/AHA2/internal/domain"
 )
 
 type sessionContextKey struct{}
+type agentClaimsContextKey struct{}
 
 func sessionFromContext(ctx context.Context) (domain.Session, bool) {
 	session, ok := ctx.Value(sessionContextKey{}).(domain.Session)
 	return session, ok
+}
+
+func agentClaimsFromContext(ctx context.Context) (agentapi.Claims, bool) {
+	claims, ok := ctx.Value(agentClaimsContextKey{}).(agentapi.Claims)
+	return claims, ok
+}
+
+func (s *Server) withAgentCapability(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if s.agentCapabilities == nil {
+			writeError(writer, http.StatusServiceUnavailable, "agent_api_unavailable")
+			return
+		}
+		scheme, token, ok := strings.Cut(strings.TrimSpace(request.Header.Get("Authorization")), " ")
+		if !ok || !strings.EqualFold(scheme, "Bearer") {
+			writeError(writer, http.StatusUnauthorized, "agent_capability_required")
+			return
+		}
+		claims, err := s.agentCapabilities.Authenticate(strings.TrimSpace(token))
+		if err != nil {
+			writeError(writer, http.StatusUnauthorized, "agent_capability_invalid")
+			return
+		}
+		ctx := context.WithValue(request.Context(), agentClaimsContextKey{}, claims)
+		next.ServeHTTP(writer, request.WithContext(ctx))
+	})
 }
 
 func (s *Server) withAuth(next http.Handler) http.Handler {

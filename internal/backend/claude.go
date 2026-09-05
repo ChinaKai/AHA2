@@ -179,6 +179,7 @@ func filterClaudeEnvironment(values map[string]string) map[string]string {
 	allowed := map[string]bool{
 		"ANTHROPIC_API_KEY": true, "ANTHROPIC_AUTH_TOKEN": true, "ANTHROPIC_BASE_URL": true,
 		"ANTHROPIC_MODEL": true, "CLAUDE_CODE_MAX_CONTEXT_TOKENS": true,
+		"AHA2_AGENT_API_URL": true, "AHA2_AGENT_API_TOKEN": true,
 		"HTTP_PROXY": true, "HTTPS_PROXY": true, "NO_PROXY": true,
 	}
 	result := map[string]string{}

@@ -85,6 +85,23 @@ python C:\Users\toope\AppData\Local\AHA\aha managed-process status aha2-v1
 python C:\Users\toope\AppData\Local\AHA\aha managed-process stop aha2-v1
 ```
 
+本地 Agent 构建并部署时使用选中的 `aha2-local-build` Skill：先构建 staging 二进制，
+再由宿主 AHA `managed-process` 启动独立部署 Worker；Worker 停止服务、备份运行数据与旧二进制、替换并重启，最后
+检查 `http://127.0.0.1:8766/healthz`；失败时恢复旧二进制。AHA2 自身的 Agent API
+只适合托管普通 Task 进程，不能用于安全地重启 AHA2 自身。
+
+远程 Workspace 使用 Agent API 时还需在启动参数中配置可达基址：
+
+```text
+--agent-api-url https://<AHA2-host>
+```
+
+非 loopback 的 `http://` URL 默认拒绝启动。只允许在受信开发网络中临时追加：
+
+```text
+--allow-insecure-agent-api
+```
+
 ## 构建产物
 
 `dist/` 包含：

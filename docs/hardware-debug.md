@@ -53,6 +53,8 @@ Network：
   默认端口 22。
 - 配置用户名/密码后，只在检测到 `login:`/`username:`/`password:` 时自动发送。
 - 密码发送记录固定显示为 `<password>`。
+- Agent 可调用显式 `login` API，按设备覆盖提示、换行、唤醒、超时和重试；提示匹配
+  使用跨读取块缓冲，Terminal status 返回登录状态。
 
 SSH 支持密码、keyboard-interactive 和用户目录中未加密的
 `~/.ssh/id_ed25519`、`id_ecdsa`、`id_rsa`。主机密钥必须匹配
@@ -111,6 +113,18 @@ WebSocket 不可用时的兜底。
 该文件包含硬件组描述、连接方式、权限、用户名和
 `password configured: true|false`，不包含密码或 Secret 引用。
 
+Agent Turn 同时获得 `agent-api.md`、`AHA2_AGENT_API_URL` 和仅存于进程环境的
+`AHA2_AGENT_API_TOKEN`。Agent 使用 Bearer Token 调用 `/api/v1/agent/hardware`
+命名空间；服务端从 capability 绑定 Task，不接受客户端指定 Task ID。Token 不写入
+Context、SQLite、Event 或日志，并在 Turn 结束时撤销。该 API 只提供列表、连接、
+断开、历史和 TX，不允许 Agent 修改硬件配置。
+
+Agent 还可调用：
+
+```text
+POST /api/v1/agent/hardware/{hardware}/login?transport=serial|network
+```
+
 ## Web
 
 Task 标题栏 Hardware 图标继续使用统一的全尺寸工具面板，终端内核为
@@ -138,7 +152,7 @@ coder/websocket 的许可证分别保存在 `web/vendor/xterm.LICENSE` 和
 - Armed rules
 - 继电器、刷写、复位等板级协议
 - 串口 owner takeover
-- Agent 专用 Hardware CLI/capability token
+- Agent Hardware WebSocket（Agent 先使用 HTTP 增量历史）
 
 这些能力应在基础连接稳定后通过 Skills 和受控工具逐项加入，不能在通用硬件层
 猜测设备协议或默认执行状态变更。

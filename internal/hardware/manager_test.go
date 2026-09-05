@@ -160,10 +160,13 @@ func TestManagerNetworkTelnetAndAutoLogin(t *testing.T) {
 	go func() {
 		buffer := make([]byte, 128)
 		_, _ = server.Read(buffer)
-		_, _ = server.Write([]byte("login:"))
+		_, _ = server.Write([]byte("log"))
+		_, _ = server.Write([]byte("in:"))
 		_, _ = server.Read(buffer)
-		_, _ = server.Write([]byte("password:"))
+		_, _ = server.Write([]byte("pass"))
+		_, _ = server.Write([]byte("word:"))
 		_, _ = server.Read(buffer)
+		_, _ = server.Write([]byte("welcome\r\n# "))
 	}()
 	if _, err := manager.Connect(context.Background(), ConnectRequest{
 		TaskID: "task-1", HardwareID: group.ID, Transport: "network", Group: group, Password: "secret",
@@ -172,6 +175,7 @@ func TestManagerNetworkTelnetAndAutoLogin(t *testing.T) {
 	}
 	waitForHardwareEvent(t, recorder, "tx", "root\\r\\n")
 	waitForHardwareEvent(t, recorder, "tx", "<password>\\r\\n")
+	waitForHardwareLoginStatus(t, manager, "authenticated")
 	recorder.mu.Lock()
 	defer recorder.mu.Unlock()
 	for _, item := range recorder.events {
@@ -179,6 +183,84 @@ func TestManagerNetworkTelnetAndAutoLogin(t *testing.T) {
 			t.Fatal("password leaked into hardware history")
 		}
 	}
+}
+
+func TestManagerExplicitSerialLoginWakesConsoleAndUsesConfiguredLineEnding(t *testing.T) {
+	t.Parallel()
+	recorder := &memoryRecorder{}
+	manager := NewManager(recorder)
+	device, bridge := net.Pipe()
+	manager.openSerial = func(string, int) (io.ReadWriteCloser, error) { return device, nil }
+	defer manager.Close()
+	defer bridge.Close()
+	group := domain.HardwareGroup{
+		ID: "board", Mode: domain.HardwareModeSerial,
+		Serial:   domain.HardwareSerialConfig{Device: "COM3", Baudrate: 115200},
+		Username: "root", Access: domain.HardwareAccessReadWrite,
+	}
+	if _, err := manager.Connect(context.Background(), ConnectRequest{
+		TaskID: "task-1", HardwareID: group.ID, Transport: "serial", Group: group, Password: "secret",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	received := make(chan string, 3)
+	go func() {
+		buffer := make([]byte, 64)
+		for index := 0; index < 3; index++ {
+			count, _ := bridge.Read(buffer)
+			received <- string(buffer[:count])
+		}
+	}()
+	status, err := manager.Login("task-1", "board", "serial", LoginOptions{Wakeup: true, LineEnding: "lf", TimeoutSeconds: 5})
+	if err != nil || status.LoginStatus != "waiting" {
+		t.Fatalf("login: %#v %v", status, err)
+	}
+	if value := <-received; value != "\n" {
+		t.Fatalf("wakeup = %q", value)
+	}
+	_, _ = bridge.Write([]byte("login:"))
+	if value := <-received; value != "root\n" {
+		t.Fatalf("username = %q", value)
+	}
+	_, _ = bridge.Write([]byte("password:"))
+	if value := <-received; value != "secret\n" {
+		t.Fatalf("password write mismatch")
+	}
+	_, _ = bridge.Write([]byte("ready\n# "))
+	waitForHardwareLoginStatus(t, manager, "authenticated")
+}
+
+func TestManagerExplicitSerialLoginRecognizesExistingShell(t *testing.T) {
+	t.Parallel()
+	manager := NewManager(&memoryRecorder{})
+	device, bridge := net.Pipe()
+	manager.openSerial = func(string, int) (io.ReadWriteCloser, error) { return device, nil }
+	defer manager.Close()
+	defer bridge.Close()
+	group := domain.HardwareGroup{
+		ID: "board", Mode: domain.HardwareModeSerial,
+		Serial:   domain.HardwareSerialConfig{Device: "COM3", Baudrate: 115200},
+		Username: "root", Access: domain.HardwareAccessReadWrite,
+	}
+	if _, err := manager.Connect(context.Background(), ConnectRequest{
+		TaskID: "task-1", HardwareID: group.ID, Transport: "serial", Group: group, Password: "secret",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	wakeup := make(chan string, 1)
+	go func() {
+		buffer := make([]byte, 16)
+		count, _ := bridge.Read(buffer)
+		wakeup <- string(buffer[:count])
+	}()
+	if _, err := manager.Login("task-1", "board", "serial", LoginOptions{Wakeup: true, TimeoutSeconds: 5}); err != nil {
+		t.Fatal(err)
+	}
+	if value := <-wakeup; value != "\r\n" {
+		t.Fatalf("unexpected wakeup %q", value)
+	}
+	_, _ = bridge.Write([]byte("[root@board:~]# "))
+	waitForHardwareLoginStatus(t, manager, "authenticated")
 }
 
 func TestManagerNetworkSSHUsesInteractiveTerminal(t *testing.T) {
@@ -302,4 +384,19 @@ func waitForHardwareEvent(t *testing.T, recorder *memoryRecorder, direction, dat
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("event not recorded: %s %q", direction, data)
+}
+
+func waitForHardwareLoginStatus(t *testing.T, manager *Manager, expected string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if status := manager.Status("task-1", "board", "serial", false); status.LoginStatus == expected {
+			return
+		}
+		if status := manager.Status("task-1", "board", "network", false); status.LoginStatus == expected {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("login status did not reach %s", expected)
 }

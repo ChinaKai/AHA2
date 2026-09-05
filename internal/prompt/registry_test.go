@@ -45,6 +45,7 @@ func TestEngineRoutesTemplatesAndBuildsContextManifest(t *testing.T) {
 			{Path: "scripts/check.sh", Content: "echo reviewed"},
 		}}},
 		KnowledgeEnabled: true,
+		AgentAPIURL:      "http://127.0.0.1:8766",
 		Hardware: []domain.HardwareGroup{{
 			ID: "board", Description: "Main board", Mode: domain.HardwareModeBoth,
 			Serial:   domain.HardwareSerialConfig{Device: "COM3", Baudrate: 115200},
@@ -58,10 +59,13 @@ func TestEngineRoutesTemplatesAndBuildsContextManifest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, expected := range []string{"CUSTOM MAIN main", "fixed inbox", ".aha2-context", "manifest.json", "Turn Checkpoint Protocol"} {
+	for _, expected := range []string{"CUSTOM MAIN main", "fixed inbox", ".aha2-context", "manifest.json", "Agent Control API Protocol", "agent-api.md"} {
 		if !strings.Contains(preview.EffectivePrompt, expected) {
 			t.Fatalf("effective prompt missing %q: %s", expected, preview.EffectivePrompt)
 		}
+	}
+	if strings.Contains(preview.EffectivePrompt, "aha2_checkpoint") || strings.Contains(preview.EffectivePrompt, "Turn Checkpoint Protocol") {
+		t.Fatal("legacy checkpoint protocol remained in the prompt")
 	}
 	if strings.Contains(preview.EffectivePrompt, strings.Repeat("knowledge", 20)) ||
 		strings.Contains(preview.EffectivePrompt, strings.Repeat("large", 20)) {

@@ -318,7 +318,8 @@ func filterEnvironment(values map[string]string) map[string]string {
 	allowed := map[string]bool{
 		"OPENAI_API_KEY": true, "OPENAI_BASE_URL": true, "OPENAI_MODEL": true,
 		"CODEX_WIRE_API": true, "CODEX_ENV_KEY": true, "AHA_PROVIDER_ID": true,
-		"CODEX_HOME": true,
+		"CODEX_HOME":         true,
+		"AHA2_AGENT_API_URL": true, "AHA2_AGENT_API_TOKEN": true,
 		"HTTP_PROXY": true, "HTTPS_PROXY": true, "NO_PROXY": true,
 	}
 	result := map[string]string{}

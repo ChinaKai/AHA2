@@ -2,9 +2,7 @@ package execution
 
 import (
 	"context"
-	"encoding/json"
 	"strconv"
-	"strings"
 
 	"github.com/ChinaKai/AHA2/internal/app"
 	"github.com/ChinaKai/AHA2/internal/backend"
@@ -34,10 +32,8 @@ func (executor Executor) runCodex(ctx context.Context, request app.ExecutionRequ
 	}, func(event backend.Event) {
 		emit(app.ExecutionEvent{Type: event.Type, Data: event.Data})
 	})
-	reply, patch, candidates, feedback, actions, mainFollowup := parseCheckpoint(result.Reply)
 	return app.ExecutionResult{
-		Reply: reply, ExitCode: result.ExitCode, ProviderSessionID: result.ProviderSessionID,
-		MainFollowup: mainFollowup, MemoryPatch: patch, KnowledgeCandidates: candidates, KnowledgeFeedback: feedback, AgentActions: actions,
+		Reply: result.Reply, ExitCode: result.ExitCode, ProviderSessionID: result.ProviderSessionID,
 	}, err
 }
 
@@ -59,10 +55,8 @@ func (executor Executor) runClaude(ctx context.Context, request app.ExecutionReq
 	}, func(event backend.Event) {
 		emit(app.ExecutionEvent{Type: event.Type, Data: event.Data})
 	})
-	reply, patch, candidates, feedback, actions, mainFollowup := parseCheckpoint(result.Reply)
 	return app.ExecutionResult{
-		Reply: reply, ExitCode: result.ExitCode, ProviderSessionID: result.ProviderSessionID,
-		MainFollowup: mainFollowup, MemoryPatch: patch, KnowledgeCandidates: candidates, KnowledgeFeedback: feedback, AgentActions: actions,
+		Reply: result.Reply, ExitCode: result.ExitCode, ProviderSessionID: result.ProviderSessionID,
 	}, err
 }
 
@@ -71,152 +65,4 @@ func taskWorkDir(request app.ExecutionRequest) string {
 		return request.Task.TaskWorkspacePath
 	}
 	return request.Workspace.RootPath
-}
-
-type checkpointPayload struct {
-	Decisions         json.RawMessage `json:"decisions"`
-	Facts             json.RawMessage `json:"facts"`
-	Excluded          json.RawMessage `json:"excluded"`
-	Progress          json.RawMessage `json:"progress"`
-	Verification      json.RawMessage `json:"verification"`
-	NextActions       json.RawMessage `json:"next_actions"`
-	Knowledge         json.RawMessage `json:"knowledge_candidates"`
-	KnowledgeFeedback json.RawMessage `json:"knowledge_feedback"`
-	MainFollowup      string          `json:"main_followup"`
-	AgentActions      json.RawMessage `json:"agent_actions"`
-}
-
-type checkpointKnowledge struct {
-	EntryID       string  `json:"entry_id"`
-	Scope         string  `json:"scope"`
-	Type          string  `json:"type"`
-	Title         string  `json:"title"`
-	Body          string  `json:"body"`
-	Confidence    float64 `json:"confidence"`
-	ProductLineID string  `json:"product_line_id"`
-}
-
-type checkpointKnowledgeFeedback struct {
-	EntryID string `json:"entry_id"`
-	Kind    string `json:"kind"`
-}
-
-type checkpointAgentAction struct {
-	AgentID         string `json:"agent_id"`
-	Title           string `json:"title"`
-	Assignment      string `json:"assignment"`
-	Required        *bool  `json:"required"`
-	Backend         string `json:"backend"`
-	ModelID         string `json:"model_id"`
-	ReasoningEffort string `json:"reasoning_effort"`
-	Filesystem      string `json:"filesystem"`
-	Approval        string `json:"approval"`
-}
-
-func parseCheckpoint(reply string) (string, app.MemoryPatch, []app.KnowledgeCandidate, []app.KnowledgeFeedback, []app.AgentAction, string) {
-	const startMarker = "<aha2_checkpoint>"
-	const endMarker = "</aha2_checkpoint>"
-	start := strings.LastIndex(reply, startMarker)
-	end := strings.LastIndex(reply, endMarker)
-	if start < 0 || end <= start {
-		return strings.TrimSpace(reply), app.MemoryPatch{}, nil, nil, nil, ""
-	}
-	var payload checkpointPayload
-	raw := strings.TrimSpace(reply[start+len(startMarker) : end])
-	if json.Unmarshal([]byte(raw), &payload) != nil {
-		return strings.TrimSpace(reply), app.MemoryPatch{}, nil, nil, nil, ""
-	}
-	visible := strings.TrimSpace(reply[:start] + reply[end+len(endMarker):])
-	patch := app.MemoryPatch{
-		Decisions: checkpointStrings(payload.Decisions), Facts: checkpointStrings(payload.Facts),
-		Excluded: checkpointStrings(payload.Excluded), Progress: checkpointStrings(payload.Progress),
-		Verification: checkpointStrings(payload.Verification), NextActions: checkpointStrings(payload.NextActions),
-	}
-	var knowledge []checkpointKnowledge
-	_ = json.Unmarshal(payload.Knowledge, &knowledge)
-	candidates := make([]app.KnowledgeCandidate, 0, len(knowledge))
-	for _, item := range knowledge {
-		if strings.TrimSpace(item.Title) == "" || strings.TrimSpace(item.Body) == "" {
-			continue
-		}
-		candidates = append(candidates, app.KnowledgeCandidate{
-			EntryID: strings.TrimSpace(item.EntryID), Scope: item.Scope, Type: item.Type, Title: item.Title,
-			Body: item.Body, Confidence: item.Confidence, ProductLineID: strings.TrimSpace(item.ProductLineID),
-		})
-	}
-	var rawFeedback []checkpointKnowledgeFeedback
-	_ = json.Unmarshal(payload.KnowledgeFeedback, &rawFeedback)
-	feedback := make([]app.KnowledgeFeedback, 0, len(rawFeedback))
-	for _, item := range rawFeedback {
-		if strings.TrimSpace(item.EntryID) != "" {
-			feedback = append(feedback, app.KnowledgeFeedback{EntryID: strings.TrimSpace(item.EntryID), Kind: strings.TrimSpace(item.Kind)})
-		}
-	}
-	var agentActions []checkpointAgentAction
-	_ = json.Unmarshal(payload.AgentActions, &agentActions)
-	actions := make([]app.AgentAction, 0, len(agentActions))
-	for _, item := range agentActions {
-		if strings.TrimSpace(item.Assignment) == "" {
-			continue
-		}
-		required := true
-		if item.Required != nil {
-			required = *item.Required
-		}
-		actions = append(actions, app.AgentAction{
-			AgentID: strings.TrimSpace(item.AgentID), Title: strings.TrimSpace(item.Title),
-			Assignment: strings.TrimSpace(item.Assignment), Required: required,
-			Backend: strings.TrimSpace(item.Backend), ModelID: strings.TrimSpace(item.ModelID),
-			ReasoningEffort: strings.TrimSpace(item.ReasoningEffort),
-			Filesystem:      strings.TrimSpace(item.Filesystem), Approval: strings.TrimSpace(item.Approval),
-		})
-	}
-	return visible, patch, candidates, feedback, actions, strings.TrimSpace(payload.MainFollowup)
-}
-
-func checkpointStrings(raw json.RawMessage) []string {
-	if len(raw) == 0 || string(raw) == "null" {
-		return nil
-	}
-	var stringsOnly []string
-	if json.Unmarshal(raw, &stringsOnly) == nil {
-		return stringsOnly
-	}
-	var values []any
-	if json.Unmarshal(raw, &values) != nil {
-		return nil
-	}
-	keys := []string{
-		"decision", "fact", "item", "progress", "verification", "next_action",
-		"text", "summary", "body", "description", "value",
-	}
-	result := make([]string, 0, len(values))
-	for _, value := range values {
-		switch typed := value.(type) {
-		case string:
-			if text := strings.TrimSpace(typed); text != "" {
-				result = append(result, text)
-			}
-		case map[string]any:
-			text := ""
-			for _, key := range keys {
-				if candidate, ok := typed[key].(string); ok && strings.TrimSpace(candidate) != "" {
-					text = strings.TrimSpace(candidate)
-					break
-				}
-			}
-			if text == "" {
-				for _, candidate := range typed {
-					if candidate, ok := candidate.(string); ok && strings.TrimSpace(candidate) != "" {
-						text = strings.TrimSpace(candidate)
-						break
-					}
-				}
-			}
-			if text != "" {
-				result = append(result, text)
-			}
-		}
-	}
-	return result
 }

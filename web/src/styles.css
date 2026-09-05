@@ -490,6 +490,11 @@ dialog form, .dialog-body { padding: 18px; }
 .task-tool-panel .ctx-view { padding: 10px; }
 .agent-collaboration-settings { margin: 0 0 14px; padding: 12px; border: 1px solid var(--line); }
 .agent-collaboration-settings legend { padding: 0 6px; color: var(--muted); font-size: 10px; font-weight: 800; }
+.task-agent-capabilities { display: grid; gap: 7px; margin: 12px 0; padding: 10px; border: 1px solid var(--line); background: #f8fafc; }
+.task-agent-capabilities > strong { font-size: 10px; }
+.task-agent-capabilities > p { margin: 0; color: var(--muted); font-size: 10px; }
+.task-agent-capabilities > label { display: flex; align-items: center; gap: 7px; font-size: 10px; }
+.task-agent-capabilities input { width: auto; margin: 0; }
 .task-skill-picker { margin: 12px 0; padding: 12px; border: 1px solid var(--line); }
 .task-skill-picker legend { padding: 0 6px; color: var(--muted); font-size: 10px; font-weight: 800; }
 .task-skill-picker > p { margin: 0 0 9px; color: var(--muted); font-size: 10px; line-height: 1.5; }

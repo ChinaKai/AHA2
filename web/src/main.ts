@@ -100,7 +100,7 @@ const state: State = {
   taskConversationBefore: 0,
   taskConversationLatest: 0,
   taskEventCursor: 0,
-  taskCategories: {chat: true, update: true, tool: true, error: true},
+  taskCategories: {chat: true, update: true, tool: false, error: true},
   taskContext: null,
   taskRealtimeState: "connecting",
   taskDraft: "",
@@ -1645,6 +1645,11 @@ function bindCommon(): void {
         max_agents: Number(form.get("max_agents") || 3),
         knowledge_policy: String(form.get("knowledge_policy") || "inherit"),
         skill_ids: form.getAll("skill_ids").map(String),
+        agent_capabilities: {
+          workspace_read: form.get("cap_workspace_read") === "on",
+          task_create: form.get("cap_task_create") === "on",
+          clone_hardware: form.get("cap_clone_hardware") === "on",
+        },
       });
     }
     const inheritMain = agentID !== "main" && form.get("inherit_main") === "on";
