@@ -600,9 +600,10 @@ function selectedConversationCategories(): ConversationCategory[] {
 }
 
 async function openTask(taskID: string): Promise<void> {
-  const [detail, page] = await Promise.all([
+  const [detail, page, context] = await Promise.all([
     api.task(taskID),
     api.agentConversation(taskID, "main", {limit: 50, categories: selectedConversationCategories()}),
+    api.agentContext(taskID, "main"),
   ]);
   detail.agents ||= [];
   state.selectedTask = detail;
@@ -612,7 +613,7 @@ async function openTask(taskID: string): Promise<void> {
   state.taskConversationBefore = page.conversation.next_before || 0;
   state.taskConversationLatest = page.conversation.latest_sequence || 0;
   state.taskEventCursor = detail.event_cursor || 0;
-  state.taskContext = null;
+  state.taskContext = context;
   state.taskTool = "";
   state.taskDraft = "";
   state.taskDrafts = {};
@@ -635,9 +636,7 @@ async function selectTaskAgent(agentID: string): Promise<void> {
   state.taskConversationLatest = page.conversation.latest_sequence || 0;
   const agent = state.selectedTask.agents.find(item => item.agent_id === agentID);
   if (agent) agent.unread_count = 0;
-  state.taskContext = state.taskTool === "context"
-    ? await api.agentContext(state.selectedTask.task.id, agentID)
-    : null;
+  state.taskContext = await api.agentContext(state.selectedTask.task.id, agentID);
   scrollConversationToBottom = true;
 }
 
@@ -728,7 +727,7 @@ async function refreshTaskRuntime(taskID: string): Promise<boolean> {
   state.taskConversationLatest = Math.max(state.taskConversationLatest, page.conversation.latest_sequence || 0);
   const selectedAgent = detail.agents.find(agent => agent.agent_id === state.selectedTaskAgent);
   if (selectedAgent) selectedAgent.unread_count = 0;
-  if (state.taskTool === "context" && state.taskContext) {
+  if (state.taskContext) {
     state.taskContext = await api.agentContext(taskID, state.selectedTaskAgent);
     changed ||= JSON.stringify(state.taskContext) !== previousContext;
   }
@@ -1088,7 +1087,7 @@ function taskDetailView(detail: TaskDetail): string {
   const chat = `<section class="conversation">
     <div id="task-failure-slot">${taskFailureBannerHtml(detail)}</div>
     <div class="messages" id="conversation-list">${conversationListHtml()}</div>
-    <div id="agent-turn-slot">${renderAgentTurnCard(detail, state.taskRealtimeState)}</div>
+    <div id="agent-turn-slot">${renderAgentTurnCard(detail, state.taskRealtimeState, state.taskContext?.context.metrics)}</div>
     <form id="message-form" class="composer${runtimeError ? " runtime-invalid" : ""}">${runtimeError ? `<div class="composer-runtime-warning">${escapeHTML(runtimeError)}</div>` : ""}${renderComposerTools(detail, state.selectedTaskAgent, state.taskCategories, state.taskConversation.length)}<div id="slash-command-menu" class="slash-command-menu" ${matchingTaskSlashCommands(state.taskDraft).length ? "" : "hidden"}>${slashCommandMenuHtml(state.taskDraft)}</div><textarea name="content" placeholder="${escapeHTML(runtimeError || (activeTurn ? `${state.selectedTaskAgent} 正在执行，发送后将排队` : taskFailed ? "输入消息重试，或输入 /reopen" : `发送给 ${state.selectedTaskAgent}，输入 / 查看命令`))}" ${runtimeError ? "disabled" : ""} required>${escapeHTML(state.taskDraft)}</textarea><button id="message-send" class="primary" aria-label="发送" ${runtimeError ? "disabled" : ""}>${icon("send")}<span class="send-label">发送</span></button></form>
   </section>`;
   return shell(`<section class="task-screen">
@@ -1101,22 +1100,79 @@ function taskDetailView(detail: TaskDetail): string {
   </section>`);
 }
 
+interface RegionUIState {
+  rootScrollTop: number;
+  rootScrollLeft: number;
+  detailOpen: boolean[];
+  nestedScroll: Array<{top: number; left: number}>;
+  expandedMessages: boolean[];
+}
+
+function captureRegionUI(root: HTMLElement | null): RegionUIState | null {
+  if (!root) return null;
+  return {
+    rootScrollTop: root.scrollTop,
+    rootScrollLeft: root.scrollLeft,
+    detailOpen: [...root.querySelectorAll<HTMLDetailsElement>("details")].map(item => item.open),
+    nestedScroll: [...root.querySelectorAll<HTMLElement>("pre, .hardware-config, .terminal-history")]
+      .map(item => ({top: item.scrollTop, left: item.scrollLeft})),
+    expandedMessages: [...root.querySelectorAll<HTMLElement>(".message")]
+      .map(item => item.classList.contains("expanded")),
+  };
+}
+
+function restoreRegionUI(root: HTMLElement | null, state: RegionUIState | null, restoreRootScroll = true): void {
+  if (!root || !state) return;
+  root.querySelectorAll<HTMLDetailsElement>("details").forEach((item, index) => {
+    if (index < state.detailOpen.length) item.open = state.detailOpen[index];
+  });
+  root.querySelectorAll<HTMLElement>("pre, .hardware-config, .terminal-history").forEach((item, index) => {
+    const position = state.nestedScroll[index];
+    if (position) {
+      item.scrollTop = position.top;
+      item.scrollLeft = position.left;
+    }
+  });
+  root.querySelectorAll<HTMLElement>(".message").forEach((message, index) => {
+    if (!state.expandedMessages[index]) return;
+    message.classList.add("expanded");
+    const preview = message.querySelector<HTMLElement>(".message-preview");
+    const full = message.querySelector<HTMLElement>(".message-full-text");
+    const toggle = message.querySelector<HTMLButtonElement>("[data-toggle-message]");
+    if (preview) preview.hidden = true;
+    if (full) full.hidden = false;
+    if (toggle) toggle.textContent = "收起";
+  });
+  if (restoreRootScroll) {
+    root.scrollTop = state.rootScrollTop;
+    root.scrollLeft = state.rootScrollLeft;
+  }
+}
+
+function replaceRegionHTML(root: HTMLElement, html: string): void {
+  const ui = captureRegionUI(root);
+  root.innerHTML = html;
+  restoreRegionUI(root, ui);
+}
+
 function updateTaskLiveRegions(): void {
   const detail = state.selectedTask;
   if (!detail) return;
   const activeTurn = (detail.turns || []).find(item => item.agent_id === state.selectedTaskAgent && isActiveTurn(item.status));
   const list = document.querySelector<HTMLElement>("#conversation-list");
   if (list) {
+    const ui = captureRegionUI(list);
     const previousHeight = list.scrollHeight;
     const previousTop = list.scrollTop;
     const wasAtBottom = previousHeight - previousTop - list.clientHeight < 80;
     list.innerHTML = conversationListHtml();
     if (wasAtBottom) list.scrollTop = list.scrollHeight;
     else list.scrollTop = previousTop;
+    restoreRegionUI(list, ui, false);
     bindConversationLiveControls();
   }
   const turnSlot = document.querySelector<HTMLElement>("#agent-turn-slot");
-  if (turnSlot) turnSlot.innerHTML = renderAgentTurnCard(detail, state.taskRealtimeState);
+  if (turnSlot) replaceRegionHTML(turnSlot, renderAgentTurnCard(detail, state.taskRealtimeState, state.taskContext?.context.metrics));
   const failureSlot = document.querySelector<HTMLElement>("#task-failure-slot");
   if (failureSlot) failureSlot.innerHTML = taskFailureBannerHtml(detail);
   const agentSelect = document.querySelector<HTMLSelectElement>("#composer-agent");
@@ -1128,7 +1184,7 @@ function updateTaskLiveRegions(): void {
   }
   const toolBody = document.querySelector<HTMLElement>("#task-tool-panel-body");
   if (toolBody && state.taskTool && state.taskTool !== "hardware") {
-    toolBody.innerHTML = renderTaskToolContent(state.taskTool, detail, taskCtxHtml());
+    replaceRegionHTML(toolBody, renderTaskToolContent(state.taskTool, detail, taskCtxHtml()));
     bindSessionActions();
   }
   const count = document.querySelector<HTMLElement>("#conversation-filter-loaded");
@@ -1166,6 +1222,10 @@ function render(): void {
   }
   state.renderPending = false;
   const previousConversation = document.querySelector<HTMLElement>("#conversation-list");
+  const previousTaskID = document.querySelector<HTMLElement>(".task-screen") ? state.selectedTask?.task.id : "";
+  const previousWindowScroll = window.scrollY;
+  const previousTurnUI = captureRegionUI(document.querySelector<HTMLElement>("#agent-turn-slot"));
+  const previousToolUI = captureRegionUI(document.querySelector<HTMLElement>("#task-tool-panel-body"));
   const previousScrollTop = previousConversation?.scrollTop || 0;
   const previousScrollHeight = previousConversation?.scrollHeight || 0;
   const wasAtConversationBottom = previousConversation
@@ -1195,9 +1255,9 @@ function render(): void {
   app.innerHTML = content;
   bindCommon();
   if (state.selectedTask) {
-    window.scrollTo(0, 0);
-    document.documentElement.scrollTop = 0;
-    document.body.scrollTop = 0;
+    window.scrollTo(0, previousTaskID === state.selectedTask.task.id ? previousWindowScroll : 0);
+    restoreRegionUI(document.querySelector<HTMLElement>("#agent-turn-slot"), previousTurnUI);
+    restoreRegionUI(document.querySelector<HTMLElement>("#task-tool-panel-body"), previousToolUI);
   }
   const nextConversation = document.querySelector<HTMLElement>("#conversation-list");
   if (nextConversation) {

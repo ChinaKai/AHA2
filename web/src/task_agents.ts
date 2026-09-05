@@ -84,6 +84,12 @@ export function compactNumber(value: number): string {
   return String(Math.round(value));
 }
 
+function roundInputTokens(usage: Record<string, number> | undefined): number {
+  const input = usageNumber(usage, "input_tokens");
+  const cached = usageNumber(usage, "cached_input_tokens");
+  return Math.max(0, input - cached);
+}
+
 function metricNumber(value: number): string {
   return Number.isFinite(value) && value > 0 ? new Intl.NumberFormat("en-US").format(Math.round(value)) : "0";
 }
@@ -141,7 +147,11 @@ export function latestAgentTurns(turns: Turn[]): Turn[] {
   );
 }
 
-export function renderAgentTurnCard(detail: TaskDetail, realtimeState: TaskRealtimeState): string {
+export function renderAgentTurnCard(
+  detail: TaskDetail,
+  realtimeState: TaskRealtimeState,
+  contextMetrics?: TaskContextDetail["context"]["metrics"],
+): string {
   const round = detail.latest_round;
   const turns = latestAgentTurns(detail.turns || []);
   if (!round || !turns.length) {
@@ -173,6 +183,8 @@ export function renderAgentTurnCard(detail: TaskDetail, realtimeState: TaskRealt
   }).join("");
   const focus = active.find(turn => turn.agent_id === "main") || active[0] || turns[0];
   const usage = focus.usage || {};
+  const inputTokens = Number(contextMetrics?.input_tokens ?? roundInputTokens(usage));
+  const outputTokens = Number(contextMetrics?.output_tokens ?? usageNumber(usage, "output_tokens"));
   return `<section class="agent-turn-card ${active.length ? "active" : ""}">
     <details>
       <summary><span>Round ${round.sequence} · ${statusLabel(round.status)} · <time${liveElapsedAttributes(roundElapsed, active.length > 0)}>${formatDuration(roundElapsed)}</time> · ${completed}/${turns.length}</span><small>${turns.length} Agents · ${active.length} active</small><code data-round-channel class="round-channel ${realtimeState}">${realtimeState === "live" ? "SSE" : realtimeState === "fallback" ? "2s" : "..."}</code></summary>
@@ -186,9 +198,9 @@ export function renderAgentTurnCard(detail: TaskDetail, realtimeState: TaskRealt
         <span><small>结果收尾</small><strong>${formatDuration(Number(focus.finalize_duration_ms || 0))}</strong></span>
       </div>
       <div class="turn-stage-grid turn-token-grid">
-        <span><small>Input</small><strong>${compactNumber(usageNumber(usage, "context_tokens") || usageNumber(usage, "input_tokens"))}</strong></span>
-        <span><small>Turn Cache</small><strong>${compactNumber(usageNumber(usage, "cached_input_tokens") || usageNumber(usage, "cache_read_input_tokens"))}</strong></span>
-        <span><small>Output</small><strong>${compactNumber(usageNumber(usage, "output_tokens"))}</strong></span>
+        <span><small>Input</small><strong>${compactNumber(inputTokens)}</strong></span>
+        <span><small>Output</small><strong>${compactNumber(outputTokens)}</strong></span>
+        <span><small>Context</small><strong>${compactNumber(usageNumber(usage, "context_tokens"))} / ${compactNumber(Number(focus.context_window || 0))}</strong></span>
       </div>
       ${failure ? `<div class="turn-failure"><strong>${escapeHTML(failure.agent_id)} 失败</strong><span>${escapeHTML(failure.error || "Backend 执行失败，未返回详细原因")}</span></div>` : ""}
     </details>

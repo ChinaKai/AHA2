@@ -185,6 +185,9 @@ test("built web contains responsive application", async () => {
   assert.match(script, /flushDeferredRender/);
   assert.match(script, /document\.activeElement instanceof HTMLTextAreaElement/);
   assert.match(script, /updateTaskLiveRegions/);
+  assert.match(script, /captureRegionUI/);
+  assert.match(script, /replaceRegionHTML/);
+  assert.match(script, /previousWindowScroll/);
   assert.match(script, /agent-turn-slot/);
   assert.doesNotMatch(script, /task-action-menu/);
   assert.match(script, /slash-command-menu/);
@@ -208,7 +211,7 @@ test("built web contains responsive application", async () => {
   assert.doesNotMatch(agents, /aha2_checkpoint/);
   assert.match(agents, /Session 唤醒/);
   assert.match(agents, /Backend 启动/);
-  assert.match(agents, /Turn Cache/);
+  assert.doesNotMatch(agents, /Turn Cache/);
   assert.match(agents, /累计 Cache/);
   assert.match(agents, /cap_workspace_read/);
   assert.match(agents, /cap_task_create/);
@@ -282,6 +285,29 @@ test("task agent config selects skills explicitly", async () => {
   }, "main", [], [], [{id: "skill-1", scope: "global", project_id: "", name: "Review", description: "Review changes", instructions: "Review", version: 1, status: "active", enabled: true, source_path: "", created_at: "", updated_at: ""}]);
   assert.match(html, /Task Skills/);
   assert.match(html, /name="skill_ids" value="skill-1" checked/);
+});
+
+test("round card reports uncached turn input and hides ambiguous cache usage", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const {renderAgentTurnCard} = await import(pathToFileURL(resolve(root, "dist", "task_agents.js")));
+  const html = renderAgentTurnCard({
+    task: {id: "task-1", project_id: "project-1", workspace_id: "workspace-1", title: "Task", original_request: "", current_goal: "", status: "active", isolation: "inplace", collaboration_mode: "single", max_agents: 1, knowledge_policy: "inherit", skill_ids: [], total_tokens: 0, created_at: "", updated_at: ""},
+    latest_round: {id: "round-1", task_id: "task-1", sequence: 2, status: "running", created_at: ""},
+    agents: [],
+    turns: [{
+      id: "turn-1", task_id: "task-1", round_id: "round-1", agent_id: "main", sequence: 2,
+      generation: 1, attempt: 1, status: "running", instruction: "", prompt_chars: 0,
+      context_window: 258400, usage: {input_tokens: 1200, cached_input_tokens: 800, context_tokens: 128592},
+      created_at: "",
+    }],
+    event_cursor: 0,
+    server_time_ms: 0,
+  }, "live", {input_tokens: 2500, output_tokens: 75});
+  assert.match(html, /<small>Input<\/small><strong>2\.5K<\/strong>/);
+  assert.match(html, /<small>Output<\/small><strong>75<\/strong>/);
+  assert.match(html, /<small>Context<\/small><strong>128\.6K \/ 258\.4K<\/strong>/);
+  assert.doesNotMatch(html, /<small>Turn Cache<\/small>/);
+  assert.doesNotMatch(html, /<small>Input<\/small><strong>128\.6K<\/strong>/);
 });
 
 test("codex accounts render compact weekly quota", async () => {
