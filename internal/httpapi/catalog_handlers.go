@@ -209,6 +209,10 @@ func (s *Server) updateWorkspace(writer http.ResponseWriter, request *http.Reque
 		writeError(writer, http.StatusNotFound, "workspace_not_found")
 		return
 	}
+	if existing.ReadOnly {
+		writeJSON(writer, http.StatusForbidden, map[string]any{"ok": false, "error": "workspace_read_only", "message": "该 Workspace 属于其他设备，只能查看"})
+		return
+	}
 	var payload struct {
 		Name             string `json:"name"`
 		Locality         string `json:"locality"`
@@ -313,6 +317,10 @@ func (s *Server) detectWorkspaceHandler(writer http.ResponseWriter, request *htt
 	item, err := s.store.Workspace(request.Context(), request.PathValue("id"))
 	if err != nil {
 		writeError(writer, http.StatusNotFound, "workspace_not_found")
+		return
+	}
+	if item.ReadOnly {
+		writeJSON(writer, http.StatusForbidden, map[string]any{"ok": false, "error": "workspace_read_only", "message": "该 Workspace 属于其他设备，不能在本机检测"})
 		return
 	}
 	if item.SSHCredentialRef != "" && s.secrets != nil {

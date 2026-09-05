@@ -37,3 +37,24 @@ func TestClientInjectsCredentialAndUsesProtocol(t *testing.T) {
 		t.Fatalf("response=%#v", response)
 	}
 }
+
+func TestClientRegistrationUsesDeviceName(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		if request["device_name"] != "My Laptop" || request["device_id"] != "" {
+			t.Fatalf("request=%#v", request)
+		}
+		_ = json.NewEncoder(w).Encode(RegisterResponse{DeviceID: "dev_center", DeviceName: "My Laptop", Token: "returned-once"})
+	}))
+	defer server.Close()
+	response, err := (&Client{BaseURL: server.URL}).Register(context.Background(), "My Laptop", "registration-code")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.DeviceID != "dev_center" || response.DeviceName != "My Laptop" || response.Token == "" {
+		t.Fatalf("response=%#v", response)
+	}
+}

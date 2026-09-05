@@ -46,6 +46,10 @@ func (s *Server) deleteWorkspace(writer http.ResponseWriter, request *http.Reque
 		writeError(writer, http.StatusNotFound, "workspace_not_found")
 		return
 	}
+	if item.ReadOnly {
+		writeJSON(writer, http.StatusForbidden, map[string]any{"ok": false, "error": "workspace_read_only", "message": "该 Workspace 属于其他设备，不能在本机删除"})
+		return
+	}
 	tasks, _ := s.store.ListTasks(request.Context(), "")
 	var active []string
 	for _, task := range tasks {

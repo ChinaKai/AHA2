@@ -37,14 +37,19 @@ type PullResponse struct {
 	HasMore bool                `json:"has_more"`
 }
 type RegisterResponse struct {
-	DeviceID string `json:"device_id"`
-	Token    string `json:"token"`
+	DeviceID   string `json:"device_id"`
+	DeviceName string `json:"device_name"`
+	Token      string `json:"token"`
 }
 
-func (c *Client) Register(ctx context.Context, deviceID, code string) (RegisterResponse, error) {
+func (c *Client) Register(ctx context.Context, deviceName, code string) (RegisterResponse, error) {
 	var response RegisterResponse
-	err := c.do(ctx, http.MethodPost, "/v1/devices/register", map[string]string{"device_id": deviceID, "registration_code": code}, &response)
+	err := c.do(ctx, http.MethodPost, "/v1/devices/register", map[string]string{"device_name": deviceName, "registration_code": code}, &response)
 	return response, err
+}
+
+func (c *Client) RenameDevice(ctx context.Context, deviceName string) error {
+	return c.do(ctx, http.MethodPatch, "/v1/devices/self", map[string]string{"device_name": deviceName}, nil)
 }
 
 func (c *Client) Push(ctx context.Context, request PushRequest) (PushResponse, error) {

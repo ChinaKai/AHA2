@@ -10,6 +10,7 @@ type SyncSettings struct {
 	Enabled         bool      `json:"enabled"`
 	Endpoint        string    `json:"endpoint"`
 	DeviceID        string    `json:"device_id"`
+	DeviceName      string    `json:"device_name"`
 	IntervalSeconds int       `json:"interval_seconds"`
 	ProviderIDs     []string  `json:"provider_ids,omitempty"`
 	EnvGroupIDs     []string  `json:"env_group_ids,omitempty"`

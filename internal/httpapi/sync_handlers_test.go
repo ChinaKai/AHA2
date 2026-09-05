@@ -13,6 +13,7 @@ import (
 
 	"github.com/ChinaKai/AHA2/internal/app"
 	"github.com/ChinaKai/AHA2/internal/auth"
+	"github.com/ChinaKai/AHA2/internal/domain"
 	"github.com/ChinaKai/AHA2/internal/store"
 )
 
@@ -59,6 +60,53 @@ func TestSyncSettingsAPIKeepsTokenOutOfResponses(t *testing.T) {
 	}
 	if !payload.Sync.TokenConfigured || !payload.Sync.PassphraseConfigured || payload.Sync.DeviceID != "device-one" || len(payload.Sync.ProviderIDs) != 1 {
 		t.Fatalf("unexpected settings: %#v", payload.Sync)
+	}
+}
+
+func TestRemoteTaskMirrorIsListedAndReadOnly(t *testing.T) {
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	now := time.Now().UTC()
+	project := domain.Project{ID: "project-shared", Name: "Shared", CreatedAt: now, UpdatedAt: now}
+	if err := database.CreateProject(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	task := domain.Task{ID: "source-task", ProjectID: project.ID, WorkspaceID: "source-workspace", Title: "Remote task", Status: domain.TaskWaitingUser, Isolation: "inplace", CollaborationMode: "single", MaxAgents: 1, KnowledgePolicy: "inherit", CreatedAt: now, UpdatedAt: now, OwnerDeviceID: "dev_remote", ReadOnly: true}
+	payload, _ := json.Marshal(task)
+	if err := database.UpsertRemoteTaskObject(ctx, store.RemoteTaskObject{OwnerDeviceID: "dev_remote", ObjectType: "task", ObjectID: task.ID, TaskID: task.ID, ProjectID: project.ID, Payload: payload, CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	authService := auth.NewService(database, "setup-test", time.Hour)
+	server := httptest.NewServer(New(Config{Store: database, Auth: authService, App: app.NewService(database, nil, app.StubExecutor{})}).Handler())
+	defer server.Close()
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	_ = registerOwner(t, client, server.URL)
+	response := requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/tasks", nil, "")
+	var list struct {
+		Tasks []domain.Task `json:"tasks"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&list); err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if len(list.Tasks) != 1 || !list.Tasks[0].ReadOnly || list.Tasks[0].OwnerDeviceID != "dev_remote" {
+		t.Fatalf("tasks=%#v", list.Tasks)
+	}
+	response = requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/tasks/"+list.Tasks[0].ID, nil, "")
+	var detail struct {
+		Task domain.Task `json:"task"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&detail); err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if !detail.Task.ReadOnly || detail.Task.Title != "Remote task" {
+		t.Fatalf("detail=%#v", detail.Task)
 	}
 }
 

@@ -73,6 +73,8 @@ type Workspace struct {
 	LastDetectedAt        time.Time      `json:"last_detected_at,omitempty"`
 	CreatedAt             time.Time      `json:"created_at"`
 	UpdatedAt             time.Time      `json:"updated_at"`
+	OwnerDeviceID         string         `json:"owner_device_id,omitempty"`
+	ReadOnly              bool           `json:"read_only,omitempty"`
 }
 
 type Model struct {
@@ -227,6 +229,8 @@ type Task struct {
 	CreatedAt               time.Time       `json:"created_at"`
 	UpdatedAt               time.Time       `json:"updated_at"`
 	CompletedAt             time.Time       `json:"completed_at,omitempty"`
+	OwnerDeviceID           string          `json:"owner_device_id,omitempty"`
+	ReadOnly                bool            `json:"read_only,omitempty"`
 }
 
 type Turn struct {

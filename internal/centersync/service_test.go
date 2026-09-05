@@ -3,6 +3,7 @@ package centersync
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -196,17 +197,18 @@ func TestOneTimeDeviceRegistrationStoresOnlyHashes(t *testing.T) {
 		t.Fatal("registration response is cacheable")
 	}
 	var response struct {
-		DeviceID string `json:"device_id"`
-		Token    string `json:"token"`
+		DeviceID   string `json:"device_id"`
+		DeviceName string `json:"device_name"`
+		Token      string `json:"token"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
 		t.Fatal(err)
 	}
-	if response.DeviceID != "device-new" || response.Token == "" || !s.Authenticate(ctx, response.DeviceID, response.Token) {
+	if response.DeviceID == "device-new" || !strings.HasPrefix(response.DeviceID, "dev_") || response.DeviceName != "device-new" || response.Token == "" || !s.Authenticate(ctx, response.DeviceID, response.Token) {
 		t.Fatal("returned token does not authenticate")
 	}
 	var storedToken string
-	if err := s.db.QueryRow(`SELECT token_hash FROM device_tokens WHERE device_id='device-new'`).Scan(&storedToken); err != nil {
+	if err := s.db.QueryRow(`SELECT token_hash FROM device_tokens WHERE device_id=?`, response.DeviceID).Scan(&storedToken); err != nil {
 		t.Fatal(err)
 	}
 	if storedToken == response.Token || storedToken != tokenHash(response.Token) {
@@ -215,6 +217,64 @@ func TestOneTimeDeviceRegistrationStoresOnlyHashes(t *testing.T) {
 	w = request(t, s.Handler(), http.MethodPost, "/v1/devices/register", map[string]string{"device_id": "device-other", "registration_code": code}, false)
 	if w.Code != http.StatusUnauthorized || strings.Contains(w.Body.String(), code) {
 		t.Fatalf("reused code=%d %q", w.Code, w.Body.String())
+	}
+}
+
+func TestDeviceRenameKeepsCenterGeneratedID(t *testing.T) {
+	s, err := Open(context.Background(), filepath.Join(t.TempDir(), "sync.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	code, err := s.CreateRegistrationCode(ctx, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	credential, err := s.RegisterNamedDevice(ctx, "Laptop", code)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := map[string]string{"device_name": "Work Laptop"}
+	raw, _ := json.Marshal(body)
+	r := httptest.NewRequest(http.MethodPatch, "/v1/devices/self", bytes.NewReader(raw))
+	r.Header.Set("X-Device-ID", credential.DeviceID)
+	r.Header.Set("Authorization", "Bearer "+credential.Token)
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("rename=%d %s", w.Code, w.Body.String())
+	}
+	var id, name string
+	if err := s.db.QueryRow(`SELECT device_id,device_name FROM device_tokens WHERE device_id=?`, credential.DeviceID).Scan(&id, &name); err != nil {
+		t.Fatal(err)
+	}
+	if id != credential.DeviceID || name != "Work Laptop" {
+		t.Fatalf("id=%q name=%q", id, name)
+	}
+}
+
+func TestLegacyCenterDeviceIDGetsCompatibleName(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sync.db")
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = raw.Exec(`CREATE TABLE device_tokens(device_id TEXT PRIMARY KEY,token_hash TEXT NOT NULL,enabled INTEGER NOT NULL DEFAULT 1); INSERT INTO device_tokens(device_id,token_hash,enabled) VALUES('legacy-device','hash',1)`); err != nil {
+		t.Fatal(err)
+	}
+	raw.Close()
+	s, err := Open(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	var name string
+	if err := s.db.QueryRow(`SELECT device_name FROM device_tokens WHERE device_id='legacy-device'`).Scan(&name); err != nil {
+		t.Fatal(err)
+	}
+	if name != "legacy-device" {
+		t.Fatalf("name=%q", name)
 	}
 }
 
@@ -256,14 +316,14 @@ func TestRegistrationRejectsExpiredCodeAndInvalidDeviceID(t *testing.T) {
 		t.Fatal(err)
 	}
 	time.Sleep(time.Millisecond)
-	if _, err := s.RegisterDevice(ctx, "device-a", code); err == nil {
+	if _, err := s.RegisterNamedDevice(ctx, "device-a", code); err == nil {
 		t.Fatal("expired code accepted")
 	}
 	code, err = s.CreateRegistrationCode(ctx, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.RegisterDevice(ctx, "bad/device", code); err == nil {
-		t.Fatal("invalid device id accepted")
+	if _, err := s.RegisterNamedDevice(ctx, "bad\ndevice", code); err == nil {
+		t.Fatal("invalid device name accepted")
 	}
 }

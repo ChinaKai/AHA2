@@ -22,6 +22,7 @@ type syncSettingsPayload struct {
 	Enabled          bool     `json:"enabled"`
 	Endpoint         string   `json:"endpoint"`
 	DeviceID         string   `json:"device_id"`
+	DeviceName       string   `json:"device_name"`
 	IntervalSeconds  int      `json:"interval_seconds"`
 	Token            string   `json:"token"`
 	ClearToken       bool     `json:"clear_token"`
@@ -34,7 +35,7 @@ type syncSettingsPayload struct {
 }
 
 func publicSyncSettings(item domain.SyncSettings, tokenConfigured, passphraseConfigured bool) map[string]any {
-	return map[string]any{"scope": item.Scope, "enabled": item.Enabled, "endpoint": item.Endpoint, "device_id": item.DeviceID, "interval_seconds": item.IntervalSeconds, "provider_ids": item.ProviderIDs, "env_group_ids": item.EnvGroupIDs, "codex_account_ids": item.CodexAccountIDs, "token_configured": tokenConfigured, "passphrase_configured": passphraseConfigured, "updated_at": item.UpdatedAt}
+	return map[string]any{"scope": item.Scope, "enabled": item.Enabled, "endpoint": item.Endpoint, "device_id": item.DeviceID, "device_name": item.DeviceName, "interval_seconds": item.IntervalSeconds, "provider_ids": item.ProviderIDs, "env_group_ids": item.EnvGroupIDs, "codex_account_ids": item.CodexAccountIDs, "token_configured": tokenConfigured, "passphrase_configured": passphraseConfigured, "updated_at": item.UpdatedAt}
 }
 
 func (s *Server) syncSettings(writer http.ResponseWriter, request *http.Request) {
@@ -60,7 +61,10 @@ type syncValidationError string
 func (e syncValidationError) Error() string { return string(e) }
 
 func normalizeSyncSettings(payload syncSettingsPayload) (domain.SyncSettings, error) {
-	item := domain.SyncSettings{Scope: localSyncScope, Enabled: payload.Enabled, Endpoint: strings.TrimSpace(payload.Endpoint), DeviceID: strings.TrimSpace(payload.DeviceID), IntervalSeconds: payload.IntervalSeconds, ProviderIDs: payload.ProviderIDs, EnvGroupIDs: payload.EnvGroupIDs, CodexAccountIDs: payload.CodexAccountIDs, UpdatedAt: time.Now().UTC()}
+	item := domain.SyncSettings{Scope: localSyncScope, Enabled: payload.Enabled, Endpoint: strings.TrimSpace(payload.Endpoint), DeviceID: strings.TrimSpace(payload.DeviceID), DeviceName: strings.TrimSpace(payload.DeviceName), IntervalSeconds: payload.IntervalSeconds, ProviderIDs: payload.ProviderIDs, EnvGroupIDs: payload.EnvGroupIDs, CodexAccountIDs: payload.CodexAccountIDs, UpdatedAt: time.Now().UTC()}
+	if item.DeviceName == "" {
+		item.DeviceName = item.DeviceID
+	}
 	if item.IntervalSeconds < 10 || item.IntervalSeconds > 86400 {
 		return item, syncValidationError("interval_seconds must be between 10 and 86400")
 	}
@@ -68,8 +72,11 @@ func normalizeSyncSettings(payload syncSettingsPayload) (domain.SyncSettings, er
 	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.User != nil {
 		return item, syncValidationError("endpoint must be an http(s) URL without embedded credentials")
 	}
-	if item.DeviceID == "" {
+	if item.DeviceID == "" && payload.RegistrationCode == "" {
 		return item, syncValidationError("device_id is required")
+	}
+	if payload.RegistrationCode != "" && item.DeviceName == "" {
+		return item, syncValidationError("device_name is required for registration")
 	}
 	if parsed.Scheme == "http" {
 		host := parsed.Hostname()
@@ -81,6 +88,7 @@ func normalizeSyncSettings(payload syncSettingsPayload) (domain.SyncSettings, er
 }
 
 func (s *Server) updateSyncSettings(writer http.ResponseWriter, request *http.Request) {
+	previous, _ := s.store.SyncSettings(request.Context(), localSyncScope)
 	var payload syncSettingsPayload
 	if err := decodeJSON(request, &payload); err != nil {
 		writeError(writer, http.StatusBadRequest, "invalid_json")
@@ -93,13 +101,26 @@ func (s *Server) updateSyncSettings(writer http.ResponseWriter, request *http.Re
 	}
 	if payload.RegistrationCode != "" && payload.Token == "" {
 		ctx, cancel := context.WithTimeout(request.Context(), 20*time.Second)
-		registered, registerErr := (&syncer.Client{BaseURL: item.Endpoint}).Register(ctx, item.DeviceID, payload.RegistrationCode)
+		registered, registerErr := (&syncer.Client{BaseURL: item.Endpoint}).Register(ctx, item.DeviceName, payload.RegistrationCode)
 		cancel()
 		if registerErr != nil || registered.Token == "" {
 			writeError(writer, http.StatusBadGateway, "sync_registration_failed")
 			return
 		}
 		payload.Token = registered.Token
+		item.DeviceID = registered.DeviceID
+		item.DeviceName = registered.DeviceName
+	} else if item.DeviceID != "" && item.DeviceName != "" && previous.DeviceName != "" && item.DeviceName != previous.DeviceName && s.secrets != nil {
+		if token, ok := s.secrets.Get(localSyncTokenRef); ok && token != "" {
+			client := &syncer.Client{BaseURL: item.Endpoint, DeviceID: item.DeviceID, Credential: func(context.Context) (string, error) { return token, nil }}
+			ctx, cancel := context.WithTimeout(request.Context(), 20*time.Second)
+			renameErr := client.RenameDevice(ctx, item.DeviceName)
+			cancel()
+			if renameErr != nil {
+				writeError(writer, http.StatusBadGateway, "sync_device_rename_failed")
+				return
+			}
+		}
 	}
 	if payload.Token != "" {
 		if s.secrets == nil {

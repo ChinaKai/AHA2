@@ -25,6 +25,7 @@ export interface SyncSettings {
   enabled: boolean;
   endpoint: string;
   device_id: string;
+  device_name?: string;
   interval_seconds: number;
   token_configured: boolean;
   passphrase_configured: boolean;
@@ -91,6 +92,8 @@ export interface Workspace {
   platform?: string;
   health: string;
   capabilities?: Record<string, unknown>;
+  owner_device_id?: string;
+  read_only?: boolean;
 }
 
 export interface Model {
@@ -225,6 +228,8 @@ export interface Task {
   total_tokens: number;
   created_at: string;
   updated_at: string;
+  owner_device_id?: string;
+  read_only?: boolean;
 }
 
 export interface Turn {

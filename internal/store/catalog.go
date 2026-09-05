@@ -65,12 +65,13 @@ func (s *Store) CreateWorkspace(ctx context.Context, item domain.Workspace) erro
 			id,project_id,name,locality,transport,root_path,ssh_host,ssh_user,ssh_port,ssh_auth,
 			ssh_credential_ref,ssh_password_configured,distro,platform,health,
 			capabilities_json,repository_json,last_detected_at,created_at,updated_at
-		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			,owner_device_id,read_only
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		item.ID, item.ProjectID, item.Name, item.Locality, item.Transport, item.RootPath,
 		item.SSHHost, item.SSHUser, item.SSHPort, item.SSHAuth, item.SSHCredentialRef,
 		boolInt(item.SSHPasswordConfigured), item.Distro, item.Platform, item.Health,
 		encodeJSON(item.Capabilities), encodeJSON(item.Repository), timeString(item.LastDetectedAt),
-		timeString(item.CreatedAt), timeString(item.UpdatedAt),
+		timeString(item.CreatedAt), timeString(item.UpdatedAt), item.OwnerDeviceID, boolInt(item.ReadOnly),
 	)
 	return err
 }
@@ -82,7 +83,7 @@ func scanWorkspace(scanner interface{ Scan(...any) error }) (domain.Workspace, e
 		&item.ID, &item.ProjectID, &item.Name, &item.Locality, &item.Transport, &item.RootPath,
 		&item.SSHHost, &item.SSHUser, &item.SSHPort, &item.SSHAuth, &item.SSHCredentialRef,
 		&item.SSHPasswordConfigured, &item.Distro, &item.Platform, &item.Health,
-		&capabilities, &repository, &detectedAt, &createdAt, &updatedAt,
+		&capabilities, &repository, &detectedAt, &createdAt, &updatedAt, &item.OwnerDeviceID, &item.ReadOnly,
 	)
 	item.Capabilities = decodeJSON(capabilities, map[string]any{})
 	item.Repository = decodeJSON(repository, map[string]any{})
@@ -91,7 +92,7 @@ func scanWorkspace(scanner interface{ Scan(...any) error }) (domain.Workspace, e
 	return item, err
 }
 
-const workspaceColumns = `id,project_id,name,locality,transport,root_path,ssh_host,ssh_user,ssh_port,ssh_auth,ssh_credential_ref,ssh_password_configured,distro,platform,health,capabilities_json,repository_json,last_detected_at,created_at,updated_at`
+const workspaceColumns = `id,project_id,name,locality,transport,root_path,ssh_host,ssh_user,ssh_port,ssh_auth,ssh_credential_ref,ssh_password_configured,distro,platform,health,capabilities_json,repository_json,last_detected_at,created_at,updated_at,owner_device_id,read_only`
 
 func (s *Store) Workspace(ctx context.Context, id string) (domain.Workspace, error) {
 	return scanWorkspace(s.db.QueryRowContext(ctx, `SELECT `+workspaceColumns+` FROM workspaces WHERE id=?`, id))

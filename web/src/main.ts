@@ -96,7 +96,7 @@ const state: State = {
   renderPending: false,
   system: {os: "windows", arch: "", wsl_available: false, wsl_distros: []},
   proxySettings: {http_proxy: "http://127.0.0.1:7897", https_proxy: "http://127.0.0.1:7897", no_proxy: "localhost,127.0.0.1,::1"},
-  syncSettings: {scope:"default",enabled:false,endpoint:"",device_id:"",interval_seconds:300,token_configured:false,passphrase_configured:false},
+  syncSettings: {scope:"default",enabled:false,endpoint:"",device_id:"",device_name:"",interval_seconds:300,token_configured:false,passphrase_configured:false},
   syncState: {scope:"default",cursor:"",last_error:""},
   syncPending: 0,
   syncConflicts: [],
@@ -357,7 +357,7 @@ function syncTaskWorkspaces(): void {
   const projectID = String((document.querySelector("#task-project") as HTMLSelectElement)?.value || "");
   const wsSelect = document.querySelector<HTMLSelectElement>("#task-workspace");
   if (!wsSelect) return;
-  const items = state.workspaces.filter(item => item.project_id === projectID);
+  const items = state.workspaces.filter(item => item.project_id === projectID && !item.read_only);
   const current = wsSelect.value;
   wsSelect.innerHTML = items.length
     ? items.map(item => `<option value="${item.id}">${escapeHTML(item.name)}</option>`).join("")
@@ -837,12 +837,11 @@ function projectsView(): string {
 function projectDetailView(project: Project): string {
   const workspaces = state.workspaces.filter(item => item.project_id === project.id);
   const tasks = state.tasks.filter(item => item.project_id === project.id);
-  const rows = workspaces.map(item => `<article class="list-row ws-row">
+  const rows = workspaces.map(item => `<article class="list-row ws-row ${item.read_only ? "read-only" : ""}">
     <div class="item-title">${item.locality === "remote" ? icon("server") : icon("monitor")}<div><strong>${escapeHTML(item.name)}</strong><small>${escapeHTML(item.root_path)}</small></div></div>
-    <div class="ws-meta"><small>${escapeHTML(item.transport)}${item.distro ? ` · ${escapeHTML(item.distro)}` : ""}</small><strong>${escapeHTML(item.platform || "-")}</strong></div>
+    <div class="ws-meta"><small>${escapeHTML(item.transport)}${item.distro ? ` · ${escapeHTML(item.distro)}` : ""}</small><strong>${item.read_only ? `只读 · ${escapeHTML(item.owner_device_id || "其他设备")}` : `本机 · ${escapeHTML(item.owner_device_id || "待首次同步绑定")}`}</strong></div>
     ${workspaceBackendInfo(item)}
-    <button data-detect="${item.id}">${icon("refresh")}检测</button>
-    <span class="row-actions"><button type="button" data-edit-workspace="${item.id}" class="icon-button" title="编辑 Workspace">${icon("edit")}</button><button type="button" data-delete-workspace="${item.id}" class="icon-button" title="删除 Workspace">${icon("close")}</button></span>
+    ${item.read_only ? '<span class="status warn">远端只读</span>' : `<button data-detect="${item.id}">${icon("refresh")}检测</button><span class="row-actions"><button type="button" data-edit-workspace="${item.id}" class="icon-button" title="编辑 Workspace">${icon("edit")}</button><button type="button" data-delete-workspace="${item.id}" class="icon-button" title="删除 Workspace">${icon("close")}</button></span>`}
   </article>`).join("");
   return shell(`<section class="page">
     <header class="page-head"><div><button id="back-projects" class="back-link">← 返回项目列表</button><h1>${escapeHTML(project.name)}</h1><p>${projectTypeLabel(project.project_type)}${project.repository_identity ? ` · ${escapeHTML(project.repository_identity)}` : ""}${project.default_branch ? ` · 默认分支 ${escapeHTML(project.default_branch)}` : ""}</p></div><div class="actions"><button data-dialog="workspace">${icon("plus")}添加 Workspace</button><button type="button" data-edit-project-detail="${project.id}" class="icon-button" title="编辑项目">${icon("edit")}</button><button id="delete-project" class="danger">${icon("close")}删除项目</button></div></header>
@@ -915,8 +914,7 @@ function taskCardHtml(task: Task): string {
       </div>
     </div>
     <div class="task-card-actions">
-      <button type="button" data-edit-task-title="${task.id}" class="icon-button" title="编辑标题">${icon("edit")}</button>
-      <button type="button" data-delete-task="${task.id}" class="icon-button" title="删除任务">${icon("close")}</button>
+      ${task.read_only ? `<span class="status warn" title="所属设备：${escapeHTML(task.owner_device_id || "未知")}">只读</span>` : `<button type="button" data-edit-task-title="${task.id}" class="icon-button" title="编辑标题">${icon("edit")}</button><button type="button" data-delete-task="${task.id}" class="icon-button" title="删除任务">${icon("close")}</button>`}
     </div>
   </article>`;
 }
@@ -1096,6 +1094,7 @@ function taskCtxHtml(): string {
 }
 
 function taskDetailView(detail: TaskDetail): string {
+  const remoteReadOnly = Boolean(detail.task.read_only);
   const activeTurn = (detail.turns || []).find(item => item.agent_id === state.selectedTaskAgent && isActiveTurn(item.status));
   const taskFailed = detail.task.status === "failed";
   const selectedAgent = detail.agents.find(item => item.agent_id === state.selectedTaskAgent);
@@ -1105,10 +1104,11 @@ function taskDetailView(detail: TaskDetail): string {
   const workspace = state.workspaces.find(item => item.id === detail.task.workspace_id);
   const taskMeta = `${project?.name || "-"} · ${workspace?.name || "-"} · ${detail.task.collaboration_mode || "auto"} · ${detail.task.max_agents || 3} Agents`;
   const chat = `<section class="conversation">
+    ${remoteReadOnly ? `<div class="task-failure-banner remote-readonly"><strong>其他设备的只读 Task</strong><span>所属设备：${escapeHTML(detail.task.owner_device_id || "未知")}</span><small>可查看同步历史，不能在本机执行或修改</small></div>` : ""}
     <div id="task-failure-slot">${taskFailureBannerHtml(detail)}</div>
     <div class="messages" id="conversation-list">${conversationListHtml()}</div>
     <div id="agent-turn-slot">${renderAgentTurnCard(detail, state.taskRealtimeState, state.taskContext?.context.metrics)}</div>
-    <form id="message-form" class="composer${runtimeError ? " runtime-invalid" : ""}">${runtimeError ? `<div class="composer-runtime-warning">${escapeHTML(runtimeError)}</div>` : ""}${renderComposerTools(detail, state.selectedTaskAgent, state.taskCategories, state.taskConversation.length)}<div id="slash-command-menu" class="slash-command-menu" ${matchingTaskSlashCommands(state.taskDraft).length ? "" : "hidden"}>${slashCommandMenuHtml(state.taskDraft)}</div><textarea name="content" placeholder="${escapeHTML(runtimeError || (activeTurn ? `${state.selectedTaskAgent} 正在执行，发送后将排队` : taskFailed ? "输入消息重试，或输入 /reopen" : `发送给 ${state.selectedTaskAgent}，输入 / 查看命令`))}" ${runtimeError ? "disabled" : ""} required>${escapeHTML(state.taskDraft)}</textarea><button id="message-send" class="primary" aria-label="发送" ${runtimeError ? "disabled" : ""}>${icon("send")}<span class="send-label">发送</span></button></form>
+    <form id="message-form" class="composer${runtimeError || remoteReadOnly ? " runtime-invalid" : ""}">${runtimeError || remoteReadOnly ? `<div class="composer-runtime-warning">${escapeHTML(remoteReadOnly ? "该 Task 属于其他设备，本机只读" : runtimeError)}</div>` : ""}${renderComposerTools(detail, state.selectedTaskAgent, state.taskCategories, state.taskConversation.length)}<div id="slash-command-menu" class="slash-command-menu" ${matchingTaskSlashCommands(state.taskDraft).length ? "" : "hidden"}>${slashCommandMenuHtml(state.taskDraft)}</div><textarea name="content" placeholder="${escapeHTML(remoteReadOnly ? "只读 Task" : runtimeError || (activeTurn ? `${state.selectedTaskAgent} 正在执行，发送后将排队` : taskFailed ? "输入消息重试，或输入 /reopen" : `发送给 ${state.selectedTaskAgent}，输入 / 查看命令`))}" ${runtimeError || remoteReadOnly ? "disabled" : ""} required>${escapeHTML(state.taskDraft)}</textarea><button id="message-send" class="primary" aria-label="发送" ${runtimeError || remoteReadOnly ? "disabled" : ""}>${icon("send")}<span class="send-label">发送</span></button></form>
   </section>`;
   return shell(`<section class="task-screen">
     <header class="task-head"><button id="back-tasks">←</button><div class="task-title-block"><h1><span class="task-code">${escapeHTML(detail.task.code || "")}</span><span class="task-title-text">${escapeHTML(detail.task.title)}</span></h1><div class="task-head-subline"><span class="task-head-meta" title="${escapeHTML(taskMeta)}">${escapeHTML(taskMeta)}</span><span id="task-detail-status" class="status ${statusClass(detail.task.status)}">${statusLabel(detail.task.status)}</span><span class="task-branch">${escapeHTML(detail.task.task_branch || "")}</span></div></div><div class="actions task-tool-actions">${renderTaskToolButtons(state.taskTool)}</div></header>

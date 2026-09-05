@@ -33,7 +33,7 @@ import (
 	"github.com/ChinaKai/AHA2/internal/workspace"
 )
 
-const version = "0.2.0"
+const version = "0.2.1"
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "version" {

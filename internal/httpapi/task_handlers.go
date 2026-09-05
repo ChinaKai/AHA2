@@ -22,6 +22,11 @@ func (s *Server) listTasks(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 	s.applyTaskTokenTotals(request.Context(), items)
+	if mirrors, mirrorErr := s.store.RemoteTaskMirrors(request.Context(), request.URL.Query().Get("project_id")); mirrorErr == nil {
+		for _, mirror := range mirrors {
+			items = append(items, mirror.Task)
+		}
+	}
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "tasks": items})
 }
 
@@ -150,6 +155,10 @@ func (s *Server) createTask(writer http.ResponseWriter, request *http.Request) {
 		writeError(writer, http.StatusBadRequest, "invalid_json")
 		return
 	}
+	if workspace, err := s.store.Workspace(request.Context(), payload.WorkspaceID); err == nil && workspace.ReadOnly {
+		writeJSON(writer, http.StatusForbidden, map[string]any{"ok": false, "error": "workspace_read_only", "message": "该 Workspace 属于其他设备，只能查看同步历史"})
+		return
+	}
 	filesystem := strings.TrimSpace(payload.Filesystem)
 	if filesystem == "" {
 		filesystem = "workspace-write"
@@ -199,7 +208,24 @@ func (s *Server) taskDetail(writer http.ResponseWriter, request *http.Request) {
 	taskID := request.PathValue("id")
 	task, err := s.store.Task(request.Context(), taskID)
 	if err != nil {
-		writeError(writer, http.StatusNotFound, "task_not_found")
+		mirror, mirrorErr := s.store.RemoteTaskMirror(request.Context(), taskID)
+		if mirrorErr != nil {
+			writeError(writer, http.StatusNotFound, "task_not_found")
+			return
+		}
+		var latest domain.TaskRound
+		for _, round := range mirror.Rounds {
+			if latest.ID == "" || round.Sequence > latest.Sequence {
+				latest = round
+			}
+		}
+		turns := make([]domain.Turn, 0)
+		for _, turn := range mirror.Turns {
+			if latest.ID == "" || turn.RoundID == latest.ID {
+				turns = append(turns, turn)
+			}
+		}
+		writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "task": mirror.Task, "latest_round": latest, "turns": turns, "agents": mirror.Agents, "memory": mirror.Memory, "hardware": []domain.HardwareGroup{}, "event_cursor": 0, "server_time_ms": time.Now().UTC().UnixMilli()})
 		return
 	}
 	round, _ := s.store.LatestRound(request.Context(), taskID)
@@ -230,7 +256,18 @@ func (s *Server) agentConversation(writer http.ResponseWriter, request *http.Req
 func (s *Server) conversationForAgent(writer http.ResponseWriter, request *http.Request, agentID string) {
 	taskID := request.PathValue("id")
 	if _, err := s.store.Task(request.Context(), taskID); err != nil {
-		writeError(writer, http.StatusNotFound, "task_not_found")
+		mirror, mirrorErr := s.store.RemoteTaskMirror(request.Context(), taskID)
+		if mirrorErr != nil {
+			writeError(writer, http.StatusNotFound, "task_not_found")
+			return
+		}
+		items := make([]domain.ConversationItem, 0, len(mirror.Conversation))
+		for _, item := range mirror.Conversation {
+			if agentID == "main" || item.AgentID == agentID || item.StreamAgentID == agentID {
+				items = append(items, item)
+			}
+		}
+		writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "conversation": domain.ConversationPage{Items: items, Latest: int64(len(items))}})
 		return
 	}
 	if _, err := s.store.TaskAgent(request.Context(), taskID, agentID); err != nil {
@@ -274,7 +311,12 @@ func (s *Server) contextForAgent(writer http.ResponseWriter, request *http.Reque
 	taskID := request.PathValue("id")
 	task, err := s.store.Task(request.Context(), taskID)
 	if err != nil {
-		writeError(writer, http.StatusNotFound, "task_not_found")
+		mirror, mirrorErr := s.store.RemoteTaskMirror(request.Context(), taskID)
+		if mirrorErr != nil {
+			writeError(writer, http.StatusNotFound, "task_not_found")
+			return
+		}
+		writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "task": mirror.Task, "turns": mirror.Turns, "memory": mirror.Memory, "project_knowledge": []domain.KnowledgeEntry{}, "global_knowledge": []domain.KnowledgeEntry{}, "context": map[string]any{"agent_id": agentID, "usage": map[string]any{}, "metrics": map[string]any{}}})
 		return
 	}
 	memory, _ := s.store.TaskMemory(request.Context(), taskID)

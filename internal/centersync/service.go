@@ -57,7 +57,7 @@ func (s *Store) migrate(ctx context.Context) error {
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
 CREATE TABLE IF NOT EXISTS device_tokens (
- device_id TEXT PRIMARY KEY, token_hash TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
+ device_id TEXT PRIMARY KEY, device_name TEXT NOT NULL DEFAULT '', token_hash TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
  generation INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT '', rotated_at TEXT NOT NULL DEFAULT '', revoked_at TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS registration_codes (
@@ -87,10 +87,14 @@ CREATE INDEX IF NOT EXISTS idx_sync_events_sequence ON sync_events(sequence);
 		`ALTER TABLE device_tokens ADD COLUMN created_at TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE device_tokens ADD COLUMN rotated_at TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE device_tokens ADD COLUMN revoked_at TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE device_tokens ADD COLUMN device_name TEXT NOT NULL DEFAULT ''`,
 	} {
 		if _, err := s.db.ExecContext(ctx, migration); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
 			return fmt.Errorf("migrate device tokens: %w", err)
 		}
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE device_tokens SET device_name=device_id WHERE device_name=''`); err != nil {
+		return fmt.Errorf("migrate legacy device names: %w", err)
 	}
 	return nil
 }
@@ -105,8 +109,8 @@ func (s *Store) PutDeviceToken(ctx context.Context, deviceID, token string) erro
 		return errors.New("device id and token are required")
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_, err := s.db.ExecContext(ctx, `INSERT INTO device_tokens(device_id, token_hash, enabled, generation, created_at) VALUES(?,?,1,1,?)
-ON CONFLICT(device_id) DO UPDATE SET token_hash=excluded.token_hash, enabled=1, generation=device_tokens.generation+1, rotated_at=excluded.created_at, revoked_at=''`, deviceID, tokenHash(token), now)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO device_tokens(device_id,device_name,token_hash,enabled,generation,created_at) VALUES(?,?,?,1,1,?)
+ON CONFLICT(device_id) DO UPDATE SET token_hash=excluded.token_hash,enabled=1,generation=device_tokens.generation+1,rotated_at=excluded.created_at,revoked_at=''`, deviceID, deviceID, tokenHash(token), now)
 	return err
 }
 
@@ -190,55 +194,83 @@ func (s *Store) CreateRegistrationCode(ctx context.Context, ttl time.Duration) (
 	return code, nil
 }
 
-func validDeviceID(value string) bool {
-	if len(value) < 1 || len(value) > 128 {
+func validDeviceName(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" || len([]rune(value)) > 128 {
 		return false
 	}
 	for _, r := range value {
-		if !(r == '-' || r == '_' || r == '.' || r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z') {
+		if r < 0x20 || r == 0x7f {
 			return false
 		}
 	}
 	return true
 }
 
-func (s *Store) RegisterDevice(ctx context.Context, deviceID, code string) (string, error) {
-	if !validDeviceID(deviceID) || code == "" {
-		return "", errors.New("device id and registration code are required")
+type DeviceCredential struct {
+	DeviceID   string `json:"device_id"`
+	DeviceName string `json:"device_name"`
+	Token      string `json:"token"`
+}
+
+func newDeviceID() (string, error) {
+	raw := make([]byte, 16)
+	if _, err := rand.Read(raw); err != nil {
+		return "", fmt.Errorf("generate device id: %w", err)
+	}
+	return "dev_" + hex.EncodeToString(raw), nil
+}
+
+func (s *Store) RegisterNamedDevice(ctx context.Context, deviceName, code string) (DeviceCredential, error) {
+	deviceName = strings.TrimSpace(deviceName)
+	if !validDeviceName(deviceName) || code == "" {
+		return DeviceCredential{}, errors.New("device name and registration code are required")
+	}
+	deviceID, err := newDeviceID()
+	if err != nil {
+		return DeviceCredential{}, err
 	}
 	token, err := randomCredential()
 	if err != nil {
-		return "", err
+		return DeviceCredential{}, err
 	}
-	now := time.Now().UTC()
-	nowText := now.Format(time.RFC3339Nano)
+	nowText := time.Now().UTC().Format(time.RFC3339Nano)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return "", err
+		return DeviceCredential{}, err
 	}
 	defer tx.Rollback()
-	var exists bool
-	if err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM device_tokens WHERE device_id=?)`, deviceID).Scan(&exists); err != nil {
-		return "", err
-	}
-	if exists {
-		return "", errors.New("device already registered")
-	}
 	result, err := tx.ExecContext(ctx, `UPDATE registration_codes SET consumed_at=? WHERE code_hash=? AND consumed_at='' AND expires_at>?`, nowText, tokenHash(code), nowText)
 	if err != nil {
-		return "", err
+		return DeviceCredential{}, err
 	}
 	affected, _ := result.RowsAffected()
 	if affected != 1 {
-		return "", errors.New("invalid or expired registration code")
+		return DeviceCredential{}, errors.New("invalid or expired registration code")
 	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO device_tokens(device_id,token_hash,enabled,generation,created_at) VALUES(?,?,1,1,?)`, deviceID, tokenHash(token), nowText); err != nil {
-		return "", err
+	if _, err = tx.ExecContext(ctx, `INSERT INTO device_tokens(device_id,device_name,token_hash,enabled,generation,created_at) VALUES(?,?,?,1,1,?)`, deviceID, deviceName, tokenHash(token), nowText); err != nil {
+		return DeviceCredential{}, err
 	}
 	if err = tx.Commit(); err != nil {
-		return "", err
+		return DeviceCredential{}, err
 	}
-	return token, nil
+	return DeviceCredential{DeviceID: deviceID, DeviceName: deviceName, Token: token}, nil
+}
+
+func (s *Store) RenameDevice(ctx context.Context, deviceID, deviceName string) error {
+	deviceName = strings.TrimSpace(deviceName)
+	if !validDeviceName(deviceName) {
+		return errors.New("valid device name is required")
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE device_tokens SET device_name=? WHERE device_id=? AND enabled=1`, deviceName, deviceID)
+	if err != nil {
+		return err
+	}
+	n, _ := result.RowsAffected()
+	if n != 1 {
+		return sql.ErrNoRows
+	}
+	return nil
 }
 
 func (s *Store) RevokeDevice(ctx context.Context, deviceID string) error {
@@ -395,20 +427,38 @@ func (s *Store) Handler() http.Handler {
 	})
 	mux.HandleFunc("POST /v1/devices/register", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			DeviceID         string `json:"device_id"`
+			DeviceID         string `json:"device_id"` // legacy clients used this as the requested name
+			DeviceName       string `json:"device_name"`
 			RegistrationCode string `json:"registration_code"`
 		}
 		if !decode(w, r, &req) {
 			return
 		}
-		token, err := s.RegisterDevice(r.Context(), strings.TrimSpace(req.DeviceID), req.RegistrationCode)
+		name := req.DeviceName
+		if strings.TrimSpace(name) == "" {
+			name = req.DeviceID
+		}
+		credential, err := s.RegisterNamedDevice(r.Context(), name, req.RegistrationCode)
 		if err != nil {
 			http.Error(w, "registration failed", http.StatusUnauthorized)
 			return
 		}
 		w.Header().Set("Cache-Control", "no-store")
-		writeJSON(w, http.StatusCreated, map[string]string{"device_id": strings.TrimSpace(req.DeviceID), "token": token})
+		writeJSON(w, http.StatusCreated, credential)
 	})
+	mux.HandleFunc("PATCH /v1/devices/self", s.auth(func(w http.ResponseWriter, r *http.Request, device string) {
+		var req struct {
+			DeviceName string `json:"device_name"`
+		}
+		if !decode(w, r, &req) {
+			return
+		}
+		if err := s.RenameDevice(r.Context(), device, req.DeviceName); err != nil {
+			http.Error(w, "invalid device name", http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"device_id": device, "device_name": strings.TrimSpace(req.DeviceName)})
+	}))
 	mux.HandleFunc("POST /v1/devices/bootstrap-code", func(w http.ResponseWriter, r *http.Request) {
 		host, _, err := net.SplitHostPort(r.RemoteAddr)
 		if err != nil || !net.ParseIP(host).IsLoopback() {

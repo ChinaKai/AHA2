@@ -20,6 +20,14 @@ const (
 	TypeModel          = "model"
 	TypeEnvGroup       = "env_group"
 	TypePromptOverride = "prompt_override"
+	TypeProject        = "project"
+	TypeWorkspace      = "workspace"
+	TypeTask           = "task"
+	TypeTaskAgent      = "task_agent"
+	TypeRound          = "round"
+	TypeTurn           = "turn"
+	TypeConversation   = "conversation"
+	TypeTaskMemory     = "task_memory"
 )
 
 type skillPayload struct {
@@ -30,6 +38,10 @@ type skillPayload struct {
 // ExportBusinessObjects exports only portable configuration. Credential references,
 // secret values, project/task/workspace identities, and local account bindings are removed.
 func ExportBusinessObjects(ctx context.Context, database *store.Store) ([]domain.SyncObject, error) {
+	return ExportBusinessObjectsForDevice(ctx, database, "")
+}
+
+func ExportBusinessObjectsForDevice(ctx context.Context, database *store.Store, ownerDeviceID string) ([]domain.SyncObject, error) {
 	var result []domain.SyncObject
 	add := func(kind, id, version string, value any) error {
 		raw, err := json.Marshal(value)
@@ -39,15 +51,18 @@ func ExportBusinessObjects(ctx context.Context, database *store.Store) ([]domain
 		result = append(result, domain.SyncObject{Type: kind, ID: id, Operation: "upsert", Payload: raw, RemoteVersion: version, IdempotencyKey: kind + ":" + id + ":" + version})
 		return nil
 	}
+	if ownerDeviceID != "" {
+		graph, err := exportTaskGraph(ctx, database, ownerDeviceID)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, graph...)
+	}
 	knowledge, err := database.ListKnowledge(ctx, "", "", nil)
 	if err != nil {
 		return nil, err
 	}
 	for _, v := range knowledge {
-		if v.ProjectID != "" {
-			v.Scope = "global"
-		}
-		v.ProjectID = ""
 		v.SourceTaskID = ""
 		v.SourceTurnID = ""
 		if err := add(TypeKnowledge, v.ID, strconv.Itoa(v.Revision), v); err != nil {
@@ -116,7 +131,7 @@ func ExportBusinessObjects(ctx context.Context, database *store.Store) ([]domain
 }
 
 func RegisterBusinessHandlers(engine *Engine, database *store.Store) {
-	for _, kind := range []string{TypeKnowledge, TypeSkill, TypeProvider, TypeModel, TypeEnvGroup, TypePromptOverride} {
+	for _, kind := range []string{TypeProject, TypeWorkspace, TypeTask, TypeTaskAgent, TypeRound, TypeTurn, TypeConversation, TypeTaskMemory, TypeKnowledge, TypeSkill, TypeProvider, TypeModel, TypeEnvGroup, TypePromptOverride} {
 		objectType := kind
 		engine.Register(objectType, func(ctx context.Context, obj domain.SyncObject) error { return applyBusinessObject(ctx, database, obj) })
 	}
@@ -147,6 +162,15 @@ func currentBusinessObject(ctx context.Context, database *store.Store, kind, id 
 	var version string
 	var err error
 	switch kind {
+	case TypeProject:
+		var v domain.Project
+		v, err = database.Project(ctx, id)
+		value = v
+		version = timeVersion(v.UpdatedAt)
+	case TypeWorkspace:
+		return nil, "", false, nil
+	case TypeTask, TypeTaskAgent, TypeRound, TypeTurn, TypeConversation, TypeTaskMemory:
+		return nil, "", false, nil
 	case TypeKnowledge:
 		var v domain.KnowledgeEntry
 		v, err = database.Knowledge(ctx, id)
@@ -202,6 +226,8 @@ func currentBusinessObject(ctx context.Context, database *store.Store, kind, id 
 func upsertBusinessObject(ctx context.Context, database *store.Store, obj domain.SyncObject, exists bool) error {
 	now := time.Now().UTC()
 	switch obj.Type {
+	case TypeProject, TypeWorkspace, TypeTask, TypeTaskAgent, TypeRound, TypeTurn, TypeConversation, TypeTaskMemory:
+		return applyTaskGraphObject(ctx, database, obj)
 	case TypeKnowledge:
 		var v domain.KnowledgeEntry
 		if err := decodePayload(obj, &v); err != nil {
@@ -209,9 +235,11 @@ func upsertBusinessObject(ctx context.Context, database *store.Store, obj domain
 		}
 		v.ID = obj.ID
 		if v.ProjectID != "" {
-			v.Scope = "global"
+			if _, err := database.Project(ctx, v.ProjectID); err != nil {
+				return fmt.Errorf("knowledge project dependency %s: %w", v.ProjectID, err)
+			}
+			v.Scope = "project"
 		}
-		v.ProjectID = ""
 		v.SourceTaskID = ""
 		v.SourceTurnID = ""
 		if exists {

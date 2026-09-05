@@ -18,10 +18,10 @@ func (s *Store) PutSyncSettings(ctx context.Context, value domain.SyncSettings) 
 		value.UpdatedAt = time.Now().UTC()
 	}
 	selection := encodeJSON(map[string]any{"provider_ids": value.ProviderIDs, "env_group_ids": value.EnvGroupIDs, "codex_account_ids": value.CodexAccountIDs})
-	_, err := s.db.ExecContext(ctx, `INSERT INTO sync_settings(scope,enabled,endpoint,device_id,interval_seconds,secret_selection_json,updated_at)
-		VALUES(?,?,?,?,?,?,?) ON CONFLICT(scope) DO UPDATE SET enabled=excluded.enabled,endpoint=excluded.endpoint,
-		device_id=excluded.device_id,interval_seconds=excluded.interval_seconds,secret_selection_json=excluded.secret_selection_json,updated_at=excluded.updated_at`,
-		value.Scope, value.Enabled, value.Endpoint, value.DeviceID, value.IntervalSeconds, selection, timeString(value.UpdatedAt))
+	_, err := s.db.ExecContext(ctx, `INSERT INTO sync_settings(scope,enabled,endpoint,device_id,device_name,interval_seconds,secret_selection_json,updated_at)
+		VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(scope) DO UPDATE SET enabled=excluded.enabled,endpoint=excluded.endpoint,
+		device_id=excluded.device_id,device_name=excluded.device_name,interval_seconds=excluded.interval_seconds,secret_selection_json=excluded.secret_selection_json,updated_at=excluded.updated_at`,
+		value.Scope, value.Enabled, value.Endpoint, value.DeviceID, value.DeviceName, value.IntervalSeconds, selection, timeString(value.UpdatedAt))
 	return err
 }
 
@@ -29,8 +29,8 @@ func (s *Store) SyncSettings(ctx context.Context, scope string) (domain.SyncSett
 	var v domain.SyncSettings
 	var enabled bool
 	var updated, selection string
-	err := s.db.QueryRowContext(ctx, `SELECT scope,enabled,endpoint,device_id,interval_seconds,secret_selection_json,updated_at FROM sync_settings WHERE scope=?`, scope).
-		Scan(&v.Scope, &enabled, &v.Endpoint, &v.DeviceID, &v.IntervalSeconds, &selection, &updated)
+	err := s.db.QueryRowContext(ctx, `SELECT scope,enabled,endpoint,device_id,device_name,interval_seconds,secret_selection_json,updated_at FROM sync_settings WHERE scope=?`, scope).
+		Scan(&v.Scope, &enabled, &v.Endpoint, &v.DeviceID, &v.DeviceName, &v.IntervalSeconds, &selection, &updated)
 	selected := decodeJSON(selection, struct {
 		ProviderIDs     []string `json:"provider_ids"`
 		EnvGroupIDs     []string `json:"env_group_ids"`

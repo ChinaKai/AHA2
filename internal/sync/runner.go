@@ -39,6 +39,9 @@ func (r Runner) RunOnce(ctx context.Context) error {
 	}
 	client := &Client{BaseURL: settings.Endpoint, DeviceID: settings.DeviceID, Credential: func(context.Context) (string, error) { return token, nil }}
 	engine := &Engine{Store: r.Store, Remote: client, Scope: r.scope(), DeviceID: settings.DeviceID}
+	if err := r.Store.ClaimLocalWorkspaces(ctx, settings.DeviceID); err != nil {
+		return err
+	}
 	RegisterBusinessHandlers(engine, r.Store)
 	passphraseRef := r.PassphraseRef
 	if passphraseRef == "" {
@@ -48,7 +51,7 @@ func (r Runner) RunOnce(ctx context.Context) error {
 	if passphraseConfigured && passphrase != "" {
 		RegisterSecretBundleHandler(engine, r.Store, r.Secrets, passphrase)
 	}
-	objects, err := ExportBusinessObjects(ctx, r.Store)
+	objects, err := ExportBusinessObjectsForDevice(ctx, r.Store, settings.DeviceID)
 	if err != nil {
 		return err
 	}

@@ -63,8 +63,31 @@ CREATE TABLE IF NOT EXISTS sync_applied (
 );
 `
 
+const schemaV29 = `
+ALTER TABLE workspaces ADD COLUMN owner_device_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE workspaces ADD COLUMN read_only INTEGER NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS idx_workspaces_owner_device ON workspaces(owner_device_id,read_only);
+CREATE TABLE IF NOT EXISTS sync_remote_task_objects (
+    owner_device_id TEXT NOT NULL,
+    object_type TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    task_id TEXT NOT NULL DEFAULT '',
+    project_id TEXT NOT NULL DEFAULT '',
+    payload_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(owner_device_id,object_type,object_id)
+);
+CREATE INDEX IF NOT EXISTS idx_sync_remote_task_objects_task ON sync_remote_task_objects(owner_device_id,task_id,object_type);
+`
+
 const schemaV28 = `
 ALTER TABLE sync_settings ADD COLUMN secret_selection_json TEXT NOT NULL DEFAULT '{}';
+`
+
+const schemaV30 = `
+ALTER TABLE sync_settings ADD COLUMN device_name TEXT NOT NULL DEFAULT '';
+UPDATE sync_settings SET device_name=device_id WHERE device_name='';
 `
 
 const schemaV1 = `
@@ -1079,6 +1102,26 @@ func (s *Store) migrate(ctx context.Context) error {
 	}
 	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(28, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
 		return fmt.Errorf("record schema v28: %w", err)
+	}
+	var hasV29 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=29)`).Scan(&hasV29)
+	if !hasV29 {
+		if _, err := s.db.ExecContext(ctx, schemaV29); err != nil {
+			return fmt.Errorf("apply schema v29: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(29, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v29: %w", err)
+	}
+	var hasV30 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=30)`).Scan(&hasV30)
+	if !hasV30 {
+		if _, err := s.db.ExecContext(ctx, schemaV30); err != nil {
+			return fmt.Errorf("apply schema v30: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(30, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v30: %w", err)
 	}
 	return nil
 }

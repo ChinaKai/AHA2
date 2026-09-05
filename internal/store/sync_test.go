@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"path/filepath"
 	"testing"
@@ -9,6 +10,27 @@ import (
 
 	"github.com/ChinaKai/AHA2/internal/domain"
 )
+
+func TestSyncSettingsDeviceNameLegacyMigration(t *testing.T) {
+	raw, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "legacy.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	if _, err := raw.Exec(`CREATE TABLE sync_settings(scope TEXT PRIMARY KEY,device_id TEXT NOT NULL); INSERT INTO sync_settings(scope,device_id) VALUES('default','legacy-device')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(schemaV30); err != nil {
+		t.Fatal(err)
+	}
+	var id, name string
+	if err := raw.QueryRow(`SELECT device_id,device_name FROM sync_settings WHERE scope='default'`).Scan(&id, &name); err != nil {
+		t.Fatal(err)
+	}
+	if id != "legacy-device" || name != "legacy-device" {
+		t.Fatalf("id=%q name=%q", id, name)
+	}
+}
 
 func TestSyncPersistenceAndAck(t *testing.T) {
 	ctx := context.Background()
@@ -18,7 +40,7 @@ func TestSyncPersistenceAndAck(t *testing.T) {
 	}
 	defer database.Close()
 	now := time.Date(2026, 9, 5, 1, 2, 3, 0, time.UTC)
-	settings := domain.SyncSettings{Scope: "default", Enabled: true, Endpoint: "https://sync.example", DeviceID: "device-1", IntervalSeconds: 60, UpdatedAt: now}
+	settings := domain.SyncSettings{Scope: "default", Enabled: true, Endpoint: "https://sync.example", DeviceID: "dev_immutable", DeviceName: "Laptop", IntervalSeconds: 60, UpdatedAt: now}
 	if err := database.PutSyncSettings(ctx, settings); err != nil {
 		t.Fatal(err)
 	}
@@ -26,7 +48,7 @@ func TestSyncPersistenceAndAck(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Endpoint != settings.Endpoint || !got.Enabled {
+	if got.Endpoint != settings.Endpoint || got.DeviceID != "dev_immutable" || got.DeviceName != "Laptop" || !got.Enabled {
 		t.Fatalf("unexpected settings: %#v", got)
 	}
 	item := domain.SyncOutboxItem{ID: "out-1", Scope: "default", Object: domain.SyncObject{Type: "note", ID: "n1", Operation: "upsert", Payload: json.RawMessage(`{"title":"one"}`), IdempotencyKey: "key-1"}}

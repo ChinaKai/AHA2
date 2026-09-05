@@ -59,10 +59,19 @@ func TestBusinessExportStripsLocalAndSecretFields(t *testing.T) {
 	}
 	raw, _ := json.Marshal(objects)
 	text := string(raw)
-	for _, forbidden := range []string{"project-private", "task-private", "turn-private", "secret/provider", "secret/token", "account-private"} {
+	for _, forbidden := range []string{"task-private", "turn-private", "secret/provider", "secret/token", "account-private"} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("export leaked %q", forbidden)
 		}
+	}
+	var projectKnowledge domain.KnowledgeEntry
+	for _, obj := range objects {
+		if obj.Type == TypeKnowledge {
+			_ = json.Unmarshal(obj.Payload, &projectKnowledge)
+		}
+	}
+	if projectKnowledge.ProjectID != "project-private" || projectKnowledge.Scope != "project" {
+		t.Fatalf("project knowledge lost scope: %#v", projectKnowledge)
 	}
 	var full skillPayload
 	for _, obj := range objects {
