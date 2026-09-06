@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -162,4 +163,60 @@ func TestSchemaV35RequiresOneTimeOrderedSyncReplay(t *testing.T) {
 	if err != nil || state.Cursor != "84" || state.ReplayRequired {
 		t.Fatalf("schema v35 replay repeated unexpectedly: %#v err=%v", state, err)
 	}
+}
+
+func TestSchemaV36RemovesOnlyCurrentDeviceMirrors(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "aha2.db")
+	database, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	project := domain.Project{ID: "project-mirrors", Name: "Mirrors", CreatedAt: now, UpdatedAt: now}
+	if err := database.CreateProject(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.PutSyncSettings(ctx, domain.SyncSettings{Scope: "default", Enabled: false, Endpoint: "https://sync.example", DeviceID: "device-local", IntervalSeconds: 60}); err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range []struct{ owner, task string }{{"device-local", "task-local"}, {"device-remote", "task-remote"}} {
+		if err := database.UpsertRemoteTaskObject(ctx, RemoteTaskObject{OwnerDeviceID: item.owner, ObjectType: "task", ObjectID: item.task, TaskID: item.task, ProjectID: project.ID, Payload: json.RawMessage(`{}`), CreatedAt: now, UpdatedAt: now}); err != nil {
+			t.Fatal(err)
+		}
+		if err := database.UpsertSyncedWorkspace(ctx, domain.Workspace{ID: syncedWorkspaceTestID(item.owner), ProjectID: project.ID, Name: item.owner, OwnerDeviceID: item.owner, ReadOnly: true, CreatedAt: now, UpdatedAt: now}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := database.db.ExecContext(ctx, `DELETE FROM schema_migrations WHERE version=36`); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	database, err = Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	for _, item := range []struct {
+		owner, task string
+		want        bool
+	}{{"device-local", "task-local", false}, {"device-remote", "task-remote", true}} {
+		found, err := database.RemoteTaskObjectExists(ctx, item.owner, "task", item.task)
+		if err != nil || found != item.want {
+			t.Fatalf("owner %s mirror found=%t want=%t err=%v", item.owner, found, item.want, err)
+		}
+		_, err = database.Workspace(ctx, syncedWorkspaceTestID(item.owner))
+		if item.want && err != nil {
+			t.Fatalf("other device workspace was removed: %v", err)
+		}
+		if !item.want && !errors.Is(err, sql.ErrNoRows) {
+			t.Fatalf("current device workspace was not removed: %v", err)
+		}
+	}
+}
+
+func syncedWorkspaceTestID(owner string) string {
+	return "remote-workspace-" + owner
 }

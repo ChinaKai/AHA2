@@ -59,6 +59,14 @@ SET cursor='',last_pull_at='',last_error='',replay_required=1,
 WHERE cursor<>'';
 `
 
+const schemaV36 = `
+DELETE FROM sync_remote_task_objects
+WHERE owner_device_id=COALESCE((SELECT device_id FROM sync_settings WHERE scope='default'),'');
+DELETE FROM workspaces
+WHERE read_only=1
+  AND owner_device_id=COALESCE((SELECT device_id FROM sync_settings WHERE scope='default'),'');
+`
+
 const schemaV27 = `
 CREATE TABLE IF NOT EXISTS sync_settings (
     scope TEXT PRIMARY KEY,
@@ -1226,6 +1234,16 @@ func (s *Store) migrate(ctx context.Context) error {
 	}
 	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(35, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
 		return fmt.Errorf("record schema v35: %w", err)
+	}
+	var hasV36 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=36)`).Scan(&hasV36)
+	if !hasV36 {
+		if _, err := s.db.ExecContext(ctx, schemaV36); err != nil {
+			return fmt.Errorf("apply schema v36: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(36, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v36: %w", err)
 	}
 	return nil
 }

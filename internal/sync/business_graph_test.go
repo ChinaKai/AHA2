@@ -121,3 +121,33 @@ func TestGraphExportStripsWorkspaceRuntimeAndConversationPayload(t *testing.T) {
 		t.Fatalf("dependency order=%#v", objects)
 	}
 }
+
+func TestBusinessHandlersIgnoreCurrentDeviceTaskMirrors(t *testing.T) {
+	ctx, db := context.Background(), businessStore(t)
+	now := time.Now().UTC()
+	project := domain.Project{ID: "project-self", Name: "Self", CreatedAt: now, UpdatedAt: now}
+	if err := db.CreateProject(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	engine := &Engine{}
+	RegisterBusinessHandlersForDevice(engine, db, "device-local")
+	localTask := domain.Task{ID: "task-local", ProjectID: project.ID, Title: "Local", Status: domain.TaskWaitingUser, CreatedAt: now, UpdatedAt: now}
+	localObject := graphObject(t, TypeTask, "device-local:task-local", "device-local", project.ID, localTask.ID, localTask)
+	if err := engine.handlers[TypeTask](ctx, localObject); err != nil {
+		t.Fatal(err)
+	}
+	found, err := db.RemoteTaskObjectExists(ctx, "device-local", TypeTask, localTask.ID)
+	if err != nil || found {
+		t.Fatalf("current device task was mirrored: found=%t err=%v", found, err)
+	}
+	remoteTask := localTask
+	remoteTask.ID, remoteTask.Title = "task-remote", "Remote"
+	remoteObject := graphObject(t, TypeTask, "device-remote:task-remote", "device-remote", project.ID, remoteTask.ID, remoteTask)
+	if err := engine.handlers[TypeTask](ctx, remoteObject); err != nil {
+		t.Fatal(err)
+	}
+	found, err = db.RemoteTaskObjectExists(ctx, "device-remote", TypeTask, remoteTask.ID)
+	if err != nil || !found {
+		t.Fatalf("other device task was not mirrored: found=%t err=%v", found, err)
+	}
+}

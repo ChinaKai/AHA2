@@ -117,6 +117,24 @@ func (s *Store) ClaimLocalWorkspaces(ctx context.Context, deviceID string) error
 	return err
 }
 
+func (s *Store) PurgeOwnRemoteMirrors(ctx context.Context, deviceID string) error {
+	if deviceID == "" {
+		return fmt.Errorf("device id is required")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM sync_remote_task_objects WHERE owner_device_id=?`, deviceID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM workspaces WHERE read_only=1 AND owner_device_id=?`, deviceID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func (s *Store) UpsertSyncedWorkspace(ctx context.Context, item domain.Workspace) error {
 	_, err := s.db.ExecContext(ctx, `INSERT INTO workspaces(id,project_id,name,locality,transport,root_path,ssh_host,ssh_user,ssh_port,ssh_auth,ssh_credential_ref,ssh_password_configured,distro,platform,health,capabilities_json,repository_json,last_detected_at,created_at,updated_at,owner_device_id,read_only)
 	VALUES(?,?,?,?,?,'','','',0,'','',0,'','','remote','{}','{}','',?,?,?,1)

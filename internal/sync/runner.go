@@ -42,7 +42,10 @@ func (r Runner) RunOnce(ctx context.Context) error {
 	if err := r.Store.ClaimLocalWorkspaces(ctx, settings.DeviceID); err != nil {
 		return err
 	}
-	RegisterBusinessHandlers(engine, r.Store)
+	if err := r.Store.PurgeOwnRemoteMirrors(ctx, settings.DeviceID); err != nil {
+		return err
+	}
+	RegisterBusinessHandlersForDevice(engine, r.Store, settings.DeviceID)
 	passphraseRef := r.PassphraseRef
 	if passphraseRef == "" {
 		passphraseRef = DefaultPassphraseRef

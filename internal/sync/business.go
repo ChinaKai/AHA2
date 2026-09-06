@@ -183,9 +183,37 @@ func ExportBusinessObjectsForDevice(ctx context.Context, database *store.Store, 
 }
 
 func RegisterBusinessHandlers(engine *Engine, database *store.Store) {
+	registerBusinessHandlers(engine, database, "")
+}
+
+func RegisterBusinessHandlersForDevice(engine *Engine, database *store.Store, localDeviceID string) {
+	registerBusinessHandlers(engine, database, localDeviceID)
+}
+
+func registerBusinessHandlers(engine *Engine, database *store.Store, localDeviceID string) {
 	for _, kind := range []string{TypeProject, TypeWorkspace, TypeTask, TypeTaskAgent, TypeRound, TypeTurn, TypeConversation, TypeTaskMemory, TypeKnowledgeProposal, TypeKnowledge, TypeSkill, TypeProvider, TypeModel, TypeEnvGroup, TypePromptOverride} {
 		objectType := kind
-		engine.Register(objectType, func(ctx context.Context, obj domain.SyncObject) error { return applyBusinessObject(ctx, database, obj) })
+		engine.Register(objectType, func(ctx context.Context, obj domain.SyncObject) error {
+			if localDeviceID != "" && objectType != TypeProject && isTaskGraphType(objectType) {
+				var envelope graphEnvelope
+				if err := decodePayload(obj, &envelope); err != nil {
+					return err
+				}
+				if envelope.OwnerDeviceID == localDeviceID {
+					return nil
+				}
+			}
+			return applyBusinessObject(ctx, database, obj)
+		})
+	}
+}
+
+func isTaskGraphType(kind string) bool {
+	switch kind {
+	case TypeProject, TypeWorkspace, TypeTask, TypeTaskAgent, TypeRound, TypeTurn, TypeConversation, TypeTaskMemory:
+		return true
+	default:
+		return false
 	}
 }
 
