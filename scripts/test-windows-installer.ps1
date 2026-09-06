@@ -23,6 +23,7 @@ $requiredWorkflowContracts = @(
     "AHA2-Setup-x64.exe",
     "build-linux-packages.sh",
     "build-macos-packages.sh",
+    "ubuntu-24.04-arm",
     "SHA256SUMS",
     "merge-multiple: true",
     "pattern: package-*",

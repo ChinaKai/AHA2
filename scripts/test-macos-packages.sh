@@ -8,8 +8,8 @@ bash -n "$build" "$repo/packaging/macos/scripts/preinstall" \
   "$repo/packaging/macos/scripts/postinstall" "$repo/packaging/macos/uninstall-aha2.sh"
 
 missing="${TMPDIR:-/tmp}/aha2-validation-$RANDOM-$RANDOM"
-"$build" --version v1.2.3 --input-exe "$missing-amd64" --arch amd64 --output-dir "$missing-output" --validate-only
-"$build" --version v1.2.3 --input-exe "$missing-arm64" --arch arm64 --output-dir "$missing-output" --validate-only
+bash "$build" --version v1.2.3 --input-exe "$missing-amd64" --arch amd64 --output-dir "$missing-output" --validate-only
+bash "$build" --version v1.2.3 --input-exe "$missing-arm64" --arch arm64 --output-dir "$missing-output" --validate-only
 
 python3 - "$repo/packaging/macos/com.aha2.controlplane.plist" <<'PY'
 import plistlib
