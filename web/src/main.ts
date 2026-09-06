@@ -816,7 +816,8 @@ function shell(content: string): string {
 }
 
 function banner(): string {
-  return `${state.error ? `<div class="banner error">${escapeHTML(state.error)}</div>` : ""}${state.notice ? `<div class="banner success">${escapeHTML(state.notice)}</div>` : ""}`;
+  const messages = `${state.error ? `<div class="banner error">${escapeHTML(state.error)}</div>` : ""}${state.notice ? `<div class="banner success">${escapeHTML(state.notice)}</div>` : ""}`;
+  return messages ? `<div class="banner-stack">${messages}</div>` : "";
 }
 
 function pageHead(title: string, description: string, actions = ""): string {

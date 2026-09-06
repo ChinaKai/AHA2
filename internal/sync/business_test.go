@@ -86,7 +86,7 @@ func TestBusinessExportStripsLocalAndSecretFields(t *testing.T) {
 		if obj.BaseVersion != "" {
 			t.Fatalf("initial export has base version")
 		}
-		if obj.Type == TypeKnowledge && !strings.HasPrefix(obj.IdempotencyKey, "knowledge:v2:") {
+		if obj.Type == TypeKnowledge && !strings.HasPrefix(obj.IdempotencyKey, "knowledge:v3:") {
 			t.Fatalf("knowledge export retained legacy idempotency key: %q", obj.IdempotencyKey)
 		}
 		if obj.Type == TypeSkill {
@@ -128,6 +128,50 @@ func TestApplyLegacyProjectKnowledgeWithoutProjectIDAsGlobalFallback(t *testing.
 	err = applyBusinessObject(ctx, db, domain.SyncObject{Type: TypeKnowledge, ID: legacy.ID, Operation: "upsert", Payload: raw})
 	if !errors.Is(err, store.ErrKnowledgeInvalidScope) {
 		t.Fatalf("invalid non-legacy scope was accepted: %v", err)
+	}
+}
+
+func TestKnowledgeExportKeyTracksStatusAndFeedbackWithoutRevisionChange(t *testing.T) {
+	ctx, db, now := context.Background(), businessStore(t), time.Now().UTC()
+	entry := domain.KnowledgeEntry{
+		ID: "knowledge-state-key", Scope: "global", Type: "practice", Title: "State", Body: "body",
+		Status: domain.KnowledgeVerified, Revision: 7, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := db.CreateKnowledge(ctx, entry); err != nil {
+		t.Fatal(err)
+	}
+	keyFor := func() string {
+		t.Helper()
+		objects, err := ExportBusinessObjects(ctx, db)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, object := range objects {
+			if object.Type == TypeKnowledge && object.ID == entry.ID {
+				return object.IdempotencyKey
+			}
+		}
+		t.Fatalf("knowledge %s was not exported", entry.ID)
+		return ""
+	}
+	verifiedKey := keyFor()
+	updated, err := db.FeedbackKnowledge(ctx, entry.ID, "stale", now.Add(time.Second).Format(time.RFC3339Nano))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Revision != entry.Revision {
+		t.Fatalf("test requires a same-revision state transition: %#v", updated)
+	}
+	staleKey := keyFor()
+	if staleKey == verifiedKey {
+		t.Fatalf("status-only change reused sync key %q", staleKey)
+	}
+	updated, err = db.FeedbackKnowledge(ctx, entry.ID, "helped", now.Add(2*time.Second).Format(time.RFC3339Nano))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if helpedKey := keyFor(); helpedKey == staleKey {
+		t.Fatalf("feedback-only change reused sync key %q", helpedKey)
 	}
 }
 

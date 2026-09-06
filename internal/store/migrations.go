@@ -49,6 +49,16 @@ CREATE INDEX IF NOT EXISTS idx_knowledge_proposals_status_created
 ON knowledge_proposals(status,created_at DESC);
 `
 
+const schemaV35 = `
+ALTER TABLE sync_state ADD COLUMN replay_required INTEGER NOT NULL DEFAULT 0;
+DELETE FROM sync_applied
+WHERE idempotency_key LIKE 'center:%' OR idempotency_key LIKE 'center-object:%';
+UPDATE sync_state
+SET cursor='',last_pull_at='',last_error='',replay_required=1,
+    updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+WHERE cursor<>'';
+`
+
 const schemaV27 = `
 CREATE TABLE IF NOT EXISTS sync_settings (
     scope TEXT PRIMARY KEY,
@@ -1206,6 +1216,16 @@ func (s *Store) migrate(ctx context.Context) error {
 	}
 	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(34, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
 		return fmt.Errorf("record schema v34: %w", err)
+	}
+	var hasV35 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=35)`).Scan(&hasV35)
+	if !hasV35 {
+		if _, err := s.db.ExecContext(ctx, schemaV35); err != nil {
+			return fmt.Errorf("apply schema v35: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(35, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v35: %w", err)
 	}
 	return nil
 }

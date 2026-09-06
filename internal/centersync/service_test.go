@@ -5,10 +5,12 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -84,7 +86,7 @@ func TestPushIsIdempotentAndPullIsIncremental(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
 		t.Fatal(err)
 	}
-	if len(response.Objects) != 1 || response.Cursor != "1" {
+	if len(response.Objects) != 1 || response.Cursor != "1" || response.Objects[0].IdempotencyKey != "event-1" || !strings.HasPrefix(response.Objects[0].EventID, "center:") || response.Objects[0].EventID == "center:" {
 		t.Fatalf("response=%+v", response)
 	}
 	w = request(t, h, "GET", "/v1/sync/pull?cursor=1", nil, true)
@@ -97,6 +99,74 @@ func TestPushIsIdempotentAndPullIsIncremental(t *testing.T) {
 	var cursor int64
 	if err := s.db.QueryRow(`SELECT cursor FROM device_cursors WHERE device_id='device-a'`).Scan(&cursor); err != nil || cursor != 1 {
 		t.Fatalf("stored cursor=%d err=%v", cursor, err)
+	}
+}
+
+func TestConcurrentDevicePushKeepsObjectAndEventVersionsAligned(t *testing.T) {
+	s := testStore(t)
+	if err := s.PutDeviceToken(context.Background(), "device-b", "token-b"); err != nil {
+		t.Fatal(err)
+	}
+	handler := s.Handler()
+	start := make(chan struct{})
+	errorsFound := make(chan error, 2)
+	var wait sync.WaitGroup
+	for _, test := range []struct {
+		device, token, key, payload string
+	}{
+		{"device-a", "token-a", "event-a", `{"source":"a"}`},
+		{"device-b", "token-b", "event-b", `{"source":"b"}`},
+	} {
+		test := test
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			<-start
+			body, _ := json.Marshal(map[string]any{"scope": "default", "device_id": test.device, "objects": []domain.SyncObject{{ID: "shared", Type: "knowledge", Operation: "upsert", Payload: json.RawMessage(test.payload), IdempotencyKey: test.key}}})
+			request := httptest.NewRequest(http.MethodPost, "/v1/sync/push", bytes.NewReader(body))
+			request.Header.Set("X-Device-ID", test.device)
+			request.Header.Set("Authorization", "Bearer "+test.token)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != http.StatusOK {
+				errorsFound <- fmt.Errorf("%s push status=%d body=%s", test.device, response.Code, response.Body.String())
+				return
+			}
+			errorsFound <- nil
+		}()
+	}
+	close(start)
+	wait.Wait()
+	close(errorsFound)
+	for err := range errorsFound {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	var objectPayload string
+	var objectVersion int64
+	if err := s.db.QueryRow(`SELECT payload,version FROM sync_objects WHERE object_type='knowledge' AND object_id='shared'`).Scan(&objectPayload, &objectVersion); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := s.db.Query(`SELECT payload,version FROM sync_events WHERE object_type='knowledge' AND object_id='shared' ORDER BY sequence`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var eventPayload string
+	var eventVersion int64
+	versions := []int64{}
+	for rows.Next() {
+		if err := rows.Scan(&eventPayload, &eventVersion); err != nil {
+			t.Fatal(err)
+		}
+		versions = append(versions, eventVersion)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if len(versions) != 2 || versions[0] != 1 || versions[1] != 2 || objectVersion != 2 || objectPayload != eventPayload {
+		t.Fatalf("versions=%v object=%s/%d last_event=%s", versions, objectPayload, objectVersion, eventPayload)
 	}
 }
 

@@ -43,13 +43,14 @@ func (s *Store) SyncSettings(ctx context.Context, scope string) (domain.SyncSett
 
 func (s *Store) SyncState(ctx context.Context, scope string) (domain.SyncState, error) {
 	var v domain.SyncState
+	var replayRequired bool
 	var push, pull, updated string
-	err := s.db.QueryRowContext(ctx, `SELECT scope,cursor,last_push_at,last_pull_at,last_error,updated_at FROM sync_state WHERE scope=?`, scope).
-		Scan(&v.Scope, &v.Cursor, &push, &pull, &v.LastError, &updated)
+	err := s.db.QueryRowContext(ctx, `SELECT scope,cursor,last_push_at,last_pull_at,last_error,replay_required,updated_at FROM sync_state WHERE scope=?`, scope).
+		Scan(&v.Scope, &v.Cursor, &push, &pull, &v.LastError, &replayRequired, &updated)
 	if err == sql.ErrNoRows {
 		return domain.SyncState{Scope: scope}, nil
 	}
-	v.LastPushAt, v.LastPullAt, v.UpdatedAt = parseTime(push), parseTime(pull), parseTime(updated)
+	v.LastPushAt, v.LastPullAt, v.ReplayRequired, v.UpdatedAt = parseTime(push), parseTime(pull), replayRequired, parseTime(updated)
 	return v, err
 }
 
@@ -65,6 +66,18 @@ func (s *Store) UpdateSyncState(ctx context.Context, v domain.SyncState) error {
 		last_pull_at=excluded.last_pull_at,last_error=excluded.last_error,updated_at=excluded.updated_at`,
 		v.Scope, v.Cursor, timeString(v.LastPushAt), timeString(v.LastPullAt), v.LastError, timeString(v.UpdatedAt))
 	return err
+}
+
+func (s *Store) CompleteSyncReplay(ctx context.Context, scope string) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE sync_state SET replay_required=0,updated_at=? WHERE scope=?`, timeString(time.Now().UTC()), scope)
+	if err != nil {
+		return err
+	}
+	affected, _ := result.RowsAffected()
+	if affected != 1 {
+		return fmt.Errorf("sync state is not configured")
+	}
+	return nil
 }
 
 func (s *Store) EnqueueSync(ctx context.Context, item domain.SyncOutboxItem) error {

@@ -51,6 +51,30 @@ func (r Runner) RunOnce(ctx context.Context) error {
 	if passphraseConfigured && passphrase != "" {
 		RegisterSecretBundleHandler(engine, r.Store, r.Secrets, passphrase)
 	}
+	state, err := r.Store.SyncState(ctx, r.scope())
+	if err != nil {
+		return err
+	}
+	if state.ReplayRequired {
+		// Preserve changes that were already queued before the upgrade, then replay
+		// the center's ordered history before exporting the current local snapshot.
+		if err := engine.Push(ctx); err != nil {
+			return err
+		}
+		pending, err := r.Store.SyncOutboxCount(ctx, r.scope())
+		if err != nil {
+			return err
+		}
+		if pending > 0 {
+			return fmt.Errorf("sync replay is waiting for %d pending local changes", pending)
+		}
+		if err := engine.Pull(ctx); err != nil {
+			return err
+		}
+		if err := r.Store.CompleteSyncReplay(ctx, r.scope()); err != nil {
+			return err
+		}
+	}
 	objects, err := ExportBusinessObjectsForDevice(ctx, r.Store, settings.DeviceID)
 	if err != nil {
 		return err

@@ -2,6 +2,7 @@ package sync
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -15,25 +16,37 @@ import (
 )
 
 const (
-	TypeKnowledge      = "knowledge"
-	TypeSkill          = "skill"
-	TypeProvider       = "provider"
-	TypeModel          = "model"
-	TypeEnvGroup       = "env_group"
-	TypePromptOverride = "prompt_override"
-	TypeProject        = "project"
-	TypeWorkspace      = "workspace"
-	TypeTask           = "task"
-	TypeTaskAgent      = "task_agent"
-	TypeRound          = "round"
-	TypeTurn           = "turn"
-	TypeConversation   = "conversation"
-	TypeTaskMemory     = "task_memory"
+	TypeKnowledge         = "knowledge"
+	TypeKnowledgeProposal = "knowledge_proposal"
+	TypeSkill             = "skill"
+	TypeProvider          = "provider"
+	TypeModel             = "model"
+	TypeEnvGroup          = "env_group"
+	TypePromptOverride    = "prompt_override"
+	TypeProject           = "project"
+	TypeWorkspace         = "workspace"
+	TypeTask              = "task"
+	TypeTaskAgent         = "task_agent"
+	TypeRound             = "round"
+	TypeTurn              = "turn"
+	TypeConversation      = "conversation"
+	TypeTaskMemory        = "task_memory"
 )
 
 type skillPayload struct {
 	Skill domain.Skill       `json:"skill"`
 	Files []domain.SkillFile `json:"files"`
+}
+
+func payloadIdempotencyKey(kind, id, format string, payload json.RawMessage) string {
+	hash := sha256.Sum256(payload)
+	return fmt.Sprintf("%s:%s:%s:%x", kind, format, id, hash[:12])
+}
+
+func knowledgeIdempotencyKey(item domain.KnowledgeEntry) string {
+	state := fmt.Sprintf("%d\x00%s\x00%s\x00%s\x00%d\x00%d\x00%s", item.Revision, item.Scope, item.ProjectID, item.Status, item.HelpedCount, item.StaleCount, item.FeedbackState)
+	hash := sha256.Sum256([]byte(state))
+	return fmt.Sprintf("knowledge:v3:%s:%x", item.ID, hash[:12])
 }
 
 // ExportBusinessObjects exports only portable configuration. Credential references,
@@ -59,6 +72,36 @@ func ExportBusinessObjectsForDevice(ctx context.Context, database *store.Store, 
 		}
 		result = append(result, graph...)
 	}
+	proposals, err := database.ListKnowledgeProposals(ctx, "", "")
+	if err != nil {
+		return nil, err
+	}
+	addProposal := func(v domain.KnowledgeProposal) error {
+		v.SourceTaskID, v.SourceTurnID = "", ""
+		v.Proposed.SourceTaskID, v.Proposed.SourceTurnID = "", ""
+		if v.BaseEntry != nil {
+			base := *v.BaseEntry
+			base.SourceTaskID, base.SourceTurnID = "", ""
+			v.BaseEntry = &base
+		}
+		version := timeVersion(v.UpdatedAt)
+		if version == "" {
+			version = timeVersion(v.CreatedAt)
+		}
+		if err := add(TypeKnowledgeProposal, v.ID, version, v); err != nil {
+			return err
+		}
+		item := &result[len(result)-1]
+		item.IdempotencyKey = payloadIdempotencyKey(TypeKnowledgeProposal, v.ID, "v1", item.Payload)
+		return nil
+	}
+	for _, v := range proposals {
+		if v.Status != domain.KnowledgeProposalPending {
+			if err := addProposal(v); err != nil {
+				return nil, err
+			}
+		}
+	}
 	knowledge, err := database.ListKnowledge(ctx, "", "", nil)
 	if err != nil {
 		return nil, err
@@ -69,7 +112,14 @@ func ExportBusinessObjectsForDevice(ctx context.Context, database *store.Store, 
 		if err := add(TypeKnowledge, v.ID, strconv.Itoa(v.Revision), v); err != nil {
 			return nil, err
 		}
-		result[len(result)-1].IdempotencyKey = fmt.Sprintf("knowledge:v2:%s:%d:%s:%s", v.ID, v.Revision, v.Scope, v.ProjectID)
+		result[len(result)-1].IdempotencyKey = knowledgeIdempotencyKey(v)
+	}
+	for _, v := range proposals {
+		if v.Status == domain.KnowledgeProposalPending {
+			if err := addProposal(v); err != nil {
+				return nil, err
+			}
+		}
 	}
 	skills, err := database.ListSkills(ctx, "", "", false)
 	if err != nil {
@@ -133,7 +183,7 @@ func ExportBusinessObjectsForDevice(ctx context.Context, database *store.Store, 
 }
 
 func RegisterBusinessHandlers(engine *Engine, database *store.Store) {
-	for _, kind := range []string{TypeProject, TypeWorkspace, TypeTask, TypeTaskAgent, TypeRound, TypeTurn, TypeConversation, TypeTaskMemory, TypeKnowledge, TypeSkill, TypeProvider, TypeModel, TypeEnvGroup, TypePromptOverride} {
+	for _, kind := range []string{TypeProject, TypeWorkspace, TypeTask, TypeTaskAgent, TypeRound, TypeTurn, TypeConversation, TypeTaskMemory, TypeKnowledgeProposal, TypeKnowledge, TypeSkill, TypeProvider, TypeModel, TypeEnvGroup, TypePromptOverride} {
 		objectType := kind
 		engine.Register(objectType, func(ctx context.Context, obj domain.SyncObject) error { return applyBusinessObject(ctx, database, obj) })
 	}
@@ -178,6 +228,14 @@ func currentBusinessObject(ctx context.Context, database *store.Store, kind, id 
 		v, err = database.Knowledge(ctx, id)
 		value = v
 		version = strconv.Itoa(v.Revision)
+	case TypeKnowledgeProposal:
+		var v domain.KnowledgeProposal
+		v, err = database.KnowledgeProposal(ctx, id)
+		value = v
+		version = timeVersion(v.UpdatedAt)
+		if version == "" {
+			version = timeVersion(v.CreatedAt)
+		}
 	case TypeSkill:
 		var v domain.Skill
 		v, err = database.Skill(ctx, id)
@@ -236,26 +294,8 @@ func upsertBusinessObject(ctx context.Context, database *store.Store, obj domain
 			return err
 		}
 		v.ID = obj.ID
-		v.Scope = strings.TrimSpace(v.Scope)
-		v.ProjectID = strings.TrimSpace(v.ProjectID)
-		if v.ProjectID != "" {
-			if _, err := database.Project(ctx, v.ProjectID); err != nil {
-				return fmt.Errorf("knowledge project dependency %s: %w", v.ProjectID, err)
-			}
-			v.Scope = "project"
-		} else {
-			switch v.Scope {
-			case "global":
-			case "", "project":
-				// Legacy profile-sync payloads removed ProjectID without changing Scope.
-				// They were historically intended to be portable global fallbacks.
-				v.Scope = "global"
-				v.ParentID = ""
-				v.ProductLineID = ""
-				v.BranchScope = ""
-			default:
-				return fmt.Errorf("%w: synced knowledge scope %q", store.ErrKnowledgeInvalidScope, v.Scope)
-			}
+		if err := normalizeSyncedKnowledgeScope(ctx, database, &v); err != nil {
+			return err
 		}
 		v.SourceTaskID = ""
 		v.SourceTurnID = ""
@@ -263,6 +303,27 @@ func upsertBusinessObject(ctx context.Context, database *store.Store, obj domain
 			return database.UpdateKnowledge(ctx, v)
 		}
 		return database.CreateKnowledge(ctx, v)
+	case TypeKnowledgeProposal:
+		var v domain.KnowledgeProposal
+		if err := decodePayload(obj, &v); err != nil {
+			return err
+		}
+		v.ID = obj.ID
+		v.Proposed.ID = v.EntryID
+		v.SourceTaskID, v.SourceTurnID = "", ""
+		v.Proposed.SourceTaskID, v.Proposed.SourceTurnID = "", ""
+		if err := normalizeSyncedKnowledgeScope(ctx, database, &v.Proposed); err != nil {
+			return err
+		}
+		if v.BaseEntry != nil {
+			base := *v.BaseEntry
+			base.SourceTaskID, base.SourceTurnID = "", ""
+			if err := normalizeSyncedKnowledgeScope(ctx, database, &base); err != nil {
+				return err
+			}
+			v.BaseEntry = &base
+		}
+		return database.ImportKnowledgeProposal(ctx, v)
 	case TypeSkill:
 		var p skillPayload
 		if err := decodePayload(obj, &p); err != nil {
@@ -360,6 +421,8 @@ func deleteBusinessObject(ctx context.Context, database *store.Store, kind, id s
 	switch kind {
 	case TypeKnowledge:
 		return database.DeleteKnowledge(ctx, id)
+	case TypeKnowledgeProposal:
+		return database.DeleteKnowledgeProposal(ctx, id)
 	case TypeSkill:
 		return database.DeleteSkill(ctx, id)
 	case TypeProvider:
@@ -372,6 +435,32 @@ func deleteBusinessObject(ctx context.Context, database *store.Store, kind, id s
 		return database.DeletePromptTemplateOverride(ctx, id)
 	default:
 		return fmt.Errorf("unsupported business sync type %q", kind)
+	}
+}
+
+func normalizeSyncedKnowledgeScope(ctx context.Context, database *store.Store, v *domain.KnowledgeEntry) error {
+	v.Scope = strings.TrimSpace(v.Scope)
+	v.ProjectID = strings.TrimSpace(v.ProjectID)
+	if v.ProjectID != "" {
+		if _, err := database.Project(ctx, v.ProjectID); err != nil {
+			return fmt.Errorf("knowledge project dependency %s: %w", v.ProjectID, err)
+		}
+		v.Scope = "project"
+		return nil
+	}
+	switch v.Scope {
+	case "global":
+		return nil
+	case "", "project":
+		// Legacy profile-sync payloads removed ProjectID without changing Scope.
+		// They were historically intended to be portable global fallbacks.
+		v.Scope = "global"
+		v.ParentID = ""
+		v.ProductLineID = ""
+		v.BranchScope = ""
+		return nil
+	default:
+		return fmt.Errorf("%w: synced knowledge scope %q", store.ErrKnowledgeInvalidScope, v.Scope)
 	}
 }
 func decodePayload(obj domain.SyncObject, value any) error {

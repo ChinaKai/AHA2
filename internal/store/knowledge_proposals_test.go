@@ -101,6 +101,52 @@ func TestKnowledgeProposalMigrationAndNewEntryApproval(t *testing.T) {
 	}
 }
 
+func TestImportKnowledgeProposalPreservesLifecycleWithoutPublishing(t *testing.T) {
+	t.Parallel()
+	database, ctx, project, root := proposalTestStore(t)
+	now := time.Now().UTC()
+	proposed := domain.KnowledgeEntry{
+		ID: "synced-entry", Scope: "project", ProjectID: project.ID, ParentID: root.ID,
+		Type: "practice", Title: "Synced", Body: "pending body", Status: domain.KnowledgeCandidate,
+		Revision: 1, CreatedAt: now, UpdatedAt: now,
+	}
+	item := pendingProposal("synced-proposal", proposed, 0, now)
+	if err := database.ImportKnowledgeProposal(ctx, item); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Knowledge(ctx, proposed.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("proposal import published Knowledge unexpectedly: %v", err)
+	}
+	item.Status = domain.KnowledgeProposalApproved
+	item.UpdatedAt = now.Add(time.Second)
+	item.DecidedAt = item.UpdatedAt
+	if err := database.ImportKnowledgeProposal(ctx, item); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := database.KnowledgeProposal(ctx, item.ID)
+	if err != nil || stored.Status != domain.KnowledgeProposalApproved || stored.DecidedAt.IsZero() || stored.Proposed.Body != proposed.Body {
+		t.Fatalf("approved proposal import=%#v err=%v", stored, err)
+	}
+	rejected := item
+	rejected.ID = "synced-proposal-rejected"
+	rejected.EntryID = "synced-entry-rejected"
+	rejected.Proposed.ID = rejected.EntryID
+	rejected.Status = domain.KnowledgeProposalRejected
+	if err := database.ImportKnowledgeProposal(ctx, rejected); err != nil {
+		t.Fatal(err)
+	}
+	items, err := database.ListKnowledgeProposals(ctx, "project", project.ID)
+	if err != nil || len(items) != 2 {
+		t.Fatalf("imported proposal lifecycle incomplete: %#v err=%v", items, err)
+	}
+	if err := database.DeleteKnowledgeProposal(ctx, rejected.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.KnowledgeProposal(ctx, rejected.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("synced proposal delete failed: %v", err)
+	}
+}
+
 func TestKnowledgeRevisionProposalStalesThenPublishesExactRevision(t *testing.T) {
 	t.Parallel()
 	database, ctx, project, root := proposalTestStore(t)

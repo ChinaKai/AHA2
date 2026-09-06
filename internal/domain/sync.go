@@ -19,12 +19,13 @@ type SyncSettings struct {
 }
 
 type SyncState struct {
-	Scope      string    `json:"scope"`
-	Cursor     string    `json:"cursor"`
-	LastPushAt time.Time `json:"last_push_at"`
-	LastPullAt time.Time `json:"last_pull_at"`
-	LastError  string    `json:"last_error"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	Scope          string    `json:"scope"`
+	Cursor         string    `json:"cursor"`
+	LastPushAt     time.Time `json:"last_push_at"`
+	LastPullAt     time.Time `json:"last_pull_at"`
+	LastError      string    `json:"last_error"`
+	ReplayRequired bool      `json:"-"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 type SyncObject struct {
@@ -35,6 +36,7 @@ type SyncObject struct {
 	BaseVersion    string          `json:"base_version,omitempty"`
 	RemoteVersion  string          `json:"remote_version,omitempty"`
 	IdempotencyKey string          `json:"idempotency_key"`
+	EventID        string          `json:"event_id,omitempty"`
 }
 
 type SyncOutboxItem struct {

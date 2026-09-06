@@ -51,6 +51,53 @@ func (s *Store) KnowledgeProposal(ctx context.Context, id string) (domain.Knowle
 	return scanKnowledgeProposal(s.db.QueryRowContext(ctx, `SELECT `+knowledgeProposalColumns+` FROM knowledge_proposals WHERE id=?`, id))
 }
 
+// ImportKnowledgeProposal stores a synchronized proposal without replaying its
+// approval/rejection side effects. The corresponding KnowledgeEntry is synced
+// independently and remains the source of truth for published content.
+func (s *Store) ImportKnowledgeProposal(ctx context.Context, item domain.KnowledgeProposal) error {
+	if strings.TrimSpace(item.ID) == "" || strings.TrimSpace(item.EntryID) == "" || item.EntryID != item.Proposed.ID || item.BaseRevision < 0 {
+		return fmt.Errorf("knowledge proposal is invalid")
+	}
+	switch item.Status {
+	case domain.KnowledgeProposalPending, domain.KnowledgeProposalApproved, domain.KnowledgeProposalRejected:
+	default:
+		return fmt.Errorf("knowledge proposal status is invalid")
+	}
+	if item.CreatedAt.IsZero() {
+		item.CreatedAt = time.Now().UTC()
+	}
+	if item.UpdatedAt.IsZero() {
+		item.UpdatedAt = item.CreatedAt
+	}
+	if item.Status == domain.KnowledgeProposalPending {
+		if err := s.defaultKnowledgeParent(ctx, &item.Proposed); err != nil {
+			return err
+		}
+		if err := s.validateKnowledge(ctx, item.Proposed); err != nil {
+			return err
+		}
+	}
+	encoded, err := encodeKnowledgeProposal(item)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `INSERT INTO knowledge_proposals(`+knowledgeProposalColumns+`) VALUES(?,?,?,?,?,?,?,?,?,?)
+		ON CONFLICT(id) DO UPDATE SET entry_id=excluded.entry_id,base_revision=excluded.base_revision,
+		proposed_json=excluded.proposed_json,source_task_id=excluded.source_task_id,source_turn_id=excluded.source_turn_id,
+		status=excluded.status,created_at=excluded.created_at,updated_at=excluded.updated_at,decided_at=excluded.decided_at`,
+		item.ID, item.EntryID, item.BaseRevision, encoded, item.SourceTaskID, item.SourceTurnID, item.Status,
+		timeString(item.CreatedAt), timeString(item.UpdatedAt), timeString(item.DecidedAt))
+	if err != nil && strings.Contains(err.Error(), "knowledge_proposals.entry_id") {
+		return ErrKnowledgeProposalPending
+	}
+	return err
+}
+
+func (s *Store) DeleteKnowledgeProposal(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM knowledge_proposals WHERE id=?`, id)
+	return err
+}
+
 func (s *Store) hasPendingKnowledgeProposal(ctx context.Context, entryID string) (bool, error) {
 	var exists bool
 	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM knowledge_proposals WHERE entry_id=? AND status='pending')`, entryID).Scan(&exists)

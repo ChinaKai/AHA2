@@ -129,7 +129,14 @@ func (e *Engine) Pull(ctx context.Context) error {
 			if object.IdempotencyKey == "" {
 				return fmt.Errorf("remote %s/%s has no idempotency key", object.Type, object.ID)
 			}
-			applied, err := e.Store.SyncWasApplied(ctx, object.IdempotencyKey)
+			deliveryKey := object.EventID
+			if deliveryKey == "" && object.RemoteVersion != "" {
+				deliveryKey = fmt.Sprintf("center-object:%s:%s:%s", object.Type, object.ID, object.RemoteVersion)
+			}
+			if deliveryKey == "" {
+				deliveryKey = object.IdempotencyKey
+			}
+			applied, err := e.Store.SyncWasApplied(ctx, deliveryKey)
 			if err != nil {
 				return err
 			}
@@ -146,11 +153,27 @@ func (e *Engine) Pull(ctx context.Context) error {
 					if addErr := e.Store.AddSyncConflict(ctx, domain.SyncConflict{Scope: e.Scope, ObjectType: object.Type, ObjectID: object.ID, LocalPayload: conflict.LocalPayload, RemotePayload: object.Payload, LocalVersion: conflict.LocalVersion, RemoteVersion: object.RemoteVersion}); addErr != nil {
 						return addErr
 					}
+					if deliveryKey != object.IdempotencyKey {
+						delivered := object
+						delivered.IdempotencyKey = deliveryKey
+						delivered.EventID = ""
+						if markErr := e.Store.MarkSyncApplied(ctx, e.Scope, delivered, e.now()); markErr != nil {
+							return markErr
+						}
+					}
 					continue
 				}
 				return err
 			}
-			if err := e.Store.MarkSyncApplied(ctx, e.Scope, object, e.now()); err != nil {
+			if deliveryKey != object.IdempotencyKey {
+				if err := e.Store.MarkSyncApplied(ctx, e.Scope, object, e.now()); err != nil {
+					return err
+				}
+			}
+			delivered := object
+			delivered.IdempotencyKey = deliveryKey
+			delivered.EventID = ""
+			if err := e.Store.MarkSyncApplied(ctx, e.Scope, delivered, e.now()); err != nil {
 				return err
 			}
 		}

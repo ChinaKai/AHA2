@@ -105,3 +105,61 @@ func TestSyncAppliedAndConflicts(t *testing.T) {
 		t.Fatalf("conflicts=%d err=%v", len(conflicts), err)
 	}
 }
+
+func TestSchemaV35RequiresOneTimeOrderedSyncReplay(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "aha2.db")
+	database, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateSyncState(ctx, domain.SyncState{Scope: "default", Cursor: "42", LastPullAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`DELETE FROM schema_migrations WHERE version=35; ALTER TABLE sync_state DROP COLUMN replay_required`); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	database, err = Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := database.SyncState(ctx, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Cursor != "" || !state.ReplayRequired || !state.LastPullAt.IsZero() {
+		t.Fatalf("migration did not require a clean replay: %#v", state)
+	}
+	if err := database.CompleteSyncReplay(ctx, "default"); err != nil {
+		t.Fatal(err)
+	}
+	state, err = database.SyncState(ctx, "default")
+	if err != nil || state.ReplayRequired {
+		t.Fatalf("replay completion was not persisted: %#v err=%v", state, err)
+	}
+	if err := database.UpdateSyncState(ctx, domain.SyncState{Scope: "default", Cursor: "84"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	database, err = Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	state, err = database.SyncState(ctx, "default")
+	if err != nil || state.Cursor != "84" || state.ReplayRequired {
+		t.Fatalf("schema v35 replay repeated unexpectedly: %#v err=%v", state, err)
+	}
+}

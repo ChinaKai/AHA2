@@ -28,6 +28,7 @@ type Store struct {
 	db            *sql.DB
 	bootstrapMu   sync.Mutex
 	bootstrapCode string
+	pushMu        sync.Mutex
 }
 
 func Open(ctx context.Context, path string) (*Store, error) {
@@ -304,6 +305,7 @@ func (s *Store) RotateDeviceToken(ctx context.Context, deviceID string) (string,
 }
 
 type Event struct {
+	DeviceID        string          `json:"-"`
 	EventID         string          `json:"event_id"`
 	ObjectID        string          `json:"object_id"`
 	ObjectType      string          `json:"object_type"`
@@ -313,6 +315,15 @@ type Event struct {
 	Version         int64           `json:"version"`
 	Sequence        int64           `json:"sequence,omitempty"`
 	CreatedAt       string          `json:"created_at,omitempty"`
+}
+
+func deliveryEventID(event Event) string {
+	value := strings.Join([]string{
+		event.DeviceID, event.EventID, event.ObjectType, event.ObjectID, event.Operation,
+		strconv.FormatInt(event.Version, 10), string(event.Payload), event.EncryptedBundle,
+	}, "\x00")
+	digest := sha256.Sum256([]byte(value))
+	return "center:" + hex.EncodeToString(digest[:16])
 }
 
 func validateEvent(e Event) error {
@@ -390,7 +401,7 @@ func (s *Store) Pull(ctx context.Context, deviceID string, after int64, limit in
 	if limit <= 0 || limit > 1000 {
 		limit = 100
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT sequence,event_id,object_id,object_type,operation,payload,encrypted_bundle,version,created_at FROM sync_events WHERE sequence>? ORDER BY sequence LIMIT ?`, after, limit)
+	rows, err := s.db.QueryContext(ctx, `SELECT sequence,device_id,event_id,object_id,object_type,operation,payload,encrypted_bundle,version,created_at FROM sync_events WHERE sequence>? ORDER BY sequence LIMIT ?`, after, limit)
 	if err != nil {
 		return nil, after, err
 	}
@@ -400,7 +411,7 @@ func (s *Store) Pull(ctx context.Context, deviceID string, after int64, limit in
 	for rows.Next() {
 		var e Event
 		var payload string
-		if err := rows.Scan(&e.Sequence, &e.EventID, &e.ObjectID, &e.ObjectType, &e.Operation, &payload, &e.EncryptedBundle, &e.Version, &e.CreatedAt); err != nil {
+		if err := rows.Scan(&e.Sequence, &e.DeviceID, &e.EventID, &e.ObjectID, &e.ObjectType, &e.Operation, &payload, &e.EncryptedBundle, &e.Version, &e.CreatedAt); err != nil {
 			return nil, after, err
 		}
 		if payload != "" {
@@ -486,6 +497,8 @@ func (s *Store) Handler() http.Handler {
 			http.Error(w, "device identity mismatch", http.StatusForbidden)
 			return
 		}
+		s.pushMu.Lock()
+		defer s.pushMu.Unlock()
 		acked := make([]string, 0, len(req.Objects))
 		conflicts := make([]domain.SyncConflict, 0)
 		for _, object := range req.Objects {
@@ -562,7 +575,11 @@ func (s *Store) Handler() http.Handler {
 			if event.ObjectType == "secret_bundle" && event.EncryptedBundle != "" {
 				payload, _ = json.Marshal(event.EncryptedBundle)
 			}
-			objects = append(objects, domain.SyncObject{Type: event.ObjectType, ID: event.ObjectID, Operation: event.Operation, Payload: payload, RemoteVersion: strconv.FormatInt(event.Version, 10), IdempotencyKey: event.EventID})
+			objects = append(objects, domain.SyncObject{
+				Type: event.ObjectType, ID: event.ObjectID, Operation: event.Operation, Payload: payload,
+				RemoteVersion: strconv.FormatInt(event.Version, 10), IdempotencyKey: event.EventID,
+				EventID: deliveryEventID(event),
+			})
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"objects": objects, "cursor": strconv.FormatInt(cursor, 10), "has_more": len(events) == limit && limit > 0})
 	}))

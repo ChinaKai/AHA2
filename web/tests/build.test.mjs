@@ -249,6 +249,8 @@ test("built web contains responsive application", async () => {
   assert.match(css, /--mobile-bottom-nav-height:\s*calc\(62px \+ env\(safe-area-inset-bottom\)\)/);
   assert.match(css, /\.task-screen \{[^}]*height:\s*calc\(var\(--visual-viewport-height\) - var\(--mobile-bottom-nav-height\)\)/);
   assert.match(css, /\.bottom-nav \{[^}]*height:\s*var\(--mobile-bottom-nav-height\)/);
+  assert.match(script, /class="banner-stack"/);
+  assert.match(css, /body\.task-view-active \.banner-stack \{[^}]*position:\s*fixed/);
   assert.match(script, /isSyncSettingsFormEditing/);
   assert.match(script, /state\.view === "sync"[\s\S]{0,250}state\.renderPending = true/);
   assert.match(script, /visualViewport/);
