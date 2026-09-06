@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"strconv"
+	"time"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
 )
@@ -44,6 +46,7 @@ func (s *Store) DeleteProductLine(ctx context.Context, id string) error {
 }
 
 func (s *Store) CreateSkill(ctx context.Context, item domain.Skill) error {
+	item.Version = s.sharedNumericVersion(ctx, "skill", item.ID, item.Version)
 	if item.PackageSlug == "" {
 		item.PackageSlug = s.uniqueSkillSlug(item.Name, item.ID)
 	}
@@ -138,7 +141,7 @@ func (s *Store) DeleteSkill(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM skills WHERE id=?`, id); err != nil {
+	if _, err := s.deleteSharedObject(ctx, "skill", id, strconv.Itoa(item.Version), time.Now().UTC()); err != nil {
 		return err
 	}
 	return s.removeSkillPackage(item)

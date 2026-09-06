@@ -29,9 +29,6 @@ export interface SyncSettings {
   interval_seconds: number;
   token_configured: boolean;
   passphrase_configured: boolean;
-  provider_ids?: string[];
-  env_group_ids?: string[];
-  codex_account_ids?: string[];
   updated_at?: string;
 }
 
@@ -42,6 +39,13 @@ export interface SyncState {
   last_pull_at?: string;
   last_error: string;
   updated_at?: string;
+}
+
+export interface SyncPreview {
+  upserts: number;
+  deletes: number;
+  pending: number;
+  conflicts: number;
 }
 
 export interface SyncConflict {

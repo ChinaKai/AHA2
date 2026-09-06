@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
 )
@@ -256,7 +257,20 @@ func (s *Store) UpdateTaskRuntimeSnapshot(ctx context.Context, id, snapshotID, u
 }
 
 func (s *Store) DeleteTask(ctx context.Context, id string) error {
-	rows, _ := s.db.QueryContext(ctx, `SELECT DISTINCT sha256 FROM attachments WHERE task_id=?`, id)
+	return s.deleteTask(ctx, id, false)
+}
+
+func (s *Store) DeleteTaskWithSyncTombstone(ctx context.Context, id string) error {
+	return s.deleteTask(ctx, id, true)
+}
+
+func (s *Store) deleteTask(ctx context.Context, id string, tombstone bool) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	rows, _ := tx.QueryContext(ctx, `SELECT DISTINCT sha256 FROM attachments WHERE task_id=?`, id)
 	var hashes []string
 	if rows != nil {
 		for rows.Next() {
@@ -267,7 +281,19 @@ func (s *Store) DeleteTask(ctx context.Context, id string) error {
 		}
 		rows.Close()
 	}
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM tasks WHERE id=?`, id); err != nil {
+	if tombstone {
+		var ownerDeviceID string
+		if err := tx.QueryRowContext(ctx, `SELECT workspace.owner_device_id FROM tasks task JOIN workspaces workspace ON workspace.id=task.workspace_id WHERE task.id=?`, id).Scan(&ownerDeviceID); err != nil {
+			return err
+		}
+		if err := enqueueOwnedGraphDeleteTx(ctx, tx, "task", id, ownerDeviceID, time.Now().UTC()); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM tasks WHERE id=?`, id); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
 		return err
 	}
 	for _, hash := range hashes {

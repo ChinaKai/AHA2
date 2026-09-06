@@ -98,11 +98,15 @@ func (s *Store) EnqueueSync(ctx context.Context, item domain.SyncOutboxItem) err
 		item.UpdatedAt = now
 	}
 	payload := item.Object.Payload
-	if len(payload) == 0 {
+	if len(payload) == 0 && item.Object.Operation != "delete" {
 		payload = json.RawMessage(`{}`)
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO sync_outbox(id,scope,object_type,object_id,operation,payload_json,base_version,idempotency_key,status,attempts,next_attempt_at,last_error,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		item.ID, item.Scope, item.Object.Type, item.Object.ID, item.Object.Operation, string(payload), item.Object.BaseVersion, item.Object.IdempotencyKey, "pending", 0, "", "", timeString(item.CreatedAt), timeString(item.UpdatedAt))
+	sourceVersion := item.Object.SourceVersion
+	if sourceVersion == "" {
+		sourceVersion = item.Object.RemoteVersion
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO sync_outbox(id,scope,object_type,object_id,operation,payload_json,base_version,source_version,idempotency_key,status,attempts,next_attempt_at,last_error,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		item.ID, item.Scope, item.Object.Type, item.Object.ID, item.Object.Operation, string(payload), item.Object.BaseVersion, sourceVersion, item.Object.IdempotencyKey, "pending", 0, "", "", timeString(item.CreatedAt), timeString(item.UpdatedAt))
 	return err
 }
 
@@ -110,7 +114,7 @@ func (s *Store) PendingSync(ctx context.Context, scope string, limit int, now ti
 	if limit < 1 || limit > 500 {
 		limit = 100
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id,scope,object_type,object_id,operation,payload_json,base_version,idempotency_key,status,attempts,next_attempt_at,last_error,created_at,updated_at FROM sync_outbox WHERE scope=? AND status='pending' AND (next_attempt_at='' OR next_attempt_at<=?) ORDER BY created_at,id LIMIT ?`, scope, timeString(now), limit)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,scope,object_type,object_id,operation,payload_json,base_version,source_version,idempotency_key,status,attempts,next_attempt_at,last_error,created_at,updated_at FROM sync_outbox WHERE scope=? AND status='pending' AND (next_attempt_at='' OR next_attempt_at<=?) ORDER BY created_at,id LIMIT ?`, scope, timeString(now), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -119,7 +123,7 @@ func (s *Store) PendingSync(ctx context.Context, scope string, limit int, now ti
 	for rows.Next() {
 		var v domain.SyncOutboxItem
 		var payload, next, created, updated string
-		if err := rows.Scan(&v.ID, &v.Scope, &v.Object.Type, &v.Object.ID, &v.Object.Operation, &payload, &v.Object.BaseVersion, &v.Object.IdempotencyKey, &v.Status, &v.Attempts, &next, &v.LastError, &created, &updated); err != nil {
+		if err := rows.Scan(&v.ID, &v.Scope, &v.Object.Type, &v.Object.ID, &v.Object.Operation, &payload, &v.Object.BaseVersion, &v.Object.SourceVersion, &v.Object.IdempotencyKey, &v.Status, &v.Attempts, &next, &v.LastError, &created, &updated); err != nil {
 			return nil, err
 		}
 		v.Object.Payload = json.RawMessage(payload)

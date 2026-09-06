@@ -3,6 +3,7 @@ package sync
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -124,15 +125,28 @@ func TestApplySecretBundlePreservesLocalReferencesAndRestoresCodexAccount(t *tes
 	}
 }
 
-func TestSecretBundleRejectsHardwareReference(t *testing.T) {
-	ctx, db, secretStore := secretBundleFixture(t)
-	now := time.Now().UTC()
-	provider := domain.Provider{ID: "provider-one", Name: "P", BaseURL: "https://example.test", CredentialRef: "hardware/task/board/credential", CredentialConfigured: true, CreatedAt: now, UpdatedAt: now}
-	if err := db.UpsertProvider(ctx, provider); err != nil {
-		t.Fatal(err)
-	}
-	_ = secretStore.PutMany(map[string]string{provider.CredentialRef: "must-not-export"})
-	if _, err := ExportSecretBundle(ctx, db, secretStore, SecretSelection{ProviderIDs: []string{provider.ID}}, "passphrase"); err == nil {
-		t.Fatal("hardware reference was exported")
+func TestSecretBundleRejectsNonPortableReferences(t *testing.T) {
+	for name, ref := range map[string]string{
+		"sync token":       "sync/default/token",
+		"SSH credential":   "workspace/remote/ssh/credential",
+		"hardware secret":  "hardware/task/board/credential",
+		"arbitrary secret": "custom/arbitrary",
+		"prefix confusion": "provider/provider-one/credential/extra",
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx, db, secretStore := secretBundleFixture(t)
+			now := time.Now().UTC()
+			provider := domain.Provider{ID: "provider-one", Name: "P", BaseURL: "https://example.test", CredentialRef: ref, CredentialConfigured: true, CreatedAt: now, UpdatedAt: now}
+			if err := db.UpsertProvider(ctx, provider); err != nil {
+				t.Fatal(err)
+			}
+			if err := secretStore.PutMany(map[string]string{provider.CredentialRef: "must-not-export"}); err != nil {
+				t.Fatal(err)
+			}
+			_, err := ExportSecretBundle(ctx, db, secretStore, SecretSelection{ProviderIDs: []string{provider.ID}}, "passphrase")
+			if !errors.Is(err, ErrNoPortableSecrets) {
+				t.Fatalf("non-portable reference returned %v", err)
+			}
+		})
 	}
 }

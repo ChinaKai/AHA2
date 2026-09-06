@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -137,6 +138,7 @@ func (s *Store) UpdateWorkspaceDetection(ctx context.Context, item domain.Worksp
 }
 
 func (s *Store) UpsertModel(ctx context.Context, item domain.Model) error {
+	item.UpdatedAt = s.sharedTimeVersion(ctx, "model", item.ID, item.UpdatedAt)
 	if item.Source == "" {
 		item.Source = domain.ModelSourceProvider
 	}
@@ -199,6 +201,7 @@ func (s *Store) Model(ctx context.Context, id string) (domain.Model, error) {
 }
 
 func (s *Store) UpsertEnvGroup(ctx context.Context, item domain.EnvGroup) error {
+	item.Revision = s.sharedNumericVersion(ctx, "env_group", item.ID, item.Revision)
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO env_groups(id,name,provider_id,backend,revision,environment_json,secret_names_json,secret_configured,created_at,updated_at)
 		VALUES(?,?,?,?,?,?,?,?,?,?)
@@ -247,6 +250,7 @@ func (s *Store) EnvGroup(ctx context.Context, id string) (domain.EnvGroup, error
 }
 
 func (s *Store) UpsertProvider(ctx context.Context, item domain.Provider) error {
+	item.UpdatedAt = s.sharedTimeVersion(ctx, "provider", item.ID, item.UpdatedAt)
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO providers(id,name,base_url,anthropic_base_url,auth_style,credential_ref,credential_configured,created_at,updated_at)
 		VALUES(?,?,?,?,?,?,?,?,?)
@@ -292,7 +296,11 @@ func (s *Store) Provider(ctx context.Context, id string) (domain.Provider, error
 }
 
 func (s *Store) DeleteProvider(ctx context.Context, id string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM providers WHERE id=?`, id)
+	item, err := s.Provider(ctx, id)
+	if err != nil {
+		return err
+	}
+	_, err = s.deleteSharedObject(ctx, "provider", id, timeString(item.UpdatedAt), time.Now().UTC())
 	return err
 }
 
@@ -341,20 +349,20 @@ func (s *Store) UpdateWorkspaceConfig(ctx context.Context, item domain.Workspace
 }
 
 func (s *Store) DeleteModel(ctx context.Context, id string) error {
-	now := timeString(time.Now().UTC())
-	result, err := s.db.ExecContext(ctx, `UPDATE models SET deleted_at=?,updated_at=? WHERE id=? AND deleted_at=''`, now, now, id)
+	item, err := s.Model(ctx, id)
 	if err != nil {
 		return err
 	}
-	count, _ := result.RowsAffected()
-	if count == 0 {
-		return sql.ErrNoRows
-	}
-	return nil
+	_, err = s.deleteSharedObject(ctx, "model", id, timeString(item.UpdatedAt), time.Now().UTC())
+	return err
 }
 
 func (s *Store) DeleteEnvGroup(ctx context.Context, id string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM env_groups WHERE id=?`, id)
+	item, err := s.EnvGroup(ctx, id)
+	if err != nil {
+		return err
+	}
+	_, err = s.deleteSharedObject(ctx, "env_group", id, strconv.Itoa(item.Revision), time.Now().UTC())
 	return err
 }
 

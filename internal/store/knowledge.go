@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -268,6 +269,7 @@ func (s *Store) CreateKnowledge(ctx context.Context, item domain.KnowledgeEntry)
 	if item.Revision < 1 {
 		item.Revision = 1
 	}
+	item.Revision = s.sharedNumericVersion(ctx, "knowledge", item.ID, item.Revision)
 	if err := s.defaultKnowledgeParent(ctx, &item); err != nil {
 		return err
 	}
@@ -432,7 +434,7 @@ func (s *Store) DeleteKnowledge(ctx context.Context, id string) error {
 	if children > 0 {
 		return ErrKnowledgeHasChildren
 	}
-	_, err = s.db.ExecContext(ctx, `DELETE FROM knowledge_entries WHERE id=?`, id)
+	_, err = s.deleteSharedObject(ctx, "knowledge", id, strconv.Itoa(item.Revision), time.Now().UTC())
 	if err == nil && item.ProjectID != "" {
 		_, _ = s.db.ExecContext(ctx, `UPDATE projects SET knowledge_revision=knowledge_revision+1 WHERE id=?`, item.ProjectID)
 	}

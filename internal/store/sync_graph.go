@@ -18,6 +18,7 @@ type RemoteTaskMirror struct {
 	Turns        []domain.Turn
 	Conversation []domain.ConversationItem
 	Memory       domain.TaskMemory
+	Hardware     []domain.HardwareGroup
 	SourceTaskID string
 }
 
@@ -91,6 +92,14 @@ func (s *Store) RemoteTaskMirror(ctx context.Context, publicID string) (RemoteTa
 			case "task_memory":
 				_ = json.Unmarshal(object.Payload, &mirror.Memory)
 				mirror.Memory.TaskID = publicID
+			case "hardware":
+				var value domain.HardwareGroup
+				if json.Unmarshal(object.Payload, &value) == nil {
+					value.TaskID = publicID
+					value.CredentialRef = ""
+					value.Access = domain.HardwareAccessReadOnly
+					mirror.Hardware = append(mirror.Hardware, value)
+				}
 			}
 		}
 		return mirror, nil
@@ -136,10 +145,22 @@ func (s *Store) PurgeOwnRemoteMirrors(ctx context.Context, deviceID string) erro
 }
 
 func (s *Store) UpsertSyncedWorkspace(ctx context.Context, item domain.Workspace) error {
+	return s.UpsertSyncedWorkspaceFromSource(ctx, item, "")
+}
+
+func (s *Store) UpsertSyncedWorkspaceFromSource(ctx context.Context, item domain.Workspace, sourceID string) error {
+	wireID := ownedGraphObjectID(item.OwnerDeviceID, sourceID)
 	_, err := s.db.ExecContext(ctx, `INSERT INTO workspaces(id,project_id,name,locality,transport,root_path,ssh_host,ssh_user,ssh_port,ssh_auth,ssh_credential_ref,ssh_password_configured,distro,platform,health,capabilities_json,repository_json,last_detected_at,created_at,updated_at,owner_device_id,read_only)
-	VALUES(?,?,?,?,?,'','','',0,'','',0,'','','remote','{}','{}','',?,?,?,1)
-	ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id,name=excluded.name,updated_at=excluded.updated_at,owner_device_id=excluded.owner_device_id,read_only=1`,
-		item.ID, item.ProjectID, item.Name, "remote", "sync", timeString(item.CreatedAt), timeString(item.UpdatedAt), item.OwnerDeviceID)
+	SELECT ?,?,?,?,?,'',?,?,?,?,'',?,?,'','remote','{}','{}','',?,?,?,1
+	WHERE NOT EXISTS(SELECT 1 FROM sync_tombstones WHERE object_type='workspace' AND object_id=?)
+	ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id,name=excluded.name,locality='remote',transport=excluded.transport,
+		root_path='',ssh_host=excluded.ssh_host,ssh_user=excluded.ssh_user,ssh_port=excluded.ssh_port,ssh_auth=excluded.ssh_auth,
+		ssh_credential_ref='',ssh_password_configured=excluded.ssh_password_configured,distro=excluded.distro,
+		platform='',health='remote',capabilities_json='{}',repository_json='{}',last_detected_at='',updated_at=excluded.updated_at,
+		owner_device_id=excluded.owner_device_id,read_only=1`,
+		item.ID, item.ProjectID, item.Name, "remote", item.Transport, item.SSHHost, item.SSHUser, item.SSHPort,
+		item.SSHAuth, boolInt(item.SSHPasswordConfigured), item.Distro,
+		timeString(item.CreatedAt), timeString(item.UpdatedAt), item.OwnerDeviceID, wireID)
 	return err
 }
 
@@ -150,7 +171,10 @@ func (s *Store) UpsertRemoteTaskObject(ctx context.Context, item RemoteTaskObjec
 	if item.UpdatedAt.IsZero() {
 		item.UpdatedAt = item.CreatedAt
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO sync_remote_task_objects(owner_device_id,object_type,object_id,task_id,project_id,payload_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(owner_device_id,object_type,object_id) DO UPDATE SET task_id=excluded.task_id,project_id=excluded.project_id,payload_json=excluded.payload_json,updated_at=excluded.updated_at`, item.OwnerDeviceID, item.ObjectType, item.ObjectID, item.TaskID, item.ProjectID, string(item.Payload), timeString(item.CreatedAt), timeString(item.UpdatedAt))
+	wireTaskID := ownedGraphObjectID(item.OwnerDeviceID, item.TaskID)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO sync_remote_task_objects(owner_device_id,object_type,object_id,task_id,project_id,payload_json,created_at,updated_at)
+		SELECT ?,?,?,?,?,?,?,? WHERE NOT EXISTS(SELECT 1 FROM sync_tombstones WHERE object_type='task' AND object_id=?)
+		ON CONFLICT(owner_device_id,object_type,object_id) DO UPDATE SET task_id=excluded.task_id,project_id=excluded.project_id,payload_json=excluded.payload_json,updated_at=excluded.updated_at`, item.OwnerDeviceID, item.ObjectType, item.ObjectID, item.TaskID, item.ProjectID, string(item.Payload), timeString(item.CreatedAt), timeString(item.UpdatedAt), wireTaskID)
 	return err
 }
 
@@ -161,7 +185,7 @@ func (s *Store) RemoteTaskObjectExists(ctx context.Context, ownerDeviceID, objec
 }
 
 func (s *Store) RemoteTaskObjects(ctx context.Context, ownerDeviceID, taskID string) ([]RemoteTaskObject, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT owner_device_id,object_type,object_id,task_id,project_id,payload_json,created_at,updated_at FROM sync_remote_task_objects WHERE owner_device_id=? AND (?='' OR task_id=?) ORDER BY CASE object_type WHEN 'task' THEN 1 WHEN 'task_agent' THEN 2 WHEN 'round' THEN 3 WHEN 'turn' THEN 4 WHEN 'conversation' THEN 5 WHEN 'task_memory' THEN 6 ELSE 9 END,created_at,object_id`, ownerDeviceID, taskID, taskID)
+	rows, err := s.db.QueryContext(ctx, `SELECT owner_device_id,object_type,object_id,task_id,project_id,payload_json,created_at,updated_at FROM sync_remote_task_objects WHERE owner_device_id=? AND (?='' OR task_id=?) ORDER BY CASE object_type WHEN 'task' THEN 1 WHEN 'task_agent' THEN 2 WHEN 'hardware' THEN 3 WHEN 'round' THEN 4 WHEN 'turn' THEN 5 WHEN 'conversation' THEN 6 WHEN 'task_memory' THEN 7 ELSE 9 END,created_at,object_id`, ownerDeviceID, taskID, taskID)
 	if err != nil {
 		return nil, err
 	}

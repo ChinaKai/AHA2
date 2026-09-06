@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
@@ -24,6 +25,13 @@ type workspaceMetadata struct {
 	ID            string    `json:"id"`
 	ProjectID     string    `json:"project_id"`
 	Name          string    `json:"name"`
+	Transport     string    `json:"transport"`
+	SSHHost       string    `json:"ssh_host,omitempty"`
+	SSHUser       string    `json:"ssh_user,omitempty"`
+	SSHPort       int       `json:"ssh_port,omitempty"`
+	SSHAuth       string    `json:"ssh_auth,omitempty"`
+	SSHConfigured bool      `json:"ssh_password_configured,omitempty"`
+	Distro        string    `json:"distro,omitempty"`
 	OwnerDeviceID string    `json:"owner_device_id"`
 	ReadOnly      bool      `json:"read_only"`
 	CreatedAt     time.Time `json:"created_at"`
@@ -62,7 +70,12 @@ func exportTaskGraph(ctx context.Context, database *store.Store, deviceID string
 			if workspace.ReadOnly || (workspace.OwnerDeviceID != "" && workspace.OwnerDeviceID != deviceID) {
 				continue
 			}
-			meta := workspaceMetadata{ID: workspace.ID, ProjectID: workspace.ProjectID, Name: workspace.Name, OwnerDeviceID: deviceID, ReadOnly: true, CreatedAt: workspace.CreatedAt, UpdatedAt: workspace.UpdatedAt}
+			meta := workspaceMetadata{
+				ID: workspace.ID, ProjectID: workspace.ProjectID, Name: workspace.Name, Transport: workspace.Transport,
+				SSHHost: workspace.SSHHost, SSHUser: workspace.SSHUser, SSHPort: workspace.SSHPort,
+				SSHAuth: workspace.SSHAuth, SSHConfigured: workspace.SSHPasswordConfigured, Distro: workspace.Distro,
+				OwnerDeviceID: deviceID, ReadOnly: true, CreatedAt: workspace.CreatedAt, UpdatedAt: workspace.UpdatedAt,
+			}
 			if err := add(TypeWorkspace, deviceID+":"+workspace.ID, project.ID, "", meta, timeVersion(workspace.UpdatedAt)); err != nil {
 				return nil, err
 			}
@@ -151,12 +164,38 @@ func exportTaskGraph(ctx context.Context, database *store.Store, deviceID string
 					return nil, err
 				}
 			}
+			hardwareGroups, err := database.HardwareGroups(ctx, task.ID)
+			if err != nil {
+				return nil, err
+			}
+			for _, group := range hardwareGroups {
+				group.CredentialRef = ""
+				group.Access = domain.HardwareAccessReadOnly
+				if err := add(TypeHardware, prefix+task.ID+":"+group.ID, project.ID, task.ID, group, timeVersion(group.UpdatedAt)); err != nil {
+					return nil, err
+				}
+			}
 		}
 	}
 	return result, nil
 }
 
 func applyTaskGraphObject(ctx context.Context, database *store.Store, obj domain.SyncObject) error {
+	if obj.Operation == "delete" {
+		ownerDeviceID, sourceID, ok := strings.Cut(obj.ID, ":")
+		if !ok || strings.TrimSpace(ownerDeviceID) == "" || strings.TrimSpace(sourceID) == "" || (obj.Type != TypeTask && obj.Type != TypeWorkspace) {
+			return errors.New("invalid owned task graph tombstone")
+		}
+		syncKey := obj.IdempotencyKey
+		if syncKey == "" {
+			syncKey = obj.EventID
+		}
+		localWorkspaceID := ""
+		if obj.Type == TypeWorkspace {
+			localWorkspaceID = syncedWorkspaceID(ownerDeviceID, sourceID)
+		}
+		return database.ApplyRemoteGraphDelete(ctx, obj.Type, ownerDeviceID, sourceID, localWorkspaceID, syncKey, obj.SourceVersion, time.Now().UTC())
+	}
 	var envelope graphEnvelope
 	if err := json.Unmarshal(obj.Payload, &envelope); err != nil {
 		return fmt.Errorf("decode %s graph envelope: %w", obj.Type, err)
@@ -192,7 +231,16 @@ func applyTaskGraphObject(ctx context.Context, database *store.Store, obj domain
 		if meta.OwnerDeviceID != envelope.OwnerDeviceID {
 			return errors.New("workspace owner_device_id mismatch")
 		}
-		return database.UpsertSyncedWorkspace(ctx, domain.Workspace{ID: syncedWorkspaceID(envelope.OwnerDeviceID, meta.ID), ProjectID: envelope.ProjectID, Name: meta.Name, OwnerDeviceID: envelope.OwnerDeviceID, ReadOnly: true, CreatedAt: meta.CreatedAt, UpdatedAt: meta.UpdatedAt})
+		if obj.ID != ownedGraphWireID(envelope.OwnerDeviceID, meta.ID) {
+			return errors.New("workspace wire ownership mismatch")
+		}
+		return database.UpsertSyncedWorkspaceFromSource(ctx, domain.Workspace{
+			ID: syncedWorkspaceID(envelope.OwnerDeviceID, meta.ID), ProjectID: envelope.ProjectID, Name: meta.Name,
+			Locality: "remote", Transport: meta.Transport, SSHHost: meta.SSHHost, SSHUser: meta.SSHUser,
+			SSHPort: meta.SSHPort, SSHAuth: meta.SSHAuth, SSHPasswordConfigured: meta.SSHConfigured,
+			Distro: meta.Distro, OwnerDeviceID: envelope.OwnerDeviceID, ReadOnly: true,
+			CreatedAt: meta.CreatedAt, UpdatedAt: meta.UpdatedAt,
+		}, meta.ID)
 	}
 	if envelope.TaskID == "" {
 		return errors.New("remote task graph object has no task_id")
@@ -203,8 +251,17 @@ func applyTaskGraphObject(ctx context.Context, database *store.Store, obj domain
 			return err
 		}
 		if !exists {
+			deleted, tombstoneErr := database.RemoteGraphTombstoned(ctx, TypeTask, ownedGraphWireID(envelope.OwnerDeviceID, envelope.TaskID))
+			if tombstoneErr != nil {
+				return tombstoneErr
+			}
+			if deleted {
+				return nil
+			}
 			return fmt.Errorf("task dependency %s is missing", envelope.TaskID)
 		}
+	} else if obj.ID != ownedGraphWireID(envelope.OwnerDeviceID, envelope.TaskID) {
+		return errors.New("task wire ownership mismatch")
 	}
 	value := append(json.RawMessage(nil), envelope.Value...)
 	switch obj.Type {
@@ -265,6 +322,18 @@ func applyTaskGraphObject(ctx context.Context, database *store.Store, obj domain
 		}
 		memory.Extra = nil
 		value, _ = json.Marshal(memory)
+	case TypeHardware:
+		var group domain.HardwareGroup
+		if err := json.Unmarshal(value, &group); err != nil {
+			return err
+		}
+		if obj.ID != ownedGraphWireID(envelope.OwnerDeviceID, envelope.TaskID)+":"+group.ID {
+			return errors.New("hardware wire ownership mismatch")
+		}
+		group.TaskID = envelope.TaskID
+		group.CredentialRef = ""
+		group.Access = domain.HardwareAccessReadOnly
+		value, _ = json.Marshal(group)
 	}
 	return database.UpsertRemoteTaskObject(ctx, store.RemoteTaskObject{OwnerDeviceID: envelope.OwnerDeviceID, ObjectType: obj.Type, ObjectID: sourceGraphObjectID(obj.Type, obj.ID, envelope.TaskID), TaskID: envelope.TaskID, ProjectID: envelope.ProjectID, Payload: value, UpdatedAt: time.Now().UTC()})
 }
@@ -278,4 +347,8 @@ func sourceGraphObjectID(kind, wireID, taskID string) string {
 		return taskID
 	}
 	return wireID
+}
+
+func ownedGraphWireID(ownerDeviceID, sourceID string) string {
+	return ownerDeviceID + ":" + sourceID
 }

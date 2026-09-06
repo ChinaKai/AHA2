@@ -1,6 +1,6 @@
 import {api} from "./api.js";
 import {icon} from "./icons.js";
-import type {CodexAccount, EnvGroup, Provider, SyncConflict, SyncSettings, SyncState} from "./types.js";
+import type {SyncConflict, SyncPreview, SyncSettings, SyncState} from "./types.js";
 
 function escapeHTML(value: unknown): string {
   return String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#039;");
@@ -29,8 +29,7 @@ function syncDomainForType(value: string): string {
   return "其他";
 }
 
-export function renderSyncSettings(settings: SyncSettings, state: SyncState, pending: number, conflicts: SyncConflict[], providers: Provider[], groups: EnvGroup[], accounts: CodexAccount[]): string {
-  const checks = (name: string, items: Array<{id: string; name?: string; label?: string}>, selected: string[]) => items.map(item => `<label class="proxy-toggle"><input type="checkbox" name="${name}" value="${escapeHTML(item.id)}" ${selected.includes(item.id) ? "checked" : ""}>${escapeHTML(item.name || item.label || item.id)}</label>`).join("") || '<span class="field-help">暂无可同步项</span>';
+export function renderSyncSettings(settings: SyncSettings, state: SyncState, pending: number, conflicts: SyncConflict[]): string {
   return `<section class="page sync-page">
     <header class="page-head"><div><h1>同步</h1><p>配置本机与 AHA 中心的通用对象同步。认证口令只保存在本机 Secret Store。</p></div><div class="actions"><button id="run-sync" class="primary">${icon("refresh")}立即同步</button></div></header>
     <nav class="sync-domain-grid" aria-label="同步分类">${syncDomains.map((domain, index) => `<article><span>${index + 1}</span>${icon(domain.icon)}<div><strong>${domain.label}</strong><small>${domain.detail}</small></div></article>`).join("")}</nav>
@@ -47,8 +46,7 @@ export function renderSyncSettings(settings: SyncSettings, state: SyncState, pen
           ${settings.token_configured ? "" : '<label>一次性注册码<input name="registration_code" type="password" autocomplete="one-time-code" placeholder="首次设备注册时填写"></label>'}
           <label>同步加密口令<input name="passphrase" type="password" minlength="12" autocomplete="new-password" placeholder="${settings.passphrase_configured ? "留空以保留现有加密口令" : "至少 12 位，各设备必须一致"}"></label>
           ${settings.passphrase_configured ? '<label class="proxy-toggle"><input name="clear_passphrase" type="checkbox">清除已保存加密口令</label>' : ""}
-          <section class="sync-model-selection"><header>${icon("model")}<div><strong>模型与凭据</strong><small>Secret 始终端到端加密，仅同步显式选中项</small></div></header><fieldset><legend>Provider 凭据</legend>${checks("provider_ids", providers, settings.provider_ids || [])}</fieldset><fieldset><legend>Env Secret</legend>${checks("env_group_ids", groups, settings.env_group_ids || [])}</fieldset><fieldset><legend>Codex 账号</legend>${checks("codex_account_ids", accounts, settings.codex_account_ids || [])}</fieldset></section>
-          <div class="field-help">设备访问凭据由注册流程自动生成并仅保存在本机 Secret Store，不需要手工填写。</div>
+          <div class="field-help">Provider、Env Secret 与 Codex 账号凭据会自动全部加密同步。SSH/硬件凭据仅作为远端只读镜像加密保存，显式接管后才能启用；本机路径、串口需重新绑定，设备 Sync Token 永不跨设备。</div>
         </div>
         <div class="dialog-actions sync-actions"><button class="primary" type="submit">${icon("save")}保存设置</button></div>
       </form>
@@ -61,7 +59,12 @@ export function renderSyncSettings(settings: SyncSettings, state: SyncState, pen
 }
 
 export function syncSettingsPayload(settings: SyncSettings, form: Pick<FormData, "get" | "getAll">): Record<string, unknown> {
-  return {enabled: form.get("enabled") === "on", endpoint: String(form.get("endpoint") || ""), device_id: settings.device_id, device_name: String(form.get("device_name") || ""), interval_seconds: Number(form.get("interval_seconds") || 300), registration_code: String(form.get("registration_code") || ""), passphrase: String(form.get("passphrase") || ""), clear_passphrase: form.get("clear_passphrase") === "on", provider_ids: form.getAll("provider_ids").map(String), env_group_ids: form.getAll("env_group_ids").map(String), codex_account_ids: form.getAll("codex_account_ids").map(String)};
+  return {enabled: form.get("enabled") === "on", endpoint: String(form.get("endpoint") || ""), device_id: settings.device_id, device_name: String(form.get("device_name") || ""), interval_seconds: Number(form.get("interval_seconds") || 300), registration_code: String(form.get("registration_code") || ""), passphrase: String(form.get("passphrase") || ""), clear_passphrase: form.get("clear_passphrase") === "on"};
+}
+
+export function syncPreviewMessage(preview: SyncPreview, completed = false): string {
+  if (completed) return `同步完成：上传 ${preview.upserts}，删除 ${preview.deletes}，剩余 ${preview.pending}，冲突 ${preview.conflicts}`;
+  return `本次将上传新增/更新 ${preview.upserts} 项、删除 ${preview.deletes} 项；当前队列 ${preview.pending} 项、冲突 ${preview.conflicts} 项。是否继续？`;
 }
 
 interface SyncSettingsFormState {
@@ -98,9 +101,19 @@ export function bindSyncSettings(options: {settings: SyncSettings; refresh: () =
       await options.refresh();
     }).catch(error => options.setMessage("error", error instanceof Error ? error.message : String(error))).finally(() => { if (button) button.disabled = false; });
   });
-  document.querySelector<HTMLButtonElement>("#run-sync")?.addEventListener("click", event => {
+  document.querySelector<HTMLButtonElement>("#run-sync")?.addEventListener("click", async event => {
     const button = event.currentTarget;
     button.disabled = true;
-    void api.runSync().then(async () => { options.setMessage("notice", "同步完成"); await options.refresh(); }).catch(error => options.setMessage("error", error instanceof Error ? error.message : String(error))).finally(() => { button.disabled = false; });
+    try {
+      const {preview} = await api.syncPreview();
+      if ((preview.upserts || preview.deletes || preview.pending || preview.conflicts) && !window.confirm(syncPreviewMessage(preview))) return;
+      const result = await api.runSync();
+      options.setMessage("notice", syncPreviewMessage(result.summary, true));
+      await options.refresh();
+    } catch (error) {
+      options.setMessage("error", error instanceof Error ? error.message : String(error));
+    } finally {
+      button.disabled = false;
+    }
   });
 }

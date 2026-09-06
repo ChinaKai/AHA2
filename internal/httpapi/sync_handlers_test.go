@@ -49,17 +49,62 @@ func TestSyncSettingsAPIKeepsTokenOutOfResponses(t *testing.T) {
 	}
 	var payload struct {
 		Sync struct {
-			TokenConfigured      bool     `json:"token_configured"`
-			PassphraseConfigured bool     `json:"passphrase_configured"`
-			DeviceID             string   `json:"device_id"`
-			ProviderIDs          []string `json:"provider_ids"`
+			TokenConfigured      bool   `json:"token_configured"`
+			PassphraseConfigured bool   `json:"passphrase_configured"`
+			DeviceID             string `json:"device_id"`
 		} `json:"sync"`
 	}
 	if err := json.Unmarshal([]byte(body), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if !payload.Sync.TokenConfigured || !payload.Sync.PassphraseConfigured || payload.Sync.DeviceID != "device-one" || len(payload.Sync.ProviderIDs) != 1 {
+	if !payload.Sync.TokenConfigured || !payload.Sync.PassphraseConfigured || payload.Sync.DeviceID != "device-one" || strings.Contains(body, "provider_ids") {
 		t.Fatalf("unexpected settings: %#v", payload.Sync)
+	}
+	stored, err := database.SyncSettings(ctx, localSyncScope)
+	if err != nil || len(stored.ProviderIDs)+len(stored.EnvGroupIDs)+len(stored.CodexAccountIDs) != 0 {
+		t.Fatalf("legacy credential selection remained active: %#v err=%v", stored, err)
+	}
+}
+
+func TestSyncPreviewCountsLocalTombstonesBeforeRunning(t *testing.T) {
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	now := time.Now().UTC()
+	entry := domain.KnowledgeEntry{ID: "knowledge-delete-preview", Scope: "global", Type: "practice", Title: "Delete", Body: "delete", Status: domain.KnowledgeVerified, Revision: 1, CreatedAt: now, UpdatedAt: now}
+	if err := database.CreateKnowledge(ctx, entry); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.DeleteKnowledge(ctx, entry.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.PutSyncSettings(ctx, domain.SyncSettings{Scope: "default", Endpoint: "https://sync.example", DeviceID: "preview-device", IntervalSeconds: 60}); err != nil {
+		t.Fatal(err)
+	}
+	authService := auth.NewService(database, "setup-test", time.Hour)
+	server := httptest.NewServer(New(Config{Store: database, Auth: authService, App: app.NewService(database, nil, app.StubExecutor{})}).Handler())
+	defer server.Close()
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	_ = registerOwner(t, client, server.URL)
+	response := requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/settings/sync/preview", nil, "")
+	defer response.Body.Close()
+	var payload struct {
+		Preview struct {
+			Upserts   int `json:"upserts"`
+			Deletes   int `json:"deletes"`
+			Pending   int `json:"pending"`
+			Conflicts int `json:"conflicts"`
+		} `json:"preview"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK || payload.Preview.Deletes != 1 || payload.Preview.Pending != 0 || payload.Preview.Conflicts != 0 {
+		t.Fatalf("status=%d preview=%#v", response.StatusCode, payload.Preview)
 	}
 }
 
@@ -80,12 +125,16 @@ func TestRemoteTaskMirrorIsListedAndReadOnly(t *testing.T) {
 	if err := database.UpsertRemoteTaskObject(ctx, store.RemoteTaskObject{OwnerDeviceID: "dev_remote", ObjectType: "task", ObjectID: task.ID, TaskID: task.ID, ProjectID: project.ID, Payload: payload, CreatedAt: now, UpdatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
+	remoteWorkspace := domain.Workspace{ID: "remote-workspace-mirror", ProjectID: project.ID, Name: "Remote workspace", OwnerDeviceID: "dev_remote", ReadOnly: true, CreatedAt: now, UpdatedAt: now}
+	if err := database.UpsertSyncedWorkspace(ctx, remoteWorkspace); err != nil {
+		t.Fatal(err)
+	}
 	authService := auth.NewService(database, "setup-test", time.Hour)
 	server := httptest.NewServer(New(Config{Store: database, Auth: authService, App: app.NewService(database, nil, app.StubExecutor{})}).Handler())
 	defer server.Close()
 	jar, _ := cookiejar.New(nil)
 	client := &http.Client{Jar: jar}
-	_ = registerOwner(t, client, server.URL)
+	csrf := registerOwner(t, client, server.URL)
 	response := requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/tasks", nil, "")
 	var list struct {
 		Tasks []domain.Task `json:"tasks"`
@@ -107,6 +156,57 @@ func TestRemoteTaskMirrorIsListedAndReadOnly(t *testing.T) {
 	response.Body.Close()
 	if !detail.Task.ReadOnly || detail.Task.Title != "Remote task" {
 		t.Fatalf("detail=%#v", detail.Task)
+	}
+	response = requestJSON(t, client, http.MethodDelete, server.URL+"/api/v1/tasks/"+list.Tasks[0].ID, nil, csrf)
+	if response.StatusCode != http.StatusNotFound {
+		t.Fatalf("remote task delete status=%d", response.StatusCode)
+	}
+	response.Body.Close()
+	if found, err := database.RemoteTaskObjectExists(ctx, "dev_remote", "task", task.ID); err != nil || !found {
+		t.Fatalf("remote task mirror was deleted: found=%t err=%v", found, err)
+	}
+	response = requestJSON(t, client, http.MethodDelete, server.URL+"/api/v1/workspaces/"+remoteWorkspace.ID, nil, csrf)
+	if response.StatusCode != http.StatusForbidden {
+		t.Fatalf("remote workspace delete status=%d", response.StatusCode)
+	}
+	response.Body.Close()
+	if _, err := database.Workspace(ctx, remoteWorkspace.ID); err != nil {
+		t.Fatalf("remote workspace mirror was deleted: %v", err)
+	}
+}
+
+func TestOwnerTaskAndWorkspaceDeletesCreateGraphTombstones(t *testing.T) {
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	task := createHardwareAPITask(t, database)
+	if err := database.ClaimLocalWorkspaces(ctx, "device-owner"); err != nil {
+		t.Fatal(err)
+	}
+	authService := auth.NewService(database, "setup-test", time.Hour)
+	server := httptest.NewServer(New(Config{Store: database, Auth: authService, App: app.NewService(database, nil, app.StubExecutor{})}).Handler())
+	defer server.Close()
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	csrf := registerOwner(t, client, server.URL)
+	response := requestJSON(t, client, http.MethodDelete, server.URL+"/api/v1/tasks/"+task.ID, nil, csrf)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("owned task delete status=%d body=%s", response.StatusCode, readBody(t, response))
+	}
+	response.Body.Close()
+	if _, err := database.SyncTombstone(ctx, "task", "device-owner:"+task.ID); err != nil {
+		t.Fatalf("task delete did not create tombstone: %v", err)
+	}
+	response = requestJSON(t, client, http.MethodDelete, server.URL+"/api/v1/workspaces/"+task.WorkspaceID, nil, csrf)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("owned workspace delete status=%d body=%s", response.StatusCode, readBody(t, response))
+	}
+	response.Body.Close()
+	if _, err := database.SyncTombstone(ctx, "workspace", "device-owner:"+task.WorkspaceID); err != nil {
+		t.Fatalf("workspace delete did not create tombstone: %v", err)
 	}
 }
 

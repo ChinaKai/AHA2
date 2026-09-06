@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
@@ -29,10 +30,11 @@ func (s *Store) PromptTemplateOverrides(ctx context.Context) (map[string]domain.
 }
 
 func (s *Store) UpsertPromptTemplateOverride(ctx context.Context, id, content string, updatedAt time.Time) error {
+	initialVersion := s.sharedNumericVersion(ctx, "prompt_override", id, 1)
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO prompt_template_overrides(id,content,version,updated_at) VALUES(?,?,1,?)
+		INSERT INTO prompt_template_overrides(id,content,version,updated_at) VALUES(?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET content=excluded.content,version=prompt_template_overrides.version+1,updated_at=excluded.updated_at`,
-		id, content, timeString(updatedAt),
+		id, content, initialVersion, timeString(updatedAt),
 	)
 	return err
 }
@@ -52,7 +54,11 @@ func (s *Store) ImportPromptTemplateOverride(ctx context.Context, id, content st
 }
 
 func (s *Store) DeletePromptTemplateOverride(ctx context.Context, id string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM prompt_template_overrides WHERE id=?`, id)
+	item, err := s.PromptTemplateOverride(ctx, id)
+	if err != nil {
+		return err
+	}
+	_, err = s.deleteSharedObject(ctx, "prompt_override", id, strconv.Itoa(item.Version), time.Now().UTC())
 	return err
 }
 

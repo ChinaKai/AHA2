@@ -29,13 +29,13 @@ type syncSettingsPayload struct {
 	Passphrase       string   `json:"passphrase"`
 	ClearPassphrase  bool     `json:"clear_passphrase"`
 	RegistrationCode string   `json:"registration_code"`
-	ProviderIDs      []string `json:"provider_ids"`
-	EnvGroupIDs      []string `json:"env_group_ids"`
-	CodexAccountIDs  []string `json:"codex_account_ids"`
+	ProviderIDs      []string `json:"provider_ids"`      // accepted for backward compatibility; ignored
+	EnvGroupIDs      []string `json:"env_group_ids"`     // accepted for backward compatibility; ignored
+	CodexAccountIDs  []string `json:"codex_account_ids"` // accepted for backward compatibility; ignored
 }
 
 func publicSyncSettings(item domain.SyncSettings, tokenConfigured, passphraseConfigured bool) map[string]any {
-	return map[string]any{"scope": item.Scope, "enabled": item.Enabled, "endpoint": item.Endpoint, "device_id": item.DeviceID, "device_name": item.DeviceName, "interval_seconds": item.IntervalSeconds, "provider_ids": item.ProviderIDs, "env_group_ids": item.EnvGroupIDs, "codex_account_ids": item.CodexAccountIDs, "token_configured": tokenConfigured, "passphrase_configured": passphraseConfigured, "updated_at": item.UpdatedAt}
+	return map[string]any{"scope": item.Scope, "enabled": item.Enabled, "endpoint": item.Endpoint, "device_id": item.DeviceID, "device_name": item.DeviceName, "interval_seconds": item.IntervalSeconds, "token_configured": tokenConfigured, "passphrase_configured": passphraseConfigured, "updated_at": item.UpdatedAt}
 }
 
 func (s *Server) syncSettings(writer http.ResponseWriter, request *http.Request) {
@@ -61,7 +61,7 @@ type syncValidationError string
 func (e syncValidationError) Error() string { return string(e) }
 
 func normalizeSyncSettings(payload syncSettingsPayload) (domain.SyncSettings, error) {
-	item := domain.SyncSettings{Scope: localSyncScope, Enabled: payload.Enabled, Endpoint: strings.TrimSpace(payload.Endpoint), DeviceID: strings.TrimSpace(payload.DeviceID), DeviceName: strings.TrimSpace(payload.DeviceName), IntervalSeconds: payload.IntervalSeconds, ProviderIDs: payload.ProviderIDs, EnvGroupIDs: payload.EnvGroupIDs, CodexAccountIDs: payload.CodexAccountIDs, UpdatedAt: time.Now().UTC()}
+	item := domain.SyncSettings{Scope: localSyncScope, Enabled: payload.Enabled, Endpoint: strings.TrimSpace(payload.Endpoint), DeviceID: strings.TrimSpace(payload.DeviceID), DeviceName: strings.TrimSpace(payload.DeviceName), IntervalSeconds: payload.IntervalSeconds, UpdatedAt: time.Now().UTC()}
 	if item.DeviceName == "" {
 		item.DeviceName = item.DeviceID
 	}
@@ -184,6 +184,19 @@ func (s *Server) syncConflicts(writer http.ResponseWriter, request *http.Request
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "conflicts": items})
 }
 
+func (s *Server) syncPreview(writer http.ResponseWriter, request *http.Request) {
+	if _, err := s.store.SyncSettings(request.Context(), localSyncScope); err != nil {
+		writeError(writer, http.StatusBadRequest, "sync_not_configured")
+		return
+	}
+	preview, err := (syncer.Runner{Store: s.store, Scope: localSyncScope}).Preview(request.Context())
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, "sync_preview_failed")
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "preview": preview})
+}
+
 func (s *Server) runSync(writer http.ResponseWriter, request *http.Request) {
 	_, err := s.store.SyncSettings(request.Context(), localSyncScope)
 	if err != nil {
@@ -199,10 +212,16 @@ func (s *Server) runSync(writer http.ResponseWriter, request *http.Request) {
 		writeError(writer, http.StatusBadRequest, "sync_token_not_configured")
 		return
 	}
-	ctx, cancel := context.WithTimeout(request.Context(), 45*time.Second)
+	runner := syncer.Runner{Store: s.store, Secrets: s.secrets, Scope: localSyncScope, TokenRef: localSyncTokenRef}
+	preview, err := runner.Preview(request.Context())
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, "sync_preview_failed")
+		return
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), 3*time.Minute)
 	defer cancel()
 	_ = token
-	err = (syncer.Runner{Store: s.store, Secrets: s.secrets, Scope: localSyncScope, TokenRef: localSyncTokenRef}).RunOnce(ctx)
+	err = runner.RunOnce(ctx)
 	if err != nil {
 		state, _ := s.store.SyncState(request.Context(), localSyncScope)
 		state.LastError = err.Error()
@@ -213,6 +232,8 @@ func (s *Server) runSync(writer http.ResponseWriter, request *http.Request) {
 	}
 	state, _ := s.store.SyncState(request.Context(), localSyncScope)
 	pending, _ := s.store.SyncOutboxCount(request.Context(), localSyncScope)
+	conflicts, _ := s.store.SyncConflicts(request.Context(), localSyncScope)
+	preview.Pending, preview.Conflicts = pending, len(conflicts)
 	s.audit(request, "sync.run", "settings", "sync", nil)
-	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "state": state, "pending": pending})
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "state": state, "pending": pending, "summary": preview})
 }

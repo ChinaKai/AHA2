@@ -102,7 +102,7 @@ func TestGraphExportStripsWorkspaceRuntimeAndConversationPayload(t *testing.T) {
 	if err := db.CreateProject(ctx, project); err != nil {
 		t.Fatal(err)
 	}
-	workspace := domain.Workspace{ID: "workspace-one", ProjectID: project.ID, Name: "Local", Locality: "local", Transport: "native", RootPath: `C:\private\repo`, SSHHost: "private-host", SSHCredentialRef: "workspace/private/password", SSHPasswordConfigured: true, Health: "ready", Capabilities: map[string]any{"runtime": "private"}, Repository: map[string]any{"path": "private"}, CreatedAt: now, UpdatedAt: now}
+	workspace := domain.Workspace{ID: "workspace-one", ProjectID: project.ID, Name: "Local", Locality: "remote", Transport: "ssh", RootPath: `C:\private\repo`, SSHHost: "private-host", SSHUser: "builder", SSHPort: 2222, SSHAuth: "password", SSHCredentialRef: "workspace/private/password", SSHPasswordConfigured: true, Health: "ready", Capabilities: map[string]any{"runtime": "private"}, Repository: map[string]any{"path": "private"}, CreatedAt: now, UpdatedAt: now}
 	if err := db.CreateWorkspace(ctx, workspace); err != nil {
 		t.Fatal(err)
 	}
@@ -112,13 +112,24 @@ func TestGraphExportStripsWorkspaceRuntimeAndConversationPayload(t *testing.T) {
 	}
 	raw, _ := json.Marshal(objects)
 	text := string(raw)
-	for _, forbidden := range []string{`C:\\private\\repo`, "private-host", "workspace/private/password", `\"runtime\":\"private\"`, `\"path\":\"private\"`} {
+	for _, forbidden := range []string{`C:\\private\\repo`, "workspace/private/password", `\"runtime\":\"private\"`, `\"path\":\"private\"`} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("graph export leaked %q: %s", forbidden, text)
 		}
 	}
 	if len(objects) < 2 || objects[0].Type != TypeProject || objects[1].Type != TypeWorkspace {
 		t.Fatalf("dependency order=%#v", objects)
+	}
+	var envelope graphEnvelope
+	if err := json.Unmarshal(objects[1].Payload, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	var metadata workspaceMetadata
+	if err := json.Unmarshal(envelope.Value, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if metadata.Transport != "ssh" || metadata.SSHHost != workspace.SSHHost || metadata.SSHUser != workspace.SSHUser || metadata.SSHPort != workspace.SSHPort || !metadata.SSHConfigured {
+		t.Fatalf("safe SSH metadata was not materialized: %#v", metadata)
 	}
 }
 
@@ -149,5 +160,18 @@ func TestBusinessHandlersIgnoreCurrentDeviceTaskMirrors(t *testing.T) {
 	found, err = db.RemoteTaskObjectExists(ctx, "device-remote", TypeTask, remoteTask.ID)
 	if err != nil || !found {
 		t.Fatalf("other device task was not mirrored: found=%t err=%v", found, err)
+	}
+	hardware := domain.HardwareGroup{TaskID: remoteTask.ID, ID: "board", Mode: domain.HardwareModeSerial, Serial: domain.HardwareSerialConfig{Device: "/dev/cu.remote", Baudrate: 115200}, Access: domain.HardwareAccessReadOnly}
+	wrongHardware := graphObject(t, TypeHardware, "device-other:task-remote:board", "device-remote", project.ID, remoteTask.ID, hardware)
+	if err := engine.handlers[TypeHardware](ctx, wrongHardware); err == nil || !strings.Contains(err.Error(), "ownership mismatch") {
+		t.Fatalf("mismatched hardware ownership was accepted: %v", err)
+	}
+	validHardware := graphObject(t, TypeHardware, "device-remote:task-remote:board", "device-remote", project.ID, remoteTask.ID, hardware)
+	if err := engine.handlers[TypeHardware](ctx, validHardware); err != nil {
+		t.Fatal(err)
+	}
+	objects, err := db.RemoteTaskObjects(ctx, "device-remote", remoteTask.ID)
+	if err != nil || len(objects) != 2 || objects[1].ObjectType != TypeHardware {
+		t.Fatalf("remote hardware object=%#v err=%v", objects, err)
 	}
 }

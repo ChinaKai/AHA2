@@ -35,6 +35,7 @@ type SyncObject struct {
 	Payload        json.RawMessage `json:"payload,omitempty"`
 	BaseVersion    string          `json:"base_version,omitempty"`
 	RemoteVersion  string          `json:"remote_version,omitempty"`
+	SourceVersion  string          `json:"source_version,omitempty"`
 	IdempotencyKey string          `json:"idempotency_key"`
 	EventID        string          `json:"event_id,omitempty"`
 }
@@ -63,4 +64,12 @@ type SyncConflict struct {
 	Status        string          `json:"status"`
 	CreatedAt     time.Time       `json:"created_at"`
 	ResolvedAt    time.Time       `json:"resolved_at"`
+}
+
+type SyncTombstone struct {
+	ObjectType string    `json:"object_type"`
+	ObjectID   string    `json:"object_id"`
+	Version    string    `json:"version"`
+	SyncKey    string    `json:"sync_key"`
+	DeletedAt  time.Time `json:"deleted_at"`
 }

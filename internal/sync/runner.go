@@ -28,6 +28,49 @@ type Runner struct {
 	SecretSelection *SecretSelection
 }
 
+type Preview struct {
+	Upserts   int `json:"upserts"`
+	Deletes   int `json:"deletes"`
+	Pending   int `json:"pending"`
+	Conflicts int `json:"conflicts"`
+}
+
+func (r Runner) Preview(ctx context.Context) (Preview, error) {
+	settings, err := r.Store.SyncSettings(ctx, r.scope())
+	if err != nil {
+		return Preview{}, err
+	}
+	objects, err := ExportBusinessObjectsForDevice(ctx, r.Store, settings.DeviceID)
+	if err != nil {
+		return Preview{}, err
+	}
+	result := Preview{}
+	for _, object := range objects {
+		applied, err := r.Store.SyncWasApplied(ctx, object.IdempotencyKey)
+		if err != nil {
+			return Preview{}, err
+		}
+		if applied {
+			continue
+		}
+		if object.Operation == "delete" {
+			result.Deletes++
+		} else {
+			result.Upserts++
+		}
+	}
+	result.Pending, err = r.Store.SyncOutboxCount(ctx, r.scope())
+	if err != nil {
+		return Preview{}, err
+	}
+	conflicts, err := r.Store.SyncConflicts(ctx, r.scope())
+	if err != nil {
+		return Preview{}, err
+	}
+	result.Conflicts = len(conflicts)
+	return result, nil
+}
+
 func (r Runner) RunOnce(ctx context.Context) error {
 	settings, err := r.Store.SyncSettings(ctx, r.scope())
 	if err != nil {
@@ -94,33 +137,41 @@ func (r Runner) RunOnce(ctx context.Context) error {
 		}
 	}
 	selection := r.SecretSelection
-	if selection == nil && len(settings.ProviderIDs)+len(settings.EnvGroupIDs)+len(settings.CodexAccountIDs) > 0 {
-		selection = &SecretSelection{ProviderIDs: settings.ProviderIDs, EnvGroupIDs: settings.EnvGroupIDs, CodexAccountIDs: settings.CodexAccountIDs}
+	if selection == nil && passphraseConfigured && passphrase != "" {
+		discovered, selectionErr := PortableSecretSelection(ctx, r.Store)
+		if selectionErr != nil {
+			return selectionErr
+		}
+		selection = &discovered
 	}
 	if selection != nil && passphraseConfigured && passphrase != "" {
 		bundle, bundleErr := ExportSecretBundle(ctx, r.Store, r.Secrets, *selection, passphrase)
-		if bundleErr != nil && !errors.Is(bundleErr, ErrNoPortableSecrets) {
-			return bundleErr
+		if err := r.enqueueSecretBundle(ctx, bundle, bundleErr); err != nil {
+			return err
 		}
-		if bundleErr == nil {
-			applied, applyErr := r.Store.SyncWasApplied(ctx, bundle.IdempotencyKey)
-			if applyErr != nil {
-				return applyErr
-			}
-			if applied {
-				bundleErr = ErrNoPortableSecrets
-			}
-		}
-		if bundleErr == nil {
-			if enqueueErr := r.Store.EnqueueSync(ctx, domain.SyncOutboxItem{Scope: r.scope(), Object: bundle}); enqueueErr != nil {
-				return enqueueErr
-			}
+		infrastructure, infrastructureErr := ExportInfrastructureSecretBundle(ctx, r.Store, r.Secrets, settings.DeviceID, passphrase)
+		if err := r.enqueueSecretBundle(ctx, infrastructure, infrastructureErr); err != nil {
+			return err
 		}
 	}
 	if err := r.drainPending(ctx, engine); err != nil {
 		return err
 	}
 	return engine.Pull(ctx)
+}
+
+func (r Runner) enqueueSecretBundle(ctx context.Context, bundle domain.SyncObject, bundleErr error) error {
+	if bundleErr != nil {
+		if errors.Is(bundleErr, ErrNoPortableSecrets) {
+			return nil
+		}
+		return bundleErr
+	}
+	applied, err := r.Store.SyncWasApplied(ctx, bundle.IdempotencyKey)
+	if err != nil || applied {
+		return err
+	}
+	return r.Store.EnqueueSync(ctx, domain.SyncOutboxItem{Scope: r.scope(), Object: bundle})
 }
 
 func (r Runner) drainPending(ctx context.Context, engine *Engine) error {

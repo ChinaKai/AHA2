@@ -94,7 +94,15 @@ func (s *Store) ImportKnowledgeProposal(ctx context.Context, item domain.Knowled
 }
 
 func (s *Store) DeleteKnowledgeProposal(ctx context.Context, id string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM knowledge_proposals WHERE id=?`, id)
+	item, err := s.KnowledgeProposal(ctx, id)
+	if err != nil {
+		return err
+	}
+	version := timeString(item.UpdatedAt)
+	if version == "" {
+		version = timeString(item.CreatedAt)
+	}
+	_, err = s.deleteSharedObject(ctx, "knowledge_proposal", id, version, time.Now().UTC())
 	return err
 }
 

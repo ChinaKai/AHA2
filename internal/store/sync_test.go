@@ -52,7 +52,7 @@ func TestSyncPersistenceAndAck(t *testing.T) {
 	if got.Endpoint != settings.Endpoint || got.DeviceID != "dev_immutable" || got.DeviceName != "Laptop" || !got.Enabled {
 		t.Fatalf("unexpected settings: %#v", got)
 	}
-	item := domain.SyncOutboxItem{ID: "out-1", Scope: "default", Object: domain.SyncObject{Type: "note", ID: "n1", Operation: "upsert", Payload: json.RawMessage(`{"title":"one"}`), IdempotencyKey: "key-1"}}
+	item := domain.SyncOutboxItem{ID: "out-1", Scope: "default", Object: domain.SyncObject{Type: "note", ID: "n1", Operation: "upsert", Payload: json.RawMessage(`{"title":"one"}`), RemoteVersion: "7", IdempotencyKey: "key-1"}}
 	if err := database.EnqueueSync(ctx, item); err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +63,7 @@ func TestSyncPersistenceAndAck(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(pending) != 1 {
+	if len(pending) != 1 || pending[0].Object.SourceVersion != "7" {
 		t.Fatalf("got %d pending items", len(pending))
 	}
 	if err := database.AckSync(ctx, "default", []string{"out-1"}, now); err != nil {

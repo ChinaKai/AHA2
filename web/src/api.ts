@@ -13,6 +13,7 @@ import type {
   Provider,
   ProxySettings,
   SyncSettings,
+  SyncPreview,
   SyncState,
   SyncConflict,
   PromptTemplate,
@@ -96,7 +97,11 @@ class APIClient {
     return this.request("/api/v1/settings/sync/status");
   }
 
-  runSync(): Promise<{state: SyncState; pending: number}> {
+  syncPreview(): Promise<{preview: SyncPreview}> {
+    return this.request("/api/v1/settings/sync/preview");
+  }
+
+  runSync(): Promise<{state: SyncState; pending: number; summary: SyncPreview}> {
     return this.request("/api/v1/settings/sync/run", {method: "POST", body: "{}"});
   }
 
@@ -139,6 +144,10 @@ class APIClient {
 
   updateWorkspace(id: string, payload: Record<string, unknown>): Promise<{workspace: Workspace}> {
     return this.request(`/api/v1/workspaces/${encodeURIComponent(id)}`, {method: "PUT", body: JSON.stringify(payload)});
+  }
+
+  takeoverWorkspace(id: string, payload: Record<string, unknown>): Promise<{workspace: Workspace}> {
+    return this.request(`/api/v1/workspaces/${encodeURIComponent(id)}/takeover`, {method: "POST", body: JSON.stringify(payload)});
   }
 
   models(): Promise<{models: Model[]}> {
@@ -267,6 +276,10 @@ class APIClient {
 
   deleteTask(id: string): Promise<{ok: boolean}> {
     return this.request(`/api/v1/tasks/${encodeURIComponent(id)}`, {method: "DELETE"});
+  }
+
+  takeoverTask(id: string, payload: Record<string, unknown>): Promise<{task: Task; hardware: HardwareGroup[]}> {
+    return this.request(`/api/v1/tasks/${encodeURIComponent(id)}/takeover`, {method: "POST", body: JSON.stringify(payload)});
   }
 
   message(taskID: string, content: string): Promise<{turn: {id: string}}> {

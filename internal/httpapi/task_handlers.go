@@ -225,7 +225,7 @@ func (s *Server) taskDetail(writer http.ResponseWriter, request *http.Request) {
 				turns = append(turns, turn)
 			}
 		}
-		writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "task": mirror.Task, "latest_round": latest, "turns": turns, "agents": mirror.Agents, "memory": mirror.Memory, "hardware": []domain.HardwareGroup{}, "event_cursor": 0, "server_time_ms": time.Now().UTC().UnixMilli()})
+		writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "task": mirror.Task, "latest_round": latest, "turns": turns, "agents": mirror.Agents, "memory": mirror.Memory, "hardware": mirror.Hardware, "event_cursor": 0, "server_time_ms": time.Now().UTC().UnixMilli()})
 		return
 	}
 	round, _ := s.store.LatestRound(request.Context(), taskID)

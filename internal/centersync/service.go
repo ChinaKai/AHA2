@@ -72,7 +72,7 @@ CREATE TABLE IF NOT EXISTS sync_objects (
 CREATE TABLE IF NOT EXISTS sync_events (
  sequence INTEGER PRIMARY KEY AUTOINCREMENT, device_id TEXT NOT NULL, event_id TEXT NOT NULL,
  object_id TEXT NOT NULL, object_type TEXT NOT NULL, operation TEXT NOT NULL,
- payload TEXT, encrypted_bundle TEXT, version INTEGER NOT NULL, created_at TEXT NOT NULL,
+ payload TEXT, encrypted_bundle TEXT, version INTEGER NOT NULL, source_version TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
  UNIQUE(device_id, event_id)
 );
 CREATE TABLE IF NOT EXISTS device_cursors (
@@ -84,6 +84,7 @@ CREATE INDEX IF NOT EXISTS idx_sync_events_sequence ON sync_events(sequence);
 		return fmt.Errorf("migrate sync database: %w", err)
 	}
 	for _, migration := range []string{
+		`ALTER TABLE sync_events ADD COLUMN source_version TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE device_tokens ADD COLUMN generation INTEGER NOT NULL DEFAULT 1`,
 		`ALTER TABLE device_tokens ADD COLUMN created_at TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE device_tokens ADD COLUMN rotated_at TEXT NOT NULL DEFAULT ''`,
@@ -313,6 +314,7 @@ type Event struct {
 	Payload         json.RawMessage `json:"payload,omitempty"`
 	EncryptedBundle string          `json:"encrypted_bundle,omitempty"`
 	Version         int64           `json:"version"`
+	SourceVersion   string          `json:"source_version,omitempty"`
 	Sequence        int64           `json:"sequence,omitempty"`
 	CreatedAt       string          `json:"created_at,omitempty"`
 }
@@ -320,7 +322,7 @@ type Event struct {
 func deliveryEventID(event Event) string {
 	value := strings.Join([]string{
 		event.DeviceID, event.EventID, event.ObjectType, event.ObjectID, event.Operation,
-		strconv.FormatInt(event.Version, 10), string(event.Payload), event.EncryptedBundle,
+		strconv.FormatInt(event.Version, 10), event.SourceVersion, string(event.Payload), event.EncryptedBundle,
 	}, "\x00")
 	digest := sha256.Sum256([]byte(value))
 	return "center:" + hex.EncodeToString(digest[:16])
@@ -375,7 +377,7 @@ func (s *Store) Push(ctx context.Context, deviceID string, events []Event) ([]in
 			return nil, err
 		}
 		now := time.Now().UTC().Format(time.RFC3339Nano)
-		result, err := tx.ExecContext(ctx, `INSERT INTO sync_events(device_id,event_id,object_id,object_type,operation,payload,encrypted_bundle,version,created_at) VALUES(?,?,?,?,?,?,?,?,?)`, deviceID, e.EventID, e.ObjectID, e.ObjectType, e.Operation, string(e.Payload), e.EncryptedBundle, e.Version, now)
+		result, err := tx.ExecContext(ctx, `INSERT INTO sync_events(device_id,event_id,object_id,object_type,operation,payload,encrypted_bundle,version,source_version,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, deviceID, e.EventID, e.ObjectID, e.ObjectType, e.Operation, string(e.Payload), e.EncryptedBundle, e.Version, e.SourceVersion, now)
 		if err != nil {
 			return nil, err
 		}
@@ -401,7 +403,7 @@ func (s *Store) Pull(ctx context.Context, deviceID string, after int64, limit in
 	if limit <= 0 || limit > 1000 {
 		limit = 100
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT sequence,device_id,event_id,object_id,object_type,operation,payload,encrypted_bundle,version,created_at FROM sync_events WHERE sequence>? ORDER BY sequence LIMIT ?`, after, limit)
+	rows, err := s.db.QueryContext(ctx, `SELECT sequence,device_id,event_id,object_id,object_type,operation,payload,encrypted_bundle,version,source_version,created_at FROM sync_events WHERE sequence>? ORDER BY sequence LIMIT ?`, after, limit)
 	if err != nil {
 		return nil, after, err
 	}
@@ -411,7 +413,7 @@ func (s *Store) Pull(ctx context.Context, deviceID string, after int64, limit in
 	for rows.Next() {
 		var e Event
 		var payload string
-		if err := rows.Scan(&e.Sequence, &e.DeviceID, &e.EventID, &e.ObjectID, &e.ObjectType, &e.Operation, &payload, &e.EncryptedBundle, &e.Version, &e.CreatedAt); err != nil {
+		if err := rows.Scan(&e.Sequence, &e.DeviceID, &e.EventID, &e.ObjectID, &e.ObjectType, &e.Operation, &payload, &e.EncryptedBundle, &e.Version, &e.SourceVersion, &e.CreatedAt); err != nil {
 			return nil, after, err
 		}
 		if payload != "" {
@@ -536,7 +538,11 @@ func (s *Store) Handler() http.Handler {
 				conflicts = append(conflicts, domain.SyncConflict{Scope: req.Scope, ObjectType: object.Type, ObjectID: object.ID, LocalPayload: object.Payload, RemotePayload: json.RawMessage(currentPayload), LocalVersion: object.BaseVersion, RemoteVersion: strconv.FormatInt(currentVersion, 10)})
 				continue
 			}
-			event := Event{EventID: object.IdempotencyKey, ObjectID: object.ID, ObjectType: object.Type, Operation: object.Operation, Payload: object.Payload, Version: currentVersion + 1}
+			sourceVersion := object.SourceVersion
+			if sourceVersion == "" {
+				sourceVersion = object.RemoteVersion
+			}
+			event := Event{EventID: object.IdempotencyKey, ObjectID: object.ID, ObjectType: object.Type, Operation: object.Operation, Payload: object.Payload, Version: currentVersion + 1, SourceVersion: sourceVersion}
 			if object.Type == "secret_bundle" && object.Operation == "upsert" {
 				if json.Unmarshal(object.Payload, &event.EncryptedBundle) != nil || event.EncryptedBundle == "" {
 					http.Error(w, "secret_bundle requires opaque ciphertext", http.StatusBadRequest)
@@ -578,7 +584,8 @@ func (s *Store) Handler() http.Handler {
 			objects = append(objects, domain.SyncObject{
 				Type: event.ObjectType, ID: event.ObjectID, Operation: event.Operation, Payload: payload,
 				RemoteVersion: strconv.FormatInt(event.Version, 10), IdempotencyKey: event.EventID,
-				EventID: deliveryEventID(event),
+				SourceVersion: event.SourceVersion,
+				EventID:       deliveryEventID(event),
 			})
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"objects": objects, "cursor": strconv.FormatInt(cursor, 10), "has_more": len(events) == limit && limit > 0})

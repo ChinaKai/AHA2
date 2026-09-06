@@ -31,6 +31,7 @@ const (
 	TypeTurn              = "turn"
 	TypeConversation      = "conversation"
 	TypeTaskMemory        = "task_memory"
+	TypeHardware          = "hardware"
 )
 
 type skillPayload struct {
@@ -71,6 +72,16 @@ func ExportBusinessObjectsForDevice(ctx context.Context, database *store.Store, 
 			return nil, err
 		}
 		result = append(result, graph...)
+	}
+	tombstones, err := database.ListSyncTombstones(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, tombstone := range tombstones {
+		result = append(result, domain.SyncObject{
+			Type: tombstone.ObjectType, ID: tombstone.ObjectID, Operation: "delete",
+			RemoteVersion: tombstone.Version, IdempotencyKey: tombstone.SyncKey,
+		})
 	}
 	proposals, err := database.ListKnowledgeProposals(ctx, "", "")
 	if err != nil {
@@ -191,10 +202,17 @@ func RegisterBusinessHandlersForDevice(engine *Engine, database *store.Store, lo
 }
 
 func registerBusinessHandlers(engine *Engine, database *store.Store, localDeviceID string) {
-	for _, kind := range []string{TypeProject, TypeWorkspace, TypeTask, TypeTaskAgent, TypeRound, TypeTurn, TypeConversation, TypeTaskMemory, TypeKnowledgeProposal, TypeKnowledge, TypeSkill, TypeProvider, TypeModel, TypeEnvGroup, TypePromptOverride} {
+	for _, kind := range []string{TypeProject, TypeWorkspace, TypeTask, TypeTaskAgent, TypeRound, TypeTurn, TypeConversation, TypeTaskMemory, TypeHardware, TypeKnowledgeProposal, TypeKnowledge, TypeSkill, TypeProvider, TypeModel, TypeEnvGroup, TypePromptOverride} {
 		objectType := kind
 		engine.Register(objectType, func(ctx context.Context, obj domain.SyncObject) error {
 			if localDeviceID != "" && objectType != TypeProject && isTaskGraphType(objectType) {
+				if obj.Operation == "delete" && (objectType == TypeTask || objectType == TypeWorkspace) {
+					ownerDeviceID, _, _ := strings.Cut(obj.ID, ":")
+					if ownerDeviceID == localDeviceID {
+						return nil
+					}
+					return applyBusinessObject(ctx, database, obj)
+				}
 				var envelope graphEnvelope
 				if err := decodePayload(obj, &envelope); err != nil {
 					return err
@@ -210,7 +228,7 @@ func registerBusinessHandlers(engine *Engine, database *store.Store, localDevice
 
 func isTaskGraphType(kind string) bool {
 	switch kind {
-	case TypeProject, TypeWorkspace, TypeTask, TypeTaskAgent, TypeRound, TypeTurn, TypeConversation, TypeTaskMemory:
+	case TypeProject, TypeWorkspace, TypeTask, TypeTaskAgent, TypeRound, TypeTurn, TypeConversation, TypeTaskMemory, TypeHardware:
 		return true
 	default:
 		return false
@@ -218,18 +236,31 @@ func isTaskGraphType(kind string) bool {
 }
 
 func applyBusinessObject(ctx context.Context, database *store.Store, obj domain.SyncObject) error {
+	if obj.Operation == "delete" && (obj.Type == TypeTask || obj.Type == TypeWorkspace) {
+		return applyTaskGraphObject(ctx, database, obj)
+	}
+	if tombstone, err := database.SyncTombstone(ctx, obj.Type, obj.ID); err == nil {
+		if obj.Operation == "delete" || !sharedVersionNewer(obj.Type, obj.SourceVersion, tombstone.Version) {
+			return nil
+		}
+		if err := database.DeleteSyncTombstone(ctx, obj.Type, obj.ID); err != nil {
+			return err
+		}
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
 	localPayload, localVersion, exists, err := currentBusinessObject(ctx, database, obj.Type, obj.ID)
 	if err != nil {
 		return err
 	}
+	if obj.Operation == "delete" {
+		if exists && obj.SourceVersion != "" && sharedVersionNewer(obj.Type, localVersion, obj.SourceVersion) {
+			return &ConflictError{LocalPayload: localPayload, LocalVersion: localVersion, Cause: fmt.Errorf("%w: older delete for %s %s", ErrConflict, obj.Type, obj.ID)}
+		}
+		return deleteBusinessObject(ctx, database, obj)
+	}
 	if obj.BaseVersion != "" && (!exists || obj.BaseVersion != localVersion) {
 		return &ConflictError{LocalPayload: localPayload, LocalVersion: localVersion, Cause: fmt.Errorf("%w: %s %s version %q does not match %q", ErrConflict, obj.Type, obj.ID, obj.BaseVersion, localVersion)}
-	}
-	if obj.Operation == "delete" {
-		if !exists {
-			return nil
-		}
-		return deleteBusinessObject(ctx, database, obj.Type, obj.ID)
 	}
 	if obj.Operation != "upsert" {
 		return fmt.Errorf("unsupported operation %q", obj.Operation)
@@ -249,7 +280,7 @@ func currentBusinessObject(ctx context.Context, database *store.Store, kind, id 
 		version = timeVersion(v.UpdatedAt)
 	case TypeWorkspace:
 		return nil, "", false, nil
-	case TypeTask, TypeTaskAgent, TypeRound, TypeTurn, TypeConversation, TypeTaskMemory:
+	case TypeTask, TypeTaskAgent, TypeRound, TypeTurn, TypeConversation, TypeTaskMemory, TypeHardware:
 		return nil, "", false, nil
 	case TypeKnowledge:
 		var v domain.KnowledgeEntry
@@ -314,7 +345,7 @@ func currentBusinessObject(ctx context.Context, database *store.Store, kind, id 
 func upsertBusinessObject(ctx context.Context, database *store.Store, obj domain.SyncObject, exists bool) error {
 	now := time.Now().UTC()
 	switch obj.Type {
-	case TypeProject, TypeWorkspace, TypeTask, TypeTaskAgent, TypeRound, TypeTurn, TypeConversation, TypeTaskMemory:
+	case TypeProject, TypeWorkspace, TypeTask, TypeTaskAgent, TypeRound, TypeTurn, TypeConversation, TypeTaskMemory, TypeHardware:
 		return applyTaskGraphObject(ctx, database, obj)
 	case TypeKnowledge:
 		var v domain.KnowledgeEntry
@@ -445,24 +476,24 @@ func upsertBusinessObject(ctx context.Context, database *store.Store, obj domain
 	}
 }
 
-func deleteBusinessObject(ctx context.Context, database *store.Store, kind, id string) error {
-	switch kind {
-	case TypeKnowledge:
-		return database.DeleteKnowledge(ctx, id)
-	case TypeKnowledgeProposal:
-		return database.DeleteKnowledgeProposal(ctx, id)
-	case TypeSkill:
-		return database.DeleteSkill(ctx, id)
-	case TypeProvider:
-		return database.DeleteProvider(ctx, id)
-	case TypeModel:
-		return database.DeleteModel(ctx, id)
-	case TypeEnvGroup:
-		return database.DeleteEnvGroup(ctx, id)
-	case TypePromptOverride:
-		return database.DeletePromptTemplateOverride(ctx, id)
+func deleteBusinessObject(ctx context.Context, database *store.Store, obj domain.SyncObject) error {
+	_, err := database.ApplySyncTombstone(ctx, obj.Type, obj.ID, obj.IdempotencyKey, obj.SourceVersion, time.Now().UTC())
+	return err
+}
+
+func sharedVersionNewer(objectType, candidate, deleted string) bool {
+	if candidate == "" || deleted == "" || deleted == "unknown" {
+		return false
+	}
+	switch objectType {
+	case TypeKnowledge, TypeSkill, TypeEnvGroup, TypePromptOverride:
+		candidateNumber, candidateErr := strconv.ParseInt(candidate, 10, 64)
+		deletedNumber, deletedErr := strconv.ParseInt(deleted, 10, 64)
+		return candidateErr == nil && deletedErr == nil && candidateNumber > deletedNumber
 	default:
-		return fmt.Errorf("unsupported business sync type %q", kind)
+		candidateTime, candidateErr := time.Parse(time.RFC3339Nano, candidate)
+		deletedTime, deletedErr := time.Parse(time.RFC3339Nano, deleted)
+		return candidateErr == nil && deletedErr == nil && candidateTime.After(deletedTime)
 	}
 }
 

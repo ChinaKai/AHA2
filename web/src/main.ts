@@ -329,6 +329,51 @@ function syncTaskBackend(): void {
   syncTaskGitIsolation();
 }
 
+function syncTakeoverTaskBackend(): void {
+  const wsID = String(document.querySelector<HTMLSelectElement>("#takeover-task-workspace")?.value || "");
+  const workspace = state.workspaces.find(item => item.id === wsID);
+  setRuntimeBackends("takeover-task", backendOptionsForWorkspace(workspace));
+  syncRuntimeFields("takeover-task", state.models, state.codexAccounts);
+}
+
+function syncWorkspaceTakeoverFields(): void {
+  const dialog = document.querySelector<HTMLDialogElement>("#workspace-takeover-dialog");
+  const transport = dialog?.querySelector<HTMLSelectElement>('[name="transport"]')?.value || "native";
+  const ssh = dialog?.querySelector<HTMLElement>(".workspace-takeover-ssh");
+  const wsl = dialog?.querySelector<HTMLElement>(".workspace-takeover-wsl");
+  if (ssh) ssh.hidden = transport !== "ssh";
+  if (wsl) wsl.hidden = transport !== "wsl";
+  dialog?.querySelectorAll<HTMLInputElement>('[name="ssh_host"], [name="ssh_user"]').forEach(input => {
+    input.required = transport === "ssh";
+  });
+}
+
+function openWorkspaceTakeoverDialog(workspace: Workspace): void {
+  const dialog = document.querySelector<HTMLDialogElement>("#workspace-takeover-dialog");
+  if (!dialog) return;
+  const set = (name: string, value: string) => {
+    const input = dialog.querySelector<HTMLInputElement | HTMLSelectElement>(`[name="${name}"]`);
+    if (input) input.value = value;
+  };
+  set("source_id", workspace.id);
+  set("name", `${workspace.name} (本机)`);
+  set("transport", workspace.transport || "native");
+  set("root_path", "");
+  set("ssh_host", workspace.ssh_host || "");
+  set("ssh_user", workspace.ssh_user || "");
+  set("ssh_port", String(workspace.ssh_port || 22));
+  set("ssh_auth", workspace.ssh_auth || "auto");
+  set("distro", workspace.distro || "");
+  set("ssh_password", "");
+  const reuse = dialog.querySelector<HTMLInputElement>('[name="reuse_remote_credential"]');
+  if (reuse) {
+    reuse.checked = Boolean(workspace.ssh_password_configured);
+    reuse.closest<HTMLElement>("label")!.hidden = !workspace.ssh_password_configured;
+  }
+  syncWorkspaceTakeoverFields();
+  dialog.showModal();
+}
+
 function defaultTaskWorktreeDir(workspace: Workspace | undefined): string {
   const root = String(workspace?.root_path || "").replace(/[\\/]+$/, "");
   if (!root) return "";
@@ -850,13 +895,13 @@ function projectDetailView(project: Project): string {
     <div class="item-title">${item.locality === "remote" ? icon("server") : icon("monitor")}<div><strong>${escapeHTML(item.name)}</strong><small>${escapeHTML(item.root_path)}</small></div></div>
     <div class="ws-meta"><small>${escapeHTML(item.transport)}${item.distro ? ` · ${escapeHTML(item.distro)}` : ""}</small><strong>${item.read_only ? `只读 · ${escapeHTML(item.owner_device_id || "其他设备")}` : `本机 · ${escapeHTML(item.owner_device_id || "待首次同步绑定")}`}</strong></div>
     ${workspaceBackendInfo(item)}
-    ${item.read_only ? '<span class="status warn">远端只读</span>' : `<button data-detect="${item.id}">${icon("refresh")}检测</button><span class="row-actions"><button type="button" data-edit-workspace="${item.id}" class="icon-button" title="编辑 Workspace">${icon("edit")}</button><button type="button" data-delete-workspace="${item.id}" class="icon-button" title="删除 Workspace">${icon("close")}</button></span>`}
+    ${item.read_only ? `<button type="button" data-takeover-workspace="${item.id}">${icon("copy")}接管到本机</button><span class="status warn">远端只读</span>` : `<button data-detect="${item.id}">${icon("refresh")}检测</button><span class="row-actions"><button type="button" data-edit-workspace="${item.id}" class="icon-button" title="编辑 Workspace">${icon("edit")}</button><button type="button" data-delete-workspace="${item.id}" class="icon-button" title="删除 Workspace">${icon("close")}</button></span>`}
   </article>`).join("");
   return shell(`<section class="page">
     <header class="page-head"><div><button id="back-projects" class="back-link">← 返回项目列表</button><h1>${escapeHTML(project.name)}</h1><p>${projectTypeLabel(project.project_type)}${project.repository_identity ? ` · ${escapeHTML(project.repository_identity)}` : ""}${project.default_branch ? ` · 默认分支 ${escapeHTML(project.default_branch)}` : ""}</p></div><div class="actions"><button data-dialog="workspace">${icon("plus")}添加 Workspace</button><button type="button" data-edit-project-detail="${project.id}" class="icon-button" title="编辑项目">${icon("edit")}</button><button id="delete-project" class="danger">${icon("close")}删除项目</button></div></header>
     <div class="metrics"><div><small>Workspace</small><strong>${workspaces.length}</strong></div><div><small>任务</small><strong>${tasks.length}</strong></div><div><small>Ready</small><strong>${workspaces.filter(item => item.health === "ready").length}</strong></div></div>
     <div class="panel"><div class="panel-head"><strong>Workspaces</strong><span>点击「检测」刷新 Backend 能力</span></div>${rows || `<div class="empty">尚无 Workspace，点击右上角添加。</div>`}</div>
-    ${workspaceDialog()}
+    ${workspaceDialog()}${workspaceTakeoverDialog()}
   </section>`);
 }
 
@@ -903,6 +948,10 @@ function modelDialog(): string {
 
 function editModelDialog(): string {
   return `<dialog id="model-edit-dialog"><div class="dialog-head"><h2>编辑模型</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div><div class="dialog-body"><label>显示名称<input id="model-edit-name"></label><div class="two"><label>协议 / Backend<select id="model-edit-wire"><option value="responses">Codex · Responses</option><option value="chat">Codex · Chat Completions</option><option value="anthropic_messages">Claude Code · Messages</option></select></label><label>默认推理强度<select id="model-edit-effort"><option value="">继承默认</option><option>high</option><option>medium</option><option>low</option></select></label></div><div class="two"><label>Context Window<input id="model-edit-context" type="number" value="0"></label><label>Max Output Tokens<input id="model-edit-maxout" type="number" value="0"></label></div><div class="dialog-actions"><button type="button" data-close>取消</button><button type="button" id="save-model-edit" class="primary">保存</button></div></div></dialog>`;
+}
+
+function workspaceTakeoverDialog(): string {
+  return `<dialog id="workspace-takeover-dialog"><form id="workspace-takeover-form"><div class="dialog-head"><h2>接管只读 Workspace</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div><input type="hidden" name="source_id"><p class="field-help">接管会创建新的本机 Workspace；远端镜像保持只读且不会被修改。</p><label>名称<input name="name" required></label><div class="two"><label>Transport<select name="transport"><option value="native">Native</option><option value="wsl">WSL</option><option value="ssh">SSH</option></select></label><label>本机 Root Path<input name="root_path" required placeholder="必须重新确认本机路径"></label></div><label class="workspace-takeover-wsl">WSL Distro<input name="distro" placeholder="例如 Ubuntu"></label><div class="workspace-takeover-ssh"><div class="two"><label>SSH Host<input name="ssh_host"></label><label>SSH User<input name="ssh_user"></label></div><div class="two"><label>SSH Port<input name="ssh_port" type="number" min="1" max="65535" value="22"></label><label>SSH Auth<select name="ssh_auth"><option value="auto">Auto</option><option value="password">Password</option><option value="key">Key</option></select></label></div><label class="reuse-remote-secret"><input name="reuse_remote_credential" type="checkbox">复用已同步的端到端加密 SSH 凭据</label><label>或输入新密码<input name="ssh_password" type="password" autocomplete="new-password"></label></div><div class="dialog-actions"><button type="button" data-close>取消</button><button class="primary" type="submit">创建本机副本</button></div></form></dialog>`;
 }
 
 const TASK_STATUS_FILTERS = ["active", "waiting_user", "preparing", "queued", "running", "completed", "failed", "blocked"];
@@ -989,6 +1038,14 @@ function slashCommandMenuHtml(value: string): string {
 
 function exactTaskSlashCommand(value: string): typeof TASK_SLASH_COMMANDS[number] | undefined {
   return exactSlashCommand(value, availableTaskSlashCommands());
+}
+
+function taskTakeoverDialog(detail: TaskDetail): string {
+  if (!detail.task.read_only) return "";
+  const workspaces = state.workspaces.filter(item => item.project_id === detail.task.project_id && !item.read_only && Boolean(item.root_path));
+  const hardware = detail.hardware || [];
+  const groups = hardware.map(group => `<fieldset class="takeover-hardware" data-hardware-id="${escapeHTML(group.id)}"><legend>${escapeHTML(group.description || group.id)}</legend><input type="hidden" data-field="id" value="${escapeHTML(group.id)}"><input type="hidden" data-field="description" value="${escapeHTML(group.description || "")}"><input type="hidden" data-field="mode" value="${escapeHTML(group.mode)}"><div class="two"><label>本机串口<input data-field="serial-device" placeholder="${escapeHTML(group.serial?.device || "无需串口")}" ${group.serial?.device ? "required" : ""}></label><label>Baudrate<input data-field="serial-baudrate" type="number" value="${Number(group.serial?.baudrate || 115200)}"></label></div><div class="two"><label>本机网络地址<input data-field="network-host" placeholder="${escapeHTML(group.network?.host || "无需网络")}" ${group.network?.host ? "required" : ""}></label><label>端口<input data-field="network-port" type="number" value="${Number(group.network?.port || 22)}"></label></div><input type="hidden" data-field="network-protocol" value="${escapeHTML(group.network?.protocol || "raw")}"><input type="hidden" data-field="network-ssh-auth" value="${escapeHTML(group.network?.ssh_auth || "auto")}"><label>用户名<input data-field="username" value="${escapeHTML(group.username || "")}"></label>${group.password_configured ? `<label class="reuse-remote-secret"><input data-field="reuse-remote-credential" type="checkbox" checked>复用已同步的端到端加密凭据</label>` : ""}<label>${group.password_configured ? "或输入新密码" : "密码（可选）"}<input data-field="password" type="password" autocomplete="new-password"></label></fieldset>`).join("");
+  return `<dialog id="task-takeover-dialog" class="wide"><form id="task-takeover-form"><div class="dialog-head"><h2>接管只读 Task</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div><p class="field-help">接管会创建新的本机 Task。请重新选择本机 Workspace，并确认所有设备专属路径和端点。</p><label>标题<input name="title" required value="${escapeHTML(detail.task.title)} (本机)"></label><label>需求<textarea name="request" required>${escapeHTML(detail.task.original_request || detail.task.current_goal || detail.task.title)}</textarea></label><label>本机 Workspace<select name="workspace_id" id="takeover-task-workspace" required>${workspaces.map(item => `<option value="${item.id}">${escapeHTML(item.name)} · ${escapeHTML(item.root_path)}</option>`).join("") || '<option value="">请先为此项目创建本机 Workspace</option>'}</select></label>${runtimeFieldsHTML("takeover-task", state.models, state.codexAccounts)}<div class="two"><label>推理强度<select name="reasoning_effort" id="takeover-task-effort"></select></label><label>文件访问<select name="filesystem"><option value="workspace-write">工作区可写</option><option value="read-only">只读</option><option value="danger-full-access">完全访问</option></select></label></div><div class="two"><label>协作模式<select name="collaboration_mode"><option value="auto" ${detail.task.collaboration_mode === "auto" ? "selected" : ""}>Auto</option><option value="single" ${detail.task.collaboration_mode === "single" ? "selected" : ""}>Single</option></select></label><label>最大 Agent 数<input name="max_agents" type="number" min="1" value="${Number(detail.task.max_agents || 3)}"></label></div><label>审批<select name="approval"><option value="never">无需确认</option><option value="auto">自动批准</option></select></label>${groups ? `<section><h3>本机硬件重绑定</h3>${groups}</section>` : ""}<div class="dialog-actions"><button type="button" data-close>取消</button><button class="primary" type="submit" ${workspaces.length ? "" : "disabled"}>创建本机 Task</button></div></form></dialog>`;
 }
 
 function currentAttachmentDrafts(): Attachment[] {
@@ -1137,7 +1194,7 @@ function taskDetailView(detail: TaskDetail): string {
   const workspace = state.workspaces.find(item => item.id === detail.task.workspace_id);
   const taskMeta = `${project?.name || "-"} · ${workspace?.name || "-"} · ${detail.task.collaboration_mode || "auto"} · ${detail.task.max_agents || 3} Agents`;
   const chat = `<section class="conversation">
-    ${remoteReadOnly ? `<div class="task-failure-banner remote-readonly"><strong>其他设备的只读 Task</strong><span>所属设备：${escapeHTML(detail.task.owner_device_id || "未知")}</span><small>可查看同步历史，不能在本机执行或修改</small></div>` : ""}
+    ${remoteReadOnly ? `<div class="task-failure-banner remote-readonly"><strong>其他设备的只读 Task</strong><span>所属设备：${escapeHTML(detail.task.owner_device_id || "未知")}</span><small>可查看同步历史，不能在本机执行或修改</small><button type="button" id="takeover-task">${icon("copy")}接管到本机</button></div>` : ""}
     <div id="task-failure-slot">${taskFailureBannerHtml(detail)}</div>
     <div class="messages" id="conversation-list">${conversationListHtml()}</div>
     <div id="agent-turn-slot">${renderAgentTurnCard(detail, state.taskRealtimeState, state.taskContext?.context.metrics)}</div>
@@ -1149,7 +1206,7 @@ function taskDetailView(detail: TaskDetail): string {
       ${chat}
       ${renderTaskToolPanel(state.taskTool, detail, state.selectedTaskAgent, taskCtxHtml())}
     </div>
-    ${renderAgentConfigDialog(detail, state.selectedTaskAgent, state.models, state.codexAccounts, state.skills)}
+    ${renderAgentConfigDialog(detail, state.selectedTaskAgent, state.models, state.codexAccounts, state.skills)}${taskTakeoverDialog(detail)}
   </section>`);
 }
 
@@ -1307,7 +1364,7 @@ function render(): void {
       })),
       prompts: () => shell(renderPromptAdmin()),
       proxy: () => shell(renderProxySettings(state.proxySettings)),
-      sync: () => shell(renderSyncSettings(state.syncSettings, state.syncState, state.syncPending, state.syncConflicts, state.providers, state.envGroups, state.codexAccounts)),
+      sync: () => shell(renderSyncSettings(state.syncSettings, state.syncState, state.syncPending, state.syncConflicts)),
     };
     content = views[state.view]();
   }
@@ -1369,6 +1426,7 @@ function bindCommon(): void {
     flushDeferredRender,
   });
   bindRuntimeFields("task", state.models, state.codexAccounts, syncTaskGitIsolation);
+  bindRuntimeFields("takeover-task", state.models, state.codexAccounts, syncTakeoverTaskBackend);
   bindRuntimeFields("agent-config", state.models, state.codexAccounts, syncAgentConfigFields);
   document.querySelectorAll<HTMLElement>("[data-view]").forEach(button => button.addEventListener("click", () => {
     state.view = button.dataset.view as View;
@@ -1432,6 +1490,10 @@ function bindCommon(): void {
     const ws = state.workspaces.find(item => item.id === button.dataset.editWorkspace!);
     if (ws) openWorkspaceDialog(ws);
   }));
+  document.querySelectorAll<HTMLElement>("[data-takeover-workspace]").forEach(button => button.addEventListener("click", () => {
+    const workspace = state.workspaces.find(item => item.id === button.dataset.takeoverWorkspace);
+    if (workspace?.read_only) openWorkspaceTakeoverDialog(workspace);
+  }));
   document.querySelectorAll<HTMLElement>("[data-edit-provider]").forEach(button => button.addEventListener("click", () => {
     const provider = state.providers.find(item => item.id === button.dataset.editProvider!);
     if (provider) openProviderDialog(provider);
@@ -1440,6 +1502,7 @@ function bindCommon(): void {
   document.querySelector<HTMLSelectElement>("#ws-locality")?.addEventListener("change", syncWorkspaceFields);
   document.querySelector<HTMLSelectElement>("#ws-transport")?.addEventListener("change", syncWorkspaceFields);
   document.querySelector<HTMLSelectElement>('[name="ssh_auth"]')?.addEventListener("change", syncWorkspaceFields);
+  document.querySelector<HTMLSelectElement>('#workspace-takeover-dialog [name="transport"]')?.addEventListener("change", syncWorkspaceTakeoverFields);
   document.querySelector<HTMLInputElement>('[name="clear_ssh_password"]')?.addEventListener("change", syncWorkspaceFields);
   document.querySelector("#provider-preset")?.addEventListener("change", applyProviderPreset);
   document.querySelectorAll<HTMLElement>("[data-close]").forEach(button => button.addEventListener("click", () => {
@@ -1739,6 +1802,11 @@ function bindCommon(): void {
     if (worktreeDir) worktreeDir.value = "";
     syncTaskBackend();
   });
+  document.querySelector("#takeover-task-workspace")?.addEventListener("change", syncTakeoverTaskBackend);
+  document.querySelector("#takeover-task")?.addEventListener("click", () => {
+    syncTakeoverTaskBackend();
+    document.querySelector<HTMLDialogElement>("#task-takeover-dialog")?.showModal();
+  });
   document.querySelector("#task-isolation")?.addEventListener("change", syncTaskGitIsolation);
   bindForm("#task-form", async form => {
     const payload = Object.fromEntries(form.entries()) as Record<string, string>;
@@ -1804,6 +1872,38 @@ function bindCommon(): void {
     closeEvents();
     render();
   });
+  document.querySelector<HTMLFormElement>("#task-takeover-form")?.addEventListener("submit", event => {
+    event.preventDefault();
+    if (!state.selectedTask?.task.read_only) return;
+    const element = event.currentTarget;
+    const form = new FormData(element);
+    const groups = [...element.querySelectorAll<HTMLElement>(".takeover-hardware")].map(group => {
+      const value = (name: string) => group.querySelector<HTMLInputElement>(`[data-field="${name}"]`)?.value || "";
+      const checked = (name: string) => Boolean(group.querySelector<HTMLInputElement>(`[data-field="${name}"]`)?.checked);
+      return {
+        id: value("id"), description: value("description"), mode: value("mode"),
+        serial: {device: value("serial-device"), baudrate: Number(value("serial-baudrate") || 115200)},
+        network: {host: value("network-host"), port: Number(value("network-port") || 0), protocol: value("network-protocol"), ssh_auth: value("network-ssh-auth")},
+        username: value("username"), password: value("password"), reuse_remote_credential: checked("reuse-remote-credential"), access: "read_write",
+      };
+    });
+    const taskID = state.selectedTask.task.id;
+    const button = element.querySelector<HTMLElement>('button[type="submit"]');
+    void runWithFeedback(button, "接管中", async () => {
+      const result = await api.takeoverTask(taskID, {
+        workspace_id: String(form.get("workspace_id") || ""), title: String(form.get("title") || ""), request: String(form.get("request") || ""),
+        backend: String(form.get("backend") || ""), model_source: String(form.get("model_source") || "env"), model_id: String(form.get("model_id") || ""),
+        wire_model: String(form.get("wire_model") || ""), codex_account_id: String(form.get("codex_account_id") || ""), reasoning_effort: String(form.get("reasoning_effort") || "medium"),
+        filesystem: String(form.get("filesystem") || "workspace-write"), approval: String(form.get("approval") || "never"), collaboration_mode: String(form.get("collaboration_mode") || "auto"),
+        max_agents: Number(form.get("max_agents") || 3), groups,
+      });
+      element.closest<HTMLDialogElement>("dialog")?.close();
+      setMessage("notice", "已创建可编辑的本机 Task，远端 Task 保持只读");
+      await loadAll();
+      await openTask(result.task.id);
+      render();
+    });
+  });
   document.querySelector<HTMLButtonElement>("#message-attachment-pick")?.addEventListener("click", () => {
     document.querySelector<HTMLInputElement>("#message-attachment-input")?.click();
   });
@@ -1833,6 +1933,26 @@ function bindCommon(): void {
     } finally {
       input.value = "";
     }
+  });
+  document.querySelector<HTMLFormElement>("#workspace-takeover-form")?.addEventListener("submit", event => {
+    event.preventDefault();
+    const element = event.currentTarget;
+    const form = new FormData(element);
+    const sourceID = String(form.get("source_id") || "");
+    const button = element.querySelector<HTMLElement>('button[type="submit"]');
+    void runWithFeedback(button, "接管中", async () => {
+      await api.takeoverWorkspace(sourceID, {
+        name: String(form.get("name") || ""), locality: String(form.get("transport")) === "ssh" ? "remote" : "local", transport: String(form.get("transport") || "native"),
+        root_path: String(form.get("root_path") || ""), ssh_host: String(form.get("ssh_host") || ""),
+        ssh_user: String(form.get("ssh_user") || ""), ssh_port: Number(form.get("ssh_port") || 22),
+        ssh_auth: String(form.get("ssh_auth") || "auto"), ssh_password: String(form.get("ssh_password") || ""),
+        distro: String(form.get("distro") || ""), reuse_remote_credential: form.get("reuse_remote_credential") === "on",
+      });
+      element.closest<HTMLDialogElement>("dialog")?.close();
+      setMessage("notice", "已创建本机 Workspace，远端镜像保持只读");
+      await loadAll();
+      render();
+    });
   });
   document.querySelectorAll<HTMLButtonElement>("[data-remove-attachment]").forEach(button => button.addEventListener("click", async () => {
     if (!state.selectedTask) return;

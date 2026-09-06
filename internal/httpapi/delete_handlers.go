@@ -28,7 +28,7 @@ func (s *Server) deleteTask(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 	s.cleanupTaskHardware(request.Context(), id)
-	if err := s.store.DeleteTask(request.Context(), id); err != nil {
+	if err := s.store.DeleteTaskWithSyncTombstone(request.Context(), id); err != nil {
 		writeError(writer, http.StatusInternalServerError, "delete_task_failed")
 		return
 	}
@@ -76,12 +76,12 @@ func (s *Server) deleteWorkspace(writer http.ResponseWriter, request *http.Reque
 			continue
 		}
 		s.cleanupTaskHardware(request.Context(), task.ID)
-		_ = s.store.DeleteTask(request.Context(), task.ID)
+		_ = s.store.DeleteTaskWithSyncTombstone(request.Context(), task.ID)
 		if task.RuntimeConfigSnapshotID != "" {
 			_ = s.store.DeleteRuntimeSnapshot(request.Context(), task.RuntimeConfigSnapshotID)
 		}
 	}
-	if err := s.store.DeleteWorkspace(request.Context(), id); err != nil {
+	if err := s.store.DeleteWorkspaceWithSyncTombstone(request.Context(), id); err != nil {
 		writeError(writer, http.StatusInternalServerError, "delete_workspace_failed")
 		return
 	}
@@ -122,7 +122,7 @@ func (s *Server) deleteProject(writer http.ResponseWriter, request *http.Request
 			continue
 		}
 		s.cleanupTaskHardware(request.Context(), task.ID)
-		_ = s.store.DeleteTask(request.Context(), task.ID)
+		_ = s.store.DeleteTaskWithSyncTombstone(request.Context(), task.ID)
 		if task.RuntimeConfigSnapshotID != "" {
 			_ = s.store.DeleteRuntimeSnapshot(request.Context(), task.RuntimeConfigSnapshotID)
 		}
@@ -130,7 +130,11 @@ func (s *Server) deleteProject(writer http.ResponseWriter, request *http.Request
 	workspaces, _ := s.store.ListWorkspaces(request.Context(), "")
 	for _, workspace := range workspaces {
 		if workspace.ProjectID == id {
-			_ = s.store.DeleteWorkspace(request.Context(), workspace.ID)
+			if workspace.ReadOnly {
+				_ = s.store.DeleteWorkspace(request.Context(), workspace.ID)
+			} else {
+				_ = s.store.DeleteWorkspaceWithSyncTombstone(request.Context(), workspace.ID)
+			}
 			s.cleanupWorkspaceSecret(workspace)
 		}
 	}

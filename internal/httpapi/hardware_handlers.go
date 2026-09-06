@@ -16,15 +16,16 @@ import (
 var hardwareIDInvalid = regexp.MustCompile(`[^a-z0-9_-]+`)
 
 type hardwareGroupPayload struct {
-	ID          string                       `json:"id"`
-	Description string                       `json:"description"`
-	Mode        string                       `json:"mode"`
-	Serial      domain.HardwareSerialConfig  `json:"serial"`
-	Network     domain.HardwareNetworkConfig `json:"network"`
-	Username    string                       `json:"username"`
-	Password    string                       `json:"password"`
-	ClearSecret bool                         `json:"clear_password"`
-	Access      string                       `json:"access"`
+	ID                    string                       `json:"id"`
+	Description           string                       `json:"description"`
+	Mode                  string                       `json:"mode"`
+	Serial                domain.HardwareSerialConfig  `json:"serial"`
+	Network               domain.HardwareNetworkConfig `json:"network"`
+	Username              string                       `json:"username"`
+	Password              string                       `json:"password"`
+	ReuseRemoteCredential bool                         `json:"reuse_remote_credential"`
+	ClearSecret           bool                         `json:"clear_password"`
+	Access                string                       `json:"access"`
 }
 
 func (s *Server) hardwareSerialPorts(writer http.ResponseWriter, _ *http.Request) {
@@ -38,6 +39,10 @@ func (s *Server) hardwareSerialPorts(writer http.ResponseWriter, _ *http.Request
 func (s *Server) taskHardware(writer http.ResponseWriter, request *http.Request) {
 	taskID := request.PathValue("id")
 	if _, err := s.store.Task(request.Context(), taskID); err != nil {
+		if mirror, mirrorErr := s.store.RemoteTaskMirror(request.Context(), taskID); mirrorErr == nil {
+			writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "groups": mirror.Hardware, "read_only": true})
+			return
+		}
 		writeError(writer, http.StatusNotFound, "task_not_found")
 		return
 	}
@@ -52,6 +57,10 @@ func (s *Server) taskHardware(writer http.ResponseWriter, request *http.Request)
 func (s *Server) updateTaskHardware(writer http.ResponseWriter, request *http.Request) {
 	taskID := request.PathValue("id")
 	if _, err := s.store.Task(request.Context(), taskID); err != nil {
+		if _, mirrorErr := s.store.RemoteTaskMirror(request.Context(), taskID); mirrorErr == nil {
+			writeJSON(writer, http.StatusForbidden, map[string]any{"ok": false, "error": "hardware_read_only", "message": "远端 Task 硬件配置只能查看，请先显式接管"})
+			return
+		}
 		writeError(writer, http.StatusNotFound, "task_not_found")
 		return
 	}
@@ -269,6 +278,10 @@ func (s *Server) hardwareTarget(
 	hardwareID := request.PathValue("hardware")
 	task, err := s.store.Task(request.Context(), taskID)
 	if err != nil {
+		if _, mirrorErr := s.store.RemoteTaskMirror(request.Context(), taskID); mirrorErr == nil {
+			writeJSON(writer, http.StatusForbidden, map[string]any{"ok": false, "error": "hardware_read_only", "message": "远端 Task 硬件配置不能连接、登录或发送，请先显式接管"})
+			return domain.Task{}, domain.HardwareGroup{}, "", true, false
+		}
 		writeError(writer, http.StatusNotFound, "task_not_found")
 		return domain.Task{}, domain.HardwareGroup{}, "", false, false
 	}

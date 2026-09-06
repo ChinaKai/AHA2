@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"strings"
 )
 
 const schemaV31 = `
@@ -65,6 +66,19 @@ WHERE owner_device_id=COALESCE((SELECT device_id FROM sync_settings WHERE scope=
 DELETE FROM workspaces
 WHERE read_only=1
   AND owner_device_id=COALESCE((SELECT device_id FROM sync_settings WHERE scope='default'),'');
+`
+
+const schemaV37 = `
+CREATE TABLE IF NOT EXISTS sync_tombstones (
+    object_type TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    version TEXT NOT NULL,
+    sync_key TEXT NOT NULL UNIQUE,
+    deleted_at TEXT NOT NULL,
+    PRIMARY KEY(object_type,object_id)
+);
+CREATE INDEX IF NOT EXISTS idx_sync_tombstones_deleted
+ON sync_tombstones(deleted_at,object_type,object_id);
 `
 
 const schemaV27 = `
@@ -1244,6 +1258,19 @@ func (s *Store) migrate(ctx context.Context) error {
 	}
 	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(36, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
 		return fmt.Errorf("record schema v36: %w", err)
+	}
+	var hasV37 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=37)`).Scan(&hasV37)
+	if !hasV37 {
+		if _, err := s.db.ExecContext(ctx, schemaV37); err != nil {
+			return fmt.Errorf("apply schema v37: %w", err)
+		}
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE sync_outbox ADD COLUMN source_version TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("apply schema v37 outbox source version: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(37, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v37: %w", err)
 	}
 	return nil
 }
