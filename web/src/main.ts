@@ -6,7 +6,7 @@ import {bindKnowledgeWorkspace, renderKnowledgeWorkspace} from "./knowledge_work
 import {bindHardwarePanel, stopHardwarePanel} from "./hardware_panel.js";
 import {bindPromptAdmin, loadPromptCatalog, renderPromptAdmin} from "./prompt_admin.js";
 import {bindProxySettings, renderProxySettings} from "./proxy_settings.js";
-import {bindSyncSettings, renderSyncSettings} from "./sync_settings.js";
+import {bindSyncSettings, isSyncSettingsFormEditing, renderSyncSettings} from "./sync_settings.js";
 import {bindRuntimeFields, runtimeFieldsHTML, setRuntimeBackends, syncRuntimeFields} from "./runtime_picker.js";
 import {renderComposerAgentOptions, renderComposerTools} from "./task_composer.js";
 import {renderTaskToolButtons, renderTaskToolContent, renderTaskToolPanel} from "./task_tools.js";
@@ -1267,6 +1267,10 @@ function render(): void {
     state.renderPending = true;
     return;
   }
+  if (state.view === "sync" && isSyncSettingsFormEditing(document.querySelector<HTMLFormElement>("#sync-settings-form"), document.activeElement)) {
+    state.renderPending = true;
+    return;
+  }
   persistNavigationState();
   if (document.activeElement instanceof HTMLTextAreaElement && document.activeElement.closest("#message-form")) {
     state.renderPending = true;
@@ -1361,6 +1365,7 @@ function bindCommon(): void {
       render();
     },
     setMessage,
+    flushDeferredRender,
   });
   bindRuntimeFields("task", state.models, state.codexAccounts, syncTaskGitIsolation);
   bindRuntimeFields("agent-config", state.models, state.codexAccounts, syncAgentConfigFields);
@@ -2172,6 +2177,7 @@ function closeEvents(): void {
 function flushDeferredRender(): void {
   if (!state.renderPending || document.querySelector("dialog[open]")) return;
   if (document.activeElement instanceof HTMLTextAreaElement && document.activeElement.closest("#message-form")) return;
+  if (state.view === "sync" && isSyncSettingsFormEditing(document.querySelector<HTMLFormElement>("#sync-settings-form"), document.activeElement)) return;
   render();
 }
 

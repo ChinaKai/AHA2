@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
@@ -68,6 +69,7 @@ func ExportBusinessObjectsForDevice(ctx context.Context, database *store.Store, 
 		if err := add(TypeKnowledge, v.ID, strconv.Itoa(v.Revision), v); err != nil {
 			return nil, err
 		}
+		result[len(result)-1].IdempotencyKey = fmt.Sprintf("knowledge:v2:%s:%d:%s:%s", v.ID, v.Revision, v.Scope, v.ProjectID)
 	}
 	skills, err := database.ListSkills(ctx, "", "", false)
 	if err != nil {
@@ -234,11 +236,26 @@ func upsertBusinessObject(ctx context.Context, database *store.Store, obj domain
 			return err
 		}
 		v.ID = obj.ID
+		v.Scope = strings.TrimSpace(v.Scope)
+		v.ProjectID = strings.TrimSpace(v.ProjectID)
 		if v.ProjectID != "" {
 			if _, err := database.Project(ctx, v.ProjectID); err != nil {
 				return fmt.Errorf("knowledge project dependency %s: %w", v.ProjectID, err)
 			}
 			v.Scope = "project"
+		} else {
+			switch v.Scope {
+			case "global":
+			case "", "project":
+				// Legacy profile-sync payloads removed ProjectID without changing Scope.
+				// They were historically intended to be portable global fallbacks.
+				v.Scope = "global"
+				v.ParentID = ""
+				v.ProductLineID = ""
+				v.BranchScope = ""
+			default:
+				return fmt.Errorf("%w: synced knowledge scope %q", store.ErrKnowledgeInvalidScope, v.Scope)
+			}
 		}
 		v.SourceTaskID = ""
 		v.SourceTurnID = ""

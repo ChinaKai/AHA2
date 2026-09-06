@@ -86,6 +86,9 @@ func TestBusinessExportStripsLocalAndSecretFields(t *testing.T) {
 		if obj.BaseVersion != "" {
 			t.Fatalf("initial export has base version")
 		}
+		if obj.Type == TypeKnowledge && !strings.HasPrefix(obj.IdempotencyKey, "knowledge:v2:") {
+			t.Fatalf("knowledge export retained legacy idempotency key: %q", obj.IdempotencyKey)
+		}
 		if obj.Type == TypeSkill {
 			if err := json.Unmarshal(obj.Payload, &full); err != nil {
 				t.Fatal(err)
@@ -94,6 +97,37 @@ func TestBusinessExportStripsLocalAndSecretFields(t *testing.T) {
 	}
 	if len(full.Files) != 2 {
 		t.Fatalf("skill files=%d", len(full.Files))
+	}
+}
+
+func TestApplyLegacyProjectKnowledgeWithoutProjectIDAsGlobalFallback(t *testing.T) {
+	ctx, db, now := context.Background(), businessStore(t), time.Now().UTC()
+	legacy := domain.KnowledgeEntry{
+		ID: "legacy-project-knowledge", Scope: "project", ProjectID: "", ParentID: "missing-project-root",
+		Type: "practice", Title: "Legacy", Body: "portable fallback", Status: domain.KnowledgeVerified,
+		ProductLineID: "legacy-line", BranchScope: "release/*", Revision: 1, CreatedAt: now, UpdatedAt: now,
+	}
+	raw, _ := json.Marshal(legacy)
+	if err := applyBusinessObject(ctx, db, domain.SyncObject{Type: TypeKnowledge, ID: legacy.ID, Operation: "upsert", Payload: raw}); err != nil {
+		t.Fatalf("legacy project knowledge failed first-device apply: %v", err)
+	}
+	got, err := db.Knowledge(ctx, legacy.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	globalRoot, err := db.EnsureKnowledgeRoot(ctx, "global", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Scope != "global" || got.ProjectID != "" || got.ParentID != globalRoot.ID || got.ProductLineID != "" || got.BranchScope != "" {
+		t.Fatalf("legacy fallback was not normalized safely: %#v", got)
+	}
+
+	legacy.ID, legacy.Scope, legacy.ParentID = "invalid-scope", "team", ""
+	raw, _ = json.Marshal(legacy)
+	err = applyBusinessObject(ctx, db, domain.SyncObject{Type: TypeKnowledge, ID: legacy.ID, Operation: "upsert", Payload: raw})
+	if !errors.Is(err, store.ErrKnowledgeInvalidScope) {
+		t.Fatalf("invalid non-legacy scope was accepted: %v", err)
 	}
 }
 

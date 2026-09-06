@@ -687,7 +687,7 @@ func agentAPIResource(baseURL string) string {
 The AHA2 control plane exposes a Task-scoped API at %s.
 Use the value of environment variable AHA2_AGENT_API_TOKEN as a Bearer token. Never print, persist, or include that token in a response. The capability expires when this Turn finishes.
 
-Send JSON with Content-Type: application/json. The final assistant response must be natural language only; never append a checkpoint.
+Send UTF-8 encoded JSON with Content-Type: application/json; charset=utf-8. Windows PowerShell 5.1 must pass UTF-8 bytes (for example, [Text.Encoding]::UTF8.GetBytes($json)) instead of a raw string body, otherwise non-ASCII text can be irreversibly replaced by question marks. The final assistant response must be natural language only; never append a checkpoint.
 
 ## Turn state
 

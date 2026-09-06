@@ -43,6 +43,14 @@ function imagePreviewDialog(): string {
   return `<dialog id="image-preview-dialog" class="image-preview-dialog"><header><strong data-image-preview-title>图片预览</strong><div><a class="primary image-preview-download" data-image-preview-download download>${icon("attachment")}下载</a><button type="button" class="icon-button" data-image-preview-close aria-label="关闭">${icon("close")}</button></div></header><div class="image-preview-stage"><img data-image-preview-image alt=""></div></dialog>`;
 }
 
+export function readableConversationText(item: Pick<ConversationItem, "category" | "summary">): string {
+  const text = visibleAgentText(item.summary);
+  if (item.category === "update" && /\?{6,}/.test(text)) {
+    return "该历史进度消息在旧版中发生编码损坏，原文无法恢复。";
+  }
+  return text;
+}
+
 function renderConversationItem(item: ConversationItem): string {
   const time = messageTime(item.created_at);
   const routeKind = item.route_kind || "";
@@ -53,7 +61,7 @@ function renderConversationItem(item: ConversationItem): string {
   const error = !user && item.category === "error";
   const sender = item.from_agent_id || item.agent_id || (user ? "owner" : "main");
   const badge = error ? "错误" : tool ? "工具" : routed ? "路由" : update ? "Update" : "";
-  const text = visibleAgentText(item.summary);
+  const text = readableConversationText(item);
   const characters = Array.from(text);
   const characterCount = characters.length;
   const collapsible = characterCount > messageCollapseChars;

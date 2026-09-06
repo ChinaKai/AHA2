@@ -64,15 +64,39 @@ export function syncSettingsPayload(settings: SyncSettings, form: Pick<FormData,
   return {enabled: form.get("enabled") === "on", endpoint: String(form.get("endpoint") || ""), device_id: settings.device_id, device_name: String(form.get("device_name") || ""), interval_seconds: Number(form.get("interval_seconds") || 300), registration_code: String(form.get("registration_code") || ""), passphrase: String(form.get("passphrase") || ""), clear_passphrase: form.get("clear_passphrase") === "on", provider_ids: form.getAll("provider_ids").map(String), env_group_ids: form.getAll("env_group_ids").map(String), codex_account_ids: form.getAll("codex_account_ids").map(String)};
 }
 
-export function bindSyncSettings(options: {settings: SyncSettings; refresh: () => Promise<void>; setMessage: (kind: "error" | "notice", message: string) => void; updateSettings?: (payload: Record<string, unknown>) => Promise<unknown>}): void {
-  document.querySelector<HTMLFormElement>("#sync-settings-form")?.addEventListener("submit", event => {
+interface SyncSettingsFormState {
+  dataset?: {syncDirty?: string};
+  contains?: (node: Node | null) => boolean;
+}
+
+export function isSyncSettingsFormEditing(form: SyncSettingsFormState | null, activeElement: Node | null): boolean {
+  if (!form) return false;
+  return form.dataset?.syncDirty === "true" || Boolean(activeElement && form.contains?.(activeElement));
+}
+
+export function bindSyncSettings(options: {settings: SyncSettings; refresh: () => Promise<void>; setMessage: (kind: "error" | "notice", message: string) => void; updateSettings?: (payload: Record<string, unknown>) => Promise<unknown>; flushDeferredRender?: () => void}): void {
+  const settingsForm = document.querySelector<HTMLFormElement>("#sync-settings-form");
+  settingsForm?.addEventListener("input", () => { settingsForm.dataset.syncDirty = "true"; });
+  settingsForm?.addEventListener("change", () => { settingsForm.dataset.syncDirty = "true"; });
+  settingsForm?.addEventListener("focusout", () => {
+    window.setTimeout(() => {
+      if (!isSyncSettingsFormEditing(settingsForm, document.activeElement)) options.flushDeferredRender?.();
+    }, 0);
+  });
+  settingsForm?.addEventListener("submit", event => {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     const button = event.currentTarget.querySelector<HTMLButtonElement>('button[type="submit"]');
     if (button) button.disabled = true;
     const payload = syncSettingsPayload(options.settings, form);
     const updateSettings = options.updateSettings || (value => api.updateSyncSettings(value));
-    void updateSettings(payload).then(async () => { options.setMessage("notice", "同步设置已保存"); await options.refresh(); }).catch(error => options.setMessage("error", error instanceof Error ? error.message : String(error))).finally(() => { if (button) button.disabled = false; });
+    void updateSettings(payload).then(async () => {
+      settingsForm.dataset.syncDirty = "false";
+      const activeElement = document.activeElement as HTMLElement | null;
+      if (activeElement && settingsForm.contains(activeElement)) activeElement.blur();
+      options.setMessage("notice", "同步设置已保存");
+      await options.refresh();
+    }).catch(error => options.setMessage("error", error instanceof Error ? error.message : String(error))).finally(() => { if (button) button.disabled = false; });
   });
   document.querySelector<HTMLButtonElement>("#run-sync")?.addEventListener("click", event => {
     const button = event.currentTarget;

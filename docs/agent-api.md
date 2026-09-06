@@ -16,6 +16,16 @@ Agent API 让本地、WSL 和 SSH Workspace 中的 Agent 通过 HTTP 使用 AHA2
 Authorization: Bearer <AHA2_AGENT_API_TOKEN>
 ```
 
+JSON 请求必须使用 UTF-8，并发送 `Content-Type: application/json; charset=utf-8`。
+Windows PowerShell 5.1 不应直接把含中文的字符串作为 `-Body`，应显式发送 UTF-8 字节，
+否则中文可能在请求发出前被永久替换成问号：
+
+```powershell
+$json = $payload | ConvertTo-Json -Depth 6
+$body = [Text.Encoding]::UTF8.GetBytes($json)
+Invoke-RestMethod -ContentType 'application/json; charset=utf-8' -Body $body
+```
+
 ## Turn 状态
 
 ```text

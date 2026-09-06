@@ -90,7 +90,7 @@ func TestEngineRoutesTemplatesAndBuildsContextManifest(t *testing.T) {
 		strings.Contains(preview.EffectivePrompt, "fact one") {
 		t.Fatal("task memory was injected inline")
 	}
-	var globalIndexFound, projectIndexFound, projectNavigationIndexFound, staleIndexFound, staleDetailFound, knowledgeDetailFound, nestedDetailFound, projectDetailFound, navigationDetailFound, nestedNavigationDetailFound, attachmentIndexFound, attachmentFileFound, skillDetailFound, skillScriptFound, hardwareFound bool
+	var globalIndexFound, projectIndexFound, projectNavigationIndexFound, staleIndexFound, staleDetailFound, knowledgeDetailFound, nestedDetailFound, projectDetailFound, navigationDetailFound, nestedNavigationDetailFound, attachmentIndexFound, attachmentFileFound, skillDetailFound, skillScriptFound, hardwareFound, agentAPIUTF8Found bool
 	knowledgeEntryPoints := 0
 	var manifest ContextResource
 	for _, resource := range preview.ContextManifest {
@@ -150,6 +150,9 @@ func TestEngineRoutesTemplatesAndBuildsContextManifest(t *testing.T) {
 			!strings.Contains(resource.Content, "credential") {
 			hardwareFound = true
 		}
+		if resource.ID == "agent-api" && strings.Contains(resource.Content, "application/json; charset=utf-8") && strings.Contains(resource.Content, "UTF8.GetBytes") {
+			agentAPIUTF8Found = true
+		}
 	}
 	if !globalIndexFound || !projectIndexFound || !projectNavigationIndexFound || !staleIndexFound || !staleDetailFound || !knowledgeDetailFound || !nestedDetailFound || !projectDetailFound || !navigationDetailFound || !nestedNavigationDetailFound || knowledgeEntryPoints != 4 {
 		t.Fatalf("knowledge hierarchy missing: global=%t project=%t navigation=%t stale_index=%t stale_detail=%t detail=%t nested=%t project_detail=%t navigation_detail=%t nested_navigation=%t entrypoints=%d", globalIndexFound, projectIndexFound, projectNavigationIndexFound, staleIndexFound, staleDetailFound, knowledgeDetailFound, nestedDetailFound, projectDetailFound, navigationDetailFound, nestedNavigationDetailFound, knowledgeEntryPoints)
@@ -162,6 +165,9 @@ func TestEngineRoutesTemplatesAndBuildsContextManifest(t *testing.T) {
 	}
 	if !hardwareFound {
 		t.Fatal("sanitized hardware resource missing")
+	}
+	if !agentAPIUTF8Found {
+		t.Fatal("Agent API resource is missing the PowerShell UTF-8 request contract")
 	}
 	var memoryFound bool
 	for _, resource := range preview.ContextManifest {

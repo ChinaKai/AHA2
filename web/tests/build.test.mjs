@@ -246,6 +246,11 @@ test("built web contains responsive application", async () => {
   assert.doesNotMatch(script, /data-task-action="delete"/);
   assert.match(script, /requestAnimationFrame\(runTaskClock\)/);
   assert.match(script, /composer-focused/);
+  assert.match(css, /--mobile-bottom-nav-height:\s*calc\(62px \+ env\(safe-area-inset-bottom\)\)/);
+  assert.match(css, /\.task-screen \{[^}]*height:\s*calc\(var\(--visual-viewport-height\) - var\(--mobile-bottom-nav-height\)\)/);
+  assert.match(css, /\.bottom-nav \{[^}]*height:\s*var\(--mobile-bottom-nav-height\)/);
+  assert.match(script, /isSyncSettingsFormEditing/);
+  assert.match(script, /state\.view === "sync"[\s\S]{0,250}state\.renderPending = true/);
   assert.match(script, /visualViewport/);
   assert.match(script, /task-view-active/);
   assert.match(api, /cache: "no-store"/);
@@ -473,6 +478,17 @@ test("conversation renders agent config and turn duration cards", async () => {
   assert.match(html, /5s/);
 });
 
+test("conversation replaces irrecoverable legacy progress mojibake", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const {renderConversationList} = await import(pathToFileURL(resolve(root, "dist", "conversation_ui.js")));
+  const html = renderConversationList([{
+    id: "broken-update", task_id: "task-1", agent_id: "main", category: "update", kind: "agent_progress",
+    summary: "???????????? v0.4.3 ??????", created_at: "2026-09-06T09:00:00Z",
+  }], null, false);
+  assert.match(html, /该历史进度消息在旧版中发生编码损坏，原文无法恢复/);
+  assert.doesNotMatch(html, /\?{6,}/);
+});
+
 test("hardware terminal accepts WebView Blob binary frames", async () => {
   const root = resolve(import.meta.dirname, "..");
   const {terminalFrameBytes} = await import(pathToFileURL(resolve(root, "dist", "hardware_terminal.js")));
@@ -604,7 +620,7 @@ test("knowledge proposals keep three approval actions on one mobile row", async 
 
 test("sync settings use the five domain groups", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const {bindSyncSettings, renderSyncSettings, syncSettingsPayload} = await import(pathToFileURL(resolve(root, "dist", "sync_settings.js")));
+  const {bindSyncSettings, isSyncSettingsFormEditing, renderSyncSettings, syncSettingsPayload} = await import(pathToFileURL(resolve(root, "dist", "sync_settings.js")));
   const html = renderSyncSettings({scope: "default", enabled: false, endpoint: "", device_id: "", device_name: "device", interval_seconds: 300, token_configured: false, passphrase_configured: false}, {scope: "default", cursor: "", last_error: ""}, 0, [], [], [], []);
   assert.match(html, /sync-domain-grid/);
   for (const label of ["项目", "任务", "知识库", "模型", "代理"]) assert.match(html, new RegExp(label));
@@ -618,11 +634,17 @@ test("sync settings use the five domain groups", async () => {
   );
   assert.deepEqual(payload, {enabled: true, endpoint: "https://sync.example.com", device_id: "dev_existing", device_name: "Laptop", interval_seconds: 60, registration_code: "one-time-code", passphrase: "long-passphrase", clear_passphrase: false, provider_ids: ["provider-one"], env_group_ids: ["env-one"], codex_account_ids: ["account-one"]});
 
-  let submit;
+  const editingForm = {dataset: {syncDirty: "true"}, contains: node => node === "sync-field"};
+  assert.equal(isSyncSettingsFormEditing(editingForm, null), true);
+  editingForm.dataset.syncDirty = "false";
+  assert.equal(isSyncSettingsFormEditing(editingForm, "sync-field"), true);
+  assert.equal(isSyncSettingsFormEditing(editingForm, "outside"), false);
+
+  const handlers = {};
   let saved;
   let refreshed = false;
   const button = {disabled: false};
-  const formElement = {addEventListener: (_type, handler) => { submit = handler; }, querySelector: () => button};
+  const formElement = {dataset: {}, contains: () => false, addEventListener: (type, handler) => { handlers[type] = handler; }, querySelector: () => button};
   const originalDocument = globalThis.document;
   const OriginalFormData = globalThis.FormData;
   globalThis.document = {querySelector: selector => selector === "#sync-settings-form" ? formElement : null};
@@ -634,11 +656,14 @@ test("sync settings use the five domain groups", async () => {
       refresh: async () => { refreshed = true; },
       setMessage: () => {},
     });
-    submit({preventDefault: () => {}, currentTarget: formElement});
+    handlers.input();
+    assert.equal(formElement.dataset.syncDirty, "true");
+    handlers.submit({preventDefault: () => {}, currentTarget: formElement});
     await new Promise(resolve => setImmediate(resolve));
     assert.equal(saved.device_id, "dev_bound");
     assert.equal(refreshed, true);
     assert.equal(button.disabled, false);
+    assert.equal(formElement.dataset.syncDirty, "false");
   } finally {
     if (originalDocument === undefined) delete globalThis.document; else globalThis.document = originalDocument;
     globalThis.FormData = OriginalFormData;
