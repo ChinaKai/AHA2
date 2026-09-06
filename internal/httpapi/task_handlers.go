@@ -208,7 +208,7 @@ func (s *Server) taskDetail(writer http.ResponseWriter, request *http.Request) {
 	taskID := request.PathValue("id")
 	task, err := s.store.Task(request.Context(), taskID)
 	if err != nil {
-		mirror, mirrorErr := s.store.RemoteTaskMirror(request.Context(), taskID)
+		mirror, mirrorErr := s.store.RemoteTaskDetailMirror(request.Context(), taskID)
 		if mirrorErr != nil {
 			writeError(writer, http.StatusNotFound, "task_not_found")
 			return
@@ -255,32 +255,38 @@ func (s *Server) agentConversation(writer http.ResponseWriter, request *http.Req
 
 func (s *Server) conversationForAgent(writer http.ResponseWriter, request *http.Request, agentID string) {
 	taskID := request.PathValue("id")
-	if _, err := s.store.Task(request.Context(), taskID); err != nil {
-		mirror, mirrorErr := s.store.RemoteTaskMirror(request.Context(), taskID)
-		if mirrorErr != nil {
-			writeError(writer, http.StatusNotFound, "task_not_found")
-			return
-		}
-		items := make([]domain.ConversationItem, 0, len(mirror.Conversation))
-		for _, item := range mirror.Conversation {
-			if agentID == "main" || item.AgentID == agentID || item.StreamAgentID == agentID {
-				items = append(items, item)
-			}
-		}
-		writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "conversation": domain.ConversationPage{Items: items, Latest: int64(len(items))}})
-		return
-	}
-	if _, err := s.store.TaskAgent(request.Context(), taskID, agentID); err != nil {
-		writeError(writer, http.StatusNotFound, "agent_not_found")
-		return
-	}
 	categories := []string{}
-	for _, value := range strings.Split(request.URL.Query().Get("categories"), ",") {
+	categoryQuery := request.URL.Query().Get("categories")
+	for _, value := range strings.Split(categoryQuery, ",") {
 		value = strings.TrimSpace(value)
 		switch value {
 		case "chat", "update", "tool", "error":
 			categories = append(categories, value)
 		}
+	}
+	if _, err := s.store.Task(request.Context(), taskID); err != nil {
+		if strings.TrimSpace(categoryQuery) == "" {
+			categories = []string{"chat", "update", "error"}
+		}
+		page, pageErr := s.store.RemoteConversationPageForAgent(
+			request.Context(),
+			taskID,
+			agentID,
+			queryInt(request, "before", 0),
+			queryInt(request, "after", 0),
+			int(queryInt(request, "limit", 50)),
+			categories,
+		)
+		if pageErr != nil {
+			writeError(writer, http.StatusNotFound, "task_not_found")
+			return
+		}
+		writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "conversation": page})
+		return
+	}
+	if _, err := s.store.TaskAgent(request.Context(), taskID, agentID); err != nil {
+		writeError(writer, http.StatusNotFound, "agent_not_found")
+		return
 	}
 	page, err := s.store.ConversationPageForAgent(
 		request.Context(),
@@ -311,7 +317,7 @@ func (s *Server) contextForAgent(writer http.ResponseWriter, request *http.Reque
 	taskID := request.PathValue("id")
 	task, err := s.store.Task(request.Context(), taskID)
 	if err != nil {
-		mirror, mirrorErr := s.store.RemoteTaskMirror(request.Context(), taskID)
+		mirror, mirrorErr := s.store.RemoteTaskDetailMirror(request.Context(), taskID)
 		if mirrorErr != nil {
 			writeError(writer, http.StatusNotFound, "task_not_found")
 			return

@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"strconv"
 	"time"
 
@@ -9,39 +10,88 @@ import (
 )
 
 func (s *Store) CreateProductLine(ctx context.Context, item domain.ProductLine) error {
+	item.UpdatedAt = s.sharedTimeVersion(ctx, "product_line", item.ID, item.UpdatedAt)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
 	if item.Default {
-		if _, err := s.db.ExecContext(ctx, `UPDATE product_lines SET is_default=0 WHERE project_id=?`, item.ProjectID); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE product_lines SET is_default=0 WHERE project_id=?`, item.ProjectID); err != nil {
 			return err
 		}
 	}
-	_, err := s.db.ExecContext(ctx, `
+	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO product_lines(id,project_id,name,branch_pattern,is_default,created_at,updated_at)
 		VALUES(?,?,?,?,?,?,?)`, item.ID, item.ProjectID, item.Name, item.BranchPattern, boolInt(item.Default),
-		timeString(item.CreatedAt), timeString(item.UpdatedAt))
-	return err
+		timeString(item.CreatedAt), timeString(item.UpdatedAt)); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+const productLineColumns = `id,project_id,name,branch_pattern,is_default,created_at,updated_at`
+
+func scanProductLine(scanner interface{ Scan(...any) error }) (domain.ProductLine, error) {
+	var item domain.ProductLine
+	var createdAt, updatedAt string
+	err := scanner.Scan(&item.ID, &item.ProjectID, &item.Name, &item.BranchPattern, &item.Default, &createdAt, &updatedAt)
+	item.CreatedAt, item.UpdatedAt = parseTime(createdAt), parseTime(updatedAt)
+	return item, err
 }
 
 func (s *Store) ListProductLines(ctx context.Context, projectID string) ([]domain.ProductLine, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,project_id,name,branch_pattern,is_default,created_at,updated_at FROM product_lines WHERE project_id=? ORDER BY is_default DESC,name`, projectID)
+	rows, err := s.db.QueryContext(ctx, `SELECT `+productLineColumns+` FROM product_lines WHERE project_id=? ORDER BY is_default DESC,name`, projectID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	result := []domain.ProductLine{}
 	for rows.Next() {
-		var item domain.ProductLine
-		var createdAt, updatedAt string
-		if err := rows.Scan(&item.ID, &item.ProjectID, &item.Name, &item.BranchPattern, &item.Default, &createdAt, &updatedAt); err != nil {
+		item, err := scanProductLine(rows)
+		if err != nil {
 			return nil, err
 		}
-		item.CreatedAt, item.UpdatedAt = parseTime(createdAt), parseTime(updatedAt)
 		result = append(result, item)
 	}
 	return result, rows.Err()
 }
 
+func (s *Store) ProductLine(ctx context.Context, id string) (domain.ProductLine, error) {
+	return scanProductLine(s.db.QueryRowContext(ctx, `SELECT `+productLineColumns+` FROM product_lines WHERE id=?`, id))
+}
+
+func (s *Store) UpdateProductLine(ctx context.Context, item domain.ProductLine) error {
+	item.UpdatedAt = s.sharedTimeVersion(ctx, "product_line", item.ID, item.UpdatedAt)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if item.Default {
+		if _, err := tx.ExecContext(ctx, `UPDATE product_lines SET is_default=0 WHERE project_id=? AND id<>?`, item.ProjectID, item.ID); err != nil {
+			return err
+		}
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE product_lines SET project_id=?,name=?,branch_pattern=?,is_default=?,updated_at=? WHERE id=?`,
+		item.ProjectID, item.Name, item.BranchPattern, boolInt(item.Default), timeString(item.UpdatedAt), item.ID)
+	if err != nil {
+		return err
+	}
+	if affected, err := result.RowsAffected(); err != nil {
+		return err
+	} else if affected != 1 {
+		return sql.ErrNoRows
+	}
+	return tx.Commit()
+}
+
 func (s *Store) DeleteProductLine(ctx context.Context, id string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM product_lines WHERE id=?`, id)
+	item, err := s.ProductLine(ctx, id)
+	if err != nil {
+		return err
+	}
+	_, err = s.deleteSharedObject(ctx, "product_line", id, timeString(item.UpdatedAt), time.Now().UTC())
 	return err
 }
 

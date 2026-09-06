@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ChinaKai/AHA2/internal/agentapi"
@@ -34,6 +35,8 @@ type Config struct {
 	CodexAccounts     *codexaccount.Manager
 	AgentCapabilities *agentapi.Capabilities
 	ManagedProcesses  *managedprocess.Manager
+	Version           string
+	StartedAt         time.Time
 }
 
 type Server struct {
@@ -50,6 +53,10 @@ type Server struct {
 	codexAccounts     *codexaccount.Manager
 	agentCapabilities *agentapi.Capabilities
 	managedProcesses  *managedprocess.Manager
+	version           string
+	startedAt         time.Time
+	syncRunMu         sync.RWMutex
+	syncRun           syncRunProgress
 	authLimiter       *authLimiter
 }
 
@@ -57,6 +64,10 @@ func New(config Config) *Server {
 	logger := config.Logger
 	if logger == nil {
 		logger = slog.Default()
+	}
+	startedAt := config.StartedAt
+	if startedAt.IsZero() {
+		startedAt = time.Now().UTC()
 	}
 	return &Server{
 		store: config.Store, auth: config.Auth, app: config.App, web: config.Web,
@@ -67,6 +78,8 @@ func New(config Config) *Server {
 		codexAccounts:     config.CodexAccounts,
 		agentCapabilities: config.AgentCapabilities,
 		managedProcesses:  config.ManagedProcesses,
+		version:           config.Version,
+		startedAt:         startedAt,
 		authLimiter:       newAuthLimiter(),
 	}
 }

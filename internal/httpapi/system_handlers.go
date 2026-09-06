@@ -20,6 +20,7 @@ func (s *Server) systemInfo(writer http.ResponseWriter, request *http.Request) {
 		"system": map[string]any{
 			"os": runtime.GOOS, "arch": runtime.GOARCH,
 			"wsl_available": available, "wsl_distros": distros,
+			"version": s.version, "started_at": s.startedAt,
 		},
 	})
 }

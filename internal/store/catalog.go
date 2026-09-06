@@ -13,6 +13,7 @@ import (
 )
 
 func (s *Store) CreateProject(ctx context.Context, project domain.Project) error {
+	project.UpdatedAt = s.sharedTimeVersion(ctx, "project", project.ID, project.UpdatedAt)
 	_, err := s.db.ExecContext(
 		ctx,
 		`INSERT INTO projects(id,name,description,project_type,repository_identity,default_workspace_id,default_branch,knowledge_policy,knowledge_revision,created_at,updated_at)
@@ -56,6 +57,7 @@ func (s *Store) Project(ctx context.Context, id string) (domain.Project, error) 
 }
 
 func (s *Store) UpdateProject(ctx context.Context, item domain.Project) error {
+	item.UpdatedAt = s.sharedTimeVersion(ctx, "project", item.ID, item.UpdatedAt)
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE projects SET name=?,description=?,project_type=?,repository_identity=?,default_branch=?,knowledge_policy=?,updated_at=? WHERE id=?`,
 		item.Name, item.Description, item.ProjectType, item.RepositoryIdentity, item.DefaultBranch, item.KnowledgePolicy,
@@ -372,7 +374,11 @@ func (s *Store) DeleteWorkspace(ctx context.Context, id string) error {
 }
 
 func (s *Store) DeleteProject(ctx context.Context, id string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM projects WHERE id=?`, id)
+	item, err := s.Project(ctx, id)
+	if err != nil {
+		return err
+	}
+	_, err = s.deleteSharedObject(ctx, "project", id, timeString(item.UpdatedAt), time.Now().UTC())
 	return err
 }
 

@@ -38,6 +38,8 @@ import type {
   Provider,
   ProxySettings,
   SyncConflict,
+	SyncPreview,
+	SyncRunProgress,
   SyncSettings,
   SyncState,
   Skill,
@@ -61,6 +63,8 @@ interface State {
   syncState: SyncState;
   syncPending: number;
   syncConflicts: SyncConflict[];
+	syncPreview: SyncPreview;
+	syncRun: SyncRunProgress;
   projects: Project[];
   workspaces: Workspace[];
   providers: Provider[];
@@ -98,12 +102,14 @@ const state: State = {
   error: "",
   notice: "",
   renderPending: false,
-  system: {os: "windows", arch: "", wsl_available: false, wsl_distros: []},
+  system: {os: "windows", arch: "", wsl_available: false, wsl_distros: [], version: "dev", started_at: ""},
   proxySettings: {http_proxy: "http://127.0.0.1:7897", https_proxy: "http://127.0.0.1:7897", no_proxy: "localhost,127.0.0.1,::1"},
   syncSettings: {scope:"default",enabled:false,endpoint:"",device_id:"",device_name:"",interval_seconds:300,token_configured:false,passphrase_configured:false},
   syncState: {scope:"default",cursor:"",last_error:""},
   syncPending: 0,
   syncConflicts: [],
+	syncPreview: {upserts: 0, deletes: 0, remote_upserts: 0, remote_deletes: 0, pending: 0, conflicts: 0},
+	syncRun: {running: false, phase: "", completed: 0, total: 0},
   projects: [],
   workspaces: [],
   providers: [],
@@ -143,6 +149,7 @@ let taskMonitorTimer: number | null = null;
 let taskFallbackTimer: number | null = null;
 let taskLastSignalAt = 0;
 let scrollConversationToBottom = false;
+let loadingOlderConversation = false;
 
 function escapeHTML(value: unknown): string {
   return String(value ?? "")
@@ -622,8 +629,8 @@ async function bootstrap(): Promise<void> {
 }
 
 async function loadAll(): Promise<void> {
-  const [projects, workspaces, providers, envGroups, codexAccounts, models, tasks, knowledge, skills, system, proxy, syncSettings, syncStatus, syncConflicts] = await Promise.all([
-    api.projects(), api.workspaces(), api.providers(), api.envGroups(), api.codexAccounts(), api.models(), api.tasks(), api.knowledge(), api.skills(), api.system(), api.proxySettings(), api.syncSettings(), api.syncStatus(), api.syncConflicts(),
+  const [projects, workspaces, providers, envGroups, codexAccounts, models, tasks, knowledge, skills, system, proxy, syncSettings, syncStatus, syncConflicts, syncPreview] = await Promise.all([
+    api.projects(), api.workspaces(), api.providers(), api.envGroups(), api.codexAccounts(), api.models(), api.tasks(), api.knowledge(), api.skills(), api.system(), api.proxySettings(), api.syncSettings(), api.syncStatus(), api.syncConflicts(), api.syncPreview().catch(() => ({preview: state.syncPreview})),
   ]);
   state.projects = projects.projects || [];
   state.workspaces = workspaces.workspaces || [];
@@ -638,8 +645,9 @@ async function loadAll(): Promise<void> {
   if (system?.system) state.system = system.system;
   if (proxy?.proxy) state.proxySettings = proxy.proxy;
   if (syncSettings?.sync) state.syncSettings = syncSettings.sync;
-  if (syncStatus?.state) { state.syncState = syncStatus.state; state.syncPending = syncStatus.pending || 0; }
+  if (syncStatus?.state) { state.syncState = syncStatus.state; state.syncPending = syncStatus.pending || 0; state.syncRun = syncStatus.run || state.syncRun; }
   state.syncConflicts = syncConflicts.conflicts || [];
+	state.syncPreview = syncPreview.preview || state.syncPreview;
   await loadPromptCatalog();
 }
 function persistNavigationState(): void {
@@ -671,9 +679,11 @@ function selectedConversationCategories(): ConversationCategory[] {
 }
 
 async function openTask(taskID: string): Promise<void> {
-  const [detail, page, context] = await Promise.all([
-    api.task(taskID),
-    api.agentConversation(taskID, "main", {limit: 50, categories: selectedConversationCategories()}),
+  const detail = await api.task(taskID);
+  const categories: ConversationCategory[] = detail.task.read_only ? ["chat", "update", "error"] : selectedConversationCategories();
+  if (detail.task.read_only) state.taskCategories.tool = false;
+  const [page, context] = await Promise.all([
+    api.agentConversation(taskID, "main", {limit: 50, categories}),
     api.agentContext(taskID, "main"),
   ]);
   detail.agents ||= [];
@@ -689,8 +699,10 @@ async function openTask(taskID: string): Promise<void> {
   state.taskDraft = "";
   state.taskDrafts = {};
   state.taskAttachmentDrafts = {};
+  loadingOlderConversation = false;
   scrollConversationToBottom = true;
-  openEvents(taskID, state.taskEventCursor);
+  if (detail.task.read_only) closeEvents();
+  else openEvents(taskID, state.taskEventCursor);
 }
 
 async function selectTaskAgent(agentID: string): Promise<void> {
@@ -852,6 +864,7 @@ function shell(content: string): string {
     <aside class="sidebar">
       <div class="brand-lockup"><span class="brand-mark">A</span><div><strong>AHA</strong><small>个人 AI 工作流</small></div></div>
       <nav>${nav.map(([view, glyph, label]) => `<button data-view="${view}" class="${state.view === view ? "active" : ""}">${icon(glyph)}<span>${label}</span></button>`).join("")}</nav>
+      <div class="system-meta"><span>AHA2 ${escapeHTML(state.system.version || "dev")}</span><span id="system-uptime">${systemUptimeText()}</span></div>
       <div class="owner-block"><span class="avatar">O</span><div><strong>${escapeHTML(state.auth?.username || "Owner")}</strong><small>已安全登录</small></div><button id="logout" class="icon-button" title="退出">${icon("logout")}</button></div>
     </aside>
     <header class="mobile-header"><div class="brand-lockup"><span class="brand-mark">A</span><strong>AHA</strong></div><button id="mobile-context" class="icon-button">${icon("menu")}</button></header>
@@ -863,6 +876,21 @@ function shell(content: string): string {
 function banner(): string {
   const messages = `${state.error ? `<div class="banner error">${escapeHTML(state.error)}</div>` : ""}${state.notice ? `<div class="banner success">${escapeHTML(state.notice)}</div>` : ""}`;
   return messages ? `<div class="banner-stack">${messages}</div>` : "";
+}
+
+function systemUptimeText(now = Date.now()): string {
+  const started = Date.parse(state.system.started_at || "");
+  if (!Number.isFinite(started)) return "在线时间 —";
+  const seconds = Math.max(0, Math.floor((now - started) / 1000));
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor((seconds % 86400) / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  return `在线 ${days ? `${days}天 ` : ""}${hours ? `${hours}小时 ` : ""}${minutes}分`;
+}
+
+function updateSystemUptime(): void {
+  const element = document.querySelector<HTMLElement>("#system-uptime");
+  if (element) element.textContent = systemUptimeText();
 }
 
 function pageHead(title: string, description: string, actions = ""): string {
@@ -1364,7 +1392,7 @@ function render(): void {
       })),
       prompts: () => shell(renderPromptAdmin()),
       proxy: () => shell(renderProxySettings(state.proxySettings)),
-      sync: () => shell(renderSyncSettings(state.syncSettings, state.syncState, state.syncPending, state.syncConflicts)),
+      sync: () => shell(renderSyncSettings(state.syncSettings, state.syncState, state.syncPending, state.syncConflicts, state.syncPreview, state.syncRun)),
     };
     content = views[state.view]();
   }
@@ -1418,10 +1446,15 @@ function bindCommon(): void {
   bindSyncSettings({
     settings: state.syncSettings,
     refresh: async () => {
-      const [settings, status, conflicts] = await Promise.all([api.syncSettings(), api.syncStatus(), api.syncConflicts()]);
-      state.syncSettings = settings.sync; state.syncState = status.state; state.syncPending = status.pending || 0; state.syncConflicts = conflicts.conflicts || [];
+      const [settings, status, conflicts, preview] = await Promise.all([api.syncSettings(), api.syncStatus(), api.syncConflicts(), api.syncPreview()]);
+      state.syncSettings = settings.sync; state.syncState = status.state; state.syncPending = status.pending || 0; state.syncRun = status.run || state.syncRun; state.syncConflicts = conflicts.conflicts || []; state.syncPreview = preview.preview;
       render();
     },
+	pollStatus: async () => {
+		const status = await api.syncStatus();
+		state.syncState = status.state; state.syncPending = status.pending || 0; state.syncRun = status.run || state.syncRun;
+		return state.syncRun;
+	},
     setMessage,
     flushDeferredRender,
   });
@@ -2209,37 +2242,54 @@ function noteTaskStreamSignal(taskID: string): void {
 }
 
 async function loadOlderConversation(): Promise<void> {
-  if (!state.selectedTask || !state.taskConversationBefore) return;
+  if (!state.selectedTask || !state.taskConversationBefore || loadingOlderConversation) return;
+  loadingOlderConversation = true;
   const list = document.querySelector<HTMLElement>("#conversation-list");
   const previousHeight = list?.scrollHeight || 0;
   const previousTop = list?.scrollTop || 0;
-  const page = await api.agentConversation(state.selectedTask.task.id, state.selectedTaskAgent, {
-    before: state.taskConversationBefore,
-    limit: 50,
-    categories: selectedConversationCategories(),
-  });
-  const older = page.conversation.items || [];
-  const seen = new Set(state.taskConversation.map(item => item.sequence));
-  state.taskConversation = [...older.filter(item => !seen.has(item.sequence)), ...state.taskConversation];
-  if (state.taskConversation.length > 300) {
-    state.taskConversation = state.taskConversation.slice(0, 300);
+  try {
+    const page = await api.agentConversation(state.selectedTask.task.id, state.selectedTaskAgent, {
+      before: state.taskConversationBefore,
+      limit: 50,
+      categories: selectedConversationCategories(),
+    });
+    const older = page.conversation.items || [];
+    const seen = new Set(state.taskConversation.map(item => item.sequence));
+    state.taskConversation = [...older.filter(item => !seen.has(item.sequence)), ...state.taskConversation];
+    if (state.taskConversation.length > 300) {
+      state.taskConversation = state.taskConversation.slice(0, 300);
+    }
+    state.taskConversationHasMore = page.conversation.has_more && state.taskConversation.length < 300;
+    state.taskConversationBefore = page.conversation.next_before || 0;
+    if (list) {
+      list.innerHTML = conversationListHtml();
+      list.scrollTop = previousTop + Math.max(0, list.scrollHeight - previousHeight);
+      bindConversationLiveControls();
+    }
+    const count = document.querySelector<HTMLElement>("#conversation-filter-count");
+    if (count) count.textContent = `${state.taskConversation.length} 条已加载`;
+  } finally {
+    loadingOlderConversation = false;
   }
-  state.taskConversationHasMore = page.conversation.has_more && state.taskConversation.length < 300;
-  state.taskConversationBefore = page.conversation.next_before || 0;
-  if (list) {
-    list.innerHTML = conversationListHtml();
-    list.scrollTop = previousTop + Math.max(0, list.scrollHeight - previousHeight);
-    bindConversationLiveControls();
-  }
-  const count = document.querySelector<HTMLElement>("#conversation-filter-count");
-  if (count) count.textContent = `${state.taskConversation.length} 条已加载`;
 }
 
 function bindConversationLiveControls(): void {
-  bindMessageBubbleControls(document.querySelector("#conversation-list") || document);
+  const list = document.querySelector<HTMLElement>("#conversation-list");
+  bindMessageBubbleControls(list || document);
   document.querySelector("#load-older-conversation")?.addEventListener("click", () => {
     void loadOlderConversation();
   });
+  if (list && list.dataset.paginationBound !== "true") {
+    list.dataset.paginationBound = "true";
+    let previousTop = list.scrollTop;
+    list.addEventListener("scroll", () => {
+      const currentTop = list.scrollTop;
+      if (currentTop < previousTop && currentTop <= 80 && state.taskConversationHasMore) {
+        void loadOlderConversation();
+      }
+      previousTop = currentTop;
+    }, {passive: true});
+  }
 }
 
 function openEvents(taskID: string, after = 0): void {
@@ -2353,4 +2403,5 @@ syncVisualViewportHeight();
 window.addEventListener("resize", syncVisualViewportHeight);
 window.visualViewport?.addEventListener("resize", syncVisualViewportHeight);
 window.visualViewport?.addEventListener("scroll", syncVisualViewportHeight);
+window.setInterval(updateSystemUptime, 30_000);
 void bootstrap();

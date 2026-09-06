@@ -24,6 +24,7 @@ const (
 	TypeEnvGroup          = "env_group"
 	TypePromptOverride    = "prompt_override"
 	TypeProject           = "project"
+	TypeProductLine       = "product_line"
 	TypeWorkspace         = "workspace"
 	TypeTask              = "task"
 	TypeTaskAgent         = "task_agent"
@@ -72,6 +73,23 @@ func ExportBusinessObjectsForDevice(ctx context.Context, database *store.Store, 
 			return nil, err
 		}
 		result = append(result, graph...)
+		projects, err := database.ListProjects(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for _, project := range projects {
+			lines, err := database.ListProductLines(ctx, project.ID)
+			if err != nil {
+				return nil, err
+			}
+			for _, line := range lines {
+				if err := add(TypeProductLine, line.ID, timeVersion(line.UpdatedAt), line); err != nil {
+					return nil, err
+				}
+				item := &result[len(result)-1]
+				item.IdempotencyKey = payloadIdempotencyKey(TypeProductLine, line.ID, "v1", item.Payload)
+			}
+		}
 	}
 	tombstones, err := database.ListSyncTombstones(ctx)
 	if err != nil {
@@ -202,7 +220,7 @@ func RegisterBusinessHandlersForDevice(engine *Engine, database *store.Store, lo
 }
 
 func registerBusinessHandlers(engine *Engine, database *store.Store, localDeviceID string) {
-	for _, kind := range []string{TypeProject, TypeWorkspace, TypeTask, TypeTaskAgent, TypeRound, TypeTurn, TypeConversation, TypeTaskMemory, TypeHardware, TypeKnowledgeProposal, TypeKnowledge, TypeSkill, TypeProvider, TypeModel, TypeEnvGroup, TypePromptOverride} {
+	for _, kind := range []string{TypeProject, TypeProductLine, TypeWorkspace, TypeTask, TypeTaskAgent, TypeRound, TypeTurn, TypeConversation, TypeTaskMemory, TypeHardware, TypeKnowledgeProposal, TypeKnowledge, TypeSkill, TypeProvider, TypeModel, TypeEnvGroup, TypePromptOverride} {
 		objectType := kind
 		engine.Register(objectType, func(ctx context.Context, obj domain.SyncObject) error {
 			if localDeviceID != "" && objectType != TypeProject && isTaskGraphType(objectType) {
@@ -278,6 +296,11 @@ func currentBusinessObject(ctx context.Context, database *store.Store, kind, id 
 		v, err = database.Project(ctx, id)
 		value = v
 		version = timeVersion(v.UpdatedAt)
+	case TypeProductLine:
+		var v domain.ProductLine
+		v, err = database.ProductLine(ctx, id)
+		value = v
+		version = timeVersion(v.UpdatedAt)
 	case TypeWorkspace:
 		return nil, "", false, nil
 	case TypeTask, TypeTaskAgent, TypeRound, TypeTurn, TypeConversation, TypeTaskMemory, TypeHardware:
@@ -347,6 +370,29 @@ func upsertBusinessObject(ctx context.Context, database *store.Store, obj domain
 	switch obj.Type {
 	case TypeProject, TypeWorkspace, TypeTask, TypeTaskAgent, TypeRound, TypeTurn, TypeConversation, TypeTaskMemory, TypeHardware:
 		return applyTaskGraphObject(ctx, database, obj)
+	case TypeProductLine:
+		var v domain.ProductLine
+		if err := decodePayload(obj, &v); err != nil {
+			return err
+		}
+		v.ID = obj.ID
+		if strings.TrimSpace(v.ProjectID) == "" {
+			return errors.New("product line project dependency is required")
+		}
+		if _, err := database.Project(ctx, v.ProjectID); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				if _, tombstoneErr := database.SyncTombstone(ctx, TypeProject, v.ProjectID); tombstoneErr == nil {
+					return nil
+				} else if !errors.Is(tombstoneErr, sql.ErrNoRows) {
+					return tombstoneErr
+				}
+			}
+			return fmt.Errorf("product line project dependency %s: %w", v.ProjectID, err)
+		}
+		if exists {
+			return database.UpdateProductLine(ctx, v)
+		}
+		return database.CreateProductLine(ctx, v)
 	case TypeKnowledge:
 		var v domain.KnowledgeEntry
 		if err := decodePayload(obj, &v); err != nil {

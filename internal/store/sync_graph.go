@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
@@ -50,6 +51,17 @@ func (s *Store) RemoteTaskMirrors(ctx context.Context, projectID string) ([]Remo
 }
 
 func (s *Store) RemoteTaskMirror(ctx context.Context, publicID string) (RemoteTaskMirror, error) {
+	return s.remoteTaskMirror(ctx, publicID, true)
+}
+
+// RemoteTaskDetailMirror materializes the read-only task detail graph without
+// loading conversation payloads. Conversation history has its own paged path
+// and can be much larger than the rest of a task graph.
+func (s *Store) RemoteTaskDetailMirror(ctx context.Context, publicID string) (RemoteTaskMirror, error) {
+	return s.remoteTaskMirror(ctx, publicID, false)
+}
+
+func (s *Store) remoteTaskMirror(ctx context.Context, publicID string, includeConversation bool) (RemoteTaskMirror, error) {
 	mirrors, err := s.RemoteTaskMirrors(ctx, "")
 	if err != nil {
 		return RemoteTaskMirror{}, err
@@ -58,7 +70,7 @@ func (s *Store) RemoteTaskMirror(ctx context.Context, publicID string) (RemoteTa
 		if mirror.Task.ID != publicID {
 			continue
 		}
-		objects, err := s.RemoteTaskObjects(ctx, mirror.Task.OwnerDeviceID, mirror.SourceTaskID)
+		objects, err := s.remoteTaskObjects(ctx, mirror.Task.OwnerDeviceID, mirror.SourceTaskID, includeConversation)
 		if err != nil {
 			return RemoteTaskMirror{}, err
 		}
@@ -105,6 +117,113 @@ func (s *Store) RemoteTaskMirror(ctx context.Context, publicID string) (RemoteTa
 		return mirror, nil
 	}
 	return RemoteTaskMirror{}, fmt.Errorf("remote task not found")
+}
+
+func (s *Store) RemoteConversationPageForAgent(
+	ctx context.Context,
+	publicID string,
+	agentID string,
+	before int64,
+	after int64,
+	limit int,
+	categories []string,
+) (domain.ConversationPage, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	mirrors, err := s.RemoteTaskMirrors(ctx, "")
+	if err != nil {
+		return domain.ConversationPage{}, err
+	}
+	var mirror *RemoteTaskMirror
+	for index := range mirrors {
+		if mirrors[index].Task.ID == publicID {
+			mirror = &mirrors[index]
+			break
+		}
+	}
+	if mirror == nil {
+		return domain.ConversationPage{}, fmt.Errorf("remote task not found")
+	}
+
+	baseWhere := []string{"owner_device_id=?", "task_id=?", "object_type='conversation'"}
+	baseArgs := []any{mirror.Task.OwnerDeviceID, mirror.SourceTaskID}
+	if agentID != "main" {
+		baseWhere = append(baseWhere, `(COALESCE(json_extract(payload_json,'$.agent_id'),'')=? OR COALESCE(json_extract(payload_json,'$.stream_agent_id'),'')=?)`)
+		baseArgs = append(baseArgs, agentID, agentID)
+	}
+	outerWhere := []string{"1=1"}
+	outerArgs := make([]any, 0, len(categories)+3)
+	if before > 0 {
+		outerWhere = append(outerWhere, "sequence<?")
+		outerArgs = append(outerArgs, before)
+	}
+	if after > 0 {
+		outerWhere = append(outerWhere, "sequence>?")
+		outerArgs = append(outerArgs, after)
+	}
+	if len(categories) > 0 {
+		placeholders := make([]string, 0, len(categories))
+		for _, category := range categories {
+			placeholders = append(placeholders, "?")
+			outerArgs = append(outerArgs, category)
+		}
+		outerWhere = append(outerWhere, "category IN ("+strings.Join(placeholders, ",")+")")
+	}
+	order := "DESC"
+	if after > 0 {
+		order = "ASC"
+	}
+	queryArgs := append(append([]any{}, baseArgs...), outerArgs...)
+	queryArgs = append(queryArgs, limit+1)
+	rows, err := s.db.QueryContext(ctx, `
+		WITH ordered AS (
+			SELECT ROW_NUMBER() OVER (ORDER BY COALESCE(json_extract(payload_json,'$.created_at'),created_at),object_id) AS sequence,
+			       payload_json,
+			       COALESCE(json_extract(payload_json,'$.category'),'') AS category
+			FROM sync_remote_task_objects
+			WHERE `+strings.Join(baseWhere, " AND ")+`
+		)
+		SELECT sequence,payload_json FROM ordered
+		WHERE `+strings.Join(outerWhere, " AND ")+`
+		ORDER BY sequence `+order+` LIMIT ?`, queryArgs...)
+	if err != nil {
+		return domain.ConversationPage{}, err
+	}
+	defer rows.Close()
+	items := make([]domain.ConversationItem, 0, limit+1)
+	for rows.Next() {
+		var item domain.ConversationItem
+		var sequence int64
+		var payload string
+		if err := rows.Scan(&sequence, &payload); err != nil {
+			return domain.ConversationPage{}, err
+		}
+		if err := json.Unmarshal([]byte(payload), &item); err != nil {
+			return domain.ConversationPage{}, err
+		}
+		item.Sequence = sequence
+		item.TaskID = publicID
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return domain.ConversationPage{}, err
+	}
+	hasMore := len(items) > limit
+	if hasMore {
+		items = items[:limit]
+	}
+	if after == 0 {
+		for left, right := 0, len(items)-1; left < right; left, right = left+1, right-1 {
+			items[left], items[right] = items[right], items[left]
+		}
+	}
+	page := domain.ConversationPage{Items: items, HasMore: hasMore}
+	if len(items) > 0 {
+		page.NextBefore = items[0].Sequence
+	}
+	_ = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sync_remote_task_objects WHERE `+strings.Join(baseWhere, " AND "), baseArgs...).Scan(&page.Latest)
+	return page, nil
 }
 
 type RemoteTaskObject struct {
@@ -185,7 +304,15 @@ func (s *Store) RemoteTaskObjectExists(ctx context.Context, ownerDeviceID, objec
 }
 
 func (s *Store) RemoteTaskObjects(ctx context.Context, ownerDeviceID, taskID string) ([]RemoteTaskObject, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT owner_device_id,object_type,object_id,task_id,project_id,payload_json,created_at,updated_at FROM sync_remote_task_objects WHERE owner_device_id=? AND (?='' OR task_id=?) ORDER BY CASE object_type WHEN 'task' THEN 1 WHEN 'task_agent' THEN 2 WHEN 'hardware' THEN 3 WHEN 'round' THEN 4 WHEN 'turn' THEN 5 WHEN 'conversation' THEN 6 WHEN 'task_memory' THEN 7 ELSE 9 END,created_at,object_id`, ownerDeviceID, taskID, taskID)
+	return s.remoteTaskObjects(ctx, ownerDeviceID, taskID, true)
+}
+
+func (s *Store) remoteTaskObjects(ctx context.Context, ownerDeviceID, taskID string, includeConversation bool) ([]RemoteTaskObject, error) {
+	conversationFilter := ""
+	if !includeConversation {
+		conversationFilter = " AND object_type<>'conversation'"
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT owner_device_id,object_type,object_id,task_id,project_id,payload_json,created_at,updated_at FROM sync_remote_task_objects WHERE owner_device_id=? AND (?='' OR task_id=?)`+conversationFilter+` ORDER BY CASE object_type WHEN 'task' THEN 1 WHEN 'task_agent' THEN 2 WHEN 'hardware' THEN 3 WHEN 'round' THEN 4 WHEN 'turn' THEN 5 WHEN 'conversation' THEN 6 WHEN 'task_memory' THEN 7 ELSE 9 END,created_at,object_id`, ownerDeviceID, taskID, taskID)
 	if err != nil {
 		return nil, err
 	}

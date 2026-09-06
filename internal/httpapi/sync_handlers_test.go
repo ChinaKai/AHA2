@@ -13,8 +13,10 @@ import (
 
 	"github.com/ChinaKai/AHA2/internal/app"
 	"github.com/ChinaKai/AHA2/internal/auth"
+	"github.com/ChinaKai/AHA2/internal/centersync"
 	"github.com/ChinaKai/AHA2/internal/domain"
 	"github.com/ChinaKai/AHA2/internal/store"
+	syncer "github.com/ChinaKai/AHA2/internal/sync"
 )
 
 func TestSyncSettingsAPIKeepsTokenOutOfResponses(t *testing.T) {
@@ -105,6 +107,70 @@ func TestSyncPreviewCountsLocalTombstonesBeforeRunning(t *testing.T) {
 	}
 	if response.StatusCode != http.StatusOK || payload.Preview.Deletes != 1 || payload.Preview.Pending != 0 || payload.Preview.Conflicts != 0 {
 		t.Fatalf("status=%d preview=%#v", response.StatusCode, payload.Preview)
+	}
+}
+
+func TestSyncPreviewIncludesUnappliedRemoteDeletes(t *testing.T) {
+	ctx := context.Background()
+	center, err := centersync.Open(ctx, filepath.Join(t.TempDir(), "center.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer center.Close()
+	if err := center.PutDeviceToken(ctx, "preview-device", "preview-token"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := center.Push(ctx, "other-device", []centersync.Event{{EventID: "delete-remote", ObjectID: "knowledge-remote", ObjectType: "knowledge", Operation: "delete", Version: 1, SourceVersion: "1"}}); err != nil {
+		t.Fatal(err)
+	}
+	centerServer := httptest.NewServer(center.Handler())
+	defer centerServer.Close()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.PutSyncSettings(ctx, domain.SyncSettings{Scope: "default", Endpoint: centerServer.URL, DeviceID: "preview-device", IntervalSeconds: 60}); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.MarkSyncApplied(ctx, "default", domain.SyncObject{Type: "knowledge", ID: "knowledge-remote", Operation: "delete", IdempotencyKey: "delete-remote"}, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	secretStore := &fakeSecretStore{values: map[string]string{localSyncTokenRef: "preview-token"}}
+	authService := auth.NewService(database, "setup-test", time.Hour)
+	server := httptest.NewServer(New(Config{Store: database, Auth: authService, App: app.NewService(database, nil, app.StubExecutor{}), Secrets: secretStore}).Handler())
+	defer server.Close()
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	_ = registerOwner(t, client, server.URL)
+	response := requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/settings/sync/preview", nil, "")
+	defer response.Body.Close()
+	var payload struct {
+		Preview syncer.Preview `json:"preview"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK || payload.Preview.RemoteDeletes != 1 || payload.Preview.RemoteUpserts != 0 {
+		t.Fatalf("status=%d preview=%#v", response.StatusCode, payload.Preview)
+	}
+}
+
+func TestSyncRunProgressTracksPhasesAndRejectsConcurrentRun(t *testing.T) {
+	server := &Server{}
+	preview := syncer.Preview{Upserts: 3, Deletes: 1, RemoteUpserts: 2, RemoteDeletes: 1}
+	if !server.beginSyncRun(preview) || server.beginSyncRun(preview) {
+		t.Fatal("sync run concurrency guard failed")
+	}
+	server.updateSyncRun("pulling", preview)
+	progress := server.syncRunSnapshot()
+	if !progress.Running || progress.Total != 7 || progress.Completed != 4 || progress.Phase != "pulling" {
+		t.Fatalf("pull progress=%#v", progress)
+	}
+	server.finishSyncRun(nil)
+	progress = server.syncRunSnapshot()
+	if progress.Running || progress.Completed != 7 || progress.Phase != "complete" {
+		t.Fatalf("final progress=%#v", progress)
 	}
 }
 

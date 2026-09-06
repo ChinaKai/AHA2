@@ -26,13 +26,17 @@ type Runner struct {
 	TokenRef        string
 	PassphraseRef   string
 	SecretSelection *SecretSelection
+	Progress        func(phase string)
 }
 
 type Preview struct {
-	Upserts   int `json:"upserts"`
-	Deletes   int `json:"deletes"`
-	Pending   int `json:"pending"`
-	Conflicts int `json:"conflicts"`
+	Upserts         int  `json:"upserts"`
+	Deletes         int  `json:"deletes"`
+	RemoteUpserts   int  `json:"remote_upserts"`
+	RemoteDeletes   int  `json:"remote_deletes"`
+	RemoteTruncated bool `json:"remote_truncated,omitempty"`
+	Pending         int  `json:"pending"`
+	Conflicts       int  `json:"conflicts"`
 }
 
 func (r Runner) Preview(ctx context.Context) (Preview, error) {
@@ -68,6 +72,54 @@ func (r Runner) Preview(ctx context.Context) (Preview, error) {
 		return Preview{}, err
 	}
 	result.Conflicts = len(conflicts)
+	if r.Secrets != nil && settings.Endpoint != "" && settings.DeviceID != "" {
+		tokenRef := r.TokenRef
+		if tokenRef == "" {
+			tokenRef = DefaultTokenRef
+		}
+		if token, ok := r.Secrets.Get(tokenRef); ok && token != "" {
+			state, stateErr := r.Store.SyncState(ctx, r.scope())
+			if stateErr != nil {
+				return Preview{}, stateErr
+			}
+			client := &Client{BaseURL: settings.Endpoint, DeviceID: settings.DeviceID, Credential: func(context.Context) (string, error) { return token, nil }}
+			cursor := state.Cursor
+			for page := 0; page < 40; page++ {
+				response, pullErr := client.Pull(ctx, r.scope(), cursor, settings.DeviceID, 500)
+				if pullErr != nil {
+					return Preview{}, pullErr
+				}
+				for _, object := range response.Objects {
+					deliveryKey := object.EventID
+					if deliveryKey == "" && object.RemoteVersion != "" {
+						deliveryKey = fmt.Sprintf("center-object:%s:%s:%s", object.Type, object.ID, object.RemoteVersion)
+					}
+					if deliveryKey == "" {
+						deliveryKey = object.IdempotencyKey
+					}
+					delivered, checkErr := r.Store.SyncWasApplied(ctx, deliveryKey)
+					if checkErr != nil {
+						return Preview{}, checkErr
+					}
+					if delivered {
+						continue
+					}
+					if object.Operation == "delete" {
+						result.RemoteDeletes++
+					} else {
+						result.RemoteUpserts++
+					}
+				}
+				cursor = response.Cursor
+				if !response.HasMore {
+					break
+				}
+				if page == 39 {
+					result.RemoteTruncated = true
+				}
+			}
+		}
+	}
 	return result, nil
 }
 
@@ -102,6 +154,7 @@ func (r Runner) RunOnce(ctx context.Context) error {
 		return err
 	}
 	if state.ReplayRequired {
+		r.report("replaying")
 		// Preserve changes that were already queued before the upgrade, then replay
 		// the center's ordered history before exporting the current local snapshot.
 		if err := r.drainPending(ctx, engine); err != nil {
@@ -121,6 +174,7 @@ func (r Runner) RunOnce(ctx context.Context) error {
 			return err
 		}
 	}
+	r.report("preparing")
 	objects, err := ExportBusinessObjectsForDevice(ctx, r.Store, settings.DeviceID)
 	if err != nil {
 		return err
@@ -154,10 +208,23 @@ func (r Runner) RunOnce(ctx context.Context) error {
 			return err
 		}
 	}
+	r.report("pushing")
 	if err := r.drainPending(ctx, engine); err != nil {
 		return err
 	}
-	return engine.Pull(ctx)
+	r.report("pulling")
+	if err := engine.Pull(ctx); err != nil {
+		return err
+	}
+	r.report("finalizing")
+	r.report("complete")
+	return nil
+}
+
+func (r Runner) report(phase string) {
+	if r.Progress != nil {
+		r.Progress(phase)
+	}
 }
 
 func (r Runner) enqueueSecretBundle(ctx context.Context, bundle domain.SyncObject, bundleErr error) error {

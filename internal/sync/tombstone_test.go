@@ -14,7 +14,7 @@ import (
 func TestSharedTombstonesExportDeletesAndBlockOldUpserts(t *testing.T) {
 	t.Parallel()
 	ctx, database, now := context.Background(), businessStore(t), time.Now().UTC()
-	types := []string{TypeKnowledge, TypeKnowledgeProposal, TypeSkill, TypeProvider, TypeModel, TypeEnvGroup, TypePromptOverride}
+	types := []string{TypeProject, TypeProductLine, TypeKnowledge, TypeKnowledgeProposal, TypeSkill, TypeProvider, TypeModel, TypeEnvGroup, TypePromptOverride}
 	for index, objectType := range types {
 		id := "deleted-" + objectType
 		key := "delete-key-" + objectType

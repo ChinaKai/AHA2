@@ -4,6 +4,27 @@ import {readFile} from "node:fs/promises";
 import {resolve} from "node:path";
 import {pathToFileURL} from "node:url";
 
+test("read-only task history opens on the latest page and lazily loads older rows", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const script = await readFile(resolve(root, "dist", "app.js"), "utf8");
+  assert.match(script, /detail\.task\.read_only\s*\?\s*\[\s*"chat",\s*"update",\s*"error"\s*\]/);
+  assert.match(script, /agentConversation\(taskID,\s*"main",\s*\{\s*limit:\s*50,\s*categories\s*\}/);
+  assert.match(script, /scrollConversationToBottom\s*=\s*true/);
+  assert.match(script, /detail\.task\.read_only\)\s*closeEvents\(\)/);
+  assert.match(script, /currentTop\s*<\s*previousTop\s*&&\s*currentTop\s*<=\s*80/);
+  assert.match(script, /loadingOlderConversation/);
+});
+
+test("sidebar shows service version and live uptime", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const script = await readFile(resolve(root, "dist", "app.js"), "utf8");
+  const styles = await readFile(resolve(root, "dist", "styles.css"), "utf8");
+  assert.match(script, /class="system-meta"/);
+  assert.match(script, /id="system-uptime"/);
+  assert.match(script, /setInterval\(updateSystemUptime,\s*30_000\)/);
+  assert.match(styles, /\.system-meta/);
+});
+
 test("built web contains responsive application", async () => {
   const root = resolve(import.meta.dirname, "..");
   const script = await readFile(resolve(root, "dist", "app.js"), "utf8");
@@ -623,7 +644,7 @@ test("knowledge proposals keep three approval actions on one mobile row", async 
 test("sync settings use the five domain groups", async () => {
   const root = resolve(import.meta.dirname, "..");
   const {bindSyncSettings, isSyncSettingsFormEditing, renderSyncSettings, syncPreviewMessage, syncSettingsPayload} = await import(pathToFileURL(resolve(root, "dist", "sync_settings.js")));
-  const html = renderSyncSettings({scope: "default", enabled: false, endpoint: "", device_id: "", device_name: "device", interval_seconds: 300, token_configured: false, passphrase_configured: false}, {scope: "default", cursor: "", last_error: ""}, 0, []);
+  const html = renderSyncSettings({scope: "default", enabled: false, endpoint: "", device_id: "", device_name: "device", interval_seconds: 300, token_configured: false, passphrase_configured: false}, {scope: "default", cursor: "", last_error: ""}, 0, [], {upserts: 3, deletes: 2, remote_upserts: 4, remote_deletes: 1, pending: 0, conflicts: 0}, {running: true, phase: "pulling", completed: 5, total: 10});
   assert.match(html, /sync-domain-grid/);
   for (const label of ["项目", "任务", "知识库", "模型", "代理"]) assert.match(html, new RegExp(label));
   assert.ok(html.indexOf("项目") < html.indexOf("任务") && html.indexOf("任务") < html.indexOf("知识库"));
@@ -635,8 +656,10 @@ test("sync settings use the five domain groups", async () => {
   );
   assert.deepEqual(payload, {enabled: true, endpoint: "https://sync.example.com", device_id: "dev_existing", device_name: "Laptop", interval_seconds: 60, registration_code: "one-time-code", passphrase: "long-passphrase", clear_passphrase: false});
   assert.doesNotMatch(html, /provider_ids|env_group_ids|codex_account_ids/);
-  assert.match(syncPreviewMessage({upserts: 3, deletes: 2, pending: 1, conflicts: 4}), /新增\/更新 3 项、删除 2 项.*队列 1 项、冲突 4 项/);
-  assert.equal(syncPreviewMessage({upserts: 3, deletes: 2, pending: 0, conflicts: 1}, true), "同步完成：上传 3，删除 2，剩余 0，冲突 1");
+  assert.match(html, /远端待更新[\s\S]*?<strong>4<\/strong>/);
+  assert.match(html, /data-sync-progress[\s\S]*?value="5"/);
+  assert.match(syncPreviewMessage({upserts: 3, deletes: 2, remote_upserts: 4, remote_deletes: 1, pending: 1, conflicts: 4}), /远端将更新本机 4 项、删除 1 项/);
+  assert.equal(syncPreviewMessage({upserts: 3, deletes: 2, remote_upserts: 4, remote_deletes: 1, pending: 0, conflicts: 1}, true), "同步完成：上传 3，本机删除 2，拉取更新 4，远端删除 1，剩余 0，冲突 1");
 
   const editingForm = {dataset: {syncDirty: "true"}, contains: node => node === "sync-field"};
   assert.equal(isSyncSettingsFormEditing(editingForm, null), true);

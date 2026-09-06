@@ -175,6 +175,69 @@ func TestKnowledgeExportKeyTracksStatusAndFeedbackWithoutRevisionChange(t *testi
 	}
 }
 
+func TestProductLineExportIsStableOrderedAndDependencyChecked(t *testing.T) {
+	ctx, source, now := context.Background(), businessStore(t), time.Now().UTC()
+	project := domain.Project{ID: "product-line-project", Name: "Project", CreatedAt: now, UpdatedAt: now}
+	line := domain.ProductLine{ID: "product-line-main", ProjectID: project.ID, Name: "Main", BranchPattern: "main", Default: true, CreatedAt: now, UpdatedAt: now}
+	if err := source.CreateProject(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	if err := source.CreateProductLine(ctx, line); err != nil {
+		t.Fatal(err)
+	}
+
+	export := func() ([]domain.SyncObject, string) {
+		t.Helper()
+		objects, err := ExportBusinessObjectsForDevice(ctx, source, "product-line-owner")
+		if err != nil {
+			t.Fatal(err)
+		}
+		projectIndex, lineIndex, lineKey := -1, -1, ""
+		for index, object := range objects {
+			switch {
+			case object.Type == TypeProject && object.ID == project.ID:
+				projectIndex = index
+			case object.Type == TypeProductLine && object.ID == line.ID:
+				lineIndex, lineKey = index, object.IdempotencyKey
+			}
+		}
+		if projectIndex < 0 || lineIndex <= projectIndex || lineKey == "" {
+			t.Fatalf("dependency order project=%d product_line=%d key=%q", projectIndex, lineIndex, lineKey)
+		}
+		return objects, lineKey
+	}
+	_, firstKey := export()
+	_, stableKey := export()
+	if stableKey != firstKey {
+		t.Fatalf("unchanged product line key changed: %q != %q", stableKey, firstKey)
+	}
+	line.Name = "Main renamed"
+	// A payload change cannot collide even if a caller retains the timestamp.
+	if err := source.UpdateProductLine(ctx, line); err != nil {
+		t.Fatal(err)
+	}
+	_, updatedKey := export()
+	if updatedKey == firstKey {
+		t.Fatalf("changed product line reused idempotency key %q", updatedKey)
+	}
+
+	destination := businessStore(t)
+	raw, _ := json.Marshal(line)
+	object := domain.SyncObject{Type: TypeProductLine, ID: line.ID, Operation: "upsert", Payload: raw, SourceVersion: timeVersion(line.UpdatedAt), IdempotencyKey: updatedKey}
+	if err := applyBusinessObject(ctx, destination, object); err == nil || !strings.Contains(err.Error(), "project dependency") {
+		t.Fatalf("product line applied before project: %v", err)
+	}
+	if err := applyBusinessObject(ctx, destination, graphObject(t, TypeProject, project.ID, "product-line-owner", project.ID, "", project)); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyBusinessObject(ctx, destination, object); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := destination.ProductLine(ctx, line.ID); err != nil || got.Name != line.Name || got.ProjectID != project.ID {
+		t.Fatalf("synced product line=%#v err=%v", got, err)
+	}
+}
+
 func TestApplyBusinessObjectVersionConflict(t *testing.T) {
 	ctx, db, now := context.Background(), businessStore(t), time.Now().UTC()
 	remote := domain.KnowledgeEntry{ID: "k1", Scope: "global", Type: "practice", Title: "remote", Body: "one", Revision: 1, CreatedAt: now, UpdatedAt: now}

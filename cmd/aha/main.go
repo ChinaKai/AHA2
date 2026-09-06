@@ -237,6 +237,7 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 		CodexAccounts:     codexAccounts,
 		AgentCapabilities: agentCapabilities,
 		ManagedProcesses:  managedProcesses,
+		Version:           version,
 	})
 	if options.allowCrossOrigin {
 		logger.Warn("Origin host validation disabled")

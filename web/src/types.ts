@@ -11,6 +11,8 @@ export interface SystemInfo {
   arch: string;
   wsl_available: boolean;
   wsl_distros: string[];
+	version?: string;
+	started_at?: string;
 }
 
 export interface ProxySettings {
@@ -44,8 +46,21 @@ export interface SyncState {
 export interface SyncPreview {
   upserts: number;
   deletes: number;
+	remote_upserts: number;
+	remote_deletes: number;
+	remote_truncated?: boolean;
   pending: number;
   conflicts: number;
+}
+
+export interface SyncRunProgress {
+	running: boolean;
+	phase: string;
+	completed: number;
+	total: number;
+	error?: string;
+	started_at?: string;
+	updated_at?: string;
 }
 
 export interface SyncConflict {

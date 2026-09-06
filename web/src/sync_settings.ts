@@ -1,6 +1,6 @@
 import {api} from "./api.js";
 import {icon} from "./icons.js";
-import type {SyncConflict, SyncPreview, SyncSettings, SyncState} from "./types.js";
+import type {SyncConflict, SyncPreview, SyncRunProgress, SyncSettings, SyncState} from "./types.js";
 
 function escapeHTML(value: unknown): string {
   return String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#039;");
@@ -21,7 +21,7 @@ const syncDomains = [
 ] as const;
 
 function syncDomainForType(value: string): string {
-  if (["project", "workspace"].includes(value)) return "项目";
+  if (["project", "product_line", "workspace"].includes(value)) return "项目";
   if (["task", "task_agent", "round", "turn", "conversation", "task_memory", "attachment"].includes(value)) return "任务";
   if (["knowledge", "skill"].includes(value)) return "知识库";
   if (["provider", "model", "env_group", "codex_account", "secret_bundle"].includes(value)) return "模型";
@@ -29,7 +29,30 @@ function syncDomainForType(value: string): string {
   return "其他";
 }
 
-export function renderSyncSettings(settings: SyncSettings, state: SyncState, pending: number, conflicts: SyncConflict[]): string {
+const phaseLabels: Record<string, string> = {preparing: "分析差异", pulling: "拉取远端变化", replaying: "回放远端历史", pushing: "上传本机变化", finalizing: "确认最终状态", complete: "同步完成", failed: "同步失败"};
+
+function syncProgressHTML(run: SyncRunProgress): string {
+  const total = Math.max(0, Number(run.total || 0));
+  const completed = Math.min(total, Math.max(0, Number(run.completed || 0)));
+  return `<div id="sync-run-progress" class="sync-run-progress ${run.running ? "running" : ""}" ${run.running ? "" : "hidden"}><div><strong data-sync-phase>${escapeHTML(phaseLabels[run.phase] || run.phase || "准备同步")}</strong><span data-sync-count>${completed} / ${total}</span></div><progress data-sync-progress max="${Math.max(1, total)}" value="${completed}"></progress></div>`;
+}
+
+function updateSyncProgress(run: SyncRunProgress): void {
+  const root = document.querySelector<HTMLElement>("#sync-run-progress");
+  if (!root) return;
+  root.hidden = !run.running;
+  root.classList.toggle("running", run.running);
+  const total = Math.max(0, Number(run.total || 0));
+  const completed = Math.min(total, Math.max(0, Number(run.completed || 0)));
+  const phase = root.querySelector<HTMLElement>("[data-sync-phase]");
+  const count = root.querySelector<HTMLElement>("[data-sync-count]");
+  const progress = root.querySelector<HTMLProgressElement>("[data-sync-progress]");
+  if (phase) phase.textContent = phaseLabels[run.phase] || run.phase || "准备同步";
+  if (count) count.textContent = `${completed} / ${total}`;
+  if (progress) { progress.max = Math.max(1, total); progress.value = completed; }
+}
+
+export function renderSyncSettings(settings: SyncSettings, state: SyncState, pending: number, conflicts: SyncConflict[], preview: SyncPreview, run: SyncRunProgress): string {
   return `<section class="page sync-page">
     <header class="page-head"><div><h1>同步</h1><p>配置本机与 AHA 中心的通用对象同步。认证口令只保存在本机 Secret Store。</p></div><div class="actions"><button id="run-sync" class="primary">${icon("refresh")}立即同步</button></div></header>
     <nav class="sync-domain-grid" aria-label="同步分类">${syncDomains.map((domain, index) => `<article><span>${index + 1}</span>${icon(domain.icon)}<div><strong>${domain.label}</strong><small>${domain.detail}</small></div></article>`).join("")}</nav>
@@ -50,7 +73,7 @@ export function renderSyncSettings(settings: SyncSettings, state: SyncState, pen
         </div>
         <div class="dialog-actions sync-actions"><button class="primary" type="submit">${icon("save")}保存设置</button></div>
       </form>
-      <section class="panel sync-status-panel"><div class="panel-head"><strong>同步状态</strong><span>${pending} 项待推送</span></div><div class="sync-domain-status">${syncDomains.map(domain => `<span>${icon(domain.icon)}${domain.label}</span>`).join("")}</div><dl class="sync-status-grid">
+      <section class="panel sync-status-panel"><div class="panel-head"><strong>同步状态</strong><span>${pending} 项待推送</span></div><div class="sync-diff-summary"><span>本机待上传 <strong>${preview.upserts || 0}</strong></span><span>本机待删除 <strong>${preview.deletes || 0}</strong></span><span>远端待更新 <strong>${preview.remote_upserts || 0}</strong></span><span>远端待删除 <strong>${preview.remote_deletes || 0}</strong></span></div>${syncProgressHTML(run)}<div class="sync-domain-status">${syncDomains.map(domain => `<span>${icon(domain.icon)}${domain.label}</span>`).join("")}</div><dl class="sync-status-grid">
         <div><dt>游标</dt><dd>${escapeHTML(state.cursor || "—")}</dd></div><div><dt>最近推送</dt><dd>${time(state.last_push_at)}</dd></div><div><dt>最近拉取</dt><dd>${time(state.last_pull_at)}</dd></div><div><dt>最近错误</dt><dd class="${state.last_error ? "bad" : ""}">${escapeHTML(state.last_error || "无")}</dd></div>
       </dl></section>
     </div>
@@ -63,8 +86,8 @@ export function syncSettingsPayload(settings: SyncSettings, form: Pick<FormData,
 }
 
 export function syncPreviewMessage(preview: SyncPreview, completed = false): string {
-  if (completed) return `同步完成：上传 ${preview.upserts}，删除 ${preview.deletes}，剩余 ${preview.pending}，冲突 ${preview.conflicts}`;
-  return `本次将上传新增/更新 ${preview.upserts} 项、删除 ${preview.deletes} 项；当前队列 ${preview.pending} 项、冲突 ${preview.conflicts} 项。是否继续？`;
+  if (completed) return `同步完成：上传 ${preview.upserts}，本机删除 ${preview.deletes}，拉取更新 ${preview.remote_upserts || 0}，远端删除 ${preview.remote_deletes || 0}，剩余 ${preview.pending}，冲突 ${preview.conflicts}`;
+  return `本机将上传 ${preview.upserts} 项、删除 ${preview.deletes} 项；远端将更新本机 ${preview.remote_upserts || 0} 项、删除 ${preview.remote_deletes || 0} 项；当前队列 ${preview.pending} 项、冲突 ${preview.conflicts} 项。是否继续？`;
 }
 
 interface SyncSettingsFormState {
@@ -77,7 +100,7 @@ export function isSyncSettingsFormEditing(form: SyncSettingsFormState | null, ac
   return form.dataset?.syncDirty === "true" || Boolean(activeElement && form.contains?.(activeElement));
 }
 
-export function bindSyncSettings(options: {settings: SyncSettings; refresh: () => Promise<void>; setMessage: (kind: "error" | "notice", message: string) => void; updateSettings?: (payload: Record<string, unknown>) => Promise<unknown>; flushDeferredRender?: () => void}): void {
+export function bindSyncSettings(options: {settings: SyncSettings; refresh: () => Promise<void>; pollStatus?: () => Promise<SyncRunProgress>; setMessage: (kind: "error" | "notice", message: string) => void; updateSettings?: (payload: Record<string, unknown>) => Promise<unknown>; flushDeferredRender?: () => void}): void {
   const settingsForm = document.querySelector<HTMLFormElement>("#sync-settings-form");
   settingsForm?.addEventListener("input", () => { settingsForm.dataset.syncDirty = "true"; });
   settingsForm?.addEventListener("change", () => { settingsForm.dataset.syncDirty = "true"; });
@@ -106,8 +129,21 @@ export function bindSyncSettings(options: {settings: SyncSettings; refresh: () =
     button.disabled = true;
     try {
       const {preview} = await api.syncPreview();
-      if ((preview.upserts || preview.deletes || preview.pending || preview.conflicts) && !window.confirm(syncPreviewMessage(preview))) return;
-      const result = await api.runSync();
+      if ((preview.upserts || preview.deletes || preview.remote_upserts || preview.remote_deletes || preview.pending || preview.conflicts) && !window.confirm(syncPreviewMessage(preview))) return;
+      updateSyncProgress({running: true, phase: "preparing", completed: 0, total: preview.upserts + preview.deletes + (preview.remote_upserts || 0) + (preview.remote_deletes || 0)});
+      const request = api.runSync();
+      const timer = window.setInterval(() => {
+        void options.pollStatus?.().then(updateSyncProgress).catch(() => {});
+      }, 400);
+      let result;
+      try {
+        result = await request;
+      } finally {
+        window.clearInterval(timer);
+		if (options.pollStatus) {
+			try { updateSyncProgress(await options.pollStatus()); } catch { /* final refresh reports errors */ }
+		}
+      }
       options.setMessage("notice", syncPreviewMessage(result.summary, true));
       await options.refresh();
     } catch (error) {

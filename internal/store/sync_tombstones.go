@@ -78,6 +78,10 @@ func deleteSharedRow(ctx context.Context, tx *sql.Tx, objectType, objectID strin
 	var result sql.Result
 	var err error
 	switch objectType {
+	case "project":
+		result, err = tx.ExecContext(ctx, `DELETE FROM projects WHERE id=?`, objectID)
+	case "product_line":
+		result, err = tx.ExecContext(ctx, `DELETE FROM product_lines WHERE id=?`, objectID)
 	case "knowledge":
 		result, err = tx.ExecContext(ctx, `DELETE FROM knowledge_entries WHERE id=? AND is_index=0`, objectID)
 	case "knowledge_proposal":
@@ -101,12 +105,64 @@ func deleteSharedRow(ctx context.Context, tx *sql.Tx, objectType, objectID strin
 	return result.RowsAffected()
 }
 
+type cascadedProductLine struct {
+	id      string
+	version string
+}
+
+func projectProductLines(ctx context.Context, tx *sql.Tx, projectID string) ([]cascadedProductLine, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT id,updated_at FROM product_lines WHERE project_id=? ORDER BY id`, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []cascadedProductLine
+	for rows.Next() {
+		var item cascadedProductLine
+		if err := rows.Scan(&item.id, &item.version); err != nil {
+			return nil, err
+		}
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
+func insertProjectProductLineTombstones(ctx context.Context, tx *sql.Tx, items []cascadedProductLine, projectSyncKey string, deletedAt time.Time) error {
+	for _, child := range items {
+		var exists bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sync_tombstones WHERE object_type='product_line' AND object_id=?)`, child.id).Scan(&exists); err != nil {
+			return err
+		}
+		if exists {
+			continue
+		}
+		version := child.version
+		if version == "" {
+			version = timeString(deletedAt)
+		}
+		if err := insertSyncTombstone(ctx, tx, domain.SyncTombstone{
+			ObjectType: "product_line", ObjectID: child.id, Version: version,
+			SyncKey: projectSyncKey + ":product_line:" + child.id, DeletedAt: deletedAt.UTC(),
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *Store) deleteSharedObject(ctx context.Context, objectType, objectID, logicalVersion string, deletedAt time.Time) (domain.SyncTombstone, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return domain.SyncTombstone{}, err
 	}
 	defer tx.Rollback()
+	var productLines []cascadedProductLine
+	if objectType == "project" {
+		productLines, err = projectProductLines(ctx, tx, objectID)
+		if err != nil {
+			return domain.SyncTombstone{}, err
+		}
+	}
 	if logicalVersion == "" {
 		logicalVersion = timeString(deletedAt)
 	}
@@ -122,6 +178,9 @@ func (s *Store) deleteSharedObject(ctx context.Context, objectType, objectID, lo
 		return domain.SyncTombstone{}, sql.ErrNoRows
 	}
 	if err := insertSyncTombstone(ctx, tx, item); err != nil {
+		return domain.SyncTombstone{}, err
+	}
+	if err := insertProjectProductLineTombstones(ctx, tx, productLines, item.SyncKey, deletedAt); err != nil {
 		return domain.SyncTombstone{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -156,6 +215,13 @@ func (s *Store) ApplySyncTombstone(ctx context.Context, objectType, objectID, sy
 		return domain.SyncTombstone{}, err
 	}
 	defer tx.Rollback()
+	var productLines []cascadedProductLine
+	if objectType == "project" {
+		productLines, err = projectProductLines(ctx, tx, objectID)
+		if err != nil {
+			return domain.SyncTombstone{}, err
+		}
+	}
 	item := domain.SyncTombstone{ObjectType: objectType, ObjectID: objectID, Version: version, SyncKey: syncKey, DeletedAt: deletedAt.UTC()}
 	if existing, err := scanSyncTombstone(tx.QueryRowContext(ctx, `SELECT object_type,object_id,version,sync_key,deleted_at FROM sync_tombstones WHERE object_type=? AND object_id=?`, objectType, objectID)); err == nil {
 		item = existing
@@ -166,6 +232,9 @@ func (s *Store) ApplySyncTombstone(ctx context.Context, objectType, objectID, sy
 		return domain.SyncTombstone{}, err
 	}
 	if err := insertSyncTombstone(ctx, tx, item); err != nil {
+		return domain.SyncTombstone{}, err
+	}
+	if err := insertProjectProductLineTombstones(ctx, tx, productLines, item.SyncKey, deletedAt); err != nil {
 		return domain.SyncTombstone{}, err
 	}
 	if err := tx.Commit(); err != nil {

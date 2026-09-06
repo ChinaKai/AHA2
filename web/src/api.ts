@@ -14,6 +14,7 @@ import type {
   ProxySettings,
   SyncSettings,
   SyncPreview,
+	SyncRunProgress,
   SyncState,
   SyncConflict,
   PromptTemplate,
@@ -93,7 +94,7 @@ class APIClient {
     return this.request("/api/v1/settings/sync", {method: "PUT", body: JSON.stringify(payload)});
   }
 
-  syncStatus(): Promise<{state: SyncState; pending: number}> {
+  syncStatus(): Promise<{state: SyncState; pending: number; run: SyncRunProgress}> {
     return this.request("/api/v1/settings/sync/status");
   }
 
