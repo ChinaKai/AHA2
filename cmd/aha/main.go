@@ -33,32 +33,78 @@ import (
 	"github.com/ChinaKai/AHA2/internal/workspace"
 )
 
-const version = "0.2.1"
+var version = "dev"
 
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "version" {
+	command, args, err := parseCommand(os.Args[1:])
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	if command == "version" {
 		fmt.Println("aha2", version)
 		return
 	}
-	command := "serve"
-	args := os.Args[1:]
-	if len(args) > 0 && args[0] == "serve" {
-		args = args[1:]
+	switch command {
+	case "serve":
+		err = serve(args)
+	case "service-run":
+		err = runPlatformService(args)
 	}
-	if len(os.Args) > 1 && os.Args[1] != "serve" && os.Args[1] != "version" && os.Args[1][0] != '-' {
-		fmt.Fprintf(os.Stderr, "unknown command %q\n", os.Args[1])
-		os.Exit(2)
-	}
-	if command == "serve" {
-		if err := serve(args); err != nil {
-			slog.Error("AHA2 stopped", "error", err)
-			os.Exit(1)
-		}
+	if err != nil {
+		slog.Error("AHA2 stopped", "error", err)
+		os.Exit(1)
 	}
 }
 
+func parseCommand(args []string) (string, []string, error) {
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		return "serve", args, nil
+	}
+	switch args[0] {
+	case "serve":
+		return "serve", args[1:], nil
+	case "version":
+		if len(args) != 1 {
+			return "", nil, fmt.Errorf("version does not accept arguments")
+		}
+		return "version", nil, nil
+	case "service":
+		if len(args) < 2 || args[1] != "run" {
+			return "", nil, fmt.Errorf("usage: aha2 service run [serve flags]")
+		}
+		return "service-run", args[2:], nil
+	default:
+		return "", nil, fmt.Errorf("unknown command %q", args[0])
+	}
+}
+
+type serveOptions struct {
+	listen                string
+	dataDir               string
+	setupToken            string
+	setupTokenFile        string
+	secureCookie          bool
+	allowCrossOrigin      bool
+	agentAPIURL           string
+	allowInsecureAgentAPI bool
+	logLevel              string
+	codexBinary           string
+	claudeBinary          string
+}
+
 func serve(args []string) error {
-	flags := flag.NewFlagSet("aha2 serve", flag.ContinueOnError)
+	options, err := parseServeOptions("aha2 serve", args)
+	if err != nil {
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return runControlPlane(ctx, options, nil)
+}
+
+func parseServeOptions(name string, args []string) (serveOptions, error) {
+	flags := flag.NewFlagSet(name, flag.ContinueOnError)
 	listen := flags.String("listen", envOr("AHA2_LISTEN", "0.0.0.0:8766"), "HTTP listen address")
 	dataDir := flags.String("data-dir", envOr("AHA2_DATA_DIR", ".data"), "AHA2 data directory")
 	setupToken := flags.String("setup-token", os.Getenv("AHA2_SETUP_TOKEN"), "one-time owner setup token")
@@ -71,10 +117,21 @@ func serve(args []string) error {
 	codexBinary := flags.String("codex-bin", envOr("AHA2_CODEX_BIN", "codex"), "Codex executable")
 	claudeBinary := flags.String("claude-bin", envOr("AHA2_CLAUDE_BIN", "claude"), "Claude Code executable")
 	if err := flags.Parse(args); err != nil {
-		return err
+		return serveOptions{}, err
 	}
+	if flags.NArg() != 0 {
+		return serveOptions{}, fmt.Errorf("unexpected arguments: %s", strings.Join(flags.Args(), " "))
+	}
+	return serveOptions{
+		listen: *listen, dataDir: *dataDir, setupToken: *setupToken, setupTokenFile: *setupTokenFile,
+		secureCookie: *secureCookie, allowCrossOrigin: *allowCrossOrigin, agentAPIURL: *agentAPIURL,
+		allowInsecureAgentAPI: *allowInsecureAgentAPI, logLevel: *logLevel, codexBinary: *codexBinary, claudeBinary: *claudeBinary,
+	}, nil
+}
+
+func runControlPlane(ctx context.Context, options serveOptions, ready func()) error {
 	level := new(slog.LevelVar)
-	switch *logLevel {
+	switch options.logLevel {
 	case "debug":
 		level.Set(slog.LevelDebug)
 	case "warn":
@@ -86,23 +143,21 @@ func serve(args []string) error {
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
 	slog.SetDefault(logger)
-	absoluteDataDir, err := filepath.Abs(*dataDir)
+	absoluteDataDir, err := filepath.Abs(options.dataDir)
 	if err != nil {
 		return err
 	}
 	if err := os.MkdirAll(absoluteDataDir, 0o700); err != nil {
 		return fmt.Errorf("create data dir: %w", err)
 	}
-	if *setupTokenFile == "" {
-		*setupTokenFile = filepath.Join(absoluteDataDir, "setup-token")
+	if options.setupTokenFile == "" {
+		options.setupTokenFile = filepath.Join(absoluteDataDir, "setup-token")
 	}
-	if *setupToken == "" {
-		if value, readErr := os.ReadFile(*setupTokenFile); readErr == nil {
-			*setupToken = strings.TrimSpace(string(value))
+	if options.setupToken == "" {
+		if value, readErr := os.ReadFile(options.setupTokenFile); readErr == nil {
+			options.setupToken = strings.TrimSpace(string(value))
 		}
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	database, err := store.Open(ctx, filepath.Join(absoluteDataDir, "aha2.db"))
 	if err != nil {
 		return err
@@ -124,24 +179,24 @@ func serve(args []string) error {
 	if err != nil {
 		return err
 	}
-	if !registrationOpen && *setupToken == "" {
-		*setupToken, err = generatedSetupToken()
+	if !registrationOpen && options.setupToken == "" {
+		options.setupToken, err = generatedSetupToken()
 		if err != nil {
 			return err
 		}
-		if err := os.WriteFile(*setupTokenFile, []byte(*setupToken+"\n"), 0o600); err != nil {
+		if err := os.WriteFile(options.setupTokenFile, []byte(options.setupToken+"\n"), 0o600); err != nil {
 			return fmt.Errorf("write setup token file: %w", err)
 		}
-		if err := os.Chmod(*setupTokenFile, 0o600); err != nil {
+		if err := os.Chmod(options.setupTokenFile, 0o600); err != nil {
 			return fmt.Errorf("restrict setup token file: %w", err)
 		}
-		logger.Warn("owner registration is open", "setup_token_file", *setupTokenFile)
+		logger.Warn("owner registration is open", "setup_token_file", options.setupTokenFile)
 	}
-	authService := auth.NewService(database, *setupToken, 14*24*time.Hour)
-	codexAccounts := codexaccount.New(ctx, database, secretStore, absoluteDataDir, *codexBinary)
+	authService := auth.NewService(database, options.setupToken, 14*24*time.Hour)
+	codexAccounts := codexaccount.New(ctx, database, secretStore, absoluteDataDir, options.codexBinary)
 	executor := execution.Executor{
-		Codex:  backend.Codex{Binary: *codexBinary},
-		Claude: backend.Claude{Binary: *claudeBinary},
+		Codex:  backend.Codex{Binary: options.codexBinary},
+		Claude: backend.Claude{Binary: options.claudeBinary},
 	}
 	appService := app.NewService(database, secretStore, executor)
 	appService.SetWorkspacePreparer(execution.WorkspacePreparer{})
@@ -149,11 +204,11 @@ func serve(args []string) error {
 	agentCapabilities := agentapi.NewCapabilities()
 	managedProcesses := managedprocess.NewManager()
 	defer managedProcesses.Close()
-	resolvedAgentAPIURL := resolveAgentAPIURL(*listen, *agentAPIURL)
-	if err := validateAgentAPIURL(resolvedAgentAPIURL, *allowInsecureAgentAPI); err != nil {
+	resolvedAgentAPIURL := resolveAgentAPIURL(options.listen, options.agentAPIURL)
+	if err := validateAgentAPIURL(resolvedAgentAPIURL, options.allowInsecureAgentAPI); err != nil {
 		return err
 	}
-	if *allowInsecureAgentAPI && strings.HasPrefix(strings.ToLower(resolvedAgentAPIURL), "http://") {
+	if options.allowInsecureAgentAPI && strings.HasPrefix(strings.ToLower(resolvedAgentAPIURL), "http://") {
 		logger.Warn("insecure Agent API URL enabled", "host", mustAgentAPIHost(resolvedAgentAPIURL))
 	}
 	appService.SetAgentAPI(agentCapabilities, resolvedAgentAPIURL)
@@ -175,7 +230,7 @@ func serve(args []string) error {
 	}
 	apiServer := httpapi.New(httpapi.Config{
 		Store: database, Auth: authService, App: appService, Web: webassets.FS(),
-		Logger: logger, SecureCookie: *secureCookie, AllowCrossOrigin: *allowCrossOrigin,
+		Logger: logger, SecureCookie: options.secureCookie, AllowCrossOrigin: options.allowCrossOrigin,
 		DetectWorkspace:   workspace.Detect,
 		Secrets:           secretStore,
 		Hardware:          hardwareManager,
@@ -183,21 +238,29 @@ func serve(args []string) error {
 		AgentCapabilities: agentCapabilities,
 		ManagedProcesses:  managedProcesses,
 	})
-	if *allowCrossOrigin {
+	if options.allowCrossOrigin {
 		logger.Warn("Origin host validation disabled")
 	}
 	server := &http.Server{
-		Addr:              *listen,
+		Addr:              options.listen,
 		Handler:           apiServer.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       90 * time.Second,
 		MaxHeaderBytes:    1 << 20,
 	}
+	listener, err := net.Listen("tcp", options.listen)
+	if err != nil {
+		return err
+	}
+	defer listener.Close()
 	errors := make(chan error, 1)
 	go func() {
-		logger.Info("AHA2 listening", "address", *listen, "data_dir", absoluteDataDir)
-		errors <- server.ListenAndServe()
+		logger.Info("AHA2 listening", "address", listener.Addr().String(), "data_dir", absoluteDataDir)
+		errors <- server.Serve(listener)
 	}()
+	if ready != nil {
+		ready()
+	}
 	select {
 	case <-ctx.Done():
 		shutdownContext, cancel := context.WithTimeout(context.Background(), 15*time.Second)

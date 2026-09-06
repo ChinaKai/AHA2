@@ -22,6 +22,28 @@ http://<Windows 主机 IP>:8766
 
 公网部署必须在 AHA2 前增加 HTTPS 反向代理，不应直接公开明文 HTTP。
 
+## Windows 机器级安装
+
+GitHub Release 同时提供便携版 `aha2-windows-amd64.exe` 与机器级安装包
+`AHA2-Setup-x64.exe`。安装包需要管理员权限，安装到 `Program Files\AHA2`，并创建：
+
+```text
+C:\ProgramData\AHA2
+```
+
+安装程序将 `AHA2` 注册为 delayed-auto Windows 服务，服务命令固定为：
+
+```text
+aha2.exe service run --listen 127.0.0.1:8766 --data-dir C:\ProgramData\AHA2
+```
+
+服务异常退出时由 Windows Service Control Manager 依次在 5 秒、15 秒和 60 秒后重启。
+升级安装会先停止服务，替换程序后重新配置并启动服务。卸载会停止并删除服务，但默认保留
+`C:\ProgramData\AHA2`，避免误删数据库、Secret Store 和 Setup Token；确认不再需要时应由管理员另行备份并删除。
+
+完成页可以选择打开 `http://127.0.0.1:8766`。安装包旁的
+`AHA2-Setup-x64.exe.sha256` 可用于校验下载完整性。
+
 ## 首次 Owner 初始化
 
 首次启动生成一次性 Setup Token：
@@ -113,6 +135,23 @@ aha2-windows-amd64.exe
 aha2-windows-arm64.exe
 aha2-darwin-amd64
 aha2-darwin-arm64
+AHA2-Setup-x64.exe
+AHA2-Setup-x64.exe.sha256
+```
+
+本地仅校验安装器定义、不生成二进制：
+
+```powershell
+.\scripts\build-windows-installer.ps1 -ValidateOnly
+```
+
+已有 Windows amd64 主程序且安装了 Inno Setup 6 时，可构建安装包：
+
+```powershell
+.\scripts\build-windows-installer.ps1 `
+  -InputExe .\dist\aha2-windows-amd64.exe `
+  -OutputDir .\dist\installer `
+  -Version 0.1.0
 ```
 
 ## 当前边界
