@@ -60,14 +60,19 @@ export function renderSyncSettings(settings: SyncSettings, state: SyncState, pen
   </section>`;
 }
 
-export function bindSyncSettings(options: {refresh: () => Promise<void>; setMessage: (kind: "error" | "notice", message: string) => void}): void {
+export function syncSettingsPayload(settings: SyncSettings, form: Pick<FormData, "get" | "getAll">): Record<string, unknown> {
+  return {enabled: form.get("enabled") === "on", endpoint: String(form.get("endpoint") || ""), device_id: settings.device_id, device_name: String(form.get("device_name") || ""), interval_seconds: Number(form.get("interval_seconds") || 300), registration_code: String(form.get("registration_code") || ""), passphrase: String(form.get("passphrase") || ""), clear_passphrase: form.get("clear_passphrase") === "on", provider_ids: form.getAll("provider_ids").map(String), env_group_ids: form.getAll("env_group_ids").map(String), codex_account_ids: form.getAll("codex_account_ids").map(String)};
+}
+
+export function bindSyncSettings(options: {settings: SyncSettings; refresh: () => Promise<void>; setMessage: (kind: "error" | "notice", message: string) => void; updateSettings?: (payload: Record<string, unknown>) => Promise<unknown>}): void {
   document.querySelector<HTMLFormElement>("#sync-settings-form")?.addEventListener("submit", event => {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     const button = event.currentTarget.querySelector<HTMLButtonElement>('button[type="submit"]');
     if (button) button.disabled = true;
-    const payload = {enabled: form.get("enabled") === "on", endpoint: String(form.get("endpoint") || ""), device_id: settings.device_id, device_name: String(form.get("device_name") || ""), interval_seconds: Number(form.get("interval_seconds") || 300), registration_code: String(form.get("registration_code") || ""), passphrase: String(form.get("passphrase") || ""), clear_passphrase: form.get("clear_passphrase") === "on", provider_ids: form.getAll("provider_ids").map(String), env_group_ids: form.getAll("env_group_ids").map(String), codex_account_ids: form.getAll("codex_account_ids").map(String)};
-    void api.updateSyncSettings(payload).then(async () => { options.setMessage("notice", "同步设置已保存"); await options.refresh(); }).catch(error => options.setMessage("error", error instanceof Error ? error.message : String(error))).finally(() => { if (button) button.disabled = false; });
+    const payload = syncSettingsPayload(options.settings, form);
+    const updateSettings = options.updateSettings || (value => api.updateSyncSettings(value));
+    void updateSettings(payload).then(async () => { options.setMessage("notice", "同步设置已保存"); await options.refresh(); }).catch(error => options.setMessage("error", error instanceof Error ? error.message : String(error))).finally(() => { if (button) button.disabled = false; });
   });
   document.querySelector<HTMLButtonElement>("#run-sync")?.addEventListener("click", event => {
     const button = event.currentTarget;

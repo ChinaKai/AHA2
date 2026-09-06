@@ -604,9 +604,43 @@ test("knowledge proposals keep three approval actions on one mobile row", async 
 
 test("sync settings use the five domain groups", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const {renderSyncSettings} = await import(pathToFileURL(resolve(root, "dist", "sync_settings.js")));
+  const {bindSyncSettings, renderSyncSettings, syncSettingsPayload} = await import(pathToFileURL(resolve(root, "dist", "sync_settings.js")));
   const html = renderSyncSettings({scope: "default", enabled: false, endpoint: "", device_id: "", device_name: "device", interval_seconds: 300, token_configured: false, passphrase_configured: false}, {scope: "default", cursor: "", last_error: ""}, 0, [], [], [], []);
   assert.match(html, /sync-domain-grid/);
   for (const label of ["项目", "任务", "知识库", "模型", "代理"]) assert.match(html, new RegExp(label));
   assert.ok(html.indexOf("项目") < html.indexOf("任务") && html.indexOf("任务") < html.indexOf("知识库"));
+
+  const values = new Map([["enabled", "on"], ["endpoint", "https://sync.example.com"], ["device_name", "Laptop"], ["interval_seconds", "60"], ["registration_code", "one-time-code"], ["passphrase", "long-passphrase"]]);
+  const selections = new Map([["provider_ids", ["provider-one"]], ["env_group_ids", ["env-one"]], ["codex_account_ids", ["account-one"]]]);
+  const payload = syncSettingsPayload(
+    {scope: "default", enabled: false, endpoint: "", device_id: "dev_existing", device_name: "", interval_seconds: 300, token_configured: true, passphrase_configured: true},
+    {get: name => values.get(name) ?? null, getAll: name => selections.get(name) ?? []},
+  );
+  assert.deepEqual(payload, {enabled: true, endpoint: "https://sync.example.com", device_id: "dev_existing", device_name: "Laptop", interval_seconds: 60, registration_code: "one-time-code", passphrase: "long-passphrase", clear_passphrase: false, provider_ids: ["provider-one"], env_group_ids: ["env-one"], codex_account_ids: ["account-one"]});
+
+  let submit;
+  let saved;
+  let refreshed = false;
+  const button = {disabled: false};
+  const formElement = {addEventListener: (_type, handler) => { submit = handler; }, querySelector: () => button};
+  const originalDocument = globalThis.document;
+  const OriginalFormData = globalThis.FormData;
+  globalThis.document = {querySelector: selector => selector === "#sync-settings-form" ? formElement : null};
+  globalThis.FormData = class { get(name) { return values.get(name) ?? null; } getAll(name) { return selections.get(name) ?? []; } };
+  try {
+    bindSyncSettings({
+      settings: {scope: "default", enabled: false, endpoint: "", device_id: "dev_bound", device_name: "", interval_seconds: 300, token_configured: true, passphrase_configured: true},
+      updateSettings: async value => { saved = value; },
+      refresh: async () => { refreshed = true; },
+      setMessage: () => {},
+    });
+    submit({preventDefault: () => {}, currentTarget: formElement});
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(saved.device_id, "dev_bound");
+    assert.equal(refreshed, true);
+    assert.equal(button.disabled, false);
+  } finally {
+    if (originalDocument === undefined) delete globalThis.document; else globalThis.document = originalDocument;
+    globalThis.FormData = OriginalFormData;
+  }
 });

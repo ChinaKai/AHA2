@@ -1354,6 +1354,7 @@ function bindCommon(): void {
     setMessage,
   });
   bindSyncSettings({
+    settings: state.syncSettings,
     refresh: async () => {
       const [settings, status, conflicts] = await Promise.all([api.syncSettings(), api.syncStatus(), api.syncConflicts()]);
       state.syncSettings = settings.sync; state.syncState = status.state; state.syncPending = status.pending || 0; state.syncConflicts = conflicts.conflicts || [];
