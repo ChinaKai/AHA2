@@ -432,8 +432,15 @@ func TestKnowledgeCatalogV22(t *testing.T) {
 		}
 	}
 	applicable, err := database.ListApplicableKnowledge(ctx, project.ID, line.ID, []domain.KnowledgeStatus{domain.KnowledgeVerified})
-	if err != nil || len(applicable) != 2 {
+	if err != nil || len(applicable) != 3 || !applicable[0].IsIndex || applicable[0].Status != domain.KnowledgeVerified {
 		t.Fatalf("applicable knowledge = %#v, %v", applicable, err)
+	}
+	applicableTypes := map[string]string{}
+	for _, entry := range applicable {
+		applicableTypes[entry.ID] = entry.Type
+	}
+	if applicableTypes["knowledge-common"] != "practice" || applicableTypes["knowledge-main"] != "navigation" {
+		t.Fatalf("applicable knowledge lost a category: %#v", applicableTypes)
 	}
 	updated, err := database.FeedbackKnowledge(ctx, "knowledge-main", "helped", now.Add(time.Second).Format(time.RFC3339Nano))
 	if err != nil || updated.HelpedCount != 1 || updated.FeedbackState != "helped" {

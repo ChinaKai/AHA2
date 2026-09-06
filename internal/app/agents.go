@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -476,9 +477,24 @@ func inboxInstruction(items []domain.AgentInboxItem) string {
 	var sections []string
 	sections = append(sections, "Process the following messages routed to you by AHA. They are a fixed inbox batch. Preserve their order and source boundaries.")
 	for _, item := range items {
+		content := strings.TrimSpace(item.Content)
+		if raw, ok := item.Payload["attachments"]; ok {
+			data, _ := json.Marshal(raw)
+			var attachments []domain.Attachment
+			if json.Unmarshal(data, &attachments) == nil && len(attachments) > 0 {
+				lines := []string{"Attachments (see the attachment index in Available context):"}
+				for _, attachment := range attachments {
+					lines = append(lines, fmt.Sprintf("- %s (%s, %d bytes, id %s)", attachment.Name, attachment.MediaType, attachment.Size, attachment.ID))
+				}
+				if content != "" {
+					content += "\n\n"
+				}
+				content += strings.Join(lines, "\n")
+			}
+		}
 		sections = append(sections, fmt.Sprintf(
 			"## Inbox %d [%s from %s]\n%s",
-			item.Sequence, item.SourceKind, item.SourceAgentID, strings.TrimSpace(item.Content),
+			item.Sequence, item.SourceKind, item.SourceAgentID, content,
 		))
 	}
 	return strings.Join(sections, "\n\n")

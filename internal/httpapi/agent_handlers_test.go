@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -230,11 +231,70 @@ func TestAgentStateKnowledgeAndSkillAPIs(t *testing.T) {
 		t.Fatalf("memory=%#v", memory)
 	}
 
-	response = agentRequest(t, server.URL+"/api/v1/agent/knowledge/candidates", http.MethodPost, token, map[string]any{"candidates": []map[string]any{{"scope": "project", "type": "practice", "title": "API knowledge", "body": "Submitted during the Turn.", "confidence": 0.9}}})
+	root, err := database.EnsureKnowledgeRoot(ctx, "project", task.ProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	existingKnowledge := domain.KnowledgeEntry{
+		ID: "knowledge-existing-api", Scope: "project", ProjectID: task.ProjectID, ParentID: root.ID, Slug: "existing-api",
+		Type: "practice", Title: "Existing API knowledge", Body: "Published body", Status: domain.KnowledgeVerified,
+		Revision: 2, CreatedAt: now, UpdatedAt: now, LastVerifiedAt: now,
+	}
+	if err := database.CreateKnowledge(ctx, existingKnowledge); err != nil {
+		t.Fatal(err)
+	}
+	response = agentRequest(t, server.URL+"/api/v1/agent/knowledge/candidates", http.MethodPost, token, map[string]any{"candidates": []map[string]any{
+		{"scope": "project", "slug": "api-knowledge", "sort_order": 4, "type": "practice", "title": "API knowledge", "body": "Submitted during the Turn.", "confidence": 0.9},
+		{"scope": "project", "slug": "api-navigation", "sort_order": 5, "type": "navigation", "title": "API navigation", "body": "Navigate from the Turn.", "confidence": 0.9},
+	}})
 	var knowledgePayload map[string]any
 	decodeResponse(t, response, &knowledgePayload)
-	if response.StatusCode != http.StatusCreated || len(knowledgePayload["knowledge"].([]any)) != 1 {
+	knowledgeItems, _ := knowledgePayload["knowledge"].([]any)
+	proposalItems, _ := knowledgePayload["proposals"].([]any)
+	if response.StatusCode != http.StatusCreated || len(knowledgeItems) != 2 || len(proposalItems) != 2 {
 		t.Fatalf("knowledge status=%d payload=%#v", response.StatusCode, knowledgePayload)
+	}
+	knowledge := knowledgeItems[0].(map[string]any)
+	if knowledge["parent_id"] != root.ID || knowledge["slug"] != "api-knowledge" || knowledge["sort_order"].(float64) != 4 || knowledge["is_index"] != false {
+		t.Fatalf("knowledge status=%d payload=%#v", response.StatusCode, knowledgePayload)
+	}
+	navigation := knowledgeItems[1].(map[string]any)
+	if navigation["parent_id"] != root.ID || navigation["type"] != "navigation" || navigation["is_index"] != false {
+		t.Fatalf("navigation knowledge status=%d payload=%#v", response.StatusCode, knowledgePayload)
+	}
+	for _, raw := range proposalItems {
+		if raw.(map[string]any)["status"] != "pending" {
+			t.Fatalf("proposal was not pending: %#v", raw)
+		}
+	}
+	if _, err := database.Knowledge(ctx, knowledge["id"].(string)); err == nil {
+		t.Fatal("new candidate was auto-published")
+	}
+	response = agentRequest(t, server.URL+"/api/v1/agent/knowledge/candidates", http.MethodPost, token, map[string]any{"candidates": []map[string]any{{"entry_id": existingKnowledge.ID, "base_revision": existingKnowledge.Revision, "scope": "project", "type": "practice", "title": "Existing revised", "body": "Pending replacement.", "confidence": 0.9}}})
+	decodeResponse(t, response, &knowledgePayload)
+	knowledgeItems, _ = knowledgePayload["knowledge"].([]any)
+	proposalItems, _ = knowledgePayload["proposals"].([]any)
+	if response.StatusCode != http.StatusCreated || len(knowledgeItems) != 1 || len(proposalItems) != 1 {
+		t.Fatalf("revision proposal status=%d payload=%#v", response.StatusCode, knowledgePayload)
+	}
+	staleKnowledge, err := database.Knowledge(ctx, existingKnowledge.ID)
+	if err != nil || staleKnowledge.Status != domain.KnowledgeStale || staleKnowledge.Revision != existingKnowledge.Revision {
+		t.Fatalf("existing knowledge=%#v err=%v", staleKnowledge, err)
+	}
+	response = agentRequest(t, server.URL+"/api/v1/agent/knowledge", http.MethodGet, token, nil)
+	decodeResponse(t, response, &knowledgePayload)
+	knowledgeItems, _ = knowledgePayload["knowledge"].([]any)
+	rootCount := 0
+	pendingVisible := false
+	for _, raw := range knowledgeItems {
+		item := raw.(map[string]any)
+		if item["is_index"] == true {
+			rootCount++
+		}
+		pendingVisible = pendingVisible || item["title"] == "API navigation" || item["id"] == existingKnowledge.ID
+	}
+	if response.StatusCode != http.StatusOK || rootCount != 2 || pendingVisible {
+		t.Fatalf("applicable knowledge roots=%d payload=%#v", rootCount, knowledgePayload)
 	}
 
 	response = agentRequest(t, server.URL+"/api/v1/agent/skills/"+skill.ID, http.MethodPut, token, map[string]any{
@@ -251,11 +311,32 @@ func TestAgentStateKnowledgeAndSkillAPIs(t *testing.T) {
 		t.Fatalf("stored skill=%#v err=%v", storedSkill, err)
 	}
 
-	response = agentRequest(t, server.URL+"/api/v1/agent/turn/messages", http.MethodPost, token, map[string]any{"message": "API progress"})
+	response = agentMultipartRequest(t, server.URL+"/api/v1/agent/turn/attachments", token, "generated.png", []byte("\x89PNG\r\ngenerated"))
+	var attachmentPayload map[string]any
+	decodeResponse(t, response, &attachmentPayload)
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("attachment status=%d payload=%#v", response.StatusCode, attachmentPayload)
+	}
+	attachmentID := attachmentPayload["attachment"].(map[string]any)["id"].(string)
+	response = agentRequest(t, server.URL+"/api/v1/agent/turn/messages", http.MethodPost, token, map[string]any{"message": "API progress", "attachment_ids": []string{attachmentID}})
 	if response.StatusCode != http.StatusCreated {
 		t.Fatalf("progress status=%d", response.StatusCode)
 	}
 	response.Body.Close()
+	page, err := database.ConversationPageForAgent(ctx, task.ID, "main", 0, 0, 100, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundAttachment := false
+	for _, item := range page.Items {
+		attachments, _ := item.Payload["attachments"].([]any)
+		if item.Summary == "API progress" && len(attachments) == 1 {
+			foundAttachment = true
+		}
+	}
+	if !foundAttachment {
+		t.Fatalf("Agent progress attachment missing: %#v", page.Items)
+	}
 	close(executor.release)
 }
 
@@ -273,6 +354,33 @@ func agentRequest(t *testing.T, url, method, token string, body any) *http.Respo
 	if body != nil {
 		request.Header.Set("Content-Type", "application/json")
 	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return response
+}
+
+func agentMultipartRequest(t *testing.T, url, token, name string, content []byte) *http.Response {
+	t.Helper()
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("file", name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write(content); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	request, err := http.NewRequest(http.MethodPost, url, &body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Content-Type", writer.FormDataContentType())
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
 		t.Fatal(err)

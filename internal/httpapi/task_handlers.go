@@ -723,13 +723,14 @@ func (s *Server) submitAgentMessage(writer http.ResponseWriter, request *http.Re
 
 func (s *Server) submitMessageForAgent(writer http.ResponseWriter, request *http.Request, agentID string) {
 	var payload struct {
-		Content string `json:"content"`
+		Content       string   `json:"content"`
+		AttachmentIDs []string `json:"attachment_ids"`
 	}
 	if err := decodeJSON(request, &payload); err != nil {
 		writeError(writer, http.StatusBadRequest, "invalid_json")
 		return
 	}
-	turn, err := s.app.SubmitAgentMessage(request.Context(), request.PathValue("id"), agentID, payload.Content)
+	turn, err := s.app.SubmitAgentMessageWithAttachments(request.Context(), request.PathValue("id"), agentID, payload.Content, payload.AttachmentIDs)
 	if err != nil {
 		status := http.StatusBadRequest
 		code := "submit_message_failed"

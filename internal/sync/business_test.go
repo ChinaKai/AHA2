@@ -25,7 +25,13 @@ func businessStore(t *testing.T) *store.Store {
 
 func TestBusinessExportStripsLocalAndSecretFields(t *testing.T) {
 	ctx, db, now := context.Background(), businessStore(t), time.Now().UTC()
+	if err := db.CreateProject(ctx, domain.Project{ID: "project-private", Name: "Private", CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
 	if err := db.CreateKnowledge(ctx, domain.KnowledgeEntry{ID: "k1", Scope: "project", ProjectID: "project-private", Type: "practice", Title: "K", Body: "body", Revision: 2, SourceTaskID: "task-private", SourceTurnID: "turn-private", CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateKnowledge(ctx, domain.KnowledgeEntry{ID: "k-navigation", Scope: "project", ProjectID: "project-private", Type: "navigation", Title: "Map", Body: "navigation", Revision: 1, CreatedAt: now, UpdatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.CreateSkill(ctx, domain.Skill{ID: "s1", Scope: "project", ProjectID: "project-private", Name: "demo", Description: "demo skill", Instructions: "instructions", Version: 1, Status: "active", Enabled: true, CreatedAt: now, UpdatedAt: now}); err != nil {
@@ -54,7 +60,7 @@ func TestBusinessExportStripsLocalAndSecretFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(objects) != 6 {
+	if len(objects) != 9 {
 		t.Fatalf("objects=%d", len(objects))
 	}
 	raw, _ := json.Marshal(objects)
@@ -65,12 +71,14 @@ func TestBusinessExportStripsLocalAndSecretFields(t *testing.T) {
 		}
 	}
 	var projectKnowledge domain.KnowledgeEntry
+	navigationExported := false
 	for _, obj := range objects {
 		if obj.Type == TypeKnowledge {
 			_ = json.Unmarshal(obj.Payload, &projectKnowledge)
+			navigationExported = navigationExported || projectKnowledge.ID == "k-navigation" && projectKnowledge.Type == "navigation"
 		}
 	}
-	if projectKnowledge.ProjectID != "project-private" || projectKnowledge.Scope != "project" {
+	if projectKnowledge.ProjectID != "project-private" || projectKnowledge.Scope != "project" || !navigationExported {
 		t.Fatalf("project knowledge lost scope: %#v", projectKnowledge)
 	}
 	var full skillPayload

@@ -85,3 +85,11 @@ const (
 	KnowledgeStale      KnowledgeStatus = "stale"
 	KnowledgeDeprecated KnowledgeStatus = "deprecated"
 )
+
+type KnowledgeProposalStatus string
+
+const (
+	KnowledgeProposalPending  KnowledgeProposalStatus = "pending"
+	KnowledgeProposalApproved KnowledgeProposalStatus = "approved"
+	KnowledgeProposalRejected KnowledgeProposalStatus = "rejected"
+)

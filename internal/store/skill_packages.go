@@ -225,7 +225,12 @@ func (s *Store) UpdateSkillPackage(ctx context.Context, item domain.Skill, baseV
 		return domain.Skill{}, fmt.Errorf("skill version conflict")
 	}
 	_ = os.RemoveAll(backup)
-	return s.Skill(ctx, item.ID)
+	item.PackageFiles = validated
+	item.Files = make([]string, 0, len(validated))
+	for _, file := range validated {
+		item.Files = append(item.Files, file.Path)
+	}
+	return item, nil
 }
 
 func validSkillEntry(content string) bool {

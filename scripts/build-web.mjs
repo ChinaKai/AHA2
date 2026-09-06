@@ -10,7 +10,7 @@ await rm(output, {recursive: true, force: true});
 await mkdir(output, {recursive: true});
 await mkdir(resolve(output, "vendor"), {recursive: true});
 
-for (const name of ["api", "icons", "types", "runtime_picker", "task_agents", "task_composer", "hardware_terminal", "hardware_panel", "task_tools", "conversation_ui", "ui_helpers", "prompt_admin", "proxy_settings", "sync_settings", "codex_accounts", "knowledge_workspace", "main"]) {
+for (const name of ["api", "icons", "types", "runtime_picker", "task_agents", "task_composer", "hardware_terminal", "hardware_panel", "task_tools", "markdown", "conversation_ui", "ui_helpers", "prompt_admin", "proxy_settings", "sync_settings", "codex_accounts", "knowledge_workspace", "main"]) {
   const input = await readFile(resolve(source, "src", `${name}.ts`), "utf8");
   const transformed = stripTypeScriptTypes(input, {mode: "transform", sourceMap: false});
   const outputName = name === "main" ? "app" : name;
@@ -32,6 +32,7 @@ const versionSource = await Promise.all([
   readFile(resolve(output, "hardware_panel.js")),
   readFile(resolve(output, "hardware_terminal.js")),
   readFile(resolve(output, "task_tools.js")),
+  readFile(resolve(output, "markdown.js")),
   readFile(resolve(output, "conversation_ui.js")),
   readFile(resolve(output, "ui_helpers.js")),
   readFile(resolve(output, "prompt_admin.js")),
@@ -72,6 +73,7 @@ await writeFile(agentsPath, versionedAgents);
 const conversationPath = resolve(output, "conversation_ui.js");
 const versionedConversation = (await readFile(conversationPath, "utf8"))
   .replaceAll('"./icons.js"', `"./icons.js?v=${version}"`)
+  .replaceAll('"./markdown.js"', `"./markdown.js?v=${version}"`)
   .replaceAll('"./task_agents.js"', `"./task_agents.js?v=${version}"`);
 await writeFile(conversationPath, versionedConversation);
 const taskComposerPath = resolve(output, "task_composer.js");
@@ -112,7 +114,8 @@ await writeFile(codexAccountsPath, versionedCodexAccounts);
 const knowledgeWorkspacePath = resolve(output, "knowledge_workspace.js");
 const versionedKnowledgeWorkspace = (await readFile(knowledgeWorkspacePath, "utf8"))
   .replaceAll('"./api.js"', `"./api.js?v=${version}"`)
-  .replaceAll('"./icons.js"', `"./icons.js?v=${version}"`);
+  .replaceAll('"./icons.js"', `"./icons.js?v=${version}"`)
+  .replaceAll('"./markdown.js"', `"./markdown.js?v=${version}"`);
 await writeFile(knowledgeWorkspacePath, versionedKnowledgeWorkspace);
 const indexPath = resolve(output, "index.html");
 const versionedIndex = (await readFile(indexPath, "utf8"))

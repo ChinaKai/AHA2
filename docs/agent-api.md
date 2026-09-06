@@ -21,6 +21,7 @@ Authorization: Bearer <AHA2_AGENT_API_TOKEN>
 ```text
 GET   /api/v1/agent/capabilities
 PATCH /api/v1/agent/turn/memory
+POST  /api/v1/agent/turn/attachments
 POST  /api/v1/agent/turn/messages
 POST  /api/v1/agent/collaboration/batches
 GET   /api/v1/agent/project/workspaces
@@ -57,8 +58,13 @@ GET  /api/v1/agent/skills/{id}
 PUT  /api/v1/agent/skills/{id}
 ```
 
-Knowledge 只返回当前 Project/Product Line 可用条目；更新已有条目必须携带
-`base_revision`。Skill 只允许更新当前 Task 已选择的包，并要求 `base_version`；提交的是
+Knowledge 只返回当前 Project/Product Line 可用的已发布条目；更新已有条目必须携带
+`base_revision`。Agent 提交的新知识或修订统一保存为 pending proposal，不会因置信度高而
+自动发布；修订现有知识时，旧版本暂时标记为 stale。Owner 通过
+`POST /api/v1/knowledge/proposals/{id}/approve` 或 `/reject` 审批，批准时校验基础 revision
+并原子发布下一版本。`GET /api/v1/knowledge` 同时返回 `knowledge` 与 `proposals`。
+
+Skill 只允许更新当前 Task 已选择的包，并要求 `base_version`；提交的是
 完整文本文件集合，服务端校验相对路径、大小、UTF-8 文本和 `SKILL.md` frontmatter，
 随后原子替换托管包。下一 Turn 会从新版本重新物化。
 

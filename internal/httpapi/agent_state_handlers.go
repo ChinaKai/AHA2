@@ -8,6 +8,7 @@ import (
 
 	"github.com/ChinaKai/AHA2/internal/app"
 	"github.com/ChinaKai/AHA2/internal/domain"
+	"github.com/ChinaKai/AHA2/internal/store"
 )
 
 func (s *Server) agentCapabilitiesInfo(writer http.ResponseWriter, request *http.Request) {
@@ -100,13 +101,14 @@ func (s *Server) updateAgentMemory(writer http.ResponseWriter, request *http.Req
 func (s *Server) addAgentProgressMessage(writer http.ResponseWriter, request *http.Request) {
 	claims, _ := agentClaimsFromContext(request.Context())
 	var payload struct {
-		Message string `json:"message"`
+		Message       string   `json:"message"`
+		AttachmentIDs []string `json:"attachment_ids"`
 	}
 	if decodeJSON(request, &payload) != nil {
 		writeError(writer, http.StatusBadRequest, "invalid_json")
 		return
 	}
-	if err := s.app.AddAgentProgress(request.Context(), claims, payload.Message); err != nil {
+	if err := s.app.AddAgentProgress(request.Context(), claims, payload.Message, payload.AttachmentIDs); err != nil {
 		writeAgentControlError(writer, err)
 		return
 	}
@@ -148,13 +150,13 @@ func (s *Server) submitAgentKnowledge(writer http.ResponseWriter, request *http.
 		writeError(writer, http.StatusBadRequest, "knowledge_candidates_invalid")
 		return
 	}
-	items, err := s.app.SubmitAgentKnowledge(request.Context(), claims, payload.Candidates)
+	items, proposals, err := s.app.SubmitAgentKnowledgeProposals(request.Context(), claims, payload.Candidates)
 	if err != nil {
 		writeAgentControlError(writer, err)
 		return
 	}
 	s.audit(request, "agent.knowledge.submit", "task", claims.TaskID, map[string]any{"count": len(items)})
-	writeJSON(writer, http.StatusCreated, map[string]any{"ok": true, "knowledge": items})
+	writeJSON(writer, http.StatusCreated, map[string]any{"ok": true, "knowledge": items, "proposals": proposals})
 }
 
 func (s *Server) submitAgentKnowledgeFeedback(writer http.ResponseWriter, request *http.Request) {
@@ -296,7 +298,7 @@ func writeAgentControlError(writer http.ResponseWriter, err error) {
 		writeError(writer, http.StatusForbidden, "agent_operation_forbidden")
 	case errors.Is(err, app.ErrAgentTurnInactive):
 		writeError(writer, http.StatusConflict, "agent_turn_inactive")
-	case errors.Is(err, app.ErrRevisionConflict):
+	case errors.Is(err, app.ErrRevisionConflict), errors.Is(err, store.ErrKnowledgeProposalRevision), errors.Is(err, store.ErrKnowledgeProposalPending):
 		writeError(writer, http.StatusConflict, "knowledge_revision_conflict")
 	default:
 		writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "agent_operation_failed", "message": err.Error()})

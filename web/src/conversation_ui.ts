@@ -1,4 +1,5 @@
 import {icon} from "./icons.js";
+import {renderMarkdown} from "./markdown.js";
 import {renderConversationWithOrchestration, visibleAgentText} from "./task_agents.js";
 import type {ConversationItem, TaskDetail} from "./types.js";
 
@@ -21,6 +22,27 @@ function messageTime(value: string): string {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 
+function renderAttachments(item: ConversationItem): string {
+  const values = Array.isArray(item.payload?.attachments) ? item.payload.attachments : [];
+  if (!values.length) return "";
+  const attachments = values.filter(value => value && typeof value === "object") as Array<Record<string, unknown>>;
+  return `<div class="message-attachments">${attachments.map(attachment => {
+    const id = String(attachment.id || "");
+    const name = String(attachment.name || "attachment");
+    const mediaType = String(attachment.media_type || "application/octet-stream");
+    const size = Number(attachment.size || 0);
+    const url = `/api/v1/tasks/${encodeURIComponent(item.task_id)}/attachments/${encodeURIComponent(id)}`;
+    if (["image/png", "image/jpeg", "image/gif", "image/webp"].includes(mediaType)) {
+      return `<button type="button" class="message-image" data-image-preview="${url}" data-image-name="${escapeHTML(name)}" aria-label="预览 ${escapeHTML(name)}"><img src="${url}" loading="lazy" alt="${escapeHTML(name)}"><span>${escapeHTML(name)}</span></button>`;
+    }
+    return `<a class="message-file" href="${url}" download>${icon("attachment")}<span><strong>${escapeHTML(name)}</strong><small>${size > 0 ? `${Math.max(1, Math.round(size / 1024))} KB` : mediaType}</small></span></a>`;
+  }).join("")}</div>`;
+}
+
+function imagePreviewDialog(): string {
+  return `<dialog id="image-preview-dialog" class="image-preview-dialog"><header><strong data-image-preview-title>图片预览</strong><div><a class="primary image-preview-download" data-image-preview-download download>${icon("attachment")}下载</a><button type="button" class="icon-button" data-image-preview-close aria-label="关闭">${icon("close")}</button></div></header><div class="image-preview-stage"><img data-image-preview-image alt=""></div></dialog>`;
+}
+
 function renderConversationItem(item: ConversationItem): string {
   const time = messageTime(item.created_at);
   const routeKind = item.route_kind || "";
@@ -38,7 +60,7 @@ function renderConversationItem(item: ConversationItem): string {
   const preview = collapsible ? `${Array.from(text.replace(/\s+/g, " ")).slice(0, messagePreviewChars - 1).join("").trim()}…` : text;
   const payload = item.payload || {};
   const output = String(payload.output_tail || "");
-  return `<article class="message ${user ? "user" : "agent"} ${update ? "agent-update-message" : ""} ${tool ? "agent-tool-message" : ""} ${routed ? "agent-routed-message" : ""} ${error ? "agent-error-message" : ""}" data-message-chars="${characterCount}"><header><strong>${escapeHTML(sender)}</strong>${badge ? `<span>${badge}</span>` : ""}<time>${time}</time><button type="button" data-copy-message class="message-copy icon-button" title="复制">${icon("copy")}</button></header><div class="message-bubble"><div class="message-text message-preview">${escapeHTML(preview).replaceAll("\n", "<br>")}</div>${collapsible ? `<div class="message-text message-full-text" hidden>${escapeHTML(text).replaceAll("\n", "<br>")}</div><button type="button" data-toggle-message class="message-toggle">展开 · ${characterCount.toLocaleString()}字符</button>` : ""}${output ? `<details class="message-output"><summary>查看输出摘要</summary><pre>${escapeHTML(output)}</pre></details>` : ""}</div></article>`;
+  return `<article class="message ${user ? "user" : "agent"} ${update ? "agent-update-message" : ""} ${tool ? "agent-tool-message" : ""} ${routed ? "agent-routed-message" : ""} ${error ? "agent-error-message" : ""}" data-message-chars="${characterCount}" data-copy-message-source="${escapeHTML(text)}"><header><strong>${escapeHTML(sender)}</strong>${badge ? `<span>${badge}</span>` : ""}<time>${time}</time><button type="button" data-copy-message class="message-copy icon-button" title="复制">${icon("copy")}</button></header><div class="message-bubble"><div class="message-text markdown-body message-preview">${renderMarkdown(preview)}</div>${collapsible ? `<div class="message-text markdown-body message-full-text" hidden>${renderMarkdown(text)}</div><button type="button" data-toggle-message class="message-toggle">展开 · ${characterCount.toLocaleString()}字符</button>` : ""}${renderAttachments(item)}${output ? `<details class="message-output"><summary>查看输出摘要</summary><pre>${escapeHTML(output)}</pre></details>` : ""}</div></article>`;
 }
 
 export function renderConversationList(
@@ -46,6 +68,6 @@ export function renderConversationList(
   detail: TaskDetail | null,
   hasMore: boolean,
 ): string {
-  const history = renderConversationWithOrchestration(items, detail, renderConversationItem);
+  const history = (renderConversationWithOrchestration(items, detail, renderConversationItem) || `<div class="empty">暂无符合筛选条件的记录。</div>`) + imagePreviewDialog();
   return `${hasMore ? `<button type="button" id="load-older-conversation" class="load-older">加载更早记录</button>` : ""}${history || `<div class="empty">暂无符合筛选条件的记录。</div>`}`;
 }

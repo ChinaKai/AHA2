@@ -5,6 +5,50 @@ import (
 	"fmt"
 )
 
+const schemaV31 = `
+ALTER TABLE knowledge_entries ADD COLUMN parent_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE knowledge_entries ADD COLUMN slug TEXT NOT NULL DEFAULT '';
+ALTER TABLE knowledge_entries ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE knowledge_entries ADD COLUMN is_index INTEGER NOT NULL DEFAULT 0;
+CREATE UNIQUE INDEX idx_knowledge_one_root ON knowledge_entries(scope,project_id) WHERE is_index=1;
+CREATE UNIQUE INDEX idx_knowledge_sibling_slug ON knowledge_entries(scope,project_id,parent_id,slug) WHERE slug<>'';
+CREATE INDEX idx_knowledge_parent_order ON knowledge_entries(scope,project_id,parent_id,sort_order,slug);
+`
+
+const schemaV32 = `
+CREATE TABLE IF NOT EXISTS attachments (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    message_id TEXT NOT NULL DEFAULT '',
+    name TEXT NOT NULL,
+    media_type TEXT NOT NULL DEFAULT 'application/octet-stream',
+    size_bytes INTEGER NOT NULL,
+    sha256 TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_attachments_task_message ON attachments(task_id,message_id,created_at);
+CREATE INDEX IF NOT EXISTS idx_attachments_sha256 ON attachments(sha256);
+`
+
+const schemaV34 = `
+CREATE TABLE IF NOT EXISTS knowledge_proposals (
+    id TEXT PRIMARY KEY,
+    entry_id TEXT NOT NULL,
+    base_revision INTEGER NOT NULL DEFAULT 0,
+    proposed_json TEXT NOT NULL,
+    source_task_id TEXT NOT NULL DEFAULT '',
+    source_turn_id TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','approved','rejected')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    decided_at TEXT NOT NULL DEFAULT ''
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_proposals_one_pending
+ON knowledge_proposals(entry_id) WHERE status='pending';
+CREATE INDEX IF NOT EXISTS idx_knowledge_proposals_status_created
+ON knowledge_proposals(status,created_at DESC);
+`
+
 const schemaV27 = `
 CREATE TABLE IF NOT EXISTS sync_settings (
     scope TEXT PRIMARY KEY,
@@ -1122,6 +1166,46 @@ func (s *Store) migrate(ctx context.Context) error {
 	}
 	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(30, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
 		return fmt.Errorf("record schema v30: %w", err)
+	}
+	var hasV31 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=31)`).Scan(&hasV31)
+	if !hasV31 {
+		if _, err := s.db.ExecContext(ctx, schemaV31); err != nil {
+			return fmt.Errorf("apply schema v31: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(31, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v31: %w", err)
+	}
+	var hasV32 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=32)`).Scan(&hasV32)
+	if !hasV32 {
+		if _, err := s.db.ExecContext(ctx, schemaV32); err != nil {
+			return fmt.Errorf("apply schema v32: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(32, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v32: %w", err)
+	}
+	var hasV33 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=33)`).Scan(&hasV33)
+	if !hasV33 {
+		if err := s.EnsureKnowledgeRoots(ctx); err != nil {
+			return fmt.Errorf("apply schema v33: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(33, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v33: %w", err)
+	}
+	var hasV34 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=34)`).Scan(&hasV34)
+	if !hasV34 {
+		if _, err := s.db.ExecContext(ctx, schemaV34); err != nil {
+			return fmt.Errorf("apply schema v34: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(34, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v34: %w", err)
 	}
 	return nil
 }

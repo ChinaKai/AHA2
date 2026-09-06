@@ -299,6 +299,17 @@ type Message struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+type Attachment struct {
+	ID        string    `json:"id"`
+	TaskID    string    `json:"task_id"`
+	MessageID string    `json:"message_id,omitempty"`
+	Name      string    `json:"name"`
+	MediaType string    `json:"media_type"`
+	Size      int64     `json:"size"`
+	SHA256    string    `json:"sha256"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
 type BackendSession struct {
 	ID               string    `json:"id"`
 	TaskID           string    `json:"task_id"`
@@ -332,6 +343,10 @@ type KnowledgeEntry struct {
 	ID             string          `json:"id"`
 	Scope          string          `json:"scope"`
 	ProjectID      string          `json:"project_id,omitempty"`
+	ParentID       string          `json:"parent_id,omitempty"`
+	Slug           string          `json:"slug,omitempty"`
+	SortOrder      int             `json:"sort_order"`
+	IsIndex        bool            `json:"is_index"`
 	Type           string          `json:"type"`
 	Title          string          `json:"title"`
 	Body           string          `json:"body"`
@@ -351,6 +366,20 @@ type KnowledgeEntry struct {
 	CreatedAt      time.Time       `json:"created_at"`
 	UpdatedAt      time.Time       `json:"updated_at"`
 	LastVerifiedAt time.Time       `json:"last_verified_at,omitempty"`
+}
+
+type KnowledgeProposal struct {
+	ID           string                  `json:"id"`
+	EntryID      string                  `json:"entry_id"`
+	BaseRevision int                     `json:"base_revision"`
+	BaseEntry    *KnowledgeEntry         `json:"base_entry,omitempty"`
+	Proposed     KnowledgeEntry          `json:"proposed"`
+	SourceTaskID string                  `json:"source_task_id,omitempty"`
+	SourceTurnID string                  `json:"source_turn_id,omitempty"`
+	Status       KnowledgeProposalStatus `json:"status"`
+	CreatedAt    time.Time               `json:"created_at"`
+	UpdatedAt    time.Time               `json:"updated_at"`
+	DecidedAt    time.Time               `json:"decided_at,omitempty"`
 }
 
 type Skill struct {

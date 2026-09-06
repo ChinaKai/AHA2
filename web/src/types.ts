@@ -299,6 +299,17 @@ export interface TaskRound {
 
 export type ConversationCategory = "chat" | "update" | "tool" | "error";
 
+export interface Attachment {
+  id: string;
+  task_id: string;
+  message_id?: string;
+  name: string;
+  media_type: string;
+  size: number;
+  sha256: string;
+  created_at: string;
+}
+
 export interface ConversationItem {
   sequence: number;
   id: string;
@@ -429,6 +440,10 @@ export interface Knowledge {
   id: string;
   scope: "global" | "project";
   project_id?: string;
+  parent_id?: string;
+  slug?: string;
+  sort_order: number;
+  is_index: boolean;
   type: string;
   title: string;
   body: string;
@@ -447,6 +462,31 @@ export interface Knowledge {
   created_at: string;
   updated_at: string;
   last_verified_at?: string;
+}
+
+export interface KnowledgeProposal {
+  id: string;
+  entry_id: string;
+  base_revision: number;
+  scope?: "global" | "project";
+  project_id?: string;
+  type?: string;
+  title?: string;
+  body?: string;
+  status: string;
+  source_task_id?: string;
+  source_turn_id?: string;
+  created_at: string;
+  updated_at?: string;
+  decided_at?: string;
+  base_title?: string;
+  base_body?: string;
+  previous_title?: string;
+  previous_body?: string;
+  current_title?: string;
+  current_body?: string;
+  base_entry?: Pick<Knowledge, "title" | "body" | "revision">;
+  proposed?: Knowledge;
 }
 
 export interface Skill {

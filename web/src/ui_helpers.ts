@@ -105,9 +105,31 @@ export function bindMessageBubbleControls(root: ParentNode = document): void {
     copy?.addEventListener("click", async () => {
       const text = full || preview;
       if (!text) return;
-      await copyText(text.innerText);
+      await copyText(message.dataset.copyMessageSource ?? text.innerText);
       copy.classList.add("copied");
       window.setTimeout(() => copy.classList.remove("copied"), 1200);
     });
+  });
+  const dialog = root.querySelector<HTMLDialogElement>("#image-preview-dialog");
+  const previewImage = dialog?.querySelector<HTMLImageElement>("[data-image-preview-image]");
+  const previewTitle = dialog?.querySelector<HTMLElement>("[data-image-preview-title]");
+  const download = dialog?.querySelector<HTMLAnchorElement>("[data-image-preview-download]");
+  root.querySelectorAll<HTMLButtonElement>("[data-image-preview]").forEach(button => button.addEventListener("click", () => {
+    if (!dialog || !previewImage || !download) return;
+    const url = button.dataset.imagePreview || "";
+    const name = button.dataset.imageName || "图片";
+    previewImage.src = url;
+    previewImage.alt = name;
+    download.href = url;
+    download.download = name;
+    if (previewTitle) previewTitle.textContent = name;
+    dialog.showModal();
+  }));
+  dialog?.querySelectorAll<HTMLElement>("[data-image-preview-close]").forEach(button => button.addEventListener("click", () => dialog.close()));
+  dialog?.addEventListener("click", event => {
+    if (event.target === dialog) dialog.close();
+  });
+  dialog?.addEventListener("close", () => {
+    if (previewImage) previewImage.removeAttribute("src");
   });
 }

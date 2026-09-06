@@ -40,13 +40,17 @@ type idleThenSuccessExecutor struct {
 	calls int
 }
 
-func (executor *idleThenSuccessExecutor) Execute(_ context.Context, _ ExecutionRequest, _ func(ExecutionEvent)) (ExecutionResult, error) {
+func (executor *idleThenSuccessExecutor) Execute(_ context.Context, _ ExecutionRequest, emit func(ExecutionEvent)) (ExecutionResult, error) {
 	executor.mu.Lock()
-	defer executor.mu.Unlock()
 	executor.calls++
-	if executor.calls == 1 {
+	call := executor.calls
+	executor.mu.Unlock()
+	emit(ExecutionEvent{Type: "agent_progress", Data: map[string]any{"message": fmt.Sprintf("attempt %d progress", call)}})
+	emit(ExecutionEvent{Type: "agent_message", Data: map[string]any{"text": fmt.Sprintf("attempt %d partial", call)}})
+	if call == 1 {
 		return ExecutionResult{}, backend.ErrCodexIdleTimeout
 	}
+	emit(ExecutionEvent{Type: "agent_message", Data: map[string]any{"text": "recovered"}})
 	return ExecutionResult{Reply: "recovered", ProviderSessionID: "retry-session"}, nil
 }
 
@@ -57,6 +61,7 @@ func (s *multiAgentExecutor) Execute(_ context.Context, request ExecutionRequest
 	emit(ExecutionEvent{Type: "agent_usage", Data: map[string]any{"usage": map[string]any{"input_tokens": 500, "output_tokens": 25}}})
 	emit(ExecutionEvent{Type: "agent_command_started", Data: map[string]any{"command": "verify " + request.Turn.AgentID}})
 	emit(ExecutionEvent{Type: "agent_command_finished", Data: map[string]any{"command": "verify " + request.Turn.AgentID, "status": "completed"}})
+	emit(ExecutionEvent{Type: "agent_progress", Data: map[string]any{"message": "working " + request.Turn.AgentID}})
 	switch {
 	case request.Turn.AgentID == "main" && request.Turn.Generation == 0:
 		if s.service != nil {
@@ -65,10 +70,13 @@ func (s *multiAgentExecutor) Execute(_ context.Context, request ExecutionRequest
 				{AgentID: "sub-002", Title: "Web", Assignment: "implement web", Required: true},
 			}, "")
 		}
+		emit(ExecutionEvent{Type: "agent_message", Data: map[string]any{"text": "delegating"}})
 		return ExecutionResult{Reply: "delegating"}, nil
 	case request.Turn.AgentID == "main":
+		emit(ExecutionEvent{Type: "agent_message", Data: map[string]any{"text": "integrated result"}})
 		return ExecutionResult{Reply: "integrated result", ProviderSessionID: "main-session"}, nil
 	default:
+		emit(ExecutionEvent{Type: "agent_message", Data: map[string]any{"text": request.Turn.AgentID + " result"}})
 		return ExecutionResult{Reply: request.Turn.AgentID + " result", ProviderSessionID: request.Turn.AgentID + "-session"}, nil
 	}
 }
@@ -533,6 +541,33 @@ func TestMultiAgentRoundCreatesIntegrationTurn(t *testing.T) {
 	if integrations != 1 {
 		t.Fatalf("expected exactly one merged integration turn: %#v", turns)
 	}
+	for _, turn := range turns {
+		if turn.Status != domain.TurnSucceeded {
+			continue
+		}
+		stream, err := database.ConversationPageForAgent(ctx, task.ID, turn.AgentID, 0, 0, 100, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		finals, progress, backendStreams := 0, 0, 0
+		for _, item := range stream.Items {
+			if item.TurnID != turn.ID {
+				continue
+			}
+			if item.RouteKind == "turn_result" && (item.Kind == "agent_message" || item.Kind == "agent_result") {
+				finals++
+			}
+			if item.Kind == "agent_progress" {
+				progress++
+			}
+			if item.RouteKind == "backend_stream" || item.Kind == "agent_message_update" && item.RouteKind == "" {
+				backendStreams++
+			}
+		}
+		if finals != 1 || progress != 1 || backendStreams != 0 {
+			t.Fatalf("turn %s conversation was not finalized exactly once: finals=%d progress=%d streams=%d items=%#v", turn.ID, finals, progress, backendStreams, stream.Items)
+		}
+	}
 	agents, err := database.ListTaskAgents(ctx, task.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -789,6 +824,48 @@ func TestMainTurnRetriesOnceAfterBackendIdleTimeout(t *testing.T) {
 	}
 	if turns[0].Status != domain.TurnFailed || turns[0].WaitingReason != "backend_idle_timeout" || turns[1].Status != domain.TurnSucceeded || turns[1].Attempt != 2 {
 		t.Fatalf("idle retry state=%#v", turns)
+	}
+	page, err := database.ConversationPageForAgent(ctx, task.ID, "main", 0, 0, 100, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failedStreams, retryFinals, retryStreams, retryEvents := 0, 0, 0, 0
+	progressByTurn := map[string]int{}
+	for _, item := range page.Items {
+		if item.Kind == "agent_progress" {
+			progressByTurn[item.TurnID]++
+		}
+		if item.TurnID == turns[0].ID && item.RouteKind == "backend_stream" {
+			failedStreams++
+		}
+		if item.TurnID == turns[1].ID && item.RouteKind == "turn_result" {
+			retryFinals++
+		}
+		if item.TurnID == turns[1].ID && item.RouteKind == "backend_stream" {
+			retryStreams++
+		}
+		if item.TurnID == turns[1].ID && item.RouteKind == "retry" && item.Kind == "agent_retry" {
+			retryEvents++
+		}
+	}
+	if failedStreams != 1 || retryFinals != 1 || retryStreams != 0 || retryEvents != 1 || progressByTurn[turns[0].ID] != 1 || progressByTurn[turns[1].ID] != 1 {
+		t.Fatalf("retry conversation mismatch: failed_streams=%d retry_finals=%d retry_streams=%d retry_events=%d progress=%#v items=%#v", failedStreams, retryFinals, retryStreams, retryEvents, progressByTurn, page.Items)
+	}
+	messages, err := database.ListMessages(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assistantReplies := 0
+	for _, message := range messages {
+		if message.Role == "assistant" {
+			assistantReplies++
+			if message.Content != "recovered" || message.TurnID != turns[1].ID {
+				t.Fatalf("unexpected retry assistant message: %#v", message)
+			}
+		}
+	}
+	if assistantReplies != 1 {
+		t.Fatalf("retry produced %d assistant replies: %#v", assistantReplies, messages)
 	}
 }
 

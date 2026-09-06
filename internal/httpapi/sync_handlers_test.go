@@ -115,10 +115,27 @@ func TestRunSyncUsesStoredTokenAndAuthenticatedRoutes(t *testing.T) {
 		if r.Header.Get("Authorization") != "Bearer stored-token" || r.Header.Get("X-Device-ID") != "device-one" {
 			t.Errorf("missing remote credentials")
 		}
-		if r.URL.Path != "/v1/sync/pull" {
+		switch r.URL.Path {
+		case "/v1/sync/push":
+			var request struct {
+				Objects []struct {
+					IdempotencyKey string `json:"idempotency_key"`
+				} `json:"objects"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Error(err)
+				return
+			}
+			acked := make([]string, 0, len(request.Objects))
+			for _, object := range request.Objects {
+				acked = append(acked, object.IdempotencyKey)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"acked_keys": acked})
+		case "/v1/sync/pull":
+			_ = json.NewEncoder(w).Encode(map[string]any{"objects": []any{}, "cursor": "7", "has_more": false})
+		default:
 			t.Errorf("unexpected remote path %s", r.URL.Path)
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"objects": []any{}, "cursor": "7", "has_more": false})
 	}))
 	defer remote.Close()
 	ctx := context.Background()

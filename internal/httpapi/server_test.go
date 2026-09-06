@@ -3,7 +3,9 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
@@ -29,6 +31,9 @@ func TestSecurityHeadersAllowXTermStylesWithoutInlineScripts(t *testing.T) {
 	policy := response.Header().Get("Content-Security-Policy")
 	if !strings.Contains(policy, "style-src 'self' 'unsafe-inline'") {
 		t.Fatalf("xterm inline styles are blocked: %s", policy)
+	}
+	if !strings.Contains(policy, "img-src 'self' data: https:") {
+		t.Fatalf("safe external Markdown images are blocked: %s", policy)
 	}
 	if !strings.Contains(policy, "script-src 'self'") || strings.Contains(policy, "script-src 'self' 'unsafe-inline'") {
 		t.Fatalf("inline scripts were allowed: %s", policy)
@@ -879,22 +884,43 @@ func TestKnowledgeWorkspaceAPI(t *testing.T) {
 		t.Fatalf("skill update failed: %d %#v", response.StatusCode, payload)
 	}
 
+	response = requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/knowledge?scope=project&project_id="+projectID, nil, "")
+	decodeResponse(t, response, &payload)
+	initialKnowledge := payload["knowledge"].([]any)
+	if response.StatusCode != http.StatusOK || len(initialKnowledge) != 1 {
+		t.Fatalf("automatic root missing: %d %#v", response.StatusCode, payload)
+	}
+	root := initialKnowledge[0].(map[string]any)
+	rootID := root["id"].(string)
+	if root["is_index"] != true || root["status"] != "verified" || root["slug"] != "index" {
+		t.Fatalf("automatic root invalid: %#v", root)
+	}
+
 	response = requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/knowledge", map[string]any{
 		"scope": "project", "project_id": projectID, "product_line_id": lineID, "type": "navigation",
-		"title": "Main route", "body": "Read the main package.", "confidence": .9, "status": "verified",
+		"title": "Main route", "body": "Read the main package.", "slug": "main-route", "sort_order": 2,
+		"confidence": .9, "status": "verified",
 	}, csrf)
 	decodeResponse(t, response, &payload)
 	entry := payload["knowledge"].(map[string]any)
 	entryID := entry["id"].(string)
-	if response.StatusCode != http.StatusCreated || entry["revision"].(float64) != 1 {
+	if response.StatusCode != http.StatusCreated || entry["revision"].(float64) != 1 || entry["parent_id"] != rootID || entry["slug"] != "main-route" || entry["sort_order"].(float64) != 2 || entry["is_index"] != false {
 		t.Fatalf("knowledge creation failed: %d %#v", response.StatusCode, payload)
+	}
+	response = requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/knowledge", map[string]any{
+		"scope": "project", "project_id": projectID, "type": "navigation", "title": "Another root",
+		"body": "duplicate", "slug": "another-index", "is_index": true,
+	}, csrf)
+	if response.StatusCode != http.StatusConflict {
+		t.Fatalf("duplicate root status=%d", response.StatusCode)
 	}
 	response = requestJSON(t, client, http.MethodPut, server.URL+"/api/v1/knowledge/"+entryID, map[string]any{
 		"scope": "project", "project_id": projectID, "product_line_id": lineID, "type": "navigation",
 		"title": "Main route", "body": "Read cmd and internal.", "confidence": .95, "status": "verified",
 	}, csrf)
 	decodeResponse(t, response, &payload)
-	if response.StatusCode != http.StatusOK || payload["knowledge"].(map[string]any)["revision"].(float64) != 2 {
+	updatedEntry := payload["knowledge"].(map[string]any)
+	if response.StatusCode != http.StatusOK || updatedEntry["revision"].(float64) != 2 || updatedEntry["parent_id"] != rootID || updatedEntry["slug"] != "main-route" || updatedEntry["is_index"] != false {
 		t.Fatalf("knowledge update failed: %d %#v", response.StatusCode, payload)
 	}
 	response = requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/knowledge/"+entryID+"/feedback", map[string]any{"kind": "helped"}, csrf)
@@ -902,9 +928,94 @@ func TestKnowledgeWorkspaceAPI(t *testing.T) {
 	if response.StatusCode != http.StatusOK || payload["knowledge"].(map[string]any)["helped_count"].(float64) != 1 {
 		t.Fatalf("knowledge feedback failed: %d %#v", response.StatusCode, payload)
 	}
+	current, err := database.Knowledge(ctx, entryID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proposed := current
+	proposed.Title, proposed.Body = "Main route revised", "Approved proposal body."
+	proposal, err := database.CreateKnowledgeProposal(ctx, domain.KnowledgeProposal{
+		ID: "owner-proposal", EntryID: entryID, BaseRevision: current.Revision, Proposed: proposed,
+		SourceTaskID: "task-source", SourceTurnID: "turn-source", Status: domain.KnowledgeProposalPending,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	response = requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/knowledge?scope=project&project_id="+projectID, nil, "")
 	decodeResponse(t, response, &payload)
-	if response.StatusCode != http.StatusOK || len(payload["knowledge"].([]any)) != 1 {
+	proposals := payload["proposals"].([]any)
+	if response.StatusCode != http.StatusOK || len(proposals) != 1 {
+		t.Fatalf("knowledge proposals missing: %d %#v", response.StatusCode, payload)
+	}
+	listedProposal := proposals[0].(map[string]any)
+	baseEntry, _ := listedProposal["base_entry"].(map[string]any)
+	if listedProposal["id"] != proposal.ID || listedProposal["status"] != "pending" || baseEntry["body"] != current.Body || baseEntry["revision"].(float64) != float64(current.Revision) {
+		t.Fatalf("knowledge proposals missing: %d %#v", response.StatusCode, payload)
+	}
+	response = requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/knowledge/proposals/"+proposal.ID+"/approve", map[string]any{}, csrf)
+	decodeResponse(t, response, &payload)
+	approvedEntry := payload["knowledge"].(map[string]any)
+	if response.StatusCode != http.StatusOK || payload["proposal"].(map[string]any)["status"] != "approved" || approvedEntry["revision"].(float64) != float64(current.Revision+1) || approvedEntry["status"] != "verified" || approvedEntry["body"] != proposed.Body || approvedEntry["helped_count"].(float64) != 1 {
+		t.Fatalf("proposal approval failed: %d %#v", response.StatusCode, payload)
+	}
+	response = requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/knowledge/proposals/"+proposal.ID+"/approve", map[string]any{}, csrf)
+	if response.StatusCode != http.StatusConflict {
+		t.Fatalf("repeat proposal approval status=%d", response.StatusCode)
+	}
+	response.Body.Close()
+	newProposed := domain.KnowledgeEntry{
+		ID: "owner-new-rejected", Scope: "project", ProjectID: projectID, ParentID: rootID, Slug: "owner-new-rejected",
+		Type: "practice", Title: "Rejected new entry", Body: "Never publish", Status: domain.KnowledgeCandidate,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	rejectedProposal, err := database.CreateKnowledgeProposal(ctx, domain.KnowledgeProposal{
+		ID: "owner-rejected-proposal", EntryID: newProposed.ID, Proposed: newProposed, Status: domain.KnowledgeProposalPending,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response = requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/knowledge/proposals/"+rejectedProposal.ID+"/reject", map[string]any{}, csrf)
+	decodeResponse(t, response, &payload)
+	if response.StatusCode != http.StatusOK || payload["proposal"].(map[string]any)["status"] != "rejected" {
+		t.Fatalf("proposal rejection failed: %d %#v", response.StatusCode, payload)
+	}
+	if _, err := database.Knowledge(ctx, newProposed.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("rejected new proposal was published: %v", err)
+	}
+	response = requestJSON(t, client, http.MethodPut, server.URL+"/api/v1/knowledge/"+rootID, map[string]any{
+		"scope": "project", "project_id": projectID, "type": "navigation", "title": "Knowledge home",
+		"body": "Start here.", "confidence": 1, "status": "verified",
+	}, csrf)
+	decodeResponse(t, response, &payload)
+	updatedRoot := payload["knowledge"].(map[string]any)
+	if response.StatusCode != http.StatusOK || updatedRoot["title"] != "Knowledge home" || updatedRoot["is_index"] != true || updatedRoot["status"] != "verified" {
+		t.Fatalf("root edit failed: %d %#v", response.StatusCode, payload)
+	}
+	response = requestJSON(t, client, http.MethodPut, server.URL+"/api/v1/knowledge/"+rootID, map[string]any{
+		"scope": "project", "project_id": projectID, "type": "navigation", "title": "Not a root",
+		"body": "Invalid.", "confidence": 1, "status": "verified", "is_index": false,
+	}, csrf)
+	if response.StatusCode != http.StatusConflict {
+		t.Fatalf("root conversion status=%d", response.StatusCode)
+	}
+	response.Body.Close()
+	response = requestJSON(t, client, http.MethodDelete, server.URL+"/api/v1/knowledge/"+rootID, nil, csrf)
+	if response.StatusCode != http.StatusConflict {
+		t.Fatalf("root deletion status=%d", response.StatusCode)
+	}
+	response.Body.Close()
+	rootBeforeGET, _ := database.Knowledge(ctx, rootID)
+	for range 3 {
+		response = requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/knowledge?scope=project&project_id="+projectID, nil, "")
+		decodeResponse(t, response, &payload)
+		if response.StatusCode != http.StatusOK || len(payload["knowledge"].([]any)) != 2 {
+			t.Fatalf("knowledge list failed: %d %#v", response.StatusCode, payload)
+		}
+	}
+	rootAfterGET, _ := database.Knowledge(ctx, rootID)
+	if rootBeforeGET.Revision != rootAfterGET.Revision || !rootBeforeGET.UpdatedAt.Equal(rootAfterGET.UpdatedAt) {
 		t.Fatalf("knowledge list failed: %d %#v", response.StatusCode, payload)
 	}
 }

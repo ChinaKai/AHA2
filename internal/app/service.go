@@ -57,6 +57,10 @@ type KnowledgeCandidate struct {
 	EntryID       string  `json:"entry_id"`
 	BaseRevision  int     `json:"base_revision"`
 	Scope         string  `json:"scope"`
+	ParentID      *string `json:"parent_id"`
+	Slug          *string `json:"slug"`
+	SortOrder     *int    `json:"sort_order"`
+	IsIndex       *bool   `json:"is_index"`
 	Type          string  `json:"type"`
 	Title         string  `json:"title"`
 	Body          string  `json:"body"`
@@ -384,13 +388,17 @@ func (s *Service) activeTaskSkills(ctx context.Context, task domain.Task) []doma
 }
 
 func (s *Service) SubmitMessage(ctx context.Context, taskID, content string) (domain.Turn, error) {
-	return s.SubmitAgentMessage(ctx, taskID, "main", content)
+	return s.SubmitAgentMessageWithAttachments(ctx, taskID, "main", content, nil)
 }
 
 func (s *Service) SubmitAgentMessage(ctx context.Context, taskID, agentID, content string) (domain.Turn, error) {
+	return s.SubmitAgentMessageWithAttachments(ctx, taskID, agentID, content, nil)
+}
+
+func (s *Service) SubmitAgentMessageWithAttachments(ctx context.Context, taskID, agentID, content string, attachmentIDs []string) (domain.Turn, error) {
 	content = strings.TrimSpace(content)
-	if content == "" {
-		return domain.Turn{}, fmt.Errorf("message is required")
+	if content == "" && len(attachmentIDs) == 0 {
+		return domain.Turn{}, fmt.Errorf("message or attachment is required")
 	}
 	agentID = strings.TrimSpace(agentID)
 	if agentID == "" {
@@ -398,6 +406,9 @@ func (s *Service) SubmitAgentMessage(ctx context.Context, taskID, agentID, conte
 	}
 	task, err := s.store.Task(ctx, taskID)
 	if err != nil {
+		return domain.Turn{}, err
+	}
+	if err := s.store.ValidateDraftAttachments(ctx, task.ID, attachmentIDs); err != nil {
 		return domain.Turn{}, err
 	}
 	if task.CollaborationMode == "single" && agentID != "main" {
@@ -436,7 +447,7 @@ func (s *Service) SubmitAgentMessage(ctx context.Context, taskID, agentID, conte
 	if agentID == "main" {
 		s.cancelMainResultMerge(task.ID)
 	}
-	round, inbox, createdRound, err := s.store.EnqueueOwnerMessage(ctx, message, agentID)
+	round, inbox, createdRound, err := s.store.EnqueueOwnerMessage(ctx, message, agentID, attachmentIDs)
 	if err != nil {
 		return domain.Turn{}, err
 	}
@@ -614,7 +625,7 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 		return
 	}
 	handoff, _ := s.store.PendingAgentSessionHandoff(ctx, task.ID, turn.AgentID)
-	var globalKB, projectKB []domain.KnowledgeEntry
+	var globalKB, projectKB, staleKB []domain.KnowledgeEntry
 	var skills []domain.Skill
 	var productLine domain.ProductLine
 	kbEnabled := knowledgeEnabled(project, task)
@@ -623,6 +634,20 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 		productLine = resolveProductLine(lines, task.TargetBranch, project.DefaultBranch)
 		globalKB, _ = s.store.ListKnowledge(ctx, "global", "", []domain.KnowledgeStatus{domain.KnowledgeVerified})
 		projectKB, _ = s.store.ListApplicableKnowledge(ctx, project.ID, productLine.ID, []domain.KnowledgeStatus{domain.KnowledgeVerified})
+		globalStale, _ := s.store.ListKnowledge(ctx, "global", "", []domain.KnowledgeStatus{domain.KnowledgeStale})
+		projectStale, _ := s.store.ListApplicableKnowledge(ctx, project.ID, productLine.ID, []domain.KnowledgeStatus{domain.KnowledgeStale})
+		pending, _ := s.store.ListKnowledgeProposals(ctx, "", "")
+		pendingEntries := map[string]bool{}
+		for _, proposal := range pending {
+			if proposal.Status == domain.KnowledgeProposalPending {
+				pendingEntries[proposal.EntryID] = true
+			}
+		}
+		for _, entry := range append(globalStale, projectStale...) {
+			if !entry.IsIndex && !pendingEntries[entry.ID] {
+				staleKB = append(staleKB, entry)
+			}
+		}
 	}
 	skills = s.activeTaskSkills(ctx, task)
 	agent, err := s.store.TaskAgent(ctx, task.ID, turn.AgentID)
@@ -633,11 +658,41 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 	conversation, _ := s.store.ConversationPageForAgent(ctx, task.ID, turn.AgentID, 0, 0, 100, nil)
 	allTurns, _ := s.store.ListTurns(ctx, task.ID)
 	hardwareGroups, _ := s.store.HardwareGroups(ctx, task.ID)
+	attachments := []prompt.AttachmentResource{}
+	seenAttachments := map[string]bool{}
+	for _, conversationItem := range conversation.Items {
+		raw, ok := conversationItem.Payload["attachments"]
+		if !ok {
+			continue
+		}
+		data, _ := json.Marshal(raw)
+		var metadata []domain.Attachment
+		if json.Unmarshal(data, &metadata) != nil {
+			continue
+		}
+		for _, reference := range metadata {
+			if reference.ID == "" || seenAttachments[reference.ID] {
+				continue
+			}
+			seenAttachments[reference.ID] = true
+			item, attachmentErr := s.store.Attachment(ctx, task.ID, reference.ID)
+			if attachmentErr != nil {
+				s.failTurn(ctx, &turn, task, fmt.Errorf("load attachment %s: %w", reference.ID, attachmentErr))
+				return
+			}
+			content, readErr := s.store.AttachmentContent(item)
+			if readErr != nil {
+				s.failTurn(ctx, &turn, task, fmt.Errorf("read attachment %s: %w", item.ID, readErr))
+				return
+			}
+			attachments = append(attachments, prompt.AttachmentResource{Attachment: item, Content: string(content)})
+		}
+	}
 	preview, err := s.prompts.Build(ctx, prompt.BuildInput{
 		Project: project, Workspace: workspace, Task: task, Agent: agent, Snapshot: snapshot,
-		Memory: memory, GlobalKnowledge: globalKB, ProjectKnowledge: projectKB, Skills: skills,
+		Memory: memory, GlobalKnowledge: globalKB, ProjectKnowledge: projectKB, StaleKnowledge: staleKB, Skills: skills,
 		ProductLine: productLine, KnowledgeEnabled: kbEnabled,
-		Conversation: conversation.Items, Turns: allTurns, Hardware: hardwareGroups, UserMessage: userMessage,
+		Conversation: conversation.Items, Turns: allTurns, Hardware: hardwareGroups, Attachments: attachments, UserMessage: userMessage,
 		Handoff: handoff.Summary, AgentAPIURL: s.agentAPIURL,
 	})
 	if err != nil {
@@ -832,14 +887,13 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 			ID: domain.NewID("message"), TaskID: task.ID, TurnID: turn.ID, Role: "assistant",
 			Sender: turn.AgentID, Content: turn.Result, CreatedAt: now,
 		}
-		_ = s.store.AddMessage(context.Background(), message)
 		category := "chat"
 		kind := "agent_message"
 		if turn.AgentID != "main" || s.mainReplyIsIntermediate(context.Background(), turn) {
 			category = "update"
 			kind = "agent_result"
 		}
-		_, _ = s.store.AddConversationItem(context.Background(), domain.ConversationItem{
+		_, _ = s.store.FinalizeTurnReply(context.Background(), message, domain.ConversationItem{
 			ID: domain.NewID("conversation"), TaskID: task.ID, RoundID: turn.RoundID, TurnID: turn.ID,
 			AgentID: turn.AgentID, Category: category, Kind: kind, Summary: turn.Result,
 			Payload: map[string]any{"attempt": turn.Attempt, "generation": turn.Generation}, CreatedAt: now,
@@ -1063,9 +1117,10 @@ func (s *Service) applyMemoryPatch(ctx context.Context, task domain.Task, memory
 	_ = s.store.UpsertTaskMemory(ctx, memory)
 }
 
-func (s *Service) createKnowledgeCandidates(ctx context.Context, projectID, taskID, turnID, branch, productLineID string, candidates []KnowledgeCandidate) []domain.KnowledgeEntry {
+func (s *Service) createKnowledgeCandidates(ctx context.Context, projectID, taskID, turnID, branch, productLineID string, candidates []KnowledgeCandidate) ([]domain.KnowledgeEntry, []domain.KnowledgeProposal, error) {
 	now := s.now().UTC()
 	result := make([]domain.KnowledgeEntry, 0, len(candidates))
+	proposals := make([]domain.KnowledgeProposal, 0, len(candidates))
 	for _, candidate := range candidates {
 		if strings.TrimSpace(candidate.Title) == "" || strings.TrimSpace(candidate.Body) == "" {
 			continue
@@ -1078,50 +1133,67 @@ func (s *Service) createKnowledgeCandidates(ctx context.Context, projectID, task
 		if lineID == "" && scope == "project" {
 			lineID = productLineID
 		}
-		status := domain.KnowledgeCandidate
-		if scope == "project" && candidate.Confidence >= 0.8 {
-			status = domain.KnowledgeVerified
-		}
 		entry := domain.KnowledgeEntry{
 			ID: domain.NewID("knowledge"), Scope: scope, Type: candidate.Type, Title: candidate.Title,
-			Body: candidate.Body, Status: status, Confidence: candidate.Confidence, Revision: 1,
+			Body: candidate.Body, Status: domain.KnowledgeCandidate, Confidence: candidate.Confidence, Revision: 1,
 			ContentHash:  fmt.Sprintf("%x", sha256.Sum256([]byte(strings.TrimSpace(candidate.Title)+"\n"+strings.TrimSpace(candidate.Body)))),
 			SourceTaskID: taskID, SourceTurnID: turnID, BranchScope: branch, ProductLineID: lineID, CreatedAt: now, UpdatedAt: now,
 		}
 		if scope == "project" {
 			entry.ProjectID = projectID
 		}
-		if status == domain.KnowledgeVerified {
-			entry.LastVerifiedAt = now
-		}
+		entry.Slug = store.KnowledgeSlug(entry.Title, entry.ID)
+		applyKnowledgeHierarchy(&entry, candidate)
+		baseRevision := 0
 		if strings.TrimSpace(candidate.EntryID) != "" {
-			if existing, err := s.store.Knowledge(ctx, candidate.EntryID); err == nil {
-				entry.ID, entry.CreatedAt = existing.ID, existing.CreatedAt
-				entry.HelpedCount, entry.StaleCount = existing.HelpedCount, existing.StaleCount
-				entry.Revision = existing.Revision + 1
-				_ = s.store.UpdateKnowledge(ctx, entry)
-				s.linkTaskMemoryKnowledge(ctx, taskID, entry)
-				s.emit(ctx, taskID, "knowledge", entry.ID, "knowledge_updated", map[string]any{"title": entry.Title, "revision": entry.Revision})
-				result = append(result, entry)
-				continue
+			existing, err := s.store.Knowledge(ctx, candidate.EntryID)
+			if err != nil {
+				return nil, nil, err
+			}
+			entry.ID, entry.CreatedAt = existing.ID, existing.CreatedAt
+			entry.ParentID, entry.Slug = existing.ParentID, existing.Slug
+			entry.SortOrder, entry.IsIndex = existing.SortOrder, existing.IsIndex
+			applyKnowledgeHierarchy(&entry, candidate)
+			if existing.IsIndex {
+				entry.ProductLineID = ""
+			}
+			baseRevision = existing.Revision
+			entry.Revision = baseRevision + 1
+		}
+		proposal := domain.KnowledgeProposal{
+			ID: domain.NewID("knowledge_proposal"), EntryID: entry.ID, BaseRevision: baseRevision, Proposed: entry,
+			SourceTaskID: taskID, SourceTurnID: turnID, Status: domain.KnowledgeProposalPending,
+			CreatedAt: now, UpdatedAt: now,
+		}
+		created, err := s.store.CreateKnowledgeProposal(ctx, proposal)
+		if err != nil {
+			return nil, nil, err
+		}
+		if baseRevision > 0 {
+			if stale, err := s.store.Knowledge(ctx, entry.ID); err == nil {
+				s.linkTaskMemoryKnowledge(ctx, taskID, stale)
 			}
 		}
-		if existing, err := s.store.MatchingKnowledge(ctx, scope, entry.ProjectID, entry.ProductLineID, entry.Type, entry.Title); err == nil {
-			entry.ID, entry.CreatedAt = existing.ID, existing.CreatedAt
-			entry.HelpedCount, entry.StaleCount = existing.HelpedCount, existing.StaleCount
-			entry.Revision = existing.Revision + 1
-			_ = s.store.UpdateKnowledge(ctx, entry)
-			s.linkTaskMemoryKnowledge(ctx, taskID, entry)
-			s.emit(ctx, taskID, "knowledge", entry.ID, "knowledge_updated", map[string]any{"title": entry.Title, "revision": entry.Revision})
-			result = append(result, entry)
-			continue
-		}
-		_ = s.store.CreateKnowledge(ctx, entry)
-		s.linkTaskMemoryKnowledge(ctx, taskID, entry)
-		s.emit(ctx, taskID, "knowledge", entry.ID, "knowledge_created", map[string]any{"title": entry.Title, "scope": entry.Scope, "status": entry.Status})
-		result = append(result, entry)
+		s.emit(ctx, taskID, "knowledge_proposal", created.ID, "knowledge_proposal_created", map[string]any{"entry_id": created.EntryID, "title": created.Proposed.Title, "base_revision": created.BaseRevision})
+		result = append(result, created.Proposed)
+		proposals = append(proposals, created)
 	}
-	return result
+	return result, proposals, nil
+}
+
+func applyKnowledgeHierarchy(entry *domain.KnowledgeEntry, candidate KnowledgeCandidate) {
+	if candidate.ParentID != nil {
+		entry.ParentID = strings.TrimSpace(*candidate.ParentID)
+	}
+	if candidate.Slug != nil {
+		entry.Slug = strings.TrimSpace(*candidate.Slug)
+	}
+	if candidate.SortOrder != nil {
+		entry.SortOrder = *candidate.SortOrder
+	}
+	if candidate.IsIndex != nil {
+		entry.IsIndex = *candidate.IsIndex
+	}
 }
 
 func (s *Service) linkTaskMemoryKnowledge(ctx context.Context, taskID string, entry domain.KnowledgeEntry) {
@@ -1370,11 +1442,16 @@ func (s *Service) recordExecutionEvent(ctx context.Context, turn domain.Turn, ev
 		if summary == "" {
 			summary = event.Type
 		}
-		_, _ = s.store.AddConversationItem(ctx, domain.ConversationItem{
+		item := domain.ConversationItem{
 			ID: domain.NewID("conversation"), TaskID: turn.TaskID, RoundID: turn.RoundID, TurnID: turn.ID,
 			AgentID: turn.AgentID, Category: category, Kind: kind, Summary: summary,
 			Payload: event.Data, CreatedAt: s.now().UTC(),
-		})
+		}
+		if kind == "agent_message_update" {
+			_, _ = s.store.UpsertBackendStreamItem(ctx, item)
+		} else {
+			_, _ = s.store.AddConversationItem(ctx, item)
+		}
 	}
 	s.emitTurn(ctx, turn, event.Type, event.Data)
 }

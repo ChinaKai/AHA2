@@ -8,6 +8,7 @@ import (
 
 	"github.com/ChinaKai/AHA2/internal/agentapi"
 	"github.com/ChinaKai/AHA2/internal/domain"
+	"github.com/ChinaKai/AHA2/internal/store"
 )
 
 var (
@@ -82,24 +83,25 @@ func (s *Service) UpdateAgentMemory(ctx context.Context, claims agentapi.Claims,
 	return s.store.TaskMemory(ctx, call.Task.ID)
 }
 
-func (s *Service) AddAgentProgress(ctx context.Context, claims agentapi.Claims, message string) error {
+func (s *Service) AddAgentProgress(ctx context.Context, claims agentapi.Claims, message string, attachmentIDs []string) error {
 	call, err := s.AgentCallContext(ctx, claims, false)
 	if err != nil {
 		return err
 	}
 	message = strings.TrimSpace(message)
-	if message == "" {
-		return fmt.Errorf("progress message is required")
+	if message == "" && len(attachmentIDs) == 0 {
+		return fmt.Errorf("progress message or attachment is required")
 	}
 	if len([]rune(message)) > 4000 {
 		return fmt.Errorf("progress message exceeds 4000 characters")
 	}
-	_, err = s.store.AddConversationItem(ctx, domain.ConversationItem{
+	item := domain.ConversationItem{
 		ID: domain.NewID("conversation"), TaskID: call.Task.ID, RoundID: call.Turn.RoundID, TurnID: call.Turn.ID,
 		AgentID: call.Turn.AgentID, StreamAgentID: call.Turn.AgentID, FromAgentID: call.Turn.AgentID, ToAgentID: "owner",
 		RouteKind: "agent_progress", Category: "update", Kind: "agent_message_update", Summary: message,
 		Payload: map[string]any{"api": true}, CreatedAt: s.now().UTC(),
-	})
+	}
+	_, err = s.store.AddConversationItemWithAttachments(ctx, item, attachmentIDs)
 	if err == nil {
 		s.emitTurn(ctx, call.Turn, "agent_progress", map[string]any{"message": message})
 	}
@@ -107,41 +109,55 @@ func (s *Service) AddAgentProgress(ctx context.Context, claims agentapi.Claims, 
 }
 
 func (s *Service) SubmitAgentKnowledge(ctx context.Context, claims agentapi.Claims, candidates []KnowledgeCandidate) ([]domain.KnowledgeEntry, error) {
+	items, _, err := s.SubmitAgentKnowledgeProposals(ctx, claims, candidates)
+	return items, err
+}
+
+func (s *Service) SubmitAgentKnowledgeProposals(ctx context.Context, claims agentapi.Claims, candidates []KnowledgeCandidate) ([]domain.KnowledgeEntry, []domain.KnowledgeProposal, error) {
 	call, err := s.AgentCallContext(ctx, claims, true)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if !knowledgeEnabled(call.Project, call.Task) {
-		return nil, ErrAgentCallForbidden
+		return nil, nil, ErrAgentCallForbidden
 	}
 	for _, candidate := range candidates {
 		if strings.TrimSpace(candidate.Title) == "" || strings.TrimSpace(candidate.Body) == "" || len([]rune(candidate.Title)) > 300 || len([]rune(candidate.Body)) > 20000 {
-			return nil, fmt.Errorf("knowledge title or body is invalid")
+			return nil, nil, fmt.Errorf("knowledge title or body is invalid")
 		}
 		if candidate.Confidence < 0 || candidate.Confidence > 1 {
-			return nil, fmt.Errorf("knowledge confidence must be between 0 and 1")
+			return nil, nil, fmt.Errorf("knowledge confidence must be between 0 and 1")
+		}
+		if candidate.Slug != nil && !store.ValidKnowledgeSlug(strings.TrimSpace(*candidate.Slug)) {
+			return nil, nil, store.ErrKnowledgeInvalidSlug
+		}
+		if candidate.SortOrder != nil && *candidate.SortOrder < 0 {
+			return nil, nil, fmt.Errorf("knowledge sort order must be non-negative")
 		}
 		if strings.TrimSpace(candidate.EntryID) == "" {
+			if candidate.BaseRevision != 0 || (candidate.IsIndex != nil && *candidate.IsIndex) {
+				return nil, nil, ErrRevisionConflict
+			}
 			continue
 		}
 		existing, err := s.store.Knowledge(ctx, candidate.EntryID)
 		if err != nil || existing.Scope == "project" && existing.ProjectID != call.Project.ID {
-			return nil, ErrAgentCallForbidden
+			return nil, nil, ErrAgentCallForbidden
 		}
 		if candidate.BaseRevision <= 0 || candidate.BaseRevision != existing.Revision {
-			return nil, ErrRevisionConflict
+			return nil, nil, ErrRevisionConflict
 		}
 		requestedScope := candidate.Scope
 		if requestedScope != "global" {
 			requestedScope = "project"
 		}
 		if requestedScope != existing.Scope {
-			return nil, ErrAgentCallForbidden
+			return nil, nil, ErrAgentCallForbidden
 		}
 	}
 	lines, _ := s.store.ListProductLines(ctx, call.Project.ID)
 	line := resolveProductLine(lines, call.Task.TargetBranch, call.Project.DefaultBranch)
-	return s.createKnowledgeCandidates(ctx, call.Project.ID, call.Task.ID, call.Turn.ID, call.Task.TaskBranch, line.ID, candidates), nil
+	return s.createKnowledgeCandidates(ctx, call.Project.ID, call.Task.ID, call.Turn.ID, call.Task.TaskBranch, line.ID, candidates)
 }
 
 func (s *Service) SubmitAgentKnowledgeFeedback(ctx context.Context, claims agentapi.Claims, feedback KnowledgeFeedback) (domain.KnowledgeEntry, error) {

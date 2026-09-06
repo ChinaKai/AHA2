@@ -24,6 +24,7 @@ import {
   usageNumber,
 } from "./task_agents.js";
 import type {
+  Attachment,
   AuthStatus,
   CodexAccount,
   ConversationCategory,
@@ -31,6 +32,7 @@ import type {
   DetectedModel,
   EnvGroup,
   Knowledge,
+  KnowledgeProposal,
   Model,
   Project,
   Provider,
@@ -67,6 +69,7 @@ interface State {
   models: Model[];
   tasks: Task[];
   knowledge: Knowledge[];
+  knowledgeProposals: KnowledgeProposal[];
   skills: Skill[];
   selectedTask: TaskDetail | null;
   taskConversation: ConversationItem[];
@@ -79,6 +82,7 @@ interface State {
   taskRealtimeState: "connecting" | "live" | "fallback";
   taskDraft: string;
   taskDrafts: Record<string, string>;
+  taskAttachmentDrafts: Record<string, Attachment[]>;
   selectedTaskAgent: string;
   selectedProject: Project | null;
   dialogProjectID: string;
@@ -108,6 +112,7 @@ const state: State = {
   models: [],
   tasks: [],
   knowledge: [],
+  knowledgeProposals: [],
   skills: [],
   selectedTask: null,
   taskConversation: [],
@@ -120,6 +125,7 @@ const state: State = {
   taskRealtimeState: "connecting",
   taskDraft: "",
   taskDrafts: {},
+  taskAttachmentDrafts: {},
   selectedTaskAgent: "main",
   selectedProject: null,
   dialogProjectID: "",
@@ -582,6 +588,7 @@ async function loadAll(): Promise<void> {
   state.models = models.models || [];
   state.tasks = tasks.tasks || [];
   state.knowledge = knowledge.knowledge || [];
+  state.knowledgeProposals = knowledge.proposals || [];
   state.skills = skills.skills || [];
   if (system?.system) state.system = system.system;
   if (proxy?.proxy) state.proxySettings = proxy.proxy;
@@ -636,6 +643,7 @@ async function openTask(taskID: string): Promise<void> {
   state.taskTool = "";
   state.taskDraft = "";
   state.taskDrafts = {};
+  state.taskAttachmentDrafts = {};
   scrollConversationToBottom = true;
   openEvents(taskID, state.taskEventCursor);
 }
@@ -982,6 +990,30 @@ function exactTaskSlashCommand(value: string): typeof TASK_SLASH_COMMANDS[number
   return exactSlashCommand(value, availableTaskSlashCommands());
 }
 
+function currentAttachmentDrafts(): Attachment[] {
+  return state.taskAttachmentDrafts[state.selectedTaskAgent] || [];
+}
+
+function attachmentURL(item: Pick<Attachment, "task_id" | "id">): string {
+  return `/api/v1/tasks/${encodeURIComponent(item.task_id)}/attachments/${encodeURIComponent(item.id)}`;
+}
+
+function attachmentSize(size: number): string {
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function previewableAttachment(mediaType: string): boolean {
+  return ["image/png", "image/jpeg", "image/gif", "image/webp"].includes(mediaType);
+}
+
+function renderAttachmentComposer(disabled: boolean): string {
+  const attachments = currentAttachmentDrafts();
+  const tray = attachments.length ? `<div class="composer-attachment-tray">${attachments.map(item => `<article>${previewableAttachment(item.media_type) ? `<img src="${attachmentURL(item)}" alt="">` : icon("attachment")}<span><strong>${escapeHTML(item.name)}</strong><small>${attachmentSize(item.size)}</small></span><button type="button" class="icon-button" data-remove-attachment="${escapeHTML(item.id)}" title="移除附件">${icon("close")}</button></article>`).join("")}</div>` : "";
+  return `${tray}<input id="message-attachment-input" type="file" multiple hidden ${disabled ? "disabled" : ""}><button id="message-attachment-pick" class="composer-attachment-button" type="button" title="添加附件" ${disabled || attachments.length >= 8 ? "disabled" : ""}>${icon("attachment")}${attachments.length ? `<small>${attachments.length}</small>` : ""}</button>`;
+}
+
 function renderTaskSlashCommandMenu(textarea: HTMLTextAreaElement | null): void {
   const menu = document.querySelector<HTMLElement>("#slash-command-menu");
   if (!menu || !textarea) return;
@@ -999,7 +1031,7 @@ function syncTaskComposerState(textarea: HTMLTextAreaElement | null): void {
   if (runtimeError) textarea.placeholder = runtimeError;
   renderTaskSlashCommandMenu(textarea);
   const send = document.querySelector<HTMLButtonElement>("#message-send");
-  if (send) send.disabled = Boolean(runtimeError) || !textarea.value.trim();
+  if (send) send.disabled = Boolean(runtimeError) || (!textarea.value.trim() && currentAttachmentDrafts().length === 0);
 }
 
 function applyTaskSlashCommand(value: string): void {
@@ -1108,7 +1140,7 @@ function taskDetailView(detail: TaskDetail): string {
     <div id="task-failure-slot">${taskFailureBannerHtml(detail)}</div>
     <div class="messages" id="conversation-list">${conversationListHtml()}</div>
     <div id="agent-turn-slot">${renderAgentTurnCard(detail, state.taskRealtimeState, state.taskContext?.context.metrics)}</div>
-    <form id="message-form" class="composer${runtimeError || remoteReadOnly ? " runtime-invalid" : ""}">${runtimeError || remoteReadOnly ? `<div class="composer-runtime-warning">${escapeHTML(remoteReadOnly ? "该 Task 属于其他设备，本机只读" : runtimeError)}</div>` : ""}${renderComposerTools(detail, state.selectedTaskAgent, state.taskCategories, state.taskConversation.length)}<div id="slash-command-menu" class="slash-command-menu" ${matchingTaskSlashCommands(state.taskDraft).length ? "" : "hidden"}>${slashCommandMenuHtml(state.taskDraft)}</div><textarea name="content" placeholder="${escapeHTML(remoteReadOnly ? "只读 Task" : runtimeError || (activeTurn ? `${state.selectedTaskAgent} 正在执行，发送后将排队` : taskFailed ? "输入消息重试，或输入 /reopen" : `发送给 ${state.selectedTaskAgent}，输入 / 查看命令`))}" ${runtimeError || remoteReadOnly ? "disabled" : ""} required>${escapeHTML(state.taskDraft)}</textarea><button id="message-send" class="primary" aria-label="发送" ${runtimeError || remoteReadOnly ? "disabled" : ""}>${icon("send")}<span class="send-label">发送</span></button></form>
+    <form id="message-form" class="composer${runtimeError || remoteReadOnly ? " runtime-invalid" : ""}">${runtimeError || remoteReadOnly ? `<div class="composer-runtime-warning">${escapeHTML(remoteReadOnly ? "该 Task 属于其他设备，本机只读" : runtimeError)}</div>` : ""}${renderComposerTools(detail, state.selectedTaskAgent, state.taskCategories, state.taskConversation.length)}<div id="slash-command-menu" class="slash-command-menu" ${matchingTaskSlashCommands(state.taskDraft).length ? "" : "hidden"}>${slashCommandMenuHtml(state.taskDraft)}</div>${renderAttachmentComposer(Boolean(runtimeError || remoteReadOnly))}<textarea name="content" placeholder="${escapeHTML(remoteReadOnly ? "只读 Task" : runtimeError || (activeTurn ? `${state.selectedTaskAgent} 正在执行，发送后将排队` : taskFailed ? "输入消息重试，或输入 /reopen" : `发送给 ${state.selectedTaskAgent}，输入 / 查看命令`))}" ${runtimeError || remoteReadOnly ? "disabled" : ""}>${escapeHTML(state.taskDraft)}</textarea><button id="message-send" class="primary" aria-label="发送" ${runtimeError || remoteReadOnly ? "disabled" : ""}>${icon("send")}<span class="send-label">发送</span></button></form>
   </section>`;
   return shell(`<section class="task-screen">
     <header class="task-head"><button id="back-tasks">←</button><div class="task-title-block"><h1><span class="task-code">${escapeHTML(detail.task.code || "")}</span><span class="task-title-text">${escapeHTML(detail.task.title)}</span></h1><div class="task-head-subline"><span class="task-head-meta" title="${escapeHTML(taskMeta)}">${escapeHTML(taskMeta)}</span><span id="task-detail-status" class="status ${statusClass(detail.task.status)}">${statusLabel(detail.task.status)}</span><span class="task-branch">${escapeHTML(detail.task.task_branch || "")}</span></div></div><div class="actions task-tool-actions">${renderTaskToolButtons(state.taskTool)}</div></header>
@@ -1263,6 +1295,7 @@ function render(): void {
         projects: state.projects,
         workspaces: state.workspaces,
         knowledge: state.knowledge,
+        proposals: state.knowledgeProposals,
         refreshData: loadAll,
         render,
         setMessage,
@@ -1764,22 +1797,70 @@ function bindCommon(): void {
     closeEvents();
     render();
   });
+  document.querySelector<HTMLButtonElement>("#message-attachment-pick")?.addEventListener("click", () => {
+    document.querySelector<HTMLInputElement>("#message-attachment-input")?.click();
+  });
+  document.querySelector<HTMLInputElement>("#message-attachment-input")?.addEventListener("change", async event => {
+    if (!state.selectedTask) return;
+    const input = event.currentTarget;
+    const files = Array.from(input.files || []);
+    const drafts = currentAttachmentDrafts();
+    if (drafts.length + files.length > 8) {
+      setMessage("error", "每条消息最多发送 8 个附件");
+      input.value = "";
+      return;
+    }
+    const button = document.querySelector<HTMLButtonElement>("#message-attachment-pick");
+    if (button) button.disabled = true;
+    state.taskAttachmentDrafts[state.selectedTaskAgent] = drafts;
+    try {
+      for (const file of files) {
+        const result = await api.uploadAttachment(state.selectedTask.task.id, file);
+        drafts.push(result.attachment);
+      }
+      if (files.length) setMessage("notice", `已添加 ${files.length} 个附件`);
+      render();
+    } catch (error) {
+      setMessage("error", error instanceof Error ? error.message : String(error));
+      render();
+    } finally {
+      input.value = "";
+    }
+  });
+  document.querySelectorAll<HTMLButtonElement>("[data-remove-attachment]").forEach(button => button.addEventListener("click", async () => {
+    if (!state.selectedTask) return;
+    const id = button.dataset.removeAttachment || "";
+    button.disabled = true;
+    try {
+      await api.deleteAttachment(state.selectedTask.task.id, id);
+      state.taskAttachmentDrafts[state.selectedTaskAgent] = currentAttachmentDrafts().filter(item => item.id !== id);
+      render();
+    } catch (error) {
+      button.disabled = false;
+      setMessage("error", error instanceof Error ? error.message : String(error));
+    }
+  }));
   document.querySelector<HTMLFormElement>("#message-form")?.addEventListener("submit", async event => {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     const content = String(form.get("content") || "").trim();
     if (!state.selectedTask) return;
     const textarea = document.querySelector<HTMLTextAreaElement>("#message-form textarea");
+    const attachments = currentAttachmentDrafts();
     try {
-      const handled = await executeTaskSlashCommand(content);
+      const handled = attachments.length === 0 && await executeTaskSlashCommand(content);
       if (!handled) {
-        const submission = await api.agentMessage(state.selectedTask.task.id, state.selectedTaskAgent, content);
+        const submission = await api.agentMessage(state.selectedTask.task.id, state.selectedTaskAgent, content, attachments.map(item => item.id));
         if (!submission.started) setMessage("notice", `${state.selectedTaskAgent} 正在执行，消息已排队；输入 /interrupt 可中断当前 Round`);
         await refreshTaskRuntime(state.selectedTask.task.id);
         updateTaskLiveRegions();
       }
       state.taskDraft = "";
       state.taskDrafts[state.selectedTaskAgent] = "";
+      state.taskAttachmentDrafts[state.selectedTaskAgent] = [];
+      document.querySelector(".composer-attachment-tray")?.remove();
+      const attachmentButton = document.querySelector<HTMLButtonElement>("#message-attachment-pick");
+      if (attachmentButton) attachmentButton.innerHTML = icon("attachment");
       if (textarea) {
         textarea.value = "";
         textarea.style.height = "auto";
@@ -1905,6 +1986,7 @@ function bindCommon(): void {
     projects: state.projects,
     workspaces: state.workspaces,
     knowledge: state.knowledge,
+    proposals: state.knowledgeProposals,
     refreshData: loadAll,
     render,
     setMessage,

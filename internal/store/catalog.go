@@ -19,6 +19,10 @@ func (s *Store) CreateProject(ctx context.Context, project domain.Project) error
 		project.ID, project.Name, project.Description, project.ProjectType, project.RepositoryIdentity, project.DefaultWorkspaceID,
 		project.DefaultBranch, project.KnowledgePolicy, project.KnowledgeRevision, timeString(project.CreatedAt), timeString(project.UpdatedAt),
 	)
+	if err != nil {
+		return err
+	}
+	_, err = s.EnsureKnowledgeRoot(ctx, "project", project.ID)
 	return err
 }
 

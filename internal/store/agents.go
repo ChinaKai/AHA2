@@ -229,6 +229,7 @@ func (s *Store) EnqueueOwnerMessage(
 	ctx context.Context,
 	message domain.Message,
 	targetAgentID string,
+	attachmentIDs []string,
 ) (domain.TaskRound, domain.AgentInboxItem, bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -262,6 +263,14 @@ func (s *Store) EnqueueOwnerMessage(
 	); err != nil {
 		return domain.TaskRound{}, domain.AgentInboxItem{}, false, err
 	}
+	attachments, err := bindAttachmentsTx(ctx, tx, message.TaskID, message.ID, attachmentIDs)
+	if err != nil {
+		return domain.TaskRound{}, domain.AgentInboxItem{}, false, err
+	}
+	payload := map[string]any{}
+	if len(attachments) > 0 {
+		payload["attachments"] = attachments
+	}
 	if errors.Is(err, sql.ErrNoRows) || round.ID == "" {
 		round = domain.TaskRound{
 			ID: domain.NewID("round"), TaskID: message.TaskID, InputMessageID: message.ID,
@@ -289,7 +298,7 @@ func (s *Store) EnqueueOwnerMessage(
 			category,kind,summary,payload_json,created_at
 		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		domain.NewID("conversation"), message.TaskID, round.ID, "", "owner", targetAgentID,
-		"owner", targetAgentID, "owner_message", "chat", "user_message", message.Content, "{}",
+		"owner", targetAgentID, "owner_message", "chat", "user_message", message.Content, encodeJSON(payload),
 		timeString(message.CreatedAt),
 	); err != nil {
 		return domain.TaskRound{}, domain.AgentInboxItem{}, false, err
@@ -297,7 +306,7 @@ func (s *Store) EnqueueOwnerMessage(
 	inbox := domain.AgentInboxItem{
 		ID: domain.NewID("inbox"), TaskID: message.TaskID, RoundID: round.ID,
 		TargetAgentID: targetAgentID, SourceAgentID: "owner", SourceKind: "owner_message",
-		MessageID: message.ID, Content: message.Content, Status: "pending", CreatedAt: message.CreatedAt,
+		MessageID: message.ID, Content: message.Content, Payload: payload, Status: "pending", CreatedAt: message.CreatedAt,
 	}
 	result, err := tx.ExecContext(ctx, `
 		INSERT INTO agent_inbox(
@@ -305,7 +314,7 @@ func (s *Store) EnqueueOwnerMessage(
 			content,payload_json,status,batch_id,created_at,claimed_at,processed_at
 		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		inbox.ID, inbox.TaskID, inbox.RoundID, inbox.TargetAgentID, inbox.SourceAgentID, inbox.SourceKind,
-		"", inbox.MessageID, inbox.Content, "{}", inbox.Status, "", timeString(inbox.CreatedAt), "", "",
+		"", inbox.MessageID, inbox.Content, encodeJSON(inbox.Payload), inbox.Status, "", timeString(inbox.CreatedAt), "", "",
 	)
 	if err != nil {
 		return domain.TaskRound{}, domain.AgentInboxItem{}, false, err

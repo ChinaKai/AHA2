@@ -174,6 +174,164 @@ func (s *Store) TurnsForRound(ctx context.Context, roundID string) ([]domain.Tur
 }
 
 func (s *Store) AddConversationItem(ctx context.Context, item domain.ConversationItem) (domain.ConversationItem, error) {
+	item = normalizeConversationItem(item)
+	return insertConversationItem(ctx, s.db, item)
+}
+
+// UpsertBackendStreamItem keeps transient assistant output to one placeholder per Turn.
+// Explicit progress and routed messages use different route kinds and are not affected.
+func (s *Store) UpsertBackendStreamItem(ctx context.Context, item domain.ConversationItem) (domain.ConversationItem, error) {
+	item = normalizeConversationItem(item)
+	item.RouteKind = "backend_stream"
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return domain.ConversationItem{}, err
+	}
+	defer tx.Rollback()
+	var existingID string
+	var sequence int64
+	err = tx.QueryRowContext(ctx, `
+		SELECT id,sequence FROM conversation_items
+		WHERE task_id=? AND turn_id=? AND kind='agent_message_update'
+		  AND route_kind IN ('','backend_stream')
+		ORDER BY sequence LIMIT 1`, item.TaskID, item.TurnID).Scan(&existingID, &sequence)
+	if err == nil {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE conversation_items
+			SET round_id=?,agent_id=?,stream_agent_id=?,from_agent_id=?,to_agent_id=?,route_kind=?,
+			    category=?,kind=?,summary=?,payload_json=?
+			WHERE id=?`,
+			item.RoundID, item.AgentID, item.StreamAgentID, item.FromAgentID, item.ToAgentID, item.RouteKind,
+			item.Category, item.Kind, item.Summary, encodeJSON(item.Payload), existingID,
+		); err != nil {
+			return domain.ConversationItem{}, err
+		}
+		item.ID, item.Sequence = existingID, sequence
+	} else if errors.Is(err, sql.ErrNoRows) {
+		item, err = insertConversationItem(ctx, tx, item)
+		if err != nil {
+			return domain.ConversationItem{}, err
+		}
+	} else {
+		return domain.ConversationItem{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM conversation_items
+		WHERE task_id=? AND turn_id=? AND kind='agent_message_update'
+		  AND route_kind IN ('','backend_stream') AND id<>?`, item.TaskID, item.TurnID, item.ID); err != nil {
+		return domain.ConversationItem{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return domain.ConversationItem{}, err
+	}
+	return item, nil
+}
+
+// FinalizeTurnReply atomically replaces backend stream placeholders with one durable reply.
+// Repeating the call updates the same records, while identical text from different Turns remains distinct.
+func (s *Store) FinalizeTurnReply(ctx context.Context, message domain.Message, item domain.ConversationItem) (domain.ConversationItem, error) {
+	item = normalizeConversationItem(item)
+	item.RouteKind = "turn_result"
+	if message.TaskID == "" || message.TurnID == "" || message.Role != "assistant" || item.TaskID != message.TaskID || item.TurnID != message.TurnID {
+		return domain.ConversationItem{}, fmt.Errorf("final Turn reply scope is invalid")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return domain.ConversationItem{}, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM conversation_items
+		WHERE task_id=? AND turn_id=? AND kind='agent_message_update'
+		  AND route_kind IN ('','backend_stream')`, item.TaskID, item.TurnID); err != nil {
+		return domain.ConversationItem{}, err
+	}
+	var messageID string
+	err = tx.QueryRowContext(ctx, `
+		SELECT id FROM messages WHERE task_id=? AND turn_id=? AND role='assistant'
+		ORDER BY created_at,id LIMIT 1`, message.TaskID, message.TurnID).Scan(&messageID)
+	if errors.Is(err, sql.ErrNoRows) {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO messages(id,task_id,turn_id,role,sender,content,created_at) VALUES(?,?,?,?,?,?,?)`,
+			message.ID, message.TaskID, message.TurnID, message.Role, message.Sender, message.Content, timeString(message.CreatedAt)); err != nil {
+			return domain.ConversationItem{}, err
+		}
+		messageID = message.ID
+	} else if err != nil {
+		return domain.ConversationItem{}, err
+	} else if _, err := tx.ExecContext(ctx, `UPDATE messages SET sender=?,content=?,created_at=? WHERE id=?`,
+		message.Sender, message.Content, timeString(message.CreatedAt), messageID); err != nil {
+		return domain.ConversationItem{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM messages WHERE task_id=? AND turn_id=? AND role='assistant' AND id<>?`, message.TaskID, message.TurnID, messageID); err != nil {
+		return domain.ConversationItem{}, err
+	}
+	var existingID string
+	var sequence int64
+	err = tx.QueryRowContext(ctx, `
+		SELECT id,sequence FROM conversation_items
+		WHERE task_id=? AND turn_id=?
+		  AND (route_kind='turn_result' OR (route_kind='' AND kind IN ('agent_message','agent_result')))
+		ORDER BY sequence LIMIT 1`, item.TaskID, item.TurnID).Scan(&existingID, &sequence)
+	if errors.Is(err, sql.ErrNoRows) {
+		item, err = insertConversationItem(ctx, tx, item)
+		if err != nil {
+			return domain.ConversationItem{}, err
+		}
+	} else if err != nil {
+		return domain.ConversationItem{}, err
+	} else {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE conversation_items
+			SET round_id=?,agent_id=?,stream_agent_id=?,from_agent_id=?,to_agent_id=?,route_kind=?,
+			    category=?,kind=?,summary=?,payload_json=?,created_at=?
+			WHERE id=?`,
+			item.RoundID, item.AgentID, item.StreamAgentID, item.FromAgentID, item.ToAgentID, item.RouteKind,
+			item.Category, item.Kind, item.Summary, encodeJSON(item.Payload), timeString(item.CreatedAt), existingID,
+		); err != nil {
+			return domain.ConversationItem{}, err
+		}
+		item.ID, item.Sequence = existingID, sequence
+	}
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM conversation_items
+		WHERE task_id=? AND turn_id=? AND id<>?
+		  AND (route_kind='turn_result' OR (route_kind='' AND kind IN ('agent_message','agent_result')))`, item.TaskID, item.TurnID, item.ID); err != nil {
+		return domain.ConversationItem{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return domain.ConversationItem{}, err
+	}
+	return item, nil
+}
+
+func (s *Store) AddConversationItemWithAttachments(ctx context.Context, item domain.ConversationItem, attachmentIDs []string) (domain.ConversationItem, error) {
+	item = normalizeConversationItem(item)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return domain.ConversationItem{}, err
+	}
+	defer tx.Rollback()
+	attachments, err := bindAttachmentsTx(ctx, tx, item.TaskID, item.ID, attachmentIDs)
+	if err != nil {
+		return domain.ConversationItem{}, err
+	}
+	if item.Payload == nil {
+		item.Payload = map[string]any{}
+	}
+	if len(attachments) > 0 {
+		item.Payload["attachments"] = attachments
+	}
+	item, err = insertConversationItem(ctx, tx, item)
+	if err != nil {
+		return domain.ConversationItem{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return domain.ConversationItem{}, err
+	}
+	return item, nil
+}
+
+func normalizeConversationItem(item domain.ConversationItem) domain.ConversationItem {
 	if item.StreamAgentID == "" {
 		item.StreamAgentID = item.AgentID
 		if item.StreamAgentID == "" || item.StreamAgentID == "owner" {
@@ -186,7 +344,15 @@ func (s *Store) AddConversationItem(ctx context.Context, item domain.Conversatio
 	if item.ToAgentID == "" {
 		item.ToAgentID = item.StreamAgentID
 	}
-	result, err := s.db.ExecContext(ctx, `
+	return item
+}
+
+type conversationExecer interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+func insertConversationItem(ctx context.Context, database conversationExecer, item domain.ConversationItem) (domain.ConversationItem, error) {
+	result, err := database.ExecContext(ctx, `
 		INSERT INTO conversation_items(
 			id,task_id,round_id,turn_id,agent_id,stream_agent_id,from_agent_id,to_agent_id,route_kind,
 			category,kind,summary,payload_json,created_at

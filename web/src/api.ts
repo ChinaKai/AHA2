@@ -1,10 +1,12 @@
 import type {
+  Attachment,
   AuthStatus,
   CodexAccount,
   CodexLogin,
   DetectedModel,
   EnvGroup,
   Knowledge,
+  KnowledgeProposal,
   Model,
   Project,
   ProductLine,
@@ -38,7 +40,7 @@ class APIClient {
 
   async request<T>(path: string, options: RequestInit = {}): Promise<T> {
     const headers = new Headers(options.headers || {});
-    if (options.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+    if (options.body && !(options.body instanceof FormData) && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
     if (this.csrf && options.method && !["GET", "HEAD"].includes(options.method)) {
       headers.set("X-CSRF-Token", this.csrf);
     }
@@ -271,11 +273,21 @@ class APIClient {
     return this.request(`/api/v1/tasks/${taskID}/messages`, {method: "POST", body: JSON.stringify({content})});
   }
 
-  agentMessage(taskID: string, agentID: string, content: string): Promise<{turn?: {id: string}; queued: boolean; started: boolean}> {
+  agentMessage(taskID: string, agentID: string, content: string, attachmentIDs: string[] = []): Promise<{turn?: {id: string}; queued: boolean; started: boolean}> {
     return this.request(`/api/v1/tasks/${taskID}/agents/${encodeURIComponent(agentID)}/messages`, {
       method: "POST",
-      body: JSON.stringify({content}),
+      body: JSON.stringify({content, attachment_ids: attachmentIDs}),
     });
+  }
+
+  uploadAttachment(taskID: string, file: File): Promise<{attachment: Attachment}> {
+    const form = new FormData();
+    form.set("file", file, file.name);
+    return this.request(`/api/v1/tasks/${encodeURIComponent(taskID)}/attachments`, {method: "POST", body: form});
+  }
+
+  deleteAttachment(taskID: string, attachmentID: string): Promise<{ok: boolean}> {
+    return this.request(`/api/v1/tasks/${encodeURIComponent(taskID)}/attachments/${encodeURIComponent(attachmentID)}`, {method: "DELETE"});
   }
 
   completeTask(id: string): Promise<{ok: boolean}> {
@@ -374,12 +386,20 @@ class APIClient {
     return this.request(`/api/v1/rounds/${id}/interrupt`, {method: "POST", body: "{}"});
   }
 
-  knowledge(scope = "", projectID = "", status = ""): Promise<{knowledge: Knowledge[]}> {
+  knowledge(scope = "", projectID = "", status = ""): Promise<{knowledge: Knowledge[]; proposals?: KnowledgeProposal[]}> {
     const query = new URLSearchParams();
     if (scope) query.set("scope", scope);
     if (projectID) query.set("project_id", projectID);
     if (status) query.set("status", status);
     return this.request(`/api/v1/knowledge?${query}`);
+  }
+
+  approveKnowledgeProposal(id: string): Promise<{ok: boolean; knowledge?: Knowledge; proposal?: KnowledgeProposal}> {
+    return this.request(`/api/v1/knowledge/proposals/${encodeURIComponent(id)}/approve`, {method: "POST", body: "{}"});
+  }
+
+  rejectKnowledgeProposal(id: string): Promise<{ok: boolean; proposal?: KnowledgeProposal}> {
+    return this.request(`/api/v1/knowledge/proposals/${encodeURIComponent(id)}/reject`, {method: "POST", body: "{}"});
   }
 
   createKnowledge(payload: Record<string, unknown>): Promise<{knowledge: Knowledge}> {

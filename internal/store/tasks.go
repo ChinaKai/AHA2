@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
+	"path/filepath"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
 )
@@ -254,8 +256,28 @@ func (s *Store) UpdateTaskRuntimeSnapshot(ctx context.Context, id, snapshotID, u
 }
 
 func (s *Store) DeleteTask(ctx context.Context, id string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM tasks WHERE id=?`, id)
-	return err
+	rows, _ := s.db.QueryContext(ctx, `SELECT DISTINCT sha256 FROM attachments WHERE task_id=?`, id)
+	var hashes []string
+	if rows != nil {
+		for rows.Next() {
+			var hash string
+			if rows.Scan(&hash) == nil {
+				hashes = append(hashes, hash)
+			}
+		}
+		rows.Close()
+	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM tasks WHERE id=?`, id); err != nil {
+		return err
+	}
+	for _, hash := range hashes {
+		var references int
+		_ = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM attachments WHERE sha256=?`, hash).Scan(&references)
+		if references == 0 && len(hash) == 64 {
+			_ = os.Remove(filepath.Join(s.dataDir, "attachments", "blobs", hash[:2], hash))
+		}
+	}
+	return nil
 }
 
 func (s *Store) DeleteRuntimeSnapshot(ctx context.Context, id string) error {
