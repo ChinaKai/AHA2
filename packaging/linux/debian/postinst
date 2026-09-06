@@ -1,0 +1,22 @@
+#!/bin/sh
+set -e
+
+if ! getent group aha2 >/dev/null 2>&1; then
+    addgroup --system aha2
+fi
+if ! getent passwd aha2 >/dev/null 2>&1; then
+    adduser --system --ingroup aha2 --home /var/lib/aha2 --no-create-home --shell /usr/sbin/nologin aha2
+fi
+install -d -m 0750 -o aha2 -g aha2 /var/lib/aha2
+
+if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+    systemctl daemon-reload
+    systemctl enable aha2.service
+    if systemctl is-active --quiet aha2.service; then
+        systemctl restart aha2.service
+    else
+        systemctl start aha2.service
+    fi
+fi
+
+exit 0

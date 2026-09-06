@@ -51,12 +51,71 @@ aha2.exe service run --listen <IP>:<端口> --data-dir <数据目录>
 重新配置并启动服务。卸载会停止并删除服务及本安装器创建的防火墙规则，但默认保留所选数据
 目录，避免误删数据库、Secret Store 和 Setup Token；确认不再需要时应由管理员另行备份并删除。
 
-完成页可以选择打开 `http://127.0.0.1:8766`。安装包旁的
-`AHA2-Setup-x64.exe.sha256` 可用于校验下载完整性。
+完成页可以选择打开 `http://127.0.0.1:8766`。Release 中的统一 `SHA256SUMS`
+可用于校验下载完整性。
+
+## macOS 机器级安装
+
+macOS 标准安装包按架构提供：
+
+```text
+AHA2-macos-amd64.pkg
+AHA2-macos-arm64.pkg
+```
+
+安装包需要管理员权限，将程序安装为 `/usr/local/bin/aha2`，并注册
+`/Library/LaunchDaemons/com.aha2.controlplane.plist`。launchd 默认执行：
+
+```text
+/usr/local/bin/aha2 serve --listen 127.0.0.1:8766 --data-dir "/Library/Application Support/AHA2"
+```
+
+服务配置启用 `RunAtLoad` 和 `KeepAlive`。升级前安装脚本会先从 system launchd domain
+卸载旧 job，文件安装完成后再执行 `bootstrap` 与 `kickstart`。持久数据位于
+`/Library/Application Support/AHA2`，安装和卸载脚本都不会主动删除该目录。
+
+管理员卸载：
+
+```bash
+sudo /usr/local/share/aha2/uninstall.sh
+```
+
+卸载脚本会停止并 bootout launchd job，删除程序和 plist，并保留持久数据。
+
+在非 macOS 环境只执行静态验证：
+
+```bash
+./scripts/test-macos-packages.sh
+```
+
+在 macOS 上分别构建两个架构的包：
+
+```bash
+./scripts/build-macos-packages.sh --version v0.1.0 \
+  --input-exe ./dist/aha2-darwin-amd64 --arch amd64 --output-dir ./dist
+./scripts/build-macos-packages.sh --version v0.1.0 \
+  --input-exe ./dist/aha2-darwin-arm64 --arch arm64 --output-dir ./dist
+```
+
+如已配置 Developer ID Installer 证书，可额外传入
+`--signing-identity`；未提供时正常产出未签名包。脚本不会打印签名凭据。
+
+首次安装后通过管理员终端读取 Owner Setup Token：
+
+```bash
+sudo cat "/Library/Application Support/AHA2/setup-token"
+```
+
+## Linux 系统安装
+
+Debian/Ubuntu 提供 amd64、arm64 `.deb`，Fedora/RHEL 提供 x86_64、aarch64 `.rpm`。
+安装包注册 `aha2.service`，使用专用 `aha2` 系统账号，配置文件位于
+`/etc/aha2/aha2.env`，持久数据位于 `/var/lib/aha2`。详细安装、配置与卸载方法见
+[`docs/linux-packaging.md`](linux-packaging.md)。
 
 ## 首次 Owner 初始化
 
-首次启动生成一次性 Setup Token：
+首次启动会在所选数据目录生成一次性 `setup-token`。例如 Windows 机器级安装默认位于：
 
 ```text
 C:\Users\toope\AppData\Local\AHA2\setup-token
@@ -136,18 +195,20 @@ python C:\Users\toope\AppData\Local\AHA\aha managed-process stop aha2-v1
 
 ## 构建产物
 
-`dist/` 包含：
+Release 只包含标准安装包，不发布裸二进制：
 
 ```text
-aha2-linux-amd64
-aha2-linux-arm64
-aha2-windows-amd64.exe
-aha2-windows-arm64.exe
-aha2-darwin-amd64
-aha2-darwin-arm64
 AHA2-Setup-x64.exe
-AHA2-Setup-x64.exe.sha256
+aha2_<version>_amd64.deb
+aha2_<version>_arm64.deb
+aha2-<version>-1.x86_64.rpm
+aha2-<version>-1.aarch64.rpm
+AHA2-macos-amd64.pkg
+AHA2-macos-arm64.pkg
+SHA256SUMS
 ```
+
+打包过程仍会生成临时目标平台二进制，但只作为安装包输入，不上传到 Release。
 
 本地仅校验安装器定义、不生成二进制：
 

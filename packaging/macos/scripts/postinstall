@@ -1,0 +1,18 @@
+#!/bin/sh
+set -eu
+
+label="com.aha2.controlplane"
+plist="/Library/LaunchDaemons/${label}.plist"
+data_dir="/Library/Application Support/AHA2"
+
+/usr/bin/install -d -o root -g wheel -m 0750 "${data_dir}"
+/usr/sbin/chown root:wheel /usr/local/bin/aha2 "${plist}" /usr/local/share/aha2/uninstall.sh
+/bin/chmod 0755 /usr/local/bin/aha2 /usr/local/share/aha2/uninstall.sh
+/bin/chmod 0644 "${plist}"
+
+/bin/launchctl bootout "system/${label}" >/dev/null 2>&1 || true
+/bin/launchctl bootstrap system "${plist}"
+/bin/launchctl enable "system/${label}"
+/bin/launchctl kickstart -k "system/${label}"
+
+exit 0

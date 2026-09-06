@@ -21,10 +21,11 @@ $requiredWorkflowContracts = @(
     "runs-on: windows-latest",
     "build-windows-installer.ps1",
     "AHA2-Setup-x64.exe",
-    "AHA2-Setup-x64.exe.sha256",
+    "build-linux-packages.sh",
+    "build-macos-packages.sh",
+    "SHA256SUMS",
     "merge-multiple: true",
-    "portable-release",
-    "aha2-windows-amd64.exe",
+    "pattern: package-*",
     "main.version=",
     "gh release create"
 )
@@ -32,5 +33,8 @@ foreach ($contract in $requiredWorkflowContracts) {
     if (-not $workflow.Contains($contract)) {
         throw "Release workflow contract is missing: $contract"
     }
+}
+if ($workflow.Contains("portable-release") -or $workflow.Contains("Upload portable artifacts")) {
+    throw "Release workflow must not publish portable binaries."
 }
 Write-Output "Windows installer and Release workflow contracts are valid."

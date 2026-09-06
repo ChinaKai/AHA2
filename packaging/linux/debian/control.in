@@ -1,0 +1,10 @@
+Package: aha2
+Version: @VERSION@
+Section: utils
+Priority: optional
+Architecture: @ARCH@
+Maintainer: AHA2 maintainers <noreply@example.invalid>
+Depends: adduser, systemd
+Description: Local agent control plane
+ AHA2 provides a local web control plane for agent tasks, knowledge,
+ hardware debugging, and managed processes.

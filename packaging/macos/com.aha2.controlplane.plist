@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.aha2.controlplane</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/aha2</string>
+    <string>serve</string>
+    <string>--listen</string>
+    <string>127.0.0.1:8766</string>
+    <string>--data-dir</string>
+    <string>/Library/Application Support/AHA2</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Library/Application Support/AHA2</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>/Library/Application Support/AHA2/aha2.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Library/Application Support/AHA2/aha2-error.log</string>
+</dict>
+</plist>

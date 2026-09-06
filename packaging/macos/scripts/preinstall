@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+
+label="com.aha2.controlplane"
+plist="/Library/LaunchDaemons/${label}.plist"
+
+/bin/launchctl bootout "system/${label}" >/dev/null 2>&1 || \
+  /bin/launchctl bootout system "${plist}" >/dev/null 2>&1 || true
+
+exit 0

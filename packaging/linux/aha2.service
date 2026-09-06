@@ -1,0 +1,24 @@
+[Unit]
+Description=AHA2 local agent control plane
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=aha2
+Group=aha2
+EnvironmentFile=/etc/aha2/aha2.env
+ExecStart=/usr/bin/aha2 serve
+WorkingDirectory=/var/lib/aha2
+StateDirectory=aha2
+StateDirectoryMode=0750
+UMask=0077
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+KillSignal=SIGTERM
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -9,12 +9,10 @@ permissions:
   contents: write
 
 jobs:
-  build-release:
+  test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
 
       - uses: actions/setup-node@v5
         with:
@@ -41,80 +39,194 @@ jobs:
           go test ./...
           go vet ./...
 
-      - name: Build release artifacts
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p dist
-          release_version="${GITHUB_REF_NAME#v}"
-          for target in linux/amd64 linux/arm64 windows/amd64 windows/arm64 darwin/amd64 darwin/arm64; do
-            os="${target%/*}"
-            arch="${target#*/}"
-            suffix=""
-            if [[ "$os" == "windows" ]]; then suffix=".exe"; fi
-            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags="-s -w -X main.version=$release_version" -o "dist/aha2-${os}-${arch}${suffix}" ./cmd/aha
-          done
-          for arch in amd64 arm64; do
-            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -trimpath -ldflags="-s -w" -o "dist/aha-sync-linux-${arch}" ./cmd/aha-sync
-          done
-          cd dist
-          sha256sum aha2-* aha-sync-* > SHA256SUMS
-
-      - name: Upload portable artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: portable-release
-          path: dist/*
-          if-no-files-found: error
-
   build-windows-installer:
-    needs: build-release
+    needs: test
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
 
-      - name: Download Windows executable
-        uses: actions/download-artifact@v5
+      - uses: actions/setup-node@v5
         with:
-          name: portable-release
-          path: dist
+          node-version: "24"
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build embedded Web
+        shell: powershell
+        run: |
+          node scripts/build-web.mjs
+          New-Item -ItemType Directory -Force internal\webassets\dist | Out-Null
+          Get-ChildItem internal\webassets\dist -Force | Remove-Item -Recurse -Force
+          Copy-Item web\dist\* internal\webassets\dist -Recurse -Force
+
+      - name: Build Windows application
+        shell: powershell
+        run: |
+          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          New-Item -ItemType Directory -Force dist\package-input | Out-Null
+          $env:CGO_ENABLED = '0'
+          $env:GOOS = 'windows'
+          $env:GOARCH = 'amd64'
+          go build -trimpath -ldflags "-s -w -X main.version=$version" -o dist\package-input\aha2.exe .\cmd\aha
 
       - name: Install Inno Setup 6
         shell: powershell
         run: choco install innosetup --no-progress -y
 
-      - name: Validate installer contracts
+      - name: Build Windows Setup
         shell: powershell
-        run: .\scripts\test-windows-installer.ps1 -RepoPath $PWD
+        run: |
+          .\scripts\test-windows-installer.ps1 -RepoPath $PWD
+          .\scripts\build-windows-installer.ps1 -RepoPath $PWD -InputExe .\dist\package-input\aha2.exe -OutputDir .\dist\release -Version $env:GITHUB_REF_NAME
 
-      - name: Build x64 Setup
-        shell: powershell
-        env:
-          RELEASE_VERSION: ${{ github.ref_name }}
-        run: .\scripts\build-windows-installer.ps1 -RepoPath $PWD -InputExe .\dist\aha2-windows-amd64.exe -OutputDir .\dist-installer -Version $env:RELEASE_VERSION
-
-      - name: Upload installer artifacts
+      - name: Upload Windows package
         uses: actions/upload-artifact@v4
         with:
-          name: windows-installer
+          name: package-windows-x64
+          path: dist/release/AHA2-Setup-x64.exe
+          if-no-files-found: error
+
+  build-linux-packages:
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        goarch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install Linux package tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rpm
+
+      - name: Build embedded Web
+        run: |
+          node scripts/build-web.mjs
+          rm -rf internal/webassets/dist
+          mkdir -p internal/webassets/dist
+          cp -R web/dist/. internal/webassets/dist/
+
+      - name: Build Linux application
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          mkdir -p dist/package-input
+          CGO_ENABLED=0 GOOS=linux GOARCH="${{ matrix.goarch }}" go build -trimpath -ldflags="-s -w -X main.version=$version" -o "dist/package-input/aha2-${{ matrix.goarch }}" ./cmd/aha
+
+      - name: Build DEB and RPM
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/test-linux-packages.sh
+          bash scripts/build-linux-packages.sh --version "$GITHUB_REF_NAME" --arch "${{ matrix.goarch }}" --input-exe "dist/package-input/aha2-${{ matrix.goarch }}" --output-dir dist/release
+
+      - name: Upload Linux packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-linux-${{ matrix.goarch }}
           path: |
-            dist-installer/AHA2-Setup-x64.exe
-            dist-installer/AHA2-Setup-x64.exe.sha256
+            dist/release/*.deb
+            dist/release/*.rpm
+          if-no-files-found: error
+
+  build-macos-packages:
+    needs: test
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        goarch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build embedded Web
+        run: |
+          node scripts/build-web.mjs
+          rm -rf internal/webassets/dist
+          mkdir -p internal/webassets/dist
+          cp -R web/dist/. internal/webassets/dist/
+
+      - name: Build macOS application
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          mkdir -p dist/package-input
+          CGO_ENABLED=0 GOOS=darwin GOARCH="${{ matrix.goarch }}" go build -trimpath -ldflags="-s -w -X main.version=$version" -o "dist/package-input/aha2-${{ matrix.goarch }}" ./cmd/aha
+
+      - name: Build macOS PKG
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/test-macos-packages.sh
+          bash scripts/build-macos-packages.sh --version "$GITHUB_REF_NAME" --arch "${{ matrix.goarch }}" --input-exe "dist/package-input/aha2-${{ matrix.goarch }}" --output-dir dist/release
+
+      - name: Upload macOS package
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-macos-${{ matrix.goarch }}
+          path: dist/release/*.pkg
           if-no-files-found: error
 
   publish-release:
-    needs: [build-release, build-windows-installer]
+    needs: [build-windows-installer, build-linux-packages, build-macos-packages]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
-      - name: Download all release artifacts
+      - name: Download all packages
         uses: actions/download-artifact@v5
         with:
+          pattern: package-*
           path: dist
           merge-multiple: true
+
+      - name: Verify packaged-only release and create checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          if find dist -maxdepth 1 -type f \( -name 'aha2-linux-*' -o -name 'aha2-windows-*' -o -name 'aha2-darwin-*' -o -name 'aha-sync-*' \) | grep -q .; then
+            echo "Release contains a forbidden portable binary." >&2
+            exit 1
+          fi
+          for package in \
+            AHA2-Setup-x64.exe \
+            "aha2_${version}_amd64.deb" "aha2_${version}_arm64.deb" \
+            "aha2-${version}-1.x86_64.rpm" "aha2-${version}-1.aarch64.rpm" \
+            AHA2-macos-amd64.pkg AHA2-macos-arm64.pkg; do
+            test -f "dist/${package}" || { echo "Missing release package: ${package}" >&2; exit 1; }
+          done
+          test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 7
+          cd dist
+          find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\n' | sort | while IFS= read -r file; do sha256sum "$file"; done > SHA256SUMS
+          test -s SHA256SUMS
 
       - name: Publish GitHub Release
         env:
