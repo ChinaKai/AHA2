@@ -9,7 +9,7 @@ $missingInput = Join-Path ([IO.Path]::GetTempPath()) ("aha2-installer-validation
 & (Join-Path $repo "scripts\build-windows-installer.ps1") -RepoPath $repo -InputExe $missingInput -ValidateOnly
 
 $installer = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $repo "installer\windows\AHA2.iss")
-foreach ($contract in @("PrivilegesRequired=admin", "ArchitecturesAllowed=x64compatible", "uninsneveruninstall", "CurUninstallStepChanged", '[Icons]', 'AHA2 local AI task and agent control plane')) {
+foreach ($contract in @("PrivilegesRequired=admin", "ArchitecturesAllowed=x64compatible", "uninsneveruninstall", "CurUninstallStepChanged", '[Icons]', 'AHA2 local AI task and agent control plane', 'CreateInputDirPage', 'CreateInputOptionPage', 'CreateInputQueryPage', 'RegisterPreviousData', 'remoteip=localsubnet profile=private', '{code:SelectedDataDir}', '{code:LocalManagementURL}')) {
     if (-not $installer.Contains($contract)) {
         throw "Installer safety contract is missing: $contract"
     }

@@ -25,21 +25,31 @@ http://<Windows 主机 IP>:8766
 ## Windows 机器级安装
 
 GitHub Release 同时提供便携版 `aha2-windows-amd64.exe` 与机器级安装包
-`AHA2-Setup-x64.exe`。安装包需要管理员权限，安装到 `Program Files\AHA2`，并创建：
+`AHA2-Setup-x64.exe`。安装包需要管理员权限，程序默认安装到 `Program Files\AHA2`。
+安装向导允许选择数据目录，默认值为：
 
 ```text
 C:\ProgramData\AHA2
 ```
 
-安装程序将 `AHA2` 注册为 delayed-auto Windows 服务，服务命令固定为：
+数据目录必须位于本机磁盘；Windows Service 不使用映射盘或 UNC 网络共享。
+
+安装向导还允许选择 HTTP 端口和访问范围：
+
+- 仅本机：监听 `127.0.0.1`，默认且不创建防火墙规则。
+- 局域网：可监听 `0.0.0.0` 或指定网卡 IPv4；可显式选择创建 Windows 防火墙规则。
+
+安装器创建的防火墙规则只适用于 Private profile、TCP 目标端口和本地子网。安装程序将
+`AHA2` 注册为 delayed-auto Windows 服务，服务命令按向导选择生成，例如：
 
 ```text
-aha2.exe service run --listen 127.0.0.1:8766 --data-dir C:\ProgramData\AHA2
+aha2.exe service run --listen <IP>:<端口> --data-dir <数据目录>
 ```
 
 服务异常退出时由 Windows Service Control Manager 依次在 5 秒、15 秒和 60 秒后重启。
-升级安装会先停止服务，替换程序后重新配置并启动服务。卸载会停止并删除服务，但默认保留
-`C:\ProgramData\AHA2`，避免误删数据库、Secret Store 和 Setup Token；确认不再需要时应由管理员另行备份并删除。
+升级安装会记住上次的数据目录、访问范围、IP、端口和防火墙选项，先停止服务，替换程序后
+重新配置并启动服务。卸载会停止并删除服务及本安装器创建的防火墙规则，但默认保留所选数据
+目录，避免误删数据库、Secret Store 和 Setup Token；确认不再需要时应由管理员另行备份并删除。
 
 完成页可以选择打开 `http://127.0.0.1:8766`。安装包旁的
 `AHA2-Setup-x64.exe.sha256` 可用于校验下载完整性。

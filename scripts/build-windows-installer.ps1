@@ -39,13 +39,20 @@ $source = Get-Content -Raw -Encoding UTF8 -LiteralPath $iss
 $requiredContracts = @(
     '#define ServiceName "AHA2"',
     '#define ListenAddress "127.0.0.1:8766"',
-    "service run --listen {#ListenAddress} --data-dir",
+    "service run --listen ' + SelectedListenAddress() + ' --data-dir",
+    "CreateInputDirPage",
+    "CreateInputOptionPage",
+    "SelectedListenAddress",
+    "RegisterPreviousData",
+    "remoteip=localsubnet profile=private",
+    "{code:SelectedDataDir}",
+    "{code:LocalManagementURL}",
     "{commonappdata}\AHA2",
     "start= delayed-auto",
     "AHA2 local AI task and agent control plane",
     "actions= restart/5000/restart/15000/restart/60000",
     "RunSC('delete",
-    "http://127.0.0.1:8766"
+    "http://127.0.0.1:' + SelectedPort()"
 )
 foreach ($contract in $requiredContracts) {
     if (-not $source.Contains($contract)) {
