@@ -124,20 +124,23 @@ jobs:
           mkdir -p internal/webassets/dist
           cp -R web/dist/. internal/webassets/dist/
 
-      - name: Build Linux application
+      - name: Build Linux applications
         shell: bash
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
           mkdir -p dist/package-input
           CGO_ENABLED=0 GOOS=linux GOARCH="${{ matrix.goarch }}" go build -trimpath -ldflags="-s -w -X main.version=$version" -o "dist/package-input/aha2-${{ matrix.goarch }}" ./cmd/aha
+          CGO_ENABLED=0 GOOS=linux GOARCH="${{ matrix.goarch }}" go build -trimpath -ldflags="-s -w" -o "dist/package-input/aha-sync-${{ matrix.goarch }}" ./cmd/aha-sync
 
       - name: Build DEB and RPM
         shell: bash
         run: |
           set -euo pipefail
           bash scripts/test-linux-packages.sh
+          bash scripts/test-linux-sync-packages.sh
           bash scripts/build-linux-packages.sh --version "$GITHUB_REF_NAME" --arch "${{ matrix.goarch }}" --input-exe "dist/package-input/aha2-${{ matrix.goarch }}" --output-dir dist/release
+          bash scripts/build-linux-sync-packages.sh --version "$GITHUB_REF_NAME" --arch "${{ matrix.goarch }}" --input-exe "dist/package-input/aha-sync-${{ matrix.goarch }}" --output-dir dist/release
 
       - name: Upload Linux packages
         uses: actions/upload-artifact@v4
@@ -224,10 +227,12 @@ jobs:
             AHA2-Setup-x64.exe \
             "aha2_${version}_amd64.deb" "aha2_${version}_arm64.deb" \
             "aha2-${version}-1.x86_64.rpm" "aha2-${version}-1.aarch64.rpm" \
+            "aha2-sync_${version}_amd64.deb" "aha2-sync_${version}_arm64.deb" \
+            "aha2-sync-${version}-1.x86_64.rpm" "aha2-sync-${version}-1.aarch64.rpm" \
             AHA2-macos-amd64.pkg AHA2-macos-arm64.pkg; do
             test -f "dist/${package}" || { echo "Missing release package: ${package}" >&2; exit 1; }
           done
-          test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 7
+          test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 11
           cd dist
           find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\n' | sort | while IFS= read -r file; do sha256sum "$file"; done > SHA256SUMS
           test -s SHA256SUMS

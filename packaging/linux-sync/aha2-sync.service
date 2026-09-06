@@ -1,0 +1,24 @@
+[Unit]
+Description=AHA2 synchronization center
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=aha2-sync
+Group=aha2-sync
+EnvironmentFile=/etc/aha2-sync/aha2-sync.env
+ExecStart=/usr/bin/aha-sync
+WorkingDirectory=/var/lib/aha2-sync
+StateDirectory=aha2-sync
+StateDirectoryMode=0750
+UMask=0077
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+KillSignal=SIGTERM
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,22 @@
+#!/bin/sh
+set -e
+
+if ! getent group aha2-sync >/dev/null 2>&1; then
+    addgroup --system aha2-sync
+fi
+if ! getent passwd aha2-sync >/dev/null 2>&1; then
+    adduser --system --ingroup aha2-sync --home /var/lib/aha2-sync --no-create-home --shell /usr/sbin/nologin aha2-sync
+fi
+install -d -m 0750 -o aha2-sync -g aha2-sync /var/lib/aha2-sync
+
+if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+    systemctl daemon-reload
+    systemctl enable aha2-sync.service
+    if systemctl is-active --quiet aha2-sync.service; then
+        systemctl restart aha2-sync.service
+    else
+        systemctl start aha2-sync.service
+    fi
+fi
+
+exit 0

@@ -22,6 +22,8 @@ $requiredWorkflowContracts = @(
     "build-windows-installer.ps1",
     "AHA2-Setup-x64.exe",
     "build-linux-packages.sh",
+    "build-linux-sync-packages.sh",
+    "aha2-sync_",
     "build-macos-packages.sh",
     "ubuntu-24.04-arm",
     "SHA256SUMS",

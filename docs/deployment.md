@@ -24,8 +24,8 @@ http://<Windows 主机 IP>:8766
 
 ## Windows 机器级安装
 
-GitHub Release 同时提供便携版 `aha2-windows-amd64.exe` 与机器级安装包
-`AHA2-Setup-x64.exe`。安装包需要管理员权限，程序默认安装到 `Program Files\AHA2`。
+GitHub Release 提供机器级安装包 `AHA2-Setup-x64.exe`。安装包需要管理员权限，
+程序默认安装到 `Program Files\AHA2`。
 安装向导允许选择数据目录，默认值为：
 
 ```text
@@ -195,7 +195,8 @@ python C:\Users\toope\AppData\Local\AHA\aha managed-process stop aha2-v1
 
 ## 构建产物
 
-Release 只包含标准安装包，不发布裸二进制：
+Release 只包含标准安装包，不发布裸二进制。`aha2-sync` 是单独部署在 Linux
+服务器上的同步中心，不需要安装到每台客户端：
 
 ```text
 AHA2-Setup-x64.exe
@@ -203,6 +204,10 @@ aha2_<version>_amd64.deb
 aha2_<version>_arm64.deb
 aha2-<version>-1.x86_64.rpm
 aha2-<version>-1.aarch64.rpm
+aha2-sync_<version>_amd64.deb
+aha2-sync_<version>_arm64.deb
+aha2-sync-<version>-1.x86_64.rpm
+aha2-sync-<version>-1.aarch64.rpm
 AHA2-macos-amd64.pkg
 AHA2-macos-arm64.pkg
 SHA256SUMS

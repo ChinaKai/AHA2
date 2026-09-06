@@ -1,0 +1,63 @@
+Name:           aha2-sync
+Version:        @VERSION@
+Release:        1
+Summary:        AHA2 synchronization center
+License:        Proprietary
+BuildArch:      @RPM_ARCH@
+Source0:        aha-sync
+Source1:        aha2-sync.service
+Source2:        aha2-sync.env
+Requires(pre):  shadow-utils
+Requires:       systemd
+Requires(post): systemd
+Requires(preun): systemd
+AutoReqProv:    no
+
+%description
+Secure synchronization center for AHA2 devices. Deploy behind an HTTPS
+reverse proxy and register every device with a one-time code.
+
+%prep
+
+%build
+
+%install
+install -D -m 0755 %{SOURCE0} %{buildroot}/usr/bin/aha-sync
+install -D -m 0644 %{SOURCE1} %{buildroot}/usr/lib/systemd/system/aha2-sync.service
+install -D -m 0644 %{SOURCE2} %{buildroot}/etc/aha2-sync/aha2-sync.env
+
+%pre
+getent group aha2-sync >/dev/null 2>&1 || groupadd --system aha2-sync
+getent passwd aha2-sync >/dev/null 2>&1 || useradd --system --gid aha2-sync --home-dir /var/lib/aha2-sync --no-create-home --shell /sbin/nologin aha2-sync
+
+%post
+install -d -m 0750 -o aha2-sync -g aha2-sync /var/lib/aha2-sync
+if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+    systemctl daemon-reload
+    systemctl enable aha2-sync.service
+    if systemctl is-active --quiet aha2-sync.service; then
+        systemctl restart aha2-sync.service
+    else
+        systemctl start aha2-sync.service
+    fi
+fi
+
+%preun
+if [ "$1" -eq 0 ] && command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+    systemctl stop aha2-sync.service
+    systemctl disable aha2-sync.service
+fi
+
+%postun
+if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+    systemctl daemon-reload
+fi
+
+%files
+%attr(0755,root,root) /usr/bin/aha-sync
+/usr/lib/systemd/system/aha2-sync.service
+%config(noreplace) /etc/aha2-sync/aha2-sync.env
+
+%changelog
+* Thu Jan 01 1970 AHA2 maintainers - @VERSION@-1
+- Packaged AHA2 synchronization center.

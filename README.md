@@ -46,7 +46,23 @@ Linux 安装后由 systemd 自动启动。监听地址和数据目录可在 `/et
 
 ## 设置同步
 
-同步需要一个可访问的 AHA Sync Center、该中心生成的一次性注册码，以及所有设备一致的加密口令。
+先在一台 Linux 服务器安装独立的 Sync Center（不要与每台设备的 AHA2 客户端包混淆）：
+
+```bash
+sudo apt install ./aha2-sync_<version>_amd64.deb
+# Fedora/RHEL：sudo dnf install ./aha2-sync-<version>-1.x86_64.rpm
+```
+
+服务默认监听 `127.0.0.1:8770`。通过 HTTPS 反向代理对外提供服务后，生成 24 小时内有效的一次性注册码：
+
+```bash
+sudo -u aha2-sync /usr/bin/aha-sync --db /var/lib/aha2-sync/sync.db \
+  --generate-registration-code /var/lib/aha2-sync/registration-code
+sudo cat /var/lib/aha2-sync/registration-code
+sudo rm /var/lib/aha2-sync/registration-code
+```
+
+然后在每台 AHA2 设备中：
 
 1. 打开 Web 的“同步”页面并启用同步。
 2. 填写 HTTPS 中心地址、设备名称、同步间隔和一次性注册码。
@@ -56,9 +72,12 @@ Linux 安装后由 systemd 自动启动。监听地址和数据目录可在 `/et
 
 项目、任务、知识库、模型和 Agent 配置会按依赖顺序同步。设备访问凭据由注册流程生成并仅保存在本机；敏感凭据只同步显式选中的条目，并使用上述口令端到端加密。
 
+中心配置、升级、卸载与反向代理说明见 [Sync Center 部署](docs/sync-center.md)。
+
 ## 文档
 
 - [核心设计](docs/core-design.md)
 - [部署说明](docs/deployment.md)
 - [Linux 打包与配置](docs/linux-packaging.md)
+- [Sync Center 部署](docs/sync-center.md)
 - [Agent API](docs/agent-api.md)

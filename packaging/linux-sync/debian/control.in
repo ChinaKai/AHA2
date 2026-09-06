@@ -1,0 +1,10 @@
+Package: aha2-sync
+Version: @VERSION@
+Section: utils
+Priority: optional
+Architecture: @ARCH@
+Maintainer: AHA2 maintainers <noreply@example.invalid>
+Depends: adduser, systemd
+Description: AHA2 synchronization center
+ Secure synchronization center for AHA2 devices. Deploy behind an HTTPS
+ reverse proxy and register every device with a one-time code.
