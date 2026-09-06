@@ -58,7 +58,7 @@ func (r Runner) RunOnce(ctx context.Context) error {
 	if state.ReplayRequired {
 		// Preserve changes that were already queued before the upgrade, then replay
 		// the center's ordered history before exporting the current local snapshot.
-		if err := engine.Push(ctx); err != nil {
+		if err := r.drainPending(ctx, engine); err != nil {
 			return err
 		}
 		pending, err := r.Store.SyncOutboxCount(ctx, r.scope())
@@ -114,10 +114,30 @@ func (r Runner) RunOnce(ctx context.Context) error {
 			}
 		}
 	}
-	if err := engine.Push(ctx); err != nil {
+	if err := r.drainPending(ctx, engine); err != nil {
 		return err
 	}
 	return engine.Pull(ctx)
+}
+
+func (r Runner) drainPending(ctx context.Context, engine *Engine) error {
+	for {
+		before, err := r.Store.SyncOutboxCount(ctx, r.scope())
+		if err != nil || before == 0 {
+			return err
+		}
+		if err := engine.Push(ctx); err != nil {
+			return err
+		}
+		after, err := r.Store.SyncOutboxCount(ctx, r.scope())
+		if err != nil {
+			return err
+		}
+		if after >= before {
+			// Conflicted or backoff-delayed items remain pending for a later run.
+			return nil
+		}
+	}
 }
 
 func (r Runner) Loop(ctx context.Context) {
