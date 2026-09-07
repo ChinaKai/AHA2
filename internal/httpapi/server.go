@@ -155,6 +155,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/tasks", s.withAuth(http.HandlerFunc(s.listTasks)))
 	mux.Handle("POST /api/v1/tasks", s.withAuth(http.HandlerFunc(s.createTask)))
 	mux.Handle("DELETE /api/v1/tasks/{id}", s.withAuth(http.HandlerFunc(s.deleteTask)))
+	mux.Handle("DELETE /api/v1/tasks/{id}/remote-mirror", s.withAuth(http.HandlerFunc(s.retireRemoteTaskMirror)))
 	mux.Handle("POST /api/v1/tasks/{id}/takeover", s.withAuth(http.HandlerFunc(s.takeoverTask)))
 	mux.Handle("GET /api/v1/tasks/{id}", s.withAuth(http.HandlerFunc(s.taskDetail)))
 	mux.Handle("GET /api/v1/tasks/{id}/conversation", s.withAuth(http.HandlerFunc(s.taskConversation)))

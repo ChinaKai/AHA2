@@ -191,12 +191,19 @@ func TestRemoteTaskMirrorIsListedAndReadOnly(t *testing.T) {
 	if err := database.UpsertRemoteTaskObject(ctx, store.RemoteTaskObject{OwnerDeviceID: "dev_remote", ObjectType: "task", ObjectID: task.ID, TaskID: task.ID, ProjectID: project.ID, Payload: payload, CreatedAt: now, UpdatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
+	hardware := domain.HardwareGroup{TaskID: task.ID, ID: "board", PasswordConfigured: true, Access: domain.HardwareAccessReadOnly, CreatedAt: now, UpdatedAt: now}
+	hardwarePayload, _ := json.Marshal(hardware)
+	if err := database.UpsertRemoteTaskObject(ctx, store.RemoteTaskObject{OwnerDeviceID: "dev_remote", ObjectType: "hardware", ObjectID: task.ID + ":board", TaskID: task.ID, ProjectID: project.ID, Payload: hardwarePayload, CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
 	remoteWorkspace := domain.Workspace{ID: "remote-workspace-mirror", ProjectID: project.ID, Name: "Remote workspace", OwnerDeviceID: "dev_remote", ReadOnly: true, CreatedAt: now, UpdatedAt: now}
 	if err := database.UpsertSyncedWorkspace(ctx, remoteWorkspace); err != nil {
 		t.Fatal(err)
 	}
+	secretRef := syncer.MirrorHardwareSecretRef("dev_remote", task.ID, "board")
+	secretStore := &fakeSecretStore{values: map[string]string{secretRef: "encrypted-mirror-secret"}}
 	authService := auth.NewService(database, "setup-test", time.Hour)
-	server := httptest.NewServer(New(Config{Store: database, Auth: authService, App: app.NewService(database, nil, app.StubExecutor{})}).Handler())
+	server := httptest.NewServer(New(Config{Store: database, Auth: authService, App: app.NewService(database, nil, app.StubExecutor{}), Secrets: secretStore}).Handler())
 	defer server.Close()
 	jar, _ := cookiejar.New(nil)
 	client := &http.Client{Jar: jar}
@@ -230,6 +237,20 @@ func TestRemoteTaskMirrorIsListedAndReadOnly(t *testing.T) {
 	response.Body.Close()
 	if found, err := database.RemoteTaskObjectExists(ctx, "dev_remote", "task", task.ID); err != nil || !found {
 		t.Fatalf("remote task mirror was deleted: found=%t err=%v", found, err)
+	}
+	response = requestJSON(t, client, http.MethodDelete, server.URL+"/api/v1/tasks/"+list.Tasks[0].ID+"/remote-mirror", nil, csrf)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("retire remote task status=%d body=%s", response.StatusCode, readBody(t, response))
+	}
+	response.Body.Close()
+	if found, err := database.RemoteTaskObjectExists(ctx, "dev_remote", "task", task.ID); err != nil || found {
+		t.Fatalf("retired remote task remained: found=%t err=%v", found, err)
+	}
+	if _, err := database.SyncTombstone(ctx, "task", "dev_remote:"+task.ID); err != nil {
+		t.Fatalf("retired remote task tombstone missing: %v", err)
+	}
+	if _, exists := secretStore.Get(secretRef); exists {
+		t.Fatal("retired remote task hardware secret was retained")
 	}
 	response = requestJSON(t, client, http.MethodDelete, server.URL+"/api/v1/workspaces/"+remoteWorkspace.ID, nil, csrf)
 	if response.StatusCode != http.StatusForbidden {

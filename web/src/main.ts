@@ -992,7 +992,7 @@ function taskCardHtml(task: Task): string {
       </div>
     </div>
     <div class="task-card-actions">
-      ${task.read_only ? `<span class="status warn" title="所属设备：${escapeHTML(task.owner_device_id || "未知")}">只读</span>` : `<button type="button" data-edit-task-title="${task.id}" class="icon-button" title="编辑标题">${icon("edit")}</button><button type="button" data-delete-task="${task.id}" class="icon-button" title="删除任务">${icon("close")}</button>`}
+      ${task.read_only ? `<button type="button" data-retire-remote-task="${task.id}" class="icon-button danger" title="移除孤立只读任务">${icon("close")}</button><span class="status warn" title="所属设备：${escapeHTML(task.owner_device_id || "未知")}">只读</span>` : `<button type="button" data-edit-task-title="${task.id}" class="icon-button" title="编辑标题">${icon("edit")}</button><button type="button" data-delete-task="${task.id}" class="icon-button" title="删除任务">${icon("close")}</button>`}
     </div>
   </article>`;
 }
@@ -1214,7 +1214,7 @@ function taskDetailView(detail: TaskDetail): string {
   const workspace = state.workspaces.find(item => item.id === detail.task.workspace_id);
   const taskMeta = `${project?.name || "-"} · ${workspace?.name || "-"} · ${detail.task.collaboration_mode || "auto"} · ${detail.task.max_agents || 3} Agents`;
   const chat = `<section class="conversation">
-    ${remoteReadOnly ? `<div class="task-failure-banner remote-readonly"><strong>其他设备的只读 Task</strong><span>所属设备：${escapeHTML(detail.task.owner_device_id || "未知")}</span><small>可查看同步历史，不能在本机执行或修改</small><button type="button" id="takeover-task">${icon("copy")}接管到本机</button></div>` : ""}
+    ${remoteReadOnly ? `<div class="task-failure-banner remote-readonly"><strong>其他设备的只读 Task</strong><span>所属设备：${escapeHTML(detail.task.owner_device_id || "未知")}</span><small>可查看同步历史，不能在本机执行或修改</small><div class="remote-readonly-actions"><button type="button" id="takeover-task">${icon("copy")}接管到本机</button><button type="button" class="danger" data-retire-remote-task="${detail.task.id}">${icon("close")}移除孤立任务</button></div></div>` : ""}
     <div id="task-failure-slot">${taskFailureBannerHtml(detail)}</div>
     <div class="messages" id="conversation-list">${conversationListHtml()}</div>
     <div id="agent-turn-slot">${renderAgentTurnCard(detail, state.taskRealtimeState, state.taskContext?.context.metrics)}</div>
@@ -1706,6 +1706,31 @@ function bindCommon(): void {
         closeEvents();
       }
       setMessage("notice", "任务已删除");
+      await loadAll();
+      render();
+    });
+  }));
+  document.querySelectorAll<HTMLElement>("[data-retire-remote-task]").forEach(button => button.addEventListener("click", async event => {
+    event.stopPropagation();
+    const id = button.dataset.retireRemoteTask!;
+    const task = state.tasks.find(item => item.id === id);
+    const title = task?.title || state.selectedTask?.task.title || "该任务";
+    if (!window.confirm(`仅当来源设备已停用或数据已清空时才能移除“${title}”。此操作会生成同步删除标记，让所有设备删除该只读镜像，且不可恢复。确定继续？`)) return;
+    void runWithFeedback(button, "移除中", async () => {
+      await api.retireRemoteTaskMirror(id);
+      let synchronized = true;
+      try {
+        await api.runSync();
+      } catch {
+        synchronized = false;
+      }
+      if (state.selectedTask?.task.id === id) {
+        state.selectedTask = null;
+        closeEvents();
+      }
+      setMessage("notice", synchronized
+        ? "孤立只读任务已移除，删除标记已推送；其他设备将在下次同步时移除镜像"
+        : "孤立只读任务已移除；删除标记将在下次同步时传播到其他设备");
       await loadAll();
       render();
     });

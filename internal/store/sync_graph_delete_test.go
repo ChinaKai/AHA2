@@ -111,3 +111,46 @@ func TestOwnedGraphDeletesCreateTombstonesAndBlockReplay(t *testing.T) {
 		t.Fatalf("old workspace replay resurrected mirror: %v", err)
 	}
 }
+
+func TestRetireRemoteTaskMirrorCreatesOwnerGraphTombstone(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database, err := Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	now := time.Now().UTC()
+	project := domain.Project{ID: "retire-project", Name: "Retire", CreatedAt: now, UpdatedAt: now}
+	if err := database.CreateProject(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	task := domain.Task{ID: "orphan-task", ProjectID: project.ID, WorkspaceID: "orphan-workspace", Title: "Orphan", Status: domain.TaskWaitingUser, OwnerDeviceID: "retired-device", ReadOnly: true, CreatedAt: now, UpdatedAt: now}
+	taskPayload, _ := json.Marshal(task)
+	for _, item := range []RemoteTaskObject{
+		{OwnerDeviceID: "retired-device", ObjectType: "task", ObjectID: task.ID, TaskID: task.ID, ProjectID: project.ID, Payload: taskPayload},
+		{OwnerDeviceID: "retired-device", ObjectType: "conversation", ObjectID: "message-one", TaskID: task.ID, ProjectID: project.ID, Payload: json.RawMessage(`{"kind":"message"}`)},
+	} {
+		if err := database.UpsertRemoteTaskObject(ctx, item); err != nil {
+			t.Fatal(err)
+		}
+	}
+	publicID := remoteTaskPublicID("retired-device", task.ID)
+	retired, err := database.RetireRemoteTaskMirror(ctx, publicID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retired.SourceTaskID != task.ID || retired.Task.OwnerDeviceID != "retired-device" {
+		t.Fatalf("retired identity=%#v", retired)
+	}
+	if objects, err := database.RemoteTaskObjects(ctx, "retired-device", task.ID); err != nil || len(objects) != 0 {
+		t.Fatalf("retired mirror objects=%#v err=%v", objects, err)
+	}
+	wireID := ownedGraphObjectID("retired-device", task.ID)
+	if tombstone, err := database.SyncTombstone(ctx, "task", wireID); err != nil || tombstone.SyncKey == "" {
+		t.Fatalf("retired mirror tombstone=%#v err=%v", tombstone, err)
+	}
+	if _, err := database.RetireRemoteTaskMirror(ctx, publicID); err == nil {
+		t.Fatal("retiring an absent mirror unexpectedly succeeded")
+	}
+}

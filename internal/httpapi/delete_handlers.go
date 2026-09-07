@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
+	syncer "github.com/ChinaKai/AHA2/internal/sync"
 )
 
 func (s *Server) deleteTask(writer http.ResponseWriter, request *http.Request) {
@@ -37,6 +38,32 @@ func (s *Server) deleteTask(writer http.ResponseWriter, request *http.Request) {
 	}
 	s.audit(request, "task.delete", "task", id, nil)
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) retireRemoteTaskMirror(writer http.ResponseWriter, request *http.Request) {
+	id := request.PathValue("id")
+	mirror, err := s.store.RetireRemoteTaskMirror(request.Context(), id)
+	if err != nil {
+		writeError(writer, http.StatusNotFound, "remote_task_not_found")
+		return
+	}
+	if s.secrets != nil {
+		refs := make([]string, 0, len(mirror.Hardware))
+		for _, group := range mirror.Hardware {
+			if group.PasswordConfigured {
+				refs = append(refs, syncer.MirrorHardwareSecretRef(mirror.Task.OwnerDeviceID, mirror.SourceTaskID, group.ID))
+			}
+		}
+		if len(refs) > 0 {
+			_ = s.secrets.DeleteMany(refs)
+		}
+	}
+	s.audit(request, "task.remote_mirror.retire", "task", id, map[string]any{
+		"source_task_id": mirror.SourceTaskID, "owner_device_id": mirror.Task.OwnerDeviceID,
+	})
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"ok": true, "source_task_id": mirror.SourceTaskID, "owner_device_id": mirror.Task.OwnerDeviceID,
+	})
 }
 
 func (s *Server) deleteWorkspace(writer http.ResponseWriter, request *http.Request) {

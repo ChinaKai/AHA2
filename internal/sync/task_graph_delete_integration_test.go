@@ -167,6 +167,99 @@ func TestOwnedTaskAndWorkspaceDeletesConvergeWithoutReplayResurrection(t *testin
 	}
 }
 
+func TestRetiredRemoteTaskMirrorDeleteConvergesToNewDevice(t *testing.T) {
+	ctx := context.Background()
+	center, err := centersync.Open(ctx, filepath.Join(t.TempDir(), "center.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer center.Close()
+	server := httptest.NewServer(center.Handler())
+	defer server.Close()
+	type device struct {
+		store  *store.Store
+		runner syncer.Runner
+	}
+	makeDevice := func(id, token string) device {
+		dir := t.TempDir()
+		database, err := store.Open(ctx, filepath.Join(dir, "aha2.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = database.Close() })
+		secretStore, err := secrets.Open(filepath.Join(dir, "secrets.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := secretStore.PutMany(map[string]string{syncer.DefaultTokenRef: token}); err != nil {
+			t.Fatal(err)
+		}
+		if err := database.PutSyncSettings(ctx, domain.SyncSettings{Scope: "default", Enabled: true, Endpoint: server.URL, DeviceID: id, IntervalSeconds: 60}); err != nil {
+			t.Fatal(err)
+		}
+		if err := center.PutDeviceToken(ctx, id, token); err != nil {
+			t.Fatal(err)
+		}
+		return device{store: database, runner: syncer.Runner{Store: database, Secrets: secretStore, TokenRef: syncer.DefaultTokenRef}}
+	}
+
+	source := makeDevice("retired-source", "source-token")
+	reader := makeDevice("active-reader", "reader-token")
+	now := time.Now().UTC()
+	project := domain.Project{ID: "orphan-project", Name: "Orphan", CreatedAt: now, UpdatedAt: now}
+	workspace := domain.Workspace{ID: "orphan-workspace", ProjectID: project.ID, Name: "Temporary", Locality: "local", Transport: "native", RootPath: t.TempDir(), CreatedAt: now, UpdatedAt: now}
+	env := domain.EnvGroup{ID: "orphan-env", Name: "Env", ProviderID: "stub", Backend: "stub", Revision: 1, Environment: map[string]string{}, SecretRefs: map[string]string{}, CreatedAt: now, UpdatedAt: now}
+	model := domain.Model{ID: "orphan-model", DisplayName: "Model", ProviderID: "stub", Backend: "stub", WireModel: "stub", DefaultEnvGroupID: env.ID, CreatedAt: now, UpdatedAt: now}
+	snapshot := domain.RuntimeConfigSnapshot{ID: "orphan-runtime", WorkspaceID: workspace.ID, Backend: "stub", ModelID: model.ID, WireModel: "stub", EnvGroupID: env.ID, EnvGroupRevision: 1, CreatedAt: now}
+	task := domain.Task{ID: "orphan-task", ProjectID: project.ID, WorkspaceID: workspace.ID, Title: "HOME-测试消息", OriginalRequest: "temporary", CurrentGoal: "temporary", Status: domain.TaskWaitingUser, RuntimeConfigSnapshotID: snapshot.ID, CollaborationMode: "single", MaxAgents: 1, CreatedAt: now, UpdatedAt: now}
+	if err := source.store.CreateProject(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	if err := source.store.CreateWorkspace(ctx, workspace); err != nil {
+		t.Fatal(err)
+	}
+	if err := source.store.UpsertEnvGroup(ctx, env); err != nil {
+		t.Fatal(err)
+	}
+	if err := source.store.UpsertModel(ctx, model); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := source.store.CreateTaskWithSnapshot(ctx, snapshot, task); err != nil {
+		t.Fatal(err)
+	}
+	if err := source.runner.RunOnce(ctx); err != nil {
+		t.Fatalf("source sync failed: %v", err)
+	}
+	if err := reader.runner.RunOnce(ctx); err != nil {
+		t.Fatalf("reader sync failed: %v", err)
+	}
+	mirrors, err := reader.store.RemoteTaskMirrors(ctx, project.ID)
+	if err != nil || len(mirrors) != 1 {
+		t.Fatalf("initial orphan mirror=%#v err=%v", mirrors, err)
+	}
+	if _, err := reader.store.RetireRemoteTaskMirror(ctx, mirrors[0].Task.ID); err != nil {
+		t.Fatalf("retire orphan mirror failed: %v", err)
+	}
+	if err := reader.runner.RunOnce(ctx); err != nil {
+		t.Fatalf("orphan tombstone push failed: %v", err)
+	}
+	if mirrors, err := reader.store.RemoteTaskMirrors(ctx, project.ID); err != nil || len(mirrors) != 0 {
+		t.Fatalf("reader retained orphan mirror=%#v err=%v", mirrors, err)
+	}
+
+	observer := makeDevice("new-observer", "observer-token")
+	if err := observer.runner.RunOnce(ctx); err != nil {
+		t.Fatalf("new observer sync failed: %v", err)
+	}
+	if mirrors, err := observer.store.RemoteTaskMirrors(ctx, project.ID); err != nil || len(mirrors) != 0 {
+		t.Fatalf("new observer replay resurrected orphan mirror=%#v err=%v", mirrors, err)
+	}
+	wireID := "retired-source:" + task.ID
+	if tombstone, err := observer.store.SyncTombstone(ctx, syncer.TypeTask, wireID); err != nil || tombstone.SyncKey == "" {
+		t.Fatalf("observer orphan tombstone=%#v err=%v", tombstone, err)
+	}
+}
+
 func mustWorkspaces(t *testing.T, ctx context.Context, database *store.Store, projectID string) []domain.Workspace {
 	t.Helper()
 	items, err := database.ListWorkspaces(ctx, projectID)

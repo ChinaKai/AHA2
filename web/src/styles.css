@@ -461,7 +461,8 @@ dialog form, .dialog-body { padding: 18px; }
 .takeover-hardware legend { padding: 0 6px; font-size: 11px; font-weight: 800; }
 .reuse-remote-secret { display: flex; flex-direction: row; align-items: center; gap: 8px; margin: 8px 0; }
 .reuse-remote-secret input { width: auto; }
-.remote-readonly button { align-self: flex-start; margin-top: 6px; }
+.remote-readonly button { align-self: flex-start; }
+.remote-readonly-actions { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 6px; }
 .dialog-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; }
 .dialog-head h2 { margin: 0; font-size: 18px; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }

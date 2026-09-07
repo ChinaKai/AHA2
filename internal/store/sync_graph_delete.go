@@ -53,6 +53,43 @@ func (s *Store) DeleteWorkspaceWithSyncTombstone(ctx context.Context, id string)
 	return tx.Commit()
 }
 
+// RetireRemoteTaskMirror removes an explicitly selected read-only task mirror
+// and creates a graph tombstone using the original owner/source identity. This
+// is intentionally separate from normal task deletion: it is an escape hatch
+// for orphaned mirrors whose source device has been retired or wiped.
+func (s *Store) RetireRemoteTaskMirror(ctx context.Context, publicID string) (RemoteTaskMirror, error) {
+	mirror, err := s.RemoteTaskDetailMirror(ctx, publicID)
+	if err != nil {
+		return RemoteTaskMirror{}, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return RemoteTaskMirror{}, err
+	}
+	defer tx.Rollback()
+	var exists bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(
+		SELECT 1 FROM sync_remote_task_objects
+		WHERE owner_device_id=? AND object_type='task' AND task_id=?)`,
+		mirror.Task.OwnerDeviceID, mirror.SourceTaskID).Scan(&exists); err != nil {
+		return RemoteTaskMirror{}, err
+	}
+	if !exists {
+		return RemoteTaskMirror{}, sql.ErrNoRows
+	}
+	now := time.Now().UTC()
+	if err := enqueueOwnedGraphDeleteTx(ctx, tx, "task", mirror.SourceTaskID, mirror.Task.OwnerDeviceID, now); err != nil {
+		return RemoteTaskMirror{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM sync_remote_task_objects WHERE owner_device_id=? AND task_id=?`, mirror.Task.OwnerDeviceID, mirror.SourceTaskID); err != nil {
+		return RemoteTaskMirror{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return RemoteTaskMirror{}, err
+	}
+	return mirror, nil
+}
+
 func (s *Store) RemoteGraphTombstoned(ctx context.Context, objectType, wireID string) (bool, error) {
 	var found bool
 	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sync_tombstones WHERE object_type=? AND object_id=?)`, objectType, wireID).Scan(&found)

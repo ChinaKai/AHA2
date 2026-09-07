@@ -283,6 +283,10 @@ class APIClient {
     return this.request(`/api/v1/tasks/${encodeURIComponent(id)}`, {method: "DELETE"});
   }
 
+  retireRemoteTaskMirror(id: string): Promise<{ok: boolean; source_task_id: string; owner_device_id: string}> {
+    return this.request(`/api/v1/tasks/${encodeURIComponent(id)}/remote-mirror`, {method: "DELETE"});
+  }
+
   takeoverTask(id: string, payload: Record<string, unknown>): Promise<{task: Task; hardware: HardwareGroup[]}> {
     return this.request(`/api/v1/tasks/${encodeURIComponent(id)}/takeover`, {method: "POST", body: JSON.stringify(payload)});
   }

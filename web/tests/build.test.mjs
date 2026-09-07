@@ -250,6 +250,10 @@ test("built web contains responsive application", async () => {
   assert.match(script, /renderSyncSettings/);
   assert.match(syncSettings, /token_configured/);
   assert.match(syncSettings, /runSync/);
+  assert.match(api, /tasks\/\$\{encodeURIComponent\(id\)\}\/remote-mirror/);
+  assert.match(script, /data-retire-remote-task/);
+  assert.match(script, /来源设备已停用或数据已清空/);
+  assert.match(script, /retireRemoteTaskMirror\(id\)[\s\S]{0,180}runSync\(\)/);
   assert.doesNotMatch(syncSettings, /value="\$\{[^}]*token/);
   assert.match(script, /heartbeat/);
   assert.doesNotMatch(css, /\.conversation-event/);
