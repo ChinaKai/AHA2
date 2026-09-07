@@ -36,7 +36,7 @@ Linux 安装后由 systemd 自动启动。监听地址和数据目录可在 `/et
 
 ### 首次初始化
 
-默认打开 `http://127.0.0.1:8766`，使用数据目录中的一次性 `setup-token` 创建 Owner：
+默认打开 `http://127.0.0.1:8766`，使用数据目录中的 `setup-token` 创建 Owner；后续忘记密码时也使用该文件完成本机恢复：
 
 - Windows：安装时选择的数据目录，默认为 `C:\ProgramData\AHA2\setup-token`
 - Linux：`sudo cat /var/lib/aha2/setup-token`
@@ -80,3 +80,4 @@ sudo rm /var/lib/aha2-sync/registration-code
 - [Linux 打包与配置](docs/linux-packaging.md)
 - [Sync Center 部署](docs/sync-center.md)
 - [Agent API](docs/agent-api.md)
+- [AHA1 知识库迁移](docs/aha1-knowledge-import.md)

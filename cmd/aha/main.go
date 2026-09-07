@@ -50,6 +50,8 @@ func main() {
 		err = serve(args)
 	case "service-run":
 		err = runPlatformService(args)
+	case "import-aha1-knowledge":
+		err = importAHA1Knowledge(args)
 	}
 	if err != nil {
 		slog.Error("AHA2 stopped", "error", err)
@@ -69,6 +71,8 @@ func parseCommand(args []string) (string, []string, error) {
 			return "", nil, fmt.Errorf("version does not accept arguments")
 		}
 		return "version", nil, nil
+	case "import-aha1-knowledge":
+		return "import-aha1-knowledge", args[1:], nil
 	case "service":
 		if len(args) < 2 || args[1] != "run" {
 			return "", nil, fmt.Errorf("usage: aha2 service run [serve flags]")
@@ -107,8 +111,8 @@ func parseServeOptions(name string, args []string) (serveOptions, error) {
 	flags := flag.NewFlagSet(name, flag.ContinueOnError)
 	listen := flags.String("listen", envOr("AHA2_LISTEN", "0.0.0.0:8766"), "HTTP listen address")
 	dataDir := flags.String("data-dir", envOr("AHA2_DATA_DIR", ".data"), "AHA2 data directory")
-	setupToken := flags.String("setup-token", os.Getenv("AHA2_SETUP_TOKEN"), "one-time owner setup token")
-	setupTokenFile := flags.String("setup-token-file", os.Getenv("AHA2_SETUP_TOKEN_FILE"), "file containing the one-time owner setup token")
+	setupToken := flags.String("setup-token", os.Getenv("AHA2_SETUP_TOKEN"), "owner setup and local password recovery token")
+	setupTokenFile := flags.String("setup-token-file", os.Getenv("AHA2_SETUP_TOKEN_FILE"), "file containing the owner setup and recovery token")
 	secureCookie := flags.Bool("secure-cookie", envBool("AHA2_SECURE_COOKIE"), "mark session cookie Secure")
 	allowCrossOrigin := flags.Bool("allow-cross-origin", envBool("AHA2_ALLOW_CROSS_ORIGIN"), "disable Origin host validation for reverse proxies and embedded WebViews")
 	agentAPIURL := flags.String("agent-api-url", os.Getenv("AHA2_AGENT_API_URL"), "Agent-reachable AHA2 base URL (required for remote workspaces)")

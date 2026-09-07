@@ -417,9 +417,29 @@ func knowledgeScopeResources(input BuildInput, directory, scope string, entries 
 	for _, entry := range entries {
 		byID[entry.ID] = entry
 	}
+	navigationIDs := make(map[string]bool, len(entries))
+	if scope == "project" {
+		for _, entry := range entries {
+			if entry.IsIndex || entry.Type != "navigation" {
+				continue
+			}
+			navigationIDs[entry.ID] = true
+			seen := map[string]bool{}
+			parentID := entry.ParentID
+			for parentID != "" && !seen[parentID] {
+				seen[parentID] = true
+				parent, ok := byID[parentID]
+				if !ok || parent.IsIndex {
+					break
+				}
+				navigationIDs[parent.ID] = true
+				parentID = parent.ParentID
+			}
+		}
+	}
 	paths := make(map[string]string, len(entries))
 	entryCategory := func(entry domain.KnowledgeEntry) string {
-		if scope == "project" && !entry.IsIndex && entry.Type == "navigation" {
+		if scope == "project" && !entry.IsIndex && navigationIDs[entry.ID] {
 			return "navigation"
 		}
 		return ""
@@ -474,13 +494,13 @@ func knowledgeScopeResources(input BuildInput, directory, scope string, entries 
 				id: "knowledge-project-index", path: joinContextPath(input, scopeDirectory, "index.md"),
 				title: "项目知识", description: "当前项目的实践、决策与诊断知识。",
 				empty: "当前没有可用的项目知识文档。", rootBacked: true,
-				include: func(entry domain.KnowledgeEntry) bool { return entry.Type != "navigation" },
+				include: func(entry domain.KnowledgeEntry) bool { return !navigationIDs[entry.ID] },
 			},
 			{
 				id: "knowledge-project-navigation-index", path: joinContextPath(input, scopeDirectory, "navigation", "index.md"),
 				title: "项目导航", description: "模块入口、代码路径、边界与关键流程。",
 				empty:   "当前没有可用的项目导航文档。",
-				include: func(entry domain.KnowledgeEntry) bool { return entry.Type == "navigation" },
+				include: func(entry domain.KnowledgeEntry) bool { return navigationIDs[entry.ID] },
 			},
 		}
 	}

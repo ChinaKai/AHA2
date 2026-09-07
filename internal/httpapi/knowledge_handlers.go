@@ -25,7 +25,14 @@ func (s *Server) listKnowledge(writer http.ResponseWriter, request *http.Request
 			statuses = append(statuses, domain.KnowledgeStatus(value))
 		}
 	}
-	items, err := s.store.ListKnowledge(request.Context(), request.URL.Query().Get("scope"), request.URL.Query().Get("project_id"), statuses)
+	scope, projectID := request.URL.Query().Get("scope"), request.URL.Query().Get("project_id")
+	var items []domain.KnowledgeEntry
+	var err error
+	if scope == "project" && projectID != "" {
+		items, err = s.store.ListProjectKnowledge(request.Context(), projectID, statuses)
+	} else {
+		items, err = s.store.ListKnowledge(request.Context(), scope, projectID, statuses)
+	}
 	if err != nil {
 		writeError(writer, http.StatusInternalServerError, "list_knowledge_failed")
 		return

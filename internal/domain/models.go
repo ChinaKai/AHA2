@@ -41,6 +41,32 @@ type Project struct {
 	UpdatedAt          time.Time `json:"updated_at"`
 }
 
+type KnowledgeLibrary struct {
+	ID                 string    `json:"id"`
+	ContainerProjectID string    `json:"container_project_id"`
+	Name               string    `json:"name"`
+	Description        string    `json:"description"`
+	SourceIdentity     string    `json:"source_identity,omitempty"`
+	BoundProjectID     string    `json:"bound_project_id,omitempty"`
+	KnowledgeCount     int       `json:"knowledge_count"`
+	SkillCount         int       `json:"skill_count"`
+	CreatedAt          time.Time `json:"created_at"`
+	UpdatedAt          time.Time `json:"updated_at"`
+}
+
+type KnowledgeLibraryBinding struct {
+	LibraryID string    `json:"library_id"`
+	ProjectID string    `json:"project_id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+type KnowledgeLibraryDeletion struct {
+	Knowledge int `json:"knowledge"`
+	Proposals int `json:"proposals"`
+	Skills    int `json:"skills"`
+}
+
 type ProductLine struct {
 	ID            string    `json:"id"`
 	ProjectID     string    `json:"project_id"`
@@ -343,6 +369,7 @@ type KnowledgeEntry struct {
 	ID             string          `json:"id"`
 	Scope          string          `json:"scope"`
 	ProjectID      string          `json:"project_id,omitempty"`
+	BoundProjectID string          `json:"bound_project_id,omitempty"`
 	ParentID       string          `json:"parent_id,omitempty"`
 	Slug           string          `json:"slug,omitempty"`
 	SortOrder      int             `json:"sort_order"`
@@ -383,21 +410,22 @@ type KnowledgeProposal struct {
 }
 
 type Skill struct {
-	ID           string      `json:"id"`
-	PackageSlug  string      `json:"package_slug"`
-	Scope        string      `json:"scope"`
-	ProjectID    string      `json:"project_id,omitempty"`
-	Name         string      `json:"name"`
-	Description  string      `json:"description"`
-	Instructions string      `json:"instructions"`
-	Version      int         `json:"version"`
-	Status       string      `json:"status"`
-	Enabled      bool        `json:"enabled"`
-	SourcePath   string      `json:"source_path,omitempty"`
-	Files        []string    `json:"files,omitempty"`
-	PackageFiles []SkillFile `json:"-"`
-	CreatedAt    time.Time   `json:"created_at"`
-	UpdatedAt    time.Time   `json:"updated_at"`
+	ID             string      `json:"id"`
+	PackageSlug    string      `json:"package_slug"`
+	Scope          string      `json:"scope"`
+	ProjectID      string      `json:"project_id,omitempty"`
+	BoundProjectID string      `json:"bound_project_id,omitempty"`
+	Name           string      `json:"name"`
+	Description    string      `json:"description"`
+	Instructions   string      `json:"instructions"`
+	Version        int         `json:"version"`
+	Status         string      `json:"status"`
+	Enabled        bool        `json:"enabled"`
+	SourcePath     string      `json:"source_path,omitempty"`
+	Files          []string    `json:"files,omitempty"`
+	PackageFiles   []SkillFile `json:"-"`
+	CreatedAt      time.Time   `json:"created_at"`
+	UpdatedAt      time.Time   `json:"updated_at"`
 }
 
 type SkillFile struct {

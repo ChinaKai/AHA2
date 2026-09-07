@@ -9,9 +9,9 @@ import {bindProxySettings, renderProxySettings} from "./proxy_settings.js";
 import {bindSyncSettings, isSyncSettingsFormEditing, renderSyncSettings} from "./sync_settings.js";
 import {bindRuntimeFields, runtimeFieldsHTML, setRuntimeBackends, syncRuntimeFields} from "./runtime_picker.js";
 import {renderComposerAgentOptions, renderComposerTools} from "./task_composer.js";
-import {renderTaskToolButtons, renderTaskToolContent, renderTaskToolPanel} from "./task_tools.js";
-import type {TaskTool} from "./task_tools.js";
-import {TASK_SLASH_COMMANDS, bindMessageBubbleControls, clearNavigationSnapshot, exactSlashCommand, executeAgentSessionAction, loadNavigationSnapshot, matchingSlashCommands, renderWorkspaceDetection, saveNavigationSnapshot} from "./ui_helpers.js";
+import {TASK_TOOL_DEFAULT_WIDTH, normalizeTaskToolMode, normalizeTaskToolWidth, renderTaskToolButtons, renderTaskToolContent, renderTaskToolPanel} from "./task_tools.js";
+import type {TaskTool, TaskToolMode} from "./task_tools.js";
+import {TASK_SLASH_COMMANDS, bindMessageBubbleControls, clearNavigationSnapshot, eventRefreshesTaskList, exactSlashCommand, executeAgentSessionAction, loadNavigationSnapshot, matchingSlashCommands, renderWorkspaceDetection, saveNavigationSnapshot} from "./ui_helpers.js";
 import {
   compactNumber,
   contextPercent,
@@ -32,6 +32,7 @@ import type {
   DetectedModel,
   EnvGroup,
   Knowledge,
+  KnowledgeLibrary,
   KnowledgeProposal,
   Model,
   Project,
@@ -49,7 +50,7 @@ import type {
   TaskDetail,
   Workspace,
 } from "./types.js";
-type View = "projects" | "models" | "tasks" | "knowledge" | "prompts" | "proxy" | "sync";
+type View = "projects" | "models" | "tasks" | "knowledge" | "prompts" | "proxy" | "sync" | "advanced";
 interface State {
   auth: AuthStatus | null;
   view: View;
@@ -73,6 +74,7 @@ interface State {
   models: Model[];
   tasks: Task[];
   knowledge: Knowledge[];
+  knowledgeLibraries: KnowledgeLibrary[];
   knowledgeProposals: KnowledgeProposal[];
   skills: Skill[];
   selectedTask: TaskDetail | null;
@@ -91,9 +93,24 @@ interface State {
   selectedProject: Project | null;
   dialogProjectID: string;
   taskTool: TaskTool | "";
+  taskToolMode: TaskToolMode;
+  taskToolWidth: number;
   taskProjectFilter: string;
   taskStatusFilter: string;
 }
+
+const taskToolLayoutKey = "aha2.task-tool-layout";
+
+function loadTaskToolLayout(): {mode: TaskToolMode; width: number} {
+  try {
+    const saved = JSON.parse(localStorage.getItem(taskToolLayoutKey) || "{}") as {mode?: unknown; width?: unknown};
+    return {mode: normalizeTaskToolMode(saved.mode), width: normalizeTaskToolWidth(saved.width)};
+  } catch {
+    return {mode: "split", width: TASK_TOOL_DEFAULT_WIDTH};
+  }
+}
+
+const savedTaskToolLayout = loadTaskToolLayout();
 
 const state: State = {
   auth: null,
@@ -118,6 +135,7 @@ const state: State = {
   models: [],
   tasks: [],
   knowledge: [],
+  knowledgeLibraries: [],
   knowledgeProposals: [],
   skills: [],
   selectedTask: null,
@@ -136,6 +154,8 @@ const state: State = {
   selectedProject: null,
   dialogProjectID: "",
   taskTool: "",
+  taskToolMode: savedTaskToolLayout.mode,
+  taskToolWidth: savedTaskToolLayout.width,
   taskProjectFilter: "",
   taskStatusFilter: "",
 };
@@ -150,6 +170,9 @@ let taskFallbackTimer: number | null = null;
 let taskLastSignalAt = 0;
 let scrollConversationToBottom = false;
 let loadingOlderConversation = false;
+let authRecoveryOpen = false;
+let ownerAvatarClicks = 0;
+let ownerAvatarResetTimer = 0;
 
 function escapeHTML(value: unknown): string {
   return String(value ?? "")
@@ -435,7 +458,7 @@ function syncTaskWorkspaces(): void {
 }
 
 function availableTaskSkills(projectID: string): Skill[] {
-  return state.skills.filter(item => item.enabled && item.status === "active" && (item.scope === "global" || item.project_id === projectID));
+  return state.skills.filter(item => item.enabled && item.status === "active" && (item.scope === "global" || item.project_id === projectID || item.bound_project_id === projectID));
 }
 
 function taskSkillOptions(projectID: string, selected: string[] = []): string {
@@ -621,8 +644,8 @@ async function bootstrap(): Promise<void> {
 }
 
 async function loadAll(): Promise<void> {
-  const [projects, workspaces, providers, envGroups, codexAccounts, models, tasks, knowledge, skills, system, proxy, syncSettings, syncStatus, syncConflicts, syncPreview] = await Promise.all([
-    api.projects(), api.workspaces(), api.providers(), api.envGroups(), api.codexAccounts(), api.models(), api.tasks(), api.knowledge(), api.skills(), api.system(), api.proxySettings(), api.syncSettings(), api.syncStatus(), api.syncConflicts(), api.syncPreview().catch(() => ({preview: state.syncPreview})),
+  const [projects, workspaces, providers, envGroups, codexAccounts, models, tasks, knowledge, libraries, skills, system, proxy, syncSettings, syncStatus, syncConflicts, syncPreview] = await Promise.all([
+    api.projects(), api.workspaces(), api.providers(), api.envGroups(), api.codexAccounts(), api.models(), api.tasks(), api.knowledge(), api.knowledgeLibraries(), api.skills(), api.system(), api.proxySettings(), api.syncSettings(), api.syncStatus(), api.syncConflicts(), api.syncPreview().catch(() => ({preview: state.syncPreview})),
   ]);
   state.projects = projects.projects || [];
   state.workspaces = workspaces.workspaces || [];
@@ -632,6 +655,7 @@ async function loadAll(): Promise<void> {
   state.models = models.models || [];
   state.tasks = tasks.tasks || [];
   state.knowledge = knowledge.knowledge || [];
+  state.knowledgeLibraries = libraries.libraries || [];
   state.knowledgeProposals = knowledge.proposals || [];
   state.skills = skills.skills || [];
   if (system?.system) state.system = system.system;
@@ -650,7 +674,7 @@ function persistNavigationState(): void {
 }
 async function restoreNavigationState(): Promise<void> {
   const saved = loadNavigationSnapshot();
-  if (["projects", "models", "tasks", "knowledge", "prompts", "proxy", "sync"].includes(saved.view || "")) state.view = saved.view as View;
+  if (["projects", "models", "tasks", "knowledge", "prompts", "proxy", "sync", "advanced"].includes(saved.view || "")) state.view = saved.view as View;
   state.selectedProject = state.projects.find(project => project.id === saved.projectID) || null;
   if (!saved.taskID || !state.tasks.some(task => task.id === saved.taskID)) return;
   state.view = "tasks"; state.selectedProject = null;
@@ -664,6 +688,100 @@ async function restoreNavigationState(): Promise<void> {
 function syncVisualViewportHeight(): void {
   const height = Math.round(window.visualViewport?.height || window.innerHeight);
   document.documentElement.style.setProperty("--visual-viewport-height", `${height}px`);
+}
+
+function authErrorMessage(error: unknown, fallback: string): string {
+  const typed = error as Error & {code?: string};
+  if (typed.code === "recovery_failed") return "Setup Token 或账号不正确";
+  if (typed.code === "invalid_current_password") return "当前密码不正确";
+  if (typed.code === "invalid_new_password") return "新密码至少需要 10 个字符";
+  if (typed.code === "auth_rate_limited") return "尝试次数过多，请稍后再试";
+  return error instanceof Error ? error.message : fallback;
+}
+
+function persistTaskToolLayout(): void {
+  try {
+    localStorage.setItem(taskToolLayoutKey, JSON.stringify({mode: state.taskToolMode, width: state.taskToolWidth}));
+  } catch {
+    // Layout persistence is best-effort in restricted WebViews.
+  }
+}
+
+function applyTaskToolLayout(): void {
+  const grid = document.querySelector<HTMLElement>(".task-grid");
+  const panel = document.querySelector<HTMLElement>(".task-tool-panel");
+  if (!grid || !panel) return;
+  const split = state.taskToolMode === "split";
+  grid.classList.toggle("task-tool-split", split);
+  grid.classList.toggle("task-tool-fullscreen", !split);
+  grid.style.setProperty("--task-tool-width", `${state.taskToolWidth}%`);
+  panel.classList.toggle("split", split);
+  panel.classList.toggle("fullscreen", !split);
+  const resizer = panel.querySelector<HTMLElement>("#task-tool-resizer");
+  resizer?.setAttribute("aria-valuenow", String(state.taskToolWidth));
+  const toggle = panel.querySelector<HTMLButtonElement>("#toggle-task-tool-mode");
+  if (toggle) {
+    const label = split ? "全屏" : "小窗";
+    toggle.title = `切换为${label}`;
+    toggle.setAttribute("aria-label", `切换为${label}`);
+    toggle.innerHTML = `${icon(split ? "expand" : "panel")}<span>${label}</span>`;
+  }
+}
+
+function resizeTaskTool(clientX: number, grid: HTMLElement): void {
+  const rect = grid.getBoundingClientRect();
+  if (rect.width <= 0) return;
+  const minTool = Math.min(320, rect.width * .4);
+  const minConversation = Math.min(360, rect.width * .45);
+  const minWidth = Math.max(rect.width * .3, minTool);
+  const maxWidth = Math.min(rect.width * .7, rect.width - minConversation);
+  const width = Math.min(maxWidth, Math.max(minWidth, rect.right - clientX));
+  state.taskToolWidth = normalizeTaskToolWidth(width / rect.width * 100);
+  applyTaskToolLayout();
+}
+
+function bindTaskToolLayout(): void {
+  const grid = document.querySelector<HTMLElement>(".task-grid");
+  const toggle = document.querySelector<HTMLButtonElement>("#toggle-task-tool-mode");
+  const resizer = document.querySelector<HTMLElement>("#task-tool-resizer");
+  toggle?.addEventListener("click", () => {
+    state.taskToolMode = state.taskToolMode === "split" ? "fullscreen" : "split";
+    persistTaskToolLayout();
+    applyTaskToolLayout();
+  });
+  if (!grid || !resizer) return;
+  resizer.setAttribute("aria-valuenow", String(state.taskToolWidth));
+  resizer.addEventListener("dblclick", () => {
+    state.taskToolWidth = TASK_TOOL_DEFAULT_WIDTH;
+    persistTaskToolLayout();
+    applyTaskToolLayout();
+  });
+  resizer.addEventListener("keydown", event => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight" && event.key !== "Home") return;
+    event.preventDefault();
+    state.taskToolWidth = event.key === "Home"
+      ? TASK_TOOL_DEFAULT_WIDTH
+      : normalizeTaskToolWidth(state.taskToolWidth + (event.key === "ArrowLeft" ? 2 : -2));
+    persistTaskToolLayout();
+    applyTaskToolLayout();
+  });
+  resizer.addEventListener("pointerdown", event => {
+    if (window.matchMedia("(max-width: 760px)").matches || state.taskToolMode !== "split") return;
+    event.preventDefault();
+    resizer.setPointerCapture?.(event.pointerId);
+    document.body.classList.add("task-tool-resizing");
+    const move = (moveEvent: PointerEvent) => resizeTaskTool(moveEvent.clientX, grid);
+    const finish = () => {
+      document.body.classList.remove("task-tool-resizing");
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", finish);
+      persistTaskToolLayout();
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", finish);
+    window.addEventListener("pointercancel", finish);
+  });
 }
 
 function selectedConversationCategories(): ConversationCategory[] {
@@ -822,6 +940,7 @@ async function refresh(): Promise<void> {
 
 function loginView(): string {
   const register = state.auth?.registration_open;
+  const recovery = !register && authRecoveryOpen;
   return `<div class="login-layout">
     <aside class="login-brand">
       <div class="brand-lockup"><span class="brand-mark">A</span><strong>AHA</strong></div>
@@ -829,15 +948,26 @@ function loginView(): string {
       <div class="secure-note">${icon("shield")}<span>公网访问 · 所有业务操作均需认证</span></div>
     </aside>
     <main class="login-main">
-      <form id="auth-form" class="auth-form">
+      ${recovery ? `<form id="password-recovery-form" class="auth-form">
+        <h1>找回密码</h1>
+        <p>使用 AHA2 数据目录中的 setup-token 验证本机所有权；重置后其他登录会话将失效。</p>
+        <label>账号<input name="username" value="${escapeHTML(state.auth?.username || "owner")}" autocomplete="username" required></label>
+        <label>Setup Token<input name="setup_token" type="password" autocomplete="one-time-code" required></label>
+        <label>新密码<input name="new_password" type="password" autocomplete="new-password" minlength="10" required></label>
+        <label>确认新密码<input name="confirm_password" type="password" autocomplete="new-password" minlength="10" required></label>
+        <button class="primary full" type="submit">重置并登录</button>
+        <button id="back-to-login" class="auth-link" type="button">返回登录</button>
+        ${state.error ? `<div class="form-error">${escapeHTML(state.error)}</div>` : ""}
+      </form>` : `<form id="auth-form" class="auth-form">
         <h1>${register ? "初始化 Owner" : "登录"}</h1>
         <p>${register ? "创建唯一 Owner 后将关闭公开注册" : "进入项目、任务与知识工作区"}</p>
         ${register ? `<label>Setup Token<input name="setup_token" autocomplete="one-time-code" required></label>` : ""}
         <label>账号<input name="username" value="owner" autocomplete="username" required></label>
         <label>密码<input name="password" type="password" autocomplete="${register ? "new-password" : "current-password"}" minlength="10" required></label>
         <button class="primary full" type="submit">${register ? "创建 Owner" : "登录"}</button>
+        ${register ? "" : `<button id="forgot-password" class="auth-link" type="button">忘记密码？</button>`}
         ${state.error ? `<div class="form-error">${escapeHTML(state.error)}</div>` : ""}
-      </form>
+      </form>`}
     </main>
   </div>`;
 }
@@ -857,7 +987,7 @@ function shell(content: string): string {
       <div class="brand-lockup"><span class="brand-mark">A</span><div><strong>AHA</strong><small>个人 AI 工作流</small></div></div>
       <nav>${nav.map(([view, glyph, label]) => `<button data-view="${view}" class="${state.view === view ? "active" : ""}">${icon(glyph)}<span>${label}</span></button>`).join("")}</nav>
       <div class="system-meta"><span>AHA2 ${escapeHTML(state.system.version || "dev")}</span><span id="system-uptime">${systemUptimeText()}</span></div>
-      <div class="owner-block"><span class="avatar">O</span><div><strong>${escapeHTML(state.auth?.username || "Owner")}</strong><small>已安全登录</small></div><button id="logout" class="icon-button" title="退出">${icon("logout")}</button></div>
+      <div class="owner-block"><button id="owner-avatar" class="avatar" type="button" title="Owner">O</button><div><strong>${escapeHTML(state.auth?.username || "Owner")}</strong><small>已安全登录</small></div><button id="logout" class="icon-button" title="退出">${icon("logout")}</button></div>
     </aside>
     <header class="mobile-header"><div class="brand-lockup"><span class="brand-mark">A</span><strong>AHA</strong></div><button id="mobile-context" class="icon-button">${icon("menu")}</button></header>
     <main class="workspace">${banner()}${content}</main>
@@ -953,6 +1083,22 @@ function modelsView(): string {
   </section>`);
 }
 
+function advancedSettingsView(): string {
+  return shell(`<section class="page advanced-settings-page">
+    <header class="page-head"><div><h1>高级设置</h1><p>管理 Owner 账号与本机恢复方式</p></div></header>
+    <section class="panel account-security-panel">
+      <div class="panel-head"><strong>修改密码</strong><span>${escapeHTML(state.auth?.username || "Owner")}</span></div>
+      <form id="change-password-form">
+        <label>当前密码<input name="current_password" type="password" autocomplete="current-password" required></label>
+        <label>新密码<input name="new_password" type="password" autocomplete="new-password" minlength="10" required></label>
+        <label>确认新密码<input name="confirm_password" type="password" autocomplete="new-password" minlength="10" required></label>
+        <div class="dialog-actions"><button class="primary" type="submit">修改密码</button></div>
+      </form>
+    </section>
+    <section class="panel spaced recovery-note"><div class="panel-head"><strong>密码恢复</strong></div><div><p>忘记密码时，可在登录页使用数据目录中的 <code>setup-token</code> 重置。重置成功会撤销其他登录会话。</p><p>默认位置：<code>C:\\ProgramData\\AHA2\\setup-token</code></p></div></section>
+  </section>`);
+}
+
 function providerDialog(): string {
   const presets = Object.entries(PROVIDER_PRESETS)
     .filter(([key]) => key !== "custom")
@@ -1027,7 +1173,7 @@ function taskDialog(): string {
 }
 
 function taskDialogBase(): string {
-  return `<dialog id="task-dialog" class="wide"><form id="task-form" method="dialog"><div class="dialog-head"><h2>创建任务</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div><label>标题<input name="title" required></label><label>需求<textarea name="request" required></textarea></label><div class="two"><label>项目<select name="project_id" id="task-project">${state.projects.map(item => `<option value="${item.id}">${escapeHTML(item.name)}</option>`).join("")}</select></label><label>Workspace<select name="workspace_id" id="task-workspace"></select></label></div>${runtimeFieldsHTML("task", state.models, state.codexAccounts)}<div class="two"><label>推理强度<select name="reasoning_effort" id="task-effort"></select></label><label>沙箱（文件访问）<select name="filesystem"><option value="workspace-write">工作区可写</option><option value="read-only">只读</option><option value="danger-full-access">完全访问</option></select></label></div><div class="two"><label>协作模式<select name="collaboration_mode"><option value="auto">Auto</option><option value="single">Single</option></select></label><label>最大 Agent 数<input name="max_agents" type="number" min="1" value="3"></label></div><label>审批<select name="approval"><option value="never">无需确认</option><option value="auto">自动批准（跳过权限检查）</option></select></label><div id="task-git-isolation"><label>任务隔离<select name="isolation" id="task-isolation"><option value="worktree">独立 Worktree（推荐）</option><option value="inplace">原地执行</option></select></label><div id="task-worktree-settings"><label>Worktree 根目录<input name="worktree_dir" id="task-worktree-dir" placeholder="默认：仓库上一级/.aha2-worktrees"></label><div class="field-help">系统会在根目录下追加 Task ID；切换为原地执行后不使用此配置。</div></div><div class="two" id="task-branches"><label>目标分支<input name="target_branch" placeholder="默认当前分支"></label><label>任务分支<input name="task_branch" placeholder="aha/task-name"></label></div></div><div class="dialog-actions"><button type="button" data-close>取消</button><button class="primary" value="default">创建任务</button></div></form></dialog>`;
+  return `<dialog id="task-dialog" class="wide"><form id="task-form"><div class="dialog-head"><h2>创建任务</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div><label>标题<input name="title" required></label><label>需求<textarea name="request" required></textarea></label><div class="two"><label>项目<select name="project_id" id="task-project" required>${state.projects.map(item => `<option value="${item.id}">${escapeHTML(item.name)}</option>`).join("")}</select></label><label>Workspace<select name="workspace_id" id="task-workspace" required></select></label></div>${runtimeFieldsHTML("task", state.models, state.codexAccounts)}<div class="two"><label>推理强度<select name="reasoning_effort" id="task-effort"></select></label><label>沙箱（文件访问）<select name="filesystem"><option value="workspace-write">工作区可写</option><option value="read-only">只读</option><option value="danger-full-access">完全访问</option></select></label></div><div class="two"><label>协作模式<select name="collaboration_mode"><option value="auto">Auto</option><option value="single">Single</option></select></label><label>最大 Agent 数<input name="max_agents" type="number" min="1" value="3"></label></div><label>审批<select name="approval"><option value="never">无需确认</option><option value="auto">自动批准（跳过权限检查）</option></select></label><div id="task-git-isolation"><label>任务隔离<select name="isolation" id="task-isolation"><option value="worktree">独立 Worktree（推荐）</option><option value="inplace">原地执行</option></select></label><div id="task-worktree-settings"><label>Worktree 根目录<input name="worktree_dir" id="task-worktree-dir" placeholder="默认：仓库上一级/.aha2-worktrees"></label><div class="field-help">系统会在根目录下追加 Task ID；切换为原地执行后不使用此配置。</div></div><div class="two" id="task-branches"><label>目标分支<input name="target_branch" placeholder="默认当前分支"></label><label>任务分支<input name="task_branch" placeholder="aha/task-name"></label></div></div><div class="dialog-actions"><button type="button" data-close>取消</button><button class="primary" type="submit">创建任务</button></div></form></dialog>`;
 }
 
 let slashCommandSelection = 0;
@@ -1086,10 +1232,89 @@ function previewableAttachment(mediaType: string): boolean {
   return ["image/png", "image/jpeg", "image/gif", "image/webp"].includes(mediaType);
 }
 
+function attachmentTrayHTML(attachments: Attachment[]): string {
+  return attachments.length ? `<div class="composer-attachment-tray">${attachments.map(item => `<article>${previewableAttachment(item.media_type) ? `<img src="${attachmentURL(item)}" alt="">` : icon("attachment")}<span><strong>${escapeHTML(item.name)}</strong><small>${attachmentSize(item.size)}</small></span><button type="button" class="icon-button" data-remove-attachment="${escapeHTML(item.id)}" title="移除附件">${icon("close")}</button></article>`).join("")}</div>` : "";
+}
+
 function renderAttachmentComposer(disabled: boolean): string {
   const attachments = currentAttachmentDrafts();
-  const tray = attachments.length ? `<div class="composer-attachment-tray">${attachments.map(item => `<article>${previewableAttachment(item.media_type) ? `<img src="${attachmentURL(item)}" alt="">` : icon("attachment")}<span><strong>${escapeHTML(item.name)}</strong><small>${attachmentSize(item.size)}</small></span><button type="button" class="icon-button" data-remove-attachment="${escapeHTML(item.id)}" title="移除附件">${icon("close")}</button></article>`).join("")}</div>` : "";
-  return `${tray}<input id="message-attachment-input" type="file" multiple hidden ${disabled ? "disabled" : ""}><button id="message-attachment-pick" class="composer-attachment-button" type="button" title="添加附件" ${disabled || attachments.length >= 8 ? "disabled" : ""}>${icon("attachment")}${attachments.length ? `<small>${attachments.length}</small>` : ""}</button>`;
+  return `${attachmentTrayHTML(attachments)}<input id="message-attachment-input" type="file" multiple hidden ${disabled ? "disabled" : ""}><button id="message-attachment-pick" class="composer-attachment-button" type="button" title="添加附件或直接粘贴图片" ${disabled || attachments.length >= 8 ? "disabled" : ""}>${icon("attachment")}${attachments.length ? `<small>${attachments.length}</small>` : ""}</button>`;
+}
+
+let messageAttachmentUploadPending = false;
+
+function clipboardImageFiles(event: ClipboardEvent): File[] {
+  const clipboard = event.clipboardData;
+  if (!clipboard) return [];
+  const source = Array.from(clipboard.items || [])
+    .filter(item => item.kind === "file" && item.type.startsWith("image/"))
+    .map(item => item.getAsFile())
+    .filter((file): file is File => Boolean(file));
+  const images = source.length ? source : Array.from(clipboard.files || []).filter(file => file.type.startsWith("image/"));
+  return images.map((file, index) => {
+    if (file.name && !/^image\.(png|jpe?g|gif|webp)$/i.test(file.name)) return file;
+    const extension = file.type === "image/jpeg" ? "jpg" : file.type.split("/")[1] || "png";
+    return new File([file], `pasted-image-${Date.now()}-${index + 1}.${extension}`, {type: file.type, lastModified: Date.now()});
+  });
+}
+
+function refreshMessageAttachmentDOM(): void {
+  const input = document.querySelector<HTMLInputElement>("#message-attachment-input");
+  const button = document.querySelector<HTMLButtonElement>("#message-attachment-pick");
+  if (!input || !button) return;
+  document.querySelector(".composer-attachment-tray")?.remove();
+  const attachments = currentAttachmentDrafts();
+  input.insertAdjacentHTML("beforebegin", attachmentTrayHTML(attachments));
+  button.disabled = messageAttachmentUploadPending || attachments.length >= 8;
+  button.title = messageAttachmentUploadPending ? "正在上传附件" : "添加附件或直接粘贴图片";
+  button.innerHTML = messageAttachmentUploadPending
+    ? `${icon("spinner", true)}<small>${attachments.length}</small>`
+    : `${icon("attachment")}${attachments.length ? `<small>${attachments.length}</small>` : ""}`;
+  bindRemoveAttachmentButtons();
+  syncTaskComposerState(document.querySelector<HTMLTextAreaElement>("#message-form textarea"));
+}
+
+async function uploadMessageAttachments(files: File[]): Promise<void> {
+  if (!files.length || !state.selectedTask || messageAttachmentUploadPending) return;
+  const taskID = state.selectedTask.task.id;
+  const agentID = state.selectedTaskAgent;
+  const drafts = currentAttachmentDrafts();
+  if (drafts.length + files.length > 8) {
+    setMessage("error", "每条消息最多发送 8 个附件");
+    return;
+  }
+  state.taskAttachmentDrafts[agentID] = drafts;
+  messageAttachmentUploadPending = true;
+  refreshMessageAttachmentDOM();
+  try {
+    for (const file of files) {
+      const result = await api.uploadAttachment(taskID, file);
+      drafts.push(result.attachment);
+      refreshMessageAttachmentDOM();
+    }
+    setMessage("notice", `已添加 ${files.length} 个附件`);
+  } catch (error) {
+    setMessage("error", error instanceof Error ? error.message : String(error));
+  } finally {
+    messageAttachmentUploadPending = false;
+    if (state.selectedTask?.task.id === taskID && state.selectedTaskAgent === agentID) refreshMessageAttachmentDOM();
+  }
+}
+
+function bindRemoveAttachmentButtons(): void {
+  document.querySelectorAll<HTMLButtonElement>("[data-remove-attachment]").forEach(button => button.addEventListener("click", async () => {
+    if (!state.selectedTask) return;
+    const id = button.dataset.removeAttachment || "";
+    button.disabled = true;
+    try {
+      await api.deleteAttachment(state.selectedTask.task.id, id);
+      state.taskAttachmentDrafts[state.selectedTaskAgent] = currentAttachmentDrafts().filter(item => item.id !== id);
+      refreshMessageAttachmentDOM();
+    } catch (error) {
+      button.disabled = false;
+      setMessage("error", error instanceof Error ? error.message : String(error));
+    }
+  }));
 }
 
 function renderTaskSlashCommandMenu(textarea: HTMLTextAreaElement | null): void {
@@ -1220,11 +1445,12 @@ function taskDetailView(detail: TaskDetail): string {
     <div id="agent-turn-slot">${renderAgentTurnCard(detail, state.taskRealtimeState, state.taskContext?.context.metrics)}</div>
     <form id="message-form" class="composer${runtimeError || remoteReadOnly ? " runtime-invalid" : ""}">${runtimeError || remoteReadOnly ? `<div class="composer-runtime-warning">${escapeHTML(remoteReadOnly ? "该 Task 属于其他设备，本机只读" : runtimeError)}</div>` : ""}${renderComposerTools(detail, state.selectedTaskAgent, state.taskCategories, state.taskConversation.length)}<div id="slash-command-menu" class="slash-command-menu" ${matchingTaskSlashCommands(state.taskDraft).length ? "" : "hidden"}>${slashCommandMenuHtml(state.taskDraft)}</div>${renderAttachmentComposer(Boolean(runtimeError || remoteReadOnly))}<textarea name="content" placeholder="${escapeHTML(remoteReadOnly ? "只读 Task" : runtimeError || (activeTurn ? `${state.selectedTaskAgent} 正在执行，发送后将排队` : taskFailed ? "输入消息重试，或输入 /reopen" : `发送给 ${state.selectedTaskAgent}，输入 / 查看命令`))}" ${runtimeError || remoteReadOnly ? "disabled" : ""}>${escapeHTML(state.taskDraft)}</textarea><button id="message-send" class="primary" aria-label="发送" ${runtimeError || remoteReadOnly ? "disabled" : ""}>${icon("send")}<span class="send-label">发送</span></button></form>
   </section>`;
+  const toolLayout = state.taskTool ? ` task-tool-open task-tool-${state.taskToolMode}` : "";
   return shell(`<section class="task-screen">
     <header class="task-head"><button id="back-tasks">←</button><div class="task-title-block"><h1><span class="task-code">${escapeHTML(detail.task.code || "")}</span><span class="task-title-text">${escapeHTML(detail.task.title)}</span></h1><div class="task-head-subline"><span class="task-head-meta" title="${escapeHTML(taskMeta)}">${escapeHTML(taskMeta)}</span><span id="task-detail-status" class="status ${statusClass(detail.task.status)}">${statusLabel(detail.task.status)}</span><span class="task-branch">${escapeHTML(detail.task.task_branch || "")}</span></div></div><div class="actions task-tool-actions">${renderTaskToolButtons(state.taskTool)}</div></header>
-    <div class="task-grid">
+    <div class="task-grid${toolLayout}" style="--task-tool-width:${state.taskToolWidth}%">
       ${chat}
-      ${renderTaskToolPanel(state.taskTool, detail, state.selectedTaskAgent, taskCtxHtml())}
+      ${renderTaskToolPanel(state.taskTool, detail, state.selectedTaskAgent, taskCtxHtml(), state.taskToolMode)}
     </div>
     ${renderAgentConfigDialog(detail, state.selectedTaskAgent, state.models, state.codexAccounts, state.skills)}${taskTakeoverDialog(detail)}
   </section>`);
@@ -1377,6 +1603,7 @@ function render(): void {
         projects: state.projects,
         workspaces: state.workspaces,
         knowledge: state.knowledge,
+        libraries: state.knowledgeLibraries,
         proposals: state.knowledgeProposals,
         refreshData: loadAll,
         render,
@@ -1385,6 +1612,7 @@ function render(): void {
       prompts: () => shell(renderPromptAdmin()),
       proxy: () => shell(renderProxySettings(state.proxySettings)),
       sync: () => shell(renderSyncSettings(state.syncSettings, state.syncState, state.syncPending, state.syncConflicts, state.syncPreview, state.syncRun)),
+      advanced: advancedSettingsView,
     };
     content = views[state.view]();
   }
@@ -1407,6 +1635,55 @@ function render(): void {
 }
 
 function bindAuth(): void {
+  document.querySelector("#forgot-password")?.addEventListener("click", () => {
+    authRecoveryOpen = true;
+    state.error = "";
+    render();
+  });
+  document.querySelector("#back-to-login")?.addEventListener("click", () => {
+    authRecoveryOpen = false;
+    state.error = "";
+    render();
+  });
+  document.querySelector<HTMLFormElement>("#password-recovery-form")?.addEventListener("submit", async event => {
+    event.preventDefault();
+    const element = event.currentTarget;
+    const form = new FormData(element);
+    const newPassword = String(form.get("new_password") || "");
+    if (newPassword !== String(form.get("confirm_password") || "")) {
+      state.error = "两次输入的新密码不一致";
+      render();
+      return;
+    }
+    const button = element.querySelector<HTMLButtonElement>('button[type="submit"]');
+    const original = button?.innerHTML || "";
+    if (button) {
+      button.disabled = true;
+      button.innerHTML = `${icon("spinner", true)}<span>重置中</span>`;
+    }
+    try {
+      const username = String(form.get("username") || "").trim();
+      const response = await api.recoverPassword({
+        setup_token: String(form.get("setup_token") || "").trim(),
+        username,
+        new_password: newPassword,
+      });
+      state.auth = {...response, authenticated: true, registration_open: false, username};
+      api.setCSRF(response.csrf_token);
+      authRecoveryOpen = false;
+      state.error = "";
+      await loadAll();
+      openGlobalEvents();
+    } catch (error) {
+      state.error = authErrorMessage(error, "密码重置失败");
+    } finally {
+      if (button?.isConnected) {
+        button.disabled = false;
+        button.innerHTML = original;
+      }
+    }
+    render();
+  });
   document.querySelector<HTMLFormElement>("#auth-form")?.addEventListener("submit", async event => {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
@@ -1416,6 +1693,7 @@ function bindAuth(): void {
       state.auth = {...response, authenticated: true, registration_open: false, username: payload.username};
       api.setCSRF(response.csrf_token);
       state.error = "";
+      authRecoveryOpen = false;
       await loadAll();
       openGlobalEvents();
     } catch (error) {
@@ -1461,6 +1739,20 @@ function bindCommon(): void {
     closeEvents();
     render();
   }));
+  document.querySelector("#owner-avatar")?.addEventListener("click", () => {
+    ownerAvatarClicks++;
+    if (ownerAvatarResetTimer) window.clearTimeout(ownerAvatarResetTimer);
+    if (ownerAvatarClicks >= 5) {
+      ownerAvatarClicks = 0;
+      state.view = "advanced";
+      state.selectedTask = null;
+      state.selectedProject = null;
+      closeEvents();
+      render();
+      return;
+    }
+    ownerAvatarResetTimer = window.setTimeout(() => { ownerAvatarClicks = 0; }, 1800);
+  });
   document.querySelector("#logout")?.addEventListener("click", () => {
     const button = document.querySelector<HTMLElement>("#logout");
     void runWithFeedback(button, "退出中", async () => {
@@ -1468,6 +1760,7 @@ function bindCommon(): void {
       state.auth = {...state.auth!, authenticated: false};
       state.selectedTask = null;
       state.selectedProject = null;
+      authRecoveryOpen = false;
       clearNavigationSnapshot();
       closeEvents();
       closeGlobalEvents();
@@ -1675,7 +1968,7 @@ function bindCommon(): void {
   document.querySelectorAll<HTMLElement>("[data-delete-project]").forEach(button => button.addEventListener("click", async event => {
     event.stopPropagation();
     const id = button.dataset.deleteProject!;
-    if (!window.confirm("删除该项目及其所有 Workspace / 任务？此操作不可恢复。")) return;
+    if (!window.confirm("删除该项目及其所有 Workspace / 任务？已绑定知识库会自动解绑并保留。此操作不可恢复。")) return;
     void runWithFeedback(button, "删除中", async () => {
       await api.deleteProject(id);
       if (state.selectedProject?.id === id) state.selectedProject = null;
@@ -1788,7 +2081,7 @@ function bindCommon(): void {
   document.querySelector("#delete-project")?.addEventListener("click", () => {
     if (!state.selectedProject) return;
     const id = state.selectedProject.id;
-    if (!window.confirm("删除该项目及其所有 Workspace / 任务？此操作不可恢复。")) return;
+    if (!window.confirm("删除该项目及其所有 Workspace / 任务？已绑定知识库会自动解绑并保留。此操作不可恢复。")) return;
     const button = document.querySelector<HTMLElement>("#delete-project");
     void runWithFeedback(button, "删除中", async () => {
       await api.deleteProject(id);
@@ -1863,7 +2156,7 @@ function bindCommon(): void {
     const result = await api.createTask({...payload, skill_ids: form.getAll("skill_ids").map(String), max_agents: Number(payload.max_agents || 3), proxy_enabled: payload.proxy_enabled === "on"});
     await openTask(result.task.id);
     if (result.start_error) setMessage("error", `Task 已创建，但首个 Turn 启动失败：${result.start_error}`);
-  });
+  }, "创建中");
   document.querySelectorAll<HTMLElement>("[data-detect]").forEach(button => button.addEventListener("click", () => {
     const id = button.dataset.detect!;
     void runWithFeedback(button, "检测中", async () => {
@@ -1957,35 +2250,26 @@ function bindCommon(): void {
       render();
     });
   });
+  bindForm("#change-password-form", async form => {
+    const currentPassword = String(form.get("current_password") || "");
+    const newPassword = String(form.get("new_password") || "");
+    if (newPassword !== String(form.get("confirm_password") || "")) throw new Error("两次输入的新密码不一致");
+    if (newPassword === currentPassword) throw new Error("新密码不能与当前密码相同");
+    try {
+      await api.changePassword({current_password: currentPassword, new_password: newPassword});
+    } catch (error) {
+      throw new Error(authErrorMessage(error, "密码修改失败"));
+    }
+    setMessage("notice", "密码已修改，其他登录会话已退出");
+  }, "修改中");
   document.querySelector<HTMLButtonElement>("#message-attachment-pick")?.addEventListener("click", () => {
     document.querySelector<HTMLInputElement>("#message-attachment-input")?.click();
   });
   document.querySelector<HTMLInputElement>("#message-attachment-input")?.addEventListener("change", async event => {
-    if (!state.selectedTask) return;
     const input = event.currentTarget;
     const files = Array.from(input.files || []);
-    const drafts = currentAttachmentDrafts();
-    if (drafts.length + files.length > 8) {
-      setMessage("error", "每条消息最多发送 8 个附件");
-      input.value = "";
-      return;
-    }
-    const button = document.querySelector<HTMLButtonElement>("#message-attachment-pick");
-    if (button) button.disabled = true;
-    state.taskAttachmentDrafts[state.selectedTaskAgent] = drafts;
-    try {
-      for (const file of files) {
-        const result = await api.uploadAttachment(state.selectedTask.task.id, file);
-        drafts.push(result.attachment);
-      }
-      if (files.length) setMessage("notice", `已添加 ${files.length} 个附件`);
-      render();
-    } catch (error) {
-      setMessage("error", error instanceof Error ? error.message : String(error));
-      render();
-    } finally {
-      input.value = "";
-    }
+    input.value = "";
+    await uploadMessageAttachments(files);
   });
   document.querySelector<HTMLFormElement>("#workspace-takeover-form")?.addEventListener("submit", event => {
     event.preventDefault();
@@ -2007,19 +2291,7 @@ function bindCommon(): void {
       render();
     });
   });
-  document.querySelectorAll<HTMLButtonElement>("[data-remove-attachment]").forEach(button => button.addEventListener("click", async () => {
-    if (!state.selectedTask) return;
-    const id = button.dataset.removeAttachment || "";
-    button.disabled = true;
-    try {
-      await api.deleteAttachment(state.selectedTask.task.id, id);
-      state.taskAttachmentDrafts[state.selectedTaskAgent] = currentAttachmentDrafts().filter(item => item.id !== id);
-      render();
-    } catch (error) {
-      button.disabled = false;
-      setMessage("error", error instanceof Error ? error.message : String(error));
-    }
-  }));
+  bindRemoveAttachmentButtons();
   document.querySelector<HTMLFormElement>("#message-form")?.addEventListener("submit", async event => {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
@@ -2161,11 +2433,19 @@ function bindCommon(): void {
     state.taskTool = "";
     render();
   });
+  document.querySelector<HTMLTextAreaElement>("#message-form textarea")?.addEventListener("paste", event => {
+    const files = clipboardImageFiles(event);
+    if (!files.length) return;
+    event.preventDefault();
+    void uploadMessageAttachments(files);
+  });
+  bindTaskToolLayout();
   if (state.taskTool === "hardware" && state.selectedTask) bindHardwarePanel(state.selectedTask, setMessage);
   if (state.view === "knowledge" && !state.selectedProject && !state.selectedTask) bindKnowledgeWorkspace({
     projects: state.projects,
     workspaces: state.workspaces,
     knowledge: state.knowledge,
+    libraries: state.knowledgeLibraries,
     proposals: state.knowledgeProposals,
     refreshData: loadAll,
     render,
@@ -2192,17 +2472,47 @@ function bindSessionActions(): void {
   }));
 }
 
-function bindForm(selector: string, action: (form: FormData) => Promise<void>): void {
+function bindForm(selector: string, action: (form: FormData) => Promise<void>, pendingLabel = "提交中"): void {
   document.querySelector<HTMLFormElement>(selector)?.addEventListener("submit", async event => {
     event.preventDefault();
-    const dialog = event.currentTarget.closest("dialog");
+    const form = event.currentTarget;
+    if (form.dataset.submitting === "true") return;
+    const dialog = form.closest("dialog");
+    const submitButton = event.submitter instanceof HTMLButtonElement
+      ? event.submitter
+      : form.querySelector<HTMLButtonElement>('button[type="submit"]');
+    const originalButtonHTML = submitButton?.innerHTML || "";
+    form.dataset.submitting = "true";
+    form.setAttribute("aria-busy", "true");
+    if (submitButton) {
+      submitButton.disabled = true;
+      submitButton.innerHTML = `${icon("spinner", true)}<span>${pendingLabel}</span>`;
+    }
+    form.querySelector<HTMLElement>("[data-form-error]")?.remove();
     try {
-      await action(new FormData(event.currentTarget));
+      await action(new FormData(form));
       dialog?.close();
       await refresh();
     } catch (error) {
-      setMessage("error", error instanceof Error ? error.message : String(error));
-      render();
+      const message = error instanceof Error ? error.message : String(error);
+      setMessage("error", message);
+      if (dialog?.open) {
+        const feedback = document.createElement("div");
+        feedback.className = "form-error";
+        feedback.dataset.formError = "true";
+        feedback.setAttribute("role", "alert");
+        feedback.textContent = message;
+        form.querySelector(".dialog-actions")?.before(feedback);
+      } else {
+        render();
+      }
+    } finally {
+      delete form.dataset.submitting;
+      form.removeAttribute("aria-busy");
+      if (submitButton?.isConnected) {
+        submitButton.disabled = false;
+        submitButton.innerHTML = originalButtonHTML;
+      }
     }
   });
 }
@@ -2405,7 +2715,7 @@ function openGlobalEvents(): void {
     } catch {
       return;
     }
-    if (type.startsWith("task_") || type.startsWith("turn_") || type.startsWith("knowledge_")) {
+    if (eventRefreshesTaskList(type)) {
       void refreshListData();
     }
   });

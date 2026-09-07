@@ -30,6 +30,7 @@ interface PanelState {
   sendNewline: boolean;
   sendData: string;
   dirty: boolean;
+  configCollapsed: boolean;
   ports: SerialPort[];
   portsLoaded: boolean;
   streams: Record<string, StreamState>;
@@ -128,6 +129,7 @@ function panelState(detail: TaskDetail): PanelState {
       sendNewline: true,
       sendData: "",
       dirty: Boolean(stored),
+      configCollapsed: false,
       ports: [],
       portsLoaded: false,
       streams: {},
@@ -242,12 +244,13 @@ export function renderHardwarePanel(detail: TaskDetail): string {
   const readOnly = Boolean(stream.status?.read_only || group?.access !== "read_write" || detail.task.status === "completed" || detail.task.status === "failed" || detail.task.status === "cancelled");
   const serialSelected = state.transport === "serial";
   const sendEncoding = serialSelected ? state.sendEncoding : "text";
-  return `<div id="hardware-tool" class="hardware-tool" data-task-id="${escapeHTML(detail.task.id)}">
-    <details class="hardware-config" open>
+  return `<div id="hardware-tool" class="hardware-tool ${state.configCollapsed ? "config-collapsed" : ""}" data-task-id="${escapeHTML(detail.task.id)}">
+    <details class="hardware-config" ${state.configCollapsed ? "" : "open"}>
       <summary>${icon("edit")}<span>连接配置</span></summary>
       <div class="hardware-config-body">
         <div class="hardware-group-row">
           <select id="hardware-group-select" aria-label="硬件组">${groupOptions(state) || '<option value="">暂无硬件组</option>'}</select>
+          <button type="button" id="hardware-config-collapse" class="icon-button" title="收起硬件组" aria-label="收起硬件组">${icon("panel")}</button>
           <button type="button" id="hardware-save-top" class="icon-button ${state.dirty ? "primary" : ""}" title="保存全部硬件组" ${state.dirty ? "" : "disabled"}>${icon("save")}</button>
           <button type="button" id="hardware-add" class="icon-button" title="添加硬件组">${icon("plus")}</button>
           <button type="button" id="hardware-remove" class="icon-button" title="删除当前硬件组" ${group ? "" : "disabled"}>${icon("close")}</button>
@@ -326,6 +329,16 @@ export function bindHardwarePanel(detail: TaskDetail, notify: Notice): void {
   const state = panelState(detail);
   const generation = ++pollGeneration;
   if (window.innerWidth <= 760) root.querySelector<HTMLDetailsElement>(".hardware-config")?.removeAttribute("open");
+  const config = root.querySelector<HTMLDetailsElement>(".hardware-config");
+  config?.addEventListener("toggle", () => {
+    state.configCollapsed = !config.open;
+    root.classList.toggle("config-collapsed", state.configCollapsed);
+  });
+  root.querySelector("#hardware-config-collapse")?.addEventListener("click", () => {
+    state.configCollapsed = true;
+    if (config) config.open = false;
+    root.classList.add("config-collapsed");
+  });
 
   const rerender = () => {
     const body = document.querySelector<HTMLElement>("#task-tool-panel-body");

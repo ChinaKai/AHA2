@@ -124,12 +124,27 @@ func (s *Store) ListKnowledgeProposals(ctx context.Context, scope, projectID str
 		if err != nil {
 			return nil, err
 		}
-		if (scope != "" && item.Proposed.Scope != scope) || (projectID != "" && item.Proposed.ProjectID != projectID) {
-			continue
-		}
 		result = append(result, item)
 	}
-	return result, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	bindings, err := s.knowledgeLibraryBindings(ctx)
+	if err != nil {
+		return nil, err
+	}
+	filtered := result[:0]
+	for _, item := range result {
+		item.Proposed.BoundProjectID = bindings[item.Proposed.ProjectID]
+		if (scope != "" && item.Proposed.Scope != scope) || (projectID != "" && item.Proposed.ProjectID != projectID && item.Proposed.BoundProjectID != projectID) {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	return filtered, nil
 }
 
 func (s *Store) CreateKnowledgeProposal(ctx context.Context, item domain.KnowledgeProposal) (domain.KnowledgeProposal, error) {

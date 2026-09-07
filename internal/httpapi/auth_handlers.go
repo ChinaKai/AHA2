@@ -117,3 +117,89 @@ func (s *Server) authLogout(writer http.ResponseWriter, request *http.Request) {
 	clearSessionCookie(writer, s.secureCookie)
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true})
 }
+
+func (s *Server) authChangePassword(writer http.ResponseWriter, request *http.Request) {
+	var payload struct {
+		CurrentPassword string `json:"current_password"`
+		NewPassword     string `json:"new_password"`
+	}
+	if err := decodeJSON(request, &payload); err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_json")
+		return
+	}
+	if payload.CurrentPassword == "" || payload.NewPassword == "" {
+		writeError(writer, http.StatusBadRequest, "missing_required_fields")
+		return
+	}
+	if len(payload.NewPassword) < 10 {
+		writeError(writer, http.StatusBadRequest, "invalid_new_password")
+		return
+	}
+	session, _ := sessionFromContext(request.Context())
+	if err := s.auth.ChangePassword(
+		request.Context(), session.OwnerID, session.ID, payload.CurrentPassword, payload.NewPassword,
+	); err != nil {
+		if errors.Is(err, auth.ErrUnauthorized) {
+			writeError(writer, http.StatusUnauthorized, "invalid_current_password")
+			return
+		}
+		writeError(writer, http.StatusInternalServerError, "password_change_failed")
+		return
+	}
+	_ = s.store.AppendAudit(
+		request.Context(), session.OwnerID, "owner.password.change", "owner", session.OwnerID, nil,
+		time.Now().UTC().Format(time.RFC3339Nano),
+	)
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) authRecover(writer http.ResponseWriter, request *http.Request) {
+	clientKey, allowed := enforceAuthRateLimit(writer, request, s.authLimiter)
+	if !allowed {
+		return
+	}
+	if !s.sameOrigin(request) {
+		s.authLimiter.failure(clientKey)
+		writeError(writer, http.StatusForbidden, "origin_rejected")
+		return
+	}
+	var payload struct {
+		SetupToken  string `json:"setup_token"`
+		Username    string `json:"username"`
+		NewPassword string `json:"new_password"`
+	}
+	if err := decodeJSON(request, &payload); err != nil {
+		s.authLimiter.failure(clientKey)
+		writeError(writer, http.StatusBadRequest, "invalid_json")
+		return
+	}
+	if payload.SetupToken == "" || strings.TrimSpace(payload.Username) == "" || payload.NewPassword == "" {
+		s.authLimiter.failure(clientKey)
+		writeError(writer, http.StatusBadRequest, "missing_required_fields")
+		return
+	}
+	if len(payload.NewPassword) < 10 {
+		s.authLimiter.failure(clientKey)
+		writeError(writer, http.StatusBadRequest, "invalid_new_password")
+		return
+	}
+	result, err := s.auth.Recover(request.Context(), strings.TrimSpace(payload.SetupToken), payload.Username, payload.NewPassword)
+	if err != nil {
+		s.authLimiter.failure(clientKey)
+		if errors.Is(err, auth.ErrInvalidSetupToken) || errors.Is(err, auth.ErrUnauthorized) {
+			writeError(writer, http.StatusUnauthorized, "recovery_failed")
+			return
+		}
+		writeError(writer, http.StatusInternalServerError, "recovery_failed")
+		return
+	}
+	s.authLimiter.success(clientKey)
+	setSessionCookie(writer, result.SessionToken, result.Session.ExpiresAt, s.secureCookie)
+	_ = s.store.AppendAudit(
+		request.Context(), result.Owner.ID, "owner.password.recover", "owner", result.Owner.ID, nil,
+		time.Now().UTC().Format(time.RFC3339Nano),
+	)
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"ok": true, "owner": result.Owner, "csrf_token": result.Session.CSRFToken,
+	})
+}

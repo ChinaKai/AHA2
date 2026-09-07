@@ -152,6 +152,12 @@ foreach ($contract in @(
 if ($workflow.Contains("portable-release") -or $workflow.Contains("Upload portable artifacts")) {
     throw "Release workflow must not publish portable binaries."
 }
+$installerBuilder = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $repo "scripts\build-windows-installer.ps1")
+foreach ($contract in @("Get-PEWindowsSubsystem", "Windows GUI subsystem", "-H windowsgui")) {
+    if (-not $installerBuilder.Contains($contract)) {
+        throw "Windows installer builder does not enforce the GUI tray subsystem: $contract"
+    }
+}
 $localBuild = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $repo "scripts\build-all.sh")
 foreach ($contract in @("./cmd/aha-tray", "aha2-tray-", "-H windowsgui")) {
     if (-not $localBuild.Contains($contract)) {

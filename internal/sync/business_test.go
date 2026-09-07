@@ -86,7 +86,7 @@ func TestBusinessExportStripsLocalAndSecretFields(t *testing.T) {
 		if obj.BaseVersion != "" {
 			t.Fatalf("initial export has base version")
 		}
-		if obj.Type == TypeKnowledge && !strings.HasPrefix(obj.IdempotencyKey, "knowledge:v3:") {
+		if obj.Type == TypeKnowledge && !strings.HasPrefix(obj.IdempotencyKey, "knowledge:v4:") {
 			t.Fatalf("knowledge export retained legacy idempotency key: %q", obj.IdempotencyKey)
 		}
 		if obj.Type == TypeSkill {
@@ -172,6 +172,48 @@ func TestKnowledgeExportKeyTracksStatusAndFeedbackWithoutRevisionChange(t *testi
 	}
 	if helpedKey := keyFor(); helpedKey == staleKey {
 		t.Fatalf("feedback-only change reused sync key %q", helpedKey)
+	}
+}
+
+func TestKnowledgeExportOrdersParentsBeforeChildren(t *testing.T) {
+	ctx, db, now := context.Background(), businessStore(t), time.Now().UTC()
+	project := domain.Project{ID: "project-knowledge-tree", Name: "Knowledge tree", CreatedAt: now, UpdatedAt: now}
+	if err := db.CreateProject(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	root, err := db.EnsureKnowledgeRoot(ctx, "project", project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := domain.KnowledgeEntry{
+		ID: "z-parent", Scope: "project", ProjectID: project.ID, ParentID: root.ID, Slug: "parent",
+		Type: "overview", Title: "Parent", Body: "parent", Status: domain.KnowledgeVerified,
+		Revision: 1, CreatedAt: now, UpdatedAt: now,
+	}
+	child := domain.KnowledgeEntry{
+		ID: "a-child", Scope: "project", ProjectID: project.ID, ParentID: parent.ID, Slug: "child",
+		Type: "practice", Title: "Child", Body: "child", Status: domain.KnowledgeVerified,
+		Revision: 1, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := db.CreateKnowledge(ctx, parent); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateKnowledge(ctx, child); err != nil {
+		t.Fatal(err)
+	}
+
+	objects, err := ExportBusinessObjects(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	positions := map[string]int{}
+	for index, object := range objects {
+		if object.Type == TypeKnowledge {
+			positions[object.ID] = index
+		}
+	}
+	if !(positions[root.ID] < positions[parent.ID] && positions[parent.ID] < positions[child.ID]) {
+		t.Fatalf("knowledge export is not topological: root=%d parent=%d child=%d", positions[root.ID], positions[parent.ID], positions[child.ID])
 	}
 }
 

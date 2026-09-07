@@ -81,6 +81,39 @@ CREATE INDEX IF NOT EXISTS idx_sync_tombstones_deleted
 ON sync_tombstones(deleted_at,object_type,object_id);
 `
 
+const schemaV38 = `
+CREATE TABLE IF NOT EXISTS knowledge_libraries (
+    id TEXT PRIMARY KEY,
+    container_project_id TEXT NOT NULL UNIQUE REFERENCES projects(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    source_identity TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS project_knowledge_bindings (
+    library_id TEXT PRIMARY KEY REFERENCES knowledge_libraries(id) ON DELETE CASCADE,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    CHECK(project_id <> '')
+);
+CREATE INDEX IF NOT EXISTS idx_project_knowledge_bindings_project
+ON project_knowledge_bindings(project_id,library_id);
+
+UPDATE projects
+SET project_type='knowledge'
+WHERE project_type<>'knowledge' AND (
+    description LIKE 'Imported AHA1 knowledge archive for legacy project %'
+    OR description='Isolated AHA1 personal knowledge, captures, and pending notes.'
+);
+
+INSERT OR IGNORE INTO knowledge_libraries(id,container_project_id,name,description,source_identity,created_at,updated_at)
+SELECT 'library_' || id,id,name,description,repository_identity,created_at,updated_at
+FROM projects
+WHERE project_type='knowledge';
+`
+
 const schemaV27 = `
 CREATE TABLE IF NOT EXISTS sync_settings (
     scope TEXT PRIMARY KEY,
@@ -1271,6 +1304,26 @@ func (s *Store) migrate(ctx context.Context) error {
 	}
 	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(37, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
 		return fmt.Errorf("record schema v37: %w", err)
+	}
+	var hasV38 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=38)`).Scan(&hasV38)
+	if !hasV38 {
+		if _, err := s.db.ExecContext(ctx, schemaV38); err != nil {
+			return fmt.Errorf("apply schema v38: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(38, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v38: %w", err)
+	}
+	var hasV39 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=39)`).Scan(&hasV39)
+	if !hasV39 {
+		if _, err := s.PruneImportedAHA1Worklogs(ctx); err != nil {
+			return fmt.Errorf("apply schema v39 AHA1 worklog cleanup: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(39, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v39: %w", err)
 	}
 	return nil
 }

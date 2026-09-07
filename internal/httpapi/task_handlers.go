@@ -334,7 +334,7 @@ func (s *Server) contextForAgent(writer http.ResponseWriter, request *http.Reque
 	s.applyTurnContextUsage(request.Context(), turns)
 	agentTurns, _ := s.store.ListTurns(request.Context(), taskID)
 	s.applyTurnContextUsage(request.Context(), agentTurns)
-	projectKB, _ := s.store.ListKnowledge(request.Context(), "project", task.ProjectID, []domain.KnowledgeStatus{domain.KnowledgeVerified})
+	projectKB, _ := s.store.ListApplicableKnowledge(request.Context(), task.ProjectID, "", []domain.KnowledgeStatus{domain.KnowledgeVerified})
 	globalKB, _ := s.store.ListKnowledge(request.Context(), "global", "", []domain.KnowledgeStatus{domain.KnowledgeVerified})
 	latest := latestTurnForAgent(agentTurns, agentID)
 	sessions, _ := s.store.ListBackendSessionsForAgent(request.Context(), taskID, agentID)

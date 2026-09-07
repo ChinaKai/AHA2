@@ -26,6 +26,15 @@ func (e *ConflictError) Error() string {
 }
 func (e *ConflictError) Unwrap() error { return ErrConflict }
 
+type dependencyError struct{ cause error }
+
+func (e *dependencyError) Error() string { return "sync dependency is not ready: " + e.cause.Error() }
+func (e *dependencyError) Unwrap() []error {
+	return []error{e.cause}
+}
+
+func waitForDependency(err error) error { return &dependencyError{cause: err} }
+
 type Repository interface {
 	SyncState(context.Context, string) (domain.SyncState, error)
 	UpdateSyncState(context.Context, domain.SyncState) error
@@ -120,72 +129,116 @@ func (e *Engine) Pull(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	cursor := state.Cursor
+	objects := []domain.SyncObject{}
+	seenCursors := map[string]bool{cursor: true}
 	for {
-		response, err := e.Remote.Pull(ctx, e.Scope, state.Cursor, e.DeviceID, e.limit())
+		response, err := e.Remote.Pull(ctx, e.Scope, cursor, e.DeviceID, e.limit())
 		if err != nil {
 			return err
 		}
-		for _, object := range response.Objects {
-			if object.IdempotencyKey == "" {
-				return fmt.Errorf("remote %s/%s has no idempotency key", object.Type, object.ID)
+		objects = append(objects, response.Objects...)
+		if response.HasMore && seenCursors[response.Cursor] {
+			return fmt.Errorf("remote sync cursor did not advance")
+		}
+		cursor = response.Cursor
+		seenCursors[cursor] = true
+		if !response.HasMore {
+			break
+		}
+	}
+	pending := append([]domain.SyncObject{}, objects...)
+	for len(pending) > 0 {
+		blocked := map[string]bool{}
+		next := make([]domain.SyncObject, 0, len(pending))
+		progress := false
+		var dependencyErr error
+		for _, object := range pending {
+			objectKey := object.Type + "\x00" + object.ID
+			if blocked[objectKey] {
+				next = append(next, object)
+				continue
 			}
-			deliveryKey := object.EventID
-			if deliveryKey == "" && object.RemoteVersion != "" {
-				deliveryKey = fmt.Sprintf("center-object:%s:%s:%s", object.Type, object.ID, object.RemoteVersion)
+			err := e.applyPulledObject(ctx, object)
+			var waiting *dependencyError
+			if errors.As(err, &waiting) {
+				blocked[objectKey] = true
+				next = append(next, object)
+				if dependencyErr == nil {
+					dependencyErr = err
+				}
+				continue
 			}
-			if deliveryKey == "" {
-				deliveryKey = object.IdempotencyKey
-			}
-			applied, err := e.Store.SyncWasApplied(ctx, deliveryKey)
 			if err != nil {
 				return err
 			}
-			if applied {
-				continue
-			}
-			handler := e.handlers[object.Type]
-			if handler == nil {
-				return fmt.Errorf("no sync handler for object type %q", object.Type)
-			}
-			if err := handler(ctx, object); err != nil {
-				var conflict *ConflictError
-				if errors.As(err, &conflict) {
-					if addErr := e.Store.AddSyncConflict(ctx, domain.SyncConflict{Scope: e.Scope, ObjectType: object.Type, ObjectID: object.ID, LocalPayload: conflict.LocalPayload, RemotePayload: object.Payload, LocalVersion: conflict.LocalVersion, RemoteVersion: object.RemoteVersion}); addErr != nil {
-						return addErr
-					}
-					if deliveryKey != object.IdempotencyKey {
-						delivered := object
-						delivered.IdempotencyKey = deliveryKey
-						delivered.EventID = ""
-						if markErr := e.Store.MarkSyncApplied(ctx, e.Scope, delivered, e.now()); markErr != nil {
-							return markErr
-						}
-					}
-					continue
-				}
-				return err
+			progress = true
+		}
+		if len(next) == 0 {
+			break
+		}
+		if !progress {
+			return dependencyErr
+		}
+		pending = next
+	}
+	state.Cursor = cursor
+	state.LastPullAt = e.now()
+	state.LastError = ""
+	state.UpdatedAt = e.now()
+	return e.Store.UpdateSyncState(ctx, state)
+}
+
+func (e *Engine) applyPulledObject(ctx context.Context, object domain.SyncObject) error {
+	if object.IdempotencyKey == "" {
+		return fmt.Errorf("remote %s/%s has no idempotency key", object.Type, object.ID)
+	}
+	deliveryKey := object.EventID
+	if deliveryKey == "" && object.RemoteVersion != "" {
+		deliveryKey = fmt.Sprintf("center-object:%s:%s:%s", object.Type, object.ID, object.RemoteVersion)
+	}
+	if deliveryKey == "" {
+		deliveryKey = object.IdempotencyKey
+	}
+	applied, err := e.Store.SyncWasApplied(ctx, deliveryKey)
+	if err != nil {
+		return err
+	}
+	if applied {
+		return nil
+	}
+	handler := e.handlers[object.Type]
+	if handler == nil {
+		return fmt.Errorf("no sync handler for object type %q", object.Type)
+	}
+	if err := handler(ctx, object); err != nil {
+		var conflict *ConflictError
+		if errors.As(err, &conflict) {
+			if addErr := e.Store.AddSyncConflict(ctx, domain.SyncConflict{Scope: e.Scope, ObjectType: object.Type, ObjectID: object.ID, LocalPayload: conflict.LocalPayload, RemotePayload: object.Payload, LocalVersion: conflict.LocalVersion, RemoteVersion: object.RemoteVersion}); addErr != nil {
+				return addErr
 			}
 			if deliveryKey != object.IdempotencyKey {
-				if err := e.Store.MarkSyncApplied(ctx, e.Scope, object, e.now()); err != nil {
-					return err
+				delivered := object
+				delivered.IdempotencyKey = deliveryKey
+				delivered.EventID = ""
+				if markErr := e.Store.MarkSyncApplied(ctx, e.Scope, delivered, e.now()); markErr != nil {
+					return markErr
 				}
 			}
-			delivered := object
-			delivered.IdempotencyKey = deliveryKey
-			delivered.EventID = ""
-			if err := e.Store.MarkSyncApplied(ctx, e.Scope, delivered, e.now()); err != nil {
-				return err
-			}
-		}
-		state.Cursor = response.Cursor
-		state.LastPullAt = e.now()
-		state.LastError = ""
-		state.UpdatedAt = e.now()
-		if err := e.Store.UpdateSyncState(ctx, state); err != nil {
-			return err
-		}
-		if !response.HasMore {
 			return nil
 		}
+		return err
 	}
+	if deliveryKey != object.IdempotencyKey {
+		if err := e.Store.MarkSyncApplied(ctx, e.Scope, object, e.now()); err != nil {
+			return err
+		}
+	}
+	delivered := object
+	delivered.IdempotencyKey = deliveryKey
+	delivered.EventID = ""
+	if err := e.Store.MarkSyncApplied(ctx, e.Scope, delivered, e.now()); err != nil {
+		return err
+	}
+	return nil
 }

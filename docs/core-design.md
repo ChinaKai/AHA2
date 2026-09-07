@@ -752,14 +752,16 @@ AHA2 的产品形态是公网可访问的 Web。
 
 ```text
 First Start
--> One-time Setup Token
+-> Local Setup / Recovery Token
 -> Create Owner
 -> Configure Credential
 -> Disable public registration
 -> Login only
 ```
 
-会话使用服务端持久化 Session 和安全 Cookie。
+会话使用服务端持久化 Session 和安全 Cookie。Owner 忘记密码时，只能使用受本机文件权限保护的
+Setup Token 重置；恢复成功后撤销此前所有 Session 并创建新 Session。登录状态下修改密码必须验证
+当前密码，并撤销除当前 Session 外的其他 Session。
 
 禁止：
 

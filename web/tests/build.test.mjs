@@ -42,6 +42,15 @@ test("workspace detection renders inaccessible, Git, and backend probe states", 
   assert.match(gitFailure, /proto codex/);
 });
 
+test("task list refreshes after round terminal events", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const {eventRefreshesTaskList} = await import(pathToFileURL(resolve(root, "dist", "ui_helpers.js")));
+  assert.equal(eventRefreshesTaskList("turn_succeeded"), true);
+  assert.equal(eventRefreshesTaskList("round_completed"), true);
+  assert.equal(eventRefreshesTaskList("round_failed"), true);
+  assert.equal(eventRefreshesTaskList("agent_progress"), false);
+});
+
 test("read-only task history opens on the latest page and lazily loads older rows", async () => {
   const root = resolve(import.meta.dirname, "..");
   const script = await readFile(resolve(root, "dist", "app.js"), "utf8");
@@ -83,6 +92,15 @@ test("built web contains responsive application", async () => {
   const css = await readFile(resolve(root, "dist", "styles.css"), "utf8");
   const index = await readFile(resolve(root, "dist", "index.html"), "utf8");
   assert.match(script, /api\.authStatus/);
+  assert.match(api, /auth\/recover/);
+  assert.match(api, /auth\/password/);
+  assert.match(script, /id="forgot-password"/);
+  assert.match(script, /id="password-recovery-form"/);
+  assert.match(script, /id="owner-avatar"/);
+  assert.match(script, /ownerAvatarClicks\s*>=\s*5/);
+  assert.match(script, /id="change-password-form"/);
+  assert.match(script, /state\.view = "advanced"/);
+  assert.match(css, /\.account-security-panel/);
   assert.match(script, /EventSource/);
   assert.match(script, /api\.agentConversation/);
   assert.match(script, /api\.agentMessage/);
@@ -133,6 +151,21 @@ test("built web contains responsive application", async () => {
   assert.match(taskTools, /data-task-tool/);
   assert.match(taskTools, /id="close-task-tool"/);
   assert.match(taskTools, /task-tool-panel/);
+  assert.match(taskTools, /id="toggle-task-tool-mode"/);
+  assert.match(taskTools, /id="task-tool-resizer"/);
+  assert.match(script, /localStorage\.setItem\(taskToolLayoutKey/);
+  assert.match(script, /state\.taskToolMode === "split" \? "fullscreen" : "split"/);
+  assert.match(script, /resizer\.addEventListener\("dblclick"/);
+  assert.match(css, /\.task-grid\.task-tool-open\.task-tool-split \{[^}]*grid-template-columns:/);
+  assert.match(css, /\.task-grid \{[^}]*grid-template-rows:\s*minmax\(0,1fr\)/);
+  assert.match(css, /\.conversation \{[^}]*height:\s*100%;[^}]*overflow:\s*hidden/);
+  assert.match(css, /\.task-tool-panel \{[^}]*min-height:\s*0;[^}]*overflow:\s*hidden/);
+  assert.match(css, /#task-tool-panel-body \{[^}]*height:\s*100%;[^}]*min-height:\s*0;[^}]*overflow:\s*auto/);
+  assert.match(css, /@media \(max-width: 760px\)[\s\S]*?\.task-grid\.task-tool-open\.task-tool-split \.task-tool-panel \{[^}]*position: absolute;/);
+  assert.match(script, /addEventListener\("paste",/);
+  assert.match(script, /clipboardImageFiles\(event\)/);
+  assert.match(script, /item\.type\.startsWith\("image\/"\)/);
+  assert.match(script, /pasted-image-\$\{Date\.now\(\)\}/);
   assert.match(taskTools, /renderHardwarePanel/);
   assert.match(hardwarePanel, /hardware-config-form/);
   assert.match(hardwarePanel, /connectHardware/);
@@ -145,6 +178,9 @@ test("built web contains responsive application", async () => {
   assert.match(hardwarePanel, /data-hardware-config="ssh"/);
   assert.match(hardwarePanel, /data-hardware-config="login"/);
   assert.match(hardwarePanel, /hardware-save-top/);
+  assert.match(hardwarePanel, /hardware-config-collapse/);
+  assert.match(hardwarePanel, /configCollapsed/);
+  assert.match(css, /\.hardware-tool\.config-collapsed \{[^}]*grid-template-columns:\s*42px minmax\(0,1fr\)/);
   assert.match(hardwarePanel, /aha2:hardware-draft:/);
   assert.match(hardwarePanel, /sessionStorage\.setItem/);
   assert.match(hardwarePanel, /password_configured:\s*group\.password_configured/);
@@ -377,10 +413,10 @@ test("knowledge workspace defaults to actionable updates", async () => {
   assert.match(html, /data-knowledge-proposal-view="proposal-revision"/);
   assert.match(html, /data-knowledge-proposal-approve="proposal-revision"/);
   assert.match(html, /data-knowledge-proposal-reject="proposal-revision"/);
-  assert.match(html, /<strong>Complete preview<\/strong>/);
-  assert.match(html, /class="remove"[\s\S]*Old detail\./);
-  assert.match(html, /class="add"[\s\S]*New detail\./);
-  assert.match(html, /<del>Current title<\/del>[\s\S]*<ins>Updated title<\/ins>/);
+  assert.match(html, /knowledge-proposal-summary/);
+  assert.match(html, /<strong>Brand new knowledge<\/strong>/);
+  assert.match(html, /<strong>Updated title<\/strong>/);
+  assert.doesNotMatch(html, /Complete preview|Old detail\.|New detail\./);
   assert.doesNotMatch(html, /data-knowledge-edit=/);
   assert.match(html, /data-knowledge-update-open="knowledge-legacy"/);
   assert.match(html, /data-knowledge-verify="knowledge-legacy"/);
@@ -518,6 +554,23 @@ test("runtime picker separates Env and Official Codex models", async () => {
   assert.match(html, /Env Model/);
   assert.match(html, /<optgroup label="Gateway A">/);
   assert.match(html, /Work · 周额度已用 13%/);
+  assert.match(html, /name="model_id"[^>]*required/);
+  assert.match(html, /name="wire_model"[^>]*required/);
+});
+
+test("knowledge update list keeps proposal bodies folded behind details", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const {renderUpdates} = await import(pathToFileURL(resolve(root, "dist", "knowledge_workspace.js")));
+  const html = renderUpdates([], [{
+    id: "proposal-1", entry_id: "", base_revision: 0, status: "pending",
+    title: "运行时实践", body: "PROPOSAL_BODY_MUST_STAY_FOLDED", scope: "global",
+    source_task_id: "task-1", created_at: "2026-09-07T10:00:00Z",
+  }], []);
+  assert.match(html, /运行时实践/);
+  assert.match(html, /查看详情/);
+  assert.match(html, /knowledge-proposal-summary/);
+  assert.doesNotMatch(html, /PROPOSAL_BODY_MUST_STAY_FOLDED/);
+  assert.doesNotMatch(html, /knowledge-proposal-full|knowledge-proposal-diff/);
 });
 
 test("conversation renders agent config and turn duration cards", async () => {
@@ -666,6 +719,54 @@ test("knowledge workspace renders one document with a clickable hierarchy", asyn
   assert.doesNotMatch(html, />revision/i);
 });
 
+test("project navigation starts from indexes and reveals children progressively", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const {renderKnowledgeDocumentWorkspace} = await import(pathToFileURL(resolve(root, "dist", "knowledge_workspace.js")));
+  const base = {scope: "project", project_id: "project-1", status: "verified", confidence: .9, revision: 1, helped_count: 0, stale_count: 0, created_at: "", updated_at: "", sort_order: 0, is_index: false};
+  const html = renderKnowledgeDocumentWorkspace([
+    {...base, id: "intro", parent_id: "root", type: "navigation", title: "Project introduction", slug: "overview", body: "Introduction"},
+    {...base, id: "modules", parent_id: "root", type: "practice", title: "modules", slug: "modules", body: "Index"},
+    {...base, id: "camera", parent_id: "modules", type: "navigation", title: "Camera", slug: "camera", body: "Camera module"},
+  ], "No navigation.", "project-navigation");
+  assert.match(html, /data-knowledge-open="intro"/);
+  assert.match(html, /data-knowledge-open="modules"/);
+  assert.match(html, /data-knowledge-toggle="modules"/);
+  assert.match(html, /data-knowledge-progressive="true"/);
+  assert.doesNotMatch(html, /data-knowledge-open="camera"/);
+  assert.match(html, />项目介绍</);
+  assert.match(html, />模块索引</);
+  assert.ok(html.indexOf('data-knowledge-open="intro"') < html.indexOf('data-knowledge-open="modules"'));
+
+  const source = await readFile(resolve(root, "dist", "knowledge_workspace.js"), "utf8");
+  assert.match(source, /projectNavigationEntryIDs/);
+  assert.match(source, /navigationIDs\.has\(item\.id\)/);
+});
+
+test("knowledge libraries support pending browse, bind, and unbind", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const workspace = await readFile(resolve(root, "dist", "knowledge_workspace.js"), "utf8");
+  const api = await readFile(resolve(root, "dist", "api.js"), "utf8");
+  for (const marker of ["data-knowledge-library-open", "data-knowledge-library-bind", "data-knowledge-library-unbind", "data-knowledge-library-delete", "data-knowledge-library-back"]) {
+    assert.match(workspace, new RegExp(marker));
+  }
+  assert.match(workspace, /bound_project_id/);
+  assert.match(workspace, /renderKnowledgeDocumentWorkspace\(entries,[\s\S]*?true\)/);
+  assert.match(api, /knowledge\/libraries/);
+  assert.match(api, /bindKnowledgeLibrary/);
+  assert.match(api, /unbindKnowledgeLibrary/);
+  assert.match(api, /deleteKnowledgeLibrary/);
+  assert.match(workspace, /data-project-knowledge-detach/);
+  assert.match(workspace, /data-project-knowledge-delete/);
+  assert.match(api, /detachProjectKnowledge/);
+  assert.match(api, /deleteProjectKnowledge/);
+  const styles = await readFile(resolve(root, "dist", "styles.css"), "utf8");
+  assert.match(styles, /\.knowledge-library-card > footer \{[^}]*flex-wrap:\s*wrap/);
+  assert.match(styles, /\.knowledge-library-card > footer label \{[^}]*grid-template-columns:\s*max-content minmax\(180px,1fr\)[^}]*white-space:\s*nowrap/);
+  assert.match(styles, /\.knowledge-library-card \{[^}]*grid-template-rows:\s*auto auto auto;[^}]*align-content:\s*start;[^}]*height:\s*auto/);
+  assert.match(styles, /@media \(max-width: 760px\)[\s\S]*?\.knowledge-library-card > header, \.knowledge-library-card > footer \{[^}]*justify-content:\s*flex-start;[^}]*height:\s*auto/);
+  assert.match(styles, /@media \(max-width: 760px\)[\s\S]*?\.knowledge-primary-rail > nav button \{[^}]*min-width:\s*max-content/);
+});
+
 test("project settings is a secondary page with a project entry back action", async () => {
   const root = resolve(import.meta.dirname, "..");
   const source = await readFile(resolve(root, "dist", "knowledge_workspace.js"), "utf8");
@@ -688,7 +789,7 @@ test("knowledge proposals keep three approval actions on one mobile row", async 
   const source = await readFile(resolve(root, "dist", "knowledge_workspace.js"), "utf8");
   const styles = await readFile(resolve(root, "dist", "styles.css"), "utf8");
   for (const marker of ["data-knowledge-proposal-view", "data-knowledge-proposal-approve", "data-knowledge-proposal-reject"]) assert.match(source, new RegExp(marker));
-  for (const label of ["\\u67e5\\u770b\\u5dee\\u5f02", "\\u6279\\u51c6\\u66f4\\u65b0", "\\u62d2\\u7edd"]) assert.ok(source.includes(label));
+  for (const label of ["\\u67e5\\u770b\\u8be6\\u60c5", "\\u6279\\u51c6\\u66f4\\u65b0", "\\u62d2\\u7edd"]) assert.ok(source.includes(label));
   assert.match(styles, /@media \(max-width: 760px\)[\s\S]*?\.knowledge-proposal-actions \{[^}]*grid-template-columns:\s*repeat\(3,minmax\(0,1fr\)\)/);
   assert.match(styles, /\.knowledge-update-feed article \{[^}]*min-width:\s*0;[^}]*max-width:\s*100%;[^}]*overflow:\s*hidden/);
   assert.match(styles, /\.knowledge-proposal-full \.markdown-body \{[^}]*min-width:\s*0;[^}]*max-width:\s*100%;[^}]*overflow-wrap:\s*anywhere/);

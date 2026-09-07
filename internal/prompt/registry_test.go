@@ -47,7 +47,8 @@ func TestEngineRoutesTemplatesAndBuildsContextManifest(t *testing.T) {
 		ProjectKnowledge: []domain.KnowledgeEntry{
 			{ID: "project-root", Scope: "project", ProjectID: "project-1", Slug: "index", IsIndex: true, Type: "navigation", Title: "Project index", Body: "Project home.", Status: domain.KnowledgeVerified, Revision: 1},
 			{ID: "project-practice", Scope: "project", ProjectID: "project-1", ParentID: "project-root", Slug: "project-practice", Type: "practice", Title: "Project practice", Body: "Practice body", Status: domain.KnowledgeVerified, Revision: 1},
-			{ID: "project-navigation", Scope: "project", ProjectID: "project-1", ParentID: "project-root", Slug: "project-navigation", Type: "navigation", Title: "Project map", Body: "Navigation body", Status: domain.KnowledgeVerified, Revision: 1},
+			{ID: "project-navigation-group", Scope: "project", ProjectID: "project-1", ParentID: "project-root", Slug: "modules", Type: "practice", Title: "Module index", Body: "Choose a module.", Status: domain.KnowledgeVerified, Revision: 1},
+			{ID: "project-navigation", Scope: "project", ProjectID: "project-1", ParentID: "project-navigation-group", Slug: "project-navigation", Type: "navigation", Title: "Project map", Body: "Navigation body", Status: domain.KnowledgeVerified, Revision: 1},
 			{ID: "project-navigation-deep", Scope: "project", ProjectID: "project-1", ParentID: "project-navigation", Slug: "deep", Type: "navigation", Title: "Deep route", Body: "Nested navigation", Status: domain.KnowledgeVerified, Revision: 1},
 		},
 		StaleKnowledge: []domain.KnowledgeEntry{
@@ -90,7 +91,7 @@ func TestEngineRoutesTemplatesAndBuildsContextManifest(t *testing.T) {
 		strings.Contains(preview.EffectivePrompt, "fact one") {
 		t.Fatal("task memory was injected inline")
 	}
-	var globalIndexFound, projectIndexFound, projectNavigationIndexFound, staleIndexFound, staleDetailFound, knowledgeDetailFound, nestedDetailFound, projectDetailFound, navigationDetailFound, nestedNavigationDetailFound, attachmentIndexFound, attachmentFileFound, skillDetailFound, skillScriptFound, hardwareFound, agentAPIUTF8Found bool
+	var globalIndexFound, projectIndexFound, projectNavigationIndexFound, navigationGroupFound, staleIndexFound, staleDetailFound, knowledgeDetailFound, nestedDetailFound, projectDetailFound, navigationDetailFound, nestedNavigationDetailFound, attachmentIndexFound, attachmentFileFound, skillDetailFound, skillScriptFound, hardwareFound, agentAPIUTF8Found bool
 	knowledgeEntryPoints := 0
 	var manifest ContextResource
 	for _, resource := range preview.ContextManifest {
@@ -112,6 +113,12 @@ func TestEngineRoutesTemplatesAndBuildsContextManifest(t *testing.T) {
 		if resource.ID == "knowledge-pending-updates" && resource.EntryPoint && strings.Contains(resource.Path, filepath.Join("knowledge", "pending-updates", "index.md")) && strings.Contains(resource.Content, "不得作为当前事实使用") && strings.Contains(resource.Content, "Old flow") {
 			staleIndexFound = true
 		}
+		if resource.ID == "knowledge-project-navigation-index" && resource.EntryPoint && strings.Contains(resource.Content, "modules.md") && strings.Contains(resource.Content, "Choose a module.") && !strings.Contains(resource.Content, "Project map") {
+			projectNavigationIndexFound = true
+		}
+		if resource.ID == "knowledge-project-navigation-group" && !resource.EntryPoint && strings.Contains(resource.Path, filepath.Join("knowledge", "project", "navigation", "modules.md")) && strings.Contains(resource.Content, filepath.Join("modules", "project-navigation.md")) {
+			navigationGroupFound = true
+		}
 		if resource.ID == "knowledge-stale-project-stale" && !resource.EntryPoint && strings.Contains(resource.Content, "entry_id: project-stale") && strings.Contains(resource.Content, "base_revision: 3") && strings.Contains(resource.Content, "Outdated instructions") {
 			staleDetailFound = true
 		}
@@ -128,6 +135,12 @@ func TestEngineRoutesTemplatesAndBuildsContextManifest(t *testing.T) {
 			navigationDetailFound = true
 		}
 		if resource.ID == "knowledge-project-navigation-deep" && !resource.EntryPoint && strings.Contains(resource.Path, filepath.Join("knowledge", "project", "navigation", "project-navigation", "deep.md")) {
+			nestedNavigationDetailFound = true
+		}
+		if resource.ID == "knowledge-project-navigation" && !resource.EntryPoint && strings.Contains(resource.Path, filepath.Join("knowledge", "project", "navigation", "modules", "project-navigation.md")) && strings.Contains(resource.Content, "project-navigation/deep.md") {
+			navigationDetailFound = true
+		}
+		if resource.ID == "knowledge-project-navigation-deep" && !resource.EntryPoint && strings.Contains(resource.Path, filepath.Join("knowledge", "project", "navigation", "modules", "project-navigation", "deep.md")) {
 			nestedNavigationDetailFound = true
 		}
 		if resource.ID == "attachments-index" && resource.EntryPoint && strings.Contains(resource.Content, "attachment-1/screen.png") && !strings.Contains(resource.Content, `\attachment-1`) {
@@ -154,8 +167,8 @@ func TestEngineRoutesTemplatesAndBuildsContextManifest(t *testing.T) {
 			agentAPIUTF8Found = true
 		}
 	}
-	if !globalIndexFound || !projectIndexFound || !projectNavigationIndexFound || !staleIndexFound || !staleDetailFound || !knowledgeDetailFound || !nestedDetailFound || !projectDetailFound || !navigationDetailFound || !nestedNavigationDetailFound || knowledgeEntryPoints != 4 {
-		t.Fatalf("knowledge hierarchy missing: global=%t project=%t navigation=%t stale_index=%t stale_detail=%t detail=%t nested=%t project_detail=%t navigation_detail=%t nested_navigation=%t entrypoints=%d", globalIndexFound, projectIndexFound, projectNavigationIndexFound, staleIndexFound, staleDetailFound, knowledgeDetailFound, nestedDetailFound, projectDetailFound, navigationDetailFound, nestedNavigationDetailFound, knowledgeEntryPoints)
+	if !globalIndexFound || !projectIndexFound || !projectNavigationIndexFound || !navigationGroupFound || !staleIndexFound || !staleDetailFound || !knowledgeDetailFound || !nestedDetailFound || !projectDetailFound || !navigationDetailFound || !nestedNavigationDetailFound || knowledgeEntryPoints != 4 {
+		t.Fatalf("knowledge hierarchy missing: global=%t project=%t navigation=%t navigation_group=%t stale_index=%t stale_detail=%t detail=%t nested=%t project_detail=%t navigation_detail=%t nested_navigation=%t entrypoints=%d", globalIndexFound, projectIndexFound, projectNavigationIndexFound, navigationGroupFound, staleIndexFound, staleDetailFound, knowledgeDetailFound, nestedDetailFound, projectDetailFound, navigationDetailFound, nestedNavigationDetailFound, knowledgeEntryPoints)
 	}
 	if !attachmentIndexFound || !attachmentFileFound {
 		t.Fatal("attachment index or file resource missing")

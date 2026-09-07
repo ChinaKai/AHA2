@@ -120,6 +120,23 @@ if (-not (Test-Path -LiteralPath $inputPath -PathType Leaf)) {
 if (-not (Test-Path -LiteralPath $trayInputPath -PathType Leaf)) {
     throw "Windows amd64 tray executable not found: $trayInputPath"
 }
+
+function Get-PEWindowsSubsystem([string]$Path) {
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    if ($bytes.Length -lt 256 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
+        throw "Windows executable is not a valid PE file: $Path"
+    }
+    $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
+    $optionalHeader = $peOffset + 24
+    if ($peOffset -lt 0 -or $optionalHeader + 70 -ge $bytes.Length) {
+        throw "Windows executable PE header is truncated: $Path"
+    }
+    return [BitConverter]::ToUInt16($bytes, $optionalHeader + 68)
+}
+
+if ((Get-PEWindowsSubsystem $trayInputPath) -ne 2) {
+    throw "AHA2 tray executable must use the Windows GUI subsystem (-H windowsgui): $trayInputPath"
+}
 if ([string]::IsNullOrWhiteSpace($ISCCPath)) {
     $command = Get-Command "ISCC.exe" -ErrorAction SilentlyContinue
     if ($command) {

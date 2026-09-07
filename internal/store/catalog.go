@@ -25,6 +25,12 @@ func (s *Store) CreateProject(ctx context.Context, project domain.Project) error
 		return err
 	}
 	_, err = s.EnsureKnowledgeRoot(ctx, "project", project.ID)
+	if err != nil {
+		return err
+	}
+	if project.ProjectType == "knowledge" {
+		_, err = s.EnsureKnowledgeLibraryForProject(ctx, project)
+	}
 	return err
 }
 
@@ -377,6 +383,17 @@ func (s *Store) DeleteProject(ctx context.Context, id string) error {
 	item, err := s.Project(ctx, id)
 	if err != nil {
 		return err
+	}
+	libraries, err := s.ListKnowledgeLibraries(ctx)
+	if err != nil {
+		return err
+	}
+	for _, library := range libraries {
+		if library.BoundProjectID == id {
+			if _, err := s.UnbindKnowledgeLibrary(ctx, library.ID); err != nil {
+				return err
+			}
+		}
 	}
 	_, err = s.deleteSharedObject(ctx, "project", id, timeString(item.UpdatedAt), time.Now().UTC())
 	return err

@@ -1,5 +1,30 @@
 const allowedLinkProtocols = new Set(["http:", "https:", "mailto:", "tel:"]);
 const allowedImageProtocols = new Set(["http:", "https:"]);
+const allowedDataImageTypes = new Set(["image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml"]);
+
+function safeDataImageURL(value: string): boolean {
+  if (!value.startsWith("data:")) return false;
+  const marker = ";base64,";
+  const markerIndex = value.indexOf(marker);
+  if (markerIndex < 5) return false;
+  const mediaType = value.slice(5, markerIndex).toLowerCase();
+  const payload = value.slice(markerIndex + marker.length);
+  const valid = allowedDataImageTypes.has(mediaType)
+    && payload.length > 0
+    && payload.length <= 3 * 1024 * 1024
+    && payload.length % 4 === 0
+    && /^[A-Za-z0-9+/]*={0,2}$/.test(payload);
+  if (!valid) return false;
+  if (mediaType === "image/svg+xml") {
+    try {
+      const svg = atob(payload);
+      if (/<(?:script|foreignobject|iframe|object|embed)\b|on[a-z]+\s*=|(?:href|xlink:href)\s*=\s*["']?\s*(?:javascript:|https?:|data:)/i.test(svg)) return false;
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
 
 function escapeHTML(value: unknown): string {
   return String(value ?? "")
@@ -13,6 +38,7 @@ function escapeHTML(value: unknown): string {
 export function sanitizeMarkdownURL(value: string, image = false): string | null {
   const url = String(value || "").trim();
   if (!url || /[\u0000-\u0020\u007f]/.test(url) || url.startsWith("\\")) return null;
+  if (image && safeDataImageURL(url)) return url;
   if (/^(?:#|\?|\/|\.\/|\.\.\/)/.test(url)) return url;
   const scheme = url.match(/^([a-z][a-z0-9+.-]*:)/i)?.[1].toLowerCase();
   if (!scheme) return url;

@@ -147,7 +147,20 @@ func (s *Store) ListSkills(ctx context.Context, scope, projectID string, enabled
 		}
 		result = append(result, item)
 	}
-	return result, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	bindings, err := s.knowledgeLibraryBindings(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for index := range result {
+		result[index].BoundProjectID = bindings[result[index].ProjectID]
+	}
+	return result, nil
 }
 
 func (s *Store) UpdateSkill(ctx context.Context, item domain.Skill) error {
@@ -169,6 +182,9 @@ func (s *Store) Skill(ctx context.Context, id string) (domain.Skill, error) {
 			&item.Version, &item.Status, &item.Enabled, &item.SourcePath, &createdAt, &updatedAt)
 	item.CreatedAt, item.UpdatedAt = parseTime(createdAt), parseTime(updatedAt)
 	if err == nil {
+		if bindings, bindingErr := s.knowledgeLibraryBindings(ctx); bindingErr == nil {
+			item.BoundProjectID = bindings[item.ProjectID]
+		}
 		err = s.hydrateSkillPackage(&item)
 	}
 	return item, err

@@ -6,6 +6,7 @@ import type {
   DetectedModel,
   EnvGroup,
   Knowledge,
+  KnowledgeLibrary,
   KnowledgeProposal,
   Model,
   Project,
@@ -68,6 +69,14 @@ class APIClient {
 
   login(payload: Record<string, string>): Promise<AuthStatus> {
     return this.request<AuthStatus>("/api/v1/auth/login", {method: "POST", body: JSON.stringify(payload)});
+  }
+
+  recoverPassword(payload: {setup_token: string; username: string; new_password: string}): Promise<AuthStatus> {
+    return this.request<AuthStatus>("/api/v1/auth/recover", {method: "POST", body: JSON.stringify(payload)});
+  }
+
+  changePassword(payload: {current_password: string; new_password: string}): Promise<{ok: boolean}> {
+    return this.request("/api/v1/auth/password", {method: "POST", body: JSON.stringify(payload)});
   }
 
   logout(): Promise<{ok: boolean}> {
@@ -424,6 +433,30 @@ class APIClient {
     if (projectID) query.set("project_id", projectID);
     if (status) query.set("status", status);
     return this.request(`/api/v1/knowledge?${query}`);
+  }
+
+  knowledgeLibraries(): Promise<{libraries: KnowledgeLibrary[]}> {
+    return this.request("/api/v1/knowledge/libraries");
+  }
+
+  bindKnowledgeLibrary(id: string, projectID: string): Promise<{ok: boolean}> {
+    return this.request(`/api/v1/knowledge/libraries/${encodeURIComponent(id)}/bind`, {method: "POST", body: JSON.stringify({project_id: projectID})});
+  }
+
+  unbindKnowledgeLibrary(id: string): Promise<{ok: boolean}> {
+    return this.request(`/api/v1/knowledge/libraries/${encodeURIComponent(id)}/unbind`, {method: "POST", body: "{}"});
+  }
+
+  deleteKnowledgeLibrary(id: string): Promise<{ok: boolean}> {
+    return this.request(`/api/v1/knowledge/libraries/${encodeURIComponent(id)}`, {method: "DELETE"});
+  }
+
+  detachProjectKnowledge(projectID: string): Promise<{ok: boolean}> {
+    return this.request(`/api/v1/projects/${encodeURIComponent(projectID)}/knowledge/detach`, {method: "POST", body: "{}"});
+  }
+
+  deleteProjectKnowledge(projectID: string): Promise<{ok: boolean}> {
+    return this.request(`/api/v1/projects/${encodeURIComponent(projectID)}/knowledge`, {method: "DELETE"});
   }
 
   approveKnowledgeProposal(id: string): Promise<{ok: boolean; knowledge?: Knowledge; proposal?: KnowledgeProposal}> {

@@ -86,6 +86,8 @@ func deleteSharedRow(ctx context.Context, tx *sql.Tx, objectType, objectID strin
 		result, err = tx.ExecContext(ctx, `DELETE FROM knowledge_entries WHERE id=? AND is_index=0`, objectID)
 	case "knowledge_proposal":
 		result, err = tx.ExecContext(ctx, `DELETE FROM knowledge_proposals WHERE id=?`, objectID)
+	case "knowledge_binding":
+		result, err = tx.ExecContext(ctx, `DELETE FROM project_knowledge_bindings WHERE library_id=?`, objectID)
 	case "skill":
 		result, err = tx.ExecContext(ctx, `DELETE FROM skills WHERE id=?`, objectID)
 	case "provider":

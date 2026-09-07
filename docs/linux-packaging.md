@@ -61,7 +61,7 @@ systemctl status aha2.service
 curl http://127.0.0.1:8766/healthz
 ```
 
-首次安装后读取一次性 Owner Setup Token：
+首次安装后读取 Owner Setup Token；创建 Owner 后，该文件继续用于忘记密码时的本机恢复：
 
 ```bash
 sudo cat /var/lib/aha2/setup-token

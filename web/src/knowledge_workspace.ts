@@ -1,9 +1,9 @@
 import {api} from "./api.js";
 import {icon} from "./icons.js";
 import {renderMarkdown} from "./markdown.js";
-import type {Knowledge, KnowledgeProposal, ProductLine, Project, Skill, Workspace} from "./types.js";
+import type {Knowledge, KnowledgeLibrary, KnowledgeProposal, ProductLine, Project, Skill, Workspace} from "./types.js";
 
-type KnowledgeArea = "global" | "skills" | "updates" | "project";
+type KnowledgeArea = "global" | "libraries" | "skills" | "updates" | "project";
 type KnowledgeSection = "overview" | "project" | "navigation" | "settings";
 type KnowledgeDocumentKind = "global" | "project" | "project-navigation";
 
@@ -11,6 +11,7 @@ export interface KnowledgeWorkspaceContext {
   projects: Project[];
   workspaces: Workspace[];
   knowledge: Knowledge[];
+  libraries: KnowledgeLibrary[];
   proposals: KnowledgeProposal[];
   refreshData: () => Promise<void>;
   render: () => void;
@@ -26,13 +27,16 @@ let catalogProjectID = "";
 let catalogLoading = false;
 let searchTerm = "";
 let selectedKnowledgeID = "";
+let selectedLibraryID = "";
 let knowledgeReaderOpen = false;
 let updateFilter: "pending" | "all" = "pending";
 const collapsedKnowledgeIDs = new Set<string>();
+const expandedNavigationIDs = new Set<string>();
 const syntheticHomeID = "__knowledge_home__";
 
 const topLevelLabels: Array<[Exclude<KnowledgeArea, "project">, string, string]> = [
   ["global", "proxy", "\u5168\u5c40\u77e5\u8bc6"],
+  ["libraries", "knowledge", "\u5f85\u7ed1\u5b9a"],
   ["skills", "bot", "Skills"],
   ["updates", "clock", "\u66f4\u65b0"],
 ];
@@ -71,6 +75,12 @@ function entryMatches(item: Knowledge): boolean {
   return `${item.title}\n${item.body}\n${item.type}`.toLowerCase().includes(query);
 }
 
+function projectEntries(context: KnowledgeWorkspaceContext, projectID: string): Knowledge[] {
+  return context.knowledge.filter(item => item.scope === "project"
+    && (item.project_id === projectID || item.bound_project_id === projectID)
+    && !(item.bound_project_id === projectID && item.is_index));
+}
+
 function renderEmpty(message: string): string {
   return `<div class="empty knowledge-empty">${escapeHTML(message)}</div>`;
 }
@@ -97,27 +107,60 @@ function sortKnowledge(entries: Knowledge[]): Knowledge[] {
     || String(left.slug || left.title).localeCompare(String(right.slug || right.title)));
 }
 
+function sortProjectNavigation(entries: Knowledge[]): Knowledge[] {
+  const entryRank = (item: Knowledge) => item.slug === "overview" ? 0 : item.slug === "modules" ? 1 : item.slug === "flows" ? 2 : 3;
+  return [...entries].sort((left, right) => entryRank(left) - entryRank(right)
+    || Number(left.sort_order || 0) - Number(right.sort_order || 0)
+    || String(left.slug || left.title).localeCompare(String(right.slug || right.title)));
+}
+
+function projectNavigationEntryIDs(entries: Knowledge[]): Set<string> {
+  const byID = new Map(entries.map(entry => [entry.id, entry]));
+  const result = new Set(entries.filter(entry => !entry.is_index && entry.type === "navigation").map(entry => entry.id));
+  for (const entry of entries) {
+    if (entry.type !== "navigation") continue;
+    const seen = new Set<string>();
+    let parent = entry.parent_id ? byID.get(entry.parent_id) : undefined;
+    while (parent && !parent.is_index && !seen.has(parent.id)) {
+      seen.add(parent.id);
+      result.add(parent.id);
+      parent = parent.parent_id ? byID.get(parent.parent_id) : undefined;
+    }
+  }
+  return result;
+}
+
+function navigationDisplayTitle(item: Knowledge): string {
+  const title = String(item.title || "").trim().toLowerCase();
+  if (item.slug === "overview") return "\u9879\u76ee\u4ecb\u7ecd";
+  if (item.slug === "modules" && (!title || title === "modules")) return "\u6a21\u5757\u7d22\u5f15";
+  if (item.slug === "flows" && (!title || title === "flows")) return "\u6d41\u7a0b\u7d22\u5f15";
+  return item.title;
+}
+
 function visualParentID(item: Knowledge, byID: Map<string, Knowledge>, homeID: string): string {
   if (item.id === homeID) return "";
   return item.parent_id && byID.has(item.parent_id) ? item.parent_id : homeID;
 }
 
-function knowledgeTreeRows(entries: Knowledge[], parentID: string, homeID: string, depth = 1, seen = new Set<string>()): string {
+function knowledgeTreeRows(entries: Knowledge[], parentID: string, homeID: string, titleFor: (item: Knowledge) => string, progressive = false, depth = 1, seen = new Set<string>()): string {
   const byID = new Map(entries.map(entry => [entry.id, entry]));
-  return sortKnowledge(entries.filter(item => item.id !== homeID && visualParentID(item, byID, homeID) === parentID)).map(item => {
+  const childrenAtLevel = entries.filter(item => item.id !== homeID && visualParentID(item, byID, homeID) === parentID);
+  return (progressive ? sortProjectNavigation(childrenAtLevel) : sortKnowledge(childrenAtLevel)).map(item => {
     if (seen.has(item.id)) return "";
     const branch = new Set(seen); branch.add(item.id);
     const childEntries = entries.filter(child => child.id !== homeID && visualParentID(child, byID, homeID) === item.id);
-    const collapsed = collapsedKnowledgeIDs.has(item.id);
-    const children = collapsed ? "" : knowledgeTreeRows(entries, item.id, homeID, depth + 1, branch);
+    const collapsed = childEntries.length > 0 && (progressive ? !expandedNavigationIDs.has(item.id) : collapsedKnowledgeIDs.has(item.id));
+    const children = collapsed ? "" : knowledgeTreeRows(entries, item.id, homeID, titleFor, progressive, depth + 1, branch);
+    const displayTitle = titleFor(item);
     const toggle = childEntries.length
-      ? `<button type="button" class="knowledge-tree-toggle ${collapsed ? "collapsed" : ""}" data-knowledge-toggle="${escapeHTML(item.id)}" aria-label="${collapsed ? "\u5c55\u5f00" : "\u6536\u8d77"}${escapeHTML(item.title)}" aria-expanded="${!collapsed}"><span>\u25be</span></button>`
+      ? `<button type="button" class="knowledge-tree-toggle ${collapsed ? "collapsed" : ""}" data-knowledge-toggle="${escapeHTML(item.id)}" data-knowledge-progressive="${progressive}" aria-label="${collapsed ? "\u5c55\u5f00" : "\u6536\u8d77"}${escapeHTML(displayTitle)}" aria-expanded="${!collapsed}"><span>\u25be</span></button>`
       : `<span class="knowledge-tree-toggle-placeholder"></span>`;
-    return `<div class="knowledge-tree-node" style="--knowledge-indent:${Math.min(depth, 12) * 18}px"><div class="knowledge-tree-row">${toggle}<button type="button" data-knowledge-open="${escapeHTML(item.id)}" class="knowledge-tree-document ${item.id === selectedKnowledgeID ? "active" : ""}"><span>${escapeHTML(item.title)}</span><small>${childEntries.length ? "\u5206\u7c7b" : "\u6587\u6863"}</small></button></div>${children}</div>`;
+    return `<div class="knowledge-tree-node" style="--knowledge-indent:${Math.min(depth, 12) * 18}px"><div class="knowledge-tree-row">${toggle}<button type="button" data-knowledge-open="${escapeHTML(item.id)}" class="knowledge-tree-document ${item.id === selectedKnowledgeID ? "active" : ""}"><span>${escapeHTML(displayTitle)}</span><small>${childEntries.length ? progressive ? "\u7d22\u5f15" : "\u5206\u7c7b" : "\u6587\u6863"}</small></button></div>${children}</div>`;
   }).join("");
 }
 
-function knowledgeBreadcrumbs(item: Knowledge | undefined, entries: Knowledge[], homeID: string, homeTitle: string): string {
+function knowledgeBreadcrumbs(item: Knowledge | undefined, entries: Knowledge[], homeID: string, homeTitle: string, titleFor: (item: Knowledge) => string): string {
   const byID = new Map(entries.map(entry => [entry.id, entry]));
   const path: Knowledge[] = [];
   const seen = new Set<string>();
@@ -126,47 +169,53 @@ function knowledgeBreadcrumbs(item: Knowledge | undefined, entries: Knowledge[],
     seen.add(current.id); path.unshift(current); current = current.parent_id ? byID.get(current.parent_id) : undefined;
   }
   if (path[0]?.id !== homeID) {
-    return `<button type="button" data-knowledge-open="${escapeHTML(homeID)}">${homeTitle}</button><span>/</span>${path.map(entry => `<button type="button" data-knowledge-open="${escapeHTML(entry.id)}">${escapeHTML(entry.title)}</button>`).join("<span>/</span>")}`;
+    return `<button type="button" data-knowledge-open="${escapeHTML(homeID)}">${homeTitle}</button><span>/</span>${path.map(entry => `<button type="button" data-knowledge-open="${escapeHTML(entry.id)}">${escapeHTML(titleFor(entry))}</button>`).join("<span>/</span>")}`;
   }
-  return path.map(entry => `<button type="button" data-knowledge-open="${escapeHTML(entry.id)}">${entry.id === homeID ? homeTitle : escapeHTML(entry.title)}</button>`).join("<span>/</span>");
+  return path.map(entry => `<button type="button" data-knowledge-open="${escapeHTML(entry.id)}">${entry.id === homeID ? homeTitle : escapeHTML(titleFor(entry))}</button>`).join("<span>/</span>");
 }
 
-export function renderKnowledgeDocumentWorkspace(entries: Knowledge[], empty: string, newKind: KnowledgeDocumentKind): string {
-  const ordered = sortKnowledge(entries);
+export function renderKnowledgeDocumentWorkspace(entries: Knowledge[], empty: string, newKind: KnowledgeDocumentKind, readOnly = false): string {
+  const progressive = newKind === "project-navigation";
+  const ordered = progressive ? sortProjectNavigation(entries) : sortKnowledge(entries);
   const root = ordered.find(item => item.is_index && !item.parent_id);
   const homeID = root?.id || `${syntheticHomeID}-${newKind}`;
   const homeTitle = newKind === "global" ? "\u5168\u5c40\u77e5\u8bc6" : newKind === "project-navigation" ? "\u9879\u76ee\u5bfc\u822a" : "\u9879\u76ee\u77e5\u8bc6";
+  const titleFor = progressive ? navigationDisplayTitle : (item: Knowledge) => item.title;
   if (selectedKnowledgeID !== homeID && !ordered.some(item => item.id === selectedKnowledgeID)) selectedKnowledgeID = homeID;
   const selected = ordered.find(item => item.id === selectedKnowledgeID);
   const filtered = searchTerm.trim() ? ordered.filter(entryMatches) : ordered;
   const byID = new Map(ordered.map(entry => [entry.id, entry]));
-  const visibleChildren = (parentID: string) => sortKnowledge(ordered.filter(item => item.id !== homeID && visualParentID(item, byID, homeID) === parentID));
+  const visibleChildren = (parentID: string) => {
+    const items = ordered.filter(item => item.id !== homeID && visualParentID(item, byID, homeID) === parentID);
+    return progressive ? sortProjectNavigation(items) : sortKnowledge(items);
+  };
   const homeChildren = visibleChildren(homeID);
   const homeCollapsed = collapsedKnowledgeIDs.has(homeID);
   const homeToggle = homeChildren.length ? `<button type="button" class="knowledge-tree-toggle ${homeCollapsed ? "collapsed" : ""}" data-knowledge-toggle="${escapeHTML(homeID)}" aria-label="${homeCollapsed ? "\u5c55\u5f00" : "\u6536\u8d77"}${homeTitle}" aria-expanded="${!homeCollapsed}"><span>\u25be</span></button>` : `<span class="knowledge-tree-toggle-placeholder"></span>`;
   const homeRow = `<div class="knowledge-tree-node knowledge-tree-home" style="--knowledge-indent:0px"><div class="knowledge-tree-row">${homeToggle}<button type="button" data-knowledge-open="${escapeHTML(homeID)}" class="knowledge-tree-document ${selectedKnowledgeID === homeID ? "active" : ""}"><span>${icon("knowledge")}${homeTitle}</span><small>\u5165\u53e3</small></button></div></div>`;
   const tree = searchTerm.trim()
-    ? `${homeRow}${filtered.filter(item => item.id !== homeID).map(item => `<button type="button" data-knowledge-open="${escapeHTML(item.id)}" class="knowledge-tree-search-result ${item.id === selectedKnowledgeID ? "active" : ""}"><span>${escapeHTML(item.title)}</span><small>${visibleChildren(item.id).length ? "\u5206\u7c7b" : "\u6587\u6863"}</small></button>`).join("")}`
-    : `${homeRow}${homeCollapsed ? "" : knowledgeTreeRows(ordered, homeID, homeID)}`;
+    ? `${homeRow}${filtered.filter(item => item.id !== homeID).map(item => `<button type="button" data-knowledge-open="${escapeHTML(item.id)}" class="knowledge-tree-search-result ${item.id === selectedKnowledgeID ? "active" : ""}"><span>${escapeHTML(titleFor(item))}</span><small>${visibleChildren(item.id).length ? progressive ? "\u7d22\u5f15" : "\u5206\u7c7b" : "\u6587\u6863"}</small></button>`).join("")}`
+    : `${homeRow}${homeCollapsed ? "" : knowledgeTreeRows(ordered, homeID, homeID, titleFor, progressive)}`;
   const isHome = selectedKnowledgeID === homeID;
   const children = isHome ? homeChildren : selected ? visibleChildren(selected.id) : [];
   const siblingParent = selected ? visualParentID(selected, byID, homeID) : "";
   const related = selected && !isHome ? visibleChildren(siblingParent).filter(item => item.id !== selected.id).slice(0, 6) : [];
-  const title = isHome ? homeTitle : selected?.title || "\u6587\u6863";
+  const title = isHome ? homeTitle : selected ? titleFor(selected) : "\u6587\u6863";
+  const canEditSelected = !readOnly && !selected?.bound_project_id;
   const body = selected ? renderMarkdown(selected.body) : `<p>${escapeHTML(ordered.length ? "\u4ece\u5de6\u4fa7\u76ee\u5f55\u9009\u62e9\u6587\u6863\uff0c\u6216\u65b0\u5efa\u4e00\u7bc7\u6587\u6863\u3002" : empty)}</p>`;
-  const linkSection = (label: string, items: Knowledge[]) => items.length ? `<section class="knowledge-related-links"><strong>${label}</strong><div>${items.map(item => `<button type="button" data-knowledge-open="${escapeHTML(item.id)}">${icon("knowledge")}<span><b>${escapeHTML(item.title)}</b><small>${visibleChildren(item.id).length ? "\u5206\u7c7b" : "\u6587\u6863"}</small></span></button>`).join("")}</div></section>` : "";
-  const backButton = newKind === "global"
+  const linkSection = (label: string, items: Knowledge[]) => items.length ? `<section class="knowledge-related-links"><strong>${label}</strong><div>${items.map(item => `<button type="button" data-knowledge-open="${escapeHTML(item.id)}">${icon("knowledge")}<span><b>${escapeHTML(titleFor(item))}</b><small>${visibleChildren(item.id).length ? progressive ? "\u7d22\u5f15" : "\u5206\u7c7b" : "\u6587\u6863"}</small></span></button>`).join("")}</div></section>` : "";
+  const backButton = readOnly ? `<button type="button" class="knowledge-mobile-back" data-knowledge-library-back>${icon("projects")}\u8fd4\u56de\u5f85\u7ed1\u5b9a\u77e5\u8bc6\u5e93</button>` : newKind === "global"
     ? knowledgeReaderOpen ? `<button type="button" class="knowledge-directory-back" data-knowledge-directory-back>${icon("projects")}\u8fd4\u56de\u5168\u5c40\u77e5\u8bc6\u76ee\u5f55</button>` : ""
     : `<button type="button" class="knowledge-mobile-back" data-knowledge-back>${icon("projects")}\u8fd4\u56de\u77e5\u8bc6\u5e93\u5165\u53e3</button>`;
   const document = `<article class="knowledge-document">
       ${backButton}
-      <header><div class="knowledge-breadcrumbs">${isHome ? `<button type="button" data-knowledge-open="${escapeHTML(homeID)}">${homeTitle}</button>` : knowledgeBreadcrumbs(selected, ordered, homeID, homeTitle)}</div><div class="knowledge-document-actions">${selected?.status !== "verified" && selected ? `<button type="button" data-knowledge-verify="${selected.id}">\u786e\u8ba4\u5185\u5bb9</button>` : ""}${selected ? `<button type="button" data-knowledge-edit="${selected.id}">${icon("edit")}\u7f16\u8f91</button>${isHome ? "" : `<button type="button" class="icon-button" data-knowledge-delete="${selected.id}" title="\u5220\u9664">${icon("close")}</button>`}` : ""}</div></header>
+      <header><div class="knowledge-breadcrumbs">${isHome ? `<button type="button" data-knowledge-open="${escapeHTML(homeID)}">${homeTitle}</button>` : knowledgeBreadcrumbs(selected, ordered, homeID, homeTitle, titleFor)}</div><div class="knowledge-document-actions">${canEditSelected && selected?.status !== "verified" && selected ? `<button type="button" data-knowledge-verify="${selected.id}">\u786e\u8ba4\u5185\u5bb9</button>` : ""}${canEditSelected && selected ? `<button type="button" data-knowledge-edit="${selected.id}">${icon("edit")}\u7f16\u8f91</button>${isHome ? "" : `<button type="button" class="icon-button" data-knowledge-delete="${selected.id}" title="\u5220\u9664">${icon("close")}</button>`}` : ""}</div></header>
       <h2>${escapeHTML(title)}</h2>${selected?.updated_at ? `<div class="knowledge-document-meta"><span>\u66f4\u65b0\u4e8e ${formatDate(selected.updated_at)}</span>${selected.product_line_id ? `<span>${icon("branch")}${escapeHTML(lineName(selected.product_line_id))}</span>` : ""}</div>` : ""}
       <div class="markdown-body knowledge-document-body">${body}</div>
       ${linkSection("\u5b50\u6587\u6863", children)}${linkSection("\u76f8\u5173\u6587\u6863", related)}
       ${selected && !isHome ? `<footer><button type="button" data-knowledge-feedback="helped" data-knowledge-id="${selected.id}">${icon("shield")}\u8fd9\u7bc7\u6709\u5e2e\u52a9 ${Number(selected.helped_count || 0)}</button><button type="button" data-knowledge-feedback="stale" data-knowledge-id="${selected.id}">${icon("clock")}\u5185\u5bb9\u5df2\u8fc7\u65f6 ${Number(selected.stale_count || 0)}</button></footer>` : ""}
     </article>`;
-  return `<div class="knowledge-section-head"><div><h2>${homeTitle}</h2><p>\u5148\u9605\u8bfb\u5165\u53e3\u6587\u6863\uff0c\u518d\u6cbf\u94fe\u63a5\u67e5\u770b\u5b50\u6587\u6863\u3002</p></div><div class="actions"><button class="primary" type="button" data-knowledge-new="${newKind === "global" ? "global" : "project"}" data-knowledge-type="${newKind === "project-navigation" ? "navigation" : "practice"}" data-knowledge-parent="${escapeHTML(selected?.id || root?.id || "")}">${icon("plus")}\u65b0\u5efa\u6587\u6863</button></div></div>
+  return `<div class="knowledge-section-head"><div><h2>${homeTitle}</h2><p>\u5148\u9605\u8bfb\u5165\u53e3\u6587\u6863\uff0c\u518d\u6cbf\u94fe\u63a5\u67e5\u770b\u5b50\u6587\u6863\u3002</p></div>${readOnly ? "" : `<div class="actions"><button class="primary" type="button" data-knowledge-new="${newKind === "global" ? "global" : "project"}" data-knowledge-type="${newKind === "project-navigation" ? "navigation" : "practice"}" data-knowledge-parent="${escapeHTML(selected?.id || root?.id || "")}">${icon("plus")}\u65b0\u5efa\u6587\u6863</button></div>`}</div>
     <div class="knowledge-document-layout ${knowledgeReaderOpen ? "reader-open" : "directory-open"}"><aside class="panel knowledge-tree"><label>${icon("filter")}<input id="knowledge-search" value="${escapeHTML(searchTerm)}" placeholder="\u641c\u7d22\u6587\u6863"></label><div>${tree}</div></aside><section class="panel knowledge-reader">${document}</section></div>`;
 }
 
@@ -177,9 +226,10 @@ function renderBindings(workspaces: Workspace[]): string {
 }
 
 function renderOverview(project: Project, entries: Knowledge[], projectWorkspaces: Workspace[]): string {
-  const projectEntries = entries.filter(item => item.scope === "project" && item.project_id === project.id);
-  const projectCount = projectEntries.filter(item => !item.is_index && item.type !== "navigation").length;
-  const navigationCount = projectEntries.filter(item => !item.is_index && item.type === "navigation").length;
+  const owned = entries.filter(item => item.scope === "project" && (item.project_id === project.id || item.bound_project_id === project.id) && !(item.bound_project_id === project.id && item.is_index));
+  const navigationIDs = projectNavigationEntryIDs(owned);
+  const projectCount = owned.filter(item => !item.is_index && !navigationIDs.has(item.id)).length;
+  const navigationCount = navigationIDs.size;
   const portal = (kind: string, iconName: string, title: string, description: string, meta: string) => `<button type="button" class="knowledge-entry-portal" data-knowledge-entry="${kind}"><span class="knowledge-entry-portal-icon">${icon(iconName)}</span><span><strong>${title}</strong><small>${description}</small></span><b>${meta}</b><i>\u6253\u5f00\u5165\u53e3 \u2192</i></button>`;
   return `<section class="knowledge-hero panel"><div><span class="knowledge-kicker">\u9879\u76ee\u5165\u53e3</span><h2>${escapeHTML(project.name)}</h2><p>\u9009\u62e9\u9879\u76ee\u77e5\u8bc6\u3001\u9879\u76ee\u5bfc\u822a\u6216\u8bbe\u7f6e\u3002\u5168\u5c40\u77e5\u8bc6\u8bf7\u4ece\u5de6\u4fa7\u56fa\u5b9a\u5165\u53e3\u8fdb\u5165\u3002</p></div><div class="knowledge-policy ${project.knowledge_policy === "disabled" ? "off" : "on"}"><small>\u4efb\u52a1\u4e2d\u7684\u77e5\u8bc6\u5e93</small><strong>${project.knowledge_policy === "disabled" ? "\u5df2\u5173\u95ed" : "\u5df2\u5f00\u542f"}</strong><span>${projectCount + navigationCount} \u7bc7\u9879\u76ee\u6587\u6863</span></div></section>
     <section class="knowledge-entry-portals">${portal("project", "knowledge", "\u9879\u76ee\u77e5\u8bc6", "\u5f53\u524d\u9879\u76ee\u7684\u5b9e\u8df5\u3001\u51b3\u7b56\u548c\u8bca\u65ad", `${projectCount} \u7bc7`)}${portal("navigation", "branch", "\u9879\u76ee\u5bfc\u822a", "\u6a21\u5757\u5165\u53e3\u3001\u8def\u5f84\u8fb9\u754c\u548c\u5173\u952e\u6d41\u7a0b", `${navigationCount} \u7bc7`)}${portal("settings", "model", "\u8bbe\u7f6e", "\u77e5\u8bc6\u5e93\u5f00\u5173\u3001\u4ea7\u54c1\u7ebf\u548c Workspace \u7ed1\u5b9a", "\u914d\u7f6e")}</section>`;
@@ -188,6 +238,24 @@ function renderOverview(project: Project, entries: Knowledge[], projectWorkspace
 function renderSkills(): string {
   return `<div class="knowledge-section-head"><div><h2>Skills</h2><p>Skill \u91c7\u7528 AHA \u6258\u7ba1\u5305\uff1aSKILL.md \u662f\u5165\u53e3\uff0cscripts / assets / agents \u4e0e\u6280\u80fd\u4e00\u8d77\u6309 Task \u9009\u62e9\u7269\u5316\u3002</p></div><button class="primary" type="button" data-skill-new>${icon("plus")}\u65b0\u5efa Skill</button></div>
     <div class="skill-grid">${skills.map(item => `<article class="skill-card ${item.enabled ? "" : "disabled"}"><header><div class="skill-mark">${icon("bot")}</div><div><strong>${escapeHTML(item.name)}</strong><small>${escapeHTML(item.scope)} \u00b7 v${item.version} \u00b7 ${escapeHTML(item.status)}</small></div><label class="skill-switch"><input type="checkbox" data-skill-toggle="${item.id}" ${item.enabled ? "checked" : ""}><span></span></label></header><p>${escapeHTML(item.description || "\u672a\u586b\u5199\u63cf\u8ff0")}</p><div class="skill-package-files"><strong>Skill Package</strong><span>${(item.files || []).map(file => `<code>${escapeHTML(file)}</code>`).join("") || "<code>SKILL.md</code>"}</span></div><footer><span title="${escapeHTML(item.source_path || "")}">${escapeHTML(item.source_path || "AHA managed package")}</span><div><button class="icon-button" type="button" data-skill-edit="${item.id}">${icon("edit")}</button><button class="icon-button" type="button" data-skill-delete="${item.id}">${icon("close")}</button></div></footer></article>`).join("") || renderEmpty("\u8fd8\u6ca1\u6709 Skill\u3002")}</div>`;
+}
+
+function renderKnowledgeLibraries(context: KnowledgeWorkspaceContext): string {
+  const projectName = new Map(context.projects.map(project => [project.id, project.name]));
+  const options = context.projects.map(project => `<option value="${escapeHTML(project.id)}">${escapeHTML(project.name)}</option>`).join("");
+	const selected = (context.libraries || []).find(item => item.id === selectedLibraryID);
+	if (selected) {
+		const entries = context.knowledge.filter(item => item.scope === "project" && item.project_id === selected.container_project_id);
+		return `<div class="knowledge-section-head"><div><h2>${escapeHTML(selected.name)}</h2><p>${selected.bound_project_id ? `\u5df2\u7ed1\u5b9a\u5230 ${escapeHTML(projectName.get(selected.bound_project_id) || selected.bound_project_id)}` : "\u5f85\u7ed1\u5b9a\u9879\u76ee\u77e5\u8bc6\u5e93"}</p></div></div>${renderKnowledgeDocumentWorkspace(entries, "\u8be5\u77e5\u8bc6\u5e93\u8fd8\u6ca1\u6709\u6587\u6863\u3002", "project", true)}`;
+	}
+  const cards = (context.libraries || []).filter(library => !library.bound_project_id).map(library => `<article class="panel knowledge-library-card pending">
+    <header><div><span class="status ${library.bound_project_id ? "good" : "warn"}">${library.bound_project_id ? "\u5df2\u7ed1\u5b9a" : "\u5f85\u7ed1\u5b9a"}</span><strong>${escapeHTML(library.name)}</strong></div><small>${library.knowledge_count} \u7bc7 \u00b7 ${library.skill_count} Skills</small></header>
+    <p>${escapeHTML(library.description || library.source_identity || "\u5bfc\u5165\u7684\u9879\u76ee\u77e5\u8bc6\u5e93")}</p>
+    <footer><button type="button" data-knowledge-library-open="${escapeHTML(library.id)}">\u67e5\u770b\u77e5\u8bc6\u5e93</button>${library.bound_project_id
+      ? `<span>\u5df2\u7ed1\u5b9a\uff1a${escapeHTML(projectName.get(library.bound_project_id) || library.bound_project_id)}</span><button type="button" data-knowledge-library-unbind="${escapeHTML(library.id)}">\u89e3\u7ed1</button>`
+      : `<label><span>\u7ed1\u5b9a\u5230</span><select data-knowledge-library-target="${escapeHTML(library.id)}"><option value="">\u8bf7\u9009\u62e9\u9879\u76ee</option>${options}</select></label><button class="primary" type="button" data-knowledge-library-bind="${escapeHTML(library.id)}">\u7ed1\u5b9a</button>`}<button class="danger" type="button" data-knowledge-library-delete="${escapeHTML(library.id)}">\u5220\u9664\u77e5\u8bc6\u5e93</button>
+    </footer></article>`).join("");
+  return `<div class="knowledge-section-head"><div><h2>\u5f85\u7ed1\u5b9a\u9879\u76ee\u77e5\u8bc6\u5e93</h2><p>\u5148\u5bfc\u5165\u548c\u9605\u8bfb\uff0c\u521b\u5efa\u6b63\u5f0f Project \u540e\u518d\u7ed1\u5b9a\u3002\u89e3\u7ed1\u548c\u5220\u9664 Project \u90fd\u4e0d\u4f1a\u5220\u9664\u77e5\u8bc6\u3002</p></div></div><div class="knowledge-library-grid">${cards || renderEmpty("\u6ca1\u6709\u5f85\u7ed1\u5b9a\u7684\u9879\u76ee\u77e5\u8bc6\u5e93\u3002")}</div>`;
 }
 
 function proposalValue(proposal: KnowledgeProposal, field: "title" | "body"): string {
@@ -248,7 +316,7 @@ function proposalStatus(status: string): [string, string] {
   return ["warn", "\u5f85\u5ba1\u6279"];
 }
 
-function renderUpdates(entries: Knowledge[], proposals: KnowledgeProposal[], projects: Project[]): string {
+export function renderUpdates(entries: Knowledge[], proposals: KnowledgeProposal[], projects: Project[]): string {
   const pending = proposals.filter(item => item.status === "pending");
   const legacyCandidates = entries.filter(item => !item.is_index && item.status === "candidate");
   const pendingCount = pending.length + legacyCandidates.length;
@@ -259,12 +327,13 @@ function renderUpdates(entries: Knowledge[], proposals: KnowledgeProposal[], pro
     const [statusClass, statusLabel] = proposalStatus(proposal.status);
     const revision = Number(proposal.base_revision || 0) > 0;
     const scopeValue = proposal.scope || proposal.proposed?.scope;
-    const projectID = proposal.project_id || proposal.proposed?.project_id || "";
+    const projectID = proposal.proposed?.bound_project_id || proposal.project_id || proposal.proposed?.project_id || "";
     const scope = scopeValue === "global" ? "\u5168\u5c40\u77e5\u8bc6" : projectNames.get(projectID) || "\u9879\u76ee\u77e5\u8bc6";
-    const actions = proposal.status === "pending" ? `<div class="knowledge-proposal-actions"><button type="button" data-knowledge-proposal-view="${escapeHTML(proposal.id)}">\u67e5\u770b\u5dee\u5f02</button><button type="button" class="primary" data-knowledge-proposal-approve="${escapeHTML(proposal.id)}">\u6279\u51c6\u66f4\u65b0</button><button type="button" class="danger" data-knowledge-proposal-reject="${escapeHTML(proposal.id)}">\u62d2\u7edd</button></div>` : `<button type="button" data-knowledge-proposal-view="${escapeHTML(proposal.id)}">\u67e5\u770b\u5dee\u5f02</button>`;
-    return `<article class="knowledge-proposal-card ${proposal.status === "pending" ? "pending" : ""}"><header><div><span class="status ${statusClass}">${statusLabel}</span><span>${revision ? "\u4fee\u8ba2\u63d0\u6848" : "\u65b0\u77e5\u8bc6"}</span><span>${escapeHTML(scope)}</span></div><small>${formatDate(proposal.created_at)}</small></header>${proposalDiffMarkup(proposal, entries)}<footer><span>${proposal.source_task_id ? `\u6765\u81ea\u4efb\u52a1 ${escapeHTML(proposal.source_task_id)}` : "\u77e5\u8bc6\u4fee\u8ba2\u5efa\u8bae"}</span>${actions}</footer></article>`;
+    const title = proposalValue(proposal, "title").trim() || "\u672a\u547d\u540d\u77e5\u8bc6";
+    const actions = proposal.status === "pending" ? `<div class="knowledge-proposal-actions"><button type="button" data-knowledge-proposal-view="${escapeHTML(proposal.id)}">\u67e5\u770b\u8be6\u60c5</button><button type="button" class="primary" data-knowledge-proposal-approve="${escapeHTML(proposal.id)}">\u6279\u51c6\u66f4\u65b0</button><button type="button" class="danger" data-knowledge-proposal-reject="${escapeHTML(proposal.id)}">\u62d2\u7edd</button></div>` : `<button type="button" data-knowledge-proposal-view="${escapeHTML(proposal.id)}">\u67e5\u770b\u8be6\u60c5</button>`;
+    return `<article class="knowledge-proposal-card ${proposal.status === "pending" ? "pending" : ""}"><header><div><span class="status ${statusClass}">${statusLabel}</span><span>${revision ? "\u4fee\u8ba2\u63d0\u6848" : "\u65b0\u77e5\u8bc6"}</span><span>${escapeHTML(scope)}</span></div><small>${formatDate(proposal.created_at)}</small></header><div class="knowledge-proposal-summary"><strong>${escapeHTML(title)}</strong><span>\u5185\u5bb9\u5df2\u6298\u53e0\uff0c\u70b9\u51fb\u67e5\u770b\u8be6\u60c5\u5ba1\u9605${revision ? "\u4fee\u8ba2\u5dee\u5f02" : "\u5b8c\u6574\u5185\u5bb9"}\u3002</span></div><footer><span>${proposal.source_task_id ? `\u6765\u81ea\u4efb\u52a1 ${escapeHTML(proposal.source_task_id)}` : "\u77e5\u8bc6\u4fee\u8ba2\u5efa\u8bae"}</span>${actions}</footer></article>`;
   }).join("");
-  const legacyCards = legacyCandidates.map(item => `<article class="knowledge-proposal-card pending legacy"><header><div><span class="status warn">\u5f85\u5ba1\u6279</span><span>\u5347\u7ea7\u524d\u5019\u9009</span><span>${escapeHTML(item.scope === "global" ? "\u5168\u5c40\u77e5\u8bc6" : projectNames.get(item.project_id || "") || "\u9879\u76ee\u77e5\u8bc6")}</span></div><small>${formatDate(item.updated_at)}</small></header><div class="knowledge-proposal-full"><h3>${escapeHTML(item.title)}</h3><div class="markdown-body">${renderMarkdown(item.body)}</div></div><footer><span>\u5f85\u8f6c\u5165\u65b0\u63d0\u6848\u6d41\u7a0b\u7684\u5386\u53f2\u5019\u9009</span><div class="knowledge-proposal-actions"><button type="button" data-knowledge-update-open="${escapeHTML(item.id)}">\u67e5\u770b\u5185\u5bb9</button><button type="button" class="primary" data-knowledge-verify="${escapeHTML(item.id)}">\u6279\u51c6\u6536\u5f55</button><button type="button" class="danger" data-knowledge-delete="${escapeHTML(item.id)}">\u62d2\u7edd\u5e76\u5220\u9664</button></div></footer></article>`).join("");
+  const legacyCards = legacyCandidates.map(item => `<article class="knowledge-proposal-card pending legacy"><header><div><span class="status warn">\u5f85\u5ba1\u6279</span><span>\u5347\u7ea7\u524d\u5019\u9009</span><span>${escapeHTML(item.scope === "global" ? "\u5168\u5c40\u77e5\u8bc6" : projectNames.get(item.bound_project_id || item.project_id || "") || "\u9879\u76ee\u77e5\u8bc6")}</span></div><small>${formatDate(item.updated_at)}</small></header><div class="knowledge-proposal-summary"><strong>${escapeHTML(item.title)}</strong><span>\u5185\u5bb9\u5df2\u6298\u53e0\uff0c\u70b9\u51fb\u67e5\u770b\u8be6\u60c5\u9605\u8bfb\u5b8c\u6574\u5185\u5bb9\u3002</span></div><footer><span>\u5f85\u8f6c\u5165\u65b0\u63d0\u6848\u6d41\u7a0b\u7684\u5386\u53f2\u5019\u9009</span><div class="knowledge-proposal-actions"><button type="button" data-knowledge-update-open="${escapeHTML(item.id)}">\u67e5\u770b\u8be6\u60c5</button><button type="button" class="primary" data-knowledge-verify="${escapeHTML(item.id)}">\u6279\u51c6\u6536\u5f55</button><button type="button" class="danger" data-knowledge-delete="${escapeHTML(item.id)}">\u62d2\u7edd\u5e76\u5220\u9664</button></div></footer></article>`).join("");
   const pendingEntryIDs = new Set(pending.map(item => item.entry_id));
   const stale = entries.filter(item => !item.is_index && !pendingEntryIDs.has(item.id) && (item.status === "stale" || item.feedback_state === "wrong"));
   const staleFallback = stale.length ? `<section class="knowledge-stale-fallback"><div><h3>\u7b49\u5f85 Agent \u4fee\u8ba2</h3><p>\u8fd9\u4e9b\u6587\u6863\u5df2\u505c\u6b62\u4f5c\u4e3a\u6709\u6548\u77e5\u8bc6\u6ce8\u5165\u3002\u540e\u7eed\u76f8\u5173 Turn \u4e2d，Agent \u83b7\u5f97\u65b0\u8bc1\u636e\u540e\u4f1a\u63d0\u4ea4\u4fee\u8ba2\u63d0\u6848；\u5982\u679c\u8fc7\u65f6\u53cd\u9988\u662f\u8bef\u5224，\u53ef\u786e\u8ba4\u5f53\u524d\u5185\u5bb9\u4ecd\u7136\u6709\u6548\u3002</p></div>${stale.map(item => `<article><span><strong>${escapeHTML(item.title)}</strong><small>${escapeHTML(item.scope === "global" ? "\u5168\u5c40\u77e5\u8bc6" : projectNames.get(item.project_id || "") || "\u9879\u76ee\u77e5\u8bc6")}</small></span><button type="button" data-knowledge-verify="${escapeHTML(item.id)}">\u786e\u8ba4\u4ecd\u6709\u6548</button></article>`).join("")}</section>` : "";
@@ -272,28 +341,35 @@ function renderUpdates(entries: Knowledge[], proposals: KnowledgeProposal[], pro
   return `<div class="knowledge-section-head"><div><h2>\u77e5\u8bc6\u66f4\u65b0</h2><p>\u5ba1\u9605 Agent \u63d0\u4ea4\u7684\u65b0\u77e5\u8bc6\u548c\u4fee\u8ba2\u5efa\u8bae\uff0c\u6279\u51c6\u540e\u624d\u4f1a\u66f4\u65b0\u77e5\u8bc6\u5e93\u3002</p></div><span class="status ${pendingCount ? "warn" : "good"}">${pendingCount ? `${pendingCount} \u9879\u5f85\u5ba1\u6279` : "\u6ca1\u6709\u5f85\u5ba1\u6279\u63d0\u6848"}</span></div>${filters}<div class="knowledge-update-feed">${reviewCards || renderEmpty(updateFilter === "pending" ? "\u6ca1\u6709\u5f85\u5ba1\u6279\u7684\u77e5\u8bc6\u63d0\u6848\u3002" : "\u5c1a\u65e0\u77e5\u8bc6\u63d0\u6848\u3002")}</div>${staleFallback}`;
 }
 
-function renderSettings(project: Project, projectWorkspaces: Workspace[]): string {
+function renderSettings(project: Project, projectWorkspaces: Workspace[], context: KnowledgeWorkspaceContext): string {
+  const boundLibraries = (context.libraries || []).filter(item => item.bound_project_id === project.id);
+  const directKnowledge = context.knowledge.filter(item => item.scope === "project" && item.project_id === project.id && !item.is_index).length;
+  const directSkills = skills.filter(item => item.scope === "project" && item.project_id === project.id).length;
+  const ownedLibrary = directKnowledge + directSkills ? `<article><div>${icon("knowledge")}<span><strong>${escapeHTML(project.name)} \u77e5\u8bc6\u5e93</strong><small>${directKnowledge} \u7bc7 \u00b7 ${directSkills} Skills</small></span></div><div class="actions"><button type="button" data-project-knowledge-detach>\u89e3\u7ed1</button><button class="danger" type="button" data-project-knowledge-delete>\u5220\u9664\u77e5\u8bc6\u5e93</button></div></article>` : "";
   return `<button type="button" class="knowledge-mobile-back" data-knowledge-back>${icon("projects")}\u8fd4\u56de\u77e5\u8bc6\u5e93\u5165\u53e3</button>
     <div class="knowledge-section-head"><div><h2>\u77e5\u8bc6\u5e93\u8bbe\u7f6e</h2><p>\u77e5\u8bc6\u5e93\u5f52\u5c5e\u4e8e\u9879\u76ee\uff0c\u5de5\u4f5c\u533a\u7528\u4e8e\u9009\u62e9\u5b9e\u9645\u6267\u884c\u4f4d\u7f6e\u3002</p></div></div>
     <section class="panel knowledge-setting-card"><div><strong>\u4efb\u52a1\u9ed8\u8ba4\u4f7f\u7528\u77e5\u8bc6\u5e93</strong><p>\u65b0\u4efb\u52a1\u53ef\u4ee5\u7ee7\u627f\u9879\u76ee\u8bbe\u7f6e\uff0c\u4e5f\u53ef\u5355\u72ec\u5f00\u542f\u6216\u5173\u95ed\u3002</p></div><button type="button" class="${project.knowledge_policy === "disabled" ? "" : "primary"}" data-project-kb-toggle>${project.knowledge_policy === "disabled" ? "\u5df2\u5173\u95ed" : "\u5df2\u5f00\u542f"}</button></section>
+    <section class="panel spaced"><div class="panel-head"><strong>\u5df2\u7ed1\u5b9a\u9879\u76ee\u77e5\u8bc6\u5e93</strong><span>${boundLibraries.length + (ownedLibrary ? 1 : 0)}</span></div><div class="product-line-list">${ownedLibrary}${boundLibraries.map(item => `<article><div>${icon("knowledge")}<span><strong>${escapeHTML(item.name)}</strong><small>${item.knowledge_count} \u7bc7 \u00b7 ${item.skill_count} Skills</small></span></div><div class="actions"><button type="button" data-knowledge-library-unbind="${escapeHTML(item.id)}">\u89e3\u7ed1</button><button class="danger" type="button" data-knowledge-library-delete="${escapeHTML(item.id)}">\u5220\u9664\u77e5\u8bc6\u5e93</button></div></article>`).join("") || (ownedLibrary ? "" : renderEmpty("\u5f53\u524d\u9879\u76ee\u672a\u7ed1\u5b9a\u77e5\u8bc6\u5e93\u3002"))}</div></section>
     <section class="panel spaced"><div class="panel-head"><strong>Product Lines</strong><button type="button" data-product-line-new>${icon("plus")}\u65b0\u5efa</button></div><div class="product-line-list">${productLines.map(line => `<article><div>${icon("branch")}<span><strong>${escapeHTML(line.name)}</strong><small>${escapeHTML(line.branch_pattern || "*")} ${line.default ? "\u00b7 default" : ""}</small></span></div><button type="button" class="icon-button" data-product-line-delete="${line.id}">${icon("close")}</button></article>`).join("") || renderEmpty("\u672a\u914d\u7f6e Product Line\uff0c\u9879\u76ee\u77e5\u8bc6\u5c06\u4f5c\u4e3a\u901a\u7528\u6761\u76ee\u3002")}</div></section>
     ${renderBindings(projectWorkspaces)}`;
 }
 
 function renderSection(project: Project, context: KnowledgeWorkspaceContext): string {
   const projectWorkspaces = context.workspaces.filter(item => item.project_id === project.id);
-  const projectEntries = context.knowledge.filter(item => item.scope === "project" && item.project_id === project.id);
+  const entries = projectEntries(context, project.id);
+  const navigationIDs = projectNavigationEntryIDs(entries);
   switch (activeSection) {
     case "project":
-      return renderKnowledgeDocumentWorkspace(projectEntries.filter(item => !item.is_index && item.type !== "navigation"), "\u8fd8\u6ca1\u6709\u9879\u76ee\u77e5\u8bc6\u3002", "project");
+      return renderKnowledgeDocumentWorkspace(entries.filter(item => !item.is_index && !navigationIDs.has(item.id)), "\u8fd8\u6ca1\u6709\u9879\u76ee\u77e5\u8bc6\u3002", "project");
     case "navigation":
-      return renderKnowledgeDocumentWorkspace(projectEntries.filter(item => !item.is_index && item.type === "navigation"), "\u8fd8\u6ca1\u6709\u9879\u76ee\u5bfc\u822a\u3002", "project-navigation");
-    case "settings": return renderSettings(project, projectWorkspaces);
+      return renderKnowledgeDocumentWorkspace(entries.filter(item => !item.is_index && navigationIDs.has(item.id)), "\u8fd8\u6ca1\u6709\u9879\u76ee\u5bfc\u822a\u3002", "project-navigation");
+    case "settings": return renderSettings(project, projectWorkspaces, context);
     default: return renderOverview(project, context.knowledge, projectWorkspaces);
   }
 }
 
 function renderTopLevelSection(context: KnowledgeWorkspaceContext): string {
+  if (activeArea === "libraries") return renderKnowledgeLibraries(context);
   if (activeArea === "skills") return renderSkills();
   if (activeArea === "updates") return renderUpdates(context.knowledge, context.proposals, context.projects);
   return renderKnowledgeDocumentWorkspace(context.knowledge.filter(item => item.scope === "global"), "\u8fd8\u6ca1\u6709 AHA \u5168\u5c40\u77e5\u8bc6\u3002", "global");
@@ -319,9 +395,9 @@ function productLineDialog(): string {
 export function renderKnowledgeWorkspace(context: KnowledgeWorkspaceContext): string {
   const project = selectedProject(context.projects);
   if (!project && activeArea === "project") activeArea = "global";
-  const projectKnowledge = project ? context.knowledge.filter(item => item.scope === "project" && item.project_id === project.id).length : 0;
+  const projectKnowledge = project ? projectEntries(context, project.id).filter(item => !item.is_index).length : 0;
   const projectMode = activeArea === "project" && project;
-  const editorEntries = projectMode ? context.knowledge.filter(item => item.scope === "project" && item.project_id === project.id) : context.knowledge.filter(item => item.scope === "global");
+  const editorEntries = projectMode ? projectEntries(context, project.id) : context.knowledge.filter(item => item.scope === "global");
   const reading = knowledgeReaderOpen && projectMode && activeSection !== "overview";
   return `<section class="page knowledge-page ${reading ? "knowledge-reading" : ""}"><div class="page-head"><div><h1>\u77e5\u8bc6\u5e93</h1><p>\u7ba1\u7406\u5168\u5c40\u77e5\u8bc6\u3001\u9879\u76ee\u6587\u6863\u3001Skills \u548c\u5185\u5bb9\u66f4\u65b0\u3002</p></div><button id="knowledge-refresh" type="button">${icon("refresh")}\u5237\u65b0</button></div>
     <div class="knowledge-workspace-layout ${projectMode ? "project-mode" : "top-level"}">
@@ -397,6 +473,7 @@ export function bindKnowledgeWorkspace(context: KnowledgeWorkspaceContext): void
   ensureCatalog(context, project?.id || "");
   document.querySelectorAll<HTMLElement>("[data-knowledge-area]").forEach(button => button.addEventListener("click", () => {
     activeArea = (button.dataset.knowledgeArea || "global") as KnowledgeArea;
+		if (activeArea !== "libraries") selectedLibraryID = "";
     knowledgeReaderOpen = false;
     selectedKnowledgeID = "";
     context.render();
@@ -433,8 +510,9 @@ export function bindKnowledgeWorkspace(context: KnowledgeWorkspaceContext): void
     if (item.scope === "global") {
       activeArea = "global";
     } else {
-      if (selectedProjectID !== item.project_id) {
-        selectedProjectID = item.project_id || "";
+      const effectiveProjectID = item.bound_project_id || item.project_id || "";
+      if (selectedProjectID !== effectiveProjectID) {
+		selectedProjectID = effectiveProjectID;
         productLines = [];
         catalogProjectID = "";
       }
@@ -473,7 +551,10 @@ export function bindKnowledgeWorkspace(context: KnowledgeWorkspaceContext): void
   }));
   document.querySelectorAll<HTMLElement>("[data-knowledge-toggle]").forEach(button => button.addEventListener("click", () => {
     const id = button.dataset.knowledgeToggle || "";
-    if (collapsedKnowledgeIDs.has(id)) collapsedKnowledgeIDs.delete(id);
+    if (button.dataset.knowledgeProgressive === "true") {
+      if (expandedNavigationIDs.has(id)) expandedNavigationIDs.delete(id);
+      else expandedNavigationIDs.add(id);
+    } else if (collapsedKnowledgeIDs.has(id)) collapsedKnowledgeIDs.delete(id);
     else collapsedKnowledgeIDs.add(id);
     context.render();
   }));
@@ -620,7 +701,53 @@ export function bindKnowledgeWorkspace(context: KnowledgeWorkspaceContext): void
     void mutate(context, () => api.deleteSkill(button.dataset.skillDelete || ""), "Skill \u5df2\u5220\u9664");
   }));
 
+  document.querySelectorAll<HTMLElement>("[data-knowledge-library-bind]").forEach(button => button.addEventListener("click", () => {
+    const id = button.dataset.knowledgeLibraryBind || "";
+    const select = document.querySelector<HTMLSelectElement>(`[data-knowledge-library-target="${CSS.escape(id)}"]`);
+    const projectID = select?.value || "";
+    if (!projectID) {
+      context.setMessage("error", "\u8bf7\u5148\u9009\u62e9\u76ee\u6807\u9879\u76ee");
+      context.render();
+      return;
+    }
+    void mutate(context, () => api.bindKnowledgeLibrary(id, projectID), "\u9879\u76ee\u77e5\u8bc6\u5e93\u5df2\u7ed1\u5b9a");
+  }));
+	document.querySelectorAll<HTMLElement>("[data-knowledge-library-open]").forEach(button => button.addEventListener("click", () => {
+		selectedLibraryID = button.dataset.knowledgeLibraryOpen || "";
+		selectedKnowledgeID = "";
+		knowledgeReaderOpen = false;
+		context.render();
+	}));
+	document.querySelector("[data-knowledge-library-back]")?.addEventListener("click", () => {
+		selectedLibraryID = "";
+		selectedKnowledgeID = "";
+		knowledgeReaderOpen = false;
+		context.render();
+	});
+	document.querySelectorAll<HTMLElement>("[data-knowledge-library-unbind]").forEach(button => button.addEventListener("click", () => {
+    if (!window.confirm("\u89e3\u7ed1\u540e\u77e5\u8bc6\u5e93\u4f1a\u56de\u5230\u5f85\u7ed1\u5b9a\u533a\uff0c\u5185\u5bb9\u4e0d\u4f1a\u5220\u9664\u3002\u7ee7\u7eed\uff1f")) return;
+    void mutate(context, () => api.unbindKnowledgeLibrary(button.dataset.knowledgeLibraryUnbind || ""), "\u9879\u76ee\u77e5\u8bc6\u5e93\u5df2\u89e3\u7ed1");
+  }));
+	document.querySelectorAll<HTMLElement>("[data-knowledge-library-delete]").forEach(button => button.addEventListener("click", () => {
+		const id = button.dataset.knowledgeLibraryDelete || "";
+		const library = context.libraries.find(item => item.id === id);
+		if (!library) return;
+		if (!window.confirm(`\u6c38\u4e45\u5220\u9664\u9879\u76ee\u77e5\u8bc6\u5e93\u201c${library.name}\u201d\u53ca\u5176 ${library.knowledge_count} \u7bc7\u6587\u6863\u3001${library.skill_count} \u4e2a Skill\uff1f\u6b64\u64cd\u4f5c\u4e0d\u53ef\u6062\u590d\u3002`)) return;
+		selectedLibraryID = "";
+		void mutate(context, () => api.deleteKnowledgeLibrary(id), "\u9879\u76ee\u77e5\u8bc6\u5e93\u5df2\u5220\u9664");
+	}));
+
   if (!project) return;
+  document.querySelector("[data-project-knowledge-detach]")?.addEventListener("click", () => {
+		if (!window.confirm("\u89e3\u7ed1\u8be5\u9879\u76ee\u77e5\u8bc6\u5e93\uff1f\u5168\u90e8\u5185\u5bb9\u4f1a\u65e0\u635f\u8f6c\u5165\u5f85\u7ed1\u5b9a\u533a\uff0c\u5f53\u524d Project \u4e0d\u518d\u4f7f\u7528\u5b83\u3002")) return;
+		void mutate(context, () => api.detachProjectKnowledge(project.id), "\u9879\u76ee\u77e5\u8bc6\u5e93\u5df2\u89e3\u7ed1");
+	});
+  document.querySelector("[data-project-knowledge-delete]")?.addEventListener("click", () => {
+		const directKnowledge = context.knowledge.filter(item => item.scope === "project" && item.project_id === project.id && !item.is_index).length;
+		const directSkills = skills.filter(item => item.scope === "project" && item.project_id === project.id).length;
+		if (!window.confirm(`\u6c38\u4e45\u5220\u9664 ${project.name} \u7684\u9879\u76ee\u77e5\u8bc6\u5e93\uff08${directKnowledge} \u7bc7\u6587\u6863\u3001${directSkills} \u4e2a Skill\uff09\uff1f\u9879\u76ee\u672c\u8eab\u548c Workspace \u4f1a\u4fdd\u7559\u3002`)) return;
+		void mutate(context, () => api.deleteProjectKnowledge(project.id), "\u9879\u76ee\u77e5\u8bc6\u5e93\u5df2\u5220\u9664");
+	});
   document.querySelector("[data-project-kb-toggle]")?.addEventListener("click", () => void mutate(context, () => api.updateProject(project.id, {
     name: project.name,
     description: project.description || "",

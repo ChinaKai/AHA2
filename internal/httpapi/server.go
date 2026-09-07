@@ -104,6 +104,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/auth/status", s.authStatus)
 	mux.HandleFunc("POST /api/v1/auth/register", s.authRegister)
 	mux.HandleFunc("POST /api/v1/auth/login", s.authLogin)
+	mux.HandleFunc("POST /api/v1/auth/recover", s.authRecover)
+	mux.Handle("POST /api/v1/auth/password", s.withAuth(http.HandlerFunc(s.authChangePassword)))
 	mux.Handle("POST /api/v1/auth/logout", s.withAuth(http.HandlerFunc(s.authLogout)))
 
 	mux.Handle("GET /api/v1/system", s.withAuth(http.HandlerFunc(s.systemInfo)))
@@ -216,6 +218,12 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/events", s.withAuth(http.HandlerFunc(s.allEvents)))
 
 	mux.Handle("GET /api/v1/knowledge", s.withAuth(http.HandlerFunc(s.listKnowledge)))
+	mux.Handle("GET /api/v1/knowledge/libraries", s.withAuth(http.HandlerFunc(s.listKnowledgeLibraries)))
+	mux.Handle("POST /api/v1/knowledge/libraries/{id}/bind", s.withAuth(http.HandlerFunc(s.bindKnowledgeLibrary)))
+	mux.Handle("POST /api/v1/knowledge/libraries/{id}/unbind", s.withAuth(http.HandlerFunc(s.unbindKnowledgeLibrary)))
+	mux.Handle("DELETE /api/v1/knowledge/libraries/{id}", s.withAuth(http.HandlerFunc(s.deleteKnowledgeLibrary)))
+	mux.Handle("POST /api/v1/projects/{id}/knowledge/detach", s.withAuth(http.HandlerFunc(s.detachProjectKnowledge)))
+	mux.Handle("DELETE /api/v1/projects/{id}/knowledge", s.withAuth(http.HandlerFunc(s.deleteProjectKnowledge)))
 	mux.Handle("POST /api/v1/knowledge", s.withAuth(http.HandlerFunc(s.createKnowledge)))
 	mux.Handle("PUT /api/v1/knowledge/{id}", s.withAuth(http.HandlerFunc(s.updateKnowledge)))
 	mux.Handle("DELETE /api/v1/knowledge/{id}", s.withAuth(http.HandlerFunc(s.deleteKnowledge)))

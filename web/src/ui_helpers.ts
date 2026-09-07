@@ -10,6 +10,10 @@ export interface NavigationSnapshot {
   drafts?: Record<string, string>;
 }
 
+export function eventRefreshesTaskList(type: string): boolean {
+  return ["task_", "turn_", "round_", "knowledge_"].some(prefix => type.startsWith(prefix));
+}
+
 function escapeWorkspaceHTML(value: unknown): string {
   return String(value ?? "")
     .replaceAll("&", "&amp;")

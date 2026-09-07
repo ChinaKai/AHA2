@@ -57,6 +57,12 @@ test("markdown escapes raw HTML and rejects active URL schemes", async () => {
   assert.equal(sanitizeMarkdownURL("data:text/html,boom"), null);
   assert.equal(sanitizeMarkdownURL("java\nscript:alert(1)"), null);
   assert.equal(sanitizeMarkdownURL("mailto:hello@example.com", true), null);
+  assert.equal(sanitizeMarkdownURL("data:image/png;base64,iVBORw0KGgo=", true), "data:image/png;base64,iVBORw0KGgo=");
+  assert.equal(sanitizeMarkdownURL("data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=", true), "data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=");
+  assert.equal(sanitizeMarkdownURL("data:image/svg+xml;base64,PHN2ZyBvbmxvYWQ9ImFsZXJ0KDEpIj48L3N2Zz4=", true), null);
+  assert.equal(sanitizeMarkdownURL("data:text/html;base64,PGgxPmJvb208L2gxPg==", true), null);
+  assert.equal(sanitizeMarkdownURL("data:image/svg+xml,%3Csvg%3E", true), null);
+  assert.match(renderMarkdown("![embedded](data:image/png;base64,iVBORw0KGgo=)"), /<img src="data:image\/png;base64,iVBORw0KGgo=" alt="embedded"/);
 });
 
 test("conversation preview and full message share the safe markdown renderer", async () => {

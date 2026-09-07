@@ -17,7 +17,13 @@ func (s *Server) listProjects(writer http.ResponseWriter, request *http.Request)
 		writeError(writer, http.StatusInternalServerError, "list_projects_failed")
 		return
 	}
-	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "projects": items})
+	visible := items[:0]
+	for _, item := range items {
+		if item.ProjectType != "knowledge" {
+			visible = append(visible, item)
+		}
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "projects": visible})
 }
 
 func (s *Server) createProject(writer http.ResponseWriter, request *http.Request) {

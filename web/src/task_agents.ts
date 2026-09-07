@@ -298,7 +298,7 @@ export function renderConversationWithOrchestration(
 }
 
 function renderTaskSkills(skills: Skill[], projectID: string, selected: string[]): string {
-  const visible = skills.filter(item => item.enabled && item.status === "active" && (item.scope === "global" || item.project_id === projectID));
+  const visible = skills.filter(item => item.enabled && item.status === "active" && (item.scope === "global" || item.project_id === projectID || item.bound_project_id === projectID));
   return visible.map(item => `<label class="task-skill-option"><input type="checkbox" name="skill_ids" value="${item.id}" ${selected.includes(item.id) ? "checked" : ""}><span><strong>${escapeHTML(item.name)}</strong><small>${escapeHTML(item.scope)} \u00b7 ${escapeHTML(item.description || "\u65e0\u63cf\u8ff0")}</small></span></label>`).join("") || `<div class="field-help">\u5f53\u524d Project \u6ca1\u6709\u53ef\u7528 Skill\u3002</div>`;
 }
 

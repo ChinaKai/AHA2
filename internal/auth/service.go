@@ -26,11 +26,14 @@ type Repository interface {
 	OwnerExists(context.Context) (bool, error)
 	CreateOwner(context.Context, domain.Owner) error
 	OwnerByUsername(context.Context, string) (domain.Owner, error)
+	OwnerByID(context.Context, string) (domain.Owner, error)
+	UpdateOwnerPassword(context.Context, string, string) error
 	TouchOwnerLogin(context.Context, string, string) error
 	CreateSession(context.Context, domain.Session) error
 	SessionByTokenHash(context.Context, string) (domain.Session, error)
 	TouchSession(context.Context, string, string) error
 	RevokeSession(context.Context, string, string) error
+	RevokeOwnerSessions(context.Context, string, string, string) error
 }
 
 type Service struct {
@@ -73,7 +76,7 @@ func (s *Service) Register(ctx context.Context, setupToken, username, password s
 	if exists {
 		return LoginResult{}, ErrOwnerExists
 	}
-	if s.setupToken == "" || subtle.ConstantTimeCompare([]byte(setupToken), []byte(s.setupToken)) != 1 {
+	if !s.validSetupToken(setupToken) {
 		return LoginResult{}, ErrInvalidSetupToken
 	}
 	username = strings.TrimSpace(username)
@@ -95,6 +98,56 @@ func (s *Service) Register(ctx context.Context, setupToken, username, password s
 	if err := s.repository.CreateOwner(ctx, owner); err != nil {
 		return LoginResult{}, err
 	}
+	return s.newSession(ctx, owner)
+}
+
+func (s *Service) ChangePassword(ctx context.Context, ownerID, currentSessionID, currentPassword, newPassword string) error {
+	owner, err := s.repository.OwnerByID(ctx, ownerID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrUnauthorized
+	}
+	if err != nil {
+		return err
+	}
+	if !VerifyPassword(owner.PasswordHash, currentPassword) {
+		return ErrUnauthorized
+	}
+	hash, err := HashPassword(newPassword, s.passwordParams)
+	if err != nil {
+		return err
+	}
+	if err := s.repository.UpdateOwnerPassword(ctx, owner.ID, hash); err != nil {
+		return err
+	}
+	return s.repository.RevokeOwnerSessions(
+		ctx, owner.ID, currentSessionID, s.now().UTC().Format(time.RFC3339Nano),
+	)
+}
+
+func (s *Service) Recover(ctx context.Context, setupToken, username, newPassword string) (LoginResult, error) {
+	if !s.validSetupToken(setupToken) {
+		return LoginResult{}, ErrInvalidSetupToken
+	}
+	hash, err := HashPassword(newPassword, s.passwordParams)
+	if err != nil {
+		return LoginResult{}, err
+	}
+	owner, err := s.repository.OwnerByUsername(ctx, strings.TrimSpace(username))
+	if errors.Is(err, sql.ErrNoRows) {
+		return LoginResult{}, ErrUnauthorized
+	}
+	if err != nil {
+		return LoginResult{}, err
+	}
+	if err := s.repository.UpdateOwnerPassword(ctx, owner.ID, hash); err != nil {
+		return LoginResult{}, err
+	}
+	if err := s.repository.RevokeOwnerSessions(
+		ctx, owner.ID, "", s.now().UTC().Format(time.RFC3339Nano),
+	); err != nil {
+		return LoginResult{}, err
+	}
+	owner.PasswordHash = hash
 	return s.newSession(ctx, owner)
 }
 
@@ -164,6 +217,15 @@ func (s *Service) newSession(ctx context.Context, owner domain.Owner) (LoginResu
 		return LoginResult{}, err
 	}
 	return LoginResult{Owner: owner, Session: session, SessionToken: rawToken}, nil
+}
+
+func (s *Service) validSetupToken(candidate string) bool {
+	if s.setupToken == "" {
+		return false
+	}
+	expected := sha256.Sum256([]byte(s.setupToken))
+	actual := sha256.Sum256([]byte(candidate))
+	return subtle.ConstantTimeCompare(actual[:], expected[:]) == 1
 }
 
 func randomToken(size int) (string, error) {

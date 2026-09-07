@@ -4,6 +4,19 @@ import {renderTaskMemory} from "./task_agents.js";
 import type {TaskDetail} from "./types.js";
 
 export type TaskTool = "context" | "hardware" | "browser" | "memory";
+export type TaskToolMode = "split" | "fullscreen";
+
+export const TASK_TOOL_DEFAULT_WIDTH = 42;
+
+export function normalizeTaskToolMode(value: unknown): TaskToolMode {
+  return value === "fullscreen" ? "fullscreen" : "split";
+}
+
+export function normalizeTaskToolWidth(value: unknown): number {
+  const width = Number(value);
+  if (!Number.isFinite(width)) return TASK_TOOL_DEFAULT_WIDTH;
+  return Math.min(70, Math.max(30, Math.round(width * 10) / 10));
+}
 
 const tools: Array<{id: TaskTool; label: string; iconName: string}> = [
   {id: "context", label: "Context", iconName: "context"},
@@ -46,9 +59,13 @@ export function renderTaskToolPanel(
   detail: TaskDetail,
   agentID: string,
   contextHTML: string,
+  mode: TaskToolMode,
 ): string {
-  return `<aside class="task-tool-panel ${tool ? "open" : ""}">
-    <header class="task-tool-panel-head"><div><h3>${escapeHTML(taskToolTitle(tool))}</h3><small>${escapeHTML(agentID)}</small></div><button type="button" id="close-task-tool" class="icon-button" title="关闭">${icon("close")}</button></header>
+  const switchLabel = mode === "split" ? "全屏" : "小窗";
+  const switchIcon = mode === "split" ? "expand" : "panel";
+  return `<aside class="task-tool-panel ${tool ? "open" : ""} ${mode}">
+    <div id="task-tool-resizer" class="task-tool-resizer" role="separator" aria-label="调整工具面板宽度" aria-orientation="vertical" aria-valuemin="30" aria-valuemax="70" tabindex="0" title="拖动调整宽度，双击恢复默认"></div>
+    <header class="task-tool-panel-head"><div><h3>${escapeHTML(taskToolTitle(tool))}</h3><small>${escapeHTML(agentID)}</small></div><div class="task-tool-panel-actions"><button type="button" id="toggle-task-tool-mode" class="task-tool-mode-toggle" title="切换为${switchLabel}" aria-label="切换为${switchLabel}">${icon(switchIcon)}<span>${switchLabel}</span></button><button type="button" id="close-task-tool" class="icon-button" title="关闭">${icon("close")}</button></div></header>
     <div id="task-tool-panel-body">${renderTaskToolContent(tool, detail, contextHTML)}</div>
   </aside>`;
 }

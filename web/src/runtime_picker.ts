@@ -64,13 +64,13 @@ export function runtimeFieldsHTML(
   const runtimeClass = className ? ` ${className}` : "";
   const envModels = models.filter(model => model.source !== "official" && model.backend === backend);
   return `<div class="two runtime-picker${runtimeClass}">
-    <label>Backend<select name="backend" id="${prefix}-backend">${backends.map(item => option(item, item === "codex" ? "Codex" : "Claude Code", item === backend)).join("")}</select></label>
-    <label id="${prefix}-model-source-field">模型使用方式<select name="model_source" id="${prefix}-model-source"><option value="env" ${source === "env" ? "selected" : ""}>Env</option><option value="official" ${source === "official" ? "selected" : ""}>Official</option></select></label>
+    <label>Backend<select name="backend" id="${prefix}-backend" required>${backends.map(item => option(item, item === "codex" ? "Codex" : "Claude Code", item === backend)).join("")}</select></label>
+    <label id="${prefix}-model-source-field">模型使用方式<select name="model_source" id="${prefix}-model-source" required><option value="env" ${source === "env" ? "selected" : ""}>Env</option><option value="official" ${source === "official" ? "selected" : ""}>Official</option></select></label>
   </div>
-  <label id="${prefix}-env-model-field" class="runtime-picker${runtimeClass}">Env 模型<select name="model_id" id="${prefix}-model">${envModelOptions(envModels, selection.model_id || "")}</select></label>
+  <label id="${prefix}-env-model-field" class="runtime-picker${runtimeClass}">Env 模型<select name="model_id" id="${prefix}-model" required>${envModelOptions(envModels, selection.model_id || "")}</select></label>
   <div id="${prefix}-official-fields" class="two runtime-picker${runtimeClass}" hidden>
-    <label>Codex 账号<select name="codex_account_id" id="${prefix}-codex-account">${accounts.map(account => option(account.id, accountName(account), account.id === accountID)).join("")}</select></label>
-    <label>官方模型<select name="wire_model" id="${prefix}-wire-model">${wireModels.map(model => option(model.wire_model, model.display_name || model.wire_model, model.wire_model === selection.wire_model)).join("")}</select></label>
+    <label>Codex 账号<select name="codex_account_id" id="${prefix}-codex-account" required>${accounts.map(account => option(account.id, accountName(account), account.id === accountID)).join("")}</select></label>
+    <label>官方模型<select name="wire_model" id="${prefix}-wire-model" required>${wireModels.map(model => option(model.wire_model, model.display_name || model.wire_model, model.wire_model === selection.wire_model)).join("")}</select></label>
   </div>`;
 }
 

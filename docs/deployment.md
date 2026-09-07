@@ -149,7 +149,7 @@ Debian/Ubuntu 提供 amd64、arm64 `.deb`，Fedora/RHEL 提供 x86_64、aarch64 
 
 ## 首次 Owner 初始化
 
-首次启动会在所选数据目录生成一次性 `setup-token`。Windows 安装器默认位于：
+首次启动会在所选数据目录生成 `setup-token`，用于首次创建 Owner，并在忘记密码时验证本机所有权。Windows 安装器默认位于：
 
 ```text
 C:\ProgramData\AHA2\setup-token
@@ -161,7 +161,7 @@ C:\ProgramData\AHA2\setup-token
 - Owner 用户名
 - 至少 10 位密码
 
-Owner 创建后公开注册自动关闭，Setup Token 不再有效。
+Owner 创建后公开注册自动关闭；Setup Token 只保留用于登录页的本机密码恢复。该文件等同于恢复凭据，应继续限制为管理员和 AHA2 运行用户可读。
 
 ## 数据目录
 

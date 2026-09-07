@@ -312,7 +312,35 @@ func (s *Store) ListKnowledge(ctx context.Context, scope, projectID string, stat
 }
 
 func (s *Store) ListApplicableKnowledge(ctx context.Context, projectID, productLineID string, statuses []domain.KnowledgeStatus) ([]domain.KnowledgeEntry, error) {
-	return s.listKnowledge(ctx, "project", projectID, productLineID, true, statuses)
+	items, err := s.listKnowledge(ctx, "project", "", "", false, statuses)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]domain.KnowledgeEntry, 0, len(items))
+	for _, item := range items {
+		if item.ProjectID != projectID && item.BoundProjectID != projectID {
+			continue
+		}
+		if item.ProductLineID != "" && item.ProductLineID != productLineID {
+			continue
+		}
+		result = append(result, item)
+	}
+	return namespaceBoundKnowledge(result, projectID), nil
+}
+
+func (s *Store) ListProjectKnowledge(ctx context.Context, projectID string, statuses []domain.KnowledgeStatus) ([]domain.KnowledgeEntry, error) {
+	items, err := s.listKnowledge(ctx, "project", "", "", false, statuses)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]domain.KnowledgeEntry, 0, len(items))
+	for _, item := range items {
+		if item.ProjectID == projectID || item.BoundProjectID == projectID && !item.IsIndex {
+			result = append(result, item)
+		}
+	}
+	return result, nil
 }
 
 func (s *Store) listKnowledge(ctx context.Context, scope, projectID, productLineID string, applicableOnly bool, statuses []domain.KnowledgeStatus) ([]domain.KnowledgeEntry, error) {
@@ -355,7 +383,47 @@ func (s *Store) listKnowledge(ctx context.Context, scope, projectID, productLine
 		}
 		result = append(result, item)
 	}
-	return result, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	bindings, err := s.knowledgeLibraryBindings(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for index := range result {
+		result[index].BoundProjectID = bindings[result[index].ProjectID]
+	}
+	return result, nil
+}
+
+func namespaceBoundKnowledge(items []domain.KnowledgeEntry, projectID string) []domain.KnowledgeEntry {
+	libraryRoots := map[string]string{}
+	for _, item := range items {
+		if item.BoundProjectID == projectID && item.IsIndex {
+			libraryRoots[item.ProjectID] = item.ID
+		}
+	}
+	result := make([]domain.KnowledgeEntry, 0, len(items))
+	for _, item := range items {
+		if item.BoundProjectID == projectID && item.IsIndex {
+			continue
+		}
+		if item.BoundProjectID == projectID && item.ParentID == libraryRoots[item.ProjectID] {
+			prefix := strings.TrimPrefix(item.ProjectID, "project_")
+			if len(prefix) > 8 {
+				prefix = prefix[:8]
+			}
+			item.ParentID = knowledgeRootID("project", projectID)
+			if item.Slug != "" {
+				item.Slug = "library-" + prefix + "-" + item.Slug
+			}
+		}
+		result = append(result, item)
+	}
+	return result
 }
 
 func (s *Store) MatchingKnowledge(ctx context.Context, scope, projectID, productLineID, kind, title string) (domain.KnowledgeEntry, error) {

@@ -3,9 +3,12 @@ package main
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ChinaKai/AHA2/internal/store"
 )
 
 func TestParseCommandRoutesServeAndWindowsService(t *testing.T) {
@@ -21,6 +24,7 @@ func TestParseCommandRoutesServeAndWindowsService(t *testing.T) {
 		{args: []string{"serve", "--data-dir", "data"}, command: "serve", commandArgs: []string{"--data-dir", "data"}},
 		{args: []string{"service", "run", "--listen", "127.0.0.1:8766"}, command: "service-run", commandArgs: []string{"--listen", "127.0.0.1:8766"}},
 		{args: []string{"version"}, command: "version"},
+		{args: []string{"import-aha1-knowledge", "--source", "legacy"}, command: "import-aha1-knowledge", commandArgs: []string{"--source", "legacy"}},
 		{args: []string{"service"}, errorText: "aha2 service run"},
 		{args: []string{"service", "stop"}, errorText: "aha2 service run"},
 		{args: []string{"unknown"}, errorText: "unknown command"},
@@ -37,6 +41,41 @@ func TestParseCommandRoutesServeAndWindowsService(t *testing.T) {
 			t.Errorf("parseCommand(%q) = %q, %q, %v", test.args, command, args, err)
 		}
 	}
+}
+
+func TestParseImportAHA1KnowledgeOptionsIsDryRunByDefault(t *testing.T) {
+	t.Setenv("AHA2_DATA_DIR", "")
+	options, err := parseImportAHA1Options([]string{"--source", `E:\AHA\.aha\knowledge`, "--project-map", "old=project-new"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if options.apply || options.confirmServiceStopped || options.dataDir != ".data" || options.projectMap["old"] != "project-new" {
+		t.Fatalf("options=%#v", options)
+	}
+	if _, err := parseImportAHA1Options([]string{"--source", "legacy", "--apply"}); err == nil || !strings.Contains(err.Error(), "confirm-service-stopped") {
+		t.Fatalf("unsafe apply was accepted: %v", err)
+	}
+}
+
+func TestBackupAHA2KnowledgeDataCreatesConsistentCopy(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	database, err := store.Open(ctx, filepath.Join(dataDir, "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	backup, err := backupAHA2KnowledgeData(dataDir, time.Date(2026, 9, 7, 6, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	copy, err := store.Open(ctx, filepath.Join(backup, "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	copy.Close()
 }
 
 func TestParseServiceRunOptions(t *testing.T) {

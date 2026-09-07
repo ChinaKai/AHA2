@@ -479,6 +479,7 @@ export interface Knowledge {
   id: string;
   scope: "global" | "project";
   project_id?: string;
+  bound_project_id?: string;
   parent_id?: string;
   slug?: string;
   sort_order: number;
@@ -539,6 +540,7 @@ export interface Skill {
   package_slug: string;
   scope: "global" | "project";
   project_id?: string;
+  bound_project_id?: string;
   name: string;
   description: string;
   instructions: string;
@@ -547,6 +549,19 @@ export interface Skill {
   enabled: boolean;
   source_path?: string;
   files?: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface KnowledgeLibrary {
+  id: string;
+  container_project_id: string;
+  name: string;
+  description: string;
+  source_identity?: string;
+  bound_project_id?: string;
+  knowledge_count: number;
+  skill_count: number;
   created_at: string;
   updated_at: string;
 }

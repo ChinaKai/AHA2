@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -18,6 +19,7 @@ import (
 const (
 	TypeKnowledge         = "knowledge"
 	TypeKnowledgeProposal = "knowledge_proposal"
+	TypeKnowledgeBinding  = "knowledge_binding"
 	TypeSkill             = "skill"
 	TypeProvider          = "provider"
 	TypeModel             = "model"
@@ -48,7 +50,7 @@ func payloadIdempotencyKey(kind, id, format string, payload json.RawMessage) str
 func knowledgeIdempotencyKey(item domain.KnowledgeEntry) string {
 	state := fmt.Sprintf("%d\x00%s\x00%s\x00%s\x00%d\x00%d\x00%s", item.Revision, item.Scope, item.ProjectID, item.Status, item.HelpedCount, item.StaleCount, item.FeedbackState)
 	hash := sha256.Sum256([]byte(state))
-	return fmt.Sprintf("knowledge:v3:%s:%x", item.ID, hash[:12])
+	return fmt.Sprintf("knowledge:v4:%s:%x", item.ID, hash[:12])
 }
 
 // ExportBusinessObjects exports only portable configuration. Credential references,
@@ -101,6 +103,15 @@ func ExportBusinessObjectsForDevice(ctx context.Context, database *store.Store, 
 			RemoteVersion: tombstone.Version, IdempotencyKey: tombstone.SyncKey,
 		})
 	}
+	bindings, err := database.ListKnowledgeLibraryBindings(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, binding := range bindings {
+		if err := add(TypeKnowledgeBinding, binding.LibraryID, timeVersion(binding.UpdatedAt), binding); err != nil {
+			return nil, err
+		}
+	}
 	proposals, err := database.ListKnowledgeProposals(ctx, "", "")
 	if err != nil {
 		return nil, err
@@ -135,7 +146,7 @@ func ExportBusinessObjectsForDevice(ctx context.Context, database *store.Store, 
 	if err != nil {
 		return nil, err
 	}
-	for _, v := range knowledge {
+	for _, v := range sortKnowledgeEntriesForSync(knowledge) {
 		v.SourceTaskID = ""
 		v.SourceTurnID = ""
 		if err := add(TypeKnowledge, v.ID, strconv.Itoa(v.Revision), v); err != nil {
@@ -155,10 +166,11 @@ func ExportBusinessObjectsForDevice(ctx context.Context, database *store.Store, 
 		return nil, err
 	}
 	for _, v := range skills {
-		if v.ProjectID != "" {
+		project, projectErr := database.Project(ctx, v.ProjectID)
+		if v.ProjectID != "" && (projectErr != nil || project.ProjectType != "knowledge") {
 			v.Scope = "global"
+			v.ProjectID = ""
 		}
-		v.ProjectID = ""
 		v.SourcePath = ""
 		v.Files = nil
 		if err := add(TypeSkill, v.ID, strconv.Itoa(v.Version), skillPayload{Skill: v, Files: v.PackageFiles}); err != nil {
@@ -211,6 +223,42 @@ func ExportBusinessObjectsForDevice(ctx context.Context, database *store.Store, 
 	return result, nil
 }
 
+func sortKnowledgeEntriesForSync(values []domain.KnowledgeEntry) []domain.KnowledgeEntry {
+	result := append([]domain.KnowledgeEntry{}, values...)
+	byID := map[string]domain.KnowledgeEntry{}
+	for _, entry := range result {
+		byID[entry.ID] = entry
+	}
+	depth := func(entry domain.KnowledgeEntry) int {
+		seen := map[string]bool{entry.ID: true}
+		value := 0
+		for entry.ParentID != "" {
+			parent, ok := byID[entry.ParentID]
+			if !ok || seen[parent.ID] {
+				break
+			}
+			seen[parent.ID] = true
+			entry = parent
+			value++
+		}
+		return value
+	}
+	sort.SliceStable(result, func(i, j int) bool {
+		left, right := depth(result[i]), depth(result[j])
+		if left != right {
+			return left < right
+		}
+		if result[i].Scope != result[j].Scope {
+			return result[i].Scope < result[j].Scope
+		}
+		if result[i].ProjectID != result[j].ProjectID {
+			return result[i].ProjectID < result[j].ProjectID
+		}
+		return result[i].ID < result[j].ID
+	})
+	return result
+}
+
 func RegisterBusinessHandlers(engine *Engine, database *store.Store) {
 	registerBusinessHandlers(engine, database, "")
 }
@@ -220,7 +268,7 @@ func RegisterBusinessHandlersForDevice(engine *Engine, database *store.Store, lo
 }
 
 func registerBusinessHandlers(engine *Engine, database *store.Store, localDeviceID string) {
-	for _, kind := range []string{TypeProject, TypeProductLine, TypeWorkspace, TypeTask, TypeTaskAgent, TypeRound, TypeTurn, TypeConversation, TypeTaskMemory, TypeHardware, TypeKnowledgeProposal, TypeKnowledge, TypeSkill, TypeProvider, TypeModel, TypeEnvGroup, TypePromptOverride} {
+	for _, kind := range []string{TypeProject, TypeProductLine, TypeWorkspace, TypeTask, TypeTaskAgent, TypeRound, TypeTurn, TypeConversation, TypeTaskMemory, TypeHardware, TypeKnowledgeBinding, TypeKnowledgeProposal, TypeKnowledge, TypeSkill, TypeProvider, TypeModel, TypeEnvGroup, TypePromptOverride} {
 		objectType := kind
 		engine.Register(objectType, func(ctx context.Context, obj domain.SyncObject) error {
 			if localDeviceID != "" && objectType != TypeProject && isTaskGraphType(objectType) {
@@ -318,6 +366,11 @@ func currentBusinessObject(ctx context.Context, database *store.Store, kind, id 
 		if version == "" {
 			version = timeVersion(v.CreatedAt)
 		}
+	case TypeKnowledgeBinding:
+		var v domain.KnowledgeLibraryBinding
+		v, err = database.KnowledgeLibraryBinding(ctx, id)
+		value = v
+		version = timeVersion(v.UpdatedAt)
 	case TypeSkill:
 		var v domain.Skill
 		v, err = database.Skill(ctx, id)
@@ -386,6 +439,7 @@ func upsertBusinessObject(ctx context.Context, database *store.Store, obj domain
 				} else if !errors.Is(tombstoneErr, sql.ErrNoRows) {
 					return tombstoneErr
 				}
+				return waitForDependency(fmt.Errorf("product line project dependency %s: %w", v.ProjectID, err))
 			}
 			return fmt.Errorf("product line project dependency %s: %w", v.ProjectID, err)
 		}
@@ -393,6 +447,26 @@ func upsertBusinessObject(ctx context.Context, database *store.Store, obj domain
 			return database.UpdateProductLine(ctx, v)
 		}
 		return database.CreateProductLine(ctx, v)
+	case TypeKnowledgeBinding:
+		var v domain.KnowledgeLibraryBinding
+		if err := decodePayload(obj, &v); err != nil {
+			return err
+		}
+		v.LibraryID = obj.ID
+		if _, err := database.KnowledgeLibrary(ctx, v.LibraryID); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return waitForDependency(fmt.Errorf("knowledge library dependency %s: %w", v.LibraryID, err))
+			}
+			return fmt.Errorf("knowledge library dependency %s: %w", v.LibraryID, err)
+		}
+		if _, err := database.Project(ctx, v.ProjectID); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return waitForDependency(fmt.Errorf("knowledge binding project dependency %s: %w", v.ProjectID, err))
+			}
+			return fmt.Errorf("knowledge binding project dependency %s: %w", v.ProjectID, err)
+		}
+		_, err := database.BindKnowledgeLibrary(ctx, v.LibraryID, v.ProjectID, v.UpdatedAt)
+		return err
 	case TypeKnowledge:
 		var v domain.KnowledgeEntry
 		if err := decodePayload(obj, &v); err != nil {
@@ -400,14 +474,14 @@ func upsertBusinessObject(ctx context.Context, database *store.Store, obj domain
 		}
 		v.ID = obj.ID
 		if err := normalizeSyncedKnowledgeScope(ctx, database, &v); err != nil {
-			return err
+			return knowledgeSyncDependency(err)
 		}
 		v.SourceTaskID = ""
 		v.SourceTurnID = ""
 		if exists {
-			return database.UpdateKnowledge(ctx, v)
+			return knowledgeSyncDependency(database.UpdateKnowledge(ctx, v))
 		}
-		return database.CreateKnowledge(ctx, v)
+		return knowledgeSyncDependency(database.CreateKnowledge(ctx, v))
 	case TypeKnowledgeProposal:
 		var v domain.KnowledgeProposal
 		if err := decodePayload(obj, &v); err != nil {
@@ -418,27 +492,28 @@ func upsertBusinessObject(ctx context.Context, database *store.Store, obj domain
 		v.SourceTaskID, v.SourceTurnID = "", ""
 		v.Proposed.SourceTaskID, v.Proposed.SourceTurnID = "", ""
 		if err := normalizeSyncedKnowledgeScope(ctx, database, &v.Proposed); err != nil {
-			return err
+			return knowledgeSyncDependency(err)
 		}
 		if v.BaseEntry != nil {
 			base := *v.BaseEntry
 			base.SourceTaskID, base.SourceTurnID = "", ""
 			if err := normalizeSyncedKnowledgeScope(ctx, database, &base); err != nil {
-				return err
+				return knowledgeSyncDependency(err)
 			}
 			v.BaseEntry = &base
 		}
-		return database.ImportKnowledgeProposal(ctx, v)
+		return knowledgeSyncDependency(database.ImportKnowledgeProposal(ctx, v))
 	case TypeSkill:
 		var p skillPayload
 		if err := decodePayload(obj, &p); err != nil {
 			return err
 		}
 		p.Skill.ID = obj.ID
-		if p.Skill.ProjectID != "" {
+		project, projectErr := database.Project(ctx, p.Skill.ProjectID)
+		if p.Skill.ProjectID != "" && (projectErr != nil || project.ProjectType != "knowledge") {
 			p.Skill.Scope = "global"
+			p.Skill.ProjectID = ""
 		}
-		p.Skill.ProjectID = ""
 		p.Skill.SourcePath = ""
 		if exists {
 			current, err := database.Skill(ctx, obj.ID)
@@ -568,6 +643,17 @@ func normalizeSyncedKnowledgeScope(ctx context.Context, database *store.Store, v
 		return fmt.Errorf("%w: synced knowledge scope %q", store.ErrKnowledgeInvalidScope, v.Scope)
 	}
 }
+
+func knowledgeSyncDependency(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, sql.ErrNoRows) || errors.Is(err, store.ErrKnowledgeParent) {
+		return waitForDependency(err)
+	}
+	return err
+}
+
 func decodePayload(obj domain.SyncObject, value any) error {
 	if len(obj.Payload) == 0 {
 		return fmt.Errorf("%s %s has empty payload", obj.Type, obj.ID)

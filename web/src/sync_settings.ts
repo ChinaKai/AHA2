@@ -23,7 +23,7 @@ const syncDomains = [
 function syncDomainForType(value: string): string {
   if (["project", "product_line", "workspace"].includes(value)) return "项目";
   if (["task", "task_agent", "round", "turn", "conversation", "task_memory", "attachment"].includes(value)) return "任务";
-  if (["knowledge", "skill"].includes(value)) return "知识库";
+  if (["knowledge", "knowledge_proposal", "knowledge_binding", "skill"].includes(value)) return "知识库";
   if (["provider", "model", "env_group", "codex_account", "secret_bundle"].includes(value)) return "模型";
   if (["prompt_override", "agent_profile"].includes(value)) return "代理";
   return "其他";

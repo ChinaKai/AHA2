@@ -69,6 +69,11 @@ func (s *Store) TouchOwnerLogin(ctx context.Context, ownerID string, value strin
 	return err
 }
 
+func (s *Store) UpdateOwnerPassword(ctx context.Context, ownerID, passwordHash string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE owners SET password_hash = ? WHERE id = ?`, passwordHash, ownerID)
+	return err
+}
+
 func (s *Store) CreateSession(ctx context.Context, session domain.Session) error {
 	_, err := s.db.ExecContext(
 		ctx,
@@ -112,5 +117,15 @@ func (s *Store) TouchSession(ctx context.Context, sessionID, lastSeen string) er
 
 func (s *Store) RevokeSession(ctx context.Context, sessionID, revokedAt string) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE sessions SET revoked_at = ? WHERE id = ?`, revokedAt, sessionID)
+	return err
+}
+
+func (s *Store) RevokeOwnerSessions(ctx context.Context, ownerID, exceptSessionID, revokedAt string) error {
+	_, err := s.db.ExecContext(
+		ctx,
+		`UPDATE sessions SET revoked_at = ?
+		 WHERE owner_id = ? AND revoked_at = '' AND (? = '' OR id <> ?)`,
+		revokedAt, ownerID, exceptSessionID, exceptSessionID,
+	)
 	return err
 }
