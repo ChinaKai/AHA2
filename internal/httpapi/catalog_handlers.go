@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
+	workspacepkg "github.com/ChinaKai/AHA2/internal/workspace"
 )
 
 func (s *Server) listProjects(writer http.ResponseWriter, request *http.Request) {
@@ -328,11 +329,19 @@ func (s *Server) detectWorkspaceHandler(writer http.ResponseWriter, request *htt
 	}
 	detected, err := s.detectWorkspace(request.Context(), item)
 	if err != nil {
-		item.Health = "error"
-		item.Capabilities = map[string]any{"error": err.Error()}
-		item.LastDetectedAt, item.UpdatedAt = time.Now().UTC(), time.Now().UTC()
-		_ = s.store.UpdateWorkspaceDetection(request.Context(), item)
-		writeJSON(writer, http.StatusBadGateway, map[string]any{"ok": false, "error": "workspace_detection_failed", "message": err.Error(), "workspace": item})
+		if detected.ID == "" {
+			detected = item
+			detected.Platform = ""
+			detected.Health = "error"
+			detected.Capabilities = map[string]any{"workspace": map[string]any{"status": "unavailable", "error": err.Error()}}
+			detected.Repository = map[string]any{}
+			detected.LastDetectedAt, detected.UpdatedAt = time.Now().UTC(), time.Now().UTC()
+		}
+		if storeErr := s.store.UpdateWorkspaceDetection(request.Context(), detected); storeErr != nil {
+			writeError(writer, http.StatusInternalServerError, "workspace_detection_store_failed")
+			return
+		}
+		writeJSON(writer, http.StatusBadGateway, map[string]any{"ok": false, "error": workspacepkg.DetectionErrorCode(err), "message": err.Error(), "workspace": detected})
 		return
 	}
 	if err := s.store.UpdateWorkspaceDetection(request.Context(), detected); err != nil {

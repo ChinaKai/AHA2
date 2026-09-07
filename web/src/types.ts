@@ -110,7 +110,21 @@ export interface Workspace {
   distro?: string;
   platform?: string;
   health: string;
-  capabilities?: Record<string, unknown>;
+  capabilities?: Record<string, unknown> & {
+    workspace?: WorkspaceProbe;
+    platform?: WorkspaceProbe;
+    codex?: WorkspaceProbe;
+    claude?: WorkspaceProbe;
+    git?: boolean;
+  };
+  repository?: {
+    status?: "ready" | "not_repository" | "execution_failed" | string;
+    is_git?: boolean;
+    root?: string;
+    branch?: string;
+    message?: string;
+    error?: string;
+  };
   owner_device_id?: string;
   read_only?: boolean;
 }
@@ -128,6 +142,12 @@ export interface Model {
   context_window?: number;
   max_output_tokens?: number;
   default_reasoning_effort?: string;
+}
+
+export interface WorkspaceProbe {
+  status?: "ready" | "unavailable" | "not_installed" | "execution_failed" | string;
+  version?: string;
+  error?: string;
 }
 
 export interface CodexAccount {

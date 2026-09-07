@@ -22,34 +22,68 @@ http://<Windows 主机 IP>:8766
 
 公网部署必须在 AHA2 前增加 HTTPS 反向代理，不应直接公开明文 HTTP。
 
-## Windows 机器级安装
+## Windows 机器级安装（登录用户运行模式）
 
 GitHub Release 提供机器级安装包 `AHA2-Setup-x64.exe`。安装包需要管理员权限，
 程序默认安装到 `Program Files\AHA2`。
+应由最终运行 AHA2 的 Windows 登录用户直接双击安装包，让安装器自行请求 UAC；不要从已提权
+终端启动，也不要使用另一个管理员账号“运行方式”启动，否则 Windows 无法可靠保留原始用户令牌。
 安装向导允许选择数据目录，默认值为：
 
 ```text
 C:\ProgramData\AHA2
 ```
 
-数据目录必须位于本机磁盘；Windows Service 不使用映射盘或 UNC 网络共享。
+数据目录必须位于本机磁盘；SQLite 数据目录不支持映射盘或 UNC 网络共享。安装器从登录计划任务
+读取原始登录用户身份，只向该用户授予所选目录的递归修改权限。管理员提权仅用于写入
+`Program Files`、设置该目录权限、配置防火墙和清理遗留服务，AHA2 进程本身不以管理员或
+`LocalSystem` 身份运行。
 
 安装向导还允许选择 HTTP 端口和访问范围：
 
 - 仅本机：监听 `127.0.0.1`，默认且不创建防火墙规则。
 - 局域网：可监听 `0.0.0.0` 或指定网卡 IPv4；可显式选择创建 Windows 防火墙规则。
 
-安装器创建的防火墙规则只适用于 Private profile、TCP 目标端口和本地子网。安装程序将
-`AHA2` 注册为 delayed-auto Windows 服务，服务命令按向导选择生成，例如：
+安装器创建的防火墙规则只适用于 Private profile、TCP 目标端口和本地子网。安装包在
+`Program Files\AHA2` 同时安装 `aha2.exe` 和 GUI 子系统的 `aha2-tray.exe`。安装程序通过原始
+登录用户进程注册唯一的 `AHA2 User` Windows 登录计划任务；任务使用交互式、最低权限的用户
+令牌，在安装完成后以及该用户每次登录时直接启动：
 
 ```text
-aha2.exe service run --listen <IP>:<端口> --data-dir <数据目录>
+aha2-tray.exe --server "<Program Files>\AHA2\aha2.exe" --listen "<IP>:<端口>" --data-dir "<数据目录>"
 ```
 
-服务异常退出时由 Windows Service Control Manager 依次在 5 秒、15 秒和 60 秒后重启。
-升级安装会记住上次的数据目录、访问范围、IP、端口和防火墙选项，先停止服务，替换程序后
-重新配置并启动服务。卸载会停止并删除服务及本安装器创建的防火墙规则，但默认保留所选数据
-目录，避免误删数据库、Secret Store 和 Setup Token；确认不再需要时应由管理员另行备份并删除。
+`aha2-tray.exe` 自身使用 Windows GUI 子系统，不创建控制台窗口；它负责启动、监控和停止
+`aha2.exe serve`。计划任务 action 直接指向 tray，不长期依赖 PowerShell、Windows Script Host
+或 VBS launcher。PowerShell 仅在安装期间用于注册任务和设置数据目录 ACL。
+
+仅使用本机 Workspace 时，Agent API 地址可留空，AHA2 会使用 loopback 地址。SSH 或其他远程
+Workspace 中运行的 Agent 需要填写其能够访问的 HTTPS 基址，安装器会追加：
+
+```text
+--agent-api-url https://<AHA2-host>
+```
+
+受信开发网络确需使用非 loopback HTTP 时，必须在向导中单独确认，启动参数才会追加
+`--allow-insecure-agent-api`。这不会启用 `--allow-cross-origin`；浏览器 Origin 校验仍保持开启。
+
+此登录用户模式是 Windows 安装器的短期正式默认方案。安装器会停止、禁用并尝试删除旧版本
+遗留的 `AHA2` LocalSystem 服务；若 Windows 暂时不能删除服务，保留 Stopped/Disabled 状态也
+不会在重启后抢占端口。
+
+升级安装会记住上次的数据目录、访问范围、IP、端口和防火墙选项，也允许重新选择这些值及安装
+路径。升级先禁用并结束唯一计划任务，停止所有已安装版本的 `aha2-tray.exe` 与 `aha2.exe`，再以
+`Register-ScheduledTask -Force` 覆盖同名任务的程序路径和完整参数，因此不会保留第二个任务或并行
+实例。遗留 `AHA2` LocalSystem 服务在任何迁移结果下都保持 Stopped/Disabled；新 tray 健康后安装器
+尽力删除服务，暂时删除失败也不会恢复其启动能力。若安装在切换完成前失败，安装器只尝试恢复升级
+前的用户任务/tray。卸载会先删除登录任务，再停止 tray/server、删除开始菜单快捷方式、遗留服务及安装器创建的防火墙
+规则，但保留所选数据目录，避免误删数据库、Secret Store 和 Setup Token；确认不再需要时应由
+管理员另行备份并删除。
+
+登录用户模式不使用 Windows Service Control Manager。GUI tray 保持 AHA2 控制面进程不可见，
+计划任务在 tray 异常退出后以 1 分钟间隔最多
+重试 3 次；仍未恢复时，可从开始菜单选择“启动 AHA2”，或在该用户下次登录时自动启动。用户
+注销后 AHA2 会随该登录会话结束，不提供未登录状态下的后台服务。
 
 完成页可以选择打开 `http://127.0.0.1:8766`。Release 中的统一 `SHA256SUMS`
 可用于校验下载完整性。
@@ -115,10 +149,10 @@ Debian/Ubuntu 提供 amd64、arm64 `.deb`，Fedora/RHEL 提供 x86_64、aarch64 
 
 ## 首次 Owner 初始化
 
-首次启动会在所选数据目录生成一次性 `setup-token`。例如 Windows 机器级安装默认位于：
+首次启动会在所选数据目录生成一次性 `setup-token`。Windows 安装器默认位于：
 
 ```text
-C:\Users\toope\AppData\Local\AHA2\setup-token
+C:\ProgramData\AHA2\setup-token
 ```
 
 打开登录页，选择初始化 Owner，输入：
@@ -132,13 +166,14 @@ Owner 创建后公开注册自动关闭，Setup Token 不再有效。
 ## 数据目录
 
 ```text
-C:\Users\toope\AppData\Local\AHA2
+C:\ProgramData\AHA2
 ```
 
-该目录位于 NTFS，只授权：
+默认目录的写权限应只授予：
 
 - 当前 Windows 用户
 - `NT AUTHORITY\SYSTEM`
+- 本机 Administrators
 
 包含：
 
@@ -150,17 +185,15 @@ Secret 值不会通过 API、Web、Event 或日志返回。
 
 ## Reverse proxy and embedded WebView compatibility
 
-Origin host validation is enabled by default. When a reverse proxy or embedded
-WebView cannot preserve a same-origin `Host` header, start AHA2 with:
+Origin host validation is enabled by default. Reverse proxies should preserve the browser-facing
+host as the upstream `Host`; in multi-level proxy deployments, the trusted inner proxy may take the
+first `X-Forwarded-Host` value supplied by the outer proxy and overwrite upstream `Host` with it.
+WebSocket deployments must also forward `Upgrade` and `Connection`.
 
-```text
---allow-cross-origin
-```
-
-The equivalent environment variable is `AHA2_ALLOW_CROSS_ORIGIN=1`. This
-disables Origin host validation for login, registration, and authenticated
-write requests. Authenticated write requests still require the session CSRF
-token.
+`--allow-cross-origin` (or `AHA2_ALLOW_CROSS_ORIGIN=1`) globally disables this Origin check for
+login, registration, and authenticated writes. It is retained only for controlled diagnostics and
+should not be used as the permanent reverse-proxy fix. Authenticated writes still require the
+session CSRF token.
 
 ## Managed Process
 
@@ -221,11 +254,19 @@ SHA256SUMS
 .\scripts\build-windows-installer.ps1 -ValidateOnly
 ```
 
-已有 Windows amd64 主程序且安装了 Inno Setup 6 时，可构建安装包：
+仓库的全平台本地交叉构建会同时生成 Windows server 与 GUI tray；tray 使用
+`-H windowsgui`，因此从登录任务启动时不会附加控制台窗口：
+
+```bash
+bash scripts/build-all.sh
+```
+
+已有 Windows amd64 控制面和 tray 程序且安装了 Inno Setup 6 时，可构建安装包：
 
 ```powershell
 .\scripts\build-windows-installer.ps1 `
   -InputExe .\dist\aha2-windows-amd64.exe `
+  -InputTrayExe .\dist\aha2-tray-windows-amd64.exe `
   -OutputDir .\dist\installer `
   -Version 0.1.0
 ```

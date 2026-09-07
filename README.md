@@ -12,7 +12,7 @@ Project → Workspace → Task → Turn → Task Memory → Knowledge → Next T
 
 ### Windows
 
-运行 `AHA2-Setup-x64.exe`。安装向导可选择程序目录、数据目录、监听 IP、端口和局域网防火墙规则，安装后自动注册并启动 Windows 服务。
+运行 `AHA2-Setup-x64.exe`。安装包同时安装 `aha2.exe` 控制面与 GUI 子系统的 `aha2-tray.exe`。安装向导可选择程序目录、数据目录、监听 IP、端口、远程 Agent API 地址和局域网防火墙规则；唯一的 `AHA2 User` 登录计划任务会以原登录用户的最低权限直接启动托盘程序，由托盘管理控制面进程，从而继承该用户的 Git、Codex、Claude、WSL 与 SSH 环境。旧版 LocalSystem 服务会保持禁用并尽力删除。
 
 ### Debian / Ubuntu
 

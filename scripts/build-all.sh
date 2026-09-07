@@ -20,4 +20,7 @@ for target in linux/amd64 linux/arm64 windows/amd64 windows/arm64 darwin/amd64 d
   [[ "$os" == "windows" ]] && suffix=".exe"
   echo "Building $os/$arch"
   CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" "$go_bin" build -trimpath -ldflags="-s -w" -o "dist/aha2-${os}-${arch}${suffix}" ./cmd/aha
+  if [[ "$os" == "windows" ]]; then
+    CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" "$go_bin" build -trimpath -ldflags="-s -w -H windowsgui" -o "dist/aha2-tray-${os}-${arch}.exe" ./cmd/aha-tray
+  fi
 done

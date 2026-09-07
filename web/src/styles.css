@@ -115,6 +115,9 @@ button.danger:hover { background: #fff1f0; }
 .ws-row .proto-badges .proto { white-space: nowrap; }
 .ws-meta small { color: var(--muted); font-size: 9px; }
 .ws-meta strong { display: block; margin-top: 3px; font-size: 11px; }
+.workspace-detection { display: grid; min-width: 0; gap: 3px; }
+.workspace-detection > small { max-width: 260px; overflow: hidden; color: var(--muted); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-detection > small.bad { color: var(--red); }
 .task-row { grid-template-columns: minmax(0,1fr) auto 40px; }
 .task-row > .icon-button { align-self: center; }
 .task-filters { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }

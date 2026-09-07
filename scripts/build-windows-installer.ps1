@@ -2,6 +2,7 @@
 param(
     [string]$RepoPath = (Split-Path -Parent $PSScriptRoot),
     [string]$InputExe = "",
+    [string]$InputTrayExe = "",
     [string]$OutputDir = "",
     [string]$Version = "dev",
     [string]$ISCCPath = "",
@@ -13,19 +14,27 @@ Set-StrictMode -Version Latest
 
 $repo = [IO.Path]::GetFullPath($RepoPath)
 $iss = Join-Path $repo "installer\windows\AHA2.iss"
+$userTaskScript = Join-Path $repo "installer\windows\Register-AHA2UserTask.ps1"
+$dataDirScript = Join-Path $repo "installer\windows\Prepare-AHA2DataDir.ps1"
 if (-not (Test-Path -LiteralPath (Join-Path $repo "go.mod") -PathType Leaf)) {
     throw "RepoPath is not an AHA2 repository: $repo"
 }
-if (-not (Test-Path -LiteralPath $iss -PathType Leaf)) {
-    throw "Inno Setup script not found: $iss"
+foreach ($requiredFile in @($iss, $userTaskScript, $dataDirScript)) {
+    if (-not (Test-Path -LiteralPath $requiredFile -PathType Leaf)) {
+        throw "Windows installer source is missing: $requiredFile"
+    }
 }
 if ([string]::IsNullOrWhiteSpace($InputExe)) {
     $InputExe = Join-Path $repo "dist\aha2-windows-amd64.exe"
+}
+if ([string]::IsNullOrWhiteSpace($InputTrayExe)) {
+    $InputTrayExe = Join-Path $repo "dist\aha2-tray-windows-amd64.exe"
 }
 if ([string]::IsNullOrWhiteSpace($OutputDir)) {
     $OutputDir = Join-Path $repo "dist\installer"
 }
 $inputPath = [IO.Path]::GetFullPath($InputExe)
+$trayInputPath = [IO.Path]::GetFullPath($InputTrayExe)
 $outputPath = [IO.Path]::GetFullPath($OutputDir)
 $normalizedVersion = $Version.Trim()
 if ($normalizedVersion.StartsWith("v", [StringComparison]::OrdinalIgnoreCase)) {
@@ -39,19 +48,36 @@ $source = Get-Content -Raw -Encoding UTF8 -LiteralPath $iss
 $requiredContracts = @(
     '#define ServiceName "AHA2"',
     '#define ListenAddress "127.0.0.1:8766"',
-    "service run --listen ' + SelectedListenAddress() + ' --data-dir",
+    '#define SourceTrayExe',
+    'DestName: "aha2.exe"',
+    'DestName: "aha2-tray.exe"',
+    '--server "'' + ExpandConstant(''{app}\aha2.exe'')',
     "CreateInputDirPage",
     "CreateInputOptionPage",
     "SelectedListenAddress",
     "RegisterPreviousData",
     "remoteip=localsubnet profile=private",
-    "{code:SelectedDataDir}",
     "{code:LocalManagementURL}",
     "{commonappdata}\AHA2",
-    "start= delayed-auto",
-    "AHA2 local AI task and agent control plane",
-    "actions= restart/5000/restart/15000/restart/60000",
-    "RunSC('delete",
+    "runasoriginaluser",
+    "TrayParameters",
+    "StopInstalledUserProcesses",
+    "Get-Process -Name ''aha2-tray'',''aha2''",
+    "DisableAndStopLegacyAHA2Service(True)",
+    "RemoveLegacyAHA2Service()",
+    "Register-AHA2UserTask.ps1",
+    "Prepare-AHA2DataDir.ps1",
+    "[InstallDelete]",
+    'Type: files; Name: "{app}\Run-AHA2User.vbs"',
+    "ConfigureAHA2UserTask",
+    "AHA2UserTaskName",
+    "RemoveAHA2UserTask",
+    "ExecAsOriginalUser",
+    "AgentAPIPage",
+    "--agent-api-url",
+    "--allow-insecure-agent-api",
+    "WaitForAHA2Health",
+    "LocalHealthURL",
     "http://127.0.0.1:' + SelectedPort()"
 )
 foreach ($contract in $requiredContracts) {
@@ -59,17 +85,40 @@ foreach ($contract in $requiredContracts) {
         throw "Installer contract is missing: $contract"
     }
 }
-if ($ValidateOnly) {
-    if (Test-Path -LiteralPath $inputPath -PathType Leaf) {
-        Write-Output "Installer definition valid; input executable found."
-    } else {
-        Write-Output "Installer definition valid; input executable is not present, so compilation was not attempted."
+$userTaskSource = Get-Content -Raw -Encoding UTF8 -LiteralPath $userTaskScript
+foreach ($contract in @("TrayExecutable", "ServerExecutable", "New-ScheduledTaskAction -Execute `$trayPath", "--server", "--listen", "--data-dir", "New-ScheduledTaskTrigger -AtLogOn", "WindowsIdentity]::GetCurrent().Name", "Win32_ComputerSystem", "OrdinalIgnoreCase", "-LogonType Interactive", "-RunLevel Limited", "-RestartCount 3", "-RestartInterval", "Register-ScheduledTask", "Start-ScheduledTask", "AllowInsecureAgentAPI")) {
+    if (-not $userTaskSource.Contains($contract)) {
+        throw "Windows tray login task contract is missing: $contract"
     }
+}
+foreach ($forbidden in @("wscript.exe", ".vbs", "powershell.exe", "service run", "SYSTEM")) {
+    if ($userTaskSource.Contains($forbidden)) {
+        throw "Windows login task still contains a forbidden long-running host contract: $forbidden"
+    }
+}
+$dataDirSource = Get-Content -Raw -Encoding UTF8 -LiteralPath $dataDirScript
+foreach ($contract in @("Get-ScheduledTask", "Principal.UserId", "SetAccessRuleProtection", "SecurityIdentifier]'S-1-5-18'", "SecurityIdentifier]'S-1-5-32-544'", "Set-Acl", "FileSystemRights]::Modify", "New-Item -ItemType Directory")) {
+    if (-not $dataDirSource.Contains($contract)) {
+        throw "Windows user data directory contract is missing: $contract"
+    }
+}
+foreach ($forbidden in @("service run --listen", "actions= restart/", "ConfigureAndStartAHA2Service", 'Source: "Run-AHA2User.vbs"', "wscript.exe")) {
+    if ($source.Contains($forbidden)) {
+        throw "Installer still contains a forbidden legacy runtime contract: $forbidden"
+    }
+}
+if ($ValidateOnly) {
+    $serverState = if (Test-Path -LiteralPath $inputPath -PathType Leaf) {"found"} else {"not present"}
+    $trayState = if (Test-Path -LiteralPath $trayInputPath -PathType Leaf) {"found"} else {"not present"}
+    Write-Output "Installer definition valid; server input $serverState; tray input $trayState."
     exit 0
 }
 
 if (-not (Test-Path -LiteralPath $inputPath -PathType Leaf)) {
-    throw "Windows amd64 executable not found: $inputPath"
+    throw "Windows amd64 server executable not found: $inputPath"
+}
+if (-not (Test-Path -LiteralPath $trayInputPath -PathType Leaf)) {
+    throw "Windows amd64 tray executable not found: $trayInputPath"
 }
 if ([string]::IsNullOrWhiteSpace($ISCCPath)) {
     $command = Get-Command "ISCC.exe" -ErrorAction SilentlyContinue
@@ -77,6 +126,7 @@ if ([string]::IsNullOrWhiteSpace($ISCCPath)) {
         $ISCCPath = $command.Path
     } else {
         $candidates = @(
+            (Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 6\ISCC.exe"),
             (Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"),
             (Join-Path $env:ProgramFiles "Inno Setup 6\ISCC.exe")
         )
@@ -88,7 +138,7 @@ if ([string]::IsNullOrWhiteSpace($ISCCPath) -or -not (Test-Path -LiteralPath $IS
 }
 
 New-Item -ItemType Directory -Force -Path $outputPath | Out-Null
-& $ISCCPath "/DMyAppVersion=$normalizedVersion" "/DSourceExe=$inputPath" "/DOutputDir=$outputPath" $iss
+& $ISCCPath "/DMyAppVersion=$normalizedVersion" "/DSourceExe=$inputPath" "/DSourceTrayExe=$trayInputPath" "/DOutputDir=$outputPath" $iss
 if ($LASTEXITCODE -ne 0) {
     throw "Inno Setup compilation failed with exit code $LASTEXITCODE."
 }

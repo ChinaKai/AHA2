@@ -1,3 +1,5 @@
+import type {Workspace, WorkspaceProbe} from "./types.js";
+
 export interface NavigationSnapshot {
   view?: string;
   projectID?: string;
@@ -6,6 +8,61 @@ export interface NavigationSnapshot {
   taskTab?: string;
   draft?: string;
   drafts?: Record<string, string>;
+}
+
+function escapeWorkspaceHTML(value: unknown): string {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function failedProbe(label: string, probe?: WorkspaceProbe): string {
+  if (probe?.status === "not_installed") return `${label} 未安装`;
+  if (probe?.status === "execution_failed") return probe.error || `${label} 检测执行失败`;
+  return "";
+}
+
+export function renderWorkspaceDetection(workspace: Workspace): string {
+  const capabilities = workspace.capabilities || {};
+  const repository = workspace.repository || {};
+  const workspaceProbe = capabilities.workspace;
+  const badges: string[] = [];
+  const details: Array<{kind: "bad" | "muted"; text: string}> = [];
+  if (capabilities.codex?.status === "ready") {
+    badges.push(`<span class="proto codex" title="Codex ${escapeWorkspaceHTML(capabilities.codex.version || "")}">Codex</span>`);
+  }
+  if (capabilities.claude?.status === "ready") {
+    badges.push(`<span class="proto claude" title="Claude Code ${escapeWorkspaceHTML(capabilities.claude.version || "")}">Claude</span>`);
+  }
+  if (workspaceProbe?.status === "unavailable") {
+    details.push({kind: "bad", text: workspaceProbe.error || "Workspace 不可访问"});
+  } else {
+    if (repository.status === "ready") {
+      details.push({kind: "muted", text: `Git${repository.branch ? ` · ${repository.branch}` : ""}`});
+    } else if (repository.status === "not_repository") {
+      details.push({kind: "muted", text: repository.message || "非 Git 仓库"});
+    } else if (repository.status === "execution_failed") {
+      details.push({kind: "bad", text: repository.error || "Git 检测执行失败"});
+    }
+    if (capabilities.platform?.status === "execution_failed") {
+      details.push({kind: "bad", text: capabilities.platform.error || "平台检测执行失败"});
+    }
+    for (const [label, probe] of [["Codex", capabilities.codex], ["Claude", capabilities.claude]] as Array<[string, WorkspaceProbe | undefined]>) {
+      const text = failedProbe(label, probe);
+      if (text) details.push({kind: probe?.status === "execution_failed" ? "bad" : "muted", text});
+    }
+  }
+  const summary = badges.length
+    ? `<span class="proto-badges">${badges.join("")}</span>`
+    : workspace.health === "unknown"
+      ? `<span class="status warn">未检测</span>`
+      : workspaceProbe?.status === "unavailable"
+        ? `<span class="status bad">Workspace 不可访问</span>`
+        : `<span class="status warn">无可用 Backend</span>`;
+  return `<div class="workspace-detection">${summary}${details.map(detail => `<small class="${detail.kind}" title="${escapeWorkspaceHTML(detail.text)}">${escapeWorkspaceHTML(detail.text)}</small>`).join("")}</div>`;
 }
 
 export const TASK_SLASH_COMMANDS = [

@@ -11,7 +11,7 @@ import {bindRuntimeFields, runtimeFieldsHTML, setRuntimeBackends, syncRuntimeFie
 import {renderComposerAgentOptions, renderComposerTools} from "./task_composer.js";
 import {renderTaskToolButtons, renderTaskToolContent, renderTaskToolPanel} from "./task_tools.js";
 import type {TaskTool} from "./task_tools.js";
-import {TASK_SLASH_COMMANDS, bindMessageBubbleControls, clearNavigationSnapshot, exactSlashCommand, executeAgentSessionAction, loadNavigationSnapshot, matchingSlashCommands, saveNavigationSnapshot} from "./ui_helpers.js";
+import {TASK_SLASH_COMMANDS, bindMessageBubbleControls, clearNavigationSnapshot, exactSlashCommand, executeAgentSessionAction, loadNavigationSnapshot, matchingSlashCommands, renderWorkspaceDetection, saveNavigationSnapshot} from "./ui_helpers.js";
 import {
   compactNumber,
   contextPercent,
@@ -185,6 +185,8 @@ function statusLabel(status: string): string {
     stale: "Stale",
     ready: "Ready",
     unknown: "未检测",
+    degraded: "部分可用",
+    error: "不可访问",
   };
   return labels[status] || status;
 }
@@ -522,16 +524,6 @@ const PROVIDER_PRESETS: Record<string, {name: string; base_url: string; anthropi
   ollama: {name: "Ollama 本地", base_url: "http://localhost:11434/v1"},
   custom: {name: "", base_url: ""},
 };
-
-function workspaceBackendInfo(ws: Workspace): string {
-  const caps = (ws.capabilities || {}) as Record<string, {status?: string; version?: string}>;
-  const parts: string[] = [];
-  if (caps.codex?.status === "ready") parts.push(`<span class="proto codex" title="Codex ${caps.codex.version || ""}">Codex</span>`);
-  if (caps.claude?.status === "ready") parts.push(`<span class="proto claude" title="Claude Code ${caps.claude.version || ""}">Claude</span>`);
-  if (parts.length) return `<span class="proto-badges">${parts.join("")}</span>`;
-  if (ws.health === "unknown") return `<span class="status warn">未检测</span>`;
-  return `<span class="status warn">无可用 Backend</span>`;
-}
 
 function backendProtocolLabel(model: Model): string {
   const wire = model.wire_api || (model.backend === "claude" ? "anthropic_messages" : "responses");
@@ -922,7 +914,7 @@ function projectDetailView(project: Project): string {
   const rows = workspaces.map(item => `<article class="list-row ws-row ${item.read_only ? "read-only" : ""}">
     <div class="item-title">${item.locality === "remote" ? icon("server") : icon("monitor")}<div><strong>${escapeHTML(item.name)}</strong><small>${escapeHTML(item.root_path)}</small></div></div>
     <div class="ws-meta"><small>${escapeHTML(item.transport)}${item.distro ? ` · ${escapeHTML(item.distro)}` : ""}</small><strong>${item.read_only ? `只读 · ${escapeHTML(item.owner_device_id || "其他设备")}` : `本机 · ${escapeHTML(item.owner_device_id || "待首次同步绑定")}`}</strong></div>
-    ${workspaceBackendInfo(item)}
+    ${renderWorkspaceDetection(item)}
     ${item.read_only ? `<button type="button" data-takeover-workspace="${item.id}">${icon("copy")}接管到本机</button><span class="status warn">远端只读</span>` : `<button data-detect="${item.id}">${icon("refresh")}检测</button><span class="row-actions"><button type="button" data-edit-workspace="${item.id}" class="icon-button" title="编辑 Workspace">${icon("edit")}</button><button type="button" data-delete-workspace="${item.id}" class="icon-button" title="删除 Workspace">${icon("close")}</button></span>`}
   </article>`).join("");
   return shell(`<section class="page">
@@ -1850,10 +1842,13 @@ function bindCommon(): void {
   document.querySelectorAll<HTMLElement>("[data-detect]").forEach(button => button.addEventListener("click", () => {
     const id = button.dataset.detect!;
     void runWithFeedback(button, "检测中", async () => {
-      const result = await api.detectWorkspace(id);
-      setMessage("notice", `检测完成：${statusLabel(result.workspace.health)}`);
-      await loadAll();
-      render();
+      try {
+        const result = await api.detectWorkspace(id);
+        setMessage("notice", `检测完成：${statusLabel(result.workspace.health)}`);
+      } finally {
+        await loadAll();
+        render();
+      }
     });
   }));
   document.querySelectorAll<HTMLElement>("[data-task]").forEach(button => button.addEventListener("click", async () => {

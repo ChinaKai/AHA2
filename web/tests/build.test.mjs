@@ -4,6 +4,44 @@ import {readFile} from "node:fs/promises";
 import {resolve} from "node:path";
 import {pathToFileURL} from "node:url";
 
+test("workspace detection renders inaccessible, Git, and backend probe states", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const {renderWorkspaceDetection} = await import(pathToFileURL(resolve(root, "dist", "ui_helpers.js")));
+  const base = {id: "workspace-1", project_id: "project-1", name: "Workspace", locality: "local", transport: "native", root_path: "C:/repo", ssh_password_configured: false, health: "degraded"};
+  const unavailable = renderWorkspaceDetection({
+    ...base,
+    health: "error",
+    capabilities: {workspace: {status: "unavailable", error: "Workspace 不可访问: <denied>"}},
+    repository: {},
+  });
+  assert.match(unavailable, /Workspace 不可访问/);
+  assert.match(unavailable, /&lt;denied&gt;/);
+  assert.doesNotMatch(unavailable, /<denied>/);
+
+  const probes = renderWorkspaceDetection({
+    ...base,
+    capabilities: {
+      workspace: {status: "ready"},
+      platform: {status: "execution_failed", error: "平台检测执行失败: timeout"},
+      codex: {status: "not_installed"},
+      claude: {status: "execution_failed", error: "Claude 检测执行失败: bad config"},
+    },
+    repository: {status: "not_repository", is_git: false, message: "该目录不是 Git 仓库"},
+  });
+  assert.match(probes, /该目录不是 Git 仓库/);
+  assert.match(probes, /Codex 未安装/);
+  assert.match(probes, /Claude 检测执行失败: bad config/);
+  assert.match(probes, /平台检测执行失败: timeout/);
+
+  const gitFailure = renderWorkspaceDetection({
+    ...base,
+    capabilities: {workspace: {status: "ready"}, codex: {status: "ready", version: "1.0"}},
+    repository: {status: "execution_failed", is_git: false, error: "Git 检测执行失败: permission denied"},
+  });
+  assert.match(gitFailure, /Git 检测执行失败: permission denied/);
+  assert.match(gitFailure, /proto codex/);
+});
+
 test("read-only task history opens on the latest page and lazily loads older rows", async () => {
   const root = resolve(import.meta.dirname, "..");
   const script = await readFile(resolve(root, "dist", "app.js"), "utf8");

@@ -4,6 +4,9 @@
 #ifndef SourceExe
   #define SourceExe "..\..\dist\aha2-windows-amd64.exe"
 #endif
+#ifndef SourceTrayExe
+  #define SourceTrayExe "..\..\dist\aha2-tray-windows-amd64.exe"
+#endif
 #ifndef OutputDir
   #define OutputDir "..\..\dist\installer"
 #endif
@@ -33,23 +36,28 @@ UninstallDisplayIcon={app}\aha2.exe
 CloseApplications=yes
 RestartApplications=no
 
-[Dirs]
-Name: "{code:SelectedDataDir}"; Flags: uninsneveruninstall
-
 [Files]
 Source: "{#SourceExe}"; DestDir: "{app}"; DestName: "aha2.exe"; Flags: ignoreversion
+Source: "{#SourceTrayExe}"; DestDir: "{app}"; DestName: "aha2-tray.exe"; Flags: ignoreversion
+Source: "Register-AHA2UserTask.ps1"; DestDir: "{app}"; Flags: ignoreversion
+Source: "Prepare-AHA2DataDir.ps1"; DestDir: "{app}"; Flags: ignoreversion
+
+[InstallDelete]
+Type: files; Name: "{app}\Run-AHA2User.vbs"
 
 [Icons]
 Name: "{group}\AHA2"; Filename: "{code:LocalManagementURL}"
+Name: "{group}\启动 AHA2"; Filename: "{sys}\schtasks.exe"; Parameters: "/Run /TN ""AHA2 User"""; WorkingDir: "{app}"; Flags: runminimized
 Name: "{group}\卸载 AHA2"; Filename: "{uninstallexe}"
 
 [Run]
-Filename: "{code:LocalManagementURL}"; Description: "打开 AHA2 管理页面"; Flags: postinstall shellexec skipifsilent
+Filename: "{code:LocalManagementURL}"; Description: "打开 AHA2 管理页面"; Flags: postinstall shellexec skipifsilent runasoriginaluser
 
 [Code]
 const
   AHA2ServiceName = '{#ServiceName}';
   AHA2FirewallRuleName = '{#FirewallRuleName}';
+  AHA2UserTaskName = 'AHA2 User';
 
 var
   DataDirPage: TInputDirWizardPage;
@@ -57,6 +65,11 @@ var
   PortPage: TInputQueryWizardPage;
   LANPage: TInputQueryWizardPage;
   FirewallPage: TInputOptionWizardPage;
+  AgentAPIPage: TInputQueryWizardPage;
+  InsecureAgentAPIPage: TInputOptionWizardPage;
+  UserTaskWasPresent: Boolean;
+  UserProcessWasRunning: Boolean;
+  InstallCommitted: Boolean;
 
 function SelectedDataDir(Param: String): String;
 begin
@@ -84,6 +97,53 @@ end;
 function LocalManagementURL(Param: String): String;
 begin
   Result := 'http://127.0.0.1:' + SelectedPort();
+end;
+
+function LocalHealthURL(): String;
+begin
+  Result := LocalManagementURL('') + '/healthz';
+end;
+
+function SelectedAgentAPIURL(): String;
+begin
+  Result := Trim(AgentAPIPage.Values[0]);
+  while (Length(Result) > 0) and (Result[Length(Result)] = '/') do
+    Delete(Result, Length(Result), 1);
+end;
+
+function AllowInsecureAgentAPI(): Boolean;
+begin
+  Result := InsecureAgentAPIPage.Values[0];
+end;
+
+function TrayParameters(Param: String): String;
+begin
+  Result := '--server "' + ExpandConstant('{app}\aha2.exe') + '" --listen "' +
+    SelectedListenAddress() + '" --data-dir "' + SelectedDataDir('') + '"';
+  if SelectedAgentAPIURL() <> '' then
+    Result := Result + ' --agent-api-url "' + SelectedAgentAPIURL() + '"';
+  if (SelectedAgentAPIURL() <> '') and AllowInsecureAgentAPI() then
+    Result := Result + ' --allow-insecure-agent-api';
+end;
+
+function RegisterUserTaskParameters(Param: String): String;
+begin
+  Result := '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' +
+    ExpandConstant('{app}\Register-AHA2UserTask.ps1') + '" -TrayExecutable "' +
+    ExpandConstant('{app}\aha2-tray.exe') + '" -ServerExecutable "' +
+    ExpandConstant('{app}\aha2.exe') + '" -Listen "' + SelectedListenAddress() +
+    '" -DataDir "' + SelectedDataDir('') + '"';
+  if SelectedAgentAPIURL() <> '' then
+    Result := Result + ' -AgentAPIURL "' + SelectedAgentAPIURL() + '"';
+  if (SelectedAgentAPIURL() <> '') and AllowInsecureAgentAPI() then
+    Result := Result + ' -AllowInsecureAgentAPI';
+end;
+
+function PrepareDataDirParameters(Param: String): String;
+begin
+  Result := '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' +
+    ExpandConstant('{app}\Prepare-AHA2DataDir.ps1') + '" -DataDir "' +
+    SelectedDataDir('') + '" -TaskName "' + AHA2UserTaskName + '"';
 end;
 
 function IsLANMode(): Boolean;
@@ -170,6 +230,18 @@ begin
     '安装器只会为 Private profile 和本地子网创建 TCP 入站规则。', False, False);
   FirewallPage.Add('创建 AHA2 Windows 防火墙规则');
   FirewallPage.Values[0] := GetPreviousData('Firewall', '0') = '1';
+
+  AgentAPIPage := CreateInputQueryPage(FirewallPage.ID,
+    '配置 Agent API', '远程 Workspace 中的 Agent 如何访问 AHA2？',
+    '仅本机使用可留空。SSH/远程 Workspace 请填写可从远端访问的 HTTPS 地址，或受信开发网 HTTP 地址。');
+  AgentAPIPage.Add('Agent API URL（可选）：', False);
+  AgentAPIPage.Values[0] := GetPreviousData('AgentAPIURL', '');
+
+  InsecureAgentAPIPage := CreateInputOptionPage(AgentAPIPage.ID,
+    'Agent API 传输安全', '是否允许非本机 HTTP 地址？',
+    '仅在明确受信的开发网络中启用；公网必须使用 HTTPS。', False, False);
+  InsecureAgentAPIPage.Add('允许受信开发网络中的非 loopback HTTP Agent API');
+  InsecureAgentAPIPage.Values[0] := GetPreviousData('AllowInsecureAgentAPI', '0') = '1';
 end;
 
 function ShouldSkipPage(PageID: Integer): Boolean;
@@ -180,6 +252,7 @@ end;
 function NextButtonClick(CurPageID: Integer): Boolean;
 var
   Port: Integer;
+  AgentURL, LowerAgentURL: String;
 begin
   Result := True;
   if CurPageID = DataDirPage.ID then
@@ -187,7 +260,7 @@ begin
     if (SelectedDataDir('') = '') or (ExtractFileDrive(SelectedDataDir('')) = '') or
       (Copy(SelectedDataDir(''), 1, 2) = '\\') or (Pos('"', SelectedDataDir('')) > 0) then
     begin
-      MsgBox('请选择本机磁盘上的绝对数据目录；Windows 服务不能使用网络共享路径。', mbError, MB_OK);
+      MsgBox('请选择当前登录用户可写的本机绝对数据目录；SQLite 数据目录不能使用网络共享路径。', mbError, MB_OK);
       Result := False;
     end;
   end
@@ -204,6 +277,31 @@ begin
   begin
     MsgBox('请输入 IPv4 地址，例如 0.0.0.0 或 192.168.1.10。', mbError, MB_OK);
     Result := False;
+  end
+  else if CurPageID = AgentAPIPage.ID then
+  begin
+    AgentURL := SelectedAgentAPIURL();
+    LowerAgentURL := Lowercase(AgentURL);
+    if (AgentURL <> '') and
+      ((Pos('"', AgentURL) > 0) or (Pos(' ', AgentURL) > 0) or
+       ((Copy(LowerAgentURL, 1, 7) <> 'http://') and
+        (Copy(LowerAgentURL, 1, 8) <> 'https://'))) then
+    begin
+      MsgBox('Agent API URL 必须是无空格、无凭据的 http:// 或 https:// 基址。', mbError, MB_OK);
+      Result := False;
+    end;
+  end
+  else if CurPageID = InsecureAgentAPIPage.ID then
+  begin
+    LowerAgentURL := Lowercase(SelectedAgentAPIURL());
+    if (Copy(LowerAgentURL, 1, 7) = 'http://') and
+      (Copy(LowerAgentURL, 1, 17) <> 'http://127.0.0.1') and
+      (Copy(LowerAgentURL, 1, 16) <> 'http://localhost') and
+      (not AllowInsecureAgentAPI()) then
+    begin
+      MsgBox('非 loopback HTTP Agent API 仅允许用于受信开发网络；请勾选确认或改用 HTTPS。', mbError, MB_OK);
+      Result := False;
+    end;
   end;
 end;
 
@@ -220,6 +318,11 @@ begin
     SetPreviousData(PreviousDataKey, 'Firewall', '1')
   else
     SetPreviousData(PreviousDataKey, 'Firewall', '0');
+  SetPreviousData(PreviousDataKey, 'AgentAPIURL', SelectedAgentAPIURL());
+  if AllowInsecureAgentAPI() then
+    SetPreviousData(PreviousDataKey, 'AllowInsecureAgentAPI', '1')
+  else
+    SetPreviousData(PreviousDataKey, 'AllowInsecureAgentAPI', '0');
 end;
 
 function RunSC(const Arguments: String): Boolean;
@@ -235,10 +338,35 @@ begin
   Result := RunSC('query "' + AHA2ServiceName + '"');
 end;
 
-procedure RequireSC(const Arguments, FailureMessage: String);
+function RunScheduledTask(const Arguments: String): Boolean;
+var
+  ResultCode: Integer;
 begin
-  if not RunSC(Arguments) then
-    RaiseException(FailureMessage);
+  Result := Exec(ExpandConstant('{sys}\schtasks.exe'), Arguments, '', SW_HIDE,
+    ewWaitUntilTerminated, ResultCode) and (ResultCode = 0);
+end;
+
+function UserTaskExists(): Boolean;
+begin
+  Result := RunScheduledTask('/Query /TN "' + AHA2UserTaskName + '"');
+end;
+
+procedure StopAHA2UserTask();
+begin
+  if UserTaskExists() then
+  begin
+    RunScheduledTask('/Change /Disable /TN "' + AHA2UserTaskName + '"');
+    RunScheduledTask('/End /TN "' + AHA2UserTaskName + '"');
+  end;
+end;
+
+procedure RemoveAHA2UserTask();
+begin
+  if UserTaskExists() then
+  begin
+    StopAHA2UserTask();
+    RunScheduledTask('/Delete /F /TN "' + AHA2UserTaskName + '"');
+  end;
 end;
 
 procedure StopAHA2Service();
@@ -246,15 +374,88 @@ var
   ResultCode: Integer;
 begin
   if ServiceExists() then
+  begin
     Exec(ExpandConstant('{sys}\net.exe'), 'stop "' + AHA2ServiceName + '" /y',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  end;
 end;
 
-function ServiceBinaryPath(): String;
+function AHA2IsHealthy(): Boolean;
+var
+  Request: Variant;
+  ResponseText: String;
 begin
-  Result := '\"' + ExpandConstant('{app}\aha2.exe') +
-    '\" service run --listen ' + SelectedListenAddress() + ' --data-dir \"' +
-    SelectedDataDir('') + '\"';
+  Result := False;
+  try
+    Request := CreateOleObject('WinHttp.WinHttpRequest.5.1');
+    Request.SetTimeouts(2000, 2000, 2000, 2000);
+    Request.Open('GET', LocalHealthURL(), False);
+    Request.Send('');
+    ResponseText := Request.ResponseText;
+    Result := (Request.Status = 200) and
+      (Pos('"service":"aha2"', ResponseText) > 0);
+  except
+    Result := False;
+  end;
+end;
+
+procedure WaitForAHA2Health();
+var
+  Attempt: Integer;
+begin
+  for Attempt := 1 to 60 do
+  begin
+    if AHA2IsHealthy() then
+      Exit;
+    Sleep(500);
+  end;
+  RaiseException('AHA2 登录任务已启动，但 30 秒内健康检查未通过。');
+end;
+
+function StopInstalledUserProcesses(): Boolean;
+var
+  ResultCode: Integer;
+  Script: String;
+begin
+  { AHA2 is a machine-level installation with one login task. Stop both the
+    current and any previous-install-path runtimes before replacing files. }
+  Script := '$items=@(Get-Process -Name ''aha2-tray'',''aha2'' -ErrorAction SilentlyContinue);' +
+    'if($items.Count -eq 0){exit 3};$items | Stop-Process -Force -ErrorAction SilentlyContinue;exit 0';
+  Result := Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
+    '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "' + Script + '"',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode) and (ResultCode = 0);
+end;
+
+function StartInstalledUserProcess(): Boolean;
+var
+  ResultCode: Integer;
+begin
+  Result := ExecAsOriginalUser(
+    ExpandConstant('{app}\aha2-tray.exe'), TrayParameters(''), ExpandConstant('{app}'),
+    SW_HIDE, ewNoWait, ResultCode);
+end;
+
+procedure ConfigureAHA2UserTask();
+var
+  ResultCode: Integer;
+begin
+  if not ExecAsOriginalUser(
+    ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
+    RegisterUserTaskParameters(''), ExpandConstant('{app}'), SW_HIDE,
+    ewWaitUntilTerminated, ResultCode) or (ResultCode <> 0) then
+  begin
+    if not UserTaskWasPresent then
+      RemoveAHA2UserTask();
+    RaiseException('无法为原始登录用户注册 AHA2 登录任务。');
+  end;
+  if not Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
+    PrepareDataDirParameters(''), ExpandConstant('{app}'), SW_HIDE,
+    ewWaitUntilTerminated, ResultCode) or (ResultCode <> 0) then
+  begin
+    if not UserTaskWasPresent then
+      RemoveAHA2UserTask();
+    RaiseException('无法为原始登录用户准备 AHA2 数据目录权限。');
+  end;
 end;
 
 procedure ConfigureFirewall();
@@ -273,32 +474,66 @@ begin
       RaiseException('无法创建 AHA2 Windows 防火墙规则。');
 end;
 
-procedure ConfigureAndStartAHA2Service();
-var
-  BinaryPath: String;
+procedure DisableAndStopLegacyAHA2Service(Required: Boolean);
 begin
-  BinaryPath := ServiceBinaryPath();
-  if not ServiceExists() then
-    RequireSC('create "' + AHA2ServiceName + '" start= auto binPath= "' + BinaryPath + '"',
-      '无法注册 AHA2 Windows 服务。');
-  RequireSC('config "' + AHA2ServiceName + '" start= delayed-auto binPath= "' + BinaryPath + '"',
-    '无法配置 AHA2 Windows 服务。');
-  RequireSC('description "' + AHA2ServiceName + '" "AHA2 local AI task and agent control plane"',
-    '无法配置 AHA2 服务描述。');
-  RequireSC('failure "' + AHA2ServiceName + '" reset= 86400 actions= restart/5000/restart/15000/restart/60000',
-    '无法配置 AHA2 服务失败恢复。');
-  RequireSC('failureflag "' + AHA2ServiceName + '" 1',
-    '无法启用 AHA2 服务失败恢复。');
-  ConfigureFirewall();
-  RequireSC('start "' + AHA2ServiceName + '"', '无法启动 AHA2 Windows 服务。');
+  if ServiceExists() then
+  begin
+    if Required and (not RunSC('config "' + AHA2ServiceName + '" start= disabled')) then
+      RaiseException('无法禁用旧版 AHA2 LocalSystem 服务；为避免下次启动抢占端口，安装已中止。');
+    if not Required then
+      RunSC('config "' + AHA2ServiceName + '" start= disabled');
+    StopAHA2Service();
+  end;
+end;
+
+procedure RemoveLegacyAHA2Service();
+begin
+  if ServiceExists() then
+  begin
+    DisableAndStopLegacyAHA2Service(True);
+    if not RunSC('delete "' + AHA2ServiceName + '"') then
+      Log('Legacy AHA2 service could not be deleted immediately; it remains stopped and disabled.');
+  end;
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssInstall then
-    StopAHA2Service()
+  begin
+    UserTaskWasPresent := UserTaskExists();
+    DisableAndStopLegacyAHA2Service(True);
+    StopAHA2UserTask();
+    UserProcessWasRunning := StopInstalledUserProcesses();
+  end
   else if CurStep = ssPostInstall then
-    ConfigureAndStartAHA2Service();
+  begin
+    ConfigureFirewall();
+    ConfigureAHA2UserTask();
+    if not RunScheduledTask('/Run /TN "' + AHA2UserTaskName + '"') then
+      RaiseException('无法启动 AHA2 登录任务。');
+    WaitForAHA2Health();
+    RemoveLegacyAHA2Service();
+    InstallCommitted := True;
+  end;
+end;
+
+procedure DeinitializeSetup();
+begin
+  if not InstallCommitted then
+  begin
+    StopInstalledUserProcesses();
+    if not UserTaskWasPresent then
+      RemoveAHA2UserTask();
+    if UserTaskWasPresent then
+    begin
+      RunScheduledTask('/Change /Enable /TN "' + AHA2UserTaskName + '"');
+      if (not RunScheduledTask('/Run /TN "' + AHA2UserTaskName + '"')) and
+        UserProcessWasRunning then
+        StartInstalledUserProcess()
+    end
+    else if UserProcessWasRunning then
+      StartInstalledUserProcess();
+  end;
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
@@ -307,8 +542,9 @@ var
 begin
   if CurUninstallStep = usUninstall then
   begin
-    StopAHA2Service();
-    RunSC('delete "' + AHA2ServiceName + '"');
+    RemoveAHA2UserTask();
+    StopInstalledUserProcesses();
+    RemoveLegacyAHA2Service();
     Exec(ExpandConstant('{sys}\netsh.exe'),
       'advfirewall firewall delete rule name="' + AHA2FirewallRuleName + '"',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);

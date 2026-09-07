@@ -73,12 +73,36 @@ func ensureContextIgnored(ctx context.Context, item domain.Workspace, workDir st
 		_, err = file.WriteString("\n.aha2-context/\n")
 		return err
 	}
-	result, err := RunnerFor(item).Run(ctx, Command{
+	return ensureRemoteContextIgnored(ctx, item, workDir, RunnerFor(item))
+}
+
+func ensureRemoteContextIgnored(ctx context.Context, item domain.Workspace, workDir string, runner Runner) error {
+	workDir = path.Clean(strings.ReplaceAll(workDir, "\\", "/"))
+	gitPath, err := runner.Run(ctx, Command{
+		Executable: "git",
+		Args:       []string{"-C", workDir, "rev-parse", "--git-path", "info/exclude"},
+		Dir:        workDir,
+		Timeout:    20 * time.Second,
+	}, nil)
+	// Context materialization also supports ordinary folders. Missing Git or a
+	// non-repository directory therefore means there is no Git exclude file to
+	// update, not that context creation should fail.
+	if err != nil || gitPath.ExitCode != 0 {
+		return nil
+	}
+	exclude := path.Clean(strings.ReplaceAll(strings.TrimSpace(gitPath.Stdout), "\\", "/"))
+	if exclude == "." || exclude == "" {
+		return nil
+	}
+	if !path.IsAbs(exclude) {
+		exclude = path.Join(workDir, exclude)
+	}
+	result, err := runner.Run(ctx, Command{
 		Executable: "sh",
-		Args: []string{"-c", `exclude="$(git -C "$1" rev-parse --git-path info/exclude 2>/dev/null || true)"; ` +
-			`if [ -n "$exclude" ] && ! grep -qxF '.aha2-context/' "$exclude" 2>/dev/null; then ` +
-			`mkdir -p "$(dirname "$exclude")"; printf '\n.aha2-context/\n' >> "$exclude"; fi`,
-			"aha-context-ignore", workDir},
+		Args: []string{"-c", `umask 077; if ! grep -qxF '.aha2-context/' "$1" 2>/dev/null; then ` +
+			`mkdir -p "$(dirname "$1")"; printf '\n.aha2-context/\n' >> "$1"; fi`,
+			"aha-context-ignore", exclude},
+		Dir:     workDir,
 		Timeout: 20 * time.Second,
 	}, nil)
 	if err != nil {

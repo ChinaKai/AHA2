@@ -71,6 +71,7 @@ jobs:
           $env:GOOS = 'windows'
           $env:GOARCH = 'amd64'
           go build -trimpath -ldflags "-s -w -X main.version=$version" -o dist\package-input\aha2.exe .\cmd\aha
+          go build -trimpath -ldflags "-s -w -H windowsgui -X main.version=$version" -o dist\package-input\aha2-tray.exe .\cmd\aha-tray
 
       - name: Install Inno Setup 6
         shell: powershell
@@ -80,7 +81,7 @@ jobs:
         shell: powershell
         run: |
           .\scripts\test-windows-installer.ps1 -RepoPath $PWD
-          .\scripts\build-windows-installer.ps1 -RepoPath $PWD -InputExe .\dist\package-input\aha2.exe -OutputDir .\dist\release -Version $env:GITHUB_REF_NAME
+          .\scripts\build-windows-installer.ps1 -RepoPath $PWD -InputExe .\dist\package-input\aha2.exe -InputTrayExe .\dist\package-input\aha2-tray.exe -OutputDir .\dist\release -Version $env:GITHUB_REF_NAME
 
       - name: Upload Windows package
         uses: actions/upload-artifact@v4
