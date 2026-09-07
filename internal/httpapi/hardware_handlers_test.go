@@ -18,6 +18,7 @@ import (
 	"github.com/ChinaKai/AHA2/internal/domain"
 	"github.com/ChinaKai/AHA2/internal/hardware"
 	"github.com/ChinaKai/AHA2/internal/store"
+	"golang.org/x/crypto/ssh"
 )
 
 func TestHardwareAPIConfigNetworkTerminalAndPermissions(t *testing.T) {
@@ -241,6 +242,56 @@ func TestHardwareConnectFailureIsAudited(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("connect failure audit count=%d", count)
+	}
+}
+
+func TestHardwareSSHHostKeyRequiresExplicitFingerprintConfirmation(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	task := createHardwareAPITask(t, database)
+	now := time.Now().UTC()
+	group := domain.HardwareGroup{TaskID: task.ID, ID: "ssh", Mode: domain.HardwareModeNetwork, Network: domain.HardwareNetworkConfig{Host: "192.0.2.40", Port: 22, Protocol: domain.HardwareProtocolSSH, SSHAuth: domain.HardwareSSHAuthPassword}, Username: "owner", PasswordConfigured: true, Access: domain.HardwareAccessReadWrite, CreatedAt: now, UpdatedAt: now}
+	if err := database.ReplaceHardwareGroups(ctx, task.ID, []domain.HardwareGroup{group}); err != nil {
+		t.Fatal(err)
+	}
+	info := hardware.SSHHostKeyInfo{Endpoint: "192.0.2.40:22", Algorithm: ssh.KeyAlgoED25519, Fingerprint: "SHA256:test-fingerprint"}
+	trusted := ""
+	authService := auth.NewService(database, "setup-test", time.Hour)
+	server := httptest.NewServer(New(Config{
+		Store: database, Auth: authService, App: app.NewService(database, nil, app.StubExecutor{}),
+		ProbeSSHHostKey: func(context.Context, string) (hardware.SSHHostKeyInfo, error) { return info, nil },
+		TrustSSHHostKey: func(_ context.Context, _ string, fingerprint string) (hardware.SSHHostKeyInfo, error) {
+			if fingerprint != info.Fingerprint {
+				return hardware.SSHHostKeyInfo{}, fmt.Errorf("fingerprint changed")
+			}
+			trusted = fingerprint
+			return info, nil
+		},
+	}).Handler())
+	defer server.Close()
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	csrf := registerOwner(t, client, server.URL)
+	response := requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/tasks/"+task.ID+"/hardware/ssh/host-key?transport=network", nil, "")
+	var probe map[string]any
+	decodeResponse(t, response, &probe)
+	if response.StatusCode != http.StatusOK || probe["host_key"].(map[string]any)["fingerprint"] != info.Fingerprint {
+		t.Fatalf("probe status=%d payload=%#v", response.StatusCode, probe)
+	}
+	response = requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/tasks/"+task.ID+"/hardware/ssh/host-key/trust?transport=network", map[string]any{"fingerprint": "SHA256:wrong"}, csrf)
+	if response.StatusCode != http.StatusConflict || trusted != "" {
+		t.Fatalf("wrong fingerprint status=%d trusted=%q", response.StatusCode, trusted)
+	}
+	response.Body.Close()
+	response = requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/tasks/"+task.ID+"/hardware/ssh/host-key/trust?transport=network", map[string]any{"fingerprint": info.Fingerprint}, csrf)
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK || trusted != info.Fingerprint {
+		t.Fatalf("trust status=%d trusted=%q", response.StatusCode, trusted)
 	}
 }
 

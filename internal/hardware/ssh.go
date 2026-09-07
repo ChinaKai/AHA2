@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -24,6 +25,120 @@ type sshTerminal struct {
 	output  *io.PipeReader
 	writer  *io.PipeWriter
 	once    sync.Once
+}
+
+type SSHHostKeyInfo struct {
+	Endpoint    string `json:"endpoint"`
+	Algorithm   string `json:"algorithm"`
+	Fingerprint string `json:"fingerprint"`
+}
+
+var knownHostsWriteMu sync.Mutex
+
+var errSSHHostKeyCaptured = errors.New("SSH host key captured")
+
+// ProbeSSHHostKey completes only the SSH key exchange. It never offers a user
+// password or private key, so callers can display the server identity before
+// deciding whether to trust it.
+func ProbeSSHHostKey(ctx context.Context, endpoint string) (SSHHostKeyInfo, error) {
+	info, _, err := probeSSHHostKey(ctx, endpoint)
+	return info, err
+}
+
+func defaultKnownHostsPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve SSH home: %w", err)
+	}
+	return filepath.Join(home, ".ssh", "known_hosts"), nil
+}
+
+// TrustSSHHostKey probes the host again, verifies the exact fingerprint shown
+// to the Owner, and appends it to the same known_hosts file used by terminals.
+func TrustSSHHostKey(ctx context.Context, endpoint, expectedFingerprint string) (SSHHostKeyInfo, error) {
+	path, err := defaultKnownHostsPath()
+	if err != nil {
+		return SSHHostKeyInfo{}, err
+	}
+	return trustSSHHostKeyAtPath(ctx, endpoint, expectedFingerprint, path)
+}
+
+func trustSSHHostKeyAtPath(ctx context.Context, endpoint, expectedFingerprint, path string) (SSHHostKeyInfo, error) {
+	info, key, err := probeSSHHostKey(ctx, endpoint)
+	if err != nil {
+		return SSHHostKeyInfo{}, err
+	}
+	if expectedFingerprint == "" || expectedFingerprint != info.Fingerprint {
+		return SSHHostKeyInfo{}, errors.New("SSH host key fingerprint changed; review the new fingerprint before trusting")
+	}
+	if err := appendTrustedSSHHostKey(path, endpoint, key); err != nil {
+		return SSHHostKeyInfo{}, err
+	}
+	return info, nil
+}
+
+func probeSSHHostKey(ctx context.Context, endpoint string) (SSHHostKeyInfo, ssh.PublicKey, error) {
+	endpoint = strings.TrimSpace(endpoint)
+	if _, _, err := net.SplitHostPort(endpoint); err != nil {
+		return SSHHostKeyInfo{}, nil, fmt.Errorf("invalid SSH endpoint: %w", err)
+	}
+	var captured ssh.PublicKey
+	config := &ssh.ClientConfig{User: "aha2-host-key-probe", HostKeyCallback: func(_ string, _ net.Addr, key ssh.PublicKey) error {
+		captured = key
+		return errSSHHostKeyCaptured
+	}, Timeout: 8 * time.Second, HostKeyAlgorithms: []string{ssh.KeyAlgoED25519, ssh.KeyAlgoECDSA256, ssh.KeyAlgoECDSA384, ssh.KeyAlgoECDSA521, ssh.KeyAlgoRSASHA512, ssh.KeyAlgoRSASHA256}}
+	connection, err := (&net.Dialer{Timeout: 8 * time.Second}).DialContext(ctx, "tcp", endpoint)
+	if err != nil {
+		return SSHHostKeyInfo{}, nil, err
+	}
+	defer connection.Close()
+	_, _, _, _ = ssh.NewClientConn(connection, endpoint, config)
+	if captured == nil {
+		return SSHHostKeyInfo{}, nil, errors.New("SSH server did not present a host key")
+	}
+	return SSHHostKeyInfo{Endpoint: endpoint, Algorithm: captured.Type(), Fingerprint: ssh.FingerprintSHA256(captured)}, captured, nil
+}
+
+func appendTrustedSSHHostKey(path, endpoint string, key ssh.PublicKey) error {
+	knownHostsWriteMu.Lock()
+	defer knownHostsWriteMu.Unlock()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("create SSH directory: %w", err)
+	}
+	if _, err := os.Stat(path); err == nil {
+		callback, callbackErr := knownhosts.New(path)
+		if callbackErr != nil {
+			return fmt.Errorf("load SSH known_hosts: %w", callbackErr)
+		}
+		address, _ := net.ResolveTCPAddr("tcp", endpoint)
+		if verifyErr := callback(endpoint, address, key); verifyErr == nil {
+			return nil
+		} else {
+			var keyErr *knownhosts.KeyError
+			if !errors.As(verifyErr, &keyErr) || len(keyErr.Want) > 0 {
+				return errors.New("SSH host key changed; remove the old key only after independent verification")
+			}
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return fmt.Errorf("open SSH known_hosts: %w", err)
+	}
+	defer file.Close()
+	if _, err := fmt.Fprintln(file, knownhosts.Line([]string{endpoint}, key)); err != nil {
+		return fmt.Errorf("write SSH known_hosts: %w", err)
+	}
+	return file.Sync()
+}
+
+func IsUnknownSSHHostKey(err error) bool {
+	if err == nil {
+		return false
+	}
+	var keyErr *knownhosts.KeyError
+	return (errors.As(err, &keyErr) && len(keyErr.Want) == 0) || strings.Contains(err.Error(), "knownhosts: key is unknown")
 }
 
 func openSSHTerminal(ctx context.Context, endpoint, username, password, authMode string) (io.ReadWriteCloser, error) {

@@ -488,12 +488,29 @@ export function bindHardwarePanel(detail: TaskDetail, notify: Notice): void {
       notify("error", "请先保存硬件配置");
       return;
     }
-    void api.connectHardware(detail.task.id, state.selectedID, state.transport).then(response => {
+    const button = root.querySelector<HTMLButtonElement>("#hardware-connect");
+    if (button) button.disabled = true;
+    const connect = async () => {
+      try {
+        return await api.connectHardware(detail.task.id, state.selectedID, state.transport);
+      } catch (error) {
+        const code = String((error as Error & {code?: string}).code || "");
+        if (state.transport !== "network" || code !== "ssh_host_key_unknown") throw error;
+        const {host_key: hostKey} = await api.hardwareHostKey(detail.task.id, state.selectedID);
+        const confirmed = window.confirm(`首次连接 SSH 主机：${hostKey.endpoint}\n算法：${hostKey.algorithm}\nSHA256 指纹：${hostKey.fingerprint}\n\n请与设备控制台或可信渠道提供的指纹核对。确认信任并继续连接？`);
+        if (!confirmed) return null;
+        await api.trustHardwareHostKey(detail.task.id, state.selectedID, hostKey.fingerprint);
+        notify("notice", `已信任 ${hostKey.endpoint} 的 SSH 主机键`);
+        return api.connectHardware(detail.task.id, state.selectedID, state.transport);
+      }
+    };
+    void connect().then(response => {
+      if (!response) return;
       currentStream(state).status = response.status;
       currentStream(state).lastError = "";
       notify("notice", `${response.status.endpoint} 已连接`);
       rerender();
-    }).catch(reportError);
+    }).catch(reportError).finally(() => { if (button) button.disabled = false; });
   });
   root.querySelector("#hardware-disconnect")?.addEventListener("click", () => {
     void api.disconnectHardware(detail.task.id, state.selectedID, state.transport).then(response => {

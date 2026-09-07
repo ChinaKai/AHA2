@@ -58,7 +58,9 @@ Network：
 
 SSH 支持密码、keyboard-interactive 和用户目录中未加密的
 `~/.ssh/id_ed25519`、`id_ecdsa`、`id_rsa`。主机密钥必须匹配
-`~/.ssh/known_hosts`；未知或变更的主机密钥会拒绝连接，不允许跳过校验。
+`~/.ssh/known_hosts`。首次连接时 Web 展示主机、算法和 SHA256 指纹；Owner
+确认后服务端再次探测并核对指纹，再写入信任库并重试连接。主机密钥发生变化时
+仍会拒绝连接，不允许直接覆盖或跳过校验。
 
 SSH 登录方式：
 
@@ -84,6 +86,8 @@ GET  /api/v1/tasks/{task}/hardware
 PUT  /api/v1/tasks/{task}/hardware
 GET  /api/v1/tasks/{task}/hardware/{hardware}/terminal?transport=serial|network
 POST /api/v1/tasks/{task}/hardware/{hardware}/connect?transport=serial|network
+GET  /api/v1/tasks/{task}/hardware/{hardware}/host-key?transport=network
+POST /api/v1/tasks/{task}/hardware/{hardware}/host-key/trust?transport=network
 POST /api/v1/tasks/{task}/hardware/{hardware}/disconnect?transport=serial|network
 POST /api/v1/tasks/{task}/hardware/{hardware}/send?transport=serial|network
 ```

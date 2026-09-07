@@ -561,6 +561,17 @@ test("tool events render as message bubbles", async () => {
   assert.doesNotMatch(html, /conversation-event/);
 });
 
+test("hardware SSH requires explicit host fingerprint trust", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const panel = await readFile(resolve(root, "dist", "hardware_panel.js"), "utf8");
+  const api = await readFile(resolve(root, "dist", "api.js"), "utf8");
+  assert.match(panel, /ssh_host_key_unknown/);
+  assert.match(panel, /SHA256 指纹/);
+  assert.match(panel, /window\.confirm/);
+  assert.match(panel, /trustHardwareHostKey/);
+  assert.match(api, /host-key\/trust/);
+});
+
 test("conversation renders uploaded images and downloadable files", async () => {
   const root = resolve(import.meta.dirname, "..");
   const {renderConversationList} = await import(pathToFileURL(resolve(root, "dist", "conversation_ui.js")));

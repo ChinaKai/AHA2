@@ -29,6 +29,7 @@ import type {
   HardwareIOPage,
   HardwareTerminalStatus,
   SerialPort,
+	SSHHostKeyInfo,
   Workspace,
   Skill,
 } from "./types.js";
@@ -49,7 +50,10 @@ class APIClient {
     const response = await fetch(path, {...options, headers, credentials: "same-origin", cache: "no-store"});
     const body = await response.json().catch(() => ({})) as Record<string, unknown>;
     if (!response.ok) {
-      throw new Error(String(body.message || body.error || `HTTP ${response.status}`));
+      const error = new Error(String(body.message || body.error || `HTTP ${response.status}`)) as Error & {code?: string; status?: number};
+      error.code = String(body.error || "");
+      error.status = response.status;
+      throw error;
     }
     return body as T;
   }
@@ -367,6 +371,16 @@ class APIClient {
   ): Promise<{status: HardwareTerminalStatus}> {
     return this.request(`/api/v1/tasks/${taskID}/hardware/${encodeURIComponent(hardwareID)}/connect?transport=${transport}`, {
       method: "POST", body: "{}",
+    });
+  }
+
+  hardwareHostKey(taskID: string, hardwareID: string): Promise<{host_key: SSHHostKeyInfo}> {
+    return this.request(`/api/v1/tasks/${taskID}/hardware/${encodeURIComponent(hardwareID)}/host-key?transport=network`);
+  }
+
+  trustHardwareHostKey(taskID: string, hardwareID: string, fingerprint: string): Promise<{host_key: SSHHostKeyInfo}> {
+    return this.request(`/api/v1/tasks/${taskID}/hardware/${encodeURIComponent(hardwareID)}/host-key/trust?transport=network`, {
+      method: "POST", body: JSON.stringify({fingerprint}),
     });
   }
 

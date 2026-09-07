@@ -35,6 +35,8 @@ type Config struct {
 	CodexAccounts     *codexaccount.Manager
 	AgentCapabilities *agentapi.Capabilities
 	ManagedProcesses  *managedprocess.Manager
+	ProbeSSHHostKey   func(context.Context, string) (hardware.SSHHostKeyInfo, error)
+	TrustSSHHostKey   func(context.Context, string, string) (hardware.SSHHostKeyInfo, error)
 	Version           string
 	StartedAt         time.Time
 }
@@ -53,6 +55,8 @@ type Server struct {
 	codexAccounts     *codexaccount.Manager
 	agentCapabilities *agentapi.Capabilities
 	managedProcesses  *managedprocess.Manager
+	probeSSHHostKey   func(context.Context, string) (hardware.SSHHostKeyInfo, error)
+	trustSSHHostKey   func(context.Context, string, string) (hardware.SSHHostKeyInfo, error)
 	version           string
 	startedAt         time.Time
 	syncRunMu         sync.RWMutex
@@ -69,6 +73,14 @@ func New(config Config) *Server {
 	if startedAt.IsZero() {
 		startedAt = time.Now().UTC()
 	}
+	probeSSHHostKey := config.ProbeSSHHostKey
+	if probeSSHHostKey == nil {
+		probeSSHHostKey = hardware.ProbeSSHHostKey
+	}
+	trustSSHHostKey := config.TrustSSHHostKey
+	if trustSSHHostKey == nil {
+		trustSSHHostKey = hardware.TrustSSHHostKey
+	}
 	return &Server{
 		store: config.Store, auth: config.Auth, app: config.App, web: config.Web,
 		logger: logger, secureCookie: config.SecureCookie, allowCrossOrigin: config.AllowCrossOrigin,
@@ -78,6 +90,8 @@ func New(config Config) *Server {
 		codexAccounts:     config.CodexAccounts,
 		agentCapabilities: config.AgentCapabilities,
 		managedProcesses:  config.ManagedProcesses,
+		probeSSHHostKey:   probeSSHHostKey,
+		trustSSHHostKey:   trustSSHHostKey,
 		version:           config.Version,
 		startedAt:         startedAt,
 		authLimiter:       newAuthLimiter(),
@@ -162,6 +176,8 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/tasks/{id}/hardware/{hardware}/terminal", s.withAuth(http.HandlerFunc(s.hardwareTerminal)))
 	mux.Handle("GET /api/v1/tasks/{id}/hardware/{hardware}/terminal/ws", s.withAuth(http.HandlerFunc(s.hardwareTerminalWebSocket)))
 	mux.Handle("POST /api/v1/tasks/{id}/hardware/{hardware}/connect", s.withAuth(http.HandlerFunc(s.connectHardware)))
+	mux.Handle("GET /api/v1/tasks/{id}/hardware/{hardware}/host-key", s.withAuth(http.HandlerFunc(s.hardwareSSHHostKey)))
+	mux.Handle("POST /api/v1/tasks/{id}/hardware/{hardware}/host-key/trust", s.withAuth(http.HandlerFunc(s.trustHardwareSSHHostKey)))
 	mux.Handle("POST /api/v1/tasks/{id}/hardware/{hardware}/disconnect", s.withAuth(http.HandlerFunc(s.disconnectHardware)))
 	mux.Handle("POST /api/v1/tasks/{id}/hardware/{hardware}/send", s.withAuth(http.HandlerFunc(s.sendHardware)))
 	mux.Handle("GET /api/v1/agent/hardware", s.withAgentCapability(http.HandlerFunc(s.agentHardware)))

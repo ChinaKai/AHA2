@@ -50,6 +50,84 @@ func TestSSHKnownHostsCallback(t *testing.T) {
 	}
 }
 
+func TestSSHHostKeyProbeAndExplicitTrust(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := ssh.NewSignerFromKey(privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	serverConfig := &ssh.ServerConfig{NoClientAuth: true}
+	serverConfig.AddHostKey(signer)
+	done := make(chan struct{}, 2)
+	go func() {
+		for index := 0; index < 2; index++ {
+			connection, acceptErr := listener.Accept()
+			if acceptErr == nil {
+				server, _, _, _ := ssh.NewServerConn(connection, serverConfig)
+				if server != nil {
+					_ = server.Close()
+				}
+				_ = connection.Close()
+			}
+			done <- struct{}{}
+		}
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	info, err := ProbeSSHHostKey(ctx, listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedKey, err := ssh.NewPublicKey(publicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Fingerprint != ssh.FingerprintSHA256(expectedKey) || info.Algorithm != expectedKey.Type() {
+		t.Fatalf("unexpected host key info: %#v", info)
+	}
+	knownHostsPath := filepath.Join(t.TempDir(), "known_hosts")
+	trusted, err := trustSSHHostKeyAtPath(ctx, listener.Addr().String(), info.Fingerprint, knownHostsPath)
+	if err != nil || trusted.Fingerprint != info.Fingerprint {
+		t.Fatalf("trust host key: %#v %v", trusted, err)
+	}
+	callback, err := knownhosts.New(knownHostsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	address, _ := net.ResolveTCPAddr("tcp", listener.Addr().String())
+	if err := callback(listener.Addr().String(), address, expectedKey); err != nil {
+		t.Fatalf("trusted host key was not persisted: %v", err)
+	}
+	select {
+	case <-done:
+	case <-ctx.Done():
+		t.Fatal("SSH probe server did not finish")
+	}
+}
+
+func TestAppendTrustedSSHHostKeyRejectsChangedKey(t *testing.T) {
+	firstPublic, _, _ := ed25519.GenerateKey(rand.Reader)
+	firstKey, _ := ssh.NewPublicKey(firstPublic)
+	secondPublic, _, _ := ed25519.GenerateKey(rand.Reader)
+	secondKey, _ := ssh.NewPublicKey(secondPublic)
+	path := filepath.Join(t.TempDir(), "known_hosts")
+	endpoint := "example.test:22"
+	if err := appendTrustedSSHHostKey(path, endpoint, firstKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := appendTrustedSSHHostKey(path, endpoint, secondKey); err == nil || !strings.Contains(err.Error(), "changed") {
+		t.Fatalf("changed host key was accepted: %v", err)
+	}
+}
+
 func TestSSHRequiresKnownHostsAndAuthentication(t *testing.T) {
 	t.Parallel()
 	if _, err := sshHostKeyCallback(filepath.Join(t.TempDir(), "missing")); err == nil ||

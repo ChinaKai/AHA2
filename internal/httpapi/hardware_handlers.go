@@ -1,8 +1,10 @@
 package httpapi
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"regexp"
 	"strings"
@@ -203,15 +205,67 @@ func (s *Server) connectHardware(writer http.ResponseWriter, request *http.Reque
 		s.audit(request, "task.hardware.connect_failed", "task", task.ID, map[string]any{
 			"hardware_id": group.ID, "transport": transport, "error": err.Error(),
 		})
-		writeJSON(writer, http.StatusConflict, map[string]any{
-			"ok": false, "error": "hardware_connect_failed", "message": err.Error(),
-		})
+		code := "hardware_connect_failed"
+		if hardware.IsUnknownSSHHostKey(err) {
+			code = "ssh_host_key_unknown"
+		}
+		writeJSON(writer, http.StatusConflict, map[string]any{"ok": false, "error": code, "message": err.Error()})
 		return
 	}
 	s.audit(request, "task.hardware.connect", "task", task.ID, map[string]any{
 		"hardware_id": group.ID, "transport": transport,
 	})
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "status": status})
+}
+
+func (s *Server) hardwareSSHHostKey(writer http.ResponseWriter, request *http.Request) {
+	_, group, transport, _, ok := s.hardwareTarget(writer, request)
+	if !ok {
+		return
+	}
+	if transport != domain.HardwareTransportNetwork || group.Network.Protocol != domain.HardwareProtocolSSH {
+		writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "ssh_host_key_unavailable", "message": "当前硬件连接不是 SSH"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), 10*time.Second)
+	defer cancel()
+	info, err := s.probeSSHHostKey(ctx, net.JoinHostPort(group.Network.Host, fmt.Sprint(group.Network.Port)))
+	if err != nil {
+		writeJSON(writer, http.StatusBadGateway, map[string]any{"ok": false, "error": "ssh_host_key_probe_failed", "message": err.Error()})
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "host_key": info})
+}
+
+func (s *Server) trustHardwareSSHHostKey(writer http.ResponseWriter, request *http.Request) {
+	task, group, transport, readOnly, ok := s.hardwareTarget(writer, request)
+	if !ok {
+		return
+	}
+	if readOnly {
+		writeJSON(writer, http.StatusForbidden, map[string]any{"ok": false, "error": "hardware_read_only", "message": "只读硬件不能修改主机信任"})
+		return
+	}
+	if transport != domain.HardwareTransportNetwork || group.Network.Protocol != domain.HardwareProtocolSSH {
+		writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "ssh_host_key_unavailable", "message": "当前硬件连接不是 SSH"})
+		return
+	}
+	var payload struct {
+		Fingerprint string `json:"fingerprint"`
+	}
+	if err := decodeJSON(request, &payload); err != nil || strings.TrimSpace(payload.Fingerprint) == "" {
+		writeError(writer, http.StatusBadRequest, "invalid_json")
+		return
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), 10*time.Second)
+	defer cancel()
+	info, err := s.trustSSHHostKey(ctx, net.JoinHostPort(group.Network.Host, fmt.Sprint(group.Network.Port)), strings.TrimSpace(payload.Fingerprint))
+	if err != nil {
+		writeJSON(writer, http.StatusConflict, map[string]any{"ok": false, "error": "ssh_host_key_trust_failed", "message": err.Error()})
+		return
+	}
+	s.audit(request, "task.hardware.ssh_host_key_trust", "task", task.ID, map[string]any{"hardware_id": group.ID, "endpoint": info.Endpoint, "algorithm": info.Algorithm, "fingerprint": info.Fingerprint})
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "host_key": info})
 }
 
 func (s *Server) disconnectHardware(writer http.ResponseWriter, request *http.Request) {

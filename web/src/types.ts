@@ -483,6 +483,12 @@ export interface Knowledge {
   last_verified_at?: string;
 }
 
+export interface SSHHostKeyInfo {
+	endpoint: string;
+	algorithm: string;
+	fingerprint: string;
+}
+
 export interface KnowledgeProposal {
   id: string;
   entry_id: string;
