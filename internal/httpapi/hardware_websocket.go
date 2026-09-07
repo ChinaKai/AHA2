@@ -57,7 +57,7 @@ func (s *Server) hardwareTerminalWebSocket(writer http.ResponseWriter, request *
 		return
 	}
 	connection, err := websocket.Accept(writer, request, &websocket.AcceptOptions{
-		InsecureSkipVerify: s.allowCrossOrigin,
+		InsecureSkipVerify: !s.originValidationEnabled(),
 		CompressionMode:    websocket.CompressionDisabled,
 	})
 	if err != nil {

@@ -190,10 +190,13 @@ host as the upstream `Host`; in multi-level proxy deployments, the trusted inner
 first `X-Forwarded-Host` value supplied by the outer proxy and overwrite upstream `Host` with it.
 WebSocket deployments must also forward `Upgrade` and `Connection`.
 
-`--allow-cross-origin` (or `AHA2_ALLOW_CROSS_ORIGIN=1`) globally disables this Origin check for
-login, registration, and authenticated writes. It is retained only for controlled diagnostics and
-should not be used as the permanent reverse-proxy fix. Authenticated writes still require the
-session CSRF token.
+高级设置中的“校验浏览器请求 Origin”默认开启。可信反向代理确实无法保留外部 Host 时，可先从
+本机地址登录，在高级设置中关闭校验；设置会持久化并立即作用于登录、注册、密码恢复、认证写入
+和硬件 WebSocket。关闭校验不会关闭 Session 认证或 CSRF Token 校验，但仍应优先修复反向代理的
+`Host` / `X-Forwarded-Host` 转发。
+
+`--allow-cross-origin`（或 `AHA2_ALLOW_CROSS_ORIGIN=1`）仍可在启动时强制关闭 Origin 校验，主要用于
+受控诊断。启用该启动参数时，高级设置会显示锁定状态；如需重新启用校验，必须移除参数并重启。
 
 ## Managed Process
 

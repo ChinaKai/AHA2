@@ -35,6 +35,18 @@ function option(value: string, label: string, selected: boolean): string {
   return `<option value="${escapeHTML(value)}" ${selected ? "selected" : ""}>${escapeHTML(label)}</option>`;
 }
 
+export function resolveReasoningEffort(
+  effortLevels: string[],
+  savedEffort: string,
+  modelDefault: string,
+  preferModelDefault: boolean,
+): string {
+  if (preferModelDefault && effortLevels.includes(modelDefault)) return modelDefault;
+  if (effortLevels.includes(savedEffort)) return savedEffort;
+  if (effortLevels.includes(modelDefault)) return modelDefault;
+  return effortLevels.includes("medium") ? "medium" : (effortLevels[0] || "");
+}
+
 function envModelOptions(models: Model[], selectedID: string): string {
   const grouped = new Map<string, Model[]>();
   for (const model of models) {
@@ -84,7 +96,7 @@ export function setRuntimeBackends(prefix: string, backends: string[]): void {
   select.value = backends.includes(previous) ? previous : (backends[0] || "");
 }
 
-export function syncRuntimeFields(prefix: string, models: Model[], accounts: CodexAccount[]): void {
+export function syncRuntimeFields(prefix: string, models: Model[], accounts: CodexAccount[], preferModelDefault = true): void {
   const backend = document.querySelector<HTMLSelectElement>(`#${prefix}-backend`)?.value || "";
   const sourceField = document.querySelector<HTMLElement>(`#${prefix}-model-source-field`);
   const sourceSelect = document.querySelector<HTMLSelectElement>(`#${prefix}-model-source`);
@@ -134,10 +146,9 @@ export function syncRuntimeFields(prefix: string, models: Model[], accounts: Cod
   const selectedModel = official
     ? accountModels(accounts, accountSelect.value).find(model => model.wire_model === wireSelect.value)
     : models.find(model => model.id === modelSelect.value);
-  const desired = selectedModel?.default_reasoning_effort || "";
-  effort.value = effortLevels.includes(desired)
-    ? desired
-    : (effortLevels.includes(previousEffort) ? previousEffort : "medium");
+  effort.value = resolveReasoningEffort(
+    effortLevels, previousEffort, selectedModel?.default_reasoning_effort || "", preferModelDefault,
+  );
 }
 
 export function bindRuntimeFields(
@@ -145,13 +156,14 @@ export function bindRuntimeFields(
   models: Model[],
   accounts: CodexAccount[],
   onBackendChange?: () => void,
+  preserveInitialEffort = false,
 ): void {
   document.querySelector(`#${prefix}-backend`)?.addEventListener("change", () => {
-    syncRuntimeFields(prefix, models, accounts);
+    syncRuntimeFields(prefix, models, accounts, true);
     onBackendChange?.();
   });
   for (const suffix of ["model-source", "model", "codex-account", "wire-model"]) {
-    document.querySelector(`#${prefix}-${suffix}`)?.addEventListener("change", () => syncRuntimeFields(prefix, models, accounts));
+    document.querySelector(`#${prefix}-${suffix}`)?.addEventListener("change", () => syncRuntimeFields(prefix, models, accounts, true));
   }
-  syncRuntimeFields(prefix, models, accounts);
+  syncRuntimeFields(prefix, models, accounts, !preserveInitialEffort);
 }

@@ -114,6 +114,16 @@ FROM projects
 WHERE project_type='knowledge';
 `
 
+const schemaV40 = `
+CREATE TABLE IF NOT EXISTS security_settings (
+    id INTEGER PRIMARY KEY CHECK(id=1),
+    validate_origin INTEGER NOT NULL DEFAULT 1,
+    updated_at TEXT NOT NULL
+);
+INSERT OR IGNORE INTO security_settings(id,validate_origin,updated_at)
+VALUES(1,1,strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+`
+
 const schemaV27 = `
 CREATE TABLE IF NOT EXISTS sync_settings (
     scope TEXT PRIMARY KEY,
@@ -1324,6 +1334,16 @@ func (s *Store) migrate(ctx context.Context) error {
 	}
 	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(39, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
 		return fmt.Errorf("record schema v39: %w", err)
+	}
+	var hasV40 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=40)`).Scan(&hasV40)
+	if !hasV40 {
+		if _, err := s.db.ExecContext(ctx, schemaV40); err != nil {
+			return fmt.Errorf("apply schema v40: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(40, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v40: %w", err)
 	}
 	return nil
 }

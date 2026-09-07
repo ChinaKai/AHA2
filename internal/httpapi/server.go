@@ -42,26 +42,28 @@ type Config struct {
 }
 
 type Server struct {
-	store             *store.Store
-	auth              *auth.Service
-	app               *app.Service
-	web               fs.FS
-	logger            *slog.Logger
-	secureCookie      bool
-	allowCrossOrigin  bool
-	detectWorkspace   func(context.Context, domain.Workspace) (domain.Workspace, error)
-	secrets           SecretStore
-	hardware          *hardware.Manager
-	codexAccounts     *codexaccount.Manager
-	agentCapabilities *agentapi.Capabilities
-	managedProcesses  *managedprocess.Manager
-	probeSSHHostKey   func(context.Context, string) (hardware.SSHHostKeyInfo, error)
-	trustSSHHostKey   func(context.Context, string, string) (hardware.SSHHostKeyInfo, error)
-	version           string
-	startedAt         time.Time
-	syncRunMu         sync.RWMutex
-	syncRun           syncRunProgress
-	authLimiter       *authLimiter
+	store                 *store.Store
+	auth                  *auth.Service
+	app                   *app.Service
+	web                   fs.FS
+	logger                *slog.Logger
+	secureCookie          bool
+	originPolicyMu        sync.RWMutex
+	validateOrigin        bool
+	originStartupOverride bool
+	detectWorkspace       func(context.Context, domain.Workspace) (domain.Workspace, error)
+	secrets               SecretStore
+	hardware              *hardware.Manager
+	codexAccounts         *codexaccount.Manager
+	agentCapabilities     *agentapi.Capabilities
+	managedProcesses      *managedprocess.Manager
+	probeSSHHostKey       func(context.Context, string) (hardware.SSHHostKeyInfo, error)
+	trustSSHHostKey       func(context.Context, string, string) (hardware.SSHHostKeyInfo, error)
+	version               string
+	startedAt             time.Time
+	syncRunMu             sync.RWMutex
+	syncRun               syncRunProgress
+	authLimiter           *authLimiter
 }
 
 func New(config Config) *Server {
@@ -81,20 +83,27 @@ func New(config Config) *Server {
 	if trustSSHHostKey == nil {
 		trustSSHHostKey = hardware.TrustSSHHostKey
 	}
+	validateOrigin := !config.AllowCrossOrigin
+	if config.Store != nil && !config.AllowCrossOrigin {
+		if settings, err := config.Store.SecuritySettings(context.Background()); err == nil {
+			validateOrigin = settings.ValidateOrigin
+		}
+	}
 	return &Server{
 		store: config.Store, auth: config.Auth, app: config.App, web: config.Web,
-		logger: logger, secureCookie: config.SecureCookie, allowCrossOrigin: config.AllowCrossOrigin,
-		detectWorkspace:   config.DetectWorkspace,
-		secrets:           config.Secrets,
-		hardware:          config.Hardware,
-		codexAccounts:     config.CodexAccounts,
-		agentCapabilities: config.AgentCapabilities,
-		managedProcesses:  config.ManagedProcesses,
-		probeSSHHostKey:   probeSSHHostKey,
-		trustSSHHostKey:   trustSSHHostKey,
-		version:           config.Version,
-		startedAt:         startedAt,
-		authLimiter:       newAuthLimiter(),
+		logger: logger, secureCookie: config.SecureCookie, validateOrigin: validateOrigin,
+		originStartupOverride: config.AllowCrossOrigin,
+		detectWorkspace:       config.DetectWorkspace,
+		secrets:               config.Secrets,
+		hardware:              config.Hardware,
+		codexAccounts:         config.CodexAccounts,
+		agentCapabilities:     config.AgentCapabilities,
+		managedProcesses:      config.ManagedProcesses,
+		probeSSHHostKey:       probeSSHHostKey,
+		trustSSHHostKey:       trustSSHHostKey,
+		version:               config.Version,
+		startedAt:             startedAt,
+		authLimiter:           newAuthLimiter(),
 	}
 }
 
@@ -112,6 +121,8 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/settings/proxy", s.withAuth(http.HandlerFunc(s.proxySettings)))
 	mux.Handle("PUT /api/v1/settings/proxy", s.withAuth(http.HandlerFunc(s.updateProxySettings)))
 	mux.Handle("POST /api/v1/settings/proxy/test", s.withAuth(http.HandlerFunc(s.testProxySettings)))
+	mux.Handle("GET /api/v1/settings/security", s.withAuth(http.HandlerFunc(s.securitySettings)))
+	mux.Handle("PUT /api/v1/settings/security", s.withAuth(http.HandlerFunc(s.updateSecuritySettings)))
 	mux.Handle("GET /api/v1/settings/sync", s.withAuth(http.HandlerFunc(s.syncSettings)))
 	mux.Handle("PUT /api/v1/settings/sync", s.withAuth(http.HandlerFunc(s.updateSyncSettings)))
 	mux.Handle("GET /api/v1/settings/sync/status", s.withAuth(http.HandlerFunc(s.syncStatus)))

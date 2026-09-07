@@ -16,6 +16,12 @@ type Owner struct {
 	LastLoginAt  time.Time `json:"last_login_at,omitempty"`
 }
 
+type SecuritySettings struct {
+	ValidateOrigin  bool      `json:"validate_origin"`
+	StartupOverride bool      `json:"startup_override,omitempty"`
+	UpdatedAt       time.Time `json:"updated_at,omitempty"`
+}
+
 type Session struct {
 	ID        string    `json:"id"`
 	OwnerID   string    `json:"owner_id"`

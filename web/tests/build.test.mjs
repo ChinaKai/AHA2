@@ -40,6 +40,19 @@ test("workspace detection renders inaccessible, Git, and backend probe states", 
   });
   assert.match(gitFailure, /Git 检测执行失败: permission denied/);
   assert.match(gitFailure, /proto codex/);
+  assert.match(gitFailure, /Codex · 1\.0/);
+
+  const versions = renderWorkspaceDetection({
+    ...base,
+    capabilities: {
+      workspace: {status: "ready"},
+      codex: {status: "ready", version: "codex-cli 0.153.4"},
+      claude: {status: "ready", version: "2.1.0"},
+    },
+    repository: {status: "ready", is_git: true},
+  });
+  assert.match(versions, /Codex · codex-cli 0\.153\.4/);
+  assert.match(versions, /Claude · 2\.1\.0/);
 });
 
 test("task list refreshes after round terminal events", async () => {
@@ -99,8 +112,12 @@ test("built web contains responsive application", async () => {
   assert.match(script, /id="owner-avatar"/);
   assert.match(script, /ownerAvatarClicks\s*>=\s*5/);
   assert.match(script, /id="change-password-form"/);
+  assert.match(script, /id="origin-validation-form"/);
+  assert.match(script, /api\.updateSecuritySettings/);
+  assert.match(script, /--allow-cross-origin/);
   assert.match(script, /state\.view = "advanced"/);
   assert.match(css, /\.account-security-panel/);
+  assert.match(css, /\.security-warning\.active/);
   assert.match(script, /EventSource/);
   assert.match(script, /api\.agentConversation/);
   assert.match(script, /api\.agentMessage/);
@@ -145,7 +162,6 @@ test("built web contains responsive application", async () => {
   assert.match(css, /@media \(max-width: 760px\)[\s\S]*?\.skill-grid \{ grid-template-columns: 1fr; \}/);
   assert.doesNotMatch(knowledgeWorkspace, /Source Path/);
   assert.doesNotMatch(knowledgeWorkspace, /knowledge graph/i);
-  assert.match(script, /"prompts",\s*"bot"/);
   assert.match(script, /agent-config-form/);
   assert.match(taskComposer, /id="composer-agent"/);
   assert.match(taskTools, /data-task-tool/);
@@ -277,7 +293,13 @@ test("built web contains responsive application", async () => {
   assert.doesNotMatch(codexAccounts, /device-auth|setInterval/);
   assert.doesNotMatch(promptAdmin, /prompt-route-list|Effective Prompt|Context Manifest/);
   assert.doesNotMatch(api, /prompts\/routes|prompts\/preview|context\/resources/);
-  assert.match(script, /shell\(renderPromptAdmin\(\)\)/);
+  assert.match(script, /advancedSubview\(renderPromptAdmin\(\)\)/);
+  assert.match(script, /data-view="prompts"/);
+  assert.match(script, /data-view="sync"/);
+  assert.match(script, /data-view="advanced">← 返回高级设置/);
+  assert.doesNotMatch(script, /\["prompts",\s*"bot",\s*"提示词"\]/);
+  assert.doesNotMatch(script, /\["sync",\s*"sync",/);
+  assert.match(css, /\.bottom-nav \{[^}]*grid-template-columns:\s*repeat\(5,1fr\)/);
   assert.match(script, /shell\(renderProxySettings\(state\.proxySettings\)\)/);
   assert.match(script, /name=\\?"proxy_enabled/);
   assert.match(agents, /name="proxy_enabled"/);
@@ -530,7 +552,10 @@ test("codex accounts render compact weekly quota", async () => {
 
 test("runtime picker separates Env and Official Codex models", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const {runtimeFieldsHTML} = await import(pathToFileURL(resolve(root, "dist", "runtime_picker.js")));
+  const {resolveReasoningEffort, runtimeFieldsHTML} = await import(pathToFileURL(resolve(root, "dist", "runtime_picker.js")));
+  assert.equal(resolveReasoningEffort(["low", "medium", "high"], "high", "low", false), "high");
+  assert.equal(resolveReasoningEffort(["low", "medium", "high"], "high", "low", true), "low");
+  assert.equal(resolveReasoningEffort(["low", "medium", "high"], "", "low", false), "low");
   const html = runtimeFieldsHTML("task", [{
     id: "model-env", display_name: "Env Model", provider_id: "gateway", provider_name: "Gateway A", source: "provider",
     backend: "codex", wire_model: "env-model", created_at: "", updated_at: "",

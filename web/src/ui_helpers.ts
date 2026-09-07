@@ -29,6 +29,12 @@ function failedProbe(label: string, probe?: WorkspaceProbe): string {
   return "";
 }
 
+function backendBadge(label: string, className: string, probe: WorkspaceProbe): string {
+  const version = String(probe.version || "").trim();
+  const text = version ? `${label} · ${version}` : label;
+  return `<span class="proto ${className}" title="${escapeWorkspaceHTML(text)}">${escapeWorkspaceHTML(text)}</span>`;
+}
+
 export function renderWorkspaceDetection(workspace: Workspace): string {
   const capabilities = workspace.capabilities || {};
   const repository = workspace.repository || {};
@@ -36,10 +42,10 @@ export function renderWorkspaceDetection(workspace: Workspace): string {
   const badges: string[] = [];
   const details: Array<{kind: "bad" | "muted"; text: string}> = [];
   if (capabilities.codex?.status === "ready") {
-    badges.push(`<span class="proto codex" title="Codex ${escapeWorkspaceHTML(capabilities.codex.version || "")}">Codex</span>`);
+    badges.push(backendBadge("Codex", "codex", capabilities.codex));
   }
   if (capabilities.claude?.status === "ready") {
-    badges.push(`<span class="proto claude" title="Claude Code ${escapeWorkspaceHTML(capabilities.claude.version || "")}">Claude</span>`);
+    badges.push(backendBadge("Claude", "claude", capabilities.claude));
   }
   if (workspaceProbe?.status === "unavailable") {
     details.push({kind: "bad", text: workspaceProbe.error || "Workspace 不可访问"});

@@ -13,6 +13,7 @@ import type {
   ProductLine,
   Provider,
   ProxySettings,
+  SecuritySettings,
   SyncSettings,
   SyncPreview,
 	SyncRunProgress,
@@ -97,6 +98,14 @@ class APIClient {
 
   testProxySettings(payload: ProxySettings): Promise<{ok: boolean; status_code: number; elapsed_ms: number}> {
     return this.request("/api/v1/settings/proxy/test", {method: "POST", body: JSON.stringify(payload)});
+  }
+
+  securitySettings(): Promise<{security: SecuritySettings}> {
+    return this.request("/api/v1/settings/security");
+  }
+
+  updateSecuritySettings(payload: {validate_origin: boolean}): Promise<{security: SecuritySettings}> {
+    return this.request("/api/v1/settings/security", {method: "PUT", body: JSON.stringify(payload)});
   }
 
   syncSettings(): Promise<{sync: SyncSettings}> {

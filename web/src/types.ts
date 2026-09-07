@@ -6,6 +6,11 @@ export interface AuthStatus {
   username?: string;
   csrf_token?: string;
 }
+export interface SecuritySettings {
+  validate_origin: boolean;
+  startup_override?: boolean;
+  updated_at?: string;
+}
 export interface SystemInfo {
   os: string;
   arch: string;

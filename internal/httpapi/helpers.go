@@ -80,7 +80,7 @@ func unsafeMethod(method string) bool {
 }
 
 func (s *Server) sameOrigin(request *http.Request) bool {
-	if s.allowCrossOrigin {
+	if !s.originValidationEnabled() {
 		return true
 	}
 	origin := strings.TrimSpace(request.Header.Get("Origin"))
@@ -92,6 +92,18 @@ func (s *Server) sameOrigin(request *http.Request) bool {
 		return false
 	}
 	return strings.EqualFold(value.Host, request.Host)
+}
+
+func (s *Server) originValidationEnabled() bool {
+	s.originPolicyMu.RLock()
+	defer s.originPolicyMu.RUnlock()
+	return s.validateOrigin
+}
+
+func (s *Server) setOriginValidation(enabled bool) {
+	s.originPolicyMu.Lock()
+	s.validateOrigin = enabled && !s.originStartupOverride
+	s.originPolicyMu.Unlock()
 }
 
 func decodeJSON(request *http.Request, destination any) error {

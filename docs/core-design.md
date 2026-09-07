@@ -768,6 +768,9 @@ Setup Token 重置；恢复成功后撤销此前所有 Session 并创建新 Sess
 - 在 URL 中传长期 Token
 - 将 Session Token 保存到 localStorage
 - 未校验 Origin 的 WebSocket
+
+Origin 校验默认开启。Owner 可在隐藏的高级设置中为可信反向代理持久化关闭，但页面必须展示风险
+提示并保留 Session 与 CSRF 校验；启动参数强制关闭时不得在 UI 中伪装为可重新启用。
 - 允许匿名读取 Project、Task、KB、版本和路径
 
 高风险操作即使已经登录仍需二次确认，必要时重新认证：

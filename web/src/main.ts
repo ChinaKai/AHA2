@@ -38,6 +38,7 @@ import type {
   Project,
   Provider,
   ProxySettings,
+  SecuritySettings,
   SyncConflict,
 	SyncPreview,
 	SyncRunProgress,
@@ -60,6 +61,7 @@ interface State {
   renderPending: boolean;
   system: SystemInfo;
   proxySettings: ProxySettings;
+  securitySettings: SecuritySettings;
   syncSettings: SyncSettings;
   syncState: SyncState;
   syncPending: number;
@@ -121,6 +123,7 @@ const state: State = {
   renderPending: false,
   system: {os: "windows", arch: "", wsl_available: false, wsl_distros: [], version: "dev", started_at: ""},
   proxySettings: {http_proxy: "http://127.0.0.1:7897", https_proxy: "http://127.0.0.1:7897", no_proxy: "localhost,127.0.0.1,::1"},
+  securitySettings: {validate_origin: true, startup_override: false},
   syncSettings: {scope:"default",enabled:false,endpoint:"",device_id:"",device_name:"",interval_seconds:300,token_configured:false,passphrase_configured:false},
   syncState: {scope:"default",cursor:"",last_error:""},
   syncPending: 0,
@@ -644,8 +647,8 @@ async function bootstrap(): Promise<void> {
 }
 
 async function loadAll(): Promise<void> {
-  const [projects, workspaces, providers, envGroups, codexAccounts, models, tasks, knowledge, libraries, skills, system, proxy, syncSettings, syncStatus, syncConflicts, syncPreview] = await Promise.all([
-    api.projects(), api.workspaces(), api.providers(), api.envGroups(), api.codexAccounts(), api.models(), api.tasks(), api.knowledge(), api.knowledgeLibraries(), api.skills(), api.system(), api.proxySettings(), api.syncSettings(), api.syncStatus(), api.syncConflicts(), api.syncPreview().catch(() => ({preview: state.syncPreview})),
+  const [projects, workspaces, providers, envGroups, codexAccounts, models, tasks, knowledge, libraries, skills, system, proxy, security, syncSettings, syncStatus, syncConflicts, syncPreview] = await Promise.all([
+    api.projects(), api.workspaces(), api.providers(), api.envGroups(), api.codexAccounts(), api.models(), api.tasks(), api.knowledge(), api.knowledgeLibraries(), api.skills(), api.system(), api.proxySettings(), api.securitySettings(), api.syncSettings(), api.syncStatus(), api.syncConflicts(), api.syncPreview().catch(() => ({preview: state.syncPreview})),
   ]);
   state.projects = projects.projects || [];
   state.workspaces = workspaces.workspaces || [];
@@ -660,6 +663,7 @@ async function loadAll(): Promise<void> {
   state.skills = skills.skills || [];
   if (system?.system) state.system = system.system;
   if (proxy?.proxy) state.proxySettings = proxy.proxy;
+  if (security?.security) state.securitySettings = security.security;
   if (syncSettings?.sync) state.syncSettings = syncSettings.sync;
   if (syncStatus?.state) { state.syncState = syncStatus.state; state.syncPending = syncStatus.pending || 0; state.syncRun = syncStatus.run || state.syncRun; }
   state.syncConflicts = syncConflicts.conflicts || [];
@@ -842,7 +846,7 @@ function syncAgentConfigFields(): void {
       input.disabled = inherited;
     });
   });
-  if (!inherited) syncRuntimeFields("agent-config", state.models, state.codexAccounts);
+  if (!inherited) syncRuntimeFields("agent-config", state.models, state.codexAccounts, false);
 }
 
 function bindTaskAgentControls(): void {
@@ -978,9 +982,7 @@ function shell(content: string): string {
     ["tasks", "tasks", "任务"],
     ["knowledge", "knowledge", "知识库"],
     ["models", "model", "模型"],
-    ["prompts", "bot", "提示词"],
     ["proxy", "proxy", "代理"],
-    ["sync", "sync", "\u540c\u6b65"],
   ] as const;
   return `<div class="app-shell">
     <aside class="sidebar">
@@ -1084,8 +1086,13 @@ function modelsView(): string {
 }
 
 function advancedSettingsView(): string {
+  const origin = state.securitySettings;
   return shell(`<section class="page advanced-settings-page">
     <header class="page-head"><div><h1>高级设置</h1><p>管理 Owner 账号与本机恢复方式</p></div></header>
+    <section class="advanced-tools-grid">
+      <article class="panel advanced-tool-card"><div>${icon("bot")}<span><strong>提示词</strong><small>查看和维护 AHA2 的提示词模板</small></span></div><button type="button" data-view="prompts">进入提示词设置</button></article>
+      <article class="panel advanced-tool-card"><div>${icon("sync")}<span><strong>同步</strong><small>配置设备同步、检查差异与冲突</small></span></div><button type="button" data-view="sync">进入同步设置</button></article>
+    </section>
     <section class="panel account-security-panel">
       <div class="panel-head"><strong>修改密码</strong><span>${escapeHTML(state.auth?.username || "Owner")}</span></div>
       <form id="change-password-form">
@@ -1095,8 +1102,20 @@ function advancedSettingsView(): string {
         <div class="dialog-actions"><button class="primary" type="submit">修改密码</button></div>
       </form>
     </section>
+    <section class="panel spaced account-security-panel">
+      <div class="panel-head"><strong>Origin 安全校验</strong><span>${origin.validate_origin ? "已启用" : "已关闭"}</span></div>
+      <form id="origin-validation-form">
+        <label class="security-setting-toggle"><input name="validate_origin" type="checkbox" ${origin.validate_origin ? "checked" : ""} ${origin.startup_override ? "disabled" : ""}><span><strong>校验浏览器请求 Origin</strong><small>建议保持启用。只有反向代理无法正确传递外部 Host 时才关闭。</small></span></label>
+        <div class="security-warning ${origin.validate_origin ? "" : "active"}">${origin.startup_override ? `启动参数 <code>--allow-cross-origin</code> 已强制关闭校验；如需重新启用，请移除参数并重启 AHA2。` : `关闭后，登录、密码恢复、业务写入和硬件 WebSocket 将不再拒绝 Origin 与 Host 不一致的请求；CSRF Token 与登录认证仍然有效。`}</div>
+        <div class="dialog-actions"><button class="primary" type="submit" ${origin.startup_override ? "disabled" : ""}>保存安全设置</button></div>
+      </form>
+    </section>
     <section class="panel spaced recovery-note"><div class="panel-head"><strong>密码恢复</strong></div><div><p>忘记密码时，可在登录页使用数据目录中的 <code>setup-token</code> 重置。重置成功会撤销其他登录会话。</p><p>默认位置：<code>C:\\ProgramData\\AHA2\\setup-token</code></p></div></section>
   </section>`);
+}
+
+function advancedSubview(content: string): string {
+  return shell(`<div class="advanced-subview"><div class="advanced-subview-back"><button type="button" data-view="advanced">← 返回高级设置</button></div>${content}</div>`);
 }
 
 function providerDialog(): string {
@@ -1609,9 +1628,9 @@ function render(): void {
         render,
         setMessage,
       })),
-      prompts: () => shell(renderPromptAdmin()),
+      prompts: () => advancedSubview(renderPromptAdmin()),
       proxy: () => shell(renderProxySettings(state.proxySettings)),
-      sync: () => shell(renderSyncSettings(state.syncSettings, state.syncState, state.syncPending, state.syncConflicts, state.syncPreview, state.syncRun)),
+      sync: () => advancedSubview(renderSyncSettings(state.syncSettings, state.syncState, state.syncPending, state.syncConflicts, state.syncPreview, state.syncRun)),
       advanced: advancedSettingsView,
     };
     content = views[state.view]();
@@ -1730,7 +1749,7 @@ function bindCommon(): void {
   });
   bindRuntimeFields("task", state.models, state.codexAccounts, syncTaskGitIsolation);
   bindRuntimeFields("takeover-task", state.models, state.codexAccounts, syncTakeoverTaskBackend);
-  bindRuntimeFields("agent-config", state.models, state.codexAccounts, syncAgentConfigFields);
+  bindRuntimeFields("agent-config", state.models, state.codexAccounts, syncAgentConfigFields, true);
   document.querySelectorAll<HTMLElement>("[data-view]").forEach(button => button.addEventListener("click", () => {
     state.view = button.dataset.view as View;
     state.selectedTask = null;
@@ -2262,6 +2281,13 @@ function bindCommon(): void {
     }
     setMessage("notice", "密码已修改，其他登录会话已退出");
   }, "修改中");
+  bindForm("#origin-validation-form", async form => {
+    const validateOrigin = form.get("validate_origin") === "on";
+    if (!validateOrigin && !window.confirm("确认关闭 Origin 校验？仅应在可信反向代理环境中使用。")) return;
+    const response = await api.updateSecuritySettings({validate_origin: validateOrigin});
+    state.securitySettings = response.security;
+    setMessage("notice", validateOrigin ? "Origin 校验已启用" : "Origin 校验已关闭");
+  }, "保存中");
   document.querySelector<HTMLButtonElement>("#message-attachment-pick")?.addEventListener("click", () => {
     document.querySelector<HTMLInputElement>("#message-attachment-input")?.click();
   });
