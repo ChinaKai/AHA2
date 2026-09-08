@@ -230,6 +230,18 @@ func TestAgentStateKnowledgeAndSkillAPIs(t *testing.T) {
 	if len(memory.Facts) != 1 || memory.Facts[0] != "API fact" {
 		t.Fatalf("memory=%#v", memory)
 	}
+	response = agentRequest(t, server.URL+"/api/v1/agent/turn/memory", http.MethodPatch, token, map[string]any{"replace": map[string]any{
+		"decisions": []string{"Keep the current decision"}, "facts": []string{"Compacted fact", "Compacted fact"},
+		"excluded": []string{}, "progress": []string{"Current progress"}, "verification": []string{}, "next_actions": []string{"Only remaining action"},
+	}})
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("memory replacement status=%d body=%s", response.StatusCode, readBody(t, response))
+	}
+	response.Body.Close()
+	memory, _ = database.TaskMemory(ctx, task.ID)
+	if len(memory.Facts) != 1 || memory.Facts[0] != "Compacted fact" || len(memory.Decisions) != 1 || len(memory.NextActions) != 1 {
+		t.Fatalf("replaced memory=%#v", memory)
+	}
 
 	root, err := database.EnsureKnowledgeRoot(ctx, "project", task.ProjectID)
 	if err != nil {

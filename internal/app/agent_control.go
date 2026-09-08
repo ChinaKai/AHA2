@@ -83,6 +83,30 @@ func (s *Service) UpdateAgentMemory(ctx context.Context, claims agentapi.Claims,
 	return s.store.TaskMemory(ctx, call.Task.ID)
 }
 
+func (s *Service) ReplaceAgentMemory(ctx context.Context, claims agentapi.Claims, replacement MemoryPatch) (domain.TaskMemory, error) {
+	call, err := s.AgentCallContext(ctx, claims, true)
+	if err != nil {
+		return domain.TaskMemory{}, err
+	}
+	memory, err := s.store.TaskMemory(ctx, call.Task.ID)
+	if err != nil {
+		return domain.TaskMemory{}, err
+	}
+	memory.TaskID = call.Task.ID
+	memory.CurrentGoal = call.Task.CurrentGoal
+	memory.Decisions = appendUnique(nil, replacement.Decisions...)
+	memory.Facts = appendUnique(nil, replacement.Facts...)
+	memory.Excluded = appendUnique(nil, replacement.Excluded...)
+	memory.Progress = appendUnique(nil, replacement.Progress...)
+	memory.Verification = appendUnique(nil, replacement.Verification...)
+	memory.NextActions = appendUnique(nil, replacement.NextActions...)
+	memory.UpdatedAt = s.now().UTC()
+	if err := s.store.UpsertTaskMemory(ctx, memory); err != nil {
+		return domain.TaskMemory{}, err
+	}
+	return s.store.TaskMemory(ctx, call.Task.ID)
+}
+
 func (s *Service) AddAgentProgress(ctx context.Context, claims agentapi.Claims, message string, attachmentIDs []string) error {
 	call, err := s.AgentCallContext(ctx, claims, false)
 	if err != nil {

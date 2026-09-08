@@ -55,6 +55,7 @@ const versionedApp = (await readFile(appPath, "utf8"))
   .replaceAll('"./hardware_panel.js"', `"./hardware_panel.js?v=${version}"`)
   .replaceAll('"./hardware_terminal.js"', `"./hardware_terminal.js?v=${version}"`)
   .replaceAll('"./task_tools.js"', `"./task_tools.js?v=${version}"`)
+  .replaceAll('"./markdown.js"', `"./markdown.js?v=${version}"`)
   .replaceAll('"./conversation_ui.js"', `"./conversation_ui.js?v=${version}"`);
 const versionedAppWithHelpers = versionedApp
   .replaceAll('"./ui_helpers.js"', `"./ui_helpers.js?v=${version}"`)

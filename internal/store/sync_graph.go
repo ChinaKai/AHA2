@@ -269,17 +269,18 @@ func (s *Store) UpsertSyncedWorkspace(ctx context.Context, item domain.Workspace
 
 func (s *Store) UpsertSyncedWorkspaceFromSource(ctx context.Context, item domain.Workspace, sourceID string) error {
 	wireID := ownedGraphObjectID(item.OwnerDeviceID, sourceID)
-	_, err := s.db.ExecContext(ctx, `INSERT INTO workspaces(id,project_id,name,locality,transport,root_path,ssh_host,ssh_user,ssh_port,ssh_auth,ssh_credential_ref,ssh_password_configured,distro,platform,health,capabilities_json,repository_json,last_detected_at,created_at,updated_at,owner_device_id,read_only)
-	SELECT ?,?,?,?,?,'',?,?,?,?,'',?,?,'','remote','{}','{}','',?,?,?,1
+	_, err := s.db.ExecContext(ctx, `INSERT INTO workspaces(id,project_id,name,locality,transport,root_path,ssh_host,ssh_user,ssh_port,ssh_auth,ssh_credential_ref,ssh_password_configured,distro,platform,health,capabilities_json,repository_json,last_detected_at,created_at,updated_at,owner_device_id,read_only,source_workspace_id)
+	SELECT ?,?,?,?,?,'',?,?,?,?,'',?,?,'','remote','{}','{}','',?,?,?,1,?
 	WHERE NOT EXISTS(SELECT 1 FROM sync_tombstones WHERE object_type='workspace' AND object_id=?)
+	  AND NOT EXISTS(SELECT 1 FROM retired_workspace_mirrors WHERE owner_device_id=? AND local_workspace_id=?)
 	ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id,name=excluded.name,locality='remote',transport=excluded.transport,
 		root_path='',ssh_host=excluded.ssh_host,ssh_user=excluded.ssh_user,ssh_port=excluded.ssh_port,ssh_auth=excluded.ssh_auth,
 		ssh_credential_ref='',ssh_password_configured=excluded.ssh_password_configured,distro=excluded.distro,
 		platform='',health='remote',capabilities_json='{}',repository_json='{}',last_detected_at='',updated_at=excluded.updated_at,
-		owner_device_id=excluded.owner_device_id,read_only=1`,
+		owner_device_id=excluded.owner_device_id,read_only=1,source_workspace_id=excluded.source_workspace_id`,
 		item.ID, item.ProjectID, item.Name, "remote", item.Transport, item.SSHHost, item.SSHUser, item.SSHPort,
 		item.SSHAuth, boolInt(item.SSHPasswordConfigured), item.Distro,
-		timeString(item.CreatedAt), timeString(item.UpdatedAt), item.OwnerDeviceID, wireID)
+		timeString(item.CreatedAt), timeString(item.UpdatedAt), item.OwnerDeviceID, sourceID, wireID, item.OwnerDeviceID, item.ID)
 	return err
 }
 

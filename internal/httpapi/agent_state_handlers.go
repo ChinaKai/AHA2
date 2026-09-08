@@ -79,22 +79,33 @@ func (s *Server) agentTaskStatus(writer http.ResponseWriter, request *http.Reque
 func (s *Server) updateAgentMemory(writer http.ResponseWriter, request *http.Request) {
 	claims, _ := agentClaimsFromContext(request.Context())
 	var payload struct {
-		Append app.MemoryPatch `json:"append"`
+		Append  app.MemoryPatch  `json:"append"`
+		Replace *app.MemoryPatch `json:"replace"`
 	}
 	if decodeJSON(request, &payload) != nil {
 		writeError(writer, http.StatusBadRequest, "invalid_json")
 		return
 	}
-	if !validMemoryPatch(payload.Append) {
+	appendValid := validMemoryPatch(payload.Append)
+	replaceValid := payload.Replace != nil && validMemoryPatch(*payload.Replace)
+	if appendValid == replaceValid {
 		writeError(writer, http.StatusBadRequest, "memory_patch_invalid")
 		return
 	}
-	memory, err := s.app.UpdateAgentMemory(request.Context(), claims, payload.Append)
+	mode := "append"
+	var memory domain.TaskMemory
+	var err error
+	if replaceValid {
+		mode = "replace"
+		memory, err = s.app.ReplaceAgentMemory(request.Context(), claims, *payload.Replace)
+	} else {
+		memory, err = s.app.UpdateAgentMemory(request.Context(), claims, payload.Append)
+	}
 	if err != nil {
 		writeAgentControlError(writer, err)
 		return
 	}
-	s.audit(request, "agent.memory.update", "task", claims.TaskID, nil)
+	s.audit(request, "agent.memory.update", "task", claims.TaskID, map[string]any{"mode": mode})
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "memory": memory})
 }
 
@@ -300,6 +311,8 @@ func writeAgentControlError(writer http.ResponseWriter, err error) {
 		writeError(writer, http.StatusConflict, "agent_turn_inactive")
 	case errors.Is(err, app.ErrRevisionConflict), errors.Is(err, store.ErrKnowledgeProposalRevision), errors.Is(err, store.ErrKnowledgeProposalPending):
 		writeError(writer, http.StatusConflict, "knowledge_revision_conflict")
+	case errors.Is(err, store.ErrKnowledgeFeedbackState):
+		writeJSON(writer, http.StatusConflict, map[string]any{"ok": false, "error": "knowledge_feedback_conflict", "message": "该 revision 已标记为过时或错误，请提交修订候选，或由 Owner 确认当前内容仍然有效"})
 	default:
 		writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "agent_operation_failed", "message": err.Error()})
 	}

@@ -106,6 +106,62 @@ func TestDetectDistinguishesGitExecutionFailure(t *testing.T) {
 	}
 }
 
+func TestDetectRetriesOneTransientWSLDeadline(t *testing.T) {
+	t.Parallel()
+	item := domain.Workspace{ID: "workspace-wsl", Locality: "local", Transport: "wsl", RootPath: "/srv/project"}
+	pwdCalls := 0
+	detected, err := detectWithRunner(context.Background(), item, detectRunnerFunc(func(command Command) (Result, error) {
+		switch command.Executable {
+		case "pwd":
+			pwdCalls++
+			if pwdCalls == 1 {
+				return Result{}, context.DeadlineExceeded
+			}
+			return Result{Stdout: item.RootPath}, nil
+		case "uname":
+			return Result{Stdout: "Linux"}, nil
+		case "git":
+			return Result{ExitCode: 128, Stderr: "not a git repository"}, nil
+		case "codex", "claude":
+			return Result{ExitCode: 127, Stderr: "command not found"}, nil
+		default:
+			return Result{}, errors.New("unexpected command")
+		}
+	}))
+	if err != nil || detected.Health != "ready" || pwdCalls != 2 {
+		t.Fatalf("detected=%#v err=%v pwd_calls=%d", detected, err, pwdCalls)
+	}
+}
+
+func TestDetectionRetryDoesNotRepeatSSHOrCancelledWSL(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name string
+		item domain.Workspace
+		ctx  context.Context
+	}{
+		{name: "ssh", item: domain.Workspace{Transport: "ssh"}, ctx: context.Background()},
+		{name: "cancelled-wsl", item: domain.Workspace{Transport: "wsl"}, ctx: cancelledContext()},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			calls := 0
+			_, err := runDetectionCommand(test.ctx, test.item, detectRunnerFunc(func(Command) (Result, error) {
+				calls++
+				return Result{}, context.DeadlineExceeded
+			}), Command{Executable: "pwd"})
+			if !errors.Is(err, context.DeadlineExceeded) || calls != 1 {
+				t.Fatalf("err=%v calls=%d", err, calls)
+			}
+		})
+	}
+}
+
+func cancelledContext() context.Context {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	return ctx
+}
+
 func TestSameWorkspaceRootRejectsNestedDirectory(t *testing.T) {
 	t.Parallel()
 	if runtime.GOOS == "windows" {

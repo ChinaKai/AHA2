@@ -22,6 +22,16 @@ type SecuritySettings struct {
 	UpdatedAt       time.Time `json:"updated_at,omitempty"`
 }
 
+type AgentAPISettings struct {
+	URL                    string    `json:"url"`
+	AllowInsecure          bool      `json:"allow_insecure"`
+	StartupURL             string    `json:"startup_url,omitempty"`
+	StartupAllowInsecure   bool      `json:"startup_allow_insecure,omitempty"`
+	EffectiveURL           string    `json:"effective_url"`
+	EffectiveAllowInsecure bool      `json:"effective_allow_insecure"`
+	UpdatedAt              time.Time `json:"updated_at,omitempty"`
+}
+
 type Session struct {
 	ID        string    `json:"id"`
 	OwnerID   string    `json:"owner_id"`
@@ -107,6 +117,13 @@ type Workspace struct {
 	UpdatedAt             time.Time      `json:"updated_at"`
 	OwnerDeviceID         string         `json:"owner_device_id,omitempty"`
 	ReadOnly              bool           `json:"read_only,omitempty"`
+	SourceWorkspaceID     string         `json:"-"`
+	AgentAPIMode          string         `json:"agent_api_mode"`
+	AgentAPIURL           string         `json:"agent_api_url,omitempty"`
+	AgentAPIResolvedURL   string         `json:"agent_api_resolved_url,omitempty"`
+	AgentAPIStatus        string         `json:"agent_api_status"`
+	AgentAPIError         string         `json:"agent_api_error,omitempty"`
+	AgentAPILastCheckedAt time.Time      `json:"agent_api_last_checked_at,omitempty"`
 }
 
 type Model struct {
@@ -410,9 +427,15 @@ type KnowledgeProposal struct {
 	SourceTaskID string                  `json:"source_task_id,omitempty"`
 	SourceTurnID string                  `json:"source_turn_id,omitempty"`
 	Status       KnowledgeProposalStatus `json:"status"`
+	ReviewMode   string                  `json:"review_mode"`
 	CreatedAt    time.Time               `json:"created_at"`
 	UpdatedAt    time.Time               `json:"updated_at"`
 	DecidedAt    time.Time               `json:"decided_at,omitempty"`
+}
+
+type KnowledgeReviewSettings struct {
+	AutoApprove bool      `json:"auto_approve"`
+	UpdatedAt   time.Time `json:"updated_at,omitempty"`
 }
 
 type Skill struct {

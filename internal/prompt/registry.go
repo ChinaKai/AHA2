@@ -31,25 +31,29 @@ type Engine struct {
 }
 
 type BuildInput struct {
-	Project          domain.Project
-	Workspace        domain.Workspace
-	Task             domain.Task
-	Agent            domain.TaskAgent
-	Snapshot         domain.RuntimeConfigSnapshot
-	Memory           domain.TaskMemory
-	GlobalKnowledge  []domain.KnowledgeEntry
-	ProjectKnowledge []domain.KnowledgeEntry
-	StaleKnowledge   []domain.KnowledgeEntry
-	Skills           []domain.Skill
-	ProductLine      domain.ProductLine
-	KnowledgeEnabled bool
-	Conversation     []domain.ConversationItem
-	Turns            []domain.Turn
-	Hardware         []domain.HardwareGroup
-	Attachments      []AttachmentResource
-	AgentAPIURL      string
-	UserMessage      string
-	Handoff          string
+	Project                domain.Project
+	Workspace              domain.Workspace
+	Task                   domain.Task
+	Agent                  domain.TaskAgent
+	Snapshot               domain.RuntimeConfigSnapshot
+	Memory                 domain.TaskMemory
+	GlobalKnowledge        []domain.KnowledgeEntry
+	ProjectKnowledge       []domain.KnowledgeEntry
+	StaleKnowledge         []domain.KnowledgeEntry
+	Skills                 []domain.Skill
+	ProductLine            domain.ProductLine
+	KnowledgeEnabled       bool
+	Conversation           []domain.ConversationItem
+	Turns                  []domain.Turn
+	Hardware               []domain.HardwareGroup
+	Attachments            []AttachmentResource
+	AgentAPIURL            string
+	UserMessage            string
+	Handoff                string
+	CurrentTurnID          string
+	CurrentRoundID         string
+	IncludeRecentContext   bool
+	IncludeTurnDiagnostics bool
 }
 
 type AttachmentResource struct {
@@ -71,6 +75,8 @@ type BuildResult struct {
 	EffectivePrompt string
 	ContextRoot     string
 	ContextManifest []ContextResource
+	SharedRoot      string
+	SharedManifest  []ContextResource
 }
 
 type templateData struct {
@@ -102,6 +108,7 @@ var builtinTemplates = []domain.PromptTemplate{
 	{ID: "channel.web", Name: "AHA Web Channel", Layer: "channel", Description: "Web 渠道消息行为", Editable: true, Required: false, Version: 1},
 	{ID: "policy.auto", Name: "Auto Collaboration", Layer: "policy", Description: "AHA 自动协作策略", Editable: true, Required: false, Version: 1},
 	{ID: "policy.single", Name: "Single Agent", Layer: "policy", Description: "单 Agent 策略", Editable: true, Required: false, Version: 1},
+	{ID: "protocol.knowledge", Name: "Knowledge Protocol", Layer: "protocol", Description: "按 index 渐进读取知识并形成反馈与修订闭环", Content: knowledgeProtocol, Editable: false, Required: false, Version: 1},
 	{ID: "protocol.agent-api", Name: "Agent Control API Protocol", Layer: "protocol", Description: "通过 Agent API 提交结构化状态，最终回复仅保留自然语言", Content: agentAPIProtocol, Editable: false, Required: true, Version: 1},
 }
 
@@ -177,7 +184,9 @@ func (engine *Engine) Build(ctx context.Context, input BuildInput) (BuildResult,
 		TaskTitle: input.Task.Title, ContextRoot: contextRoot, TaskWorkspace: workDir,
 		Workspace: input.Workspace.Name, WorkspaceTransport: input.Workspace.Transport,
 	}
-	resources := buildResources(input, contextRoot, workDir)
+	contextResources := buildResources(input, contextRoot, workDir)
+	sharedRoot, sharedManifest := buildSharedSnapshot(input, workDir)
+	resources := append(append([]ContextResource(nil), contextResources...), sharedManifest...)
 	templateIDs := []string{"core.default", "identity.task-agent"}
 	if input.Agent.Role == "sub" {
 		templateIDs = append(templateIDs, "role.sub")
@@ -191,6 +200,9 @@ func (engine *Engine) Build(ctx context.Context, input BuildInput) (BuildResult,
 		} else {
 			templateIDs = append(templateIDs, "policy.auto")
 		}
+	}
+	if input.KnowledgeEnabled {
+		templateIDs = append(templateIDs, "protocol.knowledge")
 	}
 	var parts []string
 	for _, id := range templateIDs {
@@ -217,7 +229,8 @@ func (engine *Engine) Build(ctx context.Context, input BuildInput) (BuildResult,
 	parts = append(parts, "## "+protocol.Name+"\n"+protocolContent)
 	effective := strings.Join(parts, "\n\n")
 	return BuildResult{
-		EffectivePrompt: effective, ContextRoot: contextRoot, ContextManifest: resources,
+		EffectivePrompt: effective, ContextRoot: contextRoot, ContextManifest: contextResources,
+		SharedRoot: sharedRoot, SharedManifest: sharedManifest,
 	}, nil
 }
 
@@ -278,17 +291,44 @@ func buildResources(input BuildInput, root, workDir string) []ContextResource {
 	resources := []ContextResource{
 		resource(input, "task", joinContextPath(input, root, "task.md"), "完整 Task、Project 与 Workspace 信息", taskResource(input, workDir)),
 		resource(input, "task-memory", joinContextPath(input, root, "task-memory.md"), "完整 Task Memory", fullMemory(input.Memory)),
-		resource(input, "conversation", joinContextPath(input, root, "conversation.md"), "当前 Agent 最近 Conversation", conversationResource(input.Conversation)),
-		resource(input, "turns", joinContextPath(input, root, "turns.md"), "当前 Agent Turn 历史", turnsResource(input.Turns, input.Agent.AgentID)),
+	}
+	if input.IncludeRecentContext {
+		if recent := recentContextResource(input.Conversation, input.CurrentTurnID, input.CurrentRoundID); recent != "" {
+			resources = append(resources, resource(input, "recent-context", joinContextPath(input, root, "recent-context.md"), "Backend Session 恢复所需的近期语义对话", recent))
+		}
+	}
+	if input.IncludeTurnDiagnostics {
+		if diagnostics := turnDiagnosticsResource(input.Turns, input.Agent.AgentID); diagnostics != "" {
+			resources = append(resources, resource(input, "turn-diagnostics", joinContextPath(input, root, "diagnostics", "turns.md"), "失败、中断、停滞或重试 Turn 的诊断记录", diagnostics))
+		}
 	}
 	if len(input.Hardware) > 0 {
 		resources = append(resources, resource(input, "hardware", joinContextPath(input, root, "hardware.md"), "Task 硬件调试配置（不含密码）", hardwareResource(input.Hardware)))
 	}
-	if strings.TrimSpace(input.AgentAPIURL) != "" {
-		resources = append(resources, resource(input, "agent-api", joinContextPath(input, root, "agent-api.md"), "当前 Turn 的受限 Agent API 使用说明", agentAPIResource(input.AgentAPIURL)))
-	}
 	if len(input.Attachments) > 0 {
 		resources = append(resources, attachmentResources(input, root)...)
+	}
+	return resources
+}
+
+func buildSharedSnapshot(input BuildInput, workDir string) (string, []ContextResource) {
+	seed := sharedResources(input, "")
+	if len(seed) == 0 {
+		return "", nil
+	}
+	hash := contextSnapshotHash(seed)
+	root := joinContextPath(input, workDir, ".aha2-context", input.Task.ID, "shared-"+hash)
+	manifest := sharedResources(input, root)
+	for index := range manifest {
+		manifest[index].URI = fmt.Sprintf("aha://tasks/%s/shared/%s", input.Task.ID, manifest[index].ID)
+	}
+	return root, manifest
+}
+
+func sharedResources(input BuildInput, root string) []ContextResource {
+	resources := []ContextResource{}
+	if strings.TrimSpace(input.AgentAPIURL) != "" {
+		resources = append(resources, resource(input, "agent-api", joinContextPath(input, root, "agent-api.md"), "当前 Turn 的受限 Agent API 使用说明", agentAPIResource(input.AgentAPIURL)))
 	}
 	if input.KnowledgeEnabled {
 		resources = append(resources, knowledgeResources(input, root)...)
@@ -296,12 +336,25 @@ func buildResources(input BuildInput, root, workDir string) []ContextResource {
 	if len(input.Skills) > 0 {
 		resources = append(resources, skillResources(input, root)...)
 	}
-	metadata := append([]ContextResource(nil), resources...)
-	for index := range metadata {
-		metadata[index].Content = ""
+	return resources
+}
+
+func contextSnapshotHash(resources []ContextResource) string {
+	resources = append([]ContextResource(nil), resources...)
+	sort.Slice(resources, func(left, right int) bool {
+		leftPath := strings.ReplaceAll(resources[left].Path, "\\", "/")
+		rightPath := strings.ReplaceAll(resources[right].Path, "\\", "/")
+		if leftPath != rightPath {
+			return leftPath < rightPath
+		}
+		return resources[left].ID < resources[right].ID
+	})
+	hash := sha256.New()
+	for _, item := range resources {
+		path := strings.ReplaceAll(item.Path, "\\", "/")
+		fmt.Fprintf(hash, "%d:%s\n%d:%s\n", len(path), path, len(item.Content), item.Content)
 	}
-	manifest, _ := json.MarshalIndent(map[string]any{"version": 1, "resources": metadata}, "", "  ")
-	return append([]ContextResource{resource(input, "manifest", joinContextPath(input, root, "manifest.json"), "上下文资源清单", string(manifest))}, resources...)
+	return fmt.Sprintf("%x", hash.Sum(nil))
 }
 
 func attachmentResources(input BuildInput, root string) []ContextResource {
@@ -484,7 +537,7 @@ func knowledgeScopeResources(input BuildInput, directory, scope string, entries 
 	}
 	specs := []indexSpec{{
 		id: "knowledge-global-index", path: joinContextPath(input, scopeDirectory, "index.md"),
-		title: "全局知识", description: "跨项目共享的稳定知识、规则与实践。",
+		title: "全局知识", description: "这是 AHA2 全局知识页面。通用知识以人类阅读为主，Agent 仅在任务主题明确相关时按需读取；Agent 经验教训用于沉淀可跨项目复用的技术诊断与行为教训。请根据分类、标题与摘要选择阅读路径。",
 		empty: "当前没有可用的全局知识文档。", rootBacked: true,
 		include: func(domain.KnowledgeEntry) bool { return true },
 	}}
@@ -492,13 +545,13 @@ func knowledgeScopeResources(input BuildInput, directory, scope string, entries 
 		specs = []indexSpec{
 			{
 				id: "knowledge-project-index", path: joinContextPath(input, scopeDirectory, "index.md"),
-				title: "项目知识", description: "当前项目的实践、决策与诊断知识。",
+				title: "项目知识", description: "这是当前项目的知识页面，保存项目实践、技术决策、诊断结论和可复用经验。请根据下面的标题与摘要按需打开文档。",
 				empty: "当前没有可用的项目知识文档。", rootBacked: true,
-				include: func(entry domain.KnowledgeEntry) bool { return !navigationIDs[entry.ID] },
+				include: func(domain.KnowledgeEntry) bool { return true },
 			},
 			{
 				id: "knowledge-project-navigation-index", path: joinContextPath(input, scopeDirectory, "navigation", "index.md"),
-				title: "项目导航", description: "模块入口、代码路径、边界与关键流程。",
+				title: "项目导航", description: "这是当前项目的导航页面，按模块、代码路径、边界与关键流程组织入口。请根据下面的标题与摘要选择阅读路径。",
 				empty:   "当前没有可用的项目导航文档。",
 				include: func(entry domain.KnowledgeEntry) bool { return navigationIDs[entry.ID] },
 			},
@@ -509,7 +562,7 @@ func knowledgeScopeResources(input BuildInput, directory, scope string, entries 
 		lines := []string{"# " + spec.title, "", spec.description}
 		if spec.rootBacked && rootEntry != nil {
 			description := strings.TrimSpace(rootEntry.Body)
-			if description == "" {
+			if description == "" || description == "这里汇总跨项目共享的知识文档。" || description == "这里汇总本项目的知识文档与常用入口。" {
 				description = spec.description
 			}
 			lines = []string{"# " + spec.title, "", description}
@@ -527,7 +580,7 @@ func knowledgeScopeResources(input BuildInput, directory, scope string, entries 
 				continue
 			}
 			relative := knowledgeRelativePath(spec.path, entryPath(entry, map[string]bool{}))
-			lines = append(lines, fmt.Sprintf("- [%s](%s)：%s", entry.Title, relative, knowledgeIndexSummary(entry.Body)))
+			lines = append(lines, fmt.Sprintf("- [%s](%s)：%s", entry.Title, relative, knowledgeIndexSummary(entry.Title, entry.Body)))
 			childCount++
 		}
 		if childCount == 0 {
@@ -546,21 +599,34 @@ func knowledgeScopeResources(input BuildInput, directory, scope string, entries 
 				continue
 			}
 			relative := knowledgeRelativePath(entryPath(entry, map[string]bool{}), entryPath(child, map[string]bool{}))
-			children = append(children, fmt.Sprintf("- [%s](%s)", child.Title, relative))
+			children = append(children, fmt.Sprintf("- [%s](%s)：%s", child.Title, relative, knowledgeIndexSummary(child.Title, child.Body)))
 		}
 		if len(children) > 0 {
 			body += "\n\n## Children\n\n" + strings.Join(children, "\n") + "\n"
 		}
-		resources = append(resources, detailResource(input, "knowledge-"+entry.ID, entryPath(entry, map[string]bool{}), entry.Title, body))
+		item := detailResource(input, "knowledge-"+entry.ID, entryPath(entry, map[string]bool{}), entry.Title, body)
+		if scope == "global" && entry.Slug == "agent-lessons" && rootEntry != nil && entry.ParentID == rootEntry.ID {
+			item.EntryPoint = true
+			item.Description = "Agent 经验教训优先索引；按任务相关性继续读取技术诊断或行为教训"
+			item.Content = "# " + entry.Title + "\n\n" + strings.TrimSpace(entry.Body)
+			if len(children) > 0 {
+				item.Content += "\n\n## Documents\n\n" + strings.Join(children, "\n") + "\n"
+			}
+			item.Chars = len([]rune(item.Content))
+		}
+		resources = append(resources, item)
 	}
 	return resources
 }
 
-func knowledgeIndexSummary(body string) string {
-	for _, line := range strings.Split(body, "\n") {
-		line = strings.TrimSpace(line)
-		line = strings.TrimSpace(strings.TrimLeft(line, "#>-*+0123456789. "))
-		if line != "" {
+func knowledgeIndexSummary(title, body string) string {
+	for _, raw := range strings.Split(body, "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "```") {
+			continue
+		}
+		line = strings.TrimSpace(strings.TrimLeft(line, ">-*+0123456789.) "))
+		if line != "" && !strings.EqualFold(line, strings.TrimSpace(title)) {
 			return truncate(line, 160)
 		}
 	}
@@ -640,33 +706,55 @@ func fullMemory(memory domain.TaskMemory) string {
 	return value
 }
 
-func conversationResource(items []domain.ConversationItem) string {
-	var lines []string
+func recentContextResource(items []domain.ConversationItem, currentTurnID, currentRoundID string) string {
+	lines := make([]string, 0, 20)
+	previous := ""
 	for _, item := range items {
-		lines = append(lines, fmt.Sprintf("- [%s/%s from %s] %s", item.Category, item.Kind, item.FromAgentID, item.Summary))
+		if item.TurnID == currentTurnID || currentRoundID != "" && item.RoundID == currentRoundID || item.Category == "tool" || item.Kind == "turn_duration" || strings.HasPrefix(item.Kind, "agent_command_") {
+			continue
+		}
+		if item.Category != "chat" && item.Category != "update" && item.Category != "error" {
+			continue
+		}
+		line := fmt.Sprintf("- [%s/%s from %s] %s", item.Category, item.Kind, item.FromAgentID, strings.TrimSpace(item.Summary))
+		if strings.TrimSpace(item.Summary) == "" || line == previous {
+			continue
+		}
+		previous = line
+		lines = append(lines, line)
+	}
+	if len(lines) > 20 {
+		lines = lines[len(lines)-20:]
 	}
 	if len(lines) == 0 {
-		return "# Conversation\n\n-"
+		return ""
 	}
-	return "# Conversation\n\n" + strings.Join(lines, "\n")
+	return "# Recent Context\n\nThis file is a recovery aid, not the durable source of truth. Prefer Task Memory when they differ.\n\n" + strings.Join(lines, "\n")
 }
 
-func turnsResource(turns []domain.Turn, agentID string) string {
+func turnDiagnosticsResource(turns []domain.Turn, agentID string) string {
 	var lines []string
 	for _, turn := range turns {
-		if turn.AgentID != agentID {
+		if turn.AgentID != agentID || !turnNeedsDiagnostics(turn) {
 			continue
 		}
 		body := turn.Result
 		if body == "" {
 			body = turn.Error
 		}
-		lines = append(lines, fmt.Sprintf("- Turn %d %s [%s]: %s", turn.Sequence, turn.AgentID, turn.Status, truncate(body, 1000)))
+		lines = append(lines, fmt.Sprintf("- Turn %d %s [%s, attempt %d, generation %d]: %s", turn.Sequence, turn.AgentID, turn.Status, turn.Attempt, turn.Generation, truncate(body, 1000)))
 	}
 	if len(lines) == 0 {
-		return "# Turns\n\n-"
+		return ""
 	}
-	return "# Turns\n\n" + strings.Join(lines, "\n")
+	if len(lines) > 10 {
+		lines = lines[len(lines)-10:]
+	}
+	return "# Turn Diagnostics\n\n" + strings.Join(lines, "\n")
+}
+
+func turnNeedsDiagnostics(turn domain.Turn) bool {
+	return turn.Status == domain.TurnFailed || turn.Status == domain.TurnInterrupted || turn.Status == domain.TurnBlocked || !turn.StalledAt.IsZero() || turn.Attempt > 1
 }
 
 func hardwareResource(groups []domain.HardwareGroup) string {
@@ -712,7 +800,7 @@ Send UTF-8 encoded JSON with Content-Type: application/json; charset=utf-8. Wind
 ## Turn state
 
 - GET /api/v1/agent/capabilities
-- PATCH /api/v1/agent/turn/memory with {"append":{"decisions":[],"facts":[],"excluded":[],"progress":[],"verification":[],"next_actions":[]}}
+- PATCH /api/v1/agent/turn/memory with exactly one of {"append":{...}} or {"replace":{...}} using decisions, facts, excluded, progress, verification and next_actions arrays. Use replace only after reading the current Task Memory; carry forward every still-valid item and remove superseded, duplicate, completed or corrupted entries.
 - POST /api/v1/agent/turn/attachments as multipart/form-data with one file field; returns an attachment ID
 - POST /api/v1/agent/turn/messages with {"message":"concise user-facing progress","attachment_ids":["attachment_..."]}
 - POST /api/v1/agent/collaboration/batches with {"actions":[{"agent_id":"sub-001","title":"...","assignment":"...","required":true}],"main_followup":"..."}
@@ -723,7 +811,7 @@ Send UTF-8 encoded JSON with Content-Type: application/json; charset=utf-8. Wind
 
 Task creation inherits the current Turn runtime when runtime fields are omitted. To select another configured runtime, first list project runtimes and pass back the exact backend/model fields; credentials and permissions are never accepted in this payload.
 
-Only Main may change Memory, propose Knowledge revisions, change Skills, or request collaboration. Knowledge candidates remain pending until Owner approval; proposing a revision marks the current entry stale. Send material progress promptly through turn/messages. Do not claim an update was sent unless the API returned success.
+Only Main may change Memory, propose Knowledge revisions, change Skills, or request collaboration. Knowledge submissions always create proposals; Owner settings decide whether they remain pending for manual review or are approved automatically. Proposing a revision marks the current entry stale until approval succeeds. Send material progress promptly through turn/messages. Do not claim an update was sent unless the API returned success.
 
 ## Knowledge and Skills
 
@@ -735,7 +823,7 @@ Only Main may change Memory, propose Knowledge revisions, change Skills, or requ
 - GET /api/v1/agent/skills/{id}
 - PUT /api/v1/agent/skills/{id} with {"base_version":1,"name":"...","description":"...","files":[{"path":"SKILL.md","content":"..."}]}
 
-For an existing Knowledge entry, base_revision is required and conflicts return HTTP 409. Candidate responses retain the knowledge field and also include pending proposals; candidates are never auto-verified. Skill updates replace the complete text package, require its current base_version, and are limited to Skills selected by this Task.
+For an existing Knowledge entry, base_revision is required and conflicts return HTTP 409. Candidate responses retain the knowledge field and include proposals with review_mode and current status; only status=approved/knowledge status=verified means the revision is usable. Skill updates replace the complete text package, require its current base_version, and are limited to Skills selected by this Task.
 
 ## Managed processes
 

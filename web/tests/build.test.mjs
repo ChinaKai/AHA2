@@ -53,6 +53,39 @@ test("workspace detection renders inaccessible, Git, and backend probe states", 
   });
   assert.match(versions, /Codex · codex-cli 0\.153\.4/);
   assert.match(versions, /Claude · 2\.1\.0/);
+
+  const agentAPI = renderWorkspaceDetection({
+    ...base,
+    agent_api_status: "ready",
+    agent_api_resolved_url: "http://172.28.0.1:8766",
+    capabilities: {workspace: {status: "ready"}, agent_api: {status: "ready", url: "http://172.28.0.1:8766"}},
+    repository: {status: "ready", is_git: true},
+  });
+  assert.match(agentAPI, /Agent API · http:\/\/172\.28\.0\.1:8766/);
+
+  const agentAPIFailed = renderWorkspaceDetection({
+    ...base,
+    agent_api_status: "error",
+    agent_api_error: "反向连接超时",
+    capabilities: {workspace: {status: "ready"}, agent_api: {status: "unavailable", error: "反向连接超时"}},
+    repository: {status: "ready", is_git: true},
+  });
+  assert.match(agentAPIFailed, /反向连接超时/);
+});
+
+test("Agent API settings support global defaults and Workspace reverse probes", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const script = await readFile(resolve(root, "dist", "app.js"), "utf8");
+  const api = await readFile(resolve(root, "dist", "api.js"), "utf8");
+  const styles = await readFile(resolve(root, "dist", "styles.css"), "utf8");
+  for (const marker of ["agent-api-settings-form", "ws-agent-api-mode", "ws-agent-api-url", "测试连接", "Agent API 反向连接"]) {
+    assert.match(script, new RegExp(marker));
+  }
+  assert.match(script, /api\.agentAPISettings\(\)/);
+  assert.match(script, /api\.updateAgentAPISettings/);
+  assert.match(script, /agent_api_status === "ready"/);
+  assert.match(api, /settings\/agent-api/);
+  assert.match(styles, /\.workspace-agent-api-fields/);
 });
 
 test("task list refreshes after round terminal events", async () => {
@@ -147,10 +180,14 @@ test("built web contains responsive application", async () => {
   assert.match(script, /knowledgeProposals/);
   assert.match(knowledgeWorkspace, /data-knowledge-proposal-approve/);
   assert.match(knowledgeWorkspace, /data-knowledge-proposal-reject/);
-  assert.match(knowledgeWorkspace, /\\u76f8\\u5173\\u6587\\u6863/);
+  assert.match(knowledgeWorkspace, /\\u6587\\u6863\\u94fe\\u63a5/);
+  assert.match(knowledgeWorkspace, /knowledgeHomeBody/);
+  assert.match(knowledgeWorkspace, /knowledgeIndexSummary/);
+  assert.match(knowledgeWorkspace, /knowledge-feedback-active/);
+  assert.match(knowledgeWorkspace, /feedback_state === "stale"/);
   assert.match(knowledgeWorkspace, /\\u8fd4\\u56de\\u77e5\\u8bc6\\u5e93\\u5165\\u53e3/);
   assert.match(knowledgeWorkspace, /data-knowledge-back/);
-  assert.match(knowledgeWorkspace, /data-knowledge-toggle/);
+  assert.doesNotMatch(knowledgeWorkspace, /data-knowledge-toggle/);
   assert.match(knowledgeWorkspace, /data-knowledge-entry/);
   assert.match(knowledgeWorkspace, /project-navigation/);
   assert.match(css, /\.knowledge-entry-portals/);
@@ -237,9 +274,14 @@ test("built web contains responsive application", async () => {
   assert.match(taskTools, /iconName: "hardware"/);
   assert.match(taskTools, /iconName: "browser"/);
   assert.match(script, /state\.taskTool === tool/);
-  assert.doesNotMatch(script, /<h3>Task Memory<\/h3>.*Context Evidence/s);
+  assert.doesNotMatch(script, /Context Evidence|knowledge-mini|project_knowledge|global_knowledge/);
   assert.match(script, /<details class="prompt-snapshot" open>/);
+  assert.match(script, /prompt-snapshot-body markdown-body/);
+  assert.match(script, /renderMarkdown\(context\.prompt/);
+  assert.match(script, /markdown\.js\?v=[a-f0-9]{12}/);
   assert.match(script, /refreshTaskRuntime/);
+  assert.match(script, /api\.agentMessage[\s\S]{0,600}scrollConversationToBottom\s*=\s*true[\s\S]{0,120}updateTaskLiveRegions/);
+  assert.match(script, /scrollConversationToBottom\s*\|\|\s*wasAtBottom/);
   assert.match(script, /startTaskFallback/);
   assert.match(agents, /data-live-elapsed-ms/);
   assert.match(agents, /ms > 0 && ms < 1000/);
@@ -290,6 +332,9 @@ test("built web contains responsive application", async () => {
   assert.doesNotMatch(codexAccounts, /codex-quota-grid|flatMap\(limit/);
   assert.match(css, /\.codex-limit-row/);
   assert.match(css, /\.provider-sidebar/);
+  assert.match(css, /@media \(max-width: 760px\)[\s\S]*?\.codex-account-head \{[^}]*display:\s*grid;[^}]*grid-template-columns:\s*minmax\(0,1fr\)/);
+  assert.match(css, /@media \(max-width: 760px\)[\s\S]*?\.ws-row \.workspace-detection \{[^}]*grid-column:\s*1 \/ -1/);
+  assert.match(css, /@media \(max-width: 760px\)[\s\S]*?\.ws-row \.proto-badges \{[^}]*flex-wrap:\s*wrap/);
   assert.doesNotMatch(codexAccounts, /device-auth|setInterval/);
   assert.doesNotMatch(promptAdmin, /prompt-route-list|Effective Prompt|Context Manifest/);
   assert.doesNotMatch(api, /prompts\/routes|prompts\/preview|context\/resources/);
@@ -312,6 +357,10 @@ test("built web contains responsive application", async () => {
   assert.match(script, /data-retire-remote-task/);
   assert.match(script, /来源设备已停用或数据已清空/);
   assert.match(script, /retireRemoteTaskMirror\(id\)[\s\S]{0,180}runSync\(\)/);
+  assert.match(api, /workspaces\/\$\{encodeURIComponent\(id\)\}\/remote-mirror/);
+  assert.match(script, /data-retire-remote-workspace/);
+  assert.match(script, /retireRemoteWorkspaceMirror/);
+  assert.match(script, /移除孤立 Workspace/);
   assert.doesNotMatch(syncSettings, /value="\$\{[^}]*token/);
   assert.match(script, /heartbeat/);
   assert.doesNotMatch(css, /\.conversation-event/);
@@ -420,14 +469,22 @@ test("knowledge workspace defaults to actionable updates", async () => {
       {id: "knowledge-legacy", scope: "global", type: "diagnostic", title: "Legacy candidate", body: "Created before proposal migration.", status: "candidate", confidence: .9, revision: 1, helped_count: 0, stale_count: 0, created_at: "", updated_at: ""},
     ],
     proposals: [
-      {id: "proposal-new", entry_id: "knowledge-new", base_revision: 0, status: "pending", source_task_id: "task-new", source_turn_id: "turn-new", created_at: "2026-09-06T01:00:00Z", proposed: {id: "knowledge-new", scope: "project", project_id: "project-1", sort_order: 0, is_index: false, type: "practice", title: "Brand new knowledge", body: "**Complete preview**\n\nAll proposed details.", status: "candidate", confidence: .9, revision: 1, helped_count: 0, stale_count: 0, created_at: "", updated_at: ""}},
-      {id: "proposal-revision", entry_id: "knowledge-1", base_revision: 2, scope: "project", project_id: "project-1", type: "practice", title: "Updated title", body: "Keep this line.\nNew detail.", base_title: "Current title", base_body: "Keep this line.\nOld detail.", status: "pending", source_task_id: "task-revision", source_turn_id: "turn-revision", created_at: "2026-09-06T02:00:00Z"},
+      {id: "proposal-new", entry_id: "knowledge-new", base_revision: 0, status: "pending", review_mode: "manual", source_task_id: "task-new", source_turn_id: "turn-new", created_at: "2026-09-06T01:00:00Z", proposed: {id: "knowledge-new", scope: "project", project_id: "project-1", sort_order: 0, is_index: false, type: "practice", title: "Brand new knowledge", body: "**Complete preview**\n\nAll proposed details.", status: "candidate", confidence: .9, revision: 1, helped_count: 0, stale_count: 0, created_at: "", updated_at: ""}},
+      {id: "proposal-revision", entry_id: "knowledge-1", base_revision: 2, scope: "project", project_id: "project-1", type: "practice", title: "Updated title", body: "Keep this line.\nNew detail.", base_title: "Current title", base_body: "Keep this line.\nOld detail.", status: "pending", review_mode: "manual", source_task_id: "task-revision", source_turn_id: "turn-revision", created_at: "2026-09-06T02:00:00Z"},
     ],
+    reviewSettings: {auto_approve: false},
     refreshData: async () => {}, render: () => {}, setMessage: () => {},
   });
   assert.match(html, /data-knowledge-area="updates" class="active"/);
   assert.match(html, /data-knowledge-update-filter="pending" class="active"/);
   assert.match(html, /data-knowledge-update-filter="all"/);
+  assert.match(html, /data-knowledge-auto-review/);
+  assert.match(html, /data-knowledge-batch-all/);
+  assert.match(html, /data-knowledge-batch-approve/);
+  assert.match(html, /data-knowledge-batch-reject/);
+  assert.match(html, /data-knowledge-update-select="proposal:proposal-new"/);
+  assert.match(html, /data-knowledge-update-select="legacy:knowledge-legacy"/);
+  assert.match(html, /手动评审/);
   assert.match(html, /待处理 <b>3<\/b>/);
   assert.match(html, /data-knowledge-proposal-view="proposal-new"/);
   assert.match(html, /data-knowledge-proposal-approve="proposal-new"/);
@@ -598,6 +655,42 @@ test("knowledge update list keeps proposal bodies folded behind details", async 
   assert.doesNotMatch(html, /knowledge-proposal-full|knowledge-proposal-diff/);
 });
 
+test("knowledge proposal history marks automatic and manual review", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const {renderUpdates} = await import(pathToFileURL(resolve(root, "dist", "knowledge_workspace.js")));
+  const html = renderUpdates([], [
+    {id: "auto", entry_id: "auto-entry", base_revision: 0, status: "pending", review_mode: "auto", title: "Auto", body: "body", scope: "global", created_at: "2026-09-07T10:00:00Z"},
+    {id: "manual", entry_id: "manual-entry", base_revision: 0, status: "pending", review_mode: "manual", title: "Manual", body: "body", scope: "global", created_at: "2026-09-07T09:00:00Z"},
+  ], [], {auto_approve: true});
+  assert.match(html, /自动评审/);
+  assert.match(html, /手动评审/);
+  assert.match(html, /新提案将自动批准/);
+});
+
+test("message send clears draft state before awaiting the request", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const script = await readFile(resolve(root, "dist", "app.js"), "utf8");
+  const clearAt = script.indexOf('state.taskDrafts[agentID] = ""');
+  const sendAt = script.indexOf("await api.agentMessage(taskID, agentID");
+  const acceptedAt = script.indexOf("accepted = true", sendAt);
+  const refreshAt = script.indexOf("await refreshTaskRuntime(taskID)", sendAt);
+  assert.ok(clearAt >= 0 && sendAt > clearAt);
+  assert.ok(acceptedAt > sendAt && refreshAt > acceptedAt);
+  assert.match(script, /messageSubmitPending = true/);
+  assert.match(script, /state\.taskAttachmentDrafts\[agentID\] = \[\]/);
+  assert.match(script, /if \(!accepted && state\.selectedTask/);
+  assert.match(script, /消息已发送，但刷新失败/);
+  assert.match(script, /finally\s*\{\s*messageSubmitPending = false/);
+});
+
+test("pending knowledge libraries fit mobile width", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const styles = await readFile(resolve(root, "dist", "styles.css"), "utf8");
+  assert.match(styles, /@media \(max-width: 760px\)[\s\S]*?\.knowledge-library-grid \{[^}]*grid-template-columns:\s*minmax\(0,1fr\);[^}]*overflow:\s*hidden/);
+  assert.match(styles, /\.knowledge-library-card > footer label \{[^}]*grid-template-columns:\s*1fr;[^}]*white-space:\s*normal/);
+  assert.match(styles, /\.knowledge-library-card > footer button \{[^}]*width:\s*100%/);
+});
+
 test("conversation renders agent config and turn duration cards", async () => {
   const root = resolve(import.meta.dirname, "..");
   const {renderConversationList} = await import(pathToFileURL(resolve(root, "dist", "conversation_ui.js")));
@@ -681,6 +774,36 @@ test("tool events render as message bubbles", async () => {
   assert.doesNotMatch(html, /conversation-event/);
 });
 
+test("tool lifecycle events render as one completed message", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const {coalesceToolConversationItems, renderConversationList} = await import(pathToFileURL(resolve(root, "dist", "conversation_ui.js")));
+  const base = {
+    task_id: "task-1", turn_id: "turn-42", agent_id: "main", stream_agent_id: "main", category: "tool",
+    summary: "go test ./...", created_at: "2026-09-03T00:00:00Z",
+  };
+  const current = coalesceToolConversationItems([
+    {...base, sequence: 1, id: "tool-start", kind: "agent_command_started", payload: {tool_call_id: "call-1", status: "in_progress"}},
+    {...base, sequence: 2, id: "tool-finish", kind: "agent_command_finished", payload: {tool_call_id: "call-1", status: "completed", output_tail: "ok"}},
+  ]);
+  assert.equal(current.length, 1);
+  assert.equal(current[0].kind, "agent_command_finished");
+  assert.equal(current[0].payload.output_tail, "ok");
+
+  const claude = coalesceToolConversationItems([
+    {...base, sequence: 1, id: "claude-start", kind: "agent_command_started", summary: "Read", payload: {tool_use_id: "use-1", tool_name: "Read"}},
+    {...base, sequence: 2, id: "claude-finish", kind: "agent_command_finished", summary: "agent_command_finished", payload: {tool_use_id: "use-1", output_tail: "file"}},
+  ]);
+  assert.equal(claude.length, 1);
+  assert.equal(claude[0].summary, "Read");
+
+  const historical = renderConversationList([
+    {...base, sequence: 3, id: "legacy-start", kind: "agent_command_started", payload: {command: "go test ./..."}},
+    {...base, sequence: 4, id: "legacy-finish", kind: "agent_command_finished", payload: {command: "go test ./...", output_tail: "passed"}},
+  ], null, false);
+  assert.equal((historical.match(/agent-tool-message/g) || []).length, 1);
+  assert.match(historical, /passed/);
+});
+
 test("hardware SSH requires explicit host fingerprint trust", async () => {
   const root = resolve(import.meta.dirname, "..");
   const panel = await readFile(resolve(root, "dist", "hardware_panel.js"), "utf8");
@@ -713,38 +836,50 @@ test("conversation renders uploaded images and downloadable files", async () => 
   assert.match(html, /notes\.txt/);
 });
 
-test("knowledge workspace renders one document with a clickable hierarchy", async () => {
+test("global knowledge opens as a virtual index document with described links", async () => {
   const root = resolve(import.meta.dirname, "..");
   const {renderKnowledgeDocumentWorkspace} = await import(pathToFileURL(resolve(root, "dist", "knowledge_workspace.js")));
   const base = {scope: "global", status: "verified", confidence: .9, revision: 1, helped_count: 0, stale_count: 0, created_at: "", updated_at: "", sort_order: 0};
   const html = renderKnowledgeDocumentWorkspace([
       {...base, id: "root", is_index: true, type: "navigation", title: "Global index", slug: "index", body: "# Entry\nChoose a child."},
-      {...base, id: "child", parent_id: "root", is_index: false, type: "practice", title: "Core architecture", slug: "core", body: "Child body"},
-      {...base, id: "grandchild", parent_id: "child", is_index: false, type: "practice", title: "Storage", slug: "storage", body: "Grandchild body"},
+      {...base, id: "knowledge_global_general", parent_id: "root", is_index: false, type: "navigation", title: "通用知识", slug: "general", body: "Human-first reference."},
+      {...base, id: "knowledge_global_agent_lessons", parent_id: "root", is_index: false, type: "navigation", title: "Agent 经验教训", slug: "agent-lessons", body: "Agent-first lessons."},
+      {...base, id: "knowledge_global_agent_lessons_technical", parent_id: "knowledge_global_agent_lessons", is_index: false, type: "navigation", title: "技术诊断", slug: "technical-diagnostics", body: "Technical traps."},
+      {...base, id: "knowledge_global_agent_lessons_behavior", parent_id: "knowledge_global_agent_lessons", is_index: false, type: "navigation", title: "行为教训", slug: "behavior-lessons", body: "Behavior corrections."},
+      {...base, id: "child", parent_id: "knowledge_global_general", is_index: false, type: "practice", title: "Core architecture", slug: "core", body: "Child body"},
     ], "No global knowledge.", "global");
   assert.match(html, /knowledge-document-layout/);
-  assert.match(html, /directory-open/);
+  assert.match(html, /knowledge-document-layout linked-index/);
+  assert.doesNotMatch(html, /directory-open/);
+  assert.doesNotMatch(html, /knowledge-section-head/);
+  assert.doesNotMatch(html, /class="panel knowledge-tree"/);
   assert.doesNotMatch(html, /data-knowledge-back/);
   assert.match(html, /data-knowledge-open="root"/);
   assert.doesNotMatch(html, /data-knowledge-delete="root"/);
-  assert.match(html, /data-knowledge-open="child"/);
-  assert.match(html, /data-knowledge-open="grandchild"/);
-  assert.match(html, /data-knowledge-toggle="child"/);
-  assert.match(html, /--knowledge-indent:36px/);
+  assert.match(html, /data-knowledge-open="knowledge_global_general"/);
+  assert.match(html, /data-knowledge-open="knowledge_global_agent_lessons"/);
+  assert.doesNotMatch(html, /data-knowledge-open="child"/);
+  assert.doesNotMatch(html, /data-knowledge-toggle/);
   assert.match(html, />全局知识<\/button>/);
-  assert.match(html, /<small>分类<\/small>/);
-  assert.match(html, /<small>文档<\/small>/);
   assert.match(html, /<h1>Entry<\/h1>/);
-  assert.match(html, /子文档/);
+  assert.match(html, /文档链接/);
+  assert.match(html, /class="knowledge-index-links"/);
+  assert.match(html, /class="knowledge-index-link" data-knowledge-open="knowledge_global_general">通用知识<\/button><span>：Human-first reference\.<\/span>/);
+  assert.match(html, /data-knowledge-parent="knowledge_global_general"/);
+  assert.doesNotMatch(html, /knowledge-related-links/);
   assert.match(html, />新建文档<\/button>/);
   assert.doesNotMatch(html, />index(?:\.md)?</i);
   assert.doesNotMatch(html, />navigation</i);
   assert.doesNotMatch(html, />practice</i);
   assert.doesNotMatch(html, />verified</i);
   assert.doesNotMatch(html, />revision/i);
+
+  const source = await readFile(resolve(root, "dist", "knowledge_workspace.js"), "utf8");
+  assert.match(source, /managedGlobalKnowledgeIDs/);
+  assert.match(source, /globalTechnicalLessonsKnowledgeID/);
 });
 
-test("project navigation starts from indexes and reveals children progressively", async () => {
+test("project navigation opens as an index document with child links", async () => {
   const root = resolve(import.meta.dirname, "..");
   const {renderKnowledgeDocumentWorkspace} = await import(pathToFileURL(resolve(root, "dist", "knowledge_workspace.js")));
   const base = {scope: "project", project_id: "project-1", status: "verified", confidence: .9, revision: 1, helped_count: 0, stale_count: 0, created_at: "", updated_at: "", sort_order: 0, is_index: false};
@@ -755,16 +890,38 @@ test("project navigation starts from indexes and reveals children progressively"
   ], "No navigation.", "project-navigation");
   assert.match(html, /data-knowledge-open="intro"/);
   assert.match(html, /data-knowledge-open="modules"/);
-  assert.match(html, /data-knowledge-toggle="modules"/);
-  assert.match(html, /data-knowledge-progressive="true"/);
+  assert.match(html, /knowledge-document-layout linked-index/);
+  assert.match(html, /文档链接/);
+  assert.match(html, /模块、代码路径、边界与关键流程/);
+  assert.match(html, /Introduction/);
+  assert.match(html, /<span>：Index<\/span>/);
+  assert.doesNotMatch(html, /class="panel knowledge-tree"/);
+  assert.doesNotMatch(html, /knowledge-index-toolbar/);
   assert.doesNotMatch(html, /data-knowledge-open="camera"/);
   assert.match(html, />项目介绍</);
   assert.match(html, />模块索引</);
   assert.ok(html.indexOf('data-knowledge-open="intro"') < html.indexOf('data-knowledge-open="modules"'));
 
+  const projectHtml = renderKnowledgeDocumentWorkspace([
+    {...base, id: "project-root", parent_id: "", type: "navigation", title: "Knowledge home", slug: "index", body: "Project index body", is_index: true},
+    {...base, id: "practice", parent_id: "project-root", type: "practice", title: "Build guide", slug: "build-guide", body: "Build it"},
+  ], "No project knowledge.", "project");
+  assert.match(projectHtml, /Project index body/);
+  assert.match(projectHtml, /data-knowledge-open="practice"/);
+  assert.match(projectHtml, /文档链接/);
+  assert.match(projectHtml, /Build it/);
+  assert.doesNotMatch(projectHtml, /class="panel knowledge-tree"/);
+
   const source = await readFile(resolve(root, "dist", "knowledge_workspace.js"), "utf8");
   assert.match(source, /projectNavigationEntryIDs/);
   assert.match(source, /navigationIDs\.has\(item\.id\)/);
+  assert.match(source, /knowledgeHomeBody/);
+  assert.match(source, /knowledgeIndexSummary/);
+  assert.doesNotMatch(source, /data-knowledge-search-open|data-knowledge-search-clear/);
+  assert.match(source, /renderKnowledgeDocumentWorkspace\(filterEntries\(entries\), [^,]+, "project", false, sourceLabelFor/);
+  const styles = await readFile(resolve(root, "dist", "styles.css"), "utf8");
+  assert.match(styles, /\.knowledge-document-layout\.linked-index \{[^}]*display:\s*block/);
+  assert.match(styles, /\.markdown-body \.knowledge-index-link \{[^}]*display:\s*inline/);
 });
 
 test("knowledge libraries support pending browse, bind, and unbind", async () => {
@@ -798,6 +955,33 @@ test("project settings is a secondary page with a project entry back action", as
   assert.match(source, /function renderSettings[\s\S]*?data-knowledge-back[\s\S]*?knowledge-setting-card/);
   assert.match(source, /knowledgeReaderOpen\s*&&\s*projectMode\s*&&\s*activeSection\s*!==\s*"overview"/);
   assert.match(source, /activeSection\s*=\s*entry\s*===\s*"settings"\s*\?\s*"settings"/);
+});
+
+test("project knowledge keeps a merged view while exposing source labels and filters", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const module = await import(pathToFileURL(resolve(root, "dist", "knowledge_workspace.js")));
+  const sources = module.projectKnowledgeSources(
+    {id: "project-1", name: "Project One"},
+    [
+      {id: "own-1", project_id: "project-1", is_index: false},
+      {id: "own-index", project_id: "project-1", is_index: true},
+      {id: "external-1", project_id: "library-1", bound_project_id: "project-1", is_index: false},
+    ],
+    [{id: "binding-1", container_project_id: "library-1", bound_project_id: "project-1", name: "Imported Library"}],
+  );
+  assert.deepEqual(sources, [
+    {id: "project-1", label: "项目自有知识", count: 1, external: false},
+    {id: "library-1", label: "Imported Library", count: 1, external: true},
+  ]);
+
+  const source = await readFile(resolve(root, "dist", "knowledge_workspace.js"), "utf8");
+  const styles = await readFile(resolve(root, "dist", "styles.css"), "utf8");
+  for (const marker of ["data-knowledge-source-filter", "knowledge-source-badge", "knowledge-source-settings"]) assert.match(source, new RegExp(marker));
+  assert.ok(source.includes("\\u9879\\u76ee\\u81ea\\u6709\\u77e5\\u8bc6"));
+  assert.ok(source.includes("\\u5916\\u90e8\\u7ed1\\u5b9a\\u77e5\\u8bc6\\u5e93"));
+  assert.doesNotMatch(source, /boundLibraries\.length\s*\+\s*\(owned/);
+  assert.match(styles, /\.knowledge-source-toolbar \{[^}]*display:\s*flex/);
+  assert.match(styles, /@media \(max-width: 760px\)[\s\S]*?\.knowledge-source-toolbar \{[^}]*flex-direction:\s*column/);
 });
 
 test("stale knowledge action means keeping the current content", async () => {

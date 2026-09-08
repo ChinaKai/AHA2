@@ -71,11 +71,57 @@ function renderConversationItem(item: ConversationItem): string {
   return `<article class="message ${user ? "user" : "agent"} ${update ? "agent-update-message" : ""} ${tool ? "agent-tool-message" : ""} ${routed ? "agent-routed-message" : ""} ${error ? "agent-error-message" : ""}" data-message-chars="${characterCount}" data-copy-message-source="${escapeHTML(text)}"><header><strong>${escapeHTML(sender)}</strong>${badge ? `<span>${badge}</span>` : ""}<time>${time}</time><button type="button" data-copy-message class="message-copy icon-button" title="复制">${icon("copy")}</button></header><div class="message-bubble"><div class="message-text markdown-body message-preview">${renderMarkdown(preview)}</div>${collapsible ? `<div class="message-text markdown-body message-full-text" hidden>${renderMarkdown(text)}</div><button type="button" data-toggle-message class="message-toggle">展开 · ${characterCount.toLocaleString()}字符</button>` : ""}${renderAttachments(item)}${output ? `<details class="message-output"><summary>查看输出摘要</summary><pre>${escapeHTML(output)}</pre></details>` : ""}</div></article>`;
 }
 
+function toolLifecycleKey(item: ConversationItem): string {
+  if (item.category !== "tool" || !["agent_command_started", "agent_command_finished"].includes(item.kind)) return "";
+  const payload = item.payload || {};
+  const lifecycleID = String(payload.tool_call_id || payload.tool_use_id || "").trim();
+  const scope = `${item.task_id}:${item.turn_id || item.round_id || ""}:${item.agent_id || item.from_agent_id || ""}`;
+  if (lifecycleID) return `${scope}:id:${lifecycleID}`;
+  const command = String(payload.command || item.summary || "").trim();
+  return command ? `${scope}:command:${command}` : "";
+}
+
+// Backends emit separate lifecycle events for one tool call. Keep the started
+// row visible while it is running, then fold the matching completion payload
+// into that row. The command fallback also repairs history recorded before
+// tool-call IDs were persisted.
+export function coalesceToolConversationItems(items: ConversationItem[]): ConversationItem[] {
+  const result: ConversationItem[] = [];
+  const pending = new Map<string, number[]>();
+  for (const item of items) {
+    const key = toolLifecycleKey(item);
+    if (key && item.kind === "agent_command_started") {
+      const indices = pending.get(key) || [];
+      indices.push(result.length);
+      pending.set(key, indices);
+      result.push(item);
+      continue;
+    }
+    if (key && item.kind === "agent_command_finished") {
+      const indices = pending.get(key);
+      const index = indices?.pop();
+      if (index !== undefined) {
+        if (!indices?.length) pending.delete(key);
+        const started = result[index];
+        result[index] = {
+          ...started,
+          kind: item.kind,
+          summary: item.summary && item.summary !== item.kind ? item.summary : started.summary,
+          payload: {...(started.payload || {}), ...(item.payload || {})},
+        };
+        continue;
+      }
+    }
+    result.push(item);
+  }
+  return result;
+}
+
 export function renderConversationList(
   items: ConversationItem[],
   detail: TaskDetail | null,
   hasMore: boolean,
 ): string {
-  const history = (renderConversationWithOrchestration(items, detail, renderConversationItem) || `<div class="empty">暂无符合筛选条件的记录。</div>`) + imagePreviewDialog();
+  const history = (renderConversationWithOrchestration(coalesceToolConversationItems(items), detail, renderConversationItem) || `<div class="empty">暂无符合筛选条件的记录。</div>`) + imagePreviewDialog();
   return `${hasMore ? `<button type="button" id="load-older-conversation" class="load-older">加载更早记录</button>` : ""}${history || `<div class="empty">暂无符合筛选条件的记录。</div>`}`;
 }

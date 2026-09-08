@@ -3,6 +3,7 @@ package prompt
 import (
 	"context"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -20,7 +21,7 @@ func TestEngineRoutesTemplatesAndBuildsContextManifest(t *testing.T) {
 	defer database.Close()
 	engine := NewEngine(database)
 	templates, err := engine.Templates(ctx)
-	if err != nil || len(templates) != 8 {
+	if err != nil || len(templates) != 9 {
 		t.Fatalf("templates=%d err=%v", len(templates), err)
 	}
 	if err := engine.UpdateTemplate(ctx, "role.main", "CUSTOM MAIN {{.AgentID}}", templates[0].UpdatedAt); err != nil {
@@ -40,8 +41,12 @@ func TestEngineRoutesTemplatesAndBuildsContextManifest(t *testing.T) {
 			Extra: map[string]any{"knowledge_refs": []map[string]any{{"id": "global-1", "revision": 1}}},
 		},
 		GlobalKnowledge: []domain.KnowledgeEntry{
-			{ID: "global-root", Scope: "global", Slug: "index", IsIndex: true, Type: "navigation", Title: "Global index", Body: "Start with [Global](global.md).", Revision: 1},
-			{ID: "global-1", Scope: "global", ParentID: "global-root", Slug: "global", Type: "practice", Title: "Global", Body: strings.Repeat("knowledge", 200), Revision: 1},
+			{ID: "global-root", Scope: "global", Slug: "index", IsIndex: true, Type: "navigation", Title: "Global index", Body: "这是 AHA2 全局知识页面。通用知识以人类阅读为主，Agent 经验教训优先。", Revision: 1},
+			{ID: store.GlobalGeneralKnowledgeID, Scope: "global", ParentID: "global-root", Slug: "general", Type: "navigation", Title: "通用知识", Body: "Human-first reference.", Revision: 1},
+			{ID: store.GlobalAgentLessonsKnowledgeID, Scope: "global", ParentID: "global-root", Slug: "agent-lessons", Type: "navigation", Title: "Agent 经验教训", Body: "Agent-first lessons.", Revision: 1},
+			{ID: store.GlobalTechnicalLessonsKnowledgeID, Scope: "global", ParentID: store.GlobalAgentLessonsKnowledgeID, Slug: "technical-diagnostics", Type: "navigation", Title: "技术诊断", Body: "Technical traps.", Revision: 1},
+			{ID: store.GlobalBehaviorLessonsKnowledgeID, Scope: "global", ParentID: store.GlobalAgentLessonsKnowledgeID, Slug: "behavior-lessons", Type: "navigation", Title: "行为教训", Body: "Behavior corrections.", Revision: 1},
+			{ID: "global-1", Scope: "global", ParentID: store.GlobalGeneralKnowledgeID, Slug: "global", Type: "practice", Title: "Global", Body: "# Global\n\nUse this for shared decisions.", Revision: 1},
 			{ID: "global-deep", Scope: "global", ParentID: "global-1", Slug: "deep", Type: "practice", Title: "Deep", Body: "Nested detail", Revision: 1},
 		},
 		ProjectKnowledge: []domain.KnowledgeEntry{
@@ -74,7 +79,7 @@ func TestEngineRoutesTemplatesAndBuildsContextManifest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, expected := range []string{"CUSTOM MAIN main", "fixed inbox", ".aha2-context", "manifest.json", "Agent Control API Protocol", "agent-api.md"} {
+	for _, expected := range []string{"CUSTOM MAIN main", "fixed inbox", ".aha2-context", "Knowledge Protocol", "Do not enumerate the knowledge directory", "Agent Control API Protocol", "agent-api.md"} {
 		if !strings.Contains(preview.EffectivePrompt, expected) {
 			t.Fatalf("effective prompt missing %q: %s", expected, preview.EffectivePrompt)
 		}
@@ -91,23 +96,27 @@ func TestEngineRoutesTemplatesAndBuildsContextManifest(t *testing.T) {
 		strings.Contains(preview.EffectivePrompt, "fact one") {
 		t.Fatal("task memory was injected inline")
 	}
-	var globalIndexFound, projectIndexFound, projectNavigationIndexFound, navigationGroupFound, staleIndexFound, staleDetailFound, knowledgeDetailFound, nestedDetailFound, projectDetailFound, navigationDetailFound, nestedNavigationDetailFound, attachmentIndexFound, attachmentFileFound, skillDetailFound, skillScriptFound, hardwareFound, agentAPIUTF8Found bool
+	var globalIndexFound, agentLessonsIndexFound, projectIndexFound, projectNavigationIndexFound, navigationGroupFound, staleIndexFound, staleDetailFound, knowledgeDetailFound, nestedDetailFound, projectDetailFound, navigationDetailFound, nestedNavigationDetailFound, attachmentIndexFound, attachmentFileFound, skillDetailFound, skillScriptFound, hardwareFound, agentAPIUTF8Found bool
 	knowledgeEntryPoints := 0
-	var manifest ContextResource
-	for _, resource := range preview.ContextManifest {
+	manifestFound := false
+	resources := append(append([]ContextResource(nil), preview.ContextManifest...), preview.SharedManifest...)
+	for _, resource := range resources {
 		if strings.HasPrefix(resource.ID, "knowledge-") && resource.EntryPoint {
 			knowledgeEntryPoints++
 			if strings.Contains(resource.Content, "- id:") || strings.Contains(resource.Content, "- scope:") {
 				t.Fatalf("knowledge index leaked document metadata: %s", resource.Content)
 			}
 		}
-		if resource.ID == "knowledge-global-index" && resource.EntryPoint && strings.Contains(resource.Content, "# 全局知识") && strings.Contains(resource.Content, "global.md") && !strings.Contains(resource.Content, "global/deep.md") {
+		if resource.ID == "knowledge-global-index" && resource.EntryPoint && strings.Contains(resource.Content, "# 全局知识") && strings.Contains(resource.Content, "通用知识") && strings.Contains(resource.Content, "general.md") && strings.Contains(resource.Content, "agent-lessons.md") && !strings.Contains(resource.Content, "Use this for shared decisions.") {
 			globalIndexFound = true
 		}
-		if resource.ID == "knowledge-project-index" && resource.EntryPoint && strings.Contains(resource.Content, "# 项目知识") && strings.Contains(resource.Content, "project-practice.md") && strings.Contains(resource.Content, "Practice body") && !strings.Contains(resource.Content, "Project map") && strings.Contains(resource.Content, "Project home.") {
+		if resource.ID == "knowledge-"+store.GlobalAgentLessonsKnowledgeID && resource.EntryPoint && strings.Contains(resource.Path, filepath.Join("knowledge", "global", "agent-lessons.md")) && strings.Contains(resource.Content, "技术诊断") && strings.Contains(resource.Content, "Technical traps.") && strings.Contains(resource.Content, "行为教训") {
+			agentLessonsIndexFound = true
+		}
+		if resource.ID == "knowledge-project-index" && resource.EntryPoint && strings.Contains(resource.Content, "# 项目知识") && strings.Contains(resource.Content, "project-practice.md") && strings.Contains(resource.Content, "Practice body") && strings.Contains(resource.Content, "navigation/modules.md") && !strings.Contains(resource.Content, "Project map") && strings.Contains(resource.Content, "Project home.") {
 			projectIndexFound = true
 		}
-		if resource.ID == "knowledge-project-navigation-index" && resource.EntryPoint && strings.Contains(resource.Path, filepath.Join("knowledge", "project", "navigation", "index.md")) && strings.Contains(resource.Content, "# 项目导航") && strings.Contains(resource.Content, "project-navigation.md") && strings.Contains(resource.Content, "Navigation body") && !strings.Contains(resource.Content, "Project practice") && !strings.Contains(resource.Content, "Deep route") {
+		if resource.ID == "knowledge-project-navigation-index" && resource.EntryPoint && strings.Contains(resource.Path, filepath.Join("knowledge", "project", "navigation", "index.md")) && strings.Contains(resource.Content, "# 项目导航") && strings.Contains(resource.Content, "根据下面的标题与摘要") && strings.Contains(resource.Content, "project-navigation.md") && strings.Contains(resource.Content, "Navigation body") && !strings.Contains(resource.Content, "Project practice") && !strings.Contains(resource.Content, "Deep route") {
 			projectNavigationIndexFound = true
 		}
 		if resource.ID == "knowledge-pending-updates" && resource.EntryPoint && strings.Contains(resource.Path, filepath.Join("knowledge", "pending-updates", "index.md")) && strings.Contains(resource.Content, "不得作为当前事实使用") && strings.Contains(resource.Content, "Old flow") {
@@ -122,10 +131,10 @@ func TestEngineRoutesTemplatesAndBuildsContextManifest(t *testing.T) {
 		if resource.ID == "knowledge-stale-project-stale" && !resource.EntryPoint && strings.Contains(resource.Content, "entry_id: project-stale") && strings.Contains(resource.Content, "base_revision: 3") && strings.Contains(resource.Content, "Outdated instructions") {
 			staleDetailFound = true
 		}
-		if resource.ID == "knowledge-global-1" && !resource.EntryPoint && strings.Contains(resource.Path, filepath.Join("knowledge", "global", "global.md")) && strings.Contains(resource.Content, "global/deep.md") {
+		if resource.ID == "knowledge-global-1" && !resource.EntryPoint && strings.Contains(resource.Path, filepath.Join("knowledge", "global", "general", "global.md")) && strings.Contains(resource.Content, "global/deep.md") {
 			knowledgeDetailFound = true
 		}
-		if resource.ID == "knowledge-global-deep" && !resource.EntryPoint && strings.Contains(resource.Path, filepath.Join("knowledge", "global", "global", "deep.md")) {
+		if resource.ID == "knowledge-global-deep" && !resource.EntryPoint && strings.Contains(resource.Path, filepath.Join("knowledge", "global", "general", "global", "deep.md")) {
 			nestedDetailFound = true
 		}
 		if resource.ID == "knowledge-project-practice" && !resource.EntryPoint && strings.Contains(resource.Path, filepath.Join("knowledge", "project", "project-practice.md")) {
@@ -156,7 +165,7 @@ func TestEngineRoutesTemplatesAndBuildsContextManifest(t *testing.T) {
 			skillScriptFound = true
 		}
 		if resource.ID == "manifest" {
-			manifest = resource
+			manifestFound = true
 		}
 		if resource.ID == "hardware" && strings.Contains(resource.Content, "COM3") &&
 			strings.Contains(resource.Content, "password configured: true") &&
@@ -167,8 +176,8 @@ func TestEngineRoutesTemplatesAndBuildsContextManifest(t *testing.T) {
 			agentAPIUTF8Found = true
 		}
 	}
-	if !globalIndexFound || !projectIndexFound || !projectNavigationIndexFound || !navigationGroupFound || !staleIndexFound || !staleDetailFound || !knowledgeDetailFound || !nestedDetailFound || !projectDetailFound || !navigationDetailFound || !nestedNavigationDetailFound || knowledgeEntryPoints != 4 {
-		t.Fatalf("knowledge hierarchy missing: global=%t project=%t navigation=%t navigation_group=%t stale_index=%t stale_detail=%t detail=%t nested=%t project_detail=%t navigation_detail=%t nested_navigation=%t entrypoints=%d", globalIndexFound, projectIndexFound, projectNavigationIndexFound, navigationGroupFound, staleIndexFound, staleDetailFound, knowledgeDetailFound, nestedDetailFound, projectDetailFound, navigationDetailFound, nestedNavigationDetailFound, knowledgeEntryPoints)
+	if !globalIndexFound || !agentLessonsIndexFound || !projectIndexFound || !projectNavigationIndexFound || !navigationGroupFound || !staleIndexFound || !staleDetailFound || !knowledgeDetailFound || !nestedDetailFound || !projectDetailFound || !navigationDetailFound || !nestedNavigationDetailFound || knowledgeEntryPoints != 5 {
+		t.Fatalf("knowledge hierarchy missing: global=%t lessons=%t project=%t navigation=%t navigation_group=%t stale_index=%t stale_detail=%t detail=%t nested=%t project_detail=%t navigation_detail=%t nested_navigation=%t entrypoints=%d", globalIndexFound, agentLessonsIndexFound, projectIndexFound, projectNavigationIndexFound, navigationGroupFound, staleIndexFound, staleDetailFound, knowledgeDetailFound, nestedDetailFound, projectDetailFound, navigationDetailFound, nestedNavigationDetailFound, knowledgeEntryPoints)
 	}
 	if !attachmentIndexFound || !attachmentFileFound {
 		t.Fatal("attachment index or file resource missing")
@@ -183,7 +192,7 @@ func TestEngineRoutesTemplatesAndBuildsContextManifest(t *testing.T) {
 		t.Fatal("Agent API resource is missing the PowerShell UTF-8 request contract")
 	}
 	var memoryFound bool
-	for _, resource := range preview.ContextManifest {
+	for _, resource := range resources {
 		if resource.ID == "task-memory" && strings.Contains(resource.Content, "decision one") &&
 			strings.Contains(resource.Content, "fact one") && strings.Contains(resource.Content, "global-1") {
 			memoryFound = true
@@ -192,13 +201,13 @@ func TestEngineRoutesTemplatesAndBuildsContextManifest(t *testing.T) {
 	if !memoryFound {
 		t.Fatal("task memory resource missing")
 	}
-	if strings.Contains(manifest.Content, strings.Repeat("knowledge", 20)) {
-		t.Fatal("manifest duplicated resource content")
+	if manifestFound {
+		t.Fatal("manifest.json remained in materialized context resources")
 	}
 	if strings.Contains(preview.EffectivePrompt, strings.Repeat("review", 20)) || strings.Contains(preview.EffectivePrompt, "global-1.md") {
 		t.Fatal("knowledge or skill detail leaked into the effective prompt")
 	}
-	for _, expected := range []string{filepath.Join("knowledge", "global", "index.md"), filepath.Join("knowledge", "project", "index.md"), filepath.Join("knowledge", "project", "navigation", "index.md"), filepath.Join("knowledge", "pending-updates", "index.md")} {
+	for _, expected := range []string{filepath.Join("knowledge", "global", "index.md"), filepath.Join("knowledge", "global", "agent-lessons.md"), filepath.Join("knowledge", "project", "index.md"), filepath.Join("knowledge", "project", "navigation", "index.md"), filepath.Join("knowledge", "pending-updates", "index.md")} {
 		if !strings.Contains(preview.EffectivePrompt, expected) {
 			t.Fatalf("effective prompt missing knowledge entrypoint %q", expected)
 		}
@@ -207,9 +216,6 @@ func TestEngineRoutesTemplatesAndBuildsContextManifest(t *testing.T) {
 		if strings.Contains(preview.EffectivePrompt, hidden) {
 			t.Fatalf("knowledge detail %q leaked into effective prompt", hidden)
 		}
-	}
-	if !strings.Contains(manifest.Content, `"id"`) || strings.Contains(manifest.Content, `"ID"`) {
-		t.Fatalf("manifest fields are not normalized JSON: %s", manifest.Content)
 	}
 	if err := engine.ResetTemplate(ctx, "role.main"); err != nil {
 		t.Fatal(err)
@@ -220,12 +226,18 @@ func TestEngineRoutesTemplatesAndBuildsContextManifest(t *testing.T) {
 		t.Fatal(err)
 	}
 	var disabledKnowledge, selectedSkills bool
-	for _, resource := range preview.ContextManifest {
+	for _, resource := range append(append([]ContextResource(nil), preview.ContextManifest...), preview.SharedManifest...) {
 		disabledKnowledge = disabledKnowledge || strings.HasPrefix(resource.ID, "knowledge-")
 		selectedSkills = selectedSkills || resource.ID == "skill-skill-1"
 	}
 	if disabledKnowledge || !selectedSkills {
 		t.Fatalf("knowledge and skills were not independently routed: %#v", preview.ContextManifest)
+	}
+	if strings.Contains(preview.EffectivePrompt, "Knowledge Protocol") {
+		t.Fatal("knowledge protocol remained enabled when knowledge was disabled")
+	}
+	if preview.SharedRoot == "" || len(preview.SharedManifest) == 0 {
+		t.Fatalf("disabled knowledge removed shared Skill and Agent API resources: root=%q resources=%d", preview.SharedRoot, len(preview.SharedManifest))
 	}
 	input.Skills = nil
 	preview, err = engine.Build(ctx, input)
@@ -236,5 +248,209 @@ func TestEngineRoutesTemplatesAndBuildsContextManifest(t *testing.T) {
 		if strings.HasPrefix(resource.ID, "skill-") {
 			t.Fatal("skills entrypoint was created without selected skills")
 		}
+	}
+}
+
+func TestSharedSnapshotIsSharedByTaskAgents(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	engine := NewEngine(database)
+	input := sharedSnapshotTestInput()
+
+	mainResult, err := engine.Build(ctx, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input.Agent = domain.TaskAgent{AgentID: "sub-002", Role: "sub"}
+	subResult, err := engine.Build(ctx, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if mainResult.ContextRoot == subResult.ContextRoot {
+		t.Fatalf("agent-private context roots were shared: %s", mainResult.ContextRoot)
+	}
+	if mainResult.SharedRoot == "" || mainResult.SharedRoot != subResult.SharedRoot {
+		t.Fatalf("task shared root was not shared: main=%q sub=%q", mainResult.SharedRoot, subResult.SharedRoot)
+	}
+	wantRootName := "shared-" + contextSnapshotHash(sharedResources(input, ""))
+	if filepath.Base(mainResult.SharedRoot) != wantRootName {
+		t.Fatalf("shared root is not named by its content hash: got=%q want=%q", filepath.Base(mainResult.SharedRoot), wantRootName)
+	}
+	if !reflect.DeepEqual(mainResult.SharedManifest, subResult.SharedManifest) {
+		t.Fatal("task agents received different shared manifests")
+	}
+	wantContents := map[string]string{}
+	for _, item := range sharedResources(input, mainResult.SharedRoot) {
+		wantContents[item.ID] = item.Content
+	}
+	for _, item := range mainResult.ContextManifest {
+		if !strings.HasPrefix(strings.ToLower(item.Path), strings.ToLower(mainResult.ContextRoot+string(filepath.Separator))) {
+			t.Fatalf("private resource escaped agent context root: %s", item.Path)
+		}
+		if strings.HasPrefix(item.ID, "knowledge-") || strings.HasPrefix(item.ID, "skill-") || item.ID == "agent-api" {
+			t.Fatalf("shared resource remained in the private manifest: %s", item.ID)
+		}
+	}
+	for _, item := range mainResult.SharedManifest {
+		if !strings.HasPrefix(strings.ToLower(item.Path), strings.ToLower(mainResult.SharedRoot+string(filepath.Separator))) {
+			t.Fatalf("resource escaped shared root: %s", item.Path)
+		}
+		if item.EntryPoint && !strings.Contains(mainResult.EffectivePrompt, item.Path) {
+			t.Fatalf("prompt did not expose shared knowledge entrypoint: %s", item.Path)
+		}
+		if item.Content != wantContents[item.ID] {
+			t.Fatalf("shared snapshot changed knowledge content for %s", item.ID)
+		}
+		if strings.Contains(item.URI, "/agents/") || !strings.HasPrefix(item.URI, "aha://tasks/task-shared/shared/") {
+			t.Fatalf("shared resource retained an Agent-specific URI: %s", item.URI)
+		}
+	}
+	for _, expected := range []string{"agent-api", "skill-skill-shared", "knowledge-global-index", "knowledge-project-index"} {
+		if _, ok := wantContents[expected]; !ok {
+			t.Fatalf("shared snapshot is missing %s", expected)
+		}
+	}
+}
+
+func TestSharedSnapshotChangesWithSharedContent(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	engine := NewEngine(database)
+	input := sharedSnapshotTestInput()
+
+	first, err := engine.Build(ctx, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input.ProjectKnowledge = append([]domain.KnowledgeEntry(nil), input.ProjectKnowledge...)
+	input.ProjectKnowledge[1].Body = "Updated detail body"
+	input.ProjectKnowledge[1].Revision++
+	second, err := engine.Build(ctx, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.SharedRoot == second.SharedRoot {
+		t.Fatalf("knowledge change reused immutable snapshot root: %s", first.SharedRoot)
+	}
+	if reflect.DeepEqual(first.SharedManifest, second.SharedManifest) {
+		t.Fatal("knowledge change reused the previous manifest")
+	}
+	first = second
+	input.Skills = append([]domain.Skill(nil), input.Skills...)
+	input.Skills[0].PackageFiles = append([]domain.SkillFile(nil), input.Skills[0].PackageFiles...)
+	input.Skills[0].PackageFiles[0].Content += "\nupdated"
+	second, err = engine.Build(ctx, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.SharedRoot == second.SharedRoot {
+		t.Fatalf("Skill change reused immutable snapshot root: %s", first.SharedRoot)
+	}
+	first = second
+	input.AgentAPIURL = "http://127.0.0.1:9876"
+	second, err = engine.Build(ctx, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.SharedRoot == second.SharedRoot {
+		t.Fatalf("Agent API URL change reused immutable snapshot root: %s", first.SharedRoot)
+	}
+}
+
+func TestSharedSnapshotFollowsAvailableSharedResources(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	engine := NewEngine(database)
+	input := sharedSnapshotTestInput()
+	input.KnowledgeEnabled = false
+
+	result, err := engine.Build(ctx, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.SharedRoot == "" || len(result.SharedManifest) == 0 {
+		t.Fatalf("disabled knowledge removed Skill or Agent API shared state: root=%q manifest=%#v", result.SharedRoot, result.SharedManifest)
+	}
+	if strings.Contains(result.EffectivePrompt, "Knowledge Protocol") || strings.Contains(result.EffectivePrompt, filepath.Join("knowledge", "project", "index.md")) {
+		t.Fatal("disabled knowledge was exposed in the prompt")
+	}
+	for _, item := range result.SharedManifest {
+		if strings.HasPrefix(item.ID, "knowledge-") {
+			t.Fatalf("disabled knowledge remained in shared snapshot: %s", item.ID)
+		}
+	}
+	input.AgentAPIURL = ""
+	input.Skills = nil
+	result, err = engine.Build(ctx, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.SharedRoot != "" || len(result.SharedManifest) != 0 {
+		t.Fatalf("empty shared resources created a snapshot: root=%q manifest=%#v", result.SharedRoot, result.SharedManifest)
+	}
+}
+
+func sharedSnapshotTestInput() BuildInput {
+	return BuildInput{
+		Project:     domain.Project{Name: "Project"},
+		Workspace:   domain.Workspace{Name: "Workspace", RootPath: filepath.Join("repo"), Transport: "native"},
+		Task:        domain.Task{ID: "task-shared", Code: "task-001", Title: "Shared knowledge", CurrentGoal: "test", CollaborationMode: "auto", MaxAgents: 3},
+		Agent:       domain.TaskAgent{AgentID: "main", Role: "main"},
+		Snapshot:    domain.RuntimeConfigSnapshot{Backend: "codex"},
+		AgentAPIURL: "http://127.0.0.1:8766",
+		Skills: []domain.Skill{{ID: "skill-shared", PackageSlug: "shared-skill", Scope: "global", Name: "Shared Skill", Version: 1, Enabled: true, PackageFiles: []domain.SkillFile{
+			{Path: "SKILL.md", Content: "---\nname: shared-skill\ndescription: shared\n---\n\nShared instructions."},
+		}}},
+		KnowledgeEnabled: true,
+		GlobalKnowledge: []domain.KnowledgeEntry{
+			{ID: "global-root", Scope: "global", Slug: "index", IsIndex: true, Type: "navigation", Title: "Global", Body: "Global index", Revision: 1},
+			{ID: "global-detail", Scope: "global", ParentID: "global-root", Slug: "detail", Type: "practice", Title: "Global detail", Body: "Global detail body", Revision: 1},
+		},
+		ProjectKnowledge: []domain.KnowledgeEntry{
+			{ID: "project-root", Scope: "project", Slug: "index", IsIndex: true, Type: "navigation", Title: "Project", Body: "Project index", Revision: 1},
+			{ID: "project-detail", Scope: "project", ParentID: "project-root", Slug: "detail", Type: "practice", Title: "Project detail", Body: "Project detail body", Revision: 1},
+		},
+	}
+}
+
+func TestRecoveryResourcesExcludeToolNoiseAndNormalTurns(t *testing.T) {
+	t.Parallel()
+	items := []domain.ConversationItem{
+		{Category: "chat", Kind: "user_message", FromAgentID: "owner", Summary: "previous request", TurnID: "turn-old"},
+		{Category: "tool", Kind: "agent_command_started", FromAgentID: "main", Summary: "secret-noise", TurnID: "turn-old"},
+		{Category: "update", Kind: "turn_duration", FromAgentID: "aha", Summary: "duration-noise", TurnID: "turn-old"},
+		{Category: "error", Kind: "agent_error", FromAgentID: "main", Summary: "previous failure", TurnID: "turn-old"},
+		{Category: "chat", Kind: "user_message", FromAgentID: "owner", Summary: "current request", TurnID: "turn-current"},
+	}
+	recent := recentContextResource(items, "turn-current", "")
+	if !strings.Contains(recent, "previous request") || !strings.Contains(recent, "previous failure") || strings.Contains(recent, "secret-noise") || strings.Contains(recent, "duration-noise") || strings.Contains(recent, "current request") {
+		t.Fatalf("recent context=%s", recent)
+	}
+	turns := []domain.Turn{
+		{Sequence: 1, AgentID: "main", Status: domain.TurnSucceeded, Result: "normal"},
+		{Sequence: 2, AgentID: "main", Status: domain.TurnFailed, Error: "failed"},
+		{Sequence: 3, AgentID: "main", Status: domain.TurnSucceeded, Attempt: 2, Result: "retry"},
+		{Sequence: 4, AgentID: "main", Status: domain.TurnSucceeded, Generation: 8, Result: "normal generation"},
+		{Sequence: 5, AgentID: "sub-001", Status: domain.TurnFailed, Error: "other agent"},
+	}
+	diagnostics := turnDiagnosticsResource(turns, "main")
+	if !strings.Contains(diagnostics, "failed") || !strings.Contains(diagnostics, "retry") || strings.Contains(diagnostics, "normal generation") || strings.Contains(diagnostics, "other agent") {
+		t.Fatalf("turn diagnostics=%s", diagnostics)
 	}
 }

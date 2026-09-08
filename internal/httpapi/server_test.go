@@ -348,7 +348,7 @@ func TestTaskAgentAPIIsolationAndConfigInheritance(t *testing.T) {
 	response = requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/prompts/templates", nil, "")
 	var templatesResponse map[string]any
 	decodeResponse(t, response, &templatesResponse)
-	if response.StatusCode != http.StatusOK || len(templatesResponse["templates"].([]any)) != 8 {
+	if response.StatusCode != http.StatusOK || len(templatesResponse["templates"].([]any)) != 9 {
 		t.Fatalf("prompt templates failed: %d %#v", response.StatusCode, templatesResponse)
 	}
 	response = requestJSON(t, client, http.MethodPut, server.URL+"/api/v1/prompts/templates/role.main", map[string]any{
@@ -956,7 +956,8 @@ func TestKnowledgeWorkspaceAPI(t *testing.T) {
 	response = requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/knowledge/proposals/"+proposal.ID+"/approve", map[string]any{}, csrf)
 	decodeResponse(t, response, &payload)
 	approvedEntry := payload["knowledge"].(map[string]any)
-	if response.StatusCode != http.StatusOK || payload["proposal"].(map[string]any)["status"] != "approved" || approvedEntry["revision"].(float64) != float64(current.Revision+1) || approvedEntry["status"] != "verified" || approvedEntry["body"] != proposed.Body || approvedEntry["helped_count"].(float64) != 1 {
+	feedbackState, _ := approvedEntry["feedback_state"].(string)
+	if response.StatusCode != http.StatusOK || payload["proposal"].(map[string]any)["status"] != "approved" || approvedEntry["revision"].(float64) != float64(current.Revision+1) || approvedEntry["status"] != "verified" || approvedEntry["body"] != proposed.Body || approvedEntry["helped_count"].(float64) != 0 || approvedEntry["stale_count"].(float64) != 0 || feedbackState != "" {
 		t.Fatalf("proposal approval failed: %d %#v", response.StatusCode, payload)
 	}
 	response = requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/knowledge/proposals/"+proposal.ID+"/approve", map[string]any{}, csrf)
@@ -964,6 +965,26 @@ func TestKnowledgeWorkspaceAPI(t *testing.T) {
 		t.Fatalf("repeat proposal approval status=%d", response.StatusCode)
 	}
 	response.Body.Close()
+	response = requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/knowledge/"+entryID+"/feedback", map[string]any{"kind": "stale"}, csrf)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("stale feedback status=%d body=%s", response.StatusCode, readBody(t, response))
+	}
+	response.Body.Close()
+	response = requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/knowledge/"+entryID+"/feedback", map[string]any{"kind": "helped"}, csrf)
+	var feedbackConflict map[string]any
+	decodeResponse(t, response, &feedbackConflict)
+	if response.StatusCode != http.StatusConflict || feedbackConflict["error"] != "knowledge_feedback_conflict" {
+		t.Fatalf("feedback conflict status=%d body=%#v", response.StatusCode, feedbackConflict)
+	}
+	response = requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/knowledge/"+entryID+"/verify", map[string]any{}, csrf)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("verify knowledge status=%d body=%s", response.StatusCode, readBody(t, response))
+	}
+	response.Body.Close()
+	verifiedEntry, err := database.Knowledge(ctx, entryID)
+	if err != nil || verifiedEntry.Status != domain.KnowledgeVerified || verifiedEntry.HelpedCount != 0 || verifiedEntry.StaleCount != 0 || verifiedEntry.FeedbackState != "" {
+		t.Fatalf("verified feedback state=%#v err=%v", verifiedEntry, err)
+	}
 	newProposed := domain.KnowledgeEntry{
 		ID: "owner-new-rejected", Scope: "project", ProjectID: projectID, ParentID: rootID, Slug: "owner-new-rejected",
 		Type: "practice", Title: "Rejected new entry", Body: "Never publish", Status: domain.KnowledgeCandidate,

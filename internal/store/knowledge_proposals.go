@@ -18,7 +18,7 @@ var (
 	ErrKnowledgeProposalResolved = errors.New("knowledge proposal is not pending")
 )
 
-const knowledgeProposalColumns = `id,entry_id,base_revision,proposed_json,source_task_id,source_turn_id,status,created_at,updated_at,decided_at`
+const knowledgeProposalColumns = `id,entry_id,base_revision,proposed_json,source_task_id,source_turn_id,status,created_at,updated_at,decided_at,review_mode`
 
 type knowledgeProposalPayload struct {
 	Proposed     domain.KnowledgeEntry  `json:"proposed"`
@@ -34,7 +34,7 @@ func encodeKnowledgeProposal(item domain.KnowledgeProposal) (string, error) {
 func scanKnowledgeProposal(scanner interface{ Scan(...any) error }) (domain.KnowledgeProposal, error) {
 	var item domain.KnowledgeProposal
 	var proposedJSON, createdAt, updatedAt, decidedAt string
-	if err := scanner.Scan(&item.ID, &item.EntryID, &item.BaseRevision, &proposedJSON, &item.SourceTaskID, &item.SourceTurnID, &item.Status, &createdAt, &updatedAt, &decidedAt); err != nil {
+	if err := scanner.Scan(&item.ID, &item.EntryID, &item.BaseRevision, &proposedJSON, &item.SourceTaskID, &item.SourceTurnID, &item.Status, &createdAt, &updatedAt, &decidedAt, &item.ReviewMode); err != nil {
 		return domain.KnowledgeProposal{}, err
 	}
 	var payload knowledgeProposalPayload
@@ -43,6 +43,7 @@ func scanKnowledgeProposal(scanner interface{ Scan(...any) error }) (domain.Know
 	}
 	payload.Proposed.EvidenceJSON = payload.EvidenceJSON
 	item.Proposed, item.BaseEntry = payload.Proposed, payload.BaseEntry
+	item.ReviewMode = normalizeKnowledgeReviewMode(item.ReviewMode)
 	item.CreatedAt, item.UpdatedAt, item.DecidedAt = parseTime(createdAt), parseTime(updatedAt), parseTime(decidedAt)
 	return item, nil
 }
@@ -69,6 +70,7 @@ func (s *Store) ImportKnowledgeProposal(ctx context.Context, item domain.Knowled
 	if item.UpdatedAt.IsZero() {
 		item.UpdatedAt = item.CreatedAt
 	}
+	item.ReviewMode = normalizeKnowledgeReviewMode(item.ReviewMode)
 	if item.Status == domain.KnowledgeProposalPending {
 		if err := s.defaultKnowledgeParent(ctx, &item.Proposed); err != nil {
 			return err
@@ -77,20 +79,90 @@ func (s *Store) ImportKnowledgeProposal(ctx context.Context, item domain.Knowled
 			return err
 		}
 	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	existing, existingErr := scanKnowledgeProposal(tx.QueryRowContext(ctx, `SELECT `+knowledgeProposalColumns+` FROM knowledge_proposals WHERE id=?`, item.ID))
+	if existingErr == nil {
+		existingTerminal := existing.Status != domain.KnowledgeProposalPending
+		incomingTerminal := item.Status != domain.KnowledgeProposalPending
+		switch {
+		case existingTerminal && !incomingTerminal:
+			return tx.Commit()
+		case existingTerminal && incomingTerminal && !knowledgeProposalNewer(item, existing):
+			return tx.Commit()
+		}
+	} else if !errors.Is(existingErr, sql.ErrNoRows) {
+		return existingErr
+	}
+	if item.Status == domain.KnowledgeProposalPending {
+		other, otherErr := scanKnowledgeProposal(tx.QueryRowContext(ctx, `SELECT `+knowledgeProposalColumns+` FROM knowledge_proposals WHERE entry_id=? AND status='pending' AND id<>? LIMIT 1`, item.EntryID, item.ID))
+		if otherErr == nil {
+			resolvedAt := laterProposalTime(item, other)
+			if knowledgeProposalNewer(item, other) {
+				if _, err := tx.ExecContext(ctx, `UPDATE knowledge_proposals SET status=?,updated_at=?,decided_at=? WHERE id=?`,
+					domain.KnowledgeProposalRejected, timeString(resolvedAt), timeString(resolvedAt), other.ID); err != nil {
+					return err
+				}
+			} else {
+				item.Status = domain.KnowledgeProposalRejected
+				item.UpdatedAt, item.DecidedAt = resolvedAt, resolvedAt
+			}
+		} else if !errors.Is(otherErr, sql.ErrNoRows) {
+			return otherErr
+		}
+	}
 	encoded, err := encodeKnowledgeProposal(item)
 	if err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO knowledge_proposals(`+knowledgeProposalColumns+`) VALUES(?,?,?,?,?,?,?,?,?,?)
+	_, err = tx.ExecContext(ctx, `INSERT INTO knowledge_proposals(`+knowledgeProposalColumns+`) VALUES(?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET entry_id=excluded.entry_id,base_revision=excluded.base_revision,
 		proposed_json=excluded.proposed_json,source_task_id=excluded.source_task_id,source_turn_id=excluded.source_turn_id,
-		status=excluded.status,created_at=excluded.created_at,updated_at=excluded.updated_at,decided_at=excluded.decided_at`,
+		status=excluded.status,created_at=excluded.created_at,updated_at=excluded.updated_at,decided_at=excluded.decided_at,
+		review_mode=excluded.review_mode`,
 		item.ID, item.EntryID, item.BaseRevision, encoded, item.SourceTaskID, item.SourceTurnID, item.Status,
-		timeString(item.CreatedAt), timeString(item.UpdatedAt), timeString(item.DecidedAt))
+		timeString(item.CreatedAt), timeString(item.UpdatedAt), timeString(item.DecidedAt), item.ReviewMode)
 	if err != nil && strings.Contains(err.Error(), "knowledge_proposals.entry_id") {
 		return ErrKnowledgeProposalPending
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func proposalTimestamp(item domain.KnowledgeProposal) time.Time {
+	if !item.UpdatedAt.IsZero() {
+		return item.UpdatedAt
+	}
+	return item.CreatedAt
+}
+
+func laterProposalTime(left, right domain.KnowledgeProposal) time.Time {
+	leftTime, rightTime := proposalTimestamp(left), proposalTimestamp(right)
+	if rightTime.After(leftTime) {
+		return rightTime
+	}
+	return leftTime
+}
+
+func knowledgeProposalNewer(candidate, current domain.KnowledgeProposal) bool {
+	candidateTime, currentTime := proposalTimestamp(candidate), proposalTimestamp(current)
+	if !candidateTime.Equal(currentTime) {
+		return candidateTime.After(currentTime)
+	}
+	if candidate.Status != current.Status {
+		if candidate.Status == domain.KnowledgeProposalApproved {
+			return true
+		}
+		if current.Status == domain.KnowledgeProposalApproved {
+			return false
+		}
+	}
+	return candidate.ID > current.ID
 }
 
 func (s *Store) DeleteKnowledgeProposal(ctx context.Context, id string) error {
@@ -154,6 +226,9 @@ func (s *Store) CreateKnowledgeProposal(ctx context.Context, item domain.Knowled
 	if item.BaseRevision == 0 && item.Proposed.IsIndex {
 		return domain.KnowledgeProposal{}, ErrKnowledgeRootManaged
 	}
+	if IsManagedGlobalKnowledgeCategory(item.EntryID) {
+		return domain.KnowledgeProposal{}, ErrKnowledgeRootManaged
+	}
 	if item.BaseRevision < 0 {
 		return domain.KnowledgeProposal{}, ErrKnowledgeProposalRevision
 	}
@@ -163,6 +238,7 @@ func (s *Store) CreateKnowledgeProposal(ctx context.Context, item domain.Knowled
 	if item.UpdatedAt.IsZero() {
 		item.UpdatedAt = item.CreatedAt
 	}
+	item.ReviewMode = normalizeKnowledgeReviewMode(item.ReviewMode)
 	if item.Proposed.CreatedAt.IsZero() {
 		item.Proposed.CreatedAt = item.CreatedAt
 	}
@@ -217,9 +293,9 @@ func (s *Store) CreateKnowledgeProposal(ctx context.Context, item domain.Knowled
 	if err != nil {
 		return domain.KnowledgeProposal{}, err
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO knowledge_proposals(`+knowledgeProposalColumns+`) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+	_, err = tx.ExecContext(ctx, `INSERT INTO knowledge_proposals(`+knowledgeProposalColumns+`) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
 		item.ID, item.EntryID, item.BaseRevision, proposedJSON, item.SourceTaskID, item.SourceTurnID, item.Status,
-		timeString(item.CreatedAt), timeString(item.UpdatedAt), timeString(item.DecidedAt))
+		timeString(item.CreatedAt), timeString(item.UpdatedAt), timeString(item.DecidedAt), item.ReviewMode)
 	if err != nil {
 		if strings.Contains(err.Error(), "knowledge_proposals.entry_id") {
 			return domain.KnowledgeProposal{}, ErrKnowledgeProposalPending
@@ -245,6 +321,13 @@ func (s *Store) CreateKnowledgeProposal(ctx context.Context, item domain.Knowled
 		return domain.KnowledgeProposal{}, err
 	}
 	return s.KnowledgeProposal(ctx, item.ID)
+}
+
+func normalizeKnowledgeReviewMode(value string) string {
+	if strings.TrimSpace(value) == "auto" {
+		return "auto"
+	}
+	return "manual"
 }
 
 func insertKnowledgeTx(ctx context.Context, tx *sql.Tx, item domain.KnowledgeEntry) error {
@@ -327,7 +410,6 @@ func (s *Store) ApproveKnowledgeProposal(ctx context.Context, id string, decided
 			return domain.KnowledgeProposal{}, domain.KnowledgeEntry{}, ErrKnowledgeRootManaged
 		}
 		entry.CreatedAt = existing.CreatedAt
-		entry.HelpedCount, entry.StaleCount = existing.HelpedCount, existing.StaleCount
 		if err := validateKnowledgeWith(ctx, tx, entry); err != nil {
 			return domain.KnowledgeProposal{}, domain.KnowledgeEntry{}, err
 		}

@@ -78,34 +78,39 @@ func (s *Store) CreateWorkspace(ctx context.Context, item domain.Workspace) erro
 			id,project_id,name,locality,transport,root_path,ssh_host,ssh_user,ssh_port,ssh_auth,
 			ssh_credential_ref,ssh_password_configured,distro,platform,health,
 			capabilities_json,repository_json,last_detected_at,created_at,updated_at
-			,owner_device_id,read_only
-		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			,owner_device_id,read_only,source_workspace_id,agent_api_mode,agent_api_url,
+			agent_api_resolved_url,agent_api_status,agent_api_error,agent_api_last_checked_at
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		item.ID, item.ProjectID, item.Name, item.Locality, item.Transport, item.RootPath,
 		item.SSHHost, item.SSHUser, item.SSHPort, item.SSHAuth, item.SSHCredentialRef,
 		boolInt(item.SSHPasswordConfigured), item.Distro, item.Platform, item.Health,
 		encodeJSON(item.Capabilities), encodeJSON(item.Repository), timeString(item.LastDetectedAt),
-		timeString(item.CreatedAt), timeString(item.UpdatedAt), item.OwnerDeviceID, boolInt(item.ReadOnly),
+		timeString(item.CreatedAt), timeString(item.UpdatedAt), item.OwnerDeviceID, boolInt(item.ReadOnly), item.SourceWorkspaceID,
+		normalizeWorkspaceAgentAPIMode(item.AgentAPIMode), item.AgentAPIURL, item.AgentAPIResolvedURL,
+		workspaceAgentAPIStatus(item.AgentAPIStatus), item.AgentAPIError, timeString(item.AgentAPILastCheckedAt),
 	)
 	return err
 }
 
 func scanWorkspace(scanner interface{ Scan(...any) error }) (domain.Workspace, error) {
 	var item domain.Workspace
-	var capabilities, repository, detectedAt, createdAt, updatedAt string
+	var capabilities, repository, detectedAt, createdAt, updatedAt, agentAPICheckedAt string
 	err := scanner.Scan(
 		&item.ID, &item.ProjectID, &item.Name, &item.Locality, &item.Transport, &item.RootPath,
 		&item.SSHHost, &item.SSHUser, &item.SSHPort, &item.SSHAuth, &item.SSHCredentialRef,
 		&item.SSHPasswordConfigured, &item.Distro, &item.Platform, &item.Health,
-		&capabilities, &repository, &detectedAt, &createdAt, &updatedAt, &item.OwnerDeviceID, &item.ReadOnly,
+		&capabilities, &repository, &detectedAt, &createdAt, &updatedAt, &item.OwnerDeviceID, &item.ReadOnly, &item.SourceWorkspaceID,
+		&item.AgentAPIMode, &item.AgentAPIURL, &item.AgentAPIResolvedURL, &item.AgentAPIStatus, &item.AgentAPIError, &agentAPICheckedAt,
 	)
 	item.Capabilities = decodeJSON(capabilities, map[string]any{})
 	item.Repository = decodeJSON(repository, map[string]any{})
 	item.LastDetectedAt = parseTime(detectedAt)
+	item.AgentAPILastCheckedAt = parseTime(agentAPICheckedAt)
 	item.CreatedAt, item.UpdatedAt = parseTime(createdAt), parseTime(updatedAt)
 	return item, err
 }
 
-const workspaceColumns = `id,project_id,name,locality,transport,root_path,ssh_host,ssh_user,ssh_port,ssh_auth,ssh_credential_ref,ssh_password_configured,distro,platform,health,capabilities_json,repository_json,last_detected_at,created_at,updated_at,owner_device_id,read_only`
+const workspaceColumns = `id,project_id,name,locality,transport,root_path,ssh_host,ssh_user,ssh_port,ssh_auth,ssh_credential_ref,ssh_password_configured,distro,platform,health,capabilities_json,repository_json,last_detected_at,created_at,updated_at,owner_device_id,read_only,source_workspace_id,agent_api_mode,agent_api_url,agent_api_resolved_url,agent_api_status,agent_api_error,agent_api_last_checked_at`
 
 func (s *Store) Workspace(ctx context.Context, id string) (domain.Workspace, error) {
 	return scanWorkspace(s.db.QueryRowContext(ctx, `SELECT `+workspaceColumns+` FROM workspaces WHERE id=?`, id))
@@ -137,10 +142,12 @@ func (s *Store) ListWorkspaces(ctx context.Context, projectID string) ([]domain.
 
 func (s *Store) UpdateWorkspaceDetection(ctx context.Context, item domain.Workspace) error {
 	_, err := s.db.ExecContext(ctx, `
-		UPDATE workspaces SET platform=?,health=?,capabilities_json=?,repository_json=?,last_detected_at=?,updated_at=?
+		UPDATE workspaces SET platform=?,health=?,capabilities_json=?,repository_json=?,last_detected_at=?,updated_at=?,
+			agent_api_resolved_url=?,agent_api_status=?,agent_api_error=?,agent_api_last_checked_at=?
 		WHERE id=?`,
 		item.Platform, item.Health, encodeJSON(item.Capabilities), encodeJSON(item.Repository),
-		timeString(item.LastDetectedAt), timeString(item.UpdatedAt), item.ID,
+		timeString(item.LastDetectedAt), timeString(item.UpdatedAt), item.AgentAPIResolvedURL,
+		workspaceAgentAPIStatus(item.AgentAPIStatus), item.AgentAPIError, timeString(item.AgentAPILastCheckedAt), item.ID,
 	)
 	return err
 }
@@ -346,14 +353,34 @@ func (s *Store) UpdateWorkspaceConfig(ctx context.Context, item domain.Workspace
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE workspaces SET
 			name=?,locality=?,transport=?,root_path=?,ssh_host=?,ssh_user=?,ssh_port=?,ssh_auth=?,
-			ssh_credential_ref=?,ssh_password_configured=?,distro=?,
-			platform='',health='unknown',capabilities_json='{}',repository_json='{}',last_detected_at='',updated_at=?
+			ssh_credential_ref=?,ssh_password_configured=?,distro=?,agent_api_mode=?,agent_api_url=?,
+			platform='',health='unknown',capabilities_json='{}',repository_json='{}',last_detected_at='',
+			agent_api_resolved_url='',agent_api_status='unknown',agent_api_error='',agent_api_last_checked_at='',updated_at=?
 		WHERE id=?`,
 		item.Name, item.Locality, item.Transport, item.RootPath, item.SSHHost, item.SSHUser, item.SSHPort,
 		item.SSHAuth, item.SSHCredentialRef, boolInt(item.SSHPasswordConfigured), item.Distro,
+		normalizeWorkspaceAgentAPIMode(item.AgentAPIMode), item.AgentAPIURL,
 		timeString(item.UpdatedAt), item.ID,
 	)
 	return err
+}
+
+func normalizeWorkspaceAgentAPIMode(value string) string {
+	switch strings.TrimSpace(value) {
+	case "global", "manual":
+		return strings.TrimSpace(value)
+	default:
+		return "auto"
+	}
+}
+
+func workspaceAgentAPIStatus(value string) string {
+	switch strings.TrimSpace(value) {
+	case "ready", "error":
+		return strings.TrimSpace(value)
+	default:
+		return "unknown"
+	}
 }
 
 func (s *Store) DeleteModel(ctx context.Context, id string) error {

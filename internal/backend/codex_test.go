@@ -161,6 +161,14 @@ func TestParseCodexLine(t *testing.T) {
 	if event.Type != "agent_message" || reply != "done" {
 		t.Fatalf("unexpected reply event: %#v %q", event, reply)
 	}
+	event, _, _ = parseCodexLine(`{"type":"item.started","item":{"id":"tool-1","type":"command_execution","command":"go test ./...","status":"in_progress"}}`)
+	if event.Type != "agent_command_started" || event.Data["tool_call_id"] != "tool-1" {
+		t.Fatalf("tool start lost lifecycle id: %#v", event)
+	}
+	event, _, _ = parseCodexLine(`{"type":"item.completed","item":{"id":"tool-1","type":"command_execution","command":"go test ./...","status":"completed","exit_code":0,"aggregated_output":"ok"}}`)
+	if event.Type != "agent_command_finished" || event.Data["tool_call_id"] != "tool-1" || event.Data["output_tail"] != "ok" {
+		t.Fatalf("tool completion lost lifecycle data: %#v", event)
+	}
 }
 
 func TestFilterEnvironmentDropsUnknownSecrets(t *testing.T) {

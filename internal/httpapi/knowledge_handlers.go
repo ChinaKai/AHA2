@@ -42,7 +42,12 @@ func (s *Server) listKnowledge(writer http.ResponseWriter, request *http.Request
 		writeError(writer, http.StatusInternalServerError, "list_knowledge_proposals_failed")
 		return
 	}
-	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "knowledge": items, "proposals": proposals})
+	reviewSettings, err := s.store.KnowledgeReviewSettings(request.Context())
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, "knowledge_review_settings_failed")
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "knowledge": items, "proposals": proposals, "review_settings": reviewSettings})
 }
 
 type knowledgePayload struct {
@@ -282,6 +287,10 @@ func (s *Server) feedbackKnowledge(writer http.ResponseWriter, request *http.Req
 	}
 	item, err := s.store.FeedbackKnowledge(request.Context(), request.PathValue("id"), kind, time.Now().UTC().Format(time.RFC3339Nano))
 	if err != nil {
+		if errors.Is(err, store.ErrKnowledgeFeedbackState) {
+			writeJSON(writer, http.StatusConflict, map[string]any{"ok": false, "error": "knowledge_feedback_conflict", "message": "该 revision 已标记为过时或错误，请先批准修订或确认当前内容仍然有效"})
+			return
+		}
 		writeError(writer, http.StatusNotFound, "knowledge_not_found")
 		return
 	}

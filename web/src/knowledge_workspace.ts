@@ -1,7 +1,7 @@
 import {api} from "./api.js";
 import {icon} from "./icons.js";
 import {renderMarkdown} from "./markdown.js";
-import type {Knowledge, KnowledgeLibrary, KnowledgeProposal, ProductLine, Project, Skill, Workspace} from "./types.js";
+import type {Knowledge, KnowledgeLibrary, KnowledgeProposal, KnowledgeReviewSettings, ProductLine, Project, Skill, Workspace} from "./types.js";
 
 type KnowledgeArea = "global" | "libraries" | "skills" | "updates" | "project";
 type KnowledgeSection = "overview" | "project" | "navigation" | "settings";
@@ -13,6 +13,7 @@ export interface KnowledgeWorkspaceContext {
   knowledge: Knowledge[];
   libraries: KnowledgeLibrary[];
   proposals: KnowledgeProposal[];
+  reviewSettings?: KnowledgeReviewSettings;
   refreshData: () => Promise<void>;
   render: () => void;
   setMessage: (kind: "notice" | "error", message: string) => void;
@@ -25,14 +26,23 @@ let productLines: ProductLine[] = [];
 let skills: Skill[] = [];
 let catalogProjectID = "";
 let catalogLoading = false;
-let searchTerm = "";
 let selectedKnowledgeID = "";
 let selectedLibraryID = "";
 let knowledgeReaderOpen = false;
 let updateFilter: "pending" | "all" = "pending";
-const collapsedKnowledgeIDs = new Set<string>();
-const expandedNavigationIDs = new Set<string>();
+let selectedKnowledgeSourceID = "all";
+const selectedUpdateIDs = new Set<string>();
 const syntheticHomeID = "__knowledge_home__";
+const globalGeneralKnowledgeID = "knowledge_global_general";
+const globalAgentLessonsKnowledgeID = "knowledge_global_agent_lessons";
+const globalTechnicalLessonsKnowledgeID = "knowledge_global_agent_lessons_technical";
+const globalBehaviorLessonsKnowledgeID = "knowledge_global_agent_lessons_behavior";
+const managedGlobalKnowledgeIDs = new Set([
+  globalGeneralKnowledgeID,
+  globalAgentLessonsKnowledgeID,
+  globalTechnicalLessonsKnowledgeID,
+  globalBehaviorLessonsKnowledgeID,
+]);
 
 const topLevelLabels: Array<[Exclude<KnowledgeArea, "project">, string, string]> = [
   ["global", "proxy", "\u5168\u5c40\u77e5\u8bc6"],
@@ -69,16 +79,32 @@ function lineName(id?: string): string {
   return productLines.find(line => line.id === id)?.name || "\u901a\u7528";
 }
 
-function entryMatches(item: Knowledge): boolean {
-  const query = searchTerm.trim().toLowerCase();
-  if (!query) return true;
-  return `${item.title}\n${item.body}\n${item.type}`.toLowerCase().includes(query);
-}
-
 function projectEntries(context: KnowledgeWorkspaceContext, projectID: string): Knowledge[] {
   return context.knowledge.filter(item => item.scope === "project"
     && (item.project_id === projectID || item.bound_project_id === projectID)
     && !(item.bound_project_id === projectID && item.is_index));
+}
+
+type KnowledgeSourceOption = {id: string; label: string; count: number; external: boolean};
+
+export function projectKnowledgeSources(project: Project, entries: Knowledge[], libraries: KnowledgeLibrary[]): KnowledgeSourceOption[] {
+  const counts = new Map<string, number>();
+  for (const entry of entries) {
+    if (entry.is_index) continue;
+    counts.set(entry.project_id || project.id, (counts.get(entry.project_id || project.id) || 0) + 1);
+  }
+  const libraryNames = new Map(libraries.map(library => [library.container_project_id, library.name]));
+  const sources: KnowledgeSourceOption[] = [{id: project.id, label: "项目自有知识", count: counts.get(project.id) || 0, external: false}];
+  for (const [id, count] of counts) {
+    if (id === project.id) continue;
+    sources.push({id, label: libraryNames.get(id) || "外部知识库", count, external: true});
+  }
+  return sources;
+}
+
+function knowledgeSourceToolbar(sources: KnowledgeSourceOption[]): string {
+  const total = sources.reduce((sum, source) => sum + source.count, 0);
+  return `<div class="knowledge-source-toolbar"><label>知识来源<select data-knowledge-source-filter><option value="all" ${selectedKnowledgeSourceID === "all" ? "selected" : ""}>全部来源 · ${total} 篇</option>${sources.map(source => `<option value="${escapeHTML(source.id)}" ${selectedKnowledgeSourceID === source.id ? "selected" : ""}>${escapeHTML(source.label)} · ${source.count} 篇</option>`).join("")}</select></label><span>默认合并展示，文档仍归属于原知识库</span></div>`;
 }
 
 function renderEmpty(message: string): string {
@@ -86,14 +112,15 @@ function renderEmpty(message: string): string {
 }
 
 function renderKnowledgeEntry(item: Knowledge, editable = true): string {
+  const feedbackLocked = item.status === "stale" || item.feedback_state === "stale" || item.feedback_state === "wrong";
   return `<article class="knowledge-entry-card">
     <header><span class="knowledge-entry-kind">${item.is_index ? "\u77e5\u8bc6\u9996\u9875" : "\u6587\u6863"}</span><small>${formatDate(item.updated_at)}</small></header>
     <h3>${escapeHTML(item.title)}</h3>
     <p>${escapeHTML(item.body)}</p>
     <footer><div>${item.product_line_id ? `<span>${icon("branch")}${escapeHTML(lineName(item.product_line_id))}</span>` : ""}</div>
       <div class="knowledge-entry-actions">
-        <button type="button" data-knowledge-feedback="helped" data-knowledge-id="${item.id}" title="\u6709\u5e2e\u52a9">${icon("shield")} ${Number(item.helped_count || 0)}</button>
-        <button type="button" data-knowledge-feedback="stale" data-knowledge-id="${item.id}" title="\u5185\u5bb9\u8fc7\u65f6">${icon("clock")} ${Number(item.stale_count || 0)}</button>
+        <button type="button" class="${item.feedback_state === "helped" ? "knowledge-feedback-active" : ""}" data-knowledge-feedback="helped" data-knowledge-id="${item.id}" title="\u6709\u5e2e\u52a9" ${feedbackLocked ? "disabled" : ""}>${icon("shield")} ${Number(item.helped_count || 0)}</button>
+        <button type="button" class="${feedbackLocked ? "knowledge-feedback-active stale" : ""}" data-knowledge-feedback="stale" data-knowledge-id="${item.id}" title="\u5185\u5bb9\u8fc7\u65f6">${icon("clock")} ${Number(item.stale_count || 0)}</button>
         ${item.status !== "verified" ? `<button type="button" data-knowledge-verify="${item.id}">\u786e\u8ba4\u5185\u5bb9</button>` : ""}
         ${editable ? `<button type="button" class="icon-button" data-knowledge-edit="${item.id}" title="\u7f16\u8f91">${icon("edit")}</button><button type="button" class="icon-button" data-knowledge-delete="${item.id}" title="\u5220\u9664">${icon("close")}</button>` : ""}
       </div>
@@ -138,26 +165,33 @@ function navigationDisplayTitle(item: Knowledge): string {
   return item.title;
 }
 
+function knowledgeHomeBody(kind: KnowledgeDocumentKind, body?: string): string {
+  const value = String(body || "").trim();
+  const legacy = new Set(["\u8fd9\u91cc\u6c47\u603b\u8de8\u9879\u76ee\u5171\u4eab\u7684\u77e5\u8bc6\u6587\u6863\u3002", "\u8fd9\u91cc\u6c47\u603b\u672c\u9879\u76ee\u7684\u77e5\u8bc6\u6587\u6863\u4e0e\u5e38\u7528\u5165\u53e3\u3002"]);
+  if (value && !legacy.has(value)) return value;
+  if (kind === "global") return "\u8fd9\u662f AHA2 \u5168\u5c40\u77e5\u8bc6\u9875\u9762\u3002\u901a\u7528\u77e5\u8bc6\u4ee5\u4eba\u7c7b\u9605\u8bfb\u4e3a\u4e3b\uff0cAgent \u4ec5\u5728\u4efb\u52a1\u4e3b\u9898\u660e\u786e\u76f8\u5173\u65f6\u6309\u9700\u8bfb\u53d6\uff1bAgent \u7ecf\u9a8c\u6559\u8bad\u7528\u4e8e\u6c89\u6dc0\u53ef\u8de8\u9879\u76ee\u590d\u7528\u7684\u6280\u672f\u8bca\u65ad\u4e0e\u884c\u4e3a\u6559\u8bad\u3002\u8bf7\u6839\u636e\u5206\u7c7b\u3001\u6807\u9898\u4e0e\u6458\u8981\u9009\u62e9\u9605\u8bfb\u8def\u5f84\u3002";
+  if (kind === "project-navigation") return "\u8fd9\u662f\u5f53\u524d\u9879\u76ee\u7684\u5bfc\u822a\u9875\u9762\uff0c\u6309\u6a21\u5757\u3001\u4ee3\u7801\u8def\u5f84\u3001\u8fb9\u754c\u4e0e\u5173\u952e\u6d41\u7a0b\u7ec4\u7ec7\u5165\u53e3\u3002\u8bf7\u6839\u636e\u4e0b\u9762\u7684\u6807\u9898\u4e0e\u6458\u8981\u9009\u62e9\u9605\u8bfb\u8def\u5f84\u3002";
+  return "\u8fd9\u662f\u5f53\u524d\u9879\u76ee\u7684\u77e5\u8bc6\u9875\u9762\uff0c\u4fdd\u5b58\u9879\u76ee\u5b9e\u8df5\u3001\u6280\u672f\u51b3\u7b56\u3001\u8bca\u65ad\u7ed3\u8bba\u548c\u53ef\u590d\u7528\u7ecf\u9a8c\u3002\u8bf7\u6839\u636e\u4e0b\u9762\u7684\u6807\u9898\u4e0e\u6458\u8981\u6309\u9700\u6253\u5f00\u6587\u6863\u3002";
+}
+
+function knowledgeIndexSummary(item: Knowledge): string {
+  for (const raw of String(item.body || "").split("\n")) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#") || line.startsWith("```")) continue;
+    const plain = line
+      .replace(/^(?:>|[-*+]|\d+[.)])\s+/, "")
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+      .replace(/[*_`~]/g, "")
+      .trim();
+    if (!plain || plain.toLocaleLowerCase() === String(item.title || "").trim().toLocaleLowerCase()) continue;
+    return plain.length > 160 ? `${plain.slice(0, 157)}...` : plain;
+  }
+  return "\u6253\u5f00\u6587\u6863\u67e5\u770b\u8be6\u60c5\u3002";
+}
+
 function visualParentID(item: Knowledge, byID: Map<string, Knowledge>, homeID: string): string {
   if (item.id === homeID) return "";
   return item.parent_id && byID.has(item.parent_id) ? item.parent_id : homeID;
-}
-
-function knowledgeTreeRows(entries: Knowledge[], parentID: string, homeID: string, titleFor: (item: Knowledge) => string, progressive = false, depth = 1, seen = new Set<string>()): string {
-  const byID = new Map(entries.map(entry => [entry.id, entry]));
-  const childrenAtLevel = entries.filter(item => item.id !== homeID && visualParentID(item, byID, homeID) === parentID);
-  return (progressive ? sortProjectNavigation(childrenAtLevel) : sortKnowledge(childrenAtLevel)).map(item => {
-    if (seen.has(item.id)) return "";
-    const branch = new Set(seen); branch.add(item.id);
-    const childEntries = entries.filter(child => child.id !== homeID && visualParentID(child, byID, homeID) === item.id);
-    const collapsed = childEntries.length > 0 && (progressive ? !expandedNavigationIDs.has(item.id) : collapsedKnowledgeIDs.has(item.id));
-    const children = collapsed ? "" : knowledgeTreeRows(entries, item.id, homeID, titleFor, progressive, depth + 1, branch);
-    const displayTitle = titleFor(item);
-    const toggle = childEntries.length
-      ? `<button type="button" class="knowledge-tree-toggle ${collapsed ? "collapsed" : ""}" data-knowledge-toggle="${escapeHTML(item.id)}" data-knowledge-progressive="${progressive}" aria-label="${collapsed ? "\u5c55\u5f00" : "\u6536\u8d77"}${escapeHTML(displayTitle)}" aria-expanded="${!collapsed}"><span>\u25be</span></button>`
-      : `<span class="knowledge-tree-toggle-placeholder"></span>`;
-    return `<div class="knowledge-tree-node" style="--knowledge-indent:${Math.min(depth, 12) * 18}px"><div class="knowledge-tree-row">${toggle}<button type="button" data-knowledge-open="${escapeHTML(item.id)}" class="knowledge-tree-document ${item.id === selectedKnowledgeID ? "active" : ""}"><span>${escapeHTML(displayTitle)}</span><small>${childEntries.length ? progressive ? "\u7d22\u5f15" : "\u5206\u7c7b" : "\u6587\u6863"}</small></button></div>${children}</div>`;
-  }).join("");
 }
 
 function knowledgeBreadcrumbs(item: Knowledge | undefined, entries: Knowledge[], homeID: string, homeTitle: string, titleFor: (item: Knowledge) => string): string {
@@ -174,7 +208,7 @@ function knowledgeBreadcrumbs(item: Knowledge | undefined, entries: Knowledge[],
   return path.map(entry => `<button type="button" data-knowledge-open="${escapeHTML(entry.id)}">${entry.id === homeID ? homeTitle : escapeHTML(titleFor(entry))}</button>`).join("<span>/</span>");
 }
 
-export function renderKnowledgeDocumentWorkspace(entries: Knowledge[], empty: string, newKind: KnowledgeDocumentKind, readOnly = false): string {
+export function renderKnowledgeDocumentWorkspace(entries: Knowledge[], empty: string, newKind: KnowledgeDocumentKind, readOnly = false, sourceLabelFor?: (item: Knowledge) => string, toolbar = "", allowCreate = true): string {
   const progressive = newKind === "project-navigation";
   const ordered = progressive ? sortProjectNavigation(entries) : sortKnowledge(entries);
   const root = ordered.find(item => item.is_index && !item.parent_id);
@@ -183,40 +217,40 @@ export function renderKnowledgeDocumentWorkspace(entries: Knowledge[], empty: st
   const titleFor = progressive ? navigationDisplayTitle : (item: Knowledge) => item.title;
   if (selectedKnowledgeID !== homeID && !ordered.some(item => item.id === selectedKnowledgeID)) selectedKnowledgeID = homeID;
   const selected = ordered.find(item => item.id === selectedKnowledgeID);
-  const filtered = searchTerm.trim() ? ordered.filter(entryMatches) : ordered;
   const byID = new Map(ordered.map(entry => [entry.id, entry]));
   const visibleChildren = (parentID: string) => {
     const items = ordered.filter(item => item.id !== homeID && visualParentID(item, byID, homeID) === parentID);
     return progressive ? sortProjectNavigation(items) : sortKnowledge(items);
   };
   const homeChildren = visibleChildren(homeID);
-  const homeCollapsed = collapsedKnowledgeIDs.has(homeID);
-  const homeToggle = homeChildren.length ? `<button type="button" class="knowledge-tree-toggle ${homeCollapsed ? "collapsed" : ""}" data-knowledge-toggle="${escapeHTML(homeID)}" aria-label="${homeCollapsed ? "\u5c55\u5f00" : "\u6536\u8d77"}${homeTitle}" aria-expanded="${!homeCollapsed}"><span>\u25be</span></button>` : `<span class="knowledge-tree-toggle-placeholder"></span>`;
-  const homeRow = `<div class="knowledge-tree-node knowledge-tree-home" style="--knowledge-indent:0px"><div class="knowledge-tree-row">${homeToggle}<button type="button" data-knowledge-open="${escapeHTML(homeID)}" class="knowledge-tree-document ${selectedKnowledgeID === homeID ? "active" : ""}"><span>${icon("knowledge")}${homeTitle}</span><small>\u5165\u53e3</small></button></div></div>`;
-  const tree = searchTerm.trim()
-    ? `${homeRow}${filtered.filter(item => item.id !== homeID).map(item => `<button type="button" data-knowledge-open="${escapeHTML(item.id)}" class="knowledge-tree-search-result ${item.id === selectedKnowledgeID ? "active" : ""}"><span>${escapeHTML(titleFor(item))}</span><small>${visibleChildren(item.id).length ? progressive ? "\u7d22\u5f15" : "\u5206\u7c7b" : "\u6587\u6863"}</small></button>`).join("")}`
-    : `${homeRow}${homeCollapsed ? "" : knowledgeTreeRows(ordered, homeID, homeID, titleFor, progressive)}`;
   const isHome = selectedKnowledgeID === homeID;
   const children = isHome ? homeChildren : selected ? visibleChildren(selected.id) : [];
-  const siblingParent = selected ? visualParentID(selected, byID, homeID) : "";
-  const related = selected && !isHome ? visibleChildren(siblingParent).filter(item => item.id !== selected.id).slice(0, 6) : [];
   const title = isHome ? homeTitle : selected ? titleFor(selected) : "\u6587\u6863";
-  const canEditSelected = !readOnly && !selected?.bound_project_id;
-  const body = selected ? renderMarkdown(selected.body) : `<p>${escapeHTML(ordered.length ? "\u4ece\u5de6\u4fa7\u76ee\u5f55\u9009\u62e9\u6587\u6863\uff0c\u6216\u65b0\u5efa\u4e00\u7bc7\u6587\u6863\u3002" : empty)}</p>`;
-  const linkSection = (label: string, items: Knowledge[]) => items.length ? `<section class="knowledge-related-links"><strong>${label}</strong><div>${items.map(item => `<button type="button" data-knowledge-open="${escapeHTML(item.id)}">${icon("knowledge")}<span><b>${escapeHTML(titleFor(item))}</b><small>${visibleChildren(item.id).length ? progressive ? "\u7d22\u5f15" : "\u5206\u7c7b" : "\u6587\u6863"}</small></span></button>`).join("")}</div></section>` : "";
+  const managedGlobalCategory = Boolean(selected && managedGlobalKnowledgeIDs.has(selected.id));
+  const canEditSelected = !readOnly && !selected?.bound_project_id && !managedGlobalCategory;
+  const bodySource = isHome ? knowledgeHomeBody(newKind, selected?.body) : String(selected?.body || empty);
+  const body = renderMarkdown(bodySource);
+  const documentLinks = children.length ? `<h2>\u6587\u6863\u94fe\u63a5</h2><ul class="knowledge-index-links">${children.map(item => `<li><button type="button" class="knowledge-index-link" data-knowledge-open="${escapeHTML(item.id)}">${escapeHTML(titleFor(item))}</button>${sourceLabelFor ? `<small class="knowledge-source-badge">${escapeHTML(sourceLabelFor(item))}</small>` : ""}<span>\uff1a${escapeHTML(knowledgeIndexSummary(item))}</span></li>`).join("")}</ul>` : "";
   const backButton = readOnly ? `<button type="button" class="knowledge-mobile-back" data-knowledge-library-back>${icon("projects")}\u8fd4\u56de\u5f85\u7ed1\u5b9a\u77e5\u8bc6\u5e93</button>` : newKind === "global"
-    ? knowledgeReaderOpen ? `<button type="button" class="knowledge-directory-back" data-knowledge-directory-back>${icon("projects")}\u8fd4\u56de\u5168\u5c40\u77e5\u8bc6\u76ee\u5f55</button>` : ""
+    ? ""
     : `<button type="button" class="knowledge-mobile-back" data-knowledge-back>${icon("projects")}\u8fd4\u56de\u77e5\u8bc6\u5e93\u5165\u53e3</button>`;
+  const newParentID = newKind === "global" && (isHome || selected?.id === globalGeneralKnowledgeID)
+    ? globalGeneralKnowledgeID
+    : selected?.id === globalAgentLessonsKnowledgeID
+      ? globalBehaviorLessonsKnowledgeID
+      : selected?.id || root?.id || "";
+  const newType = selected?.id === globalTechnicalLessonsKnowledgeID
+    ? "diagnostic"
+    : newKind === "project-navigation" ? "navigation" : "practice";
+  const newButton = readOnly || !allowCreate ? "" : `<button class="primary" type="button" data-knowledge-new="${newKind === "global" ? "global" : "project"}" data-knowledge-type="${newType}" data-knowledge-parent="${escapeHTML(newParentID)}">${icon("plus")}\u65b0\u5efa\u6587\u6863</button>`;
   const document = `<article class="knowledge-document">
       ${backButton}
-      <header><div class="knowledge-breadcrumbs">${isHome ? `<button type="button" data-knowledge-open="${escapeHTML(homeID)}">${homeTitle}</button>` : knowledgeBreadcrumbs(selected, ordered, homeID, homeTitle, titleFor)}</div><div class="knowledge-document-actions">${canEditSelected && selected?.status !== "verified" && selected ? `<button type="button" data-knowledge-verify="${selected.id}">\u786e\u8ba4\u5185\u5bb9</button>` : ""}${canEditSelected && selected ? `<button type="button" data-knowledge-edit="${selected.id}">${icon("edit")}\u7f16\u8f91</button>${isHome ? "" : `<button type="button" class="icon-button" data-knowledge-delete="${selected.id}" title="\u5220\u9664">${icon("close")}</button>`}` : ""}</div></header>
-      <h2>${escapeHTML(title)}</h2>${selected?.updated_at ? `<div class="knowledge-document-meta"><span>\u66f4\u65b0\u4e8e ${formatDate(selected.updated_at)}</span>${selected.product_line_id ? `<span>${icon("branch")}${escapeHTML(lineName(selected.product_line_id))}</span>` : ""}</div>` : ""}
-      <div class="markdown-body knowledge-document-body">${body}</div>
-      ${linkSection("\u5b50\u6587\u6863", children)}${linkSection("\u76f8\u5173\u6587\u6863", related)}
-      ${selected && !isHome ? `<footer><button type="button" data-knowledge-feedback="helped" data-knowledge-id="${selected.id}">${icon("shield")}\u8fd9\u7bc7\u6709\u5e2e\u52a9 ${Number(selected.helped_count || 0)}</button><button type="button" data-knowledge-feedback="stale" data-knowledge-id="${selected.id}">${icon("clock")}\u5185\u5bb9\u5df2\u8fc7\u65f6 ${Number(selected.stale_count || 0)}</button></footer>` : ""}
+      <header><div class="knowledge-breadcrumbs">${isHome ? `<button type="button" data-knowledge-open="${escapeHTML(homeID)}">${homeTitle}</button>` : knowledgeBreadcrumbs(selected, ordered, homeID, homeTitle, titleFor)}</div><div class="knowledge-document-actions">${newButton}${canEditSelected && selected?.status !== "verified" && selected ? `<button type="button" data-knowledge-verify="${selected.id}">\u786e\u8ba4\u5185\u5bb9</button>` : ""}${canEditSelected && selected ? `<button type="button" data-knowledge-edit="${selected.id}">${icon("edit")}\u7f16\u8f91</button>${isHome ? "" : `<button type="button" class="icon-button" data-knowledge-delete="${selected.id}" title="\u5220\u9664">${icon("close")}</button>`}` : ""}</div></header>
+      <h2>${escapeHTML(title)}</h2>${selected?.updated_at ? `<div class="knowledge-document-meta"><span>\u66f4\u65b0\u4e8e ${formatDate(selected.updated_at)}</span>${selected.product_line_id ? `<span>${icon("branch")}${escapeHTML(lineName(selected.product_line_id))}</span>` : ""}${sourceLabelFor && !isHome ? `<span class="knowledge-source-badge">${escapeHTML(sourceLabelFor(selected))}</span>` : ""}</div>` : ""}
+      <div class="markdown-body knowledge-document-body">${body}${documentLinks}</div>
+      ${selected && !isHome && !managedGlobalCategory ? `<footer><button type="button" class="${selected.feedback_state === "helped" ? "knowledge-feedback-active" : ""}" data-knowledge-feedback="helped" data-knowledge-id="${selected.id}" ${selected.status === "stale" || selected.feedback_state === "stale" || selected.feedback_state === "wrong" ? "disabled" : ""}>${icon("shield")}\u8fd9\u7bc7\u6709\u5e2e\u52a9 ${Number(selected.helped_count || 0)}</button><button type="button" class="${selected.status === "stale" || selected.feedback_state === "stale" || selected.feedback_state === "wrong" ? "knowledge-feedback-active stale" : ""}" data-knowledge-feedback="stale" data-knowledge-id="${selected.id}">${icon("clock")}\u5185\u5bb9\u5df2\u8fc7\u65f6 ${Number(selected.stale_count || 0)}</button></footer>` : ""}
     </article>`;
-  return `<div class="knowledge-section-head"><div><h2>${homeTitle}</h2><p>\u5148\u9605\u8bfb\u5165\u53e3\u6587\u6863\uff0c\u518d\u6cbf\u94fe\u63a5\u67e5\u770b\u5b50\u6587\u6863\u3002</p></div>${readOnly ? "" : `<div class="actions"><button class="primary" type="button" data-knowledge-new="${newKind === "global" ? "global" : "project"}" data-knowledge-type="${newKind === "project-navigation" ? "navigation" : "practice"}" data-knowledge-parent="${escapeHTML(selected?.id || root?.id || "")}">${icon("plus")}\u65b0\u5efa\u6587\u6863</button></div>`}</div>
-    <div class="knowledge-document-layout ${knowledgeReaderOpen ? "reader-open" : "directory-open"}"><aside class="panel knowledge-tree"><label>${icon("filter")}<input id="knowledge-search" value="${escapeHTML(searchTerm)}" placeholder="\u641c\u7d22\u6587\u6863"></label><div>${tree}</div></aside><section class="panel knowledge-reader">${document}</section></div>`;
+  return `${toolbar}<div class="knowledge-document-layout linked-index"><section class="panel knowledge-reader">${document}</section></div>`;
 }
 
 function renderBindings(workspaces: Workspace[]): string {
@@ -316,13 +350,16 @@ function proposalStatus(status: string): [string, string] {
   return ["warn", "\u5f85\u5ba1\u6279"];
 }
 
-export function renderUpdates(entries: Knowledge[], proposals: KnowledgeProposal[], projects: Project[]): string {
+export function renderUpdates(entries: Knowledge[], proposals: KnowledgeProposal[], projects: Project[], reviewSettings: KnowledgeReviewSettings = {auto_approve: false}): string {
   const pending = proposals.filter(item => item.status === "pending");
   const legacyCandidates = entries.filter(item => !item.is_index && item.status === "candidate");
   const pendingCount = pending.length + legacyCandidates.length;
+  const pendingKeys = new Set([...pending.map(item => `proposal:${item.id}`), ...legacyCandidates.map(item => `legacy:${item.id}`)]);
+  for (const key of selectedUpdateIDs) if (!pendingKeys.has(key)) selectedUpdateIDs.delete(key);
   const visible = (updateFilter === "pending" ? pending : proposals).sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
   const projectNames = new Map(projects.map(project => [project.id, project.name]));
-  const filters = `<div class="knowledge-update-filters" role="tablist" aria-label="\u63d0\u6848\u7b5b\u9009"><button type="button" data-knowledge-update-filter="pending" class="${updateFilter === "pending" ? "active" : ""}">\u5f85\u5904\u7406 <b>${pendingCount}</b></button><button type="button" data-knowledge-update-filter="all" class="${updateFilter === "all" ? "active" : ""}">\u5168\u90e8\u63d0\u6848 <b>${proposals.length + legacyCandidates.length}</b></button></div>`;
+  const filters = `<div class="knowledge-update-controls"><div class="knowledge-update-filters" role="tablist" aria-label="\u63d0\u6848\u7b5b\u9009"><button type="button" data-knowledge-update-filter="pending" class="${updateFilter === "pending" ? "active" : ""}">\u5f85\u5904\u7406 <b>${pendingCount}</b></button><button type="button" data-knowledge-update-filter="all" class="${updateFilter === "all" ? "active" : ""}">\u5168\u90e8\u63d0\u6848 <b>${proposals.length + legacyCandidates.length}</b></button></div><label class="knowledge-auto-review-toggle"><input type="checkbox" data-knowledge-auto-review ${reviewSettings.auto_approve ? "checked" : ""}><span><strong>\u81ea\u52a8\u8bc4\u5ba1</strong><small>${reviewSettings.auto_approve ? "\u65b0\u63d0\u6848\u5c06\u81ea\u52a8\u6279\u51c6" : "\u65b0\u63d0\u6848\u9700\u624b\u52a8\u8bc4\u5ba1"}</small></span></label></div>`;
+  const batch = updateFilter === "pending" && pendingCount ? `<div class="knowledge-batch-toolbar"><button type="button" data-knowledge-batch-all>${selectedUpdateIDs.size === pendingKeys.size ? "\u53d6\u6d88\u5168\u9009" : "\u5168\u9009"}</button><span>\u5df2\u9009 ${selectedUpdateIDs.size} / ${pendingCount}</span><div><button type="button" class="primary" data-knowledge-batch-approve ${selectedUpdateIDs.size ? "" : "disabled"}>\u6279\u91cf\u6279\u51c6</button><button type="button" class="danger" data-knowledge-batch-reject ${selectedUpdateIDs.size ? "" : "disabled"}>\u6279\u91cf\u62d2\u7edd</button></div></div>` : "";
   const cards = visible.map(proposal => {
     const [statusClass, statusLabel] = proposalStatus(proposal.status);
     const revision = Number(proposal.base_revision || 0) > 0;
@@ -330,26 +367,33 @@ export function renderUpdates(entries: Knowledge[], proposals: KnowledgeProposal
     const projectID = proposal.proposed?.bound_project_id || proposal.project_id || proposal.proposed?.project_id || "";
     const scope = scopeValue === "global" ? "\u5168\u5c40\u77e5\u8bc6" : projectNames.get(projectID) || "\u9879\u76ee\u77e5\u8bc6";
     const title = proposalValue(proposal, "title").trim() || "\u672a\u547d\u540d\u77e5\u8bc6";
+    const key = `proposal:${proposal.id}`;
+    const selector = proposal.status === "pending" ? `<label class="knowledge-batch-select" title="\u9009\u62e9\u6b64\u63d0\u6848"><input type="checkbox" data-knowledge-update-select="${escapeHTML(key)}" ${selectedUpdateIDs.has(key) ? "checked" : ""}><span></span></label>` : "";
+    const reviewMode = proposal.review_mode === "auto" ? "\u81ea\u52a8\u8bc4\u5ba1" : "\u624b\u52a8\u8bc4\u5ba1";
     const actions = proposal.status === "pending" ? `<div class="knowledge-proposal-actions"><button type="button" data-knowledge-proposal-view="${escapeHTML(proposal.id)}">\u67e5\u770b\u8be6\u60c5</button><button type="button" class="primary" data-knowledge-proposal-approve="${escapeHTML(proposal.id)}">\u6279\u51c6\u66f4\u65b0</button><button type="button" class="danger" data-knowledge-proposal-reject="${escapeHTML(proposal.id)}">\u62d2\u7edd</button></div>` : `<button type="button" data-knowledge-proposal-view="${escapeHTML(proposal.id)}">\u67e5\u770b\u8be6\u60c5</button>`;
-    return `<article class="knowledge-proposal-card ${proposal.status === "pending" ? "pending" : ""}"><header><div><span class="status ${statusClass}">${statusLabel}</span><span>${revision ? "\u4fee\u8ba2\u63d0\u6848" : "\u65b0\u77e5\u8bc6"}</span><span>${escapeHTML(scope)}</span></div><small>${formatDate(proposal.created_at)}</small></header><div class="knowledge-proposal-summary"><strong>${escapeHTML(title)}</strong><span>\u5185\u5bb9\u5df2\u6298\u53e0\uff0c\u70b9\u51fb\u67e5\u770b\u8be6\u60c5\u5ba1\u9605${revision ? "\u4fee\u8ba2\u5dee\u5f02" : "\u5b8c\u6574\u5185\u5bb9"}\u3002</span></div><footer><span>${proposal.source_task_id ? `\u6765\u81ea\u4efb\u52a1 ${escapeHTML(proposal.source_task_id)}` : "\u77e5\u8bc6\u4fee\u8ba2\u5efa\u8bae"}</span>${actions}</footer></article>`;
+    return `<article class="knowledge-proposal-card ${proposal.status === "pending" ? "pending" : ""}"><header>${selector}<div><span class="status ${statusClass}">${statusLabel}</span><span>${revision ? "\u4fee\u8ba2\u63d0\u6848" : "\u65b0\u77e5\u8bc6"}</span><span>${escapeHTML(scope)}</span><span class="knowledge-review-mode ${proposal.review_mode === "auto" ? "auto" : "manual"}">${reviewMode}</span></div><small>${formatDate(proposal.created_at)}</small></header><div class="knowledge-proposal-summary"><strong>${escapeHTML(title)}</strong><span>\u5185\u5bb9\u5df2\u6298\u53e0\uff0c\u70b9\u51fb\u67e5\u770b\u8be6\u60c5\u5ba1\u9605${revision ? "\u4fee\u8ba2\u5dee\u5f02" : "\u5b8c\u6574\u5185\u5bb9"}\u3002</span></div><footer><span>${proposal.source_task_id ? `\u6765\u81ea\u4efb\u52a1 ${escapeHTML(proposal.source_task_id)}` : "\u77e5\u8bc6\u4fee\u8ba2\u5efa\u8bae"}</span>${actions}</footer></article>`;
   }).join("");
-  const legacyCards = legacyCandidates.map(item => `<article class="knowledge-proposal-card pending legacy"><header><div><span class="status warn">\u5f85\u5ba1\u6279</span><span>\u5347\u7ea7\u524d\u5019\u9009</span><span>${escapeHTML(item.scope === "global" ? "\u5168\u5c40\u77e5\u8bc6" : projectNames.get(item.bound_project_id || item.project_id || "") || "\u9879\u76ee\u77e5\u8bc6")}</span></div><small>${formatDate(item.updated_at)}</small></header><div class="knowledge-proposal-summary"><strong>${escapeHTML(item.title)}</strong><span>\u5185\u5bb9\u5df2\u6298\u53e0\uff0c\u70b9\u51fb\u67e5\u770b\u8be6\u60c5\u9605\u8bfb\u5b8c\u6574\u5185\u5bb9\u3002</span></div><footer><span>\u5f85\u8f6c\u5165\u65b0\u63d0\u6848\u6d41\u7a0b\u7684\u5386\u53f2\u5019\u9009</span><div class="knowledge-proposal-actions"><button type="button" data-knowledge-update-open="${escapeHTML(item.id)}">\u67e5\u770b\u8be6\u60c5</button><button type="button" class="primary" data-knowledge-verify="${escapeHTML(item.id)}">\u6279\u51c6\u6536\u5f55</button><button type="button" class="danger" data-knowledge-delete="${escapeHTML(item.id)}">\u62d2\u7edd\u5e76\u5220\u9664</button></div></footer></article>`).join("");
+  const legacyCards = legacyCandidates.map(item => {
+    const key = `legacy:${item.id}`;
+    return `<article class="knowledge-proposal-card pending legacy"><header><label class="knowledge-batch-select" title="\u9009\u62e9\u6b64\u5019\u9009"><input type="checkbox" data-knowledge-update-select="${escapeHTML(key)}" ${selectedUpdateIDs.has(key) ? "checked" : ""}><span></span></label><div><span class="status warn">\u5f85\u5ba1\u6279</span><span>\u5347\u7ea7\u524d\u5019\u9009</span><span>${escapeHTML(item.scope === "global" ? "\u5168\u5c40\u77e5\u8bc6" : projectNames.get(item.bound_project_id || item.project_id || "") || "\u9879\u76ee\u77e5\u8bc6")}</span><span class="knowledge-review-mode manual">\u624b\u52a8\u8bc4\u5ba1</span></div><small>${formatDate(item.updated_at)}</small></header><div class="knowledge-proposal-summary"><strong>${escapeHTML(item.title)}</strong><span>\u5185\u5bb9\u5df2\u6298\u53e0\uff0c\u70b9\u51fb\u67e5\u770b\u8be6\u60c5\u9605\u8bfb\u5b8c\u6574\u5185\u5bb9\u3002</span></div><footer><span>\u5f85\u8f6c\u5165\u65b0\u63d0\u6848\u6d41\u7a0b\u7684\u5386\u53f2\u5019\u9009</span><div class="knowledge-proposal-actions"><button type="button" data-knowledge-update-open="${escapeHTML(item.id)}">\u67e5\u770b\u8be6\u60c5</button><button type="button" class="primary" data-knowledge-verify="${escapeHTML(item.id)}">\u6279\u51c6\u6536\u5f55</button><button type="button" class="danger" data-knowledge-delete="${escapeHTML(item.id)}">\u62d2\u7edd\u5e76\u5220\u9664</button></div></footer></article>`;
+  }).join("");
   const pendingEntryIDs = new Set(pending.map(item => item.entry_id));
   const stale = entries.filter(item => !item.is_index && !pendingEntryIDs.has(item.id) && (item.status === "stale" || item.feedback_state === "wrong"));
   const staleFallback = stale.length ? `<section class="knowledge-stale-fallback"><div><h3>\u7b49\u5f85 Agent \u4fee\u8ba2</h3><p>\u8fd9\u4e9b\u6587\u6863\u5df2\u505c\u6b62\u4f5c\u4e3a\u6709\u6548\u77e5\u8bc6\u6ce8\u5165\u3002\u540e\u7eed\u76f8\u5173 Turn \u4e2d，Agent \u83b7\u5f97\u65b0\u8bc1\u636e\u540e\u4f1a\u63d0\u4ea4\u4fee\u8ba2\u63d0\u6848；\u5982\u679c\u8fc7\u65f6\u53cd\u9988\u662f\u8bef\u5224，\u53ef\u786e\u8ba4\u5f53\u524d\u5185\u5bb9\u4ecd\u7136\u6709\u6548\u3002</p></div>${stale.map(item => `<article><span><strong>${escapeHTML(item.title)}</strong><small>${escapeHTML(item.scope === "global" ? "\u5168\u5c40\u77e5\u8bc6" : projectNames.get(item.project_id || "") || "\u9879\u76ee\u77e5\u8bc6")}</small></span><button type="button" data-knowledge-verify="${escapeHTML(item.id)}">\u786e\u8ba4\u4ecd\u6709\u6548</button></article>`).join("")}</section>` : "";
   const reviewCards = `${cards}${legacyCards}`;
-  return `<div class="knowledge-section-head"><div><h2>\u77e5\u8bc6\u66f4\u65b0</h2><p>\u5ba1\u9605 Agent \u63d0\u4ea4\u7684\u65b0\u77e5\u8bc6\u548c\u4fee\u8ba2\u5efa\u8bae\uff0c\u6279\u51c6\u540e\u624d\u4f1a\u66f4\u65b0\u77e5\u8bc6\u5e93\u3002</p></div><span class="status ${pendingCount ? "warn" : "good"}">${pendingCount ? `${pendingCount} \u9879\u5f85\u5ba1\u6279` : "\u6ca1\u6709\u5f85\u5ba1\u6279\u63d0\u6848"}</span></div>${filters}<div class="knowledge-update-feed">${reviewCards || renderEmpty(updateFilter === "pending" ? "\u6ca1\u6709\u5f85\u5ba1\u6279\u7684\u77e5\u8bc6\u63d0\u6848\u3002" : "\u5c1a\u65e0\u77e5\u8bc6\u63d0\u6848\u3002")}</div>${staleFallback}`;
+  return `<div class="knowledge-section-head"><div><h2>\u77e5\u8bc6\u66f4\u65b0</h2><p>\u5ba1\u9605 Agent \u63d0\u4ea4\u7684\u65b0\u77e5\u8bc6\u548c\u4fee\u8ba2\u5efa\u8bae\uff0c\u6279\u51c6\u540e\u624d\u4f1a\u66f4\u65b0\u77e5\u8bc6\u5e93\u3002</p></div><span class="status ${pendingCount ? "warn" : "good"}">${pendingCount ? `${pendingCount} \u9879\u5f85\u5ba1\u6279` : "\u6ca1\u6709\u5f85\u5ba1\u6279\u63d0\u6848"}</span></div>${filters}${batch}<div class="knowledge-update-feed">${reviewCards || renderEmpty(updateFilter === "pending" ? "\u6ca1\u6709\u5f85\u5ba1\u6279\u7684\u77e5\u8bc6\u63d0\u6848\u3002" : "\u5c1a\u65e0\u77e5\u8bc6\u63d0\u6848\u3002")}</div>${staleFallback}`;
 }
 
 function renderSettings(project: Project, projectWorkspaces: Workspace[], context: KnowledgeWorkspaceContext): string {
   const boundLibraries = (context.libraries || []).filter(item => item.bound_project_id === project.id);
   const directKnowledge = context.knowledge.filter(item => item.scope === "project" && item.project_id === project.id && !item.is_index).length;
   const directSkills = skills.filter(item => item.scope === "project" && item.project_id === project.id).length;
-  const ownedLibrary = directKnowledge + directSkills ? `<article><div>${icon("knowledge")}<span><strong>${escapeHTML(project.name)} \u77e5\u8bc6\u5e93</strong><small>${directKnowledge} \u7bc7 \u00b7 ${directSkills} Skills</small></span></div><div class="actions"><button type="button" data-project-knowledge-detach>\u89e3\u7ed1</button><button class="danger" type="button" data-project-knowledge-delete>\u5220\u9664\u77e5\u8bc6\u5e93</button></div></article>` : "";
+  const ownedKnowledge = directKnowledge + directSkills ? `<article><div>${icon("knowledge")}<span><strong>${escapeHTML(project.name)} \u81ea\u6709\u77e5\u8bc6</strong><small>${directKnowledge} \u7bc7 \u00b7 ${directSkills} Skills</small></span></div><div class="actions"><button type="button" data-project-knowledge-detach>\u8f6c\u4e3a\u5f85\u7ed1\u5b9a</button><button class="danger" type="button" data-project-knowledge-delete>\u5220\u9664\u81ea\u6709\u77e5\u8bc6</button></div></article>` : "";
   return `<button type="button" class="knowledge-mobile-back" data-knowledge-back>${icon("projects")}\u8fd4\u56de\u77e5\u8bc6\u5e93\u5165\u53e3</button>
     <div class="knowledge-section-head"><div><h2>\u77e5\u8bc6\u5e93\u8bbe\u7f6e</h2><p>\u77e5\u8bc6\u5e93\u5f52\u5c5e\u4e8e\u9879\u76ee\uff0c\u5de5\u4f5c\u533a\u7528\u4e8e\u9009\u62e9\u5b9e\u9645\u6267\u884c\u4f4d\u7f6e\u3002</p></div></div>
     <section class="panel knowledge-setting-card"><div><strong>\u4efb\u52a1\u9ed8\u8ba4\u4f7f\u7528\u77e5\u8bc6\u5e93</strong><p>\u65b0\u4efb\u52a1\u53ef\u4ee5\u7ee7\u627f\u9879\u76ee\u8bbe\u7f6e\uff0c\u4e5f\u53ef\u5355\u72ec\u5f00\u542f\u6216\u5173\u95ed\u3002</p></div><button type="button" class="${project.knowledge_policy === "disabled" ? "" : "primary"}" data-project-kb-toggle>${project.knowledge_policy === "disabled" ? "\u5df2\u5173\u95ed" : "\u5df2\u5f00\u542f"}</button></section>
-    <section class="panel spaced"><div class="panel-head"><strong>\u5df2\u7ed1\u5b9a\u9879\u76ee\u77e5\u8bc6\u5e93</strong><span>${boundLibraries.length + (ownedLibrary ? 1 : 0)}</span></div><div class="product-line-list">${ownedLibrary}${boundLibraries.map(item => `<article><div>${icon("knowledge")}<span><strong>${escapeHTML(item.name)}</strong><small>${item.knowledge_count} \u7bc7 \u00b7 ${item.skill_count} Skills</small></span></div><div class="actions"><button type="button" data-knowledge-library-unbind="${escapeHTML(item.id)}">\u89e3\u7ed1</button><button class="danger" type="button" data-knowledge-library-delete="${escapeHTML(item.id)}">\u5220\u9664\u77e5\u8bc6\u5e93</button></div></article>`).join("") || (ownedLibrary ? "" : renderEmpty("\u5f53\u524d\u9879\u76ee\u672a\u7ed1\u5b9a\u77e5\u8bc6\u5e93\u3002"))}</div></section>
+    <section class="panel spaced knowledge-source-settings"><div class="panel-head"><div><strong>\u9879\u76ee\u81ea\u6709\u77e5\u8bc6</strong><small>\u76f4\u63a5\u5f52\u5c5e\u4e8e\u5f53\u524d\u9879\u76ee</small></div><span>${directKnowledge} \u7bc7</span></div><div class="product-line-list">${ownedKnowledge || renderEmpty("\u5f53\u524d\u9879\u76ee\u8fd8\u6ca1\u6709\u81ea\u6709\u77e5\u8bc6\u3002")}</div></section>
+    <section class="panel spaced knowledge-source-settings"><div class="panel-head"><div><strong>\u5916\u90e8\u7ed1\u5b9a\u77e5\u8bc6\u5e93</strong><small>\u4ece\u5f85\u7ed1\u5b9a\u77e5\u8bc6\u5e93\u63a5\u5165\uff0c\u4e0e\u81ea\u6709\u77e5\u8bc6\u5408\u5e76\u5c55\u793a</small></div><span>${boundLibraries.length}</span></div><div class="product-line-list">${boundLibraries.map(item => `<article><div>${icon("knowledge")}<span><strong>${escapeHTML(item.name)}</strong><small>${item.knowledge_count} \u7bc7 \u00b7 ${item.skill_count} Skills</small></span></div><div class="actions"><button type="button" data-knowledge-library-unbind="${escapeHTML(item.id)}">\u89e3\u7ed1</button><button class="danger" type="button" data-knowledge-library-delete="${escapeHTML(item.id)}">\u5220\u9664\u77e5\u8bc6\u5e93</button></div></article>`).join("") || renderEmpty("\u5f53\u524d\u9879\u76ee\u672a\u7ed1\u5b9a\u5916\u90e8\u77e5\u8bc6\u5e93\u3002")}</div></section>
     <section class="panel spaced"><div class="panel-head"><strong>Product Lines</strong><button type="button" data-product-line-new>${icon("plus")}\u65b0\u5efa</button></div><div class="product-line-list">${productLines.map(line => `<article><div>${icon("branch")}<span><strong>${escapeHTML(line.name)}</strong><small>${escapeHTML(line.branch_pattern || "*")} ${line.default ? "\u00b7 default" : ""}</small></span></div><button type="button" class="icon-button" data-product-line-delete="${line.id}">${icon("close")}</button></article>`).join("") || renderEmpty("\u672a\u914d\u7f6e Product Line\uff0c\u9879\u76ee\u77e5\u8bc6\u5c06\u4f5c\u4e3a\u901a\u7528\u6761\u76ee\u3002")}</div></section>
     ${renderBindings(projectWorkspaces)}`;
 }
@@ -358,11 +402,17 @@ function renderSection(project: Project, context: KnowledgeWorkspaceContext): st
   const projectWorkspaces = context.workspaces.filter(item => item.project_id === project.id);
   const entries = projectEntries(context, project.id);
   const navigationIDs = projectNavigationEntryIDs(entries);
+  const sources = projectKnowledgeSources(project, entries, context.libraries || []);
+  if (selectedKnowledgeSourceID !== "all" && !sources.some(source => source.id === selectedKnowledgeSourceID)) selectedKnowledgeSourceID = "all";
+  const sourceLabelFor = (entry: Knowledge) => sources.find(source => source.id === (entry.project_id || project.id))?.label || "项目自有知识";
+  const filterEntries = (items: Knowledge[]) => selectedKnowledgeSourceID === "all" ? items : items.filter(item => item.project_id === selectedKnowledgeSourceID || item.is_index && selectedKnowledgeSourceID === project.id);
+  const sourceToolbar = knowledgeSourceToolbar(sources);
+  const allowCreate = selectedKnowledgeSourceID === "all" || selectedKnowledgeSourceID === project.id;
   switch (activeSection) {
     case "project":
-      return renderKnowledgeDocumentWorkspace(entries.filter(item => !item.is_index && !navigationIDs.has(item.id)), "\u8fd8\u6ca1\u6709\u9879\u76ee\u77e5\u8bc6\u3002", "project");
+      return renderKnowledgeDocumentWorkspace(filterEntries(entries), "\u8fd8\u6ca1\u6709\u9879\u76ee\u77e5\u8bc6\u3002", "project", false, sourceLabelFor, sourceToolbar, allowCreate);
     case "navigation":
-      return renderKnowledgeDocumentWorkspace(entries.filter(item => !item.is_index && navigationIDs.has(item.id)), "\u8fd8\u6ca1\u6709\u9879\u76ee\u5bfc\u822a\u3002", "project-navigation");
+      return renderKnowledgeDocumentWorkspace(filterEntries(entries.filter(item => !item.is_index && navigationIDs.has(item.id))), "\u8fd8\u6ca1\u6709\u9879\u76ee\u5bfc\u822a\u3002", "project-navigation", false, sourceLabelFor, sourceToolbar, allowCreate);
     case "settings": return renderSettings(project, projectWorkspaces, context);
     default: return renderOverview(project, context.knowledge, projectWorkspaces);
   }
@@ -371,7 +421,7 @@ function renderSection(project: Project, context: KnowledgeWorkspaceContext): st
 function renderTopLevelSection(context: KnowledgeWorkspaceContext): string {
   if (activeArea === "libraries") return renderKnowledgeLibraries(context);
   if (activeArea === "skills") return renderSkills();
-  if (activeArea === "updates") return renderUpdates(context.knowledge, context.proposals, context.projects);
+  if (activeArea === "updates") return renderUpdates(context.knowledge, context.proposals, context.projects, context.reviewSettings);
   return renderKnowledgeDocumentWorkspace(context.knowledge.filter(item => item.scope === "global"), "\u8fd8\u6ca1\u6709 AHA \u5168\u5c40\u77e5\u8bc6\u3002", "global");
 }
 
@@ -473,7 +523,7 @@ export function bindKnowledgeWorkspace(context: KnowledgeWorkspaceContext): void
   ensureCatalog(context, project?.id || "");
   document.querySelectorAll<HTMLElement>("[data-knowledge-area]").forEach(button => button.addEventListener("click", () => {
     activeArea = (button.dataset.knowledgeArea || "global") as KnowledgeArea;
-		if (activeArea !== "libraries") selectedLibraryID = "";
+    if (activeArea !== "libraries") selectedLibraryID = "";
     knowledgeReaderOpen = false;
     selectedKnowledgeID = "";
     context.render();
@@ -482,6 +532,57 @@ export function bindKnowledgeWorkspace(context: KnowledgeWorkspaceContext): void
     updateFilter = button.dataset.knowledgeUpdateFilter === "all" ? "all" : "pending";
     context.render();
   }));
+  document.querySelector<HTMLSelectElement>("[data-knowledge-source-filter]")?.addEventListener("change", event => {
+    selectedKnowledgeSourceID = event.currentTarget.value || "all";
+    selectedKnowledgeID = "";
+    context.render();
+  });
+  document.querySelector<HTMLInputElement>("[data-knowledge-auto-review]")?.addEventListener("change", event => {
+    const input = event.currentTarget;
+    const enabled = input.checked;
+    if (enabled && !window.confirm("开启后，Agent 新提交的知识提案将立即自动批准。现有待处理提案不会自动处理，是否继续？")) {
+      input.checked = false;
+      return;
+    }
+    void mutate(context, async () => {
+      const response = await api.updateKnowledgeReviewSettings(enabled);
+      context.reviewSettings = response.review_settings;
+    }, enabled ? "自动评审已开启" : "自动评审已关闭");
+  });
+  document.querySelectorAll<HTMLInputElement>("[data-knowledge-update-select]").forEach(input => input.addEventListener("change", () => {
+    const key = input.dataset.knowledgeUpdateSelect || "";
+    if (input.checked) selectedUpdateIDs.add(key); else selectedUpdateIDs.delete(key);
+    context.render();
+  }));
+  document.querySelector<HTMLElement>("[data-knowledge-batch-all]")?.addEventListener("click", () => {
+    const pendingKeys = [
+      ...context.proposals.filter(item => item.status === "pending").map(item => `proposal:${item.id}`),
+      ...context.knowledge.filter(item => !item.is_index && item.status === "candidate").map(item => `legacy:${item.id}`),
+    ];
+    if (pendingKeys.length && pendingKeys.every(key => selectedUpdateIDs.has(key))) selectedUpdateIDs.clear();
+    else for (const key of pendingKeys) selectedUpdateIDs.add(key);
+    context.render();
+  });
+  const runKnowledgeBatch = (action: "approve" | "reject") => {
+    if (!selectedUpdateIDs.size) return;
+    if (action === "reject" && !window.confirm(`确定批量拒绝选中的 ${selectedUpdateIDs.size} 项知识更新？`)) return;
+    const proposalIDs: string[] = [];
+    const legacyIDs: string[] = [];
+    for (const key of selectedUpdateIDs) {
+      if (key.startsWith("proposal:")) proposalIDs.push(key.slice("proposal:".length));
+      if (key.startsWith("legacy:")) legacyIDs.push(key.slice("legacy:".length));
+    }
+    void mutate(context, async () => {
+      const result = await api.batchKnowledgeProposals({action, proposal_ids: proposalIDs, legacy_ids: legacyIDs});
+      for (const id of result.processed || []) {
+        selectedUpdateIDs.delete(`proposal:${id}`);
+        selectedUpdateIDs.delete(`legacy:${id}`);
+      }
+      if (result.failures?.length) context.setMessage("error", `已处理 ${result.processed.length} 项，${result.failures.length} 项失败：${result.failures[0].error}`);
+    }, action === "approve" ? "选中的知识更新已批量批准" : "选中的知识更新已批量拒绝");
+  };
+  document.querySelector<HTMLElement>("[data-knowledge-batch-approve]")?.addEventListener("click", () => runKnowledgeBatch("approve"));
+  document.querySelector<HTMLElement>("[data-knowledge-batch-reject]")?.addEventListener("click", () => runKnowledgeBatch("reject"));
   document.querySelectorAll<HTMLElement>("[data-knowledge-proposal-view]").forEach(button => button.addEventListener("click", () => {
     const proposal = context.proposals.find(item => item.id === button.dataset.knowledgeProposalView);
     const dialog = document.querySelector<HTMLDialogElement>("#knowledge-proposal-dialog");
@@ -506,7 +607,6 @@ export function bindKnowledgeWorkspace(context: KnowledgeWorkspaceContext): void
     if (!item) return;
     selectedKnowledgeID = item.id;
     knowledgeReaderOpen = true;
-    searchTerm = "";
     if (item.scope === "global") {
       activeArea = "global";
     } else {
@@ -536,6 +636,7 @@ export function bindKnowledgeWorkspace(context: KnowledgeWorkspaceContext): void
   }));
   document.querySelectorAll<HTMLElement>("[data-knowledge-project]").forEach(button => button.addEventListener("click", () => {
     selectedProjectID = button.dataset.knowledgeProject || "";
+    selectedKnowledgeSourceID = "all";
     activeArea = "project";
     activeSection = "overview";
     selectedKnowledgeID = "";
@@ -549,15 +650,6 @@ export function bindKnowledgeWorkspace(context: KnowledgeWorkspaceContext): void
     knowledgeReaderOpen = true;
     context.render();
   }));
-  document.querySelectorAll<HTMLElement>("[data-knowledge-toggle]").forEach(button => button.addEventListener("click", () => {
-    const id = button.dataset.knowledgeToggle || "";
-    if (button.dataset.knowledgeProgressive === "true") {
-      if (expandedNavigationIDs.has(id)) expandedNavigationIDs.delete(id);
-      else expandedNavigationIDs.add(id);
-    } else if (collapsedKnowledgeIDs.has(id)) collapsedKnowledgeIDs.delete(id);
-    else collapsedKnowledgeIDs.add(id);
-    context.render();
-  }));
   document.querySelector("[data-knowledge-back]")?.addEventListener("click", () => {
     if (context.projects.length) {
       activeArea = "project";
@@ -567,16 +659,7 @@ export function bindKnowledgeWorkspace(context: KnowledgeWorkspaceContext): void
     knowledgeReaderOpen = false;
     context.render();
   });
-  document.querySelector("[data-knowledge-directory-back]")?.addEventListener("click", () => {
-    selectedKnowledgeID = "";
-    knowledgeReaderOpen = false;
-    context.render();
-  });
   document.querySelector("#knowledge-refresh")?.addEventListener("click", () => void mutate(context, async () => {}, "\u77e5\u8bc6\u5de5\u4f5c\u533a\u5df2\u5237\u65b0"));
-  document.querySelector<HTMLInputElement>("#knowledge-search")?.addEventListener("change", event => {
-    searchTerm = event.currentTarget.value;
-    context.render();
-  });
   document.querySelectorAll<HTMLElement>("[data-kb-close]").forEach(button => button.addEventListener("click", () => button.closest("dialog")?.close()));
 
   document.querySelectorAll<HTMLElement>("[data-knowledge-new]").forEach(button => button.addEventListener("click", () => {

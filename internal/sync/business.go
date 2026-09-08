@@ -473,8 +473,24 @@ func upsertBusinessObject(ctx context.Context, database *store.Store, obj domain
 			return err
 		}
 		v.ID = obj.ID
+		if store.IsManagedGlobalKnowledgeCategory(v.ID) {
+			return nil
+		}
 		if err := normalizeSyncedKnowledgeScope(ctx, database, &v); err != nil {
 			return knowledgeSyncDependency(err)
+		}
+		if v.Scope == "global" && !v.IsIndex && v.ID != store.GlobalKnowledgeRootID && (v.ParentID == "" || v.ParentID == store.GlobalKnowledgeRootID) {
+			if exists {
+				if current, err := database.Knowledge(ctx, v.ID); err == nil && store.IsManagedGlobalKnowledgeCategory(current.ParentID) {
+					v.ParentID = current.ParentID
+				}
+			}
+			if v.ParentID == "" || v.ParentID == store.GlobalKnowledgeRootID {
+				v.ParentID = store.GlobalGeneralKnowledgeID
+				if v.Type == "diagnostic" {
+					v.ParentID = store.GlobalTechnicalLessonsKnowledgeID
+				}
+			}
 		}
 		v.SourceTaskID = ""
 		v.SourceTurnID = ""
@@ -493,6 +509,12 @@ func upsertBusinessObject(ctx context.Context, database *store.Store, obj domain
 		v.Proposed.SourceTaskID, v.Proposed.SourceTurnID = "", ""
 		if err := normalizeSyncedKnowledgeScope(ctx, database, &v.Proposed); err != nil {
 			return knowledgeSyncDependency(err)
+		}
+		if v.Proposed.Scope == "global" && (v.Proposed.ParentID == "" || v.Proposed.ParentID == store.GlobalKnowledgeRootID) {
+			v.Proposed.ParentID = store.GlobalBehaviorLessonsKnowledgeID
+			if v.Proposed.Type == "diagnostic" {
+				v.Proposed.ParentID = store.GlobalTechnicalLessonsKnowledgeID
+			}
 		}
 		if v.BaseEntry != nil {
 			base := *v.BaseEntry
@@ -598,6 +620,9 @@ func upsertBusinessObject(ctx context.Context, database *store.Store, obj domain
 }
 
 func deleteBusinessObject(ctx context.Context, database *store.Store, obj domain.SyncObject) error {
+	if obj.Type == TypeKnowledge && store.IsManagedGlobalKnowledgeCategory(obj.ID) {
+		return nil
+	}
 	_, err := database.ApplySyncTombstone(ctx, obj.Type, obj.ID, obj.IdempotencyKey, obj.SourceVersion, time.Now().UTC())
 	return err
 }

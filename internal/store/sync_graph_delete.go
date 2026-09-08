@@ -10,7 +10,11 @@ import (
 	"github.com/ChinaKai/AHA2/internal/domain"
 )
 
-var ErrReadOnlySyncMirror = errors.New("synchronized read-only mirror cannot delete owner data")
+var (
+	ErrReadOnlySyncMirror      = errors.New("synchronized read-only mirror cannot delete owner data")
+	ErrWorkspaceInUse          = errors.New("workspace is still referenced")
+	ErrWorkspaceMirrorHasTasks = errors.New("remote workspace mirror still has tasks")
+)
 
 func ownedGraphObjectID(ownerDeviceID, sourceID string) string {
 	return ownerDeviceID + ":" + sourceID
@@ -47,10 +51,81 @@ func (s *Store) DeleteWorkspaceWithSyncTombstone(ctx context.Context, id string)
 	if err := enqueueOwnedGraphDeleteTx(ctx, tx, "workspace", id, ownerDeviceID, now); err != nil {
 		return err
 	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM runtime_config_snapshots
+		WHERE workspace_id=?
+		  AND NOT EXISTS(SELECT 1 FROM tasks WHERE tasks.runtime_config_snapshot_id=runtime_config_snapshots.id)
+		  AND NOT EXISTS(SELECT 1 FROM task_agents WHERE task_agents.runtime_config_snapshot_id=runtime_config_snapshots.id)
+		  AND NOT EXISTS(SELECT 1 FROM turns WHERE turns.runtime_config_snapshot_id=runtime_config_snapshots.id)`, id); err != nil {
+		return err
+	}
+	var inUse bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(
+		SELECT 1 FROM tasks WHERE workspace_id=?
+		UNION ALL SELECT 1 FROM backend_sessions WHERE workspace_id=?
+		UNION ALL SELECT 1 FROM runtime_config_snapshots WHERE workspace_id=?)`, id, id, id).Scan(&inUse); err != nil {
+		return err
+	}
+	if inUse {
+		return ErrWorkspaceInUse
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE projects SET default_workspace_id='' WHERE default_workspace_id=?`, id); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM workspaces WHERE id=? AND read_only=0`, id); err != nil {
 		return err
 	}
 	return tx.Commit()
+}
+
+// RetireRemoteWorkspaceMirror removes a read-only Workspace mirror without
+// touching the source Workspace. Legacy mirrors may not retain their source ID;
+// the local suppression row still prevents a later replay on this device.
+func (s *Store) RetireRemoteWorkspaceMirror(ctx context.Context, id string) (domain.Workspace, bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return domain.Workspace{}, false, err
+	}
+	defer tx.Rollback()
+	item, err := scanWorkspace(tx.QueryRowContext(ctx, `SELECT `+workspaceColumns+` FROM workspaces WHERE id=?`, id))
+	if err != nil {
+		return domain.Workspace{}, false, err
+	}
+	if !item.ReadOnly || item.OwnerDeviceID == "" {
+		return domain.Workspace{}, false, ErrReadOnlySyncMirror
+	}
+	var hasTasks bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(
+		SELECT 1 FROM sync_remote_task_objects
+		WHERE owner_device_id=? AND object_type='task'
+		  AND (json_extract(payload_json,'$.workspace_id')=? OR (?<>'' AND json_extract(payload_json,'$.workspace_id')=?)))`,
+		item.OwnerDeviceID, item.ID, item.SourceWorkspaceID, item.SourceWorkspaceID).Scan(&hasTasks); err != nil {
+		return domain.Workspace{}, false, err
+	}
+	if hasTasks {
+		return domain.Workspace{}, false, ErrWorkspaceMirrorHasTasks
+	}
+	now := time.Now().UTC()
+	if _, err := tx.ExecContext(ctx, `INSERT INTO retired_workspace_mirrors(owner_device_id,local_workspace_id,source_workspace_id,retired_at)
+		VALUES(?,?,?,?) ON CONFLICT(owner_device_id,local_workspace_id) DO UPDATE SET source_workspace_id=excluded.source_workspace_id,retired_at=excluded.retired_at`,
+		item.OwnerDeviceID, item.ID, item.SourceWorkspaceID, timeString(now)); err != nil {
+		return domain.Workspace{}, false, err
+	}
+	synchronized := item.SourceWorkspaceID != ""
+	if synchronized {
+		if err := enqueueOwnedGraphDeleteTx(ctx, tx, "workspace", item.SourceWorkspaceID, item.OwnerDeviceID, now); err != nil {
+			return domain.Workspace{}, false, err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE projects SET default_workspace_id='' WHERE default_workspace_id=?`, item.ID); err != nil {
+		return domain.Workspace{}, false, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM workspaces WHERE id=? AND owner_device_id=? AND read_only=1`, item.ID, item.OwnerDeviceID); err != nil {
+		return domain.Workspace{}, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return domain.Workspace{}, false, err
+	}
+	return item, synchronized, nil
 }
 
 // RetireRemoteTaskMirror removes an explicitly selected read-only task mirror

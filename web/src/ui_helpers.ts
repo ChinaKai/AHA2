@@ -39,6 +39,7 @@ export function renderWorkspaceDetection(workspace: Workspace): string {
   const capabilities = workspace.capabilities || {};
   const repository = workspace.repository || {};
   const workspaceProbe = capabilities.workspace;
+  const agentAPIProbe = capabilities.agent_api;
   const badges: string[] = [];
   const details: Array<{kind: "bad" | "muted"; text: string}> = [];
   if (capabilities.codex?.status === "ready") {
@@ -63,6 +64,11 @@ export function renderWorkspaceDetection(workspace: Workspace): string {
     for (const [label, probe] of [["Codex", capabilities.codex], ["Claude", capabilities.claude]] as Array<[string, WorkspaceProbe | undefined]>) {
       const text = failedProbe(label, probe);
       if (text) details.push({kind: probe?.status === "execution_failed" ? "bad" : "muted", text});
+    }
+    if (agentAPIProbe?.status === "ready" || workspace.agent_api_status === "ready") {
+      details.push({kind: "muted", text: `Agent API · ${agentAPIProbe?.url || workspace.agent_api_resolved_url || "已连接"}`});
+    } else if (agentAPIProbe?.status === "unavailable" || workspace.agent_api_status === "error") {
+      details.push({kind: "bad", text: agentAPIProbe?.error || workspace.agent_api_error || "Agent API 反向连接失败"});
     }
   }
   const summary = badges.length

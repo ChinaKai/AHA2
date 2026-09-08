@@ -9,6 +9,13 @@ Agent API 让本地、WSL 和 SSH Workspace 中的 Agent 通过 HTTP 使用 AHA2
 控制面基址。未配置时，AHA2 从监听端口生成本机 `127.0.0.1` URL。非 loopback URL
 强制使用 HTTPS；仅受信开发网络可显式传 `--allow-insecure-agent-api` 临时允许 HTTP。
 
+启动参数只提供初始默认值。Owner 可在高级设置中持久化全局默认，也可为 Workspace
+选择自动探测、继承全局或手动覆盖。Workspace“测试连接”先检测执行环境，再从该
+Workspace 反向请求 AHA2 `/healthz`；成功地址写入 Workspace，后续 Turn 直接使用。
+Native 优先 loopback；WSL 会尝试 localhost、Windows Host/Gateway 与允许的本机网卡地址；
+SSH 会结合当前 SSH 会话看到的客户端地址。NAT、跳板机、HTTPS 证书或反向代理无法
+自动推断时仍需手动 URL。
+
 每个 Turn 获得独立的 `AHA2_AGENT_API_TOKEN`。它是仅内存保存的 Bearer capability，
 绑定 Task、Agent 和 Turn，Turn 结束立即撤销，且不进入 Prompt、Context、数据库或日志。
 
@@ -40,7 +47,7 @@ POST  /api/v1/agent/tasks
 GET   /api/v1/agent/tasks/{task}
 ```
 
-Task Memory 使用追加语义，进度消息会立即写入 Conversation 并通过 Event Hub 推送。
+Task Memory 默认使用 `{"append":{...}}` 追加语义；Main Agent 在读完当前 Memory 后，可使用 `{"replace":{...}}` 原子替换六类列表，清理重复、损坏和已失效记录，同时必须保留仍有效的决策、事实、验证和下一步。Memory 超过 20000 字符或已经影响恢复判断时，应优先完成一次压缩替换。进度消息会立即写入 Conversation 并通过 Event Hub 推送。
 只有 Main Agent 可以修改 Memory 和提交协作批次；协作请求提交后立即由 AHA 编排。
 最终回复只包含自然语言，不再携带 Turn checkpoint。
 
@@ -69,8 +76,9 @@ PUT  /api/v1/agent/skills/{id}
 ```
 
 Knowledge 只返回当前 Project/Product Line 可用的已发布条目；更新已有条目必须携带
-`base_revision`。Agent 提交的新知识或修订统一保存为 pending proposal，不会因置信度高而
-自动发布；修订现有知识时，旧版本暂时标记为 stale。Owner 通过
+`base_revision`。Agent 提交的新知识或修订统一先创建 proposal；手动评审模式保持 pending，
+Owner 开启自动评审后立即尝试批准。`review_mode` 记录自动或手动来源，只有 proposal 为
+approved 且 Knowledge 为 verified 才能作为当前事实。修订现有知识时，旧版本暂时标记为 stale。Owner 通过
 `POST /api/v1/knowledge/proposals/{id}/approve` 或 `/reject` 审批，批准时校验基础 revision
 并原子发布下一版本。`GET /api/v1/knowledge` 同时返回 `knowledge` 与 `proposals`。
 

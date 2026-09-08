@@ -111,24 +111,27 @@ type SecretResolver interface {
 }
 
 type Service struct {
-	store       *store.Store
-	secrets     SecretResolver
-	executor    Executor
-	preparer    WorkspacePreparer
-	hub         *EventHub
-	now         func() time.Time
-	prompts     *prompt.Engine
-	codex       *codexaccount.Manager
-	agentAPI    *agentapi.Capabilities
-	agentAPIURL string
+	store                 *store.Store
+	secrets               SecretResolver
+	executor              Executor
+	preparer              WorkspacePreparer
+	hub                   *EventHub
+	now                   func() time.Time
+	prompts               *prompt.Engine
+	codex                 *codexaccount.Manager
+	agentAPI              *agentapi.Capabilities
+	agentAPIURL           string
+	agentAPIAllowInsecure bool
 
-	mu          sync.Mutex
-	cancels     map[string]context.CancelFunc
-	settleMu    sync.Mutex
-	scheduleMu  sync.Mutex
-	mergeMu     sync.Mutex
-	mergeDelay  time.Duration
-	mergeTimers map[string]*time.Timer
+	mu              sync.Mutex
+	cancels         map[string]context.CancelFunc
+	settleMu        sync.Mutex
+	scheduleMu      sync.Mutex
+	mergeMu         sync.Mutex
+	mergeDelay      time.Duration
+	mergeTimers     map[string]*time.Timer
+	sharedContextMu sync.Mutex
+	sharedContexts  map[string]struct{}
 }
 
 func (s *Service) SetWorkspacePreparer(preparer WorkspacePreparer) {
@@ -139,9 +142,10 @@ func (s *Service) SetCodexAccountManager(manager *codexaccount.Manager) {
 	s.codex = manager
 }
 
-func (s *Service) SetAgentAPI(capabilities *agentapi.Capabilities, baseURL string) {
+func (s *Service) SetAgentAPI(capabilities *agentapi.Capabilities, baseURL string, allowInsecure ...bool) {
 	s.agentAPI = capabilities
 	s.agentAPIURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	s.agentAPIAllowInsecure = len(allowInsecure) > 0 && allowInsecure[0]
 }
 
 type CreateTaskInput struct {
@@ -171,15 +175,16 @@ type CreateTaskInput struct {
 
 func NewService(database *store.Store, secretStore *secrets.FileStore, executor Executor) *Service {
 	return &Service{
-		store:       database,
-		secrets:     secretStore,
-		executor:    executor,
-		hub:         NewEventHub(),
-		now:         time.Now,
-		prompts:     prompt.NewEngine(database),
-		cancels:     map[string]context.CancelFunc{},
-		mergeDelay:  time.Second,
-		mergeTimers: map[string]*time.Timer{},
+		store:          database,
+		secrets:        secretStore,
+		executor:       executor,
+		hub:            NewEventHub(),
+		now:            time.Now,
+		prompts:        prompt.NewEngine(database),
+		cancels:        map[string]context.CancelFunc{},
+		mergeDelay:     time.Second,
+		mergeTimers:    map[string]*time.Timer{},
+		sharedContexts: map[string]struct{}{},
 	}
 }
 
@@ -604,6 +609,11 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 	if workspace.SSHCredentialRef != "" && s.secrets != nil {
 		workspace.SSHPassword, _ = s.secrets.Get(workspace.SSHCredentialRef)
 	}
+	agentAPIURL, err := s.AgentAPIURLForWorkspace(ctx, workspace)
+	if err != nil {
+		s.failTurn(ctx, &turn, task, fmt.Errorf("resolve Agent API URL: %w", err))
+		return
+	}
 	snapshot, err := s.store.RuntimeSnapshot(ctx, turn.RuntimeConfigSnapshotID)
 	if err != nil {
 		s.failTurn(ctx, &turn, task, err)
@@ -657,6 +667,11 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 	}
 	conversation, _ := s.store.ConversationPageForAgent(ctx, task.ID, turn.AgentID, 0, 0, 100, nil)
 	allTurns, _ := s.store.ListTurns(ctx, task.ID)
+	reusableSession, reusableSessionErr := s.store.ReusableBackendSession(
+		ctx, task.ID, turn.AgentID, workspace.ID, snapshot.Backend, model.ID,
+		snapshot.EnvGroupRevision, snapshot.CodexAccountID,
+	)
+	includeRecentContext, includeTurnDiagnostics := recoveryContextNeeds(turn, allTurns, reusableSessionErr == nil, handoff.Summary)
 	hardwareGroups, _ := s.store.HardwareGroups(ctx, task.ID)
 	attachments := []prompt.AttachmentResource{}
 	seenAttachments := map[string]bool{}
@@ -693,7 +708,8 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 		Memory: memory, GlobalKnowledge: globalKB, ProjectKnowledge: projectKB, StaleKnowledge: staleKB, Skills: skills,
 		ProductLine: productLine, KnowledgeEnabled: kbEnabled,
 		Conversation: conversation.Items, Turns: allTurns, Hardware: hardwareGroups, Attachments: attachments, UserMessage: userMessage,
-		Handoff: handoff.Summary, AgentAPIURL: s.agentAPIURL,
+		Handoff: handoff.Summary, AgentAPIURL: agentAPIURL, CurrentTurnID: turn.ID, CurrentRoundID: turn.RoundID,
+		IncludeRecentContext: includeRecentContext, IncludeTurnDiagnostics: includeTurnDiagnostics,
 	})
 	if err != nil {
 		s.failTurn(ctx, &turn, task, err)
@@ -703,12 +719,20 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 	for _, item := range preview.ContextManifest {
 		contextFiles[item.Path] = item.Content
 	}
+	sharedFiles := make(map[string]string, len(preview.SharedManifest))
+	for _, item := range preview.SharedManifest {
+		sharedFiles[item.Path] = item.Content
+	}
 	workDir := task.TaskWorkspacePath
 	if workDir == "" {
 		workDir = workspace.RootPath
 	}
+	if err := s.materializeSharedContext(ctx, workspace, workDir, preview.SharedRoot, sharedFiles); err != nil {
+		s.failTurn(ctx, &turn, task, fmt.Errorf("materialize prompt context: shared snapshot: %w", err))
+		return
+	}
 	if err := workspacepkg.MaterializeContext(ctx, workspace, workDir, preview.ContextRoot, contextFiles); err != nil {
-		s.failTurn(ctx, &turn, task, fmt.Errorf("materialize prompt context: %w", err))
+		s.failTurn(ctx, &turn, task, fmt.Errorf("materialize prompt context: agent resources: %w", err))
 		return
 	}
 	packedPrompt := preview.EffectivePrompt
@@ -725,10 +749,7 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 	}
 	var providerSession string
 	var sessionUsageBaseline map[string]any
-	session, err := s.store.ReusableBackendSession(
-		ctx, task.ID, turn.AgentID, workspace.ID, snapshot.Backend, model.ID,
-		snapshot.EnvGroupRevision, snapshot.CodexAccountID,
-	)
+	session, err := reusableSession, reusableSessionErr
 	if err == nil {
 		providerSession = session.ProviderSession
 		turn.BackendSessionID = session.ID
@@ -752,14 +773,14 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 		}
 	}
 	capabilityToken := ""
-	if s.agentAPI != nil && s.agentAPIURL != "" {
+	if s.agentAPI != nil && agentAPIURL != "" {
 		capabilityToken, err = s.agentAPI.Issue(task.ID, turn.AgentID, turn.ID, 4*time.Hour)
 		if err != nil {
 			s.failTurn(ctx, &turn, task, fmt.Errorf("issue Agent API capability: %w", err))
 			return
 		}
 		defer s.agentAPI.Revoke(capabilityToken)
-		environment["AHA2_AGENT_API_URL"] = s.agentAPIURL
+		environment["AHA2_AGENT_API_URL"] = agentAPIURL
 		environment["AHA2_AGENT_API_TOKEN"] = capabilityToken
 	}
 	if snapshot.ProxyEnabled {
@@ -775,7 +796,7 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 		}
 		proxyconfig.ApplyEnvironment(environment, settings)
 	}
-	appendAgentAPIToNoProxy(environment, s.agentAPIURL)
+	appendAgentAPIToNoProxy(environment, agentAPIURL)
 	if snapshot.CodexAccountID != "" {
 		if snapshot.Backend != "codex" || s.codex == nil {
 			s.failTurn(ctx, &turn, task, fmt.Errorf("Codex 官方账号运行时不可用"))
@@ -920,6 +941,28 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 		})
 	}
 	s.afterTurnTerminal(context.Background(), task, turn)
+}
+
+func (s *Service) materializeSharedContext(
+	ctx context.Context,
+	workspace domain.Workspace,
+	workDir string,
+	root string,
+	files map[string]string,
+) error {
+	if strings.TrimSpace(root) == "" {
+		return nil
+	}
+	s.sharedContextMu.Lock()
+	defer s.sharedContextMu.Unlock()
+	if _, ok := s.sharedContexts[root]; ok {
+		return nil
+	}
+	if err := workspacepkg.MaterializeContext(ctx, workspace, workDir, root, files); err != nil {
+		return err
+	}
+	s.sharedContexts[root] = struct{}{}
+	return nil
 }
 
 func cloneUsageMap(input map[string]any) map[string]any {
@@ -1119,6 +1162,11 @@ func (s *Service) applyMemoryPatch(ctx context.Context, task domain.Task, memory
 
 func (s *Service) createKnowledgeCandidates(ctx context.Context, projectID, taskID, turnID, branch, productLineID string, candidates []KnowledgeCandidate) ([]domain.KnowledgeEntry, []domain.KnowledgeProposal, error) {
 	now := s.now().UTC()
+	reviewSettings, _ := s.store.KnowledgeReviewSettings(ctx)
+	reviewMode := "manual"
+	if reviewSettings.AutoApprove {
+		reviewMode = "auto"
+	}
 	result := make([]domain.KnowledgeEntry, 0, len(candidates))
 	proposals := make([]domain.KnowledgeProposal, 0, len(candidates))
 	for _, candidate := range candidates {
@@ -1128,6 +1176,13 @@ func (s *Service) createKnowledgeCandidates(ctx context.Context, projectID, task
 		scope := candidate.Scope
 		if scope != "global" {
 			scope = "project"
+		}
+		if scope == "global" && strings.TrimSpace(candidate.EntryID) == "" && (candidate.ParentID == nil || strings.TrimSpace(*candidate.ParentID) == "") {
+			parentID := store.GlobalBehaviorLessonsKnowledgeID
+			if strings.TrimSpace(candidate.Type) == "diagnostic" {
+				parentID = store.GlobalTechnicalLessonsKnowledgeID
+			}
+			candidate.ParentID = &parentID
 		}
 		lineID := strings.TrimSpace(candidate.ProductLineID)
 		if lineID == "" && scope == "project" {
@@ -1163,7 +1218,7 @@ func (s *Service) createKnowledgeCandidates(ctx context.Context, projectID, task
 		proposal := domain.KnowledgeProposal{
 			ID: domain.NewID("knowledge_proposal"), EntryID: entry.ID, BaseRevision: baseRevision, Proposed: entry,
 			SourceTaskID: taskID, SourceTurnID: turnID, Status: domain.KnowledgeProposalPending,
-			CreatedAt: now, UpdatedAt: now,
+			ReviewMode: reviewMode, CreatedAt: now, UpdatedAt: now,
 		}
 		created, err := s.store.CreateKnowledgeProposal(ctx, proposal)
 		if err != nil {
@@ -1175,8 +1230,19 @@ func (s *Service) createKnowledgeCandidates(ctx context.Context, projectID, task
 			}
 		}
 		s.emit(ctx, taskID, "knowledge_proposal", created.ID, "knowledge_proposal_created", map[string]any{"entry_id": created.EntryID, "title": created.Proposed.Title, "base_revision": created.BaseRevision})
-		result = append(result, created.Proposed)
-		proposals = append(proposals, created)
+		if reviewSettings.AutoApprove {
+			approved, published, err := s.store.ApproveKnowledgeProposal(ctx, created.ID, s.now().UTC())
+			if err != nil {
+				return nil, nil, fmt.Errorf("auto-approve knowledge proposal %s: %w", created.ID, err)
+			}
+			s.linkTaskMemoryKnowledge(ctx, taskID, published)
+			s.emit(ctx, taskID, "knowledge_proposal", approved.ID, "knowledge_proposal_approved", map[string]any{"entry_id": published.ID, "revision": published.Revision, "review_mode": "auto"})
+			result = append(result, published)
+			proposals = append(proposals, approved)
+		} else {
+			result = append(result, created.Proposed)
+			proposals = append(proposals, created)
+		}
 	}
 	return result, proposals, nil
 }
@@ -1268,6 +1334,22 @@ func (s *Service) startTurn(turn domain.Turn) {
 	s.cancels[turn.ID] = cancel
 	s.mu.Unlock()
 	go s.runTurn(runContext, turn.ID)
+}
+
+func recoveryContextNeeds(current domain.Turn, turns []domain.Turn, hasReusableSession bool, handoff string) (bool, bool) {
+	var previous domain.Turn
+	for _, candidate := range turns {
+		if candidate.AgentID != current.AgentID || candidate.Sequence >= current.Sequence {
+			continue
+		}
+		if previous.ID == "" || candidate.Sequence > previous.Sequence {
+			previous = candidate
+		}
+	}
+	abnormalPrevious := previous.ID != "" && (previous.Status == domain.TurnFailed || previous.Status == domain.TurnInterrupted || previous.Status == domain.TurnBlocked || !previous.StalledAt.IsZero() || previous.Attempt > 1)
+	diagnostics := abnormalPrevious || current.Attempt > 1
+	recent := !hasReusableSession || strings.TrimSpace(handoff) != "" || abnormalPrevious
+	return recent, diagnostics
 }
 
 func (s *Service) spawnAgentTurns(ctx context.Context, task domain.Task, parent domain.Turn, actions []AgentAction) int {

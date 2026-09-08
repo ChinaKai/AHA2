@@ -28,6 +28,15 @@ func TestOwnedGraphDeletesCreateTombstonesAndBlockReplay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	extraSnapshot, err := database.RuntimeSnapshot(ctx, localTask.RuntimeConfigSnapshotID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	extraSnapshot.ID = "orphan-runtime-snapshot"
+	extraSnapshot.CreatedAt = time.Now().UTC()
+	if err := database.CreateRuntimeSnapshot(ctx, extraSnapshot); err != nil {
+		t.Fatal(err)
+	}
 	if err := database.DeleteTaskWithSyncTombstone(ctx, localTask.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -38,11 +47,12 @@ func TestOwnedGraphDeletesCreateTombstonesAndBlockReplay(t *testing.T) {
 	if tombstone, err := database.SyncTombstone(ctx, "task", taskWireID); err != nil || tombstone.SyncKey == "" {
 		t.Fatalf("task tombstone=%#v err=%v", tombstone, err)
 	}
-	if err := database.DeleteRuntimeSnapshot(ctx, localTask.RuntimeConfigSnapshotID); err != nil {
-		t.Fatal(err)
-	}
 	if err := database.DeleteWorkspaceWithSyncTombstone(ctx, localWorkspace.ID); err != nil {
 		t.Fatal(err)
+	}
+	var snapshotCount int
+	if err := database.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM runtime_config_snapshots WHERE workspace_id=?`, localWorkspace.ID).Scan(&snapshotCount); err != nil || snapshotCount != 0 {
+		t.Fatalf("workspace snapshots=%d err=%v", snapshotCount, err)
 	}
 	workspaceWireID := ownedGraphObjectID("device-owner", localWorkspace.ID)
 	if tombstone, err := database.SyncTombstone(ctx, "workspace", workspaceWireID); err != nil || tombstone.SyncKey == "" {
@@ -109,6 +119,78 @@ func TestOwnedGraphDeletesCreateTombstonesAndBlockReplay(t *testing.T) {
 	}
 	if _, err := database.Workspace(ctx, remoteWorkspace.ID); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("old workspace replay resurrected mirror: %v", err)
+	}
+}
+
+func TestRetireRemoteWorkspaceMirrorBlocksReplay(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database, err := Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	now := time.Now().UTC()
+	project := domain.Project{ID: "retire-workspace-project", Name: "Retire", CreatedAt: now, UpdatedAt: now}
+	if err := database.CreateProject(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	remote := domain.Workspace{ID: "remote-workspace", ProjectID: project.ID, Name: "Remote", OwnerDeviceID: "retired-device", ReadOnly: true, CreatedAt: now, UpdatedAt: now}
+	if err := database.UpsertSyncedWorkspaceFromSource(ctx, remote, "source-workspace"); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := database.Workspace(ctx, remote.ID)
+	if err != nil || stored.SourceWorkspaceID != "source-workspace" {
+		t.Fatalf("stored workspace=%#v err=%v", stored, err)
+	}
+	retired, synchronized, err := database.RetireRemoteWorkspaceMirror(ctx, remote.ID)
+	if err != nil || !synchronized || retired.OwnerDeviceID != "retired-device" {
+		t.Fatalf("retired=%#v synchronized=%t err=%v", retired, synchronized, err)
+	}
+	if _, err := database.Workspace(ctx, remote.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("workspace mirror survived retirement: %v", err)
+	}
+	if _, err := database.SyncTombstone(ctx, "workspace", ownedGraphObjectID("retired-device", "source-workspace")); err != nil {
+		t.Fatalf("workspace graph tombstone missing: %v", err)
+	}
+	if err := database.UpsertSyncedWorkspaceFromSource(ctx, remote, "source-workspace"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Workspace(ctx, remote.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("workspace replay bypassed retirement: %v", err)
+	}
+
+	legacy := domain.Workspace{ID: "legacy-remote-workspace", ProjectID: project.ID, Name: "Legacy", OwnerDeviceID: "legacy-device", ReadOnly: true, CreatedAt: now, UpdatedAt: now}
+	if err := database.UpsertSyncedWorkspaceFromSource(ctx, legacy, "legacy-source"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.db.ExecContext(ctx, `UPDATE workspaces SET source_workspace_id='' WHERE id=?`, legacy.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, synchronized, err := database.RetireRemoteWorkspaceMirror(ctx, legacy.ID); err != nil || synchronized {
+		t.Fatalf("legacy synchronized=%t err=%v", synchronized, err)
+	}
+	if err := database.UpsertSyncedWorkspaceFromSource(ctx, legacy, "legacy-source"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Workspace(ctx, legacy.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("legacy workspace replay bypassed local suppression: %v", err)
+	}
+
+	busy := domain.Workspace{ID: "busy-remote-workspace", ProjectID: project.ID, Name: "Busy", OwnerDeviceID: "busy-device", ReadOnly: true, CreatedAt: now, UpdatedAt: now}
+	if err := database.UpsertSyncedWorkspaceFromSource(ctx, busy, "busy-source"); err != nil {
+		t.Fatal(err)
+	}
+	task := domain.Task{ID: "busy-task", ProjectID: project.ID, WorkspaceID: busy.ID, Title: "Busy", OwnerDeviceID: busy.OwnerDeviceID, ReadOnly: true}
+	payload, _ := json.Marshal(task)
+	if err := database.UpsertRemoteTaskObject(ctx, RemoteTaskObject{OwnerDeviceID: busy.OwnerDeviceID, ObjectType: "task", ObjectID: task.ID, TaskID: task.ID, ProjectID: project.ID, Payload: payload}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := database.RetireRemoteWorkspaceMirror(ctx, busy.ID); !errors.Is(err, ErrWorkspaceMirrorHasTasks) {
+		t.Fatalf("busy workspace retirement error=%v", err)
+	}
+	if _, err := database.Workspace(ctx, busy.ID); err != nil {
+		t.Fatalf("busy workspace was removed: %v", err)
 	}
 }
 

@@ -60,7 +60,7 @@ func TestBusinessExportStripsLocalAndSecretFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(objects) != 9 {
+	if len(objects) != 13 {
 		t.Fatalf("objects=%d", len(objects))
 	}
 	raw, _ := json.Marshal(objects)
@@ -70,16 +70,17 @@ func TestBusinessExportStripsLocalAndSecretFields(t *testing.T) {
 			t.Fatalf("export leaked %q", forbidden)
 		}
 	}
-	var projectKnowledge domain.KnowledgeEntry
-	navigationExported := false
+	projectKnowledgeExported, navigationExported := false, false
 	for _, obj := range objects {
 		if obj.Type == TypeKnowledge {
-			_ = json.Unmarshal(obj.Payload, &projectKnowledge)
-			navigationExported = navigationExported || projectKnowledge.ID == "k-navigation" && projectKnowledge.Type == "navigation"
+			var knowledge domain.KnowledgeEntry
+			_ = json.Unmarshal(obj.Payload, &knowledge)
+			projectKnowledgeExported = projectKnowledgeExported || knowledge.ID == "k1" && knowledge.ProjectID == "project-private" && knowledge.Scope == "project"
+			navigationExported = navigationExported || knowledge.ID == "k-navigation" && knowledge.Type == "navigation"
 		}
 	}
-	if projectKnowledge.ProjectID != "project-private" || projectKnowledge.Scope != "project" || !navigationExported {
-		t.Fatalf("project knowledge lost scope: %#v", projectKnowledge)
+	if !projectKnowledgeExported || !navigationExported {
+		t.Fatalf("project knowledge or navigation was not exported: project=%t navigation=%t", projectKnowledgeExported, navigationExported)
 	}
 	var full skillPayload
 	for _, obj := range objects {
@@ -115,12 +116,35 @@ func TestApplyLegacyProjectKnowledgeWithoutProjectIDAsGlobalFallback(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	globalRoot, err := db.EnsureKnowledgeRoot(ctx, "global", "")
-	if err != nil {
+	if got.Scope != "global" || got.ProjectID != "" || got.ParentID != store.GlobalGeneralKnowledgeID || got.ProductLineID != "" || got.BranchScope != "" {
+		t.Fatalf("legacy fallback was not normalized safely: %#v", got)
+	}
+	diagnostic := legacy
+	diagnostic.ID, diagnostic.Scope, diagnostic.ParentID, diagnostic.Type = "legacy-global-diagnostic", "global", store.GlobalKnowledgeRootID, "diagnostic"
+	raw, _ = json.Marshal(diagnostic)
+	if err := applyBusinessObject(ctx, db, domain.SyncObject{Type: TypeKnowledge, ID: diagnostic.ID, Operation: "upsert", Payload: raw}); err != nil {
 		t.Fatal(err)
 	}
-	if got.Scope != "global" || got.ProjectID != "" || got.ParentID != globalRoot.ID || got.ProductLineID != "" || got.BranchScope != "" {
-		t.Fatalf("legacy fallback was not normalized safely: %#v", got)
+	diagnostic, _ = db.Knowledge(ctx, diagnostic.ID)
+	if diagnostic.ParentID != store.GlobalTechnicalLessonsKnowledgeID {
+		t.Fatalf("legacy diagnostic parent=%s", diagnostic.ParentID)
+	}
+	preserved := domain.KnowledgeEntry{
+		ID: "preserved-behavior", Scope: "global", ParentID: store.GlobalBehaviorLessonsKnowledgeID, Slug: "preserved-behavior",
+		Type: "practice", Title: "Behavior", Body: "local", Status: domain.KnowledgeVerified, Revision: 1, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := db.CreateKnowledge(ctx, preserved); err != nil {
+		t.Fatal(err)
+	}
+	incoming := preserved
+	incoming.ParentID, incoming.Body, incoming.Revision = store.GlobalKnowledgeRootID, "remote replay", 2
+	raw, _ = json.Marshal(incoming)
+	if err := applyBusinessObject(ctx, db, domain.SyncObject{Type: TypeKnowledge, ID: incoming.ID, Operation: "upsert", Payload: raw}); err != nil {
+		t.Fatal(err)
+	}
+	preserved, _ = db.Knowledge(ctx, preserved.ID)
+	if preserved.ParentID != store.GlobalBehaviorLessonsKnowledgeID || preserved.Body != "remote replay" {
+		t.Fatalf("sync replay lost behavior category: %#v", preserved)
 	}
 
 	legacy.ID, legacy.Scope, legacy.ParentID = "invalid-scope", "team", ""
@@ -166,12 +190,58 @@ func TestKnowledgeExportKeyTracksStatusAndFeedbackWithoutRevisionChange(t *testi
 	if staleKey == verifiedKey {
 		t.Fatalf("status-only change reused sync key %q", staleKey)
 	}
-	updated, err = db.FeedbackKnowledge(ctx, entry.ID, "helped", now.Add(2*time.Second).Format(time.RFC3339Nano))
+	updated, err = db.FeedbackKnowledge(ctx, entry.ID, "wrong", now.Add(2*time.Second).Format(time.RFC3339Nano))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if helpedKey := keyFor(); helpedKey == staleKey {
-		t.Fatalf("feedback-only change reused sync key %q", helpedKey)
+	if wrongKey := keyFor(); wrongKey == staleKey {
+		t.Fatalf("feedback-only change reused sync key %q", wrongKey)
+	}
+}
+
+func TestApplyConcurrentPendingKnowledgeProposalsResolvesWithoutConflict(t *testing.T) {
+	ctx, db, now := context.Background(), businessStore(t), time.Now().UTC()
+	project := domain.Project{ID: "proposal-sync-project", Name: "Proposal sync", CreatedAt: now, UpdatedAt: now}
+	if err := db.CreateProject(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	root, _ := db.EnsureKnowledgeRoot(ctx, "project", project.ID)
+	entry := domain.KnowledgeEntry{
+		ID: "proposal-sync-entry", Scope: "project", ProjectID: project.ID, ParentID: root.ID, Slug: "proposal-sync-entry",
+		Type: "practice", Title: "Entry", Body: "base", Status: domain.KnowledgeVerified, Revision: 1, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := db.CreateKnowledge(ctx, entry); err != nil {
+		t.Fatal(err)
+	}
+	localProposed := entry
+	localProposed.Body = "local"
+	local := domain.KnowledgeProposal{
+		ID: "proposal-local", EntryID: entry.ID, BaseRevision: entry.Revision, Proposed: localProposed,
+		Status: domain.KnowledgeProposalPending, CreatedAt: now, UpdatedAt: now,
+	}
+	if _, err := db.CreateKnowledgeProposal(ctx, local); err != nil {
+		t.Fatal(err)
+	}
+	remote := local
+	remote.ID = "proposal-remote"
+	remote.Proposed.Body = "remote"
+	remote.CreatedAt, remote.UpdatedAt = now.Add(time.Second), now.Add(time.Second)
+	raw, _ := json.Marshal(remote)
+	if err := applyBusinessObject(ctx, db, domain.SyncObject{Type: TypeKnowledgeProposal, ID: remote.ID, Operation: "upsert", Payload: raw}); err != nil {
+		t.Fatalf("concurrent pending proposal caused sync conflict: %v", err)
+	}
+	localStored, _ := db.KnowledgeProposal(ctx, local.ID)
+	remoteStored, _ := db.KnowledgeProposal(ctx, remote.ID)
+	if localStored.Status != domain.KnowledgeProposalRejected || remoteStored.Status != domain.KnowledgeProposalPending {
+		t.Fatalf("pending proposal resolution diverged: local=%#v remote=%#v", localStored, remoteStored)
+	}
+	raw, _ = json.Marshal(local)
+	if err := applyBusinessObject(ctx, db, domain.SyncObject{Type: TypeKnowledgeProposal, ID: local.ID, Operation: "upsert", Payload: raw}); err != nil {
+		t.Fatalf("stale pending replay caused sync conflict: %v", err)
+	}
+	localStored, _ = db.KnowledgeProposal(ctx, local.ID)
+	if localStored.Status != domain.KnowledgeProposalRejected {
+		t.Fatalf("stale pending replay resurrected local proposal: %#v", localStored)
 	}
 }
 

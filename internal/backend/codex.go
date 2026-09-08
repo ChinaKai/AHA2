@@ -387,7 +387,7 @@ func parseCodexLine(line string) (Event, string, string) {
 		}
 		if itemType == "command_execution" {
 			data := map[string]any{
-				"command": item["command"], "status": item["status"], "exit_code": item["exit_code"],
+				"tool_call_id": item["id"], "command": item["command"], "status": item["status"], "exit_code": item["exit_code"],
 			}
 			if rawType == "item.completed" {
 				output, _ := item["aggregated_output"].(string)

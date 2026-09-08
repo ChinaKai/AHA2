@@ -11,6 +11,15 @@ export interface SecuritySettings {
   startup_override?: boolean;
   updated_at?: string;
 }
+export interface AgentAPISettings {
+  url: string;
+  allow_insecure: boolean;
+  startup_url?: string;
+  startup_allow_insecure?: boolean;
+  effective_url: string;
+  effective_allow_insecure: boolean;
+  updated_at?: string;
+}
 export interface SystemInfo {
   os: string;
   arch: string;
@@ -120,6 +129,7 @@ export interface Workspace {
     platform?: WorkspaceProbe;
     codex?: WorkspaceProbe;
     claude?: WorkspaceProbe;
+    agent_api?: WorkspaceProbe & {url?: string};
     git?: boolean;
   };
   repository?: {
@@ -274,6 +284,12 @@ export interface Task {
   updated_at: string;
   owner_device_id?: string;
   read_only?: boolean;
+  agent_api_mode: "auto" | "global" | "manual" | string;
+  agent_api_url?: string;
+  agent_api_resolved_url?: string;
+  agent_api_status: "unknown" | "ready" | "error" | string;
+  agent_api_error?: string;
+  agent_api_last_checked_at?: string;
 }
 
 export interface Turn {
@@ -525,6 +541,7 @@ export interface KnowledgeProposal {
   title?: string;
   body?: string;
   status: string;
+  review_mode?: "auto" | "manual" | string;
   source_task_id?: string;
   source_turn_id?: string;
   created_at: string;
@@ -538,6 +555,11 @@ export interface KnowledgeProposal {
   current_body?: string;
   base_entry?: Pick<Knowledge, "title" | "body" | "revision">;
   proposed?: Knowledge;
+}
+
+export interface KnowledgeReviewSettings {
+  auto_approve: boolean;
+  updated_at?: string;
 }
 
 export interface Skill {
@@ -587,8 +609,6 @@ export interface TaskContextDetail {
   latest_round?: TaskRound;
   turns: Turn[];
   memory: TaskMemory;
-  project_knowledge: Knowledge[];
-  global_knowledge: Knowledge[];
   context: {
     turn_id?: string;
     agent_id?: string;

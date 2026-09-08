@@ -29,6 +29,30 @@ type stubExecutor struct {
 	environments   []map[string]string
 }
 
+func TestRecoveryContextNeedsUsesSessionAndPreviousTurnState(t *testing.T) {
+	t.Parallel()
+	current := domain.Turn{ID: "current", AgentID: "main", Sequence: 3, Attempt: 1, Generation: 1}
+	succeeded := []domain.Turn{{ID: "previous", AgentID: "main", Sequence: 2, Status: domain.TurnSucceeded, Attempt: 1, Generation: 1}}
+	if recent, diagnostics := recoveryContextNeeds(current, succeeded, true, ""); recent || diagnostics {
+		t.Fatalf("healthy reused session requested recovery resources: recent=%t diagnostics=%t", recent, diagnostics)
+	}
+	succeeded[0].Generation = 9
+	current.Generation = 10
+	if recent, diagnostics := recoveryContextNeeds(current, succeeded, true, ""); recent || diagnostics {
+		t.Fatalf("normal session generations requested recovery resources: recent=%t diagnostics=%t", recent, diagnostics)
+	}
+	if recent, diagnostics := recoveryContextNeeds(current, succeeded, false, ""); !recent || diagnostics {
+		t.Fatalf("cold session recovery=%t diagnostics=%t", recent, diagnostics)
+	}
+	failed := []domain.Turn{{ID: "previous", AgentID: "main", Sequence: 2, Status: domain.TurnFailed, Error: "boom", Attempt: 1, Generation: 1}}
+	if recent, diagnostics := recoveryContextNeeds(current, failed, true, ""); !recent || !diagnostics {
+		t.Fatalf("failed turn recovery=%t diagnostics=%t", recent, diagnostics)
+	}
+	if recent, diagnostics := recoveryContextNeeds(current, succeeded, true, "compacted"); !recent || diagnostics {
+		t.Fatalf("handoff recovery=%t diagnostics=%t", recent, diagnostics)
+	}
+}
+
 type multiAgentExecutor struct {
 	mu      sync.Mutex
 	turns   []domain.Turn
@@ -203,7 +227,8 @@ func TestTaskMultiTurnFlow(t *testing.T) {
 	}
 	workspace := domain.Workspace{
 		ID: "workspace-1", ProjectID: project.ID, Name: "local", Locality: "local", Transport: "native",
-		RootPath: t.TempDir(), Health: "ready", CreatedAt: now, UpdatedAt: now,
+		RootPath: t.TempDir(), Health: "ready", AgentAPIMode: "auto", AgentAPIStatus: "ready",
+		AgentAPIResolvedURL: "https://workspace.example.test", CreatedAt: now, UpdatedAt: now,
 	}
 	if err := database.CreateWorkspace(ctx, workspace); err != nil {
 		t.Fatal(err)
@@ -273,10 +298,10 @@ func TestTaskMultiTurnFlow(t *testing.T) {
 	}
 	environments := service.executor.(*stubExecutor).environmentHistory()
 	if len(environments) < 2 || environments[0]["HTTP_PROXY"] != "http://127.0.0.1:7897" ||
-		environments[0]["HTTPS_PROXY"] != "http://127.0.0.1:7897" || !strings.Contains(environments[0]["NO_PROXY"], "aha.example.test") {
+		environments[0]["HTTPS_PROXY"] != "http://127.0.0.1:7897" || !strings.Contains(environments[0]["NO_PROXY"], "workspace.example.test") {
 		t.Fatalf("shared proxy was not injected: %#v", environments)
 	}
-	if environments[0]["AHA2_AGENT_API_URL"] != "https://aha.example.test" || environments[0]["AHA2_AGENT_API_TOKEN"] == "" ||
+	if environments[0]["AHA2_AGENT_API_URL"] != "https://workspace.example.test" || environments[0]["AHA2_AGENT_API_TOKEN"] == "" ||
 		environments[0]["AHA2_AGENT_API_TOKEN"] == environments[1]["AHA2_AGENT_API_TOKEN"] {
 		t.Fatalf("per-turn Agent API capability was not injected: %#v", environments)
 	}
@@ -289,18 +314,44 @@ func TestTaskMultiTurnFlow(t *testing.T) {
 		}
 	}
 	manifest := filepath.Join(workspace.RootPath, ".aha2-context", task.ID, "main", "manifest.json")
-	if data, err := os.ReadFile(manifest); err != nil || strings.Contains(string(data), "stub completed") {
-		t.Fatalf("context manifest invalid: %q %v", data, err)
+	if _, err := os.Stat(manifest); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("context manifest was materialized: %v", err)
 	}
-	selectedSkillEntry := filepath.Join(workspace.RootPath, ".aha2-context", task.ID, "main", "skills", selectedSkill.PackageSlug, "SKILL.md")
+	taskContextRoot := filepath.Join(workspace.RootPath, ".aha2-context", task.ID)
+	contextEntries, err := os.ReadDir(taskContextRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sharedRoot := ""
+	for _, entry := range contextEntries {
+		if entry.IsDir() && strings.HasPrefix(entry.Name(), "shared-") {
+			sharedRoot = filepath.Join(taskContextRoot, entry.Name())
+		}
+	}
+	if sharedRoot == "" {
+		t.Fatalf("shared Context snapshot was not materialized: %#v", contextEntries)
+	}
+	selectedSkillEntry := filepath.Join(sharedRoot, "skills", selectedSkill.PackageSlug, "SKILL.md")
 	if data, err := os.ReadFile(selectedSkillEntry); err != nil || !strings.Contains(string(data), "Use selected skill.") {
 		t.Fatalf("selected skill entry was not materialized: %q %v", data, err)
 	}
-	if data, err := os.ReadFile(filepath.Join(workspace.RootPath, ".aha2-context", task.ID, "main", "skills", selectedSkill.PackageSlug, "scripts", "check.sh")); err != nil || !strings.Contains(string(data), "selected") {
+	if data, err := os.ReadFile(filepath.Join(sharedRoot, "skills", selectedSkill.PackageSlug, "scripts", "check.sh")); err != nil || !strings.Contains(string(data), "selected") {
 		t.Fatalf("selected skill script was not materialized: %q %v", data, err)
 	}
-	if _, err := os.Stat(filepath.Join(workspace.RootPath, ".aha2-context", task.ID, "main", "skills", otherSkill.PackageSlug, "SKILL.md")); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(filepath.Join(sharedRoot, "skills", otherSkill.PackageSlug, "SKILL.md")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("unselected skill was materialized: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(sharedRoot, "agent-api.md")); err != nil {
+		t.Fatalf("Agent API guide was not shared: %v", err)
+	}
+	for _, privatePath := range []string{
+		filepath.Join(taskContextRoot, "main", "skills"),
+		filepath.Join(taskContextRoot, "main", "agent-api.md"),
+		filepath.Join(taskContextRoot, "main", "knowledge"),
+	} {
+		if _, err := os.Stat(privatePath); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("shared resource remained Agent-private at %s: %v", privatePath, err)
+		}
 	}
 	current, err := database.Task(ctx, task.ID)
 	if err != nil {
@@ -574,6 +625,33 @@ func TestMultiAgentRoundCreatesIntegrationTurn(t *testing.T) {
 	}
 	if len(agents) != 3 {
 		t.Fatalf("expected persistent main and two sub-agents: %#v", agents)
+	}
+	taskContextRoot := filepath.Join(workspace.RootPath, ".aha2-context", task.ID)
+	contextEntries, err := os.ReadDir(taskContextRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sharedRoots := 0
+	for _, entry := range contextEntries {
+		if entry.IsDir() && strings.HasPrefix(entry.Name(), "shared-") {
+			sharedRoots++
+		}
+	}
+	if sharedRoots != 1 {
+		t.Fatalf("expected one shared immutable Context snapshot, got %d entries=%#v", sharedRoots, contextEntries)
+	}
+	for _, agentID := range []string{"main", "sub-001", "sub-002"} {
+		for _, relative := range []string{"knowledge", "skills", "agent-api.md"} {
+			if _, err := os.Stat(filepath.Join(taskContextRoot, agentID, relative)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("agent %s retained private shared resource %s: %v", agentID, relative, err)
+			}
+		}
+	}
+	service.sharedContextMu.Lock()
+	materializedSharedContexts := len(service.sharedContexts)
+	service.sharedContextMu.Unlock()
+	if materializedSharedContexts != 1 {
+		t.Fatalf("shared Context snapshot was not deduplicated: %d", materializedSharedContexts)
 	}
 	if pending, err := database.PendingInboxCount(ctx, task.ID); err != nil || pending != 0 {
 		t.Fatalf("inbox was not fully consumed: pending=%d err=%v", pending, err)

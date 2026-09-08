@@ -2,7 +2,9 @@ package httpapi
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -197,11 +199,12 @@ func TestRemoteTaskMirrorIsListedAndReadOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	remoteWorkspace := domain.Workspace{ID: "remote-workspace-mirror", ProjectID: project.ID, Name: "Remote workspace", OwnerDeviceID: "dev_remote", ReadOnly: true, CreatedAt: now, UpdatedAt: now}
-	if err := database.UpsertSyncedWorkspace(ctx, remoteWorkspace); err != nil {
+	if err := database.UpsertSyncedWorkspaceFromSource(ctx, remoteWorkspace, task.WorkspaceID); err != nil {
 		t.Fatal(err)
 	}
 	secretRef := syncer.MirrorHardwareSecretRef("dev_remote", task.ID, "board")
-	secretStore := &fakeSecretStore{values: map[string]string{secretRef: "encrypted-mirror-secret"}}
+	workspaceSecretRef := syncer.MirrorWorkspaceSecretRef(remoteWorkspace.ID)
+	secretStore := &fakeSecretStore{values: map[string]string{secretRef: "encrypted-mirror-secret", workspaceSecretRef: "workspace-mirror-secret"}}
 	authService := auth.NewService(database, "setup-test", time.Hour)
 	server := httptest.NewServer(New(Config{Store: database, Auth: authService, App: app.NewService(database, nil, app.StubExecutor{}), Secrets: secretStore}).Handler())
 	defer server.Close()
@@ -238,6 +241,11 @@ func TestRemoteTaskMirrorIsListedAndReadOnly(t *testing.T) {
 	if found, err := database.RemoteTaskObjectExists(ctx, "dev_remote", "task", task.ID); err != nil || !found {
 		t.Fatalf("remote task mirror was deleted: found=%t err=%v", found, err)
 	}
+	response = requestJSON(t, client, http.MethodDelete, server.URL+"/api/v1/workspaces/"+remoteWorkspace.ID+"/remote-mirror", nil, csrf)
+	if response.StatusCode != http.StatusConflict {
+		t.Fatalf("busy remote workspace retirement status=%d body=%s", response.StatusCode, readBody(t, response))
+	}
+	response.Body.Close()
 	response = requestJSON(t, client, http.MethodDelete, server.URL+"/api/v1/tasks/"+list.Tasks[0].ID+"/remote-mirror", nil, csrf)
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("retire remote task status=%d body=%s", response.StatusCode, readBody(t, response))
@@ -260,6 +268,26 @@ func TestRemoteTaskMirrorIsListedAndReadOnly(t *testing.T) {
 	if _, err := database.Workspace(ctx, remoteWorkspace.ID); err != nil {
 		t.Fatalf("remote workspace mirror was deleted: %v", err)
 	}
+	response = requestJSON(t, client, http.MethodDelete, server.URL+"/api/v1/workspaces/"+remoteWorkspace.ID+"/remote-mirror", nil, csrf)
+	var retiredWorkspace struct {
+		Synchronized bool `json:"synchronized"`
+	}
+	decodeResponse(t, response, &retiredWorkspace)
+	if response.StatusCode != http.StatusOK || !retiredWorkspace.Synchronized {
+		t.Fatalf("retire remote workspace status=%d body=%#v", response.StatusCode, retiredWorkspace)
+	}
+	if _, err := database.Workspace(ctx, remoteWorkspace.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("retired remote workspace remained: %v", err)
+	}
+	if _, exists := secretStore.Get(workspaceSecretRef); exists {
+		t.Fatal("retired remote workspace secret was retained")
+	}
+	if err := database.UpsertSyncedWorkspaceFromSource(ctx, remoteWorkspace, task.WorkspaceID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Workspace(ctx, remoteWorkspace.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("retired remote workspace replayed: %v", err)
+	}
 }
 
 func TestOwnerTaskAndWorkspaceDeletesCreateGraphTombstones(t *testing.T) {
@@ -271,6 +299,15 @@ func TestOwnerTaskAndWorkspaceDeletesCreateGraphTombstones(t *testing.T) {
 	defer database.Close()
 	task := createHardwareAPITask(t, database)
 	if err := database.ClaimLocalWorkspaces(ctx, "device-owner"); err != nil {
+		t.Fatal(err)
+	}
+	orphanSnapshot, err := database.RuntimeSnapshot(ctx, task.RuntimeConfigSnapshotID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	orphanSnapshot.ID = "workspace-orphan-snapshot"
+	orphanSnapshot.CreatedAt = time.Now().UTC()
+	if err := database.CreateRuntimeSnapshot(ctx, orphanSnapshot); err != nil {
 		t.Fatal(err)
 	}
 	authService := auth.NewService(database, "setup-test", time.Hour)
@@ -294,6 +331,9 @@ func TestOwnerTaskAndWorkspaceDeletesCreateGraphTombstones(t *testing.T) {
 	response.Body.Close()
 	if _, err := database.SyncTombstone(ctx, "workspace", "device-owner:"+task.WorkspaceID); err != nil {
 		t.Fatalf("workspace delete did not create tombstone: %v", err)
+	}
+	if _, err := database.RuntimeSnapshot(ctx, orphanSnapshot.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("orphan workspace snapshot survived delete: %v", err)
 	}
 }
 

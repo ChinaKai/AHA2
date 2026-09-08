@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -28,6 +29,9 @@ func TestKnowledgeRootsAreAutomaticAndProtected(t *testing.T) {
 		t.Helper()
 		if root.Scope != scope || root.ProjectID != projectID || root.ParentID != "" || root.Slug != "index" || !root.IsIndex || root.Status != domain.KnowledgeVerified || root.ProductLineID != "" {
 			t.Fatalf("invalid root: %#v", root)
+		}
+		if !strings.Contains(root.Body, "标题与摘要") {
+			t.Fatalf("root does not explain how to select documents: %#v", root)
 		}
 	}
 	assertRoot(global, "global", "")
@@ -108,6 +112,114 @@ func TestKnowledgeRootsAreAutomaticAndProtected(t *testing.T) {
 	after, _ := database.Knowledge(ctx, root.ID)
 	if !before.UpdatedAt.Equal(after.UpdatedAt) || before.Revision != after.Revision {
 		t.Fatalf("idempotent ensure rewrote root: before=%#v after=%#v", before, after)
+	}
+}
+
+func TestGlobalKnowledgeCategoriesClassifyLegacyAndDefaultDocuments(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database, err := Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	root, err := database.EnsureKnowledgeRoot(ctx, "global", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for id, parentID := range map[string]string{
+		GlobalGeneralKnowledgeID:          root.ID,
+		GlobalAgentLessonsKnowledgeID:     root.ID,
+		GlobalTechnicalLessonsKnowledgeID: GlobalAgentLessonsKnowledgeID,
+		GlobalBehaviorLessonsKnowledgeID:  GlobalAgentLessonsKnowledgeID,
+	} {
+		item, err := database.Knowledge(ctx, id)
+		if err != nil || item.ParentID != parentID || item.Status != domain.KnowledgeVerified || item.Type != "navigation" {
+			t.Fatalf("managed category %s=%#v err=%v", id, item, err)
+		}
+	}
+	now := time.Now().UTC()
+	createAtRoot := func(id, kind, sourceTaskID string) {
+		t.Helper()
+		if err := database.CreateKnowledge(ctx, domain.KnowledgeEntry{
+			ID: id, Scope: "global", ParentID: root.ID, Slug: id, Type: kind, Title: id, Body: "Body",
+			Status: domain.KnowledgeVerified, Revision: 1, SourceTaskID: sourceTaskID, CreatedAt: now, UpdatedAt: now,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	createAtRoot("human-reference", "diagnostic", "")
+	createAtRoot("agent-diagnostic", "diagnostic", "task-source")
+	createAtRoot("agent-behavior", "practice", "task-source")
+	pendingProposal := domain.KnowledgeProposal{
+		ID: "pending-global-lesson", EntryID: "pending-global-entry", Status: domain.KnowledgeProposalPending,
+		SourceTaskID: "task-source", SourceTurnID: "turn-source", CreatedAt: now, UpdatedAt: now,
+		Proposed: domain.KnowledgeEntry{
+			ID: "pending-global-entry", Scope: "global", ParentID: root.ID, Slug: "pending-global-entry", Type: "diagnostic",
+			Title: "Pending lesson", Body: "Body", SourceTaskID: "task-source", SourceTurnID: "turn-source", CreatedAt: now, UpdatedAt: now,
+		},
+	}
+	if _, err := database.CreateKnowledgeProposal(ctx, pendingProposal); err != nil {
+		t.Fatal(err)
+	}
+	approvedProposal := pendingProposal
+	approvedProposal.ID = "approved-global-lesson"
+	approvedProposal.EntryID = "approved-global-entry"
+	approvedProposal.Proposed.ID = approvedProposal.EntryID
+	approvedProposal.Proposed.Slug = "approved-global-entry"
+	approvedProposal.Proposed.Type = "practice"
+	approvedProposal.Proposed.Title = "Approved behavior lesson"
+	if _, err := database.CreateKnowledgeProposal(ctx, approvedProposal); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := database.ApproveKnowledgeProposal(ctx, approvedProposal.ID, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.db.ExecContext(ctx, `DELETE FROM schema_migrations WHERE version=42`); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for id, parentID := range map[string]string{
+		"human-reference":  GlobalTechnicalLessonsKnowledgeID,
+		"agent-diagnostic": GlobalTechnicalLessonsKnowledgeID,
+		"agent-behavior":   GlobalBehaviorLessonsKnowledgeID,
+	} {
+		item, err := database.Knowledge(ctx, id)
+		if err != nil || item.ParentID != parentID {
+			t.Fatalf("classified %s=%#v err=%v", id, item, err)
+		}
+	}
+	migratedProposal, err := database.KnowledgeProposal(ctx, pendingProposal.ID)
+	if err != nil || migratedProposal.Proposed.ParentID != GlobalTechnicalLessonsKnowledgeID {
+		t.Fatalf("pending global proposal=%#v err=%v", migratedProposal, err)
+	}
+	approvedEntry, err := database.Knowledge(ctx, approvedProposal.EntryID)
+	if err != nil || approvedEntry.ParentID != GlobalBehaviorLessonsKnowledgeID {
+		t.Fatalf("approved global lesson=%#v err=%v", approvedEntry, err)
+	}
+	defaulted := domain.KnowledgeEntry{
+		ID: "default-general", Scope: "global", Slug: "default-general", Type: "practice", Title: "Default", Body: "Body",
+		Status: domain.KnowledgeVerified, Revision: 1, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := database.CreateKnowledge(ctx, defaulted); err != nil {
+		t.Fatal(err)
+	}
+	defaulted, _ = database.Knowledge(ctx, defaulted.ID)
+	if defaulted.ParentID != GlobalGeneralKnowledgeID {
+		t.Fatalf("new global document parent=%s", defaulted.ParentID)
+	}
+	category, _ := database.Knowledge(ctx, GlobalGeneralKnowledgeID)
+	category.Body = "changed"
+	if err := database.UpdateKnowledge(ctx, category); !errors.Is(err, ErrKnowledgeRootManaged) {
+		t.Fatalf("managed category update error=%v", err)
+	}
+	if err := database.DeleteKnowledge(ctx, GlobalGeneralKnowledgeID); !errors.Is(err, ErrKnowledgeRootManaged) {
+		t.Fatalf("managed category delete error=%v", err)
+	}
+	if _, err := database.FeedbackKnowledge(ctx, GlobalGeneralKnowledgeID, "stale", timeString(now)); !errors.Is(err, ErrKnowledgeRootManaged) {
+		t.Fatalf("managed category feedback error=%v", err)
 	}
 }
 

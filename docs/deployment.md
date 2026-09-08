@@ -66,6 +66,9 @@ Workspace 中运行的 Agent 需要填写其能够访问的 HTTPS 基址，安�
 
 受信开发网络确需使用非 loopback HTTP 时，必须在向导中单独确认，启动参数才会追加
 `--allow-insecure-agent-api`。这不会启用 `--allow-cross-origin`；浏览器 Origin 校验仍保持开启。
+该启动参数是 Agent API 地址的初始默认值；安装后可在高级设置中修改全局默认，并通过
+Workspace“测试连接”自动保存从目标执行环境验证成功的地址。特殊 NAT、跳板机、HTTPS
+反向代理环境可在 Workspace 中手动覆盖。
 
 此登录用户模式是 Windows 安装器的短期正式默认方案。安装器会停止、禁用并尝试删除旧版本
 遗留的 `AHA2` LocalSystem 服务；若 Windows 暂时不能删除服务，保留 Stopped/Disabled 状态也

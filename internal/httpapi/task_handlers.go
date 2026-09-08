@@ -322,7 +322,7 @@ func (s *Server) contextForAgent(writer http.ResponseWriter, request *http.Reque
 			writeError(writer, http.StatusNotFound, "task_not_found")
 			return
 		}
-		writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "task": mirror.Task, "turns": mirror.Turns, "memory": mirror.Memory, "project_knowledge": []domain.KnowledgeEntry{}, "global_knowledge": []domain.KnowledgeEntry{}, "context": map[string]any{"agent_id": agentID, "usage": map[string]any{}, "metrics": map[string]any{}}})
+		writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "task": mirror.Task, "turns": mirror.Turns, "memory": mirror.Memory, "context": map[string]any{"agent_id": agentID, "usage": map[string]any{}, "metrics": map[string]any{}}})
 		return
 	}
 	memory, _ := s.store.TaskMemory(request.Context(), taskID)
@@ -334,8 +334,6 @@ func (s *Server) contextForAgent(writer http.ResponseWriter, request *http.Reque
 	s.applyTurnContextUsage(request.Context(), turns)
 	agentTurns, _ := s.store.ListTurns(request.Context(), taskID)
 	s.applyTurnContextUsage(request.Context(), agentTurns)
-	projectKB, _ := s.store.ListApplicableKnowledge(request.Context(), task.ProjectID, "", []domain.KnowledgeStatus{domain.KnowledgeVerified})
-	globalKB, _ := s.store.ListKnowledge(request.Context(), "global", "", []domain.KnowledgeStatus{domain.KnowledgeVerified})
 	latest := latestTurnForAgent(agentTurns, agentID)
 	sessions, _ := s.store.ListBackendSessionsForAgent(request.Context(), taskID, agentID)
 	workspace, _ := s.runtimeWorkspace(request.Context(), task.WorkspaceID)
@@ -361,8 +359,7 @@ func (s *Server) contextForAgent(writer http.ResponseWriter, request *http.Reque
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{
 		"ok": true, "task": task, "latest_round": round, "turns": turns,
-		"memory": memory, "project_knowledge": projectKB, "global_knowledge": globalKB,
-		"context": contextData,
+		"memory": memory, "context": contextData,
 	})
 }
 

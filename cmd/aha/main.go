@@ -215,7 +215,7 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 	if options.allowInsecureAgentAPI && strings.HasPrefix(strings.ToLower(resolvedAgentAPIURL), "http://") {
 		logger.Warn("insecure Agent API URL enabled", "host", mustAgentAPIHost(resolvedAgentAPIURL))
 	}
-	appService.SetAgentAPI(agentCapabilities, resolvedAgentAPIURL)
+	appService.SetAgentAPI(agentCapabilities, resolvedAgentAPIURL, options.allowInsecureAgentAPI)
 	hardwareManager := hardware.NewManager(database)
 	defer hardwareManager.Close()
 	if err := appService.ResumePending(ctx); err != nil {

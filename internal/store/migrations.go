@@ -124,6 +124,45 @@ INSERT OR IGNORE INTO security_settings(id,validate_origin,updated_at)
 VALUES(1,1,strftime('%Y-%m-%dT%H:%M:%fZ','now'));
 `
 
+const schemaV41 = `
+CREATE TABLE IF NOT EXISTS retired_workspace_mirrors (
+    owner_device_id TEXT NOT NULL,
+    local_workspace_id TEXT NOT NULL,
+    source_workspace_id TEXT NOT NULL DEFAULT '',
+    retired_at TEXT NOT NULL,
+    PRIMARY KEY(owner_device_id,local_workspace_id)
+);
+CREATE INDEX IF NOT EXISTS idx_retired_workspace_mirrors_source
+ON retired_workspace_mirrors(owner_device_id,source_workspace_id);
+`
+
+const schemaV44 = `
+CREATE TABLE IF NOT EXISTS agent_api_settings (
+    id INTEGER PRIMARY KEY CHECK(id=1),
+    url TEXT NOT NULL DEFAULT '',
+    allow_insecure INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
+);
+INSERT OR IGNORE INTO agent_api_settings(id,url,allow_insecure,updated_at)
+VALUES(1,'',0,strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+ALTER TABLE workspaces ADD COLUMN agent_api_mode TEXT NOT NULL DEFAULT 'auto' CHECK(agent_api_mode IN ('auto','global','manual'));
+ALTER TABLE workspaces ADD COLUMN agent_api_url TEXT NOT NULL DEFAULT '';
+ALTER TABLE workspaces ADD COLUMN agent_api_resolved_url TEXT NOT NULL DEFAULT '';
+ALTER TABLE workspaces ADD COLUMN agent_api_status TEXT NOT NULL DEFAULT 'unknown';
+ALTER TABLE workspaces ADD COLUMN agent_api_error TEXT NOT NULL DEFAULT '';
+ALTER TABLE workspaces ADD COLUMN agent_api_last_checked_at TEXT NOT NULL DEFAULT '';
+`
+
+const schemaV45 = `
+CREATE TABLE IF NOT EXISTS knowledge_review_settings (
+    id INTEGER PRIMARY KEY CHECK(id=1),
+    auto_approve INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
+);
+INSERT OR IGNORE INTO knowledge_review_settings(id,auto_approve,updated_at)
+VALUES(1,0,strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+`
+
 const schemaV27 = `
 CREATE TABLE IF NOT EXISTS sync_settings (
     scope TEXT PRIMARY KEY,
@@ -1344,6 +1383,62 @@ func (s *Store) migrate(ctx context.Context) error {
 	}
 	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(40, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
 		return fmt.Errorf("record schema v40: %w", err)
+	}
+	var hasV41 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=41)`).Scan(&hasV41)
+	if !hasV41 {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE workspaces ADD COLUMN source_workspace_id TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("apply schema v41 workspace source: %w", err)
+		}
+		if _, err := s.db.ExecContext(ctx, schemaV41); err != nil {
+			return fmt.Errorf("apply schema v41: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(41, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v41: %w", err)
+	}
+	var hasV42 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=42)`).Scan(&hasV42)
+	if !hasV42 {
+		if err := s.EnsureGlobalKnowledgeCategories(ctx); err != nil {
+			return fmt.Errorf("apply schema v42 global knowledge categories: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(42, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v42: %w", err)
+	}
+	var hasV43 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=43)`).Scan(&hasV43)
+	if !hasV43 {
+		if err := s.EnsureGlobalKnowledgeCategories(ctx); err != nil {
+			return fmt.Errorf("apply schema v43 global knowledge category repair: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(43, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v43: %w", err)
+	}
+	var hasV44 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=44)`).Scan(&hasV44)
+	if !hasV44 {
+		if _, err := s.db.ExecContext(ctx, schemaV44); err != nil {
+			return fmt.Errorf("apply schema v44: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(44, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v44: %w", err)
+	}
+	var hasV45 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=45)`).Scan(&hasV45)
+	if !hasV45 {
+		if _, err := s.db.ExecContext(ctx, schemaV45); err != nil {
+			return fmt.Errorf("apply schema v45: %w", err)
+		}
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE knowledge_proposals ADD COLUMN review_mode TEXT NOT NULL DEFAULT 'manual' CHECK(review_mode IN ('manual','auto'))`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("apply schema v45 proposal review mode: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(45, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v45: %w", err)
 	}
 	return nil
 }

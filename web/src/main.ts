@@ -4,6 +4,7 @@ import {bindCodexAccounts, renderCodexAccounts} from "./codex_accounts.js";
 import {icon} from "./icons.js";
 import {bindKnowledgeWorkspace, renderKnowledgeWorkspace} from "./knowledge_workspace.js";
 import {bindHardwarePanel, stopHardwarePanel} from "./hardware_panel.js";
+import {renderMarkdown} from "./markdown.js";
 import {bindPromptAdmin, loadPromptCatalog, renderPromptAdmin} from "./prompt_admin.js";
 import {bindProxySettings, renderProxySettings} from "./proxy_settings.js";
 import {bindSyncSettings, isSyncSettingsFormEditing, renderSyncSettings} from "./sync_settings.js";
@@ -24,6 +25,7 @@ import {
   usageNumber,
 } from "./task_agents.js";
 import type {
+  AgentAPISettings,
   Attachment,
   AuthStatus,
   CodexAccount,
@@ -34,6 +36,7 @@ import type {
   Knowledge,
   KnowledgeLibrary,
   KnowledgeProposal,
+  KnowledgeReviewSettings,
   Model,
   Project,
   Provider,
@@ -62,6 +65,7 @@ interface State {
   system: SystemInfo;
   proxySettings: ProxySettings;
   securitySettings: SecuritySettings;
+  agentAPISettings: AgentAPISettings;
   syncSettings: SyncSettings;
   syncState: SyncState;
   syncPending: number;
@@ -78,6 +82,7 @@ interface State {
   knowledge: Knowledge[];
   knowledgeLibraries: KnowledgeLibrary[];
   knowledgeProposals: KnowledgeProposal[];
+  knowledgeReviewSettings: KnowledgeReviewSettings;
   skills: Skill[];
   selectedTask: TaskDetail | null;
   taskConversation: ConversationItem[];
@@ -124,6 +129,7 @@ const state: State = {
   system: {os: "windows", arch: "", wsl_available: false, wsl_distros: [], version: "dev", started_at: ""},
   proxySettings: {http_proxy: "http://127.0.0.1:7897", https_proxy: "http://127.0.0.1:7897", no_proxy: "localhost,127.0.0.1,::1"},
   securitySettings: {validate_origin: true, startup_override: false},
+  agentAPISettings: {url: "", allow_insecure: false, effective_url: "http://127.0.0.1:8766", effective_allow_insecure: false},
   syncSettings: {scope:"default",enabled:false,endpoint:"",device_id:"",device_name:"",interval_seconds:300,token_configured:false,passphrase_configured:false},
   syncState: {scope:"default",cursor:"",last_error:""},
   syncPending: 0,
@@ -140,6 +146,7 @@ const state: State = {
   knowledge: [],
   knowledgeLibraries: [],
   knowledgeProposals: [],
+  knowledgeReviewSettings: {auto_approve: false},
   skills: [],
   selectedTask: null,
   taskConversation: [],
@@ -174,6 +181,7 @@ let taskLastSignalAt = 0;
 let scrollConversationToBottom = false;
 let loadingOlderConversation = false;
 let authRecoveryOpen = false;
+let messageSubmitPending = false;
 let ownerAvatarClicks = 0;
 let ownerAvatarResetTimer = 0;
 
@@ -280,6 +288,9 @@ function openWorkspaceDialog(ws: Workspace | null): void {
   const sshAuth = dialog.querySelector<HTMLSelectElement>('[name="ssh_auth"]');
   const sshPassword = dialog.querySelector<HTMLInputElement>('[name="ssh_password"]');
   const clearSSHPassword = dialog.querySelector<HTMLInputElement>('[name="clear_ssh_password"]');
+  const agentAPIMode = dialog.querySelector<HTMLSelectElement>('[name="agent_api_mode"]');
+  const agentAPIURL = dialog.querySelector<HTMLInputElement>('[name="agent_api_url"]');
+  const agentAPIResult = dialog.querySelector<HTMLElement>(".workspace-agent-api-result");
   if (editId) editId.value = ws ? ws.id : "";
   if (projectSelect && ws) projectSelect.value = ws.project_id;
   if (nameInput) nameInput.value = ws ? ws.name : "本地开发";
@@ -304,6 +315,13 @@ function openWorkspaceDialog(ws: Workspace | null): void {
   if (clearSSHPassword) {
     clearSSHPassword.checked = false;
     clearSSHPassword.disabled = !ws?.ssh_password_configured;
+  }
+  if (agentAPIMode) agentAPIMode.value = ws?.agent_api_mode || "auto";
+  if (agentAPIURL) agentAPIURL.value = ws?.agent_api_url || "";
+  if (agentAPIResult) {
+    agentAPIResult.textContent = ws?.agent_api_status === "ready" && ws.agent_api_resolved_url
+      ? `当前已验证：${ws.agent_api_resolved_url}`
+      : ws?.agent_api_error || "保存后点击 Workspace 的“测试连接”，AHA2 会从该 Workspace 反向验证并保存有效地址。";
   }
   syncWorkspaceFields();
   const title = dialog.querySelector(".dialog-head h2");
@@ -509,6 +527,9 @@ function syncWorkspaceFields(): void {
   const sshAuth = document.querySelector<HTMLSelectElement>('[name="ssh_auth"]');
   const sshPassword = document.querySelector<HTMLInputElement>('[name="ssh_password"]');
   const clearSSHPassword = document.querySelector<HTMLInputElement>('[name="clear_ssh_password"]');
+  const agentAPIMode = document.querySelector<HTMLSelectElement>("#ws-agent-api-mode");
+  const agentAPIURL = document.querySelector<HTMLInputElement>("#ws-agent-api-url");
+  const agentAPIManual = document.querySelector<HTMLElement>(".workspace-agent-api-manual");
   if (!localitySelect || !transportSelect) return;
   const locality = localitySelect.value;
   const allowed = workspaceTransportOptions(locality);
@@ -536,6 +557,12 @@ function syncWorkspaceFields(): void {
     );
   }
   if (transport === "wsl") populateWSLDistros();
+  const manualAgentAPI = agentAPIMode?.value === "manual";
+  if (agentAPIManual) agentAPIManual.style.display = manualAgentAPI ? "" : "none";
+  if (agentAPIURL) {
+    agentAPIURL.disabled = !manualAgentAPI;
+    agentAPIURL.required = manualAgentAPI;
+  }
   if (rootInput) rootInput.placeholder = transport === "wsl" ? "/home/user/project（WSL 内路径）" : transport === "ssh" ? "/workspace 或远程路径" : "E:\\project 或本机路径";
 }
 
@@ -647,8 +674,8 @@ async function bootstrap(): Promise<void> {
 }
 
 async function loadAll(): Promise<void> {
-  const [projects, workspaces, providers, envGroups, codexAccounts, models, tasks, knowledge, libraries, skills, system, proxy, security, syncSettings, syncStatus, syncConflicts, syncPreview] = await Promise.all([
-    api.projects(), api.workspaces(), api.providers(), api.envGroups(), api.codexAccounts(), api.models(), api.tasks(), api.knowledge(), api.knowledgeLibraries(), api.skills(), api.system(), api.proxySettings(), api.securitySettings(), api.syncSettings(), api.syncStatus(), api.syncConflicts(), api.syncPreview().catch(() => ({preview: state.syncPreview})),
+  const [projects, workspaces, providers, envGroups, codexAccounts, models, tasks, knowledge, libraries, skills, system, proxy, security, agentAPI, syncSettings, syncStatus, syncConflicts, syncPreview] = await Promise.all([
+    api.projects(), api.workspaces(), api.providers(), api.envGroups(), api.codexAccounts(), api.models(), api.tasks(), api.knowledge(), api.knowledgeLibraries(), api.skills(), api.system(), api.proxySettings(), api.securitySettings(), api.agentAPISettings(), api.syncSettings(), api.syncStatus(), api.syncConflicts(), api.syncPreview().catch(() => ({preview: state.syncPreview})),
   ]);
   state.projects = projects.projects || [];
   state.workspaces = workspaces.workspaces || [];
@@ -660,10 +687,12 @@ async function loadAll(): Promise<void> {
   state.knowledge = knowledge.knowledge || [];
   state.knowledgeLibraries = libraries.libraries || [];
   state.knowledgeProposals = knowledge.proposals || [];
+  state.knowledgeReviewSettings = knowledge.review_settings || {auto_approve: false};
   state.skills = skills.skills || [];
   if (system?.system) state.system = system.system;
   if (proxy?.proxy) state.proxySettings = proxy.proxy;
   if (security?.security) state.securitySettings = security.security;
+  if (agentAPI?.agent_api) state.agentAPISettings = agentAPI.agent_api;
   if (syncSettings?.sync) state.syncSettings = syncSettings.sync;
   if (syncStatus?.state) { state.syncState = syncStatus.state; state.syncPending = syncStatus.pending || 0; state.syncRun = syncStatus.run || state.syncRun; }
   state.syncConflicts = syncConflicts.conflicts || [];
@@ -1047,12 +1076,12 @@ function projectDetailView(project: Project): string {
     <div class="item-title">${item.locality === "remote" ? icon("server") : icon("monitor")}<div><strong>${escapeHTML(item.name)}</strong><small>${escapeHTML(item.root_path)}</small></div></div>
     <div class="ws-meta"><small>${escapeHTML(item.transport)}${item.distro ? ` · ${escapeHTML(item.distro)}` : ""}</small><strong>${item.read_only ? `只读 · ${escapeHTML(item.owner_device_id || "其他设备")}` : `本机 · ${escapeHTML(item.owner_device_id || "待首次同步绑定")}`}</strong></div>
     ${renderWorkspaceDetection(item)}
-    ${item.read_only ? `<button type="button" data-takeover-workspace="${item.id}">${icon("copy")}接管到本机</button><span class="status warn">远端只读</span>` : `<button data-detect="${item.id}">${icon("refresh")}检测</button><span class="row-actions"><button type="button" data-edit-workspace="${item.id}" class="icon-button" title="编辑 Workspace">${icon("edit")}</button><button type="button" data-delete-workspace="${item.id}" class="icon-button" title="删除 Workspace">${icon("close")}</button></span>`}
+    ${item.read_only ? `<span class="row-actions workspace-remote-actions"><button type="button" data-takeover-workspace="${item.id}">${icon("copy")}接管到本机</button><button type="button" data-retire-remote-workspace="${item.id}" class="icon-button danger" title="移除孤立 Workspace">${icon("close")}</button></span><span class="status warn">远端只读</span>` : `<button data-detect="${item.id}">${icon("refresh")}测试连接</button><span class="row-actions"><button type="button" data-edit-workspace="${item.id}" class="icon-button" title="编辑 Workspace">${icon("edit")}</button><button type="button" data-delete-workspace="${item.id}" class="icon-button" title="删除 Workspace">${icon("close")}</button></span>`}
   </article>`).join("");
   return shell(`<section class="page">
     <header class="page-head"><div><button id="back-projects" class="back-link">← 返回项目列表</button><h1>${escapeHTML(project.name)}</h1><p>${projectTypeLabel(project.project_type)}${project.repository_identity ? ` · ${escapeHTML(project.repository_identity)}` : ""}${project.default_branch ? ` · 默认分支 ${escapeHTML(project.default_branch)}` : ""}</p></div><div class="actions"><button data-dialog="workspace">${icon("plus")}添加 Workspace</button><button type="button" data-edit-project-detail="${project.id}" class="icon-button" title="编辑项目">${icon("edit")}</button><button id="delete-project" class="danger">${icon("close")}删除项目</button></div></header>
     <div class="metrics"><div><small>Workspace</small><strong>${workspaces.length}</strong></div><div><small>任务</small><strong>${tasks.length}</strong></div><div><small>Ready</small><strong>${workspaces.filter(item => item.health === "ready").length}</strong></div></div>
-    <div class="panel"><div class="panel-head"><strong>Workspaces</strong><span>点击「检测」刷新 Backend 能力</span></div>${rows || `<div class="empty">尚无 Workspace，点击右上角添加。</div>`}</div>
+    <div class="panel"><div class="panel-head"><strong>Workspaces</strong><span>“测试连接”会刷新 Backend 能力并验证 Workspace → AHA2 Agent API</span></div>${rows || `<div class="empty">尚无 Workspace，点击右上角添加。</div>`}</div>
     ${workspaceDialog()}${workspaceTakeoverDialog()}
   </section>`);
 }
@@ -1062,7 +1091,18 @@ function projectDialog(): string {
 }
 
 function workspaceDialog(): string {
-  return `<dialog id="workspace-dialog"><form id="workspace-form" method="dialog"><div class="dialog-head"><h2>添加 Workspace</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div><input type="hidden" id="ws-edit-id" name="ws_edit_id" value=""><label>项目<select name="project_id" id="ws-project">${state.projects.map(item => `<option value="${item.id}" ${item.id === state.dialogProjectID ? "selected" : ""}>${escapeHTML(item.name)}</option>`).join("")}</select></label><label>名称<input name="name" id="ws-name" value="本地开发" required></label><div class="two"><label>位置<select name="locality" id="ws-locality"><option value="local">本地</option><option value="remote">远程</option></select></label><label>Transport<select name="transport" id="ws-transport"></select></label></div><label>Root Path<input name="root_path" id="ws-root-path" placeholder="E:\project 或 /home/user/project" required></label><div class="wsl-fields" style="display:none"><label>WSL Distro<select name="distro" id="ws-distro"></select></label><div class="field-help">Root Path 填 WSL 内的路径，如 /home/user/project</div></div><div class="ssh-fields" style="display:none"><div class="two"><label>SSH Host<input name="ssh_host" placeholder="192.168.1.10"></label><label>SSH User<input name="ssh_user" placeholder="root"></label></div><div class="two"><label>SSH Port<input name="ssh_port" type="number" min="1" max="65535" value="22"></label><label>SSH 登录方式<select name="ssh_auth"><option value="auto">自动（有密码时优先密码）</option><option value="password">密码</option><option value="key">Key (~/.ssh)</option></select></label></div><label>登录密码<input name="ssh_password" type="password" autocomplete="new-password" placeholder="可选"></label><label class="workspace-clear-secret"><input name="clear_ssh_password" type="checkbox">清除已保存密码</label><div class="field-help">密码保存在 Secret Store；编辑时留空会保留原密码。</div></div><div class="dialog-actions"><button type="button" data-close>取消</button><button class="primary" value="default">添加 Workspace</button></div></form></dialog>`;
+  return `<dialog id="workspace-dialog"><form id="workspace-form" method="dialog">
+    <div class="dialog-head"><h2>添加 Workspace</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div>
+    <input type="hidden" id="ws-edit-id" name="ws_edit_id" value="">
+    <label>项目<select name="project_id" id="ws-project">${state.projects.map(item => `<option value="${item.id}" ${item.id === state.dialogProjectID ? "selected" : ""}>${escapeHTML(item.name)}</option>`).join("")}</select></label>
+    <label>名称<input name="name" id="ws-name" value="本地开发" required></label>
+    <div class="two"><label>位置<select name="locality" id="ws-locality"><option value="local">本地</option><option value="remote">远程</option></select></label><label>Transport<select name="transport" id="ws-transport"></select></label></div>
+    <label>Root Path<input name="root_path" id="ws-root-path" placeholder="E:\project 或 /home/user/project" required></label>
+    <div class="wsl-fields" style="display:none"><label>WSL Distro<select name="distro" id="ws-distro"></select></label><div class="field-help">Root Path 填 WSL 内的路径，如 /home/user/project</div></div>
+    <div class="ssh-fields" style="display:none"><div class="two"><label>SSH Host<input name="ssh_host" placeholder="192.168.1.10"></label><label>SSH User<input name="ssh_user" placeholder="root"></label></div><div class="two"><label>SSH Port<input name="ssh_port" type="number" min="1" max="65535" value="22"></label><label>SSH 登录方式<select name="ssh_auth"><option value="auto">自动（有密码时优先密码）</option><option value="password">密码</option><option value="key">Key (~/.ssh)</option></select></label></div><label>登录密码<input name="ssh_password" type="password" autocomplete="new-password" placeholder="可选"></label><label class="workspace-clear-secret"><input name="clear_ssh_password" type="checkbox">清除已保存密码</label><div class="field-help">密码保存在 Secret Store；编辑时留空会保留原密码。</div></div>
+    <fieldset class="workspace-agent-api-fields"><legend>Agent API 反向连接</legend><label>地址策略<select name="agent_api_mode" id="ws-agent-api-mode"><option value="auto">自动探测（推荐）</option><option value="global">继承全局默认</option><option value="manual">手动覆盖</option></select></label><label class="workspace-agent-api-manual">Agent API URL<input name="agent_api_url" id="ws-agent-api-url" type="url" placeholder="https://aha.example.com"></label><div class="field-help workspace-agent-api-result">保存后点击 Workspace 的“测试连接”，AHA2 会从该 Workspace 反向验证并保存有效地址。</div></fieldset>
+    <div class="dialog-actions"><button type="button" data-close>取消</button><button class="primary" value="default">添加 Workspace</button></div>
+  </form></dialog>`;
 }
 
 function modelsView(): string {
@@ -1087,11 +1127,21 @@ function modelsView(): string {
 
 function advancedSettingsView(): string {
   const origin = state.securitySettings;
+  const agentAPI = state.agentAPISettings;
   return shell(`<section class="page advanced-settings-page">
-    <header class="page-head"><div><h1>高级设置</h1><p>管理 Owner 账号与本机恢复方式</p></div></header>
+    <header class="page-head"><div><h1>高级设置</h1><p>管理 Agent API、Owner 账号与本机恢复方式</p></div></header>
     <section class="advanced-tools-grid">
       <article class="panel advanced-tool-card"><div>${icon("bot")}<span><strong>提示词</strong><small>查看和维护 AHA2 的提示词模板</small></span></div><button type="button" data-view="prompts">进入提示词设置</button></article>
       <article class="panel advanced-tool-card"><div>${icon("sync")}<span><strong>同步</strong><small>配置设备同步、检查差异与冲突</small></span></div><button type="button" data-view="sync">进入同步设置</button></article>
+    </section>
+    <section class="panel account-security-panel agent-api-settings-panel">
+      <div class="panel-head"><strong>Agent API 访问地址</strong><span>${escapeHTML(agentAPI.effective_url || "未配置")}</span></div>
+      <form id="agent-api-settings-form">
+        <label>全局默认 URL<input name="url" type="url" value="${escapeHTML(agentAPI.url || "")}" placeholder="留空继承启动地址 ${escapeHTML(agentAPI.startup_url || "")}"></label>
+        <label class="security-setting-toggle"><input name="allow_insecure" type="checkbox" ${agentAPI.allow_insecure ? "checked" : ""}><span><strong>允许受信网络中的非 loopback HTTP</strong><small>公网和跨网络访问应使用 HTTPS；修改后 Workspace 需重新测试连接。</small></span></label>
+        <div class="field-help">当前有效地址：<code>${escapeHTML(agentAPI.effective_url || "-")}</code>${agentAPI.startup_url ? ` · 启动默认：<code>${escapeHTML(agentAPI.startup_url)}</code>` : ""}</div>
+        <div class="dialog-actions"><button class="primary" type="submit">保存 Agent API 设置</button></div>
+      </form>
     </section>
     <section class="panel account-security-panel">
       <div class="panel-head"><strong>修改密码</strong><span>${escapeHTML(state.auth?.username || "Owner")}</span></div>
@@ -1349,11 +1399,13 @@ function syncTaskComposerState(textarea: HTMLTextAreaElement | null): void {
   const agent = state.selectedTask?.agents.find(item => item.agent_id === state.selectedTaskAgent);
   const runtimeError = agent?.runtime_config_valid === false
     ? (agent.runtime_config_error || "模型配置不可用，请修改模型配置") : "";
-  textarea.disabled = Boolean(runtimeError);
+  const readOnly = Boolean(state.selectedTask?.task.read_only);
+  textarea.disabled = Boolean(runtimeError) || readOnly || messageSubmitPending;
   if (runtimeError) textarea.placeholder = runtimeError;
+  else if (messageSubmitPending) textarea.placeholder = "消息发送中…";
   renderTaskSlashCommandMenu(textarea);
   const send = document.querySelector<HTMLButtonElement>("#message-send");
-  if (send) send.disabled = Boolean(runtimeError) || (!textarea.value.trim() && currentAttachmentDrafts().length === 0);
+  if (send) send.disabled = Boolean(runtimeError) || readOnly || messageSubmitPending || (!textarea.value.trim() && currentAttachmentDrafts().length === 0);
 }
 
 function applyTaskSlashCommand(value: string): void {
@@ -1440,10 +1492,7 @@ function taskCtxHtml(): string {
   const sessionActionDisabled = Boolean(state.selectedTask?.turns.some(turn => turn.agent_id === state.selectedTaskAgent && isActiveTurn(turn.status)));
   return `<div class="ctx-view">
     ${renderContextMetrics(context, sessionActionDisabled)}
-    <details class="prompt-snapshot" open><summary>查看本轮 Prompt Snapshot</summary><pre>${escapeHTML(context.prompt || "尚无 Prompt Snapshot")}</pre></details>
-    <div class="ctx-columns evidence-only">
-      <section><h3>Context Evidence</h3>${[...(value.project_knowledge || []), ...(value.global_knowledge || [])].map(item => `<div class="knowledge-mini"><strong>${escapeHTML(item.title)}</strong><small>${escapeHTML(item.scope)} · ${escapeHTML(item.type)}</small><p>${escapeHTML(item.body)}</p></div>`).join("") || "<p>暂无已验证知识</p>"}</section>
-    </div>
+    <details class="prompt-snapshot" open><summary>查看本轮 Prompt Snapshot</summary><div class="prompt-snapshot-body markdown-body">${renderMarkdown(context.prompt || "尚无 Prompt Snapshot")}</div></details>
   </div>`;
 }
 
@@ -1541,8 +1590,9 @@ function updateTaskLiveRegions(): void {
     const previousTop = list.scrollTop;
     const wasAtBottom = previousHeight - previousTop - list.clientHeight < 80;
     list.innerHTML = conversationListHtml();
-    if (wasAtBottom) list.scrollTop = list.scrollHeight;
+    if (scrollConversationToBottom || wasAtBottom) list.scrollTop = list.scrollHeight;
     else list.scrollTop = previousTop;
+    scrollConversationToBottom = false;
     restoreRegionUI(list, ui, false);
     bindConversationLiveControls();
   }
@@ -1624,6 +1674,7 @@ function render(): void {
         knowledge: state.knowledge,
         libraries: state.knowledgeLibraries,
         proposals: state.knowledgeProposals,
+        reviewSettings: state.knowledgeReviewSettings,
         refreshData: loadAll,
         render,
         setMessage,
@@ -1831,6 +1882,28 @@ function bindCommon(): void {
     const workspace = state.workspaces.find(item => item.id === button.dataset.takeoverWorkspace);
     if (workspace?.read_only) openWorkspaceTakeoverDialog(workspace);
   }));
+  document.querySelectorAll<HTMLElement>("[data-retire-remote-workspace]").forEach(button => button.addEventListener("click", event => {
+    event.stopPropagation();
+    const id = button.dataset.retireRemoteWorkspace || "";
+    const workspace = state.workspaces.find(item => item.id === id);
+    if (!workspace?.read_only) return;
+    if (!window.confirm(`仅当来源设备已停用或源 Workspace 已删除时才能移除“${workspace.name}”。若它仍有只读任务，需先移除这些任务。确定继续？`)) return;
+    void runWithFeedback(button, "移除中", async () => {
+      const result = await api.retireRemoteWorkspaceMirror(id);
+      let pushed = false;
+      if (result.synchronized) {
+        try {
+          await api.runSync();
+          pushed = true;
+        } catch {}
+      }
+      setMessage("notice", !result.synchronized
+        ? "孤立 Workspace 已从本机移除，并已防止历史同步重放"
+        : pushed ? "孤立 Workspace 已移除，删除标记已推送" : "孤立 Workspace 已移除，删除标记将在下次同步时推送");
+      await loadAll();
+      render();
+    });
+  }));
   document.querySelectorAll<HTMLElement>("[data-edit-provider]").forEach(button => button.addEventListener("click", () => {
     const provider = state.providers.find(item => item.id === button.dataset.editProvider!);
     if (provider) openProviderDialog(provider);
@@ -1838,6 +1911,7 @@ function bindCommon(): void {
   document.querySelector<HTMLSelectElement>("#project-type")?.addEventListener("change", syncProjectTypeFields);
   document.querySelector<HTMLSelectElement>("#ws-locality")?.addEventListener("change", syncWorkspaceFields);
   document.querySelector<HTMLSelectElement>("#ws-transport")?.addEventListener("change", syncWorkspaceFields);
+  document.querySelector<HTMLSelectElement>("#ws-agent-api-mode")?.addEventListener("change", syncWorkspaceFields);
   document.querySelector<HTMLSelectElement>('[name="ssh_auth"]')?.addEventListener("change", syncWorkspaceFields);
   document.querySelector<HTMLSelectElement>('#workspace-takeover-dialog [name="transport"]')?.addEventListener("change", syncWorkspaceTakeoverFields);
   document.querySelector<HTMLInputElement>('[name="clear_ssh_password"]')?.addEventListener("change", syncWorkspaceFields);
@@ -2181,7 +2255,10 @@ function bindCommon(): void {
     void runWithFeedback(button, "检测中", async () => {
       try {
         const result = await api.detectWorkspace(id);
-        setMessage("notice", `检测完成：${statusLabel(result.workspace.health)}`);
+        const agentAPI = result.workspace.agent_api_status === "ready" && result.workspace.agent_api_resolved_url
+          ? ` · Agent API ${result.workspace.agent_api_resolved_url}`
+          : result.workspace.agent_api_error ? ` · Agent API 不可达：${result.workspace.agent_api_error}` : "";
+        setMessage("notice", `连接测试完成：${statusLabel(result.workspace.health)}${agentAPI}`);
       } finally {
         await loadAll();
         render();
@@ -2288,6 +2365,16 @@ function bindCommon(): void {
     state.securitySettings = response.security;
     setMessage("notice", validateOrigin ? "Origin 校验已启用" : "Origin 校验已关闭");
   }, "保存中");
+  bindForm("#agent-api-settings-form", async form => {
+    const allowInsecure = form.get("allow_insecure") === "on";
+    if (allowInsecure && !state.agentAPISettings.allow_insecure && !window.confirm("确认允许受信网络中的非 loopback HTTP Agent API？公网和不受信网络必须使用 HTTPS。")) return;
+    const response = await api.updateAgentAPISettings({
+      url: String(form.get("url") || "").trim(),
+      allow_insecure: allowInsecure,
+    });
+    state.agentAPISettings = response.agent_api;
+    setMessage("notice", "Agent API 全局设置已保存，请重新测试相关 Workspace 连接");
+  }, "保存中");
   document.querySelector<HTMLButtonElement>("#message-attachment-pick")?.addEventListener("click", () => {
     document.querySelector<HTMLInputElement>("#message-attachment-input")?.click();
   });
@@ -2320,37 +2407,57 @@ function bindCommon(): void {
   bindRemoveAttachmentButtons();
   document.querySelector<HTMLFormElement>("#message-form")?.addEventListener("submit", async event => {
     event.preventDefault();
+    if (messageSubmitPending) return;
     const form = new FormData(event.currentTarget);
     const content = String(form.get("content") || "").trim();
     if (!state.selectedTask) return;
-    const textarea = document.querySelector<HTMLTextAreaElement>("#message-form textarea");
-    const attachments = currentAttachmentDrafts();
+    const taskID = state.selectedTask.task.id;
+    const agentID = state.selectedTaskAgent;
+    const attachments = [...currentAttachmentDrafts()];
+    if (!content && attachments.length === 0) return;
+    messageSubmitPending = true;
+    state.taskDrafts[agentID] = "";
+    if (state.selectedTaskAgent === agentID) state.taskDraft = "";
+    state.taskAttachmentDrafts[agentID] = [];
+    const clearTextarea = document.querySelector<HTMLTextAreaElement>("#message-form textarea");
+    if (clearTextarea) {
+      clearTextarea.value = "";
+      clearTextarea.style.height = "auto";
+      syncTaskComposerState(clearTextarea);
+    }
+    document.querySelector(".composer-attachment-tray")?.remove();
+    const attachmentButton = document.querySelector<HTMLButtonElement>("#message-attachment-pick");
+    if (attachmentButton) attachmentButton.innerHTML = icon("attachment");
+    persistNavigationState();
+    let accepted = false;
     try {
       const handled = attachments.length === 0 && await executeTaskSlashCommand(content);
+      accepted = handled;
       if (!handled) {
-        const submission = await api.agentMessage(state.selectedTask.task.id, state.selectedTaskAgent, content, attachments.map(item => item.id));
-        if (!submission.started) setMessage("notice", `${state.selectedTaskAgent} 正在执行，消息已排队；输入 /interrupt 可中断当前 Round`);
-        await refreshTaskRuntime(state.selectedTask.task.id);
+        const submission = await api.agentMessage(taskID, agentID, content, attachments.map(item => item.id));
+        accepted = true;
+        if (!submission.started) setMessage("notice", `${agentID} 正在执行，消息已排队；输入 /interrupt 可中断当前 Round`);
+        await refreshTaskRuntime(taskID);
+        scrollConversationToBottom = true;
         updateTaskLiveRegions();
-      }
-      state.taskDraft = "";
-      state.taskDrafts[state.selectedTaskAgent] = "";
-      state.taskAttachmentDrafts[state.selectedTaskAgent] = [];
-      document.querySelector(".composer-attachment-tray")?.remove();
-      const attachmentButton = document.querySelector<HTMLButtonElement>("#message-attachment-pick");
-      if (attachmentButton) attachmentButton.innerHTML = icon("attachment");
-      if (textarea) {
-        textarea.value = "";
-        textarea.style.height = "auto";
-        syncTaskComposerState(textarea);
       }
       const menu = document.querySelector<HTMLElement>("#slash-command-menu");
       if (menu) menu.hidden = true;
     } catch (error) {
-      state.taskDraft = content;
-      state.taskDrafts[state.selectedTaskAgent] = content;
-      if (textarea) textarea.value = content;
-      setMessage("error", error instanceof Error ? error.message : String(error));
+      if (!accepted && state.selectedTask?.task.id === taskID && state.selectedTaskAgent === agentID) {
+        state.taskDrafts[agentID] = content;
+        state.taskAttachmentDrafts[agentID] = attachments;
+        state.taskDraft = content;
+        const currentTextarea = document.querySelector<HTMLTextAreaElement>("#message-form textarea");
+        if (currentTextarea) currentTextarea.value = content;
+        refreshMessageAttachmentDOM();
+      }
+      persistNavigationState();
+      const message = error instanceof Error ? error.message : String(error);
+      setMessage("error", accepted ? `消息已发送，但刷新失败：${message}` : message);
+    } finally {
+      messageSubmitPending = false;
+      syncTaskComposerState(document.querySelector<HTMLTextAreaElement>("#message-form textarea"));
     }
   });
   document.querySelector<HTMLTextAreaElement>("#message-form textarea")?.addEventListener("input", event => {

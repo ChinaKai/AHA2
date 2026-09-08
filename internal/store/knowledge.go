@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -15,17 +16,28 @@ import (
 )
 
 var (
-	ErrKnowledgeInvalidScope = errors.New("knowledge scope is invalid")
-	ErrKnowledgeInvalidSlug  = errors.New("knowledge slug is invalid")
-	ErrKnowledgeParent       = errors.New("knowledge parent must be in the same scope and project")
-	ErrKnowledgeCycle        = errors.New("knowledge hierarchy contains a cycle")
-	ErrKnowledgeRoot         = errors.New("knowledge scope already has a root index")
-	ErrKnowledgeRootManaged  = errors.New("knowledge root index is managed and cannot be replaced or deleted")
-	ErrKnowledgeSiblingSlug  = errors.New("knowledge sibling slug already exists")
-	ErrKnowledgeHasChildren  = errors.New("knowledge entry has children")
+	ErrKnowledgeInvalidScope  = errors.New("knowledge scope is invalid")
+	ErrKnowledgeInvalidSlug   = errors.New("knowledge slug is invalid")
+	ErrKnowledgeParent        = errors.New("knowledge parent must be in the same scope and project")
+	ErrKnowledgeCycle         = errors.New("knowledge hierarchy contains a cycle")
+	ErrKnowledgeRoot          = errors.New("knowledge scope already has a root index")
+	ErrKnowledgeRootManaged   = errors.New("knowledge root index is managed and cannot be replaced or deleted")
+	ErrKnowledgeSiblingSlug   = errors.New("knowledge sibling slug already exists")
+	ErrKnowledgeHasChildren   = errors.New("knowledge entry has children")
+	ErrKnowledgeFeedbackState = errors.New("knowledge feedback conflicts with current revision state")
 )
 
 var knowledgeSlugPattern = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
+
+const (
+	GlobalKnowledgeRootID             = "knowledge_root_global"
+	GlobalGeneralKnowledgeID          = "knowledge_global_general"
+	GlobalAgentLessonsKnowledgeID     = "knowledge_global_agent_lessons"
+	GlobalTechnicalLessonsKnowledgeID = "knowledge_global_agent_lessons_technical"
+	GlobalBehaviorLessonsKnowledgeID  = "knowledge_global_agent_lessons_behavior"
+)
+
+const globalKnowledgeRootBody = "这是 AHA2 全局知识页面。通用知识以人类阅读为主，Agent 仅在任务主题明确相关时按需读取；Agent 经验教训用于沉淀可跨项目复用的技术诊断与行为教训。请根据分类、标题与摘要选择阅读路径。"
 
 const knowledgeColumns = `id,scope,project_id,parent_id,slug,sort_order,is_index,type,title,body,status,branch_scope,product_line_id,evidence_json,confidence,revision,content_hash,verified_commit,helped_count,stale_count,feedback_state,source_task_id,source_turn_id,created_at,updated_at,last_verified_at`
 
@@ -42,17 +54,17 @@ func KnowledgeSlug(title, fallback string) string {
 
 func knowledgeRootID(scope, projectID string) string {
 	if scope == "global" {
-		return "knowledge_root_global"
+		return GlobalKnowledgeRootID
 	}
 	return "knowledge_root_project_" + projectID
 }
 
 func knowledgeRootDefaults(scope, projectID string, now time.Time) domain.KnowledgeEntry {
 	title := "全局知识首页"
-	body := "这里汇总跨项目共享的知识文档。"
+	body := globalKnowledgeRootBody
 	if scope == "project" {
 		title = "知识首页"
-		body = "这里汇总本项目的知识文档与常用入口。"
+		body = "这是当前项目的知识页面，保存项目实践、技术决策、诊断结论和可复用经验。请根据下面的标题与摘要按需打开文档。"
 	}
 	contentHash := fmt.Sprintf("%x", sha256.Sum256([]byte(strings.TrimSpace(title)+"\n"+strings.TrimSpace(body))))
 	return domain.KnowledgeEntry{
@@ -72,6 +84,146 @@ func knowledgeRootDefaults(scope, projectID string, now time.Time) domain.Knowle
 		UpdatedAt:      now,
 		LastVerifiedAt: now,
 	}
+}
+
+func IsManagedGlobalKnowledgeCategory(id string) bool {
+	switch id {
+	case GlobalGeneralKnowledgeID, GlobalAgentLessonsKnowledgeID, GlobalTechnicalLessonsKnowledgeID, GlobalBehaviorLessonsKnowledgeID:
+		return true
+	default:
+		return false
+	}
+}
+
+func globalKnowledgeCategories(rootID string, now time.Time) []domain.KnowledgeEntry {
+	values := []domain.KnowledgeEntry{
+		{
+			ID: GlobalGeneralKnowledgeID, ParentID: rootID, Slug: "general", SortOrder: 0,
+			Title: "通用知识", Body: "面向人类阅读的跨项目参考资料。Agent 仅在当前任务主题明确相关时读取，不作为默认行为约束。",
+		},
+		{
+			ID: GlobalAgentLessonsKnowledgeID, ParentID: rootID, Slug: "agent-lessons", SortOrder: 10,
+			Title: "Agent 经验教训", Body: "Agent 应优先检查的跨项目经验索引。只沉淀可复用的触发条件、正确行为、验证方法与必要例外，不保留事故叙事或已否决方案的残留说明。",
+		},
+		{
+			ID: GlobalTechnicalLessonsKnowledgeID, ParentID: GlobalAgentLessonsKnowledgeID, Slug: "technical-diagnostics", SortOrder: 0,
+			Title: "技术诊断", Body: "记录稳定可复现的技术陷阱：现象、原因、安全修复与验证方法。",
+		},
+		{
+			ID: GlobalBehaviorLessonsKnowledgeID, ParentID: GlobalAgentLessonsKnowledgeID, Slug: "behavior-lessons", SortOrder: 10,
+			Title: "行为教训", Body: "记录 Agent 做事方式的可复用纠正：触发条件、应执行的行为、验收标准与例外。必须始终执行的规则应晋升到 Prompt 或 Skill。",
+		},
+	}
+	for index := range values {
+		values[index].Scope = "global"
+		values[index].Type = "navigation"
+		values[index].Status = domain.KnowledgeVerified
+		values[index].Confidence = 1
+		values[index].Revision = 1
+		values[index].ContentHash = fmt.Sprintf("%x", sha256.Sum256([]byte(strings.TrimSpace(values[index].Title)+"\n"+strings.TrimSpace(values[index].Body))))
+		values[index].CreatedAt = now
+		values[index].UpdatedAt = now
+		values[index].LastVerifiedAt = now
+	}
+	return values
+}
+
+// EnsureGlobalKnowledgeCategories creates the two user-facing global sections
+// and moves legacy root-level documents into them. Diagnostics and Agent-authored
+// guidance become lessons; remaining human/imported references stay general.
+func (s *Store) EnsureGlobalKnowledgeCategories(ctx context.Context) error {
+	root, err := s.EnsureKnowledgeRoot(ctx, "global", "")
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE knowledge_entries
+		SET parent_id=CASE
+			WHEN type='diagnostic' THEN ?
+			WHEN source_task_id<>'' THEN ?
+			ELSE ? END
+		WHERE scope='global' AND project_id='' AND is_index=0 AND parent_id=?
+		  AND id NOT IN (?,?,?,?)`,
+		GlobalTechnicalLessonsKnowledgeID, GlobalBehaviorLessonsKnowledgeID, GlobalGeneralKnowledgeID, root.ID,
+		GlobalGeneralKnowledgeID, GlobalAgentLessonsKnowledgeID, GlobalTechnicalLessonsKnowledgeID, GlobalBehaviorLessonsKnowledgeID,
+	); err != nil {
+		return err
+	}
+	for _, item := range globalKnowledgeCategories(root.ID, now) {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT OR IGNORE INTO knowledge_entries(`+knowledgeColumns+`)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			item.ID, item.Scope, item.ProjectID, item.ParentID, item.Slug, item.SortOrder, item.IsIndex,
+			item.Type, item.Title, item.Body, item.Status, item.BranchScope, item.ProductLineID, item.EvidenceJSON,
+			item.Confidence, item.Revision, item.ContentHash, item.VerifiedCommit, item.HelpedCount, item.StaleCount,
+			item.FeedbackState, item.SourceTaskID, item.SourceTurnID, timeString(item.CreatedAt), timeString(item.UpdatedAt), timeString(item.LastVerifiedAt),
+		); err != nil {
+			return err
+		}
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT id,entry_id,status,source_task_id,proposed_json FROM knowledge_proposals`)
+	if err != nil {
+		return err
+	}
+	type pendingProposal struct{ id, entryID, status, sourceTaskID, encoded string }
+	pending := []pendingProposal{}
+	for rows.Next() {
+		var item pendingProposal
+		if err := rows.Scan(&item.id, &item.entryID, &item.status, &item.sourceTaskID, &item.encoded); err != nil {
+			rows.Close()
+			return err
+		}
+		pending = append(pending, item)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, item := range pending {
+		var payload knowledgeProposalPayload
+		if json.Unmarshal([]byte(item.encoded), &payload) != nil || payload.Proposed.Scope != "global" || (payload.Proposed.ParentID != "" && payload.Proposed.ParentID != root.ID) {
+			continue
+		}
+		parentID := GlobalGeneralKnowledgeID
+		if payload.Proposed.Type == "diagnostic" {
+			parentID = GlobalTechnicalLessonsKnowledgeID
+		} else if payload.Proposed.SourceTaskID != "" || item.sourceTaskID != "" {
+			parentID = GlobalBehaviorLessonsKnowledgeID
+		}
+		if item.status == string(domain.KnowledgeProposalPending) {
+			payload.Proposed.ParentID = parentID
+			encoded, err := json.Marshal(payload)
+			if err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE knowledge_proposals SET proposed_json=? WHERE id=?`, string(encoded), item.id); err != nil {
+				return err
+			}
+		} else if parentID != GlobalGeneralKnowledgeID {
+			if _, err := tx.ExecContext(ctx, `UPDATE knowledge_entries SET parent_id=? WHERE id=? AND scope='global' AND parent_id IN (?,?)`, parentID, item.entryID, root.ID, GlobalGeneralKnowledgeID); err != nil {
+				return err
+			}
+		}
+	}
+	legacyBodies := []string{
+		"这里汇总跨项目共享的知识文档。",
+		"这是 AHA2 全局知识页面，保存跨项目复用的常用知识，以及 Agent 工作过程中沉淀的经验和教训。请根据下面的标题与摘要按需打开文档。",
+	}
+	for _, body := range legacyBodies {
+		if _, err := tx.ExecContext(ctx, `UPDATE knowledge_entries SET body=?,content_hash=?,revision=revision+1,updated_at=? WHERE id=? AND body=?`,
+			globalKnowledgeRootBody,
+			fmt.Sprintf("%x", sha256.Sum256([]byte(strings.TrimSpace(root.Title)+"\n"+globalKnowledgeRootBody))),
+			timeString(now), root.ID, body,
+		); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // EnsureKnowledgeRoot creates the durable root index for one knowledge scope and
@@ -170,6 +322,15 @@ func (s *Store) defaultKnowledgeParent(ctx context.Context, item *domain.Knowled
 	if err != nil {
 		return err
 	}
+	if item.Scope == "global" {
+		var categoryID string
+		if err := s.db.QueryRowContext(ctx, `SELECT id FROM knowledge_entries WHERE id=? AND scope='global'`, GlobalGeneralKnowledgeID).Scan(&categoryID); err == nil {
+			item.ParentID = categoryID
+			return nil
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+	}
 	item.ParentID = root.ID
 	return nil
 }
@@ -263,7 +424,7 @@ func validateKnowledgeWith(ctx context.Context, queryer knowledgeQueryer, item d
 }
 
 func (s *Store) CreateKnowledge(ctx context.Context, item domain.KnowledgeEntry) error {
-	if item.IsIndex {
+	if item.IsIndex || IsManagedGlobalKnowledgeCategory(item.ID) {
 		return ErrKnowledgeRootManaged
 	}
 	if item.Revision < 1 {
@@ -437,6 +598,9 @@ func (s *Store) UpdateKnowledge(ctx context.Context, item domain.KnowledgeEntry)
 	if err != nil {
 		return err
 	}
+	if IsManagedGlobalKnowledgeCategory(existing.ID) {
+		return ErrKnowledgeRootManaged
+	}
 	if existing.IsIndex {
 		if !item.IsIndex || item.Scope != existing.Scope || item.ProjectID != existing.ProjectID || item.ParentID != "" || item.Slug != "index" || item.Status != domain.KnowledgeVerified || item.ProductLineID != "" {
 			return ErrKnowledgeRootManaged
@@ -485,7 +649,7 @@ func (s *Store) DeleteKnowledge(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	if item.IsIndex {
+	if item.IsIndex || IsManagedGlobalKnowledgeCategory(item.ID) {
 		return ErrKnowledgeRootManaged
 	}
 	pending, err := s.hasPendingKnowledgeProposal(ctx, id)
@@ -516,6 +680,8 @@ func (s *Store) VerifyKnowledge(ctx context.Context, id, updatedAt string) error
 	}
 	item.Status = domain.KnowledgeVerified
 	item.Revision++
+	item.HelpedCount = 0
+	item.StaleCount = 0
 	item.FeedbackState = ""
 	item.LastVerifiedAt = parseTime(updatedAt)
 	item.UpdatedAt = item.LastVerifiedAt
@@ -527,8 +693,14 @@ func (s *Store) FeedbackKnowledge(ctx context.Context, id, kind string, updatedA
 	if err != nil {
 		return domain.KnowledgeEntry{}, err
 	}
+	if IsManagedGlobalKnowledgeCategory(item.ID) {
+		return domain.KnowledgeEntry{}, ErrKnowledgeRootManaged
+	}
 	switch kind {
 	case "helped":
+		if item.Status != domain.KnowledgeVerified || item.FeedbackState == "stale" || item.FeedbackState == "wrong" {
+			return domain.KnowledgeEntry{}, ErrKnowledgeFeedbackState
+		}
 		item.HelpedCount++
 		item.FeedbackState = "helped"
 	case "stale", "wrong":

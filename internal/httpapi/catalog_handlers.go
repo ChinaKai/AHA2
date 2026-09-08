@@ -145,6 +145,8 @@ func (s *Server) createWorkspace(writer http.ResponseWriter, request *http.Reque
 		SSHPassword      string `json:"ssh_password"`
 		ClearSSHPassword bool   `json:"clear_ssh_password"`
 		Distro           string `json:"distro"`
+		AgentAPIMode     string `json:"agent_api_mode"`
+		AgentAPIURL      string `json:"agent_api_url"`
 	}
 	if err := decodeJSON(request, &payload); err != nil {
 		writeError(writer, http.StatusBadRequest, "invalid_json")
@@ -175,6 +177,12 @@ func (s *Server) createWorkspace(writer http.ResponseWriter, request *http.Reque
 		Distro: strings.TrimSpace(payload.Distro),
 		Health: "unknown", CreatedAt: now, UpdatedAt: now,
 	}
+	agentAPIMode, agentAPIURL, err := s.app.ValidateWorkspaceAgentAPI(request.Context(), payload.AgentAPIMode, payload.AgentAPIURL)
+	if err != nil {
+		writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "workspace_agent_api_invalid", "message": err.Error()})
+		return
+	}
+	item.AgentAPIMode, item.AgentAPIURL = agentAPIMode, agentAPIURL
 	if item.Transport == "ssh" {
 		item.SSHAuth = normalizeWorkspaceSSHAuth(payload.SSHAuth)
 		if payload.SSHPassword != "" {
@@ -232,6 +240,8 @@ func (s *Server) updateWorkspace(writer http.ResponseWriter, request *http.Reque
 		SSHPassword      string `json:"ssh_password"`
 		ClearSSHPassword bool   `json:"clear_ssh_password"`
 		Distro           string `json:"distro"`
+		AgentAPIMode     string `json:"agent_api_mode"`
+		AgentAPIURL      string `json:"agent_api_url"`
 	}
 	if err := decodeJSON(request, &payload); err != nil {
 		writeError(writer, http.StatusBadRequest, "invalid_json")
@@ -260,6 +270,11 @@ func (s *Server) updateWorkspace(writer http.ResponseWriter, request *http.Reque
 	existing.SSHUser = strings.TrimSpace(payload.SSHUser)
 	existing.SSHPort = payload.SSHPort
 	existing.Distro = strings.TrimSpace(payload.Distro)
+	existing.AgentAPIMode, existing.AgentAPIURL, err = s.app.ValidateWorkspaceAgentAPI(request.Context(), payload.AgentAPIMode, payload.AgentAPIURL)
+	if err != nil {
+		writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "workspace_agent_api_invalid", "message": err.Error()})
+		return
+	}
 	oldCredentialRef := existing.SSHCredentialRef
 	oldPassword, hadOldPassword := "", false
 	if oldCredentialRef != "" && s.secrets != nil {
@@ -343,6 +358,10 @@ func (s *Server) detectWorkspaceHandler(writer http.ResponseWriter, request *htt
 			detected.Repository = map[string]any{}
 			detected.LastDetectedAt, detected.UpdatedAt = time.Now().UTC(), time.Now().UTC()
 		}
+		detected.AgentAPIResolvedURL = ""
+		detected.AgentAPIStatus = "unknown"
+		detected.AgentAPIError = ""
+		detected.AgentAPILastCheckedAt = time.Time{}
 		if storeErr := s.store.UpdateWorkspaceDetection(request.Context(), detected); storeErr != nil {
 			writeError(writer, http.StatusInternalServerError, "workspace_detection_store_failed")
 			return
@@ -353,6 +372,13 @@ func (s *Server) detectWorkspaceHandler(writer http.ResponseWriter, request *htt
 	if err := s.store.UpdateWorkspaceDetection(request.Context(), detected); err != nil {
 		writeError(writer, http.StatusInternalServerError, "workspace_detection_store_failed")
 		return
+	}
+	if s.app != nil {
+		detected = s.app.DetectWorkspaceAgentAPI(request.Context(), detected)
+		if err := s.store.UpdateWorkspaceDetection(request.Context(), detected); err != nil {
+			writeError(writer, http.StatusInternalServerError, "workspace_agent_api_detection_store_failed")
+			return
+		}
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "workspace": detected})
 }

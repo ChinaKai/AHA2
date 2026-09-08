@@ -81,7 +81,7 @@ func detectWithRunner(ctx context.Context, item domain.Workspace, runner Runner)
 		item.Platform = runtime.GOOS + "/" + runtime.GOARCH
 		item.Capabilities["platform"] = probeResult(probeReady, "")
 	} else {
-		result, err := runner.Run(ctx, Command{Executable: "uname", Args: []string{"-srm"}, Dir: item.RootPath, Timeout: 15 * time.Second}, nil)
+		result, err := runDetectionCommand(ctx, item, runner, Command{Executable: "uname", Args: []string{"-srm"}, Dir: item.RootPath, Timeout: 15 * time.Second})
 		if err == nil && result.ExitCode == 0 && strings.TrimSpace(result.Stdout) != "" {
 			item.Platform = strings.TrimSpace(result.Stdout)
 			item.Capabilities["platform"] = probeResult(probeReady, "")
@@ -111,7 +111,7 @@ func detectWithRunner(ctx context.Context, item domain.Workspace, runner Runner)
 
 func probeWorkspaceAccess(ctx context.Context, item domain.Workspace, runner Runner) (Result, error) {
 	if item.Transport == "ssh" || item.Transport == "wsl" || item.Locality == "remote" {
-		return runner.Run(ctx, Command{Executable: "pwd", Dir: item.RootPath, Timeout: 15 * time.Second}, nil)
+		return runDetectionCommand(ctx, item, runner, Command{Executable: "pwd", Dir: item.RootPath, Timeout: 15 * time.Second})
 	}
 	root := strings.TrimSpace(item.RootPath)
 	if root == "" {
@@ -138,9 +138,9 @@ func probeWorkspaceAccess(ctx context.Context, item domain.Workspace, runner Run
 // probeGit returns true when Git itself failed to execute. A normal non-Git
 // folder is a valid workspace and does not degrade workspace health.
 func probeGit(ctx context.Context, runner Runner, item *domain.Workspace) bool {
-	result, err := runner.Run(ctx, Command{
+	result, err := runDetectionCommand(ctx, *item, runner, Command{
 		Executable: "git", Args: []string{"-C", item.RootPath, "rev-parse", "--show-toplevel"}, Timeout: 15 * time.Second,
-	}, nil)
+	})
 	item.Repository["is_git"] = false
 	if err == nil && result.ExitCode == 0 {
 		root := strings.TrimSpace(result.Stdout)
@@ -152,9 +152,9 @@ func probeGit(ctx context.Context, runner Runner, item *domain.Workspace) bool {
 		item.Repository["is_git"] = true
 		item.Repository["status"] = probeReady
 		item.Repository["root"] = root
-		branchResult, branchErr := runner.Run(ctx, Command{
+		branchResult, branchErr := runDetectionCommand(ctx, *item, runner, Command{
 			Executable: "git", Args: []string{"-C", item.RootPath, "branch", "--show-current"}, Timeout: 15 * time.Second,
-		}, nil)
+		})
 		if branchErr == nil && branchResult.ExitCode == 0 {
 			item.Repository["branch"] = strings.TrimSpace(branchResult.Stdout)
 			return false
@@ -179,9 +179,9 @@ func probeGit(ctx context.Context, runner Runner, item *domain.Workspace) bool {
 // boolean result reports an execution failure; a missing optional CLI is not a
 // degraded workspace by itself.
 func probeBackend(ctx context.Context, runner Runner, item domain.Workspace, executable string) (map[string]any, bool) {
-	result, err := runner.Run(ctx, Command{
+	result, err := runDetectionCommand(ctx, item, runner, Command{
 		Executable: executable, Args: []string{"--version"}, Dir: item.RootPath, Timeout: 20 * time.Second,
-	}, nil)
+	})
 	if err == nil && result.ExitCode == 0 {
 		version := strings.TrimSpace(result.Stdout)
 		if version == "" {
@@ -194,6 +194,17 @@ func probeBackend(ctx context.Context, runner Runner, item domain.Workspace, exe
 	}
 	message := strings.ToUpper(executable[:1]) + executable[1:] + " 检测执行失败: " + safeProbeDetail(item, result, err)
 	return probeResult(probeExecutionFailed, message), true
+}
+
+// Detection probes are read-only, so retrying one WSL deadline is safe and
+// absorbs the common cold-start case without making general Runner commands
+// repeat side effects. SSH and an already-cancelled parent context never retry.
+func runDetectionCommand(ctx context.Context, item domain.Workspace, runner Runner, command Command) (Result, error) {
+	result, err := runner.Run(ctx, command, nil)
+	if item.Transport != "wsl" || !errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil {
+		return result, err
+	}
+	return runner.Run(ctx, command, nil)
 }
 
 func probeResult(status, message string) map[string]any {

@@ -50,7 +50,7 @@ func TestKnowledgeProposalMigrationAndNewEntryApproval(t *testing.T) {
 	if _, err := database.db.ExecContext(ctx, `DROP TABLE knowledge_proposals`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := database.db.ExecContext(ctx, `DELETE FROM schema_migrations WHERE version=34`); err != nil {
+	if _, err := database.db.ExecContext(ctx, `DELETE FROM schema_migrations WHERE version IN (34,45)`); err != nil {
 		t.Fatal(err)
 	}
 	if err := database.migrate(ctx); err != nil {
@@ -127,6 +127,17 @@ func TestImportKnowledgeProposalPreservesLifecycleWithoutPublishing(t *testing.T
 	if err != nil || stored.Status != domain.KnowledgeProposalApproved || stored.DecidedAt.IsZero() || stored.Proposed.Body != proposed.Body {
 		t.Fatalf("approved proposal import=%#v err=%v", stored, err)
 	}
+	stalePending := item
+	stalePending.Status = domain.KnowledgeProposalPending
+	stalePending.UpdatedAt = now
+	stalePending.DecidedAt = time.Time{}
+	if err := database.ImportKnowledgeProposal(ctx, stalePending); err != nil {
+		t.Fatal(err)
+	}
+	stored, _ = database.KnowledgeProposal(ctx, item.ID)
+	if stored.Status != domain.KnowledgeProposalApproved {
+		t.Fatalf("stale pending replay regressed approved proposal: %#v", stored)
+	}
 	rejected := item
 	rejected.ID = "synced-proposal-rejected"
 	rejected.EntryID = "synced-entry-rejected"
@@ -144,6 +155,45 @@ func TestImportKnowledgeProposalPreservesLifecycleWithoutPublishing(t *testing.T
 	}
 	if _, err := database.KnowledgeProposal(ctx, rejected.ID); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("synced proposal delete failed: %v", err)
+	}
+}
+
+func TestImportKnowledgeProposalResolvesConcurrentPendingDeterministically(t *testing.T) {
+	t.Parallel()
+	database, ctx, project, root := proposalTestStore(t)
+	now := time.Now().UTC()
+	entry := domain.KnowledgeEntry{
+		ID: "concurrent-entry", Scope: "project", ProjectID: project.ID, ParentID: root.ID,
+		Type: "practice", Title: "Concurrent", Body: "body", CreatedAt: now, UpdatedAt: now,
+	}
+	first := pendingProposal("proposal-a", entry, 0, now)
+	if err := database.ImportKnowledgeProposal(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	older := pendingProposal("proposal-b", entry, 0, now.Add(-time.Second))
+	if err := database.ImportKnowledgeProposal(ctx, older); err != nil {
+		t.Fatal(err)
+	}
+	olderStored, _ := database.KnowledgeProposal(ctx, older.ID)
+	firstStored, _ := database.KnowledgeProposal(ctx, first.ID)
+	if olderStored.Status != domain.KnowledgeProposalRejected || firstStored.Status != domain.KnowledgeProposalPending {
+		t.Fatalf("older concurrent proposal was not rejected: older=%#v first=%#v", olderStored, firstStored)
+	}
+	newer := pendingProposal("proposal-c", entry, 0, now.Add(time.Second))
+	if err := database.ImportKnowledgeProposal(ctx, newer); err != nil {
+		t.Fatal(err)
+	}
+	firstStored, _ = database.KnowledgeProposal(ctx, first.ID)
+	newerStored, _ := database.KnowledgeProposal(ctx, newer.ID)
+	if firstStored.Status != domain.KnowledgeProposalRejected || newerStored.Status != domain.KnowledgeProposalPending {
+		t.Fatalf("newer concurrent proposal did not win: first=%#v newer=%#v", firstStored, newerStored)
+	}
+	if err := database.ImportKnowledgeProposal(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	firstStored, _ = database.KnowledgeProposal(ctx, first.ID)
+	if firstStored.Status != domain.KnowledgeProposalRejected {
+		t.Fatalf("stale pending replay resurrected rejected proposal: %#v", firstStored)
 	}
 }
 
@@ -199,7 +249,7 @@ func TestKnowledgeRevisionProposalStalesThenPublishesExactRevision(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if published.Status != domain.KnowledgeVerified || published.Revision != existing.Revision+1 || published.Title != proposed.Title || published.Body != proposed.Body || published.HelpedCount != existing.HelpedCount || published.StaleCount != existing.StaleCount || published.FeedbackState != "" {
+	if published.Status != domain.KnowledgeVerified || published.Revision != existing.Revision+1 || published.Title != proposed.Title || published.Body != proposed.Body || published.HelpedCount != 0 || published.StaleCount != 0 || published.FeedbackState != "" {
 		t.Fatalf("published revision=%#v", published)
 	}
 	approved, err := database.KnowledgeProposal(ctx, created.ID)

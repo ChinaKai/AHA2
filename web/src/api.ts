@@ -1,4 +1,5 @@
 import type {
+  AgentAPISettings,
   Attachment,
   AuthStatus,
   CodexAccount,
@@ -8,6 +9,7 @@ import type {
   Knowledge,
   KnowledgeLibrary,
   KnowledgeProposal,
+  KnowledgeReviewSettings,
   Model,
   Project,
   ProductLine,
@@ -108,6 +110,14 @@ class APIClient {
     return this.request("/api/v1/settings/security", {method: "PUT", body: JSON.stringify(payload)});
   }
 
+  agentAPISettings(): Promise<{agent_api: AgentAPISettings}> {
+    return this.request("/api/v1/settings/agent-api");
+  }
+
+  updateAgentAPISettings(payload: {url: string; allow_insecure: boolean}): Promise<{agent_api: AgentAPISettings}> {
+    return this.request("/api/v1/settings/agent-api", {method: "PUT", body: JSON.stringify(payload)});
+  }
+
   syncSettings(): Promise<{sync: SyncSettings}> {
     return this.request("/api/v1/settings/sync");
   }
@@ -163,6 +173,10 @@ class APIClient {
 
   deleteWorkspace(id: string): Promise<{ok: boolean}> {
     return this.request(`/api/v1/workspaces/${encodeURIComponent(id)}`, {method: "DELETE"});
+  }
+
+  retireRemoteWorkspaceMirror(id: string): Promise<{ok: boolean; owner_device_id: string; synchronized: boolean}> {
+    return this.request(`/api/v1/workspaces/${encodeURIComponent(id)}/remote-mirror`, {method: "DELETE"});
   }
 
   updateWorkspace(id: string, payload: Record<string, unknown>): Promise<{workspace: Workspace}> {
@@ -436,7 +450,7 @@ class APIClient {
     return this.request(`/api/v1/rounds/${id}/interrupt`, {method: "POST", body: "{}"});
   }
 
-  knowledge(scope = "", projectID = "", status = ""): Promise<{knowledge: Knowledge[]; proposals?: KnowledgeProposal[]}> {
+  knowledge(scope = "", projectID = "", status = ""): Promise<{knowledge: Knowledge[]; proposals?: KnowledgeProposal[]; review_settings?: KnowledgeReviewSettings}> {
     const query = new URLSearchParams();
     if (scope) query.set("scope", scope);
     if (projectID) query.set("project_id", projectID);
@@ -474,6 +488,14 @@ class APIClient {
 
   rejectKnowledgeProposal(id: string): Promise<{ok: boolean; proposal?: KnowledgeProposal}> {
     return this.request(`/api/v1/knowledge/proposals/${encodeURIComponent(id)}/reject`, {method: "POST", body: "{}"});
+  }
+
+  updateKnowledgeReviewSettings(autoApprove: boolean): Promise<{review_settings: KnowledgeReviewSettings}> {
+    return this.request("/api/v1/settings/knowledge-review", {method: "PUT", body: JSON.stringify({auto_approve: autoApprove})});
+  }
+
+  batchKnowledgeProposals(payload: {action: "approve" | "reject"; proposal_ids: string[]; legacy_ids: string[]}): Promise<{ok: boolean; processed: string[]; failures: Array<{id: string; error: string}>}> {
+    return this.request("/api/v1/knowledge/proposals/batch", {method: "POST", body: JSON.stringify(payload)});
   }
 
   createKnowledge(payload: Record<string, unknown>): Promise<{knowledge: Knowledge}> {

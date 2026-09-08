@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
+	"github.com/ChinaKai/AHA2/internal/store"
 	syncer "github.com/ChinaKai/AHA2/internal/sync"
 )
 
@@ -66,6 +67,33 @@ func (s *Server) retireRemoteTaskMirror(writer http.ResponseWriter, request *htt
 	})
 }
 
+func (s *Server) retireRemoteWorkspaceMirror(writer http.ResponseWriter, request *http.Request) {
+	id := request.PathValue("id")
+	workspace, synchronized, err := s.store.RetireRemoteWorkspaceMirror(request.Context(), id)
+	if err != nil {
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			writeError(writer, http.StatusNotFound, "remote_workspace_not_found")
+		case errors.Is(err, store.ErrWorkspaceMirrorHasTasks):
+			writeJSON(writer, http.StatusConflict, map[string]any{"ok": false, "error": "workspace_mirror_has_tasks", "message": "该 Workspace 仍有只读任务，请先移除对应的孤立任务"})
+		case errors.Is(err, store.ErrReadOnlySyncMirror):
+			writeJSON(writer, http.StatusConflict, map[string]any{"ok": false, "error": "workspace_not_remote", "message": "只能移除其他设备的只读 Workspace 镜像"})
+		default:
+			writeError(writer, http.StatusInternalServerError, "retire_remote_workspace_failed")
+		}
+		return
+	}
+	if s.secrets != nil {
+		_ = s.secrets.DeleteMany([]string{syncer.MirrorWorkspaceSecretRef(workspace.ID)})
+	}
+	s.audit(request, "workspace.remote_mirror.retire", "workspace", id, map[string]any{
+		"owner_device_id": workspace.OwnerDeviceID, "synchronized": synchronized,
+	})
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"ok": true, "owner_device_id": workspace.OwnerDeviceID, "synchronized": synchronized,
+	})
+}
+
 func (s *Server) deleteWorkspace(writer http.ResponseWriter, request *http.Request) {
 	id := request.PathValue("id")
 	item, err := s.store.Workspace(request.Context(), id)
@@ -103,12 +131,22 @@ func (s *Server) deleteWorkspace(writer http.ResponseWriter, request *http.Reque
 			continue
 		}
 		s.cleanupTaskHardware(request.Context(), task.ID)
-		_ = s.store.DeleteTaskWithSyncTombstone(request.Context(), task.ID)
+		if err := s.store.DeleteTaskWithSyncTombstone(request.Context(), task.ID); err != nil {
+			writeError(writer, http.StatusInternalServerError, "delete_workspace_task_failed")
+			return
+		}
 		if task.RuntimeConfigSnapshotID != "" {
-			_ = s.store.DeleteRuntimeSnapshot(request.Context(), task.RuntimeConfigSnapshotID)
+			if err := s.store.DeleteRuntimeSnapshot(request.Context(), task.RuntimeConfigSnapshotID); err != nil {
+				writeError(writer, http.StatusInternalServerError, "delete_workspace_snapshot_failed")
+				return
+			}
 		}
 	}
 	if err := s.store.DeleteWorkspaceWithSyncTombstone(request.Context(), id); err != nil {
+		if errors.Is(err, store.ErrWorkspaceInUse) {
+			writeJSON(writer, http.StatusConflict, map[string]any{"ok": false, "error": "workspace_in_use", "message": "Workspace 仍被任务、运行记录或 Backend Session 引用"})
+			return
+		}
 		writeError(writer, http.StatusInternalServerError, "delete_workspace_failed")
 		return
 	}

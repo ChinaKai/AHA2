@@ -450,6 +450,16 @@ func TestKnowledgeCatalogV22(t *testing.T) {
 	if err != nil || updated.StaleCount != 1 || updated.Status != domain.KnowledgeStale {
 		t.Fatalf("stale feedback = %#v, %v", updated, err)
 	}
+	if _, err := database.FeedbackKnowledge(ctx, "knowledge-main", "helped", now.Add(3*time.Second).Format(time.RFC3339Nano)); !errors.Is(err, ErrKnowledgeFeedbackState) {
+		t.Fatalf("stale revision accepted helped feedback: %v", err)
+	}
+	if err := database.VerifyKnowledge(ctx, "knowledge-main", now.Add(4*time.Second).Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	verified, err := database.Knowledge(ctx, "knowledge-main")
+	if err != nil || verified.Status != domain.KnowledgeVerified || verified.FeedbackState != "" || verified.HelpedCount != 0 || verified.StaleCount != 0 {
+		t.Fatalf("verified feedback state = %#v, %v", verified, err)
+	}
 	skill.Description = "Updated"
 	skill.Version = 2
 	skill.Enabled = false

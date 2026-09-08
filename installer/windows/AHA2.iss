@@ -232,9 +232,9 @@ begin
   FirewallPage.Values[0] := GetPreviousData('Firewall', '0') = '1';
 
   AgentAPIPage := CreateInputQueryPage(FirewallPage.ID,
-    '配置 Agent API', '远程 Workspace 中的 Agent 如何访问 AHA2？',
-    '仅本机使用可留空。SSH/远程 Workspace 请填写可从远端访问的 HTTPS 地址，或受信开发网 HTTP 地址。');
-  AgentAPIPage.Add('Agent API URL（可选）：', False);
+    '配置 Agent API 初始默认值', '远程 Workspace 中的 Agent 如何访问 AHA2？',
+    '可留空并在安装后自动探测。此值只作为全局初始默认，也可在高级设置和每个 Workspace 中修改或覆盖。');
+  AgentAPIPage.Add('Agent API URL（可选初始值）：', False);
   AgentAPIPage.Values[0] := GetPreviousData('AgentAPIURL', '');
 
   InsecureAgentAPIPage := CreateInputOptionPage(AgentAPIPage.ID,
