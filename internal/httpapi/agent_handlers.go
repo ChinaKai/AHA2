@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"path"
 	"path/filepath"
@@ -94,6 +95,9 @@ func (s *Server) bindAgentTask(writer http.ResponseWriter, request *http.Request
 
 func (s *Server) agentProcesses(writer http.ResponseWriter, request *http.Request) {
 	claims, _ := agentClaimsFromContext(request.Context())
+	if s.rejectChannelManagedProcess(writer, request, claims.TurnID) {
+		return
+	}
 	if s.managedProcesses == nil {
 		writeError(writer, http.StatusServiceUnavailable, "managed_processes_unavailable")
 		return
@@ -103,6 +107,9 @@ func (s *Server) agentProcesses(writer http.ResponseWriter, request *http.Reques
 
 func (s *Server) startAgentProcess(writer http.ResponseWriter, request *http.Request) {
 	claims, _ := agentClaimsFromContext(request.Context())
+	if s.rejectChannelManagedProcess(writer, request, claims.TurnID) {
+		return
+	}
 	if s.managedProcesses == nil {
 		writeError(writer, http.StatusServiceUnavailable, "managed_processes_unavailable")
 		return
@@ -149,6 +156,9 @@ func (s *Server) startAgentProcess(writer http.ResponseWriter, request *http.Req
 
 func (s *Server) agentProcessStatus(writer http.ResponseWriter, request *http.Request) {
 	claims, _ := agentClaimsFromContext(request.Context())
+	if s.rejectChannelManagedProcess(writer, request, claims.TurnID) {
+		return
+	}
 	if s.managedProcesses == nil {
 		writeError(writer, http.StatusServiceUnavailable, "managed_processes_unavailable")
 		return
@@ -163,6 +173,9 @@ func (s *Server) agentProcessStatus(writer http.ResponseWriter, request *http.Re
 
 func (s *Server) stopAgentProcess(writer http.ResponseWriter, request *http.Request) {
 	claims, _ := agentClaimsFromContext(request.Context())
+	if s.rejectChannelManagedProcess(writer, request, claims.TurnID) {
+		return
+	}
 	if s.managedProcesses == nil {
 		writeError(writer, http.StatusServiceUnavailable, "managed_processes_unavailable")
 		return
@@ -174,6 +187,23 @@ func (s *Server) stopAgentProcess(writer http.ResponseWriter, request *http.Requ
 	}
 	s.audit(request, "task.process.stop", "task", claims.TaskID, map[string]any{"name": status.Name})
 	writeJSON(writer, http.StatusAccepted, map[string]any{"ok": true, "process": status})
+}
+
+func (s *Server) rejectChannelManagedProcess(writer http.ResponseWriter, request *http.Request, turnID string) bool {
+	turn, err := s.store.Turn(request.Context(), turnID)
+	if err != nil {
+		return false
+	}
+	channelContext, err := s.store.ChannelContextForInboxBatch(request.Context(), turn.InboxBatchID)
+	if err != nil {
+		return false
+	}
+	route, _ := channelContext["route"].(map[string]any)
+	if strings.TrimSpace(fmt.Sprint(route["mode"])) == "task_route" {
+		return false
+	}
+	writeError(writer, http.StatusForbidden, "channel_operation_forbidden")
+	return true
 }
 
 func managedProcessDir(transport, root, requested string) (string, error) {

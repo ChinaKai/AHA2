@@ -13,6 +13,10 @@ import (
 
 func (s *Server) deleteTask(writer http.ResponseWriter, request *http.Request) {
 	id := request.PathValue("id")
+	if s.store.IsManagedChannelTask(request.Context(), id) {
+		writeJSON(writer, http.StatusConflict, map[string]any{"ok": false, "error": "managed_channel_resource", "message": "渠道宿主 Task 只能在渠道管理流程中删除"})
+		return
+	}
 	task, err := s.store.Task(request.Context(), id)
 	if err != nil {
 		writeError(writer, http.StatusNotFound, "task_not_found")
@@ -96,6 +100,10 @@ func (s *Server) retireRemoteWorkspaceMirror(writer http.ResponseWriter, request
 
 func (s *Server) deleteWorkspace(writer http.ResponseWriter, request *http.Request) {
 	id := request.PathValue("id")
+	if s.store.IsManagedChannelWorkspace(request.Context(), id) {
+		writeJSON(writer, http.StatusConflict, map[string]any{"ok": false, "error": "managed_channel_resource", "message": "渠道宿主 Workspace 只能在渠道管理流程中删除"})
+		return
+	}
 	item, err := s.store.Workspace(request.Context(), id)
 	if err != nil {
 		writeError(writer, http.StatusNotFound, "workspace_not_found")
@@ -157,6 +165,10 @@ func (s *Server) deleteWorkspace(writer http.ResponseWriter, request *http.Reque
 
 func (s *Server) deleteProject(writer http.ResponseWriter, request *http.Request) {
 	id := request.PathValue("id")
+	if s.store.IsManagedChannelProject(request.Context(), id) {
+		writeJSON(writer, http.StatusConflict, map[string]any{"ok": false, "error": "managed_channel_resource", "message": "渠道宿主 Project 只能在渠道管理流程中删除"})
+		return
+	}
 	if _, err := s.store.Project(request.Context(), id); err != nil {
 		writeError(writer, http.StatusNotFound, "project_not_found")
 		return

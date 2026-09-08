@@ -41,6 +41,10 @@ Source: "{#SourceExe}"; DestDir: "{app}"; DestName: "aha2.exe"; Flags: ignorever
 Source: "{#SourceTrayExe}"; DestDir: "{app}"; DestName: "aha2-tray.exe"; Flags: ignoreversion
 Source: "Register-AHA2UserTask.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "Prepare-AHA2DataDir.ps1"; DestDir: "{app}"; Flags: ignoreversion
+#ifdef SourceFeishuPlugin
+Source: "{#SourceFeishuPlugin}"; DestDir: "{code:SelectedDataDir}\plugins\channels\feishu"; DestName: "aha2-channel-feishu.exe"; Flags: ignoreversion
+Source: "{#SourceFeishuManifest}"; DestDir: "{code:SelectedDataDir}\plugins\channels\feishu"; DestName: "plugin.json"; Flags: ignoreversion
+#endif
 
 [InstallDelete]
 Type: files; Name: "{app}\Run-AHA2User.vbs"

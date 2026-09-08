@@ -88,6 +88,18 @@ test("Agent API settings support global defaults and Workspace reverse probes", 
   assert.match(styles, /\.workspace-agent-api-fields/);
 });
 
+test("advanced settings expose independent Backend idle and turn timeouts", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const script = await readFile(resolve(root, "dist", "app.js"), "utf8");
+  const api = await readFile(resolve(root, "dist", "api.js"), "utf8");
+  for (const marker of ["backend-settings-form", "idle_timeout_minutes", "turn_timeout_hours", "Codex / Claude 统一生效"]) {
+    assert.match(script, new RegExp(marker));
+  }
+  assert.match(script, /api\.backendSettings\(\)/);
+  assert.match(script, /api\.updateBackendSettings/);
+  assert.match(api, /settings\/backend/);
+});
+
 test("task list refreshes after round terminal events", async () => {
   const root = resolve(import.meta.dirname, "..");
   const {eventRefreshesTaskList} = await import(pathToFileURL(resolve(root, "dist", "ui_helpers.js")));
@@ -133,6 +145,7 @@ test("built web contains responsive application", async () => {
   const promptAdmin = await readFile(resolve(root, "dist", "prompt_admin.js"), "utf8");
   const proxySettings = await readFile(resolve(root, "dist", "proxy_settings.js"), "utf8");
   const syncSettings = await readFile(resolve(root, "dist", "sync_settings.js"), "utf8");
+  const channels = await readFile(resolve(root, "dist", "channels.js"), "utf8");
   const codexAccounts = await readFile(resolve(root, "dist", "codex_accounts.js"), "utf8");
   const knowledgeWorkspace = await readFile(resolve(root, "dist", "knowledge_workspace.js"), "utf8");
   const css = await readFile(resolve(root, "dist", "styles.css"), "utf8");
@@ -290,6 +303,10 @@ test("built web contains responsive application", async () => {
   assert.match(agents, /function renderTaskMemory/);
   assert.match(conversation, /data-copy-message/);
   assert.match(conversation, /data-toggle-message/);
+  assert.match(conversation, /data-message-id/);
+  assert.match(script, /expandedMessageIDs/);
+  assert.match(script, /list\.innerHTML = conversationListHtml\(\);\s*restoreRegionUI\(list, ui, false\);\s*if \(scrollConversationToBottom/);
+  assert.match(script, /list\.innerHTML = conversationListHtml\(\);\s*restoreRegionUI\(list, ui, false\);\s*list\.scrollTop = previousTop \+ Math\.max/);
   assert.match(conversation, /data-image-preview/);
   assert.match(helpers, /showModal\(\)/);
   assert.match(helpers, /data-image-preview-download/);
@@ -344,7 +361,19 @@ test("built web contains responsive application", async () => {
   assert.match(script, /data-view="advanced">← 返回高级设置/);
   assert.doesNotMatch(script, /\["prompts",\s*"bot",\s*"提示词"\]/);
   assert.doesNotMatch(script, /\["sync",\s*"sync",/);
-  assert.match(css, /\.bottom-nav \{[^}]*grid-template-columns:\s*repeat\(5,1fr\)/);
+  assert.match(css, /\.bottom-nav \{[^}]*grid-template-columns:\s*repeat\(6,1fr\)/);
+  assert.match(script, /"channels",\s*"bot",\s*"渠道"/);
+  assert.match(script, /renderChannels\(state\.channelProviders, state\.channelInstances\)/);
+  assert.match(api, /api\/v1\/channel-providers/);
+  assert.match(script, /channels\.js\?v=[a-f0-9]{12}/);
+  assert.match(channels, /扫码创建并绑定飞书应用/);
+  assert.match(channels, /channel-onboarding-sessions\/.*\/qr/);
+  assert.match(channels, /name="app_secret" type="password"/);
+  assert.match(channels, /data-delivery-replay/);
+  assert.match(channels, /Owner 收件箱与投递/);
+  assert.match(channels, /Knowledge allowlist/);
+  assert.match(channels, /人工整理并共享/);
+  assert.match(api, /channel-knowledge-records/);
   assert.match(script, /shell\(renderProxySettings\(state\.proxySettings\)\)/);
   assert.match(script, /name=\\?"proxy_enabled/);
   assert.match(agents, /name="proxy_enabled"/);

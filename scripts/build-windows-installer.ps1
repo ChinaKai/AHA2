@@ -3,6 +3,8 @@ param(
     [string]$RepoPath = (Split-Path -Parent $PSScriptRoot),
     [string]$InputExe = "",
     [string]$InputTrayExe = "",
+	[string]$InputFeishuPlugin = "",
+	[string]$InputFeishuManifest = "",
     [string]$OutputDir = "",
     [string]$Version = "dev",
     [string]$ISCCPath = "",
@@ -30,11 +32,25 @@ if ([string]::IsNullOrWhiteSpace($InputExe)) {
 if ([string]::IsNullOrWhiteSpace($InputTrayExe)) {
     $InputTrayExe = Join-Path $repo "dist\aha2-tray-windows-amd64.exe"
 }
+$defaultFeishuDir = Join-Path $repo "dist\plugins\feishu\windows-amd64"
+if ([string]::IsNullOrWhiteSpace($InputFeishuPlugin) -and [string]::IsNullOrWhiteSpace($InputFeishuManifest)) {
+	$defaultPlugin = Join-Path $defaultFeishuDir "aha2-channel-feishu.exe"
+	$defaultManifest = Join-Path $defaultFeishuDir "plugin.json"
+	if ((Test-Path -LiteralPath $defaultPlugin -PathType Leaf) -and (Test-Path -LiteralPath $defaultManifest -PathType Leaf)) {
+		$InputFeishuPlugin = $defaultPlugin
+		$InputFeishuManifest = $defaultManifest
+	}
+}
+if ([string]::IsNullOrWhiteSpace($InputFeishuPlugin) -xor [string]::IsNullOrWhiteSpace($InputFeishuManifest)) {
+	throw "Feishu plugin executable and manifest must be provided together."
+}
 if ([string]::IsNullOrWhiteSpace($OutputDir)) {
     $OutputDir = Join-Path $repo "dist\installer"
 }
 $inputPath = [IO.Path]::GetFullPath($InputExe)
 $trayInputPath = [IO.Path]::GetFullPath($InputTrayExe)
+$feishuPluginPath = if ([string]::IsNullOrWhiteSpace($InputFeishuPlugin)) { "" } else { [IO.Path]::GetFullPath($InputFeishuPlugin) }
+$feishuManifestPath = if ([string]::IsNullOrWhiteSpace($InputFeishuManifest)) { "" } else { [IO.Path]::GetFullPath($InputFeishuManifest) }
 $outputPath = [IO.Path]::GetFullPath($OutputDir)
 $normalizedVersion = $Version.Trim()
 if ($normalizedVersion.StartsWith("v", [StringComparison]::OrdinalIgnoreCase)) {
@@ -78,7 +94,10 @@ $requiredContracts = @(
     "--allow-insecure-agent-api",
     "WaitForAHA2Health",
     "LocalHealthURL",
-    "http://127.0.0.1:' + SelectedPort()"
+	"http://127.0.0.1:' + SelectedPort()",
+	"SourceFeishuPlugin",
+	"SourceFeishuManifest",
+	"plugins\channels\feishu"
 )
 foreach ($contract in $requiredContracts) {
     if (-not $source.Contains($contract)) {
@@ -110,7 +129,8 @@ foreach ($forbidden in @("service run --listen", "actions= restart/", "Configure
 if ($ValidateOnly) {
     $serverState = if (Test-Path -LiteralPath $inputPath -PathType Leaf) {"found"} else {"not present"}
     $trayState = if (Test-Path -LiteralPath $trayInputPath -PathType Leaf) {"found"} else {"not present"}
-    Write-Output "Installer definition valid; server input $serverState; tray input $trayState."
+	$feishuState = if ($feishuPluginPath -and (Test-Path -LiteralPath $feishuPluginPath -PathType Leaf) -and (Test-Path -LiteralPath $feishuManifestPath -PathType Leaf)) { "found" } else { "not bundled" }
+	Write-Output "Installer definition valid; server input $serverState; tray input $trayState; Feishu plugin $feishuState."
     exit 0
 }
 
@@ -119,6 +139,9 @@ if (-not (Test-Path -LiteralPath $inputPath -PathType Leaf)) {
 }
 if (-not (Test-Path -LiteralPath $trayInputPath -PathType Leaf)) {
     throw "Windows amd64 tray executable not found: $trayInputPath"
+}
+if ($feishuPluginPath -and ((-not (Test-Path -LiteralPath $feishuPluginPath -PathType Leaf)) -or (-not (Test-Path -LiteralPath $feishuManifestPath -PathType Leaf)))) {
+	throw "Feishu plugin bundle inputs were not found."
 }
 
 function Get-PEWindowsSubsystem([string]$Path) {
@@ -155,7 +178,17 @@ if ([string]::IsNullOrWhiteSpace($ISCCPath) -or -not (Test-Path -LiteralPath $IS
 }
 
 New-Item -ItemType Directory -Force -Path $outputPath | Out-Null
-& $ISCCPath "/DMyAppVersion=$normalizedVersion" "/DSourceExe=$inputPath" "/DSourceTrayExe=$trayInputPath" "/DOutputDir=$outputPath" $iss
+$compilerArgs = @(
+	"/DMyAppVersion=$normalizedVersion",
+	"/DSourceExe=$inputPath",
+	"/DSourceTrayExe=$trayInputPath",
+	"/DOutputDir=$outputPath"
+)
+if ($feishuPluginPath) {
+	$compilerArgs += "/DSourceFeishuPlugin=$feishuPluginPath"
+	$compilerArgs += "/DSourceFeishuManifest=$feishuManifestPath"
+}
+& $ISCCPath @compilerArgs $iss
 if ($LASTEXITCODE -ne 0) {
     throw "Inno Setup compilation failed with exit code $LASTEXITCODE."
 }

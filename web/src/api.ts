@@ -1,9 +1,16 @@
 import type {
   AgentAPISettings,
+	BackendSettings,
   Attachment,
   AuthStatus,
   CodexAccount,
   CodexLogin,
+  ChannelEndpoint,
+  ChannelDelivery,
+  ChannelHandoff,
+  ChannelInstance,
+  ChannelOnboardingSession,
+  ChannelPlugin,
   DetectedModel,
   EnvGroup,
   Knowledge,
@@ -118,6 +125,14 @@ class APIClient {
     return this.request("/api/v1/settings/agent-api", {method: "PUT", body: JSON.stringify(payload)});
   }
 
+  backendSettings(): Promise<{backend: BackendSettings}> {
+		return this.request("/api/v1/settings/backend");
+	}
+
+	updateBackendSettings(payload: {idle_timeout_seconds: number; turn_timeout_seconds: number}): Promise<{backend: BackendSettings}> {
+		return this.request("/api/v1/settings/backend", {method: "PUT", body: JSON.stringify(payload)});
+	}
+
   syncSettings(): Promise<{sync: SyncSettings}> {
     return this.request("/api/v1/settings/sync");
   }
@@ -128,6 +143,102 @@ class APIClient {
 
   syncStatus(): Promise<{state: SyncState; pending: number; run: SyncRunProgress}> {
     return this.request("/api/v1/settings/sync/status");
+  }
+
+  channelProviders(): Promise<{providers: ChannelPlugin[]}> {
+    return this.request("/api/v1/channel-providers");
+  }
+
+  updateChannelPlugin(id: string, enabled: boolean, revision: number): Promise<{plugin: ChannelPlugin}> {
+    return this.request(`/api/v1/channel-plugins/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      headers: {"If-Match": `"${revision}"`},
+      body: JSON.stringify({enabled}),
+    });
+  }
+
+  channelInstances(): Promise<{instances: ChannelInstance[]}> {
+    return this.request("/api/v1/channel-instances");
+  }
+
+  channelInstance(id: string): Promise<{instance: ChannelInstance; endpoints: ChannelEndpoint[]}> {
+    return this.request(`/api/v1/channel-instances/${encodeURIComponent(id)}`);
+  }
+
+  createChannelInstance(pluginID: string, name: string): Promise<{instance: ChannelInstance}> {
+    const idempotencyKey = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
+    return this.request("/api/v1/channel-instances", {
+      method: "POST",
+      headers: {"Idempotency-Key": idempotencyKey},
+      body: JSON.stringify({plugin_id: pluginID, name}),
+    });
+  }
+
+  updateChannelInstance(id: string, payload: {name?: string; config?: Record<string, unknown>}, revision: number): Promise<{instance: ChannelInstance}> {
+    return this.request(`/api/v1/channel-instances/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      headers: {"If-Match": `"${revision}"`},
+      body: JSON.stringify(payload),
+    });
+  }
+
+  setChannelInstanceEnabled(id: string, enabled: boolean, revision: number): Promise<{instance: ChannelInstance}> {
+    return this.request(`/api/v1/channel-instances/${encodeURIComponent(id)}`, {method: "PATCH", headers: {"If-Match": `"${revision}"`}, body: JSON.stringify({enabled})});
+  }
+
+  updateChannelCredentials(id: string, appID: string, appSecret: string, revision: number): Promise<{instance: ChannelInstance}> {
+    return this.request(`/api/v1/channel-instances/${encodeURIComponent(id)}/credentials`, {
+      method: "PUT",
+      headers: {"If-Match": `"${revision}"`},
+      body: JSON.stringify({app_id: appID, app_secret: appSecret}),
+    });
+  }
+
+  startChannelOnboarding(id: string): Promise<{onboarding: ChannelOnboardingSession}> {
+    const idempotencyKey = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
+    return this.request(`/api/v1/channel-instances/${encodeURIComponent(id)}/onboarding-sessions`, {
+      method: "POST", headers: {"Idempotency-Key": idempotencyKey}, body: "{}",
+    });
+  }
+
+  channelOnboarding(id: string): Promise<{onboarding: ChannelOnboardingSession}> {
+    return this.request(`/api/v1/channel-onboarding-sessions/${encodeURIComponent(id)}`);
+  }
+
+  cancelChannelOnboarding(id: string): Promise<{onboarding: ChannelOnboardingSession}> {
+    return this.request(`/api/v1/channel-onboarding-sessions/${encodeURIComponent(id)}/cancel`, {method: "POST", body: "{}"});
+  }
+
+  channelHandoffs(id: string): Promise<{handoffs: ChannelHandoff[]}> {
+    return this.request(`/api/v1/channel-instances/${encodeURIComponent(id)}/handoffs`);
+  }
+
+  channelDeliveries(id: string): Promise<{deliveries: ChannelDelivery[]}> {
+    return this.request(`/api/v1/channel-instances/${encodeURIComponent(id)}/deliveries`);
+  }
+
+  replayChannelDelivery(id: string): Promise<{delivery: ChannelDelivery}> {
+    return this.request(`/api/v1/channel-deliveries/${encodeURIComponent(id)}/replay`, {method: "POST", body: "{}"});
+  }
+
+  skipChannelDelivery(id: string): Promise<{ok: boolean}> {
+    return this.request(`/api/v1/channel-deliveries/${encodeURIComponent(id)}/skip`, {method: "POST", body: "{}"});
+  }
+
+  channelKnowledgePolicies(id: string): Promise<{policies: Array<{id: string; endpoint: string; fixed_index_entry_id: string; revision: number; grants: Array<{knowledge_entry_id: string; grant_scope: string}>}>}> {
+    return this.request(`/api/v1/channel-instances/${encodeURIComponent(id)}/knowledge-policy`);
+  }
+
+  updateChannelKnowledgePolicy(id: string, endpoint: string, revision: number, grants: Array<{knowledge_entry_id: string; grant_scope: string}>): Promise<{policies: unknown[]}> {
+    return this.request(`/api/v1/channel-instances/${encodeURIComponent(id)}/knowledge-policy`, {method: "PUT", headers: {"If-Match": `"${revision}"`}, body: JSON.stringify({endpoint, grants})});
+  }
+
+  channelKnowledgeRecords(id: string): Promise<{records: Array<{id: string; question: string; answer: string; visibility: string; authority_status: string}>}> {
+    return this.request(`/api/v1/channel-instances/${encodeURIComponent(id)}/knowledge-records`);
+  }
+
+  promoteChannelKnowledgeRecord(id: string, title: string, body: string): Promise<{ok: boolean}> {
+    return this.request(`/api/v1/channel-knowledge-records/${encodeURIComponent(id)}/promote`, {method: "POST", body: JSON.stringify({title, body})});
   }
 
   syncPreview(): Promise<{preview: SyncPreview}> {

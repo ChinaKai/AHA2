@@ -26,8 +26,6 @@ type Codex struct {
 	ModelsCachePath string
 }
 
-var ErrCodexIdleTimeout = errors.New("codex backend produced no activity before the idle timeout")
-
 func (adapter Codex) Execute(ctx context.Context, request Request, emit func(Event)) (Result, error) {
 	binary := adapter.Binary
 	if binary == "" {
@@ -35,20 +33,9 @@ func (adapter Codex) Execute(ctx context.Context, request Request, emit func(Eve
 	}
 	timeout := adapter.Timeout
 	if timeout == 0 {
-		timeout = 2 * time.Hour
+		timeout = defaultBackendTurnTimeout
 	}
-	idleWarning := adapter.IdleWarning
-	if idleWarning <= 0 {
-		idleWarning = 90 * time.Second
-	}
-	idleTimeout := adapter.IdleTimeout
-	if idleTimeout <= idleWarning {
-		idleTimeout = 5 * time.Minute
-	}
-	heartbeat := adapter.Heartbeat
-	if heartbeat <= 0 {
-		heartbeat = time.Minute
-	}
+	idleWarning, idleTimeout, heartbeat := backendWatchdogDurations(adapter.IdleWarning, adapter.IdleTimeout, adapter.Heartbeat)
 	catalogPath := adapter.ensureModelCatalog(ctx, request)
 	args := codexArguments(request, catalogPath)
 	environment := filterEnvironment(request.Environment)
@@ -65,7 +52,7 @@ func (adapter Codex) Execute(ctx context.Context, request Request, emit func(Eve
 	runContext, cancelRun := context.WithCancelCause(ctx)
 	activity := make(chan string, 1)
 	monitorDone := make(chan struct{})
-	go monitorCodexActivity(runContext, idleWarning, idleTimeout, heartbeat, activity, send, cancelRun, monitorDone)
+	go monitorBackendActivity(runContext, idleWarning, idleTimeout, heartbeat, activity, send, cancelRun, monitorDone)
 	result, err := request.Runner.Run(runContext, workspace.Command{
 		Executable: binary,
 		Args:       args,
@@ -96,8 +83,8 @@ func (adapter Codex) Execute(ctx context.Context, request Request, emit func(Eve
 	cause := context.Cause(runContext)
 	cancelRun(context.Canceled)
 	<-monitorDone
-	if errors.Is(cause, ErrCodexIdleTimeout) {
-		return Result{Reply: reply, ExitCode: result.ExitCode, ProviderSessionID: sessionID}, ErrCodexIdleTimeout
+	if errors.Is(cause, ErrBackendIdleTimeout) {
+		return Result{Reply: reply, ExitCode: result.ExitCode, ProviderSessionID: sessionID}, ErrBackendIdleTimeout
 	}
 	if err != nil {
 		return Result{Reply: reply, ExitCode: result.ExitCode, ProviderSessionID: sessionID}, err
@@ -120,61 +107,6 @@ func (adapter Codex) Execute(ctx context.Context, request Request, emit func(Eve
 		return Result{ExitCode: result.ExitCode, ProviderSessionID: sessionID}, fmt.Errorf("codex returned no agent message")
 	}
 	return Result{Reply: strings.TrimSpace(reply), ExitCode: result.ExitCode, ProviderSessionID: sessionID}, nil
-}
-
-func monitorCodexActivity(
-	ctx context.Context,
-	warning, timeout, heartbeat time.Duration,
-	activity <-chan string,
-	emit func(Event),
-	cancel context.CancelCauseFunc,
-	done chan<- struct{},
-) {
-	defer close(done)
-	interval := warning / 4
-	if interval <= 0 || interval > time.Second {
-		interval = time.Second
-	}
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	lastActivity := time.Now()
-	lastEvent := "backend_start"
-	stalled := false
-	lastHeartbeat := time.Time{}
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case eventType := <-activity:
-			now := time.Now()
-			if strings.TrimSpace(eventType) != "" {
-				lastEvent = eventType
-			}
-			if stalled {
-				emit(Event{Type: "agent_resumed", Data: map[string]any{"message": "Backend activity resumed", "last_event_type": lastEvent}})
-			}
-			lastActivity, stalled, lastHeartbeat = now, false, time.Time{}
-		case now := <-ticker.C:
-			idle := now.Sub(lastActivity)
-			if idle >= timeout {
-				emit(Event{Type: "agent_idle_timeout", Data: map[string]any{"message": "Backend idle timeout", "idle_ms": idle.Milliseconds(), "last_event_type": lastEvent}})
-				cancel(ErrCodexIdleTimeout)
-				return
-			}
-			if idle < warning {
-				continue
-			}
-			if !stalled {
-				stalled, lastHeartbeat = true, now
-				emit(Event{Type: "agent_stalled", Data: map[string]any{"message": "Backend has produced no activity", "idle_ms": idle.Milliseconds(), "last_event_type": lastEvent}})
-				continue
-			}
-			if now.Sub(lastHeartbeat) >= heartbeat {
-				lastHeartbeat = now
-				emit(Event{Type: "agent_heartbeat", Data: map[string]any{"message": "Backend is still stalled", "idle_ms": idle.Milliseconds(), "last_event_type": lastEvent}})
-			}
-		}
-	}
 }
 
 func codexArguments(request Request, catalogPath string) []string {

@@ -32,6 +32,17 @@ type AgentAPISettings struct {
 	UpdatedAt              time.Time `json:"updated_at,omitempty"`
 }
 
+const (
+	DefaultBackendIdleTimeoutSeconds = 10 * 60
+	DefaultBackendTurnTimeoutSeconds = 10 * 60 * 60
+)
+
+type BackendSettings struct {
+	IdleTimeoutSeconds int       `json:"idle_timeout_seconds"`
+	TurnTimeoutSeconds int       `json:"turn_timeout_seconds"`
+	UpdatedAt          time.Time `json:"updated_at,omitempty"`
+}
+
 type Session struct {
 	ID        string    `json:"id"`
 	OwnerID   string    `json:"owner_id"`

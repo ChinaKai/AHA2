@@ -20,6 +20,11 @@ export interface AgentAPISettings {
   effective_allow_insecure: boolean;
   updated_at?: string;
 }
+export interface BackendSettings {
+  idle_timeout_seconds: number;
+  turn_timeout_seconds: number;
+  updated_at?: string;
+}
 export interface SystemInfo {
   os: string;
   arch: string;
@@ -174,6 +179,7 @@ export interface CodexAccount {
   status: string;
   proxy_enabled: boolean;
   credential_configured: boolean;
+  owner_bound: boolean;
   usage?: CodexUsage;
   usage_updated_at?: string;
   usage_error?: string;
@@ -651,4 +657,93 @@ export interface PromptTemplate {
   required: boolean;
   version: number;
   updated_at?: string;
+}
+
+export interface ChannelPlugin {
+  id: string;
+  provider_key: string;
+  display_name: string;
+  manifest_version: number;
+  package_version: string;
+  protocol_min: number;
+  protocol_max: number;
+  executable_sha256?: string;
+  install_state: "installed" | "missing" | "invalid" | "incompatible" | string;
+  enabled: boolean;
+  revision: number;
+  last_error?: string;
+  available: boolean;
+  updated_at: string;
+}
+
+export interface ChannelInstance {
+  id: string;
+  plugin_id: string;
+  provider_key?: string;
+  owner_id: string;
+  runtime_device_id: string;
+  name: string;
+  status: "draft" | "onboarding" | "ready" | "degraded" | "disabled" | "error" | string;
+  effective_availability: "available" | "unavailable" | string;
+  revision: number;
+  app_id?: string;
+  provider_tenant_id?: string;
+  credential_configured: boolean;
+  host_project_id: string;
+  host_workspace_id: string;
+  config?: Record<string, unknown>;
+  last_seen_at?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ChannelEndpoint {
+  id: string;
+  instance_id: string;
+  kind: "assistant_dm" | "group_digital_human";
+  enabled: boolean;
+  config?: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ChannelOnboardingSession {
+  id: string;
+  instance_id: string;
+  mode: "register_app" | "existing_app";
+  registration_command_id: string;
+  verification_url?: string;
+  status: "pending" | "qr_ready" | "completing" | "succeeded" | "failed" | "cancelled" | "expired" | string;
+  step: string;
+  expires_at: string;
+  consumed_at?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ChannelHandoff {
+  id: string;
+  instance_id: string;
+  summary: string;
+  details?: string;
+  state: string;
+  decision?: string;
+  created_task_id?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ChannelDelivery {
+  id: string;
+  instance_id: string;
+  stream_sequence: number;
+  replay_generation: number;
+  replay_of_id?: string;
+  semantic_payload: Record<string, unknown>;
+  state: string;
+  attempts: number;
+  last_error_code?: string;
+  outcome_certainty?: string;
+  created_at: string;
+  delivered_at?: string;
 }

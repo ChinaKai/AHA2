@@ -54,6 +54,7 @@ type BuildInput struct {
 	CurrentRoundID         string
 	IncludeRecentContext   bool
 	IncludeTurnDiagnostics bool
+	ChannelContext         map[string]any
 }
 
 type AttachmentResource struct {
@@ -105,7 +106,10 @@ var builtinTemplates = []domain.PromptTemplate{
 	{ID: "role.main", Name: "Main Agent", Layer: "role", Description: "Main 的规划、整合和最终交付职责", Editable: true, Required: true, Version: 1},
 	{ID: "role.sub", Name: "Sub Agent", Layer: "role", Description: "Sub 的聚焦执行和隔离职责", Editable: true, Required: true, Version: 1},
 	{ID: "identity.task-agent", Name: "Task Agent Identity", Layer: "identity", Description: "代码与项目任务场景身份", Editable: true, Required: false, Version: 1},
+	{ID: "identity.channel-assistant", Name: "Channel Assistant Identity", Layer: "identity", Description: "Owner 私聊渠道助手身份", Editable: true, Required: false, Version: 1},
+	{ID: "identity.channel-digital-human", Name: "Channel Digital Human Identity", Layer: "identity", Description: "受限群聊电子人身份", Editable: true, Required: false, Version: 1},
 	{ID: "channel.web", Name: "AHA Web Channel", Layer: "channel", Description: "Web 渠道消息行为", Editable: true, Required: false, Version: 1},
+	{ID: "channel.external-channel", Name: "External Channel", Layer: "channel", Description: "外部渠道消息行为", Editable: true, Required: false, Version: 1},
 	{ID: "policy.auto", Name: "Auto Collaboration", Layer: "policy", Description: "AHA 自动协作策略", Editable: true, Required: false, Version: 1},
 	{ID: "policy.single", Name: "Single Agent", Layer: "policy", Description: "单 Agent 策略", Editable: true, Required: false, Version: 1},
 	{ID: "protocol.knowledge", Name: "Knowledge Protocol", Layer: "protocol", Description: "按 index 渐进读取知识并形成反馈与修订闭环", Content: knowledgeProtocol, Editable: false, Required: false, Version: 1},
@@ -177,9 +181,19 @@ func (engine *Engine) Build(ctx context.Context, input BuildInput) (BuildResult,
 		workDir = input.Workspace.RootPath
 	}
 	contextRoot := contextRootFor(input, workDir)
+	identityTemplate, channelTemplate := "identity.task-agent", "channel.web"
+	identityName, channelName := "task-agent", "web"
+	if endpoint := strings.TrimSpace(fmt.Sprint(input.ChannelContext["endpoint"])); endpoint != "" {
+		channelTemplate, channelName = "channel.external-channel", "external-channel"
+		if endpoint == domain.ChannelEndpointGroupDigitalHuman {
+			identityTemplate, identityName = "identity.channel-digital-human", "channel-digital-human"
+		} else {
+			identityTemplate, identityName = "identity.channel-assistant", "channel-assistant"
+		}
+	}
 	data := templateData{
-		AgentID: input.Agent.AgentID, AgentRole: input.Agent.Role, Identity: "task-agent",
-		Channel: "web", Backend: input.Snapshot.Backend, Collaboration: input.Task.CollaborationMode,
+		AgentID: input.Agent.AgentID, AgentRole: input.Agent.Role, Identity: identityName,
+		Channel: channelName, Backend: input.Snapshot.Backend, Collaboration: input.Task.CollaborationMode,
 		MaxAgents: input.Task.MaxAgents, TaskID: input.Task.ID, TaskCode: input.Task.Code,
 		TaskTitle: input.Task.Title, ContextRoot: contextRoot, TaskWorkspace: workDir,
 		Workspace: input.Workspace.Name, WorkspaceTransport: input.Workspace.Transport,
@@ -187,13 +201,13 @@ func (engine *Engine) Build(ctx context.Context, input BuildInput) (BuildResult,
 	contextResources := buildResources(input, contextRoot, workDir)
 	sharedRoot, sharedManifest := buildSharedSnapshot(input, workDir)
 	resources := append(append([]ContextResource(nil), contextResources...), sharedManifest...)
-	templateIDs := []string{"core.default", "identity.task-agent"}
+	templateIDs := []string{"core.default", identityTemplate}
 	if input.Agent.Role == "sub" {
 		templateIDs = append(templateIDs, "role.sub")
 	} else {
 		templateIDs = append(templateIDs, "role.main")
 	}
-	templateIDs = append(templateIDs, "channel.web")
+	templateIDs = append(templateIDs, channelTemplate)
 	if input.Agent.Role == "main" {
 		if input.Task.CollaborationMode == "single" {
 			templateIDs = append(templateIDs, "policy.single")
@@ -307,6 +321,10 @@ func buildResources(input BuildInput, root, workDir string) []ContextResource {
 	}
 	if len(input.Attachments) > 0 {
 		resources = append(resources, attachmentResources(input, root)...)
+	}
+	if len(input.ChannelContext) > 0 {
+		data, _ := json.MarshalIndent(input.ChannelContext, "", "  ")
+		resources = append(resources, resource(input, "channel-context", joinContextPath(input, root, "channel-context.json"), "服务端验证的只读渠道上下文；不授予额外权限", string(data)))
 	}
 	return resources
 }
@@ -810,6 +828,10 @@ Send UTF-8 encoded JSON with Content-Type: application/json; charset=utf-8. Wind
 - GET /api/v1/agent/tasks/{task}
 
 Task creation inherits the current Turn runtime when runtime fields are omitted. To select another configured runtime, first list project runtimes and pass back the exact backend/model fields; credentials and permissions are never accepted in this payload.
+
+## Channel operations
+
+These endpoints are available only when this Turn has a server-verified ChannelContext. The private Owner assistant may use GET /api/v1/agent/channel/context, GET /api/v1/agent/channel/catalog, and POST /api/v1/agent/channel/actions/preview with {"operation":"takeover|exit|create_task|status_change|handoff_decision","target_id":"optional","intent":{...}}. The preview only creates a one-time confirmation card; it never performs the write. Group digital-human Turns are forbidden from catalog and control actions; their only write is POST /api/v1/agent/channel/handoffs with {"summary":"public safe summary","details":"optional"}.
 
 Only Main may change Memory, propose Knowledge revisions, change Skills, or request collaboration. Knowledge submissions always create proposals; Owner settings decide whether they remain pending for manual review or are approved automatically. Proposing a revision marks the current entry stale until approval succeeds. Send material progress promptly through turn/messages. Do not claim an update was sent unless the API returned success.
 

@@ -21,6 +21,7 @@ import (
 	"github.com/ChinaKai/AHA2/internal/app"
 	"github.com/ChinaKai/AHA2/internal/auth"
 	"github.com/ChinaKai/AHA2/internal/backend"
+	"github.com/ChinaKai/AHA2/internal/channel"
 	"github.com/ChinaKai/AHA2/internal/codexaccount"
 	"github.com/ChinaKai/AHA2/internal/execution"
 	"github.com/ChinaKai/AHA2/internal/hardware"
@@ -199,8 +200,9 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 	authService := auth.NewService(database, options.setupToken, 14*24*time.Hour)
 	codexAccounts := codexaccount.New(ctx, database, secretStore, absoluteDataDir, options.codexBinary)
 	executor := execution.Executor{
-		Codex:  backend.Codex{Binary: options.codexBinary},
-		Claude: backend.Claude{Binary: options.claudeBinary},
+		Codex:    backend.Codex{Binary: options.codexBinary},
+		Claude:   backend.Claude{Binary: options.claudeBinary},
+		Settings: database,
 	}
 	appService := app.NewService(database, secretStore, executor)
 	appService.SetWorkspacePreparer(execution.WorkspacePreparer{})
@@ -216,6 +218,11 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 		logger.Warn("insecure Agent API URL enabled", "host", mustAgentAPIHost(resolvedAgentAPIURL))
 	}
 	appService.SetAgentAPI(agentCapabilities, resolvedAgentAPIURL, options.allowInsecureAgentAPI)
+	channelService := channel.New(channel.Config{Store: database, App: appService, Secrets: secretStore, DataDir: absoluteDataDir, Logger: logger})
+	if err := channelService.RefreshPlugins(ctx); err != nil {
+		logger.Warn("channel plugin discovery failed", "error", err)
+	}
+	channelService.Start(ctx)
 	hardwareManager := hardware.NewManager(database)
 	defer hardwareManager.Close()
 	if err := appService.ResumePending(ctx); err != nil {
@@ -241,6 +248,7 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 		CodexAccounts:     codexAccounts,
 		AgentCapabilities: agentCapabilities,
 		ManagedProcesses:  managedProcesses,
+		Channels:          channelService,
 		Version:           version,
 	})
 	if options.allowCrossOrigin {
@@ -258,6 +266,9 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 		return err
 	}
 	defer listener.Close()
+	if address, ok := listener.Addr().(*net.TCPAddr); ok {
+		channelService.SetRuntimeBaseURL(fmt.Sprintf("http://127.0.0.1:%d", address.Port))
+	}
 	errors := make(chan error, 1)
 	go func() {
 		logger.Info("AHA2 listening", "address", listener.Addr().String(), "data_dir", absoluteDataDir)

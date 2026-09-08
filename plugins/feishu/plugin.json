@@ -1,0 +1,21 @@
+{
+  "manifest_version": 1,
+  "plugin_id": "feishu",
+  "provider_key": "feishu",
+  "display_name": "飞书",
+  "package_version": "1.0.0",
+  "protocol_versions": ["channel-runtime/v1"],
+  "endpoints": ["assistant_dm", "group_digital_human"],
+  "executable": "aha2-channel-feishu.exe",
+  "sha256": "SET_BY_PACKAGING",
+  "requested_capabilities": [
+    "channel.inbound.write",
+    "channel.delivery.claim",
+    "channel.delivery.ack",
+    "channel.command.claim",
+    "channel.command.progress",
+    "channel.command.complete",
+    "channel.registration.store",
+    "channel.health.write"
+  ]
+}

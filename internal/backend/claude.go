@@ -3,16 +3,21 @@ package backend
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ChinaKai/AHA2/internal/workspace"
 )
 
 type Claude struct {
-	Binary  string
-	Timeout time.Duration
+	Binary      string
+	Timeout     time.Duration
+	IdleWarning time.Duration
+	IdleTimeout time.Duration
+	Heartbeat   time.Duration
 }
 
 func (adapter Claude) Execute(ctx context.Context, request Request, emit func(Event)) (Result, error) {
@@ -22,8 +27,9 @@ func (adapter Claude) Execute(ctx context.Context, request Request, emit func(Ev
 	}
 	timeout := adapter.Timeout
 	if timeout == 0 {
-		timeout = 2 * time.Hour
+		timeout = defaultBackendTurnTimeout
 	}
+	idleWarning, idleTimeout, heartbeat := backendWatchdogDurations(adapter.IdleWarning, adapter.IdleTimeout, adapter.Heartbeat)
 	args := []string{
 		"-p", "--output-format", "stream-json", "--verbose",
 		"--disallowedTools", "Task,Agent",
@@ -39,7 +45,20 @@ func (adapter Claude) Execute(ctx context.Context, request Request, emit func(Ev
 		args = append(args, "--resume", request.ProviderSessionID)
 	}
 	var reply, sessionID, providerError string
-	result, err := request.Runner.Run(ctx, workspace.Command{
+	var emitMu sync.Mutex
+	send := func(event Event) {
+		if event.Type == "" || emit == nil {
+			return
+		}
+		emitMu.Lock()
+		emit(event)
+		emitMu.Unlock()
+	}
+	runContext, cancelRun := context.WithCancelCause(ctx)
+	activity := make(chan string, 1)
+	monitorDone := make(chan struct{})
+	go monitorBackendActivity(runContext, idleWarning, idleTimeout, heartbeat, activity, send, cancelRun, monitorDone)
+	result, err := request.Runner.Run(runContext, workspace.Command{
 		Executable: binary,
 		Args:       args,
 		Dir:        request.WorkDir,
@@ -48,6 +67,10 @@ func (adapter Claude) Execute(ctx context.Context, request Request, emit func(Ev
 		Timeout:    timeout,
 	}, func(line string) {
 		event, parsedReply, parsedSession := parseClaudeLine(line)
+		select {
+		case activity <- event.Type:
+		default:
+		}
 		if parsedReply != "" {
 			reply = parsedReply
 		}
@@ -60,13 +83,19 @@ func (adapter Claude) Execute(ctx context.Context, request Request, emit func(Ev
 				providerError = ""
 			}
 		}
-		if event.Type != "" && emit != nil {
+		if event.Type != "" {
 			if usage, ok := event.Data["usage"].(map[string]any); ok && len(usage) > 0 {
-				emit(Event{Type: "agent_usage", Data: map[string]any{"usage": usage}})
+				send(Event{Type: "agent_usage", Data: map[string]any{"usage": usage}})
 			}
-			emit(event)
+			send(event)
 		}
 	})
+	cause := context.Cause(runContext)
+	cancelRun(context.Canceled)
+	<-monitorDone
+	if errors.Is(cause, ErrBackendIdleTimeout) {
+		return Result{Reply: reply, ExitCode: result.ExitCode, ProviderSessionID: sessionID}, ErrBackendIdleTimeout
+	}
 	if err != nil {
 		return Result{Reply: reply, ExitCode: result.ExitCode, ProviderSessionID: sessionID}, err
 	}

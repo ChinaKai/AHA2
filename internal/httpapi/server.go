@@ -12,6 +12,7 @@ import (
 	"github.com/ChinaKai/AHA2/internal/agentapi"
 	"github.com/ChinaKai/AHA2/internal/app"
 	"github.com/ChinaKai/AHA2/internal/auth"
+	"github.com/ChinaKai/AHA2/internal/channel"
 	"github.com/ChinaKai/AHA2/internal/codexaccount"
 	"github.com/ChinaKai/AHA2/internal/domain"
 	"github.com/ChinaKai/AHA2/internal/hardware"
@@ -35,6 +36,7 @@ type Config struct {
 	CodexAccounts     *codexaccount.Manager
 	AgentCapabilities *agentapi.Capabilities
 	ManagedProcesses  *managedprocess.Manager
+	Channels          *channel.Service
 	ProbeSSHHostKey   func(context.Context, string) (hardware.SSHHostKeyInfo, error)
 	TrustSSHHostKey   func(context.Context, string, string) (hardware.SSHHostKeyInfo, error)
 	Version           string
@@ -57,6 +59,7 @@ type Server struct {
 	codexAccounts         *codexaccount.Manager
 	agentCapabilities     *agentapi.Capabilities
 	managedProcesses      *managedprocess.Manager
+	channels              *channel.Service
 	probeSSHHostKey       func(context.Context, string) (hardware.SSHHostKeyInfo, error)
 	trustSSHHostKey       func(context.Context, string, string) (hardware.SSHHostKeyInfo, error)
 	version               string
@@ -99,6 +102,7 @@ func New(config Config) *Server {
 		codexAccounts:         config.CodexAccounts,
 		agentCapabilities:     config.AgentCapabilities,
 		managedProcesses:      config.ManagedProcesses,
+		channels:              config.Channels,
 		probeSSHHostKey:       probeSSHHostKey,
 		trustSSHHostKey:       trustSSHHostKey,
 		version:               config.Version,
@@ -114,6 +118,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/auth/register", s.authRegister)
 	mux.HandleFunc("POST /api/v1/auth/login", s.authLogin)
 	mux.HandleFunc("POST /api/v1/auth/recover", s.authRecover)
+	mux.Handle("POST /api/channel-runtime/v1/handshake", s.withChannelCapability("", http.HandlerFunc(s.channelRuntimeHandshake)))
+	mux.Handle("PUT /api/channel-runtime/v1/instances/{instance_id}/health", s.withChannelCapability("channel.health.write", http.HandlerFunc(s.channelRuntimeHealth)))
+	mux.Handle("POST /api/channel-runtime/v1/instances/{instance_id}/commands:claim", s.withChannelCapability("channel.command.claim", http.HandlerFunc(s.channelRuntimeClaimCommands)))
+	mux.Handle("POST /api/channel-runtime/v1/instances/{instance_id}/inbound-events", s.withChannelCapability("channel.inbound.write", http.HandlerFunc(s.channelRuntimeInbound)))
+	mux.Handle("POST /api/channel-runtime/v1/commands/{id}/progress", s.withChannelCapability("channel.command.progress", http.HandlerFunc(s.channelRuntimeCommandProgress)))
+	mux.Handle("POST /api/channel-runtime/v1/commands/{id}/complete", s.withChannelCapability("channel.command.complete", http.HandlerFunc(s.channelRuntimeCommandComplete)))
+	mux.Handle("POST /api/channel-runtime/v1/instances/{instance_id}/deliveries:claim", s.withChannelCapability("channel.delivery.claim", http.HandlerFunc(s.channelRuntimeClaimDeliveries)))
+	mux.Handle("POST /api/channel-runtime/v1/deliveries/{id}/ack", s.withChannelCapability("channel.delivery.ack", http.HandlerFunc(s.channelRuntimeDeliveryAck)))
+	mux.Handle("POST /api/channel-runtime/v1/deliveries/{id}/nack", s.withChannelCapability("channel.delivery.ack", http.HandlerFunc(s.channelRuntimeDeliveryNack)))
 	mux.Handle("POST /api/v1/auth/password", s.withAuth(http.HandlerFunc(s.authChangePassword)))
 	mux.Handle("POST /api/v1/auth/logout", s.withAuth(http.HandlerFunc(s.authLogout)))
 
@@ -125,6 +138,8 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("PUT /api/v1/settings/security", s.withAuth(http.HandlerFunc(s.updateSecuritySettings)))
 	mux.Handle("GET /api/v1/settings/agent-api", s.withAuth(http.HandlerFunc(s.agentAPISettings)))
 	mux.Handle("PUT /api/v1/settings/agent-api", s.withAuth(http.HandlerFunc(s.updateAgentAPISettings)))
+	mux.Handle("GET /api/v1/settings/backend", s.withAuth(http.HandlerFunc(s.backendSettings)))
+	mux.Handle("PUT /api/v1/settings/backend", s.withAuth(http.HandlerFunc(s.updateBackendSettings)))
 	mux.Handle("GET /api/v1/settings/knowledge-review", s.withAuth(http.HandlerFunc(s.knowledgeReviewSettings)))
 	mux.Handle("PUT /api/v1/settings/knowledge-review", s.withAuth(http.HandlerFunc(s.updateKnowledgeReviewSettings)))
 	mux.Handle("GET /api/v1/settings/sync", s.withAuth(http.HandlerFunc(s.syncSettings)))
@@ -133,6 +148,25 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/settings/sync/preview", s.withAuth(http.HandlerFunc(s.syncPreview)))
 	mux.Handle("POST /api/v1/settings/sync/run", s.withAuth(http.HandlerFunc(s.runSync)))
 	mux.Handle("GET /api/v1/settings/sync/conflicts", s.withAuth(http.HandlerFunc(s.syncConflicts)))
+	mux.Handle("GET /api/v1/channel-providers", s.withAuth(http.HandlerFunc(s.channelProviders)))
+	mux.Handle("PATCH /api/v1/channel-plugins/{id}", s.withAuth(http.HandlerFunc(s.updateChannelPlugin)))
+	mux.Handle("GET /api/v1/channel-instances", s.withAuth(http.HandlerFunc(s.channelInstances)))
+	mux.Handle("POST /api/v1/channel-instances", s.withAuth(http.HandlerFunc(s.createChannelInstance)))
+	mux.Handle("GET /api/v1/channel-instances/{id}", s.withAuth(http.HandlerFunc(s.channelInstance)))
+	mux.Handle("PATCH /api/v1/channel-instances/{id}", s.withAuth(http.HandlerFunc(s.updateChannelInstance)))
+	mux.Handle("PUT /api/v1/channel-instances/{id}/credentials", s.withAuth(http.HandlerFunc(s.updateChannelCredentials)))
+	mux.Handle("POST /api/v1/channel-instances/{id}/onboarding-sessions", s.withAuth(http.HandlerFunc(s.startChannelOnboarding)))
+	mux.Handle("GET /api/v1/channel-onboarding-sessions/{id}", s.withAuth(http.HandlerFunc(s.channelOnboarding)))
+	mux.Handle("GET /api/v1/channel-onboarding-sessions/{id}/qr", s.withAuth(http.HandlerFunc(s.channelOnboardingQR)))
+	mux.Handle("POST /api/v1/channel-onboarding-sessions/{id}/cancel", s.withAuth(http.HandlerFunc(s.cancelChannelOnboarding)))
+	mux.Handle("GET /api/v1/channel-instances/{id}/handoffs", s.withAuth(http.HandlerFunc(s.channelHandoffs)))
+	mux.Handle("GET /api/v1/channel-instances/{id}/deliveries", s.withAuth(http.HandlerFunc(s.channelDeliveries)))
+	mux.Handle("POST /api/v1/channel-deliveries/{id}/replay", s.withAuth(http.HandlerFunc(s.replayChannelDelivery)))
+	mux.Handle("POST /api/v1/channel-deliveries/{id}/skip", s.withAuth(http.HandlerFunc(s.skipChannelDelivery)))
+	mux.Handle("GET /api/v1/channel-instances/{id}/knowledge-policy", s.withAuth(http.HandlerFunc(s.channelKnowledgePolicy)))
+	mux.Handle("PUT /api/v1/channel-instances/{id}/knowledge-policy", s.withAuth(http.HandlerFunc(s.updateChannelKnowledgePolicy)))
+	mux.Handle("GET /api/v1/channel-instances/{id}/knowledge-records", s.withAuth(http.HandlerFunc(s.channelKnowledgeRecords)))
+	mux.Handle("POST /api/v1/channel-knowledge-records/{id}/promote", s.withAuth(http.HandlerFunc(s.promoteChannelKnowledgeRecord)))
 	mux.Handle("GET /api/v1/projects", s.withAuth(http.HandlerFunc(s.listProjects)))
 	mux.Handle("POST /api/v1/projects", s.withAuth(http.HandlerFunc(s.createProject)))
 	mux.Handle("PUT /api/v1/projects/{id}", s.withAuth(http.HandlerFunc(s.updateProject)))
@@ -223,6 +257,10 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("PUT /api/v1/agent/skills/{skill}", s.withAgentCapability(http.HandlerFunc(s.updateAgentSkill)))
 	mux.Handle("GET /api/v1/agent/project/workspaces", s.withAgentCapability(http.HandlerFunc(s.agentProjectWorkspaces)))
 	mux.Handle("GET /api/v1/agent/project/runtimes", s.withAgentCapability(http.HandlerFunc(s.agentProjectRuntimes)))
+	mux.Handle("GET /api/v1/agent/channel/context", s.withAgentCapability(http.HandlerFunc(s.agentChannelContext)))
+	mux.Handle("GET /api/v1/agent/channel/catalog", s.withAgentCapability(http.HandlerFunc(s.agentChannelCatalog)))
+	mux.Handle("POST /api/v1/agent/channel/actions/preview", s.withAgentCapability(http.HandlerFunc(s.previewAgentChannelAction)))
+	mux.Handle("POST /api/v1/agent/channel/handoffs", s.withAgentCapability(http.HandlerFunc(s.createAgentChannelHandoff)))
 	mux.Handle("POST /api/v1/agent/tasks", s.withAgentCapability(http.HandlerFunc(s.createAgentTask)))
 	mux.Handle("GET /api/v1/agent/tasks/{task}", s.withAgentCapability(http.HandlerFunc(s.agentTaskStatus)))
 	mux.Handle("PATCH /api/v1/tasks/{id}", s.withAuth(http.HandlerFunc(s.updateTaskTitle)))

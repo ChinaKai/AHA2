@@ -2,6 +2,7 @@ package sync
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"testing"
 	"time"
@@ -10,7 +11,7 @@ import (
 	"github.com/ChinaKai/AHA2/internal/store"
 )
 
-func TestKnowledgeLibraryBindingSynchronizesAndUnbinds(t *testing.T) {
+func TestKnowledgeLibraryBindingAndDeletionSynchronize(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	open := func() *store.Store {
@@ -90,5 +91,41 @@ func TestKnowledgeLibraryBindingSynchronizesAndUnbinds(t *testing.T) {
 	received, err = destination.KnowledgeLibrary(ctx, library.ID)
 	if err != nil || received.BoundProjectID != "" {
 		t.Fatalf("unbind did not synchronize: %#v err=%v", received, err)
+	}
+
+	root, err := source.EnsureKnowledgeRoot(ctx, "project", container.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := source.DeleteKnowledgeLibrary(ctx, library.ID); err != nil {
+		t.Fatal(err)
+	}
+	objects, err = ExportBusinessObjectsForDevice(ctx, source, "device-source")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, object := range objects {
+		if object.Operation != "delete" {
+			continue
+		}
+		if err := applyBusinessObject(ctx, destination, object); err != nil {
+			t.Fatalf("apply library deletion %s/%s: %v", object.Type, object.ID, err)
+		}
+	}
+	for _, check := range []struct {
+		name string
+		err  error
+	}{
+		{"container", func() error { _, err := destination.Project(ctx, container.ID); return err }()},
+		{"library", func() error { _, err := destination.KnowledgeLibrary(ctx, library.ID); return err }()},
+		{"root", func() error { _, err := destination.Knowledge(ctx, root.ID); return err }()},
+		{"skill", func() error { _, err := destination.Skill(ctx, "skill-library"); return err }()},
+	} {
+		if check.err != sql.ErrNoRows {
+			t.Fatalf("%s survived synchronized library deletion: %v", check.name, check.err)
+		}
+	}
+	if _, err := destination.SyncTombstone(ctx, TypeKnowledge, root.ID); err != nil {
+		t.Fatalf("library root tombstone was not retained: %v", err)
 	}
 }

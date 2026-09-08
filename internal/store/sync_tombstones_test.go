@@ -98,3 +98,62 @@ func TestSharedObjectDeletesPersistVersionedTombstones(t *testing.T) {
 		t.Fatalf("repeat migration: %v", err)
 	}
 }
+
+func TestApplySyncTombstoneRestrictsRootDeletionToKnowledgeLibraries(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database, err := Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	now := time.Now().UTC()
+
+	project := domain.Project{ID: "project-root-protected", Name: "Protected", ProjectType: "folder", KnowledgePolicy: "enabled", CreatedAt: now, UpdatedAt: now}
+	if err := database.CreateProject(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	projectRoot, err := database.EnsureKnowledgeRoot(ctx, "project", project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.ApplySyncTombstone(ctx, "knowledge", projectRoot.ID, "delete-project-root", "1", now); !errors.Is(err, ErrKnowledgeRootManaged) {
+		t.Fatalf("ordinary project root delete error=%v", err)
+	}
+	if _, err := database.Knowledge(ctx, projectRoot.ID); err != nil {
+		t.Fatalf("ordinary project root was deleted: %v", err)
+	}
+
+	libraryProject := domain.Project{ID: "project-library-root-delete", Name: "Library", ProjectType: "knowledge", KnowledgePolicy: "enabled", CreatedAt: now, UpdatedAt: now}
+	if err := database.CreateProject(ctx, libraryProject); err != nil {
+		t.Fatal(err)
+	}
+	libraryRoot, err := database.EnsureKnowledgeRoot(ctx, "project", libraryProject.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.ApplySyncTombstone(ctx, "knowledge", libraryRoot.ID, "delete-library-root", "1", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Knowledge(ctx, libraryRoot.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("knowledge library root survived tombstone: %v", err)
+	}
+
+	projectFirst := domain.Project{ID: "project-library-project-first", Name: "Project first", ProjectType: "knowledge", KnowledgePolicy: "enabled", CreatedAt: now, UpdatedAt: now}
+	if err := database.CreateProject(ctx, projectFirst); err != nil {
+		t.Fatal(err)
+	}
+	projectFirstRoot, err := database.EnsureKnowledgeRoot(ctx, "project", projectFirst.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.ApplySyncTombstone(ctx, "project", projectFirst.ID, "delete-library-project-first", timeString(now), now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Knowledge(ctx, projectFirstRoot.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("project-first library root survived project tombstone: %v", err)
+	}
+	if _, err := database.ApplySyncTombstone(ctx, "knowledge", projectFirstRoot.ID, "delete-library-root-after-project", "1", now); err != nil {
+		t.Fatalf("late library root tombstone failed: %v", err)
+	}
+}

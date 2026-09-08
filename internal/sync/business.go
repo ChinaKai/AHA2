@@ -61,6 +61,10 @@ func ExportBusinessObjects(ctx context.Context, database *store.Store) ([]domain
 
 func ExportBusinessObjectsForDevice(ctx context.Context, database *store.Store, ownerDeviceID string) ([]domain.SyncObject, error) {
 	var result []domain.SyncObject
+	channelProjects, err := database.ManagedChannelProjectIDs(ctx)
+	if err != nil {
+		return nil, err
+	}
 	add := func(kind, id, version string, value any) error {
 		raw, err := json.Marshal(value)
 		if err != nil {
@@ -80,6 +84,9 @@ func ExportBusinessObjectsForDevice(ctx context.Context, database *store.Store, 
 			return nil, err
 		}
 		for _, project := range projects {
+			if channelProjects[project.ID] {
+				continue
+			}
 			lines, err := database.ListProductLines(ctx, project.ID)
 			if err != nil {
 				return nil, err
@@ -108,6 +115,9 @@ func ExportBusinessObjectsForDevice(ctx context.Context, database *store.Store, 
 		return nil, err
 	}
 	for _, binding := range bindings {
+		if channelProjects[binding.ProjectID] {
+			continue
+		}
 		if err := add(TypeKnowledgeBinding, binding.LibraryID, timeVersion(binding.UpdatedAt), binding); err != nil {
 			return nil, err
 		}
@@ -117,6 +127,9 @@ func ExportBusinessObjectsForDevice(ctx context.Context, database *store.Store, 
 		return nil, err
 	}
 	addProposal := func(v domain.KnowledgeProposal) error {
+		if channelProjects[v.Proposed.ProjectID] {
+			return nil
+		}
 		v.SourceTaskID, v.SourceTurnID = "", ""
 		v.Proposed.SourceTaskID, v.Proposed.SourceTurnID = "", ""
 		if v.BaseEntry != nil {
@@ -147,6 +160,9 @@ func ExportBusinessObjectsForDevice(ctx context.Context, database *store.Store, 
 		return nil, err
 	}
 	for _, v := range sortKnowledgeEntriesForSync(knowledge) {
+		if channelProjects[v.ProjectID] {
+			continue
+		}
 		v.SourceTaskID = ""
 		v.SourceTurnID = ""
 		if err := add(TypeKnowledge, v.ID, strconv.Itoa(v.Revision), v); err != nil {
@@ -166,6 +182,9 @@ func ExportBusinessObjectsForDevice(ctx context.Context, database *store.Store, 
 		return nil, err
 	}
 	for _, v := range skills {
+		if channelProjects[v.ProjectID] {
+			continue
+		}
 		project, projectErr := database.Project(ctx, v.ProjectID)
 		if v.ProjectID != "" && (projectErr != nil || project.ProjectType != "knowledge") {
 			v.Scope = "global"

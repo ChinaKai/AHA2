@@ -2,11 +2,27 @@ package backend
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ChinaKai/AHA2/internal/workspace"
 )
+
+func TestClaudeIdleWatchdogReportsAndCancels(t *testing.T) {
+	events := []string{}
+	_, err := (Claude{IdleWarning: 10 * time.Millisecond, IdleTimeout: 35 * time.Millisecond, Heartbeat: 10 * time.Millisecond}).Execute(
+		context.Background(), Request{Runner: idleCodexRunner{}, WorkDir: t.TempDir()}, func(event Event) { events = append(events, event.Type) },
+	)
+	if !errors.Is(err, ErrBackendIdleTimeout) {
+		t.Fatalf("idle error = %v", err)
+	}
+	joined := strings.Join(events, ",")
+	if !strings.Contains(joined, "agent_stalled") || !strings.Contains(joined, "agent_idle_timeout") {
+		t.Fatalf("watchdog events = %v", events)
+	}
+}
 
 type claudeErrorRunner struct{}
 

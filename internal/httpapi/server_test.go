@@ -126,6 +126,53 @@ func TestProxySettingsAPI(t *testing.T) {
 	}
 }
 
+func TestBackendSettingsAPI(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	secretStore, err := secrets.Open(filepath.Join(t.TempDir(), "secrets.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	authService := auth.NewService(database, "setup-test", time.Hour)
+	server := httptest.NewServer(New(Config{
+		Store: database, Auth: authService, App: app.NewService(database, secretStore, app.StubExecutor{}),
+	}).Handler())
+	defer server.Close()
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	csrf := registerOwner(t, client, server.URL)
+
+	response := requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/settings/backend", nil, "")
+	var payload map[string]any
+	decodeResponse(t, response, &payload)
+	settings := payload["backend"].(map[string]any)
+	if response.StatusCode != http.StatusOK || settings["idle_timeout_seconds"] != float64(600) || settings["turn_timeout_seconds"] != float64(36000) {
+		t.Fatalf("unexpected backend defaults: status=%d payload=%v", response.StatusCode, payload)
+	}
+
+	response = requestJSON(t, client, http.MethodPut, server.URL+"/api/v1/settings/backend", map[string]any{
+		"idle_timeout_seconds": 900, "turn_timeout_seconds": 43200,
+	}, csrf)
+	decodeResponse(t, response, &payload)
+	settings = payload["backend"].(map[string]any)
+	if response.StatusCode != http.StatusOK || settings["idle_timeout_seconds"] != float64(900) || settings["turn_timeout_seconds"] != float64(43200) {
+		t.Fatalf("backend update failed: status=%d payload=%v", response.StatusCode, payload)
+	}
+
+	response = requestJSON(t, client, http.MethodPut, server.URL+"/api/v1/settings/backend", map[string]any{
+		"idle_timeout_seconds": 59, "turn_timeout_seconds": 43200,
+	}, csrf)
+	decodeResponse(t, response, &payload)
+	if response.StatusCode != http.StatusBadRequest || payload["error"] != "invalid_backend_idle_timeout" {
+		t.Fatalf("invalid backend timeout accepted: status=%d payload=%v", response.StatusCode, payload)
+	}
+}
+
 func TestCatalogProjectTypeAndManualModels(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -348,7 +395,7 @@ func TestTaskAgentAPIIsolationAndConfigInheritance(t *testing.T) {
 	response = requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/prompts/templates", nil, "")
 	var templatesResponse map[string]any
 	decodeResponse(t, response, &templatesResponse)
-	if response.StatusCode != http.StatusOK || len(templatesResponse["templates"].([]any)) != 9 {
+	if response.StatusCode != http.StatusOK || len(templatesResponse["templates"].([]any)) != 12 {
 		t.Fatalf("prompt templates failed: %d %#v", response.StatusCode, templatesResponse)
 	}
 	response = requestJSON(t, client, http.MethodPut, server.URL+"/api/v1/prompts/templates/role.main", map[string]any{

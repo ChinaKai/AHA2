@@ -142,6 +142,9 @@ func (s *Service) SubmitAgentKnowledgeProposals(ctx context.Context, claims agen
 	if err != nil {
 		return nil, nil, err
 	}
+	if channelContext, channelErr := s.store.ChannelContextForInboxBatch(ctx, call.Turn.InboxBatchID); channelErr == nil && channelRouteMode(channelContext) != "task_route" {
+		return nil, nil, ErrAgentCallForbidden
+	}
 	if !knowledgeEnabled(call.Project, call.Task) {
 		return nil, nil, ErrAgentCallForbidden
 	}
@@ -189,6 +192,9 @@ func (s *Service) SubmitAgentKnowledgeFeedback(ctx context.Context, claims agent
 	if err != nil {
 		return domain.KnowledgeEntry{}, err
 	}
+	if channelContext, channelErr := s.store.ChannelContextForInboxBatch(ctx, call.Turn.InboxBatchID); channelErr == nil && channelRouteMode(channelContext) != "task_route" {
+		return domain.KnowledgeEntry{}, ErrAgentCallForbidden
+	}
 	entry, err := s.store.Knowledge(ctx, strings.TrimSpace(feedback.EntryID))
 	if err != nil || entry.Scope == "project" && entry.ProjectID != call.Project.ID {
 		return domain.KnowledgeEntry{}, ErrAgentCallForbidden
@@ -209,6 +215,9 @@ func (s *Service) SubmitAgentCollaboration(ctx context.Context, claims agentapi.
 	call, err := s.AgentCallContext(ctx, claims, true)
 	if err != nil {
 		return 0, err
+	}
+	if channelContext, channelErr := s.store.ChannelContextForInboxBatch(ctx, call.Turn.InboxBatchID); channelErr == nil && channelRouteMode(channelContext) != "task_route" {
+		return 0, ErrAgentCallForbidden
 	}
 	created := s.spawnAgentTurns(ctx, call.Task, call.Turn, actions)
 	if created > 0 && strings.TrimSpace(mainFollowup) != "" {
@@ -235,6 +244,21 @@ func (s *Service) ApplicableAgentKnowledge(ctx context.Context, claims agentapi.
 	call, err := s.AgentCallContext(ctx, claims, false)
 	if err != nil {
 		return nil, err
+	}
+	if channelContext, channelErr := s.store.ChannelContextForInboxBatch(ctx, call.Turn.InboxBatchID); channelErr == nil {
+		if channelRouteMode(channelContext) == "task_route" {
+			lines, _ := s.store.ListProductLines(ctx, call.Project.ID)
+			line := resolveProductLine(lines, call.Task.TargetBranch, call.Project.DefaultBranch)
+			project, _ := s.store.ListApplicableKnowledge(ctx, call.Project.ID, line.ID, []domain.KnowledgeStatus{domain.KnowledgeVerified})
+			global, _ := s.store.ListKnowledge(ctx, "global", "", []domain.KnowledgeStatus{domain.KnowledgeVerified})
+			return append(project, global...), nil
+		}
+		return s.store.ChannelAllowedKnowledge(
+			ctx,
+			strings.TrimSpace(fmt.Sprint(channelContext["instance_id"])),
+			strings.TrimSpace(fmt.Sprint(channelContext["endpoint"])),
+			strings.TrimSpace(fmt.Sprint(channelContext["conversation_id"])),
+		)
 	}
 	lines, _ := s.store.ListProductLines(ctx, call.Project.ID)
 	line := resolveProductLine(lines, call.Task.TargetBranch, call.Project.DefaultBranch)

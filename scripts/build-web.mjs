@@ -10,7 +10,7 @@ await rm(output, {recursive: true, force: true});
 await mkdir(output, {recursive: true});
 await mkdir(resolve(output, "vendor"), {recursive: true});
 
-for (const name of ["api", "icons", "types", "runtime_picker", "task_agents", "task_composer", "hardware_terminal", "hardware_panel", "task_tools", "markdown", "conversation_ui", "ui_helpers", "prompt_admin", "proxy_settings", "sync_settings", "codex_accounts", "knowledge_workspace", "main"]) {
+for (const name of ["api", "icons", "types", "runtime_picker", "task_agents", "task_composer", "hardware_terminal", "hardware_panel", "task_tools", "markdown", "conversation_ui", "ui_helpers", "prompt_admin", "proxy_settings", "sync_settings", "codex_accounts", "knowledge_workspace", "channels", "main"]) {
   const input = await readFile(resolve(source, "src", `${name}.ts`), "utf8");
   const transformed = stripTypeScriptTypes(input, {mode: "transform", sourceMap: false});
   const outputName = name === "main" ? "app" : name;
@@ -40,6 +40,7 @@ const versionSource = await Promise.all([
   readFile(resolve(output, "sync_settings.js")),
   readFile(resolve(output, "codex_accounts.js")),
   readFile(resolve(output, "knowledge_workspace.js")),
+  readFile(resolve(output, "channels.js")),
   readFile(resolve(output, "styles.css")),
   readFile(resolve(output, "vendor", "xterm.js")),
   readFile(resolve(output, "vendor", "xterm.css")),
@@ -64,7 +65,8 @@ const versionedAppWithHelpers = versionedApp
   .replaceAll('"./sync_settings.js"', `"./sync_settings.js?v=${version}"`)
   .replaceAll('"./codex_accounts.js"', `"./codex_accounts.js?v=${version}"`);
 const versionedAppWithKnowledge = versionedAppWithHelpers
-  .replaceAll('"./knowledge_workspace.js"', `"./knowledge_workspace.js?v=${version}"`);
+  .replaceAll('"./knowledge_workspace.js"', `"./knowledge_workspace.js?v=${version}"`)
+  .replaceAll('"./channels.js"', `"./channels.js?v=${version}"`);
 await writeFile(appPath, versionedAppWithKnowledge);
 const agentsPath = resolve(output, "task_agents.js");
 const versionedAgents = (await readFile(agentsPath, "utf8"))
@@ -118,6 +120,11 @@ const versionedKnowledgeWorkspace = (await readFile(knowledgeWorkspacePath, "utf
   .replaceAll('"./icons.js"', `"./icons.js?v=${version}"`)
   .replaceAll('"./markdown.js"', `"./markdown.js?v=${version}"`);
 await writeFile(knowledgeWorkspacePath, versionedKnowledgeWorkspace);
+const channelsPath = resolve(output, "channels.js");
+const versionedChannels = (await readFile(channelsPath, "utf8"))
+  .replaceAll('"./api.js"', `"./api.js?v=${version}"`)
+  .replaceAll('"./icons.js"', `"./icons.js?v=${version}"`);
+await writeFile(channelsPath, versionedChannels);
 const indexPath = resolve(output, "index.html");
 const versionedIndex = (await readFile(indexPath, "utf8"))
   .replace('href="/vendor/xterm.css"', `href="/vendor/xterm.css?v=${version}"`)

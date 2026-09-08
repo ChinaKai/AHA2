@@ -196,6 +196,8 @@ func (s *Store) ApplySyncTombstone(ctx context.Context, objectType, objectID, sy
 		return domain.SyncTombstone{}, fmt.Errorf("sync tombstone identity is required")
 	}
 	var skillPackage *domain.Skill
+	var knowledgeLibraryRoot *domain.KnowledgeEntry
+	knowledgeLibraryProject := false
 	if objectType == "skill" {
 		if item, err := s.Skill(ctx, objectID); err == nil {
 			skillPackage = &item
@@ -203,7 +205,16 @@ func (s *Store) ApplySyncTombstone(ctx context.Context, objectType, objectID, sy
 	}
 	if objectType == "knowledge" {
 		if item, err := s.Knowledge(ctx, objectID); err == nil && item.IsIndex {
-			return domain.SyncTombstone{}, ErrKnowledgeRootManaged
+			project, projectErr := s.Project(ctx, item.ProjectID)
+			if projectErr != nil || item.Scope != "project" || project.ProjectType != "knowledge" {
+				return domain.SyncTombstone{}, ErrKnowledgeRootManaged
+			}
+			knowledgeLibraryRoot = &item
+		}
+	}
+	if objectType == "project" {
+		if project, err := s.Project(ctx, objectID); err == nil {
+			knowledgeLibraryProject = project.ProjectType == "knowledge"
 		}
 	}
 	if deletedAt.IsZero() {
@@ -223,6 +234,11 @@ func (s *Store) ApplySyncTombstone(ctx context.Context, objectType, objectID, sy
 		if err != nil {
 			return domain.SyncTombstone{}, err
 		}
+		if knowledgeLibraryProject {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM knowledge_entries WHERE project_id=?`, objectID); err != nil {
+				return domain.SyncTombstone{}, err
+			}
+		}
 	}
 	item := domain.SyncTombstone{ObjectType: objectType, ObjectID: objectID, Version: version, SyncKey: syncKey, DeletedAt: deletedAt.UTC()}
 	if existing, err := scanSyncTombstone(tx.QueryRowContext(ctx, `SELECT object_type,object_id,version,sync_key,deleted_at FROM sync_tombstones WHERE object_type=? AND object_id=?`, objectType, objectID)); err == nil {
@@ -230,8 +246,14 @@ func (s *Store) ApplySyncTombstone(ctx context.Context, objectType, objectID, sy
 	} else if err != sql.ErrNoRows {
 		return domain.SyncTombstone{}, err
 	}
-	if _, err := deleteSharedRow(ctx, tx, objectType, objectID, deletedAt); err != nil {
-		return domain.SyncTombstone{}, err
+	if knowledgeLibraryRoot != nil {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM knowledge_entries WHERE id=? AND project_id=? AND is_index=1`, objectID, knowledgeLibraryRoot.ProjectID); err != nil {
+			return domain.SyncTombstone{}, err
+		}
+	} else {
+		if _, err := deleteSharedRow(ctx, tx, objectType, objectID, deletedAt); err != nil {
+			return domain.SyncTombstone{}, err
+		}
 	}
 	if err := insertSyncTombstone(ctx, tx, item); err != nil {
 		return domain.SyncTombstone{}, err

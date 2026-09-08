@@ -21,7 +21,7 @@ func TestEngineRoutesTemplatesAndBuildsContextManifest(t *testing.T) {
 	defer database.Close()
 	engine := NewEngine(database)
 	templates, err := engine.Templates(ctx)
-	if err != nil || len(templates) != 9 {
+	if err != nil || len(templates) != 12 {
 		t.Fatalf("templates=%d err=%v", len(templates), err)
 	}
 	if err := engine.UpdateTemplate(ctx, "role.main", "CUSTOM MAIN {{.AgentID}}", templates[0].UpdatedAt); err != nil {

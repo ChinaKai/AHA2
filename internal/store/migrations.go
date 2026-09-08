@@ -163,6 +163,378 @@ INSERT OR IGNORE INTO knowledge_review_settings(id,auto_approve,updated_at)
 VALUES(1,0,strftime('%Y-%m-%dT%H:%M:%fZ','now'));
 `
 
+const schemaV46 = `
+CREATE TABLE IF NOT EXISTS channel_plugins (
+    id TEXT PRIMARY KEY,
+    provider_key TEXT NOT NULL UNIQUE,
+    display_name TEXT NOT NULL,
+    manifest_version INTEGER NOT NULL CHECK(manifest_version >= 1),
+    package_version TEXT NOT NULL,
+    protocol_min INTEGER NOT NULL CHECK(protocol_min >= 1),
+    protocol_max INTEGER NOT NULL CHECK(protocol_max >= protocol_min),
+    executable_path TEXT NOT NULL,
+    executable_sha256 TEXT NOT NULL,
+    manifest_json TEXT NOT NULL DEFAULT '{}',
+    install_state TEXT NOT NULL CHECK(install_state IN ('installed','missing','invalid','incompatible')),
+    enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
+    revision INTEGER NOT NULL DEFAULT 1 CHECK(revision >= 1),
+    last_error TEXT NOT NULL DEFAULT '',
+    discovered_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS channel_instances (
+    id TEXT PRIMARY KEY,
+    plugin_id TEXT NOT NULL REFERENCES channel_plugins(id) ON DELETE RESTRICT,
+    owner_id TEXT NOT NULL REFERENCES owners(id) ON DELETE RESTRICT,
+    runtime_device_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('draft','onboarding','ready','degraded','disabled','error')),
+    revision INTEGER NOT NULL DEFAULT 1 CHECK(revision >= 1),
+    app_id TEXT NOT NULL DEFAULT '',
+    provider_tenant_id TEXT NOT NULL DEFAULT '',
+    credential_ref TEXT NOT NULL DEFAULT '',
+    credential_configured INTEGER NOT NULL DEFAULT 0 CHECK(credential_configured IN (0,1)),
+    host_project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+    host_workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE RESTRICT,
+    config_json TEXT NOT NULL DEFAULT '{}',
+    last_seen_at TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(owner_id,plugin_id,name)
+);
+CREATE INDEX IF NOT EXISTS idx_channel_instances_owner ON channel_instances(owner_id,updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_channel_instances_plugin ON channel_instances(plugin_id,status);
+
+CREATE TABLE IF NOT EXISTS channel_endpoints (
+    id TEXT PRIMARY KEY,
+    instance_id TEXT NOT NULL REFERENCES channel_instances(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL CHECK(kind IN ('assistant_dm','group_digital_human')),
+    enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
+    config_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(instance_id,kind)
+);
+
+CREATE TABLE IF NOT EXISTS channel_identity_links (
+    id TEXT PRIMARY KEY,
+    instance_id TEXT NOT NULL REFERENCES channel_instances(id) ON DELETE CASCADE,
+    owner_id TEXT REFERENCES owners(id) ON DELETE RESTRICT,
+    provider_tenant_id TEXT NOT NULL DEFAULT '',
+    external_user_id TEXT NOT NULL,
+    union_id TEXT NOT NULL DEFAULT '',
+    role TEXT NOT NULL CHECK(role IN ('owner','participant')),
+    display_name TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL CHECK(status IN ('active','revoked')),
+    linked_at TEXT NOT NULL,
+    revoked_at TEXT NOT NULL DEFAULT '',
+    CHECK((role='owner' AND owner_id IS NOT NULL) OR (role='participant' AND owner_id IS NULL)),
+    UNIQUE(instance_id,external_user_id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_channel_identity_one_owner
+ON channel_identity_links(instance_id) WHERE role='owner' AND status='active';
+
+CREATE TABLE IF NOT EXISTS channel_conversations (
+    id TEXT PRIMARY KEY,
+    instance_id TEXT NOT NULL REFERENCES channel_instances(id) ON DELETE CASCADE,
+    endpoint_id TEXT NOT NULL REFERENCES channel_endpoints(id) ON DELETE RESTRICT,
+    scope_key_version INTEGER NOT NULL DEFAULT 1 CHECK(scope_key_version >= 1),
+    scope_key TEXT NOT NULL,
+    external_chat_id TEXT NOT NULL DEFAULT '',
+    external_sender_id TEXT NOT NULL DEFAULT '',
+    owner_identity_link_id TEXT REFERENCES channel_identity_links(id) ON DELETE RESTRICT,
+    host_task_id TEXT NOT NULL UNIQUE REFERENCES tasks(id) ON DELETE RESTRICT,
+    status TEXT NOT NULL CHECK(status IN ('active','closed')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(endpoint_id,scope_key_version,scope_key)
+);
+CREATE INDEX IF NOT EXISTS idx_channel_conversations_instance ON channel_conversations(instance_id,status);
+
+CREATE TABLE IF NOT EXISTS channel_sessions (
+    id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL REFERENCES channel_conversations(id) ON DELETE CASCADE,
+    generation INTEGER NOT NULL CHECK(generation >= 1),
+    mode TEXT NOT NULL CHECK(mode IN ('assistant','group_qa','task_route')),
+    status TEXT NOT NULL CHECK(status IN ('active','closed')),
+    inbound_cursor INTEGER NOT NULL DEFAULT 0,
+    outbound_cursor INTEGER NOT NULL DEFAULT 0,
+    started_at TEXT NOT NULL,
+    closed_at TEXT NOT NULL DEFAULT '',
+    UNIQUE(conversation_id,generation)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_channel_sessions_one_active
+ON channel_sessions(conversation_id) WHERE status='active';
+
+CREATE TABLE IF NOT EXISTS channel_pending_actions (
+    id TEXT PRIMARY KEY,
+    instance_id TEXT NOT NULL REFERENCES channel_instances(id) ON DELETE CASCADE,
+    conversation_id TEXT NOT NULL REFERENCES channel_conversations(id) ON DELETE CASCADE,
+    actor_identity_link_id TEXT NOT NULL REFERENCES channel_identity_links(id) ON DELETE RESTRICT,
+    operation TEXT NOT NULL,
+    target_type TEXT NOT NULL,
+    target_id TEXT NOT NULL DEFAULT '',
+    intent_json TEXT NOT NULL DEFAULT '{}',
+    preview_json TEXT NOT NULL DEFAULT '{}',
+    precondition_json TEXT NOT NULL DEFAULT '{}',
+    precondition_hash TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('pending','executing','succeeded','failed','cancelled','expired','superseded')),
+    provider_message_id TEXT NOT NULL DEFAULT '',
+    expires_at TEXT NOT NULL,
+    consumed_at TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_channel_pending_actions_active
+ON channel_pending_actions(conversation_id,status,expires_at);
+
+CREATE TABLE IF NOT EXISTS channel_task_routes (
+    id TEXT PRIMARY KEY,
+    instance_id TEXT NOT NULL REFERENCES channel_instances(id) ON DELETE CASCADE,
+    conversation_id TEXT NOT NULL REFERENCES channel_conversations(id) ON DELETE CASCADE,
+    target_task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE RESTRICT,
+    state TEXT NOT NULL CHECK(state IN ('pending','active','exited','superseded','revoked')),
+    revision INTEGER NOT NULL DEFAULT 1 CHECK(revision >= 1),
+    pending_action_id TEXT REFERENCES channel_pending_actions(id) ON DELETE RESTRICT,
+    activated_at TEXT NOT NULL DEFAULT '',
+    exited_at TEXT NOT NULL DEFAULT '',
+    exit_reason TEXT NOT NULL DEFAULT ''
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_channel_task_routes_one_active
+ON channel_task_routes(conversation_id) WHERE state='active';
+CREATE INDEX IF NOT EXISTS idx_channel_task_routes_target ON channel_task_routes(target_task_id,state);
+
+CREATE TABLE IF NOT EXISTS channel_subscriptions (
+    id TEXT PRIMARY KEY,
+    instance_id TEXT NOT NULL REFERENCES channel_instances(id) ON DELETE CASCADE,
+    conversation_id TEXT NOT NULL REFERENCES channel_conversations(id) ON DELETE CASCADE,
+    route_id TEXT REFERENCES channel_task_routes(id) ON DELETE CASCADE,
+    source_task_id TEXT REFERENCES tasks(id) ON DELETE RESTRICT,
+	kind TEXT NOT NULL CHECK(kind IN ('task_route','owner_global','conversation_host')),
+    filter_version INTEGER NOT NULL DEFAULT 1 CHECK(filter_version >= 1),
+    filter_json TEXT NOT NULL DEFAULT '{}',
+    source_cursor INTEGER NOT NULL DEFAULT 0,
+    state TEXT NOT NULL CHECK(state IN ('active','closed','revoked')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+	CHECK((kind='task_route' AND route_id IS NOT NULL AND source_task_id IS NOT NULL) OR
+	      (kind='owner_global' AND route_id IS NULL AND source_task_id IS NULL) OR
+	      (kind='conversation_host' AND route_id IS NULL AND source_task_id IS NOT NULL))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_channel_subscriptions_active_route
+ON channel_subscriptions(route_id) WHERE kind='task_route' AND state='active';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_channel_subscriptions_owner_global
+ON channel_subscriptions(instance_id) WHERE kind='owner_global' AND state='active';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_channel_subscriptions_conversation_host
+ON channel_subscriptions(conversation_id) WHERE kind='conversation_host' AND state='active';
+
+CREATE TABLE IF NOT EXISTS channel_knowledge_policies (
+    id TEXT PRIMARY KEY,
+    instance_id TEXT NOT NULL REFERENCES channel_instances(id) ON DELETE CASCADE,
+    endpoint_id TEXT NOT NULL UNIQUE REFERENCES channel_endpoints(id) ON DELETE CASCADE,
+    fixed_index_entry_id TEXT NOT NULL REFERENCES knowledge_entries(id) ON DELETE RESTRICT,
+    default_visibility TEXT NOT NULL CHECK(default_visibility IN ('conversation_only','instance_shared')),
+    revision INTEGER NOT NULL DEFAULT 1 CHECK(revision >= 1),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS channel_knowledge_grants (
+    id TEXT PRIMARY KEY,
+    policy_id TEXT NOT NULL REFERENCES channel_knowledge_policies(id) ON DELETE CASCADE,
+    knowledge_entry_id TEXT NOT NULL REFERENCES knowledge_entries(id) ON DELETE RESTRICT,
+    grant_scope TEXT NOT NULL CHECK(grant_scope IN ('node','subtree')),
+    granted_by_owner_id TEXT NOT NULL REFERENCES owners(id) ON DELETE RESTRICT,
+    created_at TEXT NOT NULL,
+    revoked_at TEXT NOT NULL DEFAULT ''
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_channel_knowledge_grants_active
+ON channel_knowledge_grants(policy_id,knowledge_entry_id,grant_scope) WHERE revoked_at='';
+
+CREATE TABLE IF NOT EXISTS channel_knowledge_records (
+    id TEXT PRIMARY KEY,
+    instance_id TEXT NOT NULL REFERENCES channel_instances(id) ON DELETE CASCADE,
+    conversation_id TEXT NOT NULL REFERENCES channel_conversations(id) ON DELETE CASCADE,
+    knowledge_entry_id TEXT NOT NULL UNIQUE REFERENCES knowledge_entries(id) ON DELETE RESTRICT,
+    requester_identity_link_id TEXT NOT NULL REFERENCES channel_identity_links(id) ON DELETE RESTRICT,
+    question TEXT NOT NULL,
+    answer TEXT NOT NULL,
+    source_json TEXT NOT NULL DEFAULT '{}',
+    visibility TEXT NOT NULL CHECK(visibility IN ('conversation_only','instance_shared')),
+    authority_status TEXT NOT NULL DEFAULT 'observed' CHECK(authority_status IN ('observed','reviewed','verified','rejected')),
+    occurred_at TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS channel_inbox_dedup (
+    id TEXT PRIMARY KEY,
+    instance_id TEXT NOT NULL REFERENCES channel_instances(id) ON DELETE CASCADE,
+    external_event_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    payload_digest TEXT NOT NULL,
+    normalized_payload_json TEXT NOT NULL DEFAULT '{}',
+    state TEXT NOT NULL CHECK(state IN ('received','processing','processed','rejected','failed')),
+    lease_id TEXT NOT NULL DEFAULT '',
+    lease_until TEXT NOT NULL DEFAULT '',
+    conversation_id TEXT REFERENCES channel_conversations(id) ON DELETE RESTRICT,
+    aha_message_id TEXT NOT NULL DEFAULT '',
+    outcome TEXT NOT NULL DEFAULT '',
+    occurred_at TEXT NOT NULL,
+    received_at TEXT NOT NULL,
+    processed_at TEXT NOT NULL DEFAULT '',
+    UNIQUE(instance_id,external_event_id)
+);
+CREATE INDEX IF NOT EXISTS idx_channel_inbox_claim
+ON channel_inbox_dedup(instance_id,state,lease_until,received_at);
+
+CREATE TABLE IF NOT EXISTS channel_source_events (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    id TEXT NOT NULL UNIQUE,
+    source_key TEXT NOT NULL,
+    source_revision INTEGER NOT NULL CHECK(source_revision >= 1),
+    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    round_id TEXT NOT NULL DEFAULT '',
+    turn_id TEXT NOT NULL DEFAULT '',
+    conversation_item_id TEXT NOT NULL DEFAULT '',
+    event_class TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    semantic_payload_json TEXT NOT NULL DEFAULT '{}',
+    occurred_at TEXT NOT NULL,
+    UNIQUE(source_key,source_revision)
+);
+CREATE INDEX IF NOT EXISTS idx_channel_source_events_task ON channel_source_events(task_id,sequence);
+
+CREATE TABLE IF NOT EXISTS channel_delivery_outbox (
+    id TEXT PRIMARY KEY,
+    instance_id TEXT NOT NULL REFERENCES channel_instances(id) ON DELETE CASCADE,
+    conversation_id TEXT NOT NULL REFERENCES channel_conversations(id) ON DELETE CASCADE,
+    subscription_id TEXT REFERENCES channel_subscriptions(id) ON DELETE SET NULL,
+    source_event_sequence INTEGER NOT NULL REFERENCES channel_source_events(sequence) ON DELETE CASCADE,
+    stream_sequence INTEGER NOT NULL CHECK(stream_sequence >= 1),
+    replay_generation INTEGER NOT NULL DEFAULT 0 CHECK(replay_generation >= 0),
+    replay_of_id TEXT REFERENCES channel_delivery_outbox(id) ON DELETE RESTRICT,
+    idempotency_key TEXT NOT NULL UNIQUE,
+    coalesce_key TEXT NOT NULL DEFAULT '',
+    payload_version INTEGER NOT NULL DEFAULT 1 CHECK(payload_version >= 1),
+    semantic_payload_json TEXT NOT NULL DEFAULT '{}',
+    state TEXT NOT NULL CHECK(state IN ('pending','leased','delivered','dead_letter','replayed','skipped')),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    first_attempt_at TEXT NOT NULL DEFAULT '',
+    available_at TEXT NOT NULL,
+    lease_id TEXT NOT NULL DEFAULT '',
+    lease_until TEXT NOT NULL DEFAULT '',
+    provider_message_id TEXT NOT NULL DEFAULT '',
+    last_error_code TEXT NOT NULL DEFAULT '',
+    outcome_certainty TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    delivered_at TEXT NOT NULL DEFAULT '',
+    UNIQUE(conversation_id,stream_sequence,replay_generation)
+);
+CREATE INDEX IF NOT EXISTS idx_channel_delivery_claim
+ON channel_delivery_outbox(instance_id,state,available_at,conversation_id,stream_sequence,replay_generation);
+
+CREATE TABLE IF NOT EXISTS channel_delivery_attempts (
+    id TEXT PRIMARY KEY,
+    delivery_id TEXT NOT NULL REFERENCES channel_delivery_outbox(id) ON DELETE CASCADE,
+    attempt_no INTEGER NOT NULL CHECK(attempt_no >= 1),
+    lease_id TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    error_code TEXT NOT NULL DEFAULT '',
+    retry_after_ms INTEGER NOT NULL DEFAULT 0,
+    provider_request_id TEXT NOT NULL DEFAULT '',
+    started_at TEXT NOT NULL,
+    finished_at TEXT NOT NULL DEFAULT '',
+    UNIQUE(delivery_id,attempt_no)
+);
+
+CREATE TABLE IF NOT EXISTS channel_handoffs (
+    id TEXT PRIMARY KEY,
+    instance_id TEXT NOT NULL REFERENCES channel_instances(id) ON DELETE CASCADE,
+    origin_conversation_id TEXT NOT NULL REFERENCES channel_conversations(id) ON DELETE RESTRICT,
+    origin_inbox_id TEXT NOT NULL UNIQUE REFERENCES channel_inbox_dedup(id) ON DELETE RESTRICT,
+    requester_identity_link_id TEXT NOT NULL REFERENCES channel_identity_links(id) ON DELETE RESTRICT,
+    owner_conversation_id TEXT REFERENCES channel_conversations(id) ON DELETE RESTRICT,
+    summary TEXT NOT NULL,
+    details TEXT NOT NULL DEFAULT '',
+    source_json TEXT NOT NULL DEFAULT '{}',
+    state TEXT NOT NULL CHECK(state IN ('pending_owner','accepted_todo','accepted_task','task_created','dismissed','expired')),
+    decision TEXT NOT NULL DEFAULT '',
+    accepted_action_id TEXT REFERENCES channel_pending_actions(id) ON DELETE RESTRICT,
+    created_task_id TEXT REFERENCES tasks(id) ON DELETE RESTRICT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    resolved_at TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_channel_handoffs_owner ON channel_handoffs(instance_id,state,created_at DESC);
+
+CREATE TABLE IF NOT EXISTS channel_service_capabilities (
+    id TEXT PRIMARY KEY,
+    plugin_id TEXT NOT NULL REFERENCES channel_plugins(id) ON DELETE CASCADE,
+    instance_id TEXT NOT NULL REFERENCES channel_instances(id) ON DELETE CASCADE,
+    token_hash TEXT NOT NULL UNIQUE,
+    token_secret_ref TEXT NOT NULL,
+    scopes_json TEXT NOT NULL DEFAULT '[]',
+    status TEXT NOT NULL CHECK(status IN ('active','revoked','expired')),
+    issued_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    last_used_at TEXT NOT NULL DEFAULT '',
+    revoked_at TEXT NOT NULL DEFAULT '',
+    rotated_from_id TEXT REFERENCES channel_service_capabilities(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS idx_channel_capabilities_instance ON channel_service_capabilities(instance_id,status,expires_at);
+
+CREATE TABLE IF NOT EXISTS channel_onboarding_sessions (
+    id TEXT PRIMARY KEY,
+    instance_id TEXT NOT NULL REFERENCES channel_instances(id) ON DELETE CASCADE,
+    owner_session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL,
+    mode TEXT NOT NULL CHECK(mode IN ('register_app','existing_app')),
+    registration_command_id TEXT NOT NULL DEFAULT '',
+    verification_url_secret_ref TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL CHECK(status IN ('pending','qr_ready','completing','succeeded','failed','cancelled','expired')),
+    step TEXT NOT NULL DEFAULT '',
+    secret_stage_ref TEXT NOT NULL DEFAULT '',
+    scanner_external_user_id TEXT NOT NULL DEFAULT '',
+    expires_at TEXT NOT NULL,
+    consumed_at TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_channel_onboarding_owner ON channel_onboarding_sessions(instance_id,status,expires_at);
+
+CREATE TABLE IF NOT EXISTS channel_plugin_commands (
+    id TEXT PRIMARY KEY,
+    instance_id TEXT NOT NULL REFERENCES channel_instances(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    progress_json TEXT NOT NULL DEFAULT '{}',
+    state TEXT NOT NULL CHECK(state IN ('pending','leased','completed','failed','cancelled','dead_letter')),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    available_at TEXT NOT NULL,
+    lease_id TEXT NOT NULL DEFAULT '',
+    lease_until TEXT NOT NULL DEFAULT '',
+    result_json TEXT NOT NULL DEFAULT '{}',
+    last_error_code TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    completed_at TEXT NOT NULL DEFAULT '',
+    UNIQUE(instance_id,idempotency_key)
+);
+CREATE INDEX IF NOT EXISTS idx_channel_commands_claim ON channel_plugin_commands(instance_id,state,available_at,created_at);
+`
+
+const schemaV47 = `
+CREATE TABLE IF NOT EXISTS backend_settings (
+    id INTEGER PRIMARY KEY CHECK(id=1),
+    idle_timeout_seconds INTEGER NOT NULL DEFAULT 600 CHECK(idle_timeout_seconds BETWEEN 60 AND 86400),
+    turn_timeout_seconds INTEGER NOT NULL DEFAULT 36000 CHECK(turn_timeout_seconds BETWEEN 60 AND 604800),
+    updated_at TEXT NOT NULL
+);
+INSERT OR IGNORE INTO backend_settings(id,idle_timeout_seconds,turn_timeout_seconds,updated_at)
+VALUES(1,600,36000,strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+`
+
 const schemaV27 = `
 CREATE TABLE IF NOT EXISTS sync_settings (
     scope TEXT PRIMARY KEY,
@@ -1439,6 +1811,26 @@ func (s *Store) migrate(ctx context.Context) error {
 	}
 	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(45, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
 		return fmt.Errorf("record schema v45: %w", err)
+	}
+	var hasV46 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=46)`).Scan(&hasV46)
+	if !hasV46 {
+		if _, err := s.db.ExecContext(ctx, schemaV46); err != nil {
+			return fmt.Errorf("apply schema v46: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(46, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v46: %w", err)
+	}
+	var hasV47 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=47)`).Scan(&hasV47)
+	if !hasV47 {
+		if _, err := s.db.ExecContext(ctx, schemaV47); err != nil {
+			return fmt.Errorf("apply schema v47: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(47, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v47: %w", err)
 	}
 	return nil
 }

@@ -1,6 +1,7 @@
 import {api} from "./api.js";
 import {renderConversationList} from "./conversation_ui.js";
 import {bindCodexAccounts, renderCodexAccounts} from "./codex_accounts.js";
+import {bindChannels, renderChannels} from "./channels.js";
 import {icon} from "./icons.js";
 import {bindKnowledgeWorkspace, renderKnowledgeWorkspace} from "./knowledge_workspace.js";
 import {bindHardwarePanel, stopHardwarePanel} from "./hardware_panel.js";
@@ -26,9 +27,12 @@ import {
 } from "./task_agents.js";
 import type {
   AgentAPISettings,
+	BackendSettings,
   Attachment,
   AuthStatus,
   CodexAccount,
+  ChannelInstance,
+  ChannelPlugin,
   ConversationCategory,
   ConversationItem,
   DetectedModel,
@@ -54,7 +58,7 @@ import type {
   TaskDetail,
   Workspace,
 } from "./types.js";
-type View = "projects" | "models" | "tasks" | "knowledge" | "prompts" | "proxy" | "sync" | "advanced";
+type View = "projects" | "channels" | "models" | "tasks" | "knowledge" | "prompts" | "proxy" | "sync" | "advanced";
 interface State {
   auth: AuthStatus | null;
   view: View;
@@ -66,6 +70,7 @@ interface State {
   proxySettings: ProxySettings;
   securitySettings: SecuritySettings;
   agentAPISettings: AgentAPISettings;
+	backendSettings: BackendSettings;
   syncSettings: SyncSettings;
   syncState: SyncState;
   syncPending: number;
@@ -75,6 +80,8 @@ interface State {
   projects: Project[];
   workspaces: Workspace[];
   providers: Provider[];
+  channelProviders: ChannelPlugin[];
+  channelInstances: ChannelInstance[];
   envGroups: EnvGroup[];
   codexAccounts: CodexAccount[];
   models: Model[];
@@ -130,6 +137,7 @@ const state: State = {
   proxySettings: {http_proxy: "http://127.0.0.1:7897", https_proxy: "http://127.0.0.1:7897", no_proxy: "localhost,127.0.0.1,::1"},
   securitySettings: {validate_origin: true, startup_override: false},
   agentAPISettings: {url: "", allow_insecure: false, effective_url: "http://127.0.0.1:8766", effective_allow_insecure: false},
+	backendSettings: {idle_timeout_seconds: 10 * 60, turn_timeout_seconds: 10 * 60 * 60},
   syncSettings: {scope:"default",enabled:false,endpoint:"",device_id:"",device_name:"",interval_seconds:300,token_configured:false,passphrase_configured:false},
   syncState: {scope:"default",cursor:"",last_error:""},
   syncPending: 0,
@@ -139,6 +147,8 @@ const state: State = {
   projects: [],
   workspaces: [],
   providers: [],
+  channelProviders: [],
+  channelInstances: [],
   envGroups: [],
   codexAccounts: [],
   models: [],
@@ -226,7 +236,7 @@ function statusLabel(status: string): string {
 }
 
 function projectTypeLabel(type?: string): string {
-  return type === "git" ? "Git 仓库" : "普通文件夹";
+  return type === "git" ? "Git 仓库" : type === "channel" ? "渠道宿主" : "普通文件夹";
 }
 
 function formatDateTime(value?: string): string {
@@ -674,12 +684,14 @@ async function bootstrap(): Promise<void> {
 }
 
 async function loadAll(): Promise<void> {
-  const [projects, workspaces, providers, envGroups, codexAccounts, models, tasks, knowledge, libraries, skills, system, proxy, security, agentAPI, syncSettings, syncStatus, syncConflicts, syncPreview] = await Promise.all([
-    api.projects(), api.workspaces(), api.providers(), api.envGroups(), api.codexAccounts(), api.models(), api.tasks(), api.knowledge(), api.knowledgeLibraries(), api.skills(), api.system(), api.proxySettings(), api.securitySettings(), api.agentAPISettings(), api.syncSettings(), api.syncStatus(), api.syncConflicts(), api.syncPreview().catch(() => ({preview: state.syncPreview})),
+  const [projects, workspaces, providers, channelProviders, channelInstances, envGroups, codexAccounts, models, tasks, knowledge, libraries, skills, system, proxy, security, agentAPI, backendSettings, syncSettings, syncStatus, syncConflicts, syncPreview] = await Promise.all([
+    api.projects(), api.workspaces(), api.providers(), api.channelProviders().catch(() => ({providers: []})), api.channelInstances().catch(() => ({instances: []})), api.envGroups(), api.codexAccounts(), api.models(), api.tasks(), api.knowledge(), api.knowledgeLibraries(), api.skills(), api.system(), api.proxySettings(), api.securitySettings(), api.agentAPISettings(), api.backendSettings(), api.syncSettings(), api.syncStatus(), api.syncConflicts(), api.syncPreview().catch(() => ({preview: state.syncPreview})),
   ]);
   state.projects = projects.projects || [];
   state.workspaces = workspaces.workspaces || [];
   state.providers = providers.providers || [];
+  state.channelProviders = channelProviders.providers || [];
+  state.channelInstances = channelInstances.instances || [];
   state.envGroups = envGroups.env_groups || [];
   state.codexAccounts = codexAccounts.accounts || [];
   state.models = models.models || [];
@@ -693,6 +705,7 @@ async function loadAll(): Promise<void> {
   if (proxy?.proxy) state.proxySettings = proxy.proxy;
   if (security?.security) state.securitySettings = security.security;
   if (agentAPI?.agent_api) state.agentAPISettings = agentAPI.agent_api;
+	if (backendSettings?.backend) state.backendSettings = backendSettings.backend;
   if (syncSettings?.sync) state.syncSettings = syncSettings.sync;
   if (syncStatus?.state) { state.syncState = syncStatus.state; state.syncPending = syncStatus.pending || 0; state.syncRun = syncStatus.run || state.syncRun; }
   state.syncConflicts = syncConflicts.conflicts || [];
@@ -707,7 +720,7 @@ function persistNavigationState(): void {
 }
 async function restoreNavigationState(): Promise<void> {
   const saved = loadNavigationSnapshot();
-  if (["projects", "models", "tasks", "knowledge", "prompts", "proxy", "sync", "advanced"].includes(saved.view || "")) state.view = saved.view as View;
+  if (["projects", "channels", "models", "tasks", "knowledge", "prompts", "proxy", "sync", "advanced"].includes(saved.view || "")) state.view = saved.view as View;
   state.selectedProject = state.projects.find(project => project.id === saved.projectID) || null;
   if (!saved.taskID || !state.tasks.some(task => task.id === saved.taskID)) return;
   state.view = "tasks"; state.selectedProject = null;
@@ -1009,6 +1022,7 @@ function shell(content: string): string {
   const nav = [
     ["projects", "projects", "项目"],
     ["tasks", "tasks", "任务"],
+    ["channels", "bot", "渠道"],
     ["knowledge", "knowledge", "知识库"],
     ["models", "model", "模型"],
     ["proxy", "proxy", "代理"],
@@ -1128,8 +1142,9 @@ function modelsView(): string {
 function advancedSettingsView(): string {
   const origin = state.securitySettings;
   const agentAPI = state.agentAPISettings;
+	const backendSettings = state.backendSettings;
   return shell(`<section class="page advanced-settings-page">
-    <header class="page-head"><div><h1>高级设置</h1><p>管理 Agent API、Owner 账号与本机恢复方式</p></div></header>
+    <header class="page-head"><div><h1>高级设置</h1><p>管理 Backend、Agent API、Owner 账号与本机恢复方式</p></div></header>
     <section class="advanced-tools-grid">
       <article class="panel advanced-tool-card"><div>${icon("bot")}<span><strong>提示词</strong><small>查看和维护 AHA2 的提示词模板</small></span></div><button type="button" data-view="prompts">进入提示词设置</button></article>
       <article class="panel advanced-tool-card"><div>${icon("sync")}<span><strong>同步</strong><small>配置设备同步、检查差异与冲突</small></span></div><button type="button" data-view="sync">进入同步设置</button></article>
@@ -1143,7 +1158,18 @@ function advancedSettingsView(): string {
         <div class="dialog-actions"><button class="primary" type="submit">保存 Agent API 设置</button></div>
       </form>
     </section>
-    <section class="panel account-security-panel">
+    <section class="panel spaced account-security-panel backend-timeout-settings-panel">
+      <div class="panel-head"><strong>Backend 超时</strong><span>Codex / Claude 统一生效</span></div>
+      <form id="backend-settings-form">
+			<div class="two">
+				<label>无活动超时（分钟）<input name="idle_timeout_minutes" type="number" min="1" max="1440" step="1" value="${Math.round(backendSettings.idle_timeout_seconds / 60)}" required></label>
+				<label>单次执行总时限（小时）<input name="turn_timeout_hours" type="number" min="0.0167" max="168" step="any" value="${Number((backendSettings.turn_timeout_seconds / 3600).toFixed(4))}" required></label>
+			</div>
+			<div class="field-help">无活动超时只在 Backend 持续没有输出时触发；总时限从本次执行启动开始计算。两项可以独立设置，保存后对后续执行生效。</div>
+			<div class="dialog-actions"><button class="primary" type="submit">保存 Backend 设置</button></div>
+		</form>
+	</section>
+    <section class="panel spaced account-security-panel">
       <div class="panel-head"><strong>修改密码</strong><span>${escapeHTML(state.auth?.username || "Owner")}</span></div>
       <form id="change-password-form">
         <label>当前密码<input name="current_password" type="password" autocomplete="current-password" required></label>
@@ -1529,7 +1555,7 @@ interface RegionUIState {
   rootScrollLeft: number;
   detailOpen: boolean[];
   nestedScroll: Array<{top: number; left: number}>;
-  expandedMessages: boolean[];
+  expandedMessageIDs: string[];
 }
 
 function captureRegionUI(root: HTMLElement | null): RegionUIState | null {
@@ -1540,8 +1566,9 @@ function captureRegionUI(root: HTMLElement | null): RegionUIState | null {
     detailOpen: [...root.querySelectorAll<HTMLDetailsElement>("details")].map(item => item.open),
     nestedScroll: [...root.querySelectorAll<HTMLElement>("pre, .hardware-config, .terminal-history")]
       .map(item => ({top: item.scrollTop, left: item.scrollLeft})),
-    expandedMessages: [...root.querySelectorAll<HTMLElement>(".message")]
-      .map(item => item.classList.contains("expanded")),
+    expandedMessageIDs: [...root.querySelectorAll<HTMLElement>(".message.expanded")]
+      .map(item => item.dataset.messageId || "")
+      .filter(Boolean),
   };
 }
 
@@ -1557,8 +1584,9 @@ function restoreRegionUI(root: HTMLElement | null, state: RegionUIState | null, 
       item.scrollLeft = position.left;
     }
   });
-  root.querySelectorAll<HTMLElement>(".message").forEach((message, index) => {
-    if (!state.expandedMessages[index]) return;
+  const expandedMessageIDs = new Set(state.expandedMessageIDs);
+  root.querySelectorAll<HTMLElement>(".message").forEach(message => {
+    if (!expandedMessageIDs.has(message.dataset.messageId || "")) return;
     message.classList.add("expanded");
     const preview = message.querySelector<HTMLElement>(".message-preview");
     const full = message.querySelector<HTMLElement>(".message-full-text");
@@ -1590,10 +1618,10 @@ function updateTaskLiveRegions(): void {
     const previousTop = list.scrollTop;
     const wasAtBottom = previousHeight - previousTop - list.clientHeight < 80;
     list.innerHTML = conversationListHtml();
+    restoreRegionUI(list, ui, false);
     if (scrollConversationToBottom || wasAtBottom) list.scrollTop = list.scrollHeight;
     else list.scrollTop = previousTop;
     scrollConversationToBottom = false;
-    restoreRegionUI(list, ui, false);
     bindConversationLiveControls();
   }
   const turnSlot = document.querySelector<HTMLElement>("#agent-turn-slot");
@@ -1655,6 +1683,7 @@ function render(): void {
   const previousWindowScroll = window.scrollY;
   const previousTurnUI = captureRegionUI(document.querySelector<HTMLElement>("#agent-turn-slot"));
   const previousToolUI = captureRegionUI(document.querySelector<HTMLElement>("#task-tool-panel-body"));
+  const previousConversationUI = captureRegionUI(previousConversation);
   const previousScrollTop = previousConversation?.scrollTop || 0;
   const previousScrollHeight = previousConversation?.scrollHeight || 0;
   const wasAtConversationBottom = previousConversation
@@ -1666,6 +1695,7 @@ function render(): void {
   } else {
     const views: Record<View, () => string> = {
       projects: projectsView,
+      channels: () => shell(renderChannels(state.channelProviders, state.channelInstances)),
       models: modelsView,
       tasks: tasksView,
       knowledge: () => shell(renderKnowledgeWorkspace({
@@ -1695,6 +1725,7 @@ function render(): void {
   }
   const nextConversation = document.querySelector<HTMLElement>("#conversation-list");
   if (nextConversation) {
+    restoreRegionUI(nextConversation, previousConversationUI, false);
     if (scrollConversationToBottom || wasAtConversationBottom) {
       nextConversation.scrollTop = nextConversation.scrollHeight;
     } else {
@@ -1797,6 +1828,19 @@ function bindCommon(): void {
 	},
     setMessage,
     flushDeferredRender,
+  });
+  bindChannels({
+    refresh: async () => {
+      const [providers, instances, projects, workspaces] = await Promise.all([
+        api.channelProviders(), api.channelInstances(), api.projects(), api.workspaces(),
+      ]);
+      state.channelProviders = providers.providers || [];
+      state.channelInstances = instances.instances || [];
+      state.projects = projects.projects || [];
+      state.workspaces = workspaces.workspaces || [];
+      render();
+    },
+    setMessage,
   });
   bindRuntimeFields("task", state.models, state.codexAccounts, syncTaskGitIsolation);
   bindRuntimeFields("takeover-task", state.models, state.codexAccounts, syncTakeoverTaskBackend);
@@ -2375,6 +2419,16 @@ function bindCommon(): void {
     state.agentAPISettings = response.agent_api;
     setMessage("notice", "Agent API 全局设置已保存，请重新测试相关 Workspace 连接");
   }, "保存中");
+	bindForm("#backend-settings-form", async form => {
+		const idleTimeoutSeconds = Math.round(Number(form.get("idle_timeout_minutes") || 0) * 60);
+		const turnTimeoutSeconds = Math.round(Number(form.get("turn_timeout_hours") || 0) * 60 * 60);
+		const response = await api.updateBackendSettings({
+			idle_timeout_seconds: idleTimeoutSeconds,
+			turn_timeout_seconds: turnTimeoutSeconds,
+		});
+		state.backendSettings = response.backend;
+		setMessage("notice", "Backend 超时设置已保存，将对后续执行生效");
+	}, "保存中");
   document.querySelector<HTMLButtonElement>("#message-attachment-pick")?.addEventListener("click", () => {
     document.querySelector<HTMLInputElement>("#message-attachment-input")?.click();
   });
@@ -2708,6 +2762,7 @@ async function loadOlderConversation(): Promise<void> {
   if (!state.selectedTask || !state.taskConversationBefore || loadingOlderConversation) return;
   loadingOlderConversation = true;
   const list = document.querySelector<HTMLElement>("#conversation-list");
+  const ui = captureRegionUI(list);
   const previousHeight = list?.scrollHeight || 0;
   const previousTop = list?.scrollTop || 0;
   try {
@@ -2726,6 +2781,7 @@ async function loadOlderConversation(): Promise<void> {
     state.taskConversationBefore = page.conversation.next_before || 0;
     if (list) {
       list.innerHTML = conversationListHtml();
+      restoreRegionUI(list, ui, false);
       list.scrollTop = previousTop + Math.max(0, list.scrollHeight - previousHeight);
       bindConversationLiveControls();
     }

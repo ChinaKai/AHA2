@@ -149,6 +149,7 @@ func (s *Service) SetAgentAPI(capabilities *agentapi.Capabilities, baseURL strin
 }
 
 type CreateTaskInput struct {
+	ID                string
 	ProjectID         string
 	WorkspaceID       string
 	Title             string
@@ -261,7 +262,7 @@ func (s *Service) CreateTask(ctx context.Context, input CreateTaskInput) (domain
 		return domain.Task{}, err
 	}
 	task := domain.Task{
-		ID:                      domain.NewID("task"),
+		ID:                      strings.TrimSpace(input.ID),
 		ProjectID:               project.ID,
 		WorkspaceID:             workspace.ID,
 		Title:                   input.Title,
@@ -280,6 +281,9 @@ func (s *Service) CreateTask(ctx context.Context, input CreateTaskInput) (domain
 		SkillIDs:                skillIDs,
 		CreatedAt:               now,
 		UpdatedAt:               now,
+	}
+	if task.ID == "" {
+		task.ID = domain.NewID("task")
 	}
 	if task.MaxAgents < 1 {
 		task.MaxAgents = 3
@@ -401,6 +405,14 @@ func (s *Service) SubmitAgentMessage(ctx context.Context, taskID, agentID, conte
 }
 
 func (s *Service) SubmitAgentMessageWithAttachments(ctx context.Context, taskID, agentID, content string, attachmentIDs []string) (domain.Turn, error) {
+	return s.submitAgentMessage(ctx, taskID, agentID, content, attachmentIDs, "", "", "", nil)
+}
+
+func (s *Service) SubmitChannelMessage(ctx context.Context, receiptID, receiptLeaseID, conversationID, taskID, content string, provenance map[string]any) (domain.Turn, error) {
+	return s.submitAgentMessage(ctx, taskID, "main", content, nil, receiptID, receiptLeaseID, conversationID, provenance)
+}
+
+func (s *Service) submitAgentMessage(ctx context.Context, taskID, agentID, content string, attachmentIDs []string, channelReceiptID, channelReceiptLeaseID, channelConversationID string, channelProvenance map[string]any) (domain.Turn, error) {
 	content = strings.TrimSpace(content)
 	if content == "" && len(attachmentIDs) == 0 {
 		return domain.Turn{}, fmt.Errorf("message or attachment is required")
@@ -452,18 +464,28 @@ func (s *Service) SubmitAgentMessageWithAttachments(ctx context.Context, taskID,
 	if agentID == "main" {
 		s.cancelMainResultMerge(task.ID)
 	}
-	round, inbox, createdRound, err := s.store.EnqueueOwnerMessage(ctx, message, agentID, attachmentIDs)
+	var round domain.TaskRound
+	var inbox domain.AgentInboxItem
+	var createdRound, inserted bool
+	if channelReceiptID != "" {
+		round, inbox, createdRound, inserted, err = s.store.EnqueueChannelOwnerMessage(ctx, channelReceiptID, channelReceiptLeaseID, channelConversationID, message, agentID, channelProvenance)
+	} else {
+		round, inbox, createdRound, err = s.store.EnqueueOwnerMessage(ctx, message, agentID, attachmentIDs)
+		inserted = err == nil
+	}
 	if err != nil {
 		return domain.Turn{}, err
 	}
-	if createdRound {
+	if createdRound && inserted {
 		s.emit(ctx, task.ID, "round", round.ID, "round_started", map[string]any{
 			"round_id": round.ID, "round_sequence": round.Sequence,
 		})
 	}
-	s.emit(ctx, task.ID, "inbox", inbox.ID, "agent_message_queued", map[string]any{
-		"round_id": round.ID, "agent_id": agentID, "source": "owner", "inbox_sequence": inbox.Sequence,
-	})
+	if inserted {
+		s.emit(ctx, task.ID, "inbox", inbox.ID, "agent_message_queued", map[string]any{
+			"round_id": round.ID, "agent_id": agentID, "source": "owner", "inbox_sequence": inbox.Sequence,
+		})
+	}
 	turn, started, err := s.scheduleAgent(ctx, task.ID, agentID)
 	if err != nil {
 		return domain.Turn{}, err
@@ -589,6 +611,7 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 		return
 	}
 	userMessage := turn.Instruction
+	channelContext, _ := s.store.ChannelContextForInboxBatch(ctx, turn.InboxBatchID)
 	task, err := s.store.Task(ctx, turn.TaskID)
 	if err != nil {
 		return
@@ -639,7 +662,13 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 	var skills []domain.Skill
 	var productLine domain.ProductLine
 	kbEnabled := knowledgeEnabled(project, task)
-	if kbEnabled {
+	if len(channelContext) > 0 && channelRouteMode(channelContext) != "task_route" {
+		kbEnabled = true
+		instanceID := strings.TrimSpace(fmt.Sprint(channelContext["instance_id"]))
+		endpoint := strings.TrimSpace(fmt.Sprint(channelContext["endpoint"]))
+		conversationID := strings.TrimSpace(fmt.Sprint(channelContext["conversation_id"]))
+		projectKB, _ = s.store.ChannelAllowedKnowledge(ctx, instanceID, endpoint, conversationID)
+	} else if kbEnabled {
 		lines, _ := s.store.ListProductLines(ctx, project.ID)
 		productLine = resolveProductLine(lines, task.TargetBranch, project.DefaultBranch)
 		globalKB, _ = s.store.ListKnowledge(ctx, "global", "", []domain.KnowledgeStatus{domain.KnowledgeVerified})
@@ -710,6 +739,7 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 		Conversation: conversation.Items, Turns: allTurns, Hardware: hardwareGroups, Attachments: attachments, UserMessage: userMessage,
 		Handoff: handoff.Summary, AgentAPIURL: agentAPIURL, CurrentTurnID: turn.ID, CurrentRoundID: turn.RoundID,
 		IncludeRecentContext: includeRecentContext, IncludeTurnDiagnostics: includeTurnDiagnostics,
+		ChannelContext: channelContext,
 	})
 	if err != nil {
 		s.failTurn(ctx, &turn, task, err)
@@ -865,7 +895,7 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 			s.interruptTurn(context.Background(), &turn, task)
 			return
 		}
-		if errors.Is(executeErr, backend.ErrCodexIdleTimeout) {
+		if errors.Is(executeErr, backend.ErrBackendIdleTimeout) {
 			turn.WaitingReason = "backend_idle_timeout"
 		}
 		s.failTurn(context.Background(), &turn, task, executeErr)
@@ -914,11 +944,17 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 			category = "update"
 			kind = "agent_result"
 		}
-		_, _ = s.store.FinalizeTurnReply(context.Background(), message, domain.ConversationItem{
+		finalItem, finalizeErr := s.store.FinalizeTurnReply(context.Background(), message, domain.ConversationItem{
 			ID: domain.NewID("conversation"), TaskID: task.ID, RoundID: turn.RoundID, TurnID: turn.ID,
 			AgentID: turn.AgentID, Category: category, Kind: kind, Summary: turn.Result,
 			Payload: map[string]any{"attempt": turn.Attempt, "generation": turn.Generation}, CreatedAt: now,
 		})
+		if finalizeErr == nil && turn.AgentID == "main" && category == "chat" {
+			_, _ = s.store.RecordChannelAnswer(context.Background(), task.ID, turn.RoundID, turn.ID, turn.Result, now)
+			s.emit(context.Background(), task.ID, "conversation", finalItem.ID, "agent_reply", map[string]any{
+				"round_id": turn.RoundID, "turn_id": turn.ID, "agent_id": turn.AgentID, "text": turn.Result,
+			})
+		}
 	}
 	if turn.Status == domain.TurnSucceeded && handoff.ID != "" {
 		_ = s.store.ConsumeAgentSessionHandoff(context.Background(), handoff.ID, now)
@@ -941,6 +977,11 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 		})
 	}
 	s.afterTurnTerminal(context.Background(), task, turn)
+}
+
+func channelRouteMode(channelContext map[string]any) string {
+	route, _ := channelContext["route"].(map[string]any)
+	return strings.TrimSpace(fmt.Sprint(route["mode"]))
 }
 
 func (s *Service) materializeSharedContext(
@@ -1530,9 +1571,13 @@ func (s *Service) recordExecutionEvent(ctx context.Context, turn domain.Turn, ev
 			Payload: event.Data, CreatedAt: s.now().UTC(),
 		}
 		if kind == "agent_message_update" {
-			_, _ = s.store.UpsertBackendStreamItem(ctx, item)
+			if stored, storeErr := s.store.UpsertBackendStreamItem(ctx, item); storeErr == nil {
+				event.Data["conversation_item_id"] = stored.ID
+			}
 		} else {
-			_, _ = s.store.AddConversationItem(ctx, item)
+			if stored, storeErr := s.store.AddConversationItem(ctx, item); storeErr == nil {
+				event.Data["conversation_item_id"] = stored.ID
+			}
 		}
 	}
 	s.emitTurn(ctx, turn, event.Type, event.Data)
@@ -1575,7 +1620,50 @@ func (s *Service) emit(ctx context.Context, taskID, aggregateType, aggregateID, 
 		return
 	}
 	event.Sequence = sequence
+	if eventClass, semanticType, semanticPayload, coalesceKey, ok := channelSemanticEvent(taskID, eventType, data); ok {
+		sourceKey := event.ID
+		conversationItemID := strings.TrimSpace(fmt.Sprint(data["conversation_item_id"]))
+		if conversationItemID != "" && semanticType == "agent_message_update" {
+			sourceKey = "conversation-stream:" + conversationItemID
+		}
+		_ = s.store.AppendChannelSourceAndProject(ctx, domain.ChannelSourceEvent{
+			ID: domain.NewID("channel_source_event"), SourceKey: sourceKey, TaskID: taskID,
+			RoundID: strings.TrimSpace(fmt.Sprint(data["round_id"])), TurnID: strings.TrimSpace(fmt.Sprint(data["turn_id"])),
+			ConversationItemID: conversationItemID, EventClass: eventClass, EventType: semanticType,
+			SemanticPayload: semanticPayload, OccurredAt: event.OccurredAt,
+		}, coalesceKey)
+	}
 	s.hub.Publish(taskID, event)
+}
+
+func channelSemanticEvent(taskID, eventType string, data map[string]any) (string, string, map[string]any, string, bool) {
+	agentID := strings.TrimSpace(fmt.Sprint(data["agent_id"]))
+	if agentID != "" && agentID != "main" {
+		return "", "", nil, "", false
+	}
+	roundID := strings.TrimSpace(fmt.Sprint(data["round_id"]))
+	payload := map[string]any{"task_id": taskID, "round_id": roundID, "turn_id": strings.TrimSpace(fmt.Sprint(data["turn_id"]))}
+	eventClass, semanticType := "", eventType
+	switch eventType {
+	case "agent_reply":
+		eventClass, semanticType, payload["text"] = "message", "agent_reply", firstText(data, "text")
+	case "agent_message":
+		if final, _ := data["final"].(bool); final {
+			return "", "", nil, "", false
+		}
+		eventClass, semanticType, payload["text"] = "update", "agent_message_update", firstText(data, "text", "message")
+	case "agent_progress", "agent_stalled", "agent_resumed", "agent_idle_timeout":
+		eventClass, semanticType, payload["text"] = "update", eventType, firstText(data, "message", "phase", "status")
+	case "agent_error", "turn_failed":
+		eventClass, semanticType, payload["error"] = "error", "agent_error", firstText(data, "message", "error")
+	case "round_completed":
+		eventClass, semanticType, payload["status"] = "status", "waiting_user", "waiting_user"
+	case "round_failed", "round_interrupted", "task_completed":
+		eventClass, semanticType, payload["status"] = "status", "terminal", eventType
+	default:
+		return "", "", nil, "", false
+	}
+	return eventClass, semanticType, payload, store.ChannelCoalesceKey(taskID, roundID, semanticType), true
 }
 
 func appendUnique(existing []string, values ...string) []string {
