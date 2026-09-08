@@ -38,7 +38,8 @@ func (s *Store) AppendChannelSourceAndProject(ctx context.Context, source domain
 		FROM channel_subscriptions sub
 		JOIN channel_instances instance ON instance.id=sub.instance_id
 		WHERE sub.state='active' AND instance.status IN ('ready','degraded')
-		  AND ((sub.kind IN ('task_route','conversation_host') AND sub.source_task_id=?) OR sub.kind='owner_global')`, source.TaskID)
+		  AND ((sub.kind IN ('task_route','conversation_host') AND sub.source_task_id=?)
+		       OR (sub.kind='owner_global' AND ?))`, source.TaskID, source.EventClass == "status")
 	if err != nil {
 		return err
 	}

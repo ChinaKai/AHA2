@@ -335,6 +335,36 @@ func TestInboundOwnerAndGroupScopesAreServerEnforcedAndIdempotent(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
+	beforeUnrouted, err := database.ChannelDeliveries(ctx, instance.ID, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.AppendChannelSourceAndProject(ctx, domain.ChannelSourceEvent{
+		ID: "source-unrouted", SourceKey: "source-unrouted", TaskID: target.ID, EventClass: "message", EventType: "agent_reply",
+		SemanticPayload: map[string]any{"text": "must stay isolated"}, OccurredAt: time.Now().UTC(),
+	}, ""); err != nil {
+		t.Fatal(err)
+	}
+	afterUnrouted, err := database.ChannelDeliveries(ctx, instance.ID, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(afterUnrouted) != len(beforeUnrouted) {
+		t.Fatalf("unrouted task leaked through owner-global subscription: before=%d after=%d", len(beforeUnrouted), len(afterUnrouted))
+	}
+	if err := database.AppendChannelSourceAndProject(ctx, domain.ChannelSourceEvent{
+		ID: "source-unrouted-status", SourceKey: "source-unrouted-status", TaskID: target.ID, EventClass: "status", EventType: "waiting_user",
+		SemanticPayload: map[string]any{"status": "waiting_user"}, OccurredAt: time.Now().UTC(),
+	}, ""); err != nil {
+		t.Fatal(err)
+	}
+	afterGlobalStatus, err := database.ChannelDeliveries(ctx, instance.ID, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(afterGlobalStatus) != len(beforeUnrouted)+1 {
+		t.Fatalf("whitelisted global task status was not delivered: before=%d after=%d", len(beforeUnrouted), len(afterGlobalStatus))
+	}
 	actionNow := time.Now().UTC()
 	action := domain.ChannelPendingAction{ID: "action-takeover", InstanceID: instance.ID, ConversationID: conversation.ID, ActorIdentityLinkID: "channel-owner", Operation: "takeover", TargetType: "task", TargetID: target.ID, Intent: map[string]any{}, Preview: map[string]any{"task": target.ID}, Precondition: map[string]any{}, PreconditionHash: "hash", Status: "pending", ExpiresAt: actionNow.Add(time.Hour), CreatedAt: actionNow, UpdatedAt: actionNow}
 	if _, err := database.CreateChannelPendingAction(ctx, action); err != nil {
