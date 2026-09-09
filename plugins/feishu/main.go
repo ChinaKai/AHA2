@@ -796,6 +796,14 @@ func renderDelivery(payload map[string]any) (string, string) {
 		raw, _ := json.Marshal(card)
 		return "interactive", string(raw)
 	}
+	text := stringValue(payload, "text")
+	if text == "" {
+		text = stringValue(payload, "error")
+	}
+	if text != "" {
+		raw, _ := json.Marshal(map[string]string{"text": text})
+		return "text", string(raw)
+	}
 	if status := stringValue(payload, "status"); status != "" {
 		statusLabel := map[string]string{
 			"waiting_user":      "等待处理",
@@ -817,14 +825,8 @@ func renderDelivery(payload map[string]any) (string, string) {
 		raw, _ := json.Marshal(map[string]string{"text": text})
 		return "text", string(raw)
 	}
-	text := stringValue(payload, "text")
-	if text == "" {
-		text = stringValue(payload, "error")
-	}
-	if text == "" {
-		raw, _ := json.Marshal(payload)
-		text = string(raw)
-	}
+	rawPayload, _ := json.Marshal(payload)
+	text = string(rawPayload)
 	raw, _ := json.Marshal(map[string]string{"text": text})
 	return "text", string(raw)
 }
@@ -950,7 +952,14 @@ func deterministicUUID(value string) string {
 }
 
 func stringValue(values map[string]any, key string) string {
-	return strings.TrimSpace(fmt.Sprint(values[key]))
+	if values == nil {
+		return ""
+	}
+	value, exists := values[key]
+	if !exists || value == nil {
+		return ""
+	}
+	return strings.TrimSpace(fmt.Sprint(value))
 }
 
 func boolValue(values map[string]any, key string) bool {

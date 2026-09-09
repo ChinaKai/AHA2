@@ -179,3 +179,11 @@ func TestRenderTaskStatusNotificationIsUserFacing(t *testing.T) {
 		t.Fatalf("status notification type=%s content=%s", msgType, content)
 	}
 }
+
+func TestRenderCoalescedFinalReplyPrefersReplyText(t *testing.T) {
+	t.Parallel()
+	msgType, content := renderDelivery(map[string]any{"text": "final answer", "status": "waiting_user", "task_code": "task-005", "task_title": "Review"})
+	if msgType != "text" || !strings.Contains(content, "final answer") || strings.Contains(content, "等待处理") {
+		t.Fatalf("coalesced final reply type=%s content=%s", msgType, content)
+	}
+}
