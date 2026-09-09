@@ -444,7 +444,7 @@ func configureFeishuMenu(ctx context.Context, client *lark.Client, appID string)
 	}
 	configBody := larkapplicationv7.NewPatchApplicationConfigReqBodyBuilder().
 		Scope(larkapplicationv7.NewAppConfigScopeBuilder().AddScopes(scopes).Build()).
-		Event(larkapplicationv7.NewAppConfigEventBuilder().AddEvents([]string{"application.bot.menu_v6"}).Build()).Build()
+		Event(larkapplicationv7.NewAppConfigEventBuilder().SubscriptionType("websocket").AddEvents([]string{"application.bot.menu_v6"}).Build()).Build()
 	configRequest := larkapplicationv7.NewPatchApplicationConfigReqBuilder().AppId(appID).UserIdType("open_id").Body(configBody).Build()
 	configResponse, err := client.Application.V7.ApplicationConfig.Patch(ctx, configRequest)
 	if err != nil || !configResponse.Success() {

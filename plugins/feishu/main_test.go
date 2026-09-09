@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+
+	larkapplicationv7 "github.com/larksuite/oapi-sdk-go/v3/service/application/v7"
 )
 
 func TestNewFeishuClientsInstallEventDispatcher(t *testing.T) {
@@ -11,6 +13,14 @@ func TestNewFeishuClientsInstallEventDispatcher(t *testing.T) {
 	_, wsClient := newFeishuClients(bootstrap{AppID: "cli_test", AppSecret: "secret"})
 	if wsClient.EventHandler() == nil {
 		t.Fatal("WebSocket client has no event dispatcher; inbound events cannot reach Channel handlers")
+	}
+}
+
+func TestMenuEventConfigurationUsesWebsocketSubscription(t *testing.T) {
+	t.Parallel()
+	event := larkapplicationv7.NewAppConfigEventBuilder().SubscriptionType("websocket").AddEvents([]string{"application.bot.menu_v6"}).Build()
+	if event.SubscriptionType == nil || *event.SubscriptionType != "websocket" {
+		t.Fatalf("subscription=%v", event.SubscriptionType)
 	}
 }
 
