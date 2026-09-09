@@ -212,6 +212,16 @@ func TestMissingPluginDoesNotPreventEmptyProviderList(t *testing.T) {
 	}
 }
 
+func TestReauthorizationCapabilityIncludesRuntimeAndOnboardingScopes(t *testing.T) {
+	t.Parallel()
+	scopes := sliceSet(reauthorizationScopes())
+	for _, required := range append(runtimeScopes(), onboardingScopes()...) {
+		if !scopes[required] {
+			t.Fatalf("reauthorization scope missing %q", required)
+		}
+	}
+}
+
 func TestChannelRuntimeFallsBackToReadyOfficialCodexAccount(t *testing.T) {
 	ctx := context.Background()
 	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))

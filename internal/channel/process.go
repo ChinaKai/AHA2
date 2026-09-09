@@ -214,9 +214,6 @@ func (s *Service) ensurePluginProcess(instanceID, rawCapability string) error {
 }
 
 func (s *Service) registrationProcessRequired(ctx context.Context, instance domain.ChannelInstance) (bool, error) {
-	if instance.Status != "onboarding" {
-		return false, nil
-	}
 	_, err := s.store.ActiveChannelOnboarding(ctx, instance.ID)
 	if err == nil {
 		return true, nil

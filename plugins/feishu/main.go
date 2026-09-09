@@ -171,7 +171,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "AHA2 channel handshake failed")
 		os.Exit(1)
 	}
-	if boot.Registration || boot.AppID == "" || boot.AppSecret == "" {
+	if registrationOnly(boot) {
 		if err := registrationLoop(ctx, client); err != nil {
 			fmt.Fprintln(os.Stderr, "Feishu registration failed")
 			os.Exit(1)
@@ -183,6 +183,10 @@ func main() {
 		fmt.Fprintln(os.Stderr, "Feishu channel runtime stopped")
 		os.Exit(1)
 	}
+}
+
+func registrationOnly(boot bootstrap) bool {
+	return boot.AppID == "" || boot.AppSecret == ""
 }
 
 func (c *runtimeClient) request(ctx context.Context, method, path string, body, output any) error {
@@ -353,7 +357,7 @@ func runChannel(ctx context.Context, runtime *runtimeClient, boot bootstrap) err
 		return runtime.inbound(eventCtx, map[string]any{"schema_version": 1, "request_id": action.EventID, "instance_id": runtime.instanceID, "external_event_id": action.EventID, "event_type": "card_action", "occurred_at": time.Now().UTC(), "chat_type": "p2p", "external_chat_id": chatID, "external_sender_id": action.Operator.OpenID, "external_message_id": messageID, "card_action": value})
 	})
 	go runtime.deliveryLoop(ctx, client)
-	go runtime.commandLoop(ctx, client, boot.AppID)
+	go runtime.commandLoop(ctx, client, boot)
 	return channel.Start(ctx)
 }
 
@@ -485,7 +489,7 @@ func (c *runtimeClient) inbound(ctx context.Context, payload map[string]any) err
 	return c.request(ctx, http.MethodPost, "/api/channel-runtime/v1/instances/"+c.instanceID+"/inbound-events", payload, &map[string]any{})
 }
 
-func (c *runtimeClient) commandLoop(ctx context.Context, client *lark.Client, appID string) {
+func (c *runtimeClient) commandLoop(ctx context.Context, client *lark.Client, boot bootstrap) {
 	for ctx.Err() == nil {
 		commands, err := c.claimCommands(ctx)
 		if err != nil {
@@ -494,10 +498,16 @@ func (c *runtimeClient) commandLoop(ctx context.Context, client *lark.Client, ap
 		}
 		for _, item := range commands {
 			switch item.Kind {
+			case "register_app":
+				if !boot.Registration {
+					_ = c.complete(ctx, item, false, map[string]any{}, "unsupported_command")
+					continue
+				}
+				_ = registerApp(ctx, c, item)
 			case "verify_installation":
 				_ = c.complete(ctx, item, true, map[string]any{"status": "ready"}, "")
 			case "configure_menu":
-				if err := configureFeishuMenu(ctx, client, appID); err != nil {
+				if err := configureFeishuMenu(ctx, client, boot.AppID); err != nil {
 					_ = c.complete(ctx, item, false, menuConfigurationFailureResult(err), menuConfigurationErrorCode(err))
 					continue
 				}

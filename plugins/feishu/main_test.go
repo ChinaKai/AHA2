@@ -29,6 +29,16 @@ func TestNewFeishuClientsInstallEventDispatcher(t *testing.T) {
 	}
 }
 
+func TestExistingAppReauthorizationKeepsChannelRuntimeOnline(t *testing.T) {
+	t.Parallel()
+	if registrationOnly(bootstrap{Registration: true, AppID: "app", AppSecret: "secret"}) {
+		t.Fatal("existing-app reauthorization would replace the live channel with a registration-only process")
+	}
+	if !registrationOnly(bootstrap{Registration: true}) {
+		t.Fatal("new app registration requires the registration-only process")
+	}
+}
+
 func TestMenuEventConfigurationUsesWebsocketSubscription(t *testing.T) {
 	t.Parallel()
 	event := larkapplicationv7.NewAppConfigEventBuilder().SubscriptionType("websocket").AddEvents([]string{"application.bot.menu_v6"}).Build()

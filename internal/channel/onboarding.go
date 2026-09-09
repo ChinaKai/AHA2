@@ -43,7 +43,11 @@ func (s *Service) StartOnboarding(ctx context.Context, ownerID, ownerSessionID, 
 			return domain.ChannelOnboardingSession{}, fmt.Errorf("idempotency key was already used with a different request")
 		}
 		if existing.Status == "pending" || existing.Status == "qr_ready" {
-			raw, _, issueErr := s.IssueCapability(ctx, instance.ID, onboardingScopes(), 20*time.Minute)
+			scopes := onboardingScopes()
+			if instance.CredentialConfigured {
+				scopes = reauthorizationScopes()
+			}
+			raw, _, issueErr := s.IssueCapability(ctx, instance.ID, scopes, 20*time.Minute)
 			if issueErr == nil {
 				s.stopPluginProcess(instance.ID)
 				_ = s.ensurePluginProcess(instance.ID, raw)
@@ -75,7 +79,11 @@ func (s *Service) StartOnboarding(ctx context.Context, ownerID, ownerSessionID, 
 	if _, err := s.store.UpdateChannelInstance(ctx, instance, instance.Revision); err != nil {
 		return domain.ChannelOnboardingSession{}, err
 	}
-	raw, _, err := s.IssueCapability(ctx, instance.ID, onboardingScopes(), 20*time.Minute)
+	scopes := onboardingScopes()
+	if instance.CredentialConfigured {
+		scopes = reauthorizationScopes()
+	}
+	raw, _, err := s.IssueCapability(ctx, instance.ID, scopes, 20*time.Minute)
 	if err != nil {
 		return domain.ChannelOnboardingSession{}, err
 	}
@@ -93,6 +101,10 @@ func onboardingScopes() []string {
 
 func runtimeScopes() []string {
 	return []string{"channel.command.claim", "channel.command.progress", "channel.command.complete", "channel.inbound.write", "channel.delivery.claim", "channel.delivery.ack", "channel.health.write"}
+}
+
+func reauthorizationScopes() []string {
+	return uniqueScopes(append(append([]string{}, runtimeScopes()...), onboardingScopes()...))
 }
 
 func (s *Service) OwnerOnboarding(ctx context.Context, ownerID, ownerSessionID, id string) (domain.ChannelOnboardingSession, error) {
