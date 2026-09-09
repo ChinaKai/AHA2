@@ -159,6 +159,10 @@ func TestRenderMenuFormCard(t *testing.T) {
 	if form["project_id"] != "p1" || form["title"] != "Task" {
 		t.Fatalf("normalized form=%#v", form)
 	}
+	action := normalizedCardActionValue(map[string]any{"kind": "menu_control", "menu_action": "task.create.preview", "project_id": "p1", "untrusted": "drop"})
+	if action["project_id"] != "p1" || action["untrusted"] != nil {
+		t.Fatalf("normalized action=%#v", action)
+	}
 }
 
 func TestFeishuMenuTimestampAcceptsSecondsAndMilliseconds(t *testing.T) {

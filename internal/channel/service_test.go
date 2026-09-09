@@ -234,16 +234,24 @@ func TestMenuControlPayloadsUseStructuredForms(t *testing.T) {
 	t.Parallel()
 	projects := []domain.Project{{ID: "project-menu", Name: "Project"}}
 	workspaces := []domain.Workspace{{ID: "workspace-menu", ProjectID: "project-menu", Name: "Workspace"}}
-	create := taskCreateFormPayload(projects, workspaces)
-	if create["kind"] != "menu_card" {
-		t.Fatalf("create payload=%#v", create)
+	projectStep := taskCreateProjectFormPayload(projects)
+	if projectStep["kind"] != "menu_card" {
+		t.Fatalf("project step=%#v", projectStep)
 	}
-	fields, ok := create["fields"].([]map[string]any)
-	if !ok || len(fields) != 4 || stringField(mapValueForTest(create["submit"]), "label") != "生成预览" {
-		t.Fatalf("create fields=%#v", create)
+	projectFields, ok := projectStep["fields"].([]map[string]any)
+	if !ok || len(projectFields) != 1 || stringField(mapValueForTest(projectStep["submit"]), "label") != "下一步" {
+		t.Fatalf("project fields=%#v", projectStep)
 	}
-	if intField(fields[3], "max_length") != 1000 {
-		t.Fatalf("Feishu multiline input exceeds card limit: %#v", fields[3])
+	details := taskCreateDetailsFormPayload(projects[0], workspaces)
+	fields, ok := details["fields"].([]map[string]any)
+	if !ok || len(fields) != 3 || stringField(mapValueForTest(details["submit"]), "label") != "生成预览" || stringField(mapValueForTest(mapValueForTest(details["submit"])["value"]), "project_id") != projects[0].ID {
+		t.Fatalf("details fields=%#v", details)
+	}
+	if intField(fields[2], "max_length") != 1000 {
+		t.Fatalf("Feishu multiline input exceeds card limit: %#v", fields[2])
+	}
+	if errorPayload := taskCreateDetailsFormPayload(projects[0], nil); stringField(errorPayload, "template") != "red" {
+		t.Fatalf("missing workspace payload=%#v", errorPayload)
 	}
 	project, workspace, ok := catalogTaskTarget(channelCatalog{projects: projects, workspaces: workspaces}, "project-menu", "workspace-menu")
 	if !ok || project.ID == "" || workspace.ID == "" {

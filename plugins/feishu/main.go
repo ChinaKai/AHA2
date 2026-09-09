@@ -348,12 +348,8 @@ func runChannel(ctx context.Context, runtime *runtimeClient, boot bootstrap) err
 		if chatID == "" {
 			chatID = action.Context.OpenChatID
 		}
-		value := map[string]any{"provider_message_id": messageID}
-		for key, item := range action.Action.Value {
-			if key == "action_id" || key == "decision" || key == "kind" || key == "menu_action" || key == "task_id" {
-				value[key] = item
-			}
-		}
+		value := normalizedCardActionValue(action.Action.Value)
+		value["provider_message_id"] = messageID
 		formValues := normalizedCardFormValues(action.Action.FormValue)
 		if len(formValues) > 0 {
 			value["form_values"] = formValues
@@ -363,6 +359,17 @@ func runChannel(ctx context.Context, runtime *runtimeClient, boot bootstrap) err
 	go runtime.deliveryLoop(ctx, client)
 	go runtime.commandLoop(ctx, client, boot)
 	return channel.Start(ctx)
+}
+
+func normalizedCardActionValue(values map[string]any) map[string]any {
+	result := map[string]any{}
+	for key, item := range values {
+		switch key {
+		case "action_id", "decision", "kind", "menu_action", "task_id", "project_id":
+			result[key] = item
+		}
+	}
+	return result
 }
 
 func feishuEventTime(timestamp int64) time.Time {

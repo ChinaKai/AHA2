@@ -905,7 +905,7 @@ func (s *Service) processMenuAction(ctx context.Context, receipt domain.ChannelI
 			payload["actions"] = actions
 		}
 	case "aha.task.create":
-		payload = taskCreateFormPayload(catalog.projects, catalog.workspaces)
+		payload = taskCreateProjectFormPayload(catalog.projects)
 	default:
 		return fmt.Errorf("unsupported menu action")
 	}
@@ -1037,16 +1037,32 @@ func taskQueryFormPayload(projects []domain.Project) map[string]any {
 	}
 }
 
-func taskCreateFormPayload(projects []domain.Project, workspaces []domain.Workspace) map[string]any {
+func taskCreateProjectFormPayload(projects []domain.Project) map[string]any {
 	return map[string]any{
-		"kind": "menu_card", "title": "创建 Task", "template": "blue", "markdown": "请填写结构化字段。Runtime 默认继承渠道设置；提交后仍需一次确认。",
+		"kind": "menu_card", "title": "创建 Task · 选择 Project", "template": "blue", "markdown": "先选择 Project，下一步只会显示该 Project 下可用的 Workspace。",
+		"fields": []map[string]any{{"type": "select", "name": "project_id", "label": "Project", "options": projectOptions(projects)}},
+		"submit": map[string]any{"label": "下一步", "value": map[string]any{"kind": "menu_control", "menu_action": "task.create.workspaces"}},
+	}
+}
+
+func taskCreateDetailsFormPayload(project domain.Project, workspaces []domain.Workspace) map[string]any {
+	options := []map[string]any{}
+	for _, workspace := range workspaces {
+		if workspace.ProjectID == project.ID {
+			options = append(options, map[string]any{"label": workspace.Name, "value": workspace.ID})
+		}
+	}
+	if len(options) == 0 {
+		return menuValidationErrorPayload("该 Project 当前没有可用 Workspace，请先在 AHA 中配置 Workspace。")
+	}
+	return map[string]any{
+		"kind": "menu_card", "title": "创建 Task · " + project.Name, "template": "blue", "markdown": "请选择 Workspace 并填写任务内容。Runtime 默认继承渠道设置；提交后仍需一次确认。",
 		"fields": []map[string]any{
-			{"type": "select", "name": "project_id", "label": "Project", "options": projectOptions(projects)},
-			{"type": "select", "name": "workspace_id", "label": "Workspace", "options": workspaceOptions(projects, workspaces)},
+			{"type": "select", "name": "workspace_id", "label": "Workspace", "options": options},
 			{"type": "text", "name": "title", "label": "标题", "max_length": 200},
 			{"type": "multiline", "name": "request", "label": "需求", "max_length": 1000},
 		},
-		"submit": map[string]any{"label": "生成预览", "value": map[string]any{"kind": "menu_control", "menu_action": "task.create.preview"}},
+		"submit": map[string]any{"label": "生成预览", "value": map[string]any{"kind": "menu_control", "menu_action": "task.create.preview", "project_id": project.ID}},
 	}
 }
 
@@ -1399,12 +1415,31 @@ func (s *Service) processMenuCardAction(ctx context.Context, receipt domain.Chan
 			return err
 		}
 		return s.store.FinishChannelInbox(ctx, receipt.ID, receipt.LeaseID, "processed", conversation.ID, "", "menu_exit_preview", s.now().UTC())
+	case "task.create.workspaces":
+		projectID := formString(values, "project_id")
+		if !catalogHasProject(catalog, projectID) {
+			payload = menuValidationErrorPayload("Project 不在当前渠道可操作范围内，请重新选择。")
+			break
+		}
+		var project domain.Project
+		for _, candidate := range catalog.projects {
+			if candidate.ID == projectID {
+				project = candidate
+				break
+			}
+		}
+		payload = taskCreateDetailsFormPayload(project, catalog.workspaces)
 	case "task.create.preview":
-		projectID, workspaceID := formString(values, "project_id"), formString(values, "workspace_id")
+		projectID := formString(values, "project_id")
+		if projectID == "" {
+			projectID = stringField(envelope.CardAction, "project_id")
+		}
+		workspaceID := formString(values, "workspace_id")
 		title, request := formString(values, "title"), formString(values, "request")
 		project, workspace, ok := catalogTaskTarget(catalog, projectID, workspaceID)
 		if !ok || title == "" || request == "" || len([]rune(title)) > 200 || len([]rune(request)) > 1000 {
-			return fmt.Errorf("menu task creation fields are invalid")
+			payload = menuValidationErrorPayload("Project、Workspace 或任务内容无效，请从“创建任务”菜单重新开始。")
+			break
 		}
 		precondition := map[string]any{"project_id": project.ID, "project_updated_at": timeStringUTC(project.UpdatedAt), "workspace_id": workspace.ID, "workspace_updated_at": timeStringUTC(workspace.UpdatedAt)}
 		intent := map[string]any{"project_id": project.ID, "workspace_id": workspace.ID, "title": title, "request": request}
@@ -1420,6 +1455,10 @@ func (s *Service) processMenuCardAction(ctx context.Context, receipt domain.Chan
 		return err
 	}
 	return s.store.FinishChannelInbox(ctx, receipt.ID, receipt.LeaseID, "processed", conversation.ID, "", "menu_control", s.now().UTC())
+}
+
+func menuValidationErrorPayload(message string) map[string]any {
+	return map[string]any{"kind": "menu_card", "title": "操作未提交", "template": "red", "markdown": menuSafeText(message)}
 }
 
 func (s *Service) activeRouteMenuActions(ctx context.Context, conversation domain.ChannelConversation) []map[string]any {
