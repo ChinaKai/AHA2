@@ -96,9 +96,52 @@ $trigger = New-ScheduledTaskTrigger -AtLogOn -User $identity
 $principal = New-ScheduledTaskPrincipal -UserId $identity -LogonType Interactive -RunLevel Limited
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) -Hidden
 
+function Resolve-IdentitySid([string]$Value) {
+    try {
+        if ($Value -match '^S-') {
+            return (New-Object Security.Principal.SecurityIdentifier($Value)).Value
+        }
+        return (New-Object Security.Principal.NTAccount($Value)).Translate([Security.Principal.SecurityIdentifier]).Value
+    } catch {
+        return ""
+    }
+}
+
+function Test-ExistingAHA2UserTask {
+    try {
+        $existing = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
+        $actions = @($existing.Actions)
+        if ($actions.Count -ne 1 -or $existing.State -eq 'Disabled') {
+            return $false
+        }
+        $existingAction = $actions[0]
+        if ([string]::IsNullOrWhiteSpace([string]$existingAction.Execute) -or
+            [string]::IsNullOrWhiteSpace([string]$existingAction.WorkingDirectory)) {
+            return $false
+        }
+        $expectedWorkingDirectory = [IO.Path]::GetFullPath((Split-Path -Parent $trayPath))
+        $actualWorkingDirectory = [IO.Path]::GetFullPath([string]$existingAction.WorkingDirectory)
+        $sameExecutable = [string]::Equals([IO.Path]::GetFullPath([string]$existingAction.Execute), $trayPath, [StringComparison]::OrdinalIgnoreCase)
+        $sameArguments = [string]::Equals([string]$existingAction.Arguments, $taskArguments, [StringComparison]::Ordinal)
+        $sameWorkingDirectory = [string]::Equals($actualWorkingDirectory, $expectedWorkingDirectory, [StringComparison]::OrdinalIgnoreCase)
+        $sameIdentity = (Resolve-IdentitySid ([string]$existing.Principal.UserId)) -eq (Resolve-IdentitySid $identity)
+        $limited = [string]::Equals([string]$existing.Principal.RunLevel, 'Limited', [StringComparison]::OrdinalIgnoreCase)
+        return $sameExecutable -and $sameArguments -and $sameWorkingDirectory -and $sameIdentity -and $limited
+    } catch {
+        return $false
+    }
+}
+
 # The fixed task name plus -Force is the uniqueness boundary. Reinstalling to a
 # new path or with new network settings replaces the previous action in place.
-Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
+try {
+    Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
+} catch {
+    if (-not (Test-ExistingAHA2UserTask)) {
+        throw
+    }
+    Write-Output "Existing AHA2 user task already matches the requested configuration; reusing it."
+}
 if ($Start) {
     Start-ScheduledTask -TaskName $taskName
 }

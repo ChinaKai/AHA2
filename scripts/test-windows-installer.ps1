@@ -70,7 +70,8 @@ foreach ($contract in @(
     "TrayExecutable", "ServerExecutable", "New-ScheduledTaskAction -Execute `$trayPath", "--server", "--listen", "--data-dir",
     "New-ScheduledTaskTrigger -AtLogOn", "WindowsIdentity]::GetCurrent().Name", "Win32_ComputerSystem", "OrdinalIgnoreCase",
     "-LogonType Interactive", "-RunLevel Limited", "-RestartCount 3", "-RestartInterval", "Register-ScheduledTask",
-    "-Force", "Start-ScheduledTask", "AllowInsecureAgentAPI"
+    "-Force", "Start-ScheduledTask", "AllowInsecureAgentAPI", "Test-ExistingAHA2UserTask", "Resolve-IdentitySid",
+    "existingAction.Arguments", "existingAction.WorkingDirectory", "reusing it"
 )) {
     if (-not $taskScript.Contains($contract)) {
         throw "Windows tray login task contract is missing: $contract"
