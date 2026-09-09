@@ -39,6 +39,16 @@ function stringList(config: Record<string, unknown>, key: string, defaults: stri
 	return Array.isArray(config[key]) ? (config[key] as unknown[]).map(String) : defaults;
 }
 
+function channelErrorMessage(error: unknown): string {
+	const typed = error as Error & {code?: string};
+	if (typed?.code === "channel_revision_conflict") return "渠道设置已被其他更新修改，页面已刷新，请重新操作。";
+	return error instanceof Error ? error.message : String(error);
+}
+
+function refreshAfterChannelConflict(error: unknown, refresh: () => Promise<void>): void {
+	if ((error as {code?: string})?.code === "channel_revision_conflict") void refresh().catch(() => undefined);
+}
+
 function runtimeEditor(prefix: string, title: string, config: Record<string, unknown>, context: ChannelUIContext, allowInherit: boolean): string {
 	const modelID = String(config.model_id || "");
 	const accountID = String(config.codex_account_id || "");
@@ -150,7 +160,10 @@ export function bindChannels(options: {refresh: () => Promise<void>; setMessage:
 		void api.updateChannelInstance(settingsForm.dataset.channelSettings || "", {config}, Number(settingsForm.dataset.revision || 0)).then(async () => {
 			options.setMessage("success", "渠道 Runtime、通知与访问范围已保存，新会话将使用新配置。");
 			await refresh();
-		}).catch(error => options.setMessage("error", error instanceof Error ? error.message : String(error)));
+		}).catch(error => {
+			options.setMessage("error", channelErrorMessage(error));
+			refreshAfterChannelConflict(error, refresh);
+		});
 	}));
 	document.querySelectorAll<HTMLFormElement>("[data-channel-settings]").forEach(settingsForm => {
 		const operationMode = settingsForm.querySelector<HTMLSelectElement>('select[name="operation_scope_mode"]');
@@ -200,7 +213,10 @@ export function bindChannels(options: {refresh: () => Promise<void>; setMessage:
         const values = new FormData(form);
 				const grants = values.getAll("knowledge_entry_id").map(value => ({knowledge_entry_id: String(value), grant_scope: "subtree"}));
         const scopeMode = String(values.get("knowledge_scope_mode") || "all") as "all" | "selected";
-        void api.updateChannelKnowledgePolicy(form.dataset.channelPolicy || "", form.dataset.endpoint || "", scopeMode, Number(form.dataset.revision || 0), grants).then(() => { options.setMessage("success", "Knowledge 范围已更新。"); details.dataset.loaded = "false"; }).catch(error => options.setMessage("error", String(error)));
+        void api.updateChannelKnowledgePolicy(form.dataset.channelPolicy || "", form.dataset.endpoint || "", scopeMode, Number(form.dataset.revision || 0), grants).then(() => { options.setMessage("success", "Knowledge 范围已更新。"); details.dataset.loaded = "false"; }).catch(error => {
+					options.setMessage("error", channelErrorMessage(error));
+					refreshAfterChannelConflict(error, options.refresh);
+				});
       }));
 			body.querySelectorAll<HTMLFormElement>("[data-channel-policy]").forEach(form => {
 				const mode = form.querySelector<HTMLSelectElement>('select[name="knowledge_scope_mode"]');

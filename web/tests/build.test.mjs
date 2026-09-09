@@ -375,6 +375,8 @@ test("built web contains responsive application", async () => {
 	for (const marker of ["data-channel-project-scope", "data-channel-workspace-option", "data-channel-policy-select-all", "data-channel-policy-clear"]) assert.match(channels, new RegExp(marker));
 	assert.match(channels, /selectedProjects\.has/);
 	for (const marker of ["operation_scope_mode", "knowledge_scope_mode", "data-channel-operation-selected", "data-channel-knowledge-selected", "全部 Project \/ Workspace", "全部项目知识与知识库"]) assert.match(channels, new RegExp(marker));
+	assert.match(channels, /channel_revision_conflict/);
+	assert.match(channels, /渠道设置已被其他更新修改/);
 	assert.match(channels, /扫码更新飞书权限/);
   assert.match(channels, /Knowledge allowlist/);
   assert.match(channels, /人工整理并共享/);

@@ -283,7 +283,7 @@ func (s *Store) UpdateChannelInstance(ctx context.Context, item domain.ChannelIn
 
 func (s *Store) UpdateChannelInstanceHealth(ctx context.Context, id, status, errorCode string, at time.Time) error {
 	configPatch := map[string]any{"runtime_error_code": errorCode}
-	_, err := s.db.ExecContext(ctx, `UPDATE channel_instances SET status=?,last_seen_at=?,config_json=json_patch(config_json,?),revision=revision+1,updated_at=? WHERE id=? AND status<>'disabled'`,
+	_, err := s.db.ExecContext(ctx, `UPDATE channel_instances SET status=?,last_seen_at=?,config_json=json_patch(config_json,?),updated_at=? WHERE id=? AND status<>'disabled'`,
 		status, timeString(at), encodeJSON(configPatch), timeString(at), id)
 	return err
 }

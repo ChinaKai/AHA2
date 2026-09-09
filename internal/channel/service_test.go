@@ -420,6 +420,7 @@ func TestInboundOwnerAndGroupScopesAreServerEnforcedAndIdempotent(t *testing.T) 
 		EventType: "menu_action", OccurredAt: time.Now().UTC(), ChatType: "p2p", ExternalSenderID: "owner-open",
 		SenderDisplayName: "Owner", MenuAction: map[string]any{"key": "aha.project.query"},
 	}
+	revisionBeforeHealth := instance.Revision
 	if err := database.UpdateChannelInstanceHealth(ctx, instance.ID, "degraded", "feishu_reconnecting", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
@@ -439,6 +440,9 @@ func TestInboundOwnerAndGroupScopesAreServerEnforcedAndIdempotent(t *testing.T) 
 	instance, err = database.ChannelInstance(ctx, instance.ID)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if instance.Revision != revisionBeforeHealth {
+		t.Fatalf("runtime health changed config revision: before=%d after=%d", revisionBeforeHealth, instance.Revision)
 	}
 	turnsAfterMenu, err := database.ListTurns(ctx, conversation.HostTaskID)
 	if err != nil || len(turnsAfterMenu) != len(turnsBeforeMenu) {
