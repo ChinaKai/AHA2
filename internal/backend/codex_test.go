@@ -181,6 +181,14 @@ func TestParseCodexLine(t *testing.T) {
 	if event.Type != "agent_message" || reply != "done" {
 		t.Fatalf("unexpected reply event: %#v %q", event, reply)
 	}
+	event, reply, _ = parseCodexLine(`{"type":"item.completed","item":{"type":"agent_message","text":"working","phase":"commentary"}}`)
+	if event.Type != "agent_message" || reply != "working" || event.Data["intermediate"] != true || event.Data["phase"] != "commentary" {
+		t.Fatalf("unexpected commentary event: %#v %q", event, reply)
+	}
+	event, reply, _ = parseCodexLine(`{"type":"item.completed","item":{"type":"agent_message","text":"done","phase":"final_answer"}}`)
+	if event.Type != "agent_message" || reply != "done" || event.Data["final"] != true || event.Data["intermediate"] != false {
+		t.Fatalf("unexpected final event: %#v %q", event, reply)
+	}
 	event, _, _ = parseCodexLine(`{"type":"item.started","item":{"id":"tool-1","type":"command_execution","command":"go test ./...","status":"in_progress"}}`)
 	if event.Type != "agent_command_started" || event.Data["tool_call_id"] != "tool-1" {
 		t.Fatalf("tool start lost lifecycle id: %#v", event)

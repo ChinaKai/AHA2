@@ -316,7 +316,13 @@ func parseCodexLine(line string) (Event, string, string) {
 		itemType, _ := item["type"].(string)
 		if itemType == "agent_message" && rawType == "item.completed" {
 			text, _ := item["text"].(string)
-			return Event{Type: "agent_message", Data: map[string]any{"text": text}}, text, ""
+			data := map[string]any{"text": text}
+			if phase, _ := item["phase"].(string); phase != "" {
+				data["phase"] = phase
+				data["intermediate"] = phase == "commentary"
+				data["final"] = phase == "final_answer"
+			}
+			return Event{Type: "agent_message", Data: data}, text, ""
 		}
 		if itemType == "command_execution" {
 			data := map[string]any{

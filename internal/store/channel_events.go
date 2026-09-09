@@ -34,22 +34,27 @@ func (s *Store) AppendChannelSourceAndProject(ctx context.Context, source domain
 		return err
 	}
 	rows, err := tx.QueryContext(ctx, `
-		SELECT sub.id,sub.instance_id,sub.conversation_id,sub.kind
+		SELECT sub.id,sub.instance_id,sub.conversation_id,sub.kind,endpoint.kind
 		FROM channel_subscriptions sub
 		JOIN channel_instances instance ON instance.id=sub.instance_id
+		JOIN channel_conversations conversation ON conversation.id=sub.conversation_id
+		JOIN channel_endpoints endpoint ON endpoint.id=conversation.endpoint_id
 		WHERE sub.state='active' AND instance.status IN ('ready','degraded')
 		  AND ((sub.kind IN ('task_route','conversation_host') AND sub.source_task_id=?)
 		       OR (sub.kind='owner_global' AND ? AND COALESCE(json_extract(instance.config_json,'$.notify_task_status'),0)=1))`, source.TaskID, source.EventClass == "status")
 	if err != nil {
 		return err
 	}
-	type target struct{ subscriptionID, instanceID, conversationID, kind string }
+	type target struct{ subscriptionID, instanceID, conversationID, kind, endpointKind string }
 	targets := []target{}
 	for rows.Next() {
 		var item target
-		if err := rows.Scan(&item.subscriptionID, &item.instanceID, &item.conversationID, &item.kind); err != nil {
+		if err := rows.Scan(&item.subscriptionID, &item.instanceID, &item.conversationID, &item.kind, &item.endpointKind); err != nil {
 			rows.Close()
 			return err
+		}
+		if !channelSubscriptionAllows(item.endpointKind, item.kind, source.EventClass, source.EventType) {
+			continue
 		}
 		targets = append(targets, item)
 	}
@@ -102,6 +107,16 @@ func (s *Store) AppendChannelSourceAndProject(ctx context.Context, source domain
 		}
 	}
 	return tx.Commit()
+}
+
+func channelSubscriptionAllows(endpointKind, subscriptionKind, eventClass, eventType string) bool {
+	if subscriptionKind == "owner_global" {
+		return eventClass == "status"
+	}
+	if endpointKind == domain.ChannelEndpointGroupDigitalHuman {
+		return eventType == "agent_reply"
+	}
+	return true
 }
 
 func (s *Store) EnsureOwnerGlobalSubscription(ctx context.Context, instanceID, conversationID string, at time.Time) error {
