@@ -9,8 +9,11 @@ param(
   [string]$DataDir = (Join-Path $env:LOCALAPPDATA "AHA2"),
   [string]$Version = "dev",
 	[string]$TaskName = "AHA2 User",
+	[string]$UpdateTaskName = "AHA2 User Update",
   [string]$HealthURL = "http://127.0.0.1:8766/healthz",
   [int]$HealthTimeoutSeconds = 60,
+	[string]$ResultPath = "",
+	[switch]$DetachedWorker,
   [switch]$ValidateOnly
 )
 
@@ -40,6 +43,58 @@ $plugin = Join-Path $data "plugins\channels\feishu\aha2-channel-feishu.exe"
 
 if ($ValidateOnly) {
   [pscustomobject]@{Mode="per-user";Repository=$repo;InstallDir=$install;DataDir=$data;HealthURL=$HealthURL;ElevationRequired=$false}
+  return
+}
+
+function Test-AHA2Ancestor {
+  $current = $PID
+  for ($depth = 0; $depth -lt 32 -and $current -gt 0; $depth++) {
+    $process = Get-CimInstance Win32_Process -Filter "ProcessId=$current" -ErrorAction SilentlyContinue
+    if (-not $process) { return $false }
+    if ($process.Name -ieq "aha2.exe") { return $true }
+    $current = [int]$process.ParentProcessId
+  }
+  return $false
+}
+
+function ConvertTo-CommandLineArgument([string]$Value) {
+  if ($Value.Contains('"')) { throw "Scheduled deployment argument contains an unsupported quote." }
+  return '"' + $Value + '"'
+}
+
+function Write-DeploymentResult([string]$Status, $Value) {
+  if ([string]::IsNullOrWhiteSpace($ResultPath)) { return }
+  $target = [IO.Path]::GetFullPath($ResultPath)
+  $repoPrefix = $repo.TrimEnd('\') + '\'
+  if (-not $target.StartsWith($repoPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "Deployment result path must stay inside the repository."
+  }
+  New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force | Out-Null
+  @{Status=$Status;Value=$Value;FinishedAt=[DateTime]::UtcNow.ToString("o")} | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $target -Encoding UTF8
+}
+
+if (-not $DetachedWorker -and (Test-AHA2Ancestor)) {
+  if ([string]::IsNullOrWhiteSpace($ResultPath)) {
+    $ResultPath = Join-Path $repo "dist\user-deploy-result.json"
+  }
+  $workerArguments = @(
+    "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", $PSCommandPath,
+    "-DetachedWorker", "-RepoPath", $repo, "-InputExe", $serverInput, "-InputTrayExe", $trayInput,
+    "-InstallDir", $install, "-DataDir", $data, "-Version", $Version, "-TaskName", $TaskName,
+    "-UpdateTaskName", $UpdateTaskName, "-HealthURL", $HealthURL,
+    "-HealthTimeoutSeconds", [string]$HealthTimeoutSeconds, "-ResultPath", $ResultPath
+  )
+  if ($InputFeishuPlugin -and $InputFeishuManifest) {
+    $workerArguments += @("-InputFeishuPlugin", (Resolve-Path -LiteralPath $InputFeishuPlugin).Path, "-InputFeishuManifest", (Resolve-Path -LiteralPath $InputFeishuManifest).Path)
+  }
+  $argumentLine = ($workerArguments | ForEach-Object { ConvertTo-CommandLineArgument ([string]$_) }) -join ' '
+  $powershell = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+  $action = New-ScheduledTaskAction -Execute $powershell -Argument $argumentLine -WorkingDirectory $repo
+  $principal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited
+  $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 20) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+  Register-ScheduledTask -TaskName $UpdateTaskName -Action $action -Principal $principal -Settings $settings -Force | Out-Null
+  Start-ScheduledTask -TaskName $UpdateTaskName
+  [pscustomobject]@{Mode="per-user";State="scheduled";Result=$ResultPath;ElevationRequired=$false}
   return
 }
 
@@ -103,7 +158,10 @@ try {
   if ($serverHash -ne (Get-FileHash -LiteralPath $serverInput -Algorithm SHA256).Hash -or $trayHash -ne (Get-FileHash -LiteralPath $trayInput -Algorithm SHA256).Hash) {
     throw "Installed per-user binary hash does not match the candidate."
   }
-  [pscustomobject]@{Mode="per-user";Health="ok";URL=$HealthURL;Installer=$installer;Backup=$backup;ServerSHA256=$serverHash;TraySHA256=$trayHash;ElevationRequired=$false}
+  $deploymentResult = [pscustomobject]@{Mode="per-user";Health="ok";URL=$HealthURL;Installer=$installer;Backup=$backup;ServerSHA256=$serverHash;TraySHA256=$trayHash;ElevationRequired=$false}
+  Write-DeploymentResult "succeeded" $deploymentResult
+  if ($DetachedWorker) { Unregister-ScheduledTask -TaskName $UpdateTaskName -Confirm:$false -ErrorAction SilentlyContinue }
+  $deploymentResult
 } catch {
   $deploymentError = $_
   Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
@@ -120,5 +178,7 @@ try {
     Register-ScheduledTask -TaskName $TaskName -Xml $previousTaskXML -Force | Out-Null
     Start-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
   }
+  Write-DeploymentResult "failed" $deploymentError.Exception.Message
+  if ($DetachedWorker) { Unregister-ScheduledTask -TaskName $UpdateTaskName -Confirm:$false -ErrorAction SilentlyContinue }
   throw "$($deploymentError.Exception.Message) Backup: $backup"
 }

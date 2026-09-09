@@ -100,7 +100,7 @@ try {
 
 $userDeployPath = Join-Path $repo "scripts\deploy-windows-user.ps1"
 $userDeploy = Get-Content -Raw -Encoding UTF8 -LiteralPath $userDeployPath
-foreach ($contract in @("Per-user install directory must stay under LOCALAPPDATA", "-PerUser", "ElevationRequired=`$false", "AHA2-Setup-User-x64.exe", "Wait-AHA2Health", "Get-FileHash", "AHA2 User", "Stop-AHA2ProcessTrees", "taskkill.exe", "/T")) {
+foreach ($contract in @("Per-user install directory must stay under LOCALAPPDATA", "-PerUser", "ElevationRequired=`$false", "AHA2-Setup-User-x64.exe", "Wait-AHA2Health", "Get-FileHash", "AHA2 User", "AHA2 User Update", "DetachedWorker", "New-ScheduledTaskAction", "RunLevel Limited", "Stop-AHA2ProcessTrees", "taskkill.exe", "/T", "user-deploy-result.json")) {
     if (-not $userDeploy.Contains($contract)) {
         throw "Per-user deployment contract is missing: $contract"
     }
