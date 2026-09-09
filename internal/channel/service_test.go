@@ -389,6 +389,23 @@ func TestInboundOwnerAndGroupScopesAreServerEnforcedAndIdempotent(t *testing.T) 
 	}, ""); err != nil {
 		t.Fatal(err)
 	}
+	withoutGlobalStatus, err := database.ChannelDeliveries(ctx, instance.ID, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(withoutGlobalStatus) != len(beforeUnrouted) {
+		t.Fatalf("global task status notification must default off: before=%d after=%d", len(beforeUnrouted), len(withoutGlobalStatus))
+	}
+	instance, err = service.UpdateInstance(ctx, owner.ID, instance.ID, "", map[string]any{"notify_task_status": true}, instance.Revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.AppendChannelSourceAndProject(ctx, domain.ChannelSourceEvent{
+		ID: "source-unrouted-status-enabled", SourceKey: "source-unrouted-status-enabled", TaskID: target.ID, EventClass: "status", EventType: "waiting_user",
+		SemanticPayload: map[string]any{"status": "waiting_user"}, OccurredAt: time.Now().UTC(),
+	}, ""); err != nil {
+		t.Fatal(err)
+	}
 	afterGlobalStatus, err := database.ChannelDeliveries(ctx, instance.ID, 100)
 	if err != nil {
 		t.Fatal(err)

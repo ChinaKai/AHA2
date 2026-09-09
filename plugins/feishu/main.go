@@ -17,6 +17,7 @@ import (
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	larkchannel "github.com/larksuite/oapi-sdk-go/v3/channel"
 	channeltypes "github.com/larksuite/oapi-sdk-go/v3/channel/types"
+	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
 	larkevent "github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
 	"github.com/larksuite/oapi-sdk-go/v3/scene/registration"
 	larkapplication "github.com/larksuite/oapi-sdk-go/v3/service/application/v6"
@@ -88,8 +89,51 @@ type cachedDisplayName struct {
 }
 
 type menuConfigFailure struct {
-	stage string
-	code  int
+	stage       string
+	code        int
+	message     string
+	field       string
+	description string
+}
+
+func rejectedMenuConfig(stage string, providerError larkcore.CodeError) menuConfigFailure {
+	failure := menuConfigFailure{stage: stage, code: providerError.Code, message: safeProviderDetail(providerError.Msg)}
+	if providerError.Err != nil && len(providerError.Err.FieldViolations) > 0 && providerError.Err.FieldViolations[0] != nil {
+		failure.field = safeProviderDetail(providerError.Err.FieldViolations[0].Field)
+		failure.description = safeProviderDetail(providerError.Err.FieldViolations[0].Description)
+	}
+	return failure
+}
+
+func safeProviderDetail(value string) string {
+	value = strings.Map(func(character rune) rune {
+		if character < 32 || character == 127 {
+			return -1
+		}
+		return character
+	}, strings.TrimSpace(value))
+	if len([]rune(value)) > 160 {
+		value = string([]rune(value)[:160])
+	}
+	return value
+}
+
+func menuConfigurationFailureResult(err error) map[string]any {
+	var failure menuConfigFailure
+	if !errors.As(err, &failure) {
+		return map[string]any{"stage": "unknown"}
+	}
+	result := map[string]any{"stage": failure.stage, "code": failure.code}
+	if failure.message != "" {
+		result["message"] = failure.message
+	}
+	if failure.field != "" {
+		result["field"] = failure.field
+	}
+	if failure.description != "" {
+		result["description"] = failure.description
+	}
+	return result
 }
 
 func (e menuConfigFailure) Error() string {
@@ -330,9 +374,13 @@ func feishuDisplayNames(ctx context.Context, client *lark.Client, message *chann
 			pending++
 			go func() {
 				value := ""
-				request := larkcontact.NewGetUserReqBuilder().UserId(message.UserID).UserIdType("open_id").Build()
-				if response, err := client.Contact.V3.User.Get(lookupCtx, request); err == nil && response.Success() && response.Data != nil && response.Data.User != nil && response.Data.User.Name != nil {
-					value = strings.TrimSpace(*response.Data.User.Name)
+				if message.ChatType == "group" && message.ChatID != "" {
+					value = groupMemberDisplayName(lookupCtx, client, message.ChatID, message.UserID)
+				} else {
+					request := larkcontact.NewGetUserReqBuilder().UserId(message.UserID).UserIdType("open_id").Build()
+					if response, err := client.Contact.V3.User.Get(lookupCtx, request); err == nil && response.Success() && response.Data != nil && response.Data.User != nil && response.Data.User.Name != nil {
+						value = strings.TrimSpace(*response.Data.User.Name)
+					}
 				}
 				results <- result{kind: "user", value: value}
 			}()
@@ -369,6 +417,30 @@ func feishuDisplayNames(ctx context.Context, client *lark.Client, message *chann
 		}
 	}
 	return chatName, senderName
+}
+
+func groupMemberDisplayName(ctx context.Context, client *lark.Client, chatID, senderOpenID string) string {
+	pageToken := ""
+	for page := 0; page < 5 && ctx.Err() == nil; page++ {
+		builder := larkim.NewGetChatMembersReqBuilder().ChatId(chatID).MemberIdType("open_id").PageSize(100)
+		if pageToken != "" {
+			builder.PageToken(pageToken)
+		}
+		response, err := client.Im.V1.ChatMembers.Get(ctx, builder.Build())
+		if err != nil || !response.Success() || response.Data == nil {
+			return ""
+		}
+		for _, member := range response.Data.Items {
+			if member != nil && member.MemberId != nil && *member.MemberId == senderOpenID && member.Name != nil {
+				return strings.TrimSpace(*member.Name)
+			}
+		}
+		if response.Data.HasMore == nil || !*response.Data.HasMore || response.Data.PageToken == nil || *response.Data.PageToken == "" {
+			return ""
+		}
+		pageToken = *response.Data.PageToken
+	}
+	return ""
 }
 
 func cachedName(key string) string {
@@ -426,7 +498,7 @@ func (c *runtimeClient) commandLoop(ctx context.Context, client *lark.Client, ap
 				_ = c.complete(ctx, item, true, map[string]any{"status": "ready"}, "")
 			case "configure_menu":
 				if err := configureFeishuMenu(ctx, client, appID); err != nil {
-					_ = c.complete(ctx, item, false, map[string]any{}, menuConfigurationErrorCode(err))
+					_ = c.complete(ctx, item, false, menuConfigurationFailureResult(err), menuConfigurationErrorCode(err))
 					continue
 				}
 				_ = c.complete(ctx, item, true, map[string]any{"status": "publish_submitted", "menu_version": 1}, "")
@@ -456,13 +528,34 @@ func configureFeishuMenu(ctx context.Context, client *lark.Client, appID string)
 		if err != nil {
 			return menuConfigFailure{stage: "config"}
 		}
-		return menuConfigFailure{stage: "config", code: configResponse.Code}
+		return rejectedMenuConfig("config", configResponse.CodeError)
 	}
-	menu := func(id, parent, label string, sort, action int, eventKey string) *larkapplicationv7.BotMenuNode {
-		builder := larkapplicationv7.NewBotMenuNodeBuilder().MenuId(id).Sort(sort).DefaultName(label).MenuContentType(action)
-		if parent != "" {
-			builder.ParentMenuId(parent)
+	abilityBody := larkapplicationv7.NewPatchApplicationAbilityReqBodyBuilder().Bot(
+		buildFeishuMenuAbility(),
+	).Build()
+	abilityRequest := larkapplicationv7.NewPatchApplicationAbilityReqBuilder().AppId(appID).Body(abilityBody).Build()
+	abilityResponse, err := client.Application.V7.ApplicationAbility.Patch(ctx, abilityRequest)
+	if err != nil || !abilityResponse.Success() {
+		if err != nil {
+			return menuConfigFailure{stage: "ability"}
 		}
+		return rejectedMenuConfig("ability", abilityResponse.CodeError)
+	}
+	publishBody := larkapplicationv7.NewCreateApplicationPublishReqBodyBuilder().MobileDefaultAbility("bot").PcDefaultAbility("bot").Remark("Configure AHA channel menu").Changelog("Configure Owner menu and channel display permissions").Build()
+	publishRequest := larkapplicationv7.NewCreateApplicationPublishReqBuilder().AppId(appID).Body(publishBody).Build()
+	publishResponse, err := client.Application.V7.ApplicationPublish.Create(ctx, publishRequest)
+	if err != nil || !publishResponse.Success() {
+		if err != nil {
+			return menuConfigFailure{stage: "publish"}
+		}
+		return rejectedMenuConfig("publish", publishResponse.CodeError)
+	}
+	return nil
+}
+
+func buildFeishuMenuAbility() *larkapplicationv7.AppAbilityBot {
+	menu := func(id, parent, label string, sort, action int, eventKey string) *larkapplicationv7.BotMenuNode {
+		builder := larkapplicationv7.NewBotMenuNodeBuilder().MenuId(id).ParentMenuId(parent).Sort(sort).DefaultName(label).MenuContentType(action)
 		if eventKey != "" {
 			builder.EventKey(eventKey)
 		}
@@ -476,27 +569,9 @@ func configureFeishuMenu(ctx context.Context, client *lark.Client, appID string)
 		menu("aha_task_query", "aha_task", "查询任务", 1, 2, "aha.task.query"),
 		menu("aha_task_create", "aha_task", "创建任务", 2, 2, "aha.task.create"),
 	}
-	abilityBody := larkapplicationv7.NewPatchApplicationAbilityReqBodyBuilder().Bot(
-		larkapplicationv7.NewAppAbilityBotBuilder().Enable(true).BotMenuEnable(true).BotMenus(menus).BotMenuDisplayStrategy(1).Build(),
-	).Build()
-	abilityRequest := larkapplicationv7.NewPatchApplicationAbilityReqBuilder().AppId(appID).Body(abilityBody).Build()
-	abilityResponse, err := client.Application.V7.ApplicationAbility.Patch(ctx, abilityRequest)
-	if err != nil || !abilityResponse.Success() {
-		if err != nil {
-			return menuConfigFailure{stage: "ability"}
-		}
-		return menuConfigFailure{stage: "ability", code: abilityResponse.Code}
-	}
-	publishBody := larkapplicationv7.NewCreateApplicationPublishReqBodyBuilder().MobileDefaultAbility("bot").PcDefaultAbility("bot").Remark("Configure AHA channel menu").Changelog("Configure Owner menu and channel display permissions").Build()
-	publishRequest := larkapplicationv7.NewCreateApplicationPublishReqBuilder().AppId(appID).Body(publishBody).Build()
-	publishResponse, err := client.Application.V7.ApplicationPublish.Create(ctx, publishRequest)
-	if err != nil || !publishResponse.Success() {
-		if err != nil {
-			return menuConfigFailure{stage: "publish"}
-		}
-		return menuConfigFailure{stage: "publish", code: publishResponse.Code}
-	}
-	return nil
+	return larkapplicationv7.NewAppAbilityBotBuilder().Enable(true).I18ns([]*larkapplicationv7.AppAbilityBotI18n{
+		larkapplicationv7.NewAppAbilityBotI18nBuilder().I18nKey("zh_cn").GetStartedDesc("使用 AHA2 管理项目和任务").Build(),
+	}).BotMenuEnable(true).BotMenus(menus).BotMenuDisplayStrategy(1).Build()
 }
 
 func (c *runtimeClient) deliveryLoop(ctx context.Context, client *lark.Client) {

@@ -1702,10 +1702,9 @@ func channelSemanticEvent(taskID, eventType string, data map[string]any) (string
 	case "agent_reply":
 		eventClass, semanticType, payload["text"] = "message", "agent_reply", firstText(data, "text")
 	case "agent_message":
-		if final, _ := data["final"].(bool); final {
-			return "", "", nil, "", false
-		}
-		eventClass, semanticType, payload["text"] = "update", "agent_message_update", firstText(data, "text", "message")
+		// Backend message updates are durable Web progress, not separate channel
+		// replies. The final agent_reply event is the only user-facing delivery.
+		return "", "", nil, "", false
 	case "agent_progress", "agent_stalled", "agent_resumed", "agent_idle_timeout":
 		eventClass, semanticType, payload["text"] = "update", eventType, firstText(data, "message", "phase", "status")
 	case "agent_error", "turn_failed":

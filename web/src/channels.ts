@@ -58,7 +58,7 @@ function instanceSettings(instance: ChannelInstance, context: ChannelUIContext):
 		const project = normalProjects.find(item => item.id === workspace.project_id);
 		return `<label class="channel-check"><input type="checkbox" name="allowed_workspace_ids" value="${escapeHTML(workspace.id)}" ${workspaceIDs.has(workspace.id) ? "checked" : ""}>${escapeHTML(project?.name || "-")} / ${escapeHTML(workspace.name)}</label>`;
 	}).join("");
-	return `<details class="channel-instance-settings"><summary>Runtime 与访问范围</summary><form data-channel-settings="${escapeHTML(instance.id)}" data-revision="${instance.revision}">${runtimeEditor("default", "实例默认", objectValue(config.runtime_default), context, false)}${runtimeEditor("assistant", "私聊助手", objectValue(config.runtime_assistant_dm), context, true)}${runtimeEditor("group", "群聊电子人", objectValue(config.runtime_group_digital_human), context, true)}<fieldset><legend>私聊操作范围 · Project</legend><div class="channel-checkbox-list">${projectChecks || "<small>暂无可选项目</small>"}</div></fieldset><fieldset><legend>私聊操作范围 · Workspace</legend><div class="channel-checkbox-list">${workspaceChecks || "<small>暂无可选 Workspace</small>"}</div></fieldset><button class="primary" type="submit">保存 Runtime 与访问范围</button></form></details>`;
+	return `<details class="channel-instance-settings"><summary>Runtime、通知与访问范围</summary><form data-channel-settings="${escapeHTML(instance.id)}" data-revision="${instance.revision}">${runtimeEditor("default", "实例默认", objectValue(config.runtime_default), context, false)}${runtimeEditor("assistant", "私聊助手", objectValue(config.runtime_assistant_dm), context, true)}${runtimeEditor("group", "群聊电子人", objectValue(config.runtime_group_digital_human), context, true)}<fieldset><legend>消息通知</legend><label class="channel-check"><input type="checkbox" name="notify_task_status" ${config.notify_task_status === true ? "checked" : ""}>普通 Task 状态变更推送到飞书私聊助手</label><small>仅推送等待处理、完成、失败或中断等状态；不会推送普通消息、过程输出或渠道宿主 Task。</small></fieldset><fieldset><legend>私聊操作范围 · Project</legend><div class="channel-checkbox-list">${projectChecks || "<small>暂无可选项目</small>"}</div></fieldset><fieldset><legend>私聊操作范围 · Workspace</legend><div class="channel-checkbox-list">${workspaceChecks || "<small>暂无可选 Workspace</small>"}</div></fieldset><button class="primary" type="submit">保存渠道设置</button></form></details>`;
 }
 
 export function renderChannels(providers: ChannelPlugin[], instances: ChannelInstance[], context: ChannelUIContext): string {
@@ -141,9 +141,10 @@ export function bindChannels(options: {refresh: () => Promise<void>; setMessage:
 			runtime_group_digital_human: runtime("group", true),
 			allowed_project_ids: values.getAll("allowed_project_ids").map(String),
 			allowed_workspace_ids: values.getAll("allowed_workspace_ids").map(String),
+			notify_task_status: values.get("notify_task_status") === "on",
 		};
 		void api.updateChannelInstance(settingsForm.dataset.channelSettings || "", {config}, Number(settingsForm.dataset.revision || 0)).then(async () => {
-			options.setMessage("success", "渠道 Runtime 与访问范围已保存，新会话将使用新配置。");
+			options.setMessage("success", "渠道 Runtime、通知与访问范围已保存，新会话将使用新配置。");
 			await refresh();
 		}).catch(error => options.setMessage("error", error instanceof Error ? error.message : String(error)));
 	}));
