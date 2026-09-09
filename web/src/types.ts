@@ -689,6 +689,7 @@ export interface ChannelInstance {
   app_id?: string;
   provider_tenant_id?: string;
   credential_configured: boolean;
+	owner_bound: boolean;
   host_project_id: string;
   host_workspace_id: string;
   config?: Record<string, unknown>;

@@ -311,6 +311,9 @@ func TestInboundOwnerAndGroupScopesAreServerEnforcedAndIdempotent(t *testing.T) 
 	if err != nil || len(tasks) != 1 {
 		t.Fatalf("tasks=%#v err=%v", tasks, err)
 	}
+	if tasks[0].Title != "飞书私聊 · owner" {
+		t.Fatalf("private channel task title=%q", tasks[0].Title)
+	}
 	endpoint, err := database.ChannelEndpoint(ctx, instance.ID, domain.ChannelEndpointAssistantDM)
 	if err != nil {
 		t.Fatal(err)
@@ -322,6 +325,21 @@ func TestInboundOwnerAndGroupScopesAreServerEnforcedAndIdempotent(t *testing.T) 
 	conversation, err := database.ChannelConversationByScope(ctx, endpoint.ID, 1, scope)
 	if err != nil {
 		t.Fatal(err)
+	}
+	menu := domain.ChannelInboundEnvelope{
+		SchemaVersion: 1, RequestID: "menu-request", InstanceID: instance.ID, ExternalEventID: "menu-event",
+		EventType: "menu_action", OccurredAt: time.Now().UTC(), ChatType: "p2p", ExternalSenderID: "owner-open",
+		SenderDisplayName: "Owner", MenuAction: map[string]any{"key": "aha.project.query"},
+	}
+	if _, duplicate, err := service.ReceiveInbound(ctx, claims, menu); err != nil || duplicate {
+		t.Fatalf("menu receive duplicate=%v err=%v", duplicate, err)
+	}
+	if err := service.processInboundBatch(ctx); err != nil {
+		t.Fatal(err)
+	}
+	storedMenu, duplicate, err := service.ReceiveInbound(ctx, claims, menu)
+	if err != nil || !duplicate || storedMenu.State != "processed" || storedMenu.Outcome != "delivered_to_task" {
+		t.Fatalf("menu receipt=%#v duplicate=%v err=%v", storedMenu, duplicate, err)
 	}
 	regularProject := domain.Project{ID: "regular-project", Name: "Regular", ProjectType: "folder", DefaultWorkspaceID: "regular-workspace", KnowledgePolicy: "enabled", CreatedAt: now, UpdatedAt: now}
 	if err := database.CreateProject(ctx, regularProject); err != nil {
@@ -467,6 +485,7 @@ func TestInboundOwnerAndGroupScopesAreServerEnforcedAndIdempotent(t *testing.T) 
 		group.RequestID = fmt.Sprintf("group-request-%d", index)
 		group.ExternalEventID = fmt.Sprintf("group-event-%d", index)
 		group.ChatType, group.ExternalChatID, group.ExternalSenderID, group.MentionedBot = "group", chatID, "same-user", true
+		group.ChatDisplayName, group.SenderDisplayName = "研发群", "张三"
 		if _, _, err := service.ReceiveInbound(ctx, claims, group); err != nil {
 			t.Fatal(err)
 		}
@@ -477,6 +496,15 @@ func TestInboundOwnerAndGroupScopesAreServerEnforcedAndIdempotent(t *testing.T) 
 	tasks, _ = database.ListTasks(ctx, instance.HostProjectID)
 	if len(tasks) != 3 {
 		t.Fatalf("group scopes did not isolate by chat: %#v", tasks)
+	}
+	groupTitles := 0
+	for _, task := range tasks {
+		if task.Title == "飞书群聊 · 研发群 · 张三" {
+			groupTitles++
+		}
+	}
+	if groupTitles != 2 {
+		t.Fatalf("group channel task titles=%#v", tasks)
 	}
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {

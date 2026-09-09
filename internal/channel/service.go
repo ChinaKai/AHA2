@@ -261,10 +261,54 @@ func (s *Service) UpdateInstance(ctx context.Context, ownerID, id, name string, 
 		item.Name = strings.TrimSpace(name)
 	}
 	if config != nil {
-		item.Config = config
+		merged := map[string]any{}
+		for key, value := range item.Config {
+			merged[key] = value
+		}
+		for key, value := range config {
+			merged[key] = value
+		}
+		if err := s.validateChannelInstanceConfig(ctx, item, merged); err != nil {
+			return domain.ChannelInstance{}, err
+		}
+		item.Config = merged
 	}
 	item.UpdatedAt = s.now().UTC()
 	return s.store.UpdateChannelInstance(ctx, item, expectedRevision)
+}
+
+func (s *Service) validateChannelInstanceConfig(ctx context.Context, instance domain.ChannelInstance, config map[string]any) error {
+	projects, projectsSet := stringListField(config, "allowed_project_ids")
+	workspaces, workspacesSet := stringListField(config, "allowed_workspace_ids")
+	if projectsSet {
+		for _, id := range projects {
+			project, err := s.store.Project(ctx, id)
+			if err != nil || project.ProjectType == "channel" || project.ProjectType == "knowledge" {
+				return fmt.Errorf("invalid channel project allowlist")
+			}
+		}
+	}
+	if workspacesSet {
+		allowedProjects := sliceSet(projects)
+		for _, id := range workspaces {
+			workspace, err := s.store.Workspace(ctx, id)
+			if err != nil || workspace.ReadOnly || s.store.IsManagedChannelWorkspace(ctx, id) || (projectsSet && !allowedProjects[workspace.ProjectID]) {
+				return fmt.Errorf("invalid channel workspace allowlist")
+			}
+		}
+	}
+	for _, key := range []string{"runtime_default", "runtime_assistant_dm", "runtime_group_digital_human"} {
+		runtimeConfig, present := mapField(config, key)
+		if !present || boolField(runtimeConfig, "inherit") || stringField(runtimeConfig, "model_id") == "" {
+			continue
+		}
+		model, err := s.store.Model(ctx, stringField(runtimeConfig, "model_id"))
+		if err != nil || !s.channelRuntimeModelAvailable(ctx, model, stringField(runtimeConfig, "codex_account_id"), model.WireModel) {
+			return fmt.Errorf("invalid channel runtime configuration")
+		}
+	}
+	_ = instance
+	return nil
 }
 
 func (s *Service) SetInstanceEnabled(ctx context.Context, ownerID, id string, enabled bool, expectedRevision int) (domain.ChannelInstance, error) {
@@ -332,16 +376,53 @@ func (s *Service) ReplaceOwnerKnowledgeGrants(ctx context.Context, ownerID, inst
 		return nil, sql.ErrNoRows
 	}
 	grants := make([]domain.ChannelKnowledgeGrant, 0, len(inputs))
+	allowedRoots, err := s.channelKnowledgeSourceRoots(ctx, instance)
+	if err != nil {
+		return nil, err
+	}
 	for _, input := range inputs {
-		if strings.TrimSpace(input.KnowledgeEntryID) == "" {
-			return nil, fmt.Errorf("stable knowledge entry id is required")
+		entryID := strings.TrimSpace(input.KnowledgeEntryID)
+		if entryID == "" || !allowedRoots[entryID] {
+			return nil, fmt.Errorf("channel knowledge source is not selectable")
 		}
-		grants = append(grants, domain.ChannelKnowledgeGrant{KnowledgeEntryID: strings.TrimSpace(input.KnowledgeEntryID), GrantScope: strings.TrimSpace(input.GrantScope)})
+		grants = append(grants, domain.ChannelKnowledgeGrant{KnowledgeEntryID: entryID, GrantScope: "subtree"})
 	}
 	if err := s.store.ReplaceChannelKnowledgeGrants(ctx, instanceID, endpoint, ownerID, revision, grants, s.now().UTC()); err != nil {
 		return nil, err
 	}
 	return s.store.ChannelKnowledgePolicies(ctx, instanceID)
+}
+
+func (s *Service) channelKnowledgeSourceRoots(ctx context.Context, instance domain.ChannelInstance) (map[string]bool, error) {
+	entries, err := s.store.ListKnowledge(ctx, "", "", []domain.KnowledgeStatus{domain.KnowledgeVerified})
+	if err != nil {
+		return nil, err
+	}
+	libraries, err := s.store.ListKnowledgeLibraries(ctx)
+	if err != nil {
+		return nil, err
+	}
+	libraryProjects := map[string]bool{}
+	for _, library := range libraries {
+		libraryProjects[library.ContainerProjectID] = true
+	}
+	allowedProjects, restricted := stringListField(instance.Config, "allowed_project_ids")
+	projectSet := sliceSet(allowedProjects)
+	result := map[string]bool{}
+	for _, entry := range entries {
+		if !entry.IsIndex || entry.ProjectID == "" {
+			continue
+		}
+		if libraryProjects[entry.ProjectID] {
+			result[entry.ID] = true
+			continue
+		}
+		project, projectErr := s.store.Project(ctx, entry.ProjectID)
+		if projectErr == nil && project.ProjectType != "channel" && project.ProjectType != "knowledge" && (!restricted || projectSet[project.ID]) {
+			result[entry.ID] = true
+		}
+	}
+	return result, nil
 }
 
 func (s *Service) OwnerKnowledgeRecords(ctx context.Context, ownerID, instanceID string) ([]domain.ChannelKnowledgeRecord, error) {
@@ -641,13 +722,16 @@ func (s *Service) ReceiveInbound(ctx context.Context, claims RuntimeClaims, enve
 	if envelope.SchemaVersion != 1 || envelope.InstanceID != claims.InstanceID || strings.TrimSpace(envelope.ExternalEventID) == "" || strings.TrimSpace(envelope.ExternalSenderID) == "" {
 		return domain.ChannelInboxReceipt{}, false, fmt.Errorf("invalid_envelope")
 	}
-	if envelope.EventType != "message" && envelope.EventType != "card_action" {
+	if envelope.EventType != "message" && envelope.EventType != "card_action" && envelope.EventType != "menu_action" {
 		return domain.ChannelInboxReceipt{}, false, fmt.Errorf("invalid_envelope")
 	}
 	if envelope.ChatType != "p2p" && envelope.ChatType != "group" {
 		return domain.ChannelInboxReceipt{}, false, fmt.Errorf("invalid_envelope")
 	}
-	if strings.TrimSpace(envelope.ExternalChatID) == "" || len([]byte(envelope.Content)) > 256*1024 || containsSensitiveField(envelope.CardAction) {
+	if (envelope.EventType != "menu_action" && strings.TrimSpace(envelope.ExternalChatID) == "") || len([]byte(envelope.Content)) > 256*1024 || containsSensitiveField(envelope.CardAction) || containsSensitiveField(envelope.MenuAction) {
+		return domain.ChannelInboxReceipt{}, false, fmt.Errorf("invalid_envelope")
+	}
+	if envelope.EventType == "menu_action" && (envelope.ChatType != "p2p" || !validChannelMenuKey(stringField(envelope.MenuAction, "key"))) {
 		return domain.ChannelInboxReceipt{}, false, fmt.Errorf("invalid_envelope")
 	}
 	raw, err := json.Marshal(envelope)
@@ -725,6 +809,9 @@ func (s *Service) processInbound(ctx context.Context, receipt domain.ChannelInbo
 	if envelope.EventType == "card_action" {
 		return s.processCardAction(ctx, receipt, instance, envelope)
 	}
+	if envelope.EventType == "menu_action" {
+		return s.processMenuAction(ctx, receipt, instance, envelope)
+	}
 	endpointKind := domain.ChannelEndpointGroupDigitalHuman
 	role := "participant"
 	var identity domain.ChannelIdentityLink
@@ -774,6 +861,55 @@ func (s *Service) processInbound(ctx context.Context, receipt domain.ChannelInbo
 	return err
 }
 
+func validChannelMenuKey(key string) bool {
+	switch key {
+	case "aha.project.query", "aha.workspace.query", "aha.task.query", "aha.task.create":
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Service) processMenuAction(ctx context.Context, receipt domain.ChannelInboxReceipt, instance domain.ChannelInstance, envelope domain.ChannelInboundEnvelope) error {
+	identity, err := s.store.ChannelOwnerIdentity(ctx, instance.ID)
+	if err != nil || identity.ExternalUserID != envelope.ExternalSenderID || identity.OwnerID != instance.OwnerID {
+		return fmt.Errorf("channel owner identity is required")
+	}
+	conversation, err := s.store.OwnerChannelConversation(ctx, instance.ID)
+	if err != nil || conversation.Status != "active" {
+		endpoint, endpointErr := s.store.ChannelEndpoint(ctx, instance.ID, domain.ChannelEndpointAssistantDM)
+		if endpointErr != nil || !endpoint.Enabled {
+			return fmt.Errorf("channel owner conversation is required")
+		}
+		menuEnvelope := envelope
+		menuEnvelope.ExternalChatID = "open_id:" + envelope.ExternalSenderID
+		scopeKey, scopeErr := s.scopeKey(instance.ID, endpoint.Kind, identity.ID, menuEnvelope.ExternalChatID, envelope.ExternalSenderID)
+		if scopeErr != nil {
+			return scopeErr
+		}
+		conversation, err = s.ensureConversation(ctx, instance, endpoint, identity, menuEnvelope, scopeKey)
+		if err != nil {
+			return err
+		}
+	}
+	key := stringField(envelope.MenuAction, "key")
+	instructions := map[string]string{
+		"aha.project.query":   "用户点击了“查询项目”。请调用渠道目录能力，列出 allowlist 内的项目，并提供继续查询 Workspace 的清晰选项。",
+		"aha.workspace.query": "用户点击了“查询 Workspace”。请先调用渠道目录能力列出 allowlist 内项目，请用户选择项目后再展示该项目的 Workspace。",
+		"aha.task.query":      "用户点击了“查询任务”。请调用渠道目录能力，并询问或应用项目、Workspace、状态、关键词筛选后展示任务。",
+		"aha.task.create":     "用户点击了“创建任务”。请收集 Project、Workspace、标题与需求，Runtime 默认继承渠道配置；创建前必须生成服务端预览并要求一次性确认。",
+	}
+	provenance := map[string]any{
+		"schema": "aha.channel-context/v1", "instance_id": instance.ID, "provider": instance.ProviderKey,
+		"endpoint": domain.ChannelEndpointAssistantDM, "conversation_id": conversation.ID,
+		"actor":              map[string]any{"identity_link_id": identity.ID, "role": "owner"},
+		"route":              map[string]any{"mode": "assistant", "target_task_id": conversation.HostTaskID},
+		"inbound_receipt_id": receipt.ID, "menu_action": key,
+	}
+	_, err = s.application.SubmitChannelMessage(ctx, receipt.ID, receipt.LeaseID, conversation.ID, conversation.HostTaskID, instructions[key], provenance)
+	return err
+}
+
 func (s *Service) channelAgentContext(ctx context.Context, claims agentapi.Claims, endpointRequired string) (app.AgentCallContext, map[string]any, domain.ChannelIdentityLink, error) {
 	call, err := s.application.AgentCallContext(ctx, claims, true)
 	if err != nil {
@@ -814,21 +950,29 @@ func (s *Service) AgentCatalog(ctx context.Context, claims agentapi.Claims) (map
 	if err != nil {
 		return nil, err
 	}
+	instanceID := stringField(channelContext, "instance_id")
+	instance, err := s.store.ChannelInstance(ctx, instanceID)
+	if err != nil {
+		return nil, err
+	}
+	allowedProjects, projectsRestricted := stringListField(instance.Config, "allowed_project_ids")
+	allowedWorkspaces, workspacesRestricted := stringListField(instance.Config, "allowed_workspace_ids")
+	projectSet, workspaceSet := sliceSet(allowedProjects), sliceSet(allowedWorkspaces)
 	projectResult := []domain.Project{}
 	for _, project := range projects {
-		if !s.store.IsManagedChannelProject(ctx, project.ID) {
+		if !s.store.IsManagedChannelProject(ctx, project.ID) && project.ProjectType != "knowledge" && (!projectsRestricted || projectSet[project.ID]) {
 			projectResult = append(projectResult, project)
 		}
 	}
 	workspaceResult := []domain.Workspace{}
 	for _, workspace := range workspaces {
-		if !workspace.ReadOnly && !s.store.IsManagedChannelWorkspace(ctx, workspace.ID) {
+		if !workspace.ReadOnly && !s.store.IsManagedChannelWorkspace(ctx, workspace.ID) && (!projectsRestricted || projectSet[workspace.ProjectID]) && (!workspacesRestricted || workspaceSet[workspace.ID]) {
 			workspaceResult = append(workspaceResult, workspace)
 		}
 	}
 	taskResult := []domain.Task{}
 	for _, task := range tasks {
-		if !task.ReadOnly && !s.store.IsManagedChannelTask(ctx, task.ID) {
+		if !task.ReadOnly && !s.store.IsManagedChannelTask(ctx, task.ID) && (!projectsRestricted || projectSet[task.ProjectID]) && (!workspacesRestricted || workspaceSet[task.WorkspaceID]) {
 			taskResult = append(taskResult, task)
 		}
 	}
@@ -881,13 +1025,17 @@ func (s *Service) PreviewAgentAction(ctx context.Context, claims agentapi.Claims
 	}
 	instanceID := strings.TrimSpace(fmt.Sprint(channelContext["instance_id"]))
 	conversationID := strings.TrimSpace(fmt.Sprint(channelContext["conversation_id"]))
+	instance, err := s.store.ChannelInstance(ctx, instanceID)
+	if err != nil {
+		return domain.ChannelPendingAction{}, err
+	}
 	operation := strings.TrimSpace(input.Operation)
 	precondition, preview := map[string]any{}, map[string]any{"operation": operation}
 	targetType, targetID := "", strings.TrimSpace(input.TargetID)
 	switch operation {
 	case "takeover":
 		task, err := s.store.Task(ctx, targetID)
-		if err != nil || task.ReadOnly || s.store.IsManagedChannelTask(ctx, targetID) || !taskRouteEligible(task.Status) {
+		if err != nil || task.ReadOnly || s.store.IsManagedChannelTask(ctx, targetID) || !taskRouteEligible(task.Status) || !channelOperationAllowed(instance.Config, task.ProjectID, task.WorkspaceID) {
 			return domain.ChannelPendingAction{}, fmt.Errorf("target task is not eligible for takeover")
 		}
 		targetType = "task"
@@ -906,7 +1054,7 @@ func (s *Service) PreviewAgentAction(ctx context.Context, claims agentapi.Claims
 		projectID, workspaceID := stringField(input.Intent, "project_id"), stringField(input.Intent, "workspace_id")
 		project, projectErr := s.store.Project(ctx, projectID)
 		workspace, workspaceErr := s.store.Workspace(ctx, workspaceID)
-		if projectErr != nil || workspaceErr != nil || workspace.ProjectID != project.ID || workspace.ReadOnly || s.store.IsManagedChannelProject(ctx, project.ID) {
+		if projectErr != nil || workspaceErr != nil || workspace.ProjectID != project.ID || workspace.ReadOnly || s.store.IsManagedChannelProject(ctx, project.ID) || !channelOperationAllowed(instance.Config, project.ID, workspace.ID) {
 			return domain.ChannelPendingAction{}, fmt.Errorf("task project or workspace is not eligible")
 		}
 		if stringField(input.Intent, "title") == "" || stringField(input.Intent, "request") == "" {
@@ -917,7 +1065,7 @@ func (s *Service) PreviewAgentAction(ctx context.Context, claims agentapi.Claims
 	case "status_change":
 		task, err := s.store.Task(ctx, targetID)
 		action := stringField(input.Intent, "action")
-		if err != nil || task.ReadOnly || s.store.IsManagedChannelTask(ctx, task.ID) || (action != "complete" && action != "reopen" && action != "interrupt") {
+		if err != nil || task.ReadOnly || s.store.IsManagedChannelTask(ctx, task.ID) || !channelOperationAllowed(instance.Config, task.ProjectID, task.WorkspaceID) || (action != "complete" && action != "reopen" && action != "interrupt") {
 			return domain.ChannelPendingAction{}, fmt.Errorf("task status change is not eligible")
 		}
 		targetType = "task"
@@ -941,7 +1089,7 @@ func (s *Service) PreviewAgentAction(ctx context.Context, claims agentapi.Claims
 			}
 			project, projectErr := s.store.Project(ctx, stringField(input.Intent, "project_id"))
 			workspace, workspaceErr := s.store.Workspace(ctx, stringField(input.Intent, "workspace_id"))
-			if projectErr != nil || workspaceErr != nil || workspace.ProjectID != project.ID || workspace.ReadOnly || s.store.IsManagedChannelProject(ctx, project.ID) || stringField(input.Intent, "request") == "" {
+			if projectErr != nil || workspaceErr != nil || workspace.ProjectID != project.ID || workspace.ReadOnly || s.store.IsManagedChannelProject(ctx, project.ID) || !channelOperationAllowed(instance.Config, project.ID, workspace.ID) || stringField(input.Intent, "request") == "" {
 				return domain.ChannelPendingAction{}, fmt.Errorf("handoff task target is not eligible")
 			}
 			precondition["project_updated_at"], precondition["workspace_updated_at"] = timeStringUTC(project.UpdatedAt), timeStringUTC(workspace.UpdatedAt)
@@ -957,6 +1105,12 @@ func (s *Service) PreviewAgentAction(ctx context.Context, claims agentapi.Claims
 		Operation: operation, TargetType: targetType, TargetID: targetID, Intent: input.Intent, Preview: preview,
 		Precondition: precondition, PreconditionHash: hex.EncodeToString(digest[:]), Status: "pending", ExpiresAt: now.Add(15 * time.Minute), CreatedAt: now, UpdatedAt: now,
 	})
+}
+
+func channelOperationAllowed(config map[string]any, projectID, workspaceID string) bool {
+	projects, projectsRestricted := stringListField(config, "allowed_project_ids")
+	workspaces, workspacesRestricted := stringListField(config, "allowed_workspace_ids")
+	return (!projectsRestricted || sliceSet(projects)[projectID]) && (!workspacesRestricted || sliceSet(workspaces)[workspaceID])
 }
 
 func stringField(values map[string]any, key string) string {
@@ -986,7 +1140,7 @@ func (s *Service) processCardAction(ctx context.Context, receipt domain.ChannelI
 		return fmt.Errorf("pending action is not available")
 	}
 	conversation, err := s.store.ChannelConversation(ctx, action.ConversationID)
-	if err != nil || conversation.ExternalChatID != envelope.ExternalChatID {
+	if err != nil || (conversation.ExternalChatID != envelope.ExternalChatID && conversation.ExternalChatID != "open_id:"+envelope.ExternalSenderID) {
 		return fmt.Errorf("pending action conversation mismatch")
 	}
 	action, execute, err := s.store.BeginChannelPendingAction(ctx, action.ID, instance.ID, conversation.ID, identity.ID, providerMessageID, s.now().UTC())
@@ -1085,24 +1239,29 @@ func (s *Service) executeCreateTaskAction(ctx context.Context, action domain.Cha
 	if err != nil || workspace.ReadOnly || workspace.ProjectID != stringField(intent, "project_id") {
 		return fmt.Errorf("task workspace precondition changed")
 	}
-	models, err := s.store.ListModels(ctx)
-	if err != nil || len(models) == 0 {
-		return fmt.Errorf("task runtime is unavailable")
+	instance, err := s.store.ChannelInstance(ctx, action.InstanceID)
+	if err != nil || !channelOperationAllowed(instance.Config, workspace.ProjectID, workspace.ID) {
+		return fmt.Errorf("task workspace is outside channel allowlist")
 	}
-	model := models[0]
-	for _, candidate := range models {
-		if candidate.ID == stringField(intent, "model_id") {
-			model = candidate
-			break
+	if modelID := stringField(intent, "model_id"); modelID != "" {
+		config := map[string]any{}
+		for key, value := range instance.Config {
+			config[key] = value
 		}
+		config["runtime_default"] = map[string]any{"model_id": modelID, "codex_account_id": stringField(intent, "codex_account_id")}
+		instance.Config = config
+	}
+	runtimeChoice, err := s.resolveChannelRuntime(ctx, instance)
+	if err != nil {
+		return fmt.Errorf("task runtime is unavailable")
 	}
 	taskID := stableID("task", action.ID)
 	task, err := s.store.Task(ctx, taskID)
 	if errors.Is(err, sql.ErrNoRows) {
 		task, err = s.application.CreateTask(ctx, app.CreateTaskInput{
 			ID: taskID, ProjectID: workspace.ProjectID, WorkspaceID: workspace.ID, Title: stringField(intent, "title"), Request: stringField(intent, "request"),
-			Isolation: "inplace", Backend: model.Backend, ModelSource: model.Source, ModelID: model.ID, WireModel: model.WireModel,
-			CodexAccountID: model.CodexAccountID, ReasoningEffort: model.DefaultEffort, Filesystem: "workspace-write", Approval: "never",
+			Isolation: "inplace", Backend: runtimeChoice.Model.Backend, ModelSource: runtimeChoice.Model.Source, ModelID: runtimeChoice.Model.ID, WireModel: runtimeChoice.WireModel,
+			CodexAccountID: runtimeChoice.CodexAccountID, ProxyEnabled: runtimeChoice.ProxyEnabled, ReasoningEffort: runtimeChoice.ReasoningEffort, Filesystem: "workspace-write", Approval: "never",
 			CollaborationMode: "single", MaxAgents: 1, KnowledgePolicy: "inherit",
 		})
 	}
@@ -1152,19 +1311,24 @@ func (s *Service) scopeKey(instanceID, endpointKind, identityID, chatID, senderI
 func (s *Service) ensureConversation(ctx context.Context, instance domain.ChannelInstance, endpoint domain.ChannelEndpoint, identity domain.ChannelIdentityLink, envelope domain.ChannelInboundEnvelope, scopeKey string) (domain.ChannelConversation, error) {
 	conversation, err := s.store.ChannelConversationByScope(ctx, endpoint.ID, 1, scopeKey)
 	if err == nil {
+		desiredTitle := s.channelConversationTitle(ctx, instance, endpoint.Kind, envelope)
+		nameResolved := endpoint.Kind == domain.ChannelEndpointAssistantDM || (envelope.ChatDisplayName != "" && envelope.SenderDisplayName != "")
+		if task, taskErr := s.store.Task(ctx, conversation.HostTaskID); taskErr == nil && nameResolved && desiredTitle != "" && task.Title != desiredTitle {
+			_ = s.store.UpdateTaskTitle(ctx, task.ID, desiredTitle, timeStringUTC(s.now().UTC()))
+		}
 		return conversation, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return domain.ChannelConversation{}, err
 	}
-	runtimeChoice, err := s.resolveChannelRuntime(ctx, instance)
+	runtimeChoice, err := s.resolveChannelRuntime(ctx, instance, endpoint.Kind)
 	if err != nil {
 		return domain.ChannelConversation{}, err
 	}
 	conversationID := domain.NewID("channel_conversation")
 	task, err := s.application.CreateTask(ctx, app.CreateTaskInput{
 		ProjectID: instance.HostProjectID, WorkspaceID: instance.HostWorkspaceID,
-		Title:   "Channel · " + endpoint.Kind + " · " + conversationID[len(conversationID)-8:],
+		Title:   s.channelConversationTitle(ctx, instance, endpoint.Kind, envelope),
 		Request: "System-managed external channel conversation host.", Isolation: "inplace",
 		Backend: runtimeChoice.Model.Backend, ModelSource: runtimeChoice.Model.Source, ModelID: runtimeChoice.Model.ID, WireModel: runtimeChoice.WireModel,
 		CodexAccountID: runtimeChoice.CodexAccountID, ProxyEnabled: runtimeChoice.ProxyEnabled,
@@ -1219,8 +1383,15 @@ type channelRuntimeChoice struct {
 	ProxyEnabled    bool
 }
 
-func (s *Service) resolveChannelRuntime(ctx context.Context, instance domain.ChannelInstance) (channelRuntimeChoice, error) {
-	configuredModelID := stringField(instance.Config, "model_id")
+func (s *Service) resolveChannelRuntime(ctx context.Context, instance domain.ChannelInstance, endpointKind ...string) (channelRuntimeChoice, error) {
+	runtimeConfig, _ := mapField(instance.Config, "runtime_default")
+	if len(endpointKind) > 0 {
+		if override, present := mapField(instance.Config, "runtime_"+endpointKind[0]); present && !boolField(override, "inherit") {
+			runtimeConfig = override
+		}
+	}
+	configuredModelID := stringField(runtimeConfig, "model_id")
+	configuredAccountID := stringField(runtimeConfig, "codex_account_id")
 	tasks, _ := s.store.ListTasks(ctx, "")
 	for _, task := range tasks {
 		if task.ReadOnly || task.ProjectID == instance.HostProjectID || s.store.IsManagedChannelTask(ctx, task.ID) {
@@ -1231,12 +1402,16 @@ func (s *Service) resolveChannelRuntime(ctx context.Context, instance domain.Cha
 			continue
 		}
 		model, modelErr := s.store.Model(ctx, snapshot.ModelID)
-		if modelErr != nil || !s.channelRuntimeModelAvailable(ctx, model, snapshot.CodexAccountID, snapshot.WireModel) {
+		accountID := snapshot.CodexAccountID
+		if configuredAccountID != "" {
+			accountID = configuredAccountID
+		}
+		if modelErr != nil || !s.channelRuntimeModelAvailable(ctx, model, accountID, snapshot.WireModel) {
 			continue
 		}
 		return channelRuntimeChoice{
-			Model: model, WireModel: snapshot.WireModel, CodexAccountID: snapshot.CodexAccountID,
-			ReasoningEffort: snapshot.ReasoningEffort, ProxyEnabled: snapshot.ProxyEnabled,
+			Model: model, WireModel: snapshot.WireModel, CodexAccountID: accountID,
+			ReasoningEffort: firstNonEmpty(stringField(runtimeConfig, "reasoning_effort"), snapshot.ReasoningEffort), ProxyEnabled: boolFieldDefault(runtimeConfig, "proxy_enabled", snapshot.ProxyEnabled),
 		}, nil
 	}
 
@@ -1251,20 +1426,125 @@ func (s *Service) resolveChannelRuntime(ctx context.Context, instance domain.Cha
 		}
 		if model.Source == domain.ModelSourceOfficial {
 			for _, account := range accounts {
+				if configuredAccountID != "" && account.ID != configuredAccountID {
+					continue
+				}
 				if !account.CredentialConfigured || account.Status != "ready" {
 					continue
 				}
 				if s.channelRuntimeModelAvailable(ctx, model, account.ID, model.WireModel) {
-					return channelRuntimeChoice{Model: model, WireModel: model.WireModel, CodexAccountID: account.ID, ReasoningEffort: model.DefaultEffort, ProxyEnabled: account.ProxyEnabled}, nil
+					return channelRuntimeChoice{Model: model, WireModel: model.WireModel, CodexAccountID: account.ID, ReasoningEffort: firstNonEmpty(stringField(runtimeConfig, "reasoning_effort"), model.DefaultEffort), ProxyEnabled: boolFieldDefault(runtimeConfig, "proxy_enabled", account.ProxyEnabled)}, nil
 				}
 			}
 			continue
 		}
 		if s.channelRuntimeModelAvailable(ctx, model, "", model.WireModel) {
-			return channelRuntimeChoice{Model: model, WireModel: model.WireModel, ReasoningEffort: model.DefaultEffort}, nil
+			return channelRuntimeChoice{Model: model, WireModel: model.WireModel, ReasoningEffort: firstNonEmpty(stringField(runtimeConfig, "reasoning_effort"), model.DefaultEffort), ProxyEnabled: boolField(runtimeConfig, "proxy_enabled")}, nil
 		}
 	}
 	return channelRuntimeChoice{}, fmt.Errorf("channel runtime model is unavailable")
+}
+
+func (s *Service) channelConversationTitle(ctx context.Context, instance domain.ChannelInstance, endpointKind string, envelope domain.ChannelInboundEnvelope) string {
+	clean := func(value, fallback string) string {
+		value = strings.Map(func(r rune) rune {
+			if r < 32 || r == 127 {
+				return -1
+			}
+			return r
+		}, strings.TrimSpace(value))
+		if value == "" {
+			value = fallback
+		}
+		if len([]rune(value)) > 60 {
+			value = string([]rune(value)[:60])
+		}
+		return value
+	}
+	if endpointKind == domain.ChannelEndpointAssistantDM {
+		ownerName := envelope.SenderDisplayName
+		if ownerName == "" {
+			if owner, err := s.store.OwnerByID(ctx, instance.OwnerID); err == nil {
+				ownerName = owner.Username
+			}
+		}
+		return "飞书私聊 · " + clean(ownerName, "Owner")
+	}
+	return "飞书群聊 · " + clean(envelope.ChatDisplayName, "未命名群聊") + " · " + clean(envelope.SenderDisplayName, "群成员")
+}
+
+func mapField(values map[string]any, key string) (map[string]any, bool) {
+	if values == nil {
+		return nil, false
+	}
+	value, ok := values[key]
+	if !ok || value == nil {
+		return nil, false
+	}
+	typed, ok := value.(map[string]any)
+	return typed, ok
+}
+
+func stringListField(values map[string]any, key string) ([]string, bool) {
+	if values == nil {
+		return nil, false
+	}
+	raw, present := values[key]
+	if !present {
+		return nil, false
+	}
+	result, seen := []string{}, map[string]bool{}
+	switch typed := raw.(type) {
+	case []any:
+		for _, item := range typed {
+			value := strings.TrimSpace(fmt.Sprint(item))
+			if value != "" && value != "<nil>" && !seen[value] {
+				seen[value] = true
+				result = append(result, value)
+			}
+		}
+	case []string:
+		for _, item := range typed {
+			value := strings.TrimSpace(item)
+			if value != "" && !seen[value] {
+				seen[value] = true
+				result = append(result, value)
+			}
+		}
+	}
+	return result, true
+}
+
+func sliceSet(values []string) map[string]bool {
+	result := map[string]bool{}
+	for _, value := range values {
+		result[value] = true
+	}
+	return result
+}
+
+func boolFieldDefault(values map[string]any, key string, fallback bool) bool {
+	if values == nil {
+		return fallback
+	}
+	value, ok := values[key].(bool)
+	if !ok {
+		return fallback
+	}
+	return value
+}
+
+func boolField(values map[string]any, key string) bool {
+	return boolFieldDefault(values, key, false)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func (s *Service) channelRuntimeModelAvailable(ctx context.Context, model domain.Model, accountID, wireModel string) bool {

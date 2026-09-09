@@ -19,6 +19,9 @@ import (
 	channeltypes "github.com/larksuite/oapi-sdk-go/v3/channel/types"
 	larkevent "github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
 	"github.com/larksuite/oapi-sdk-go/v3/scene/registration"
+	larkapplication "github.com/larksuite/oapi-sdk-go/v3/service/application/v6"
+	larkapplicationv7 "github.com/larksuite/oapi-sdk-go/v3/service/application/v7"
+	larkcontact "github.com/larksuite/oapi-sdk-go/v3/service/contact/v3"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
 )
@@ -77,6 +80,12 @@ type secretMessage struct {
 }
 
 var secretOutput sync.Mutex
+var displayNameCache sync.Map
+
+type cachedDisplayName struct {
+	value     string
+	expiresAt time.Time
+}
 
 func main() {
 	if len(os.Args) != 2 || os.Args[1] != "--channel-runtime" {
@@ -181,9 +190,11 @@ func registerApp(ctx context.Context, client *runtimeClient, item command) error
 		AppID:      stringValue(item.Payload, "app_id"),
 		AppPreset:  &registration.AppPreset{Name: stringValue(item.Payload, "app_name"), Desc: "AHA2 channel assistant"},
 		Addons: &registration.AppAddons{
-			Preset:    &preset,
-			Scopes:    registration.AppAddonsScopes{Tenant: []string{"im:message.p2p_msg:readonly", "im:message.group_at_msg:readonly", "im:message:send_as_bot", "cardkit:card:write"}},
-			Events:    registration.AppAddonsEvents{Items: registration.AppAddonsEventItems{Tenant: []string{"im.message.receive_v1"}}},
+			Preset: &preset,
+			Scopes: registration.AppAddonsScopes{Tenant: []string{
+				"im:message.p2p_msg:readonly", "im:message.group_at_msg:readonly", "im:message:send_as_bot", "im:chat:readonly", "contact:user.base:readonly", "cardkit:card:write",
+			}},
+			Events:    registration.AppAddonsEvents{Items: registration.AppAddonsEventItems{Tenant: []string{"im.message.receive_v1", "application.bot.menu_v6"}}},
 			Callbacks: registration.AppAddonsCallbacks{Items: []string{"card.action.trigger"}},
 		},
 		OnQRCode: func(info *registration.QRCodeInfo) {
@@ -226,11 +237,31 @@ func runChannel(ctx context.Context, runtime *runtimeClient, boot bootstrap) err
 	channel.OnReady(func() { _ = runtime.health(context.Background(), "ready", "") })
 	channel.OnReconnecting(func() { _ = runtime.health(context.Background(), "degraded", "feishu_reconnecting") })
 	channel.OnMessage(func(eventCtx context.Context, message *channeltypes.NormalizedMessage) error {
+		chatName, senderName := feishuDisplayNames(eventCtx, client, message)
 		resources := make([]map[string]any, 0, len(message.Resources))
 		for _, resource := range message.Resources {
 			resources = append(resources, map[string]any{"type": resource.Type, "file_key": resource.FileKey, "file_name": resource.FileName})
 		}
-		return runtime.inbound(eventCtx, map[string]any{"schema_version": 1, "request_id": message.EventID, "instance_id": runtime.instanceID, "external_event_id": message.EventID, "event_type": "message", "occurred_at": time.UnixMilli(message.CreateTimeMs).UTC(), "chat_type": message.ChatType, "external_chat_id": message.ChatID, "external_sender_id": message.UserID, "external_message_id": message.MessageID, "content": message.Content, "mentioned_bot": message.MentionedBot, "resources": resources})
+		return runtime.inbound(eventCtx, map[string]any{"schema_version": 1, "request_id": message.EventID, "instance_id": runtime.instanceID, "external_event_id": message.EventID, "event_type": "message", "occurred_at": time.UnixMilli(message.CreateTimeMs).UTC(), "chat_type": message.ChatType, "external_chat_id": message.ChatID, "external_sender_id": message.UserID, "external_message_id": message.MessageID, "content": message.Content, "chat_display_name": chatName, "sender_display_name": senderName, "mentioned_bot": message.MentionedBot, "resources": resources})
+	})
+	wsClient.EventHandler().OnP2BotMenuV6(func(eventCtx context.Context, event *larkapplication.P2BotMenuV6) error {
+		if event == nil || event.Event == nil || event.Event.Operator == nil || event.Event.Operator.OperatorId == nil || event.Event.Operator.OperatorId.OpenId == nil || event.Event.EventKey == nil || event.EventV2Base == nil || event.EventV2Base.Header == nil {
+			return nil
+		}
+		occurredAt := time.Now().UTC()
+		if event.Event.Timestamp != nil && *event.Event.Timestamp > 0 {
+			occurredAt = time.UnixMilli(*event.Event.Timestamp).UTC()
+		}
+		senderName := ""
+		if event.Event.Operator.OperatorName != nil {
+			senderName = *event.Event.Operator.OperatorName
+		}
+		return runtime.inbound(eventCtx, map[string]any{
+			"schema_version": 1, "request_id": event.EventV2Base.Header.EventID, "instance_id": runtime.instanceID,
+			"external_event_id": event.EventV2Base.Header.EventID, "event_type": "menu_action", "occurred_at": occurredAt,
+			"chat_type": "p2p", "external_sender_id": *event.Event.Operator.OperatorId.OpenId,
+			"sender_display_name": senderName, "menu_action": map[string]any{"key": *event.Event.EventKey},
+		})
 	})
 	channel.OnCardAction(func(eventCtx context.Context, action *channeltypes.CardActionEvent) error {
 		messageID, chatID := action.MessageID, action.ChatID
@@ -249,8 +280,85 @@ func runChannel(ctx context.Context, runtime *runtimeClient, boot bootstrap) err
 		return runtime.inbound(eventCtx, map[string]any{"schema_version": 1, "request_id": action.EventID, "instance_id": runtime.instanceID, "external_event_id": action.EventID, "event_type": "card_action", "occurred_at": time.Now().UTC(), "chat_type": "p2p", "external_chat_id": chatID, "external_sender_id": action.Operator.OpenID, "external_message_id": messageID, "card_action": value})
 	})
 	go runtime.deliveryLoop(ctx, client)
-	go runtime.commandLoop(ctx)
+	go runtime.commandLoop(ctx, client, boot.AppID)
 	return channel.Start(ctx)
+}
+
+func feishuDisplayNames(ctx context.Context, client *lark.Client, message *channeltypes.NormalizedMessage) (string, string) {
+	chatName, senderName := "", ""
+	if message == nil {
+		return chatName, senderName
+	}
+	lookupCtx, cancel := context.WithTimeout(ctx, 750*time.Millisecond)
+	defer cancel()
+	type result struct{ kind, value string }
+	results := make(chan result, 2)
+	pending := 0
+	if message.UserID != "" {
+		if cached := cachedName("user:" + message.UserID); cached != "" {
+			senderName = cached
+		} else {
+			pending++
+			go func() {
+				value := ""
+				request := larkcontact.NewGetUserReqBuilder().UserId(message.UserID).UserIdType("open_id").Build()
+				if response, err := client.Contact.V3.User.Get(lookupCtx, request); err == nil && response.Success() && response.Data != nil && response.Data.User != nil && response.Data.User.Name != nil {
+					value = strings.TrimSpace(*response.Data.User.Name)
+				}
+				results <- result{kind: "user", value: value}
+			}()
+		}
+	}
+	if message.ChatType == "group" && message.ChatID != "" {
+		if cached := cachedName("chat:" + message.ChatID); cached != "" {
+			chatName = cached
+		} else {
+			pending++
+			go func() {
+				value := ""
+				request := larkim.NewGetChatReqBuilder().ChatId(message.ChatID).UserIdType("open_id").Build()
+				if response, err := client.Im.V1.Chat.Get(lookupCtx, request); err == nil && response.Success() && response.Data != nil && response.Data.Name != nil {
+					value = strings.TrimSpace(*response.Data.Name)
+				}
+				results <- result{kind: "chat", value: value}
+			}()
+		}
+	}
+	for pending > 0 {
+		select {
+		case item := <-results:
+			pending--
+			if item.kind == "user" {
+				senderName = item.value
+				cacheName("user:"+message.UserID, item.value)
+			} else {
+				chatName = item.value
+				cacheName("chat:"+message.ChatID, item.value)
+			}
+		case <-lookupCtx.Done():
+			return chatName, senderName
+		}
+	}
+	return chatName, senderName
+}
+
+func cachedName(key string) string {
+	raw, ok := displayNameCache.Load(key)
+	if !ok {
+		return ""
+	}
+	item, ok := raw.(cachedDisplayName)
+	if !ok || !item.expiresAt.After(time.Now()) {
+		displayNameCache.Delete(key)
+		return ""
+	}
+	return item.value
+}
+
+func cacheName(key, value string) {
+	if value != "" {
+		displayNameCache.Store(key, cachedDisplayName{value: value, expiresAt: time.Now().Add(15 * time.Minute)})
+	}
 }
 
 func newFeishuClients(boot bootstrap) (*lark.Client, *larkws.Client) {
@@ -276,7 +384,7 @@ func (c *runtimeClient) inbound(ctx context.Context, payload map[string]any) err
 	return c.request(ctx, http.MethodPost, "/api/channel-runtime/v1/instances/"+c.instanceID+"/inbound-events", payload, &map[string]any{})
 }
 
-func (c *runtimeClient) commandLoop(ctx context.Context) {
+func (c *runtimeClient) commandLoop(ctx context.Context, client *lark.Client, appID string) {
 	for ctx.Err() == nil {
 		commands, err := c.claimCommands(ctx)
 		if err != nil {
@@ -287,6 +395,12 @@ func (c *runtimeClient) commandLoop(ctx context.Context) {
 			switch item.Kind {
 			case "verify_installation":
 				_ = c.complete(ctx, item, true, map[string]any{"status": "ready"}, "")
+			case "configure_menu":
+				if err := configureFeishuMenu(ctx, client, appID); err != nil {
+					_ = c.complete(ctx, item, false, map[string]any{}, "menu_configuration_failed")
+					continue
+				}
+				_ = c.complete(ctx, item, true, map[string]any{"status": "publish_submitted", "menu_version": 1}, "")
 			case "stop_runtime":
 				_ = c.complete(ctx, item, true, map[string]any{"status": "stopping"}, "")
 				return
@@ -296,6 +410,64 @@ func (c *runtimeClient) commandLoop(ctx context.Context) {
 		}
 		time.Sleep(time.Second)
 	}
+}
+
+func configureFeishuMenu(ctx context.Context, client *lark.Client, appID string) error {
+	scopeNames := []string{"im:chat:readonly", "contact:user.base:readonly"}
+	scopes := make([]*larkapplicationv7.AppConfigScopeItem, 0, len(scopeNames))
+	for _, name := range scopeNames {
+		scopes = append(scopes, larkapplicationv7.NewAppConfigScopeItemBuilder().ScopeName(name).TokenType("tenant").Build())
+	}
+	configBody := larkapplicationv7.NewPatchApplicationConfigReqBodyBuilder().
+		Scope(larkapplicationv7.NewAppConfigScopeBuilder().AddScopes(scopes).Build()).
+		Event(larkapplicationv7.NewAppConfigEventBuilder().AddEvents([]string{"application.bot.menu_v6"}).Build()).Build()
+	configRequest := larkapplicationv7.NewPatchApplicationConfigReqBuilder().AppId(appID).UserIdType("open_id").Body(configBody).Build()
+	configResponse, err := client.Application.V7.ApplicationConfig.Patch(ctx, configRequest)
+	if err != nil || !configResponse.Success() {
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("feishu application config rejected: %d", configResponse.Code)
+	}
+	menu := func(id, parent, label string, sort, action int, eventKey string) *larkapplicationv7.BotMenuNode {
+		builder := larkapplicationv7.NewBotMenuNodeBuilder().MenuId(id).Sort(sort).DefaultName(label).MenuContentType(action)
+		if parent != "" {
+			builder.ParentMenuId(parent)
+		}
+		if eventKey != "" {
+			builder.EventKey(eventKey)
+		}
+		return builder.Build()
+	}
+	menus := []*larkapplicationv7.BotMenuNode{
+		menu("aha_project", "", "项目", 1, 3, ""),
+		menu("aha_project_query", "aha_project", "查询项目", 1, 2, "aha.project.query"),
+		menu("aha_workspace_query", "aha_project", "查询 Workspace", 2, 2, "aha.workspace.query"),
+		menu("aha_task", "", "任务", 2, 3, ""),
+		menu("aha_task_query", "aha_task", "查询任务", 1, 2, "aha.task.query"),
+		menu("aha_task_create", "aha_task", "创建任务", 2, 2, "aha.task.create"),
+	}
+	abilityBody := larkapplicationv7.NewPatchApplicationAbilityReqBodyBuilder().Bot(
+		larkapplicationv7.NewAppAbilityBotBuilder().Enable(true).BotMenuEnable(true).BotMenus(menus).BotMenuDisplayStrategy(1).Build(),
+	).Build()
+	abilityRequest := larkapplicationv7.NewPatchApplicationAbilityReqBuilder().AppId(appID).Body(abilityBody).Build()
+	abilityResponse, err := client.Application.V7.ApplicationAbility.Patch(ctx, abilityRequest)
+	if err != nil || !abilityResponse.Success() {
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("feishu application ability rejected: %d", abilityResponse.Code)
+	}
+	publishBody := larkapplicationv7.NewCreateApplicationPublishReqBodyBuilder().MobileDefaultAbility("bot").PcDefaultAbility("bot").Remark("Configure AHA channel menu").Changelog("Configure Owner menu and channel display permissions").Build()
+	publishRequest := larkapplicationv7.NewCreateApplicationPublishReqBuilder().AppId(appID).Body(publishBody).Build()
+	publishResponse, err := client.Application.V7.ApplicationPublish.Create(ctx, publishRequest)
+	if err != nil || !publishResponse.Success() {
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("feishu application publish rejected: %d", publishResponse.Code)
+	}
+	return nil
 }
 
 func (c *runtimeClient) deliveryLoop(ctx context.Context, client *lark.Client) {
@@ -347,8 +519,15 @@ func deliveryBackoffMS(key string, attempt int) int64 {
 }
 
 func sendDelivery(ctx context.Context, client *lark.Client, item delivery) (string, string, error) {
-	chatID := item.Target["chat_id"]
-	if chatID == "" {
+	receiveID := item.Target["receive_id"]
+	receiveIDType := item.Target["receive_id_type"]
+	if receiveID == "" {
+		receiveID = item.Target["chat_id"]
+	}
+	if receiveIDType == "" {
+		receiveIDType = "chat_id"
+	}
+	if receiveID == "" {
 		return "", "", errors.New("missing target chat")
 	}
 	msgType, content := renderDelivery(item.SemanticPayload)
@@ -375,7 +554,7 @@ func sendDelivery(ctx context.Context, client *lark.Client, item delivery) (stri
 		}
 		return *response.Data.MessageId, response.RequestId(), nil
 	}
-	request := larkim.NewCreateMessageReqBuilder().ReceiveIdType("chat_id").Body(larkim.NewCreateMessageReqBodyBuilder().ReceiveId(chatID).MsgType(msgType).Content(content).Uuid(uuid).Build()).Build()
+	request := larkim.NewCreateMessageReqBuilder().ReceiveIdType(receiveIDType).Body(larkim.NewCreateMessageReqBodyBuilder().ReceiveId(receiveID).MsgType(msgType).Content(content).Uuid(uuid).Build()).Build()
 	response, err := client.Im.V1.Message.Create(ctx, request)
 	if err != nil {
 		return "", "", err

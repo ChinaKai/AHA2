@@ -8,11 +8,12 @@ $repo = [IO.Path]::GetFullPath($RepoPath)
 $missingServer = Join-Path ([IO.Path]::GetTempPath()) ("aha2-server-validation-" + [Guid]::NewGuid().ToString("N") + ".exe")
 $missingTray = Join-Path ([IO.Path]::GetTempPath()) ("aha2-tray-validation-" + [Guid]::NewGuid().ToString("N") + ".exe")
 & (Join-Path $repo "scripts\build-windows-installer.ps1") -RepoPath $repo -InputExe $missingServer -InputTrayExe $missingTray -ValidateOnly
+& (Join-Path $repo "scripts\build-windows-installer.ps1") -RepoPath $repo -InputExe $missingServer -InputTrayExe $missingTray -PerUser -ValidateOnly
 
 $installerPath = Join-Path $repo "installer\windows\AHA2.iss"
 $installer = Get-Content -Raw -Encoding UTF8 -LiteralPath $installerPath
 foreach ($contract in @(
-    "PrivilegesRequired=admin", "ArchitecturesAllowed=x64compatible", "CurUninstallStepChanged", "DeinitializeSetup",
+	"PrivilegesRequired=admin", "PrivilegesRequired=lowest", "PerUserInstall", "AHA2-Setup-User-x64", "{localappdata}\Programs\AHA2", "ArchitecturesAllowed=x64compatible", "CurUninstallStepChanged", "DeinitializeSetup",
     '[Icons]', '[Run]', '[Files]', '[InstallDelete]', 'Type: files; Name: "{app}\Run-AHA2User.vbs"', 'CreateInputDirPage', 'CreateInputOptionPage', 'CreateInputQueryPage',
     'RegisterPreviousData', 'remoteip=localsubnet profile=private', '{code:LocalManagementURL}', '{commonappdata}\AHA2',
     'DestName: "aha2.exe"', 'DestName: "aha2-tray.exe"', 'TrayParameters', '--server', '--listen', '--data-dir',
@@ -97,6 +98,15 @@ try {
 }
 & (Join-Path $repo "installer\windows\Prepare-AHA2DataDir.ps1") -DataDir (Join-Path ([IO.Path]::GetTempPath()) "AHA2 User Data") -ValidateOnly
 
+$userDeployPath = Join-Path $repo "scripts\deploy-windows-user.ps1"
+$userDeploy = Get-Content -Raw -Encoding UTF8 -LiteralPath $userDeployPath
+foreach ($contract in @("Per-user install directory must stay under LOCALAPPDATA", "-PerUser", "ElevationRequired=`$false", "AHA2-Setup-User-x64.exe", "Wait-AHA2Health", "Get-FileHash", "AHA2 User")) {
+    if (-not $userDeploy.Contains($contract)) {
+        throw "Per-user deployment contract is missing: $contract"
+    }
+}
+& $userDeployPath -RepoPath $repo -InputExe (Join-Path $repo "go.mod") -InputTrayExe (Join-Path $repo "go.mod") -InstallDir (Join-Path $env:LOCALAPPDATA "Programs\AHA2-validation") -DataDir (Join-Path ([IO.Path]::GetTempPath()) "AHA2 User Data") -ValidateOnly
+
 $unsafeListenRejected = $false
 try {
     & $taskScriptPath -TrayExecutable (Join-Path $repo "go.mod") -ServerExecutable (Join-Path $repo "go.mod") -Listen '127.0.0.1:8766"' -DataDir $repo -ValidateOnly
@@ -142,7 +152,7 @@ foreach ($forbidden in @("delayed-auto Windows", "aha2.exe service run --listen"
 $workflow = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $repo ".github\workflows\release.yml")
 foreach ($contract in @(
     "runs-on: windows-latest", "cmd\aha-tray", "aha2-tray.exe", "-H windowsgui", "build-windows-installer.ps1", "-InputTrayExe",
-    "AHA2-Setup-x64.exe", "build-linux-packages.sh", "build-linux-sync-packages.sh", "aha2-sync_", "build-macos-packages.sh",
+	"AHA2-Setup-x64.exe", "AHA2-Setup-User-x64.exe", "build-feishu-plugin.sh", "build-linux-packages.sh", "build-linux-sync-packages.sh", "aha2-sync_", "build-macos-packages.sh",
     "ubuntu-24.04-arm", "SHA256SUMS", "merge-multiple: true", "pattern: package-*", "main.version=", "gh release create"
 )) {
     if (-not $workflow.Contains($contract)) {

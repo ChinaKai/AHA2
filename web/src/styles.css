@@ -509,6 +509,12 @@ dd { margin: 3px 0 0; overflow-wrap: anywhere; font-size: 11px; }
 .channel-instance-card details { border-top: 1px solid var(--line); padding-top: 8px; }
 .channel-instance-card details summary { cursor: pointer; color: var(--muted); font-size: 9px; }
 .channel-instance-card form { display: grid; gap: 8px; margin-top: 8px; }
+.channel-instance-settings form, .channel-runtime-editor { display: grid; gap: 10px; }
+.channel-instance-settings fieldset { margin: 0; padding: 10px; border: 1px solid var(--line); border-radius: 6px; }
+.channel-instance-settings legend { padding: 0 6px; color: var(--muted); font-size: 10px; font-weight: 700; }
+.channel-checkbox-list { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 7px 12px; max-height: 220px; overflow: auto; }
+.channel-check { display: flex; align-items: center; gap: 7px; margin: 0; font-weight: 500; }
+.channel-check input { width: 15px; height: 15px; margin: 0; }
 .channel-create-form { display: grid; grid-template-columns: minmax(160px,220px) minmax(220px,1fr) auto; align-items: end; gap: 10px; padding: 0 14px 14px; }
 .channel-empty { margin: 0 14px 14px; }
 .channel-onboarding-dialog { width: min(520px,calc(100vw - 24px)); }
@@ -529,6 +535,7 @@ dd { margin: 3px 0 0; overflow-wrap: anywhere; font-size: 11px; }
   .channel-provider-grid, .channel-instance-grid { grid-template-columns: minmax(0,1fr); padding: 0 10px 10px; }
   .channel-create-form { grid-template-columns: minmax(0,1fr); padding: 0 10px 10px; }
   .channel-instance-card dl { grid-template-columns: minmax(0,1fr); }
+	.channel-checkbox-list { grid-template-columns: minmax(0,1fr); }
   .channel-instance-card dl div { border-right: 0; border-bottom: 1px solid var(--line); }
   .channel-instance-card dl div:last-child { border-bottom: 0; }
 }

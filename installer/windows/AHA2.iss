@@ -17,18 +17,34 @@
 #define FirewallRuleName "AHA2 Local Control Plane"
 
 [Setup]
+#ifdef PerUserInstall
+AppId={{D23028A1-597D-4D7B-BB12-E29A58AC53A8}
+#else
 AppId={{6F51A727-6446-4A71-83C8-6A6E8FB61192}
+#endif
 AppName={#AppName}
 AppVersion={#MyAppVersion}
 AppPublisher=AHA2
+#ifdef PerUserInstall
+DefaultDirName={localappdata}\Programs\AHA2
+#else
 DefaultDirName={autopf}\AHA2
+#endif
 DefaultGroupName=AHA2
 DisableProgramGroupPage=yes
+#ifdef PerUserInstall
+PrivilegesRequired=lowest
+#else
 PrivilegesRequired=admin
+#endif
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir={#OutputDir}
+#ifdef PerUserInstall
+OutputBaseFilename=AHA2-Setup-User-x64
+#else
 OutputBaseFilename=AHA2-Setup-x64
+#endif
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
@@ -87,10 +103,14 @@ end;
 
 function SelectedListenHost(): String;
 begin
+#ifdef PerUserInstall
+  Result := '127.0.0.1';
+#else
   if ListenModePage.SelectedValueIndex = 0 then
     Result := '127.0.0.1'
   else
     Result := Trim(LANPage.Values[0]);
+#endif
 end;
 
 function SelectedListenAddress(): String;
@@ -204,7 +224,11 @@ begin
     '数据库、配置、密钥和日志将保存在此目录。升级和卸载不会自动删除该目录。',
     False, SetupMessage(msgNewFolderName));
   DataDirPage.Add('');
+#ifdef PerUserInstall
+  DataDirPage.Values[0] := ExpandConstant('{param:DATADIR|' + GetPreviousData('DataDir', ExpandConstant('{localappdata}\AHA2')) + '}');
+#else
   DataDirPage.Values[0] := GetPreviousData('DataDir', ExpandConstant('{commonappdata}\AHA2'));
+#endif
 
   ListenModePage := CreateInputOptionPage(DataDirPage.ID,
     '选择访问范围', '谁可以访问 AHA2？',
@@ -250,7 +274,11 @@ end;
 
 function ShouldSkipPage(PageID: Integer): Boolean;
 begin
+#ifdef PerUserInstall
+  Result := (PageID = ListenModePage.ID) or (PageID = LANPage.ID) or (PageID = FirewallPage.ID);
+#else
   Result := (not IsLANMode()) and ((PageID = LANPage.ID) or (PageID = FirewallPage.ID));
+#endif
 end;
 
 function NextButtonClick(CurPageID: Integer): Boolean;
@@ -421,8 +449,8 @@ var
   ResultCode: Integer;
   Script: String;
 begin
-  { AHA2 is a machine-level installation with one login task. Stop both the
-    current and any previous-install-path runtimes before replacing files. }
+  { AHA2 has one login task. Stop both the current and any previous-install-path
+    runtimes before replacing files. }
   Script := '$items=@(Get-Process -Name ''aha2-tray'',''aha2'' -ErrorAction SilentlyContinue);' +
     'if($items.Count -eq 0){exit 3};$items | Stop-Process -Force -ErrorAction SilentlyContinue;exit 0';
   Result := Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
@@ -452,6 +480,7 @@ begin
       RemoveAHA2UserTask();
     RaiseException('无法为原始登录用户注册 AHA2 登录任务。');
   end;
+#ifndef PerUserInstall
   if not Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
     PrepareDataDirParameters(''), ExpandConstant('{app}'), SW_HIDE,
     ewWaitUntilTerminated, ResultCode) or (ResultCode <> 0) then
@@ -460,12 +489,16 @@ begin
       RemoveAHA2UserTask();
     RaiseException('无法为原始登录用户准备 AHA2 数据目录权限。');
   end;
+#endif
 end;
 
 procedure ConfigureFirewall();
 var
   ResultCode: Integer;
 begin
+#ifdef PerUserInstall
+  Exit;
+#else
   Exec(ExpandConstant('{sys}\netsh.exe'),
     'advfirewall firewall delete rule name="' + AHA2FirewallRuleName + '"',
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
@@ -476,6 +509,7 @@ begin
       ' remoteip=localsubnet profile=private', '', SW_HIDE,
       ewWaitUntilTerminated, ResultCode) or (ResultCode <> 0) then
       RaiseException('无法创建 AHA2 Windows 防火墙规则。');
+#endif
 end;
 
 procedure DisableAndStopLegacyAHA2Service(Required: Boolean);
@@ -505,7 +539,9 @@ begin
   if CurStep = ssInstall then
   begin
     UserTaskWasPresent := UserTaskExists();
+#ifndef PerUserInstall
     DisableAndStopLegacyAHA2Service(True);
+#endif
     StopAHA2UserTask();
     UserProcessWasRunning := StopInstalledUserProcesses();
   end
@@ -516,7 +552,9 @@ begin
     if not RunScheduledTask('/Run /TN "' + AHA2UserTaskName + '"') then
       RaiseException('无法启动 AHA2 登录任务。');
     WaitForAHA2Health();
+#ifndef PerUserInstall
     RemoveLegacyAHA2Service();
+#endif
     InstallCommitted := True;
   end;
 end;
@@ -548,9 +586,11 @@ begin
   begin
     RemoveAHA2UserTask();
     StopInstalledUserProcesses();
+#ifndef PerUserInstall
     RemoveLegacyAHA2Service();
     Exec(ExpandConstant('{sys}\netsh.exe'),
       'advfirewall firewall delete rule name="' + AHA2FirewallRuleName + '"',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+#endif
   end;
 end;

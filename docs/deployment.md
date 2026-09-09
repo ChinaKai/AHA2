@@ -91,6 +91,17 @@ Workspace“测试连接”自动保存从目标执行环境验证成功的地�
 完成页可以选择打开 `http://127.0.0.1:8766`。Release 中的统一 `SHA256SUMS`
 可用于校验下载完整性。
 
+## Windows per-user 开发安装与自动部署
+
+频繁本地开发使用 `AHA2-Setup-User-x64.exe`。它以最低权限安装到当前用户的
+`LOCALAPPDATA\Programs\AHA2`，默认数据目录为 `LOCALAPPDATA\AHA2`，只监听 loopback，
+继续使用唯一的 `AHA2 User` 登录任务，不创建服务或防火墙规则。安装和后续升级均不请求 UAC。
+
+从已有机器级安装迁移时，可在首次 per-user 安装中显式复用用户已有写权限的数据目录；安装器会
+把唯一登录任务切换到用户级二进制。旧机器级文件不会被无权限删除，可在确认新实例健康后单独执行
+一次管理员卸载。后续开发部署使用 `scripts/deploy-windows-user.ps1`，脚本会备份运行数据和旧用户级
+二进制、构建 per-user 安装包、升级、重启并核对健康与哈希。
+
 ## macOS 机器级安装
 
 macOS 标准安装包按架构提供：

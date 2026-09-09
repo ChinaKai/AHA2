@@ -81,13 +81,17 @@ jobs:
         shell: powershell
         run: |
           .\scripts\test-windows-installer.ps1 -RepoPath $PWD
+          bash -lc 'GO_BIN=go bash scripts/build-feishu-plugin.sh windows/amd64'
           .\scripts\build-windows-installer.ps1 -RepoPath $PWD -InputExe .\dist\package-input\aha2.exe -InputTrayExe .\dist\package-input\aha2-tray.exe -OutputDir .\dist\release -Version $env:GITHUB_REF_NAME
+          .\scripts\build-windows-installer.ps1 -RepoPath $PWD -InputExe .\dist\package-input\aha2.exe -InputTrayExe .\dist\package-input\aha2-tray.exe -OutputDir .\dist\release -Version $env:GITHUB_REF_NAME -PerUser
 
       - name: Upload Windows package
         uses: actions/upload-artifact@v4
         with:
           name: package-windows-x64
-          path: dist/release/AHA2-Setup-x64.exe
+          path: |
+            dist/release/AHA2-Setup-x64.exe
+            dist/release/AHA2-Setup-User-x64.exe
           if-no-files-found: error
 
   build-linux-packages:
@@ -226,6 +230,7 @@ jobs:
           fi
           for package in \
             AHA2-Setup-x64.exe \
+            AHA2-Setup-User-x64.exe \
             "aha2_${version}_amd64.deb" "aha2_${version}_arm64.deb" \
             "aha2-${version}-1.x86_64.rpm" "aha2-${version}-1.aarch64.rpm" \
             "aha2-sync_${version}_amd64.deb" "aha2-sync_${version}_arm64.deb" \

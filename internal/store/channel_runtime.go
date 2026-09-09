@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
@@ -438,11 +439,21 @@ func (s *Store) ChannelDeliveryTarget(ctx context.Context, conversationID string
 	if err := s.db.QueryRowContext(ctx, `SELECT external_chat_id,external_sender_id FROM channel_conversations WHERE id=? AND status='active'`, conversationID).Scan(&chatID, &senderID); err != nil {
 		return nil, err
 	}
-	target := map[string]string{"chat_id": chatID, "sender_id": senderID}
+	target := map[string]string{"sender_id": senderID}
+	if strings.HasPrefix(chatID, "open_id:") {
+		target["receive_id_type"] = "open_id"
+		target["receive_id"] = strings.TrimPrefix(chatID, "open_id:")
+	} else {
+		target["receive_id_type"] = "chat_id"
+		target["receive_id"] = chatID
+		target["chat_id"] = chatID
+	}
 	var payloadJSON string
 	if err := s.db.QueryRowContext(ctx, `SELECT normalized_payload_json FROM channel_inbox_dedup WHERE conversation_id=? AND state='processed' ORDER BY received_at DESC LIMIT 1`, conversationID).Scan(&payloadJSON); err == nil {
 		payload := decodeJSON(payloadJSON, map[string]any{})
-		target["reply_message_id"] = fmt.Sprint(payload["external_message_id"])
+		if messageID := strings.TrimSpace(fmt.Sprint(payload["external_message_id"])); messageID != "" && messageID != "<nil>" {
+			target["reply_message_id"] = messageID
+		}
 	}
 	return target, nil
 }

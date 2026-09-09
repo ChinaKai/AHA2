@@ -1695,7 +1695,7 @@ function render(): void {
   } else {
     const views: Record<View, () => string> = {
       projects: projectsView,
-      channels: () => shell(renderChannels(state.channelProviders, state.channelInstances)),
+		channels: () => shell(renderChannels(state.channelProviders, state.channelInstances, {models: state.models, accounts: state.codexAccounts, projects: state.projects, workspaces: state.workspaces, knowledge: state.knowledge, libraries: state.knowledgeLibraries})),
       models: modelsView,
       tasks: tasksView,
       knowledge: () => shell(renderKnowledgeWorkspace({
@@ -1830,6 +1830,7 @@ function bindCommon(): void {
     flushDeferredRender,
   });
   bindChannels({
+		context: {models: state.models, accounts: state.codexAccounts, projects: state.projects, workspaces: state.workspaces, knowledge: state.knowledge, libraries: state.knowledgeLibraries},
     refresh: async () => {
       const [providers, instances, projects, workspaces] = await Promise.all([
         api.channelProviders(), api.channelInstances(), api.projects(), api.workspaces(),

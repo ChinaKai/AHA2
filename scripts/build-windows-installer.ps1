@@ -8,6 +8,7 @@ param(
     [string]$OutputDir = "",
     [string]$Version = "dev",
     [string]$ISCCPath = "",
+	[switch]$PerUser,
     [switch]$ValidateOnly
 )
 
@@ -130,7 +131,8 @@ if ($ValidateOnly) {
     $serverState = if (Test-Path -LiteralPath $inputPath -PathType Leaf) {"found"} else {"not present"}
     $trayState = if (Test-Path -LiteralPath $trayInputPath -PathType Leaf) {"found"} else {"not present"}
 	$feishuState = if ($feishuPluginPath -and (Test-Path -LiteralPath $feishuPluginPath -PathType Leaf) -and (Test-Path -LiteralPath $feishuManifestPath -PathType Leaf)) { "found" } else { "not bundled" }
-	Write-Output "Installer definition valid; server input $serverState; tray input $trayState; Feishu plugin $feishuState."
+	$mode = if ($PerUser) { "per-user" } else { "per-machine" }
+	Write-Output "Installer definition valid ($mode); server input $serverState; tray input $trayState; Feishu plugin $feishuState."
     exit 0
 }
 
@@ -188,17 +190,21 @@ if ($feishuPluginPath) {
 	$compilerArgs += "/DSourceFeishuPlugin=$feishuPluginPath"
 	$compilerArgs += "/DSourceFeishuManifest=$feishuManifestPath"
 }
+if ($PerUser) {
+	$compilerArgs += "/DPerUserInstall=1"
+}
 & $ISCCPath @compilerArgs $iss
 if ($LASTEXITCODE -ne 0) {
     throw "Inno Setup compilation failed with exit code $LASTEXITCODE."
 }
 
-$setup = Join-Path $outputPath "AHA2-Setup-x64.exe"
+$setupName = if ($PerUser) { "AHA2-Setup-User-x64.exe" } else { "AHA2-Setup-x64.exe" }
+$setup = Join-Path $outputPath $setupName
 if (-not (Test-Path -LiteralPath $setup -PathType Leaf)) {
     throw "Expected installer was not produced: $setup"
 }
 $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $setup).Hash.ToLowerInvariant()
 $hashFile = "$setup.sha256"
-[IO.File]::WriteAllText($hashFile, "$hash  AHA2-Setup-x64.exe`n", [Text.UTF8Encoding]::new($false))
+[IO.File]::WriteAllText($hashFile, "$hash  $setupName`n", [Text.UTF8Encoding]::new($false))
 Write-Output "Installer: $setup"
 Write-Output "SHA256: $hashFile"

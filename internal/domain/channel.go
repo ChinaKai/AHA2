@@ -215,9 +215,12 @@ type ChannelInboundEnvelope struct {
 	ExternalSenderID  string           `json:"external_sender_id"`
 	ExternalMessageID string           `json:"external_message_id"`
 	Content           string           `json:"content"`
+	ChatDisplayName   string           `json:"chat_display_name,omitempty"`
+	SenderDisplayName string           `json:"sender_display_name,omitempty"`
 	MentionedBot      bool             `json:"mentioned_bot"`
 	Resources         []map[string]any `json:"resources,omitempty"`
 	CardAction        map[string]any   `json:"card_action,omitempty"`
+	MenuAction        map[string]any   `json:"menu_action,omitempty"`
 }
 
 type ChannelSourceEvent struct {
