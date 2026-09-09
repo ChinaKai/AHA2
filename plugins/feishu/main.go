@@ -350,15 +350,74 @@ func runChannel(ctx context.Context, runtime *runtimeClient, boot bootstrap) err
 		}
 		value := map[string]any{"provider_message_id": messageID}
 		for key, item := range action.Action.Value {
-			if key == "action_id" || key == "decision" {
+			if key == "action_id" || key == "decision" || key == "kind" || key == "menu_action" {
 				value[key] = item
 			}
+		}
+		formValues := normalizedCardFormValues(action.Action.FormValue)
+		if len(formValues) > 0 {
+			value["form_values"] = formValues
 		}
 		return runtime.inbound(eventCtx, map[string]any{"schema_version": 1, "request_id": action.EventID, "instance_id": runtime.instanceID, "external_event_id": action.EventID, "event_type": "card_action", "occurred_at": time.Now().UTC(), "chat_type": "p2p", "external_chat_id": chatID, "external_sender_id": action.Operator.OpenID, "external_message_id": messageID, "card_action": value})
 	})
 	go runtime.deliveryLoop(ctx, client)
 	go runtime.commandLoop(ctx, client, boot)
 	return channel.Start(ctx)
+}
+
+func normalizedCardFormValues(values map[string]any) map[string]any {
+	result := map[string]any{}
+	var collect func(map[string]any, int)
+	collect = func(items map[string]any, depth int) {
+		if depth > 3 {
+			return
+		}
+		for key, item := range items {
+			name := strings.TrimPrefix(key, "aha_menu_control.")
+			switch name {
+			case "project_id", "workspace_id", "status", "keyword", "title", "request":
+				limit := 4000
+				if name != "request" {
+					limit = 300
+				}
+				if normalized := cardFormScalar(item, limit); normalized != "" {
+					result[name] = normalized
+				}
+			default:
+				if nested, ok := item.(map[string]any); ok {
+					collect(nested, depth+1)
+				}
+			}
+		}
+	}
+	collect(values, 0)
+	return result
+}
+
+func cardFormScalar(value any, limit int) string {
+	if nested, ok := value.(map[string]any); ok {
+		for _, key := range []string{"value", "text", "content"} {
+			if item, exists := nested[key]; exists {
+				value = item
+				break
+			}
+		}
+	}
+	if items, ok := value.([]any); ok {
+		if len(items) == 0 {
+			return ""
+		}
+		value = items[0]
+	}
+	result := strings.TrimSpace(fmt.Sprint(value))
+	if result == "" || result == "<nil>" {
+		return ""
+	}
+	runes := []rune(result)
+	if limit > 0 && len(runes) > limit {
+		result = string(runes[:limit])
+	}
+	return result
 }
 
 func feishuDisplayNames(ctx context.Context, client *lark.Client, message *channeltypes.NormalizedMessage) (string, string) {
@@ -702,6 +761,11 @@ func sendDelivery(ctx context.Context, client *lark.Client, item delivery) (stri
 }
 
 func renderDelivery(payload map[string]any) (string, string) {
+	if stringValue(payload, "kind") == "menu_card" {
+		card := renderMenuCard(payload)
+		raw, _ := json.Marshal(card)
+		return "interactive", string(raw)
+	}
 	if stringValue(payload, "kind") == "confirmation" {
 		actionID := stringValue(payload, "action_id")
 		preview, _ := json.MarshalIndent(payload["preview"], "", "  ")
@@ -735,6 +799,97 @@ func renderDelivery(payload map[string]any) (string, string) {
 	}
 	raw, _ := json.Marshal(map[string]string{"text": text})
 	return "text", string(raw)
+}
+
+func renderMenuCard(payload map[string]any) map[string]any {
+	title := stringValue(payload, "title")
+	if title == "" {
+		title = "AHA"
+	}
+	template := stringValue(payload, "template")
+	if template == "" {
+		template = "blue"
+	}
+	elements := []any{}
+	if markdown := stringValue(payload, "markdown"); markdown != "" {
+		elements = append(elements, map[string]any{"tag": "markdown", "content": markdown})
+	}
+	fields := mapList(payload["fields"])
+	if len(fields) > 0 {
+		formElements := []any{}
+		for _, field := range fields {
+			name, label, fieldType := stringValue(field, "name"), stringValue(field, "label"), stringValue(field, "type")
+			if name == "" || label == "" {
+				continue
+			}
+			formElements = append(formElements, map[string]any{"tag": "markdown", "content": "**" + label + "**"})
+			switch fieldType {
+			case "select":
+				options := []any{}
+				for _, option := range mapList(field["options"]) {
+					value, optionLabel := stringValue(option, "value"), stringValue(option, "label")
+					if value != "" && optionLabel != "" {
+						options = append(options, map[string]any{"text": map[string]any{"tag": "plain_text", "content": optionLabel}, "value": value})
+					}
+				}
+				if len(options) == 0 {
+					options = append(options, map[string]any{"text": map[string]any{"tag": "plain_text", "content": "无可用选项"}, "value": ""})
+				}
+				formElements = append(formElements, map[string]any{"tag": "select_static", "element_id": name, "name": name, "placeholder": map[string]any{"tag": "plain_text", "content": label}, "options": options})
+			case "text", "multiline":
+				input := map[string]any{"tag": "input", "element_id": name, "name": name, "placeholder": map[string]any{"tag": "plain_text", "content": label}, "max_length": numericInt(field["max_length"], 1000)}
+				if fieldType == "multiline" {
+					input["input_type"] = "multiline_text"
+				}
+				formElements = append(formElements, input)
+			}
+		}
+		submit := mapValue(payload["submit"])
+		value := mapValue(submit["value"])
+		label := stringValue(submit, "label")
+		if label == "" {
+			label = "提交"
+		}
+		button := map[string]any{"tag": "button", "element_id": "aha_menu_submit", "name": "form_submit", "text": map[string]any{"tag": "plain_text", "content": label}, "type": "primary", "action_type": "form_submit", "form_action_type": "submit", "behaviors": []any{map[string]any{"type": "callback", "value": value}}}
+		formElements = append(formElements, map[string]any{"tag": "column_set", "columns": []any{map[string]any{"tag": "column", "width": "auto", "elements": []any{button}}}})
+		elements = append(elements, map[string]any{"tag": "form", "name": "aha_menu_control", "elements": formElements})
+	}
+	elements = append(elements, map[string]any{"tag": "markdown", "content": "<font color='grey'>由 AHA 控制面直接处理，不调用 Agent/Backend。</font>"})
+	return map[string]any{"schema": "2.0", "header": map[string]any{"template": template, "title": map[string]any{"tag": "plain_text", "content": title}}, "body": map[string]any{"elements": elements}}
+}
+
+func mapValue(value any) map[string]any {
+	result, _ := value.(map[string]any)
+	return result
+}
+
+func mapList(value any) []map[string]any {
+	result := []map[string]any{}
+	switch typed := value.(type) {
+	case []map[string]any:
+		return typed
+	case []any:
+		for _, item := range typed {
+			if mapped, ok := item.(map[string]any); ok {
+				result = append(result, mapped)
+			}
+		}
+	}
+	return result
+}
+
+func numericInt(value any, fallback int) int {
+	switch typed := value.(type) {
+	case int:
+		return typed
+	case float64:
+		return int(typed)
+	case json.Number:
+		parsed, _ := typed.Int64()
+		return int(parsed)
+	default:
+		return fallback
+	}
 }
 
 func buttonColumn(label, style, actionID, decision string) map[string]any {

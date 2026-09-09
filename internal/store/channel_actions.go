@@ -82,6 +82,18 @@ func enqueueChannelActionDeliveryTx(ctx context.Context, tx *sql.Tx, instanceID,
 	return err
 }
 
+func (s *Store) EnqueueChannelControlDelivery(ctx context.Context, instanceID, conversationID, sourceKey, eventType string, payload map[string]any, at time.Time) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := enqueueChannelActionDeliveryTx(ctx, tx, instanceID, conversationID, sourceKey, eventType, payload, at); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func (s *Store) BeginChannelPendingAction(ctx context.Context, id, instanceID, conversationID, actorIdentityID, providerMessageID string, at time.Time) (domain.ChannelPendingAction, bool, error) {
 	result, err := s.db.ExecContext(ctx, `UPDATE channel_pending_actions SET status='executing',consumed_at=?,updated_at=? WHERE id=? AND instance_id=? AND conversation_id=? AND actor_identity_link_id=? AND provider_message_id=? AND status='pending' AND expires_at>?`,
 		timeString(at), timeString(at), id, instanceID, conversationID, actorIdentityID, providerMessageID, timeString(at))

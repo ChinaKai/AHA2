@@ -222,6 +222,32 @@ func TestReauthorizationCapabilityIncludesRuntimeAndOnboardingScopes(t *testing.
 	}
 }
 
+func TestMenuControlPayloadsUseStructuredForms(t *testing.T) {
+	t.Parallel()
+	projects := []domain.Project{{ID: "project-menu", Name: "Project"}}
+	workspaces := []domain.Workspace{{ID: "workspace-menu", ProjectID: "project-menu", Name: "Workspace"}}
+	create := taskCreateFormPayload(projects, workspaces)
+	if create["kind"] != "menu_card" {
+		t.Fatalf("create payload=%#v", create)
+	}
+	fields, ok := create["fields"].([]map[string]any)
+	if !ok || len(fields) != 4 || stringField(mapValueForTest(create["submit"]), "label") != "生成预览" {
+		t.Fatalf("create fields=%#v", create)
+	}
+	project, workspace, ok := catalogTaskTarget(channelCatalog{projects: projects, workspaces: workspaces}, "project-menu", "workspace-menu")
+	if !ok || project.ID == "" || workspace.ID == "" {
+		t.Fatal("structured create target was not resolved")
+	}
+	if _, _, ok := catalogTaskTarget(channelCatalog{projects: projects, workspaces: workspaces}, "project-menu", "not-allowed"); ok {
+		t.Fatal("out-of-catalog workspace was accepted")
+	}
+}
+
+func mapValueForTest(value any) map[string]any {
+	result, _ := value.(map[string]any)
+	return result
+}
+
 func TestChannelRuntimeFallsBackToReadyOfficialCodexAccount(t *testing.T) {
 	ctx := context.Background()
 	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
@@ -349,6 +375,10 @@ func TestInboundOwnerAndGroupScopesAreServerEnforcedAndIdempotent(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
+	turnsBeforeMenu, err := database.ListTurns(ctx, conversation.HostTaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	menu := domain.ChannelInboundEnvelope{
 		SchemaVersion: 1, RequestID: "menu-request", InstanceID: instance.ID, ExternalEventID: "menu-event",
 		EventType: "menu_action", OccurredAt: time.Now().UTC(), ChatType: "p2p", ExternalSenderID: "owner-open",
@@ -361,8 +391,16 @@ func TestInboundOwnerAndGroupScopesAreServerEnforcedAndIdempotent(t *testing.T) 
 		t.Fatal(err)
 	}
 	storedMenu, duplicate, err := service.ReceiveInbound(ctx, claims, menu)
-	if err != nil || !duplicate || storedMenu.State != "processed" || storedMenu.Outcome != "delivered_to_task" {
+	if err != nil || !duplicate || storedMenu.State != "processed" || storedMenu.Outcome != "menu_control" {
 		t.Fatalf("menu receipt=%#v duplicate=%v err=%v", storedMenu, duplicate, err)
+	}
+	turnsAfterMenu, err := database.ListTurns(ctx, conversation.HostTaskID)
+	if err != nil || len(turnsAfterMenu) != len(turnsBeforeMenu) {
+		t.Fatalf("deterministic menu started an Agent turn: before=%d after=%d err=%v", len(turnsBeforeMenu), len(turnsAfterMenu), err)
+	}
+	menuDeliveries, err := database.ChannelDeliveries(ctx, instance.ID, 100)
+	if err != nil || len(menuDeliveries) == 0 || menuDeliveries[0].SemanticPayload["kind"] != "menu_card" {
+		t.Fatalf("menu delivery=%#v err=%v", menuDeliveries, err)
 	}
 	regularProject := domain.Project{ID: "regular-project", Name: "Regular", ProjectType: "folder", DefaultWorkspaceID: "regular-workspace", KnowledgePolicy: "enabled", CreatedAt: now, UpdatedAt: now}
 	if err := database.CreateProject(ctx, regularProject); err != nil {

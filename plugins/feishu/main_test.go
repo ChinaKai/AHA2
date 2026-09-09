@@ -135,3 +135,25 @@ func TestDeterministicUUIDAndConfirmationCard(t *testing.T) {
 		t.Fatalf("backoff=%d", delay)
 	}
 }
+
+func TestRenderMenuFormCard(t *testing.T) {
+	t.Parallel()
+	msgType, content := renderDelivery(map[string]any{
+		"kind": "menu_card", "title": "查询 Task", "markdown": "直接查询",
+		"fields": []any{
+			map[string]any{"type": "select", "name": "project_id", "label": "Project", "options": []any{map[string]any{"label": "P", "value": "p1"}}},
+			map[string]any{"type": "text", "name": "keyword", "label": "关键词", "max_length": float64(100)},
+		},
+		"submit": map[string]any{"label": "查询", "value": map[string]any{"kind": "menu_control", "menu_action": "task.query"}},
+	})
+	if msgType != "interactive" || !strings.Contains(content, "form_submit") || !strings.Contains(content, "select_static") || !strings.Contains(content, "menu_control") {
+		t.Fatalf("menu card type=%s content=%s", msgType, content)
+	}
+	if got := cardFormScalar(map[string]any{"value": " project "}, 20); got != "project" {
+		t.Fatalf("form scalar=%q", got)
+	}
+	form := normalizedCardFormValues(map[string]any{"aha_menu_control": map[string]any{"aha_menu_control.project_id": "p1", "title": "Task"}})
+	if form["project_id"] != "p1" || form["title"] != "Task" {
+		t.Fatalf("normalized form=%#v", form)
+	}
+}

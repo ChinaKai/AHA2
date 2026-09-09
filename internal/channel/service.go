@@ -875,39 +875,174 @@ func (s *Service) processMenuAction(ctx context.Context, receipt domain.ChannelI
 	if err != nil || identity.ExternalUserID != envelope.ExternalSenderID || identity.OwnerID != instance.OwnerID {
 		return fmt.Errorf("channel owner identity is required")
 	}
-	conversation, err := s.store.OwnerChannelConversation(ctx, instance.ID)
-	if err != nil || conversation.Status != "active" {
-		endpoint, endpointErr := s.store.ChannelEndpoint(ctx, instance.ID, domain.ChannelEndpointAssistantDM)
-		if endpointErr != nil || !endpoint.Enabled {
-			return fmt.Errorf("channel owner conversation is required")
-		}
-		menuEnvelope := envelope
-		menuEnvelope.ExternalChatID = "open_id:" + envelope.ExternalSenderID
-		scopeKey, scopeErr := s.scopeKey(instance.ID, endpoint.Kind, identity.ID, menuEnvelope.ExternalChatID, envelope.ExternalSenderID)
-		if scopeErr != nil {
-			return scopeErr
-		}
-		conversation, err = s.ensureConversation(ctx, instance, endpoint, identity, menuEnvelope, scopeKey)
-		if err != nil {
-			return err
-		}
+	conversation, err := s.ensureOwnerMenuConversation(ctx, instance, identity, envelope)
+	if err != nil {
+		return err
 	}
 	key := stringField(envelope.MenuAction, "key")
-	instructions := map[string]string{
-		"aha.project.query":   "用户点击了“查询项目”。请调用渠道目录能力，列出 allowlist 内的项目，并提供继续查询 Workspace 的清晰选项。",
-		"aha.workspace.query": "用户点击了“查询 Workspace”。请先调用渠道目录能力列出 allowlist 内项目，请用户选择项目后再展示该项目的 Workspace。",
-		"aha.task.query":      "用户点击了“查询任务”。请调用渠道目录能力，并询问或应用项目、Workspace、状态、关键词筛选后展示任务。",
-		"aha.task.create":     "用户点击了“创建任务”。请收集 Project、Workspace、标题与需求，Runtime 默认继承渠道配置；创建前必须生成服务端预览并要求一次性确认。",
+	catalog, err := s.allowedChannelCatalog(ctx, instance)
+	if err != nil {
+		return err
 	}
-	provenance := map[string]any{
-		"schema": "aha.channel-context/v1", "instance_id": instance.ID, "provider": instance.ProviderKey,
-		"endpoint": domain.ChannelEndpointAssistantDM, "conversation_id": conversation.ID,
-		"actor":              map[string]any{"identity_link_id": identity.ID, "role": "owner"},
-		"route":              map[string]any{"mode": "assistant", "target_task_id": conversation.HostTaskID},
-		"inbound_receipt_id": receipt.ID, "menu_action": key,
+	var payload map[string]any
+	switch key {
+	case "aha.project.query":
+		payload = projectMenuPayload(catalog.projects)
+	case "aha.workspace.query":
+		payload = workspaceQueryFormPayload(catalog.projects)
+	case "aha.task.query":
+		payload = taskQueryFormPayload(catalog.projects)
+	case "aha.task.create":
+		payload = taskCreateFormPayload(catalog.projects, catalog.workspaces)
+	default:
+		return fmt.Errorf("unsupported menu action")
 	}
-	_, err = s.application.SubmitChannelMessage(ctx, receipt.ID, receipt.LeaseID, conversation.ID, conversation.HostTaskID, instructions[key], provenance)
-	return err
+	if err := s.store.EnqueueChannelControlDelivery(ctx, instance.ID, conversation.ID, receipt.ID+":menu", "menu_result", payload, s.now().UTC()); err != nil {
+		return err
+	}
+	return s.store.FinishChannelInbox(ctx, receipt.ID, receipt.LeaseID, "processed", conversation.ID, "", "menu_control", s.now().UTC())
+}
+
+func (s *Service) ensureOwnerMenuConversation(ctx context.Context, instance domain.ChannelInstance, identity domain.ChannelIdentityLink, envelope domain.ChannelInboundEnvelope) (domain.ChannelConversation, error) {
+	conversation, err := s.store.OwnerChannelConversation(ctx, instance.ID)
+	if err == nil && conversation.Status == "active" {
+		return conversation, nil
+	}
+	endpoint, endpointErr := s.store.ChannelEndpoint(ctx, instance.ID, domain.ChannelEndpointAssistantDM)
+	if endpointErr != nil || !endpoint.Enabled {
+		return domain.ChannelConversation{}, fmt.Errorf("channel owner conversation is required")
+	}
+	menuEnvelope := envelope
+	menuEnvelope.ExternalChatID = "open_id:" + envelope.ExternalSenderID
+	scopeKey, scopeErr := s.scopeKey(instance.ID, endpoint.Kind, identity.ID, menuEnvelope.ExternalChatID, envelope.ExternalSenderID)
+	if scopeErr != nil {
+		return domain.ChannelConversation{}, scopeErr
+	}
+	return s.ensureConversation(ctx, instance, endpoint, identity, menuEnvelope, scopeKey)
+}
+
+type channelCatalog struct {
+	projects   []domain.Project
+	workspaces []domain.Workspace
+	tasks      []domain.Task
+}
+
+func (s *Service) allowedChannelCatalog(ctx context.Context, instance domain.ChannelInstance) (channelCatalog, error) {
+	projects, err := s.store.ListProjects(ctx)
+	if err != nil {
+		return channelCatalog{}, err
+	}
+	workspaces, err := s.store.ListWorkspaces(ctx, "")
+	if err != nil {
+		return channelCatalog{}, err
+	}
+	tasks, err := s.store.ListTasks(ctx, "")
+	if err != nil {
+		return channelCatalog{}, err
+	}
+	allowedProjects, projectsRestricted := stringListField(instance.Config, "allowed_project_ids")
+	allowedWorkspaces, workspacesRestricted := stringListField(instance.Config, "allowed_workspace_ids")
+	projectSet, workspaceSet := sliceSet(allowedProjects), sliceSet(allowedWorkspaces)
+	result := channelCatalog{}
+	for _, project := range projects {
+		if !s.store.IsManagedChannelProject(ctx, project.ID) && project.ProjectType != "knowledge" && (!projectsRestricted || projectSet[project.ID]) {
+			result.projects = append(result.projects, project)
+		}
+	}
+	for _, workspace := range workspaces {
+		if !workspace.ReadOnly && !s.store.IsManagedChannelWorkspace(ctx, workspace.ID) && (!projectsRestricted || projectSet[workspace.ProjectID]) && (!workspacesRestricted || workspaceSet[workspace.ID]) {
+			result.workspaces = append(result.workspaces, workspace)
+		}
+	}
+	for _, task := range tasks {
+		if !task.ReadOnly && !s.store.IsManagedChannelTask(ctx, task.ID) && (!projectsRestricted || projectSet[task.ProjectID]) && (!workspacesRestricted || workspaceSet[task.WorkspaceID]) {
+			result.tasks = append(result.tasks, task)
+		}
+	}
+	return result, nil
+}
+
+func projectOptions(projects []domain.Project) []map[string]any {
+	options := make([]map[string]any, 0, len(projects))
+	for index, project := range projects {
+		if index >= 100 {
+			break
+		}
+		options = append(options, map[string]any{"label": project.Name, "value": project.ID})
+	}
+	return options
+}
+
+func workspaceOptions(projects []domain.Project, workspaces []domain.Workspace) []map[string]any {
+	projectNames := map[string]string{}
+	for _, project := range projects {
+		projectNames[project.ID] = project.Name
+	}
+	options := make([]map[string]any, 0, len(workspaces))
+	for _, workspace := range workspaces {
+		if len(options) >= 100 {
+			break
+		}
+		options = append(options, map[string]any{"label": projectNames[workspace.ProjectID] + " / " + workspace.Name, "value": workspace.ID})
+	}
+	return options
+}
+
+func projectMenuPayload(projects []domain.Project) map[string]any {
+	lines := []string{"AHA 直接查询，未调用 Agent。"}
+	for index, project := range projects {
+		if index >= 20 {
+			lines = append(lines, "…仅展示前 20 个项目")
+			break
+		}
+		lines = append(lines, fmt.Sprintf("**%d. %s**", index+1, menuSafeText(project.Name)))
+	}
+	if len(projects) == 0 {
+		lines = append(lines, "当前 allowlist 内没有可用项目。")
+	}
+	return map[string]any{"kind": "menu_card", "title": "查询项目", "template": "blue", "markdown": strings.Join(lines, "\n")}
+}
+
+func workspaceQueryFormPayload(projects []domain.Project) map[string]any {
+	return map[string]any{
+		"kind": "menu_card", "title": "查询 Workspace", "template": "blue", "markdown": "请先选择项目。查询由 AHA 直接执行，不调用 Agent。",
+		"fields": []map[string]any{{"type": "select", "name": "project_id", "label": "Project", "options": projectOptions(projects)}},
+		"submit": map[string]any{"label": "查询", "value": map[string]any{"kind": "menu_control", "menu_action": "workspace.query"}},
+	}
+}
+
+func taskQueryFormPayload(projects []domain.Project) map[string]any {
+	statuses := []map[string]any{{"label": "全部", "value": "all"}, {"label": "进行中", "value": "active"}, {"label": "等待处理", "value": "waiting_user"}, {"label": "已完成", "value": "completed"}, {"label": "失败", "value": "failed"}, {"label": "阻塞", "value": "blocked"}}
+	return map[string]any{
+		"kind": "menu_card", "title": "查询 Task", "template": "blue", "markdown": "请选择筛选条件。查询由 AHA 直接执行，不调用 Agent。",
+		"fields": []map[string]any{
+			{"type": "select", "name": "project_id", "label": "Project", "options": projectOptions(projects)},
+			{"type": "select", "name": "status", "label": "状态", "options": statuses},
+			{"type": "text", "name": "keyword", "label": "关键词（可选）", "max_length": 100},
+		},
+		"submit": map[string]any{"label": "查询", "value": map[string]any{"kind": "menu_control", "menu_action": "task.query"}},
+	}
+}
+
+func taskCreateFormPayload(projects []domain.Project, workspaces []domain.Workspace) map[string]any {
+	return map[string]any{
+		"kind": "menu_card", "title": "创建 Task", "template": "blue", "markdown": "请填写结构化字段。Runtime 默认继承渠道设置；提交后仍需一次确认。",
+		"fields": []map[string]any{
+			{"type": "select", "name": "project_id", "label": "Project", "options": projectOptions(projects)},
+			{"type": "select", "name": "workspace_id", "label": "Workspace", "options": workspaceOptions(projects, workspaces)},
+			{"type": "text", "name": "title", "label": "标题", "max_length": 200},
+			{"type": "multiline", "name": "request", "label": "需求", "max_length": 4000},
+		},
+		"submit": map[string]any{"label": "生成预览", "value": map[string]any{"kind": "menu_control", "menu_action": "task.create.preview"}},
+	}
+}
+
+func menuSafeText(value string) string {
+	value = strings.TrimSpace(value)
+	if len([]rune(value)) > 120 {
+		value = string([]rune(value)[:120]) + "…"
+	}
+	return strings.NewReplacer("\\", "\\\\", "*", "\\*", "`", "'", "[", "\\[", "]", "\\]", "<", "&lt;", ">", "&gt;").Replace(value)
 }
 
 func (s *Service) channelAgentContext(ctx context.Context, claims agentapi.Claims, endpointRequired string) (app.AgentCallContext, map[string]any, domain.ChannelIdentityLink, error) {
@@ -938,46 +1073,17 @@ func (s *Service) AgentCatalog(ctx context.Context, claims agentapi.Claims) (map
 	if err != nil {
 		return nil, err
 	}
-	projects, err := s.store.ListProjects(ctx)
-	if err != nil {
-		return nil, err
-	}
-	workspaces, err := s.store.ListWorkspaces(ctx, "")
-	if err != nil {
-		return nil, err
-	}
-	tasks, err := s.store.ListTasks(ctx, "")
-	if err != nil {
-		return nil, err
-	}
 	instanceID := stringField(channelContext, "instance_id")
 	instance, err := s.store.ChannelInstance(ctx, instanceID)
 	if err != nil {
 		return nil, err
 	}
-	allowedProjects, projectsRestricted := stringListField(instance.Config, "allowed_project_ids")
-	allowedWorkspaces, workspacesRestricted := stringListField(instance.Config, "allowed_workspace_ids")
-	projectSet, workspaceSet := sliceSet(allowedProjects), sliceSet(allowedWorkspaces)
-	projectResult := []domain.Project{}
-	for _, project := range projects {
-		if !s.store.IsManagedChannelProject(ctx, project.ID) && project.ProjectType != "knowledge" && (!projectsRestricted || projectSet[project.ID]) {
-			projectResult = append(projectResult, project)
-		}
-	}
-	workspaceResult := []domain.Workspace{}
-	for _, workspace := range workspaces {
-		if !workspace.ReadOnly && !s.store.IsManagedChannelWorkspace(ctx, workspace.ID) && (!projectsRestricted || projectSet[workspace.ProjectID]) && (!workspacesRestricted || workspaceSet[workspace.ID]) {
-			workspaceResult = append(workspaceResult, workspace)
-		}
-	}
-	taskResult := []domain.Task{}
-	for _, task := range tasks {
-		if !task.ReadOnly && !s.store.IsManagedChannelTask(ctx, task.ID) && (!projectsRestricted || projectSet[task.ProjectID]) && (!workspacesRestricted || workspaceSet[task.WorkspaceID]) {
-			taskResult = append(taskResult, task)
-		}
+	catalog, err := s.allowedChannelCatalog(ctx, instance)
+	if err != nil {
+		return nil, err
 	}
 	handoffs, _ := s.store.ChannelHandoffs(ctx, strings.TrimSpace(fmt.Sprint(channelContext["instance_id"])))
-	return map[string]any{"projects": projectResult, "workspaces": workspaceResult, "tasks": taskResult, "handoffs": handoffs}, nil
+	return map[string]any{"projects": catalog.projects, "workspaces": catalog.workspaces, "tasks": catalog.tasks, "handoffs": handoffs}, nil
 }
 
 func (s *Service) CreateAgentHandoff(ctx context.Context, claims agentapi.Claims, summary, details string) (domain.ChannelHandoff, error) {
@@ -1125,6 +1231,9 @@ func stringField(values map[string]any, key string) string {
 }
 
 func (s *Service) processCardAction(ctx context.Context, receipt domain.ChannelInboxReceipt, instance domain.ChannelInstance, envelope domain.ChannelInboundEnvelope) error {
+	if stringField(envelope.CardAction, "kind") == "menu_control" {
+		return s.processMenuCardAction(ctx, receipt, instance, envelope)
+	}
 	actionID := stringField(envelope.CardAction, "action_id")
 	decision := stringField(envelope.CardAction, "decision")
 	providerMessageID := stringField(envelope.CardAction, "provider_message_id")
@@ -1160,6 +1269,153 @@ func (s *Service) processCardAction(ctx context.Context, receipt domain.ChannelI
 		return err
 	}
 	return s.store.FinishChannelInbox(ctx, receipt.ID, receipt.LeaseID, "processed", conversation.ID, "", "action_processed", s.now().UTC())
+}
+
+func (s *Service) processMenuCardAction(ctx context.Context, receipt domain.ChannelInboxReceipt, instance domain.ChannelInstance, envelope domain.ChannelInboundEnvelope) error {
+	identity, err := s.store.ChannelOwnerIdentity(ctx, instance.ID)
+	if err != nil || identity.ExternalUserID != envelope.ExternalSenderID || identity.OwnerID != instance.OwnerID {
+		return fmt.Errorf("channel owner identity is required")
+	}
+	conversation, err := s.store.OwnerChannelConversation(ctx, instance.ID)
+	if err != nil || conversation.Status != "active" || (conversation.ExternalChatID != envelope.ExternalChatID && conversation.ExternalChatID != "open_id:"+envelope.ExternalSenderID) {
+		return fmt.Errorf("menu conversation mismatch")
+	}
+	catalog, err := s.allowedChannelCatalog(ctx, instance)
+	if err != nil {
+		return err
+	}
+	action := stringField(envelope.CardAction, "menu_action")
+	values, _ := mapField(envelope.CardAction, "form_values")
+	var payload map[string]any
+	switch action {
+	case "workspace.query":
+		projectID := formString(values, "project_id")
+		if !catalogHasProject(catalog, projectID) {
+			return fmt.Errorf("menu project is not allowed")
+		}
+		lines := []string{"AHA 直接查询，未调用 Agent。"}
+		count := 0
+		for _, workspace := range catalog.workspaces {
+			if workspace.ProjectID != projectID {
+				continue
+			}
+			count++
+			if count <= 20 {
+				lines = append(lines, fmt.Sprintf("**%d. %s** · %s", count, menuSafeText(workspace.Name), menuSafeText(workspace.Health)))
+			}
+		}
+		if count == 0 {
+			lines = append(lines, "该项目下没有 allowlist 可用的 Workspace。")
+		} else if count > 20 {
+			lines = append(lines, "…仅展示前 20 个 Workspace")
+		}
+		payload = map[string]any{"kind": "menu_card", "title": "Workspace", "template": "blue", "markdown": strings.Join(lines, "\n")}
+	case "task.query":
+		projectID, status, keyword := formString(values, "project_id"), formString(values, "status"), strings.ToLower(formString(values, "keyword"))
+		if !catalogHasProject(catalog, projectID) || !sliceSet([]string{"all", "active", "waiting_user", "completed", "failed", "blocked"})[status] {
+			return fmt.Errorf("menu task filter is invalid")
+		}
+		lines := []string{"AHA 直接查询，未调用 Agent。"}
+		count := 0
+		for _, task := range catalog.tasks {
+			if task.ProjectID != projectID || (status != "all" && string(task.Status) != status) {
+				continue
+			}
+			haystack := strings.ToLower(task.Code + " " + task.Title + " " + task.CurrentGoal)
+			if keyword != "" && !strings.Contains(haystack, keyword) {
+				continue
+			}
+			count++
+			if count <= 20 {
+				lines = append(lines, fmt.Sprintf("**%s · %s**\n%s", menuSafeText(task.Code), menuSafeText(string(task.Status)), menuSafeText(task.Title)))
+			}
+		}
+		if count == 0 {
+			lines = append(lines, "没有符合条件的 Task。")
+		} else if count > 20 {
+			lines = append(lines, "…仅展示前 20 个 Task")
+		}
+		payload = map[string]any{"kind": "menu_card", "title": "Task 查询结果", "template": "blue", "markdown": strings.Join(lines, "\n\n")}
+	case "task.create.preview":
+		projectID, workspaceID := formString(values, "project_id"), formString(values, "workspace_id")
+		title, request := formString(values, "title"), formString(values, "request")
+		project, workspace, ok := catalogTaskTarget(catalog, projectID, workspaceID)
+		if !ok || title == "" || request == "" || len([]rune(title)) > 200 || len([]rune(request)) > 4000 {
+			return fmt.Errorf("menu task creation fields are invalid")
+		}
+		precondition := map[string]any{"project_id": project.ID, "project_updated_at": timeStringUTC(project.UpdatedAt), "workspace_id": workspace.ID, "workspace_updated_at": timeStringUTC(workspace.UpdatedAt)}
+		raw, _ := json.Marshal(precondition)
+		digest := sha256.Sum256(raw)
+		now := s.now().UTC()
+		_, err = s.store.CreateChannelPendingAction(ctx, domain.ChannelPendingAction{
+			ID: domain.NewID("channel_action"), InstanceID: instance.ID, ConversationID: conversation.ID, ActorIdentityLinkID: identity.ID,
+			Operation: "create_task", TargetType: "task", Intent: map[string]any{"project_id": project.ID, "workspace_id": workspace.ID, "title": title, "request": request},
+			Preview:      map[string]any{"operation": "create_task", "project": project.Name, "workspace": workspace.Name, "title": title, "request": request, "runtime": "继承渠道配置"},
+			Precondition: precondition, PreconditionHash: hex.EncodeToString(digest[:]), Status: "pending", ExpiresAt: now.Add(15 * time.Minute), CreatedAt: now, UpdatedAt: now,
+		})
+		if err != nil {
+			return err
+		}
+		return s.store.FinishChannelInbox(ctx, receipt.ID, receipt.LeaseID, "processed", conversation.ID, "", "menu_create_preview", s.now().UTC())
+	default:
+		return fmt.Errorf("unsupported menu card action")
+	}
+	if err := s.store.EnqueueChannelControlDelivery(ctx, instance.ID, conversation.ID, receipt.ID+":menu-card", "menu_result", payload, s.now().UTC()); err != nil {
+		return err
+	}
+	return s.store.FinishChannelInbox(ctx, receipt.ID, receipt.LeaseID, "processed", conversation.ID, "", "menu_control", s.now().UTC())
+}
+
+func formString(values map[string]any, key string) string {
+	value := values[key]
+	if value == nil {
+		return ""
+	}
+	switch typed := value.(type) {
+	case map[string]any:
+		for _, child := range []string{"value", "text", "content"} {
+			if result := stringField(typed, child); result != "" {
+				return result
+			}
+		}
+	case []any:
+		if len(typed) > 0 {
+			return strings.TrimSpace(fmt.Sprint(typed[0]))
+		}
+	}
+	result := strings.TrimSpace(fmt.Sprint(value))
+	if result == "<nil>" {
+		return ""
+	}
+	return result
+}
+
+func catalogHasProject(catalog channelCatalog, projectID string) bool {
+	for _, project := range catalog.projects {
+		if project.ID == projectID {
+			return true
+		}
+	}
+	return false
+}
+
+func catalogTaskTarget(catalog channelCatalog, projectID, workspaceID string) (domain.Project, domain.Workspace, bool) {
+	var project domain.Project
+	for _, item := range catalog.projects {
+		if item.ID == projectID {
+			project = item
+			break
+		}
+	}
+	if project.ID == "" {
+		return domain.Project{}, domain.Workspace{}, false
+	}
+	for _, workspace := range catalog.workspaces {
+		if workspace.ID == workspaceID && workspace.ProjectID == project.ID {
+			return project, workspace, true
+		}
+	}
+	return domain.Project{}, domain.Workspace{}, false
 }
 
 func (s *Service) executePendingAction(ctx context.Context, action domain.ChannelPendingAction) error {
