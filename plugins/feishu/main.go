@@ -87,6 +87,30 @@ type cachedDisplayName struct {
 	expiresAt time.Time
 }
 
+type menuConfigFailure struct {
+	stage string
+	code  int
+}
+
+func (e menuConfigFailure) Error() string {
+	return e.errorCode()
+}
+
+func (e menuConfigFailure) errorCode() string {
+	if e.code != 0 {
+		return fmt.Sprintf("menu_%s_rejected_%d", e.stage, e.code)
+	}
+	return "menu_" + e.stage + "_transport_failed"
+}
+
+func menuConfigurationErrorCode(err error) string {
+	var failure menuConfigFailure
+	if errors.As(err, &failure) {
+		return failure.errorCode()
+	}
+	return "menu_configuration_failed"
+}
+
 func main() {
 	if len(os.Args) != 2 || os.Args[1] != "--channel-runtime" {
 		fmt.Fprintln(os.Stderr, "this binary is managed by AHA2")
@@ -397,7 +421,7 @@ func (c *runtimeClient) commandLoop(ctx context.Context, client *lark.Client, ap
 				_ = c.complete(ctx, item, true, map[string]any{"status": "ready"}, "")
 			case "configure_menu":
 				if err := configureFeishuMenu(ctx, client, appID); err != nil {
-					_ = c.complete(ctx, item, false, map[string]any{}, "menu_configuration_failed")
+					_ = c.complete(ctx, item, false, map[string]any{}, menuConfigurationErrorCode(err))
 					continue
 				}
 				_ = c.complete(ctx, item, true, map[string]any{"status": "publish_submitted", "menu_version": 1}, "")
@@ -425,9 +449,9 @@ func configureFeishuMenu(ctx context.Context, client *lark.Client, appID string)
 	configResponse, err := client.Application.V7.ApplicationConfig.Patch(ctx, configRequest)
 	if err != nil || !configResponse.Success() {
 		if err != nil {
-			return err
+			return menuConfigFailure{stage: "config"}
 		}
-		return fmt.Errorf("feishu application config rejected: %d", configResponse.Code)
+		return menuConfigFailure{stage: "config", code: configResponse.Code}
 	}
 	menu := func(id, parent, label string, sort, action int, eventKey string) *larkapplicationv7.BotMenuNode {
 		builder := larkapplicationv7.NewBotMenuNodeBuilder().MenuId(id).Sort(sort).DefaultName(label).MenuContentType(action)
@@ -454,18 +478,18 @@ func configureFeishuMenu(ctx context.Context, client *lark.Client, appID string)
 	abilityResponse, err := client.Application.V7.ApplicationAbility.Patch(ctx, abilityRequest)
 	if err != nil || !abilityResponse.Success() {
 		if err != nil {
-			return err
+			return menuConfigFailure{stage: "ability"}
 		}
-		return fmt.Errorf("feishu application ability rejected: %d", abilityResponse.Code)
+		return menuConfigFailure{stage: "ability", code: abilityResponse.Code}
 	}
 	publishBody := larkapplicationv7.NewCreateApplicationPublishReqBodyBuilder().MobileDefaultAbility("bot").PcDefaultAbility("bot").Remark("Configure AHA channel menu").Changelog("Configure Owner menu and channel display permissions").Build()
 	publishRequest := larkapplicationv7.NewCreateApplicationPublishReqBuilder().AppId(appID).Body(publishBody).Build()
 	publishResponse, err := client.Application.V7.ApplicationPublish.Create(ctx, publishRequest)
 	if err != nil || !publishResponse.Success() {
 		if err != nil {
-			return err
+			return menuConfigFailure{stage: "publish"}
 		}
-		return fmt.Errorf("feishu application publish rejected: %d", publishResponse.Code)
+		return menuConfigFailure{stage: "publish", code: publishResponse.Code}
 	}
 	return nil
 }

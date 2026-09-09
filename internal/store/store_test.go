@@ -173,6 +173,47 @@ func TestStorePersistsProject(t *testing.T) {
 	}
 }
 
+func TestRepeatMigrationDoesNotRecreateTaskLevelActiveTurnIndex(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database, err := Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	now := "2026-09-09T00:00:00Z"
+	statements := []struct {
+		query string
+		args  []any
+	}{
+		{`INSERT INTO projects(id,name,description,repository_identity,default_workspace_id,default_branch,created_at,updated_at,project_type) VALUES(?,?,?,?,?,?,?,?,?)`, []any{"project-repeat", "P", "", "", "", "main", now, now, "git"}},
+		{`INSERT INTO workspaces(id,project_id,name,locality,transport,root_path,ssh_host,ssh_user,ssh_port,platform,health,capabilities_json,repository_json,last_detected_at,created_at,updated_at,distro,isolation,worktree_dir) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, []any{"workspace-repeat", "project-repeat", "W", "local", "native", t.TempDir(), "", "", 22, "windows/amd64", "ready", "{}", "{}", now, now, now, "", "", ""}},
+		{`INSERT INTO env_groups(id,name,provider_id,backend,revision,environment_json,secret_names_json,secret_configured,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, []any{"env-repeat", "E", "p", "stub", 1, "{}", "[]", 0, now, now}},
+		{`INSERT INTO models(id,display_name,provider_id,backend,wire_model,wire_api,context_window,max_output_tokens,default_effort,capabilities_json,default_env_group_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, []any{"model-repeat", "M", "p", "stub", "stub", "", 1000, 0, "", "{}", "env-repeat", now, now}},
+		{`INSERT INTO runtime_config_snapshots(id,workspace_id,backend,backend_version,model_id,wire_model,env_group_id,env_group_revision,reasoning_effort,permissions_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, []any{"runtime-repeat", "workspace-repeat", "stub", "", "model-repeat", "stub", "env-repeat", 1, "", "{}", now}},
+		{`INSERT INTO tasks(id,project_id,workspace_id,title,original_request,current_goal,status,target_branch,base_commit,task_branch,task_workspace_path,runtime_config_snapshot_id,created_at,updated_at,completed_at,code) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, []any{"task-repeat", "project-repeat", "workspace-repeat", "T", "request", "request", "running", "", "", "", "", "runtime-repeat", now, now, "", "task-repeat"}},
+		{`INSERT INTO messages(id,task_id,turn_id,role,sender,content,created_at) VALUES(?,?,?,?,?,?,?)`, []any{"message-repeat-1", "task-repeat", "turn-repeat-1", "user", "owner", "one", now}},
+		{`INSERT INTO messages(id,task_id,turn_id,role,sender,content,created_at) VALUES(?,?,?,?,?,?,?)`, []any{"message-repeat-2", "task-repeat", "turn-repeat-2", "user", "owner", "two", now}},
+		{`INSERT INTO turns(id,task_id,agent_id,sequence,input_message_id,status,waiting_reason,backend_session_id,runtime_config_snapshot_id,queued_at,prepared_at,started_at,finished_at,exit_code,result,error) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, []any{"turn-repeat-1", "task-repeat", "main", 1, "message-repeat-1", "running", "", "", "runtime-repeat", now, now, now, "", nil, "", ""}},
+		{`INSERT INTO turns(id,task_id,agent_id,sequence,input_message_id,status,waiting_reason,backend_session_id,runtime_config_snapshot_id,queued_at,prepared_at,started_at,finished_at,exit_code,result,error) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, []any{"turn-repeat-2", "task-repeat", "sub-001", 2, "message-repeat-2", "running", "", "", "runtime-repeat", now, now, now, "", nil, "", ""}},
+	}
+	for _, statement := range statements {
+		if _, err := database.db.ExecContext(ctx, statement.query, statement.args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := database.migrate(ctx); err != nil {
+		t.Fatalf("repeat migration failed with valid multi-agent turns: %v", err)
+	}
+	var legacyIndex int
+	if err := database.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_turns_one_active'`).Scan(&legacyIndex); err != nil {
+		t.Fatal(err)
+	}
+	if legacyIndex != 0 {
+		t.Fatal("legacy task-level active turn index was recreated")
+	}
+}
+
 func TestCatalogUsageIgnoresOrphanRuntimeSnapshots(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
 )
 
@@ -10,6 +11,19 @@ func TestNewFeishuClientsInstallEventDispatcher(t *testing.T) {
 	_, wsClient := newFeishuClients(bootstrap{AppID: "cli_test", AppSecret: "secret"})
 	if wsClient.EventHandler() == nil {
 		t.Fatal("WebSocket client has no event dispatcher; inbound events cannot reach Channel handlers")
+	}
+}
+
+func TestMenuConfigurationErrorCodeIsSafeAndActionable(t *testing.T) {
+	t.Parallel()
+	if got := menuConfigurationErrorCode(menuConfigFailure{stage: "ability", code: 230001}); got != "menu_ability_rejected_230001" {
+		t.Fatalf("code=%q", got)
+	}
+	if got := menuConfigurationErrorCode(menuConfigFailure{stage: "config"}); got != "menu_config_transport_failed" {
+		t.Fatalf("transport code=%q", got)
+	}
+	if got := menuConfigurationErrorCode(errors.New("opaque provider failure")); got != "menu_configuration_failed" {
+		t.Fatalf("fallback code=%q", got)
 	}
 }
 

@@ -1292,8 +1292,12 @@ func (s *Store) migrate(ctx context.Context) error {
 	); err != nil {
 		return fmt.Errorf("record schema v1: %w", err)
 	}
-	if _, err := s.db.ExecContext(ctx, schemaV2); err != nil {
-		return fmt.Errorf("apply schema v2: %w", err)
+	var hasV2 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=2)`).Scan(&hasV2)
+	if !hasV2 {
+		if _, err := s.db.ExecContext(ctx, schemaV2); err != nil {
+			return fmt.Errorf("apply schema v2: %w", err)
+		}
 	}
 	if _, err := s.db.ExecContext(
 		ctx,

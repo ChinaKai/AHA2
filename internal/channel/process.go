@@ -77,7 +77,7 @@ func (s *Service) reconcileProcesses(ctx context.Context) {
 			}
 		}
 		if instance.ProviderKey == "feishu" && instance.CredentialConfigured && instance.OwnerBound {
-			_, _ = s.EnqueueCommand(ctx, instance.ID, "configure_menu", "configure-menu:v1", map[string]any{"version": 1})
+			_, _ = s.EnqueueCommand(ctx, instance.ID, "configure_menu", "configure-menu:v2", map[string]any{"version": 2})
 		}
 		if err := s.ensurePluginProcess(instance.ID, ""); err != nil {
 			s.logger.Warn("channel plugin process start failed", "instance_id", instance.ID, "error", err)
