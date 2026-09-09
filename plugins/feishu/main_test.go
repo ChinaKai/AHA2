@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	larkapplicationv7 "github.com/larksuite/oapi-sdk-go/v3/service/application/v7"
@@ -157,5 +158,24 @@ func TestRenderMenuFormCard(t *testing.T) {
 	form := normalizedCardFormValues(map[string]any{"aha_menu_control": map[string]any{"aha_menu_control.project_id": "p1", "title": "Task"}})
 	if form["project_id"] != "p1" || form["title"] != "Task" {
 		t.Fatalf("normalized form=%#v", form)
+	}
+}
+
+func TestFeishuMenuTimestampAcceptsSecondsAndMilliseconds(t *testing.T) {
+	t.Parallel()
+	want := time.Date(2026, 9, 9, 4, 33, 32, 0, time.UTC)
+	if got := feishuEventTime(want.Unix()); !got.Equal(want) {
+		t.Fatalf("seconds timestamp=%s", got)
+	}
+	if got := feishuEventTime(want.UnixMilli()); !got.Equal(want) {
+		t.Fatalf("milliseconds timestamp=%s", got)
+	}
+}
+
+func TestRenderTaskStatusNotificationIsUserFacing(t *testing.T) {
+	t.Parallel()
+	msgType, content := renderDelivery(map[string]any{"status": "waiting_user", "task_id": "internal-id", "task_code": "task-005", "task_title": "Review"})
+	if msgType != "text" || !strings.Contains(content, "task-005") || !strings.Contains(content, "等待处理") || !strings.Contains(content, "Review") || strings.Contains(content, "internal-id") {
+		t.Fatalf("status notification type=%s content=%s", msgType, content)
 	}
 }

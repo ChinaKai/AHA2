@@ -1675,6 +1675,12 @@ func (s *Service) emit(ctx context.Context, taskID, aggregateType, aggregateID, 
 	}
 	event.Sequence = sequence
 	if eventClass, semanticType, semanticPayload, coalesceKey, ok := channelSemanticEvent(taskID, eventType, data); ok {
+		if eventClass == "status" {
+			if task, taskErr := s.store.Task(ctx, taskID); taskErr == nil {
+				semanticPayload["task_code"] = task.Code
+				semanticPayload["task_title"] = task.Title
+			}
+		}
 		sourceKey := event.ID
 		conversationItemID := strings.TrimSpace(fmt.Sprint(data["conversation_item_id"]))
 		if conversationItemID != "" && semanticType == "agent_message_update" {
@@ -1691,7 +1697,10 @@ func (s *Service) emit(ctx context.Context, taskID, aggregateType, aggregateID, 
 }
 
 func channelSemanticEvent(taskID, eventType string, data map[string]any) (string, string, map[string]any, string, bool) {
-	agentID := strings.TrimSpace(fmt.Sprint(data["agent_id"]))
+	agentID := ""
+	if rawAgentID, exists := data["agent_id"]; exists && rawAgentID != nil {
+		agentID = strings.TrimSpace(fmt.Sprint(rawAgentID))
+	}
 	if agentID != "" && agentID != "main" {
 		return "", "", nil, "", false
 	}

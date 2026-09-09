@@ -327,7 +327,7 @@ func runChannel(ctx context.Context, runtime *runtimeClient, boot bootstrap) err
 		}
 		occurredAt := time.Now().UTC()
 		if event.Event.Timestamp != nil && *event.Event.Timestamp > 0 {
-			occurredAt = time.UnixMilli(*event.Event.Timestamp).UTC()
+			occurredAt = feishuEventTime(*event.Event.Timestamp)
 		}
 		senderName := ""
 		if event.Event.Operator.OperatorName != nil {
@@ -363,6 +363,13 @@ func runChannel(ctx context.Context, runtime *runtimeClient, boot bootstrap) err
 	go runtime.deliveryLoop(ctx, client)
 	go runtime.commandLoop(ctx, client, boot)
 	return channel.Start(ctx)
+}
+
+func feishuEventTime(timestamp int64) time.Time {
+	if timestamp >= 1_000_000_000_000 {
+		return time.UnixMilli(timestamp).UTC()
+	}
+	return time.Unix(timestamp, 0).UTC()
 }
 
 func normalizedCardFormValues(values map[string]any) map[string]any {
@@ -788,6 +795,27 @@ func renderDelivery(payload map[string]any) (string, string) {
 		card := map[string]any{"schema": "2.0", "header": map[string]any{"template": "orange", "title": map[string]any{"tag": "plain_text", "content": "群聊转单待处理"}}, "body": map[string]any{"elements": []any{map[string]any{"tag": "markdown", "content": "**" + stringValue(payload, "summary") + "**\n\n" + stringValue(payload, "details") + "\n\n请在私聊中选择整理为待办、创建 Task 或忽略；写操作仍需一次性确认。"}}}}
 		raw, _ := json.Marshal(card)
 		return "interactive", string(raw)
+	}
+	if status := stringValue(payload, "status"); status != "" {
+		statusLabel := map[string]string{
+			"waiting_user":      "等待处理",
+			"round_failed":      "执行失败",
+			"round_interrupted": "执行已中断",
+			"task_completed":    "任务已完成",
+		}[status]
+		if statusLabel == "" {
+			statusLabel = status
+		}
+		task := stringValue(payload, "task_code")
+		if task == "" {
+			task = "Task"
+		}
+		text := task + " · " + statusLabel
+		if title := stringValue(payload, "task_title"); title != "" {
+			text += "\n" + title
+		}
+		raw, _ := json.Marshal(map[string]string{"text": text})
+		return "text", string(raw)
 	}
 	text := stringValue(payload, "text")
 	if text == "" {

@@ -806,7 +806,7 @@ func (s *Service) processInbound(ctx context.Context, receipt domain.ChannelInbo
 		return err
 	}
 	instance, err := s.store.ChannelInstance(ctx, receipt.InstanceID)
-	if err != nil || instance.Status != "ready" {
+	if err != nil || (instance.Status != "ready" && instance.Status != "degraded") {
 		return fmt.Errorf("channel runtime is not ready")
 	}
 	if envelope.EventType == "card_action" {

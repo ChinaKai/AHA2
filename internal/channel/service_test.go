@@ -387,6 +387,9 @@ func TestInboundOwnerAndGroupScopesAreServerEnforcedAndIdempotent(t *testing.T) 
 		EventType: "menu_action", OccurredAt: time.Now().UTC(), ChatType: "p2p", ExternalSenderID: "owner-open",
 		SenderDisplayName: "Owner", MenuAction: map[string]any{"key": "aha.project.query"},
 	}
+	if err := database.UpdateChannelInstanceHealth(ctx, instance.ID, "degraded", "feishu_reconnecting", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
 	if _, duplicate, err := service.ReceiveInbound(ctx, claims, menu); err != nil || duplicate {
 		t.Fatalf("menu receive duplicate=%v err=%v", duplicate, err)
 	}
@@ -396,6 +399,13 @@ func TestInboundOwnerAndGroupScopesAreServerEnforcedAndIdempotent(t *testing.T) 
 	storedMenu, duplicate, err := service.ReceiveInbound(ctx, claims, menu)
 	if err != nil || !duplicate || storedMenu.State != "processed" || storedMenu.Outcome != "menu_control" {
 		t.Fatalf("menu receipt=%#v duplicate=%v err=%v", storedMenu, duplicate, err)
+	}
+	if err := database.UpdateChannelInstanceHealth(ctx, instance.ID, "ready", "", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	instance, err = database.ChannelInstance(ctx, instance.ID)
+	if err != nil {
+		t.Fatal(err)
 	}
 	turnsAfterMenu, err := database.ListTurns(ctx, conversation.HostTaskID)
 	if err != nil || len(turnsAfterMenu) != len(turnsBeforeMenu) {
@@ -470,6 +480,27 @@ func TestInboundOwnerAndGroupScopesAreServerEnforcedAndIdempotent(t *testing.T) 
 	}
 	if len(afterGlobalStatus) != len(beforeUnrouted)+1 {
 		t.Fatalf("whitelisted global task status was not delivered: before=%d after=%d", len(beforeUnrouted), len(afterGlobalStatus))
+	}
+	notificationTask, err := appService.CreateTask(ctx, app.CreateTaskInput{ProjectID: regularProject.ID, WorkspaceID: regularWorkspace.ID, Title: "Notify owner", Request: "Notify owner", Isolation: "inplace", Backend: model.Backend, ModelSource: model.Source, ModelID: model.ID, WireModel: model.WireModel, Filesystem: "workspace-write", Approval: "never", CollaborationMode: "single", MaxAgents: 1, KnowledgePolicy: "inherit"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := appService.CompleteTask(ctx, notificationTask.ID); err != nil {
+		t.Fatal(err)
+	}
+	statusDeliveries, err := database.ChannelDeliveries(ctx, instance.ID, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statusFound := false
+	for _, delivery := range statusDeliveries {
+		if delivery.SemanticPayload["status"] == "task_completed" && delivery.SemanticPayload["task_code"] == notificationTask.Code && delivery.SemanticPayload["task_title"] == notificationTask.Title {
+			statusFound = true
+			break
+		}
+	}
+	if !statusFound {
+		t.Fatal("ordinary Task completion did not produce an owner notification payload")
 	}
 	actionNow := time.Now().UTC()
 	action := domain.ChannelPendingAction{ID: "action-takeover", InstanceID: instance.ID, ConversationID: conversation.ID, ActorIdentityLinkID: "channel-owner", Operation: "takeover", TargetType: "task", TargetID: target.ID, Intent: map[string]any{}, Preview: map[string]any{"task": target.ID}, Precondition: map[string]any{}, PreconditionHash: "hash", Status: "pending", ExpiresAt: actionNow.Add(time.Hour), CreatedAt: actionNow, UpdatedAt: actionNow}
