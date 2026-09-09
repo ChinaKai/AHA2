@@ -60,6 +60,7 @@ func (adapter Codex) Execute(ctx context.Context, request Request, emit func(Eve
 		Env:        environment,
 		Stdin:      request.Prompt,
 		Timeout:    timeout,
+		KillTree:   true,
 	}, func(line string) {
 		event, parsedReply, parsedSession := parseCodexLine(line)
 		select {

@@ -55,6 +55,14 @@ function Wait-AHA2Health {
   throw "AHA2 health check did not pass."
 }
 
+function Stop-AHA2ProcessTrees {
+  $items = @(Get-Process -Name "aha2-tray","aha2" -ErrorAction SilentlyContinue)
+  foreach ($item in $items) {
+    & taskkill.exe /PID $item.Id /T /F 2>$null | Out-Null
+  }
+  Start-Sleep -Milliseconds 500
+}
+
 $buildArgs = @("-ExecutionPolicy","Bypass","-File",$builder,"-RepoPath",$repo,"-InputExe",$serverInput,"-InputTrayExe",$trayInput,"-OutputDir",$installerDir,"-Version",$Version,"-PerUser")
 if ($InputFeishuPlugin -and $InputFeishuManifest) {
   $buildArgs += @("-InputFeishuPlugin",$InputFeishuPlugin,"-InputFeishuManifest",$InputFeishuManifest)
@@ -99,7 +107,7 @@ try {
 } catch {
   $deploymentError = $_
   Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-  Get-Process -Name "aha2-tray","aha2" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+  Stop-AHA2ProcessTrees
   foreach ($entry in @(@{Path=$server;Name="aha2.exe"},@{Path=$tray;Name="aha2-tray.exe"},@{Path=$plugin;Name="aha2-channel-feishu.exe"})) {
     $backupFile = Join-Path $backup $entry.Name
     if (Test-Path -LiteralPath $backupFile -PathType Leaf) { Copy-Item -LiteralPath $backupFile -Destination $entry.Path -Force }

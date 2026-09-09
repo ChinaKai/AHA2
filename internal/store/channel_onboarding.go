@@ -72,6 +72,10 @@ func (s *Store) ChannelOnboarding(ctx context.Context, id string) (domain.Channe
 	return scanChannelOnboarding(s.db.QueryRowContext(ctx, `SELECT `+channelOnboardingColumns+` FROM channel_onboarding_sessions WHERE id=?`, id))
 }
 
+func (s *Store) ActiveChannelOnboarding(ctx context.Context, instanceID string) (domain.ChannelOnboardingSession, error) {
+	return scanChannelOnboarding(s.db.QueryRowContext(ctx, `SELECT `+channelOnboardingColumns+` FROM channel_onboarding_sessions WHERE instance_id=? AND status IN ('pending','qr_ready') ORDER BY created_at DESC LIMIT 1`, instanceID))
+}
+
 func (s *Store) UpdateChannelOnboardingQR(ctx context.Context, id, commandID, verificationRef string, expiresAt, at time.Time) error {
 	result, err := s.db.ExecContext(ctx, `UPDATE channel_onboarding_sessions SET verification_url_secret_ref=?,status='qr_ready',step='awaiting_scan',expires_at=?,updated_at=? WHERE id=? AND registration_command_id=? AND status='pending'`,
 		verificationRef, timeString(expiresAt), timeString(at), id, commandID)

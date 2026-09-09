@@ -450,9 +450,12 @@ var
   Script: String;
 begin
   { AHA2 has one login task. Stop both the current and any previous-install-path
-    runtimes before replacing files. }
+    runtimes before replacing files. Kill each AHA2 process tree so backend CLI
+    descendants cannot keep a Codex thread-store writer alive across upgrade. }
   Script := '$items=@(Get-Process -Name ''aha2-tray'',''aha2'' -ErrorAction SilentlyContinue);' +
-    'if($items.Count -eq 0){exit 3};$items | Stop-Process -Force -ErrorAction SilentlyContinue;exit 0';
+    'if($items.Count -eq 0){exit 3};' +
+    'foreach($item in $items){& taskkill.exe /PID $item.Id /T /F 2>$null | Out-Null};' +
+    'Start-Sleep -Milliseconds 500;exit 0';
   Result := Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
     '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "' + Script + '"',
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode) and (ResultCode = 0);
@@ -542,8 +545,8 @@ begin
 #ifndef PerUserInstall
     DisableAndStopLegacyAHA2Service(True);
 #endif
-    StopAHA2UserTask();
     UserProcessWasRunning := StopInstalledUserProcesses();
+    StopAHA2UserTask();
   end
   else if CurStep = ssPostInstall then
   begin
@@ -584,8 +587,8 @@ var
 begin
   if CurUninstallStep = usUninstall then
   begin
-    RemoveAHA2UserTask();
     StopInstalledUserProcesses();
+    RemoveAHA2UserTask();
 #ifndef PerUserInstall
     RemoveLegacyAHA2Service();
     Exec(ExpandConstant('{sys}\netsh.exe'),

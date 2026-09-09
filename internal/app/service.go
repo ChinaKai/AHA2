@@ -125,6 +125,9 @@ type Service struct {
 
 	mu              sync.Mutex
 	cancels         map[string]context.CancelFunc
+	runContext      context.Context
+	runWG           sync.WaitGroup
+	closing         bool
 	settleMu        sync.Mutex
 	scheduleMu      sync.Mutex
 	mergeMu         sync.Mutex
@@ -183,9 +186,48 @@ func NewService(database *store.Store, secretStore *secrets.FileStore, executor 
 		now:            time.Now,
 		prompts:        prompt.NewEngine(database),
 		cancels:        map[string]context.CancelFunc{},
+		runContext:     context.Background(),
 		mergeDelay:     time.Second,
 		mergeTimers:    map[string]*time.Timer{},
 		sharedContexts: map[string]struct{}{},
+	}
+}
+
+func (s *Service) SetRunContext(ctx context.Context) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.closing && len(s.cancels) == 0 {
+		s.runContext = ctx
+	}
+}
+
+func (s *Service) Shutdown(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	s.mu.Lock()
+	s.closing = true
+	cancels := make([]context.CancelFunc, 0, len(s.cancels))
+	for _, cancel := range s.cancels {
+		cancels = append(cancels, cancel)
+	}
+	s.mu.Unlock()
+	for _, cancel := range cancels {
+		cancel()
+	}
+	done := make(chan struct{})
+	go func() {
+		s.runWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
@@ -1370,11 +1412,23 @@ func resolveProductLine(lines []domain.ProductLine, branches ...string) domain.P
 }
 
 func (s *Service) startTurn(turn domain.Turn) {
-	runContext, cancel := context.WithCancel(context.Background())
 	s.mu.Lock()
+	if s.closing {
+		s.mu.Unlock()
+		return
+	}
+	runContext := s.runContext
+	if runContext == nil {
+		runContext = context.Background()
+	}
+	runContext, cancel := context.WithCancel(runContext)
 	s.cancels[turn.ID] = cancel
+	s.runWG.Add(1)
 	s.mu.Unlock()
-	go s.runTurn(runContext, turn.ID)
+	go func() {
+		defer s.runWG.Done()
+		s.runTurn(runContext, turn.ID)
+	}()
 }
 
 func recoveryContextNeeds(current domain.Turn, turns []domain.Turn, hasReusableSession bool, handoff string) (bool, bool) {

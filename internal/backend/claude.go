@@ -65,6 +65,7 @@ func (adapter Claude) Execute(ctx context.Context, request Request, emit func(Ev
 		Env:        filterClaudeEnvironment(request.Environment),
 		Stdin:      request.Prompt,
 		Timeout:    timeout,
+		KillTree:   true,
 	}, func(line string) {
 		event, parsedReply, parsedSession := parseClaudeLine(line)
 		select {

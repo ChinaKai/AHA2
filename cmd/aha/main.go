@@ -205,6 +205,14 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 		Settings: database,
 	}
 	appService := app.NewService(database, secretStore, executor)
+	appService.SetRunContext(ctx)
+	defer func() {
+		shutdownContext, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := appService.Shutdown(shutdownContext); err != nil {
+			logger.Warn("agent runtime shutdown incomplete", "error", err)
+		}
+	}()
 	appService.SetWorkspacePreparer(execution.WorkspacePreparer{})
 	appService.SetCodexAccountManager(codexAccounts)
 	agentCapabilities := agentapi.NewCapabilities()
@@ -281,6 +289,9 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 	case <-ctx.Done():
 		shutdownContext, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
+		if err := appService.Shutdown(shutdownContext); err != nil {
+			logger.Warn("agent runtime shutdown incomplete", "error", err)
+		}
 		return server.Shutdown(shutdownContext)
 	case err := <-errors:
 		if err == http.ErrServerClosed {

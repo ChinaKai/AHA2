@@ -44,10 +44,10 @@ if (-not $installer.Contains("procedure RemoveLegacyAHA2Service();") -or -not $i
 
 $installStep = $installer.IndexOf("if CurStep = ssInstall then")
 $disableService = $installer.IndexOf("DisableAndStopLegacyAHA2Service(True);", $installStep)
-$stopTask = $installer.IndexOf("StopAHA2UserTask();", $installStep)
-$stopProcesses = $installer.IndexOf("StopInstalledUserProcesses();", $stopTask)
-if ($installStep -lt 0 -or $disableService -le $installStep -or $stopTask -le $disableService -or $stopProcesses -le $stopTask) {
-    throw "Upgrade must disable the legacy service, end the unique task, and stop tray/server before file replacement."
+$stopProcesses = $installer.IndexOf("StopInstalledUserProcesses();", $installStep)
+$stopTask = $installer.IndexOf("StopAHA2UserTask();", $stopProcesses)
+if ($installStep -lt 0 -or $disableService -le $installStep -or $stopProcesses -le $disableService -or $stopTask -le $stopProcesses) {
+    throw "Upgrade must disable the legacy service, kill the complete runtime tree, and then end the unique task before file replacement."
 }
 $postInstall = $installer.IndexOf("else if CurStep = ssPostInstall then")
 $startTask = $installer.IndexOf("if not RunScheduledTask('/Run /TN", $postInstall)
@@ -58,10 +58,10 @@ if ($postInstall -lt 0 -or $startTask -le $postInstall -or $health -le $startTas
     throw "Installer transition must start the tray task, verify health, delete the legacy service best-effort, and then commit."
 }
 $uninstall = $installer.IndexOf("if CurUninstallStep = usUninstall then")
-$uninstallTask = $installer.IndexOf("RemoveAHA2UserTask();", $uninstall)
-$uninstallProcesses = $installer.IndexOf("StopInstalledUserProcesses();", $uninstallTask)
-if ($uninstall -lt 0 -or $uninstallTask -le $uninstall -or $uninstallProcesses -le $uninstallTask) {
-    throw "Uninstall must remove the unique task before stopping tray/server."
+$uninstallProcesses = $installer.IndexOf("StopInstalledUserProcesses();", $uninstall)
+$uninstallTask = $installer.IndexOf("RemoveAHA2UserTask();", $uninstallProcesses)
+if ($uninstall -lt 0 -or $uninstallProcesses -le $uninstall -or $uninstallTask -le $uninstallProcesses) {
+    throw "Uninstall must kill the complete runtime tree before removing the unique task."
 }
 
 $taskScriptPath = Join-Path $repo "installer\windows\Register-AHA2UserTask.ps1"
@@ -100,7 +100,7 @@ try {
 
 $userDeployPath = Join-Path $repo "scripts\deploy-windows-user.ps1"
 $userDeploy = Get-Content -Raw -Encoding UTF8 -LiteralPath $userDeployPath
-foreach ($contract in @("Per-user install directory must stay under LOCALAPPDATA", "-PerUser", "ElevationRequired=`$false", "AHA2-Setup-User-x64.exe", "Wait-AHA2Health", "Get-FileHash", "AHA2 User")) {
+foreach ($contract in @("Per-user install directory must stay under LOCALAPPDATA", "-PerUser", "ElevationRequired=`$false", "AHA2-Setup-User-x64.exe", "Wait-AHA2Health", "Get-FileHash", "AHA2 User", "Stop-AHA2ProcessTrees", "taskkill.exe", "/T")) {
     if (-not $userDeploy.Contains($contract)) {
         throw "Per-user deployment contract is missing: $contract"
     }
@@ -142,6 +142,9 @@ foreach ($contract in @("AHA2 User", "aha2-tray.exe", "--server", "aha2.exe", '`
     if (-not $deployment.Contains($contract)) {
         throw "Windows deployment documentation is missing: $contract"
     }
+}
+foreach ($contract in @("taskkill.exe", "/T", "backend CLI")) {
+  if ($installer -notmatch [regex]::Escape($contract)) { throw "Installer process-tree shutdown contract is missing: $contract" }
 }
 foreach ($forbidden in @("delayed-auto Windows", "aha2.exe service run --listen", "wscript.exe", "Run-AHA2User.vbs")) {
     if ($deployment.Contains($forbidden)) {

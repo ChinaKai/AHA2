@@ -33,6 +33,7 @@ func (runner WSLRunner) Run(parent context.Context, command Command, onLine Line
 		Args:       []string{"-d", distro, "--", "bash", "-s"},
 		Stdin:      script,
 		Timeout:    command.Timeout,
+		KillTree:   command.KillTree,
 	}, wslHostEnvironment(), onLine)
 }
 

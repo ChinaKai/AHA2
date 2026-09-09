@@ -32,11 +32,13 @@ func (claudeErrorRunner) Run(_ context.Context, _ workspace.Command, onLine work
 }
 
 type claudeArgsRunner struct {
-	args []string
+	args     []string
+	killTree bool
 }
 
 func (runner *claudeArgsRunner) Run(_ context.Context, command workspace.Command, onLine workspace.LineHandler) (workspace.Result, error) {
 	runner.args = append([]string(nil), command.Args...)
+	runner.killTree = command.KillTree
 	onLine(`{"type":"result","subtype":"success","result":"done","session_id":"sess-args"}`)
 	return workspace.Result{ExitCode: 0}, nil
 }
@@ -96,6 +98,9 @@ func TestClaudeDisablesNativeAgentTools(t *testing.T) {
 	}, nil)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !runner.killTree {
+		t.Fatal("Claude backend descendants would survive turn or service cancellation")
 	}
 	joined := strings.Join(runner.args, " ")
 	if !strings.Contains(joined, "--disallowedTools Task,Agent") {

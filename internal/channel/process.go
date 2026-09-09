@@ -3,7 +3,9 @@ package channel
 import (
 	"bufio"
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -11,6 +13,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/ChinaKai/AHA2/internal/domain"
 )
 
 type managedPluginProcess struct {
@@ -121,9 +125,9 @@ func (s *Service) ensurePluginProcess(instanceID, rawCapability string) error {
 		PluginID: plugin.ID, ProviderKey: plugin.ProviderKey, InstanceID: instance.ID, Capability: rawCapability,
 		AppID: instance.AppID, TenantBrand: strings.TrimSpace(fmt.Sprint(instance.Config["tenant_brand"])),
 	}
-	if instance.Status == "onboarding" {
-		_, ownerErr := s.store.ChannelOwnerIdentity(runCtx, instance.ID)
-		bootstrap.Registration = ownerErr != nil
+	bootstrap.Registration, err = s.registrationProcessRequired(runCtx, instance)
+	if err != nil {
+		return err
 	}
 	if instance.CredentialConfigured && instance.CredentialRef != "" && s.secrets != nil {
 		bootstrap.AppSecret, _ = s.secrets.Get(instance.CredentialRef)
@@ -207,6 +211,20 @@ func (s *Service) ensurePluginProcess(instanceID, rawCapability string) error {
 		}
 	}()
 	return nil
+}
+
+func (s *Service) registrationProcessRequired(ctx context.Context, instance domain.ChannelInstance) (bool, error) {
+	if instance.Status != "onboarding" {
+		return false, nil
+	}
+	_, err := s.store.ActiveChannelOnboarding(ctx, instance.ID)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return false, err
 }
 
 func minInt(left, right int) int {

@@ -182,6 +182,19 @@ func TestDiscoverAndCreateInstanceIsOptionalAndIdempotent(t *testing.T) {
 	if _, err := database.BindChannelOwnerIdentity(ctx, domain.ChannelIdentityLink{ID: "other-owner", InstanceID: item.ID, OwnerID: owner.ID, ExternalUserID: "different-scanner", Role: "owner", Status: "active", LinkedAt: now}); err == nil {
 		t.Fatal("second active channel owner was accepted")
 	}
+	reauthorization := domain.ChannelOnboardingSession{
+		ID: "onboarding-reauthorize", InstanceID: item.ID, OwnerSessionID: "", Mode: "existing_app",
+		RegistrationCommandID: "register-command-reauthorize", Status: "pending", Step: "starting_registration",
+		ExpiresAt: now.Add(time.Hour), CreatedAt: now.Add(time.Minute), UpdatedAt: now.Add(time.Minute),
+	}
+	if err := database.CreateChannelOnboarding(ctx, reauthorization); err != nil {
+		t.Fatal(err)
+	}
+	registered.Status = "onboarding"
+	required, err := service.registrationProcessRequired(ctx, registered)
+	if err != nil || !required {
+		t.Fatalf("existing-owner reauthorization must use registration process: required=%v err=%v", required, err)
+	}
 }
 
 func TestMissingPluginDoesNotPreventEmptyProviderList(t *testing.T) {

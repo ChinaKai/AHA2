@@ -20,6 +20,26 @@ func (idleCodexRunner) Run(ctx context.Context, _ workspace.Command, _ workspace
 	return workspace.Result{ExitCode: 1}, ctx.Err()
 }
 
+type codexCommandRunner struct{ command workspace.Command }
+
+func (runner *codexCommandRunner) Run(_ context.Context, command workspace.Command, onLine workspace.LineHandler) (workspace.Result, error) {
+	runner.command = command
+	onLine(`{"type":"thread.started","thread_id":"session-tree"}`)
+	onLine(`{"type":"item.completed","item":{"type":"agent_message","text":"done"}}`)
+	return workspace.Result{ExitCode: 0}, nil
+}
+
+func TestCodexExecutionAlwaysOwnsTheBackendProcessTree(t *testing.T) {
+	t.Parallel()
+	runner := &codexCommandRunner{}
+	if _, err := (Codex{}).Execute(context.Background(), Request{Runner: runner, WorkDir: t.TempDir()}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !runner.command.KillTree {
+		t.Fatal("Codex backend descendants would survive turn or service cancellation")
+	}
+}
+
 func TestCodexIdleWatchdogReportsAndCancels(t *testing.T) {
 	events := []string{}
 	_, err := (Codex{IdleWarning: 10 * time.Millisecond, IdleTimeout: 35 * time.Millisecond, Heartbeat: 10 * time.Millisecond}).Execute(
