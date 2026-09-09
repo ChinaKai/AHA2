@@ -159,7 +159,14 @@ func TestAgentStateKnowledgeAndSkillAPIs(t *testing.T) {
 	server := httptest.NewServer(New(Config{Store: database, App: service, AgentCapabilities: capabilities}).Handler())
 	defer server.Close()
 
-	response := agentRequest(t, server.URL+"/api/v1/agent/project/workspaces", http.MethodGet, token, nil)
+	response := agentRequest(t, server.URL+"/api/v1/agent/capabilities", http.MethodGet, token, nil)
+	var capabilitiesPayload map[string]any
+	decodeResponse(t, response, &capabilitiesPayload)
+	if response.StatusCode != http.StatusOK || capabilitiesPayload["capabilities"].(map[string]any)["skill_create"] != true {
+		t.Fatalf("skill create capability status=%d payload=%#v", response.StatusCode, capabilitiesPayload)
+	}
+
+	response = agentRequest(t, server.URL+"/api/v1/agent/project/workspaces", http.MethodGet, token, nil)
 	if response.StatusCode != http.StatusForbidden {
 		t.Fatalf("default project capability status=%d", response.StatusCode)
 	}
@@ -307,6 +314,27 @@ func TestAgentStateKnowledgeAndSkillAPIs(t *testing.T) {
 	}
 	if response.StatusCode != http.StatusOK || rootCount != 2 || pendingVisible {
 		t.Fatalf("applicable knowledge roots=%d payload=%#v", rootCount, knowledgePayload)
+	}
+
+	response = agentRequest(t, server.URL+"/api/v1/agent/skills", http.MethodPost, token, map[string]any{
+		"name": "Release checks", "description": "Verify an AHA2 release", "instructions": "Run the release verification suite.",
+	})
+	var createdSkillPayload map[string]any
+	decodeResponse(t, response, &createdSkillPayload)
+	createdSkill := createdSkillPayload["skill"].(map[string]any)
+	createdSkillID := createdSkill["id"].(string)
+	if response.StatusCode != http.StatusCreated || createdSkill["scope"] != "project" || createdSkill["project_id"] != task.ProjectID || createdSkill["version"] != float64(1) {
+		t.Fatalf("created skill status=%d payload=%#v", response.StatusCode, createdSkillPayload)
+	}
+	updatedTask, err := database.Task(ctx, task.ID)
+	if err != nil || len(updatedTask.SkillIDs) != 2 || updatedTask.SkillIDs[1] != createdSkillID {
+		t.Fatalf("created skill was not selected: task=%#v err=%v", updatedTask, err)
+	}
+	response = agentRequest(t, server.URL+"/api/v1/agent/skills/"+createdSkillID, http.MethodGet, token, nil)
+	var selectedSkillPayload map[string]any
+	decodeResponse(t, response, &selectedSkillPayload)
+	if response.StatusCode != http.StatusOK || selectedSkillPayload["skill"].(map[string]any)["id"] != createdSkillID {
+		t.Fatalf("created skill was not immediately readable: status=%d payload=%#v", response.StatusCode, selectedSkillPayload)
 	}
 
 	response = agentRequest(t, server.URL+"/api/v1/agent/skills/"+skill.ID, http.MethodPut, token, map[string]any{

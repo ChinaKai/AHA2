@@ -83,6 +83,9 @@ test("Agent API settings support global defaults and Workspace reverse probes", 
   }
   assert.match(script, /api\.agentAPISettings\(\)/);
   assert.match(script, /api\.updateAgentAPISettings/);
+  assert.match(script, /detectWorkspaceWithHostKeyTrust/);
+  assert.match(script, /首次连接 SSH Workspace/);
+  assert.match(api, /workspaces\/.*\/host-key\/trust/);
   assert.match(script, /agent_api_status === "ready"/);
   assert.match(api, /settings\/agent-api/);
   assert.match(styles, /\.workspace-agent-api-fields/);
@@ -338,6 +341,9 @@ test("built web contains responsive application", async () => {
   assert.match(script, /codex_account_id/);
   assert.match(script, /wire_model/);
   assert.match(api, /codex-accounts\/.*\/refresh/);
+  assert.match(api, /codex-accounts\/import-local/);
+  assert.match(codexAccounts, /importLocalCodexAccount/);
+  assert.match(codexAccounts, /import-local-codex-account/);
   assert.match(codexAccounts, /submitCodexCallback/);
   assert.match(codexAccounts, /Callback URL/);
   assert.match(codexAccounts, /正在校验 Callback 并添加账号/);

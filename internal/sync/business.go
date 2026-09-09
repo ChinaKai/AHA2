@@ -42,6 +42,23 @@ type skillPayload struct {
 	Files []domain.SkillFile `json:"files"`
 }
 
+// modelPayload keeps the runtime-only default env association portable without
+// exposing it through the browser-facing domain.Model JSON representation.
+type modelPayload struct {
+	domain.Model
+	DefaultEnvGroupID string `json:"default_env_group_id,omitempty"`
+}
+
+func portableModel(value domain.Model) modelPayload {
+	return modelPayload{Model: value, DefaultEnvGroupID: value.DefaultEnvGroupID}
+}
+
+func (value modelPayload) model() domain.Model {
+	result := value.Model
+	result.DefaultEnvGroupID = value.DefaultEnvGroupID
+	return result
+}
+
 func payloadIdempotencyKey(kind, id, format string, payload json.RawMessage) string {
 	hash := sha256.Sum256(payload)
 	return fmt.Sprintf("%s:%s:%s:%x", kind, format, id, hash[:12])
@@ -214,7 +231,7 @@ func ExportBusinessObjectsForDevice(ctx context.Context, database *store.Store, 
 	for _, v := range models {
 		v.CodexAccountID = ""
 		v.ProviderName = ""
-		if err := add(TypeModel, v.ID, timeVersion(v.UpdatedAt), v); err != nil {
+		if err := add(TypeModel, v.ID, timeVersion(v.UpdatedAt), portableModel(v)); err != nil {
 			return nil, err
 		}
 	}
@@ -409,7 +426,7 @@ func currentBusinessObject(ctx context.Context, database *store.Store, kind, id 
 		v, err = database.Model(ctx, id)
 		v.CodexAccountID = ""
 		v.ProviderName = ""
-		value = v
+		value = portableModel(v)
 		version = timeVersion(v.UpdatedAt)
 	case TypeEnvGroup:
 		var v domain.EnvGroup
@@ -599,10 +616,11 @@ func upsertBusinessObject(ctx context.Context, database *store.Store, obj domain
 		}
 		return database.UpsertProvider(ctx, v)
 	case TypeModel:
-		var v domain.Model
-		if err := decodePayload(obj, &v); err != nil {
+		var payload modelPayload
+		if err := decodePayload(obj, &payload); err != nil {
 			return err
 		}
+		v := payload.model()
 		v.ID = obj.ID
 		if exists {
 			local, err := database.Model(ctx, obj.ID)
@@ -610,6 +628,11 @@ func upsertBusinessObject(ctx context.Context, database *store.Store, obj domain
 				return err
 			}
 			v.CodexAccountID = local.CodexAccountID
+			// Payloads emitted before default_env_group_id became portable must
+			// not erase an already valid local association.
+			if v.DefaultEnvGroupID == "" {
+				v.DefaultEnvGroupID = local.DefaultEnvGroupID
+			}
 		}
 		return database.UpsertModel(ctx, v)
 	case TypeEnvGroup:

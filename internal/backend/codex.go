@@ -226,15 +226,7 @@ func (adapter Codex) ensureModelCatalog(ctx context.Context, request Request) st
 	}
 	dir := pathpkg.Join(strings.ReplaceAll(request.WorkDir, `\`, "/"), ".aha2-context", "runtime", "codex-models")
 	path := pathpkg.Join(dir, name)
-	result, err := request.Runner.Run(ctx, workspace.Command{
-		Executable: "sh",
-		Args: []string{
-			"-c", `umask 077; mkdir -p "$1"; cat > "$2"`,
-			"aha2-catalog", dir, path,
-		},
-		Dir: request.WorkDir, Stdin: string(payload), Timeout: 20 * time.Second,
-	}, nil)
-	if err != nil || result.ExitCode != 0 {
+	if err := workspace.WriteRemoteTextFile(ctx, request.Runner, path, string(payload)); err != nil {
 		return ""
 	}
 	return path
@@ -253,12 +245,19 @@ func (adapter Codex) readModelsCache(ctx context.Context, request Request) ([]by
 		raw, _ := os.ReadFile(cachePath)
 		return raw, true
 	}
-	result, err := request.Runner.Run(ctx, workspace.Command{
-		Executable: "sh",
-		Args:       []string{"-c", `cat "$HOME/.codex/models_cache.json"`},
-		Dir:        request.WorkDir,
-		Timeout:    20 * time.Second,
-	}, nil)
+	command := workspace.Command{
+		Executable: "sh", Args: []string{"-c", `cat "$HOME/.codex/models_cache.json"`},
+		Dir: request.WorkDir, Timeout: 20 * time.Second,
+	}
+	if workspace.IsWindowsRunner(request.Runner) {
+		command = workspace.Command{
+			Executable: "powershell.exe",
+			Args: []string{"-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+				`[Console]::Out.Write([IO.File]::ReadAllText((Join-Path $HOME '.codex\models_cache.json'))) `},
+			Dir: request.WorkDir, Timeout: 20 * time.Second,
+		}
+	}
+	result, err := request.Runner.Run(ctx, command, nil)
 	if err != nil || result.ExitCode != 0 {
 		return nil, false
 	}

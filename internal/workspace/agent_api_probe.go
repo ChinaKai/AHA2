@@ -49,9 +49,8 @@ func probeAgentAPIWithRunner(ctx context.Context, item domain.Workspace, baseURL
 		}
 		body = string(data)
 	} else {
-		result, err := runDetectionCommand(ctx, item, runner, Command{
-			Executable: "sh",
-			Args: []string{"-c", `set -eu
+		command := Command{
+			Executable: "sh", Args: []string{"-c", `set -eu
 export NO_PROXY='*' no_proxy='*'
 probe_url="$1/healthz"
 if command -v curl >/dev/null 2>&1; then
@@ -69,7 +68,18 @@ fi
 echo 'curl、wget 或 Python 均不可用' >&2
 exit 127`, "aha-agent-api-probe", baseURL},
 			Dir: item.RootPath, Timeout: 8 * time.Second, OutputLimit: 4096,
-		})
+		}
+		if IsWindowsWorkspace(item) {
+			command = Command{
+				Executable: "powershell.exe",
+				Args: []string{"-NoLogo", "-NoProfile", "-NonInteractive", "-Command", `param([string]$URL)
+$ProgressPreference = 'SilentlyContinue'
+$response = Invoke-WebRequest -UseBasicParsing -Uri ($URL.TrimEnd('/') + '/healthz') -TimeoutSec 5
+[Console]::Out.Write($response.Content)`, baseURL},
+				Dir: item.RootPath, Timeout: 8 * time.Second, OutputLimit: 4096,
+			}
+		}
+		result, err := runDetectionCommand(ctx, item, runner, command)
 		if err != nil {
 			return err
 		}
@@ -100,7 +110,16 @@ func agentAPIHostCandidatesWithRunner(ctx context.Context, item domain.Workspace
 	if item.Transport != "wsl" && item.Transport != "ssh" {
 		return nil
 	}
-	script := `set -eu
+	command := Command{}
+	if IsWindowsWorkspace(item) {
+		command = Command{
+			Executable: "powershell.exe",
+			Args: []string{"-NoLogo", "-NoProfile", "-NonInteractive", "-Command", `$parts = ($env:SSH_CONNECTION -split '\s+')
+if ($parts.Length -ge 1) { [Console]::Out.WriteLine($parts[0]) }`},
+			Dir: item.RootPath, Timeout: 8 * time.Second, OutputLimit: 4096,
+		}
+	} else {
+		script := `set -eu
 if [ "${1:-}" = "ssh" ]; then
   set -- ${SSH_CONNECTION:-}
   [ "$#" -ge 1 ] && printf '%s\n' "$1"
@@ -110,10 +129,12 @@ if command -v ip >/dev/null 2>&1; then
   ip route show default 2>/dev/null | awk 'NR==1 {print $3}'
 fi
 awk '/^nameserver[[:space:]]+/ {print $2; exit}' /etc/resolv.conf 2>/dev/null || true`
-	result, err := runDetectionCommand(ctx, item, runner, Command{
-		Executable: "sh", Args: []string{"-c", script, "aha-agent-api-hosts", item.Transport},
-		Dir: item.RootPath, Timeout: 8 * time.Second, OutputLimit: 4096,
-	})
+		command = Command{
+			Executable: "sh", Args: []string{"-c", script, "aha-agent-api-hosts", item.Transport},
+			Dir: item.RootPath, Timeout: 8 * time.Second, OutputLimit: 4096,
+		}
+	}
+	result, err := runDetectionCommand(ctx, item, runner, command)
 	if err != nil || result.ExitCode != 0 {
 		return nil
 	}

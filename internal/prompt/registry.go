@@ -281,8 +281,7 @@ func contextRootFor(input BuildInput, workDir string) string {
 	if input.Workspace.Transport == "native" {
 		return filepath.Join(workDir, ".aha2-context", input.Task.ID, safeAgentID(input.Agent.AgentID))
 	}
-	workDir = strings.ReplaceAll(workDir, "\\", "/")
-	return path.Join(workDir, ".aha2-context", input.Task.ID, safeAgentID(input.Agent.AgentID))
+	return joinRemoteContextPath(workDir, ".aha2-context", input.Task.ID, safeAgentID(input.Agent.AgentID))
 }
 
 func taskSummary(input BuildInput, workDir string) string {
@@ -395,7 +394,22 @@ func joinContextPath(input BuildInput, values ...string) string {
 	if input.Workspace.Transport == "native" {
 		return filepath.Join(values...)
 	}
-	return path.Join(values...)
+	return joinRemoteContextPath(values...)
+}
+
+func joinRemoteContextPath(values ...string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	first := strings.ReplaceAll(values[0], "\\", "/")
+	unc := strings.HasPrefix(first, "//")
+	values = append([]string(nil), values...)
+	values[0] = first
+	joined := path.Join(values...)
+	if unc {
+		return "//" + strings.TrimPrefix(joined, "/")
+	}
+	return joined
 }
 
 func resource(input BuildInput, id, path, description, content string) ContextResource {
@@ -842,10 +856,11 @@ Only Main may change Memory, propose Knowledge revisions, change Skills, or requ
 - POST /api/v1/agent/knowledge/candidates with {"candidates":[{"entry_id":"","base_revision":0,"scope":"project","parent_id":"","slug":"topic","sort_order":0,"is_index":false,"type":"practice","title":"...","body":"...","confidence":0.8,"product_line_id":""}]}
 - POST /api/v1/agent/knowledge/{id}/feedback with {"kind":"helped|stale|wrong"}
 - GET /api/v1/agent/skills
+- POST /api/v1/agent/skills with {"name":"...","description":"...","instructions":"..."}
 - GET /api/v1/agent/skills/{id}
 - PUT /api/v1/agent/skills/{id} with {"base_version":1,"name":"...","description":"...","files":[{"path":"SKILL.md","content":"..."}]}
 
-For an existing Knowledge entry, base_revision is required and conflicts return HTTP 409. Candidate responses retain the knowledge field and include proposals with review_mode and current status; only status=approved/knowledge status=verified means the revision is usable. Skill updates replace the complete text package, require its current base_version, and are limited to Skills selected by this Task.
+For an existing Knowledge entry, base_revision is required and conflicts return HTTP 409. Candidate responses retain the knowledge field and include proposals with review_mode and current status; only status=approved/knowledge status=verified means the revision is usable. A created Skill is project-scoped, enabled, and automatically selected for the current Task; it is available through the API immediately and materialized into context on the next Turn. Skill updates replace the complete text package, require its current base_version, and are limited to Skills selected by this Task.
 
 ## Managed processes
 

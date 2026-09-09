@@ -21,7 +21,7 @@ func (s *Server) agentCapabilitiesInfo(writer http.ResponseWriter, request *http
 	main := call.Turn.AgentID == "main"
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "capabilities": map[string]bool{
 		"progress": true, "knowledge_read": true, "knowledge_feedback": true,
-		"memory_update": main, "knowledge_publish": main, "skill_update": main,
+		"memory_update": main, "knowledge_publish": main, "skill_create": main, "skill_update": main,
 		"workspace_read": main && call.Task.AgentCapabilities["workspace_read"],
 		"task_create":    main && call.Task.AgentCapabilities["task_create"],
 		"clone_hardware": main && call.Task.AgentCapabilities["clone_hardware"],
@@ -220,6 +220,22 @@ func (s *Server) agentSkills(writer http.ResponseWriter, request *http.Request) 
 		return
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "skills": items})
+}
+
+func (s *Server) createAgentSkill(writer http.ResponseWriter, request *http.Request) {
+	claims, _ := agentClaimsFromContext(request.Context())
+	var payload app.AgentSkillCreateInput
+	if decodeJSON(request, &payload) != nil {
+		writeError(writer, http.StatusBadRequest, "skill_create_invalid")
+		return
+	}
+	item, err := s.app.CreateAgentSkill(request.Context(), claims, payload)
+	if err != nil {
+		writeAgentControlError(writer, err)
+		return
+	}
+	s.audit(request, "agent.skill.create", "skill", item.ID, map[string]any{"version": item.Version, "project_id": item.ProjectID})
+	writeJSON(writer, http.StatusCreated, map[string]any{"ok": true, "skill": item})
 }
 
 func (s *Server) agentSkill(writer http.ResponseWriter, request *http.Request) {

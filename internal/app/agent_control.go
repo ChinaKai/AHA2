@@ -36,6 +36,12 @@ type AgentTaskCreateInput struct {
 	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 }
 
+type AgentSkillCreateInput struct {
+	Name         string `json:"name"`
+	Description  string `json:"description"`
+	Instructions string `json:"instructions"`
+}
+
 type AgentRuntimeOption struct {
 	Backend          string   `json:"backend"`
 	ModelSource      string   `json:"model_source"`
@@ -238,6 +244,34 @@ func (s *Service) SelectedAgentSkills(ctx context.Context, claims agentapi.Claim
 		return nil, AgentCallContext{}, err
 	}
 	return s.activeTaskSkills(ctx, call.Task), call, nil
+}
+
+func (s *Service) CreateAgentSkill(ctx context.Context, claims agentapi.Claims, input AgentSkillCreateInput) (domain.Skill, error) {
+	call, err := s.AgentCallContext(ctx, claims, true)
+	if err != nil {
+		return domain.Skill{}, err
+	}
+	input.Name = strings.TrimSpace(input.Name)
+	input.Description = strings.TrimSpace(input.Description)
+	input.Instructions = strings.TrimSpace(input.Instructions)
+	if input.Name == "" || input.Instructions == "" {
+		return domain.Skill{}, fmt.Errorf("skill name and instructions are required")
+	}
+	now := s.now().UTC()
+	item := domain.Skill{
+		ID: domain.NewID("skill"), Scope: "project", ProjectID: call.Project.ID,
+		Name: input.Name, Description: input.Description, Instructions: input.Instructions,
+		Version: 1, Status: "active", Enabled: true, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := s.store.CreateSkill(ctx, item); err != nil {
+		return domain.Skill{}, err
+	}
+	skillIDs := append(append([]string(nil), call.Task.SkillIDs...), item.ID)
+	if _, err := s.UpdateTaskSkills(ctx, call.Task.ID, skillIDs); err != nil {
+		_ = s.store.DeleteSkill(ctx, item.ID)
+		return domain.Skill{}, err
+	}
+	return s.store.Skill(ctx, item.ID)
 }
 
 func (s *Service) ApplicableAgentKnowledge(ctx context.Context, claims agentapi.Claims) ([]domain.KnowledgeEntry, error) {

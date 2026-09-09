@@ -40,11 +40,223 @@ func MaterializeContext(
 	return materializeRemoteContext(ctx, item, runner, root, files)
 }
 
+// PruneSharedContexts removes obsolete immutable shared Context snapshots next
+// to currentRoot. The boundary is deliberately narrower than .aha2-context:
+// only direct children of the same Task directory whose names match the
+// generated shared snapshot format are eligible for removal.
+func PruneSharedContexts(
+	ctx context.Context,
+	item domain.Workspace,
+	workDir string,
+	currentRoot string,
+	keepRoots []string,
+) error {
+	currentRoot = cleanContextPath(item, currentRoot)
+	taskRoot, currentName, err := sharedContextLocation(item, currentRoot)
+	if err != nil {
+		return fmt.Errorf("context prune stage: %w", err)
+	}
+	if !taskContextRootBelongsToWorkDir(item, workDir, taskRoot) {
+		return fmt.Errorf("context prune stage: refusing to prune outside workspace Context root: %s", taskRoot)
+	}
+	keepNames := make(map[string]struct{}, len(keepRoots)+1)
+	keepNames[contextNameKey(item, currentName)] = struct{}{}
+	for _, root := range keepRoots {
+		root = cleanContextPath(item, root)
+		parent, name, err := sharedContextLocation(item, root)
+		if err != nil || !sameContextPath(item, parent, taskRoot) {
+			continue
+		}
+		keepNames[contextNameKey(item, name)] = struct{}{}
+	}
+
+	if item.Transport == "native" {
+		if err := pruneLocalSharedContexts(taskRoot, keepNames); err != nil {
+			return fmt.Errorf("context prune stage: %w", err)
+		}
+		return nil
+	}
+	runner := retryRemoteContextRunner(item, RunnerFor(item))
+	if err := pruneRemoteSharedContexts(ctx, item, workDir, runner, taskRoot, keepNames); err != nil {
+		return fmt.Errorf("context prune stage: %w", err)
+	}
+	return nil
+}
+
+func cleanContextPath(item domain.Workspace, value string) string {
+	if item.Transport == "native" {
+		return filepath.Clean(value)
+	}
+	value = strings.ReplaceAll(value, "\\", "/")
+	if strings.HasPrefix(value, "//") {
+		return "//" + strings.TrimPrefix(path.Clean(strings.TrimPrefix(value, "//")), "/")
+	}
+	return path.Clean(value)
+}
+
+func sharedContextLocation(item domain.Workspace, root string) (string, string, error) {
+	var taskRoot, name string
+	if item.Transport == "native" {
+		taskRoot, name = filepath.Dir(root), filepath.Base(root)
+	} else {
+		name = path.Base(root)
+		if strings.HasPrefix(root, "//") {
+			taskRoot = "//" + strings.TrimPrefix(path.Dir(strings.TrimPrefix(root, "//")), "/")
+		} else {
+			taskRoot = path.Dir(root)
+		}
+	}
+	if !isSharedContextName(name) || !isContextTaskRoot(taskRoot) {
+		return "", "", fmt.Errorf("refusing to prune invalid shared context root: %s", root)
+	}
+	return taskRoot, name, nil
+}
+
+func isContextTaskRoot(root string) bool {
+	cleaned := strings.Trim(strings.ReplaceAll(filepath.Clean(root), "\\", "/"), "/")
+	parts := strings.Split(cleaned, "/")
+	return len(parts) >= 2 && parts[len(parts)-2] == ".aha2-context" &&
+		parts[len(parts)-1] != "" && parts[len(parts)-1] != "runtime"
+}
+
+func taskContextRootBelongsToWorkDir(item domain.Workspace, workDir, taskRoot string) bool {
+	if item.Transport == "native" {
+		absoluteWorkDir, err := filepath.Abs(workDir)
+		if err != nil {
+			return false
+		}
+		absoluteTaskRoot, err := filepath.Abs(taskRoot)
+		if err != nil {
+			return false
+		}
+		return filepath.Clean(filepath.Dir(absoluteTaskRoot)) == filepath.Join(filepath.Clean(absoluteWorkDir), ".aha2-context")
+	}
+	workDir = path.Clean(strings.ReplaceAll(workDir, "\\", "/"))
+	expectedParent := path.Join(workDir, ".aha2-context")
+	return sameContextPath(item, path.Dir(taskRoot), expectedParent)
+}
+
+func isSharedContextName(name string) bool {
+	const prefix = "shared-"
+	if !strings.HasPrefix(name, prefix) || len(name) != len(prefix)+sha256HexLength {
+		return false
+	}
+	for _, value := range name[len(prefix):] {
+		if value < '0' || value > '9' {
+			if value < 'a' || value > 'f' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+const sha256HexLength = 64
+
+func contextNameKey(item domain.Workspace, name string) string {
+	if item.Transport == "native" || IsWindowsWorkspace(item) {
+		return strings.ToLower(name)
+	}
+	return name
+}
+
+func sameContextPath(item domain.Workspace, left, right string) bool {
+	if item.Transport == "native" || IsWindowsWorkspace(item) {
+		return strings.EqualFold(left, right)
+	}
+	return left == right
+}
+
+func pruneLocalSharedContexts(taskRoot string, keepNames map[string]struct{}) error {
+	entries, err := os.ReadDir(taskRoot)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() || !isSharedContextName(entry.Name()) {
+			continue
+		}
+		if _, keep := keepNames[strings.ToLower(entry.Name())]; keep {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(taskRoot, entry.Name())); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func pruneRemoteSharedContexts(
+	ctx context.Context,
+	item domain.Workspace,
+	workDir string,
+	runner Runner,
+	taskRoot string,
+	keepNames map[string]struct{},
+) error {
+	names := make([]string, 0, len(keepNames))
+	for name := range keepNames {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	if IsWindowsWorkspace(item) {
+		result, err := runner.Run(ctx, Command{
+			Executable: "powershell.exe",
+			Args: append([]string{"-NoLogo", "-NoProfile", "-NonInteractive", "-Command", `param([string]$TaskRoot,[string[]]$Keep)
+if (-not (Test-Path -LiteralPath $TaskRoot -PathType Container)) { exit 0 }
+Get-ChildItem -LiteralPath $TaskRoot -Directory | Where-Object {
+  $_.Name -match '^shared-[0-9a-f]{64}$' -and $Keep -notcontains $_.Name
+} | Remove-Item -Recurse -Force`, taskRoot}, names...),
+			Dir: workDir, Timeout: 30 * time.Second,
+		}, nil)
+		if err != nil {
+			return err
+		}
+		if result.ExitCode != 0 {
+			return fmt.Errorf("prune remote Windows Context: %s", remoteCommandDetail(result))
+		}
+		return nil
+	}
+	result, err := runner.Run(ctx, Command{
+		Executable: "sh",
+		Args: append([]string{"-c", `set -eu
+task_root=$1
+shift
+[ -d "$task_root" ] || exit 0
+for candidate in "$task_root"/shared-*; do
+  [ -d "$candidate" ] || continue
+  name=${candidate##*/}
+  suffix=${name#shared-}
+  [ ${#suffix} -eq 64 ] || continue
+  case "$suffix" in *[!0-9a-f]*) continue ;; esac
+  keep=false
+  for retained in "$@"; do
+    if [ "$name" = "$retained" ]; then keep=true; break; fi
+  done
+  [ "$keep" = true ] || rm -rf -- "$candidate"
+done`, "aha-context-prune", taskRoot}, names...),
+		Dir: workDir, Timeout: 30 * time.Second,
+	}, nil)
+	if err != nil {
+		return err
+	}
+	if result.ExitCode != 0 {
+		return fmt.Errorf("prune remote Context: %s", strings.TrimSpace(result.Stderr))
+	}
+	return nil
+}
+
 func materializeRemoteContext(ctx context.Context, item domain.Workspace, runner Runner, root string, files map[string]string) error {
 	err := func() error {
 		root = path.Clean(strings.ReplaceAll(root, "\\", "/"))
 		if !isContextMaterializationRoot(root) {
 			return fmt.Errorf("refusing to reset invalid context root: %s", root)
+		}
+		if IsWindowsWorkspace(item) {
+			return materializeWindowsRemoteContext(ctx, runner, root, files)
 		}
 		archive, err := remoteContextArchive(root, files)
 		if err != nil {
@@ -68,6 +280,40 @@ func materializeRemoteContext(ctx context.Context, item domain.Workspace, runner
 	}()
 	if err != nil {
 		return fmt.Errorf("context reset-or-write stage: %w", err)
+	}
+	return nil
+}
+
+func materializeWindowsRemoteContext(ctx context.Context, runner Runner, root string, files map[string]string) error {
+	reset := Command{
+		Executable: "powershell.exe",
+		Args: []string{"-NoLogo", "-NoProfile", "-NonInteractive", "-Command", `param([string]$Root)
+if (Test-Path -LiteralPath $Root) { Remove-Item -LiteralPath $Root -Recurse -Force }
+[IO.Directory]::CreateDirectory($Root) | Out-Null`, root},
+		Timeout: 30 * time.Second,
+	}
+	result, err := runner.Run(ctx, reset, nil)
+	if err != nil {
+		return err
+	}
+	if result.ExitCode != 0 {
+		return fmt.Errorf("reset remote context: %s", remoteCommandDetail(result))
+	}
+	targets := make([]string, 0, len(files))
+	validated := make(map[string]string, len(files))
+	for target, content := range files {
+		target = path.Clean(strings.ReplaceAll(target, "\\", "/"))
+		if target == root || !strings.HasPrefix(strings.ToLower(target), strings.ToLower(root+"/")) {
+			return fmt.Errorf("context path escapes root: %s", target)
+		}
+		targets = append(targets, target)
+		validated[target] = content
+	}
+	sort.Strings(targets)
+	for _, target := range targets {
+		if err := WriteRemoteTextFile(ctx, runner, target, validated[target]); err != nil {
+			return fmt.Errorf("write context file %s: %w", target, err)
+		}
 	}
 	return nil
 }
@@ -207,8 +453,26 @@ func ensureRemoteContextIgnored(ctx context.Context, item domain.Workspace, work
 		if exclude == "." || exclude == "" {
 			return nil
 		}
-		if !path.IsAbs(exclude) {
+		if !remotePathIsAbs(item, exclude) {
 			exclude = path.Join(workDir, exclude)
+		}
+		if IsWindowsWorkspace(item) {
+			result, err := runner.Run(ctx, Command{
+				Executable: "powershell.exe",
+				Args: []string{"-NoLogo", "-NoProfile", "-NonInteractive", "-Command", `param([string]$Target)
+$parent = [IO.Path]::GetDirectoryName($Target)
+if ($parent) { [IO.Directory]::CreateDirectory($parent) | Out-Null }
+$present = (Test-Path -LiteralPath $Target) -and ((Get-Content -LiteralPath $Target) -contains '.aha2-context/')
+if (-not $present) { [IO.File]::AppendAllText($Target, [Environment]::NewLine + '.aha2-context/' + [Environment]::NewLine) }`, exclude},
+				Dir: workDir, Timeout: 20 * time.Second,
+			}, nil)
+			if err != nil {
+				return fmt.Errorf("configure context ignore: %w", err)
+			}
+			if result.ExitCode != 0 {
+				return fmt.Errorf("configure context ignore: %s", strings.TrimSpace(result.Stderr))
+			}
+			return nil
 		}
 		result, err := runner.Run(ctx, Command{
 			Executable: "sh",

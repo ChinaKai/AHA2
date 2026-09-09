@@ -17,6 +17,41 @@ func (runner detectRunnerFunc) Run(_ context.Context, command Command, _ LineHan
 	return runner(command)
 }
 
+type windowsDetectRunner struct {
+	commands []string
+}
+
+func (runner *windowsDetectRunner) Run(_ context.Context, command Command, _ LineHandler) (Result, error) {
+	runner.commands = append(runner.commands, command.Executable)
+	switch command.Executable {
+	case "pwd":
+		return Result{Stdout: `C:\workspace`}, nil
+	case "git":
+		return Result{ExitCode: 128, Stderr: "fatal: not a git repository"}, nil
+	case "codex", "claude":
+		return Result{Stdout: command.Executable + " 1.0"}, nil
+	default:
+		return Result{}, errors.New("unexpected command")
+	}
+}
+
+func (runner *windowsDetectRunner) DetectedPlatform() string { return "windows/amd64" }
+
+func TestDetectUsesSSHRunnerTargetPlatformWithoutUnixProbe(t *testing.T) {
+	runner := &windowsDetectRunner{}
+	item := domain.Workspace{ID: "workspace-windows", Locality: "remote", Transport: "ssh", RootPath: `C:\workspace`}
+	detected, err := detectWithRunner(context.Background(), item, runner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detected.Platform != "windows/amd64" || detected.Health != "ready" {
+		t.Fatalf("unexpected Windows detection: %#v", detected)
+	}
+	if strings.Contains(strings.Join(runner.commands, ","), "uname") {
+		t.Fatalf("Windows target ran Unix platform probe: %#v", runner.commands)
+	}
+}
+
 func TestDetectClearsStaleStateBeforeWorkspaceAccessFailure(t *testing.T) {
 	item := domain.Workspace{
 		ID: "workspace-stale", Locality: "remote", Transport: "ssh", RootPath: "/missing",
@@ -188,5 +223,20 @@ func TestSameWorkspaceRootRemote(t *testing.T) {
 	}
 	if sameWorkspaceRoot(item, "/srv") {
 		t.Fatal("remote parent repository was accepted")
+	}
+}
+
+func TestSameWorkspaceRootRemoteWindowsIsCaseInsensitive(t *testing.T) {
+	t.Parallel()
+	item := domain.Workspace{RootPath: `C:\Work\Project`, Locality: "remote", Transport: "ssh", Platform: "windows/amd64"}
+	if !sameWorkspaceRoot(item, `c:/work/project/`) {
+		t.Fatal("equivalent remote Windows roots did not match")
+	}
+	if sameWorkspaceRoot(item, `C:\Work`) {
+		t.Fatal("remote Windows parent was accepted")
+	}
+	unc := domain.Workspace{RootPath: `\\server\share\Project`, Locality: "remote", Transport: "ssh", Platform: "windows/amd64"}
+	if !sameWorkspaceRoot(unc, `//SERVER/share/project/`) || !remotePathIsAbs(unc, unc.RootPath) {
+		t.Fatal("equivalent remote Windows UNC roots did not match")
 	}
 }

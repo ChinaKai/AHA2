@@ -8,8 +8,11 @@ param(
   [string]$InstallDir = (Join-Path $env:LOCALAPPDATA "Programs\AHA2"),
   [string]$DataDir = (Join-Path $env:LOCALAPPDATA "AHA2"),
   [string]$Version = "dev",
-	[string]$TaskName = "AHA2 User",
+  [string]$TaskName = "AHA2 User",
 	[string]$UpdateTaskName = "AHA2 User Update",
+  [string]$Listen = "127.0.0.1:8766",
+  [string]$AgentAPIURL = "",
+	[switch]$AllowInsecureAgentAPI,
   [string]$HealthURL = "http://127.0.0.1:8766/healthz",
   [int]$HealthTimeoutSeconds = 60,
 	[string]$ResultPath = "",
@@ -32,6 +35,15 @@ if (-not $install.StartsWith($localRoot, [StringComparison]::OrdinalIgnoreCase))
 if ($HealthTimeoutSeconds -lt 5 -or $HealthTimeoutSeconds -gt 300) {
   throw "HealthTimeoutSeconds must be between 5 and 300."
 }
+$listenAddress = $null
+$listenPort = 0
+$listenParts = $Listen.Split(':')
+if ($listenParts.Count -ne 2 -or
+    -not [Net.IPAddress]::TryParse($listenParts[0], [ref]$listenAddress) -or
+    -not [int]::TryParse($listenParts[1], [ref]$listenPort) -or
+    $listenPort -lt 1 -or $listenPort -gt 65535) {
+  throw "AHA2 listen address is invalid."
+}
 $builder = Join-Path $repo "scripts\build-windows-installer.ps1"
 if (-not (Test-Path -LiteralPath $builder -PathType Leaf)) { throw "Installer builder was not found." }
 
@@ -42,8 +54,12 @@ $tray = Join-Path $install "aha2-tray.exe"
 $plugin = Join-Path $data "plugins\channels\feishu\aha2-channel-feishu.exe"
 
 if ($ValidateOnly) {
-  [pscustomobject]@{Mode="per-user";Repository=$repo;InstallDir=$install;DataDir=$data;HealthURL=$HealthURL;ElevationRequired=$false}
+  [pscustomobject]@{Mode="per-user";Repository=$repo;InstallDir=$install;DataDir=$data;Listen=$Listen;HealthURL=$HealthURL;ElevationRequired=$false}
   return
+}
+
+if ($DetachedWorker) {
+  Start-Transcript -LiteralPath (Join-Path $repo "dist\user-deploy.log") -Force | Out-Null
 }
 
 function Test-AHA2Ancestor {
@@ -81,9 +97,11 @@ if (-not $DetachedWorker -and (Test-AHA2Ancestor)) {
     "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", $PSCommandPath,
     "-DetachedWorker", "-RepoPath", $repo, "-InputExe", $serverInput, "-InputTrayExe", $trayInput,
     "-InstallDir", $install, "-DataDir", $data, "-Version", $Version, "-TaskName", $TaskName,
-    "-UpdateTaskName", $UpdateTaskName, "-HealthURL", $HealthURL,
+    "-UpdateTaskName", $UpdateTaskName, "-Listen", $Listen, "-HealthURL", $HealthURL,
     "-HealthTimeoutSeconds", [string]$HealthTimeoutSeconds, "-ResultPath", $ResultPath
   )
+  if ($AgentAPIURL) { $workerArguments += @("-AgentAPIURL", $AgentAPIURL) }
+  if ($AllowInsecureAgentAPI) { $workerArguments += "-AllowInsecureAgentAPI" }
   if ($InputFeishuPlugin -and $InputFeishuManifest) {
     $workerArguments += @("-InputFeishuPlugin", (Resolve-Path -LiteralPath $InputFeishuPlugin).Path, "-InputFeishuManifest", (Resolve-Path -LiteralPath $InputFeishuManifest).Path)
   }
@@ -113,7 +131,15 @@ function Wait-AHA2Health {
 function Stop-AHA2ProcessTrees {
   $items = @(Get-Process -Name "aha2-tray","aha2" -ErrorAction SilentlyContinue)
   foreach ($item in $items) {
-    & taskkill.exe /PID $item.Id /T /F 2>$null | Out-Null
+    try {
+      & taskkill.exe /PID $item.Id /T /F 2>$null | Out-Null
+    } catch {
+      # The tray and server can exit together while their process list is being
+      # walked. Treat that race as success, but still fail if the process lives.
+    }
+    if (Get-Process -Id $item.Id -ErrorAction SilentlyContinue) {
+      throw "AHA2 process $($item.Id) could not be stopped."
+    }
   }
   Start-Sleep -Milliseconds 500
 }
@@ -145,6 +171,21 @@ try {
   $arguments = @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/CLOSEAPPLICATIONS',('/DIR="{0}"' -f $install),('/DATADIR="{0}"' -f $data))
   $process = Start-Process -FilePath $installer -ArgumentList $arguments -WindowStyle Hidden -Wait -PassThru
   if ($process.ExitCode -ne 0) { throw "Per-user installer exited with code $($process.ExitCode)." }
+  $registerTask = Join-Path $install "Register-AHA2UserTask.ps1"
+  if (-not (Test-Path -LiteralPath $registerTask -PathType Leaf)) { throw "Installed task registration script is missing." }
+  Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+  Stop-AHA2ProcessTrees
+  $registerArguments = @{
+    TrayExecutable = $tray
+    ServerExecutable = $server
+    Listen = $Listen
+    DataDir = $data
+    TaskName = $TaskName
+    Start = $true
+  }
+  if ($AgentAPIURL) { $registerArguments.AgentAPIURL = $AgentAPIURL }
+  if ($AllowInsecureAgentAPI) { $registerArguments.AllowInsecureAgentAPI = $true }
+  & $registerTask @registerArguments
   Wait-AHA2Health
 
   $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
@@ -164,6 +205,7 @@ try {
   $deploymentResult
 } catch {
   $deploymentError = $_
+  Write-DeploymentResult "failed" $deploymentError.Exception.Message
   Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
   Stop-AHA2ProcessTrees
   foreach ($entry in @(@{Path=$server;Name="aha2.exe"},@{Path=$tray;Name="aha2-tray.exe"},@{Path=$plugin;Name="aha2-channel-feishu.exe"})) {
@@ -178,7 +220,6 @@ try {
     Register-ScheduledTask -TaskName $TaskName -Xml $previousTaskXML -Force | Out-Null
     Start-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
   }
-  Write-DeploymentResult "failed" $deploymentError.Exception.Message
   if ($DetachedWorker) { Unregister-ScheduledTask -TaskName $UpdateTaskName -Confirm:$false -ErrorAction SilentlyContinue }
   throw "$($deploymentError.Exception.Message) Backup: $backup"
 }

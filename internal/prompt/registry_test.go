@@ -96,7 +96,7 @@ func TestEngineRoutesTemplatesAndBuildsContextManifest(t *testing.T) {
 		strings.Contains(preview.EffectivePrompt, "fact one") {
 		t.Fatal("task memory was injected inline")
 	}
-	var globalIndexFound, agentLessonsIndexFound, projectIndexFound, projectNavigationIndexFound, navigationGroupFound, staleIndexFound, staleDetailFound, knowledgeDetailFound, nestedDetailFound, projectDetailFound, navigationDetailFound, nestedNavigationDetailFound, attachmentIndexFound, attachmentFileFound, skillDetailFound, skillScriptFound, hardwareFound, agentAPIUTF8Found bool
+	var globalIndexFound, agentLessonsIndexFound, projectIndexFound, projectNavigationIndexFound, navigationGroupFound, staleIndexFound, staleDetailFound, knowledgeDetailFound, nestedDetailFound, projectDetailFound, navigationDetailFound, nestedNavigationDetailFound, attachmentIndexFound, attachmentFileFound, skillDetailFound, skillScriptFound, hardwareFound, agentAPIUTF8Found, agentAPISkillCreateFound bool
 	knowledgeEntryPoints := 0
 	manifestFound := false
 	resources := append(append([]ContextResource(nil), preview.ContextManifest...), preview.SharedManifest...)
@@ -175,6 +175,9 @@ func TestEngineRoutesTemplatesAndBuildsContextManifest(t *testing.T) {
 		if resource.ID == "agent-api" && strings.Contains(resource.Content, "application/json; charset=utf-8") && strings.Contains(resource.Content, "UTF8.GetBytes") {
 			agentAPIUTF8Found = true
 		}
+		if resource.ID == "agent-api" && strings.Contains(resource.Content, "POST /api/v1/agent/skills") && strings.Contains(resource.Content, "automatically selected for the current Task") {
+			agentAPISkillCreateFound = true
+		}
 	}
 	if !globalIndexFound || !agentLessonsIndexFound || !projectIndexFound || !projectNavigationIndexFound || !navigationGroupFound || !staleIndexFound || !staleDetailFound || !knowledgeDetailFound || !nestedDetailFound || !projectDetailFound || !navigationDetailFound || !nestedNavigationDetailFound || knowledgeEntryPoints != 5 {
 		t.Fatalf("knowledge hierarchy missing: global=%t lessons=%t project=%t navigation=%t navigation_group=%t stale_index=%t stale_detail=%t detail=%t nested=%t project_detail=%t navigation_detail=%t nested_navigation=%t entrypoints=%d", globalIndexFound, agentLessonsIndexFound, projectIndexFound, projectNavigationIndexFound, navigationGroupFound, staleIndexFound, staleDetailFound, knowledgeDetailFound, nestedDetailFound, projectDetailFound, navigationDetailFound, nestedNavigationDetailFound, knowledgeEntryPoints)
@@ -190,6 +193,9 @@ func TestEngineRoutesTemplatesAndBuildsContextManifest(t *testing.T) {
 	}
 	if !agentAPIUTF8Found {
 		t.Fatal("Agent API resource is missing the PowerShell UTF-8 request contract")
+	}
+	if !agentAPISkillCreateFound {
+		t.Fatal("Agent API resource is missing the Skill creation contract")
 	}
 	var memoryFound bool
 	for _, resource := range resources {
@@ -248,6 +254,17 @@ func TestEngineRoutesTemplatesAndBuildsContextManifest(t *testing.T) {
 		if strings.HasPrefix(resource.ID, "skill-") {
 			t.Fatal("skills entrypoint was created without selected skills")
 		}
+	}
+}
+
+func TestRemoteWindowsUNCContextPathKeepsNetworkRoot(t *testing.T) {
+	t.Parallel()
+	input := BuildInput{
+		Workspace: domain.Workspace{Transport: "ssh", Platform: "windows/amd64"},
+		Task:      domain.Task{ID: "task-1"}, Agent: domain.TaskAgent{AgentID: "main"},
+	}
+	if got := contextRootFor(input, `\\server\share\repo`); got != `//server/share/repo/.aha2-context/task-1/main` {
+		t.Fatalf("remote Windows UNC context root = %q", got)
 	}
 }
 

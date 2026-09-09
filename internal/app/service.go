@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"net/url"
 	"path"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -134,7 +136,13 @@ type Service struct {
 	mergeDelay      time.Duration
 	mergeTimers     map[string]*time.Timer
 	sharedContextMu sync.Mutex
-	sharedContexts  map[string]struct{}
+	sharedContexts  map[string]*sharedContextState
+	latestShared    map[string]string
+}
+
+type sharedContextState struct {
+	scope string
+	refs  int
 }
 
 func (s *Service) SetWorkspacePreparer(preparer WorkspacePreparer) {
@@ -189,7 +197,8 @@ func NewService(database *store.Store, secretStore *secrets.FileStore, executor 
 		runContext:     context.Background(),
 		mergeDelay:     time.Second,
 		mergeTimers:    map[string]*time.Timer{},
-		sharedContexts: map[string]struct{}{},
+		sharedContexts: map[string]*sharedContextState{},
+		latestShared:   map[string]string{},
 	}
 }
 
@@ -799,10 +808,12 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 	if workDir == "" {
 		workDir = workspace.RootPath
 	}
-	if err := s.materializeSharedContext(ctx, workspace, workDir, preview.SharedRoot, sharedFiles); err != nil {
+	releaseSharedContext, err := s.materializeSharedContext(ctx, workspace, workDir, preview.SharedRoot, sharedFiles)
+	if err != nil {
 		s.failTurn(ctx, &turn, task, fmt.Errorf("materialize prompt context: shared snapshot: %w", err))
 		return
 	}
+	defer releaseSharedContext()
 	if err := workspacepkg.MaterializeContext(ctx, workspace, workDir, preview.ContextRoot, contextFiles); err != nil {
 		s.failTurn(ctx, &turn, task, fmt.Errorf("materialize prompt context: agent resources: %w", err))
 		return
@@ -1032,20 +1043,97 @@ func (s *Service) materializeSharedContext(
 	workDir string,
 	root string,
 	files map[string]string,
-) error {
+) (func(), error) {
 	if strings.TrimSpace(root) == "" {
-		return nil
+		return func() {}, nil
 	}
 	s.sharedContextMu.Lock()
-	defer s.sharedContextMu.Unlock()
-	if _, ok := s.sharedContexts[root]; ok {
-		return nil
+	state, ok := s.sharedContexts[root]
+	scope := sharedContextScope(workspace, root)
+	if ok && state.refs == 0 && (state.scope != scope || s.latestShared[state.scope] != root) {
+		delete(s.sharedContexts, root)
+		state, ok = nil, false
 	}
-	if err := workspacepkg.MaterializeContext(ctx, workspace, workDir, root, files); err != nil {
-		return err
+	if !ok {
+		if err := workspacepkg.MaterializeContext(ctx, workspace, workDir, root, files); err != nil {
+			s.sharedContextMu.Unlock()
+			return nil, err
+		}
+		state = &sharedContextState{scope: scope}
+		s.sharedContexts[root] = state
 	}
-	s.sharedContexts[root] = struct{}{}
-	return nil
+	state.refs++
+	s.latestShared[scope] = root
+	if err := s.pruneSharedContextsLocked(ctx, workspace, workDir, scope, root); err == nil {
+		s.dropPrunedSharedContextsLocked(scope)
+	}
+	s.sharedContextMu.Unlock()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			s.sharedContextMu.Lock()
+			defer s.sharedContextMu.Unlock()
+			if current := s.sharedContexts[root]; current != nil && current.refs > 0 {
+				current.refs--
+			}
+			latest := s.latestShared[scope]
+			if latest == "" {
+				return
+			}
+			if err := s.pruneSharedContextsLocked(context.Background(), workspace, workDir, scope, latest); err == nil {
+				s.dropPrunedSharedContextsLocked(scope)
+			}
+		})
+	}, nil
+}
+
+func sharedContextScope(workspace domain.Workspace, root string) string {
+	if workspace.Transport == "native" {
+		root = filepath.Clean(filepath.Dir(root))
+		if runtime.GOOS == "windows" {
+			root = strings.ToLower(root)
+		}
+		return "native\x00" + root
+	}
+	root = strings.ReplaceAll(root, "\\", "/")
+	unc := strings.HasPrefix(root, "//")
+	root = path.Dir(strings.TrimPrefix(root, "//"))
+	if unc {
+		root = "//" + strings.TrimPrefix(root, "/")
+	}
+	if workspacepkg.IsWindowsWorkspace(workspace) {
+		root = strings.ToLower(root)
+	}
+	return workspace.Transport + "\x00" + root
+}
+
+func (s *Service) pruneSharedContextsLocked(
+	ctx context.Context,
+	workspace domain.Workspace,
+	workDir string,
+	scope string,
+	currentRoot string,
+) error {
+	keep := make([]string, 0, len(s.sharedContexts)+1)
+	for root, state := range s.sharedContexts {
+		if state.scope == scope && state.refs > 0 {
+			keep = append(keep, root)
+		}
+	}
+	if latest := s.latestShared[scope]; latest != "" {
+		keep = append(keep, latest)
+	}
+	return workspacepkg.PruneSharedContexts(ctx, workspace, workDir, currentRoot, keep)
+}
+
+func (s *Service) dropPrunedSharedContextsLocked(scope string) {
+	latest := s.latestShared[scope]
+	for root, state := range s.sharedContexts {
+		if state.scope == scope && state.refs == 0 && root != latest {
+			delete(s.sharedContexts, root)
+		}
+	}
 }
 
 func cloneUsageMap(input map[string]any) map[string]any {

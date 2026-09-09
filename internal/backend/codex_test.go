@@ -85,8 +85,8 @@ func (runner *catalogRunner) Run(_ context.Context, command workspace.Command, _
 	if len(command.Args) >= 2 && strings.Contains(command.Args[1], "models_cache.json") {
 		return workspace.Result{Stdout: runner.cache, ExitCode: 0}, nil
 	}
-	if len(command.Args) >= 5 && strings.Contains(command.Args[1], "mkdir -p") {
-		runner.writtenPath = command.Args[4]
+	if command.Executable == "sh" && len(command.Args) >= 4 && strings.Contains(command.Args[1], "cat >") {
+		runner.writtenPath = command.Args[len(command.Args)-1]
 		runner.writtenData = command.Stdin
 		return workspace.Result{ExitCode: 0}, nil
 	}

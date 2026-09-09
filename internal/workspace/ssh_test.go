@@ -5,12 +5,16 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -50,6 +54,81 @@ func TestRemoteScriptRejectsInvalidEnvName(t *testing.T) {
 	}
 }
 
+func TestWorkspaceUnknownSSHHostKeyClassification(t *testing.T) {
+	t.Parallel()
+	if !IsUnknownSSHHostKey(fmt.Errorf("SSH known_hosts is missing; verify the host once")) {
+		t.Fatal("missing known_hosts did not trigger explicit trust flow")
+	}
+	if IsUnknownSSHHostKey(fmt.Errorf("knownhosts: key mismatch")) {
+		t.Fatal("changed host key was classified as unknown")
+	}
+}
+
+func TestWindowsRemotePayloadPreservesMetadataAndRawStdin(t *testing.T) {
+	t.Parallel()
+	payload, err := windowsRemotePayload(Command{
+		Executable: "codex.exe", Args: []string{"exec", "--json", "-"}, Dir: `C:\workspace`,
+		Env: map[string]string{"OPENAI_API_KEY": "top-secret"}, Stdin: "中文\x00prompt",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	newline := strings.IndexByte(payload, '\n')
+	if newline != 8 {
+		t.Fatalf("invalid Windows SSH frame header: %q", payload)
+	}
+	length, err := strconv.ParseInt(payload[:newline], 16, 32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadataEnd := newline + 1 + int(length)
+	var metadata windowsCommandMetadata
+	if err := json.Unmarshal([]byte(payload[newline+1:metadataEnd]), &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if metadata.Executable != "codex.exe" || metadata.Directory != `C:\workspace` || metadata.Env["OPENAI_API_KEY"] != "top-secret" || metadata.Arguments != `exec --json -` {
+		t.Fatalf("unexpected Windows metadata: %#v", metadata)
+	}
+	if payload[metadataEnd:] != "中文\x00prompt" {
+		t.Fatalf("raw Windows stdin changed: %q", payload[metadataEnd:])
+	}
+	commandLine := windowsBootstrapCommand()
+	if len(commandLine) >= 8000 {
+		t.Fatalf("Windows SSH bootstrap exceeds cmd.exe command-line limit: %d", len(commandLine))
+	}
+	for _, secret := range []string{"top-secret", `C:\workspace`, "中文", "prompt"} {
+		if strings.Contains(commandLine, secret) {
+			t.Fatalf("Windows SSH exec arguments leaked dynamic data %q", secret)
+		}
+	}
+}
+
+func TestWindowsSSHBootstrapPreservesRawStdin(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows PowerShell integration test")
+	}
+	raw := "中文\x00without-final-newline"
+	payload, err := windowsRemotePayload(Command{
+		Executable: "powershell.exe",
+		Args: []string{"-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+			`[Console]::OpenStandardInput().CopyTo([Console]::OpenStandardOutput())`},
+		Stdin: raw,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts := strings.Fields(windowsBootstrapCommand())
+	command := exec.Command(parts[0], parts[1:]...)
+	command.Stdin = strings.NewReader(payload)
+	output, err := command.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(output) != raw {
+		t.Fatalf("bootstrap changed raw stdin: %q", output)
+	}
+}
+
 func TestSSHRunnerAutoPrefersConfiguredPassword(t *testing.T) {
 	hostSigner, _ := newSSHKeyPair(t)
 	clientSigner, clientPrivateKey := newSSHKeyPair(t)
@@ -57,9 +136,9 @@ func TestSSHRunnerAutoPrefersConfiguredPassword(t *testing.T) {
 	knownHostsPath := writeKnownHosts(t, listener.Addr().String(), hostSigner.PublicKey())
 	privateKeyPath := writePrivateKey(t, clientPrivateKey)
 
-	result, err := (SSHRunner{
+	result, err := (&SSHRunner{
 		Host: "127.0.0.1", User: "root", Port: listener.Addr().(*net.TCPAddr).Port,
-		Auth: "auto", Password: "secret",
+		Auth: "auto", Password: "secret", Platform: "linux",
 		KnownHostsPaths: []string{knownHostsPath}, PrivateKeyPaths: []string{privateKeyPath},
 	}).Run(context.Background(), Command{
 		Executable: "printf", Args: []string{"runner-ok"}, Timeout: 5 * time.Second,
@@ -85,9 +164,9 @@ func TestSSHRunnerKeyAuthenticationAndKnownHosts(t *testing.T) {
 	knownHostsPath := writeKnownHosts(t, listener.Addr().String(), hostSigner.PublicKey())
 	privateKeyPath := writePrivateKey(t, clientPrivateKey)
 
-	result, err := (SSHRunner{
+	result, err := (&SSHRunner{
 		Host: "127.0.0.1", User: "root", Port: listener.Addr().(*net.TCPAddr).Port,
-		Auth: "key", KnownHostsPaths: []string{knownHostsPath}, PrivateKeyPaths: []string{privateKeyPath},
+		Auth: "key", Platform: "linux", KnownHostsPaths: []string{knownHostsPath}, PrivateKeyPaths: []string{privateKeyPath},
 	}).Run(context.Background(), Command{Executable: "true", Timeout: 5 * time.Second}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -105,6 +184,64 @@ func TestSSHRunnerKeyAuthenticationAndKnownHosts(t *testing.T) {
 	if _, err := workspaceSSHHostKeyCallback(filepath.Join(t.TempDir(), "missing")); err == nil ||
 		!strings.Contains(err.Error(), "known_hosts") {
 		t.Fatalf("missing known_hosts accepted: %v", err)
+	}
+}
+
+func TestSSHRunnerDetectsWindowsBeforeRunningPowerShellCommand(t *testing.T) {
+	hostSigner, _ := newSSHKeyPair(t)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	config := &ssh.ServerConfig{PasswordCallback: func(metadata ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) {
+		if metadata.User() == "root" && string(password) == "secret" {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("invalid password")
+	}}
+	config.AddHostKey(hostSigner)
+	serverErrors := make(chan error, 1)
+	go func() {
+		for index := 0; index < 3; index++ {
+			if err := serveMockSSHExec(listener, config, func(command, stdin string) (string, error) {
+				if index == 0 {
+					if !strings.Contains(command, "sh -lc") || stdin != "" {
+						return "", fmt.Errorf("POSIX platform probe invalid: command=%s stdin=%q", command, stdin)
+					}
+					return "", nil
+				}
+				if index == 1 {
+					if !strings.Contains(command, "powershell.exe") || stdin != "" {
+						return "", fmt.Errorf("Windows platform probe invalid: command=%s stdin=%q", command, stdin)
+					}
+					return "AHA2_WINDOWS:AMD64", nil
+				}
+				if !strings.Contains(command, "powershell.exe") || !strings.HasPrefix(stdin, "000000") {
+					return "", fmt.Errorf("Windows command frame missing: command=%s stdin=%q", command, stdin)
+				}
+				return "runner ok\n", nil
+			}); err != nil {
+				serverErrors <- err
+				return
+			}
+		}
+		serverErrors <- nil
+	}()
+	knownHostsPath := writeKnownHosts(t, listener.Addr().String(), hostSigner.PublicKey())
+	runner := &SSHRunner{
+		Host: "127.0.0.1", User: "root", Port: listener.Addr().(*net.TCPAddr).Port,
+		Auth: "password", Password: "secret", KnownHostsPaths: []string{knownHostsPath},
+	}
+	result, err := runner.Run(context.Background(), Command{Executable: "codex.exe", Args: []string{"--version"}, Timeout: 5 * time.Second}, nil)
+	if err != nil || result.ExitCode != 0 || !strings.Contains(result.Stdout, "runner ok") {
+		t.Fatalf("Windows SSH command result=%#v err=%v", result, err)
+	}
+	if runner.DetectedPlatform() != "windows/amd64" {
+		t.Fatalf("detected platform=%q", runner.DetectedPlatform())
+	}
+	if err := <-serverErrors; err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -214,6 +351,56 @@ func serveWorkspaceSSHConnection(listener net.Listener, config *ssh.ServerConfig
 			return err
 		}
 		if _, err := channel.Write([]byte("runner ok\n")); err != nil {
+			return err
+		}
+		_, _ = channel.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{0}))
+		return channel.Close()
+	}
+	return fmt.Errorf("SSH exec request was not received")
+}
+
+func serveMockSSHExec(listener net.Listener, config *ssh.ServerConfig, handle func(command, stdin string) (string, error)) error {
+	connection, err := listener.Accept()
+	if err != nil {
+		return err
+	}
+	defer connection.Close()
+	server, channels, requests, err := ssh.NewServerConn(connection, config)
+	if err != nil {
+		return err
+	}
+	defer server.Close()
+	go ssh.DiscardRequests(requests)
+	channelRequest, ok := <-channels
+	if !ok {
+		return fmt.Errorf("SSH session channel was not opened")
+	}
+	channel, channelRequests, err := channelRequest.Accept()
+	if err != nil {
+		return err
+	}
+	defer channel.Close()
+	for request := range channelRequests {
+		if request.Type != "exec" {
+			_ = request.Reply(false, nil)
+			continue
+		}
+		var payload struct{ Command string }
+		if err := ssh.Unmarshal(request.Payload, &payload); err != nil {
+			return err
+		}
+		if err := request.Reply(true, nil); err != nil {
+			return err
+		}
+		data, err := io.ReadAll(channel)
+		if err != nil {
+			return err
+		}
+		stdout, err := handle(payload.Command, string(data))
+		if err != nil {
+			return err
+		}
+		if _, err := channel.Write([]byte(stdout)); err != nil {
 			return err
 		}
 		_, _ = channel.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{0}))

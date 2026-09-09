@@ -516,6 +516,63 @@ func TestAgentSessionCompactAndReset(t *testing.T) {
 	waitForTurn(t, database, active.ID, domain.TurnSucceeded)
 }
 
+func TestSharedContextCleanupProtectsActiveTurnsAndOtherTasks(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	workspaceRoot := t.TempDir()
+	workspace := domain.Workspace{ID: "workspace-context-cleanup", Transport: "native", RootPath: workspaceRoot}
+	taskRoot := filepath.Join(workspaceRoot, ".aha2-context", "task-1")
+	root := func(hashByte string) string {
+		return filepath.Join(taskRoot, "shared-"+strings.Repeat(hashByte, 64))
+	}
+	stale, first, second := root("a"), root("b"), root("c")
+	otherTask := filepath.Join(workspaceRoot, ".aha2-context", "task-2", "shared-"+strings.Repeat("d", 64))
+	agentRoot := filepath.Join(taskRoot, "main")
+	for _, directory := range []string{stale, otherTask, agentRoot} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	service := &Service{
+		sharedContexts: map[string]*sharedContextState{},
+		latestShared:   map[string]string{},
+	}
+	firstFile := filepath.Join(first, "agent-api.md")
+	releaseFirst, err := service.materializeSharedContext(ctx, workspace, workspaceRoot, first, map[string]string{firstFile: "first"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(stale); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("startup leftover survived: %v", err)
+	}
+	secondFile := filepath.Join(second, "agent-api.md")
+	releaseSecond, err := service.materializeSharedContext(ctx, workspace, workspaceRoot, second, map[string]string{secondFile: "second"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(first); err != nil {
+		t.Fatalf("active Turn snapshot was removed: %v", err)
+	}
+	releaseFirst()
+	if _, err := os.Stat(first); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("released old snapshot survived: %v", err)
+	}
+	for _, retained := range []string{second, otherTask, agentRoot} {
+		if _, err := os.Stat(retained); err != nil {
+			t.Fatalf("cleanup crossed ownership boundary %s: %v", retained, err)
+		}
+	}
+	releaseSecond()
+	if _, err := os.Stat(second); err != nil {
+		t.Fatalf("latest snapshot was not retained: %v", err)
+	}
+	service.sharedContextMu.Lock()
+	defer service.sharedContextMu.Unlock()
+	if len(service.sharedContexts) != 1 || service.sharedContexts[second] == nil || service.sharedContexts[second].refs != 0 {
+		t.Fatalf("shared Context lease state was not compacted: %#v", service.sharedContexts)
+	}
+}
+
 func TestMultiAgentRoundCreatesIntegrationTurn(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

@@ -45,7 +45,11 @@ func (s *Service) resolveRuntimeSelection(
 		return domain.Model{}, domain.EnvGroup{}, "", fmt.Errorf("backend does not match model backend")
 	}
 	if model.DefaultEnvGroupID == "" {
-		return domain.Model{}, domain.EnvGroup{}, "", fmt.Errorf("model has no default env group")
+		envGroup, repairErr := s.repairDefaultEnvGroup(ctx, &model)
+		if repairErr != nil {
+			return domain.Model{}, domain.EnvGroup{}, "", repairErr
+		}
+		return model, envGroup, "", nil
 	}
 	envGroup, err := s.store.EnvGroup(ctx, model.DefaultEnvGroupID)
 	if err != nil {
@@ -55,6 +59,43 @@ func (s *Service) resolveRuntimeSelection(
 		return domain.Model{}, domain.EnvGroup{}, "", fmt.Errorf("env group provider does not match model provider")
 	}
 	return model, envGroup, "", nil
+}
+
+func (s *Service) repairDefaultEnvGroup(ctx context.Context, model *domain.Model) (domain.EnvGroup, error) {
+	groups, err := s.store.ListEnvGroups(ctx)
+	if err != nil {
+		return domain.EnvGroup{}, fmt.Errorf("env groups: %w", err)
+	}
+	generic := make([]domain.EnvGroup, 0, 1)
+	exact := make([]domain.EnvGroup, 0, 1)
+	for _, group := range groups {
+		if group.ProviderID != model.ProviderID || group.Backend != model.Backend {
+			continue
+		}
+		configuredModel := strings.TrimSpace(group.Environment["OPENAI_MODEL"])
+		if configuredModel == "" {
+			configuredModel = strings.TrimSpace(group.Environment["ANTHROPIC_MODEL"])
+		}
+		switch {
+		case configuredModel == model.WireModel:
+			exact = append(exact, group)
+		case configuredModel == "":
+			generic = append(generic, group)
+		}
+	}
+	candidates := exact
+	if len(candidates) == 0 && len(generic) == 1 {
+		candidates = generic
+	}
+	if len(candidates) != 1 {
+		return domain.EnvGroup{}, fmt.Errorf("model has no default env group")
+	}
+	model.DefaultEnvGroupID = candidates[0].ID
+	model.UpdatedAt = s.now().UTC()
+	if err := s.store.UpsertModel(ctx, *model); err != nil {
+		return domain.EnvGroup{}, fmt.Errorf("save model default env group: %w", err)
+	}
+	return candidates[0], nil
 }
 
 func (s *Service) resolveOfficialCodexSelection(

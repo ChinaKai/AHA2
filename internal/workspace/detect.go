@@ -44,9 +44,9 @@ func RunnerFor(item domain.Workspace) Runner {
 	case item.Transport == "wsl":
 		return WSLRunner{Distro: item.Distro}
 	case item.Transport == "ssh" || item.Locality == "remote":
-		return SSHRunner{
+		return &SSHRunner{
 			Host: item.SSHHost, User: item.SSHUser, Port: item.SSHPort,
-			Auth: item.SSHAuth, Password: item.SSHPassword,
+			Auth: item.SSHAuth, Password: item.SSHPassword, Platform: item.Platform,
 		}
 	default:
 		return LocalRunner{}
@@ -54,11 +54,15 @@ func RunnerFor(item domain.Workspace) Runner {
 }
 
 func Detect(ctx context.Context, item domain.Workspace) (domain.Workspace, error) {
+	if item.Transport == "ssh" {
+		item.Platform = ""
+	}
 	return detectWithRunner(ctx, item, RunnerFor(item))
 }
 
 func detectWithRunner(ctx context.Context, item domain.Workspace, runner Runner) (domain.Workspace, error) {
 	now := time.Now().UTC()
+	detectedPlatform := strings.TrimSpace(item.Platform)
 	item.LastDetectedAt, item.UpdatedAt = now, now
 	// Detection is a fresh snapshot. Never carry a previous successful probe
 	// into a failed or partial run.
@@ -75,9 +79,17 @@ func detectWithRunner(ctx context.Context, item domain.Workspace, runner Runner)
 		return item, &DetectionError{Code: "workspace_unavailable", Message: message}
 	}
 	item.Capabilities["workspace"] = probeResult(probeReady, "")
+	if platformRunner, ok := runner.(interface{ DetectedPlatform() string }); ok {
+		if platform := strings.TrimSpace(platformRunner.DetectedPlatform()); platform != "" {
+			detectedPlatform = platform
+		}
+	}
 
 	degraded := false
-	if item.Locality == "local" && runtime.GOOS == "windows" && item.Transport != "wsl" {
+	if item.Transport == "ssh" && detectedPlatform != "" {
+		item.Platform = detectedPlatform
+		item.Capabilities["platform"] = probeResult(probeReady, "")
+	} else if item.Locality == "local" && runtime.GOOS == "windows" && item.Transport != "wsl" {
 		item.Platform = runtime.GOOS + "/" + runtime.GOARCH
 		item.Capabilities["platform"] = probeResult(probeReady, "")
 	} else {
@@ -230,6 +242,7 @@ func commandUnavailable(result Result, err error) bool {
 	}
 	return strings.Contains(text, "executable file not found") ||
 		strings.Contains(text, "command not found") ||
+		strings.Contains(text, "aha2_command_not_found:") ||
 		strings.Contains(text, "not recognized as an internal or external command")
 }
 
@@ -260,6 +273,11 @@ func sameWorkspaceRoot(item domain.Workspace, gitRoot string) bool {
 	workspaceRoot := strings.TrimSpace(item.RootPath)
 	if workspaceRoot == "" || gitRoot == "" {
 		return false
+	}
+	if IsWindowsWorkspace(item) {
+		workspaceRoot = path.Clean(strings.ReplaceAll(workspaceRoot, "\\", "/"))
+		gitRoot = path.Clean(strings.ReplaceAll(gitRoot, "\\", "/"))
+		return strings.EqualFold(workspaceRoot, gitRoot)
 	}
 	if item.Locality == "remote" || item.Transport == "ssh" || item.Transport == "wsl" {
 		return path.Clean(strings.ReplaceAll(workspaceRoot, "\\", "/")) == path.Clean(strings.ReplaceAll(gitRoot, "\\", "/"))

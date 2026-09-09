@@ -68,8 +68,11 @@ func PrepareTaskWorkspace(ctx context.Context, item domain.Workspace, taskID, ta
 	worktree := worktreePath(item, taskID, worktreeDir)
 	if item.Locality == "remote" || item.Transport == "ssh" || item.Transport == "wsl" {
 		parent := path.Dir(worktree)
-		if result, err := runner.Run(ctx, Command{Executable: "mkdir", Args: []string{"-p", parent}, Timeout: 20 * time.Second}, nil); err != nil || result.ExitCode != 0 {
-			return PreparedTaskWorkspace{}, fmt.Errorf("create remote worktree parent: %s", strings.TrimSpace(result.Stderr))
+		if IsWindowsWorkspace(item) {
+			parent = windowsRemotePathDir(worktree)
+		}
+		if err := EnsureRemoteDirectory(ctx, runner, parent); err != nil {
+			return PreparedTaskWorkspace{}, fmt.Errorf("create remote worktree parent: %w", err)
 		}
 	} else if err := os.MkdirAll(filepath.Dir(worktree), 0o700); err != nil {
 		return PreparedTaskWorkspace{}, fmt.Errorf("create worktree parent: %w", err)
@@ -104,6 +107,9 @@ func worktreePath(item domain.Workspace, taskID, worktreeDir string) string {
 // DefaultWorktreeDir returns the stable task-worktree root beside the primary
 // repository, using the path rules of the workspace host.
 func DefaultWorktreeDir(item domain.Workspace) string {
+	if IsWindowsWorkspace(item) {
+		return windowsRemotePathJoin(windowsRemotePathDir(item.RootPath), ".aha2-worktrees")
+	}
 	if item.Locality == "remote" || item.Transport == "ssh" || item.Transport == "wsl" || runtime.GOOS != "windows" {
 		return path.Join(path.Dir(strings.ReplaceAll(item.RootPath, "\\", "/")), ".aha2-worktrees")
 	}
@@ -111,6 +117,9 @@ func DefaultWorktreeDir(item domain.Workspace) string {
 }
 
 func worktreePathFromRoot(root, taskID string, item domain.Workspace) string {
+	if IsWindowsWorkspace(item) {
+		return windowsRemotePathJoin(root, taskID)
+	}
 	if item.Locality == "remote" || item.Transport == "ssh" || item.Transport == "wsl" || runtime.GOOS != "windows" {
 		return path.Join(strings.ReplaceAll(root, "\\", "/"), taskID)
 	}

@@ -399,6 +399,20 @@ function syncTakeoverTaskBackend(): void {
   syncRuntimeFields("takeover-task", state.models, state.codexAccounts);
 }
 
+async function detectWorkspaceWithHostKeyTrust(id: string): Promise<{workspace: Workspace} | null> {
+  try {
+    return await api.detectWorkspace(id);
+  } catch (error) {
+    const apiError = error as Error & {code?: string};
+    if (apiError.code !== "ssh_host_key_unknown") throw error;
+    const {host_key: hostKey} = await api.workspaceHostKey(id);
+    const confirmed = window.confirm(`首次连接 SSH Workspace：${hostKey.endpoint}\n算法：${hostKey.algorithm}\nSHA256 指纹：${hostKey.fingerprint}\n\n请与目标机器或可信渠道提供的指纹核对。确认信任并重新检测？`);
+    if (!confirmed) return null;
+    await api.trustWorkspaceHostKey(id, hostKey.fingerprint);
+    return api.detectWorkspace(id);
+  }
+}
+
 function syncWorkspaceTakeoverFields(): void {
   const dialog = document.querySelector<HTMLDialogElement>("#workspace-takeover-dialog");
   const transport = dialog?.querySelector<HTMLSelectElement>('[name="transport"]')?.value || "native";
@@ -2299,7 +2313,8 @@ function bindCommon(): void {
     const id = button.dataset.detect!;
     void runWithFeedback(button, "检测中", async () => {
       try {
-        const result = await api.detectWorkspace(id);
+        const result = await detectWorkspaceWithHostKeyTrust(id);
+        if (!result) return;
         const agentAPI = result.workspace.agent_api_status === "ready" && result.workspace.agent_api_resolved_url
           ? ` · Agent API ${result.workspace.agent_api_resolved_url}`
           : result.workspace.agent_api_error ? ` · Agent API 不可达：${result.workspace.agent_api_error}` : "";

@@ -19,6 +19,17 @@ func (runner contextRunnerFunc) Run(_ context.Context, command Command, _ LineHa
 	return runner(command)
 }
 
+type windowsContextRunner struct {
+	commands []Command
+}
+
+func (runner *windowsContextRunner) Run(_ context.Context, command Command, _ LineHandler) (Result, error) {
+	runner.commands = append(runner.commands, command)
+	return Result{}, nil
+}
+
+func (runner *windowsContextRunner) DetectedPlatform() string { return "windows/amd64" }
+
 func TestMaterializeContextWritesInsideNativeWorkspace(t *testing.T) {
 	t.Parallel()
 	workspace := t.TempDir()
@@ -52,6 +63,101 @@ func TestMaterializeContextWritesInsideNativeWorkspace(t *testing.T) {
 	}
 	if err := materializeLocalContext(workspace, map[string]string{filepath.Join(workspace, "unsafe"): "bad"}); err == nil {
 		t.Fatal("unsafe materialization root was accepted")
+	}
+}
+
+func TestPruneSharedContextsKeepsOnlyExplicitTaskSnapshots(t *testing.T) {
+	t.Parallel()
+	workspaceRoot := t.TempDir()
+	taskRoot := filepath.Join(workspaceRoot, ".aha2-context", "task-1")
+	current := filepath.Join(taskRoot, "shared-"+strings.Repeat("a", sha256HexLength))
+	active := filepath.Join(taskRoot, "shared-"+strings.Repeat("b", sha256HexLength))
+	stale := filepath.Join(taskRoot, "shared-"+strings.Repeat("c", sha256HexLength))
+	malformed := filepath.Join(taskRoot, "shared-not-a-snapshot")
+	agentRoot := filepath.Join(taskRoot, "main")
+	otherTask := filepath.Join(workspaceRoot, ".aha2-context", "task-2", "shared-"+strings.Repeat("d", sha256HexLength))
+	for _, root := range []string{current, active, stale, malformed, agentRoot, otherTask} {
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := PruneSharedContexts(context.Background(), domain.Workspace{Transport: "native"}, workspaceRoot, current, []string{active, otherTask}); err != nil {
+		t.Fatal(err)
+	}
+	for _, retained := range []string{current, active, malformed, agentRoot, otherTask} {
+		if _, err := os.Stat(retained); err != nil {
+			t.Fatalf("retained path %s: %v", retained, err)
+		}
+	}
+	if _, err := os.Stat(stale); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale shared snapshot survived: %v", err)
+	}
+}
+
+func TestPruneSharedContextsRejectsBroadOrMalformedRoots(t *testing.T) {
+	t.Parallel()
+	workspaceRoot := t.TempDir()
+	taskRoot := filepath.Join(workspaceRoot, ".aha2-context", "task-1")
+	stale := filepath.Join(taskRoot, "shared-"+strings.Repeat("c", sha256HexLength))
+	if err := os.MkdirAll(stale, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), ".aha2-context", "task-outside", "shared-"+strings.Repeat("e", sha256HexLength))
+	if err := os.MkdirAll(outside, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, root := range []string{taskRoot, filepath.Join(taskRoot, "shared-invalid"), workspaceRoot, outside} {
+		if err := PruneSharedContexts(context.Background(), domain.Workspace{Transport: "native"}, workspaceRoot, root, nil); err == nil {
+			t.Fatalf("unsafe prune root was accepted: %s", root)
+		}
+	}
+	if _, err := os.Stat(stale); err != nil {
+		t.Fatalf("failed validation changed shared snapshot: %v", err)
+	}
+	if _, err := os.Stat(outside); err != nil {
+		t.Fatalf("outside snapshot was changed: %v", err)
+	}
+}
+
+func TestPruneRemoteSharedContextsUsesDirectChildBoundary(t *testing.T) {
+	t.Parallel()
+	taskRoot := "/srv/repo/.aha2-context/task-1"
+	keep := map[string]struct{}{"shared-" + strings.Repeat("a", sha256HexLength): {}}
+	for _, item := range []domain.Workspace{
+		{Transport: "ssh", Platform: "linux/amd64"},
+		{Transport: "ssh", Platform: "windows/amd64"},
+	} {
+		var command Command
+		runner := contextRunnerFunc(func(value Command) (Result, error) {
+			command = value
+			return Result{}, nil
+		})
+		if err := pruneRemoteSharedContexts(context.Background(), item, "/srv/repo", runner, taskRoot, keep); err != nil {
+			t.Fatal(err)
+		}
+		if command.Dir != "/srv/repo" || !strings.Contains(strings.Join(command.Args, " "), taskRoot) {
+			t.Fatalf("remote prune escaped Task boundary: %#v", command)
+		}
+		joined := strings.Join(command.Args, " ")
+		strictFilter := strings.Contains(joined, "shared-[0-9a-f]") ||
+			strings.Contains(joined, "[!0-9a-f]") && strings.Contains(joined, "-eq 64")
+		if !strictFilter || !strings.Contains(joined, "shared-"+strings.Repeat("a", sha256HexLength)) {
+			t.Fatalf("remote prune lacks strict snapshot filter or keep set: %#v", command)
+		}
+	}
+}
+
+func TestSharedContextLocationPreservesWindowsUNC(t *testing.T) {
+	t.Parallel()
+	item := domain.Workspace{Transport: "ssh", Platform: "windows/amd64"}
+	root := `\\server\share\repo\.aha2-context\task-1\shared-` + strings.Repeat("a", sha256HexLength)
+	taskRoot, name, err := sharedContextLocation(item, cleanContextPath(item, root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if taskRoot != "//server/share/repo/.aha2-context/task-1" || name != "shared-"+strings.Repeat("a", sha256HexLength) {
+		t.Fatalf("UNC shared Context location = %q %q", taskRoot, name)
 	}
 }
 
@@ -103,6 +209,31 @@ func TestMaterializeRemoteContextResetsBeforeWriting(t *testing.T) {
 		if writes[target] != content {
 			t.Fatalf("remote file %s=%q", target, writes[target])
 		}
+	}
+}
+
+func TestMaterializeRemoteWindowsContextDoesNotRequireUnixTools(t *testing.T) {
+	t.Parallel()
+	root := `C:/repo/.aha2-context/task-1/main`
+	runner := &windowsContextRunner{}
+	files := map[string]string{
+		root + "/task.md":        "task",
+		root + "/nested/info.md": "info",
+	}
+	item := domain.Workspace{Transport: "ssh", Locality: "remote", Platform: "windows/amd64"}
+	if err := materializeRemoteContext(context.Background(), item, runner, root, files); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.commands) != 3 {
+		t.Fatalf("Windows context commands=%d: %#v", len(runner.commands), runner.commands)
+	}
+	for _, command := range runner.commands {
+		if command.Executable != "powershell.exe" {
+			t.Fatalf("Windows context used Unix command: %#v", command)
+		}
+	}
+	if runner.commands[1].Stdin != "info" || runner.commands[2].Stdin != "task" {
+		t.Fatalf("Windows context contents were not preserved: %#v", runner.commands)
 	}
 }
 

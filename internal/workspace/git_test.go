@@ -29,3 +29,15 @@ func TestWorktreePathDefaultsBesideLocalRepository(t *testing.T) {
 		}
 	}
 }
+
+func TestWindowsSSHWorktreePathsUseRemoteDriveAndUNCSemantics(t *testing.T) {
+	t.Parallel()
+	item := domain.Workspace{RootPath: `C:\repos\project`, Locality: "remote", Transport: "ssh", Platform: "windows/amd64"}
+	if got := worktreePath(item, "task-002", ""); got != `C:\repos\.aha2-worktrees\task-002` {
+		t.Fatalf("Windows SSH worktree path = %q", got)
+	}
+	item.RootPath = `\\server\share\project`
+	if got := worktreePath(item, "task-002", ""); got != `\\server\share\.aha2-worktrees\task-002` {
+		t.Fatalf("Windows SSH UNC worktree path = %q", got)
+	}
+}

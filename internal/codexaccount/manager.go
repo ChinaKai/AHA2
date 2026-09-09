@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -478,17 +477,9 @@ func (m *Manager) PrepareProfile(
 	}
 	runner := workspace.RunnerFor(item)
 	for name, content := range map[string]string{"auth.json": authJSON, "config.toml": config} {
-		target := path.Join(profileDir, name)
-		result, runErr := runner.Run(ctx, workspace.Command{
-			Executable: "sh",
-			Args:       []string{"-c", `umask 077; mkdir -p "$1"; cat > "$2"`, "aha-codex-auth", profileDir, target},
-			Stdin:      content, Timeout: 30 * time.Second,
-		}, nil)
-		if runErr != nil {
-			return "", runErr
-		}
-		if result.ExitCode != 0 {
-			return "", fmt.Errorf("写入 Codex 账号失败: %s", strings.TrimSpace(result.Stderr))
+		target := workspace.JoinRemotePath(item, profileDir, name)
+		if err := workspace.WriteRemoteTextFile(ctx, runner, target, content); err != nil {
+			return "", fmt.Errorf("写入 Codex 账号失败: %w", err)
 		}
 	}
 	return profileDir, nil
@@ -499,12 +490,9 @@ func (m *Manager) SyncProfile(ctx context.Context, accountID string, item domain
 	if item.Transport == "native" {
 		data, _ = os.ReadFile(filepath.Join(profileDir, "auth.json"))
 	} else {
-		result, err := workspace.RunnerFor(item).Run(ctx, workspace.Command{
-			Executable: "sh", Args: []string{"-c", `cat "$1"`, "aha-codex-auth-read", path.Join(profileDir, "auth.json")},
-			Timeout: 20 * time.Second,
-		}, nil)
-		if err == nil && result.ExitCode == 0 {
-			data = []byte(result.Stdout)
+		content, err := workspace.ReadRemoteTextFile(ctx, workspace.RunnerFor(item), workspace.JoinRemotePath(item, profileDir, "auth.json"))
+		if err == nil {
+			data = []byte(content)
 		}
 	}
 	if len(bytes.TrimSpace(data)) == 0 {
@@ -591,7 +579,7 @@ func runtimeProfileDir(item domain.Workspace, workDir, sessionID string) string 
 	if item.Transport == "native" {
 		return filepath.Join(workDir, ".aha2-context", "runtime", "codex-auth", sessionID)
 	}
-	return path.Join(strings.ReplaceAll(workDir, `\`, "/"), ".aha2-context", "runtime", "codex-auth", sessionID)
+	return workspace.JoinRemotePath(item, workDir, ".aha2-context", "runtime", "codex-auth", sessionID)
 }
 
 func (m *Manager) updateLogin(id string, update func(*Login)) {

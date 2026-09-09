@@ -1,7 +1,9 @@
 package httpapi
 
 import (
+	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -366,7 +368,13 @@ func (s *Server) detectWorkspaceHandler(writer http.ResponseWriter, request *htt
 			writeError(writer, http.StatusInternalServerError, "workspace_detection_store_failed")
 			return
 		}
-		writeJSON(writer, http.StatusBadGateway, map[string]any{"ok": false, "error": workspacepkg.DetectionErrorCode(err), "message": err.Error(), "workspace": detected})
+		code := workspacepkg.DetectionErrorCode(err)
+		status := http.StatusBadGateway
+		if item.Transport == "ssh" && workspacepkg.IsUnknownSSHHostKey(err) {
+			code = "ssh_host_key_unknown"
+			status = http.StatusConflict
+		}
+		writeJSON(writer, status, map[string]any{"ok": false, "error": code, "message": err.Error(), "workspace": detected})
 		return
 	}
 	if err := s.store.UpdateWorkspaceDetection(request.Context(), detected); err != nil {
@@ -381,6 +389,65 @@ func (s *Server) detectWorkspaceHandler(writer http.ResponseWriter, request *htt
 		}
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "workspace": detected})
+}
+
+func (s *Server) workspaceSSHTarget(writer http.ResponseWriter, request *http.Request) (domain.Workspace, string, bool) {
+	item, err := s.store.Workspace(request.Context(), request.PathValue("id"))
+	if err != nil {
+		writeError(writer, http.StatusNotFound, "workspace_not_found")
+		return domain.Workspace{}, "", false
+	}
+	if item.ReadOnly {
+		writeJSON(writer, http.StatusForbidden, map[string]any{"ok": false, "error": "workspace_read_only", "message": "只读 Workspace 不能在本机修改 SSH 主机信任"})
+		return domain.Workspace{}, "", false
+	}
+	if item.Transport != "ssh" || strings.TrimSpace(item.SSHHost) == "" {
+		writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "ssh_host_key_unavailable", "message": "当前 Workspace 不是 SSH 连接"})
+		return domain.Workspace{}, "", false
+	}
+	port := item.SSHPort
+	if port == 0 {
+		port = 22
+	}
+	return item, net.JoinHostPort(item.SSHHost, strconv.Itoa(port)), true
+}
+
+func (s *Server) workspaceSSHHostKey(writer http.ResponseWriter, request *http.Request) {
+	_, endpoint, ok := s.workspaceSSHTarget(writer, request)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), 10*time.Second)
+	defer cancel()
+	info, err := s.probeSSHHostKey(ctx, endpoint)
+	if err != nil {
+		writeJSON(writer, http.StatusBadGateway, map[string]any{"ok": false, "error": "ssh_host_key_probe_failed", "message": err.Error()})
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "host_key": info})
+}
+
+func (s *Server) trustWorkspaceSSHHostKey(writer http.ResponseWriter, request *http.Request) {
+	item, endpoint, ok := s.workspaceSSHTarget(writer, request)
+	if !ok {
+		return
+	}
+	var payload struct {
+		Fingerprint string `json:"fingerprint"`
+	}
+	if err := decodeJSON(request, &payload); err != nil || strings.TrimSpace(payload.Fingerprint) == "" {
+		writeError(writer, http.StatusBadRequest, "invalid_json")
+		return
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), 10*time.Second)
+	defer cancel()
+	info, err := s.trustSSHHostKey(ctx, endpoint, strings.TrimSpace(payload.Fingerprint))
+	if err != nil {
+		writeJSON(writer, http.StatusConflict, map[string]any{"ok": false, "error": "ssh_host_key_trust_failed", "message": err.Error()})
+		return
+	}
+	s.audit(request, "workspace.ssh_host_key_trust", "workspace", item.ID, map[string]any{"endpoint": info.Endpoint, "algorithm": info.Algorithm, "fingerprint": info.Fingerprint})
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "host_key": info})
 }
 
 func workspaceSSHCredentialRef(workspaceID string) string {

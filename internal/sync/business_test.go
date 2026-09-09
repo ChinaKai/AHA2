@@ -101,6 +101,60 @@ func TestBusinessExportStripsLocalAndSecretFields(t *testing.T) {
 	}
 }
 
+func TestModelSyncPreservesDefaultEnvGroup(t *testing.T) {
+	t.Parallel()
+	ctx, source, now := context.Background(), businessStore(t), time.Now().UTC()
+	env := domain.EnvGroup{
+		ID: "env-model-default", Name: "Gateway / gpt-env", ProviderID: "provider-model-default", Backend: "codex", Revision: 2,
+		Environment: map[string]string{"OPENAI_MODEL": "gpt-env"}, SecretRefs: map[string]string{}, CreatedAt: now, UpdatedAt: now,
+	}
+	model := domain.Model{
+		ID: "model-default", DisplayName: "GPT Env", ProviderID: env.ProviderID, Source: domain.ModelSourceProvider,
+		Backend: env.Backend, WireModel: "gpt-env", DefaultEnvGroupID: env.ID, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := source.UpsertEnvGroup(ctx, env); err != nil {
+		t.Fatal(err)
+	}
+	if err := source.UpsertModel(ctx, model); err != nil {
+		t.Fatal(err)
+	}
+	objects, err := ExportBusinessObjects(ctx, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	destination := businessStore(t)
+	for _, object := range objects {
+		if object.Type != TypeEnvGroup && object.Type != TypeModel {
+			continue
+		}
+		if err := applyBusinessObject(ctx, destination, object); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := destination.Model(ctx, model.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.DefaultEnvGroupID != env.ID {
+		t.Fatalf("synced default env group=%q, want %q", got.DefaultEnvGroupID, env.ID)
+	}
+
+	legacy := model
+	legacy.DisplayName = "Legacy update"
+	legacy.DefaultEnvGroupID = ""
+	raw, _ := json.Marshal(legacy)
+	if err := applyBusinessObject(ctx, destination, domain.SyncObject{Type: TypeModel, ID: model.ID, Operation: "upsert", Payload: raw}); err != nil {
+		t.Fatal(err)
+	}
+	got, err = destination.Model(ctx, model.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.DefaultEnvGroupID != env.ID {
+		t.Fatalf("legacy payload erased local default env group: %#v", got)
+	}
+}
+
 func TestApplyLegacyProjectKnowledgeWithoutProjectIDAsGlobalFallback(t *testing.T) {
 	ctx, db, now := context.Background(), businessStore(t), time.Now().UTC()
 	legacy := domain.KnowledgeEntry{

@@ -71,9 +71,12 @@ GET  /api/v1/agent/knowledge/{id}
 POST /api/v1/agent/knowledge/candidates
 POST /api/v1/agent/knowledge/{id}/feedback
 GET  /api/v1/agent/skills
+POST /api/v1/agent/skills
 GET  /api/v1/agent/skills/{id}
 PUT  /api/v1/agent/skills/{id}
 ```
+
+`POST /api/v1/agent/skills` accepts `name`, `description`, and `instructions`. Main Agent creates an active, enabled Skill scoped to the current Project, and AHA2 automatically selects it for the current Task. It is available through the Agent API immediately and is materialized into context on the next Turn.
 
 Knowledge 只返回当前 Project/Product Line 可用的已发布条目；更新已有条目必须携带
 `base_revision`。Agent 提交的新知识或修订统一先创建 proposal；手动评审模式保持 pending，

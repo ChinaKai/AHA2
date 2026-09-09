@@ -57,7 +57,7 @@ func codexRuntimeContextFromRunner(
 	runner workspace.Runner,
 	workDir, root, sessionID string,
 ) (runtimeContextSample, bool) {
-	result, err := runner.Run(ctx, workspace.Command{
+	command := workspace.Command{
 		Executable: "sh",
 		Args: []string{
 			"-c",
@@ -67,7 +67,19 @@ func codexRuntimeContextFromRunner(
 			"aha2-context", root, sessionID,
 		},
 		Dir: workDir, Timeout: 20 * time.Second,
-	}, nil)
+	}
+	if workspace.IsWindowsRunner(runner) {
+		command = workspace.Command{
+			Executable: "powershell.exe",
+			Args: []string{"-NoLogo", "-NoProfile", "-NonInteractive", "-Command", `param([string]$Root, [string]$Session)
+if ($Root -eq '__HOME_CODEX__') { $Root = Join-Path $HOME '.codex\sessions' }
+$file = Get-ChildItem -LiteralPath $Root -Recurse -File -Filter "*$Session*.jsonl" -ErrorAction SilentlyContinue | Select-Object -First 1
+if (-not $file) { exit 1 }
+Get-Content -LiteralPath $file.FullName -Tail 4000`, root, sessionID},
+			Dir: workDir, Timeout: 20 * time.Second,
+		}
+	}
+	result, err := runner.Run(ctx, command, nil)
 	if err != nil || result.ExitCode != 0 {
 		return runtimeContextSample{}, false
 	}
@@ -126,7 +138,7 @@ func backendSessionArtifactSizeFromRunner(
 	runner workspace.Runner,
 	workDir, root, sessionID string,
 ) (int64, bool) {
-	result, err := runner.Run(ctx, workspace.Command{
+	command := workspace.Command{
 		Executable: "sh",
 		Args: []string{
 			"-c",
@@ -138,7 +150,20 @@ func backendSessionArtifactSizeFromRunner(
 			"aha2-session-file", root, sessionID,
 		},
 		Dir: workDir, Timeout: 20 * time.Second,
-	}, nil)
+	}
+	if workspace.IsWindowsRunner(runner) {
+		command = workspace.Command{
+			Executable: "powershell.exe",
+			Args: []string{"-NoLogo", "-NoProfile", "-NonInteractive", "-Command", `param([string]$Root, [string]$Session)
+if ($Root -eq '__HOME_CODEX__') { $Root = Join-Path $HOME '.codex\sessions' }
+if ($Root -eq '__HOME_CLAUDE__') { $Root = Join-Path $HOME '.claude\projects' }
+$file = Get-ChildItem -LiteralPath $Root -Recurse -File -Filter "*$Session*.jsonl" -ErrorAction SilentlyContinue | Select-Object -First 1
+if (-not $file) { exit 1 }
+[Console]::Out.Write($file.Length)`, root, sessionID},
+			Dir: workDir, Timeout: 20 * time.Second,
+		}
+	}
+	result, err := runner.Run(ctx, command, nil)
 	if err != nil || result.ExitCode != 0 {
 		return 0, false
 	}

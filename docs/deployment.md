@@ -292,6 +292,6 @@ bash scripts/build-all.sh
 
 - 第一版支持单 Owner。
 - Backend 优先支持 Codex，同时保留 Stub 自测 Backend。
-- Remote Workspace 使用系统 OpenSSH，目标 WSL/Unix 主机需提前配置 SSH Key。
+- Remote Workspace 通过 SSH 连接目标主机，首次检测会展示并要求确认主机指纹；支持 WSL/Unix 的 `sh` 与 Windows OpenSSH 的 PowerShell 执行环境。
 - 当前 WSL 首次 Host Key 使用 `accept-new`，后续严格校验已保存指纹。
 - 自动合并、自动推送、多 Agent 和公网 TLS 终止不在第一版范围。

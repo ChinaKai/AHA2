@@ -88,7 +88,7 @@ function renderCodexAccountsBase(accounts: CodexAccount[]): string {
     <div class="field-help">复制链接到浏览器完成登录。跳转失败页面出现后，复制浏览器地址栏中的完整 Callback URL。</div>
     <label>Callback URL<textarea id="codex-callback-url" rows="4" placeholder="http://localhost:1455/auth/callback?code=...&state=..."></textarea></label>
     <div id="codex-login-status" class="detect-status"></div>
-    <div class="dialog-actions"><button type="button" data-close>取消</button><button type="button" id="submit-codex-callback" class="primary">添加账号</button></div>
+    <div class="dialog-actions"><button type="button" data-close>取消</button><button type="button" id="import-local-codex-account">导入本机登录</button><button type="button" id="submit-codex-callback" class="primary">添加账号</button></div>
   </div></dialog>`;
 }
 
@@ -181,6 +181,24 @@ export function bindCodexAccounts(options: {
       if (button) button.classList.add("copied");
       status("授权链接已复制");
     }).catch(() => status("复制失败，请手动选择链接复制", true));
+  });
+  document.querySelector<HTMLElement>("#import-local-codex-account")?.addEventListener("click", () => {
+    const button = document.querySelector<HTMLElement>("#import-local-codex-account");
+    status("正在读取本机 Codex 登录并刷新模型...");
+    void busy(button, "导入中", async () => {
+      const imported = await api.importLocalCodexAccount();
+      let refreshError = "";
+      try {
+        await api.refreshCodexAccount(imported.account.id);
+      } catch (error) {
+        refreshError = error instanceof Error ? error.message : String(error);
+      }
+      document.querySelector<HTMLDialogElement>("#codex-account-dialog")?.close();
+      options.setMessage(refreshError ? "error" : "notice", refreshError
+        ? `Codex 账号已导入，但模型刷新失败：${refreshError}`
+        : "本机 Codex 登录已导入");
+      await options.onChanged();
+    }, message => status(message, true));
   });
   document.querySelector<HTMLElement>("#submit-codex-callback")?.addEventListener("click", () => {
     const button = document.querySelector<HTMLElement>("#submit-codex-callback");

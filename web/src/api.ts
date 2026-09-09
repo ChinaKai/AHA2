@@ -282,6 +282,16 @@ class APIClient {
     return this.request(`/api/v1/workspaces/${id}/detect`, {method: "POST", body: "{}"});
   }
 
+  workspaceHostKey(id: string): Promise<{host_key: SSHHostKeyInfo}> {
+    return this.request(`/api/v1/workspaces/${encodeURIComponent(id)}/host-key`);
+  }
+
+  trustWorkspaceHostKey(id: string, fingerprint: string): Promise<{host_key: SSHHostKeyInfo}> {
+    return this.request(`/api/v1/workspaces/${encodeURIComponent(id)}/host-key/trust`, {
+      method: "POST", body: JSON.stringify({fingerprint}),
+    });
+  }
+
   deleteWorkspace(id: string): Promise<{ok: boolean}> {
     return this.request(`/api/v1/workspaces/${encodeURIComponent(id)}`, {method: "DELETE"});
   }
@@ -348,6 +358,10 @@ class APIClient {
 
   codexAccounts(): Promise<{accounts: CodexAccount[]}> {
     return this.request("/api/v1/codex-accounts");
+  }
+
+  importLocalCodexAccount(): Promise<{account: CodexAccount}> {
+    return this.request("/api/v1/codex-accounts/import-local", {method: "POST", body: "{}"});
   }
 
   startCodexLogin(proxyEnabled: boolean): Promise<{login: CodexLogin}> {
