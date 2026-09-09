@@ -11,7 +11,8 @@ import (
 
 func (s *Store) ChannelAllowedKnowledge(ctx context.Context, instanceID, endpointKind, conversationID string) ([]domain.KnowledgeEntry, error) {
 	var policyID, fixedIndexID string
-	err := s.db.QueryRowContext(ctx, `SELECT p.id,p.fixed_index_entry_id FROM channel_knowledge_policies p JOIN channel_endpoints e ON e.id=p.endpoint_id WHERE p.instance_id=? AND e.kind=? AND e.enabled=1`, instanceID, endpointKind).Scan(&policyID, &fixedIndexID)
+	var scopeMode string
+	err := s.db.QueryRowContext(ctx, `SELECT p.id,p.fixed_index_entry_id,p.scope_mode FROM channel_knowledge_policies p JOIN channel_endpoints e ON e.id=p.endpoint_id WHERE p.instance_id=? AND e.kind=? AND e.enabled=1`, instanceID, endpointKind).Scan(&policyID, &fixedIndexID, &scopeMode)
 	if err != nil {
 		return nil, err
 	}
@@ -26,6 +27,22 @@ func (s *Store) ChannelAllowedKnowledge(ctx context.Context, instanceID, endpoin
 		children[entry.ParentID] = append(children[entry.ParentID], entry.ID)
 	}
 	allowed := map[string]bool{fixedIndexID: true}
+	if scopeMode == "all" {
+		projects, projectErr := s.ListProjects(ctx)
+		if projectErr != nil {
+			return nil, projectErr
+		}
+		projectTypes := map[string]string{}
+		for _, project := range projects {
+			projectTypes[project.ID] = project.ProjectType
+		}
+		for _, entry := range all {
+			projectType, exists := projectTypes[entry.ProjectID]
+			if entry.ProjectID != "" && exists && projectType != "channel" {
+				allowed[entry.ID] = true
+			}
+		}
+	}
 	rows, err := s.db.QueryContext(ctx, `SELECT knowledge_entry_id FROM channel_knowledge_records WHERE instance_id=? AND (conversation_id=? OR (visibility='instance_shared' AND authority_status='verified'))`, instanceID, conversationID)
 	if err != nil {
 		return nil, err
@@ -336,8 +353,8 @@ func (s *Store) EnsureChannelKnowledgePolicies(ctx context.Context, instanceID, 
 	}
 	for _, endpoint := range endpoints {
 		visibility := "conversation_only"
-		_, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO channel_knowledge_policies(id,instance_id,endpoint_id,fixed_index_entry_id,default_visibility,revision,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)`,
-			domain.NewID("channel_knowledge_policy"), instanceID, endpoint.ID, fixedIndexID, visibility, 1, timeString(at), timeString(at))
+		_, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO channel_knowledge_policies(id,instance_id,endpoint_id,fixed_index_entry_id,default_visibility,scope_mode,revision,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)`,
+			domain.NewID("channel_knowledge_policy"), instanceID, endpoint.ID, fixedIndexID, visibility, "all", 1, timeString(at), timeString(at))
 		if err != nil {
 			return err
 		}

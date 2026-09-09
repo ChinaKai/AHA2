@@ -535,6 +535,10 @@ INSERT OR IGNORE INTO backend_settings(id,idle_timeout_seconds,turn_timeout_seco
 VALUES(1,600,36000,strftime('%Y-%m-%dT%H:%M:%fZ','now'));
 `
 
+const schemaV48 = `
+ALTER TABLE channel_knowledge_policies ADD COLUMN scope_mode TEXT NOT NULL DEFAULT 'selected' CHECK(scope_mode IN ('all','selected'));
+`
+
 const schemaV27 = `
 CREATE TABLE IF NOT EXISTS sync_settings (
     scope TEXT PRIMARY KEY,
@@ -1835,6 +1839,16 @@ func (s *Store) migrate(ctx context.Context) error {
 	}
 	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(47, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
 		return fmt.Errorf("record schema v47: %w", err)
+	}
+	var hasV48 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=48)`).Scan(&hasV48)
+	if !hasV48 {
+		if _, err := s.db.ExecContext(ctx, schemaV48); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("apply schema v48: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(48, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v48: %w", err)
 	}
 	return nil
 }

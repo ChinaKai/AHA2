@@ -228,7 +228,7 @@ func (s *Service) CreateInstance(ctx context.Context, ownerID, pluginID, name, i
 	item := domain.ChannelInstance{
 		ID: instanceID, PluginID: plugin.ID, ProviderKey: plugin.ProviderKey, OwnerID: ownerID,
 		RuntimeDeviceID: s.runtimeDeviceID, Name: name, Status: "draft", EffectiveAvailability: "available", Revision: 1,
-		HostProjectID: projectID, HostWorkspaceID: workspaceID, Config: map[string]any{}, CreatedAt: now, UpdatedAt: now,
+		HostProjectID: projectID, HostWorkspaceID: workspaceID, Config: map[string]any{"operation_scope_mode": "all"}, CreatedAt: now, UpdatedAt: now,
 	}
 	endpoints := []domain.ChannelEndpoint{
 		{ID: domain.NewID("channel_endpoint"), InstanceID: instanceID, Kind: domain.ChannelEndpointAssistantDM, Enabled: true, Config: map[string]any{}, CreatedAt: now, UpdatedAt: now},
@@ -281,9 +281,14 @@ func (s *Service) UpdateInstance(ctx context.Context, ownerID, id, name string, 
 }
 
 func (s *Service) validateChannelInstanceConfig(ctx context.Context, instance domain.ChannelInstance, config map[string]any) error {
-	projects, projectsSet := stringListField(config, "allowed_project_ids")
-	workspaces, workspacesSet := stringListField(config, "allowed_workspace_ids")
-	if projectsSet {
+	mode := stringField(config, "operation_scope_mode")
+	if mode != "" && mode != "all" && mode != "selected" {
+		return fmt.Errorf("invalid channel operation scope mode")
+	}
+	projects, _ := stringListField(config, "allowed_project_ids")
+	workspaces, _ := stringListField(config, "allowed_workspace_ids")
+	projectsRestricted, workspacesRestricted := channelOperationRestrictions(config)
+	if projectsRestricted {
 		for _, id := range projects {
 			project, err := s.store.Project(ctx, id)
 			if err != nil || project.ProjectType == "channel" || project.ProjectType == "knowledge" {
@@ -291,11 +296,11 @@ func (s *Service) validateChannelInstanceConfig(ctx context.Context, instance do
 			}
 		}
 	}
-	if workspacesSet {
+	if workspacesRestricted {
 		allowedProjects := sliceSet(projects)
 		for _, id := range workspaces {
 			workspace, err := s.store.Workspace(ctx, id)
-			if err != nil || workspace.ReadOnly || s.store.IsManagedChannelWorkspace(ctx, id) || (projectsSet && !allowedProjects[workspace.ProjectID]) {
+			if err != nil || workspace.ReadOnly || s.store.IsManagedChannelWorkspace(ctx, id) || (projectsRestricted && !allowedProjects[workspace.ProjectID]) {
 				return fmt.Errorf("invalid channel workspace allowlist")
 			}
 		}
@@ -373,13 +378,16 @@ func (s *Service) OwnerKnowledgePolicies(ctx context.Context, ownerID, instanceI
 	return s.store.ChannelKnowledgePolicies(ctx, instanceID)
 }
 
-func (s *Service) ReplaceOwnerKnowledgeGrants(ctx context.Context, ownerID, instanceID, endpoint string, revision int, inputs []KnowledgeGrantInput) ([]map[string]any, error) {
+func (s *Service) ReplaceOwnerKnowledgeGrants(ctx context.Context, ownerID, instanceID, endpoint, scopeMode string, revision int, inputs []KnowledgeGrantInput) ([]map[string]any, error) {
 	instance, err := s.store.ChannelInstance(ctx, instanceID)
 	if err != nil || instance.OwnerID != ownerID {
 		return nil, sql.ErrNoRows
 	}
+	if scopeMode == "" {
+		scopeMode = "selected"
+	}
 	grants := make([]domain.ChannelKnowledgeGrant, 0, len(inputs))
-	allowedRoots, err := s.channelKnowledgeSourceRoots(ctx, instance)
+	allowedRoots, err := s.channelKnowledgeSourceRoots(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -390,13 +398,13 @@ func (s *Service) ReplaceOwnerKnowledgeGrants(ctx context.Context, ownerID, inst
 		}
 		grants = append(grants, domain.ChannelKnowledgeGrant{KnowledgeEntryID: entryID, GrantScope: "subtree"})
 	}
-	if err := s.store.ReplaceChannelKnowledgeGrants(ctx, instanceID, endpoint, ownerID, revision, grants, s.now().UTC()); err != nil {
+	if err := s.store.ReplaceChannelKnowledgeGrants(ctx, instanceID, endpoint, ownerID, scopeMode, revision, grants, s.now().UTC()); err != nil {
 		return nil, err
 	}
 	return s.store.ChannelKnowledgePolicies(ctx, instanceID)
 }
 
-func (s *Service) channelKnowledgeSourceRoots(ctx context.Context, instance domain.ChannelInstance) (map[string]bool, error) {
+func (s *Service) channelKnowledgeSourceRoots(ctx context.Context) (map[string]bool, error) {
 	entries, err := s.store.ListKnowledge(ctx, "", "", []domain.KnowledgeStatus{domain.KnowledgeVerified})
 	if err != nil {
 		return nil, err
@@ -409,8 +417,6 @@ func (s *Service) channelKnowledgeSourceRoots(ctx context.Context, instance doma
 	for _, library := range libraries {
 		libraryProjects[library.ContainerProjectID] = true
 	}
-	allowedProjects, restricted := stringListField(instance.Config, "allowed_project_ids")
-	projectSet := sliceSet(allowedProjects)
 	result := map[string]bool{}
 	for _, entry := range entries {
 		if !entry.IsIndex || entry.ProjectID == "" {
@@ -421,7 +427,7 @@ func (s *Service) channelKnowledgeSourceRoots(ctx context.Context, instance doma
 			continue
 		}
 		project, projectErr := s.store.Project(ctx, entry.ProjectID)
-		if projectErr == nil && project.ProjectType != "channel" && project.ProjectType != "knowledge" && (!restricted || projectSet[project.ID]) {
+		if projectErr == nil && project.ProjectType != "channel" && project.ProjectType != "knowledge" {
 			result[entry.ID] = true
 		}
 	}
@@ -946,8 +952,9 @@ func (s *Service) allowedChannelCatalog(ctx context.Context, instance domain.Cha
 	if err != nil {
 		return channelCatalog{}, err
 	}
-	allowedProjects, projectsRestricted := stringListField(instance.Config, "allowed_project_ids")
-	allowedWorkspaces, workspacesRestricted := stringListField(instance.Config, "allowed_workspace_ids")
+	allowedProjects, _ := stringListField(instance.Config, "allowed_project_ids")
+	allowedWorkspaces, _ := stringListField(instance.Config, "allowed_workspace_ids")
+	projectsRestricted, workspacesRestricted := channelOperationRestrictions(instance.Config)
 	projectSet, workspaceSet := sliceSet(allowedProjects), sliceSet(allowedWorkspaces)
 	result := channelCatalog{}
 	for _, project := range projects {
@@ -1220,9 +1227,23 @@ func (s *Service) PreviewAgentAction(ctx context.Context, claims agentapi.Claims
 }
 
 func channelOperationAllowed(config map[string]any, projectID, workspaceID string) bool {
-	projects, projectsRestricted := stringListField(config, "allowed_project_ids")
-	workspaces, workspacesRestricted := stringListField(config, "allowed_workspace_ids")
+	projects, _ := stringListField(config, "allowed_project_ids")
+	workspaces, _ := stringListField(config, "allowed_workspace_ids")
+	projectsRestricted, workspacesRestricted := channelOperationRestrictions(config)
 	return (!projectsRestricted || sliceSet(projects)[projectID]) && (!workspacesRestricted || sliceSet(workspaces)[workspaceID])
+}
+
+func channelOperationRestrictions(config map[string]any) (bool, bool) {
+	switch stringField(config, "operation_scope_mode") {
+	case "all":
+		return false, false
+	case "selected":
+		return true, true
+	default:
+		_, projectsSet := stringListField(config, "allowed_project_ids")
+		_, workspacesSet := stringListField(config, "allowed_workspace_ids")
+		return projectsSet, workspacesSet
+	}
 }
 
 func stringField(values map[string]any, key string) string {

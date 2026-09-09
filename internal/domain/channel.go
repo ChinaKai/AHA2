@@ -155,6 +155,7 @@ type ChannelKnowledgePolicy struct {
 	EndpointID        string    `json:"endpoint_id"`
 	FixedIndexEntryID string    `json:"fixed_index_entry_id"`
 	DefaultVisibility string    `json:"default_visibility"`
+	ScopeMode         string    `json:"scope_mode"`
 	Revision          int       `json:"revision"`
 	CreatedAt         time.Time `json:"created_at"`
 	UpdatedAt         time.Time `json:"updated_at"`

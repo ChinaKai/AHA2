@@ -1,10 +1,32 @@
 package store
 
 import (
+	"context"
+	"path/filepath"
 	"testing"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
 )
+
+func TestChannelKnowledgeScopeMigrationIsSafeForExistingPolicies(t *testing.T) {
+	ctx := context.Background()
+	database, err := Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var defaultValue string
+	if err := database.db.QueryRowContext(ctx, `SELECT dflt_value FROM pragma_table_info('channel_knowledge_policies') WHERE name='scope_mode'`).Scan(&defaultValue); err != nil {
+		t.Fatal(err)
+	}
+	if defaultValue != "'selected'" {
+		t.Fatalf("legacy policy default=%q", defaultValue)
+	}
+	var migrated bool
+	if err := database.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=48)`).Scan(&migrated); err != nil || !migrated {
+		t.Fatalf("schema v48 migrated=%v err=%v", migrated, err)
+	}
+}
 
 func TestChannelSubscriptionAllowsUpdatesOnlyForPrivateConversations(t *testing.T) {
 	t.Parallel()

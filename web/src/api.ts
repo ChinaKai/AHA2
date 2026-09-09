@@ -225,12 +225,12 @@ class APIClient {
     return this.request(`/api/v1/channel-deliveries/${encodeURIComponent(id)}/skip`, {method: "POST", body: "{}"});
   }
 
-  channelKnowledgePolicies(id: string): Promise<{policies: Array<{id: string; endpoint: string; fixed_index_entry_id: string; revision: number; grants: Array<{knowledge_entry_id: string; grant_scope: string}>}>}> {
+  channelKnowledgePolicies(id: string): Promise<{policies: Array<{id: string; endpoint: string; fixed_index_entry_id: string; scope_mode: "all" | "selected"; revision: number; grants: Array<{knowledge_entry_id: string; grant_scope: string}>}>}> {
     return this.request(`/api/v1/channel-instances/${encodeURIComponent(id)}/knowledge-policy`);
   }
 
-  updateChannelKnowledgePolicy(id: string, endpoint: string, revision: number, grants: Array<{knowledge_entry_id: string; grant_scope: string}>): Promise<{policies: unknown[]}> {
-    return this.request(`/api/v1/channel-instances/${encodeURIComponent(id)}/knowledge-policy`, {method: "PUT", headers: {"If-Match": `"${revision}"`}, body: JSON.stringify({endpoint, grants})});
+  updateChannelKnowledgePolicy(id: string, endpoint: string, scopeMode: "all" | "selected", revision: number, grants: Array<{knowledge_entry_id: string; grant_scope: string}>): Promise<{policies: unknown[]}> {
+    return this.request(`/api/v1/channel-instances/${encodeURIComponent(id)}/knowledge-policy`, {method: "PUT", headers: {"If-Match": `"${revision}"`}, body: JSON.stringify({endpoint, scope_mode: scopeMode, grants})});
   }
 
   channelKnowledgeRecords(id: string): Promise<{records: Array<{id: string; question: string; answer: string; visibility: string; authority_status: string}>}> {

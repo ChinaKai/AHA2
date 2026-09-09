@@ -139,18 +139,18 @@ func (s *Store) PromoteChannelKnowledgeRecord(ctx context.Context, id, instanceI
 }
 
 func (s *Store) ChannelKnowledgePolicies(ctx context.Context, instanceID string) ([]map[string]any, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT p.id,e.kind,p.fixed_index_entry_id,p.default_visibility,p.revision,p.created_at,p.updated_at FROM channel_knowledge_policies p JOIN channel_endpoints e ON e.id=p.endpoint_id WHERE p.instance_id=? ORDER BY e.kind`, instanceID)
+	rows, err := s.db.QueryContext(ctx, `SELECT p.id,e.kind,p.fixed_index_entry_id,p.default_visibility,p.scope_mode,p.revision,p.created_at,p.updated_at FROM channel_knowledge_policies p JOIN channel_endpoints e ON e.id=p.endpoint_id WHERE p.instance_id=? ORDER BY e.kind`, instanceID)
 	if err != nil {
 		return nil, err
 	}
 	type policyRow struct {
-		id, kind, fixed, visibility, created, updated string
-		revision                                      int
+		id, kind, fixed, visibility, scopeMode, created, updated string
+		revision                                                 int
 	}
 	policies := []policyRow{}
 	for rows.Next() {
 		var item policyRow
-		if err := rows.Scan(&item.id, &item.kind, &item.fixed, &item.visibility, &item.revision, &item.created, &item.updated); err != nil {
+		if err := rows.Scan(&item.id, &item.kind, &item.fixed, &item.visibility, &item.scopeMode, &item.revision, &item.created, &item.updated); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -175,12 +175,15 @@ func (s *Store) ChannelKnowledgePolicies(ctx context.Context, instanceID string)
 			grants = append(grants, map[string]string{"knowledge_entry_id": entryID, "grant_scope": scope})
 		}
 		grantRows.Close()
-		result = append(result, map[string]any{"id": item.id, "endpoint": item.kind, "fixed_index_entry_id": item.fixed, "default_visibility": item.visibility, "revision": item.revision, "grants": grants, "created_at": item.created, "updated_at": item.updated})
+		result = append(result, map[string]any{"id": item.id, "endpoint": item.kind, "fixed_index_entry_id": item.fixed, "default_visibility": item.visibility, "scope_mode": item.scopeMode, "revision": item.revision, "grants": grants, "created_at": item.created, "updated_at": item.updated})
 	}
 	return result, nil
 }
 
-func (s *Store) ReplaceChannelKnowledgeGrants(ctx context.Context, instanceID, endpointKind, ownerID string, expectedRevision int, grants []domain.ChannelKnowledgeGrant, at time.Time) error {
+func (s *Store) ReplaceChannelKnowledgeGrants(ctx context.Context, instanceID, endpointKind, ownerID, scopeMode string, expectedRevision int, grants []domain.ChannelKnowledgeGrant, at time.Time) error {
+	if scopeMode != "all" && scopeMode != "selected" {
+		return errors.New("invalid channel knowledge scope mode")
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -212,7 +215,7 @@ func (s *Store) ReplaceChannelKnowledgeGrants(ctx context.Context, instanceID, e
 			return err
 		}
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE channel_knowledge_policies SET revision=revision+1,updated_at=? WHERE id=? AND revision=?`, timeString(at), policyID, expectedRevision)
+	result, err := tx.ExecContext(ctx, `UPDATE channel_knowledge_policies SET scope_mode=?,revision=revision+1,updated_at=? WHERE id=? AND revision=?`, scopeMode, timeString(at), policyID, expectedRevision)
 	if err != nil {
 		return err
 	}

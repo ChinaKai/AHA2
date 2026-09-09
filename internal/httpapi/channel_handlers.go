@@ -321,20 +321,21 @@ func (s *Server) updateChannelKnowledgePolicy(writer http.ResponseWriter, reques
 		return
 	}
 	var payload struct {
-		Endpoint string                        `json:"endpoint"`
-		Grants   []channel.KnowledgeGrantInput `json:"grants"`
+		Endpoint  string                        `json:"endpoint"`
+		ScopeMode string                        `json:"scope_mode"`
+		Grants    []channel.KnowledgeGrantInput `json:"grants"`
 	}
 	if err := decodeJSON(request, &payload); err != nil {
 		writeError(writer, http.StatusBadRequest, "invalid_json")
 		return
 	}
 	session, _ := sessionFromContext(request.Context())
-	items, err := s.channels.ReplaceOwnerKnowledgeGrants(request.Context(), session.OwnerID, request.PathValue("id"), payload.Endpoint, revision, payload.Grants)
+	items, err := s.channels.ReplaceOwnerKnowledgeGrants(request.Context(), session.OwnerID, request.PathValue("id"), payload.Endpoint, payload.ScopeMode, revision, payload.Grants)
 	if err != nil {
 		writeChannelError(writer, err, "update_channel_knowledge_policy_failed")
 		return
 	}
-	s.audit(request, "channel.knowledge_policy.update", "channel_instance", request.PathValue("id"), map[string]any{"endpoint": payload.Endpoint, "grant_count": len(payload.Grants)})
+	s.audit(request, "channel.knowledge_policy.update", "channel_instance", request.PathValue("id"), map[string]any{"endpoint": payload.Endpoint, "scope_mode": payload.ScopeMode, "grant_count": len(payload.Grants)})
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "policies": items})
 }
 

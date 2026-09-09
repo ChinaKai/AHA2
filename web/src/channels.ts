@@ -51,6 +51,8 @@ function instanceSettings(instance: ChannelInstance, context: ChannelUIContext):
 	const config = objectValue(instance.config);
 	const normalProjects = context.projects.filter(project => !["channel", "knowledge"].includes(project.project_type || ""));
 	const normalWorkspaces = context.workspaces.filter(workspace => !workspace.read_only && normalProjects.some(project => project.id === workspace.project_id));
+	const legacyOperationRestricted = Array.isArray(config.allowed_project_ids) || Array.isArray(config.allowed_workspace_ids);
+	const operationScopeMode = config.operation_scope_mode === "all" ? "all" : config.operation_scope_mode === "selected" || legacyOperationRestricted ? "selected" : "all";
 	const projectIDs = new Set(stringList(config, "allowed_project_ids", normalProjects.map(item => item.id)));
 	const workspaceIDs = new Set(stringList(config, "allowed_workspace_ids", normalWorkspaces.map(item => item.id)));
 	const projectChecks = normalProjects.map(project => `<label class="channel-check"><input type="checkbox" name="allowed_project_ids" data-channel-project-scope value="${escapeHTML(project.id)}" ${projectIDs.has(project.id) ? "checked" : ""}>${escapeHTML(project.name)}</label>`).join("");
@@ -59,7 +61,7 @@ function instanceSettings(instance: ChannelInstance, context: ChannelUIContext):
 		const projectSelected = projectIDs.has(workspace.project_id);
 		return `<label class="channel-check" data-channel-workspace-option data-project-id="${escapeHTML(workspace.project_id)}"><input type="checkbox" name="allowed_workspace_ids" value="${escapeHTML(workspace.id)}" ${workspaceIDs.has(workspace.id) ? "checked" : ""} ${projectSelected ? "" : "disabled"}>${escapeHTML(project?.name || "-")} / ${escapeHTML(workspace.name)}</label>`;
 	}).join("");
-	return `<details class="channel-instance-settings"><summary>Runtime、通知与访问范围</summary><form data-channel-settings="${escapeHTML(instance.id)}" data-revision="${instance.revision}">${runtimeEditor("default", "实例默认", objectValue(config.runtime_default), context, false)}${runtimeEditor("assistant", "私聊助手", objectValue(config.runtime_assistant_dm), context, true)}${runtimeEditor("group", "群聊电子人", objectValue(config.runtime_group_digital_human), context, true)}<fieldset><legend>消息通知</legend><label class="channel-check"><input type="checkbox" name="notify_task_status" ${config.notify_task_status === true ? "checked" : ""}>普通 Task 状态变更推送到飞书私聊助手</label><small>仅推送等待处理、完成、失败或中断等状态；不会推送普通消息、过程输出或渠道宿主 Task。</small></fieldset><fieldset><legend>私聊操作范围 · Project</legend><div class="channel-checkbox-list">${projectChecks || "<small>暂无可选项目</small>"}</div></fieldset><fieldset><legend>私聊操作范围 · Workspace</legend><small>先选择 Project，随后仅可选择该 Project 下的 Workspace。</small><div class="channel-checkbox-list">${workspaceChecks || "<small>暂无可选 Workspace</small>"}</div></fieldset><button class="primary" type="submit">保存渠道设置</button></form></details>`;
+	return `<details class="channel-instance-settings"><summary>Runtime、通知与访问范围</summary><form data-channel-settings="${escapeHTML(instance.id)}" data-revision="${instance.revision}">${runtimeEditor("default", "实例默认", objectValue(config.runtime_default), context, false)}${runtimeEditor("assistant", "私聊助手", objectValue(config.runtime_assistant_dm), context, true)}${runtimeEditor("group", "群聊电子人", objectValue(config.runtime_group_digital_human), context, true)}<fieldset><legend>消息通知</legend><label class="channel-check"><input type="checkbox" name="notify_task_status" ${config.notify_task_status === true ? "checked" : ""}>普通 Task 状态变更推送到飞书私聊助手</label><small>仅推送等待处理、完成、失败或中断等状态；不会推送普通消息、过程输出或渠道宿主 Task。</small></fieldset><fieldset><legend>私聊操作范围</legend><label>范围模式<select name="operation_scope_mode"><option value="all" ${operationScopeMode === "all" ? "selected" : ""}>全部 Project / Workspace</option><option value="selected" ${operationScopeMode === "selected" ? "selected" : ""}>限制到所选范围</option></select></label><small>默认全部；渠道宿主、知识库项目和只读 Workspace 仍由服务端排除。</small></fieldset><div data-channel-operation-selected ${operationScopeMode === "all" ? "hidden" : ""}><fieldset><legend>私聊操作范围 · Project</legend><div class="channel-checkbox-list">${projectChecks || "<small>暂无可选项目</small>"}</div></fieldset><fieldset><legend>私聊操作范围 · Workspace</legend><small>先选择 Project，随后仅可选择该 Project 下的 Workspace。</small><div class="channel-checkbox-list">${workspaceChecks || "<small>暂无可选 Workspace</small>"}</div></fieldset></div><button class="primary" type="submit">保存渠道设置</button></form></details>`;
 }
 
 export function renderChannels(providers: ChannelPlugin[], instances: ChannelInstance[], context: ChannelUIContext): string {
@@ -140,6 +142,7 @@ export function bindChannels(options: {refresh: () => Promise<void>; setMessage:
 			runtime_default: runtime("default", false),
 			runtime_assistant_dm: runtime("assistant", true),
 			runtime_group_digital_human: runtime("group", true),
+			operation_scope_mode: String(values.get("operation_scope_mode") || "all"),
 			allowed_project_ids: values.getAll("allowed_project_ids").map(String),
 			allowed_workspace_ids: values.getAll("allowed_workspace_ids").map(String),
 			notify_task_status: values.get("notify_task_status") === "on",
@@ -150,6 +153,8 @@ export function bindChannels(options: {refresh: () => Promise<void>; setMessage:
 		}).catch(error => options.setMessage("error", error instanceof Error ? error.message : String(error)));
 	}));
 	document.querySelectorAll<HTMLFormElement>("[data-channel-settings]").forEach(settingsForm => {
+		const operationMode = settingsForm.querySelector<HTMLSelectElement>('select[name="operation_scope_mode"]');
+		const operationSelected = settingsForm.querySelector<HTMLElement>("[data-channel-operation-selected]");
 		const syncWorkspaceScope = () => {
 			const selectedProjects = new Set(Array.from(settingsForm.querySelectorAll<HTMLInputElement>('input[name="allowed_project_ids"]:checked')).map(input => input.value));
 			settingsForm.querySelectorAll<HTMLElement>("[data-channel-workspace-option]").forEach(option => {
@@ -160,6 +165,9 @@ export function bindChannels(options: {refresh: () => Promise<void>; setMessage:
 			});
 		};
 		settingsForm.querySelectorAll<HTMLInputElement>("[data-channel-project-scope]").forEach(input => input.addEventListener("change", syncWorkspaceScope));
+		const syncOperationMode = () => { if (operationSelected) operationSelected.hidden = operationMode?.value !== "selected"; };
+		operationMode?.addEventListener("change", syncOperationMode);
+		syncOperationMode();
 		syncWorkspaceScope();
 	});
   document.querySelectorAll<HTMLDetailsElement>("[data-channel-activity]").forEach(details => details.addEventListener("toggle", () => {
@@ -178,8 +186,9 @@ export function bindChannels(options: {refresh: () => Promise<void>; setMessage:
 			const knowledgeSources = [...projectSources, ...librarySources];
 			const policyRows = policies.policies.map(policy => {
 				const granted = new Set(policy.grants.map(grant => grant.knowledge_entry_id));
+				const scopeMode = policy.scope_mode === "all" ? "all" : "selected";
 				const choices = knowledgeSources.map(source => `<label class="channel-check"><input type="checkbox" name="knowledge_entry_id" value="${escapeHTML(source.root)}" ${granted.has(source.root) ? "checked" : ""}>${escapeHTML(source.label)}</label>`).join("");
-				return `<form data-channel-policy="${escapeHTML(instanceID)}" data-endpoint="${escapeHTML(policy.endpoint)}" data-revision="${policy.revision}"><strong>${escapeHTML(policy.endpoint)}</strong><small>固定渠道索引始终可读</small><div class="channel-batch-toolbar"><button type="button" data-channel-policy-select-all>全选</button><button type="button" data-channel-policy-clear>清空</button></div><div class="channel-checkbox-list">${choices || "<small>暂无可选知识源</small>"}</div><button type="submit">保存知识 allowlist</button></form>`;
+				return `<form data-channel-policy="${escapeHTML(instanceID)}" data-endpoint="${escapeHTML(policy.endpoint)}" data-revision="${policy.revision}"><strong>${escapeHTML(policy.endpoint)}</strong><small>固定渠道索引始终可读</small><label>Knowledge 范围<select name="knowledge_scope_mode"><option value="all" ${scopeMode === "all" ? "selected" : ""}>全部项目知识与知识库</option><option value="selected" ${scopeMode === "selected" ? "selected" : ""}>限制到所选知识源</option></select></label><div data-channel-knowledge-selected ${scopeMode === "all" ? "hidden" : ""}><div class="channel-batch-toolbar"><button type="button" data-channel-policy-select-all>全选</button><button type="button" data-channel-policy-clear>清空</button></div><div class="channel-checkbox-list">${choices || "<small>暂无可选知识源</small>"}</div></div><button type="submit">保存 Knowledge 范围</button></form>`;
 			}).join("");
       const recordRows = records.records.filter(record => record.authority_status !== "verified").map(record => `<details><summary>${escapeHTML(record.question)}</summary><form data-channel-record-promote="${escapeHTML(record.id)}"><label>整理后的标题<input name="title" value="${escapeHTML(record.question.slice(0, 120))}" required></label><label>整理后的正文<textarea name="body" required>${escapeHTML(record.answer)}</textarea></label><button type="submit">人工整理并共享</button></form></details>`).join("") || `<small>暂无待整理渠道问答</small>`;
       body.innerHTML = `<h4>Handoff</h4><ul>${handoffRows}</ul><h4>Dead letter</h4><ul>${deliveryRows}</ul><h4>Knowledge allowlist</h4><div class="channel-policy-list">${policyRows}</div><h4>待人工整理问答</h4><div class="channel-record-list">${recordRows}</div>`;
@@ -190,12 +199,18 @@ export function bindChannels(options: {refresh: () => Promise<void>; setMessage:
         event.preventDefault();
         const values = new FormData(form);
 				const grants = values.getAll("knowledge_entry_id").map(value => ({knowledge_entry_id: String(value), grant_scope: "subtree"}));
-        void api.updateChannelKnowledgePolicy(form.dataset.channelPolicy || "", form.dataset.endpoint || "", Number(form.dataset.revision || 0), grants).then(() => { options.setMessage("success", "Knowledge allowlist 已更新。"); details.dataset.loaded = "false"; }).catch(error => options.setMessage("error", String(error)));
+        const scopeMode = String(values.get("knowledge_scope_mode") || "all") as "all" | "selected";
+        void api.updateChannelKnowledgePolicy(form.dataset.channelPolicy || "", form.dataset.endpoint || "", scopeMode, Number(form.dataset.revision || 0), grants).then(() => { options.setMessage("success", "Knowledge 范围已更新。"); details.dataset.loaded = "false"; }).catch(error => options.setMessage("error", String(error)));
       }));
 			body.querySelectorAll<HTMLFormElement>("[data-channel-policy]").forEach(form => {
+				const mode = form.querySelector<HTMLSelectElement>('select[name="knowledge_scope_mode"]');
+				const selected = form.querySelector<HTMLElement>("[data-channel-knowledge-selected]");
 				const setAll = (checked: boolean) => form.querySelectorAll<HTMLInputElement>('input[name="knowledge_entry_id"]').forEach(input => { input.checked = checked; });
 				form.querySelector<HTMLElement>("[data-channel-policy-select-all]")?.addEventListener("click", () => setAll(true));
 				form.querySelector<HTMLElement>("[data-channel-policy-clear]")?.addEventListener("click", () => setAll(false));
+				const syncMode = () => { if (selected) selected.hidden = mode?.value !== "selected"; };
+				mode?.addEventListener("change", syncMode);
+				syncMode();
 			});
       body.querySelectorAll<HTMLFormElement>("[data-channel-record-promote]").forEach(form => form.addEventListener("submit", event => {
         event.preventDefault();

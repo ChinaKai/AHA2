@@ -427,6 +427,12 @@ Prompt Engine 将 Identity 切换为核心维护的 `channel-assistant` 或 `cha
 
 接管候选只能是当前设备可写、非 remote mirror、非渠道宿主的普通 Task；服务端 preview 与 confirm 两次检查。普通 Task 本身继续遵守既有同步规则，但 route/outbox 永远属于当前 runtime device。Owner allowlist 指向的 Knowledge 节点若本机不存在、stale、未 verified 或不再满足绑定关系，ACL 取交集后拒绝，不因远端曾存在而放行。跨设备渠道主从/迁移需要单独的 lease 与 Secret 迁移协议，不在一期隐式实现。
 
+### 11.4 默认全部与安全迁移
+
+私聊操作范围使用 `ChannelInstance.config.operation_scope_mode=all|selected`。新实例默认 `all`；`all` 仍排除渠道宿主、知识库项目、只读 Workspace 和其他不可写资源。`selected` 才应用 `allowed_project_ids/allowed_workspace_ids`，且 Workspace 必须属于已选 Project。旧实例没有 mode 时，只要存在任一 allowlist 字段就继续按旧限制处理，否则保持旧版“未限制”语义。
+
+Knowledge 范围按 endpoint 存在 `channel_knowledge_policies.scope_mode=all|selected`。新 policy 默认 `all`，读取全部普通项目知识与 Knowledge Library；全局知识和其他渠道宿主知识不自动开放。旧 policy 迁移默认 `selected`，继续使用稳定 Knowledge ID grants，避免升级后静默扩大权限。两类范围互相独立，所有写操作确认、Owner 身份和 endpoint capability 约束保持不变。
+
 ## 12. 一期实施拆分与验收
 
 1. **P1 核心骨架**：schema v46、domain/store、manifest loader、可空 ChannelService、provider/instance 只读与 CRUD、Profile Sync 排除规则；Web 增加“渠道”和无可用提供方页。验证插件目录为空、无效和禁用时 Go/Web 全量通过，渠道宿主图不进入 sync outbox。

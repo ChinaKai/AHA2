@@ -82,6 +82,9 @@ func TestDiscoverAndCreateInstanceIsOptionalAndIdempotent(t *testing.T) {
 	if err != nil || second.ID != first.ID {
 		t.Fatalf("idempotent result=%#v err=%v", second, err)
 	}
+	if stringField(first.Config, "operation_scope_mode") != "all" {
+		t.Fatalf("new channel operation scope=%#v", first.Config)
+	}
 	if _, err := service.CreateInstance(ctx, owner.ID, "feishu", "另一个名字", "request-1"); err == nil {
 		t.Fatal("reused idempotency key accepted different payload")
 	}
@@ -108,6 +111,11 @@ func TestDiscoverAndCreateInstanceIsOptionalAndIdempotent(t *testing.T) {
 	policies, err := database.ChannelKnowledgePolicies(ctx, item.ID)
 	if err != nil || len(policies) != 2 {
 		t.Fatalf("policies=%#v err=%v", policies, err)
+	}
+	for _, policy := range policies {
+		if stringField(policy, "scope_mode") != "all" {
+			t.Fatalf("new channel knowledge scope=%#v", policy)
+		}
 	}
 	raw, capability, err := service.IssueCapability(ctx, item.ID, []string{"channel.command.claim", "channel.command.progress", "channel.command.complete"}, time.Hour)
 	if err != nil || raw == "" || capability.TokenHash == raw {
@@ -243,6 +251,23 @@ func TestMenuControlPayloadsUseStructuredForms(t *testing.T) {
 	}
 	if _, _, ok := catalogTaskTarget(channelCatalog{projects: projects, workspaces: workspaces}, "project-menu", "not-allowed"); ok {
 		t.Fatal("out-of-catalog workspace was accepted")
+	}
+}
+
+func TestChannelOperationScopeDefaultsAllAndPreservesLegacyRestrictions(t *testing.T) {
+	t.Parallel()
+	projectID, workspaceID := "project", "workspace"
+	if !channelOperationAllowed(map[string]any{"operation_scope_mode": "all", "allowed_project_ids": []string{}, "allowed_workspace_ids": []string{}}, projectID, workspaceID) {
+		t.Fatal("explicit all scope was restricted by stale lists")
+	}
+	selected := map[string]any{"operation_scope_mode": "selected", "allowed_project_ids": []string{projectID}, "allowed_workspace_ids": []string{workspaceID}}
+	if !channelOperationAllowed(selected, projectID, workspaceID) || channelOperationAllowed(selected, "other", workspaceID) {
+		t.Fatal("selected scope did not enforce both allowlists")
+	}
+	legacy := map[string]any{"allowed_project_ids": []string{projectID}, "allowed_workspace_ids": []string{workspaceID}}
+	projectsRestricted, workspacesRestricted := channelOperationRestrictions(legacy)
+	if !projectsRestricted || !workspacesRestricted || !channelOperationAllowed(legacy, projectID, workspaceID) {
+		t.Fatal("legacy allowlists did not remain restricted")
 	}
 }
 
@@ -425,6 +450,38 @@ func TestInboundOwnerAndGroupScopesAreServerEnforcedAndIdempotent(t *testing.T) 
 	regularProject := domain.Project{ID: "regular-project", Name: "Regular", ProjectType: "folder", DefaultWorkspaceID: "regular-workspace", KnowledgePolicy: "enabled", CreatedAt: now, UpdatedAt: now}
 	if err := database.CreateProject(ctx, regularProject); err != nil {
 		t.Fatal(err)
+	}
+	externalKnowledgeRoot, err := database.EnsureKnowledgeRoot(ctx, "project", regularProject.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	allowedKnowledge, err := database.ChannelAllowedKnowledge(ctx, instance.ID, endpoint.Kind, conversation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !knowledgeEntryPresent(allowedKnowledge, externalKnowledgeRoot.ID) {
+		t.Fatal("new channel knowledge scope did not default to all")
+	}
+	ownerPolicies, err := service.OwnerKnowledgePolicies(ctx, owner.ID, instance.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, policy := range ownerPolicies {
+		if stringField(policy, "endpoint") != endpoint.Kind {
+			continue
+		}
+		ownerPolicies, err = service.ReplaceOwnerKnowledgeGrants(ctx, owner.ID, instance.ID, endpoint.Kind, "selected", intField(policy, "revision"), nil)
+		if err != nil || len(ownerPolicies) != 2 {
+			t.Fatalf("restrict knowledge policy=%#v err=%v", ownerPolicies, err)
+		}
+		break
+	}
+	allowedKnowledge, err = database.ChannelAllowedKnowledge(ctx, instance.ID, endpoint.Kind, conversation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if knowledgeEntryPresent(allowedKnowledge, externalKnowledgeRoot.ID) {
+		t.Fatal("selected knowledge scope ignored empty grants")
 	}
 	regularWorkspace := domain.Workspace{ID: "regular-workspace", ProjectID: regularProject.ID, Name: "Regular", Locality: "local", Transport: "native", RootPath: dataDir, Health: "ready", CreatedAt: now, UpdatedAt: now, AgentAPIMode: "global", AgentAPIStatus: "unknown"}
 	if err := database.CreateWorkspace(ctx, regularWorkspace); err != nil {
@@ -696,4 +753,13 @@ func TestInboundOwnerAndGroupScopesAreServerEnforcedAndIdempotent(t *testing.T) 
 	if !shared {
 		t.Fatal("human-promoted knowledge was not shared within instance")
 	}
+}
+
+func knowledgeEntryPresent(entries []domain.KnowledgeEntry, id string) bool {
+	for _, entry := range entries {
+		if entry.ID == id {
+			return true
+		}
+	}
+	return false
 }
