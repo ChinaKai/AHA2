@@ -350,7 +350,7 @@ func runChannel(ctx context.Context, runtime *runtimeClient, boot bootstrap) err
 		}
 		value := map[string]any{"provider_message_id": messageID}
 		for key, item := range action.Action.Value {
-			if key == "action_id" || key == "decision" || key == "kind" || key == "menu_action" {
+			if key == "action_id" || key == "decision" || key == "kind" || key == "menu_action" || key == "task_id" {
 				value[key] = item
 			}
 		}
@@ -376,7 +376,7 @@ func normalizedCardFormValues(values map[string]any) map[string]any {
 			name := strings.TrimPrefix(key, "aha_menu_control.")
 			switch name {
 			case "project_id", "workspace_id", "status", "keyword", "title", "request":
-				limit := 4000
+				limit := 1000
 				if name != "request" {
 					limit = 300
 				}
@@ -837,7 +837,11 @@ func renderMenuCard(payload map[string]any) map[string]any {
 				}
 				formElements = append(formElements, map[string]any{"tag": "select_static", "element_id": name, "name": name, "placeholder": map[string]any{"tag": "plain_text", "content": label}, "options": options})
 			case "text", "multiline":
-				input := map[string]any{"tag": "input", "element_id": name, "name": name, "placeholder": map[string]any{"tag": "plain_text", "content": label}, "max_length": numericInt(field["max_length"], 1000)}
+				maxLength := numericInt(field["max_length"], 1000)
+				if maxLength < 1 || maxLength > 1000 {
+					maxLength = 1000
+				}
+				input := map[string]any{"tag": "input", "element_id": name, "name": name, "placeholder": map[string]any{"tag": "plain_text", "content": label}, "max_length": maxLength}
 				if fieldType == "multiline" {
 					input["input_type"] = "multiline_text"
 				}
@@ -853,6 +857,19 @@ func renderMenuCard(payload map[string]any) map[string]any {
 		button := map[string]any{"tag": "button", "element_id": "aha_menu_submit", "name": "form_submit", "text": map[string]any{"tag": "plain_text", "content": label}, "type": "primary", "action_type": "form_submit", "form_action_type": "submit", "behaviors": []any{map[string]any{"type": "callback", "value": value}}}
 		formElements = append(formElements, map[string]any{"tag": "column_set", "columns": []any{map[string]any{"tag": "column", "width": "auto", "elements": []any{button}}}})
 		elements = append(elements, map[string]any{"tag": "form", "name": "aha_menu_control", "elements": formElements})
+	}
+	for index, action := range mapList(payload["actions"]) {
+		label := stringValue(action, "label")
+		value := mapValue(action["value"])
+		if label == "" || len(value) == 0 {
+			continue
+		}
+		style := stringValue(action, "style")
+		if style != "primary" && style != "danger" {
+			style = "default"
+		}
+		button := map[string]any{"tag": "button", "element_id": fmt.Sprintf("aha_menu_action_%d", index+1), "text": map[string]any{"tag": "plain_text", "content": label}, "type": style, "behaviors": []any{map[string]any{"type": "callback", "value": value}}}
+		elements = append(elements, map[string]any{"tag": "column_set", "columns": []any{map[string]any{"tag": "column", "width": "auto", "elements": []any{button}}}})
 	}
 	elements = append(elements, map[string]any{"tag": "markdown", "content": "<font color='grey'>由 AHA 控制面直接处理，不调用 Agent/Backend。</font>"})
 	return map[string]any{"schema": "2.0", "header": map[string]any{"template": template, "title": map[string]any{"tag": "plain_text", "content": title}}, "body": map[string]any{"elements": elements}}

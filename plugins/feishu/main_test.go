@@ -143,10 +143,12 @@ func TestRenderMenuFormCard(t *testing.T) {
 		"fields": []any{
 			map[string]any{"type": "select", "name": "project_id", "label": "Project", "options": []any{map[string]any{"label": "P", "value": "p1"}}},
 			map[string]any{"type": "text", "name": "keyword", "label": "关键词", "max_length": float64(100)},
+			map[string]any{"type": "multiline", "name": "request", "label": "需求", "max_length": float64(4000)},
 		},
-		"submit": map[string]any{"label": "查询", "value": map[string]any{"kind": "menu_control", "menu_action": "task.query"}},
+		"submit":  map[string]any{"label": "查询", "value": map[string]any{"kind": "menu_control", "menu_action": "task.query"}},
+		"actions": []any{map[string]any{"label": "接管 task-001", "style": "default", "value": map[string]any{"kind": "menu_control", "menu_action": "task.takeover.preview", "task_id": "task-1"}}},
 	})
-	if msgType != "interactive" || !strings.Contains(content, "form_submit") || !strings.Contains(content, "select_static") || !strings.Contains(content, "menu_control") {
+	if msgType != "interactive" || !strings.Contains(content, "form_submit") || !strings.Contains(content, "select_static") || !strings.Contains(content, "menu_control") || !strings.Contains(content, `"max_length":1000`) || !strings.Contains(content, `"task_id":"task-1"`) {
 		t.Fatalf("menu card type=%s content=%s", msgType, content)
 	}
 	if got := cardFormScalar(map[string]any{"value": " project "}, 20); got != "project" {

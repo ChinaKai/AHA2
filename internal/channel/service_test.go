@@ -234,6 +234,9 @@ func TestMenuControlPayloadsUseStructuredForms(t *testing.T) {
 	if !ok || len(fields) != 4 || stringField(mapValueForTest(create["submit"]), "label") != "生成预览" {
 		t.Fatalf("create fields=%#v", create)
 	}
+	if intField(fields[3], "max_length") != 1000 {
+		t.Fatalf("Feishu multiline input exceeds card limit: %#v", fields[3])
+	}
 	project, workspace, ok := catalogTaskTarget(channelCatalog{projects: projects, workspaces: workspaces}, "project-menu", "workspace-menu")
 	if !ok || project.ID == "" || workspace.ID == "" {
 		t.Fatal("structured create target was not resolved")
@@ -402,6 +405,13 @@ func TestInboundOwnerAndGroupScopesAreServerEnforcedAndIdempotent(t *testing.T) 
 	if err != nil || len(menuDeliveries) == 0 || menuDeliveries[0].SemanticPayload["kind"] != "menu_card" {
 		t.Fatalf("menu delivery=%#v err=%v", menuDeliveries, err)
 	}
+	if err := database.SkipEphemeralMenuCards(ctx, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	staleMenu, err := database.ChannelDelivery(ctx, menuDeliveries[0].ID)
+	if err != nil || staleMenu.State != "skipped" {
+		t.Fatalf("stale menu card state=%s err=%v", staleMenu.State, err)
+	}
 	regularProject := domain.Project{ID: "regular-project", Name: "Regular", ProjectType: "folder", DefaultWorkspaceID: "regular-workspace", KnowledgePolicy: "enabled", CreatedAt: now, UpdatedAt: now}
 	if err := database.CreateProject(ctx, regularProject); err != nil {
 		t.Fatal(err)
@@ -504,6 +514,10 @@ func TestInboundOwnerAndGroupScopesAreServerEnforcedAndIdempotent(t *testing.T) 
 	route, err := database.ActiveChannelTaskRoute(ctx, conversation.ID)
 	if err != nil || route.TargetTaskID != target.ID {
 		t.Fatalf("route=%#v err=%v", route, err)
+	}
+	routeActions := service.activeRouteMenuActions(ctx, conversation)
+	if len(routeActions) != 1 || stringField(mapValueForTest(routeActions[0]["value"]), "menu_action") != "task.exit.preview" {
+		t.Fatalf("route actions=%#v", routeActions)
 	}
 	resultDeliveries, err := service.ClaimDeliveries(ctx, deliveryClaims, 10)
 	if err != nil || len(resultDeliveries) == 0 {

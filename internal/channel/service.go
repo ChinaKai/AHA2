@@ -108,6 +108,9 @@ func (s *Service) Start(ctx context.Context) {
 	s.processMu.Lock()
 	s.runCtx = ctx
 	s.processMu.Unlock()
+	if err := s.store.SkipEphemeralMenuCards(ctx, s.now().UTC()); err != nil {
+		s.logger.Warn("skip stale channel menu cards failed", "error", err)
+	}
 	go func() {
 		ticker := time.NewTicker(time.Second)
 		defer ticker.Stop()
@@ -892,6 +895,9 @@ func (s *Service) processMenuAction(ctx context.Context, receipt domain.ChannelI
 		payload = workspaceQueryFormPayload(catalog.projects)
 	case "aha.task.query":
 		payload = taskQueryFormPayload(catalog.projects)
+		if actions := s.activeRouteMenuActions(ctx, conversation); len(actions) > 0 {
+			payload["actions"] = actions
+		}
 	case "aha.task.create":
 		payload = taskCreateFormPayload(catalog.projects, catalog.workspaces)
 	default:
@@ -1031,7 +1037,7 @@ func taskCreateFormPayload(projects []domain.Project, workspaces []domain.Worksp
 			{"type": "select", "name": "project_id", "label": "Project", "options": projectOptions(projects)},
 			{"type": "select", "name": "workspace_id", "label": "Workspace", "options": workspaceOptions(projects, workspaces)},
 			{"type": "text", "name": "title", "label": "标题", "max_length": 200},
-			{"type": "multiline", "name": "request", "label": "需求", "max_length": 4000},
+			{"type": "multiline", "name": "request", "label": "需求", "max_length": 1000},
 		},
 		"submit": map[string]any{"label": "生成预览", "value": map[string]any{"kind": "menu_control", "menu_action": "task.create.preview"}},
 	}
@@ -1317,6 +1323,7 @@ func (s *Service) processMenuCardAction(ctx context.Context, receipt domain.Chan
 		}
 		lines := []string{"AHA 直接查询，未调用 Agent。"}
 		count := 0
+		actions := s.activeRouteMenuActions(ctx, conversation)
 		for _, task := range catalog.tasks {
 			if task.ProjectID != projectID || (status != "all" && string(task.Status) != status) {
 				continue
@@ -1326,34 +1333,62 @@ func (s *Service) processMenuCardAction(ctx context.Context, receipt domain.Chan
 				continue
 			}
 			count++
-			if count <= 20 {
+			if count <= 10 {
 				lines = append(lines, fmt.Sprintf("**%s · %s**\n%s", menuSafeText(task.Code), menuSafeText(string(task.Status)), menuSafeText(task.Title)))
+				if taskRouteEligible(task.Status) {
+					actions = append(actions, map[string]any{"label": "接管 " + task.Code, "style": "default", "value": map[string]any{"kind": "menu_control", "menu_action": "task.takeover.preview", "task_id": task.ID}})
+				}
 			}
 		}
 		if count == 0 {
 			lines = append(lines, "没有符合条件的 Task。")
-		} else if count > 20 {
-			lines = append(lines, "…仅展示前 20 个 Task")
+		} else if count > 10 {
+			lines = append(lines, "…仅展示前 10 个 Task")
 		}
 		payload = map[string]any{"kind": "menu_card", "title": "Task 查询结果", "template": "blue", "markdown": strings.Join(lines, "\n\n")}
+		if len(actions) > 0 {
+			payload["actions"] = actions
+		}
+	case "task.takeover.preview":
+		taskID := stringField(envelope.CardAction, "task_id")
+		var target domain.Task
+		for _, task := range catalog.tasks {
+			if task.ID == taskID {
+				target = task
+				break
+			}
+		}
+		if target.ID == "" || !taskRouteEligible(target.Status) {
+			return fmt.Errorf("menu takeover target is not eligible")
+		}
+		precondition := map[string]any{"task_id": target.ID, "status": target.Status, "updated_at": timeStringUTC(target.UpdatedAt)}
+		preview := map[string]any{"operation": "takeover", "task_code": target.Code, "title": target.Title, "effect": "建立消息路由，不迁移或改变 Task"}
+		if err := s.createMenuPendingAction(ctx, instance, conversation, identity, "takeover", "task", target.ID, map[string]any{}, preview, precondition); err != nil {
+			return err
+		}
+		return s.store.FinishChannelInbox(ctx, receipt.ID, receipt.LeaseID, "processed", conversation.ID, "", "menu_takeover_preview", s.now().UTC())
+	case "task.exit.preview":
+		route, routeErr := s.store.ActiveChannelTaskRoute(ctx, conversation.ID)
+		if routeErr != nil {
+			return fmt.Errorf("no active task route")
+		}
+		precondition := map[string]any{"route_id": route.ID, "route_revision": route.Revision, "task_id": route.TargetTaskID}
+		preview := map[string]any{"operation": "exit", "effect": "仅解绑当前 Task 路由，不完成或中断 Task"}
+		if err := s.createMenuPendingAction(ctx, instance, conversation, identity, "exit", "task_route", route.TargetTaskID, map[string]any{}, preview, precondition); err != nil {
+			return err
+		}
+		return s.store.FinishChannelInbox(ctx, receipt.ID, receipt.LeaseID, "processed", conversation.ID, "", "menu_exit_preview", s.now().UTC())
 	case "task.create.preview":
 		projectID, workspaceID := formString(values, "project_id"), formString(values, "workspace_id")
 		title, request := formString(values, "title"), formString(values, "request")
 		project, workspace, ok := catalogTaskTarget(catalog, projectID, workspaceID)
-		if !ok || title == "" || request == "" || len([]rune(title)) > 200 || len([]rune(request)) > 4000 {
+		if !ok || title == "" || request == "" || len([]rune(title)) > 200 || len([]rune(request)) > 1000 {
 			return fmt.Errorf("menu task creation fields are invalid")
 		}
 		precondition := map[string]any{"project_id": project.ID, "project_updated_at": timeStringUTC(project.UpdatedAt), "workspace_id": workspace.ID, "workspace_updated_at": timeStringUTC(workspace.UpdatedAt)}
-		raw, _ := json.Marshal(precondition)
-		digest := sha256.Sum256(raw)
-		now := s.now().UTC()
-		_, err = s.store.CreateChannelPendingAction(ctx, domain.ChannelPendingAction{
-			ID: domain.NewID("channel_action"), InstanceID: instance.ID, ConversationID: conversation.ID, ActorIdentityLinkID: identity.ID,
-			Operation: "create_task", TargetType: "task", Intent: map[string]any{"project_id": project.ID, "workspace_id": workspace.ID, "title": title, "request": request},
-			Preview:      map[string]any{"operation": "create_task", "project": project.Name, "workspace": workspace.Name, "title": title, "request": request, "runtime": "继承渠道配置"},
-			Precondition: precondition, PreconditionHash: hex.EncodeToString(digest[:]), Status: "pending", ExpiresAt: now.Add(15 * time.Minute), CreatedAt: now, UpdatedAt: now,
-		})
-		if err != nil {
+		intent := map[string]any{"project_id": project.ID, "workspace_id": workspace.ID, "title": title, "request": request}
+		preview := map[string]any{"operation": "create_task", "project": project.Name, "workspace": workspace.Name, "title": title, "request": request, "runtime": "继承渠道配置"}
+		if err := s.createMenuPendingAction(ctx, instance, conversation, identity, "create_task", "task", "", intent, preview, precondition); err != nil {
 			return err
 		}
 		return s.store.FinishChannelInbox(ctx, receipt.ID, receipt.LeaseID, "processed", conversation.ID, "", "menu_create_preview", s.now().UTC())
@@ -1364,6 +1399,30 @@ func (s *Service) processMenuCardAction(ctx context.Context, receipt domain.Chan
 		return err
 	}
 	return s.store.FinishChannelInbox(ctx, receipt.ID, receipt.LeaseID, "processed", conversation.ID, "", "menu_control", s.now().UTC())
+}
+
+func (s *Service) activeRouteMenuActions(ctx context.Context, conversation domain.ChannelConversation) []map[string]any {
+	route, err := s.store.ActiveChannelTaskRoute(ctx, conversation.ID)
+	if err != nil {
+		return nil
+	}
+	label := "退出当前 Task"
+	if task, taskErr := s.store.Task(ctx, route.TargetTaskID); taskErr == nil && task.Code != "" {
+		label = "退出 " + task.Code
+	}
+	return []map[string]any{{"label": label, "style": "danger", "value": map[string]any{"kind": "menu_control", "menu_action": "task.exit.preview"}}}
+}
+
+func (s *Service) createMenuPendingAction(ctx context.Context, instance domain.ChannelInstance, conversation domain.ChannelConversation, identity domain.ChannelIdentityLink, operation, targetType, targetID string, intent, preview, precondition map[string]any) error {
+	raw, _ := json.Marshal(precondition)
+	digest := sha256.Sum256(raw)
+	now := s.now().UTC()
+	_, err := s.store.CreateChannelPendingAction(ctx, domain.ChannelPendingAction{
+		ID: domain.NewID("channel_action"), InstanceID: instance.ID, ConversationID: conversation.ID, ActorIdentityLinkID: identity.ID,
+		Operation: operation, TargetType: targetType, TargetID: targetID, Intent: intent, Preview: preview, Precondition: precondition,
+		PreconditionHash: hex.EncodeToString(digest[:]), Status: "pending", ExpiresAt: now.Add(15 * time.Minute), CreatedAt: now, UpdatedAt: now,
+	})
+	return err
 }
 
 func formString(values map[string]any, key string) string {
@@ -1422,7 +1481,8 @@ func (s *Service) executePendingAction(ctx context.Context, action domain.Channe
 	switch action.Operation {
 	case "takeover":
 		task, err := s.store.Task(ctx, action.TargetID)
-		if err != nil || task.ReadOnly || !taskRouteEligible(task.Status) || timeStringUTC(task.UpdatedAt) != stringField(action.Precondition, "updated_at") {
+		instance, instanceErr := s.store.ChannelInstance(ctx, action.InstanceID)
+		if err != nil || instanceErr != nil || task.ReadOnly || s.store.IsManagedChannelTask(ctx, task.ID) || !channelOperationAllowed(instance.Config, task.ProjectID, task.WorkspaceID) || !taskRouteEligible(task.Status) || string(task.Status) != stringField(action.Precondition, "status") || timeStringUTC(task.UpdatedAt) != stringField(action.Precondition, "updated_at") {
 			return fmt.Errorf("takeover precondition changed")
 		}
 		return s.store.ActivateChannelTaskRoute(ctx, action, s.now().UTC())

@@ -55,6 +55,11 @@ func (s *Store) CreateChannelPendingAction(ctx context.Context, item domain.Chan
 }
 
 func enqueueChannelActionDeliveryTx(ctx context.Context, tx *sql.Tx, instanceID, conversationID, sourceKey, eventType string, payload map[string]any, at time.Time) error {
+	if payload["kind"] == "menu_card" {
+		if _, err := tx.ExecContext(ctx, `UPDATE channel_delivery_outbox SET state='skipped',updated_at=? WHERE conversation_id=? AND state IN ('pending','dead_letter') AND json_extract(semantic_payload_json,'$.kind')='menu_card'`, timeString(at), conversationID); err != nil {
+			return err
+		}
+	}
 	var taskID string
 	if err := tx.QueryRowContext(ctx, `SELECT host_task_id FROM channel_conversations WHERE id=? AND instance_id=?`, conversationID, instanceID).Scan(&taskID); err != nil {
 		return err
@@ -92,6 +97,11 @@ func (s *Store) EnqueueChannelControlDelivery(ctx context.Context, instanceID, c
 		return err
 	}
 	return tx.Commit()
+}
+
+func (s *Store) SkipEphemeralMenuCards(ctx context.Context, at time.Time) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE channel_delivery_outbox SET state='skipped',lease_id='',lease_until='',updated_at=? WHERE state IN ('pending','leased','dead_letter') AND json_extract(semantic_payload_json,'$.kind')='menu_card'`, timeString(at))
+	return err
 }
 
 func (s *Store) BeginChannelPendingAction(ctx context.Context, id, instanceID, conversationID, actorIdentityID, providerMessageID string, at time.Time) (domain.ChannelPendingAction, bool, error) {
