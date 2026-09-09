@@ -67,16 +67,25 @@ func TestMenuConfigurationErrorCodeIsSafeAndActionable(t *testing.T) {
 	}
 }
 
-func TestMenuAbilityHasExplicitRootParentsAndI18n(t *testing.T) {
+func TestMenuAbilityHasLocalizedNodesAndDeterministicOrdering(t *testing.T) {
 	t.Parallel()
 	ability := buildFeishuMenuAbility()
 	if ability.Enable == nil || !*ability.Enable || ability.BotMenuEnable == nil || !*ability.BotMenuEnable || len(ability.BotMenus) != 6 || len(ability.I18ns) != 1 {
 		t.Fatalf("ability=%#v", ability)
 	}
 	for _, index := range []int{0, 3} {
-		if ability.BotMenus[index].ParentMenuId == nil || *ability.BotMenus[index].ParentMenuId != "" {
-			t.Fatalf("root menu %d must carry an explicit empty parent", index)
+		if ability.BotMenus[index].ParentMenuId != nil {
+			t.Fatalf("root menu %d must omit parent", index)
 		}
+	}
+	for index, item := range ability.BotMenus {
+		if item.Sort == nil || *item.Sort != index+1 || item.I18nName["zh_cn"] == "" {
+			t.Fatalf("menu %d=%#v", index, item)
+		}
+	}
+	minimal := buildMinimalFeishuMenuAbility()
+	if len(minimal.BotMenus) != 1 || minimal.BotMenus[0].MenuContentType == nil || *minimal.BotMenus[0].MenuContentType != 2 {
+		t.Fatalf("minimal ability=%#v", minimal)
 	}
 }
 

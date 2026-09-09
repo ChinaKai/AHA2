@@ -539,6 +539,20 @@ func configureFeishuMenu(ctx context.Context, client *lark.Client, appID string)
 		if err != nil {
 			return menuConfigFailure{stage: "ability"}
 		}
+		if abilityResponse.Code == 210011 {
+			minimalBody := larkapplicationv7.NewPatchApplicationAbilityReqBodyBuilder().Bot(buildMinimalFeishuMenuAbility()).Build()
+			minimalRequest := larkapplicationv7.NewPatchApplicationAbilityReqBuilder().AppId(appID).Body(minimalBody).Build()
+			minimalResponse, minimalErr := client.Application.V7.ApplicationAbility.Patch(ctx, minimalRequest)
+			if minimalErr != nil {
+				return menuConfigFailure{stage: "ability_minimal"}
+			}
+			if minimalResponse.Success() {
+				failure := rejectedMenuConfig("ability_nested", abilityResponse.CodeError)
+				failure.description = "minimal event menu accepted; nested menu rejected"
+				return failure
+			}
+			return rejectedMenuConfig("ability_minimal", minimalResponse.CodeError)
+		}
 		return rejectedMenuConfig("ability", abilityResponse.CodeError)
 	}
 	publishBody := larkapplicationv7.NewCreateApplicationPublishReqBodyBuilder().MobileDefaultAbility("bot").PcDefaultAbility("bot").Remark("Configure AHA channel menu").Changelog("Configure Owner menu and channel display permissions").Build()
@@ -555,7 +569,10 @@ func configureFeishuMenu(ctx context.Context, client *lark.Client, appID string)
 
 func buildFeishuMenuAbility() *larkapplicationv7.AppAbilityBot {
 	menu := func(id, parent, label string, sort, action int, eventKey string) *larkapplicationv7.BotMenuNode {
-		builder := larkapplicationv7.NewBotMenuNodeBuilder().MenuId(id).ParentMenuId(parent).Sort(sort).DefaultName(label).MenuContentType(action)
+		builder := larkapplicationv7.NewBotMenuNodeBuilder().MenuId(id).Sort(sort).DefaultName(label).I18nName(map[string]string{"zh_cn": label}).MenuContentType(action)
+		if parent != "" {
+			builder.ParentMenuId(parent)
+		}
 		if eventKey != "" {
 			builder.EventKey(eventKey)
 		}
@@ -563,15 +580,20 @@ func buildFeishuMenuAbility() *larkapplicationv7.AppAbilityBot {
 	}
 	menus := []*larkapplicationv7.BotMenuNode{
 		menu("aha_project", "", "项目", 1, 3, ""),
-		menu("aha_project_query", "aha_project", "查询项目", 1, 2, "aha.project.query"),
-		menu("aha_workspace_query", "aha_project", "查询 Workspace", 2, 2, "aha.workspace.query"),
-		menu("aha_task", "", "任务", 2, 3, ""),
-		menu("aha_task_query", "aha_task", "查询任务", 1, 2, "aha.task.query"),
-		menu("aha_task_create", "aha_task", "创建任务", 2, 2, "aha.task.create"),
+		menu("aha_project_query", "aha_project", "查询项目", 2, 2, "aha.project.query"),
+		menu("aha_workspace_query", "aha_project", "查询 Workspace", 3, 2, "aha.workspace.query"),
+		menu("aha_task", "", "任务", 4, 3, ""),
+		menu("aha_task_query", "aha_task", "查询任务", 5, 2, "aha.task.query"),
+		menu("aha_task_create", "aha_task", "创建任务", 6, 2, "aha.task.create"),
 	}
 	return larkapplicationv7.NewAppAbilityBotBuilder().Enable(true).I18ns([]*larkapplicationv7.AppAbilityBotI18n{
 		larkapplicationv7.NewAppAbilityBotI18nBuilder().I18nKey("zh_cn").GetStartedDesc("使用 AHA2 管理项目和任务").Build(),
 	}).BotMenuEnable(true).BotMenus(menus).BotMenuDisplayStrategy(1).Build()
+}
+
+func buildMinimalFeishuMenuAbility() *larkapplicationv7.AppAbilityBot {
+	item := larkapplicationv7.NewBotMenuNodeBuilder().MenuId("aha_query").Sort(1).DefaultName("查询项目").I18nName(map[string]string{"zh_cn": "查询项目"}).EventKey("aha.project.query").MenuContentType(2).Build()
+	return larkapplicationv7.NewAppAbilityBotBuilder().Enable(true).BotMenuEnable(true).BotMenus([]*larkapplicationv7.BotMenuNode{item}).BotMenuDisplayStrategy(1).Build()
 }
 
 func (c *runtimeClient) deliveryLoop(ctx context.Context, client *lark.Client) {
