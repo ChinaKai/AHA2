@@ -372,6 +372,7 @@ test("built web contains responsive application", async () => {
   assert.match(channels, /data-delivery-replay/);
   assert.match(channels, /Owner 收件箱与投递/);
 	for (const marker of ["Runtime 与访问范围", "allowed_project_ids", "allowed_workspace_ids", "knowledge_entry_id"]) assert.match(channels, new RegExp(marker));
+	assert.match(channels, /扫码更新飞书权限/);
   assert.match(channels, /Knowledge allowlist/);
   assert.match(channels, /人工整理并共享/);
   assert.match(api, /channel-knowledge-records/);

@@ -24,6 +24,19 @@ func TestMenuEventConfigurationUsesWebsocketSubscription(t *testing.T) {
 	}
 }
 
+func TestRegistrationRequestsMenuManagementScope(t *testing.T) {
+	t.Parallel()
+	found := false
+	for _, scope := range registrationTenantScopes() {
+		if scope == "application:application:patch" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("registration must request the permission required to configure and publish the bot menu")
+	}
+}
+
 func TestMenuConfigurationErrorCodeIsSafeAndActionable(t *testing.T) {
 	t.Parallel()
 	if got := menuConfigurationErrorCode(menuConfigFailure{stage: "ability", code: 230001}); got != "menu_ability_rejected_230001" {

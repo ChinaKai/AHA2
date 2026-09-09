@@ -214,10 +214,8 @@ func registerApp(ctx context.Context, client *runtimeClient, item command) error
 		AppID:      stringValue(item.Payload, "app_id"),
 		AppPreset:  &registration.AppPreset{Name: stringValue(item.Payload, "app_name"), Desc: "AHA2 channel assistant"},
 		Addons: &registration.AppAddons{
-			Preset: &preset,
-			Scopes: registration.AppAddonsScopes{Tenant: []string{
-				"im:message.p2p_msg:readonly", "im:message.group_at_msg:readonly", "im:message:send_as_bot", "im:chat:readonly", "contact:user.base:readonly", "cardkit:card:write",
-			}},
+			Preset:    &preset,
+			Scopes:    registration.AppAddonsScopes{Tenant: registrationTenantScopes()},
 			Events:    registration.AppAddonsEvents{Items: registration.AppAddonsEventItems{Tenant: []string{"im.message.receive_v1", "application.bot.menu_v6"}}},
 			Callbacks: registration.AppAddonsCallbacks{Items: []string{"card.action.trigger"}},
 		},
@@ -239,6 +237,13 @@ func registerApp(ctx context.Context, client *runtimeClient, item command) error
 	}
 	emitSecret(secretMessage{Schema: "channel-secret/v1", Type: "registration_result", InstanceID: client.instanceID, OnboardingID: onboardingID, CommandID: item.ID, LeaseID: item.LeaseID, AppID: result.ClientID, AppSecret: result.ClientSecret, ScannerOpenID: result.UserInfo.OpenID, TenantBrand: result.UserInfo.TenantBrand})
 	return nil
+}
+
+func registrationTenantScopes() []string {
+	return []string{
+		"im:message.p2p_msg:readonly", "im:message.group_at_msg:readonly", "im:message:send_as_bot",
+		"im:chat:readonly", "contact:user.base:readonly", "cardkit:card:write", "application:application:patch",
+	}
 }
 
 func registrationErrorCode(err error) string {
