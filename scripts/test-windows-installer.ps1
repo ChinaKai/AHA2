@@ -160,6 +160,12 @@ foreach ($contract in @("taskkill.exe", "/T", "backend CLI")) {
 foreach ($contract in @("SKIPUSERTASK", "authoritative listen/data/Agent API arguments", "if UserTaskWasPresent then", "preserved for per-user upgrade")) {
   if ($installer -notmatch [regex]::Escape($contract)) { throw "Installer task-registration handoff contract is missing: $contract" }
 }
+$preserveTask = $installer.IndexOf("Existing AHA2 user task will be preserved for per-user upgrade.")
+$enableTask = $installer.IndexOf("/Change /Enable /TN", $preserveTask)
+$preserveExit = $installer.IndexOf("Exit;", $preserveTask)
+if ($preserveTask -lt 0 -or $enableTask -le $preserveTask -or $preserveExit -le $enableTask) {
+  throw "A preserved per-user login task must be re-enabled before ConfigureAHA2UserTask exits."
+}
 foreach ($forbidden in @("delayed-auto Windows", "aha2.exe service run --listen", "wscript.exe", "Run-AHA2User.vbs")) {
     if ($deployment.Contains($forbidden)) {
         throw "Windows deployment documentation still describes an old runtime: $forbidden"

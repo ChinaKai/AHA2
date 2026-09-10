@@ -40,6 +40,27 @@ test("channel lifecycle renders active and retired actions with guarded purge", 
   assert.ok(source.indexOf("channelInstancePurgePreview(instanceID)") < source.indexOf("window.confirm(channelPurgePreviewMessage(preview))"));
   assert.ok(source.indexOf("window.confirm(channelPurgePreviewMessage(preview))") < source.indexOf("window.prompt(`请输入实例名"));
   assert.ok(source.indexOf("window.prompt(`请输入实例名") < source.indexOf("api.purgeChannelInstance(instanceID"));
+  assert.match(source, /waitForChannelReadiness/);
+  assert.match(source, /api\.channelInstance\(instanceID\)/);
+  assert.match(source, /status === "ready"/);
+  assert.match(source, /渠道已就绪，可以开始收发消息/);
+  const originalFetch = globalThis.fetch;
+  const originalWindow = globalThis.window;
+  let refreshed = 0;
+  const messages = [];
+  globalThis.window = {setTimeout};
+  globalThis.fetch = async () => new Response(JSON.stringify({instance: {...instance, status: "ready"}}), {status: 200, headers: {"content-type": "application/json"}});
+  try {
+    await module.waitForChannelReadiness("channel-1", {
+      refresh: async () => { refreshed++; },
+      setMessage: (kind, message) => messages.push([kind, message]),
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    globalThis.window = originalWindow;
+  }
+  assert.equal(refreshed, 1);
+  assert.deepEqual(messages, [["success", "渠道已就绪，可以开始收发消息。"]]);
 });
 
 test("channel lifecycle API and archived projects share the purge path", async () => {
@@ -1158,6 +1179,17 @@ test("startup renders immediately and CRUD actions refresh local state with prog
   assert.match(knowledge, /aria-busy/);
   assert.match(knowledge, /icon\("spinner", true\)/);
   assert.match(knowledge, /context\.setMessage\("notice", message\);\s*context\.render\(\)/);
+});
+
+test("route resources load silently and only surface failures", async () => {
+  const source = await readFile(resolve(import.meta.dirname, "..", "src", "main.ts"), "utf8");
+  const start = source.indexOf("function resourceStatusHTML");
+  const end = source.indexOf("\nfunction systemUptimeText", start);
+  const implementation = source.slice(start, end);
+  assert.match(implementation, /resourceStates\[key\]\.error/);
+  assert.match(implementation, /resource-error/);
+  assert.doesNotMatch(implementation, /resourceStates\[key\]\.loading/);
+  assert.doesNotMatch(implementation, /正在加载/);
 });
 
 test("task creation supports manual draft and explicit start", async () => {

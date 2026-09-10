@@ -1398,11 +1398,8 @@ function banner(): string {
 }
 
 function resourceStatusHTML(): string {
-  if (state.hydrating) return `<div class="app-hydrating" role="status">${icon("spinner", true)}<span>正在加载项目与任务…</span></div>`;
   const resources = resourcesForView(state.view);
-  const loading = resources.filter(key => resourceStates[key].loading);
   const failed = resources.filter(key => resourceStates[key].error);
-  if (loading.length) return `<div class="app-hydrating" role="status">${icon("spinner", true)}<span>正在加载当前页面数据（${loading.length} 项）…</span></div>`;
   if (failed.length) return `<div class="app-hydrating resource-error" role="alert"><span>部分数据加载失败，不影响其他区域。</span><button type="button" id="retry-view-data">重试</button></div>`;
   return "";
 }

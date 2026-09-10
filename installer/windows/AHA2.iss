@@ -488,6 +488,8 @@ begin
   if UserTaskWasPresent then
   begin
     Log('Existing AHA2 user task will be preserved for per-user upgrade.');
+    if not RunScheduledTask('/Change /Enable /TN "' + AHA2UserTaskName + '"') then
+      RaiseException('无法重新启用已有 AHA2 登录任务。');
     Exit;
   end;
 #endif

@@ -373,6 +373,36 @@ export function bindChannels(options: {refresh: () => Promise<void>; setMessage:
 }
 
 let onboardingPoll = 0;
+let channelReadinessGeneration = 0;
+
+export async function waitForChannelReadiness(instanceID: string, options: {refresh: () => Promise<void>; setMessage: (kind: "error" | "success", message: string) => void}): Promise<void> {
+  const generation = ++channelReadinessGeneration;
+  const deadline = Date.now() + 60_000;
+  let previousStatus = "";
+  while (generation === channelReadinessGeneration && Date.now() < deadline) {
+    try {
+      const result = await api.channelInstance(instanceID);
+      const status = result.instance.status;
+      if (status !== previousStatus) {
+        previousStatus = status;
+        await options.refresh();
+      }
+      if (status === "ready") {
+        options.setMessage("success", "渠道已就绪，可以开始收发消息。");
+        return;
+      }
+      if (["disabled", "retired"].includes(status)) return;
+    } catch {
+      // The service can be briefly unavailable while the plugin process starts.
+      // Keep polling until the bounded deadline; the final state remains visible.
+    }
+    await new Promise(resolve => window.setTimeout(resolve, 1000));
+  }
+  if (generation === channelReadinessGeneration) {
+    await options.refresh().catch(() => undefined);
+    options.setMessage("error", "授权已完成，但渠道尚未就绪；请检查渠道运行状态。");
+  }
+}
 
 function showOnboarding(initial: ChannelOnboardingSession, options: {refresh: () => Promise<void>; setMessage: (kind: "error" | "success", message: string) => void}): void {
   if (onboardingPoll) window.clearTimeout(onboardingPoll);
@@ -404,8 +434,13 @@ function showOnboarding(initial: ChannelOnboardingSession, options: {refresh: ()
       const result = await api.channelOnboarding(initial.id);
       update(result.onboarding);
       if (result.onboarding.status === "succeeded") {
-        options.setMessage("success", existingApp ? "飞书增量授权已完成，未修改已有菜单。权限是否生效请以飞书审批与发布状态为准。" : "飞书应用已创建，扫码用户已绑定为唯一 Owner。菜单初始化结果请查看渠道命令记录。");
-        window.setTimeout(() => { close(); void options.refresh(); }, 700);
+        options.setMessage("success", existingApp ? "飞书增量授权已完成，正在等待渠道重新就绪。" : "飞书应用已创建并完成 Owner 绑定，正在等待渠道就绪。");
+        window.setTimeout(() => {
+          close();
+          void options.refresh().finally(() => {
+            void waitForChannelReadiness(initial.instance_id, options);
+          });
+        }, 300);
         return;
       }
       if (["failed", "cancelled", "expired"].includes(result.onboarding.status)) {
