@@ -160,15 +160,27 @@ foreach ($contract in @("taskkill.exe", "/T", "backend CLI")) {
 foreach ($contract in @("SKIPUSERTASK", "authoritative listen/data/Agent API arguments", "if UserTaskWasPresent then", "preserved for per-user upgrade")) {
   if ($installer -notmatch [regex]::Escape($contract)) { throw "Installer task-registration handoff contract is missing: $contract" }
 }
-$dataDirProbe = $installer.IndexOf("function ExistingUserTaskDataDir")
-$captureTask = $installer.IndexOf("ExecAndCaptureOutput", $dataDirProbe)
-$dataDirArgument = $installer.IndexOf("--data-dir", $captureTask)
+$taskCommandProbe = $installer.IndexOf("function ExistingUserTaskCommandLine")
+$captureTask = $installer.IndexOf("ExecAndCaptureOutput", $taskCommandProbe)
+$dataDirProbe = $installer.IndexOf("function ExistingUserTaskDataDir", $captureTask)
+$dataDirArgument = $installer.IndexOf("--data-dir", $dataDirProbe)
 $explicitDataDir = $installer.IndexOf("if ExplicitDataDir <> '' then")
 $taskDataDir = $installer.IndexOf("else if TaskDataDir <> '' then", $explicitDataDir)
 $previousDataDir = $installer.IndexOf("DataDirPage.Values[0] := PreviousDataDir", $taskDataDir)
-if ($dataDirProbe -lt 0 -or $captureTask -le $dataDirProbe -or $dataDirArgument -le $captureTask -or
+if ($taskCommandProbe -lt 0 -or $captureTask -le $taskCommandProbe -or $dataDirProbe -le $captureTask -or $dataDirArgument -le $dataDirProbe -or
     $explicitDataDir -lt 0 -or $taskDataDir -le $explicitDataDir -or $previousDataDir -le $taskDataDir) {
   throw "The per-user wizard must prefer explicit DATADIR, then the existing task data directory, then previous/default data."
+}
+$listenProbe = $installer.IndexOf("function ExistingUserTaskListenAddress")
+$listenArgument = $installer.IndexOf("--listen", $listenProbe)
+$listenModeRestore = $installer.IndexOf("if TaskListenHost <> '' then")
+$listenPortRestore = $installer.IndexOf("if TaskListenPort <> '' then", $listenModeRestore)
+$skipStart = $installer.IndexOf("function ShouldSkipPage")
+$skipEnd = $installer.IndexOf("function NextButtonClick", $skipStart)
+$skipSection = $installer.Substring($skipStart, $skipEnd - $skipStart)
+if ($listenProbe -lt 0 -or $listenArgument -le $listenProbe -or $listenModeRestore -lt 0 -or $listenPortRestore -le $listenModeRestore -or
+    $skipSection.Contains("PageID = ListenModePage.ID") -or -not $skipSection.Contains("PageID = FirewallPage.ID")) {
+  throw "The per-user wizard must show listen mode, restore the existing --listen value, and keep only the firewall page unavailable."
 }
 $preserveTask = $installer.IndexOf("Existing AHA2 user task will be preserved for per-user upgrade.")
 $enableTask = $installer.IndexOf("/Change /Enable /TN", $preserveTask)

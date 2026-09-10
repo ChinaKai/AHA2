@@ -91,6 +91,8 @@ var
   UserTaskWasPresent: Boolean;
   UserProcessWasRunning: Boolean;
   InstallCommitted: Boolean;
+  ExistingTaskArgumentsLoaded: Boolean;
+  ExistingTaskArguments: String;
 
 function SelectedDataDir(Param: String): String;
 begin
@@ -104,14 +106,10 @@ end;
 
 function SelectedListenHost(): String;
 begin
-#ifdef PerUserInstall
-  Result := '127.0.0.1';
-#else
   if ListenModePage.SelectedValueIndex = 0 then
     Result := '127.0.0.1'
   else
     Result := Trim(LANPage.Values[0]);
-#endif
 end;
 
 function SelectedListenAddress(): String;
@@ -187,13 +185,18 @@ begin
     Result := Trim(Copy(Tail, 1, EndPos - 1));
 end;
 
-function ExistingUserTaskDataDir(): String;
+function ExistingUserTaskCommandLine(): String;
 var
   ResultCode: Integer;
   Output: TExecOutput;
-  Arguments: String;
 begin
-  Result := '';
+  if ExistingTaskArgumentsLoaded then
+  begin
+    Result := ExistingTaskArguments;
+    Exit;
+  end;
+  ExistingTaskArgumentsLoaded := True;
+  ExistingTaskArguments := '';
   try
     if ExecAndCaptureOutput(
       ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
@@ -204,15 +207,29 @@ begin
       (ResultCode = 0) and (not Output.Error) and
       (GetArrayLength(Output.StdOut) > 0) then
     begin
-      Arguments := Trim(Output.StdOut[0]);
-      Result := QuotedArgumentValue(Arguments, '--data-dir');
-      if Result <> '' then
-        Log('Using the existing AHA2 user task data directory for the upgrade wizard.');
+      ExistingTaskArguments := Trim(Output.StdOut[0]);
+      if ExistingTaskArguments <> '' then
+        Log('Using the existing AHA2 user task configuration for the upgrade wizard.');
     end;
   except
-    Log('Could not inspect the existing AHA2 user task data directory: ' + GetExceptionMessage);
-    Result := '';
+    Log('Could not inspect the existing AHA2 user task configuration: ' + GetExceptionMessage);
+    ExistingTaskArguments := '';
   end;
+  Result := ExistingTaskArguments;
+end;
+
+function ExistingUserTaskDataDir(): String;
+begin
+  Result := QuotedArgumentValue(ExistingUserTaskCommandLine(), '--data-dir');
+  if Result <> '' then
+    Log('Using the existing AHA2 user task data directory for the upgrade wizard.');
+end;
+
+function ExistingUserTaskListenAddress(): String;
+begin
+  Result := QuotedArgumentValue(ExistingUserTaskCommandLine(), '--listen');
+  if Result <> '' then
+    Log('Using the existing AHA2 user task listen address for the upgrade wizard.');
 end;
 
 function IsLANMode(): Boolean;
@@ -263,6 +280,8 @@ end;
 procedure InitializeWizard();
 var
   PreviousMode, ExplicitDataDir, TaskDataDir, PreviousDataDir: String;
+  TaskListenAddress, TaskListenHost, TaskListenPort: String;
+  ListenSeparator: Integer;
 begin
   DataDirPage := CreateInputDirPage(wpSelectDir,
     '选择数据目录', 'AHA2 的持久数据保存在哪里？',
@@ -283,12 +302,27 @@ begin
   DataDirPage.Values[0] := GetPreviousData('DataDir', ExpandConstant('{commonappdata}\AHA2'));
 #endif
 
+  TaskListenAddress := ExistingUserTaskListenAddress();
+  ListenSeparator := Pos(':', TaskListenAddress);
+  if ListenSeparator > 0 then
+  begin
+    TaskListenHost := Trim(Copy(TaskListenAddress, 1, ListenSeparator - 1));
+    TaskListenPort := Trim(Copy(TaskListenAddress, ListenSeparator + 1, MaxInt));
+  end;
+
   ListenModePage := CreateInputOptionPage(DataDirPage.ID,
     '选择访问范围', '谁可以访问 AHA2？',
     '推荐仅本机访问。只有明确需要其他设备访问时才启用局域网模式。', True, False);
   ListenModePage.Add('仅本机访问（127.0.0.1）');
   ListenModePage.Add('允许局域网访问');
   PreviousMode := GetPreviousData('ListenMode', 'local');
+  if TaskListenHost <> '' then
+  begin
+    if TaskListenHost = '127.0.0.1' then
+      PreviousMode := 'local'
+    else
+      PreviousMode := 'lan';
+  end;
   if PreviousMode = 'lan' then
     ListenModePage.SelectedValueIndex := 1
   else
@@ -298,13 +332,19 @@ begin
     '选择端口', 'AHA2 使用哪个 HTTP 端口？',
     '端口范围为 1 到 65535，默认使用 8766。');
   PortPage.Add('端口：', False);
-  PortPage.Values[0] := GetPreviousData('Port', '8766');
+  if TaskListenPort <> '' then
+    PortPage.Values[0] := TaskListenPort
+  else
+    PortPage.Values[0] := GetPreviousData('Port', '8766');
 
   LANPage := CreateInputQueryPage(PortPage.ID,
     '配置局域网监听', '选择监听的 IPv4 地址',
     '使用 0.0.0.0 监听所有网卡，或填写一张网卡的具体 IPv4 地址。');
   LANPage.Add('监听 IPv4：', False);
-  LANPage.Values[0] := GetPreviousData('ListenHost', '0.0.0.0');
+  if (TaskListenHost <> '') and (TaskListenHost <> '127.0.0.1') then
+    LANPage.Values[0] := TaskListenHost
+  else
+    LANPage.Values[0] := GetPreviousData('ListenHost', '0.0.0.0');
 
   FirewallPage := CreateInputOptionPage(LANPage.ID,
     'Windows 防火墙', '是否允许本地子网访问？',
@@ -328,7 +368,8 @@ end;
 function ShouldSkipPage(PageID: Integer): Boolean;
 begin
 #ifdef PerUserInstall
-  Result := (PageID = ListenModePage.ID) or (PageID = LANPage.ID) or (PageID = FirewallPage.ID);
+  Result := (PageID = FirewallPage.ID) or
+    ((not IsLANMode()) and (PageID = LANPage.ID));
 #else
   Result := (not IsLANMode()) and ((PageID = LANPage.ID) or (PageID = FirewallPage.ID));
 #endif
