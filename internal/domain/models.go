@@ -379,6 +379,7 @@ type BackendSession struct {
 	ModelID          string    `json:"model_id"`
 	EnvGroupRevision int       `json:"env_group_revision"`
 	CodexAccountID   string    `json:"codex_account_id,omitempty"`
+	IdentityContext  string    `json:"identity_context"`
 	ProviderSession  string    `json:"provider_session_id,omitempty"`
 	Status           string    `json:"status"`
 	ContextUsageJSON string    `json:"-"`

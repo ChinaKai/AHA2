@@ -257,6 +257,77 @@ func TestEngineRoutesTemplatesAndBuildsContextManifest(t *testing.T) {
 	}
 }
 
+func TestEngineRoutesTaskTakeoverWithoutChannelAssistantIdentity(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	engine := NewEngine(database)
+	base := BuildInput{
+		Project:   domain.Project{Name: "Project"},
+		Workspace: domain.Workspace{Name: "Workspace", RootPath: "/repo", Transport: "native"},
+		Task: domain.Task{
+			ID: "task-identity", Code: "task-013", Title: "Identity", TaskWorkspacePath: "/repo",
+			CollaborationMode: "single", MaxAgents: 1,
+		},
+		Agent:       domain.TaskAgent{AgentID: "main", Role: "main"},
+		Snapshot:    domain.RuntimeConfigSnapshot{Backend: "codex"},
+		UserMessage: "test identity",
+	}
+	tests := []struct {
+		name           string
+		channelContext map[string]any
+		wantIdentity   string
+		wantChannel    string
+		wantSession    string
+	}{
+		{name: "web", wantIdentity: "Task Agent Identity", wantChannel: "AHA Web Channel", wantSession: "task-agent:web"},
+		{
+			name: "task takeover", channelContext: map[string]any{
+				"endpoint": domain.ChannelEndpointAssistantDM,
+				"route":    map[string]any{"mode": "task_route"},
+			},
+			wantIdentity: "Task Agent Identity", wantChannel: "External Channel", wantSession: "task-agent:external-channel",
+		},
+		{
+			name: "owner assistant host", channelContext: map[string]any{
+				"endpoint": domain.ChannelEndpointAssistantDM,
+				"route":    map[string]any{"mode": "assistant"},
+			},
+			wantIdentity: "Channel Assistant Identity", wantChannel: "External Channel", wantSession: "channel-assistant:external-channel",
+		},
+		{
+			name: "group host", channelContext: map[string]any{
+				"endpoint": domain.ChannelEndpointGroupDigitalHuman,
+				"route":    map[string]any{"mode": "group_qa"},
+			},
+			wantIdentity: "Channel Digital Human Identity", wantChannel: "External Channel", wantSession: "channel-digital-human:external-channel",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			input := base
+			input.ChannelContext = test.channelContext
+			preview, buildErr := engine.Build(ctx, input)
+			if buildErr != nil {
+				t.Fatal(buildErr)
+			}
+			if !strings.Contains(preview.EffectivePrompt, "## "+test.wantIdentity) || !strings.Contains(preview.EffectivePrompt, "## "+test.wantChannel) {
+				t.Fatalf("prompt routing mismatch: identity=%q channel=%q\n%s", test.wantIdentity, test.wantChannel, preview.EffectivePrompt)
+			}
+			if got := BackendSessionContext(test.channelContext); got != test.wantSession {
+				t.Fatalf("BackendSessionContext()=%q want %q", got, test.wantSession)
+			}
+			if test.name == "task takeover" && strings.Contains(preview.EffectivePrompt, "## Channel Assistant Identity") {
+				t.Fatal("task takeover received channel assistant identity")
+			}
+		})
+	}
+}
+
 func TestRemoteWindowsUNCContextPathKeepsNetworkRoot(t *testing.T) {
 	t.Parallel()
 	input := BuildInput{

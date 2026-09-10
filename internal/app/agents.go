@@ -765,7 +765,6 @@ func (s *Service) retryTurn(ctx context.Context, turn domain.Turn) bool {
 	retry.Status = domain.TurnQueued
 	retry.WaitingReason = ""
 	retry.BackendSessionID = ""
-	retry.InboxBatchID = ""
 	retry.QueuedAt = s.now().UTC()
 	retry.PreparedAt = time.Time{}
 	retry.ContextReadyAt = time.Time{}

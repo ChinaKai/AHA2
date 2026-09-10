@@ -56,6 +56,12 @@ SDK 返回的用户信息只有 `open_id` 与 `tenant_brand`，不返回 `tenant
 
 若当前租户、区域或已安装 SDK 不支持一键注册，页面必须显示 `one_click_registration_unavailable` 及平台原因，再提供“官方后台快捷创建 + 一次性录入 App ID/App Secret”的手工分支；不得静默切换。手工 Secret 仍立即进入 Secret Store，响应只返回 configured。已存在应用的更新流程也必须由 Owner 显式选择，并在飞书确认页审阅增量权限。
 
+### 3.4 存量应用增量授权与菜单保护
+
+存量应用扫码仅通过官方 SDK 的增量 Addons 补充应用身份权限，固定目标 App ID；不传新建应用预设、应用名称、事件、回调或菜单配置，也不由 AHA 自动提交应用草稿发布。服务端同时校验原 App ID 和唯一 Owner，不能借重新授权换应用或换 Owner。平台审批与发布是否完成独立于扫码成功，Web 明示检查全部待发布草稿变更。
+
+插件启动、凭据轮换和重连均不得触发菜单重写。遗留 `configure_menu` 命令包含重试在内，均无提供方请求地结束为 skipped。仅首次创建新应用时，在绑定事务内持久化独立 `initialize_menu` 命令；Web 创建弹窗预先说明初始化及发布行为。命令限定相同 App ID、onboarding ID、首次领取和五分钟有效期。重新授权取消未完成初始化；超时、进程中断或提供方拒绝后停止，不以单菜单回退、不自动重放。存量应用的菜单维护与增权分离，当前通过开发者后台显式操作；本版不提供自动合并或修复入口，不能将增权作为菜单修复操作。
+
 ## 4. 进程外插件边界
 
 ### 4.1 安装与发现
@@ -466,3 +472,16 @@ Knowledge 范围按 endpoint 存在 `channel_knowledge_policies.scope_mode=all|s
 - 飞书官方 2026 年“创建飞书智能体应用”说明：https://www.feishu.cn/content/article/7651905073454304222
 - 飞书事件处理与长连接：https://open.feishu.cn/document/server-docs/event-subscription-guide/overview
 - 飞书 API 权限申请与批量导入：https://open.feishu.cn/document/server-docs/application-scope/introduction
+
+## 图片与文件增量（插件 1.1）
+
+一期媒体范围为图片、文件双向收发，不包含音视频消息理解或转码。复用已有 attachments/blob、channel_plugin_commands、channel_inbox_dedup 和 channel_delivery_outbox，不增加提供方专属领域表。
+
+- 入站：校验实例、私聊 Owner 或群聊 @、会话与目标 Task → 持久化逐资源 download_resource 命令 → 插件按原消息与资源标识下载 → 凭 command lease 上传 → 核心以确定性附件 ID 存储 → 将附件与用户消息、收件完成状态在同一事务内绑定。等待过程中改变接管目标不会把已授权资源静默转入新 Task。
+- 出站：Agent 通过通用附件 API 上传并在 turn/messages 中引用附件 → 主 Agent 最终回复事件收集本 Turn 的结果附件 → 正文和每个附件拆成独立有序投递 → 按 delivery lease 读取文件 → 飞书上传 → 核心持久化资源 key → 使用稳定 UUID 发送 → ack/nack。群聊仍仅投递最终回复及随附文件，owner_global 状态订阅不携带附件。
+- 通用发送契约：上述上传与消息绑定步骤进入所有 Task 必带、不可编辑的 Agent API Protocol 及 agent-api.md，不依赖当前 Task Memory、选中 Skill、Backend 或 Web/外部渠道模板。生成工具预览、描述文字、Markdown 和本地路径不等于 AHA 附件；必须取得真实文件、检查上传成功并读取 attachment.id，再将其绑定到当前 Task/Turn 消息。禁止复用其他 Task 的附件 ID。上传/绑定成功仅表示消息关联完成，Web 可见与飞书送达须分别以回执或 Owner 反馈验收；无匹配渠道订阅的普通 Web Task 不自动发送到飞书。
+- 新增版本化接口：POST /api/channel-runtime/v1/commands/{id}/attachment；GET /api/channel-runtime/v1/deliveries/{id}/attachment；POST /api/channel-runtime/v1/deliveries/{id}/media。新增 channel.media.upload/read capability，均强制实例与租约绑定；接口不接受任意 Task、文件路径或资源 URL。
+- 大小边界：每条入站最多 8 个资源；PNG/JPEG/GIF/WebP 图片最多 10,000,000 bytes，文件最多 25 MiB；流式读取强制上限且清理 multipart 临时文件。出站较大或非原生图片格式按文件发送。
+- 失败语义：资源下载最多 5 次带退避尝试，等待有总时限；失败或不支持的媒体形成可读提示。每个出站附件复用已有死信、重放、顺序和不确定投递窗口；单个附件重试不重复发送已确认的正文与前序附件。
+- 飞书授权：新建/增权请求 im:resource；旧实例可能需要 Owner 重新授权。凭据继续仅经 Secret 引用和受控 IPC 使用，资源标识不进入 Agent 正文。
+- Knowledge ACL、群聊隔离、唯一 Owner、接管确认与部署权限不改变；收到文件不等于模型支持解析其格式。

@@ -40,6 +40,15 @@ func cleanAttachmentName(value string) string {
 }
 
 func (s *Store) CreateAttachment(ctx context.Context, taskID, name, mediaType string, content []byte, now time.Time) (domain.Attachment, error) {
+	return s.createAttachment(ctx, domain.NewID("attachment"), taskID, name, mediaType, content, now)
+}
+
+func (s *Store) CreateChannelAttachment(ctx context.Context, commandID, taskID, name, mediaType string, content []byte, now time.Time) (domain.Attachment, error) {
+	digest := sha256.Sum256([]byte(commandID))
+	return s.createAttachment(ctx, "attachment_"+hex.EncodeToString(digest[:]), taskID, name, mediaType, content, now)
+}
+
+func (s *Store) createAttachment(ctx context.Context, id, taskID, name, mediaType string, content []byte, now time.Time) (domain.Attachment, error) {
 	if len(content) == 0 {
 		return domain.Attachment{}, fmt.Errorf("attachment is empty")
 	}
@@ -78,18 +87,44 @@ func (s *Store) CreateAttachment(ctx context.Context, taskID, name, mediaType st
 		}
 	}
 	item := domain.Attachment{
-		ID: domain.NewID("attachment"), TaskID: taskID, Name: cleanAttachmentName(name),
+		ID: id, TaskID: taskID, Name: cleanAttachmentName(name),
 		MediaType: strings.TrimSpace(mediaType), Size: int64(len(content)), SHA256: hash, CreatedAt: now.UTC(),
 	}
 	if item.MediaType == "" {
 		item.MediaType = "application/octet-stream"
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO attachments(id,task_id,message_id,name,media_type,size_bytes,sha256,created_at) VALUES(?,?,?,?,?,?,?,?)`,
+	_, err := s.db.ExecContext(ctx, `INSERT INTO attachments(id,task_id,message_id,name,media_type,size_bytes,sha256,created_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`,
 		item.ID, item.TaskID, "", item.Name, item.MediaType, item.Size, item.SHA256, timeString(item.CreatedAt))
 	if err != nil {
 		return domain.Attachment{}, err
 	}
-	return item, nil
+	existing, err := s.Attachment(ctx, taskID, id)
+	if err != nil {
+		return domain.Attachment{}, err
+	}
+	if existing.SHA256 != item.SHA256 || existing.Name != item.Name || existing.MediaType != item.MediaType {
+		return domain.Attachment{}, fmt.Errorf("attachment content conflict")
+	}
+	return existing, nil
+}
+
+func (s *Store) TurnOutputAttachments(ctx context.Context, taskID, turnID string) ([]domain.Attachment, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT a.id,a.task_id,a.message_id,a.name,a.media_type,a.size_bytes,a.sha256,a.created_at
+		FROM attachments a JOIN conversation_items c ON a.message_id=c.id AND a.task_id=c.task_id
+		WHERE a.task_id=? AND c.turn_id=? AND c.agent_id='main' ORDER BY c.sequence,a.created_at,a.id`, taskID, turnID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []domain.Attachment
+	for rows.Next() {
+		item, err := scanAttachment(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, item)
+	}
+	return result, rows.Err()
 }
 
 func scanAttachment(scanner interface{ Scan(...any) error }) (domain.Attachment, error) {

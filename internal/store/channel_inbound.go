@@ -368,6 +368,7 @@ func (s *Store) EnqueueChannelOwnerMessage(
 	message domain.Message,
 	targetAgentID string,
 	provenance map[string]any,
+	attachmentIDs ...string,
 ) (domain.TaskRound, domain.AgentInboxItem, bool, bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -420,6 +421,13 @@ func (s *Store) EnqueueChannelOwnerMessage(
 		createdRound = true
 	}
 	payload := map[string]any{"channel_receipt_id": receiptID, "channel_context": provenance}
+	attachments, err := bindAttachmentsTx(ctx, tx, message.TaskID, message.ID, attachmentIDs)
+	if err != nil {
+		return domain.TaskRound{}, domain.AgentInboxItem{}, false, false, err
+	}
+	if len(attachments) > 0 {
+		payload["attachments"] = attachments
+	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO conversation_items(id,task_id,round_id,turn_id,agent_id,stream_agent_id,from_agent_id,to_agent_id,route_kind,category,kind,summary,payload_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		domain.NewID("conversation"), message.TaskID, round.ID, "", "owner", targetAgentID, "owner", targetAgentID, "owner_message", "chat", "user_message", message.Content, encodeJSON(payload), timeString(message.CreatedAt)); err != nil {
 		return domain.TaskRound{}, domain.AgentInboxItem{}, false, false, err

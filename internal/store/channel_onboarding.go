@@ -65,6 +65,9 @@ func (s *Store) CancelActiveChannelOnboardings(ctx context.Context, instanceID s
 			return nil, err
 		}
 	}
+	if _, err := tx.ExecContext(ctx, `UPDATE channel_plugin_commands SET state='cancelled',last_error_code='menu_initialization_cancelled_by_reauthorization',lease_id='',lease_until='',completed_at=? WHERE instance_id=? AND kind='initialize_menu' AND state IN ('pending','leased')`, timeString(at), instanceID); err != nil {
+		return nil, err
+	}
 	return refs, tx.Commit()
 }
 
@@ -135,6 +138,10 @@ func (s *Store) CompleteChannelRegistration(ctx context.Context, onboardingID, c
 	if err != nil {
 		return domain.ChannelInstance{}, domain.ChannelIdentityLink{}, err
 	}
+	if onboarding.Mode == "existing_app" && (instance.AppID == "" || instance.AppID != appID) {
+		return domain.ChannelInstance{}, domain.ChannelIdentityLink{}, errors.New("channel reauthorization app mismatch")
+	}
+	initializeMenu := onboarding.Mode == "register_app" && !instance.CredentialConfigured && instance.AppID == ""
 	var existingExternal string
 	err = tx.QueryRowContext(ctx, `SELECT external_user_id FROM channel_identity_links WHERE instance_id=? AND role='owner' AND status='active'`, instance.ID).Scan(&existingExternal)
 	if err == nil && existingExternal != scannerExternalUserID {
@@ -153,6 +160,17 @@ func (s *Store) CompleteChannelRegistration(ctx context.Context, onboardingID, c
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE channel_onboarding_sessions SET status='succeeded',step='runtime_starting',secret_stage_ref=?,scanner_external_user_id=?,consumed_at=?,updated_at=? WHERE id=?`, credentialRef, scannerExternalUserID, timeString(at), timeString(at), onboarding.ID); err != nil {
 		return domain.ChannelInstance{}, domain.ChannelIdentityLink{}, err
+	}
+	if initializeMenu {
+		payload := encodeJSON(map[string]any{"app_id": appID, "onboarding_id": onboarding.ID, "new_app": true})
+		if _, err := tx.ExecContext(ctx, `INSERT INTO channel_plugin_commands(id,instance_id,kind,idempotency_key,payload_json,progress_json,state,attempts,available_at,lease_id,lease_until,result_json,last_error_code,created_at,completed_at) VALUES(?,?,'initialize_menu',?,?,'{}','pending',0,?,'','','{}','',?,'')`,
+			domain.NewID("channel_command"), instance.ID, "initialize_menu:"+onboarding.ID, payload, timeString(at), timeString(at)); err != nil {
+			return domain.ChannelInstance{}, domain.ChannelIdentityLink{}, err
+		}
+	} else {
+		if _, err := tx.ExecContext(ctx, `UPDATE channel_plugin_commands SET state='failed',last_error_code='menu_initialization_cancelled_by_reauthorization',lease_id='',lease_until='',completed_at=? WHERE instance_id=? AND kind='initialize_menu' AND state IN ('pending','leased')`, timeString(at), instance.ID); err != nil {
+			return domain.ChannelInstance{}, domain.ChannelIdentityLink{}, err
+		}
 	}
 	instance, err = scanChannelInstance(tx.QueryRowContext(ctx, `SELECT `+channelInstanceColumns+` FROM channel_instances WHERE id=?`, instance.ID))
 	if err != nil {

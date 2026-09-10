@@ -106,6 +106,17 @@ func TestChannelOwnerAndRuntimeAPIBoundaries(t *testing.T) {
 		t.Fatalf("cross instance status=%d", response.StatusCode)
 	}
 	response.Body.Close()
+	for _, target := range []struct{ method, path string }{
+		{http.MethodPost, "/api/channel-runtime/v1/commands/command/attachment"},
+		{http.MethodGet, "/api/channel-runtime/v1/deliveries/delivery/attachment"},
+		{http.MethodPost, "/api/channel-runtime/v1/deliveries/delivery/media"},
+	} {
+		response = channelJSON(t, client, target.method, server.URL+target.path, map[string]any{}, map[string]string{"Authorization": "Bearer " + rawCapability})
+		if response.StatusCode != http.StatusForbidden {
+			t.Errorf("media endpoint accepted health-only capability: %d", response.StatusCode)
+		}
+		response.Body.Close()
+	}
 }
 
 func channelJSON(t *testing.T, client *http.Client, method, url string, payload any, headers map[string]string) *http.Response {

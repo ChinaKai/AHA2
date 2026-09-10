@@ -4,6 +4,15 @@ import {readFile} from "node:fs/promises";
 import {resolve} from "node:path";
 import {pathToFileURL} from "node:url";
 
+test("channel reauthorization explains menu preservation and separate creation", async () => {
+  const channels = await readFile(resolve(import.meta.dirname, "..", "dist", "channels.js"), "utf8");
+  assert.match(channels, /initial.mode === "existing_app"/);
+  assert.match(channels, /不修改已有菜单/);
+  assert.match(channels, /不自动提交应用草稿发布/);
+  assert.match(channels, /新应用会执行一次 AHA 菜单初始化并提交发布/);
+  assert.doesNotMatch(channels, /用于新增机器人菜单或显示名权限/);
+});
+
 test("workspace detection renders inaccessible, Git, and backend probe states", async () => {
   const root = resolve(import.meta.dirname, "..");
   const {renderWorkspaceDetection} = await import(pathToFileURL(resolve(root, "dist", "ui_helpers.js")));

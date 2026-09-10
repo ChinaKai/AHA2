@@ -646,6 +646,12 @@ func (s *Service) CompleteCommand(ctx context.Context, claims RuntimeClaims, id,
 	if containsSensitiveField(result) {
 		return fmt.Errorf("invalid_envelope")
 	}
+	if command, err := s.store.ChannelCommand(ctx, claims.InstanceID, id); err == nil && command.Kind == "download_resource" {
+		if success {
+			return fmt.Errorf("invalid_envelope")
+		}
+		return s.store.RetryChannelMediaCommand(ctx, claims.InstanceID, id, leaseID, errorCode, s.now().UTC())
+	}
 	return s.store.CompleteChannelCommand(ctx, claims.InstanceID, id, leaseID, success, result, errorCode, s.now().UTC())
 }
 
@@ -866,7 +872,23 @@ func (s *Service) processInbound(ctx context.Context, receipt domain.ChannelInbo
 		"endpoint": endpointKind, "conversation_id": conversation.ID, "actor": map[string]any{"identity_link_id": identity.ID, "role": role},
 		"route": map[string]any{"mode": routeMode, "target_task_id": targetTaskID}, "inbound_receipt_id": receipt.ID,
 	}
-	_, err = s.application.SubmitChannelMessage(ctx, receipt.ID, receipt.LeaseID, conversation.ID, targetTaskID, envelope.Content, provenance)
+	attachmentIDs, warning, pending, err := s.inboundAttachments(ctx, receipt, conversation, targetTaskID, envelope)
+	if errors.Is(err, errMediaRouteChanged) {
+		if noticeErr := s.store.EnqueueChannelControlDelivery(ctx, instance.ID, conversation.ID, receipt.ID+":media-route-changed", "media_notice", map[string]any{"text": "接管目标已变化，本条消息及附件未转发，请在当前会话重新发送。"}, s.now().UTC()); noticeErr != nil {
+			return noticeErr
+		}
+		return s.store.FinishChannelInbox(ctx, receipt.ID, receipt.LeaseID, "processed", conversation.ID, "", "media_route_changed", s.now().UTC())
+	}
+	if err != nil {
+		return err
+	}
+	if pending {
+		return s.store.DeferChannelInbox(ctx, receipt.ID, receipt.LeaseID, conversation.ID, s.now().UTC().Add(2*time.Second))
+	}
+	if warning != "" {
+		envelope.Content = strings.TrimSpace(envelope.Content + "\n[渠道附件提示] " + warning)
+	}
+	_, err = s.application.SubmitChannelMessageWithAttachments(ctx, receipt.ID, receipt.LeaseID, conversation.ID, targetTaskID, envelope.Content, provenance, attachmentIDs)
 	return err
 }
 

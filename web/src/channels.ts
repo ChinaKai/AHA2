@@ -85,7 +85,7 @@ export function renderChannels(providers: ChannelPlugin[], instances: ChannelIns
     <header><div><strong>${escapeHTML(instance.name)}</strong><small>${escapeHTML(instance.provider_key || instance.plugin_id)}</small></div><span><span class="status ${instance.status === "ready" ? "good" : instance.status === "error" || instance.status === "degraded" ? "bad" : "warn"}">${instanceState(instance)}</span><button type="button" data-channel-instance-toggle="${escapeHTML(instance.id)}" data-enabled="${instance.status !== "disabled"}" data-revision="${instance.revision}">${instance.status === "disabled" ? "启用" : "停用"}</button></span></header>
     <dl><div><dt>私聊助手</dt><dd>唯一 Owner</dd></div><div><dt>群聊电子人</dt><dd>群 + 提问人隔离</dd></div><div><dt>凭据</dt><dd>${instance.credential_configured ? "已安全保存" : "未配置"}</dd></div></dl>
 		<button type="button" class="primary full" data-channel-onboard="${escapeHTML(instance.id)}">${!instance.owner_bound ? (instance.credential_configured ? "扫码确认唯一 Owner" : "扫码创建并绑定飞书应用") : "扫码更新飞书权限"}</button>
-		${instance.owner_bound ? `<small>更新权限会绑定当前应用并重新确认唯一 Owner，用于新增机器人菜单或显示名权限。</small>` : ""}
+		${instance.owner_bound ? `<small>仅增补当前应用权限并重新确认唯一 Owner；不修改已有菜单、事件、回调或应用信息，不自动提交应用草稿发布。</small>` : ""}
 		${instanceSettings(instance, context)}
     <details><summary>兼容方式：绑定已有应用</summary><form data-channel-credentials="${escapeHTML(instance.id)}" data-revision="${instance.revision}"><label>App ID<input name="app_id" value="${escapeHTML(instance.app_id || "")}" required></label><label>App Secret<input name="app_secret" type="password" autocomplete="new-password" required></label><button class="primary" type="submit">保存到 Secret Store</button></form></details>
     <details data-channel-activity="${escapeHTML(instance.id)}"><summary>Owner 收件箱与投递</summary><div class="channel-activity"><small>展开后加载</small></div></details>
@@ -245,7 +245,10 @@ function showOnboarding(initial: ChannelOnboardingSession, options: {refresh: ()
   const dialog = document.createElement("dialog");
   dialog.id = "channel-onboarding-dialog";
   dialog.className = "channel-onboarding-dialog";
-  dialog.innerHTML = `<div class="dialog-body"><header class="dialog-head"><div><h2>扫码创建飞书应用</h2><p>请在飞书官方页面核对应用名称与最小权限后确认。</p></div><button type="button" class="icon-button" data-onboarding-close>${icon("close")}</button></header><div data-onboarding-state class="channel-onboarding-state"></div><div class="dialog-actions"><button type="button" data-onboarding-cancel>取消绑定</button></div></div>`;
+  const existingApp = initial.mode === "existing_app";
+  const title = existingApp ? "扫码更新飞书权限" : "扫码创建飞书应用";
+  const notice = existingApp ? "仅增补权限，不修改已有菜单或其他应用配置。请在飞书官方页面确认权限；如需审批或发布，请核对全部草稿变更后操作。" : "请在飞书官方页面核对应用名称与最小权限后确认。新应用会执行一次 AHA 菜单初始化并提交发布。";
+  dialog.innerHTML = `<div class="dialog-body"><header class="dialog-head"><div><h2>${title}</h2><p>${notice}</p></div><button type="button" class="icon-button" data-onboarding-close>${icon("close")}</button></header><div data-onboarding-state class="channel-onboarding-state"></div><div class="dialog-actions"><button type="button" data-onboarding-cancel>取消绑定</button></div></div>`;
   document.body.append(dialog);
   const close = () => { if (onboardingPoll) window.clearTimeout(onboardingPoll); onboardingPoll = 0; dialog.close(); dialog.remove(); };
   dialog.querySelector("[data-onboarding-close]")?.addEventListener("click", () => { close(); void options.refresh(); });
@@ -266,7 +269,7 @@ function showOnboarding(initial: ChannelOnboardingSession, options: {refresh: ()
       const result = await api.channelOnboarding(initial.id);
       update(result.onboarding);
       if (result.onboarding.status === "succeeded") {
-        options.setMessage("success", "飞书应用已创建，扫码用户已绑定为唯一 Owner。");
+        options.setMessage("success", existingApp ? "飞书增量授权已完成，未修改已有菜单。权限是否生效请以飞书审批与发布状态为准。" : "飞书应用已创建，扫码用户已绑定为唯一 Owner。菜单初始化结果请查看渠道命令记录。");
         window.setTimeout(() => { close(); void options.refresh(); }, 700);
         return;
       }

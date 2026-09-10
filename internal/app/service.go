@@ -460,7 +460,11 @@ func (s *Service) SubmitAgentMessageWithAttachments(ctx context.Context, taskID,
 }
 
 func (s *Service) SubmitChannelMessage(ctx context.Context, receiptID, receiptLeaseID, conversationID, taskID, content string, provenance map[string]any) (domain.Turn, error) {
-	return s.submitAgentMessage(ctx, taskID, "main", content, nil, receiptID, receiptLeaseID, conversationID, provenance)
+	return s.SubmitChannelMessageWithAttachments(ctx, receiptID, receiptLeaseID, conversationID, taskID, content, provenance, nil)
+}
+
+func (s *Service) SubmitChannelMessageWithAttachments(ctx context.Context, receiptID, receiptLeaseID, conversationID, taskID, content string, provenance map[string]any, attachmentIDs []string) (domain.Turn, error) {
+	return s.submitAgentMessage(ctx, taskID, "main", content, attachmentIDs, receiptID, receiptLeaseID, conversationID, provenance)
 }
 
 func (s *Service) submitAgentMessage(ctx context.Context, taskID, agentID, content string, attachmentIDs []string, channelReceiptID, channelReceiptLeaseID, channelConversationID string, channelProvenance map[string]any) (domain.Turn, error) {
@@ -519,7 +523,7 @@ func (s *Service) submitAgentMessage(ctx context.Context, taskID, agentID, conte
 	var inbox domain.AgentInboxItem
 	var createdRound, inserted bool
 	if channelReceiptID != "" {
-		round, inbox, createdRound, inserted, err = s.store.EnqueueChannelOwnerMessage(ctx, channelReceiptID, channelReceiptLeaseID, channelConversationID, message, agentID, channelProvenance)
+		round, inbox, createdRound, inserted, err = s.store.EnqueueChannelOwnerMessage(ctx, channelReceiptID, channelReceiptLeaseID, channelConversationID, message, agentID, channelProvenance, attachmentIDs...)
 	} else {
 		round, inbox, createdRound, err = s.store.EnqueueOwnerMessage(ctx, message, agentID, attachmentIDs)
 		inserted = err == nil
@@ -747,10 +751,15 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 	}
 	conversation, _ := s.store.ConversationPageForAgent(ctx, task.ID, turn.AgentID, 0, 0, 100, nil)
 	allTurns, _ := s.store.ListTurns(ctx, task.ID)
+	identityContext := prompt.BackendSessionContext(channelContext)
 	reusableSession, reusableSessionErr := s.store.ReusableBackendSession(
 		ctx, task.ID, turn.AgentID, workspace.ID, snapshot.Backend, model.ID,
-		snapshot.EnvGroupRevision, snapshot.CodexAccountID,
+		snapshot.EnvGroupRevision, snapshot.CodexAccountID, identityContext,
 	)
+	if reusableSessionErr != nil && !errors.Is(reusableSessionErr, sql.ErrNoRows) {
+		s.failTurn(ctx, &turn, task, fmt.Errorf("load reusable backend session: %w", reusableSessionErr))
+		return
+	}
 	includeRecentContext, includeTurnDiagnostics := recoveryContextNeeds(turn, allTurns, reusableSessionErr == nil, handoff.Summary)
 	hardwareGroups, _ := s.store.HardwareGroups(ctx, task.ID)
 	attachments := []prompt.AttachmentResource{}
@@ -958,7 +967,7 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 	backendSession := domain.BackendSession{
 		ID: sessionID, TaskID: task.ID, AgentID: turn.AgentID, WorkspaceID: workspace.ID,
 		Backend: snapshot.Backend, ModelID: model.ID, EnvGroupRevision: snapshot.EnvGroupRevision,
-		CodexAccountID:  snapshot.CodexAccountID,
+		CodexAccountID: snapshot.CodexAccountID, IdentityContext: identityContext,
 		ProviderSession: result.ProviderSessionID, Status: "active", CreatedAt: now, LastUsedAt: now,
 	}
 	if len(latestSessionUsage) > 0 {
@@ -967,6 +976,9 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 	}
 	if !session.CreatedAt.IsZero() {
 		backendSession.CreatedAt = session.CreatedAt
+	}
+	if errors.Is(reusableSessionErr, sql.ErrNoRows) {
+		_ = s.store.CloseBackendSessionsForAgent(context.Background(), task.ID, turn.AgentID)
 	}
 	_ = s.store.UpsertBackendSession(context.Background(), backendSession)
 	turn.BackendSessionID = sessionID
@@ -1763,6 +1775,11 @@ func (s *Service) emit(ctx context.Context, taskID, aggregateType, aggregateID, 
 	}
 	event.Sequence = sequence
 	if eventClass, semanticType, semanticPayload, coalesceKey, ok := channelSemanticEvent(taskID, eventType, data); ok {
+		if semanticType == "agent_reply" {
+			if attachments, attachmentErr := s.store.TurnOutputAttachments(ctx, taskID, firstText(data, "turn_id")); attachmentErr == nil && len(attachments) > 0 {
+				semanticPayload["attachments"] = attachments
+			}
+		}
 		if eventClass == "status" {
 			if task, taskErr := s.store.Task(ctx, taskID); taskErr == nil {
 				semanticPayload["task_code"] = task.Code

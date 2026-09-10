@@ -100,7 +100,7 @@ func onboardingScopes() []string {
 }
 
 func runtimeScopes() []string {
-	return []string{"channel.command.claim", "channel.command.progress", "channel.command.complete", "channel.inbound.write", "channel.delivery.claim", "channel.delivery.ack", "channel.health.write"}
+	return []string{"channel.command.claim", "channel.command.progress", "channel.command.complete", "channel.inbound.write", "channel.delivery.claim", "channel.delivery.ack", "channel.health.write", "channel.media.upload", "channel.media.read"}
 }
 
 func reauthorizationScopes() []string {

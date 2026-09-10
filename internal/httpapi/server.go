@@ -127,6 +127,9 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/channel-runtime/v1/instances/{instance_id}/deliveries:claim", s.withChannelCapability("channel.delivery.claim", http.HandlerFunc(s.channelRuntimeClaimDeliveries)))
 	mux.Handle("POST /api/channel-runtime/v1/deliveries/{id}/ack", s.withChannelCapability("channel.delivery.ack", http.HandlerFunc(s.channelRuntimeDeliveryAck)))
 	mux.Handle("POST /api/channel-runtime/v1/deliveries/{id}/nack", s.withChannelCapability("channel.delivery.ack", http.HandlerFunc(s.channelRuntimeDeliveryNack)))
+	mux.Handle("POST /api/channel-runtime/v1/commands/{id}/attachment", s.withChannelCapability("channel.media.upload", http.HandlerFunc(s.channelRuntimeUploadMedia)))
+	mux.Handle("GET /api/channel-runtime/v1/deliveries/{id}/attachment", s.withChannelCapability("channel.media.read", http.HandlerFunc(s.channelRuntimeMediaContent)))
+	mux.Handle("POST /api/channel-runtime/v1/deliveries/{id}/media", s.withChannelCapability("channel.media.read", http.HandlerFunc(s.channelRuntimeMediaUploaded)))
 	mux.Handle("POST /api/v1/auth/password", s.withAuth(http.HandlerFunc(s.authChangePassword)))
 	mux.Handle("POST /api/v1/auth/logout", s.withAuth(http.HandlerFunc(s.authLogout)))
 

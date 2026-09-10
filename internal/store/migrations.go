@@ -539,6 +539,10 @@ const schemaV48 = `
 ALTER TABLE channel_knowledge_policies ADD COLUMN scope_mode TEXT NOT NULL DEFAULT 'selected' CHECK(scope_mode IN ('all','selected'));
 `
 
+const schemaV49 = `
+ALTER TABLE backend_sessions ADD COLUMN identity_context TEXT NOT NULL DEFAULT '';
+`
+
 const schemaV27 = `
 CREATE TABLE IF NOT EXISTS sync_settings (
     scope TEXT PRIMARY KEY,
@@ -1849,6 +1853,19 @@ func (s *Store) migrate(ctx context.Context) error {
 	}
 	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(48, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
 		return fmt.Errorf("record schema v48: %w", err)
+	}
+	var hasV49 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=49)`).Scan(&hasV49)
+	if !hasV49 {
+		if _, err := s.db.ExecContext(ctx, schemaV49); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("apply schema v49: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_backend_sessions_reuse_identity ON backend_sessions(task_id,agent_id,workspace_id,backend,model_id,env_group_revision,codex_account_id,identity_context,status,last_used_at)`); err != nil {
+		return fmt.Errorf("apply schema v49 identity index: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(49, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v49: %w", err)
 	}
 	return nil
 }

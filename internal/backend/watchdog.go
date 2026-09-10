@@ -69,10 +69,15 @@ func monitorBackendActivity(
 		case <-ctx.Done():
 			return
 		case eventType := <-activity:
-			now := time.Now()
-			if strings.TrimSpace(eventType) != "" {
-				lastEvent = eventType
+			eventType = strings.TrimSpace(eventType)
+			if eventType == "" {
+				continue
 			}
+			lastEvent = eventType
+			if !backendEventResetsIdle(eventType) {
+				continue
+			}
+			now := time.Now()
 			if stalled {
 				emit(Event{Type: "agent_resumed", Data: map[string]any{"message": "Backend activity resumed", "last_event_type": lastEvent}})
 			}
@@ -97,5 +102,14 @@ func monitorBackendActivity(
 				emit(Event{Type: "agent_heartbeat", Data: map[string]any{"message": "Backend is still stalled", "idle_ms": idle.Milliseconds(), "last_event_type": lastEvent}})
 			}
 		}
+	}
+}
+
+func backendEventResetsIdle(eventType string) bool {
+	switch strings.TrimSpace(eventType) {
+	case "", "agent_error", "agent_stalled", "agent_heartbeat", "agent_idle_timeout":
+		return false
+	default:
+		return true
 	}
 }

@@ -270,6 +270,14 @@ func TestTaskMultiTurnFlow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := database.UpsertBackendSession(ctx, domain.BackendSession{
+		ID: "channel-session", TaskID: task.ID, AgentID: "main", WorkspaceID: workspace.ID,
+		Backend: "stub", ModelID: model.ID, EnvGroupRevision: 1,
+		IdentityContext: "channel-assistant:external-channel", ProviderSession: "channel-provider",
+		Status: "active", CreatedAt: now, LastUsedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
 	for index := 0; index < 2; index++ {
 		turn, err := service.SubmitMessage(ctx, task.ID, "continue")
 		if err != nil {
@@ -291,10 +299,24 @@ func TestTaskMultiTurnFlow(t *testing.T) {
 			t.Fatalf("turn stage timestamps were not persisted: %#v", item)
 		}
 	}
-	prompts, _ := service.executor.(*stubExecutor).requestHistory()
+	prompts, providerInputs := service.executor.(*stubExecutor).requestHistory()
 	if len(prompts) < 2 || !strings.Contains(prompts[0], "## AHA Core") ||
 		!strings.Contains(prompts[0], ".aha2-context") || !strings.Contains(prompts[0], "agent-api.md") {
 		t.Fatalf("routed prompt was not used: %#v", prompts)
+	}
+	if len(providerInputs) < 2 || providerInputs[0] != "" || providerInputs[1] != "stub-session-1" {
+		t.Fatalf("web turn reused a mismatched identity session: %#v", providerInputs)
+	}
+	sessions, err := database.ListBackendSessionsForAgent(ctx, task.ID, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	statusByID := map[string]string{}
+	for _, session := range sessions {
+		statusByID[session.ID] = session.Status
+	}
+	if statusByID["channel-session"] != "superseded" || statusByID[turns[0].BackendSessionID] != "active" {
+		t.Fatalf("identity transition did not rotate sessions: %#v", sessions)
 	}
 	environments := service.executor.(*stubExecutor).environmentHistory()
 	if len(environments) < 2 || environments[0]["HTTP_PROXY"] != "http://127.0.0.1:7897" ||
@@ -959,6 +981,9 @@ func TestMainTurnRetriesOnceAfterBackendIdleTimeout(t *testing.T) {
 	}
 	if turns[0].Status != domain.TurnFailed || turns[0].WaitingReason != "backend_idle_timeout" || turns[1].Status != domain.TurnSucceeded || turns[1].Attempt != 2 {
 		t.Fatalf("idle retry state=%#v", turns)
+	}
+	if turns[0].InboxBatchID == "" || turns[1].InboxBatchID != turns[0].InboxBatchID {
+		t.Fatalf("retry lost inbox provenance: first=%q retry=%q", turns[0].InboxBatchID, turns[1].InboxBatchID)
 	}
 	page, err := database.ConversationPageForAgent(ctx, task.ID, "main", 0, 0, 100, nil)
 	if err != nil {

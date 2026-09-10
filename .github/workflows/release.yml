@@ -238,7 +238,7 @@ jobs:
             AHA2-macos-amd64.pkg AHA2-macos-arm64.pkg; do
             test -f "dist/${package}" || { echo "Missing release package: ${package}" >&2; exit 1; }
           done
-          test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 11
+          test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 12
           cd dist
           find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\n' | sort | while IFS= read -r file; do sha256sum "$file"; done > SHA256SUMS
           test -s SHA256SUMS

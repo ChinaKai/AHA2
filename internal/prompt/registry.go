@@ -30,6 +30,14 @@ type Engine struct {
 	repository Repository
 }
 
+const (
+	identityTaskAgent           = "task-agent"
+	identityChannelAssistant    = "channel-assistant"
+	identityChannelDigitalHuman = "channel-digital-human"
+	channelWeb                  = "web"
+	channelExternal             = "external-channel"
+)
+
 type BuildInput struct {
 	Project                domain.Project
 	Workspace              domain.Workspace
@@ -113,7 +121,7 @@ var builtinTemplates = []domain.PromptTemplate{
 	{ID: "policy.auto", Name: "Auto Collaboration", Layer: "policy", Description: "AHA 自动协作策略", Editable: true, Required: false, Version: 1},
 	{ID: "policy.single", Name: "Single Agent", Layer: "policy", Description: "单 Agent 策略", Editable: true, Required: false, Version: 1},
 	{ID: "protocol.knowledge", Name: "Knowledge Protocol", Layer: "protocol", Description: "按 index 渐进读取知识并形成反馈与修订闭环", Content: knowledgeProtocol, Editable: false, Required: false, Version: 1},
-	{ID: "protocol.agent-api", Name: "Agent Control API Protocol", Layer: "protocol", Description: "通过 Agent API 提交结构化状态，最终回复仅保留自然语言", Content: agentAPIProtocol, Editable: false, Required: true, Version: 1},
+	{ID: "protocol.agent-api", Name: "Agent Control API Protocol", Layer: "protocol", Description: "通过 Agent API 提交结构化状态，最终回复仅保留自然语言", Content: agentAPIProtocol, Editable: false, Required: true, Version: 2},
 }
 
 func (engine *Engine) Templates(ctx context.Context) ([]domain.PromptTemplate, error) {
@@ -181,16 +189,9 @@ func (engine *Engine) Build(ctx context.Context, input BuildInput) (BuildResult,
 		workDir = input.Workspace.RootPath
 	}
 	contextRoot := contextRootFor(input, workDir)
-	identityTemplate, channelTemplate := "identity.task-agent", "channel.web"
-	identityName, channelName := "task-agent", "web"
-	if endpoint := strings.TrimSpace(fmt.Sprint(input.ChannelContext["endpoint"])); endpoint != "" {
-		channelTemplate, channelName = "channel.external-channel", "external-channel"
-		if endpoint == domain.ChannelEndpointGroupDigitalHuman {
-			identityTemplate, identityName = "identity.channel-digital-human", "channel-digital-human"
-		} else {
-			identityTemplate, identityName = "identity.channel-assistant", "channel-assistant"
-		}
-	}
+	identityName, channelName := identityAndChannel(input.ChannelContext)
+	identityTemplate := "identity." + identityName
+	channelTemplate := "channel." + channelName
 	data := templateData{
 		AgentID: input.Agent.AgentID, AgentRole: input.Agent.Role, Identity: identityName,
 		Channel: channelName, Backend: input.Snapshot.Backend, Collaboration: input.Task.CollaborationMode,
@@ -246,6 +247,42 @@ func (engine *Engine) Build(ctx context.Context, input BuildInput) (BuildResult,
 		EffectivePrompt: effective, ContextRoot: contextRoot, ContextManifest: contextResources,
 		SharedRoot: sharedRoot, SharedManifest: sharedManifest,
 	}, nil
+}
+
+// BackendSessionContext returns the prompt identity/channel boundary for Backend
+// Session reuse. A task_route is still a Task Agent, but remains distinct from a
+// Web turn because the external-channel delivery rules also form part of the
+// session's system prompt.
+func BackendSessionContext(channelContext map[string]any) string {
+	identity, channel := identityAndChannel(channelContext)
+	return identity + ":" + channel
+}
+
+func identityAndChannel(channelContext map[string]any) (string, string) {
+	endpoint := contextString(channelContext, "endpoint")
+	if endpoint == "" {
+		return identityTaskAgent, channelWeb
+	}
+	if channelRouteMode(channelContext) == "task_route" {
+		return identityTaskAgent, channelExternal
+	}
+	if endpoint == domain.ChannelEndpointGroupDigitalHuman {
+		return identityChannelDigitalHuman, channelExternal
+	}
+	return identityChannelAssistant, channelExternal
+}
+
+func channelRouteMode(channelContext map[string]any) string {
+	route, _ := channelContext["route"].(map[string]any)
+	return contextString(route, "mode")
+}
+
+func contextString(values map[string]any, key string) string {
+	value, ok := values[key]
+	if !ok || value == nil {
+		return ""
+	}
+	return strings.TrimSpace(fmt.Sprint(value))
 }
 
 func builtinTemplate(id string) (domain.PromptTemplate, bool) {
@@ -843,6 +880,10 @@ Send UTF-8 encoded JSON with Content-Type: application/json; charset=utf-8. Wind
 
 Task creation inherits the current Turn runtime when runtime fields are omitted. To select another configured runtime, first list project runtimes and pass back the exact backend/model fields; credentials and permissions are never accepted in this payload.
 
+## Attachment delivery
+
+%s
+
 ## Channel operations
 
 These endpoints are available only when this Turn has a server-verified ChannelContext. The private Owner assistant may use GET /api/v1/agent/channel/context, GET /api/v1/agent/channel/catalog, and POST /api/v1/agent/channel/actions/preview with {"operation":"takeover|exit|create_task|status_change|handoff_decision","target_id":"optional","intent":{...}}. The preview only creates a one-time confirmation card; it never performs the write. Group digital-human Turns are forbidden from catalog and control actions; their only write is POST /api/v1/agent/channel/handoffs with {"summary":"public safe summary","details":"optional"}.
@@ -880,7 +921,7 @@ Managed processes are owned by the AHA2 service rather than the Agent subprocess
 - POST /api/v1/agent/hardware/{hardware}/send?transport=serial|network with JSON {"data":"...","encoding":"text|hex"}
 - POST /api/v1/agent/hardware/{hardware}/login?transport=serial|network with configurable prompts, line_ending, wakeup, timeout_seconds, and retries
 
-All requests require Authorization: Bearer $AHA2_AGENT_API_TOKEN. The API cannot change hardware configuration and enforces the Task/hardware read-only rules.`, strings.TrimRight(baseURL, "/"))
+All requests require Authorization: Bearer $AHA2_AGENT_API_TOKEN. The API cannot change hardware configuration and enforces the Task/hardware read-only rules.`, strings.TrimRight(baseURL, "/"), attachmentDeliveryProtocol)
 }
 
 func normalizeHardwareSSHAuth(value string) string {

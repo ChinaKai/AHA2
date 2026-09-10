@@ -61,6 +61,64 @@ func TestRegistrationRequestsMenuManagementScope(t *testing.T) {
 	}
 }
 
+func TestRegistrationRequestsInboundAndOutboundMediaScopes(t *testing.T) {
+	t.Parallel()
+	scopes := registrationTenantScopes()
+	for _, required := range []string{"im:message:readonly", "im:resource"} {
+		found := false
+		for _, scope := range scopes {
+			if scope == required {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("registration missing media scope %s", required)
+		}
+	}
+}
+
+func TestNewAppMenuInitializationRequestsMediaScopes(t *testing.T) {
+	t.Parallel()
+	configured := false
+	client := lark.NewClient("media-scope-config", "test-secret", lark.WithHttpClient(mockHTTPClient{do: func(request *http.Request) (*http.Response, error) {
+		if strings.Contains(request.URL.Path, "/auth/") {
+			return mediaTestResponse(200, `{"code":0,"tenant_access_token":"sdk-test","expire":7200}`), nil
+		}
+		if strings.HasSuffix(request.URL.Path, "/config") {
+			configured = true
+			var payload struct {
+				Scope struct {
+					AddScopes []struct {
+						ScopeName string `json:"scope_name"`
+						TokenType string `json:"token_type"`
+					} `json:"add_scopes"`
+				} `json:"scope"`
+			}
+			if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+				t.Fatal(err)
+			}
+			for _, required := range []string{"im:message:readonly", "im:resource"} {
+				found := false
+				for _, scope := range payload.Scope.AddScopes {
+					if scope.ScopeName == required && scope.TokenType == "tenant" {
+						found = true
+					}
+				}
+				if !found {
+					t.Errorf("existing app configuration missing tenant media scope %s", required)
+				}
+			}
+		}
+		return mediaTestResponse(200, `{"code":0}`), nil
+	}}))
+	if err := configureFeishuMenu(context.Background(), client, "media-scope-config"); err != nil {
+		t.Fatal(err)
+	}
+	if !configured {
+		t.Fatal("existing app configuration was not requested")
+	}
+}
+
 func TestMenuConfigurationErrorCodeIsSafeAndActionable(t *testing.T) {
 	t.Parallel()
 	if got := menuConfigurationErrorCode(menuConfigFailure{stage: "ability", code: 230001}); got != "menu_ability_rejected_230001" {
@@ -93,10 +151,6 @@ func TestMenuAbilityHasLocalizedNodesAndDeterministicOrdering(t *testing.T) {
 		if item.Sort == nil || *item.Sort != index+1 || item.I18nName["zh_cn"] == "" {
 			t.Fatalf("menu %d=%#v", index, item)
 		}
-	}
-	minimal := buildMinimalFeishuMenuAbility()
-	if len(minimal.BotMenus) != 1 || minimal.BotMenus[0].MenuContentType == nil || *minimal.BotMenus[0].MenuContentType != 2 {
-		t.Fatalf("minimal ability=%#v", minimal)
 	}
 }
 

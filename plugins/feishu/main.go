@@ -52,6 +52,8 @@ type command struct {
 	IdempotencyKey string         `json:"idempotency_key"`
 	Payload        map[string]any `json:"payload"`
 	LeaseID        string         `json:"lease_id"`
+	Attempts       int            `json:"attempts"`
+	CreatedAt      time.Time      `json:"created_at"`
 }
 
 type delivery struct {
@@ -141,6 +143,9 @@ func (e menuConfigFailure) Error() string {
 }
 
 func (e menuConfigFailure) errorCode() string {
+	if e.stage == "confirmation_required" {
+		return "menu_confirmation_required"
+	}
 	if e.code != 0 {
 		return fmt.Sprintf("menu_%s_rejected_%d", e.stage, e.code)
 	}
@@ -207,7 +212,7 @@ func (c *runtimeClient) request(ctx context.Context, method, path string, body, 
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return fmt.Errorf("runtime status %d", response.StatusCode)
+		return runtimeStatusError(response.StatusCode)
 	}
 	if output != nil {
 		return json.NewDecoder(response.Body).Decode(output)
@@ -223,7 +228,7 @@ func (c *runtimeClient) claimCommands(ctx context.Context) ([]command, error) {
 	var result struct {
 		Commands []command `json:"commands"`
 	}
-	err := c.request(ctx, http.MethodPost, "/api/channel-runtime/v1/instances/"+c.instanceID+"/commands:claim", map[string]any{"schema_version": 1, "limit": 10}, &result)
+	err := c.request(ctx, http.MethodPost, "/api/channel-runtime/v1/instances/"+c.instanceID+"/commands:claim", map[string]any{"schema_version": 1, "limit": 1}, &result)
 	return result.Commands, err
 }
 
@@ -254,26 +259,19 @@ func registrationLoop(ctx context.Context, client *runtimeClient) error {
 }
 
 func registerApp(ctx context.Context, client *runtimeClient, item command) error {
-	preset := false
 	onboardingID := stringValue(item.Payload, "onboarding_id")
-	createOnly := boolValue(item.Payload, "create_only")
-	result, err := registration.RegisterApp(ctx, &registration.Options{
-		CreateOnly: createOnly,
-		AppID:      stringValue(item.Payload, "app_id"),
-		AppPreset:  &registration.AppPreset{Name: stringValue(item.Payload, "app_name"), Desc: "AHA2 channel assistant"},
-		Addons: &registration.AppAddons{
-			Preset:    &preset,
-			Scopes:    registration.AppAddonsScopes{Tenant: registrationTenantScopes()},
-			Events:    registration.AppAddonsEvents{Items: registration.AppAddonsEventItems{Tenant: []string{"im.message.receive_v1", "application.bot.menu_v6"}}},
-			Callbacks: registration.AppAddonsCallbacks{Items: []string{"card.action.trigger"}},
-		},
-		OnQRCode: func(info *registration.QRCodeInfo) {
-			emitSecret(secretMessage{Schema: "channel-secret/v1", Type: "verification_url", InstanceID: client.instanceID, OnboardingID: onboardingID, CommandID: item.ID, LeaseID: item.LeaseID, URL: info.URL, ExpireIn: info.ExpireIn})
-		},
-		OnStatusChange: func(info *registration.StatusChangeInfo) {
-			_ = client.progress(context.Background(), item, map[string]any{"status": info.Status, "interval": info.Interval})
-		},
-	})
+	options := registrationOptions(item)
+	if !options.CreateOnly && options.AppID == "" {
+		_ = client.complete(ctx, item, false, map[string]any{}, "reauthorization_app_missing")
+		return errors.New("reauthorization app is required")
+	}
+	options.OnQRCode = func(info *registration.QRCodeInfo) {
+		emitSecret(secretMessage{Schema: "channel-secret/v1", Type: "verification_url", InstanceID: client.instanceID, OnboardingID: onboardingID, CommandID: item.ID, LeaseID: item.LeaseID, URL: info.URL, ExpireIn: info.ExpireIn})
+	}
+	options.OnStatusChange = func(info *registration.StatusChangeInfo) {
+		_ = client.progress(context.Background(), item, map[string]any{"status": info.Status, "interval": info.Interval})
+	}
+	result, err := registration.RegisterApp(ctx, options)
 	if err != nil {
 		_ = client.complete(context.Background(), item, false, map[string]any{}, registrationErrorCode(err))
 		return err
@@ -287,10 +285,26 @@ func registerApp(ctx context.Context, client *runtimeClient, item command) error
 	return nil
 }
 
+func registrationOptions(item command) *registration.Options {
+	options := &registration.Options{
+		CreateOnly: boolValue(item.Payload, "create_only"),
+		AppID:      stringValue(item.Payload, "app_id"),
+		Addons:     &registration.AppAddons{Scopes: registration.AppAddonsScopes{Tenant: registrationTenantScopes()}},
+	}
+	if options.CreateOnly {
+		preset := false
+		options.AppPreset = &registration.AppPreset{Name: stringValue(item.Payload, "app_name"), Desc: "AHA2 channel assistant"}
+		options.Addons.Preset = &preset
+		options.Addons.Events = registration.AppAddonsEvents{Items: registration.AppAddonsEventItems{Tenant: []string{"im.message.receive_v1", "application.bot.menu_v6"}}}
+		options.Addons.Callbacks = registration.AppAddonsCallbacks{Items: []string{"card.action.trigger"}}
+	}
+	return options
+}
+
 func registrationTenantScopes() []string {
 	return []string{
 		"im:message.p2p_msg:readonly", "im:message.group_at_msg:readonly", "im:message:send_as_bot",
-		"im:chat:readonly", "contact:user.base:readonly", "cardkit:card:write", "application:application:patch",
+		"im:chat:readonly", "contact:user.base:readonly", "cardkit:card:write", "application:application:patch", "im:resource", "im:message:readonly",
 	}
 }
 
@@ -315,11 +329,8 @@ func runChannel(ctx context.Context, runtime *runtimeClient, boot bootstrap) err
 	channel.OnReconnecting(func() { _ = runtime.health(context.Background(), "degraded", "feishu_reconnecting") })
 	channel.OnMessage(func(eventCtx context.Context, message *channeltypes.NormalizedMessage) error {
 		chatName, senderName := feishuDisplayNames(eventCtx, client, message)
-		resources := make([]map[string]any, 0, len(message.Resources))
-		for _, resource := range message.Resources {
-			resources = append(resources, map[string]any{"type": resource.Type, "file_key": resource.FileKey, "file_name": resource.FileName})
-		}
-		return runtime.inbound(eventCtx, map[string]any{"schema_version": 1, "request_id": message.EventID, "instance_id": runtime.instanceID, "external_event_id": message.EventID, "event_type": "message", "occurred_at": time.UnixMilli(message.CreateTimeMs).UTC(), "chat_type": message.ChatType, "external_chat_id": message.ChatID, "external_sender_id": message.UserID, "external_message_id": message.MessageID, "content": message.Content, "chat_display_name": chatName, "sender_display_name": senderName, "mentioned_bot": message.MentionedBot, "resources": resources})
+		content, resources := normalizedInboundMedia(message)
+		return runtime.inbound(eventCtx, map[string]any{"schema_version": 1, "request_id": message.EventID, "instance_id": runtime.instanceID, "external_event_id": message.EventID, "event_type": "message", "occurred_at": time.UnixMilli(message.CreateTimeMs).UTC(), "chat_type": message.ChatType, "external_chat_id": message.ChatID, "external_sender_id": message.UserID, "external_message_id": message.MessageID, "content": content, "chat_display_name": chatName, "sender_display_name": senderName, "mentioned_bot": message.MentionedBot, "resources": resources})
 	})
 	wsClient.EventHandler().OnP2BotMenuV6(func(eventCtx context.Context, event *larkapplication.P2BotMenuV6) error {
 		if event == nil || event.Event == nil || event.Event.Operator == nil || event.Event.Operator.OperatorId == nil || event.Event.Operator.OperatorId.OpenId == nil || event.Event.EventKey == nil || event.EventV2Base == nil || event.EventV2Base.Header == nil {
@@ -540,7 +551,7 @@ func cacheName(key, value string) {
 }
 
 func newFeishuClients(boot bootstrap) (*lark.Client, *larkws.Client) {
-	clientOptions := []lark.ClientOptionFunc{}
+	clientOptions := []lark.ClientOptionFunc{lark.WithHttpClient(mediaHTTPClient{client: &http.Client{Timeout: 30 * time.Second}})}
 	// ws.Client does not create an EventDispatcher by default. A Channel can
 	// report the socket as ready without one, but every inbound event then
 	// panics inside ws.Client before reaching the registered Channel handlers.
@@ -571,6 +582,10 @@ func (c *runtimeClient) commandLoop(ctx context.Context, client *lark.Client, bo
 		}
 		for _, item := range commands {
 			switch item.Kind {
+			case "download_resource":
+				if err := c.downloadResource(ctx, client, item); err != nil {
+					_ = c.complete(ctx, item, false, map[string]any{}, mediaErrorCode(err))
+				}
 			case "register_app":
 				if !boot.Registration {
 					_ = c.complete(ctx, item, false, map[string]any{}, "unsupported_command")
@@ -579,12 +594,13 @@ func (c *runtimeClient) commandLoop(ctx context.Context, client *lark.Client, bo
 				_ = registerApp(ctx, c, item)
 			case "verify_installation":
 				_ = c.complete(ctx, item, true, map[string]any{"status": "ready"}, "")
-			case "configure_menu":
-				if err := configureFeishuMenu(ctx, client, boot.AppID); err != nil {
+			case "configure_menu", "initialize_menu":
+				result, err := configureMenuCommand(ctx, client, boot.AppID, item)
+				if err != nil {
 					_ = c.complete(ctx, item, false, menuConfigurationFailureResult(err), menuConfigurationErrorCode(err))
 					continue
 				}
-				_ = c.complete(ctx, item, true, map[string]any{"status": "publish_submitted", "menu_version": 1}, "")
+				_ = c.complete(ctx, item, true, result, "")
 			case "stop_runtime":
 				_ = c.complete(ctx, item, true, map[string]any{"status": "stopping"}, "")
 				return
@@ -596,8 +612,22 @@ func (c *runtimeClient) commandLoop(ctx context.Context, client *lark.Client, bo
 	}
 }
 
+func configureMenuCommand(ctx context.Context, client *lark.Client, appID string, item command) (map[string]any, error) {
+	if item.Kind == "configure_menu" {
+		return map[string]any{"status": "skipped", "reason": "existing_menu_preserved"}, nil
+	}
+	age := time.Since(item.CreatedAt)
+	if item.Kind != "initialize_menu" || !boolValue(item.Payload, "new_app") || stringValue(item.Payload, "app_id") != appID || appID == "" || stringValue(item.Payload, "onboarding_id") == "" || item.Attempts != 1 || item.CreatedAt.IsZero() || age < 0 || age > 5*time.Minute {
+		return nil, menuConfigFailure{stage: "confirmation_required"}
+	}
+	if err := configureFeishuMenu(ctx, client, appID); err != nil {
+		return nil, err
+	}
+	return map[string]any{"status": "publish_submitted", "menu_version": 1}, nil
+}
+
 func configureFeishuMenu(ctx context.Context, client *lark.Client, appID string) error {
-	scopeNames := []string{"im:chat:readonly", "contact:user.base:readonly"}
+	scopeNames := []string{"im:chat:readonly", "contact:user.base:readonly", "im:resource", "im:message:readonly"}
 	scopes := make([]*larkapplicationv7.AppConfigScopeItem, 0, len(scopeNames))
 	for _, name := range scopeNames {
 		scopes = append(scopes, larkapplicationv7.NewAppConfigScopeItemBuilder().ScopeName(name).TokenType("tenant").Build())
@@ -621,20 +651,6 @@ func configureFeishuMenu(ctx context.Context, client *lark.Client, appID string)
 	if err != nil || !abilityResponse.Success() {
 		if err != nil {
 			return menuConfigFailure{stage: "ability"}
-		}
-		if abilityResponse.Code == 210011 {
-			minimalBody := larkapplicationv7.NewPatchApplicationAbilityReqBodyBuilder().Bot(buildMinimalFeishuMenuAbility()).Build()
-			minimalRequest := larkapplicationv7.NewPatchApplicationAbilityReqBuilder().AppId(appID).Body(minimalBody).Build()
-			minimalResponse, minimalErr := client.Application.V7.ApplicationAbility.Patch(ctx, minimalRequest)
-			if minimalErr != nil {
-				return menuConfigFailure{stage: "ability_minimal"}
-			}
-			if minimalResponse.Success() {
-				failure := rejectedMenuConfig("ability_nested", abilityResponse.CodeError)
-				failure.description = "minimal event menu accepted; nested menu rejected"
-				return failure
-			}
-			return rejectedMenuConfig("ability_minimal", minimalResponse.CodeError)
 		}
 		return rejectedMenuConfig("ability", abilityResponse.CodeError)
 	}
@@ -674,11 +690,6 @@ func buildFeishuMenuAbility() *larkapplicationv7.AppAbilityBot {
 	}).BotMenuEnable(true).BotMenus(menus).BotMenuDisplayStrategy(1).Build()
 }
 
-func buildMinimalFeishuMenuAbility() *larkapplicationv7.AppAbilityBot {
-	item := larkapplicationv7.NewBotMenuNodeBuilder().MenuId("aha_query").Sort(1).DefaultName("查询项目").I18nName(map[string]string{"zh_cn": "查询项目"}).EventKey("aha.project.query").MenuContentType(2).Build()
-	return larkapplicationv7.NewAppAbilityBotBuilder().Enable(true).BotMenuEnable(true).BotMenus([]*larkapplicationv7.BotMenuNode{item}).BotMenuDisplayStrategy(1).Build()
-}
-
 func (c *runtimeClient) deliveryLoop(ctx context.Context, client *lark.Client) {
 	for ctx.Err() == nil {
 		var result struct {
@@ -699,7 +710,13 @@ func (c *runtimeClient) deliveryLoop(ctx context.Context, client *lark.Client) {
 }
 
 func (c *runtimeClient) deliver(ctx context.Context, client *lark.Client, item delivery) {
-	messageID, requestID, err := sendDelivery(ctx, client, item)
+	var messageID, requestID string
+	var err error
+	if stringValue(item.SemanticPayload, "kind") == "attachment" {
+		messageID, requestID, err = c.sendAttachmentDelivery(ctx, client, item)
+	} else {
+		messageID, requestID, err = sendDelivery(ctx, client, item)
+	}
 	if err == nil {
 		_ = c.request(ctx, http.MethodPost, "/api/channel-runtime/v1/deliveries/"+item.ID+"/ack", map[string]any{"schema_version": 1, "lease_id": item.LeaseID, "provider_message_id": messageID, "provider_request_id": requestID}, &map[string]any{})
 		return
@@ -709,7 +726,11 @@ func (c *runtimeClient) deliver(ctx context.Context, client *lark.Client, item d
 		certainty = "unknown"
 		permanent = !item.FirstAttemptAt.IsZero() && time.Since(item.FirstAttemptAt) >= 55*time.Minute
 	}
-	_ = c.request(ctx, http.MethodPost, "/api/channel-runtime/v1/deliveries/"+item.ID+"/nack", map[string]any{"schema_version": 1, "lease_id": item.LeaseID, "error_code": "feishu_send_failed", "outcome_certainty": certainty, "retry_after_ms": retry, "permanent": permanent}, &map[string]any{})
+	errorCode := "feishu_send_failed"
+	if stringValue(item.SemanticPayload, "kind") == "attachment" {
+		errorCode = mediaErrorCode(err)
+	}
+	_ = c.request(ctx, http.MethodPost, "/api/channel-runtime/v1/deliveries/"+item.ID+"/nack", map[string]any{"schema_version": 1, "lease_id": item.LeaseID, "error_code": errorCode, "outcome_certainty": certainty, "retry_after_ms": retry, "permanent": permanent}, &map[string]any{})
 }
 
 func deliveryBackoffMS(key string, attempt int) int64 {
@@ -759,6 +780,9 @@ func sendDelivery(ctx context.Context, client *lark.Client, item delivery) (stri
 			return "", "", err
 		}
 		if !response.Success() || response.Data == nil || response.Data.MessageId == nil {
+			if stringValue(item.SemanticPayload, "kind") == "provider_media" {
+				return "", response.RequestId(), mediaProviderError("send", response.StatusCode, response.Code)
+			}
 			return "", response.RequestId(), fmt.Errorf("feishu reply rejected: %d", response.Code)
 		}
 		return *response.Data.MessageId, response.RequestId(), nil
@@ -769,12 +793,24 @@ func sendDelivery(ctx context.Context, client *lark.Client, item delivery) (stri
 		return "", "", err
 	}
 	if !response.Success() || response.Data == nil || response.Data.MessageId == nil {
+		if stringValue(item.SemanticPayload, "kind") == "provider_media" {
+			return "", response.RequestId(), mediaProviderError("send", response.StatusCode, response.Code)
+		}
 		return "", response.RequestId(), fmt.Errorf("feishu create rejected: %d", response.Code)
 	}
 	return *response.Data.MessageId, response.RequestId(), nil
 }
 
 func renderDelivery(payload map[string]any) (string, string) {
+	if stringValue(payload, "kind") == "provider_media" {
+		kind := stringValue(payload, "resource_type")
+		field := "file_key"
+		if kind == "image" {
+			field = "image_key"
+		}
+		raw, _ := json.Marshal(map[string]string{field: stringValue(payload, "resource_key")})
+		return kind, string(raw)
+	}
 	if stringValue(payload, "kind") == "menu_card" {
 		card := renderMenuCard(payload)
 		raw, _ := json.Marshal(card)
@@ -975,6 +1011,10 @@ func boolValue(values map[string]any, key string) bool {
 }
 
 func isAmbiguous(err error) bool {
+	var failure mediaFailure
+	if errors.As(err, &failure) && failure.cause != nil {
+		return isAmbiguous(failure.cause)
+	}
 	var urlError interface{ Timeout() bool }
 	return errors.As(err, &urlError) || strings.Contains(strings.ToLower(err.Error()), "connection") || strings.Contains(strings.ToLower(err.Error()), "timeout")
 }

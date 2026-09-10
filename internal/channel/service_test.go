@@ -187,6 +187,13 @@ func TestDiscoverAndCreateInstanceIsOptionalAndIdempotent(t *testing.T) {
 	if strings.Contains(string(encoded), "top-secret-value") || strings.Contains(string(encoded), "credential_ref") {
 		t.Fatalf("secret leaked: %s", encoded)
 	}
+	if _, _, err := database.CompleteChannelRegistration(ctx, onboarding.ID, registerCommand.ID, "cli_test", registered.CredentialRef, "scanner-owner", "feishu", now); err != nil {
+		t.Fatal(err)
+	}
+	initialization, err := database.ClaimChannelCommands(ctx, item.ID, 10, now.Add(time.Second), time.Minute)
+	if err != nil || len(initialization) != 1 || initialization[0].Kind != "initialize_menu" || initialization[0].Attempts != 1 || initialization[0].Payload["app_id"] != "cli_test" {
+		t.Fatalf("initial menu command=%#v err=%v", initialization, err)
+	}
 	if _, err := database.BindChannelOwnerIdentity(ctx, domain.ChannelIdentityLink{ID: "other-owner", InstanceID: item.ID, OwnerID: owner.ID, ExternalUserID: "different-scanner", Role: "owner", Status: "active", LinkedAt: now}); err == nil {
 		t.Fatal("second active channel owner was accepted")
 	}
@@ -202,6 +209,27 @@ func TestDiscoverAndCreateInstanceIsOptionalAndIdempotent(t *testing.T) {
 	required, err := service.registrationProcessRequired(ctx, registered)
 	if err != nil || !required {
 		t.Fatalf("existing-owner reauthorization must use registration process: required=%v err=%v", required, err)
+	}
+	if _, _, err := database.CompleteChannelRegistration(ctx, reauthorization.ID, reauthorization.RegistrationCommandID, "different-app", "new-ref", "scanner-owner", "feishu", now); err == nil {
+		t.Fatal("reauthorization accepted another app")
+	}
+	if _, _, err := database.CompleteChannelRegistration(ctx, reauthorization.ID, reauthorization.RegistrationCommandID, "cli_test", "new-ref", "different-scanner", "feishu", now); err == nil {
+		t.Fatal("reauthorization accepted another owner")
+	}
+	if _, _, err := database.CompleteChannelRegistration(ctx, reauthorization.ID, reauthorization.RegistrationCommandID, "cli_test", "new-ref", "scanner-owner", "feishu", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CompleteChannelCommand(ctx, item.ID, initialization[0].ID, initialization[0].LeaseID, true, map[string]any{}, "", now); err == nil {
+		t.Fatal("superseded initialization lease was still usable")
+	}
+	service.runtimeBaseURL = "http://127.0.0.1:1"
+	service.runCtx = ctx
+	for attempt := 0; attempt < 2; attempt++ {
+		service.reconcileProcesses(ctx)
+	}
+	remaining, err := database.ClaimChannelCommands(ctx, item.ID, 10, now.Add(2*time.Minute), time.Minute)
+	if err != nil || len(remaining) != 0 {
+		t.Fatalf("reauthorization or restart queued menu/configuration writes: %#v err=%v", remaining, err)
 	}
 }
 
@@ -503,9 +531,21 @@ func TestInboundOwnerAndGroupScopesAreServerEnforcedAndIdempotent(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	beforeUnrouted, err := database.ChannelDeliveries(ctx, instance.ID, 100)
-	if err != nil {
-		t.Fatal(err)
+	assertSourceDeliveryCount := func(sourceID string, expected int) {
+		t.Helper()
+		deliveries, err := database.ChannelDeliveries(ctx, instance.ID, 100)
+		if err != nil {
+			t.Fatal(err)
+		}
+		count := 0
+		for _, delivery := range deliveries {
+			if strings.HasPrefix(delivery.IdempotencyKey, "channel-delivery:"+sourceID+":") {
+				count++
+			}
+		}
+		if count != expected {
+			t.Fatalf("source %s delivery count=%d, want %d", sourceID, count, expected)
+		}
 	}
 	if err := database.AppendChannelSourceAndProject(ctx, domain.ChannelSourceEvent{
 		ID: "source-unrouted", SourceKey: "source-unrouted", TaskID: target.ID, EventClass: "message", EventType: "agent_reply",
@@ -513,26 +553,14 @@ func TestInboundOwnerAndGroupScopesAreServerEnforcedAndIdempotent(t *testing.T) 
 	}, ""); err != nil {
 		t.Fatal(err)
 	}
-	afterUnrouted, err := database.ChannelDeliveries(ctx, instance.ID, 100)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(afterUnrouted) != len(beforeUnrouted) {
-		t.Fatalf("unrouted task leaked through owner-global subscription: before=%d after=%d", len(beforeUnrouted), len(afterUnrouted))
-	}
+	assertSourceDeliveryCount("source-unrouted", 0)
 	if err := database.AppendChannelSourceAndProject(ctx, domain.ChannelSourceEvent{
 		ID: "source-unrouted-status", SourceKey: "source-unrouted-status", TaskID: target.ID, EventClass: "status", EventType: "waiting_user",
 		SemanticPayload: map[string]any{"status": "waiting_user"}, OccurredAt: time.Now().UTC(),
 	}, ""); err != nil {
 		t.Fatal(err)
 	}
-	withoutGlobalStatus, err := database.ChannelDeliveries(ctx, instance.ID, 100)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(withoutGlobalStatus) != len(beforeUnrouted) {
-		t.Fatalf("global task status notification must default off: before=%d after=%d", len(beforeUnrouted), len(withoutGlobalStatus))
-	}
+	assertSourceDeliveryCount("source-unrouted-status", 0)
 	instance, err = service.UpdateInstance(ctx, owner.ID, instance.ID, "", map[string]any{"notify_task_status": true}, instance.Revision)
 	if err != nil {
 		t.Fatal(err)
@@ -543,13 +571,7 @@ func TestInboundOwnerAndGroupScopesAreServerEnforcedAndIdempotent(t *testing.T) 
 	}, ""); err != nil {
 		t.Fatal(err)
 	}
-	afterGlobalStatus, err := database.ChannelDeliveries(ctx, instance.ID, 100)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(afterGlobalStatus) != len(beforeUnrouted)+1 {
-		t.Fatalf("whitelisted global task status was not delivered: before=%d after=%d", len(beforeUnrouted), len(afterGlobalStatus))
-	}
+	assertSourceDeliveryCount("source-unrouted-status-enabled", 1)
 	notificationTask, err := appService.CreateTask(ctx, app.CreateTaskInput{ProjectID: regularProject.ID, WorkspaceID: regularWorkspace.ID, Title: "Notify owner", Request: "Notify owner", Isolation: "inplace", Backend: model.Backend, ModelSource: model.Source, ModelID: model.ID, WireModel: model.WireModel, Filesystem: "workspace-write", Approval: "never", CollaborationMode: "single", MaxAgents: 1, KnowledgePolicy: "inherit"})
 	if err != nil {
 		t.Fatal(err)
