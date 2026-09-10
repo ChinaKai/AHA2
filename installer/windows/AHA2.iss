@@ -32,6 +32,7 @@ DefaultDirName={autopf}\AHA2
 #endif
 DefaultGroupName=AHA2
 DisableProgramGroupPage=yes
+DisableDirPage=no
 #ifdef PerUserInstall
 PrivilegesRequired=lowest
 #else
@@ -170,6 +171,50 @@ begin
     SelectedDataDir('') + '" -TaskName "' + AHA2UserTaskName + '"';
 end;
 
+function QuotedArgumentValue(const Arguments, Name: String): String;
+var
+  Marker, Tail: String;
+  StartPos, EndPos: Integer;
+begin
+  Result := '';
+  Marker := Name + ' "';
+  StartPos := Pos(Marker, Arguments);
+  if StartPos = 0 then
+    Exit;
+  Tail := Copy(Arguments, StartPos + Length(Marker), MaxInt);
+  EndPos := Pos('"', Tail);
+  if EndPos > 0 then
+    Result := Trim(Copy(Tail, 1, EndPos - 1));
+end;
+
+function ExistingUserTaskDataDir(): String;
+var
+  ResultCode: Integer;
+  Output: TExecOutput;
+  Arguments: String;
+begin
+  Result := '';
+  try
+    if ExecAndCaptureOutput(
+      ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
+      '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "' +
+      '$task=Get-ScheduledTask -TaskName ''' + AHA2UserTaskName + ''' -ErrorAction SilentlyContinue;' +
+      'if($task){[Console]::Out.Write([string]$task.Actions[0].Arguments)}"',
+      '', SW_SHOWNORMAL, ewWaitUntilTerminated, ResultCode, Output) and
+      (ResultCode = 0) and (not Output.Error) and
+      (GetArrayLength(Output.StdOut) > 0) then
+    begin
+      Arguments := Trim(Output.StdOut[0]);
+      Result := QuotedArgumentValue(Arguments, '--data-dir');
+      if Result <> '' then
+        Log('Using the existing AHA2 user task data directory for the upgrade wizard.');
+    end;
+  except
+    Log('Could not inspect the existing AHA2 user task data directory: ' + GetExceptionMessage);
+    Result := '';
+  end;
+end;
+
 function IsLANMode(): Boolean;
 begin
   Result := ListenModePage.SelectedValueIndex = 1;
@@ -217,7 +262,7 @@ end;
 
 procedure InitializeWizard();
 var
-  PreviousMode: String;
+  PreviousMode, ExplicitDataDir, TaskDataDir, PreviousDataDir: String;
 begin
   DataDirPage := CreateInputDirPage(wpSelectDir,
     '选择数据目录', 'AHA2 的持久数据保存在哪里？',
@@ -225,7 +270,15 @@ begin
     False, SetupMessage(msgNewFolderName));
   DataDirPage.Add('');
 #ifdef PerUserInstall
-  DataDirPage.Values[0] := ExpandConstant('{param:DATADIR|' + GetPreviousData('DataDir', ExpandConstant('{localappdata}\AHA2')) + '}');
+  ExplicitDataDir := Trim(ExpandConstant('{param:DATADIR|}'));
+  TaskDataDir := ExistingUserTaskDataDir();
+  PreviousDataDir := GetPreviousData('DataDir', ExpandConstant('{localappdata}\AHA2'));
+  if ExplicitDataDir <> '' then
+    DataDirPage.Values[0] := ExplicitDataDir
+  else if TaskDataDir <> '' then
+    DataDirPage.Values[0] := TaskDataDir
+  else
+    DataDirPage.Values[0] := PreviousDataDir;
 #else
   DataDirPage.Values[0] := GetPreviousData('DataDir', ExpandConstant('{commonappdata}\AHA2'));
 #endif

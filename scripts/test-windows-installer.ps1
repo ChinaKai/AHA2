@@ -13,7 +13,7 @@ $missingTray = Join-Path ([IO.Path]::GetTempPath()) ("aha2-tray-validation-" + [
 $installerPath = Join-Path $repo "installer\windows\AHA2.iss"
 $installer = Get-Content -Raw -Encoding UTF8 -LiteralPath $installerPath
 foreach ($contract in @(
-	"PrivilegesRequired=admin", "PrivilegesRequired=lowest", "PerUserInstall", "AHA2-Setup-User-x64", "{localappdata}\Programs\AHA2", "ArchitecturesAllowed=x64compatible", "CurUninstallStepChanged", "DeinitializeSetup",
+	"PrivilegesRequired=admin", "PrivilegesRequired=lowest", "PerUserInstall", "AHA2-Setup-User-x64", "{localappdata}\Programs\AHA2", "DisableDirPage=no", "ArchitecturesAllowed=x64compatible", "CurUninstallStepChanged", "DeinitializeSetup",
     '[Icons]', '[Run]', '[Files]', '[InstallDelete]', 'Type: files; Name: "{app}\Run-AHA2User.vbs"', 'CreateInputDirPage', 'CreateInputOptionPage', 'CreateInputQueryPage',
     'RegisterPreviousData', 'remoteip=localsubnet profile=private', '{code:LocalManagementURL}', '{commonappdata}\AHA2',
     'DestName: "aha2.exe"', 'DestName: "aha2-tray.exe"', 'TrayParameters', '--server', '--listen', '--data-dir',
@@ -159,6 +159,16 @@ foreach ($contract in @("taskkill.exe", "/T", "backend CLI")) {
 }
 foreach ($contract in @("SKIPUSERTASK", "authoritative listen/data/Agent API arguments", "if UserTaskWasPresent then", "preserved for per-user upgrade")) {
   if ($installer -notmatch [regex]::Escape($contract)) { throw "Installer task-registration handoff contract is missing: $contract" }
+}
+$dataDirProbe = $installer.IndexOf("function ExistingUserTaskDataDir")
+$captureTask = $installer.IndexOf("ExecAndCaptureOutput", $dataDirProbe)
+$dataDirArgument = $installer.IndexOf("--data-dir", $captureTask)
+$explicitDataDir = $installer.IndexOf("if ExplicitDataDir <> '' then")
+$taskDataDir = $installer.IndexOf("else if TaskDataDir <> '' then", $explicitDataDir)
+$previousDataDir = $installer.IndexOf("DataDirPage.Values[0] := PreviousDataDir", $taskDataDir)
+if ($dataDirProbe -lt 0 -or $captureTask -le $dataDirProbe -or $dataDirArgument -le $captureTask -or
+    $explicitDataDir -lt 0 -or $taskDataDir -le $explicitDataDir -or $previousDataDir -le $taskDataDir) {
+  throw "The per-user wizard must prefer explicit DATADIR, then the existing task data directory, then previous/default data."
 }
 $preserveTask = $installer.IndexOf("Existing AHA2 user task will be preserved for per-user upgrade.")
 $enableTask = $installer.IndexOf("/Change /Enable /TN", $preserveTask)
