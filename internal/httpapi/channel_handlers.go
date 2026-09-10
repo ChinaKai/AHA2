@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/ChinaKai/AHA2/internal/channel"
 	"github.com/ChinaKai/AHA2/internal/domain"
+	"github.com/ChinaKai/AHA2/internal/store"
 	qrcode "github.com/skip2/go-qrcode"
 )
 
@@ -137,6 +139,107 @@ func (s *Server) updateChannelInstance(writer http.ResponseWriter, request *http
 	}
 	s.audit(request, "channel.instance.update", "channel_instance", item.ID, nil)
 	writeChannelResource(writer, http.StatusOK, item.Revision, map[string]any{"ok": true, "instance": item})
+}
+
+func (s *Server) channelInstanceHasActiveTurn(ctx context.Context, ownerID, id string) (bool, error) {
+	item, _, err := s.channels.Instance(ctx, ownerID, id)
+	if err != nil {
+		return false, err
+	}
+	tasks, err := s.store.ListTasks(ctx, item.HostProjectID)
+	if err != nil {
+		return false, err
+	}
+	for _, task := range tasks {
+		active, err := s.taskHasActiveTurn(ctx, task.ID)
+		if err != nil {
+			return false, err
+		}
+		if active {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (s *Server) resetChannelBinding(writer http.ResponseWriter, request *http.Request) {
+	revision, ok := channelIfMatch(writer, request)
+	if !ok {
+		return
+	}
+	session, _ := sessionFromContext(request.Context())
+	item, err := s.channels.ResetBinding(request.Context(), session.OwnerID, request.PathValue("id"), revision)
+	if err != nil {
+		writeChannelError(writer, err, "reset_channel_binding_failed")
+		return
+	}
+	s.audit(request, "channel.instance.reset_binding", "channel_instance", item.ID, nil)
+	writeChannelResource(writer, http.StatusOK, item.Revision, map[string]any{"ok": true, "instance": item})
+}
+
+func (s *Server) archiveChannelInstance(writer http.ResponseWriter, request *http.Request) {
+	revision, ok := channelIfMatch(writer, request)
+	if !ok {
+		return
+	}
+	session, _ := sessionFromContext(request.Context())
+	active, err := s.channelInstanceHasActiveTurn(request.Context(), session.OwnerID, request.PathValue("id"))
+	if err != nil {
+		writeChannelError(writer, err, "archive_channel_instance_failed")
+		return
+	}
+	if active {
+		writeJSON(writer, http.StatusConflict, map[string]any{"ok": false, "error": "active_turn_exists", "message": "渠道宿主仍有执行中的 Turn，请先中断或等待完成"})
+		return
+	}
+	item, err := s.channels.ArchiveInstance(request.Context(), session.OwnerID, request.PathValue("id"), revision)
+	if err != nil {
+		writeChannelError(writer, err, "archive_channel_instance_failed")
+		return
+	}
+	s.audit(request, "channel.instance.archive", "channel_instance", item.ID, map[string]any{"remote_application_deleted": false})
+	writeChannelResource(writer, http.StatusOK, item.Revision, map[string]any{"ok": true, "instance": item})
+}
+
+func (s *Server) channelPurgePreview(writer http.ResponseWriter, request *http.Request) {
+	session, _ := sessionFromContext(request.Context())
+	preview, err := s.channels.PurgePreview(request.Context(), session.OwnerID, request.PathValue("id"))
+	if err != nil {
+		writeChannelError(writer, err, "channel_purge_preview_failed")
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "preview": preview})
+}
+
+func (s *Server) purgeChannelInstance(writer http.ResponseWriter, request *http.Request) {
+	revision, ok := channelIfMatch(writer, request)
+	if !ok {
+		return
+	}
+	var payload struct {
+		ConfirmationName string `json:"confirmation_name"`
+	}
+	if err := decodeJSON(request, &payload); err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_json")
+		return
+	}
+	session, _ := sessionFromContext(request.Context())
+	preview, err := s.channels.PurgePreview(request.Context(), session.OwnerID, request.PathValue("id"))
+	if err != nil {
+		writeChannelError(writer, err, "purge_channel_instance_failed")
+		return
+	}
+	if strings.TrimSpace(payload.ConfirmationName) != preview.Name {
+		writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "channel_purge_confirmation_mismatch", "message": "实例名称确认不匹配"})
+		return
+	}
+	item, err := s.channels.PurgeInstance(request.Context(), session.OwnerID, request.PathValue("id"), revision)
+	if err != nil {
+		writeChannelError(writer, err, "purge_channel_instance_failed")
+		return
+	}
+	s.audit(request, "channel.instance.purge", "channel_instance", item.ID, map[string]any{"tasks": preview.Tasks, "conversations": preview.Conversations, "messages": preview.Messages, "attachments": preview.Attachments, "remote_application_deleted": false})
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "purged": preview})
 }
 
 func (s *Server) updateChannelCredentials(writer http.ResponseWriter, request *http.Request) {
@@ -399,6 +502,10 @@ func writeChannelError(writer http.ResponseWriter, err error, fallback string) {
 		writeError(writer, http.StatusNotFound, "channel_resource_not_found")
 	case channel.IsRevisionConflict(err):
 		writeError(writer, http.StatusPreconditionFailed, "channel_revision_conflict")
+	case errors.Is(err, store.ErrChannelNotRetired):
+		writeError(writer, http.StatusConflict, "channel_instance_not_archived")
+	case errors.Is(err, store.ErrActiveTurn):
+		writeError(writer, http.StatusConflict, "active_turn_exists")
 	case strings.Contains(err.Error(), "unavailable"):
 		writeError(writer, http.StatusConflict, "channel_provider_unavailable")
 	case strings.Contains(err.Error(), "idempotency key"):

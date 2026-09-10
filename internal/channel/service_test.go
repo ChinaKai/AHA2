@@ -3,8 +3,10 @@ package channel
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -176,8 +178,37 @@ func TestDiscoverAndCreateInstanceIsOptionalAndIdempotent(t *testing.T) {
 	if err != nil || visible.Status != "qr_ready" || visible.VerificationURL == "" {
 		t.Fatalf("onboarding=%#v err=%v", visible, err)
 	}
-	if err := service.completeRegistrationFromIPC(ctx, secretIPCMessage{Schema: "channel-secret/v1", Type: "registration_result", InstanceID: item.ID, OnboardingID: onboarding.ID, CommandID: registerCommand.ID, LeaseID: registerClaim[0].LeaseID, AppID: "cli_test", AppSecret: "top-secret-value", ScannerOpenID: "scanner-owner", TenantBrand: "feishu"}); err != nil {
+	firstVerificationURL := visible.VerificationURL
+	service.handleVerificationURL(ctx, secretIPCMessage{Schema: "channel-secret/v1", Type: "verification_url", InstanceID: item.ID, OnboardingID: onboarding.ID, CommandID: registerCommand.ID, LeaseID: "stale-lease", URL: "https://accounts.feishu.cn/stale", ExpireIn: 600})
+	visible, err = service.OwnerOnboarding(ctx, owner.ID, "", onboarding.ID)
+	if err != nil || visible.VerificationURL != firstVerificationURL {
+		t.Fatalf("stale registration lease replaced active QR URL: onboarding=%#v err=%v", visible, err)
+	}
+	service.handleVerificationURL(ctx, secretIPCMessage{Schema: "channel-secret/v1", Type: "verification_url", InstanceID: item.ID, OnboardingID: onboarding.ID, CommandID: registerCommand.ID, LeaseID: registerClaim[0].LeaseID, URL: "https://accounts.feishu.cn/retry", ExpireIn: 600})
+	visible, err = service.OwnerOnboarding(ctx, owner.ID, "", onboarding.ID)
+	if err != nil || visible.Status != "qr_ready" || visible.VerificationURL != "https://accounts.feishu.cn/retry" {
+		t.Fatalf("retried onboarding did not rotate QR URL: onboarding=%#v err=%v", visible, err)
+	}
+	registrationMessage, err := json.Marshal(secretIPCMessage{Schema: "channel-secret/v1", Type: "registration_result", InstanceID: item.ID, OnboardingID: onboarding.ID, CommandID: registerCommand.ID, LeaseID: registerClaim[0].LeaseID, AppID: "cli_test", AppSecret: "top-secret-value", ScannerOpenID: "scanner-owner", TenantBrand: "feishu"})
+	if err != nil {
 		t.Fatal(err)
+	}
+	ipcCtx, cancelIPC := context.WithCancel(ctx)
+	ipcDone := make(chan struct{})
+	go func() {
+		defer close(ipcDone)
+		service.consumePluginSecretIPC(ipcCtx, item.ID, strings.NewReader(string(registrationMessage)+"\n"))
+	}()
+	processFinished := make(chan struct{})
+	go func() {
+		_ = waitForPluginExit(ipcDone, func() error { return nil })
+		cancelIPC()
+		close(processFinished)
+	}()
+	select {
+	case <-processFinished:
+	case <-time.After(time.Second):
+		t.Fatal("registration result IPC was not drained before process finalization")
 	}
 	registered, _, err := service.Instance(ctx, owner.ID, item.ID)
 	if err != nil || !registered.CredentialConfigured || registered.AppID != "cli_test" {
@@ -230,6 +261,61 @@ func TestDiscoverAndCreateInstanceIsOptionalAndIdempotent(t *testing.T) {
 	remaining, err := database.ClaimChannelCommands(ctx, item.ID, 10, now.Add(2*time.Minute), time.Minute)
 	if err != nil || len(remaining) != 0 {
 		t.Fatalf("reauthorization or restart queued menu/configuration writes: %#v err=%v", remaining, err)
+	}
+	current, _, err := service.Instance(ctx, owner.ID, item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reset, err := service.ResetBinding(ctx, owner.ID, item.ID, current.Revision)
+	if err != nil || reset.Status != "draft" || reset.CredentialConfigured || reset.OwnerBound || reset.Retired {
+		t.Fatalf("reset binding=%#v err=%v", reset, err)
+	}
+	archived, err := service.ArchiveInstance(ctx, owner.ID, item.ID, reset.Revision)
+	if err != nil || !archived.Retired || archived.Status != "retired" || archived.CredentialConfigured || archived.OwnerBound {
+		t.Fatalf("archived instance=%#v err=%v", archived, err)
+	}
+	if _, err := database.Project(ctx, archived.HostProjectID); err != nil {
+		t.Fatalf("archive removed host project: %v", err)
+	}
+	if _, err := database.Workspace(ctx, archived.HostWorkspaceID); err != nil {
+		t.Fatalf("archive removed host workspace: %v", err)
+	}
+	preview, err := service.PurgePreview(ctx, owner.ID, archived.ID)
+	if err != nil || preview.Name != archived.Name || preview.Tasks != 0 {
+		t.Fatalf("purge preview=%#v err=%v", preview, err)
+	}
+	if _, err := service.PurgeInstance(ctx, owner.ID, archived.ID, archived.Revision); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Project(ctx, archived.HostProjectID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("purge retained host project: %v", err)
+	}
+}
+
+func TestPluginExitWaitsForSecretIPCDrain(t *testing.T) {
+	ipcDone := make(chan struct{})
+	started := make(chan struct{})
+	waitCalled := make(chan struct{})
+	finished := make(chan struct{})
+	go func() {
+		close(started)
+		_ = waitForPluginExit(ipcDone, func() error {
+			close(waitCalled)
+			return nil
+		})
+		close(finished)
+	}()
+	<-started
+	select {
+	case <-waitCalled:
+		t.Fatal("process Wait ran before secret IPC was drained")
+	default:
+	}
+	close(ipcDone)
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("process Wait did not run after secret IPC was drained")
 	}
 }
 

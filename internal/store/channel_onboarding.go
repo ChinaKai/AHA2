@@ -79,9 +79,11 @@ func (s *Store) ActiveChannelOnboarding(ctx context.Context, instanceID string) 
 	return scanChannelOnboarding(s.db.QueryRowContext(ctx, `SELECT `+channelOnboardingColumns+` FROM channel_onboarding_sessions WHERE instance_id=? AND status IN ('pending','qr_ready') ORDER BY created_at DESC LIMIT 1`, instanceID))
 }
 
-func (s *Store) UpdateChannelOnboardingQR(ctx context.Context, id, commandID, verificationRef string, expiresAt, at time.Time) error {
-	result, err := s.db.ExecContext(ctx, `UPDATE channel_onboarding_sessions SET verification_url_secret_ref=?,status='qr_ready',step='awaiting_scan',expires_at=?,updated_at=? WHERE id=? AND registration_command_id=? AND status='pending'`,
-		verificationRef, timeString(expiresAt), timeString(at), id, commandID)
+func (s *Store) UpdateChannelOnboardingQR(ctx context.Context, id, commandID, leaseID, verificationRef string, expiresAt, at time.Time) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE channel_onboarding_sessions SET verification_url_secret_ref=?,status='qr_ready',step='awaiting_scan',expires_at=?,updated_at=?
+		WHERE id=? AND registration_command_id=? AND status IN ('pending','qr_ready')
+		AND EXISTS(SELECT 1 FROM channel_plugin_commands command WHERE command.id=? AND command.instance_id=channel_onboarding_sessions.instance_id AND command.state='leased' AND command.lease_id=? AND command.lease_until>?)`,
+		verificationRef, timeString(expiresAt), timeString(at), id, commandID, commandID, leaseID, timeString(at))
 	if err != nil {
 		return err
 	}

@@ -47,7 +47,7 @@ POST  /api/v1/agent/tasks
 GET   /api/v1/agent/tasks/{task}
 ```
 
-Task Memory 默认使用 `{"append":{...}}` 追加语义；Main Agent 在读完当前 Memory 后，可使用 `{"replace":{...}}` 原子替换六类列表，清理重复、损坏和已失效记录，同时必须保留仍有效的决策、事实、验证和下一步。Memory 超过 20000 字符或已经影响恢复判断时，应优先完成一次压缩替换。进度消息会立即写入 Conversation 并通过 Event Hub 推送。
+Task Memory 默认使用 `{"append":{...}}` 追加语义；两种模式都可携带 `current_goal`，Main Agent 应在活动目标变化时更新它。原始需求仅用于历史溯源，不应在新 Session 中自动恢复为当前目标。Main Agent 在读完当前 Memory 后，可使用 `{"replace":{...}}` 原子替换六类列表，清理重复、损坏和已失效记录，同时必须保留仍有效的决策、事实、验证和下一步。Memory 超过 20000 字符或已经影响恢复判断时，应优先完成一次压缩替换。进度消息会立即写入 Conversation 并通过 Event Hub 推送。
 只有 Main Agent 可以修改 Memory 和提交协作批次；协作请求提交后立即由 AHA 编排。
 最终回复只包含自然语言，不再携带 Turn checkpoint。
 
@@ -75,6 +75,14 @@ POST /api/v1/agent/skills
 GET  /api/v1/agent/skills/{id}
 PUT  /api/v1/agent/skills/{id}
 ```
+
+`GET /api/v1/agent/knowledge` marks bound project entries with `binding_mode` and
+`can_propose_revision`. A `project` binding allows the current Project's Main
+Agent to submit a manual review proposal back to the source library; an
+`external` binding is read-only and returns `knowledge_entry_read_only` for
+revision attempts. `knowledge_publish` is the Task-level capability, while
+`knowledge_contribute_bound` reports whether the Project has at least one
+project-collaboration binding.
 
 `POST /api/v1/agent/skills` accepts `name`, `description`, and `instructions`. Main Agent creates an active, enabled Skill scoped to the current Project, and AHA2 automatically selects it for the current Task. It is available through the Agent API immediately and is materialized into context on the next Turn.
 

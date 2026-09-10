@@ -543,6 +543,24 @@ const schemaV49 = `
 ALTER TABLE backend_sessions ADD COLUMN identity_context TEXT NOT NULL DEFAULT '';
 `
 
+const schemaV50 = `
+ALTER TABLE project_knowledge_bindings ADD COLUMN binding_mode TEXT NOT NULL DEFAULT 'external' CHECK(binding_mode IN ('project','external'));
+`
+
+const schemaV51 = `
+ALTER TABLE channel_instances ADD COLUMN retired_at TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS idx_channel_instances_retired ON channel_instances(retired_at,updated_at);
+`
+
+const schemaV52 = `
+CREATE INDEX IF NOT EXISTS idx_projects_updated_cursor ON projects(updated_at DESC,id DESC);
+CREATE INDEX IF NOT EXISTS idx_workspaces_project_updated_cursor ON workspaces(project_id,updated_at DESC,id DESC);
+CREATE INDEX IF NOT EXISTS idx_tasks_project_updated_cursor ON tasks(project_id,updated_at DESC,id DESC);
+CREATE INDEX IF NOT EXISTS idx_tasks_updated_cursor ON tasks(updated_at DESC,id DESC);
+CREATE INDEX IF NOT EXISTS idx_knowledge_updated_cursor ON knowledge_entries(updated_at DESC,id DESC);
+CREATE INDEX IF NOT EXISTS idx_knowledge_scope_project_updated_cursor ON knowledge_entries(scope,project_id,updated_at DESC,id DESC);
+`
+
 const schemaV27 = `
 CREATE TABLE IF NOT EXISTS sync_settings (
     scope TEXT PRIMARY KEY,
@@ -1866,6 +1884,35 @@ func (s *Store) migrate(ctx context.Context) error {
 	}
 	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(49, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
 		return fmt.Errorf("record schema v49: %w", err)
+	}
+	var hasV50 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=50)`).Scan(&hasV50)
+	if !hasV50 {
+		if _, err := s.db.ExecContext(ctx, schemaV50); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("apply schema v50: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(50, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v50: %w", err)
+	}
+	var hasV51 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=51)`).Scan(&hasV51)
+	if !hasV51 {
+		if _, err := s.db.ExecContext(ctx, schemaV51); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("apply schema v51: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_channel_instances_retired ON channel_instances(retired_at,updated_at)`); err != nil {
+		return fmt.Errorf("apply schema v51 retired index: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(51, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v51: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, schemaV52); err != nil {
+		return fmt.Errorf("apply schema v52: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(52, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v52: %w", err)
 	}
 	return nil
 }

@@ -48,6 +48,10 @@ func TestKnowledgeLibraryMigrationConvertsAHA1ArchiveProject(t *testing.T) {
 	if _, err := database.KnowledgeLibrary(ctx, "missing"); err != sql.ErrNoRows {
 		t.Fatalf("missing library error=%v", err)
 	}
+	var bindingModeDefault string
+	if err := database.db.QueryRowContext(ctx, `SELECT dflt_value FROM pragma_table_info('project_knowledge_bindings') WHERE name='binding_mode'`).Scan(&bindingModeDefault); err != nil || bindingModeDefault != "'external'" {
+		t.Fatalf("binding mode migration default=%q err=%v", bindingModeDefault, err)
+	}
 }
 
 func TestSchemaV39PrunesImportedAHA1WorklogsWithTombstones(t *testing.T) {
@@ -135,8 +139,8 @@ func TestKnowledgeLibraryBindUnbindAndProjectDeletePreserveContent(t *testing.T)
 	if err := database.CreateKnowledge(ctx, entry); err != nil {
 		t.Fatal(err)
 	}
-	bound, err := database.BindKnowledgeLibrary(ctx, libraries[0].ID, project.ID, now)
-	if err != nil || bound.BoundProjectID != project.ID {
+	bound, err := database.BindKnowledgeLibrary(ctx, libraries[0].ID, project.ID, "project", now)
+	if err != nil || bound.BoundProjectID != project.ID || bound.BindingMode != "project" {
 		t.Fatalf("bound=%#v err=%v", bound, err)
 	}
 	items, err := database.ListApplicableKnowledge(ctx, project.ID, "", []domain.KnowledgeStatus{domain.KnowledgeVerified})
@@ -146,7 +150,7 @@ func TestKnowledgeLibraryBindUnbindAndProjectDeletePreserveContent(t *testing.T)
 	found := false
 	for _, item := range items {
 		if item.ID == entry.ID {
-			found = item.BoundProjectID == project.ID && item.ParentID == knowledgeRootID("project", project.ID) && item.Slug != entry.Slug
+			found = item.BoundProjectID == project.ID && item.BindingMode == "project" && item.CanProposeRevision && item.ParentID == knowledgeRootID("project", project.ID) && item.Slug != entry.Slug
 		}
 		if item.ID == root.ID {
 			t.Fatal("bound library root leaked into applicable project knowledge")
@@ -154,6 +158,9 @@ func TestKnowledgeLibraryBindUnbindAndProjectDeletePreserveContent(t *testing.T)
 	}
 	if !found {
 		t.Fatalf("bound knowledge missing or not namespaced: %#v", items)
+	}
+	if _, err := database.BindKnowledgeLibrary(ctx, libraries[0].ID, project.ID, "invalid", now); err == nil {
+		t.Fatal("invalid knowledge library binding mode was accepted")
 	}
 	if err := database.DeleteProject(ctx, project.ID); err != nil {
 		t.Fatal(err)
@@ -278,7 +285,7 @@ func TestDetachAndDeleteProjectOwnedKnowledge(t *testing.T) {
 	if items, err := database.ListProjectKnowledge(ctx, project.ID, nil); err != nil || len(items) != 1 || !items[0].IsIndex {
 		t.Fatalf("project-owned knowledge was not emptied: %#v err=%v", items, err)
 	}
-	if _, err := database.BindKnowledgeLibrary(ctx, library.ID, project.ID, now); err != nil {
+	if _, err := database.BindKnowledgeLibrary(ctx, library.ID, project.ID, "external", now); err != nil {
 		t.Fatal(err)
 	}
 	if items, err := database.ListApplicableKnowledge(ctx, project.ID, "", []domain.KnowledgeStatus{domain.KnowledgeVerified}); err != nil || len(items) != 3 {

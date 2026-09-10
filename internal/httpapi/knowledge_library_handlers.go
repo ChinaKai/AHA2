@@ -18,13 +18,14 @@ func (s *Server) listKnowledgeLibraries(writer http.ResponseWriter, request *htt
 
 func (s *Server) bindKnowledgeLibrary(writer http.ResponseWriter, request *http.Request) {
 	var payload struct {
-		ProjectID string `json:"project_id"`
+		ProjectID   string `json:"project_id"`
+		BindingMode string `json:"binding_mode"`
 	}
 	if decodeJSON(request, &payload) != nil || strings.TrimSpace(payload.ProjectID) == "" {
 		writeError(writer, http.StatusBadRequest, "knowledge_library_project_required")
 		return
 	}
-	item, err := s.store.BindKnowledgeLibrary(request.Context(), request.PathValue("id"), strings.TrimSpace(payload.ProjectID), time.Now().UTC())
+	item, err := s.store.BindKnowledgeLibrary(request.Context(), request.PathValue("id"), strings.TrimSpace(payload.ProjectID), strings.TrimSpace(payload.BindingMode), time.Now().UTC())
 	if err != nil {
 		if err == sql.ErrNoRows {
 			writeError(writer, http.StatusNotFound, "knowledge_library_not_found")
@@ -33,7 +34,7 @@ func (s *Server) bindKnowledgeLibrary(writer http.ResponseWriter, request *http.
 		}
 		return
 	}
-	s.audit(request, "knowledge_library.bind", "knowledge_library", item.ID, map[string]any{"project_id": item.BoundProjectID})
+	s.audit(request, "knowledge_library.bind", "knowledge_library", item.ID, map[string]any{"project_id": item.BoundProjectID, "binding_mode": item.BindingMode})
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "library": item})
 }
 

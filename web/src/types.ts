@@ -97,6 +97,9 @@ export interface Project {
   name: string;
   description: string;
   project_type?: string;
+  channel_instance_id?: string;
+  channel_retired?: boolean;
+  read_only_reason?: string;
   repository_identity?: string;
   default_branch?: string;
   knowledge_policy: "enabled" | "disabled" | string;
@@ -147,6 +150,9 @@ export interface Workspace {
   };
   owner_device_id?: string;
   read_only?: boolean;
+  read_only_reason?: string;
+  channel_instance_id?: string;
+  channel_retired?: boolean;
 }
 
 export interface Model {
@@ -290,6 +296,9 @@ export interface Task {
   updated_at: string;
   owner_device_id?: string;
   read_only?: boolean;
+  read_only_reason?: string;
+  channel_instance_id?: string;
+  channel_retired?: boolean;
   agent_api_mode: "auto" | "global" | "manual" | string;
   agent_api_url?: string;
   agent_api_resolved_url?: string;
@@ -507,6 +516,8 @@ export interface Knowledge {
   scope: "global" | "project";
   project_id?: string;
   bound_project_id?: string;
+  binding_mode?: "project" | "external";
+  can_propose_revision?: boolean;
   parent_id?: string;
   slug?: string;
   sort_order: number;
@@ -574,6 +585,8 @@ export interface Skill {
   scope: "global" | "project";
   project_id?: string;
   bound_project_id?: string;
+  binding_mode?: "project" | "external";
+  can_update?: boolean;
   name: string;
   description: string;
   instructions: string;
@@ -593,6 +606,7 @@ export interface KnowledgeLibrary {
   description: string;
   source_identity?: string;
   bound_project_id?: string;
+  binding_mode?: "project" | "external";
   knowledge_count: number;
   skill_count: number;
   created_at: string;
@@ -683,7 +697,7 @@ export interface ChannelInstance {
   owner_id: string;
   runtime_device_id: string;
   name: string;
-  status: "draft" | "onboarding" | "ready" | "degraded" | "disabled" | "error" | string;
+  status: "draft" | "onboarding" | "ready" | "degraded" | "disabled" | "error" | "retired" | string;
   effective_availability: "available" | "unavailable" | string;
   revision: number;
   app_id?: string;
@@ -694,8 +708,18 @@ export interface ChannelInstance {
   host_workspace_id: string;
   config?: Record<string, unknown>;
   last_seen_at?: string;
+  retired_at?: string;
+  retired: boolean;
   created_at: string;
   updated_at: string;
+}
+
+export interface ChannelPurgePreview {
+  name: string;
+  tasks: number;
+  conversations: number;
+  messages: number;
+  attachments: number;
 }
 
 export interface ChannelEndpoint {

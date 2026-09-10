@@ -174,10 +174,17 @@ func (s *Service) ensurePluginProcess(instanceID, rawCapability string) error {
 		defer stdin.Close()
 		_ = json.NewEncoder(stdin).Encode(bootstrap)
 	}()
-	go s.consumePluginSecretIPC(processCtx, instanceID, stdout)
+	ipcDone := make(chan struct{})
+	go func() {
+		defer close(ipcDone)
+		s.consumePluginSecretIPC(processCtx, instanceID, stdout)
+	}()
 	go func() { _, _ = io.Copy(io.Discard, stderr) }()
 	go func() {
-		_ = command.Wait()
+		// Stdout carries the one-time registration result, including the secret
+		// that makes the new app usable. Drain it before Wait tears down the pipe
+		// and before this goroutine cancels processCtx.
+		_ = waitForPluginExit(ipcDone, command.Wait)
 		unexpected := processCtx.Err() == nil
 		cleanup()
 		cancel()
@@ -207,6 +214,11 @@ func (s *Service) ensurePluginProcess(instanceID, rawCapability string) error {
 		}
 	}()
 	return nil
+}
+
+func waitForPluginExit(ipcDone <-chan struct{}, wait func() error) error {
+	<-ipcDone
+	return wait()
 }
 
 func (s *Service) registrationProcessRequired(ctx context.Context, instance domain.ChannelInstance) (bool, error) {
@@ -251,11 +263,13 @@ func (s *Service) consumePluginSecretIPC(ctx context.Context, instanceID string,
 		case "verification_url":
 			s.handleVerificationURL(ctx, message)
 		case "registration_result":
-			if s.completeRegistrationFromIPC(ctx, message) == nil {
+			if err := s.completeRegistrationFromIPC(ctx, message); err == nil {
 				go func() {
 					time.Sleep(100 * time.Millisecond)
 					s.stopPluginProcess(instanceID)
 				}()
+			} else {
+				s.logger.Warn("channel registration result persistence failed", "instance_id", instanceID, "error", err)
 			}
 		}
 	}
@@ -273,14 +287,17 @@ func (s *Service) handleVerificationURL(ctx context.Context, message secretIPCMe
 	if expireIn < 1 || expireIn > 600 {
 		expireIn = 600
 	}
-	ref := "channel/" + message.InstanceID + "/onboarding/" + message.OnboardingID + "/verification_url"
+	ref := "channel/" + message.InstanceID + "/onboarding/" + message.OnboardingID + "/verification_url/" + stableID("lease", message.LeaseID)
 	if s.secrets == nil || s.secrets.PutMany(map[string]string{ref: message.URL}) != nil {
 		return
 	}
 	now := s.now().UTC()
-	if s.store.UpdateChannelOnboardingQR(ctx, onboarding.ID, message.CommandID, ref, now.Add(time.Duration(expireIn)*time.Second), now) != nil {
+	if s.store.UpdateChannelOnboardingQR(ctx, onboarding.ID, message.CommandID, message.LeaseID, ref, now.Add(time.Duration(expireIn)*time.Second), now) != nil {
 		_ = s.secrets.DeleteMany([]string{ref})
 		return
+	}
+	if onboarding.VerificationURLRef != "" && onboarding.VerificationURLRef != ref {
+		_ = s.secrets.DeleteMany([]string{onboarding.VerificationURLRef})
 	}
 	_ = s.store.UpdateChannelCommandProgress(ctx, message.InstanceID, message.CommandID, message.LeaseID, map[string]any{"status": "qr_ready", "verification_url_ref": ref, "expires_at": now.Add(time.Duration(expireIn) * time.Second)}, now.Add(30*time.Second))
 }

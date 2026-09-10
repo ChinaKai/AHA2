@@ -26,8 +26,9 @@ function pluginState(plugin: ChannelPlugin): string {
 }
 
 function instanceState(instance: ChannelInstance): string {
+  if (instance.status === "retired") return "已归档";
   if (instance.effective_availability === "unavailable") return "提供方不可用";
-  const labels: Record<string, string> = {draft: "待绑定", onboarding: "绑定中", ready: "已就绪", degraded: "运行异常", disabled: "已停用", error: "错误"};
+  const labels: Record<string, string> = {draft: "待绑定", onboarding: "绑定中", ready: "已就绪", degraded: "运行异常", disabled: "已停用", error: "错误", retired: "已归档"};
   return labels[instance.status] || instance.status;
 }
 
@@ -47,6 +48,66 @@ function channelErrorMessage(error: unknown): string {
 
 function refreshAfterChannelConflict(error: unknown, refresh: () => Promise<void>): void {
 	if ((error as {code?: string})?.code === "channel_revision_conflict") void refresh().catch(() => undefined);
+}
+
+export function channelPurgePreviewMessage(preview: {name: string; tasks: number; conversations: number; messages: number; attachments: number}): string {
+	return `将永久删除“${preview.name}”及其本地归档：${preview.tasks} 个任务、${preview.conversations} 个会话、${preview.messages} 条消息、${preview.attachments} 个附件。此操作不可恢复，飞书后台应用不会自动删除。`;
+}
+
+export async function purgeRetiredChannelInstance(instanceID: string, revision = 0): Promise<"cancelled" | "name_mismatch" | "purged"> {
+	const [instanceResult, previewResult] = await Promise.all([
+		revision > 0 ? Promise.resolve(null) : api.channelInstance(instanceID),
+		api.channelInstancePurgePreview(instanceID),
+	]);
+	const preview = previewResult.preview;
+	if (!window.confirm(channelPurgePreviewMessage(preview))) return "cancelled";
+	const confirmationName = window.prompt(`请输入实例名“${preview.name}”确认永久删除：`);
+	if (confirmationName === null) return "cancelled";
+	if (confirmationName !== preview.name) return "name_mismatch";
+	await api.purgeChannelInstance(instanceID, confirmationName, revision > 0 ? revision : Number(instanceResult?.instance.revision || 0));
+	return "purged";
+}
+
+async function completeConversation(taskID: string): Promise<unknown[]> {
+	const items: unknown[] = [];
+	let before: number | undefined;
+	for (;;) {
+		const response = await api.conversation(taskID, {before, limit: 500});
+		items.push(...response.conversation.items);
+		if (!response.conversation.has_more || response.conversation.next_before === undefined || response.conversation.next_before === before) break;
+		before = response.conversation.next_before;
+	}
+	return items;
+}
+
+export async function exportRetiredChannelInstance(instanceID: string): Promise<void> {
+	const instanceResult = await api.channelInstance(instanceID);
+	const instance = instanceResult.instance;
+	const [projects, workspaces, tasks, handoffs, deliveries, policies, records] = await Promise.all([
+		api.projects(), api.workspaces(instance.host_project_id), api.tasks(instance.host_project_id), api.channelHandoffs(instanceID), api.channelDeliveries(instanceID), api.channelKnowledgePolicies(instanceID), api.channelKnowledgeRecords(instanceID),
+	]);
+	const taskHistory = await Promise.all(tasks.tasks.map(async task => ({
+		detail: await api.task(task.id),
+		conversation: await completeConversation(task.id),
+	})));
+	const content = {
+		exported_at: new Date().toISOString(),
+		instance,
+		endpoints: instanceResult.endpoints,
+		project: projects.projects.find(project => project.id === instance.host_project_id) || null,
+		workspaces: workspaces.workspaces,
+		tasks: taskHistory,
+		handoffs: handoffs.handoffs,
+		deliveries: deliveries.deliveries,
+		knowledge_policies: policies.policies,
+		knowledge_records: records.records,
+	};
+	const blobURL = URL.createObjectURL(new Blob([JSON.stringify(content, null, 2)], {type: "application/json"}));
+	const link = document.createElement("a");
+	link.href = blobURL;
+	link.download = `${instance.name.replace(/[\\/:*?"<>|]+/g, "-") || "channel"}-archive.json`;
+	link.click();
+	window.setTimeout(() => URL.revokeObjectURL(blobURL), 0);
 }
 
 function runtimeEditor(prefix: string, title: string, config: Record<string, unknown>, context: ChannelUIContext, allowInherit: boolean): string {
@@ -81,15 +142,26 @@ export function renderChannels(providers: ChannelPlugin[], instances: ChannelIns
     <div class="channel-provider-actions">${plugin.install_state === "installed" ? `<button type="button" data-channel-plugin-toggle="${escapeHTML(plugin.id)}" data-enabled="${plugin.enabled}" data-revision="${plugin.revision}">${plugin.enabled ? "停用" : "启用"}</button>` : ""}</div>
     ${plugin.last_error ? `<p>${escapeHTML(plugin.last_error)}</p>` : ""}
   </article>`).join("") : `<div class="empty channel-empty"><strong>无可用渠道提供方</strong><p>未安装渠道插件时，项目、任务和知识库仍可正常使用。</p></div>`;
-  const instanceRows = instances.length ? instances.map(instance => `<article class="channel-instance-card">
+  const instanceRows = instances.length ? instances.map(instance => {
+	const retired = instance.status === "retired";
+	const activity = `<details data-channel-activity="${escapeHTML(instance.id)}"><summary>${retired ? "查看归档记录" : "Owner 收件箱与投递"}</summary><div class="channel-activity"><small>展开后加载</small></div></details>`;
+	if (retired) return `<article class="channel-instance-card retired">
+    <header><div><strong>${escapeHTML(instance.name)}</strong><small>${escapeHTML(instance.provider_key || instance.plugin_id)}</small></div><span class="status warn">${instanceState(instance)}</span></header>
+    <p class="channel-retired-note">实例已归档，运行能力与本地凭据已移除；历史记录保持只读，飞书后台应用不会自动删除。</p>
+    <div class="channel-retired-actions"><button type="button" data-channel-view="${escapeHTML(instance.id)}" data-project-id="${escapeHTML(instance.host_project_id)}">查看</button><button type="button" data-channel-export="${escapeHTML(instance.id)}">导出</button><button type="button" class="danger" data-channel-purge="${escapeHTML(instance.id)}" data-revision="${instance.revision}">永久删除</button></div>
+    ${activity}
+  </article>`;
+	return `<article class="channel-instance-card">
     <header><div><strong>${escapeHTML(instance.name)}</strong><small>${escapeHTML(instance.provider_key || instance.plugin_id)}</small></div><span><span class="status ${instance.status === "ready" ? "good" : instance.status === "error" || instance.status === "degraded" ? "bad" : "warn"}">${instanceState(instance)}</span><button type="button" data-channel-instance-toggle="${escapeHTML(instance.id)}" data-enabled="${instance.status !== "disabled"}" data-revision="${instance.revision}">${instance.status === "disabled" ? "启用" : "停用"}</button></span></header>
     <dl><div><dt>私聊助手</dt><dd>唯一 Owner</dd></div><div><dt>群聊电子人</dt><dd>群 + 提问人隔离</dd></div><div><dt>凭据</dt><dd>${instance.credential_configured ? "已安全保存" : "未配置"}</dd></div></dl>
 		<button type="button" class="primary full" data-channel-onboard="${escapeHTML(instance.id)}">${!instance.owner_bound ? (instance.credential_configured ? "扫码确认唯一 Owner" : "扫码创建并绑定飞书应用") : "扫码更新飞书权限"}</button>
 		${instance.owner_bound ? `<small>仅增补当前应用权限并重新确认唯一 Owner；不修改已有菜单、事件、回调或应用信息，不自动提交应用草稿发布。</small>` : ""}
 		${instanceSettings(instance, context)}
     <details><summary>兼容方式：绑定已有应用</summary><form data-channel-credentials="${escapeHTML(instance.id)}" data-revision="${instance.revision}"><label>App ID<input name="app_id" value="${escapeHTML(instance.app_id || "")}" required></label><label>App Secret<input name="app_secret" type="password" autocomplete="new-password" required></label><button class="primary" type="submit">保存到 Secret Store</button></form></details>
-    <details data-channel-activity="${escapeHTML(instance.id)}"><summary>Owner 收件箱与投递</summary><div class="channel-activity"><small>展开后加载</small></div></details>
-  </article>`).join("") : `<div class="empty"><strong>尚未创建渠道实例</strong><p>每个实例独立绑定一个 Owner，并包含私聊助手与群聊电子人。</p></div>`;
+		<div class="channel-instance-lifecycle"><button type="button" data-channel-reset-binding="${escapeHTML(instance.id)}" data-revision="${instance.revision}">重置绑定</button><button type="button" class="danger" data-channel-archive="${escapeHTML(instance.id)}" data-revision="${instance.revision}">归档实例</button></div>
+    ${activity}
+  </article>`;
+  }).join("") : `<div class="empty"><strong>尚未创建渠道实例</strong><p>每个实例独立绑定一个 Owner，并包含私聊助手与群聊电子人。</p></div>`;
   return `<section class="page channels-page">
     <header class="page-head"><div><h1>渠道</h1><p>可选的外部消息渠道；插件缺失或停用不会影响 AHA2 核心功能。</p></div><button id="refresh-channels" type="button">${icon("refresh")}刷新</button></header>
     <section class="panel"><div class="section-head"><div><h2>渠道提供方</h2><p>仅加载受管目录中 manifest 与可执行文件校验通过的插件。</p></div></div><div class="channel-provider-grid">${providerRows}</div></section>
@@ -100,7 +172,7 @@ export function renderChannels(providers: ChannelPlugin[], instances: ChannelIns
   </section>`;
 }
 
-export function bindChannels(options: {refresh: () => Promise<void>; setMessage: (kind: "error" | "success", message: string) => void; context: ChannelUIContext}): void {
+export function bindChannels(options: {refresh: () => Promise<void>; setMessage: (kind: "error" | "success", message: string) => void; context: ChannelUIContext; openProject?: (projectID: string) => void}): void {
   const refresh = async () => {
     await options.refresh();
   };
@@ -140,6 +212,69 @@ export function bindChannels(options: {refresh: () => Promise<void>; setMessage:
   document.querySelectorAll<HTMLButtonElement>("[data-channel-instance-toggle]").forEach(button => button.addEventListener("click", () => {
     void api.setChannelInstanceEnabled(button.dataset.channelInstanceToggle || "", button.dataset.enabled !== "true", Number(button.dataset.revision || 0)).then(refresh).catch(error => options.setMessage("error", String(error)));
   }));
+	document.querySelectorAll<HTMLButtonElement>("[data-channel-reset-binding]").forEach(button => button.addEventListener("click", () => {
+		if (!window.confirm("重置绑定会保留实例设置与宿主历史，清理当前凭据并回到待绑定状态。确定继续？")) return;
+		button.disabled = true;
+		void api.resetChannelBinding(button.dataset.channelResetBinding || "", Number(button.dataset.revision || 0)).then(async () => {
+			options.setMessage("success", "渠道绑定已重置，可以重新扫码绑定。");
+			await refresh();
+		}).catch(error => {
+			button.disabled = false;
+			options.setMessage("error", channelErrorMessage(error));
+			refreshAfterChannelConflict(error, refresh);
+		});
+	}));
+	document.querySelectorAll<HTMLButtonElement>("[data-channel-archive]").forEach(button => button.addEventListener("click", () => {
+		if (!window.confirm("归档后实例及宿主内容保持只读，运行能力与本地凭据会被移除。飞书后台应用不会自动删除。确定归档？")) return;
+		button.disabled = true;
+		void api.archiveChannelInstance(button.dataset.channelArchive || "", Number(button.dataset.revision || 0)).then(async () => {
+			options.setMessage("success", "渠道实例已归档，历史记录保持只读。");
+			await refresh();
+		}).catch(error => {
+			button.disabled = false;
+			options.setMessage("error", channelErrorMessage(error));
+			refreshAfterChannelConflict(error, refresh);
+		});
+	}));
+	document.querySelectorAll<HTMLButtonElement>("[data-channel-view]").forEach(button => button.addEventListener("click", () => {
+		const projectID = button.dataset.projectId || "";
+		if (options.openProject && projectID) {
+			options.openProject(projectID);
+			return;
+		}
+		const card = button.closest<HTMLElement>(".channel-instance-card");
+		const details = card?.querySelector<HTMLDetailsElement>("[data-channel-activity]");
+		if (details) {
+			details.open = true;
+			details.scrollIntoView({block: "nearest"});
+		}
+	}));
+	document.querySelectorAll<HTMLButtonElement>("[data-channel-export]").forEach(button => button.addEventListener("click", () => {
+		button.disabled = true;
+		void exportRetiredChannelInstance(button.dataset.channelExport || "").then(() => {
+			options.setMessage("success", "归档 JSON 已生成并开始下载。");
+		}).catch(error => options.setMessage("error", error instanceof Error ? error.message : String(error))).finally(() => {
+			button.disabled = false;
+		});
+	}));
+	document.querySelectorAll<HTMLButtonElement>("[data-channel-purge]").forEach(button => button.addEventListener("click", () => {
+		button.disabled = true;
+		void purgeRetiredChannelInstance(button.dataset.channelPurge || "", Number(button.dataset.revision || 0)).then(async result => {
+			if (result === "name_mismatch") {
+				options.setMessage("error", "输入的实例名不匹配，未执行永久删除。");
+				return;
+			}
+			if (result === "purged") {
+				options.setMessage("success", "渠道归档及其本地宿主资源已永久删除。");
+				await refresh();
+			}
+		}).catch(error => {
+			options.setMessage("error", channelErrorMessage(error));
+			refreshAfterChannelConflict(error, refresh);
+		}).finally(() => {
+			button.disabled = false;
+		});
+	}));
 	document.querySelectorAll<HTMLFormElement>("[data-channel-settings]").forEach(settingsForm => settingsForm.addEventListener("submit", event => {
 		event.preventDefault();
 		const values = new FormData(settingsForm);

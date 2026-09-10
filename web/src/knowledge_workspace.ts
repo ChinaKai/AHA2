@@ -44,6 +44,14 @@ const managedGlobalKnowledgeIDs = new Set([
   globalBehaviorLessonsKnowledgeID,
 ]);
 
+async function ensureKnowledgeDetail(context: KnowledgeWorkspaceContext, id: string): Promise<Knowledge | undefined> {
+  const item = context.knowledge.find(entry => entry.id === id);
+  if (!item || typeof item.body === "string") return item;
+  const response = await api.knowledgeEntry(id);
+  Object.assign(item, response.knowledge);
+  return item;
+}
+
 const topLevelLabels: Array<[Exclude<KnowledgeArea, "project">, string, string]> = [
   ["global", "proxy", "\u5168\u5c40\u77e5\u8bc6"],
   ["libraries", "knowledge", "\u5f85\u7ed1\u5b9a"],
@@ -87,17 +95,23 @@ function projectEntries(context: KnowledgeWorkspaceContext, projectID: string): 
 
 type KnowledgeSourceOption = {id: string; label: string; count: number; external: boolean};
 
+function bindingModeLabel(mode?: KnowledgeLibrary["binding_mode"]): string {
+  return mode === "project" ? "项目协作" : "外部引用";
+}
+
 export function projectKnowledgeSources(project: Project, entries: Knowledge[], libraries: KnowledgeLibrary[]): KnowledgeSourceOption[] {
   const counts = new Map<string, number>();
   for (const entry of entries) {
     if (entry.is_index) continue;
     counts.set(entry.project_id || project.id, (counts.get(entry.project_id || project.id) || 0) + 1);
   }
-  const libraryNames = new Map(libraries.map(library => [library.container_project_id, library.name]));
+  const libraryByProject = new Map(libraries.map(library => [library.container_project_id, library]));
   const sources: KnowledgeSourceOption[] = [{id: project.id, label: "项目自有知识", count: counts.get(project.id) || 0, external: false}];
   for (const [id, count] of counts) {
     if (id === project.id) continue;
-    sources.push({id, label: libraryNames.get(id) || "外部知识库", count, external: true});
+    const library = libraryByProject.get(id);
+    const mode = library?.binding_mode || "external";
+    sources.push({id, label: `${library?.name || "绑定知识库"}（${bindingModeLabel(mode)}）`, count, external: mode === "external"});
   }
   return sources;
 }
@@ -227,7 +241,7 @@ export function renderKnowledgeDocumentWorkspace(entries: Knowledge[], empty: st
   const children = isHome ? homeChildren : selected ? visibleChildren(selected.id) : [];
   const title = isHome ? homeTitle : selected ? titleFor(selected) : "\u6587\u6863";
   const managedGlobalCategory = Boolean(selected && managedGlobalKnowledgeIDs.has(selected.id));
-  const canEditSelected = !readOnly && !selected?.bound_project_id && !managedGlobalCategory;
+  const canEditSelected = !readOnly && (!selected?.bound_project_id || selected.binding_mode === "project") && !managedGlobalCategory;
   const bodySource = isHome ? knowledgeHomeBody(newKind, selected?.body) : String(selected?.body || empty);
   const body = renderMarkdown(bodySource);
   const documentLinks = children.length ? `<h2>\u6587\u6863\u94fe\u63a5</h2><ul class="knowledge-index-links">${children.map(item => `<li><button type="button" class="knowledge-index-link" data-knowledge-open="${escapeHTML(item.id)}">${escapeHTML(titleFor(item))}</button>${sourceLabelFor ? `<small class="knowledge-source-badge">${escapeHTML(sourceLabelFor(item))}</small>` : ""}<span>\uff1a${escapeHTML(knowledgeIndexSummary(item))}</span></li>`).join("")}</ul>` : "";
@@ -287,7 +301,7 @@ function renderKnowledgeLibraries(context: KnowledgeWorkspaceContext): string {
     <p>${escapeHTML(library.description || library.source_identity || "\u5bfc\u5165\u7684\u9879\u76ee\u77e5\u8bc6\u5e93")}</p>
     <footer><button type="button" data-knowledge-library-open="${escapeHTML(library.id)}">\u67e5\u770b\u77e5\u8bc6\u5e93</button>${library.bound_project_id
       ? `<span>\u5df2\u7ed1\u5b9a\uff1a${escapeHTML(projectName.get(library.bound_project_id) || library.bound_project_id)}</span><button type="button" data-knowledge-library-unbind="${escapeHTML(library.id)}">\u89e3\u7ed1</button>`
-      : `<label><span>\u7ed1\u5b9a\u5230</span><select data-knowledge-library-target="${escapeHTML(library.id)}"><option value="">\u8bf7\u9009\u62e9\u9879\u76ee</option>${options}</select></label><button class="primary" type="button" data-knowledge-library-bind="${escapeHTML(library.id)}">\u7ed1\u5b9a</button>`}<button class="danger" type="button" data-knowledge-library-delete="${escapeHTML(library.id)}">\u5220\u9664\u77e5\u8bc6\u5e93</button>
+      : `<label><span>\u7ed1\u5b9a\u5230</span><select data-knowledge-library-target="${escapeHTML(library.id)}"><option value="">\u8bf7\u9009\u62e9\u9879\u76ee</option>${options}</select></label><label><span>\u7ed1\u5b9a\u7c7b\u578b</span><select data-knowledge-library-mode="${escapeHTML(library.id)}"><option value="project">\u9879\u76ee\u534f\u4f5c</option><option value="external" selected>\u5916\u90e8\u5f15\u7528</option></select></label><button class="primary" type="button" data-knowledge-library-bind="${escapeHTML(library.id)}">\u7ed1\u5b9a</button>`}<button class="danger" type="button" data-knowledge-library-delete="${escapeHTML(library.id)}">\u5220\u9664\u77e5\u8bc6\u5e93</button>
     </footer></article>`).join("");
   return `<div class="knowledge-section-head"><div><h2>\u5f85\u7ed1\u5b9a\u9879\u76ee\u77e5\u8bc6\u5e93</h2><p>\u5148\u5bfc\u5165\u548c\u9605\u8bfb\uff0c\u521b\u5efa\u6b63\u5f0f Project \u540e\u518d\u7ed1\u5b9a\u3002\u89e3\u7ed1\u548c\u5220\u9664 Project \u90fd\u4e0d\u4f1a\u5220\u9664\u77e5\u8bc6\u3002</p></div></div><div class="knowledge-library-grid">${cards || renderEmpty("\u6ca1\u6709\u5f85\u7ed1\u5b9a\u7684\u9879\u76ee\u77e5\u8bc6\u5e93\u3002")}</div>`;
 }
@@ -393,7 +407,7 @@ function renderSettings(project: Project, projectWorkspaces: Workspace[], contex
     <div class="knowledge-section-head"><div><h2>\u77e5\u8bc6\u5e93\u8bbe\u7f6e</h2><p>\u77e5\u8bc6\u5e93\u5f52\u5c5e\u4e8e\u9879\u76ee\uff0c\u5de5\u4f5c\u533a\u7528\u4e8e\u9009\u62e9\u5b9e\u9645\u6267\u884c\u4f4d\u7f6e\u3002</p></div></div>
     <section class="panel knowledge-setting-card"><div><strong>\u4efb\u52a1\u9ed8\u8ba4\u4f7f\u7528\u77e5\u8bc6\u5e93</strong><p>\u65b0\u4efb\u52a1\u53ef\u4ee5\u7ee7\u627f\u9879\u76ee\u8bbe\u7f6e\uff0c\u4e5f\u53ef\u5355\u72ec\u5f00\u542f\u6216\u5173\u95ed\u3002</p></div><button type="button" class="${project.knowledge_policy === "disabled" ? "" : "primary"}" data-project-kb-toggle>${project.knowledge_policy === "disabled" ? "\u5df2\u5173\u95ed" : "\u5df2\u5f00\u542f"}</button></section>
     <section class="panel spaced knowledge-source-settings"><div class="panel-head"><div><strong>\u9879\u76ee\u81ea\u6709\u77e5\u8bc6</strong><small>\u76f4\u63a5\u5f52\u5c5e\u4e8e\u5f53\u524d\u9879\u76ee</small></div><span>${directKnowledge} \u7bc7</span></div><div class="product-line-list">${ownedKnowledge || renderEmpty("\u5f53\u524d\u9879\u76ee\u8fd8\u6ca1\u6709\u81ea\u6709\u77e5\u8bc6\u3002")}</div></section>
-    <section class="panel spaced knowledge-source-settings"><div class="panel-head"><div><strong>\u5916\u90e8\u7ed1\u5b9a\u77e5\u8bc6\u5e93</strong><small>\u4ece\u5f85\u7ed1\u5b9a\u77e5\u8bc6\u5e93\u63a5\u5165\uff0c\u4e0e\u81ea\u6709\u77e5\u8bc6\u5408\u5e76\u5c55\u793a</small></div><span>${boundLibraries.length}</span></div><div class="product-line-list">${boundLibraries.map(item => `<article><div>${icon("knowledge")}<span><strong>${escapeHTML(item.name)}</strong><small>${item.knowledge_count} \u7bc7 \u00b7 ${item.skill_count} Skills</small></span></div><div class="actions"><button type="button" data-knowledge-library-unbind="${escapeHTML(item.id)}">\u89e3\u7ed1</button><button class="danger" type="button" data-knowledge-library-delete="${escapeHTML(item.id)}">\u5220\u9664\u77e5\u8bc6\u5e93</button></div></article>`).join("") || renderEmpty("\u5f53\u524d\u9879\u76ee\u672a\u7ed1\u5b9a\u5916\u90e8\u77e5\u8bc6\u5e93\u3002")}</div></section>
+    <section class="panel spaced knowledge-source-settings"><div class="panel-head"><div><strong>\u7ed1\u5b9a\u77e5\u8bc6\u5e93</strong><small>\u9879\u76ee\u534f\u4f5c\u53ef\u63d0\u4ea4\u56de\u6e90\u4fee\u8ba2\uff1b\u5916\u90e8\u5f15\u7528\u4ec5\u8bfb</small></div><span>${boundLibraries.length}</span></div><div class="product-line-list">${boundLibraries.map(item => `<article><div>${icon("knowledge")}<span><strong>${escapeHTML(item.name)}</strong><small>${item.knowledge_count} \u7bc7 \u00b7 ${item.skill_count} Skills \u00b7 ${bindingModeLabel(item.binding_mode)}</small></span></div><div class="actions"><select aria-label="\u7ed1\u5b9a\u7c7b\u578b" data-knowledge-library-mode="${escapeHTML(item.id)}"><option value="project" ${item.binding_mode === "project" ? "selected" : ""}>\u9879\u76ee\u534f\u4f5c</option><option value="external" ${item.binding_mode !== "project" ? "selected" : ""}>\u5916\u90e8\u5f15\u7528</option></select><button type="button" data-knowledge-library-mode-save="${escapeHTML(item.id)}">\u4fdd\u5b58\u7c7b\u578b</button><button type="button" data-knowledge-library-unbind="${escapeHTML(item.id)}">\u89e3\u7ed1</button><button class="danger" type="button" data-knowledge-library-delete="${escapeHTML(item.id)}">\u5220\u9664\u77e5\u8bc6\u5e93</button></div></article>`).join("") || renderEmpty("\u5f53\u524d\u9879\u76ee\u672a\u7ed1\u5b9a\u77e5\u8bc6\u5e93\u3002")}</div></section>
     <section class="panel spaced"><div class="panel-head"><strong>Product Lines</strong><button type="button" data-product-line-new>${icon("plus")}\u65b0\u5efa</button></div><div class="product-line-list">${productLines.map(line => `<article><div>${icon("branch")}<span><strong>${escapeHTML(line.name)}</strong><small>${escapeHTML(line.branch_pattern || "*")} ${line.default ? "\u00b7 default" : ""}</small></span></div><button type="button" class="icon-button" data-product-line-delete="${line.id}">${icon("close")}</button></article>`).join("") || renderEmpty("\u672a\u914d\u7f6e Product Line\uff0c\u9879\u76ee\u77e5\u8bc6\u5c06\u4f5c\u4e3a\u901a\u7528\u6761\u76ee\u3002")}</div></section>
     ${renderBindings(projectWorkspaces)}`;
 }
@@ -479,17 +493,35 @@ function ensureCatalog(context: KnowledgeWorkspaceContext, projectID: string): v
   });
 }
 
-async function mutate(context: KnowledgeWorkspaceContext, action: () => Promise<unknown>, message: string): Promise<void> {
+async function mutate(context: KnowledgeWorkspaceContext, action: () => Promise<unknown>, message: string, pendingTarget?: HTMLElement | null, pendingLabel = "处理中"): Promise<void> {
+  const button = pendingTarget instanceof HTMLFormElement
+    ? pendingTarget.querySelector<HTMLButtonElement>('button[type="submit"]')
+    : pendingTarget instanceof HTMLButtonElement ? pendingTarget : null;
+  const dialog = pendingTarget?.closest("dialog") as HTMLDialogElement | null;
+  const original = button?.innerHTML || "";
+  const wasDisabled = button?.disabled || false;
+  if (button) {
+    button.disabled = true;
+    button.innerHTML = `${icon("spinner", true)}<span>${pendingLabel}</span>`;
+  }
+  pendingTarget?.setAttribute("aria-busy", "true");
   try {
     await action();
-    catalogProjectID = "";
-    await context.refreshData();
-    await loadCatalog(selectedProjectID);
+    dialog?.close();
     context.setMessage("notice", message);
+    context.render();
+    catalogProjectID = "";
+    await Promise.all([context.refreshData(), loadCatalog(selectedProjectID)]);
     context.render();
   } catch (error) {
     context.setMessage("error", error instanceof Error ? error.message : String(error));
     context.render();
+  } finally {
+    pendingTarget?.removeAttribute("aria-busy");
+    if (button?.isConnected) {
+      button.disabled = wasDisabled;
+      button.innerHTML = original;
+    }
   }
 }
 
@@ -645,9 +677,14 @@ export function bindKnowledgeWorkspace(context: KnowledgeWorkspaceContext): void
     catalogProjectID = "";
     context.render();
   }));
-  document.querySelectorAll<HTMLElement>("[data-knowledge-open]").forEach(button => button.addEventListener("click", () => {
+  document.querySelectorAll<HTMLElement>("[data-knowledge-open]").forEach(button => button.addEventListener("click", async () => {
     selectedKnowledgeID = button.dataset.knowledgeOpen || "";
     knowledgeReaderOpen = true;
+    try {
+      await ensureKnowledgeDetail(context, selectedKnowledgeID);
+    } catch (error) {
+      context.setMessage("error", error instanceof Error ? error.message : String(error));
+    }
     context.render();
   }));
   document.querySelector("[data-knowledge-back]")?.addEventListener("click", () => {
@@ -688,10 +725,17 @@ export function bindKnowledgeWorkspace(context: KnowledgeWorkspaceContext): void
     syncKnowledgeScope(form);
     openDialog("#knowledge-editor-dialog");
   }));
-  document.querySelectorAll<HTMLElement>("[data-knowledge-edit]").forEach(button => button.addEventListener("click", () => {
-    const item = context.knowledge.find(entry => entry.id === button.dataset.knowledgeEdit);
+  document.querySelectorAll<HTMLElement>("[data-knowledge-edit]").forEach(button => button.addEventListener("click", async () => {
+    let item = context.knowledge.find(entry => entry.id === button.dataset.knowledgeEdit);
     const form = document.querySelector<HTMLFormElement>("#knowledge-editor-form");
     if (!item || !form) return;
+    try {
+      item = await ensureKnowledgeDetail(context, item.id);
+    } catch (error) {
+      context.setMessage("error", error instanceof Error ? error.message : String(error));
+      return;
+    }
+    if (!item) return;
     form.reset();
     const scopeSelect = form.elements.namedItem("scope") as HTMLSelectElement | null;
     const parentSelect = form.elements.namedItem("parent_id") as HTMLSelectElement | null;
@@ -737,11 +781,11 @@ export function bindKnowledgeWorkspace(context: KnowledgeWorkspaceContext): void
       payload.product_line_id = "";
       payload.branch_scope = "";
     }
-    void mutate(context, () => id ? api.updateKnowledge(id, payload) : api.createKnowledge(payload), id ? "\u6587\u6863\u5df2\u66f4\u65b0" : "\u6587\u6863\u5df2\u521b\u5efa");
+    void mutate(context, () => id ? api.updateKnowledge(id, payload) : api.createKnowledge(payload), id ? "\u6587\u6863\u5df2\u66f4\u65b0" : "\u6587\u6863\u5df2\u521b\u5efa", event.currentTarget, "\u4fdd\u5b58\u4e2d");
   });
   document.querySelectorAll<HTMLElement>("[data-knowledge-delete]").forEach(button => button.addEventListener("click", () => {
     if (!window.confirm("\u786e\u5b9a\u5220\u9664\u8be5\u6587\u6863\uff1f")) return;
-    void mutate(context, () => api.deleteKnowledge(button.dataset.knowledgeDelete || ""), "\u6587\u6863\u5df2\u5220\u9664");
+    void mutate(context, () => api.deleteKnowledge(button.dataset.knowledgeDelete || ""), "\u6587\u6863\u5df2\u5220\u9664", button, "\u5220\u9664\u4e2d");
   }));
   document.querySelectorAll<HTMLElement>("[data-knowledge-verify]").forEach(button => button.addEventListener("click", () => void mutate(context, () => api.verifyKnowledge(button.dataset.knowledgeVerify || ""), "\u5185\u5bb9\u5df2\u786e\u8ba4")));
   document.querySelectorAll<HTMLElement>("[data-knowledge-feedback]").forEach(button => button.addEventListener("click", () => void mutate(context, () => api.feedbackKnowledge(button.dataset.knowledgeId || "", button.dataset.knowledgeFeedback as "helped" | "stale" | "wrong"), "\u53cd\u9988\u5df2\u8bb0\u5f55")));
@@ -772,7 +816,7 @@ export function bindKnowledgeWorkspace(context: KnowledgeWorkspaceContext): void
     delete payload.id;
     payload.enabled = form.get("enabled") === "on";
     if (payload.scope === "global") payload.project_id = "";
-    void mutate(context, () => id ? api.updateSkill(id, payload) : api.createSkill(payload), id ? "Skill \u5df2\u66f4\u65b0" : "Skill \u5df2\u521b\u5efa");
+    void mutate(context, () => id ? api.updateSkill(id, payload) : api.createSkill(payload), id ? "Skill \u5df2\u66f4\u65b0" : "Skill \u5df2\u521b\u5efa", event.currentTarget, "\u4fdd\u5b58\u4e2d");
   });
   document.querySelectorAll<HTMLInputElement>("[data-skill-toggle]").forEach(input => input.addEventListener("change", () => {
     const item = skills.find(skill => skill.id === input.dataset.skillToggle);
@@ -786,15 +830,25 @@ export function bindKnowledgeWorkspace(context: KnowledgeWorkspaceContext): void
 
   document.querySelectorAll<HTMLElement>("[data-knowledge-library-bind]").forEach(button => button.addEventListener("click", () => {
     const id = button.dataset.knowledgeLibraryBind || "";
-    const select = document.querySelector<HTMLSelectElement>(`[data-knowledge-library-target="${CSS.escape(id)}"]`);
-    const projectID = select?.value || "";
+	const select = document.querySelector<HTMLSelectElement>(`[data-knowledge-library-target="${CSS.escape(id)}"]`);
+	const modeSelect = document.querySelector<HTMLSelectElement>(`[data-knowledge-library-mode="${CSS.escape(id)}"]`);
+	const projectID = select?.value || "";
     if (!projectID) {
       context.setMessage("error", "\u8bf7\u5148\u9009\u62e9\u76ee\u6807\u9879\u76ee");
       context.render();
       return;
     }
-    void mutate(context, () => api.bindKnowledgeLibrary(id, projectID), "\u9879\u76ee\u77e5\u8bc6\u5e93\u5df2\u7ed1\u5b9a");
+	const bindingMode = modeSelect?.value === "project" ? "project" : "external";
+	void mutate(context, () => api.bindKnowledgeLibrary(id, projectID, bindingMode), "\u77e5\u8bc6\u5e93\u5df2\u7ed1\u5b9a", button, "\u7ed1\u5b9a\u4e2d");
   }));
+	document.querySelectorAll<HTMLElement>("[data-knowledge-library-mode-save]").forEach(button => button.addEventListener("click", () => {
+		const id = button.dataset.knowledgeLibraryModeSave || "";
+		const library = context.libraries.find(item => item.id === id);
+		const select = document.querySelector<HTMLSelectElement>(`[data-knowledge-library-mode="${CSS.escape(id)}"]`);
+		if (!library?.bound_project_id || !select) return;
+		const bindingMode = select.value === "project" ? "project" : "external";
+		void mutate(context, () => api.bindKnowledgeLibrary(id, library.bound_project_id || "", bindingMode), "\u7ed1\u5b9a\u7c7b\u578b\u5df2\u66f4\u65b0", button, "\u4fdd\u5b58\u4e2d");
+	}));
 	document.querySelectorAll<HTMLElement>("[data-knowledge-library-open]").forEach(button => button.addEventListener("click", () => {
 		selectedLibraryID = button.dataset.knowledgeLibraryOpen || "";
 		selectedKnowledgeID = "";

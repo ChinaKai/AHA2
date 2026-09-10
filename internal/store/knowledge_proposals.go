@@ -210,7 +210,11 @@ func (s *Store) ListKnowledgeProposals(ctx context.Context, scope, projectID str
 	}
 	filtered := result[:0]
 	for _, item := range result {
-		item.Proposed.BoundProjectID = bindings[item.Proposed.ProjectID]
+		if binding, ok := bindings[item.Proposed.ProjectID]; ok {
+			item.Proposed.BoundProjectID = binding.ProjectID
+			item.Proposed.BindingMode = binding.BindingMode
+			item.Proposed.CanProposeRevision = binding.BindingMode == "project"
+		}
 		if (scope != "" && item.Proposed.Scope != scope) || (projectID != "" && item.Proposed.ProjectID != projectID && item.Proposed.BoundProjectID != projectID) {
 			continue
 		}

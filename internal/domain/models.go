@@ -64,6 +64,9 @@ type Project struct {
 	DefaultBranch      string    `json:"default_branch,omitempty"`
 	KnowledgePolicy    string    `json:"knowledge_policy"`
 	KnowledgeRevision  int       `json:"knowledge_revision"`
+	ChannelInstanceID  string    `json:"channel_instance_id,omitempty"`
+	ChannelRetired     bool      `json:"channel_retired,omitempty"`
+	ReadOnlyReason     string    `json:"read_only_reason,omitempty"`
 	CreatedAt          time.Time `json:"created_at"`
 	UpdatedAt          time.Time `json:"updated_at"`
 }
@@ -75,6 +78,7 @@ type KnowledgeLibrary struct {
 	Description        string    `json:"description"`
 	SourceIdentity     string    `json:"source_identity,omitempty"`
 	BoundProjectID     string    `json:"bound_project_id,omitempty"`
+	BindingMode        string    `json:"binding_mode,omitempty"`
 	KnowledgeCount     int       `json:"knowledge_count"`
 	SkillCount         int       `json:"skill_count"`
 	CreatedAt          time.Time `json:"created_at"`
@@ -82,10 +86,11 @@ type KnowledgeLibrary struct {
 }
 
 type KnowledgeLibraryBinding struct {
-	LibraryID string    `json:"library_id"`
-	ProjectID string    `json:"project_id"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	LibraryID   string    `json:"library_id"`
+	ProjectID   string    `json:"project_id"`
+	BindingMode string    `json:"binding_mode"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 type KnowledgeLibraryDeletion struct {
@@ -128,6 +133,9 @@ type Workspace struct {
 	UpdatedAt             time.Time      `json:"updated_at"`
 	OwnerDeviceID         string         `json:"owner_device_id,omitempty"`
 	ReadOnly              bool           `json:"read_only,omitempty"`
+	ReadOnlyReason        string         `json:"read_only_reason,omitempty"`
+	ChannelInstanceID     string         `json:"channel_instance_id,omitempty"`
+	ChannelRetired        bool           `json:"channel_retired,omitempty"`
 	SourceWorkspaceID     string         `json:"-"`
 	AgentAPIMode          string         `json:"agent_api_mode"`
 	AgentAPIURL           string         `json:"agent_api_url,omitempty"`
@@ -291,6 +299,9 @@ type Task struct {
 	CompletedAt             time.Time       `json:"completed_at,omitempty"`
 	OwnerDeviceID           string          `json:"owner_device_id,omitempty"`
 	ReadOnly                bool            `json:"read_only,omitempty"`
+	ReadOnlyReason          string          `json:"read_only_reason,omitempty"`
+	ChannelInstanceID       string          `json:"channel_instance_id,omitempty"`
+	ChannelRetired          bool            `json:"channel_retired,omitempty"`
 }
 
 type Turn struct {
@@ -401,33 +412,35 @@ type TaskMemory struct {
 }
 
 type KnowledgeEntry struct {
-	ID             string          `json:"id"`
-	Scope          string          `json:"scope"`
-	ProjectID      string          `json:"project_id,omitempty"`
-	BoundProjectID string          `json:"bound_project_id,omitempty"`
-	ParentID       string          `json:"parent_id,omitempty"`
-	Slug           string          `json:"slug,omitempty"`
-	SortOrder      int             `json:"sort_order"`
-	IsIndex        bool            `json:"is_index"`
-	Type           string          `json:"type"`
-	Title          string          `json:"title"`
-	Body           string          `json:"body"`
-	Status         KnowledgeStatus `json:"status"`
-	BranchScope    string          `json:"branch_scope,omitempty"`
-	ProductLineID  string          `json:"product_line_id,omitempty"`
-	EvidenceJSON   string          `json:"-"`
-	Confidence     float64         `json:"confidence"`
-	Revision       int             `json:"revision"`
-	ContentHash    string          `json:"content_hash"`
-	VerifiedCommit string          `json:"verified_commit,omitempty"`
-	HelpedCount    int             `json:"helped_count"`
-	StaleCount     int             `json:"stale_count"`
-	FeedbackState  string          `json:"feedback_state,omitempty"`
-	SourceTaskID   string          `json:"source_task_id,omitempty"`
-	SourceTurnID   string          `json:"source_turn_id,omitempty"`
-	CreatedAt      time.Time       `json:"created_at"`
-	UpdatedAt      time.Time       `json:"updated_at"`
-	LastVerifiedAt time.Time       `json:"last_verified_at,omitempty"`
+	ID                 string          `json:"id"`
+	Scope              string          `json:"scope"`
+	ProjectID          string          `json:"project_id,omitempty"`
+	BoundProjectID     string          `json:"bound_project_id,omitempty"`
+	BindingMode        string          `json:"binding_mode,omitempty"`
+	CanProposeRevision bool            `json:"can_propose_revision"`
+	ParentID           string          `json:"parent_id,omitempty"`
+	Slug               string          `json:"slug,omitempty"`
+	SortOrder          int             `json:"sort_order"`
+	IsIndex            bool            `json:"is_index"`
+	Type               string          `json:"type"`
+	Title              string          `json:"title"`
+	Body               string          `json:"body"`
+	Status             KnowledgeStatus `json:"status"`
+	BranchScope        string          `json:"branch_scope,omitempty"`
+	ProductLineID      string          `json:"product_line_id,omitempty"`
+	EvidenceJSON       string          `json:"-"`
+	Confidence         float64         `json:"confidence"`
+	Revision           int             `json:"revision"`
+	ContentHash        string          `json:"content_hash"`
+	VerifiedCommit     string          `json:"verified_commit,omitempty"`
+	HelpedCount        int             `json:"helped_count"`
+	StaleCount         int             `json:"stale_count"`
+	FeedbackState      string          `json:"feedback_state,omitempty"`
+	SourceTaskID       string          `json:"source_task_id,omitempty"`
+	SourceTurnID       string          `json:"source_turn_id,omitempty"`
+	CreatedAt          time.Time       `json:"created_at"`
+	UpdatedAt          time.Time       `json:"updated_at"`
+	LastVerifiedAt     time.Time       `json:"last_verified_at,omitempty"`
 }
 
 type KnowledgeProposal struct {
@@ -456,6 +469,8 @@ type Skill struct {
 	Scope          string      `json:"scope"`
 	ProjectID      string      `json:"project_id,omitempty"`
 	BoundProjectID string      `json:"bound_project_id,omitempty"`
+	BindingMode    string      `json:"binding_mode,omitempty"`
+	CanUpdate      bool        `json:"can_update"`
 	Name           string      `json:"name"`
 	Description    string      `json:"description"`
 	Instructions   string      `json:"instructions"`

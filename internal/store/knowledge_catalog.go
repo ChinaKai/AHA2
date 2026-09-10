@@ -158,7 +158,11 @@ func (s *Store) ListSkills(ctx context.Context, scope, projectID string, enabled
 		return nil, err
 	}
 	for index := range result {
-		result[index].BoundProjectID = bindings[result[index].ProjectID]
+		if binding, ok := bindings[result[index].ProjectID]; ok {
+			result[index].BoundProjectID = binding.ProjectID
+			result[index].BindingMode = binding.BindingMode
+			result[index].CanUpdate = binding.BindingMode == "project"
+		}
 	}
 	return result, nil
 }
@@ -183,7 +187,11 @@ func (s *Store) Skill(ctx context.Context, id string) (domain.Skill, error) {
 	item.CreatedAt, item.UpdatedAt = parseTime(createdAt), parseTime(updatedAt)
 	if err == nil {
 		if bindings, bindingErr := s.knowledgeLibraryBindings(ctx); bindingErr == nil {
-			item.BoundProjectID = bindings[item.ProjectID]
+			if binding, ok := bindings[item.ProjectID]; ok {
+				item.BoundProjectID = binding.ProjectID
+				item.BindingMode = binding.BindingMode
+				item.CanUpdate = binding.BindingMode == "project"
+			}
 		}
 		err = s.hydrateSkillPackage(&item)
 	}

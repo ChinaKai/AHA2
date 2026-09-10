@@ -369,7 +369,15 @@ func validateKnowledgeWith(ctx context.Context, queryer knowledgeQueryer, item d
 		return ErrKnowledgeInvalidScope
 	}
 	if item.Slug != "" && !ValidKnowledgeSlug(item.Slug) {
-		return ErrKnowledgeInvalidSlug
+		// Older imports could persist slugs before the current URL-safe format
+		// was enforced. Keep those entries revisable as long as a revision does
+		// not change the legacy slug; new entries and slug changes still use the
+		// strict format.
+		var existingSlug string
+		err := queryer.QueryRowContext(ctx, `SELECT slug FROM knowledge_entries WHERE id=?`, item.ID).Scan(&existingSlug)
+		if err != nil || existingSlug != item.Slug {
+			return ErrKnowledgeInvalidSlug
+		}
 	}
 	if item.SortOrder < 0 {
 		return fmt.Errorf("knowledge sort order must be non-negative")
@@ -472,6 +480,68 @@ func (s *Store) ListKnowledge(ctx context.Context, scope, projectID string, stat
 	return s.listKnowledge(ctx, scope, projectID, "", false, statuses)
 }
 
+func (s *Store) ListKnowledgePage(ctx context.Context, scope, projectID string, statuses []domain.KnowledgeStatus, cursorAt time.Time, cursorID string, limit int) ([]domain.KnowledgeEntry, bool, error) {
+	query := `SELECT ` + knowledgeColumns + ` FROM knowledge_entries WHERE 1=1`
+	args := []any{}
+	if scope != "" {
+		query += ` AND scope=?`
+		args = append(args, scope)
+	}
+	if projectID != "" {
+		query += ` AND project_id=?`
+		args = append(args, projectID)
+	}
+	if len(statuses) > 0 {
+		query += ` AND status IN (`
+		for index, status := range statuses {
+			if index > 0 {
+				query += `,`
+			}
+			query += `?`
+			args = append(args, status)
+		}
+		query += `)`
+	}
+	if !cursorAt.IsZero() && cursorID != "" {
+		query += ` AND (updated_at<? OR (updated_at=? AND id<?))`
+		cursor := timeString(cursorAt)
+		args = append(args, cursor, cursor, cursorID)
+	}
+	query += ` ORDER BY updated_at DESC,id DESC LIMIT ?`
+	args = append(args, limit+1)
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, false, err
+	}
+	defer rows.Close()
+	items := make([]domain.KnowledgeEntry, 0, limit+1)
+	for rows.Next() {
+		item, err := scanKnowledge(rows)
+		if err != nil {
+			return nil, false, err
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, err
+	}
+	hasMore := len(items) > limit
+	if hasMore {
+		items = items[:limit]
+	}
+	bindings, err := s.knowledgeLibraryBindings(ctx)
+	if err != nil {
+		return nil, false, err
+	}
+	for index := range items {
+		if binding, ok := bindings[items[index].ProjectID]; ok {
+			items[index].BoundProjectID = binding.ProjectID
+			items[index].BindingMode = binding.BindingMode
+		}
+	}
+	return items, hasMore, nil
+}
+
 func (s *Store) ListApplicableKnowledge(ctx context.Context, projectID, productLineID string, statuses []domain.KnowledgeStatus) ([]domain.KnowledgeEntry, error) {
 	items, err := s.listKnowledge(ctx, "project", "", "", false, statuses)
 	if err != nil {
@@ -485,6 +555,7 @@ func (s *Store) ListApplicableKnowledge(ctx context.Context, projectID, productL
 		if item.ProductLineID != "" && item.ProductLineID != productLineID {
 			continue
 		}
+		item.CanProposeRevision = item.ProjectID == projectID || item.BoundProjectID == projectID && item.BindingMode == "project"
 		result = append(result, item)
 	}
 	return namespaceBoundKnowledge(result, projectID), nil
@@ -530,7 +601,7 @@ func (s *Store) listKnowledge(ctx context.Context, scope, projectID, productLine
 		}
 		query += `)`
 	}
-	query += ` ORDER BY is_index DESC,parent_id,sort_order,slug,type,title,updated_at DESC`
+	query += ` ORDER BY is_index DESC,parent_id,sort_order,slug,type,title,updated_at DESC,id DESC`
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
@@ -555,7 +626,10 @@ func (s *Store) listKnowledge(ctx context.Context, scope, projectID, productLine
 		return nil, err
 	}
 	for index := range result {
-		result[index].BoundProjectID = bindings[result[index].ProjectID]
+		if binding, ok := bindings[result[index].ProjectID]; ok {
+			result[index].BoundProjectID = binding.ProjectID
+			result[index].BindingMode = binding.BindingMode
+		}
 	}
 	return result, nil
 }

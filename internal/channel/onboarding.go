@@ -20,6 +20,9 @@ func (s *Service) StartOnboarding(ctx context.Context, ownerID, ownerSessionID, 
 		}
 		return domain.ChannelOnboardingSession{}, err
 	}
+	if instance.Retired {
+		return domain.ChannelOnboardingSession{}, fmt.Errorf("channel instance is archived")
+	}
 	plugin, err := s.store.ChannelPlugin(ctx, instance.PluginID)
 	if err != nil || !plugin.Available {
 		return domain.ChannelOnboardingSession{}, fmt.Errorf("one_click_registration_unavailable")

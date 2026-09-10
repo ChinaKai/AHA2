@@ -151,6 +151,14 @@ func TestAgentStateKnowledgeAndSkillAPIs(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("turn did not start")
 	}
+	activeTask, err := database.Task(ctx, task.ID)
+	if err != nil || activeTask.CurrentGoal != "exercise Agent API" {
+		t.Fatalf("latest owner message did not become current goal: task=%#v err=%v", activeTask, err)
+	}
+	activeMemory, err := database.TaskMemory(ctx, task.ID)
+	if err != nil || activeMemory.CurrentGoal != activeTask.CurrentGoal {
+		t.Fatalf("task memory goal diverged: memory=%#v err=%v", activeMemory, err)
+	}
 	capabilities := agentapi.NewCapabilities()
 	token, err := capabilities.Issue(task.ID, "main", turn.ID, time.Hour)
 	if err != nil {
@@ -228,13 +236,14 @@ func TestAgentStateKnowledgeAndSkillAPIs(t *testing.T) {
 		t.Fatalf("alternate snapshot=%#v err=%v", alternateSnapshot, err)
 	}
 
-	response = agentRequest(t, server.URL+"/api/v1/agent/turn/memory", http.MethodPatch, token, map[string]any{"append": map[string]any{"facts": []string{"API fact"}}})
+	response = agentRequest(t, server.URL+"/api/v1/agent/turn/memory", http.MethodPatch, token, map[string]any{"append": map[string]any{"current_goal": "Refined active objective", "facts": []string{"API fact"}}})
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("memory status=%d", response.StatusCode)
 	}
 	response.Body.Close()
 	memory, _ := database.TaskMemory(ctx, task.ID)
-	if len(memory.Facts) != 1 || memory.Facts[0] != "API fact" {
+	updatedGoalTask, _ := database.Task(ctx, task.ID)
+	if len(memory.Facts) != 1 || memory.Facts[0] != "API fact" || memory.CurrentGoal != "Refined active objective" || updatedGoalTask.CurrentGoal != memory.CurrentGoal {
 		t.Fatalf("memory=%#v", memory)
 	}
 	response = agentRequest(t, server.URL+"/api/v1/agent/turn/memory", http.MethodPatch, token, map[string]any{"replace": map[string]any{
@@ -248,6 +257,83 @@ func TestAgentStateKnowledgeAndSkillAPIs(t *testing.T) {
 	memory, _ = database.TaskMemory(ctx, task.ID)
 	if len(memory.Facts) != 1 || memory.Facts[0] != "Compacted fact" || len(memory.Decisions) != 1 || len(memory.NextActions) != 1 {
 		t.Fatalf("replaced memory=%#v", memory)
+	}
+
+	projectBindingContainer := domain.Project{ID: "project-agent-bound-write", Name: "Writable library", ProjectType: "knowledge", KnowledgePolicy: "enabled", CreatedAt: now, UpdatedAt: now}
+	externalBindingContainer := domain.Project{ID: "project-agent-bound-read", Name: "Read-only library", ProjectType: "knowledge", KnowledgePolicy: "enabled", CreatedAt: now, UpdatedAt: now}
+	for _, container := range []domain.Project{projectBindingContainer, externalBindingContainer} {
+		if err := database.CreateProject(ctx, container); err != nil {
+			t.Fatal(err)
+		}
+	}
+	projectLibrary, _ := database.KnowledgeLibrary(ctx, "library_"+projectBindingContainer.ID)
+	externalLibrary, _ := database.KnowledgeLibrary(ctx, "library_"+externalBindingContainer.ID)
+	if _, err := database.BindKnowledgeLibrary(ctx, projectLibrary.ID, task.ProjectID, "project", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.BindKnowledgeLibrary(ctx, externalLibrary.ID, task.ProjectID, "external", now); err != nil {
+		t.Fatal(err)
+	}
+	projectLibraryRoot, _ := database.EnsureKnowledgeRoot(ctx, "project", projectBindingContainer.ID)
+	externalLibraryRoot, _ := database.EnsureKnowledgeRoot(ctx, "project", externalBindingContainer.ID)
+	projectBoundEntry := domain.KnowledgeEntry{
+		ID: "knowledge-project-bound-api", Scope: "project", ProjectID: projectBindingContainer.ID, ParentID: projectLibraryRoot.ID, Slug: "project-bound-api",
+		Type: "practice", Title: "Project-bound API knowledge", Body: "Original project-bound body", Status: domain.KnowledgeVerified,
+		Revision: 1, CreatedAt: now, UpdatedAt: now, LastVerifiedAt: now,
+	}
+	externalBoundEntry := domain.KnowledgeEntry{
+		ID: "knowledge-external-bound-api", Scope: "project", ProjectID: externalBindingContainer.ID, ParentID: externalLibraryRoot.ID, Slug: "external-bound-api",
+		Type: "practice", Title: "External-bound API knowledge", Body: "Original external body", Status: domain.KnowledgeVerified,
+		Revision: 1, CreatedAt: now, UpdatedAt: now, LastVerifiedAt: now,
+	}
+	for _, entry := range []domain.KnowledgeEntry{projectBoundEntry, externalBoundEntry} {
+		if err := database.CreateKnowledge(ctx, entry); err != nil {
+			t.Fatal(err)
+		}
+	}
+	response = agentRequest(t, server.URL+"/api/v1/agent/capabilities", http.MethodGet, token, nil)
+	decodeResponse(t, response, &capabilitiesPayload)
+	if response.StatusCode != http.StatusOK || capabilitiesPayload["capabilities"].(map[string]any)["knowledge_contribute_bound"] != true {
+		t.Fatalf("bound knowledge capability status=%d payload=%#v", response.StatusCode, capabilitiesPayload)
+	}
+	response = agentRequest(t, server.URL+"/api/v1/agent/knowledge", http.MethodGet, token, nil)
+	var boundKnowledgePayload map[string]any
+	decodeResponse(t, response, &boundKnowledgePayload)
+	canPropose := map[string]bool{}
+	for _, raw := range boundKnowledgePayload["knowledge"].([]any) {
+		entry := raw.(map[string]any)
+		if id, _ := entry["id"].(string); id == projectBoundEntry.ID || id == externalBoundEntry.ID {
+			canPropose[id], _ = entry["can_propose_revision"].(bool)
+		}
+	}
+	if !canPropose[projectBoundEntry.ID] || canPropose[externalBoundEntry.ID] {
+		t.Fatalf("bound knowledge proposal flags=%#v", canPropose)
+	}
+	if _, err := database.UpdateKnowledgeReviewSettings(ctx, domain.KnowledgeReviewSettings{AutoApprove: true, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	response = agentRequest(t, server.URL+"/api/v1/agent/knowledge/candidates", http.MethodPost, token, map[string]any{"candidates": []map[string]any{{
+		"entry_id": projectBoundEntry.ID, "base_revision": 1, "scope": "project", "type": "practice", "title": projectBoundEntry.Title, "body": "Proposed from the bound project.", "confidence": 0.9,
+	}}})
+	decodeResponse(t, response, &boundKnowledgePayload)
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("project-bound proposal status=%d payload=%#v", response.StatusCode, boundKnowledgePayload)
+	}
+	boundProposal := boundKnowledgePayload["proposals"].([]any)[0].(map[string]any)
+	proposed := boundProposal["proposed"].(map[string]any)
+	if proposed["project_id"] != projectBindingContainer.ID || boundProposal["review_mode"] != "manual" || boundProposal["status"] != "pending" {
+		t.Fatalf("project-bound proposal lost source ownership: %#v", boundProposal)
+	}
+	response = agentRequest(t, server.URL+"/api/v1/agent/knowledge/candidates", http.MethodPost, token, map[string]any{"candidates": []map[string]any{{
+		"entry_id": externalBoundEntry.ID, "base_revision": 1, "scope": "project", "type": "practice", "title": externalBoundEntry.Title, "body": "Must remain read-only.", "confidence": 0.9,
+	}}})
+	var readOnlyPayload map[string]any
+	decodeResponse(t, response, &readOnlyPayload)
+	if response.StatusCode != http.StatusForbidden || readOnlyPayload["error"] != "knowledge_entry_read_only" {
+		t.Fatalf("external-bound proposal status=%d payload=%#v", response.StatusCode, readOnlyPayload)
+	}
+	if _, err := database.UpdateKnowledgeReviewSettings(ctx, domain.KnowledgeReviewSettings{AutoApprove: false, UpdatedAt: now.Add(time.Second)}); err != nil {
+		t.Fatal(err)
 	}
 
 	root, err := database.EnsureKnowledgeRoot(ctx, "project", task.ProjectID)
@@ -312,8 +398,13 @@ func TestAgentStateKnowledgeAndSkillAPIs(t *testing.T) {
 		}
 		pendingVisible = pendingVisible || item["title"] == "API navigation" || item["id"] == existingKnowledge.ID
 	}
-	if response.StatusCode != http.StatusOK || rootCount != 2 || pendingVisible {
+	if response.StatusCode != http.StatusOK || rootCount != 2 || !pendingVisible {
 		t.Fatalf("applicable knowledge roots=%d payload=%#v", rootCount, knowledgePayload)
+	}
+	response = agentRequest(t, server.URL+"/api/v1/agent/knowledge/"+existingKnowledge.ID, http.MethodGet, token, nil)
+	decodeResponse(t, response, &knowledgePayload)
+	if response.StatusCode != http.StatusOK || knowledgePayload["knowledge"].(map[string]any)["status"] != "stale" {
+		t.Fatalf("stale knowledge by id status=%d payload=%#v", response.StatusCode, knowledgePayload)
 	}
 
 	response = agentRequest(t, server.URL+"/api/v1/agent/skills", http.MethodPost, token, map[string]any{

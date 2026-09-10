@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -29,6 +30,12 @@ type Result struct {
 // gateways vary: some want Authorization: Bearer, others want x-api-key.
 // Returns the first non-empty model list plus the auth style that succeeded.
 func DetectModels(baseURL, apiKey, authStyle string, timeout time.Duration) (Result, error) {
+	return DetectModelsContext(context.Background(), baseURL, apiKey, authStyle, timeout)
+}
+
+// DetectModelsContext is DetectModels with cancellation propagated to every
+// gateway catalog request.
+func DetectModelsContext(ctx context.Context, baseURL, apiKey, authStyle string, timeout time.Duration) (Result, error) {
 	base := strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	if base == "" {
 		return Result{}, fmt.Errorf("base_url is required")
@@ -76,7 +83,10 @@ func DetectModels(baseURL, apiKey, authStyle string, timeout time.Duration) (Res
 	var lastError string
 	for _, endpoint := range candidates {
 		for _, set := range authSets {
-			models, err := fetchModels(client, endpoint, set.headers)
+			if err := ctx.Err(); err != nil {
+				return Result{}, err
+			}
+			models, err := fetchModels(ctx, client, endpoint, set.headers)
 			if err != nil {
 				lastError = endpoint + ": " + err.Error()
 				continue
@@ -92,8 +102,8 @@ func DetectModels(baseURL, apiKey, authStyle string, timeout time.Duration) (Res
 	return Result{AuthStyle: "none", Models: []DetectedModel{}}, nil
 }
 
-func fetchModels(client *http.Client, endpoint string, headers map[string]string) ([]DetectedModel, error) {
-	request, err := http.NewRequest(http.MethodGet, endpoint, nil)
+func fetchModels(ctx context.Context, client *http.Client, endpoint string, headers map[string]string) ([]DetectedModel, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -183,6 +193,12 @@ func int64Value(value any) int64 {
 // gateways like DeepSeek/MiniMax/Kimi serve the Anthropic protocol there) and
 // returns that base URL when it is the one that works.
 func ProbeModelCapabilities(baseURL, apiKey, authStyle, modelID string, timeout time.Duration) (map[string]string, string) {
+	return ProbeModelCapabilitiesContext(context.Background(), baseURL, apiKey, authStyle, modelID, timeout)
+}
+
+// ProbeModelCapabilitiesContext is ProbeModelCapabilities with cancellation
+// propagated to every protocol probe request.
+func ProbeModelCapabilitiesContext(ctx context.Context, baseURL, apiKey, authStyle, modelID string, timeout time.Duration) (map[string]string, string) {
 	base := strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	key := strings.TrimSpace(apiKey)
 	if base == "" || modelID == "" || key == "" {
@@ -195,7 +211,10 @@ func ProbeModelCapabilities(baseURL, apiKey, authStyle, modelID string, timeout 
 	client := &http.Client{Timeout: timeout}
 	capabilities := make(map[string]string)
 	for _, wireAPI := range []string{"responses", "chat_completions"} {
-		status, _ := probeWireAPI(client, base, key, normalizedAuth, modelID, wireAPI)
+		if ctx.Err() != nil {
+			return capabilities, ""
+		}
+		status, _ := probeWireAPI(ctx, client, base, key, normalizedAuth, modelID, wireAPI)
 		capabilities[wireAPI] = status
 	}
 	anthropicBase := ""
@@ -204,11 +223,14 @@ func ProbeModelCapabilities(baseURL, apiKey, authStyle, modelID string, timeout 
 		capabilities["anthropic_messages"] = "unavailable"
 		return capabilities, ""
 	}
-	status, _ := probeWireAPI(client, candidates[0], key, normalizedAuth, modelID, "anthropic_messages")
+	status, _ := probeWireAPI(ctx, client, candidates[0], key, normalizedAuth, modelID, "anthropic_messages")
 	capabilities["anthropic_messages"] = status
 	if status == "unsupported" && len(candidates) > 1 {
 		for _, candidate := range candidates[1:] {
-			status, _ = probeWireAPI(client, candidate, key, normalizedAuth, modelID, "anthropic_messages")
+			if ctx.Err() != nil {
+				return capabilities, ""
+			}
+			status, _ = probeWireAPI(ctx, client, candidate, key, normalizedAuth, modelID, "anthropic_messages")
 			if status == "supported" {
 				capabilities["anthropic_messages"] = "supported"
 				anthropicBase = candidate
@@ -246,7 +268,7 @@ func anthropicBaseCandidates(baseURL string) []string {
 // /v1-prefixed path for bare-host bases). Auth is narrowed to the confirmed
 // style when known so rate-limited gateways are not flooded with redundant
 // requests. A definitive result (supported or rate_limited) stops the probe.
-func probeWireAPI(client *http.Client, base, apiKey, authStyle, modelID, wireAPI string) (string, int) {
+func probeWireAPI(ctx context.Context, client *http.Client, base, apiKey, authStyle, modelID, wireAPI string) (string, int) {
 	rel := ""
 	var body []byte
 	switch wireAPI {
@@ -287,6 +309,9 @@ func probeWireAPI(client *http.Client, base, apiKey, authStyle, modelID, wireAPI
 	bestCode := 0
 	for _, endpoint := range endpoints {
 		for _, auth := range authOrder {
+			if ctx.Err() != nil {
+				return "unavailable", 0
+			}
 			headers := map[string]string{"Content-Type": "application/json"}
 			if wireAPI == "anthropic_messages" {
 				headers["anthropic-version"] = "2023-06-01"
@@ -299,7 +324,7 @@ func probeWireAPI(client *http.Client, base, apiKey, authStyle, modelID, wireAPI
 			default:
 				headers["Authorization"] = "Bearer " + apiKey
 			}
-			status, code := probeOneEndpoint(client, endpoint, headers, body)
+			status, code := probeOneEndpoint(ctx, client, endpoint, headers, body)
 			if status == "supported" || status == "rate_limited" {
 				return status, code
 			}
@@ -312,8 +337,8 @@ func probeWireAPI(client *http.Client, base, apiKey, authStyle, modelID, wireAPI
 	return best, bestCode
 }
 
-func probeOneEndpoint(client *http.Client, endpoint string, headers map[string]string, body []byte) (string, int) {
-	request, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(body))
+func probeOneEndpoint(ctx context.Context, client *http.Client, endpoint string, headers map[string]string, body []byte) (string, int) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return "unavailable", 0
 	}

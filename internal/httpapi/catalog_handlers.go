@@ -14,18 +14,50 @@ import (
 )
 
 func (s *Server) listProjects(writer http.ResponseWriter, request *http.Request) {
-	items, err := s.store.ListProjects(request.Context())
+	options, err := parseListOptions(request)
 	if err != nil {
-		writeError(writer, http.StatusInternalServerError, "list_projects_failed")
+		writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid_list_options", "message": err.Error()})
 		return
 	}
-	visible := items[:0]
-	for _, item := range items {
-		if item.ProjectType != "knowledge" {
-			visible = append(visible, item)
+	var page listPage[domain.Project]
+	if options.Paged {
+		cursorAt, cursorID, cursorErr := listCursorPosition(options, "projects")
+		if cursorErr != nil {
+			writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid_cursor", "message": cursorErr.Error()})
+			return
 		}
+		items, hasMore, listErr := s.store.ListProjectsPage(request.Context(), cursorAt, cursorID, options.Limit)
+		if listErr != nil {
+			writeError(writer, http.StatusInternalServerError, "list_projects_failed")
+			return
+		}
+		page = storeListPage(items, hasMore, "projects", func(item domain.Project) (time.Time, string) { return item.UpdatedAt, item.ID })
+	} else {
+		items, listErr := s.store.ListProjects(request.Context())
+		if listErr != nil {
+			writeError(writer, http.StatusInternalServerError, "list_projects_failed")
+			return
+		}
+		visible := items[:0]
+		for _, item := range items {
+			if item.ProjectType != "knowledge" {
+				visible = append(visible, item)
+			}
+		}
+		page = listPage[domain.Project]{Items: visible}
 	}
-	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "projects": visible})
+	s.decorateChannelProjects(request.Context(), page.Items)
+	response := map[string]any{"ok": true}
+	if options.Summary {
+		response["projects"] = summarizeProjects(page.Items)
+	} else {
+		response["projects"] = page.Items
+	}
+	if options.Paged {
+		response["has_more"] = page.HasMore
+		response["next_cursor"] = page.NextCursor
+	}
+	writeJSON(writer, http.StatusOK, response)
 }
 
 func (s *Server) createProject(writer http.ResponseWriter, request *http.Request) {
@@ -72,6 +104,9 @@ func (s *Server) createProject(writer http.ResponseWriter, request *http.Request
 
 func (s *Server) updateProject(writer http.ResponseWriter, request *http.Request) {
 	id := request.PathValue("id")
+	if s.rejectRetiredChannelProjectWrite(writer, request, id) {
+		return
+	}
 	existing, err := s.store.Project(request.Context(), id)
 	if err != nil {
 		writeError(writer, http.StatusNotFound, "project_not_found")
@@ -130,6 +165,7 @@ func (s *Server) listWorkspaces(writer http.ResponseWriter, request *http.Reques
 		writeError(writer, http.StatusInternalServerError, "list_workspaces_failed")
 		return
 	}
+	s.decorateChannelWorkspaces(request.Context(), items)
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "workspaces": items})
 }
 
@@ -156,6 +192,9 @@ func (s *Server) createWorkspace(writer http.ResponseWriter, request *http.Reque
 	}
 	if _, err := s.store.Project(request.Context(), payload.ProjectID); err != nil {
 		writeError(writer, http.StatusBadRequest, "project_not_found")
+		return
+	}
+	if s.rejectRetiredChannelProjectWrite(writer, request, payload.ProjectID) {
 		return
 	}
 	if payload.SSHPort == 0 {
@@ -221,6 +260,9 @@ func (s *Server) createWorkspace(writer http.ResponseWriter, request *http.Reque
 
 func (s *Server) updateWorkspace(writer http.ResponseWriter, request *http.Request) {
 	id := request.PathValue("id")
+	if s.rejectRetiredChannelWorkspaceWrite(writer, request, id) {
+		return
+	}
 	existing, err := s.store.Workspace(request.Context(), id)
 	if err != nil {
 		writeError(writer, http.StatusNotFound, "workspace_not_found")

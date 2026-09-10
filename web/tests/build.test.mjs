@@ -4,6 +4,61 @@ import {readFile} from "node:fs/promises";
 import {resolve} from "node:path";
 import {pathToFileURL} from "node:url";
 
+test("channel lifecycle renders active and retired actions with guarded purge", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const module = await import(pathToFileURL(resolve(root, "dist", "channels.js")));
+  const context = {models: [], accounts: [], projects: [], workspaces: [], knowledge: [], libraries: []};
+  const instance = {
+    id: "channel-1",
+    plugin_id: "feishu",
+    provider_key: "feishu",
+    owner_id: "owner-1",
+    runtime_device_id: "device-1",
+    name: "团队飞书",
+    status: "ready",
+    effective_availability: "available",
+    revision: 7,
+    credential_configured: true,
+    owner_bound: true,
+    host_project_id: "project-channel-1",
+    host_workspace_id: "workspace-channel-1",
+    created_at: "2026-09-10T00:00:00Z",
+    updated_at: "2026-09-10T00:00:00Z",
+  };
+  const active = module.renderChannels([], [instance], context);
+  assert.match(active, /data-channel-reset-binding="channel-1"/);
+  assert.match(active, /data-channel-archive="channel-1"/);
+  assert.match(active, /扫码更新飞书权限/);
+  assert.match(active, /Runtime、通知与访问范围/);
+
+  const retired = module.renderChannels([], [{...instance, status: "retired"}], context);
+  for (const marker of ["已归档", "data-channel-view", "data-channel-export", "data-channel-purge", "永久删除"]) assert.match(retired, new RegExp(marker));
+  for (const forbidden of ["data-channel-instance-toggle", "data-channel-onboard", "data-channel-settings", "data-channel-credentials", "data-channel-reset-binding", "data-channel-archive"]) assert.doesNotMatch(retired, new RegExp(forbidden));
+  assert.equal(module.channelPurgePreviewMessage({name: "团队飞书", tasks: 2, conversations: 3, messages: 5, attachments: 7}), "将永久删除“团队飞书”及其本地归档：2 个任务、3 个会话、5 条消息、7 个附件。此操作不可恢复，飞书后台应用不会自动删除。");
+
+  const source = await readFile(resolve(root, "src", "channels.ts"), "utf8");
+  assert.ok(source.indexOf("channelInstancePurgePreview(instanceID)") < source.indexOf("window.confirm(channelPurgePreviewMessage(preview))"));
+  assert.ok(source.indexOf("window.confirm(channelPurgePreviewMessage(preview))") < source.indexOf("window.prompt(`请输入实例名"));
+  assert.ok(source.indexOf("window.prompt(`请输入实例名") < source.indexOf("api.purgeChannelInstance(instanceID"));
+});
+
+test("channel lifecycle API and archived projects share the purge path", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const api = await readFile(resolve(root, "src", "api.ts"), "utf8");
+  const main = await readFile(resolve(root, "src", "main.ts"), "utf8");
+  const types = await readFile(resolve(root, "src", "types.ts"), "utf8");
+  for (const route of ["reset-binding", "/archive", "purge-preview", "/purge"]) assert.match(api, new RegExp(route));
+  assert.match(api, /resetChannelBinding[\s\S]*?method: "POST"[\s\S]*?"If-Match"/);
+  assert.match(api, /archiveChannelInstance[\s\S]*?method: "POST"[\s\S]*?"If-Match"/);
+  assert.match(api, /purgeChannelInstance[\s\S]*?"If-Match"[\s\S]*?confirmation_name/);
+  assert.match(types, /channel_instance_id\?: string/);
+  assert.match(types, /channel_retired\?: boolean/);
+  assert.match(types, /"retired"/);
+  assert.match(main, /project\.channel_retired[\s\S]*?purgeArchivedChannelProject/);
+  assert.match(main, /purgeArchivedChannelProject[\s\S]*?purgeRetiredChannelInstance/);
+  assert.match(main, /state\.projects\.filter\(item => !item\.channel_retired\)/);
+});
+
 test("channel reauthorization explains menu preservation and separate creation", async () => {
   const channels = await readFile(resolve(import.meta.dirname, "..", "dist", "channels.js"), "utf8");
   assert.match(channels, /initial.mode === "existing_app"/);
@@ -258,6 +313,12 @@ test("built web contains responsive application", async () => {
   assert.match(hardwarePanel, /hardware-save-top/);
   assert.match(hardwarePanel, /hardware-config-collapse/);
   assert.match(hardwarePanel, /configCollapsed/);
+  assert.match(taskTools, /renderHardwareGroupSwitcher/);
+  assert.match(hardwarePanel, /hardware-title-group-select/);
+  assert.match(hardwarePanel, /syncTitleGroupSelect/);
+  assert.match(script, /hardware:\s*detail\.hardware/);
+  assert.match(script, /refreshHardwarePanel\(detail, setMessage\)/);
+  assert.match(css, /\.hardware-title-group-select/);
   assert.match(css, /\.hardware-tool\.config-collapsed \{[^}]*grid-template-columns:\s*42px minmax\(0,1fr\)/);
   assert.match(hardwarePanel, /aha2:hardware-draft:/);
   assert.match(hardwarePanel, /sessionStorage\.setItem/);
@@ -288,8 +349,10 @@ test("built web contains responsive application", async () => {
   assert.match(hardwareTerminal, /TextEncoder/);
   assert.match(hardwareTerminal, /send\s*\(data/);
   assert.match(hardwareTerminal, /type:\s*"resize"/);
-  assert.match(index, /vendor\/xterm\.js\?v=[a-f0-9]{12}/);
-  assert.match(index, /vendor\/xterm\.css\?v=[a-f0-9]{12}/);
+  assert.doesNotMatch(index, /vendor\/xterm\.(?:js|css)/);
+  assert.match(hardwarePanel, /loadTerminalAssets/);
+  assert.match(hardwarePanel, /\/vendor\/xterm\.js/);
+  assert.match(hardwarePanel, /\/vendor\/xterm\.css/);
   assert.match(hardwarePanel, /data-hardware-terminal-key="ctrl-c"/);
   assert.match(hardwarePanel, /const sendForm = root\.querySelector/);
   assert.doesNotMatch(script, /data-task-tab=|mobile-agent-strip|conversation-filters/);
@@ -506,6 +569,34 @@ test("built web contains responsive application", async () => {
   assert.match(agents, /\.\/runtime_picker\.js\?v=[a-f0-9]{12}/);
   assert.match(codexAccounts, /button\.innerHTML = icon\("spinner", true\)/);
   assert.match(codexAccounts, /refreshAccount\(id, true\)[\s\S]*undefined, true/);
+});
+
+test("hardware tool title renders the active hardware group switcher", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const {renderTaskToolPanel} = await import(pathToFileURL(resolve(root, "dist", "task_tools.js")));
+  const group = (id, description, position) => ({
+    task_id: "task-hardware-title",
+    id,
+    position,
+    description,
+    mode: "serial",
+    serial: {device: `COM${position + 1}`, baudrate: 115200},
+    network: {host: "", port: 23, protocol: "telnet", ssh_auth: "auto"},
+    username: "",
+    password_configured: false,
+    access: "read_write",
+    created_at: "2026-09-10T00:00:00Z",
+    updated_at: "2026-09-10T00:00:00Z",
+  });
+  const detail = {
+    task: {id: "task-hardware-title", status: "active"},
+    hardware: [group("board-a", "主控板", 0), group("board-b", "继电器板", 1)],
+    memory: {},
+  };
+  const html = renderTaskToolPanel("hardware", detail, "main", "", "split");
+  assert.match(html, /<h3>硬件调试<\/h3><select id="hardware-title-group-select"/);
+  assert.match(html, /<option value="board-a" selected>主控板<\/option>/);
+  assert.match(html, /<option value="board-b" >继电器板<\/option>/);
 });
 
 test("knowledge workspace defaults to actionable updates", async () => {
@@ -1022,17 +1113,97 @@ test("project knowledge keeps a merged view while exposing source labels and fil
   );
   assert.deepEqual(sources, [
     {id: "project-1", label: "项目自有知识", count: 1, external: false},
-    {id: "library-1", label: "Imported Library", count: 1, external: true},
+    {id: "library-1", label: "Imported Library（外部引用）", count: 1, external: true},
   ]);
 
   const source = await readFile(resolve(root, "dist", "knowledge_workspace.js"), "utf8");
   const styles = await readFile(resolve(root, "dist", "styles.css"), "utf8");
   for (const marker of ["data-knowledge-source-filter", "knowledge-source-badge", "knowledge-source-settings"]) assert.match(source, new RegExp(marker));
   assert.ok(source.includes("\\u9879\\u76ee\\u81ea\\u6709\\u77e5\\u8bc6"));
-  assert.ok(source.includes("\\u5916\\u90e8\\u7ed1\\u5b9a\\u77e5\\u8bc6\\u5e93"));
+  assert.ok(source.includes("\\u7ed1\\u5b9a\\u77e5\\u8bc6\\u5e93"));
   assert.doesNotMatch(source, /boundLibraries\.length\s*\+\s*\(owned/);
   assert.match(styles, /\.knowledge-source-toolbar \{[^}]*display:\s*flex/);
   assert.match(styles, /@media \(max-width: 760px\)[\s\S]*?\.knowledge-source-toolbar \{[^}]*flex-direction:\s*column/);
+});
+
+test("knowledge library bindings distinguish collaboration from external reference", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const workspace = await readFile(resolve(root, "dist", "knowledge_workspace.js"), "utf8");
+  const api = await readFile(resolve(root, "dist", "api.js"), "utf8");
+  for (const marker of ["data-knowledge-library-mode", "data-knowledge-library-mode-save", "bindingModeLabel"]) {
+    assert.match(workspace, new RegExp(marker));
+  }
+  assert.ok(workspace.includes("\\u9879\\u76ee\\u534f\\u4f5c"));
+  assert.ok(workspace.includes("\\u5916\\u90e8\\u5f15\\u7528"));
+  assert.match(api, /binding_mode/);
+  assert.match(workspace, /selected\.binding_mode === "project"/);
+});
+
+test("startup renders immediately and CRUD actions refresh local state with progress", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const main = await readFile(resolve(root, "dist", "app.js"), "utf8");
+  const index = await readFile(resolve(root, "dist", "index.html"), "utf8");
+  const knowledge = await readFile(resolve(root, "dist", "knowledge_workspace.js"), "utf8");
+  assert.match(index, /boot-loading/);
+  assert.doesNotMatch(index, /<script defer src="\/vendor\/xterm\.js/);
+  assert.match(main, /state\.hydrating = true;\s*render\(\);\s*await loadCoreData\(\)/);
+  assert.match(main, /async function loadCoreData/);
+  assert.match(main, /async function ensureViewData/);
+  assert.match(main, /loadResource\("knowledge"/);
+  assert.doesNotMatch(main, /async function loadDeferredData/);
+  assert.match(main, /state\.projects = state\.projects\.filter/);
+  assert.match(main, /state\.workspaces = state\.workspaces\.filter/);
+  assert.match(main, /state\.tasks = state\.tasks\.filter/);
+  assert.match(main, /"保存中", false/);
+  assert.match(knowledge, /aria-busy/);
+  assert.match(knowledge, /icon\("spinner", true\)/);
+  assert.match(knowledge, /context\.setMessage\("notice", message\);\s*context\.render\(\)/);
+});
+
+test("task creation supports manual draft and explicit start", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const main = await readFile(resolve(root, "dist", "app.js"), "utf8");
+  const api = await readFile(resolve(root, "dist", "api.js"), "utf8");
+  assert.match(main, /name="start_mode" value="manual"/);
+  assert.match(main, /name="start_mode" value="immediate"/);
+  assert.match(main, /id="start-task"/);
+  assert.match(main, /task\.status === "draft"/);
+  assert.match(api, /\/tasks\/\$\{encodeURIComponent\(id\)\}\/start/);
+});
+
+test("model detection streams catalog results and can be stopped", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const main = await readFile(resolve(root, "dist", "app.js"), "utf8");
+  const api = await readFile(resolve(root, "dist", "api.js"), "utf8");
+  assert.match(main, /new EventSource\(api\.modelDetectionEventsURL/);
+  assert.match(main, /addEventListener\("catalog"/);
+  assert.match(main, /addEventListener\("result"/);
+  assert.match(main, /id="stop-model-detection"/);
+  assert.match(main, /cancelModelDetectionJob/);
+  assert.match(api, /model-detection-jobs/);
+});
+
+test("large catalogs use independent route resources and cursor pages", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const main = await readFile(resolve(root, "dist", "app.js"), "utf8");
+  const api = await readFile(resolve(root, "dist", "api.js"), "utf8");
+  assert.match(main, /const initialListPageSize = 50/);
+  assert.match(main, /data-load-more=/);
+  assert.match(main, /loadNextPage/);
+  assert.match(api, /query\.set\("cursor"/);
+  assert.match(api, /query\.set\("limit"/);
+});
+
+test("task list protects clicks from live refresh and reports open failures", async () => {
+  const source = await readFile(resolve(import.meta.dirname, "..", "src", "main.ts"), "utf8");
+  assert.match(source, /taskListPointerActive = true/);
+  assert.match(source, /if \(taskListPointerActive\) state\.renderPending = true/);
+  assert.match(source, /window\.setTimeout\(flushDeferredRender, 0\)/);
+  assert.match(source, /openingTaskID = taskID/);
+  assert.match(source, /setMessage\("error", error instanceof Error/);
+  assert.match(source, /if \(listRefreshInFlight\) \{\s*listRefreshQueued = true/);
+  assert.match(source, /do \{\s*listRefreshQueued = false/);
+  assert.match(source, /while \(listRefreshQueued\)/);
 });
 
 test("stale knowledge action means keeping the current content", async () => {

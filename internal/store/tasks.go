@@ -188,7 +188,7 @@ func (s *Store) ListTasks(ctx context.Context, projectID string) ([]domain.Task,
 		query += ` WHERE project_id=?`
 		args = append(args, projectID)
 	}
-	query += ` ORDER BY updated_at DESC`
+	query += ` ORDER BY updated_at DESC,id DESC`
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
@@ -203,6 +203,43 @@ func (s *Store) ListTasks(ctx context.Context, projectID string) ([]domain.Task,
 		result = append(result, item)
 	}
 	return result, rows.Err()
+}
+
+func (s *Store) ListTasksPage(ctx context.Context, projectID string, cursorAt time.Time, cursorID string, limit int) ([]domain.Task, bool, error) {
+	query := `SELECT ` + taskColumns + ` FROM tasks WHERE 1=1`
+	args := []any{}
+	if projectID != "" {
+		query += ` AND project_id=?`
+		args = append(args, projectID)
+	}
+	if !cursorAt.IsZero() && cursorID != "" {
+		query += ` AND (updated_at<? OR (updated_at=? AND id<?))`
+		cursor := timeString(cursorAt)
+		args = append(args, cursor, cursor, cursorID)
+	}
+	query += ` ORDER BY updated_at DESC,id DESC LIMIT ?`
+	args = append(args, limit+1)
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, false, err
+	}
+	defer rows.Close()
+	items := make([]domain.Task, 0, limit+1)
+	for rows.Next() {
+		item, err := scanTask(rows)
+		if err != nil {
+			return nil, false, err
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, err
+	}
+	hasMore := len(items) > limit
+	if hasMore {
+		items = items[:limit]
+	}
+	return items, hasMore, nil
 }
 
 func (s *Store) UpdateTaskStatus(ctx context.Context, id string, from, to domain.TaskStatus, updatedAt, completedAt string) error {
@@ -432,6 +469,34 @@ func (s *Store) ListTurns(ctx context.Context, taskID string) ([]domain.Turn, er
 	return result, rows.Err()
 }
 
+// ListTurnsForTasks loads turn histories for a task list in one query. It is
+// intended for list-level aggregation where calling ListTurns per task would
+// amplify database work linearly.
+func (s *Store) ListTurnsForTasks(ctx context.Context, taskIDs []string) (map[string][]domain.Turn, error) {
+	result := make(map[string][]domain.Turn, len(taskIDs))
+	if len(taskIDs) == 0 {
+		return result, nil
+	}
+	args := make([]any, 0, len(taskIDs))
+	for _, id := range taskIDs {
+		args = append(args, id)
+		result[id] = []domain.Turn{}
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT `+turnColumns+` FROM turns WHERE task_id IN (`+placeholders(len(taskIDs))+`) ORDER BY task_id,sequence`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		item, err := scanTurn(rows)
+		if err != nil {
+			return nil, err
+		}
+		result[item.TaskID] = append(result[item.TaskID], item)
+	}
+	return result, rows.Err()
+}
+
 func (s *Store) PreviousTurnUsage(ctx context.Context, turn domain.Turn) (map[string]any, error) {
 	previous, err := s.PreviousTurnForSession(ctx, turn)
 	if err != nil {
@@ -552,6 +617,33 @@ func (s *Store) ListBackendSessionsForTask(ctx context.Context, taskID string) (
 			return nil, err
 		}
 		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
+// ListBackendSessionsForTasks is the batch companion to
+// ListBackendSessionsForTask for list-level token aggregation.
+func (s *Store) ListBackendSessionsForTasks(ctx context.Context, taskIDs []string) (map[string][]domain.BackendSession, error) {
+	result := make(map[string][]domain.BackendSession, len(taskIDs))
+	if len(taskIDs) == 0 {
+		return result, nil
+	}
+	args := make([]any, 0, len(taskIDs))
+	for _, id := range taskIDs {
+		args = append(args, id)
+		result[id] = []domain.BackendSession{}
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT `+backendSessionColumns+` FROM backend_sessions WHERE task_id IN (`+placeholders(len(taskIDs))+`) ORDER BY task_id,created_at`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		item, err := scanBackendSession(rows)
+		if err != nil {
+			return nil, err
+		}
+		result[item.TaskID] = append(result[item.TaskID], item)
 	}
 	return result, rows.Err()
 }

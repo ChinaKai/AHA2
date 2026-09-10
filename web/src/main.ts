@@ -1,10 +1,10 @@
 import {api} from "./api.js";
 import {renderConversationList} from "./conversation_ui.js";
 import {bindCodexAccounts, renderCodexAccounts} from "./codex_accounts.js";
-import {bindChannels, renderChannels} from "./channels.js";
+import {bindChannels, exportRetiredChannelInstance, purgeRetiredChannelInstance, renderChannels} from "./channels.js";
 import {icon} from "./icons.js";
 import {bindKnowledgeWorkspace, renderKnowledgeWorkspace} from "./knowledge_workspace.js";
-import {bindHardwarePanel, stopHardwarePanel} from "./hardware_panel.js";
+import {bindHardwarePanel, refreshHardwarePanel, stopHardwarePanel} from "./hardware_panel.js";
 import {renderMarkdown} from "./markdown.js";
 import {bindPromptAdmin, loadPromptCatalog, renderPromptAdmin} from "./prompt_admin.js";
 import {bindProxySettings, renderProxySettings} from "./proxy_settings.js";
@@ -59,10 +59,13 @@ import type {
   Workspace,
 } from "./types.js";
 type View = "projects" | "channels" | "models" | "tasks" | "knowledge" | "prompts" | "proxy" | "sync" | "advanced";
+type ResourceKey = "projects" | "workspaces" | "tasks" | "system" | "providers" | "models" | "env" | "accounts" | "skills" | "channels" | "knowledge" | "proxy" | "advanced" | "sync" | "prompts";
+interface ResourceState {loading: boolean; loaded: boolean; error: string; updatedAt: number}
 interface State {
   auth: AuthStatus | null;
   view: View;
   loading: boolean;
+  hydrating: boolean;
   error: string;
   notice: string;
   renderPending: boolean;
@@ -130,6 +133,7 @@ const state: State = {
   auth: null,
   view: "projects",
   loading: true,
+  hydrating: false,
   error: "",
   notice: "",
   renderPending: false,
@@ -190,10 +194,68 @@ let taskFallbackTimer: number | null = null;
 let taskLastSignalAt = 0;
 let scrollConversationToBottom = false;
 let loadingOlderConversation = false;
+let taskListPointerActive = false;
+let openingTaskID = "";
+let listRefreshInFlight = false;
+let listRefreshQueued = false;
 let authRecoveryOpen = false;
 let messageSubmitPending = false;
 let ownerAvatarClicks = 0;
 let ownerAvatarResetTimer = 0;
+const resourceStates = Object.fromEntries([
+  "projects", "workspaces", "tasks", "system", "providers", "models", "env", "accounts", "skills",
+  "channels", "knowledge", "proxy", "advanced", "sync", "prompts",
+].map(key => [key, {loading: false, loaded: false, error: "", updatedAt: 0}])) as Record<ResourceKey, ResourceState>;
+const resourceRequests = new Map<ResourceKey, Promise<void>>();
+const listPages: Record<"projects" | "tasks" | "knowledge", {cursor: string; hasMore: boolean; loadingMore: boolean}> = {
+  projects: {cursor: "", hasMore: false, loadingMore: false},
+  tasks: {cursor: "", hasMore: false, loadingMore: false},
+  knowledge: {cursor: "", hasMore: false, loadingMore: false},
+};
+const initialListPageSize = 50;
+
+function mergeByID<T extends {id: string}>(current: T[], incoming: T[]): T[] {
+  const merged = new Map(current.map(item => [item.id, item]));
+  for (const item of incoming) merged.set(item.id, item);
+  return [...merged.values()];
+}
+
+function resourcesForView(view: View): ResourceKey[] {
+  switch (view) {
+    case "projects": return ["projects", "workspaces", "tasks"];
+    case "tasks": return ["projects", "workspaces", "tasks", "models", "accounts", "skills"];
+    case "channels": return ["channels", "projects", "workspaces", "models", "accounts", "knowledge"];
+    case "models": return ["providers", "models", "env", "accounts"];
+    case "knowledge": return ["projects", "workspaces", "knowledge"];
+    case "prompts": return ["prompts"];
+    case "proxy": return ["proxy"];
+    case "sync": return ["sync"];
+    case "advanced": return ["advanced"];
+  }
+}
+
+async function loadResource(key: ResourceKey, force: boolean, action: () => Promise<void>): Promise<void> {
+  if (!force && resourceStates[key].loaded) return;
+  const current = resourceRequests.get(key);
+  if (current) return current;
+  resourceStates[key].loading = true;
+  resourceStates[key].error = "";
+  window.queueMicrotask(() => {
+    if (state.auth?.authenticated) render();
+  });
+  const request = action().then(() => {
+    resourceStates[key].loaded = true;
+    resourceStates[key].updatedAt = Date.now();
+  }).catch(error => {
+    resourceStates[key].error = error instanceof Error ? error.message : String(error);
+  }).finally(() => {
+    resourceStates[key].loading = false;
+    resourceRequests.delete(key);
+    if (state.auth?.authenticated) render();
+  });
+  resourceRequests.set(key, request);
+  return request;
+}
 
 function escapeHTML(value: unknown): string {
   return String(value ?? "")
@@ -218,6 +280,7 @@ function statusLabel(status: string): string {
     completed: "已完成",
     failed: "失败",
     preparing: "准备中",
+    draft: "草稿",
     queued: "排队",
     starting: "启动中",
     running: "执行中",
@@ -685,9 +748,16 @@ async function bootstrap(): Promise<void> {
     state.auth = await api.authStatus();
     api.setCSRF(state.auth.csrf_token);
     if (state.auth.authenticated) {
-      await loadAll();
+      state.loading = false;
+      state.hydrating = true;
+      render();
+      await loadCoreData();
+      state.hydrating = false;
+      render();
       await restoreNavigationState();
       openGlobalEvents();
+      await ensureViewData(state.view);
+      prefetchSecondaryData();
     }
   } catch (error) {
     state.error = error instanceof Error ? error.message : String(error);
@@ -698,33 +768,300 @@ async function bootstrap(): Promise<void> {
 }
 
 async function loadAll(): Promise<void> {
-  const [projects, workspaces, providers, channelProviders, channelInstances, envGroups, codexAccounts, models, tasks, knowledge, libraries, skills, system, proxy, security, agentAPI, backendSettings, syncSettings, syncStatus, syncConflicts, syncPreview] = await Promise.all([
-    api.projects(), api.workspaces(), api.providers(), api.channelProviders().catch(() => ({providers: []})), api.channelInstances().catch(() => ({instances: []})), api.envGroups(), api.codexAccounts(), api.models(), api.tasks(), api.knowledge(), api.knowledgeLibraries(), api.skills(), api.system(), api.proxySettings(), api.securitySettings(), api.agentAPISettings(), api.backendSettings(), api.syncSettings(), api.syncStatus(), api.syncConflicts(), api.syncPreview().catch(() => ({preview: state.syncPreview})),
+  await Promise.all([loadCoreData(true), ensureViewData(state.view, true)]);
+}
+
+interface ModelDetectionSession {
+  providerID: string;
+  jobID: string;
+  authStyle: string;
+  catalog: DetectedModel[];
+  results: Map<string, DetectedModel>;
+  selected: Set<string>;
+  completed: number;
+  total: number;
+  anthropicBaseURL: string;
+  status: "queued" | "running" | "cancelling" | "completed" | "cancelled" | "failed";
+  source: EventSource;
+  button: HTMLElement;
+  originalButtonHTML: string;
+}
+
+let activeModelDetection: ModelDetectionSession | null = null;
+
+function detectedModelRow(session: ModelDetectionSession, item: DetectedModel, ready: boolean): string {
+  return `<div class="detected-item${ready ? "" : " pending"}" data-model="${escapeHTML(item.id)}"><input type="checkbox" class="detected-model" value="${escapeHTML(item.id)}" ${ready && session.selected.has(item.id) ? "checked" : ""} ${ready ? "" : "disabled"}><span><strong>${escapeHTML(item.id)}</strong>${item.max_input_tokens ? `<small>context ${Math.round(item.max_input_tokens / 1000)}K</small>` : ""}${ready ? `<span class="proto-badges">${protoBadges(item)}</span>${protoChecks(item)}` : `<span class="proto pending">等待检测</span>`}</span></div>`;
+}
+
+function renderModelDetection(session: ModelDetectionSession): void {
+  const root = document.querySelector<HTMLElement>("#model-detect-results");
+  if (!root) return;
+  const terminal = ["completed", "cancelled", "failed"].includes(session.status);
+  const statusText = session.status === "completed" ? "检测完成" : session.status === "cancelled" ? "已停止" : session.status === "failed" ? "检测失败" : session.status === "cancelling" ? "正在停止" : session.catalog.length ? "正在检测协议能力" : "正在获取模型目录";
+  const rows = session.catalog.map(item => detectedModelRow(session, session.results.get(item.id) || item, session.results.has(item.id))).join("");
+  const anthropicNote = session.anthropicBaseURL ? `<div class="detect-status">检测到 Anthropic 端点：<code>${escapeHTML(session.anthropicBaseURL)}</code></div>` : "";
+  root.innerHTML = `<div class="detect-status" id="model-detect-progress">${statusText} · ${session.completed}/${session.total || "?"}${session.authStyle ? `（认证：${escapeHTML(session.authStyle)}）` : ""}</div>${anthropicNote}<div class="detect-toolbar"><input type="search" id="detect-search" placeholder="搜索模型名称..."><button type="button" id="detect-select-all">全选</button><button type="button" id="detect-select-none">全不选</button>${terminal ? "" : `<button type="button" id="stop-model-detection" class="danger">停止检测</button>`}</div><div class="detected-list">${rows || `<div class="empty">正在读取模型目录…</div>`}</div><div class="dialog-actions"><button type="button" id="add-selected-models" class="primary" ${session.results.size ? "" : "disabled"}>添加已选模型</button></div>`;
+}
+
+function finishModelDetection(session: ModelDetectionSession): void {
+  session.source.close();
+  session.button.disabled = false;
+  session.button.innerHTML = session.originalButtonHTML;
+  renderModelDetection(session);
+  if (activeModelDetection === session) activeModelDetection = null;
+}
+
+async function startModelDetection(providerID: string, button: HTMLElement, results: HTMLElement): Promise<void> {
+  if (activeModelDetection) return;
+  const originalButtonHTML = button.innerHTML;
+  button.disabled = true;
+  button.innerHTML = `${icon("spinner", true)}<span>读取目录中</span>`;
+  results.innerHTML = `<div class="detect-status">正在获取模型目录…</div>`;
+  try {
+    const created = await api.createModelDetectionJob(providerID);
+    const source = new EventSource(api.modelDetectionEventsURL(providerID, created.job.id));
+    const session: ModelDetectionSession = {
+      providerID, jobID: created.job.id, authStyle: "", catalog: [], results: new Map(), selected: new Set(), completed: 0, total: 0,
+      anthropicBaseURL: "", status: "queued", source, button, originalButtonHTML,
+    };
+    activeModelDetection = session;
+    results.addEventListener("input", event => {
+      if (!(event.target instanceof HTMLInputElement) || event.target.id !== "detect-search") return;
+      const query = event.target.value.trim().toLowerCase();
+      results.querySelectorAll<HTMLElement>(".detected-item").forEach(row => {
+        row.style.display = !query || String(row.dataset.model || "").toLowerCase().includes(query) ? "" : "none";
+      });
+    });
+    results.addEventListener("change", event => {
+      if (!(event.target instanceof HTMLInputElement) || !event.target.classList.contains("detected-model")) return;
+      if (event.target.checked) session.selected.add(event.target.value);
+      else session.selected.delete(event.target.value);
+    });
+    results.addEventListener("click", event => {
+      const target = event.target as HTMLElement;
+      if (target.closest("#stop-model-detection")) {
+        session.status = "cancelling";
+        renderModelDetection(session);
+        void api.cancelModelDetectionJob(session.providerID, session.jobID).catch(error => setMessage("error", error instanceof Error ? error.message : String(error)));
+        return;
+      }
+      if (target.closest("#detect-select-all")) {
+        results.querySelectorAll<HTMLInputElement>(".detected-item:not([style*='display: none']) .detected-model:not(:disabled)").forEach(box => { box.checked = true; session.selected.add(box.value); });
+        return;
+      }
+      if (target.closest("#detect-select-none")) {
+        results.querySelectorAll<HTMLInputElement>(".detected-model").forEach(box => { box.checked = false; session.selected.delete(box.value); });
+        return;
+      }
+      if (!target.closest("#add-selected-models")) return;
+      const picks = [...results.querySelectorAll<HTMLInputElement>(".detected-model:checked")].map(input => {
+        const row = input.closest(".detected-item");
+        const wireAPIs = [...(row?.querySelectorAll<HTMLInputElement>(".proto-checks input:checked") || [])].map(item => item.value);
+        const detected = session.results.get(input.value);
+        return {id: input.value, wire_apis: wireAPIs.length ? wireAPIs : ["responses"], max_input_tokens: detected?.max_input_tokens || 0, max_output_tokens: detected?.max_output_tokens || 0};
+      });
+      if (!picks.length) {
+        setMessage("error", "请至少选择一个已检测模型");
+        return;
+      }
+      const addButton = results.querySelector<HTMLElement>("#add-selected-models");
+      void runWithFeedback(addButton, "添加中", async () => {
+        const result = await api.addModels({provider_id: providerID, models: picks, anthropic_base_url: session.anthropicBaseURL});
+        document.querySelector<HTMLDialogElement>("#model-dialog")?.close();
+        setMessage("notice", `已添加 ${(result.models || []).length} 个模型${result.skipped ? `，跳过 ${result.skipped} 个已存在` : ""}`);
+        await ensureViewData("models", true);
+        render();
+      });
+    });
+    source.addEventListener("catalog", event => {
+      const data = JSON.parse((event as MessageEvent).data) as {models?: DetectedModel[]; total?: number; auth_style?: string};
+      session.catalog = data.models || [];
+      session.total = data.total || session.catalog.length;
+      session.authStyle = data.auth_style || "";
+      session.status = "running";
+      button.innerHTML = `${icon("spinner", true)}<span>检测中 ${session.completed}/${session.total}</span>`;
+      renderModelDetection(session);
+    });
+    source.addEventListener("result", event => {
+      const data = JSON.parse((event as MessageEvent).data) as {model: DetectedModel; completed: number; total: number; anthropic_base_url?: string};
+      session.results.set(data.model.id, data.model);
+      session.selected.add(data.model.id);
+      session.completed = data.completed;
+      session.total = data.total;
+      if (data.anthropic_base_url) session.anthropicBaseURL = data.anthropic_base_url;
+      button.innerHTML = `${icon("spinner", true)}<span>检测中 ${session.completed}/${session.total}</span>`;
+      renderModelDetection(session);
+    });
+    source.addEventListener("progress", event => {
+      const data = JSON.parse((event as MessageEvent).data) as {status?: ModelDetectionSession["status"]; completed?: number; total?: number};
+      if (data.status) session.status = data.status;
+      session.completed = data.completed ?? session.completed;
+      session.total = data.total ?? session.total;
+      renderModelDetection(session);
+    });
+    source.addEventListener("done", event => {
+      const data = JSON.parse((event as MessageEvent).data) as {status: ModelDetectionSession["status"]; completed: number; total: number; anthropic_base_url?: string};
+      session.status = data.status;
+      session.completed = data.completed;
+      session.total = data.total;
+      if (data.anthropic_base_url) session.anthropicBaseURL = data.anthropic_base_url;
+      finishModelDetection(session);
+    });
+    source.addEventListener("error", event => {
+      if (event instanceof MessageEvent) {
+        const data = JSON.parse(event.data || "{}") as {message?: string};
+        session.status = "failed";
+        if (data.message) setMessage("error", data.message);
+        return;
+      }
+      if (!["completed", "cancelled", "failed"].includes(session.status)) {
+        session.status = "failed";
+        setMessage("error", "模型检测连接中断，可重新检测");
+        finishModelDetection(session);
+      }
+    });
+  } catch (error) {
+    button.disabled = false;
+    button.innerHTML = originalButtonHTML;
+    results.innerHTML = `<div class="detect-status">检测启动失败：${escapeHTML(error instanceof Error ? error.message : String(error))}</div>`;
+  }
+}
+
+function forgetProject(projectID: string): void {
+  if (state.selectedProject?.id === projectID) state.selectedProject = null;
+  state.projects = state.projects.filter(item => item.id !== projectID);
+  state.workspaces = state.workspaces.filter(item => item.project_id !== projectID);
+  state.tasks = state.tasks.filter(item => item.project_id !== projectID);
+}
+
+async function purgeArchivedChannelProject(project: Project): Promise<boolean> {
+  if (!project.channel_instance_id) throw new Error("归档 Project 缺少渠道实例关联，无法安全永久删除。");
+  const revision = state.channelInstances.find(item => item.id === project.channel_instance_id)?.revision || 0;
+  const result = await purgeRetiredChannelInstance(project.channel_instance_id, revision);
+  if (result === "name_mismatch") {
+    setMessage("error", "输入的实例名不匹配，未执行永久删除。");
+    return false;
+  }
+  if (result !== "purged") return false;
+  forgetProject(project.id);
+  state.channelInstances = state.channelInstances.filter(item => item.id !== project.channel_instance_id);
+  setMessage("notice", "渠道归档及其本地宿主资源已永久删除");
+  return true;
+}
+
+async function loadCoreData(force = false): Promise<void> {
+  await Promise.all([
+    loadResource("projects", force, async () => {
+      const result = await api.projects({limit: initialListPageSize});
+      state.projects = result.projects || [];
+      listPages.projects = {cursor: result.next_cursor || "", hasMore: Boolean(result.has_more), loadingMore: false};
+    }),
+    loadResource("workspaces", force, async () => { state.workspaces = (await api.workspaces()).workspaces || []; }),
+    loadResource("tasks", force, async () => {
+      const result = await api.tasks("", {limit: initialListPageSize});
+      state.tasks = result.tasks || [];
+      listPages.tasks = {cursor: result.next_cursor || "", hasMore: Boolean(result.has_more), loadingMore: false};
+    }),
   ]);
-  state.projects = projects.projects || [];
-  state.workspaces = workspaces.workspaces || [];
-  state.providers = providers.providers || [];
-  state.channelProviders = channelProviders.providers || [];
-  state.channelInstances = channelInstances.instances || [];
-  state.envGroups = envGroups.env_groups || [];
-  state.codexAccounts = codexAccounts.accounts || [];
-  state.models = models.models || [];
-  state.tasks = tasks.tasks || [];
-  state.knowledge = knowledge.knowledge || [];
-  state.knowledgeLibraries = libraries.libraries || [];
-  state.knowledgeProposals = knowledge.proposals || [];
-  state.knowledgeReviewSettings = knowledge.review_settings || {auto_approve: false};
-  state.skills = skills.skills || [];
-  if (system?.system) state.system = system.system;
-  if (proxy?.proxy) state.proxySettings = proxy.proxy;
-  if (security?.security) state.securitySettings = security.security;
-  if (agentAPI?.agent_api) state.agentAPISettings = agentAPI.agent_api;
-	if (backendSettings?.backend) state.backendSettings = backendSettings.backend;
-  if (syncSettings?.sync) state.syncSettings = syncSettings.sync;
-  if (syncStatus?.state) { state.syncState = syncStatus.state; state.syncPending = syncStatus.pending || 0; state.syncRun = syncStatus.run || state.syncRun; }
-  state.syncConflicts = syncConflicts.conflicts || [];
-	state.syncPreview = syncPreview.preview || state.syncPreview;
-  await loadPromptCatalog();
+  void loadResource("system", force, async () => {
+    const system = await api.system();
+    if (system?.system) state.system = system.system;
+  });
+}
+
+async function loadKnowledgeData(force = true): Promise<void> {
+  await loadResource("knowledge", force, async () => {
+    const [knowledge, libraries] = await Promise.all([api.knowledge("", "", "", {limit: initialListPageSize, summary: true}), api.knowledgeLibraries()]);
+    state.knowledge = knowledge.knowledge || [];
+    state.knowledgeLibraries = libraries.libraries || [];
+    state.knowledgeProposals = knowledge.proposals || [];
+    state.knowledgeReviewSettings = knowledge.review_settings || {auto_approve: false};
+    listPages.knowledge = {cursor: knowledge.next_cursor || "", hasMore: Boolean(knowledge.has_more), loadingMore: false};
+  });
+}
+
+async function loadNextPage(kind: "projects" | "tasks" | "knowledge"): Promise<void> {
+  const page = listPages[kind];
+  if (!page.hasMore || !page.cursor || page.loadingMore) return;
+  page.loadingMore = true;
+  render();
+  try {
+    if (kind === "projects") {
+      const result = await api.projects({limit: initialListPageSize, cursor: page.cursor});
+      state.projects = mergeByID(state.projects, result.projects || []);
+      page.cursor = result.next_cursor || "";
+      page.hasMore = Boolean(result.has_more);
+    } else if (kind === "tasks") {
+      const result = await api.tasks("", {limit: initialListPageSize, cursor: page.cursor});
+      state.tasks = mergeByID(state.tasks, result.tasks || []);
+      page.cursor = result.next_cursor || "";
+      page.hasMore = Boolean(result.has_more);
+    } else {
+      const result = await api.knowledge("", "", "", {limit: initialListPageSize, cursor: page.cursor, summary: true});
+      state.knowledge = mergeByID(state.knowledge, result.knowledge || []);
+      state.knowledgeProposals = result.proposals || state.knowledgeProposals;
+      page.cursor = result.next_cursor || "";
+      page.hasMore = Boolean(result.has_more);
+    }
+  } finally {
+    page.loadingMore = false;
+    render();
+  }
+}
+
+function loadMoreHTML(kind: "projects" | "tasks" | "knowledge"): string {
+  const page = listPages[kind];
+  if (!page.hasMore) return "";
+  return `<div class="list-load-more"><button type="button" data-load-more="${kind}" ${page.loadingMore ? "disabled" : ""}>${page.loadingMore ? `${icon("spinner", true)}加载中…` : "加载更多"}</button></div>`;
+}
+
+async function ensureViewData(view: View, force = false): Promise<void> {
+  const jobs: Promise<void>[] = [];
+  if (["projects", "tasks", "channels", "knowledge"].includes(view)) jobs.push(loadCoreData(force));
+  if (["models", "tasks", "channels"].includes(view)) {
+    jobs.push(loadResource("providers", force, async () => { state.providers = (await api.providers()).providers || []; }));
+    jobs.push(loadResource("models", force, async () => { state.models = (await api.models()).models || []; }));
+    jobs.push(loadResource("accounts", force, async () => { state.codexAccounts = (await api.codexAccounts()).accounts || []; }));
+  }
+  if (view === "models") jobs.push(loadResource("env", force, async () => { state.envGroups = (await api.envGroups()).env_groups || []; }));
+  if (view === "tasks") jobs.push(loadResource("skills", force, async () => { state.skills = (await api.skills()).skills || []; }));
+  if (view === "channels") {
+    jobs.push(loadResource("channels", force, async () => {
+      const [providers, instances] = await Promise.all([api.channelProviders(), api.channelInstances()]);
+      state.channelProviders = providers.providers || [];
+      state.channelInstances = instances.instances || [];
+    }));
+    jobs.push(loadKnowledgeData(force));
+  }
+  if (view === "knowledge") jobs.push(loadKnowledgeData(force));
+  if (view === "proxy") jobs.push(loadResource("proxy", force, async () => {
+    const result = await api.proxySettings();
+    if (result.proxy) state.proxySettings = result.proxy;
+  }));
+  if (view === "advanced") jobs.push(loadResource("advanced", force, async () => {
+    const [security, agentAPI, backend] = await Promise.all([api.securitySettings(), api.agentAPISettings(), api.backendSettings()]);
+    if (security.security) state.securitySettings = security.security;
+    if (agentAPI.agent_api) state.agentAPISettings = agentAPI.agent_api;
+    if (backend.backend) state.backendSettings = backend.backend;
+  }));
+  if (view === "sync") jobs.push(loadResource("sync", force, async () => {
+    const [settings, status, conflicts, preview] = await Promise.all([api.syncSettings(), api.syncStatus(), api.syncConflicts(), api.syncPreview()]);
+    state.syncSettings = settings.sync;
+    state.syncState = status.state;
+    state.syncPending = status.pending || 0;
+    state.syncRun = status.run || state.syncRun;
+    state.syncConflicts = conflicts.conflicts || [];
+    state.syncPreview = preview.preview || state.syncPreview;
+  }));
+  if (view === "prompts") jobs.push(loadResource("prompts", force, loadPromptCatalog));
+  await Promise.all(jobs);
+}
+
+function prefetchSecondaryData(): void {
+  window.setTimeout(() => {
+    if (!state.auth?.authenticated) return;
+    void ensureViewData("models").then(() => ensureViewData("channels")).then(() => ensureViewData("knowledge"));
+  }, 250);
 }
 function persistNavigationState(): void {
   saveNavigationSnapshot({
@@ -945,6 +1282,7 @@ function taskRuntimeSignature(detail: TaskDetail | null): string {
     agents: (detail.agents || []).map(agent => [
       agent.agent_id, agent.status, agent.runtime_config_snapshot_id, agent.unread_count, agent.updated_at,
     ]),
+    hardware: detail.hardware,
     memory: detail.memory,
   });
 }
@@ -1049,7 +1387,7 @@ function shell(content: string): string {
       <div class="owner-block"><button id="owner-avatar" class="avatar" type="button" title="Owner">O</button><div><strong>${escapeHTML(state.auth?.username || "Owner")}</strong><small>已安全登录</small></div><button id="logout" class="icon-button" title="退出">${icon("logout")}</button></div>
     </aside>
     <header class="mobile-header"><div class="brand-lockup"><span class="brand-mark">A</span><strong>AHA</strong></div><button id="mobile-context" class="icon-button">${icon("menu")}</button></header>
-    <main class="workspace">${banner()}${content}</main>
+    <main class="workspace">${resourceStatusHTML()}${banner()}${content}</main>
     <nav class="bottom-nav">${nav.map(([view, glyph, label]) => `<button data-view="${view}" class="${state.view === view ? "active" : ""}">${icon(glyph)}<span>${label}</span></button>`).join("")}</nav>
   </div>`;
 }
@@ -1057,6 +1395,16 @@ function shell(content: string): string {
 function banner(): string {
   const messages = `${state.error ? `<div class="banner error">${escapeHTML(state.error)}</div>` : ""}${state.notice ? `<div class="banner success">${escapeHTML(state.notice)}</div>` : ""}`;
   return messages ? `<div class="banner-stack">${messages}</div>` : "";
+}
+
+function resourceStatusHTML(): string {
+  if (state.hydrating) return `<div class="app-hydrating" role="status">${icon("spinner", true)}<span>正在加载项目与任务…</span></div>`;
+  const resources = resourcesForView(state.view);
+  const loading = resources.filter(key => resourceStates[key].loading);
+  const failed = resources.filter(key => resourceStates[key].error);
+  if (loading.length) return `<div class="app-hydrating" role="status">${icon("spinner", true)}<span>正在加载当前页面数据（${loading.length} 项）…</span></div>`;
+  if (failed.length) return `<div class="app-hydrating resource-error" role="alert"><span>部分数据加载失败，不影响其他区域。</span><button type="button" id="retry-view-data">重试</button></div>`;
+  return "";
 }
 
 function systemUptimeText(now = Date.now()): string {
@@ -1082,8 +1430,9 @@ function projectsView(): string {
   const rows = state.projects.map(project => {
     const workspaces = state.workspaces.filter(item => item.project_id === project.id);
     const tasks = state.tasks.filter(item => item.project_id === project.id);
+    const archived = project.channel_retired === true;
     return `<article class="list-row project-row" data-project="${project.id}">
-      <div class="item-title"><span class="square-icon">${icon("projects")}</span><div><strong>${escapeHTML(project.name)}</strong><small>${projectTypeLabel(project.project_type)}</small></div><span class="row-actions"><button type="button" data-edit-project="${project.id}" class="icon-button" title="编辑项目">${icon("edit")}</button><button type="button" data-delete-project="${project.id}" class="icon-button project-del" title="删除项目">${icon("close")}</button></span></div>
+      <div class="item-title"><span class="square-icon">${icon("projects")}</span><div><strong>${escapeHTML(project.name)}</strong><small>${projectTypeLabel(project.project_type)}${archived ? " · 渠道归档" : ""}</small></div><span class="row-actions">${archived ? `<span class="status warn">已归档</span><button type="button" data-delete-project="${project.id}" class="icon-button danger project-del" title="永久删除归档">${icon("close")}</button>` : `<button type="button" data-edit-project="${project.id}" class="icon-button" title="编辑项目">${icon("edit")}</button><button type="button" data-delete-project="${project.id}" class="icon-button project-del" title="删除项目">${icon("close")}</button>`}</span></div>
       <div class="chips">${workspaces.map(item => `<span>${item.locality === "remote" ? icon("server") : icon("monitor")}${escapeHTML(item.name)}</span>`).join("") || "<span>暂无 Workspace</span>"}</div>
       <div><strong>${tasks.length}</strong><small>任务</small></div>
       <div><strong>${workspaces.filter(item => item.health === "ready").length}/${workspaces.length}</strong><small>Workspace Ready</small></div>
@@ -1092,7 +1441,7 @@ function projectsView(): string {
   return shell(`<section class="page">
     ${pageHead("项目", "管理逻辑 Project，点开项目配置其 Workspace。", `<button data-dialog="project">${icon("plus")}新建项目</button>`)}
     <div class="metrics"><div><small>项目</small><strong>${state.projects.length}</strong></div><div><small>Workspace</small><strong>${state.workspaces.length}</strong></div><div><small>活动任务</small><strong>${state.tasks.filter(item => item.status === "active").length}</strong></div><div><small>知识</small><strong>${state.knowledge.length}</strong></div></div>
-    <div class="panel"><div class="panel-head"><strong>所有项目</strong><button id="refresh">${icon("refresh")}刷新</button></div>${rows || `<div class="empty">创建第一个项目，随后点开配置 Workspace。</div>`}</div>
+    <div class="panel"><div class="panel-head"><strong>所有项目</strong><button id="refresh">${icon("refresh")}刷新</button></div>${rows || `<div class="empty">创建第一个项目，随后点开配置 Workspace。</div>`}${loadMoreHTML("projects")}</div>
     ${projectDialog()}
   </section>`);
 }
@@ -1100,14 +1449,15 @@ function projectsView(): string {
 function projectDetailView(project: Project): string {
   const workspaces = state.workspaces.filter(item => item.project_id === project.id);
   const tasks = state.tasks.filter(item => item.project_id === project.id);
+  const archived = project.channel_retired === true;
   const rows = workspaces.map(item => `<article class="list-row ws-row ${item.read_only ? "read-only" : ""}">
     <div class="item-title">${item.locality === "remote" ? icon("server") : icon("monitor")}<div><strong>${escapeHTML(item.name)}</strong><small>${escapeHTML(item.root_path)}</small></div></div>
-    <div class="ws-meta"><small>${escapeHTML(item.transport)}${item.distro ? ` · ${escapeHTML(item.distro)}` : ""}</small><strong>${item.read_only ? `只读 · ${escapeHTML(item.owner_device_id || "其他设备")}` : `本机 · ${escapeHTML(item.owner_device_id || "待首次同步绑定")}`}</strong></div>
+    <div class="ws-meta"><small>${escapeHTML(item.transport)}${item.distro ? ` · ${escapeHTML(item.distro)}` : ""}</small><strong>${item.channel_retired ? "渠道归档只读" : item.read_only ? `只读 · ${escapeHTML(item.owner_device_id || "其他设备")}` : `本机 · ${escapeHTML(item.owner_device_id || "待首次同步绑定")}`}</strong></div>
     ${renderWorkspaceDetection(item)}
-    ${item.read_only ? `<span class="row-actions workspace-remote-actions"><button type="button" data-takeover-workspace="${item.id}">${icon("copy")}接管到本机</button><button type="button" data-retire-remote-workspace="${item.id}" class="icon-button danger" title="移除孤立 Workspace">${icon("close")}</button></span><span class="status warn">远端只读</span>` : `<button data-detect="${item.id}">${icon("refresh")}测试连接</button><span class="row-actions"><button type="button" data-edit-workspace="${item.id}" class="icon-button" title="编辑 Workspace">${icon("edit")}</button><button type="button" data-delete-workspace="${item.id}" class="icon-button" title="删除 Workspace">${icon("close")}</button></span>`}
+    ${archived ? `<span class="status warn">归档只读</span>` : item.read_only ? `<span class="row-actions workspace-remote-actions"><button type="button" data-takeover-workspace="${item.id}">${icon("copy")}接管到本机</button><button type="button" data-retire-remote-workspace="${item.id}" class="icon-button danger" title="移除孤立 Workspace">${icon("close")}</button></span><span class="status warn">远端只读</span>` : `<button data-detect="${item.id}">${icon("refresh")}测试连接</button><span class="row-actions"><button type="button" data-edit-workspace="${item.id}" class="icon-button" title="编辑 Workspace">${icon("edit")}</button><button type="button" data-delete-workspace="${item.id}" class="icon-button" title="删除 Workspace">${icon("close")}</button></span>`}
   </article>`).join("");
   return shell(`<section class="page">
-    <header class="page-head"><div><button id="back-projects" class="back-link">← 返回项目列表</button><h1>${escapeHTML(project.name)}</h1><p>${projectTypeLabel(project.project_type)}${project.repository_identity ? ` · ${escapeHTML(project.repository_identity)}` : ""}${project.default_branch ? ` · 默认分支 ${escapeHTML(project.default_branch)}` : ""}</p></div><div class="actions"><button data-dialog="workspace">${icon("plus")}添加 Workspace</button><button type="button" data-edit-project-detail="${project.id}" class="icon-button" title="编辑项目">${icon("edit")}</button><button id="delete-project" class="danger">${icon("close")}删除项目</button></div></header>
+    <header class="page-head"><div><button id="back-projects" class="back-link">← 返回项目列表</button><h1>${escapeHTML(project.name)}${archived ? ` <span class="status warn">已归档</span>` : ""}</h1><p>${projectTypeLabel(project.project_type)}${project.repository_identity ? ` · ${escapeHTML(project.repository_identity)}` : ""}${project.default_branch ? ` · 默认分支 ${escapeHTML(project.default_branch)}` : ""}${archived ? " · 渠道宿主历史只读" : ""}</p></div><div class="actions">${archived ? `<button type="button" data-channel-project-export="${escapeHTML(project.channel_instance_id || "")}">导出归档</button><button id="delete-project" class="danger">${icon("close")}永久删除</button>` : `<button data-dialog="workspace">${icon("plus")}添加 Workspace</button><button type="button" data-edit-project-detail="${project.id}" class="icon-button" title="编辑项目">${icon("edit")}</button><button id="delete-project" class="danger">${icon("close")}删除项目</button>`}</div></header>
     <div class="metrics"><div><small>Workspace</small><strong>${workspaces.length}</strong></div><div><small>任务</small><strong>${tasks.length}</strong></div><div><small>Ready</small><strong>${workspaces.filter(item => item.health === "ready").length}</strong></div></div>
     <div class="panel"><div class="panel-head"><strong>Workspaces</strong><span>“测试连接”会刷新 Backend 能力并验证 Workspace → AHA2 Agent API</span></div>${rows || `<div class="empty">尚无 Workspace，点击右上角添加。</div>`}</div>
     ${workspaceDialog()}${workspaceTakeoverDialog()}
@@ -1122,7 +1472,7 @@ function workspaceDialog(): string {
   return `<dialog id="workspace-dialog"><form id="workspace-form" method="dialog">
     <div class="dialog-head"><h2>添加 Workspace</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div>
     <input type="hidden" id="ws-edit-id" name="ws_edit_id" value="">
-    <label>项目<select name="project_id" id="ws-project">${state.projects.map(item => `<option value="${item.id}" ${item.id === state.dialogProjectID ? "selected" : ""}>${escapeHTML(item.name)}</option>`).join("")}</select></label>
+    <label>项目<select name="project_id" id="ws-project">${state.projects.filter(item => !item.channel_retired).map(item => `<option value="${item.id}" ${item.id === state.dialogProjectID ? "selected" : ""}>${escapeHTML(item.name)}</option>`).join("")}</select></label>
     <label>名称<input name="name" id="ws-name" value="本地开发" required></label>
     <div class="two"><label>位置<select name="locality" id="ws-locality"><option value="local">本地</option><option value="remote">远程</option></select></label><label>Transport<select name="transport" id="ws-transport"></select></label></div>
     <label>Root Path<input name="root_path" id="ws-root-path" placeholder="E:\project 或 /home/user/project" required></label>
@@ -1229,11 +1579,12 @@ function workspaceTakeoverDialog(): string {
   return `<dialog id="workspace-takeover-dialog"><form id="workspace-takeover-form"><div class="dialog-head"><h2>接管只读 Workspace</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div><input type="hidden" name="source_id"><p class="field-help">接管会创建新的本机 Workspace；远端镜像保持只读且不会被修改。</p><label>名称<input name="name" required></label><div class="two"><label>Transport<select name="transport"><option value="native">Native</option><option value="wsl">WSL</option><option value="ssh">SSH</option></select></label><label>本机 Root Path<input name="root_path" required placeholder="必须重新确认本机路径"></label></div><label class="workspace-takeover-wsl">WSL Distro<input name="distro" placeholder="例如 Ubuntu"></label><div class="workspace-takeover-ssh"><div class="two"><label>SSH Host<input name="ssh_host"></label><label>SSH User<input name="ssh_user"></label></div><div class="two"><label>SSH Port<input name="ssh_port" type="number" min="1" max="65535" value="22"></label><label>SSH Auth<select name="ssh_auth"><option value="auto">Auto</option><option value="password">Password</option><option value="key">Key</option></select></label></div><label class="reuse-remote-secret"><input name="reuse_remote_credential" type="checkbox">复用已同步的端到端加密 SSH 凭据</label><label>或输入新密码<input name="ssh_password" type="password" autocomplete="new-password"></label></div><div class="dialog-actions"><button type="button" data-close>取消</button><button class="primary" type="submit">创建本机副本</button></div></form></dialog>`;
 }
 
-const TASK_STATUS_FILTERS = ["active", "waiting_user", "preparing", "queued", "running", "completed", "failed", "blocked"];
+const TASK_STATUS_FILTERS = ["draft", "active", "waiting_user", "preparing", "queued", "running", "completed", "failed", "blocked"];
 
 function taskCardHtml(task: Task): string {
   const project = state.projects.find(item => item.id === task.project_id);
   const ws = state.workspaces.find(item => item.id === task.workspace_id);
+  const archived = task.channel_retired === true || task.read_only_reason === "channel_retired";
   return `<article class="task-card" data-task="${task.id}">
     <div class="task-card-main">
       <div class="task-card-title"><span class="task-code">${escapeHTML(task.code || "")}</span><h3 data-task-title="${task.id}">${escapeHTML(task.title)}</h3><span class="status ${statusClass(task.status)}">${statusLabel(task.status)}</span></div>
@@ -1247,7 +1598,7 @@ function taskCardHtml(task: Task): string {
       </div>
     </div>
     <div class="task-card-actions">
-      ${task.read_only ? `<button type="button" data-retire-remote-task="${task.id}" class="icon-button danger" title="移除孤立只读任务">${icon("close")}</button><span class="status warn" title="所属设备：${escapeHTML(task.owner_device_id || "未知")}">只读</span>` : `<button type="button" data-edit-task-title="${task.id}" class="icon-button" title="编辑标题">${icon("edit")}</button><button type="button" data-delete-task="${task.id}" class="icon-button" title="删除任务">${icon("close")}</button>`}
+      ${archived ? `<span class="status warn">归档只读</span>` : task.read_only ? `<button type="button" data-retire-remote-task="${task.id}" class="icon-button danger" title="移除孤立只读任务">${icon("close")}</button><span class="status warn" title="所属设备：${escapeHTML(task.owner_device_id || "未知")}">只读</span>` : `<button type="button" data-edit-task-title="${task.id}" class="icon-button" title="编辑标题">${icon("edit")}</button><button type="button" data-delete-task="${task.id}" class="icon-button" title="删除任务">${icon("close")}</button>`}
     </div>
   </article>`;
 }
@@ -1268,13 +1619,13 @@ function tasksView(): string {
       <select id="task-filter-status" title="按状态筛选"><option value="">全部状态</option>${statusOptions}</select>
       <span class="task-count">${filtered.length} / ${state.tasks.length}</span>
     </div>
-    <div class="task-list">${rows || `<div class="empty">${state.tasks.length ? "没有符合条件的任务" : "创建第一个任务开始执行。"}</div>`}</div>
+    <div class="task-list">${rows || `<div class="empty">${state.tasks.length ? "没有符合条件的任务" : "创建第一个任务开始执行。"}</div>`}${loadMoreHTML("tasks")}</div>
     ${taskDialog()}
   </section>`);
 }
 
 function taskDialog(): string {
-  const projectID = state.projects[0]?.id || "";
+  const projectID = state.projects.find(project => !project.channel_retired)?.id || "";
   return taskDialogBase().replace(
     '<div id="task-git-isolation">',
     `<div class="two"><label>Knowledge<select name="knowledge_policy"><option value="inherit">\u7ee7\u627f Project</option><option value="enabled">\u5f00\u542f</option><option value="disabled">\u5173\u95ed</option></select></label><label class="proxy-toggle"><input name="proxy_enabled" type="checkbox">Backend \u4f7f\u7528\u5171\u4eab\u4ee3\u7406</label></div><fieldset class="task-skill-picker"><legend>Task Skills</legend><p>\u4ec5\u5c06\u9009\u4e2d Skill \u7684\u8def\u5f84\u5199\u5165 Context\uff0c\u672a\u9009\u4e2d\u7684 Skill \u4e0d\u4f1a\u88ab Agent \u770b\u5230\u3002</p><div id="task-skill-options">${taskSkillOptions(projectID)}</div></fieldset><div id="task-git-isolation">`,
@@ -1282,7 +1633,7 @@ function taskDialog(): string {
 }
 
 function taskDialogBase(): string {
-  return `<dialog id="task-dialog" class="wide"><form id="task-form"><div class="dialog-head"><h2>创建任务</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div><label>标题<input name="title" required></label><label>需求<textarea name="request" required></textarea></label><div class="two"><label>项目<select name="project_id" id="task-project" required>${state.projects.map(item => `<option value="${item.id}">${escapeHTML(item.name)}</option>`).join("")}</select></label><label>Workspace<select name="workspace_id" id="task-workspace" required></select></label></div>${runtimeFieldsHTML("task", state.models, state.codexAccounts)}<div class="two"><label>推理强度<select name="reasoning_effort" id="task-effort"></select></label><label>沙箱（文件访问）<select name="filesystem"><option value="workspace-write">工作区可写</option><option value="read-only">只读</option><option value="danger-full-access">完全访问</option></select></label></div><div class="two"><label>协作模式<select name="collaboration_mode"><option value="auto">Auto</option><option value="single">Single</option></select></label><label>最大 Agent 数<input name="max_agents" type="number" min="1" value="3"></label></div><label>审批<select name="approval"><option value="never">无需确认</option><option value="auto">自动批准（跳过权限检查）</option></select></label><div id="task-git-isolation"><label>任务隔离<select name="isolation" id="task-isolation"><option value="worktree">独立 Worktree（推荐）</option><option value="inplace">原地执行</option></select></label><div id="task-worktree-settings"><label>Worktree 根目录<input name="worktree_dir" id="task-worktree-dir" placeholder="默认：仓库上一级/.aha2-worktrees"></label><div class="field-help">系统会在根目录下追加 Task ID；切换为原地执行后不使用此配置。</div></div><div class="two" id="task-branches"><label>目标分支<input name="target_branch" placeholder="默认当前分支"></label><label>任务分支<input name="task_branch" placeholder="aha/task-name"></label></div></div><div class="dialog-actions"><button type="button" data-close>取消</button><button class="primary" type="submit">创建任务</button></div></form></dialog>`;
+  return `<dialog id="task-dialog" class="wide"><form id="task-form"><div class="dialog-head"><h2>创建任务</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div><label>标题<input name="title" required></label><label>需求<textarea name="request" required></textarea></label><div class="two"><label>项目<select name="project_id" id="task-project" required>${state.projects.filter(item => !item.channel_retired).map(item => `<option value="${item.id}">${escapeHTML(item.name)}</option>`).join("")}</select></label><label>Workspace<select name="workspace_id" id="task-workspace" required></select></label></div>${runtimeFieldsHTML("task", state.models, state.codexAccounts)}<div class="two"><label>推理强度<select name="reasoning_effort" id="task-effort"></select></label><label>沙箱（文件访问）<select name="filesystem"><option value="workspace-write">工作区可写</option><option value="read-only">只读</option><option value="danger-full-access">完全访问</option></select></label></div><div class="two"><label>协作模式<select name="collaboration_mode"><option value="auto">Auto</option><option value="single">Single</option></select></label><label>最大 Agent 数<input name="max_agents" type="number" min="1" value="3"></label></div><label>审批<select name="approval"><option value="never">无需确认</option><option value="auto">自动批准（跳过权限检查）</option></select></label><div id="task-git-isolation"><label>任务隔离<select name="isolation" id="task-isolation"><option value="worktree">独立 Worktree（推荐）</option><option value="inplace">原地执行</option></select></label><div id="task-worktree-settings"><label>Worktree 根目录<input name="worktree_dir" id="task-worktree-dir" placeholder="默认：仓库上一级/.aha2-worktrees"></label><div class="field-help">系统会在根目录下追加 Task ID；切换为原地执行后不使用此配置。</div></div><div class="two" id="task-branches"><label>目标分支<input name="target_branch" placeholder="默认当前分支"></label><label>任务分支<input name="task_branch" placeholder="aha/task-name"></label></div></div><div class="dialog-actions"><button type="button" data-close>取消</button><button type="submit" name="start_mode" value="manual">创建，稍后启动</button><button class="primary" type="submit" name="start_mode" value="immediate">创建并立即启动</button></div></form></dialog>`;
 }
 
 let slashCommandSelection = 0;
@@ -1537,7 +1888,10 @@ function taskCtxHtml(): string {
 }
 
 function taskDetailView(detail: TaskDetail): string {
-  const remoteReadOnly = Boolean(detail.task.read_only);
+  const archivedReadOnly = detail.task.channel_retired === true || detail.task.read_only_reason === "channel_retired";
+  const remoteReadOnly = Boolean(detail.task.read_only && !archivedReadOnly);
+  const readOnly = archivedReadOnly || remoteReadOnly;
+  const draft = detail.task.status === "draft";
   const activeTurn = (detail.turns || []).find(item => item.agent_id === state.selectedTaskAgent && isActiveTurn(item.status));
   const taskFailed = detail.task.status === "failed";
   const selectedAgent = detail.agents.find(item => item.agent_id === state.selectedTaskAgent);
@@ -1546,12 +1900,14 @@ function taskDetailView(detail: TaskDetail): string {
   const project = state.projects.find(item => item.id === detail.task.project_id);
   const workspace = state.workspaces.find(item => item.id === detail.task.workspace_id);
   const taskMeta = `${project?.name || "-"} · ${workspace?.name || "-"} · ${detail.task.collaboration_mode || "auto"} · ${detail.task.max_agents || 3} Agents`;
+  const composerDisabled = Boolean(runtimeError || readOnly || draft);
   const chat = `<section class="conversation">
-    ${remoteReadOnly ? `<div class="task-failure-banner remote-readonly"><strong>其他设备的只读 Task</strong><span>所属设备：${escapeHTML(detail.task.owner_device_id || "未知")}</span><small>可查看同步历史，不能在本机执行或修改</small><div class="remote-readonly-actions"><button type="button" id="takeover-task">${icon("copy")}接管到本机</button><button type="button" class="danger" data-retire-remote-task="${detail.task.id}">${icon("close")}移除孤立任务</button></div></div>` : ""}
+    ${archivedReadOnly ? `<div class="task-failure-banner remote-readonly"><strong>渠道归档只读</strong><span>该渠道实例已归档</span><small>历史内容可查看和导出，不能继续执行或修改</small></div>` : remoteReadOnly ? `<div class="task-failure-banner remote-readonly"><strong>其他设备的只读 Task</strong><span>所属设备：${escapeHTML(detail.task.owner_device_id || "未知")}</span><small>可查看同步历史，不能在本机执行或修改</small><div class="remote-readonly-actions"><button type="button" id="takeover-task">${icon("copy")}接管到本机</button><button type="button" class="danger" data-retire-remote-task="${detail.task.id}">${icon("close")}移除孤立任务</button></div></div>` : ""}
     <div id="task-failure-slot">${taskFailureBannerHtml(detail)}</div>
+    ${draft ? `<div class="task-failure-banner task-draft-banner"><strong>任务尚未启动</strong><span>可以先配置 Agent、Skill 和硬件调试，准备好后再启动。</span><button type="button" id="start-task" class="primary">${icon("play")}启动任务</button></div>` : ""}
     <div class="messages" id="conversation-list">${conversationListHtml()}</div>
     <div id="agent-turn-slot">${renderAgentTurnCard(detail, state.taskRealtimeState, state.taskContext?.context.metrics)}</div>
-    <form id="message-form" class="composer${runtimeError || remoteReadOnly ? " runtime-invalid" : ""}">${runtimeError || remoteReadOnly ? `<div class="composer-runtime-warning">${escapeHTML(remoteReadOnly ? "该 Task 属于其他设备，本机只读" : runtimeError)}</div>` : ""}${renderComposerTools(detail, state.selectedTaskAgent, state.taskCategories, state.taskConversation.length)}<div id="slash-command-menu" class="slash-command-menu" ${matchingTaskSlashCommands(state.taskDraft).length ? "" : "hidden"}>${slashCommandMenuHtml(state.taskDraft)}</div>${renderAttachmentComposer(Boolean(runtimeError || remoteReadOnly))}<textarea name="content" placeholder="${escapeHTML(remoteReadOnly ? "只读 Task" : runtimeError || (activeTurn ? `${state.selectedTaskAgent} 正在执行，发送后将排队` : taskFailed ? "输入消息重试，或输入 /reopen" : `发送给 ${state.selectedTaskAgent}，输入 / 查看命令`))}" ${runtimeError || remoteReadOnly ? "disabled" : ""}>${escapeHTML(state.taskDraft)}</textarea><button id="message-send" class="primary" aria-label="发送" ${runtimeError || remoteReadOnly ? "disabled" : ""}>${icon("send")}<span class="send-label">发送</span></button></form>
+    <form id="message-form" class="composer${composerDisabled ? " runtime-invalid" : ""}">${composerDisabled ? `<div class="composer-runtime-warning">${escapeHTML(draft ? "先启动任务后再发送消息" : archivedReadOnly ? "渠道实例已归档，此 Task 只读" : remoteReadOnly ? "该 Task 属于其他设备，本机只读" : runtimeError)}</div>` : ""}${renderComposerTools(detail, state.selectedTaskAgent, state.taskCategories, state.taskConversation.length)}<div id="slash-command-menu" class="slash-command-menu" ${matchingTaskSlashCommands(state.taskDraft).length ? "" : "hidden"}>${slashCommandMenuHtml(state.taskDraft)}</div>${renderAttachmentComposer(composerDisabled)}<textarea name="content" placeholder="${escapeHTML(draft ? "启动任务后可发送消息" : readOnly ? "只读 Task" : runtimeError || (activeTurn ? `${state.selectedTaskAgent} 正在执行，发送后将排队` : taskFailed ? "输入消息重试，或输入 /reopen" : `发送给 ${state.selectedTaskAgent}，输入 / 查看命令`))}" ${composerDisabled ? "disabled" : ""}>${escapeHTML(state.taskDraft)}</textarea><button id="message-send" class="primary" aria-label="发送" ${composerDisabled ? "disabled" : ""}>${icon("send")}<span class="send-label">发送</span></button></form>
   </section>`;
   const toolLayout = state.taskTool ? ` task-tool-open task-tool-${state.taskToolMode}` : "";
   return shell(`<section class="task-screen">
@@ -1650,7 +2006,9 @@ function updateTaskLiveRegions(): void {
     taskStatus.textContent = statusLabel(detail.task.status);
   }
   const toolBody = document.querySelector<HTMLElement>("#task-tool-panel-body");
-  if (toolBody && state.taskTool && state.taskTool !== "hardware") {
+  if (toolBody && state.taskTool === "hardware") {
+    refreshHardwarePanel(detail, setMessage);
+  } else if (toolBody && state.taskTool) {
     replaceRegionHTML(toolBody, renderTaskToolContent(state.taskTool, detail, taskCtxHtml()));
     bindSessionActions();
   }
@@ -1668,7 +2026,7 @@ function render(): void {
   if (!app) return;
   document.body.classList.toggle("task-view-active", Boolean(state.selectedTask));
   if (state.loading) {
-    app.innerHTML = `<div class="loading">AHA2 正在加载...</div>`;
+    app.innerHTML = `<div class="loading boot-loading"><span class="brand-mark">A</span><strong>AHA2</strong><small>正在连接服务…</small></div>`;
     return;
   }
   if (!state.auth?.authenticated) {
@@ -1712,17 +2070,17 @@ function render(): void {
 		channels: () => shell(renderChannels(state.channelProviders, state.channelInstances, {models: state.models, accounts: state.codexAccounts, projects: state.projects, workspaces: state.workspaces, knowledge: state.knowledge, libraries: state.knowledgeLibraries})),
       models: modelsView,
       tasks: tasksView,
-      knowledge: () => shell(renderKnowledgeWorkspace({
+      knowledge: () => shell(`${renderKnowledgeWorkspace({
         projects: state.projects,
         workspaces: state.workspaces,
         knowledge: state.knowledge,
         libraries: state.knowledgeLibraries,
         proposals: state.knowledgeProposals,
         reviewSettings: state.knowledgeReviewSettings,
-        refreshData: loadAll,
+        refreshData: loadKnowledgeData,
         render,
         setMessage,
-      })),
+      })}${loadMoreHTML("knowledge")}`),
       prompts: () => advancedSubview(renderPromptAdmin()),
       proxy: () => shell(renderProxySettings(state.proxySettings)),
       sync: () => advancedSubview(renderSyncSettings(state.syncSettings, state.syncState, state.syncPending, state.syncConflicts, state.syncPreview, state.syncRun)),
@@ -1846,16 +2204,27 @@ function bindCommon(): void {
   bindChannels({
 		context: {models: state.models, accounts: state.codexAccounts, projects: state.projects, workspaces: state.workspaces, knowledge: state.knowledge, libraries: state.knowledgeLibraries},
     refresh: async () => {
-      const [providers, instances, projects, workspaces] = await Promise.all([
-        api.channelProviders(), api.channelInstances(), api.projects(), api.workspaces(),
+      const [providers, instances, projects, workspaces, tasks] = await Promise.all([
+        api.channelProviders(), api.channelInstances(), api.projects({limit: initialListPageSize}), api.workspaces(), api.tasks("", {limit: initialListPageSize}),
       ]);
       state.channelProviders = providers.providers || [];
       state.channelInstances = instances.instances || [];
       state.projects = projects.projects || [];
       state.workspaces = workspaces.workspaces || [];
+      state.tasks = tasks.tasks || [];
+      listPages.projects = {cursor: projects.next_cursor || "", hasMore: Boolean(projects.has_more), loadingMore: false};
+      listPages.tasks = {cursor: tasks.next_cursor || "", hasMore: Boolean(tasks.has_more), loadingMore: false};
       render();
     },
-    setMessage,
+		setMessage: (kind, message) => setMessage(kind === "error" ? "error" : "notice", message),
+		openProject: projectID => {
+			state.view = "projects";
+			state.selectedProject = state.projects.find(project => project.id === projectID) || null;
+			state.dialogProjectID = projectID;
+			state.selectedTask = null;
+			closeEvents();
+			render();
+		},
   });
   bindRuntimeFields("task", state.models, state.codexAccounts, syncTaskGitIsolation);
   bindRuntimeFields("takeover-task", state.models, state.codexAccounts, syncTakeoverTaskBackend);
@@ -1867,6 +2236,13 @@ function bindCommon(): void {
     state.dialogProjectID = "";
     closeEvents();
     render();
+    void ensureViewData(state.view).then(() => render());
+  }));
+  document.querySelector<HTMLElement>("#retry-view-data")?.addEventListener("click", () => {
+    void ensureViewData(state.view, true).then(() => render());
+  });
+  document.querySelectorAll<HTMLElement>("[data-load-more]").forEach(button => button.addEventListener("click", () => {
+    void loadNextPage(button.dataset.loadMore as "projects" | "tasks" | "knowledge");
   }));
   document.querySelector("#owner-avatar")?.addEventListener("click", () => {
     ownerAvatarClicks++;
@@ -1878,6 +2254,7 @@ function bindCommon(): void {
       state.selectedProject = null;
       closeEvents();
       render();
+      void ensureViewData(state.view).then(() => render());
       return;
     }
     ownerAvatarResetTimer = window.setTimeout(() => { ownerAvatarClicks = 0; }, 1800);
@@ -1904,6 +2281,7 @@ function bindCommon(): void {
     state.view = "models";
     state.selectedProject = null;
     render();
+    void ensureViewData("models").then(() => render());
   });
   document.querySelectorAll<HTMLElement>("[data-dialog]").forEach(button => button.addEventListener("click", () => {
     if (button.dataset.dialog === "workspace") {
@@ -1995,9 +2373,13 @@ function bindCommon(): void {
     const payload = Object.fromEntries(form.entries()) as Record<string, string>;
     const editId = payload["project_edit_id"] || "";
     delete payload["project_edit_id"];
-    if (editId) await api.updateProject(editId, payload);
-    else await api.createProject(payload);
-  });
+    const result = editId ? await api.updateProject(editId, payload) : await api.createProject(payload);
+    state.projects = editId
+      ? state.projects.map(item => item.id === result.project.id ? result.project : item)
+      : [result.project, ...state.projects.filter(item => item.id !== result.project.id)];
+    if (state.selectedProject?.id === result.project.id) state.selectedProject = result.project;
+    setMessage("notice", editId ? "项目已更新" : "项目已创建");
+  }, "保存中", false);
   bindForm("#workspace-form", async form => {
     const payload = Object.fromEntries(form.entries()) as Record<string, string>;
     const editId = payload["ws_edit_id"] || "";
@@ -2008,16 +2390,21 @@ function bindCommon(): void {
       ssh_port: Number(payload.ssh_port || 22),
     };
     delete body.ws_edit_id;
+    let result;
     if (editId) {
-      await api.updateWorkspace(editId, {
+      result = await api.updateWorkspace(editId, {
         ...body,
         clear_ssh_password: payload.clear_ssh_password === "on",
       });
     } else {
       delete body.clear_ssh_password;
-      await api.createWorkspace(body);
+      result = await api.createWorkspace(body);
     }
-  });
+    state.workspaces = editId
+      ? state.workspaces.map(item => item.id === result.workspace.id ? result.workspace : item)
+      : [result.workspace, ...state.workspaces.filter(item => item.id !== result.workspace.id)];
+    setMessage("notice", editId ? "Workspace 已更新" : "Workspace 已创建");
+  }, "保存中", false);
   document.querySelector("#save-provider")?.addEventListener("click", () => {
     const button = document.querySelector<HTMLElement>("#save-provider");
     const editId = String((document.querySelector("#provider-edit-id") as HTMLInputElement)?.value || "");
@@ -2047,64 +2434,8 @@ function bindCommon(): void {
       return;
     }
     const results = document.querySelector<HTMLElement>("#model-detect-results");
-    if (!results) return;
-    void runWithFeedback(button, "检测中", async () => {
-      const response = await api.detectModels({provider_id: providerID});
-      const models = response.models || [];
-      if (!models.length) {
-        results.innerHTML = `<div class="detect-status">未检测到模型。</div>`;
-        return;
-      }
-      const anthropicNote = response.anthropic_base_url ? `<div class="detect-status">检测到 Anthropic 端点：<code>${escapeHTML(response.anthropic_base_url)}</code></div>` : "";
-      results.innerHTML = `<div class="detect-status">检测到 ${models.length} 个模型（认证：${escapeHTML(response.auth_style)}）。支持全选/全不选与搜索过滤。</div>${anthropicNote}<div class="detect-toolbar"><input type="search" id="detect-search" placeholder="搜索模型名称..."><button type="button" id="detect-select-all">全选</button><button type="button" id="detect-select-none">全不选</button></div><div class="detected-list">${models.map(item => `<div class="detected-item" data-model="${escapeHTML(item.id)}"><input type="checkbox" class="detected-model" value="${escapeHTML(item.id)}" checked><span><strong>${escapeHTML(item.id)}</strong>${item.max_input_tokens ? `<small>context ${Math.round(item.max_input_tokens / 1000)}K</small>` : ""}<span class="proto-badges">${protoBadges(item)}</span>${protoChecks(item)}</span></div>`).join("")}</div><div class="dialog-actions"><button type="button" id="add-selected-models" class="primary">添加所选模型</button></div>`;
-      document.querySelector("#detect-search")?.addEventListener("input", event => {
-        const query = String((event.target as HTMLInputElement).value || "").trim().toLowerCase();
-        document.querySelectorAll<HTMLElement>("#model-detect-results .detected-item").forEach(row => {
-          const model = String(row.dataset.model || "").toLowerCase();
-          row.style.display = !query || model.includes(query) ? "" : "none";
-        });
-      });
-      document.querySelector("#detect-select-all")?.addEventListener("click", () => {
-        document.querySelectorAll<HTMLElement>("#model-detect-results .detected-item").forEach(row => {
-          if (row.style.display === "none") return;
-          const box = row.querySelector<HTMLInputElement>(".detected-model");
-          if (box) box.checked = true;
-        });
-      });
-      document.querySelector("#detect-select-none")?.addEventListener("click", () => {
-        document.querySelectorAll<HTMLInputElement>("#model-detect-results .detected-model").forEach(box => {
-          box.checked = false;
-        });
-      });
-      document.querySelector<HTMLElement>("#add-selected-models")?.addEventListener("click", () => {
-        const checked = [...document.querySelectorAll<HTMLInputElement>("#model-detect-results input.detected-model:checked")].map(input => input.value);
-        if (!checked.length) {
-          setMessage("error", "请至少选择一个模型");
-          return;
-        }
-        const picks = checked.map(id => {
-          const row = document.querySelector<HTMLInputElement>(`#model-detect-results input.detected-model[value="${CSS.escape(id)}"]`)?.closest(".detected-item");
-          const wireAPIs = [...(row?.querySelectorAll<HTMLInputElement>(".proto-checks input:checked") || [])].map(input => input.value);
-          const detected = models.find(item => item.id === id);
-          return {
-            id,
-            wire_apis: wireAPIs.length ? wireAPIs : ["responses"],
-            max_input_tokens: detected?.max_input_tokens || 0,
-            max_output_tokens: detected?.max_output_tokens || 0,
-          };
-        });
-        const addButton = document.querySelector<HTMLElement>("#add-selected-models");
-        void runWithFeedback(addButton, "添加中", async () => {
-          const result = await api.addModels({provider_id: providerID, models: picks, anthropic_base_url: response.anthropic_base_url || ""});
-          document.querySelector<HTMLDialogElement>("#model-dialog")?.close();
-          const added = (result.models || []).length;
-          const skipped = result.skipped || 0;
-          setMessage("notice", skipped ? `已添加 ${added} 个模型，跳过 ${skipped} 个已存在` : `已添加 ${added} 个模型`);
-          await loadAll();
-          render();
-        });
-      });
-    });
+    if (!results || !button) return;
+    void startModelDetection(providerID, button, results);
   });
   document.querySelectorAll<HTMLElement>("[data-delete-provider]").forEach(button => button.addEventListener("click", async event => {
     event.stopPropagation();
@@ -2120,12 +2451,18 @@ function bindCommon(): void {
   document.querySelectorAll<HTMLElement>("[data-delete-project]").forEach(button => button.addEventListener("click", async event => {
     event.stopPropagation();
     const id = button.dataset.deleteProject!;
+		const project = state.projects.find(item => item.id === id);
+		if (project?.channel_retired) {
+			void runWithFeedback(button, "永久删除中", async () => {
+				if (await purgeArchivedChannelProject(project)) render();
+			});
+			return;
+		}
     if (!window.confirm("删除该项目及其所有 Workspace / 任务？已绑定知识库会自动解绑并保留。此操作不可恢复。")) return;
     void runWithFeedback(button, "删除中", async () => {
       await api.deleteProject(id);
-      if (state.selectedProject?.id === id) state.selectedProject = null;
+			forgetProject(id);
       setMessage("notice", "项目已删除");
-      await loadAll();
       render();
     });
   }));
@@ -2135,8 +2472,9 @@ function bindCommon(): void {
     if (!window.confirm("删除该 Workspace 及其所有任务？此操作不可恢复。")) return;
     void runWithFeedback(button, "删除中", async () => {
       await api.deleteWorkspace(id);
+      state.workspaces = state.workspaces.filter(item => item.id !== id);
+      state.tasks = state.tasks.filter(item => item.workspace_id !== id);
       setMessage("notice", "Workspace 已删除");
-      await loadAll();
       render();
     });
   }));
@@ -2150,8 +2488,8 @@ function bindCommon(): void {
         state.selectedTask = null;
         closeEvents();
       }
+      state.tasks = state.tasks.filter(item => item.id !== id);
       setMessage("notice", "任务已删除");
-      await loadAll();
       render();
     });
   }));
@@ -2232,14 +2570,20 @@ function bindCommon(): void {
   }));
   document.querySelector("#delete-project")?.addEventListener("click", () => {
     if (!state.selectedProject) return;
-    const id = state.selectedProject.id;
+		const project = state.selectedProject;
+    const id = project.id;
+		const button = document.querySelector<HTMLElement>("#delete-project");
+		if (project.channel_retired) {
+			void runWithFeedback(button, "永久删除中", async () => {
+				if (await purgeArchivedChannelProject(project)) render();
+			});
+			return;
+		}
     if (!window.confirm("删除该项目及其所有 Workspace / 任务？已绑定知识库会自动解绑并保留。此操作不可恢复。")) return;
-    const button = document.querySelector<HTMLElement>("#delete-project");
     void runWithFeedback(button, "删除中", async () => {
       await api.deleteProject(id);
-      state.selectedProject = null;
+			forgetProject(id);
       setMessage("notice", "项目已删除");
-      await loadAll();
       render();
     });
   });
@@ -2306,9 +2650,23 @@ function bindCommon(): void {
   bindForm("#task-form", async form => {
     const payload = Object.fromEntries(form.entries()) as Record<string, string>;
     const result = await api.createTask({...payload, skill_ids: form.getAll("skill_ids").map(String), max_agents: Number(payload.max_agents || 3), proxy_enabled: payload.proxy_enabled === "on"});
+    state.tasks = [result.task, ...state.tasks.filter(item => item.id !== result.task.id)];
+    setMessage("notice", result.task.status === "draft" ? "任务草稿已创建，可先完成配置" : "任务已创建并启动");
     await openTask(result.task.id);
     if (result.start_error) setMessage("error", `Task 已创建，但首个 Turn 启动失败：${result.start_error}`);
-  }, "创建中");
+  }, "创建中", false);
+  document.querySelector<HTMLElement>("#start-task")?.addEventListener("click", () => {
+    if (!state.selectedTask) return;
+    const taskID = state.selectedTask.task.id;
+    const button = document.querySelector<HTMLElement>("#start-task");
+    void runWithFeedback(button, "启动中", async () => {
+      const result = await api.startTask(taskID);
+      await openTask(taskID);
+      setMessage("notice", "任务已启动");
+      if (result.start_error) setMessage("error", `任务已启动，但首个 Turn 启动失败：${result.start_error}`);
+      render();
+    });
+  });
   document.querySelectorAll<HTMLElement>("[data-detect]").forEach(button => button.addEventListener("click", () => {
     const id = button.dataset.detect!;
     void runWithFeedback(button, "检测中", async () => {
@@ -2325,10 +2683,30 @@ function bindCommon(): void {
       }
     });
   }));
-  document.querySelectorAll<HTMLElement>("[data-task]").forEach(button => button.addEventListener("click", async () => {
-    await openTask(button.dataset.task!);
-    render();
-  }));
+  document.querySelectorAll<HTMLElement>("[data-task]").forEach(button => {
+	button.addEventListener("pointerdown", () => {
+	  taskListPointerActive = true;
+	});
+	button.addEventListener("click", async event => {
+	  if ((event.target as HTMLElement).closest(".task-card-actions")) return;
+	  const taskID = button.dataset.task!;
+	  if (openingTaskID) return;
+	  openingTaskID = taskID;
+	  button.classList.add("opening");
+	  button.setAttribute("aria-busy", "true");
+	  try {
+		await openTask(taskID);
+		render();
+	  } catch (error) {
+		setMessage("error", error instanceof Error ? error.message : String(error));
+		render();
+	  } finally {
+		openingTaskID = "";
+		button.classList.remove("opening");
+		button.removeAttribute("aria-busy");
+	  }
+	});
+  });
   bindTaskAgentControls();
   document.querySelector<HTMLSelectElement>("#composer-agent")?.addEventListener("change", async event => {
     await selectTaskAgent(event.currentTarget.value);
@@ -2404,6 +2782,19 @@ function bindCommon(): void {
       await loadAll();
       await openTask(result.task.id);
       render();
+    });
+  });
+  document.querySelector<HTMLButtonElement>("[data-channel-project-export]")?.addEventListener("click", event => {
+    const button = event.currentTarget;
+    const instanceID = button.dataset.channelProjectExport || "";
+    if (!instanceID) return;
+    button.disabled = true;
+    void exportRetiredChannelInstance(instanceID).then(() => {
+      setMessage("notice", "归档 JSON 已生成并开始下载");
+    }).catch(error => {
+      setMessage("error", error instanceof Error ? error.message : String(error));
+    }).finally(() => {
+      button.disabled = false;
     });
   });
   bindForm("#change-password-form", async form => {
@@ -2650,7 +3041,7 @@ function bindCommon(): void {
     knowledge: state.knowledge,
     libraries: state.knowledgeLibraries,
     proposals: state.knowledgeProposals,
-    refreshData: loadAll,
+    refreshData: loadKnowledgeData,
     render,
     setMessage,
   });
@@ -2675,7 +3066,7 @@ function bindSessionActions(): void {
   }));
 }
 
-function bindForm(selector: string, action: (form: FormData) => Promise<void>, pendingLabel = "提交中"): void {
+function bindForm(selector: string, action: (form: FormData) => Promise<void>, pendingLabel = "提交中", refreshAfter = true): void {
   document.querySelector<HTMLFormElement>(selector)?.addEventListener("submit", async event => {
     event.preventDefault();
     const form = event.currentTarget;
@@ -2693,9 +3084,12 @@ function bindForm(selector: string, action: (form: FormData) => Promise<void>, p
     }
     form.querySelector<HTMLElement>("[data-form-error]")?.remove();
     try {
-      await action(new FormData(form));
+      const payload = new FormData(form);
+      if (submitButton?.name) payload.set(submitButton.name, submitButton.value);
+      await action(payload);
       dialog?.close();
-      await refresh();
+      if (refreshAfter) await refresh();
+      else render();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setMessage("error", message);
@@ -2888,6 +3282,13 @@ function flushDeferredRender(): void {
 }
 
 document.addEventListener("close", event => {
+  if (event.target instanceof HTMLDialogElement && event.target.id === "model-dialog" && activeModelDetection) {
+    const session = activeModelDetection;
+    session.source.close();
+    session.status = "cancelling";
+    activeModelDetection = null;
+    void api.cancelModelDetectionJob(session.providerID, session.jobID).catch(() => undefined);
+  }
   if (event.target instanceof HTMLDialogElement) flushDeferredRender();
 }, true);
 
@@ -2899,16 +3300,43 @@ let globalEvents: EventSource | null = null;
 
 async function refreshListData(): Promise<void> {
   if (!state.auth?.authenticated) return;
+  if (listRefreshInFlight) {
+	listRefreshQueued = true;
+	return;
+  }
+  listRefreshInFlight = true;
   try {
-    const [tasks, projects, workspaces] = await Promise.all([api.tasks(), api.projects(), api.workspaces()]);
-    state.tasks = tasks.tasks || [];
-    state.projects = projects.projects || [];
-    state.workspaces = workspaces.workspaces || [];
-    if (!state.selectedTask) render();
-  } catch {
-    // transient network/backend errors are ignored
+	do {
+	  listRefreshQueued = false;
+	  try {
+		const [tasks, projects, workspaces] = await Promise.all([api.tasks("", {limit: initialListPageSize}), api.projects({limit: initialListPageSize}), api.workspaces()]);
+		state.tasks = tasks.tasks || [];
+		state.projects = projects.projects || [];
+		state.workspaces = workspaces.workspaces || [];
+		listPages.projects = {cursor: projects.next_cursor || "", hasMore: Boolean(projects.has_more), loadingMore: false};
+		listPages.tasks = {cursor: tasks.next_cursor || "", hasMore: Boolean(tasks.has_more), loadingMore: false};
+		if (!state.selectedTask) {
+		  if (taskListPointerActive) state.renderPending = true;
+		  else render();
+		}
+	  } catch {
+		// Transient failures are retried by a queued event or SSE reconnect.
+	  }
+	} while (listRefreshQueued);
+  } finally {
+	listRefreshInFlight = false;
   }
 }
+
+window.addEventListener("pointerup", () => {
+  if (!taskListPointerActive) return;
+  taskListPointerActive = false;
+  window.setTimeout(flushDeferredRender, 0);
+});
+window.addEventListener("pointercancel", () => {
+  taskListPointerActive = false;
+  flushDeferredRender();
+});
 
 function openGlobalEvents(): void {
   if (globalEvents) return;
@@ -2939,4 +3367,5 @@ window.addEventListener("resize", syncVisualViewportHeight);
 window.visualViewport?.addEventListener("resize", syncVisualViewportHeight);
 window.visualViewport?.addEventListener("scroll", syncVisualViewportHeight);
 window.setInterval(updateSystemUptime, 30_000);
+render();
 void bootstrap();

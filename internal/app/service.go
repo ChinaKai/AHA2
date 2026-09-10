@@ -47,6 +47,7 @@ type ExecutionEvent struct {
 }
 
 type MemoryPatch struct {
+	CurrentGoal  *string  `json:"current_goal,omitempty"`
 	Decisions    []string `json:"decisions"`
 	Facts        []string `json:"facts"`
 	Excluded     []string `json:"excluded"`
@@ -183,6 +184,7 @@ type CreateTaskInput struct {
 	MaxAgents         int
 	KnowledgePolicy   string
 	SkillIDs          []string
+	StartMode         string
 }
 
 func NewService(database *store.Store, secretStore *secrets.FileStore, executor Executor) *Service {
@@ -250,6 +252,13 @@ func (s *Service) CreateTask(ctx context.Context, input CreateTaskInput) (domain
 	if input.Title == "" || input.Request == "" {
 		return domain.Task{}, fmt.Errorf("task title and request are required")
 	}
+	startMode := strings.TrimSpace(input.StartMode)
+	if startMode == "" {
+		startMode = "immediate"
+	}
+	if startMode != "immediate" && startMode != "manual" {
+		return domain.Task{}, fmt.Errorf("invalid task start mode")
+	}
 	project, err := s.store.Project(ctx, input.ProjectID)
 	if err != nil {
 		return domain.Task{}, fmt.Errorf("project: %w", err)
@@ -312,6 +321,10 @@ func (s *Service) CreateTask(ctx context.Context, input CreateTaskInput) (domain
 	if err != nil {
 		return domain.Task{}, err
 	}
+	taskStatus := domain.TaskPreparing
+	if startMode == "manual" {
+		taskStatus = domain.TaskDraft
+	}
 	task := domain.Task{
 		ID:                      strings.TrimSpace(input.ID),
 		ProjectID:               project.ID,
@@ -319,7 +332,7 @@ func (s *Service) CreateTask(ctx context.Context, input CreateTaskInput) (domain
 		Title:                   input.Title,
 		OriginalRequest:         input.Request,
 		CurrentGoal:             input.Request,
-		Status:                  domain.TaskPreparing,
+		Status:                  taskStatus,
 		TargetBranch:            input.TargetBranch,
 		BaseCommit:              input.BaseCommit,
 		TaskBranch:              input.TaskBranch,
@@ -344,6 +357,38 @@ func (s *Service) CreateTask(ctx context.Context, input CreateTaskInput) (domain
 		return domain.Task{}, err
 	}
 	task = created
+	if startMode == "manual" {
+		s.emit(ctx, task.ID, "task", task.ID, "task_created", map[string]any{"title": task.Title, "workspace_id": task.WorkspaceID, "start_mode": startMode})
+		return task, nil
+	}
+	return s.prepareAndActivateTask(ctx, workspace, task, "task_created")
+}
+
+// StartTask activates a manually-created Draft exactly once. The status
+// compare-and-swap happens before workspace preparation so concurrent start
+// requests cannot create duplicate worktrees or initial Turns.
+func (s *Service) StartTask(ctx context.Context, taskID string) (domain.Task, error) {
+	task, err := s.store.Task(ctx, strings.TrimSpace(taskID))
+	if err != nil {
+		return domain.Task{}, err
+	}
+	if task.Status != domain.TaskDraft {
+		return task, fmt.Errorf("task is not a draft")
+	}
+	workspace, err := s.store.Workspace(ctx, task.WorkspaceID)
+	if err != nil {
+		return domain.Task{}, fmt.Errorf("workspace: %w", err)
+	}
+	now := s.now().UTC()
+	if err := s.store.UpdateTaskStatus(ctx, task.ID, domain.TaskDraft, domain.TaskPreparing, timeString(now), ""); err != nil {
+		return domain.Task{}, err
+	}
+	task.Status = domain.TaskPreparing
+	return s.prepareAndActivateTask(ctx, workspace, task, "task_started")
+}
+
+func (s *Service) prepareAndActivateTask(ctx context.Context, workspace domain.Workspace, task domain.Task, eventType string) (domain.Task, error) {
+	now := s.now().UTC()
 	if s.preparer != nil {
 		prepared, prepareErr := s.preparer.Prepare(ctx, workspace, task.ID, task.TargetBranch, task.TaskBranch, task.Isolation, task.WorktreeDir)
 		if prepareErr != nil {
@@ -363,7 +408,7 @@ func (s *Service) CreateTask(ctx context.Context, input CreateTaskInput) (domain
 		return domain.Task{}, err
 	}
 	task.Status = domain.TaskActive
-	s.emit(ctx, task.ID, "task", task.ID, "task_created", map[string]any{"title": task.Title, "workspace_id": task.WorkspaceID})
+	s.emit(ctx, task.ID, "task", task.ID, eventType, map[string]any{"title": task.Title, "workspace_id": task.WorkspaceID})
 	return task, nil
 }
 
@@ -479,6 +524,25 @@ func (s *Service) submitAgentMessage(ctx context.Context, taskID, agentID, conte
 	task, err := s.store.Task(ctx, taskID)
 	if err != nil {
 		return domain.Turn{}, err
+	}
+	if task.Status == domain.TaskDraft {
+		return domain.Turn{}, fmt.Errorf("task must be started before sending messages")
+	}
+	// Persist the latest owner instruction before prompt construction. A fresh
+	// Backend Session must not fall back to the immutable original request.
+	if agentID == "main" && content != "" && content != task.OriginalRequest {
+		now := s.now().UTC()
+		if err := s.store.UpdateTaskGoal(ctx, task.ID, content, timeString(now)); err != nil {
+			return domain.Turn{}, err
+		}
+		task.CurrentGoal = content
+		if memory, memoryErr := s.store.TaskMemory(ctx, task.ID); memoryErr == nil {
+			memory.CurrentGoal = content
+			memory.UpdatedAt = now
+			if err := s.store.UpsertTaskMemory(ctx, memory); err != nil {
+				return domain.Turn{}, err
+			}
+		}
 	}
 	if err := s.store.ValidateDraftAttachments(ctx, task.ID, attachmentIDs); err != nil {
 		return domain.Turn{}, err
@@ -1330,9 +1394,19 @@ func elapsedBetween(start, end time.Time) int64 {
 	return end.Sub(start).Milliseconds()
 }
 
-func (s *Service) applyMemoryPatch(ctx context.Context, task domain.Task, memory domain.TaskMemory, patch MemoryPatch) {
+func (s *Service) applyMemoryPatch(ctx context.Context, task domain.Task, memory domain.TaskMemory, patch MemoryPatch) error {
 	memory.TaskID = task.ID
 	memory.CurrentGoal = task.CurrentGoal
+	if patch.CurrentGoal != nil {
+		goal := strings.TrimSpace(*patch.CurrentGoal)
+		if goal == "" || len([]rune(goal)) > 2000 {
+			return fmt.Errorf("current goal is invalid")
+		}
+		if err := s.store.UpdateTaskGoal(ctx, task.ID, goal, timeString(s.now().UTC())); err != nil {
+			return err
+		}
+		memory.CurrentGoal = goal
+	}
 	memory.Decisions = appendUnique(memory.Decisions, patch.Decisions...)
 	memory.Facts = appendUnique(memory.Facts, patch.Facts...)
 	memory.Excluded = appendUnique(memory.Excluded, patch.Excluded...)
@@ -1340,7 +1414,7 @@ func (s *Service) applyMemoryPatch(ctx context.Context, task domain.Task, memory
 	memory.Verification = appendUnique(memory.Verification, patch.Verification...)
 	memory.NextActions = appendUnique(memory.NextActions, patch.NextActions...)
 	memory.UpdatedAt = s.now().UTC()
-	_ = s.store.UpsertTaskMemory(ctx, memory)
+	return s.store.UpsertTaskMemory(ctx, memory)
 }
 
 func (s *Service) createKnowledgeCandidates(ctx context.Context, projectID, taskID, turnID, branch, productLineID string, candidates []KnowledgeCandidate) ([]domain.KnowledgeEntry, []domain.KnowledgeProposal, error) {
@@ -1383,12 +1457,19 @@ func (s *Service) createKnowledgeCandidates(ctx context.Context, projectID, task
 		entry.Slug = store.KnowledgeSlug(entry.Title, entry.ID)
 		applyKnowledgeHierarchy(&entry, candidate)
 		baseRevision := 0
+		foreignRevision := false
 		if strings.TrimSpace(candidate.EntryID) != "" {
 			existing, err := s.store.Knowledge(ctx, candidate.EntryID)
 			if err != nil {
 				return nil, nil, err
 			}
 			entry.ID, entry.CreatedAt = existing.ID, existing.CreatedAt
+			entry.Scope, entry.ProjectID = existing.Scope, existing.ProjectID
+			foreignRevision = existing.Scope == "project" && existing.ProjectID != projectID
+			if foreignRevision {
+				entry.BoundProjectID, entry.BindingMode = projectID, "project"
+				entry.BranchScope, entry.ProductLineID = existing.BranchScope, existing.ProductLineID
+			}
 			entry.ParentID, entry.Slug = existing.ParentID, existing.Slug
 			entry.SortOrder, entry.IsIndex = existing.SortOrder, existing.IsIndex
 			applyKnowledgeHierarchy(&entry, candidate)
@@ -1398,10 +1479,14 @@ func (s *Service) createKnowledgeCandidates(ctx context.Context, projectID, task
 			baseRevision = existing.Revision
 			entry.Revision = baseRevision + 1
 		}
+		proposalReviewMode := reviewMode
+		if foreignRevision {
+			proposalReviewMode = "manual"
+		}
 		proposal := domain.KnowledgeProposal{
 			ID: domain.NewID("knowledge_proposal"), EntryID: entry.ID, BaseRevision: baseRevision, Proposed: entry,
 			SourceTaskID: taskID, SourceTurnID: turnID, Status: domain.KnowledgeProposalPending,
-			ReviewMode: reviewMode, CreatedAt: now, UpdatedAt: now,
+			ReviewMode: proposalReviewMode, CreatedAt: now, UpdatedAt: now,
 		}
 		created, err := s.store.CreateKnowledgeProposal(ctx, proposal)
 		if err != nil {
@@ -1413,7 +1498,7 @@ func (s *Service) createKnowledgeCandidates(ctx context.Context, projectID, task
 			}
 		}
 		s.emit(ctx, taskID, "knowledge_proposal", created.ID, "knowledge_proposal_created", map[string]any{"entry_id": created.EntryID, "title": created.Proposed.Title, "base_revision": created.BaseRevision})
-		if reviewSettings.AutoApprove {
+		if reviewSettings.AutoApprove && !foreignRevision {
 			approved, published, err := s.store.ApproveKnowledgeProposal(ctx, created.ID, s.now().UTC())
 			if err != nil {
 				return nil, nil, fmt.Errorf("auto-approve knowledge proposal %s: %w", created.ID, err)

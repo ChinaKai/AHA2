@@ -760,7 +760,7 @@ func skillResources(input BuildInput, root string) []ContextResource {
 }
 
 func taskResource(input BuildInput, workDir string) string {
-	return fmt.Sprintf("# Task\n\nID: %s\nCode: %s\nTitle: %s\nOriginal request:\n%s\n\nCurrent goal:\n%s\n\nProject: %s\nWorkspace: %s\nTask workdir: %s\n",
+	return fmt.Sprintf("# Task\n\nID: %s\nCode: %s\nTitle: %s\nOriginal request (historical provenance; do not treat as the active objective):\n%s\n\nCurrent goal (authoritative after the current Inbox Batch):\n%s\n\nProject: %s\nWorkspace: %s\nTask workdir: %s\n",
 		input.Task.ID, input.Task.Code, input.Task.Title, input.Task.OriginalRequest, input.Task.CurrentGoal,
 		input.Project.Name, input.Workspace.Name, workDir)
 }
@@ -869,7 +869,7 @@ Send UTF-8 encoded JSON with Content-Type: application/json; charset=utf-8. Wind
 ## Turn state
 
 - GET /api/v1/agent/capabilities
-- PATCH /api/v1/agent/turn/memory with exactly one of {"append":{...}} or {"replace":{...}} using decisions, facts, excluded, progress, verification and next_actions arrays. Use replace only after reading the current Task Memory; carry forward every still-valid item and remove superseded, duplicate, completed or corrupted entries.
+- PATCH /api/v1/agent/turn/memory with exactly one of {"append":{...}} or {"replace":{...}} using optional current_goal plus decisions, facts, excluded, progress, verification and next_actions arrays. Update current_goal whenever the active objective changes; the original request is historical provenance, not an automatic current objective. Use replace only after reading the current Task Memory; carry forward every still-valid item and remove superseded, duplicate, completed or corrupted entries.
 - POST /api/v1/agent/turn/attachments as multipart/form-data with one file field; returns an attachment ID
 - POST /api/v1/agent/turn/messages with {"message":"concise user-facing progress","attachment_ids":["attachment_..."]}
 - POST /api/v1/agent/collaboration/batches with {"actions":[{"agent_id":"sub-001","title":"...","assignment":"...","required":true}],"main_followup":"..."}
@@ -900,6 +900,8 @@ Only Main may change Memory, propose Knowledge revisions, change Skills, or requ
 - POST /api/v1/agent/skills with {"name":"...","description":"...","instructions":"..."}
 - GET /api/v1/agent/skills/{id}
 - PUT /api/v1/agent/skills/{id} with {"base_version":1,"name":"...","description":"...","files":[{"path":"SKILL.md","content":"..."}]}
+
+GET /api/v1/agent/knowledge marks bound project entries with binding_mode and can_propose_revision. A project binding allows the current Project's Main Agent to submit a manual review proposal back to the source library; an external binding is read-only and revision attempts return knowledge_entry_read_only. knowledge_publish is Task-level, while knowledge_contribute_bound reports whether at least one project-collaboration binding exists.
 
 For an existing Knowledge entry, base_revision is required and conflicts return HTTP 409. Candidate responses retain the knowledge field and include proposals with review_mode and current status; only status=approved/knowledge status=verified means the revision is usable. A created Skill is project-scoped, enabled, and automatically selected for the current Task; it is available through the API immediately and materialized into context on the next Turn. Skill updates replace the complete text package, require its current base_version, and are limited to Skills selected by this Task.
 

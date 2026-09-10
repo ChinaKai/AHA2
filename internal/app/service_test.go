@@ -208,6 +208,64 @@ func TestMessagesQueueWhileAgentIsBusy(t *testing.T) {
 	}
 }
 
+func TestManualTaskStaysDraftUntilExplicitStart(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	secretStore, err := secrets.Open(filepath.Join(t.TempDir(), "secrets.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	project := domain.Project{ID: "project-manual", Name: "Manual", CreatedAt: now, UpdatedAt: now}
+	workspace := domain.Workspace{ID: "workspace-manual", ProjectID: project.ID, Name: "local", Locality: "local", Transport: "native", RootPath: t.TempDir(), Health: "ready", CreatedAt: now, UpdatedAt: now}
+	envGroup := domain.EnvGroup{ID: "env-manual", Name: "stub", ProviderID: "stub", Backend: "stub", Revision: 1, Environment: map[string]string{}, SecretRefs: map[string]string{}, CreatedAt: now, UpdatedAt: now}
+	model := domain.Model{ID: "model-manual", DisplayName: "Stub", ProviderID: "stub", Backend: "stub", WireModel: "stub", DefaultEnvGroupID: envGroup.ID, CreatedAt: now, UpdatedAt: now}
+	for _, operation := range []func() error{
+		func() error { return database.CreateProject(ctx, project) },
+		func() error { return database.CreateWorkspace(ctx, workspace) },
+		func() error { return database.UpsertEnvGroup(ctx, envGroup) },
+		func() error { return database.UpsertModel(ctx, model) },
+	} {
+		if err := operation(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	service := NewService(database, secretStore, &stubExecutor{})
+	task, err := service.CreateTask(ctx, CreateTaskInput{
+		ProjectID: project.ID, WorkspaceID: workspace.ID, Title: "configure first", Request: "run later",
+		ModelID: model.ID, StartMode: "manual",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.Status != domain.TaskDraft {
+		t.Fatalf("manual task status = %s, want draft", task.Status)
+	}
+	if _, err := service.SubmitMessage(ctx, task.ID, task.OriginalRequest); err == nil || !strings.Contains(err.Error(), "must be started") {
+		t.Fatalf("draft accepted message: %v", err)
+	}
+	started, err := service.StartTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if started.Status != domain.TaskActive {
+		t.Fatalf("started task status = %s, want active", started.Status)
+	}
+	if _, err := service.StartTask(ctx, task.ID); err == nil {
+		t.Fatal("second start unexpectedly succeeded")
+	}
+	turn, err := service.SubmitMessage(ctx, task.ID, task.OriginalRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForTurn(t, database, turn.ID, domain.TurnSucceeded)
+}
+
 func TestTaskMultiTurnFlow(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

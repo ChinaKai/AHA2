@@ -120,18 +120,22 @@ func (s *Store) UpdateChannelPluginEnabled(ctx context.Context, id string, enabl
 	return s.ChannelPlugin(ctx, id)
 }
 
-const channelInstanceColumns = `id,plugin_id,owner_id,runtime_device_id,name,status,revision,app_id,provider_tenant_id,credential_ref,credential_configured,host_project_id,host_workspace_id,config_json,last_seen_at,created_at,updated_at`
+const channelInstanceColumns = `id,plugin_id,owner_id,runtime_device_id,name,status,revision,app_id,provider_tenant_id,credential_ref,credential_configured,host_project_id,host_workspace_id,config_json,last_seen_at,retired_at,created_at,updated_at`
 
 func scanChannelInstance(scanner interface{ Scan(...any) error }) (domain.ChannelInstance, error) {
 	var item domain.ChannelInstance
-	var config, lastSeenAt, createdAt, updatedAt string
+	var config, lastSeenAt, retiredAt, createdAt, updatedAt string
 	err := scanner.Scan(
 		&item.ID, &item.PluginID, &item.OwnerID, &item.RuntimeDeviceID, &item.Name, &item.Status, &item.Revision,
 		&item.AppID, &item.ProviderTenantID, &item.CredentialRef, &item.CredentialConfigured,
-		&item.HostProjectID, &item.HostWorkspaceID, &config, &lastSeenAt, &createdAt, &updatedAt,
+		&item.HostProjectID, &item.HostWorkspaceID, &config, &lastSeenAt, &retiredAt, &createdAt, &updatedAt,
 	)
 	item.Config = decodeJSON(config, map[string]any{})
-	item.LastSeenAt, item.CreatedAt, item.UpdatedAt = parseTime(lastSeenAt), parseTime(createdAt), parseTime(updatedAt)
+	item.LastSeenAt, item.RetiredAt, item.CreatedAt, item.UpdatedAt = parseTime(lastSeenAt), parseTime(retiredAt), parseTime(createdAt), parseTime(updatedAt)
+	item.Retired = !item.RetiredAt.IsZero()
+	if item.Retired {
+		item.Status = "retired"
+	}
 	return item, err
 }
 
@@ -268,7 +272,7 @@ func (s *Store) ChannelInstances(ctx context.Context, ownerID string) ([]domain.
 func (s *Store) UpdateChannelInstance(ctx context.Context, item domain.ChannelInstance, expectedRevision int) (domain.ChannelInstance, error) {
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE channel_instances SET name=?,status=?,app_id=?,provider_tenant_id=?,credential_ref=?,credential_configured=?,config_json=?,last_seen_at=?,revision=revision+1,updated_at=?
-		WHERE id=? AND owner_id=? AND revision=?`,
+		WHERE id=? AND owner_id=? AND revision=? AND retired_at=''`,
 		item.Name, item.Status, item.AppID, item.ProviderTenantID, item.CredentialRef, boolInt(item.CredentialConfigured),
 		encodeJSON(item.Config), timeString(item.LastSeenAt), timeString(item.UpdatedAt), item.ID, item.OwnerID, expectedRevision,
 	)
@@ -283,7 +287,7 @@ func (s *Store) UpdateChannelInstance(ctx context.Context, item domain.ChannelIn
 
 func (s *Store) UpdateChannelInstanceHealth(ctx context.Context, id, status, errorCode string, at time.Time) error {
 	configPatch := map[string]any{"runtime_error_code": errorCode}
-	_, err := s.db.ExecContext(ctx, `UPDATE channel_instances SET status=?,last_seen_at=?,config_json=json_patch(config_json,?),updated_at=? WHERE id=? AND status<>'disabled'`,
+	_, err := s.db.ExecContext(ctx, `UPDATE channel_instances SET status=?,last_seen_at=?,config_json=json_patch(config_json,?),updated_at=? WHERE id=? AND status<>'disabled' AND retired_at=''`,
 		status, timeString(at), encodeJSON(configPatch), timeString(at), id)
 	return err
 }
@@ -324,6 +328,71 @@ func (s *Store) IsManagedChannelTask(ctx context.Context, id string) bool {
 	var exists bool
 	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM channel_conversations WHERE host_task_id=?)`, id).Scan(&exists)
 	return exists
+}
+
+func (s *Store) RetiredChannelInstanceForProject(ctx context.Context, id string) (domain.ChannelInstance, error) {
+	return scanChannelInstance(s.db.QueryRowContext(ctx, `SELECT `+channelInstanceColumns+` FROM channel_instances WHERE host_project_id=? AND retired_at<>''`, id))
+}
+
+func (s *Store) RetiredChannelInstanceForWorkspace(ctx context.Context, id string) (domain.ChannelInstance, error) {
+	return scanChannelInstance(s.db.QueryRowContext(ctx, `SELECT `+channelInstanceColumns+` FROM channel_instances WHERE host_workspace_id=? AND retired_at<>''`, id))
+}
+
+func (s *Store) RetiredChannelInstanceForTask(ctx context.Context, id string) (domain.ChannelInstance, error) {
+	return scanChannelInstance(s.db.QueryRowContext(ctx, `SELECT `+channelInstanceColumns+` FROM channel_instances WHERE host_project_id=(SELECT project_id FROM tasks WHERE id=?) AND retired_at<>''`, id))
+}
+
+// ChannelInstancesForHostProjects returns channel markers for all requested
+// host projects in one query, including active instances.
+func (s *Store) ChannelInstancesForHostProjects(ctx context.Context, projectIDs []string) (map[string]domain.ChannelInstance, error) {
+	return s.channelInstancesByHost(ctx, "host_project_id", projectIDs, false)
+}
+
+// RetiredChannelInstancesForHostProjects returns only archived channel markers
+// keyed by host project ID.
+func (s *Store) RetiredChannelInstancesForHostProjects(ctx context.Context, projectIDs []string) (map[string]domain.ChannelInstance, error) {
+	return s.channelInstancesByHost(ctx, "host_project_id", projectIDs, true)
+}
+
+// RetiredChannelInstancesForHostWorkspaces returns archived channel markers
+// keyed by host workspace ID.
+func (s *Store) RetiredChannelInstancesForHostWorkspaces(ctx context.Context, workspaceIDs []string) (map[string]domain.ChannelInstance, error) {
+	return s.channelInstancesByHost(ctx, "host_workspace_id", workspaceIDs, true)
+}
+
+func (s *Store) channelInstancesByHost(ctx context.Context, column string, ids []string, retiredOnly bool) (map[string]domain.ChannelInstance, error) {
+	result := make(map[string]domain.ChannelInstance, len(ids))
+	if len(ids) == 0 {
+		return result, nil
+	}
+	args := make([]any, 0, len(ids))
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	query := `SELECT ` + channelInstanceColumns + ` FROM channel_instances WHERE ` + column + ` IN (` + placeholders(len(ids)) + `)`
+	if retiredOnly {
+		query += ` AND retired_at<>''`
+	}
+	query += ` ORDER BY updated_at DESC,id DESC`
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		item, err := scanChannelInstance(rows)
+		if err != nil {
+			return nil, err
+		}
+		key := item.HostProjectID
+		if column == "host_workspace_id" {
+			key = item.HostWorkspaceID
+		}
+		if _, exists := result[key]; !exists {
+			result[key] = item
+		}
+	}
+	return result, rows.Err()
 }
 
 func (s *Store) ManagedChannelProjectIDs(ctx context.Context) (map[string]bool, error) {

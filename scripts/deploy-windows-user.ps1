@@ -154,13 +154,6 @@ if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $installer -PathType Le
 $stamp = [DateTime]::UtcNow.ToString("yyyyMMdd-HHmmss")
 $backup = Join-Path $data "backups\user-installed-$stamp"
 New-Item -ItemType Directory -Path $backup -Force | Out-Null
-foreach ($name in @("aha2.db","aha2.db-wal","aha2.db-shm","secrets.json","setup-token")) {
-  $source = Join-Path $data $name
-  if (Test-Path -LiteralPath $source -PathType Leaf) { Copy-Item -LiteralPath $source -Destination (Join-Path $backup $name) -Force }
-}
-foreach ($entry in @(@{Path=$server;Name="aha2.exe"},@{Path=$tray;Name="aha2-tray.exe"},@{Path=$plugin;Name="aha2-channel-feishu.exe"})) {
-  if (Test-Path -LiteralPath $entry.Path -PathType Leaf) { Copy-Item -LiteralPath $entry.Path -Destination (Join-Path $backup $entry.Name) -Force }
-}
 $previousTaskXML = ""
 if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
   $previousTaskXML = Export-ScheduledTask -TaskName $TaskName
@@ -168,7 +161,16 @@ if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
 }
 
 try {
-  $arguments = @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/CLOSEAPPLICATIONS',('/DIR="{0}"' -f $install),('/DATADIR="{0}"' -f $data))
+  Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+  Stop-AHA2ProcessTrees
+  foreach ($name in @("aha2.db","aha2.db-wal","aha2.db-shm","secrets.json","setup-token")) {
+    $source = Join-Path $data $name
+    if (Test-Path -LiteralPath $source -PathType Leaf) { Copy-Item -LiteralPath $source -Destination (Join-Path $backup $name) -Force }
+  }
+  foreach ($entry in @(@{Path=$server;Name="aha2.exe"},@{Path=$tray;Name="aha2-tray.exe"},@{Path=$plugin;Name="aha2-channel-feishu.exe"})) {
+    if (Test-Path -LiteralPath $entry.Path -PathType Leaf) { Copy-Item -LiteralPath $entry.Path -Destination (Join-Path $backup $entry.Name) -Force }
+  }
+  $arguments = @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/CLOSEAPPLICATIONS','/SKIPUSERTASK=1',('/DIR="{0}"' -f $install),('/DATADIR="{0}"' -f $data))
   $process = Start-Process -FilePath $installer -ArgumentList $arguments -WindowStyle Hidden -Wait -PassThru
   if ($process.ExitCode -ne 0) { throw "Per-user installer exited with code $($process.ExitCode)." }
   $registerTask = Join-Path $install "Register-AHA2UserTask.ps1"
@@ -217,7 +219,9 @@ try {
     if (Test-Path -LiteralPath $backupFile -PathType Leaf) { Copy-Item -LiteralPath $backupFile -Destination (Join-Path $data $name) -Force }
   }
   if ($previousTaskXML) {
-    Register-ScheduledTask -TaskName $TaskName -Xml $previousTaskXML -Force | Out-Null
+    if (-not (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue)) {
+      Register-ScheduledTask -TaskName $TaskName -Xml $previousTaskXML -Force | Out-Null
+    }
     Start-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
   }
   if ($DetachedWorker) { Unregister-ScheduledTask -TaskName $UpdateTaskName -Confirm:$false -ErrorAction SilentlyContinue }

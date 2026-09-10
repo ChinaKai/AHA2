@@ -58,6 +58,9 @@ func (s *Server) taskHardware(writer http.ResponseWriter, request *http.Request)
 
 func (s *Server) updateTaskHardware(writer http.ResponseWriter, request *http.Request) {
 	taskID := request.PathValue("id")
+	if s.rejectRetiredChannelTaskWrite(writer, request, taskID) {
+		return
+	}
 	if _, err := s.store.Task(request.Context(), taskID); err != nil {
 		if _, mirrorErr := s.store.RemoteTaskMirror(request.Context(), taskID); mirrorErr == nil {
 			writeJSON(writer, http.StatusForbidden, map[string]any{"ok": false, "error": "hardware_read_only", "message": "远端 Task 硬件配置只能查看，请先显式接管"})

@@ -36,7 +36,7 @@ func TestKnowledgeLibraryBindingAndDeletionSynchronize(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := source.BindKnowledgeLibrary(ctx, library.ID, target.ID, now); err != nil {
+	if _, err := source.BindKnowledgeLibrary(ctx, library.ID, target.ID, "project", now); err != nil {
 		t.Fatal(err)
 	}
 	if err := source.CreateSkill(ctx, domain.Skill{
@@ -67,11 +67,11 @@ func TestKnowledgeLibraryBindingAndDeletionSynchronize(t *testing.T) {
 		t.Fatalf("binding dependency order projects=%#v binding=%d", projectIndexes, bindingIndex)
 	}
 	received, err := destination.KnowledgeLibrary(ctx, library.ID)
-	if err != nil || received.BoundProjectID != target.ID {
+	if err != nil || received.BoundProjectID != target.ID || received.BindingMode != "project" {
 		t.Fatalf("received library=%#v err=%v", received, err)
 	}
 	receivedSkill, err := destination.Skill(ctx, "skill-library")
-	if err != nil || receivedSkill.ProjectID != container.ID || receivedSkill.BoundProjectID != target.ID {
+	if err != nil || receivedSkill.ProjectID != container.ID || receivedSkill.BoundProjectID != target.ID || receivedSkill.BindingMode != "project" || !receivedSkill.CanUpdate {
 		t.Fatalf("library skill lost binding scope: %#v err=%v", receivedSkill, err)
 	}
 	if _, err := source.UnbindKnowledgeLibrary(ctx, library.ID); err != nil {

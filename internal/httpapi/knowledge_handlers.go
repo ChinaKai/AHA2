@@ -19,6 +19,11 @@ func knowledgeContentHash(title, body string) string {
 }
 
 func (s *Server) listKnowledge(writer http.ResponseWriter, request *http.Request) {
+	options, err := parseListOptions(request)
+	if err != nil {
+		writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid_list_options", "message": err.Error()})
+		return
+	}
 	var statuses []domain.KnowledgeStatus
 	for _, value := range strings.Split(request.URL.Query().Get("status"), ",") {
 		if value = strings.TrimSpace(value); value != "" {
@@ -26,16 +31,35 @@ func (s *Server) listKnowledge(writer http.ResponseWriter, request *http.Request
 		}
 	}
 	scope, projectID := request.URL.Query().Get("scope"), request.URL.Query().Get("project_id")
-	var items []domain.KnowledgeEntry
-	var err error
-	if scope == "project" && projectID != "" {
-		items, err = s.store.ListProjectKnowledge(request.Context(), projectID, statuses)
+	var page listPage[domain.KnowledgeEntry]
+	if options.Paged && !(scope == "project" && projectID != "") {
+		cursorAt, cursorID, cursorErr := listCursorPosition(options, "knowledge")
+		if cursorErr != nil {
+			writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid_cursor", "message": cursorErr.Error()})
+			return
+		}
+		items, hasMore, listErr := s.store.ListKnowledgePage(request.Context(), scope, projectID, statuses, cursorAt, cursorID, options.Limit)
+		if listErr != nil {
+			writeError(writer, http.StatusInternalServerError, "list_knowledge_failed")
+			return
+		}
+		page = storeListPage(items, hasMore, "knowledge", func(item domain.KnowledgeEntry) (time.Time, string) { return item.UpdatedAt, item.ID })
 	} else {
-		items, err = s.store.ListKnowledge(request.Context(), scope, projectID, statuses)
-	}
-	if err != nil {
-		writeError(writer, http.StatusInternalServerError, "list_knowledge_failed")
-		return
+		var items []domain.KnowledgeEntry
+		if scope == "project" && projectID != "" {
+			items, err = s.store.ListProjectKnowledge(request.Context(), projectID, statuses)
+		} else {
+			items, err = s.store.ListKnowledge(request.Context(), scope, projectID, statuses)
+		}
+		if err != nil {
+			writeError(writer, http.StatusInternalServerError, "list_knowledge_failed")
+			return
+		}
+		page, err = paginateByUpdated(items, "knowledge", options, func(item domain.KnowledgeEntry) (time.Time, string) { return item.UpdatedAt, item.ID })
+		if err != nil {
+			writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid_cursor", "message": err.Error()})
+			return
+		}
 	}
 	proposals, err := s.store.ListKnowledgeProposals(request.Context(), request.URL.Query().Get("scope"), request.URL.Query().Get("project_id"))
 	if err != nil {
@@ -47,7 +71,26 @@ func (s *Server) listKnowledge(writer http.ResponseWriter, request *http.Request
 		writeError(writer, http.StatusInternalServerError, "knowledge_review_settings_failed")
 		return
 	}
-	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "knowledge": items, "proposals": proposals, "review_settings": reviewSettings})
+	response := map[string]any{"ok": true, "proposals": proposals, "review_settings": reviewSettings}
+	if options.Summary {
+		response["knowledge"] = summarizeKnowledge(page.Items)
+	} else {
+		response["knowledge"] = page.Items
+	}
+	if options.Paged {
+		response["has_more"] = page.HasMore
+		response["next_cursor"] = page.NextCursor
+	}
+	writeJSON(writer, http.StatusOK, response)
+}
+
+func (s *Server) knowledgeDetail(writer http.ResponseWriter, request *http.Request) {
+	item, err := s.store.Knowledge(request.Context(), request.PathValue("id"))
+	if err != nil {
+		writeError(writer, http.StatusNotFound, "knowledge_not_found")
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "knowledge": item})
 }
 
 type knowledgePayload struct {

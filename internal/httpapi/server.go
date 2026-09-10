@@ -67,6 +67,10 @@ type Server struct {
 	syncRunMu             sync.RWMutex
 	syncRun               syncRunProgress
 	authLimiter           *authLimiter
+	modelDetectionJobs    *modelDetectionJobs
+	systemMu              sync.Mutex
+	systemCachedAt        time.Time
+	systemCache           map[string]any
 }
 
 func New(config Config) *Server {
@@ -108,6 +112,7 @@ func New(config Config) *Server {
 		version:               config.Version,
 		startedAt:             startedAt,
 		authLimiter:           newAuthLimiter(),
+		modelDetectionJobs:    newModelDetectionJobs(),
 	}
 }
 
@@ -157,6 +162,10 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/channel-instances", s.withAuth(http.HandlerFunc(s.createChannelInstance)))
 	mux.Handle("GET /api/v1/channel-instances/{id}", s.withAuth(http.HandlerFunc(s.channelInstance)))
 	mux.Handle("PATCH /api/v1/channel-instances/{id}", s.withAuth(http.HandlerFunc(s.updateChannelInstance)))
+	mux.Handle("POST /api/v1/channel-instances/{id}/reset-binding", s.withAuth(http.HandlerFunc(s.resetChannelBinding)))
+	mux.Handle("POST /api/v1/channel-instances/{id}/archive", s.withAuth(http.HandlerFunc(s.archiveChannelInstance)))
+	mux.Handle("GET /api/v1/channel-instances/{id}/purge-preview", s.withAuth(http.HandlerFunc(s.channelPurgePreview)))
+	mux.Handle("POST /api/v1/channel-instances/{id}/purge", s.withAuth(http.HandlerFunc(s.purgeChannelInstance)))
 	mux.Handle("PUT /api/v1/channel-instances/{id}/credentials", s.withAuth(http.HandlerFunc(s.updateChannelCredentials)))
 	mux.Handle("POST /api/v1/channel-instances/{id}/onboarding-sessions", s.withAuth(http.HandlerFunc(s.startChannelOnboarding)))
 	mux.Handle("GET /api/v1/channel-onboarding-sessions/{id}", s.withAuth(http.HandlerFunc(s.channelOnboarding)))
@@ -194,6 +203,9 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/env-groups", s.withAuth(http.HandlerFunc(s.listEnvGroups)))
 	mux.Handle("POST /api/v1/env-groups", s.withAuth(http.HandlerFunc(s.createEnvGroup)))
 	mux.Handle("POST /api/v1/providers/detect-models", s.withAuth(http.HandlerFunc(s.detectModelsHandler)))
+	mux.Handle("POST /api/v1/providers/{id}/model-detection-jobs", s.withAuth(http.HandlerFunc(s.createModelDetectionJob)))
+	mux.Handle("GET /api/v1/providers/{id}/model-detection-jobs/{job}/events", s.withAuth(http.HandlerFunc(s.modelDetectionJobEvents)))
+	mux.Handle("POST /api/v1/providers/{id}/model-detection-jobs/{job}/cancel", s.withAuth(http.HandlerFunc(s.cancelModelDetectionJob)))
 	mux.Handle("POST /api/v1/providers/add-models", s.withAuth(http.HandlerFunc(s.addModelsHandler)))
 	mux.Handle("GET /api/v1/codex-accounts", s.withAuth(http.HandlerFunc(s.listCodexAccounts)))
 	mux.Handle("POST /api/v1/codex-accounts/import-local", s.withAuth(http.HandlerFunc(s.importLocalCodexAccount)))
@@ -211,6 +223,7 @@ func (s *Server) Handler() http.Handler {
 
 	mux.Handle("GET /api/v1/tasks", s.withAuth(http.HandlerFunc(s.listTasks)))
 	mux.Handle("POST /api/v1/tasks", s.withAuth(http.HandlerFunc(s.createTask)))
+	mux.Handle("POST /api/v1/tasks/{id}/start", s.withAuth(http.HandlerFunc(s.startTask)))
 	mux.Handle("DELETE /api/v1/tasks/{id}", s.withAuth(http.HandlerFunc(s.deleteTask)))
 	mux.Handle("DELETE /api/v1/tasks/{id}/remote-mirror", s.withAuth(http.HandlerFunc(s.retireRemoteTaskMirror)))
 	mux.Handle("POST /api/v1/tasks/{id}/takeover", s.withAuth(http.HandlerFunc(s.takeoverTask)))
@@ -278,6 +291,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/events", s.withAuth(http.HandlerFunc(s.allEvents)))
 
 	mux.Handle("GET /api/v1/knowledge", s.withAuth(http.HandlerFunc(s.listKnowledge)))
+	mux.Handle("GET /api/v1/knowledge/{id}", s.withAuth(http.HandlerFunc(s.knowledgeDetail)))
 	mux.Handle("GET /api/v1/knowledge/libraries", s.withAuth(http.HandlerFunc(s.listKnowledgeLibraries)))
 	mux.Handle("POST /api/v1/knowledge/libraries/{id}/bind", s.withAuth(http.HandlerFunc(s.bindKnowledgeLibrary)))
 	mux.Handle("POST /api/v1/knowledge/libraries/{id}/unbind", s.withAuth(http.HandlerFunc(s.unbindKnowledgeLibrary)))

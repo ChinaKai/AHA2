@@ -89,6 +89,10 @@ foreach ($contract in @("Get-ScheduledTask", "Principal.UserId", "SetAccessRuleP
         throw "Windows user data directory contract is missing: $contract"
     }
 }
+$taskScript = Get-Content -Raw -Encoding UTF8 -LiteralPath $taskScriptPath
+if ($taskScript.IndexOf("if (Test-ExistingAHA2UserTask)") -gt $taskScript.LastIndexOf("Register-ScheduledTask -TaskName")) {
+    throw "Windows user task does not reuse an exact existing task before attempting registration."
+}
 
 $validationServer = [IO.Path]::GetTempFileName()
 $validationTray = [IO.Path]::GetTempFileName()
@@ -101,10 +105,16 @@ try {
 
 $userDeployPath = Join-Path $repo "scripts\deploy-windows-user.ps1"
 $userDeploy = Get-Content -Raw -Encoding UTF8 -LiteralPath $userDeployPath
-foreach ($contract in @("Per-user install directory must stay under LOCALAPPDATA", "-PerUser", "ElevationRequired=`$false", "AHA2-Setup-User-x64.exe", "Wait-AHA2Health", "Get-FileHash", "AHA2 User", "AHA2 User Update", "DetachedWorker", "New-ScheduledTaskAction", "RunLevel Limited", "Stop-AHA2ProcessTrees", "taskkill.exe", "/T", "user-deploy-result.json")) {
+foreach ($contract in @("Per-user install directory must stay under LOCALAPPDATA", "-PerUser", "ElevationRequired=`$false", "AHA2-Setup-User-x64.exe", "Wait-AHA2Health", "Get-FileHash", "AHA2 User", "AHA2 User Update", "DetachedWorker", "New-ScheduledTaskAction", "RunLevel Limited", "Stop-AHA2ProcessTrees", "taskkill.exe", "/T", "/SKIPUSERTASK=1", "user-deploy-result.json")) {
     if (-not $userDeploy.Contains($contract)) {
         throw "Per-user deployment contract is missing: $contract"
     }
+}
+$taskSnapshotIndex = $userDeploy.IndexOf('$previousTaskXML')
+$stopBeforeBackupIndex = $userDeploy.IndexOf('Stop-AHA2ProcessTrees', $taskSnapshotIndex)
+$databaseBackupIndex = $userDeploy.IndexOf('foreach ($name in @("aha2.db"', $taskSnapshotIndex)
+if ($stopBeforeBackupIndex -lt 0 -or $databaseBackupIndex -lt 0 -or $stopBeforeBackupIndex -gt $databaseBackupIndex) {
+    throw "Per-user deployment must stop the complete AHA2 process tree before copying SQLite backup files."
 }
 & $userDeployPath -RepoPath $repo -InputExe (Join-Path $repo "go.mod") -InputTrayExe (Join-Path $repo "go.mod") -InstallDir (Join-Path $env:LOCALAPPDATA "Programs\AHA2-validation") -DataDir (Join-Path ([IO.Path]::GetTempPath()) "AHA2 User Data") -ValidateOnly
 
@@ -146,6 +156,9 @@ foreach ($contract in @("AHA2 User", "aha2-tray.exe", "--server", "aha2.exe", '`
 }
 foreach ($contract in @("taskkill.exe", "/T", "backend CLI")) {
   if ($installer -notmatch [regex]::Escape($contract)) { throw "Installer process-tree shutdown contract is missing: $contract" }
+}
+foreach ($contract in @("SKIPUSERTASK", "authoritative listen/data/Agent API arguments", "if UserTaskWasPresent then", "preserved for per-user upgrade")) {
+  if ($installer -notmatch [regex]::Escape($contract)) { throw "Installer task-registration handoff contract is missing: $contract" }
 }
 foreach ($forbidden in @("delayed-auto Windows", "aha2.exe service run --listen", "wscript.exe", "Run-AHA2User.vbs")) {
     if ($deployment.Contains($forbidden)) {

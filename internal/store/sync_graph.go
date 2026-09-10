@@ -29,7 +29,7 @@ func remoteTaskPublicID(ownerDeviceID, sourceTaskID string) string {
 }
 
 func (s *Store) RemoteTaskMirrors(ctx context.Context, projectID string) ([]RemoteTaskMirror, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT owner_device_id,task_id,payload_json FROM sync_remote_task_objects WHERE object_type='task' AND (?='' OR project_id=?) ORDER BY updated_at DESC`, projectID, projectID)
+	rows, err := s.db.QueryContext(ctx, `SELECT owner_device_id,task_id,payload_json FROM sync_remote_task_objects WHERE object_type='task' AND (?='' OR project_id=?) ORDER BY updated_at DESC,owner_device_id DESC,task_id DESC`, projectID, projectID)
 	if err != nil {
 		return nil, err
 	}

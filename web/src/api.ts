@@ -11,6 +11,7 @@ import type {
   ChannelInstance,
   ChannelOnboardingSession,
   ChannelPlugin,
+  ChannelPurgePreview,
   DetectedModel,
   EnvGroup,
   Knowledge,
@@ -186,6 +187,28 @@ class APIClient {
     return this.request(`/api/v1/channel-instances/${encodeURIComponent(id)}`, {method: "PATCH", headers: {"If-Match": `"${revision}"`}, body: JSON.stringify({enabled})});
   }
 
+  resetChannelBinding(id: string, revision: number): Promise<{instance: ChannelInstance}> {
+    return this.request(`/api/v1/channel-instances/${encodeURIComponent(id)}/reset-binding`, {
+      method: "POST", headers: {"If-Match": `"${revision}"`}, body: "{}",
+    });
+  }
+
+  archiveChannelInstance(id: string, revision: number): Promise<{instance: ChannelInstance}> {
+    return this.request(`/api/v1/channel-instances/${encodeURIComponent(id)}/archive`, {
+      method: "POST", headers: {"If-Match": `"${revision}"`}, body: "{}",
+    });
+  }
+
+  channelInstancePurgePreview(id: string): Promise<{preview: ChannelPurgePreview}> {
+    return this.request(`/api/v1/channel-instances/${encodeURIComponent(id)}/purge-preview`);
+  }
+
+  purgeChannelInstance(id: string, confirmationName: string, revision: number): Promise<{ok: boolean}> {
+    return this.request(`/api/v1/channel-instances/${encodeURIComponent(id)}/purge`, {
+      method: "POST", headers: {"If-Match": `"${revision}"`}, body: JSON.stringify({confirmation_name: confirmationName}),
+    });
+  }
+
   updateChannelCredentials(id: string, appID: string, appSecret: string, revision: number): Promise<{instance: ChannelInstance}> {
     return this.request(`/api/v1/channel-instances/${encodeURIComponent(id)}/credentials`, {
       method: "PUT",
@@ -253,8 +276,12 @@ class APIClient {
     return this.request("/api/v1/settings/sync/conflicts");
   }
 
-  projects(): Promise<{projects: Project[]}> {
-    return this.request("/api/v1/projects");
+  projects(options: {limit?: number; cursor?: string; summary?: boolean} = {}): Promise<{projects: Project[]; has_more?: boolean; next_cursor?: string}> {
+    const query = new URLSearchParams();
+    if (options.limit) query.set("limit", String(options.limit));
+    if (options.cursor) query.set("cursor", options.cursor);
+    if (options.summary) query.set("summary", "true");
+    return this.request(`/api/v1/projects${query.size ? `?${query}` : ""}`);
   }
 
   createProject(payload: Record<string, string>): Promise<{project: Project}> {
@@ -328,6 +355,18 @@ class APIClient {
     return this.request("/api/v1/providers/detect-models", {method: "POST", body: JSON.stringify(payload)});
   }
 
+  createModelDetectionJob(providerID: string): Promise<{job: {id: string; provider_id: string; status: string}}> {
+    return this.request(`/api/v1/providers/${encodeURIComponent(providerID)}/model-detection-jobs`, {method: "POST", body: "{}"});
+  }
+
+  cancelModelDetectionJob(providerID: string, jobID: string): Promise<{job: {id: string; status: string; completed: number; total: number}}> {
+    return this.request(`/api/v1/providers/${encodeURIComponent(providerID)}/model-detection-jobs/${encodeURIComponent(jobID)}/cancel`, {method: "POST", body: "{}"});
+  }
+
+  modelDetectionEventsURL(providerID: string, jobID: string): string {
+    return `/api/v1/providers/${encodeURIComponent(providerID)}/model-detection-jobs/${encodeURIComponent(jobID)}/events`;
+  }
+
   addModels(payload: Record<string, unknown>): Promise<{models: Model[]; provider_id: string; skipped?: number}> {
     return this.request("/api/v1/providers/add-models", {method: "POST", body: JSON.stringify(payload)});
   }
@@ -386,13 +425,21 @@ class APIClient {
     });
   }
 
-  tasks(projectID = ""): Promise<{tasks: Task[]}> {
-    const query = projectID ? `?project_id=${encodeURIComponent(projectID)}` : "";
-    return this.request(`/api/v1/tasks${query}`);
+  tasks(projectID = "", options: {limit?: number; cursor?: string; summary?: boolean} = {}): Promise<{tasks: Task[]; has_more?: boolean; next_cursor?: string}> {
+    const query = new URLSearchParams();
+    if (projectID) query.set("project_id", projectID);
+    if (options.limit) query.set("limit", String(options.limit));
+    if (options.cursor) query.set("cursor", options.cursor);
+    if (options.summary) query.set("summary", "true");
+    return this.request(`/api/v1/tasks${query.size ? `?${query}` : ""}`);
   }
 
-  createTask(payload: Record<string, unknown>): Promise<{task: Task; turn?: {id: string}; start_error?: string}> {
+  createTask(payload: Record<string, unknown>): Promise<{task: Task; turn?: {id: string}; started?: boolean; start_error?: string}> {
     return this.request("/api/v1/tasks", {method: "POST", body: JSON.stringify(payload)});
+  }
+
+  startTask(id: string): Promise<{task: Task; turn?: {id: string}; started: boolean; start_error?: string}> {
+    return this.request(`/api/v1/tasks/${encodeURIComponent(id)}/start`, {method: "POST", body: "{}"});
   }
 
   task(id: string): Promise<TaskDetail> {
@@ -575,20 +622,27 @@ class APIClient {
     return this.request(`/api/v1/rounds/${id}/interrupt`, {method: "POST", body: "{}"});
   }
 
-  knowledge(scope = "", projectID = "", status = ""): Promise<{knowledge: Knowledge[]; proposals?: KnowledgeProposal[]; review_settings?: KnowledgeReviewSettings}> {
+  knowledge(scope = "", projectID = "", status = "", options: {limit?: number; cursor?: string; summary?: boolean} = {}): Promise<{knowledge: Knowledge[]; proposals?: KnowledgeProposal[]; review_settings?: KnowledgeReviewSettings; has_more?: boolean; next_cursor?: string}> {
     const query = new URLSearchParams();
     if (scope) query.set("scope", scope);
     if (projectID) query.set("project_id", projectID);
     if (status) query.set("status", status);
+    if (options.limit) query.set("limit", String(options.limit));
+    if (options.cursor) query.set("cursor", options.cursor);
+    if (options.summary) query.set("summary", "true");
     return this.request(`/api/v1/knowledge?${query}`);
+  }
+
+  knowledgeEntry(id: string): Promise<{knowledge: Knowledge}> {
+    return this.request(`/api/v1/knowledge/${encodeURIComponent(id)}`);
   }
 
   knowledgeLibraries(): Promise<{libraries: KnowledgeLibrary[]}> {
     return this.request("/api/v1/knowledge/libraries");
   }
 
-  bindKnowledgeLibrary(id: string, projectID: string): Promise<{ok: boolean}> {
-    return this.request(`/api/v1/knowledge/libraries/${encodeURIComponent(id)}/bind`, {method: "POST", body: JSON.stringify({project_id: projectID})});
+  bindKnowledgeLibrary(id: string, projectID: string, bindingMode: "project" | "external"): Promise<{ok: boolean}> {
+    return this.request(`/api/v1/knowledge/libraries/${encodeURIComponent(id)}/bind`, {method: "POST", body: JSON.stringify({project_id: projectID, binding_mode: bindingMode})});
   }
 
   unbindKnowledgeLibrary(id: string): Promise<{ok: boolean}> {

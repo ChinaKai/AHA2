@@ -19,9 +19,11 @@ func (s *Server) agentCapabilitiesInfo(writer http.ResponseWriter, request *http
 		return
 	}
 	main := call.Turn.AgentID == "main"
+	knowledgePublish := s.app.AgentKnowledgePublishAllowed(request.Context(), call)
+	boundKnowledgeContribute, _ := s.store.HasContributingKnowledgeBinding(request.Context(), call.Project.ID)
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "capabilities": map[string]bool{
 		"progress": true, "knowledge_read": true, "knowledge_feedback": true,
-		"memory_update": main, "knowledge_publish": main, "skill_create": main, "skill_update": main,
+		"memory_update": main, "knowledge_publish": knowledgePublish, "knowledge_contribute_bound": knowledgePublish && boundKnowledgeContribute, "skill_create": main, "skill_update": main,
 		"workspace_read": main && call.Task.AgentCapabilities["workspace_read"],
 		"task_create":    main && call.Task.AgentCapabilities["task_create"],
 		"clone_hardware": main && call.Task.AgentCapabilities["clone_hardware"],
@@ -287,7 +289,7 @@ func (s *Server) updateAgentSkill(writer http.ResponseWriter, request *http.Requ
 		writeError(writer, http.StatusBadRequest, "skill_update_invalid")
 		return
 	}
-	if skill.Scope == "project" && skill.ProjectID != call.Project.ID {
+	if skill.Scope == "project" && skill.ProjectID != call.Project.ID && !(skill.BoundProjectID == call.Project.ID && skill.BindingMode == "project") {
 		writeError(writer, http.StatusForbidden, "skill_scope_forbidden")
 		return
 	}
@@ -323,6 +325,8 @@ func writeAgentControlError(writer http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, app.ErrAgentCallForbidden):
 		writeError(writer, http.StatusForbidden, "agent_operation_forbidden")
+	case errors.Is(err, app.ErrKnowledgeReadOnly):
+		writeJSON(writer, http.StatusForbidden, map[string]any{"ok": false, "error": "knowledge_entry_read_only", "message": "该知识来自外部引用型绑定；请切换为项目协作型，或在来源 Project 中提交修订"})
 	case errors.Is(err, app.ErrAgentTurnInactive):
 		writeError(writer, http.StatusConflict, "agent_turn_inactive")
 	case errors.Is(err, app.ErrRevisionConflict), errors.Is(err, store.ErrKnowledgeProposalRevision), errors.Is(err, store.ErrKnowledgeProposalPending):
@@ -344,6 +348,13 @@ func validMemoryPatch(patch app.MemoryPatch) bool {
 				return false
 			}
 		}
+	}
+	if patch.CurrentGoal != nil {
+		goal := strings.TrimSpace(*patch.CurrentGoal)
+		if goal == "" || len([]rune(goal)) > 2000 {
+			return false
+		}
+		count++
 	}
 	return count > 0 && count <= 100
 }

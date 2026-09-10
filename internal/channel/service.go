@@ -33,22 +33,24 @@ type SecretStore interface {
 }
 
 type Service struct {
-	store           *store.Store
-	application     *app.Service
-	secrets         SecretStore
-	pluginsRoot     string
-	instancesRoot   string
-	runtimeDeviceID string
-	logger          *slog.Logger
-	now             func() time.Time
-	createMu        sync.Mutex
-	wakeInbound     chan struct{}
-	processMu       sync.Mutex
-	processes       map[string]*managedPluginProcess
-	processRetry    map[string]time.Time
-	processFailures map[string]int
-	runtimeBaseURL  string
-	runCtx          context.Context
+	store              *store.Store
+	application        *app.Service
+	secrets            SecretStore
+	pluginsRoot        string
+	instancesRoot      string
+	runtimeDeviceID    string
+	logger             *slog.Logger
+	now                func() time.Time
+	createMu           sync.Mutex
+	pluginRefreshMu    sync.Mutex
+	pluginsRefreshedAt time.Time
+	wakeInbound        chan struct{}
+	processMu          sync.Mutex
+	processes          map[string]*managedPluginProcess
+	processRetry       map[string]time.Time
+	processFailures    map[string]int
+	runtimeBaseURL     string
+	runCtx             context.Context
 }
 
 type RuntimeClaims struct {
@@ -139,12 +141,23 @@ func (s *Service) RefreshPlugins(ctx context.Context) error {
 	if s == nil || s.store == nil {
 		return nil
 	}
-	return Discover(ctx, s.store, s.pluginsRoot, s.now().UTC())
+	s.pluginRefreshMu.Lock()
+	defer s.pluginRefreshMu.Unlock()
+	err := Discover(ctx, s.store, s.pluginsRoot, s.now().UTC())
+	if err == nil {
+		s.pluginsRefreshedAt = s.now().UTC()
+	}
+	return err
 }
 
 func (s *Service) Providers(ctx context.Context) ([]domain.ChannelPlugin, error) {
-	if err := s.RefreshPlugins(ctx); err != nil {
-		s.logger.Warn("channel plugin discovery failed", "error", err)
+	s.pluginRefreshMu.Lock()
+	stale := s.pluginsRefreshedAt.IsZero() || s.now().UTC().Sub(s.pluginsRefreshedAt) >= 5*time.Second
+	s.pluginRefreshMu.Unlock()
+	if stale {
+		if err := s.RefreshPlugins(ctx); err != nil {
+			s.logger.Warn("channel plugin discovery failed", "error", err)
+		}
 	}
 	return s.store.ChannelPlugins(ctx)
 }
@@ -260,6 +273,9 @@ func (s *Service) UpdateInstance(ctx context.Context, ownerID, id, name string, 
 		}
 		return domain.ChannelInstance{}, err
 	}
+	if item.Retired {
+		return domain.ChannelInstance{}, fmt.Errorf("channel instance is archived")
+	}
 	if strings.TrimSpace(name) != "" {
 		item.Name = strings.TrimSpace(name)
 	}
@@ -324,6 +340,9 @@ func (s *Service) SetInstanceEnabled(ctx context.Context, ownerID, id string, en
 	if err != nil || item.OwnerID != ownerID {
 		return domain.ChannelInstance{}, sql.ErrNoRows
 	}
+	if item.Retired {
+		return domain.ChannelInstance{}, fmt.Errorf("channel instance is archived")
+	}
 	if !enabled {
 		item.Status = "disabled"
 	} else if item.CredentialConfigured && item.OwnerBound {
@@ -347,6 +366,82 @@ func (s *Service) SetInstanceEnabled(ctx context.Context, ownerID, id string, en
 		s.reconcileProcesses(ctx)
 	}
 	return updated, nil
+}
+
+func (s *Service) clearLifecycleSecrets(ctx context.Context, instanceID string, refs []string) error {
+	if s.secrets != nil && len(refs) > 0 {
+		if err := s.secrets.DeleteMany(uniqueStrings(refs)); err != nil {
+			return err
+		}
+	}
+	return s.store.ClearChannelSecretRefs(ctx, instanceID)
+}
+
+func uniqueStrings(values []string) []string {
+	seen := map[string]bool{}
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		result = append(result, value)
+	}
+	return result
+}
+
+func (s *Service) ResetBinding(ctx context.Context, ownerID, id string, expectedRevision int) (domain.ChannelInstance, error) {
+	s.stopPluginProcess(id)
+	item, refs, err := s.store.ResetChannelBinding(ctx, id, ownerID, expectedRevision, s.now().UTC())
+	if err != nil {
+		return domain.ChannelInstance{}, err
+	}
+	if err := s.clearLifecycleSecrets(ctx, id, refs); err != nil {
+		return domain.ChannelInstance{}, err
+	}
+	return s.store.ChannelInstance(ctx, item.ID)
+}
+
+func (s *Service) ArchiveInstance(ctx context.Context, ownerID, id string, expectedRevision int) (domain.ChannelInstance, error) {
+	if active, err := s.store.ChannelInstanceHasActiveTurn(ctx, id); err != nil || active {
+		if err != nil {
+			return domain.ChannelInstance{}, err
+		}
+		return domain.ChannelInstance{}, store.ErrActiveTurn
+	}
+	s.stopPluginProcess(id)
+	item, refs, err := s.store.RetireChannelInstance(ctx, id, ownerID, expectedRevision, s.now().UTC())
+	if err != nil {
+		return domain.ChannelInstance{}, err
+	}
+	if err := s.clearLifecycleSecrets(ctx, id, refs); err != nil {
+		return domain.ChannelInstance{}, err
+	}
+	return s.store.ChannelInstance(ctx, item.ID)
+}
+
+func (s *Service) PurgePreview(ctx context.Context, ownerID, id string) (domain.ChannelPurgePreview, error) {
+	return s.store.ChannelPurgePreview(ctx, id, ownerID)
+}
+
+func (s *Service) PurgeInstance(ctx context.Context, ownerID, id string, expectedRevision int) (domain.ChannelInstance, error) {
+	if active, err := s.store.ChannelInstanceHasActiveTurn(ctx, id); err != nil || active {
+		if err != nil {
+			return domain.ChannelInstance{}, err
+		}
+		return domain.ChannelInstance{}, store.ErrActiveTurn
+	}
+	s.stopPluginProcess(id)
+	item, err := s.store.PurgeRetiredChannelInstance(ctx, id, ownerID, expectedRevision)
+	if err != nil {
+		return domain.ChannelInstance{}, err
+	}
+	root := filepath.Clean(filepath.Join(s.instancesRoot, item.ID))
+	prefix := filepath.Clean(s.instancesRoot) + string(os.PathSeparator)
+	if strings.HasPrefix(root+string(os.PathSeparator), prefix) {
+		_ = os.RemoveAll(root)
+	}
+	return item, nil
 }
 
 func (s *Service) OwnerHandoffs(ctx context.Context, ownerID, instanceID string) ([]domain.ChannelHandoff, error) {
@@ -382,6 +477,9 @@ func (s *Service) ReplaceOwnerKnowledgeGrants(ctx context.Context, ownerID, inst
 	instance, err := s.store.ChannelInstance(ctx, instanceID)
 	if err != nil || instance.OwnerID != ownerID {
 		return nil, sql.ErrNoRows
+	}
+	if instance.Retired {
+		return nil, fmt.Errorf("channel instance is archived")
 	}
 	if scopeMode == "" {
 		scopeMode = "selected"
@@ -451,6 +549,9 @@ func (s *Service) PromoteOwnerKnowledgeRecord(ctx context.Context, ownerID, id, 
 	if err != nil || instance.OwnerID != ownerID {
 		return domain.ChannelKnowledgeRecord{}, sql.ErrNoRows
 	}
+	if instance.Retired {
+		return domain.ChannelKnowledgeRecord{}, fmt.Errorf("channel instance is archived")
+	}
 	return s.store.PromoteChannelKnowledgeRecord(ctx, id, instance.ID, title, body, s.now().UTC())
 }
 
@@ -462,6 +563,9 @@ func (s *Service) ReplayOwnerDelivery(ctx context.Context, ownerID, id string) (
 	instance, err := s.store.ChannelInstance(ctx, delivery.InstanceID)
 	if err != nil || instance.OwnerID != ownerID {
 		return domain.ChannelDelivery{}, sql.ErrNoRows
+	}
+	if instance.Retired {
+		return domain.ChannelDelivery{}, fmt.Errorf("channel instance is archived")
 	}
 	return s.store.ReplayChannelDelivery(ctx, id, instance.ID, s.now().UTC())
 }
@@ -475,6 +579,9 @@ func (s *Service) SkipOwnerDelivery(ctx context.Context, ownerID, id string) err
 	if err != nil || instance.OwnerID != ownerID {
 		return sql.ErrNoRows
 	}
+	if instance.Retired {
+		return fmt.Errorf("channel instance is archived")
+	}
 	return s.store.SkipChannelDelivery(ctx, id, instance.ID, s.now().UTC())
 }
 
@@ -485,6 +592,9 @@ func (s *Service) StoreExistingCredential(ctx context.Context, ownerID, id, appI
 			err = sql.ErrNoRows
 		}
 		return domain.ChannelInstance{}, err
+	}
+	if item.Retired {
+		return domain.ChannelInstance{}, fmt.Errorf("channel instance is archived")
 	}
 	appID, secret = strings.TrimSpace(appID), strings.TrimSpace(secret)
 	if appID == "" || secret == "" {

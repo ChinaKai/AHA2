@@ -35,7 +35,7 @@ func (s *Store) CreateProject(ctx context.Context, project domain.Project) error
 }
 
 func (s *Store) ListProjects(ctx context.Context) ([]domain.Project, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,name,description,project_type,repository_identity,default_workspace_id,default_branch,knowledge_policy,knowledge_revision,created_at,updated_at FROM projects ORDER BY updated_at DESC`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,name,description,project_type,repository_identity,default_workspace_id,default_branch,knowledge_policy,knowledge_revision,created_at,updated_at FROM projects ORDER BY updated_at DESC,id DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -51,6 +51,41 @@ func (s *Store) ListProjects(ctx context.Context) ([]domain.Project, error) {
 		result = append(result, item)
 	}
 	return result, rows.Err()
+}
+
+func (s *Store) ListProjectsPage(ctx context.Context, cursorAt time.Time, cursorID string, limit int) ([]domain.Project, bool, error) {
+	query := `SELECT id,name,description,project_type,repository_identity,default_workspace_id,default_branch,knowledge_policy,knowledge_revision,created_at,updated_at FROM projects WHERE project_type<>'knowledge'`
+	args := []any{}
+	if !cursorAt.IsZero() && cursorID != "" {
+		query += ` AND (updated_at<? OR (updated_at=? AND id<?))`
+		cursor := timeString(cursorAt)
+		args = append(args, cursor, cursor, cursorID)
+	}
+	query += ` ORDER BY updated_at DESC,id DESC LIMIT ?`
+	args = append(args, limit+1)
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, false, err
+	}
+	defer rows.Close()
+	items := make([]domain.Project, 0, limit+1)
+	for rows.Next() {
+		var item domain.Project
+		var createdAt, updatedAt string
+		if err := rows.Scan(&item.ID, &item.Name, &item.Description, &item.ProjectType, &item.RepositoryIdentity, &item.DefaultWorkspaceID, &item.DefaultBranch, &item.KnowledgePolicy, &item.KnowledgeRevision, &createdAt, &updatedAt); err != nil {
+			return nil, false, err
+		}
+		item.CreatedAt, item.UpdatedAt = parseTime(createdAt), parseTime(updatedAt)
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, err
+	}
+	hasMore := len(items) > limit
+	if hasMore {
+		items = items[:limit]
+	}
+	return items, hasMore, nil
 }
 
 func (s *Store) Project(ctx context.Context, id string) (domain.Project, error) {
@@ -123,7 +158,7 @@ func (s *Store) ListWorkspaces(ctx context.Context, projectID string) ([]domain.
 		query += ` WHERE project_id=?`
 		args = append(args, projectID)
 	}
-	query += ` ORDER BY updated_at DESC`
+	query += ` ORDER BY updated_at DESC,id DESC`
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
@@ -528,6 +563,34 @@ func (s *Store) RuntimeSnapshot(ctx context.Context, id string) (domain.RuntimeC
 		Scan(&item.ID, &item.WorkspaceID, &item.Backend, &item.BackendVersion, &item.ModelID, &item.WireModel, &item.EnvGroupID, &item.EnvGroupRevision, &item.CodexAccountID, &item.ProxyEnabled, &item.ReasoningEffort, &item.PermissionsJSON, &createdAt)
 	item.CreatedAt = parseTime(createdAt)
 	return item, err
+}
+
+// RuntimeSnapshotsByIDs resolves runtime metadata for list-level aggregation
+// without issuing one query per turn snapshot.
+func (s *Store) RuntimeSnapshotsByIDs(ctx context.Context, ids []string) (map[string]domain.RuntimeConfigSnapshot, error) {
+	result := make(map[string]domain.RuntimeConfigSnapshot, len(ids))
+	if len(ids) == 0 {
+		return result, nil
+	}
+	args := make([]any, 0, len(ids))
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id,workspace_id,backend,backend_version,model_id,wire_model,env_group_id,env_group_revision,codex_account_id,proxy_enabled,reasoning_effort,permissions_json,created_at FROM runtime_config_snapshots WHERE id IN (`+placeholders(len(ids))+`)`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var item domain.RuntimeConfigSnapshot
+		var createdAt string
+		if err := rows.Scan(&item.ID, &item.WorkspaceID, &item.Backend, &item.BackendVersion, &item.ModelID, &item.WireModel, &item.EnvGroupID, &item.EnvGroupRevision, &item.CodexAccountID, &item.ProxyEnabled, &item.ReasoningEffort, &item.PermissionsJSON, &createdAt); err != nil {
+			return nil, err
+		}
+		item.CreatedAt = parseTime(createdAt)
+		result[item.ID] = item
+	}
+	return result, rows.Err()
 }
 
 func isNotFound(err error) bool {

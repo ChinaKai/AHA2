@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -73,7 +76,7 @@ func TestChannelOwnerAndRuntimeAPIBoundaries(t *testing.T) {
 		t.Fatalf("created=%#v", created)
 	}
 	instance := created["instance"].(map[string]any)
-	instanceID, projectID := instance["id"].(string), instance["host_project_id"].(string)
+	instanceID, projectID, workspaceID := instance["id"].(string), instance["host_project_id"].(string), instance["host_workspace_id"].(string)
 	if _, ok := instance["credential_ref"]; ok {
 		t.Fatalf("credential ref leaked: %#v", instance)
 	}
@@ -116,6 +119,76 @@ func TestChannelOwnerAndRuntimeAPIBoundaries(t *testing.T) {
 			t.Errorf("media endpoint accepted health-only capability: %d", response.StatusCode)
 		}
 		response.Body.Close()
+	}
+	credentialInstance := credentials["instance"].(map[string]any)
+	revision := int(credentialInstance["revision"].(float64))
+	response = channelJSON(t, client, http.MethodPost, server.URL+"/api/v1/channel-instances/"+instanceID+"/archive", map[string]any{}, map[string]string{"X-CSRF-Token": csrf, "If-Match": fmt.Sprintf(`"%d"`, revision)})
+	var archivedResponse map[string]any
+	decodeResponse(t, response, &archivedResponse)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("archive=%#v", archivedResponse)
+	}
+	archived := archivedResponse["instance"].(map[string]any)
+	if archived["retired"] != true || archived["credential_configured"] != false {
+		t.Fatalf("archived instance=%#v", archived)
+	}
+	archivedRevision := int(archived["revision"].(float64))
+	response = requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/projects", nil, "")
+	var projects map[string]any
+	decodeResponse(t, response, &projects)
+	foundArchivedProject := false
+	for _, raw := range projects["projects"].([]any) {
+		project := raw.(map[string]any)
+		if project["id"] == projectID {
+			foundArchivedProject = project["channel_retired"] == true && project["read_only_reason"] == "channel_retired" && project["channel_instance_id"] == instanceID
+		}
+	}
+	if !foundArchivedProject {
+		t.Fatalf("archived channel project was not decorated: %#v", projects)
+	}
+	response = requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/workspaces?project_id="+projectID, nil, "")
+	var workspaces map[string]any
+	decodeResponse(t, response, &workspaces)
+	archivedWorkspace := workspaces["workspaces"].([]any)[0].(map[string]any)
+	if archivedWorkspace["id"] != workspaceID || archivedWorkspace["read_only"] != true || archivedWorkspace["read_only_reason"] != "channel_retired" {
+		t.Fatalf("archived channel workspace was not decorated: %#v", archivedWorkspace)
+	}
+	response = requestJSON(t, client, http.MethodPut, server.URL+"/api/v1/projects/"+projectID, map[string]any{"name": "changed"}, csrf)
+	var readOnlyResponse map[string]any
+	decodeResponse(t, response, &readOnlyResponse)
+	if response.StatusCode != http.StatusForbidden || readOnlyResponse["error"] != "channel_archive_read_only" {
+		t.Fatalf("archived project accepted mutation: %#v", readOnlyResponse)
+	}
+	response = requestJSON(t, client, http.MethodPut, server.URL+"/api/v1/workspaces/"+workspaceID, map[string]any{"name": "changed"}, csrf)
+	decodeResponse(t, response, &readOnlyResponse)
+	if response.StatusCode != http.StatusForbidden || readOnlyResponse["error"] != "channel_archive_read_only" {
+		t.Fatalf("archived workspace accepted mutation: %#v", readOnlyResponse)
+	}
+	response = requestJSON(t, client, http.MethodDelete, server.URL+"/api/v1/projects/"+projectID, nil, csrf)
+	decodeResponse(t, response, &deletion)
+	if response.StatusCode != http.StatusConflict || deletion["error"] != "managed_channel_resource" {
+		t.Fatalf("archived project bypassed channel purge: %#v", deletion)
+	}
+	response = channelJSON(t, client, http.MethodGet, server.URL+"/api/v1/channel-instances/"+instanceID+"/purge-preview", nil, map[string]string{})
+	var previewResponse map[string]any
+	decodeResponse(t, response, &previewResponse)
+	if response.StatusCode != http.StatusOK || previewResponse["preview"].(map[string]any)["name"] != "Team" {
+		t.Fatalf("purge preview=%#v", previewResponse)
+	}
+	response = channelJSON(t, client, http.MethodPost, server.URL+"/api/v1/channel-instances/"+instanceID+"/purge", map[string]any{"confirmation_name": "wrong"}, map[string]string{"X-CSRF-Token": csrf, "If-Match": fmt.Sprintf(`"%d"`, archivedRevision)})
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("purge accepted wrong confirmation: %d", response.StatusCode)
+	}
+	response.Body.Close()
+	response = channelJSON(t, client, http.MethodPost, server.URL+"/api/v1/channel-instances/"+instanceID+"/purge", map[string]any{"confirmation_name": "Team"}, map[string]string{"X-CSRF-Token": csrf, "If-Match": fmt.Sprintf(`"%d"`, archivedRevision)})
+	if response.StatusCode != http.StatusOK {
+		var body map[string]any
+		decodeResponse(t, response, &body)
+		t.Fatalf("purge=%#v", body)
+	}
+	response.Body.Close()
+	if _, err := database.Project(ctx, projectID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("purge retained project: %v", err)
 	}
 }
 

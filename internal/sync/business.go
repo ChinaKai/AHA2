@@ -501,7 +501,7 @@ func upsertBusinessObject(ctx context.Context, database *store.Store, obj domain
 			}
 			return fmt.Errorf("knowledge binding project dependency %s: %w", v.ProjectID, err)
 		}
-		_, err := database.BindKnowledgeLibrary(ctx, v.LibraryID, v.ProjectID, v.UpdatedAt)
+		_, err := database.BindKnowledgeLibrary(ctx, v.LibraryID, v.ProjectID, v.BindingMode, v.UpdatedAt)
 		return err
 	case TypeKnowledge:
 		var v domain.KnowledgeEntry

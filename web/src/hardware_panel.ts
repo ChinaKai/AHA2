@@ -58,6 +58,26 @@ const terminalKeys: Record<string, string> = {
 let pollGeneration = 0;
 let pollTimer = 0;
 let activeTerminal: HardwareTerminalBinding | null = null;
+let terminalAssetsPromise: Promise<void> | null = null;
+
+function loadTerminalAssets(): Promise<void> {
+  if (window.Terminal) return Promise.resolve();
+  if (terminalAssetsPromise) return terminalAssetsPromise;
+  const appScript = document.querySelector<HTMLScriptElement>('script[src*="/app.js"]');
+  const version = appScript ? new URL(appScript.src, location.href).search : "";
+  const stylesheet = document.createElement("link");
+  stylesheet.rel = "stylesheet";
+  stylesheet.href = `/vendor/xterm.css${version}`;
+  document.head.appendChild(stylesheet);
+  terminalAssetsPromise = new Promise<void>((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = `/vendor/xterm.js${version}`;
+    script.onload = () => resolve();
+    script.onerror = () => reject(new Error("终端组件加载失败"));
+    document.head.appendChild(script);
+  });
+  return terminalAssetsPromise;
+}
 
 function escapeHTML(value: unknown): string {
   return String(value ?? "")
@@ -184,6 +204,33 @@ function groupOptions(state: PanelState): string {
   return state.groups.map((group, index) =>
     `<option value="${escapeHTML(group.id)}" ${group.id === state.selectedID ? "selected" : ""}>${escapeHTML(group.description || `硬件 ${index + 1}`)}</option>`,
   ).join("");
+}
+
+function syncTitleGroupSelect(state: PanelState): void {
+  const select = document.querySelector<HTMLSelectElement>("#hardware-title-group-select");
+  if (!select) return;
+  select.innerHTML = groupOptions(state) || '<option value="">暂无硬件组</option>';
+  select.value = state.selectedID;
+  select.disabled = state.groups.length === 0;
+}
+
+function hardwareGroupsSignature(groups: HardwareGroup[]): string {
+  return JSON.stringify(groups.map(group => ({
+    id: group.id,
+    position: group.position,
+    description: group.description,
+    mode: group.mode,
+    serial: group.serial,
+    network: group.network,
+    username: group.username || "",
+    password_configured: group.password_configured,
+    access: group.access,
+  })));
+}
+
+export function renderHardwareGroupSwitcher(detail: TaskDetail): string {
+  const state = panelState(detail);
+  return `<select id="hardware-title-group-select" class="hardware-title-group-select" aria-label="切换硬件组" ${state.groups.length ? "" : "disabled"}>${groupOptions(state) || '<option value="">暂无硬件组</option>'}</select>`;
 }
 
 function serialDeviceOptions(state: PanelState, current = ""): string {
@@ -328,6 +375,7 @@ export function bindHardwarePanel(detail: TaskDetail, notify: Notice): void {
   if (!root) return;
   const state = panelState(detail);
   const generation = ++pollGeneration;
+  syncTitleGroupSelect(state);
   if (window.innerWidth <= 760) root.querySelector<HTMLDetailsElement>(".hardware-config")?.removeAttribute("open");
   const config = root.querySelector<HTMLDetailsElement>(".hardware-config");
   config?.addEventListener("toggle", () => {
@@ -450,14 +498,21 @@ export function bindHardwarePanel(detail: TaskDetail, notify: Notice): void {
     void saveGroups().catch(reportError);
   });
   root.querySelector("#hardware-save-top")?.addEventListener("click", () => void saveGroups().catch(reportError));
-  root.querySelector("#hardware-group-select")?.addEventListener("change", event => {
+  const selectGroup = (value: string) => {
     readForm();
-    state.selectedID = (event.currentTarget as HTMLSelectElement).value;
+    state.selectedID = value;
     const group = selectedGroup(state);
     state.transport = group?.mode === "network" ? "network" : "serial";
     if (state.dirty) persistHardwareDraft(state);
     rerender();
+  };
+  root.querySelector("#hardware-group-select")?.addEventListener("change", event => {
+    selectGroup((event.currentTarget as HTMLSelectElement).value);
   });
+  const titleGroupSelect = document.querySelector<HTMLSelectElement>("#hardware-title-group-select");
+  if (titleGroupSelect) {
+    titleGroupSelect.onchange = event => selectGroup((event.currentTarget as HTMLSelectElement).value);
+  }
   const addGroup = () => {
     readForm();
     const existing = new Set(state.groups.map(group => group.id));
@@ -580,6 +635,23 @@ export function stopHardwarePanel(): void {
   activeTerminal = null;
 }
 
+export function refreshHardwarePanel(detail: TaskDetail, notify: Notice): boolean {
+  const state = panelStates.get(detail.task.id);
+  if (!state || state.dirty) return false;
+  const groups = cloneGroups(detail.hardware || []);
+  if (hardwareGroupsSignature(state.groups) === hardwareGroupsSignature(groups)) return false;
+  const selected = state.selectedID;
+  state.groups = groups;
+  state.selectedID = groups.some(group => group.id === selected) ? selected : (groups[0]?.id || "");
+  const group = selectedGroup(state);
+  if (!supports(group, state.transport)) state.transport = group?.mode === "network" ? "network" : "serial";
+  const body = document.querySelector<HTMLElement>("#task-tool-panel-body");
+  if (!body) return false;
+  body.innerHTML = renderHardwarePanel(detail);
+  bindHardwarePanel(detail, notify);
+  return true;
+}
+
 async function loadPorts(state: PanelState, root: HTMLElement, rerender: () => void): Promise<void> {
   if (state.portsLoaded) return;
   try {
@@ -644,6 +716,13 @@ function ensureHardwareTerminal(detail: TaskDetail, state: PanelState): void {
   }
   const key = `${detail.task.id}:${group.id}:${state.transport}`;
   if (activeTerminal?.key === key) return;
+  if (!window.Terminal) {
+    container.textContent = "正在加载终端组件…";
+    void loadTerminalAssets().then(() => ensureHardwareTerminal(detail, state)).catch(error => {
+      container.textContent = error instanceof Error ? error.message : String(error);
+    });
+    return;
+  }
   activeTerminal?.dispose();
   const transport = state.transport;
   activeTerminal = mountHardwareTerminal({

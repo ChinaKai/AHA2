@@ -10,7 +10,7 @@ import (
 	"github.com/ChinaKai/AHA2/internal/domain"
 )
 
-const knowledgeLibraryColumns = `library.id,library.container_project_id,library.name,library.description,library.source_identity,COALESCE(binding.project_id,''),
+const knowledgeLibraryColumns = `library.id,library.container_project_id,library.name,library.description,library.source_identity,COALESCE(binding.project_id,''),COALESCE(binding.binding_mode,''),
     (SELECT COUNT(*) FROM knowledge_entries entry WHERE entry.project_id=library.container_project_id AND entry.is_index=0),
     (SELECT COUNT(*) FROM skills skill WHERE skill.project_id=library.container_project_id),
     library.created_at,library.updated_at`
@@ -24,7 +24,7 @@ func scanKnowledgeLibrary(scanner interface{ Scan(...any) error }) (domain.Knowl
 	var createdAt, updatedAt string
 	err := scanner.Scan(
 		&item.ID, &item.ContainerProjectID, &item.Name, &item.Description, &item.SourceIdentity,
-		&item.BoundProjectID, &item.KnowledgeCount, &item.SkillCount, &createdAt, &updatedAt,
+		&item.BoundProjectID, &item.BindingMode, &item.KnowledgeCount, &item.SkillCount, &createdAt, &updatedAt,
 	)
 	item.CreatedAt, item.UpdatedAt = parseTime(createdAt), parseTime(updatedAt)
 	return item, err
@@ -83,7 +83,17 @@ func (s *Store) ListKnowledgeLibraries(ctx context.Context) ([]domain.KnowledgeL
 	return result, rows.Err()
 }
 
-func (s *Store) BindKnowledgeLibrary(ctx context.Context, libraryID, projectID string, now time.Time) (domain.KnowledgeLibrary, error) {
+func normalizeKnowledgeBindingMode(value string) (string, error) {
+	if value == "" {
+		return "external", nil
+	}
+	if value != "project" && value != "external" {
+		return "", fmt.Errorf("knowledge library binding mode is invalid")
+	}
+	return value, nil
+}
+
+func (s *Store) BindKnowledgeLibrary(ctx context.Context, libraryID, projectID, bindingMode string, now time.Time) (domain.KnowledgeLibrary, error) {
 	library, err := s.KnowledgeLibrary(ctx, libraryID)
 	if err != nil {
 		return domain.KnowledgeLibrary{}, err
@@ -95,15 +105,19 @@ func (s *Store) BindKnowledgeLibrary(ctx context.Context, libraryID, projectID s
 	if project.ProjectType == "knowledge" || project.ID == library.ContainerProjectID {
 		return domain.KnowledgeLibrary{}, fmt.Errorf("knowledge library target project is invalid")
 	}
+	bindingMode, err = normalizeKnowledgeBindingMode(bindingMode)
+	if err != nil {
+		return domain.KnowledgeLibrary{}, err
+	}
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
 	now = s.sharedTimeVersion(ctx, "knowledge_binding", library.ID, now)
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO project_knowledge_bindings(library_id,project_id,created_at,updated_at)
-		VALUES(?,?,?,?)
-		ON CONFLICT(library_id) DO UPDATE SET project_id=excluded.project_id,updated_at=excluded.updated_at`,
-		library.ID, project.ID, timeString(now), timeString(now),
+		INSERT INTO project_knowledge_bindings(library_id,project_id,binding_mode,created_at,updated_at)
+		VALUES(?,?,?,?,?)
+		ON CONFLICT(library_id) DO UPDATE SET project_id=excluded.project_id,binding_mode=excluded.binding_mode,updated_at=excluded.updated_at`,
+		library.ID, project.ID, bindingMode, timeString(now), timeString(now),
 	)
 	if err != nil {
 		return domain.KnowledgeLibrary{}, err
@@ -127,11 +141,12 @@ func (s *Store) UnbindKnowledgeLibrary(ctx context.Context, libraryID string) (d
 		return domain.KnowledgeLibrary{}, err
 	}
 	library.BoundProjectID = ""
+	library.BindingMode = ""
 	return library, nil
 }
 
 func (s *Store) ListKnowledgeLibraryBindings(ctx context.Context) ([]domain.KnowledgeLibraryBinding, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT library_id,project_id,created_at,updated_at FROM project_knowledge_bindings ORDER BY library_id`)
+	rows, err := s.db.QueryContext(ctx, `SELECT library_id,project_id,binding_mode,created_at,updated_at FROM project_knowledge_bindings ORDER BY library_id`)
 	if err != nil {
 		return nil, err
 	}
@@ -140,7 +155,7 @@ func (s *Store) ListKnowledgeLibraryBindings(ctx context.Context) ([]domain.Know
 	for rows.Next() {
 		var item domain.KnowledgeLibraryBinding
 		var createdAt, updatedAt string
-		if err := rows.Scan(&item.LibraryID, &item.ProjectID, &createdAt, &updatedAt); err != nil {
+		if err := rows.Scan(&item.LibraryID, &item.ProjectID, &item.BindingMode, &createdAt, &updatedAt); err != nil {
 			return nil, err
 		}
 		item.CreatedAt, item.UpdatedAt = parseTime(createdAt), parseTime(updatedAt)
@@ -152,8 +167,8 @@ func (s *Store) ListKnowledgeLibraryBindings(ctx context.Context) ([]domain.Know
 func (s *Store) KnowledgeLibraryBinding(ctx context.Context, libraryID string) (domain.KnowledgeLibraryBinding, error) {
 	var item domain.KnowledgeLibraryBinding
 	var createdAt, updatedAt string
-	err := s.db.QueryRowContext(ctx, `SELECT library_id,project_id,created_at,updated_at FROM project_knowledge_bindings WHERE library_id=?`, libraryID).
-		Scan(&item.LibraryID, &item.ProjectID, &createdAt, &updatedAt)
+	err := s.db.QueryRowContext(ctx, `SELECT library_id,project_id,binding_mode,created_at,updated_at FROM project_knowledge_bindings WHERE library_id=?`, libraryID).
+		Scan(&item.LibraryID, &item.ProjectID, &item.BindingMode, &createdAt, &updatedAt)
 	item.CreatedAt, item.UpdatedAt = parseTime(createdAt), parseTime(updatedAt)
 	return item, err
 }
@@ -410,21 +425,38 @@ func (s *Store) deleteKnowledgeLibraryRoot(ctx context.Context, projectID string
 	return tx.Commit()
 }
 
-func (s *Store) knowledgeLibraryBindings(ctx context.Context) (map[string]string, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT library.container_project_id,binding.project_id
+func (s *Store) knowledgeLibraryBindings(ctx context.Context) (map[string]domain.KnowledgeLibraryBinding, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT library.container_project_id,binding.library_id,binding.project_id,binding.binding_mode,binding.created_at,binding.updated_at
 		FROM project_knowledge_bindings binding
 		JOIN knowledge_libraries library ON library.id=binding.library_id`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	result := map[string]string{}
+	result := map[string]domain.KnowledgeLibraryBinding{}
 	for rows.Next() {
-		var containerProjectID, projectID string
-		if err := rows.Scan(&containerProjectID, &projectID); err != nil {
+		var containerProjectID, createdAt, updatedAt string
+		var binding domain.KnowledgeLibraryBinding
+		if err := rows.Scan(&containerProjectID, &binding.LibraryID, &binding.ProjectID, &binding.BindingMode, &createdAt, &updatedAt); err != nil {
 			return nil, err
 		}
-		result[containerProjectID] = projectID
+		binding.CreatedAt, binding.UpdatedAt = parseTime(createdAt), parseTime(updatedAt)
+		result[containerProjectID] = binding
 	}
 	return result, rows.Err()
+}
+
+func (s *Store) CanContributeKnowledgeLibrary(ctx context.Context, sourceProjectID, targetProjectID string) (bool, error) {
+	bindings, err := s.knowledgeLibraryBindings(ctx)
+	if err != nil {
+		return false, err
+	}
+	binding, ok := bindings[sourceProjectID]
+	return ok && binding.ProjectID == targetProjectID && binding.BindingMode == "project", nil
+}
+
+func (s *Store) HasContributingKnowledgeBinding(ctx context.Context, projectID string) (bool, error) {
+	var exists bool
+	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM project_knowledge_bindings WHERE project_id=? AND binding_mode='project')`, projectID).Scan(&exists)
+	return exists, err
 }

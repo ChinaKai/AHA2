@@ -46,6 +46,8 @@ type ChannelInstance struct {
 	HostWorkspaceID       string         `json:"host_workspace_id"`
 	Config                map[string]any `json:"config,omitempty"`
 	LastSeenAt            time.Time      `json:"last_seen_at,omitempty"`
+	RetiredAt             time.Time      `json:"retired_at,omitempty"`
+	Retired               bool           `json:"retired"`
 	CreatedAt             time.Time      `json:"created_at"`
 	UpdatedAt             time.Time      `json:"updated_at"`
 }
@@ -58,6 +60,15 @@ type ChannelEndpoint struct {
 	Config     map[string]any `json:"config,omitempty"`
 	CreatedAt  time.Time      `json:"created_at"`
 	UpdatedAt  time.Time      `json:"updated_at"`
+}
+
+type ChannelPurgePreview struct {
+	InstanceID    string `json:"instance_id"`
+	Name          string `json:"name"`
+	Tasks         int    `json:"tasks"`
+	Conversations int    `json:"conversations"`
+	Messages      int    `json:"messages"`
+	Attachments   int    `json:"attachments"`
 }
 
 type ChannelIdentityLink struct {

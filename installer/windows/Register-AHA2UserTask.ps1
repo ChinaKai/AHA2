@@ -132,15 +132,15 @@ function Test-ExistingAHA2UserTask {
     }
 }
 
-# The fixed task name plus -Force is the uniqueness boundary. Reinstalling to a
-# new path or with new network settings replaces the previous action in place.
-try {
-    Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
-} catch {
-    if (-not (Test-ExistingAHA2UserTask)) {
-        throw
-    }
+# Reuse an exact existing task before attempting a write. Some valid per-user
+# tasks are readable and startable by their owner but have an ACL that rejects
+# Register-ScheduledTask -Force.
+if (Test-ExistingAHA2UserTask) {
     Write-Output "Existing AHA2 user task already matches the requested configuration; reusing it."
+} else {
+    # The fixed task name plus -Force is the uniqueness boundary when the
+    # requested runtime configuration actually changed.
+    Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
 }
 if ($Start) {
     Start-ScheduledTask -TaskName $taskName

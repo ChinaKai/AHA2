@@ -15,6 +15,7 @@ var (
 	ErrAgentCallForbidden = errors.New("agent control operation is forbidden")
 	ErrAgentTurnInactive  = errors.New("agent turn is not active")
 	ErrRevisionConflict   = errors.New("resource revision conflict")
+	ErrKnowledgeReadOnly  = errors.New("knowledge entry is available through a read-only library binding")
 )
 
 type AgentCallContext struct {
@@ -76,6 +77,16 @@ func (s *Service) AgentCallContext(ctx context.Context, claims agentapi.Claims, 
 	return AgentCallContext{Task: task, Turn: turn, Project: project}, nil
 }
 
+func (s *Service) AgentKnowledgePublishAllowed(ctx context.Context, call AgentCallContext) bool {
+	if call.Turn.AgentID != "main" || !knowledgeEnabled(call.Project, call.Task) {
+		return false
+	}
+	if channelContext, err := s.store.ChannelContextForInboxBatch(ctx, call.Turn.InboxBatchID); err == nil {
+		return channelRouteMode(channelContext) == "task_route"
+	}
+	return true
+}
+
 func (s *Service) UpdateAgentMemory(ctx context.Context, claims agentapi.Claims, patch MemoryPatch) (domain.TaskMemory, error) {
 	call, err := s.AgentCallContext(ctx, claims, true)
 	if err != nil {
@@ -85,7 +96,9 @@ func (s *Service) UpdateAgentMemory(ctx context.Context, claims agentapi.Claims,
 	if err != nil {
 		return domain.TaskMemory{}, err
 	}
-	s.applyMemoryPatch(ctx, call.Task, memory, patch)
+	if err := s.applyMemoryPatch(ctx, call.Task, memory, patch); err != nil {
+		return domain.TaskMemory{}, err
+	}
 	return s.store.TaskMemory(ctx, call.Task.ID)
 }
 
@@ -100,6 +113,16 @@ func (s *Service) ReplaceAgentMemory(ctx context.Context, claims agentapi.Claims
 	}
 	memory.TaskID = call.Task.ID
 	memory.CurrentGoal = call.Task.CurrentGoal
+	if replacement.CurrentGoal != nil {
+		goal := strings.TrimSpace(*replacement.CurrentGoal)
+		if goal == "" || len([]rune(goal)) > 2000 {
+			return domain.TaskMemory{}, fmt.Errorf("current goal is invalid")
+		}
+		if err := s.store.UpdateTaskGoal(ctx, call.Task.ID, goal, timeString(s.now().UTC())); err != nil {
+			return domain.TaskMemory{}, err
+		}
+		memory.CurrentGoal = goal
+	}
 	memory.Decisions = appendUnique(nil, replacement.Decisions...)
 	memory.Facts = appendUnique(nil, replacement.Facts...)
 	memory.Excluded = appendUnique(nil, replacement.Excluded...)
@@ -161,7 +184,7 @@ func (s *Service) SubmitAgentKnowledgeProposals(ctx context.Context, claims agen
 		if candidate.Confidence < 0 || candidate.Confidence > 1 {
 			return nil, nil, fmt.Errorf("knowledge confidence must be between 0 and 1")
 		}
-		if candidate.Slug != nil && !store.ValidKnowledgeSlug(strings.TrimSpace(*candidate.Slug)) {
+		if strings.TrimSpace(candidate.EntryID) == "" && candidate.Slug != nil && !store.ValidKnowledgeSlug(strings.TrimSpace(*candidate.Slug)) {
 			return nil, nil, store.ErrKnowledgeInvalidSlug
 		}
 		if candidate.SortOrder != nil && *candidate.SortOrder < 0 {
@@ -174,8 +197,17 @@ func (s *Service) SubmitAgentKnowledgeProposals(ctx context.Context, claims agen
 			continue
 		}
 		existing, err := s.store.Knowledge(ctx, candidate.EntryID)
-		if err != nil || existing.Scope == "project" && existing.ProjectID != call.Project.ID {
+		if err != nil {
 			return nil, nil, ErrAgentCallForbidden
+		}
+		if existing.Scope == "project" && existing.ProjectID != call.Project.ID {
+			allowed, bindingErr := s.store.CanContributeKnowledgeLibrary(ctx, existing.ProjectID, call.Project.ID)
+			if bindingErr != nil {
+				return nil, nil, bindingErr
+			}
+			if !allowed {
+				return nil, nil, ErrKnowledgeReadOnly
+			}
 		}
 		if candidate.BaseRevision <= 0 || candidate.BaseRevision != existing.Revision {
 			return nil, nil, ErrRevisionConflict
@@ -202,8 +234,17 @@ func (s *Service) SubmitAgentKnowledgeFeedback(ctx context.Context, claims agent
 		return domain.KnowledgeEntry{}, ErrAgentCallForbidden
 	}
 	entry, err := s.store.Knowledge(ctx, strings.TrimSpace(feedback.EntryID))
-	if err != nil || entry.Scope == "project" && entry.ProjectID != call.Project.ID {
+	if err != nil {
 		return domain.KnowledgeEntry{}, ErrAgentCallForbidden
+	}
+	if entry.Scope == "project" && entry.ProjectID != call.Project.ID {
+		allowed, bindingErr := s.store.CanContributeKnowledgeLibrary(ctx, entry.ProjectID, call.Project.ID)
+		if bindingErr != nil {
+			return domain.KnowledgeEntry{}, bindingErr
+		}
+		if !allowed {
+			return domain.KnowledgeEntry{}, ErrKnowledgeReadOnly
+		}
 	}
 	kind := strings.TrimSpace(feedback.Kind)
 	if kind != "helped" && kind != "stale" && kind != "wrong" {
@@ -243,7 +284,11 @@ func (s *Service) SelectedAgentSkills(ctx context.Context, claims agentapi.Claim
 	if err != nil {
 		return nil, AgentCallContext{}, err
 	}
-	return s.activeTaskSkills(ctx, call.Task), call, nil
+	items := s.activeTaskSkills(ctx, call.Task)
+	for index := range items {
+		items[index].CanUpdate = items[index].Scope == "global" || items[index].ProjectID == call.Project.ID || items[index].BoundProjectID == call.Project.ID && items[index].BindingMode == "project"
+	}
+	return items, call, nil
 }
 
 func (s *Service) CreateAgentSkill(ctx context.Context, claims agentapi.Claims, input AgentSkillCreateInput) (domain.Skill, error) {
@@ -283,9 +328,11 @@ func (s *Service) ApplicableAgentKnowledge(ctx context.Context, claims agentapi.
 		if channelRouteMode(channelContext) == "task_route" {
 			lines, _ := s.store.ListProductLines(ctx, call.Project.ID)
 			line := resolveProductLine(lines, call.Task.TargetBranch, call.Project.DefaultBranch)
-			project, _ := s.store.ListApplicableKnowledge(ctx, call.Project.ID, line.ID, []domain.KnowledgeStatus{domain.KnowledgeVerified})
-			global, _ := s.store.ListKnowledge(ctx, "global", "", []domain.KnowledgeStatus{domain.KnowledgeVerified})
-			return append(project, global...), nil
+			project, _ := s.store.ListApplicableKnowledge(ctx, call.Project.ID, line.ID, []domain.KnowledgeStatus{domain.KnowledgeVerified, domain.KnowledgeStale})
+			global, _ := s.store.ListKnowledge(ctx, "global", "", []domain.KnowledgeStatus{domain.KnowledgeVerified, domain.KnowledgeStale})
+			items := append(project, global...)
+			markAgentKnowledgeWritable(items, s.AgentKnowledgePublishAllowed(ctx, call))
+			return items, nil
 		}
 		return s.store.ChannelAllowedKnowledge(
 			ctx,
@@ -296,9 +343,21 @@ func (s *Service) ApplicableAgentKnowledge(ctx context.Context, claims agentapi.
 	}
 	lines, _ := s.store.ListProductLines(ctx, call.Project.ID)
 	line := resolveProductLine(lines, call.Task.TargetBranch, call.Project.DefaultBranch)
-	project, _ := s.store.ListApplicableKnowledge(ctx, call.Project.ID, line.ID, []domain.KnowledgeStatus{domain.KnowledgeVerified})
-	global, _ := s.store.ListKnowledge(ctx, "global", "", []domain.KnowledgeStatus{domain.KnowledgeVerified})
-	return append(project, global...), nil
+	project, _ := s.store.ListApplicableKnowledge(ctx, call.Project.ID, line.ID, []domain.KnowledgeStatus{domain.KnowledgeVerified, domain.KnowledgeStale})
+	global, _ := s.store.ListKnowledge(ctx, "global", "", []domain.KnowledgeStatus{domain.KnowledgeVerified, domain.KnowledgeStale})
+	items := append(project, global...)
+	markAgentKnowledgeWritable(items, s.AgentKnowledgePublishAllowed(ctx, call))
+	return items, nil
+}
+
+func markAgentKnowledgeWritable(items []domain.KnowledgeEntry, allowed bool) {
+	for index := range items {
+		if !allowed {
+			items[index].CanProposeRevision = false
+		} else if items[index].Scope == "global" {
+			items[index].CanProposeRevision = true
+		}
+	}
 }
 
 func (s *Service) AgentProjectWorkspaces(ctx context.Context, claims agentapi.Claims) ([]domain.Workspace, error) {

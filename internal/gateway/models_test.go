@@ -1,6 +1,8 @@
 package gateway
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -93,4 +95,63 @@ func TestDetectModelsRejectsEmptyBaseURL(t *testing.T) {
 	if _, err := DetectModels("", "key", "auto", time.Second); err == nil {
 		t.Fatal("expected error for empty base_url")
 	}
+}
+
+func TestModelDetectionRequestsHonorContextCancellation(t *testing.T) {
+	started := make(chan struct{}, 2)
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+		started <- struct{}{}
+		select {
+		case <-request.Context().Done():
+		case <-release:
+		}
+	}))
+	defer func() {
+		close(release)
+		server.Close()
+	}()
+
+	t.Run("catalog", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() {
+			_, err := DetectModelsContext(ctx, server.URL, "secret", "bearer", time.Minute)
+			done <- err
+		}()
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("catalog request did not start")
+		}
+		cancel()
+		select {
+		case err := <-done:
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("catalog cancellation error=%v", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("catalog request ignored cancellation")
+		}
+	})
+
+	t.Run("capability", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() {
+			ProbeModelCapabilitiesContext(ctx, server.URL, "secret", "bearer", "model", time.Minute)
+			close(done)
+		}()
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("capability request did not start")
+		}
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("capability request ignored cancellation")
+		}
+	})
 }

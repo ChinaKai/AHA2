@@ -664,6 +664,94 @@ func TestStableStaticAssetNamesAreRevalidated(t *testing.T) {
 	}
 }
 
+func TestVersionedStaticAssetIsCompressedImmutableAndRevalidated(t *testing.T) {
+	t.Parallel()
+	server := New(Config{Web: fstest.MapFS{
+		"index.html": &fstest.MapFile{Data: []byte("<html>app</html>")},
+		"app.js":     &fstest.MapFile{Data: bytes.Repeat([]byte("console.log('app');"), 100)},
+	}})
+	request := httptest.NewRequest(http.MethodGet, "http://example.test/app.js?v=abc123", nil)
+	request.Header.Set("Accept-Encoding", "gzip")
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK || response.Header().Get("Content-Encoding") != "gzip" {
+		t.Fatalf("versioned asset was not compressed: status=%d encoding=%q", response.Code, response.Header().Get("Content-Encoding"))
+	}
+	if cache := response.Header().Get("Cache-Control"); !strings.Contains(cache, "immutable") {
+		t.Fatalf("versioned asset cache policy = %q", cache)
+	}
+	etag := response.Header().Get("ETag")
+	if etag == "" {
+		t.Fatal("versioned asset omitted ETag")
+	}
+	revalidate := httptest.NewRequest(http.MethodGet, "http://example.test/app.js?v=abc123", nil)
+	revalidate.Header.Set("Accept-Encoding", "gzip")
+	revalidate.Header.Set("If-None-Match", etag)
+	notModified := httptest.NewRecorder()
+	server.Handler().ServeHTTP(notModified, revalidate)
+	if notModified.Code != http.StatusNotModified {
+		t.Fatalf("ETag revalidation status = %d", notModified.Code)
+	}
+}
+
+func TestTaskHTTPManualCreateAndStart(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	secretStore, err := secrets.Open(filepath.Join(t.TempDir(), "secrets.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	project := domain.Project{ID: "project-http-manual", Name: "Manual", CreatedAt: now, UpdatedAt: now}
+	workspace := domain.Workspace{ID: "workspace-http-manual", ProjectID: project.ID, Name: "local", Locality: "local", Transport: "native", RootPath: t.TempDir(), Health: "ready", CreatedAt: now, UpdatedAt: now}
+	envGroup := domain.EnvGroup{ID: "env-http-manual", Name: "stub", ProviderID: "stub", Backend: "stub", Revision: 1, Environment: map[string]string{}, SecretRefs: map[string]string{}, CreatedAt: now, UpdatedAt: now}
+	model := domain.Model{ID: "model-http-manual", DisplayName: "Stub", ProviderID: "stub", Backend: "stub", WireModel: "stub", DefaultEnvGroupID: envGroup.ID, CreatedAt: now, UpdatedAt: now}
+	for _, operation := range []func() error{
+		func() error { return database.CreateProject(ctx, project) },
+		func() error { return database.CreateWorkspace(ctx, workspace) },
+		func() error { return database.UpsertEnvGroup(ctx, envGroup) },
+		func() error { return database.UpsertModel(ctx, model) },
+	} {
+		if err := operation(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	appService := app.NewService(database, secretStore, app.StubExecutor{})
+	authService := auth.NewService(database, "setup-test", time.Hour)
+	server := httptest.NewServer(New(Config{Store: database, Auth: authService, App: appService}).Handler())
+	defer server.Close()
+	client := newCookieClient(t)
+	csrf := registerOwner(t, client, server.URL)
+	response := requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/tasks", map[string]any{
+		"project_id": project.ID, "workspace_id": workspace.ID, "title": "configure first", "request": "run later",
+		"model_id": model.ID, "start_mode": "manual",
+	}, csrf)
+	if response.StatusCode != http.StatusCreated {
+		t.Fatalf("manual create status = %d", response.StatusCode)
+	}
+	var created map[string]any
+	decodeResponse(t, response, &created)
+	taskPayload := created["task"].(map[string]any)
+	if taskPayload["status"] != "draft" || created["turn"] != nil {
+		t.Fatalf("manual create response = %#v", created)
+	}
+	taskID := taskPayload["id"].(string)
+	response = requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/tasks/"+taskID+"/start", map[string]any{}, csrf)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("manual start status = %d", response.StatusCode)
+	}
+	var started map[string]any
+	decodeResponse(t, response, &started)
+	if started["started"] != true || started["turn"] == nil || started["task"].(map[string]any)["status"] != "active" {
+		t.Fatalf("manual start response = %#v", started)
+	}
+}
+
 func TestJSONResponsesAreNotCached(t *testing.T) {
 	t.Parallel()
 	response := httptest.NewRecorder()

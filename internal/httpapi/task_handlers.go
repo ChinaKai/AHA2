@@ -16,37 +16,95 @@ import (
 )
 
 func (s *Server) listTasks(writer http.ResponseWriter, request *http.Request) {
-	items, err := s.store.ListTasks(request.Context(), request.URL.Query().Get("project_id"))
+	options, err := parseListOptions(request)
 	if err != nil {
-		writeError(writer, http.StatusInternalServerError, "list_tasks_failed")
+		writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid_list_options", "message": err.Error()})
 		return
 	}
-	s.applyTaskTokenTotals(request.Context(), items)
-	if mirrors, mirrorErr := s.store.RemoteTaskMirrors(request.Context(), request.URL.Query().Get("project_id")); mirrorErr == nil {
+	projectID := request.URL.Query().Get("project_id")
+	mirrors, _ := s.store.RemoteTaskMirrors(request.Context(), projectID)
+	var page listPage[domain.Task]
+	if options.Paged && len(mirrors) == 0 {
+		cursorAt, cursorID, cursorErr := listCursorPosition(options, "tasks")
+		if cursorErr != nil {
+			writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid_cursor", "message": cursorErr.Error()})
+			return
+		}
+		items, hasMore, listErr := s.store.ListTasksPage(request.Context(), projectID, cursorAt, cursorID, options.Limit)
+		if listErr != nil {
+			writeError(writer, http.StatusInternalServerError, "list_tasks_failed")
+			return
+		}
+		page = storeListPage(items, hasMore, "tasks", func(item domain.Task) (time.Time, string) { return item.UpdatedAt, item.ID })
+	} else {
+		items, listErr := s.store.ListTasks(request.Context(), projectID)
+		if listErr != nil {
+			writeError(writer, http.StatusInternalServerError, "list_tasks_failed")
+			return
+		}
 		for _, mirror := range mirrors {
 			items = append(items, mirror.Task)
 		}
+		var pageErr error
+		page, pageErr = paginateByUpdated(items, "tasks", options, func(item domain.Task) (time.Time, string) { return item.UpdatedAt, item.ID })
+		if pageErr != nil {
+			writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid_cursor", "message": pageErr.Error()})
+			return
+		}
 	}
-	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "tasks": items})
+	s.applyTaskTokenTotals(request.Context(), page.Items)
+	s.decorateChannelTasks(request.Context(), page.Items)
+	response := map[string]any{"ok": true}
+	if options.Summary {
+		response["tasks"] = summarizeTasks(page.Items)
+	} else {
+		response["tasks"] = page.Items
+	}
+	if options.Paged {
+		response["has_more"] = page.HasMore
+		response["next_cursor"] = page.NextCursor
+	}
+	writeJSON(writer, http.StatusOK, response)
 }
 
 func (s *Server) applyTaskTokenTotals(ctx context.Context, tasks []domain.Task) {
+	ids := make([]string, 0, len(tasks))
+	for _, task := range tasks {
+		if task.OwnerDeviceID == "" {
+			ids = append(ids, task.ID)
+		}
+	}
+	turnsByTask, err := s.store.ListTurnsForTasks(ctx, ids)
+	if err != nil {
+		return
+	}
+	sessionsByTask, err := s.store.ListBackendSessionsForTasks(ctx, ids)
+	if err != nil {
+		return
+	}
+	snapshotIDs := make([]string, 0)
+	seenSnapshots := map[string]bool{}
+	for _, turns := range turnsByTask {
+		for _, turn := range turns {
+			if turn.RuntimeConfigSnapshotID != "" && !seenSnapshots[turn.RuntimeConfigSnapshotID] {
+				seenSnapshots[turn.RuntimeConfigSnapshotID] = true
+				snapshotIDs = append(snapshotIDs, turn.RuntimeConfigSnapshotID)
+			}
+		}
+	}
+	snapshots, err := s.store.RuntimeSnapshotsByIDs(ctx, snapshotIDs)
+	if err != nil {
+		return
+	}
+	backends := make(map[string]string, len(snapshots))
+	for id, snapshot := range snapshots {
+		backends[id] = snapshot.Backend
+	}
 	for index := range tasks {
-		turns, turnsErr := s.store.ListTurns(ctx, tasks[index].ID)
-		sessions, sessionsErr := s.store.ListBackendSessionsForTask(ctx, tasks[index].ID)
-		if turnsErr != nil || sessionsErr != nil {
+		if tasks[index].OwnerDeviceID != "" {
 			continue
 		}
-		backends := map[string]string{}
-		for _, turn := range turns {
-			if _, ok := backends[turn.RuntimeConfigSnapshotID]; ok {
-				continue
-			}
-			if snapshot, err := s.store.RuntimeSnapshot(ctx, turn.RuntimeConfigSnapshotID); err == nil {
-				backends[turn.RuntimeConfigSnapshotID] = snapshot.Backend
-			}
-		}
-		tasks[index].TotalTokens = int64(taskTotalTokens(turns, sessions, backends))
+		tasks[index].TotalTokens = int64(taskTotalTokens(turnsByTask[tasks[index].ID], sessionsByTask[tasks[index].ID], backends))
 	}
 }
 
@@ -150,6 +208,7 @@ func (s *Server) createTask(writer http.ResponseWriter, request *http.Request) {
 		MaxAgents         int      `json:"max_agents"`
 		KnowledgePolicy   string   `json:"knowledge_policy"`
 		SkillIDs          []string `json:"skill_ids"`
+		StartMode         string   `json:"start_mode"`
 	}
 	if err := decodeJSON(request, &payload); err != nil {
 		writeError(writer, http.StatusBadRequest, "invalid_json")
@@ -157,6 +216,9 @@ func (s *Server) createTask(writer http.ResponseWriter, request *http.Request) {
 	}
 	if workspace, err := s.store.Workspace(request.Context(), payload.WorkspaceID); err == nil && workspace.ReadOnly {
 		writeJSON(writer, http.StatusForbidden, map[string]any{"ok": false, "error": "workspace_read_only", "message": "该 Workspace 属于其他设备，只能查看同步历史"})
+		return
+	}
+	if s.rejectRetiredChannelWorkspaceWrite(writer, request, payload.WorkspaceID) {
 		return
 	}
 	filesystem := strings.TrimSpace(payload.Filesystem)
@@ -187,13 +249,21 @@ func (s *Server) createTask(writer http.ResponseWriter, request *http.Request) {
 		CodexAccountID: payload.CodexAccountID, ReasoningEffort: payload.ReasoningEffort,
 		Filesystem: filesystem, Approval: approval, CollaborationMode: payload.CollaborationMode,
 		MaxAgents: payload.MaxAgents, ProxyEnabled: payload.ProxyEnabled, KnowledgePolicy: payload.KnowledgePolicy,
-		SkillIDs: payload.SkillIDs,
+		SkillIDs: payload.SkillIDs, StartMode: payload.StartMode,
 	})
 	if err != nil {
 		writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "create_task_failed", "message": err.Error()})
 		return
 	}
-	s.audit(request, "task.create", "task", item.ID, map[string]any{"project_id": item.ProjectID})
+	startMode := strings.TrimSpace(payload.StartMode)
+	if startMode == "" {
+		startMode = "immediate"
+	}
+	s.audit(request, "task.create", "task", item.ID, map[string]any{"project_id": item.ProjectID, "start_mode": startMode})
+	if startMode == "manual" {
+		writeJSON(writer, http.StatusCreated, map[string]any{"ok": true, "task": item, "started": false})
+		return
+	}
 	turn, startErr := s.app.SubmitMessage(request.Context(), item.ID, item.OriginalRequest)
 	if startErr != nil {
 		writeJSON(writer, http.StatusCreated, map[string]any{
@@ -201,7 +271,39 @@ func (s *Server) createTask(writer http.ResponseWriter, request *http.Request) {
 		})
 		return
 	}
-	writeJSON(writer, http.StatusCreated, map[string]any{"ok": true, "task": item, "turn": turn})
+	writeJSON(writer, http.StatusCreated, map[string]any{"ok": true, "task": item, "turn": turn, "started": true})
+}
+
+func (s *Server) startTask(writer http.ResponseWriter, request *http.Request) {
+	taskID := request.PathValue("id")
+	if s.rejectRetiredChannelTaskWrite(writer, request, taskID) {
+		return
+	}
+	current, err := s.store.Task(request.Context(), taskID)
+	if err != nil {
+		writeError(writer, http.StatusNotFound, "task_not_found")
+		return
+	}
+	if current.ReadOnly {
+		writeJSON(writer, http.StatusForbidden, map[string]any{"ok": false, "error": "task_read_only", "message": "该 Task 只读，不能启动"})
+		return
+	}
+	item, err := s.app.StartTask(request.Context(), taskID)
+	if err != nil {
+		status := http.StatusBadRequest
+		if current.Status != domain.TaskDraft {
+			status = http.StatusConflict
+		}
+		writeJSON(writer, status, map[string]any{"ok": false, "error": "start_task_failed", "message": err.Error()})
+		return
+	}
+	s.audit(request, "task.start", "task", item.ID, map[string]any{"project_id": item.ProjectID})
+	turn, startErr := s.app.SubmitMessage(request.Context(), item.ID, item.OriginalRequest)
+	if startErr != nil {
+		writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "task": item, "started": true, "start_error": startErr.Error()})
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "task": item, "turn": turn, "started": true})
 }
 
 func (s *Server) taskDetail(writer http.ResponseWriter, request *http.Request) {
@@ -228,6 +330,7 @@ func (s *Server) taskDetail(writer http.ResponseWriter, request *http.Request) {
 		writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "task": mirror.Task, "latest_round": latest, "turns": turns, "agents": mirror.Agents, "memory": mirror.Memory, "hardware": mirror.Hardware, "event_cursor": 0, "server_time_ms": time.Now().UTC().UnixMilli()})
 		return
 	}
+	s.decorateChannelTask(request.Context(), &task)
 	round, _ := s.store.LatestRound(request.Context(), taskID)
 	turns, _ := s.store.TurnsForRound(request.Context(), round.ID)
 	agents, _ := s.app.TaskAgents(request.Context(), taskID)
@@ -725,6 +828,9 @@ func (s *Server) submitAgentMessage(writer http.ResponseWriter, request *http.Re
 }
 
 func (s *Server) submitMessageForAgent(writer http.ResponseWriter, request *http.Request, agentID string) {
+	if s.rejectRetiredChannelTaskWrite(writer, request, request.PathValue("id")) {
+		return
+	}
 	var payload struct {
 		Content       string   `json:"content"`
 		AttachmentIDs []string `json:"attachment_ids"`
@@ -769,6 +875,9 @@ func (s *Server) taskAgents(writer http.ResponseWriter, request *http.Request) {
 }
 
 func (s *Server) updateTaskCollaboration(writer http.ResponseWriter, request *http.Request) {
+	if s.rejectRetiredChannelTaskWrite(writer, request, request.PathValue("id")) {
+		return
+	}
 	var payload struct {
 		CollaborationMode string `json:"collaboration_mode"`
 		MaxAgents         int    `json:"max_agents"`
@@ -793,6 +902,9 @@ func (s *Server) updateTaskCollaboration(writer http.ResponseWriter, request *ht
 }
 
 func (s *Server) updateAgentConfig(writer http.ResponseWriter, request *http.Request) {
+	if s.rejectRetiredChannelTaskWrite(writer, request, request.PathValue("id")) {
+		return
+	}
 	var payload struct {
 		Backend         string `json:"backend"`
 		ModelSource     string `json:"model_source"`
@@ -837,6 +949,9 @@ func (s *Server) resetAgentSession(writer http.ResponseWriter, request *http.Req
 
 func (s *Server) rotateAgentSession(writer http.ResponseWriter, request *http.Request, compact bool) {
 	taskID, agentID := request.PathValue("id"), request.PathValue("agent")
+	if s.rejectRetiredChannelTaskWrite(writer, request, taskID) {
+		return
+	}
 	var session domain.BackendSession
 	var err error
 	action := "reset"
@@ -866,6 +981,9 @@ func (s *Server) rotateAgentSession(writer http.ResponseWriter, request *http.Re
 
 func (s *Server) updateTaskTitle(writer http.ResponseWriter, request *http.Request) {
 	id := request.PathValue("id")
+	if s.rejectRetiredChannelTaskWrite(writer, request, id) {
+		return
+	}
 	var payload struct {
 		Title             *string          `json:"title"`
 		CollaborationMode *string          `json:"collaboration_mode"`
@@ -965,6 +1083,9 @@ func normalizeTaskAgentCapabilities(input map[string]bool) map[string]bool {
 
 func (s *Server) completeTask(writer http.ResponseWriter, request *http.Request) {
 	taskID := request.PathValue("id")
+	if s.rejectRetiredChannelTaskWrite(writer, request, taskID) {
+		return
+	}
 	if err := s.app.CompleteTask(request.Context(), taskID); err != nil {
 		status := http.StatusBadRequest
 		code := "complete_task_failed"
@@ -981,6 +1102,9 @@ func (s *Server) completeTask(writer http.ResponseWriter, request *http.Request)
 
 func (s *Server) reopenTask(writer http.ResponseWriter, request *http.Request) {
 	taskID := request.PathValue("id")
+	if s.rejectRetiredChannelTaskWrite(writer, request, taskID) {
+		return
+	}
 	if err := s.app.ReopenTask(request.Context(), taskID); err != nil {
 		status := http.StatusBadRequest
 		code := "reopen_task_failed"

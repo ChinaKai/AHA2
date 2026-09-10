@@ -60,10 +60,10 @@ func TestKnowledgeLibraryAPIHidesContainersAndBindsWithoutMovingContent(t *testi
 	if response.StatusCode != http.StatusOK || len(libraries["libraries"].([]any)) != 1 {
 		t.Fatalf("libraries status=%d payload=%#v", response.StatusCode, libraries)
 	}
-	response = requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/knowledge/libraries/"+library.ID+"/bind", map[string]any{"project_id": target.ID}, csrf)
+	response = requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/knowledge/libraries/"+library.ID+"/bind", map[string]any{"project_id": target.ID, "binding_mode": "project"}, csrf)
 	var bound map[string]any
 	decodeResponse(t, response, &bound)
-	if response.StatusCode != http.StatusOK || bound["library"].(map[string]any)["bound_project_id"] != target.ID {
+	if response.StatusCode != http.StatusOK || bound["library"].(map[string]any)["bound_project_id"] != target.ID || bound["library"].(map[string]any)["binding_mode"] != "project" {
 		t.Fatalf("bind status=%d payload=%#v", response.StatusCode, bound)
 	}
 	response = requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/knowledge/libraries/"+library.ID+"/unbind", map[string]any{}, csrf)

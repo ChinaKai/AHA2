@@ -376,3 +376,33 @@ func TestKnowledgeRootRevisionUsesExistingV33Root(t *testing.T) {
 		t.Fatalf("root count=%d err=%v", roots, err)
 	}
 }
+
+func TestKnowledgeProposalPreservesLegacySlug(t *testing.T) {
+	t.Parallel()
+	database, ctx, project, root := proposalTestStore(t)
+	now := time.Now().UTC()
+	existing := domain.KnowledgeEntry{
+		ID: "knowledge-legacy-slug", Scope: "project", ProjectID: project.ID, ParentID: root.ID,
+		Slug: "legacy-slug", Type: "practice", Title: "Legacy slug", Body: "Original body.",
+		Status: domain.KnowledgeVerified, Revision: 1, CreatedAt: now, UpdatedAt: now, LastVerifiedAt: now,
+	}
+	if err := database.CreateKnowledge(ctx, existing); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.db.ExecContext(ctx, `UPDATE knowledge_entries SET slug=? WHERE id=?`, "legacy_slug.md", existing.ID); err != nil {
+		t.Fatal(err)
+	}
+	existing.Slug = "legacy_slug.md"
+	proposed := existing
+	proposed.Body = "Revised body."
+	if _, err := database.CreateKnowledgeProposal(ctx, pendingProposal("proposal-legacy-slug", proposed, existing.Revision, now.Add(time.Second))); err != nil {
+		t.Fatalf("unchanged legacy slug rejected: %v", err)
+	}
+
+	changed := existing
+	changed.ID = "knowledge-new-invalid-slug"
+	changed.Slug = "another_legacy.md"
+	if err := database.CreateKnowledge(ctx, changed); !errors.Is(err, ErrKnowledgeInvalidSlug) {
+		t.Fatalf("new invalid slug error=%v", err)
+	}
+}

@@ -474,6 +474,23 @@ procedure ConfigureAHA2UserTask();
 var
   ResultCode: Integer;
 begin
+  { The per-user deployment wrapper owns task registration because it has the
+    authoritative listen/data/Agent API arguments. Silent upgrades otherwise
+    reuse stale wizard values and can reject an already-correct ACL-protected
+    task before the wrapper gets a chance to validate and reuse it. }
+  if CompareText(ExpandConstant('{param:SKIPUSERTASK|0}'), '1') = 0 then
+    Exit;
+#ifdef PerUserInstall
+  { A manual per-user upgrade must preserve an existing login task. Its action
+    is the authoritative runtime configuration and may be owner-startable but
+    ACL-protected against Register-ScheduledTask -Force. The deployment wrapper
+    performs stricter post-install validation when explicit settings change. }
+  if UserTaskWasPresent then
+  begin
+    Log('Existing AHA2 user task will be preserved for per-user upgrade.');
+    Exit;
+  end;
+#endif
   if not ExecAsOriginalUser(
     ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
     RegisterUserTaskParameters(''), ExpandConstant('{app}'), SW_HIDE,
