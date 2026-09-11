@@ -4,6 +4,177 @@ import {readFile} from "node:fs/promises";
 import {resolve} from "node:path";
 import {pathToFileURL} from "node:url";
 
+test("interactive region state restores scroll, focus, controls, and expansion", async () => {
+  const previous = {
+    HTMLElement: globalThis.HTMLElement,
+    document: globalThis.document,
+  };
+  class FakeClassList {
+    constructor(names = []) { this.names = new Set(names); }
+    contains(name) { return this.names.has(name); }
+    add(name) { this.names.add(name); }
+  }
+  class FakeElement {
+    constructor(tagName, options = {}) {
+      this.tagName = tagName.toUpperCase();
+      this.id = options.id || "";
+      this.dataset = {...(options.dataset || {})};
+      this.classList = new FakeClassList(options.classes || []);
+      this.parentElement = null;
+      this.children = [];
+      this.scrollTop = options.scrollTop || 0;
+      this.scrollLeft = options.scrollLeft || 0;
+      this.scrollHeight = options.scrollHeight || 0;
+      this.scrollWidth = options.scrollWidth || 0;
+      this.clientHeight = options.clientHeight || 0;
+      this.clientWidth = options.clientWidth || 0;
+      this.disabled = Boolean(options.disabled);
+      this.open = Boolean(options.open);
+      this.name = options.name || "";
+      this.value = options.value || "";
+      this.type = options.type || "";
+      this.checked = Boolean(options.checked);
+      this.selectionStart = options.selectionStart ?? null;
+      this.selectionEnd = options.selectionEnd ?? null;
+    }
+    append(...children) {
+      for (const child of children) { child.parentElement = this; this.children.push(child); }
+    }
+    querySelectorAll(selector) {
+      if (selector !== "*") return [];
+      const result = [];
+      const visit = element => { for (const child of element.children) { result.push(child); visit(child); } };
+      visit(this);
+      return result;
+    }
+    hasAttribute(name) { return name === "disabled" && this.disabled; }
+    focus() { globalThis.document.activeElement = this; }
+    setSelectionRange(start, end) { this.selectionStart = start; this.selectionEnd = end; }
+  }
+  const tree = fresh => {
+    const root = new FakeElement("div");
+    const list = new FakeElement("div", {dataset: {uiKey: "model-list"}, classes: ["detected-list"], scrollTop: fresh ? 0 : 140, scrollHeight: 500, clientHeight: 200});
+    const search = new FakeElement("input", {id: "detect-search", type: "search", value: fresh ? "" : "model-b", selectionStart: fresh ? 0 : 3, selectionEnd: fresh ? 0 : 5});
+    const selected = new FakeElement("input", {dataset: {uiKey: "selected-model"}, type: "checkbox", checked: fresh});
+    const pending = new FakeElement("input", {dataset: {uiKey: "pending-model"}, type: "checkbox", checked: fresh, disabled: !fresh});
+    const details = new FakeElement("details", {dataset: {uiKey: "details"}, open: !fresh});
+    const message = new FakeElement("article", {dataset: {messageId: "message-1"}, classes: fresh ? [] : ["expanded"]});
+    list.append(selected, pending);
+    root.append(search, list, details, message);
+    return {root, list, search, selected, pending, details, message};
+  };
+  try {
+    globalThis.HTMLElement = FakeElement;
+    const oldTree = tree(false);
+    globalThis.document = {activeElement: oldTree.search};
+    const helpers = await import(pathToFileURL(resolve(import.meta.dirname, "..", "dist", "ui_helpers.js")));
+    const state = helpers.captureInteractiveRegion(oldTree.root);
+    const newTree = tree(true);
+    globalThis.document.activeElement = null;
+    helpers.restoreInteractiveRegion(newTree.root, state);
+    assert.equal(newTree.list.scrollTop, 140);
+    assert.equal(newTree.search.value, "model-b");
+    assert.equal(globalThis.document.activeElement, newTree.search);
+    assert.deepEqual([newTree.search.selectionStart, newTree.search.selectionEnd], [3, 5]);
+    assert.equal(newTree.selected.checked, false, "enabled user choice should survive");
+    assert.equal(newTree.pending.checked, true, "newly enabled live result should keep its rendered default");
+    assert.equal(newTree.details.open, true);
+    assert.equal(newTree.message.classList.contains("expanded"), true);
+  } finally {
+    if (previous.HTMLElement === undefined) delete globalThis.HTMLElement; else globalThis.HTMLElement = previous.HTMLElement;
+    if (previous.document === undefined) delete globalThis.document; else globalThis.document = previous.document;
+  }
+});
+
+test("testing the current proxy never persists or switches settings", async () => {
+  const previousDocument = globalThis.document;
+  class FakeClassList {
+    toggle() {}
+  }
+  class FakeElement {
+    constructor(value = "") {
+      this.value = value;
+      this.disabled = false;
+      this.textContent = "";
+      this.classList = new FakeClassList();
+      this.listeners = new Map();
+    }
+    addEventListener(name, listener) { this.listeners.set(name, listener); }
+    fire(name) { this.listeners.get(name)?.({currentTarget: this, preventDefault() {}, stopPropagation() {}}); }
+  }
+  const elements = new Map([
+    ["#proxy-test-status", new FakeElement()],
+    ["#proxy-mode", new FakeElement("external")],
+    ["#proxy-http", new FakeElement("http://127.0.0.1:18080")],
+    ["#proxy-https", new FakeElement("http://127.0.0.1:18443")],
+    ["#proxy-bypass", new FakeElement("localhost")],
+    ["#test-proxy", new FakeElement()],
+  ]);
+  globalThis.document = {
+    querySelector(selector) { return elements.get(selector) || null; },
+    querySelectorAll() { return []; },
+  };
+  const root = resolve(import.meta.dirname, "..");
+  const proxySource = await readFile(resolve(root, "dist", "proxy_settings.js"), "utf8");
+  const apiVersion = proxySource.match(/\.\/api\.js(\?v=[^"]+)?/i)?.[1] || "";
+  const apiURL = pathToFileURL(resolve(root, "dist", "api.js"));
+  apiURL.search = apiVersion;
+  const apiModule = await import(apiURL);
+  const proxyModule = await import(pathToFileURL(resolve(root, "dist", "proxy_settings.js")));
+  const originalUpdate = apiModule.api.updateProxySettings;
+  const originalTest = apiModule.api.testProxySettings;
+  let writes = 0;
+  let tested;
+  try {
+    apiModule.api.updateProxySettings = async () => { writes++; throw new Error("unexpected write"); };
+    apiModule.api.testProxySettings = async settings => { tested = settings; return {status_code: 200, elapsed_ms: 12}; };
+    proxyModule.bindProxySettings({
+      settings: {mode: "external", http_proxy: "", https_proxy: "", no_proxy: "", managed_refresh_interval_minutes: 1440},
+      managed: {configured: false, profiles: [], url_configured: false, nodes: [], unsupported_count: 0, unsupported_types: [], status: "idle"},
+      onChanged() { throw new Error("proxy test unexpectedly changed state"); },
+      setMessage() {},
+    });
+    assert.equal(elements.get("#test-proxy").listeners.has("click"), true);
+    elements.get("#test-proxy").fire("click");
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.equal(writes, 0);
+    assert.equal(typeof tested, "object", elements.get("#proxy-test-status").textContent);
+    assert.deepEqual(
+      {mode: tested.mode, http_proxy: tested.http_proxy, https_proxy: tested.https_proxy, no_proxy: tested.no_proxy},
+      {mode: "external", http_proxy: "http://127.0.0.1:18080", https_proxy: "http://127.0.0.1:18443", no_proxy: "localhost"},
+    );
+    assert.match(elements.get("#proxy-test-status").textContent, /代理可用/);
+  } finally {
+    apiModule.api.updateProxySettings = originalUpdate;
+    apiModule.api.testProxySettings = originalTest;
+    if (previousDocument === undefined) delete globalThis.document; else globalThis.document = previousDocument;
+  }
+});
+
+test("forms and action groups stay aligned without narrow-window button distortion", async () => {
+  const styles = await readFile(resolve(import.meta.dirname, "..", "src", "styles.css"), "utf8");
+  assert.match(styles, /\.channel-create-form \{[^}]*grid-template-columns:\s*minmax\(160px,220px\) minmax\(220px,1fr\) max-content;[^}]*align-items:\s*end/);
+  assert.match(styles, /\.channel-create-form label \{[^}]*margin:\s*0/);
+  assert.match(styles, /\.channel-create-form > button \{[^}]*min-height:\s*38px;[^}]*white-space:\s*nowrap/);
+  assert.match(styles, /\.managed-profile-meta \{[^}]*grid-template-columns:\s*minmax\(160px,240px\) max-content;[^}]*justify-content:\s*start/);
+  assert.match(styles, /\.managed-profile-meta label \{[^}]*margin:\s*0/);
+  assert.match(styles, /\.dialog-actions \{[^}]*flex-wrap:\s*wrap/);
+  assert.match(styles, /@media \(max-width:\s*760px\)[\s\S]*?\.dialog-actions \{[^}]*grid-template-columns:\s*repeat\(auto-fit,minmax\(120px,1fr\)\)/);
+  assert.match(styles, /@media \(max-width:\s*520px\)[\s\S]*?\.managed-profile-card-actions[^\{]*\{[^}]*grid-template-columns:\s*repeat\(2,minmax\(0,1fr\)\)/);
+  assert.match(styles, /\.actions > button, \.row-actions > button, \.task-card-actions > button \{[^}]*white-space:\s*nowrap/);
+  assert.match(styles, /dialog > \.dialog-head \{[^}]*padding:\s*18px 18px 0/);
+  assert.match(styles, /@media \(max-width:\s*760px\)[\s\S]*?\.provider-layout \.provider-row \{[^}]*grid-template-columns:\s*minmax\(0,1fr\) auto/);
+  assert.match(styles, /@media \(max-width:\s*400px\)[\s\S]*?\.dialog-actions \{[^}]*grid-template-columns:\s*minmax\(0,1fr\)/);
+  assert.match(styles, /\.models-table th:nth-child\(2\)/);
+  assert.doesNotMatch(styles, /\n\s*th:nth-child\(2\),\s*td:nth-child\(2\)/);
+  assert.match(styles, /@media \(max-width:\s*760px\)[\s\S]*?\.task-draft-banner button \{[^}]*grid-column:\s*1 \/ -1/);
+  assert.match(styles, /@media \(max-width:\s*760px\)[\s\S]*?\.remote-readonly-actions \{[^}]*grid-column:\s*1 \/ -1/);
+  assert.match(styles, /@media \(max-width:\s*760px\)[\s\S]*?\.sync-domain-grid \{[^}]*grid-template-columns:\s*repeat\(2,minmax\(0,1fr\)\);[^}]*overflow:\s*visible/);
+  assert.match(styles, /@media \(max-width:\s*760px\)[\s\S]*?\.hardware-group-row \{[^}]*grid-template-columns:\s*minmax\(0,1fr\) repeat\(3,34px\)/);
+  assert.match(styles, /@media \(max-width:\s*360px\)[\s\S]*?\.agent-turn-row code \{[^}]*display:\s*none/);
+  assert.match(styles, /@media \(max-width:\s*360px\)[\s\S]*?\.hardware-terminal-keys \{[^}]*grid-template-columns:\s*repeat\(4,minmax\(0,1fr\)\);[^}]*overflow:\s*visible/);
+});
+
 test("channel lifecycle renders active and retired actions with guarded purge", async () => {
   const root = resolve(import.meta.dirname, "..");
   const module = await import(pathToFileURL(resolve(root, "dist", "channels.js")));
@@ -202,7 +373,7 @@ test("read-only task history opens on the latest page and lazily loads older row
   const script = await readFile(resolve(root, "dist", "app.js"), "utf8");
   assert.match(script, /detail\.task\.read_only\s*\?\s*\[\s*"chat",\s*"update",\s*"error"\s*\]/);
   assert.match(script, /agentConversation\(taskID,\s*"main",\s*\{\s*limit:\s*50,\s*categories\s*\}/);
-  assert.match(script, /scrollConversationToBottom\s*=\s*true/);
+  assert.match(script, /requestConversationBottom\(\)/);
   assert.match(script, /detail\.task\.read_only\)\s*closeEvents\(\)/);
   assert.match(script, /currentTop\s*<\s*previousTop\s*&&\s*currentTop\s*<=\s*80/);
   assert.match(script, /loadingOlderConversation/);
@@ -389,8 +560,12 @@ test("built web contains responsive application", async () => {
   assert.match(script, /renderMarkdown\(context\.prompt/);
   assert.match(script, /markdown\.js\?v=[a-f0-9]{12}/);
   assert.match(script, /refreshTaskRuntime/);
-  assert.match(script, /api\.agentMessage[\s\S]{0,600}scrollConversationToBottom\s*=\s*true[\s\S]{0,120}updateTaskLiveRegions/);
-  assert.match(script, /scrollConversationToBottom\s*\|\|\s*wasAtBottom/);
+  assert.match(script, /api\.agentMessage[\s\S]{0,600}requestConversationBottom\(\)[\s\S]{0,120}updateTaskLiveRegions/);
+  assert.match(script, /shouldAutoScrollConversation\(wasAtBottom\)/);
+  assert.match(script, /conversationAutoScrollBlockedUntil\s*=\s*Date\.now\(\)\s*\+\s*800/);
+  assert.match(script, /function stabilizeConversationBottom[\s\S]*requestAnimationFrame[\s\S]*image\.addEventListener\("load"/);
+  assert.match(script, /\[\s*"wheel",\s*"touchstart",\s*"pointerdown"\s*\][\s\S]*cancelConversationBottomPin/);
+  assert.match(css, /\.messages \{[^}]*overflow-anchor:\s*none/);
   assert.match(script, /startTaskFallback/);
   assert.match(agents, /data-live-elapsed-ms/);
   assert.match(agents, /ms > 0 && ms < 1000/);
@@ -400,8 +575,8 @@ test("built web contains responsive application", async () => {
   assert.match(conversation, /data-copy-message/);
   assert.match(conversation, /data-toggle-message/);
   assert.match(conversation, /data-message-id/);
-  assert.match(script, /expandedMessageIDs/);
-  assert.match(script, /list\.innerHTML = conversationListHtml\(\);\s*restoreRegionUI\(list, ui, false\);\s*if \(scrollConversationToBottom/);
+  assert.match(helpers, /classList\.contains\("expanded"\)/);
+  assert.match(script, /list\.innerHTML = conversationListHtml\(\);\s*restoreRegionUI\(list, ui, false\);\s*if \(shouldAutoScrollConversation\(wasAtBottom\)\)[\s\S]{0,80}stabilizeConversationBottom\(list\)/);
   assert.match(script, /list\.innerHTML = conversationListHtml\(\);\s*restoreRegionUI\(list, ui, false\);\s*list\.scrollTop = previousTop \+ Math\.max/);
   assert.match(conversation, /data-image-preview/);
   assert.match(helpers, /showModal\(\)/);
@@ -480,7 +655,29 @@ test("built web contains responsive application", async () => {
   assert.match(channels, /Knowledge allowlist/);
   assert.match(channels, /人工整理并共享/);
   assert.match(api, /channel-knowledge-records/);
-  assert.match(script, /shell\(renderProxySettings\(state\.proxySettings\)\)/);
+  assert.match(script, /shell\(renderProxySettings\(state\.proxySettings, state\.managedProxy\)\)/);
+  assert.match(proxySettings, /AHA 内置代理/);
+  assert.match(proxySettings, /VLESS Reality/);
+  assert.match(proxySettings, /importProxySubscription/);
+  assert.match(proxySettings, /refreshProxyProfile/);
+  assert.match(proxySettings, /deleteProxyProfile/);
+  assert.match(proxySettings, /data-activate-proxy-profile/);
+  assert.match(proxySettings, /data-select-proxy-node/);
+  assert.match(proxySettings, /updateProxyProfile/);
+  assert.match(proxySettings, /activateProxyProfile/);
+  assert.match(proxySettings, /data-delete-proxy-profile/);
+  assert.match(proxySettings, /data-test-proxy-node/);
+  assert.match(proxySettings, /testProxyNode/);
+  assert.match(proxySettings, /节点列表/);
+  assert.match(proxySettings, /应用节点/);
+  assert.match(proxySettings, /需要重新选择节点/);
+  assert.match(proxySettings, /subscription_at/);
+  assert.match(proxySettings, /添加后不会切换当前线路/);
+  assert.match(proxySettings, /id="proxy-add-dialog"/);
+  assert.match(proxySettings, /type="file"/);
+  assert.match(proxySettings, /saveProxySettings/);
+  assert.match(proxySettings, /pendingSubscription\(\)\.then/);
+  assert.match(proxySettings, /return api\.importProxySubscription/);
   assert.match(script, /name=\\?"proxy_enabled/);
   assert.match(agents, /name="proxy_enabled"/);
   assert.match(proxySettings, /HTTP_PROXY/);
@@ -1212,7 +1409,38 @@ test("model detection streams catalog results and can be stopped", async () => {
   assert.match(main, /addEventListener\("result"/);
   assert.match(main, /id="stop-model-detection"/);
   assert.match(main, /cancelModelDetectionJob/);
+  assert.match(main, /replaceRegionHTML\(root,/);
+  assert.match(main, /data-ui-key="model-detection-list"/);
+  assert.match(main, /applyModelDetectionFilter/);
+  assert.match(main, /session\.selected/);
+  assert.match(main, /addEventListener\("result"[\s\S]{0,700}updateDetectedModelRow/);
+  assert.match(main, /addEventListener\("progress"[\s\S]{0,500}updateModelDetectionProgress/);
+  assert.match(main, /finishModelDetection[\s\S]{0,300}#stop-model-detection/);
+  const resultHandler = main.slice(main.indexOf('source.addEventListener("result"'), main.indexOf('source.addEventListener("progress"'));
+  const progressHandler = main.slice(main.indexOf('source.addEventListener("progress"'), main.indexOf('source.addEventListener("done"'));
+  assert.doesNotMatch(resultHandler, /renderModelDetection/);
+  assert.doesNotMatch(progressHandler, /renderModelDetection/);
   assert.match(api, /model-detection-jobs/);
+});
+
+test("same-page live renders preserve page interaction state", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const main = await readFile(resolve(root, "dist", "app.js"), "utf8");
+  const helpers = await readFile(resolve(root, "dist", "ui_helpers.js"), "utf8");
+  assert.match(main, /const preservePageUI = app\.dataset\.uiScope === nextUIScope/);
+  assert.match(main, /const previousAppUI = preservePageUI \? captureRegionUI\(app\) : null/);
+  assert.match(main, /restoreRegionUI\(app, previousAppUI, false\)/);
+  assert.match(main, /if \(preservePageUI\) window\.scrollTo\(0, previousWindowScroll\)/);
+  assert.match(main, /else window\.scrollTo\(0, 0\)/);
+  assert.match(main, /if \(appPointerActive\) \{\s*state\.renderPending = true/);
+  assert.match(main, /if \(hasActiveTextEditor\(\)\) \{\s*state\.renderPending = true/);
+  assert.match(main, /addEventListener\("focusout",\s*\(\)\s*=>\s*window\.setTimeout\(flushDeferredRender, 0\)/);
+  assert.match(main, /function updateTaskLiveRegions[\s\S]{0,180}if \(appPointerActive\)/);
+  assert.match(main, /document\.activeElement !== agentSelect/);
+  assert.match(main, /const listPageVisible = state\.view === "projects" \|\| state\.view === "tasks"/);
+  for (const marker of ["captureInteractiveRegion", "restoreInteractiveRegion", "focusKey", "selectionStart", "preserveScroll"]) {
+    assert.match(helpers, new RegExp(marker));
+  }
 });
 
 test("large catalogs use independent route resources and cursor pages", async () => {

@@ -35,10 +35,42 @@ export interface SystemInfo {
 }
 
 export interface ProxySettings {
+  mode: "off" | "external" | "managed_hysteria2";
   http_proxy: string;
   https_proxy: string;
   no_proxy: string;
+  managed_profile_id?: string;
+  managed_node_id?: string;
+  managed_refresh_interval_minutes: number;
+  managed_subscription_at?: string;
   updated_at?: string;
+}
+
+export interface ManagedProxyView {
+  configured: boolean;
+  active_profile_id?: string;
+  profiles: ManagedProxyProfile[];
+  url_configured: boolean;
+  nodes: Array<{id: string; name: string; protocol: "hysteria2" | "vless"}>;
+  unsupported_count: number;
+  unsupported_types: string[];
+  status: string;
+  last_error?: string;
+}
+
+export interface ManagedProxyProfile {
+  id: string;
+  name: string;
+  active: boolean;
+  url_configured: boolean;
+  nodes: Array<{id: string; name: string; protocol: "hysteria2" | "vless"}>;
+  selected_node_id: string;
+  active_node_id?: string;
+  needs_selection: boolean;
+  unsupported_count: number;
+  unsupported_types: string[];
+  refresh_interval_minutes: number;
+  subscription_at?: string;
 }
 
 export interface SyncSettings {

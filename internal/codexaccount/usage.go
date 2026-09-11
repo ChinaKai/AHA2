@@ -142,6 +142,13 @@ func (m *Manager) clientForAccount(ctx context.Context, account domain.CodexAcco
 	if !account.ProxyEnabled {
 		return m.httpClient, nil
 	}
+	if m.proxyRuntime != nil {
+		client, err := m.proxyRuntime.Client(ctx, m.httpClient)
+		if err != nil {
+			return nil, fmt.Errorf("invalid proxy settings: %w", err)
+		}
+		return client, nil
+	}
 	settings, err := m.store.ProxySettings(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("读取代理设置失败: %w", err)

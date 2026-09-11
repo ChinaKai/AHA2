@@ -12,6 +12,19 @@ import (
 )
 
 func Normalize(input domain.ProxySettings) (domain.ProxySettings, error) {
+	input.Mode = strings.TrimSpace(input.Mode)
+	if input.Mode == "" {
+		input.Mode = "external"
+	}
+	if input.Mode != "off" && input.Mode != "external" && input.Mode != "managed_hysteria2" {
+		return domain.ProxySettings{}, fmt.Errorf("unsupported proxy mode")
+	}
+	if input.ManagedRefreshIntervalMins == 0 {
+		input.ManagedRefreshIntervalMins = 1440
+	}
+	if input.ManagedRefreshIntervalMins < 15 || input.ManagedRefreshIntervalMins > 10080 {
+		return domain.ProxySettings{}, fmt.Errorf("managed refresh interval must be between 15 and 10080 minutes")
+	}
 	input.HTTPProxy = strings.TrimSpace(input.HTTPProxy)
 	input.HTTPSProxy = strings.TrimSpace(input.HTTPSProxy)
 	input.NoProxy = strings.TrimSpace(input.NoProxy)
@@ -31,6 +44,10 @@ func Normalize(input domain.ProxySettings) (domain.ProxySettings, error) {
 }
 
 func ApplyEnvironment(environment map[string]string, settings domain.ProxySettings) {
+	if settings.Mode == "off" {
+		settings.HTTPProxy = ""
+		settings.HTTPSProxy = ""
+	}
 	for key, value := range map[string]string{
 		"HTTP_PROXY": settings.HTTPProxy, "HTTPS_PROXY": settings.HTTPSProxy, "NO_PROXY": settings.NoProxy,
 	} {

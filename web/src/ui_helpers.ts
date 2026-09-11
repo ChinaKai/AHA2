@@ -128,6 +128,163 @@ export function clearNavigationSnapshot(): void {
   }
 }
 
+export interface InteractiveRegionState {
+  rootScrollTop: number;
+  rootScrollLeft: number;
+  scroll: Array<{key: string; top: number; left: number}>;
+  details: Array<{key: string; open: boolean}>;
+  controls: Array<{
+    key: string;
+    value: string;
+    checked?: boolean;
+    selected?: string[];
+    disabled: boolean;
+    selectionStart?: number | null;
+    selectionEnd?: number | null;
+  }>;
+  expanded: string[];
+  focusKey: string;
+  focusSelectionStart?: number | null;
+  focusSelectionEnd?: number | null;
+}
+
+function regionElements(root: HTMLElement): HTMLElement[] {
+  return [root, ...root.querySelectorAll<HTMLElement>("*")];
+}
+
+function regionElementPath(root: HTMLElement, element: HTMLElement): string {
+  const parts: number[] = [];
+  let current: HTMLElement | null = element;
+  while (current && current !== root) {
+    const parent = current.parentElement;
+    if (!parent) break;
+    parts.push(Array.prototype.indexOf.call(parent.children, current));
+    current = parent;
+  }
+  return parts.reverse().join(".");
+}
+
+function regionElementKey(root: HTMLElement, element: HTMLElement): string {
+  if (element === root) return "$root";
+  if (element.id) return `id:${element.id}`;
+  if (element.dataset.uiKey) return `ui:${element.dataset.uiKey}`;
+  if (element.dataset.messageId) return `message:${element.dataset.messageId}`;
+  const tag = element.tagName.toLowerCase();
+  const control = element as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
+  if (["input", "select", "textarea"].includes(tag) && control.name) {
+    const input = element as HTMLInputElement;
+    const choice = tag === "input" && ["checkbox", "radio"].includes(input.type) ? `:${input.type}:${input.value}` : "";
+    return `control:${tag}:${control.name}${choice}`;
+  }
+  return `path:${regionElementPath(root, element)}`;
+}
+
+function isRegionControl(element: HTMLElement): element is HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement {
+  return ["INPUT", "SELECT", "TEXTAREA"].includes(element.tagName);
+}
+
+function shouldCaptureControl(element: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement): boolean {
+  if (element.tagName !== "INPUT") return true;
+  return !["button", "submit", "reset", "file", "hidden", "password"].includes((element as HTMLInputElement).type);
+}
+
+function shouldCaptureScroll(root: HTMLElement, element: HTMLElement): boolean {
+  if (element === root || element.dataset.preserveScroll !== undefined) return true;
+  if (["detected-list", "table-wrap", "channel-checkbox-list", "ctx-scroll", "ctx-view", "hardware-config", "terminal-history"].some(name => element.classList.contains(name))) return true;
+  if (element.tagName === "PRE") return true;
+  return element.scrollHeight > element.clientHeight || element.scrollWidth > element.clientWidth;
+}
+
+export function captureInteractiveRegion(root: HTMLElement | null): InteractiveRegionState | null {
+  if (!root) return null;
+  const elements = regionElements(root);
+  const focus = document.activeElement instanceof HTMLElement && elements.includes(document.activeElement) ? document.activeElement : null;
+  const selection = focus && isRegionControl(focus) ? focus : null;
+  return {
+    rootScrollTop: root.scrollTop,
+    rootScrollLeft: root.scrollLeft,
+    scroll: elements.filter(element => shouldCaptureScroll(root, element)).map(element => ({
+      key: regionElementKey(root, element), top: element.scrollTop, left: element.scrollLeft,
+    })),
+    details: elements.filter(element => element.tagName === "DETAILS").map(element => ({
+      key: regionElementKey(root, element), open: (element as HTMLDetailsElement).open,
+    })),
+    controls: elements.filter(isRegionControl).filter(shouldCaptureControl).map(element => {
+      const input = element as HTMLInputElement;
+      const select = element as HTMLSelectElement;
+      return {
+        key: regionElementKey(root, element),
+        value: element.value,
+        checked: element.tagName === "INPUT" && ["checkbox", "radio"].includes(input.type) ? input.checked : undefined,
+        selected: element.tagName === "SELECT" && select.multiple ? [...select.selectedOptions].map(option => option.value) : undefined,
+        disabled: element.disabled,
+        selectionStart: "selectionStart" in element ? element.selectionStart : undefined,
+        selectionEnd: "selectionEnd" in element ? element.selectionEnd : undefined,
+      };
+    }),
+    expanded: elements.filter(element => element.classList.contains("expanded")).map(element => regionElementKey(root, element)),
+    focusKey: focus ? regionElementKey(root, focus) : "",
+    focusSelectionStart: selection && "selectionStart" in selection ? selection.selectionStart : undefined,
+    focusSelectionEnd: selection && "selectionEnd" in selection ? selection.selectionEnd : undefined,
+  };
+}
+
+export function restoreInteractiveRegion(root: HTMLElement | null, state: InteractiveRegionState | null, restoreRootScroll = true): void {
+  if (!root || !state) return;
+  const elements = regionElements(root);
+  const byKey = new Map(elements.map(element => [regionElementKey(root, element), element]));
+  for (const detail of state.details) {
+    const element = byKey.get(detail.key);
+    if (element?.tagName === "DETAILS") (element as HTMLDetailsElement).open = detail.open;
+  }
+  for (const saved of state.controls) {
+    const element = byKey.get(saved.key);
+    if (!element || !isRegionControl(element) || !shouldCaptureControl(element)) continue;
+    // A disabled placeholder becoming enabled represents new live data. Keep
+    // its newly rendered default rather than restoring the placeholder value.
+    if (saved.disabled && !element.disabled) continue;
+    const input = element as HTMLInputElement;
+    const select = element as HTMLSelectElement;
+    if (saved.checked !== undefined && element.tagName === "INPUT") input.checked = saved.checked;
+    else if (saved.selected && element.tagName === "SELECT") {
+      const selected = new Set(saved.selected);
+      [...select.options].forEach(option => { option.selected = selected.has(option.value); });
+    } else element.value = saved.value;
+    if (saved.selectionStart !== undefined && "setSelectionRange" in element) {
+      try { element.setSelectionRange(saved.selectionStart, saved.selectionEnd ?? saved.selectionStart); } catch { /* unsupported input type */ }
+    }
+  }
+  const expanded = new Set(state.expanded);
+  for (const element of elements) {
+    if (expanded.has(regionElementKey(root, element))) element.classList.add("expanded");
+  }
+  const focus = state.focusKey ? byKey.get(state.focusKey) : null;
+  if (focus && !focus.hasAttribute("disabled")) {
+    try { focus.focus({preventScroll: true}); } catch { focus.focus(); }
+    if (isRegionControl(focus) && state.focusSelectionStart !== undefined && "setSelectionRange" in focus) {
+      try { focus.setSelectionRange(state.focusSelectionStart, state.focusSelectionEnd ?? state.focusSelectionStart); } catch { /* unsupported input type */ }
+    }
+  }
+  for (const saved of state.scroll) {
+    if (!restoreRootScroll && saved.key === "$root") continue;
+    const element = byKey.get(saved.key);
+    if (element) {
+      element.scrollTop = saved.top;
+      element.scrollLeft = saved.left;
+    }
+  }
+  if (restoreRootScroll) {
+    root.scrollTop = state.rootScrollTop;
+    root.scrollLeft = state.rootScrollLeft;
+  }
+}
+
+export function replaceInteractiveRegion(root: HTMLElement, html: string, restoreRootScroll = true): void {
+  const state = captureInteractiveRegion(root);
+  root.innerHTML = html;
+  restoreInteractiveRegion(root, state, restoreRootScroll);
+}
+
 interface AgentSessionAPI {
   compactAgentSession(taskID: string, agentID: string): Promise<unknown>;
   resetAgentSession(taskID: string, agentID: string): Promise<unknown>;

@@ -23,6 +23,7 @@ import type {
   ProductLine,
   Provider,
   ProxySettings,
+  ManagedProxyView,
   SecuritySettings,
   SyncSettings,
   SyncPreview,
@@ -98,7 +99,7 @@ class APIClient {
     return this.request("/api/v1/system");
   }
 
-  proxySettings(): Promise<{proxy: ProxySettings}> {
+  proxySettings(): Promise<{proxy: ProxySettings; managed?: ManagedProxyView}> {
     return this.request("/api/v1/settings/proxy");
   }
 
@@ -108,6 +109,34 @@ class APIClient {
 
   testProxySettings(payload: ProxySettings): Promise<{ok: boolean; status_code: number; elapsed_ms: number}> {
     return this.request("/api/v1/settings/proxy/test", {method: "POST", body: JSON.stringify(payload)});
+  }
+
+  importProxySubscription(payload: {profile_id?: string; name?: string; subscription_url?: string; subscription_yaml?: string; selected_node_id?: string; refresh_interval_minutes?: number}): Promise<{proxy: ProxySettings; managed: ManagedProxyView}> {
+    return this.request("/api/v1/settings/proxy/subscription", {method: "POST", body: JSON.stringify(payload)});
+  }
+
+  refreshProxySubscription(): Promise<{proxy: ProxySettings; managed: ManagedProxyView}> {
+    return this.request("/api/v1/settings/proxy/subscription/refresh", {method: "POST", body: "{}"});
+  }
+
+  refreshProxyProfile(id: string): Promise<{proxy: ProxySettings; managed: ManagedProxyView}> {
+    return this.request(`/api/v1/settings/proxy/profiles/${encodeURIComponent(id)}/refresh`, {method: "POST", body: "{}"});
+  }
+
+  updateProxyProfile(id: string, payload: {name?: string; selected_node_id?: string; refresh_interval_minutes?: number}): Promise<{proxy: ProxySettings; managed: ManagedProxyView}> {
+    return this.request(`/api/v1/settings/proxy/profiles/${encodeURIComponent(id)}`, {method: "PATCH", body: JSON.stringify(payload)});
+  }
+
+  activateProxyProfile(id: string): Promise<{proxy: ProxySettings; managed: ManagedProxyView}> {
+    return this.request(`/api/v1/settings/proxy/profiles/${encodeURIComponent(id)}/activate`, {method: "POST", body: "{}"});
+  }
+
+  deleteProxyProfile(id: string): Promise<{proxy: ProxySettings; managed: ManagedProxyView}> {
+    return this.request(`/api/v1/settings/proxy/profiles/${encodeURIComponent(id)}`, {method: "DELETE"});
+  }
+
+  testProxyNode(profileID: string, nodeID: string): Promise<{ok: boolean; status_code: number; elapsed_ms: number}> {
+    return this.request(`/api/v1/settings/proxy/profiles/${encodeURIComponent(profileID)}/nodes/${encodeURIComponent(nodeID)}/test`, {method: "POST", body: "{}"});
   }
 
   securitySettings(): Promise<{security: SecuritySettings}> {

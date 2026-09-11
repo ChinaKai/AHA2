@@ -36,6 +36,12 @@ func DetectModels(baseURL, apiKey, authStyle string, timeout time.Duration) (Res
 // DetectModelsContext is DetectModels with cancellation propagated to every
 // gateway catalog request.
 func DetectModelsContext(ctx context.Context, baseURL, apiKey, authStyle string, timeout time.Duration) (Result, error) {
+	return DetectModelsContextWithClient(ctx, baseURL, apiKey, authStyle, timeout, nil)
+}
+
+// DetectModelsContextWithClient uses the supplied client while preserving the
+// legacy direct-client behavior when client is nil.
+func DetectModelsContextWithClient(ctx context.Context, baseURL, apiKey, authStyle string, timeout time.Duration, client *http.Client) (Result, error) {
 	base := strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	if base == "" {
 		return Result{}, fmt.Errorf("base_url is required")
@@ -79,7 +85,9 @@ func DetectModelsContext(ctx context.Context, baseURL, apiKey, authStyle string,
 	if len(authSets) == 0 {
 		return Result{}, fmt.Errorf("provider credential is not configured")
 	}
-	client := &http.Client{Timeout: timeout}
+	if client == nil {
+		client = &http.Client{Timeout: timeout}
+	}
 	var lastError string
 	for _, endpoint := range candidates {
 		for _, set := range authSets {
@@ -199,6 +207,12 @@ func ProbeModelCapabilities(baseURL, apiKey, authStyle, modelID string, timeout 
 // ProbeModelCapabilitiesContext is ProbeModelCapabilities with cancellation
 // propagated to every protocol probe request.
 func ProbeModelCapabilitiesContext(ctx context.Context, baseURL, apiKey, authStyle, modelID string, timeout time.Duration) (map[string]string, string) {
+	return ProbeModelCapabilitiesContextWithClient(ctx, baseURL, apiKey, authStyle, modelID, timeout, nil)
+}
+
+// ProbeModelCapabilitiesContextWithClient uses the supplied client while
+// preserving the legacy direct-client behavior when client is nil.
+func ProbeModelCapabilitiesContextWithClient(ctx context.Context, baseURL, apiKey, authStyle, modelID string, timeout time.Duration, client *http.Client) (map[string]string, string) {
 	base := strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	key := strings.TrimSpace(apiKey)
 	if base == "" || modelID == "" || key == "" {
@@ -208,7 +222,9 @@ func ProbeModelCapabilitiesContext(ctx context.Context, baseURL, apiKey, authSty
 	if normalizedAuth == "" {
 		normalizedAuth = "auto"
 	}
-	client := &http.Client{Timeout: timeout}
+	if client == nil {
+		client = &http.Client{Timeout: timeout}
+	}
 	capabilities := make(map[string]string)
 	for _, wireAPI := range []string{"responses", "chat_completions"} {
 		if ctx.Err() != nil {

@@ -249,8 +249,26 @@ func (s *Service) UpdateAgentConfig(
 	}
 	now := s.now().UTC()
 	inheritMain := false
+	var previousSnapshot domain.RuntimeConfigSnapshot
 	var snapshot domain.RuntimeConfigSnapshot
+	inheritedSnapshots := map[string]domain.RuntimeConfigSnapshot{}
+	if agentID == "main" {
+		if agents, listErr := s.store.ListTaskAgents(ctx, taskID); listErr == nil {
+			for _, child := range agents {
+				if child.AgentID == "main" || !child.InheritMain {
+					continue
+				}
+				if childSnapshot, snapshotErr := s.store.RuntimeSnapshot(ctx, child.RuntimeConfigSnapshotID); snapshotErr == nil {
+					inheritedSnapshots[child.AgentID] = childSnapshot
+				}
+			}
+		}
+	}
 	if agentID != "main" && input.InheritMain != nil && *input.InheritMain {
+		previousSnapshot, err = s.store.RuntimeSnapshot(ctx, agent.RuntimeConfigSnapshotID)
+		if err != nil {
+			return domain.TaskAgent{}, err
+		}
 		mainAgent, mainErr := s.store.TaskAgent(ctx, taskID, "main")
 		if mainErr != nil {
 			return domain.TaskAgent{}, mainErr
@@ -262,6 +280,7 @@ func (s *Service) UpdateAgentConfig(
 		if baseErr != nil {
 			return domain.TaskAgent{}, baseErr
 		}
+		previousSnapshot = base
 		snapshot, err = s.deriveRuntimeSnapshot(ctx, task, base, input)
 		if err == nil {
 			err = s.store.CreateRuntimeSnapshot(ctx, snapshot)
@@ -273,7 +292,9 @@ func (s *Service) UpdateAgentConfig(
 	if err := s.store.UpdateTaskAgentSnapshot(ctx, taskID, agentID, snapshot.ID, inheritMain, now); err != nil {
 		return domain.TaskAgent{}, err
 	}
-	_ = s.store.CloseBackendSessionsForAgent(ctx, taskID, agentID)
+	if backendSessionIdentityChanged(previousSnapshot, snapshot) {
+		_ = s.store.CloseBackendSessionsForAgent(ctx, taskID, agentID)
+	}
 	if agentID == "main" {
 		if err := s.store.UpdateTaskRuntimeSnapshot(ctx, taskID, snapshot.ID, timeString(now)); err != nil {
 			return domain.TaskAgent{}, err
@@ -284,7 +305,10 @@ func (s *Service) UpdateAgentConfig(
 		agents, _ := s.store.ListTaskAgents(ctx, taskID)
 		for _, child := range agents {
 			if child.AgentID != "main" && child.InheritMain {
-				_ = s.store.CloseBackendSessionsForAgent(ctx, taskID, child.AgentID)
+				childSnapshot, captured := inheritedSnapshots[child.AgentID]
+				if captured && backendSessionIdentityChanged(childSnapshot, snapshot) {
+					_ = s.store.CloseBackendSessionsForAgent(ctx, taskID, child.AgentID)
+				}
 			}
 		}
 	}
@@ -302,6 +326,16 @@ func (s *Service) UpdateAgentConfig(
 		}
 	}
 	return domain.TaskAgent{}, sql.ErrNoRows
+}
+
+func backendSessionIdentityChanged(previous, next domain.RuntimeConfigSnapshot) bool {
+	return previous.WorkspaceID != next.WorkspaceID ||
+		previous.Backend != next.Backend ||
+		previous.ModelID != next.ModelID ||
+		previous.WireModel != next.WireModel ||
+		previous.EnvGroupID != next.EnvGroupID ||
+		previous.EnvGroupRevision != next.EnvGroupRevision ||
+		previous.CodexAccountID != next.CodexAccountID
 }
 
 func (s *Service) recordAgentConfigUpdate(ctx context.Context, agent domain.TaskAgent, now time.Time) {

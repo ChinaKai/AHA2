@@ -104,7 +104,7 @@ func TestMigrationV8BackfillsRoundsAndConversation(t *testing.T) {
 		t.Fatalf("Codex account migration defaults are invalid: %#v", model)
 	}
 	proxy, err := database.ProxySettings(ctx)
-	if err != nil || proxy.HTTPProxy != "http://127.0.0.1:7897" || proxy.HTTPSProxy != proxy.HTTPProxy || proxy.NoProxy == "" {
+	if err != nil || proxy.Mode != "external" || proxy.HTTPProxy != "http://127.0.0.1:7897" || proxy.HTTPSProxy != proxy.HTTPProxy || proxy.NoProxy == "" || proxy.ManagedRefreshIntervalMins != 1440 {
 		t.Fatalf("proxy migration defaults are invalid: %#v %v", proxy, err)
 	}
 	account := domain.CodexAccount{

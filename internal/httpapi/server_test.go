@@ -19,6 +19,7 @@ import (
 	"github.com/ChinaKai/AHA2/internal/app"
 	"github.com/ChinaKai/AHA2/internal/auth"
 	"github.com/ChinaKai/AHA2/internal/domain"
+	"github.com/ChinaKai/AHA2/internal/outboundproxy"
 	"github.com/ChinaKai/AHA2/internal/secrets"
 	"github.com/ChinaKai/AHA2/internal/store"
 )
@@ -123,6 +124,126 @@ func TestProxySettingsAPI(t *testing.T) {
 	decodeResponse(t, response, &payload)
 	if response.StatusCode != http.StatusOK || payload["proxy"].(map[string]any)["https_proxy"] != "http://192.168.1.2:7897" {
 		t.Fatalf("proxy update failed: status=%d payload=%v", response.StatusCode, payload)
+	}
+}
+
+func TestManagedProxySubscriptionAPIKeepsSecretsOutOfResponses(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	secretStore, err := secrets.Open(filepath.Join(t.TempDir(), "secrets.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxyRuntime := outboundproxy.New(database, secretStore)
+	defer proxyRuntime.Close()
+	authService := auth.NewService(database, "setup-test", time.Hour)
+	server := httptest.NewServer(New(Config{
+		Store: database, Auth: authService, App: app.NewService(database, secretStore, app.StubExecutor{}),
+		Secrets: secretStore, OutboundProxy: proxyRuntime,
+	}).Handler())
+	defer server.Close()
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	csrf := registerOwner(t, client, server.URL)
+
+	subscription := `proxies:
+  - name: managed-hy2
+    type: hysteria2
+    server: private-server.example
+    port: 443
+    password: private-auth-value
+    obfs: salamander
+    obfs-password: private-obfs-value
+  - name: ignored-cdn
+    type: vless
+    server: ignored.example
+    port: 443
+`
+	response := requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/settings/proxy/subscription", map[string]any{
+		"subscription_yaml": subscription, "refresh_interval_minutes": 60,
+	}, csrf)
+	body, err := io.ReadAll(response.Body)
+	response.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("import failed: status=%d body=%s", response.StatusCode, body)
+	}
+	for _, sensitive := range []string{"private-server.example", "private-auth-value", "private-obfs-value", "second.example", "second-secret"} {
+		if bytes.Contains(body, []byte(sensitive)) {
+			t.Fatalf("managed proxy response exposed %q", sensitive)
+		}
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatal(err)
+	}
+	managed := payload["managed"].(map[string]any)
+	if managed["configured"] != true {
+		t.Fatalf("unexpected managed proxy view: %#v", managed)
+	}
+	profiles := managed["profiles"].([]any)
+	if len(profiles) != 1 || profiles[0].(map[string]any)["name"] == "" || profiles[0].(map[string]any)["unsupported_count"] != float64(1) {
+		t.Fatalf("unexpected managed profiles: %#v", profiles)
+	}
+	profileID := profiles[0].(map[string]any)["id"].(string)
+	proxy := payload["proxy"].(map[string]any)
+	if proxy["mode"] != "external" || proxy["managed_profile_id"] != nil {
+		t.Fatalf("new profile unexpectedly became active: %#v", proxy)
+	}
+	response = requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/settings/proxy/profiles/"+profileID+"/activate", map[string]any{}, csrf)
+	decodeResponse(t, response, &payload)
+	if response.StatusCode != http.StatusOK || payload["proxy"].(map[string]any)["managed_profile_id"] != profileID {
+		t.Fatalf("explicit profile activation failed: status=%d payload=%#v", response.StatusCode, payload)
+	}
+	secondSubscription := `proxies: [{name: second-node, type: hysteria2, server: second.example, port: 443, password: second-secret}]`
+	response = requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/settings/proxy/subscription", map[string]any{
+		"name": "second", "subscription_yaml": secondSubscription, "refresh_interval_minutes": 120,
+	}, csrf)
+	decodeResponse(t, response, &payload)
+	secondManaged := payload["managed"].(map[string]any)
+	secondProfiles := secondManaged["profiles"].([]any)
+	if response.StatusCode != http.StatusOK || len(secondProfiles) != 2 || payload["proxy"].(map[string]any)["managed_profile_id"] != profileID {
+		t.Fatalf("adding second profile switched the active profile: status=%d payload=%#v", response.StatusCode, payload)
+	}
+	secondProfileID := secondProfiles[1].(map[string]any)["id"].(string)
+	response = requestJSON(t, client, http.MethodPatch, server.URL+"/api/v1/settings/proxy/profiles/"+secondProfileID, map[string]any{
+		"refresh_interval_minutes": 180,
+	}, csrf)
+	decodeResponse(t, response, &payload)
+	if response.StatusCode != http.StatusOK || payload["proxy"].(map[string]any)["managed_profile_id"] != profileID {
+		t.Fatalf("editing inactive profile switched the active profile: status=%d payload=%#v", response.StatusCode, payload)
+	}
+	response = requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/settings/proxy/profiles/"+profileID+"/nodes/missing/test", map[string]any{}, csrf)
+	decodeResponse(t, response, &payload)
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("missing node test returned status=%d payload=%#v", response.StatusCode, payload)
+	}
+
+	response = requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/settings/proxy", nil, "")
+	body, _ = io.ReadAll(response.Body)
+	response.Body.Close()
+	for _, sensitive := range []string{"private-server.example", "private-auth-value", "private-obfs-value", "second.example", "second-secret"} {
+		if bytes.Contains(body, []byte(sensitive)) {
+			t.Fatalf("proxy settings response exposed %q", sensitive)
+		}
+	}
+
+	response = requestJSON(t, client, http.MethodDelete, server.URL+"/api/v1/settings/proxy/profiles/"+secondProfileID, nil, csrf)
+	decodeResponse(t, response, &payload)
+	if response.StatusCode != http.StatusOK || payload["proxy"].(map[string]any)["managed_profile_id"] != profileID {
+		t.Fatalf("inactive profile delete changed active profile: status=%d payload=%#v", response.StatusCode, payload)
+	}
+	response = requestJSON(t, client, http.MethodDelete, server.URL+"/api/v1/settings/proxy/profiles/"+profileID, nil, csrf)
+	decodeResponse(t, response, &payload)
+	if response.StatusCode != http.StatusOK || payload["proxy"].(map[string]any)["mode"] != "off" || payload["managed"].(map[string]any)["configured"] != false {
+		t.Fatalf("managed profile delete failed: status=%d payload=%#v", response.StatusCode, payload)
 	}
 }
 

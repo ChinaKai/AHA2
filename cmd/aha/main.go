@@ -27,6 +27,7 @@ import (
 	"github.com/ChinaKai/AHA2/internal/hardware"
 	"github.com/ChinaKai/AHA2/internal/httpapi"
 	"github.com/ChinaKai/AHA2/internal/managedprocess"
+	"github.com/ChinaKai/AHA2/internal/outboundproxy"
 	"github.com/ChinaKai/AHA2/internal/secrets"
 	"github.com/ChinaKai/AHA2/internal/store"
 	syncer "github.com/ChinaKai/AHA2/internal/sync"
@@ -179,6 +180,9 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 	if err != nil {
 		return err
 	}
+	proxyRuntime := outboundproxy.New(database, secretStore)
+	proxyRuntime.Start(ctx)
+	defer proxyRuntime.Close()
 	go (syncer.Runner{Store: database, Secrets: secretStore, TokenRef: syncer.DefaultTokenRef}).Loop(ctx)
 	registrationOpen, err := database.OwnerExists(ctx)
 	if err != nil {
@@ -199,12 +203,14 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 	}
 	authService := auth.NewService(database, options.setupToken, 14*24*time.Hour)
 	codexAccounts := codexaccount.New(ctx, database, secretStore, absoluteDataDir, options.codexBinary)
+	codexAccounts.SetProxyRuntime(proxyRuntime)
 	executor := execution.Executor{
 		Codex:    backend.Codex{Binary: options.codexBinary},
 		Claude:   backend.Claude{Binary: options.claudeBinary},
 		Settings: database,
 	}
 	appService := app.NewService(database, secretStore, executor)
+	appService.SetProxyRuntime(proxyRuntime)
 	appService.SetRunContext(ctx)
 	defer func() {
 		shutdownContext, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -256,6 +262,7 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 		CodexAccounts:     codexAccounts,
 		AgentCapabilities: agentCapabilities,
 		ManagedProcesses:  managedProcesses,
+		OutboundProxy:     proxyRuntime,
 		Channels:          channelService,
 		Version:           version,
 	})

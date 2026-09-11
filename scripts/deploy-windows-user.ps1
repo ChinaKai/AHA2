@@ -128,18 +128,76 @@ function Wait-AHA2Health {
   throw "AHA2 health check did not pass."
 }
 
+function Get-AHA2ProcessTree {
+  $processes = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+  $targets = @{}
+  foreach ($process in $processes) {
+    if ($process.Name -ieq "aha2.exe" -or $process.Name -ieq "aha2-tray.exe") {
+      $targets[[int]$process.ProcessId] = [pscustomobject]@{Process=$process;Depth=0}
+    }
+  }
+  do {
+    $added = $false
+    foreach ($process in $processes) {
+      $processId = [int]$process.ProcessId
+      $parentId = [int]$process.ParentProcessId
+      if (-not $targets.ContainsKey($processId) -and $targets.ContainsKey($parentId)) {
+        $targets[$processId] = [pscustomobject]@{Process=$process;Depth=([int]$targets[$parentId].Depth + 1)}
+        $added = $true
+      }
+    }
+  } while ($added)
+  @($targets.Values | ForEach-Object {
+    [pscustomobject]@{
+      Id = [int]$_.Process.ProcessId
+      Name = [string]$_.Process.Name
+      CreationDate = [string]$_.Process.CreationDate
+      Depth = [int]$_.Depth
+    }
+  })
+}
+
+function Test-AHA2ProcessIdentity($Target) {
+  $current = Get-CimInstance Win32_Process -Filter "ProcessId=$($Target.Id)" -ErrorAction SilentlyContinue
+  return $current -and
+    $current.Name -ieq $Target.Name -and
+    [string]$current.CreationDate -eq $Target.CreationDate
+}
+
+function Invoke-TaskKillNoThrow([int]$ProcessId) {
+  $previousPreference = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = "Continue"
+    $output = @(& taskkill.exe /PID $ProcessId /T /F 2>&1)
+    $exitCode = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $previousPreference
+  }
+  if ($exitCode -ne 0) {
+    Write-Warning ("taskkill failed for PID {0} with code {1}: {2}" -f $ProcessId,$exitCode,($output -join " "))
+  }
+}
+
 function Stop-AHA2ProcessTrees {
-  $items = @(Get-Process -Name "aha2-tray","aha2" -ErrorAction SilentlyContinue)
-  foreach ($item in $items) {
-    try {
-      & taskkill.exe /PID $item.Id /T /F 2>$null | Out-Null
-    } catch {
-      # The tray and server can exit together while their process list is being
-      # walked. Treat that race as success, but still fail if the process lives.
+  $targets = @(Get-AHA2ProcessTree)
+  foreach ($root in @($targets | Where-Object Depth -eq 0)) {
+    Invoke-TaskKillNoThrow $root.Id
+  }
+
+  $deadline = [DateTime]::UtcNow.AddSeconds(10)
+  do {
+    $remaining = @($targets | Where-Object { Test-AHA2ProcessIdentity $_ })
+    if ($remaining.Count -eq 0) { break }
+    foreach ($target in @($remaining | Sort-Object Depth -Descending)) {
+      Stop-Process -Id $target.Id -Force -ErrorAction SilentlyContinue
     }
-    if (Get-Process -Id $item.Id -ErrorAction SilentlyContinue) {
-      throw "AHA2 process $($item.Id) could not be stopped."
-    }
+    Start-Sleep -Milliseconds 250
+  } while ([DateTime]::UtcNow -lt $deadline)
+
+  $remaining = @($targets | Where-Object { Test-AHA2ProcessIdentity $_ })
+  if ($remaining.Count -gt 0) {
+    $description = ($remaining | ForEach-Object { "$($_.Name) PID $($_.Id)" }) -join ", "
+    throw "AHA2 processes could not be stopped within 10 seconds: $description"
   }
   Start-Sleep -Milliseconds 500
 }

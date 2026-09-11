@@ -42,3 +42,16 @@ func TestNormalizeRejectsCredentialsAndUnsupportedSchemes(t *testing.T) {
 		}
 	}
 }
+
+func TestNormalizeModesAndManagedDefaults(t *testing.T) {
+	settings, err := Normalize(domain.ProxySettings{Mode: "managed_hysteria2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.ManagedRefreshIntervalMins != 1440 {
+		t.Fatalf("unexpected refresh default: %d", settings.ManagedRefreshIntervalMins)
+	}
+	if _, err := Normalize(domain.ProxySettings{Mode: "unsupported"}); err == nil {
+		t.Fatal("expected unsupported mode to fail")
+	}
+}

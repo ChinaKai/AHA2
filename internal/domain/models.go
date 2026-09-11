@@ -224,10 +224,15 @@ type CodexModelOption struct {
 }
 
 type ProxySettings struct {
-	HTTPProxy  string    `json:"http_proxy"`
-	HTTPSProxy string    `json:"https_proxy"`
-	NoProxy    string    `json:"no_proxy"`
-	UpdatedAt  time.Time `json:"updated_at,omitempty"`
+	Mode                       string    `json:"mode"`
+	HTTPProxy                  string    `json:"http_proxy"`
+	HTTPSProxy                 string    `json:"https_proxy"`
+	NoProxy                    string    `json:"no_proxy"`
+	ManagedProfileID           string    `json:"managed_profile_id,omitempty"`
+	ManagedNodeID              string    `json:"managed_node_id,omitempty"`
+	ManagedRefreshIntervalMins int       `json:"managed_refresh_interval_minutes"`
+	ManagedSubscriptionAt      time.Time `json:"managed_subscription_at,omitempty"`
+	UpdatedAt                  time.Time `json:"updated_at,omitempty"`
 }
 
 type Provider struct {

@@ -107,8 +107,12 @@ func (s *Server) setOriginValidation(enabled bool) {
 }
 
 func decodeJSON(request *http.Request, destination any) error {
+	return decodeJSONLimit(request, destination, 1<<20)
+}
+
+func decodeJSONLimit(request *http.Request, destination any, limit int64) error {
 	defer request.Body.Close()
-	decoder := json.NewDecoder(io.LimitReader(request.Body, 1<<20))
+	decoder := json.NewDecoder(io.LimitReader(request.Body, limit))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(destination); err != nil {
 		return err

@@ -15,8 +15,10 @@ import (
 	"github.com/ChinaKai/AHA2/internal/channel"
 	"github.com/ChinaKai/AHA2/internal/codexaccount"
 	"github.com/ChinaKai/AHA2/internal/domain"
+	"github.com/ChinaKai/AHA2/internal/gateway"
 	"github.com/ChinaKai/AHA2/internal/hardware"
 	"github.com/ChinaKai/AHA2/internal/managedprocess"
+	"github.com/ChinaKai/AHA2/internal/outboundproxy"
 	"github.com/ChinaKai/AHA2/internal/store"
 )
 
@@ -36,6 +38,7 @@ type Config struct {
 	CodexAccounts     *codexaccount.Manager
 	AgentCapabilities *agentapi.Capabilities
 	ManagedProcesses  *managedprocess.Manager
+	OutboundProxy     *outboundproxy.Controller
 	Channels          *channel.Service
 	ProbeSSHHostKey   func(context.Context, string) (hardware.SSHHostKeyInfo, error)
 	TrustSSHHostKey   func(context.Context, string, string) (hardware.SSHHostKeyInfo, error)
@@ -59,6 +62,7 @@ type Server struct {
 	codexAccounts         *codexaccount.Manager
 	agentCapabilities     *agentapi.Capabilities
 	managedProcesses      *managedprocess.Manager
+	outboundProxy         *outboundproxy.Controller
 	channels              *channel.Service
 	probeSSHHostKey       func(context.Context, string) (hardware.SSHHostKeyInfo, error)
 	trustSSHHostKey       func(context.Context, string, string) (hardware.SSHHostKeyInfo, error)
@@ -96,7 +100,7 @@ func New(config Config) *Server {
 			validateOrigin = settings.ValidateOrigin
 		}
 	}
-	return &Server{
+	server := &Server{
 		store: config.Store, auth: config.Auth, app: config.App, web: config.Web,
 		logger: logger, secureCookie: config.SecureCookie, validateOrigin: validateOrigin,
 		originStartupOverride: config.AllowCrossOrigin,
@@ -106,6 +110,7 @@ func New(config Config) *Server {
 		codexAccounts:         config.CodexAccounts,
 		agentCapabilities:     config.AgentCapabilities,
 		managedProcesses:      config.ManagedProcesses,
+		outboundProxy:         config.OutboundProxy,
 		channels:              config.Channels,
 		probeSSHHostKey:       probeSSHHostKey,
 		trustSSHHostKey:       trustSSHHostKey,
@@ -114,6 +119,23 @@ func New(config Config) *Server {
 		authLimiter:           newAuthLimiter(),
 		modelDetectionJobs:    newModelDetectionJobs(),
 	}
+	if config.OutboundProxy != nil {
+		server.modelDetectionJobs.detect = func(ctx context.Context, provider domain.Provider, apiKey string) (gateway.Result, error) {
+			client, err := config.OutboundProxy.ServiceClient(ctx, &http.Client{Timeout: 15 * time.Second})
+			if err != nil {
+				return gateway.Result{}, err
+			}
+			return gateway.DetectModelsContextWithClient(ctx, provider.BaseURL, apiKey, provider.AuthStyle, 15*time.Second, client)
+		}
+		server.modelDetectionJobs.probe = func(ctx context.Context, provider domain.Provider, apiKey, authStyle, modelID string) (map[string]string, string) {
+			client, err := config.OutboundProxy.ServiceClient(ctx, &http.Client{Timeout: 8 * time.Second})
+			if err != nil {
+				return map[string]string{"responses": "unavailable", "chat_completions": "unavailable", "anthropic_messages": "unavailable"}, ""
+			}
+			return gateway.ProbeModelCapabilitiesContextWithClient(ctx, provider.BaseURL, apiKey, authStyle, modelID, 8*time.Second, client)
+		}
+	}
+	return server
 }
 
 func (s *Server) Handler() http.Handler {
@@ -142,6 +164,13 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/settings/proxy", s.withAuth(http.HandlerFunc(s.proxySettings)))
 	mux.Handle("PUT /api/v1/settings/proxy", s.withAuth(http.HandlerFunc(s.updateProxySettings)))
 	mux.Handle("POST /api/v1/settings/proxy/test", s.withAuth(http.HandlerFunc(s.testProxySettings)))
+	mux.Handle("POST /api/v1/settings/proxy/subscription", s.withAuth(http.HandlerFunc(s.importProxySubscription)))
+	mux.Handle("POST /api/v1/settings/proxy/subscription/refresh", s.withAuth(http.HandlerFunc(s.refreshProxySubscription)))
+	mux.Handle("POST /api/v1/settings/proxy/profiles/{id}/refresh", s.withAuth(http.HandlerFunc(s.refreshProxyProfile)))
+	mux.Handle("PATCH /api/v1/settings/proxy/profiles/{id}", s.withAuth(http.HandlerFunc(s.patchProxyProfile)))
+	mux.Handle("POST /api/v1/settings/proxy/profiles/{id}/activate", s.withAuth(http.HandlerFunc(s.activateProxyProfile)))
+	mux.Handle("POST /api/v1/settings/proxy/profiles/{id}/nodes/{node_id}/test", s.withAuth(http.HandlerFunc(s.testProxyNode)))
+	mux.Handle("DELETE /api/v1/settings/proxy/profiles/{id}", s.withAuth(http.HandlerFunc(s.deleteProxyProfile)))
 	mux.Handle("GET /api/v1/settings/security", s.withAuth(http.HandlerFunc(s.securitySettings)))
 	mux.Handle("PUT /api/v1/settings/security", s.withAuth(http.HandlerFunc(s.updateSecuritySettings)))
 	mux.Handle("GET /api/v1/settings/agent-api", s.withAuth(http.HandlerFunc(s.agentAPISettings)))

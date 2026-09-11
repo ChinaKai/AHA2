@@ -58,6 +58,11 @@ Source: "{#SourceExe}"; DestDir: "{app}"; DestName: "aha2.exe"; Flags: ignorever
 Source: "{#SourceTrayExe}"; DestDir: "{app}"; DestName: "aha2-tray.exe"; Flags: ignoreversion
 Source: "Register-AHA2UserTask.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "Prepare-AHA2DataDir.ps1"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\..\third_party\hysteria\LICENSE.md"; DestDir: "{app}\licenses"; DestName: "Hysteria-LICENSE.txt"; Flags: ignoreversion
+Source: "..\..\third_party\yaml-v3\LICENSE"; DestDir: "{app}\licenses"; DestName: "yaml-v3-LICENSE.txt"; Flags: ignoreversion
+Source: "..\..\third_party\yaml-v3\NOTICE"; DestDir: "{app}\licenses"; DestName: "yaml-v3-NOTICE.txt"; Flags: ignoreversion
+Source: "..\..\third_party\xray-core\LICENSE"; DestDir: "{app}\licenses"; DestName: "Xray-core-MPL-2.0.txt"; Flags: ignoreversion
+Source: "..\..\third_party\xray-core\README.AHA2.md"; DestDir: "{app}\licenses"; DestName: "Xray-core-SOURCE.txt"; Flags: ignoreversion
 #ifdef SourceFeishuPlugin
 Source: "{#SourceFeishuPlugin}"; DestDir: "{code:SelectedDataDir}\plugins\channels\feishu"; DestName: "aha2-channel-feishu.exe"; Flags: ignoreversion
 Source: "{#SourceFeishuManifest}"; DestDir: "{code:SelectedDataDir}\plugins\channels\feishu"; DestName: "plugin.json"; Flags: ignoreversion

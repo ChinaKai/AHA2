@@ -13,7 +13,8 @@ import {bindRuntimeFields, runtimeFieldsHTML, setRuntimeBackends, syncRuntimeFie
 import {renderComposerAgentOptions, renderComposerTools} from "./task_composer.js";
 import {TASK_TOOL_DEFAULT_WIDTH, normalizeTaskToolMode, normalizeTaskToolWidth, renderTaskToolButtons, renderTaskToolContent, renderTaskToolPanel} from "./task_tools.js";
 import type {TaskTool, TaskToolMode} from "./task_tools.js";
-import {TASK_SLASH_COMMANDS, bindMessageBubbleControls, clearNavigationSnapshot, eventRefreshesTaskList, exactSlashCommand, executeAgentSessionAction, loadNavigationSnapshot, matchingSlashCommands, renderWorkspaceDetection, saveNavigationSnapshot} from "./ui_helpers.js";
+import {TASK_SLASH_COMMANDS, bindMessageBubbleControls, captureInteractiveRegion, clearNavigationSnapshot, eventRefreshesTaskList, exactSlashCommand, executeAgentSessionAction, loadNavigationSnapshot, matchingSlashCommands, renderWorkspaceDetection, restoreInteractiveRegion, saveNavigationSnapshot} from "./ui_helpers.js";
+import type {InteractiveRegionState} from "./ui_helpers.js";
 import {
   compactNumber,
   contextPercent,
@@ -45,6 +46,7 @@ import type {
   Project,
   Provider,
   ProxySettings,
+  ManagedProxyView,
   SecuritySettings,
   SyncConflict,
 	SyncPreview,
@@ -71,6 +73,7 @@ interface State {
   renderPending: boolean;
   system: SystemInfo;
   proxySettings: ProxySettings;
+  managedProxy: ManagedProxyView;
   securitySettings: SecuritySettings;
   agentAPISettings: AgentAPISettings;
 	backendSettings: BackendSettings;
@@ -138,7 +141,8 @@ const state: State = {
   notice: "",
   renderPending: false,
   system: {os: "windows", arch: "", wsl_available: false, wsl_distros: [], version: "dev", started_at: ""},
-  proxySettings: {http_proxy: "http://127.0.0.1:7897", https_proxy: "http://127.0.0.1:7897", no_proxy: "localhost,127.0.0.1,::1"},
+  proxySettings: {mode: "external", http_proxy: "http://127.0.0.1:7897", https_proxy: "http://127.0.0.1:7897", no_proxy: "localhost,127.0.0.1,::1", managed_refresh_interval_minutes: 1440},
+  managedProxy: {configured: false, profiles: [], url_configured: false, nodes: [], unsupported_count: 0, unsupported_types: [], status: "idle"},
   securitySettings: {validate_origin: true, startup_override: false},
   agentAPISettings: {url: "", allow_insecure: false, effective_url: "http://127.0.0.1:8766", effective_allow_insecure: false},
 	backendSettings: {idle_timeout_seconds: 10 * 60, turn_timeout_seconds: 10 * 60 * 60},
@@ -193,8 +197,11 @@ let taskMonitorTimer: number | null = null;
 let taskFallbackTimer: number | null = null;
 let taskLastSignalAt = 0;
 let scrollConversationToBottom = false;
+let conversationBottomPinVersion = 0;
+let conversationAutoScrollBlockedUntil = 0;
 let loadingOlderConversation = false;
 let taskListPointerActive = false;
+let appPointerActive = false;
 let openingTaskID = "";
 let listRefreshInFlight = false;
 let listRefreshQueued = false;
@@ -793,21 +800,67 @@ function detectedModelRow(session: ModelDetectionSession, item: DetectedModel, r
   return `<div class="detected-item${ready ? "" : " pending"}" data-model="${escapeHTML(item.id)}"><input type="checkbox" class="detected-model" value="${escapeHTML(item.id)}" ${ready && session.selected.has(item.id) ? "checked" : ""} ${ready ? "" : "disabled"}><span><strong>${escapeHTML(item.id)}</strong>${item.max_input_tokens ? `<small>context ${Math.round(item.max_input_tokens / 1000)}K</small>` : ""}${ready ? `<span class="proto-badges">${protoBadges(item)}</span>${protoChecks(item)}` : `<span class="proto pending">等待检测</span>`}</span></div>`;
 }
 
+function applyModelDetectionFilter(root: HTMLElement, query: string): void {
+  const normalized = query.trim().toLowerCase();
+  root.querySelectorAll<HTMLElement>(".detected-item").forEach(row => {
+    row.style.display = !normalized || String(row.dataset.model || "").toLowerCase().includes(normalized) ? "" : "none";
+  });
+}
+
+function modelDetectionStatusText(session: ModelDetectionSession): string {
+  const label = session.status === "completed" ? "检测完成" : session.status === "cancelled" ? "已停止" : session.status === "failed" ? "检测失败" : session.status === "cancelling" ? "正在停止" : session.catalog.length ? "正在检测协议能力" : "正在获取模型目录";
+  return `${label} · ${session.completed}/${session.total || "?"}${session.authStyle ? `（认证：${session.authStyle}）` : ""}`;
+}
+
+function updateModelDetectionProgress(session: ModelDetectionSession): void {
+  const root = document.querySelector<HTMLElement>("#model-detect-results");
+  if (!root) return;
+  const status = root.querySelector<HTMLElement>("#model-detect-progress");
+  if (status) status.textContent = modelDetectionStatusText(session);
+  const note = root.querySelector<HTMLElement>("#model-detect-anthropic");
+  if (note) {
+    note.hidden = !session.anthropicBaseURL;
+    const value = note.querySelector<HTMLElement>("code");
+    if (value) value.textContent = session.anthropicBaseURL;
+  }
+  const stop = root.querySelector<HTMLButtonElement>("#stop-model-detection");
+  if (stop && session.status === "cancelling") {
+    stop.disabled = true;
+    stop.textContent = "停止中";
+  }
+  const add = root.querySelector<HTMLButtonElement>("#add-selected-models");
+  if (add) add.disabled = session.results.size === 0;
+}
+
+function updateDetectedModelRow(session: ModelDetectionSession, modelID: string): void {
+  const root = document.querySelector<HTMLElement>("#model-detect-results");
+  const model = session.results.get(modelID);
+  if (!root || !model) return;
+  const row = [...root.querySelectorAll<HTMLElement>(".detected-item")].find(item => item.dataset.model === modelID);
+  if (!row) {
+    renderModelDetection(session);
+    return;
+  }
+  row.outerHTML = detectedModelRow(session, model, true);
+  applyModelDetectionFilter(root, root.querySelector<HTMLInputElement>("#detect-search")?.value || "");
+  updateModelDetectionProgress(session);
+}
+
 function renderModelDetection(session: ModelDetectionSession): void {
   const root = document.querySelector<HTMLElement>("#model-detect-results");
   if (!root) return;
   const terminal = ["completed", "cancelled", "failed"].includes(session.status);
-  const statusText = session.status === "completed" ? "检测完成" : session.status === "cancelled" ? "已停止" : session.status === "failed" ? "检测失败" : session.status === "cancelling" ? "正在停止" : session.catalog.length ? "正在检测协议能力" : "正在获取模型目录";
   const rows = session.catalog.map(item => detectedModelRow(session, session.results.get(item.id) || item, session.results.has(item.id))).join("");
-  const anthropicNote = session.anthropicBaseURL ? `<div class="detect-status">检测到 Anthropic 端点：<code>${escapeHTML(session.anthropicBaseURL)}</code></div>` : "";
-  root.innerHTML = `<div class="detect-status" id="model-detect-progress">${statusText} · ${session.completed}/${session.total || "?"}${session.authStyle ? `（认证：${escapeHTML(session.authStyle)}）` : ""}</div>${anthropicNote}<div class="detect-toolbar"><input type="search" id="detect-search" placeholder="搜索模型名称..."><button type="button" id="detect-select-all">全选</button><button type="button" id="detect-select-none">全不选</button>${terminal ? "" : `<button type="button" id="stop-model-detection" class="danger">停止检测</button>`}</div><div class="detected-list">${rows || `<div class="empty">正在读取模型目录…</div>`}</div><div class="dialog-actions"><button type="button" id="add-selected-models" class="primary" ${session.results.size ? "" : "disabled"}>添加已选模型</button></div>`;
+  replaceRegionHTML(root, `<div class="detect-status" id="model-detect-progress">${escapeHTML(modelDetectionStatusText(session))}</div><div class="detect-status" id="model-detect-anthropic" ${session.anthropicBaseURL ? "" : "hidden"}>检测到 Anthropic 端点：<code>${escapeHTML(session.anthropicBaseURL)}</code></div><div class="detect-toolbar"><input type="search" id="detect-search" placeholder="搜索模型名称..."><button type="button" id="detect-select-all">全选</button><button type="button" id="detect-select-none">全不选</button>${terminal ? "" : `<button type="button" id="stop-model-detection" class="danger">停止检测</button>`}</div><div class="detected-list" data-ui-key="model-detection-list">${rows || `<div class="empty">正在读取模型目录…</div>`}</div><div class="dialog-actions"><button type="button" id="add-selected-models" class="primary" ${session.results.size ? "" : "disabled"}>添加已选模型</button></div>`);
+  applyModelDetectionFilter(root, root.querySelector<HTMLInputElement>("#detect-search")?.value || "");
 }
 
 function finishModelDetection(session: ModelDetectionSession): void {
   session.source.close();
   session.button.disabled = false;
   session.button.innerHTML = session.originalButtonHTML;
-  renderModelDetection(session);
+  updateModelDetectionProgress(session);
+  document.querySelector("#model-detect-results #stop-model-detection")?.remove();
   if (activeModelDetection === session) activeModelDetection = null;
 }
 
@@ -825,12 +878,10 @@ async function startModelDetection(providerID: string, button: HTMLElement, resu
       anthropicBaseURL: "", status: "queued", source, button, originalButtonHTML,
     };
     activeModelDetection = session;
+    renderModelDetection(session);
     results.addEventListener("input", event => {
       if (!(event.target instanceof HTMLInputElement) || event.target.id !== "detect-search") return;
-      const query = event.target.value.trim().toLowerCase();
-      results.querySelectorAll<HTMLElement>(".detected-item").forEach(row => {
-        row.style.display = !query || String(row.dataset.model || "").toLowerCase().includes(query) ? "" : "none";
-      });
+      applyModelDetectionFilter(results, event.target.value);
     });
     results.addEventListener("change", event => {
       if (!(event.target instanceof HTMLInputElement) || !event.target.classList.contains("detected-model")) return;
@@ -841,7 +892,7 @@ async function startModelDetection(providerID: string, button: HTMLElement, resu
       const target = event.target as HTMLElement;
       if (target.closest("#stop-model-detection")) {
         session.status = "cancelling";
-        renderModelDetection(session);
+        updateModelDetectionProgress(session);
         void api.cancelModelDetectionJob(session.providerID, session.jobID).catch(error => setMessage("error", error instanceof Error ? error.message : String(error)));
         return;
       }
@@ -890,14 +941,14 @@ async function startModelDetection(providerID: string, button: HTMLElement, resu
       session.total = data.total;
       if (data.anthropic_base_url) session.anthropicBaseURL = data.anthropic_base_url;
       button.innerHTML = `${icon("spinner", true)}<span>检测中 ${session.completed}/${session.total}</span>`;
-      renderModelDetection(session);
+      updateDetectedModelRow(session, data.model.id);
     });
     source.addEventListener("progress", event => {
       const data = JSON.parse((event as MessageEvent).data) as {status?: ModelDetectionSession["status"]; completed?: number; total?: number};
       if (data.status) session.status = data.status;
       session.completed = data.completed ?? session.completed;
       session.total = data.total ?? session.total;
-      renderModelDetection(session);
+      updateModelDetectionProgress(session);
     });
     source.addEventListener("done", event => {
       const data = JSON.parse((event as MessageEvent).data) as {status: ModelDetectionSession["status"]; completed: number; total: number; anthropic_base_url?: string};
@@ -1037,6 +1088,7 @@ async function ensureViewData(view: View, force = false): Promise<void> {
   if (view === "proxy") jobs.push(loadResource("proxy", force, async () => {
     const result = await api.proxySettings();
     if (result.proxy) state.proxySettings = result.proxy;
+    if (result.managed) state.managedProxy = result.managed;
   }));
   if (view === "advanced") jobs.push(loadResource("advanced", force, async () => {
     const [security, agentAPI, backend] = await Promise.all([api.securitySettings(), api.agentAPISettings(), api.backendSettings()]);
@@ -1207,7 +1259,7 @@ async function openTask(taskID: string): Promise<void> {
   state.taskDrafts = {};
   state.taskAttachmentDrafts = {};
   loadingOlderConversation = false;
-  scrollConversationToBottom = true;
+  requestConversationBottom();
   if (detail.task.read_only) closeEvents();
   else openEvents(taskID, state.taskEventCursor);
 }
@@ -1228,7 +1280,7 @@ async function selectTaskAgent(agentID: string): Promise<void> {
   const agent = state.selectedTask.agents.find(item => item.agent_id === agentID);
   if (agent) agent.unread_count = 0;
   state.taskContext = await api.agentContext(state.selectedTask.task.id, agentID);
-  scrollConversationToBottom = true;
+  requestConversationBottom();
 }
 
 function syncAgentConfigFields(): void {
@@ -1494,7 +1546,7 @@ function modelsView(): string {
         ${renderCodexAccounts(state.codexAccounts)}
         <section class="panel"><div class="panel-head"><strong>Providers</strong><button data-dialog="provider">${icon("plus")}添加 Provider</button></div>${providers || `<div class="empty">先添加 Provider（API Base URL + API Key）。</div>`}</section>
       </div>
-      <section class="panel"><div class="panel-head"><strong>Models</strong><button data-dialog="model">${icon("plus")}添加模型</button></div><div class="table-wrap"><table><thead><tr><th>模型</th><th>Provider</th><th>Backend</th><th>Context</th><th></th></tr></thead><tbody>${models || `<tr><td colspan="5">选择 Provider 后添加模型。</td></tr>`}</tbody></table></div></section>
+      <section class="panel"><div class="panel-head"><strong>Models</strong><button data-dialog="model">${icon("plus")}添加模型</button></div><div class="table-wrap"><table class="models-table"><thead><tr><th>模型</th><th>Provider</th><th>Backend</th><th>Context</th><th></th></tr></thead><tbody>${models || `<tr><td colspan="5">选择 Provider 后添加模型。</td></tr>`}</tbody></table></div></section>
     </div>
     ${providerDialog()}${modelDialog()}${editModelDialog()}
   </section>`);
@@ -1917,43 +1969,17 @@ function taskDetailView(detail: TaskDetail): string {
   </section>`);
 }
 
-interface RegionUIState {
-  rootScrollTop: number;
-  rootScrollLeft: number;
-  detailOpen: boolean[];
-  nestedScroll: Array<{top: number; left: number}>;
-  expandedMessageIDs: string[];
-}
+type RegionUIState = InteractiveRegionState;
 
 function captureRegionUI(root: HTMLElement | null): RegionUIState | null {
-  if (!root) return null;
-  return {
-    rootScrollTop: root.scrollTop,
-    rootScrollLeft: root.scrollLeft,
-    detailOpen: [...root.querySelectorAll<HTMLDetailsElement>("details")].map(item => item.open),
-    nestedScroll: [...root.querySelectorAll<HTMLElement>("pre, .hardware-config, .terminal-history")]
-      .map(item => ({top: item.scrollTop, left: item.scrollLeft})),
-    expandedMessageIDs: [...root.querySelectorAll<HTMLElement>(".message.expanded")]
-      .map(item => item.dataset.messageId || "")
-      .filter(Boolean),
-  };
+  return captureInteractiveRegion(root);
 }
 
 function restoreRegionUI(root: HTMLElement | null, state: RegionUIState | null, restoreRootScroll = true): void {
-  if (!root || !state) return;
-  root.querySelectorAll<HTMLDetailsElement>("details").forEach((item, index) => {
-    if (index < state.detailOpen.length) item.open = state.detailOpen[index];
-  });
-  root.querySelectorAll<HTMLElement>("pre, .hardware-config, .terminal-history").forEach((item, index) => {
-    const position = state.nestedScroll[index];
-    if (position) {
-      item.scrollTop = position.top;
-      item.scrollLeft = position.left;
-    }
-  });
-  const expandedMessageIDs = new Set(state.expandedMessageIDs);
+  restoreInteractiveRegion(root, state, restoreRootScroll);
+  if (!root) return;
   root.querySelectorAll<HTMLElement>(".message").forEach(message => {
-    if (!expandedMessageIDs.has(message.dataset.messageId || "")) return;
+    if (!message.classList.contains("expanded")) return;
     message.classList.add("expanded");
     const preview = message.querySelector<HTMLElement>(".message-preview");
     const full = message.querySelector<HTMLElement>(".message-full-text");
@@ -1962,10 +1988,6 @@ function restoreRegionUI(root: HTMLElement | null, state: RegionUIState | null, 
     if (full) full.hidden = false;
     if (toggle) toggle.textContent = "收起";
   });
-  if (restoreRootScroll) {
-    root.scrollTop = state.rootScrollTop;
-    root.scrollLeft = state.rootScrollLeft;
-  }
 }
 
 function replaceRegionHTML(root: HTMLElement, html: string): void {
@@ -1974,9 +1996,57 @@ function replaceRegionHTML(root: HTMLElement, html: string): void {
   restoreRegionUI(root, ui);
 }
 
+function requestConversationBottom(): void {
+  scrollConversationToBottom = true;
+  conversationBottomPinVersion++;
+}
+
+function cancelConversationBottomPin(): void {
+  conversationBottomPinVersion++;
+  conversationAutoScrollBlockedUntil = Date.now() + 800;
+}
+
+function shouldAutoScrollConversation(wasAtBottom: boolean): boolean {
+  return scrollConversationToBottom || (wasAtBottom && Date.now() >= conversationAutoScrollBlockedUntil);
+}
+
+function stabilizeConversationBottom(list: HTMLElement): void {
+  const pinVersion = conversationBottomPinVersion;
+  const apply = () => {
+    if (pinVersion !== conversationBottomPinVersion || !list.isConnected) return;
+    list.scrollTop = list.scrollHeight;
+  };
+  apply();
+  window.requestAnimationFrame(() => {
+    apply();
+    window.requestAnimationFrame(apply);
+  });
+  list.querySelectorAll<HTMLImageElement>("img").forEach(image => {
+    if (!image.complete) image.addEventListener("load", apply, {once: true});
+  });
+}
+
+function renderUIScope(): string {
+  if (state.selectedTask) return `task:${state.selectedTask.task.id}`;
+  if (state.selectedProject) return `project:${state.selectedProject.id}`;
+  return `view:${state.view}`;
+}
+
+function hasActiveTextEditor(): boolean {
+  const active = document.activeElement;
+  if (!(active instanceof HTMLElement) || !app?.contains(active)) return false;
+  if (active instanceof HTMLTextAreaElement || active.isContentEditable) return true;
+  if (!(active instanceof HTMLInputElement)) return false;
+  return !["button", "checkbox", "color", "file", "hidden", "image", "radio", "range", "reset", "submit"].includes(active.type);
+}
+
 function updateTaskLiveRegions(): void {
   const detail = state.selectedTask;
   if (!detail) return;
+  if (appPointerActive) {
+    state.renderPending = true;
+    return;
+  }
   const activeTurn = (detail.turns || []).find(item => item.agent_id === state.selectedTaskAgent && isActiveTurn(item.status));
   const list = document.querySelector<HTMLElement>("#conversation-list");
   if (list) {
@@ -1986,7 +2056,7 @@ function updateTaskLiveRegions(): void {
     const wasAtBottom = previousHeight - previousTop - list.clientHeight < 80;
     list.innerHTML = conversationListHtml();
     restoreRegionUI(list, ui, false);
-    if (scrollConversationToBottom || wasAtBottom) list.scrollTop = list.scrollHeight;
+    if (shouldAutoScrollConversation(wasAtBottom)) stabilizeConversationBottom(list);
     else list.scrollTop = previousTop;
     scrollConversationToBottom = false;
     bindConversationLiveControls();
@@ -1994,9 +2064,11 @@ function updateTaskLiveRegions(): void {
   const turnSlot = document.querySelector<HTMLElement>("#agent-turn-slot");
   if (turnSlot) replaceRegionHTML(turnSlot, renderAgentTurnCard(detail, state.taskRealtimeState, state.taskContext?.context.metrics));
   const failureSlot = document.querySelector<HTMLElement>("#task-failure-slot");
-  if (failureSlot) failureSlot.innerHTML = taskFailureBannerHtml(detail);
+  const nextFailure = taskFailureBannerHtml(detail);
+  if (failureSlot && failureSlot.innerHTML !== nextFailure) failureSlot.innerHTML = nextFailure;
   const agentSelect = document.querySelector<HTMLSelectElement>("#composer-agent");
-  if (agentSelect) agentSelect.innerHTML = renderComposerAgentOptions(detail, state.selectedTaskAgent);
+  const nextAgentOptions = renderComposerAgentOptions(detail, state.selectedTaskAgent);
+  if (agentSelect && document.activeElement !== agentSelect && agentSelect.innerHTML !== nextAgentOptions) agentSelect.innerHTML = nextAgentOptions;
   const taskStatus = document.querySelector<HTMLElement>("#task-detail-status");
   if (taskStatus) {
     taskStatus.className = `status ${statusClass(detail.task.status)}`;
@@ -2023,10 +2095,12 @@ function render(): void {
   if (!app) return;
   document.body.classList.toggle("task-view-active", Boolean(state.selectedTask));
   if (state.loading) {
+    delete app.dataset.uiScope;
     app.innerHTML = `<div class="loading boot-loading"><span class="brand-mark">A</span><strong>AHA2</strong><small>正在连接服务…</small></div>`;
     return;
   }
   if (!state.auth?.authenticated) {
+    delete app.dataset.uiScope;
     app.innerHTML = loginView();
     bindAuth();
     return;
@@ -2041,14 +2115,24 @@ function render(): void {
     state.renderPending = true;
     return;
   }
+  if (appPointerActive) {
+    state.renderPending = true;
+    return;
+  }
+  if (hasActiveTextEditor()) {
+    state.renderPending = true;
+    return;
+  }
   persistNavigationState();
   if (document.activeElement instanceof HTMLTextAreaElement && document.activeElement.closest("#message-form")) {
     state.renderPending = true;
     return;
   }
   state.renderPending = false;
+  const nextUIScope = renderUIScope();
+  const preservePageUI = app.dataset.uiScope === nextUIScope;
+  const previousAppUI = preservePageUI ? captureRegionUI(app) : null;
   const previousConversation = document.querySelector<HTMLElement>("#conversation-list");
-  const previousTaskID = document.querySelector<HTMLElement>(".task-screen") ? state.selectedTask?.task.id : "";
   const previousWindowScroll = window.scrollY;
   const previousTurnUI = captureRegionUI(document.querySelector<HTMLElement>("#agent-turn-slot"));
   const previousToolUI = captureRegionUI(document.querySelector<HTMLElement>("#task-tool-panel-body"));
@@ -2079,28 +2163,31 @@ function render(): void {
         setMessage,
       })}${loadMoreHTML("knowledge")}`),
       prompts: () => advancedSubview(renderPromptAdmin()),
-      proxy: () => shell(renderProxySettings(state.proxySettings)),
+      proxy: () => shell(renderProxySettings(state.proxySettings, state.managedProxy)),
       sync: () => advancedSubview(renderSyncSettings(state.syncSettings, state.syncState, state.syncPending, state.syncConflicts, state.syncPreview, state.syncRun)),
       advanced: advancedSettingsView,
     };
     content = views[state.view]();
   }
   app.innerHTML = content;
+  app.dataset.uiScope = nextUIScope;
   bindCommon();
+  restoreRegionUI(app, previousAppUI, false);
   if (state.selectedTask) {
-    window.scrollTo(0, previousTaskID === state.selectedTask.task.id ? previousWindowScroll : 0);
     restoreRegionUI(document.querySelector<HTMLElement>("#agent-turn-slot"), previousTurnUI);
     restoreRegionUI(document.querySelector<HTMLElement>("#task-tool-panel-body"), previousToolUI);
   }
   const nextConversation = document.querySelector<HTMLElement>("#conversation-list");
   if (nextConversation) {
     restoreRegionUI(nextConversation, previousConversationUI, false);
-    if (scrollConversationToBottom || wasAtConversationBottom) {
-      nextConversation.scrollTop = nextConversation.scrollHeight;
+    if (shouldAutoScrollConversation(wasAtConversationBottom)) {
+      stabilizeConversationBottom(nextConversation);
     } else {
       nextConversation.scrollTop = previousScrollTop;
     }
   }
+  if (preservePageUI) window.scrollTo(0, previousWindowScroll);
+  else window.scrollTo(0, 0);
   scrollConversationToBottom = false;
 }
 
@@ -2180,7 +2267,13 @@ function bindCommon(): void {
     setMessage,
   });
   bindProxySettings({
-    onChanged: settings => { state.proxySettings = settings; },
+    settings: state.proxySettings,
+    managed: state.managedProxy,
+    onChanged: (settings, managed) => {
+      state.proxySettings = settings;
+      if (managed) state.managedProxy = managed;
+      render();
+    },
     setMessage,
   });
   bindSyncSettings({
@@ -2896,7 +2989,7 @@ function bindCommon(): void {
         accepted = true;
         if (!submission.started) setMessage("notice", `${agentID} 正在执行，消息已排队；输入 /interrupt 可中断当前 Round`);
         await refreshTaskRuntime(taskID);
-        scrollConversationToBottom = true;
+        requestConversationBottom();
         updateTaskLiveRegions();
       }
       const menu = document.querySelector<HTMLElement>("#slash-command-menu");
@@ -3216,6 +3309,12 @@ function bindConversationLiveControls(): void {
       previousTop = currentTop;
     }, {passive: true});
   }
+  if (list && list.dataset.bottomPinBound !== "true") {
+    list.dataset.bottomPinBound = "true";
+    for (const eventName of ["wheel", "touchstart", "pointerdown"] as const) {
+      list.addEventListener(eventName, cancelConversationBottomPin, {passive: true});
+    }
+  }
 }
 
 function openEvents(taskID: string, after = 0): void {
@@ -3273,6 +3372,7 @@ function closeEvents(): void {
 // closes so the UI never goes stale but the dialog is never yanked away.
 function flushDeferredRender(): void {
   if (!state.renderPending || document.querySelector("dialog[open]")) return;
+  if (appPointerActive || hasActiveTextEditor()) return;
   if (document.activeElement instanceof HTMLTextAreaElement && document.activeElement.closest("#message-form")) return;
   if (state.view === "sync" && isSyncSettingsFormEditing(document.querySelector<HTMLFormElement>("#sync-settings-form"), document.activeElement)) return;
   render();
@@ -3288,6 +3388,7 @@ document.addEventListener("close", event => {
   }
   if (event.target instanceof HTMLDialogElement) flushDeferredRender();
 }, true);
+document.addEventListener("focusout", () => window.setTimeout(flushDeferredRender, 0), true);
 
 // Event-driven list refresh: one global SSE stream keeps the task list (and
 // project/workspace labels) fresh without polling. The task detail view keeps
@@ -3312,7 +3413,8 @@ async function refreshListData(): Promise<void> {
 		state.workspaces = workspaces.workspaces || [];
 		listPages.projects = {cursor: projects.next_cursor || "", hasMore: Boolean(projects.has_more), loadingMore: false};
 		listPages.tasks = {cursor: tasks.next_cursor || "", hasMore: Boolean(tasks.has_more), loadingMore: false};
-		if (!state.selectedTask) {
+		const listPageVisible = state.view === "projects" || state.view === "tasks" || Boolean(state.selectedProject);
+		if (!state.selectedTask && listPageVisible) {
 		  if (taskListPointerActive) state.renderPending = true;
 		  else render();
 		}
@@ -3324,6 +3426,24 @@ async function refreshListData(): Promise<void> {
 	listRefreshInFlight = false;
   }
 }
+
+app?.addEventListener("pointerdown", event => {
+  if (event.isPrimary) appPointerActive = true;
+});
+window.addEventListener("pointerup", () => {
+  if (!appPointerActive) return;
+  appPointerActive = false;
+  window.setTimeout(flushDeferredRender, 0);
+});
+window.addEventListener("pointercancel", () => {
+  appPointerActive = false;
+  flushDeferredRender();
+});
+window.addEventListener("blur", () => {
+  appPointerActive = false;
+  taskListPointerActive = false;
+  flushDeferredRender();
+});
 
 window.addEventListener("pointerup", () => {
   if (!taskListPointerActive) return;

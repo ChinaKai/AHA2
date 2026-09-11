@@ -37,6 +37,10 @@ type SecretStore interface {
 	Get(string) (string, bool)
 }
 
+type ProxyRuntime interface {
+	Client(context.Context, *http.Client) (*http.Client, error)
+}
+
 type Login struct {
 	ID           string               `json:"id"`
 	Status       string               `json:"status"`
@@ -61,10 +65,15 @@ type Manager struct {
 	usageURL      string
 	modelsURL     string
 	clientVersion string
+	proxyRuntime  ProxyRuntime
 
 	mu       sync.Mutex
 	logins   map[string]*Login
 	accounts map[string]*sync.Mutex
+}
+
+func (m *Manager) SetProxyRuntime(runtime ProxyRuntime) {
+	m.proxyRuntime = runtime
 }
 
 const (
@@ -337,7 +346,13 @@ func (m *Manager) exchangeCode(ctx context.Context, code, verifier string, usePr
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	request.Header.Set("User-Agent", "codex_cli_rs")
 	client := m.httpClient
-	if useProxy {
+	if useProxy && m.proxyRuntime != nil {
+		client, err = m.proxyRuntime.Client(ctx, m.httpClient)
+		if err != nil {
+			return nil, fmt.Errorf("invalid proxy settings: %w", err)
+		}
+	}
+	if useProxy && m.proxyRuntime == nil {
 		settings, settingsErr := m.store.ProxySettings(ctx)
 		if settingsErr != nil {
 			return nil, fmt.Errorf("读取代理设置失败: %w", settingsErr)

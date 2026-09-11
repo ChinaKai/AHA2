@@ -102,6 +102,18 @@ Workspace“测试连接”自动保存从目标执行环境验证成功的地�
 一次管理员卸载。后续开发部署使用 `scripts/deploy-windows-user.ps1`，脚本会备份运行数据和旧用户级
 二进制、构建 per-user 安装包、升级、重启并核对健康与哈希。
 
+需要从源码完成完整验证、构建、打包、升级和重启时，使用单一入口，避免手工重复探测工具链或重复执行测试：
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File scripts\build-and-deploy-windows-user.ps1 `
+  -Version 0.5.19 `
+  -DataDir D:\ProgramData\AHA2 `
+  -Listen 0.0.0.0:8766 `
+  -HealthURL http://127.0.0.1:8766/healthz
+```
+
+脚本只复用仓库现有的 WSL Go 工具链，自动读取真实发行版名称并预检磁盘空间；Web 与 Go 验证在同一轮各执行一次。已有已验证候选时传入 `-DeployOnly`，只执行安装、重启、健康和哈希校验。
+
 ## macOS 机器级安装
 
 macOS 标准安装包按架构提供：

@@ -561,6 +561,17 @@ CREATE INDEX IF NOT EXISTS idx_knowledge_updated_cursor ON knowledge_entries(upd
 CREATE INDEX IF NOT EXISTS idx_knowledge_scope_project_updated_cursor ON knowledge_entries(scope,project_id,updated_at DESC,id DESC);
 `
 
+const schemaV53 = `
+ALTER TABLE proxy_settings ADD COLUMN mode TEXT NOT NULL DEFAULT 'external' CHECK(mode IN ('off','external','managed_hysteria2'));
+ALTER TABLE proxy_settings ADD COLUMN managed_node_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE proxy_settings ADD COLUMN managed_refresh_interval_minutes INTEGER NOT NULL DEFAULT 1440 CHECK(managed_refresh_interval_minutes BETWEEN 15 AND 10080);
+ALTER TABLE proxy_settings ADD COLUMN managed_subscription_at TEXT NOT NULL DEFAULT '';
+`
+
+const schemaV54 = `
+ALTER TABLE proxy_settings ADD COLUMN managed_profile_id TEXT NOT NULL DEFAULT '';
+`
+
 const schemaV27 = `
 CREATE TABLE IF NOT EXISTS sync_settings (
     scope TEXT PRIMARY KEY,
@@ -1913,6 +1924,32 @@ func (s *Store) migrate(ctx context.Context) error {
 	}
 	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(52, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
 		return fmt.Errorf("record schema v52: %w", err)
+	}
+	var hasV53 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=53)`).Scan(&hasV53)
+	if !hasV53 {
+		for _, statement := range strings.Split(schemaV53, ";") {
+			statement = strings.TrimSpace(statement)
+			if statement == "" {
+				continue
+			}
+			if _, err := s.db.ExecContext(ctx, statement); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+				return fmt.Errorf("apply schema v53: %w", err)
+			}
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(53, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v53: %w", err)
+	}
+	var hasV54 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=54)`).Scan(&hasV54)
+	if !hasV54 {
+		if _, err := s.db.ExecContext(ctx, schemaV54); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("apply schema v54: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(54, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v54: %w", err)
 	}
 	return nil
 }

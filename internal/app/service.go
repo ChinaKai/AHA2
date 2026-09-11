@@ -113,6 +113,10 @@ type SecretResolver interface {
 	PutMany(map[string]string) error
 }
 
+type ProxyRuntime interface {
+	ApplyEnvironment(context.Context, map[string]string) error
+}
+
 type Service struct {
 	store                 *store.Store
 	secrets               SecretResolver
@@ -122,6 +126,7 @@ type Service struct {
 	now                   func() time.Time
 	prompts               *prompt.Engine
 	codex                 *codexaccount.Manager
+	proxyRuntime          ProxyRuntime
 	agentAPI              *agentapi.Capabilities
 	agentAPIURL           string
 	agentAPIAllowInsecure bool
@@ -139,6 +144,10 @@ type Service struct {
 	sharedContextMu sync.Mutex
 	sharedContexts  map[string]*sharedContextState
 	latestShared    map[string]string
+}
+
+func (s *Service) SetProxyRuntime(runtime ProxyRuntime) {
+	s.proxyRuntime = runtime
 }
 
 type sharedContextState struct {
@@ -939,7 +948,13 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 		environment["AHA2_AGENT_API_URL"] = agentAPIURL
 		environment["AHA2_AGENT_API_TOKEN"] = capabilityToken
 	}
-	if snapshot.ProxyEnabled {
+	if snapshot.ProxyEnabled && s.proxyRuntime != nil {
+		if settingsErr := s.proxyRuntime.ApplyEnvironment(ctx, environment); settingsErr != nil {
+			s.failTurn(ctx, &turn, task, fmt.Errorf("apply proxy settings: %w", settingsErr))
+			return
+		}
+	}
+	if snapshot.ProxyEnabled && s.proxyRuntime == nil {
 		settings, settingsErr := s.store.ProxySettings(ctx)
 		if settingsErr != nil {
 			s.failTurn(ctx, &turn, task, fmt.Errorf("读取代理设置失败: %w", settingsErr))
