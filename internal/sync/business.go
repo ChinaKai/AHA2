@@ -37,6 +37,8 @@ const (
 	TypeHardware          = "hardware"
 )
 
+var errSyncedKnowledgeProjectDeleted = errors.New("synced knowledge project was deleted")
+
 type skillPayload struct {
 	Skill domain.Skill       `json:"skill"`
 	Files []domain.SkillFile `json:"files"`
@@ -512,7 +514,9 @@ func upsertBusinessObject(ctx context.Context, database *store.Store, obj domain
 		if store.IsManagedGlobalKnowledgeCategory(v.ID) {
 			return nil
 		}
-		if err := normalizeSyncedKnowledgeScope(ctx, database, &v); err != nil {
+		if err := normalizeSyncedKnowledgeScope(ctx, database, &v); errors.Is(err, errSyncedKnowledgeProjectDeleted) {
+			return nil
+		} else if err != nil {
 			return knowledgeSyncDependency(err)
 		}
 		if v.Scope == "global" && !v.IsIndex && v.ID != store.GlobalKnowledgeRootID && (v.ParentID == "" || v.ParentID == store.GlobalKnowledgeRootID) {
@@ -543,7 +547,9 @@ func upsertBusinessObject(ctx context.Context, database *store.Store, obj domain
 		v.Proposed.ID = v.EntryID
 		v.SourceTaskID, v.SourceTurnID = "", ""
 		v.Proposed.SourceTaskID, v.Proposed.SourceTurnID = "", ""
-		if err := normalizeSyncedKnowledgeScope(ctx, database, &v.Proposed); err != nil {
+		if err := normalizeSyncedKnowledgeScope(ctx, database, &v.Proposed); errors.Is(err, errSyncedKnowledgeProjectDeleted) {
+			return nil
+		} else if err != nil {
 			return knowledgeSyncDependency(err)
 		}
 		if v.Proposed.Scope == "global" && (v.Proposed.ParentID == "" || v.Proposed.ParentID == store.GlobalKnowledgeRootID) {
@@ -555,7 +561,9 @@ func upsertBusinessObject(ctx context.Context, database *store.Store, obj domain
 		if v.BaseEntry != nil {
 			base := *v.BaseEntry
 			base.SourceTaskID, base.SourceTurnID = "", ""
-			if err := normalizeSyncedKnowledgeScope(ctx, database, &base); err != nil {
+			if err := normalizeSyncedKnowledgeScope(ctx, database, &base); errors.Is(err, errSyncedKnowledgeProjectDeleted) {
+				return nil
+			} else if err != nil {
 				return knowledgeSyncDependency(err)
 			}
 			v.BaseEntry = &base
@@ -690,6 +698,13 @@ func normalizeSyncedKnowledgeScope(ctx context.Context, database *store.Store, v
 	v.ProjectID = strings.TrimSpace(v.ProjectID)
 	if v.ProjectID != "" {
 		if _, err := database.Project(ctx, v.ProjectID); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				if _, tombstoneErr := database.SyncTombstone(ctx, TypeProject, v.ProjectID); tombstoneErr == nil {
+					return fmt.Errorf("%w: %s", errSyncedKnowledgeProjectDeleted, v.ProjectID)
+				} else if !errors.Is(tombstoneErr, sql.ErrNoRows) {
+					return tombstoneErr
+				}
+			}
 			return fmt.Errorf("knowledge project dependency %s: %w", v.ProjectID, err)
 		}
 		v.Scope = "project"

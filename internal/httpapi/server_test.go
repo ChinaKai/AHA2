@@ -862,6 +862,37 @@ func TestTaskHTTPManualCreateAndStart(t *testing.T) {
 		t.Fatalf("manual create response = %#v", created)
 	}
 	taskID := taskPayload["id"].(string)
+	response = requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/tasks/"+taskID, nil, "")
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("draft detail status = %d", response.StatusCode)
+	}
+	var detail map[string]any
+	decodeResponse(t, response, &detail)
+	agents := detail["agents"].([]any)
+	if len(agents) != 1 || agents[0].(map[string]any)["agent_id"] != "main" {
+		t.Fatalf("draft detail agents = %#v", agents)
+	}
+	if turns, ok := detail["turns"].([]any); ok && len(turns) != 0 {
+		t.Fatalf("draft detail turns = %#v", turns)
+	}
+	response = requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/tasks/"+taskID+"/agents/main/conversation", nil, "")
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("draft conversation status = %d", response.StatusCode)
+	}
+	var conversation map[string]any
+	decodeResponse(t, response, &conversation)
+	if items := conversation["conversation"].(map[string]any)["items"].([]any); len(items) != 0 {
+		t.Fatalf("draft conversation items = %#v", items)
+	}
+	response = requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/tasks/"+taskID+"/agents/main/context", nil, "")
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("draft context status = %d", response.StatusCode)
+	}
+	var taskContext map[string]any
+	decodeResponse(t, response, &taskContext)
+	if contextAgent := taskContext["context"].(map[string]any)["agent_id"]; contextAgent != nil && contextAgent != "" {
+		t.Fatalf("draft context unexpectedly has active agent = %#v", taskContext["context"])
+	}
 	response = requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/tasks/"+taskID+"/start", map[string]any{}, csrf)
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("manual start status = %d", response.StatusCode)

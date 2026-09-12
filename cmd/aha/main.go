@@ -36,6 +36,7 @@ import (
 )
 
 var version = "dev"
+var webVersion = ""
 
 func main() {
 	command, args, err := parseCommand(os.Args[1:])
@@ -265,6 +266,7 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 		OutboundProxy:     proxyRuntime,
 		Channels:          channelService,
 		Version:           version,
+		WebVersion:        webVersion,
 	})
 	if options.allowCrossOrigin {
 		logger.Warn("Origin host validation disabled")

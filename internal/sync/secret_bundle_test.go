@@ -125,6 +125,33 @@ func TestApplySecretBundlePreservesLocalReferencesAndRestoresCodexAccount(t *tes
 	}
 }
 
+func TestApplySecretBundleSkipsDeletedProviderAndEnvSecrets(t *testing.T) {
+	ctx, destination, destinationSecrets := secretBundleFixture(t)
+	bundle := portableSecretBundle{Version: 1,
+		Providers: []portableProvider{{ID: "provider_deleted", Value: "provider-secret"}},
+		EnvGroups: []portableEnvGroup{{ID: "env_deleted", Values: map[string]string{"API_TOKEN": "env-secret"}}},
+	}
+	plain, err := json.Marshal(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encrypted, err := EncryptBundle(plain, "passphrase")
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, _ := json.Marshal(string(encrypted))
+	object := domain.SyncObject{Type: TypeSecretBundle, Operation: "upsert", Payload: payload}
+	if err := ApplySecretBundle(ctx, destination, destinationSecrets, object, "passphrase"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := destinationSecrets.Get("provider/provider_deleted/credential"); ok {
+		t.Fatal("deleted provider secret was written")
+	}
+	if _, ok := destinationSecrets.Get("env/env_deleted/API_TOKEN"); ok {
+		t.Fatal("deleted env secret was written")
+	}
+}
+
 func TestSecretBundleRejectsNonPortableReferences(t *testing.T) {
 	for name, ref := range map[string]string{
 		"sync token":       "sync/default/token",

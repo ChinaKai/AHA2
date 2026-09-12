@@ -3,6 +3,9 @@ set -euo pipefail
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 go_bin="${GO_BIN:-$repo/.tools/go/bin/go}"
+base_version="${VERSION:-$(git -C "$repo" describe --tags --abbrev=0 2>/dev/null || printf 'v0.0.0')}"
+base_version="${base_version#v}"
+web_version="$(bash "$repo/scripts/web-version.sh" "$base_version")"
 mkdir -p "$repo/dist"
 
 if [[ -d "$repo/web/dist" ]]; then
@@ -19,7 +22,7 @@ for target in linux/amd64 linux/arm64 windows/amd64 windows/arm64 darwin/amd64 d
   suffix=""
   [[ "$os" == "windows" ]] && suffix=".exe"
   echo "Building $os/$arch"
-  CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" "$go_bin" build -trimpath -ldflags="-s -w" -o "dist/aha2-${os}-${arch}${suffix}" ./cmd/aha
+  CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" "$go_bin" build -trimpath -ldflags="-s -w -X main.version=$base_version -X main.webVersion=$web_version" -o "dist/aha2-${os}-${arch}${suffix}" ./cmd/aha
   if [[ "$os" == "windows" ]]; then
     CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" "$go_bin" build -trimpath -ldflags="-s -w -H windowsgui" -o "dist/aha2-tray-${os}-${arch}.exe" ./cmd/aha-tray
   fi

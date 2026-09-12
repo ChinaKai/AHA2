@@ -70,6 +70,33 @@ func TestSyncSettingsAPIKeepsTokenOutOfResponses(t *testing.T) {
 	}
 }
 
+func TestSyncPreviewIsEmptyBeforeConfiguration(t *testing.T) {
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	authService := auth.NewService(database, "setup-test", time.Hour)
+	server := httptest.NewServer(New(Config{Store: database, Auth: authService, App: app.NewService(database, nil, app.StubExecutor{})}).Handler())
+	defer server.Close()
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	_ = registerOwner(t, client, server.URL)
+
+	response := requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/settings/sync/preview", nil, "")
+	defer response.Body.Close()
+	var payload struct {
+		Preview syncer.Preview `json:"preview"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK || payload.Preview != (syncer.Preview{}) {
+		t.Fatalf("status=%d preview=%#v", response.StatusCode, payload.Preview)
+	}
+}
+
 func TestSyncPreviewCountsLocalTombstonesBeforeRunning(t *testing.T) {
 	ctx := context.Background()
 	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))

@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,11 +19,21 @@ import (
 type CredentialProvider func(context.Context) (string, error)
 
 type Client struct {
-	BaseURL    string
-	DeviceID   string
-	HTTP       *http.Client
-	Credential CredentialProvider
+	BaseURL     string
+	DeviceID    string
+	HTTP        *http.Client
+	Credential  CredentialProvider
+	retryWait   func(context.Context, time.Duration) error
+	retryNow    func() time.Time
+	retryJitter func(time.Duration) time.Duration
 }
+
+const (
+	maxRetryAttempts  = 3
+	initialRetryDelay = 250 * time.Millisecond
+	maxRetryDelay     = 2 * time.Second
+)
+
 type PushRequest struct {
 	Scope    string              `json:"scope"`
 	DeviceID string              `json:"device_id"`
@@ -74,52 +86,122 @@ func (c *Client) do(ctx context.Context, method, path string, input, output any)
 		return err
 	}
 	endpoint := base.ResolveReference(relative)
-	var body io.Reader
+	var bodyData []byte
 	if input != nil {
 		data, err := json.Marshal(input)
 		if err != nil {
 			return err
 		}
-		body = bytes.NewReader(data)
+		bodyData = data
 	}
-	req, err := http.NewRequestWithContext(ctx, method, endpoint.String(), body)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Accept", "application/json")
-	if c.DeviceID != "" {
-		req.Header.Set("X-Device-ID", c.DeviceID)
-	}
-	if input != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
+	credential := ""
 	if c.Credential != nil {
-		credential, err := c.Credential(ctx)
+		credential, err = c.Credential(ctx)
 		if err != nil {
 			return fmt.Errorf("load sync credential: %w", err)
-		}
-		if credential != "" {
-			req.Header.Set("Authorization", "Bearer "+credential)
 		}
 	}
 	httpClient := c.HTTP
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 30 * time.Second}
 	}
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("sync request: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+
+	for attempt := 0; ; attempt++ {
+		var body io.Reader
+		if bodyData != nil {
+			body = bytes.NewReader(bodyData)
+		}
+		req, err := http.NewRequestWithContext(ctx, method, endpoint.String(), body)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Accept", "application/json")
+		if c.DeviceID != "" {
+			req.Header.Set("X-Device-ID", c.DeviceID)
+		}
+		if input != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		if credential != "" {
+			req.Header.Set("Authorization", "Bearer "+credential)
+		}
+
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			return fmt.Errorf("sync request: %w", err)
+		}
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			if output == nil {
+				resp.Body.Close()
+				return nil
+			}
+			err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(output)
+			resp.Body.Close()
+			if err != nil {
+				return fmt.Errorf("decode sync response: %w", err)
+			}
+			return nil
+		}
+
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("sync server returned %s: %s", resp.Status, strings.TrimSpace(string(data)))
+		resp.Body.Close()
+		if !isRetryableStatus(resp.StatusCode) || attempt >= maxRetryAttempts {
+			return fmt.Errorf("sync server returned %s: %s", resp.Status, strings.TrimSpace(string(data)))
+		}
+		delay := c.jitterRetryDelay(c.retryDelay(resp.Header.Get("Retry-After"), attempt))
+		if err := c.waitForRetry(ctx, delay); err != nil {
+			return fmt.Errorf("sync retry: %w", err)
+		}
 	}
-	if output == nil {
+}
+
+func (c *Client) jitterRetryDelay(delay time.Duration) time.Duration {
+	if c.retryJitter != nil {
+		return c.retryJitter(delay)
+	}
+	if delay <= 0 {
+		return 0
+	}
+	return delay + time.Duration(rand.Int64N(int64(delay/4)+1))
+}
+
+func isRetryableStatus(status int) bool {
+	return status == http.StatusTooManyRequests || status == http.StatusServiceUnavailable
+}
+
+func (c *Client) retryDelay(retryAfter string, attempt int) time.Duration {
+	if retryAfter != "" {
+		if seconds, err := strconv.ParseUint(strings.TrimSpace(retryAfter), 10, 31); err == nil {
+			return time.Duration(seconds) * time.Second
+		}
+		if retryAt, err := http.ParseTime(retryAfter); err == nil {
+			now := time.Now()
+			if c.retryNow != nil {
+				now = c.retryNow()
+			}
+			if delay := retryAt.Sub(now); delay > 0 {
+				return delay
+			}
+			return 0
+		}
+	}
+	delay := initialRetryDelay << attempt
+	if delay > maxRetryDelay {
+		return maxRetryDelay
+	}
+	return delay
+}
+
+func (c *Client) waitForRetry(ctx context.Context, delay time.Duration) error {
+	if c.retryWait != nil {
+		return c.retryWait(ctx, delay)
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
 		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(output); err != nil {
-		return fmt.Errorf("decode sync response: %w", err)
-	}
-	return nil
 }

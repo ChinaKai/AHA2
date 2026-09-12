@@ -10,7 +10,7 @@ await rm(output, {recursive: true, force: true});
 await mkdir(output, {recursive: true});
 await mkdir(resolve(output, "vendor"), {recursive: true});
 
-for (const name of ["api", "icons", "types", "runtime_picker", "task_agents", "task_composer", "hardware_terminal", "hardware_panel", "task_tools", "markdown", "conversation_ui", "ui_helpers", "prompt_admin", "proxy_settings", "sync_settings", "codex_accounts", "knowledge_workspace", "channels", "main"]) {
+for (const name of ["api", "icons", "types", "runtime_picker", "task_agents", "task_composer", "task_filters", "hardware_terminal", "hardware_panel", "task_tools", "markdown", "conversation_ui", "ui_helpers", "prompt_admin", "proxy_settings", "sync_settings", "codex_accounts", "knowledge_workspace", "channels", "main"]) {
   const input = await readFile(resolve(source, "src", `${name}.ts`), "utf8");
   const transformed = stripTypeScriptTypes(input, {mode: "transform", sourceMap: false});
   const outputName = name === "main" ? "app" : name;
@@ -29,6 +29,7 @@ const versionSource = await Promise.all([
   readFile(resolve(output, "runtime_picker.js")),
   readFile(resolve(output, "task_agents.js")),
   readFile(resolve(output, "task_composer.js")),
+  readFile(resolve(output, "task_filters.js")),
   readFile(resolve(output, "hardware_panel.js")),
   readFile(resolve(output, "hardware_terminal.js")),
   readFile(resolve(output, "task_tools.js")),
@@ -53,6 +54,7 @@ const versionedApp = (await readFile(appPath, "utf8"))
   .replaceAll('"./runtime_picker.js"', `"./runtime_picker.js?v=${version}"`)
   .replaceAll('"./task_agents.js"', `"./task_agents.js?v=${version}"`)
   .replaceAll('"./task_composer.js"', `"./task_composer.js?v=${version}"`)
+  .replaceAll('"./task_filters.js"', `"./task_filters.js?v=${version}"`)
   .replaceAll('"./hardware_panel.js"', `"./hardware_panel.js?v=${version}"`)
   .replaceAll('"./hardware_terminal.js"', `"./hardware_terminal.js?v=${version}"`)
   .replaceAll('"./task_tools.js"', `"./task_tools.js?v=${version}"`)

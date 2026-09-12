@@ -11,6 +11,7 @@ import {bindProxySettings, renderProxySettings} from "./proxy_settings.js";
 import {bindSyncSettings, isSyncSettingsFormEditing, renderSyncSettings} from "./sync_settings.js";
 import {bindRuntimeFields, runtimeFieldsHTML, setRuntimeBackends, syncRuntimeFields} from "./runtime_picker.js";
 import {renderComposerAgentOptions, renderComposerTools} from "./task_composer.js";
+import {LOCAL_TASK_DEVICE_FILTER, taskDeviceFilterOptions, taskMatchesFilters} from "./task_filters.js";
 import {TASK_TOOL_DEFAULT_WIDTH, normalizeTaskToolMode, normalizeTaskToolWidth, renderTaskToolButtons, renderTaskToolContent, renderTaskToolPanel} from "./task_tools.js";
 import type {TaskTool, TaskToolMode} from "./task_tools.js";
 import {TASK_SLASH_COMMANDS, bindMessageBubbleControls, captureInteractiveRegion, clearNavigationSnapshot, eventRefreshesTaskList, exactSlashCommand, executeAgentSessionAction, loadNavigationSnapshot, matchingSlashCommands, renderWorkspaceDetection, restoreInteractiveRegion, saveNavigationSnapshot} from "./ui_helpers.js";
@@ -62,6 +63,7 @@ import type {
 } from "./types.js";
 type View = "projects" | "channels" | "models" | "tasks" | "knowledge" | "prompts" | "proxy" | "sync" | "advanced";
 type ResourceKey = "projects" | "workspaces" | "tasks" | "system" | "providers" | "models" | "env" | "accounts" | "skills" | "channels" | "knowledge" | "proxy" | "advanced" | "sync" | "prompts";
+type TaskFilterKind = "project" | "status" | "device";
 interface ResourceState {loading: boolean; loaded: boolean; error: string; updatedAt: number}
 interface State {
   auth: AuthStatus | null;
@@ -78,6 +80,7 @@ interface State {
   agentAPISettings: AgentAPISettings;
 	backendSettings: BackendSettings;
   syncSettings: SyncSettings;
+  syncSettingsReady: boolean;
   syncState: SyncState;
   syncPending: number;
   syncConflicts: SyncConflict[];
@@ -115,8 +118,11 @@ interface State {
   taskTool: TaskTool | "";
   taskToolMode: TaskToolMode;
   taskToolWidth: number;
-  taskProjectFilter: string;
-  taskStatusFilter: string;
+  taskDetailLoading: boolean;
+  taskProjectFilters: Set<string>;
+  taskStatusFilters: Set<string>;
+  taskDeviceFilters: Set<string>;
+  taskOpenFilter: TaskFilterKind | "";
 }
 
 const taskToolLayoutKey = "aha2.task-tool-layout";
@@ -140,13 +146,14 @@ const state: State = {
   error: "",
   notice: "",
   renderPending: false,
-  system: {os: "windows", arch: "", wsl_available: false, wsl_distros: [], version: "dev", started_at: ""},
+  system: {os: "windows", arch: "", wsl_available: false, wsl_distros: [], version: "dev", web_version: "", started_at: ""},
   proxySettings: {mode: "external", http_proxy: "http://127.0.0.1:7897", https_proxy: "http://127.0.0.1:7897", no_proxy: "localhost,127.0.0.1,::1", managed_refresh_interval_minutes: 1440},
   managedProxy: {configured: false, profiles: [], url_configured: false, nodes: [], unsupported_count: 0, unsupported_types: [], status: "idle"},
   securitySettings: {validate_origin: true, startup_override: false},
   agentAPISettings: {url: "", allow_insecure: false, effective_url: "http://127.0.0.1:8766", effective_allow_insecure: false},
 	backendSettings: {idle_timeout_seconds: 10 * 60, turn_timeout_seconds: 10 * 60 * 60},
   syncSettings: {scope:"default",enabled:false,endpoint:"",device_id:"",device_name:"",interval_seconds:300,token_configured:false,passphrase_configured:false},
+  syncSettingsReady: false,
   syncState: {scope:"default",cursor:"",last_error:""},
   syncPending: 0,
   syncConflicts: [],
@@ -184,8 +191,11 @@ const state: State = {
   taskTool: "",
   taskToolMode: savedTaskToolLayout.mode,
   taskToolWidth: savedTaskToolLayout.width,
-  taskProjectFilter: "",
-  taskStatusFilter: "",
+  taskDetailLoading: false,
+  taskProjectFilters: new Set(),
+  taskStatusFilters: new Set(),
+  taskDeviceFilters: new Set([LOCAL_TASK_DEVICE_FILTER]),
+  taskOpenFilter: "",
 };
 
 const app = document.querySelector<HTMLDivElement>("#app");
@@ -199,6 +209,7 @@ let taskLastSignalAt = 0;
 let scrollConversationToBottom = false;
 let conversationBottomPinVersion = 0;
 let conversationAutoScrollBlockedUntil = 0;
+let composerFocusWasAtBottom = false;
 let loadingOlderConversation = false;
 let taskListPointerActive = false;
 let appPointerActive = false;
@@ -209,6 +220,26 @@ let authRecoveryOpen = false;
 let messageSubmitPending = false;
 let ownerAvatarClicks = 0;
 let ownerAvatarResetTimer = 0;
+let navigationRestoring = true;
+let taskOpenVersion = 0;
+
+document.addEventListener("click", event => {
+  const target = event.target;
+  if (target instanceof Element && target.closest("[data-task-filter]")) return;
+  state.taskOpenFilter = "";
+  document.querySelectorAll<HTMLDetailsElement>("[data-task-filter][open]").forEach(details => {
+    details.open = false;
+  });
+});
+
+document.addEventListener("keydown", event => {
+  if (event.key !== "Escape" || !state.taskOpenFilter) return;
+  state.taskOpenFilter = "";
+  document.querySelectorAll<HTMLDetailsElement>("[data-task-filter][open]").forEach(details => {
+    details.open = false;
+  });
+});
+
 const resourceStates = Object.fromEntries([
   "projects", "workspaces", "tasks", "system", "providers", "models", "env", "accounts", "skills",
   "channels", "knowledge", "proxy", "advanced", "sync", "prompts",
@@ -286,6 +317,8 @@ function statusLabel(status: string): string {
     waiting_user: "等待输入",
     completed: "已完成",
     failed: "失败",
+    blocked: "受阻",
+    cancelled: "已取消",
     preparing: "准备中",
     draft: "草稿",
     queued: "排队",
@@ -751,6 +784,10 @@ async function runWithFeedback(button: HTMLElement | null, label: string, action
 }
 
 async function bootstrap(): Promise<void> {
+  const savedNavigation = loadNavigationSnapshot();
+  if (["projects", "channels", "models", "tasks", "knowledge", "prompts", "proxy", "sync", "advanced"].includes(savedNavigation.view || "")) {
+    state.view = savedNavigation.view as View;
+  }
   try {
     state.auth = await api.authStatus();
     api.setCSRF(state.auth.csrf_token);
@@ -761,7 +798,9 @@ async function bootstrap(): Promise<void> {
       await loadCoreData();
       state.hydrating = false;
       render();
-      await restoreNavigationState();
+      await restoreNavigationState(savedNavigation);
+      navigationRestoring = false;
+      persistNavigationState();
       openGlobalEvents();
       await ensureViewData(state.view);
       prefetchSecondaryData();
@@ -769,7 +808,9 @@ async function bootstrap(): Promise<void> {
   } catch (error) {
     state.error = error instanceof Error ? error.message : String(error);
   } finally {
+    navigationRestoring = false;
     state.loading = false;
+    if (state.selectedTask) requestConversationBottom();
     render();
   }
 }
@@ -1097,12 +1138,15 @@ async function ensureViewData(view: View, force = false): Promise<void> {
     if (backend.backend) state.backendSettings = backend.backend;
   }));
   if (view === "sync") jobs.push(loadResource("sync", force, async () => {
-    const [settings, status, conflicts, preview] = await Promise.all([api.syncSettings(), api.syncStatus(), api.syncConflicts(), api.syncPreview()]);
+    const [settings, status, conflicts] = await Promise.all([api.syncSettings(), api.syncStatus(), api.syncConflicts()]);
     state.syncSettings = settings.sync;
+    state.syncSettingsReady = true;
     state.syncState = status.state;
     state.syncPending = status.pending || 0;
     state.syncRun = status.run || state.syncRun;
     state.syncConflicts = conflicts.conflicts || [];
+    if (state.view === "sync") render();
+    const preview = await api.syncPreview();
     state.syncPreview = preview.preview || state.syncPreview;
   }));
   if (view === "prompts") jobs.push(loadResource("prompts", force, loadPromptCatalog));
@@ -1116,16 +1160,23 @@ function prefetchSecondaryData(): void {
   }, 250);
 }
 function persistNavigationState(): void {
+  if (navigationRestoring) return;
   saveNavigationSnapshot({
     view: state.view, projectID: state.selectedProject?.id, taskID: state.selectedTask?.task.id,
+    project: state.selectedProject || undefined, task: state.selectedTask?.task,
     agentID: state.selectedTaskAgent, draft: state.taskDraft, drafts: state.taskDrafts,
   });
 }
-async function restoreNavigationState(): Promise<void> {
-  const saved = loadNavigationSnapshot();
+async function restoreNavigationState(saved = loadNavigationSnapshot()): Promise<void> {
   if (["projects", "channels", "models", "tasks", "knowledge", "prompts", "proxy", "sync", "advanced"].includes(saved.view || "")) state.view = saved.view as View;
-  state.selectedProject = state.projects.find(project => project.id === saved.projectID) || null;
-  if (!saved.taskID || !state.tasks.some(task => task.id === saved.taskID)) return;
+  const savedProject = state.projects.find(project => project.id === saved.projectID) || saved.project;
+  state.selectedProject = savedProject || null;
+  if (savedProject && !state.projects.some(project => project.id === savedProject.id)) {
+    state.projects.push(savedProject);
+  }
+  const savedTask = state.tasks.find(task => task.id === saved.taskID) || saved.task;
+  if (!saved.taskID || !savedTask) return;
+  if (!state.tasks.some(task => task.id === savedTask.id)) state.tasks.push(savedTask);
   state.view = "tasks"; state.selectedProject = null;
   await openTask(saved.taskID);
   if (saved.agentID && saved.agentID !== "main" && state.selectedTask?.agents.some(agent => agent.agent_id === saved.agentID)) {
@@ -1135,8 +1186,14 @@ async function restoreNavigationState(): Promise<void> {
   state.taskDraft = saved.draft || state.taskDrafts[state.selectedTaskAgent] || "";
 }
 function syncVisualViewportHeight(): void {
-  const height = Math.round(window.visualViewport?.height || window.innerHeight);
+  const viewport = window.visualViewport;
+  const height = Math.round(viewport?.height || window.innerHeight);
+  const offsetTop = Math.round(viewport?.offsetTop || 0);
+  const layoutHeight = Math.round(window.innerHeight || height);
+  const bottomInset = Math.max(0, layoutHeight - offsetTop - height);
   document.documentElement.style.setProperty("--visual-viewport-height", `${height}px`);
+  document.documentElement.style.setProperty("--visual-viewport-offset-top", `${offsetTop}px`);
+  document.documentElement.style.setProperty("--visual-viewport-bottom-inset", `${bottomInset}px`);
 }
 
 function authErrorMessage(error: unknown, fallback: string): string {
@@ -1237,31 +1294,81 @@ function selectedConversationCategories(): ConversationCategory[] {
   return (Object.keys(state.taskCategories) as ConversationCategory[]).filter(category => state.taskCategories[category]);
 }
 
-async function openTask(taskID: string): Promise<void> {
-  const detail = await api.task(taskID);
-  const categories: ConversationCategory[] = detail.task.read_only ? ["chat", "update", "error"] : selectedConversationCategories();
-  if (detail.task.read_only) state.taskCategories.tool = false;
-  const [page, context] = await Promise.all([
-    api.agentConversation(taskID, "main", {limit: 50, categories}),
-    api.agentContext(taskID, "main"),
-  ]);
-  detail.agents ||= [];
-  state.selectedTask = detail;
+const initialConversationPageSize = 20;
+
+function cancelTaskOpen(): void {
+  taskOpenVersion++;
+  openingTaskID = "";
+  state.taskDetailLoading = false;
+}
+
+function showTaskLoading(task: Task): void {
+  closeEvents();
+  state.view = "tasks";
+  state.selectedProject = null;
+  state.selectedTask = {
+    task,
+    turns: [],
+    agents: [],
+    event_cursor: 0,
+    server_time_ms: Date.now(),
+  };
   state.selectedTaskAgent = "main";
-  state.taskConversation = page.conversation.items || [];
-  state.taskConversationHasMore = page.conversation.has_more;
-  state.taskConversationBefore = page.conversation.next_before || 0;
-  state.taskConversationLatest = page.conversation.latest_sequence || 0;
-  state.taskEventCursor = detail.event_cursor || 0;
-  state.taskContext = context;
+  state.taskConversation = [];
+  state.taskConversationHasMore = false;
+  state.taskConversationBefore = 0;
+  state.taskConversationLatest = 0;
+  state.taskContext = null;
   state.taskTool = "";
   state.taskDraft = "";
   state.taskDrafts = {};
   state.taskAttachmentDrafts = {};
+  state.taskDetailLoading = true;
   loadingOlderConversation = false;
-  requestConversationBottom();
-  if (detail.task.read_only) closeEvents();
-  else openEvents(taskID, state.taskEventCursor);
+  render();
+}
+
+async function openTask(taskID: string): Promise<void> {
+  const version = ++taskOpenVersion;
+  openingTaskID = taskID;
+  const summary = state.tasks.find(task => task.id === taskID);
+  if (summary) showTaskLoading(summary);
+  try {
+    const categories: ConversationCategory[] = summary?.read_only ? ["chat", "update", "error"] : selectedConversationCategories();
+    if (summary?.read_only) state.taskCategories.tool = false;
+    let pagePromise = summary?.status === "draft"
+      ? Promise.resolve(null)
+      : api.agentConversation(taskID, "main", {limit: initialConversationPageSize, categories});
+    const detail = await api.task(taskID);
+    if (!summary && version === taskOpenVersion) showTaskLoading(detail.task);
+    if (summary?.status === "draft" && detail.task.status !== "draft") {
+      pagePromise = api.agentConversation(taskID, "main", {limit: initialConversationPageSize, categories});
+    }
+    const page = await pagePromise;
+    if (version !== taskOpenVersion) return;
+    detail.agents ||= [];
+    state.selectedTask = detail;
+    state.selectedTaskAgent = "main";
+    state.taskConversation = page?.conversation.items || [];
+    state.taskConversationHasMore = page?.conversation.has_more || false;
+    state.taskConversationBefore = page?.conversation.next_before || 0;
+    state.taskConversationLatest = page?.conversation.latest_sequence || 0;
+    state.taskEventCursor = detail.event_cursor || 0;
+    state.taskContext = null;
+    state.taskDetailLoading = false;
+    requestConversationBottom();
+    if (detail.task.read_only || detail.task.status === "draft") closeEvents();
+    else openEvents(taskID, state.taskEventCursor);
+    render();
+  } catch (error) {
+    if (version === taskOpenVersion) {
+      state.selectedTask = null;
+      state.taskDetailLoading = false;
+    }
+    throw error;
+  } finally {
+    if (version === taskOpenVersion) openingTaskID = "";
+  }
 }
 
 async function selectTaskAgent(agentID: string): Promise<void> {
@@ -1270,7 +1377,7 @@ async function selectTaskAgent(agentID: string): Promise<void> {
   state.selectedTaskAgent = agentID;
   state.taskDraft = state.taskDrafts[agentID] || "";
   const page = await api.agentConversation(state.selectedTask.task.id, agentID, {
-    limit: 50,
+    limit: initialConversationPageSize,
     categories: selectedConversationCategories(),
   });
   state.taskConversation = page.conversation.items || [];
@@ -1279,7 +1386,10 @@ async function selectTaskAgent(agentID: string): Promise<void> {
   state.taskConversationLatest = page.conversation.latest_sequence || 0;
   const agent = state.selectedTask.agents.find(item => item.agent_id === agentID);
   if (agent) agent.unread_count = 0;
-  state.taskContext = await api.agentContext(state.selectedTask.task.id, agentID);
+  state.taskContext = null;
+  if (state.taskTool === "context") {
+    state.taskContext = await api.agentContext(state.selectedTask.task.id, agentID);
+  }
   requestConversationBottom();
 }
 
@@ -1311,7 +1421,7 @@ function bindTaskAgentControls(): void {
 async function reloadConversation(): Promise<void> {
   if (!state.selectedTask) return;
   const page = await api.agentConversation(state.selectedTask.task.id, state.selectedTaskAgent, {
-    limit: 50,
+    limit: initialConversationPageSize,
     categories: selectedConversationCategories(),
   });
   state.taskConversation = page.conversation.items || [];
@@ -1431,16 +1541,17 @@ function shell(content: string): string {
     ["models", "model", "模型"],
     ["proxy", "proxy", "代理"],
   ] as const;
+  const mobileNav = [...nav.slice(0, 5), ["advanced", "shield", "高级"] as const];
   return `<div class="app-shell">
     <aside class="sidebar">
       <div class="brand-lockup"><span class="brand-mark">A</span><div><strong>AHA</strong><small>个人 AI 工作流</small></div></div>
       <nav>${nav.map(([view, glyph, label]) => `<button data-view="${view}" class="${state.view === view ? "active" : ""}">${icon(glyph)}<span>${label}</span></button>`).join("")}</nav>
-      <div class="system-meta"><span>AHA2 ${escapeHTML(state.system.version || "dev")}</span><span id="system-uptime">${systemUptimeText()}</span></div>
+      <div class="system-meta"><span>AHA2 ${escapeHTML(state.system.web_version || state.system.version || "dev")}</span><span id="system-uptime">${systemUptimeText()}</span></div>
       <div class="owner-block"><button id="owner-avatar" class="avatar" type="button" title="Owner">O</button><div><strong>${escapeHTML(state.auth?.username || "Owner")}</strong><small>已安全登录</small></div><button id="logout" class="icon-button" title="退出">${icon("logout")}</button></div>
     </aside>
     <header class="mobile-header"><div class="brand-lockup"><span class="brand-mark">A</span><strong>AHA</strong></div><button id="mobile-context" class="icon-button">${icon("menu")}</button></header>
     <main class="workspace">${resourceStatusHTML()}${banner()}${content}</main>
-    <nav class="bottom-nav">${nav.map(([view, glyph, label]) => `<button data-view="${view}" class="${state.view === view ? "active" : ""}">${icon(glyph)}<span>${label}</span></button>`).join("")}</nav>
+    <nav class="bottom-nav">${mobileNav.map(([view, glyph, label]) => `<button data-view="${view}" class="${state.view === view ? "active" : ""}">${icon(glyph)}<span>${label}</span></button>`).join("")}</nav>
   </div>`;
 }
 
@@ -1561,6 +1672,7 @@ function advancedSettingsView(): string {
     <section class="advanced-tools-grid">
       <article class="panel advanced-tool-card"><div>${icon("bot")}<span><strong>提示词</strong><small>查看和维护 AHA2 的提示词模板</small></span></div><button type="button" data-view="prompts">进入提示词设置</button></article>
       <article class="panel advanced-tool-card"><div>${icon("sync")}<span><strong>同步</strong><small>配置设备同步、检查差异与冲突</small></span></div><button type="button" data-view="sync">进入同步设置</button></article>
+      <article class="panel advanced-tool-card"><div>${icon("proxy")}<span><strong>代理</strong><small>管理订阅、节点和连接状态</small></span></div><button type="button" data-view="proxy">进入代理设置</button></article>
     </section>
     <section class="panel account-security-panel agent-api-settings-panel">
       <div class="panel-head"><strong>Agent API 访问地址</strong><span>${escapeHTML(agentAPI.effective_url || "未配置")}</span></div>
@@ -1630,6 +1742,44 @@ function workspaceTakeoverDialog(): string {
 
 const TASK_STATUS_FILTERS = ["draft", "active", "waiting_user", "preparing", "queued", "running", "completed", "failed", "blocked"];
 
+interface TaskFilterOption {
+  value: string;
+  label: string;
+  count: number;
+}
+
+function taskFilterSelection(kind: TaskFilterKind): Set<string> {
+  if (kind === "project") return state.taskProjectFilters;
+  if (kind === "status") return state.taskStatusFilters;
+  return state.taskDeviceFilters;
+}
+
+function taskFilterPopover(
+  kind: TaskFilterKind,
+  label: string,
+  allLabel: string,
+  options: TaskFilterOption[],
+): string {
+  const selected = taskFilterSelection(kind);
+  const selectedLabels = options.filter(option => selected.has(option.value)).map(option => option.label);
+  const summary = selected.size === 0
+    ? allLabel
+    : selectedLabels.length === 1
+      ? selectedLabels[0]
+      : `已选 ${selected.size} 项`;
+  const rows = options.map(option => `<label class="task-filter-option" title="${escapeHTML(option.label)}">
+    <input type="checkbox" data-task-filter-option="${kind}" value="${escapeHTML(option.value)}" ${selected.has(option.value) ? "checked" : ""}>
+    <span><strong>${escapeHTML(option.label)}</strong><small>${option.count}</small></span>
+  </label>`).join("");
+  return `<details class="task-filter-popover" data-task-filter="${kind}" ${state.taskOpenFilter === kind ? "open" : ""}>
+    <summary class="task-filter-trigger" title="按${label}筛选">${icon("filter")}<span><small>${label}</small><strong>${escapeHTML(summary)}</strong></span></summary>
+    <div class="task-filter-menu">
+      <header><strong>${label}筛选</strong><button type="button" data-task-filter-clear="${kind}" ${selected.size ? "" : "disabled"}>全部</button></header>
+      <div>${rows || `<div class="empty">暂无可选项</div>`}</div>
+    </div>
+  </details>`;
+}
+
 function taskCardHtml(task: Task): string {
   const project = state.projects.find(item => item.id === task.project_id);
   const ws = state.workspaces.find(item => item.id === task.workspace_id);
@@ -1654,18 +1804,29 @@ function taskCardHtml(task: Task): string {
 
 function tasksView(): string {
   if (state.selectedTask) return taskDetailView(state.selectedTask);
-  const projectOptions = state.projects.map(item => `<option value="${item.id}" ${item.id === state.taskProjectFilter ? "selected" : ""}>${escapeHTML(item.name)}</option>`).join("");
-  const statusOptions = TASK_STATUS_FILTERS.map(status => `<option value="${status}" ${status === state.taskStatusFilter ? "selected" : ""}>${statusLabel(status)}</option>`).join("");
-  const filtered = state.tasks.filter(item =>
-    (!state.taskProjectFilter || item.project_id === state.taskProjectFilter) &&
-    (!state.taskStatusFilter || item.status === state.taskStatusFilter)
-  );
+  const projectCounts = new Map<string, number>();
+  const statusCounts = new Map<string, number>();
+  for (const task of state.tasks) {
+    projectCounts.set(task.project_id, (projectCounts.get(task.project_id) || 0) + 1);
+    statusCounts.set(task.status, (statusCounts.get(task.status) || 0) + 1);
+  }
+  const projectOptions = state.projects.map(item => ({value: item.id, label: item.name, count: projectCounts.get(item.id) || 0}));
+  const statusValues = [...new Set([...TASK_STATUS_FILTERS, ...state.tasks.map(item => item.status)])];
+  const statusOptions = statusValues.map(status => ({value: status, label: statusLabel(status), count: statusCounts.get(status) || 0}));
+  const deviceOptions = taskDeviceFilterOptions(state.tasks);
+  const filtered = state.tasks.filter(item => taskMatchesFilters(
+    item,
+    state.taskProjectFilters,
+    state.taskStatusFilters,
+    state.taskDeviceFilters,
+  ));
   const rows = filtered.map(item => taskCardHtml(item)).join("");
   return shell(`<section class="page">
     ${pageHead("任务", "Task 是长期目标，每条用户输入创建一个独立 Turn。", `<button data-dialog="task">${icon("plus")}创建任务</button>`)}
     <div class="task-filters">
-      <select id="task-filter-project" title="按项目筛选"><option value="">全部项目</option>${projectOptions}</select>
-      <select id="task-filter-status" title="按状态筛选"><option value="">全部状态</option>${statusOptions}</select>
+      ${taskFilterPopover("project", "项目", "全部项目", projectOptions)}
+      ${taskFilterPopover("status", "状态", "全部状态", statusOptions)}
+      ${taskFilterPopover("device", "设备", "全部设备", deviceOptions)}
       <span class="task-count">${filtered.length} / ${state.tasks.length}</span>
     </div>
     <div class="task-list">${rows || `<div class="empty">${state.tasks.length ? "没有符合条件的任务" : "创建第一个任务开始执行。"}</div>`}${loadMoreHTML("tasks")}</div>
@@ -1926,6 +2087,9 @@ function taskFailureBannerHtml(detail: TaskDetail): string {
 }
 
 function taskCtxHtml(): string {
+  if (state.selectedTask?.task.status === "draft") {
+    return `<div class="task-tool-placeholder">${icon("context")}<h3>尚无 Context</h3><p>启动任务后将生成 Agent Context。</p></div>`;
+  }
   const value = state.taskContext;
   if (!value) return `<div class="ctx-loading">${icon("refresh")}正在加载 Context...</div>`;
   const context = value.context || {};
@@ -1937,6 +2101,7 @@ function taskCtxHtml(): string {
 }
 
 function taskDetailView(detail: TaskDetail): string {
+  const loadingDetail = state.taskDetailLoading;
   const archivedReadOnly = detail.task.channel_retired === true || detail.task.read_only_reason === "channel_retired";
   const remoteReadOnly = Boolean(detail.task.read_only && !archivedReadOnly);
   const readOnly = archivedReadOnly || remoteReadOnly;
@@ -1949,14 +2114,14 @@ function taskDetailView(detail: TaskDetail): string {
   const project = state.projects.find(item => item.id === detail.task.project_id);
   const workspace = state.workspaces.find(item => item.id === detail.task.workspace_id);
   const taskMeta = `${project?.name || "-"} · ${workspace?.name || "-"} · ${detail.task.collaboration_mode || "auto"} · ${detail.task.max_agents || 3} Agents`;
-  const composerDisabled = Boolean(runtimeError || readOnly || draft);
+  const composerDisabled = Boolean(loadingDetail || runtimeError || readOnly || draft);
   const chat = `<section class="conversation">
     ${archivedReadOnly ? `<div class="task-failure-banner remote-readonly"><strong>渠道归档只读</strong><span>该渠道实例已归档</span><small>历史内容可查看和导出，不能继续执行或修改</small></div>` : remoteReadOnly ? `<div class="task-failure-banner remote-readonly"><strong>其他设备的只读 Task</strong><span>所属设备：${escapeHTML(detail.task.owner_device_id || "未知")}</span><small>可查看同步历史，不能在本机执行或修改</small><div class="remote-readonly-actions"><button type="button" id="takeover-task">${icon("copy")}接管到本机</button><button type="button" class="danger" data-retire-remote-task="${detail.task.id}">${icon("close")}移除孤立任务</button></div></div>` : ""}
     <div id="task-failure-slot">${taskFailureBannerHtml(detail)}</div>
     ${draft ? `<div class="task-failure-banner task-draft-banner"><strong>任务尚未启动</strong><span>可以先配置 Agent、Skill 和硬件调试，准备好后再启动。</span><button type="button" id="start-task" class="primary">${icon("play")}启动任务</button></div>` : ""}
-    <div class="messages" id="conversation-list">${conversationListHtml()}</div>
+    <div class="messages" id="conversation-list">${loadingDetail ? `<div class="task-detail-loading" role="status">${icon("spinner", true)}<strong>正在打开任务</strong><small>加载最近 ${initialConversationPageSize} 条消息…</small></div>` : conversationListHtml()}</div>
     <div id="agent-turn-slot">${renderAgentTurnCard(detail, state.taskRealtimeState, state.taskContext?.context.metrics)}</div>
-    <form id="message-form" class="composer${composerDisabled ? " runtime-invalid" : ""}">${composerDisabled ? `<div class="composer-runtime-warning">${escapeHTML(draft ? "先启动任务后再发送消息" : archivedReadOnly ? "渠道实例已归档，此 Task 只读" : remoteReadOnly ? "该 Task 属于其他设备，本机只读" : runtimeError)}</div>` : ""}${renderComposerTools(detail, state.selectedTaskAgent, state.taskCategories, state.taskConversation.length)}<div id="slash-command-menu" class="slash-command-menu" ${matchingTaskSlashCommands(state.taskDraft).length ? "" : "hidden"}>${slashCommandMenuHtml(state.taskDraft)}</div>${renderAttachmentComposer(composerDisabled)}<textarea name="content" placeholder="${escapeHTML(draft ? "启动任务后可发送消息" : readOnly ? "只读 Task" : runtimeError || (activeTurn ? `${state.selectedTaskAgent} 正在执行，发送后将排队` : taskFailed ? "输入消息重试，或输入 /reopen" : `发送给 ${state.selectedTaskAgent}，输入 / 查看命令`))}" ${composerDisabled ? "disabled" : ""}>${escapeHTML(state.taskDraft)}</textarea><button id="message-send" class="primary" aria-label="发送" ${composerDisabled ? "disabled" : ""}>${icon("send")}<span class="send-label">发送</span></button></form>
+    <form id="message-form" class="composer${composerDisabled && !loadingDetail ? " runtime-invalid" : ""}">${composerDisabled && !loadingDetail ? `<div class="composer-runtime-warning">${escapeHTML(draft ? "先启动任务后再发送消息" : archivedReadOnly ? "渠道实例已归档，此 Task 只读" : remoteReadOnly ? "该 Task 属于其他设备，本机只读" : runtimeError)}</div>` : ""}${renderComposerTools(detail, state.selectedTaskAgent, state.taskCategories, state.taskConversation.length)}<div id="slash-command-menu" class="slash-command-menu" ${matchingTaskSlashCommands(state.taskDraft).length ? "" : "hidden"}>${slashCommandMenuHtml(state.taskDraft)}</div>${renderAttachmentComposer(composerDisabled)}<textarea name="content" placeholder="${escapeHTML(loadingDetail ? "正在加载任务…" : draft ? "启动任务后可发送消息" : readOnly ? "只读 Task" : runtimeError || (activeTurn ? `${state.selectedTaskAgent} 正在执行，发送后将排队` : taskFailed ? "输入消息重试，或输入 /reopen" : `发送给 ${state.selectedTaskAgent}，输入 / 查看命令`))}" ${composerDisabled ? "disabled" : ""}>${escapeHTML(state.taskDraft)}</textarea><button id="message-send" class="primary" aria-label="发送" ${composerDisabled ? "disabled" : ""}>${icon("send")}<span class="send-label">发送</span></button></form>
   </section>`;
   const toolLayout = state.taskTool ? ` task-tool-open task-tool-${state.taskToolMode}` : "";
   return shell(`<section class="task-screen">
@@ -2004,6 +2169,17 @@ function requestConversationBottom(): void {
 function cancelConversationBottomPin(): void {
   conversationBottomPinVersion++;
   conversationAutoScrollBlockedUntil = Date.now() + 800;
+  composerFocusWasAtBottom = false;
+}
+
+function conversationIsAtBottom(list: HTMLElement): boolean {
+  return list.scrollHeight - list.scrollTop - list.clientHeight < 80;
+}
+
+function restoreComposerConversationBottom(): void {
+  if (!composerFocusWasAtBottom || !document.body.classList.contains("composer-focused")) return;
+  const list = document.querySelector<HTMLElement>("#conversation-list");
+  if (list) stabilizeConversationBottom(list);
 }
 
 function shouldAutoScrollConversation(wasAtBottom: boolean): boolean {
@@ -2011,7 +2187,7 @@ function shouldAutoScrollConversation(wasAtBottom: boolean): boolean {
 }
 
 function stabilizeConversationBottom(list: HTMLElement): void {
-  const pinVersion = conversationBottomPinVersion;
+  const pinVersion = ++conversationBottomPinVersion;
   const apply = () => {
     if (pinVersion !== conversationBottomPinVersion || !list.isConnected) return;
     list.scrollTop = list.scrollHeight;
@@ -2021,6 +2197,9 @@ function stabilizeConversationBottom(list: HTMLElement): void {
     apply();
     window.requestAnimationFrame(apply);
   });
+  for (const delay of [80, 240, 600]) {
+    window.setTimeout(apply, delay);
+  }
   list.querySelectorAll<HTMLImageElement>("img").forEach(image => {
     if (!image.complete) image.addEventListener("load", apply, {once: true});
   });
@@ -2164,7 +2343,7 @@ function render(): void {
       })}${loadMoreHTML("knowledge")}`),
       prompts: () => advancedSubview(renderPromptAdmin()),
       proxy: () => shell(renderProxySettings(state.proxySettings, state.managedProxy)),
-      sync: () => advancedSubview(renderSyncSettings(state.syncSettings, state.syncState, state.syncPending, state.syncConflicts, state.syncPreview, state.syncRun)),
+      sync: () => advancedSubview(renderSyncSettings(state.syncSettings, state.syncState, state.syncPending, state.syncConflicts, state.syncPreview, state.syncRun, state.syncSettingsReady)),
       advanced: advancedSettingsView,
     };
     content = views[state.view]();
@@ -2279,8 +2458,11 @@ function bindCommon(): void {
   bindSyncSettings({
     settings: state.syncSettings,
     refresh: async () => {
-      const [settings, status, conflicts, preview] = await Promise.all([api.syncSettings(), api.syncStatus(), api.syncConflicts(), api.syncPreview()]);
-      state.syncSettings = settings.sync; state.syncState = status.state; state.syncPending = status.pending || 0; state.syncRun = status.run || state.syncRun; state.syncConflicts = conflicts.conflicts || []; state.syncPreview = preview.preview;
+      const [settings, status, conflicts] = await Promise.all([api.syncSettings(), api.syncStatus(), api.syncConflicts()]);
+      state.syncSettings = settings.sync; state.syncSettingsReady = true; state.syncState = status.state; state.syncPending = status.pending || 0; state.syncRun = status.run || state.syncRun; state.syncConflicts = conflicts.conflicts || [];
+      render();
+      const preview = await api.syncPreview();
+      state.syncPreview = preview.preview;
       render();
     },
 	pollStatus: async () => {
@@ -2320,6 +2502,7 @@ function bindCommon(): void {
   bindRuntimeFields("takeover-task", state.models, state.codexAccounts, syncTakeoverTaskBackend);
   bindRuntimeFields("agent-config", state.models, state.codexAccounts, syncAgentConfigFields, true);
   document.querySelectorAll<HTMLElement>("[data-view]").forEach(button => button.addEventListener("click", () => {
+    cancelTaskOpen();
     state.view = button.dataset.view as View;
     state.selectedTask = null;
     state.selectedProject = null;
@@ -2608,14 +2791,31 @@ function bindCommon(): void {
       render();
     });
   }));
-  document.querySelector("#task-filter-project")?.addEventListener("change", event => {
-    state.taskProjectFilter = (event.target as HTMLSelectElement).value;
+  document.querySelectorAll<HTMLDetailsElement>("[data-task-filter]").forEach(details => details.addEventListener("toggle", () => {
+    const kind = details.dataset.taskFilter as TaskFilterKind;
+    if (details.open) {
+      state.taskOpenFilter = kind;
+      document.querySelectorAll<HTMLDetailsElement>("[data-task-filter]").forEach(other => {
+        if (other !== details) other.open = false;
+      });
+    } else if (state.taskOpenFilter === kind) {
+      state.taskOpenFilter = "";
+    }
+  }));
+  document.querySelectorAll<HTMLInputElement>("[data-task-filter-option]").forEach(input => input.addEventListener("change", () => {
+    const kind = input.dataset.taskFilterOption as TaskFilterKind;
+    const selected = taskFilterSelection(kind);
+    if (input.checked) selected.add(input.value);
+    else selected.delete(input.value);
+    state.taskOpenFilter = kind;
     render();
-  });
-  document.querySelector("#task-filter-status")?.addEventListener("change", event => {
-    state.taskStatusFilter = (event.target as HTMLSelectElement).value;
+  }));
+  document.querySelectorAll<HTMLButtonElement>("[data-task-filter-clear]").forEach(button => button.addEventListener("click", () => {
+    const kind = button.dataset.taskFilterClear as TaskFilterKind;
+    taskFilterSelection(kind).clear();
+    state.taskOpenFilter = kind;
     render();
-  });
+  }));
   document.querySelectorAll<HTMLElement>("[data-edit-task-title]").forEach(button => button.addEventListener("click", async event => {
     event.stopPropagation();
     const taskID = button.dataset.editTaskTitle!;
@@ -2781,19 +2981,11 @@ function bindCommon(): void {
 	  if ((event.target as HTMLElement).closest(".task-card-actions")) return;
 	  const taskID = button.dataset.task!;
 	  if (openingTaskID) return;
-	  openingTaskID = taskID;
-	  button.classList.add("opening");
-	  button.setAttribute("aria-busy", "true");
 	  try {
 		await openTask(taskID);
-		render();
 	  } catch (error) {
 		setMessage("error", error instanceof Error ? error.message : String(error));
 		render();
-	  } finally {
-		openingTaskID = "";
-		button.classList.remove("opening");
-		button.removeAttribute("aria-busy");
 	  }
 	});
   });
@@ -2838,6 +3030,7 @@ function bindCommon(): void {
     setMessage("notice", `${agentID} 配置已更新，下一个 Turn 生效`);
   });
   document.querySelector("#back-tasks")?.addEventListener("click", () => {
+    cancelTaskOpen();
     state.selectedTask = null;
     closeEvents();
     render();
@@ -3022,8 +3215,15 @@ function bindCommon(): void {
     syncTaskComposerState(textarea);
   });
   document.querySelector<HTMLTextAreaElement>("#message-form textarea")?.addEventListener("focus", () => {
+    const list = document.querySelector<HTMLElement>("#conversation-list");
+    composerFocusWasAtBottom = Boolean(list && conversationIsAtBottom(list));
     document.body.classList.add("composer-focused");
     syncVisualViewportHeight();
+    restoreComposerConversationBottom();
+    window.setTimeout(() => {
+      syncVisualViewportHeight();
+      restoreComposerConversationBottom();
+    }, 180);
     syncTaskComposerState(document.querySelector<HTMLTextAreaElement>("#message-form textarea"));
   });
   document.querySelector<HTMLTextAreaElement>("#message-form textarea")?.addEventListener("keydown", event => {
@@ -3073,6 +3273,7 @@ function bindCommon(): void {
     window.setTimeout(() => {
       if (!(document.activeElement instanceof HTMLTextAreaElement && document.activeElement.closest("#message-form"))) {
         document.body.classList.remove("composer-focused");
+        composerFocusWasAtBottom = false;
         const menu = document.querySelector<HTMLElement>("#slash-command-menu");
         if (menu) menu.hidden = true;
       }
@@ -3099,6 +3300,11 @@ function bindCommon(): void {
     }
     state.taskTool = tool;
     if (tool !== "context" || !state.selectedTask) {
+      render();
+      return;
+    }
+    if (state.selectedTask.task.status === "draft") {
+      state.taskContext = null;
       render();
       return;
     }
@@ -3481,8 +3687,14 @@ function closeGlobalEvents(): void {
 
 syncVisualViewportHeight();
 window.addEventListener("resize", syncVisualViewportHeight);
-window.visualViewport?.addEventListener("resize", syncVisualViewportHeight);
-window.visualViewport?.addEventListener("scroll", syncVisualViewportHeight);
+window.visualViewport?.addEventListener("resize", () => {
+  syncVisualViewportHeight();
+  restoreComposerConversationBottom();
+});
+window.visualViewport?.addEventListener("scroll", () => {
+  syncVisualViewportHeight();
+  restoreComposerConversationBottom();
+});
 window.setInterval(updateSystemUptime, 30_000);
 render();
 void bootstrap();

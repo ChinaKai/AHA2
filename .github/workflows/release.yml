@@ -66,11 +66,12 @@ jobs:
         shell: powershell
         run: |
           $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          $webVersion = "v$version.$((Get-Date).ToUniversalTime().ToString('yyyyMMdd')).$((git rev-parse --short=12 HEAD).Trim())"
           New-Item -ItemType Directory -Force dist\package-input | Out-Null
           $env:CGO_ENABLED = '0'
           $env:GOOS = 'windows'
           $env:GOARCH = 'amd64'
-          go build -trimpath -ldflags "-s -w -X main.version=$version" -o dist\package-input\aha2.exe .\cmd\aha
+          go build -trimpath -ldflags "-s -w -X main.version=$version -X main.webVersion=$webVersion" -o dist\package-input\aha2.exe .\cmd\aha
           go build -trimpath -ldflags "-s -w -H windowsgui -X main.version=$version" -o dist\package-input\aha2-tray.exe .\cmd\aha-tray
 
       - name: Install Inno Setup 6
@@ -134,8 +135,9 @@ jobs:
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
+          web_version="$(bash scripts/web-version.sh "$version")"
           mkdir -p dist/package-input
-          CGO_ENABLED=0 GOOS=linux GOARCH="${{ matrix.goarch }}" go build -trimpath -ldflags="-s -w -X main.version=$version" -o "dist/package-input/aha2-${{ matrix.goarch }}" ./cmd/aha
+          CGO_ENABLED=0 GOOS=linux GOARCH="${{ matrix.goarch }}" go build -trimpath -ldflags="-s -w -X main.version=$version -X main.webVersion=$web_version" -o "dist/package-input/aha2-${{ matrix.goarch }}" ./cmd/aha
           CGO_ENABLED=0 GOOS=linux GOARCH="${{ matrix.goarch }}" go build -trimpath -ldflags="-s -w" -o "dist/package-input/aha-sync-${{ matrix.goarch }}" ./cmd/aha-sync
 
       - name: Build DEB and RPM
@@ -187,8 +189,9 @@ jobs:
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
+          web_version="$(bash scripts/web-version.sh "$version")"
           mkdir -p dist/package-input
-          CGO_ENABLED=0 GOOS=darwin GOARCH="${{ matrix.goarch }}" go build -trimpath -ldflags="-s -w -X main.version=$version" -o "dist/package-input/aha2-${{ matrix.goarch }}" ./cmd/aha
+          CGO_ENABLED=0 GOOS=darwin GOARCH="${{ matrix.goarch }}" go build -trimpath -ldflags="-s -w -X main.version=$version -X main.webVersion=$web_version" -o "dist/package-input/aha2-${{ matrix.goarch }}" ./cmd/aha
 
       - name: Build macOS PKG
         shell: bash

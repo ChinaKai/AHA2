@@ -5,6 +5,7 @@ dist/
 coverage/
 web/node_modules/
 web/dist/
+web/.edge-profile-*/
 !internal/webassets/dist/
 internal/webassets/dist/*
 !internal/webassets/dist/.gitkeep

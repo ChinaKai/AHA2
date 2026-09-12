@@ -4,6 +4,9 @@ set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 go_bin="${GO_BIN:-$repo/.tools/go/bin/go}"
 output="${1:-$repo/dist/aha2}"
+base_version="${VERSION:-$(git -C "$repo" describe --tags --abbrev=0 2>/dev/null || printf 'v0.0.0')}"
+base_version="${base_version#v}"
+web_version="$(bash "$repo/scripts/web-version.sh" "$base_version")"
 
 mkdir -p "$repo/internal/webassets/dist" "$(dirname "$output")"
 if [[ -d "$repo/web/dist" ]]; then
@@ -13,5 +16,5 @@ fi
 
 cd "$repo"
 "$go_bin" test ./...
-CGO_ENABLED=0 "$go_bin" build -trimpath -ldflags="-s -w" -o "$output" ./cmd/aha
-echo "Built $output"
+CGO_ENABLED=0 "$go_bin" build -trimpath -ldflags="-s -w -X main.version=$base_version -X main.webVersion=$web_version" -o "$output" ./cmd/aha
+echo "Built $output ($web_version)"

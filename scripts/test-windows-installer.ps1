@@ -106,7 +106,7 @@ try {
 
 $userDeployPath = Join-Path $repo "scripts\deploy-windows-user.ps1"
 $userDeploy = Get-Content -Raw -Encoding UTF8 -LiteralPath $userDeployPath
-foreach ($contract in @("Per-user install directory must stay under LOCALAPPDATA", "-PerUser", "ElevationRequired=`$false", "AHA2-Setup-User-x64.exe", "Wait-AHA2Health", "Get-FileHash", "AHA2 User", "AHA2 User Update", "DetachedWorker", "New-ScheduledTaskAction", "RunLevel Limited", "Stop-AHA2ProcessTrees", "taskkill.exe", "/T", "/SKIPUSERTASK=1", "user-deploy-result.json")) {
+foreach ($contract in @("ProviderPath", "-WorkingDirectory `$install", "AllowCustomUserWritableInstallDir", "UpdateExistingInstallInPlace", "existing-install-in-place", "Custom install directory is not writable", "WriteAccessVerified", "-PerUser", "ElevationRequired=`$false", "AHA2-Setup-User-x64.exe", "Wait-AHA2Health", "Get-FileHash", "AHA2 User", "AHA2 User Update", "DetachedWorker", "New-ScheduledTaskAction", "RunLevel Limited", "Stop-AHA2ProcessTrees", "taskkill.exe", "/T", "/SKIPUSERTASK=1", "user-deploy-result.json")) {
     if (-not $userDeploy.Contains($contract)) {
         throw "Per-user deployment contract is missing: $contract"
     }
@@ -118,6 +118,19 @@ if ($stopBeforeBackupIndex -lt 0 -or $databaseBackupIndex -lt 0 -or $stopBeforeB
     throw "Per-user deployment must stop the complete AHA2 process tree before copying SQLite backup files."
 }
 & $userDeployPath -RepoPath $repo -InputExe (Join-Path $repo "go.mod") -InputTrayExe (Join-Path $repo "go.mod") -InstallDir (Join-Path $env:LOCALAPPDATA "Programs\AHA2-validation") -DataDir (Join-Path ([IO.Path]::GetTempPath()) "AHA2 User Data") -ValidateOnly
+$customInstallValidation = Join-Path $repo ".tools\AHA2 Custom Install Validation"
+New-Item -ItemType Directory -Path $customInstallValidation -Force | Out-Null
+$previousLocalAppData = $env:LOCALAPPDATA
+try {
+    $env:LOCALAPPDATA = Join-Path $repo ".tools\fake-local-app-data"
+    $customValidation = & $userDeployPath -RepoPath $repo -InputExe (Join-Path $repo "go.mod") -InputTrayExe (Join-Path $repo "go.mod") -InstallDir $customInstallValidation -DataDir (Join-Path ([IO.Path]::GetTempPath()) "AHA2 User Data") -AllowCustomUserWritableInstallDir -ValidateOnly
+    if ($customValidation.Mode -ne "per-user-custom" -or -not $customValidation.WriteAccessVerified) {
+        throw "Custom user-writable deployment validation did not report the expected mode."
+    }
+} finally {
+    $env:LOCALAPPDATA = $previousLocalAppData
+    Remove-Item -LiteralPath $customInstallValidation -Recurse -Force -ErrorAction SilentlyContinue
+}
 
 $unsafeListenRejected = $false
 try {
@@ -199,7 +212,7 @@ $workflow = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $repo ".gith
 foreach ($contract in @(
     "runs-on: windows-latest", "cmd\aha-tray", "aha2-tray.exe", "-H windowsgui", "build-windows-installer.ps1", "-InputTrayExe",
 	"AHA2-Setup-x64.exe", "AHA2-Setup-User-x64.exe", "build-feishu-plugin.sh", "build-linux-packages.sh", "build-linux-sync-packages.sh", "aha2-sync_", "build-macos-packages.sh",
-    "ubuntu-24.04-arm", "SHA256SUMS", "merge-multiple: true", "pattern: package-*", "main.version=", "gh release create"
+    "ubuntu-24.04-arm", "SHA256SUMS", "merge-multiple: true", "pattern: package-*", "main.version=", "main.webVersion=", "gh release create"
 )) {
     if (-not $workflow.Contains($contract)) {
         throw "Release workflow contract is missing: $contract"
@@ -218,6 +231,12 @@ $localBuild = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $repo "scr
 foreach ($contract in @("./cmd/aha-tray", "aha2-tray-", "-H windowsgui")) {
     if (-not $localBuild.Contains($contract)) {
         throw "Local cross-build contract is missing: $contract"
+    }
+}
+$buildAndDeploy = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $repo "scripts\build-and-deploy-windows-user.ps1")
+foreach ($contract in @("ProviderPath", "candidateLinuxPath", "main.webVersion=", "AllowCustomUserWritableInstallDir", "UpdateExistingInstallInPlace")) {
+    if (-not $buildAndDeploy.Contains($contract)) {
+        throw "Windows build-and-deploy contract is missing: $contract"
     }
 }
 Write-Output "Windows tray installer and Release workflow contracts are valid."

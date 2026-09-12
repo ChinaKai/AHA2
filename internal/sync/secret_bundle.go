@@ -366,6 +366,9 @@ func ApplySecretBundle(ctx context.Context, database *store.Store, secrets Secre
 			return errors.New("invalid provider secret entry")
 		}
 		provider, err := database.Provider(ctx, entry.ID)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
 		if err != nil {
 			return fmt.Errorf("load provider %s: %w", entry.ID, err)
 		}
@@ -385,6 +388,9 @@ func ApplySecretBundle(ctx context.Context, database *store.Store, secrets Secre
 			return errors.New("invalid env secret entry")
 		}
 		group, err := database.EnvGroup(ctx, entry.ID)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
 		if err != nil {
 			return fmt.Errorf("load env group %s: %w", entry.ID, err)
 		}
@@ -459,6 +465,9 @@ func ApplySecretBundle(ctx context.Context, database *store.Store, secrets Secre
 		}
 	}
 	if len(writes) == 0 {
+		if len(bundle.Providers)+len(bundle.EnvGroups)+len(bundle.CodexAccounts) > 0 {
+			return nil
+		}
 		return errors.New("secret bundle contains no secrets")
 	}
 	if err := secrets.PutMany(writes); err != nil {

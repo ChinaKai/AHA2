@@ -2,6 +2,7 @@ package sync
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"path/filepath"
@@ -445,6 +446,30 @@ func TestApplyPreservesLocalProviderCredential(t *testing.T) {
 	}
 	if got.Name != "remote" || got.CredentialRef != "secret/local" || !got.CredentialConfigured {
 		t.Fatalf("provider=%#v", got)
+	}
+}
+
+func TestApplyKnowledgeSkipsTombstonedProjectAndWaitsForUnknownProject(t *testing.T) {
+	ctx, db, now := context.Background(), businessStore(t), time.Now().UTC()
+	entry := domain.KnowledgeEntry{ID: "stale-knowledge", Scope: "project", ProjectID: "deleted-project", Type: "practice", Title: "stale", Body: "stale", Revision: 1, CreatedAt: now, UpdatedAt: now}
+	raw, _ := json.Marshal(entry)
+	object := domain.SyncObject{Type: TypeKnowledge, ID: entry.ID, Operation: "upsert", Payload: raw}
+	if _, err := db.ApplySyncTombstone(ctx, TypeProject, entry.ProjectID, "delete-project", timeVersion(now), now); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyBusinessObject(ctx, db, object); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Knowledge(ctx, entry.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("stale knowledge was imported: %v", err)
+	}
+
+	entry.ID, entry.ProjectID = "waiting-knowledge", "unknown-project"
+	object.ID = entry.ID
+	object.Payload, _ = json.Marshal(entry)
+	var dependency *dependencyError
+	if err := applyBusinessObject(ctx, db, object); !errors.As(err, &dependency) {
+		t.Fatalf("unknown project error=%v", err)
 	}
 }
 

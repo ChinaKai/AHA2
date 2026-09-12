@@ -2,6 +2,7 @@
 param(
     [Parameter(Mandatory = $true)][string]$Version,
     [Parameter(Mandatory = $true)][string]$DataDir,
+    [string]$WebVersion = "",
     [string]$RepoPath = "",
     [string]$InstallDir = (Join-Path $env:LOCALAPPDATA "Programs\AHA2"),
     [string]$Distro = "",
@@ -12,6 +13,8 @@ param(
     [switch]$AllowInsecureAgentAPI,
     [int]$MinimumFreeGB = 3,
     [string]$ResultPath = "",
+    [switch]$AllowCustomUserWritableInstallDir,
+    [switch]$UpdateExistingInstallInPlace,
     [switch]$DeployOnly,
     [switch]$BuildOnly,
     [switch]$ValidateOnly
@@ -19,13 +22,17 @@ param(
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+$global:LASTEXITCODE = 0
 
 if ($DeployOnly -and $BuildOnly) { throw "DeployOnly and BuildOnly cannot be used together." }
 if ($MinimumFreeGB -lt 1) { throw "MinimumFreeGB must be at least 1." }
+$systemRoot = if ([string]::IsNullOrWhiteSpace($env:SystemRoot)) { "C:\Windows" } else { $env:SystemRoot }
+$powershellExecutable = Join-Path $systemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+$wslExecutable = Join-Path $systemRoot "System32\wsl.exe"
 
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 if ([string]::IsNullOrWhiteSpace($RepoPath)) { $RepoPath = Split-Path -Parent $scriptRoot }
-$repo = (Resolve-Path -LiteralPath $RepoPath).Path
+$repo = (Resolve-Path -LiteralPath $RepoPath).ProviderPath
 if (-not (Test-Path -LiteralPath (Join-Path $repo "go.mod") -PathType Leaf)) {
     throw "RepoPath is not an AHA2 repository: $repo"
 }
@@ -77,11 +84,11 @@ $resolvedDistro = ""
 $linuxRepo = ""
 if (-not $DeployOnly) {
     if (-not (Get-Command node.exe -ErrorAction SilentlyContinue)) { throw "node.exe was not found." }
-    if (-not (Get-Command wsl.exe -ErrorAction SilentlyContinue)) { throw "wsl.exe was not found." }
+    if (-not (Test-Path -LiteralPath $wslExecutable -PathType Leaf)) { throw "wsl.exe was not found." }
     if (-not (Test-Path -LiteralPath (Join-Path $repo ".tools\go\bin\go") -PathType Leaf)) {
         throw "Repository Linux Go toolchain was not found. Do not download another toolchain during deployment."
     }
-    $installedDistros = @(@(& wsl.exe -l -q 2>$null) |
+    $installedDistros = @(@(& $wslExecutable -l -q 2>$null) |
         ForEach-Object { ($_ -replace "`0", "").Trim() } |
         Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
     if ($LASTEXITCODE -ne 0 -or $installedDistros.Count -eq 0) { throw "No WSL distribution is available." }
@@ -93,7 +100,7 @@ if (-not $DeployOnly) {
             throw "WSL distribution '$Distro' was not found. Available: $($installedDistros -join ', ')"
         }
     }
-    $linuxRepo = ((& wsl.exe -d $resolvedDistro --cd $repo -- pwd) -join "").Trim()
+    $linuxRepo = ((& $wslExecutable -d $resolvedDistro --cd $repo -- pwd) -join "").Trim()
     if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($linuxRepo)) {
         throw "Could not translate the repository path for WSL."
     }
@@ -106,6 +113,17 @@ if (-not $DeployOnly) {
 
 $linuxGoCache = "$linuxRepo/.tools/gocache-linux"
 $linuxGoPath = "$linuxRepo/.tools/gopath-linux"
+$resolvedWebVersion = $WebVersion.Trim()
+if (-not $DeployOnly -and [string]::IsNullOrWhiteSpace($resolvedWebVersion)) {
+    $gitHash = ((& $wslExecutable -d $resolvedDistro --cd $linuxRepo -- git rev-parse --short=12 HEAD) -join "").Trim()
+    if ($LASTEXITCODE -ne 0 -or $gitHash -notmatch '^[0-9a-fA-F]{12}$') {
+        throw "Could not resolve the 12-character Git hash for the Web version."
+    }
+    $gitStatus = ((& $wslExecutable -d $resolvedDistro --cd $linuxRepo -- git status --porcelain) -join "`n").Trim()
+    if ($LASTEXITCODE -ne 0) { throw "Could not inspect the Git worktree state for the Web version." }
+    $dirtySuffix = if ([string]::IsNullOrWhiteSpace($gitStatus)) { "" } else { ".dirty" }
+    $resolvedWebVersion = "v$normalizedVersion.$([DateTime]::UtcNow.ToString('yyyyMMdd')).$gitHash$dirtySuffix"
+}
 function Invoke-WslGo([string]$WorkingDirectory, [string[]]$Arguments, [string[]]$EnvironmentEntries = @()) {
     $wslArguments = @("-d", $resolvedDistro, "--cd", $WorkingDirectory, "--", "env", "GOCACHE=$linuxGoCache", "GOPATH=$linuxGoPath")
     $wslArguments += $EnvironmentEntries
@@ -114,12 +132,13 @@ function Invoke-WslGo([string]$WorkingDirectory, [string[]]$Arguments, [string[]
     }
     $wslArguments += "$linuxRepo/.tools/go/bin/go"
     $wslArguments += $Arguments
-    Invoke-Native "wsl.exe" $wslArguments
+    Invoke-Native $wslExecutable $wslArguments
 }
 
 $summary = [ordered]@{
     Repository = $repo
     Version = $Version
+    WebVersion = $resolvedWebVersion
     Mode = if ($DeployOnly) { "deploy-only" } elseif ($BuildOnly) { "build-only" } else { "build-and-deploy" }
     Distro = $resolvedDistro
     InstallDir = [IO.Path]::GetFullPath($InstallDir)
@@ -156,7 +175,7 @@ if (-not $DeployOnly) {
     $windowsGoEnvironment = @("CGO_ENABLED=0", "GOOS=windows", "GOARCH=amd64")
     Invoke-Step "Build Windows server" {
         Invoke-WslGo -WorkingDirectory $linuxRepo -EnvironmentEntries $windowsGoEnvironment -Arguments @(
-            "build", "-trimpath", "-ldflags=-s -w -X main.version=$normalizedVersion",
+            "build", "-trimpath", "-ldflags=-s -w -X main.version=$normalizedVersion -X main.webVersion=$resolvedWebVersion",
             "-o", "dist/aha2-windows-amd64.exe", "./cmd/aha"
         )
     }
@@ -194,8 +213,36 @@ foreach ($candidate in @($serverOutput, $trayOutput)) {
 if (Test-Path -LiteralPath $pluginOutput -PathType Leaf) {
     Assert-WindowsPortableExecutable $pluginOutput
 }
-$serverVersion = (& $serverOutput version | Out-String).Trim()
-if ($LASTEXITCODE -ne 0) {
+$serverVersion = ""
+$candidateExitCode = 0
+if ($serverOutput.StartsWith("\\", [StringComparison]::Ordinal)) {
+    if (-not (Test-Path -LiteralPath $wslExecutable -PathType Leaf)) {
+        throw "wsl.exe is required to validate a deployment candidate stored in WSL."
+    }
+    if ($serverOutput -notmatch '^\\\\wsl(?:\.localhost|\$)\\([^\\]+)\\(.+)$') {
+        throw "Unsupported WSL candidate path: $serverOutput"
+    }
+    $candidateDistro = $Matches[1]
+    $candidateLinuxPath = "/" + ($Matches[2] -replace '\\', '/')
+    $versionProbeID = [Guid]::NewGuid().ToString("N")
+    $versionOutput = Join-Path $repo "dist\.candidate-version-$versionProbeID.txt"
+    $versionError = Join-Path $repo "dist\.candidate-version-$versionProbeID.err.txt"
+    try {
+        $versionProcess = Start-Process -FilePath $wslExecutable -ArgumentList @(
+            "-d", $candidateDistro, "--", $candidateLinuxPath, "version"
+        ) -RedirectStandardOutput $versionOutput -RedirectStandardError $versionError -Wait -PassThru -NoNewWindow
+        $candidateExitCode = $versionProcess.ExitCode
+        if (Test-Path -LiteralPath $versionOutput -PathType Leaf) {
+            $serverVersion = (Get-Content -Raw -LiteralPath $versionOutput).Replace("`0", "").Trim()
+        }
+    } finally {
+        Remove-Item -LiteralPath $versionOutput,$versionError -Force -ErrorAction SilentlyContinue
+    }
+} else {
+    $serverVersion = (& $serverOutput version | Out-String).Trim()
+    $candidateExitCode = $LASTEXITCODE
+}
+if ($candidateExitCode -ne 0) {
     throw "Could not read the deployment candidate version."
 }
 $expectedServerVersion = "aha2 $normalizedVersion"
@@ -234,12 +281,14 @@ if (-not [string]::IsNullOrWhiteSpace($AgentAPIURL)) {
     $deployArguments += @("-AgentAPIURL", $AgentAPIURL)
 }
 if ($AllowInsecureAgentAPI) { $deployArguments += "-AllowInsecureAgentAPI" }
+if ($AllowCustomUserWritableInstallDir) { $deployArguments += "-AllowCustomUserWritableInstallDir" }
+if ($UpdateExistingInstallInPlace) { $deployArguments += "-UpdateExistingInstallInPlace" }
 
 Invoke-Step "Validate per-user deployment" {
-    Invoke-Native "powershell.exe" ($deployArguments + "-ValidateOnly")
+    Invoke-Native $powershellExecutable ($deployArguments + "-ValidateOnly")
 }
 Invoke-Step "Deploy and restart AHA2" {
-    Invoke-Native "powershell.exe" $deployArguments
+    Invoke-Native $powershellExecutable $deployArguments
 }
 $summary.ResultPath = $ResultPath
 [pscustomobject]$summary

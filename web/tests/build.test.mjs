@@ -371,10 +371,10 @@ test("task list refreshes after round terminal events", async () => {
 test("read-only task history opens on the latest page and lazily loads older rows", async () => {
   const root = resolve(import.meta.dirname, "..");
   const script = await readFile(resolve(root, "dist", "app.js"), "utf8");
-  assert.match(script, /detail\.task\.read_only\s*\?\s*\[\s*"chat",\s*"update",\s*"error"\s*\]/);
-  assert.match(script, /agentConversation\(taskID,\s*"main",\s*\{\s*limit:\s*50,\s*categories\s*\}/);
+  assert.match(script, /summary\?\.read_only\s*\?\s*\[\s*"chat",\s*"update",\s*"error"\s*\]/);
+  assert.match(script, /agentConversation\(taskID,\s*"main",\s*\{\s*limit:\s*initialConversationPageSize,\s*categories\s*\}/);
   assert.match(script, /requestConversationBottom\(\)/);
-  assert.match(script, /detail\.task\.read_only\)\s*closeEvents\(\)/);
+  assert.match(script, /detail\.task\.read_only\s*\|\|\s*detail\.task\.status\s*===\s*"draft"\)\s*closeEvents\(\)/);
   assert.match(script, /currentTop\s*<\s*previousTop\s*&&\s*currentTop\s*<=\s*80/);
   assert.match(script, /loadingOlderConversation/);
 });
@@ -385,6 +385,7 @@ test("sidebar shows service version and live uptime", async () => {
   const styles = await readFile(resolve(root, "dist", "styles.css"), "utf8");
   assert.match(script, /class="system-meta"/);
   assert.match(script, /id="system-uptime"/);
+  assert.match(script, /state\.system\.web_version \|\| state\.system\.version \|\| "dev"/);
   assert.match(script, /setInterval\(updateSystemUptime,\s*30_000\)/);
   assert.match(styles, /\.system-meta/);
 });
@@ -564,6 +565,8 @@ test("built web contains responsive application", async () => {
   assert.match(script, /shouldAutoScrollConversation\(wasAtBottom\)/);
   assert.match(script, /conversationAutoScrollBlockedUntil\s*=\s*Date\.now\(\)\s*\+\s*800/);
   assert.match(script, /function stabilizeConversationBottom[\s\S]*requestAnimationFrame[\s\S]*image\.addEventListener\("load"/);
+  assert.match(script, /function stabilizeConversationBottom[\s\S]{0,120}const pinVersion = \+\+conversationBottomPinVersion/);
+  assert.match(script, /for \(const delay of \[\s*80,\s*240,\s*600\s*\]\)[\s\S]{0,80}setTimeout\(apply,\s*delay\)/);
   assert.match(script, /\[\s*"wheel",\s*"touchstart",\s*"pointerdown"\s*\][\s\S]*cancelConversationBottomPin/);
   assert.match(css, /\.messages \{[^}]*overflow-anchor:\s*none/);
   assert.match(script, /startTaskFallback/);
@@ -633,6 +636,9 @@ test("built web contains responsive application", async () => {
   assert.match(script, /data-view="prompts"/);
   assert.match(script, /data-view="sync"/);
   assert.match(script, /data-view="advanced">← 返回高级设置/);
+  assert.match(script, /const mobileNav = \[[\s\S]{0,100}\.\.\.nav\.slice\(0, 5\)[\s\S]{0,100}"advanced"[\s\S]{0,40}"shield"[\s\S]{0,40}"高级"/);
+  assert.match(script, /<nav class="bottom-nav">\$\{mobileNav\.map/);
+  assert.match(script, /data-view="proxy">进入代理设置/);
   assert.doesNotMatch(script, /\["prompts",\s*"bot",\s*"提示词"\]/);
   assert.doesNotMatch(script, /\["sync",\s*"sync",/);
   assert.match(css, /\.bottom-nav \{[^}]*grid-template-columns:\s*repeat\(6,1fr\)/);
@@ -756,10 +762,29 @@ test("built web contains responsive application", async () => {
   assert.match(script, /isSyncSettingsFormEditing/);
   assert.match(script, /state\.view === "sync"[\s\S]{0,250}state\.renderPending = true/);
   assert.match(script, /visualViewport/);
+  assert.match(script, /--visual-viewport-offset-top/);
+  assert.match(script, /--visual-viewport-bottom-inset/);
+  assert.match(script, /setTimeout\(\(\)\s*=>\s*\{[\s\S]{0,120}syncVisualViewportHeight\(\);[\s\S]{0,120}restoreComposerConversationBottom\(\);[\s\S]{0,80}\},\s*180\)/);
+  assert.match(script, /composerFocusWasAtBottom/);
+  assert.match(script, /restoreComposerConversationBottom/);
+  assert.match(script, /conversationIsAtBottom/);
+  assert.match(script, /navigationRestoring/);
+  assert.match(script, /if \(navigationRestoring\) return/);
+  assert.match(script, /navigationRestoring = false;\s*state\.loading = false;\s*if \(state\.selectedTask\) requestConversationBottom\(\);\s*render\(\)/);
+  assert.match(script, /project:\s*state\.selectedProject \|\| undefined/);
+  assert.match(script, /task:\s*state\.selectedTask\?\.task/);
+  assert.match(script, /const savedTask = state\.tasks\.find[\s\S]{0,80}\|\| saved\.task/);
+  assert.match(script, /const initialConversationPageSize = 20/);
+  assert.match(script, /function showTaskLoading/);
+  assert.match(script, /function cancelTaskOpen/);
+  assert.match(script, /taskDetailLoading/);
+  assert.match(script, /加载最近 \$\{initialConversationPageSize\} 条消息/);
+  assert.match(css, /\.task-detail-loading/);
   assert.match(script, /task-view-active/);
   assert.match(api, /cache: "no-store"/);
   assert.match(script, /addEventListener\("heartbeat"/);
   assert.match(css, /body\.composer-focused \.composer-target-wrap/);
+  assert.match(css, /body\.composer-focused \.task-screen \{[^}]*position:\s*fixed[^}]*top:\s*var\(--visual-viewport-offset-top\)[^}]*bottom:\s*var\(--visual-viewport-bottom-inset\)/);
   assert.match(css, /body\.task-view-active/);
   assert.match(css, /overscroll-behavior: contain/);
   assert.match(index, /app\.js\?v=[a-f0-9]{12}/);
@@ -1397,6 +1422,13 @@ test("task creation supports manual draft and explicit start", async () => {
   assert.match(main, /name="start_mode" value="immediate"/);
   assert.match(main, /id="start-task"/);
   assert.match(main, /task\.status === "draft"/);
+  assert.match(main, /summary\?\.status === "draft"/);
+  assert.match(main, /state\.taskConversation = page\?\.conversation\.items \|\| \[\]/);
+  assert.match(main, /state\.taskContext = null/);
+  assert.match(main, /detail\.task\.read_only \|\| detail\.task\.status === "draft"\) closeEvents/);
+  assert.match(main, /state\.selectedTask\?\.task\.status === "draft"/);
+  assert.match(main, /尚无 Context/);
+  assert.match(main, /if \(state\.selectedTask\.task\.status === "draft"\) \{[\s\S]{0,160}state\.taskContext = null;[\s\S]{0,80}render\(\);[\s\S]{0,80}return;/);
   assert.match(api, /\/tasks\/\$\{encodeURIComponent\(id\)\}\/start/);
 });
 
@@ -1466,6 +1498,35 @@ test("task list protects clicks from live refresh and reports open failures", as
   assert.match(source, /while \(listRefreshQueued\)/);
 });
 
+test("task list filters combine multi-select project, status, and device choices", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const main = await readFile(resolve(root, "dist", "app.js"), "utf8");
+  const styles = await readFile(resolve(root, "dist", "styles.css"), "utf8");
+  const filters = await import(pathToFileURL(resolve(root, "dist", "task_filters.js")));
+  const local = {id: "local", project_id: "p1", status: "active", read_only: false};
+  const remoteA = {id: "remote-a", project_id: "p1", status: "completed", read_only: true, owner_device_id: "device-a"};
+  const remoteB = {id: "remote-b", project_id: "p2", status: "failed", read_only: true, owner_device_id: "device-b"};
+
+  assert.equal(filters.taskDeviceFilterKey(local), "local");
+  assert.equal(filters.taskDeviceFilterKey(remoteA), "remote:device-a");
+  assert.deepEqual(filters.taskDeviceFilterOptions([local, remoteA, remoteB]), [
+    {value: "local", label: "本机", count: 1},
+    {value: "remote:device-a", label: "device-a", count: 1},
+    {value: "remote:device-b", label: "device-b", count: 1},
+  ]);
+  assert.equal(filters.taskMatchesFilters(local, new Set(["p1"]), new Set(["active", "failed"]), new Set(["local"])), true);
+  assert.equal(filters.taskMatchesFilters(remoteA, new Set(["p1"]), new Set(["active", "failed"]), new Set()), false);
+  assert.equal(filters.taskMatchesFilters(remoteB, new Set(), new Set(["active", "failed"]), new Set(["remote:device-b"])), true);
+
+  for (const marker of ["taskProjectFilters", "taskStatusFilters", "taskDeviceFilters", "data-task-filter-option", "data-task-filter-clear"]) {
+    assert.match(main, new RegExp(marker));
+  }
+  assert.match(main, /taskDeviceFilters:\s*new Set\(\[\s*LOCAL_TASK_DEVICE_FILTER\s*\]\)/);
+  assert.match(main, /taskMatchesFilters/);
+  assert.match(styles, /\.task-filter-menu/);
+  assert.match(styles, /@media \(max-width: 760px\)[\s\S]*?\.task-filters \{[^}]*grid-template-columns:\s*repeat\(2,minmax\(0,1fr\)\)/);
+});
+
 test("stale knowledge action means keeping the current content", async () => {
   const root = resolve(import.meta.dirname, "..");
   const source = await readFile(resolve(root, "dist", "knowledge_workspace.js"), "utf8");
@@ -1486,13 +1547,12 @@ test("knowledge proposals keep three approval actions on one mobile row", async 
   assert.match(styles, /\.knowledge-proposal-full \.markdown-body \{[^}]*min-width:\s*0;[^}]*max-width:\s*100%;[^}]*overflow-wrap:\s*anywhere/);
 });
 
-test("sync settings use the five domain groups", async () => {
+test("sync settings put status first and omit the static domain explainer", async () => {
   const root = resolve(import.meta.dirname, "..");
   const {bindSyncSettings, isSyncSettingsFormEditing, renderSyncSettings, syncPreviewMessage, syncSettingsPayload} = await import(pathToFileURL(resolve(root, "dist", "sync_settings.js")));
   const html = renderSyncSettings({scope: "default", enabled: false, endpoint: "", device_id: "", device_name: "device", interval_seconds: 300, token_configured: false, passphrase_configured: false}, {scope: "default", cursor: "", last_error: ""}, 0, [], {upserts: 3, deletes: 2, remote_upserts: 4, remote_deletes: 1, pending: 0, conflicts: 0}, {running: true, phase: "pulling", completed: 5, total: 10});
-  assert.match(html, /sync-domain-grid/);
-  for (const label of ["项目", "任务", "知识库", "模型", "代理"]) assert.match(html, new RegExp(label));
-  assert.ok(html.indexOf("项目") < html.indexOf("任务") && html.indexOf("任务") < html.indexOf("知识库"));
+  assert.doesNotMatch(html, /sync-domain-grid|sync-dependency-note|界面按项目/);
+  assert.ok(html.indexOf("同步状态") < html.indexOf("连接设置"));
 
   const values = new Map([["enabled", "on"], ["endpoint", "https://sync.example.com"], ["device_name", "Laptop"], ["interval_seconds", "60"], ["registration_code", "one-time-code"], ["passphrase", "long-passphrase"]]);
   const payload = syncSettingsPayload(
@@ -1540,6 +1600,25 @@ test("sync settings use the five domain groups", async () => {
     if (originalDocument === undefined) delete globalThis.document; else globalThis.document = originalDocument;
     globalThis.FormData = OriginalFormData;
   }
+});
+
+test("sync settings render local connection data before remote preview", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const main = await readFile(resolve(root, "dist", "app.js"), "utf8");
+  const sync = await readFile(resolve(root, "dist", "sync_settings.js"), "utf8");
+  const coreLoad = main.indexOf("api.syncSettings()", main.indexOf('view === "sync"'));
+  const coreRendered = main.indexOf("render();", main.indexOf("state.syncConflicts = conflicts.conflicts || [];", coreLoad));
+  const previewLoad = main.indexOf("await api.syncPreview()", coreLoad);
+  assert.ok(coreLoad >= 0 && coreRendered > coreLoad && previewLoad > coreRendered);
+  assert.doesNotMatch(main, /Promise\.all\(\[api\.syncSettings\(\), api\.syncStatus\(\), api\.syncConflicts\(\), api\.syncPreview\(\)\]\)/);
+  assert.match(sync, /settings\.device_name\?\.trim\(\) \|\| settings\.device_id/);
+  assert.match(main, /syncSettingsReady: false/);
+  const settingsReady = main.indexOf("state.syncSettingsReady = true;", coreLoad);
+  assert.ok(settingsReady > coreLoad && coreRendered > settingsReady && previewLoad > coreRendered);
+  assert.match(sync, /settingsReady \? "" : "disabled"/);
+  assert.match(sync, /正在读取本地设置/);
+  assert.match(sync, /分析差异…/);
+  assert.match(sync, /同步中…/);
 });
 
 test("remote workspace and task mirrors expose explicit local takeover", async () => {

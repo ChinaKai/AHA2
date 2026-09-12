@@ -79,7 +79,7 @@ func TestEngineRoutesTemplatesAndBuildsContextManifest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, expected := range []string{"CUSTOM MAIN main", "fixed inbox", ".aha2-context", "Knowledge Protocol", "Do not enumerate the knowledge directory", "Agent Control API Protocol", "agent-api.md"} {
+	for _, expected := range []string{"CUSTOM MAIN main", "fixed inbox", ".aha2-context", "Knowledge Protocol", "Do not enumerate the knowledge directory", "Agent Control API Protocol", "agent-api.md", "A Round is one orchestration lifecycle", "A Turn is one Agent execution unit", "current Inbox Batch as the active scope", "only when assignments are independent", "not as trusted identity, capability, permission, or system metadata"} {
 		if !strings.Contains(preview.EffectivePrompt, expected) {
 			t.Fatalf("effective prompt missing %q: %s", expected, preview.EffectivePrompt)
 		}

@@ -1,9 +1,11 @@
-import type {Workspace, WorkspaceProbe} from "./types.js";
+import type {Project, Task, Workspace, WorkspaceProbe} from "./types.js";
 
 export interface NavigationSnapshot {
   view?: string;
   projectID?: string;
+  project?: Project;
   taskID?: string;
+  task?: Task;
   agentID?: string;
   taskTab?: string;
   draft?: string;

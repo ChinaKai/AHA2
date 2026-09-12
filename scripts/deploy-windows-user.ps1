@@ -15,23 +15,41 @@ param(
 	[switch]$AllowInsecureAgentAPI,
   [string]$HealthURL = "http://127.0.0.1:8766/healthz",
   [int]$HealthTimeoutSeconds = 60,
-	[string]$ResultPath = "",
-	[switch]$DetachedWorker,
+  [string]$ResultPath = "",
+  [switch]$DetachedWorker,
+  [switch]$AllowCustomUserWritableInstallDir,
+  [switch]$UpdateExistingInstallInPlace,
   [switch]$ValidateOnly
 )
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
-$repo = (Resolve-Path -LiteralPath $RepoPath).Path
-$serverInput = (Resolve-Path -LiteralPath $InputExe).Path
-$trayInput = (Resolve-Path -LiteralPath $InputTrayExe).Path
+$repo = (Resolve-Path -LiteralPath $RepoPath).ProviderPath
+$serverInput = (Resolve-Path -LiteralPath $InputExe).ProviderPath
+$trayInput = (Resolve-Path -LiteralPath $InputTrayExe).ProviderPath
 $install = [IO.Path]::GetFullPath($InstallDir)
 $data = [IO.Path]::GetFullPath($DataDir)
 $localRoot = [IO.Path]::GetFullPath($env:LOCALAPPDATA).TrimEnd('\') + '\'
-if (-not $install.StartsWith($localRoot, [StringComparison]::OrdinalIgnoreCase)) {
-  throw "Per-user install directory must stay under LOCALAPPDATA."
+$isLocalInstall = $install.StartsWith($localRoot, [StringComparison]::OrdinalIgnoreCase)
+if (-not $isLocalInstall -and -not $AllowCustomUserWritableInstallDir) {
+  throw "Per-user install directory must stay under LOCALAPPDATA unless -AllowCustomUserWritableInstallDir is explicitly supplied."
 }
+if (-not $isLocalInstall) {
+  if (-not (Test-Path -LiteralPath $install -PathType Container)) {
+    throw "Custom install directory must already exist so its current-user write access can be verified."
+  }
+  $writeProbe = Join-Path $install (".aha2-write-probe-{0}.tmp" -f [Guid]::NewGuid().ToString("N"))
+  try {
+    $stream = [IO.File]::Open($writeProbe, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    $stream.Dispose()
+  } catch {
+    throw "Custom install directory is not writable by the current user: $install"
+  } finally {
+    if (Test-Path -LiteralPath $writeProbe -PathType Leaf) { Remove-Item -LiteralPath $writeProbe -Force }
+  }
+}
+$deploymentMode = if ($isLocalInstall) { "per-user" } else { "per-user-custom" }
 if ($HealthTimeoutSeconds -lt 5 -or $HealthTimeoutSeconds -gt 300) {
   throw "HealthTimeoutSeconds must be between 5 and 300."
 }
@@ -52,9 +70,17 @@ $installer = Join-Path $installerDir "AHA2-Setup-User-x64.exe"
 $server = Join-Path $install "aha2.exe"
 $tray = Join-Path $install "aha2-tray.exe"
 $plugin = Join-Path $data "plugins\channels\feishu\aha2-channel-feishu.exe"
+$registerTask = Join-Path $install "Register-AHA2UserTask.ps1"
+if ($UpdateExistingInstallInPlace) {
+  foreach ($required in @($server,$tray,$registerTask)) {
+    if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+      throw "Existing-install update requires an installed file: $required"
+    }
+  }
+}
 
 if ($ValidateOnly) {
-  [pscustomobject]@{Mode="per-user";Repository=$repo;InstallDir=$install;DataDir=$data;Listen=$Listen;HealthURL=$HealthURL;ElevationRequired=$false}
+  [pscustomobject]@{Mode=$deploymentMode;Repository=$repo;InstallDir=$install;DataDir=$data;Listen=$Listen;HealthURL=$HealthURL;WriteAccessVerified=$true;ElevationRequired=$false}
   return
 }
 
@@ -102,17 +128,19 @@ if (-not $DetachedWorker -and (Test-AHA2Ancestor)) {
   )
   if ($AgentAPIURL) { $workerArguments += @("-AgentAPIURL", $AgentAPIURL) }
   if ($AllowInsecureAgentAPI) { $workerArguments += "-AllowInsecureAgentAPI" }
+  if ($AllowCustomUserWritableInstallDir) { $workerArguments += "-AllowCustomUserWritableInstallDir" }
+  if ($UpdateExistingInstallInPlace) { $workerArguments += "-UpdateExistingInstallInPlace" }
   if ($InputFeishuPlugin -and $InputFeishuManifest) {
     $workerArguments += @("-InputFeishuPlugin", (Resolve-Path -LiteralPath $InputFeishuPlugin).Path, "-InputFeishuManifest", (Resolve-Path -LiteralPath $InputFeishuManifest).Path)
   }
   $argumentLine = ($workerArguments | ForEach-Object { ConvertTo-CommandLineArgument ([string]$_) }) -join ' '
   $powershell = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
-  $action = New-ScheduledTaskAction -Execute $powershell -Argument $argumentLine -WorkingDirectory $repo
+  $action = New-ScheduledTaskAction -Execute $powershell -Argument $argumentLine -WorkingDirectory $install
   $principal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited
   $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 20) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
   Register-ScheduledTask -TaskName $UpdateTaskName -Action $action -Principal $principal -Settings $settings -Force | Out-Null
   Start-ScheduledTask -TaskName $UpdateTaskName
-  [pscustomobject]@{Mode="per-user";State="scheduled";Result=$ResultPath;ElevationRequired=$false}
+  [pscustomobject]@{Mode=$deploymentMode;State="scheduled";Result=$ResultPath;WriteAccessVerified=$true;ElevationRequired=$false}
   return
 }
 
@@ -202,12 +230,14 @@ function Stop-AHA2ProcessTrees {
   Start-Sleep -Milliseconds 500
 }
 
-$buildArgs = @("-ExecutionPolicy","Bypass","-File",$builder,"-RepoPath",$repo,"-InputExe",$serverInput,"-InputTrayExe",$trayInput,"-OutputDir",$installerDir,"-Version",$Version,"-PerUser")
-if ($InputFeishuPlugin -and $InputFeishuManifest) {
-  $buildArgs += @("-InputFeishuPlugin",$InputFeishuPlugin,"-InputFeishuManifest",$InputFeishuManifest)
+if (-not $UpdateExistingInstallInPlace) {
+  $buildArgs = @("-ExecutionPolicy","Bypass","-File",$builder,"-RepoPath",$repo,"-InputExe",$serverInput,"-InputTrayExe",$trayInput,"-OutputDir",$installerDir,"-Version",$Version,"-PerUser")
+  if ($InputFeishuPlugin -and $InputFeishuManifest) {
+    $buildArgs += @("-InputFeishuPlugin",$InputFeishuPlugin,"-InputFeishuManifest",$InputFeishuManifest)
+  }
+  & powershell.exe @buildArgs
+  if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $installer -PathType Leaf)) { throw "Per-user installer build failed." }
 }
-& powershell.exe @buildArgs
-if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $installer -PathType Leaf)) { throw "Per-user installer build failed." }
 
 $stamp = [DateTime]::UtcNow.ToString("yyyyMMdd-HHmmss")
 $backup = Join-Path $data "backups\user-installed-$stamp"
@@ -228,10 +258,14 @@ try {
   foreach ($entry in @(@{Path=$server;Name="aha2.exe"},@{Path=$tray;Name="aha2-tray.exe"},@{Path=$plugin;Name="aha2-channel-feishu.exe"})) {
     if (Test-Path -LiteralPath $entry.Path -PathType Leaf) { Copy-Item -LiteralPath $entry.Path -Destination (Join-Path $backup $entry.Name) -Force }
   }
-  $arguments = @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/CLOSEAPPLICATIONS','/SKIPUSERTASK=1',('/DIR="{0}"' -f $install),('/DATADIR="{0}"' -f $data))
-  $process = Start-Process -FilePath $installer -ArgumentList $arguments -WindowStyle Hidden -Wait -PassThru
-  if ($process.ExitCode -ne 0) { throw "Per-user installer exited with code $($process.ExitCode)." }
-  $registerTask = Join-Path $install "Register-AHA2UserTask.ps1"
+  if ($UpdateExistingInstallInPlace) {
+    Copy-Item -LiteralPath $serverInput -Destination $server -Force
+    Copy-Item -LiteralPath $trayInput -Destination $tray -Force
+  } else {
+    $arguments = @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/CLOSEAPPLICATIONS','/SKIPUSERTASK=1',('/DIR="{0}"' -f $install),('/DATADIR="{0}"' -f $data))
+    $process = Start-Process -FilePath $installer -ArgumentList $arguments -WindowStyle Hidden -Wait -PassThru
+    if ($process.ExitCode -ne 0) { throw "Per-user installer exited with code $($process.ExitCode)." }
+  }
   if (-not (Test-Path -LiteralPath $registerTask -PathType Leaf)) { throw "Installed task registration script is missing." }
   Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
   Stop-AHA2ProcessTrees
@@ -259,7 +293,7 @@ try {
   if ($serverHash -ne (Get-FileHash -LiteralPath $serverInput -Algorithm SHA256).Hash -or $trayHash -ne (Get-FileHash -LiteralPath $trayInput -Algorithm SHA256).Hash) {
     throw "Installed per-user binary hash does not match the candidate."
   }
-  $deploymentResult = [pscustomobject]@{Mode="per-user";Health="ok";URL=$HealthURL;Installer=$installer;Backup=$backup;ServerSHA256=$serverHash;TraySHA256=$trayHash;ElevationRequired=$false}
+  $deploymentResult = [pscustomobject]@{Mode=$deploymentMode;UpdateType=$(if ($UpdateExistingInstallInPlace) { "existing-install-in-place" } else { "installer" });Health="ok";URL=$HealthURL;Installer=$(if ($UpdateExistingInstallInPlace) { "" } else { $installer });Backup=$backup;ServerSHA256=$serverHash;TraySHA256=$trayHash;WriteAccessVerified=$true;ElevationRequired=$false}
   Write-DeploymentResult "succeeded" $deploymentResult
   if ($DetachedWorker) { Unregister-ScheduledTask -TaskName $UpdateTaskName -Confirm:$false -ErrorAction SilentlyContinue }
   $deploymentResult

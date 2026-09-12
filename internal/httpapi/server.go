@@ -43,6 +43,7 @@ type Config struct {
 	ProbeSSHHostKey   func(context.Context, string) (hardware.SSHHostKeyInfo, error)
 	TrustSSHHostKey   func(context.Context, string, string) (hardware.SSHHostKeyInfo, error)
 	Version           string
+	WebVersion        string
 	StartedAt         time.Time
 }
 
@@ -67,6 +68,7 @@ type Server struct {
 	probeSSHHostKey       func(context.Context, string) (hardware.SSHHostKeyInfo, error)
 	trustSSHHostKey       func(context.Context, string, string) (hardware.SSHHostKeyInfo, error)
 	version               string
+	webVersion            string
 	startedAt             time.Time
 	syncRunMu             sync.RWMutex
 	syncRun               syncRunProgress
@@ -115,9 +117,13 @@ func New(config Config) *Server {
 		probeSSHHostKey:       probeSSHHostKey,
 		trustSSHHostKey:       trustSSHHostKey,
 		version:               config.Version,
+		webVersion:            config.WebVersion,
 		startedAt:             startedAt,
 		authLimiter:           newAuthLimiter(),
 		modelDetectionJobs:    newModelDetectionJobs(),
+	}
+	if server.webVersion == "" {
+		server.webVersion = server.version
 	}
 	if config.OutboundProxy != nil {
 		server.modelDetectionJobs.detect = func(ctx context.Context, provider domain.Provider, apiKey string) (gateway.Result, error) {

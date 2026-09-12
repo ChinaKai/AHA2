@@ -19,6 +19,7 @@ type fakeRemote struct {
 
 type pagedRemote struct {
 	responses map[string]PullResponse
+	errors    map[string]error
 	cursors   []string
 }
 
@@ -32,7 +33,62 @@ func (f *pagedRemote) Push(_ context.Context, request PushRequest) (PushResponse
 
 func (f *pagedRemote) Pull(_ context.Context, _ string, cursor, _ string, _ int) (PullResponse, error) {
 	f.cursors = append(f.cursors, cursor)
+	if err := f.errors[cursor]; err != nil {
+		return PullResponse{}, err
+	}
 	return f.responses[cursor], nil
+}
+
+func TestEnginePullCheckpointsEachAppliedPageAndResumesAfterFailure(t *testing.T) {
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	object := func(id string) domain.SyncObject {
+		return domain.SyncObject{Type: "note", ID: id, Operation: "upsert", Payload: json.RawMessage(`{}`), IdempotencyKey: "key-" + id, EventID: "event-" + id}
+	}
+	remote := &pagedRemote{
+		responses: map[string]PullResponse{
+			"":       {Cursor: "page-1", HasMore: true, Objects: []domain.SyncObject{object("one")}},
+			"page-1": {Cursor: "page-2", HasMore: true, Objects: []domain.SyncObject{object("two")}},
+			"page-2": {Cursor: "page-3", Objects: []domain.SyncObject{object("three")}},
+		},
+		errors: map[string]error{"page-1": fmt.Errorf("temporary pull failure")},
+	}
+	engine := Engine{Store: database, Remote: remote, Scope: "default", DeviceID: "device", BatchSize: 1}
+	applied := []string{}
+	engine.Register("note", func(_ context.Context, object domain.SyncObject) error {
+		applied = append(applied, object.ID)
+		return nil
+	})
+
+	if err := engine.Pull(ctx); err == nil || err.Error() != "temporary pull failure" {
+		t.Fatalf("first pull err=%v", err)
+	}
+	state, err := database.SyncState(ctx, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Cursor != "page-1" || len(applied) != 1 || applied[0] != "one" {
+		t.Fatalf("after failure cursor=%q applied=%v", state.Cursor, applied)
+	}
+
+	delete(remote.errors, "page-1")
+	if err := engine.Pull(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(remote.cursors) != 4 || remote.cursors[2] != "page-1" || remote.cursors[3] != "page-2" {
+		t.Fatalf("pull cursors=%v", remote.cursors)
+	}
+	if len(applied) != 3 || applied[0] != "one" || applied[1] != "two" || applied[2] != "three" {
+		t.Fatalf("applied=%v", applied)
+	}
+	state, err = database.SyncState(ctx, "default")
+	if err != nil || state.Cursor != "page-3" {
+		t.Fatalf("final state=%#v err=%v", state, err)
+	}
 }
 
 func TestEngineRecordsCenterConflictOnceWithoutSuppressingLocalExport(t *testing.T) {

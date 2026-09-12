@@ -244,7 +244,10 @@ func (s *Server) syncConflicts(writer http.ResponseWriter, request *http.Request
 }
 
 func (s *Server) syncPreview(writer http.ResponseWriter, request *http.Request) {
-	if _, err := s.store.SyncSettings(request.Context(), localSyncScope); err != nil {
+	if _, err := s.store.SyncSettings(request.Context(), localSyncScope); errors.Is(err, sql.ErrNoRows) {
+		writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "preview": syncer.Preview{}})
+		return
+	} else if err != nil {
 		writeError(writer, http.StatusBadRequest, "sync_not_configured")
 		return
 	}

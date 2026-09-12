@@ -30,8 +30,9 @@ export interface SystemInfo {
   arch: string;
   wsl_available: boolean;
   wsl_distros: string[];
-	version?: string;
-	started_at?: string;
+  version?: string;
+  web_version?: string;
+  started_at?: string;
 }
 
 export interface ProxySettings {

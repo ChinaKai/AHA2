@@ -130,24 +130,42 @@ func (e *Engine) Pull(ctx context.Context) error {
 		return err
 	}
 	cursor := state.Cursor
-	objects := []domain.SyncObject{}
+	pending := []domain.SyncObject{}
 	seenCursors := map[string]bool{cursor: true}
 	for {
 		response, err := e.Remote.Pull(ctx, e.Scope, cursor, e.DeviceID, e.limit())
 		if err != nil {
 			return err
 		}
-		objects = append(objects, response.Objects...)
 		if response.HasMore && seenCursors[response.Cursor] {
 			return fmt.Errorf("remote sync cursor did not advance")
 		}
 		cursor = response.Cursor
 		seenCursors[cursor] = true
+		pending = append(pending, response.Objects...)
+		var dependencyErr error
+		pending, dependencyErr, err = e.applyPulledObjects(ctx, pending)
+		if err != nil {
+			return err
+		}
+		if len(pending) == 0 {
+			state.Cursor = cursor
+			state.LastPullAt = e.now()
+			state.LastError = ""
+			state.UpdatedAt = e.now()
+			if err := e.Store.UpdateSyncState(ctx, state); err != nil {
+				return err
+			}
+		} else if !response.HasMore {
+			return dependencyErr
+		}
 		if !response.HasMore {
-			break
+			return nil
 		}
 	}
-	pending := append([]domain.SyncObject{}, objects...)
+}
+
+func (e *Engine) applyPulledObjects(ctx context.Context, pending []domain.SyncObject) ([]domain.SyncObject, error, error) {
 	for len(pending) > 0 {
 		blocked := map[string]bool{}
 		next := make([]domain.SyncObject, 0, len(pending))
@@ -170,23 +188,19 @@ func (e *Engine) Pull(ctx context.Context) error {
 				continue
 			}
 			if err != nil {
-				return err
+				return nil, nil, err
 			}
 			progress = true
 		}
 		if len(next) == 0 {
-			break
+			return nil, nil, nil
 		}
 		if !progress {
-			return dependencyErr
+			return next, dependencyErr, nil
 		}
 		pending = next
 	}
-	state.Cursor = cursor
-	state.LastPullAt = e.now()
-	state.LastError = ""
-	state.UpdatedAt = e.now()
-	return e.Store.UpdateSyncState(ctx, state)
+	return nil, nil, nil
 }
 
 func (e *Engine) applyPulledObject(ctx context.Context, object domain.SyncObject) error {
