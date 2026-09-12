@@ -3,9 +3,14 @@ set -euo pipefail
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 build="$repo/scripts/build-macos-packages.sh"
+web_version_script="$repo/scripts/web-version.sh"
 
 bash -n "$build" "$repo/packaging/macos/scripts/preinstall" \
   "$repo/packaging/macos/scripts/postinstall" "$repo/packaging/macos/uninstall-aha2.sh"
+if grep -Eq '\$\{[^}]+,,\}' "$web_version_script"; then
+  echo "Web version generation must remain compatible with macOS Bash 3.2." >&2
+  exit 1
+fi
 
 missing="${TMPDIR:-/tmp}/aha2-validation-$RANDOM-$RANDOM"
 bash "$build" --version v1.2.3 --input-exe "$missing-amd64" --arch amd64 --output-dir "$missing-output" --validate-only

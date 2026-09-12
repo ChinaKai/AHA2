@@ -20,7 +20,7 @@ if [[ ! "$git_hash" =~ ^[0-9a-fA-F]{12}$ ]]; then
   echo "Git hash must contain exactly 12 hexadecimal characters." >&2
   exit 2
 fi
-git_hash="${git_hash,,}"
+git_hash="$(printf '%s' "$git_hash" | tr '[:upper:]' '[:lower:]')"
 dirty=""
 if [[ -n "$(git -C "$repo" status --porcelain)" ]]; then
   dirty=".dirty"
