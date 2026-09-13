@@ -21,9 +21,9 @@ Project → Workspace → Task → Turn → Task Memory → Knowledge → Next T
 ./local_build.sh
 ```
 
-脚本默认构建并部署 `0.5.21` 到 `D:\Program Files\AHA2`，复用 `D:\ProgramData\AHA2` 和
+脚本默认构建并部署 `0.5.22` 到 `D:\Program Files\AHA2`，复用 `D:\ProgramData\AHA2` 和
 `0.0.0.0:8766`，同时生成
-`dist/installer-user-0.5.21/AHA2-Setup-User-x64.exe`；可通过 `--version` 以及脚本帮助中列出的
+`dist/installer-user-0.5.22/AHA2-Setup-User-x64.exe`；可通过 `--version` 以及脚本帮助中列出的
 `AHA2_*` 环境变量覆盖。
 
 ### Debian / Ubuntu

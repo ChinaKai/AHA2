@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"errors"
@@ -44,6 +45,13 @@ func (s *Server) listKnowledge(writer http.ResponseWriter, request *http.Request
 			return
 		}
 		page = storeListPage(items, hasMore, "knowledge", func(item domain.KnowledgeEntry) (time.Time, string) { return item.UpdatedAt, item.ID })
+		if scope == "" || scope == "global" {
+			page.Items, err = s.withGlobalKnowledgeNavigation(request.Context(), page.Items)
+			if err != nil {
+				writeError(writer, http.StatusInternalServerError, "list_knowledge_failed")
+				return
+			}
+		}
 	} else {
 		var items []domain.KnowledgeEntry
 		if scope == "project" && projectID != "" {
@@ -82,6 +90,49 @@ func (s *Server) listKnowledge(writer http.ResponseWriter, request *http.Request
 		response["next_cursor"] = page.NextCursor
 	}
 	writeJSON(writer, http.StatusOK, response)
+}
+
+func (s *Server) withGlobalKnowledgeNavigation(ctx context.Context, items []domain.KnowledgeEntry) ([]domain.KnowledgeEntry, error) {
+	result := append([]domain.KnowledgeEntry(nil), items...)
+	seen := make(map[string]bool, len(items))
+	queue := make([]string, 0, len(items)+5)
+	queueID := func(id string) {
+		id = strings.TrimSpace(id)
+		if id == "" || seen[id] {
+			return
+		}
+		seen[id] = true
+		queue = append(queue, id)
+	}
+	for _, item := range items {
+		seen[item.ID] = true
+		if item.Scope == "global" {
+			queueID(item.ParentID)
+		}
+	}
+	for _, id := range []string{
+		store.GlobalKnowledgeRootID,
+		store.GlobalGeneralKnowledgeID,
+		store.GlobalAgentLessonsKnowledgeID,
+		store.GlobalTechnicalLessonsKnowledgeID,
+		store.GlobalBehaviorLessonsKnowledgeID,
+	} {
+		queueID(id)
+	}
+	for index := 0; index < len(queue); index++ {
+		item, err := s.store.Knowledge(ctx, queue[index])
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, item)
+		if item.Scope == "global" {
+			queueID(item.ParentID)
+		}
+	}
+	return result, nil
 }
 
 func (s *Server) knowledgeDetail(writer http.ResponseWriter, request *http.Request) {

@@ -8,7 +8,7 @@ Usage: ./local_build.sh [options]
 Build, package, validate, deploy, and restart the Windows AHA2 per-user instance.
 
 Options:
-  --version VERSION   Override AHA2_VERSION (default: 0.5.21)
+  --version VERSION   Override AHA2_VERSION (default: 0.5.22)
   --validate-only     Validate the local toolchain and Windows deployment target
   --build-only        Build, verify, and package candidates without deploying
   --deploy-only       Deploy the existing verified candidates
@@ -32,7 +32,7 @@ EOF
 
 repo_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 powershell="${AHA2_POWERSHELL:-/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe}"
-version="${AHA2_VERSION:-0.5.21}"
+version="${AHA2_VERSION:-0.5.22}"
 install_dir="${AHA2_INSTALL_DIR:-D:\\Program Files\\AHA2}"
 data_dir="${AHA2_DATA_DIR:-D:\\ProgramData\\AHA2}"
 listen="${AHA2_LISTEN:-0.0.0.0:8766}"

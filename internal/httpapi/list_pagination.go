@@ -223,6 +223,7 @@ type knowledgeSummary struct {
 	IsIndex            bool                   `json:"is_index"`
 	Type               string                 `json:"type"`
 	Title              string                 `json:"title"`
+	Body               string                 `json:"body,omitempty"`
 	Status             domain.KnowledgeStatus `json:"status"`
 	ProductLineID      string                 `json:"product_line_id,omitempty"`
 	Revision           int                    `json:"revision"`
@@ -235,16 +236,28 @@ type knowledgeSummary struct {
 func summarizeKnowledge(items []domain.KnowledgeEntry) []knowledgeSummary {
 	result := make([]knowledgeSummary, 0, len(items))
 	for _, item := range items {
+		body := ""
+		if item.IsIndex || item.Type == "navigation" {
+			body = truncateSummaryText(item.Body, 512)
+		}
 		result = append(result, knowledgeSummary{
 			ID: item.ID, Scope: item.Scope, ProjectID: item.ProjectID, BoundProjectID: item.BoundProjectID,
 			BindingMode: item.BindingMode, CanProposeRevision: item.CanProposeRevision, ParentID: item.ParentID,
-			Slug: item.Slug, SortOrder: item.SortOrder, IsIndex: item.IsIndex, Type: item.Type, Title: item.Title,
+			Slug: item.Slug, SortOrder: item.SortOrder, IsIndex: item.IsIndex, Type: item.Type, Title: item.Title, Body: body,
 			Status: item.Status, ProductLineID: item.ProductLineID, Revision: item.Revision,
 			HelpedCount: item.HelpedCount, StaleCount: item.StaleCount, FeedbackState: item.FeedbackState,
 			UpdatedAt: item.UpdatedAt,
 		})
 	}
 	return result
+}
+
+func truncateSummaryText(value string, limit int) string {
+	runes := []rune(strings.TrimSpace(value))
+	if len(runes) <= limit {
+		return string(runes)
+	}
+	return string(runes[:limit-3]) + "..."
 }
 
 type knowledgeProposalSummary struct {

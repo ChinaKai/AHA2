@@ -68,6 +68,63 @@ func TestProjectListPaginationAndSummaryAPI(t *testing.T) {
 	}
 }
 
+func TestKnowledgePaginationIncludesGlobalNavigationContext(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	now := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
+	for index, id := range []string{"global-recent-a", "global-recent-b"} {
+		item := domain.KnowledgeEntry{
+			ID: id, Scope: "global", ParentID: store.GlobalGeneralKnowledgeID, Slug: id,
+			Type: "practice", Title: id, Body: "body", Status: domain.KnowledgeVerified,
+			Confidence: 1, Revision: 1, CreatedAt: now.Add(time.Duration(index) * time.Minute),
+			UpdatedAt: now.Add(time.Duration(index) * time.Minute), LastVerifiedAt: now,
+		}
+		if err := database.CreateKnowledge(ctx, item); err != nil {
+			t.Fatal(err)
+		}
+	}
+	server := httptest.NewServer(New(Config{Store: database, Auth: auth.NewService(database, "setup-test", time.Hour)}).Handler())
+	defer server.Close()
+	client := newCookieClient(t)
+	registerOwner(t, client, server.URL)
+
+	response := requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/knowledge?limit=1&summary=true", nil, "")
+	var payload map[string]any
+	decodeResponse(t, response, &payload)
+	if response.StatusCode != http.StatusOK || payload["has_more"] != true || payload["next_cursor"] == "" {
+		t.Fatalf("knowledge page status=%d payload=%#v", response.StatusCode, payload)
+	}
+	entries := payload["knowledge"].([]any)
+	byID := map[string]map[string]any{}
+	for _, raw := range entries {
+		item := raw.(map[string]any)
+		byID[item["id"].(string)] = item
+	}
+	for _, id := range []string{
+		store.GlobalKnowledgeRootID,
+		store.GlobalGeneralKnowledgeID,
+		store.GlobalAgentLessonsKnowledgeID,
+		store.GlobalTechnicalLessonsKnowledgeID,
+		store.GlobalBehaviorLessonsKnowledgeID,
+		"global-recent-b",
+	} {
+		if byID[id] == nil {
+			t.Fatalf("knowledge page omitted %s: %#v", id, byID)
+		}
+	}
+	if body := strings.TrimSpace(byID[store.GlobalGeneralKnowledgeID]["body"].(string)); body == "" {
+		t.Fatalf("global navigation summary omitted its description: %#v", byID[store.GlobalGeneralKnowledgeID])
+	}
+	if _, found := byID["global-recent-a"]; found {
+		t.Fatalf("navigation context changed the one-item page boundary: %#v", byID)
+	}
+}
+
 func TestPaginateByUpdatedUsesStableKeysetCursor(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)
