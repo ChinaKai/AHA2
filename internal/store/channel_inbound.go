@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
@@ -274,8 +275,23 @@ func (s *Store) BindChannelOwnerIdentity(ctx context.Context, item domain.Channe
 }
 
 func (s *Store) UpsertChannelParticipant(ctx context.Context, item domain.ChannelIdentityLink) (domain.ChannelIdentityLink, error) {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO channel_identity_links(id,instance_id,owner_id,provider_tenant_id,external_user_id,union_id,role,display_name,status,linked_at,revoked_at) VALUES(?,?,NULL,?,?,?,?,?,?,?,?) ON CONFLICT(instance_id,external_user_id) DO UPDATE SET provider_tenant_id=excluded.provider_tenant_id,union_id=excluded.union_id,display_name=excluded.display_name,status=CASE WHEN channel_identity_links.role='owner' THEN channel_identity_links.status ELSE 'active' END,linked_at=CASE WHEN channel_identity_links.role='owner' THEN channel_identity_links.linked_at ELSE excluded.linked_at END,revoked_at=CASE WHEN channel_identity_links.role='owner' THEN channel_identity_links.revoked_at ELSE '' END`,
-		item.ID, item.InstanceID, item.ProviderTenantID, item.ExternalUserID, item.UnionID, "participant", item.DisplayName, "active", timeString(item.LinkedAt), "")
+	return s.upsertChannelParticipant(ctx, item, false)
+}
+
+// UpsertObservedChannelParticipant keeps a previously resolved display name
+// when a later provider event omits it. The fallback is only used for a new
+// identity that has never had a real name.
+func (s *Store) UpsertObservedChannelParticipant(ctx context.Context, item domain.ChannelIdentityLink, fallbackDisplayName string) (domain.ChannelIdentityLink, error) {
+	preserveDisplayName := strings.TrimSpace(item.DisplayName) == ""
+	if preserveDisplayName {
+		item.DisplayName = strings.TrimSpace(fallbackDisplayName)
+	}
+	return s.upsertChannelParticipant(ctx, item, preserveDisplayName)
+}
+
+func (s *Store) upsertChannelParticipant(ctx context.Context, item domain.ChannelIdentityLink, preserveDisplayName bool) (domain.ChannelIdentityLink, error) {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO channel_identity_links(id,instance_id,owner_id,provider_tenant_id,external_user_id,union_id,role,display_name,status,linked_at,revoked_at) VALUES(?,?,NULL,?,?,?,?,?,?,?,?) ON CONFLICT(instance_id,external_user_id) DO UPDATE SET provider_tenant_id=excluded.provider_tenant_id,union_id=excluded.union_id,display_name=CASE WHEN ? AND TRIM(channel_identity_links.display_name)<>'' THEN channel_identity_links.display_name ELSE excluded.display_name END,status=CASE WHEN channel_identity_links.role='owner' THEN channel_identity_links.status ELSE 'active' END,linked_at=CASE WHEN channel_identity_links.role='owner' THEN channel_identity_links.linked_at ELSE excluded.linked_at END,revoked_at=CASE WHEN channel_identity_links.role='owner' THEN channel_identity_links.revoked_at ELSE '' END`,
+		item.ID, item.InstanceID, item.ProviderTenantID, item.ExternalUserID, item.UnionID, "participant", item.DisplayName, "active", timeString(item.LinkedAt), "", preserveDisplayName)
 	if err != nil {
 		return domain.ChannelIdentityLink{}, err
 	}
@@ -296,7 +312,7 @@ func scanChannelConversation(scanner interface{ Scan(...any) error }) (domain.Ch
 	var item domain.ChannelConversation
 	var ownerIdentity sql.NullString
 	var created, updated string
-	err := scanner.Scan(&item.ID, &item.InstanceID, &item.EndpointID, &item.ScopeKeyVersion, &item.ScopeKey, &item.ExternalChatID, &item.ExternalSenderID, &ownerIdentity, &item.HostTaskID, &item.Status, &created, &updated)
+	err := scanner.Scan(&item.ID, &item.InstanceID, &item.EndpointID, &item.ScopeKeyVersion, &item.ScopeKey, &item.ExternalChatID, &item.ExternalSenderID, &item.DisplayName, &ownerIdentity, &item.HostTaskID, &item.Status, &created, &updated)
 	if ownerIdentity.Valid {
 		item.OwnerIdentityLinkID = ownerIdentity.String
 	}
@@ -305,15 +321,46 @@ func scanChannelConversation(scanner interface{ Scan(...any) error }) (domain.Ch
 }
 
 func (s *Store) ChannelConversationByScope(ctx context.Context, endpointID string, scopeVersion int, scopeKey string) (domain.ChannelConversation, error) {
-	return scanChannelConversation(s.db.QueryRowContext(ctx, `SELECT id,instance_id,endpoint_id,scope_key_version,scope_key,external_chat_id,external_sender_id,owner_identity_link_id,host_task_id,status,created_at,updated_at FROM channel_conversations WHERE endpoint_id=? AND scope_key_version=? AND scope_key=?`, endpointID, scopeVersion, scopeKey))
+	return scanChannelConversation(s.db.QueryRowContext(ctx, `SELECT id,instance_id,endpoint_id,scope_key_version,scope_key,external_chat_id,external_sender_id,display_name,owner_identity_link_id,host_task_id,status,created_at,updated_at FROM channel_conversations WHERE endpoint_id=? AND scope_key_version=? AND scope_key=?`, endpointID, scopeVersion, scopeKey))
 }
 
 func (s *Store) ChannelConversation(ctx context.Context, id string) (domain.ChannelConversation, error) {
-	return scanChannelConversation(s.db.QueryRowContext(ctx, `SELECT id,instance_id,endpoint_id,scope_key_version,scope_key,external_chat_id,external_sender_id,owner_identity_link_id,host_task_id,status,created_at,updated_at FROM channel_conversations WHERE id=?`, id))
+	return scanChannelConversation(s.db.QueryRowContext(ctx, `SELECT id,instance_id,endpoint_id,scope_key_version,scope_key,external_chat_id,external_sender_id,display_name,owner_identity_link_id,host_task_id,status,created_at,updated_at FROM channel_conversations WHERE id=?`, id))
+}
+
+func (s *Store) PreferredChannelGroupConversation(ctx context.Context, endpointID, externalChatID string) (domain.ChannelConversation, error) {
+	return scanChannelConversation(s.db.QueryRowContext(ctx, `
+		SELECT c.id,c.instance_id,c.endpoint_id,c.scope_key_version,c.scope_key,c.external_chat_id,c.external_sender_id,
+		       c.display_name,c.owner_identity_link_id,c.host_task_id,c.status,c.created_at,c.updated_at
+		FROM channel_conversations c
+		WHERE c.endpoint_id=? AND c.external_chat_id=? AND c.status='active'
+		ORDER BY CASE WHEN EXISTS(
+		             SELECT 1 FROM channel_task_routes route
+		             WHERE route.conversation_id=c.id AND route.state='active'
+		         ) THEN 0 ELSE 1 END,
+		         c.scope_key_version DESC,c.updated_at DESC,c.id DESC
+		LIMIT 1`, endpointID, externalChatID))
+}
+
+func (s *Store) PromoteChannelConversationScope(ctx context.Context, id string, scopeVersion int, scopeKey, displayName string, at time.Time) error {
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE channel_conversations
+		SET scope_key_version=?,scope_key=?,
+		    display_name=CASE WHEN TRIM(?)<>'' THEN ? ELSE display_name END,
+		    updated_at=?
+		WHERE id=? AND status='active'`,
+		scopeVersion, scopeKey, displayName, displayName, timeString(at), id)
+	if err != nil {
+		return err
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return ErrChannelRevision
+	}
+	return nil
 }
 
 func (s *Store) OwnerChannelConversation(ctx context.Context, instanceID string) (domain.ChannelConversation, error) {
-	return scanChannelConversation(s.db.QueryRowContext(ctx, `SELECT c.id,c.instance_id,c.endpoint_id,c.scope_key_version,c.scope_key,c.external_chat_id,c.external_sender_id,c.owner_identity_link_id,c.host_task_id,c.status,c.created_at,c.updated_at FROM channel_conversations c JOIN channel_endpoints e ON e.id=c.endpoint_id WHERE c.instance_id=? AND e.kind='assistant_dm' AND c.status='active'`, instanceID))
+	return scanChannelConversation(s.db.QueryRowContext(ctx, `SELECT c.id,c.instance_id,c.endpoint_id,c.scope_key_version,c.scope_key,c.external_chat_id,c.external_sender_id,c.display_name,c.owner_identity_link_id,c.host_task_id,c.status,c.created_at,c.updated_at FROM channel_conversations c JOIN channel_endpoints e ON e.id=c.endpoint_id WHERE c.instance_id=? AND e.kind='assistant_dm' AND c.status='active'`, instanceID))
 }
 
 func (s *Store) CreateChannelConversation(ctx context.Context, item domain.ChannelConversation, session domain.ChannelSession) error {
@@ -322,8 +369,8 @@ func (s *Store) CreateChannelConversation(ctx context.Context, item domain.Chann
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO channel_conversations(id,instance_id,endpoint_id,scope_key_version,scope_key,external_chat_id,external_sender_id,owner_identity_link_id,host_task_id,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
-		item.ID, item.InstanceID, item.EndpointID, item.ScopeKeyVersion, item.ScopeKey, item.ExternalChatID, item.ExternalSenderID, nullableString(item.OwnerIdentityLinkID), item.HostTaskID, item.Status, timeString(item.CreatedAt), timeString(item.UpdatedAt)); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO channel_conversations(id,instance_id,endpoint_id,scope_key_version,scope_key,external_chat_id,external_sender_id,display_name,owner_identity_link_id,host_task_id,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		item.ID, item.InstanceID, item.EndpointID, item.ScopeKeyVersion, item.ScopeKey, item.ExternalChatID, item.ExternalSenderID, item.DisplayName, nullableString(item.OwnerIdentityLinkID), item.HostTaskID, item.Status, timeString(item.CreatedAt), timeString(item.UpdatedAt)); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO channel_sessions(id,conversation_id,generation,mode,status,inbound_cursor,outbound_cursor,started_at,closed_at) VALUES(?,?,?,?,?,?,?,?,?)`,
@@ -331,6 +378,11 @@ func (s *Store) CreateChannelConversation(ctx context.Context, item domain.Chann
 		return err
 	}
 	return tx.Commit()
+}
+
+func (s *Store) UpdateChannelConversationDisplayName(ctx context.Context, id, displayName string, at time.Time) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE channel_conversations SET display_name=?,updated_at=? WHERE id=?`, displayName, timeString(at), id)
+	return err
 }
 
 func (s *Store) ActiveChannelTaskRoute(ctx context.Context, conversationID string) (domain.ChannelTaskRoute, error) {
@@ -471,6 +523,7 @@ func (s *Store) ChannelContextForInboxBatch(ctx context.Context, batchID string)
 	}
 	defer rows.Close()
 	var result map[string]any
+	var latest map[string]any
 	for rows.Next() {
 		var payloadJSON string
 		if err := rows.Scan(&payloadJSON); err != nil {
@@ -481,16 +534,30 @@ func (s *Store) ChannelContextForInboxBatch(ctx context.Context, batchID string)
 		if !ok || len(value) == 0 {
 			return nil, sql.ErrNoRows
 		}
+		stable := map[string]any{}
+		for _, key := range []string{"schema", "instance_id", "provider", "endpoint", "conversation_id", "route"} {
+			if child, exists := value[key]; exists {
+				stable[key] = child
+			}
+		}
+		latest = value
 		if result == nil {
-			result = value
+			result = stable
 			continue
 		}
-		if encodeJSON(result) != encodeJSON(value) {
+		if encodeJSON(result) != encodeJSON(stable) {
 			return nil, errors.New("mixed channel contexts in one inbox batch")
 		}
 	}
 	if result == nil {
 		return nil, sql.ErrNoRows
+	}
+	if latest != nil {
+		for _, key := range []string{"actor", "mentions", "inbound_receipt_id", "chat_display_name"} {
+			if child, exists := latest[key]; exists {
+				result[key] = child
+			}
+		}
 	}
 	return result, rows.Err()
 }

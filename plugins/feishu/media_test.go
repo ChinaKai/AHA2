@@ -14,6 +14,7 @@ import (
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	"github.com/larksuite/oapi-sdk-go/v3/channel/normalize"
 	channeltypes "github.com/larksuite/oapi-sdk-go/v3/channel/types"
+	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
 
 func TestNormalizedInboundImagesUseAttachmentsNotResourceURLs(t *testing.T) {
@@ -38,6 +39,87 @@ func TestNormalizedInboundImagesUseAttachmentsNotResourceURLs(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestNormalizedInboundMentionsSeparateSenderVisibleText(t *testing.T) {
+	message := &channeltypes.NormalizedMessage{
+		Content: "@_user_1 请和 @_user_2 联调",
+		Mentions: []channeltypes.Mention{
+			{Key: "@_user_1", OpenID: "bot-open", Name: "机器人", IsBot: true},
+			{Key: "@_user_2", OpenID: "app-user", Name: "APP 张三"},
+		},
+	}
+	content, _ := normalizedInboundMedia(message)
+	mentions := normalizedInboundMentions(message)
+	if content != "请和 @APP 张三 联调" {
+		t.Fatalf("content=%q", content)
+	}
+	if len(mentions) != 2 || mentions[1]["external_user_id"] != "app-user" || mentions[1]["display_name"] != "APP 张三" {
+		t.Fatalf("mentions=%#v", mentions)
+	}
+	filtered := normalizedInboundMentions(message, "bot-open")
+	if len(filtered) != 1 || filtered[0]["external_user_id"] != "app-user" {
+		t.Fatalf("self bot mention was not filtered: %#v", filtered)
+	}
+}
+
+func TestRestoreInboundMentionTypesUsesRawMentionedType(t *testing.T) {
+	messageType := "text"
+	content := `{"text":"@_user_1 @_user_2 测试"}`
+	selfKey, otherKey := "@_user_1", "@_user_2"
+	selfID, otherID := "self-bot-open", "other-bot-open"
+	selfName, otherName := "HOME-AHA", "WORK-AHA"
+	botType := "bot"
+	event := &larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Message: &larkim.EventMessage{
+				MessageType: &messageType,
+				Content:     &content,
+				Mentions: []*larkim.MentionEvent{
+					{Key: &selfKey, Id: &larkim.UserId{OpenId: &selfID}, MentionedType: &botType, Name: &selfName},
+					{Key: &otherKey, Id: &larkim.UserId{OpenId: &otherID}, MentionedType: &botType, Name: &otherName},
+				},
+			},
+		},
+	}
+	message := normalize.ParseMessage(event)
+	if message == nil || message.Mentions[0].IsBot || message.Mentions[1].IsBot {
+		t.Fatalf("unexpected SDK mention classification: %#v", message)
+	}
+
+	restoreInboundMentionTypes(message)
+	normalizedContent, _ := normalizedInboundMedia(message)
+	mentions := normalizedInboundMentions(message, selfID)
+	if normalizedContent != "测试" || len(mentions) != 1 ||
+		mentions[0]["external_user_id"] != otherID || mentions[0]["is_bot"] != true {
+		t.Fatalf("content=%q mentions=%#v", normalizedContent, mentions)
+	}
+}
+
+func TestDeliveryMentionsUseProviderMarkup(t *testing.T) {
+	msgType, content := applyDeliveryMentions("text", `{"text":"请测试"}`, map[string]string{
+		"mention_user_ids": `["user-one","user-two"]`,
+		"mention_names":    `["张三","李四"]`,
+	})
+	var payload map[string]string
+	if msgType != "text" || json.Unmarshal([]byte(content), &payload) != nil ||
+		!strings.Contains(payload["text"], `<at user_id="user-one">张三</at>`) ||
+		!strings.Contains(payload["text"], `<at user_id="user-two">李四</at>`) {
+		t.Fatalf("content=%s", content)
+	}
+}
+
+func TestDeliveryMentionsUseTextForBotOutreach(t *testing.T) {
+	msgType, content := applyDeliveryMentions("text", `{"text":"请处理"}`, map[string]string{
+		"mention_user_ids": `["ou-bot"]`,
+		"mention_names":    `["目标机器人"]`,
+	})
+	var payload map[string]string
+	if msgType != "text" || json.Unmarshal([]byte(content), &payload) != nil ||
+		!strings.Contains(payload["text"], `<at user_id="ou-bot">目标机器人</at>`) ||
+		!strings.Contains(payload["text"], "请处理") {
+		t.Fatalf("text content type=%s content=%s", msgType, content)
 	}
 }
 

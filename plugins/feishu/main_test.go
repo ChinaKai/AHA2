@@ -77,6 +77,23 @@ func TestRegistrationRequestsInboundAndOutboundMediaScopes(t *testing.T) {
 	}
 }
 
+func TestRegistrationRequestsBotMessagingScopes(t *testing.T) {
+	t.Parallel()
+	scopes := registrationTenantScopes()
+	for _, required := range []string{"im:message.group_at_msg.include_bot:readonly", "application:bot.basic_info:read"} {
+		found := false
+		for _, scope := range scopes {
+			if scope == required {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("registration missing bot messaging scope %s", required)
+		}
+	}
+}
+
 func TestNewAppMenuInitializationRequestsMediaScopes(t *testing.T) {
 	t.Parallel()
 	configured := false
@@ -170,6 +187,43 @@ func TestGroupMemberDisplayNameUsesChatMembership(t *testing.T) {
 	}}))
 	if name := groupMemberDisplayName(context.Background(), client, "chat-test", "sender-open"); name != "群成员张三" {
 		t.Fatalf("name=%q", name)
+	}
+}
+
+func TestSyncChatMembersCommandListsMembersWithoutInboundMessages(t *testing.T) {
+	t.Parallel()
+	queries := []string{}
+	client := lark.NewClient("app", "secret", lark.WithHttpClient(mockHTTPClient{do: func(request *http.Request) (*http.Response, error) {
+		header := make(http.Header)
+		header.Set("Content-Type", "application/json")
+		body := `{"code":0,"msg":"success"}`
+		switch request.URL.Path {
+		case "/open-apis/auth/v3/tenant_access_token/internal":
+			body = `{"code":0,"msg":"success","tenant_access_token":"tenant-token","expire":7200}`
+		case "/open-apis/im/v1/chats/chat-test/members":
+			queries = append(queries, request.URL.RawQuery)
+			if request.URL.Query().Get("page_token") == "" {
+				body = `{"code":0,"msg":"success","data":{"items":[{"member_id_type":"open_id","member_id":"member-open","name":"云端李四"}],"has_more":true,"page_token":"next-page"}}`
+			} else {
+				body = `{"code":0,"msg":"success","data":{"items":[{"member_id_type":"open_id","member_id":"member-open-2","name":"固件王五"}],"has_more":false}}`
+			}
+		}
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: header}, nil
+	}}))
+	result, err := syncChatMembersCommand(context.Background(), client, command{
+		Payload: map[string]any{"conversation_id": "conversation-test", "external_chat_id": "chat-test"},
+	})
+	members, _ := result["members"].([]map[string]any)
+	if err != nil || len(members) != 2 || members[0]["external_user_id"] != "member-open" ||
+		members[0]["display_name"] != "云端李四" || members[0]["is_bot"] != false ||
+		members[1]["external_user_id"] != "member-open-2" {
+		t.Fatalf("members=%#v err=%v", members, err)
+	}
+	if len(queries) != 2 ||
+		!strings.Contains(queries[0], "member_id_type=open_id") ||
+		!strings.Contains(queries[0], "page_size=100") ||
+		!strings.Contains(queries[1], "page_token=next-page") {
+		t.Fatalf("chat member queries=%#v", queries)
 	}
 }
 

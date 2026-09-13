@@ -186,29 +186,31 @@ func latestUsageTurn(turns []domain.Turn) domain.Turn {
 
 func (s *Server) createTask(writer http.ResponseWriter, request *http.Request) {
 	var payload struct {
-		ProjectID         string   `json:"project_id"`
-		WorkspaceID       string   `json:"workspace_id"`
-		Title             string   `json:"title"`
-		Request           string   `json:"request"`
-		TargetBranch      string   `json:"target_branch"`
-		BaseCommit        string   `json:"base_commit"`
-		TaskBranch        string   `json:"task_branch"`
-		Isolation         string   `json:"isolation"`
-		WorktreeDir       string   `json:"worktree_dir"`
-		Backend           string   `json:"backend"`
-		ModelSource       string   `json:"model_source"`
-		ModelID           string   `json:"model_id"`
-		WireModel         string   `json:"wire_model"`
-		CodexAccountID    string   `json:"codex_account_id"`
-		ReasoningEffort   string   `json:"reasoning_effort"`
-		Filesystem        string   `json:"filesystem"`
-		Approval          string   `json:"approval"`
-		ProxyEnabled      bool     `json:"proxy_enabled"`
-		CollaborationMode string   `json:"collaboration_mode"`
-		MaxAgents         int      `json:"max_agents"`
-		KnowledgePolicy   string   `json:"knowledge_policy"`
-		SkillIDs          []string `json:"skill_ids"`
-		StartMode         string   `json:"start_mode"`
+		ProjectID           string   `json:"project_id"`
+		WorkspaceID         string   `json:"workspace_id"`
+		Title               string   `json:"title"`
+		Request             string   `json:"request"`
+		TargetBranch        string   `json:"target_branch"`
+		BaseCommit          string   `json:"base_commit"`
+		TaskBranch          string   `json:"task_branch"`
+		Isolation           string   `json:"isolation"`
+		WorktreeDir         string   `json:"worktree_dir"`
+		Backend             string   `json:"backend"`
+		ModelSource         string   `json:"model_source"`
+		ModelID             string   `json:"model_id"`
+		WireModel           string   `json:"wire_model"`
+		CodexAccountID      string   `json:"codex_account_id"`
+		ReasoningEffort     string   `json:"reasoning_effort"`
+		StreamIdleTimeoutMS *int     `json:"stream_idle_timeout_ms"`
+		StreamMaxRetries    *int     `json:"stream_max_retries"`
+		Filesystem          string   `json:"filesystem"`
+		Approval            string   `json:"approval"`
+		ProxyEnabled        bool     `json:"proxy_enabled"`
+		CollaborationMode   string   `json:"collaboration_mode"`
+		MaxAgents           int      `json:"max_agents"`
+		KnowledgePolicy     string   `json:"knowledge_policy"`
+		SkillIDs            []string `json:"skill_ids"`
+		StartMode           string   `json:"start_mode"`
 	}
 	if err := decodeJSON(request, &payload); err != nil {
 		writeError(writer, http.StatusBadRequest, "invalid_json")
@@ -247,6 +249,7 @@ func (s *Server) createTask(writer http.ResponseWriter, request *http.Request) {
 		Isolation: payload.Isolation, WorktreeDir: payload.WorktreeDir, Backend: payload.Backend,
 		ModelSource: payload.ModelSource, ModelID: payload.ModelID, WireModel: payload.WireModel,
 		CodexAccountID: payload.CodexAccountID, ReasoningEffort: payload.ReasoningEffort,
+		StreamIdleTimeoutMS: payload.StreamIdleTimeoutMS, StreamMaxRetries: payload.StreamMaxRetries,
 		Filesystem: filesystem, Approval: approval, CollaborationMode: payload.CollaborationMode,
 		MaxAgents: payload.MaxAgents, ProxyEnabled: payload.ProxyEnabled, KnowledgePolicy: payload.KnowledgePolicy,
 		SkillIDs: payload.SkillIDs, StartMode: payload.StartMode,
@@ -906,16 +909,18 @@ func (s *Server) updateAgentConfig(writer http.ResponseWriter, request *http.Req
 		return
 	}
 	var payload struct {
-		Backend         string `json:"backend"`
-		ModelSource     string `json:"model_source"`
-		ModelID         string `json:"model_id"`
-		WireModel       string `json:"wire_model"`
-		CodexAccountID  string `json:"codex_account_id"`
-		ReasoningEffort string `json:"reasoning_effort"`
-		Filesystem      string `json:"filesystem"`
-		Approval        string `json:"approval"`
-		ProxyEnabled    *bool  `json:"proxy_enabled"`
-		InheritMain     *bool  `json:"inherit_main"`
+		Backend             string `json:"backend"`
+		ModelSource         string `json:"model_source"`
+		ModelID             string `json:"model_id"`
+		WireModel           string `json:"wire_model"`
+		CodexAccountID      string `json:"codex_account_id"`
+		ReasoningEffort     string `json:"reasoning_effort"`
+		StreamIdleTimeoutMS *int   `json:"stream_idle_timeout_ms"`
+		StreamMaxRetries    *int   `json:"stream_max_retries"`
+		Filesystem          string `json:"filesystem"`
+		Approval            string `json:"approval"`
+		ProxyEnabled        *bool  `json:"proxy_enabled"`
+		InheritMain         *bool  `json:"inherit_main"`
 	}
 	if err := decodeJSON(request, &payload); err != nil {
 		writeError(writer, http.StatusBadRequest, "invalid_json")
@@ -926,6 +931,7 @@ func (s *Server) updateAgentConfig(writer http.ResponseWriter, request *http.Req
 		app.UpdateAgentConfigInput{
 			Backend: payload.Backend, ModelSource: payload.ModelSource, ModelID: payload.ModelID,
 			WireModel: payload.WireModel, CodexAccountID: payload.CodexAccountID, ReasoningEffort: payload.ReasoningEffort,
+			StreamIdleTimeoutMS: payload.StreamIdleTimeoutMS, StreamMaxRetries: payload.StreamMaxRetries,
 			Filesystem: payload.Filesystem, Approval: payload.Approval, ProxyEnabled: payload.ProxyEnabled, InheritMain: payload.InheritMain,
 		},
 	)

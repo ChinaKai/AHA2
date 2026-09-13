@@ -103,6 +103,13 @@ func TestMigrationV8BackfillsRoundsAndConversation(t *testing.T) {
 	if model.Source != "provider" || model.CodexAccountID != "" {
 		t.Fatalf("Codex account migration defaults are invalid: %#v", model)
 	}
+	snapshot, err := database.RuntimeSnapshot(ctx, "runtime-v7")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.StreamIdleTimeoutMS != 0 || snapshot.StreamMaxRetries != 0 {
+		t.Fatalf("legacy runtime snapshot must preserve Codex defaults: %#v", snapshot)
+	}
 	proxy, err := database.ProxySettings(ctx)
 	if err != nil || proxy.Mode != "external" || proxy.HTTPProxy != "http://127.0.0.1:7897" || proxy.HTTPSProxy != proxy.HTTPProxy || proxy.NoProxy == "" || proxy.ManagedRefreshIntervalMins != 1440 {
 		t.Fatalf("proxy migration defaults are invalid: %#v %v", proxy, err)
@@ -211,6 +218,167 @@ func TestRepeatMigrationDoesNotRecreateTaskLevelActiveTurnIndex(t *testing.T) {
 	}
 	if legacyIndex != 0 {
 		t.Fatal("legacy task-level active turn index was recreated")
+	}
+}
+
+func TestChannelPrimaryRouteMigration(t *testing.T) {
+	ctx := context.Background()
+	database, err := Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var migrated bool
+	if err := database.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=55)`).Scan(&migrated); err != nil || !migrated {
+		t.Fatalf("schema v55 migrated=%v err=%v", migrated, err)
+	}
+	if err := database.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=56)`).Scan(&migrated); err != nil || !migrated {
+		t.Fatalf("schema v56 migrated=%v err=%v", migrated, err)
+	}
+	if err := database.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=57)`).Scan(&migrated); err != nil || !migrated {
+		t.Fatalf("schema v57 migrated=%v err=%v", migrated, err)
+	}
+	if err := database.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=58)`).Scan(&migrated); err != nil || !migrated {
+		t.Fatalf("schema v58 migrated=%v err=%v", migrated, err)
+	}
+	if err := database.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=59)`).Scan(&migrated); err != nil || !migrated {
+		t.Fatalf("schema v59 migrated=%v err=%v", migrated, err)
+	}
+	if err := database.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=60)`).Scan(&migrated); err != nil || !migrated {
+		t.Fatalf("schema v60 migrated=%v err=%v", migrated, err)
+	}
+	if err := database.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=61)`).Scan(&migrated); err != nil || !migrated {
+		t.Fatalf("schema v61 migrated=%v err=%v", migrated, err)
+	}
+	if err := database.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=63)`).Scan(&migrated); err != nil || !migrated {
+		t.Fatalf("schema v63 migrated=%v err=%v", migrated, err)
+	}
+	if err := database.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=65)`).Scan(&migrated); err != nil || !migrated {
+		t.Fatalf("schema v65 migrated=%v err=%v", migrated, err)
+	}
+	var streamIdleColumn, streamRetriesColumn bool
+	if err := database.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM pragma_table_info('runtime_config_snapshots') WHERE name='stream_idle_timeout_ms')`).Scan(&streamIdleColumn); err != nil || !streamIdleColumn {
+		t.Fatalf("runtime stream idle column=%v err=%v", streamIdleColumn, err)
+	}
+	if err := database.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM pragma_table_info('runtime_config_snapshots') WHERE name='stream_max_retries')`).Scan(&streamRetriesColumn); err != nil || !streamRetriesColumn {
+		t.Fatalf("runtime stream retries column=%v err=%v", streamRetriesColumn, err)
+	}
+	var displayNameColumn bool
+	if err := database.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM pragma_table_info('channel_conversations') WHERE name='display_name')`).Scan(&displayNameColumn); err != nil || !displayNameColumn {
+		t.Fatalf("channel display_name column=%v err=%v", displayNameColumn, err)
+	}
+	var membersSyncedColumn bool
+	if err := database.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM pragma_table_info('channel_conversations') WHERE name='members_synced_at')`).Scan(&membersSyncedColumn); err != nil || !membersSyncedColumn {
+		t.Fatalf("channel members_synced_at column=%v err=%v", membersSyncedColumn, err)
+	}
+	var providerActiveColumn bool
+	if err := database.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM pragma_table_info('channel_conversation_members') WHERE name='provider_active')`).Scan(&providerActiveColumn); err != nil || !providerActiveColumn {
+		t.Fatalf("channel provider_active column=%v err=%v", providerActiveColumn, err)
+	}
+	var memberSourceColumn bool
+	if err := database.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM pragma_table_info('channel_conversation_members') WHERE name='source')`).Scan(&memberSourceColumn); err != nil || !memberSourceColumn {
+		t.Fatalf("channel member source column=%v err=%v", memberSourceColumn, err)
+	}
+	var botDirectoryTable bool
+	if err := database.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='sync_channel_bot_directory')`).Scan(&botDirectoryTable); err != nil || botDirectoryTable {
+		t.Fatalf("channel bot directory table=%v err=%v", botDirectoryTable, err)
+	}
+	var primaryRouteIndex bool
+	if err := database.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_channel_task_routes_one_active_task')`).Scan(&primaryRouteIndex); err != nil || !primaryRouteIndex {
+		t.Fatalf("primary route index=%v err=%v", primaryRouteIndex, err)
+	}
+}
+
+func TestSchemaV63SeparatesBotDisplayNameOverride(t *testing.T) {
+	ctx := context.Background()
+	database, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if _, err := database.ExecContext(ctx, `
+		CREATE TABLE channel_instances(
+			id TEXT PRIMARY KEY,
+			config_json TEXT NOT NULL
+		);
+		INSERT INTO channel_instances(id,config_json) VALUES
+			('legacy','{"runtime_bot_display_name":"AHA-WORK"}'),
+			('existing','{"runtime_bot_display_name":"Provider Old","runtime_bot_display_name_override":"Owner Name","runtime_bot_provider_display_name":"Provider New"}');
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.ExecContext(ctx, schemaV63); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		id       string
+		override string
+		provider string
+	}{
+		{id: "legacy", override: "AHA-WORK", provider: "AHA-WORK"},
+		{id: "existing", override: "Owner Name", provider: "Provider New"},
+	} {
+		var override, provider string
+		var legacy any
+		if err := database.QueryRowContext(ctx, `
+			SELECT json_extract(config_json,'$.runtime_bot_display_name_override'),
+			       json_extract(config_json,'$.runtime_bot_provider_display_name'),
+			       json_extract(config_json,'$.runtime_bot_display_name')
+			FROM channel_instances WHERE id=?`, test.id).Scan(&override, &provider, &legacy); err != nil {
+			t.Fatal(err)
+		}
+		if override != test.override || provider != test.provider || legacy != nil {
+			t.Fatalf("%s override=%q provider=%q legacy=%#v", test.id, override, provider, legacy)
+		}
+	}
+	if _, err := database.ExecContext(ctx, schemaV63); err != nil {
+		t.Fatalf("repeat schema v63: %v", err)
+	}
+}
+
+func TestSchemaV61RestoresObservedBotsFromHistory(t *testing.T) {
+	ctx := context.Background()
+	database, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if _, err := database.ExecContext(ctx, `
+		CREATE TABLE channel_conversation_members(
+			conversation_id TEXT NOT NULL,
+			identity_link_id TEXT NOT NULL,
+			is_bot INTEGER NOT NULL,
+			observed_at TEXT NOT NULL,
+			provider_seen_at TEXT NOT NULL,
+			provider_active INTEGER NOT NULL,
+			source TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);
+		CREATE TABLE conversation_items(payload_json TEXT NOT NULL,created_at TEXT NOT NULL);
+		INSERT INTO channel_conversation_members VALUES(
+			'conversation-1','identity-bot',0,'','',0,'observed','2026-09-12T00:00:00Z'
+		);
+		INSERT INTO conversation_items VALUES(
+			'{"channel_context":{"conversation_id":"conversation-1","mentions":[{"identity_link_id":"identity-bot","is_bot":true}]}}',
+			'2026-09-12T00:01:00Z'
+		);
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.ExecContext(ctx, schemaV61); err != nil {
+		t.Fatal(err)
+	}
+	var isBot, providerActive int
+	var source, observedAt string
+	if err := database.QueryRowContext(ctx, `
+		SELECT is_bot,provider_active,source,observed_at
+		FROM channel_conversation_members
+		WHERE conversation_id='conversation-1' AND identity_link_id='identity-bot'
+	`).Scan(&isBot, &providerActive, &source, &observedAt); err != nil {
+		t.Fatal(err)
+	}
+	if isBot != 1 || providerActive != 0 || source != "observed" || observedAt != "2026-09-12T00:01:00Z" {
+		t.Fatalf("historical bot was not restored: is_bot=%d provider_active=%d source=%q observed_at=%q", isBot, providerActive, source, observedAt)
 	}
 }
 

@@ -60,7 +60,11 @@ internal/secrets
   本地受限 Secret Store
 
 internal/prompt
-  Global KB、Project KB、Task Memory 与当前输入的 Prompt Pack
+  Global KB、Project KB、近期完整问答、恢复提示与当前输入的 Prompt Pack
+
+Runtime Config Snapshot
+  保存 Task/Agent 的 Backend、模型、推理强度、权限、代理和 Codex SSE 空闲超时/重试参数；
+  修改后只影响下一 Turn，不因传输参数变化轮换 Backend Session
 
 internal/webassets
   Web 构建产物
@@ -80,7 +84,7 @@ Owner 初始化 / 登录
 -> 创建 Task
 -> 自动创建并执行首个 Turn
 -> 创建独立 Task Turn
--> 注入 Task Memory 与 KB
+-> 注入近期完整问答、恢复提示与 KB
 -> 调用 Codex / Stub
 -> 持久化事件和回复
 -> 复用 Backend Session

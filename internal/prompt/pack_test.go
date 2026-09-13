@@ -1,33 +1,51 @@
 package prompt
 
 import (
+	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/ChinaKai/AHA2/internal/domain"
+	"github.com/ChinaKai/AHA2/internal/store"
 )
 
-func TestMemoryAndKnowledgeFormatting(t *testing.T) {
+func TestProtocolTemplatesAreFocusedAndFileBacked(t *testing.T) {
 	t.Parallel()
-	value := memoryText(domain.TaskMemory{Facts: []string{"turn is persistent"}}) + "\n" +
-		knowledgeText([]domain.KnowledgeEntry{{
-			Title: "State boundary", Body: "Task and Turn differ.", Status: domain.KnowledgeVerified, Confidence: 0.9,
-		}})
-	for _, expected := range []string{"turn is persistent", "State boundary"} {
-		if !strings.Contains(value, expected) {
-			t.Fatalf("prompt does not contain %q", expected)
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	engine := NewEngine(database)
+	knowledge := templateContent(t, engine, ctx, "protocol.knowledge")
+	agentAPI := templateContent(t, engine, ctx, "protocol.agent-api")
+	for _, expected := range []string{
+		"progressive, index-first", "perform one Knowledge closeout",
+		"pending proposal is not current guidance",
+	} {
+		if !strings.Contains(knowledge, expected) {
+			t.Fatalf("Knowledge Protocol does not contain %q", expected)
 		}
+	}
+	for _, expected := range []string{
+		"Task-scoped Agent Control API", "Never print, persist, or expose its token",
+		"Only Main may change durable Task state", "final response concise and natural-language only",
+	} {
+		if !strings.Contains(agentAPI, expected) {
+			t.Fatalf("Agent Control API Protocol does not contain %q", expected)
+		}
+	}
+	if len([]rune(knowledge)) > 1800 || len([]rune(agentAPI)) > 1400 {
+		t.Fatalf("protocol templates regressed to verbose copies: knowledge=%d agent_api=%d", len([]rune(knowledge)), len([]rune(agentAPI)))
 	}
 }
 
-func TestKnowledgeProtocolRequiresTurnCloseout(t *testing.T) {
-	for _, expected := range []string{
-		"Before the final response of every Turn, perform a Knowledge closeout",
-		"the Main Agent must submit a Knowledge candidate or revision",
-		"explicitly record that no Knowledge submission is needed",
-	} {
-		if !strings.Contains(knowledgeProtocol, expected) {
-			t.Fatalf("knowledge protocol does not contain %q", expected)
+func TestBuiltinPromptContentIsNotEmbeddedInGo(t *testing.T) {
+	t.Parallel()
+	for _, item := range builtinTemplates {
+		if strings.TrimSpace(item.Content) != "" {
+			t.Fatalf("template %s embeds prompt content in Go", item.ID)
 		}
 	}
 }

@@ -67,6 +67,13 @@ type ActionPreviewInput struct {
 	Intent    map[string]any `json:"intent,omitempty"`
 }
 
+type AgentOutreachInput struct {
+	RequestID              string   `json:"request_id"`
+	Purpose                string   `json:"purpose"`
+	Message                string   `json:"message"`
+	MentionIdentityLinkIDs []string `json:"mention_identity_link_ids"`
+}
+
 type KnowledgeGrantInput struct {
 	KnowledgeEntryID string `json:"knowledge_entry_id"`
 	GrantScope       string `json:"grant_scope"`
@@ -178,6 +185,142 @@ func (s *Service) Instance(ctx context.Context, ownerID, id string) (domain.Chan
 	return item, endpoints, err
 }
 
+func (s *Service) TaskChannelRoutes(ctx context.Context, ownerID, taskID string) ([]domain.ChannelDestination, domain.ChannelTaskRoute, error) {
+	task, err := s.store.Task(ctx, taskID)
+	if err != nil || task.ReadOnly || s.store.IsManagedChannelTask(ctx, taskID) {
+		if err == nil {
+			err = fmt.Errorf("task is not eligible for a primary channel")
+		}
+		return nil, domain.ChannelTaskRoute{}, err
+	}
+	destinations, err := s.store.ChannelDestinations(ctx, ownerID)
+	if err != nil {
+		return nil, domain.ChannelTaskRoute{}, err
+	}
+	filtered := destinations[:0]
+	for _, destination := range destinations {
+		instance, instanceErr := s.store.ChannelInstance(ctx, destination.InstanceID)
+		if instanceErr == nil && channelOperationAllowed(instance.Config, task.ProjectID, task.WorkspaceID) {
+			filtered = append(filtered, destination)
+		}
+	}
+	route, routeErr := s.store.ActiveChannelTaskRouteForTask(ctx, taskID)
+	if routeErr != nil && !errors.Is(routeErr, sql.ErrNoRows) {
+		return nil, domain.ChannelTaskRoute{}, routeErr
+	}
+	return filtered, route, nil
+}
+
+func (s *Service) OwnerTaskChannelContacts(ctx context.Context, ownerID, taskID string) ([]domain.ChannelContact, error) {
+	route, err := s.store.ActiveChannelTaskRouteForTask(ctx, taskID)
+	if err != nil {
+		return nil, err
+	}
+	destination, err := s.store.ChannelDestination(ctx, ownerID, route.ConversationID)
+	if err != nil || destination.EndpointKind != domain.ChannelEndpointGroupDigitalHuman {
+		if err == nil {
+			return []domain.ChannelContact{}, nil
+		}
+		return nil, err
+	}
+	return s.store.TaskChannelContacts(ctx, taskID, route.InstanceID, route.ConversationID, 50)
+}
+
+func (s *Service) OwnerTaskChannelMembers(ctx context.Context, ownerID, taskID string) ([]domain.ChannelGroupMember, error) {
+	route, err := s.store.ActiveChannelTaskRouteForTask(ctx, taskID)
+	if err != nil {
+		return nil, err
+	}
+	destination, err := s.store.ChannelDestination(ctx, ownerID, route.ConversationID)
+	if err != nil || destination.EndpointKind != domain.ChannelEndpointGroupDigitalHuman {
+		if err == nil {
+			return []domain.ChannelGroupMember{}, nil
+		}
+		return nil, err
+	}
+	return s.store.ChannelMembersForConversation(ctx, route.InstanceID, route.ConversationID, 500)
+}
+
+func (s *Service) SetOwnerTaskChannelContacts(ctx context.Context, ownerID, taskID string, contacts []store.TaskChannelContactInput) ([]domain.ChannelContact, error) {
+	if len(contacts) > 50 {
+		return nil, fmt.Errorf("choose no more than 50 task channel contacts")
+	}
+	route, err := s.store.ActiveChannelTaskRouteForTask(ctx, taskID)
+	if err != nil {
+		return nil, err
+	}
+	destination, err := s.store.ChannelDestination(ctx, ownerID, route.ConversationID)
+	if err != nil || destination.EndpointKind != domain.ChannelEndpointGroupDigitalHuman {
+		return nil, fmt.Errorf("task primary channel is not a group chat")
+	}
+	if err := s.store.ReplaceTaskChannelContacts(ctx, taskID, route.InstanceID, route.ConversationID, contacts, s.now().UTC()); err != nil {
+		return nil, err
+	}
+	return s.store.TaskChannelContacts(ctx, taskID, route.InstanceID, route.ConversationID, 50)
+}
+
+func (s *Service) RefreshOwnerTaskChannelMembers(ctx context.Context, ownerID, taskID string) (domain.ChannelPluginCommand, error) {
+	route, err := s.store.ActiveChannelTaskRouteForTask(ctx, taskID)
+	if err != nil {
+		return domain.ChannelPluginCommand{}, err
+	}
+	destination, err := s.store.ChannelDestination(ctx, ownerID, route.ConversationID)
+	if err != nil || destination.EndpointKind != domain.ChannelEndpointGroupDigitalHuman {
+		return domain.ChannelPluginCommand{}, fmt.Errorf("task primary channel is not a group chat")
+	}
+	conversation, err := s.store.ChannelConversation(ctx, route.ConversationID)
+	if err != nil || strings.TrimSpace(conversation.ExternalChatID) == "" {
+		return domain.ChannelPluginCommand{}, fmt.Errorf("group chat destination is unavailable")
+	}
+	return s.enqueueChannelMemberSync(ctx, route, conversation)
+}
+
+func (s *Service) enqueueChannelMemberSync(ctx context.Context, route domain.ChannelTaskRoute, conversation domain.ChannelConversation) (domain.ChannelPluginCommand, error) {
+	return s.EnqueueCommand(ctx, route.InstanceID, "sync_chat_members", domain.NewID("channel_member_sync"), map[string]any{
+		"conversation_id":  conversation.ID,
+		"external_chat_id": conversation.ExternalChatID,
+	})
+}
+
+func (s *Service) BindTaskChannelRoute(ctx context.Context, ownerID, taskID, conversationID string) (domain.ChannelTaskRoute, error) {
+	task, err := s.store.Task(ctx, taskID)
+	if err != nil || task.ReadOnly || s.store.IsManagedChannelTask(ctx, taskID) || !taskRouteEligible(task.Status) {
+		return domain.ChannelTaskRoute{}, fmt.Errorf("task is not eligible for a primary channel")
+	}
+	destination, err := s.store.ChannelDestination(ctx, ownerID, conversationID)
+	if err != nil {
+		return domain.ChannelTaskRoute{}, fmt.Errorf("channel destination is not available")
+	}
+	if destination.TargetTaskID != "" && destination.TargetTaskID != taskID {
+		return domain.ChannelTaskRoute{}, fmt.Errorf("channel destination is already connected to another task")
+	}
+	instance, err := s.store.ChannelInstance(ctx, destination.InstanceID)
+	if err != nil || (instance.Status != "ready" && instance.Status != "degraded") || !channelOperationAllowed(instance.Config, task.ProjectID, task.WorkspaceID) {
+		return domain.ChannelTaskRoute{}, fmt.Errorf("channel destination is not eligible for this task")
+	}
+	if current, currentErr := s.store.ActiveChannelTaskRouteForTask(ctx, taskID); currentErr == nil && current.ConversationID == conversationID {
+		return current, nil
+	}
+	route, err := s.store.ActivateOwnerChannelTaskRoute(ctx, destination.InstanceID, conversationID, taskID, s.now().UTC())
+	if err != nil {
+		return domain.ChannelTaskRoute{}, err
+	}
+	if destination.EndpointKind == domain.ChannelEndpointGroupDigitalHuman {
+		if conversation, conversationErr := s.store.ChannelConversation(ctx, conversationID); conversationErr == nil {
+			_, _ = s.enqueueChannelMemberSync(ctx, route, conversation)
+		}
+	}
+	return route, nil
+}
+
+func (s *Service) UnbindTaskChannelRoute(ctx context.Context, ownerID, taskID, routeID string) error {
+	route, err := s.store.ChannelRouteOwnedBy(ctx, routeID, ownerID)
+	if err != nil || route.TargetTaskID != taskID || route.State != "active" {
+		return fmt.Errorf("active task channel route was not found")
+	}
+	return s.store.ExitOwnerChannelTaskRoute(ctx, route.ID, taskID, s.now().UTC())
+}
+
 func (s *Service) SetPluginEnabled(ctx context.Context, id string, enabled bool, revision int) (domain.ChannelPlugin, error) {
 	item, err := s.store.UpdateChannelPluginEnabled(ctx, id, enabled, revision, s.now().UTC())
 	if err != nil || enabled {
@@ -265,6 +408,23 @@ func stableID(prefix string, values ...string) string {
 	return prefix + "_" + hex.EncodeToString(digest[:12])
 }
 
+func safeChannelDisplayName(value, fallbackPrefix, instanceID, externalID string) string {
+	value = strings.Map(func(r rune) rune {
+		if r == '\r' || r == '\n' || r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, strings.TrimSpace(value))
+	if len([]rune(value)) > 60 {
+		value = string([]rune(value)[:60])
+	}
+	if value != "" {
+		return value
+	}
+	digest := sha256.Sum256([]byte(instanceID + "\x00" + externalID))
+	return fallbackPrefix + " " + hex.EncodeToString(digest[:3])
+}
+
 func (s *Service) UpdateInstance(ctx context.Context, ownerID, id, name string, config map[string]any, expectedRevision int) (domain.ChannelInstance, error) {
 	item, err := s.store.ChannelInstance(ctx, id)
 	if err != nil || item.OwnerID != ownerID {
@@ -287,6 +447,9 @@ func (s *Service) UpdateInstance(ctx context.Context, ownerID, id, name string, 
 		for key, value := range config {
 			merged[key] = value
 		}
+		if value, present := config["runtime_bot_display_name_override"]; present {
+			merged["runtime_bot_display_name_override"] = strings.TrimSpace(fmt.Sprint(value))
+		}
 		if err := s.validateChannelInstanceConfig(ctx, item, merged); err != nil {
 			return domain.ChannelInstance{}, err
 		}
@@ -297,6 +460,20 @@ func (s *Service) UpdateInstance(ctx context.Context, ownerID, id, name string, 
 }
 
 func (s *Service) validateChannelInstanceConfig(ctx context.Context, instance domain.ChannelInstance, config map[string]any) error {
+	if value, present := config["runtime_bot_display_name_override"]; present {
+		displayName, ok := value.(string)
+		if !ok || len([]rune(displayName)) > 60 || strings.IndexFunc(displayName, func(r rune) bool {
+			return r == '\r' || r == '\n' || r < 0x20 || r == 0x7f
+		}) >= 0 {
+			return fmt.Errorf("invalid channel bot display name")
+		}
+	}
+	if _, present := config["bot_dialogue_max_turns"]; present {
+		maxTurns := intField(config, "bot_dialogue_max_turns")
+		if maxTurns < 1 || maxTurns > 50 {
+			return fmt.Errorf("invalid bot dialogue max turns")
+		}
+	}
 	mode := stringField(config, "operation_scope_mode")
 	if mode != "" && mode != "all" && mode != "selected" {
 		return fmt.Errorf("invalid channel operation scope mode")
@@ -762,7 +939,71 @@ func (s *Service) CompleteCommand(ctx context.Context, claims RuntimeClaims, id,
 		}
 		return s.store.RetryChannelMediaCommand(ctx, claims.InstanceID, id, leaseID, errorCode, s.now().UTC())
 	}
+	if command, err := s.store.ChannelCommand(ctx, claims.InstanceID, id); err == nil && command.Kind == "sync_chat_members" && success {
+		if command.State != "leased" || command.LeaseID != leaseID || !command.LeaseUntil.After(s.now().UTC()) {
+			return store.ErrChannelRevision
+		}
+		if err := s.applyChannelMemberSync(ctx, command, result); err != nil {
+			return err
+		}
+	}
 	return s.store.CompleteChannelCommand(ctx, claims.InstanceID, id, leaseID, success, result, errorCode, s.now().UTC())
+}
+
+func (s *Service) applyChannelMemberSync(ctx context.Context, command domain.ChannelPluginCommand, result map[string]any) error {
+	conversationID := strings.TrimSpace(fmt.Sprint(command.Payload["conversation_id"]))
+	conversation, err := s.store.ChannelConversation(ctx, conversationID)
+	if err != nil || conversation.InstanceID != command.InstanceID {
+		return fmt.Errorf("invalid_envelope")
+	}
+	rawMembers, ok := result["members"].([]any)
+	if !ok {
+		raw, marshalErr := json.Marshal(result["members"])
+		if marshalErr != nil || json.Unmarshal(raw, &rawMembers) != nil {
+			return fmt.Errorf("invalid_envelope")
+		}
+	}
+	if len(rawMembers) > 1000 {
+		return fmt.Errorf("invalid_envelope")
+	}
+	now := s.now().UTC()
+	members := make([]store.ChannelMemberInput, 0, len(rawMembers))
+	seen := map[string]bool{}
+	for _, rawMember := range rawMembers {
+		member, ok := rawMember.(map[string]any)
+		if !ok {
+			continue
+		}
+		externalID := strings.TrimSpace(fmt.Sprint(member["external_user_id"]))
+		if externalID == "" || externalID == "<nil>" || seen[externalID] {
+			continue
+		}
+		seen[externalID] = true
+		isBot, _ := member["is_bot"].(bool)
+		fallback := "群成员"
+		if isBot {
+			fallback = "群机器人"
+		}
+		displayName := strings.TrimSpace(fmt.Sprint(member["display_name"]))
+		if displayName == "<nil>" {
+			displayName = ""
+		} else if displayName != "" {
+			displayName = safeChannelDisplayName(displayName, fallback, command.InstanceID, externalID)
+		}
+		identity, linkErr := s.store.UpsertObservedChannelParticipant(ctx, domain.ChannelIdentityLink{
+			ID: domain.NewID("channel_identity"), InstanceID: command.InstanceID, ExternalUserID: externalID,
+			Role: "participant", DisplayName: displayName,
+			Status: "active", LinkedAt: now,
+		}, safeChannelDisplayName("", fallback, command.InstanceID, externalID))
+		if linkErr != nil {
+			return linkErr
+		}
+		members = append(members, store.ChannelMemberInput{IdentityLinkID: identity.ID, IsBot: isBot})
+	}
+	if err := s.store.ReplaceProviderChannelMembers(ctx, conversation.ID, members, now); err != nil {
+		return err
+	}
+	return s.store.EnsureCurrentChannelBot(ctx, conversation.ID, now)
 }
 
 func (s *Service) ClaimDeliveries(ctx context.Context, claims RuntimeClaims, limit int) ([]domain.ChannelDelivery, error) {
@@ -774,7 +1015,7 @@ func (s *Service) ClaimDeliveries(ctx context.Context, claims RuntimeClaims, lim
 		return nil, err
 	}
 	for index := range items {
-		items[index].Target, _ = s.store.ChannelDeliveryTarget(ctx, items[index].ConversationID)
+		items[index].Target, _ = s.store.ChannelDeliveryTarget(ctx, items[index].ConversationID, items[index].SourceEventSequence)
 		if items[index].SemanticPayload["kind"] == "action_result" {
 			actionID := strings.TrimSpace(fmt.Sprint(items[index].SemanticPayload["action_id"]))
 			if messageID, messageErr := s.store.ChannelActionProviderMessage(ctx, actionID, claims.InstanceID); messageErr == nil && messageID != "" {
@@ -800,7 +1041,7 @@ func (s *Service) NackDelivery(ctx context.Context, claims RuntimeClaims, id, le
 	return s.store.NackChannelDelivery(ctx, claims.InstanceID, id, leaseID, errorCode, certainty, retryAfter, permanent, s.now().UTC())
 }
 
-func (s *Service) UpdateHealth(ctx context.Context, claims RuntimeClaims, status, errorCode string) error {
+func (s *Service) UpdateHealth(ctx context.Context, claims RuntimeClaims, status, errorCode string, metadata ...map[string]string) error {
 	if !claims.Scopes["channel.health.write"] {
 		return fmt.Errorf("capability_scope_denied")
 	}
@@ -815,7 +1056,7 @@ func (s *Service) UpdateHealth(ctx context.Context, claims RuntimeClaims, status
 		delete(s.processFailures, claims.InstanceID)
 		s.processMu.Unlock()
 	}
-	return s.store.UpdateChannelInstanceHealth(ctx, claims.InstanceID, status, errorCode, s.now().UTC())
+	return s.store.UpdateChannelInstanceHealth(ctx, claims.InstanceID, status, errorCode, s.now().UTC(), metadata...)
 }
 
 func containsSensitiveField(value any) bool {
@@ -941,46 +1182,109 @@ func (s *Service) processInbound(ctx context.Context, receipt domain.ChannelInbo
 	role := "participant"
 	var identity domain.ChannelIdentityLink
 	if envelope.ChatType == "p2p" {
+		if strings.TrimSpace(envelope.SenderDisplayName) != "" {
+			envelope.SenderDisplayName = safeChannelDisplayName(envelope.SenderDisplayName, "Owner", instance.ID, envelope.ExternalSenderID)
+		}
 		endpointKind = domain.ChannelEndpointAssistantDM
 		role = "owner"
 		identity, err = s.store.ChannelOwnerIdentity(ctx, instance.ID)
 		if err != nil || identity.ExternalUserID != envelope.ExternalSenderID || identity.OwnerID != instance.OwnerID {
 			return fmt.Errorf("channel owner identity is required")
 		}
+		if identity.DisplayName == "" {
+			identity.DisplayName = envelope.SenderDisplayName
+			if identity.DisplayName == "" {
+				if owner, ownerErr := s.store.OwnerByID(ctx, instance.OwnerID); ownerErr == nil {
+					identity.DisplayName = owner.Username
+				}
+			}
+		}
 	} else {
 		if !envelope.MentionedBot {
 			return fmt.Errorf("group mention is required")
 		}
-		identity, err = s.store.UpsertChannelParticipant(ctx, domain.ChannelIdentityLink{
+		envelope.ChatDisplayName = safeChannelDisplayName(envelope.ChatDisplayName, "群聊", instance.ID, envelope.ExternalChatID)
+		senderDisplayName := strings.TrimSpace(envelope.SenderDisplayName)
+		if senderDisplayName != "" {
+			senderDisplayName = safeChannelDisplayName(senderDisplayName, "群成员", instance.ID, envelope.ExternalSenderID)
+		}
+		envelope.SenderDisplayName = safeChannelDisplayName(envelope.SenderDisplayName, "群成员", instance.ID, envelope.ExternalSenderID)
+		identity, err = s.store.UpsertObservedChannelParticipant(ctx, domain.ChannelIdentityLink{
 			ID: domain.NewID("channel_identity"), InstanceID: instance.ID, ExternalUserID: envelope.ExternalSenderID,
-			Role: "participant", Status: "active", LinkedAt: s.now().UTC(),
-		})
+			Role: "participant", DisplayName: senderDisplayName, Status: "active", LinkedAt: s.now().UTC(),
+		}, envelope.SenderDisplayName)
 		if err != nil {
 			return err
 		}
+		envelope.SenderDisplayName = identity.DisplayName
 	}
 	endpoint, err := s.store.ChannelEndpoint(ctx, instance.ID, endpointKind)
 	if err != nil || !endpoint.Enabled {
 		return fmt.Errorf("channel endpoint is unavailable")
 	}
+	scopeVersion := 1
+	if endpointKind == domain.ChannelEndpointGroupDigitalHuman {
+		scopeVersion = 2
+	}
 	scopeKey, err := s.scopeKey(instance.ID, endpointKind, identity.ID, envelope.ExternalChatID, envelope.ExternalSenderID)
 	if err != nil {
 		return err
 	}
-	conversation, err := s.ensureConversation(ctx, instance, endpoint, identity, envelope, scopeKey)
+	conversation, err := s.ensureConversation(ctx, instance, endpoint, identity, envelope, scopeVersion, scopeKey)
 	if err != nil {
 		return err
 	}
-	targetTaskID, routeMode := conversation.HostTaskID, "assistant"
 	if endpointKind == domain.ChannelEndpointGroupDigitalHuman {
-		routeMode = "group_qa"
-	} else if route, routeErr := s.store.ActiveChannelTaskRoute(ctx, conversation.ID); routeErr == nil {
+		_ = s.store.UpsertChannelConversationMember(ctx, conversation.ID, identity.ID, envelope.SenderIsBot, envelope.OccurredAt)
+	}
+	targetTaskID, routeMode := conversation.HostTaskID, "assistant"
+	if route, routeErr := s.store.ActiveChannelTaskRoute(ctx, conversation.ID); routeErr == nil {
 		targetTaskID, routeMode = route.TargetTaskID, "task_route"
+	} else if endpointKind == domain.ChannelEndpointGroupDigitalHuman {
+		routeMode = "group_qa"
+	}
+	mentions := make([]map[string]any, 0, len(envelope.Mentions))
+	for _, mention := range envelope.Mentions {
+		if strings.TrimSpace(mention.ExternalUserID) == "" {
+			continue
+		}
+		fallback := "群成员"
+		if mention.IsBot {
+			fallback = "群机器人"
+		}
+		mentionDisplayName := strings.TrimSpace(mention.DisplayName)
+		if mention.ExternalUserID == stringField(instance.Config, "runtime_bot_open_id") {
+			mentionDisplayName = domain.ChannelBotDisplayName(instance.Config, instance.Name)
+		}
+		if mentionDisplayName != "" {
+			mentionDisplayName = safeChannelDisplayName(mentionDisplayName, fallback, instance.ID, mention.ExternalUserID)
+		}
+		linked, linkErr := s.store.UpsertObservedChannelParticipant(ctx, domain.ChannelIdentityLink{
+			ID: domain.NewID("channel_identity"), InstanceID: instance.ID, ExternalUserID: mention.ExternalUserID,
+			Role: "participant", DisplayName: mentionDisplayName, Status: "active", LinkedAt: s.now().UTC(),
+		}, safeChannelDisplayName("", fallback, instance.ID, mention.ExternalUserID))
+		if linkErr == nil {
+			_ = s.store.UpsertChannelConversationMember(ctx, conversation.ID, linked.ID, mention.IsBot, envelope.OccurredAt)
+			mentions = append(mentions, map[string]any{"identity_link_id": linked.ID, "display_name": linked.DisplayName, "is_bot": mention.IsBot})
+		}
+	}
+	botDialogueTurns := 0
+	if endpointKind == domain.ChannelEndpointGroupDigitalHuman && envelope.SenderIsBot {
+		botDialogueTurns, _ = s.store.ChannelBotDialogueTurnCount(ctx, targetTaskID, conversation.ID)
+		botDialogueTurns++
 	}
 	provenance := map[string]any{
 		"schema": "aha.channel-context/v1", "instance_id": instance.ID, "provider": instance.ProviderKey,
-		"endpoint": endpointKind, "conversation_id": conversation.ID, "actor": map[string]any{"identity_link_id": identity.ID, "role": role},
-		"route": map[string]any{"mode": routeMode, "target_task_id": targetTaskID}, "inbound_receipt_id": receipt.ID,
+		"endpoint": endpointKind, "conversation_id": conversation.ID, "chat_display_name": conversation.DisplayName,
+		"actor":    map[string]any{"identity_link_id": identity.ID, "role": role, "display_name": identity.DisplayName, "is_bot": envelope.SenderIsBot},
+		"mentions": mentions,
+		"route":    map[string]any{"mode": routeMode, "target_task_id": targetTaskID}, "inbound_receipt_id": receipt.ID,
+	}
+	if endpointKind == domain.ChannelEndpointGroupDigitalHuman && envelope.SenderIsBot {
+		provenance["bot_dialogue"] = map[string]any{
+			"active": true, "turn": botDialogueTurns,
+			"max_turns": domain.ChannelBotDialogueMaxTurns(instance.Config),
+		}
 	}
 	attachmentIDs, warning, pending, err := s.inboundAttachments(ctx, receipt, conversation, targetTaskID, envelope)
 	if errors.Is(err, errMediaRouteChanged) {
@@ -1062,7 +1366,7 @@ func (s *Service) ensureOwnerMenuConversation(ctx context.Context, instance doma
 	if scopeErr != nil {
 		return domain.ChannelConversation{}, scopeErr
 	}
-	return s.ensureConversation(ctx, instance, endpoint, identity, menuEnvelope, scopeKey)
+	return s.ensureConversation(ctx, instance, endpoint, identity, menuEnvelope, 1, scopeKey)
 }
 
 type channelCatalog struct {
@@ -1285,6 +1589,79 @@ func (s *Service) AgentChannelContext(ctx context.Context, claims agentapi.Claim
 	return value, nil
 }
 
+func (s *Service) AgentTaskChannelContacts(ctx context.Context, claims agentapi.Claims) (domain.ChannelDestination, []domain.ChannelContact, error) {
+	call, err := s.application.AgentCallContext(ctx, claims, true)
+	if err != nil {
+		return domain.ChannelDestination{}, nil, err
+	}
+	route, err := s.store.ActiveChannelTaskRouteForTask(ctx, call.Task.ID)
+	if err != nil {
+		return domain.ChannelDestination{}, nil, app.ErrAgentCallForbidden
+	}
+	conversation, err := s.store.ChannelConversation(ctx, route.ConversationID)
+	if err != nil || conversation.Status != "active" {
+		return domain.ChannelDestination{}, nil, app.ErrAgentCallForbidden
+	}
+	endpoint, err := s.store.ChannelEndpoint(ctx, route.InstanceID, domain.ChannelEndpointGroupDigitalHuman)
+	if err != nil || endpoint.ID != conversation.EndpointID || !endpoint.Enabled {
+		return domain.ChannelDestination{}, nil, app.ErrAgentCallForbidden
+	}
+	instance, err := s.store.ChannelInstance(ctx, route.InstanceID)
+	if err != nil || (instance.Status != "ready" && instance.Status != "degraded") {
+		return domain.ChannelDestination{}, nil, app.ErrAgentCallForbidden
+	}
+	contacts, err := s.store.TaskChannelContacts(ctx, call.Task.ID, route.InstanceID, route.ConversationID, 50)
+	if err != nil {
+		return domain.ChannelDestination{}, nil, err
+	}
+	return domain.ChannelDestination{
+		ConversationID: conversation.ID, InstanceID: instance.ID, InstanceName: instance.Name,
+		EndpointKind: endpoint.Kind, DisplayName: conversation.DisplayName, Status: conversation.Status,
+		RouteID: route.ID, RouteRevision: route.Revision, TargetTaskID: route.TargetTaskID, UpdatedAt: conversation.UpdatedAt,
+	}, contacts, nil
+}
+
+func (s *Service) SendAgentTaskChannelMessage(ctx context.Context, claims agentapi.Claims, input AgentOutreachInput) (domain.ChannelDelivery, error) {
+	_, contacts, err := s.AgentTaskChannelContacts(ctx, claims)
+	if err != nil {
+		return domain.ChannelDelivery{}, err
+	}
+	requestID := strings.TrimSpace(input.RequestID)
+	purpose := strings.TrimSpace(input.Purpose)
+	message := strings.TrimSpace(input.Message)
+	if requestID == "" || len(requestID) > 120 || strings.ContainsAny(requestID, " \t\r\n/\\") {
+		return domain.ChannelDelivery{}, fmt.Errorf("request_id must be a stable token up to 120 characters")
+	}
+	if purpose != "blocker" {
+		return domain.ChannelDelivery{}, fmt.Errorf("purpose must be blocker")
+	}
+	if message == "" || len([]rune(message)) > 1000 {
+		return domain.ChannelDelivery{}, fmt.Errorf("message must contain 1 to 1000 characters")
+	}
+	if len(input.MentionIdentityLinkIDs) < 1 || len(input.MentionIdentityLinkIDs) > 5 {
+		return domain.ChannelDelivery{}, fmt.Errorf("choose between 1 and 5 channel contacts")
+	}
+	available := map[string]bool{}
+	for _, contact := range contacts {
+		available[contact.IdentityLinkID] = true
+	}
+	identityIDs := make([]string, 0, len(input.MentionIdentityLinkIDs))
+	seen := map[string]bool{}
+	for _, identityID := range input.MentionIdentityLinkIDs {
+		identityID = strings.TrimSpace(identityID)
+		if identityID == "" || seen[identityID] || !available[identityID] {
+			return domain.ChannelDelivery{}, fmt.Errorf("channel contact is not available in the primary channel")
+		}
+		seen[identityID] = true
+		identityIDs = append(identityIDs, identityID)
+	}
+	delivery, conversationItemID, created, err := s.store.EnqueueTaskChannelOutreach(ctx, claims.TaskID, claims.TurnID, requestID, purpose, message, identityIDs, s.now().UTC())
+	if err == nil && created && s.application != nil {
+		s.application.PublishAgentChannelOutreach(ctx, claims.TaskID, claims.TurnID, conversationItemID, len(identityIDs))
+	}
+	return delivery, err
+}
+
 func (s *Service) PreviewAgentAction(ctx context.Context, claims agentapi.Claims, input ActionPreviewInput) (domain.ChannelPendingAction, error) {
 	_, channelContext, identity, err := s.channelAgentContext(ctx, claims, domain.ChannelEndpointAssistantDM)
 	if err != nil {
@@ -1307,7 +1684,7 @@ func (s *Service) PreviewAgentAction(ctx context.Context, claims agentapi.Claims
 		}
 		targetType = "task"
 		precondition = map[string]any{"task_id": task.ID, "status": task.Status, "updated_at": timeStringUTC(task.UpdatedAt)}
-		preview = map[string]any{"operation": operation, "task_id": task.ID, "task_code": task.Code, "title": task.Title, "effect": "建立消息路由，不迁移或改变 Task"}
+		preview = map[string]any{"operation": operation, "task_id": task.ID, "task_code": task.Code, "title": task.Title, "effect": "连接为 Task 主渠道；已有主渠道会被替换，不迁移或改变 Task"}
 	case "exit":
 		route, err := s.store.ActiveChannelTaskRoute(ctx, conversationID)
 		if err != nil {
@@ -1531,7 +1908,7 @@ func (s *Service) processMenuCardAction(ctx context.Context, receipt domain.Chan
 			return fmt.Errorf("menu takeover target is not eligible")
 		}
 		precondition := map[string]any{"task_id": target.ID, "status": target.Status, "updated_at": timeStringUTC(target.UpdatedAt)}
-		preview := map[string]any{"operation": "takeover", "task_code": target.Code, "title": target.Title, "effect": "建立消息路由，不迁移或改变 Task"}
+		preview := map[string]any{"operation": "takeover", "task_code": target.Code, "title": target.Title, "effect": "连接为 Task 主渠道；已有主渠道会被替换，不迁移或改变 Task"}
 		if err := s.createMenuPendingAction(ctx, instance, conversation, identity, "takeover", "task", target.ID, map[string]any{}, preview, precondition); err != nil {
 			return err
 		}
@@ -1806,7 +2183,7 @@ func (s *Service) scopeKey(instanceID, endpointKind, identityID, chatID, senderI
 	if endpointKind == domain.ChannelEndpointAssistantDM {
 		values = append(values, identityID)
 	} else {
-		values = append(values, chatID, senderID)
+		values = append(values, chatID)
 	}
 	hash := hmac.New(sha256.New, []byte(pepper))
 	for _, value := range values {
@@ -1816,15 +2193,32 @@ func (s *Service) scopeKey(instanceID, endpointKind, identityID, chatID, senderI
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
-func (s *Service) ensureConversation(ctx context.Context, instance domain.ChannelInstance, endpoint domain.ChannelEndpoint, identity domain.ChannelIdentityLink, envelope domain.ChannelInboundEnvelope, scopeKey string) (domain.ChannelConversation, error) {
-	conversation, err := s.store.ChannelConversationByScope(ctx, endpoint.ID, 1, scopeKey)
-	if err == nil {
-		desiredTitle := s.channelConversationTitle(ctx, instance, endpoint.Kind, envelope)
-		nameResolved := endpoint.Kind == domain.ChannelEndpointAssistantDM || (envelope.ChatDisplayName != "" && envelope.SenderDisplayName != "")
-		if task, taskErr := s.store.Task(ctx, conversation.HostTaskID); taskErr == nil && nameResolved && desiredTitle != "" && task.Title != desiredTitle {
-			_ = s.store.UpdateTaskTitle(ctx, task.ID, desiredTitle, timeStringUTC(s.now().UTC()))
+func (s *Service) ensureConversation(ctx context.Context, instance domain.ChannelInstance, endpoint domain.ChannelEndpoint, identity domain.ChannelIdentityLink, envelope domain.ChannelInboundEnvelope, scopeVersion int, scopeKey string) (domain.ChannelConversation, error) {
+	if endpoint.Kind == domain.ChannelEndpointGroupDigitalHuman {
+		preferred, preferredErr := s.store.PreferredChannelGroupConversation(ctx, endpoint.ID, envelope.ExternalChatID)
+		if preferredErr == nil {
+			if _, routeErr := s.store.ActiveChannelTaskRoute(ctx, preferred.ID); routeErr == nil || preferred.ScopeKeyVersion >= scopeVersion {
+				return s.updateChannelConversationIdentity(ctx, preferred, instance, endpoint.Kind, envelope)
+			}
+			if err := s.store.PromoteChannelConversationScope(ctx, preferred.ID, scopeVersion, scopeKey, envelope.ChatDisplayName, s.now().UTC()); err == nil {
+				preferred.ScopeKeyVersion = scopeVersion
+				preferred.ScopeKey = scopeKey
+				if strings.TrimSpace(envelope.ChatDisplayName) != "" {
+					preferred.DisplayName = envelope.ChatDisplayName
+				}
+				return s.updateChannelConversationIdentity(ctx, preferred, instance, endpoint.Kind, envelope)
+			} else if current, lookupErr := s.store.ChannelConversationByScope(ctx, endpoint.ID, scopeVersion, scopeKey); lookupErr == nil {
+				return s.updateChannelConversationIdentity(ctx, current, instance, endpoint.Kind, envelope)
+			} else {
+				return domain.ChannelConversation{}, err
+			}
+		} else if !errors.Is(preferredErr, sql.ErrNoRows) {
+			return domain.ChannelConversation{}, preferredErr
 		}
-		return conversation, nil
+	}
+	conversation, err := s.store.ChannelConversationByScope(ctx, endpoint.ID, scopeVersion, scopeKey)
+	if err == nil {
+		return s.updateChannelConversationIdentity(ctx, conversation, instance, endpoint.Kind, envelope)
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return domain.ChannelConversation{}, err
@@ -1849,9 +2243,13 @@ func (s *Service) ensureConversation(ctx context.Context, instance domain.Channe
 	now := s.now().UTC()
 	_ = s.store.UpdateTaskStatus(ctx, task.ID, task.Status, domain.TaskWaitingUser, timeStringUTC(now), "")
 	conversation = domain.ChannelConversation{
-		ID: conversationID, InstanceID: instance.ID, EndpointID: endpoint.ID, ScopeKeyVersion: 1, ScopeKey: scopeKey,
+		ID: conversationID, InstanceID: instance.ID, EndpointID: endpoint.ID, ScopeKeyVersion: scopeVersion, ScopeKey: scopeKey,
 		ExternalChatID: envelope.ExternalChatID, ExternalSenderID: envelope.ExternalSenderID, HostTaskID: task.ID,
 		Status: "active", CreatedAt: now, UpdatedAt: now,
+	}
+	conversation.DisplayName = envelope.SenderDisplayName
+	if endpoint.Kind == domain.ChannelEndpointGroupDigitalHuman {
+		conversation.DisplayName = envelope.ChatDisplayName
 	}
 	if endpoint.Kind == domain.ChannelEndpointAssistantDM {
 		conversation.OwnerIdentityLinkID = identity.ID
@@ -1864,7 +2262,7 @@ func (s *Service) ensureConversation(ctx context.Context, instance domain.Channe
 	if err := s.store.CreateChannelConversation(ctx, conversation, session); err != nil {
 		_ = s.store.DeleteTask(ctx, task.ID)
 		_ = s.store.DeleteRuntimeSnapshot(ctx, task.RuntimeConfigSnapshotID)
-		if existing, lookupErr := s.store.ChannelConversationByScope(ctx, endpoint.ID, 1, scopeKey); lookupErr == nil {
+		if existing, lookupErr := s.store.ChannelConversationByScope(ctx, endpoint.ID, scopeVersion, scopeKey); lookupErr == nil {
 			return existing, nil
 		}
 		return domain.ChannelConversation{}, err
@@ -1879,6 +2277,23 @@ func (s *Service) ensureConversation(ctx context.Context, instance domain.Channe
 		if err := s.store.DeliverPendingChannelHandoffs(ctx, instance.ID, conversation.ID, now); err != nil {
 			return domain.ChannelConversation{}, err
 		}
+	}
+	return conversation, nil
+}
+
+func (s *Service) updateChannelConversationIdentity(ctx context.Context, conversation domain.ChannelConversation, instance domain.ChannelInstance, endpointKind string, envelope domain.ChannelInboundEnvelope) (domain.ChannelConversation, error) {
+	desiredTitle := s.channelConversationTitle(ctx, instance, endpointKind, envelope)
+	nameResolved := endpointKind == domain.ChannelEndpointAssistantDM || envelope.ChatDisplayName != ""
+	if task, taskErr := s.store.Task(ctx, conversation.HostTaskID); taskErr == nil && nameResolved && desiredTitle != "" && task.Title != desiredTitle {
+		_ = s.store.UpdateTaskTitle(ctx, task.ID, desiredTitle, timeStringUTC(s.now().UTC()))
+	}
+	displayName := envelope.SenderDisplayName
+	if endpointKind == domain.ChannelEndpointGroupDigitalHuman {
+		displayName = envelope.ChatDisplayName
+	}
+	if strings.TrimSpace(displayName) != "" && conversation.DisplayName != displayName {
+		_ = s.store.UpdateChannelConversationDisplayName(ctx, conversation.ID, displayName, s.now().UTC())
+		conversation.DisplayName = displayName
 	}
 	return conversation, nil
 }
@@ -1978,7 +2393,7 @@ func (s *Service) channelConversationTitle(ctx context.Context, instance domain.
 		}
 		return "飞书私聊 · " + clean(ownerName, "Owner")
 	}
-	return "飞书群聊 · " + clean(envelope.ChatDisplayName, "未命名群聊") + " · " + clean(envelope.SenderDisplayName, "群成员")
+	return "飞书群聊 · " + clean(envelope.ChatDisplayName, "未命名群聊")
 }
 
 func mapField(values map[string]any, key string) (map[string]any, bool) {

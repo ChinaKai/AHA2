@@ -33,8 +33,12 @@ import type {
   Attachment,
   AuthStatus,
   CodexAccount,
+  ChannelContact,
+  ChannelDestination,
+  ChannelGroupMember,
   ChannelInstance,
   ChannelPlugin,
+  ChannelTaskRoute,
   ConversationCategory,
   ConversationItem,
   DetectedModel,
@@ -65,6 +69,12 @@ type View = "projects" | "channels" | "models" | "tasks" | "knowledge" | "prompt
 type ResourceKey = "projects" | "workspaces" | "tasks" | "system" | "providers" | "models" | "env" | "accounts" | "skills" | "channels" | "knowledge" | "proxy" | "advanced" | "sync" | "prompts";
 type TaskFilterKind = "project" | "status" | "device";
 interface ResourceState {loading: boolean; loaded: boolean; error: string; updatedAt: number}
+interface TaskChannelState {
+  destinations: ChannelDestination[];
+  route?: ChannelTaskRoute;
+  contacts: ChannelContact[];
+  members: ChannelGroupMember[];
+}
 interface State {
   auth: AuthStatus | null;
   view: View;
@@ -112,6 +122,9 @@ interface State {
   taskDraft: string;
   taskDrafts: Record<string, string>;
   taskAttachmentDrafts: Record<string, Attachment[]>;
+  taskChannelDestination: ChannelDestination | null | undefined;
+  taskChannelState: TaskChannelState | null;
+  taskChannelLoading: boolean;
   selectedTaskAgent: string;
   selectedProject: Project | null;
   dialogProjectID: string;
@@ -185,6 +198,9 @@ const state: State = {
   taskDraft: "",
   taskDrafts: {},
   taskAttachmentDrafts: {},
+  taskChannelDestination: undefined,
+  taskChannelState: null,
+  taskChannelLoading: false,
   selectedTaskAgent: "main",
   selectedProject: null,
   dialogProjectID: "",
@@ -222,6 +238,7 @@ let ownerAvatarClicks = 0;
 let ownerAvatarResetTimer = 0;
 let navigationRestoring = true;
 let taskOpenVersion = 0;
+let taskChannelLoadVersion = 0;
 
 document.addEventListener("click", event => {
   const target = event.target;
@@ -763,7 +780,12 @@ function setMessage(type: "error" | "notice", value: string): void {
   }, 5000);
 }
 
-async function runWithFeedback(button: HTMLElement | null, label: string, action: () => Promise<void>): Promise<void> {
+async function runWithFeedback(
+  button: HTMLElement | null,
+  label: string,
+  action: () => Promise<void>,
+  onError?: (message: string) => void,
+): Promise<void> {
   if (!button) {
     await action();
     return;
@@ -775,8 +797,13 @@ async function runWithFeedback(button: HTMLElement | null, label: string, action
   try {
     await action();
   } catch (error) {
-    setMessage("error", error instanceof Error ? error.message : String(error));
-    render();
+    const message = error instanceof Error ? error.message : String(error);
+    if (onError) {
+      onError(message);
+    } else {
+      setMessage("error", message);
+      render();
+    }
   } finally {
     button.disabled = wasDisabled;
     button.innerHTML = original;
@@ -1323,6 +1350,10 @@ function showTaskLoading(task: Task): void {
   state.taskDraft = "";
   state.taskDrafts = {};
   state.taskAttachmentDrafts = {};
+  state.taskChannelDestination = undefined;
+  state.taskChannelState = null;
+  state.taskChannelLoading = false;
+  taskChannelLoadVersion++;
   state.taskDetailLoading = true;
   loadingOlderConversation = false;
   render();
@@ -1360,6 +1391,7 @@ async function openTask(taskID: string): Promise<void> {
     if (detail.task.read_only || detail.task.status === "draft") closeEvents();
     else openEvents(taskID, state.taskEventCursor);
     render();
+    void loadTaskChannelDestination(taskID, version);
   } catch (error) {
     if (version === taskOpenVersion) {
       state.selectedTask = null;
@@ -1368,6 +1400,40 @@ async function openTask(taskID: string): Promise<void> {
     throw error;
   } finally {
     if (version === taskOpenVersion) openingTaskID = "";
+  }
+}
+
+function taskChannelButtonLabel(destination: ChannelDestination | null | undefined): string {
+  if (!destination) return "连接渠道";
+  const kind = destination.endpoint_kind === "group_digital_human" ? "群聊" : "私聊";
+  const name = destination.display_name || (kind === "群聊" ? "未命名群聊" : "Owner 私聊");
+  return `主渠道已连接 · ${kind} · ${destination.instance_name} · ${name}`;
+}
+
+function updateTaskChannelButton(): void {
+  const button = document.querySelector<HTMLButtonElement>('[data-task-tool="channel"]');
+  if (!button) return;
+  const connected = Boolean(state.taskChannelDestination);
+  const label = taskChannelButtonLabel(state.taskChannelDestination);
+  button.classList.toggle("connected", connected);
+  button.title = label;
+  button.setAttribute("aria-label", label);
+}
+
+async function loadTaskChannelDestination(taskID: string, version: number): Promise<void> {
+  if (!state.selectedTask || state.selectedTask.task.id !== taskID || state.selectedTask.task.read_only || state.selectedTask.task.channel_instance_id) return;
+  const loadVersion = ++taskChannelLoadVersion;
+  try {
+    const result = await api.taskChannelRoutes(taskID);
+    if (loadVersion !== taskChannelLoadVersion || version !== taskOpenVersion || !state.selectedTask || state.selectedTask.task.id !== taskID) return;
+    state.taskChannelState = result;
+    const current = result.route;
+    state.taskChannelDestination = current
+      ? result.destinations.find(item => item.conversation_id === current.conversation_id) || null
+      : null;
+    updateTaskChannelButton();
+  } catch {
+    // Opening the channel tool retries the full request and surfaces the error.
   }
 }
 
@@ -1884,6 +1950,84 @@ function taskTakeoverDialog(detail: TaskDetail): string {
   return `<dialog id="task-takeover-dialog" class="wide"><form id="task-takeover-form"><div class="dialog-head"><h2>接管只读 Task</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div><p class="field-help">接管会创建新的本机 Task。请重新选择本机 Workspace，并确认所有设备专属路径和端点。</p><label>标题<input name="title" required value="${escapeHTML(detail.task.title)} (本机)"></label><label>需求<textarea name="request" required>${escapeHTML(detail.task.original_request || detail.task.current_goal || detail.task.title)}</textarea></label><label>本机 Workspace<select name="workspace_id" id="takeover-task-workspace" required>${workspaces.map(item => `<option value="${item.id}">${escapeHTML(item.name)} · ${escapeHTML(item.root_path)}</option>`).join("") || '<option value="">请先为此项目创建本机 Workspace</option>'}</select></label>${runtimeFieldsHTML("takeover-task", state.models, state.codexAccounts)}<div class="two"><label>推理强度<select name="reasoning_effort" id="takeover-task-effort"></select></label><label>文件访问<select name="filesystem"><option value="workspace-write">工作区可写</option><option value="read-only">只读</option><option value="danger-full-access">完全访问</option></select></label></div><div class="two"><label>协作模式<select name="collaboration_mode"><option value="auto" ${detail.task.collaboration_mode === "auto" ? "selected" : ""}>Auto</option><option value="single" ${detail.task.collaboration_mode === "single" ? "selected" : ""}>Single</option></select></label><label>最大 Agent 数<input name="max_agents" type="number" min="1" value="${Number(detail.task.max_agents || 3)}"></label></div><label>审批<select name="approval"><option value="never">无需确认</option><option value="auto">自动批准</option></select></label>${groups ? `<section><h3>本机硬件重绑定</h3>${groups}</section>` : ""}<div class="dialog-actions"><button type="button" data-close>取消</button><button class="primary" type="submit" ${workspaces.length ? "" : "disabled"}>创建本机 Task</button></div></form></dialog>`;
 }
 
+function taskChannelPanelHTML(): string {
+  if (state.taskChannelLoading) {
+    return `<div class="ctx-loading">${icon("spinner", true)}正在读取可用渠道...</div>`;
+  }
+  const result = state.taskChannelState;
+  const taskID = state.selectedTask?.task.id || "";
+  if (!result) {
+    return `<div class="task-channel-empty"><strong>渠道信息尚未加载</strong><button type="button" id="reload-task-channel">${icon("refresh")}重新加载</button></div>`;
+  }
+  const current = result.route;
+  const currentDestination = current ? result.destinations.find(item => item.conversation_id === current.conversation_id) : undefined;
+  const selectable = result.destinations.filter(item => !item.target_task_id || item.target_task_id === taskID);
+  const options = result.destinations.map(item => {
+    const kind = item.endpoint_kind === "group_digital_human" ? "群聊" : "私聊";
+    const label = item.display_name || (kind === "群聊" ? "未命名群聊" : "Owner 私聊");
+    const occupied = Boolean(item.target_task_id && item.target_task_id !== taskID);
+    const occupiedBy = item.target_task_code || item.target_task_name || "其他 Task";
+    const suffix = occupied ? ` · 已绑定 ${occupiedBy}` : "";
+    return `<option value="${escapeHTML(item.conversation_id)}" ${item.conversation_id === current?.conversation_id ? "selected" : ""} ${occupied ? "disabled" : ""}>${escapeHTML(item.instance_name)} · ${kind} · ${escapeHTML(label + suffix)}</option>`;
+  }).join("");
+  const switcher = `<form id="task-channel-route-form" class="task-channel-switcher">
+    <label>绑定渠道<select name="conversation_id" required>${options || '<option value="">暂无可用渠道</option>'}</select></label>
+    <button type="submit" class="primary" ${selectable.length ? "" : "disabled"}>${icon("link")}${current ? "切换" : "连接"}</button>
+    ${current ? `<button type="button" id="disconnect-task-channel" class="icon-button danger-quiet" title="解除主渠道" aria-label="解除主渠道">${icon("close")}</button>` : ""}
+  </form>`;
+  if (!current || !currentDestination) {
+    return `<div class="task-channel-tool">${switcher}<div class="task-channel-empty"><strong>未连接主渠道</strong><p>先在上方选择已登记的私聊或群聊。每个 Task 只能连接一个主渠道。</p></div></div>`;
+  }
+  if (currentDestination.endpoint_kind !== "group_digital_human") {
+    return `<div class="task-channel-tool">${switcher}<section class="task-channel-private"><span class="channel-route-icon">${icon("bot")}</span><div><strong>${escapeHTML(currentDestination.display_name || "Owner 私聊")}</strong><small>${escapeHTML(currentDestination.instance_name)} · 私聊主渠道</small></div></section></div>`;
+  }
+  const selected = new Map(result.contacts.map(contact => [contact.identity_link_id, contact]));
+  const memberRows = result.members.map(member => {
+    const contact = selected.get(member.identity_link_id);
+    return `<label class="task-channel-member ${member.is_bot ? "bot" : ""}">
+      <input type="checkbox" name="contact_id" value="${escapeHTML(member.identity_link_id)}" data-member-name="${escapeHTML(member.display_name)}" data-member-bot="${member.is_bot}" data-member-role="${escapeHTML(contact?.collaboration_role || "")}" ${member.is_self ? "disabled" : ""} ${contact ? "checked" : ""}>
+      <span>${icon(member.is_bot ? "bot" : "user")}<span><strong>${escapeHTML(member.display_name)}</strong><small>${member.is_self ? "当前渠道机器人" : member.is_bot ? "渠道已观察机器人" : member.source === "provider" ? "群成员" : "已观察成员"}</small></span></span>
+    </label>`;
+  }).join("");
+  const selectedRows = result.contacts.map(contact => taskChannelSelectedContactHTML(contact.identity_link_id, contact.display_name, contact.is_bot, contact.collaboration_role || "")).join("");
+  return `<div class="task-channel-tool">
+    ${switcher}
+    <div class="task-channel-group-head"><div><strong>${escapeHTML(currentDestination.display_name || "未命名群聊")}</strong><small>${escapeHTML(currentDestination.instance_name)} · ${result.members.length} 名已登记成员</small></div><button type="button" id="refresh-task-channel-members">${icon("refresh")}同步群成员</button></div>
+    <form id="task-channel-contacts-form">
+      <div class="task-channel-people">
+        <section><header><strong>群聊成员</strong><small>勾选加入联调</small></header><div class="task-channel-member-list">${memberRows || '<div class="empty-state">暂无成员，点击“同步群成员”读取。</div>'}</div></section>
+        <section><header><strong>可 @ 联调人</strong><small>Agent 只会看到这里的人</small></header><div class="task-channel-contact-list" data-task-channel-selected>${selectedRows || '<div class="empty-state">尚未选择联调人</div>'}</div></section>
+      </div>
+      <datalist id="task-channel-role-options"><option value="APP"><option value="云端"><option value="固件"><option value="测试"><option value="产品"></datalist>
+      <footer><small>群成员来自渠道同步；观察其他机器人时，请在同一条群消息里同时 @ 当前渠道机器人和目标机器人。</small><button type="submit" class="primary">${icon("save")}保存联调人</button></footer>
+    </form>
+  </div>`;
+}
+
+function taskChannelSelectedContactHTML(identityID: string, name: string, isBot: boolean, role: string): string {
+  return `<div class="task-channel-contact" data-contact-id="${escapeHTML(identityID)}"><span>${icon(isBot ? "bot" : "user")}<strong>${escapeHTML(name)}</strong></span><label>身份<input name="role_${escapeHTML(identityID)}" list="task-channel-role-options" maxlength="40" value="${escapeHTML(role)}" placeholder="APP / 云端 / 固件"></label></div>`;
+}
+
+async function reloadTaskChannelState(renderAfter = true): Promise<void> {
+  if (!state.selectedTask) return;
+  const taskID = state.selectedTask.task.id;
+  const loadVersion = ++taskChannelLoadVersion;
+  state.taskChannelLoading = true;
+  if (renderAfter) render();
+  try {
+    const result = await api.taskChannelRoutes(taskID);
+    if (loadVersion !== taskChannelLoadVersion || !state.selectedTask || state.selectedTask.task.id !== taskID) return;
+    state.taskChannelState = result;
+    state.taskChannelDestination = result.route
+      ? result.destinations.find(item => item.conversation_id === result.route?.conversation_id) || null
+      : null;
+  } finally {
+    if (loadVersion !== taskChannelLoadVersion) return;
+    state.taskChannelLoading = false;
+    if (renderAfter) render();
+  }
+}
+
 function currentAttachmentDrafts(): Attachment[] {
   return state.taskAttachmentDrafts[state.selectedTaskAgent] || [];
 }
@@ -2124,11 +2268,12 @@ function taskDetailView(detail: TaskDetail): string {
     <form id="message-form" class="composer${composerDisabled && !loadingDetail ? " runtime-invalid" : ""}">${composerDisabled && !loadingDetail ? `<div class="composer-runtime-warning">${escapeHTML(draft ? "先启动任务后再发送消息" : archivedReadOnly ? "渠道实例已归档，此 Task 只读" : remoteReadOnly ? "该 Task 属于其他设备，本机只读" : runtimeError)}</div>` : ""}${renderComposerTools(detail, state.selectedTaskAgent, state.taskCategories, state.taskConversation.length)}<div id="slash-command-menu" class="slash-command-menu" ${matchingTaskSlashCommands(state.taskDraft).length ? "" : "hidden"}>${slashCommandMenuHtml(state.taskDraft)}</div>${renderAttachmentComposer(composerDisabled)}<textarea name="content" placeholder="${escapeHTML(loadingDetail ? "正在加载任务…" : draft ? "启动任务后可发送消息" : readOnly ? "只读 Task" : runtimeError || (activeTurn ? `${state.selectedTaskAgent} 正在执行，发送后将排队` : taskFailed ? "输入消息重试，或输入 /reopen" : `发送给 ${state.selectedTaskAgent}，输入 / 查看命令`))}" ${composerDisabled ? "disabled" : ""}>${escapeHTML(state.taskDraft)}</textarea><button id="message-send" class="primary" aria-label="发送" ${composerDisabled ? "disabled" : ""}>${icon("send")}<span class="send-label">发送</span></button></form>
   </section>`;
   const toolLayout = state.taskTool ? ` task-tool-open task-tool-${state.taskToolMode}` : "";
+  const channelVisible = !readOnly && !detail.task.channel_instance_id;
   return shell(`<section class="task-screen">
-    <header class="task-head"><button id="back-tasks">←</button><div class="task-title-block"><h1><span class="task-code">${escapeHTML(detail.task.code || "")}</span><span class="task-title-text">${escapeHTML(detail.task.title)}</span></h1><div class="task-head-subline"><span class="task-head-meta" title="${escapeHTML(taskMeta)}">${escapeHTML(taskMeta)}</span><span id="task-detail-status" class="status ${statusClass(detail.task.status)}">${statusLabel(detail.task.status)}</span><span class="task-branch">${escapeHTML(detail.task.task_branch || "")}</span></div></div><div class="actions task-tool-actions">${renderTaskToolButtons(state.taskTool)}</div></header>
+    <header class="task-head"><button id="back-tasks">←</button><div class="task-title-block"><h1><span class="task-code">${escapeHTML(detail.task.code || "")}</span><span class="task-title-text">${escapeHTML(detail.task.title)}</span></h1><div class="task-head-subline"><span class="task-head-meta" title="${escapeHTML(taskMeta)}">${escapeHTML(taskMeta)}</span><span id="task-detail-status" class="status ${statusClass(detail.task.status)}">${statusLabel(detail.task.status)}</span><span class="task-branch">${escapeHTML(detail.task.task_branch || "")}</span></div></div><div class="actions task-tool-actions">${renderTaskToolButtons(state.taskTool, {includeChannel: channelVisible, channelConnected: Boolean(state.taskChannelDestination), channelLabel: taskChannelButtonLabel(state.taskChannelDestination)})}</div></header>
     <div class="task-grid${toolLayout}" style="--task-tool-width:${state.taskToolWidth}%">
       ${chat}
-      ${renderTaskToolPanel(state.taskTool, detail, state.selectedTaskAgent, taskCtxHtml(), state.taskToolMode)}
+      ${renderTaskToolPanel(state.taskTool, detail, state.selectedTaskAgent, taskCtxHtml(), state.taskToolMode, taskChannelPanelHTML())}
     </div>
     ${renderAgentConfigDialog(detail, state.selectedTaskAgent, state.models, state.codexAccounts, state.skills)}${taskTakeoverDialog(detail)}
   </section>`);
@@ -2257,8 +2402,9 @@ function updateTaskLiveRegions(): void {
   if (toolBody && state.taskTool === "hardware") {
     refreshHardwarePanel(detail, setMessage);
   } else if (toolBody && state.taskTool) {
-    replaceRegionHTML(toolBody, renderTaskToolContent(state.taskTool, detail, taskCtxHtml()));
+    replaceRegionHTML(toolBody, renderTaskToolContent(state.taskTool, detail, taskCtxHtml(), taskChannelPanelHTML()));
     bindSessionActions();
+    if (state.taskTool === "channel") bindTaskChannelPanel();
   }
   const count = document.querySelector<HTMLElement>("#conversation-filter-loaded");
   if (count) count.textContent = `${state.taskConversation.length} 条已加载`;
@@ -2939,7 +3085,15 @@ function bindCommon(): void {
   document.querySelector("#task-isolation")?.addEventListener("change", syncTaskGitIsolation);
   bindForm("#task-form", async form => {
     const payload = Object.fromEntries(form.entries()) as Record<string, string>;
-    const result = await api.createTask({...payload, skill_ids: form.getAll("skill_ids").map(String), max_agents: Number(payload.max_agents || 3), proxy_enabled: payload.proxy_enabled === "on"});
+    const {stream_idle_timeout_seconds: streamIdleTimeoutSeconds, ...taskPayload} = payload;
+    const result = await api.createTask({
+      ...taskPayload,
+      skill_ids: form.getAll("skill_ids").map(String),
+      max_agents: Number(payload.max_agents || 3),
+      proxy_enabled: payload.proxy_enabled === "on",
+      stream_idle_timeout_ms: Number(streamIdleTimeoutSeconds || 120) * 1000,
+      stream_max_retries: Number(payload.stream_max_retries || 0),
+    });
     state.tasks = [result.task, ...state.tasks.filter(item => item.id !== result.task.id)];
     setMessage("notice", result.task.status === "draft" ? "任务草稿已创建，可先完成配置" : "任务已创建并启动");
     await openTask(result.task.id);
@@ -3022,6 +3176,8 @@ function bindCommon(): void {
       wire_model: String(form.get("wire_model") || ""),
       codex_account_id: String(form.get("codex_account_id") || ""),
       reasoning_effort: String(form.get("reasoning_effort") || ""),
+      stream_idle_timeout_ms: Number(form.get("stream_idle_timeout_seconds") || 300) * 1000,
+      stream_max_retries: Number(form.get("stream_max_retries") || 0),
       filesystem: String(form.get("filesystem") || ""),
       approval: String(form.get("approval") || ""),
       proxy_enabled: form.get("proxy_enabled") === "on",
@@ -3057,6 +3213,8 @@ function bindCommon(): void {
         workspace_id: String(form.get("workspace_id") || ""), title: String(form.get("title") || ""), request: String(form.get("request") || ""),
         backend: String(form.get("backend") || ""), model_source: String(form.get("model_source") || "env"), model_id: String(form.get("model_id") || ""),
         wire_model: String(form.get("wire_model") || ""), codex_account_id: String(form.get("codex_account_id") || ""), reasoning_effort: String(form.get("reasoning_effort") || "medium"),
+        stream_idle_timeout_ms: Number(form.get("stream_idle_timeout_seconds") || 120) * 1000,
+        stream_max_retries: Number(form.get("stream_max_retries") || 0),
         filesystem: String(form.get("filesystem") || "workspace-write"), approval: String(form.get("approval") || "never"), collaboration_mode: String(form.get("collaboration_mode") || "auto"),
         max_agents: Number(form.get("max_agents") || 3), groups,
       });
@@ -3299,6 +3457,14 @@ function bindCommon(): void {
       return;
     }
     state.taskTool = tool;
+    if (tool === "channel") {
+      try {
+        await reloadTaskChannelState();
+      } catch (error) {
+        setMessage("error", error instanceof Error ? error.message : String(error));
+      }
+      return;
+    }
     if (tool !== "context" || !state.selectedTask) {
       render();
       return;
@@ -3331,6 +3497,7 @@ function bindCommon(): void {
   });
   bindTaskToolLayout();
   if (state.taskTool === "hardware" && state.selectedTask) bindHardwarePanel(state.selectedTask, setMessage);
+  if (state.taskTool === "channel" && state.selectedTask) bindTaskChannelPanel();
   if (state.view === "knowledge" && !state.selectedProject && !state.selectedTask) bindKnowledgeWorkspace({
     projects: state.projects,
     workspaces: state.workspaces,
@@ -3355,11 +3522,102 @@ function bindSessionActions(): void {
       await refreshTaskRuntime(state.selectedTask!.task.id);
       const content = document.querySelector<HTMLElement>("#task-tool-panel-body");
       if (content) {
-        content.innerHTML = renderTaskToolContent(state.taskTool, state.selectedTask!, taskCtxHtml());
+        content.innerHTML = renderTaskToolContent(state.taskTool, state.selectedTask!, taskCtxHtml(), taskChannelPanelHTML());
         bindSessionActions();
       }
     });
   }));
+}
+
+function syncTaskChannelContactSelection(): void {
+  const form = document.querySelector<HTMLFormElement>("#task-channel-contacts-form");
+  const selected = form?.querySelector<HTMLElement>("[data-task-channel-selected]");
+  if (!form || !selected) return;
+  selected.querySelectorAll<HTMLInputElement>('input[name^="role_"]').forEach(input => {
+    const identityID = input.name.slice("role_".length);
+    const checkbox = Array.from(form.querySelectorAll<HTMLInputElement>('input[name="contact_id"]')).find(item => item.value === identityID);
+    if (checkbox) checkbox.dataset.memberRole = input.value;
+  });
+  const rows = Array.from(form.querySelectorAll<HTMLInputElement>('input[name="contact_id"]:checked')).map(input =>
+    taskChannelSelectedContactHTML(
+      input.value,
+      input.dataset.memberName || "群成员",
+      input.dataset.memberBot === "true",
+      input.dataset.memberRole || "",
+    ),
+  ).join("");
+  selected.innerHTML = rows || '<div class="empty-state">尚未选择联调人</div>';
+  selected.querySelectorAll<HTMLInputElement>('input[name^="role_"]').forEach(input => input.addEventListener("input", () => {
+    const identityID = input.name.slice("role_".length);
+    const checkbox = Array.from(form.querySelectorAll<HTMLInputElement>('input[name="contact_id"]')).find(item => item.value === identityID);
+    if (checkbox) checkbox.dataset.memberRole = input.value;
+  }));
+}
+
+function bindTaskChannelPanel(): void {
+  const taskID = state.selectedTask?.task.id;
+  if (!taskID) return;
+  document.querySelector("#reload-task-channel")?.addEventListener("click", () => {
+    void reloadTaskChannelState().catch(error => setMessage("error", error instanceof Error ? error.message : String(error)));
+  });
+  document.querySelector<HTMLFormElement>("#task-channel-route-form")?.addEventListener("submit", event => {
+    event.preventDefault();
+    const conversationID = String(new FormData(event.currentTarget).get("conversation_id") || "");
+    const current = state.taskChannelState?.route;
+    if (!conversationID || conversationID === current?.conversation_id) return;
+    if (current && !window.confirm("切换主渠道后，旧渠道将停止接收该 Task 的回复。继续？")) return;
+    void runWithFeedback(event.submitter as HTMLElement | null, current ? "切换中" : "连接中", async () => {
+      await api.bindTaskChannelRoute(taskID, conversationID);
+      await reloadTaskChannelState();
+      setMessage("notice", current ? "Task 主渠道已切换" : "Task 主渠道已连接");
+      window.setTimeout(() => void reloadTaskChannelState().catch(() => undefined), 2200);
+    });
+  });
+  document.querySelector("#disconnect-task-channel")?.addEventListener("click", () => {
+    const route = state.taskChannelState?.route;
+    if (!route || !window.confirm("解除主渠道连接？Task 状态不会改变。")) return;
+    void runWithFeedback(document.querySelector("#disconnect-task-channel"), "解除中", async () => {
+      await api.unbindTaskChannelRoute(taskID, route.id);
+      await reloadTaskChannelState();
+      setMessage("notice", "Task 主渠道已解除");
+    });
+  });
+  document.querySelector("#refresh-task-channel-members")?.addEventListener("click", () => {
+    const button = document.querySelector<HTMLElement>("#refresh-task-channel-members");
+    void runWithFeedback(button, "同步中", async () => {
+      const result = await api.refreshTaskChannelMembers(taskID);
+      await reloadTaskChannelState();
+      setMessage("notice", result.completed ? "群成员目录已同步" : "同步请求已提交，渠道恢复后会自动完成");
+    });
+  });
+  document.querySelectorAll<HTMLInputElement>('#task-channel-contacts-form input[name="contact_id"]').forEach(input =>
+    input.addEventListener("change", syncTaskChannelContactSelection),
+  );
+  document.querySelector<HTMLFormElement>("#task-channel-contacts-form")?.addEventListener("submit", event => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    form.querySelector<HTMLElement>("[data-form-error]")?.remove();
+    const values = new FormData(form);
+    const contacts = values.getAll("contact_id").map(value => {
+      const identityID = String(value);
+      return {
+        identity_link_id: identityID,
+        collaboration_role: String(values.get(`role_${identityID}`) || "").trim(),
+      };
+    });
+    void runWithFeedback(event.submitter as HTMLElement | null, "保存中", async () => {
+      await api.updateTaskChannelContacts(taskID, contacts);
+      await reloadTaskChannelState();
+      setMessage("notice", "联调人及身份已保存");
+    }, message => {
+      const feedback = document.createElement("div");
+      feedback.className = "form-error";
+      feedback.dataset.formError = "true";
+      feedback.setAttribute("role", "alert");
+      feedback.textContent = message;
+      form.querySelector("footer")?.before(feedback);
+    });
+  });
 }
 
 function bindForm(selector: string, action: (form: FormData) => Promise<void>, pendingLabel = "提交中", refreshAfter = true): void {

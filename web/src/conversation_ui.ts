@@ -59,14 +59,18 @@ function renderConversationItem(item: ConversationItem): string {
   const update = !user && item.category === "update";
   const tool = !user && item.category === "tool";
   const error = !user && item.category === "error";
-  const sender = item.from_agent_id || item.agent_id || (user ? "owner" : "main");
-  const badge = error ? "错误" : tool ? "工具" : routed ? "路由" : update ? "Update" : "";
+  const payload = item.payload || {};
+  const channelContext = payload.channel_context && typeof payload.channel_context === "object" ? payload.channel_context as Record<string, unknown> : {};
+  const actor = channelContext.actor && typeof channelContext.actor === "object" ? channelContext.actor as Record<string, unknown> : {};
+  const actorName = String(actor.display_name || "").trim();
+  const chatName = String(channelContext.chat_display_name || "").trim();
+  const sender = actorName ? `${actorName}${chatName ? ` · ${chatName}` : ""}` : item.from_agent_id || item.agent_id || (user ? "owner" : "main");
+  const badge = error ? "错误" : tool ? "工具" : routed ? "路由" : actorName ? "渠道" : update ? "Update" : "";
   const text = readableConversationText(item);
   const characters = Array.from(text);
   const characterCount = characters.length;
   const collapsible = characterCount > messageCollapseChars;
   const preview = collapsible ? `${Array.from(text.replace(/\s+/g, " ")).slice(0, messagePreviewChars - 1).join("").trim()}…` : text;
-  const payload = item.payload || {};
   const output = String(payload.output_tail || "");
   return `<article class="message ${user ? "user" : "agent"} ${update ? "agent-update-message" : ""} ${tool ? "agent-tool-message" : ""} ${routed ? "agent-routed-message" : ""} ${error ? "agent-error-message" : ""}" data-message-id="${escapeHTML(item.id)}" data-message-chars="${characterCount}" data-copy-message-source="${escapeHTML(text)}"><header><strong>${escapeHTML(sender)}</strong>${badge ? `<span>${badge}</span>` : ""}<time>${time}</time><button type="button" data-copy-message class="message-copy icon-button" title="复制">${icon("copy")}</button></header><div class="message-bubble"><div class="message-text markdown-body message-preview">${renderMarkdown(preview)}</div>${collapsible ? `<div class="message-text markdown-body message-full-text" hidden>${renderMarkdown(text)}</div><button type="button" data-toggle-message class="message-toggle">展开 · ${characterCount.toLocaleString()}字符</button>` : ""}${renderAttachments(item)}${output ? `<details class="message-output"><summary>查看输出摘要</summary><pre>${escapeHTML(output)}</pre></details>` : ""}</div></article>`;
 }

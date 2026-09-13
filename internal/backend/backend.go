@@ -7,16 +7,18 @@ import (
 )
 
 type Request struct {
-	Runner            workspace.Runner
-	WorkDir           string
-	Model             string
-	ContextWindow     int64
-	ReasoningEffort   string
-	Environment       map[string]string
-	Prompt            string
-	ProviderSessionID string
-	Filesystem        string
-	Approval          string
+	Runner              workspace.Runner
+	WorkDir             string
+	Model               string
+	ContextWindow       int64
+	ReasoningEffort     string
+	StreamIdleTimeoutMS int
+	StreamMaxRetries    int
+	Environment         map[string]string
+	Prompt              string
+	ProviderSessionID   string
+	Filesystem          string
+	Approval            string
 }
 
 type Event struct {

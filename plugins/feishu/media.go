@@ -85,7 +85,72 @@ func normalizedInboundMedia(message *channeltypes.NormalizedMessage) (string, []
 			content = strings.ReplaceAll(content, resource.FileKey, "[附件]")
 		}
 	}
+	for _, mention := range message.Mentions {
+		replacement := ""
+		if !mention.IsBot {
+			replacement = "@" + strings.TrimSpace(mention.Name)
+		}
+		if mention.Key != "" {
+			content = strings.ReplaceAll(content, mention.Key, replacement)
+		}
+	}
+	content = strings.TrimSpace(content)
 	return content, resources
+}
+
+func normalizedInboundMentions(message *channeltypes.NormalizedMessage, selfBotOpenID ...string) []map[string]any {
+	result := []map[string]any{}
+	selfID := ""
+	if len(selfBotOpenID) > 0 {
+		selfID = strings.TrimSpace(selfBotOpenID[0])
+	}
+	for _, mention := range message.Mentions {
+		externalID := strings.TrimSpace(mention.OpenID)
+		if externalID == "" {
+			externalID = strings.TrimSpace(mention.UserID)
+		}
+		if externalID == "" {
+			continue
+		}
+		if mention.IsBot && selfID != "" && externalID == selfID {
+			continue
+		}
+		result = append(result, map[string]any{
+			"external_user_id": externalID,
+			"display_name":     strings.TrimSpace(mention.Name),
+			"is_bot":           mention.IsBot,
+		})
+	}
+	return result
+}
+
+func restoreInboundMentionTypes(message *channeltypes.NormalizedMessage) {
+	if message == nil {
+		return
+	}
+	event, ok := message.RawEvent.(*larkim.P2MessageReceiveV1)
+	if !ok || event.Event == nil || event.Event.Message == nil {
+		return
+	}
+	for index, mention := range event.Event.Message.Mentions {
+		if index >= len(message.Mentions) || mention == nil || mention.MentionedType == nil {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(*mention.MentionedType), "bot") {
+			message.Mentions[index].IsBot = true
+		}
+	}
+}
+
+func inboundSenderIsBot(message *channeltypes.NormalizedMessage) bool {
+	if message == nil {
+		return false
+	}
+	event, ok := message.RawEvent.(*larkim.P2MessageReceiveV1)
+	if !ok || event.Event == nil || event.Event.Sender == nil || event.Event.Sender.SenderType == nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(*event.Event.Sender.SenderType), "bot")
 }
 
 type limitedMediaBody struct {

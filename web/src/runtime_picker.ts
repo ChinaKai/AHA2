@@ -6,6 +6,8 @@ type RuntimeSelection = {
   model_id?: string;
   codex_account_id?: string;
   wire_model?: string;
+  stream_idle_timeout_ms?: number;
+  stream_max_retries?: number;
 };
 
 function escapeHTML(value: unknown): string {
@@ -75,6 +77,13 @@ export function runtimeFieldsHTML(
   const wireModels = accountModels(accounts, accountID);
   const runtimeClass = className ? ` ${className}` : "";
   const envModels = models.filter(model => model.source !== "official" && model.backend === backend);
+  const existingSelection = Object.keys(selection).length > 0;
+  const streamIdleTimeoutMS = Number(selection.stream_idle_timeout_ms || 0) ||
+    (existingSelection ? 300000 : 120000);
+  const configuredStreamMaxRetries = Number(selection.stream_max_retries || 0);
+  const streamMaxRetries = configuredStreamMaxRetries > 0
+    ? configuredStreamMaxRetries
+    : (existingSelection ? 5 : 2);
   return `<div class="two runtime-picker${runtimeClass}">
     <label>Backend<select name="backend" id="${prefix}-backend" required>${backends.map(item => option(item, item === "codex" ? "Codex" : "Claude Code", item === backend)).join("")}</select></label>
     <label id="${prefix}-model-source-field">模型使用方式<select name="model_source" id="${prefix}-model-source" required><option value="env" ${source === "env" ? "selected" : ""}>Env</option><option value="official" ${source === "official" ? "selected" : ""}>Official</option></select></label>
@@ -83,6 +92,10 @@ export function runtimeFieldsHTML(
   <div id="${prefix}-official-fields" class="two runtime-picker${runtimeClass}" hidden>
     <label>Codex 账号<select name="codex_account_id" id="${prefix}-codex-account" required>${accounts.map(account => option(account.id, accountName(account), account.id === accountID)).join("")}</select></label>
     <label>官方模型<select name="wire_model" id="${prefix}-wire-model" required>${wireModels.map(model => option(model.wire_model, model.display_name || model.wire_model, model.wire_model === selection.wire_model)).join("")}</select></label>
+  </div>
+  <div id="${prefix}-codex-stream-settings" class="two runtime-picker${runtimeClass}" ${backend === "codex" ? "" : "hidden"}>
+    <label>SSE 无数据超时（秒）<input name="stream_idle_timeout_seconds" type="number" min="30" max="1800" step="1" value="${Math.round(streamIdleTimeoutMS / 1000)}" required></label>
+    <label>流中断重试次数<input name="stream_max_retries" type="number" min="1" max="10" step="1" value="${streamMaxRetries}" required></label>
   </div>`;
 }
 
@@ -105,9 +118,14 @@ export function syncRuntimeFields(prefix: string, models: Model[], accounts: Cod
   const officialFields = document.querySelector<HTMLElement>(`#${prefix}-official-fields`);
   const accountSelect = document.querySelector<HTMLSelectElement>(`#${prefix}-codex-account`);
   const wireSelect = document.querySelector<HTMLSelectElement>(`#${prefix}-wire-model`);
+  const streamSettings = document.querySelector<HTMLElement>(`#${prefix}-codex-stream-settings`);
   if (!sourceField || !sourceSelect || !envField || !modelSelect || !officialFields || !accountSelect || !wireSelect) return;
 
   const supportsOfficial = backend === "codex";
+  if (streamSettings) {
+    streamSettings.hidden = !supportsOfficial;
+    streamSettings.querySelectorAll<HTMLInputElement>("input").forEach(input => { input.disabled = !supportsOfficial; });
+  }
   sourceField.hidden = !supportsOfficial;
   sourceSelect.disabled = !supportsOfficial;
   if (!supportsOfficial) sourceSelect.value = "env";

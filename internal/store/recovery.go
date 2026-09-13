@@ -9,8 +9,9 @@ import (
 )
 
 type RecoveryResult struct {
-	Turns int `json:"turns"`
-	Tasks int `json:"tasks"`
+	Turns              int `json:"turns"`
+	Tasks              int `json:"tasks"`
+	RequeuedInboxItems int `json:"requeued_inbox_items"`
 }
 
 func (s *Store) RecoverInterrupted(ctx context.Context, now time.Time) (RecoveryResult, error) {
@@ -29,15 +30,18 @@ func (s *Store) RecoverInterrupted(ctx context.Context, now time.Time) (Recovery
 	if err != nil {
 		return RecoveryResult{}, fmt.Errorf("recover turns: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `
+	requeueResult, err := tx.ExecContext(ctx, `
 		UPDATE agent_inbox
-		SET status='pending',batch_id='',claimed_at=''
-		WHERE status='claimed' AND batch_id IN (
-			SELECT inbox_batch_id FROM turns
-			WHERE status=? AND finished_at=? AND inbox_batch_id<>''
+		SET status='pending',batch_id='',claimed_at='',recovery_attempts=recovery_attempts+1
+		WHERE status='claimed'
+		  AND batch_id IN (
+			SELECT interrupted.inbox_batch_id
+			FROM turns interrupted
+			WHERE interrupted.status=? AND interrupted.finished_at=? AND interrupted.inbox_batch_id<>''
 		)`,
 		domain.TurnInterrupted, finishedAt,
-	); err != nil {
+	)
+	if err != nil {
 		return RecoveryResult{}, fmt.Errorf("recover inbox: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `
@@ -77,5 +81,9 @@ func (s *Store) RecoverInterrupted(ctx context.Context, now time.Time) (Recovery
 	}
 	turns, _ := turnResult.RowsAffected()
 	tasks, _ := taskResult.RowsAffected()
-	return RecoveryResult{Turns: int(turns), Tasks: int(tasks)}, nil
+	requeued, _ := requeueResult.RowsAffected()
+	return RecoveryResult{
+		Turns: int(turns), Tasks: int(tasks),
+		RequeuedInboxItems: int(requeued),
+	}, nil
 }

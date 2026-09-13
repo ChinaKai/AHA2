@@ -1,11 +1,59 @@
 package domain
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 const (
 	ChannelEndpointAssistantDM       = "assistant_dm"
 	ChannelEndpointGroupDigitalHuman = "group_digital_human"
 )
+
+const DefaultChannelBotDialogueMaxTurns = 6
+
+func ChannelBotDisplayName(config map[string]any, fallback string) string {
+	for _, key := range []string{
+		"runtime_bot_display_name_override",
+		"runtime_bot_provider_display_name",
+		"runtime_bot_display_name",
+	} {
+		if value := strings.TrimSpace(stringValue(config[key])); value != "" {
+			return value
+		}
+	}
+	if fallback = strings.TrimSpace(fallback); fallback != "" {
+		return fallback
+	}
+	return "当前渠道机器人"
+}
+
+func stringValue(value any) string {
+	typed, _ := value.(string)
+	return typed
+}
+
+func ChannelBotDialogueMaxTurns(config map[string]any) int {
+	value, ok := config["bot_dialogue_max_turns"]
+	if !ok {
+		return DefaultChannelBotDialogueMaxTurns
+	}
+	switch typed := value.(type) {
+	case int:
+		if typed > 0 && typed <= 50 {
+			return typed
+		}
+	case int64:
+		if typed > 0 && typed <= 50 {
+			return int(typed)
+		}
+	case float64:
+		if typed > 0 && typed <= 50 {
+			return int(typed)
+		}
+	}
+	return DefaultChannelBotDialogueMaxTurns
+}
 
 type ChannelPlugin struct {
 	ID               string         `json:"id"`
@@ -93,6 +141,7 @@ type ChannelConversation struct {
 	ScopeKey            string    `json:"-"`
 	ExternalChatID      string    `json:"-"`
 	ExternalSenderID    string    `json:"-"`
+	DisplayName         string    `json:"display_name"`
 	OwnerIdentityLinkID string    `json:"owner_identity_link_id,omitempty"`
 	HostTaskID          string    `json:"host_task_id"`
 	Status              string    `json:"status"`
@@ -123,6 +172,40 @@ type ChannelTaskRoute struct {
 	ActivatedAt     time.Time `json:"activated_at,omitempty"`
 	ExitedAt        time.Time `json:"exited_at,omitempty"`
 	ExitReason      string    `json:"exit_reason,omitempty"`
+}
+
+type ChannelDestination struct {
+	ConversationID string    `json:"conversation_id"`
+	InstanceID     string    `json:"instance_id"`
+	InstanceName   string    `json:"instance_name"`
+	ProviderKey    string    `json:"provider_key"`
+	EndpointKind   string    `json:"endpoint_kind"`
+	DisplayName    string    `json:"display_name"`
+	Status         string    `json:"status"`
+	RouteID        string    `json:"route_id,omitempty"`
+	RouteRevision  int       `json:"route_revision,omitempty"`
+	TargetTaskID   string    `json:"target_task_id,omitempty"`
+	TargetTaskCode string    `json:"target_task_code,omitempty"`
+	TargetTaskName string    `json:"target_task_name,omitempty"`
+	UpdatedAt      time.Time `json:"updated_at"`
+}
+
+type ChannelContact struct {
+	IdentityLinkID    string    `json:"identity_link_id"`
+	DisplayName       string    `json:"display_name"`
+	Role              string    `json:"role"`
+	CollaborationRole string    `json:"collaboration_role,omitempty"`
+	IsBot             bool      `json:"is_bot"`
+	LastSeenAt        time.Time `json:"last_seen_at"`
+}
+
+type ChannelGroupMember struct {
+	IdentityLinkID string    `json:"identity_link_id"`
+	DisplayName    string    `json:"display_name"`
+	IsBot          bool      `json:"is_bot"`
+	Source         string    `json:"source"`
+	IsSelf         bool      `json:"is_self,omitempty"`
+	LastSeenAt     time.Time `json:"last_seen_at,omitempty"`
 }
 
 type ChannelSubscription struct {
@@ -215,6 +298,12 @@ type ChannelInboxReceipt struct {
 	ProcessedAt       time.Time      `json:"processed_at,omitempty"`
 }
 
+type ChannelMention struct {
+	ExternalUserID string `json:"external_user_id"`
+	DisplayName    string `json:"display_name"`
+	IsBot          bool   `json:"is_bot"`
+}
+
 type ChannelInboundEnvelope struct {
 	SchemaVersion     int              `json:"schema_version"`
 	RequestID         string           `json:"request_id"`
@@ -229,6 +318,8 @@ type ChannelInboundEnvelope struct {
 	Content           string           `json:"content"`
 	ChatDisplayName   string           `json:"chat_display_name,omitempty"`
 	SenderDisplayName string           `json:"sender_display_name,omitempty"`
+	SenderIsBot       bool             `json:"sender_is_bot,omitempty"`
+	Mentions          []ChannelMention `json:"mentions,omitempty"`
 	MentionedBot      bool             `json:"mentioned_bot"`
 	Resources         []map[string]any `json:"resources,omitempty"`
 	CardAction        map[string]any   `json:"card_action,omitempty"`

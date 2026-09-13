@@ -25,9 +25,13 @@ func TestAttachmentProtocolIsRequiredAcrossTasksAndChannels(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := engine.UpdateTemplate(ctx, "protocol.agent-api", "Remove attachment rules", time.Now()); err == nil {
+	if err := engine.UpdateTemplate(ctx, "protocol.agent-api", "Use `agent-api.md` only when needed.", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.UpdateTemplate(ctx, "protocol.attachment-delivery", "Remove attachment rules", time.Now()); err == nil {
 		t.Fatal("managed attachment protocol allowed an override")
 	}
+	attachmentProtocol := templateContent(t, engine, ctx, "protocol.attachment-delivery")
 	channels := []struct {
 		name    string
 		context map[string]any
@@ -53,14 +57,14 @@ func TestAttachmentProtocolIsRequiredAcrossTasksAndChannels(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					if !strings.Contains(result.EffectivePrompt, attachmentDeliveryProtocol) {
+					if !strings.Contains(result.EffectivePrompt, attachmentProtocol) {
 						t.Fatal("mandatory attachment protocol missing without Memory or Skills")
 					}
 					foundResource := false
 					for _, resource := range result.SharedManifest {
 						if resource.ID == "agent-api" {
 							foundResource = true
-							if !strings.Contains(resource.Content, attachmentDeliveryProtocol) {
+							if !strings.Contains(resource.Content, "Upload alone does not publish") {
 								t.Fatal("attachment instructions missing from API resource")
 							}
 							if !strings.Contains(resource.Path, taskID) {
@@ -79,15 +83,37 @@ func TestAttachmentProtocolIsRequiredAcrossTasksAndChannels(t *testing.T) {
 
 func TestAttachmentProtocolIncludesPublicationAndReceiptBoundaries(t *testing.T) {
 	t.Parallel()
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	attachmentProtocol := templateContent(t, NewEngine(database), ctx, "protocol.attachment-delivery")
 	for _, required := range []string{
-		"actual file bytes", "Image generation output", "POST /api/v1/agent/turn/attachments",
+		"actual file bytes", "generated previews", "POST /api/v1/agent/turn/attachments",
 		"attachment.id", "POST /api/v1/agent/turn/messages", "attachment_ids",
-		"Upload alone does not publish a message", "Never reuse an attachment ID from another Task",
-		"confirmed receipt or Owner feedback", "group progress updates do not send attachments",
-		"not automatically mirrored to Feishu",
+		"Upload alone does not publish a message", "Never reuse or guess an attachment ID from another Task",
+		"confirmed result or Owner feedback", "Group progress updates do not send attachments",
+		"not automatically mirrored to an external channel",
 	} {
-		if !strings.Contains(attachmentDeliveryProtocol, required) {
+		if !strings.Contains(attachmentProtocol, required) {
 			t.Errorf("attachment protocol is missing %q", required)
 		}
 	}
+}
+
+func templateContent(t *testing.T, engine *Engine, ctx context.Context, id string) string {
+	t.Helper()
+	templates, err := engine.Templates(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range templates {
+		if item.ID == id {
+			return item.Content
+		}
+	}
+	t.Fatalf("template %s not found", id)
+	return ""
 }

@@ -71,6 +71,8 @@ type TaskAgent struct {
 	WireModel               string    `json:"wire_model,omitempty"`
 	CodexAccountID          string    `json:"codex_account_id,omitempty"`
 	ReasoningEffort         string    `json:"reasoning_effort,omitempty"`
+	StreamIdleTimeoutMS     int       `json:"stream_idle_timeout_ms,omitempty"`
+	StreamMaxRetries        int       `json:"stream_max_retries,omitempty"`
 	Filesystem              string    `json:"filesystem,omitempty"`
 	Approval                string    `json:"approval,omitempty"`
 	ProxyEnabled            bool      `json:"proxy_enabled"`

@@ -170,30 +170,32 @@ func (s *Service) SetAgentAPI(capabilities *agentapi.Capabilities, baseURL strin
 }
 
 type CreateTaskInput struct {
-	ID                string
-	ProjectID         string
-	WorkspaceID       string
-	Title             string
-	Request           string
-	TargetBranch      string
-	BaseCommit        string
-	TaskBranch        string
-	Isolation         string
-	WorktreeDir       string
-	Backend           string
-	ModelSource       string
-	ModelID           string
-	WireModel         string
-	CodexAccountID    string
-	ReasoningEffort   string
-	Filesystem        string
-	Approval          string
-	ProxyEnabled      bool
-	CollaborationMode string
-	MaxAgents         int
-	KnowledgePolicy   string
-	SkillIDs          []string
-	StartMode         string
+	ID                  string
+	ProjectID           string
+	WorkspaceID         string
+	Title               string
+	Request             string
+	TargetBranch        string
+	BaseCommit          string
+	TaskBranch          string
+	Isolation           string
+	WorktreeDir         string
+	Backend             string
+	ModelSource         string
+	ModelID             string
+	WireModel           string
+	CodexAccountID      string
+	ReasoningEffort     string
+	StreamIdleTimeoutMS *int
+	StreamMaxRetries    *int
+	Filesystem          string
+	Approval            string
+	ProxyEnabled        bool
+	CollaborationMode   string
+	MaxAgents           int
+	KnowledgePolicy     string
+	SkillIDs            []string
+	StartMode           string
 }
 
 func NewService(database *store.Store, secretStore *secrets.FileStore, executor Executor) *Service {
@@ -305,19 +307,32 @@ func (s *Service) CreateTask(ctx context.Context, input CreateTaskInput) (domain
 		return domain.Task{}, err
 	}
 	now := s.now().UTC()
+	streamIdleTimeoutMS := domain.DefaultTaskStreamIdleTimeoutMS
+	if input.StreamIdleTimeoutMS != nil {
+		streamIdleTimeoutMS = *input.StreamIdleTimeoutMS
+	}
+	streamMaxRetries := domain.DefaultTaskStreamMaxRetries
+	if input.StreamMaxRetries != nil {
+		streamMaxRetries = *input.StreamMaxRetries
+	}
+	if err := validateCodexStreamSettings(streamIdleTimeoutMS, streamMaxRetries); err != nil {
+		return domain.Task{}, err
+	}
 	snapshot := domain.RuntimeConfigSnapshot{
-		ID:               domain.NewID("runtime"),
-		WorkspaceID:      workspace.ID,
-		Backend:          model.Backend,
-		ModelID:          model.ID,
-		WireModel:        model.WireModel,
-		EnvGroupID:       envGroup.ID,
-		EnvGroupRevision: envGroup.Revision,
-		CodexAccountID:   accountID,
-		ProxyEnabled:     input.ProxyEnabled,
-		ReasoningEffort:  input.ReasoningEffort,
-		PermissionsJSON:  permissionsJSON(input.Filesystem, input.Approval),
-		CreatedAt:        now,
+		ID:                  domain.NewID("runtime"),
+		WorkspaceID:         workspace.ID,
+		Backend:             model.Backend,
+		ModelID:             model.ID,
+		WireModel:           model.WireModel,
+		EnvGroupID:          envGroup.ID,
+		EnvGroupRevision:    envGroup.Revision,
+		CodexAccountID:      accountID,
+		ProxyEnabled:        input.ProxyEnabled,
+		ReasoningEffort:     input.ReasoningEffort,
+		StreamIdleTimeoutMS: streamIdleTimeoutMS,
+		StreamMaxRetries:    streamMaxRetries,
+		PermissionsJSON:     permissionsJSON(input.Filesystem, input.Approval),
+		CreatedAt:           now,
 	}
 	if snapshot.ReasoningEffort == "" {
 		snapshot.ReasoningEffort = model.DefaultEffort
@@ -589,6 +604,11 @@ func (s *Service) submitAgentMessage(ctx context.Context, taskID, agentID, conte
 		Content:   content,
 		CreatedAt: now,
 	}
+	if actor, ok := channelProvenance["actor"].(map[string]any); ok {
+		if displayName := strings.TrimSpace(fmt.Sprint(actor["display_name"])); displayName != "" && displayName != "<nil>" {
+			message.Sender = displayName
+		}
+	}
 	if agentID == "main" {
 		s.cancelMainResultMerge(task.ID)
 	}
@@ -780,11 +800,6 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 		s.failTurn(ctx, &turn, task, err)
 		return
 	}
-	memory, err := s.store.TaskMemory(ctx, task.ID)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		s.failTurn(ctx, &turn, task, err)
-		return
-	}
 	handoff, _ := s.store.PendingAgentSessionHandoff(ctx, task.ID, turn.AgentID)
 	var globalKB, projectKB, staleKB []domain.KnowledgeEntry
 	var skills []domain.Skill
@@ -822,7 +837,7 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 		s.failTurn(ctx, &turn, task, err)
 		return
 	}
-	conversation, _ := s.store.ConversationPageForAgent(ctx, task.ID, turn.AgentID, 0, 0, 100, nil)
+	conversation, _ := s.store.ConversationPageForAgent(ctx, task.ID, turn.AgentID, 0, 0, 200, nil)
 	allTurns, _ := s.store.ListTurns(ctx, task.ID)
 	identityContext := prompt.BackendSessionContext(channelContext)
 	reusableSession, reusableSessionErr := s.store.ReusableBackendSession(
@@ -833,7 +848,13 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 		s.failTurn(ctx, &turn, task, fmt.Errorf("load reusable backend session: %w", reusableSessionErr))
 		return
 	}
-	includeRecentContext, includeTurnDiagnostics := recoveryContextNeeds(turn, allTurns, reusableSessionErr == nil, handoff.Summary)
+	includeRecentContext, includeRecoveryHandoff, includeTurnDiagnostics := recoveryContextNeeds(turn, allTurns, reusableSessionErr == nil, handoff.Summary)
+	promptConversation := conversation.Items
+	if includeRecentContext {
+		if recentConversation, recentErr := s.store.ConversationPageForAgent(ctx, task.ID, turn.AgentID, 0, 0, 200, []string{"chat"}); recentErr == nil {
+			promptConversation = recentConversation.Items
+		}
+	}
 	hardwareGroups, _ := s.store.HardwareGroups(ctx, task.ID)
 	attachments := []prompt.AttachmentResource{}
 	seenAttachments := map[string]bool{}
@@ -867,11 +888,12 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 	}
 	preview, err := s.prompts.Build(ctx, prompt.BuildInput{
 		Project: project, Workspace: workspace, Task: task, Agent: agent, Snapshot: snapshot,
-		Memory: memory, GlobalKnowledge: globalKB, ProjectKnowledge: projectKB, StaleKnowledge: staleKB, Skills: skills,
+		GlobalKnowledge: globalKB, ProjectKnowledge: projectKB, StaleKnowledge: staleKB, Skills: skills,
 		ProductLine: productLine, KnowledgeEnabled: kbEnabled,
-		Conversation: conversation.Items, Turns: allTurns, Hardware: hardwareGroups, Attachments: attachments, UserMessage: userMessage,
-		Handoff: handoff.Summary, AgentAPIURL: agentAPIURL, CurrentTurnID: turn.ID, CurrentRoundID: turn.RoundID,
-		IncludeRecentContext: includeRecentContext, IncludeTurnDiagnostics: includeTurnDiagnostics,
+		Conversation: promptConversation, Turns: allTurns, Hardware: hardwareGroups, Attachments: attachments, UserMessage: userMessage,
+		RecoveryConversation: conversation.Items,
+		Handoff:              handoff.Summary, AgentAPIURL: agentAPIURL, CurrentTurnID: turn.ID, CurrentRoundID: turn.RoundID,
+		IncludeRecentContext: includeRecentContext, IncludeRecoveryHandoff: includeRecoveryHandoff, IncludeTurnDiagnostics: includeTurnDiagnostics,
 		ChannelContext: channelContext,
 	})
 	if err != nil {
@@ -1631,7 +1653,7 @@ func (s *Service) startTurn(turn domain.Turn) {
 	}()
 }
 
-func recoveryContextNeeds(current domain.Turn, turns []domain.Turn, hasReusableSession bool, handoff string) (bool, bool) {
+func recoveryContextNeeds(current domain.Turn, turns []domain.Turn, hasReusableSession bool, handoff string) (bool, bool, bool) {
 	var previous domain.Turn
 	for _, candidate := range turns {
 		if candidate.AgentID != current.AgentID || candidate.Sequence >= current.Sequence {
@@ -1642,9 +1664,10 @@ func recoveryContextNeeds(current domain.Turn, turns []domain.Turn, hasReusableS
 		}
 	}
 	abnormalPrevious := previous.ID != "" && (previous.Status == domain.TurnFailed || previous.Status == domain.TurnInterrupted || previous.Status == domain.TurnBlocked || !previous.StalledAt.IsZero() || previous.Attempt > 1)
+	recoveryHandoff := previous.ID != "" && previous.Status == domain.TurnInterrupted && previous.RoundID != "" && previous.RoundID == current.RoundID && previous.InputMessageID == current.InputMessageID
 	diagnostics := abnormalPrevious || current.Attempt > 1
 	recent := !hasReusableSession || strings.TrimSpace(handoff) != "" || abnormalPrevious
-	return recent, diagnostics
+	return recent, recoveryHandoff, diagnostics
 }
 
 func (s *Service) spawnAgentTurns(ctx context.Context, task domain.Task, parent domain.Turn, actions []AgentAction) int {
@@ -1780,6 +1803,7 @@ func (s *Service) recordExecutionEvent(ctx context.Context, turn domain.Turn, ev
 		return
 	}
 	category, kind, summary := "", event.Type, ""
+	durableUpdate := false
 	switch event.Type {
 	case "agent_progress":
 		category = "update"
@@ -1792,6 +1816,7 @@ func (s *Service) recordExecutionEvent(ctx context.Context, turn domain.Turn, ev
 		category = "update"
 		kind = "agent_message_update"
 		summary = text
+		durableUpdate, _ = event.Data["intermediate"].(bool)
 	case "agent_command_started", "agent_command_finished":
 		category = "tool"
 		summary = firstText(event.Data, "command", "tool_name")
@@ -1801,11 +1826,11 @@ func (s *Service) recordExecutionEvent(ctx context.Context, turn domain.Turn, ev
 	case "agent_stalled":
 		category = "update"
 		kind = "agent_stalled"
-		summary = fmt.Sprintf("Backend 已连续 %s 没有活动，仍在等待响应", time.Duration(usageValue(event.Data["idle_ms"]))*time.Millisecond)
+		summary = fmt.Sprintf("Backend 已连续 %s 未产生新的流式事件，仍在等待响应", time.Duration(usageValue(event.Data["idle_ms"]))*time.Millisecond)
 	case "agent_heartbeat":
 		category = "update"
 		kind = "agent_stalled_heartbeat"
-		summary = fmt.Sprintf("Backend 仍无活动，已等待 %s", time.Duration(usageValue(event.Data["idle_ms"]))*time.Millisecond)
+		summary = fmt.Sprintf("Backend 仍未产生新的流式事件，已等待 %s", time.Duration(usageValue(event.Data["idle_ms"]))*time.Millisecond)
 	case "agent_resumed":
 		category = "update"
 		kind = "agent_resumed"
@@ -1824,7 +1849,15 @@ func (s *Service) recordExecutionEvent(ctx context.Context, turn domain.Turn, ev
 			AgentID: turn.AgentID, Category: category, Kind: kind, Summary: summary,
 			Payload: event.Data, CreatedAt: s.now().UTC(),
 		}
-		if kind == "agent_message_update" {
+		if durableUpdate {
+			item.StreamAgentID = turn.AgentID
+			item.FromAgentID = turn.AgentID
+			item.ToAgentID = "owner"
+			item.RouteKind = "agent_progress"
+			if stored, storeErr := s.store.AddConversationItem(ctx, item); storeErr == nil {
+				event.Data["conversation_item_id"] = stored.ID
+			}
+		} else if kind == "agent_message_update" {
 			if stored, storeErr := s.store.UpsertBackendStreamItem(ctx, item); storeErr == nil {
 				event.Data["conversation_item_id"] = stored.ID
 			}

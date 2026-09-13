@@ -56,6 +56,10 @@ func TestCreateTaskSelectsOfficialCodexModelFromAccount(t *testing.T) {
 	if snapshot.CodexAccountID != "account-official" || snapshot.WireModel != "gpt-5.6-sol" || snapshot.Backend != "codex" {
 		t.Fatalf("unexpected official runtime snapshot: %#v", snapshot)
 	}
+	if snapshot.StreamIdleTimeoutMS != domain.DefaultTaskStreamIdleTimeoutMS ||
+		snapshot.StreamMaxRetries != domain.DefaultTaskStreamMaxRetries {
+		t.Fatalf("unexpected task stream defaults: %#v", snapshot)
+	}
 	model, err := database.Model(ctx, snapshot.ModelID)
 	if err != nil {
 		t.Fatal(err)
@@ -86,6 +90,29 @@ func TestOfficialCodexSelectionRejectsModelOutsideAccountCatalog(t *testing.T) {
 		CodexAccountID: "account-limited", WireModel: "gpt-not-available",
 	}); err == nil {
 		t.Fatal("expected unavailable account model to be rejected")
+	}
+}
+
+func TestCodexStreamSettingsValidation(t *testing.T) {
+	t.Parallel()
+	for _, item := range []struct {
+		idle    int
+		retries int
+		valid   bool
+	}{
+		{idle: 0, retries: 0, valid: true},
+		{idle: 30000, retries: 1, valid: true},
+		{idle: 120000, retries: 2, valid: true},
+		{idle: 1800000, retries: 10, valid: true},
+		{idle: 29999, retries: 2},
+		{idle: 1800001, retries: 2},
+		{idle: 120000, retries: -1},
+		{idle: 120000, retries: 11},
+	} {
+		err := validateCodexStreamSettings(item.idle, item.retries)
+		if (err == nil) != item.valid {
+			t.Fatalf("idle=%d retries=%d valid=%t err=%v", item.idle, item.retries, item.valid, err)
+		}
 	}
 }
 
@@ -139,6 +166,7 @@ func TestUpdateAgentConfigSwitchesOfficialToLegacySyncedEnvModel(t *testing.T) {
 	}
 	agent, err := service.UpdateAgentConfig(ctx, task.ID, "main", UpdateAgentConfigInput{
 		Backend: "codex", ModelSource: "env", ModelID: envModel.ID,
+		StreamIdleTimeoutMS: intPointer(90000), StreamMaxRetries: intPointer(3),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -152,6 +180,23 @@ func TestUpdateAgentConfigSwitchesOfficialToLegacySyncedEnvModel(t *testing.T) {
 	}
 	if snapshot.EnvGroupID != envGroup.ID || snapshot.EnvGroupRevision != envGroup.Revision || snapshot.CodexAccountID != "" {
 		t.Fatalf("unexpected env runtime snapshot: %#v", snapshot)
+	}
+	if snapshot.StreamIdleTimeoutMS != 90000 || snapshot.StreamMaxRetries != 3 ||
+		agent.StreamIdleTimeoutMS != 90000 || agent.StreamMaxRetries != 3 {
+		t.Fatalf("stream settings were not exposed by agent runtime: snapshot=%#v agent=%#v", snapshot, agent)
+	}
+	agent, err = service.UpdateAgentConfig(ctx, task.ID, "main", UpdateAgentConfigInput{
+		StreamIdleTimeoutMS: intPointer(0), StreamMaxRetries: intPointer(0),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err = database.RuntimeSnapshot(ctx, agent.RuntimeConfigSnapshotID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.StreamIdleTimeoutMS != 0 || snapshot.StreamMaxRetries != 0 {
+		t.Fatalf("zero stream settings must preserve Codex defaults: %#v", snapshot)
 	}
 	repaired, err := database.Model(ctx, envModel.ID)
 	if err != nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
@@ -285,8 +286,17 @@ func (s *Store) UpdateChannelInstance(ctx context.Context, item domain.ChannelIn
 	return s.ChannelInstance(ctx, item.ID)
 }
 
-func (s *Store) UpdateChannelInstanceHealth(ctx context.Context, id, status, errorCode string, at time.Time) error {
+func (s *Store) UpdateChannelInstanceHealth(ctx context.Context, id, status, errorCode string, at time.Time, metadata ...map[string]string) error {
 	configPatch := map[string]any{"runtime_error_code": errorCode}
+	for _, values := range metadata {
+		for key, value := range values {
+			if key == "runtime_bot_open_id" || key == "runtime_bot_provider_display_name" {
+				if value = strings.TrimSpace(value); value != "" {
+					configPatch[key] = value
+				}
+			}
+		}
+	}
 	_, err := s.db.ExecContext(ctx, `UPDATE channel_instances SET status=?,last_seen_at=?,config_json=json_patch(config_json,?),updated_at=? WHERE id=? AND status<>'disabled' AND retired_at=''`,
 		status, timeString(at), encodeJSON(configPatch), timeString(at), id)
 	return err

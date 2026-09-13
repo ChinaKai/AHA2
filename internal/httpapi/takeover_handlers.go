@@ -108,21 +108,23 @@ func (s *Server) takeoverWorkspace(writer http.ResponseWriter, request *http.Req
 }
 
 type taskTakeoverPayload struct {
-	WorkspaceID       string                 `json:"workspace_id"`
-	Title             string                 `json:"title"`
-	Request           string                 `json:"request"`
-	Backend           string                 `json:"backend"`
-	ModelSource       string                 `json:"model_source"`
-	ModelID           string                 `json:"model_id"`
-	WireModel         string                 `json:"wire_model"`
-	CodexAccountID    string                 `json:"codex_account_id"`
-	ReasoningEffort   string                 `json:"reasoning_effort"`
-	Filesystem        string                 `json:"filesystem"`
-	Approval          string                 `json:"approval"`
-	ProxyEnabled      bool                   `json:"proxy_enabled"`
-	CollaborationMode string                 `json:"collaboration_mode"`
-	MaxAgents         int                    `json:"max_agents"`
-	Groups            []hardwareGroupPayload `json:"groups"`
+	WorkspaceID         string                 `json:"workspace_id"`
+	Title               string                 `json:"title"`
+	Request             string                 `json:"request"`
+	Backend             string                 `json:"backend"`
+	ModelSource         string                 `json:"model_source"`
+	ModelID             string                 `json:"model_id"`
+	WireModel           string                 `json:"wire_model"`
+	CodexAccountID      string                 `json:"codex_account_id"`
+	ReasoningEffort     string                 `json:"reasoning_effort"`
+	StreamIdleTimeoutMS *int                   `json:"stream_idle_timeout_ms"`
+	StreamMaxRetries    *int                   `json:"stream_max_retries"`
+	Filesystem          string                 `json:"filesystem"`
+	Approval            string                 `json:"approval"`
+	ProxyEnabled        bool                   `json:"proxy_enabled"`
+	CollaborationMode   string                 `json:"collaboration_mode"`
+	MaxAgents           int                    `json:"max_agents"`
+	Groups              []hardwareGroupPayload `json:"groups"`
 }
 
 func (s *Server) takeoverTask(writer http.ResponseWriter, request *http.Request) {
@@ -201,7 +203,9 @@ func (s *Server) takeoverTask(writer http.ResponseWriter, request *http.Request)
 		ProjectID: source.Task.ProjectID, WorkspaceID: workspace.ID, Title: title, Request: goal,
 		Isolation: "inplace", Backend: payload.Backend, ModelSource: payload.ModelSource,
 		ModelID: payload.ModelID, WireModel: payload.WireModel, CodexAccountID: payload.CodexAccountID,
-		ReasoningEffort: payload.ReasoningEffort, Filesystem: filesystem, Approval: approval,
+		ReasoningEffort:     payload.ReasoningEffort,
+		StreamIdleTimeoutMS: payload.StreamIdleTimeoutMS, StreamMaxRetries: payload.StreamMaxRetries,
+		Filesystem: filesystem, Approval: approval,
 		ProxyEnabled: payload.ProxyEnabled, CollaborationMode: mode, MaxAgents: maxAgents,
 		KnowledgePolicy: source.Task.KnowledgePolicy,
 	})

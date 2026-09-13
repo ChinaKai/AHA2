@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -21,14 +22,28 @@ func (s *Server) agentCapabilitiesInfo(writer http.ResponseWriter, request *http
 	main := call.Turn.AgentID == "main"
 	knowledgePublish := s.app.AgentKnowledgePublishAllowed(request.Context(), call)
 	boundKnowledgeContribute, _ := s.store.HasContributingKnowledgeBinding(request.Context(), call.Project.ID)
+	channelOutreach := false
+	channelReplyDecision := false
+	if main && s.channels != nil {
+		_, _, channelErr := s.channels.AgentTaskChannelContacts(request.Context(), claims)
+		channelOutreach = channelErr == nil
+	}
+	if s.store != nil {
+		if channelContext, contextErr := s.store.ChannelContextForInboxBatch(request.Context(), call.Turn.InboxBatchID); contextErr == nil {
+			actor, _ := channelContext["actor"].(map[string]any)
+			isBot, _ := actor["is_bot"].(bool)
+			channelReplyDecision = strings.TrimSpace(fmt.Sprint(channelContext["endpoint"])) == domain.ChannelEndpointGroupDigitalHuman && isBot
+		}
+	}
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "capabilities": map[string]bool{
 		"progress": true, "knowledge_read": true, "knowledge_feedback": true,
 		"memory_update": main, "knowledge_publish": knowledgePublish, "knowledge_contribute_bound": knowledgePublish && boundKnowledgeContribute, "skill_create": main, "skill_update": main,
-		"workspace_read": main && call.Task.AgentCapabilities["workspace_read"],
-		"task_create":    main && call.Task.AgentCapabilities["task_create"],
-		"clone_hardware": main && call.Task.AgentCapabilities["clone_hardware"],
-		"collaboration":  main && call.Task.CollaborationMode == "auto",
-		"hardware":       true, "managed_process": true,
+		"workspace_read":   main && call.Task.AgentCapabilities["workspace_read"],
+		"task_create":      main && call.Task.AgentCapabilities["task_create"],
+		"clone_hardware":   main && call.Task.AgentCapabilities["clone_hardware"],
+		"collaboration":    main && call.Task.CollaborationMode == "auto",
+		"channel_outreach": channelOutreach, "channel_reply_decision": channelReplyDecision,
+		"hardware": true, "managed_process": true,
 	}})
 }
 
@@ -126,6 +141,23 @@ func (s *Server) addAgentProgressMessage(writer http.ResponseWriter, request *ht
 		return
 	}
 	writeJSON(writer, http.StatusCreated, map[string]any{"ok": true})
+}
+
+func (s *Server) setAgentChannelReplyDecision(writer http.ResponseWriter, request *http.Request) {
+	claims, _ := agentClaimsFromContext(request.Context())
+	var payload struct {
+		Decision string `json:"decision"`
+	}
+	if decodeJSON(request, &payload) != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_json")
+		return
+	}
+	if err := s.app.SetAgentChannelReplyDecision(request.Context(), claims, strings.TrimSpace(payload.Decision)); err != nil {
+		writeAgentControlError(writer, err)
+		return
+	}
+	s.audit(request, "agent.channel.reply_decision", "turn", claims.TurnID, map[string]any{"decision": payload.Decision})
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "decision": payload.Decision})
 }
 
 func (s *Server) agentKnowledge(writer http.ResponseWriter, request *http.Request) {

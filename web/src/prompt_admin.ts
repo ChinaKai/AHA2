@@ -5,6 +5,7 @@ const state = {
   loaded: false,
   templates: [] as PromptTemplate[],
   selectedTemplateID: "",
+  drafts: {} as Record<string, string>,
 };
 
 function escapeHTML(value: unknown): string {
@@ -35,6 +36,7 @@ export function renderPromptAdmin(): string {
   if (!state.loaded) return '<section class="page"><div class="loading">正在加载提示词模板...</div></section>';
   const selected = state.templates.find(item => item.id === state.selectedTemplateID) || state.templates[0];
   if (!selected) return '<section class="page"><div class="empty">暂无提示词模板</div></section>';
+  const content = state.drafts[selected.id] ?? selected.content;
   return `<section class="page prompt-page">
     <header class="page-head"><div><h1>提示词</h1><p>查看和维护当前 AHA2 使用的全部提示词模板。</p></div></header>
     <div class="prompt-template-layout">
@@ -42,10 +44,10 @@ export function renderPromptAdmin(): string {
       <section class="prompt-editor">
         <header><div><h2>${escapeHTML(selected.name)}</h2><p>${escapeHTML(selected.description)}</p></div><code>${escapeHTML(selected.id)}</code></header>
         <div class="prompt-editor-meta"><span>${escapeHTML(selected.layer)}</span><span>${escapeHTML(selected.source)}</span><span>v${selected.version}</span>${selected.required ? "<span>required</span>" : ""}</div>
-        <textarea id="prompt-template-content" ${selected.editable ? "" : "readonly"}>${escapeHTML(selected.content)}</textarea>
+        <textarea data-prompt-template-content data-ui-key="prompt-template-content:${escapeHTML(selected.id)}" ${selected.editable ? "" : "readonly"}>${escapeHTML(content)}</textarea>
         <footer>
-          <span>${Array.from(selected.content).length.toLocaleString()} chars</span>
-          ${selected.editable ? `<button type="button" id="reset-prompt-template" ${selected.source === "builtin" ? "disabled" : ""}>恢复内置</button><button type="button" id="save-prompt-template" class="primary">保存模板</button>` : '<span class="managed-template">协议由代码管理</span>'}
+          <span>${Array.from(content).length.toLocaleString()} chars</span>
+          ${selected.editable ? `<button type="button" id="reset-prompt-template" ${selected.source === "builtin" ? "disabled" : ""}>恢复内置</button><button type="button" id="save-prompt-template" class="primary">保存模板</button>` : '<span class="managed-template">内置只读模板</span>'}
         </footer>
       </section>
     </div>
@@ -57,13 +59,19 @@ export function bindPromptAdmin(
   notify: (kind: "notice" | "error", message: string) => void,
 ): void {
   document.querySelectorAll<HTMLElement>("[data-prompt-template]").forEach(button => button.addEventListener("click", () => {
+    const current = document.querySelector<HTMLTextAreaElement>("[data-prompt-template-content]");
+    if (current && state.selectedTemplateID) state.drafts[state.selectedTemplateID] = current.value;
     state.selectedTemplateID = button.dataset.promptTemplate || "";
     render();
   }));
+  document.querySelector<HTMLTextAreaElement>("[data-prompt-template-content]")?.addEventListener("input", event => {
+    if (state.selectedTemplateID) state.drafts[state.selectedTemplateID] = (event.currentTarget as HTMLTextAreaElement).value;
+  });
   document.querySelector("#save-prompt-template")?.addEventListener("click", async () => {
-    const content = document.querySelector<HTMLTextAreaElement>("#prompt-template-content")?.value || "";
+    const content = document.querySelector<HTMLTextAreaElement>("[data-prompt-template-content]")?.value || "";
     try {
       await api.updatePromptTemplate(state.selectedTemplateID, content);
+      delete state.drafts[state.selectedTemplateID];
       await loadPromptCatalog();
       notify("notice", "提示词模板已保存");
     } catch (error) {
@@ -75,6 +83,7 @@ export function bindPromptAdmin(
     if (!window.confirm("恢复该模板的内置内容？")) return;
     try {
       await api.resetPromptTemplate(state.selectedTemplateID);
+      delete state.drafts[state.selectedTemplateID];
       await loadPromptCatalog();
       notify("notice", "已恢复内置模板");
     } catch (error) {

@@ -10,20 +10,23 @@ import (
 	"time"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
+	"github.com/ChinaKai/AHA2/internal/prompt"
 	"github.com/ChinaKai/AHA2/internal/store"
 )
 
 type UpdateAgentConfigInput struct {
-	Backend         string
-	ModelSource     string
-	ModelID         string
-	WireModel       string
-	CodexAccountID  string
-	ReasoningEffort string
-	Filesystem      string
-	Approval        string
-	ProxyEnabled    *bool
-	InheritMain     *bool
+	Backend             string
+	ModelSource         string
+	ModelID             string
+	WireModel           string
+	CodexAccountID      string
+	ReasoningEffort     string
+	StreamIdleTimeoutMS *int
+	StreamMaxRetries    *int
+	Filesystem          string
+	Approval            string
+	ProxyEnabled        *bool
+	InheritMain         *bool
 }
 
 func (s *Service) CompactAgentSession(ctx context.Context, taskID, agentID string) (domain.BackendSession, error) {
@@ -53,13 +56,9 @@ func (s *Service) rotateAgentSession(
 	var handoff *domain.AgentSessionHandoff
 	if compact {
 		status = "compacted"
-		summary, err := s.buildAgentCompactSummary(ctx, taskID, agentID)
-		if err != nil {
-			return domain.BackendSession{}, err
-		}
 		handoff = &domain.AgentSessionHandoff{
 			ID: domain.NewID("handoff"), TaskID: taskID, AgentID: agentID, Mode: "compact",
-			Summary: summary, Status: "pending", CreatedAt: now,
+			Summary: "compact", Status: "pending", CreatedAt: now,
 		}
 	}
 	session, err := s.store.RotateAgentBackendSession(ctx, taskID, agentID, status, handoff)
@@ -82,65 +81,6 @@ func (s *Service) rotateAgentSession(
 		"agent_id": agentID, "old_backend_session_id": session.ID, "mode": status,
 	})
 	return session, nil
-}
-
-func (s *Service) buildAgentCompactSummary(ctx context.Context, taskID, agentID string) (string, error) {
-	task, err := s.store.Task(ctx, taskID)
-	if err != nil {
-		return "", err
-	}
-	memory, _ := s.store.TaskMemory(ctx, taskID)
-	turns, err := s.store.ListTurns(ctx, taskID)
-	if err != nil {
-		return "", err
-	}
-	var recent []domain.Turn
-	for index := len(turns) - 1; index >= 0 && len(recent) < 8; index-- {
-		if turns[index].AgentID == agentID && turns[index].Status.Terminal() {
-			recent = append(recent, turns[index])
-		}
-	}
-	var builder strings.Builder
-	fmt.Fprintf(&builder, "# AHA Backend Session Handoff\n\nTask: %s (%s)\nAgent: %s\nCurrent goal: %s\n\n",
-		task.Title, task.Code, agentID, task.CurrentGoal,
-	)
-	writeCompactList(&builder, "Decisions", memory.Decisions)
-	writeCompactList(&builder, "Facts", memory.Facts)
-	writeCompactList(&builder, "Progress", memory.Progress)
-	writeCompactList(&builder, "Verification", memory.Verification)
-	writeCompactList(&builder, "Next actions", memory.NextActions)
-	builder.WriteString("\n## Recent Agent Turns\n")
-	for _, turn := range recent {
-		body := strings.TrimSpace(turn.Result)
-		if body == "" {
-			body = strings.TrimSpace(turn.Error)
-		}
-		fmt.Fprintf(&builder, "- Turn %d [%s]: %s\n", turn.Sequence, turn.Status, truncateCompactText(body, 420))
-	}
-	return truncateCompactText(builder.String(), 12000), nil
-}
-
-func writeCompactList(builder *strings.Builder, title string, values []string) {
-	fmt.Fprintf(builder, "## %s\n", title)
-	if len(values) == 0 {
-		builder.WriteString("- none\n")
-		return
-	}
-	start := 0
-	if len(values) > 12 {
-		start = len(values) - 12
-	}
-	for _, value := range values[start:] {
-		fmt.Fprintf(builder, "- %s\n", truncateCompactText(value, 420))
-	}
-}
-
-func truncateCompactText(value string, limit int) string {
-	value = strings.TrimSpace(value)
-	if len([]rune(value)) <= limit {
-		return value
-	}
-	return string([]rune(value)[:limit-1]) + "…"
 }
 
 func (s *Service) ResumePending(ctx context.Context) error {
@@ -188,6 +128,8 @@ func (s *Service) TaskAgents(ctx context.Context, taskID string) ([]domain.TaskA
 		agents[index].WireModel = snapshot.WireModel
 		agents[index].CodexAccountID = snapshot.CodexAccountID
 		agents[index].ReasoningEffort = snapshot.ReasoningEffort
+		agents[index].StreamIdleTimeoutMS = snapshot.StreamIdleTimeoutMS
+		agents[index].StreamMaxRetries = snapshot.StreamMaxRetries
 		agents[index].Filesystem, agents[index].Approval = parsePermissionsJSON(snapshot.PermissionsJSON)
 		agents[index].ProxyEnabled = snapshot.ProxyEnabled
 		model, modelErr := s.store.Model(ctx, snapshot.ModelID)
@@ -372,6 +314,7 @@ func (s *Service) recordAgentConfigUpdate(ctx context.Context, agent domain.Task
 			"model_id": agent.ModelID, "model_name": modelName, "wire_model": agent.WireModel,
 			"codex_account_id": agent.CodexAccountID, "codex_account_name": accountName,
 			"reasoning_effort": agent.ReasoningEffort, "filesystem": agent.Filesystem,
+			"stream_idle_timeout_ms": agent.StreamIdleTimeoutMS, "stream_max_retries": agent.StreamMaxRetries,
 			"approval": agent.Approval, "proxy_enabled": agent.ProxyEnabled, "inherit_main": agent.InheritMain,
 		},
 		CreatedAt: now,
@@ -440,13 +383,35 @@ func (s *Service) deriveRuntimeSnapshot(
 	if input.ProxyEnabled != nil {
 		proxyEnabled = *input.ProxyEnabled
 	}
+	streamIdleTimeoutMS := base.StreamIdleTimeoutMS
+	if input.StreamIdleTimeoutMS != nil {
+		streamIdleTimeoutMS = *input.StreamIdleTimeoutMS
+	}
+	streamMaxRetries := base.StreamMaxRetries
+	if input.StreamMaxRetries != nil {
+		streamMaxRetries = *input.StreamMaxRetries
+	}
+	if err := validateCodexStreamSettings(streamIdleTimeoutMS, streamMaxRetries); err != nil {
+		return domain.RuntimeConfigSnapshot{}, err
+	}
 	return domain.RuntimeConfigSnapshot{
 		ID: domain.NewID("runtime"), WorkspaceID: task.WorkspaceID, Backend: backend,
 		ModelID: model.ID, WireModel: model.WireModel, EnvGroupID: envGroup.ID,
 		EnvGroupRevision: envGroup.Revision, CodexAccountID: accountID, ReasoningEffort: effort,
+		StreamIdleTimeoutMS: streamIdleTimeoutMS, StreamMaxRetries: streamMaxRetries,
 		ProxyEnabled:    proxyEnabled,
 		PermissionsJSON: permissionsJSON(filesystem, approval), CreatedAt: s.now().UTC(),
 	}, nil
+}
+
+func validateCodexStreamSettings(idleTimeoutMS, maxRetries int) error {
+	if idleTimeoutMS < 0 || idleTimeoutMS > 1800000 || (idleTimeoutMS > 0 && idleTimeoutMS < 30000) {
+		return fmt.Errorf("stream_idle_timeout_ms must be 0 or between 30000 and 1800000")
+	}
+	if maxRetries < 0 || maxRetries > 10 {
+		return fmt.Errorf("stream_max_retries must be between 0 and 10")
+	}
+	return nil
 }
 
 func (s *Service) scheduleAgent(ctx context.Context, taskID, agentID string) (domain.Turn, bool, error) {
@@ -485,11 +450,15 @@ func (s *Service) scheduleAgent(ctx context.Context, taskID, agentID string) (do
 			parentTurnID = item.SourceTurnID
 		}
 	}
+	instruction, err := s.prompts.RenderInboxBatch(ctx, inboxTemplateItems(items))
+	if err != nil {
+		return domain.Turn{}, false, err
+	}
 	now := s.now().UTC()
 	turn := domain.Turn{
 		ID: domain.NewID("turn"), TaskID: taskID, RoundID: round.ID, AgentID: agentID,
 		ParentTurnID: parentTurnID, Attempt: 1, Generation: generation, Required: true,
-		Title: agent.Title, Instruction: inboxInstruction(items), InputMessageID: round.InputMessageID,
+		Title: agent.Title, Instruction: instruction, InputMessageID: round.InputMessageID,
 		Status: domain.TurnQueued, RuntimeConfigSnapshotID: agent.RuntimeConfigSnapshotID,
 		InboxBatchID: domain.NewID("inbox_batch"), QueuedAt: now,
 	}
@@ -507,31 +476,42 @@ func (s *Service) scheduleAgent(ctx context.Context, taskID, agentID string) (do
 	return turn, true, nil
 }
 
-func inboxInstruction(items []domain.AgentInboxItem) string {
-	var sections []string
-	sections = append(sections, "Process the following messages routed to you by AHA. They are a fixed inbox batch. Preserve their order and source boundaries.")
+func inboxTemplateItems(items []domain.AgentInboxItem) []prompt.InboxTemplateItem {
+	result := make([]prompt.InboxTemplateItem, 0, len(items))
 	for _, item := range items {
-		content := strings.TrimSpace(item.Content)
-		if raw, ok := item.Payload["attachments"]; ok {
-			data, _ := json.Marshal(raw)
-			var attachments []domain.Attachment
-			if json.Unmarshal(data, &attachments) == nil && len(attachments) > 0 {
-				lines := []string{"Attachments (see the attachment index in Available context):"}
-				for _, attachment := range attachments {
-					lines = append(lines, fmt.Sprintf("- %s (%s, %d bytes, id %s)", attachment.Name, attachment.MediaType, attachment.Size, attachment.ID))
+		rendered := prompt.InboxTemplateItem{
+			Sequence: item.Sequence, SourceKind: item.SourceKind, SourceAgentID: item.SourceAgentID,
+			Content: strings.TrimSpace(item.Content),
+		}
+		if channelContext, ok := item.Payload["channel_context"].(map[string]any); ok {
+			actor, _ := channelContext["actor"].(map[string]any)
+			displayName := strings.TrimSpace(fmt.Sprint(actor["display_name"]))
+			if displayName != "" && displayName != "<nil>" {
+				rendered.SourceAgentID = displayName
+				rendered.ChannelSender = displayName
+			}
+			if chatName := strings.TrimSpace(fmt.Sprint(channelContext["chat_display_name"])); chatName != "" && chatName != "<nil>" {
+				rendered.ChannelConversation = chatName
+			}
+			if rawMentions, ok := channelContext["mentions"].([]any); ok {
+				var names []string
+				for _, rawMention := range rawMentions {
+					mention, _ := rawMention.(map[string]any)
+					name := strings.TrimSpace(fmt.Sprint(mention["display_name"]))
+					if name != "" && name != "<nil>" {
+						names = append(names, name)
+					}
 				}
-				if content != "" {
-					content += "\n\n"
-				}
-				content += strings.Join(lines, "\n")
+				rendered.MentionedParticipants = strings.Join(names, ", ")
 			}
 		}
-		sections = append(sections, fmt.Sprintf(
-			"## Inbox %d [%s from %s]\n%s",
-			item.Sequence, item.SourceKind, item.SourceAgentID, content,
-		))
+		if raw, ok := item.Payload["attachments"]; ok {
+			data, _ := json.Marshal(raw)
+			_ = json.Unmarshal(data, &rendered.Attachments)
+		}
+		result = append(result, rendered)
 	}
-	return strings.Join(sections, "\n\n")
+	return result
 }
 
 func (s *Service) routeAgentOutcome(ctx context.Context, task domain.Task, turn domain.Turn) bool {

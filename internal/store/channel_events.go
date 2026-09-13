@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
@@ -57,6 +58,16 @@ func (s *Store) AppendChannelSourceAndProject(ctx context.Context, source domain
 		if !channelSubscriptionAllows(item.endpointKind, item.kind, source.EventClass, source.EventType) {
 			continue
 		}
+		if item.endpointKind == domain.ChannelEndpointGroupDigitalHuman && source.EventType == "agent_reply" {
+			matches, matchErr := channelGroupReplyMatchesRoundTx(ctx, tx, source.TaskID, source.RoundID, item.conversationID)
+			if matchErr != nil {
+				rows.Close()
+				return matchErr
+			}
+			if !matches {
+				continue
+			}
+		}
 		targets = append(targets, item)
 	}
 	rows.Close()
@@ -76,6 +87,40 @@ func (s *Store) AppendChannelSourceAndProject(ctx context.Context, source domain
 			if routed {
 				continue
 			}
+		}
+		deliveryState := "pending"
+		suppressionReason := ""
+		isBotDialogue := false
+		replyDecision := ""
+		botTurnCount := 0
+		botMaxTurns := 0
+		if source.EventType == "agent_reply" {
+			if target.endpointKind == domain.ChannelEndpointGroupDigitalHuman {
+				state, stateErr := channelGroupReplyStateTx(ctx, tx, source.TaskID, source.RoundID, source.TurnID, target.conversationID)
+				if stateErr != nil {
+					return stateErr
+				}
+				if !state.matches {
+					continue
+				}
+				isBotDialogue, replyDecision, botTurnCount, botMaxTurns = state.isBot, state.decision, state.turnCount, state.maxTurns
+				if state.isBot && state.decision != "continue" {
+					deliveryState = "suppressed"
+					suppressionReason = "bot_dialogue_ended"
+				} else if state.isBot && state.turnCount > state.maxTurns {
+					deliveryState = "suppressed"
+					suppressionReason = "bot_dialogue_max_turns"
+				}
+			}
+			if err := insertChannelRouteCardTx(ctx, tx, source, target, deliveryState, suppressionReason, isBotDialogue, replyDecision, botTurnCount, botMaxTurns); err != nil {
+				return err
+			}
+		}
+		if deliveryState == "suppressed" {
+			if _, err := tx.ExecContext(ctx, `UPDATE channel_subscriptions SET source_cursor=?,updated_at=? WHERE id=?`, source.Sequence, timeString(source.OccurredAt), target.subscriptionID); err != nil {
+				return err
+			}
+			continue
 		}
 		for partIndex, part := range channelDeliveryParts(source.SemanticPayload) {
 			partCoalesceKey := coalesceKey
@@ -148,6 +193,175 @@ func channelSubscriptionAllows(endpointKind, subscriptionKind, eventClass, event
 		return eventType == "agent_reply"
 	}
 	return true
+}
+
+func (s *Store) ChannelBotDialogueTurnCount(ctx context.Context, taskID, conversationID string) (int, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT payload_json
+		FROM conversation_items
+		WHERE task_id=? AND kind='user_message'
+		  AND json_extract(payload_json,'$.channel_context.conversation_id')=?
+		ORDER BY sequence DESC`,
+		taskID, conversationID)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	count := 0
+	for rows.Next() {
+		var payloadJSON string
+		if err := rows.Scan(&payloadJSON); err != nil {
+			return 0, err
+		}
+		payload := decodeJSON(payloadJSON, map[string]any{})
+		channelContext, _ := payload["channel_context"].(map[string]any)
+		actor, _ := channelContext["actor"].(map[string]any)
+		isBot, _ := actor["is_bot"].(bool)
+		if !isBot {
+			break
+		}
+		count++
+	}
+	return count, rows.Err()
+}
+
+type channelBotReplyState struct {
+	matches   bool
+	isBot     bool
+	decision  string
+	turnCount int
+	maxTurns  int
+}
+
+func channelGroupReplyStateTx(ctx context.Context, tx *sql.Tx, taskID, roundID, turnID, conversationID string) (channelBotReplyState, error) {
+	state := channelBotReplyState{maxTurns: domain.DefaultChannelBotDialogueMaxTurns}
+	var payloadJSON string
+	if err := tx.QueryRowContext(ctx, `
+		SELECT item.payload_json
+		FROM conversation_items item
+		JOIN channel_inbox_dedup receipt ON receipt.id=json_extract(item.payload_json,'$.channel_receipt_id')
+		WHERE item.task_id=? AND item.round_id=? AND item.kind='user_message'
+		  AND json_extract(item.payload_json,'$.channel_context.endpoint')=?
+		  AND json_extract(item.payload_json,'$.channel_context.conversation_id')=?
+		  AND receipt.conversation_id=? AND receipt.state='processed'
+		  AND COALESCE(json_extract(receipt.normalized_payload_json,'$.mentioned_bot'),0)=1
+		ORDER BY item.sequence DESC LIMIT 1`,
+		taskID, roundID, domain.ChannelEndpointGroupDigitalHuman, conversationID, conversationID,
+	).Scan(&payloadJSON); err != nil {
+		if err == sql.ErrNoRows {
+			return state, nil
+		}
+		return state, err
+	}
+	state.matches = true
+	payload := decodeJSON(payloadJSON, map[string]any{})
+	channelContext, _ := payload["channel_context"].(map[string]any)
+	actor, _ := channelContext["actor"].(map[string]any)
+	state.isBot, _ = actor["is_bot"].(bool)
+	if turnID != "" {
+		_ = tx.QueryRowContext(ctx, `SELECT channel_reply_decision FROM turns WHERE id=? AND task_id=?`, turnID, taskID).Scan(&state.decision)
+	}
+	_ = tx.QueryRowContext(ctx, `
+		SELECT COALESCE(json_extract(instance.config_json,'$.bot_dialogue_max_turns'),?)
+		FROM channel_conversations conversation
+		JOIN channel_instances instance ON instance.id=conversation.instance_id
+		WHERE conversation.id=?`,
+		domain.DefaultChannelBotDialogueMaxTurns, conversationID).Scan(&state.maxTurns)
+	if state.maxTurns < 1 || state.maxTurns > 50 {
+		state.maxTurns = domain.DefaultChannelBotDialogueMaxTurns
+	}
+	if state.isBot {
+		rows, err := tx.QueryContext(ctx, `
+			SELECT item.payload_json
+			FROM conversation_items item
+			WHERE item.task_id=? AND item.kind='user_message'
+			  AND json_extract(item.payload_json,'$.channel_context.conversation_id')=?
+			ORDER BY item.sequence DESC`,
+			taskID, conversationID)
+		if err != nil {
+			return state, err
+		}
+		for rows.Next() {
+			var itemPayload string
+			if err := rows.Scan(&itemPayload); err != nil {
+				rows.Close()
+				return state, err
+			}
+			item := decodeJSON(itemPayload, map[string]any{})
+			itemContext, _ := item["channel_context"].(map[string]any)
+			itemActor, _ := itemContext["actor"].(map[string]any)
+			itemIsBot, _ := itemActor["is_bot"].(bool)
+			if !itemIsBot {
+				break
+			}
+			state.turnCount++
+		}
+		if err := rows.Close(); err != nil {
+			return state, err
+		}
+	}
+	return state, nil
+}
+
+func insertChannelRouteCardTx(ctx context.Context, tx *sql.Tx, source domain.ChannelSourceEvent, target struct {
+	subscriptionID, instanceID, conversationID, kind, endpointKind string
+}, deliveryState, suppressionReason string, isBotDialogue bool, replyDecision string, botTurnCount, botMaxTurns int) error {
+	var conversationName, instanceName string
+	if err := tx.QueryRowContext(ctx, `
+		SELECT conversation.display_name,instance.name
+		FROM channel_conversations conversation
+		JOIN channel_instances instance ON instance.id=conversation.instance_id
+		WHERE conversation.id=? AND instance.id=?`,
+		target.conversationID, target.instanceID).Scan(&conversationName, &instanceName); err != nil {
+		return err
+	}
+	payload := map[string]any{
+		"message":            strings.TrimSpace(fmt.Sprint(source.SemanticPayload["text"])),
+		"delivery_state":     deliveryState,
+		"suppression_reason": suppressionReason,
+		"reply_decision":     replyDecision,
+		"is_bot_dialogue":    isBotDialogue,
+		"bot_turn":           botTurnCount,
+		"bot_max_turns":      botMaxTurns,
+		"channel": map[string]any{
+			"conversation_id": target.conversationID,
+			"display_name":    conversationName,
+			"instance_name":   instanceName,
+			"endpoint_kind":   target.endpointKind,
+		},
+	}
+	item := domain.ConversationItem{
+		ID:     stableStoreID("conversation_channel_route", source.ID, target.subscriptionID),
+		TaskID: source.TaskID, RoundID: source.RoundID, TurnID: source.TurnID,
+		AgentID: "aha", StreamAgentID: "main", FromAgentID: "aha", ToAgentID: "main",
+		RouteKind: "channel_route", Category: "update", Kind: "agent_channel_route",
+		Summary: "AHA 外部渠道路由", Payload: payload, CreatedAt: source.OccurredAt,
+	}
+	_, err := insertConversationItem(ctx, tx, item)
+	return err
+}
+
+func channelGroupReplyMatchesRoundTx(ctx context.Context, tx *sql.Tx, taskID, roundID, conversationID string) (bool, error) {
+	if taskID == "" || roundID == "" || conversationID == "" {
+		return false, nil
+	}
+	var matches bool
+	err := tx.QueryRowContext(ctx, `
+		SELECT EXISTS(
+			SELECT 1
+			FROM conversation_items item
+			JOIN channel_inbox_dedup receipt
+			  ON receipt.id=json_extract(item.payload_json,'$.channel_receipt_id')
+			WHERE item.task_id=? AND item.round_id=? AND item.kind='user_message'
+			  AND json_extract(item.payload_json,'$.channel_context.endpoint')=?
+			  AND json_extract(item.payload_json,'$.channel_context.conversation_id')=?
+			  AND json_extract(item.payload_json,'$.channel_context.inbound_receipt_id')=receipt.id
+			  AND receipt.conversation_id=? AND receipt.state='processed'
+			  AND COALESCE(json_extract(receipt.normalized_payload_json,'$.mentioned_bot'),0)=1
+		)`,
+		taskID, roundID, domain.ChannelEndpointGroupDigitalHuman, conversationID, conversationID,
+	).Scan(&matches)
+	return matches, err
 }
 
 func (s *Store) EnsureOwnerGlobalSubscription(ctx context.Context, instanceID, conversationID string, at time.Time) error {

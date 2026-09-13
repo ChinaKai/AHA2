@@ -14,6 +14,18 @@ Project → Workspace → Task → Turn → Task Memory → Knowledge → Next T
 
 运行 `AHA2-Setup-x64.exe`。安装包同时安装 `aha2.exe` 控制面与 GUI 子系统的 `aha2-tray.exe`。安装向导可选择程序目录、数据目录、监听 IP、端口、远程 Agent API 地址和局域网防火墙规则；唯一的 `AHA2 User` 登录计划任务会以原登录用户的最低权限直接启动托盘程序，由托盘管理控制面进程，从而继承该用户的 Git、Codex、Claude、WSL 与 SSH 环境。旧版 LocalSystem 服务会保持禁用并尽力删除。
 
+在 WSL 源码仓库中更新当前 Windows 本地实例：
+
+```bash
+./local_build.sh --validate-only
+./local_build.sh
+```
+
+脚本默认构建并部署 `0.5.21` 到 `D:\Program Files\AHA2`，复用 `D:\ProgramData\AHA2` 和
+`0.0.0.0:8766`，同时生成
+`dist/installer-user-0.5.21/AHA2-Setup-User-x64.exe`；可通过 `--version` 以及脚本帮助中列出的
+`AHA2_*` 环境变量覆盖。
+
 ### Debian / Ubuntu
 
 ```bash

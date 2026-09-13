@@ -202,6 +202,7 @@ export function renderAgentTurnCard(
         <span><small>Output</small><strong>${compactNumber(outputTokens)}</strong></span>
         <span><small>Context</small><strong>${compactNumber(usageNumber(usage, "context_tokens"))} / ${compactNumber(Number(focus.context_window || 0))}</strong></span>
       </div>
+      ${timestampMs(focus.stalled_at_ms || focus.stalled_at) > 0 ? `<div class="turn-stalled-note"><strong>等待 Backend 流事件</strong><span>可能处于模型推理、网络重连或上游排队；AHA 会在空闲超时后中断并自动重试一次。</span></div>` : ""}
       ${failure ? `<div class="turn-failure"><strong>${escapeHTML(failure.agent_id)} 失败</strong><span>${escapeHTML(failure.error || "Backend 执行失败，未返回详细原因")}</span></div>` : ""}
     </details>
   </section>`;
@@ -259,6 +260,35 @@ function renderOrchestrationCard(item: ConversationItem, detail: TaskDetail): st
   return `<article class="aha-orchestration-card"><header><strong>${icon("bot")}AHA 系统路由</strong><time>${time}</time></header><p>${escapeHTML(item.summary || `AHA 已向 ${agentIDs.length} 个子 Agent 路由任务`)}</p><div>${rows}</div></article>`;
 }
 
+function renderChannelOutreachCard(item: ConversationItem): string {
+  const payload = item.payload || {};
+  const recipients = Array.isArray(payload.recipients) ? payload.recipients as Array<Record<string, unknown>> : [];
+  const channel = payload.channel && typeof payload.channel === "object" ? payload.channel as Record<string, unknown> : {};
+  const destination = String(channel.display_name || channel.instance_name || "群聊主渠道");
+  const message = String(payload.message || item.summary || "");
+  const status = String(payload.delivery_state || "pending") === "pending" ? "已排队" : String(payload.delivery_state || "");
+  const rows = recipients.map(recipient => {
+    const name = String(recipient.display_name || "联调人");
+    const role = String(recipient.collaboration_role || (recipient.is_bot ? "机器人" : "群成员"));
+    return `<div><strong>${escapeHTML(name)}</strong><span>${escapeHTML(role)}</span><b>${escapeHTML(status)}</b></div>`;
+  }).join("");
+  return `<article class="aha-orchestration-card aha-channel-route-card"><header><strong>${icon("send")}AHA 主动路由</strong><span>阻塞协调</span><time>${systemCardTime(item)}</time></header><p>${escapeHTML(message)}</p><div>${rows || `<div><strong>${escapeHTML(destination)}</strong><span>群聊主渠道</span><b>${escapeHTML(status)}</b></div>`}</div></article>`;
+}
+
+function renderChannelRouteCard(item: ConversationItem): string {
+  const payload = item.payload || {};
+  const channel = payload.channel && typeof payload.channel === "object" ? payload.channel as Record<string, unknown> : {};
+  const destination = String(channel.display_name || channel.instance_name || "外部渠道");
+  const state = String(payload.delivery_state || "pending");
+  const status = state === "suppressed" ? "未外发" : state === "delivered" ? "已发送" : "已排队";
+  const reason = String(payload.suppression_reason || "");
+  const bot = Boolean(payload.is_bot_dialogue);
+  const decision = String(payload.reply_decision || "");
+  const detail = reason === "bot_dialogue_max_turns" ? "达到机器人最大连续轮数" :
+    reason === "bot_dialogue_ended" ? "机器人对话已结束" : bot ? `机器人对话 · ${decision || "未设置决策"}` : "最终回复";
+  return `<article class="aha-orchestration-card aha-channel-route-card"><header><strong>${icon("send")}AHA 外部路由</strong><span>${escapeHTML(status)}</span><time>${systemCardTime(item)}</time></header><p>${escapeHTML(destination)} · ${escapeHTML(detail)}</p>${payload.message ? `<div class="aha-route-message">${escapeHTML(String(payload.message))}</div>` : ""}</article>`;
+}
+
 function systemCardTime(item: ConversationItem): string {
   return new Date(item.created_at).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"});
 }
@@ -271,6 +301,10 @@ function renderAgentConfigCard(item: ConversationItem): string {
     ["模型", `${String(payload.model_source || "env") === "official" ? "Official" : "Env"} · ${String(payload.model_name || payload.wire_model || "-")}`],
     ...(payload.codex_account_name ? [["账号", String(payload.codex_account_name)]] : []),
     ["推理", String(payload.reasoning_effort || "-")],
+    ...(payload.backend === "codex" ? [
+      ["SSE 超时", `${Math.round(Number(payload.stream_idle_timeout_ms || 300000) / 1000)} 秒`],
+      ["流重试", String(Number(payload.stream_max_retries || 0) || 5)],
+    ] : []),
     ["权限", `${String(payload.filesystem || "-")} · ${String(payload.approval || "-")}`],
     ["代理", payload.proxy_enabled ? "启用" : "关闭"],
   ];
@@ -291,6 +325,8 @@ export function renderConversationWithOrchestration(
 ): string {
   return items.map(item => {
     if (item.kind === "agent_batch_dispatched" && detail) return renderOrchestrationCard(item, detail);
+    if (item.kind === "agent_channel_outreach") return renderChannelOutreachCard(item);
+    if (item.kind === "agent_channel_route") return renderChannelRouteCard(item);
     if (item.kind === "agent_config_updated") return renderAgentConfigCard(item);
     if (item.kind === "turn_duration") return renderTurnDurationCard(item);
     return renderItem(item);

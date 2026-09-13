@@ -572,6 +572,190 @@ const schemaV54 = `
 ALTER TABLE proxy_settings ADD COLUMN managed_profile_id TEXT NOT NULL DEFAULT '';
 `
 
+const schemaV55 = `
+ALTER TABLE channel_conversations ADD COLUMN display_name TEXT NOT NULL DEFAULT '';
+UPDATE channel_task_routes
+SET state='superseded',
+    exited_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+    exit_reason='superseded by single primary channel migration'
+WHERE state='active'
+  AND id NOT IN (
+    SELECT MAX(id)
+    FROM channel_task_routes
+    WHERE state='active'
+    GROUP BY target_task_id
+  );
+UPDATE channel_subscriptions
+SET state='closed',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+WHERE kind='task_route'
+  AND route_id IN (SELECT id FROM channel_task_routes WHERE state<>'active');
+CREATE UNIQUE INDEX IF NOT EXISTS idx_channel_task_routes_one_active_task
+ON channel_task_routes(target_task_id) WHERE state='active';
+`
+
+const schemaV56 = `
+CREATE TABLE IF NOT EXISTS channel_conversation_members (
+    conversation_id TEXT NOT NULL REFERENCES channel_conversations(id) ON DELETE CASCADE,
+    identity_link_id TEXT NOT NULL REFERENCES channel_identity_links(id) ON DELETE CASCADE,
+    is_bot INTEGER NOT NULL DEFAULT 0 CHECK(is_bot IN (0,1)),
+    observed_at TEXT NOT NULL DEFAULT '',
+    provider_seen_at TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(conversation_id,identity_link_id)
+);
+CREATE INDEX IF NOT EXISTS idx_channel_conversation_members_identity
+ON channel_conversation_members(identity_link_id,conversation_id);
+
+CREATE TABLE IF NOT EXISTS channel_task_contacts (
+    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    conversation_id TEXT NOT NULL REFERENCES channel_conversations(id) ON DELETE CASCADE,
+    identity_link_id TEXT NOT NULL REFERENCES channel_identity_links(id) ON DELETE CASCADE,
+    collaboration_role TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(task_id,conversation_id,identity_link_id)
+);
+CREATE INDEX IF NOT EXISTS idx_channel_task_contacts_conversation
+ON channel_task_contacts(conversation_id,task_id);
+
+INSERT OR IGNORE INTO channel_conversation_members(
+    conversation_id,identity_link_id,is_bot,observed_at,provider_seen_at,updated_at
+)
+SELECT json_extract(ci.payload_json,'$.channel_context.conversation_id'),
+       json_extract(ci.payload_json,'$.channel_context.actor.identity_link_id'),
+       0,ci.created_at,'',ci.created_at
+FROM conversation_items ci
+WHERE json_extract(ci.payload_json,'$.channel_context.conversation_id')<>''
+  AND json_extract(ci.payload_json,'$.channel_context.actor.identity_link_id')<>'';
+
+INSERT OR IGNORE INTO channel_conversation_members(
+    conversation_id,identity_link_id,is_bot,observed_at,provider_seen_at,updated_at
+)
+SELECT json_extract(ci.payload_json,'$.channel_context.conversation_id'),
+       json_extract(mention.value,'$.identity_link_id'),
+       0,ci.created_at,'',ci.created_at
+FROM conversation_items ci, json_each(ci.payload_json,'$.channel_context.mentions') mention
+WHERE json_extract(ci.payload_json,'$.channel_context.conversation_id')<>''
+  AND json_extract(mention.value,'$.identity_link_id')<>'';
+
+INSERT OR IGNORE INTO channel_task_contacts(
+    task_id,conversation_id,identity_link_id,collaboration_role,created_at,updated_at
+)
+SELECT route.target_task_id,route.conversation_id,member.identity_link_id,'',
+       route.activated_at,route.activated_at
+FROM channel_task_routes route
+JOIN channel_conversation_members member ON member.conversation_id=route.conversation_id
+WHERE route.state='active';
+`
+
+const schemaV57 = `
+ALTER TABLE channel_conversations ADD COLUMN members_synced_at TEXT NOT NULL DEFAULT '';
+ALTER TABLE channel_conversation_members ADD COLUMN provider_active INTEGER NOT NULL DEFAULT 0 CHECK(provider_active IN (0,1));
+UPDATE channel_conversation_members
+SET provider_active=1
+WHERE provider_seen_at<>'';
+`
+
+const schemaV58 = `
+ALTER TABLE channel_conversation_members ADD COLUMN source TEXT NOT NULL DEFAULT 'observed'
+  CHECK(source IN ('provider','observed','configured_bot'));
+UPDATE channel_conversation_members
+SET source=CASE WHEN provider_seen_at<>'' THEN 'provider' ELSE 'observed' END
+WHERE source='observed';
+`
+
+const schemaV59 = `
+CREATE TABLE IF NOT EXISTS sync_channel_bot_directory (
+    object_id TEXT PRIMARY KEY,
+    source_device_id TEXT NOT NULL,
+    source_instance_id TEXT NOT NULL,
+    provider_key TEXT NOT NULL,
+    bot_open_id TEXT NOT NULL,
+    display_name TEXT NOT NULL DEFAULT '',
+    active INTEGER NOT NULL DEFAULT 0 CHECK(active IN (0,1)),
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sync_channel_bot_directory_provider
+ON sync_channel_bot_directory(provider_key,active,updated_at);
+`
+
+const schemaV60 = `
+DELETE FROM channel_task_contacts
+WHERE identity_link_id IN (
+    SELECT identity_link_id
+    FROM channel_conversation_members
+    WHERE source='configured_bot'
+);
+DELETE FROM channel_conversation_members
+WHERE source='configured_bot';
+DROP TABLE IF EXISTS sync_channel_bot_directory;
+`
+
+const schemaV61 = `
+UPDATE channel_conversation_members
+SET is_bot=1,
+    provider_active=0,
+    source='observed',
+    observed_at=CASE
+        WHEN observed_at<>'' THEN observed_at
+        ELSE COALESCE((
+            SELECT MAX(ci.created_at)
+            FROM conversation_items ci, json_each(ci.payload_json,'$.channel_context.mentions') mention
+            WHERE json_extract(ci.payload_json,'$.channel_context.conversation_id')=channel_conversation_members.conversation_id
+              AND json_extract(mention.value,'$.identity_link_id')=channel_conversation_members.identity_link_id
+              AND json_extract(mention.value,'$.is_bot')=1
+        ),'')
+    END
+WHERE EXISTS (
+    SELECT 1
+    FROM conversation_items ci, json_each(ci.payload_json,'$.channel_context.mentions') mention
+    WHERE json_extract(ci.payload_json,'$.channel_context.conversation_id')=channel_conversation_members.conversation_id
+      AND json_extract(mention.value,'$.identity_link_id')=channel_conversation_members.identity_link_id
+      AND json_extract(mention.value,'$.is_bot')=1
+);
+`
+
+const schemaV62 = `
+ALTER TABLE turns ADD COLUMN channel_reply_decision TEXT NOT NULL DEFAULT ''
+  CHECK(channel_reply_decision IN ('','continue','end'));
+`
+
+const schemaV63 = `
+UPDATE channel_instances
+SET config_json=json_remove(
+    json_set(
+        config_json,
+        '$.runtime_bot_display_name_override',
+        COALESCE(
+            NULLIF(TRIM(json_extract(config_json,'$.runtime_bot_display_name_override')),''),
+            NULLIF(TRIM(json_extract(config_json,'$.runtime_bot_display_name')),''),
+            ''
+        ),
+        '$.runtime_bot_provider_display_name',
+        COALESCE(
+            NULLIF(TRIM(json_extract(config_json,'$.runtime_bot_provider_display_name')),''),
+            NULLIF(TRIM(json_extract(config_json,'$.runtime_bot_display_name')),''),
+            ''
+        )
+    ),
+    '$.runtime_bot_display_name'
+)
+WHERE json_type(config_json,'$.runtime_bot_display_name') IS NOT NULL
+   OR json_type(config_json,'$.runtime_bot_display_name_override') IS NOT NULL;
+`
+
+const schemaV64 = `
+ALTER TABLE agent_inbox ADD COLUMN recovery_attempts INTEGER NOT NULL DEFAULT 0
+  CHECK(recovery_attempts>=0);
+`
+
+const schemaV65 = `
+ALTER TABLE runtime_config_snapshots ADD COLUMN stream_idle_timeout_ms INTEGER NOT NULL DEFAULT 0
+  CHECK(stream_idle_timeout_ms=0 OR stream_idle_timeout_ms BETWEEN 30000 AND 1800000);
+ALTER TABLE runtime_config_snapshots ADD COLUMN stream_max_retries INTEGER NOT NULL DEFAULT 0
+  CHECK(stream_max_retries BETWEEN 0 AND 10);
+`
+
 const schemaV27 = `
 CREATE TABLE IF NOT EXISTS sync_settings (
     scope TEXT PRIMARY KEY,
@@ -1950,6 +2134,125 @@ func (s *Store) migrate(ctx context.Context) error {
 	}
 	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(54, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
 		return fmt.Errorf("record schema v54: %w", err)
+	}
+	var hasV55 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=55)`).Scan(&hasV55)
+	if !hasV55 {
+		if _, err := s.db.ExecContext(ctx, schemaV55); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("apply schema v55: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS idx_channel_task_routes_one_active_task ON channel_task_routes(target_task_id) WHERE state='active'`); err != nil {
+		return fmt.Errorf("apply schema v55 active task route index: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(55, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v55: %w", err)
+	}
+	var hasV56 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=56)`).Scan(&hasV56)
+	if !hasV56 {
+		if _, err := s.db.ExecContext(ctx, schemaV56); err != nil {
+			return fmt.Errorf("apply schema v56: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(56, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v56: %w", err)
+	}
+	var hasV57 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=57)`).Scan(&hasV57)
+	if !hasV57 {
+		if _, err := s.db.ExecContext(ctx, schemaV57); err != nil {
+			return fmt.Errorf("apply schema v57: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(57, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v57: %w", err)
+	}
+	var hasV58 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=58)`).Scan(&hasV58)
+	if !hasV58 {
+		if _, err := s.db.ExecContext(ctx, schemaV58); err != nil {
+			return fmt.Errorf("apply schema v58: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(58, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v58: %w", err)
+	}
+	var hasV59 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=59)`).Scan(&hasV59)
+	if !hasV59 {
+		if _, err := s.db.ExecContext(ctx, schemaV59); err != nil {
+			return fmt.Errorf("apply schema v59: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(59, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v59: %w", err)
+	}
+	var hasV60 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=60)`).Scan(&hasV60)
+	if !hasV60 {
+		if _, err := s.db.ExecContext(ctx, schemaV60); err != nil {
+			return fmt.Errorf("apply schema v60: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(60, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v60: %w", err)
+	}
+	var hasV61 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=61)`).Scan(&hasV61)
+	if !hasV61 {
+		if _, err := s.db.ExecContext(ctx, schemaV61); err != nil {
+			return fmt.Errorf("apply schema v61: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(61, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v61: %w", err)
+	}
+	var hasV62 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=62)`).Scan(&hasV62)
+	if !hasV62 {
+		if _, err := s.db.ExecContext(ctx, schemaV62); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("apply schema v62: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(62, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v62: %w", err)
+	}
+	var hasV63 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=63)`).Scan(&hasV63)
+	if !hasV63 {
+		if _, err := s.db.ExecContext(ctx, schemaV63); err != nil {
+			return fmt.Errorf("apply schema v63: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(63, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v63: %w", err)
+	}
+	var hasV64 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=64)`).Scan(&hasV64)
+	if !hasV64 {
+		if _, err := s.db.ExecContext(ctx, schemaV64); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("apply schema v64: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(64, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v64: %w", err)
+	}
+	var hasV65 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=65)`).Scan(&hasV65)
+	if !hasV65 {
+		for _, statement := range strings.Split(schemaV65, ";") {
+			statement = strings.TrimSpace(statement)
+			if statement == "" {
+				continue
+			}
+			if _, err := s.db.ExecContext(ctx, statement); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+				return fmt.Errorf("apply schema v65: %w", err)
+			}
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(65, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v65: %w", err)
 	}
 	return nil
 }

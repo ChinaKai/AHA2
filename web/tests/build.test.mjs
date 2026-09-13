@@ -162,6 +162,7 @@ test("forms and action groups stay aligned without narrow-window button distorti
   assert.match(styles, /@media \(max-width:\s*760px\)[\s\S]*?\.dialog-actions \{[^}]*grid-template-columns:\s*repeat\(auto-fit,minmax\(120px,1fr\)\)/);
   assert.match(styles, /@media \(max-width:\s*520px\)[\s\S]*?\.managed-profile-card-actions[^\{]*\{[^}]*grid-template-columns:\s*repeat\(2,minmax\(0,1fr\)\)/);
   assert.match(styles, /\.actions > button, \.row-actions > button, \.task-card-actions > button \{[^}]*white-space:\s*nowrap/);
+  assert.match(styles, /\.task-channel-switcher label \{[^}]*margin:\s*0/);
   assert.match(styles, /dialog > \.dialog-head \{[^}]*padding:\s*18px 18px 0/);
   assert.match(styles, /@media \(max-width:\s*760px\)[\s\S]*?\.provider-layout \.provider-row \{[^}]*grid-template-columns:\s*minmax\(0,1fr\) auto/);
   assert.match(styles, /@media \(max-width:\s*400px\)[\s\S]*?\.dialog-actions \{[^}]*grid-template-columns:\s*minmax\(0,1fr\)/);
@@ -173,6 +174,17 @@ test("forms and action groups stay aligned without narrow-window button distorti
   assert.match(styles, /@media \(max-width:\s*760px\)[\s\S]*?\.hardware-group-row \{[^}]*grid-template-columns:\s*minmax\(0,1fr\) repeat\(3,34px\)/);
   assert.match(styles, /@media \(max-width:\s*360px\)[\s\S]*?\.agent-turn-row code \{[^}]*display:\s*none/);
   assert.match(styles, /@media \(max-width:\s*360px\)[\s\S]*?\.hardware-terminal-keys \{[^}]*grid-template-columns:\s*repeat\(4,minmax\(0,1fr\)\);[^}]*overflow:\s*visible/);
+});
+
+test("task channel selector shows occupied destinations without allowing silent takeover", async () => {
+  const main = await readFile(resolve(import.meta.dirname, "..", "src", "main.ts"), "utf8");
+  assert.match(main, /const selectable = result\.destinations\.filter\(item => !item\.target_task_id \|\| item\.target_task_id === taskID\)/);
+  assert.match(main, /const options = result\.destinations\.map\(item =>/);
+  assert.match(main, /const occupied = Boolean\(item\.target_task_id && item\.target_task_id !== taskID\)/);
+  assert.match(main, /item\.target_task_code \|\| item\.target_task_name \|\| "其他 Task"/);
+  assert.match(main, /\$\{occupied \? "disabled" : ""\}/);
+  assert.match(main, /selectable\.length \? "" : "disabled"/);
+  assert.doesNotMatch(main, /const available = result\.destinations\.filter/);
 });
 
 test("channel lifecycle renders active and retired actions with guarded purge", async () => {
@@ -201,6 +213,8 @@ test("channel lifecycle renders active and retired actions with guarded purge", 
   assert.match(active, /data-channel-archive="channel-1"/);
   assert.match(active, /扫码更新飞书权限/);
   assert.match(active, /Runtime、通知与访问范围/);
+  assert.match(active, /机器人显示名称/);
+  assert.match(active, /runtime_bot_display_name_override/);
 
   const retired = module.renderChannels([], [{...instance, status: "retired"}], context);
   for (const marker of ["已归档", "data-channel-view", "data-channel-export", "data-channel-purge", "永久删除"]) assert.match(retired, new RegExp(marker));
@@ -390,6 +404,49 @@ test("sidebar shows service version and live uptime", async () => {
   assert.match(styles, /\.system-meta/);
 });
 
+test("task detail can bind one primary private or group channel", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const script = await readFile(resolve(root, "dist", "app.js"), "utf8");
+  const api = await readFile(resolve(root, "dist", "api.js"), "utf8");
+  const conversation = await readFile(resolve(root, "dist", "conversation_ui.js"), "utf8");
+  const styles = await readFile(resolve(root, "dist", "styles.css"), "utf8");
+  for (const marker of ["task-channel-route-form", "disconnect-task-channel", "task-channel-contacts-form", "群聊成员", "可 @ 联调人", "保存联调人"]) {
+    assert.match(script, new RegExp(marker));
+  }
+  assert.match(script, /同时 @ 当前渠道机器人和目标机器人/);
+  assert.doesNotMatch(script, /task-channel-route-dialog/);
+  assert.match(script, /renderTaskToolPanel\([\s\S]*?taskChannelPanelHTML\(\)\)/);
+  assert.match(api, /\/tasks\/\$\{encodeURIComponent\(id\)\}\/channel-routes/);
+  assert.match(api, /channel-members:refresh/);
+  assert.match(api, /channel-contacts/);
+  assert.match(conversation, /actor\.display_name/);
+  assert.match(conversation, /chat_display_name/);
+  assert.match(styles, /\.task-channel-people/);
+  assert.match(styles, /\.task-channel-contact-list/);
+});
+
+test("task channel entry keeps a stable tool slot and exposes connected state", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const script = await readFile(resolve(root, "src", "main.ts"), "utf8");
+  const styles = await readFile(resolve(root, "src", "styles.css"), "utf8");
+  assert.match(script, /taskChannelDestination: ChannelDestination \| null \| undefined/);
+  assert.match(script, /loadTaskChannelDestination\(taskID, version\)/);
+  assert.match(script, /主渠道已连接/);
+  assert.match(script, /renderTaskToolButtons\(state\.taskTool, \{includeChannel: channelVisible, channelConnected: Boolean\(state\.taskChannelDestination\)/);
+  assert.match(styles, /\.task-tool-actions \.task-tool-button\.connected/);
+});
+
+test("task channel saves preserve drafts and stale loads cannot overwrite current state", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const main = await readFile(resolve(root, "src", "main.ts"), "utf8");
+  assert.match(main, /let taskChannelLoadVersion = 0/);
+  assert.match(main, /const loadVersion = \+\+taskChannelLoadVersion/);
+  assert.match(main, /loadVersion !== taskChannelLoadVersion/);
+  assert.match(main, /form\.querySelector<HTMLElement>\("\[data-form-error\]"\)\?\.remove\(\)/);
+  assert.match(main, /feedback\.dataset\.formError = "true"/);
+  assert.match(main, /form\.querySelector\("footer"\)\?\.before\(feedback\)/);
+});
+
 test("built web contains responsive application", async () => {
   const root = resolve(import.meta.dirname, "..");
   const script = await readFile(resolve(root, "dist", "app.js"), "utf8");
@@ -411,6 +468,14 @@ test("built web contains responsive application", async () => {
   const css = await readFile(resolve(root, "dist", "styles.css"), "utf8");
   const index = await readFile(resolve(root, "dist", "index.html"), "utf8");
   assert.match(script, /api\.authStatus/);
+  assert.match(promptAdmin, /内置只读模板/);
+  assert.doesNotMatch(promptAdmin, /协议由代码管理/);
+  assert.match(promptAdmin, /data-ui-key="prompt-template-content:\$\{escapeHTML\(selected\.id\)\}"/);
+  assert.match(promptAdmin, /state\.drafts\[state\.selectedTemplateID\]/);
+  assert.match(promptAdmin, /delete state\.drafts\[state\.selectedTemplateID\]/);
+  assert.match(css, /\.prompt-page \{[^}]*height: calc\(100vh - 52px\);[^}]*overflow: hidden;/);
+  assert.match(css, /\.prompt-template-list \{[^}]*overflow-y: auto;/);
+  assert.match(css, /\.prompt-editor textarea \{[^}]*height: 100%;[^}]*overflow: auto;/);
   assert.match(api, /auth\/recover/);
   assert.match(api, /auth\/password/);
   assert.match(script, /id="forgot-password"/);
@@ -473,6 +538,13 @@ test("built web contains responsive application", async () => {
   assert.doesNotMatch(knowledgeWorkspace, /Source Path/);
   assert.doesNotMatch(knowledgeWorkspace, /knowledge graph/i);
   assert.match(script, /agent-config-form/);
+  assert.match(script, /stream_idle_timeout_ms/);
+  assert.match(script, /stream_max_retries/);
+  assert.match(runtimePicker, /SSE 无数据超时（秒）/);
+  assert.match(runtimePicker, /流中断重试次数/);
+  assert.match(runtimePicker, /codex-stream-settings/);
+  assert.match(agents, /SSE 超时/);
+  assert.match(agents, /流重试/);
   assert.match(taskComposer, /id="composer-agent"/);
   assert.match(taskTools, /data-task-tool/);
   assert.match(taskTools, /id="close-task-tool"/);
@@ -651,7 +723,7 @@ test("built web contains responsive application", async () => {
   assert.match(channels, /name="app_secret" type="password"/);
   assert.match(channels, /data-delivery-replay/);
   assert.match(channels, /Owner 收件箱与投递/);
-	for (const marker of ["Runtime、通知与访问范围", "allowed_project_ids", "allowed_workspace_ids", "notify_task_status", "普通 Task 状态变更推送到飞书私聊助手", "knowledge_entry_id"]) assert.match(channels, new RegExp(marker));
+	for (const marker of ["Runtime、通知与访问范围", "runtime_bot_display_name_override", "机器人显示名称", "allowed_project_ids", "allowed_workspace_ids", "notify_task_status", "普通 Task 状态变更推送到飞书私聊助手", "knowledge_entry_id"]) assert.match(channels, new RegExp(marker));
 	for (const marker of ["data-channel-project-scope", "data-channel-workspace-option", "data-channel-policy-select-all", "data-channel-policy-clear"]) assert.match(channels, new RegExp(marker));
 	assert.match(channels, /selectedProjects\.has/);
 	for (const marker of ["operation_scope_mode", "knowledge_scope_mode", "data-channel-operation-selected", "data-channel-knowledge-selected", "全部 Project \/ Workspace", "全部项目知识与知识库"]) assert.match(channels, new RegExp(marker));
@@ -1023,6 +1095,14 @@ test("runtime picker separates Env and Official Codex models", async () => {
   assert.match(html, /Work · 周额度已用 13%/);
   assert.match(html, /name="model_id"[^>]*required/);
   assert.match(html, /name="wire_model"[^>]*required/);
+  assert.match(html, /name="stream_idle_timeout_seconds"[^>]*value="300"/);
+  assert.match(html, /name="stream_max_retries"[^>]*value="5"/);
+  const newTaskHTML = runtimeFieldsHTML("new-task", [{
+    id: "model-env", display_name: "Env Model", provider_id: "gateway", source: "provider",
+    backend: "codex", wire_model: "env-model", created_at: "", updated_at: "",
+  }], []);
+  assert.match(newTaskHTML, /name="stream_idle_timeout_seconds"[^>]*value="120"/);
+  assert.match(newTaskHTML, /name="stream_max_retries"[^>]*value="2"/);
 });
 
 test("knowledge update list keeps proposal bodies folded behind details", async () => {
@@ -1076,7 +1156,7 @@ test("pending knowledge libraries fit mobile width", async () => {
   assert.match(styles, /\.knowledge-library-card > footer button \{[^}]*width:\s*100%/);
 });
 
-test("conversation renders agent config and turn duration cards", async () => {
+test("conversation renders agent config, channel outreach, and turn duration cards", async () => {
   const root = resolve(import.meta.dirname, "..");
   const {renderConversationList} = await import(pathToFileURL(resolve(root, "dist", "conversation_ui.js")));
   const items = [{
@@ -1091,12 +1171,36 @@ test("conversation renders agent config and turn duration cards", async () => {
     payload: {turn_sequence: 1, status: "succeeded", elapsed_ms: 5200, queue_duration_ms: 100,
       prepare_duration_ms: 600, run_duration_ms: 4500},
     created_at: "2026-09-04T09:00:05Z",
+  }, {
+    sequence: 3, id: "outreach-1", task_id: "task-1", agent_id: "aha", stream_agent_id: "main",
+    category: "update", kind: "agent_channel_outreach", summary: "AHA 已主动路由阻塞协调消息",
+    payload: {
+      purpose: "blocker", message: "接口字段需要确认 <script>",
+      delivery_state: "pending", channel: {display_name: "AHA-TEST"},
+      recipients: [{display_name: "张三", collaboration_role: "APP"}, {display_name: "WORK-AHA", is_bot: true}],
+    },
+    created_at: "2026-09-04T09:00:03Z",
   }];
   const html = renderConversationList(items, null, false);
   assert.match(html, /Agent 配置更新/);
   assert.match(html, /GPT-5\.6/);
   assert.match(html, /Turn 1 耗时/);
   assert.match(html, /5s/);
+  assert.match(html, /AHA 主动路由/);
+  assert.match(html, /阻塞协调/);
+  assert.match(html, /WORK-AHA/);
+  assert.match(html, /已排队/);
+  assert.match(html, /接口字段需要确认 &lt;script&gt;/);
+  assert.doesNotMatch(html, /接口字段需要确认 <script>/);
+});
+
+test("stalled turns explain that backend streaming is silent", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const agents = await readFile(resolve(root, "dist", "task_agents.js"), "utf8");
+  const styles = await readFile(resolve(root, "dist", "styles.css"), "utf8");
+  assert.match(agents, /等待 Backend 流事件/);
+  assert.match(agents, /模型推理、网络重连或上游排队/);
+  assert.match(styles, /\.turn-stalled-note/);
 });
 
 test("conversation replaces irrecoverable legacy progress mojibake", async () => {

@@ -47,7 +47,7 @@ POST  /api/v1/agent/tasks
 GET   /api/v1/agent/tasks/{task}
 ```
 
-Task Memory 默认使用 `{"append":{...}}` 追加语义；两种模式都可携带 `current_goal`，Main Agent 应在活动目标变化时更新它。原始需求仅用于历史溯源，不应在新 Session 中自动恢复为当前目标。Main Agent 在读完当前 Memory 后，可使用 `{"replace":{...}}` 原子替换六类列表，清理重复、损坏和已失效记录，同时必须保留仍有效的决策、事实、验证和下一步。Memory 超过 20000 字符或已经影响恢复判断时，应优先完成一次压缩替换。进度消息会立即写入 Conversation 并通过 Event Hub 推送。
+Task Memory API 继续支持 `{"append":{...}}` 与 `{"replace":{...}}`，两种模式都可携带 `current_goal`。Task Memory 不再进入默认 Prompt 或 `Available context`；普通 Turn 不应为了恢复语义而主动读取或维护它。只有显式的 Task 状态维护流程才应调用该接口，使用 replace 时必须由调用方保证携带所有仍有效内容。进度消息会立即写入 Conversation 并通过 Event Hub 推送。
 只有 Main Agent 可以修改 Memory 和提交协作批次；协作请求提交后立即由 AHA 编排。
 最终回复只包含自然语言，不再携带 Turn checkpoint。
 
@@ -62,6 +62,50 @@ Main 的运行时与权限上限，避免为调用 Agent API 意外关闭网络�
 `POST /api/v1/agent/tasks` 省略 Runtime 字段时继承当前 Main；需要覆盖时，先读取 Runtime 列表，
 再原样提交 `backend`、`model_source`、`model_id`、`wire_model`、`codex_account_id` 和可选的
 `reasoning_effort`。服务端重新校验模型与账号，并始终继承当前 Main 的文件系统和审批权限。
+
+## Task 主渠道主动联系
+
+普通 Task 已连接群聊主渠道后，活动 Main Turn 可读取 Owner 在 Task 渠道右栏选定的联调人，
+包括显示名、联调身份和是否机器人，并发送一条持久化的主动协调消息：
+
+```text
+GET  /api/v1/agent/channel/contacts
+POST /api/v1/agent/channel/messages
+POST /api/v1/agent/channel/reply-decision
+```
+
+发送体包含稳定的重试键、正文和 1–5 个内部联系人 ID：
+
+```json
+{
+  "request_id": "firmware-api-blocker-1",
+  "purpose": "blocker",
+  "message": "接口返回字段与约定不一致，请确认最终契约和可联调时间。",
+  "mention_identity_link_ids": ["channel_identity_example"]
+}
+```
+
+联系人必须来自当前 Task 的活动群聊主渠道，并且已经被 Owner 在渠道界面明确绑定；不要求
+联系人此前发言。服务端只向 Agent 暴露内部 identity link 和显示名，飞书原始用户 ID 仅在
+渠道投递边界内解析。`purpose` 只接受 `blocker`；相同 Turn 使用相同 `request_id` 重试不会重复创建消息或 Web 路由卡片。
+该接口仅用于阻塞性联调协调，不替代 `POST /api/v1/agent/turn/messages` 的常规 Web 进度更新。
+
+对于发送者已由渠道确认是机器人的群聊 Turn，Agent 必须在最终回复前设置路由决策：
+
+```text
+POST /api/v1/agent/channel/reply-decision
+{"decision":"continue|end"}
+```
+
+`continue` 会把最终 `agent_reply` 投递回外部渠道；`end` 只保留在 AHA Web。
+服务端即使收到 `continue`，仍会执行渠道配置的机器人连续对话最大轮数。
+真人发送者的群聊 Turn 继续沿用最终回复自动路由行为。
+
+群机器人候选不通过 Profile Sync 推导。当前渠道实例的自身机器人由运行时确认；其他机器人
+只有在当前群聊消息的 mention 等渠道事件中被实际观察到后，才可作为该群的联系人。渠道
+无法确认的机器人身份不得生成可 @ 候选，避免跨应用或跨租户 ID 被发送成普通文本。
+飞书应用仅有群聊 @ 消息读取权限时，观察目标机器人需要用户在同一条消息中同时 @ 当前
+渠道机器人和目标机器人；仅 @ 目标机器人不会向当前渠道实例投递消息事件。
 
 ## Knowledge 与 Skill
 

@@ -78,15 +78,21 @@ func containsString(values []string, expected string) bool {
 
 func (s *Server) channelRuntimeHealth(writer http.ResponseWriter, request *http.Request) {
 	var payload struct {
-		SchemaVersion int    `json:"schema_version"`
-		Status        string `json:"status"`
-		ErrorCode     string `json:"error_code"`
+		SchemaVersion  int    `json:"schema_version"`
+		Status         string `json:"status"`
+		ErrorCode      string `json:"error_code"`
+		BotOpenID      string `json:"bot_open_id"`
+		BotDisplayName string `json:"bot_display_name"`
 	}
 	if err := decodeJSON(request, &payload); err != nil || payload.SchemaVersion != 1 {
 		writeError(writer, http.StatusUnprocessableEntity, "invalid_envelope")
 		return
 	}
-	if err := s.channels.UpdateHealth(request.Context(), channelRuntimeClaims(request.Context()), payload.Status, payload.ErrorCode); err != nil {
+	metadata := map[string]string{
+		"runtime_bot_open_id":               payload.BotOpenID,
+		"runtime_bot_provider_display_name": payload.BotDisplayName,
+	}
+	if err := s.channels.UpdateHealth(request.Context(), channelRuntimeClaims(request.Context()), payload.Status, payload.ErrorCode, metadata); err != nil {
 		writeChannelRuntimeError(writer, err)
 		return
 	}

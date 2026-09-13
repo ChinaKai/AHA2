@@ -57,11 +57,11 @@ func (s *Store) CreateTaskWithSnapshot(ctx context.Context, snapshot domain.Runt
 	}
 	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO runtime_config_snapshots(id,workspace_id,backend,backend_version,model_id,wire_model,env_group_id,env_group_revision,codex_account_id,proxy_enabled,reasoning_effort,permissions_json,created_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		INSERT INTO runtime_config_snapshots(id,workspace_id,backend,backend_version,model_id,wire_model,env_group_id,env_group_revision,codex_account_id,proxy_enabled,reasoning_effort,stream_idle_timeout_ms,stream_max_retries,permissions_json,created_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		snapshot.ID, snapshot.WorkspaceID, snapshot.Backend, snapshot.BackendVersion, snapshot.ModelID,
 		snapshot.WireModel, snapshot.EnvGroupID, snapshot.EnvGroupRevision, snapshot.CodexAccountID, boolInt(snapshot.ProxyEnabled), snapshot.ReasoningEffort,
-		snapshot.PermissionsJSON, timeString(snapshot.CreatedAt),
+		snapshot.StreamIdleTimeoutMS, snapshot.StreamMaxRetries, snapshot.PermissionsJSON, timeString(snapshot.CreatedAt),
 	); err != nil {
 		return domain.Task{}, err
 	}
@@ -420,7 +420,7 @@ func scanTurn(scanner interface{ Scan(...any) error }) (domain.Turn, error) {
 		&queuedAt, &preparedAt, &startedAt, &finishedAt, &exitCode, &item.Result, &item.Error,
 		&item.RoundID, &item.ParentTurnID, &item.Attempt, &item.Generation, &required, &item.Title, &item.Instruction,
 		&item.ContextWindow, &item.PromptChars, &item.PromptSnapshot, &item.InboxBatchID, &usage,
-		&contextReadyAt, &sessionReadyAt, &firstEventAt, &lastActivityAt, &stalledAt, &backendFinishedAt,
+		&item.ChannelReplyDecision, &contextReadyAt, &sessionReadyAt, &firstEventAt, &lastActivityAt, &stalledAt, &backendFinishedAt,
 	)
 	item.QueuedAt, item.PreparedAt = parseTime(queuedAt), parseTime(preparedAt)
 	item.StartedAt, item.FinishedAt = parseTime(startedAt), parseTime(finishedAt)
@@ -446,7 +446,7 @@ func scanTurn(scanner interface{ Scan(...any) error }) (domain.Turn, error) {
 	return item, err
 }
 
-const turnColumns = `id,task_id,agent_id,sequence,input_message_id,status,waiting_reason,backend_session_id,runtime_config_snapshot_id,queued_at,prepared_at,started_at,finished_at,exit_code,result,error,round_id,parent_turn_id,attempt,generation,required,title,instruction,context_window,prompt_chars,prompt_snapshot,inbox_batch_id,usage_json,context_ready_at,session_ready_at,first_event_at,last_activity_at,stalled_at,backend_finished_at`
+const turnColumns = `id,task_id,agent_id,sequence,input_message_id,status,waiting_reason,backend_session_id,runtime_config_snapshot_id,queued_at,prepared_at,started_at,finished_at,exit_code,result,error,round_id,parent_turn_id,attempt,generation,required,title,instruction,context_window,prompt_chars,prompt_snapshot,inbox_batch_id,usage_json,channel_reply_decision,context_ready_at,session_ready_at,first_event_at,last_activity_at,stalled_at,backend_finished_at`
 
 func (s *Store) Turn(ctx context.Context, id string) (domain.Turn, error) {
 	return scanTurn(s.db.QueryRowContext(ctx, `SELECT `+turnColumns+` FROM turns WHERE id=?`, id))
@@ -523,11 +523,13 @@ func (s *Store) UpdateTurn(ctx context.Context, item domain.Turn, from domain.Tu
 		return err
 	}
 	result, err := s.db.ExecContext(ctx, `
-		UPDATE turns SET status=?,waiting_reason=?,backend_session_id=?,prepared_at=?,started_at=?,finished_at=?,exit_code=?,result=?,error=?,context_window=?,prompt_chars=?,prompt_snapshot=?,usage_json=?,context_ready_at=?,session_ready_at=?,first_event_at=?,last_activity_at=?,stalled_at=?,backend_finished_at=?
+		UPDATE turns SET status=?,waiting_reason=?,backend_session_id=?,prepared_at=?,started_at=?,finished_at=?,exit_code=?,result=?,error=?,context_window=?,prompt_chars=?,prompt_snapshot=?,usage_json=?,
+			channel_reply_decision=CASE WHEN ?='' THEN channel_reply_decision ELSE ? END,
+			context_ready_at=?,session_ready_at=?,first_event_at=?,last_activity_at=?,stalled_at=?,backend_finished_at=?
 		WHERE id=? AND status=?`,
 		item.Status, item.WaitingReason, item.BackendSessionID, timeString(item.PreparedAt), timeString(item.StartedAt),
 		timeString(item.FinishedAt), item.ExitCode, item.Result, item.Error, item.ContextWindow, item.PromptChars,
-		item.PromptSnapshot, encodeJSON(item.Usage), timeString(item.ContextReadyAt), timeString(item.SessionReadyAt),
+		item.PromptSnapshot, encodeJSON(item.Usage), item.ChannelReplyDecision, item.ChannelReplyDecision, timeString(item.ContextReadyAt), timeString(item.SessionReadyAt),
 		timeString(item.FirstEventAt), timeString(item.LastActivityAt), timeString(item.StalledAt), timeString(item.BackendFinishedAt), item.ID, from,
 	)
 	if err != nil {
@@ -536,6 +538,21 @@ func (s *Store) UpdateTurn(ctx context.Context, item domain.Turn, from domain.Tu
 	count, _ := result.RowsAffected()
 	if count != 1 {
 		return fmt.Errorf("turn status changed concurrently")
+	}
+	return nil
+}
+
+func (s *Store) SetTurnChannelReplyDecision(ctx context.Context, turnID, taskID, agentID, decision string) error {
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE turns SET channel_reply_decision=?
+		WHERE id=? AND task_id=? AND agent_id=?
+		  AND status IN ('queued','preparing','starting','running','waiting')`,
+		decision, turnID, taskID, agentID)
+	if err != nil {
+		return err
+	}
+	if count, _ := result.RowsAffected(); count != 1 {
+		return fmt.Errorf("turn is no longer active")
 	}
 	return nil
 }

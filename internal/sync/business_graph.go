@@ -114,6 +114,8 @@ func exportTaskGraph(ctx context.Context, database *store.Store, deviceID string
 				agent.WireModel = ""
 				agent.CodexAccountID = ""
 				agent.ReasoningEffort = ""
+				agent.StreamIdleTimeoutMS = 0
+				agent.StreamMaxRetries = 0
 				agent.Filesystem = ""
 				agent.Approval = ""
 				agent.RuntimeConfigValid = false
@@ -293,6 +295,8 @@ func applyTaskGraphObject(ctx context.Context, database *store.Store, obj domain
 		agent.WireModel = ""
 		agent.CodexAccountID = ""
 		agent.ReasoningEffort = ""
+		agent.StreamIdleTimeoutMS = 0
+		agent.StreamMaxRetries = 0
 		agent.Filesystem = ""
 		agent.Approval = ""
 		agent.RuntimeConfigValid = false

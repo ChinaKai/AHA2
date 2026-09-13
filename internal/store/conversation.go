@@ -76,14 +76,14 @@ func insertTurnTx(ctx context.Context, tx *sql.Tx, item domain.Turn) error {
 		INSERT INTO turns(
 			id,task_id,agent_id,sequence,input_message_id,status,waiting_reason,backend_session_id,
 			runtime_config_snapshot_id,queued_at,prepared_at,started_at,finished_at,exit_code,result,error,
-			round_id,parent_turn_id,attempt,generation,required,title,instruction,context_window,prompt_chars,prompt_snapshot,inbox_batch_id,usage_json
+			round_id,parent_turn_id,attempt,generation,required,title,instruction,context_window,prompt_chars,prompt_snapshot,inbox_batch_id,usage_json,channel_reply_decision
 		)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		item.ID, item.TaskID, item.AgentID, item.Sequence, item.InputMessageID, item.Status, item.WaitingReason,
 		item.BackendSessionID, item.RuntimeConfigSnapshotID, timeString(item.QueuedAt), timeString(item.PreparedAt),
 		timeString(item.StartedAt), timeString(item.FinishedAt), item.ExitCode, item.Result, item.Error,
 		item.RoundID, item.ParentTurnID, item.Attempt, item.Generation, item.Required, item.Title, item.Instruction,
-		item.ContextWindow, item.PromptChars, item.PromptSnapshot, item.InboxBatchID, encodeJSON(item.Usage),
+		item.ContextWindow, item.PromptChars, item.PromptSnapshot, item.InboxBatchID, encodeJSON(item.Usage), item.ChannelReplyDecision,
 	)
 	return err
 }
@@ -505,15 +505,17 @@ func (s *Store) ConversationPageForAgent(
 		}
 	}
 	page := domain.ConversationPage{Items: items, HasMore: hasMore}
+	// Advance only through records represented by this response. A concurrent
+	// insert must remain reachable by the caller's next incremental request.
+	page.Latest = after
 	if len(items) > 0 {
 		page.NextBefore = items[0].Sequence
+		for _, item := range items {
+			if item.Sequence > page.Latest {
+				page.Latest = item.Sequence
+			}
+		}
 	}
-	_ = s.db.QueryRowContext(ctx, `
-		SELECT COALESCE(MAX(sequence),0) FROM conversation_items
-		WHERE task_id=? AND stream_agent_id=?`,
-		taskID, agentID,
-	).
-		Scan(&page.Latest)
 	return page, nil
 }
 

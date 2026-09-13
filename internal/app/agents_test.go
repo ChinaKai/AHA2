@@ -1,9 +1,14 @@
 package app
 
 import (
+	"context"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
+	"github.com/ChinaKai/AHA2/internal/prompt"
+	"github.com/ChinaKai/AHA2/internal/store"
 )
 
 func TestBackendSessionIdentityChangedIgnoresPerTurnSettings(t *testing.T) {
@@ -19,6 +24,8 @@ func TestBackendSessionIdentityChangedIgnoresPerTurnSettings(t *testing.T) {
 	}{
 		{name: "reasoning effort", mutate: func(snapshot *domain.RuntimeConfigSnapshot) { snapshot.ReasoningEffort = "high" }},
 		{name: "proxy", mutate: func(snapshot *domain.RuntimeConfigSnapshot) { snapshot.ProxyEnabled = false }},
+		{name: "stream idle timeout", mutate: func(snapshot *domain.RuntimeConfigSnapshot) { snapshot.StreamIdleTimeoutMS = 120000 }},
+		{name: "stream retries", mutate: func(snapshot *domain.RuntimeConfigSnapshot) { snapshot.StreamMaxRetries = 2 }},
 		{name: "permissions", mutate: func(snapshot *domain.RuntimeConfigSnapshot) {
 			snapshot.PermissionsJSON = `{"filesystem":"read-only","approval":"auto"}`
 		}},
@@ -38,5 +45,42 @@ func TestBackendSessionIdentityChangedIgnoresPerTurnSettings(t *testing.T) {
 				t.Fatalf("backendSessionIdentityChanged()=%t want %t", got, test.want)
 			}
 		})
+	}
+}
+
+func TestInboxInstructionRendersPerMessageChannelActor(t *testing.T) {
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	instruction, err := prompt.NewEngine(database).RenderInboxBatch(ctx, inboxTemplateItems([]domain.AgentInboxItem{
+		{
+			Sequence: 1, SourceKind: "owner_message", SourceAgentID: "owner", Content: "请检查蓝牙连接",
+			Payload: map[string]any{"channel_context": map[string]any{
+				"chat_display_name": "APP 与固件联调群",
+				"actor":             map[string]any{"display_name": "张三", "role": "participant"},
+				"mentions":          []any{map[string]any{"display_name": "李四"}},
+			}},
+		},
+		{
+			Sequence: 2, SourceKind: "owner_message", SourceAgentID: "owner", Content: "我补充日志",
+			Payload: map[string]any{"channel_context": map[string]any{
+				"chat_display_name": "APP 与固件联调群",
+				"actor":             map[string]any{"display_name": "王五", "role": "participant"},
+			}},
+		},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{
+		"owner_message from 张三", "Channel sender: 张三", "Mentioned participants: 李四",
+		"owner_message from 王五", "Channel sender: 王五", "我补充日志",
+	} {
+		if !strings.Contains(instruction, expected) {
+			t.Fatalf("instruction missing %q: %s", expected, instruction)
+		}
 	}
 }

@@ -59,8 +59,11 @@ func (executor Executor) runCodex(ctx context.Context, adapter backend.Codex, re
 		Runner:  workspace.RunnerFor(request.Workspace),
 		WorkDir: taskWorkDir(request),
 		Model:   request.Model.WireModel, ContextWindow: request.Model.ContextWindow,
-		ReasoningEffort: request.Snapshot.ReasoningEffort, Environment: request.Environment,
-		Prompt: request.Prompt, ProviderSessionID: request.ProviderSessionID,
+		ReasoningEffort:     request.Snapshot.ReasoningEffort,
+		StreamIdleTimeoutMS: request.Snapshot.StreamIdleTimeoutMS,
+		StreamMaxRetries:    request.Snapshot.StreamMaxRetries,
+		Environment:         request.Environment,
+		Prompt:              request.Prompt, ProviderSessionID: request.ProviderSessionID,
 		Filesystem: request.Filesystem, Approval: request.Approval,
 	}, func(event backend.Event) {
 		emit(app.ExecutionEvent{Type: event.Type, Data: event.Data})

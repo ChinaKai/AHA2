@@ -40,6 +40,17 @@ func (m *memorySecrets) DeleteMany(keys []string) error {
 	return nil
 }
 
+func TestSafeChannelDisplayNameIsStableAndSingleLine(t *testing.T) {
+	first := safeChannelDisplayName("", "群成员", "instance", "external-one")
+	if first != safeChannelDisplayName("", "群成员", "instance", "external-one") ||
+		first == safeChannelDisplayName("", "群成员", "instance", "external-two") {
+		t.Fatalf("fallback labels are not stable and distinct: %q", first)
+	}
+	if got := safeChannelDisplayName(" 张三\n伪造头 ", "群成员", "instance", "external"); got != "张三伪造头" {
+		t.Fatalf("display name=%q", got)
+	}
+}
+
 func TestDiscoverAndCreateInstanceIsOptionalAndIdempotent(t *testing.T) {
 	ctx := context.Background()
 	dataDir := t.TempDir()
@@ -79,6 +90,27 @@ func TestDiscoverAndCreateInstanceIsOptionalAndIdempotent(t *testing.T) {
 	first, err := service.CreateInstance(ctx, owner.ID, "feishu", "团队飞书", "request-1")
 	if err != nil {
 		t.Fatal(err)
+	}
+	knownBot, err := database.UpsertChannelParticipant(ctx, domain.ChannelIdentityLink{
+		ID: "channel-known-bot", InstanceID: first.ID, ExternalUserID: "known-bot-open-id",
+		Role: "participant", DisplayName: "AHA-WORK", Status: "active", LinkedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	observedWithoutName, err := database.UpsertObservedChannelParticipant(ctx, domain.ChannelIdentityLink{
+		ID: domain.NewID("channel_identity"), InstanceID: first.ID, ExternalUserID: knownBot.ExternalUserID,
+		Role: "participant", Status: "active", LinkedAt: now.Add(time.Second),
+	}, "群机器人 123456")
+	if err != nil || observedWithoutName.DisplayName != "AHA-WORK" {
+		t.Fatalf("missing observed display name replaced known name: %#v err=%v", observedWithoutName, err)
+	}
+	observedRename, err := database.UpsertObservedChannelParticipant(ctx, domain.ChannelIdentityLink{
+		ID: domain.NewID("channel_identity"), InstanceID: first.ID, ExternalUserID: knownBot.ExternalUserID,
+		Role: "participant", DisplayName: "AHA-WORK-2", Status: "active", LinkedAt: now.Add(2 * time.Second),
+	}, "群机器人 123456")
+	if err != nil || observedRename.DisplayName != "AHA-WORK-2" {
+		t.Fatalf("resolved observed display name did not update: %#v err=%v", observedRename, err)
 	}
 	second, err := service.CreateInstance(ctx, owner.ID, "feishu", "团队飞书", "request-1")
 	if err != nil || second.ID != first.ID {
@@ -799,14 +831,162 @@ func TestInboundOwnerAndGroupScopesAreServerEnforcedAndIdempotent(t *testing.T) 
 	}
 	groupTitles := 0
 	for _, task := range tasks {
-		if task.Title == "飞书群聊 · 研发群 · 张三" {
+		if task.Title == "飞书群聊 · 研发群" {
 			groupTitles++
 		}
 	}
 	if groupTitles != 2 {
 		t.Fatalf("group channel task titles=%#v", tasks)
 	}
+	groupEndpoint, err := database.ChannelEndpoint(ctx, instance.ID, domain.ChannelEndpointGroupDigitalHuman)
+	if err != nil {
+		t.Fatal(err)
+	}
+	groupScope, err := service.scopeKey(instance.ID, groupEndpoint.Kind, "", "group-a", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	groupConversation, err := database.ChannelConversationByScope(ctx, groupEndpoint.ID, 2, groupScope)
+	if err != nil || groupConversation.DisplayName != "研发群" {
+		t.Fatalf("group conversation=%#v err=%v", groupConversation, err)
+	}
+	if err := database.PromoteChannelConversationScope(ctx, groupConversation.ID, 1, "legacy-per-sender-scope", groupConversation.DisplayName, now); err != nil {
+		t.Fatal(err)
+	}
+	groupConversation.ScopeKeyVersion = 1
+	groupConversation.ScopeKey = "legacy-per-sender-scope"
+	destinations, activeRoute, err := service.TaskChannelRoutes(ctx, owner.ID, target.ID)
+	if err != nil || activeRoute.ID != "" {
+		t.Fatalf("task channel destinations=%#v route=%#v err=%v", destinations, activeRoute, err)
+	}
+	groupDestinationFound := false
+	for _, destination := range destinations {
+		groupDestinationFound = groupDestinationFound || destination.ConversationID == groupConversation.ID
+	}
+	if !groupDestinationFound {
+		t.Fatalf("legacy group destination missing: %#v", destinations)
+	}
+	groupRoute, err := service.BindTaskChannelRoute(ctx, owner.ID, target.ID, groupConversation.ID)
+	if err != nil || groupRoute.ConversationID != groupConversation.ID {
+		t.Fatalf("group route=%#v err=%v", groupRoute, err)
+	}
+	groupBScope, err := service.scopeKey(instance.ID, groupEndpoint.Kind, "", "group-b", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	groupBConversation, err := database.ChannelConversationByScope(ctx, groupEndpoint.ID, 2, groupBScope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacedRoute, err := service.BindTaskChannelRoute(ctx, owner.ID, target.ID, groupBConversation.ID)
+	if err != nil || replacedRoute.ConversationID != groupBConversation.ID {
+		t.Fatalf("replacement route=%#v err=%v", replacedRoute, err)
+	}
+	if _, err := database.ActiveChannelTaskRoute(ctx, groupConversation.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("previous primary channel remained active: %v", err)
+	}
+	groupRoute, err = service.BindTaskChannelRoute(ctx, owner.ID, target.ID, groupConversation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	webTurn, err := appService.SubmitMessage(ctx, target.ID, "Web 发起的消息不应回到群聊")
+	if err != nil {
+		t.Fatal(err)
+	}
+	webDeadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(webDeadline) {
+		if _, activeErr := database.ActiveTurn(ctx, target.ID); errors.Is(activeErr, sql.ErrNoRows) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	webReplyRouted := false
+	webDeliveries, err := database.ChannelDeliveries(ctx, instance.ID, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, delivery := range webDeliveries {
+		if delivery.ConversationID == groupConversation.ID && delivery.SemanticPayload["turn_id"] == webTurn.ID {
+			webReplyRouted = true
+			break
+		}
+	}
+	if webReplyRouted {
+		t.Fatal("Web-originated final reply was projected to the bound group chat")
+	}
+	secondSender := dm
+	secondSender.RequestID = "group-request-second-sender"
+	secondSender.ExternalEventID = "group-event-second-sender"
+	secondSender.ChatType, secondSender.ExternalChatID, secondSender.ExternalSenderID, secondSender.MentionedBot = "group", "group-a", "another-user", true
+	secondSender.ChatDisplayName, secondSender.SenderDisplayName = "研发群", "李四"
+	secondSender.ExternalMessageID = "group-message-second-sender"
+	if _, _, err := service.ReceiveInbound(ctx, claims, secondSender); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.processInboundBatch(ctx); err != nil {
+		t.Fatal(err)
+	}
+	tasks, _ = database.ListTasks(ctx, instance.HostProjectID)
+	if len(tasks) != 3 {
+		t.Fatalf("bound legacy group created a replacement host task: %#v", tasks)
+	}
+	routedLegacy, err := database.ActiveChannelTaskRoute(ctx, groupConversation.ID)
+	if err != nil || routedLegacy.TargetTaskID != target.ID {
+		t.Fatalf("legacy group route was not reused: %#v err=%v", routedLegacy, err)
+	}
+	page, err := database.ConversationPageForAgent(ctx, target.ID, "main", 0, 0, 100, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundSecondSender := false
+	for _, item := range page.Items {
+		channelContext, _ := item.Payload["channel_context"].(map[string]any)
+		actor, _ := channelContext["actor"].(map[string]any)
+		if actor["display_name"] == "李四" {
+			foundSecondSender = true
+		}
+		if _, exposed := channelContext["external_message_id"]; exposed {
+			t.Fatal("raw provider message ID leaked into Task conversation payload")
+		}
+	}
+	if !foundSecondSender {
+		t.Fatalf("routed conversation did not retain per-message actor: %#v", page.Items)
+	}
 	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, activeErr := database.ActiveTurn(ctx, target.ID); errors.Is(activeErr, sql.ErrNoRows) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	routedReplyFound := false
+	for attempt := 0; attempt < 20 && !routedReplyFound; attempt++ {
+		deliveries, claimErr := service.ClaimDeliveries(ctx, deliveryClaims, 20)
+		if claimErr != nil {
+			t.Fatal(claimErr)
+		}
+		if len(deliveries) == 0 {
+			time.Sleep(20 * time.Millisecond)
+			continue
+		}
+		for _, delivery := range deliveries {
+			if delivery.ConversationID == groupConversation.ID &&
+				delivery.Target["reply_message_id"] == "group-message-second-sender" &&
+				strings.Contains(delivery.Target["mention_user_ids"], "another-user") {
+				routedReplyFound = true
+			}
+			if err := service.AckDelivery(ctx, deliveryClaims, delivery.ID, delivery.LeaseID, "provider-routed-reply", ""); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if !routedReplyFound {
+		t.Fatal("group routed final reply did not target and mention the requesting participant")
+	}
+	if err := service.UnbindTaskChannelRoute(ctx, owner.ID, target.ID, groupRoute.ID); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		active := false
 		for _, task := range tasks {
@@ -845,10 +1025,6 @@ func TestInboundOwnerAndGroupScopesAreServerEnforcedAndIdempotent(t *testing.T) 
 	}
 	if records[0].AuthorityStatus != "observed" || records[0].Visibility != "conversation_only" {
 		t.Fatalf("record auto-promoted: %#v", records[0])
-	}
-	groupEndpoint, err := database.ChannelEndpoint(ctx, instance.ID, domain.ChannelEndpointGroupDigitalHuman)
-	if err != nil {
-		t.Fatal(err)
 	}
 	allowed, err := database.ChannelAllowedKnowledge(ctx, instance.ID, groupEndpoint.Kind, records[0].ConversationID)
 	if err != nil {

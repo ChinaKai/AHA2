@@ -27,7 +27,7 @@ func TestMediaDeliveriesAreOrderedScopedAndDurable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	conversation, err := service.ensureConversation(ctx, instance, endpoint, identity, envelope, scope)
+	conversation, err := service.ensureConversation(ctx, instance, endpoint, identity, envelope, 1, scope)
 	if err != nil {
 		t.Fatal(err)
 	}

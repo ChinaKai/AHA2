@@ -318,8 +318,10 @@ waiting_backend
 
 排队、Context 准备、Session 唤醒、Backend 启动到首事件、Agent 活跃执行和结果收尾
 分别记录，不能压缩成一个模糊的 elapsed。Codex 在输出部分响应后超过 90 秒没有任何
-事件时标记 stalled 并发送 update；每分钟发送心跳，5 分钟 idle timeout 后中断并自动
-重试一次。
+AHA 可识别事件时标记 stalled 并发送 update；每分钟发送心跳，默认 10 分钟 Backend
+idle timeout 后中断并自动重试一次。该 watchdog 与 Codex Provider 的 SSE 空闲超时分开：
+每个 Task Runtime Snapshot 可以独立配置 `stream_idle_timeout_ms` 和
+`stream_max_retries`，新 Task 默认 120 秒和 2 次。
 
 ### 4.6 Agent
 
@@ -825,18 +827,22 @@ Enter task information
 
 Prompt Pack 使用稳定结构：
 
+所有面向 Agent 的静态文案来自 `internal/prompt/templates/*.md`。Go 编排代码只选择模板并填充
+Task、Workspace、Inbox、Context 和 API 等运行时数据，不内联协议或恢复提示正文。
+
 ```text
 1. AHA system policy
 2. Agent identity and permissions
 3. Project / Workspace / Git context
 4. Original task request
 5. Current task goal
-6. Task Memory
-7. Relevant Global KB
-8. Relevant Project KB
-9. Current user message
-10. Artifact references
-11. Output, memory and knowledge feedback protocol
+6. Recent completed user / Main exchanges
+7. Optional recovery handoff inline at the beginning of Current Inbox
+8. Relevant Global KB
+9. Relevant Project KB
+10. Current user message
+11. Artifact references
+12. Output and knowledge feedback protocol
 ```
 
 ### 9.5 Turn 循环
@@ -846,7 +852,6 @@ Receive user message
 -> Persist message
 -> Update current goal
 -> Create Turn
--> Load Task Memory
 -> Retrieve Global KB
 -> Retrieve Project KB
 -> Filter applicable knowledge
@@ -856,7 +861,6 @@ Receive user message
 -> Start Agent Turn
 -> Stream events and tool actions
 -> Persist reply and Artifacts
--> Update Task Memory
 -> Upsert Knowledge Candidates
 -> Set Task waiting_user
 -> Wait for next user message
@@ -881,11 +885,10 @@ resumable provider session
 Session 不可恢复或关键配置变化时：
 
 ```text
-Persist Task Memory
--> Generate Handoff Summary
+Generate minimal Session handoff
 -> Archive old Session
 -> Create new Session
--> Continue Task
+-> Continue from the Current Inbox and recent completed exchanges
 ```
 
 ### 9.7 Task 结束
@@ -903,7 +906,7 @@ Agent provides result
 -> Complete Task
 ```
 
-Task 可以重新打开。原 Session 可恢复时继续使用，否则根据 Task Memory 和 Handoff Summary 创建新 Session。
+Task 可以重新打开。原 Session 可恢复时继续使用，否则根据当前 Inbox、最近完成的问答和现有 Workspace 状态创建新 Session。
 
 ## 10. 状态恢复与并发
 
@@ -1009,7 +1012,8 @@ Agent 执行时的信息优先级：
 ```text
 Current user request
 > Current Workspace source and command results
-> Current Task Memory
+> Recovery handoff when present
+> Recent completed user / Main exchanges
 > Current branch Project Knowledge
 > Shared Project Knowledge
 > Global AHA Knowledge

@@ -158,24 +158,7 @@ func (s *Store) ActivateChannelTaskRoute(ctx context.Context, action domain.Chan
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `UPDATE channel_task_routes SET state='superseded',exited_at=?,exit_reason='superseded by confirmed takeover' WHERE conversation_id=? AND state='active'`, timeString(at), action.ConversationID); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE channel_subscriptions SET state='closed',updated_at=? WHERE conversation_id=? AND kind='task_route' AND state='active'`, timeString(at), action.ConversationID); err != nil {
-		return err
-	}
-	routeID := domain.NewID("channel_route")
-	if _, err := tx.ExecContext(ctx, `INSERT INTO channel_task_routes(id,instance_id,conversation_id,target_task_id,state,revision,pending_action_id,activated_at,exited_at,exit_reason) VALUES(?,?,?,?, 'active',1,?,?,'','')`,
-		routeID, action.InstanceID, action.ConversationID, action.TargetID, action.ID, timeString(at)); err != nil {
-		return err
-	}
-	var cursor int64
-	_ = tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(sequence),0) FROM channel_source_events`).Scan(&cursor)
-	if _, err := tx.ExecContext(ctx, `INSERT INTO channel_subscriptions(id,instance_id,conversation_id,route_id,source_task_id,kind,filter_version,filter_json,source_cursor,state,created_at,updated_at) VALUES(?,?,?,?,?,'task_route',1,'{}',?,'active',?,?)`,
-		domain.NewID("channel_subscription"), action.InstanceID, action.ConversationID, routeID, action.TargetID, cursor, timeString(at), timeString(at)); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE channel_sessions SET mode='task_route' WHERE conversation_id=? AND status='active'`, action.ConversationID); err != nil {
+	if _, err := activateChannelTaskRouteTx(ctx, tx, action.InstanceID, action.ConversationID, action.TargetID, action.ID, at); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE channel_pending_actions SET status='succeeded',updated_at=? WHERE id=? AND status='executing'`, timeString(at), action.ID); err != nil {
@@ -188,23 +171,66 @@ func (s *Store) ActivateChannelTaskRoute(ctx context.Context, action domain.Chan
 	return tx.Commit()
 }
 
+func activateChannelTaskRouteTx(ctx context.Context, tx *sql.Tx, instanceID, conversationID, taskID, pendingActionID string, at time.Time) (string, error) {
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE channel_sessions
+		SET mode=CASE
+			WHEN conversation_id IN (
+				SELECT c.id FROM channel_conversations c JOIN channel_endpoints e ON e.id=c.endpoint_id
+				WHERE e.kind='group_digital_human'
+			) THEN 'group_qa'
+			ELSE 'assistant'
+		END
+		WHERE status='active' AND conversation_id IN (
+			SELECT conversation_id FROM channel_task_routes
+			WHERE state='active' AND (conversation_id=? OR target_task_id=?)
+		)`, conversationID, taskID); err != nil {
+		return "", err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE channel_subscriptions SET state='closed',updated_at=?
+		WHERE kind='task_route' AND state='active' AND route_id IN (
+			SELECT id FROM channel_task_routes
+			WHERE state='active' AND (conversation_id=? OR target_task_id=?)
+		)`, timeString(at), conversationID, taskID); err != nil {
+		return "", err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE channel_task_routes
+		SET state='superseded',revision=revision+1,exited_at=?,exit_reason='superseded by primary channel change'
+		WHERE state='active' AND (conversation_id=? OR target_task_id=?)`, timeString(at), conversationID, taskID); err != nil {
+		return "", err
+	}
+	routeID := domain.NewID("channel_route")
+	if _, err := tx.ExecContext(ctx, `INSERT INTO channel_task_routes(id,instance_id,conversation_id,target_task_id,state,revision,pending_action_id,activated_at,exited_at,exit_reason) VALUES(?,?,?,?, 'active',1,?,?, '','')`,
+		routeID, instanceID, conversationID, taskID, nullableString(pendingActionID), timeString(at)); err != nil {
+		return "", err
+	}
+	var cursor int64
+	_ = tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(sequence),0) FROM channel_source_events`).Scan(&cursor)
+	if _, err := tx.ExecContext(ctx, `INSERT INTO channel_subscriptions(id,instance_id,conversation_id,route_id,source_task_id,kind,filter_version,filter_json,source_cursor,state,created_at,updated_at) VALUES(?,?,?,?,?,'task_route',1,'{}',?,'active',?,?)`,
+		domain.NewID("channel_subscription"), instanceID, conversationID, routeID, taskID, cursor, timeString(at), timeString(at)); err != nil {
+		return "", err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE channel_sessions SET mode='task_route' WHERE conversation_id=? AND status='active'`, conversationID); err != nil {
+		return "", err
+	}
+	return routeID, nil
+}
+
 func (s *Store) ExitChannelTaskRoute(ctx context.Context, action domain.ChannelPendingAction, at time.Time) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	result, err := tx.ExecContext(ctx, `UPDATE channel_task_routes SET state='exited',exited_at=?,exit_reason='owner confirmed exit' WHERE conversation_id=? AND target_task_id=? AND state='active'`, timeString(at), action.ConversationID, action.TargetID)
+	route, err := scanChannelTaskRoute(tx.QueryRowContext(ctx, `
+		SELECT id,instance_id,conversation_id,target_task_id,state,revision,pending_action_id,activated_at,exited_at,exit_reason
+		FROM channel_task_routes WHERE conversation_id=? AND target_task_id=? AND state='active'`, action.ConversationID, action.TargetID))
 	if err != nil {
-		return err
-	}
-	if affected, _ := result.RowsAffected(); affected != 1 {
 		return errors.New("active channel route changed")
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE channel_subscriptions SET state='closed',updated_at=? WHERE conversation_id=? AND kind='task_route' AND state='active'`, timeString(at), action.ConversationID); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE channel_sessions SET mode='assistant' WHERE conversation_id=? AND status='active'`, action.ConversationID); err != nil {
+	if err := exitChannelTaskRouteTx(ctx, tx, route, "owner confirmed exit", at); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE channel_pending_actions SET status='succeeded',updated_at=? WHERE id=? AND status='executing'`, timeString(at), action.ID); err != nil {
@@ -215,6 +241,26 @@ func (s *Store) ExitChannelTaskRoute(ctx context.Context, action domain.ChannelP
 		return err
 	}
 	return tx.Commit()
+}
+
+func exitChannelTaskRouteTx(ctx context.Context, tx *sql.Tx, route domain.ChannelTaskRoute, reason string, at time.Time) error {
+	result, err := tx.ExecContext(ctx, `UPDATE channel_task_routes SET state='exited',revision=revision+1,exited_at=?,exit_reason=? WHERE id=? AND state='active'`, timeString(at), reason, route.ID)
+	if err != nil {
+		return err
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return errors.New("active channel route changed")
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE channel_subscriptions SET state='closed',updated_at=? WHERE route_id=? AND kind='task_route' AND state='active'`, timeString(at), route.ID); err != nil {
+		return err
+	}
+	mode := "assistant"
+	var endpointKind string
+	if err := tx.QueryRowContext(ctx, `SELECT e.kind FROM channel_conversations c JOIN channel_endpoints e ON e.id=c.endpoint_id WHERE c.id=?`, route.ConversationID).Scan(&endpointKind); err == nil && endpointKind == domain.ChannelEndpointGroupDigitalHuman {
+		mode = "group_qa"
+	}
+	_, err = tx.ExecContext(ctx, `UPDATE channel_sessions SET mode=? WHERE conversation_id=? AND status='active'`, mode, route.ConversationID)
+	return err
 }
 
 func (s *Store) BindChannelActionProviderMessage(ctx context.Context, actionID, instanceID, conversationID, providerMessageID string) error {

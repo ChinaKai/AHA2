@@ -40,6 +40,7 @@ func (adapter Codex) Execute(ctx context.Context, request Request, emit func(Eve
 	args := codexArguments(request, catalogPath)
 	environment := filterEnvironment(request.Environment)
 	var reply, sessionID, providerError string
+	var pendingUnphasedMessage *Event
 	var emitMu sync.Mutex
 	send := func(event Event) {
 		if event.Type == "" || emit == nil {
@@ -48,6 +49,15 @@ func (adapter Codex) Execute(ctx context.Context, request Request, emit func(Eve
 		emitMu.Lock()
 		emit(event)
 		emitMu.Unlock()
+	}
+	flushPendingMessage := func(final bool) {
+		if pendingUnphasedMessage == nil {
+			return
+		}
+		pendingUnphasedMessage.Data["intermediate"] = !final
+		pendingUnphasedMessage.Data["final"] = final
+		send(*pendingUnphasedMessage)
+		pendingUnphasedMessage = nil
 	}
 	runContext, cancelRun := context.WithCancelCause(ctx)
 	activity := make(chan string, 1)
@@ -79,8 +89,19 @@ func (adapter Codex) Execute(ctx context.Context, request Request, emit func(Eve
 				providerError = ""
 			}
 		}
+		if event.Type == "agent_message" {
+			if _, hasPhase := event.Data["phase"]; !hasPhase {
+				flushPendingMessage(false)
+				pendingUnphasedMessage = &event
+				return
+			}
+			flushPendingMessage(false)
+		} else if pendingUnphasedMessage != nil && event.Type != "" {
+			flushPendingMessage(event.Type == "agent_usage")
+		}
 		send(event)
 	})
+	flushPendingMessage(true)
 	cause := context.Cause(runContext)
 	cancelRun(context.Canceled)
 	<-monitorDone
@@ -117,7 +138,11 @@ func codexArguments(request Request, catalogPath string) []string {
 	wireAPI := request.Environment["CODEX_WIRE_API"]
 	envKey := request.Environment["CODEX_ENV_KEY"]
 	if providerID == "" {
-		providerID = "aha2_provider"
+		if baseURL == "" {
+			providerID = "openai"
+		} else {
+			providerID = "aha2_provider"
+		}
 	}
 	if wireAPI == "" {
 		wireAPI = "responses"
@@ -142,6 +167,12 @@ func codexArguments(request Request, catalogPath string) []string {
 			"-c", "model_providers."+providerID+".requires_openai_auth=false",
 			"-c", "model_providers."+providerID+".env_key="+strconv.Quote(envKey),
 		)
+	}
+	if request.StreamIdleTimeoutMS > 0 {
+		args = append(args, "-c", fmt.Sprintf("model_providers.%s.stream_idle_timeout_ms=%d", providerID, request.StreamIdleTimeoutMS))
+	}
+	if request.StreamMaxRetries > 0 {
+		args = append(args, "-c", fmt.Sprintf("model_providers.%s.stream_max_retries=%d", providerID, request.StreamMaxRetries))
 	}
 	if request.Model != "" {
 		args = append(args, "-m", request.Model)

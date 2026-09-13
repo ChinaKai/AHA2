@@ -516,7 +516,7 @@ func TestTaskAgentAPIIsolationAndConfigInheritance(t *testing.T) {
 	response = requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/prompts/templates", nil, "")
 	var templatesResponse map[string]any
 	decodeResponse(t, response, &templatesResponse)
-	if response.StatusCode != http.StatusOK || len(templatesResponse["templates"].([]any)) != 12 {
+	if response.StatusCode != http.StatusOK || len(templatesResponse["templates"].([]any)) != 25 {
 		t.Fatalf("prompt templates failed: %d %#v", response.StatusCode, templatesResponse)
 	}
 	response = requestJSON(t, client, http.MethodPut, server.URL+"/api/v1/prompts/templates/role.main", map[string]any{
@@ -550,6 +550,7 @@ func TestTaskAgentAPIIsolationAndConfigInheritance(t *testing.T) {
 
 	response = requestJSON(t, client, http.MethodPatch, server.URL+"/api/v1/tasks/"+task.ID+"/agents/main", map[string]any{
 		"model_id": model2.ID, "reasoning_effort": "high", "filesystem": "workspace-write", "approval": "never",
+		"stream_idle_timeout_ms": 60000, "stream_max_retries": 1,
 	}, csrf)
 	if response.StatusCode != http.StatusOK {
 		var failure map[string]any
@@ -569,6 +570,9 @@ func TestTaskAgentAPIIsolationAndConfigInheritance(t *testing.T) {
 		agent := value.(map[string]any)
 		if agent["model_id"] != model2.ID {
 			t.Fatalf("main config did not propagate: %#v", agentsResponse)
+		}
+		if agent["stream_idle_timeout_ms"] != float64(60000) || agent["stream_max_retries"] != float64(1) {
+			t.Fatalf("stream config did not propagate: %#v", agentsResponse)
 		}
 	}
 
@@ -851,6 +855,7 @@ func TestTaskHTTPManualCreateAndStart(t *testing.T) {
 	response := requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/tasks", map[string]any{
 		"project_id": project.ID, "workspace_id": workspace.ID, "title": "configure first", "request": "run later",
 		"model_id": model.ID, "start_mode": "manual",
+		"stream_idle_timeout_ms": 90000, "stream_max_retries": 4,
 	}, csrf)
 	if response.StatusCode != http.StatusCreated {
 		t.Fatalf("manual create status = %d", response.StatusCode)
@@ -871,6 +876,10 @@ func TestTaskHTTPManualCreateAndStart(t *testing.T) {
 	agents := detail["agents"].([]any)
 	if len(agents) != 1 || agents[0].(map[string]any)["agent_id"] != "main" {
 		t.Fatalf("draft detail agents = %#v", agents)
+	}
+	mainAgent := agents[0].(map[string]any)
+	if mainAgent["stream_idle_timeout_ms"] != float64(90000) || mainAgent["stream_max_retries"] != float64(4) {
+		t.Fatalf("draft stream settings = %#v", mainAgent)
 	}
 	if turns, ok := detail["turns"].([]any); ok && len(turns) != 0 {
 		t.Fatalf("draft detail turns = %#v", turns)

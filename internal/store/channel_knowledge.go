@@ -18,8 +18,8 @@ func (s *Store) RecordChannelAnswer(ctx context.Context, taskID, roundID, turnID
 	var endpointKind, projectID string
 	var ownerIdentity sql.NullString
 	var created, updated string
-	err := s.db.QueryRowContext(ctx, `SELECT c.id,c.instance_id,c.endpoint_id,c.scope_key_version,c.scope_key,c.external_chat_id,c.external_sender_id,c.owner_identity_link_id,c.host_task_id,c.status,c.created_at,c.updated_at,e.kind,i.host_project_id FROM channel_conversations c JOIN channel_endpoints e ON e.id=c.endpoint_id JOIN channel_instances i ON i.id=c.instance_id WHERE c.host_task_id=?`, taskID).
-		Scan(&conversation.ID, &conversation.InstanceID, &conversation.EndpointID, &conversation.ScopeKeyVersion, &conversation.ScopeKey, &conversation.ExternalChatID, &conversation.ExternalSenderID, &ownerIdentity, &conversation.HostTaskID, &conversation.Status, &created, &updated, &endpointKind, &projectID)
+	err := s.db.QueryRowContext(ctx, `SELECT c.id,c.instance_id,c.endpoint_id,c.scope_key_version,c.scope_key,c.external_chat_id,c.external_sender_id,c.display_name,c.owner_identity_link_id,c.host_task_id,c.status,c.created_at,c.updated_at,e.kind,i.host_project_id FROM channel_conversations c JOIN channel_endpoints e ON e.id=c.endpoint_id JOIN channel_instances i ON i.id=c.instance_id WHERE c.host_task_id=?`, taskID).
+		Scan(&conversation.ID, &conversation.InstanceID, &conversation.EndpointID, &conversation.ScopeKeyVersion, &conversation.ScopeKey, &conversation.ExternalChatID, &conversation.ExternalSenderID, &conversation.DisplayName, &ownerIdentity, &conversation.HostTaskID, &conversation.Status, &created, &updated, &endpointKind, &projectID)
 	if err != nil || endpointKind != domain.ChannelEndpointGroupDigitalHuman {
 		if err == nil {
 			err = sql.ErrNoRows

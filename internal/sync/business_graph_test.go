@@ -175,3 +175,19 @@ func TestBusinessHandlersIgnoreCurrentDeviceTaskMirrors(t *testing.T) {
 		t.Fatalf("remote hardware object=%#v err=%v", objects, err)
 	}
 }
+
+func TestBusinessHandlersIgnoreLegacyChannelBotIdentity(t *testing.T) {
+	ctx, db := context.Background(), businessStore(t)
+	engine := &Engine{}
+	RegisterBusinessHandlersForDevice(engine, db, "device-local")
+	handler := engine.handlers[legacyChannelBotType]
+	if handler == nil {
+		t.Fatal("legacy channel bot handler was not registered")
+	}
+	if err := handler(ctx, domain.SyncObject{
+		Type: legacyChannelBotType, ID: "device-remote:channel-instance",
+		Operation: "upsert", Payload: json.RawMessage(`{"bot_open_id":"obsolete"}`),
+	}); err != nil {
+		t.Fatalf("legacy channel bot identity blocked sync: %v", err)
+	}
+}

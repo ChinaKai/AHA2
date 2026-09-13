@@ -5,6 +5,9 @@ import type {
   AuthStatus,
   CodexAccount,
   CodexLogin,
+  ChannelContact,
+  ChannelDestination,
+  ChannelGroupMember,
   ChannelEndpoint,
   ChannelDelivery,
   ChannelHandoff,
@@ -12,6 +15,7 @@ import type {
   ChannelOnboardingSession,
   ChannelPlugin,
   ChannelPurgePreview,
+  ChannelTaskRoute,
   DetectedModel,
   EnvGroup,
   Knowledge,
@@ -522,6 +526,30 @@ class APIClient {
 
   takeoverTask(id: string, payload: Record<string, unknown>): Promise<{task: Task; hardware: HardwareGroup[]}> {
     return this.request(`/api/v1/tasks/${encodeURIComponent(id)}/takeover`, {method: "POST", body: JSON.stringify(payload)});
+  }
+
+  taskChannelRoutes(id: string): Promise<{destinations: ChannelDestination[]; route?: ChannelTaskRoute; contacts: ChannelContact[]; members: ChannelGroupMember[]}> {
+    return this.request(`/api/v1/tasks/${encodeURIComponent(id)}/channel-routes`);
+  }
+
+  bindTaskChannelRoute(id: string, conversationID: string): Promise<{route: ChannelTaskRoute}> {
+    return this.request(`/api/v1/tasks/${encodeURIComponent(id)}/channel-routes`, {
+      method: "POST", body: JSON.stringify({conversation_id: conversationID}),
+    });
+  }
+
+  unbindTaskChannelRoute(id: string, routeID: string): Promise<{ok: boolean}> {
+    return this.request(`/api/v1/tasks/${encodeURIComponent(id)}/channel-routes/${encodeURIComponent(routeID)}`, {method: "DELETE"});
+  }
+
+  refreshTaskChannelMembers(id: string): Promise<{ok: boolean; completed: boolean; command: {id: string; state: string}; members?: ChannelGroupMember[]}> {
+    return this.request(`/api/v1/tasks/${encodeURIComponent(id)}/channel-members:refresh`, {method: "POST"});
+  }
+
+  updateTaskChannelContacts(id: string, contacts: Array<{identity_link_id: string; collaboration_role: string}>): Promise<{contacts: ChannelContact[]}> {
+    return this.request(`/api/v1/tasks/${encodeURIComponent(id)}/channel-contacts`, {
+      method: "PUT", body: JSON.stringify({contacts}),
+    });
   }
 
   message(taskID: string, content: string): Promise<{turn: {id: string}}> {

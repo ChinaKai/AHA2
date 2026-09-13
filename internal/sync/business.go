@@ -35,6 +35,7 @@ const (
 	TypeConversation      = "conversation"
 	TypeTaskMemory        = "task_memory"
 	TypeHardware          = "hardware"
+	legacyChannelBotType  = "channel_bot_identity"
 )
 
 var errSyncedKnowledgeProjectDeleted = errors.New("synced knowledge project was deleted")
@@ -306,6 +307,11 @@ func RegisterBusinessHandlersForDevice(engine *Engine, database *store.Store, lo
 }
 
 func registerBusinessHandlers(engine *Engine, database *store.Store, localDeviceID string) {
+	// Older centers may still retain channel_bot_identity objects. Consume them
+	// as inert legacy records so upgrading does not block all Profile Sync pulls.
+	engine.Register(legacyChannelBotType, func(context.Context, domain.SyncObject) error {
+		return nil
+	})
 	for _, kind := range []string{TypeProject, TypeProductLine, TypeWorkspace, TypeTask, TypeTaskAgent, TypeRound, TypeTurn, TypeConversation, TypeTaskMemory, TypeHardware, TypeKnowledgeBinding, TypeKnowledgeProposal, TypeKnowledge, TypeSkill, TypeProvider, TypeModel, TypeEnvGroup, TypePromptOverride} {
 		objectType := kind
 		engine.Register(objectType, func(ctx context.Context, obj domain.SyncObject) error {

@@ -5,6 +5,11 @@ $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
 $repo = [IO.Path]::GetFullPath($RepoPath)
+$localAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
+$tempRoot = if ([string]::IsNullOrWhiteSpace($env:TEMP)) { Join-Path $localAppData "Temp" } else { $env:TEMP }
+New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
+$env:TEMP = $tempRoot
+$env:TMP = $tempRoot
 $missingServer = Join-Path ([IO.Path]::GetTempPath()) ("aha2-server-validation-" + [Guid]::NewGuid().ToString("N") + ".exe")
 $missingTray = Join-Path ([IO.Path]::GetTempPath()) ("aha2-tray-validation-" + [Guid]::NewGuid().ToString("N") + ".exe")
 & (Join-Path $repo "scripts\build-windows-installer.ps1") -RepoPath $repo -InputExe $missingServer -InputTrayExe $missingTray -ValidateOnly
@@ -106,7 +111,7 @@ try {
 
 $userDeployPath = Join-Path $repo "scripts\deploy-windows-user.ps1"
 $userDeploy = Get-Content -Raw -Encoding UTF8 -LiteralPath $userDeployPath
-foreach ($contract in @("ProviderPath", "-WorkingDirectory `$install", "AllowCustomUserWritableInstallDir", "UpdateExistingInstallInPlace", "existing-install-in-place", "Custom install directory is not writable", "WriteAccessVerified", "-PerUser", "ElevationRequired=`$false", "AHA2-Setup-User-x64.exe", "Wait-AHA2Health", "Get-FileHash", "AHA2 User", "AHA2 User Update", "DetachedWorker", "New-ScheduledTaskAction", "RunLevel Limited", "Stop-AHA2ProcessTrees", "taskkill.exe", "/T", "/SKIPUSERTASK=1", "user-deploy-result.json")) {
+foreach ($contract in @("ProviderPath", "GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)", "-WorkingDirectory `$install", "AllowCustomUserWritableInstallDir", "UpdateExistingInstallInPlace", "existing-install-in-place", "Custom install directory is not writable", "WriteAccessVerified", "-PerUser", "ElevationRequired=`$false", "AHA2-Setup-User-x64.exe", "Wait-AHA2Health", "Get-FileHash", "AHA2 User", "AHA2 User Update", "DetachedWorker", "New-ScheduledTaskAction", "RunLevel Limited", "Stop-AHA2ProcessTrees", "System32\taskkill.exe", "`$taskkillExecutable", "/T", "/SKIPUSERTASK=1", "user-deploy-result.json")) {
     if (-not $userDeploy.Contains($contract)) {
         throw "Per-user deployment contract is missing: $contract"
     }
@@ -117,7 +122,7 @@ $databaseBackupIndex = $userDeploy.IndexOf('foreach ($name in @("aha2.db"', $tas
 if ($stopBeforeBackupIndex -lt 0 -or $databaseBackupIndex -lt 0 -or $stopBeforeBackupIndex -gt $databaseBackupIndex) {
     throw "Per-user deployment must stop the complete AHA2 process tree before copying SQLite backup files."
 }
-& $userDeployPath -RepoPath $repo -InputExe (Join-Path $repo "go.mod") -InputTrayExe (Join-Path $repo "go.mod") -InstallDir (Join-Path $env:LOCALAPPDATA "Programs\AHA2-validation") -DataDir (Join-Path ([IO.Path]::GetTempPath()) "AHA2 User Data") -ValidateOnly
+& $userDeployPath -RepoPath $repo -InputExe (Join-Path $repo "go.mod") -InputTrayExe (Join-Path $repo "go.mod") -InstallDir (Join-Path $localAppData "Programs\AHA2-validation") -DataDir (Join-Path ([IO.Path]::GetTempPath()) "AHA2 User Data") -ValidateOnly
 $customInstallValidation = Join-Path $repo ".tools\AHA2 Custom Install Validation"
 New-Item -ItemType Directory -Path $customInstallValidation -Force | Out-Null
 $previousLocalAppData = $env:LOCALAPPDATA
@@ -222,7 +227,10 @@ if ($workflow.Contains("portable-release") -or $workflow.Contains("Upload portab
     throw "Release workflow must not publish portable binaries."
 }
 $installerBuilder = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $repo "scripts\build-windows-installer.ps1")
-foreach ($contract in @("Get-PEWindowsSubsystem", "Windows GUI subsystem", "-H windowsgui")) {
+foreach ($contract in @(
+    "Get-PEWindowsSubsystem", "Windows GUI subsystem", "-H windowsgui",
+    "Start-Process", "-Wait", 'Remove-Item -LiteralPath $setup,$hashFile'
+)) {
     if (-not $installerBuilder.Contains($contract)) {
         throw "Windows installer builder does not enforce the GUI tray subsystem: $contract"
     }
@@ -234,9 +242,25 @@ foreach ($contract in @("./cmd/aha-tray", "aha2-tray-", "-H windowsgui")) {
     }
 }
 $buildAndDeploy = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $repo "scripts\build-and-deploy-windows-user.ps1")
-foreach ($contract in @("ProviderPath", "candidateLinuxPath", "main.webVersion=", "AllowCustomUserWritableInstallDir", "UpdateExistingInstallInPlace")) {
+foreach ($contract in @("ProviderPath", "GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)", "aha2-version-", "main.webVersion=", "InputFeishuPlugin", "InputFeishuManifest", "AllowCustomUserWritableInstallDir", "UpdateExistingInstallInPlace", "Neither Windows node.exe nor WSL node was found.", "NodeRuntime", '"node", "scripts/build-web.mjs"', 'test -x "$linuxRepo/.tools/go/bin/go"', "df -Pk .")) {
     if (-not $buildAndDeploy.Contains($contract)) {
         throw "Windows build-and-deploy contract is missing: $contract"
     }
+}
+$localBuildScript = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $repo "local_build.sh")
+foreach ($contract in @(
+    "scripts/build-web.mjs", "web/tests/build.test.mjs", "test ./...", "vet ./...",
+    "CGO_ENABLED=0 GOOS=windows GOARCH=amd64", "-H windowsgui", "plugins/feishu",
+    "build-and-deploy-windows-user.ps1", "-DeployOnly", "AllowCustomUserWritableInstallDir",
+    "UpdateExistingInstallInPlace", "user-deploy-result-local-build.json",
+    "build-windows-installer.ps1", "AHA2_INSTALLER_DIR", "AHA2_ISCC_PATH",
+    "AHA2-Setup-User-x64.exe", "-PerUser"
+)) {
+    if (-not $localBuildScript.Contains($contract)) {
+        throw "WSL local build contract is missing: $contract"
+    }
+}
+if ($localBuildScript.Contains(".aha2-planned-restart")) {
+    throw "WSL local build must not restore the removed planned-restart marker."
 }
 Write-Output "Windows tray installer and Release workflow contracts are valid."

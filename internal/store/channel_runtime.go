@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -434,9 +435,9 @@ func (s *Store) ChannelDelivery(ctx context.Context, id string) (domain.ChannelD
 	return scanChannelDelivery(s.db.QueryRowContext(ctx, `SELECT `+channelDeliveryColumns+` FROM channel_delivery_outbox WHERE id=?`, id))
 }
 
-func (s *Store) ChannelDeliveryTarget(ctx context.Context, conversationID string) (map[string]string, error) {
-	var chatID, senderID string
-	if err := s.db.QueryRowContext(ctx, `SELECT external_chat_id,external_sender_id FROM channel_conversations WHERE id=? AND status='active'`, conversationID).Scan(&chatID, &senderID); err != nil {
+func (s *Store) ChannelDeliveryTarget(ctx context.Context, conversationID string, sourceEventSequence int64) (map[string]string, error) {
+	var chatID, senderID, instanceID string
+	if err := s.db.QueryRowContext(ctx, `SELECT external_chat_id,external_sender_id,instance_id FROM channel_conversations WHERE id=? AND status='active'`, conversationID).Scan(&chatID, &senderID, &instanceID); err != nil {
 		return nil, err
 	}
 	target := map[string]string{"sender_id": senderID}
@@ -448,14 +449,237 @@ func (s *Store) ChannelDeliveryTarget(ctx context.Context, conversationID string
 		target["receive_id"] = chatID
 		target["chat_id"] = chatID
 	}
-	var payloadJSON string
-	if err := s.db.QueryRowContext(ctx, `SELECT normalized_payload_json FROM channel_inbox_dedup WHERE conversation_id=? AND state='processed' ORDER BY received_at DESC LIMIT 1`, conversationID).Scan(&payloadJSON); err == nil {
-		payload := decodeJSON(payloadJSON, map[string]any{})
-		if messageID := strings.TrimSpace(fmt.Sprint(payload["external_message_id"])); messageID != "" && messageID != "<nil>" {
-			target["reply_message_id"] = messageID
+	var taskID, roundID, sourcePayloadJSON string
+	if sourceEventSequence > 0 {
+		_ = s.db.QueryRowContext(ctx, `SELECT task_id,round_id,semantic_payload_json FROM channel_source_events WHERE sequence=?`, sourceEventSequence).Scan(&taskID, &roundID, &sourcePayloadJSON)
+	}
+	sourcePayload := decodeJSON(sourcePayloadJSON, map[string]any{})
+	if taskID != "" && roundID != "" {
+		rows, err := s.db.QueryContext(ctx, `SELECT payload_json FROM conversation_items WHERE task_id=? AND round_id=? AND kind='user_message' ORDER BY sequence`, taskID, roundID)
+		if err == nil {
+			payloads := []string{}
+			for rows.Next() {
+				var payloadJSON string
+				if rows.Scan(&payloadJSON) == nil {
+					payloads = append(payloads, payloadJSON)
+				}
+			}
+			_ = rows.Close()
+			identityNames := map[string]string{}
+			identityOrder := []string{}
+			for _, payloadJSON := range payloads {
+				payload := decodeJSON(payloadJSON, map[string]any{})
+				channelContext, _ := payload["channel_context"].(map[string]any)
+				if strings.TrimSpace(fmt.Sprint(channelContext["conversation_id"])) != conversationID {
+					continue
+				}
+				receiptID := strings.TrimSpace(fmt.Sprint(payload["channel_receipt_id"]))
+				if receiptID != "" && receiptID != "<nil>" {
+					var normalizedPayloadJSON string
+					if err := s.db.QueryRowContext(ctx, `SELECT normalized_payload_json FROM channel_inbox_dedup WHERE id=? AND conversation_id=?`, receiptID, conversationID).Scan(&normalizedPayloadJSON); err == nil {
+						normalizedPayload := decodeJSON(normalizedPayloadJSON, map[string]any{})
+						if messageID := strings.TrimSpace(fmt.Sprint(normalizedPayload["external_message_id"])); messageID != "" && messageID != "<nil>" {
+							target["reply_message_id"] = messageID
+						}
+					}
+				}
+				actor, _ := channelContext["actor"].(map[string]any)
+				identityID := strings.TrimSpace(fmt.Sprint(actor["identity_link_id"]))
+				if identityID != "" && identityID != "<nil>" {
+					if _, exists := identityNames[identityID]; !exists && len(identityOrder) < 5 {
+						identityOrder = append(identityOrder, identityID)
+						identityNames[identityID] = strings.TrimSpace(fmt.Sprint(actor["display_name"]))
+					}
+				}
+			}
+			userIDs, names := []string{}, []string{}
+			for _, identityID := range identityOrder {
+				var externalUserID, displayName string
+				if err := s.db.QueryRowContext(ctx, `SELECT external_user_id,display_name FROM channel_identity_links WHERE id=? AND status='active'`, identityID).Scan(&externalUserID, &displayName); err != nil || externalUserID == "" {
+					continue
+				}
+				if identityNames[identityID] != "" && identityNames[identityID] != "<nil>" {
+					displayName = identityNames[identityID]
+				}
+				userIDs = append(userIDs, externalUserID)
+				names = append(names, displayName)
+			}
+			if len(userIDs) > 0 {
+				rawIDs, _ := json.Marshal(userIDs)
+				rawNames, _ := json.Marshal(names)
+				target["mention_user_ids"] = string(rawIDs)
+				target["mention_names"] = string(rawNames)
+			}
+		}
+	}
+	if rawMentionIDs, ok := sourcePayload["mention_identity_link_ids"]; ok {
+		raw, _ := json.Marshal(rawMentionIDs)
+		var identityIDs []string
+		if json.Unmarshal(raw, &identityIDs) == nil {
+			userIDs, names := []string{}, []string{}
+			seen := map[string]bool{}
+			for _, identityID := range identityIDs {
+				identityID = strings.TrimSpace(identityID)
+				if identityID == "" || seen[identityID] || len(userIDs) >= 5 {
+					continue
+				}
+				var externalUserID, displayName string
+				if err := s.db.QueryRowContext(ctx, `
+					SELECT identity.external_user_id,identity.display_name
+					FROM channel_identity_links identity
+					JOIN channel_conversation_members member
+					  ON member.identity_link_id=identity.id AND member.conversation_id=?
+					JOIN channel_conversations conversation ON conversation.id=member.conversation_id
+					WHERE identity.id=? AND identity.instance_id=? AND identity.status='active' AND identity.role='participant'
+					  AND (
+						member.provider_active=1
+						OR (member.is_bot=1 AND member.observed_at<>'')
+						OR (conversation.members_synced_at='' AND member.observed_at<>'')
+					  )`,
+					conversationID, identityID, instanceID).Scan(&externalUserID, &displayName); err != nil || externalUserID == "" {
+					continue
+				}
+				seen[identityID] = true
+				userIDs = append(userIDs, externalUserID)
+				names = append(names, displayName)
+			}
+			if len(userIDs) > 0 {
+				rawIDs, _ := json.Marshal(userIDs)
+				rawNames, _ := json.Marshal(names)
+				target["mention_user_ids"] = string(rawIDs)
+				target["mention_names"] = string(rawNames)
+			}
+		}
+	}
+	if target["reply_message_id"] == "" && roundID == "" && strings.TrimSpace(fmt.Sprint(sourcePayload["kind"])) != "agent_outreach" {
+		var payloadJSON string
+		if err := s.db.QueryRowContext(ctx, `SELECT normalized_payload_json FROM channel_inbox_dedup WHERE conversation_id=? AND state='processed' ORDER BY received_at DESC LIMIT 1`, conversationID).Scan(&payloadJSON); err == nil {
+			payload := decodeJSON(payloadJSON, map[string]any{})
+			if messageID := strings.TrimSpace(fmt.Sprint(payload["external_message_id"])); messageID != "" && messageID != "<nil>" {
+				target["reply_message_id"] = messageID
+			}
 		}
 	}
 	return target, nil
+}
+
+func (s *Store) EnqueueTaskChannelOutreach(ctx context.Context, taskID, turnID, requestID, purpose, message string, identityIDs []string, at time.Time) (domain.ChannelDelivery, string, bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return domain.ChannelDelivery{}, "", false, err
+	}
+	defer tx.Rollback()
+	route, err := scanChannelTaskRoute(tx.QueryRowContext(ctx, `
+		SELECT id,instance_id,conversation_id,target_task_id,state,revision,pending_action_id,activated_at,exited_at,exit_reason
+		FROM channel_task_routes WHERE target_task_id=? AND state='active'`, taskID))
+	if err != nil {
+		return domain.ChannelDelivery{}, "", false, err
+	}
+	var endpointKind, conversationStatus, conversationName, instanceStatus, instanceName string
+	if err := tx.QueryRowContext(ctx, `
+		SELECT endpoint.kind,conversation.status,conversation.display_name,instance.status,instance.name
+		FROM channel_conversations conversation
+		JOIN channel_endpoints endpoint ON endpoint.id=conversation.endpoint_id
+		JOIN channel_instances instance ON instance.id=conversation.instance_id
+		WHERE conversation.id=? AND conversation.instance_id=?`, route.ConversationID, route.InstanceID).
+		Scan(&endpointKind, &conversationStatus, &conversationName, &instanceStatus, &instanceName); err != nil {
+		return domain.ChannelDelivery{}, "", false, err
+	}
+	if endpointKind != domain.ChannelEndpointGroupDigitalHuman || conversationStatus != "active" || (instanceStatus != "ready" && instanceStatus != "degraded") {
+		return domain.ChannelDelivery{}, "", false, errors.New("primary channel is not available for outreach")
+	}
+	recipients := make([]map[string]any, 0, len(identityIDs))
+	for _, identityID := range identityIDs {
+		var displayName, collaborationRole string
+		var isBot bool
+		if err := tx.QueryRowContext(ctx, `
+			SELECT identity.display_name,contact.collaboration_role,member.is_bot
+			FROM channel_task_contacts contact
+			JOIN channel_conversation_members member
+			  ON member.conversation_id=contact.conversation_id
+			 AND member.identity_link_id=contact.identity_link_id
+			JOIN channel_conversations conversation ON conversation.id=member.conversation_id
+			JOIN channel_identity_links identity ON identity.id=member.identity_link_id
+			WHERE contact.task_id=? AND contact.conversation_id=? AND contact.identity_link_id=?
+			  AND identity.instance_id=? AND identity.role='participant' AND identity.status='active'
+			  AND (
+					member.provider_active=1
+					OR (member.is_bot=1 AND member.observed_at<>'')
+					OR (conversation.members_synced_at='' AND member.observed_at<>'')
+			  )`,
+			taskID, route.ConversationID, identityID, route.InstanceID).
+			Scan(&displayName, &collaborationRole, &isBot); err != nil {
+			return domain.ChannelDelivery{}, "", false, errors.New("channel contact is no longer available")
+		}
+		recipients = append(recipients, map[string]any{
+			"identity_link_id": identityID, "display_name": displayName,
+			"collaboration_role": collaborationRole, "is_bot": isBot,
+		})
+	}
+	sourceKey := "agent-channel-outreach:" + taskID + ":" + turnID + ":" + requestID
+	conversationItemID := stableStoreID("conversation_channel_outreach", taskID, turnID, requestID)
+	payload := map[string]any{
+		"kind": "agent_outreach", "purpose": purpose, "task_id": taskID, "text": message,
+		"mention_identity_link_ids": identityIDs,
+	}
+	sourceID := domain.NewID("channel_source_event")
+	result, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO channel_source_events(id,source_key,source_revision,task_id,round_id,turn_id,conversation_item_id,event_class,event_type,semantic_payload_json,occurred_at) VALUES(?,?,1,?,'',?,?, 'message','agent_outreach',?,?)`,
+		sourceID, sourceKey, taskID, turnID, conversationItemID, encodeJSON(payload), timeString(at))
+	if err != nil {
+		return domain.ChannelDelivery{}, "", false, err
+	}
+	idempotencyKey := "channel-outreach:" + sourceKey
+	if inserted, _ := result.RowsAffected(); inserted == 0 {
+		item, lookupErr := scanChannelDelivery(tx.QueryRowContext(ctx, `SELECT `+channelDeliveryColumns+` FROM channel_delivery_outbox WHERE idempotency_key=?`, idempotencyKey))
+		if lookupErr != nil {
+			return domain.ChannelDelivery{}, "", false, lookupErr
+		}
+		return item, conversationItemID, false, tx.Commit()
+	}
+	var sourceSequence, streamSequence int64
+	if err := tx.QueryRowContext(ctx, `SELECT sequence FROM channel_source_events WHERE id=?`, sourceID).Scan(&sourceSequence); err != nil {
+		return domain.ChannelDelivery{}, "", false, err
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(stream_sequence),0)+1 FROM channel_delivery_outbox WHERE conversation_id=?`, route.ConversationID).Scan(&streamSequence); err != nil {
+		return domain.ChannelDelivery{}, "", false, err
+	}
+	var subscriptionID string
+	if err := tx.QueryRowContext(ctx, `SELECT id FROM channel_subscriptions WHERE route_id=? AND kind='task_route' AND state='active'`, route.ID).Scan(&subscriptionID); err != nil {
+		return domain.ChannelDelivery{}, "", false, err
+	}
+	deliveryID := domain.NewID("channel_delivery")
+	if _, err := tx.ExecContext(ctx, `INSERT INTO channel_delivery_outbox(id,instance_id,conversation_id,subscription_id,source_event_sequence,stream_sequence,replay_generation,replay_of_id,idempotency_key,coalesce_key,payload_version,semantic_payload_json,state,attempts,first_attempt_at,available_at,lease_id,lease_until,provider_message_id,last_error_code,outcome_certainty,created_at,updated_at,delivered_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		deliveryID, route.InstanceID, route.ConversationID, subscriptionID, sourceSequence, streamSequence, 0, nil,
+		idempotencyKey, "", 1, encodeJSON(payload), "pending", 0, "", timeString(at), "", "", "", "", "", timeString(at), timeString(at), ""); err != nil {
+		return domain.ChannelDelivery{}, "", false, err
+	}
+	var roundID string
+	if err := tx.QueryRowContext(ctx, `SELECT round_id FROM turns WHERE id=? AND task_id=?`, turnID, taskID).Scan(&roundID); err != nil {
+		return domain.ChannelDelivery{}, "", false, err
+	}
+	card := normalizeConversationItem(domain.ConversationItem{
+		ID: conversationItemID, TaskID: taskID, RoundID: roundID, TurnID: turnID,
+		AgentID: "aha", StreamAgentID: "main", FromAgentID: "aha", ToAgentID: "main",
+		RouteKind: "channel_outreach", Category: "update", Kind: "agent_channel_outreach",
+		Summary: fmt.Sprintf("AHA 已向 %d 位联调人主动路由阻塞协调消息", len(recipients)),
+		Payload: map[string]any{
+			"purpose": purpose, "message": message, "delivery_id": deliveryID, "delivery_state": "pending",
+			"channel": map[string]any{
+				"conversation_id": route.ConversationID, "display_name": conversationName,
+				"instance_name": instanceName,
+			},
+			"recipients": recipients,
+		},
+		CreatedAt: at,
+	})
+	if _, err := insertConversationItem(ctx, tx, card); err != nil {
+		return domain.ChannelDelivery{}, "", false, err
+	}
+	item, err := scanChannelDelivery(tx.QueryRowContext(ctx, `SELECT `+channelDeliveryColumns+` FROM channel_delivery_outbox WHERE id=?`, deliveryID))
+	if err != nil {
+		return domain.ChannelDelivery{}, "", false, err
+	}
+	return item, conversationItemID, true, tx.Commit()
 }
 
 func isNoRows(err error) bool { return errors.Is(err, sql.ErrNoRows) }

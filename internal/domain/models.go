@@ -35,6 +35,8 @@ type AgentAPISettings struct {
 const (
 	DefaultBackendIdleTimeoutSeconds = 10 * 60
 	DefaultBackendTurnTimeoutSeconds = 10 * 60 * 60
+	DefaultTaskStreamIdleTimeoutMS   = 120000
+	DefaultTaskStreamMaxRetries      = 2
 )
 
 type BackendSettings struct {
@@ -262,19 +264,21 @@ type EnvGroup struct {
 }
 
 type RuntimeConfigSnapshot struct {
-	ID               string    `json:"id"`
-	WorkspaceID      string    `json:"workspace_id"`
-	Backend          string    `json:"backend"`
-	BackendVersion   string    `json:"backend_version,omitempty"`
-	ModelID          string    `json:"model_id"`
-	WireModel        string    `json:"wire_model"`
-	EnvGroupID       string    `json:"env_group_id"`
-	EnvGroupRevision int       `json:"env_group_revision"`
-	CodexAccountID   string    `json:"codex_account_id,omitempty"`
-	ProxyEnabled     bool      `json:"proxy_enabled"`
-	ReasoningEffort  string    `json:"reasoning_effort"`
-	PermissionsJSON  string    `json:"-"`
-	CreatedAt        time.Time `json:"created_at"`
+	ID                  string    `json:"id"`
+	WorkspaceID         string    `json:"workspace_id"`
+	Backend             string    `json:"backend"`
+	BackendVersion      string    `json:"backend_version,omitempty"`
+	ModelID             string    `json:"model_id"`
+	WireModel           string    `json:"wire_model"`
+	EnvGroupID          string    `json:"env_group_id"`
+	EnvGroupRevision    int       `json:"env_group_revision"`
+	CodexAccountID      string    `json:"codex_account_id,omitempty"`
+	ProxyEnabled        bool      `json:"proxy_enabled"`
+	ReasoningEffort     string    `json:"reasoning_effort"`
+	StreamIdleTimeoutMS int       `json:"stream_idle_timeout_ms"`
+	StreamMaxRetries    int       `json:"stream_max_retries"`
+	PermissionsJSON     string    `json:"-"`
+	CreatedAt           time.Time `json:"created_at"`
 }
 
 type Task struct {
@@ -330,6 +334,7 @@ type Turn struct {
 	PromptChars              int            `json:"prompt_chars,omitempty"`
 	PromptSnapshot           string         `json:"-"`
 	InboxBatchID             string         `json:"inbox_batch_id,omitempty"`
+	ChannelReplyDecision     string         `json:"channel_reply_decision,omitempty"`
 	Usage                    map[string]any `json:"usage,omitempty"`
 	QueuedAt                 time.Time      `json:"queued_at"`
 	QueuedAtMS               int64          `json:"queued_at_ms"`

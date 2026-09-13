@@ -33,23 +33,137 @@ func TestRecoveryContextNeedsUsesSessionAndPreviousTurnState(t *testing.T) {
 	t.Parallel()
 	current := domain.Turn{ID: "current", AgentID: "main", Sequence: 3, Attempt: 1, Generation: 1}
 	succeeded := []domain.Turn{{ID: "previous", AgentID: "main", Sequence: 2, Status: domain.TurnSucceeded, Attempt: 1, Generation: 1}}
-	if recent, diagnostics := recoveryContextNeeds(current, succeeded, true, ""); recent || diagnostics {
-		t.Fatalf("healthy reused session requested recovery resources: recent=%t diagnostics=%t", recent, diagnostics)
+	if recent, recovery, diagnostics := recoveryContextNeeds(current, succeeded, true, ""); recent || recovery || diagnostics {
+		t.Fatalf("healthy reused session requested recovery resources: recent=%t recovery=%t diagnostics=%t", recent, recovery, diagnostics)
 	}
 	succeeded[0].Generation = 9
 	current.Generation = 10
-	if recent, diagnostics := recoveryContextNeeds(current, succeeded, true, ""); recent || diagnostics {
-		t.Fatalf("normal session generations requested recovery resources: recent=%t diagnostics=%t", recent, diagnostics)
+	if recent, recovery, diagnostics := recoveryContextNeeds(current, succeeded, true, ""); recent || recovery || diagnostics {
+		t.Fatalf("normal session generations requested recovery resources: recent=%t recovery=%t diagnostics=%t", recent, recovery, diagnostics)
 	}
-	if recent, diagnostics := recoveryContextNeeds(current, succeeded, false, ""); !recent || diagnostics {
-		t.Fatalf("cold session recovery=%t diagnostics=%t", recent, diagnostics)
+	if recent, recovery, diagnostics := recoveryContextNeeds(current, succeeded, false, ""); !recent || recovery || diagnostics {
+		t.Fatalf("cold session recent=%t recovery=%t diagnostics=%t", recent, recovery, diagnostics)
 	}
 	failed := []domain.Turn{{ID: "previous", AgentID: "main", Sequence: 2, Status: domain.TurnFailed, Error: "boom", Attempt: 1, Generation: 1}}
-	if recent, diagnostics := recoveryContextNeeds(current, failed, true, ""); !recent || !diagnostics {
-		t.Fatalf("failed turn recovery=%t diagnostics=%t", recent, diagnostics)
+	if recent, recovery, diagnostics := recoveryContextNeeds(current, failed, true, ""); !recent || recovery || !diagnostics {
+		t.Fatalf("failed turn recent=%t recovery=%t diagnostics=%t", recent, recovery, diagnostics)
 	}
-	if recent, diagnostics := recoveryContextNeeds(current, succeeded, true, "compacted"); !recent || diagnostics {
-		t.Fatalf("handoff recovery=%t diagnostics=%t", recent, diagnostics)
+	if recent, recovery, diagnostics := recoveryContextNeeds(current, succeeded, true, "compacted"); !recent || recovery || diagnostics {
+		t.Fatalf("handoff recent=%t recovery=%t diagnostics=%t", recent, recovery, diagnostics)
+	}
+	current.RoundID = "round-resume"
+	current.InputMessageID = "message-resume"
+	interrupted := []domain.Turn{{
+		ID: "previous", AgentID: "main", Sequence: 2, Status: domain.TurnInterrupted,
+		RoundID: current.RoundID, InputMessageID: current.InputMessageID, Attempt: 1, Generation: 1,
+	}}
+	if recent, recovery, diagnostics := recoveryContextNeeds(current, interrupted, true, ""); !recent || !recovery || !diagnostics {
+		t.Fatalf("interrupted same-Inbox recent=%t recovery=%t diagnostics=%t", recent, recovery, diagnostics)
+	}
+	interrupted[0].RoundID = "round-old"
+	if recent, recovery, diagnostics := recoveryContextNeeds(current, interrupted, true, ""); !recent || recovery || !diagnostics {
+		t.Fatalf("interrupted prior Round recent=%t recovery=%t diagnostics=%t", recent, recovery, diagnostics)
+	}
+	interrupted[0].RoundID = current.RoundID
+	interrupted[0].InputMessageID = "message-old"
+	if recent, recovery, diagnostics := recoveryContextNeeds(current, interrupted, true, ""); !recent || recovery || !diagnostics {
+		t.Fatalf("interrupted prior input recent=%t recovery=%t diagnostics=%t", recent, recovery, diagnostics)
+	}
+}
+
+func TestRecoveredTurnReceivesInlineDurableHandoff(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	secretStore, err := secrets.Open(filepath.Join(t.TempDir(), "secrets.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	project := domain.Project{ID: "project-recovery-prompt", Name: "Recovery", CreatedAt: now, UpdatedAt: now}
+	workspace := domain.Workspace{
+		ID: "workspace-recovery-prompt", ProjectID: project.ID, Name: "local", Locality: "local",
+		Transport: "native", RootPath: t.TempDir(), Health: "ready", CreatedAt: now, UpdatedAt: now,
+	}
+	env := domain.EnvGroup{
+		ID: "env-recovery-prompt", Name: "stub", ProviderID: "stub", Backend: "stub", Revision: 1,
+		Environment: map[string]string{}, SecretRefs: map[string]string{}, CreatedAt: now, UpdatedAt: now,
+	}
+	model := domain.Model{
+		ID: "model-recovery-prompt", DisplayName: "Stub", ProviderID: "stub", Backend: "stub",
+		WireModel: "stub", DefaultEnvGroupID: env.ID, CreatedAt: now, UpdatedAt: now,
+	}
+	for _, operation := range []func() error{
+		func() error { return database.CreateProject(ctx, project) },
+		func() error { return database.CreateWorkspace(ctx, workspace) },
+		func() error { return database.UpsertEnvGroup(ctx, env) },
+		func() error { return database.UpsertModel(ctx, model) },
+	} {
+		if err := operation(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	beforeRestart := NewService(database, secretStore, &stubExecutor{})
+	beforeRestart.closing = true
+	task, err := beforeRestart.CreateTask(ctx, CreateTaskInput{
+		ProjectID: project.ID, WorkspaceID: workspace.ID, Title: "Recover prompt",
+		Request: "finish the interrupted work", ModelID: model.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	interrupted, err := beforeRestart.SubmitMessage(ctx, task.ID, task.OriginalRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range []domain.ConversationItem{
+		{
+			ID: "recovery-progress", TaskID: task.ID, RoundID: interrupted.RoundID, TurnID: interrupted.ID,
+			AgentID: "main", StreamAgentID: "main", FromAgentID: "main", ToAgentID: "owner",
+			RouteKind: "agent_progress", Category: "update", Kind: "agent_message_update",
+			Summary: "patched the prompt renderer", CreatedAt: now.Add(time.Second),
+		},
+		{
+			ID: "recovery-tool", TaskID: task.ID, RoundID: interrupted.RoundID, TurnID: interrupted.ID,
+			AgentID: "main", StreamAgentID: "main", FromAgentID: "main", ToAgentID: "owner",
+			Category: "tool", Kind: "agent_command_finished", Summary: "go test ./internal/prompt",
+			Payload:   map[string]any{"status": "completed", "exit_code": 0, "output_tail": "ok"},
+			CreatedAt: now.Add(2 * time.Second),
+		},
+	} {
+		if _, err := database.AddConversationItem(ctx, item); err != nil {
+			t.Fatal(err)
+		}
+	}
+	recovered, err := database.RecoverInterrupted(ctx, now.Add(3*time.Second))
+	if err != nil || recovered.Turns != 1 || recovered.RequeuedInboxItems != 1 {
+		t.Fatalf("recover result=%#v err=%v", recovered, err)
+	}
+	executor := &stubExecutor{}
+	afterRestart := NewService(database, secretStore, executor)
+	if err := afterRestart.ResumePending(ctx); err != nil {
+		t.Fatal(err)
+	}
+	waitForTask(t, database, task.ID, domain.TaskWaitingUser)
+	prompts, _ := executor.requestHistory()
+	if len(prompts) != 1 {
+		t.Fatalf("recovered prompts=%d", len(prompts))
+	}
+	for _, expected := range []string{
+		"### Recovery handoff", interrupted.ID, "status `interrupted`",
+		"AHA service restarted during this turn", "patched the prompt renderer",
+		"`completed` - go test ./internal/prompt", "Do not repeat completed commands or external side effects",
+	} {
+		if !strings.Contains(prompts[0], expected) {
+			t.Fatalf("recovered prompt missing %q: %s", expected, prompts[0])
+		}
+	}
+	if strings.Contains(prompts[0], "recovery-handoff.md") {
+		t.Fatalf("recovered prompt exposed recovery handoff as a file: %s", prompts[0])
 	}
 }
 
@@ -86,6 +200,8 @@ func (s *multiAgentExecutor) Execute(_ context.Context, request ExecutionRequest
 	emit(ExecutionEvent{Type: "agent_command_started", Data: map[string]any{"command": "verify " + request.Turn.AgentID}})
 	emit(ExecutionEvent{Type: "agent_command_finished", Data: map[string]any{"command": "verify " + request.Turn.AgentID, "status": "completed"}})
 	emit(ExecutionEvent{Type: "agent_progress", Data: map[string]any{"message": "working " + request.Turn.AgentID}})
+	emit(ExecutionEvent{Type: "agent_message", Data: map[string]any{"text": "commentary one " + request.Turn.AgentID, "intermediate": true}})
+	emit(ExecutionEvent{Type: "agent_message", Data: map[string]any{"text": "commentary two " + request.Turn.AgentID, "intermediate": true}})
 	switch {
 	case request.Turn.AgentID == "main" && request.Turn.Generation == 0:
 		if s.service != nil {
@@ -547,7 +663,7 @@ func TestAgentSessionCompactAndReset(t *testing.T) {
 	}
 
 	prompts, providerInputs := executor.requestHistory()
-	if len(prompts) < 3 || !strings.Contains(prompts[1], "AHA Backend Session Handoff") || providerInputs[1] != "" {
+	if len(prompts) < 3 || !strings.Contains(prompts[1], "## Compact Handoff") || !strings.Contains(prompts[1], "previous Backend Session for main") || providerInputs[1] != "" {
 		t.Fatalf("compact did not start a fresh session with handoff: prompts=%d inputs=%#v", len(prompts), providerInputs)
 	}
 	if strings.Contains(prompts[2], "The previous Backend Session was compacted by AHA") || providerInputs[2] != "" {
@@ -737,7 +853,7 @@ func TestMultiAgentRoundCreatesIntegrationTurn(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		finals, progress, backendStreams := 0, 0, 0
+		finals, progress, commentary, backendStreams := 0, 0, 0, 0
 		for _, item := range stream.Items {
 			if item.TurnID != turn.ID {
 				continue
@@ -748,12 +864,15 @@ func TestMultiAgentRoundCreatesIntegrationTurn(t *testing.T) {
 			if item.Kind == "agent_progress" {
 				progress++
 			}
+			if item.Kind == "agent_message_update" && item.RouteKind == "agent_progress" {
+				commentary++
+			}
 			if item.RouteKind == "backend_stream" || item.Kind == "agent_message_update" && item.RouteKind == "" {
 				backendStreams++
 			}
 		}
-		if finals != 1 || progress != 1 || backendStreams != 0 {
-			t.Fatalf("turn %s conversation was not finalized exactly once: finals=%d progress=%d streams=%d items=%#v", turn.ID, finals, progress, backendStreams, stream.Items)
+		if finals != 1 || progress != 1 || commentary != 2 || backendStreams != 0 {
+			t.Fatalf("turn %s conversation was not finalized exactly once: finals=%d progress=%d commentary=%d streams=%d items=%#v", turn.ID, finals, progress, commentary, backendStreams, stream.Items)
 		}
 	}
 	agents, err := database.ListTaskAgents(ctx, task.ID)

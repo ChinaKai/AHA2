@@ -451,6 +451,8 @@ export interface TaskAgent {
   wire_model?: string;
   codex_account_id?: string;
   reasoning_effort?: string;
+  stream_idle_timeout_ms?: number;
+  stream_max_retries?: number;
   filesystem?: string;
   approval?: string;
   proxy_enabled: boolean;
@@ -763,6 +765,50 @@ export interface ChannelEndpoint {
   config?: Record<string, unknown>;
   created_at: string;
   updated_at: string;
+}
+
+export interface ChannelTaskRoute {
+  id: string;
+  instance_id: string;
+  conversation_id: string;
+  target_task_id: string;
+  state: string;
+  revision: number;
+  activated_at?: string;
+}
+
+export interface ChannelDestination {
+  conversation_id: string;
+  instance_id: string;
+  instance_name: string;
+  provider_key: string;
+  endpoint_kind: "assistant_dm" | "group_digital_human";
+  display_name: string;
+  status: string;
+  route_id?: string;
+  route_revision?: number;
+  target_task_id?: string;
+  target_task_code?: string;
+  target_task_name?: string;
+  updated_at: string;
+}
+
+export interface ChannelContact {
+  identity_link_id: string;
+  display_name: string;
+  role: "participant";
+  collaboration_role?: string;
+  is_bot: boolean;
+  last_seen_at: string;
+}
+
+export interface ChannelGroupMember {
+  identity_link_id: string;
+  display_name: string;
+  is_bot: boolean;
+  source: "provider" | "observed";
+  is_self?: boolean;
+  last_seen_at?: string;
 }
 
 export interface ChannelOnboardingSession {

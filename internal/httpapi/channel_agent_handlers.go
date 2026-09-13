@@ -77,6 +77,40 @@ func (s *Server) createAgentChannelHandoff(writer http.ResponseWriter, request *
 	writeJSON(writer, http.StatusCreated, map[string]any{"ok": true, "handoff": handoff})
 }
 
+func (s *Server) agentTaskChannelContacts(writer http.ResponseWriter, request *http.Request) {
+	if s.channels == nil {
+		writeError(writer, http.StatusForbidden, "channel_outreach_unavailable")
+		return
+	}
+	claims, _ := agentClaimsFromContext(request.Context())
+	destination, contacts, err := s.channels.AgentTaskChannelContacts(request.Context(), claims)
+	if err != nil {
+		writeAgentChannelError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "channel": destination, "contacts": contacts})
+}
+
+func (s *Server) sendAgentTaskChannelMessage(writer http.ResponseWriter, request *http.Request) {
+	if s.channels == nil {
+		writeError(writer, http.StatusForbidden, "channel_outreach_unavailable")
+		return
+	}
+	var payload channel.AgentOutreachInput
+	if err := decodeJSON(request, &payload); err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_json")
+		return
+	}
+	claims, _ := agentClaimsFromContext(request.Context())
+	delivery, err := s.channels.SendAgentTaskChannelMessage(request.Context(), claims, payload)
+	if err != nil {
+		writeAgentChannelError(writer, err)
+		return
+	}
+	s.audit(request, "agent.channel.outreach", "task", claims.TaskID, map[string]any{"delivery_id": delivery.ID, "mentions": len(payload.MentionIdentityLinkIDs)})
+	writeJSON(writer, http.StatusCreated, map[string]any{"ok": true, "delivery": delivery})
+}
+
 func writeAgentChannelError(writer http.ResponseWriter, err error) {
 	if errors.Is(err, app.ErrAgentCallForbidden) || errors.Is(err, app.ErrAgentTurnInactive) {
 		writeError(writer, http.StatusForbidden, "channel_operation_forbidden")

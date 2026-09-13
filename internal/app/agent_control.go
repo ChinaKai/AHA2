@@ -87,6 +87,29 @@ func (s *Service) AgentKnowledgePublishAllowed(ctx context.Context, call AgentCa
 	return true
 }
 
+func (s *Service) SetAgentChannelReplyDecision(ctx context.Context, claims agentapi.Claims, decision string) error {
+	if decision != "continue" && decision != "end" {
+		return fmt.Errorf("channel reply decision must be continue or end")
+	}
+	call, err := s.AgentCallContext(ctx, claims, true)
+	if err != nil {
+		return err
+	}
+	channelContext, err := s.store.ChannelContextForInboxBatch(ctx, call.Turn.InboxBatchID)
+	if err != nil {
+		return ErrAgentCallForbidden
+	}
+	if strings.TrimSpace(fmt.Sprint(channelContext["endpoint"])) != domain.ChannelEndpointGroupDigitalHuman {
+		return ErrAgentCallForbidden
+	}
+	actor, _ := channelContext["actor"].(map[string]any)
+	isBot, _ := actor["is_bot"].(bool)
+	if !isBot {
+		return ErrAgentCallForbidden
+	}
+	return s.store.SetTurnChannelReplyDecision(ctx, claims.TurnID, claims.TaskID, claims.AgentID, decision)
+}
+
 func (s *Service) UpdateAgentMemory(ctx context.Context, claims agentapi.Claims, patch MemoryPatch) (domain.TaskMemory, error) {
 	call, err := s.AgentCallContext(ctx, claims, true)
 	if err != nil {
@@ -159,6 +182,12 @@ func (s *Service) AddAgentProgress(ctx context.Context, claims agentapi.Claims, 
 		s.emitTurn(ctx, call.Turn, "agent_progress", map[string]any{"message": message})
 	}
 	return err
+}
+
+func (s *Service) PublishAgentChannelOutreach(ctx context.Context, taskID, turnID, conversationItemID string, recipientCount int) {
+	s.emit(ctx, taskID, "conversation", conversationItemID, "agent_channel_outreach", map[string]any{
+		"turn_id": turnID, "recipient_count": recipientCount,
+	})
 }
 
 func (s *Service) SubmitAgentKnowledge(ctx context.Context, claims agentapi.Claims, candidates []KnowledgeCandidate) ([]domain.KnowledgeEntry, error) {
@@ -464,7 +493,9 @@ func (s *Service) CreateAgentTask(ctx context.Context, claims agentapi.Claims, i
 		Isolation: "inplace", Backend: backend, ModelSource: modelSource,
 		ModelID: modelID, WireModel: wireModel,
 		CodexAccountID: codexAccountID, ReasoningEffort: reasoningEffort,
-		Filesystem: filesystem, Approval: approval, ProxyEnabled: snapshot.ProxyEnabled,
+		StreamIdleTimeoutMS: intPointer(snapshot.StreamIdleTimeoutMS),
+		StreamMaxRetries:    intPointer(snapshot.StreamMaxRetries),
+		Filesystem:          filesystem, Approval: approval, ProxyEnabled: snapshot.ProxyEnabled,
 		CollaborationMode: "single", MaxAgents: 1, KnowledgePolicy: call.Task.KnowledgePolicy,
 	})
 	if err != nil {
@@ -478,6 +509,10 @@ func (s *Service) CreateAgentTask(ctx context.Context, claims agentapi.Claims, i
 	}
 	turn, err := s.SubmitMessage(ctx, item.ID, item.OriginalRequest)
 	return item, turn, err
+}
+
+func intPointer(value int) *int {
+	return &value
 }
 
 func (s *Service) AgentProjectTask(ctx context.Context, claims agentapi.Claims, taskID string) (domain.Task, []domain.Turn, error) {

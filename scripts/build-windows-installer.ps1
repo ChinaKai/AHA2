@@ -14,6 +14,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+$global:LASTEXITCODE = 0
 
 $repo = [IO.Path]::GetFullPath($RepoPath)
 $iss = Join-Path $repo "installer\windows\AHA2.iss"
@@ -171,11 +172,20 @@ if ([string]::IsNullOrWhiteSpace($ISCCPath)) {
     if ($command) {
         $ISCCPath = $command.Path
     } else {
-        $candidates = @(
-            (Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 6\ISCC.exe"),
-            (Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"),
-            (Join-Path $env:ProgramFiles "Inno Setup 6\ISCC.exe")
-        )
+        $localAppData = $env:LOCALAPPDATA
+        if ([string]::IsNullOrWhiteSpace($localAppData)) {
+            $localAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
+        }
+        $candidates = @()
+        if (-not [string]::IsNullOrWhiteSpace($localAppData)) {
+            $candidates += Join-Path $localAppData "Programs\Inno Setup 6\ISCC.exe"
+        }
+        if (-not [string]::IsNullOrWhiteSpace(${env:ProgramFiles(x86)})) {
+            $candidates += Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"
+        }
+        if (-not [string]::IsNullOrWhiteSpace($env:ProgramFiles)) {
+            $candidates += Join-Path $env:ProgramFiles "Inno Setup 6\ISCC.exe"
+        }
         $ISCCPath = $candidates | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) } | Select-Object -First 1
     }
 }
@@ -197,18 +207,43 @@ if ($feishuPluginPath) {
 if ($PerUser) {
 	$compilerArgs += "/DPerUserInstall=1"
 }
-& $ISCCPath @compilerArgs $iss
-if ($LASTEXITCODE -ne 0) {
-    throw "Inno Setup compilation failed with exit code $LASTEXITCODE."
-}
-
 $setupName = if ($PerUser) { "AHA2-Setup-User-x64.exe" } else { "AHA2-Setup-x64.exe" }
 $setup = Join-Path $outputPath $setupName
-if (-not (Test-Path -LiteralPath $setup -PathType Leaf)) {
+$hashFile = "$setup.sha256"
+Remove-Item -LiteralPath $setup,$hashFile -Force -ErrorAction SilentlyContinue
+function ConvertTo-ProcessArgument([string]$Value) {
+    if ($Value.Contains('"')) {
+        throw "Inno Setup argument contains an unsupported quote."
+    }
+    if ($Value -match '\s') {
+        return '"' + $Value + '"'
+    }
+    return $Value
+}
+$compilerArgumentLine = (@($compilerArgs) + @($iss) | ForEach-Object {
+    ConvertTo-ProcessArgument ([string]$_)
+}) -join " "
+$compilerProcess = Start-Process -FilePath $ISCCPath -ArgumentList $compilerArgumentLine -NoNewWindow -Wait -PassThru
+if ($compilerProcess.ExitCode -ne 0) {
+    throw "Inno Setup compilation failed with exit code $($compilerProcess.ExitCode)."
+}
+
+$deadline = [DateTime]::UtcNow.AddSeconds(5)
+$previousLength = -1L
+do {
+    if (Test-Path -LiteralPath $setup -PathType Leaf) {
+        $length = (Get-Item -LiteralPath $setup).Length
+        if ($length -gt 0 -and $length -eq $previousLength) {
+            break
+        }
+        $previousLength = $length
+    }
+    Start-Sleep -Milliseconds 200
+} while ([DateTime]::UtcNow -lt $deadline)
+if (-not (Test-Path -LiteralPath $setup -PathType Leaf) -or (Get-Item -LiteralPath $setup).Length -le 0) {
     throw "Expected installer was not produced: $setup"
 }
 $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $setup).Hash.ToLowerInvariant()
-$hashFile = "$setup.sha256"
 [IO.File]::WriteAllText($hashFile, "$hash  $setupName`n", [Text.UTF8Encoding]::new($false))
 Write-Output "Installer: $setup"
 Write-Output "SHA256: $hashFile"

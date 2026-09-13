@@ -4,7 +4,7 @@ param(
     [Parameter(Mandatory = $true)][string]$DataDir,
     [string]$WebVersion = "",
     [string]$RepoPath = "",
-    [string]$InstallDir = (Join-Path $env:LOCALAPPDATA "Programs\AHA2"),
+    [string]$InstallDir = "",
     [string]$Distro = "",
     [string]$ProxyURL = "",
     [string]$Listen = "127.0.0.1:8766",
@@ -29,6 +29,20 @@ if ($MinimumFreeGB -lt 1) { throw "MinimumFreeGB must be at least 1." }
 $systemRoot = if ([string]::IsNullOrWhiteSpace($env:SystemRoot)) { "C:\Windows" } else { $env:SystemRoot }
 $powershellExecutable = Join-Path $systemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
 $wslExecutable = Join-Path $systemRoot "System32\wsl.exe"
+$localAppData = $env:LOCALAPPDATA
+if ([string]::IsNullOrWhiteSpace($localAppData)) {
+    $localAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
+}
+if ([string]::IsNullOrWhiteSpace($localAppData)) {
+    throw "Could not resolve the current user's LocalApplicationData directory."
+}
+$tempRoot = if ([string]::IsNullOrWhiteSpace($env:TEMP)) { Join-Path $localAppData "Temp" } else { $env:TEMP }
+New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
+$env:TEMP = $tempRoot
+$env:TMP = $tempRoot
+if ([string]::IsNullOrWhiteSpace($InstallDir)) {
+    $InstallDir = Join-Path $localAppData "Programs\AHA2"
+}
 
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 if ([string]::IsNullOrWhiteSpace($RepoPath)) { $RepoPath = Split-Path -Parent $scriptRoot }
@@ -82,12 +96,9 @@ function Assert-WindowsPortableExecutable([string]$Path) {
 
 $resolvedDistro = ""
 $linuxRepo = ""
+$windowsNode = ""
 if (-not $DeployOnly) {
-    if (-not (Get-Command node.exe -ErrorAction SilentlyContinue)) { throw "node.exe was not found." }
     if (-not (Test-Path -LiteralPath $wslExecutable -PathType Leaf)) { throw "wsl.exe was not found." }
-    if (-not (Test-Path -LiteralPath (Join-Path $repo ".tools\go\bin\go") -PathType Leaf)) {
-        throw "Repository Linux Go toolchain was not found. Do not download another toolchain during deployment."
-    }
     $installedDistros = @(@(& $wslExecutable -l -q 2>$null) |
         ForEach-Object { ($_ -replace "`0", "").Trim() } |
         Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
@@ -104,10 +115,29 @@ if (-not $DeployOnly) {
     if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($linuxRepo)) {
         throw "Could not translate the repository path for WSL."
     }
-    $driveName = [IO.Path]::GetPathRoot($repo).TrimEnd('\').TrimEnd(':')
-    $freeGB = [Math]::Round((Get-PSDrive -Name $driveName -ErrorAction Stop).Free / 1GB, 2)
+    & $wslExecutable -d $resolvedDistro --cd $linuxRepo -- test -x "$linuxRepo/.tools/go/bin/go"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Repository Linux Go toolchain was not found. Do not download another toolchain during deployment."
+    }
+    $diskLine = @(& $wslExecutable -d $resolvedDistro --cd $linuxRepo -- df -Pk .) |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+        Select-Object -Last 1
+    $diskFields = @($diskLine -split '\s+' | Where-Object { $_ -ne "" })
+    if ($LASTEXITCODE -ne 0 -or $diskFields.Count -lt 4) {
+        throw "Could not inspect free space for the WSL repository."
+    }
+    $freeGB = [Math]::Round(([double]$diskFields[3] * 1KB) / 1GB, 2)
     if ($freeGB -lt $MinimumFreeGB) {
         throw "Repository drive has $freeGB GB free; at least $MinimumFreeGB GB is required."
+    }
+    $nodeCommand = Get-Command node.exe -ErrorAction SilentlyContinue
+    if ($nodeCommand) {
+        $windowsNode = $nodeCommand.Source
+    } else {
+        & $wslExecutable -d $resolvedDistro --cd $linuxRepo -- node --version | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw "Neither Windows node.exe nor WSL node was found."
+        }
     }
 }
 
@@ -141,6 +171,7 @@ $summary = [ordered]@{
     WebVersion = $resolvedWebVersion
     Mode = if ($DeployOnly) { "deploy-only" } elseif ($BuildOnly) { "build-only" } else { "build-and-deploy" }
     Distro = $resolvedDistro
+    NodeRuntime = if ($DeployOnly) { "" } elseif ($windowsNode) { $windowsNode } else { "WSL:$resolvedDistro" }
     InstallDir = [IO.Path]::GetFullPath($InstallDir)
     DataDir = [IO.Path]::GetFullPath($DataDir)
     Listen = $Listen
@@ -153,10 +184,18 @@ if ($ValidateOnly) {
 
 if (-not $DeployOnly) {
     Invoke-Step "Build Web assets" {
-        Invoke-Native "node.exe" @((Join-Path $repo "scripts\build-web.mjs"))
+        if ($windowsNode) {
+            Invoke-Native $windowsNode @((Join-Path $repo "scripts\build-web.mjs"))
+        } else {
+            Invoke-Native $wslExecutable @("-d", $resolvedDistro, "--cd", $linuxRepo, "--", "node", "scripts/build-web.mjs")
+        }
     }
     Invoke-Step "Test Web build" {
-        Invoke-Native "node.exe" @("--test", (Join-Path $repo "web\tests\build.test.mjs"))
+        if ($windowsNode) {
+            Invoke-Native $windowsNode @("--test", (Join-Path $repo "web\tests\build.test.mjs"))
+        } else {
+            Invoke-Native $wslExecutable @("-d", $resolvedDistro, "--cd", $linuxRepo, "--", "node", "--test", "web/tests/build.test.mjs")
+        }
     }
     Invoke-Step "Sync embedded Web assets" {
         $assetTarget = Assert-PathUnderRepository (Join-Path $repo "internal\webassets\dist")
@@ -216,27 +255,21 @@ if (Test-Path -LiteralPath $pluginOutput -PathType Leaf) {
 $serverVersion = ""
 $candidateExitCode = 0
 if ($serverOutput.StartsWith("\\", [StringComparison]::Ordinal)) {
-    if (-not (Test-Path -LiteralPath $wslExecutable -PathType Leaf)) {
-        throw "wsl.exe is required to validate a deployment candidate stored in WSL."
-    }
-    if ($serverOutput -notmatch '^\\\\wsl(?:\.localhost|\$)\\([^\\]+)\\(.+)$') {
-        throw "Unsupported WSL candidate path: $serverOutput"
-    }
-    $candidateDistro = $Matches[1]
-    $candidateLinuxPath = "/" + ($Matches[2] -replace '\\', '/')
     $versionProbeID = [Guid]::NewGuid().ToString("N")
-    $versionOutput = Join-Path $repo "dist\.candidate-version-$versionProbeID.txt"
-    $versionError = Join-Path $repo "dist\.candidate-version-$versionProbeID.err.txt"
+    $versionCandidate = Join-Path $tempRoot ("aha2-version-" + $versionProbeID + ".exe")
+    $versionOutput = Join-Path $tempRoot ("aha2-version-" + $versionProbeID + ".out.txt")
+    $versionError = Join-Path $tempRoot ("aha2-version-" + $versionProbeID + ".err.txt")
     try {
-        $versionProcess = Start-Process -FilePath $wslExecutable -ArgumentList @(
-            "-d", $candidateDistro, "--", $candidateLinuxPath, "version"
-        ) -RedirectStandardOutput $versionOutput -RedirectStandardError $versionError -Wait -PassThru -NoNewWindow
+        Copy-Item -LiteralPath $serverOutput -Destination $versionCandidate -Force
+        $versionProcess = Start-Process -FilePath $versionCandidate -ArgumentList @("version") `
+            -RedirectStandardOutput $versionOutput -RedirectStandardError $versionError `
+            -Wait -PassThru -NoNewWindow
         $candidateExitCode = $versionProcess.ExitCode
         if (Test-Path -LiteralPath $versionOutput -PathType Leaf) {
-            $serverVersion = (Get-Content -Raw -LiteralPath $versionOutput).Replace("`0", "").Trim()
+            $serverVersion = (Get-Content -Raw -LiteralPath $versionOutput).Trim()
         }
     } finally {
-        Remove-Item -LiteralPath $versionOutput,$versionError -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $versionCandidate,$versionOutput,$versionError -Force -ErrorAction SilentlyContinue
     }
 } else {
     $serverVersion = (& $serverOutput version | Out-String).Trim()
@@ -283,6 +316,9 @@ if (-not [string]::IsNullOrWhiteSpace($AgentAPIURL)) {
 if ($AllowInsecureAgentAPI) { $deployArguments += "-AllowInsecureAgentAPI" }
 if ($AllowCustomUserWritableInstallDir) { $deployArguments += "-AllowCustomUserWritableInstallDir" }
 if ($UpdateExistingInstallInPlace) { $deployArguments += "-UpdateExistingInstallInPlace" }
+if ((Test-Path -LiteralPath $pluginOutput -PathType Leaf) -and (Test-Path -LiteralPath $pluginManifestOutput -PathType Leaf)) {
+    $deployArguments += @("-InputFeishuPlugin", $pluginOutput, "-InputFeishuManifest", $pluginManifestOutput)
+}
 
 Invoke-Step "Validate per-user deployment" {
     Invoke-Native $powershellExecutable ($deployArguments + "-ValidateOnly")

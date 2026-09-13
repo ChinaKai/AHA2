@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"net/http"
 	"os"
 	"strings"
@@ -303,7 +304,8 @@ func registrationOptions(item command) *registration.Options {
 
 func registrationTenantScopes() []string {
 	return []string{
-		"im:message.p2p_msg:readonly", "im:message.group_at_msg:readonly", "im:message:send_as_bot",
+		"im:message.p2p_msg:readonly", "im:message.group_at_msg:readonly", "im:message.group_at_msg.include_bot:readonly", "im:message:send_as_bot",
+		"application:bot.basic_info:read",
 		"im:chat:readonly", "contact:user.base:readonly", "cardkit:card:write", "application:application:patch", "im:resource", "im:message:readonly",
 	}
 }
@@ -324,13 +326,16 @@ func emitSecret(message secretMessage) {
 
 func runChannel(ctx context.Context, runtime *runtimeClient, boot bootstrap) error {
 	client, wsClient := newFeishuClients(boot)
+	selfBotOpenID, selfBotName := feishuBotIdentity(ctx, client)
 	channel := larkchannel.NewChannel(client, wsClient)
-	channel.OnReady(func() { _ = runtime.health(context.Background(), "ready", "") })
-	channel.OnReconnecting(func() { _ = runtime.health(context.Background(), "degraded", "feishu_reconnecting") })
+	healthMetadata := map[string]string{"bot_open_id": selfBotOpenID, "bot_display_name": selfBotName}
+	channel.OnReady(func() { _ = runtime.health(context.Background(), "ready", "", healthMetadata) })
+	channel.OnReconnecting(func() { _ = runtime.health(context.Background(), "degraded", "feishu_reconnecting", healthMetadata) })
 	channel.OnMessage(func(eventCtx context.Context, message *channeltypes.NormalizedMessage) error {
 		chatName, senderName := feishuDisplayNames(eventCtx, client, message)
+		restoreInboundMentionTypes(message)
 		content, resources := normalizedInboundMedia(message)
-		return runtime.inbound(eventCtx, map[string]any{"schema_version": 1, "request_id": message.EventID, "instance_id": runtime.instanceID, "external_event_id": message.EventID, "event_type": "message", "occurred_at": time.UnixMilli(message.CreateTimeMs).UTC(), "chat_type": message.ChatType, "external_chat_id": message.ChatID, "external_sender_id": message.UserID, "external_message_id": message.MessageID, "content": content, "chat_display_name": chatName, "sender_display_name": senderName, "mentioned_bot": message.MentionedBot, "resources": resources})
+		return runtime.inbound(eventCtx, map[string]any{"schema_version": 1, "request_id": message.EventID, "instance_id": runtime.instanceID, "external_event_id": message.EventID, "event_type": "message", "occurred_at": time.UnixMilli(message.CreateTimeMs).UTC(), "chat_type": message.ChatType, "external_chat_id": message.ChatID, "external_sender_id": message.UserID, "external_message_id": message.MessageID, "content": content, "chat_display_name": chatName, "sender_display_name": senderName, "sender_is_bot": inboundSenderIsBot(message), "mentions": normalizedInboundMentions(message, selfBotOpenID), "mentioned_bot": message.MentionedBot, "resources": resources})
 	})
 	wsClient.EventHandler().OnP2BotMenuV6(func(eventCtx context.Context, event *larkapplication.P2BotMenuV6) error {
 		if event == nil || event.Event == nil || event.Event.Operator == nil || event.Event.Operator.OperatorId == nil || event.Event.Operator.OperatorId.OpenId == nil || event.Event.EventKey == nil || event.EventV2Base == nil || event.EventV2Base.Header == nil {
@@ -565,8 +570,16 @@ func newFeishuClients(boot bootstrap) (*lark.Client, *larkws.Client) {
 	return client, wsClient
 }
 
-func (c *runtimeClient) health(ctx context.Context, status, code string) error {
-	return c.request(ctx, http.MethodPut, "/api/channel-runtime/v1/instances/"+c.instanceID+"/health", map[string]any{"schema_version": 1, "status": status, "error_code": code}, &map[string]any{})
+func (c *runtimeClient) health(ctx context.Context, status, code string, metadata ...map[string]string) error {
+	payload := map[string]any{"schema_version": 1, "status": status, "error_code": code}
+	for _, values := range metadata {
+		for key, value := range values {
+			if key == "bot_open_id" || key == "bot_display_name" {
+				payload[key] = strings.TrimSpace(value)
+			}
+		}
+	}
+	return c.request(ctx, http.MethodPut, "/api/channel-runtime/v1/instances/"+c.instanceID+"/health", payload, &map[string]any{})
 }
 
 func (c *runtimeClient) inbound(ctx context.Context, payload map[string]any) error {
@@ -594,6 +607,13 @@ func (c *runtimeClient) commandLoop(ctx context.Context, client *lark.Client, bo
 				_ = registerApp(ctx, c, item)
 			case "verify_installation":
 				_ = c.complete(ctx, item, true, map[string]any{"status": "ready"}, "")
+			case "sync_chat_members":
+				result, err := syncChatMembersCommand(ctx, client, item)
+				if err != nil {
+					_ = c.complete(ctx, item, false, map[string]any{}, "chat_member_sync_failed")
+					continue
+				}
+				_ = c.complete(ctx, item, true, result, "")
 			case "configure_menu", "initialize_menu":
 				result, err := configureMenuCommand(ctx, client, boot.AppID, item)
 				if err != nil {
@@ -610,6 +630,72 @@ func (c *runtimeClient) commandLoop(ctx context.Context, client *lark.Client, bo
 		}
 		time.Sleep(time.Second)
 	}
+}
+
+func syncChatMembersCommand(ctx context.Context, client *lark.Client, item command) (map[string]any, error) {
+	chatID := stringValue(item.Payload, "external_chat_id")
+	if chatID == "" || stringValue(item.Payload, "conversation_id") == "" {
+		return nil, errors.New("invalid chat member sync command")
+	}
+	members := []map[string]any{}
+	pageToken := ""
+	for page := 0; page < 10; page++ {
+		builder := larkim.NewGetChatMembersReqBuilder().ChatId(chatID).MemberIdType("open_id").PageSize(100)
+		if pageToken != "" {
+			builder.PageToken(pageToken)
+		}
+		response, err := client.Im.V1.ChatMembers.Get(ctx, builder.Build())
+		if err != nil || !response.Success() || response.Data == nil {
+			if err != nil {
+				return nil, err
+			}
+			return nil, fmt.Errorf("feishu chat member sync rejected: %d", response.Code)
+		}
+		for _, member := range response.Data.Items {
+			if member == nil || member.MemberId == nil || strings.TrimSpace(*member.MemberId) == "" {
+				continue
+			}
+			name := ""
+			if member.Name != nil {
+				name = strings.TrimSpace(*member.Name)
+			}
+			members = append(members, map[string]any{
+				"external_user_id": strings.TrimSpace(*member.MemberId),
+				"display_name":     name,
+				// Feishu's chat-member list excludes bots even in open_id mode.
+				// Other bots are learned from message mention events instead.
+				"is_bot": false,
+			})
+			if len(members) >= 1000 {
+				return map[string]any{"members": members}, nil
+			}
+		}
+		if response.Data.HasMore == nil || !*response.Data.HasMore || response.Data.PageToken == nil || *response.Data.PageToken == "" {
+			break
+		}
+		pageToken = *response.Data.PageToken
+	}
+	return map[string]any{"members": members}, nil
+}
+
+func feishuBotIdentity(ctx context.Context, client *lark.Client) (string, string) {
+	lookupCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	response, err := client.Get(lookupCtx, "/open-apis/bot/v3/info", nil, larkcore.AccessTokenTypeTenant)
+	if err != nil || response == nil || response.StatusCode != http.StatusOK {
+		return "", ""
+	}
+	var payload struct {
+		Code int `json:"code"`
+		Bot  struct {
+			OpenID  string `json:"open_id"`
+			AppName string `json:"app_name"`
+		} `json:"bot"`
+	}
+	if json.Unmarshal(response.RawBody, &payload) != nil || payload.Code != 0 {
+		return "", ""
+	}
+	return strings.TrimSpace(payload.Bot.OpenID), strings.TrimSpace(payload.Bot.AppName)
 }
 
 func configureMenuCommand(ctx context.Context, client *lark.Client, appID string, item command) (map[string]any, error) {
@@ -761,6 +847,7 @@ func sendDelivery(ctx context.Context, client *lark.Client, item delivery) (stri
 		return "", "", errors.New("missing target chat")
 	}
 	msgType, content := renderDelivery(item.SemanticPayload)
+	msgType, content = applyDeliveryMentions(msgType, content, item.Target)
 	if updateID := item.Target["update_message_id"]; updateID != "" {
 		request := larkim.NewPatchMessageReqBuilder().MessageId(updateID).Body(larkim.NewPatchMessageReqBodyBuilder().Content(content).Build()).Build()
 		response, err := client.Im.V1.Message.Patch(ctx, request)
@@ -799,6 +886,44 @@ func sendDelivery(ctx context.Context, client *lark.Client, item delivery) (stri
 		return "", response.RequestId(), fmt.Errorf("feishu create rejected: %d", response.Code)
 	}
 	return *response.Data.MessageId, response.RequestId(), nil
+}
+
+func applyDeliveryMentions(msgType, content string, target map[string]string) (string, string) {
+	if msgType != "text" || target["mention_user_ids"] == "" {
+		return msgType, content
+	}
+	var userIDs, names []string
+	if json.Unmarshal([]byte(target["mention_user_ids"]), &userIDs) != nil || len(userIDs) == 0 {
+		return msgType, content
+	}
+	_ = json.Unmarshal([]byte(target["mention_names"]), &names)
+	var payload map[string]string
+	if json.Unmarshal([]byte(content), &payload) != nil {
+		return msgType, content
+	}
+	mentions := make([]string, 0, len(userIDs))
+	for index, userID := range userIDs {
+		name := ""
+		if index < len(names) {
+			name = names[index]
+		}
+		mentions = append(mentions, fmt.Sprintf(`<at user_id="%s">%s</at>`, html.EscapeString(userID), html.EscapeString(name)))
+	}
+	if target["mention_as_post"] == "true" {
+		post := map[string]any{
+			"zh_cn": map[string]any{
+				"content": [][]map[string]string{{{
+					"tag":  "md",
+					"text": strings.TrimSpace(strings.Join(mentions, " ") + " " + payload["text"]),
+				}}},
+			},
+		}
+		raw, _ := json.Marshal(post)
+		return "post", string(raw)
+	}
+	payload["text"] = strings.Join(mentions, " ") + " " + payload["text"]
+	raw, _ := json.Marshal(payload)
+	return msgType, string(raw)
 }
 
 func renderDelivery(payload map[string]any) (string, string) {

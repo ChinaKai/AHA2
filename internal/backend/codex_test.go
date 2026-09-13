@@ -29,6 +29,19 @@ func (runner *codexCommandRunner) Run(_ context.Context, command workspace.Comma
 	return workspace.Result{ExitCode: 0}, nil
 }
 
+type codexUnphasedMessageRunner struct{}
+
+func (codexUnphasedMessageRunner) Run(_ context.Context, _ workspace.Command, onLine workspace.LineHandler) (workspace.Result, error) {
+	onLine(`{"type":"thread.started","thread_id":"session-unphased"}`)
+	onLine(`{"type":"item.completed","item":{"type":"agent_message","text":"first update"}}`)
+	onLine(`{"type":"item.started","item":{"id":"tool-1","type":"command_execution","command":"verify","status":"in_progress"}}`)
+	onLine(`{"type":"item.completed","item":{"id":"tool-1","type":"command_execution","command":"verify","status":"completed","exit_code":0}}`)
+	onLine(`{"type":"item.completed","item":{"type":"agent_message","text":"second update"}}`)
+	onLine(`{"type":"item.completed","item":{"type":"agent_message","text":"done"}}`)
+	onLine(`{"type":"turn.completed","usage":{}}`)
+	return workspace.Result{ExitCode: 0}, nil
+}
+
 func TestCodexExecutionAlwaysOwnsTheBackendProcessTree(t *testing.T) {
 	t.Parallel()
 	runner := &codexCommandRunner{}
@@ -37,6 +50,32 @@ func TestCodexExecutionAlwaysOwnsTheBackendProcessTree(t *testing.T) {
 	}
 	if !runner.command.KillTree {
 		t.Fatal("Codex backend descendants would survive turn or service cancellation")
+	}
+}
+
+func TestCodexExecutionClassifiesUnphasedMessagesByStreamPosition(t *testing.T) {
+	t.Parallel()
+	messages := []Event{}
+	result, err := (Codex{}).Execute(
+		context.Background(),
+		Request{Runner: codexUnphasedMessageRunner{}, WorkDir: t.TempDir()},
+		func(event Event) {
+			if event.Type == "agent_message" {
+				messages = append(messages, event)
+			}
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Reply != "done" || len(messages) != 3 {
+		t.Fatalf("result=%#v messages=%#v", result, messages)
+	}
+	for index, message := range messages {
+		wantIntermediate := index < 2
+		if message.Data["intermediate"] != wantIntermediate || message.Data["final"] != !wantIntermediate {
+			t.Fatalf("message %d classification=%#v", index, message.Data)
+		}
 	}
 }
 
@@ -71,6 +110,45 @@ func TestCodexArgumentsResumeAndProvider(t *testing.T) {
 	} {
 		if !strings.Contains(joined, expected) {
 			t.Fatalf("arguments missing %q: %s", expected, joined)
+		}
+	}
+}
+
+func TestCodexArgumentsInjectConfiguredStreamRecovery(t *testing.T) {
+	t.Parallel()
+	request := Request{
+		WorkDir: "/workspace", Model: "gpt-test",
+		StreamIdleTimeoutMS: 120000, StreamMaxRetries: 2,
+		Environment: map[string]string{
+			"AHA_PROVIDER_ID": "internal", "OPENAI_BASE_URL": "https://example.test/v1",
+			"CODEX_WIRE_API": "responses", "CODEX_ENV_KEY": "OPENAI_API_KEY",
+		},
+	}
+	joined := strings.Join(codexArguments(request, ""), " ")
+	for _, expected := range []string{
+		"model_providers.internal.stream_idle_timeout_ms=120000",
+		"model_providers.internal.stream_max_retries=2",
+	} {
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("arguments missing %q: %s", expected, joined)
+		}
+	}
+	request.StreamIdleTimeoutMS = 0
+	request.StreamMaxRetries = 0
+	joined = strings.Join(codexArguments(request, ""), " ")
+	if strings.Contains(joined, "stream_idle_timeout_ms") || strings.Contains(joined, "stream_max_retries") {
+		t.Fatalf("zero stream settings must preserve Codex defaults: %s", joined)
+	}
+	request.StreamIdleTimeoutMS = 120000
+	request.StreamMaxRetries = 2
+	request.Environment = map[string]string{}
+	joined = strings.Join(codexArguments(request, ""), " ")
+	for _, expected := range []string{
+		"model_providers.openai.stream_idle_timeout_ms=120000",
+		"model_providers.openai.stream_max_retries=2",
+	} {
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("official provider arguments missing %q: %s", expected, joined)
 		}
 	}
 }

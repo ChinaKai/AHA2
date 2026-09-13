@@ -5,8 +5,8 @@ param(
   [string]$InputFeishuPlugin = "",
   [string]$InputFeishuManifest = "",
   [string]$RepoPath = (Split-Path -Parent $PSScriptRoot),
-  [string]$InstallDir = (Join-Path $env:LOCALAPPDATA "Programs\AHA2"),
-  [string]$DataDir = (Join-Path $env:LOCALAPPDATA "AHA2"),
+  [string]$InstallDir = "",
+  [string]$DataDir = "",
   [string]$Version = "dev",
   [string]$TaskName = "AHA2 User",
 	[string]$UpdateTaskName = "AHA2 User Update",
@@ -25,12 +25,45 @@ param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
+$systemRoot = if ([string]::IsNullOrWhiteSpace($env:SystemRoot)) { "C:\Windows" } else { $env:SystemRoot }
+$powershellExecutable = Join-Path $systemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+$taskkillExecutable = Join-Path $systemRoot "System32\taskkill.exe"
+foreach ($requiredSystemExecutable in @($powershellExecutable, $taskkillExecutable)) {
+  if (-not (Test-Path -LiteralPath $requiredSystemExecutable -PathType Leaf)) {
+    throw "Required Windows system executable was not found: $requiredSystemExecutable"
+  }
+}
+
+$localAppData = $env:LOCALAPPDATA
+if ([string]::IsNullOrWhiteSpace($localAppData)) {
+  $localAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
+}
+if ([string]::IsNullOrWhiteSpace($localAppData)) {
+  throw "Could not resolve the current user's LocalApplicationData directory."
+}
+if ([string]::IsNullOrWhiteSpace($InstallDir)) { $InstallDir = Join-Path $localAppData "Programs\AHA2" }
+if ([string]::IsNullOrWhiteSpace($DataDir)) { $DataDir = Join-Path $localAppData "AHA2" }
+
 $repo = (Resolve-Path -LiteralPath $RepoPath).ProviderPath
 $serverInput = (Resolve-Path -LiteralPath $InputExe).ProviderPath
 $trayInput = (Resolve-Path -LiteralPath $InputTrayExe).ProviderPath
+$pluginInput = ""
+$pluginManifestInput = ""
+if ([string]::IsNullOrWhiteSpace($InputFeishuPlugin) -ne [string]::IsNullOrWhiteSpace($InputFeishuManifest)) {
+  throw "Feishu plugin executable and manifest must be supplied together."
+}
+if (-not [string]::IsNullOrWhiteSpace($InputFeishuPlugin)) {
+  $pluginInput = (Resolve-Path -LiteralPath $InputFeishuPlugin).ProviderPath
+  $pluginManifestInput = (Resolve-Path -LiteralPath $InputFeishuManifest).ProviderPath
+  $pluginHash = (Get-FileHash -LiteralPath $pluginInput -Algorithm SHA256).Hash.ToLowerInvariant()
+  $pluginManifestData = Get-Content -Raw -Encoding UTF8 -LiteralPath $pluginManifestInput | ConvertFrom-Json
+  if ([string]$pluginManifestData.sha256 -ne $pluginHash) {
+    throw "Feishu plugin manifest SHA256 does not match the candidate executable."
+  }
+}
 $install = [IO.Path]::GetFullPath($InstallDir)
 $data = [IO.Path]::GetFullPath($DataDir)
-$localRoot = [IO.Path]::GetFullPath($env:LOCALAPPDATA).TrimEnd('\') + '\'
+$localRoot = [IO.Path]::GetFullPath($localAppData).TrimEnd('\') + '\'
 $isLocalInstall = $install.StartsWith($localRoot, [StringComparison]::OrdinalIgnoreCase)
 if (-not $isLocalInstall -and -not $AllowCustomUserWritableInstallDir) {
   throw "Per-user install directory must stay under LOCALAPPDATA unless -AllowCustomUserWritableInstallDir is explicitly supplied."
@@ -70,6 +103,9 @@ $installer = Join-Path $installerDir "AHA2-Setup-User-x64.exe"
 $server = Join-Path $install "aha2.exe"
 $tray = Join-Path $install "aha2-tray.exe"
 $plugin = Join-Path $data "plugins\channels\feishu\aha2-channel-feishu.exe"
+$pluginManifest = Join-Path $data "plugins\channels\feishu\plugin.json"
+$pluginExisted = Test-Path -LiteralPath $plugin -PathType Leaf
+$pluginManifestExisted = Test-Path -LiteralPath $pluginManifest -PathType Leaf
 $registerTask = Join-Path $install "Register-AHA2UserTask.ps1"
 if ($UpdateExistingInstallInPlace) {
   foreach ($required in @($server,$tray,$registerTask)) {
@@ -130,12 +166,11 @@ if (-not $DetachedWorker -and (Test-AHA2Ancestor)) {
   if ($AllowInsecureAgentAPI) { $workerArguments += "-AllowInsecureAgentAPI" }
   if ($AllowCustomUserWritableInstallDir) { $workerArguments += "-AllowCustomUserWritableInstallDir" }
   if ($UpdateExistingInstallInPlace) { $workerArguments += "-UpdateExistingInstallInPlace" }
-  if ($InputFeishuPlugin -and $InputFeishuManifest) {
-    $workerArguments += @("-InputFeishuPlugin", (Resolve-Path -LiteralPath $InputFeishuPlugin).Path, "-InputFeishuManifest", (Resolve-Path -LiteralPath $InputFeishuManifest).Path)
+  if ($pluginInput -and $pluginManifestInput) {
+    $workerArguments += @("-InputFeishuPlugin", $pluginInput, "-InputFeishuManifest", $pluginManifestInput)
   }
   $argumentLine = ($workerArguments | ForEach-Object { ConvertTo-CommandLineArgument ([string]$_) }) -join ' '
-  $powershell = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
-  $action = New-ScheduledTaskAction -Execute $powershell -Argument $argumentLine -WorkingDirectory $install
+  $action = New-ScheduledTaskAction -Execute $powershellExecutable -Argument $argumentLine -WorkingDirectory $install
   $principal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited
   $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 20) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
   Register-ScheduledTask -TaskName $UpdateTaskName -Action $action -Principal $principal -Settings $settings -Force | Out-Null
@@ -196,7 +231,7 @@ function Invoke-TaskKillNoThrow([int]$ProcessId) {
   $previousPreference = $ErrorActionPreference
   try {
     $ErrorActionPreference = "Continue"
-    $output = @(& taskkill.exe /PID $ProcessId /T /F 2>&1)
+    $output = @(& $taskkillExecutable /PID $ProcessId /T /F 2>&1)
     $exitCode = $LASTEXITCODE
   } finally {
     $ErrorActionPreference = $previousPreference
@@ -235,7 +270,7 @@ if (-not $UpdateExistingInstallInPlace) {
   if ($InputFeishuPlugin -and $InputFeishuManifest) {
     $buildArgs += @("-InputFeishuPlugin",$InputFeishuPlugin,"-InputFeishuManifest",$InputFeishuManifest)
   }
-  & powershell.exe @buildArgs
+  & $powershellExecutable @buildArgs
   if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $installer -PathType Leaf)) { throw "Per-user installer build failed." }
 }
 
@@ -249,18 +284,24 @@ if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
 }
 
 try {
+  New-Item -ItemType Directory -Path $data -Force | Out-Null
   Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
   Stop-AHA2ProcessTrees
   foreach ($name in @("aha2.db","aha2.db-wal","aha2.db-shm","secrets.json","setup-token")) {
     $source = Join-Path $data $name
     if (Test-Path -LiteralPath $source -PathType Leaf) { Copy-Item -LiteralPath $source -Destination (Join-Path $backup $name) -Force }
   }
-  foreach ($entry in @(@{Path=$server;Name="aha2.exe"},@{Path=$tray;Name="aha2-tray.exe"},@{Path=$plugin;Name="aha2-channel-feishu.exe"})) {
+  foreach ($entry in @(@{Path=$server;Name="aha2.exe"},@{Path=$tray;Name="aha2-tray.exe"},@{Path=$plugin;Name="aha2-channel-feishu.exe"},@{Path=$pluginManifest;Name="feishu-plugin.json"})) {
     if (Test-Path -LiteralPath $entry.Path -PathType Leaf) { Copy-Item -LiteralPath $entry.Path -Destination (Join-Path $backup $entry.Name) -Force }
   }
   if ($UpdateExistingInstallInPlace) {
     Copy-Item -LiteralPath $serverInput -Destination $server -Force
     Copy-Item -LiteralPath $trayInput -Destination $tray -Force
+    if ($pluginInput -and $pluginManifestInput) {
+      New-Item -ItemType Directory -Path (Split-Path -Parent $plugin) -Force | Out-Null
+      Copy-Item -LiteralPath $pluginInput -Destination $plugin -Force
+      Copy-Item -LiteralPath $pluginManifestInput -Destination $pluginManifest -Force
+    }
   } else {
     $arguments = @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/CLOSEAPPLICATIONS','/SKIPUSERTASK=1',('/DIR="{0}"' -f $install),('/DATADIR="{0}"' -f $data))
     $process = Start-Process -FilePath $installer -ArgumentList $arguments -WindowStyle Hidden -Wait -PassThru
@@ -293,7 +334,14 @@ try {
   if ($serverHash -ne (Get-FileHash -LiteralPath $serverInput -Algorithm SHA256).Hash -or $trayHash -ne (Get-FileHash -LiteralPath $trayInput -Algorithm SHA256).Hash) {
     throw "Installed per-user binary hash does not match the candidate."
   }
-  $deploymentResult = [pscustomobject]@{Mode=$deploymentMode;UpdateType=$(if ($UpdateExistingInstallInPlace) { "existing-install-in-place" } else { "installer" });Health="ok";URL=$HealthURL;Installer=$(if ($UpdateExistingInstallInPlace) { "" } else { $installer });Backup=$backup;ServerSHA256=$serverHash;TraySHA256=$trayHash;WriteAccessVerified=$true;ElevationRequired=$false}
+  $installedPluginHash = ""
+  if ($pluginInput -and $pluginManifestInput) {
+    $installedPluginHash = (Get-FileHash -LiteralPath $plugin -Algorithm SHA256).Hash
+    if ($installedPluginHash -ne (Get-FileHash -LiteralPath $pluginInput -Algorithm SHA256).Hash) {
+      throw "Installed Feishu plugin hash does not match the candidate."
+    }
+  }
+  $deploymentResult = [pscustomobject]@{Mode=$deploymentMode;UpdateType=$(if ($UpdateExistingInstallInPlace) { "existing-install-in-place" } else { "installer" });Health="ok";URL=$HealthURL;Installer=$(if ($UpdateExistingInstallInPlace) { "" } else { $installer });Backup=$backup;ServerSHA256=$serverHash;TraySHA256=$trayHash;PluginSHA256=$installedPluginHash;WriteAccessVerified=$true;ElevationRequired=$false}
   Write-DeploymentResult "succeeded" $deploymentResult
   if ($DetachedWorker) { Unregister-ScheduledTask -TaskName $UpdateTaskName -Confirm:$false -ErrorAction SilentlyContinue }
   $deploymentResult
@@ -302,10 +350,12 @@ try {
   Write-DeploymentResult "failed" $deploymentError.Exception.Message
   Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
   Stop-AHA2ProcessTrees
-  foreach ($entry in @(@{Path=$server;Name="aha2.exe"},@{Path=$tray;Name="aha2-tray.exe"},@{Path=$plugin;Name="aha2-channel-feishu.exe"})) {
+  foreach ($entry in @(@{Path=$server;Name="aha2.exe"},@{Path=$tray;Name="aha2-tray.exe"},@{Path=$plugin;Name="aha2-channel-feishu.exe"},@{Path=$pluginManifest;Name="feishu-plugin.json"})) {
     $backupFile = Join-Path $backup $entry.Name
     if (Test-Path -LiteralPath $backupFile -PathType Leaf) { Copy-Item -LiteralPath $backupFile -Destination $entry.Path -Force }
   }
+  if ($pluginInput -and -not $pluginExisted) { Remove-Item -LiteralPath $plugin -Force -ErrorAction SilentlyContinue }
+  if ($pluginManifestInput -and -not $pluginManifestExisted) { Remove-Item -LiteralPath $pluginManifest -Force -ErrorAction SilentlyContinue }
   foreach ($name in @("aha2.db","aha2.db-wal","aha2.db-shm","secrets.json","setup-token")) {
     $backupFile = Join-Path $backup $name
     if (Test-Path -LiteralPath $backupFile -PathType Leaf) { Copy-Item -LiteralPath $backupFile -Destination (Join-Path $data $name) -Force }
