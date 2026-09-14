@@ -136,9 +136,83 @@ interface State {
   taskStatusFilters: Set<string>;
   taskDeviceFilters: Set<string>;
   taskOpenFilter: TaskFilterKind | "";
+  sidebarWidth: number;
+  sidebarMemoItems: SidebarMemoItem[];
+  sidebarMemoCollapsed: boolean;
+  sidebarMemoColor: string;
+}
+
+interface SidebarMemoItem {
+  id: string;
+  text: string;
+  done: boolean;
 }
 
 const taskToolLayoutKey = "aha2.task-tool-layout";
+const sidebarLayoutKey = "aha2.sidebar-layout";
+const sidebarMemoKey = "aha2.sidebar-memo";
+const SIDEBAR_DEFAULT_WIDTH = 228;
+const SIDEBAR_MIN_WIDTH = 180;
+const SIDEBAR_MAX_WIDTH = 360;
+const SIDEBAR_MEMO_MAX_LENGTH = 20000;
+const SIDEBAR_MEMO_COLORS: Record<string, {label: string; surface: string; input: string; border: string; text: string; placeholder: string}> = {
+  graphite: {label: "石墨", surface: "#272c33", input: "#20242a", border: "#424953", text: "#eef1f5", placeholder: "#7f8996"},
+  yellow: {label: "浅黄", surface: "#fff8dc", input: "#fffdf1", border: "#e6dca8", text: "#3e3a2e", placeholder: "#8e8259"},
+  blue: {label: "浅蓝", surface: "#e8f3ff", input: "#f7fbff", border: "#bcd8f6", text: "#24384c", placeholder: "#6d849c"},
+  green: {label: "浅绿", surface: "#e9f7ee", input: "#f7fcf8", border: "#b9ddc4", text: "#244433", placeholder: "#6c9077"},
+  lavender: {label: "浅紫", surface: "#f2edff", input: "#fbfaff", border: "#d5c9f4", text: "#3b3150", placeholder: "#84759d"},
+};
+
+function normalizeSidebarMemoColor(value: unknown): string {
+  const color = String(value || "");
+  return SIDEBAR_MEMO_COLORS[color] ? color : "graphite";
+}
+
+function normalizeSidebarWidth(value: unknown): number {
+  const width = Number(value);
+  if (!Number.isFinite(width)) return SIDEBAR_DEFAULT_WIDTH;
+  return Math.round(Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, width)));
+}
+
+function newSidebarMemoItem(text = "", done = false): SidebarMemoItem {
+  const randomID = globalThis.crypto?.randomUUID?.();
+  return {id: randomID || `memo-${Date.now()}-${Math.random().toString(36).slice(2)}`, text, done};
+}
+
+function loadSidebarMemoItems(): SidebarMemoItem[] {
+  const raw = localStorage.getItem(sidebarMemoKey) || "";
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      const items = parsed
+        .filter(item => item && typeof item === "object")
+        .map(item => ({
+          id: String(item.id || newSidebarMemoItem().id),
+          text: String(item.text || "").slice(0, SIDEBAR_MEMO_MAX_LENGTH),
+          done: item.done === true,
+        }));
+      if (items.length) return items;
+    }
+  } catch {
+    // Older versions stored plain text; migrate it line-by-line below.
+  }
+  const lines = raw.split(/\r?\n/).map(text => text.slice(0, SIDEBAR_MEMO_MAX_LENGTH));
+  return (lines.length ? lines : [""]).map(text => newSidebarMemoItem(text));
+}
+
+function loadSidebarSettings(): {width: number; memoItems: SidebarMemoItem[]; memoCollapsed: boolean; memoColor: string} {
+  try {
+    const layout = JSON.parse(localStorage.getItem(sidebarLayoutKey) || "{}") as {width?: unknown; memoCollapsed?: unknown; memoColor?: unknown};
+    return {
+      width: normalizeSidebarWidth(layout.width),
+      memoItems: loadSidebarMemoItems(),
+      memoCollapsed: layout.memoCollapsed === true,
+      memoColor: normalizeSidebarMemoColor(layout.memoColor),
+    };
+  } catch {
+    return {width: SIDEBAR_DEFAULT_WIDTH, memoItems: [newSidebarMemoItem()], memoCollapsed: false, memoColor: "graphite"};
+  }
+}
 
 function loadTaskToolLayout(): {mode: TaskToolMode; width: number} {
   try {
@@ -150,6 +224,7 @@ function loadTaskToolLayout(): {mode: TaskToolMode; width: number} {
 }
 
 const savedTaskToolLayout = loadTaskToolLayout();
+const savedSidebarSettings = loadSidebarSettings();
 
 const state: State = {
   auth: null,
@@ -212,6 +287,10 @@ const state: State = {
   taskStatusFilters: new Set(),
   taskDeviceFilters: new Set([LOCAL_TASK_DEVICE_FILTER]),
   taskOpenFilter: "",
+  sidebarWidth: savedSidebarSettings.width,
+  sidebarMemoItems: savedSidebarSettings.memoItems,
+  sidebarMemoCollapsed: savedSidebarSettings.memoCollapsed,
+  sidebarMemoColor: savedSidebarSettings.memoColor,
 };
 
 const app = document.querySelector<HTMLDivElement>("#app");
@@ -239,6 +318,8 @@ let ownerAvatarResetTimer = 0;
 let navigationRestoring = true;
 let taskOpenVersion = 0;
 let taskChannelLoadVersion = 0;
+let sidebarMemoSaveTimer = 0;
+let sidebarMemoResizeObserver: ResizeObserver | null = null;
 
 document.addEventListener("click", event => {
   const target = event.target;
@@ -1240,6 +1321,228 @@ function persistTaskToolLayout(): void {
   }
 }
 
+function persistSidebarLayout(): void {
+  try {
+    localStorage.setItem(sidebarLayoutKey, JSON.stringify({
+      width: state.sidebarWidth,
+      memoCollapsed: state.sidebarMemoCollapsed,
+      memoColor: state.sidebarMemoColor,
+    }));
+  } catch {
+    // Layout persistence is best-effort in restricted WebViews.
+  }
+}
+
+function persistSidebarMemo(): void {
+  if (sidebarMemoSaveTimer) {
+    window.clearTimeout(sidebarMemoSaveTimer);
+    sidebarMemoSaveTimer = 0;
+  }
+  try {
+    localStorage.setItem(sidebarMemoKey, JSON.stringify(state.sidebarMemoItems));
+  } catch {
+    // Memo persistence is best-effort in restricted WebViews.
+  }
+}
+
+function scheduleSidebarMemoSave(): void {
+  if (sidebarMemoSaveTimer) window.clearTimeout(sidebarMemoSaveTimer);
+  sidebarMemoSaveTimer = window.setTimeout(() => {
+    sidebarMemoSaveTimer = 0;
+    persistSidebarMemo();
+    const status = document.querySelector<HTMLElement>("#sidebar-memo-status");
+    if (status) status.textContent = "已保存";
+  }, 500);
+}
+
+function sidebarMemoItemsHTML(): string {
+  const items = state.sidebarMemoItems.length ? state.sidebarMemoItems : [newSidebarMemoItem()];
+  return `<div class="sidebar-memo-list">${items.map(item => `<div class="sidebar-memo-item ${item.done ? "done" : ""} ${item.text ? "" : "sidebar-memo-empty"}" data-sidebar-memo-item="${escapeHTML(item.id)}">
+    <input type="checkbox" data-sidebar-memo-done="${escapeHTML(item.id)}" ${item.done ? "checked" : ""} aria-label="标记完成">
+    <button type="button" class="sidebar-memo-preview" data-sidebar-memo-edit="${escapeHTML(item.id)}" aria-label="编辑备忘"><span class="sidebar-memo-preview-text">${escapeHTML(item.text || "写下备忘")}</span></button>
+    <textarea data-sidebar-memo-text="${escapeHTML(item.id)}" placeholder="写下备忘" maxlength="${SIDEBAR_MEMO_MAX_LENGTH}" rows="1" aria-label="编辑备忘">${escapeHTML(item.text)}</textarea>
+    <button type="button" class="icon-button" data-sidebar-memo-remove="${escapeHTML(item.id)}" title="删除事项" aria-label="删除事项">${icon("close")}</button>
+  </div>`).join("")}</div><button type="button" class="sidebar-memo-add" id="add-sidebar-memo-item">${icon("plus")}添加事项</button>`;
+}
+
+function focusSidebarMemoItem(id: string): void {
+  window.setTimeout(() => {
+    enterSidebarMemoEdit(id);
+  }, 0);
+}
+
+function fitSidebarMemoTextarea(input: HTMLTextAreaElement): void {
+  input.style.height = "22px";
+  if (!input.value) return;
+  input.style.height = "0px";
+  input.style.height = `${Math.max(30, input.scrollHeight)}px`;
+}
+
+function fitSidebarMemoTextareas(root: ParentNode = document): void {
+  root.querySelectorAll<HTMLTextAreaElement>("[data-sidebar-memo-text]").forEach(fitSidebarMemoTextarea);
+}
+
+function enterSidebarMemoEdit(id: string, root: ParentNode = document): void {
+  const item = root.querySelector<HTMLElement>(`[data-sidebar-memo-item="${CSS.escape(id)}"]`);
+  const input = item?.querySelector<HTMLTextAreaElement>("[data-sidebar-memo-text]");
+  if (!item || !input) return;
+  item.classList.add("editing");
+  fitSidebarMemoTextarea(input);
+  input.focus();
+  input.setSelectionRange(input.value.length, input.value.length);
+}
+
+function bindSidebarMemoItems(root: HTMLElement): void {
+  root.querySelectorAll<HTMLInputElement>("[data-sidebar-memo-done]").forEach(input => input.addEventListener("change", () => {
+    const item = state.sidebarMemoItems.find(candidate => candidate.id === input.dataset.sidebarMemoDone);
+    if (!item) return;
+    item.done = input.checked;
+    input.closest<HTMLElement>(".sidebar-memo-item")?.classList.toggle("done", item.done);
+    persistSidebarMemo();
+  }));
+  root.querySelectorAll<HTMLTextAreaElement>("[data-sidebar-memo-text]").forEach(input => input.addEventListener("input", () => {
+    const item = state.sidebarMemoItems.find(candidate => candidate.id === input.dataset.sidebarMemoText);
+    if (!item) return;
+    item.text = input.value.slice(0, SIDEBAR_MEMO_MAX_LENGTH);
+    const row = input.closest<HTMLElement>(".sidebar-memo-item");
+    const preview = row?.querySelector<HTMLElement>(".sidebar-memo-preview-text");
+    if (preview) preview.textContent = item.text || "写下备忘";
+    row?.classList.toggle("sidebar-memo-empty", !item.text);
+    fitSidebarMemoTextarea(input);
+    scheduleSidebarMemoSave();
+    const status = root.querySelector<HTMLElement>("#sidebar-memo-status");
+    if (status) status.textContent = "正在保存";
+  }));
+  root.querySelectorAll<HTMLTextAreaElement>("[data-sidebar-memo-text]").forEach(input => input.addEventListener("blur", () => {
+    persistSidebarMemo();
+    const row = input.closest<HTMLElement>(".sidebar-memo-item");
+    row?.classList.remove("editing");
+    const status = root.querySelector<HTMLElement>("#sidebar-memo-status");
+    if (status) status.textContent = "已保存";
+  }));
+  root.querySelectorAll<HTMLButtonElement>("[data-sidebar-memo-edit]").forEach(button => button.addEventListener("click", () => {
+    enterSidebarMemoEdit(button.dataset.sidebarMemoEdit || "", root);
+  }));
+  fitSidebarMemoTextareas(root);
+  root.querySelectorAll<HTMLButtonElement>("[data-sidebar-memo-remove]").forEach(button => button.addEventListener("click", () => {
+    const index = state.sidebarMemoItems.findIndex(item => item.id === button.dataset.sidebarMemoRemove);
+    if (index < 0) return;
+    if (state.sidebarMemoItems.length === 1) {
+      state.sidebarMemoItems[0] = newSidebarMemoItem();
+    } else {
+      state.sidebarMemoItems.splice(index, 1);
+    }
+    persistSidebarMemo();
+    root.innerHTML = sidebarMemoItemsHTML();
+    bindSidebarMemoItems(root);
+    focusSidebarMemoItem(state.sidebarMemoItems[Math.min(index, state.sidebarMemoItems.length - 1)].id);
+  }));
+  root.querySelector<HTMLButtonElement>("#add-sidebar-memo-item")?.addEventListener("click", () => {
+    const item = newSidebarMemoItem();
+    state.sidebarMemoItems.push(item);
+    persistSidebarMemo();
+    root.innerHTML = sidebarMemoItemsHTML();
+    bindSidebarMemoItems(root);
+    focusSidebarMemoItem(item.id);
+  });
+}
+
+function applySidebarLayout(): void {
+  const shellElement = document.querySelector<HTMLElement>(".app-shell");
+  if (!shellElement) return;
+  shellElement.style.setProperty("--sidebar-width", `${state.sidebarWidth}px`);
+  const memo = shellElement.querySelector<HTMLElement>(".sidebar-memo");
+  memo?.classList.toggle("collapsed", state.sidebarMemoCollapsed);
+  const color = SIDEBAR_MEMO_COLORS[state.sidebarMemoColor] || SIDEBAR_MEMO_COLORS.graphite;
+  if (memo) {
+    memo.dataset.memoColor = state.sidebarMemoColor;
+    memo.style.setProperty("--memo-surface", color.surface);
+    memo.style.setProperty("--memo-input", color.input);
+    memo.style.setProperty("--memo-border", color.border);
+    memo.style.setProperty("--memo-text", color.text);
+    memo.style.setProperty("--memo-placeholder", color.placeholder);
+  }
+  const toggle = shellElement.querySelector<HTMLButtonElement>("#toggle-sidebar-memo");
+  if (toggle) {
+    toggle.setAttribute("aria-label", state.sidebarMemoCollapsed ? "展开便签" : "折叠便签");
+    toggle.title = state.sidebarMemoCollapsed ? "展开便签" : "折叠便签";
+    toggle.innerHTML = icon(state.sidebarMemoCollapsed ? "chevron-up" : "chevron-down");
+  }
+  shellElement.querySelector<HTMLElement>("#sidebar-resizer")?.setAttribute("aria-valuenow", String(state.sidebarWidth));
+}
+
+function resizeSidebar(clientX: number): void {
+  const availableMax = Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, window.innerWidth - 420));
+  state.sidebarWidth = Math.round(Math.min(availableMax, Math.max(SIDEBAR_MIN_WIDTH, clientX)));
+  applySidebarLayout();
+}
+
+function adjustSidebarWidth(delta: number): void {
+  const availableMax = Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, window.innerWidth - 420));
+  state.sidebarWidth = Math.round(Math.min(availableMax, Math.max(SIDEBAR_MIN_WIDTH, state.sidebarWidth + delta)));
+}
+
+function bindSidebarControls(): void {
+  const shellElement = document.querySelector<HTMLElement>(".app-shell");
+  const resizer = shellElement?.querySelector<HTMLElement>("#sidebar-resizer");
+  const memoToggle = shellElement?.querySelector<HTMLButtonElement>("#toggle-sidebar-memo");
+  const memoList = shellElement?.querySelector<HTMLElement>(".sidebar-memo-body");
+  applySidebarLayout();
+  sidebarMemoResizeObserver?.disconnect();
+  sidebarMemoResizeObserver = null;
+  if (memoList && typeof ResizeObserver !== "undefined") {
+    sidebarMemoResizeObserver = new ResizeObserver(() => fitSidebarMemoTextareas(memoList));
+    const sidebar = shellElement?.querySelector<HTMLElement>(".sidebar");
+    if (sidebar) sidebarMemoResizeObserver.observe(sidebar);
+  }
+  memoToggle?.addEventListener("click", () => {
+    state.sidebarMemoCollapsed = !state.sidebarMemoCollapsed;
+    persistSidebarLayout();
+    applySidebarLayout();
+  });
+  if (memoList) bindSidebarMemoItems(memoList);
+  shellElement.querySelectorAll<HTMLButtonElement>("[data-sidebar-memo-color]").forEach(button => {
+    button.addEventListener("click", () => {
+      const color = normalizeSidebarMemoColor(button.dataset.sidebarMemoColor);
+      state.sidebarMemoColor = color;
+      persistSidebarLayout();
+      applySidebarLayout();
+    });
+  });
+  if (!resizer) return;
+  resizer.setAttribute("aria-valuenow", String(state.sidebarWidth));
+  resizer.addEventListener("dblclick", () => {
+    state.sidebarWidth = SIDEBAR_DEFAULT_WIDTH;
+    persistSidebarLayout();
+    applySidebarLayout();
+  });
+  resizer.addEventListener("keydown", event => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight" && event.key !== "Home") return;
+    event.preventDefault();
+    state.sidebarWidth = event.key === "Home" ? SIDEBAR_DEFAULT_WIDTH : state.sidebarWidth;
+    if (event.key !== "Home") adjustSidebarWidth(event.key === "ArrowRight" ? 8 : -8);
+    persistSidebarLayout();
+    applySidebarLayout();
+  });
+  resizer.addEventListener("pointerdown", event => {
+    if (window.matchMedia("(max-width: 760px)").matches) return;
+    event.preventDefault();
+    resizer.setPointerCapture?.(event.pointerId);
+    document.body.classList.add("sidebar-resizing");
+    const move = (moveEvent: PointerEvent) => resizeSidebar(moveEvent.clientX);
+    const finish = () => {
+      document.body.classList.remove("sidebar-resizing");
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", finish);
+      persistSidebarLayout();
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", finish);
+    window.addEventListener("pointercancel", finish);
+  });
+}
+
 function applyTaskToolLayout(): void {
   const grid = document.querySelector<HTMLElement>(".task-grid");
   const panel = document.querySelector<HTMLElement>(".task-tool-panel");
@@ -1612,9 +1915,15 @@ function shell(content: string): string {
     <aside class="sidebar">
       <div class="brand-lockup"><span class="brand-mark">A</span><div><strong>AHA</strong><small>个人 AI 工作流</small></div></div>
       <nav>${nav.map(([view, glyph, label]) => `<button data-view="${view}" class="${state.view === view ? "active" : ""}">${icon(glyph)}<span>${label}</span></button>`).join("")}</nav>
+      <section class="sidebar-memo ${state.sidebarMemoCollapsed ? "collapsed" : ""}">
+        <header><strong>${icon("edit")}便签</strong><button id="toggle-sidebar-memo" class="icon-button" type="button" aria-label="${state.sidebarMemoCollapsed ? "展开便签" : "折叠便签"}" title="${state.sidebarMemoCollapsed ? "展开便签" : "折叠便签"}">${icon(state.sidebarMemoCollapsed ? "chevron-up" : "chevron-down")}</button></header>
+        <div class="sidebar-memo-colors" role="group" aria-label="便签背景颜色">${Object.entries(SIDEBAR_MEMO_COLORS).map(([id, color]) => `<button type="button" class="sidebar-memo-swatch ${state.sidebarMemoColor === id ? "active" : ""}" data-sidebar-memo-color="${id}" aria-label="${color.label}" title="${color.label}" style="--swatch-color:${color.surface}"></button>`).join("")}</div>
+        <div class="sidebar-memo-body">${sidebarMemoItemsHTML()}<small id="sidebar-memo-status">已保存</small></div>
+      </section>
       <div class="system-meta"><span>AHA2 ${escapeHTML(state.system.web_version || state.system.version || "dev")}</span><span id="system-uptime">${systemUptimeText()}</span></div>
       <div class="owner-block"><button id="owner-avatar" class="avatar" type="button" title="Owner">O</button><div><strong>${escapeHTML(state.auth?.username || "Owner")}</strong><small>已安全登录</small></div><button id="logout" class="icon-button" title="退出">${icon("logout")}</button></div>
     </aside>
+    <div id="sidebar-resizer" class="sidebar-resizer" role="separator" aria-label="调整侧栏宽度" aria-orientation="vertical" aria-valuemin="${SIDEBAR_MIN_WIDTH}" aria-valuemax="${SIDEBAR_MAX_WIDTH}" aria-valuenow="${state.sidebarWidth}" tabindex="0" title="拖动调整侧栏宽度，双击恢复默认"></div>
     <header class="mobile-header"><div class="brand-lockup"><span class="brand-mark">A</span><strong>AHA</strong></div><button id="mobile-context" class="icon-button">${icon("menu")}</button></header>
     <main class="workspace">${resourceStatusHTML()}${banner()}${content}</main>
     <nav class="bottom-nav">${mobileNav.map(([view, glyph, label]) => `<button data-view="${view}" class="${state.view === view ? "active" : ""}">${icon(glyph)}<span>${label}</span></button>`).join("")}</nav>
@@ -2586,6 +2895,7 @@ function bindAuth(): void {
 }
 
 function bindCommon(): void {
+  bindSidebarControls();
   bindCodexAccounts({
     accounts: state.codexAccounts,
     onChanged: async () => { await loadAll(); render(); },

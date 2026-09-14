@@ -76,7 +76,7 @@ func TestKnowledgePaginationIncludesGlobalNavigationContext(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer database.Close()
-	now := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
+	now := time.Now().UTC().Add(5 * time.Minute)
 	for index, id := range []string{"global-recent-a", "global-recent-b"} {
 		item := domain.KnowledgeEntry{
 			ID: id, Scope: "global", ParentID: store.GlobalGeneralKnowledgeID, Slug: id,

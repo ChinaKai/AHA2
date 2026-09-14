@@ -402,6 +402,33 @@ test("sidebar shows service version and live uptime", async () => {
   assert.match(script, /state\.system\.web_version \|\| state\.system\.version \|\| "dev"/);
   assert.match(script, /setInterval\(updateSystemUptime,\s*30_000\)/);
   assert.match(styles, /\.system-meta/);
+  assert.match(script, /sidebar-resizer/);
+  assert.match(script, /sidebar-memo-item/);
+  assert.match(script, /data-sidebar-memo-done/);
+  assert.match(script, /data-sidebar-memo-text/);
+  assert.match(script, /data-sidebar-memo-edit/);
+  assert.match(script, /input\.scrollHeight/);
+  assert.match(script, /input\.style\.height = "22px";\s*if \(!input\.value\) return;/);
+  assert.match(script, /classList\.toggle\("sidebar-memo-empty",\s*!item\.text\)/);
+  assert.match(script, /new ResizeObserver/);
+  assert.match(script, /fitSidebarMemoTextareas/);
+  assert.match(script, /enterSidebarMemoEdit/);
+  assert.match(script, /add-sidebar-memo-item/);
+  assert.match(script, /localStorage\.setItem\(sidebarMemoKey/);
+  assert.match(script, /localStorage\.setItem\(sidebarLayoutKey/);
+  assert.match(script, /sidebarMemoColor/);
+  assert.match(script, /data-sidebar-memo-color/);
+  assert.match(script, /resizeSidebar/);
+  assert.match(styles, /\.sidebar-resizer/);
+  assert.match(styles, /\.sidebar-memo/);
+  assert.match(styles, /\.sidebar-memo-swatch/);
+  assert.match(styles, /\.sidebar-memo-item > textarea/);
+  assert.match(styles, /\.sidebar-memo-item\.sidebar-memo-empty \.sidebar-memo-preview-text/);
+  assert.match(styles, /-webkit-line-clamp: 2/);
+  assert.match(styles, /max-height: 240px/);
+  assert.match(styles, /\.sidebar-memo-item\.editing \{ border-color: var\(--blue\); \}/);
+  assert.doesNotMatch(script, /class="sidebar-memo-item[^"]*\bempty\b/);
+  assert.match(styles, /@media \(max-width: 760px\)[\s\S]*?\.sidebar-resizer \{ display: none; \}/);
 });
 
 test("task detail can bind one primary private or group channel", async () => {
