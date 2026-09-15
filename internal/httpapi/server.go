@@ -14,6 +14,7 @@ import (
 	"github.com/ChinaKai/AHA2/internal/auth"
 	"github.com/ChinaKai/AHA2/internal/channel"
 	"github.com/ChinaKai/AHA2/internal/codexaccount"
+	"github.com/ChinaKai/AHA2/internal/desktop"
 	"github.com/ChinaKai/AHA2/internal/domain"
 	"github.com/ChinaKai/AHA2/internal/gateway"
 	"github.com/ChinaKai/AHA2/internal/hardware"
@@ -35,6 +36,7 @@ type Config struct {
 	DetectWorkspace   func(context.Context, domain.Workspace) (domain.Workspace, error)
 	Secrets           SecretStore
 	Hardware          *hardware.Manager
+	Desktop           *desktop.Manager
 	CodexAccounts     *codexaccount.Manager
 	AgentCapabilities *agentapi.Capabilities
 	ManagedProcesses  *managedprocess.Manager
@@ -60,6 +62,7 @@ type Server struct {
 	detectWorkspace       func(context.Context, domain.Workspace) (domain.Workspace, error)
 	secrets               SecretStore
 	hardware              *hardware.Manager
+	desktop               *desktop.Manager
 	codexAccounts         *codexaccount.Manager
 	agentCapabilities     *agentapi.Capabilities
 	managedProcesses      *managedprocess.Manager
@@ -80,6 +83,9 @@ type Server struct {
 }
 
 func New(config Config) *Server {
+	if config.Desktop == nil {
+		config.Desktop = desktop.New(desktop.NativeProvider())
+	}
 	logger := config.Logger
 	if logger == nil {
 		logger = slog.Default()
@@ -109,6 +115,7 @@ func New(config Config) *Server {
 		detectWorkspace:       config.DetectWorkspace,
 		secrets:               config.Secrets,
 		hardware:              config.Hardware,
+		desktop:               config.Desktop,
 		codexAccounts:         config.CodexAccounts,
 		agentCapabilities:     config.AgentCapabilities,
 		managedProcesses:      config.ManagedProcesses,
@@ -283,6 +290,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/tasks/{id}/agents/{agent}/session/compact", s.withAuth(http.HandlerFunc(s.compactAgentSession)))
 	mux.Handle("POST /api/v1/tasks/{id}/agents/{agent}/session/reset", s.withAuth(http.HandlerFunc(s.resetAgentSession)))
 	mux.Handle("GET /api/v1/tasks/{id}/hardware", s.withAuth(http.HandlerFunc(s.taskHardware)))
+	s.registerDesktopRoutes(mux)
 	mux.Handle("PUT /api/v1/tasks/{id}/hardware", s.withAuth(http.HandlerFunc(s.updateTaskHardware)))
 	mux.Handle("GET /api/v1/tasks/{id}/hardware/{hardware}/terminal", s.withAuth(http.HandlerFunc(s.hardwareTerminal)))
 	mux.Handle("GET /api/v1/tasks/{id}/hardware/{hardware}/terminal/ws", s.withAuth(http.HandlerFunc(s.hardwareTerminalWebSocket)))
@@ -367,7 +375,7 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 		writer.Header().Set("X-Frame-Options", "DENY")
 		writer.Header().Set("Referrer-Policy", "no-referrer")
 		writer.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
-		writer.Header().Set("Content-Security-Policy", "default-src 'self'; connect-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; script-src 'self'")
+		writer.Header().Set("Content-Security-Policy", "default-src 'self'; connect-src 'self'; img-src 'self' data: https: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'")
 		next.ServeHTTP(writer, request)
 	})
 }

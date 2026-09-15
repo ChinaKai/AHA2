@@ -107,7 +107,9 @@ func (s *Server) sendAgentTaskChannelMessage(writer http.ResponseWriter, request
 		writeAgentChannelError(writer, err)
 		return
 	}
-	s.audit(request, "agent.channel.outreach", "task", claims.TaskID, map[string]any{"delivery_id": delivery.ID, "mentions": len(payload.MentionIdentityLinkIDs)})
+	s.audit(request, "agent.channel.outreach", "task", claims.TaskID, map[string]any{
+		"delivery_id": delivery.ID, "mentions": len(payload.MentionIdentityLinkIDs), "attachments": len(payload.AttachmentIDs),
+	})
 	writeJSON(writer, http.StatusCreated, map[string]any{"ok": true, "delivery": delivery})
 }
 

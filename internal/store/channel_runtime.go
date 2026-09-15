@@ -563,7 +563,7 @@ func (s *Store) ChannelDeliveryTarget(ctx context.Context, conversationID string
 	return target, nil
 }
 
-func (s *Store) EnqueueTaskChannelOutreach(ctx context.Context, taskID, turnID, requestID, purpose, message string, identityIDs []string, at time.Time) (domain.ChannelDelivery, string, bool, error) {
+func (s *Store) EnqueueTaskChannelOutreach(ctx context.Context, taskID, turnID, requestID, purpose, message string, identityIDs, attachmentIDs []string, at time.Time) (domain.ChannelDelivery, string, bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return domain.ChannelDelivery{}, "", false, err
@@ -618,9 +618,22 @@ func (s *Store) EnqueueTaskChannelOutreach(ctx context.Context, taskID, turnID, 
 	}
 	sourceKey := "agent-channel-outreach:" + taskID + ":" + turnID + ":" + requestID
 	conversationItemID := stableStoreID("conversation_channel_outreach", taskID, turnID, requestID)
+	idempotencyKey := "channel-outreach:" + sourceKey
+	if item, lookupErr := scanChannelDelivery(tx.QueryRowContext(ctx, `SELECT `+channelDeliveryColumns+` FROM channel_delivery_outbox WHERE idempotency_key=?`, idempotencyKey)); lookupErr == nil {
+		return item, conversationItemID, false, tx.Commit()
+	} else if lookupErr != sql.ErrNoRows {
+		return domain.ChannelDelivery{}, "", false, lookupErr
+	}
 	payload := map[string]any{
 		"kind": "agent_outreach", "purpose": purpose, "task_id": taskID, "text": message,
 		"mention_identity_link_ids": identityIDs,
+	}
+	attachments, err := bindAttachmentsTx(ctx, tx, taskID, conversationItemID, attachmentIDs)
+	if err != nil {
+		return domain.ChannelDelivery{}, "", false, err
+	}
+	if len(attachments) > 0 {
+		payload["attachments"] = attachments
 	}
 	sourceID := domain.NewID("channel_source_event")
 	result, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO channel_source_events(id,source_key,source_revision,task_id,round_id,turn_id,conversation_item_id,event_class,event_type,semantic_payload_json,occurred_at) VALUES(?,?,1,?,'',?,?, 'message','agent_outreach',?,?)`,
@@ -628,7 +641,6 @@ func (s *Store) EnqueueTaskChannelOutreach(ctx context.Context, taskID, turnID, 
 	if err != nil {
 		return domain.ChannelDelivery{}, "", false, err
 	}
-	idempotencyKey := "channel-outreach:" + sourceKey
 	if inserted, _ := result.RowsAffected(); inserted == 0 {
 		item, lookupErr := scanChannelDelivery(tx.QueryRowContext(ctx, `SELECT `+channelDeliveryColumns+` FROM channel_delivery_outbox WHERE idempotency_key=?`, idempotencyKey))
 		if lookupErr != nil {
@@ -647,11 +659,21 @@ func (s *Store) EnqueueTaskChannelOutreach(ctx context.Context, taskID, turnID, 
 	if err := tx.QueryRowContext(ctx, `SELECT id FROM channel_subscriptions WHERE route_id=? AND kind='task_route' AND state='active'`, route.ID).Scan(&subscriptionID); err != nil {
 		return domain.ChannelDelivery{}, "", false, err
 	}
-	deliveryID := domain.NewID("channel_delivery")
-	if _, err := tx.ExecContext(ctx, `INSERT INTO channel_delivery_outbox(id,instance_id,conversation_id,subscription_id,source_event_sequence,stream_sequence,replay_generation,replay_of_id,idempotency_key,coalesce_key,payload_version,semantic_payload_json,state,attempts,first_attempt_at,available_at,lease_id,lease_until,provider_message_id,last_error_code,outcome_certainty,created_at,updated_at,delivered_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		deliveryID, route.InstanceID, route.ConversationID, subscriptionID, sourceSequence, streamSequence, 0, nil,
-		idempotencyKey, "", 1, encodeJSON(payload), "pending", 0, "", timeString(at), "", "", "", "", "", timeString(at), timeString(at), ""); err != nil {
-		return domain.ChannelDelivery{}, "", false, err
+	deliveryID := ""
+	for partIndex, part := range channelDeliveryParts(payload) {
+		partID := domain.NewID("channel_delivery")
+		partKey := idempotencyKey
+		if partIndex > 0 {
+			partKey += ":attachment:" + fmt.Sprint(part["attachment_id"])
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO channel_delivery_outbox(id,instance_id,conversation_id,subscription_id,source_event_sequence,stream_sequence,replay_generation,replay_of_id,idempotency_key,coalesce_key,payload_version,semantic_payload_json,state,attempts,first_attempt_at,available_at,lease_id,lease_until,provider_message_id,last_error_code,outcome_certainty,created_at,updated_at,delivered_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			partID, route.InstanceID, route.ConversationID, subscriptionID, sourceSequence, streamSequence+int64(partIndex), 0, nil,
+			partKey, "", 1, encodeJSON(part), "pending", 0, "", timeString(at), "", "", "", "", "", timeString(at), timeString(at), ""); err != nil {
+			return domain.ChannelDelivery{}, "", false, err
+		}
+		if partIndex == 0 {
+			deliveryID = partID
+		}
 	}
 	var roundID string
 	if err := tx.QueryRowContext(ctx, `SELECT round_id FROM turns WHERE id=? AND task_id=?`, turnID, taskID).Scan(&roundID); err != nil {

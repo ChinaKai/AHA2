@@ -667,6 +667,16 @@ test("built web contains responsive application", async () => {
   assert.match(script, /function stabilizeConversationBottom[\s\S]{0,120}const pinVersion = \+\+conversationBottomPinVersion/);
   assert.match(script, /for \(const delay of \[\s*80,\s*240,\s*600\s*\]\)[\s\S]{0,80}setTimeout\(apply,\s*delay\)/);
   assert.match(script, /\[\s*"wheel",\s*"touchstart",\s*"pointerdown"\s*\][\s\S]*cancelConversationBottomPin/);
+  assert.match(script, /const conversationRenderedHTML = new WeakMap\(\)/);
+  assert.match(script, /if \(conversationRenderedHTML\.get\(list\) !== nextHTML\)[\s\S]{0,500}list\.innerHTML = nextHTML[\s\S]{0,180}conversationRenderedHTML\.set\(list,\s*nextHTML\)/);
+  assert.match(script, /const preservedConversation = previousConversation && preservePageUI[\s\S]{0,180}conversationRenderedHTML\.get\(previousConversation\) === nextConversationHTML/);
+  assert.match(script, /function captureConversationImages[\s\S]{0,600}function restoreConversationImages/);
+  assert.match(script, /images\.set\(key,\s*\[[\s\S]{0,100}\.\.\.images\.get\(key\) \|\| \[\],[\s\S]{0,40}image[\s\S]{0,20}\]\)/);
+  assert.match(script, /images\.get\(button\.dataset\.imagePreview \|\| ""\)\?\.shift\(\)/);
+  assert.match(script, /const images = captureConversationImages\(list\)[\s\S]{0,260}list\.innerHTML = nextHTML[\s\S]{0,180}restoreConversationImages\(list, images\)/);
+  assert.match(script, /if \(!preservedConversation && renderedConversation\) restoreConversationImages\(renderedConversation, previousConversationImages\)/);
+  assert.match(script, /bindCommon\(\);\s*if \(preservedConversation\) document\.querySelector\("#conversation-list"\)\?\.replaceWith\(preservedConversation\)/);
+  assert.match(script, /await restoreNavigationState\(savedNavigation\);[\s\S]{0,260}await ensureViewData\(state\.view\);[\s\S]{0,180}if \(state\.selectedTask\) requestConversationBottom\(\);[\s\S]{0,100}prefetchSecondaryData\(\)/);
   assert.match(css, /\.messages \{[^}]*overflow-anchor:\s*none/);
   assert.match(script, /startTaskFallback/);
   assert.match(agents, /data-live-elapsed-ms/);
@@ -678,8 +688,8 @@ test("built web contains responsive application", async () => {
   assert.match(conversation, /data-toggle-message/);
   assert.match(conversation, /data-message-id/);
   assert.match(helpers, /classList\.contains\("expanded"\)/);
-  assert.match(script, /list\.innerHTML = conversationListHtml\(\);\s*restoreRegionUI\(list, ui, false\);\s*if \(shouldAutoScrollConversation\(wasAtBottom\)\)[\s\S]{0,80}stabilizeConversationBottom\(list\)/);
-  assert.match(script, /list\.innerHTML = conversationListHtml\(\);\s*restoreRegionUI\(list, ui, false\);\s*list\.scrollTop = previousTop \+ Math\.max/);
+  assert.match(script, /list\.innerHTML = nextHTML;\s*conversationRenderedHTML\.set\(list, nextHTML\);\s*restoreConversationImages\(list, images\);\s*restoreRegionUI\(list, ui, false\);\s*if \(shouldAutoScrollConversation\(wasAtBottom\)\)[\s\S]{0,80}stabilizeConversationBottom\(list\)/);
+  assert.match(script, /list\.innerHTML = nextHTML;\s*conversationRenderedHTML\.set\(list, nextHTML\);\s*restoreRegionUI\(list, ui, false\);\s*list\.scrollTop = previousTop \+ Math\.max/);
   assert.match(conversation, /data-image-preview/);
   assert.match(helpers, /showModal\(\)/);
   assert.match(helpers, /data-image-preview-download/);

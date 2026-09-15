@@ -44,6 +44,7 @@ func (s *Server) agentCapabilitiesInfo(writer http.ResponseWriter, request *http
 		"collaboration":    main && call.Task.CollaborationMode == "auto",
 		"channel_outreach": channelOutreach, "channel_reply_decision": channelReplyDecision,
 		"hardware": true, "managed_process": true,
+		"desktop": main && s.desktop.Status(call.Task.ID).Supported,
 	}})
 }
 

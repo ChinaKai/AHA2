@@ -74,20 +74,23 @@ POST /api/v1/agent/channel/messages
 POST /api/v1/agent/channel/reply-decision
 ```
 
-发送体包含稳定的重试键、正文和 1–5 个内部联系人 ID：
+发送体包含稳定的重试键、正文、1–5 个内部联系人 ID，以及可选的当前 Task 草稿附件 ID：
 
 ```json
 {
   "request_id": "firmware-api-blocker-1",
   "purpose": "blocker",
   "message": "接口返回字段与约定不一致，请确认最终契约和可联调时间。",
-  "mention_identity_link_ids": ["channel_identity_example"]
+  "mention_identity_link_ids": ["channel_identity_example"],
+  "attachment_ids": ["attachment_example"]
 }
 ```
 
 联系人必须来自当前 Task 的活动群聊主渠道，并且已经被 Owner 在渠道界面明确绑定；不要求
 联系人此前发言。服务端只向 Agent 暴露内部 identity link 和显示名，飞书原始用户 ID 仅在
-渠道投递边界内解析。`purpose` 只接受 `blocker`；相同 Turn 使用相同 `request_id` 重试不会重复创建消息或 Web 路由卡片。
+渠道投递边界内解析。附件必须先通过当前 Turn 的 Task 附件接口上传，最多 8 个；正文和原生
+图片/文件按顺序投递。`purpose` 只接受 `blocker`；相同 Turn 使用相同 `request_id` 重试不会
+重复创建消息、附件投递或 Web 路由卡片。
 该接口仅用于阻塞性联调协调，不替代 `POST /api/v1/agent/turn/messages` 的常规 Web 进度更新。
 
 对于发送者已由渠道确认是机器人的群聊 Turn，Agent 必须在最终回复前设置路由决策：

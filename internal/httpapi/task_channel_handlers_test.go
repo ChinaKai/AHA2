@@ -320,7 +320,7 @@ func TestTaskChannelRouteAPI(t *testing.T) {
 	}
 	if _, _, _, err := database.EnqueueTaskChannelOutreach(
 		ctx, task.ID, turn.ID, "cross-conversation-contact", "blocker",
-		"不应发送", []string{foreignParticipant.ID}, now,
+		"不应发送", []string{foreignParticipant.ID}, nil, now,
 	); err == nil {
 		t.Fatal("outreach accepted a participant from another conversation")
 	}
@@ -332,11 +332,16 @@ func TestTaskChannelRouteAPI(t *testing.T) {
 		t.Fatalf("outreach without blocker purpose status=%d", response.StatusCode)
 	}
 	response.Body.Close()
+	attachment, err := database.CreateAttachment(ctx, task.ID, "interop.png", "image/png", []byte("\x89PNG\r\n\x1a\ninterop"), now)
+	if err != nil {
+		t.Fatal(err)
+	}
 	outreach := map[string]any{
 		"request_id":                "api-contract-blocker-1",
 		"purpose":                   "blocker",
 		"message":                   "接口字段与约定不一致，请确认最终契约。",
 		"mention_identity_link_ids": []string{participant.IdentityLinkID, bot.ID},
+		"attachment_ids":            []string{attachment.ID},
 	}
 	response = agentRequest(t, server.URL+"/api/v1/agent/channel/messages", http.MethodPost, token, outreach)
 	var sent struct {
@@ -376,6 +381,10 @@ func TestTaskChannelRouteAPI(t *testing.T) {
 		channelInfo["display_name"] != conversation.DisplayName {
 		t.Fatalf("outreach card=%#v", card)
 	}
+	boundAttachment, err := database.Attachment(ctx, task.ID, attachment.ID)
+	if err != nil || boundAttachment.MessageID != card.ID {
+		t.Fatalf("outreach attachment=%#v err=%v", boundAttachment, err)
+	}
 	target, err := database.ChannelDeliveryTarget(ctx, sent.Delivery.ConversationID, sent.Delivery.SourceEventSequence)
 	if err != nil || target["mention_as_post"] != "" ||
 		!strings.Contains(target["mention_user_ids"], "provider-user-zhang") ||
@@ -383,8 +392,18 @@ func TestTaskChannelRouteAPI(t *testing.T) {
 		t.Fatalf("outreach target=%#v err=%v", target, err)
 	}
 	deliveries, err := database.ChannelDeliveries(ctx, instance.ID, 100)
-	if err != nil || len(deliveries) != 1 {
+	if err != nil || len(deliveries) != 2 {
 		t.Fatalf("outreach deliveries=%#v err=%v", deliveries, err)
+	}
+	attachmentDeliveries := 0
+	for _, delivery := range deliveries {
+		if delivery.SemanticPayload["kind"] == "attachment" &&
+			delivery.SemanticPayload["attachment_id"] == attachment.ID {
+			attachmentDeliveries++
+		}
+	}
+	if attachmentDeliveries != 1 {
+		t.Fatalf("outreach attachment deliveries=%#v", deliveries)
 	}
 	response = agentRequest(t, server.URL+"/api/v1/agent/channel/messages", http.MethodPost, token, map[string]any{
 		"request_id": "unknown-contact", "message": "不应发送",

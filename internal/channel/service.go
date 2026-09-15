@@ -72,6 +72,7 @@ type AgentOutreachInput struct {
 	Purpose                string   `json:"purpose"`
 	Message                string   `json:"message"`
 	MentionIdentityLinkIDs []string `json:"mention_identity_link_ids"`
+	AttachmentIDs          []string `json:"attachment_ids,omitempty"`
 }
 
 type KnowledgeGrantInput struct {
@@ -1655,7 +1656,9 @@ func (s *Service) SendAgentTaskChannelMessage(ctx context.Context, claims agenta
 		seen[identityID] = true
 		identityIDs = append(identityIDs, identityID)
 	}
-	delivery, conversationItemID, created, err := s.store.EnqueueTaskChannelOutreach(ctx, claims.TaskID, claims.TurnID, requestID, purpose, message, identityIDs, s.now().UTC())
+	delivery, conversationItemID, created, err := s.store.EnqueueTaskChannelOutreach(
+		ctx, claims.TaskID, claims.TurnID, requestID, purpose, message, identityIDs, input.AttachmentIDs, s.now().UTC(),
+	)
 	if err == nil && created && s.application != nil {
 		s.application.PublishAgentChannelOutreach(ctx, claims.TaskID, claims.TurnID, conversationItemID, len(identityIDs))
 	}

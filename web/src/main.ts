@@ -5,6 +5,7 @@ import {bindChannels, exportRetiredChannelInstance, purgeRetiredChannelInstance,
 import {icon} from "./icons.js";
 import {bindKnowledgeWorkspace, renderKnowledgeWorkspace} from "./knowledge_workspace.js";
 import {bindHardwarePanel, refreshHardwarePanel, stopHardwarePanel} from "./hardware_panel.js";
+import {bindDesktopPanel, desktopPanelInteracting, refreshDesktopPanel, stopDesktopPanel} from "./desktop_panel.js";
 import {renderMarkdown} from "./markdown.js";
 import {bindPromptAdmin, loadPromptCatalog, renderPromptAdmin} from "./prompt_admin.js";
 import {bindProxySettings, renderProxySettings} from "./proxy_settings.js";
@@ -305,6 +306,7 @@ let scrollConversationToBottom = false;
 let conversationBottomPinVersion = 0;
 let conversationAutoScrollBlockedUntil = 0;
 let composerFocusWasAtBottom = false;
+const conversationRenderedHTML = new WeakMap<HTMLElement, string>();
 let loadingOlderConversation = false;
 let taskListPointerActive = false;
 let appPointerActive = false;
@@ -911,6 +913,9 @@ async function bootstrap(): Promise<void> {
       persistNavigationState();
       openGlobalEvents();
       await ensureViewData(state.view);
+      // View-specific hydration can render again after restoreNavigationState.
+      // Make the final startup render authoritative for a restored conversation.
+      if (state.selectedTask) requestConversationBottom();
       prefetchSecondaryData();
     }
   } catch (error) {
@@ -1560,7 +1565,7 @@ function applyTaskToolLayout(): void {
     const label = split ? "全屏" : "小窗";
     toggle.title = `切换为${label}`;
     toggle.setAttribute("aria-label", `切换为${label}`);
-    toggle.innerHTML = `${icon(split ? "expand" : "panel")}<span>${label}</span>`;
+    toggle.innerHTML = `${icon(split ? "expand" : "panel")}${state.taskTool === "browser" ? "" : `<span>${label}</span>`}`;
   }
 }
 
@@ -1580,11 +1585,11 @@ function bindTaskToolLayout(): void {
   const grid = document.querySelector<HTMLElement>(".task-grid");
   const toggle = document.querySelector<HTMLButtonElement>("#toggle-task-tool-mode");
   const resizer = document.querySelector<HTMLElement>("#task-tool-resizer");
-  toggle?.addEventListener("click", () => {
+  if (toggle) toggle.onclick = () => {
     state.taskToolMode = state.taskToolMode === "split" ? "fullscreen" : "split";
     persistTaskToolLayout();
     applyTaskToolLayout();
-  });
+  };
   if (!grid || !resizer) return;
   resizer.setAttribute("aria-valuenow", String(state.taskToolWidth));
   resizer.addEventListener("dblclick", () => {
@@ -2659,6 +2664,26 @@ function stabilizeConversationBottom(list: HTMLElement): void {
   });
 }
 
+function captureConversationImages(list: HTMLElement | null): Map<string, HTMLImageElement[]> {
+  const images = new Map<string, HTMLImageElement[]>();
+  list?.querySelectorAll<HTMLButtonElement>("[data-image-preview]").forEach(button => {
+    const key = button.dataset.imagePreview || "";
+    const image = button.querySelector<HTMLImageElement>("img");
+    if (key && image) images.set(key, [...(images.get(key) || []), image]);
+  });
+  return images;
+}
+
+function restoreConversationImages(list: HTMLElement, images: Map<string, HTMLImageElement[]>): void {
+  list.querySelectorAll<HTMLButtonElement>("[data-image-preview]").forEach(button => {
+    const image = button.querySelector<HTMLImageElement>("img");
+    const preserved = images.get(button.dataset.imagePreview || "")?.shift();
+    if (image && preserved && image.getAttribute("src") === preserved.getAttribute("src")) {
+      image.replaceWith(preserved);
+    }
+  });
+}
+
 function renderUIScope(): string {
   if (state.selectedTask) return `task:${state.selectedTask.task.id}`;
   if (state.selectedProject) return `project:${state.selectedProject.id}`;
@@ -2683,16 +2708,24 @@ function updateTaskLiveRegions(): void {
   const activeTurn = (detail.turns || []).find(item => item.agent_id === state.selectedTaskAgent && isActiveTurn(item.status));
   const list = document.querySelector<HTMLElement>("#conversation-list");
   if (list) {
-    const ui = captureRegionUI(list);
-    const previousHeight = list.scrollHeight;
-    const previousTop = list.scrollTop;
-    const wasAtBottom = previousHeight - previousTop - list.clientHeight < 80;
-    list.innerHTML = conversationListHtml();
-    restoreRegionUI(list, ui, false);
-    if (shouldAutoScrollConversation(wasAtBottom)) stabilizeConversationBottom(list);
-    else list.scrollTop = previousTop;
+    const nextHTML = conversationListHtml();
+    if (conversationRenderedHTML.get(list) !== nextHTML) {
+      const ui = captureRegionUI(list);
+      const images = captureConversationImages(list);
+      const previousHeight = list.scrollHeight;
+      const previousTop = list.scrollTop;
+      const wasAtBottom = previousHeight - previousTop - list.clientHeight < 80;
+      list.innerHTML = nextHTML;
+      conversationRenderedHTML.set(list, nextHTML);
+      restoreConversationImages(list, images);
+      restoreRegionUI(list, ui, false);
+      if (shouldAutoScrollConversation(wasAtBottom)) stabilizeConversationBottom(list);
+      else list.scrollTop = previousTop;
+      bindConversationLiveControls();
+    } else if (scrollConversationToBottom) {
+      stabilizeConversationBottom(list);
+    }
     scrollConversationToBottom = false;
-    bindConversationLiveControls();
   }
   const turnSlot = document.querySelector<HTMLElement>("#agent-turn-slot");
   if (turnSlot) replaceRegionHTML(turnSlot, renderAgentTurnCard(detail, state.taskRealtimeState, state.taskContext?.context.metrics));
@@ -2710,6 +2743,8 @@ function updateTaskLiveRegions(): void {
   const toolBody = document.querySelector<HTMLElement>("#task-tool-panel-body");
   if (toolBody && state.taskTool === "hardware") {
     refreshHardwarePanel(detail, setMessage);
+  } else if (toolBody && state.taskTool === "browser") {
+    refreshDesktopPanel(detail, setMessage);
   } else if (toolBody && state.taskTool) {
     replaceRegionHTML(toolBody, renderTaskToolContent(state.taskTool, detail, taskCtxHtml(), taskChannelPanelHTML()));
     bindSessionActions();
@@ -2727,6 +2762,8 @@ function updateTaskLiveRegions(): void {
 
 function render(): void {
   if (!app) return;
+  if (!state.auth?.authenticated || !state.selectedTask || state.taskTool !== "browser"
+    || document.querySelector<HTMLElement>("#desktop-tool")?.dataset.taskId !== state.selectedTask.task.id) stopDesktopPanel();
   document.body.classList.toggle("task-view-active", Boolean(state.selectedTask));
   if (state.loading) {
     delete app.dataset.uiScope;
@@ -2757,6 +2794,13 @@ function render(): void {
     state.renderPending = true;
     return;
   }
+  if (state.taskTool === "browser" && state.selectedTask
+    && document.querySelector<HTMLElement>("#desktop-tool")?.dataset.taskId === state.selectedTask.task.id
+    && desktopPanelInteracting()) {
+    state.renderPending = true;
+    updateTaskLiveRegions();
+    return;
+  }
   persistNavigationState();
   if (document.activeElement instanceof HTMLTextAreaElement && document.activeElement.closest("#message-form")) {
     state.renderPending = true;
@@ -2771,6 +2815,7 @@ function render(): void {
   const previousTurnUI = captureRegionUI(document.querySelector<HTMLElement>("#agent-turn-slot"));
   const previousToolUI = captureRegionUI(document.querySelector<HTMLElement>("#task-tool-panel-body"));
   const previousConversationUI = captureRegionUI(previousConversation);
+  const previousConversationImages = captureConversationImages(previousConversation);
   const previousScrollTop = previousConversation?.scrollTop || 0;
   const previousScrollHeight = previousConversation?.scrollHeight || 0;
   const wasAtConversationBottom = previousConversation
@@ -2803,9 +2848,18 @@ function render(): void {
     };
     content = views[state.view]();
   }
+  const preservedDesktop = state.taskTool === "browser" && preservePageUI
+    ? document.querySelector<HTMLElement>(`#desktop-tool[data-read-only="${Boolean(state.selectedTask?.task.read_only)}"]`) : null;
+  const nextConversationHTML = state.selectedTask && !state.taskDetailLoading ? conversationListHtml() : "";
+  const preservedConversation = previousConversation && preservePageUI
+    && conversationRenderedHTML.get(previousConversation) === nextConversationHTML ? previousConversation : null;
   app.innerHTML = content;
+  if (preservedDesktop) document.querySelector("#desktop-tool")?.replaceWith(preservedDesktop);
   app.dataset.uiScope = nextUIScope;
+  const renderedConversation = document.querySelector<HTMLElement>("#conversation-list");
+  if (!preservedConversation && renderedConversation) restoreConversationImages(renderedConversation, previousConversationImages);
   bindCommon();
+  if (preservedConversation) document.querySelector("#conversation-list")?.replaceWith(preservedConversation);
   restoreRegionUI(app, previousAppUI, false);
   if (state.selectedTask) {
     restoreRegionUI(document.querySelector<HTMLElement>("#agent-turn-slot"), previousTurnUI);
@@ -2813,11 +2867,16 @@ function render(): void {
   }
   const nextConversation = document.querySelector<HTMLElement>("#conversation-list");
   if (nextConversation) {
-    restoreRegionUI(nextConversation, previousConversationUI, false);
-    if (shouldAutoScrollConversation(wasAtConversationBottom)) {
-      stabilizeConversationBottom(nextConversation);
+    if (preservedConversation) {
+      if (scrollConversationToBottom) stabilizeConversationBottom(nextConversation);
     } else {
-      nextConversation.scrollTop = previousScrollTop;
+      if (!state.taskDetailLoading) conversationRenderedHTML.set(nextConversation, nextConversationHTML);
+      restoreRegionUI(nextConversation, previousConversationUI, false);
+      if (shouldAutoScrollConversation(wasAtConversationBottom)) {
+        stabilizeConversationBottom(nextConversation);
+      } else {
+        nextConversation.scrollTop = previousScrollTop;
+      }
     }
   }
   if (preservePageUI) window.scrollTo(0, previousWindowScroll);
@@ -3761,6 +3820,7 @@ function bindCommon(): void {
   document.querySelectorAll<HTMLElement>("[data-task-tool]").forEach(button => button.addEventListener("click", async () => {
     const tool = button.dataset.taskTool as TaskTool;
     if (state.taskTool === "hardware") stopHardwarePanel();
+    if (state.taskTool === "browser") stopDesktopPanel();
     if (state.taskTool === tool) {
       state.taskTool = "";
       render();
@@ -3794,11 +3854,13 @@ function bindCommon(): void {
     render();
   }));
   bindSessionActions();
-  document.querySelector("#close-task-tool")?.addEventListener("click", () => {
+  const closeTaskTool = document.querySelector<HTMLButtonElement>("#close-task-tool");
+  if (closeTaskTool) closeTaskTool.onclick = () => {
     if (state.taskTool === "hardware") stopHardwarePanel();
+    if (state.taskTool === "browser") stopDesktopPanel();
     state.taskTool = "";
     render();
-  });
+  };
   document.querySelector<HTMLTextAreaElement>("#message-form textarea")?.addEventListener("paste", event => {
     const files = clipboardImageFiles(event);
     if (!files.length) return;
@@ -3807,6 +3869,7 @@ function bindCommon(): void {
   });
   bindTaskToolLayout();
   if (state.taskTool === "hardware" && state.selectedTask) bindHardwarePanel(state.selectedTask, setMessage);
+  if (state.taskTool === "browser" && state.selectedTask) bindDesktopPanel(state.selectedTask, setMessage);
   if (state.taskTool === "channel" && state.selectedTask) bindTaskChannelPanel();
   if (state.view === "knowledge" && !state.selectedProject && !state.selectedTask) bindKnowledgeWorkspace({
     projects: state.projects,
@@ -4054,7 +4117,9 @@ async function loadOlderConversation(): Promise<void> {
     state.taskConversationHasMore = page.conversation.has_more && state.taskConversation.length < 300;
     state.taskConversationBefore = page.conversation.next_before || 0;
     if (list) {
-      list.innerHTML = conversationListHtml();
+      const nextHTML = conversationListHtml();
+      list.innerHTML = nextHTML;
+      conversationRenderedHTML.set(list, nextHTML);
       restoreRegionUI(list, ui, false);
       list.scrollTop = previousTop + Math.max(0, list.scrollHeight - previousHeight);
       bindConversationLiveControls();

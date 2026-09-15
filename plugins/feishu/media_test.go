@@ -42,6 +42,28 @@ func TestNormalizedInboundImagesUseAttachmentsNotResourceURLs(t *testing.T) {
 	}
 }
 
+func TestNormalizedInboundDirectPostUsesRawEventResources(t *testing.T) {
+	messageType := "post"
+	content := `{"title":"","content":[[{"tag":"text","text":"引用图片"},{"tag":"img","image_key":"img_direct"}]]}`
+	event := &larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Message: &larkim.EventMessage{
+				MessageType: &messageType,
+				Content:     &content,
+			},
+		},
+	}
+	message := normalize.ParseMessage(event)
+	if message.Content != "[rich text message]" || len(message.Resources) != 0 {
+		t.Fatalf("fixture no longer reproduces SDK direct-post gap: %#v", message)
+	}
+	got, resources := normalizedInboundMedia(message)
+	if got != "引用图片[图片附件]" || len(resources) != 1 ||
+		resources[0]["type"] != "image" || resources[0]["file_key"] != "img_direct" {
+		t.Fatalf("content=%q resources=%#v", got, resources)
+	}
+}
+
 func TestNormalizedInboundMentionsSeparateSenderVisibleText(t *testing.T) {
 	message := &channeltypes.NormalizedMessage{
 		Content: "@_user_1 请和 @_user_2 联调",
@@ -154,6 +176,20 @@ func TestMediaRenderUsesProviderNativeMessageTypes(t *testing.T) {
 		}
 		if payload[field] != "resource" {
 			t.Fatalf("payload=%#v", payload)
+		}
+	}
+}
+
+func TestMediaMentionsDoNotConvertNativeAttachmentsToRichText(t *testing.T) {
+	target := map[string]string{
+		"mention_user_ids": `["group-user"]`,
+		"mention_names":    `["群成员"]`,
+	}
+	for _, kind := range []string{"image", "file"} {
+		msgType, content := renderDelivery(map[string]any{"kind": "provider_media", "resource_type": kind, "resource_key": "resource"})
+		actualType, actualContent := applyDeliveryMentions(msgType, content, target)
+		if actualType != kind || actualContent != content {
+			t.Fatalf("%s attachment converted to %s: %s", kind, actualType, actualContent)
 		}
 	}
 }

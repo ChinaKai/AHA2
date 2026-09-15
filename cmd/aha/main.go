@@ -276,6 +276,7 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 	if options.allowCrossOrigin {
 		logger.Warn("Origin host validation disabled")
 	}
+	defer apiServer.CloseDesktop()
 	server := &http.Server{
 		Addr:              options.listen,
 		Handler:           apiServer.Handler(),

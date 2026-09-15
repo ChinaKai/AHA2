@@ -1,5 +1,6 @@
 import {icon} from "./icons.js";
 import {renderHardwareGroupSwitcher, renderHardwarePanel} from "./hardware_panel.js";
+import {renderDesktopHeaderControls, renderDesktopPanel} from "./desktop_panel.js";
 import {renderTaskMemory} from "./task_agents.js";
 import type {TaskDetail} from "./types.js";
 
@@ -22,7 +23,7 @@ const tools: Array<{id: TaskTool; label: string; iconName: string}> = [
   {id: "channel", label: "渠道", iconName: "bot"},
   {id: "context", label: "Context", iconName: "context"},
   {id: "hardware", label: "硬件调试", iconName: "hardware"},
-  {id: "browser", label: "浏览器", iconName: "browser"},
+  {id: "browser", label: "共享控制", iconName: "browser"},
   {id: "memory", label: "Task Memory", iconName: "knowledge"},
 ];
 
@@ -57,10 +58,7 @@ export function renderTaskToolContent(
   if (tool === "context") return contextHTML;
   if (tool === "memory") return `<div class="task-memory-tool">${renderTaskMemory(detail.memory)}</div>`;
   if (tool === "hardware") return renderHardwarePanel(detail);
-  if (tool === "browser") {
-    const label = taskToolTitle(tool);
-    return `<div class="task-tool-placeholder">${icon(tool)}<h3>${escapeHTML(label)}</h3><p>该工具将在后续版本接入。</p></div>`;
-  }
+  if (tool === "browser") return renderDesktopPanel(detail);
   return "";
 }
 
@@ -75,6 +73,13 @@ export function renderTaskToolPanel(
   const switchLabel = mode === "split" ? "全屏" : "小窗";
   const switchIcon = mode === "split" ? "expand" : "panel";
   const hardwareSwitcher = tool === "hardware" ? renderHardwareGroupSwitcher(detail) : "";
+  if (tool === "browser" && !detail.task.read_only) {
+    const header = `<header class="task-tool-panel-head desktop-task-header"><div class="task-tool-panel-title"><h3>共享控制</h3></div>
+      ${renderDesktopHeaderControls()}<div class="task-tool-panel-actions desktop-page-actions" role="group" aria-label="工具面板布局与关闭">
+      <button type="button" id="toggle-task-tool-mode" class="icon-button" title="切换为${switchLabel}" aria-label="切换为${switchLabel}">${icon(switchIcon)}</button>
+      <button type="button" id="close-task-tool" class="icon-button" title="关闭" aria-label="关闭">${icon("close")}</button></div></header>`;
+    return `<aside class="task-tool-panel open ${mode} desktop-task-panel"><div id="task-tool-resizer" class="task-tool-resizer" role="separator" aria-label="调整工具面板宽度" aria-orientation="vertical" aria-valuemin="30" aria-valuemax="70" tabindex="0"></div>${renderDesktopPanel(detail, header)}</aside>`;
+  }
   return `<aside class="task-tool-panel ${tool ? "open" : ""} ${mode}">
     <div id="task-tool-resizer" class="task-tool-resizer" role="separator" aria-label="调整工具面板宽度" aria-orientation="vertical" aria-valuemin="30" aria-valuemax="70" tabindex="0" title="拖动调整宽度，双击恢复默认"></div>
     <header class="task-tool-panel-head"><div class="task-tool-panel-title"><div class="task-tool-panel-title-row"><h3>${escapeHTML(taskToolTitle(tool))}</h3>${hardwareSwitcher}</div><small>${escapeHTML(agentID)}</small></div><div class="task-tool-panel-actions"><button type="button" id="toggle-task-tool-mode" class="task-tool-mode-toggle" title="切换为${switchLabel}" aria-label="切换为${switchLabel}">${icon(switchIcon)}<span>${switchLabel}</span></button><button type="button" id="close-task-tool" class="icon-button" title="关闭">${icon("close")}</button></div></header>

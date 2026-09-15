@@ -14,6 +14,7 @@ import (
 	"time"
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
+	"github.com/larksuite/oapi-sdk-go/v3/channel/normalize"
 	channeltypes "github.com/larksuite/oapi-sdk-go/v3/channel/types"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
@@ -65,22 +66,23 @@ func mediaProviderError(stage string, status, code int) error {
 var inboundImageReference = regexp.MustCompile(`!\[[^\]\r\n]*\]\(([^)\r\n]+)\)`)
 
 func normalizedInboundMedia(message *channeltypes.NormalizedMessage) (string, []map[string]any) {
-	resources := make([]map[string]any, 0, len(message.Resources))
+	content, sourceResources := repairedInboundPost(message)
+	resources := make([]map[string]any, 0, len(sourceResources))
 	imageKeys := make(map[string]bool)
-	for _, resource := range message.Resources {
+	for _, resource := range sourceResources {
 		resources = append(resources, map[string]any{"type": resource.Type, "file_key": resource.FileKey, "file_name": resource.FileName})
 		if resource.Type == "image" && resource.FileKey != "" {
 			imageKeys[resource.FileKey] = true
 		}
 	}
-	content := inboundImageReference.ReplaceAllStringFunc(message.Content, func(reference string) string {
+	content = inboundImageReference.ReplaceAllStringFunc(content, func(reference string) string {
 		match := inboundImageReference.FindStringSubmatch(reference)
 		if imageKeys[match[1]] {
 			return "[图片附件]"
 		}
 		return reference
 	})
-	for _, resource := range message.Resources {
+	for _, resource := range sourceResources {
 		if resource.FileKey != "" {
 			content = strings.ReplaceAll(content, resource.FileKey, "[附件]")
 		}
@@ -95,6 +97,36 @@ func normalizedInboundMedia(message *channeltypes.NormalizedMessage) (string, []
 		}
 	}
 	content = strings.TrimSpace(content)
+	return content, resources
+}
+
+func repairedInboundPost(message *channeltypes.NormalizedMessage) (string, []channeltypes.Resource) {
+	if message == nil {
+		return "", nil
+	}
+	if message.RawContentType != "post" {
+		return message.Content, message.Resources
+	}
+	event, ok := message.RawEvent.(*larkim.P2MessageReceiveV1)
+	if !ok || event.Event == nil || event.Event.Message == nil || event.Event.Message.Content == nil {
+		return message.Content, message.Resources
+	}
+	raw := []byte(*event.Event.Message.Content)
+	var body map[string]json.RawMessage
+	if json.Unmarshal(raw, &body) != nil {
+		return message.Content, message.Resources
+	}
+	if len(body["content"]) == 0 && len(body["content_v2"]) == 0 {
+		return message.Content, message.Resources
+	}
+	wrapped, err := json.Marshal(map[string]json.RawMessage{"zh_cn": raw})
+	if err != nil {
+		return message.Content, message.Resources
+	}
+	content, resources := normalize.ParseContent("post", string(wrapped))
+	if content == "[rich text message]" && len(resources) == 0 {
+		return message.Content, message.Resources
+	}
 	return content, resources
 }
 

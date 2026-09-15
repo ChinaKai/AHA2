@@ -10,7 +10,7 @@ await rm(output, {recursive: true, force: true});
 await mkdir(output, {recursive: true});
 await mkdir(resolve(output, "vendor"), {recursive: true});
 
-for (const name of ["api", "icons", "types", "runtime_picker", "task_agents", "task_composer", "task_filters", "hardware_terminal", "hardware_panel", "task_tools", "markdown", "conversation_ui", "ui_helpers", "prompt_admin", "proxy_settings", "sync_settings", "codex_accounts", "knowledge_workspace", "channels", "main"]) {
+for (const name of ["api", "icons", "types", "runtime_picker", "task_agents", "task_composer", "task_filters", "hardware_terminal", "hardware_panel", "desktop_panel", "task_tools", "markdown", "conversation_ui", "ui_helpers", "prompt_admin", "proxy_settings", "sync_settings", "codex_accounts", "knowledge_workspace", "channels", "main"]) {
   const input = await readFile(resolve(source, "src", `${name}.ts`), "utf8");
   const transformed = stripTypeScriptTypes(input, {mode: "transform", sourceMap: false});
   const outputName = name === "main" ? "app" : name;
@@ -31,6 +31,7 @@ const versionSource = await Promise.all([
   readFile(resolve(output, "task_composer.js")),
   readFile(resolve(output, "task_filters.js")),
   readFile(resolve(output, "hardware_panel.js")),
+  readFile(resolve(output, "desktop_panel.js")),
   readFile(resolve(output, "hardware_terminal.js")),
   readFile(resolve(output, "task_tools.js")),
   readFile(resolve(output, "markdown.js")),
@@ -56,6 +57,7 @@ const versionedApp = (await readFile(appPath, "utf8"))
   .replaceAll('"./task_composer.js"', `"./task_composer.js?v=${version}"`)
   .replaceAll('"./task_filters.js"', `"./task_filters.js?v=${version}"`)
   .replaceAll('"./hardware_panel.js"', `"./hardware_panel.js?v=${version}"`)
+  .replaceAll('"./desktop_panel.js"', `"./desktop_panel.js?v=${version}"`)
   .replaceAll('"./hardware_terminal.js"', `"./hardware_terminal.js?v=${version}"`)
   .replaceAll('"./task_tools.js"', `"./task_tools.js?v=${version}"`)
   .replaceAll('"./markdown.js"', `"./markdown.js?v=${version}"`)
@@ -89,6 +91,7 @@ const taskToolsPath = resolve(output, "task_tools.js");
 const versionedTaskTools = (await readFile(taskToolsPath, "utf8"))
   .replaceAll('"./icons.js"', `"./icons.js?v=${version}"`)
   .replaceAll('"./hardware_panel.js"', `"./hardware_panel.js?v=${version}"`)
+  .replaceAll('"./desktop_panel.js"', `"./desktop_panel.js?v=${version}"`)
   .replaceAll('"./task_agents.js"', `"./task_agents.js?v=${version}"`);
 await writeFile(taskToolsPath, versionedTaskTools);
 const hardwarePanelPath = resolve(output, "hardware_panel.js");
@@ -97,6 +100,11 @@ const versionedHardwarePanel = (await readFile(hardwarePanelPath, "utf8"))
   .replaceAll('"./icons.js"', `"./icons.js?v=${version}"`)
   .replaceAll('"./hardware_terminal.js"', `"./hardware_terminal.js?v=${version}"`);
 await writeFile(hardwarePanelPath, versionedHardwarePanel);
+const desktopPanelPath = resolve(output, "desktop_panel.js");
+const versionedDesktopPanel = (await readFile(desktopPanelPath, "utf8"))
+  .replaceAll('"./api.js"', `"./api.js?v=${version}"`)
+  .replaceAll('"./icons.js"', `"./icons.js?v=${version}"`);
+await writeFile(desktopPanelPath, versionedDesktopPanel);
 const promptAdminPath = resolve(output, "prompt_admin.js");
 const versionedPromptAdmin = (await readFile(promptAdminPath, "utf8"))
   .replaceAll('"./api.js"', `"./api.js?v=${version}"`);

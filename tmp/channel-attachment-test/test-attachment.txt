@@ -1,0 +1,4 @@
+AHA2 group channel attachment delivery test
+Date: 2026-09-15
+Task: task-007
+Purpose: verify native file delivery in group and interop mode.

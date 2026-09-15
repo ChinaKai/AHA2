@@ -389,6 +389,147 @@ body.task-tool-resizing { cursor: col-resize; user-select: none; }
 .task-tool-mode-toggle { gap: 5px; padding: 0 9px !important; font-size: 9px; }
 .task-tool-mode-toggle .icon { width: 13px; height: 13px; }
 #task-tool-panel-body { width: 100%; height: 100%; min-width: 0; min-height: 0; overflow: auto; }
+.desktop-tool { container: shared-desktop / inline-size; position: relative; display: flex; flex-direction: column; width: 100%; height: 100%; min-width: 0; min-height: 0; overflow: hidden; color: var(--ink); background: var(--surface); font-size: 12px; letter-spacing: 0; }
+.desktop-task-panel { display: block; }
+.desktop-task-header { flex: 0 0 52px; min-height: 52px; justify-content: flex-start; gap: 8px; padding: 6px 8px; }
+.desktop-task-header .task-tool-panel-title { flex: 0 0 auto; }
+.desktop-task-header h3 { white-space: nowrap; font-size: 12px; }
+.desktop-header-controls, .desktop-task-header .task-tool-panel-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 3px; }
+.desktop-task-header .desktop-page-actions { margin-left: auto; padding-left: 8px; border-left: 1px solid var(--line); }
+.desktop-task-header .icon-button { width: 28px; min-width: 28px; height: 30px; min-height: 30px; padding: 0; }
+.desktop-task-header #desktop-stop { margin: 0; }
+.desktop-header-controls button[aria-pressed="true"] { border-color: var(--green); color: var(--green); background: #edf8f0; }
+.desktop-header-controls button[aria-expanded="true"] { border-color: var(--blue); color: var(--blue); background: #edf3ff; }
+#task-tool-panel-body.desktop-body { position: relative; display: flex; flex: 1 1 0; height: auto; overflow: hidden; }
+.desktop-popover { position: absolute; top: 92px; left: 8px; z-index: 8; display: grid; gap: 10px; width: min(380px, calc(100% - 16px)); max-height: calc(100% - 144px); overflow: auto; overscroll-behavior: contain; padding: 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); box-shadow: 0 5px 18px rgb(0 0 0 / 14%); }
+.desktop-popover .desktop-mode-row, .desktop-popover .desktop-toolbar { margin: 0; padding: 0; border: 0; }
+.desktop-popover label { margin-bottom: 0; }
+.desktop-popover .desktop-target { margin: 0; }
+.desktop-popover .desktop-target small { display: block; }
+.desktop-popover .desktop-target strong { white-space: normal; }
+.desktop-popover .desktop-input { border: 0; }
+.desktop-popover .desktop-view-controls { flex-wrap: wrap; margin: 0; }
+.desktop-popover #desktop-video-metrics { font-size: 11px; color: var(--muted); overflow-wrap: anywhere; }
+.desktop-target-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.desktop-alert { position: absolute; top: 6px; left: 8px; right: 8px; z-index: 5; padding: 8px; border: 1px solid #efc4bd; border-radius: 4px; background: #fff2ee; }
+.desktop-empty-target { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); white-space: nowrap; }
+.desktop-capture-notice { position: absolute; bottom: 8px; left: 12px; right: 12px; text-align: center; pointer-events: none; }
+@media (max-width: 360px) {
+  .desktop-task-header { gap: 3px; padding: 6px 4px; }
+  .desktop-header-controls, .desktop-task-header .task-tool-panel-actions { gap: 2px; }
+  .desktop-task-header .icon-button { width: 24px; min-width: 24px; }
+  .desktop-task-header .desktop-page-actions { padding-left: 5px; }
+}
+@container shared-desktop (max-width: 360px) {
+  .desktop-task-header { gap: 3px; padding: 6px 4px; }
+  .desktop-header-controls, .desktop-task-header .task-tool-panel-actions { gap: 2px; }
+  .desktop-task-header .icon-button { width: 24px; min-width: 24px; }
+  .desktop-task-header .desktop-page-actions { padding-left: 5px; }
+}
+.desktop-tool:fullscreen { width: 100vw; height: 100dvh; background: var(--surface); }
+.desktop-tool:not(.desktop-sharing) .desktop-video-toolbar { display: none; }
+.desktop-tool:fullscreen .desktop-video-toolbar { display: flex; }
+.desktop-tool:not(.desktop-sharing) .desktop-tools { max-height: 75%; }
+.desktop-tool [hidden] { display: none !important; }
+.desktop-tool button { min-height: 34px; font-size: 12px; }
+.desktop-tool button:focus-visible, .desktop-tool textarea:focus-visible, .desktop-tool select:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+.desktop-toolbar { display: flex; align-items: end; gap: 8px; padding: 12px; border-bottom: 1px solid var(--line); }
+.desktop-window-label { flex: 1; min-width: 0; margin: 0; }
+.desktop-window-label select { min-width: 0; text-overflow: ellipsis; }
+.desktop-toolbar > button { flex: 0 0 auto; height: 38px; }
+.desktop-session { flex: 0 0 auto; z-index: 2; padding: 8px 10px; border-bottom: 1px solid var(--line); background: var(--surface); }
+.desktop-target { display: flex; align-items: center; gap: 9px; margin-bottom: 6px; }
+.desktop-target > div { min-width: 0; }
+.desktop-target strong, .desktop-target small { display: block; overflow-wrap: anywhere; }
+.desktop-target strong { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.desktop-target small { display: none; }
+.desktop-control-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+#desktop-stop { margin-left: auto; }
+.desktop-controller { display: inline-flex; min-width: 0; }
+.desktop-controller button { border-radius: 0; }
+.desktop-controller button:first-child { border-radius: 5px 0 0 5px; }
+.desktop-controller button:last-child { border-radius: 0 5px 5px 0; margin-left: -1px; }
+.desktop-controller button.active { position: relative; border-color: var(--green); background: #edf8f0; color: #126c34; }
+.desktop-status { margin: 4px 0 0; color: var(--muted); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.desktop-error { max-height: 56px; overflow: auto; margin: 4px 0 0; color: var(--red); line-height: 1.5; overflow-wrap: anywhere; }
+.desktop-observation { flex: 1 1 0; display: flex; flex-direction: column; min-height: 0; min-width: 0; padding: 8px; border-bottom: 1px solid var(--line); background: #f3f5f7; overflow: hidden; }
+.desktop-viewport { flex: 1 1 0; display: flex; width: 100%; min-height: 0; min-width: 0; overflow: auto; overscroll-behavior: contain; }
+.desktop-preview { flex: 0 0 auto; position: relative; width: 100%; margin: auto; overflow: hidden; background: #e5e8ec; }
+.desktop-preview img { display: block; width: 100%; height: 100%; object-fit: contain; }
+.desktop-highlight { position: absolute; border: 2px solid var(--blue); background: rgb(37 99 235 / 10%); pointer-events: none; }
+.desktop-empty { margin: 8px 0; color: var(--muted); line-height: 1.6; overflow-wrap: anywhere; }
+.desktop-tools { flex: 0 1 auto; max-height: 38%; min-height: 32px; overflow: auto; overscroll-behavior: contain; border-top: 1px solid var(--line); }
+.desktop-tools > details { padding: 0 10px; border-bottom: 1px solid var(--line); }
+.desktop-tools > details > summary { min-height: 32px; padding: 7px 0; cursor: pointer; font-weight: 600; line-height: 18px; }
+.desktop-tools > details[open] { padding-bottom: 10px; }
+.desktop-settings .desktop-mode-row { padding: 6px 0 0; }
+.desktop-settings .desktop-toolbar { padding: 8px 0 0; border: 0; }
+.desktop-inspector { min-width: 0; }
+.desktop-inspector > header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.desktop-inspector h4 { margin: 0; font-size: 12px; }
+.desktop-inspector > header small { color: var(--muted); font-variant-numeric: tabular-nums; }
+.desktop-elements { max-height: 240px; overflow: auto; overscroll-behavior: contain; }
+.desktop-element { display: flex; justify-content: space-between; width: 100%; gap: 10px; padding: 8px; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; text-align: left; }
+.desktop-element span { min-width: 0; overflow-wrap: anywhere; }
+.desktop-element small { flex: 0 1 40%; color: var(--muted); overflow-wrap: anywhere; }
+.desktop-element[aria-pressed="true"] { background: #edf3ff; color: #1d4ed8; }
+.desktop-selection { display: grid; gap: 5px; padding: 12px 0 8px; overflow-wrap: anywhere; }
+.desktop-selection small { max-height: 100px; overflow: auto; white-space: pre-wrap; color: var(--muted); }
+.desktop-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.desktop-value-form { display: grid; gap: 8px; margin-top: 10px; }
+.desktop-value-form label { margin: 0; }
+.desktop-value-form textarea { min-width: 0; min-height: 64px; }
+.desktop-value-form button { justify-self: end; }
+.desktop-mode-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 10px 12px 0; }
+.desktop-mode-row > span { color: var(--amber); font-size: 11px; overflow-wrap: anywhere; }
+.desktop-input { border-bottom: 1px solid var(--line); }
+.desktop-input-toolbar { display: flex; flex-wrap: wrap; gap: 6px; }
+.desktop-video-toolbar { flex: 0 0 auto; display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 6px 10px; border-bottom: 1px solid var(--line); }
+.desktop-view-controls { display: flex; align-items: center; gap: 5px; margin-left: auto; }
+.desktop-view-controls .icon-button { width: 30px; height: 30px; min-height: 30px; padding: 0; }
+.desktop-view-controls button[aria-pressed="true"] { border-color: var(--green); background: #edf8f0; color: #126c34; }
+.desktop-view-controls input[type="range"] { width: 64px; min-width: 0; height: 24px; margin: 0; padding: 0; }
+.desktop-view-controls output { width: 34px; font-size: 11px; text-align: center; font-variant-numeric: tabular-nums; }
+.desktop-video-toolbar > #desktop-video-metrics { flex: 0 0 100%; }
+.desktop-video-toolbar > span { min-width: 0; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.desktop-input-surface { touch-action: none; cursor: crosshair; }
+.desktop-input-surface:focus { outline: 2px solid var(--blue); outline-offset: -2px; }
+#desktop-input-status:empty { display: none; }
+@media (max-width: 400px) {
+  .desktop-session { padding: 6px 8px; }
+  .desktop-observation { padding: 6px; }
+  .desktop-video-toolbar { padding: 6px 8px; }
+  .desktop-toolbar { gap: 6px; }
+  .desktop-tool button { padding-left: 9px; padding-right: 9px; }
+  .desktop-tool .icon-button { padding: 0; }
+  .desktop-control-row { gap: 6px; }
+}
+.desktop-picture-bar { display: flex; flex: 0 0 40px; height: 40px; align-items: center; gap: 8px; min-width: 0; padding: 4px 8px; border-bottom: 1px solid var(--line); background: var(--surface); }
+.desktop-picture-bar > .desktop-controller { flex: 0 0 auto; }
+.desktop-picture-bar button { flex: 0 0 auto; height: 28px; min-height: 28px; padding: 0 7px; font-size: 11px; white-space: nowrap; }
+.desktop-picture-bar .desktop-view-controls { flex: 0 0 auto; gap: 3px; }
+.desktop-picture-bar .icon-button { width: 26px; min-width: 26px; padding: 0; }
+.desktop-picture-bar #desktop-video-metrics { flex: 1 1 0; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.desktop-input-bar { display: flex; flex: 0 0 44px; height: 44px; min-width: 0; align-items: center; gap: 6px; padding: 6px 8px; border-top: 1px solid var(--line); background: var(--surface); }
+.desktop-input-bar .desktop-input-toolbar, .desktop-key-options { display: flex; flex: 0 0 auto; align-items: center; flex-wrap: nowrap; gap: 4px; }
+.desktop-input-bar button { flex: 0 0 auto; height: 30px; min-height: 30px; padding: 0 6px; font-size: 11px; white-space: nowrap; }
+.desktop-input-bar .icon-button { width: 28px; min-width: 28px; padding: 0; }
+.desktop-text-form { display: flex; flex: 1 1 0; align-items: center; gap: 4px; min-width: 0; margin: 0; }
+.desktop-text-form textarea { flex: 1 1 0; width: 0; min-width: 40px; height: 30px; min-height: 30px; max-height: 30px; padding: 5px 6px; resize: none; font-size: 12px; line-height: 18px; }
+.desktop-text-form textarea[aria-invalid="true"] { border-color: var(--red); }
+#desktop-more-keys { display: none; }
+@container shared-desktop (max-width: 720px) {
+  .desktop-key-options { display: none; }
+  #desktop-more-keys { display: inline-flex; }
+  .desktop-key-options.open { display: flex; position: absolute; bottom: 44px; left: 8px; z-index: 9; flex-wrap: wrap; width: max-content; max-width: calc(100% - 16px); max-height: calc(100% - 100px); overflow: auto; padding: 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); box-shadow: 0 5px 18px rgb(0 0 0 / 14%); }
+  .desktop-picture-bar #desktop-video-metrics { display: none; }
+}
+@container shared-desktop (max-width: 360px) {
+  .desktop-picture-bar, .desktop-input-bar { padding-left: 4px; padding-right: 4px; gap: 4px; }
+  .desktop-picture-bar .desktop-view-controls { gap: 2px; }
+  .desktop-picture-bar .desktop-view-controls input[type="range"] { width: 44px; }
+  .desktop-picture-bar .desktop-view-controls output { width: 30px; }
+}
 .task-memory-tool { width: min(960px,100%); min-width: 0; margin: 0 auto; padding: 14px; }
 .task-tool-placeholder { display: grid; place-items: center; align-content: center; min-height: 100%; padding: 28px; color: var(--muted); text-align: center; }
 .task-tool-placeholder .icon { width: 30px; height: 30px; }
