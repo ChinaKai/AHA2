@@ -49,7 +49,13 @@ func (s *Server) channelRuntimeUploadMedia(writer http.ResponseWriter, request *
 }
 
 func (s *Server) channelRuntimeMediaContent(writer http.ResponseWriter, request *http.Request) {
-	item, content, err := s.channels.DeliveryAttachment(request.Context(), channelRuntimeClaims(request.Context()), request.PathValue("id"), request.Header.Get("X-AHA-Lease-ID"))
+	item, content, err := s.channels.DeliveryAttachment(
+		request.Context(),
+		channelRuntimeClaims(request.Context()),
+		request.PathValue("id"),
+		request.Header.Get("X-AHA-Lease-ID"),
+		request.URL.Query().Get("attachment_id"),
+	)
 	if err != nil {
 		writeChannelRuntimeError(writer, err)
 		return
@@ -65,6 +71,7 @@ func (s *Server) channelRuntimeMediaUploaded(writer http.ResponseWriter, request
 	var payload struct {
 		SchemaVersion int    `json:"schema_version"`
 		LeaseID       string `json:"lease_id"`
+		AttachmentID  string `json:"attachment_id"`
 		ResourceType  string `json:"resource_type"`
 		ResourceKey   string `json:"resource_key"`
 	}
@@ -72,7 +79,7 @@ func (s *Server) channelRuntimeMediaUploaded(writer http.ResponseWriter, request
 		writeError(writer, http.StatusUnprocessableEntity, "invalid_envelope")
 		return
 	}
-	if err := s.channels.RecordMediaUpload(request.Context(), channelRuntimeClaims(request.Context()), request.PathValue("id"), payload.LeaseID, payload.ResourceType, payload.ResourceKey); err != nil {
+	if err := s.channels.RecordMediaUpload(request.Context(), channelRuntimeClaims(request.Context()), request.PathValue("id"), payload.LeaseID, payload.AttachmentID, payload.ResourceType, payload.ResourceKey); err != nil {
 		writeChannelRuntimeError(writer, err)
 		return
 	}

@@ -194,6 +194,88 @@ func TestMediaMentionsDoNotConvertNativeAttachmentsToRichText(t *testing.T) {
 	}
 }
 
+func TestOutreachImageSendsMentionTextAndImageInOnePost(t *testing.T) {
+	png := []byte("\x89PNG\r\n\x1a\nfixture")
+	reads, records, uploads, sends := 0, 0, 0, 0
+	runtimeServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch {
+		case request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/deliveries/delivery/attachment"):
+			reads++
+			if request.URL.Query().Get("attachment_id") != "image-attachment" ||
+				request.Header.Get("X-AHA-Lease-ID") != "lease" {
+				t.Errorf("invalid attachment request %s headers=%#v", request.URL.String(), request.Header)
+			}
+			writer.Header().Set("Content-Type", "image/png")
+			writer.Write(png)
+		case request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/deliveries/delivery/media"):
+			records++
+			var payload map[string]any
+			_ = json.NewDecoder(request.Body).Decode(&payload)
+			if payload["attachment_id"] != "image-attachment" || payload["lease_id"] != "lease" {
+				t.Errorf("invalid media record %#v", payload)
+			}
+			writer.Write([]byte(`{"ok":true}`))
+		default:
+			t.Errorf("unexpected runtime request %s %s", request.Method, request.URL.String())
+			writer.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer runtimeServer.Close()
+	client := lark.NewClient("outreach-image", "test-secret", lark.WithHttpClient(mockHTTPClient{do: func(request *http.Request) (*http.Response, error) {
+		if strings.Contains(request.URL.Path, "/auth/") {
+			return mediaTestResponse(200, `{"code":0,"tenant_access_token":"sdk-test","expire":3600}`), nil
+		}
+		if strings.HasSuffix(request.URL.Path, "/images") {
+			uploads++
+			return mediaTestResponse(200, `{"code":0,"data":{"image_key":"uploaded-image"}}`), nil
+		}
+		if strings.Contains(request.URL.Path, "/messages") {
+			sends++
+			var envelope map[string]any
+			_ = json.NewDecoder(request.Body).Decode(&envelope)
+			if envelope["msg_type"] != "post" || envelope["uuid"] != deterministicUUID("outreach-key") {
+				t.Errorf("invalid send envelope %#v", envelope)
+			}
+			rawContent, _ := envelope["content"].(string)
+			var post struct {
+				ZhCN struct {
+					Content [][]map[string]string `json:"content"`
+				} `json:"zh_cn"`
+			}
+			if json.Unmarshal([]byte(rawContent), &post) != nil || len(post.ZhCN.Content) != 2 ||
+				post.ZhCN.Content[0][0]["tag"] != "at" ||
+				post.ZhCN.Content[0][0]["user_id"] != "work-bot-open" ||
+				post.ZhCN.Content[0][1]["text"] != " 请原样回复图片" ||
+				post.ZhCN.Content[1][0]["tag"] != "img" ||
+				post.ZhCN.Content[1][0]["image_key"] != "uploaded-image" {
+				t.Errorf("invalid post content %s", rawContent)
+			}
+			return mediaTestResponse(200, `{"code":0,"data":{"message_id":"sent-post"}}`), nil
+		}
+		t.Errorf("unexpected provider request %s", request.URL.String())
+		return mediaTestResponse(400, `{"code":1}`), nil
+	}}))
+	runtime := &runtimeClient{baseURL: runtimeServer.URL, token: "runtime-capability", http: runtimeServer.Client()}
+	item := delivery{
+		ID: "delivery", IdempotencyKey: "outreach-key", LeaseID: "lease",
+		Target: map[string]string{
+			"chat_id": "chat", "mention_user_ids": `["work-bot-open"]`,
+			"mention_names": `["WORK-AHA"]`,
+		},
+		SemanticPayload: map[string]any{
+			"kind": "agent_outreach", "task_id": "task", "text": "请原样回复图片",
+			"image_attachments": []map[string]any{{
+				"attachment_id": "image-attachment", "task_id": "task",
+				"name": "image.png", "media_type": "image/png",
+			}},
+		},
+	}
+	messageID, _, err := runtime.sendOutreachImageDelivery(context.Background(), client, item)
+	if err != nil || messageID != "sent-post" || reads != 1 || records != 2 || uploads != 1 || sends != 1 {
+		t.Fatalf("message=%q read/record/upload/send=%d/%d/%d/%d err=%v", messageID, reads, records, uploads, sends, err)
+	}
+}
+
 func TestMediaDownloadTransfersBinaryWithCommandLease(t *testing.T) {
 	for _, kind := range []string{"file", "image"} {
 		t.Run(kind, func(t *testing.T) {

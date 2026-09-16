@@ -9,6 +9,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -349,14 +350,17 @@ func supportedImage(mediaType string) bool {
 	return false
 }
 
-func (c *runtimeClient) recordMedia(ctx context.Context, item delivery, kind, key string) error {
-	return c.request(ctx, http.MethodPost, "/api/channel-runtime/v1/deliveries/"+item.ID+"/media", map[string]any{"schema_version": 1, "lease_id": item.LeaseID, "resource_type": kind, "resource_key": key}, &map[string]any{})
+func (c *runtimeClient) recordMedia(ctx context.Context, item delivery, attachmentID, kind, key string) error {
+	return c.request(ctx, http.MethodPost, "/api/channel-runtime/v1/deliveries/"+item.ID+"/media", map[string]any{
+		"schema_version": 1, "lease_id": item.LeaseID, "attachment_id": attachmentID,
+		"resource_type": kind, "resource_key": key,
+	}, &map[string]any{})
 }
 
 func (c *runtimeClient) sendAttachmentDelivery(ctx context.Context, client *lark.Client, item delivery) (string, string, error) {
 	operationCtx, cancel := context.WithTimeout(ctx, 80*time.Second)
 	defer cancel()
-	if err := c.recordMedia(operationCtx, item, "", ""); err != nil {
+	if err := c.recordMedia(operationCtx, item, "", "", ""); err != nil {
 		return "", "", mediaStageError("record", err)
 	}
 	kind, key := stringValue(item.SemanticPayload, "provider_resource_type"), stringValue(item.SemanticPayload, "provider_resource_key")
@@ -417,11 +421,102 @@ func (c *runtimeClient) sendAttachmentDelivery(ctx context.Context, client *lark
 		if key == "" {
 			return "", "", fmt.Errorf("media_upload_failed")
 		}
-		if err := c.recordMedia(operationCtx, item, kind, key); err != nil {
+		if err := c.recordMedia(operationCtx, item, "", kind, key); err != nil {
 			return "", "", mediaStageError("record", err)
 		}
 	}
 	item.SemanticPayload = map[string]any{"kind": "provider_media", "resource_type": kind, "resource_key": key}
 	messageID, requestID, err := sendDelivery(operationCtx, client, item)
+	return messageID, requestID, mediaStageError("send", err)
+}
+
+func deliveryImageItems(payload map[string]any) []map[string]any {
+	raw, _ := json.Marshal(payload["image_attachments"])
+	var images []map[string]any
+	if json.Unmarshal(raw, &images) != nil {
+		return nil
+	}
+	return images
+}
+
+func deliveryProviderImageKeys(payload map[string]any) map[string]string {
+	keys := map[string]string{}
+	raw, _ := json.Marshal(payload["provider_image_keys"])
+	_ = json.Unmarshal(raw, &keys)
+	return keys
+}
+
+func (c *runtimeClient) uploadDeliveryImage(ctx context.Context, client *lark.Client, item delivery, attachmentID string) (string, error) {
+	if err := c.recordMedia(ctx, item, attachmentID, "", ""); err != nil {
+		return "", mediaStageError("record", err)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/api/channel-runtime/v1/deliveries/"+item.ID+"/attachment?attachment_id="+url.QueryEscape(attachmentID), nil)
+	if err != nil {
+		return "", err
+	}
+	request.Header.Set("Authorization", "Bearer "+c.token)
+	request.Header.Set("X-AHA-Lease-ID", item.LeaseID)
+	response, err := c.http.Do(request)
+	if err != nil {
+		return "", mediaStageError("read", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return "", mediaStageError("read", runtimeStatusError(response.StatusCode))
+	}
+	if response.ContentLength > maxMediaImageBytes {
+		return "", errMediaSize
+	}
+	content, err := io.ReadAll(io.LimitReader(response.Body, maxMediaImageBytes+1))
+	if err != nil {
+		return "", mediaStageError("read", err)
+	}
+	if len(content) == 0 || int64(len(content)) > maxMediaImageBytes || !supportedImage(http.DetectContentType(content)) {
+		return "", errMediaType
+	}
+	upload := larkim.NewCreateImageReqBuilder().Body(larkim.NewCreateImageReqBodyBuilder().ImageType("message").Image(bytes.NewReader(content)).Build()).Build()
+	result, err := client.Im.V1.Image.Create(ctx, upload)
+	if err != nil {
+		return "", mediaStageError("upload_image", err)
+	}
+	if !result.Success() || result.Data == nil || result.Data.ImageKey == nil {
+		return "", mediaProviderError("upload_image", result.StatusCode, result.Code)
+	}
+	key := *result.Data.ImageKey
+	if key == "" {
+		return "", mediaStageError("upload_image", errors.New("empty image key"))
+	}
+	if err := c.recordMedia(ctx, item, attachmentID, "image", key); err != nil {
+		return "", mediaStageError("record", err)
+	}
+	return key, nil
+}
+
+func (c *runtimeClient) sendOutreachImageDelivery(ctx context.Context, client *lark.Client, item delivery) (string, string, error) {
+	operationCtx, cancel := context.WithTimeout(ctx, 80*time.Second)
+	defer cancel()
+	images := deliveryImageItems(item.SemanticPayload)
+	keys := deliveryProviderImageKeys(item.SemanticPayload)
+	orderedKeys := make([]string, 0, len(images))
+	for _, image := range images {
+		attachmentID := stringValue(image, "attachment_id")
+		if attachmentID == "" {
+			return "", "", mediaStageError("read", errors.New("missing attachment id"))
+		}
+		key := keys[attachmentID]
+		if key == "" {
+			var err error
+			key, err = c.uploadDeliveryImage(operationCtx, client, item, attachmentID)
+			if err != nil {
+				return "", "", err
+			}
+		}
+		orderedKeys = append(orderedKeys, key)
+	}
+	content, err := renderOutreachImagePost(item.SemanticPayload, item.Target, orderedKeys)
+	if err != nil {
+		return "", "", err
+	}
+	messageID, requestID, err := sendRenderedDelivery(operationCtx, client, item, "post", content)
 	return messageID, requestID, mediaStageError("send", err)
 }

@@ -2,6 +2,7 @@ package channel
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -158,7 +159,11 @@ func (s *Service) MediaDelivery(ctx context.Context, claims RuntimeClaims, id, l
 		return domain.ChannelDelivery{}, fmt.Errorf("capability_scope_denied")
 	}
 	item, err := s.store.ChannelDelivery(ctx, id)
-	if err != nil || item.InstanceID != claims.InstanceID || item.SemanticPayload["kind"] != "attachment" {
+	if err != nil || item.InstanceID != claims.InstanceID {
+		return domain.ChannelDelivery{}, fmt.Errorf("capability_scope_denied")
+	}
+	kind := stringField(item.SemanticPayload, "kind")
+	if kind != "attachment" && (kind != "agent_outreach" || len(deliveryImageAttachments(item.SemanticPayload)) == 0) {
 		return domain.ChannelDelivery{}, fmt.Errorf("capability_scope_denied")
 	}
 	instance, err := s.store.ChannelInstance(ctx, claims.InstanceID)
@@ -171,12 +176,44 @@ func (s *Service) MediaDelivery(ctx context.Context, claims RuntimeClaims, id, l
 	return item, nil
 }
 
-func (s *Service) DeliveryAttachment(ctx context.Context, claims RuntimeClaims, id, leaseID string) (domain.Attachment, []byte, error) {
+type deliveryImageReference struct {
+	AttachmentID string `json:"attachment_id"`
+	TaskID       string `json:"task_id"`
+	Name         string `json:"name"`
+	MediaType    string `json:"media_type"`
+	Size         int64  `json:"size"`
+}
+
+func deliveryImageAttachments(payload map[string]any) []deliveryImageReference {
+	raw, _ := json.Marshal(payload["image_attachments"])
+	var attachments []deliveryImageReference
+	if json.Unmarshal(raw, &attachments) != nil {
+		return nil
+	}
+	return attachments
+}
+
+func deliveryImageAttachment(payload map[string]any, attachmentID string) (deliveryImageReference, bool) {
+	for _, item := range deliveryImageAttachments(payload) {
+		if item.AttachmentID == attachmentID && item.TaskID == stringField(payload, "task_id") && mediaImageType(item.MediaType) {
+			return item, true
+		}
+	}
+	return deliveryImageReference{}, false
+}
+
+func (s *Service) DeliveryAttachment(ctx context.Context, claims RuntimeClaims, id, leaseID, attachmentID string) (domain.Attachment, []byte, error) {
 	delivery, err := s.MediaDelivery(ctx, claims, id, leaseID)
 	if err != nil {
 		return domain.Attachment{}, nil, err
 	}
-	item, err := s.store.Attachment(ctx, stringField(delivery.SemanticPayload, "task_id"), stringField(delivery.SemanticPayload, "attachment_id"))
+	kind := stringField(delivery.SemanticPayload, "kind")
+	if kind == "attachment" {
+		attachmentID = stringField(delivery.SemanticPayload, "attachment_id")
+	} else if _, ok := deliveryImageAttachment(delivery.SemanticPayload, attachmentID); !ok {
+		return domain.Attachment{}, nil, fmt.Errorf("capability_scope_denied")
+	}
+	item, err := s.store.Attachment(ctx, stringField(delivery.SemanticPayload, "task_id"), attachmentID)
 	if err != nil || item.MessageID == "" {
 		return domain.Attachment{}, nil, fmt.Errorf("capability_scope_denied")
 	}
@@ -187,12 +224,20 @@ func (s *Service) DeliveryAttachment(ctx context.Context, claims RuntimeClaims, 
 	return item, content, err
 }
 
-func (s *Service) RecordMediaUpload(ctx context.Context, claims RuntimeClaims, id, leaseID, kind, key string) error {
-	if _, err := s.MediaDelivery(ctx, claims, id, leaseID); err != nil {
+func (s *Service) RecordMediaUpload(ctx context.Context, claims RuntimeClaims, id, leaseID, attachmentID, kind, key string) error {
+	delivery, err := s.MediaDelivery(ctx, claims, id, leaseID)
+	if err != nil {
 		return err
 	}
 	if key != "" && (len(key) > 1024 || (kind != "image" && kind != "file")) {
 		return fmt.Errorf("invalid_envelope")
 	}
-	return s.store.SaveChannelMediaUpload(ctx, claims.InstanceID, id, leaseID, kind, key, s.now().UTC())
+	if stringField(delivery.SemanticPayload, "kind") == "agent_outreach" {
+		if _, ok := deliveryImageAttachment(delivery.SemanticPayload, attachmentID); !ok || (kind != "" && kind != "image") {
+			return fmt.Errorf("capability_scope_denied")
+		}
+	} else if attachmentID != "" {
+		return fmt.Errorf("capability_scope_denied")
+	}
+	return s.store.SaveChannelMediaUpload(ctx, claims.InstanceID, id, leaseID, attachmentID, kind, key, s.now().UTC())
 }

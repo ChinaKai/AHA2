@@ -149,7 +149,7 @@ function panelState(detail: TaskDetail): PanelState {
       sendNewline: true,
       sendData: "",
       dirty: Boolean(stored),
-      configCollapsed: false,
+      configCollapsed: groups.length > 0,
       ports: [],
       portsLoaded: false,
       streams: {},
@@ -206,12 +206,22 @@ function groupOptions(state: PanelState): string {
   ).join("");
 }
 
-function syncTitleGroupSelect(state: PanelState): void {
-  const select = document.querySelector<HTMLSelectElement>("#hardware-title-group-select");
-  if (!select) return;
-  select.innerHTML = groupOptions(state) || '<option value="">暂无硬件组</option>';
-  select.value = state.selectedID;
-  select.disabled = state.groups.length === 0;
+function selectedGroupLabel(state: PanelState): string {
+  const index = state.groups.findIndex(group => group.id === state.selectedID);
+  const group = index >= 0 ? state.groups[index] : undefined;
+  return group?.description || (group ? `硬件 ${index + 1}` : "暂无硬件组");
+}
+
+function syncTitleGroupSwitcher(state: PanelState): void {
+  const trigger = document.querySelector<HTMLButtonElement>("#hardware-title-group-trigger");
+  const menu = document.querySelector<HTMLElement>("#hardware-title-group-menu");
+  if (!trigger || !menu) return;
+  const label = trigger.querySelector<HTMLElement>("span");
+  if (label) label.textContent = selectedGroupLabel(state);
+  trigger.disabled = state.groups.length === 0;
+  menu.innerHTML = state.groups.map((group, index) =>
+    `<button type="button" data-hardware-title-group="${escapeHTML(group.id)}" class="${group.id === state.selectedID ? "active" : ""}">${escapeHTML(group.description || `硬件 ${index + 1}`)}</button>`,
+  ).join("");
 }
 
 function hardwareGroupsSignature(groups: HardwareGroup[]): string {
@@ -230,7 +240,13 @@ function hardwareGroupsSignature(groups: HardwareGroup[]): string {
 
 export function renderHardwareGroupSwitcher(detail: TaskDetail): string {
   const state = panelState(detail);
-  return `<select id="hardware-title-group-select" class="hardware-title-group-select" aria-label="切换硬件组" ${state.groups.length ? "" : "disabled"}>${groupOptions(state) || '<option value="">暂无硬件组</option>'}</select>`;
+  const options = state.groups.map((group, index) =>
+    `<button type="button" data-hardware-title-group="${escapeHTML(group.id)}" class="${group.id === state.selectedID ? "active" : ""}">${escapeHTML(group.description || `硬件 ${index + 1}`)}</button>`,
+  ).join("");
+  return `<div class="hardware-title-group-switcher">
+    <button type="button" id="hardware-title-group-trigger" class="hardware-title-group-trigger" aria-haspopup="menu" aria-expanded="false" ${state.groups.length ? "" : "disabled"}><span>${escapeHTML(selectedGroupLabel(state))}</span>${icon("chevron-down")}</button>
+    <div id="hardware-title-group-menu" class="hardware-title-group-menu" role="menu" hidden>${options}</div>
+  </div>`;
 }
 
 function serialDeviceOptions(state: PanelState, current = ""): string {
@@ -375,7 +391,7 @@ export function bindHardwarePanel(detail: TaskDetail, notify: Notice): void {
   if (!root) return;
   const state = panelState(detail);
   const generation = ++pollGeneration;
-  syncTitleGroupSelect(state);
+  syncTitleGroupSwitcher(state);
   if (window.innerWidth <= 760) root.querySelector<HTMLDetailsElement>(".hardware-config")?.removeAttribute("open");
   const config = root.querySelector<HTMLDetailsElement>(".hardware-config");
   config?.addEventListener("toggle", () => {
@@ -509,9 +525,32 @@ export function bindHardwarePanel(detail: TaskDetail, notify: Notice): void {
   root.querySelector("#hardware-group-select")?.addEventListener("change", event => {
     selectGroup((event.currentTarget as HTMLSelectElement).value);
   });
-  const titleGroupSelect = document.querySelector<HTMLSelectElement>("#hardware-title-group-select");
-  if (titleGroupSelect) {
-    titleGroupSelect.onchange = event => selectGroup((event.currentTarget as HTMLSelectElement).value);
+  const titleGroupTrigger = document.querySelector<HTMLButtonElement>("#hardware-title-group-trigger");
+  const titleGroupMenu = document.querySelector<HTMLElement>("#hardware-title-group-menu");
+  if (titleGroupTrigger && titleGroupMenu) {
+    const switcher = titleGroupTrigger.closest<HTMLElement>(".hardware-title-group-switcher");
+    const closeTitleGroupMenu = () => {
+      titleGroupMenu.hidden = true;
+      titleGroupTrigger.setAttribute("aria-expanded", "false");
+    };
+    titleGroupTrigger.onclick = () => {
+      const open = titleGroupMenu.hidden;
+      titleGroupMenu.hidden = !open;
+      titleGroupTrigger.setAttribute("aria-expanded", String(open));
+    };
+    titleGroupMenu.querySelectorAll<HTMLButtonElement>("[data-hardware-title-group]").forEach(button => {
+      button.onclick = () => selectGroup(button.dataset.hardwareTitleGroup || "");
+    });
+    switcher?.addEventListener("focusout", event => {
+      if (event.relatedTarget instanceof Node && switcher.contains(event.relatedTarget)) return;
+      closeTitleGroupMenu();
+    });
+    switcher?.addEventListener("keydown", event => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      closeTitleGroupMenu();
+      titleGroupTrigger.focus();
+    });
   }
   const addGroup = () => {
     readForm();

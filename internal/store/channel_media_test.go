@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"testing"
 	"time"
@@ -62,6 +63,25 @@ func TestChannelDeliveryPartsKeepFilesOutOfTextCoalescing(t *testing.T) {
 	}
 	if payload["attachments"] == nil {
 		t.Fatal("original source payload mutated")
+	}
+}
+
+func TestChannelDeliveryPartsBundleOutreachImagesIntoTextPost(t *testing.T) {
+	payload := map[string]any{"kind": "agent_outreach", "task_id": "task", "text": "review", "attachments": []domain.Attachment{
+		{ID: "image", TaskID: "task", Name: "image.png", MediaType: "image/png", Size: 20},
+		{ID: "file", TaskID: "task", Name: "report.txt", MediaType: "text/plain", Size: 30},
+	}}
+	parts := channelDeliveryParts(payload)
+	if len(parts) != 2 || parts[0]["kind"] != "agent_outreach" || parts[1]["attachment_id"] != "file" {
+		t.Fatalf("parts=%#v", parts)
+	}
+	raw, _ := json.Marshal(parts[0]["image_attachments"])
+	var images []map[string]any
+	if json.Unmarshal(raw, &images) != nil || len(images) != 1 || images[0]["attachment_id"] != "image" {
+		t.Fatalf("images=%#v part=%#v", images, parts[0])
+	}
+	if payload["attachments"] == nil {
+		t.Fatal("original payload mutated")
 	}
 }
 

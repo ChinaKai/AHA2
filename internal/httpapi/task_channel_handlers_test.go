@@ -392,18 +392,50 @@ func TestTaskChannelRouteAPI(t *testing.T) {
 		t.Fatalf("outreach target=%#v err=%v", target, err)
 	}
 	deliveries, err := database.ChannelDeliveries(ctx, instance.ID, 100)
-	if err != nil || len(deliveries) != 2 {
+	if err != nil || len(deliveries) != 1 {
 		t.Fatalf("outreach deliveries=%#v err=%v", deliveries, err)
 	}
-	attachmentDeliveries := 0
-	for _, delivery := range deliveries {
-		if delivery.SemanticPayload["kind"] == "attachment" &&
-			delivery.SemanticPayload["attachment_id"] == attachment.ID {
-			attachmentDeliveries++
-		}
+	rawImages, _ := json.Marshal(deliveries[0].SemanticPayload["image_attachments"])
+	var bundledImages []map[string]any
+	if json.Unmarshal(rawImages, &bundledImages) != nil || len(bundledImages) != 1 || bundledImages[0]["attachment_id"] != attachment.ID {
+		t.Fatalf("outreach bundled images=%#v delivery=%#v", bundledImages, deliveries[0])
 	}
-	if attachmentDeliveries != 1 {
-		t.Fatalf("outreach attachment deliveries=%#v", deliveries)
+	deliveryClaims := channel.RuntimeClaims{
+		InstanceID: instance.ID,
+		Scopes: map[string]bool{
+			"channel.delivery.claim": true,
+			"channel.delivery.ack":   true,
+			"channel.media.read":     true,
+		},
+	}
+	claimed, err := channelService.ClaimDeliveries(ctx, deliveryClaims, 10)
+	if err != nil || len(claimed) != 1 || claimed[0].ID != sent.Delivery.ID {
+		t.Fatalf("outreach claim=%#v err=%v", claimed, err)
+	}
+	leased := claimed[0]
+	imageItem, imageContent, err := channelService.DeliveryAttachment(ctx, deliveryClaims, leased.ID, leased.LeaseID, attachment.ID)
+	if err != nil || imageItem.ID != attachment.ID || len(imageContent) == 0 {
+		t.Fatalf("bundled image read item=%#v bytes=%d err=%v", imageItem, len(imageContent), err)
+	}
+	if _, _, err := channelService.DeliveryAttachment(ctx, deliveryClaims, leased.ID, leased.LeaseID, "unknown-image"); err == nil {
+		t.Fatal("outreach delivery exposed an unbound attachment")
+	}
+	if err := channelService.RecordMediaUpload(ctx, deliveryClaims, leased.ID, leased.LeaseID, attachment.ID, "image", "provider-image-key"); err != nil {
+		t.Fatal(err)
+	}
+	if err := channelService.NackDelivery(ctx, deliveryClaims, leased.ID, leased.LeaseID, "transport_failed", "confirmed_failure", 0, false); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err = channelService.ClaimDeliveries(ctx, deliveryClaims, 10)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("outreach retry=%#v err=%v", claimed, err)
+	}
+	imageKeys, _ := claimed[0].SemanticPayload["provider_image_keys"].(map[string]any)
+	if imageKeys[attachment.ID] != "provider-image-key" {
+		t.Fatalf("outreach retry=%#v keys=%#v err=%v", claimed, imageKeys, err)
+	}
+	if err := channelService.AckDelivery(ctx, deliveryClaims, claimed[0].ID, claimed[0].LeaseID, "provider-post-message", "provider-request"); err != nil {
+		t.Fatal(err)
 	}
 	response = agentRequest(t, server.URL+"/api/v1/agent/channel/messages", http.MethodPost, token, map[string]any{
 		"request_id": "unknown-contact", "message": "不应发送",

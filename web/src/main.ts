@@ -13,7 +13,7 @@ import {bindSyncSettings, isSyncSettingsFormEditing, renderSyncSettings} from ".
 import {bindRuntimeFields, runtimeFieldsHTML, setRuntimeBackends, syncRuntimeFields} from "./runtime_picker.js";
 import {renderComposerAgentOptions, renderComposerTools} from "./task_composer.js";
 import {LOCAL_TASK_DEVICE_FILTER, taskDeviceFilterOptions, taskMatchesFilters} from "./task_filters.js";
-import {TASK_TOOL_DEFAULT_WIDTH, normalizeTaskToolMode, normalizeTaskToolWidth, renderTaskToolButtons, renderTaskToolContent, renderTaskToolPanel} from "./task_tools.js";
+import {TASK_TOOL_DEFAULT_WIDTH, normalizePinnedTaskTool, normalizeTaskToolMode, normalizeTaskToolWidth, renderTaskToolButtons, renderTaskToolContent, renderTaskToolPanel} from "./task_tools.js";
 import type {TaskTool, TaskToolMode} from "./task_tools.js";
 import {TASK_SLASH_COMMANDS, bindMessageBubbleControls, captureInteractiveRegion, clearNavigationSnapshot, eventRefreshesTaskList, exactSlashCommand, executeAgentSessionAction, loadNavigationSnapshot, matchingSlashCommands, renderWorkspaceDetection, restoreInteractiveRegion, saveNavigationSnapshot} from "./ui_helpers.js";
 import type {InteractiveRegionState} from "./ui_helpers.js";
@@ -130,6 +130,7 @@ interface State {
   selectedProject: Project | null;
   dialogProjectID: string;
   taskTool: TaskTool | "";
+  taskToolPinned: TaskTool | "";
   taskToolMode: TaskToolMode;
   taskToolWidth: number;
   taskDetailLoading: boolean;
@@ -215,12 +216,12 @@ function loadSidebarSettings(): {width: number; memoItems: SidebarMemoItem[]; me
   }
 }
 
-function loadTaskToolLayout(): {mode: TaskToolMode; width: number} {
+function loadTaskToolLayout(): {mode: TaskToolMode; width: number; pinnedTool: TaskTool | ""} {
   try {
-    const saved = JSON.parse(localStorage.getItem(taskToolLayoutKey) || "{}") as {mode?: unknown; width?: unknown};
-    return {mode: normalizeTaskToolMode(saved.mode), width: normalizeTaskToolWidth(saved.width)};
+    const saved = JSON.parse(localStorage.getItem(taskToolLayoutKey) || "{}") as {mode?: unknown; width?: unknown; pinnedTool?: unknown};
+    return {mode: normalizeTaskToolMode(saved.mode), width: normalizeTaskToolWidth(saved.width), pinnedTool: normalizePinnedTaskTool(saved.pinnedTool)};
   } catch {
-    return {mode: "split", width: TASK_TOOL_DEFAULT_WIDTH};
+    return {mode: "split", width: TASK_TOOL_DEFAULT_WIDTH, pinnedTool: ""};
   }
 }
 
@@ -281,6 +282,7 @@ const state: State = {
   selectedProject: null,
   dialogProjectID: "",
   taskTool: "",
+  taskToolPinned: savedTaskToolLayout.pinnedTool,
   taskToolMode: savedTaskToolLayout.mode,
   taskToolWidth: savedTaskToolLayout.width,
   taskDetailLoading: false,
@@ -1320,7 +1322,7 @@ function authErrorMessage(error: unknown, fallback: string): string {
 
 function persistTaskToolLayout(): void {
   try {
-    localStorage.setItem(taskToolLayoutKey, JSON.stringify({mode: state.taskToolMode, width: state.taskToolWidth}));
+    localStorage.setItem(taskToolLayoutKey, JSON.stringify({mode: state.taskToolMode, width: state.taskToolWidth, pinnedTool: state.taskToolPinned}));
   } catch {
     // Layout persistence is best-effort in restricted WebViews.
   }
@@ -1694,12 +1696,28 @@ async function openTask(taskID: string): Promise<void> {
     state.taskConversationLatest = page?.conversation.latest_sequence || 0;
     state.taskEventCursor = detail.event_cursor || 0;
     state.taskContext = null;
+    state.taskTool = state.taskToolPinned === "channel" && (detail.task.read_only || detail.task.channel_instance_id)
+      ? ""
+      : state.taskToolPinned;
     state.taskDetailLoading = false;
     requestConversationBottom();
     if (detail.task.read_only || detail.task.status === "draft") closeEvents();
     else openEvents(taskID, state.taskEventCursor);
     render();
     void loadTaskChannelDestination(taskID, version);
+    if (state.taskTool === "channel") {
+      void reloadTaskChannelState().catch(error => {
+        if (version === taskOpenVersion) setMessage("error", error instanceof Error ? error.message : String(error));
+      });
+    } else if (state.taskTool === "context" && detail.task.status !== "draft") {
+      void api.agentContext(taskID, "main").then(context => {
+        if (version !== taskOpenVersion || !state.selectedTask || state.selectedTask.task.id !== taskID || state.taskTool !== "context") return;
+        state.taskContext = context;
+        render();
+      }).catch(error => {
+        if (version === taskOpenVersion) setMessage("error", error instanceof Error ? error.message : String(error));
+      });
+    }
   } catch (error) {
     if (version === taskOpenVersion) {
       state.selectedTask = null;
@@ -2587,7 +2605,7 @@ function taskDetailView(detail: TaskDetail): string {
     <header class="task-head"><button id="back-tasks">←</button><div class="task-title-block"><h1><span class="task-code">${escapeHTML(detail.task.code || "")}</span><span class="task-title-text">${escapeHTML(detail.task.title)}</span></h1><div class="task-head-subline"><span class="task-head-meta" title="${escapeHTML(taskMeta)}">${escapeHTML(taskMeta)}</span><span id="task-detail-status" class="status ${statusClass(detail.task.status)}">${statusLabel(detail.task.status)}</span><span class="task-branch">${escapeHTML(detail.task.task_branch || "")}</span></div></div><div class="actions task-tool-actions">${renderTaskToolButtons(state.taskTool, {includeChannel: channelVisible, channelConnected: Boolean(state.taskChannelDestination), channelLabel: taskChannelButtonLabel(state.taskChannelDestination)})}</div></header>
     <div class="task-grid${toolLayout}" style="--task-tool-width:${state.taskToolWidth}%">
       ${chat}
-      ${renderTaskToolPanel(state.taskTool, detail, state.selectedTaskAgent, taskCtxHtml(), state.taskToolMode, taskChannelPanelHTML())}
+      ${renderTaskToolPanel(state.taskTool, detail, state.selectedTaskAgent, taskCtxHtml(), state.taskToolMode, taskChannelPanelHTML(), state.taskToolPinned === state.taskTool)}
     </div>
     ${renderAgentConfigDialog(detail, state.selectedTaskAgent, state.models, state.codexAccounts, state.skills)}${taskTakeoverDialog(detail)}
   </section>`);
@@ -3556,6 +3574,8 @@ function bindCommon(): void {
   });
   document.querySelector("#back-tasks")?.addEventListener("click", () => {
     cancelTaskOpen();
+    if (state.taskTool === "hardware") stopHardwarePanel();
+    if (state.taskTool === "browser") stopDesktopPanel();
     state.selectedTask = null;
     closeEvents();
     render();
@@ -3822,11 +3842,19 @@ function bindCommon(): void {
     if (state.taskTool === "hardware") stopHardwarePanel();
     if (state.taskTool === "browser") stopDesktopPanel();
     if (state.taskTool === tool) {
+      if (state.taskToolPinned === tool) {
+        state.taskToolPinned = "";
+        persistTaskToolLayout();
+      }
       state.taskTool = "";
       render();
       return;
     }
     state.taskTool = tool;
+    if (state.taskToolPinned) {
+      state.taskToolPinned = tool;
+      persistTaskToolLayout();
+    }
     if (tool === "channel") {
       try {
         await reloadTaskChannelState();
@@ -3858,8 +3886,23 @@ function bindCommon(): void {
   if (closeTaskTool) closeTaskTool.onclick = () => {
     if (state.taskTool === "hardware") stopHardwarePanel();
     if (state.taskTool === "browser") stopDesktopPanel();
+    if (state.taskToolPinned === state.taskTool) {
+      state.taskToolPinned = "";
+      persistTaskToolLayout();
+    }
     state.taskTool = "";
     render();
+  };
+  const pinTaskTool = document.querySelector<HTMLButtonElement>("#pin-task-tool");
+  if (pinTaskTool) pinTaskTool.onclick = () => {
+    if (!state.taskTool) return;
+    state.taskToolPinned = state.taskToolPinned === state.taskTool ? "" : state.taskTool;
+    persistTaskToolLayout();
+    const pinned = state.taskToolPinned === state.taskTool;
+    pinTaskTool.classList.toggle("active", pinned);
+    pinTaskTool.title = pinned ? "取消固定" : "固定面板";
+    pinTaskTool.setAttribute("aria-label", pinTaskTool.title);
+    pinTaskTool.setAttribute("aria-pressed", String(pinned));
   };
   document.querySelector<HTMLTextAreaElement>("#message-form textarea")?.addEventListener("paste", event => {
     const files = clipboardImageFiles(event);

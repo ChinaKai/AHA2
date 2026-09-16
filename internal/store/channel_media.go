@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"time"
@@ -62,14 +63,54 @@ func (s *Store) RetryChannelMediaCommand(ctx context.Context, instanceID, id, le
 	return nil
 }
 
-func (s *Store) SaveChannelMediaUpload(ctx context.Context, instanceID, id, leaseID, resourceType, resourceKey string, at time.Time) error {
+func (s *Store) SaveChannelMediaUpload(ctx context.Context, instanceID, id, leaseID, attachmentID, resourceType, resourceKey string, at time.Time) error {
 	item, err := s.ChannelDelivery(ctx, id)
-	if err != nil || item.InstanceID != instanceID || item.SemanticPayload["kind"] != "attachment" || item.State != "leased" || item.LeaseID != leaseID || !item.LeaseUntil.After(at) {
+	if err != nil || item.InstanceID != instanceID || item.State != "leased" || item.LeaseID != leaseID || !item.LeaseUntil.After(at) {
 		return ErrChannelRevision
 	}
 	payload := map[string]any{}
-	if resourceKey != "" {
-		payload["provider_resource_type"], payload["provider_resource_key"] = resourceType, resourceKey
+	switch fmt.Sprint(item.SemanticPayload["kind"]) {
+	case "attachment":
+		if attachmentID != "" {
+			return ErrChannelRevision
+		}
+		if resourceKey != "" {
+			payload["provider_resource_type"], payload["provider_resource_key"] = resourceType, resourceKey
+		}
+	case "agent_outreach":
+		if attachmentID == "" {
+			return ErrChannelRevision
+		}
+		raw, _ := json.Marshal(item.SemanticPayload["image_attachments"])
+		var images []struct {
+			AttachmentID string `json:"attachment_id"`
+			TaskID       string `json:"task_id"`
+		}
+		if json.Unmarshal(raw, &images) != nil {
+			return ErrChannelRevision
+		}
+		allowed := false
+		for _, image := range images {
+			if image.AttachmentID == attachmentID && image.TaskID == fmt.Sprint(item.SemanticPayload["task_id"]) {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return ErrChannelRevision
+		}
+		if resourceKey != "" {
+			keys := map[string]any{}
+			if existing, ok := item.SemanticPayload["provider_image_keys"].(map[string]any); ok {
+				for key, value := range existing {
+					keys[key] = value
+				}
+			}
+			keys[attachmentID] = resourceKey
+			payload["provider_image_keys"] = keys
+		}
+	default:
+		return ErrChannelRevision
 	}
 	result, err := s.db.ExecContext(ctx, "UPDATE channel_delivery_outbox SET semantic_payload_json=json_patch(semantic_payload_json,?),updated_at=?,lease_until=? WHERE id=? AND instance_id=? AND state='leased' AND lease_id=?", encodeJSON(payload), timeString(at), timeString(at.Add(90*time.Second)), id, instanceID, leaseID)
 	if err != nil {

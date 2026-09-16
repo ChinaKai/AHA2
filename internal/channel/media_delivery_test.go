@@ -57,7 +57,7 @@ func TestMediaDeliveriesAreOrderedScopedAndDurable(t *testing.T) {
 		t.Fatalf("text delivery=%#v err=%v", deliveries, err)
 	}
 	first := deliveries[0]
-	if _, _, err := service.DeliveryAttachment(ctx, claims, first.ID, first.LeaseID); err == nil {
+	if _, _, err := service.DeliveryAttachment(ctx, claims, first.ID, first.LeaseID, ""); err == nil {
 		t.Fatal("text delivery granted attachment access")
 	}
 	if err := service.AckDelivery(ctx, claims, first.ID, first.LeaseID, "text-message", ""); err != nil {
@@ -71,18 +71,18 @@ func TestMediaDeliveriesAreOrderedScopedAndDurable(t *testing.T) {
 		item := deliveries[0]
 		foreign := claims
 		foreign.InstanceID = "foreign"
-		if _, _, err := service.DeliveryAttachment(ctx, foreign, item.ID, item.LeaseID); err == nil {
+		if _, _, err := service.DeliveryAttachment(ctx, foreign, item.ID, item.LeaseID, ""); err == nil {
 			t.Fatal("cross-instance attachment read accepted")
 		}
-		if _, _, err := service.DeliveryAttachment(ctx, claims, item.ID, "wrong"); err == nil {
+		if _, _, err := service.DeliveryAttachment(ctx, claims, item.ID, "wrong", ""); err == nil {
 			t.Fatal("wrong lease attachment read accepted")
 		}
-		actual, content, err := service.DeliveryAttachment(ctx, claims, item.ID, item.LeaseID)
+		actual, content, err := service.DeliveryAttachment(ctx, claims, item.ID, item.LeaseID, "")
 		if err != nil || actual.ID != attachment.ID || !bytes.Equal(content, []byte(attachment.Name)) {
 			t.Fatalf("attachment content=%#v err=%v", actual, err)
 		}
 		if index == 0 {
-			if err := service.RecordMediaUpload(ctx, claims, item.ID, item.LeaseID, "file", "uploaded-key"); err != nil {
+			if err := service.RecordMediaUpload(ctx, claims, item.ID, item.LeaseID, "", "file", "uploaded-key"); err != nil {
 				t.Fatal(err)
 			}
 			if err := service.NackDelivery(ctx, claims, item.ID, item.LeaseID, "transport_failed", "confirmed_failure", 0, false); err != nil {
@@ -97,7 +97,7 @@ func TestMediaDeliveriesAreOrderedScopedAndDurable(t *testing.T) {
 		if err := service.AckDelivery(ctx, claims, item.ID, item.LeaseID, "file-message", ""); err != nil {
 			t.Fatal(err)
 		}
-		if _, _, err := service.DeliveryAttachment(ctx, claims, item.ID, item.LeaseID); err == nil {
+		if _, _, err := service.DeliveryAttachment(ctx, claims, item.ID, item.LeaseID, ""); err == nil {
 			t.Fatal("acknowledged delivery still grants file access")
 		}
 	}

@@ -176,6 +176,26 @@ func channelDeliveryParts(payload map[string]any) []map[string]any {
 	if json.Unmarshal(raw, &attachments) != nil {
 		return parts
 	}
+	if strings.TrimSpace(fmt.Sprint(payload["kind"])) == "agent_outreach" {
+		images := make([]map[string]any, 0, len(attachments))
+		files := make([]map[string]any, 0, len(attachments))
+		for _, item := range attachments {
+			if item.ID == "" || item.TaskID != payload["task_id"] {
+				continue
+			}
+			part := map[string]any{"kind": "attachment", "task_id": item.TaskID, "attachment_id": item.ID, "name": item.Name, "media_type": item.MediaType, "size": item.Size}
+			switch item.MediaType {
+			case "image/png", "image/jpeg", "image/gif", "image/webp":
+				images = append(images, part)
+			default:
+				files = append(files, part)
+			}
+		}
+		if len(images) > 0 {
+			text["image_attachments"] = images
+		}
+		return append([]map[string]any{text}, files...)
+	}
 	for _, item := range attachments {
 		if item.ID == "" || item.TaskID != payload["task_id"] {
 			continue

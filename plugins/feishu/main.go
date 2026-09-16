@@ -800,6 +800,8 @@ func (c *runtimeClient) deliver(ctx context.Context, client *lark.Client, item d
 	var err error
 	if stringValue(item.SemanticPayload, "kind") == "attachment" {
 		messageID, requestID, err = c.sendAttachmentDelivery(ctx, client, item)
+	} else if stringValue(item.SemanticPayload, "kind") == "agent_outreach" && len(deliveryImageItems(item.SemanticPayload)) > 0 {
+		messageID, requestID, err = c.sendOutreachImageDelivery(ctx, client, item)
 	} else {
 		messageID, requestID, err = sendDelivery(ctx, client, item)
 	}
@@ -813,7 +815,7 @@ func (c *runtimeClient) deliver(ctx context.Context, client *lark.Client, item d
 		permanent = !item.FirstAttemptAt.IsZero() && time.Since(item.FirstAttemptAt) >= 55*time.Minute
 	}
 	errorCode := "feishu_send_failed"
-	if stringValue(item.SemanticPayload, "kind") == "attachment" {
+	if stringValue(item.SemanticPayload, "kind") == "attachment" || len(deliveryImageItems(item.SemanticPayload)) > 0 {
 		errorCode = mediaErrorCode(err)
 	}
 	_ = c.request(ctx, http.MethodPost, "/api/channel-runtime/v1/deliveries/"+item.ID+"/nack", map[string]any{"schema_version": 1, "lease_id": item.LeaseID, "error_code": errorCode, "outcome_certainty": certainty, "retry_after_ms": retry, "permanent": permanent}, &map[string]any{})
@@ -835,6 +837,12 @@ func deliveryBackoffMS(key string, attempt int) int64 {
 }
 
 func sendDelivery(ctx context.Context, client *lark.Client, item delivery) (string, string, error) {
+	msgType, content := renderDelivery(item.SemanticPayload)
+	msgType, content = applyDeliveryMentions(msgType, content, item.Target)
+	return sendRenderedDelivery(ctx, client, item, msgType, content)
+}
+
+func sendRenderedDelivery(ctx context.Context, client *lark.Client, item delivery, msgType, content string) (string, string, error) {
 	receiveID := item.Target["receive_id"]
 	receiveIDType := item.Target["receive_id_type"]
 	if receiveID == "" {
@@ -846,8 +854,6 @@ func sendDelivery(ctx context.Context, client *lark.Client, item delivery) (stri
 	if receiveID == "" {
 		return "", "", errors.New("missing target chat")
 	}
-	msgType, content := renderDelivery(item.SemanticPayload)
-	msgType, content = applyDeliveryMentions(msgType, content, item.Target)
 	if updateID := item.Target["update_message_id"]; updateID != "" {
 		request := larkim.NewPatchMessageReqBuilder().MessageId(updateID).Body(larkim.NewPatchMessageReqBodyBuilder().Content(content).Build()).Build()
 		response, err := client.Im.V1.Message.Patch(ctx, request)
@@ -886,6 +892,40 @@ func sendDelivery(ctx context.Context, client *lark.Client, item delivery) (stri
 		return "", response.RequestId(), fmt.Errorf("feishu create rejected: %d", response.Code)
 	}
 	return *response.Data.MessageId, response.RequestId(), nil
+}
+
+func renderOutreachImagePost(payload map[string]any, target map[string]string, imageKeys []string) (string, error) {
+	var userIDs []string
+	if target["mention_user_ids"] != "" {
+		if err := json.Unmarshal([]byte(target["mention_user_ids"]), &userIDs); err != nil {
+			return "", err
+		}
+	}
+	first := make([]map[string]string, 0, len(userIDs)+1)
+	for _, userID := range userIDs {
+		if strings.TrimSpace(userID) != "" {
+			first = append(first, map[string]string{"tag": "at", "user_id": userID})
+		}
+	}
+	if text := strings.TrimSpace(stringValue(payload, "text")); text != "" {
+		prefix := ""
+		if len(first) > 0 {
+			prefix = " "
+		}
+		first = append(first, map[string]string{"tag": "text", "text": prefix + text})
+	}
+	content := make([][]map[string]string, 0, len(imageKeys)+1)
+	if len(first) > 0 {
+		content = append(content, first)
+	}
+	for _, key := range imageKeys {
+		if strings.TrimSpace(key) == "" {
+			return "", errors.New("missing image key")
+		}
+		content = append(content, []map[string]string{{"tag": "img", "image_key": key}})
+	}
+	raw, err := json.Marshal(map[string]any{"zh_cn": map[string]any{"content": content}})
+	return string(raw), err
 }
 
 func applyDeliveryMentions(msgType, content string, target map[string]string) (string, string) {

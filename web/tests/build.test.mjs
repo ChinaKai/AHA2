@@ -577,8 +577,13 @@ test("built web contains responsive application", async () => {
   assert.match(taskTools, /id="close-task-tool"/);
   assert.match(taskTools, /task-tool-panel/);
   assert.match(taskTools, /id="toggle-task-tool-mode"/);
+  assert.match(taskTools, /id="pin-task-tool"/);
+  assert.match(taskTools, /aria-pressed="\$\{pinned\}"/);
   assert.match(taskTools, /id="task-tool-resizer"/);
   assert.match(script, /localStorage\.setItem\(taskToolLayoutKey/);
+  assert.match(script, /pinnedTool:\s*state\.taskToolPinned/);
+  assert.match(script, /state\.taskTool = state\.taskToolPinned/);
+  assert.match(script, /state\.taskToolPinned === state\.taskTool/);
   assert.match(script, /state\.taskToolMode === "split" \? "fullscreen" : "split"/);
   assert.match(script, /resizer\.addEventListener\("dblclick"/);
   assert.match(css, /\.task-grid\.task-tool-open\.task-tool-split \{[^}]*grid-template-columns:/);
@@ -606,11 +611,14 @@ test("built web contains responsive application", async () => {
   assert.match(hardwarePanel, /hardware-config-collapse/);
   assert.match(hardwarePanel, /configCollapsed/);
   assert.match(taskTools, /renderHardwareGroupSwitcher/);
-  assert.match(hardwarePanel, /hardware-title-group-select/);
-  assert.match(hardwarePanel, /syncTitleGroupSelect/);
+  assert.match(hardwarePanel, /hardware-title-group-trigger/);
+  assert.match(hardwarePanel, /hardware-title-group-menu/);
+  assert.match(hardwarePanel, /syncTitleGroupSwitcher/);
   assert.match(script, /hardware:\s*detail\.hardware/);
   assert.match(script, /refreshHardwarePanel\(detail, setMessage\)/);
-  assert.match(css, /\.hardware-title-group-select/);
+  assert.match(css, /\.hardware-title-group-switcher/);
+  assert.match(css, /\.hardware-title-group-menu/);
+  assert.match(css, /\.task-tool-pin\.active/);
   assert.match(css, /\.hardware-tool\.config-collapsed \{[^}]*grid-template-columns:\s*42px minmax\(0,1fr\)/);
   assert.match(hardwarePanel, /aha2:hardware-draft:/);
   assert.match(hardwarePanel, /sessionStorage\.setItem/);
@@ -925,7 +933,7 @@ test("built web contains responsive application", async () => {
 
 test("hardware tool title renders the active hardware group switcher", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const {renderTaskToolPanel} = await import(pathToFileURL(resolve(root, "dist", "task_tools.js")));
+  const {normalizePinnedTaskTool, renderTaskToolPanel} = await import(pathToFileURL(resolve(root, "dist", "task_tools.js")));
   const group = (id, description, position) => ({
     task_id: "task-hardware-title",
     id,
@@ -945,10 +953,24 @@ test("hardware tool title renders the active hardware group switcher", async () 
     hardware: [group("board-a", "主控板", 0), group("board-b", "继电器板", 1)],
     memory: {},
   };
-  const html = renderTaskToolPanel("hardware", detail, "main", "", "split");
-  assert.match(html, /<h3>硬件调试<\/h3><select id="hardware-title-group-select"/);
-  assert.match(html, /<option value="board-a" selected>主控板<\/option>/);
-  assert.match(html, /<option value="board-b" >继电器板<\/option>/);
+  const html = renderTaskToolPanel("hardware", detail, "main", "", "split", "", true);
+  assert.match(html, /<h3>硬件调试<\/h3><div class="hardware-title-group-switcher">/);
+  assert.match(html, /id="hardware-title-group-trigger"[^>]*><span>主控板<\/span>/);
+  assert.match(html, /data-hardware-title-group="board-a" class="active">主控板<\/button>/);
+  assert.match(html, /data-hardware-title-group="board-b" class="">继电器板<\/button>/);
+  assert.match(html, /id="pin-task-tool"[^>]*class="icon-button task-tool-pin active"[^>]*aria-pressed="true"/);
+  assert.match(html, /class="hardware-tool config-collapsed"/);
+  assert.doesNotMatch(html, /<details class="hardware-config" open>/);
+  assert.equal(normalizePinnedTaskTool("hardware"), "hardware");
+  assert.equal(normalizePinnedTaskTool("invalid"), "");
+
+  const emptyHTML = renderTaskToolPanel("hardware", {
+    task: {id: "task-hardware-empty", status: "active"},
+    hardware: [],
+    memory: {},
+  }, "main", "", "split");
+  assert.doesNotMatch(emptyHTML, /class="hardware-tool config-collapsed"/);
+  assert.match(emptyHTML, /<details class="hardware-config" open>/);
 });
 
 test("knowledge workspace defaults to actionable updates", async () => {
