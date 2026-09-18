@@ -70,10 +70,23 @@ Source: "{#SourceFeishuManifest}"; DestDir: "{code:SelectedDataDir}\plugins\chan
 
 [InstallDelete]
 Type: files; Name: "{app}\Run-AHA2User.vbs"
+; The previous release created "启动 AHA2" pointing at schtasks.exe. Inno only
+; removes shortcuts it created in this run, so without this the old entry survives
+; an upgrade and the Start menu shows both it and the new entries.
+Type: files; Name: "{group}\启动 AHA2.lnk"
 
 [Icons]
-Name: "{group}\AHA2"; Filename: "{code:LocalManagementURL}"
-Name: "{group}\启动 AHA2"; Filename: "{sys}\schtasks.exe"; Parameters: "/Run /TN ""AHA2 User"""; WorkingDir: "{app}"; Flags: runminimized
+; Two distinct entries, because they do different things and Inno silently keeps
+; only the last one when names collide.
+;   打开 AHA2  -- opens the running instance's web interface.
+;   AHA2       -- starts the tray, which owns the server process. This is also the
+;                 entry that carries the AHA2 icon; it used to point at
+;                 schtasks.exe, so the Start menu showed the generic Windows task
+;                 icon under the name "启动 AHA2".
+; If an instance is already running, the tray exits on its single-instance lock
+; rather than starting a second one. Use 打开 AHA2 in that case.
+Name: "{group}\AHA2"; Filename: "{app}\aha2-tray.exe"; Parameters: "{code:TrayParameters|}"; WorkingDir: "{app}"; IconFilename: "{app}\aha2-tray.exe"; Flags: runminimized
+Name: "{group}\打开 AHA2"; Filename: "{code:LocalManagementURL}"; IconFilename: "{app}\aha2-tray.exe"
 Name: "{group}\卸载 AHA2"; Filename: "{uninstallexe}"
 
 [Run]
@@ -91,11 +104,14 @@ var
   PortPage: TInputQueryWizardPage;
   LANPage: TInputQueryWizardPage;
   FirewallPage: TInputOptionWizardPage;
-  AgentAPIPage: TInputQueryWizardPage;
-  InsecureAgentAPIPage: TInputOptionWizardPage;
   UserTaskWasPresent: Boolean;
   UserProcessWasRunning: Boolean;
   InstallCommitted: Boolean;
+  { Set only once the install step has actually begun. Everything the rollback in
+    DeinitializeSetup undoes — stopping processes, disabling and removing the
+    login task — happens at that step and not before, so this is what decides
+    whether there is anything to roll back. }
+  InstallStarted: Boolean;
   ExistingTaskArgumentsLoaded: Boolean;
   ExistingTaskArguments: String;
 
@@ -132,26 +148,18 @@ begin
   Result := LocalManagementURL('') + '/healthz';
 end;
 
-function SelectedAgentAPIURL(): String;
-begin
-  Result := Trim(AgentAPIPage.Values[0]);
-  while (Length(Result) > 0) and (Result[Length(Result)] = '/') do
-    Delete(Result, Length(Result), 1);
-end;
-
-function AllowInsecureAgentAPI(): Boolean;
-begin
-  Result := InsecureAgentAPIPage.Values[0];
-end;
+{ Agent API is deliberately not configurable from the installer. The server
+  derives its base URL from the listen address, and the value it derives is the
+  one the reverse tunnel needs. Accepting a URL here would override that derived
+  value and would also gate the insecure-HTTP permission on the wrong address, so
+  a URL typed into the wizard could only make the result worse. Anyone who truly
+  needs a fixed address, such as behind an HTTPS reverse proxy, can still set one
+  on the running instance. }
 
 function TrayParameters(Param: String): String;
 begin
   Result := '--server "' + ExpandConstant('{app}\aha2.exe') + '" --listen "' +
     SelectedListenAddress() + '" --data-dir "' + SelectedDataDir('') + '"';
-  if SelectedAgentAPIURL() <> '' then
-    Result := Result + ' --agent-api-url "' + SelectedAgentAPIURL() + '"';
-  if (SelectedAgentAPIURL() <> '') and AllowInsecureAgentAPI() then
-    Result := Result + ' --allow-insecure-agent-api';
 end;
 
 function RegisterUserTaskParameters(Param: String): String;
@@ -161,10 +169,6 @@ begin
     ExpandConstant('{app}\aha2-tray.exe') + '" -ServerExecutable "' +
     ExpandConstant('{app}\aha2.exe') + '" -Listen "' + SelectedListenAddress() +
     '" -DataDir "' + SelectedDataDir('') + '"';
-  if SelectedAgentAPIURL() <> '' then
-    Result := Result + ' -AgentAPIURL "' + SelectedAgentAPIURL() + '"';
-  if (SelectedAgentAPIURL() <> '') and AllowInsecureAgentAPI() then
-    Result := Result + ' -AllowInsecureAgentAPI';
 end;
 
 function PrepareDataDirParameters(Param: String): String;
@@ -357,17 +361,12 @@ begin
   FirewallPage.Add('创建 AHA2 Windows 防火墙规则');
   FirewallPage.Values[0] := GetPreviousData('Firewall', '0') = '1';
 
-  AgentAPIPage := CreateInputQueryPage(FirewallPage.ID,
-    '配置 Agent API 初始默认值', '远程 Workspace 中的 Agent 如何访问 AHA2？',
-    '可留空并在安装后自动探测。此值只作为全局初始默认，也可在高级设置和每个 Workspace 中修改或覆盖。');
-  AgentAPIPage.Add('Agent API URL（可选初始值）：', False);
-  AgentAPIPage.Values[0] := GetPreviousData('AgentAPIURL', '');
-
-  InsecureAgentAPIPage := CreateInputOptionPage(AgentAPIPage.ID,
-    'Agent API 传输安全', '是否允许非本机 HTTP 地址？',
-    '仅在明确受信的开发网络中启用；公网必须使用 HTTPS。', False, False);
-  InsecureAgentAPIPage.Add('允许受信开发网络中的非 loopback HTTP Agent API');
-  InsecureAgentAPIPage.Values[0] := GetPreviousData('AllowInsecureAgentAPI', '0') = '1';
+  { No Agent API page. Left unset, the server derives its Agent API base URL from
+    the listen address (127.0.0.1 for a wildcard bind), and that loopback address
+    is exactly what the reverse tunnel gate expects: for an SSH workspace the
+    tunnel replaces it with a per-Turn port the workspace can actually reach. The
+    old page asked the user to answer a question AHA can answer itself, and an
+    answer typed here could only make things worse. }
 end;
 
 function ShouldSkipPage(PageID: Integer): Boolean;
@@ -383,7 +382,6 @@ end;
 function NextButtonClick(CurPageID: Integer): Boolean;
 var
   Port: Integer;
-  AgentURL, LowerAgentURL: String;
 begin
   Result := True;
   if CurPageID = DataDirPage.ID then
@@ -409,31 +407,7 @@ begin
     MsgBox('请输入 IPv4 地址，例如 0.0.0.0 或 192.168.1.10。', mbError, MB_OK);
     Result := False;
   end
-  else if CurPageID = AgentAPIPage.ID then
-  begin
-    AgentURL := SelectedAgentAPIURL();
-    LowerAgentURL := Lowercase(AgentURL);
-    if (AgentURL <> '') and
-      ((Pos('"', AgentURL) > 0) or (Pos(' ', AgentURL) > 0) or
-       ((Copy(LowerAgentURL, 1, 7) <> 'http://') and
-        (Copy(LowerAgentURL, 1, 8) <> 'https://'))) then
-    begin
-      MsgBox('Agent API URL 必须是无空格、无凭据的 http:// 或 https:// 基址。', mbError, MB_OK);
-      Result := False;
-    end;
-  end
-  else if CurPageID = InsecureAgentAPIPage.ID then
-  begin
-    LowerAgentURL := Lowercase(SelectedAgentAPIURL());
-    if (Copy(LowerAgentURL, 1, 7) = 'http://') and
-      (Copy(LowerAgentURL, 1, 17) <> 'http://127.0.0.1') and
-      (Copy(LowerAgentURL, 1, 16) <> 'http://localhost') and
-      (not AllowInsecureAgentAPI()) then
-    begin
-      MsgBox('非 loopback HTTP Agent API 仅允许用于受信开发网络；请勾选确认或改用 HTTPS。', mbError, MB_OK);
-      Result := False;
-    end;
-  end;
+  ;
 end;
 
 procedure RegisterPreviousData(PreviousDataKey: Integer);
@@ -449,11 +423,12 @@ begin
     SetPreviousData(PreviousDataKey, 'Firewall', '1')
   else
     SetPreviousData(PreviousDataKey, 'Firewall', '0');
-  SetPreviousData(PreviousDataKey, 'AgentAPIURL', SelectedAgentAPIURL());
-  if AllowInsecureAgentAPI() then
-    SetPreviousData(PreviousDataKey, 'AllowInsecureAgentAPI', '1')
-  else
-    SetPreviousData(PreviousDataKey, 'AllowInsecureAgentAPI', '0');
+  { Agent API is not a wizard input, so nothing to carry over between runs.
+    A stale AgentAPIURL left in the registry from an older version would still be
+    read by the page initialisation that no longer exists, so make sure it is
+    cleared rather than inherited. }
+  SetPreviousData(PreviousDataKey, 'AgentAPIURL', '');
+  SetPreviousData(PreviousDataKey, 'AllowInsecureAgentAPI', '0');
 end;
 
 function RunSC(const Arguments: String): Boolean;
@@ -574,7 +549,7 @@ var
   ResultCode: Integer;
 begin
   { The per-user deployment wrapper owns task registration because it has the
-    authoritative listen/data/Agent API arguments. Silent upgrades otherwise
+    authoritative listen and data-directory arguments. Silent upgrades otherwise
     reuse stale wizard values and can reject an already-correct ACL-protected
     task before the wrapper gets a chance to validate and reuse it. }
   if CompareText(ExpandConstant('{param:SKIPUSERTASK|0}'), '1') = 0 then
@@ -659,6 +634,7 @@ procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssInstall then
   begin
+    InstallStarted := True;
     UserTaskWasPresent := UserTaskExists();
 #ifndef PerUserInstall
     DisableAndStopLegacyAHA2Service(True);
@@ -682,7 +658,12 @@ end;
 
 procedure DeinitializeSetup();
 begin
-  if not InstallCommitted then
+  { Only undo what this run actually did. Cancelling or closing the wizard before
+    the install step leaves a running AHA2 entirely alone: stopping it there, or
+    removing its login task, would break a working installation the user never
+    asked us to touch. InstallStarted is what distinguishes "we began replacing
+    files and must roll back" from "we never got that far". }
+  if InstallStarted and (not InstallCommitted) then
   begin
     StopInstalledUserProcesses();
     if not UserTaskWasPresent then

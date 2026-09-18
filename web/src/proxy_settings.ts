@@ -93,7 +93,13 @@ function profileCards(profiles: ManagedProxyProfile[]): string {
   }).join("");
 }
 
-export function renderProxySettings(settings: ProxySettings, managed: ManagedProxyView): string {
+export function renderProxySettings(settings: ProxySettings, managed: ManagedProxyView, loading = false): string {
+  if (loading) {
+    return `<section class="page proxy-page">
+      <header class="page-head"><div><h1>代理</h1><p>添加配置、选择节点和切换线路相互独立；任何测试都不会改变当前流量。</p></div></header>
+      <section class="panel proxy-settings-panel"><div class="empty">正在读取当前代理设置…</div></section>
+    </section>`;
+  }
   const mode = settings.mode || "external";
   const profiles = managed.profiles || [];
   const activeProfile = profiles.find(profile => profile.active);

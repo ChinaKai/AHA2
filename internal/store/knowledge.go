@@ -480,6 +480,35 @@ func (s *Store) ListKnowledge(ctx context.Context, scope, projectID string, stat
 	return s.listKnowledge(ctx, scope, projectID, "", false, statuses)
 }
 
+// KnowledgeIndexes returns every verified project knowledge root, keyed by the
+// project it belongs to.
+//
+// This is the set of projects a caller may scope knowledge access to, so it must
+// not be derived from a page of entries: those are ordered by recency, and on a
+// library with more recent entries than a page holds, only the few projects that
+// were touched most recently would appear. A knowledge source missing from that
+// list cannot be granted, which is exactly the failure this avoids.
+func (s *Store) KnowledgeIndexes(ctx context.Context) (map[string]domain.KnowledgeEntry, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+knowledgeColumns+` FROM knowledge_entries WHERE is_index=1 AND status=? ORDER BY project_id`, domain.KnowledgeVerified)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := map[string]domain.KnowledgeEntry{}
+	for rows.Next() {
+		item, err := scanKnowledge(rows)
+		if err != nil {
+			return nil, err
+		}
+		// The global root has no project and is not a grantable source.
+		if strings.TrimSpace(item.ProjectID) == "" {
+			continue
+		}
+		result[item.ProjectID] = item
+	}
+	return result, rows.Err()
+}
+
 func (s *Store) ListKnowledgePage(ctx context.Context, scope, projectID string, statuses []domain.KnowledgeStatus, cursorAt time.Time, cursorID string, limit int) ([]domain.KnowledgeEntry, bool, error) {
 	query := `SELECT ` + knowledgeColumns + ` FROM knowledge_entries WHERE 1=1`
 	args := []any{}

@@ -55,18 +55,184 @@ func (runner *SSHRunner) Run(parent context.Context, command Command, onLine Lin
 	if err != nil {
 		return Result{}, err
 	}
-	if isWindowsPlatform(platform) {
-		payload, payloadErr := windowsRemotePayload(command)
-		if payloadErr != nil {
-			return Result{}, payloadErr
+	if command.ReverseForward != nil {
+		return runner.runWithReverseForward(ctx, command, platform, onLine)
+	}
+	return runner.runConnected(ctx, command, platform, onLine)
+}
+
+// runConnected runs the command on its own SSH connection.
+func (runner *SSHRunner) runConnected(ctx context.Context, command Command, platform string, onLine LineHandler) (Result, error) {
+	client, err := runner.dial(ctx)
+	if err != nil {
+		return Result{}, err
+	}
+	defer client.Close()
+	return runner.execCommand(ctx, client, command, platform, onLine)
+}
+
+// runWithReverseForward runs the command on a connection that also carries a
+// forwarding to an AHA-side address, so the command can reach AHA even when the
+// workspace cannot dial it directly.
+//
+// The forward lives exactly as long as this connection, which is the lifetime of
+// the inner command: when the backend process exits, the listener and the tunnel
+// go with it.
+//
+// Which address the command gets is decided by asking the workspace itself, over
+// this connection, rather than by assuming. Whether a forward works depends on the
+// workspace's own network position, and AHA cannot see that from outside: an
+// established forward that does not carry traffic looks exactly like a working one
+// until something tries it. Guessing wrong here is unusually costly, because the
+// Turn does not fail — it runs to its full duration with every Agent API call
+// timing out, which reads as the Agent hanging rather than as a broken address.
+func (runner *SSHRunner) runWithReverseForward(ctx context.Context, command Command, platform string, onLine LineHandler) (Result, error) {
+	client, err := runner.dial(ctx)
+	if err != nil {
+		return Result{}, err
+	}
+	defer client.Close()
+
+	configured := command.Env[command.ReverseForward.EnvName]
+	tunnelURL, cause := runner.openForward(client, command.ReverseForward)
+
+	if tunnelURL != "" {
+		switch probeErr := runner.probeAgentAPI(ctx, client, platform, tunnelURL); {
+		case probeErr == nil || probeErr == errProbeUnavailable:
+			// Either the tunnel answers, or the workspace has no tool to ask with.
+			// Both cases take the tunnel: it is the only candidate that can work
+			// for a remote workspace whose configured address is loopback.
+			setCommandEnv(command, command.ReverseForward.EnvName, tunnelURL)
+			return runner.execCommand(ctx, client, command, platform, onLine)
+		default:
+			cause = fmt.Sprintf("%s；隧道已建立但工作区无法通过它访问 AHA（%s）", cause, probeErr)
 		}
-		return runner.runRaw(ctx, windowsBootstrapCommand(), payload, 0, command.OutputLimit, onLine)
+	}
+
+	// The forward is unusable. Accept the configured address only if the workspace
+	// can actually reach it; otherwise this Turn would run to its full duration
+	// failing every Agent API call.
+	if configured != "" {
+		switch probeErr := runner.probeAgentAPI(ctx, client, platform, configured); {
+		case probeErr == nil, probeErr == errProbeUnavailable:
+			// Reachable, or unverifiable. A workspace that is merely minimal must
+			// keep the behaviour it had before; only positive evidence that nothing
+			// answers is grounds for stopping the Turn.
+			return runner.execCommand(ctx, client, command, platform, onLine)
+		default:
+			cause = fmt.Sprintf("%s；配置地址 %s 也不可达（%s）", cause, configured, probeErr)
+		}
+	}
+	return Result{}, fmt.Errorf(
+		"Agent API 不可达，已停止本 Turn 以免它在整个时限内空转：%s。\n"+
+			"该工作区解析出的 Agent API 地址是 loopback，从工作区内部指向它自己，因此只能依赖反向隧道。\n"+
+			"请检查 AHA 宿主到 %s 的 SSH 连接是否允许端口转发（sshd 需 AllowTcpForwarding yes 与 PermitListen 放行）。",
+		cause, runner.Host)
+}
+
+// openForward establishes the reverse forward and returns the workspace-side URL
+// that reaches it, or an empty URL and the reason it could not be established.
+func (runner *SSHRunner) openForward(client *ssh.Client, forward *ReverseForward) (string, string) {
+	listener, err := client.ListenTCP(&net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		return "", fmt.Sprintf("服务端拒绝或未响应端口转发请求（%v）", err)
+	}
+	address, ok := listener.Addr().(*net.TCPAddr)
+	if !ok || address.Port == 0 {
+		listener.Close()
+		return "", "服务端没有分配转发端口"
+	}
+	go serveReverseForward(listener, forward.Target)
+	// The workspace reaches the forward on its own loopback, so the value is the
+	// same regardless of how AHA itself is addressed or whether its listener is
+	// public. That is the point: no address configured anywhere is involved.
+	return "http://" + net.JoinHostPort("127.0.0.1", strconv.Itoa(address.Port)), ""
+}
+
+func setCommandEnv(command Command, name, value string) {
+	if command.Env == nil {
+		command.Env = map[string]string{}
+	}
+	command.Env[name] = value
+}
+
+// errProbeUnavailable means the workspace has no tool to make the request, so the
+// probe is inconclusive rather than negative. Treating it as a failure would fail
+// Turns on workspaces that are merely minimal.
+var errProbeUnavailable = errors.New("工作区中没有 curl、wget 或 Python，无法验证")
+
+// probeAgentAPI asks the workspace itself whether baseURL answers /healthz with an
+// AHA2 health payload, using the connection that carries any forward.
+//
+// It deliberately reuses the workspace's own tooling rather than dialing from AHA:
+// the question is what the workspace can reach, not what AHA can.
+func (runner *SSHRunner) probeAgentAPI(ctx context.Context, client *ssh.Client, platform, baseURL string) error {
+	if baseURL == "" {
+		return fmt.Errorf("地址为空")
+	}
+	if isWindowsPlatform(platform) {
+		// A Windows workspace reaches loopback through a different bootstrap, and
+		// reading it with the POSIX probe below would give a wrong answer. Reporting
+		// "cannot verify" keeps today's behaviour rather than guessing.
+		return errProbeUnavailable
+	}
+	script := `set -eu
+export NO_PROXY='*' no_proxy='*'
+probe_url="$1/healthz"
+if command -v curl >/dev/null 2>&1; then
+  body=$(curl --noproxy '*' -fsS --connect-timeout 3 --max-time 6 "$probe_url") || exit 1
+elif command -v wget >/dev/null 2>&1; then
+  body=$(wget -qO- -T 6 "$probe_url") || exit 1
+elif command -v python3 >/dev/null 2>&1; then
+  body=$(python3 -c 'import sys,urllib.request;print(urllib.request.urlopen(sys.argv[1],timeout=6).read(4096).decode())' "$probe_url") || exit 1
+else
+  exit 3
+fi
+printf '%s' "$body"`
+	result, err := runner.execCommand(ctx, client, Command{
+		Executable: "sh",
+		Args:       []string{"-c", script, "aha-agent-api-verify", baseURL},
+		Timeout:    20 * time.Second, OutputLimit: 4096,
+	}, platform, nil)
+	if err != nil {
+		return err
+	}
+	if result.ExitCode == 3 {
+		return errProbeUnavailable
+	}
+	if result.ExitCode != 0 {
+		detail := strings.TrimSpace(result.Stderr)
+		if detail == "" {
+			detail = fmt.Sprintf("exit code %d", result.ExitCode)
+		}
+		return fmt.Errorf("%s", detail)
+	}
+	return verifyAHA2HealthPayload(result.Stdout)
+}
+
+// execCommand builds the transport-specific invocation and runs it on an
+// established connection.
+func (runner *SSHRunner) execCommand(ctx context.Context, client *ssh.Client, command Command, platform string, onLine LineHandler) (Result, error) {
+	if isWindowsPlatform(platform) {
+		payload, err := windowsRemotePayload(command)
+		if err != nil {
+			return Result{}, err
+		}
+		return runner.execOnClient(ctx, client, windowsBootstrapCommand(), payload, command.OutputLimit, onLine)
 	}
 	script, err := remoteScript(command)
 	if err != nil {
 		return Result{}, err
 	}
-	return runner.runRaw(ctx, "sh -s", script, 0, command.OutputLimit, onLine)
+	return runner.execOnClient(ctx, client, "sh -s", script, command.OutputLimit, onLine)
+}
+
+func (runner *SSHRunner) dial(ctx context.Context) (*ssh.Client, error) {
+	port := runner.Port
+	if port == 0 {
+		port = 22
+	}
+	return runner.connect(ctx, net.JoinHostPort(runner.Host, strconv.Itoa(port)))
 }
 
 func (runner *SSHRunner) runRaw(parent context.Context, remoteCommand, stdin string, timeout time.Duration, outputLimit int, onLine LineHandler) (Result, error) {
@@ -80,12 +246,19 @@ func (runner *SSHRunner) runRaw(parent context.Context, remoteCommand, stdin str
 		ctx, cancel = context.WithTimeout(parent, timeout)
 	}
 	defer cancel()
-	start := time.Now()
 	client, err := runner.connect(ctx, net.JoinHostPort(runner.Host, strconv.Itoa(port)))
 	if err != nil {
 		return Result{}, err
 	}
 	defer client.Close()
+	return runner.execOnClient(ctx, client, remoteCommand, stdin, outputLimit, onLine)
+}
+
+// execOnClient runs one command over an already-established connection. Splitting
+// it out lets a caller reuse the same connection for a reverse forward, whose
+// lifetime must match the command's.
+func (runner *SSHRunner) execOnClient(ctx context.Context, client *ssh.Client, remoteCommand, stdin string, outputLimit int, onLine LineHandler) (Result, error) {
+	start := time.Now()
 	session, err := client.NewSession()
 	if err != nil {
 		return Result{}, err

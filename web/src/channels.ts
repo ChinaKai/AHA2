@@ -7,7 +7,8 @@ interface ChannelUIContext {
 	accounts: CodexAccount[];
 	projects: Project[];
 	workspaces: Workspace[];
-	knowledge: Knowledge[];
+	// One verified knowledge root per project, from /knowledge/indexes. Not a page.
+	knowledgeIndexes: Knowledge[];
 	libraries: KnowledgeLibrary[];
 }
 
@@ -83,8 +84,8 @@ async function completeConversation(taskID: string): Promise<unknown[]> {
 export async function exportRetiredChannelInstance(instanceID: string): Promise<void> {
 	const instanceResult = await api.channelInstance(instanceID);
 	const instance = instanceResult.instance;
-	const [projects, workspaces, tasks, handoffs, deliveries, policies, records] = await Promise.all([
-		api.projects(), api.workspaces(instance.host_project_id), api.tasks(instance.host_project_id), api.channelHandoffs(instanceID), api.channelDeliveries(instanceID), api.channelKnowledgePolicies(instanceID), api.channelKnowledgeRecords(instanceID),
+	const [projects, workspaces, tasks, handoffs, deliveries, policies] = await Promise.all([
+		api.projects(), api.workspaces(instance.host_project_id), api.tasks(instance.host_project_id), api.channelHandoffs(instanceID), api.channelDeliveries(instanceID), api.channelKnowledgePolicies(instanceID),
 	]);
 	const taskHistory = await Promise.all(tasks.tasks.map(async task => ({
 		detail: await api.task(task.id),
@@ -100,7 +101,6 @@ export async function exportRetiredChannelInstance(instanceID: string): Promise<
 		handoffs: handoffs.handoffs,
 		deliveries: deliveries.deliveries,
 		knowledge_policies: policies.policies,
-		knowledge_records: records.records,
 	};
 	const blobURL = URL.createObjectURL(new Blob([JSON.stringify(content, null, 2)], {type: "application/json"}));
 	const link = document.createElement("a");
@@ -111,11 +111,17 @@ export async function exportRetiredChannelInstance(instanceID: string): Promise<
 }
 
 function runtimeEditor(prefix: string, title: string, config: Record<string, unknown>, context: ChannelUIContext, allowInherit: boolean): string {
-	const modelID = String(config.model_id || "");
-	const accountID = String(config.codex_account_id || "");
+	// A saved config may carry inherit:true alongside a stale model_id from the
+	// era of the separate checkbox. It must render as "inherit", not as that
+	// stale choice, or saving the form would silently promote it to an override.
+	const modelID = config.inherit === true ? "" : String(config.model_id || "");
+	const accountID = config.inherit === true ? "" : String(config.codex_account_id || "");
 	const models = context.models.map(model => `<option value="${escapeHTML(model.id)}" ${model.id === modelID ? "selected" : ""}>${escapeHTML(model.display_name)} · ${escapeHTML(model.backend)}${model.source === "official" ? " · 官方" : ""}</option>`).join("");
 	const accounts = context.accounts.filter(item => item.status === "ready" && item.credential_configured).map(item => `<option value="${escapeHTML(item.id)}" ${item.id === accountID ? "selected" : ""}>${escapeHTML(item.label)}</option>`).join("");
-	return `<fieldset class="channel-runtime-editor"><legend>${escapeHTML(title)}</legend>${allowInherit ? `<label class="channel-check"><input type="checkbox" name="${prefix}_inherit" ${!modelID || config.inherit === true ? "checked" : ""}>继承实例默认 Runtime</label>` : ""}<label>Backend / Model<select name="${prefix}_model_id"><option value="">${allowInherit ? "继承实例默认" : "自动继承最近有效 Runtime"}</option>${models}</select></label><label>官方 Codex 账号<select name="${prefix}_codex_account_id"><option value="">自动选择就绪账号 / Provider Env</option>${accounts}</select></label></fieldset>`;
+	// Inheritance is expressed once, by the empty option of the model select: a
+	// second "inherit" checkbox that silently overrode that select made the two
+	// controls disagree. Leaving the select empty is the inherit signal.
+	return `<fieldset class="channel-runtime-editor"><legend>${escapeHTML(title)}</legend><label>Backend / Model<select name="${prefix}_model_id"><option value="" ${modelID === "" ? "selected" : ""}>${allowInherit ? "继承实例默认 Runtime" : "自动继承最近有效 Runtime"}</option>${models}</select></label><label>官方 Codex 账号<select name="${prefix}_codex_account_id"><option value="">自动选择就绪账号 / Provider Env</option>${accounts}</select></label></fieldset>`;
 }
 
 function instanceSettings(instance: ChannelInstance, context: ChannelUIContext): string {
@@ -135,7 +141,7 @@ function instanceSettings(instance: ChannelInstance, context: ChannelUIContext):
 	const botDialogueMaxTurns = Number(config.bot_dialogue_max_turns || 6);
 	const botDisplayName = String(config.runtime_bot_display_name_override || config.runtime_bot_display_name || "");
 	const providerBotDisplayName = String(config.runtime_bot_provider_display_name || "");
-	return `<details class="channel-instance-settings"><summary>Runtime、通知与访问范围</summary><form data-channel-settings="${escapeHTML(instance.id)}" data-revision="${instance.revision}">${runtimeEditor("default", "实例默认", objectValue(config.runtime_default), context, false)}${runtimeEditor("assistant", "私聊助手", objectValue(config.runtime_assistant_dm), context, true)}${runtimeEditor("group", "群聊电子人", objectValue(config.runtime_group_digital_human), context, true)}<fieldset><legend>机器人身份与对话</legend><label>机器人显示名称<input name="runtime_bot_display_name_override" maxlength="60" value="${escapeHTML(botDisplayName)}" placeholder="${escapeHTML(providerBotDisplayName || instance.name)}"></label><small>本地名称保存后不会被飞书应用名称或群内观察结果覆盖；留空时跟随飞书当前名称。</small><label>最大连续对话轮数<input name="bot_dialogue_max_turns" type="number" min="1" max="50" step="1" value="${Number.isFinite(botDialogueMaxTurns) ? botDialogueMaxTurns : 6}" required></label><small>仅限制群聊中由机器人发送者触发的连续回复；真人发送者不受此限制。</small></fieldset><fieldset><legend>消息通知</legend><label class="channel-check"><input type="checkbox" name="notify_task_status" ${config.notify_task_status === true ? "checked" : ""}>普通 Task 状态变更推送到飞书私聊助手</label><small>仅推送等待处理、完成、失败或中断等状态；不会推送普通消息、过程输出或渠道宿主 Task。</small></fieldset><fieldset><legend>私聊操作范围</legend><label>范围模式<select name="operation_scope_mode"><option value="all" ${operationScopeMode === "all" ? "selected" : ""}>全部 Project / Workspace</option><option value="selected" ${operationScopeMode === "selected" || legacyOperationRestricted ? "selected" : ""}>限制到所选范围</option></select></label><small>默认全部；渠道宿主、知识库项目和只读 Workspace 仍由服务端排除。</small></fieldset><div data-channel-operation-selected ${operationScopeMode === "all" ? "hidden" : ""}><fieldset><legend>私聊操作范围 · Project</legend><div class="channel-checkbox-list">${projectChecks || "<small>暂无可选项目</small>"}</div></fieldset><fieldset><legend>私聊操作范围 · Workspace</legend><small>先选择 Project，随后仅可选择该 Project 下的 Workspace。</small><div class="channel-checkbox-list">${workspaceChecks || "<small>暂无可选 Workspace</small>"}</div></fieldset></div><button class="primary" type="submit">保存渠道设置</button></form></details>`;
+	return `<details class="channel-instance-settings"><summary>Runtime、通知与访问范围</summary><form data-channel-settings="${escapeHTML(instance.id)}" data-revision="${instance.revision}">${runtimeEditor("default", "实例默认 Runtime", objectValue(config.runtime_default), context, false)}<details class="channel-runtime-overrides"><summary>私聊与群聊分别设置 Runtime</summary>${runtimeEditor("assistant", "私聊助手", objectValue(config.runtime_assistant_dm), context, true)}${runtimeEditor("group", "群聊电子人", objectValue(config.runtime_group_digital_human), context, true)}</details><fieldset><legend>机器人身份与对话</legend><label>机器人显示名称<input name="runtime_bot_display_name_override" maxlength="60" value="${escapeHTML(botDisplayName)}" placeholder="${escapeHTML(providerBotDisplayName || instance.name)}"></label><small>本地名称保存后不会被飞书应用名称或群内观察结果覆盖；留空时跟随飞书当前名称。</small><label>最大连续对话轮数<input name="bot_dialogue_max_turns" type="number" min="1" max="50" step="1" value="${Number.isFinite(botDialogueMaxTurns) ? botDialogueMaxTurns : 6}" required></label><small>仅限制群聊中由机器人发送者触发的连续回复；真人发送者不受此限制。</small></fieldset><fieldset><legend>消息通知</legend><label class="channel-check"><input type="checkbox" name="notify_task_status" ${config.notify_task_status === true ? "checked" : ""}>普通 Task 状态变更推送到飞书私聊助手</label><small>仅推送等待处理、完成、失败或中断等状态；不会推送普通消息、过程输出或渠道宿主 Task。</small></fieldset><fieldset><legend>私聊操作范围</legend><label>范围模式<select name="operation_scope_mode"><option value="all" ${operationScopeMode === "all" ? "selected" : ""}>全部 Project / Workspace</option><option value="selected" ${operationScopeMode === "selected" || legacyOperationRestricted ? "selected" : ""}>限制到所选范围</option></select></label><small>默认全部；渠道宿主、知识库项目和只读 Workspace 仍由服务端排除。</small></fieldset><div data-channel-operation-selected ${operationScopeMode === "all" ? "hidden" : ""}><fieldset><legend>私聊操作范围 · Project</legend><div class="channel-checkbox-list">${projectChecks || "<small>暂无可选项目</small>"}</div></fieldset><fieldset><legend>私聊操作范围 · Workspace</legend><small>先选择 Project，随后仅可选择该 Project 下的 Workspace。</small><div class="channel-checkbox-list">${workspaceChecks || "<small>暂无可选 Workspace</small>"}</div></fieldset></div><button class="primary" type="submit">保存渠道设置</button></form></details>`;
 }
 
 export function renderChannels(providers: ChannelPlugin[], instances: ChannelInstance[], context: ChannelUIContext): string {
@@ -156,12 +162,15 @@ export function renderChannels(providers: ChannelPlugin[], instances: ChannelIns
   </article>`;
 	return `<article class="channel-instance-card">
     <header><div><strong>${escapeHTML(instance.name)}</strong><small>${escapeHTML(instance.provider_key || instance.plugin_id)}</small></div><span><span class="status ${instance.status === "ready" ? "good" : instance.status === "error" || instance.status === "degraded" ? "bad" : "warn"}">${instanceState(instance)}</span><button type="button" data-channel-instance-toggle="${escapeHTML(instance.id)}" data-enabled="${instance.status !== "disabled"}" data-revision="${instance.revision}">${instance.status === "disabled" ? "启用" : "停用"}</button></span></header>
-    <dl><div><dt>私聊助手</dt><dd>唯一 Owner</dd></div><div><dt>群聊电子人</dt><dd>群聊共享会话</dd></div><div><dt>凭据</dt><dd>${instance.credential_configured ? "已安全保存" : "未配置"}</dd></div></dl>
-		<button type="button" class="primary full" data-channel-onboard="${escapeHTML(instance.id)}">${!instance.owner_bound ? (instance.credential_configured ? "扫码确认唯一 Owner" : "扫码创建并绑定飞书应用") : "扫码更新飞书权限"}</button>
-		${instance.owner_bound ? `<small>仅增补当前应用权限并重新确认唯一 Owner；不修改已有菜单、事件、回调或应用信息，不自动提交应用草稿发布。</small>` : ""}
+    <dl><div><dt>凭据</dt><dd>${instance.credential_configured ? "已安全保存" : "未配置"}</dd></div><div><dt>App ID</dt><dd>${instance.app_id ? escapeHTML(instance.app_id) : "尚未创建"}</dd></div></dl>
+    <div class="channel-instance-actions">
+      <button type="button" class="primary" data-channel-onboard="${escapeHTML(instance.id)}">${!instance.owner_bound ? (instance.credential_configured ? "扫码确认唯一 Owner" : "扫码创建并绑定") : "扫码更新权限"}</button>
+      <button type="button" data-channel-reset-binding="${escapeHTML(instance.id)}" data-revision="${instance.revision}">重置绑定</button>
+      <button type="button" class="danger" data-channel-archive="${escapeHTML(instance.id)}" data-revision="${instance.revision}">归档实例</button>
+    </div>
+    ${instance.owner_bound ? `<small class="channel-instance-hint">扫码仅增补当前应用权限并重新确认唯一 Owner，不修改已有菜单、事件、回调或应用信息。</small>` : ""}
 		${instanceSettings(instance, context)}
-    <details><summary>兼容方式：绑定已有应用</summary><form data-channel-credentials="${escapeHTML(instance.id)}" data-revision="${instance.revision}"><label>App ID<input name="app_id" value="${escapeHTML(instance.app_id || "")}" required></label><label>App Secret<input name="app_secret" type="password" autocomplete="new-password" required></label><button class="primary" type="submit">保存到 Secret Store</button></form></details>
-		<div class="channel-instance-lifecycle"><button type="button" data-channel-reset-binding="${escapeHTML(instance.id)}" data-revision="${instance.revision}">重置绑定</button><button type="button" class="danger" data-channel-archive="${escapeHTML(instance.id)}" data-revision="${instance.revision}">归档实例</button></div>
+    <details class="channel-instance-knowledge" data-channel-knowledge="${escapeHTML(instance.id)}"><summary>Knowledge 访问范围</summary><div class="channel-knowledge"><small>展开后加载</small></div></details>
     ${activity}
   </article>`;
   }).join("") : `<div class="empty"><strong>尚未创建渠道实例</strong><p>每个实例独立绑定一个 Owner，并包含私聊助手与群聊电子人。</p></div>`;
@@ -193,17 +202,6 @@ export function bindChannels(options: {refresh: () => Promise<void>; setMessage:
     const current = button.dataset.enabled === "true";
     const revision = Number(button.dataset.revision || 0);
     void api.updateChannelPlugin(plugin, !current, revision).then(refresh).catch(error => options.setMessage("error", error instanceof Error ? error.message : String(error)));
-  }));
-  document.querySelectorAll<HTMLFormElement>("[data-channel-credentials]").forEach(form => form.addEventListener("submit", event => {
-    event.preventDefault();
-    const values = new FormData(form);
-    const id = form.dataset.channelCredentials || "";
-    const revision = Number(form.dataset.revision || 0);
-    void api.updateChannelCredentials(id, String(values.get("app_id") || ""), String(values.get("app_secret") || ""), revision).then(async () => {
-      form.reset();
-      options.setMessage("success", "凭据已写入 Secret Store，响应未回显 Secret。");
-      await refresh();
-    }).catch(error => options.setMessage("error", error instanceof Error ? error.message : String(error)));
   }));
   document.querySelectorAll<HTMLButtonElement>("[data-channel-onboard]").forEach(button => button.addEventListener("click", () => {
     button.disabled = true;
@@ -283,7 +281,8 @@ export function bindChannels(options: {refresh: () => Promise<void>; setMessage:
 		const values = new FormData(settingsForm);
 		const runtime = (prefix: string, allowInherit: boolean) => {
 			const modelID = String(values.get(`${prefix}_model_id`) || "");
-			if (allowInherit && (values.get(`${prefix}_inherit`) === "on" || !modelID)) return {inherit: true};
+			// An empty select is the whole inherit signal; there is no second control.
+			if (allowInherit && !modelID) return {inherit: true};
 			return {model_id: modelID, codex_account_id: String(values.get(`${prefix}_codex_account_id`) || "")};
 		};
 		const config = {
@@ -329,50 +328,66 @@ export function bindChannels(options: {refresh: () => Promise<void>; setMessage:
     const body = details.querySelector<HTMLElement>(".channel-activity");
     if (!body) return;
     body.innerHTML = `<small>加载中…</small>`;
-    void Promise.all([api.channelHandoffs(instanceID), api.channelDeliveries(instanceID), api.channelKnowledgePolicies(instanceID), api.channelKnowledgeRecords(instanceID)]).then(([handoffs, deliveries, policies, records]) => {
-      const handoffRows = handoffs.handoffs.length ? handoffs.handoffs.map(item => `<li><strong>${escapeHTML(item.summary)}</strong><small>${escapeHTML(item.state)}${item.created_task_id ? ` · Task ${escapeHTML(item.created_task_id)}` : ""}</small></li>`).join("") : `<li><small>暂无群聊转单</small></li>`;
+    void Promise.all([api.channelHandoffs(instanceID), api.channelDeliveries(instanceID)]).then(([handoffs, deliveries]) => {
+      const handoffRows = handoffs.handoffs.map(item => `<li><strong>${escapeHTML(item.summary)}</strong><small>${escapeHTML(item.state)}${item.created_task_id ? ` · Task ${escapeHTML(item.created_task_id)}` : ""}</small></li>`).join("");
       const failed = deliveries.deliveries.filter(item => item.state === "dead_letter");
-      const deliveryRows = failed.length ? failed.map(item => `<li><strong>#${item.stream_sequence} · ${escapeHTML(item.last_error_code || "投递失败")}</strong><small>${item.attempts} 次 · ${escapeHTML(item.outcome_certainty || "unknown")}</small><span><button type="button" data-delivery-replay="${escapeHTML(item.id)}">重放</button><button type="button" data-delivery-skip="${escapeHTML(item.id)}">跳过</button></span></li>`).join("") : `<li><small>暂无死信投递</small></li>`;
-			const roots = options.context.knowledge.filter(entry => entry.is_index && entry.status === "verified");
-			const projectSources = options.context.projects.filter(project => !["channel", "knowledge"].includes(project.project_type || "")).map(project => ({label: `项目知识 · ${project.name}`, root: roots.find(entry => entry.project_id === project.id)?.id || ""})).filter(item => item.root);
-			const librarySources = options.context.libraries.map(library => ({label: `知识库 · ${library.name}`, root: roots.find(entry => entry.project_id === library.container_project_id)?.id || ""})).filter(item => item.root);
-			const knowledgeSources = [...projectSources, ...librarySources];
-			const policyRows = policies.policies.map(policy => {
-				const granted = new Set(policy.grants.map(grant => grant.knowledge_entry_id));
-				const scopeMode = policy.scope_mode === "all" ? "all" : "selected";
-				const choices = knowledgeSources.map(source => `<label class="channel-check"><input type="checkbox" name="knowledge_entry_id" value="${escapeHTML(source.root)}" ${granted.has(source.root) ? "checked" : ""}>${escapeHTML(source.label)}</label>`).join("");
-				return `<form data-channel-policy="${escapeHTML(instanceID)}" data-endpoint="${escapeHTML(policy.endpoint)}" data-revision="${policy.revision}"><strong>${escapeHTML(policy.endpoint)}</strong><small>固定渠道索引始终可读</small><label>Knowledge 范围<select name="knowledge_scope_mode"><option value="all" ${scopeMode === "all" ? "selected" : ""}>全部项目知识与知识库</option><option value="selected" ${scopeMode === "selected" ? "selected" : ""}>限制到所选知识源</option></select></label><div data-channel-knowledge-selected ${scopeMode === "all" ? "hidden" : ""}><div class="channel-batch-toolbar"><button type="button" data-channel-policy-select-all>全选</button><button type="button" data-channel-policy-clear>清空</button></div><div class="channel-checkbox-list">${choices || "<small>暂无可选知识源</small>"}</div></div><button type="submit">保存 Knowledge 范围</button></form>`;
-			}).join("");
-      const recordRows = records.records.filter(record => record.authority_status !== "verified").map(record => `<details><summary>${escapeHTML(record.question)}</summary><form data-channel-record-promote="${escapeHTML(record.id)}"><label>整理后的标题<input name="title" value="${escapeHTML(record.question.slice(0, 120))}" required></label><label>整理后的正文<textarea name="body" required>${escapeHTML(record.answer)}</textarea></label><button type="submit">人工整理并共享</button></form></details>`).join("") || `<small>暂无待整理渠道问答</small>`;
-      body.innerHTML = `<h4>Handoff</h4><ul>${handoffRows}</ul><h4>Dead letter</h4><ul>${deliveryRows}</ul><h4>Knowledge allowlist</h4><div class="channel-policy-list">${policyRows}</div><h4>待人工整理问答</h4><div class="channel-record-list">${recordRows}</div>`;
+      const deliveryRows = failed.map(item => `<li><strong>#${item.stream_sequence} · ${escapeHTML(item.last_error_code || "投递失败")}</strong><small>${item.attempts} 次 · ${escapeHTML(item.outcome_certainty || "unknown")}</small><span><button type="button" data-delivery-replay="${escapeHTML(item.id)}">重放</button><button type="button" data-delivery-skip="${escapeHTML(item.id)}">跳过</button></span></li>`).join("");
+      // Each block is omitted when it has nothing to show. Rendering a permanent
+      // "none" placeholder for both made this fold read as clutter while carrying
+      // no information at all on a healthy instance.
+      const sections = [
+        handoffs.handoffs.length ? `<h4>Handoff</h4><ul>${handoffRows}</ul>` : "",
+        failed.length ? `<h4>Dead letter</h4><ul>${deliveryRows}</ul>` : "",
+      ].filter(Boolean).join("");
+      body.innerHTML = sections || `<small>暂无转单记录与投递故障。</small>`;
       details.dataset.loaded = "true";
       body.querySelectorAll<HTMLButtonElement>("[data-delivery-replay]").forEach(button => button.addEventListener("click", () => void api.replayChannelDelivery(button.dataset.deliveryReplay || "").then(() => { details.dataset.loaded = "false"; details.open = false; details.open = true; }).catch(error => options.setMessage("error", String(error)))));
       body.querySelectorAll<HTMLButtonElement>("[data-delivery-skip]").forEach(button => button.addEventListener("click", () => void api.skipChannelDelivery(button.dataset.deliverySkip || "").then(() => { details.dataset.loaded = "false"; details.open = false; details.open = true; }).catch(error => options.setMessage("error", String(error)))));
-      body.querySelectorAll<HTMLFormElement>("[data-channel-policy]").forEach(form => form.addEventListener("submit", event => {
-        event.preventDefault();
-        const values = new FormData(form);
-				const grants = values.getAll("knowledge_entry_id").map(value => ({knowledge_entry_id: String(value), grant_scope: "subtree"}));
-        const scopeMode = String(values.get("knowledge_scope_mode") || "all") as "all" | "selected";
-        void api.updateChannelKnowledgePolicy(form.dataset.channelPolicy || "", form.dataset.endpoint || "", scopeMode, Number(form.dataset.revision || 0), grants).then(() => { options.setMessage("success", "Knowledge 范围已更新。"); details.dataset.loaded = "false"; }).catch(error => {
-					options.setMessage("error", channelErrorMessage(error));
-					refreshAfterChannelConflict(error, options.refresh);
-				});
-      }));
-			body.querySelectorAll<HTMLFormElement>("[data-channel-policy]").forEach(form => {
-				const mode = form.querySelector<HTMLSelectElement>('select[name="knowledge_scope_mode"]');
-				const selected = form.querySelector<HTMLElement>("[data-channel-knowledge-selected]");
-				const setAll = (checked: boolean) => form.querySelectorAll<HTMLInputElement>('input[name="knowledge_entry_id"]').forEach(input => { input.checked = checked; });
-				form.querySelector<HTMLElement>("[data-channel-policy-select-all]")?.addEventListener("click", () => setAll(true));
-				form.querySelector<HTMLElement>("[data-channel-policy-clear]")?.addEventListener("click", () => setAll(false));
-				const syncMode = () => { if (selected) selected.hidden = mode?.value !== "selected"; };
-				mode?.addEventListener("change", syncMode);
-				syncMode();
-			});
-      body.querySelectorAll<HTMLFormElement>("[data-channel-record-promote]").forEach(form => form.addEventListener("submit", event => {
-        event.preventDefault();
-        const values = new FormData(form);
-        void api.promoteChannelKnowledgeRecord(form.dataset.channelRecordPromote || "", String(values.get("title") || ""), String(values.get("body") || "")).then(() => { options.setMessage("success", "问答已人工整理为实例共享知识。"); form.closest("details")?.remove(); }).catch(error => options.setMessage("error", String(error)));
-      }));
+    }).catch(error => { body.textContent = error instanceof Error ? error.message : String(error); });
+  }));
+  // Knowledge scope is an access-control setting, so it lives with the other
+  // settings rather than inside the runtime activity fold, where its title gave
+  // no hint that a permission lived there.
+  document.querySelectorAll<HTMLDetailsElement>("[data-channel-knowledge]").forEach(details => details.addEventListener("toggle", () => {
+    if (!details.open || details.dataset.loaded === "true") return;
+    const instanceID = details.dataset.channelKnowledge || "";
+    const body = details.querySelector<HTMLElement>(".channel-knowledge");
+    if (!body) return;
+    body.innerHTML = `<small>加载中…</small>`;
+    void api.channelKnowledgePolicies(instanceID).then(policies => {
+      // Keyed by project so a source is never missed: the list is every project
+      // with a verified root, not a recency-ordered page of entries.
+      const rootByProject = new Map(options.context.knowledgeIndexes.map(entry => [entry.project_id, entry.id]));
+      const projectSources = options.context.projects.filter(project => !["channel", "knowledge"].includes(project.project_type || "")).map(project => ({label: `项目知识 · ${project.name}`, root: rootByProject.get(project.id) || ""})).filter(item => item.root);
+      const librarySources = options.context.libraries.map(library => ({label: `知识库 · ${library.name}`, root: rootByProject.get(library.container_project_id) || ""})).filter(item => item.root);
+      const knowledgeSources = [...projectSources, ...librarySources];
+      body.innerHTML = policies.policies.map(policy => {
+        const granted = new Set(policy.grants.map(grant => grant.knowledge_entry_id));
+        const scopeMode = policy.scope_mode === "all" ? "all" : "selected";
+        const choices = knowledgeSources.map(source => `<label class="channel-check"><input type="checkbox" name="knowledge_entry_id" value="${escapeHTML(source.root)}" ${granted.has(source.root) ? "checked" : ""}>${escapeHTML(source.label)}</label>`).join("");
+        return `<form data-channel-policy="${escapeHTML(instanceID)}" data-endpoint="${escapeHTML(policy.endpoint)}" data-revision="${policy.revision}"><strong>${policy.endpoint === "group_digital_human" ? "群聊电子人" : "私聊助手"}</strong><small>固定渠道索引始终可读</small><label>Knowledge 范围<select name="knowledge_scope_mode"><option value="all" ${scopeMode === "all" ? "selected" : ""}>全部项目知识与知识库</option><option value="selected" ${scopeMode === "selected" ? "selected" : ""}>限制到所选知识源</option></select></label><div data-channel-knowledge-selected ${scopeMode === "all" ? "hidden" : ""}><div class="channel-batch-toolbar"><button type="button" data-channel-policy-select-all>全选</button><button type="button" data-channel-policy-clear>清空</button></div><div class="channel-checkbox-list">${choices || "<small>暂无可选知识源</small>"}</div></div><button type="submit">保存 Knowledge 范围</button></form>`;
+      }).join("") || `<small>暂无可配置的知识源。</small>`;
+      details.dataset.loaded = "true";
+      body.querySelectorAll<HTMLFormElement>("[data-channel-policy]").forEach(form => {
+        const mode = form.querySelector<HTMLSelectElement>('select[name="knowledge_scope_mode"]');
+        const selected = form.querySelector<HTMLElement>("[data-channel-knowledge-selected]");
+        const setAll = (checked: boolean) => form.querySelectorAll<HTMLInputElement>('input[name="knowledge_entry_id"]').forEach(input => { input.checked = checked; });
+        form.querySelector<HTMLElement>("[data-channel-policy-select-all]")?.addEventListener("click", () => setAll(true));
+        form.querySelector<HTMLElement>("[data-channel-policy-clear]")?.addEventListener("click", () => setAll(false));
+        const syncMode = () => { if (selected) selected.hidden = mode?.value !== "selected"; };
+        mode?.addEventListener("change", syncMode);
+        syncMode();
+        form.addEventListener("submit", event => {
+          event.preventDefault();
+          const values = new FormData(form);
+          const grants = values.getAll("knowledge_entry_id").map(value => ({knowledge_entry_id: String(value), grant_scope: "subtree"}));
+          const scopeMode = String(values.get("knowledge_scope_mode") || "all") as "all" | "selected";
+          void api.updateChannelKnowledgePolicy(form.dataset.channelPolicy || "", form.dataset.endpoint || "", scopeMode, Number(form.dataset.revision || 0), grants).then(() => { options.setMessage("success", "Knowledge 范围已更新。"); details.dataset.loaded = "false"; }).catch(error => {
+            options.setMessage("error", channelErrorMessage(error));
+            refreshAfterChannelConflict(error, options.refresh);
+          });
+        });
+      });
     }).catch(error => { body.textContent = error instanceof Error ? error.message : String(error); });
   }));
 }

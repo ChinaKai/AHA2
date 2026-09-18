@@ -17,8 +17,12 @@ type Request struct {
 	Environment         map[string]string
 	Prompt              string
 	ProviderSessionID   string
-	Filesystem          string
-	Approval            string
+	// ReverseForward asks the transport to carry an AHA-side address into the
+	// workspace for the lifetime of this run. Nil when the workspace can already
+	// reach AHA by address.
+	ReverseForward *workspace.ReverseForward
+	Filesystem     string
+	Approval       string
 }
 
 type Event struct {

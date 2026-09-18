@@ -8,6 +8,9 @@ import (
 )
 
 func Run(config Config) error {
+	// The stored address wins over the one baked into the scheduled task, so a
+	// change made in the UI survives a restart.
+	config.Listen = EffectiveListen(OSCommandRunner{}, config)
 	command, err := BuildServerCommand(config)
 	if err != nil {
 		return err

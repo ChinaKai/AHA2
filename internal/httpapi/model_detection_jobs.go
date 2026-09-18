@@ -16,7 +16,6 @@ import (
 )
 
 const (
-	modelDetectionWorkers   = 4
 	modelDetectionJobTTL    = 10 * time.Minute
 	modelDetectionHeartbeat = 15 * time.Second
 )
@@ -75,19 +74,17 @@ type modelDetectionJob struct {
 }
 
 type modelDetectionJobs struct {
-	mu      sync.RWMutex
-	jobs    map[string]*modelDetectionJob
-	ttl     time.Duration
-	workers int
-	detect  modelCatalogDetector
-	probe   modelCapabilityProber
+	mu     sync.RWMutex
+	jobs   map[string]*modelDetectionJob
+	ttl    time.Duration
+	detect modelCatalogDetector
+	probe  modelCapabilityProber
 }
 
 func newModelDetectionJobs() *modelDetectionJobs {
 	return &modelDetectionJobs{
-		jobs:    make(map[string]*modelDetectionJob),
-		ttl:     modelDetectionJobTTL,
-		workers: modelDetectionWorkers,
+		jobs: make(map[string]*modelDetectionJob),
+		ttl:  modelDetectionJobTTL,
 		detect: func(ctx context.Context, provider domain.Provider, apiKey string) (gateway.Result, error) {
 			return gateway.DetectModelsContext(ctx, provider.BaseURL, apiKey, provider.AuthStyle, 15*time.Second)
 		},
@@ -131,58 +128,6 @@ func (m *modelDetectionJobs) run(job *modelDetectionJob, provider domain.Provide
 		return
 	}
 	job.setCatalog(result)
-
-	workers := m.workers
-	if workers <= 0 {
-		workers = modelDetectionWorkers
-	}
-	if workers > len(result.Models) {
-		workers = len(result.Models)
-	}
-	type probeResult struct {
-		model         gateway.DetectedModel
-		anthropicBase string
-	}
-	indices := make(chan int, len(result.Models))
-	for index := range result.Models {
-		indices <- index
-	}
-	close(indices)
-	results := make(chan probeResult, workers)
-	var wg sync.WaitGroup
-	for range workers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for index := range indices {
-				if job.ctx.Err() != nil {
-					return
-				}
-				model := result.Models[index]
-				capabilities, anthropicBase := m.probe(job.ctx, provider, apiKey, result.AuthStyle, model.ID)
-				if job.ctx.Err() != nil {
-					return
-				}
-				model.Capabilities = capabilities
-				select {
-				case results <- probeResult{model: model, anthropicBase: anthropicBase}:
-				case <-job.ctx.Done():
-					return
-				}
-			}
-		}()
-	}
-	go func() {
-		wg.Wait()
-		close(results)
-	}()
-	for result := range results {
-		job.recordResult(result.model, result.anthropicBase)
-	}
-	if job.ctx.Err() != nil {
-		job.finish("cancelled", "")
-		return
-	}
 	job.finish("completed", "")
 }
 

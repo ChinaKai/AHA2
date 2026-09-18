@@ -35,7 +35,7 @@ func (s *Server) listTasks(writer http.ResponseWriter, request *http.Request) {
 			writeError(writer, http.StatusInternalServerError, "list_tasks_failed")
 			return
 		}
-		page = storeListPage(items, hasMore, "tasks", func(item domain.Task) (time.Time, string) { return item.UpdatedAt, item.ID })
+		page = storeListPage(items, hasMore, "tasks", func(item domain.Task) (time.Time, string) { return item.CreatedAt, item.ID })
 	} else {
 		items, listErr := s.store.ListTasks(request.Context(), projectID)
 		if listErr != nil {
@@ -46,7 +46,7 @@ func (s *Server) listTasks(writer http.ResponseWriter, request *http.Request) {
 			items = append(items, mirror.Task)
 		}
 		var pageErr error
-		page, pageErr = paginateByUpdated(items, "tasks", options, func(item domain.Task) (time.Time, string) { return item.UpdatedAt, item.ID })
+		page, pageErr = paginateByUpdated(items, "tasks", options, func(item domain.Task) (time.Time, string) { return item.CreatedAt, item.ID })
 		if pageErr != nil {
 			writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid_cursor", "message": pageErr.Error()})
 			return

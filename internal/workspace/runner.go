@@ -16,6 +16,12 @@ type Command struct {
 	OutputLimit int
 	// KillTree terminates the local process tree when the command context is cancelled.
 	KillTree bool
+	// ReverseForward, when set, asks the runner to expose an AHA-side address
+	// inside the workspace for the lifetime of this command. The runner fills in
+	// EnvName once the forward is up, so the command can be told where to connect
+	// without knowing how the forward is carried. It is best-effort: a transport
+	// that cannot forward still runs the command.
+	ReverseForward *ReverseForward
 }
 
 type Result struct {

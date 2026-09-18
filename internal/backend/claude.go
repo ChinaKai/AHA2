@@ -59,13 +59,14 @@ func (adapter Claude) Execute(ctx context.Context, request Request, emit func(Ev
 	monitorDone := make(chan struct{})
 	go monitorBackendActivity(runContext, idleWarning, idleTimeout, heartbeat, activity, send, cancelRun, monitorDone)
 	result, err := request.Runner.Run(runContext, workspace.Command{
-		Executable: binary,
-		Args:       args,
-		Dir:        request.WorkDir,
-		Env:        filterClaudeEnvironment(request.Environment),
-		Stdin:      request.Prompt,
-		Timeout:    timeout,
-		KillTree:   true,
+		Executable:     binary,
+		Args:           args,
+		Dir:            request.WorkDir,
+		Env:            filterClaudeEnvironment(request.Environment),
+		Stdin:          request.Prompt,
+		Timeout:        timeout,
+		KillTree:       true,
+		ReverseForward: request.ReverseForward,
 	}, func(line string) {
 		event, parsedReply, parsedSession := parseClaudeLine(line)
 		select {
@@ -209,6 +210,7 @@ func filterClaudeEnvironment(values map[string]string) map[string]string {
 	allowed := map[string]bool{
 		"ANTHROPIC_API_KEY": true, "ANTHROPIC_AUTH_TOKEN": true, "ANTHROPIC_BASE_URL": true,
 		"ANTHROPIC_MODEL": true, "CLAUDE_CODE_MAX_CONTEXT_TOKENS": true,
+		"CLAUDE_CONFIG_DIR":  true,
 		"AHA2_AGENT_API_URL": true, "AHA2_AGENT_API_TOKEN": true,
 		"HTTP_PROXY": true, "HTTPS_PROXY": true, "NO_PROXY": true,
 	}

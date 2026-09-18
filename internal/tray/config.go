@@ -57,14 +57,10 @@ func normalizeConfig(config Config) (Config, error) {
 	if config.Server == "" || config.Listen == "" || config.DataDir == "" {
 		return Config{}, errors.New("usage: aha-tray --server <aha2.exe> --listen <ip:port> --data-dir <path> [--agent-api-url <url>] [--allow-insecure-agent-api]")
 	}
-	host, rawPort, err := net.SplitHostPort(config.Listen)
-	if err != nil || net.ParseIP(strings.TrimSpace(host)) == nil {
-		return Config{}, errors.New("listen must be an IP address and port")
+	if _, err := normalizeListen(config.Listen); err != nil {
+		return Config{}, err
 	}
-	port, err := strconv.Atoi(rawPort)
-	if err != nil || port < 1 || port > 65535 {
-		return Config{}, errors.New("listen port must be between 1 and 65535")
-	}
+	var err error
 	if config.AgentAPIURL != "" {
 		parsed, err := url.Parse(config.AgentAPIURL)
 		if err != nil || parsed.Host == "" || parsed.User != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") ||
@@ -94,6 +90,39 @@ func isLoopbackHost(host string) bool {
 	return address != nil && address.IsLoopback()
 }
 
+// EffectiveListen resolves the address the server should bind.
+//
+// The scheduled task carries the address chosen at install time, but the operator
+// can change it from the UI, which stores it in the data directory. The stored
+// value therefore wins, and the task argument is only the fallback. Any failure
+// here returns the configured address: a resolver problem must never keep the
+// server from starting.
+func EffectiveListen(runner CommandRunner, config Config) string {
+	resolved, err := runner.Output(Command{
+		Path: config.Server,
+		Args: []string{"listen", "--data-dir", config.DataDir, "--default", config.Listen},
+		Dir:  filepath.Dir(config.Server),
+	})
+	if err != nil {
+		return config.Listen
+	}
+	candidate := strings.TrimSpace(resolved)
+	if candidate == "" {
+		return config.Listen
+	}
+	if _, err := normalizeListen(candidate); err != nil {
+		// A stored address that cannot be bound must not strand the tray on a
+		// dead listener; fall back to the address the task was installed with.
+		return config.Listen
+	}
+	return candidate
+}
+
+// CommandRunner runs the server binary for a one-shot query.
+type CommandRunner interface {
+	Output(command Command) (string, error)
+}
+
 func BuildServerCommand(config Config) (Command, error) {
 	config, err := normalizeConfig(config)
 	if err != nil {
@@ -121,4 +150,20 @@ func ManagementURL(listen string) string {
 		host = "::1"
 	}
 	return "http://" + net.JoinHostPort(host, port)
+}
+
+// normalizeListen validates an "ip:port" listen address the same way
+// normalizeConfig does, so a resolved address is held to the same standard as a
+// configured one.
+func normalizeListen(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	host, rawPort, err := net.SplitHostPort(value)
+	if err != nil || net.ParseIP(strings.TrimSpace(host)) == nil {
+		return "", errors.New("listen must be an IP address and port")
+	}
+	port, err := strconv.Atoi(rawPort)
+	if err != nil || port < 1 || port > 65535 {
+		return "", errors.New("listen port must be between 1 and 65535")
+	}
+	return value, nil
 }

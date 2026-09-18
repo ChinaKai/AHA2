@@ -26,11 +26,21 @@ foreach ($contract in @(
     'runasoriginaluser', 'StopInstalledUserProcesses', "Get-Process -Name ''aha2-tray'',''aha2''",
     'DisableAndStopLegacyAHA2Service(True)', 'RemoveLegacyAHA2Service()', 'Register-AHA2UserTask.ps1',
     'Prepare-AHA2DataDir.ps1', 'ConfigureAHA2UserTask', 'AHA2UserTaskName', 'RemoveAHA2UserTask',
-    'ExecAsOriginalUser', 'AgentAPIPage', '--agent-api-url', '--allow-insecure-agent-api',
+    'ExecAsOriginalUser', 'InstallStarted',
     'WaitForAHA2Health', 'LocalHealthURL', "ExpandConstant('{app}\aha2-tray.exe')"
 )) {
     if (-not $installer.Contains($contract)) {
         throw "Installer safety contract is missing: $contract"
+    }
+}
+# Agent API must not be an installer input. Leaving it unset is what lets the
+# server derive a loopback base URL, and that is the value the reverse tunnel
+# needs; asking here invited an answer that could only make the result worse.
+# InstallStarted is the guard that keeps a cancelled wizard from stopping a
+# running installation and deleting its login task.
+foreach ($forbidden in @('AgentAPIPage', 'InsecureAgentAPIPage', '--agent-api-url', '--allow-insecure-agent-api')) {
+    if ($installer.Contains($forbidden)) {
+        throw "Installer still asks the user for Agent API settings: $forbidden"
     }
 }
 foreach ($forbidden in @('Source: "Run-AHA2User.vbs"', "UserLauncherParameters", "wscript.exe", "service run --listen", "actions= restart/", "ConfigureAndStartAHA2Service", '{userstartup}\AHA2')) {
@@ -176,7 +186,7 @@ foreach ($contract in @("AHA2 User", "aha2-tray.exe", "--server", "aha2.exe", '`
 foreach ($contract in @("taskkill.exe", "/T", "backend CLI")) {
   if ($installer -notmatch [regex]::Escape($contract)) { throw "Installer process-tree shutdown contract is missing: $contract" }
 }
-foreach ($contract in @("SKIPUSERTASK", "authoritative listen/data/Agent API arguments", "if UserTaskWasPresent then", "preserved for per-user upgrade")) {
+foreach ($contract in @("SKIPUSERTASK", "authoritative listen and data-directory arguments", "if UserTaskWasPresent then", "preserved for per-user upgrade")) {
   if ($installer -notmatch [regex]::Escape($contract)) { throw "Installer task-registration handoff contract is missing: $contract" }
 }
 $taskCommandProbe = $installer.IndexOf("function ExistingUserTaskCommandLine")

@@ -121,7 +121,9 @@ func (s *Service) TaskAgents(ctx context.Context, taskID string) ([]domain.TaskA
 		}
 		agents[index].Backend = snapshot.Backend
 		agents[index].ModelSource = domain.ModelSourceProvider
-		if snapshot.CodexAccountID != "" {
+		if snapshot.EnvGroupID == domain.ClaudeNativeEnvGroupID {
+			agents[index].ModelSource = domain.ModelSourceClaudeNative
+		} else if snapshot.CodexAccountID != "" {
 			agents[index].ModelSource = domain.ModelSourceOfficial
 		}
 		agents[index].ModelID = snapshot.ModelID
@@ -282,7 +284,7 @@ func backendSessionIdentityChanged(previous, next domain.RuntimeConfigSnapshot) 
 
 func (s *Service) recordAgentConfigUpdate(ctx context.Context, agent domain.TaskAgent, now time.Time) {
 	modelName := agent.ModelName
-	if agent.ModelSource == domain.ModelSourceOfficial || modelName == "" {
+	if agent.ModelSource == domain.ModelSourceOfficial || agent.ModelSource == domain.ModelSourceClaudeNative || modelName == "" {
 		modelName = agent.WireModel
 	}
 	accountName := ""
@@ -299,6 +301,8 @@ func (s *Service) recordAgentConfigUpdate(ctx context.Context, agent domain.Task
 	}
 	source := "Env"
 	if agent.ModelSource == domain.ModelSourceOfficial {
+		source = "Official"
+	} else if agent.ModelSource == domain.ModelSourceClaudeNative {
 		source = "Official"
 	}
 	summary := fmt.Sprintf("%s 配置已更新：%s · %s · %s", agent.AgentID, agent.Backend, source, modelName)
@@ -334,7 +338,9 @@ func (s *Service) deriveRuntimeSnapshot(
 	modelSource := strings.TrimSpace(input.ModelSource)
 	if modelSource == "" {
 		modelSource = domain.ModelSourceProvider
-		if base.CodexAccountID != "" {
+		if base.EnvGroupID == domain.ClaudeNativeEnvGroupID {
+			modelSource = domain.ModelSourceClaudeNative
+		} else if base.CodexAccountID != "" {
 			modelSource = domain.ModelSourceOfficial
 		}
 	}
@@ -348,11 +354,15 @@ func (s *Service) deriveRuntimeSnapshot(
 		if accountID == "" {
 			accountID = base.CodexAccountID
 		}
+	} else if modelSource == domain.ModelSourceClaudeNative {
+		if wireModel == "" {
+			wireModel = base.WireModel
+		}
 	} else if modelID == "" {
 		modelID = base.ModelID
 	}
 	model, envGroup, accountID, err := s.resolveRuntimeSelection(ctx, runtimeSelectionInput{
-		Backend: backend, ModelSource: modelSource, ModelID: modelID,
+		WorkspaceID: task.WorkspaceID, Backend: backend, ModelSource: modelSource, ModelID: modelID,
 		WireModel: wireModel, CodexAccountID: accountID,
 	})
 	if err != nil {

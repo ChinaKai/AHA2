@@ -191,6 +191,9 @@ func probeGit(ctx context.Context, runner Runner, item *domain.Workspace) bool {
 // boolean result reports an execution failure; a missing optional CLI is not a
 // degraded workspace by itself.
 func probeBackend(ctx context.Context, runner Runner, item domain.Workspace, executable string) (map[string]any, bool) {
+	if executable == "claude" {
+		return probeClaudeBackend(ctx, runner, item)
+	}
 	result, err := runDetectionCommand(ctx, item, runner, Command{
 		Executable: executable, Args: []string{"--version"}, Dir: item.RootPath, Timeout: 20 * time.Second,
 	})

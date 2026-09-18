@@ -8,8 +8,17 @@ export interface AuthStatus {
 }
 export interface SecuritySettings {
   validate_origin: boolean;
+  // "local" answers only this machine; "lan" also answers private network
+  // addresses. The server binds every interface, so this is what narrows it.
+  access_scope: string;
   startup_override?: boolean;
   updated_at?: string;
+}
+export interface NetworkSettings {
+  // Persisted override; empty means the address the service was installed with.
+  listen_address: string;
+  startup_listen_address: string;
+  restart_required: boolean;
 }
 export interface AgentAPISettings {
   url: string;
@@ -193,7 +202,7 @@ export interface Model {
   display_name: string;
   provider_id: string;
   provider_name?: string;
-  source: "provider" | "official" | string;
+  source: "provider" | "official" | "claude_native" | string;
   codex_account_id?: string;
   backend: string;
   wire_model: string;
@@ -207,6 +216,24 @@ export interface WorkspaceProbe {
   status?: "ready" | "unavailable" | "not_installed" | "execution_failed" | string;
   version?: string;
   error?: string;
+  auth_status?: "logged_in" | "not_logged_in" | "unknown" | string;
+  auth_method?: string;
+  api_provider?: string;
+  models?: ClaudeModelOption[];
+  models_error?: string;
+  models_updated_at?: string;
+}
+
+export interface ClaudeModelOption {
+  wire_model: string;
+  resolved_model?: string;
+  display_name: string;
+  description?: string;
+  supports_effort?: boolean;
+  supported_effort_levels?: string[];
+  supports_adaptive_thinking?: boolean;
+  supports_fast_mode?: boolean;
+  supports_auto_mode?: boolean;
 }
 
 export interface CodexAccount {
@@ -332,7 +359,7 @@ export interface Task {
   read_only_reason?: string;
   channel_instance_id?: string;
   channel_retired?: boolean;
-  agent_api_mode: "auto" | "global" | "manual" | string;
+  agent_api_mode: "auto" | "manual" | string;
   agent_api_url?: string;
   agent_api_resolved_url?: string;
   agent_api_status: "unknown" | "ready" | "error" | string;
@@ -445,7 +472,7 @@ export interface TaskAgent {
   runtime_config_snapshot_id: string;
   inherit_main: boolean;
   backend?: string;
-  model_source?: "env" | "official" | string;
+  model_source?: "env" | "official" | "claude_native" | string;
   model_id?: string;
   model_name?: string;
   wire_model?: string;

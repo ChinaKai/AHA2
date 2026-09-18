@@ -48,6 +48,14 @@ func main() {
 		fmt.Println("aha2", version)
 		return
 	}
+	if command == "listen" {
+		err = printEffectiveListen(args)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	switch command {
 	case "serve":
 		err = serve(args)
@@ -74,6 +82,8 @@ func parseCommand(args []string) (string, []string, error) {
 			return "", nil, fmt.Errorf("version does not accept arguments")
 		}
 		return "version", nil, nil
+	case "listen":
+		return "listen", args[1:], nil
 	case "import-aha1-knowledge":
 		return "import-aha1-knowledge", args[1:], nil
 	case "service":
@@ -272,6 +282,7 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 		Channels:          channelService,
 		Version:           version,
 		WebVersion:        webVersion,
+		ListenAddress:     options.listen,
 	})
 	if options.allowCrossOrigin {
 		logger.Warn("Origin host validation disabled")
@@ -392,4 +403,43 @@ func envBool(name string) bool {
 	default:
 		return false
 	}
+}
+
+// printEffectiveListen reports the listen address the running instance would use,
+// resolving the persisted override against the flag default.
+//
+// The tray starts aha2.exe, so it needs this before the server is up: it reads
+// the setting without opening a socket. It is a read-only query and prints one
+// line of plain text so the tray can consume it without parsing JSON.
+func printEffectiveListen(args []string) error {
+	flags := flag.NewFlagSet("aha2 listen", flag.ContinueOnError)
+	dataDir := flags.String("data-dir", envOr("AHA2_DATA_DIR", ".data"), "AHA2 data directory")
+	fallback := flags.String("default", "0.0.0.0:8766", "address to report when no override is stored")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	address := strings.TrimSpace(*fallback)
+	if address == "" {
+		address = "0.0.0.0:8766"
+	}
+	storePath := filepath.Join(*dataDir, "aha2.db")
+	if _, err := os.Stat(storePath); err != nil {
+		// No database yet: this is a first run, so the flag default stands.
+		fmt.Println(address)
+		return nil
+	}
+	database, err := store.Open(context.Background(), storePath)
+	if err != nil {
+		return fmt.Errorf("open store to read listen address: %w", err)
+	}
+	defer database.Close()
+	settings, err := database.NetworkSettings(context.Background())
+	if err != nil {
+		return fmt.Errorf("read listen address: %w", err)
+	}
+	if stored := strings.TrimSpace(settings.ListenAddress); stored != "" {
+		address = stored
+	}
+	fmt.Println(address)
+	return nil
 }

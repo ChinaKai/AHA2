@@ -265,21 +265,6 @@ type ChannelKnowledgeGrant struct {
 	RevokedAt        time.Time `json:"revoked_at,omitempty"`
 }
 
-type ChannelKnowledgeRecord struct {
-	ID                      string         `json:"id"`
-	InstanceID              string         `json:"instance_id"`
-	ConversationID          string         `json:"conversation_id"`
-	KnowledgeEntryID        string         `json:"knowledge_entry_id"`
-	RequesterIdentityLinkID string         `json:"requester_identity_link_id"`
-	Question                string         `json:"question"`
-	Answer                  string         `json:"answer"`
-	Source                  map[string]any `json:"source"`
-	Visibility              string         `json:"visibility"`
-	AuthorityStatus         string         `json:"authority_status"`
-	OccurredAt              time.Time      `json:"occurred_at"`
-	CreatedAt               time.Time      `json:"created_at"`
-}
-
 type ChannelInboxReceipt struct {
 	ID                string         `json:"id"`
 	InstanceID        string         `json:"instance_id"`

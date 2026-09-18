@@ -54,18 +54,31 @@ func (executor Executor) configuredAdapters(ctx context.Context) (backend.Codex,
 	return codex, claude, nil
 }
 
-func (executor Executor) runCodex(ctx context.Context, adapter backend.Codex, request app.ExecutionRequest, emit func(app.ExecutionEvent)) (app.ExecutionResult, error) {
-	result, err := adapter.Execute(ctx, backend.Request{
+// newBackendRequest fills the fields every backend shares.
+//
+// Both backends need the same set, and building them independently is how one
+// path silently loses a field: Claude was left without the Agent API forward, so
+// its Turns ran against an address only reachable through a tunnel that was never
+// established. Sharing the construction makes that class of omission impossible
+// rather than merely fixed.
+func newBackendRequest(request app.ExecutionRequest, model string, environment map[string]string) backend.Request {
+	return backend.Request{
 		Runner:  workspace.RunnerFor(request.Workspace),
 		WorkDir: taskWorkDir(request),
-		Model:   request.Model.WireModel, ContextWindow: request.Model.ContextWindow,
-		ReasoningEffort:     request.Snapshot.ReasoningEffort,
-		StreamIdleTimeoutMS: request.Snapshot.StreamIdleTimeoutMS,
-		StreamMaxRetries:    request.Snapshot.StreamMaxRetries,
-		Environment:         request.Environment,
-		Prompt:              request.Prompt, ProviderSessionID: request.ProviderSessionID,
+		Model:   model, ContextWindow: request.Model.ContextWindow,
+		ReasoningEffort: request.Snapshot.ReasoningEffort,
+		Environment:     environment,
+		Prompt:          request.Prompt, ProviderSessionID: request.ProviderSessionID,
 		Filesystem: request.Filesystem, Approval: request.Approval,
-	}, func(event backend.Event) {
+		ReverseForward: request.AgentAPIForward,
+	}
+}
+
+func (executor Executor) runCodex(ctx context.Context, adapter backend.Codex, request app.ExecutionRequest, emit func(app.ExecutionEvent)) (app.ExecutionResult, error) {
+	backendRequest := newBackendRequest(request, request.Model.WireModel, request.Environment)
+	backendRequest.StreamIdleTimeoutMS = request.Snapshot.StreamIdleTimeoutMS
+	backendRequest.StreamMaxRetries = request.Snapshot.StreamMaxRetries
+	result, err := adapter.Execute(ctx, backendRequest, func(event backend.Event) {
 		emit(app.ExecutionEvent{Type: event.Type, Data: event.Data})
 	})
 	return app.ExecutionResult{
@@ -74,26 +87,64 @@ func (executor Executor) runCodex(ctx context.Context, adapter backend.Codex, re
 }
 
 func (executor Executor) runClaude(ctx context.Context, adapter backend.Claude, request app.ExecutionRequest, emit func(app.ExecutionEvent)) (app.ExecutionResult, error) {
-	environment := make(map[string]string, len(request.Environment)+1)
-	for key, value := range request.Environment {
-		environment[key] = value
-	}
+	environment, model := claudeExecutionRuntime(request)
 	if request.Model.ContextWindow > 0 && environment["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "" {
 		environment["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = strconv.FormatInt(request.Model.ContextWindow, 10)
 	}
-	result, err := adapter.Execute(ctx, backend.Request{
-		Runner:  workspace.RunnerFor(request.Workspace),
-		WorkDir: taskWorkDir(request),
-		Model:   request.Model.WireModel, ContextWindow: request.Model.ContextWindow,
-		ReasoningEffort: request.Snapshot.ReasoningEffort, Environment: environment,
-		Prompt: request.Prompt, ProviderSessionID: request.ProviderSessionID,
-		Filesystem: request.Filesystem, Approval: request.Approval,
-	}, func(event backend.Event) {
+	workDir := taskWorkDir(request)
+	home, _ := workspace.SessionHomeFor(workspace.SessionHomeInput{
+		Backend: "claude", Workspace: request.Workspace, WorkDir: workDir,
+		SessionID: request.BackendSessionID, EnvGroupID: request.Snapshot.EnvGroupID,
+	})
+	if home.EnvName != "" {
+		runner := workspace.RunnerFor(request.Workspace)
+		// A session can only be resumed from the config directory that holds its
+		// transcript. Sessions created before this isolation existed live in the
+		// backend's own default directory, so continue those there instead of
+		// pointing --resume at an empty directory and failing the turn.
+		//
+		// That default directory belongs to the workspace host, whose home is not
+		// necessarily the control plane's: a WSL workspace keeps its transcripts in
+		// the distro's home. Asking for the control plane's home instead would look
+		// in a directory that does not exist on the host, so the transcript would
+		// never be found and the turn would fail with "No conversation found".
+		configDir := home.Dir
+		if request.ProviderSessionID != "" {
+			if defaults := workspace.ClaudeDefaultConfigDirOn(ctx, runner); defaults != "" &&
+				workspace.ClaudeTranscriptExists(ctx, runner, defaults, workDir, request.ProviderSessionID) {
+				configDir = defaults
+			}
+		} else if err := workspace.EnsureClaudeConfigDir(ctx, request.Workspace, runner, home.Dir); err != nil {
+			return app.ExecutionResult{}, fmt.Errorf("prepare Claude config dir: %w", err)
+		}
+		environment[home.EnvName] = configDir
+	}
+	result, err := adapter.Execute(ctx, newBackendRequest(request, model, environment), func(event backend.Event) {
 		emit(app.ExecutionEvent{Type: event.Type, Data: event.Data})
 	})
 	return app.ExecutionResult{
 		Reply: result.Reply, ExitCode: result.ExitCode, ProviderSessionID: result.ProviderSessionID,
 	}, err
+}
+
+func claudeExecutionRuntime(request app.ExecutionRequest) (map[string]string, string) {
+	environment := make(map[string]string, len(request.Environment)+1)
+	for key, value := range request.Environment {
+		environment[key] = value
+	}
+	model := request.Model.WireModel
+	if request.Snapshot.EnvGroupID == domain.ClaudeNativeEnvGroupID {
+		// The native source must use Claude Code's own logged-in account,
+		// even when AHA itself was launched with ANTHROPIC_* variables set.
+		environment["ANTHROPIC_API_KEY"] = ""
+		environment["ANTHROPIC_AUTH_TOKEN"] = ""
+		environment["ANTHROPIC_BASE_URL"] = ""
+		environment["ANTHROPIC_MODEL"] = ""
+		if model == "default" {
+			model = ""
+		}
+	}
+	return environment, model
 }
 
 func taskWorkDir(request app.ExecutionRequest) string {

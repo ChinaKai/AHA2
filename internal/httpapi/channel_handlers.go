@@ -442,43 +442,6 @@ func (s *Server) updateChannelKnowledgePolicy(writer http.ResponseWriter, reques
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "policies": items})
 }
 
-func (s *Server) channelKnowledgeRecords(writer http.ResponseWriter, request *http.Request) {
-	if s.channels == nil {
-		writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "records": []any{}})
-		return
-	}
-	session, _ := sessionFromContext(request.Context())
-	items, err := s.channels.OwnerKnowledgeRecords(request.Context(), session.OwnerID, request.PathValue("id"))
-	if err != nil {
-		writeChannelError(writer, err, "list_channel_knowledge_records_failed")
-		return
-	}
-	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "records": items})
-}
-
-func (s *Server) promoteChannelKnowledgeRecord(writer http.ResponseWriter, request *http.Request) {
-	if s.channels == nil {
-		writeError(writer, http.StatusServiceUnavailable, "channels_unavailable")
-		return
-	}
-	var payload struct {
-		Title string `json:"title"`
-		Body  string `json:"body"`
-	}
-	if err := decodeJSON(request, &payload); err != nil {
-		writeError(writer, http.StatusBadRequest, "invalid_json")
-		return
-	}
-	session, _ := sessionFromContext(request.Context())
-	item, err := s.channels.PromoteOwnerKnowledgeRecord(request.Context(), session.OwnerID, request.PathValue("id"), payload.Title, payload.Body)
-	if err != nil {
-		writeChannelError(writer, err, "promote_channel_knowledge_record_failed")
-		return
-	}
-	s.audit(request, "channel.knowledge_record.promote", "channel_knowledge_record", item.ID, nil)
-	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "record": item})
-}
-
 func channelIfMatch(writer http.ResponseWriter, request *http.Request) (int, bool) {
 	value := strings.TrimSpace(request.Header.Get("If-Match"))
 	value = strings.TrimPrefix(value, "W/")

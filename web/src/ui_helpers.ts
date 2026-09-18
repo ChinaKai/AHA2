@@ -68,9 +68,22 @@ export function renderWorkspaceDetection(workspace: Workspace): string {
       if (text) details.push({kind: probe?.status === "execution_failed" ? "bad" : "muted", text});
     }
     if (agentAPIProbe?.status === "ready" || workspace.agent_api_status === "ready") {
-      details.push({kind: "muted", text: `Agent API · ${agentAPIProbe?.url || workspace.agent_api_resolved_url || "已连接"}`});
+      // A tunnel-reached workspace is reached over a per-Turn port, not at the
+      // stored address. Showing the stored loopback address on its own would claim
+      // the workspace connects to 127.0.0.1, which is never true remotely.
+      const via = (agentAPIProbe as {via?: string} | undefined)?.via;
+      const address = agentAPIProbe?.url || workspace.agent_api_resolved_url || "";
+      details.push({
+        kind: "muted",
+        text: via === "tunnel" ? "Agent API · 隧道已连通" : `Agent API · ${address || "已连接"}`,
+      });
     } else if (agentAPIProbe?.status === "unavailable" || workspace.agent_api_status === "error") {
       details.push({kind: "bad", text: agentAPIProbe?.error || workspace.agent_api_error || "Agent API 反向连接失败"});
+    } else {
+      // Never probed. Naming that state is the point: it previously rendered
+      // nothing, so a workspace whose address could not work looked identical to
+      // a healthy one until an Agent Turn started failing part-way through.
+      details.push({kind: "muted", text: "Agent API · 未检测"});
     }
   }
   const summary = badges.length

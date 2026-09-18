@@ -1,6 +1,7 @@
 package tray
 
 import (
+	"errors"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -71,5 +72,57 @@ func TestManagementURLAndSingleInstanceContract(t *testing.T) {
 	}
 	if !strings.HasPrefix(SingleInstanceName, `Local\`) || !strings.Contains(SingleInstanceName, "AHA2Tray") {
 		t.Fatalf("single instance name=%q", SingleInstanceName)
+	}
+}
+
+type stubRunner struct {
+	output string
+	err    error
+	seen   []string
+}
+
+func (runner *stubRunner) Output(command Command) (string, error) {
+	runner.seen = append(runner.seen, strings.Join(command.Args, " "))
+	if runner.err != nil {
+		return "", runner.err
+	}
+	return runner.output, nil
+}
+
+func TestEffectiveListenPrefersTheStoredAddress(t *testing.T) {
+	t.Parallel()
+	config := Config{Server: `C:\AHA2\aha2.exe`, Listen: "0.0.0.0:8766", DataDir: `C:\AHA2\data`}
+
+	stored := &stubRunner{output: "127.0.0.1:9000\n"}
+	if got := EffectiveListen(stored, config); got != "127.0.0.1:9000" {
+		t.Fatalf("stored address = %q, want the stored value", got)
+	}
+	// The query must pass the task's address as the fallback, so a database
+	// without an override reports exactly what the task was installed with.
+	if len(stored.seen) != 1 || !strings.Contains(stored.seen[0], "--default 0.0.0.0:8766") {
+		t.Fatalf("query args = %v, want --default to carry the configured address", stored.seen)
+	}
+}
+
+func TestEffectiveListenFallsBackWhenResolutionFails(t *testing.T) {
+	t.Parallel()
+	config := Config{Server: `C:\AHA2\aha2.exe`, Listen: "0.0.0.0:8766", DataDir: `C:\AHA2\data`}
+
+	// A resolver failure or a bad stored value must never leave the tray with an
+	// unbindable address: that would take AHA2 down rather than degrade it.
+	cases := []struct {
+		name   string
+		runner *stubRunner
+	}{
+		{"query failed", &stubRunner{err: errors.New("boom")}},
+		{"empty output", &stubRunner{output: "   \n"}},
+		{"not an address", &stubRunner{output: "not-an-address"}},
+		{"hostname instead of IP", &stubRunner{output: "localhost:8766"}},
+		{"port out of range", &stubRunner{output: "0.0.0.0:70000"}},
+	}
+	for _, test := range cases {
+		if got := EffectiveListen(test.runner, config); got != config.Listen {
+			t.Fatalf("%s: effective listen = %q, want the configured fallback %q", test.name, got, config.Listen)
+		}
 	}
 }

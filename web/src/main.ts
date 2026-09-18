@@ -10,7 +10,8 @@ import {renderMarkdown} from "./markdown.js";
 import {bindPromptAdmin, loadPromptCatalog, renderPromptAdmin} from "./prompt_admin.js";
 import {bindProxySettings, renderProxySettings} from "./proxy_settings.js";
 import {bindSyncSettings, isSyncSettingsFormEditing, renderSyncSettings} from "./sync_settings.js";
-import {bindRuntimeFields, runtimeFieldsHTML, setRuntimeBackends, syncRuntimeFields} from "./runtime_picker.js";
+import {bindRuntimeFields, runtimeFieldsHTML, setClaudeOfficialCatalog, setClaudeOfficialLoading, setRuntimeBackends, syncRuntimeFields} from "./runtime_picker.js";
+import type {ClaudeOfficialCatalog} from "./runtime_picker.js";
 import {renderComposerAgentOptions, renderComposerTools} from "./task_composer.js";
 import {LOCAL_TASK_DEVICE_FILTER, taskDeviceFilterOptions, taskMatchesFilters} from "./task_filters.js";
 import {TASK_TOOL_DEFAULT_WIDTH, normalizePinnedTaskTool, normalizeTaskToolMode, normalizeTaskToolWidth, renderTaskToolButtons, renderTaskToolContent, renderTaskToolPanel} from "./task_tools.js";
@@ -33,6 +34,7 @@ import type {
 	BackendSettings,
   Attachment,
   AuthStatus,
+  ClaudeModelOption,
   CodexAccount,
   ChannelContact,
   ChannelDestination,
@@ -46,6 +48,7 @@ import type {
   EnvGroup,
   Knowledge,
   KnowledgeLibrary,
+  NetworkSettings,
   KnowledgeProposal,
   KnowledgeReviewSettings,
   Model,
@@ -88,6 +91,7 @@ interface State {
   proxySettings: ProxySettings;
   managedProxy: ManagedProxyView;
   securitySettings: SecuritySettings;
+  networkSettings: NetworkSettings;
   agentAPISettings: AgentAPISettings;
 	backendSettings: BackendSettings;
   syncSettings: SyncSettings;
@@ -107,6 +111,9 @@ interface State {
   models: Model[];
   tasks: Task[];
   knowledge: Knowledge[];
+  // Every project with a verified knowledge root, for scoping UI. Separate from
+  // `knowledge`, which is only the current page of entries.
+  knowledgeIndexes: Knowledge[];
   knowledgeLibraries: KnowledgeLibrary[];
   knowledgeProposals: KnowledgeProposal[];
   knowledgeReviewSettings: KnowledgeReviewSettings;
@@ -239,7 +246,8 @@ const state: State = {
   system: {os: "windows", arch: "", wsl_available: false, wsl_distros: [], version: "dev", web_version: "", started_at: ""},
   proxySettings: {mode: "external", http_proxy: "http://127.0.0.1:7897", https_proxy: "http://127.0.0.1:7897", no_proxy: "localhost,127.0.0.1,::1", managed_refresh_interval_minutes: 1440},
   managedProxy: {configured: false, profiles: [], url_configured: false, nodes: [], unsupported_count: 0, unsupported_types: [], status: "idle"},
-  securitySettings: {validate_origin: true, startup_override: false},
+  securitySettings: {validate_origin: true, access_scope: "lan", startup_override: false},
+  networkSettings: {listen_address: "", startup_listen_address: "", restart_required: false},
   agentAPISettings: {url: "", allow_insecure: false, effective_url: "http://127.0.0.1:8766", effective_allow_insecure: false},
 	backendSettings: {idle_timeout_seconds: 10 * 60, turn_timeout_seconds: 10 * 60 * 60},
   syncSettings: {scope:"default",enabled:false,endpoint:"",device_id:"",device_name:"",interval_seconds:300,token_configured:false,passphrase_configured:false},
@@ -259,6 +267,7 @@ const state: State = {
   models: [],
   tasks: [],
   knowledge: [],
+  knowledgeIndexes: [],
   knowledgeLibraries: [],
   knowledgeProposals: [],
   knowledgeReviewSettings: {auto_approve: false},
@@ -588,11 +597,39 @@ function backendOptionsForWorkspace(ws?: Workspace): string[] {
   return ["codex", "claude"].filter(backend => present.has(backend));
 }
 
+function claudeOfficialCatalog(workspace?: Workspace): ClaudeOfficialCatalog {
+  const probe = (workspace?.capabilities || {}).claude as {
+    status?: string;
+    auth_status?: string;
+    models?: ClaudeModelOption[];
+    models_error?: string;
+  } | undefined;
+  if (!probe || probe.status !== "ready") {
+    return {availability: "unavailable", models: [], message: "暂不可用：当前 Workspace 未检测到 Claude Code CLI。"};
+  }
+  if (probe.auth_status === "not_logged_in") {
+    return {availability: "not_logged_in", models: [], message: "暂不可用：当前 Workspace 尚未登录 Claude Code，请先执行 claude auth login。"};
+  }
+  if (probe.auth_status !== "logged_in") {
+    return {availability: "unknown", models: [], message: "暂不可用：尚未完成 Claude Code 登录状态检测。"};
+  }
+  const models = Array.isArray(probe.models) ? probe.models : [];
+  if (models.length > 0) {
+    return {availability: "ready", models, message: `已检测到 ${models.length} 个官方模型。`};
+  }
+  return {
+    availability: "unavailable",
+    models: [],
+    message: probe.models_error ? `暂不可用：${probe.models_error}` : "暂不可用：未能获取官方模型列表。",
+  };
+}
+
 function syncTaskBackend(): void {
   const wsID = String((document.querySelector<HTMLSelectElement>("#task-workspace"))?.value || "");
   const ws = state.workspaces.find(item => item.id === wsID);
   const options = backendOptionsForWorkspace(ws);
   setRuntimeBackends("task", options);
+  setClaudeOfficialCatalog("task", claudeOfficialCatalog(ws));
   syncRuntimeFields("task", state.models, state.codexAccounts);
   syncTaskGitIsolation();
 }
@@ -601,7 +638,62 @@ function syncTakeoverTaskBackend(): void {
   const wsID = String(document.querySelector<HTMLSelectElement>("#takeover-task-workspace")?.value || "");
   const workspace = state.workspaces.find(item => item.id === wsID);
   setRuntimeBackends("takeover-task", backendOptionsForWorkspace(workspace));
+  setClaudeOfficialCatalog("takeover-task", claudeOfficialCatalog(workspace));
   syncRuntimeFields("takeover-task", state.models, state.codexAccounts);
+}
+
+const claudeOfficialDetectionInFlight = new Map<string, Promise<void>>();
+
+async function refreshClaudeOfficialCatalog(prefix: string, workspaceID: string): Promise<void> {
+  const workspace = state.workspaces.find(item => item.id === workspaceID);
+  if (!workspace) {
+    setClaudeOfficialCatalog(prefix, {availability: "unavailable", models: [], message: "暂不可用：未选择 Workspace。"});
+    syncRuntimeFields(prefix, state.models, state.codexAccounts);
+    return;
+  }
+  const key = `${prefix}:${workspaceID}`;
+  const running = claudeOfficialDetectionInFlight.get(key);
+  if (running) return running;
+  const detection = (async () => {
+    setClaudeOfficialLoading(prefix);
+    syncRuntimeFields(prefix, state.models, state.codexAccounts, false);
+    try {
+      const result = await detectWorkspaceWithHostKeyTrust(workspaceID);
+      if (!result) {
+        setClaudeOfficialCatalog(prefix, {availability: "unknown", models: [], message: "检测已取消。"});
+        return;
+      }
+      state.workspaces = state.workspaces.map(item => item.id === result.workspace.id ? result.workspace : item);
+      setClaudeOfficialCatalog(prefix, claudeOfficialCatalog(result.workspace));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setClaudeOfficialCatalog(prefix, {availability: "unavailable", models: [], message: `暂不可用：${message}`});
+    } finally {
+      syncRuntimeFields(prefix, state.models, state.codexAccounts, false);
+    }
+  })();
+  claudeOfficialDetectionInFlight.set(key, detection);
+  try {
+    await detection;
+  } finally {
+    if (claudeOfficialDetectionInFlight.get(key) === detection) claudeOfficialDetectionInFlight.delete(key);
+  }
+}
+
+function bindClaudeOfficialDetection(prefix: string, workspaceID: () => string): void {
+  document.querySelector<HTMLSelectElement>(`#${prefix}-model-source`)?.addEventListener("change", event => {
+    const source = event.currentTarget as HTMLSelectElement;
+    delete source.dataset.initialOfficial;
+    if (source.value === "claude_native") void refreshClaudeOfficialCatalog(prefix, workspaceID());
+  });
+}
+
+function assertClaudeOfficialReady(prefix: string): void {
+  const source = document.querySelector<HTMLSelectElement>(`#${prefix}-model-source`);
+  const model = document.querySelector<HTMLSelectElement>(`#${prefix}-claude-native-model`);
+  if (source?.value !== "claude_native" || model?.dataset.ready === "true" || source.dataset.initialOfficial === "true") return;
+  const help = document.querySelector<HTMLElement>(`#${prefix}-claude-native-help`)?.textContent || "Claude Code Official 暂不可用。";
+  throw new Error(help);
 }
 
 async function detectWorkspaceWithHostKeyTrust(id: string): Promise<{workspace: Workspace} | null> {
@@ -940,6 +1032,8 @@ interface ModelDetectionSession {
   authStyle: string;
   catalog: DetectedModel[];
   results: Map<string, DetectedModel>;
+  detecting: Set<string>;
+  probeErrors: Map<string, string>;
   selected: Set<string>;
   completed: number;
   total: number;
@@ -953,7 +1047,10 @@ interface ModelDetectionSession {
 let activeModelDetection: ModelDetectionSession | null = null;
 
 function detectedModelRow(session: ModelDetectionSession, item: DetectedModel, ready: boolean): string {
-  return `<div class="detected-item${ready ? "" : " pending"}" data-model="${escapeHTML(item.id)}"><input type="checkbox" class="detected-model" value="${escapeHTML(item.id)}" ${ready && session.selected.has(item.id) ? "checked" : ""} ${ready ? "" : "disabled"}><span><strong>${escapeHTML(item.id)}</strong>${item.max_input_tokens ? `<small>context ${Math.round(item.max_input_tokens / 1000)}K</small>` : ""}${ready ? `<span class="proto-badges">${protoBadges(item)}</span>${protoChecks(item)}` : `<span class="proto pending">等待检测</span>`}</span></div>`;
+  const detecting = session.detecting.has(item.id);
+  const probeError = session.probeErrors.get(item.id) || "";
+  const addable = ready && supportedWireAPIs(item).length > 0;
+  return `<div class="detected-item${ready ? "" : " pending"}" data-model="${escapeHTML(item.id)}"><input type="checkbox" class="detected-model" value="${escapeHTML(item.id)}" ${addable && session.selected.has(item.id) ? "checked" : ""} ${addable ? "" : "disabled"}><span><strong>${escapeHTML(item.id)}</strong>${item.max_input_tokens ? `<small>context ${Math.round(item.max_input_tokens / 1000)}K</small>` : ""}${ready ? `<span class="proto-badges">${protoBadges(item)}</span>${protoChecks(item)}` : `<span class="proto pending">等待手动检测</span>`}${probeError ? `<small class="bad">${escapeHTML(probeError)}</small>` : ""}</span><button type="button" data-probe-model="${escapeHTML(item.id)}" ${detecting ? "disabled" : ""}>${detecting ? "检测中…" : ready ? "重新检测" : "检测"}</button></div>`;
 }
 
 function applyModelDetectionFilter(root: HTMLElement, query: string): void {
@@ -964,8 +1061,12 @@ function applyModelDetectionFilter(root: HTMLElement, query: string): void {
 }
 
 function modelDetectionStatusText(session: ModelDetectionSession): string {
-  const label = session.status === "completed" ? "检测完成" : session.status === "cancelled" ? "已停止" : session.status === "failed" ? "检测失败" : session.status === "cancelling" ? "正在停止" : session.catalog.length ? "正在检测协议能力" : "正在获取模型目录";
-  return `${label} · ${session.completed}/${session.total || "?"}${session.authStyle ? `（认证：${session.authStyle}）` : ""}`;
+  if (session.status === "failed") return `获取模型列表失败${session.authStyle ? `（认证：${session.authStyle}）` : ""}`;
+  if (session.status === "cancelled") return "已取消";
+  if (session.status === "cancelling") return "正在停止";
+  if (!session.catalog.length) return "正在获取模型目录";
+  const inspected = session.results.size;
+  return `模型列表已获取 · ${inspected}/${session.catalog.length} 已手动检测${session.authStyle ? `（认证：${session.authStyle}）` : ""}`;
 }
 
 function updateModelDetectionProgress(session: ModelDetectionSession): void {
@@ -985,19 +1086,19 @@ function updateModelDetectionProgress(session: ModelDetectionSession): void {
     stop.textContent = "停止中";
   }
   const add = root.querySelector<HTMLButtonElement>("#add-selected-models");
-  if (add) add.disabled = session.results.size === 0;
+  if (add) add.disabled = session.selected.size === 0;
 }
 
 function updateDetectedModelRow(session: ModelDetectionSession, modelID: string): void {
   const root = document.querySelector<HTMLElement>("#model-detect-results");
-  const model = session.results.get(modelID);
+  const model = session.results.get(modelID) || session.catalog.find(item => item.id === modelID);
   if (!root || !model) return;
   const row = [...root.querySelectorAll<HTMLElement>(".detected-item")].find(item => item.dataset.model === modelID);
   if (!row) {
     renderModelDetection(session);
     return;
   }
-  row.outerHTML = detectedModelRow(session, model, true);
+  row.outerHTML = detectedModelRow(session, model, session.results.has(modelID));
   applyModelDetectionFilter(root, root.querySelector<HTMLInputElement>("#detect-search")?.value || "");
   updateModelDetectionProgress(session);
 }
@@ -1030,7 +1131,8 @@ async function startModelDetection(providerID: string, button: HTMLElement, resu
     const created = await api.createModelDetectionJob(providerID);
     const source = new EventSource(api.modelDetectionEventsURL(providerID, created.job.id));
     const session: ModelDetectionSession = {
-      providerID, jobID: created.job.id, authStyle: "", catalog: [], results: new Map(), selected: new Set(), completed: 0, total: 0,
+      providerID, jobID: created.job.id, authStyle: "", catalog: [], results: new Map(), detecting: new Set(),
+      probeErrors: new Map(), selected: new Set(), completed: 0, total: 0,
       anthropicBaseURL: "", status: "queued", source, button, originalButtonHTML,
     };
     activeModelDetection = session;
@@ -1043,6 +1145,7 @@ async function startModelDetection(providerID: string, button: HTMLElement, resu
       if (!(event.target instanceof HTMLInputElement) || !event.target.classList.contains("detected-model")) return;
       if (event.target.checked) session.selected.add(event.target.value);
       else session.selected.delete(event.target.value);
+      updateModelDetectionProgress(session);
     });
     results.addEventListener("click", event => {
       const target = event.target as HTMLElement;
@@ -1052,12 +1155,33 @@ async function startModelDetection(providerID: string, button: HTMLElement, resu
         void api.cancelModelDetectionJob(session.providerID, session.jobID).catch(error => setMessage("error", error instanceof Error ? error.message : String(error)));
         return;
       }
+      const probeButton = target.closest<HTMLElement>("[data-probe-model]");
+      if (probeButton) {
+        const modelID = probeButton.dataset.probeModel || "";
+        if (!modelID || session.detecting.has(modelID)) return;
+        session.detecting.add(modelID);
+        session.probeErrors.delete(modelID);
+        updateDetectedModelRow(session, modelID);
+        void api.probeModel(session.providerID, modelID, session.authStyle).then(response => {
+          session.results.set(modelID, response.model);
+          if (supportedWireAPIs(response.model).length === 0) session.selected.delete(modelID);
+          if (response.anthropic_base_url) session.anthropicBaseURL = response.anthropic_base_url;
+        }).catch(error => {
+          session.probeErrors.set(modelID, error instanceof Error ? error.message : String(error));
+        }).finally(() => {
+          session.detecting.delete(modelID);
+          updateDetectedModelRow(session, modelID);
+        });
+        return;
+      }
       if (target.closest("#detect-select-all")) {
         results.querySelectorAll<HTMLInputElement>(".detected-item:not([style*='display: none']) .detected-model:not(:disabled)").forEach(box => { box.checked = true; session.selected.add(box.value); });
+        updateModelDetectionProgress(session);
         return;
       }
       if (target.closest("#detect-select-none")) {
         results.querySelectorAll<HTMLInputElement>(".detected-model").forEach(box => { box.checked = false; session.selected.delete(box.value); });
+        updateModelDetectionProgress(session);
         return;
       }
       if (!target.closest("#add-selected-models")) return;
@@ -1092,7 +1216,6 @@ async function startModelDetection(providerID: string, button: HTMLElement, resu
     source.addEventListener("result", event => {
       const data = JSON.parse((event as MessageEvent).data) as {model: DetectedModel; completed: number; total: number; anthropic_base_url?: string};
       session.results.set(data.model.id, data.model);
-      session.selected.add(data.model.id);
       session.completed = data.completed;
       session.total = data.total;
       if (data.anthropic_base_url) session.anthropicBaseURL = data.anthropic_base_url;
@@ -1178,9 +1301,10 @@ async function loadCoreData(force = false): Promise<void> {
 
 async function loadKnowledgeData(force = true): Promise<void> {
   await loadResource("knowledge", force, async () => {
-    const [knowledge, libraries] = await Promise.all([api.knowledge("", "", "", {limit: initialListPageSize, summary: true}), api.knowledgeLibraries()]);
+    const [knowledge, libraries, indexes] = await Promise.all([api.knowledge("", "", "", {limit: initialListPageSize, summary: true}), api.knowledgeLibraries(), api.knowledgeIndexes()]);
     state.knowledge = knowledge.knowledge || [];
     state.knowledgeLibraries = libraries.libraries || [];
+    state.knowledgeIndexes = indexes.indexes || [];
     state.knowledgeProposals = knowledge.proposals || [];
     state.knowledgeReviewSettings = knowledge.review_settings || {auto_approve: false};
     listPages.knowledge = {cursor: knowledge.next_cursor || "", hasMore: Boolean(knowledge.has_more), loadingMore: false};
@@ -1247,10 +1371,11 @@ async function ensureViewData(view: View, force = false): Promise<void> {
     if (result.managed) state.managedProxy = result.managed;
   }));
   if (view === "advanced") jobs.push(loadResource("advanced", force, async () => {
-    const [security, agentAPI, backend] = await Promise.all([api.securitySettings(), api.agentAPISettings(), api.backendSettings()]);
+    const [security, agentAPI, backend, network] = await Promise.all([api.securitySettings(), api.agentAPISettings(), api.backendSettings(), api.networkSettings()]);
     if (security.security) state.securitySettings = security.security;
     if (agentAPI.agent_api) state.agentAPISettings = agentAPI.agent_api;
     if (backend.backend) state.backendSettings = backend.backend;
+    if (network.network) state.networkSettings = network.network;
   }));
   if (view === "sync") jobs.push(loadResource("sync", force, async () => {
     const [settings, status, conflicts] = await Promise.all([api.syncSettings(), api.syncStatus(), api.syncConflicts()]);
@@ -1689,7 +1814,9 @@ async function openTask(taskID: string): Promise<void> {
     if (version !== taskOpenVersion) return;
     detail.agents ||= [];
     state.selectedTask = detail;
-    state.selectedTaskAgent = "main";
+    state.selectedTaskAgent = detail.agents.some(agent => agent.agent_id === "main")
+      ? "main"
+      : (detail.agents[0]?.agent_id || "main");
     state.taskConversation = page?.conversation.items || [];
     state.taskConversationHasMore = page?.conversation.has_more || false;
     state.taskConversationBefore = page?.conversation.next_before || 0;
@@ -1764,7 +1891,7 @@ async function loadTaskChannelDestination(taskID: string, version: number): Prom
 }
 
 async function selectTaskAgent(agentID: string): Promise<void> {
-  if (!state.selectedTask || agentID === state.selectedTaskAgent) return;
+  if (!state.selectedTask || !state.selectedTask.agents.some(agent => agent.agent_id === agentID) || agentID === state.selectedTaskAgent) return;
   state.taskDrafts[state.selectedTaskAgent] = state.taskDraft;
   state.selectedTaskAgent = agentID;
   state.taskDraft = state.taskDrafts[agentID] || "";
@@ -1793,7 +1920,11 @@ function syncAgentConfigFields(): void {
       input.disabled = inherited;
     });
   });
-  if (!inherited) syncRuntimeFields("agent-config", state.models, state.codexAccounts, false);
+  if (!inherited) {
+    const workspace = state.workspaces.find(item => item.id === state.selectedTask?.task.workspace_id);
+    setClaudeOfficialCatalog("agent-config", claudeOfficialCatalog(workspace));
+    syncRuntimeFields("agent-config", state.models, state.codexAccounts, false);
+  }
 }
 
 function bindTaskAgentControls(): void {
@@ -1807,6 +1938,9 @@ function bindTaskAgentControls(): void {
     const dialog = document.querySelector<HTMLDialogElement>("#agent-config-dialog");
     dialog?.showModal();
     syncAgentConfigFields();
+    if (document.querySelector<HTMLSelectElement>("#agent-config-model-source")?.value === "claude_native") {
+      void refreshClaudeOfficialCatalog("agent-config", state.selectedTask?.task.workspace_id || "");
+    }
   }));
 }
 
@@ -2036,7 +2170,7 @@ function workspaceDialog(): string {
     <label>Root Path<input name="root_path" id="ws-root-path" placeholder="E:\project 或 /home/user/project" required></label>
     <div class="wsl-fields" style="display:none"><label>WSL Distro<select name="distro" id="ws-distro"></select></label><div class="field-help">Root Path 填 WSL 内的路径，如 /home/user/project</div></div>
     <div class="ssh-fields" style="display:none"><div class="two"><label>SSH Host<input name="ssh_host" placeholder="192.168.1.10"></label><label>SSH User<input name="ssh_user" placeholder="root"></label></div><div class="two"><label>SSH Port<input name="ssh_port" type="number" min="1" max="65535" value="22"></label><label>SSH 登录方式<select name="ssh_auth"><option value="auto">自动（有密码时优先密码）</option><option value="password">密码</option><option value="key">Key (~/.ssh)</option></select></label></div><label>登录密码<input name="ssh_password" type="password" autocomplete="new-password" placeholder="可选"></label><label class="workspace-clear-secret"><input name="clear_ssh_password" type="checkbox">清除已保存密码</label><div class="field-help">密码保存在 Secret Store；编辑时留空会保留原密码。</div></div>
-    <fieldset class="workspace-agent-api-fields"><legend>Agent API 反向连接</legend><label>地址策略<select name="agent_api_mode" id="ws-agent-api-mode"><option value="auto">自动探测（推荐）</option><option value="global">继承全局默认</option><option value="manual">手动覆盖</option></select></label><label class="workspace-agent-api-manual">Agent API URL<input name="agent_api_url" id="ws-agent-api-url" type="url" placeholder="https://aha.example.com"></label><div class="field-help workspace-agent-api-result">保存后点击 Workspace 的“测试连接”，AHA2 会从该 Workspace 反向验证并保存有效地址。</div></fieldset>
+    <fieldset class="workspace-agent-api-fields"><legend>Agent API 反向连接</legend><label>地址策略<select name="agent_api_mode" id="ws-agent-api-mode"><option value="auto">自动探测（推荐）</option><option value="manual">手动覆盖</option></select></label><label class="workspace-agent-api-manual">Agent API URL<input name="agent_api_url" id="ws-agent-api-url" type="url" placeholder="https://aha.example.com"></label><div class="field-help workspace-agent-api-result">保存后点击 Workspace 的“测试连接”，AHA2 会从该 Workspace 反向验证并保存有效地址。</div></fieldset>
     <div class="dialog-actions"><button type="button" data-close>取消</button><button class="primary" value="default">添加 Workspace</button></div>
   </form></dialog>`;
 }
@@ -2049,7 +2183,7 @@ function modelsView(): string {
   </article>`).join("");
   const models = state.models.map(item => `<tr><td><strong>${escapeHTML(item.display_name)}</strong><small>${escapeHTML(item.wire_model)}</small></td><td><strong>${escapeHTML(item.provider_name || item.provider_id)}</strong><small>${escapeHTML(item.provider_id)}</small></td><td>${escapeHTML(backendProtocolLabel(item))}</td><td>${item.context_window ? Math.round(item.context_window / 1000) + "K" : "-"}</td><td class="row-actions"><button type="button" data-edit-model="${item.id}" class="icon-button" title="编辑模型">${icon("edit")}</button><button type="button" data-delete-model="${item.id}" class="icon-button" title="删除模型">${icon("close")}</button></td></tr>`).join("");
   return shell(`<section class="page">
-    ${pageHead("模型", "Models 仅管理 Provider / Env 模型；官方模型在创建 Task 时按账号选择。")}
+    ${pageHead("模型", "Models 管理 Provider / Env 模型；Codex 与 Claude Code 官方账号在创建或编辑 Task 时选择。")}
     <div class="provider-layout">
       <div class="provider-sidebar">
         ${renderCodexAccounts(state.codexAccounts)}
@@ -2063,23 +2197,16 @@ function modelsView(): string {
 
 function advancedSettingsView(): string {
   const origin = state.securitySettings;
-  const agentAPI = state.agentAPISettings;
 	const backendSettings = state.backendSettings;
+  const network = state.networkSettings;
+  const accessScope = origin.access_scope === "local" ? "local" : "lan";
+  const restartRequired = Boolean(network.restart_required);
   return shell(`<section class="page advanced-settings-page">
-    <header class="page-head"><div><h1>高级设置</h1><p>管理 Backend、Agent API、Owner 账号与本机恢复方式</p></div></header>
+    <header class="page-head"><div><h1>高级设置</h1><p>管理 Backend、Owner 账号与本机恢复方式</p></div></header>
     <section class="advanced-tools-grid">
       <article class="panel advanced-tool-card"><div>${icon("bot")}<span><strong>提示词</strong><small>查看和维护 AHA2 的提示词模板</small></span></div><button type="button" data-view="prompts">进入提示词设置</button></article>
       <article class="panel advanced-tool-card"><div>${icon("sync")}<span><strong>同步</strong><small>配置设备同步、检查差异与冲突</small></span></div><button type="button" data-view="sync">进入同步设置</button></article>
       <article class="panel advanced-tool-card"><div>${icon("proxy")}<span><strong>代理</strong><small>管理订阅、节点和连接状态</small></span></div><button type="button" data-view="proxy">进入代理设置</button></article>
-    </section>
-    <section class="panel account-security-panel agent-api-settings-panel">
-      <div class="panel-head"><strong>Agent API 访问地址</strong><span>${escapeHTML(agentAPI.effective_url || "未配置")}</span></div>
-      <form id="agent-api-settings-form">
-        <label>全局默认 URL<input name="url" type="url" value="${escapeHTML(agentAPI.url || "")}" placeholder="留空继承启动地址 ${escapeHTML(agentAPI.startup_url || "")}"></label>
-        <label class="security-setting-toggle"><input name="allow_insecure" type="checkbox" ${agentAPI.allow_insecure ? "checked" : ""}><span><strong>允许受信网络中的非 loopback HTTP</strong><small>公网和跨网络访问应使用 HTTPS；修改后 Workspace 需重新测试连接。</small></span></label>
-        <div class="field-help">当前有效地址：<code>${escapeHTML(agentAPI.effective_url || "-")}</code>${agentAPI.startup_url ? ` · 启动默认：<code>${escapeHTML(agentAPI.startup_url)}</code>` : ""}</div>
-        <div class="dialog-actions"><button class="primary" type="submit">保存 Agent API 设置</button></div>
-      </form>
     </section>
     <section class="panel spaced account-security-panel backend-timeout-settings-panel">
       <div class="panel-head"><strong>Backend 超时</strong><span>Codex / Claude 统一生效</span></div>
@@ -2099,6 +2226,24 @@ function advancedSettingsView(): string {
         <label>新密码<input name="new_password" type="password" autocomplete="new-password" minlength="10" required></label>
         <label>确认新密码<input name="confirm_password" type="password" autocomplete="new-password" minlength="10" required></label>
         <div class="dialog-actions"><button class="primary" type="submit">修改密码</button></div>
+      </form>
+    </section>
+    <section class="panel spaced account-security-panel access-scope-panel">
+      <div class="panel-head"><strong>访问范围</strong><span>${accessScope === "local" ? "仅本机" : "本机与局域网"}</span></div>
+      <form id="access-scope-form">
+        <label>允许访问的来源<select name="access_scope"><option value="lan" ${accessScope === "lan" ? "selected" : ""}>本机与局域网</option><option value="local" ${accessScope === "local" ? "selected" : ""}>仅本机</option></select></label>
+        <div class="field-help">AHA2 监听所有网卡，此处决定哪些来源会被响应。改为“仅本机”后，局域网内其他设备的访问会立即被拒绝；保存即生效，无需重启。</div>
+        <div class="security-warning ${accessScope === "local" ? "active" : ""}">${accessScope === "local" ? `当前只响应本机地址的请求。其他设备上的浏览器、Agent 与同步都无法连接。工作区若通过局域网地址回连 AHA（Agent API 地址不是 127.0.0.1），也会一并失败。` : `局域网内可达的设备都能打开登录页，实际进入仍需 Owner 密码。`}</div>
+        <div class="dialog-actions"><button class="primary" type="submit">保存访问范围</button></div>
+      </form>
+    </section>
+    <section class="panel spaced account-security-panel listen-address-panel">
+      <div class="panel-head"><strong>监听地址</strong><span>${restartRequired ? "需重启生效" : "已生效"}</span></div>
+      <form id="listen-address-form">
+        <label>监听地址<input name="listen_address" value="${escapeHTML(network.listen_address)}" placeholder="${escapeHTML(network.startup_listen_address || "0.0.0.0:8766")}"></label>
+        <div class="field-help">格式为 <code>IP:端口</code>，例如 <code>0.0.0.0:8766</code>（所有网卡）或 <code>127.0.0.1:8766</code>（仅本机）。留空则继续使用服务安装时选择的地址：<code>${escapeHTML(network.startup_listen_address || "-")}</code>。</div>
+        <div class="security-warning ${restartRequired ? "active" : ""}">${restartRequired ? `已保存 <code>${escapeHTML(network.listen_address)}</code>，当前进程仍监听 <code>${escapeHTML(network.startup_listen_address)}</code>，重启 AHA2 后生效。` : ""}</div>
+        <div class="dialog-actions"><button class="primary" type="submit">保存监听地址</button></div>
       </form>
     </section>
     <section class="panel spaced account-security-panel">
@@ -2751,8 +2896,16 @@ function updateTaskLiveRegions(): void {
   const nextFailure = taskFailureBannerHtml(detail);
   if (failureSlot && failureSlot.innerHTML !== nextFailure) failureSlot.innerHTML = nextFailure;
   const agentSelect = document.querySelector<HTMLSelectElement>("#composer-agent");
+  if (!detail.agents.some(agent => agent.agent_id === state.selectedTaskAgent)) {
+    state.selectedTaskAgent = detail.agents.some(agent => agent.agent_id === "main")
+      ? "main"
+      : (detail.agents[0]?.agent_id || "main");
+  }
   const nextAgentOptions = renderComposerAgentOptions(detail, state.selectedTaskAgent);
-  if (agentSelect && document.activeElement !== agentSelect && agentSelect.innerHTML !== nextAgentOptions) agentSelect.innerHTML = nextAgentOptions;
+  const selectedOptionExists = Boolean(agentSelect && [...agentSelect.options].some(option => option.value === state.selectedTaskAgent));
+  if (agentSelect && (document.activeElement !== agentSelect || !agentSelect.options.length || !selectedOptionExists) && agentSelect.innerHTML !== nextAgentOptions) {
+    agentSelect.innerHTML = nextAgentOptions;
+  }
   const taskStatus = document.querySelector<HTMLElement>("#task-detail-status");
   if (taskStatus) {
     taskStatus.className = `status ${statusClass(detail.task.status)}`;
@@ -2845,7 +2998,7 @@ function render(): void {
   } else {
     const views: Record<View, () => string> = {
       projects: projectsView,
-		channels: () => shell(renderChannels(state.channelProviders, state.channelInstances, {models: state.models, accounts: state.codexAccounts, projects: state.projects, workspaces: state.workspaces, knowledge: state.knowledge, libraries: state.knowledgeLibraries})),
+		channels: () => shell(renderChannels(state.channelProviders, state.channelInstances, {models: state.models, accounts: state.codexAccounts, projects: state.projects, workspaces: state.workspaces, knowledgeIndexes: state.knowledgeIndexes, libraries: state.knowledgeLibraries})),
       models: modelsView,
       tasks: tasksView,
       knowledge: () => shell(`${renderKnowledgeWorkspace({
@@ -2860,7 +3013,11 @@ function render(): void {
         setMessage,
       })}${loadMoreHTML("knowledge")}`),
       prompts: () => advancedSubview(renderPromptAdmin()),
-      proxy: () => shell(renderProxySettings(state.proxySettings, state.managedProxy)),
+      proxy: () => shell(renderProxySettings(
+        state.proxySettings,
+        state.managedProxy,
+        !resourceStates.proxy.loaded || resourceStates.proxy.loading,
+      )),
       sync: () => advancedSubview(renderSyncSettings(state.syncSettings, state.syncState, state.syncPending, state.syncConflicts, state.syncPreview, state.syncRun, state.syncSettingsReady)),
       advanced: advancedSettingsView,
     };
@@ -3007,7 +3164,7 @@ function bindCommon(): void {
     flushDeferredRender,
   });
   bindChannels({
-		context: {models: state.models, accounts: state.codexAccounts, projects: state.projects, workspaces: state.workspaces, knowledge: state.knowledge, libraries: state.knowledgeLibraries},
+		context: {models: state.models, accounts: state.codexAccounts, projects: state.projects, workspaces: state.workspaces, knowledgeIndexes: state.knowledgeIndexes, libraries: state.knowledgeLibraries},
     refresh: async () => {
       const [providers, instances, projects, workspaces, tasks] = await Promise.all([
         api.channelProviders(), api.channelInstances(), api.projects({limit: initialListPageSize}), api.workspaces(), api.tasks("", {limit: initialListPageSize}),
@@ -3034,15 +3191,20 @@ function bindCommon(): void {
   bindRuntimeFields("task", state.models, state.codexAccounts, syncTaskGitIsolation);
   bindRuntimeFields("takeover-task", state.models, state.codexAccounts, syncTakeoverTaskBackend);
   bindRuntimeFields("agent-config", state.models, state.codexAccounts, syncAgentConfigFields, true);
+  bindClaudeOfficialDetection("task", () => String(document.querySelector<HTMLSelectElement>("#task-workspace")?.value || ""));
+  bindClaudeOfficialDetection("takeover-task", () => String(document.querySelector<HTMLSelectElement>("#takeover-task-workspace")?.value || ""));
+  bindClaudeOfficialDetection("agent-config", () => state.selectedTask?.task.workspace_id || "");
   document.querySelectorAll<HTMLElement>("[data-view]").forEach(button => button.addEventListener("click", () => {
     cancelTaskOpen();
-    state.view = button.dataset.view as View;
+    const nextView = button.dataset.view as View;
+    state.view = nextView;
+    if (nextView === "proxy") resourceStates.proxy.loaded = false;
     state.selectedTask = null;
     state.selectedProject = null;
     state.dialogProjectID = "";
     closeEvents();
     render();
-    void ensureViewData(state.view).then(() => render());
+    void ensureViewData(state.view, nextView === "proxy").then(() => render());
   }));
   document.querySelector<HTMLElement>("#retry-view-data")?.addEventListener("click", () => {
     void ensureViewData(state.view, true).then(() => render());
@@ -3463,14 +3625,23 @@ function bindCommon(): void {
     const worktreeDir = document.querySelector<HTMLInputElement>("#task-worktree-dir");
     if (worktreeDir) worktreeDir.value = "";
     syncTaskBackend();
+    if (document.querySelector<HTMLSelectElement>("#task-model-source")?.value === "claude_native") {
+      void refreshClaudeOfficialCatalog("task", String(document.querySelector<HTMLSelectElement>("#task-workspace")?.value || ""));
+    }
   });
-  document.querySelector("#takeover-task-workspace")?.addEventListener("change", syncTakeoverTaskBackend);
+  document.querySelector("#takeover-task-workspace")?.addEventListener("change", () => {
+    syncTakeoverTaskBackend();
+    if (document.querySelector<HTMLSelectElement>("#takeover-task-model-source")?.value === "claude_native") {
+      void refreshClaudeOfficialCatalog("takeover-task", String(document.querySelector<HTMLSelectElement>("#takeover-task-workspace")?.value || ""));
+    }
+  });
   document.querySelector("#takeover-task")?.addEventListener("click", () => {
     syncTakeoverTaskBackend();
     document.querySelector<HTMLDialogElement>("#task-takeover-dialog")?.showModal();
   });
   document.querySelector("#task-isolation")?.addEventListener("change", syncTaskGitIsolation);
   bindForm("#task-form", async form => {
+    assertClaudeOfficialReady("task");
     const payload = Object.fromEntries(form.entries()) as Record<string, string>;
     const {stream_idle_timeout_seconds: streamIdleTimeoutSeconds, ...taskPayload} = payload;
     const result = await api.createTask({
@@ -3538,6 +3709,7 @@ function bindCommon(): void {
   document.querySelector<HTMLInputElement>('[name="inherit_main"]')?.addEventListener("change", syncAgentConfigFields);
   bindForm("#agent-config-form", async form => {
     if (!state.selectedTask) return;
+    assertClaudeOfficialReady("agent-config");
     const agentID = String(form.get("agent_id") || state.selectedTaskAgent);
     if (agentID === "main") {
       await api.updateTask(state.selectedTask.task.id, {
@@ -3583,6 +3755,12 @@ function bindCommon(): void {
   document.querySelector<HTMLFormElement>("#task-takeover-form")?.addEventListener("submit", event => {
     event.preventDefault();
     if (!state.selectedTask?.task.read_only) return;
+    try {
+      assertClaudeOfficialReady("takeover-task");
+    } catch (error) {
+      setMessage("error", error instanceof Error ? error.message : String(error));
+      return;
+    }
     const element = event.currentTarget;
     const form = new FormData(element);
     const groups = [...element.querySelectorAll<HTMLElement>(".takeover-hardware")].map(group => {
@@ -3642,19 +3820,29 @@ function bindCommon(): void {
   bindForm("#origin-validation-form", async form => {
     const validateOrigin = form.get("validate_origin") === "on";
     if (!validateOrigin && !window.confirm("确认关闭 Origin 校验？仅应在可信反向代理环境中使用。")) return;
-    const response = await api.updateSecuritySettings({validate_origin: validateOrigin});
+    const response = await api.updateSecuritySettings({validate_origin: validateOrigin, access_scope: state.securitySettings.access_scope});
     state.securitySettings = response.security;
     setMessage("notice", validateOrigin ? "Origin 校验已启用" : "Origin 校验已关闭");
   }, "保存中");
-  bindForm("#agent-api-settings-form", async form => {
-    const allowInsecure = form.get("allow_insecure") === "on";
-    if (allowInsecure && !state.agentAPISettings.allow_insecure && !window.confirm("确认允许受信网络中的非 loopback HTTP Agent API？公网和不受信网络必须使用 HTTPS。")) return;
-    const response = await api.updateAgentAPISettings({
-      url: String(form.get("url") || "").trim(),
-      allow_insecure: allowInsecure,
+  bindForm("#access-scope-form", async form => {
+    const accessScope = String(form.get("access_scope") || "lan");
+    if (accessScope === "local" && state.securitySettings.access_scope !== "local" &&
+      !window.confirm("改为“仅本机”后，局域网内其他设备将立即无法访问 AHA2。确定继续？")) return;
+    const response = await api.updateSecuritySettings({
+      validate_origin: state.securitySettings.validate_origin,
+      access_scope: accessScope,
     });
-    state.agentAPISettings = response.agent_api;
-    setMessage("notice", "Agent API 全局设置已保存，请重新测试相关 Workspace 连接");
+    state.securitySettings = response.security;
+    setMessage("notice", accessScope === "local" ? "访问范围已改为仅本机" : "访问范围已改为本机与局域网");
+  }, "保存中");
+  bindForm("#listen-address-form", async form => {
+    const listenAddress = String(form.get("listen_address") || "").trim();
+    if (listenAddress && state.networkSettings.startup_listen_address &&
+      listenAddress !== state.networkSettings.startup_listen_address &&
+      !window.confirm(`监听地址将改为 ${listenAddress}，需要重启 AHA2 才生效。确定保存？`)) return;
+    const response = await api.updateNetworkSettings(listenAddress);
+    state.networkSettings = response.network;
+    setMessage("notice", response.network.restart_required ? "监听地址已保存，重启 AHA2 后生效" : "监听地址已保存");
   }, "保存中");
 	bindForm("#backend-settings-form", async form => {
 		const idleTimeoutSeconds = Math.round(Number(form.get("idle_timeout_minutes") || 0) * 60);

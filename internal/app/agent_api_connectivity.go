@@ -96,17 +96,49 @@ func (s *Service) DetectWorkspaceAgentAPI(ctx context.Context, item domain.Works
 	candidates := s.agentAPIProbeCandidates(ctx, item, settings)
 	lastError := "没有可测试的 Agent API 地址"
 	for _, candidate := range candidates {
-		if err := workspacepkg.ProbeAgentAPI(ctx, item, candidate); err == nil {
+		// Probe the way a Turn will reach it, tunnel included. A bare probe of a
+		// remote workspace's configured loopback address always fails, because that
+		// address is the workspace itself; the tunnel is what makes it work. Testing
+		// without it reported a fault for workspaces that were fine.
+		err := workspacepkg.ProbeAgentAPIThroughForward(ctx, item, candidate)
+		if err == nil {
 			item.AgentAPIResolvedURL = candidate
 			item.AgentAPIStatus = "ready"
 			item.AgentAPIError = ""
-			item.Capabilities["agent_api"] = map[string]any{"status": "ready", "url": candidate}
+			// Record how it was reached, not just that it was. For a remote workspace
+			// the stored address is AHA's own loopback — the value that *triggers* the
+			// tunnel — so presenting it as an address the workspace dials would claim
+			// something untrue. The address is kept as-is because the tunnel gate keys
+			// off exactly this loopback form; only the label distinguishes them.
+			item.Capabilities["agent_api"] = map[string]any{
+				"status": "ready", "url": candidate, "via": agentAPIReachability(item, candidate),
+			}
 			return item
-		} else {
-			lastError = err.Error()
 		}
+		lastError = err.Error()
 	}
 	return markAgentAPIProbeFailure(item, truncateAgentAPIError(lastError))
+}
+
+// agentAPIReachability describes how the workspace reaches AHA, for display.
+//
+// "tunnel" means the address is AHA's loopback, which the workspace cannot dial
+// itself: it is the target the reverse tunnel forwards to, and the Agent is given
+// a per-Turn port instead. Reporting that address without this distinction reads
+// as "the workspace connects to 127.0.0.1", which is never true for a remote
+// workspace and sends anyone debugging it looking in the wrong place.
+func agentAPIReachability(item domain.Workspace, resolvedURL string) string {
+	if item.Transport != "ssh" {
+		return "direct"
+	}
+	parsed, err := url.Parse(resolvedURL)
+	if err != nil {
+		return "direct"
+	}
+	if agentAPIHostIsLoopback(parsed.Hostname()) {
+		return "tunnel"
+	}
+	return "direct"
 }
 
 func markAgentAPIProbeFailure(item domain.Workspace, message string) domain.Workspace {
@@ -123,9 +155,6 @@ func (s *Service) agentAPIProbeCandidates(ctx context.Context, item domain.Works
 	mode := normalizeAgentAPIMode(item.AgentAPIMode)
 	if mode == "manual" {
 		return uniqueAgentAPIURLs(item.AgentAPIURL)
-	}
-	if mode == "global" {
-		return uniqueAgentAPIURLs(settings.EffectiveURL)
 	}
 	result := uniqueAgentAPIURLs(settings.EffectiveURL)
 	parsed, err := url.Parse(settings.EffectiveURL)
@@ -147,10 +176,18 @@ func (s *Service) agentAPIProbeCandidates(ctx context.Context, item domain.Works
 	return result
 }
 
+// normalizeAgentAPIMode maps a stored mode onto the two that still exist.
+//
+// "global" meant "inherit the global default", which was a second way to express
+// what auto already does: both end at the same effective URL, and the global value
+// is itself derived from the listen address. It is folded into "auto" here rather
+// than rejected, so a row that still carries it keeps working if a migration has
+// not run yet — but its effective behaviour is unchanged, because the resolution
+// chain already fell through to the same place.
 func normalizeAgentAPIMode(value string) string {
 	switch strings.TrimSpace(value) {
-	case "global", "manual":
-		return strings.TrimSpace(value)
+	case "manual":
+		return "manual"
 	default:
 		return "auto"
 	}
@@ -248,4 +285,54 @@ func truncateAgentAPIError(value string) string {
 		return string(runes[:239]) + "…"
 	}
 	return value
+}
+
+// agentAPICapabilityTTL sizes the Agent API credential to the work it authorises.
+//
+// A credential must not expire before the unit of work it serves. The previous
+// fixed four hours was shorter than the default ten-hour execution limit (and far
+// shorter than the 168-hour maximum), so a long Turn would lose API access partway
+// through — every call would start failing while the Turn itself kept running,
+// which reads as the Agent misbehaving rather than as an expired credential.
+func (s *Service) agentAPICapabilityTTL(ctx context.Context) time.Duration {
+	seconds := domain.DefaultBackendTurnTimeoutSeconds
+	if settings, err := s.store.BackendSettings(ctx); err == nil && settings.TurnTimeoutSeconds > 0 {
+		seconds = settings.TurnTimeoutSeconds
+	}
+	ttl := time.Duration(seconds) * time.Second
+	// A margin covers the gap between issuing the token and the backend process
+	// starting, plus the tail of a Turn that runs to its limit.
+	ttl += 15 * time.Minute
+	if ttl < time.Hour {
+		ttl = time.Hour
+	}
+	return ttl
+}
+
+// agentAPIReverseForward decides whether this Turn needs AHA carried into the
+// workspace.
+//
+// Only a transport that both cannot dial AHA and can carry a forward qualifies.
+// A native workspace runs on this host and reaches loopback directly; a workspace
+// whose configured address already reaches AHA needs nothing. This is best-effort
+// by design: when no forward is possible the Turn still runs with its configured
+// address, which is exactly today's behaviour.
+func agentAPIReverseForward(item domain.Workspace, agentAPIURL string) *workspacepkg.ReverseForward {
+	if item.Transport != "ssh" {
+		return nil
+	}
+	parsed, err := url.Parse(agentAPIURL)
+	if err != nil || parsed.Hostname() == "" {
+		return nil
+	}
+	// An address on the workspace's own loopback cannot be reached by the workspace
+	// itself, so it must be replaced. Any other address is assumed reachable: AHA
+	// cannot know otherwise from here, and guessing wrong would break a working setup.
+	if !agentAPIHostIsLoopback(parsed.Hostname()) {
+		return nil
+	}
+	return &workspacepkg.ReverseForward{
+		Target:  net.JoinHostPort(parsed.Hostname(), parsed.Port()),
+		EnvName: "AHA2_AGENT_API_URL",
+	}
 }

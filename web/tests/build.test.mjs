@@ -208,13 +208,37 @@ test("channel lifecycle renders active and retired actions with guarded purge", 
     created_at: "2026-09-10T00:00:00Z",
     updated_at: "2026-09-10T00:00:00Z",
   };
+  const styles = await readFile(resolve(root, "src", "styles.css"), "utf8");
   const active = module.renderChannels([], [instance], context);
   assert.match(active, /data-channel-reset-binding="channel-1"/);
   assert.match(active, /data-channel-archive="channel-1"/);
-  assert.match(active, /扫码更新飞书权限/);
+  assert.match(active, /扫码更新权限/);
   assert.match(active, /Runtime、通知与访问范围/);
   assert.match(active, /机器人显示名称/);
   assert.match(active, /runtime_bot_display_name_override/);
+  // The card is scan-only: the manual App ID/Secret form is gone, while the App
+  // ID stays visible as read-only text.
+  assert.doesNotMatch(active, /data-channel-credentials/);
+  assert.match(active, /<dt>App ID<\/dt>/);
+  // Scan, reset and archive share one equal-width row.
+  assert.match(active, /channel-instance-actions/);
+  assert.match(styles, /\.channel-instance-actions \{[^}]*grid-template-columns:\s*repeat\(3,minmax\(0,1fr\)\)/);
+  // Knowledge scope is an access-control setting, not part of the delivery fold.
+  assert.match(active, /data-channel-knowledge="channel-1"/);
+  assert.doesNotMatch(active, /Knowledge allowlist/);
+  assert.doesNotMatch(active, /人工整理并共享/);
+  assert.doesNotMatch(active, /channel-record-promote/);
+
+  // A config saved by the older two-control UI can carry inherit:true next to a
+  // stale model_id. It has to render as "inherit", otherwise merely opening and
+  // saving the form would turn a stale leftover into a real runtime override.
+  const legacy = module.renderChannels([], [{...instance, config: {
+    runtime_assistant_dm: {inherit: true, model_id: "model_stale", codex_account_id: "acct_stale"},
+  }}], context);
+  const assistantSelect = legacy.match(/<select name="assistant_model_id">[\s\S]*?<\/select>/)?.[0] || "";
+  assert.ok(assistantSelect, "assistant runtime select must render");
+  assert.match(assistantSelect, /value="" selected/, "inherit:true must select the inherit option");
+  assert.doesNotMatch(assistantSelect, /model_stale/, "a stale model must not stay selected beside inherit:true");
 
   const retired = module.renderChannels([], [{...instance, status: "retired"}], context);
   for (const marker of ["已归档", "data-channel-view", "data-channel-export", "data-channel-purge", "永久删除"]) assert.match(retired, new RegExp(marker));
@@ -269,7 +293,7 @@ test("channel reauthorization explains menu preservation and separate creation",
   const channels = await readFile(resolve(import.meta.dirname, "..", "dist", "channels.js"), "utf8");
   assert.match(channels, /initial.mode === "existing_app"/);
   assert.match(channels, /不修改已有菜单/);
-  assert.match(channels, /不自动提交应用草稿发布/);
+  assert.match(channels, /不修改已有菜单、事件、回调或应用信息/);
   assert.match(channels, /新应用会执行一次 AHA 菜单初始化并提交发布/);
   assert.doesNotMatch(channels, /用于新增机器人菜单或显示名权限/);
 });
@@ -343,22 +367,32 @@ test("workspace detection renders inaccessible, Git, and backend probe states", 
   assert.match(agentAPIFailed, /反向连接超时/);
 });
 
-test("Agent API settings support global defaults and Workspace reverse probes", async () => {
+test("Agent API is automatic by default with a manual Workspace exception", async () => {
   const root = resolve(import.meta.dirname, "..");
   const script = await readFile(resolve(root, "dist", "app.js"), "utf8");
   const api = await readFile(resolve(root, "dist", "api.js"), "utf8");
   const styles = await readFile(resolve(root, "dist", "styles.css"), "utf8");
-  for (const marker of ["agent-api-settings-form", "ws-agent-api-mode", "ws-agent-api-url", "测试连接", "Agent API 反向连接"]) {
+
+  // The Workspace-level exception stays: a workspace reachable only through a
+  // reverse proxy still needs a human to name its address, and the mode picker is
+  // the only place that can express it.
+  for (const marker of ["ws-agent-api-mode", "ws-agent-api-url", "测试连接", "Agent API 反向连接"]) {
     assert.match(script, new RegExp(marker));
   }
-  assert.match(script, /api\.agentAPISettings\(\)/);
-  assert.match(script, /api\.updateAgentAPISettings/);
+  assert.match(styles, /\.workspace-agent-api-fields/);
+
+  // The global Agent API panel is gone. Keeping it implied the address needed
+  // configuring, and a value set there overrode the loopback address that the
+  // reverse tunnel depends on.
+  assert.doesNotMatch(script, /agent-api-settings-form/);
+  assert.doesNotMatch(script, /api\.updateAgentAPISettings/);
+  // Only auto and manual remain; "global" duplicated the same decision one level up.
+  assert.doesNotMatch(script, /value="global"/);
+
   assert.match(script, /detectWorkspaceWithHostKeyTrust/);
   assert.match(script, /首次连接 SSH Workspace/);
   assert.match(api, /workspaces\/.*\/host-key\/trust/);
   assert.match(script, /agent_api_status === "ready"/);
-  assert.match(api, /settings\/agent-api/);
-  assert.match(styles, /\.workspace-agent-api-fields/);
 });
 
 test("advanced settings expose independent Backend idle and turn timeouts", async () => {
@@ -490,6 +524,12 @@ test("built web contains responsive application", async () => {
   const proxySettings = await readFile(resolve(root, "dist", "proxy_settings.js"), "utf8");
   const syncSettings = await readFile(resolve(root, "dist", "sync_settings.js"), "utf8");
   const channels = await readFile(resolve(root, "dist", "channels.js"), "utf8");
+  // The scope picker must read the index endpoint, not the entries page: a page
+  // is recency-ordered, so filtering it silently drops every project whose
+  // knowledge has not changed recently, and those projects then cannot be granted.
+  assert.match(api, /knowledgeIndexes\(\)/);
+  assert.match(api, /\/api\/v1\/knowledge\/indexes/);
+  assert.ok(!/options\.context\.knowledge\b/.test(channels), "scope UI must not read the entries page");
   const codexAccounts = await readFile(resolve(root, "dist", "codex_accounts.js"), "utf8");
   const knowledgeWorkspace = await readFile(resolve(root, "dist", "knowledge_workspace.js"), "utf8");
   const css = await readFile(resolve(root, "dist", "styles.css"), "utf8");
@@ -573,6 +613,7 @@ test("built web contains responsive application", async () => {
   assert.match(agents, /SSE 超时/);
   assert.match(agents, /流重试/);
   assert.match(taskComposer, /id="composer-agent"/);
+  assert.match(taskComposer, /加载中/);
   assert.match(taskTools, /data-task-tool/);
   assert.match(taskTools, /id="close-task-tool"/);
   assert.match(taskTools, /task-tool-panel/);
@@ -721,8 +762,16 @@ test("built web contains responsive application", async () => {
   assert.doesNotMatch(codexAccounts, /data-codex-model|official-model-dialog|添加官方 Codex 模型/);
   assert.doesNotMatch(api, /codex-accounts\/.*\/models/);
   assert.match(runtimePicker, /模型使用方式/);
-  assert.match(runtimePicker, />Env</);
-  assert.match(runtimePicker, />Official</);
+  assert.match(runtimePicker, /option\("env", "Env"/);
+  assert.match(runtimePicker, /option\("official", "Official"/);
+  assert.match(runtimePicker, /Official/);
+  assert.match(runtimePicker, /claude_native/);
+  assert.match(runtimePicker, /官方模型/);
+  assert.match(script, /refreshClaudeOfficialCatalog/);
+  assert.match(script, /selectedOptionExists/);
+  assert.doesNotMatch(script, /Claude Code 原生账号/);
+  assert.doesNotMatch(script, /重新检测 Claude Code 登录状态/);
+  assert.match(css, /select \{[^}]*appearance: none;[^}]*padding: 0 32px 0 4px;[^}]*background-position: right 10px center;/s);
   assert.match(runtimePicker, /Codex 账号/);
   assert.match(runtimePicker, /available_models/);
   assert.match(script, /model_source/);
@@ -763,9 +812,9 @@ test("built web contains responsive application", async () => {
 	assert.match(script, /renderChannels\(state\.channelProviders, state\.channelInstances,/);
   assert.match(api, /api\/v1\/channel-providers/);
   assert.match(script, /channels\.js\?v=[a-f0-9]{12}/);
-  assert.match(channels, /扫码创建并绑定飞书应用/);
+  assert.match(channels, /扫码创建并绑定/);
   assert.match(channels, /channel-onboarding-sessions\/.*\/qr/);
-  assert.match(channels, /name="app_secret" type="password"/);
+  assert.doesNotMatch(channels, /name="app_secret" type="password"/);
   assert.match(channels, /data-delivery-replay/);
   assert.match(channels, /Owner 收件箱与投递/);
 	for (const marker of ["Runtime、通知与访问范围", "runtime_bot_display_name_override", "机器人显示名称", "allowed_project_ids", "allowed_workspace_ids", "notify_task_status", "普通 Task 状态变更推送到飞书私聊助手", "knowledge_entry_id"]) assert.match(channels, new RegExp(marker));
@@ -775,11 +824,15 @@ test("built web contains responsive application", async () => {
 	assert.match(channels, /channel_revision_conflict/);
 	assert.match(channels, /渠道设置已被其他更新修改/);
 	assert.match(channels, /扫码更新飞书权限/);
-  assert.match(channels, /Knowledge allowlist/);
-  assert.match(channels, /人工整理并共享/);
-  assert.match(api, /channel-knowledge-records/);
-  assert.match(script, /shell\(renderProxySettings\(state\.proxySettings, state\.managedProxy\)\)/);
+  assert.doesNotMatch(channels, /Knowledge allowlist/);
+  assert.doesNotMatch(channels, /人工整理并共享/);
+  assert.doesNotMatch(channels, /channelKnowledgeRecords/);
+  assert.doesNotMatch(api, /channel-knowledge-records/);
+  assert.match(script, /renderProxySettings\(/);
+  assert.match(script, /!resourceStates\.proxy\.loaded \|\| resourceStates\.proxy\.loading/);
+  assert.match(script, /if \(nextView === "proxy"\) resourceStates\.proxy\.loaded = false/);
   assert.match(proxySettings, /AHA 内置代理/);
+  assert.match(proxySettings, /正在读取当前代理设置/);
   assert.match(proxySettings, /VLESS Reality/);
   assert.match(proxySettings, /importProxySubscription/);
   assert.match(proxySettings, /refreshProxyProfile/);
@@ -929,6 +982,19 @@ test("built web contains responsive application", async () => {
   assert.match(agents, /\.\/runtime_picker\.js\?v=[a-f0-9]{12}/);
   assert.match(codexAccounts, /button\.innerHTML = icon\("spinner", true\)/);
   assert.match(codexAccounts, /refreshAccount\(id, true\)[\s\S]*undefined, true/);
+});
+
+test("composer agent selector stays populated while task detail loads", async () => {
+  const composer = await import(pathToFileURL(resolve(import.meta.dirname, "..", "dist", "task_composer.js")));
+  const loading = composer.renderComposerAgentOptions({agents: []}, "main");
+  assert.match(loading, /value="main"/);
+  assert.match(loading, /加载中/);
+  assert.doesNotMatch(loading, />\s*<\/option>/);
+  const loaded = composer.renderComposerAgentOptions({
+    agents: [{agent_id: "main", status: "idle", unread_count: 0}],
+  }, "main");
+  assert.match(loaded, /value="main" selected/);
+  assert.match(loaded, /main · 空闲/);
 });
 
 test("hardware tool title renders the active hardware group switcher", async () => {
@@ -1152,16 +1218,24 @@ test("runtime picker separates Env and Official Codex models", async () => {
   assert.match(html, /Env Model/);
   assert.match(html, /<optgroup label="Gateway A">/);
   assert.match(html, /Work · 周额度已用 13%/);
-  assert.match(html, /name="model_id"[^>]*required/);
+  assert.match(html, /name="model_id"[^>]*disabled/);
   assert.match(html, /name="wire_model"[^>]*required/);
   assert.match(html, /name="stream_idle_timeout_seconds"[^>]*value="300"/);
   assert.match(html, /name="stream_max_retries"[^>]*value="5"/);
+  assert.match(html, /Codex 官方账号使用 CLI 默认的流超时与重试参数/);
   const newTaskHTML = runtimeFieldsHTML("new-task", [{
     id: "model-env", display_name: "Env Model", provider_id: "gateway", source: "provider",
     backend: "codex", wire_model: "env-model", created_at: "", updated_at: "",
   }], []);
   assert.match(newTaskHTML, /name="stream_idle_timeout_seconds"[^>]*value="120"/);
   assert.match(newTaskHTML, /name="stream_max_retries"[^>]*value="2"/);
+  const nativeHTML = runtimeFieldsHTML("native", [], [], {
+    backend: "claude", model_source: "claude_native", wire_model: "sonnet",
+  });
+  assert.match(nativeHTML, /value="claude_native" selected/);
+  assert.match(nativeHTML, /id="native-claude-native-model"/);
+  assert.match(nativeHTML, /value="sonnet" selected/);
+  assert.match(nativeHTML, /claude_native/);
 });
 
 test("knowledge update list keeps proposal bodies folded behind details", async () => {
@@ -1595,13 +1669,15 @@ test("task creation supports manual draft and explicit start", async () => {
   assert.match(api, /\/tasks\/\$\{encodeURIComponent\(id\)\}\/start/);
 });
 
-test("model detection streams catalog results and can be stopped", async () => {
+test("model detection lists models and probes only on manual request", async () => {
   const root = resolve(import.meta.dirname, "..");
   const main = await readFile(resolve(root, "dist", "app.js"), "utf8");
   const api = await readFile(resolve(root, "dist", "api.js"), "utf8");
   assert.match(main, /new EventSource\(api\.modelDetectionEventsURL/);
   assert.match(main, /addEventListener\("catalog"/);
   assert.match(main, /addEventListener\("result"/);
+  assert.match(main, /data-probe-model/);
+  assert.match(main, /api\.probeModel/);
   assert.match(main, /id="stop-model-detection"/);
   assert.match(main, /cancelModelDetectionJob/);
   assert.match(main, /replaceRegionHTML\(root,/);
@@ -1614,8 +1690,10 @@ test("model detection streams catalog results and can be stopped", async () => {
   const resultHandler = main.slice(main.indexOf('source.addEventListener("result"'), main.indexOf('source.addEventListener("progress"'));
   const progressHandler = main.slice(main.indexOf('source.addEventListener("progress"'), main.indexOf('source.addEventListener("done"'));
   assert.doesNotMatch(resultHandler, /renderModelDetection/);
+  assert.doesNotMatch(resultHandler, /session\.selected\.add/);
   assert.doesNotMatch(progressHandler, /renderModelDetection/);
   assert.match(api, /model-detection-jobs/);
+  assert.match(api, /model-probes/);
 });
 
 test("same-page live renders preserve page interaction state", async () => {
@@ -1795,4 +1873,84 @@ test("remote workspace and task mirrors expose explicit local takeover", async (
   assert.match(main, /本机硬件重绑定/);
   assert.match(api, /workspaces\/.*\/takeover/);
   assert.match(api, /tasks\/.*\/takeover/);
+});
+
+// The web build only strips TypeScript types; it never typechecks. A property
+// renamed on one side of a plain object literal therefore compiles and ships,
+// and fails at runtime as "Cannot read properties of undefined" — which is
+// exactly how the channel knowledge-scope picker broke. Until a real typecheck
+// runs in CI, this guards the interfaces where it has happened.
+test("channel UI context keys match between the interface and every call site", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const channels = await readFile(resolve(root, "src", "channels.ts"), "utf8");
+  const main = await readFile(resolve(root, "src", "main.ts"), "utf8");
+
+  const interfaceBody = channels.match(/interface ChannelUIContext \{([\s\S]*?)\n\}/)?.[1];
+  assert.ok(interfaceBody, "ChannelUIContext interface must be found");
+  const declared = new Set(
+    interfaceBody.split("\n")
+      .map(line => line.replace(/\/\/.*$/, "").trim())
+      .map(line => line.match(/^([A-Za-z_$][\w$]*)\s*:/)?.[1])
+      .filter(Boolean),
+  );
+  assert.ok(declared.size >= 5, `parsed too few interface keys: ${[...declared]}`);
+
+  // Depth-0 keys of an object literal, so nested objects report their own keys.
+  const topLevelKeys = body => {
+    let depth = 0;
+    let flat = "";
+    for (const character of body) {
+      if ("{([".includes(character)) { depth++; flat += " "; continue; }
+      if ("})]".includes(character)) { depth--; flat += " "; continue; }
+      flat += depth === 0 ? character : " ";
+    }
+    return new Set([...flat.matchAll(/([A-Za-z_$][\w$]*)\s*:\s*state\./g)].map(match => match[1]));
+  };
+
+  // The channel contexts are exactly the literals whose own keys carry models,
+  // accounts and libraries; larger enclosing literals report different keys.
+  const contexts = [];
+  for (let index = 0; index < main.length; index++) {
+    if (main[index] !== "{") continue;
+    let depth = 0;
+    let end = index;
+    for (; end < main.length; end++) {
+      if (main[end] === "{") depth++;
+      else if (main[end] === "}" && --depth === 0) break;
+    }
+    const keys = topLevelKeys(main.slice(index + 1, end));
+    if (keys.has("models") && keys.has("accounts") && keys.has("libraries")) contexts.push(keys);
+    // Do not skip to `end`: the literal we want is often nested inside this one.
+  }
+  assert.equal(contexts.length, 2, `expected 2 channel contexts, found ${contexts.length}`);
+
+  for (const provided of contexts) {
+    const missing = [...declared].filter(key => !provided.has(key));
+    const extra = [...provided].filter(key => !declared.has(key));
+    assert.deepEqual(missing, [], `channel context is missing keys ${missing.join(", ")}`);
+    assert.deepEqual(extra, [], `channel context passes unknown keys ${extra.join(", ")}`);
+  }
+});
+
+test("advanced settings expose access scope and listen address", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const main = await readFile(resolve(root, "src", "main.ts"), "utf8");
+  const api = await readFile(resolve(root, "src", "api.ts"), "utf8");
+  const types = await readFile(resolve(root, "src", "types.ts"), "utf8");
+
+  for (const marker of ["access-scope-form", "listen-address-form", "访问范围", "监听地址"]) {
+    assert.match(main, new RegExp(marker));
+  }
+  // The scope the UI offers must match what the server accepts.
+  assert.match(main, /value="lan"/);
+  assert.match(main, /value="local"/);
+  // Narrowing access is disruptive, so it must be confirmed before saving.
+  assert.match(main, /window\.confirm\([^)]*仅本机/);
+  // A stored listen address does not take effect until the process restarts, and
+  // the UI must say so instead of implying the change is live.
+  assert.match(main, /restart_required/);
+  assert.match(main, /重启 AHA2 后生效/);
+  assert.match(api, /\/api\/v1\/settings\/network/);
+  assert.match(types, /access_scope: string/);
+  assert.match(types, /NetworkSettings/);
 });

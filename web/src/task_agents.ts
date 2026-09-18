@@ -298,7 +298,7 @@ function renderAgentConfigCard(item: ConversationItem): string {
   const inherited = Boolean(payload.inherit_main);
   const rows = inherited ? [["配置", "继承 Main"]] : [
     ["Backend", String(payload.backend || "-")],
-    ["模型", `${String(payload.model_source || "env") === "official" ? "Official" : "Env"} · ${String(payload.model_name || payload.wire_model || "-")}`],
+    ["模型", `${String(payload.model_source || "env") === "official" || String(payload.model_source || "env") === "claude_native" ? "Official" : "Env"} · ${String(payload.model_name || payload.wire_model || "-")}`],
     ...(payload.codex_account_name ? [["账号", String(payload.codex_account_name)]] : []),
     ["推理", String(payload.reasoning_effort || "-")],
     ...(payload.backend === "codex" ? [

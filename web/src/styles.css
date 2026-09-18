@@ -24,7 +24,7 @@ body.task-view-active { height: 100dvh; overflow: hidden; }
 body.task-view-active #app,
 body.task-view-active .app-shell,
 body.task-view-active .workspace { height: 100%; min-height: 0; overflow: hidden; }
-button, input, select, textarea { font: inherit; }
+button, input, select, textarea { font-family: inherit; font-size: inherit; }
 button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 36px; padding: 0 12px; border: 1px solid #cfd5dc; border-radius: 5px; background: #fff; color: #30343b; font-weight: 650; cursor: pointer; }
 button.primary, .primary { border-color: var(--blue); background: var(--blue); color: #fff; }
 button:disabled { opacity: .5; cursor: not-allowed; }
@@ -54,8 +54,19 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .auth-form > p { margin: 8px 0 24px; color: var(--muted); }
 .auth-link { width: 100%; margin-top: 9px; border: 0; background: transparent; color: var(--blue); }
 label { display: grid; gap: 6px; margin-bottom: 13px; color: #30343b; font-size: 12px; font-weight: 700; }
-input, select, textarea { width: 100%; border: 1px solid #cfd5dc; border-radius: 5px; background: #fff; color: var(--ink); }
+input, select, textarea { width: 100%; max-width: 100%; min-width: 0; border: 1px solid #cfd5dc; border-radius: 5px; background: #fff; color: var(--ink); font-weight: 400; line-height: normal; }
 input, select { height: 38px; padding: 0 10px; }
+select {
+  appearance: none;
+  padding: 0 32px 0 4px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2369707d' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  background-size: 12px 12px;
+  text-overflow: ellipsis;
+}
+select option { line-height: normal; }
+select:disabled { color: #8b93a0; background-color: #f7f8fa; }
 textarea { min-height: 96px; padding: 10px; resize: vertical; line-height: 1.5; }
 .form-error { margin-top: 12px; color: var(--red); font-size: 12px; }
 
@@ -760,15 +771,22 @@ dd { margin: 3px 0 0; overflow-wrap: anywhere; font-size: 11px; }
 .channel-provider-actions { margin-top: 9px; }
 .channel-instance-card > header { justify-content: space-between; }
 .channel-instance-card > header > span { display: flex; align-items: center; gap: 5px; }
-.channel-instance-card dl { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); margin: 12px 0; }
+.channel-instance-card dl { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); margin: 12px 0; }
 .channel-instance-card dl div { min-width: 0; padding: 6px; border-right: 1px solid var(--line); }
 .channel-instance-card dl div:last-child { border-right: 0; }
 .channel-instance-card dt { color: var(--muted); font-size: 8px; }
-.channel-instance-card dd { margin: 3px 0 0; font-size: 9px; font-weight: 700; }
+.channel-instance-card dd { margin: 3px 0 0; font-size: 9px; font-weight: 700; overflow-wrap: anywhere; }
 .channel-instance-card details { border-top: 1px solid var(--line); padding-top: 8px; }
 .channel-instance-card details summary { cursor: pointer; color: var(--muted); font-size: 9px; }
 .channel-instance-card form { display: grid; gap: 8px; margin-top: 8px; }
-.channel-instance-lifecycle, .channel-retired-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin: 12px 0; }
+/* Scan, reset and archive are one row of equal actions: no single one of them is
+   the routine step once an instance is bound, so none of them dominates. */
+.channel-instance-actions { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 8px; margin: 12px 0; }
+.channel-instance-actions > button { min-width: 0; padding: 0 8px; }
+.channel-instance-hint { display: block; margin: -4px 0 12px; }
+.channel-retired-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin: 12px 0; }
+.channel-runtime-overrides { margin-top: 4px; border: 1px solid var(--line); border-radius: 6px; padding: 4px 10px 10px; }
+.channel-runtime-overrides > summary { padding: 6px 0; }
 .channel-retired-note { margin: 12px 0; color: var(--muted); font-size: 10px; line-height: 1.6; }
 .channel-instance-settings form, .channel-runtime-editor { display: grid; gap: 10px; }
 .channel-instance-settings fieldset { margin: 0; padding: 10px; border: 1px solid var(--line); border-radius: 6px; }
@@ -887,6 +905,9 @@ dialog > .dialog-head { margin: 0; padding: 18px 18px 0; }
 .detected-item input { width: auto; height: auto; }
 .detected-item > span { display: grid; gap: 2px; }
 .detected-item small { color: var(--muted); font-weight: 400; }
+.detected-item > button { margin-left: auto; min-height: 30px; padding: 0 9px; font-size: 11px; white-space: nowrap; }
+.detected-item > button.good { border-color: #8bc49a; color: #166534; }
+.detected-item > button.bad { border-color: #e9a4a4; color: #b42318; }
 .proto-badges { display: flex; gap: 4px; margin-top: 3px; }
 .proto { padding: 2px 6px; border-radius: 999px; font-size: 9px; font-weight: 800; }
 .proto.codex { background: #edf4ff; color: #1d4ed8; }

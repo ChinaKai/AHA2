@@ -46,7 +46,10 @@ type Config struct {
 	TrustSSHHostKey   func(context.Context, string, string) (hardware.SSHHostKeyInfo, error)
 	Version           string
 	WebVersion        string
-	StartedAt         time.Time
+	// ListenAddress is what this process was launched with, reported so the UI can
+	// tell a saved-but-not-yet-applied address from an active one.
+	ListenAddress string
+	StartedAt     time.Time
 }
 
 type Server struct {
@@ -59,6 +62,8 @@ type Server struct {
 	originPolicyMu        sync.RWMutex
 	validateOrigin        bool
 	originStartupOverride bool
+	accessScope           *accessScopeGate
+	startupListenAddress  string
 	detectWorkspace       func(context.Context, domain.Workspace) (domain.Workspace, error)
 	secrets               SecretStore
 	hardware              *hardware.Manager
@@ -103,15 +108,23 @@ func New(config Config) *Server {
 		trustSSHHostKey = hardware.TrustSSHHostKey
 	}
 	validateOrigin := !config.AllowCrossOrigin
-	if config.Store != nil && !config.AllowCrossOrigin {
+	// Default to the LAN scope: AHA2 binds 0.0.0.0, so narrowing on startup before
+	// anyone has chosen would cut off clients that already rely on it.
+	accessScopeValue := domain.AccessScopeLAN
+	if config.Store != nil {
 		if settings, err := config.Store.SecuritySettings(context.Background()); err == nil {
-			validateOrigin = settings.ValidateOrigin
+			if !config.AllowCrossOrigin {
+				validateOrigin = settings.ValidateOrigin
+			}
+			accessScopeValue = settings.AccessScope
 		}
 	}
 	server := &Server{
 		store: config.Store, auth: config.Auth, app: config.App, web: config.Web,
 		logger: logger, secureCookie: config.SecureCookie, validateOrigin: validateOrigin,
 		originStartupOverride: config.AllowCrossOrigin,
+		accessScope:           newAccessScopeGate(accessScopeValue),
+		startupListenAddress:  config.ListenAddress,
 		detectWorkspace:       config.DetectWorkspace,
 		secrets:               config.Secrets,
 		hardware:              config.Hardware,
@@ -186,6 +199,8 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("DELETE /api/v1/settings/proxy/profiles/{id}", s.withAuth(http.HandlerFunc(s.deleteProxyProfile)))
 	mux.Handle("GET /api/v1/settings/security", s.withAuth(http.HandlerFunc(s.securitySettings)))
 	mux.Handle("PUT /api/v1/settings/security", s.withAuth(http.HandlerFunc(s.updateSecuritySettings)))
+	mux.Handle("GET /api/v1/settings/network", s.withAuth(http.HandlerFunc(s.networkSettings)))
+	mux.Handle("PUT /api/v1/settings/network", s.withAuth(http.HandlerFunc(s.updateNetworkSettings)))
 	mux.Handle("GET /api/v1/settings/agent-api", s.withAuth(http.HandlerFunc(s.agentAPISettings)))
 	mux.Handle("PUT /api/v1/settings/agent-api", s.withAuth(http.HandlerFunc(s.updateAgentAPISettings)))
 	mux.Handle("GET /api/v1/settings/backend", s.withAuth(http.HandlerFunc(s.backendSettings)))
@@ -219,8 +234,6 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/channel-deliveries/{id}/skip", s.withAuth(http.HandlerFunc(s.skipChannelDelivery)))
 	mux.Handle("GET /api/v1/channel-instances/{id}/knowledge-policy", s.withAuth(http.HandlerFunc(s.channelKnowledgePolicy)))
 	mux.Handle("PUT /api/v1/channel-instances/{id}/knowledge-policy", s.withAuth(http.HandlerFunc(s.updateChannelKnowledgePolicy)))
-	mux.Handle("GET /api/v1/channel-instances/{id}/knowledge-records", s.withAuth(http.HandlerFunc(s.channelKnowledgeRecords)))
-	mux.Handle("POST /api/v1/channel-knowledge-records/{id}/promote", s.withAuth(http.HandlerFunc(s.promoteChannelKnowledgeRecord)))
 	mux.Handle("GET /api/v1/projects", s.withAuth(http.HandlerFunc(s.listProjects)))
 	mux.Handle("POST /api/v1/projects", s.withAuth(http.HandlerFunc(s.createProject)))
 	mux.Handle("PUT /api/v1/projects/{id}", s.withAuth(http.HandlerFunc(s.updateProject)))
@@ -248,6 +261,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/providers/{id}/model-detection-jobs", s.withAuth(http.HandlerFunc(s.createModelDetectionJob)))
 	mux.Handle("GET /api/v1/providers/{id}/model-detection-jobs/{job}/events", s.withAuth(http.HandlerFunc(s.modelDetectionJobEvents)))
 	mux.Handle("POST /api/v1/providers/{id}/model-detection-jobs/{job}/cancel", s.withAuth(http.HandlerFunc(s.cancelModelDetectionJob)))
+	mux.Handle("POST /api/v1/providers/{id}/model-probes", s.withAuth(http.HandlerFunc(s.probeProviderModel)))
 	mux.Handle("POST /api/v1/providers/add-models", s.withAuth(http.HandlerFunc(s.addModelsHandler)))
 	mux.Handle("GET /api/v1/codex-accounts", s.withAuth(http.HandlerFunc(s.listCodexAccounts)))
 	mux.Handle("POST /api/v1/codex-accounts/import-local", s.withAuth(http.HandlerFunc(s.importLocalCodexAccount)))
@@ -343,6 +357,7 @@ func (s *Server) Handler() http.Handler {
 
 	mux.Handle("GET /api/v1/knowledge", s.withAuth(http.HandlerFunc(s.listKnowledge)))
 	mux.Handle("GET /api/v1/knowledge/{id}", s.withAuth(http.HandlerFunc(s.knowledgeDetail)))
+	mux.Handle("GET /api/v1/knowledge/indexes", s.withAuth(http.HandlerFunc(s.knowledgeIndexes)))
 	mux.Handle("GET /api/v1/knowledge/libraries", s.withAuth(http.HandlerFunc(s.listKnowledgeLibraries)))
 	mux.Handle("POST /api/v1/knowledge/libraries/{id}/bind", s.withAuth(http.HandlerFunc(s.bindKnowledgeLibrary)))
 	mux.Handle("POST /api/v1/knowledge/libraries/{id}/unbind", s.withAuth(http.HandlerFunc(s.unbindKnowledgeLibrary)))
@@ -366,7 +381,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("DELETE /api/v1/skills/{id}", s.withAuth(http.HandlerFunc(s.deleteSkill)))
 
 	mux.HandleFunc("/", s.serveWeb)
-	return s.securityHeaders(s.requestLog(mux))
+	return s.securityHeaders(s.requestLog(s.enforceAccessScope(mux)))
 }
 
 func (s *Server) securityHeaders(next http.Handler) http.Handler {

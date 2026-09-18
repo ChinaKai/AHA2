@@ -54,6 +54,16 @@ const (
 	TurnBlocked     TurnStatus = "blocked"
 )
 
+// EndedCleanly reports whether the turn finished through a path that guarantees
+// AHA observed its backend process exit. Queued, preparing, starting, running and
+// waiting turns have not finished at all; blocked, failed and interrupted turns
+// may have left a backend process behind, because a service restart cannot kill
+// a process running behind a WSL or SSH hop. Only a succeeded turn is therefore
+// safe to resume without first confirming its writer is really gone.
+func (status TurnStatus) EndedCleanly() bool {
+	return status == TurnSucceeded
+}
+
 var turnTransitions = map[TurnStatus]map[TurnStatus]bool{
 	TurnQueued:    {TurnPreparing: true, TurnInterrupted: true, TurnFailed: true},
 	TurnPreparing: {TurnStarting: true, TurnBlocked: true, TurnInterrupted: true, TurnFailed: true},

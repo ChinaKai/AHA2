@@ -64,13 +64,14 @@ func (adapter Codex) Execute(ctx context.Context, request Request, emit func(Eve
 	monitorDone := make(chan struct{})
 	go monitorBackendActivity(runContext, idleWarning, idleTimeout, heartbeat, activity, send, cancelRun, monitorDone)
 	result, err := request.Runner.Run(runContext, workspace.Command{
-		Executable: binary,
-		Args:       args,
-		Dir:        request.WorkDir,
-		Env:        environment,
-		Stdin:      request.Prompt,
-		Timeout:    timeout,
-		KillTree:   true,
+		Executable:     binary,
+		Args:           args,
+		Dir:            request.WorkDir,
+		Env:            environment,
+		Stdin:          request.Prompt,
+		Timeout:        timeout,
+		KillTree:       true,
+		ReverseForward: request.ReverseForward,
 	}, func(line string) {
 		event, parsedReply, parsedSession := parseCodexLine(line)
 		select {
@@ -144,6 +145,12 @@ func codexArguments(request Request, catalogPath string) []string {
 			providerID = "aha2_provider"
 		}
 	}
+	if baseURL != "" && providerID == "openai" {
+		// New Codex versions reserve built-in provider IDs such as openai.
+		// Legacy AHA imports may still carry this provider ID, so use a
+		// deterministic custom alias rather than attempting to override it.
+		providerID = "openai-custom"
+	}
 	if wireAPI == "" {
 		wireAPI = "responses"
 	}
@@ -168,10 +175,10 @@ func codexArguments(request Request, catalogPath string) []string {
 			"-c", "model_providers."+providerID+".env_key="+strconv.Quote(envKey),
 		)
 	}
-	if request.StreamIdleTimeoutMS > 0 {
+	if baseURL != "" && request.StreamIdleTimeoutMS > 0 {
 		args = append(args, "-c", fmt.Sprintf("model_providers.%s.stream_idle_timeout_ms=%d", providerID, request.StreamIdleTimeoutMS))
 	}
-	if request.StreamMaxRetries > 0 {
+	if baseURL != "" && request.StreamMaxRetries > 0 {
 		args = append(args, "-c", fmt.Sprintf("model_providers.%s.stream_max_retries=%d", providerID, request.StreamMaxRetries))
 	}
 	if request.Model != "" {

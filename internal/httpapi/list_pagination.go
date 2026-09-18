@@ -22,10 +22,28 @@ type listOptions struct {
 	Summary bool
 }
 
+// listCursor is the opaque page position handed back to the client.
+//
+// The timestamp field is deliberately generic: what it holds follows the list's
+// sort key, and different lists sort by different columns. The wire key still
+// reads "updated_at" because a client may already be holding a cursor, and this
+// doubles as the backward-compatible name — see At.
 type listCursor struct {
-	Kind      string `json:"kind"`
-	UpdatedAt string `json:"updated_at"`
+	Kind string `json:"kind"`
+	// At is the current field, holding the list's own sort timestamp.
+	At string `json:"at,omitempty"`
+	// UpdatedAt is the original key name. It is read for compatibility and never
+	// written, so a cursor minted before this field existed still decodes.
+	UpdatedAt string `json:"updated_at,omitempty"`
 	ID        string `json:"id"`
+}
+
+// position returns the cursor timestamp, preferring the current field.
+func (cursor listCursor) position() string {
+	if cursor.At != "" {
+		return cursor.At
+	}
+	return cursor.UpdatedAt
 }
 
 type listPage[T any] struct {
@@ -77,6 +95,8 @@ func paginateByUpdated[T any](items []T, kind string, options listOptions, key f
 	if !options.Paged {
 		return listPage[T]{Items: items}, nil
 	}
+	// Newest first, with the id as a stable tie-break so equal timestamps cannot
+	// straddle a page boundary.
 	sort.SliceStable(items, func(left, right int) bool {
 		leftTime, leftID := key(items[left])
 		rightTime, rightID := key(items[right])
@@ -91,13 +111,13 @@ func paginateByUpdated[T any](items []T, kind string, options listOptions, key f
 		if err != nil {
 			return listPage[T]{}, err
 		}
-		cursorTime, err := time.Parse(time.RFC3339Nano, cursor.UpdatedAt)
+		cursorTime, err := time.Parse(time.RFC3339Nano, cursor.position())
 		if err != nil {
 			return listPage[T]{}, fmt.Errorf("invalid cursor timestamp")
 		}
 		start = sort.Search(len(items), func(index int) bool {
-			updatedAt, id := key(items[index])
-			return updatedAt.Before(cursorTime) || updatedAt.Equal(cursorTime) && id < cursor.ID
+			at, id := key(items[index])
+			return at.Before(cursorTime) || at.Equal(cursorTime) && id < cursor.ID
 		})
 	}
 	end := start + options.Limit
@@ -106,8 +126,8 @@ func paginateByUpdated[T any](items []T, kind string, options listOptions, key f
 	}
 	page := listPage[T]{Items: items[start:end], HasMore: end < len(items)}
 	if page.HasMore && len(page.Items) > 0 {
-		updatedAt, id := key(page.Items[len(page.Items)-1])
-		page.NextCursor = encodeListCursor(listCursor{Kind: kind, UpdatedAt: updatedAt.UTC().Format(time.RFC3339Nano), ID: id})
+		at, id := key(page.Items[len(page.Items)-1])
+		page.NextCursor = encodeListCursor(listCursor{Kind: kind, At: at.UTC().Format(time.RFC3339Nano), ID: id})
 	}
 	return page, nil
 }
@@ -120,18 +140,18 @@ func listCursorPosition(options listOptions, kind string) (time.Time, string, er
 	if err != nil {
 		return time.Time{}, "", err
 	}
-	updatedAt, err := time.Parse(time.RFC3339Nano, cursor.UpdatedAt)
+	position, err := time.Parse(time.RFC3339Nano, cursor.position())
 	if err != nil {
 		return time.Time{}, "", fmt.Errorf("invalid cursor timestamp")
 	}
-	return updatedAt, cursor.ID, nil
+	return position, cursor.ID, nil
 }
 
 func storeListPage[T any](items []T, hasMore bool, kind string, key func(T) (time.Time, string)) listPage[T] {
 	page := listPage[T]{Items: items, HasMore: hasMore}
 	if hasMore && len(items) > 0 {
-		updatedAt, id := key(items[len(items)-1])
-		page.NextCursor = encodeListCursor(listCursor{Kind: kind, UpdatedAt: updatedAt.UTC().Format(time.RFC3339Nano), ID: id})
+		at, id := key(items[len(items)-1])
+		page.NextCursor = encodeListCursor(listCursor{Kind: kind, At: at.UTC().Format(time.RFC3339Nano), ID: id})
 	}
 	return page
 }
@@ -147,7 +167,7 @@ func decodeListCursor(value, kind string) (listCursor, error) {
 		return listCursor{}, fmt.Errorf("invalid cursor")
 	}
 	var cursor listCursor
-	if err := json.Unmarshal(payload, &cursor); err != nil || cursor.Kind != kind || cursor.UpdatedAt == "" || cursor.ID == "" {
+	if err := json.Unmarshal(payload, &cursor); err != nil || cursor.Kind != kind || cursor.position() == "" || cursor.ID == "" {
 		return listCursor{}, fmt.Errorf("invalid cursor")
 	}
 	return cursor, nil

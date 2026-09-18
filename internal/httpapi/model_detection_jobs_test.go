@@ -26,17 +26,16 @@ func waitModelDetectionStatus(t *testing.T, job *modelDetectionJob, terminal ...
 	return modelDetectionJobView{}
 }
 
-func TestModelDetectionJobStreamsCatalogAndPerModelResults(t *testing.T) {
+func TestModelDetectionJobStreamsCatalogWithoutProbingModels(t *testing.T) {
 	t.Parallel()
 	jobs := newModelDetectionJobs()
 	jobs.ttl = time.Hour
-	jobs.workers = 2
 	jobs.detect = func(context.Context, domain.Provider, string) (gateway.Result, error) {
 		return gateway.Result{AuthStyle: "bearer", Models: []gateway.DetectedModel{{ID: "one"}, {ID: "two"}, {ID: "three"}}}, nil
 	}
-	jobs.probe = func(_ context.Context, _ domain.Provider, _, _, modelID string) (map[string]string, string) {
-		time.Sleep(5 * time.Millisecond)
-		return map[string]string{"responses": "supported", "model": modelID}, ""
+	jobs.probe = func(context.Context, domain.Provider, string, string, string) (map[string]string, string) {
+		t.Fatal("model detection job must not probe capabilities")
+		return nil, ""
 	}
 	provider := domain.Provider{ID: "provider-stream", BaseURL: "https://example.invalid"}
 	created := jobs.start("owner-a", provider, "secret")
@@ -45,7 +44,7 @@ func TestModelDetectionJobStreamsCatalogAndPerModelResults(t *testing.T) {
 		t.Fatal(err)
 	}
 	view := waitModelDetectionStatus(t, job, "completed")
-	if view.Total != 3 || view.Completed != 3 || len(view.Results) != 3 {
+	if view.Total != 3 || view.Completed != 0 || len(view.Results) != 0 {
 		t.Fatalf("completed job = %#v", view)
 	}
 	events, terminal, _ := job.eventsAfter(0)
@@ -53,7 +52,7 @@ func TestModelDetectionJobStreamsCatalogAndPerModelResults(t *testing.T) {
 	for _, event := range events {
 		counts[event.Type]++
 	}
-	if !terminal || counts["catalog"] != 1 || counts["result"] != 3 || counts["done"] != 1 {
+	if !terminal || counts["catalog"] != 1 || counts["result"] != 0 || counts["done"] != 1 {
 		t.Fatalf("stream events = %#v terminal=%t", counts, terminal)
 	}
 	if _, err := jobs.get("owner-b", provider.ID, created.ID); !errors.Is(err, errModelDetectionJobNotFound) {
@@ -64,22 +63,17 @@ func TestModelDetectionJobStreamsCatalogAndPerModelResults(t *testing.T) {
 	}
 }
 
-func TestModelDetectionJobCancellationStopsWorkersAndKeepsResults(t *testing.T) {
+func TestModelDetectionJobCancellationStopsCatalogFetch(t *testing.T) {
 	t.Parallel()
 	jobs := newModelDetectionJobs()
 	jobs.ttl = time.Hour
-	jobs.workers = 1
-	jobs.detect = func(context.Context, domain.Provider, string) (gateway.Result, error) {
-		return gateway.Result{AuthStyle: "none", Models: []gateway.DetectedModel{{ID: "fast"}, {ID: "blocked"}}}, nil
-	}
-	firstDone := make(chan struct{})
-	jobs.probe = func(ctx context.Context, _ domain.Provider, _, _, modelID string) (map[string]string, string) {
-		if modelID == "fast" {
-			close(firstDone)
-			return map[string]string{"responses": "supported"}, ""
-		}
+	blocked := make(chan struct{})
+	cancelled := make(chan struct{})
+	jobs.detect = func(ctx context.Context, _ domain.Provider, _ string) (gateway.Result, error) {
+		close(blocked)
 		<-ctx.Done()
-		return nil, ""
+		close(cancelled)
+		return gateway.Result{}, ctx.Err()
 	}
 	provider := domain.Provider{ID: "provider-cancel", BaseURL: "https://example.invalid"}
 	created := jobs.start("owner-a", provider, "secret")
@@ -88,19 +82,20 @@ func TestModelDetectionJobCancellationStopsWorkersAndKeepsResults(t *testing.T) 
 		t.Fatal(err)
 	}
 	select {
-	case <-firstDone:
+	case <-blocked:
 	case <-time.After(time.Second):
-		t.Fatal("first model was not probed")
-	}
-	deadline := time.Now().Add(time.Second)
-	for job.view().Completed == 0 && time.Now().Before(deadline) {
-		time.Sleep(2 * time.Millisecond)
+		t.Fatal("catalog fetch did not start")
 	}
 	if _, err := jobs.cancel("owner-a", provider.ID, created.ID); err != nil {
 		t.Fatal(err)
 	}
+	select {
+	case <-cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("catalog fetch did not receive cancellation")
+	}
 	view := waitModelDetectionStatus(t, job, "cancelled")
-	if view.Completed != 1 || len(view.Results) != 1 || view.Results[0].ID != "fast" {
-		t.Fatalf("cancelled job lost completed results: %#v", view)
+	if view.Completed != 0 || len(view.Results) != 0 {
+		t.Fatalf("cancelled catalog job retained results: %#v", view)
 	}
 }

@@ -28,8 +28,16 @@ func (runner *windowsDetectRunner) Run(_ context.Context, command Command, _ Lin
 		return Result{Stdout: `C:\workspace`}, nil
 	case "git":
 		return Result{ExitCode: 128, Stderr: "fatal: not a git repository"}, nil
-	case "codex", "claude":
+	case "codex":
 		return Result{Stdout: command.Executable + " 1.0"}, nil
+	case "claude":
+		if len(command.Args) > 0 && command.Args[0] == "auth" {
+			return Result{Stdout: `{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty"}`}, nil
+		}
+		if containsString(command.Args, "--input-format") {
+			return Result{Stdout: `{"type":"control_response","response":{"subtype":"success","request_id":"aha-claude-models","response":{"models":[{"value":"sonnet","resolvedModel":"claude-sonnet-5","displayName":"Sonnet","description":"Sonnet 5","supportsEffort":true,"supportedEffortLevels":["low","medium","high"]}]}}}` + "\n"}, nil
+		}
+		return Result{Stdout: "claude 1.0"}, nil
 	default:
 		return Result{}, errors.New("unexpected command")
 	}
@@ -115,6 +123,67 @@ func TestDetectDistinguishesRepositoryAndBackendResults(t *testing.T) {
 	if claude["status"] != probeExecutionFailed || !strings.Contains(claude["error"].(string), "configuration invalid") {
 		t.Fatalf("failed Claude probe was misclassified: %#v", claude)
 	}
+}
+
+func TestDetectReportsClaudeNativeLoginStatus(t *testing.T) {
+	item := domain.Workspace{ID: "workspace-claude-native", Locality: "local", Transport: "wsl", RootPath: "/home/owner/project"}
+	detected, err := detectWithRunner(context.Background(), item, detectRunnerFunc(func(command Command) (Result, error) {
+		switch command.Executable {
+		case "pwd":
+			return Result{Stdout: item.RootPath}, nil
+		case "uname":
+			return Result{Stdout: "Linux"}, nil
+		case "git":
+			return Result{ExitCode: 128, Stderr: "not a git repository"}, nil
+		case "codex":
+			return Result{}, exec.ErrNotFound
+		case "claude":
+			if len(command.Args) > 0 && command.Args[0] == "auth" {
+				return Result{Stdout: `{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty"}`}, nil
+			}
+			if containsString(command.Args, "--input-format") {
+				return Result{Stdout: `{"type":"control_response","response":{"subtype":"success","request_id":"aha-claude-models","response":{"models":[{"value":"sonnet","resolvedModel":"claude-sonnet-5","displayName":"Sonnet","description":"Sonnet 5","supportsEffort":true,"supportedEffortLevels":["low","medium","high"]}]}}}` + "\n"}, nil
+			}
+			return Result{Stdout: "2.1.0 (Claude Code)"}, nil
+		default:
+			return Result{}, errors.New("unexpected command")
+		}
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	claude := detected.Capabilities["claude"].(map[string]any)
+	if claude["status"] != probeReady || claude["auth_status"] != "logged_in" ||
+		claude["auth_method"] != "claude.ai" || claude["api_provider"] != "firstParty" {
+		t.Fatalf("unexpected Claude native probe: %#v", claude)
+	}
+	models, ok := claude["models"].([]domain.ClaudeModelOption)
+	if !ok || len(models) != 1 || models[0].WireModel != "sonnet" || models[0].ResolvedModel != "claude-sonnet-5" {
+		t.Fatalf("unexpected Claude model catalog: %#v", claude["models"])
+	}
+}
+
+func TestParseClaudeModelResponse(t *testing.T) {
+	models, err := parseClaudeModelResponse(`
+{"type":"system","subtype":"init"}
+{"type":"control_response","response":{"subtype":"success","request_id":"aha-claude-models","response":{"models":[{"value":"default","resolvedModel":"claude-opus-5","displayName":"Default","description":"Recommended","supportsEffort":true,"supportedEffortLevels":["low","medium","high","xhigh","max"],"supportsAdaptiveThinking":true,"supportsFastMode":true,"supportsAutoMode":true},{"value":"haiku","displayName":"Haiku"}]}}}
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(models) != 2 || models[0].WireModel != "default" || models[0].ResolvedModel != "claude-opus-5" ||
+		len(models[0].SupportedEffortLevels) != 5 || models[1].DisplayName != "Haiku" {
+		t.Fatalf("unexpected models: %#v", models)
+	}
+}
+
+func containsString(values []string, expected string) bool {
+	for _, value := range values {
+		if value == expected {
+			return true
+		}
+	}
+	return false
 }
 
 func TestDetectDistinguishesGitExecutionFailure(t *testing.T) {

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -133,6 +134,25 @@ func (s *Server) withGlobalKnowledgeNavigation(ctx context.Context, items []doma
 		}
 	}
 	return result, nil
+}
+
+// knowledgeIndexes lists one verified knowledge root per project.
+//
+// Callers that need "every project I can scope knowledge to" must use this
+// rather than filtering a page of /api/v1/knowledge, which is recency-ordered
+// and therefore reports only the projects touched most recently.
+func (s *Server) knowledgeIndexes(writer http.ResponseWriter, request *http.Request) {
+	indexes, err := s.store.KnowledgeIndexes(request.Context())
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, "list_knowledge_indexes_failed")
+		return
+	}
+	entries := make([]domain.KnowledgeEntry, 0, len(indexes))
+	for _, entry := range indexes {
+		entries = append(entries, entry)
+	}
+	sort.Slice(entries, func(left, right int) bool { return entries[left].ProjectID < entries[right].ProjectID })
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "indexes": entries})
 }
 
 func (s *Server) knowledgeDetail(writer http.ResponseWriter, request *http.Request) {

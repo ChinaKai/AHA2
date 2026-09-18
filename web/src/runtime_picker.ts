@@ -1,4 +1,4 @@
-import type {CodexAccount, CodexModelOption, Model} from "./types.js";
+import type {ClaudeModelOption, CodexAccount, CodexModelOption, Model} from "./types.js";
 
 type RuntimeSelection = {
   backend?: string;
@@ -9,6 +9,24 @@ type RuntimeSelection = {
   stream_idle_timeout_ms?: number;
   stream_max_retries?: number;
 };
+
+export type ClaudeOfficialAvailability = "ready" | "loading" | "not_logged_in" | "unknown" | "unavailable";
+
+export type ClaudeOfficialCatalog = {
+  availability: ClaudeOfficialAvailability;
+  models: ClaudeModelOption[];
+  message?: string;
+};
+
+const CLAUDE_OFFICIAL_LABELS: Record<ClaudeOfficialAvailability, string> = {
+  ready: "Official",
+  loading: "Official（检测中）",
+  not_logged_in: "Official（暂不可用）",
+  unknown: "Official（待检测）",
+  unavailable: "Official（暂不可用）",
+};
+
+const claudeOfficialCatalogs = new Map<string, ClaudeOfficialCatalog>();
 
 function escapeHTML(value: unknown): string {
   return String(value ?? "")
@@ -60,6 +78,20 @@ function envModelOptions(models: Model[], selectedID: string): string {
   ).join("");
 }
 
+function officialModelOptions(catalog: ClaudeOfficialCatalog | undefined, selected: string): string {
+  const models = catalog?.models || [];
+  if (models.length === 0) {
+    const label = catalog?.message || "暂不可用";
+    const selectedOption = selected ? option(selected, `${selected}（暂不可用）`, true) : "";
+    return `${selectedOption}${option("", label, !selectedOption)}`;
+  }
+  return models.map(model => option(
+    model.wire_model,
+    model.display_name || model.wire_model,
+    model.wire_model === selected,
+  )).join("");
+}
+
 export function runtimeFieldsHTML(
   prefix: string,
   models: Model[],
@@ -67,16 +99,22 @@ export function runtimeFieldsHTML(
   selection: RuntimeSelection = {},
   className = "",
 ): string {
-  const source = selection.model_source === "official" ? "official" : "env";
+  const source = selection.model_source === "official"
+    ? "official"
+    : selection.model_source === "claude_native" ? "claude_native" : "env";
   const backends = [...new Set([
-    ...models.filter(model => model.source !== "official").map(model => model.backend),
+    ...(selection.backend ? [selection.backend] : []),
+    ...models.filter(model => model.source !== "official" && model.source !== "claude_native").map(model => model.backend),
     ...(accounts.length ? ["codex"] : []),
   ])];
   const backend = selection.backend || backends[0] || "";
   const accountID = selection.codex_account_id || accounts[0]?.id || "";
   const wireModels = accountModels(accounts, accountID);
+  const claudeCatalog = claudeOfficialCatalogs.get(prefix);
   const runtimeClass = className ? ` ${className}` : "";
-  const envModels = models.filter(model => model.source !== "official" && model.backend === backend);
+  const envModels = models.filter(model => model.source !== "official" && model.source !== "claude_native" && model.backend === backend);
+  const official = backend === "codex" && source === "official";
+  const native = backend === "claude" && source === "claude_native";
   const existingSelection = Object.keys(selection).length > 0;
   const streamIdleTimeoutMS = Number(selection.stream_idle_timeout_ms || 0) ||
     (existingSelection ? 300000 : 120000);
@@ -86,16 +124,23 @@ export function runtimeFieldsHTML(
     : (existingSelection ? 5 : 2);
   return `<div class="two runtime-picker${runtimeClass}">
     <label>Backend<select name="backend" id="${prefix}-backend" required>${backends.map(item => option(item, item === "codex" ? "Codex" : "Claude Code", item === backend)).join("")}</select></label>
-    <label id="${prefix}-model-source-field">模型使用方式<select name="model_source" id="${prefix}-model-source" required><option value="env" ${source === "env" ? "selected" : ""}>Env</option><option value="official" ${source === "official" ? "selected" : ""}>Official</option></select></label>
+    <label id="${prefix}-model-source-field">模型使用方式<select name="model_source" id="${prefix}-model-source" ${existingSelection && source === "claude_native" ? 'data-initial-official="true"' : ""} required>${backend === "claude"
+      ? `${option("env", "Env Provider", source === "env")}${option("claude_native", "Official", source === "claude_native")}`
+      : `${option("env", "Env", source === "env")}${option("official", "Official", source === "official")}`}</select></label>
   </div>
-  <label id="${prefix}-env-model-field" class="runtime-picker${runtimeClass}">Env 模型<select name="model_id" id="${prefix}-model" required>${envModelOptions(envModels, selection.model_id || "")}</select></label>
-  <div id="${prefix}-official-fields" class="two runtime-picker${runtimeClass}" hidden>
+  <label id="${prefix}-env-model-field" class="runtime-picker${runtimeClass}" ${official || native ? "hidden" : ""}>Env 模型<select name="model_id" id="${prefix}-model" ${official || native ? "disabled" : "required"}>${envModelOptions(envModels, selection.model_id || "")}</select></label>
+  <div id="${prefix}-official-fields" class="two runtime-picker${runtimeClass}" ${official ? "" : "hidden"}>
     <label>Codex 账号<select name="codex_account_id" id="${prefix}-codex-account" required>${accounts.map(account => option(account.id, accountName(account), account.id === accountID)).join("")}</select></label>
     <label>官方模型<select name="wire_model" id="${prefix}-wire-model" required>${wireModels.map(model => option(model.wire_model, model.display_name || model.wire_model, model.wire_model === selection.wire_model)).join("")}</select></label>
+  </div>
+  <div id="${prefix}-claude-native-fields" class="two runtime-picker${runtimeClass}" ${native ? "" : "hidden"}>
+    <label>官方模型<select name="wire_model" id="${prefix}-claude-native-model" ${native && claudeCatalog?.availability === "ready" ? "required" : "disabled"}>${officialModelOptions(claudeCatalog, selection.wire_model || "default")}</select></label>
+    <div class="field-help" id="${prefix}-claude-native-help">${escapeHTML(claudeCatalog?.message || "选择 Official 后检测当前 Workspace 的 Claude Code 登录状态和模型。")}</div>
   </div>
   <div id="${prefix}-codex-stream-settings" class="two runtime-picker${runtimeClass}" ${backend === "codex" ? "" : "hidden"}>
     <label>SSE 无数据超时（秒）<input name="stream_idle_timeout_seconds" type="number" min="30" max="1800" step="1" value="${Math.round(streamIdleTimeoutMS / 1000)}" required></label>
     <label>流中断重试次数<input name="stream_max_retries" type="number" min="1" max="10" step="1" value="${streamMaxRetries}" required></label>
+    <div class="field-help" id="${prefix}-codex-stream-official-help" hidden>Codex 官方账号使用 CLI 默认的流超时与重试参数；两项设置仅适用于自定义 Env Provider。</div>
   </div>`;
 }
 
@@ -118,23 +163,55 @@ export function syncRuntimeFields(prefix: string, models: Model[], accounts: Cod
   const officialFields = document.querySelector<HTMLElement>(`#${prefix}-official-fields`);
   const accountSelect = document.querySelector<HTMLSelectElement>(`#${prefix}-codex-account`);
   const wireSelect = document.querySelector<HTMLSelectElement>(`#${prefix}-wire-model`);
+  const nativeFields = document.querySelector<HTMLElement>(`#${prefix}-claude-native-fields`);
+  const nativeSelect = document.querySelector<HTMLSelectElement>(`#${prefix}-claude-native-model`);
   const streamSettings = document.querySelector<HTMLElement>(`#${prefix}-codex-stream-settings`);
-  if (!sourceField || !sourceSelect || !envField || !modelSelect || !officialFields || !accountSelect || !wireSelect) return;
+  const streamOfficialHelp = document.querySelector<HTMLElement>(`#${prefix}-codex-stream-official-help`);
+  if (!sourceField || !sourceSelect || !envField || !modelSelect || !officialFields || !accountSelect || !wireSelect || !nativeFields || !nativeSelect) return;
 
   const supportsOfficial = backend === "codex";
+  const supportsNative = backend === "claude";
+  const expectedSourceValues = supportsOfficial ? "env,official" : supportsNative ? "env,claude_native" : "env";
+  const currentSourceValues = [...sourceSelect.options].map(item => item.value).join(",");
+  const desiredOptions = supportsOfficial
+    ? `${option("env", "Env", sourceSelect.value === "env")}${option("official", "Official", sourceSelect.value === "official")}`
+    : supportsNative
+      ? `${option("env", "Env Provider", sourceSelect.value === "env")}${option("claude_native", "Official", sourceSelect.value === "claude_native")}`
+      : option("env", "Env", true);
+  if (currentSourceValues !== expectedSourceValues) {
+    const current = sourceSelect.value;
+    sourceSelect.innerHTML = desiredOptions;
+    restoreSourceValue(sourceSelect, current, supportsOfficial, supportsNative);
+  }
+  sourceField.hidden = !supportsOfficial && !supportsNative;
+  sourceSelect.disabled = !supportsOfficial && !supportsNative;
+  if (!supportsOfficial && sourceSelect.value === "official") sourceSelect.value = "env";
+  if (!supportsNative && sourceSelect.value === "claude_native") sourceSelect.value = "env";
+  const nativeOption = sourceSelect.querySelector<HTMLOptionElement>('option[value="claude_native"]');
+  if (nativeOption) {
+    const availability = claudeOfficialCatalogs.get(prefix)?.availability || "unknown";
+    nativeOption.textContent = CLAUDE_OFFICIAL_LABELS[availability];
+  }
+  const official = supportsOfficial && sourceSelect.value === "official";
+  const native = supportsNative && sourceSelect.value === "claude_native";
+
   if (streamSettings) {
     streamSettings.hidden = !supportsOfficial;
-    streamSettings.querySelectorAll<HTMLInputElement>("input").forEach(input => { input.disabled = !supportsOfficial; });
+    streamSettings.querySelectorAll<HTMLInputElement>("input").forEach(input => { input.disabled = !supportsOfficial || official; });
+    if (streamOfficialHelp) streamOfficialHelp.hidden = !official;
   }
-  sourceField.hidden = !supportsOfficial;
-  sourceSelect.disabled = !supportsOfficial;
-  if (!supportsOfficial) sourceSelect.value = "env";
-  const official = supportsOfficial && sourceSelect.value === "official";
-  envField.hidden = official;
-  modelSelect.disabled = official;
+  envField.hidden = official || native;
+  modelSelect.disabled = official || native;
+  modelSelect.required = !official && !native;
   officialFields.hidden = !official;
   accountSelect.disabled = !official;
   wireSelect.disabled = !official;
+  nativeFields.hidden = !native;
+  const claudeCatalog = claudeOfficialCatalogs.get(prefix);
+  const preserveUnavailable = sourceSelect.dataset.initialOfficial === "true" && claudeCatalog?.availability !== "ready";
+  nativeSelect.disabled = !native || (claudeCatalog?.availability !== "ready" && !preserveUnavailable);
+  nativeSelect.required = native && claudeCatalog?.availability === "ready";
+  nativeSelect.dataset.ready = claudeCatalog?.availability === "ready" ? "true" : "false";
 
   if (official) {
     const accountID = accountSelect.value || accounts[0]?.id || "";
@@ -145,9 +222,12 @@ export function syncRuntimeFields(prefix: string, models: Model[], accounts: Cod
       ? available.map(model => option(model.wire_model, model.display_name || model.wire_model, model.wire_model === previousWire)).join("")
       : '<option value="">该账号暂无可用模型，请先刷新账号</option>';
     if (!available.some(model => model.wire_model === previousWire)) wireSelect.value = available[0]?.wire_model || "";
+  } else if (native) {
+    const previousNative = nativeSelect.value || "default";
+    nativeSelect.innerHTML = officialModelOptions(claudeCatalog, previousNative);
   } else {
     const previousModel = modelSelect.value;
-    const available = models.filter(model => model.source !== "official" && model.backend === backend);
+    const available = models.filter(model => model.source !== "official" && model.source !== "claude_native" && model.backend === backend);
     modelSelect.innerHTML = available.length
       ? envModelOptions(available, previousModel)
       : `<option value="">${backend ? "该 Backend 下暂无 Env 模型" : "请先选择 Backend"}</option>`;
@@ -163,10 +243,59 @@ export function syncRuntimeFields(prefix: string, models: Model[], accounts: Cod
   effort.innerHTML = effortLevels.map(level => option(level, level, level === previousEffort)).join("");
   const selectedModel = official
     ? accountModels(accounts, accountSelect.value).find(model => model.wire_model === wireSelect.value)
-    : models.find(model => model.id === modelSelect.value);
+    : native
+      ? undefined
+      : models.find(model => model.id === modelSelect.value);
   effort.value = resolveReasoningEffort(
     effortLevels, previousEffort, selectedModel?.default_reasoning_effort || "", preferModelDefault,
   );
+}
+
+function restoreSourceValue(
+  select: HTMLSelectElement,
+  previous: string,
+  supportsOfficial: boolean,
+  supportsNative: boolean,
+): void {
+  if (previous === "official" && supportsOfficial) {
+    select.value = "official";
+  } else if (previous === "claude_native" && supportsNative) {
+    select.value = "claude_native";
+  } else {
+    select.value = "env";
+  }
+}
+
+export function setClaudeOfficialCatalog(prefix: string, catalog: ClaudeOfficialCatalog): void {
+  claudeOfficialCatalogs.set(prefix, catalog);
+  syncClaudeOfficialFields(prefix);
+}
+
+export function setClaudeOfficialLoading(prefix: string): void {
+  setClaudeOfficialCatalog(prefix, {availability: "loading", models: [], message: "正在检测当前 Workspace 的 Claude Code 官方账号..."});
+}
+
+function syncClaudeOfficialFields(prefix: string): void {
+  const sourceSelect = document.querySelector<HTMLSelectElement>(`#${prefix}-model-source`);
+  const catalog = claudeOfficialCatalogs.get(prefix);
+  if (!sourceSelect || !catalog) return;
+  const officialOption = sourceSelect.querySelector<HTMLOptionElement>('option[value="claude_native"]');
+  const help = document.querySelector<HTMLElement>(`#${prefix}-claude-native-help`);
+  const modelSelect = document.querySelector<HTMLSelectElement>(`#${prefix}-claude-native-model`);
+  if (officialOption) {
+    officialOption.textContent = CLAUDE_OFFICIAL_LABELS[catalog.availability];
+  }
+  if (help) help.textContent = catalog.message || (catalog.availability === "ready"
+    ? `已检测到 ${catalog.models.length} 个可用模型。`
+    : "Official 暂不可用。");
+  if (modelSelect) {
+    const previous = modelSelect.value || "default";
+    const preserveUnavailable = sourceSelect.dataset.initialOfficial === "true" && catalog.availability !== "ready";
+    modelSelect.innerHTML = officialModelOptions(catalog, previous);
+    modelSelect.disabled = sourceSelect.value !== "claude_native" || (catalog.availability !== "ready" && !preserveUnavailable);
+    modelSelect.required = sourceSelect.value === "claude_native" && catalog.availability === "ready";
+    modelSelect.dataset.ready = catalog.availability === "ready" ? "true" : "false";
+  }
 }
 
 export function bindRuntimeFields(

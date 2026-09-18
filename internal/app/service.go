@@ -37,8 +37,14 @@ type ExecutionRequest struct {
 	Environment       map[string]string
 	Prompt            string
 	ProviderSessionID string
-	Filesystem        string
-	Approval          string
+	// BackendSessionID is AHA's own session id, used to derive the per-session
+	// home that keeps this run out of the operator's own backend state.
+	BackendSessionID string
+	// AgentAPIForward asks the runner to carry an AHA-side address into a workspace
+	// that cannot dial AHA directly. Empty when no forward is needed.
+	AgentAPIForward *workspacepkg.ReverseForward
+	Filesystem      string
+	Approval        string
 }
 
 type ExecutionEvent struct {
@@ -300,7 +306,7 @@ func (s *Service) CreateTask(ctx context.Context, input CreateTaskInput) (domain
 		worktreeDir = workspacepkg.DefaultWorktreeDir(workspace)
 	}
 	model, envGroup, accountID, err := s.resolveRuntimeSelection(ctx, runtimeSelectionInput{
-		Backend: input.Backend, ModelSource: input.ModelSource, ModelID: input.ModelID,
+		WorkspaceID: workspace.ID, Backend: input.Backend, ModelSource: input.ModelSource, ModelID: input.ModelID,
 		WireModel: input.WireModel, CodexAccountID: input.CodexAccountID,
 	})
 	if err != nil {
@@ -848,6 +854,12 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 		s.failTurn(ctx, &turn, task, fmt.Errorf("load reusable backend session: %w", reusableSessionErr))
 		return
 	}
+	releaseLeftoverWriter := reusableSessionErr == nil &&
+		workspacepkg.SupportsSessionHome(snapshot.Backend) &&
+		func() bool {
+			previous := previousTurnForAgent(turn, allTurns)
+			return previous.ID != "" && !previous.Status.EndedCleanly()
+		}()
 	includeRecentContext, includeRecoveryHandoff, includeTurnDiagnostics := recoveryContextNeeds(turn, allTurns, reusableSessionErr == nil, handoff.Summary)
 	promptConversation := conversation.Items
 	if includeRecentContext {
@@ -922,6 +934,35 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 		s.failTurn(ctx, &turn, task, fmt.Errorf("materialize prompt context: agent resources: %w", err))
 		return
 	}
+	if releaseLeftoverWriter {
+		// Resuming a provider session is only unsafe while another process still
+		// holds it. A turn that did not end cleanly is the signal that AHA may
+		// have lost track of its backend process (a service restart cannot kill a
+		// process running behind a WSL/SSH hop), so confirm that writer is gone
+		// before appending to the same transcript. A cleanly finished turn keeps
+		// its session and is never interrupted here.
+		home, _ := workspacepkg.SessionHomeFor(workspacepkg.SessionHomeInput{
+			Backend: snapshot.Backend, Workspace: workspace, WorkDir: workDir,
+			SessionID: reusableSession.ID, CodexAccountID: reusableSession.CodexAccountID,
+			EnvGroupID: snapshot.EnvGroupID,
+		})
+		// The two identifiers are alternatives, not a primary and a fallback: the
+		// query matches a process by either one. The session home identifies an
+		// isolated run exactly, and the resume id covers backends that keep their
+		// default config directory. Supplying both widens coverage rather than
+		// weakening it, and it is also what a Windows target needs, which exposes
+		// a process command line but not its environment.
+		query := workspacepkg.WriterQuery{
+			EnvName: home.EnvName, EnvValue: home.Dir,
+			ResumeSessionID: reusableSession.ProviderSession,
+		}
+		if err := s.stopLeftoverBackendWriter(ctx, task, workspace, query); err != nil {
+			// The old writer could not be confirmed dead; starting a second one
+			// on the same transcript is exactly the corruption being prevented.
+			_ = s.store.CloseBackendSessionsForAgent(ctx, task.ID, turn.AgentID)
+			reusableSession, reusableSessionErr = domain.BackendSession{}, sql.ErrNoRows
+		}
+	}
 	packedPrompt := preview.EffectivePrompt
 	turn.ContextWindow = model.ContextWindow
 	turn.PromptChars = len([]rune(packedPrompt))
@@ -960,8 +1001,9 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 		}
 	}
 	capabilityToken := ""
+	agentAPIForward := (*workspacepkg.ReverseForward)(nil)
 	if s.agentAPI != nil && agentAPIURL != "" {
-		capabilityToken, err = s.agentAPI.Issue(task.ID, turn.AgentID, turn.ID, 4*time.Hour)
+		capabilityToken, err = s.agentAPI.Issue(task.ID, turn.AgentID, turn.ID, s.agentAPICapabilityTTL(ctx))
 		if err != nil {
 			s.failTurn(ctx, &turn, task, fmt.Errorf("issue Agent API capability: %w", err))
 			return
@@ -969,6 +1011,7 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 		defer s.agentAPI.Revoke(capabilityToken)
 		environment["AHA2_AGENT_API_URL"] = agentAPIURL
 		environment["AHA2_AGENT_API_TOKEN"] = capabilityToken
+		agentAPIForward = agentAPIReverseForward(workspace, agentAPIURL)
 	}
 	if snapshot.ProxyEnabled && s.proxyRuntime != nil {
 		if settingsErr := s.proxyRuntime.ApplyEnvironment(ctx, environment); settingsErr != nil {
@@ -1010,6 +1053,31 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 			defer unlock()
 			s.codex.SyncProfile(context.Background(), snapshot.CodexAccountID, workspace, profileDir)
 		}()
+	} else if snapshot.Backend == "codex" {
+		// Env-provider runs must use their own Codex home. Reusing the operator's
+		// ~/.codex would inherit their global config (including mcp_servers) and
+		// let an AHA turn share rollout files with the operator's own Codex.
+		envHome := workspacepkg.CodexEnvHomeDir(workspace, workDir, sessionID)
+		if err := workspacepkg.EnsureCodexEnvHome(ctx, workspace, workspacepkg.RunnerFor(workspace), envHome); err != nil {
+			s.failTurn(ctx, &turn, task, fmt.Errorf("prepare Codex Env home: %w", err))
+			return
+		}
+		environment["CODEX_HOME"] = envHome
+	} else if snapshot.Backend == "claude" {
+		// Env-provider Claude runs keep their transcript out of the operator's
+		// own ~/.claude. The native source authenticates with that account, so it
+		// keeps the default directory and is not redirected here.
+		home, _ := workspacepkg.SessionHomeFor(workspacepkg.SessionHomeInput{
+			Backend: "claude", Workspace: workspace, WorkDir: workDir,
+			SessionID: sessionID, EnvGroupID: snapshot.EnvGroupID,
+		})
+		if home.EnvName != "" {
+			if err := workspacepkg.EnsureClaudeConfigDir(ctx, workspace, workspacepkg.RunnerFor(workspace), home.Dir); err != nil {
+				s.failTurn(ctx, &turn, task, fmt.Errorf("prepare Claude config dir: %w", err))
+				return
+			}
+			environment[home.EnvName] = home.Dir
+		}
 	}
 	turn.SessionReadyAt = s.now().UTC()
 	if err := s.store.UpdateTurn(ctx, turn, turn.Status); err != nil {
@@ -1024,7 +1092,9 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 	result, executeErr := s.executor.Execute(ctx, ExecutionRequest{
 		Turn: turn, Task: task, Project: project, Workspace: workspace, Snapshot: snapshot,
 		Model: model, EnvGroup: envGroup, Environment: environment, Prompt: packedPrompt,
-		ProviderSessionID: providerSession, Filesystem: filesystem, Approval: approval,
+		ProviderSessionID: providerSession, BackendSessionID: sessionID,
+		AgentAPIForward: agentAPIForward,
+		Filesystem:      filesystem, Approval: approval,
 	}, func(event ExecutionEvent) {
 		now := s.now().UTC()
 		watchdogEvent := event.Type == "agent_stalled" || event.Type == "agent_heartbeat" || event.Type == "agent_idle_timeout"
@@ -1116,7 +1186,6 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 			Payload: map[string]any{"attempt": turn.Attempt, "generation": turn.Generation}, CreatedAt: now,
 		})
 		if finalizeErr == nil && turn.AgentID == "main" && category == "chat" {
-			_, _ = s.store.RecordChannelAnswer(context.Background(), task.ID, turn.RoundID, turn.ID, turn.Result, now)
 			s.emit(context.Background(), task.ID, "conversation", finalItem.ID, "agent_reply", map[string]any{
 				"round_id": turn.RoundID, "turn_id": turn.ID, "agent_id": turn.AgentID, "text": turn.Result,
 			})
@@ -1653,7 +1722,9 @@ func (s *Service) startTurn(turn domain.Turn) {
 	}()
 }
 
-func recoveryContextNeeds(current domain.Turn, turns []domain.Turn, hasReusableSession bool, handoff string) (bool, bool, bool) {
+// previousTurnForAgent returns the latest turn of the same agent that precedes
+// current in sequence order.
+func previousTurnForAgent(current domain.Turn, turns []domain.Turn) domain.Turn {
 	var previous domain.Turn
 	for _, candidate := range turns {
 		if candidate.AgentID != current.AgentID || candidate.Sequence >= current.Sequence {
@@ -1663,7 +1734,39 @@ func recoveryContextNeeds(current domain.Turn, turns []domain.Turn, hasReusableS
 			previous = candidate
 		}
 	}
-	abnormalPrevious := previous.ID != "" && (previous.Status == domain.TurnFailed || previous.Status == domain.TurnInterrupted || previous.Status == domain.TurnBlocked || !previous.StalledAt.IsZero() || previous.Attempt > 1)
+	return previous
+}
+
+// stopLeftoverBackendWriter makes sure the process that wrote the given backend
+// session is no longer running before AHA appends to the same thread again.
+//
+// Only Codex needs this: its provider session is a rollout file that two
+// processes would interleave. A session belongs to exactly one backend session
+// id, so the isolated CODEX_HOME of that session identifies the writer without
+// touching the operator's own Codex processes.
+func (s *Service) stopLeftoverBackendWriter(ctx context.Context, task domain.Task, workspace domain.Workspace, query workspacepkg.WriterQuery) error {
+	runner := workspacepkg.RunnerFor(workspace)
+	pids, err := workspacepkg.FindWriterPIDs(ctx, runner, query)
+	if err != nil {
+		return err
+	}
+	if len(pids) == 0 {
+		return nil
+	}
+	_, _ = s.store.AddConversationItem(ctx, domain.ConversationItem{
+		ID: domain.NewID("conversation"), TaskID: task.ID, AgentID: "aha", StreamAgentID: "main",
+		FromAgentID: "aha", ToAgentID: "main", RouteKind: "recovery",
+		Category: "update", Kind: "backend_writer_stopped",
+		Summary:   fmt.Sprintf("已终止上一轮遗留的后端进程（%d 个），避免同一会话被并发写入", len(pids)),
+		Payload:   map[string]any{"pids": pids, "env_name": query.EnvName, "env_value": query.EnvValue, "resume_session_id": query.ResumeSessionID},
+		CreatedAt: s.now().UTC(),
+	})
+	return workspacepkg.TerminateProcesses(ctx, runner, pids)
+}
+
+func recoveryContextNeeds(current domain.Turn, turns []domain.Turn, hasReusableSession bool, handoff string) (bool, bool, bool) {
+	previous := previousTurnForAgent(current, turns)
+	abnormalPrevious := previous.ID != "" && !previous.Status.EndedCleanly()
 	recoveryHandoff := previous.ID != "" && previous.Status == domain.TurnInterrupted && previous.RoundID != "" && previous.RoundID == current.RoundID && previous.InputMessageID == current.InputMessageID
 	diagnostics := abnormalPrevious || current.Attempt > 1
 	recent := !hasReusableSession || strings.TrimSpace(handoff) != "" || abnormalPrevious

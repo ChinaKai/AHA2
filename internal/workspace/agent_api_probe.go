@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -15,6 +16,76 @@ import (
 
 func ProbeAgentAPI(ctx context.Context, item domain.Workspace, baseURL string) error {
 	return probeAgentAPIWithRunner(ctx, item, baseURL, RunnerFor(item))
+}
+
+// ProbeAgentAPIThroughForward verifies that a workspace can reach AHA the same way
+// a Turn will: through the reverse tunnel, using the address the tunnel injects.
+//
+// Probing the bare address instead answers a different question than the one that
+// matters. For a remote workspace the configured address is AHA's loopback, which
+// from inside that machine is the machine itself — so a bare probe always fails,
+// while the Turn succeeds over a tunnel. Detection reporting "unreachable" for a
+// workspace that works is worse than reporting nothing: it sends the operator to
+// look for a fault that does not exist.
+//
+// Transport that cannot carry a forward falls back to the plain probe, so this is
+// only ever a stronger check, never a different contract.
+func ProbeAgentAPIThroughForward(ctx context.Context, item domain.Workspace, baseURL string) error {
+	return probeAgentAPIThroughForwardWithRunner(ctx, item, baseURL, RunnerFor(item))
+}
+
+func probeAgentAPIThroughForwardWithRunner(ctx context.Context, item domain.Workspace, baseURL string, runner Runner) error {
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	parsed, err := url.Parse(baseURL)
+	if err != nil || parsed.Hostname() == "" {
+		return fmt.Errorf("Agent API URL 无效")
+	}
+	if item.Transport != "ssh" {
+		return probeAgentAPIWithRunner(ctx, item, baseURL, runner)
+	}
+	// The address comes from the injected variable, exactly as the Agent will read
+	// it, so a pass here means the Turn path works rather than that some address
+	// happens to answer.
+	script := `set -eu
+export NO_PROXY='*' no_proxy='*'
+probe_url="$AHA2_AGENT_API_URL/healthz"
+if command -v curl >/dev/null 2>&1; then
+  exec curl --noproxy '*' -fsS --connect-timeout 3 --max-time 8 "$probe_url"
+fi
+if command -v wget >/dev/null 2>&1; then
+  exec wget -qO- -T 8 "$probe_url"
+fi
+if command -v python3 >/dev/null 2>&1; then
+  exec python3 -c 'import sys,urllib.request; print(urllib.request.urlopen(sys.argv[1], timeout=8).read(4097).decode())' "$probe_url"
+fi
+echo 'curl、wget 或 Python 均不可用' >&2
+exit 127`
+	command := Command{
+		Executable: "sh",
+		Args:       []string{"-c", script},
+		Dir:        item.RootPath,
+		// Generous, because this covers opening the tunnel and then running the
+		// check through it.
+		Timeout:     45 * time.Second,
+		OutputLimit: 4096,
+		Env:         map[string]string{"AHA2_AGENT_API_URL": baseURL},
+		ReverseForward: &ReverseForward{
+			Target:  net.JoinHostPort(parsed.Hostname(), parsed.Port()),
+			EnvName: "AHA2_AGENT_API_URL",
+		},
+	}
+	result, err := runDetectionCommand(ctx, item, runner, command)
+	if err != nil {
+		return err
+	}
+	if result.ExitCode != 0 {
+		detail := strings.TrimSpace(result.Stderr)
+		if detail == "" {
+			detail = fmt.Sprintf("exit code %d", result.ExitCode)
+		}
+		return fmt.Errorf("healthz 请求失败: %s", detail)
+	}
+	return verifyAHA2HealthPayload(result.Stdout)
 }
 
 func probeAgentAPIWithRunner(ctx context.Context, item domain.Workspace, baseURL string, runner Runner) error {
@@ -92,6 +163,16 @@ $response = Invoke-WebRequest -UseBasicParsing -Uri ($URL.TrimEnd('/') + '/healt
 		}
 		body = result.Stdout
 	}
+	if err := verifyAHA2HealthPayload(body); err != nil {
+		return err
+	}
+	return nil
+}
+
+// verifyAHA2HealthPayload checks that a response really came from AHA2 rather than
+// from whatever else may be listening on the port. It parses rather than matching
+// text, so it does not depend on field order or whitespace.
+func verifyAHA2HealthPayload(body string) error {
 	var health struct {
 		OK      bool   `json:"ok"`
 		Service string `json:"service"`

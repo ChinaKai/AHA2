@@ -93,6 +93,73 @@ func TestOfficialCodexSelectionRejectsModelOutsideAccountCatalog(t *testing.T) {
 	}
 }
 
+func TestClaudeNativeSelectionCreatesSyntheticRuntimeWithoutCredentials(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	service := NewService(database, nil, nil)
+	model, envGroup, accountID, err := service.resolveRuntimeSelection(ctx, runtimeSelectionInput{
+		Backend: "claude", ModelSource: domain.ModelSourceClaudeNative, WireModel: "sonnet",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if model.Source != domain.ModelSourceClaudeNative || model.Backend != "claude" || model.WireModel != "sonnet" {
+		t.Fatalf("unexpected native model: %#v", model)
+	}
+	if envGroup.ID != domain.ClaudeNativeEnvGroupID || envGroup.ProviderID != domain.OfficialClaudeProviderID ||
+		len(envGroup.Environment) != 0 || len(envGroup.SecretRefs) != 0 || accountID != "" {
+		t.Fatalf("unexpected native runtime: %#v account=%q", envGroup, accountID)
+	}
+}
+
+func TestClaudeOfficialSelectionUsesDetectedWorkspaceCatalog(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	now := time.Now().UTC()
+	if err := database.CreateProject(ctx, domain.Project{
+		ID: "project-claude-official", Name: "Claude", ProjectType: "folder", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CreateWorkspace(ctx, domain.Workspace{
+		ID: "workspace-claude-official", ProjectID: "project-claude-official",
+		Name: "Claude", Locality: "local", Transport: "native",
+		RootPath: t.TempDir(), Health: "ready", CreatedAt: now, UpdatedAt: now,
+		Capabilities: map[string]any{"claude": map[string]any{
+			"status": "ready", "auth_status": "logged_in",
+			"models": []domain.ClaudeModelOption{{
+				WireModel: "opus[1m]", ResolvedModel: "claude-opus-5[1m]", DisplayName: "Opus",
+				SupportsEffort: true, SupportedEffortLevels: []string{"low", "medium", "high", "xhigh", "max"},
+				SupportsFastMode: true,
+			}},
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(database, nil, nil)
+	model, _, _, err := service.resolveRuntimeSelection(ctx, runtimeSelectionInput{
+		WorkspaceID: "workspace-claude-official", Backend: "claude",
+		ModelSource: domain.ModelSourceClaudeNative, WireModel: "opus[1m]",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if model.DisplayName != "Opus" || model.Capabilities["resolved_model"] != "claude-opus-5[1m]" ||
+		model.Capabilities["supports_fast_mode"] != true {
+		t.Fatalf("unexpected detected Claude model: %#v", model)
+	}
+}
+
 func TestCodexStreamSettingsValidation(t *testing.T) {
 	t.Parallel()
 	for _, item := range []struct {

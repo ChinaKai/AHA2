@@ -756,6 +756,80 @@ ALTER TABLE runtime_config_snapshots ADD COLUMN stream_max_retries INTEGER NOT N
   CHECK(stream_max_retries BETWEEN 0 AND 10);
 `
 
+// schemaV66 removes the channel question/answer capture pipeline. Every channel
+// answer was recorded as a knowledge entry plus a row here, only so an operator
+// could later curate it by hand; that review step is gone, and nothing else read
+// these rows once the conversation-scoped read was removed with it.
+//
+// The knowledge entries themselves (type='channel_qa') are deliberately left in
+// place: they are ordinary knowledge rows, and deleting user-visible content is
+// not something a schema migration should decide. They stop being reachable from
+// a channel because the capture that scoped them to a conversation is gone.
+const schemaV66 = `
+DROP TABLE IF EXISTS channel_knowledge_records;
+`
+
+// schemaV67 removes the knowledge entries that v66 left behind. They were
+// auto-captured channel answers, and once the capture pipeline is gone nothing
+// references them: they are the only 'observed' entries in the database, they
+// carry no inbound grant, and they hang off the channel host project, so they
+// read as real knowledge to anyone who opens that project.
+//
+// A migration may not be edited once any machine has applied it — the guard is
+// per-version, so an edited v66 would run on a fresh machine and never on one
+// that already applied it, leaving the two schemas permanently different. That
+// is why this is a new version rather than a change to v66.
+//
+// Only 'observed' entries are removed. The removed feature let an operator
+// curate an answer into real knowledge, which flips the entry to 'verified';
+// those are hand-written content and are kept.
+//
+// The removal is whole-subtree rather than row-by-row, which matters for two
+// reasons. A kept descendant must not be stranded under a deleted parent, so
+// every ancestor of a kept entry is kept as well. And a kept parent must not
+// lose a deleted child, so an entry is only removed when it is not the ancestor
+// of anything kept. Both directions are what the recursive walk below computes.
+const schemaV67 = `
+WITH RECURSIVE kept(id) AS (
+    SELECT id FROM knowledge_entries WHERE type='channel_qa' AND status<>'observed'
+  UNION
+    SELECT parent.id FROM knowledge_entries parent
+      JOIN knowledge_entries child ON child.parent_id=parent.id
+      JOIN kept ON kept.id=child.id
+)
+DELETE FROM knowledge_entries
+ WHERE type='channel_qa' AND status='observed'
+   AND id NOT IN (SELECT id FROM kept);
+`
+
+// schemaV68 adds the network access scope. The default is 'lan' rather than
+// 'local' on purpose: AHA2 binds 0.0.0.0 by default and the Agent API supports
+// non-loopback access, so an existing install may already be reached from the
+// LAN. Defaulting to 'local' would silently cut those clients off on upgrade.
+const schemaV68 = `
+ALTER TABLE security_settings ADD COLUMN access_scope TEXT NOT NULL DEFAULT 'lan'
+  CHECK(access_scope IN ('local','lan'));
+CREATE TABLE IF NOT EXISTS network_settings (
+    id INTEGER PRIMARY KEY CHECK(id=1),
+    listen_address TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL
+);
+INSERT OR IGNORE INTO network_settings(id,listen_address,updated_at)
+VALUES(1,'',strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+`
+
+// schemaV69 folds the removed "global" Agent API mode into "auto".
+//
+// Both modes resolve to the same effective URL, so the stored value changes but
+// the behaviour does not. The column keeps its original CHECK clause: dropping it
+// would require rebuilding the table in SQLite, and "global" merely being
+// permitted-but-unused is harmless, whereas a rebuild risks every existing
+// workspace row for no functional gain. Readers fold it to "auto" anyway, so this
+// migration exists to stop stale rows from carrying a value nothing selects.
+const schemaV69 = `
+UPDATE workspaces SET agent_api_mode='auto' WHERE agent_api_mode='global';
+`
+
 const schemaV27 = `
 CREATE TABLE IF NOT EXISTS sync_settings (
     scope TEXT PRIMARY KEY,
@@ -2253,6 +2327,46 @@ func (s *Store) migrate(ctx context.Context) error {
 	}
 	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(65, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
 		return fmt.Errorf("record schema v65: %w", err)
+	}
+	var hasV66 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=66)`).Scan(&hasV66)
+	if !hasV66 {
+		if _, err := s.db.ExecContext(ctx, schemaV66); err != nil {
+			return fmt.Errorf("apply schema v66: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(66, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v66: %w", err)
+	}
+	var hasV67 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=67)`).Scan(&hasV67)
+	if !hasV67 {
+		if _, err := s.db.ExecContext(ctx, schemaV67); err != nil {
+			return fmt.Errorf("apply schema v67: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(67, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v67: %w", err)
+	}
+	var hasV68 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=68)`).Scan(&hasV68)
+	if !hasV68 {
+		if _, err := s.db.ExecContext(ctx, schemaV68); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("apply schema v68: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(68, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v68: %w", err)
+	}
+	var hasV69 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=69)`).Scan(&hasV69)
+	if !hasV69 {
+		if _, err := s.db.ExecContext(ctx, schemaV69); err != nil {
+			return fmt.Errorf("apply schema v69: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(69, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v69: %w", err)
 	}
 	return nil
 }

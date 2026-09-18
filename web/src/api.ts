@@ -151,8 +151,16 @@ class APIClient {
     return this.request("/api/v1/settings/security");
   }
 
-  updateSecuritySettings(payload: {validate_origin: boolean}): Promise<{security: SecuritySettings}> {
+  updateSecuritySettings(payload: {validate_origin: boolean; access_scope: string}): Promise<{security: SecuritySettings}> {
     return this.request("/api/v1/settings/security", {method: "PUT", body: JSON.stringify(payload)});
+  }
+
+  networkSettings(): Promise<{network: NetworkSettings}> {
+    return this.request("/api/v1/settings/network");
+  }
+
+  updateNetworkSettings(listenAddress: string): Promise<{network: NetworkSettings}> {
+    return this.request("/api/v1/settings/network", {method: "PUT", body: JSON.stringify({listen_address: listenAddress})});
   }
 
   agentAPISettings(): Promise<{agent_api: AgentAPISettings}> {
@@ -293,14 +301,6 @@ class APIClient {
     return this.request(`/api/v1/channel-instances/${encodeURIComponent(id)}/knowledge-policy`, {method: "PUT", headers: {"If-Match": `"${revision}"`}, body: JSON.stringify({endpoint, scope_mode: scopeMode, grants})});
   }
 
-  channelKnowledgeRecords(id: string): Promise<{records: Array<{id: string; question: string; answer: string; visibility: string; authority_status: string}>}> {
-    return this.request(`/api/v1/channel-instances/${encodeURIComponent(id)}/knowledge-records`);
-  }
-
-  promoteChannelKnowledgeRecord(id: string, title: string, body: string): Promise<{ok: boolean}> {
-    return this.request(`/api/v1/channel-knowledge-records/${encodeURIComponent(id)}/promote`, {method: "POST", body: JSON.stringify({title, body})});
-  }
-
   syncPreview(): Promise<{preview: SyncPreview}> {
     return this.request("/api/v1/settings/sync/preview");
   }
@@ -398,6 +398,12 @@ class APIClient {
 
   cancelModelDetectionJob(providerID: string, jobID: string): Promise<{job: {id: string; status: string; completed: number; total: number}}> {
     return this.request(`/api/v1/providers/${encodeURIComponent(providerID)}/model-detection-jobs/${encodeURIComponent(jobID)}/cancel`, {method: "POST", body: "{}"});
+  }
+
+  probeModel(providerID: string, modelID: string, authStyle: string): Promise<{model: DetectedModel; anthropic_base_url?: string}> {
+    return this.request(`/api/v1/providers/${encodeURIComponent(providerID)}/model-probes`, {
+      method: "POST", body: JSON.stringify({model_id: modelID, auth_style: authStyle}),
+    });
   }
 
   modelDetectionEventsURL(providerID: string, jobID: string): string {
@@ -700,6 +706,13 @@ class APIClient {
 
   knowledgeLibraries(): Promise<{libraries: KnowledgeLibrary[]}> {
     return this.request("/api/v1/knowledge/libraries");
+  }
+
+  // Every project that has a verified knowledge root, independent of any page of
+  // entries. Scoping UI must use this: a page is recency-ordered, so it reports
+  // only the projects whose knowledge changed most recently.
+  knowledgeIndexes(): Promise<{indexes: Knowledge[]}> {
+    return this.request("/api/v1/knowledge/indexes");
   }
 
   bindKnowledgeLibrary(id: string, projectID: string, bindingMode: "project" | "external"): Promise<{ok: boolean}> {

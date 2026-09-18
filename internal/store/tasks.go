@@ -188,7 +188,7 @@ func (s *Store) ListTasks(ctx context.Context, projectID string) ([]domain.Task,
 		query += ` WHERE project_id=?`
 		args = append(args, projectID)
 	}
-	query += ` ORDER BY updated_at DESC,id DESC`
+	query += ` ORDER BY created_at DESC,id DESC`
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
@@ -213,11 +213,13 @@ func (s *Store) ListTasksPage(ctx context.Context, projectID string, cursorAt ti
 		args = append(args, projectID)
 	}
 	if !cursorAt.IsZero() && cursorID != "" {
-		query += ` AND (updated_at<? OR (updated_at=? AND id<?))`
+		// The cursor tracks the ORDER BY column. Comparing it against a different
+		// column silently skips or repeats rows at page boundaries.
+		query += ` AND (created_at<? OR (created_at=? AND id<?))`
 		cursor := timeString(cursorAt)
 		args = append(args, cursor, cursor, cursorID)
 	}
-	query += ` ORDER BY updated_at DESC,id DESC LIMIT ?`
+	query += ` ORDER BY created_at DESC,id DESC LIMIT ?`
 	args = append(args, limit+1)
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {

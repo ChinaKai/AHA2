@@ -143,12 +143,20 @@ func TestCodexArgumentsInjectConfiguredStreamRecovery(t *testing.T) {
 	request.StreamMaxRetries = 2
 	request.Environment = map[string]string{}
 	joined = strings.Join(codexArguments(request, ""), " ")
+	if strings.Contains(joined, "model_providers.openai") {
+		t.Fatalf("official provider must not be overridden: %s", joined)
+	}
+	request.Environment = map[string]string{
+		"AHA_PROVIDER_ID": "openai", "OPENAI_BASE_URL": "https://example.test/v1",
+	}
+	joined = strings.Join(codexArguments(request, ""), " ")
 	for _, expected := range []string{
-		"model_providers.openai.stream_idle_timeout_ms=120000",
-		"model_providers.openai.stream_max_retries=2",
+		"model_provider=\"openai-custom\"",
+		"model_providers.openai-custom.stream_idle_timeout_ms=120000",
+		"model_providers.openai-custom.stream_max_retries=2",
 	} {
 		if !strings.Contains(joined, expected) {
-			t.Fatalf("official provider arguments missing %q: %s", expected, joined)
+			t.Fatalf("legacy reserved provider alias missing %q: %s", expected, joined)
 		}
 	}
 }

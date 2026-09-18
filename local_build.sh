@@ -76,8 +76,52 @@ while (($# > 0)); do
   esac
 done
 
+# The Web build calls module.stripTypeScriptTypes, which Node added in 22.13.0 and
+# 23.2.0. Checking that `node` merely exists hides the real problem: an older
+# interpreter gets much further and then fails inside build-web.mjs as a
+# module-resolution SyntaxError that names a Node internal instead of the version
+# requirement, so the message points at the build script rather than at the
+# toolchain. Resolve an interpreter that can actually run the build, and when none
+# is found say what is required.
+#
+# Note that the capability check, not a version compare, is deliberate: the build
+# also passes {mode:"transform"}, and Node 26 removes that option. A future Node
+# will therefore fail while still reporting a version that looks new enough, and
+# this probe reports that honestly instead of waving it through.
+node_can_build_web() {
+  "$1" -e 'const m = require("node:module"); process.exit(typeof m.stripTypeScriptTypes === "function" ? 0 : 1);' >/dev/null 2>&1
+}
+
+resolve_node() {
+  local candidate
+  if candidate="$(command -v node 2>/dev/null)" && node_can_build_web "$candidate"; then
+    printf '%s' "$candidate"
+    return 0
+  fi
+  # A version manager may hold a newer interpreter than the one on PATH — and its
+  # shell hook commonly runs from ~/.bashrc only, which a non-interactive or login
+  # shell never sources. Highest version first, so the choice does not depend on
+  # directory listing order.
+  while IFS= read -r candidate; do
+    [[ -x "$candidate" ]] || continue
+    if node_can_build_web "$candidate"; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done < <(ls -1d "$HOME"/.nvm/versions/node/*/bin/node /usr/local/bin/node 2>/dev/null | sort -Vr)
+  return 1
+}
+
+node_bin="$(resolve_node)" || {
+  printf 'No Node.js interpreter able to run the Web build was found.\n' >&2
+  printf 'It needs module.stripTypeScriptTypes with {mode:"transform"}, which is\n' >&2
+  printf 'present in Node 22.13+/23.2+ and removed again in Node 26.\n' >&2
+  printf 'On PATH: %s\n' "$(node --version 2>/dev/null || printf 'no node')" >&2
+  exit 1
+}
+[[ "$node_bin" == "$(command -v node 2>/dev/null)" ]] || printf 'Using Node from %s (%s)\n' "$node_bin" "$("$node_bin" --version)"
+
 [[ -x "$powershell" ]] || { printf 'Windows PowerShell was not found: %s\n' "$powershell" >&2; exit 1; }
-command -v node >/dev/null 2>&1 || { printf 'node was not found\n' >&2; exit 1; }
 command -v wslpath >/dev/null 2>&1 || { printf 'wslpath was not found\n' >&2; exit 1; }
 [[ -x "$repo_dir/.tools/go/bin/go" ]] || { printf 'Repository Go toolchain was not found\n' >&2; exit 1; }
 [[ -f "$repo_dir/go.mod" ]] || { printf 'AHA2 go.mod was not found\n' >&2; exit 1; }
@@ -203,9 +247,9 @@ assert_pe() {
 
 build_candidates() {
   printf '==> Build Web assets\n'
-  node "$repo_dir/scripts/build-web.mjs"
+  "$node_bin" "$repo_dir/scripts/build-web.mjs"
   printf '==> Test Web build\n'
-  node --test "$repo_dir/web/tests/build.test.mjs"
+  "$node_bin" --test "$repo_dir/web/tests/build.test.mjs"
 
   printf '==> Sync embedded Web assets\n'
   rm -rf -- "$repo_dir/internal/webassets/dist"
@@ -247,7 +291,7 @@ build_candidates() {
     )
     cp -- "$repo_dir/plugins/feishu/plugin.json" "$repo_dir/dist/plugins/feishu/windows-amd64/plugin.json"
     plugin_hash="$(sha256sum "$repo_dir/dist/plugins/feishu/windows-amd64/aha2-channel-feishu.exe" | awk '{print $1}')"
-    node - "$repo_dir/dist/plugins/feishu/windows-amd64/plugin.json" "$plugin_hash" <<'NODE'
+    "$node_bin" - "$repo_dir/dist/plugins/feishu/windows-amd64/plugin.json" "$plugin_hash" <<'NODE'
 const fs = require("node:fs");
 const [manifestPath, hash] = process.argv.slice(2);
 const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));

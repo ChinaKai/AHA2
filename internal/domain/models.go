@@ -1,11 +1,17 @@
 package domain
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 const (
-	OfficialCodexProviderID = "official-codex"
-	ModelSourceProvider     = "provider"
-	ModelSourceOfficial     = "official"
+	OfficialCodexProviderID  = "official-codex"
+	OfficialClaudeProviderID = "official-claude"
+	ClaudeNativeEnvGroupID   = "env_claude_native"
+	ModelSourceProvider      = "provider"
+	ModelSourceOfficial      = "official"
+	ModelSourceClaudeNative  = "claude_native"
 )
 
 type Owner struct {
@@ -16,8 +22,39 @@ type Owner struct {
 	LastLoginAt  time.Time `json:"last_login_at,omitempty"`
 }
 
+// Network access scopes. AHA2 binds every interface by default, so this setting
+// is what decides which callers the HTTP layer will answer.
+const (
+	// AccessScopeLocal answers only this machine. Use it when nothing else needs
+	// to reach AHA2.
+	AccessScopeLocal = "local"
+	// AccessScopeLAN answers this machine and private network addresses. It is the
+	// default because AHA2 binds 0.0.0.0 out of the box and the Agent API supports
+	// non-loopback access, so a LAN client may already depend on it.
+	AccessScopeLAN = "lan"
+)
+
+func NormalizeAccessScope(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case AccessScopeLocal:
+		return AccessScopeLocal
+	default:
+		return AccessScopeLAN
+	}
+}
+
+// NetworkSettings holds what the operator chose for the listener. An empty
+// ListenAddress means the launch default stands; it is an override, not a value
+// with its own default, so an untouched install keeps exactly what it was
+// installed with.
+type NetworkSettings struct {
+	ListenAddress string    `json:"listen_address"`
+	UpdatedAt     time.Time `json:"updated_at,omitempty"`
+}
+
 type SecuritySettings struct {
 	ValidateOrigin  bool      `json:"validate_origin"`
+	AccessScope     string    `json:"access_scope"`
 	StartupOverride bool      `json:"startup_override,omitempty"`
 	UpdatedAt       time.Time `json:"updated_at,omitempty"`
 }
@@ -223,6 +260,18 @@ type CodexModelOption struct {
 	MaxContextWindow int64    `json:"max_context_window,omitempty"`
 	DefaultEffort    string   `json:"default_reasoning_effort,omitempty"`
 	ReasoningEfforts []string `json:"reasoning_efforts,omitempty"`
+}
+
+type ClaudeModelOption struct {
+	WireModel                string   `json:"wire_model"`
+	ResolvedModel            string   `json:"resolved_model,omitempty"`
+	DisplayName              string   `json:"display_name"`
+	Description              string   `json:"description,omitempty"`
+	SupportsEffort           bool     `json:"supports_effort,omitempty"`
+	SupportedEffortLevels    []string `json:"supported_effort_levels,omitempty"`
+	SupportsAdaptiveThinking bool     `json:"supports_adaptive_thinking,omitempty"`
+	SupportsFastMode         bool     `json:"supports_fast_mode,omitempty"`
+	SupportsAutoMode         bool     `json:"supports_auto_mode,omitempty"`
 }
 
 type ProxySettings struct {

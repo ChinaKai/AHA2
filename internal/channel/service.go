@@ -710,29 +710,6 @@ func (s *Service) channelKnowledgeSourceRoots(ctx context.Context) (map[string]b
 	return result, nil
 }
 
-func (s *Service) OwnerKnowledgeRecords(ctx context.Context, ownerID, instanceID string) ([]domain.ChannelKnowledgeRecord, error) {
-	instance, err := s.store.ChannelInstance(ctx, instanceID)
-	if err != nil || instance.OwnerID != ownerID {
-		return nil, sql.ErrNoRows
-	}
-	return s.store.ChannelKnowledgeRecords(ctx, instanceID)
-}
-
-func (s *Service) PromoteOwnerKnowledgeRecord(ctx context.Context, ownerID, id, title, body string) (domain.ChannelKnowledgeRecord, error) {
-	record, err := s.store.ChannelKnowledgeRecord(ctx, id)
-	if err != nil {
-		return domain.ChannelKnowledgeRecord{}, err
-	}
-	instance, err := s.store.ChannelInstance(ctx, record.InstanceID)
-	if err != nil || instance.OwnerID != ownerID {
-		return domain.ChannelKnowledgeRecord{}, sql.ErrNoRows
-	}
-	if instance.Retired {
-		return domain.ChannelKnowledgeRecord{}, fmt.Errorf("channel instance is archived")
-	}
-	return s.store.PromoteChannelKnowledgeRecord(ctx, id, instance.ID, title, body, s.now().UTC())
-}
-
 func (s *Service) ReplayOwnerDelivery(ctx context.Context, ownerID, id string) (domain.ChannelDelivery, error) {
 	delivery, err := s.store.ChannelDelivery(ctx, id)
 	if err != nil {

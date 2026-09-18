@@ -10,8 +10,6 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -96,19 +94,9 @@ func TestModelDetectionHTTPJobSSEAndCancelLifecycle(t *testing.T) {
 		}
 		return gateway.Result{AuthStyle: "bearer", Models: models}, nil
 	}
-	var active atomic.Int32
-	var maximum atomic.Int32
 	jobs.probe = func(context.Context, domain.Provider, string, string, string) (map[string]string, string) {
-		current := active.Add(1)
-		for {
-			previous := maximum.Load()
-			if current <= previous || maximum.CompareAndSwap(previous, current) {
-				break
-			}
-		}
-		time.Sleep(8 * time.Millisecond)
-		active.Add(-1)
-		return map[string]string{"responses": "supported"}, ""
+		t.Fatal("catalog job must not probe model capabilities")
+		return nil, ""
 	}
 	server, client, csrf, provider := newModelDetectionHTTPTest(t, jobs)
 	baseURL := server.URL + "/api/v1/providers/" + provider.ID + "/model-detection-jobs"
@@ -116,19 +104,15 @@ func TestModelDetectionHTTPJobSSEAndCancelLifecycle(t *testing.T) {
 	eventsURL := baseURL + "/" + created.ID + "/events"
 	stream := readModelDetectionEvents(t, client, eventsURL, "")
 	catalog := strings.Index(stream, "event: catalog")
-	result := strings.Index(stream, "event: result")
 	done := strings.Index(stream, "event: done")
-	if catalog < 0 || result <= catalog || done <= result {
+	if catalog < 0 || done <= catalog {
 		t.Fatalf("incremental event order is invalid: %s", stream)
 	}
-	if got := strings.Count(stream, "event: result"); got != len(models) {
-		t.Fatalf("result events=%d want=%d", got, len(models))
+	if got := strings.Count(stream, "event: result"); got != 0 {
+		t.Fatalf("automatic result events=%d want=0", got)
 	}
-	if got := strings.Count(stream, "event: progress"); got < len(models)+1 {
-		t.Fatalf("progress events=%d want at least %d", got, len(models)+1)
-	}
-	if maximum.Load() > modelDetectionWorkers || maximum.Load() < 2 {
-		t.Fatalf("worker concurrency=%d bound=%d", maximum.Load(), modelDetectionWorkers)
+	if got := strings.Count(stream, "event: progress"); got != 1 {
+		t.Fatalf("progress events=%d want=1", got)
 	}
 	if strings.Contains(stream, "model-job-secret") {
 		t.Fatal("credential leaked into model detection events")
@@ -138,38 +122,35 @@ func TestModelDetectionHTTPJobSSEAndCancelLifecycle(t *testing.T) {
 		t.Fatalf("Last-Event-ID replay is invalid: %s", replayed)
 	}
 
-	jobs.detect = func(context.Context, domain.Provider, string) (gateway.Result, error) {
-		return gateway.Result{AuthStyle: "bearer", Models: []gateway.DetectedModel{{ID: "fast"}, {ID: "blocked-a"}, {ID: "blocked-b"}, {ID: "blocked-c"}}}, nil
-	}
-	blockedStarted := make(chan struct{})
-	cancelObserved := make(chan struct{})
-	var startOnce sync.Once
-	var cancelOnce sync.Once
-	jobs.probe = func(ctx context.Context, _ domain.Provider, _, _, modelID string) (map[string]string, string) {
-		if modelID == "fast" {
-			return map[string]string{"responses": "supported"}, ""
+	var probedModel string
+	jobs.probe = func(_ context.Context, _ domain.Provider, apiKey, authStyle, modelID string) (map[string]string, string) {
+		if apiKey != "model-job-secret" || authStyle != "bearer" {
+			t.Fatalf("probe credentials=%q auth=%q", apiKey, authStyle)
 		}
-		startOnce.Do(func() { close(blockedStarted) })
+		probedModel = modelID
+		return map[string]string{"responses": "supported", "anthropic_messages": "unsupported"}, "https://provider.invalid/anthropic"
+	}
+	probeResponse := requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/providers/"+provider.ID+"/model-probes",
+		map[string]any{"model_id": "a", "auth_style": "bearer"}, csrf)
+	var probePayload struct {
+		Model            gateway.DetectedModel `json:"model"`
+		AnthropicBaseURL string                `json:"anthropic_base_url"`
+	}
+	decodeResponse(t, probeResponse, &probePayload)
+	if probeResponse.StatusCode != http.StatusOK || probedModel != "a" ||
+		probePayload.Model.Capabilities["responses"] != "supported" ||
+		probePayload.AnthropicBaseURL == "" {
+		t.Fatalf("probe status=%d payload=%#v", probeResponse.StatusCode, probePayload)
+	}
+
+	jobs.detect = func(ctx context.Context, _ domain.Provider, _ string) (gateway.Result, error) {
 		<-ctx.Done()
-		cancelOnce.Do(func() { close(cancelObserved) })
-		return nil, ""
+		return gateway.Result{}, ctx.Err()
 	}
 	cancelJob := postModelDetectionJob(t, client, baseURL, csrf)
-	select {
-	case <-blockedStarted:
-	case <-time.After(time.Second):
-		t.Fatal("blocking capability probes did not start")
-	}
-	job, err := jobs.get("", provider.ID, cancelJob.ID)
+	_, err := jobs.get("", provider.ID, cancelJob.ID)
 	if !errors.Is(err, errModelDetectionJobNotFound) {
 		t.Fatalf("job accepted an empty owner binding: %v", err)
-	}
-	jobs.mu.RLock()
-	job = jobs.jobs[cancelJob.ID]
-	jobs.mu.RUnlock()
-	deadline := time.Now().Add(time.Second)
-	for job.view().Completed != 1 && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
 	}
 	response := requestJSON(t, client, http.MethodPost, baseURL+"/"+cancelJob.ID+"/cancel", nil, csrf)
 	var cancelPayload struct {
@@ -179,14 +160,9 @@ func TestModelDetectionHTTPJobSSEAndCancelLifecycle(t *testing.T) {
 	if response.StatusCode != http.StatusOK || (cancelPayload.Job.Status != "cancelling" && cancelPayload.Job.Status != "cancelled") {
 		t.Fatalf("cancel status=%d payload=%#v", response.StatusCode, cancelPayload)
 	}
-	select {
-	case <-cancelObserved:
-	case <-time.After(time.Second):
-		t.Fatal("cancel endpoint did not reach capability request context")
-	}
 	cancelStream := readModelDetectionEvents(t, client, baseURL+"/"+cancelJob.ID+"/events", "")
-	if strings.Count(cancelStream, "event: result") != 1 || !strings.Contains(cancelStream, `"status":"cancelled"`) {
-		t.Fatalf("cancelled stream did not retain exactly the completed result: %s", cancelStream)
+	if strings.Contains(cancelStream, "event: catalog") || !strings.Contains(cancelStream, `"status":"cancelled"`) {
+		t.Fatalf("cancelled stream is invalid: %s", cancelStream)
 	}
 	encoded, _ := json.Marshal(cancelPayload.Job)
 	if strings.Contains(string(encoded), "model-job-secret") {

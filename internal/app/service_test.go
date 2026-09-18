@@ -17,6 +17,7 @@ import (
 	"github.com/ChinaKai/AHA2/internal/domain"
 	"github.com/ChinaKai/AHA2/internal/secrets"
 	"github.com/ChinaKai/AHA2/internal/store"
+	workspacepkg "github.com/ChinaKai/AHA2/internal/workspace"
 )
 
 type stubExecutor struct {
@@ -68,6 +69,117 @@ func TestRecoveryContextNeedsUsesSessionAndPreviousTurnState(t *testing.T) {
 	interrupted[0].InputMessageID = "message-old"
 	if recent, recovery, diagnostics := recoveryContextNeeds(current, interrupted, true, ""); !recent || recovery || !diagnostics {
 		t.Fatalf("interrupted prior input recent=%t recovery=%t diagnostics=%t", recent, recovery, diagnostics)
+	}
+}
+
+func TestSessionHomeSupportGatesWriterCleanup(t *testing.T) {
+	t.Parallel()
+	// Writer cleanup depends on being able to address one backend session's own
+	// home, so only backends that expose one may attempt it.
+	if !workspacepkg.SupportsSessionHome("codex") {
+		t.Fatal("codex must support per-session homes")
+	}
+	if !workspacepkg.SupportsSessionHome("claude") {
+		t.Fatal("claude must support per-session homes")
+	}
+	if workspacepkg.SupportsSessionHome("stub") {
+		t.Fatal("a backend without a session home must not attempt writer cleanup")
+	}
+
+	item := domain.Workspace{Transport: "native", RootPath: "/work"}
+	base := workspacepkg.SessionHomeInput{Workspace: item, WorkDir: "/work/task", SessionID: "s1"}
+
+	// The native Claude login keeps the default config dir, so it cannot be
+	// redirected; the writer is then found from its resume id instead.
+	native := base
+	native.Backend = "claude"
+	native.EnvGroupID = domain.ClaudeNativeEnvGroupID
+	home, ok := workspacepkg.SessionHomeFor(native)
+	if !ok || home.EnvName != "" {
+		t.Fatalf("native claude home = %+v ok=%t, want no env redirect", home, ok)
+	}
+
+	envRun := base
+	envRun.Backend = "claude"
+	envRun.EnvGroupID = "env_other"
+	home, ok = workspacepkg.SessionHomeFor(envRun)
+	if !ok || home.EnvName != "CLAUDE_CONFIG_DIR" || home.Dir == "" {
+		t.Fatalf("env claude home = %+v ok=%t, want CLAUDE_CONFIG_DIR", home, ok)
+	}
+}
+
+func TestWriterQueryCarriesBothIdentifiers(t *testing.T) {
+	t.Parallel()
+	// The session home and the resume id are alternatives the lookup matches on,
+	// not a primary and a fallback: a Windows target can only match the resume id
+	// (it does not expose another process's environment), so dropping the second
+	// identifier there would turn a missing lookup into "no writer found" and let
+	// AHA resume a session that is still being appended to.
+	native := domain.Workspace{Transport: "native", RootPath: "/work"}
+	home, ok := workspacepkg.SessionHomeFor(workspacepkg.SessionHomeInput{
+		Backend: "claude", Workspace: native, WorkDir: "/work/task",
+		SessionID: "backend_session_a", EnvGroupID: domain.ClaudeNativeEnvGroupID,
+	})
+	if !ok {
+		t.Fatal("claude must expose a session home")
+	}
+	query := workspacepkg.WriterQuery{
+		EnvName: home.EnvName, EnvValue: home.Dir, ResumeSessionID: "provider-session-a",
+	}
+	if query.EnvName != "" {
+		t.Fatalf("native claude keeps the default config dir, got env %q", query.EnvName)
+	}
+	if query.ResumeSessionID == "" {
+		t.Fatal("the resume id must be supplied even when an env home exists")
+	}
+
+	isolated, ok := workspacepkg.SessionHomeFor(workspacepkg.SessionHomeInput{
+		Backend: "claude", Workspace: native, WorkDir: "/work/task",
+		SessionID: "backend_session_a", EnvGroupID: "env_other",
+	})
+	if !ok || isolated.EnvName == "" {
+		t.Fatal("an isolated claude run must expose an env home")
+	}
+	// Both must be present: the env match is exact for an isolated run, and the
+	// resume id keeps the lookup working on a target that cannot read env.
+	if both := (workspacepkg.WriterQuery{
+		EnvName: isolated.EnvName, EnvValue: isolated.Dir, ResumeSessionID: "provider-session-a",
+	}); both.EnvName == "" || both.ResumeSessionID == "" {
+		t.Fatalf("isolated query lost an identifier: %+v", both)
+	}
+}
+
+func TestTurnStatusEndedCleanlyOnlyForSucceeded(t *testing.T) {
+	t.Parallel()
+	// Only a succeeded turn is known to have released its backend process, so
+	// only it may be resumed without first proving the previous writer is gone.
+	if !domain.TurnSucceeded.EndedCleanly() {
+		t.Fatal("a succeeded turn is the one status known to have ended cleanly")
+	}
+	for _, status := range []domain.TurnStatus{
+		domain.TurnQueued, domain.TurnPreparing, domain.TurnStarting, domain.TurnRunning,
+		domain.TurnWaiting, domain.TurnFailed, domain.TurnInterrupted, domain.TurnBlocked,
+	} {
+		if status.EndedCleanly() {
+			t.Fatalf("status %q must not count as a clean end", status)
+		}
+	}
+}
+
+func TestPreviousTurnForAgentIgnoresOtherAgentsAndLaterTurns(t *testing.T) {
+	t.Parallel()
+	current := domain.Turn{ID: "current", AgentID: "main", Sequence: 5}
+	turns := []domain.Turn{
+		{ID: "old", AgentID: "main", Sequence: 2},
+		{ID: "other", AgentID: "sub-001", Sequence: 4},
+		{ID: "latest", AgentID: "main", Sequence: 3},
+		{ID: "later", AgentID: "main", Sequence: 9},
+	}
+	if got := previousTurnForAgent(current, turns); got.ID != "latest" {
+		t.Fatalf("previous turn = %q, want %q", got.ID, "latest")
+	}
+	if got := previousTurnForAgent(current, nil); got.ID != "" {
+		t.Fatalf("previous turn = %q, want empty", got.ID)
 	}
 }
 

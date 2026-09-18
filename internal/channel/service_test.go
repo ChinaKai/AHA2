@@ -1011,44 +1011,6 @@ func TestInboundOwnerAndGroupScopesAreServerEnforcedAndIdempotent(t *testing.T) 
 	if strings.Contains(prompt, "owner-open") || strings.Contains(prompt, "chat-owner") {
 		t.Fatal("raw provider identity leaked into prompt")
 	}
-	var records []domain.ChannelKnowledgeRecord
-	deadline = time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		records, err = database.ChannelKnowledgeRecords(ctx, instance.ID)
-		if err == nil && len(records) == 2 {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	if err != nil || len(records) != 2 {
-		t.Fatalf("knowledge records=%#v err=%v", records, err)
-	}
-	if records[0].AuthorityStatus != "observed" || records[0].Visibility != "conversation_only" {
-		t.Fatalf("record auto-promoted: %#v", records[0])
-	}
-	allowed, err := database.ChannelAllowedKnowledge(ctx, instance.ID, groupEndpoint.Kind, records[0].ConversationID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, entry := range allowed {
-		if entry.ID == records[1].KnowledgeEntryID {
-			t.Fatal("conversation-only knowledge crossed group conversation")
-		}
-	}
-	if _, err := database.PromoteChannelKnowledgeRecord(ctx, records[0].ID, instance.ID, "Curated answer", "Human reviewed content", time.Now().UTC()); err != nil {
-		t.Fatal(err)
-	}
-	allowed, err = database.ChannelAllowedKnowledge(ctx, instance.ID, groupEndpoint.Kind, records[1].ConversationID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	shared := false
-	for _, entry := range allowed {
-		shared = shared || entry.ID == records[0].KnowledgeEntryID
-	}
-	if !shared {
-		t.Fatal("human-promoted knowledge was not shared within instance")
-	}
 }
 
 func knowledgeEntryPresent(entries []domain.KnowledgeEntry, id string) bool {

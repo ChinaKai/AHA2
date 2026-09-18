@@ -35,7 +35,7 @@ func (s *Store) CreateProject(ctx context.Context, project domain.Project) error
 }
 
 func (s *Store) ListProjects(ctx context.Context) ([]domain.Project, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,name,description,project_type,repository_identity,default_workspace_id,default_branch,knowledge_policy,knowledge_revision,created_at,updated_at FROM projects ORDER BY updated_at DESC,id DESC`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,name,description,project_type,repository_identity,default_workspace_id,default_branch,knowledge_policy,knowledge_revision,created_at,updated_at FROM projects ORDER BY created_at DESC,id DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -57,11 +57,13 @@ func (s *Store) ListProjectsPage(ctx context.Context, cursorAt time.Time, cursor
 	query := `SELECT id,name,description,project_type,repository_identity,default_workspace_id,default_branch,knowledge_policy,knowledge_revision,created_at,updated_at FROM projects WHERE project_type<>'knowledge'`
 	args := []any{}
 	if !cursorAt.IsZero() && cursorID != "" {
-		query += ` AND (updated_at<? OR (updated_at=? AND id<?))`
+		// The cursor tracks the ORDER BY column. Comparing it against a different
+		// column silently skips or repeats rows at page boundaries.
+		query += ` AND (created_at<? OR (created_at=? AND id<?))`
 		cursor := timeString(cursorAt)
 		args = append(args, cursor, cursor, cursorID)
 	}
-	query += ` ORDER BY updated_at DESC,id DESC LIMIT ?`
+	query += ` ORDER BY created_at DESC,id DESC LIMIT ?`
 	args = append(args, limit+1)
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -158,7 +160,7 @@ func (s *Store) ListWorkspaces(ctx context.Context, projectID string) ([]domain.
 		query += ` WHERE project_id=?`
 		args = append(args, projectID)
 	}
-	query += ` ORDER BY updated_at DESC,id DESC`
+	query += ` ORDER BY created_at DESC,id DESC`
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err

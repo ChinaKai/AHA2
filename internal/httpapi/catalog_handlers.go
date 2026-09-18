@@ -31,7 +31,7 @@ func (s *Server) listProjects(writer http.ResponseWriter, request *http.Request)
 			writeError(writer, http.StatusInternalServerError, "list_projects_failed")
 			return
 		}
-		page = storeListPage(items, hasMore, "projects", func(item domain.Project) (time.Time, string) { return item.UpdatedAt, item.ID })
+		page = storeListPage(items, hasMore, "projects", func(item domain.Project) (time.Time, string) { return item.CreatedAt, item.ID })
 	} else {
 		items, listErr := s.store.ListProjects(request.Context())
 		if listErr != nil {
@@ -531,7 +531,7 @@ func (s *Server) listModels(writer http.ResponseWriter, request *http.Request) {
 	}
 	visible := make([]domain.Model, 0, len(items))
 	for _, item := range items {
-		if item.Source != domain.ModelSourceOfficial {
+		if item.Source != domain.ModelSourceOfficial && item.Source != domain.ModelSourceClaudeNative {
 			visible = append(visible, item)
 		}
 	}

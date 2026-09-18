@@ -44,19 +44,6 @@ func (s *Store) ChannelAllowedKnowledge(ctx context.Context, instanceID, endpoin
 			}
 		}
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT knowledge_entry_id FROM channel_knowledge_records WHERE instance_id=? AND (conversation_id=? OR (visibility='instance_shared' AND authority_status='verified'))`, instanceID, conversationID)
-	if err != nil {
-		return nil, err
-	}
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		allowed[id] = true
-	}
-	rows.Close()
 	grants, err := s.db.QueryContext(ctx, `SELECT knowledge_entry_id,grant_scope FROM channel_knowledge_grants WHERE policy_id=? AND revoked_at=''`, policyID)
 	if err != nil {
 		return nil, err
@@ -87,12 +74,11 @@ func (s *Store) ChannelAllowedKnowledge(ctx context.Context, instanceID, endpoin
 		if !allowed[entry.ID] {
 			continue
 		}
+		// Only the fixed index may be unverified here: answering from anything
+		// else requires an owner-granted allowlist entry, and grants are checked
+		// against verified entries when they are created.
 		if entry.ID != fixedIndexID && entry.Status != domain.KnowledgeVerified {
-			var isConversationRecord bool
-			_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM channel_knowledge_records WHERE knowledge_entry_id=? AND conversation_id=?)`, entry.ID, conversationID).Scan(&isConversationRecord)
-			if !isConversationRecord {
-				continue
-			}
+			continue
 		}
 		if entry.BranchScope != "" || entry.ProductLineID != "" {
 			continue

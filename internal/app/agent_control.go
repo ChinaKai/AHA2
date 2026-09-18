@@ -9,6 +9,7 @@ import (
 	"github.com/ChinaKai/AHA2/internal/agentapi"
 	"github.com/ChinaKai/AHA2/internal/domain"
 	"github.com/ChinaKai/AHA2/internal/store"
+	workspacepkg "github.com/ChinaKai/AHA2/internal/workspace"
 )
 
 var (
@@ -414,7 +415,7 @@ func (s *Service) AgentProjectRuntimes(ctx context.Context, claims agentapi.Clai
 	}
 	result := make([]AgentRuntimeOption, 0, len(models))
 	for _, model := range models {
-		if model.Source == domain.ModelSourceOfficial || model.DefaultEnvGroupID == "" {
+		if model.Source == domain.ModelSourceOfficial || model.Source == domain.ModelSourceClaudeNative || model.DefaultEnvGroupID == "" {
 			continue
 		}
 		efforts, _ := model.Capabilities["reasoning_efforts"].([]string)
@@ -449,6 +450,18 @@ func (s *Service) AgentProjectRuntimes(ctx context.Context, claims agentapi.Clai
 			})
 		}
 	}
+	if workspace, workspaceErr := s.store.Workspace(ctx, call.Task.WorkspaceID); workspaceErr == nil {
+		if probe, ok := workspace.Capabilities["claude"].(map[string]any); ok &&
+			probe["status"] == "ready" && probe["auth_status"] == "logged_in" {
+			for _, model := range workspacepkg.ClaudeModelsFromCapabilities(workspace.Capabilities) {
+				result = append(result, AgentRuntimeOption{
+					Backend: "claude", ModelSource: domain.ModelSourceClaudeNative, WireModel: model.WireModel,
+					DisplayName: model.DisplayName, ProviderName: "Claude Code Official",
+					ReasoningEfforts: model.SupportedEffortLevels,
+				})
+			}
+		}
+	}
 	return result, nil
 }
 
@@ -472,7 +485,9 @@ func (s *Service) CreateAgentTask(ctx context.Context, claims agentapi.Claims, i
 		return domain.Task{}, domain.Turn{}, err
 	}
 	modelSource := domain.ModelSourceProvider
-	if snapshot.CodexAccountID != "" {
+	if snapshot.EnvGroupID == domain.ClaudeNativeEnvGroupID {
+		modelSource = domain.ModelSourceClaudeNative
+	} else if snapshot.CodexAccountID != "" {
 		modelSource = domain.ModelSourceOfficial
 	}
 	backend, modelID, wireModel := snapshot.Backend, snapshot.ModelID, snapshot.WireModel

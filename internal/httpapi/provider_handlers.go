@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
@@ -289,38 +288,44 @@ func (s *Server) detectModelsHandler(writer http.ResponseWriter, request *http.R
 		writeJSON(writer, http.StatusBadGateway, map[string]any{"ok": false, "error": "no_models_found"})
 		return
 	}
-	anthropicBase := probeCapabilities(provider, apiKey, result.AuthStyle, result.Models)
 	writeJSON(writer, http.StatusOK, map[string]any{
 		"ok": true, "provider_id": provider.ID, "auth_style": result.AuthStyle, "models": result.Models,
-		"anthropic_base_url": anthropicBase,
 	})
 }
 
-func probeCapabilities(provider domain.Provider, apiKey, authStyle string, models []gateway.DetectedModel) string {
-	var wg sync.WaitGroup
-	sem := make(chan struct{}, 4)
-	var mu sync.Mutex
-	anthropicBase := ""
-	for index := range models {
-		modelID := models[index].ID
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			caps, base := gateway.ProbeModelCapabilities(provider.BaseURL, apiKey, authStyle, modelID, 8*time.Second)
-			models[index].Capabilities = caps
-			if base != "" {
-				mu.Lock()
-				if anthropicBase == "" {
-					anthropicBase = base
-				}
-				mu.Unlock()
-			}
-		}()
+func (s *Server) probeProviderModel(writer http.ResponseWriter, request *http.Request) {
+	var payload struct {
+		ModelID   string `json:"model_id"`
+		AuthStyle string `json:"auth_style"`
 	}
-	wg.Wait()
-	return anthropicBase
+	if err := decodeJSON(request, &payload); err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_json")
+		return
+	}
+	provider, err := s.store.Provider(request.Context(), strings.TrimSpace(request.PathValue("id")))
+	if err != nil {
+		writeError(writer, http.StatusNotFound, "provider_not_found")
+		return
+	}
+	modelID := strings.TrimSpace(payload.ModelID)
+	if modelID == "" {
+		writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "model_id_required"})
+		return
+	}
+	apiKey := ""
+	if provider.CredentialRef != "" && s.secrets != nil {
+		apiKey, _ = s.secrets.Get(provider.CredentialRef)
+	}
+	authStyle := strings.TrimSpace(payload.AuthStyle)
+	if authStyle == "" {
+		authStyle = provider.AuthStyle
+	}
+	capabilities, anthropicBase := s.modelDetectionJobs.probe(request.Context(), provider, apiKey, authStyle, modelID)
+	model := gateway.DetectedModel{ID: modelID, Capabilities: capabilities}
+	s.audit(request, "provider.model.probe", "provider", provider.ID, map[string]any{"model_id": modelID})
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"ok": true, "provider_id": provider.ID, "model": model, "anthropic_base_url": anthropicBase,
+	})
 }
 
 func (s *Server) addModelsHandler(writer http.ResponseWriter, request *http.Request) {

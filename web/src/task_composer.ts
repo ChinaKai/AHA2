@@ -16,7 +16,12 @@ function statusLabel(status: string): string {
 }
 
 export function renderComposerAgentOptions(detail: TaskDetail, selectedAgentID: string): string {
-  return (detail.agents || []).map(agent => {
+  const agents = detail.agents || [];
+  if (agents.length === 0) {
+    const agentID = selectedAgentID || "main";
+    return `<option value="${escapeHTML(agentID)}" selected>● ${escapeHTML(agentID)} · 加载中</option>`;
+  }
+  return agents.map(agent => {
     const unread = agent.unread_count ? ` · ${agent.unread_count > 99 ? "99+" : agent.unread_count}未读` : "";
     const dot = ["failed", "interrupted"].includes(agent.status) ? "○" : "●";
     return `<option value="${escapeHTML(agent.agent_id)}" ${agent.agent_id === selectedAgentID ? "selected" : ""}>${dot} ${escapeHTML(agent.agent_id)} · ${escapeHTML(statusLabel(agent.status))}${unread}</option>`;
