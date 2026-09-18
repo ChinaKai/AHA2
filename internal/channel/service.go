@@ -1221,6 +1221,18 @@ func (s *Service) processInbound(ctx context.Context, receipt domain.ChannelInbo
 	} else if endpointKind == domain.ChannelEndpointGroupDigitalHuman {
 		routeMode = "group_qa"
 	}
+	// A finished Task refuses further input, so the message would fail with
+	// "task is completed" and the sender would see silence. Continue it in a
+	// fresh Task instead of dropping the message.
+	if finished, finishedErr := s.finishedChannelTarget(ctx, targetTaskID); finishedErr != nil {
+		return finishedErr
+	} else if finished.ID != "" {
+		continued, continueErr := s.continueFinishedChannelTask(ctx, instance, conversation, finished)
+		if continueErr != nil {
+			return continueErr
+		}
+		targetTaskID, routeMode = continued.ID, "task_route"
+	}
 	mentions := make([]map[string]any, 0, len(envelope.Mentions))
 	for _, mention := range envelope.Mentions {
 		if strings.TrimSpace(mention.ExternalUserID) == "" {
@@ -2091,6 +2103,121 @@ func (s *Service) executePendingAction(ctx context.Context, action domain.Channe
 
 func taskRouteEligible(status domain.TaskStatus) bool {
 	return status == domain.TaskPreparing || status == domain.TaskActive || status == domain.TaskWaitingUser || status == domain.TaskFailed
+}
+
+// finishedChannelTarget reports the bound Task when it can no longer accept a
+// new message and a continuation Task is therefore needed. "failed" and
+// "blocked" are excluded on purpose: those still take a retry message directly.
+// A lookup failure is returned rather than read as "not finished", so a
+// continuation is never skipped because the Task could not be read.
+func (s *Service) finishedChannelTarget(ctx context.Context, taskID string) (domain.Task, error) {
+	if strings.TrimSpace(taskID) == "" {
+		return domain.Task{}, nil
+	}
+	task, err := s.store.Task(ctx, taskID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return domain.Task{}, nil
+		}
+		return domain.Task{}, err
+	}
+	if task.Status != domain.TaskCompleted && task.Status != domain.TaskCancelled {
+		return domain.Task{}, nil
+	}
+	return task, nil
+}
+
+// continueFinishedChannelTask carries a conversation whose Task just finished
+// into a new Task, so the next private or group message starts new work instead
+// of being silently dropped. The new Task reuses the finished Task's project,
+// workspace and runtime settings and takes over the same channel route slot, so
+// the triggering message is delivered to it instead of the frozen Task. It is
+// idempotent: repeating a delivery for the same finished Task reuses the
+// continuation it already created.
+func (s *Service) continueFinishedChannelTask(ctx context.Context, instance domain.ChannelInstance, conversation domain.ChannelConversation, finished domain.Task) (domain.Task, error) {
+	previous, err := s.store.RuntimeSnapshot(ctx, finished.RuntimeConfigSnapshotID)
+	if err != nil {
+		return domain.Task{}, fmt.Errorf("continuation runtime is unavailable")
+	}
+	model, err := s.store.Model(ctx, previous.ModelID)
+	if err != nil {
+		return domain.Task{}, fmt.Errorf("continuation model is unavailable")
+	}
+	modelSource := domain.ModelSourceProvider
+	switch {
+	case previous.EnvGroupID == domain.ClaudeNativeEnvGroupID:
+		modelSource = domain.ModelSourceClaudeNative
+	case previous.CodexAccountID != "":
+		modelSource = domain.ModelSourceOfficial
+	}
+	// Deriving the ID from the finished Task keeps a redelivery idempotent.
+	continuationID := stableID("task", "channel-continuation", finished.ID)
+	task, err := s.store.Task(ctx, continuationID)
+	if errors.Is(err, sql.ErrNoRows) {
+		task, err = s.application.CreateTask(ctx, app.CreateTaskInput{
+			ID: continuationID, ProjectID: finished.ProjectID, WorkspaceID: finished.WorkspaceID,
+			Title: finished.Title, Request: channelContinuationRequest(finished),
+			Isolation: finished.Isolation, WorktreeDir: finished.WorktreeDir,
+			TargetBranch: finished.TargetBranch, TaskBranch: finished.TaskBranch,
+			Backend: previous.Backend, ModelSource: modelSource, ModelID: model.ID, WireModel: previous.WireModel,
+			CodexAccountID: previous.CodexAccountID, ReasoningEffort: previous.ReasoningEffort,
+			StreamIdleTimeoutMS: intPointer(previous.StreamIdleTimeoutMS), StreamMaxRetries: intPointer(previous.StreamMaxRetries),
+			Filesystem: filesystemOf(previous.PermissionsJSON), Approval: approvalOf(previous.PermissionsJSON),
+			ProxyEnabled: previous.ProxyEnabled, CollaborationMode: finished.CollaborationMode,
+			MaxAgents: finished.MaxAgents, KnowledgePolicy: finished.KnowledgePolicy,
+			SkillIDs: finished.SkillIDs,
+		})
+		if err != nil {
+			return domain.Task{}, fmt.Errorf("continuation task: %w", err)
+		}
+	} else if err != nil {
+		return domain.Task{}, err
+	}
+	// The finished Task still owns the route slot, so route activation
+	// supersedes it; this also wakes a paused channel session.
+	if _, err := s.store.ActivateOwnerChannelTaskRoute(ctx, instance.ID, conversation.ID, task.ID, s.now().UTC()); err != nil {
+		return domain.Task{}, err
+	}
+	return task, nil
+}
+
+// channelContinuationRequest makes the continuation explain itself: the Agent
+// sees why a new Task exists and that the previous, now read-only Task still
+// holds the history it must not rewrite.
+func channelContinuationRequest(finished domain.Task) string {
+	code := firstNonEmpty(finished.Code, finished.ID)
+	return fmt.Sprintf("这是 %s 的后续任务：上一个 Task（%s）已经完成，因此本会话继续在新建的任务中执行。\n沿用原目标：%s\n需要时只读参考 %s 的历史记录，其中的文件和提交可能已被清理。", code, code, firstNonEmpty(finished.CurrentGoal, finished.OriginalRequest), code)
+}
+
+func intPointer(value int) *int {
+	return &value
+}
+
+func filesystemOf(permissionsJSON string) string {
+	filesystem, _ := parsePermissions(permissionsJSON)
+	return filesystem
+}
+
+func approvalOf(permissionsJSON string) string {
+	_, approval := parsePermissions(permissionsJSON)
+	return approval
+}
+
+// parsePermissions mirrors app.parsePermissionsJSON for the Runtime Snapshot
+// this package reads back; the two stay separate because the channel service
+// must not depend on the app package's unexported helpers.
+func parsePermissions(value string) (filesystem, approval string) {
+	filesystem, approval = "workspace-write", "never"
+	var payload map[string]string
+	if json.Unmarshal([]byte(value), &payload) == nil {
+		if payload["filesystem"] != "" {
+			filesystem = payload["filesystem"]
+		}
+		if payload["approval"] != "" {
+			approval = payload["approval"]
+		}
+	}
+	return filesystem, approval
 }
 
 func intField(values map[string]any, key string) int {

@@ -1021,3 +1021,169 @@ func knowledgeEntryPresent(entries []domain.KnowledgeEntry, id string) bool {
 	}
 	return false
 }
+
+// A Task that already completed must not swallow the next private or group
+// message. The conversation continues in a new Task that carries the same
+// owner-chosen Runtime Snapshot, and the message is delivered to it.
+func TestCompletedChannelTaskContinuesInNewTask(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	database, err := store.Open(ctx, filepath.Join(dataDir, "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	secretStore, err := secrets.Open(filepath.Join(dataDir, "secrets.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	owner := domain.Owner{ID: "owner-continue", Username: "owner", PasswordHash: "hash", CreatedAt: now}
+	if err := database.CreateOwner(ctx, owner); err != nil {
+		t.Fatal(err)
+	}
+	provider := domain.Provider{ID: "provider-continue", Name: "Stub", AuthStyle: "none", CreatedAt: now, UpdatedAt: now}
+	if err := database.UpsertProvider(ctx, provider); err != nil {
+		t.Fatal(err)
+	}
+	env := domain.EnvGroup{ID: "env-continue", Name: "Stub", ProviderID: provider.ID, Backend: "stub", Revision: 1, Environment: map[string]string{}, SecretRefs: map[string]string{}, CreatedAt: now, UpdatedAt: now}
+	if err := database.UpsertEnvGroup(ctx, env); err != nil {
+		t.Fatal(err)
+	}
+	model := domain.Model{ID: "model-continue", DisplayName: "Stub", ProviderID: provider.ID, Source: "provider", Backend: "stub", WireModel: "stub", DefaultEnvGroupID: env.ID, CreatedAt: now, UpdatedAt: now}
+	if err := database.UpsertModel(ctx, model); err != nil {
+		t.Fatal(err)
+	}
+	plugin := domain.ChannelPlugin{ID: "feishu", ProviderKey: "feishu", DisplayName: "飞书", ManifestVersion: 1, PackageVersion: "1", ProtocolMin: 1, ProtocolMax: 1, ExecutablePath: "test", ExecutableSHA256: "test", Manifest: map[string]any{}, InstallState: "installed", Enabled: true, Revision: 1, DiscoveredAt: now, UpdatedAt: now}
+	if err := database.UpsertChannelPlugin(ctx, plugin); err != nil {
+		t.Fatal(err)
+	}
+	appService := app.NewService(database, secretStore, app.StubExecutor{})
+	service := New(Config{Store: database, App: appService, Secrets: secretStore, DataDir: dataDir, RuntimeDevice: "device-local"})
+	instance, err := service.CreateInstance(ctx, owner.ID, plugin.ID, "Continue", "create-continue")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.BindChannelOwnerIdentity(ctx, domain.ChannelIdentityLink{ID: "channel-owner-continue", InstanceID: instance.ID, OwnerID: owner.ID, ExternalUserID: "owner-open", Role: "owner", Status: "active", LinkedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	instance.Status, instance.UpdatedAt = "ready", now
+	instance, err = database.UpdateChannelInstance(ctx, instance, instance.Revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _, err := service.IssueCapability(ctx, instance.ID, []string{"channel.inbound.write"}, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims, err := service.AuthenticateCapability(ctx, raw, "channel.inbound.write")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dm := domain.ChannelInboundEnvelope{SchemaVersion: 1, RequestID: "req-1", InstanceID: instance.ID, ExternalEventID: "event-1", EventType: "message", OccurredAt: now, ChatType: "p2p", ExternalChatID: "chat-owner", ExternalSenderID: "owner-open", ExternalMessageID: "message-1", Content: "hello"}
+	if _, _, err := service.ReceiveInbound(ctx, claims, dm); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.processInboundBatch(ctx); err != nil {
+		t.Fatal(err)
+	}
+	endpoint, err := database.ChannelEndpoint(ctx, instance.ID, domain.ChannelEndpointAssistantDM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope, err := service.scopeKey(instance.ID, endpoint.Kind, "channel-owner-continue", "chat-owner", "owner-open")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := database.ChannelConversationByScope(ctx, endpoint.ID, 1, scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The owner explicitly takes over a real Task; that Task is the one that
+	// will complete and must not swallow the next message.
+	project := domain.Project{ID: "continue-project", Name: "Continue", ProjectType: "folder", DefaultWorkspaceID: "continue-workspace", KnowledgePolicy: "enabled", CreatedAt: now, UpdatedAt: now}
+	if err := database.CreateProject(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	workspace := domain.Workspace{ID: "continue-workspace", ProjectID: project.ID, Name: "Continue", Locality: "local", Transport: "native", RootPath: dataDir, Health: "ready", CreatedAt: now, UpdatedAt: now, AgentAPIMode: "global", AgentAPIStatus: "unknown"}
+	if err := database.CreateWorkspace(ctx, workspace); err != nil {
+		t.Fatal(err)
+	}
+	target, err := appService.CreateTask(ctx, app.CreateTaskInput{ProjectID: project.ID, WorkspaceID: workspace.ID, Title: "Target", Request: "Target", Isolation: "inplace", Backend: model.Backend, ModelSource: model.Source, ModelID: model.ID, WireModel: model.WireModel, Filesystem: "workspace-write", Approval: "never", CollaborationMode: "auto", MaxAgents: 2, KnowledgePolicy: "inherit"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.BindTaskChannelRoute(ctx, owner.ID, target.ID, conversation.ID); err != nil {
+		t.Fatal(err)
+	}
+	target.SkillIDs = []string{}
+	if err := appService.CompleteTask(ctx, target.ID); err != nil {
+		t.Fatal(err)
+	}
+	next := dm
+	next.RequestID, next.ExternalEventID, next.ExternalMessageID, next.Content = "req-2", "event-2", "message-2", "continue please"
+	if _, _, err := service.ReceiveInbound(ctx, claims, next); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.processInboundBatch(ctx); err != nil {
+		t.Fatal(err)
+	}
+	route, err := database.ActiveChannelTaskRoute(ctx, conversation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if route.TargetTaskID == target.ID || route.TargetTaskID == "" {
+		t.Fatalf("completed task kept the route: %#v", route)
+	}
+	continuation, err := database.Task(ctx, route.TargetTaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if continuation.Status != domain.TaskActive {
+		t.Fatalf("continuation status=%s", continuation.Status)
+	}
+	// The continuation carries the finished Task's owner-chosen runtime settings
+	// into an equivalent snapshot instead of re-resolving a channel default.
+	targetSnapshot, err := database.RuntimeSnapshot(ctx, target.RuntimeConfigSnapshotID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	continuationSnapshot, err := database.RuntimeSnapshot(ctx, continuation.RuntimeConfigSnapshotID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if continuationSnapshot.ModelID != targetSnapshot.ModelID || continuationSnapshot.CodexAccountID != targetSnapshot.CodexAccountID || continuationSnapshot.ReasoningEffort != targetSnapshot.ReasoningEffort || continuationSnapshot.PermissionsJSON != targetSnapshot.PermissionsJSON {
+		t.Fatalf("continuation snapshot=%#v target snapshot=%#v", continuationSnapshot, targetSnapshot)
+	}
+	if continuation.CollaborationMode != target.CollaborationMode || continuation.MaxAgents != target.MaxAgents {
+		t.Fatalf("continuation lost collaboration settings: %#v", continuation)
+	}
+	// The triggering message must reach the continuation, not vanish.
+	turns, err := database.ListTurns(ctx, continuation.ID)
+	if err != nil || len(turns) == 0 {
+		t.Fatalf("continuation turns=%#v err=%v", turns, err)
+	}
+	if !strings.Contains(turns[0].Instruction, "continue please") {
+		t.Fatalf("continuation did not receive the message: %q", turns[0].Instruction)
+	}
+	if turns[0].RuntimeConfigSnapshotID != continuation.RuntimeConfigSnapshotID {
+		t.Fatalf("continuation turn snapshot=%s task snapshot=%s", turns[0].RuntimeConfigSnapshotID, continuation.RuntimeConfigSnapshotID)
+	}
+	if !strings.Contains(continuation.OriginalRequest, target.Code) {
+		t.Fatalf("continuation did not explain the predecessor: %q", continuation.OriginalRequest)
+	}
+	// A redelivery for the same finished Task must reuse the continuation.
+	if _, _, err := service.ReceiveInbound(ctx, claims, next); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.processInboundBatch(ctx); err != nil {
+		t.Fatal(err)
+	}
+	tasks, err := database.ListTasks(ctx, project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 2 {
+		t.Fatalf("continuation was not idempotent: %#v", tasks)
+	}
+}

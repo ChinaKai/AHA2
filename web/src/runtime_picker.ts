@@ -55,6 +55,17 @@ function option(value: string, label: string, selected: boolean): string {
   return `<option value="${escapeHTML(value)}" ${selected ? "selected" : ""}>${escapeHTML(label)}</option>`;
 }
 
+// Backend proxy is a two-value setting, so it renders as an ordinary select like
+// every neighbouring field rather than a lone checkbox. The value is submitted
+// as "enabled"/"disabled"; read it back with proxyEnabledFrom.
+export function proxyEnabledFrom(value: unknown): boolean {
+  return String(value || "") === "enabled";
+}
+
+export function proxyOptionsHTML(enabled: boolean): string {
+  return `<option value="disabled" ${enabled ? "" : "selected"}>关闭</option><option value="enabled" ${enabled ? "selected" : ""}>开启</option>`;
+}
+
 export function resolveReasoningEffort(
   effortLevels: string[],
   savedEffort: string,

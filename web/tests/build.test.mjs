@@ -80,6 +80,41 @@ test("interactive region state restores scroll, focus, controls, and expansion",
     assert.equal(newTree.pending.checked, true, "newly enabled live result should keep its rendered default");
     assert.equal(newTree.details.open, true);
     assert.equal(newTree.message.classList.contains("expanded"), true);
+
+    // A select whose saved value no longer exists among its options (captured
+    // before the options loaded, or pointing at a removed entry) must fall back
+    // to the freshly rendered default. Forcing the stale value leaves the select
+    // at selectedIndex -1, which silently empties everything derived from it.
+    const withSelect = (options, value) => {
+      const root = new FakeElement("div");
+      const select = new FakeElement("select", {id: "task-project", name: "project_id"});
+      // Mirror the browser: options is a live list, value picks a matching
+      // option, and a value with no match leaves selectedIndex at -1.
+      select.options = options.map(option => ({value: option, selected: false}));
+      Object.defineProperty(select, "value", {
+        get() { return select.options[select.selectedIndex]?.value ?? ""; },
+        set(next) {
+          select.selectedIndex = select.options.findIndex(option => option.value === next);
+          select.options.forEach((option, index) => { option.selected = index === select.selectedIndex; });
+        },
+      });
+      select.selectedIndex = -1;
+      select.value = value;
+      root.append(select);
+      return {root, select};
+    };
+    const capturedEmpty = withSelect([], "");
+    const capturedState = helpers.captureInteractiveRegion(capturedEmpty.root);
+    const repopulated = withSelect(["project-1", "project-2"], "");
+    helpers.restoreInteractiveRegion(repopulated.root, capturedState);
+    assert.equal(repopulated.select.value, "project-1", "a stale empty select value must adopt the new default");
+
+    // A value that is still offered keeps winning over the default.
+    const keptSource = withSelect(["project-1", "project-2"], "project-2");
+    const keptState = helpers.captureInteractiveRegion(keptSource.root);
+    const keptTarget = withSelect(["project-1", "project-2"], "project-1");
+    helpers.restoreInteractiveRegion(keptTarget.root, keptState);
+    assert.equal(keptTarget.select.value, "project-2", "a still-valid selection must be preserved");
   } finally {
     if (previous.HTMLElement === undefined) delete globalThis.HTMLElement; else globalThis.HTMLElement = previous.HTMLElement;
     if (previous.document === undefined) delete globalThis.document; else globalThis.document = previous.document;
@@ -1750,20 +1785,40 @@ test("task list filters combine multi-select project, status, and device choices
 
   assert.equal(filters.taskDeviceFilterKey(local), "local");
   assert.equal(filters.taskDeviceFilterKey(remoteA), "remote:device-a");
-  assert.deepEqual(filters.taskDeviceFilterOptions([local, remoteA, remoteB]), [
+  // Device options are built from server totals, not from the loaded page.
+  assert.deepEqual(filters.taskDeviceFilterOptions({local: 1, "remote:device-a": 1, "remote:device-b": 1}), [
     {value: "local", label: "本机", count: 1},
     {value: "remote:device-a", label: "device-a", count: 1},
     {value: "remote:device-b", label: "device-b", count: 1},
   ]);
-  assert.equal(filters.taskMatchesFilters(local, new Set(["p1"]), new Set(["active", "failed"]), new Set(["local"])), true);
-  assert.equal(filters.taskMatchesFilters(remoteA, new Set(["p1"]), new Set(["active", "failed"]), new Set()), false);
-  assert.equal(filters.taskMatchesFilters(remoteB, new Set(), new Set(["active", "failed"]), new Set(["remote:device-b"])), true);
+
+  // Status filtering is three owner-facing buckets, and "blocked" counts as an
+  // error because it needs the owner to step in.
+  assert.equal(filters.taskStatusGroup("active"), "open");
+  assert.equal(filters.taskStatusGroup("waiting_user"), "open");
+  assert.equal(filters.taskStatusGroup("draft"), "open");
+  assert.equal(filters.taskStatusGroup("completed"), "done");
+  for (const status of ["failed", "blocked", "cancelled"]) {
+    assert.equal(filters.taskStatusGroup(status), "error", `${status} must group as an error`);
+  }
+  assert.deepEqual(filters.DEFAULT_TASK_STATUS_FILTERS, ["open", "error"]);
+  assert.deepEqual(filters.taskStatusGroupCounts({active: 2, blocked: 1, completed: 3, cancelled: 1}), {open: 2, done: 3, error: 2});
+  // An unknown status must not vanish from every bucket.
+  assert.deepEqual(filters.taskStatusGroupCounts({something_new: 4}), {open: 4, done: 0, error: 0});
+
+  assert.equal(filters.taskMatchesFilters(local, new Set(["p1"]), new Set(["open"]), new Set(["local"])), true);
+  assert.equal(filters.taskMatchesFilters(remoteA, new Set(["p1"]), new Set(["open"]), new Set()), false);
+  assert.equal(filters.taskMatchesFilters(remoteB, new Set(), new Set(["error"]), new Set(["remote:device-b"])), true);
 
   for (const marker of ["taskProjectFilters", "taskStatusFilters", "taskDeviceFilters", "data-task-filter-option", "data-task-filter-clear"]) {
     assert.match(main, new RegExp(marker));
   }
   assert.match(main, /taskDeviceFilters:\s*new Set\(\[\s*LOCAL_TASK_DEVICE_FILTER\s*\]\)/);
+  assert.match(main, /taskStatusFilters:\s*new Set\(DEFAULT_TASK_STATUS_FILTERS\)/);
   assert.match(main, /taskMatchesFilters/);
+  // Counts must come from the server aggregate, never from the loaded page.
+  assert.match(main, /state\.taskFacetCounts = result\.counts/);
+  assert.doesNotMatch(main, /statusCounts\.set\(task\.status/);
   assert.match(styles, /\.task-filter-menu/);
   assert.match(styles, /@media \(max-width: 760px\)[\s\S]*?\.task-filters \{[^}]*grid-template-columns:\s*repeat\(2,minmax\(0,1fr\)\)/);
 });
@@ -1953,4 +2008,46 @@ test("advanced settings expose access scope and listen address", async () => {
   assert.match(api, /\/api\/v1\/settings\/network/);
   assert.match(types, /access_scope: string/);
   assert.match(types, /NetworkSettings/);
+});
+
+test("completed tasks freeze the composer behind a confirmed reopen", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const main = await readFile(resolve(root, "src", "main.ts"), "utf8");
+  const handlers = await readFile(resolve(root, "..", "internal", "httpapi", "task_handlers.go"), "utf8");
+
+  // A completed Task renders the reopen control instead of an input box, and
+  // reopening only happens after an explicit confirmation dialog.
+  assert.match(main, /function completedComposerHtml/);
+  assert.match(main, /id="reopen-task"/);
+  assert.match(main, /id="reopen-task-dialog"/);
+  assert.match(main, /确认重新打开/);
+  const dialogBinding = /function bindReopenTaskControls\(\): void \{[\s\S]*?\n\}/.exec(main)?.[0] || "";
+  assert.match(dialogBinding, /showModal\(\)/);
+  assert.match(dialogBinding, /await api\.reopenTask\(/);
+  // The reopen call must live in the dialog submit handler, not the button click.
+  const clickBinding = /#reopen-task"\)\?\.addEventListener\("click", ([^\n]*)/.exec(main)?.[1] || "";
+  assert.doesNotMatch(clickBinding, /reopenTask/);
+
+  // The send button is type=submit and Enter calls requestSubmit(), so the
+  // composer must stay a <form> for every status except "completed". Rendering a
+  // <div> in the normal state silently breaks both ways of sending a message.
+  const elementHelper = /function messageComposerElement\(detail: TaskDetail\)[\s\S]*?\n\}/.exec(main)?.[0] || "";
+  assert.match(elementHelper, /completed \? "div" : "form"/, "the composer element type must depend on the completed status");
+  const openTagHelper = /function messageComposerOpenTag\([\s\S]*?\n\}/.exec(main)?.[0] || "";
+  assert.match(openTagHelper, /\$\{messageComposerElement\(detail\)\}/, "the rendered composer tag must come from messageComposerElement");
+  const nodeHelper = /function messageComposerNode\([\s\S]*?\n\}/.exec(main)?.[0] || "";
+  assert.match(nodeHelper, /messageComposerOpenTag\(detail, options\)/, "live composer rebuild must reuse the first-render markup");
+  assert.match(nodeHelper, /messageComposerElement\(detail\)/, "live composer rebuild must close the tag it opened");
+  // A stray hard-coded <div id="message-form"> in the task view would reintroduce it.
+  assert.doesNotMatch(main, /<div id="message-form"/, "the composer must not be hard-coded as a div");
+
+  // Completed status makes the Task read-only for editing, and the server
+  // enforces the same freeze rather than trusting the UI.
+  assert.match(main, /readOnly: archivedReadOnly \|\| remoteReadOnly \|\| completed/);
+  assert.match(handlers, /task_completed_read_only/);
+  assert.match(handlers, /func \(s \*Server\) rejectCompletedTaskWrite/);
+  for (const guard of ["updateTaskTitle", "updateTaskCollaboration", "updateAgentConfig"]) {
+    const body = new RegExp(`func \\(s \\*Server\\) ${guard}\\([\\s\\S]*?\\n\\}`).exec(handlers)?.[0] || "";
+    assert.match(body, /rejectCompletedTaskWrite/, `${guard} must reject completed-task writes`);
+  }
 });

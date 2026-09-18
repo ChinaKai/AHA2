@@ -489,6 +489,10 @@ export function bindHardwarePanel(detail: TaskDetail, notify: Notice): void {
     syncMode();
   });
   const saveGroups = async () => {
+    if (detail.task.status === "completed") {
+      notify("error", "任务已完成，硬件配置只读；请先重新打开任务");
+      return;
+    }
     readForm();
     const response = await api.updateTaskHardware(detail.task.id, state.groups.map(group => ({
       id: group.id,

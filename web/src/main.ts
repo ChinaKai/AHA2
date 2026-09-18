@@ -10,10 +10,11 @@ import {renderMarkdown} from "./markdown.js";
 import {bindPromptAdmin, loadPromptCatalog, renderPromptAdmin} from "./prompt_admin.js";
 import {bindProxySettings, renderProxySettings} from "./proxy_settings.js";
 import {bindSyncSettings, isSyncSettingsFormEditing, renderSyncSettings} from "./sync_settings.js";
-import {bindRuntimeFields, runtimeFieldsHTML, setClaudeOfficialCatalog, setClaudeOfficialLoading, setRuntimeBackends, syncRuntimeFields} from "./runtime_picker.js";
+import {bindRuntimeFields, proxyEnabledFrom, proxyOptionsHTML, runtimeFieldsHTML, setClaudeOfficialCatalog, setClaudeOfficialLoading, setRuntimeBackends, syncRuntimeFields} from "./runtime_picker.js";
 import type {ClaudeOfficialCatalog} from "./runtime_picker.js";
 import {renderComposerAgentOptions, renderComposerTools} from "./task_composer.js";
-import {LOCAL_TASK_DEVICE_FILTER, taskDeviceFilterOptions, taskMatchesFilters} from "./task_filters.js";
+import {DEFAULT_TASK_STATUS_FILTERS, LOCAL_TASK_DEVICE_FILTER, TASK_STATUS_GROUP_LABELS, taskDeviceFilterOptions, taskMatchesFilters, taskStatusGroupCounts} from "./task_filters.js";
+import type {TaskStatusGroup} from "./task_filters.js";
 import {TASK_TOOL_DEFAULT_WIDTH, normalizePinnedTaskTool, normalizeTaskToolMode, normalizeTaskToolWidth, renderTaskToolButtons, renderTaskToolContent, renderTaskToolPanel} from "./task_tools.js";
 import type {TaskTool, TaskToolMode} from "./task_tools.js";
 import {TASK_SLASH_COMMANDS, bindMessageBubbleControls, captureInteractiveRegion, clearNavigationSnapshot, eventRefreshesTaskList, exactSlashCommand, executeAgentSessionAction, loadNavigationSnapshot, matchingSlashCommands, renderWorkspaceDetection, restoreInteractiveRegion, saveNavigationSnapshot} from "./ui_helpers.js";
@@ -67,6 +68,7 @@ import type {
   Task,
   TaskContextDetail,
   TaskDetail,
+  TaskFacetCounts,
   Workspace,
 } from "./types.js";
 type View = "projects" | "channels" | "models" | "tasks" | "knowledge" | "prompts" | "proxy" | "sync" | "advanced";
@@ -143,6 +145,8 @@ interface State {
   taskDetailLoading: boolean;
   taskProjectFilters: Set<string>;
   taskStatusFilters: Set<string>;
+  // Server totals behind the filter popovers; null until the first list load.
+  taskFacetCounts: TaskFacetCounts | null;
   taskDeviceFilters: Set<string>;
   taskOpenFilter: TaskFilterKind | "";
   sidebarWidth: number;
@@ -296,8 +300,9 @@ const state: State = {
   taskToolWidth: savedTaskToolLayout.width,
   taskDetailLoading: false,
   taskProjectFilters: new Set(),
-  taskStatusFilters: new Set(),
+  taskStatusFilters: new Set<string>(DEFAULT_TASK_STATUS_FILTERS),
   taskDeviceFilters: new Set([LOCAL_TASK_DEVICE_FILTER]),
+  taskFacetCounts: null,
   taskOpenFilter: "",
   sidebarWidth: savedSidebarSettings.width,
   sidebarMemoItems: savedSidebarSettings.memoItems,
@@ -814,6 +819,7 @@ function syncTaskSkills(): void {
   if (!container) return;
   const selected = [...container.querySelectorAll<HTMLInputElement>('input[name="skill_ids"]:checked')].map(input => input.value);
   container.innerHTML = taskSkillOptions(projectID, selected);
+  syncTaskFormFoldCounts();
 }
 
 function openProjectDialog(project: Project | null): void {
@@ -1290,6 +1296,7 @@ async function loadCoreData(force = false): Promise<void> {
     loadResource("tasks", force, async () => {
       const result = await api.tasks("", {limit: initialListPageSize});
       state.tasks = result.tasks || [];
+      state.taskFacetCounts = result.counts || null;
       listPages.tasks = {cursor: result.next_cursor || "", hasMore: Boolean(result.has_more), loadingMore: false};
     }),
   ]);
@@ -1487,14 +1494,62 @@ function scheduleSidebarMemoSave(): void {
   }, 500);
 }
 
+// Only a memo that actually holds text can become a Task, and a finished one is
+// already dealt with. The button is always rendered and hidden by CSS off the
+// row's own empty/done classes, which the input and checkbox handlers already
+// maintain, so no re-render is needed as the owner types.
+function sidebarMemoCanCreateTask(item: SidebarMemoItem): boolean {
+  return Boolean(item.text.trim()) && !item.done;
+}
+
 function sidebarMemoItemsHTML(): string {
   const items = state.sidebarMemoItems.length ? state.sidebarMemoItems : [newSidebarMemoItem()];
   return `<div class="sidebar-memo-list">${items.map(item => `<div class="sidebar-memo-item ${item.done ? "done" : ""} ${item.text ? "" : "sidebar-memo-empty"}" data-sidebar-memo-item="${escapeHTML(item.id)}">
     <input type="checkbox" data-sidebar-memo-done="${escapeHTML(item.id)}" ${item.done ? "checked" : ""} aria-label="标记完成">
     <button type="button" class="sidebar-memo-preview" data-sidebar-memo-edit="${escapeHTML(item.id)}" aria-label="编辑备忘"><span class="sidebar-memo-preview-text">${escapeHTML(item.text || "写下备忘")}</span></button>
     <textarea data-sidebar-memo-text="${escapeHTML(item.id)}" placeholder="写下备忘" maxlength="${SIDEBAR_MEMO_MAX_LENGTH}" rows="1" aria-label="编辑备忘">${escapeHTML(item.text)}</textarea>
-    <button type="button" class="icon-button" data-sidebar-memo-remove="${escapeHTML(item.id)}" title="删除事项" aria-label="删除事项">${icon("close")}</button>
+    <div class="sidebar-memo-actions"><button type="button" class="icon-button sidebar-memo-task" data-sidebar-memo-task="${escapeHTML(item.id)}" title="用这条便签创建任务" aria-label="用这条便签创建任务">${icon("tasks")}</button><button type="button" class="icon-button" data-sidebar-memo-remove="${escapeHTML(item.id)}" title="删除事项" aria-label="删除事项">${icon("close")}</button></div>
   </div>`).join("")}</div><button type="button" class="sidebar-memo-add" id="add-sidebar-memo-item">${icon("plus")}添加事项</button>`;
+}
+
+// The first line becomes the Task title so the create form is immediately
+// submittable; `title` is required and a memo is usually one long paragraph.
+function sidebarMemoTaskTitle(text: string): string {
+  const firstLine = text.split(/\r?\n/).map(line => line.trim()).find(Boolean) || "";
+  return firstLine.length > 60 ? `${firstLine.slice(0, 60)}…` : firstLine;
+}
+
+// The create panel only exists in the tasks view and reads that view's loaded
+// projects, workspaces, models and skills, so this navigates there first and
+// fills the panel once its data has settled. It deliberately does not add a
+// second create form: there stays exactly one Task creation path.
+async function createTaskFromMemo(memoID: string): Promise<void> {
+  const item = state.sidebarMemoItems.find(candidate => candidate.id === memoID);
+  const text = item?.text.trim() || "";
+  if (!item || !text) return;
+  persistSidebarMemo();
+  cancelTaskOpen();
+  state.view = "tasks";
+  state.selectedTask = null;
+  state.selectedProject = null;
+  state.dialogProjectID = "";
+  closeEvents();
+  render();
+  await ensureViewData("tasks");
+  render();
+  const form = document.querySelector<HTMLFormElement>("#task-form");
+  const dialog = document.querySelector<HTMLDialogElement>("#task-dialog");
+  if (!form || !dialog) return;
+  // Populates the workspace list for the selected project and, with it, the
+  // runtime fields and the offered skills.
+  syncTaskWorkspaces();
+  const title = form.querySelector<HTMLInputElement>('input[name="title"]');
+  const request = form.querySelector<HTMLTextAreaElement>('textarea[name="request"]');
+  if (title) title.value = sidebarMemoTaskTitle(text);
+  if (request) request.value = text;
+  dialog.showModal();
+  title?.focus();
+  title?.setSelectionRange(title.value.length, title.value.length);
 }
 
 function focusSidebarMemoItem(id: string): void {
@@ -1554,6 +1609,9 @@ function bindSidebarMemoItems(root: HTMLElement): void {
   }));
   root.querySelectorAll<HTMLButtonElement>("[data-sidebar-memo-edit]").forEach(button => button.addEventListener("click", () => {
     enterSidebarMemoEdit(button.dataset.sidebarMemoEdit || "", root);
+  }));
+  root.querySelectorAll<HTMLButtonElement>("[data-sidebar-memo-task]").forEach(button => button.addEventListener("click", () => {
+    void createTaskFromMemo(button.dataset.sidebarMemoTask || "");
   }));
   fitSidebarMemoTextareas(root);
   root.querySelectorAll<HTMLButtonElement>("[data-sidebar-memo-remove]").forEach(button => button.addEventListener("click", () => {
@@ -1944,6 +2002,37 @@ function bindTaskAgentControls(): void {
   }));
 }
 
+// Completed Tasks expose exactly one write action: reopening. The button only
+// opens the confirmation dialog; the reopen call happens on dialog submit.
+// Assigning onclick/onsubmit keeps this idempotent, because the composer is
+// rebuilt whenever the Task freezes or reopens.
+function bindReopenTaskControls(): void {
+  const dialog = document.querySelector<HTMLDialogElement>("#reopen-task-dialog");
+  const button = document.querySelector<HTMLButtonElement>("#reopen-task");
+  if (button) button.onclick = () => dialog?.showModal();
+  const form = document.querySelector<HTMLFormElement>("#reopen-task-form");
+  if (!form) return;
+  // The generic [data-close] binding only runs at bind time, which predates a
+  // dialog inserted when the Task freezes live, so wire the dismissals here.
+  dialog?.querySelectorAll<HTMLElement>("[data-close]").forEach(element => {
+    element.onclick = () => dialog.close();
+  });
+  form.onsubmit = async event => {
+    event.preventDefault();
+    const taskID = state.selectedTask?.task.id;
+    dialog?.close();
+    if (!taskID) return;
+    try {
+      await api.reopenTask(taskID);
+      setMessage("notice", "任务已重新打开，可以继续编辑和发送消息");
+    } catch (error) {
+      setMessage("error", error instanceof Error ? error.message : String(error));
+    }
+    await refreshTaskRuntime(taskID);
+    updateTaskLiveRegions();
+  };
+}
+
 async function reloadConversation(): Promise<void> {
   if (!state.selectedTask) return;
   const page = await api.agentConversation(state.selectedTask.task.id, state.selectedTaskAgent, {
@@ -2283,12 +2372,12 @@ function workspaceTakeoverDialog(): string {
   return `<dialog id="workspace-takeover-dialog"><form id="workspace-takeover-form"><div class="dialog-head"><h2>接管只读 Workspace</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div><input type="hidden" name="source_id"><p class="field-help">接管会创建新的本机 Workspace；远端镜像保持只读且不会被修改。</p><label>名称<input name="name" required></label><div class="two"><label>Transport<select name="transport"><option value="native">Native</option><option value="wsl">WSL</option><option value="ssh">SSH</option></select></label><label>本机 Root Path<input name="root_path" required placeholder="必须重新确认本机路径"></label></div><label class="workspace-takeover-wsl">WSL Distro<input name="distro" placeholder="例如 Ubuntu"></label><div class="workspace-takeover-ssh"><div class="two"><label>SSH Host<input name="ssh_host"></label><label>SSH User<input name="ssh_user"></label></div><div class="two"><label>SSH Port<input name="ssh_port" type="number" min="1" max="65535" value="22"></label><label>SSH Auth<select name="ssh_auth"><option value="auto">Auto</option><option value="password">Password</option><option value="key">Key</option></select></label></div><label class="reuse-remote-secret"><input name="reuse_remote_credential" type="checkbox">复用已同步的端到端加密 SSH 凭据</label><label>或输入新密码<input name="ssh_password" type="password" autocomplete="new-password"></label></div><div class="dialog-actions"><button type="button" data-close>取消</button><button class="primary" type="submit">创建本机副本</button></div></form></dialog>`;
 }
 
-const TASK_STATUS_FILTERS = ["draft", "active", "waiting_user", "preparing", "queued", "running", "completed", "failed", "blocked"];
-
 interface TaskFilterOption {
   value: string;
   label: string;
-  count: number;
+  // Absent until the server totals load; the popover then omits the number
+  // instead of showing a page-derived count that would be wrong.
+  count?: number;
 }
 
 function taskFilterSelection(kind: TaskFilterKind): Set<string> {
@@ -2312,7 +2401,7 @@ function taskFilterPopover(
       : `已选 ${selected.size} 项`;
   const rows = options.map(option => `<label class="task-filter-option" title="${escapeHTML(option.label)}">
     <input type="checkbox" data-task-filter-option="${kind}" value="${escapeHTML(option.value)}" ${selected.has(option.value) ? "checked" : ""}>
-    <span><strong>${escapeHTML(option.label)}</strong><small>${option.count}</small></span>
+    <span><strong>${escapeHTML(option.label)}</strong>${option.count === undefined ? "" : `<small>${option.count}</small>`}</span>
   </label>`).join("");
   return `<details class="task-filter-popover" data-task-filter="${kind}" ${state.taskOpenFilter === kind ? "open" : ""}>
     <summary class="task-filter-trigger" title="按${label}筛选">${icon("filter")}<span><small>${label}</small><strong>${escapeHTML(summary)}</strong></span></summary>
@@ -2340,23 +2429,25 @@ function taskCardHtml(task: Task): string {
       </div>
     </div>
     <div class="task-card-actions">
-      ${archived ? `<span class="status warn">归档只读</span>` : task.read_only ? `<button type="button" data-retire-remote-task="${task.id}" class="icon-button danger" title="移除孤立只读任务">${icon("close")}</button><span class="status warn" title="所属设备：${escapeHTML(task.owner_device_id || "未知")}">只读</span>` : `<button type="button" data-edit-task-title="${task.id}" class="icon-button" title="编辑标题">${icon("edit")}</button><button type="button" data-delete-task="${task.id}" class="icon-button" title="删除任务">${icon("close")}</button>`}
+      ${archived ? `<span class="status warn">归档只读</span>` : task.read_only ? `<button type="button" data-retire-remote-task="${task.id}" class="icon-button danger" title="移除孤立只读任务">${icon("close")}</button><span class="status warn" title="所属设备：${escapeHTML(task.owner_device_id || "未知")}">只读</span>` : task.status === "completed" ? `<span class="status warn" title="任务已完成，需先重新打开才能编辑">已完成只读</span><button type="button" data-delete-task="${task.id}" class="icon-button" title="删除任务">${icon("close")}</button>` : `<button type="button" data-edit-task-title="${task.id}" class="icon-button" title="编辑标题">${icon("edit")}</button><button type="button" data-delete-task="${task.id}" class="icon-button" title="删除任务">${icon("close")}</button>`}
     </div>
   </article>`;
 }
 
 function tasksView(): string {
   if (state.selectedTask) return taskDetailView(state.selectedTask);
-  const projectCounts = new Map<string, number>();
-  const statusCounts = new Map<string, number>();
-  for (const task of state.tasks) {
-    projectCounts.set(task.project_id, (projectCounts.get(task.project_id) || 0) + 1);
-    statusCounts.set(task.status, (statusCounts.get(task.status) || 0) + 1);
-  }
-  const projectOptions = state.projects.map(item => ({value: item.id, label: item.name, count: projectCounts.get(item.id) || 0}));
-  const statusValues = [...new Set([...TASK_STATUS_FILTERS, ...state.tasks.map(item => item.status)])];
-  const statusOptions = statusValues.map(status => ({value: status, label: statusLabel(status), count: statusCounts.get(status) || 0}));
-  const deviceOptions = taskDeviceFilterOptions(state.tasks);
+  // Counts describe the whole set, so they come from the server aggregate
+  // rather than the loaded page; a page-derived count is wrong as soon as the
+  // list outgrows one page. Until the first response lands, show no numbers.
+  const counts = state.taskFacetCounts;
+  const projectOptions = state.projects.map(item => ({
+    value: item.id, label: item.name, count: counts?.project?.[item.id],
+  }));
+  const groupedStatus = taskStatusGroupCounts(counts?.status || {});
+  const statusOptions = (Object.keys(TASK_STATUS_GROUP_LABELS) as TaskStatusGroup[]).map(group => ({
+    value: group, label: TASK_STATUS_GROUP_LABELS[group], count: groupedStatus[group],
+  }));
+  const deviceOptions = taskDeviceFilterOptions(counts?.device || {});
   const filtered = state.tasks.filter(item => taskMatchesFilters(
     item,
     state.taskProjectFilters,
@@ -2381,8 +2472,62 @@ function taskDialog(): string {
   const projectID = state.projects.find(project => !project.channel_retired)?.id || "";
   return taskDialogBase().replace(
     '<div id="task-git-isolation">',
-    `<div class="two"><label>Knowledge<select name="knowledge_policy"><option value="inherit">\u7ee7\u627f Project</option><option value="enabled">\u5f00\u542f</option><option value="disabled">\u5173\u95ed</option></select></label><label class="proxy-toggle"><input name="proxy_enabled" type="checkbox">Backend \u4f7f\u7528\u5171\u4eab\u4ee3\u7406</label></div><fieldset class="task-skill-picker"><legend>Task Skills</legend><p>\u4ec5\u5c06\u9009\u4e2d Skill \u7684\u8def\u5f84\u5199\u5165 Context\uff0c\u672a\u9009\u4e2d\u7684 Skill \u4e0d\u4f1a\u88ab Agent \u770b\u5230\u3002</p><div id="task-skill-options">${taskSkillOptions(projectID)}</div></fieldset><div id="task-git-isolation">`,
+    `<div class="two"><label>Knowledge<select name="knowledge_policy"><option value="inherit">\u7ee7\u627f Project</option><option value="enabled">\u5f00\u542f</option><option value="disabled">\u5173\u95ed</option></select></label><label>Backend \u4ee3\u7406<select name="proxy_enabled">${proxyOptionsHTML(false)}</select></label></div>${taskCapabilitiesFold({})}${taskSkillsFold(taskSkillOptions(projectID))}<div id="task-git-isolation">`,
   );
+}
+
+// Both optional modules collapse to one line by default: they are configured far
+// less often than the fields above, and Skills would otherwise grow the dialog
+// with every Skill the Project gains.
+function taskCapabilitiesFold(capabilities: Record<string, boolean> | undefined): string {
+  const granted = capabilities || {};
+  const body = `<div class="task-agent-capabilities">
+    <p>\u9ed8\u8ba4\u5173\u95ed\uff1b\u4ec5 Main Agent \u53ef\u7528\u3002</p>
+    <label><input type="checkbox" name="cap_workspace_read" ${granted.workspace_read ? "checked" : ""}>\u8bfb\u53d6\u540c Project Workspace</label>
+    <label><input type="checkbox" name="cap_task_create" ${granted.task_create ? "checked" : ""}>\u521b\u5efa\u540c Project Task</label>
+    <label><input type="checkbox" name="cap_clone_hardware" ${granted.clone_hardware ? "checked" : ""}>\u514b\u9686\u5f53\u524d Task \u786c\u4ef6\u4e0e\u51ed\u636e</label>
+  </div>`;
+  return taskFormFold("task-capabilities-fold", "Agent \u9879\u76ee\u7ea7\u6388\u6743", body);
+}
+
+function taskSkillsFold(body: string): string {
+  return taskFormFold("task-skills-fold", "Task Skills", `<div class="task-skill-options" id="task-skill-options">${body}</div>`);
+}
+
+function taskFormFold(id: string, title: string, body: string): string {
+  return `<details class="task-form-fold" id="${id}">
+    <summary><strong>${title}</strong><b data-fold-count></b></summary>
+    <div class="task-form-fold-body">${body}</div>
+  </details>`;
+}
+
+// Keeps each collapsed summary truthful about what is switched on inside it.
+// The same helper serves the create panel and the Agent config dialog, whose
+// folds use the same ids.
+function syncFoldCount(scope: string, id: string, total: number): void {
+  const root = document.querySelector<HTMLElement>(`#${scope}`);
+  if (!root) return;
+  const on = root.querySelectorAll<HTMLInputElement>(`#${id} input[type=checkbox]:checked`).length;
+  const badge = root.querySelector<HTMLElement>(`#${id} [data-fold-count]`);
+  if (badge) badge.textContent = on ? `\u5df2\u542f\u7528 ${on}/${total}` : "\u9ed8\u8ba4\u5173\u95ed";
+}
+
+function syncSkillsFoldCount(scope: string, id: string): void {
+  const root = document.querySelector<HTMLElement>(`#${scope}`);
+  if (!root) return;
+  const selected = root.querySelectorAll<HTMLInputElement>(`#${id} input[name="skill_ids"]:checked`).length;
+  const badge = root.querySelector<HTMLElement>(`#${id} [data-fold-count]`);
+  if (badge) badge.textContent = selected ? `\u5df2\u9009 ${selected}` : "\u672a\u9009\u62e9";
+}
+
+function syncTaskFormFoldCounts(): void {
+  syncFoldCount("task-dialog", "task-capabilities-fold", 3);
+  syncSkillsFoldCount("task-dialog", "task-skills-fold");
+}
+
+function syncAgentFoldCounts(): void {
+  syncFoldCount("agent-config-dialog", "agent-capabilities-fold", 3);
+  syncSkillsFoldCount("agent-config-dialog", "agent-skills-fold");
 }
 
 function taskDialogBase(): string {
@@ -2707,6 +2852,112 @@ function taskFailureBannerHtml(detail: TaskDetail): string {
   return `<div class="task-failure-banner"><strong>失败原因</strong><span>${escapeHTML(failure.error || "Backend 执行失败，未返回详细原因")}</span><small>可直接发送下一条消息创建新 Round 重试</small></div>`;
 }
 
+function taskComposerFlags(detail: TaskDetail): {
+  archivedReadOnly: boolean; remoteReadOnly: boolean; completed: boolean; readOnly: boolean; draft: boolean;
+} {
+  const archivedReadOnly = detail.task.channel_retired === true || detail.task.read_only_reason === "channel_retired";
+  const remoteReadOnly = Boolean(detail.task.read_only && !archivedReadOnly);
+  const completed = detail.task.status === "completed";
+  return {archivedReadOnly, remoteReadOnly, completed, readOnly: archivedReadOnly || remoteReadOnly || completed, draft: detail.task.status === "draft"};
+}
+
+// A completed Task is frozen: the input box is replaced by a reopen affordance
+// that still requires an explicit confirmation dialog before reopening.
+function completedComposerHtml(detail: TaskDetail): string {
+  const remoteReadOnly = Boolean(detail.task.read_only && detail.task.read_only_reason !== "channel_retired");
+  if (remoteReadOnly) {
+    return `<div class="composer-completed-hint">${icon("lock")}<div><strong>任务已完成</strong><small>该 Task 属于其他设备，本机只读，不能重新打开。</small></div></div>`;
+  }
+  return `<div class="composer-reopen-hint">${icon("lock")}<div><strong>任务已完成</strong><small>继续这个目标前需要先重新打开任务。</small></div></div><button type="button" id="reopen-task" class="primary composer-reopen-button">${icon("refresh")}<span>重新打开任务</span></button>`;
+}
+
+// The composer is marked invalid while it cannot accept input, which dims the
+// input box and shows the reason banner.
+function messageComposerInvalid(detail: TaskDetail, runtimeError = ""): boolean {
+  const {readOnly, draft} = taskComposerFlags(detail);
+  return !state.taskDetailLoading && Boolean(runtimeError || readOnly || draft);
+}
+
+// The composer is a <form> in every state except "completed": the send button is
+// type=submit and the Enter key calls requestSubmit(), so the frozen state is the
+// only one allowed to drop the form.
+function messageComposerElement(detail: TaskDetail): "form" | "div" {
+  return taskComposerFlags(detail).completed ? "div" : "form";
+}
+
+function messageComposerClass(detail: TaskDetail, options: {runtimeError?: string} = {}): string {
+  const {completed} = taskComposerFlags(detail);
+  if (completed) return "composer composer-completed";
+  return `composer${messageComposerInvalid(detail, options.runtimeError) ? " runtime-invalid" : ""}`;
+}
+
+function messageComposerOpenTag(detail: TaskDetail, options: {runtimeError?: string} = {}): string {
+  return `<${messageComposerElement(detail)} id="message-form" class="${messageComposerClass(detail, options)}">`;
+}
+
+function messageComposerHtml(detail: TaskDetail, options: {activeTurn?: boolean; runtimeError?: string} = {}): string {
+  const {archivedReadOnly, remoteReadOnly, completed, readOnly, draft} = taskComposerFlags(detail);
+  if (completed) return completedComposerHtml(detail);
+  const runtimeError = options.runtimeError || "";
+  const disabled = Boolean(state.taskDetailLoading || runtimeError || readOnly || draft);
+  const warning = state.taskDetailLoading ? "" : draft ? "先启动任务后再发送消息"
+    : archivedReadOnly ? "渠道实例已归档，此 Task 只读"
+    : remoteReadOnly ? "该 Task 属于其他设备，本机只读" : runtimeError;
+  const placeholder = state.taskDetailLoading ? "正在加载任务…" : draft ? "启动任务后可发送消息" : readOnly ? "只读 Task"
+    : runtimeError || (options.activeTurn ? `${state.selectedTaskAgent} 正在执行，发送后将排队`
+      : detail.task.status === "failed" ? "输入消息重试，或输入 /reopen" : `发送给 ${state.selectedTaskAgent}，输入 / 查看命令`);
+  return `${warning ? `<div class="composer-runtime-warning">${escapeHTML(warning)}</div>` : ""}${renderComposerTools(detail, state.selectedTaskAgent, state.taskCategories, state.taskConversation.length)}<div id="slash-command-menu" class="slash-command-menu" ${matchingTaskSlashCommands(state.taskDraft).length ? "" : "hidden"}>${slashCommandMenuHtml(state.taskDraft)}</div>${renderAttachmentComposer(disabled)}<textarea name="content" placeholder="${escapeHTML(placeholder)}" ${disabled ? "disabled" : ""}>${escapeHTML(state.taskDraft)}</textarea><button id="message-send" class="primary" aria-label="发送" ${disabled ? "disabled" : ""}>${icon("send")}<span class="send-label">发送</span></button>`;
+}
+
+// Rebuilds the composer as a whole node so the element type, event bindings and
+// frozen class all follow the Task status. The node is built from the same
+// messageComposerOpenTag/messageComposerHtml pair the first render uses, so the
+// live path and a full render cannot drift apart.
+function messageComposerNode(detail: TaskDetail, options: {activeTurn?: boolean; runtimeError?: string} = {}): HTMLElement {
+  const template = document.createElement("template");
+  template.innerHTML = `${messageComposerOpenTag(detail, options)}${messageComposerHtml(detail, options)}</${messageComposerElement(detail)}>`;
+  return template.content.firstElementChild as HTMLElement;
+}
+
+// Completion can arrive over SSE, rebuilding only part of the screen. The frozen
+// composer, its reopen dialog and the turn placeholder are reconciled here so a
+// Task that finishes (or is reopened) while the page is open stays consistent
+// without waiting for a full render.
+function syncCompletedTaskFrozen(detail: TaskDetail): void {
+  const completed = detail.task.status === "completed";
+  const composer = document.querySelector<HTMLElement>("#message-form");
+  if (composer && completed !== composer.classList.contains("composer-completed")) {
+    const focusedBefore = document.activeElement === composer || document.activeElement === document.body;
+    composer.replaceWith(messageComposerNode(detail));
+    bindMessageComposer();
+    // Replacing a focused node drops focus, so hand it back after a reopen.
+    if (focusedBefore) document.querySelector<HTMLTextAreaElement>("#message-form textarea")?.focus();
+  }
+  let dialog = document.querySelector<HTMLDialogElement>("#reopen-task-dialog");
+  if (completed && !dialog) {
+    document.querySelector("#task-screen-dialogs")?.insertAdjacentHTML("beforeend", reopenTaskDialog(detail));
+    dialog = document.querySelector<HTMLDialogElement>("#reopen-task-dialog");
+  } else if (!completed && dialog) {
+    dialog.remove();
+  }
+  bindReopenTaskControls();
+  const frozenSlot = document.querySelector<HTMLElement>("#task-frozen-slot");
+  if (frozenSlot) frozenSlot.innerHTML = completedTaskBannerHtml(detail);
+  const turnSlot = document.querySelector<HTMLElement>("#agent-turn-slot");
+  const nextTurn = renderAgentTurnCard(detail, state.taskRealtimeState, state.taskContext?.context.metrics);
+  if (turnSlot && turnSlot.innerHTML !== nextTurn) turnSlot.innerHTML = nextTurn;
+}
+
+function reopenTaskDialog(detail: TaskDetail): string {
+  return `<dialog id="reopen-task-dialog"><form id="reopen-task-form"><div class="dialog-head"><h2>重新打开任务</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div><div class="dialog-body"><p class="field-help">${escapeHTML(detail.task.code || detail.task.title)}</p><p>重新打开后 Task 回到「等待处理」状态，可以继续编辑配置和发送消息。</p><p class="dialog-warning">已完成的记录不会被删除，但新消息会开启新的 Round。</p></div><div class="dialog-actions"><button type="button" data-close>取消</button><button type="submit" class="primary">确认重新打开</button></div></form></dialog>`;
+}
+
+// Explains in the frozen state why input is gone and what the way forward is.
+function completedTaskBannerHtml(detail: TaskDetail): string {
+  if (detail.task.status !== "completed") return "";
+  return `<div class="task-failure-banner task-completed-banner"><strong>任务已完成</strong><span>已完成的任务禁止编辑和继续输入，历史内容仍可查看和导出。</span><small>需要继续这个目标时，先重新打开任务再发送消息。</small></div>`;
+}
+
 function taskCtxHtml(): string {
   if (state.selectedTask?.task.status === "draft") {
     return `<div class="task-tool-placeholder">${icon("context")}<h3>尚无 Context</h3><p>启动任务后将生成 Agent Context。</p></div>`;
@@ -2714,7 +2965,8 @@ function taskCtxHtml(): string {
   const value = state.taskContext;
   if (!value) return `<div class="ctx-loading">${icon("refresh")}正在加载 Context...</div>`;
   const context = value.context || {};
-  const sessionActionDisabled = Boolean(state.selectedTask?.turns.some(turn => turn.agent_id === state.selectedTaskAgent && isActiveTurn(turn.status)));
+  const sessionActionDisabled = state.selectedTask?.task.status === "completed"
+    || Boolean(state.selectedTask?.turns.some(turn => turn.agent_id === state.selectedTaskAgent && isActiveTurn(turn.status)));
   return `<div class="ctx-view">
     ${renderContextMetrics(context, sessionActionDisabled)}
     <details class="prompt-snapshot" open><summary>查看本轮 Prompt Snapshot</summary><div class="prompt-snapshot-body markdown-body">${renderMarkdown(context.prompt || "尚无 Prompt Snapshot")}</div></details>
@@ -2723,26 +2975,23 @@ function taskCtxHtml(): string {
 
 function taskDetailView(detail: TaskDetail): string {
   const loadingDetail = state.taskDetailLoading;
-  const archivedReadOnly = detail.task.channel_retired === true || detail.task.read_only_reason === "channel_retired";
-  const remoteReadOnly = Boolean(detail.task.read_only && !archivedReadOnly);
-  const readOnly = archivedReadOnly || remoteReadOnly;
+  const {archivedReadOnly, remoteReadOnly, completed, readOnly} = taskComposerFlags(detail);
   const draft = detail.task.status === "draft";
   const activeTurn = (detail.turns || []).find(item => item.agent_id === state.selectedTaskAgent && isActiveTurn(item.status));
-  const taskFailed = detail.task.status === "failed";
   const selectedAgent = detail.agents.find(item => item.agent_id === state.selectedTaskAgent);
   const runtimeError = selectedAgent?.runtime_config_valid === false
     ? (selectedAgent.runtime_config_error || "模型配置不可用，请修改模型配置") : "";
   const project = state.projects.find(item => item.id === detail.task.project_id);
   const workspace = state.workspaces.find(item => item.id === detail.task.workspace_id);
   const taskMeta = `${project?.name || "-"} · ${workspace?.name || "-"} · ${detail.task.collaboration_mode || "auto"} · ${detail.task.max_agents || 3} Agents`;
-  const composerDisabled = Boolean(loadingDetail || runtimeError || readOnly || draft);
   const chat = `<section class="conversation">
     ${archivedReadOnly ? `<div class="task-failure-banner remote-readonly"><strong>渠道归档只读</strong><span>该渠道实例已归档</span><small>历史内容可查看和导出，不能继续执行或修改</small></div>` : remoteReadOnly ? `<div class="task-failure-banner remote-readonly"><strong>其他设备的只读 Task</strong><span>所属设备：${escapeHTML(detail.task.owner_device_id || "未知")}</span><small>可查看同步历史，不能在本机执行或修改</small><div class="remote-readonly-actions"><button type="button" id="takeover-task">${icon("copy")}接管到本机</button><button type="button" class="danger" data-retire-remote-task="${detail.task.id}">${icon("close")}移除孤立任务</button></div></div>` : ""}
     <div id="task-failure-slot">${taskFailureBannerHtml(detail)}</div>
     ${draft ? `<div class="task-failure-banner task-draft-banner"><strong>任务尚未启动</strong><span>可以先配置 Agent、Skill 和硬件调试，准备好后再启动。</span><button type="button" id="start-task" class="primary">${icon("play")}启动任务</button></div>` : ""}
     <div class="messages" id="conversation-list">${loadingDetail ? `<div class="task-detail-loading" role="status">${icon("spinner", true)}<strong>正在打开任务</strong><small>加载最近 ${initialConversationPageSize} 条消息…</small></div>` : conversationListHtml()}</div>
     <div id="agent-turn-slot">${renderAgentTurnCard(detail, state.taskRealtimeState, state.taskContext?.context.metrics)}</div>
-    <form id="message-form" class="composer${composerDisabled && !loadingDetail ? " runtime-invalid" : ""}">${composerDisabled && !loadingDetail ? `<div class="composer-runtime-warning">${escapeHTML(draft ? "先启动任务后再发送消息" : archivedReadOnly ? "渠道实例已归档，此 Task 只读" : remoteReadOnly ? "该 Task 属于其他设备，本机只读" : runtimeError)}</div>` : ""}${renderComposerTools(detail, state.selectedTaskAgent, state.taskCategories, state.taskConversation.length)}<div id="slash-command-menu" class="slash-command-menu" ${matchingTaskSlashCommands(state.taskDraft).length ? "" : "hidden"}>${slashCommandMenuHtml(state.taskDraft)}</div>${renderAttachmentComposer(composerDisabled)}<textarea name="content" placeholder="${escapeHTML(loadingDetail ? "正在加载任务…" : draft ? "启动任务后可发送消息" : readOnly ? "只读 Task" : runtimeError || (activeTurn ? `${state.selectedTaskAgent} 正在执行，发送后将排队` : taskFailed ? "输入消息重试，或输入 /reopen" : `发送给 ${state.selectedTaskAgent}，输入 / 查看命令`))}" ${composerDisabled ? "disabled" : ""}>${escapeHTML(state.taskDraft)}</textarea><button id="message-send" class="primary" aria-label="发送" ${composerDisabled ? "disabled" : ""}>${icon("send")}<span class="send-label">发送</span></button></form>
+    <div id="task-frozen-slot">${completedTaskBannerHtml(detail)}</div>
+    ${messageComposerOpenTag(detail, {runtimeError})}${messageComposerHtml(detail, {activeTurn: Boolean(activeTurn), runtimeError})}</${messageComposerElement(detail)}>
   </section>`;
   const toolLayout = state.taskTool ? ` task-tool-open task-tool-${state.taskToolMode}` : "";
   const channelVisible = !readOnly && !detail.task.channel_instance_id;
@@ -2752,7 +3001,7 @@ function taskDetailView(detail: TaskDetail): string {
       ${chat}
       ${renderTaskToolPanel(state.taskTool, detail, state.selectedTaskAgent, taskCtxHtml(), state.taskToolMode, taskChannelPanelHTML(), state.taskToolPinned === state.taskTool)}
     </div>
-    ${renderAgentConfigDialog(detail, state.selectedTaskAgent, state.models, state.codexAccounts, state.skills)}${taskTakeoverDialog(detail)}
+    ${renderAgentConfigDialog(detail, state.selectedTaskAgent, state.models, state.codexAccounts, state.skills)}${taskTakeoverDialog(detail)}<div id="task-screen-dialogs">${completed ? reopenTaskDialog(detail) : ""}</div>
   </section>`);
 }
 
@@ -2923,6 +3172,7 @@ function updateTaskLiveRegions(): void {
   }
   const count = document.querySelector<HTMLElement>("#conversation-filter-loaded");
   if (count) count.textContent = `${state.taskConversation.length} 条已加载`;
+  syncCompletedTaskFrozen(detail);
   const textarea = document.querySelector<HTMLTextAreaElement>("#message-form textarea");
   if (textarea) {
     textarea.placeholder = activeTurn ? `${state.selectedTaskAgent} 正在执行，发送后将排队` : detail.task.status === "failed" ? "输入消息重试，或输入 /reopen" : `发送给 ${state.selectedTaskAgent}，输入 / 查看命令`;
@@ -3621,6 +3871,12 @@ function bindCommon(): void {
     });
   });
   document.querySelector("#task-project")?.addEventListener("change", syncTaskWorkspaces);
+  // The collapsed summaries report what is selected inside them, so they must
+  // follow every checkbox change, not just the initial render.
+  document.querySelector<HTMLElement>("#task-dialog")?.addEventListener("change", event => {
+    const target = event.target;
+    if (target instanceof HTMLInputElement && target.type === "checkbox") syncTaskFormFoldCounts();
+  });
   document.querySelector("#task-workspace")?.addEventListener("change", () => {
     const worktreeDir = document.querySelector<HTMLInputElement>("#task-worktree-dir");
     if (worktreeDir) worktreeDir.value = "";
@@ -3648,7 +3904,12 @@ function bindCommon(): void {
       ...taskPayload,
       skill_ids: form.getAll("skill_ids").map(String),
       max_agents: Number(payload.max_agents || 3),
-      proxy_enabled: payload.proxy_enabled === "on",
+      proxy_enabled: proxyEnabledFrom(payload.proxy_enabled),
+      agent_capabilities: {
+        workspace_read: form.get("cap_workspace_read") === "on",
+        task_create: form.get("cap_task_create") === "on",
+        clone_hardware: form.get("cap_clone_hardware") === "on",
+      },
       stream_idle_timeout_ms: Number(streamIdleTimeoutSeconds || 120) * 1000,
       stream_max_retries: Number(payload.stream_max_retries || 0),
     });
@@ -3702,11 +3963,17 @@ function bindCommon(): void {
 	});
   });
   bindTaskAgentControls();
+  bindReopenTaskControls();
   document.querySelector<HTMLSelectElement>("#composer-agent")?.addEventListener("change", async event => {
     await selectTaskAgent(event.currentTarget.value);
     render();
   });
   document.querySelector<HTMLInputElement>('[name="inherit_main"]')?.addEventListener("change", syncAgentConfigFields);
+  // Collapsed summaries report what is selected inside them.
+  document.querySelector<HTMLElement>("#agent-config-dialog")?.addEventListener("change", event => {
+    const target = event.target;
+    if (target instanceof HTMLInputElement && target.type === "checkbox") syncAgentFoldCounts();
+  });
   bindForm("#agent-config-form", async form => {
     if (!state.selectedTask) return;
     assertClaudeOfficialReady("agent-config");
@@ -3739,7 +4006,7 @@ function bindCommon(): void {
       stream_max_retries: Number(form.get("stream_max_retries") || 0),
       filesystem: String(form.get("filesystem") || ""),
       approval: String(form.get("approval") || ""),
-      proxy_enabled: form.get("proxy_enabled") === "on",
+      proxy_enabled: proxyEnabledFrom(form.get("proxy_enabled")),
     });
     await refreshTaskRuntime(state.selectedTask.task.id);
     setMessage("notice", `${agentID} 配置已更新，下一个 Turn 生效`);
@@ -3884,6 +4151,19 @@ function bindCommon(): void {
     });
   });
   bindRemoveAttachmentButtons();
+  bindMessageComposer();
+  document.querySelector<HTMLTextAreaElement>("#message-form textarea")?.addEventListener("paste", event => {
+    const files = clipboardImageFiles(event);
+    if (!files.length) return;
+    event.preventDefault();
+    void uploadMessageAttachments(files);
+  });
+  bindTaskToolsAndPanels();
+}
+
+// The composer element is replaced whenever the Task freezes or reopens, so
+// its listeners are attached from one place that can be re-run on a new node.
+function bindMessageComposer(): void {
   document.querySelector<HTMLFormElement>("#message-form")?.addEventListener("submit", async event => {
     event.preventDefault();
     if (messageSubmitPending) return;
@@ -4092,12 +4372,9 @@ function bindCommon(): void {
     pinTaskTool.setAttribute("aria-label", pinTaskTool.title);
     pinTaskTool.setAttribute("aria-pressed", String(pinned));
   };
-  document.querySelector<HTMLTextAreaElement>("#message-form textarea")?.addEventListener("paste", event => {
-    const files = clipboardImageFiles(event);
-    if (!files.length) return;
-    event.preventDefault();
-    void uploadMessageAttachments(files);
-  });
+}
+
+function bindTaskToolsAndPanels(): void {
   bindTaskToolLayout();
   if (state.taskTool === "hardware" && state.selectedTask) bindHardwarePanel(state.selectedTask, setMessage);
   if (state.taskTool === "browser" && state.selectedTask) bindDesktopPanel(state.selectedTask, setMessage);

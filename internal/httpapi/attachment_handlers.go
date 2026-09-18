@@ -18,6 +18,9 @@ func (s *Server) uploadTaskAttachment(writer http.ResponseWriter, request *http.
 	if s.rejectRetiredChannelTaskWrite(writer, request, taskID) {
 		return
 	}
+	if s.rejectCompletedTaskWrite(writer, request, taskID) {
+		return
+	}
 	if _, err := s.store.Task(request.Context(), taskID); err != nil {
 		writeError(writer, http.StatusNotFound, "task_not_found")
 		return
@@ -92,6 +95,9 @@ func (s *Server) taskAttachmentContent(writer http.ResponseWriter, request *http
 
 func (s *Server) deleteTaskAttachment(writer http.ResponseWriter, request *http.Request) {
 	if s.rejectRetiredChannelTaskWrite(writer, request, request.PathValue("id")) {
+		return
+	}
+	if s.rejectCompletedTaskWrite(writer, request, request.PathValue("id")) {
 		return
 	}
 	err := s.store.DeleteDraftAttachment(request.Context(), request.PathValue("id"), request.PathValue("attachment"))

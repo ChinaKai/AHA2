@@ -40,6 +40,7 @@ import type {
   TaskContextDetail,
   TaskDetail,
   TaskAgent,
+  TaskFacetCounts,
   ConversationCategory,
   ConversationPage,
   HardwareGroup,
@@ -468,7 +469,14 @@ class APIClient {
     });
   }
 
-  tasks(projectID = "", options: {limit?: number; cursor?: string; summary?: boolean} = {}): Promise<{tasks: Task[]; has_more?: boolean; next_cursor?: string}> {
+  tasks(projectID = "", options: {limit?: number; cursor?: string; summary?: boolean} = {}): Promise<{
+    tasks: Task[];
+    has_more?: boolean;
+    next_cursor?: string;
+    // Totals for the filter popovers. The response is paged, so these count the
+    // whole set and must not be re-derived from the loaded tasks.
+    counts?: TaskFacetCounts;
+  }> {
     const query = new URLSearchParams();
     if (projectID) query.set("project_id", projectID);
     if (options.limit) query.set("limit", String(options.limit));

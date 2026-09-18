@@ -244,6 +244,12 @@ export function captureInteractiveRegion(root: HTMLElement | null): InteractiveR
   };
 }
 
+// A select can only hold a value one of its options carries; an empty value is
+// valid only when a placeholder option exists for it.
+function selectValueSupported(select: HTMLSelectElement, value: string): boolean {
+  return [...select.options].some(option => option.value === value);
+}
+
 export function restoreInteractiveRegion(root: HTMLElement | null, state: InteractiveRegionState | null, restoreRootScroll = true): void {
   if (!root || !state) return;
   const elements = regionElements(root);
@@ -264,6 +270,15 @@ export function restoreInteractiveRegion(root: HTMLElement | null, state: Intera
     else if (saved.selected && element.tagName === "SELECT") {
       const selected = new Set(saved.selected);
       [...select.options].forEach(option => { option.selected = selected.has(option.value); });
+    } else if (element.tagName === "SELECT") {
+      // A select must never be left holding a value none of its options carry:
+      // that is selectedIndex -1, and everything derived from the control (the
+      // workspace list, the offered skills, the runtime fields) silently empties
+      // out. The saved value can be stale this way when the previous render
+      // captured the select before its options loaded or its option was removed,
+      // so an unsupported value falls back to the freshly rendered default.
+      if (selectValueSupported(select, saved.value)) element.value = saved.value;
+      else if (select.selectedIndex < 0 && select.options.length > 0) select.selectedIndex = 0;
     } else element.value = saved.value;
     if (saved.selectionStart !== undefined && "setSelectionRange" in element) {
       try { element.setSelectionRange(saved.selectionStart, saved.selectionEnd ?? saved.selectionStart); } catch { /* unsupported input type */ }

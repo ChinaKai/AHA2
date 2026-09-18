@@ -1,5 +1,5 @@
 import {icon} from "./icons.js";
-import {runtimeFieldsHTML} from "./runtime_picker.js";
+import {proxyOptionsHTML, runtimeFieldsHTML} from "./runtime_picker.js";
 import type {CodexAccount, ConversationItem, Model, Skill, TaskAgent, TaskContextDetail, TaskDetail, TaskMemory, Turn} from "./types.js";
 
 export type TaskRealtimeState = "connecting" | "live" | "fallback";
@@ -155,6 +155,11 @@ export function renderAgentTurnCard(
   const round = detail.latest_round;
   const turns = latestAgentTurns(detail.turns || []);
   if (!round || !turns.length) {
+    // A completed Task will not turn the next message into work on its own, so
+    // the placeholder must not promise a new Turn.
+    if (detail.task.status === "completed") {
+      return `<section class="agent-turn-card empty-turn"><strong>任务已完成</strong><small>重新打开任务后才能开始下一轮</small></section>`;
+    }
     return `<section class="agent-turn-card empty-turn"><strong>等待下一轮</strong><small>新消息将创建 Agent Turn</small></section>`;
   }
   const active = turns.filter(turn => isActiveTurn(turn.status));
@@ -338,6 +343,30 @@ function renderTaskSkills(skills: Skill[], projectID: string, selected: string[]
   return visible.map(item => `<label class="task-skill-option"><input type="checkbox" name="skill_ids" value="${item.id}" ${selected.includes(item.id) ? "checked" : ""}><span><strong>${escapeHTML(item.name)}</strong><small>${escapeHTML(item.scope)} \u00b7 ${escapeHTML(item.description || "\u65e0\u63cf\u8ff0")}</small></span></label>`).join("") || `<div class="field-help">\u5f53\u524d Project \u6ca1\u6709\u53ef\u7528 Skill\u3002</div>`;
 }
 
+// Both optional modules collapse to one row so they stop growing the dialog;
+// Skills in particular gains a row per Skill the Project has. The summary badge
+// reports what is switched on, because the body is hidden when collapsed.
+function agentCapabilitiesFold(capabilities: Record<string, boolean> | undefined): string {
+  const granted = capabilities || {};
+  const on = ["workspace_read", "task_create", "clone_hardware"].filter(name => granted[name]).length;
+  return `<details class="task-form-fold" id="agent-capabilities-fold">
+    <summary><strong>Agent 项目级授权</strong><b data-fold-count>${on ? `已启用 ${on}/3` : "默认关闭"}</b></summary>
+    <div class="task-form-fold-body"><div class="task-agent-capabilities">
+      <p>默认关闭；仅 Main Agent 可用。</p>
+      <label><input type="checkbox" name="cap_workspace_read" ${granted.workspace_read ? "checked" : ""}>读取同 Project Workspace</label>
+      <label><input type="checkbox" name="cap_task_create" ${granted.task_create ? "checked" : ""}>创建同 Project Task</label>
+      <label><input type="checkbox" name="cap_clone_hardware" ${granted.clone_hardware ? "checked" : ""}>克隆当前 Task 硬件与凭据</label>
+    </div></div>
+  </details>`;
+}
+
+function agentSkillsFold(skills: Skill[], projectID: string, selected: string[]): string {
+  return `<details class="task-form-fold" id="agent-skills-fold">
+    <summary><strong>Task Skills</strong><b data-fold-count>${selected.length ? `已选 ${selected.length}` : "未选择"}</b></summary>
+    <div class="task-form-fold-body"><div class="task-skill-options">${renderTaskSkills(skills, projectID, selected)}</div></div>
+  </details>`;
+}
+
 export function renderAgentConfigDialog(detail: TaskDetail, agentID: string, models: Model[], accounts: CodexAccount[], skills: Skill[]): string {
   const agent = (detail.agents || []).find(item => item.agent_id === agentID);
   if (!agent) return "";
@@ -347,7 +376,7 @@ export function renderAgentConfigDialog(detail: TaskDetail, agentID: string, mod
   const mainSettings = agent.agent_id === "main" ? `<fieldset class="agent-collaboration-settings"><legend>Task \u7b56\u7565</legend><div class="two">
     <label>\u534f\u4f5c\u6a21\u5f0f<select name="collaboration_mode"><option value="single" ${detail.task.collaboration_mode === "single" ? "selected" : ""}>Single</option><option value="auto" ${detail.task.collaboration_mode !== "single" ? "selected" : ""}>Auto</option></select></label>
     <label>\u6700\u5927 Agent \u6570<input name="max_agents" type="number" min="1" value="${Math.max(1, Number(detail.task.max_agents || 3))}"></label>
-  </div><label>Knowledge<select name="knowledge_policy"><option value="inherit" ${detail.task.knowledge_policy === "inherit" ? "selected" : ""}>\u7ee7\u627f Project</option><option value="enabled" ${detail.task.knowledge_policy === "enabled" ? "selected" : ""}>\u5f00\u542f</option><option value="disabled" ${detail.task.knowledge_policy === "disabled" ? "selected" : ""}>\u5173\u95ed</option></select></label><div class="task-agent-capabilities"><strong>Agent \u9879\u76ee\u7ea7\u6388\u6743</strong><p>\u9ed8\u8ba4\u5173\u95ed\uff1b\u4ec5 Main Agent \u53ef\u7528\u3002</p><label><input type="checkbox" name="cap_workspace_read" ${detail.task.agent_capabilities?.workspace_read ? "checked" : ""}>\u8bfb\u53d6\u540c Project Workspace</label><label><input type="checkbox" name="cap_task_create" ${detail.task.agent_capabilities?.task_create ? "checked" : ""}>\u521b\u5efa\u540c Project Task</label><label><input type="checkbox" name="cap_clone_hardware" ${detail.task.agent_capabilities?.clone_hardware ? "checked" : ""}>\u514b\u9686\u5f53\u524d Task \u786c\u4ef6\u4e0e\u51ed\u636e</label></div><div class="task-skill-picker compact"><strong>Task Skills</strong><p>\u53ea\u6709\u9009\u4e2d\u7684 Skill \u4f1a\u5728\u4e0b\u4e00\u4e2a Turn \u4e2d\u53ef\u7528\u3002</p><div>${renderTaskSkills(skills, detail.task.project_id, detail.task.skill_ids || [])}</div></div></fieldset>` : `<label class="agent-inherit-toggle"><input name="inherit_main" type="checkbox" ${agent.inherit_main ? "checked" : ""}>\u7ee7\u627f Main \u5f53\u524d\u914d\u7f6e</label>`;
+  </div><label>Knowledge<select name="knowledge_policy"><option value="inherit" ${detail.task.knowledge_policy === "inherit" ? "selected" : ""}>\u7ee7\u627f Project</option><option value="enabled" ${detail.task.knowledge_policy === "enabled" ? "selected" : ""}>\u5f00\u542f</option><option value="disabled" ${detail.task.knowledge_policy === "disabled" ? "selected" : ""}>\u5173\u95ed</option></select></label>${agentCapabilitiesFold(detail.task.agent_capabilities)}${agentSkillsFold(skills, detail.task.project_id, detail.task.skill_ids || [])}</fieldset>` : `<label class="agent-inherit-toggle"><input name="inherit_main" type="checkbox" ${agent.inherit_main ? "checked" : ""}>\u7ee7\u627f Main \u5f53\u524d\u914d\u7f6e</label>`;
   return `<dialog id="agent-config-dialog"><form id="agent-config-form" method="dialog">
     <div class="dialog-head"><div><h2>${escapeHTML(agent.agent_id)} 配置</h2><small>${escapeHTML(agent.title || agent.role)}</small></div><button type="button" data-close class="icon-button">${icon("close")}</button></div>
     <input type="hidden" name="agent_id" value="${escapeHTML(agent.agent_id)}">
@@ -358,7 +387,7 @@ export function renderAgentConfigDialog(detail: TaskDetail, agentID: string, mod
       <label>沙箱<select name="filesystem"><option value="read-only" ${agent.filesystem === "read-only" ? "selected" : ""}>只读</option><option value="workspace-write" ${agent.filesystem === "workspace-write" ? "selected" : ""}>工作区可写</option><option value="danger-full-access" ${agent.filesystem === "danger-full-access" ? "selected" : ""}>完全访问</option></select></label>
     </div>
     <label class="agent-runtime-fields">审批<select name="approval"><option value="never" ${agent.approval !== "auto" ? "selected" : ""}>无需确认</option><option value="auto" ${agent.approval === "auto" ? "selected" : ""}>自动批准</option></select></label>
-    <label class="agent-runtime-fields proxy-toggle"><input name="proxy_enabled" type="checkbox" ${agent.proxy_enabled ? "checked" : ""}>Backend 使用共享代理</label>
+    <label class="agent-runtime-fields">Backend 代理<select name="proxy_enabled">${proxyOptionsHTML(agent.proxy_enabled)}</select></label>
     <div class="dialog-actions"><button type="button" data-close>取消</button><button class="primary" value="default">保存</button></div>
   </form></dialog>`;
 }

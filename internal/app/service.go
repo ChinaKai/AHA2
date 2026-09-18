@@ -201,6 +201,7 @@ type CreateTaskInput struct {
 	MaxAgents           int
 	KnowledgePolicy     string
 	SkillIDs            []string
+	AgentCapabilities   map[string]bool
 	StartMode           string
 }
 
@@ -373,6 +374,7 @@ func (s *Service) CreateTask(ctx context.Context, input CreateTaskInput) (domain
 		MaxAgents:               input.MaxAgents,
 		KnowledgePolicy:         normalizeKnowledgePolicy(input.KnowledgePolicy),
 		SkillIDs:                skillIDs,
+		AgentCapabilities:       input.AgentCapabilities,
 		CreatedAt:               now,
 		UpdatedAt:               now,
 	}
@@ -600,6 +602,11 @@ func (s *Service) submitAgentMessage(ctx context.Context, taskID, agentID, conte
 			return domain.Turn{}, err
 		}
 		task.Status = domain.TaskActive
+	}
+	// Re-read the status after the transition above so a Task completed by a
+	// concurrent CompleteTask cannot still take a new message.
+	if current, currentErr := s.store.Task(ctx, task.ID); currentErr == nil && current.Status == domain.TaskCompleted {
+		return domain.Turn{}, fmt.Errorf("task is %s", current.Status)
 	}
 	now := s.now().UTC()
 	message := domain.Message{

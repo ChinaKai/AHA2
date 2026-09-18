@@ -463,6 +463,14 @@ export interface ConversationItem {
   created_at: string;
 }
 
+// Whole-set totals for the task list filter popovers, keyed by raw task status,
+// project id and device filter key.
+export interface TaskFacetCounts {
+  status: Record<string, number>;
+  project: Record<string, number>;
+  device: Record<string, number>;
+}
+
 export interface TaskAgent {
   task_id: string;
   agent_id: string;

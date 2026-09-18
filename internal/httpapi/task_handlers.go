@@ -64,6 +64,11 @@ func (s *Server) listTasks(writer http.ResponseWriter, request *http.Request) {
 		response["has_more"] = page.HasMore
 		response["next_cursor"] = page.NextCursor
 	}
+	// The list is paged but the filter popovers count the whole set, so the
+	// totals come from their own aggregate instead of the loaded page.
+	if counts, countsErr := s.store.TaskFacetCounts(request.Context()); countsErr == nil {
+		response["counts"] = map[string]any{"status": counts.Status, "project": counts.Project, "device": counts.Device}
+	}
 	writeJSON(writer, http.StatusOK, response)
 }
 
@@ -186,31 +191,32 @@ func latestUsageTurn(turns []domain.Turn) domain.Turn {
 
 func (s *Server) createTask(writer http.ResponseWriter, request *http.Request) {
 	var payload struct {
-		ProjectID           string   `json:"project_id"`
-		WorkspaceID         string   `json:"workspace_id"`
-		Title               string   `json:"title"`
-		Request             string   `json:"request"`
-		TargetBranch        string   `json:"target_branch"`
-		BaseCommit          string   `json:"base_commit"`
-		TaskBranch          string   `json:"task_branch"`
-		Isolation           string   `json:"isolation"`
-		WorktreeDir         string   `json:"worktree_dir"`
-		Backend             string   `json:"backend"`
-		ModelSource         string   `json:"model_source"`
-		ModelID             string   `json:"model_id"`
-		WireModel           string   `json:"wire_model"`
-		CodexAccountID      string   `json:"codex_account_id"`
-		ReasoningEffort     string   `json:"reasoning_effort"`
-		StreamIdleTimeoutMS *int     `json:"stream_idle_timeout_ms"`
-		StreamMaxRetries    *int     `json:"stream_max_retries"`
-		Filesystem          string   `json:"filesystem"`
-		Approval            string   `json:"approval"`
-		ProxyEnabled        bool     `json:"proxy_enabled"`
-		CollaborationMode   string   `json:"collaboration_mode"`
-		MaxAgents           int      `json:"max_agents"`
-		KnowledgePolicy     string   `json:"knowledge_policy"`
-		SkillIDs            []string `json:"skill_ids"`
-		StartMode           string   `json:"start_mode"`
+		ProjectID           string           `json:"project_id"`
+		WorkspaceID         string           `json:"workspace_id"`
+		Title               string           `json:"title"`
+		Request             string           `json:"request"`
+		TargetBranch        string           `json:"target_branch"`
+		BaseCommit          string           `json:"base_commit"`
+		TaskBranch          string           `json:"task_branch"`
+		Isolation           string           `json:"isolation"`
+		WorktreeDir         string           `json:"worktree_dir"`
+		Backend             string           `json:"backend"`
+		ModelSource         string           `json:"model_source"`
+		ModelID             string           `json:"model_id"`
+		WireModel           string           `json:"wire_model"`
+		CodexAccountID      string           `json:"codex_account_id"`
+		ReasoningEffort     string           `json:"reasoning_effort"`
+		StreamIdleTimeoutMS *int             `json:"stream_idle_timeout_ms"`
+		StreamMaxRetries    *int             `json:"stream_max_retries"`
+		Filesystem          string           `json:"filesystem"`
+		Approval            string           `json:"approval"`
+		ProxyEnabled        bool             `json:"proxy_enabled"`
+		CollaborationMode   string           `json:"collaboration_mode"`
+		MaxAgents           int              `json:"max_agents"`
+		KnowledgePolicy     string           `json:"knowledge_policy"`
+		SkillIDs            []string         `json:"skill_ids"`
+		AgentCapabilities   *map[string]bool `json:"agent_capabilities"`
+		StartMode           string           `json:"start_mode"`
 	}
 	if err := decodeJSON(request, &payload); err != nil {
 		writeError(writer, http.StatusBadRequest, "invalid_json")
@@ -243,6 +249,13 @@ func (s *Server) createTask(writer http.ResponseWriter, request *http.Request) {
 		writeError(writer, http.StatusBadRequest, "invalid_approval")
 		return
 	}
+	// The create panel offers the same project-level grants as the Agent config
+	// dialog. They are frozen into the Task here so an "immediately started"
+	// Task already holds them for its first Turn.
+	capabilities := map[string]bool{}
+	if payload.AgentCapabilities != nil {
+		capabilities = normalizeTaskAgentCapabilities(*payload.AgentCapabilities)
+	}
 	item, err := s.app.CreateTask(request.Context(), app.CreateTaskInput{
 		ProjectID: payload.ProjectID, WorkspaceID: payload.WorkspaceID, Title: payload.Title, Request: payload.Request,
 		TargetBranch: payload.TargetBranch, BaseCommit: payload.BaseCommit, TaskBranch: payload.TaskBranch,
@@ -252,7 +265,7 @@ func (s *Server) createTask(writer http.ResponseWriter, request *http.Request) {
 		StreamIdleTimeoutMS: payload.StreamIdleTimeoutMS, StreamMaxRetries: payload.StreamMaxRetries,
 		Filesystem: filesystem, Approval: approval, CollaborationMode: payload.CollaborationMode,
 		MaxAgents: payload.MaxAgents, ProxyEnabled: payload.ProxyEnabled, KnowledgePolicy: payload.KnowledgePolicy,
-		SkillIDs: payload.SkillIDs, StartMode: payload.StartMode,
+		SkillIDs: payload.SkillIDs, AgentCapabilities: capabilities, StartMode: payload.StartMode,
 	})
 	if err != nil {
 		writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "create_task_failed", "message": err.Error()})
@@ -881,6 +894,9 @@ func (s *Server) updateTaskCollaboration(writer http.ResponseWriter, request *ht
 	if s.rejectRetiredChannelTaskWrite(writer, request, request.PathValue("id")) {
 		return
 	}
+	if s.rejectCompletedTaskWrite(writer, request, request.PathValue("id")) {
+		return
+	}
 	var payload struct {
 		CollaborationMode string `json:"collaboration_mode"`
 		MaxAgents         int    `json:"max_agents"`
@@ -906,6 +922,9 @@ func (s *Server) updateTaskCollaboration(writer http.ResponseWriter, request *ht
 
 func (s *Server) updateAgentConfig(writer http.ResponseWriter, request *http.Request) {
 	if s.rejectRetiredChannelTaskWrite(writer, request, request.PathValue("id")) {
+		return
+	}
+	if s.rejectCompletedTaskWrite(writer, request, request.PathValue("id")) {
 		return
 	}
 	var payload struct {
@@ -958,6 +977,9 @@ func (s *Server) rotateAgentSession(writer http.ResponseWriter, request *http.Re
 	if s.rejectRetiredChannelTaskWrite(writer, request, taskID) {
 		return
 	}
+	if s.rejectCompletedTaskWrite(writer, request, taskID) {
+		return
+	}
 	var session domain.BackendSession
 	var err error
 	action := "reset"
@@ -985,9 +1007,29 @@ func (s *Server) rotateAgentSession(writer http.ResponseWriter, request *http.Re
 	})
 }
 
+// rejectCompletedTaskWrite freezes a Task that already reached "completed".
+// Its configuration, Agent runtime and attachments stay readable but can no
+// longer be changed; the only way forward is POST /api/v1/tasks/{id}/reopen,
+// which the Web UI asks the Owner to confirm first.
+func (s *Server) rejectCompletedTaskWrite(writer http.ResponseWriter, request *http.Request, taskID string) bool {
+	// A missing Task is not this guard's concern: remote mirrors and genuinely
+	// unknown IDs keep whatever response their own handler already produced.
+	task, err := s.store.Task(request.Context(), taskID)
+	if err != nil || task.Status != domain.TaskCompleted {
+		return false
+	}
+	writeJSON(writer, http.StatusConflict, map[string]any{
+		"ok": false, "error": "task_completed_read_only", "message": "任务已完成，禁止编辑；请先重新打开任务",
+	})
+	return true
+}
+
 func (s *Server) updateTaskTitle(writer http.ResponseWriter, request *http.Request) {
 	id := request.PathValue("id")
 	if s.rejectRetiredChannelTaskWrite(writer, request, id) {
+		return
+	}
+	if s.rejectCompletedTaskWrite(writer, request, id) {
 		return
 	}
 	var payload struct {

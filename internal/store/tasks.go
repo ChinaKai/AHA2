@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
@@ -242,6 +243,79 @@ func (s *Store) ListTasksPage(ctx context.Context, projectID string, cursorAt ti
 		items = items[:limit]
 	}
 	return items, hasMore, nil
+}
+
+// TaskFacetCounts holds the total number of Tasks behind each list filter.
+type TaskFacetCounts struct {
+	Status  map[string]int
+	Project map[string]int
+	Device  map[string]int
+}
+
+// Device filter keys. They must stay identical to the Web client's
+// taskDeviceFilterKey, which produces the value a Task is matched against: a
+// mismatch does not fail, it silently empties the device filter.
+const (
+	TaskDeviceLocalKey      = "local"
+	TaskDeviceRemotePrefix  = "remote:"
+	TaskDeviceRemoteUnknown = "remote:unknown"
+)
+
+func taskDeviceFilterKey(readOnly bool, ownerDeviceID string) string {
+	if !readOnly {
+		return TaskDeviceLocalKey
+	}
+	if ownerDeviceID = strings.TrimSpace(ownerDeviceID); ownerDeviceID == "" {
+		return TaskDeviceRemoteUnknown
+	}
+	return TaskDeviceRemotePrefix + ownerDeviceID
+}
+
+// TaskFacetCounts reports how many Tasks carry each status, belong to each
+// project, and sit on each device. The Task list is paged, so counting the
+// loaded page reports wrong numbers as soon as the list outgrows one page;
+// these totals always cover the whole set, remote mirrors included.
+func (s *Store) TaskFacetCounts(ctx context.Context) (TaskFacetCounts, error) {
+	counts := TaskFacetCounts{Status: map[string]int{}, Project: map[string]int{}, Device: map[string]int{}}
+	local, err := s.db.QueryContext(ctx, `SELECT project_id,status,COUNT(*) FROM tasks GROUP BY project_id,status`)
+	if err != nil {
+		return counts, err
+	}
+	defer local.Close()
+	for local.Next() {
+		var projectID, status string
+		var total int
+		if err := local.Scan(&projectID, &status, &total); err != nil {
+			return counts, err
+		}
+		counts.Status[status] += total
+		counts.Project[projectID] += total
+		counts.Device[TaskDeviceLocalKey] += total
+	}
+	if err := local.Err(); err != nil {
+		return counts, err
+	}
+	// Mirrors carry their Task as a synced payload, so the status and project
+	// come from the JSON rather than from columns.
+	mirrors, err := s.db.QueryContext(ctx, `
+		SELECT owner_device_id,json_extract(payload_json,'$.project_id'),json_extract(payload_json,'$.status'),COUNT(*)
+		FROM sync_remote_task_objects WHERE object_type='task'
+		GROUP BY owner_device_id,json_extract(payload_json,'$.project_id'),json_extract(payload_json,'$.status')`)
+	if err != nil {
+		return counts, err
+	}
+	defer mirrors.Close()
+	for mirrors.Next() {
+		var owner, projectID, status sql.NullString
+		var total int
+		if err := mirrors.Scan(&owner, &projectID, &status, &total); err != nil {
+			return counts, err
+		}
+		counts.Status[status.String] += total
+		counts.Project[projectID.String] += total
+		counts.Device[taskDeviceFilterKey(true, owner.String)] += total
+	}
+	return counts, mirrors.Err()
 }
 
 func (s *Store) UpdateTaskStatus(ctx context.Context, id string, from, to domain.TaskStatus, updatedAt, completedAt string) error {
