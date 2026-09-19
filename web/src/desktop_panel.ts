@@ -3,8 +3,6 @@ import {icon} from "./icons.js";
 import type {TaskDetail} from "./types.js";
 
 type Notice = (type: "error" | "notice", message: string) => void;
-type ActionKind = "invoke" | "set_value" | "toggle" | "select" | "expand" | "collapse";
-type Mode = "foreground" | "background";
 type InputKind = "click" | "double_click" | "drag" | "scroll" | "text" | "key" | "focus";
 interface SharedWindow {
   id: string; title: string; process: string; desktop_id?: string; monitor_id?: string;
@@ -20,9 +18,9 @@ interface SharedElement {
 }
 interface Session {
   id: string; task_id: string; window: SharedWindow; controller: string;
-  revision: number; expires_at: string; claimed: boolean; mode?: Mode; switching?: boolean;
+  revision: number; expires_at: string; claimed: boolean; mode?: string; switching?: boolean;
 }
-interface Status { supported: boolean; foreground_supported?: boolean; stream_supported?: boolean; targets_supported?: boolean; shared_control_supported?: boolean; background_desktop_supported?: boolean; reason?: string; session: Session | null }
+interface Status { supported: boolean; foreground_supported?: boolean; stream_supported?: boolean; targets_supported?: boolean; shared_control_supported?: boolean; reason?: string; session: Session | null }
 interface Observation {
   id: string; session_id: string; revision: number; window: SharedWindow;
   elements: SharedElement[]; image: string; width: number; height: number; capture_error?: string; control_error?: string;
@@ -38,7 +36,7 @@ interface PanelState {
   windowID: string; selectedID: string; observation: Observation | null; observedAt: number;
   draft: string; dirty: boolean; error: string; sessionNote: string;
   loading: boolean; busy: string; denied: boolean;
-  mode: Mode; windowsLoaded: boolean; inputDraft: string;
+  windowsLoaded: boolean; inputDraft: string;
   actionError: string;
   videoMode: VideoMode; adaptive: AdaptiveState; transport: string; fps: number; cycleMS: number;
   zoom: number;
@@ -215,14 +213,6 @@ const shortcuts = [
   {id: "backspace", label: "退格", keys: ["BACKSPACE"]},
   {id: "select-all", label: "全选", keys: ["CTRL", "A"]},
 ];
-const actions: Record<ActionKind, {label: string; icon: string}> = {
-  invoke: {label: "执行", icon: "send"},
-  set_value: {label: "设置值", icon: "save"},
-  toggle: {label: "切换", icon: "sync"},
-  select: {label: "选中", icon: "tasks"},
-  expand: {label: "展开", icon: "chevron-down"},
-  collapse: {label: "折叠", icon: "chevron-up"},
-};
 
 function escapeHTML(value: unknown): string {
   return String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;")
@@ -236,7 +226,7 @@ function stateFor(detail: TaskDetail): PanelState {
       taskID: detail.task.id, remote: Boolean(detail.task.read_only), status: null, windows: [],
       windowID: "new-desktop", selectedID: "", observation: null, observedAt: 0, draft: "", dirty: false,
       error: "", sessionNote: "", loading: false, busy: "", denied: false,
-      mode: "foreground", windowsLoaded: false, inputDraft: "", actionError: "",
+      windowsLoaded: false, inputDraft: "", actionError: "",
       videoMode: "auto", adaptive: {level: 1, slow: 0, fast: 0}, transport: "HTTP 预览", fps: 0, cycleMS: 0, zoom: 1,
       targets: null, desktopID: "", monitorID: "", targetKind: "new-desktop", popover: "",
     };
@@ -272,10 +262,6 @@ function selected(state: PanelState): SharedElement | undefined {
   return state.observation?.elements.find(element => element.id === state.selectedID);
 }
 
-function supportedActions(element?: SharedElement): ActionKind[] {
-  return Object.keys(actions).filter(kind => element?.actions?.includes(kind)) as ActionKind[];
-}
-
 function canAssist(state: PanelState): boolean {
   return !state.remote && !state.denied && state.status?.shared_control_supported === true && Boolean(state.status
     && (state.status.session?.mode === "foreground" ? state.status.foreground_supported : state.status.supported))
@@ -291,18 +277,20 @@ function actionable(state: PanelState): boolean {
     && state.observedAt > 0 && Date.now() - state.observedAt < 25000);
 }
 
+// Control is foreground-only, so a live shared session is always foreground.
+// The helper stays so the call sites read as "is this grant active".
 function foreground(state: PanelState): boolean {
-  return state.status?.session?.mode === "foreground";
+  return Boolean(state.status?.session);
 }
 
 function inputAllowed(state: PanelState, kind: InputKind): boolean {
   return foreground(state) && Boolean(state.observation?.input_actions?.includes(kind));
 }
 
+// Crossing to another virtual desktop is Owner-only and needs the explicit
+// desktop-switch grant; there is no background mode to fall back on.
 function windowSelectable(state: PanelState, window: SharedWindow): boolean {
-  return !window.other_desktop || (state.mode === "background"
-    ? state.status?.background_desktop_supported === true
-    : state.targets?.desktop_switch_supported === true);
+  return !window.other_desktop || state.targets?.desktop_switch_supported === true;
 }
 
 function windowDesktopName(state: PanelState, window: SharedWindow): string {
@@ -373,10 +361,7 @@ export function renderDesktopPanel(detail: TaskDetail, header = ""): string {
       </form>
     </section>
     <section id="desktop-targets-popover" class="desktop-popover" role="dialog" aria-label="共享目标" hidden>
-      <div class="desktop-mode-row"><div class="desktop-controller" role="group" aria-label="控制模式">
-        <button type="button" data-desktop-mode="foreground" aria-pressed="${state.mode === "foreground"}">前台控制</button>
-        <button type="button" data-desktop-mode="background" aria-pressed="${state.mode === "background"}">后台控件</button>
-      </div><span id="desktop-mode-status"></span></div>
+      <div class="desktop-mode-row"><span id="desktop-mode-status"></span></div>
       <div class="desktop-toolbar">
         <label class="desktop-window-label">共享目标<select id="desktop-window" aria-label="共享目标" disabled><option value="">正在加载目标...</option></select></label>
         <button type="button" id="desktop-refresh" class="icon-button" title="刷新目标与画面" aria-label="刷新目标与画面">${icon("refresh")}</button>
@@ -397,11 +382,6 @@ export function renderDesktopPanel(detail: TaskDetail, header = ""): string {
       <header><h4>窗口元素</h4><small id="desktop-element-count">0</small></header>
       <div id="desktop-elements" class="desktop-elements" role="group" aria-label="窗口元素"></div>
       <div class="desktop-selection"><strong id="desktop-selected">未选择元素</strong><small id="desktop-value"></small></div>
-      <div id="desktop-actions" class="desktop-actions"></div>
-      <form id="desktop-value-form" class="desktop-value-form" hidden>
-        <label>元素值<textarea id="desktop-value-input" name="value" rows="2" autocomplete="off" spellcheck="false">${escapeHTML(state.draft)}</textarea></label>
-        <button type="submit" title="设置值" aria-label="设置值">${icon("save")}<span>设置值</span></button>
-      </form>
     </details>
     </section>
   </section>`;
@@ -416,7 +396,7 @@ function statusText(state: PanelState): string {
   if (expired(session)) return "共享授权已过期，请重新共享窗口";
   if (session?.switching) return "正在切换共享目标...";
   if (session && session.controller !== "shared") return "旧版独占授权：请停止后重新共享，以授权共同控制";
-  if (!session) return state.sessionNote || (state.mode === "foreground" && !state.status.foreground_supported ? "此宿主不支持前台控制" : "尚未授权共享窗口");
+  if (!session) return state.sessionNote || (!state.status.foreground_supported ? "此宿主不支持前台控制" : "尚未授权共享窗口");
   if (state.busy) return state.busy;
   return `共同控制 · ${session.claimed ? "Agent 已接入" : "Agent 可直接接入"} · 授权到期 ${new Date(session.expires_at).toLocaleTimeString()}`;
 }
@@ -428,18 +408,16 @@ function updateDOM(binding: Binding): void {
   root.classList.toggle("desktop-sharing", Boolean(session));
   const observation = state.observation;
   const element = selected(state);
-  const allowed = supportedActions(element);
   const text = (selector: string, value: string) => {
     const node = root.querySelector<HTMLElement>(selector);
     if (node && node.textContent !== value) node.textContent = value;
   };
-  const modeSupported = state.mode === "foreground" ? state.status?.foreground_supported === true : state.status?.supported === true;
-  const canShare = modeSupported && state.status?.shared_control_supported === true
+  const canShare = state.status?.foreground_supported === true && state.status?.shared_control_supported === true
     && (!session || session.controller === "shared") && !state.denied && !state.busy && !session?.switching;
   const chooser = root.querySelector<HTMLSelectElement>("#desktop-window")!;
   const choiceValue = (kind: string, id: string) => JSON.stringify({kind, id});
   const options = '<option value="">选择已有桌面或窗口</option>'
-    + (state.mode === "foreground" && state.targets?.desktops.length ? `<optgroup label="已有桌面">${state.targets.desktops.map(item =>
+    + (state.targets?.desktops.length ? `<optgroup label="已有桌面">${state.targets.desktops.map(item =>
       `<option value="${escapeHTML(choiceValue("desktop", item.id))}" ${!state.targets!.desktop_switch_supported && !item.current ? "disabled" : ""}>${escapeHTML(item.name)}${item.current ? "（当前）" : ""}</option>`).join("")}</optgroup>` : "")
     + `<optgroup label="窗口">${state.windows.map(item => {
       const desktop = windowDesktopName(state, item);
@@ -459,16 +437,10 @@ function updateDOM(binding: Binding): void {
     if (chooser.value !== value) chooser.value = value;
     if (chooser.disabled !== !canShare) chooser.disabled = !canShare;
   }
-  root.querySelectorAll<HTMLButtonElement>("[data-desktop-mode]").forEach(button => {
-    const pressed = button.dataset.desktopMode === state.mode;
-    button.classList.toggle("active", pressed);
-    button.setAttribute("aria-pressed", String(pressed));
-    button.disabled = Boolean(session?.switching) || Boolean(state.busy);
-  });
-  text("#desktop-mode-status", (session?.mode || (session ? "background" : state.mode)) === "foreground" ? "前台 · 会影响宿主键鼠" : "后台 · 元素操作");
+  text("#desktop-mode-status", session ? "前台 · 共享期间会影响宿主键鼠" : "");
   root.querySelector<HTMLButtonElement>("#desktop-share")!.disabled = !canShare || state.targetKind === "new-desktop"
     || (state.targetKind === "window" && !state.windows.some(item => item.id === state.windowID && windowSelectable(state, item)))
-    || (state.targetKind === "desktop" && (state.mode !== "foreground" || !state.targets?.desktops.some(item =>
+    || (state.targetKind === "desktop" && (!state.targets?.desktops.some(item =>
       item.id === state.desktopID && (item.current || state.targets!.desktop_switch_supported))));
   text("#desktop-share span", session ? "切换到所选目标" : "共享所选目标");
   const monitor = root.querySelector<HTMLSelectElement>("#desktop-monitor")!;
@@ -476,9 +448,9 @@ function updateDOM(binding: Binding): void {
   if (document.activeElement !== monitor) {
     if (monitor.dataset.options !== monitorOptions) { monitor.innerHTML = monitorOptions; monitor.dataset.options = monitorOptions; }
     if (monitor.value !== state.monitorID) monitor.value = state.monitorID;
-    monitor.disabled = !canShare || state.mode !== "foreground" || !state.targets?.monitors.length;
+    monitor.disabled = !canShare || !state.targets?.monitors.length;
   }
-  root.querySelector<HTMLButtonElement>("#desktop-new-desktop")!.disabled = !canShare || state.mode !== "foreground"
+  root.querySelector<HTMLButtonElement>("#desktop-new-desktop")!.disabled = !canShare
     || Boolean(state.targets && !state.targets.desktop_switch_supported);
   text("#desktop-target-reason", errorMessages[state.targets?.desktop_reason || ""] || state.targets?.desktop_reason || "");
   root.querySelector<HTMLElement>("#desktop-empty-target")!.hidden = Boolean(session);
@@ -555,24 +527,8 @@ function updateDOM(binding: Binding): void {
   }
   text("#desktop-selected", element ? `${element.name || "未命名元素"} · ${element.role}` : "未选择元素");
   text("#desktop-value", element?.value || "");
-  const toolbar = root.querySelector<HTMLElement>("#desktop-actions")!;
-  const toolbarHTML = allowed.filter(kind => kind !== "set_value").map(kind =>
-    `<button type="button" data-desktop-action="${kind}" title="${actions[kind].label}">${icon(actions[kind].icon)}<span>${actions[kind].label}</span></button>`).join("")
-    || (element && !allowed.length ? '<span class="desktop-empty">此元素没有支持的操作</span>' : "");
-  if (toolbar.dataset.content !== toolbarHTML) {
-    toolbar.innerHTML = toolbarHTML;
-    toolbar.dataset.content = toolbarHTML;
-  }
-  root.querySelectorAll<HTMLButtonElement>("[data-desktop-action], #desktop-value-form button")
-    .forEach(button => { button.disabled = !actionable(state); });
-  root.querySelector<HTMLElement>("#desktop-value-form")!.hidden = !allowed.includes("set_value");
-  const input = root.querySelector<HTMLTextAreaElement>("#desktop-value-input")!;
-  // Polling must not replace or disable a focused editor; actions still fail closed.
-  input.readOnly = !canAssist(state);
-  if (input.value !== state.draft) input.value = state.draft;
-  // The inspector is how an element action is chosen, so it has to stay
-  // reachable in background mode; the free-form input bar stays foreground-only
-  // because coordinate gestures are not available there.
+  // The element list is read-only now: it reports what the adapter saw, and all
+  // input goes through the surface below.
   root.querySelector<HTMLElement>(".desktop-inspector")!.hidden = !session;
   root.querySelector<HTMLElement>("#desktop-input")!.hidden = !foreground(state) || !session;
   const focus = root.querySelector<HTMLButtonElement>("#desktop-focus")!;
@@ -683,7 +639,6 @@ function setStatus(binding: Binding, status: Status): void {
     binding.state.popover = "";
     binding.root.querySelector<HTMLDetailsElement>(".desktop-inspector")!.open = false;
     binding.state.zoom = 1;
-    if (status.session) binding.state.mode = status.session.mode || "background";
   }
   if (old?.id !== status.session?.id || old?.revision !== status.session?.revision
     || old?.controller !== status.session?.controller || !status.stream_supported || expired(status.session)) {
@@ -1133,81 +1088,20 @@ async function mutate(binding: Binding, suffix: string, payload: object, busy: s
 // cover the picture the Owner is working on, so a picture click only records the
 // selection: the actions-bar entry points open the editor when a value actually
 // needs typing, and the Owner opens the list deliberately.
-function chooseElement(binding: Binding, id: string, surface: "picture" | "list" = "list"): void {
+// The element list is a read-only inspection aid now: control goes through the
+// surface, so selecting an entry only shows what the adapter reported.
+function chooseElement(binding: Binding, id: string): void {
   const {state} = binding;
   const element = state.observation?.elements.find(item => item.id === id);
   if (!element) return;
-  if (surface === "list") {
-    binding.root.querySelector<HTMLDetailsElement>(".desktop-inspector")!.open = true;
-    setPopover(binding, "operations");
-  }
+  binding.root.querySelector<HTMLDetailsElement>(".desktop-inspector")!.open = true;
+  setPopover(binding, "operations");
   if (state.selectedID !== id) {
     state.selectedID = id;
     state.draft = element.value || "";
     state.dirty = false;
   }
   updateDOM(binding);
-}
-
-// Editing a value needs the form, which only exists while the inspector inside
-// the operations popover is open, so this is the path that reveals both.
-function openElementEditor(binding: Binding): void {
-  binding.root.querySelector<HTMLDetailsElement>(".desktop-inspector")!.open = true;
-  setPopover(binding, "operations");
-}
-
-function performAction(binding: Binding, kind: string): void {
-  const {state} = binding;
-  const element = selected(state);
-  // Element actions work in both modes. In background the adapter maps them to
-  // the control's own accessibility action, which is exactly what keeps the
-  // Owner's focus where it is. Free-form pointer gestures stay foreground-only:
-  // the background adapter has no coordinate input.
-  // Element actions work in both modes. In background the adapter maps them to
-  // the control's own accessibility action, which is exactly what keeps the
-  // Owner's focus where it is. Free-form pointer gestures stay foreground-only:
-  // the background adapter has no coordinate input.
-  if (!actionable(state) || !element || !supportedActions(element).includes(kind as ActionKind)) return;
-  dispatchElementAction(binding, element, kind as ActionKind);
-}
-
-function dispatchElementAction(binding: Binding, element: SharedElement, kind: ActionKind): void {
-  const {state} = binding;
-  if (!actionable(state) || !supportedActions(element).includes(kind)) return;
-  const session = state.status!.session!;
-  void mutate(binding, "/actions", {
-    session_id: session.id, revision: session.revision, observation_id: state.observation!.id,
-    kind, element_id: element.id, ...(kind === "set_value" ? {value: state.draft} : {}),
-  }, "正在操作目标软件...");
-}
-
-// The Owner works on the picture, not on the element list. A click is resolved
-// to the element under the pointer and its own action is dispatched, so the
-// experience matches foreground: point at what you want, click it. Resolution
-// still lands on an authorized element rather than a raw coordinate, which is
-// what keeps the background path from becoming arbitrary input injection.
-function elementAtPoint(state: PanelState, x: number, y: number): SharedElement | undefined {
-  const candidates = (state.observation?.elements || []).filter(element =>
-    element.width > 0 && element.height > 0 && element.actions?.length
-    && x >= element.x && x <= element.x + element.width
-    && y >= element.y && y <= element.y + element.height);
-  if (!candidates.length) return undefined;
-  // Innermost wins: a button inside a toolbar should win over the toolbar.
-  return candidates.reduce((best, element) =>
-    element.width * element.height < best.width * best.height ? element : best);
-}
-
-// What a plain click means for an element. Buttons and links invoke, checkboxes
-// and radios flip. A text entry is the exception: it is typed into, so clicking
-// only selects it and lets the Owner enter a value, rather than firing its
-// set_value with whatever draft happens to be there.
-function primaryAction(element: SharedElement): ActionKind | undefined {
-  const supported = supportedActions(element);
-  if (supported.includes("set_value")) return undefined;
-  for (const kind of ["invoke", "toggle", "select", "expand", "collapse"] as ActionKind[]) {
-    if (supported.includes(kind)) return kind;
-  }
-  return undefined;
 }
 
 function cancelGesture(binding: Binding): void {
@@ -1307,18 +1201,6 @@ function bindInput(binding: Binding): void {
     binding.gesture = {...point, button: ["left", "middle", "right"][event.button],
       pointerID: event.pointerId, observationID: state.observation!.id};
     image.setPointerCapture(event.pointerId);
-  });
-  listen(binding, image, "pointermove", event => {
-    // Background only: preview which element a click would act on, so pointing
-    // at the picture feels the same as pointing at the real window. Moving over
-    // empty space keeps the current selection rather than clearing it, so a
-    // value the Owner is part-way through editing does not disappear when the
-    // pointer drifts off the control.
-    if (foreground(state) || binding.gesture || !actionable(state)) return;
-    const point = imagePoint(binding, event);
-    const element = point ? elementAtPoint(state, point.x, point.y) : undefined;
-    if (!element || element.id === state.selectedID) return;
-    chooseElement(binding, element.id, "picture");
   });
   listen(binding, image, "pointerup", event => {
     const gesture = binding.gesture;
@@ -1476,13 +1358,12 @@ function bindPopovers(binding: Binding): void {
 function shareTarget(binding: Binding, createDesktop = false): void {
   if (!current(binding) || binding.state.remote) return;
   const {state} = binding;
-  const supported = state.mode === "foreground" ? state.status?.foreground_supported : state.status?.supported;
+  const supported = state.status?.foreground_supported;
   if (!supported || state.status?.shared_control_supported !== true || state.denied || state.busy || state.status?.session?.switching
     || (state.status?.session && state.status.session.controller !== "shared")) return;
   const target: TargetSelection = createDesktop ? {kind: "new-desktop"}
     : state.targetKind === "desktop" ? {kind: "desktop", desktop_id: state.desktopID}
       : {kind: "window", window_id: state.windowID};
-  if (target.kind !== "window" && state.mode !== "foreground") return;
   const selectedWindow = target.kind === "window" ? state.windows.find(item => item.id === target.window_id) : undefined;
   if (target.kind === "window" && (!selectedWindow || !windowSelectable(state, selectedWindow))) return;
   if (target.kind === "desktop" && !state.targets?.desktops.some(item => item.id === target.desktop_id
@@ -1494,19 +1375,15 @@ function shareTarget(binding: Binding, createDesktop = false): void {
       : state.windows.find(item => item.id === target.window_id)?.title;
   const monitor = state.targets?.monitors.find(item => item.id === target.monitor_id);
   const switchNotice = selectedWindow?.other_desktop
-    ? state.mode === "background"
-      ? `\n将在窗口所属桌面「${windowDesktopName(state, selectedWindow)}」后台操作，不切换到该桌面。`
-      : `\n将切换到窗口所属桌面：${windowDesktopName(state, selectedWindow)}。`
+    ? `\n将切换到窗口所属桌面：${windowDesktopName(state, selectedWindow)}。`
     : "";
-  const effects = state.mode === "foreground"
-    ? "会移动宿主鼠标、输入键盘、改变窗口焦点或切换桌面。不是虚拟机，也不提供输入隔离。"
-    : "仅通过目标软件支持的后台控件操作改变软件状态，不切换桌面、不激活窗口。是否可显示画面或操作控件取决于目标应用。";
+  const effects = "会移动宿主鼠标、输入键盘、改变窗口焦点或切换桌面。不是虚拟机，也不提供输入隔离。";
   const consent = window.confirm(`共同控制：${label || "共享目标"}${switchNotice}${monitor ? `\n显示器：${monitor.name}` : ""}\n\n授权当前任务的 Main Agent 和 Owner 共同查看并操作这个目标，无需交接控制权。\n${effects}\n\n${state.status?.session ? "更换共享目标后旧目标授权立即失效。" : ""}确认共同共享？`);
   if (!consent) return;
   const session = state.status?.session;
   void mutate(binding, session ? "/switch" : "/session", {
     ...(session ? {session_id: session.id, revision: session.revision} : {}),
-    target, mode: state.mode, confirm_foreground: state.mode === "foreground", confirm_shared: true,
+    target, mode: "foreground", confirm_foreground: true, confirm_shared: true,
   }, session ? "正在切换共享目标..." : "正在共享目标...");
 }
 
@@ -1597,13 +1474,6 @@ export function bindDesktopPanel(detail: TaskDetail, notify: Notice): void {
     const id = (event.target as HTMLSelectElement).value;
     if (state.targets?.monitors.some(item => item.id === id)) state.monitorID = id;
   });
-  root.querySelectorAll<HTMLButtonElement>("[data-desktop-mode]").forEach(button => listen(binding, button, "click", () => {
-    if (state.busy || state.status?.session?.switching) return;
-    state.mode = button.dataset.desktopMode === "background" ? "background" : "foreground";
-    if (state.mode === "background" && state.windowID === "new-desktop") state.windowID = "";
-    if (state.mode === "foreground" && !state.windowID) state.windowID = "new-desktop";
-    updateDOM(binding);
-  }));
   listen(binding, root.querySelector("#desktop-refresh"), "click", () => {
     state.denied = false;
     void poll(binding, true);
@@ -1621,54 +1491,12 @@ export function bindDesktopPanel(detail: TaskDetail, notify: Notice): void {
     const button = event.target instanceof Element ? event.target.closest<HTMLElement>("[data-desktop-element]") : null;
     if (button) chooseElement(binding, button.dataset.desktopElement || "");
   });
-  listen(binding, root.querySelector("#desktop-image"), "click", event => {
-    // Background: a click on the picture is the Owner acting on the window, the
-    // same as in foreground, but without coordinates. It resolves to the element
-    // under the pointer and that element performs its own action, so the Owner
-    // points at what they want instead of learning about elements. Resolution
-    // still lands on an authorized element, which is what keeps this from
-    // becoming arbitrary input injection.
-    if (foreground(state)) return;
-    if (!actionable(state)) return;
-    const observation = state.observation;
-    if (!observation || observation.width <= 0 || observation.height <= 0) return;
-    const bounds = (event.currentTarget as HTMLImageElement).getBoundingClientRect();
-    if (bounds.width <= 0 || bounds.height <= 0) return;
-    const pointer = event as MouseEvent;
-    const element = elementAtPoint(state,
-      (pointer.clientX - bounds.left) / bounds.width * observation.width,
-      (pointer.clientY - bounds.top) / bounds.height * observation.height);
-    if (!element) return;
-    event.preventDefault();
-    chooseElement(binding, element.id, "picture");
-    const kind = primaryAction(element);
-    if (kind) {
-      dispatchElementAction(binding, element, kind);
-      return;
-    }
-    // A text entry has no click action: it is typed into, so clicking it opens
-    // the editor. That is the one case where the popover must cover the picture,
-    // because the Owner is now typing rather than pointing.
-    if (supportedActions(element).includes("set_value")) openElementEditor(binding);
-  });
   listen(binding, root.querySelector("#desktop-image"), "error", () => {
     if (!current(binding)) return;
     root.querySelector<HTMLElement>("#desktop-preview")!.hidden = true;
     const message = root.querySelector<HTMLElement>("#desktop-capture-status")!;
     message.textContent = "窗口截图无法显示";
     message.hidden = false;
-  });
-  listen(binding, root.querySelector("#desktop-actions"), "click", event => {
-    const button = event.target instanceof Element ? event.target.closest<HTMLElement>("[data-desktop-action]") : null;
-    if (button) performAction(binding, button.dataset.desktopAction || "");
-  });
-  listen(binding, root.querySelector("#desktop-value-input"), "input", event => {
-    state.draft = (event.target as HTMLTextAreaElement).value;
-    state.dirty = true;
-  });
-  listen(binding, root.querySelector("#desktop-value-form"), "submit", event => {
-    event.preventDefault();
-    performAction(binding, "set_value");
   });
   bindInput(binding);
   const visibility = () => {

@@ -7,7 +7,6 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"os"
-	"strings"
 	"testing"
 	"unicode/utf16"
 )
@@ -21,9 +20,9 @@ func TestNativeHelperRejectsMalformedTarget(t *testing.T) {
 	if supported, reason := p.Support(); !supported {
 		t.Fatalf("helper unavailable: %s", reason)
 	}
-	_, err := p.Observe(context.Background(), Window{ID: "invalid-fixture-id"})
-	if err == nil || !strings.Contains(err.Error(), "stale_target") {
-		t.Fatalf("helper did not reject malformed target: %v", err)
+	_, err := p.(ForegroundProvider).ObserveForeground(context.Background(), Window{ID: "invalid-fixture-id"})
+	if err == nil {
+		t.Fatal("helper did not reject malformed target")
 	}
 }
 

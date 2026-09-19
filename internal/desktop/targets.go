@@ -8,10 +8,10 @@ import (
 )
 
 func validateSelection(target TargetSelection, mode string, confirmed bool) error {
-	if mode != "foreground" && mode != "background" {
+	if mode != "foreground" {
 		return failure("invalid_mode")
 	}
-	if mode == "foreground" && !confirmed {
+	if !confirmed {
 		return failure("foreground_confirmation_required")
 	}
 	if len(target.WindowID) > 128 || len(target.DesktopID) > 64 || len(target.MonitorID) > 128 {
@@ -104,7 +104,7 @@ func selectionWindowID(target TargetSelection) string {
 
 func (m *Manager) OpenTarget(ctx context.Context, taskID string, target TargetSelection, mode string, confirmed bool) (Status, error) {
 	if mode == "" {
-		mode = "background"
+		mode = "foreground"
 	}
 	if err := validateSelection(target, mode, confirmed); err != nil {
 		return Status{}, err
@@ -115,7 +115,7 @@ func (m *Manager) OpenTarget(ctx context.Context, taskID string, target TargetSe
 // OpenSharedTarget is called only after the Owner explicitly consents to joint access.
 func (m *Manager) OpenSharedTarget(ctx context.Context, taskID string, target TargetSelection, mode string, confirmed bool) (Status, error) {
 	if mode == "" {
-		mode = "background"
+		mode = "foreground"
 	}
 	if err := validateSelection(target, mode, confirmed); err != nil {
 		return Status{}, err
@@ -124,28 +124,6 @@ func (m *Manager) OpenSharedTarget(ctx context.Context, taskID string, target Ta
 }
 
 func (m *Manager) resolveSelection(ctx context.Context, windowID, mode string, foreground ForegroundProvider, selection *TargetSelection) (Window, error) {
-	if provider, ok := m.provider.(BackgroundTargetProvider); ok && mode == "background" {
-		release, err := m.captureQueue.acquire(ctx, true)
-		if err != nil {
-			return Window{}, err
-		}
-		defer release()
-		if supported, _ := m.support(); !supported {
-			return Window{}, failure("unsupported")
-		}
-		window, err := provider.SelectBackgroundWindow(ctx, windowID)
-		if err != nil {
-			return Window{}, err
-		}
-		if err := ctx.Err(); err != nil {
-			return Window{}, err
-		}
-		if window.ID != windowID || window.ID == "" || window.Kind == "desktop" ||
-			window.DesktopID == "" || len(window.DesktopID) > 64 {
-			return Window{}, failure("target_mismatch")
-		}
-		return window, nil
-	}
 	if provider, ok := m.provider.(TargetProvider); ok && selection != nil && mode == "foreground" {
 		window, err := provider.SelectTarget(ctx, *selection)
 		if err != nil {

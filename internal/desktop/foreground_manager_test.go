@@ -64,12 +64,10 @@ func TestForegroundRequiresExplicitConsentAndProvider(t *testing.T) {
 		_, err := m.OpenWithMode(context.Background(), "t", target, "foreground", false)
 		wantError(t, err, "foreground_confirmation_required")
 	}
-	_, err := m.Open(context.Background(), "t", "new-desktop")
-	wantError(t, err, "foreground_confirmation_required")
 	if p.creates.Load() != 0 {
 		t.Fatal("unconfirmed request created a desktop")
 	}
-	_, err = New(&fakeProvider{}).OpenWithMode(context.Background(), "t", "w1", "foreground", true)
+	_, err := New(listOnlyProvider{}).OpenWithMode(context.Background(), "t", "w1", "foreground", true)
 	wantError(t, err, "unsupported")
 	s := shareForeground(t, m, "t", "new-desktop")
 	if s.Mode != "foreground" || s.Window.Kind != "desktop" || p.creates.Load() != 1 || !m.Status("t").ForegroundSupported {
@@ -109,7 +107,7 @@ func TestForegroundPendingCreationIsReserved(t *testing.T) {
 	<-entered
 	_, err := m.OpenWithMode(context.Background(), "t2", "w2", "foreground", true)
 	wantError(t, err, "foreground_in_use")
-	_, err = m.Open(context.Background(), "t1", "w1")
+	_, err = m.OpenWithMode(context.Background(), "t1", "w1", "foreground", true)
 	wantError(t, err, "busy")
 	close(release)
 	if <-done == nil {
@@ -252,17 +250,4 @@ func TestForegroundStopKeepsGlobalReservationUntilInputReturns(t *testing.T) {
 	close(release)
 	wantError(t, <-done, "not_shared")
 	shareForeground(t, m, "t2", "w2")
-}
-
-func TestForegroundNeverFallsBackFromBackgroundGrant(t *testing.T) {
-	p := &foregroundFixture{}
-	m := New(p)
-	s := share(t, m, "t", "w1")
-	r := observe(t, m, s, "owner")
-	r.ElementID, r.Kind, r.Keys = "$surface", "key", []string{"WIN", "R"}
-	_, err := m.Act(context.Background(), "t", "owner", r)
-	wantError(t, err, "unsupported_action")
-	if p.inputs.Load() != 0 || p.calls.Load() != 0 {
-		t.Fatal("background grant upgraded to foreground input")
-	}
 }

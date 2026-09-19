@@ -18,13 +18,23 @@ func (p *fakeProvider) Support() (bool, string) { return true, "" }
 func (p *fakeProvider) Windows(context.Context) ([]Window, error) {
 	return []Window{{ID: "w1", Title: "Fixture", Process: "fixture"}, {ID: "w2", Title: "Other"}}, nil
 }
-func (p *fakeProvider) Observe(ctx context.Context, window Window) (Observation, error) {
+
+// Control is foreground-only, so the fixture implements the foreground contract
+// the Manager actually drives. The observe/act hooks stay, so a test can inject
+// a failure or a custom observation without caring which call reaches them.
+func (p *fakeProvider) NewDesktop(context.Context) (Window, error) {
+	return Window{ID: "desktop:fixture", Kind: "desktop", Title: "Fixture desktop", Process: "fixture"}, nil
+}
+
+func (p *fakeProvider) ObserveForeground(ctx context.Context, window Window) (Observation, error) {
 	if p.observe != nil {
 		return p.observe(ctx, window)
 	}
-	return Observation{Elements: []Element{{ID: "e1", Name: "test", Actions: []string{"invoke", "set_value"}}}}, nil
+	return Observation{Width: 800, Height: 600, Surface: "trusted:800:600",
+		InputActions: []string{"click", "double_click", "drag", "scroll", "text", "key", "focus"}}, nil
 }
-func (p *fakeProvider) Act(ctx context.Context, window Window, action Action) error {
+
+func (p *fakeProvider) ActForeground(ctx context.Context, window Window, action Action, _ Observation) error {
 	p.calls.Add(1)
 	if p.act != nil {
 		return p.act(ctx, window, action)
@@ -32,15 +42,26 @@ func (p *fakeProvider) Act(ctx context.Context, window Window, action Action) er
 	return nil
 }
 
+// listOnlyProvider enumerates targets but does not implement the foreground
+// contract. Nothing may fall back to it.
+type listOnlyProvider struct{}
+
+func (listOnlyProvider) Support() (bool, string) { return true, "" }
+func (listOnlyProvider) Windows(context.Context) ([]Window, error) {
+	return []Window{{ID: "w1", Title: "Fixture", Process: "fixture"}}, nil
+}
+
 func share(t *testing.T, manager *Manager, taskID, windowID string) Session {
 	t.Helper()
-	status, err := manager.Open(context.Background(), taskID, windowID)
+	status, err := manager.OpenWithMode(context.Background(), taskID, windowID, "foreground", true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return *status.Session
 }
 
+// A foreground action addresses the trusted surface, so the request carries the
+// coordinates the surface observation validated rather than an element id.
 func observe(t *testing.T, manager *Manager, session Session, actor string) ActionRequest {
 	t.Helper()
 	result, err := manager.Observe(context.Background(), session.TaskID, session.ID, actor)
@@ -48,7 +69,7 @@ func observe(t *testing.T, manager *Manager, session Session, actor string) Acti
 		t.Fatal(err)
 	}
 	return ActionRequest{SessionID: session.ID, Revision: result.Revision, ObservationID: result.ID,
-		Action: Action{Kind: "invoke", ElementID: "e1"}}
+		Action: Action{Kind: "click", ElementID: "$surface", X: 10, Y: 10}}
 }
 
 func wantError(t *testing.T, err error, code string) {
@@ -60,16 +81,16 @@ func wantError(t *testing.T, err error, code string) {
 
 func TestSharingRequiresSelectedWindowAndExclusiveTask(t *testing.T) {
 	m := New(&fakeProvider{})
-	_, err := m.Open(context.Background(), "task1", "arbitrary-hwnd")
+	_, err := m.OpenWithMode(context.Background(), "task1", "arbitrary-hwnd", "foreground", true)
 	wantError(t, err, "window_gone")
 	session := share(t, m, "task1", "w1")
-	_, err = m.Open(context.Background(), "task2", "w1")
-	wantError(t, err, "window_in_use")
+	_, err = m.OpenWithMode(context.Background(), "task2", "w1", "foreground", true)
+	wantError(t, err, "foreground_in_use")
 	_, err = m.Observe(context.Background(), "task2", session.ID, "owner")
 	wantError(t, err, "not_shared")
 	_, err = m.Control("task1", session.ID, session.Revision, "attacker")
 	wantError(t, err, "invalid_control")
-	_, err = m.Open(context.Background(), "task1", "w2")
+	_, err = m.OpenWithMode(context.Background(), "task1", "w2", "foreground", true)
 	wantError(t, err, "session_exists")
 }
 
@@ -154,16 +175,17 @@ func TestObservationTTLAndActionAllowlist(t *testing.T) {
 	ctx := context.Background()
 	session := share(t, m, "t", "w1")
 	request := observe(t, m, session, "owner")
-	for _, kind := range []string{"shell", "click", "send_keys", "toggle"} {
+	for _, kind := range []string{"shell", "send_keys", "invoke", "set_value"} {
 		changed := request
 		changed.Kind = kind
 		_, err := m.Act(ctx, "t", "owner", changed)
 		wantError(t, err, "unsupported_action")
 	}
-	changed := request
-	changed.ElementID = "not-observed"
-	_, err := m.Act(ctx, "t", "owner", changed)
-	wantError(t, err, "unsupported_action")
+	// A point outside the observed surface is refused; inside it is allowed.
+	outside := request
+	outside.X, outside.Y = 5000, 5000
+	_, err := m.Act(ctx, "t", "owner", outside)
+	wantError(t, err, "invalid_coordinates")
 	now = now.Add(observationTTL)
 	_, err = m.Act(ctx, "t", "owner", request)
 	wantError(t, err, "stale_observation")
@@ -206,8 +228,8 @@ func TestStopCancelsInFlightAndPreventsReopenOverlap(t *testing.T) {
 	if _, err := m.Stop("t", session.ID); err != nil {
 		t.Fatal(err)
 	}
-	_, err := m.Open(context.Background(), "other", "w1")
-	wantError(t, err, "busy")
+	_, err := m.OpenWithMode(context.Background(), "other", "w1", "foreground", true)
+	wantError(t, err, "foreground_in_use")
 	close(release)
 	wantError(t, <-done, "not_shared")
 	reopened := share(t, m, "other", "w1")

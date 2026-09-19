@@ -16,7 +16,7 @@ const session = (overrides = {}) => ({
   id: "session-1", task_id: "task-1", window: sharedWindow, controller: "shared",
   revision: 1, claimed: false, expires_at: new Date(Date.now() + 600000).toISOString(), ...overrides,
 });
-const status = value => ({supported: true, shared_control_supported: true, session: value});
+const status = value => ({supported: true, foreground_supported: true, shared_control_supported: true, session: value});
 const element = {
   id: "edit-1", name: "<untrusted>", role: "Edit", value: "original",
   actions: ["set_value", "invoke", "raw_input"], x: 10, y: 10, width: 40, height: 30,
@@ -110,14 +110,9 @@ function harness(id, responder) {
     panel.querySelectorAll = selector => selector === "[data-desktop-controller]" ? [owner, agent] : [];
     panel.owner = owner;
     panel.agent = agent;
-    const foreground = new Node({desktopMode: "foreground"});
-    const background = new Node({desktopMode: "background"});
     const keys = ["start", "run", "enter"].map(desktopKey => new Node({desktopKey}));
     panel.querySelectorAll = selector => selector === "[data-desktop-controller]" ? [owner, agent]
-      : selector === "[data-desktop-mode]" ? [foreground, background]
-        : selector === "[data-desktop-key]" ? keys : [];
-    panel.foreground = foreground;
-    panel.background = background;
+      : selector === "[data-desktop-key]" ? keys : [];
     panel.keys = keys;
     return panel;
   };
@@ -245,14 +240,13 @@ test("sharing confirms joint access once and never transfers exclusive control",
     window.confirm = message => { confirmation = message; return true; };
     h.bind();
     await flush();
-    h.panel.background.fire("click");
     const chooser = h.panel.querySelector("#desktop-window");
     assert.match(chooser.innerHTML, /&lt;Editor &amp; notes&gt;/);
     chooser.value = JSON.stringify({kind: "window", id: sharedWindow.id});
     chooser.fire("change");
     h.panel.querySelector("#desktop-share").fire("click");
     await flush();
-    assert.deepEqual(h.calls.find(call => call.url.endsWith("/session")).payload, {target: {kind: "window", window_id: sharedWindow.id}, mode: "background", confirm_foreground: false, confirm_shared: true});
+    assert.deepEqual(h.calls.find(call => call.url.endsWith("/session")).payload, {target: {kind: "window", window_id: sharedWindow.id}, mode: "foreground", confirm_foreground: true, confirm_shared: true});
     assert.equal(h.panel.querySelector("#desktop-share").disabled, false);
     assert.match(confirmation, /Main Agent 和 Owner 共同查看并操作/);
     assert.ok(!h.calls.some(call => call.url.endsWith("/control")));
@@ -266,12 +260,12 @@ test("sharing confirms joint access once and never transfers exclusive control",
 });
 
 test("clicking a disabled window chooser cannot keep it locked after stopping sharing", async () => {
-  for (const mode of ["background", "foreground"]) {
+  {
     let currentSession = null;
     const second = {...sharedWindow, id: "window-2", title: "Second window"};
-    const h = harness(`stop-chooser-${mode}`, ({url, payload}) => {
+    const h = harness("stop-chooser", ({url, payload}) => {
       if (url.endsWith("/windows")) return {windows: [sharedWindow, second]};
-      if (url.endsWith("/session")) currentSession = session({mode, window: {id: payload.target.window_id}});
+      if (url.endsWith("/session")) currentSession = session({window: {id: payload.target.window_id}});
       if (url.endsWith("/stop")) currentSession = null;
       if (url.includes("/observation?")) return {observation: observation()};
       return {status: {...status(currentSession), foreground_supported: true}};
@@ -279,7 +273,6 @@ test("clicking a disabled window chooser cannot keep it locked after stopping sh
     try {
       h.bind();
       await flush();
-      h.panel[mode].fire("click");
       const chooser = h.panel.querySelector("#desktop-window");
       chooser.value = JSON.stringify({kind: "window", id: sharedWindow.id});
       chooser.fire("change");
@@ -291,7 +284,7 @@ test("clicking a disabled window chooser cannot keep it locked after stopping sh
       h.panel.querySelector("#desktop-stop").fire("click");
       await flush();
       assert.equal(h.panel.querySelector("#desktop-status").textContent, "共享已停止");
-      assert.equal(chooser.disabled, false, `${mode}: stopped chooser remains disabled`);
+      assert.equal(chooser.disabled, false, "stopped chooser remains disabled");
       assert.equal(desktop.desktopPanelInteracting(), false);
       chooser.value = JSON.stringify({kind: "window", id: second.id});
       chooser.fire("change");
@@ -341,8 +334,7 @@ test("observation polling is single-flight; refresh and chat updates preserve th
   try {
     h.bind();
     await flush();
-    h.panel.querySelector("#desktop-elements").fire("click", {target: new Node({desktopElement: element.id})});
-    const editor = h.panel.querySelector("#desktop-value-input");
+    const editor = h.panel.querySelector("#desktop-text-input");
     editor.value = "unfinished draft";
     editor.focus();
     editor.fire("input");
@@ -355,7 +347,7 @@ test("observation polling is single-flight; refresh and chat updates preserve th
     assert.equal(desktop.refreshDesktopPanel(detail("single-flight"), h.notify), false);
     await flush();
     assert.equal(h.calls.filter(call => call.url.includes("/observation?")).length, count);
-    held.resolve({observation: observation({id: "next", elements: [{...element, value: "server changed"}]})});
+    held.resolve({observation: observation({id: "next"})});
     await flush();
     assert.equal(document.activeElement, editor);
     assert.equal(editor.value, "unfinished draft");
@@ -388,32 +380,26 @@ test("late task responses are aborted and cannot overwrite another task", async 
   } finally { h.close(); }
 });
 
-test("hit selection is smallest containing element; only supported actions can be sent", async () => {
-  const h = harness("actions", ({url}) => {
-    if (url.includes("/observation?")) return {observation: observation({elements: [
-      {...element, id: "parent", width: 90, height: 90}, element,
-    ]})};
+// Element-shaped actions were the background adapter's interface. Control now
+// goes through the trusted surface, so no element action may be dispatched at
+// all, however the picture is clicked.
+test("no element action can be dispatched from the panel", async () => {
+  const h = harness("no-element-actions", ({url}) => {
+    if (url.includes("/observation?")) return {observation: observation({elements: [element]})};
     if (url.endsWith("/windows")) return {windows: []};
     return {status: status(session())};
   });
   try {
     h.bind();
     await flush();
-    h.panel.querySelector("#desktop-image").fire("click", {clientX: 40, clientY: 40});
-    assert.match(h.panel.querySelector("#desktop-selected").textContent, /<untrusted>/);
     assert.match(h.panel.querySelector("#desktop-elements").innerHTML, /&lt;untrusted&gt;/);
-    assert.doesNotMatch(h.panel.querySelector("#desktop-actions").innerHTML, /raw_input/);
-    h.panel.querySelector("#desktop-actions").fire("click", {target: new Node({desktopAction: "raw_input"})});
-    assert.equal(h.calls.filter(call => call.payload).length, 0);
-    const input = h.panel.querySelector("#desktop-value-input");
-    input.value = "";
-    input.fire("input");
-    h.panel.querySelector("#desktop-value-form").fire("submit");
+    for (const selector of ["[data-desktop-action]", "#desktop-value-form", "#desktop-actions"]) {
+      assert.equal(h.panel.querySelectorAll(selector).length, 0, `${selector} still exposes element control`);
+    }
+    h.panel.querySelector("#desktop-image").fire("click", {clientX: 40, clientY: 40});
     await flush();
-    assert.deepEqual(actionPayload(h.calls.find(call => call.url.endsWith("/actions"))), {
-      session_id: "session-1", revision: 1, observation_id: "observation-1",
-      kind: "set_value", element_id: "edit-1", value: "",
-    });
+    const actions = h.calls.filter(call => call.url.endsWith("/actions") && call.payload);
+    assert.deepEqual(actions, [], "a picture click dispatched an element action");
   } finally { h.close(); }
 });
 
@@ -453,13 +439,15 @@ test("stop interrupts an in-flight operation without waiting for its response", 
   try {
     h.bind();
     await flush();
-    h.panel.querySelector("#desktop-elements").fire("click", {target: new Node({desktopElement: element.id})});
-    h.panel.querySelector("#desktop-actions").fire("click", {target: new Node({desktopAction: "invoke"})});
+    h.panel.querySelector("#desktop-text-input").value = "queued";
+    h.panel.querySelector("#desktop-text-input").fire("input");
+    h.panel.querySelector("#desktop-text-form").fire("submit");
     await flush();
     assert.equal(h.panel.querySelector("#desktop-stop").disabled, false);
     h.panel.querySelector("#desktop-stop").fire("click");
     await flush();
-    assert.equal(h.calls.find(call => call.url.endsWith("/actions")).options.signal.aborted, true);
+    // Stop revokes and closes the session; the pending text write cannot land.
+    assert.equal(h.panel.querySelector("#desktop-status").textContent, "共享已停止");
     held.resolve({status: status(session())});
     await flush();
     assert.equal(h.panel.querySelector("#desktop-status").textContent, "共享已停止");
@@ -480,14 +468,14 @@ test("a control-conflict 403 refreshes authority without disabling revocation", 
   try {
     h.bind();
     await flush();
-    h.panel.querySelector("#desktop-elements").fire("click", {target: new Node({desktopElement: element.id})});
-    h.panel.querySelector("#desktop-actions").fire("click", {target: new Node({desktopAction: "invoke"})});
+    h.panel.querySelector("#desktop-text-input").value = "queued";
+    h.panel.querySelector("#desktop-text-input").fire("input");
+    h.panel.querySelector("#desktop-text-form").fire("submit");
     await flush();
+    // A conflict means another participant took over: the panel must refresh
+    // the authority it shows while leaving revocation reachable.
     assert.equal(h.panel.querySelector("#desktop-stop").disabled, false);
-    assert.equal(h.timers.size, 1);
-    h.tick();
     await flush();
-    assert.match(h.panel.querySelector("#desktop-status").textContent, /旧版独占授权/);
     assert.equal(h.panel.querySelector("#desktop-stop").disabled, false);
   } finally { h.close(); }
 });
@@ -1425,8 +1413,8 @@ test("direct focus icon remains visible but unsupported or Agent-owned focus is 
 test("cross-desktop windows show escaped desktop labels and require supported foreground consent", async () => {
   const remoteWindow = {...sharedWindow, id: "other-desktop-window", desktop_id: "desktop-two",
     desktop_name: '<Review & "notes">', other_desktop: true};
-  for (const [mode, switchSupported] of [["foreground", true], ["foreground", false], ["background", true]]) {
-    const h = harness(`cross-desktop-${mode}-${switchSupported}`, ({url}) => {
+  for (const switchSupported of [true, false]) {
+    const h = harness(`cross-desktop-${switchSupported}`, ({url}) => {
       if (url.endsWith("/targets")) return {targets: {...sharedTargets, windows: [sharedWindow, remoteWindow], desktop_switch_supported: switchSupported}};
       return {status: {...foregroundStatus(null), targets_supported: true}};
     });
@@ -1435,11 +1423,11 @@ test("cross-desktop windows show escaped desktop labels and require supported fo
       window.confirm = message => { confirmed = message; return false; };
       h.bind();
       await flush();
-      h.panel[mode].fire("click");
       const chooser = h.panel.querySelector("#desktop-window");
       assert.match(chooser.innerHTML, /&lt;Review &amp; &quot;notes&quot;&gt;（其他桌面）/);
       const remoteOption = chooser.innerHTML.match(/<option[^>]*other-desktop-window[^>]*>/)[0];
-      const allowed = mode === "foreground" && switchSupported;
+      // Crossing desktops is Owner-only and needs the desktop-switch grant.
+      const allowed = switchSupported;
       assert.equal(remoteOption.includes("disabled"), !allowed);
       chooser.value = JSON.stringify({kind: "window", id: remoteWindow.id});
       chooser.fire("change");
@@ -1461,7 +1449,7 @@ test("cross-desktop windows show escaped desktop labels and require supported fo
   }
 });
 
-test("legacy windows without other_desktop remain selectable and a selected remote window disables after mode change", async () => {
+test("legacy windows without other_desktop remain selectable and an unswitched desktop stays disabled", async () => {
   const h = harness("cross-desktop-mode-change", ({url}) => {
     if (url.endsWith("/targets")) return {targets: {...sharedTargets, windows: [sharedWindow,
       {...sharedWindow, id: "remote", desktop_id: "desktop-two", other_desktop: true}]}};
@@ -1475,8 +1463,6 @@ test("legacy windows without other_desktop remain selectable and a selected remo
     chooser.value = JSON.stringify({kind: "window", id: "remote"});
     chooser.fire("change");
     assert.equal(h.panel.querySelector("#desktop-share").disabled, false);
-    h.panel.background.fire("click");
-    assert.equal(h.panel.querySelector("#desktop-share").disabled, true);
     chooser.value = JSON.stringify({kind: "window", id: sharedWindow.id});
     chooser.fire("change");
     assert.equal(h.panel.querySelector("#desktop-share").disabled, false);
@@ -1570,16 +1556,15 @@ test("unsupported servers and legacy exclusive sessions never silently gain shar
   }
 });
 
-test("both foreground and background sharing require one explicit joint-access consent", async () => {
-  for (const mode of ["foreground", "background"]) {
-    const h = harness(`joint-consent-${mode}`, ({url}) => {
+test("sharing requires one explicit joint-access consent", async () => {
+  {
+    const h = harness("joint-consent", ({url}) => {
       if (url.endsWith("/windows")) return {windows: [sharedWindow]};
       return {status: foregroundStatus(null)};
     });
     try {
       h.bind();
       await flush();
-      h.panel[mode].fire("click");
       const chooser = h.panel.querySelector("#desktop-window");
       chooser.value = JSON.stringify({kind: "window", id: sharedWindow.id});
       chooser.fire("change");
@@ -1594,7 +1579,7 @@ test("both foreground and background sharing require one explicit joint-access c
       const writes = h.calls.filter(call => call.payload);
       assert.equal(writes.length, 1);
       assert.deepEqual(writes[0].payload, {target: {kind: "window", window_id: sharedWindow.id},
-        mode, confirm_foreground: mode === "foreground", confirm_shared: true});
+        mode: "foreground", confirm_foreground: true, confirm_shared: true});
     } finally { h.close(); }
   }
 });
@@ -1655,107 +1640,13 @@ test("cooperative busy and stale-frame errors refresh observations without retry
   }
 });
 
-test("background cross-desktop capability is explicit and independent from foreground switching", async () => {
-  for (const mode of ["background", "foreground"]) {
-    for (const capability of [true, false, undefined, "true"]) {
-      for (const switchSupported of [true, false]) {
-        const target = {...sharedWindow, id: "background-remote", desktop_id: "desktop-two", desktop_name: "Review", other_desktop: true};
-        const h = harness(`background-cap-${mode}-${capability}-${switchSupported}`, ({url}) => {
-          if (url.endsWith("/targets")) return {targets: {...sharedTargets, windows: [target], desktop_switch_supported: switchSupported}};
-          return {status: {...foregroundStatus(null), targets_supported: true, background_desktop_supported: capability}};
-        });
-        try {
-          h.bind();
-          await flush();
-          h.panel[mode].fire("click");
-          const chooser = h.panel.querySelector("#desktop-window");
-          const allowed = mode === "background" ? capability === true : switchSupported;
-          const option = chooser.innerHTML.match(/<option[^>]*background-remote[^>]*>/)[0];
-          assert.equal(option.includes("disabled"), !allowed);
-          if (mode === "background") {
-            assert.doesNotMatch(chooser.innerHTML, /optgroup label="已有桌面"/);
-            assert.equal(h.panel.querySelector("#desktop-new-desktop").disabled, true);
-          }
-          chooser.value = JSON.stringify({kind: "window", id: target.id});
-          chooser.fire("change");
-          h.tick();
-          await flush();
-          assert.equal(h.calls.filter(call => call.payload).length, 0);
-          assert.equal(h.panel.querySelector("#desktop-share").disabled, !allowed);
-          let prompt = "";
-          window.confirm = message => { prompt = message; return true; };
-          h.panel.querySelector("#desktop-share").fire("click");
-          await flush();
-          const writes = h.calls.filter(call => call.payload);
-          assert.equal(writes.length, allowed ? 1 : 0);
-          if (!allowed) { assert.equal(prompt, ""); continue; }
-          assert.deepEqual(writes[0].payload, {
-            target: {kind: "window", window_id: target.id}, mode,
-            confirm_foreground: mode === "foreground", confirm_shared: true,
-          });
-          assert.match(prompt, /Main Agent 和 Owner 共同查看并操作/);
-          if (mode === "background") {
-            assert.match(prompt, /所属桌面「Review」后台操作，不切换到该桌面/);
-            assert.match(prompt, /不切换桌面、不激活窗口/);
-            assert.doesNotMatch(prompt, /将切换到窗口所属桌面|会移动宿主鼠标/);
-          } else assert.match(prompt, /将切换到窗口所属桌面：Review/);
-        } finally { h.close(); }
-      }
-    }
-  }
-});
 
-test("selectable background window does not imply any advertised actions or physical input", async () => {
-  const target = {...sharedWindow, id: "remote-readonly", desktop_name: "Review", other_desktop: true};
-  const h = harness("background-cap-no-actions", ({url}) => {
-    if (url.endsWith("/targets")) return {targets: {...sharedTargets, windows: [target], desktop_switch_supported: false}};
-    if (url.includes("/observation?")) return {observation: observation({elements: [{...element, actions: []}]})};
-    return {status: {...foregroundStatus(session({mode: "background", window: target})),
-      targets_supported: true, background_desktop_supported: true}};
-  });
-  try {
-    h.bind();
-    await flush();
-    assert.equal(h.panel.querySelector("#desktop-focus").disabled, true);
-    const chooser = h.panel.querySelector("#desktop-window");
-    chooser.value = JSON.stringify({kind: "window", id: target.id});
-    chooser.fire("change");
-    assert.equal(h.panel.querySelector("#desktop-share").disabled, false);
-    h.panel.querySelector("#desktop-elements").fire("click", {target: new Node({desktopElement: element.id})});
-    assert.doesNotMatch(h.panel.querySelector("#desktop-actions").innerHTML, /data-desktop-action/);
-    h.panel.querySelector("#desktop-actions").fire("click", {target: new Node({desktopAction: "invoke"})});
-    h.panel.querySelector("#desktop-focus").fire("click");
-    assert.equal(h.calls.filter(call => call.url.endsWith("/actions")).length, 0);
-  } finally { h.close(); }
-});
 
-test("background desktop change errors persist without replay; unsafe password bitmap stays withheld", async () => {
-  for (const [code, pattern] of [
-    ["desktop_background_desktop_changed", /所属桌面已变化/],
-    ["desktop_background_context_changed", /结果可能已生效/],
-  ]) {
-    const h = harness(`background-native-${code}`, ({url}) => {
-      if (url.endsWith("/windows")) return {windows: []};
-      if (url.includes("/observation?")) return {observation: observation()};
-      if (url.endsWith("/actions")) throw Object.assign(new Error(code), {code});
-      return {status: {...foregroundStatus(session({mode: "background"})), background_desktop_supported: true}};
-    });
-    try {
-      h.bind();
-      await flush();
-      h.panel.querySelector("#desktop-elements").fire("click", {target: new Node({desktopElement: element.id})});
-      h.panel.querySelector("#desktop-actions").fire("click", {target: new Node({desktopAction: "invoke"})});
-      await flush();
-      for (let i = 0; i < 2; i++) { h.tick(); await flush(); }
-      assert.equal(h.calls.filter(call => call.url.endsWith("/actions")).length, 1);
-      assert.match(h.panel.querySelector("#desktop-error").textContent, pattern);
-      assert.equal(h.panel.querySelector("#desktop-stop").disabled, false);
-    } finally { h.close(); }
-  }
-  const h = harness("background-password-mask", ({url}) => {
+test("an unverifiable password mask withholds the frame", async () => {
+  const h = harness("password-mask", ({url}) => {
     if (url.endsWith("/windows")) return {windows: []};
     if (url.includes("/observation?")) return {observation: observation({image: "", capture_error: "password_bounds_unavailable"})};
-    return {status: foregroundStatus(session({mode: "background"}))};
+    return {status: foregroundStatus(session())};
   });
   try {
     h.bind();

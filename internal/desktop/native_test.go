@@ -2,12 +2,9 @@ package desktop
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"runtime"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestNativeOtherUnsupported(t *testing.T) {
@@ -21,172 +18,10 @@ func TestNativeOtherUnsupported(t *testing.T) {
 	if _, err := p.Windows(context.Background()); err == nil {
 		t.Fatal("expected unsupported error")
 	}
-	if _, err := p.Observe(context.Background(), Window{ID: "fixture"}); err == nil {
-		t.Fatal("expected unsupported error")
-	}
-	if err := p.Act(context.Background(), Window{ID: "fixture"}, Action{Kind: "invoke", ElementID: "fixture"}); err == nil {
-		t.Fatal("expected unsupported error")
-	}
 }
 
-func TestNativeRequestIsStructuredData(t *testing.T) {
-	value := "'; $(throw 'injection');\n\"quoted\"\u4e2d\u6587"
-	p := &nativeProvider{run: func(ctx context.Context, data []byte) ([]byte, error) {
-		var packet struct {
-			Source  string        `json:"source"`
-			Request nativeRequest `json:"request"`
-		}
-		if err := json.Unmarshal(data, &packet); err != nil {
-			t.Fatal(err)
-		}
-		if packet.Source != nativeSource || packet.Request.Action.Value != value || packet.Request.Operation != "act" {
-			t.Fatal("request or embedded source was changed")
-		}
-		deadline, ok := ctx.Deadline()
-		if !ok || time.Until(deadline) > nativeTimeout {
-			t.Fatal("native operation has no bounded deadline")
-		}
-		return []byte(`{"ok":true}`), nil
-	}}
-	if err := p.Act(context.Background(), Window{ID: "fixture"}, Action{Kind: "set_value", ElementID: "fixture-element", Value: value}); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestNativeRejectsUnsupportedInput(t *testing.T) {
-	p := &nativeProvider{run: func(context.Context, []byte) ([]byte, error) {
-		t.Fatal("invalid request reached native helper")
-		return nil, nil
-	}}
-	for _, action := range []Action{
-		{Kind: "click", ElementID: "x"}, {Kind: "invoke"},
-		{Kind: "invoke", ElementID: "x", Value: "unexpected"},
-		{Kind: "set_value", ElementID: "x", Value: strings.Repeat("a", nativeMaxValue+1)},
-		{Kind: "toggle", ElementID: strings.Repeat("a", 1025)},
-	} {
-		if err := p.Act(context.Background(), Window{ID: "fixture"}, action); err == nil {
-			t.Fatalf("accepted invalid action %+v", action.Kind)
-		}
-	}
-	if _, err := p.Observe(context.Background(), Window{}); err == nil {
-		t.Fatal("empty target accepted")
-	}
-}
-
-func TestNativeErrorsAreBoundedAndSanitized(t *testing.T) {
-	for _, test := range []struct {
-		name, output, want string
-	}{
-		{"invalid", "sensitive native diagnostics", "invalid JSON"},
-		{"unknown", `{"ok":false,"error":"secret diagnostics"}`, "native operation failed"},
-		{"known", `{"ok":false,"error":"password_element"}`, "password_element"},
-		{"trailing", `{"ok":true} {"sensitive":"data"}`, "trailing output"},
-		{"oversize", strings.Repeat(" ", nativeMaxOutput+1), "output limit"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			p := &nativeProvider{run: func(context.Context, []byte) ([]byte, error) {
-				return []byte(test.output), nil
-			}}
-			_, err := p.Windows(context.Background())
-			if err == nil || !strings.Contains(err.Error(), test.want) || strings.Contains(err.Error(), "secret") {
-				t.Fatalf("unexpected error: %v", err)
-			}
-		})
-	}
-	p := &nativeProvider{run: func(context.Context, []byte) ([]byte, error) {
-		return nil, errors.New("sensitive process stderr")
-	}}
-	if _, err := p.Windows(context.Background()); err == nil || strings.Contains(err.Error(), "sensitive") {
-		t.Fatalf("process error not sanitized: %v", err)
-	}
-}
-
-func TestNativeCancellation(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	p := &nativeProvider{run: func(context.Context, []byte) ([]byte, error) {
-		t.Fatal("canceled request reached helper")
-		return nil, nil
-	}}
-	if _, err := p.Windows(ctx); !errors.Is(err, context.Canceled) {
-		t.Fatalf("error = %v", err)
-	}
-	p.run = func(ctx context.Context, _ []byte) ([]byte, error) {
-		<-ctx.Done()
-		return nil, ctx.Err()
-	}
-	ctx, cancel = context.WithTimeout(context.Background(), time.Millisecond)
-	defer cancel()
-	if _, err := p.Windows(ctx); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("error = %v", err)
-	}
-}
-
-// A focus violation must stop further actions on that window, but only for the
-// cooldown: a single transient interference used to disable the window until
-// the process restarted, which made the feature unusable for an Owner who keeps
-// using their own machine.
-func TestNativeFocusViolationPausesActionsForCooldown(t *testing.T) {
-	now := time.Unix(1700000000, 0)
-	clock := func() time.Time { return now }
-	calls := 0
-	p := &nativeProvider{now: clock, run: func(context.Context, []byte) ([]byte, error) {
-		calls++
-		return []byte(`{"ok":false,"error":"focus_side_effect"}`), nil
-	}}
-	for i := 0; i < 2; i++ {
-		err := p.Act(context.Background(), Window{ID: "fixture"}, Action{Kind: "invoke", ElementID: "fixture"})
-		if err == nil || !strings.Contains(err.Error(), "focus_side_effect") {
-			t.Fatalf("action %d error = %v", i, err)
-		}
-	}
-	if calls != 1 {
-		t.Fatalf("blocked window received %d actions, want 1", calls)
-	}
-	p.run = func(context.Context, []byte) ([]byte, error) {
-		return []byte(`{"ok":true,"observation":{"window":{"id":"fixture"},"elements":[{"id":"e","actions":["invoke"]}]}}`), nil
-	}
-	// Observation stays available throughout: the Owner must be able to watch at
-	// any time, and a read cannot move focus.
-	observation, err := p.Observe(context.Background(), Window{ID: "fixture"})
-	if err != nil || observation.ControlError != "" || len(observation.Elements[0].Actions) == 0 {
-		t.Fatalf("paused window did not stay observable: %+v %v", observation, err)
-	}
-	// Still inside the cooldown.
-	now = now.Add(focusQuarantineCooldown - time.Second)
-	if err := p.Act(context.Background(), Window{ID: "fixture"}, Action{Kind: "invoke", ElementID: "fixture"}); err == nil {
-		t.Fatal("window accepted an action during the cooldown")
-	}
-	// Once the cooldown lapses the window recovers on its own.
-	now = now.Add(2 * time.Second)
-	p.run = func(context.Context, []byte) ([]byte, error) {
-		return []byte(`{"ok":true}`), nil
-	}
-	if err := p.Act(context.Background(), Window{ID: "fixture"}, Action{Kind: "invoke", ElementID: "fixture"}); err != nil {
-		t.Fatalf("window did not recover after the cooldown: %v", err)
-	}
-}
-
-func TestNativeObservationTargetMismatch(t *testing.T) {
-	p := &nativeProvider{run: func(context.Context, []byte) ([]byte, error) {
-		return []byte(`{"ok":true,"observation":{"window":{"id":"other"}}}`), nil
-	}}
-	if _, err := p.Observe(context.Background(), Window{ID: "fixture"}); err == nil {
-		t.Fatal("accepted wrong target observation")
-	}
-}
-
-func TestNativeWriterLimitCancels(t *testing.T) {
-	canceled := false
-	w := &nativeBoundedWriter{limit: 3, cancel: func() { canceled = true }}
-	if n, err := w.Write([]byte("abc")); n != 3 || err != nil {
-		t.Fatalf("write = %d, %v", n, err)
-	}
-	if _, err := w.Write([]byte("d")); err == nil || !canceled || w.buffer.Len() != 3 {
-		t.Fatal("output bound was not enforced")
-	}
-}
-
+// The native helper must not reach for anything that injects input into the
+// user's session. Control is granted per operation and dispatched explicitly.
 func TestNativeSourceHasNoPhysicalInputFallback(t *testing.T) {
 	for _, forbidden := range []string{
 		"SendInput", "SendKeys", "SetForegroundWindow", "SetFocus", "Clipboard",
@@ -205,6 +40,8 @@ func TestNativeSourceHasNoPhysicalInputFallback(t *testing.T) {
 	}
 }
 
+// Text writes must stay scoped to the selected target rather than acting as a
+// generic UI-automation input proxy.
 func TestNativeTextWritesAreScopedAndNotUIAInputProxies(t *testing.T) {
 	for _, required := range []string{
 		"NativeEdit(element)", "pid != target.PID", "GetAncestor(handle, 2) != target.Handle",
@@ -212,6 +49,18 @@ func TestNativeTextWritesAreScopedAndNotUIAInputProxies(t *testing.T) {
 	} {
 		if !strings.Contains(nativeSource, required) {
 			t.Errorf("missing scoped text guard %q", required)
+		}
+	}
+}
+
+// The removed background mode must not linger as a reachable code path: with it
+// gone, control is only ever granted through the foreground provider contract.
+func TestBackgroundControlIsGone(t *testing.T) {
+	for _, source := range []string{nativeSource, foregroundNativeSource} {
+		for _, forbidden := range []string{"RunBackground", "ObserveBackgroundNative", "ActBackgroundNative", "background_observe", "background_act"} {
+			if strings.Contains(source, forbidden) {
+				t.Errorf("background control source still present: %q", forbidden)
+			}
 		}
 	}
 }

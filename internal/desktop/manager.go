@@ -128,8 +128,6 @@ func (m *Manager) statusLocked(taskID string) Status {
 	result.StreamSupported = result.ForegroundSupported && preview
 	_, targets := m.provider.(TargetProvider)
 	result.TargetsSupported = supported && targets
-	_, background := m.provider.(BackgroundTargetProvider)
-	result.BackgroundDesktopSupported = supported && background
 	if entry := m.sessions[taskID]; entry != nil {
 		copy := entry.Session
 		result.Session = &copy
@@ -168,20 +166,12 @@ func (m *Manager) Windows(ctx context.Context) ([]Window, error) {
 	return windows, err
 }
 
-func (m *Manager) Open(ctx context.Context, taskID, windowID string) (Status, error) {
-	return m.OpenWithMode(ctx, taskID, windowID, "background", false)
-}
-
 func (m *Manager) foregroundAvailableLocked() bool {
 	if m.runningForeground != "" || len(m.pendingForeground) != 0 || len(m.capturing) != 0 {
 		return false
 	}
-	for _, entry := range m.sessions {
-		if entry.Mode == "foreground" {
-			return false
-		}
-	}
-	return true
+	// Every session is foreground now, so any live session occupies the input.
+	return len(m.sessions) == 0
 }
 
 func (m *Manager) OpenWithMode(ctx context.Context, taskID, windowID, mode string, confirmed bool) (Status, error) {
@@ -190,16 +180,12 @@ func (m *Manager) OpenWithMode(ctx context.Context, taskID, windowID, mode strin
 
 func (m *Manager) open(ctx context.Context, taskID, windowID, mode string, confirmed bool, selection *TargetSelection, shared bool) (Status, error) {
 	if mode == "" {
-		mode = "background"
+		mode = "foreground"
 	}
-	if mode != "background" && mode != "foreground" {
+	if mode != "foreground" {
 		return Status{}, failure("invalid_mode")
 	}
-	if mode == "foreground" && !confirmed {
-		return Status{}, failure("foreground_confirmation_required")
-	}
-	newDesktop := windowID == "new-desktop"
-	if newDesktop && mode != "foreground" {
+	if !confirmed {
 		return Status{}, failure("foreground_confirmation_required")
 	}
 	if taskID == "" || windowID == "" || len(windowID) > 512 {
@@ -211,43 +197,39 @@ func (m *Manager) open(ctx context.Context, taskID, windowID, mode string, confi
 	if pending {
 		return Status{}, failure("busy")
 	}
-	var foreground ForegroundProvider
-	if mode == "foreground" {
-		var ok bool
-		foreground, ok = m.provider.(ForegroundProvider)
-		if supported, _ := m.support(); !ok || !supported {
-			return Status{}, failure("unsupported")
-		}
-		m.mu.Lock()
-		m.cleanLocked()
-		if m.sessions[taskID] != nil {
-			m.mu.Unlock()
-			return Status{}, failure("session_exists")
-		}
-		if !m.foregroundAvailableLocked() {
-			m.mu.Unlock()
-			return Status{}, failure("foreground_in_use")
-		}
-		if len(m.sessions) >= 128 {
-			m.mu.Unlock()
-			return Status{}, failure("session_limit")
-		}
-		openCtx, cancel := context.WithTimeout(ctx, operationTTL)
-		ctx = openCtx
-		reservation := token()
-		m.pendingForeground[taskID] = reservation
-		m.pendingCancel[taskID] = cancel
-		m.mu.Unlock()
-		defer func() {
-			cancel()
-			m.mu.Lock()
-			if m.pendingForeground[taskID] == reservation {
-				delete(m.pendingForeground, taskID)
-				delete(m.pendingCancel, taskID)
-			}
-			m.mu.Unlock()
-		}()
+	foreground, ok := m.provider.(ForegroundProvider)
+	if supported, _ := m.support(); !ok || !supported {
+		return Status{}, failure("unsupported")
 	}
+	m.mu.Lock()
+	m.cleanLocked()
+	if m.sessions[taskID] != nil {
+		m.mu.Unlock()
+		return Status{}, failure("session_exists")
+	}
+	if !m.foregroundAvailableLocked() {
+		m.mu.Unlock()
+		return Status{}, failure("foreground_in_use")
+	}
+	if len(m.sessions) >= 128 {
+		m.mu.Unlock()
+		return Status{}, failure("session_limit")
+	}
+	openCtx, cancel := context.WithTimeout(ctx, operationTTL)
+	ctx = openCtx
+	reservation := token()
+	m.pendingForeground[taskID] = reservation
+	m.pendingCancel[taskID] = cancel
+	m.mu.Unlock()
+	defer func() {
+		cancel()
+		m.mu.Lock()
+		if m.pendingForeground[taskID] == reservation {
+			delete(m.pendingForeground, taskID)
+			delete(m.pendingCancel, taskID)
+		}
+		m.mu.Unlock()
+	}()
 	target, err := m.resolveSelection(ctx, windowID, mode, foreground, selection)
 	if err != nil {
 		return Status{}, err
@@ -264,9 +246,6 @@ func (m *Manager) open(ctx context.Context, taskID, windowID, mode string, confi
 	}
 	if m.sessions[taskID] != nil {
 		return Status{}, failure("session_exists")
-	}
-	if mode == "background" && m.pendingCancel[taskID] != nil {
-		return Status{}, failure("busy")
 	}
 	if m.running[windowID] != "" || m.capturing[windowID] != "" {
 		return Status{}, failure("busy")
@@ -461,7 +440,7 @@ func (m *Manager) begin(ctx context.Context, taskID, sessionID, actor string, re
 	if entry.Switching {
 		return nil, Window{}, "", 0, failure("switching")
 	}
-	*foreground = entry.Mode == "foreground"
+	*foreground = true
 	isAgent := strings.HasPrefix(actor, "agent:") && len(actor) > len("agent:")
 	if !ownerActor(actor) && !isAgent {
 		return nil, Window{}, "", 0, failure("invalid_actor")
@@ -481,20 +460,10 @@ func (m *Manager) begin(ctx context.Context, taskID, sessionID, actor string, re
 		if !ok {
 			return nil, Window{}, "", 0, failure("stale_observation")
 		}
-		var supported bool
-		if entry.Mode == "foreground" {
-			supported = action.ElementID == "$surface" && slices.Contains(snapshot.inputActions, action.Kind)
-			if supported {
-				if err := validateForegroundInput(action.Action, snapshot.width, snapshot.height); err != nil {
-					return nil, Window{}, "", 0, err
-				}
-			}
-		} else {
-			for _, element := range snapshot.elements {
-				if element.ID == action.ElementID && slices.Contains(element.Actions, action.Kind) {
-					supported = true
-					break
-				}
+		supported := action.ElementID == "$surface" && slices.Contains(snapshot.inputActions, action.Kind)
+		if supported {
+			if err := validateForegroundInput(action.Action, snapshot.width, snapshot.height); err != nil {
+				return nil, Window{}, "", 0, err
 			}
 		}
 		if !supported {
@@ -511,7 +480,9 @@ func (m *Manager) begin(ctx context.Context, taskID, sessionID, actor string, re
 		*capture = Observation{Window: entry.Window, Width: snapshot.width, Height: snapshot.height,
 			Surface: snapshot.surface, InputActions: slices.Clone(snapshot.inputActions)}
 	}
-	if entry.operationID != "" || entry.Mode != "foreground" && entry.captureID != "" {
+	// A running capture must not block input: the Owner watching a live preview
+	// should never be locked out of acting on it.
+	if entry.operationID != "" {
 		return nil, Window{}, "", 0, failure("busy")
 	}
 	opID := token()
@@ -522,9 +493,7 @@ func (m *Manager) begin(ctx context.Context, taskID, sessionID, actor string, re
 	opCtx, cancel := context.WithDeadline(ctx, deadline)
 	entry.cancel, entry.operationID = cancel, opID
 	m.running[entry.Window.ID] = opID
-	if entry.Mode == "foreground" {
-		m.runningForeground = opID
-	}
+	m.runningForeground = opID
 	if action != nil {
 		entry.actionEpoch++
 		if entry.Controller == "shared" {
@@ -602,14 +571,10 @@ func (m *Manager) observe(ctx context.Context, taskID, sessionID, actor string, 
 	foreground, streamID := op.foreground, op.streamID
 	var observation Observation
 	var nativeErr error
-	if foreground {
-		if preview, ok := m.provider.(PreviewProvider); ok && options != nil {
-			observation, nativeErr = preview.ObservePreview(opCtx, window, *options)
-		} else {
-			observation, nativeErr = m.provider.(ForegroundProvider).ObserveForeground(opCtx, window)
-		}
+	if preview, ok := m.provider.(PreviewProvider); ok && options != nil {
+		observation, nativeErr = preview.ObservePreview(opCtx, window, *options)
 	} else {
-		observation, nativeErr = m.provider.Observe(opCtx, window)
+		observation, nativeErr = m.provider.(ForegroundProvider).ObserveForeground(opCtx, window)
 	}
 	if nativeErr == nil {
 		nativeErr = opCtx.Err()
@@ -637,10 +602,9 @@ func (m *Manager) observe(ctx context.Context, taskID, sessionID, actor string, 
 	}
 	if nativeErr != nil {
 		if code := ErrorCode(nativeErr); code == "desktop_focus_side_effect" || code == "desktop_focus_unverifiable" ||
-			code == "desktop_background_desktop_changed" || code == "desktop_background_context_changed" ||
-			code == "desktop_background_control_changed" || code == "desktop_background_child_unverifiable" ||
-			code == "desktop_browser_accessibility_unavailable" || code == "desktop_browser_scope_changed" ||
-			code == "desktop_browser_page_unavailable" {
+			code == "desktop_surface_changed" {
+			// A revoked grant is the one failure that invalidates the session's
+			// operation, so the shared grant drops back to owner-only.
 			revokeOperation(entry)
 			if entry.Controller != "shared" {
 				entry.Controller = "owner"
@@ -686,12 +650,11 @@ func (m *Manager) observe(ctx context.Context, taskID, sessionID, actor string, 
 	entry.observed[key] = append(entry.observed[key], observed{id: observation.ID, stream: streamID, at: m.now(), elements: elements,
 		surface: observation.Surface, width: observation.Width, height: observation.Height,
 		inputActions: slices.Clone(observation.InputActions)})
-	limit := 4
-	if foreground {
-		limit = 64
-	}
-	if frames := entry.observed[key]; len(frames) > limit {
-		entry.observed[key] = slices.Clone(frames[len(frames)-limit:])
+	// Every session is foreground, and a foreground frame carries the surface
+	// that authorizes input, so keep a deeper window of recent frames.
+	const retainedFrames = 64
+	if frames := entry.observed[key]; len(frames) > retainedFrames {
+		entry.observed[key] = slices.Clone(frames[len(frames)-retainedFrames:])
 	}
 	return observation, nil
 }
@@ -710,19 +673,13 @@ func (m *Manager) Act(ctx context.Context, taskID, actor string, request ActionR
 		utf8.RuneCountInString(request.Value) > 8192 || strings.ContainsRune(request.Value, '\x00') {
 		return Status{}, failure("invalid_action")
 	}
+	// Input is surface-based only. The element kinds (invoke, set_value, toggle,
+	// …) belonged to the removed background adapter and are refused here rather
+	// than silently accepted. validateForegroundInput owns the per-kind shape.
 	switch request.Kind {
-	case "invoke", "set_value", "toggle", "select", "expand", "collapse",
-		"click", "double_click", "drag", "scroll", "text", "key", "focus":
+	case "click", "double_click", "drag", "scroll", "text", "key", "focus":
 	default:
 		return Status{}, failure("unsupported_action")
-	}
-	if request.Kind != "set_value" && request.Kind != "text" && request.Value != "" {
-		return Status{}, failure("invalid_action")
-	}
-	if request.ElementID != "$surface" && (request.X != 0 || request.Y != 0 ||
-		request.EndX != 0 || request.EndY != 0 || request.DeltaX != 0 || request.DeltaY != 0 ||
-		request.Button != "" || len(request.Keys) != 0) {
-		return Status{}, failure("invalid_action")
 	}
 	var capture Observation
 	var foreground bool
@@ -733,10 +690,8 @@ func (m *Manager) Act(ctx context.Context, taskID, actor string, request ActionR
 	var nativeErr error
 	if opCtx.Err() != nil {
 		nativeErr = opCtx.Err()
-	} else if foreground {
-		nativeErr = m.provider.(ForegroundProvider).ActForeground(opCtx, window, request.Action, capture)
 	} else {
-		nativeErr = m.provider.Act(opCtx, window, request.Action)
+		nativeErr = m.provider.(ForegroundProvider).ActForeground(opCtx, window, request.Action, capture)
 	}
 	if nativeErr == nil {
 		nativeErr = opCtx.Err()

@@ -25,12 +25,18 @@ func (*desktopFixture) Support() (bool, string) { return true, "" }
 func (*desktopFixture) Windows(context.Context) ([]desktop.Window, error) {
 	return []desktop.Window{{ID: "fixture", Title: "Fixture window", Process: "fixture"}}, nil
 }
-func (*desktopFixture) Observe(context.Context, desktop.Window) (desktop.Observation, error) {
-	return desktop.Observation{Elements: []desktop.Element{
-		{ID: "button", Name: "Fixture button", Actions: []string{"invoke"}},
-	}}, nil
+
+// Control is foreground-only, so the base fixture implements that contract.
+func (p *desktopFixture) NewDesktop(context.Context) (desktop.Window, error) {
+	return desktop.Window{ID: "desktop:test", Kind: "desktop", Title: "Test desktop", Process: "Windows"}, nil
 }
-func (p *desktopFixture) Act(context.Context, desktop.Window, desktop.Action) error {
+
+func (*desktopFixture) ObserveForeground(context.Context, desktop.Window) (desktop.Observation, error) {
+	return desktop.Observation{Width: 800, Height: 600, Surface: "fixture-surface",
+		InputActions: []string{"click", "double_click", "drag", "scroll", "text", "key", "focus"}}, nil
+}
+
+func (p *desktopFixture) ActForeground(context.Context, desktop.Window, desktop.Action, desktop.Observation) error {
 	p.calls.Add(1)
 	return nil
 }
@@ -161,12 +167,13 @@ func TestDesktopOwnerAndAgentSharedSession(t *testing.T) {
 		Status desktop.Status `json:"status"`
 		Error  string         `json:"error"`
 	}
+	share := map[string]any{"window_id": "fixture", "mode": "foreground", "confirm_foreground": true}
 	response := requestJSON(t, client, http.MethodPost, base+"/session", map[string]any{"window_id": "fixture"}, "")
 	if response.StatusCode != http.StatusForbidden {
 		t.Fatalf("missing CSRF status = %d", response.StatusCode)
 	}
 	response.Body.Close()
-	response = requestJSON(t, client, http.MethodPost, base+"/session", map[string]any{"window_id": "fixture"}, csrf)
+	response = requestJSON(t, client, http.MethodPost, base+"/session", share, csrf)
 	decodeResponse(t, response, &state)
 	if response.StatusCode != http.StatusCreated || state.Status.Session.Controller != "owner" {
 		t.Fatalf("share failed: %d %+v", response.StatusCode, state)
@@ -252,8 +259,10 @@ func TestDesktopOwnerAndAgentSharedSession(t *testing.T) {
 	if response.Header.Get("Cache-Control") != "no-store" {
 		t.Fatal("observation is cacheable")
 	}
+	// Control input addresses the trusted surface observed above.
 	action := desktop.ActionRequest{SessionID: session.ID, Revision: session.Revision,
-		ObservationID: observation.Observation.ID, Action: desktop.Action{Kind: "invoke", ElementID: "button"}}
+		ObservationID: observation.Observation.ID,
+		Action:        desktop.Action{Kind: "click", ElementID: "$surface", X: 10, Y: 10, Button: "left"}}
 	response = agentRequest(t, agentBase+"/actions", http.MethodPost, active, action)
 	if response.StatusCode != http.StatusOK || fixture.calls.Load() != 1 {
 		t.Fatalf("valid action failed: %d calls=%d", response.StatusCode, fixture.calls.Load())

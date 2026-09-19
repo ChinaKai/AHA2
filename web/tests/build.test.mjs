@@ -2052,57 +2052,25 @@ test("completed tasks freeze the composer behind a confirmed reopen", async () =
   }
 });
 
-test("background shared control accepts Owner element actions without focus", async () => {
+// Background control was removed: control is foreground-only, so the panel must
+// offer no mode toggle and the backend must expose no background entry point.
+test("background control is gone and control is foreground-only", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const panel = await readFile(resolve(root, "dist", "desktop_panel.js"), "utf8");
   const source = await readFile(resolve(root, "src", "desktop_panel.ts"), "utf8");
-
-  // Owner element actions must work in background mode too. The background
-  // adapter maps them to the control's own accessibility action, which cannot
-  // move the user's focus; requiring foreground here was the only thing that
-  // kept the Owner from assisting without stealing their own machine.
-  const perform = /function performAction\([\s\S]*?\n\}/.exec(source)?.[0] || "";
-  assert.ok(perform, "performAction not found");
-  assert.doesNotMatch(perform, /if \(foreground\(state\) \|\|/, "performAction still refuses background mode");
-  assert.match(perform, /supportedActions\(element\)\.includes/, "performAction lost its action support check");
-
-  // The element inspector is the only way to pick an element action, so it has
-  // to be reachable in background; the coordinate input bar must stay
-  // foreground-only because background has no coordinate input.
-  assert.match(source, /\.desktop-inspector"\)!\.hidden = !session;/);
-  assert.match(source, /#desktop-input"\)!\.hidden = !foreground\(state\) \|\| !session;/);
-
-  // Pointer gestures genuinely need coordinates, so they stay foreground-only.
-  assert.match(source, /if \(!actionable\(state\) \|\| !\["click", "double_click", "drag"\]\.some\(kind => inputAllowed/);
-  // A background click resolves to the element under the pointer and acts on it,
-  // so the Owner points at the picture instead of learning about elements.
-  assert.match(source, /const element = point \? elementAtPoint\(state, point\.x, point\.y\) : undefined;/);
-  assert.match(source, /function elementAtPoint\(/);
-  assert.match(source, /dispatchElementAction\(binding, element, kind\)/);
-  // Picking from the picture must not force the element list open.
-  assert.match(source, /chooseElement\(binding, element\.id, "picture"\)/);
-  assert.match(source, /function openElementEditor\(/);
-  // A text entry opens its editor; a button acts without covering the picture.
-  assert.match(source, /if \(supportedActions\(element\)\.includes\("set_value"\)\) openElementEditor\(binding\);/);
-  // Selecting an element is not a gesture and must not require foreground.
-  const choose = /function chooseElement\([\s\S]*?\n\}/.exec(source)?.[0] || "";
-  assert.ok(choose, "chooseElement not found");
-  assert.doesNotMatch(choose, /if \(foreground\(state\)\) return;/, "chooseElement still refuses background mode");
-
-  // The Go side must not keep a window action-blocked forever: one transient
-  // interference used to disable it until the process restarted.
   const native = await readFile(resolve(root, "..", "internal", "desktop", "native.go"), "utf8");
-  assert.match(native, /focusQuarantineCooldown\s*=\s*\d+\s*\*\s*time\.Second/);
-  const blocked = /func \(p \*nativeProvider\) actionBlocked\([\s\S]*?\n\}/.exec(native)?.[0] || "";
-  assert.ok(blocked, "actionBlocked not found");
-  // The block must actually lapse; returning a bare true is the old behaviour.
-  assert.match(blocked, /Sub\(at\) < focusQuarantineCooldown/, "the focus block does not expire");
-  // A read cannot move focus, so observation must not be suppressed.
-  const observe = /func \(p \*nativeProvider\) Observe\([\s\S]*?\n\}/.exec(native)?.[0] || "";
-  assert.doesNotMatch(observe, /ControlError = "desktop_focus_side_effect"/, "observation still reports a focus error");
-  // The read-only native operations must not run the focus guard.
-  const background = await readFile(resolve(root, "..", "internal", "desktop", "native_background.cs"), "utf8");
-  assert.match(background, /bool guardFocus = operation == "background_act";/);
-  assert.match(background, /if \(guardFocus\) focus\.Check\(\);/);
-  assert.match(panel, /inputAllowed/, "the bundled panel lost its input gate");
+  const manager = await readFile(resolve(root, "..", "internal", "desktop", "manager.go"), "utf8");
+
+  // No mode switch is offered, and no background-only C# source is embedded.
+  assert.doesNotMatch(source, /data-desktop-mode/, "the panel still offers a control-mode toggle");
+  assert.doesNotMatch(source, /"background"/, "the panel still references the removed background mode");
+  assert.doesNotMatch(native, /native_background|native_browser/, "the removed background helpers are still embedded");
+
+  // The only control mode the backend accepts is foreground, with consent.
+  assert.match(manager, /if mode != "foreground" \{\s*return Status\{\}, failure\("invalid_mode"\)/);
+  assert.match(manager, /case "click", "double_click", "drag", "scroll", "text", "key", "focus":/);
+  // Element-shaped actions belonged to the removed adapter.
+  assert.doesNotMatch(manager, /case "invoke", "set_value"/, "element actions are still accepted");
+  assert.doesNotMatch(native, /SelectBackgroundWindow|background_observe/, "a background entry point remains");
+  // The element list may stay as an inspection aid, but it must not dispatch.
+  assert.doesNotMatch(source, /data-desktop-action/, "element action buttons still render");
 });

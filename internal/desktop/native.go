@@ -24,15 +24,6 @@ var nativeBootstrap string
 //go:embed native.cs
 var nativeSource string
 
-//go:embed native_background.cs
-var nativeBackgroundSource string
-
-//go:embed native_background_lifetime.cs
-var nativeBackgroundLifetimeSource string
-
-//go:embed native_browser.cs
-var nativeBrowserSource string
-
 type nativeRequest struct {
 	Operation string           `json:"operation"`
 	WindowID  string           `json:"window_id,omitempty"`
@@ -54,23 +45,11 @@ type nativeResponse struct {
 	Targets     Targets     `json:"targets"`
 }
 
-// focusQuarantineCooldown is how long a window stays action-blocked after an
-// action moved the user's focus. Long enough that a retry cannot hammer a
-// window whose page fights for focus, short enough that one transient
-// interference (the Owner clicking their own machine mid-action) does not
-// disable the window until the process restarts.
-const focusQuarantineCooldown = 60 * time.Second
-
 type nativeProvider struct {
 	run          func(context.Context, []byte) ([]byte, error)
 	reason       string
 	mu           sync.Mutex
 	closeWorkers func() error
-	// A provider that changed focus must not receive another action until the
-	// cooldown expires. Entries are timestamps, not flags, so the block lifts by
-	// itself instead of lasting for the life of the process.
-	unsafeWindows map[string]time.Time
-	now           func() time.Time
 }
 
 func (p *nativeProvider) Close() error {
@@ -160,94 +139,6 @@ func (p *nativeProvider) Windows(ctx context.Context) ([]Window, error) {
 		result.Windows = []Window{}
 	}
 	return result.Windows, err
-}
-
-func (p *nativeProvider) Observe(ctx context.Context, window Window) (Observation, error) {
-	if window.ID == "" || len(window.ID) > 128 {
-		return Observation{}, errors.New("desktop invalid window")
-	}
-	operation := "observe"
-	if window.DesktopID != "" {
-		operation = "background_observe"
-	}
-	result, err := p.call(ctx, nativeRequest{Operation: operation, WindowID: window.ID, DesktopID: window.DesktopID})
-	if err == nil && (result.Observation.Window.ID != window.ID ||
-		window.DesktopID != "" && result.Observation.Window.DesktopID != window.DesktopID) {
-		return Observation{}, errors.New("desktop observation target mismatch")
-	}
-	if result.Error == "focus_side_effect" {
-		p.markUnsafe(window.ID)
-	}
-	// Observation itself is read-only: it cannot move focus, and a window under
-	// cooldown still has to be viewable, because the Owner asked to be able to
-	// watch at any time. Only actions are suppressed, and only until the
-	// cooldown lapses.
-	return result.Observation, err
-}
-
-func (p *nativeProvider) markUnsafe(id string) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.unsafeWindows == nil {
-		p.unsafeWindows = make(map[string]time.Time)
-	}
-	p.unsafeWindows[id] = p.clock()()
-}
-
-func (p *nativeProvider) clock() func() time.Time {
-	if p.now != nil {
-		return p.now
-	}
-	return time.Now
-}
-
-// actionBlocked reports whether the window is still inside its focus cooldown.
-func (p *nativeProvider) actionBlocked(id string) bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	at, quarantined := p.unsafeWindows[id]
-	if !quarantined {
-		return false
-	}
-	return p.clock()().Sub(at) < focusQuarantineCooldown
-}
-
-func (p *nativeProvider) Act(ctx context.Context, window Window, action Action) error {
-	switch action.Kind {
-	case "invoke", "set_value", "toggle", "select", "expand", "collapse":
-	default:
-		return errors.New("desktop unsupported_action")
-	}
-	if window.ID == "" || len(window.ID) > 128 || action.ElementID == "" ||
-		len(action.ElementID) > 1024 || len(action.Value) > nativeMaxValue ||
-		(action.Kind != "set_value" && action.Value != "") || action.X != 0 || action.Y != 0 ||
-		action.EndX != 0 || action.EndY != 0 || action.DeltaX != 0 || action.DeltaY != 0 ||
-		action.Button != "" || len(action.Keys) != 0 {
-		return errors.New("desktop invalid_request")
-	}
-	if p.actionBlocked(window.ID) {
-		return errors.New("desktop focus_side_effect")
-	}
-	operation := "act"
-	if window.DesktopID != "" {
-		operation = "background_act"
-	}
-	result, err := p.call(ctx, nativeRequest{Operation: operation, WindowID: window.ID, DesktopID: window.DesktopID, Action: action})
-	if result.Error == "focus_side_effect" {
-		p.markUnsafe(window.ID)
-	}
-	return err
-}
-
-func (p *nativeProvider) SelectBackgroundWindow(ctx context.Context, id string) (Window, error) {
-	if id == "" || len(id) > 128 {
-		return Window{}, errors.New("desktop invalid_request")
-	}
-	result, err := p.call(ctx, nativeRequest{Operation: "background_select", WindowID: id})
-	if err == nil && (result.Window.ID != id || result.Window.DesktopID == "" || result.Window.Kind != "window") {
-		return Window{}, errors.New("desktop stale_target")
-	}
-	return result.Window, err
 }
 
 type nativeBoundedWriter struct {

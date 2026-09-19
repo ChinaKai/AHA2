@@ -24,36 +24,34 @@ Prefix: `/api/v1/tasks/{id}/desktop`.
   Legacy exclusive sessions only. Shared sessions reject this without mutation.
 - `POST /stop` with `{session_id}`: `{ok,status}`. Revokes the entire session.
 - `GET /observation?session_id=...`: `{ok,observation}`.
-- `POST /actions` with `{session_id,revision,observation_id,kind,element_id,value?}`:
-  `{ok,status}`. Both participants can use a shared grant. Background grants
-  reject coordinate/key input. Foreground grants accept bounded input operations
-  against `$surface`, tied to the latest observation. No direct command execution,
-  arbitrary window IDs or clipboard operations are exposed.
+- `POST /actions` with `{session_id,revision,observation_id,kind,element_id:"$surface",...}`:
+  `{ok,status}`. Both participants can use a shared grant. Input is bounded and
+  always addresses `$surface`, tied to the latest observation. No direct command
+  execution, arbitrary window IDs or clipboard operations are exposed.
+
+Control is foreground-only. The background adapter was removed because its
+element actions could not carry ordinary pointer input, and a control mode that
+cannot navigate or click where the user points was not usable. Consequently the
+accepted kinds are `click`, `double_click`, `drag`, `scroll`, `text`, `key` and
+`focus`; the element kinds (`invoke`, `set_value`, `toggle`, `select`, `expand`,
+`collapse`) are refused.
 
 Status and observation types are in `internal/desktop/types.go`.
-Observation contains PNG base64 image (may be empty with capture_error),
-window-relative element rectangles, and protocol-level element actions:
-`invoke`, `set_value`, `toggle`, `select`, `expand`, `collapse`.
-Render only actions returned for a selected element. Never store screenshot or
-element contents in localStorage or logs. Treat all captions as untrusted text.
+Observation contains PNG base64 image (may be empty with capture_error) and
+window-relative element rectangles. The element list is a read-only inspection
+aid: it is not an input surface. Never store screenshot or element contents in
+localStorage or logs. Treat all captions as untrusted text.
 
 ### Current Windows Adapters
 
-UI Automation is used to inspect controls, not as a generic mutation fallback.
-Native testing demonstrated that legacy ValuePattern/TogglePattern proxies
-activate a background WinForms window. Those mutation paths are removed.
-
-- `set_value`: writable, non-password native Edit/RichEdit and WinForms Edit
-  controls, using bounded WM_SETTEXT on the validated descendant HWND.
-- `invoke`: native pushbutton command notification or WinForms ButtonBase's
-  dedicated command handler.
-- `toggle` / `select`: WinForms checkbox/radio command handlers.
-- Other elements are read-only. `expand` / `collapse` remain protocol options
-  for future adapters but are not advertised by the current native provider.
+Control goes through the foreground contract: the Owner grants a target, AHA
+brings it to the foreground, and input is dispatched as real pointer and
+keyboard events against the observed surface. The element list is read-only
+inspection and carries no actions.
 
 No endpoint exposes native message IDs or HWND parameters to a caller.
 Class, process lifetime, ancestry, control ID and current element identity
-are validated by the background provider. Each native command is bounded.
+are validated before each input. Each native command is bounded.
 
 The opt-in native fixture tests actual image capture, password masking,
 text/checkbox/radio/button state changes, and foreground window/input focus

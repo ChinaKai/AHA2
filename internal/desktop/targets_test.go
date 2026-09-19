@@ -261,7 +261,7 @@ func TestStopDuringNativeSelectionCannotPublishOrOverlapReopen(t *testing.T) {
 	if _, err := m.Stop("t", s.ID); err != nil {
 		t.Fatal(err)
 	}
-	_, err := m.Open(context.Background(), "t", "w1")
+	_, err := m.OpenWithMode(context.Background(), "t", "w1", "foreground", true)
 	wantError(t, err, "busy")
 	close(release)
 	select {
@@ -277,12 +277,16 @@ func TestStopDuringNativeSelectionCannotPublishOrOverlapReopen(t *testing.T) {
 	}
 }
 
-func TestBackgroundWindowCanSwitchWithoutForegroundUpgrade(t *testing.T) {
+// Background control was removed, so a session can only ever be foreground, and
+// an unconfirmed switch must be refused rather than silently downgraded.
+func TestSwitchRefusesUnconfirmedAndUnknownModes(t *testing.T) {
 	p := &selectionFixture{}
 	m := New(p)
 	s := share(t, m, "t", "w1")
-	next, err := m.SwitchTarget(context.Background(), "t", s.ID, 1, TargetSelection{Kind: "window", WindowID: "w2"}, "background", false)
-	if err != nil || next.Session.Mode != "background" || next.Session.Window.ID != "w2" || p.selections.Load() != 0 {
-		t.Fatal("background switch called physical foreground selector", err)
+	if _, err := m.SwitchTarget(context.Background(), "t", s.ID, 1, TargetSelection{Kind: "window", WindowID: "w2"}, "background", false); err == nil {
+		t.Fatal("removed background mode still accepted")
+	}
+	if _, err := m.SwitchTarget(context.Background(), "t", s.ID, 1, TargetSelection{Kind: "window", WindowID: "w2"}, "foreground", false); err == nil {
+		t.Fatal("unconfirmed foreground switch accepted")
 	}
 }

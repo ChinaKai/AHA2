@@ -34,7 +34,6 @@ type nativeWorkerPool struct {
 	idle       time.Duration
 	capture    nativeWorkerLane
 	action     nativeWorkerLane
-	background nativeWorkerLane
 }
 
 type nativeWorkerLane struct {
@@ -125,9 +124,6 @@ func (pool *nativeWorkerPool) run(ctx context.Context, packet []byte) ([]byte, e
 		lane = &pool.capture
 	case "act", "foreground_act", "foreground_new_desktop", "target_select":
 		lane, laneName = &pool.action, "action"
-	case "background_select", "background_observe", "background_act":
-		// Observation receipts and lifecycle invalidation live in the same worker.
-		lane, laneName = &pool.background, "background"
 	default:
 		return nil, errors.New("desktop invalid_request")
 	}
@@ -336,7 +332,7 @@ func (worker *nativeResident) stop() {
 
 func (pool *nativeWorkerPool) close() error {
 	pool.cancel()
-	for _, lane := range []*nativeWorkerLane{&pool.capture, &pool.action, &pool.background} {
+	for _, lane := range []*nativeWorkerLane{&pool.capture, &pool.action} {
 		lane.mu.Lock()
 		if lane.worker != nil {
 			lane.worker.stop()

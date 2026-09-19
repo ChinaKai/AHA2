@@ -16,7 +16,7 @@ import (
 //go:embed foreground_native.cs
 var foregroundBaseSource string
 
-var foregroundNativeSource = foregroundBaseSource + "\n" + nativeTargetsSource + "\n" + nativeBackgroundSource + "\n" + nativeBackgroundLifetimeSource + "\n" + nativeBrowserSource
+var foregroundNativeSource = foregroundBaseSource + "\n" + nativeTargetsSource
 
 var _ ForegroundProvider = (*nativeProvider)(nil)
 

@@ -21,12 +21,10 @@ func TestOtherDesktopWindowSelectionRequiresConfirmedForeground(t *testing.T) {
 	}
 	m := New(p)
 	target := TargetSelection{Kind: "window", WindowID: "other-window"}
-	_, err := m.OpenTarget(context.Background(), "t", target, "background", false)
-	wantError(t, err, "window_gone")
-	_, err = m.OpenTarget(context.Background(), "t", target, "foreground", false)
+	_, err := m.OpenTarget(context.Background(), "t", target, "foreground", false)
 	wantError(t, err, "foreground_confirmation_required")
 	if p.selections.Load() != 0 {
-		t.Fatal("unconfirmed/background request invoked cross-desktop selector")
+		t.Fatal("unconfirmed request invoked cross-desktop selector")
 	}
 	state, err := m.OpenTarget(context.Background(), "t", target, "foreground", true)
 	if err != nil || p.selections.Load() != 1 || state.Session.Controller != "owner" ||

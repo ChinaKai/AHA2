@@ -210,22 +210,22 @@ func TestSharedHTTPStillRequiresActiveMainAndTaskScope(t *testing.T) {
 	}
 }
 
-func TestSharedHTTPBackgroundConsentAndTargetSwitch(t *testing.T) {
+func TestSharedHTTPConsentAndTargetSwitch(t *testing.T) {
 	h := newStreamHarness(t)
 	h.manager.Stop(h.taskID, h.session.ID)
 	payload := map[string]any{"target": map[string]string{"kind": "window", "window_id": "fixture"},
-		"mode": "background", "confirm_shared": true}
+		"mode": "foreground", "confirm_foreground": true, "confirm_shared": true}
 	response := requestJSON(t, h.client, http.MethodPost, h.base+"/session", payload, h.csrf)
 	var opened struct{ Status desktop.Status }
 	decodeResponse(t, response, &opened)
 	if response.StatusCode != http.StatusCreated || opened.Status.Session.Controller != "shared" {
-		t.Fatal("joint background grant unavailable")
+		t.Fatal("joint grant unavailable")
 	}
 	s := opened.Status.Session
 	token := cooperativeAgentToken(t, h, h.taskID, "main", domain.TurnRunning)
 	response = agentRequest(t, h.server.URL+"/api/v1/agent/desktop/observation?session_id="+s.ID, http.MethodGet, token, nil)
 	if response.StatusCode != http.StatusOK {
-		t.Fatal("Agent cannot observe jointly shared background target")
+		t.Fatal("Agent cannot observe a jointly shared target")
 	}
 	response.Body.Close()
 	payload["session_id"], payload["revision"] = s.ID, s.Revision

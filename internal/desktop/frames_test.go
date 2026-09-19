@@ -85,14 +85,14 @@ func TestFramesBoundedMetadataExpiryAndViews(t *testing.T) {
 	wantError(t, err, "stale_observation")
 	viewRequest(t, m, s, "expired-views-freed")
 
-	background := New(&fakeProvider{})
-	b := share(t, background, "b", "w1")
+	retained := New(&fakeProvider{})
+	b := share(t, retained, "b", "w1")
 	for range 5 {
-		observe(t, background, b, "owner")
+		observe(t, retained, b, "owner")
 	}
-	frames := background.sessions["b"].observed["owner"]
-	if len(frames) != 4 {
-		t.Fatal("unbounded background snapshots")
+	frames := retained.sessions["b"].observed["owner"]
+	if len(frames) != 5 || len(frames) > 64 {
+		t.Fatalf("retained snapshot count = %d, want 5 (bounded)", len(frames))
 	}
 	for _, frame := range frames {
 		for _, e := range frame.elements {

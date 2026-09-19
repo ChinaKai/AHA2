@@ -51,11 +51,6 @@ type TargetProvider interface {
 	SelectTarget(context.Context, TargetSelection) (Window, error)
 }
 
-// Background selection validates identity and desktop membership without switching.
-type BackgroundTargetProvider interface {
-	SelectBackgroundWindow(context.Context, string) (Window, error)
-}
-
 type Element struct {
 	ID      string   `json:"id"`
 	Name    string   `json:"name"`
@@ -100,13 +95,12 @@ type Action struct {
 	Keys      []string `json:"keys,omitempty"`
 }
 
-// Provider methods remain background-only. Foreground input requires a separate
-// explicit grant and the ForegroundProvider contract; there is no silent fallback.
+// Provider enumerates shareable targets. Control itself always goes through the
+// ForegroundProvider contract with its own explicit grant; there is no silent
+// fallback to a less visible mode.
 type Provider interface {
 	Support() (bool, string)
 	Windows(context.Context) ([]Window, error)
-	Observe(context.Context, Window) (Observation, error)
-	Act(context.Context, Window, Action) error
 }
 
 type ForegroundProvider interface {
@@ -140,14 +134,13 @@ type Session struct {
 }
 
 type Status struct {
-	BackgroundDesktopSupported bool     `json:"background_desktop_supported"`
-	Supported                  bool     `json:"supported"`
-	Reason                     string   `json:"reason,omitempty"`
-	Session                    *Session `json:"session"`
-	ForegroundSupported        bool     `json:"foreground_supported"`
-	StreamSupported            bool     `json:"stream_supported"`
-	TargetsSupported           bool     `json:"targets_supported"`
-	SharedControlSupported     bool     `json:"shared_control_supported"`
+	Supported              bool     `json:"supported"`
+	Reason                 string   `json:"reason,omitempty"`
+	Session                *Session `json:"session"`
+	ForegroundSupported    bool     `json:"foreground_supported"`
+	StreamSupported        bool     `json:"stream_supported"`
+	TargetsSupported       bool     `json:"targets_supported"`
+	SharedControlSupported bool     `json:"shared_control_supported"`
 }
 
 type ActionRequest struct {

@@ -100,22 +100,6 @@ func TestForegroundNativeDoesNotBypassSystemPolicy(t *testing.T) {
 	}
 }
 
-func TestNativeBackgroundRejectsForegroundFields(t *testing.T) {
-	p := &nativeProvider{run: func(context.Context, []byte) ([]byte, error) {
-		t.Fatal("background action forwarded foreground input")
-		return nil, nil
-	}}
-	for _, action := range []Action{
-		{Kind: "invoke", ElementID: "x", X: 1},
-		{Kind: "set_value", ElementID: "x", Value: "x", Keys: []string{"ENTER"}},
-		{Kind: "toggle", ElementID: "x", Button: "left"},
-	} {
-		if err := p.Act(context.Background(), Window{ID: "fixture"}, action); err == nil {
-			t.Fatal("background input field accepted")
-		}
-	}
-}
-
 func TestForegroundNativeInterruptedBatchMarkers(t *testing.T) {
 	for _, test := range []struct {
 		markers string

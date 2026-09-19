@@ -259,32 +259,6 @@ func TestForegroundOwnedEdgeNavigationAndUnicode(t *testing.T) {
 		t.Log("owned temporary-profile startup dialog closed; parent enabled")
 	}
 	act(Action{Kind: "focus"})
-	if controls, err := NativeProvider().Observe(ctx, window); err == nil {
-		for _, element := range controls.Elements {
-			if (strings.Contains(element.Name, "地址") || strings.Contains(strings.ToLower(element.Name), "address")) &&
-				element.Width > 0 && element.Height > 0 {
-				act(Action{Kind: "click", X: element.X + element.Width/2, Y: element.Y + element.Height/2})
-				break
-			}
-		}
-	}
-	act(Action{Kind: "key", Keys: []string{"CTRL", "L"}})
-	act(Action{Kind: "text", Value: server.URL + "/input"})
-	if address, err := NativeProvider().Observe(ctx, window); err == nil {
-		for _, element := range address.Elements {
-			if strings.Contains(element.Name, "地址") || strings.Contains(strings.ToLower(element.Name), "address") {
-				state := "other"
-				if strings.TrimSuffix(element.Value, "/") == strings.TrimPrefix(server.URL, "http://") ||
-					strings.TrimSuffix(element.Value, "/") == server.URL {
-					state = "start"
-				}
-				if strings.Contains(element.Value, strings.TrimPrefix(server.URL, "http://")+"/input") {
-					state = "input"
-				}
-				t.Logf("owned address bar after text: state=%s length=%d", state, len(element.Value))
-			}
-		}
-	}
 	act(Action{Kind: "key", Keys: []string{"ENTER"}})
 	waitWindow("input")
 	value := "AHA foreground \u4e2d\u6587"

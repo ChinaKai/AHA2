@@ -73,7 +73,7 @@ try {
     if (endpoint.includes("/remote-task/")) throw new Error("remote task must never access desktop API");
     if (endpoint.endsWith("/session")) {
       sessionRequests.push(payload);
-      session = makeSession(payload.mode);
+      session = makeSession();
       if (payload.target.window_id === secondTarget.id) session.window = secondTarget;
     }
     if (endpoint.endsWith("/stop")) session = null;
@@ -97,8 +97,9 @@ try {
         window: target, image: minimized ? "" : image, width: minimized ? 0 : 800, height: minimized ? 0 : 450,
         capture_error: minimized ? "Window minimized" : "",
         surface: "geometry-v1",
-        input_actions: snapshotSession.mode === "foreground" ? (minimized ? ["focus"] : ["click", "double_click", "drag", "scroll", "text", "key", "focus"]) : [],
-        elements: snapshotSession.mode === "foreground" ? [] : [
+        // Control is foreground-only, so a live session always advertises input.
+        input_actions: minimized ? ["focus"] : ["click", "double_click", "drag", "scroll", "text", "key", "focus"],
+        elements: [
           {id: "container", name: "Editor", role: "Window", x: 0, y: 0, width: 800, height: 450, actions: []},
           {id: "value", name: '<Entry name="untrusted">', role: "Edit", value: "Original", x: 40, y: 80, width: 300, height: 65, actions: ["set_value", "invoke", "unknown"]},
           ...["toggle", "select", "expand", "collapse"].map((kind, i) => ({id: kind, name: kind, role: "Control", x: 400, y: 80 + i * 65, width: 300, height: 50, actions: [kind]})),
@@ -109,7 +110,7 @@ try {
   });
   const target = {id: "win-1", title: "Shared sample editor with a long document title", process: "editor.exe"};
   const secondTarget = {id: "win-2", title: "Second shared window", process: "second-editor.exe"};
-  const makeSession = mode => ({id: "session-1", task_id: "test-task", window: target, controller: "shared", revision: 1, expires_at: new Date(Date.now() + 600000).toISOString(), claimed: false, mode});
+  const makeSession = () => ({id: "session-1", task_id: "test-task", window: target, controller: "shared", revision: 1, expires_at: new Date(Date.now() + 600000).toISOString(), claimed: false, mode: "foreground"});
   let session = null;
   let observations = 0;
   let maxInFlight = 0;
@@ -168,7 +169,6 @@ try {
   });
   await page.waitForFunction(() => !document.querySelector("#desktop-window").disabled);
   await openPopover("targets");
-  await page.click('[data-desktop-mode="background"]');
   await page.selectOption("#desktop-window", choice("win-1"));
   await page.click("#desktop-share");
   await page.waitForFunction(() => document.querySelector("#desktop-image").naturalWidth === 800);
@@ -178,17 +178,23 @@ try {
     await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     const bounds = await page.locator("#desktop-image").boundingBox();
     await page.locator("#desktop-image").click({position: {x: bounds.width * 100 / 800, y: bounds.height * 110 / 450}});
-    await page.waitForSelector("#desktop-value-form", {state: "visible"});
-    assert.equal(await page.locator("#desktop-highlight").isVisible(), true);
-    assert.equal(await page.locator("[data-desktop-action=unknown]").count(), 0);
-    await page.locator("#desktop-value-input").fill("Draft survives polling");
-    await page.locator("#desktop-value-input").focus();
+    // A click on the picture is a real pointer gesture now, so it must reach the
+    // host as input rather than opening an element editor.
+    // A single click is deferred briefly so a double click can be told apart.
+    await page.waitForFunction(() => document.querySelector("#desktop-image").naturalWidth === 800);
+    await page.waitForFunction(() => document.querySelector("#desktop-image") !== null);
+    for (let i = 0; i < 20 && !sentActions.some(action => action.kind === "click"); i++) await page.waitForTimeout(100);
+    assert.ok(sentActions.some(action => action.kind === "click" && action.element_id === "$surface"),
+      "a picture click must reach the host as surface input");
+    const editor = page.locator("#desktop-text-input");
+    await editor.fill("Draft survives polling");
+    await editor.focus();
     const before = observations;
     await page.waitForFunction(() => document.querySelector("#desktop-image").naturalWidth === 800);
     await page.waitForTimeout(3000);
     assert.ok(observations > before);
-    assert.equal(await page.locator("#desktop-value-input").inputValue(), "Draft survives polling");
-    assert.equal(await page.evaluate(() => document.activeElement?.id), "desktop-value-input");
+    assert.equal(await editor.inputValue(), "Draft survives polling");
+    assert.equal(await page.evaluate(() => document.activeElement?.id), "desktop-text-input");
     assert.equal(await page.evaluate(() => desktop.refreshDesktopPanel(detail, () => {})), false);
     const overflow = await page.evaluate(() => ({
       document: document.documentElement.scrollWidth > innerWidth,
@@ -197,32 +203,26 @@ try {
     assert.deepEqual(overflow, {document: false, panel: false});
     await page.locator("#task-tool-panel-body").evaluate(node => { node.scrollTop = 0; });
     await page.screenshot({path: resolve(output, `desktop-${viewport.width}.png`)});
-    await page.locator("#desktop-value-form").scrollIntoViewIfNeeded();
+    await page.locator("#desktop-input").scrollIntoViewIfNeeded();
     await page.screenshot({path: resolve(output, `inspector-${viewport.width}.png`)});
   }
-  await page.click("#desktop-value-form button");
-  await page.waitForFunction(() => !document.querySelector("#desktop-value-form button").disabled);
-  // The Owner could not act here before: the panel refused every element action
-  // unless the session was in foreground mode, which also steals their machine.
-  assert.equal(await page.locator("#desktop-mode-status").innerText(), "后台 · 元素操作", "this flow must run in background mode to be meaningful");
-  assert.equal(await page.evaluate(() => document.querySelector("#desktop-input").hidden), true, "free-form coordinate input must stay foreground-only");
-  assert.equal(sentActions[0].kind, "set_value");
-  assert.equal(sentActions[0].value, "Draft survives polling");
-  for (const kind of ["toggle", "select", "expand", "collapse"]) {
-    await page.click(`[data-desktop-element="${kind}"]`);
-    await page.click(`[data-desktop-action="${kind}"]`);
-    await page.waitForFunction(() => !document.querySelector("#desktop-refresh").disabled);
-    assert.equal(sentActions.at(-1).kind, kind);
-  }
+  // Control is foreground-only now, and no element action may be dispatched: the
+  // panel offers no mode toggle, no action buttons and no element value form.
+  assert.equal(await page.locator("[data-desktop-mode]").count(), 0, "a control-mode toggle is still offered");
+  assert.equal(await page.locator("[data-desktop-action]").count(), 0, "element action buttons are still offered");
+  assert.equal(await page.locator("#desktop-value-form").count(), 0, "the element value form still renders");
+  assert.match(await page.locator("#desktop-mode-status").innerText(), /前台 · /);
   await openPopover("targets");
   session.claimed = true;
   await page.click("#desktop-refresh");
   await page.waitForFunction(() => document.querySelector("#desktop-status").textContent.includes("Agent 已接入"));
   await openPopover("operations");
+  // The element list is a collapsed read-only inspection aid.
+  await page.locator(".desktop-inspector > summary").click();
   await page.click('[data-desktop-element="value"]');
-  assert.equal(await page.locator("#desktop-value-form button").isDisabled(), false);
+  assert.match(await page.locator("#desktop-selected").innerText(), /Entry/);
   assert.equal(await page.locator("[data-desktop-controller]").count(), 0);
-  await stopAndReselect("background");
+  await stopAndReselect("foreground");
   await page.evaluate(() => window.mount("foreground-task"));
   await page.waitForFunction(() => !document.querySelector("#desktop-window").disabled);
   assert.equal(await page.locator("#desktop-window").inputValue(), "");

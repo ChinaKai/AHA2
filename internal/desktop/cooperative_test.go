@@ -9,9 +9,9 @@ import (
 	"time"
 )
 
-func shareCooperative(t *testing.T, m *Manager, mode string) Session {
+func shareCooperative(t *testing.T, m *Manager) Session {
 	t.Helper()
-	status, err := m.OpenSharedTarget(context.Background(), "t", TargetSelection{Kind: "window", WindowID: "w1"}, mode, mode == "foreground")
+	status, err := m.OpenSharedTarget(context.Background(), "t", TargetSelection{Kind: "window", WindowID: "w1"}, "foreground", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -22,11 +22,11 @@ func shareCooperative(t *testing.T, m *Manager, mode string) Session {
 }
 
 func TestSharedOwnerAndAgentUseSameGrantWithoutTransfer(t *testing.T) {
-	for _, mode := range []string{"foreground", "background"} {
-		t.Run(mode, func(t *testing.T) {
+	{
+		t.Run("foreground", func(t *testing.T) {
 			p := &foregroundFixture{}
 			m := New(p)
-			s := shareCooperative(t, m, mode)
+			s := shareCooperative(t, m)
 			var notices int
 			claim := func(Window) error { notices++; return nil }
 			if _, err := m.Claim(context.Background(), "t", s.ID, s.Revision, "turn", claim); err != nil {
@@ -37,11 +37,8 @@ func TestSharedOwnerAndAgentUseSameGrantWithoutTransfer(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				action := Action{Kind: "key", ElementID: "$surface", Keys: []string{"ENTER"}}
-				if mode == "background" {
-					action = Action{Kind: "invoke", ElementID: o.Elements[0].ID}
-				}
-				return ActionRequest{SessionID: s.ID, Revision: s.Revision, ObservationID: o.ID, Action: action}
+				return ActionRequest{SessionID: s.ID, Revision: s.Revision, ObservationID: o.ID,
+					Action: Action{Kind: "key", ElementID: "$surface", Keys: []string{"ENTER"}}}
 			}
 			owner := observe("owner")
 			agent := observe("agent:turn")
@@ -81,7 +78,7 @@ func TestSharedGrantDoesNotBroadenLegacyOrAcceptTransfer(t *testing.T) {
 	_, err = m.Claim(context.Background(), "t", legacy.ID, legacy.Revision, "turn", func(Window) error { return nil })
 	wantError(t, err, "owner_control")
 	m.Stop("t", legacy.ID)
-	s := shareCooperative(t, m, "foreground")
+	s := shareCooperative(t, m)
 	for _, role := range []string{"owner", "agent", "shared"} {
 		_, err := m.Control("t", s.ID, s.Revision, role)
 		if role == "shared" {
@@ -98,7 +95,7 @@ func TestSharedGrantDoesNotBroadenLegacyOrAcceptTransfer(t *testing.T) {
 
 func TestSharedConcurrentClaimsPublishOneNotice(t *testing.T) {
 	m := New(&foregroundFixture{})
-	s := shareCooperative(t, m, "foreground")
+	s := shareCooperative(t, m)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	started, release := make(chan struct{}), make(chan struct{})
@@ -134,7 +131,7 @@ func TestSharedClaimFailureStopAndCancellationFailClosed(t *testing.T) {
 	for _, operation := range []string{"notice_failure", "stop", "cancel"} {
 		t.Run(operation, func(t *testing.T) {
 			m := New(&foregroundFixture{})
-			s := shareCooperative(t, m, "foreground")
+			s := shareCooperative(t, m)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			_, err := m.Claim(ctx, "t", s.ID, s.Revision, "turn", func(Window) error {
@@ -161,7 +158,7 @@ func TestSharedClaimFailureStopAndCancellationFailClosed(t *testing.T) {
 func TestSharedInputRemainsSingleFlightAndOwnerStopCancels(t *testing.T) {
 	p := &foregroundFixture{}
 	m := New(p)
-	s := shareCooperative(t, m, "foreground")
+	s := shareCooperative(t, m)
 	if _, err := m.Claim(context.Background(), "t", s.ID, s.Revision, "turn", func(Window) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
@@ -202,7 +199,7 @@ func TestSharedInputRemainsSingleFlightAndOwnerStopCancels(t *testing.T) {
 func TestSharedErrorRevokesFramesButDoesNotTransferOrReplay(t *testing.T) {
 	p := &foregroundFixture{}
 	m := New(p)
-	s := shareCooperative(t, m, "foreground")
+	s := shareCooperative(t, m)
 	m.Claim(context.Background(), "t", s.ID, s.Revision, "turn", func(Window) error { return nil })
 	request := foregroundRequest(t, m, s, "agent:turn", Action{Kind: "key", Keys: []string{"ENTER"}})
 	request.ActionID = "uncertain-action"
@@ -228,7 +225,7 @@ func TestSharedErrorRevokesFramesButDoesNotTransferOrReplay(t *testing.T) {
 func TestSharedSwitchAndExpiryRevokeBothParticipants(t *testing.T) {
 	p := &selectionFixture{}
 	m := New(p)
-	s := shareCooperative(t, m, "foreground")
+	s := shareCooperative(t, m)
 	owner := foregroundRequest(t, m, s, "owner", Action{Kind: "key", Keys: []string{"ENTER"}})
 	m.Claim(context.Background(), "t", s.ID, s.Revision, "turn", func(Window) error { return nil })
 	agent := foregroundRequest(t, m, s, "agent:turn", Action{Kind: "key", Keys: []string{"ENTER"}})
@@ -249,7 +246,7 @@ func TestSharedSwitchAndExpiryRevokeBothParticipants(t *testing.T) {
 
 func TestSharedClaimsWaitWithoutHoldingManagerLock(t *testing.T) {
 	m := New(&foregroundFixture{})
-	s := shareCooperative(t, m, "foreground")
+	s := shareCooperative(t, m)
 	entered, release := make(chan struct{}), make(chan struct{})
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -281,7 +278,7 @@ func TestSharedControlErrorCannotAuthorizeEitherParticipant(t *testing.T) {
 			ControlError: "desktop_foreground_unavailable", InputActions: []string{"key"}}, nil
 	}}
 	m := New(p)
-	s := shareCooperative(t, m, "foreground")
+	s := shareCooperative(t, m)
 	m.Claim(context.Background(), "t", s.ID, s.Revision, "turn", func(Window) error { return nil })
 	for _, actor := range []string{"owner", "agent:turn"} {
 		o, err := m.Observe(context.Background(), "t", s.ID, actor)
