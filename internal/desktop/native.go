@@ -54,13 +54,23 @@ type nativeResponse struct {
 	Targets     Targets     `json:"targets"`
 }
 
+// focusQuarantineCooldown is how long a window stays action-blocked after an
+// action moved the user's focus. Long enough that a retry cannot hammer a
+// window whose page fights for focus, short enough that one transient
+// interference (the Owner clicking their own machine mid-action) does not
+// disable the window until the process restarts.
+const focusQuarantineCooldown = 60 * time.Second
+
 type nativeProvider struct {
 	run          func(context.Context, []byte) ([]byte, error)
 	reason       string
 	mu           sync.Mutex
 	closeWorkers func() error
-	// A provider that changed focus must not receive another action.
-	unsafeWindows map[string]bool
+	// A provider that changed focus must not receive another action until the
+	// cooldown expires. Entries are timestamps, not flags, so the block lifts by
+	// itself instead of lasting for the life of the process.
+	unsafeWindows map[string]time.Time
+	now           func() time.Time
 }
 
 func (p *nativeProvider) Close() error {
@@ -168,15 +178,10 @@ func (p *nativeProvider) Observe(ctx context.Context, window Window) (Observatio
 	if result.Error == "focus_side_effect" {
 		p.markUnsafe(window.ID)
 	}
-	p.mu.Lock()
-	unsafe := p.unsafeWindows[window.ID]
-	p.mu.Unlock()
-	if unsafe {
-		result.Observation.ControlError = "desktop_focus_side_effect"
-		for i := range result.Observation.Elements {
-			result.Observation.Elements[i].Actions = []string{}
-		}
-	}
+	// Observation itself is read-only: it cannot move focus, and a window under
+	// cooldown still has to be viewable, because the Owner asked to be able to
+	// watch at any time. Only actions are suppressed, and only until the
+	// cooldown lapses.
 	return result.Observation, err
 }
 
@@ -184,9 +189,27 @@ func (p *nativeProvider) markUnsafe(id string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.unsafeWindows == nil {
-		p.unsafeWindows = make(map[string]bool)
+		p.unsafeWindows = make(map[string]time.Time)
 	}
-	p.unsafeWindows[id] = true
+	p.unsafeWindows[id] = p.clock()()
+}
+
+func (p *nativeProvider) clock() func() time.Time {
+	if p.now != nil {
+		return p.now
+	}
+	return time.Now
+}
+
+// actionBlocked reports whether the window is still inside its focus cooldown.
+func (p *nativeProvider) actionBlocked(id string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	at, quarantined := p.unsafeWindows[id]
+	if !quarantined {
+		return false
+	}
+	return p.clock()().Sub(at) < focusQuarantineCooldown
 }
 
 func (p *nativeProvider) Act(ctx context.Context, window Window, action Action) error {
@@ -202,10 +225,7 @@ func (p *nativeProvider) Act(ctx context.Context, window Window, action Action) 
 		action.Button != "" || len(action.Keys) != 0 {
 		return errors.New("desktop invalid_request")
 	}
-	p.mu.Lock()
-	unsafe := p.unsafeWindows[window.ID]
-	p.mu.Unlock()
-	if unsafe {
+	if p.actionBlocked(window.ID) {
 		return errors.New("desktop focus_side_effect")
 	}
 	operation := "act"

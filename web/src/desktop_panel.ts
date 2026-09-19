@@ -567,7 +567,10 @@ function updateDOM(binding: Binding): void {
   // Polling must not replace or disable a focused editor; actions still fail closed.
   input.readOnly = !canAssist(state);
   if (input.value !== state.draft) input.value = state.draft;
-  root.querySelector<HTMLElement>(".desktop-inspector")!.hidden = foreground(state) || !session;
+  // The inspector is how an element action is chosen, so it has to stay
+  // reachable in background mode; the free-form input bar stays foreground-only
+  // because coordinate gestures are not available there.
+  root.querySelector<HTMLElement>(".desktop-inspector")!.hidden = !session;
   root.querySelector<HTMLElement>("#desktop-input")!.hidden = !foreground(state) || !session;
   const focus = root.querySelector<HTMLButtonElement>("#desktop-focus")!;
   focus.hidden = false;
@@ -1050,7 +1053,9 @@ async function mutate(binding: Binding, suffix: string, payload: object, busy: s
   binding.pendingText = draftSubmitted ? sentText : null;
   if (draftSubmitted) state.inputDraft = "";
   if (suffix === "/actions") {
-    if (!foreground(state)) state.observedAt = 0;
+    // An element action in background still leaves the frame valid; a
+    // coordinate action in foreground has moved the page and needs a new one.
+    if (foreground(state)) state.observedAt = 0;
   } else {
     closeStream(binding);
     state.observation = null;
@@ -1093,7 +1098,6 @@ async function mutate(binding: Binding, suffix: string, payload: object, busy: s
 
 function chooseElement(binding: Binding, id: string): void {
   const {state} = binding;
-  if (foreground(state)) return;
   const element = state.observation?.elements.find(item => item.id === id);
   if (!element) return;
   binding.root.querySelector<HTMLDetailsElement>(".desktop-inspector")!.open = true;
@@ -1109,7 +1113,11 @@ function chooseElement(binding: Binding, id: string): void {
 function performAction(binding: Binding, kind: string): void {
   const {state} = binding;
   const element = selected(state);
-  if (foreground(state) || !actionable(state) || !element || !supportedActions(element).includes(kind as ActionKind)) return;
+  // Element actions work in both modes. In background the adapter maps them to
+  // the control's own accessibility action, which is exactly what keeps the
+  // Owner's focus where it is. Free-form pointer gestures stay foreground-only:
+  // the background adapter has no coordinate input.
+  if (!actionable(state) || !element || !supportedActions(element).includes(kind as ActionKind)) return;
   const session = state.status!.session!;
   void mutate(binding, "/actions", {
     session_id: session.id, revision: session.revision, observation_id: state.observation!.id,

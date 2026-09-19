@@ -122,28 +122,48 @@ func TestNativeCancellation(t *testing.T) {
 	}
 }
 
-func TestNativeFocusViolationDisablesFurtherActions(t *testing.T) {
+// A focus violation must stop further actions on that window, but only for the
+// cooldown: a single transient interference used to disable the window until
+// the process restarted, which made the feature unusable for an Owner who keeps
+// using their own machine.
+func TestNativeFocusViolationPausesActionsForCooldown(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	clock := func() time.Time { return now }
 	calls := 0
-	p := &nativeProvider{run: func(context.Context, []byte) ([]byte, error) {
+	p := &nativeProvider{now: clock, run: func(context.Context, []byte) ([]byte, error) {
 		calls++
 		return []byte(`{"ok":false,"error":"focus_side_effect"}`), nil
 	}}
 	for i := 0; i < 2; i++ {
 		err := p.Act(context.Background(), Window{ID: "fixture"}, Action{Kind: "invoke", ElementID: "fixture"})
 		if err == nil || !strings.Contains(err.Error(), "focus_side_effect") {
-			t.Fatalf("error = %v", err)
+			t.Fatalf("action %d error = %v", i, err)
 		}
 	}
 	if calls != 1 {
-		t.Fatalf("unsafe provider received %d actions", calls)
+		t.Fatalf("blocked window received %d actions, want 1", calls)
 	}
 	p.run = func(context.Context, []byte) ([]byte, error) {
 		return []byte(`{"ok":true,"observation":{"window":{"id":"fixture"},"elements":[{"id":"e","actions":["invoke"]}]}}`), nil
 	}
+	// Observation stays available throughout: the Owner must be able to watch at
+	// any time, and a read cannot move focus.
 	observation, err := p.Observe(context.Background(), Window{ID: "fixture"})
-	if err != nil || observation.ControlError != "desktop_focus_side_effect" ||
-		len(observation.Elements[0].Actions) != 0 {
-		t.Fatalf("quarantined window still advertises actions: %+v %v", observation, err)
+	if err != nil || observation.ControlError != "" || len(observation.Elements[0].Actions) == 0 {
+		t.Fatalf("paused window did not stay observable: %+v %v", observation, err)
+	}
+	// Still inside the cooldown.
+	now = now.Add(focusQuarantineCooldown - time.Second)
+	if err := p.Act(context.Background(), Window{ID: "fixture"}, Action{Kind: "invoke", ElementID: "fixture"}); err == nil {
+		t.Fatal("window accepted an action during the cooldown")
+	}
+	// Once the cooldown lapses the window recovers on its own.
+	now = now.Add(2 * time.Second)
+	p.run = func(context.Context, []byte) ([]byte, error) {
+		return []byte(`{"ok":true}`), nil
+	}
+	if err := p.Act(context.Background(), Window{ID: "fixture"}, Action{Kind: "invoke", ElementID: "fixture"}); err != nil {
+		t.Fatalf("window did not recover after the cooldown: %v", err)
 	}
 }
 

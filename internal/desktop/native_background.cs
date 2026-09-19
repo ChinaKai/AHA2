@@ -227,9 +227,15 @@ namespace AHADesktop {
                     Fail("invalid_request");
                 Guid active = CurrentVirtualDesktop();
                 Target target = ResolveBackground(id, bound, active, operation == "background_select");
-                Focus focus = Focus.Read(target.Thread);
+                // The focus guard exists to catch one of our actions moving the
+                // user's focus. A read cannot move focus, so a change observed
+                // while selecting or observing is the Owner using their own
+                // machine, and failing the read would punish them for that.
+                // Only the mutating operation is policed.
+                bool guardFocus = operation == "background_act";
+                Focus focus = guardFocus ? Focus.Read(target.Thread) : null;
                 System.Action validate = target.Revalidate;
-                target.Revalidate = delegate { validate(); focus.Check(); };
+                target.Revalidate = guardFocus ? delegate { validate(); focus.Check(); } : validate;
                 try {
                     object result;
                     if (operation == "background_select") result = Obj("ok", true, "window", target.Window);
@@ -243,7 +249,7 @@ namespace AHADesktop {
                     target.Revalidate();
                     return JSON.Serialize(result);
                 } finally {
-                    focus.Check();
+                    if (guardFocus) focus.Check();
                     InputDesktopGuard();
                     if (CurrentVirtualDesktop() != active) Fail("background_context_changed");
                 }

@@ -202,6 +202,10 @@ try {
   }
   await page.click("#desktop-value-form button");
   await page.waitForFunction(() => !document.querySelector("#desktop-value-form button").disabled);
+  // The Owner could not act here before: the panel refused every element action
+  // unless the session was in foreground mode, which also steals their machine.
+  assert.equal(await page.locator("#desktop-mode-status").innerText(), "后台 · 元素操作", "this flow must run in background mode to be meaningful");
+  assert.equal(await page.evaluate(() => document.querySelector("#desktop-input").hidden), true, "free-form coordinate input must stay foreground-only");
   assert.equal(sentActions[0].kind, "set_value");
   assert.equal(sentActions[0].value, "Draft survives polling");
   for (const kind of ["toggle", "select", "expand", "collapse"]) {
