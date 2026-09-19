@@ -31,7 +31,7 @@ func TestEngineRoutesTemplatesAndBuildsContextManifest(t *testing.T) {
 		templateBodies[item.ID] = item.Content
 	}
 	for id, marker := range map[string]string{
-		"core.default":             "Work only inside the selected Task workspace",
+		"core.default":             "Use the selected Task workspace as the default/primary workspace",
 		"role.main":                "You are the Main Agent",
 		"protocol.knowledge":       "Knowledge is a progressive",
 		"context.recovery-handoff": "### Recovery handoff",
