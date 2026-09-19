@@ -3,6 +3,7 @@ package workspace
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -91,4 +92,40 @@ func isDecimal(value string) bool {
 		}
 	}
 	return true
+}
+
+// TestFindWriterPIDsScanIsPosixShell pins the scan to POSIX shell.
+//
+// The runner executes the scan with "sh". On Debian and Ubuntu that is dash,
+// which has no "read -d"; the scan originally used it to split
+// /proc/<pid>/environ on NUL. Under dash the loop aborted immediately, so every
+// query matched nothing and AHA silently concluded no backend writer existed —
+// CI caught it only because the runner there is Ubuntu while a WSL shell links
+// /bin/sh to bash. The scan runs in the same shell on real Ubuntu hosts, so this
+// is production behaviour, not a test-environment quirk.
+func TestFindWriterPIDsScanIsPosixShell(t *testing.T) {
+	t.Parallel()
+	spy := &capturingRunner{inner: LocalRunner{}}
+	if _, err := FindWriterPIDs(context.Background(), spy, WriterQuery{
+		EnvName: "CODEX_HOME", EnvValue: "/nonexistent/aha2-writer-posix-test",
+	}); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if spy.command.Executable != "sh" {
+		t.Fatalf("the scan must run under sh, got %q", spy.command.Executable)
+	}
+	// Only the executable lines matter: the explanatory comments name the
+	// constructs they warn against, and a comment cannot break dash.
+	var code []string
+	for _, line := range strings.Split(strings.Join(spy.command.Args, "\n"), "\n") {
+		if trimmed := strings.TrimSpace(line); !strings.HasPrefix(trimmed, "#") {
+			code = append(code, line)
+		}
+	}
+	script := strings.Join(code, "\n")
+	for _, bashism := range []string{"read -d", "-d ''", "read -r -d", "[[", "<<<"} {
+		if strings.Contains(script, bashism) {
+			t.Errorf("scan uses a non-POSIX construct %q that dash rejects", bashism)
+		}
+	}
 }

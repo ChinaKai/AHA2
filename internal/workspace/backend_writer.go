@@ -74,11 +74,19 @@ for pid_dir in /proc/[0-9]*; do
   cat "$pid_dir/environ" >/dev/null 2>&1 || continue
   hit=0
   if [ -n "$env_name" ]; then
-    while IFS= read -r -d '' entry; do
+    # /proc/<pid>/environ is NUL-separated and each value may contain spaces, so
+    # split on NUL. This must stay POSIX: the runner executes the script with
+    # "sh", which is dash on Debian/Ubuntu, and dash has no "read -d". Using it
+    # there made the whole scan match nothing, silently reporting no writer.
+    while IFS= read -r entry; do
       case "$entry" in
         "$env_name"=*) [ "${entry#*=}" = "$env_value" ] && hit=1 ;;
       esac
-    done < "$pid_dir/environ" 2>/dev/null
+    done <<EOF
+$(tr '\0' '\n' < "$pid_dir/environ" 2>/dev/null)
+EOF
+    # tr/build may have produced a trailing empty line; that cannot match the
+    # NAME=value pattern above, so no extra filtering is needed.
   fi
   if [ "$hit" = 0 ] && [ -n "$resume_id" ]; then
     cmdline=$(tr '\0' ' ' < "$pid_dir/cmdline" 2>/dev/null) || cmdline=""
