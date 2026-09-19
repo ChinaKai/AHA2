@@ -2073,7 +2073,17 @@ test("background shared control accepts Owner element actions without focus", as
   assert.match(source, /#desktop-input"\)!\.hidden = !foreground\(state\) \|\| !session;/);
 
   // Pointer gestures genuinely need coordinates, so they stay foreground-only.
-  assert.match(source, /if \(!foreground\(state\) \|\| !actionable\(state\) \|\| !\["click", "double_click", "drag"\]/);
+  assert.match(source, /if \(!actionable\(state\) \|\| !\["click", "double_click", "drag"\]\.some\(kind => inputAllowed/);
+  // A background click resolves to the element under the pointer and acts on it,
+  // so the Owner points at the picture instead of learning about elements.
+  assert.match(source, /const element = point \? elementAtPoint\(state, point\.x, point\.y\) : undefined;/);
+  assert.match(source, /function elementAtPoint\(/);
+  assert.match(source, /dispatchElementAction\(binding, element, kind\)/);
+  // Picking from the picture must not force the element list open.
+  assert.match(source, /chooseElement\(binding, element\.id, "picture"\)/);
+  assert.match(source, /function openElementEditor\(/);
+  // A text entry opens its editor; a button acts without covering the picture.
+  assert.match(source, /if \(supportedActions\(element\)\.includes\("set_value"\)\) openElementEditor\(binding\);/);
   // Selecting an element is not a gesture and must not require foreground.
   const choose = /function chooseElement\([\s\S]*?\n\}/.exec(source)?.[0] || "";
   assert.ok(choose, "chooseElement not found");
@@ -2094,5 +2104,5 @@ test("background shared control accepts Owner element actions without focus", as
   const background = await readFile(resolve(root, "..", "internal", "desktop", "native_background.cs"), "utf8");
   assert.match(background, /bool guardFocus = operation == "background_act";/);
   assert.match(background, /if \(guardFocus\) focus\.Check\(\);/);
-  assert.match(panel, /desktop-inspector/);
+  assert.match(panel, /inputAllowed/, "the bundled panel lost its input gate");
 });

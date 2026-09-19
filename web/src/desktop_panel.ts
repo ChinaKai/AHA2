@@ -500,8 +500,10 @@ function updateDOM(binding: Binding): void {
   text("#desktop-video-metrics", `${state.transport} · ${observation?.preview_width || observation?.width || 0} × ${observation?.preview_height || observation?.height || 0} · ${state.fps.toFixed(1)} FPS · 帧周期 ${Math.round(state.cycleMS)} ms`);
   root.querySelector<HTMLElement>("#desktop-error")!.hidden = !state.error;
   const image = root.querySelector<HTMLImageElement>("#desktop-image")!;
-  image.tabIndex = foreground(state) ? 0 : -1;
-  image.classList.toggle("desktop-input-surface", foreground(state));
+  // The picture is the surface the Owner works on in both modes: foreground
+  // sends gestures, background resolves a click to the element underneath.
+  image.tabIndex = actionable(state) ? 0 : -1;
+  image.classList.toggle("desktop-input-surface", true);
   image.setAttribute("aria-disabled", String(!actionable(state)));
   const mime = observation?.mime || "image/png";
   const hasImage = Boolean(observation && (binding.imageURL || (observation.image
@@ -525,7 +527,8 @@ function updateDOM(binding: Binding): void {
   text("#desktop-capture-status", captureStatus);
   root.querySelector<HTMLElement>("#desktop-capture-status")!.hidden = !captureStatus;
   const highlight = root.querySelector<HTMLElement>("#desktop-highlight")!;
-  highlight.hidden = foreground(state) || !hasImage || !element || element.width <= 0 || element.height <= 0;
+  // Shown in both modes: it marks the element the next click would act on.
+  highlight.hidden = !hasImage || !element || element.width <= 0 || element.height <= 0;
   if (!highlight.hidden && element && observation) {
     const left = Math.max(0, Math.min(observation.width, element.x));
     const top = Math.max(0, Math.min(observation.height, element.y));
@@ -713,17 +716,42 @@ function recordFrame(binding: Binding, bytes: number, decodeMS: number, cycleMS:
   if (state.videoMode === "auto") state.adaptive = adaptDesktopVideo(state.adaptive, cycleMS, bytes, decodeMS);
 }
 
+// Element ids are single-use receipts minted per capture, so every refresh
+// replaces them. Carrying the Owner's selection across a refresh therefore means
+// re-resolving it to the new receipt for the same element, by the identity that
+// does survive: name, role and geometry. Without this the panel drops whatever
+// was selected on every frame and a form the Owner just opened closes itself.
+function reselectAfterRefresh(state: PanelState, previous: SharedElement | undefined): void {
+  if (!previous) return;
+  const match = (state.observation?.elements || []).find(element =>
+    element.name === previous.name && element.role === previous.role
+    && element.x === previous.x && element.y === previous.y
+    && element.width === previous.width && element.height === previous.height);
+  if (match) {
+    state.selectedID = match.id;
+    return;
+  }
+  state.selectedID = "";
+  state.draft = "";
+  state.dirty = false;
+}
+
 function acceptObservation(binding: Binding, observation: Observation): void {
   const state = binding.state;
+  const previous = selected(state);
   state.observation = observation;
   state.observedAt = Date.now();
   state.error = state.actionError || (observation.control_error
     ? errorMessages[observation.control_error] || observation.control_error : "");
-  if (!selected(state)) {
-    state.selectedID = "";
-    state.draft = "";
-    state.dirty = false;
-  } else if (!state.dirty) state.draft = selected(state)?.value || "";
+  if (!previous) return;
+  const stillCurrent = selected(state);
+  if (stillCurrent && stillCurrent.id === previous.id) {
+    if (!state.dirty) state.draft = stillCurrent.value || "";
+    return;
+  }
+  reselectAfterRefresh(state, previous);
+  const reselected = selected(state);
+  if (reselected && !state.dirty) state.draft = reselected.value || "";
 }
 
 async function receiveFrame(binding: Binding, socket: WebSocket, data: ArrayBuffer | Blob): Promise<void> {
@@ -1096,18 +1124,36 @@ async function mutate(binding: Binding, suffix: string, payload: object, busy: s
   }
 }
 
-function chooseElement(binding: Binding, id: string): void {
+// Selecting an element is what a click on the picture does; the element list is
+// the Agent's and the debugger's view, so it is revealed only when the Owner
+// opens it deliberately (surface = "list").
+// Selecting an element is what a click on the picture does. The value editor and
+// the element list both live inside the operations popover's inspector <details>,
+// which renders nothing while closed. Opening them on every picture click would
+// cover the picture the Owner is working on, so a picture click only records the
+// selection: the actions-bar entry points open the editor when a value actually
+// needs typing, and the Owner opens the list deliberately.
+function chooseElement(binding: Binding, id: string, surface: "picture" | "list" = "list"): void {
   const {state} = binding;
   const element = state.observation?.elements.find(item => item.id === id);
   if (!element) return;
-  binding.root.querySelector<HTMLDetailsElement>(".desktop-inspector")!.open = true;
-  setPopover(binding, "operations");
+  if (surface === "list") {
+    binding.root.querySelector<HTMLDetailsElement>(".desktop-inspector")!.open = true;
+    setPopover(binding, "operations");
+  }
   if (state.selectedID !== id) {
     state.selectedID = id;
     state.draft = element.value || "";
     state.dirty = false;
   }
   updateDOM(binding);
+}
+
+// Editing a value needs the form, which only exists while the inspector inside
+// the operations popover is open, so this is the path that reveals both.
+function openElementEditor(binding: Binding): void {
+  binding.root.querySelector<HTMLDetailsElement>(".desktop-inspector")!.open = true;
+  setPopover(binding, "operations");
 }
 
 function performAction(binding: Binding, kind: string): void {
@@ -1117,12 +1163,51 @@ function performAction(binding: Binding, kind: string): void {
   // the control's own accessibility action, which is exactly what keeps the
   // Owner's focus where it is. Free-form pointer gestures stay foreground-only:
   // the background adapter has no coordinate input.
+  // Element actions work in both modes. In background the adapter maps them to
+  // the control's own accessibility action, which is exactly what keeps the
+  // Owner's focus where it is. Free-form pointer gestures stay foreground-only:
+  // the background adapter has no coordinate input.
   if (!actionable(state) || !element || !supportedActions(element).includes(kind as ActionKind)) return;
+  dispatchElementAction(binding, element, kind as ActionKind);
+}
+
+function dispatchElementAction(binding: Binding, element: SharedElement, kind: ActionKind): void {
+  const {state} = binding;
+  if (!actionable(state) || !supportedActions(element).includes(kind)) return;
   const session = state.status!.session!;
   void mutate(binding, "/actions", {
     session_id: session.id, revision: session.revision, observation_id: state.observation!.id,
     kind, element_id: element.id, ...(kind === "set_value" ? {value: state.draft} : {}),
   }, "正在操作目标软件...");
+}
+
+// The Owner works on the picture, not on the element list. A click is resolved
+// to the element under the pointer and its own action is dispatched, so the
+// experience matches foreground: point at what you want, click it. Resolution
+// still lands on an authorized element rather than a raw coordinate, which is
+// what keeps the background path from becoming arbitrary input injection.
+function elementAtPoint(state: PanelState, x: number, y: number): SharedElement | undefined {
+  const candidates = (state.observation?.elements || []).filter(element =>
+    element.width > 0 && element.height > 0 && element.actions?.length
+    && x >= element.x && x <= element.x + element.width
+    && y >= element.y && y <= element.y + element.height);
+  if (!candidates.length) return undefined;
+  // Innermost wins: a button inside a toolbar should win over the toolbar.
+  return candidates.reduce((best, element) =>
+    element.width * element.height < best.width * best.height ? element : best);
+}
+
+// What a plain click means for an element. Buttons and links invoke, checkboxes
+// and radios flip. A text entry is the exception: it is typed into, so clicking
+// only selects it and lets the Owner enter a value, rather than firing its
+// set_value with whatever draft happens to be there.
+function primaryAction(element: SharedElement): ActionKind | undefined {
+  const supported = supportedActions(element);
+  if (supported.includes("set_value")) return undefined;
+  for (const kind of ["invoke", "toggle", "select", "expand", "collapse"] as ActionKind[]) {
+    if (supported.includes(kind)) return kind;
+  }
+  return undefined;
 }
 
 function cancelGesture(binding: Binding): void {
@@ -1212,7 +1297,8 @@ function bindInput(binding: Binding): void {
   const image = root.querySelector<HTMLImageElement>("#desktop-image")!;
   listen(binding, image, "pointerdown", event => {
     if (binding.gesture) return;
-    if (!foreground(state) || !actionable(state) || !["click", "double_click", "drag"].some(kind => inputAllowed(state, kind as InputKind))) return;
+    if (!foreground(state)) return; // background pointer handling lives on click
+    if (!actionable(state) || !["click", "double_click", "drag"].some(kind => inputAllowed(state, kind as InputKind))) return;
     const point = imagePoint(binding, event);
     if (!point || ![0, 1, 2].includes(event.button)) return;
     pauseObservation(binding);
@@ -1221,6 +1307,18 @@ function bindInput(binding: Binding): void {
     binding.gesture = {...point, button: ["left", "middle", "right"][event.button],
       pointerID: event.pointerId, observationID: state.observation!.id};
     image.setPointerCapture(event.pointerId);
+  });
+  listen(binding, image, "pointermove", event => {
+    // Background only: preview which element a click would act on, so pointing
+    // at the picture feels the same as pointing at the real window. Moving over
+    // empty space keeps the current selection rather than clearing it, so a
+    // value the Owner is part-way through editing does not disappear when the
+    // pointer drifts off the control.
+    if (foreground(state) || binding.gesture || !actionable(state)) return;
+    const point = imagePoint(binding, event);
+    const element = point ? elementAtPoint(state, point.x, point.y) : undefined;
+    if (!element || element.id === state.selectedID) return;
+    chooseElement(binding, element.id, "picture");
   });
   listen(binding, image, "pointerup", event => {
     const gesture = binding.gesture;
@@ -1524,17 +1622,34 @@ export function bindDesktopPanel(detail: TaskDetail, notify: Notice): void {
     if (button) chooseElement(binding, button.dataset.desktopElement || "");
   });
   listen(binding, root.querySelector("#desktop-image"), "click", event => {
+    // Background: a click on the picture is the Owner acting on the window, the
+    // same as in foreground, but without coordinates. It resolves to the element
+    // under the pointer and that element performs its own action, so the Owner
+    // points at what they want instead of learning about elements. Resolution
+    // still lands on an authorized element, which is what keeps this from
+    // becoming arbitrary input injection.
     if (foreground(state)) return;
+    if (!actionable(state)) return;
     const observation = state.observation;
-    if (!observation) return;
+    if (!observation || observation.width <= 0 || observation.height <= 0) return;
     const bounds = (event.currentTarget as HTMLImageElement).getBoundingClientRect();
+    if (bounds.width <= 0 || bounds.height <= 0) return;
     const pointer = event as MouseEvent;
-    const x = (pointer.clientX - bounds.left) / bounds.width * observation.width;
-    const y = (pointer.clientY - bounds.top) / bounds.height * observation.height;
-    const hits = observation.elements.filter(element => element.width > 0 && element.height > 0
-      && x >= element.x && y >= element.y && x <= element.x + element.width && y <= element.y + element.height);
-    hits.sort((a, b) => a.width * a.height - b.width * b.height);
-    if (hits[0]) chooseElement(binding, hits[0].id);
+    const element = elementAtPoint(state,
+      (pointer.clientX - bounds.left) / bounds.width * observation.width,
+      (pointer.clientY - bounds.top) / bounds.height * observation.height);
+    if (!element) return;
+    event.preventDefault();
+    chooseElement(binding, element.id, "picture");
+    const kind = primaryAction(element);
+    if (kind) {
+      dispatchElementAction(binding, element, kind);
+      return;
+    }
+    // A text entry has no click action: it is typed into, so clicking it opens
+    // the editor. That is the one case where the popover must cover the picture,
+    // because the Owner is now typing rather than pointing.
+    if (supportedActions(element).includes("set_value")) openElementEditor(binding);
   });
   listen(binding, root.querySelector("#desktop-image"), "error", () => {
     if (!current(binding)) return;
