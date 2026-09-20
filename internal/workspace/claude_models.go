@@ -32,10 +32,20 @@ func probeClaudeBackend(ctx context.Context, runner Runner, item domain.Workspac
 		Executable: "claude", Args: []string{"auth", "status", "--json"}, Dir: item.RootPath,
 		Env: claudeNativeEnvironment(), Timeout: 20 * time.Second,
 	})
-	if authErr != nil || authResult.ExitCode != 0 {
+	// "unknown" is all the Web UI can render as "detection not finished", so a
+	// failed probe carries the reason too. Without it a timeout, a missing HOME
+	// and an unparsable reply are indistinguishable to the operator.
+	if strings.TrimSpace(authResult.Stdout) == "" {
 		probe["auth_status"] = "unknown"
+		probe["auth_error"] = claudeAuthFailure(item, authResult, authErr)
 		return probe, false
 	}
+	// A non-zero exit code is not a failure signal here: `claude auth status
+	// --json` prints the complete status and still exits 1 for a logged-out
+	// account, so the reply is the authority and the exit code is deliberately
+	// ignored. Keying off the exit code reported every logged-out machine as
+	// "unknown" -- a different message from "not logged in" -- which sent the
+	// operator looking for a detection failure that had never happened.
 	var status struct {
 		LoggedIn    bool   `json:"loggedIn"`
 		AuthMethod  string `json:"authMethod"`
@@ -43,6 +53,7 @@ func probeClaudeBackend(ctx context.Context, runner Runner, item domain.Workspac
 	}
 	if err := json.Unmarshal([]byte(authResult.Stdout), &status); err != nil {
 		probe["auth_status"] = "unknown"
+		probe["auth_error"] = claudeAuthFailure(item, authResult, err)
 		return probe, false
 	}
 	probe["auth_status"] = "not_logged_in"
@@ -163,6 +174,18 @@ func ClaudeModelsFromCapabilities(capabilities map[string]any) []domain.ClaudeMo
 		return nil
 	}
 	return models
+}
+
+// claudeAuthFailure describes why the auth probe produced no usable status.
+// safeProbeDetail can only surface stderr or the exit code, so an empty reply
+// with exit code 0 -- the shape a killed or silently-denied process leaves
+// behind -- would otherwise read as the unhelpful "exit code 0".
+func claudeAuthFailure(item domain.Workspace, result Result, err error) string {
+	detail := safeProbeDetail(item, result, err)
+	if strings.TrimSpace(result.Stdout) != "" || detail != "exit code 0" {
+		return "claude auth status: " + detail
+	}
+	return "claude auth status 未返回任何内容（退出码 0）：命令可能被提前终止或输出被拦截"
 }
 
 func claudeNativeEnvironment() map[string]string {

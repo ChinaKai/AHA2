@@ -608,6 +608,7 @@ function claudeOfficialCatalog(workspace?: Workspace): ClaudeOfficialCatalog {
     auth_status?: string;
     models?: ClaudeModelOption[];
     models_error?: string;
+    auth_error?: string;
   } | undefined;
   if (!probe || probe.status !== "ready") {
     return {availability: "unavailable", models: [], message: "暂不可用：当前 Workspace 未检测到 Claude Code CLI。"};
@@ -616,7 +617,16 @@ function claudeOfficialCatalog(workspace?: Workspace): ClaudeOfficialCatalog {
     return {availability: "not_logged_in", models: [], message: "暂不可用：当前 Workspace 尚未登录 Claude Code，请先执行 claude auth login。"};
   }
   if (probe.auth_status !== "logged_in") {
-    return {availability: "unknown", models: [], message: "暂不可用：尚未完成 Claude Code 登录状态检测。"};
+    // The probe keeps the reason it could not read a status. Showing it is the
+    // difference between the operator knowing what failed and guessing.
+    const reason = typeof probe.auth_error === "string" ? probe.auth_error.trim() : "";
+    return {
+      availability: "unknown",
+      models: [],
+      message: reason
+        ? `暂不可用：Claude Code 登录状态检测失败（${reason}）。`
+        : "暂不可用：尚未完成 Claude Code 登录状态检测。",
+    };
   }
   const models = Array.isArray(probe.models) ? probe.models : [];
   if (models.length > 0) {
