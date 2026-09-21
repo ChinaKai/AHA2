@@ -252,7 +252,11 @@ foreach ($contract in @("./cmd/aha-tray", "aha2-tray-", "-H windowsgui")) {
     }
 }
 $buildAndDeploy = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $repo "scripts\build-and-deploy-windows-user.ps1")
-foreach ($contract in @("ProviderPath", "GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)", "aha2-version-", "main.webVersion=", "InputFeishuPlugin", "InputFeishuManifest", "AllowCustomUserWritableInstallDir", "UpdateExistingInstallInPlace", "Neither Windows node.exe nor WSL node was found.", "NodeRuntime", '"node", "scripts/build-web.mjs"', 'test -x "$linuxRepo/.tools/go/bin/go"', "df -Pk .")) {
+# These assertions name the mechanism, so reworking an invocation legitimately
+# changes them -- the guard is that the capability is still present, not that the
+# wording froze. Keep each one pointing at a real marker: the toolchain probe, the
+# free-space probe, and the node that runs the Web build.
+foreach ($contract in @("ProviderPath", "GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)", "aha2-version-", "main.webVersion=", "InputFeishuPlugin", "InputFeishuManifest", "AllowCustomUserWritableInstallDir", "UpdateExistingInstallInPlace", "No WSL Node.js able to run the Web build was found", "NodeRuntime", '$wslNode, "scripts/build-web.mjs"', '"test", "-x", "$linuxRepo/.tools/go/bin/go"', '"df", "-Pk", "."')) {
     if (-not $buildAndDeploy.Contains($contract)) {
         throw "Windows build-and-deploy contract is missing: $contract"
     }
