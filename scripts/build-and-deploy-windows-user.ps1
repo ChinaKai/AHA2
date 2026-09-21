@@ -78,9 +78,81 @@ function Invoke-Step([string]$Name, [scriptblock]$Action) {
     Write-Host ("<== {0} ({1:n1}s)" -f $Name, $watch.Elapsed.TotalSeconds)
 }
 
+# PowerShell's call operator silently yields nothing for some console programs
+# launched with a non-Windows current directory; wsl.exe is one of them, which
+# made the WSL discovery below look like "no distribution is installed". Capture
+# stdout/stderr and the exit code through a process instead of relying on `&`.
+function Invoke-NativeCapture([string]$Executable, [string[]]$Arguments, [switch]$AllowFailure) {
+    $startInfo = New-Object Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $Executable
+    $startInfo.Arguments = ($Arguments | ForEach-Object {
+        if ($_ -match '[\s"]') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ }
+    }) -join ' '
+    $startInfo.UseShellExecute = $false
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $startInfo.StandardOutputEncoding = [Text.Encoding]::UTF8
+    $startInfo.StandardErrorEncoding = [Text.Encoding]::UTF8
+    $startInfo.CreateNoWindow = $true
+    if (-not [string]::IsNullOrWhiteSpace($env:SystemDrive)) {
+        $startInfo.WorkingDirectory = "$($env:SystemDrive)\"
+    }
+    $process = [Diagnostics.Process]::Start($startInfo)
+    $stdout = $process.StandardOutput.ReadToEnd()
+    $stderr = $process.StandardError.ReadToEnd()
+    $process.WaitForExit()
+    $lines = @($stdout -split "`r?`n" |
+        ForEach-Object { ($_ -replace "`0", "").Trim() } |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if (-not $AllowFailure -and $process.ExitCode -ne 0) {
+        $detail = if ([string]::IsNullOrWhiteSpace($stderr)) { $stdout.Trim() } else { $stderr.Trim() }
+        throw "$Executable exited with code $($process.ExitCode). $detail"
+    }
+    return [pscustomobject]@{ ExitCode = $process.ExitCode; Lines = $lines; Output = $stdout }
+}
+
 function Invoke-Native([string]$Executable, [string[]]$Arguments) {
-    & $Executable @Arguments
-    if ($LASTEXITCODE -ne 0) { throw "$Executable exited with code $LASTEXITCODE." }
+    # Streams to the console so build output stays visible, and still fails the
+    # step on a non-zero exit code.
+    [void](Invoke-NativeCapture $Executable $Arguments)
+}
+
+# The Web build calls module.stripTypeScriptTypes, which Node added in 22.13.0
+# and 23.2.0, so a bare `node` is not enough: Ubuntu 24.04's nodejs package is
+# Node 18, and running the build with it fails inside build-web.mjs as a module
+# SyntaxError that names a Node internal rather than the version requirement.
+# A version manager may hold a usable interpreter while its shell hook lives in
+# ~/.bashrc, which non-interactive shells never source. Probe the capability and
+# prefer the highest candidate instead of trusting PATH.
+$wslNodeCandidates = @(
+    '$HOME/.nvm/versions/node/*/bin/node',
+    '/usr/local/bin/node',
+    '/usr/bin/node'
+)
+
+function Test-WslNodeCanBuildWeb([string]$ExpandedPath) {
+    $probe = Invoke-NativeCapture $wslExecutable @("-d", $resolvedDistro, "--cd", $linuxRepo, "--",
+        "env", "NODE_PATH=", $ExpandedPath, "-e",
+        'const m=require("node:module");process.exit(typeof m.stripTypeScriptTypes==="function"?0:1)') -AllowFailure
+    return $probe.ExitCode -eq 0
+}
+
+function Resolve-WslNode {
+    $expanded = @()
+    foreach ($candidate in $wslNodeCandidates) {
+        # Let the remote shell expand $HOME, then sort highest version first so
+        # the choice does not depend on directory listing order.
+        $glob = Invoke-NativeCapture $wslExecutable @("-d", $resolvedDistro, "--",
+            "sh", "-c", "ls -1d $candidate 2>/dev/null") -AllowFailure
+        if ($glob.ExitCode -eq 0) { $expanded += $glob.Lines }
+    }
+    foreach ($path in @($expanded | Sort-Object -Descending { [regex]::Replace($_, '\d+', { $args[0].Value.PadLeft(10, '0') }) })) {
+        if (Test-WslNodeCanBuildWeb $path) {
+            Write-Host "Using WSL Node at $path"
+            return $path
+        }
+    }
+    throw "No WSL Node.js able to run the Web build was found (needs module.stripTypeScriptTypes with {mode:`"transform`"}, present in Node 22.13+/23.2+ and removed in 26)."
 }
 
 function Assert-WindowsPortableExecutable([string]$Path) {
@@ -99,10 +171,9 @@ $linuxRepo = ""
 $windowsNode = ""
 if (-not $DeployOnly) {
     if (-not (Test-Path -LiteralPath $wslExecutable -PathType Leaf)) { throw "wsl.exe was not found." }
-    $installedDistros = @(@(& $wslExecutable -l -q 2>$null) |
-        ForEach-Object { ($_ -replace "`0", "").Trim() } |
-        Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-    if ($LASTEXITCODE -ne 0 -or $installedDistros.Count -eq 0) { throw "No WSL distribution is available." }
+    $distroList = Invoke-NativeCapture $wslExecutable @("-l", "-q") -AllowFailure
+    $installedDistros = $distroList.Lines
+    if ($distroList.ExitCode -ne 0 -or $installedDistros.Count -eq 0) { throw "No WSL distribution is available." }
     if ([string]::IsNullOrWhiteSpace($Distro)) {
         $resolvedDistro = $installedDistros[0]
     } else {
@@ -111,19 +182,18 @@ if (-not $DeployOnly) {
             throw "WSL distribution '$Distro' was not found. Available: $($installedDistros -join ', ')"
         }
     }
-    $linuxRepo = ((& $wslExecutable -d $resolvedDistro --cd $repo -- pwd) -join "").Trim()
-    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($linuxRepo)) {
+    $linuxRepo = (Invoke-NativeCapture $wslExecutable @("-d", $resolvedDistro, "--cd", $repo, "--", "pwd")).Lines -join ""
+    if ([string]::IsNullOrWhiteSpace($linuxRepo)) {
         throw "Could not translate the repository path for WSL."
     }
-    & $wslExecutable -d $resolvedDistro --cd $linuxRepo -- test -x "$linuxRepo/.tools/go/bin/go"
-    if ($LASTEXITCODE -ne 0) {
+    $goProbe = Invoke-NativeCapture $wslExecutable @("-d", $resolvedDistro, "--cd", $linuxRepo, "--", "test", "-x", "$linuxRepo/.tools/go/bin/go") -AllowFailure
+    if ($goProbe.ExitCode -ne 0) {
         throw "Repository Linux Go toolchain was not found. Do not download another toolchain during deployment."
     }
-    $diskLine = @(& $wslExecutable -d $resolvedDistro --cd $linuxRepo -- df -Pk .) |
-        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
-        Select-Object -Last 1
+    $diskProbe = Invoke-NativeCapture $wslExecutable @("-d", $resolvedDistro, "--cd", $linuxRepo, "--", "df", "-Pk", ".") -AllowFailure
+    $diskLine = $diskProbe.Lines | Select-Object -Last 1
     $diskFields = @($diskLine -split '\s+' | Where-Object { $_ -ne "" })
-    if ($LASTEXITCODE -ne 0 -or $diskFields.Count -lt 4) {
+    if ($diskProbe.ExitCode -ne 0 -or $diskFields.Count -lt 4) {
         throw "Could not inspect free space for the WSL repository."
     }
     $freeGB = [Math]::Round(([double]$diskFields[3] * 1KB) / 1GB, 2)
@@ -134,10 +204,7 @@ if (-not $DeployOnly) {
     if ($nodeCommand) {
         $windowsNode = $nodeCommand.Source
     } else {
-        & $wslExecutable -d $resolvedDistro --cd $linuxRepo -- node --version | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            throw "Neither Windows node.exe nor WSL node was found."
-        }
+        $wslNode = Resolve-WslNode
     }
 }
 
@@ -145,12 +212,11 @@ $linuxGoCache = "$linuxRepo/.tools/gocache-linux"
 $linuxGoPath = "$linuxRepo/.tools/gopath-linux"
 $resolvedWebVersion = $WebVersion.Trim()
 if (-not $DeployOnly -and [string]::IsNullOrWhiteSpace($resolvedWebVersion)) {
-    $gitHash = ((& $wslExecutable -d $resolvedDistro --cd $linuxRepo -- git rev-parse --short=12 HEAD) -join "").Trim()
-    if ($LASTEXITCODE -ne 0 -or $gitHash -notmatch '^[0-9a-fA-F]{12}$') {
+    $gitHash = (Invoke-NativeCapture $wslExecutable @("-d", $resolvedDistro, "--cd", $linuxRepo, "--", "git", "rev-parse", "--short=12", "HEAD")).Lines -join ""
+    if ($gitHash -notmatch '^[0-9a-fA-F]{12}$') {
         throw "Could not resolve the 12-character Git hash for the Web version."
     }
-    $gitStatus = ((& $wslExecutable -d $resolvedDistro --cd $linuxRepo -- git status --porcelain) -join "`n").Trim()
-    if ($LASTEXITCODE -ne 0) { throw "Could not inspect the Git worktree state for the Web version." }
+    $gitStatus = (Invoke-NativeCapture $wslExecutable @("-d", $resolvedDistro, "--cd", $linuxRepo, "--", "git", "status", "--porcelain")).Lines -join "`n"
     $dirtySuffix = if ([string]::IsNullOrWhiteSpace($gitStatus)) { "" } else { ".dirty" }
     $resolvedWebVersion = "v$normalizedVersion.$([DateTime]::UtcNow.ToString('yyyyMMdd')).$gitHash$dirtySuffix"
 }
@@ -171,7 +237,7 @@ $summary = [ordered]@{
     WebVersion = $resolvedWebVersion
     Mode = if ($DeployOnly) { "deploy-only" } elseif ($BuildOnly) { "build-only" } else { "build-and-deploy" }
     Distro = $resolvedDistro
-    NodeRuntime = if ($DeployOnly) { "" } elseif ($windowsNode) { $windowsNode } else { "WSL:$resolvedDistro" }
+    NodeRuntime = if ($DeployOnly) { "" } elseif ($windowsNode) { $windowsNode } else { "WSL:${resolvedDistro}:${wslNode}" }
     InstallDir = [IO.Path]::GetFullPath($InstallDir)
     DataDir = [IO.Path]::GetFullPath($DataDir)
     Listen = $Listen
@@ -187,14 +253,14 @@ if (-not $DeployOnly) {
         if ($windowsNode) {
             Invoke-Native $windowsNode @((Join-Path $repo "scripts\build-web.mjs"))
         } else {
-            Invoke-Native $wslExecutable @("-d", $resolvedDistro, "--cd", $linuxRepo, "--", "node", "scripts/build-web.mjs")
+            Invoke-Native $wslExecutable @("-d", $resolvedDistro, "--cd", $linuxRepo, "--", $wslNode, "scripts/build-web.mjs")
         }
     }
     Invoke-Step "Test Web build" {
         if ($windowsNode) {
             Invoke-Native $windowsNode @("--test", (Join-Path $repo "web\tests\build.test.mjs"))
         } else {
-            Invoke-Native $wslExecutable @("-d", $resolvedDistro, "--cd", $linuxRepo, "--", "node", "--test", "web/tests/build.test.mjs")
+            Invoke-Native $wslExecutable @("-d", $resolvedDistro, "--cd", $linuxRepo, "--", $wslNode, "--test", "web/tests/build.test.mjs")
         }
     }
     Invoke-Step "Sync embedded Web assets" {

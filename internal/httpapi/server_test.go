@@ -516,7 +516,7 @@ func TestTaskAgentAPIIsolationAndConfigInheritance(t *testing.T) {
 	response = requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/prompts/templates", nil, "")
 	var templatesResponse map[string]any
 	decodeResponse(t, response, &templatesResponse)
-	if response.StatusCode != http.StatusOK || len(templatesResponse["templates"].([]any)) != 25 {
+	if response.StatusCode != http.StatusOK || len(templatesResponse["templates"].([]any)) != 26 {
 		t.Fatalf("prompt templates failed: %d %#v", response.StatusCode, templatesResponse)
 	}
 	response = requestJSON(t, client, http.MethodPut, server.URL+"/api/v1/prompts/templates/role.main", map[string]any{

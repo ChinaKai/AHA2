@@ -29,8 +29,8 @@ func TestProtocolTemplatesAreFocusedAndFileBacked(t *testing.T) {
 		}
 	}
 	for _, expected := range []string{
-		"Task-scoped Agent Control API", "Never print, persist, or expose its token",
-		"Only Main may change durable Task state", "final response concise and natural-language only",
+		"Task-scoped Agent Control API", "Never print, persist, or expose the API token",
+		"Only Main may change durable Task state", "final response natural-language only",
 	} {
 		if !strings.Contains(agentAPI, expected) {
 			t.Fatalf("Agent Control API Protocol does not contain %q", expected)

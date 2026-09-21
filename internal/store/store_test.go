@@ -483,7 +483,12 @@ func TestCatalogUsageIgnoresOrphanRuntimeSnapshots(t *testing.T) {
 	assertUsage(false)
 }
 
-func TestOfficialCodexProviderIsInternal(t *testing.T) {
+// An official runtime is addressed by a sentinel provider id, not by a provider
+// row: it carries no endpoint and no credential, because the run uses the
+// operator's own login. Backfilling one from its env group would put a provider
+// in the list that nobody configured and nothing can use -- and it reappears on
+// every start, so deleting it does not help.
+func TestOfficialProvidersAreInternal(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	database, err := Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
@@ -494,6 +499,7 @@ func TestOfficialCodexProviderIsInternal(t *testing.T) {
 	now := time.Now().UTC()
 	for _, group := range []domain.EnvGroup{
 		{ID: "env-official", Name: "Official Codex", ProviderID: domain.OfficialCodexProviderID, Backend: "codex"},
+		{ID: "env-native", Name: "Claude Code Native Runtime", ProviderID: domain.OfficialClaudeProviderID, Backend: "claude"},
 		{ID: "env-visible", Name: "Visible / Model", ProviderID: "visible", Backend: "codex"},
 	} {
 		group.Revision = 1
@@ -508,17 +514,24 @@ func TestOfficialCodexProviderIsInternal(t *testing.T) {
 	if err != nil || created != 1 {
 		t.Fatalf("BackfillProviders() = %d, %v; want 1", created, err)
 	}
-	if err := database.UpsertProvider(ctx, domain.Provider{
-		ID: domain.OfficialCodexProviderID, Name: domain.OfficialCodexProviderID, CreatedAt: now, UpdatedAt: now,
-	}); err != nil {
-		t.Fatal(err)
+	for _, id := range []string{domain.OfficialCodexProviderID, domain.OfficialClaudeProviderID} {
+		if err := database.UpsertProvider(ctx, domain.Provider{
+			ID: id, Name: id, CreatedAt: now, UpdatedAt: now,
+		}); err != nil {
+			t.Fatal(err)
+		}
 	}
 	providers, err := database.ListProviders(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
+	for _, provider := range providers {
+		if provider.ID == domain.OfficialCodexProviderID || provider.ID == domain.OfficialClaudeProviderID {
+			t.Fatalf("internal provider %q leaked into list: %#v", provider.ID, providers)
+		}
+	}
 	if len(providers) != 1 || providers[0].ID != "visible" {
-		t.Fatalf("internal Codex provider leaked into list: %#v", providers)
+		t.Fatalf("providers = %#v, want only the visible one", providers)
 	}
 }
 

@@ -28,9 +28,14 @@ func probeClaudeBackend(ctx context.Context, runner Runner, item domain.Workspac
 		version = strings.TrimSpace(result.Stderr)
 	}
 	probe := map[string]any{"status": probeReady, "version": safeDisplayText(item, version)}
+	// The operator's login may live in a shell profile rather than Claude Code's
+	// credentials file. Lending that value to the probe keeps this report honest:
+	// without it the workspace reads as logged out even though the operator's own
+	// claude works, and the two disagree for no reason the operator can see.
+	credential := ClaudeCredentialEnvironment(ctx, runner, item)
 	authResult, authErr := runDetectionCommand(ctx, item, runner, Command{
 		Executable: "claude", Args: []string{"auth", "status", "--json"}, Dir: item.RootPath,
-		Env: claudeNativeEnvironment(), Timeout: 20 * time.Second,
+		Env: claudeProbeEnvironment(credential), Timeout: 20 * time.Second,
 	})
 	// "unknown" is all the Web UI can render as "detection not finished", so a
 	// failed probe carries the reason too. Without it a timeout, a missing HOME
@@ -69,7 +74,7 @@ func probeClaudeBackend(ctx context.Context, runner Runner, item domain.Workspac
 	if !status.LoggedIn {
 		return probe, false
 	}
-	models, modelErr := detectClaudeModels(ctx, runner, item)
+	models, modelErr := detectClaudeModels(ctx, runner, item, credential)
 	if modelErr != nil {
 		probe["models_error"] = safeDisplayText(item, modelErr.Error())
 		return probe, false
@@ -79,7 +84,7 @@ func probeClaudeBackend(ctx context.Context, runner Runner, item domain.Workspac
 	return probe, false
 }
 
-func detectClaudeModels(ctx context.Context, runner Runner, item domain.Workspace) ([]domain.ClaudeModelOption, error) {
+func detectClaudeModels(ctx context.Context, runner Runner, item domain.Workspace, credential map[string]string) ([]domain.ClaudeModelOption, error) {
 	result, err := runDetectionCommand(ctx, item, runner, Command{
 		Executable: "claude",
 		Args: []string{
@@ -87,7 +92,7 @@ func detectClaudeModels(ctx context.Context, runner Runner, item domain.Workspac
 			"--output-format", "stream-json",
 			"--verbose",
 		},
-		Dir: item.RootPath, Env: claudeNativeEnvironment(), Stdin: claudeInitializeRequest,
+		Dir: item.RootPath, Env: claudeProbeEnvironment(credential), Stdin: claudeInitializeRequest,
 		Timeout: 20 * time.Second,
 	})
 	if err != nil {

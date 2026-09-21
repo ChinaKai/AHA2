@@ -88,6 +88,7 @@ func (executor Executor) runCodex(ctx context.Context, adapter backend.Codex, re
 
 func (executor Executor) runClaude(ctx context.Context, adapter backend.Claude, request app.ExecutionRequest, emit func(app.ExecutionEvent)) (app.ExecutionResult, error) {
 	environment, model := claudeExecutionRuntime(request)
+	environment = lendNativeClaudeCredential(ctx, request, environment)
 	if request.Model.ContextWindow > 0 && environment["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "" {
 		environment["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = strconv.FormatInt(request.Model.ContextWindow, 10)
 	}
@@ -125,6 +126,29 @@ func (executor Executor) runClaude(ctx context.Context, adapter backend.Claude, 
 	return app.ExecutionResult{
 		Reply: result.Reply, ExitCode: result.ExitCode, ProviderSessionID: result.ProviderSessionID,
 	}, err
+}
+
+// lendNativeClaudeCredential adds the operator's borrowed Claude credential to a
+// native-source run.
+//
+// The native source is meant to use the operator's own Claude login. A machine
+// that holds that login in a shell profile has none as far as this
+// non-interactive channel is concerned, so the workspace probe reports "not
+// logged in" while the operator's own claude works. Lending the same value here
+// that detection lends is what keeps "detection said logged in" true when the
+// Turn actually runs; without it, detection would pass and the Turn would fail
+// to authenticate, moving the failure from a visible result to an obscure one.
+//
+// Non-native sources carry their own credentials and are left untouched.
+func lendNativeClaudeCredential(ctx context.Context, request app.ExecutionRequest, environment map[string]string) map[string]string {
+	if request.Snapshot.EnvGroupID != domain.ClaudeNativeEnvGroupID {
+		return environment
+	}
+	runner := workspace.RunnerFor(request.Workspace)
+	for key, value := range workspace.ClaudeCredentialEnvironment(ctx, runner, request.Workspace) {
+		environment[key] = value
+	}
+	return environment
 }
 
 func claudeExecutionRuntime(request app.ExecutionRequest) (map[string]string, string) {

@@ -366,3 +366,76 @@ func TestEngineUsesRemoteVersionWhenOlderCenterOmitsEventID(t *testing.T) {
 		t.Fatalf("fallback delivery key applied=%t err=%v", applied, err)
 	}
 }
+
+// A single object whose handler can never succeed must not stop the whole pull.
+// Every later page is blocked behind it, and because the cursor only advances
+// once a page fully drains, the run restarts at the same cursor forever:
+// one bad record froze inbound sync for days while outbound kept working.
+func TestEnginePullQuarantinesUnappliedObjectAndKeepsGoing(t *testing.T) {
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	object := func(id string) domain.SyncObject {
+		return domain.SyncObject{Type: "note", ID: id, Operation: "upsert", Payload: json.RawMessage(`{}`), IdempotencyKey: "key-" + id, EventID: "event-" + id}
+	}
+	remote := &pagedRemote{
+		responses: map[string]PullResponse{
+			"":       {Cursor: "page-1", HasMore: true, Objects: []domain.SyncObject{object("poison")}},
+			"page-1": {Cursor: "page-2", HasMore: true, Objects: []domain.SyncObject{object("after-one")}},
+			"page-2": {Cursor: "page-3", Objects: []domain.SyncObject{object("after-two")}},
+		},
+		errors: map[string]error{},
+	}
+	engine := Engine{Store: database, Remote: remote, Scope: "default", DeviceID: "device", BatchSize: 1}
+	applied := []string{}
+	engine.Register("note", func(_ context.Context, object domain.SyncObject) error {
+		if object.ID == "poison" {
+			return fmt.Errorf("this object can never be applied")
+		}
+		applied = append(applied, object.ID)
+		return nil
+	})
+
+	if err := engine.Pull(ctx); err != nil {
+		t.Fatalf("a single unappliable object failed the whole pull: %v", err)
+	}
+	state, err := database.SyncState(ctx, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Cursor != "page-3" {
+		t.Fatalf("cursor = %q, want it to reach the end of the backlog", state.Cursor)
+	}
+	if len(applied) != 2 || applied[0] != "after-one" || applied[1] != "after-two" {
+		t.Fatalf("objects behind the bad one were not applied: %v", applied)
+	}
+	// The skipped object is recorded for the operator rather than dropped.
+	conflicts, err := database.SyncConflicts(ctx, "default")
+	if err != nil || len(conflicts) != 1 {
+		t.Fatalf("conflicts=%#v err=%v", conflicts, err)
+	}
+	if conflicts[0].ObjectID != "poison" || conflicts[0].ObjectType != "note" {
+		t.Fatalf("quarantined the wrong object: %#v", conflicts[0])
+	}
+	// The bad object is not retried on the next run: a settled cursor costs one
+	// confirming poll and stops there, instead of replaying the whole backlog
+	// and failing on the same record again.
+	storeState, err := database.SyncState(ctx, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("stored state: cursor=%q last_pull_at=%s", storeState.Cursor, storeState.LastPullAt.Format(time.RFC3339))
+	if storeState.Cursor != "page-3" {
+		t.Fatalf("stored cursor = %q", storeState.Cursor)
+	}
+	second := len(remote.cursors)
+	if err := engine.Pull(ctx); err != nil {
+		t.Fatalf("second pull: %v", err)
+	}
+	if got := remote.cursors[second:]; len(got) != 1 || got[0] != "page-3" {
+		t.Fatalf("a settled backlog was replayed: %v", got)
+	}
+}

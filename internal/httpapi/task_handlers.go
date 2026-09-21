@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -456,6 +457,17 @@ func (s *Server) contextForAgent(writer http.ResponseWriter, request *http.Reque
 	latest := latestTurnForAgent(agentTurns, agentID)
 	sessions, _ := s.store.ListBackendSessionsForAgent(request.Context(), taskID, agentID)
 	workspace, _ := s.runtimeWorkspace(request.Context(), task.WorkspaceID)
+	// The recorded window is authoritative. Claude's official models record none,
+	// because the CLI reports none, so fall back to a known value for display
+	// only -- it is never written back to the turn, and therefore never reaches
+	// execution as a compaction threshold.
+	//
+	// This resolves before the metrics because the percentage is computed against
+	// it: resolving afterwards left the page showing a window with no share of it
+	// used, which reads as "unknown" for a Task that has a perfectly good window.
+	if latest.ContextWindow <= 0 {
+		latest.ContextWindow = s.displayContextWindow(request.Context(), latest, workspace)
+	}
 	metrics := contextMetrics(latest, sessions, workspace, agentTurns)
 	if active, ok := activeBackendSession(sessions); ok {
 		size, exists := backendSessionArtifactSize(
@@ -480,6 +492,120 @@ func (s *Server) contextForAgent(writer http.ResponseWriter, request *http.Reque
 		"ok": true, "task": task, "latest_round": round, "turns": turns,
 		"memory": memory, "context": contextData,
 	})
+}
+
+// displayContextWindow resolves the context window a Claude turn actually ran
+// with, for display only.
+//
+// Claude's official models never record one: the CLI reports no window, and the
+// execution path turns a recorded window into CLAUDE_CODE_MAX_CONTEXT_TOKENS, so
+// writing a guess onto the model would silently change when Claude compacts.
+// Resolving it here keeps the guess out of the run and still lets the context
+// page show a percentage.
+//
+// It answers "what the run used", not "what the model can do": a run routed
+// through a custom endpoint is budgeted at the fallback window unless the model
+// name carries the 1M marker, and reporting the model's capable window there
+// would show context the run cannot reach. A model with no known window returns
+// 0, which the page renders as "window unknown".
+func (s *Server) displayContextWindow(ctx context.Context, turn domain.Turn, workspace domain.Workspace) int64 {
+	if turn.RuntimeConfigSnapshotID == "" {
+		return 0
+	}
+	snapshot, err := s.store.RuntimeSnapshot(ctx, turn.RuntimeConfigSnapshotID)
+	if err != nil || snapshot.Backend != "claude" {
+		return 0
+	}
+	resolved := ""
+	if model, modelErr := s.store.Model(ctx, snapshot.ModelID); modelErr == nil {
+		if value, ok := model.Capabilities["resolved_model"].(string); ok {
+			resolved = value
+		}
+	}
+	group := s.claudeRunEnvironment(ctx, snapshot, workspace)
+	// An env group may name the model itself, and that name is where the 1M
+	// marker goes when the endpoint is a gateway. Resolve against it when
+	// present, so a marker the operator set is reflected in the window shown.
+	wireModel := snapshot.WireModel
+	if named := envValue(group, "ANTHROPIC_MODEL"); named != "" {
+		wireModel = named
+	}
+	return app.ClaudeContextWindow(wireModel, resolved, claudeEndpointFrom(group) != "")
+}
+
+// claudeRunEnvironment resolves the environment a Claude run is actually given,
+// mirroring execution: the env group's values (secrets included) layered over the
+// environment the run starts from. Reading it this way is what keeps the context
+// window shown equal to the one the run used.
+//
+// The native source contributes nothing, and that is a deliberate blank rather
+// than an absence. Execution clears ANTHROPIC_* for this source so the run always
+// reaches Anthropic on the operator's own login; reporting the variable the AHA
+// process happens to carry would instead mark an Official run as gateway-routed
+// and budget its window at the 200K fallback. The distinction only shows up on a
+// host whose AHA is itself launched with a gateway endpoint set -- which is
+// exactly where it would be believed.
+func (s *Server) claudeRunEnvironment(ctx context.Context, snapshot domain.RuntimeConfigSnapshot, item domain.Workspace) map[string]string {
+	environment := map[string]string{}
+	if claudeRunInheritsProcessEnv(item) {
+		environment["ANTHROPIC_BASE_URL"] = os.Getenv("ANTHROPIC_BASE_URL")
+	}
+	if snapshot.EnvGroupID == "" || snapshot.EnvGroupID == domain.ClaudeNativeEnvGroupID {
+		for _, name := range []string{"ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL"} {
+			environment[name] = ""
+		}
+		return environment
+	}
+	group, err := s.store.EnvGroup(ctx, snapshot.EnvGroupID)
+	if err != nil {
+		return environment
+	}
+	for key, value := range group.Environment {
+		environment[key] = value
+	}
+	for name, ref := range group.SecretRefs {
+		if s.secrets == nil {
+			continue
+		}
+		if value, ok := s.secrets.Get(ref); ok {
+			environment[name] = value
+		}
+	}
+	return environment
+}
+
+// claudeRunInheritsProcessEnv reports whether a run's process starts from AHA's
+// own environment.
+//
+// Only a local run does: LocalRunner merges os.Environ() (internal/workspace/local.go),
+// so an endpoint set on the AHA process reaches the backend. A wsl or ssh run
+// executes on another host with its own environment -- WSL passes only
+// SystemRoot/WINDIR -- so AHA's value never arrives there.
+func claudeRunInheritsProcessEnv(item domain.Workspace) bool {
+	return item.Transport != "wsl" && item.Transport != "ssh" && item.Locality != "remote"
+}
+
+// envValue reads a variable case-insensitively, since an env group's environment
+// is free-form even though the canonical spelling is uppercase.
+func envValue(environment map[string]string, name string) string {
+	for key, value := range environment {
+		if strings.EqualFold(key, name) {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+// claudeEndpointFrom returns the endpoint a run with this environment would use,
+// or "" when it talks to Anthropic directly.
+//
+// Pointing at Anthropic itself is the direct path, not a gateway.
+func claudeEndpointFrom(environment map[string]string) string {
+	endpoint := envValue(environment, "ANTHROPIC_BASE_URL")
+	if strings.Contains(strings.ToLower(endpoint), "api.anthropic.com") {
+		return ""
+	}
+	return endpoint
 }
 
 func latestTurnForAgent(turns []domain.Turn, agentID string) domain.Turn {
@@ -739,7 +865,7 @@ func (s *Server) applyCodexRuntimeContext(ctx context.Context, turns []domain.Tu
 	byID := map[string]domain.BackendSession{}
 	byAgent := map[string]domain.BackendSession{}
 	for _, session := range sessions {
-		if session.Backend != "codex" || session.Status != "active" {
+		if session.Status != "active" {
 			continue
 		}
 		byID[session.ID] = session
@@ -766,23 +892,44 @@ func (s *Server) applyCodexRuntimeContext(ctx context.Context, turns []domain.Tu
 		sample, cached := samples[session.ID]
 		if !cached && !missing[session.ID] {
 			var found bool
-			sample, found = codexRuntimeContext(
-				ctx, session, workspace, taskRuntimeWorkDir(task, workspace),
-			)
+			if session.Backend == "claude" {
+				sample, found = claudeRuntimeContext(
+					ctx, session, workspace, taskRuntimeWorkDir(task, workspace),
+				)
+			} else {
+				sample, found = codexRuntimeContext(
+					ctx, session, workspace, taskRuntimeWorkDir(task, workspace),
+				)
+			}
 			if found {
 				samples[session.ID] = sample
 			} else {
 				missing[session.ID] = true
 			}
 		}
-		if sample.ContextWindow <= 0 || sample.InputTokens <= 0 {
+		// Only the occupancy is required. A Codex transcript reports the model's
+		// window alongside it and that value replaces the Turn's; a Claude one
+		// records usage per message and no window at all, so requiring one here
+		// would discard every Claude sample and leave the page reading the Turn's
+		// session cumulative -- which exceeds the window and blanks the row.
+		if sample.InputTokens <= 0 {
 			continue
 		}
-		turn.ContextWindow = sample.ContextWindow
+		if sample.ContextWindow > 0 {
+			turn.ContextWindow = sample.ContextWindow
+		}
 		if turn.Usage == nil {
 			turn.Usage = map[string]any{}
 		}
-		if sample.InputTokens > float64(sample.ContextWindow) {
+		// The window to judge the occupancy against: the transcript's when it
+		// carries one, otherwise the Turn's own recorded window. Claude records
+		// none in the transcript, so judging against the sample alone would make
+		// every measured occupancy look like it overflows.
+		window := sample.ContextWindow
+		if window <= 0 {
+			window = turn.ContextWindow
+		}
+		if window > 0 && sample.InputTokens > float64(window) {
 			delete(turn.Usage, "context_tokens")
 			turn.Usage["context_inconsistent"] = float64(1)
 			continue

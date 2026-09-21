@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"time"
@@ -260,8 +261,15 @@ func safeProbeDetail(item domain.Workspace, result Result, err error) string {
 	return safeDisplayText(item, detail)
 }
 
+// credentialPattern matches the shapes Anthropic credentials take. A rejected
+// token quoted back in an error message is the realistic leak: probe output
+// becomes a stored capability and is shown to the operator, so a credential
+// that reached this string would end up in the database and on screen.
+var credentialPattern = regexp.MustCompile(`sk-ant-[A-Za-z0-9_\-]{8,}`)
+
 func safeDisplayText(item domain.Workspace, value string) string {
 	value = strings.Join(strings.Fields(value), " ")
+	value = credentialPattern.ReplaceAllString(value, "[已隐藏]")
 	if item.SSHPassword != "" {
 		value = strings.ReplaceAll(value, item.SSHPassword, "[已隐藏]")
 	}

@@ -4,5 +4,5 @@
 - current goal: {{.CurrentGoalSummary}}
 - workspace: {{.Workspace}}
 - task workdir: {{.TaskWorkspace}}
-- transport: {{.WorkspaceTransport}}
-- branch: {{.TaskBranch}}
+- transport: {{.WorkspaceTransport}}{{if .TaskBranch}}
+- branch: {{.TaskBranch}}{{end}}

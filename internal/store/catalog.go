@@ -327,7 +327,10 @@ func scanProvider(scanner interface{ Scan(...any) error }) (domain.Provider, err
 }
 
 func (s *Store) ListProviders(ctx context.Context) ([]domain.Provider, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,name,base_url,anthropic_base_url,auth_style,credential_ref,credential_configured,created_at,updated_at FROM providers WHERE id<>? ORDER BY name`, domain.OfficialCodexProviderID)
+	// The official runtimes are addressed by sentinel ids rather than by rows, so
+	// they are not providers the operator can pick or edit.
+	rows, err := s.db.QueryContext(ctx, `SELECT id,name,base_url,anthropic_base_url,auth_style,credential_ref,credential_configured,created_at,updated_at FROM providers WHERE id NOT IN (?,?) ORDER BY name`,
+		domain.OfficialCodexProviderID, domain.OfficialClaudeProviderID)
 	if err != nil {
 		return nil, err
 	}
@@ -511,7 +514,12 @@ func (s *Store) BackfillProviders(ctx context.Context) (int, error) {
 	seen := make(map[string]bool)
 	for _, group := range envGroups {
 		id := group.ProviderID
-		if id == "" || id == "stub" || id == domain.OfficialCodexProviderID || existing[id] || seen[id] {
+		// An official runtime is addressed by a sentinel, not by a provider row:
+		// its env group carries no endpoint or credential, because the run uses
+		// the operator's own login. Backfilling one would list a provider nobody
+		// configured, and since this runs at every start, deleting it would not
+		// stick either.
+		if id == "" || id == "stub" || id == domain.OfficialCodexProviderID || id == domain.OfficialClaudeProviderID || existing[id] || seen[id] {
 			continue
 		}
 		seen[id] = true

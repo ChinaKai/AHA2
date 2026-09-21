@@ -148,6 +148,15 @@ func (e *Engine) Pull(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		if !response.HasMore {
+			// The center has nothing further to offer, so a dependency still
+			// waiting here can never be satisfied by a later object: this client
+			// has now seen the entire backlog. Holding the cursor for it would be
+			// permanent -- the same page gets re-pulled, the same object blocks
+			// it, and everything behind it stays unreachable for as long as the
+			// remote keeps offering it.
+			pending = e.quarantineUnresolvable(ctx, pending)
+		}
 		if len(pending) == 0 {
 			state.Cursor = cursor
 			state.LastPullAt = e.now()
@@ -165,6 +174,64 @@ func (e *Engine) Pull(ctx context.Context) error {
 	}
 }
 
+// quarantineUnresolvable records objects that could not be applied even after
+// the whole backlog was read, and reports them as consumed.
+//
+// Skipping is deliberate: the alternative is that one unusable record -- a
+// reference to something deleted on every device, a payload this build cannot
+// parse -- freezes inbound sync indefinitely, which is a far worse outcome than
+// one object not arriving. The record is kept as an open conflict so the
+// operator can see what was left behind rather than losing it silently.
+func (e *Engine) quarantineUnresolvable(ctx context.Context, pending []domain.SyncObject) []domain.SyncObject {
+	if len(pending) == 0 {
+		return pending
+	}
+	remaining := make([]domain.SyncObject, 0, len(pending))
+	for _, object := range pending {
+		if err := e.quarantineObject(ctx, object); err != nil {
+			remaining = append(remaining, object)
+		}
+	}
+	return remaining
+}
+
+// quarantineObject records one unappliable object as an open conflict and marks
+// its delivery consumed, so the same broken record cannot block every later run.
+func (e *Engine) quarantineObject(ctx context.Context, object domain.SyncObject) error {
+	if err := e.Store.AddSyncConflict(ctx, domain.SyncConflict{
+		Scope: e.Scope, ObjectType: object.Type, ObjectID: object.ID,
+		RemotePayload: object.Payload, RemoteVersion: object.RemoteVersion,
+	}); err != nil {
+		// Without the record there would be no trace of what was skipped, which
+		// is worse than leaving it for the operator to see failing.
+		return err
+	}
+	delivered := object
+	delivered.IdempotencyKey = e.deliveryKey(object)
+	delivered.EventID = ""
+	return e.Store.MarkSyncApplied(ctx, e.Scope, delivered, e.now())
+}
+
+// deliveryKey is the identity an object is recorded under once it is applied.
+// It prefers the center's event id, which is what makes a re-delivered object
+// recognizable as already applied.
+func (e *Engine) deliveryKey(object domain.SyncObject) string {
+	if object.EventID != "" {
+		return object.EventID
+	}
+	if object.RemoteVersion != "" {
+		return fmt.Sprintf("center-object:%s:%s:%s", object.Type, object.ID, object.RemoteVersion)
+	}
+	return object.IdempotencyKey
+}
+
+// applyPulledObjects applies what it can and reports what is left waiting.
+//
+// The third result is a fatal error, the second a dependency that may still be
+// satisfied by a later object. Only a dependency is ever returned as waiting:
+// a handler that fails for its own reason must not be retried on every run
+// behind a cursor that never advances, so it is recorded and skipped rather
+// than left to block everything behind it.
 func (e *Engine) applyPulledObjects(ctx context.Context, pending []domain.SyncObject) ([]domain.SyncObject, error, error) {
 	for len(pending) > 0 {
 		blocked := map[string]bool{}
@@ -188,7 +255,10 @@ func (e *Engine) applyPulledObjects(ctx context.Context, pending []domain.SyncOb
 				continue
 			}
 			if err != nil {
-				return nil, nil, err
+				if quarantineErr := e.quarantineObject(ctx, object); quarantineErr != nil {
+					return nil, nil, err
+				}
+				continue
 			}
 			progress = true
 		}
@@ -207,13 +277,7 @@ func (e *Engine) applyPulledObject(ctx context.Context, object domain.SyncObject
 	if object.IdempotencyKey == "" {
 		return fmt.Errorf("remote %s/%s has no idempotency key", object.Type, object.ID)
 	}
-	deliveryKey := object.EventID
-	if deliveryKey == "" && object.RemoteVersion != "" {
-		deliveryKey = fmt.Sprintf("center-object:%s:%s:%s", object.Type, object.ID, object.RemoteVersion)
-	}
-	if deliveryKey == "" {
-		deliveryKey = object.IdempotencyKey
-	}
+	deliveryKey := e.deliveryKey(object)
 	applied, err := e.Store.SyncWasApplied(ctx, deliveryKey)
 	if err != nil {
 		return err

@@ -184,7 +184,7 @@ type templateData struct {
 	RecoveryHandoff    string
 	Recovery           *recoveryHandoffEvidence
 	AgentAPIURL        string
-	AvailableContext   []ContextResource
+	AvailableContext   []AvailableContextGroup
 	RecentExchanges    []recentContextExchange
 	TurnDiagnostics    []turnDiagnostic
 	HardwareGroups     []hardwareContextGroup
@@ -210,7 +210,7 @@ var builtinTemplates = []domain.PromptTemplate{
 	{ID: "protocol.knowledge", Name: "Knowledge Protocol", Layer: "protocol", Description: "按 index 渐进读取知识并形成反馈与修订闭环", Editable: true, Required: false, Version: 2},
 	{ID: "protocol.agent-api", Name: "Agent Control API Protocol", Layer: "protocol", Description: "Agent API 的权限、进度与输出边界", Editable: true, Required: true, Version: 3},
 	{ID: "protocol.attachment-delivery", Name: "Attachment Delivery Protocol", Layer: "protocol", Description: "所有 Task 必须遵守的附件上传、绑定与回执边界", Editable: false, Required: true, Version: 1},
-	{ID: "context.task", Name: "Task Context File", Layer: "context", Description: "task.md 的内容模板", Editable: true, Required: true, Version: 1},
+	{ID: "context.task", Name: "Task Context File", Layer: "context", Description: "内容模板", Editable: true, Required: true, Version: 1},
 	{ID: "context.recent-context", Name: "Recent Context File", Layer: "context", Description: "recent-context.md 的内容模板", Editable: true, Required: false, Version: 1},
 	{ID: "context.recovery-handoff", Name: "Recovery Handoff Inline", Layer: "context", Description: "Current Inbox Batch 开头的中断续接证据模板", Editable: true, Required: false, Version: 2},
 	{ID: "context.turn-diagnostics", Name: "Turn Diagnostics File", Layer: "context", Description: "diagnostics/turns.md 的内容模板", Editable: true, Required: false, Version: 1},
@@ -221,7 +221,8 @@ var builtinTemplates = []domain.PromptTemplate{
 	{ID: "section.available-context", Name: "Available Context Section", Layer: "section", Description: "可用上下文入口列表段落", Editable: true, Required: true, Version: 1},
 	{ID: "section.current-inbox", Name: "Current Inbox Section", Layer: "section", Description: "当前 Inbox Batch 段落", Editable: true, Required: true, Version: 1},
 	{ID: "section.inbox-batch-content", Name: "Inbox Batch Content", Layer: "section", Description: "Inbox 消息、渠道来源和附件引用的内容模板", Editable: true, Required: true, Version: 1},
-	{ID: "resource.agent-api", Name: "Agent API Reference File", Layer: "resource", Description: "agent-api.md 的只读参考模板", Editable: false, Required: true, Version: 5},
+	{ID: "resource.agent-api", Name: "Agent API Reference File", Layer: "resource", Description: "只读参考模板", Editable: false, Required: true, Version: 5},
+	{ID: "resource.attachment-protocol", Name: "Attachment Protocol File", Layer: "resource", Description: "只读参考模板；附件上传、绑定与回执规程", Editable: false, Required: true, Version: 1},
 }
 
 var supersededBuiltinOverrideHashes = map[string]map[string]bool{
@@ -364,28 +365,8 @@ func (engine *Engine) Build(ctx context.Context, input BuildInput) (BuildResult,
 		return BuildResult{}, err
 	}
 	resources := append(append([]ContextResource(nil), contextResources...), sharedManifest...)
-	for _, item := range resources {
-		if item.EntryPoint {
-			data.AvailableContext = append(data.AvailableContext, item)
-		}
-	}
-	templateIDs := []string{"core.default", identityTemplate}
-	if input.Agent.Role == "sub" {
-		templateIDs = append(templateIDs, "role.sub")
-	} else {
-		templateIDs = append(templateIDs, "role.main")
-	}
-	templateIDs = append(templateIDs, channelTemplate)
-	if input.Agent.Role == "main" {
-		if input.Task.CollaborationMode == "single" {
-			templateIDs = append(templateIDs, "policy.single")
-		} else {
-			templateIDs = append(templateIDs, "policy.auto")
-		}
-	}
-	if input.KnowledgeEnabled {
-		templateIDs = append(templateIDs, "protocol.knowledge")
-	}
+	data.AvailableContext = availableContextEntries(resources)
+	templateIDs := residentTemplateIDs(input.Agent.Role, input.Task.CollaborationMode, input.KnowledgeEnabled, identityTemplate, channelTemplate)
 	var parts []string
 	for _, id := range templateIDs {
 		content, renderErr := renderTemplateByID(templateByID, id, data)
@@ -431,6 +412,41 @@ func renderTemplateByID(templates map[string]domain.PromptTemplate, id string, d
 	}
 	return renderTemplate(item.ID, item.Content, data)
 }
+
+// residentTemplateIDs lists the templates rendered in full, in order, for a Turn
+// with the given shape. It is separate from Build so the residency guardrail can
+// enumerate exactly the set the renderer uses: a template that becomes resident
+// without a budget entry should fail the test rather than quietly ship
+// unguarded, which is how the largest layer in the system went unnoticed.
+func residentTemplateIDs(agentRole, collaborationMode string, knowledgeEnabled bool, identityTemplate, channelTemplate string) []string {
+	ids := []string{"core.default", identityTemplate}
+	if agentRole == "sub" {
+		ids = append(ids, "role.sub")
+	} else {
+		ids = append(ids, "role.main")
+	}
+	ids = append(ids, channelTemplate)
+	if agentRole == "main" {
+		if collaborationMode == "single" {
+			ids = append(ids, "policy.single")
+		} else {
+			ids = append(ids, "policy.auto")
+		}
+	}
+	if knowledgeEnabled {
+		ids = append(ids, "protocol.knowledge")
+	}
+	return ids
+}
+
+// The layers below are appended after the role-dependent block. They render
+// unconditionally except for the compact handoff, which appears once a Backend
+// Session has been compacted.
+var (
+	residentSectionTemplateIDs     = []string{"section.task-workspace", "section.available-context", "section.current-inbox"}
+	residentProtocolTemplateIDs    = []string{"protocol.agent-api", "protocol.attachment-delivery"}
+	residentConditionalTemplateIDs = []string{"section.compact-handoff"}
+)
 
 // BackendSessionContext returns the prompt identity/channel boundary for Backend
 // Session reuse. A task_route is still a Task Agent, but remains distinct from a
@@ -584,23 +600,35 @@ func buildSharedSnapshot(
 			return "", nil, err
 		}
 	}
-	seed := sharedResources(input, "", agentAPIContent, templates["resource.agent-api"].Description)
+	// The attachment procedure is a resource rather than resident text, so it is
+	// materialized for every Task: the resident protocol template only points at
+	// it, and a pointer without the file would lose the procedure entirely.
+	attachmentContent, err := renderTemplateByID(templates, "resource.attachment-protocol", data)
+	if err != nil {
+		return "", nil, err
+	}
+	agentAPIDescription := templates["resource.agent-api"].Description
+	attachmentDescription := templates["resource.attachment-protocol"].Description
+	seed := sharedResources(input, "", agentAPIContent, agentAPIDescription, attachmentContent, attachmentDescription)
 	if len(seed) == 0 {
 		return "", nil, nil
 	}
 	hash := contextSnapshotHash(seed)
 	root := joinContextPath(input, workDir, ".aha2-context", input.Task.ID, "shared-"+hash)
-	manifest := sharedResources(input, root, agentAPIContent, templates["resource.agent-api"].Description)
+	manifest := sharedResources(input, root, agentAPIContent, agentAPIDescription, attachmentContent, attachmentDescription)
 	for index := range manifest {
 		manifest[index].URI = fmt.Sprintf("aha://tasks/%s/shared/%s", input.Task.ID, manifest[index].ID)
 	}
 	return root, manifest, nil
 }
 
-func sharedResources(input BuildInput, root, agentAPIContent, agentAPIDescription string) []ContextResource {
+func sharedResources(input BuildInput, root, agentAPIContent, agentAPIDescription, attachmentContent, attachmentDescription string) []ContextResource {
 	resources := []ContextResource{}
 	if strings.TrimSpace(input.AgentAPIURL) != "" {
 		resources = append(resources, resource(input, "agent-api", joinContextPath(input, root, "agent-api.md"), agentAPIDescription, agentAPIContent))
+	}
+	if strings.TrimSpace(attachmentContent) != "" {
+		resources = append(resources, resource(input, "attachment-protocol", joinContextPath(input, root, "attachment-protocol.md"), attachmentDescription, attachmentContent))
 	}
 	if input.KnowledgeEnabled {
 		resources = append(resources, knowledgeResources(input, root)...)
@@ -688,6 +716,340 @@ func detailResource(input BuildInput, id, path, description, content string) Con
 	item := resource(input, id, path, description, content)
 	item.EntryPoint = false
 	return item
+}
+
+// AvailableContextGroup is one directory to print once, followed by the entry
+// point paths beneath it. Paths are relative to Root.
+type AvailableContextGroup struct {
+	Root    string
+	Entries []ContextResource
+}
+
+// availableContextEntries selects the entry points and groups them under their
+// parent directories, so each directory is printed once rather than once per
+// entry.
+//
+// Full paths re-sent ~110 rune of per-snapshot prefix on every line of every
+// Turn, and the shared snapshot's hash directory on top of that. Factoring out
+// the longest *common* directory recovers only the outer prefix, because the
+// entries span two roots beneath it (the agent's own context and the shared
+// snapshot) and the common prefix therefore stops above the hash directory —
+// the budget guard caught exactly that, with the hash still printed six times.
+//
+// Grouping by parent directory instead prints the hash once, because the
+// shared snapshot's directory is one group. A directory holding a single entry
+// is not worth a heading of its own, so those entries keep their full path;
+// nothing is made relative to a root that does not contain it.
+func availableContextEntries(resourceSets ...[]ContextResource) []AvailableContextGroup {
+	entries := []ContextResource{}
+	paths := []string{}
+	for _, resources := range resourceSets {
+		for _, item := range resources {
+			if !item.EntryPoint {
+				continue
+			}
+			entries = append(entries, item)
+			paths = append(paths, item.Path)
+		}
+	}
+	roots := availableContextRoots(paths)
+	groups := []AvailableContextGroup{}
+	position := map[string]int{}
+	uncRoots := map[string]bool{}
+	for index := range entries {
+		root := coveringRoot(roots, paths[index])
+		// A UNC path is written with two leading separators, and the tree
+		// collapses them into one. joinRemoteContextPath goes out of its way to
+		// keep the pair, because "//host/share" and "/host/share" are different
+		// paths to the host that reads them, so restore it here rather than
+		// printing a root no Windows consumer can open. Both separators count:
+		// a remote workspace reaches the template as //host/share, but the same
+		// share is also written \\host\share, and the two must come out alike.
+		if isUNCPath(paths[index]) && strings.HasPrefix(root, "/") && !strings.HasPrefix(root, "//") {
+			uncRoots[root] = true
+		}
+		slot, seen := position[root]
+		if !seen {
+			slot = len(groups)
+			position[root] = slot
+			groups = append(groups, AvailableContextGroup{Root: root})
+		}
+		entries[index].Path = relativeToContextRoot(root, paths[index])
+		groups[slot].Entries = append(groups[slot].Entries, entries[index])
+	}
+	for index := range groups {
+		if uncRoots[groups[index].Root] {
+			groups[index].Root = "/" + groups[index].Root
+		}
+	}
+	return groups
+}
+
+// availableContextRootHeading renders a group heading. The root search measures
+// the same string, so the two cannot drift apart.
+func availableContextRootHeading(root string) string {
+	return "Paths under `" + root + "/` (each `aha://` URI below is also valid):"
+}
+
+// availableContextRoots chooses the directories worth printing once, as a root
+// the entries beneath them are shown relative to.
+//
+// Full paths re-sent ~110 rune of per-snapshot prefix on every line of every
+// Turn, and the shared snapshot's hash directory on top of that. Opening the
+// longest *common* directory instead recovers only the outer prefix: the
+// entries span two roots beneath it (the agent's own context and the shared
+// snapshot), so the common prefix stops above the hash directory, which then
+// repeats on six lines. The budget guard caught exactly that.
+//
+// So the choice is made by costing the rendered result. Two earlier versions
+// decided per directory and each failed a case a reader gets right at a glance:
+// one left a heading behind for a directory holding a single entry, and the
+// other let the shallowest shared directory swallow the deeper ones, so /home
+// was opened and the hash directory under it was never reached. Both were
+// fixing a local rule that is really a global trade — a heading costs a line
+// but removes a prefix from everything below.
+//
+// The tree of directories is laminar, which is what makes an exact answer
+// cheap: each directory is opened or closed independently of its siblings, and
+// the only context a subtree needs from above is the nearest open ancestor.
+func availableContextRoots(paths []string) []string {
+	root := buildContextTree(paths)
+	if root == nil {
+		return nil
+	}
+	chooseContextRoots(root, "")
+	return openContextRoots(root, nil)
+}
+
+type contextTreeNode struct {
+	Directory string
+	// key is the path from the tree root, used to identify the node.
+	key      string
+	files    []string
+	children []*contextTreeNode
+	byName   map[string]*contextTreeNode
+	opened   bool
+}
+
+func buildContextTree(paths []string) *contextTreeNode {
+	if len(paths) == 0 {
+		return nil
+	}
+	root := &contextTreeNode{key: "", byName: map[string]*contextTreeNode{}}
+	for _, path := range paths {
+		segments := splitPathSegments(path)
+		if len(segments) == 0 {
+			continue
+		}
+		node := root
+		// The leading empty segment of an absolute path is the separator
+		// itself, which every directory already carries in its name. A UNC
+		// path has two of them, so the empties are skipped rather than
+		// consumed once: treating the second as a name would create a child
+		// whose directory equals its parent's, and two nodes sharing a
+		// directory is what made the UNC case below fail.
+		start := 0
+		if segments[0] == "" {
+			start = 1
+			node = ensureContextChild(root, "/")
+		}
+		for index := start; index < len(segments)-1; index++ {
+			if segments[index] == "" {
+				continue
+			}
+			node = ensureContextChild(node, segments[index])
+		}
+		node.files = append(node.files, segments[len(segments)-1])
+	}
+	return root
+}
+
+func ensureContextChild(parent *contextTreeNode, name string) *contextTreeNode {
+	if child, ok := parent.byName[name]; ok {
+		return child
+	}
+	directory := name
+	switch parent.Directory {
+	case "":
+	case "/":
+		// The filesystem root already carries its separator.
+		directory = "/" + name
+	default:
+		directory = parent.Directory + "/" + name
+	}
+	child := &contextTreeNode{
+		Directory: directory,
+		key:       parent.key + "/" + name,
+		byName:    map[string]*contextTreeNode{},
+	}
+	parent.byName[name] = child
+	parent.children = append(parent.children, child)
+	return child
+}
+
+// chooseContextRoots records which directories to print, and returns the cost
+// of rendering the subtree below openAncestor.
+//
+// Costing and choosing are separate passes on purpose. Setting the flag in the
+// same pass that weighs the two branches is wrong however it is written: the
+// recursive calls that produce the "closed" figure also set flags on the
+// children, so the last branch evaluated leaves its marks behind even when the
+// other branch won. The answers still look plausible, which is what makes it
+// worth splitting rather than patching.
+func chooseContextRoots(node *contextTreeNode, openAncestor string) int {
+	costs := map[string]int{}
+	total := contextRootCosts(node, openAncestor, costs)
+	recordContextRoots(node, openAncestor, costs)
+	return total
+}
+
+// contextRootCostKey identifies a node by its path from the tree root rather
+// than by Directory. Keying on the directory would collide as soon as two nodes
+// carry the same one, which a malformed path shape can produce, and the
+// collision does not fail loudly: the second node silently reuses the first
+// node's cost and the roots chosen are merely wrong.
+func contextRootCostKey(node *contextTreeNode, openAncestor string) string {
+	return node.key + "\x00" + openAncestor
+}
+
+func contextRootCosts(node *contextTreeNode, openAncestor string, memo map[string]int) int {
+	key := contextRootCostKey(node, openAncestor)
+	if cost, ok := memo[key]; ok {
+		return cost
+	}
+	closed := 0
+	for _, file := range node.files {
+		closed += len(relativeToContextRoot(openAncestor, joinContextFile(node, file))) + 1
+	}
+	for _, child := range node.children {
+		closed += contextRootCosts(child, openAncestor, memo)
+	}
+	best := closed
+	if node.Directory != "" {
+		opened := len(availableContextRootHeading(node.Directory)) + 1
+		for _, file := range node.files {
+			opened += len(relativeToContextRoot(node.Directory, joinContextFile(node, file))) + 1
+		}
+		for _, child := range node.children {
+			opened += contextRootCosts(child, node.Directory, memo)
+		}
+		if opened < closed {
+			best = opened
+		}
+	}
+	memo[key] = best
+	return best
+}
+
+// recordContextRoots replays the costing to mark the winning directories.
+func recordContextRoots(node *contextTreeNode, openAncestor string, costs map[string]int) {
+	closed := 0
+	for _, file := range node.files {
+		closed += len(relativeToContextRoot(openAncestor, joinContextFile(node, file))) + 1
+	}
+	for _, child := range node.children {
+		closed += costs[contextRootCostKey(child, openAncestor)]
+	}
+	chosen := openAncestor
+	if node.Directory != "" {
+		opened := len(availableContextRootHeading(node.Directory)) + 1
+		for _, file := range node.files {
+			opened += len(relativeToContextRoot(node.Directory, joinContextFile(node, file))) + 1
+		}
+		for _, child := range node.children {
+			opened += costs[contextRootCostKey(child, node.Directory)]
+		}
+		if opened < closed {
+			node.opened = true
+			chosen = node.Directory
+		}
+	}
+	for _, child := range node.children {
+		recordContextRoots(child, chosen, costs)
+	}
+}
+
+// openContextRoots collects the marked directories in a stable order.
+func openContextRoots(node *contextTreeNode, roots []string) []string {
+	if node.opened {
+		roots = append(roots, node.Directory)
+	}
+	for _, child := range node.children {
+		roots = openContextRoots(child, roots)
+	}
+	return roots
+}
+
+func joinContextFile(node *contextTreeNode, file string) string {
+	if node.Directory == "" {
+		return file
+	}
+	return node.Directory + "/" + file
+}
+
+// coveringRoot returns the deepest printed root containing path, or "" when the
+// path stands outside every root and must stay absolute.
+func coveringRoot(roots []string, path string) string {
+	segments := comparablePathSegments(path)
+	chosen := ""
+	for _, root := range roots {
+		rootSegments := comparablePathSegments(root)
+		if len(rootSegments) < len(segments) && hasPathPrefix(segments, rootSegments) && len(root) > len(chosen) {
+			chosen = root
+		}
+	}
+	return chosen
+}
+
+// isUNCPath reports whether a path names a network share, written either as
+// \\host\share or //host/share.
+func isUNCPath(path string) bool {
+	return strings.HasPrefix(path, "//") || strings.HasPrefix(path, `\\`)
+}
+
+func relativeToContextRoot(root, path string) string {
+	if root == "" {
+		return path
+	}
+	return joinPathTail(comparablePathSegments(path), len(comparablePathSegments(root)))
+}
+
+func splitPathSegments(value string) []string {
+	return strings.Split(strings.TrimRight(strings.ReplaceAll(value, "\\", "/"), "/"), "/")
+}
+
+// comparablePathSegments splits a path for comparison, dropping the empty
+// segments that leading separators produce. A UNC path starts with two of them
+// and an absolute path with one, while a directory name built by the tree
+// builder carries exactly one, so comparing raw segments would find that
+// \\server\share shares nothing with the root /server/share chosen for it.
+func comparablePathSegments(value string) []string {
+	segments := splitPathSegments(value)
+	start := 0
+	for start < len(segments) && segments[start] == "" {
+		start++
+	}
+	return segments[start:]
+}
+
+func hasPathPrefix(segments, prefix []string) bool {
+	if len(prefix) >= len(segments) {
+		return false
+	}
+	for index, segment := range prefix {
+		if segment != segments[index] {
+			return false
+		}
+	}
+	return true
+}
+
+// joinPathTail renders the segments below the first depth of a path.
+func joinPathTail(segments []string, depth int) string {
+	if depth == 0 {
+		return strings.Join(segments, "/")
+	}
+	return strings.Join(segments[depth:], "/")
 }
 
 func knowledgeResources(input BuildInput, root string) []ContextResource {

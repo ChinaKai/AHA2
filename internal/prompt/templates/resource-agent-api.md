@@ -44,7 +44,7 @@ Task creation is Main-only, stays inside the current Project, and inherits the c
 
 ## Attachment delivery
 
-Upload the actual file as multipart/form-data with one `file` field, read `attachment.id`, then bind it through `attachment_ids` in a turn message. Upload alone does not publish. Never reuse IDs across Tasks or claim delivery without a confirmed result.
+The full upload, binding, and receipt procedure lives in the `attachment-protocol.md` entry of the Available context list; read it before attaching a file.
 
 ## Channel operations
 

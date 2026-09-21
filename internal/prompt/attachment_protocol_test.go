@@ -60,20 +60,28 @@ func TestAttachmentProtocolIsRequiredAcrossTasksAndChannels(t *testing.T) {
 					if !strings.Contains(result.EffectivePrompt, attachmentProtocol) {
 						t.Fatal("mandatory attachment protocol missing without Memory or Skills")
 					}
-					foundResource := false
+					foundResource, foundAttachment := false, false
 					for _, resource := range result.SharedManifest {
-						if resource.ID == "agent-api" {
+						if !strings.Contains(resource.Path, taskID) {
+							t.Fatalf("shared resource %s is not scoped to the current Task", resource.ID)
+						}
+						switch resource.ID {
+						case "agent-api":
 							foundResource = true
+						case "attachment-protocol":
+							foundAttachment = true
+							// The resident protocol only points at the file, so the
+							// procedure must survive in the File for every Task.
 							if !strings.Contains(resource.Content, "Upload alone does not publish") {
-								t.Fatal("attachment instructions missing from API resource")
-							}
-							if !strings.Contains(resource.Path, taskID) {
-								t.Fatal("API resource is not scoped to the current Task")
+								t.Fatal("attachment instructions missing from the attachment resource")
 							}
 						}
 					}
 					if !foundResource {
 						t.Fatal("Task API resource missing")
+					}
+					if !foundAttachment {
+						t.Fatal("Task attachment resource missing")
 					}
 				})
 			}
@@ -89,7 +97,12 @@ func TestAttachmentProtocolIncludesPublicationAndReceiptBoundaries(t *testing.T)
 		t.Fatal(err)
 	}
 	defer database.Close()
-	attachmentProtocol := templateContent(t, NewEngine(database), ctx, "protocol.attachment-delivery")
+	// The procedure is now split: the resident template keeps the safety
+	// invariants, and the resource carries the steps. Assert both halves so
+	// moving a line out of the resident template cannot silently drop it.
+	engine := NewEngine(database)
+	attachmentProtocol := templateContent(t, engine, ctx, "protocol.attachment-delivery") +
+		templateContent(t, engine, ctx, "resource.attachment-protocol")
 	for _, required := range []string{
 		"actual file bytes", "generated previews", "POST /api/v1/agent/turn/attachments",
 		"attachment.id", "POST /api/v1/agent/turn/messages", "attachment_ids",

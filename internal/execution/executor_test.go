@@ -2,11 +2,14 @@ package execution
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/ChinaKai/AHA2/internal/app"
 	"github.com/ChinaKai/AHA2/internal/domain"
+	"github.com/ChinaKai/AHA2/internal/workspace"
 )
 
 type staticBackendSettings struct {
@@ -63,5 +66,51 @@ func TestClaudeNativeRuntimeUsesCLIAccountAndDefaultModel(t *testing.T) {
 		if environment[key] != "" {
 			t.Fatalf("%s must be cleared for native account: %#v", key, environment)
 		}
+	}
+}
+
+// A profile-only login is invisible to the non-interactive channel the backend
+// runs in, so the execution side has to lend the same credential the probe did.
+// Otherwise detection reports "logged in" and the Turn then fails to
+// authenticate: the failure merely moves from a visible result to an obscure one.
+func TestClaudeNativeExecutionBorrowsProfileCredential(t *testing.T) {
+	const token = "sk-ant-oat01-EXAMPLE-NOT-REAL"
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.WriteFile(filepath.Join(home, ".profile"), []byte("export CLAUDE_CODE_OAUTH_TOKEN="+token+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	local := domain.Workspace{ID: "ws", Locality: "local", Transport: "native"}
+
+	borrowed := lendNativeClaudeCredential(context.Background(), app.ExecutionRequest{
+		Snapshot: domain.RuntimeConfigSnapshot{EnvGroupID: domain.ClaudeNativeEnvGroupID},
+		Workspace: local,
+	}, map[string]string{})
+
+	if got := borrowed[workspace.ClaudeCodeOAuthTokenEnv]; got != token {
+		t.Fatalf("native execution credential = %q, want the profile's token", got)
+	}
+}
+
+// A non-native source authenticates with the credentials its env group supplies,
+// so the operator's profile login must not be mixed in behind its back.
+func TestNonNativeExecutionKeepsItsOwnCredentials(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.WriteFile(filepath.Join(home, ".profile"), []byte("export CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-EXAMPLE-NOT-REAL\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before := map[string]string{"ANTHROPIC_API_KEY": "env-group-key"}
+
+	after := lendNativeClaudeCredential(context.Background(), app.ExecutionRequest{
+		Snapshot:  domain.RuntimeConfigSnapshot{EnvGroupID: "env-some-other-group"},
+		Workspace: domain.Workspace{ID: "ws", Locality: "local", Transport: "native"},
+	}, before)
+
+	if _, present := after[workspace.ClaudeCodeOAuthTokenEnv]; present {
+		t.Fatalf("non-native run was given the operator's profile login: %#v", after)
+	}
+	if after["ANTHROPIC_API_KEY"] != "env-group-key" {
+		t.Fatalf("non-native credentials were altered: %#v", after)
 	}
 }

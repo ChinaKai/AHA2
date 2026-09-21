@@ -23,7 +23,7 @@ func TestEngineRoutesTemplatesAndBuildsContextManifest(t *testing.T) {
 	defer database.Close()
 	engine := NewEngine(database)
 	templates, err := engine.Templates(ctx)
-	if err != nil || len(templates) != 25 {
+	if err != nil || len(templates) != 26 {
 		t.Fatalf("templates=%d err=%v", len(templates), err)
 	}
 	templateBodies := map[string]string{}
@@ -381,14 +381,16 @@ func TestSharedSnapshotIsSharedByTaskAgents(t *testing.T) {
 	if mainResult.SharedRoot == "" || mainResult.SharedRoot != subResult.SharedRoot {
 		t.Fatalf("task shared root was not shared: main=%q sub=%q", mainResult.SharedRoot, subResult.SharedRoot)
 	}
-	var agentAPIContent, agentAPIDescription string
+	var agentAPIContent, agentAPIDescription, attachmentContent, attachmentDescription string
 	for _, item := range mainResult.SharedManifest {
-		if item.ID == "agent-api" {
+		switch item.ID {
+		case "agent-api":
 			agentAPIContent, agentAPIDescription = item.Content, item.Description
-			break
+		case "attachment-protocol":
+			attachmentContent, attachmentDescription = item.Content, item.Description
 		}
 	}
-	wantRootName := "shared-" + contextSnapshotHash(sharedResources(input, "", agentAPIContent, agentAPIDescription))
+	wantRootName := "shared-" + contextSnapshotHash(sharedResources(input, "", agentAPIContent, agentAPIDescription, attachmentContent, attachmentDescription))
 	if filepath.Base(mainResult.SharedRoot) != wantRootName {
 		t.Fatalf("shared root is not named by its content hash: got=%q want=%q", filepath.Base(mainResult.SharedRoot), wantRootName)
 	}
@@ -396,7 +398,7 @@ func TestSharedSnapshotIsSharedByTaskAgents(t *testing.T) {
 		t.Fatal("task agents received different shared manifests")
 	}
 	wantContents := map[string]string{}
-	for _, item := range sharedResources(input, mainResult.SharedRoot, agentAPIContent, agentAPIDescription) {
+	for _, item := range sharedResources(input, mainResult.SharedRoot, agentAPIContent, agentAPIDescription, attachmentContent, attachmentDescription) {
 		wantContents[item.ID] = item.Content
 	}
 	for _, item := range mainResult.ContextManifest {
@@ -411,7 +413,7 @@ func TestSharedSnapshotIsSharedByTaskAgents(t *testing.T) {
 		if !strings.HasPrefix(strings.ToLower(item.Path), strings.ToLower(mainResult.SharedRoot+string(filepath.Separator))) {
 			t.Fatalf("resource escaped shared root: %s", item.Path)
 		}
-		if item.EntryPoint && !strings.Contains(mainResult.EffectivePrompt, item.Path) {
+		if item.EntryPoint && !contextEntryPointResolves(mainResult, item.Path) {
 			t.Fatalf("prompt did not expose shared knowledge entrypoint: %s", item.Path)
 		}
 		if item.Content != wantContents[item.ID] {
@@ -426,6 +428,30 @@ func TestSharedSnapshotIsSharedByTaskAgents(t *testing.T) {
 			t.Fatalf("shared snapshot is missing %s", expected)
 		}
 	}
+}
+
+// contextEntryPointResolves reports whether the effective prompt names the file
+// at path. The Available context list prints a shared directory once and shows
+// its entries relative to it, so the literal path is no longer expected to
+// appear. The listing is rebuilt from the entry points the same way the template
+// renders it, which keeps the assertion about the prompt's content instead of
+// about whichever pairing of root and entry the current code happens to make.
+func contextEntryPointResolves(result BuildResult, path string) bool {
+	if strings.Contains(result.EffectivePrompt, path) {
+		return true
+	}
+	for _, group := range availableContextEntries(result.ContextManifest, result.SharedManifest) {
+		for _, entry := range group.Entries {
+			resolved := entry.Path
+			if group.Root != "" {
+				resolved = group.Root + "/" + entry.Path
+			}
+			if resolved == path {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func TestSharedSnapshotChangesWithSharedContent(t *testing.T) {
@@ -511,8 +537,14 @@ func TestSharedSnapshotFollowsAvailableSharedResources(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.SharedRoot != "" || len(result.SharedManifest) != 0 {
-		t.Fatalf("empty shared resources created a snapshot: root=%q manifest=%#v", result.SharedRoot, result.SharedManifest)
+	// The attachment procedure is a resource for every Task, so dropping the
+	// Agent API URL and Skills must leave exactly that one shared resource
+	// rather than collapsing the snapshot.
+	if len(result.SharedManifest) != 1 || result.SharedManifest[0].ID != "attachment-protocol" {
+		t.Fatalf("task-wide attachment resource missing: root=%q manifest=%#v", result.SharedRoot, result.SharedManifest)
+	}
+	if result.SharedRoot == "" {
+		t.Fatal("task-wide attachment resource was not materialized")
 	}
 }
 
@@ -661,6 +693,58 @@ func TestBuildAddsOneShotRecoveryHandoffWithoutTaskMemory(t *testing.T) {
 		if strings.Contains(result.EffectivePrompt, forbidden) {
 			t.Fatalf("recovery prompt retained forbidden content %q: %s", forbidden, result.EffectivePrompt)
 		}
+	}
+}
+
+// The Main role and the Agent Control API protocol each carry a sentence that
+// only applies in a narrower situation: continuing an interrupted Turn, and
+// delegating to a Sub Agent. Both were resident on every Turn, including the
+// ones they cannot apply to. The budget guard counts the template source, so it
+// cannot tell a conditional sentence from a resident one; these cases keep the
+// conditions from being dropped or inverted while they are still claimed.
+func TestSituationalResidentSentencesStayConditional(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	engine := NewEngine(database)
+	base := BuildInput{
+		Workspace:        domain.Workspace{RootPath: t.TempDir(), Transport: "native"},
+		Task:             domain.Task{ID: "task-situational", Code: "task-001", Title: "Situational", CurrentGoal: "trim", CollaborationMode: "single"},
+		Agent:            domain.TaskAgent{AgentID: "main", Role: "main"},
+		KnowledgeEnabled: true,
+		UserMessage:      "inbox",
+	}
+	const (
+		recoverySentence = "continue from the existing workspace and system state"
+		subSentence      = "Sub Agents return focused results"
+	)
+	plain, err := engine.Build(ctx, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(plain.EffectivePrompt, recoverySentence) {
+		t.Error("recovery continuation instructions are resident without a Recovery handoff")
+	}
+	if strings.Contains(plain.EffectivePrompt, subSentence) {
+		t.Error("Sub Agent wording is resident in single-agent mode")
+	}
+
+	delegating := base
+	delegating.Task.CollaborationMode = "auto"
+	delegating.Task.MaxAgents = 3
+	withChildren, err := engine.Build(ctx, delegating)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(withChildren.EffectivePrompt, subSentence) {
+		t.Error("Sub Agent wording is missing when the Task can delegate")
+	}
+	if strings.Contains(withChildren.EffectivePrompt, recoverySentence) {
+		t.Error("recovery continuation instructions leaked into a Turn with no handoff")
 	}
 }
 

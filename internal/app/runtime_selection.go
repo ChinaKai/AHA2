@@ -111,6 +111,12 @@ func (s *Service) resolveClaudeNativeSelection(
 	if option.SupportsAutoMode {
 		capabilities["supports_auto_mode"] = true
 	}
+	// ContextWindow is deliberately left unset. It drives
+	// CLAUDE_CODE_MAX_CONTEXT_TOKENS at execution time, and the CLI reports no
+	// window for an official model -- so any value here would be a guess that
+	// could make Claude compact earlier than it should. The context page resolves
+	// a window for display through ClaudeContextWindow instead, which keeps a
+	// guess out of the run.
 	model := domain.Model{
 		ID: fmt.Sprintf("model_claude_native_%x", digest[:8]), DisplayName: displayName,
 		ProviderID: domain.OfficialClaudeProviderID, Source: domain.ModelSourceClaudeNative,

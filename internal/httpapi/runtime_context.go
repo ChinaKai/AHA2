@@ -7,6 +7,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -20,6 +21,37 @@ const runtimeContextScanLines = 4000
 type runtimeContextSample struct {
 	InputTokens   float64
 	ContextWindow int64
+}
+
+// claudeContextSample reads the context a Claude request actually occupied.
+//
+// A Claude transcript records usage per assistant message as the tokens of that
+// one request, so the newest such record is the current occupancy. This is the
+// value the context page needs. It is deliberately not derived from a turn's
+// usage: a turn records the CLI's session cumulative, which after a few turns
+// dwarfs the window and would report nonsense.
+//
+// The HTTP handler addresses both the isolated session directory and the default
+// one through backendSessionArtifactPath, so a local read needs no extra roots;
+// the runner path below covers the case where neither is readable from here.
+func claudeContextSample(record map[string]any) (runtimeContextSample, bool) {
+	message, _ := record["message"].(map[string]any)
+	if message == nil {
+		return runtimeContextSample{}, false
+	}
+	usage, _ := message["usage"].(map[string]any)
+	if len(usage) == 0 {
+		return runtimeContextSample{}, false
+	}
+	// A single request counts its whole input as uncached plus cache reads and
+	// cache writes.
+	input := usageNumber(usage, "input_tokens") +
+		usageNumber(usage, "cache_read_input_tokens") +
+		usageNumber(usage, "cache_creation_input_tokens")
+	if input <= 0 {
+		return runtimeContextSample{}, false
+	}
+	return runtimeContextSample{InputTokens: input}, true
 }
 
 func codexRuntimeContext(
@@ -92,6 +124,96 @@ Get-Content -LiteralPath $file.FullName -Tail 4000`, root, sessionID},
 	return sample, found
 }
 
+// claudeRuntimeContext samples the newest request's context occupancy from the
+// session transcript.
+//
+// The session may live in the isolated per-session directory or the default one,
+// so the host is asked to search both; reading only the default is what made an
+// Env-provider session look like it had no transcript at all.
+func claudeRuntimeContext(
+	ctx context.Context,
+	session domain.BackendSession,
+	item domain.Workspace,
+	workDir string,
+) (runtimeContextSample, bool) {
+	if session.ProviderSession == "" {
+		return runtimeContextSample{}, false
+	}
+	if sessionPath, ok := backendSessionArtifactPath(session, item, workDir); ok {
+		var sample runtimeContextSample
+		found := scanJSONLinesReverse(sessionPath, runtimeContextScanLines, func(record map[string]any) bool {
+			var ok bool
+			sample, ok = claudeContextSample(record)
+			return ok
+		})
+		return sample, found
+	}
+	if item.Transport != "wsl" && item.Transport != "ssh" && item.Locality != "remote" {
+		return runtimeContextSample{}, false
+	}
+	return claudeRuntimeContextFromRunner(
+		ctx,
+		workspace.RunnerFor(item),
+		workDir,
+		remoteBackendSessionRoot(session, workDir),
+		isolatedClaudeSessionRoot(session, item, workDir),
+		session.ProviderSession,
+	)
+}
+
+func claudeRuntimeContextFromRunner(
+	ctx context.Context,
+	runner workspace.Runner,
+	workDir, root, isolatedRoot, sessionID string,
+) (runtimeContextSample, bool) {
+	// $2 is the isolated per-session directory, empty when there is none; the
+	// default directory is searched after it.
+	command := workspace.Command{
+		Executable: "sh",
+		Args: []string{
+			"-c",
+			`root="$1"; case "$root" in ` +
+				`"__HOME_CLAUDE__") root="$HOME/.claude/projects" ;; esac; ` +
+				`dirs="$2"; [ -n "$2" ] || dirs="$root"; [ -d "$root" ] && dirs="$dirs
+$root"; ` +
+				`file=$(printf '%s\n' "$dirs" | while read -r dir; do ` +
+				`[ -n "$dir" ] && find "$dir" -type f -name "*$3*.jsonl" 2>/dev/null | head -n 1; done | head -n 1); ` +
+				`[ -n "$file" ] || exit 1; tail -n 4000 "$file"`,
+			"aha2-claude-context", root, isolatedRoot, sessionID,
+		},
+		Dir: workDir, Timeout: 20 * time.Second,
+	}
+	if workspace.IsWindowsRunner(runner) {
+		command = workspace.Command{
+			Executable: "powershell.exe",
+			Args: []string{"-NoLogo", "-NoProfile", "-NonInteractive", "-Command", `param([string]$Root, [string]$Isolated, [string]$Session)
+if ($Root -eq '__HOME_CLAUDE__') { $Root = Join-Path $HOME '.claude\projects' }
+$roots = @()
+if ($Isolated) { $roots += $Isolated }
+if ($Root -and $Root -ne $Isolated) { $roots += $Root }
+$file = $null
+foreach ($candidate in $roots) {
+  $file = Get-ChildItem -LiteralPath $candidate -Recurse -File -Filter "*$Session*.jsonl" -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($file) { break }
+}
+if (-not $file) { exit 1 }
+Get-Content -LiteralPath $file.FullName -Tail 4000`, root, isolatedRoot, sessionID},
+			Dir: workDir, Timeout: 20 * time.Second,
+		}
+	}
+	result, err := runner.Run(ctx, command, nil)
+	if err != nil || result.ExitCode != 0 {
+		return runtimeContextSample{}, false
+	}
+	var sample runtimeContextSample
+	found := scanJSONBytesReverse([]byte(result.Stdout), runtimeContextScanLines, func(record map[string]any) bool {
+		var ok bool
+		sample, ok = claudeContextSample(record)
+		return ok
+	})
+	return sample, found
+}
+
 func codexContextSample(record map[string]any) (runtimeContextSample, bool) {
 	payload, _ := record["payload"].(map[string]any)
 	info, _ := payload["info"].(map[string]any)
@@ -124,11 +246,15 @@ func backendSessionArtifactSize(
 	if item.Transport != "wsl" && item.Transport != "ssh" && item.Locality != "remote" {
 		return 0, false
 	}
+	// The isolated per-session directory is not reachable from here, so ask the
+	// host to look in both it and the default directory. Searching only the
+	// default is what reported every Env-provider session as unavailable.
 	return backendSessionArtifactSizeFromRunner(
 		ctx,
 		workspace.RunnerFor(item),
 		workDir,
 		remoteBackendSessionRoot(session, workDir),
+		isolatedClaudeSessionRoot(session, item, workDir),
 		session.ProviderSession,
 	)
 }
@@ -136,8 +262,11 @@ func backendSessionArtifactSize(
 func backendSessionArtifactSizeFromRunner(
 	ctx context.Context,
 	runner workspace.Runner,
-	workDir, root, sessionID string,
+	workDir, root, isolatedRoot, sessionID string,
 ) (int64, bool) {
+	// $2 is the isolated per-session directory, empty when there is none. The
+	// default directory comes second so a native-source session, which keeps the
+	// operator's own config, is still found.
 	command := workspace.Command{
 		Executable: "sh",
 		Args: []string{
@@ -145,21 +274,31 @@ func backendSessionArtifactSizeFromRunner(
 			`root="$1"; case "$root" in ` +
 				`"__HOME_CODEX__") root="$HOME/.codex/sessions" ;; ` +
 				`"__HOME_CLAUDE__") root="$HOME/.claude/projects" ;; esac; ` +
-				`file=$(find "$root" -type f -name "*$2*.jsonl" 2>/dev/null | head -n 1); ` +
+				`dirs="$2"; [ -n "$2" ] || dirs="$root"; [ -d "$root" ] && dirs="$dirs
+$root"; ` +
+				`file=$(printf '%s\n' "$dirs" | while read -r dir; do ` +
+				`[ -n "$dir" ] && find "$dir" -type f -name "*$3*.jsonl" 2>/dev/null | head -n 1; done | head -n 1); ` +
 				`[ -n "$file" ] || exit 1; wc -c < "$file"`,
-			"aha2-session-file", root, sessionID,
+			"aha2-session-file", root, isolatedRoot, sessionID,
 		},
 		Dir: workDir, Timeout: 20 * time.Second,
 	}
 	if workspace.IsWindowsRunner(runner) {
 		command = workspace.Command{
 			Executable: "powershell.exe",
-			Args: []string{"-NoLogo", "-NoProfile", "-NonInteractive", "-Command", `param([string]$Root, [string]$Session)
+			Args: []string{"-NoLogo", "-NoProfile", "-NonInteractive", "-Command", `param([string]$Root, [string]$Isolated, [string]$Session)
 if ($Root -eq '__HOME_CODEX__') { $Root = Join-Path $HOME '.codex\sessions' }
 if ($Root -eq '__HOME_CLAUDE__') { $Root = Join-Path $HOME '.claude\projects' }
-$file = Get-ChildItem -LiteralPath $Root -Recurse -File -Filter "*$Session*.jsonl" -ErrorAction SilentlyContinue | Select-Object -First 1
+$roots = @()
+if ($Isolated) { $roots += $Isolated }
+if ($Root -and $Root -ne $Isolated) { $roots += $Root }
+$file = $null
+foreach ($candidate in $roots) {
+  $file = Get-ChildItem -LiteralPath $candidate -Recurse -File -Filter "*$Session*.jsonl" -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($file) { break }
+}
 if (-not $file) { exit 1 }
-[Console]::Out.Write($file.Length)`, root, sessionID},
+[Console]::Out.Write($file.Length)`, root, isolatedRoot, sessionID},
 			Dir: workDir, Timeout: 20 * time.Second,
 		}
 	}
@@ -171,26 +310,48 @@ if (-not $file) { exit 1 }
 	return size, err == nil
 }
 
+// runningOnWindows reports whether this process is the Windows build, which is
+// the only one that addresses a WSL workspace through \\wsl.localhost.
+func runningOnWindows() bool {
+	return runtime.GOOS == "windows"
+}
+
 func backendSessionArtifactPath(
 	session domain.BackendSession,
 	item domain.Workspace,
 	workDir string,
 ) (string, bool) {
-	var roots []string
+	// The isolated session directory comes first: it is where an Env-provider
+	// session writes, and it is the only place its transcript exists.
+	var candidates []string
+	if root := isolatedClaudeSessionRoot(session, item, workDir); root != "" {
+		candidates = append(candidates, root)
+	}
 	if item.Transport == "native" {
-		root := nativeBackendSessionRoot(session, workDir)
-		if root != "" {
-			roots = append(roots, root)
+		if root := nativeBackendSessionRoot(session, workDir); root != "" {
+			candidates = append(candidates, strings.ReplaceAll(root, `\`, "/"))
 		}
 	} else if item.Transport == "wsl" && item.Distro != "" {
-		root := linuxBackendSessionRoot(session, item.RootPath, workDir)
-		if root != "" {
+		if root := linuxBackendSessionRoot(session, item.RootPath, workDir); root != "" {
+			candidates = append(candidates, root)
+		}
+	}
+	var roots []string
+	for _, root := range candidates {
+		// A Linux path may only be rewritten as a Windows UNC path when AHA itself
+		// is running on Windows. A WSL workspace is reachable from there through
+		// \\wsl.localhost; from inside WSL the same path is simply local, and
+		// rewriting it produces a path that no host can resolve -- which is what
+		// stopped every Claude session from being found.
+		if runningOnWindows() && item.Transport == "wsl" && item.Distro != "" && strings.HasPrefix(root, "/") {
 			suffix := strings.ReplaceAll(strings.TrimPrefix(root, "/"), "/", `\`)
 			roots = append(roots,
 				`\\wsl.localhost\`+item.Distro+`\`+suffix,
 				`\\wsl$\`+item.Distro+`\`+suffix,
 			)
+			continue
 		}
+		roots = append(roots, filepath.FromSlash(root))
 	}
 	var newest string
 	var newestTime int64
@@ -223,6 +384,25 @@ func nativeBackendSessionRoot(session domain.BackendSession, workDir string) str
 		return filepath.Join(home, ".claude", "projects")
 	}
 	return filepath.Join(home, ".codex", "sessions")
+}
+
+// isolatedClaudeSessionRoot returns the per-session config directory AHA gives a
+// Claude Env-provider session, where that session's transcript actually lives.
+//
+// It is empty for a native-source session: those keep the operator's default
+// config directory, which nativeBackendSessionRoot / linuxBackendSessionRoot
+// already cover. Both locations must be searched — reading only the default
+// reported every Env-provider session as "session file unavailable", and
+// reading only the isolated directory would hide native-source transcripts.
+func isolatedClaudeSessionRoot(session domain.BackendSession, item domain.Workspace, workDir string) string {
+	if session.Backend != "claude" {
+		return ""
+	}
+	directory := workspace.ClaudeConfigDir(item, workDir, session.ID)
+	if strings.TrimSpace(directory) == "" {
+		return ""
+	}
+	return path.Join(strings.ReplaceAll(directory, `\`, "/"), "projects")
 }
 
 func linuxBackendSessionRoot(session domain.BackendSession, workspaceRoot, workDir string) string {

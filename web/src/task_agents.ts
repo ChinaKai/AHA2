@@ -115,7 +115,12 @@ export function renderContextMetrics(context: TaskContextDetail["context"], sess
     ["Output", metricNumber(Number(metrics.output_tokens || 0)), "model output"],
     ["Reasoning", metricNumber(Number(metrics.reasoning_output_tokens || 0)), "subset of output"],
     ["AHA", metricNumber(Number(metrics.aha_prompt_tokens || 0)), `${metricNumber(Number(metrics.aha_prompt_chars || context.prompt_chars || 0))} chars`],
-    ["Context", percent ? `${percent.toFixed(1)}%` : "未知", `${compactNumber(contextTokens)} / ${compactNumber(contextWindow)}`],
+    // Without a window there is no percentage to show. Printing "0 / 0" instead
+    // reads as a measured zero rather than a missing value, so say which part is
+    // unknown and still show the token count that was measured.
+    ["Context", percent ? `${percent.toFixed(1)}%` : "未知", contextWindow > 0
+      ? `${compactNumber(contextTokens)} / ${compactNumber(contextWindow)}`
+      : `${compactNumber(contextTokens)} tokens · 窗口未知`],
     ["Session", metricBytes(Number(metrics.session_size_bytes || 0)), metrics.session_exists ? "backend session file" : "session file unavailable", sessionID],
   ];
   return `<section class="ctx-token-grid">${rows.map(([label, value, detail, id]) =>

@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -454,7 +455,11 @@ func (s *Server) updateModel(writer http.ResponseWriter, request *http.Request) 
 		return
 	}
 	var payload struct {
-		DisplayName     string `json:"display_name"`
+		DisplayName string `json:"display_name"`
+		// WireModel is the model id sent to the backend. It has to be editable:
+		// it is the only place a "[1m]" marker can go, and the CLI reads the
+		// marker from the name it is invoked with rather than from a variable.
+		WireModel       string `json:"wire_model"`
 		WireAPI         string `json:"wire_api"`
 		ContextWindow   int64  `json:"context_window"`
 		MaxOutputTokens int64  `json:"max_output_tokens"`
@@ -465,6 +470,21 @@ func (s *Server) updateModel(writer http.ResponseWriter, request *http.Request) 
 		return
 	}
 	now := time.Now().UTC()
+	wireModel := strings.TrimSpace(payload.WireModel)
+	if wireModel != "" && wireModel != model.WireModel {
+		if len(wireModel) > 160 || strings.ContainsAny(wireModel, " \t\r\n") {
+			writeJSON(writer, http.StatusBadRequest, map[string]any{
+				"ok": false, "error": "invalid_wire_model",
+				"message": "模型 ID 不能超过 160 个字符，也不能包含空白字符",
+			})
+			return
+		}
+		model.WireModel = wireModel
+		// The env group carries the same name for backends that read it from the
+		// environment. Keep it in step, or a rename would leave the two
+		// disagreeing about which model to call.
+		s.syncEnvGroupModel(request.Context(), model)
+	}
 	if strings.TrimSpace(payload.DisplayName) != "" {
 		model.DisplayName = strings.TrimSpace(payload.DisplayName)
 	}
@@ -590,4 +610,28 @@ func providerID(name, baseURL string) string {
 		slug = "provider"
 	}
 	return slug + "-" + digest
+}
+
+// syncEnvGroupModel keeps a model's env group naming the same model id.
+//
+// The group is what a backend reading its model from ANTHROPIC_MODEL or
+// OPENAI_MODEL will call, so after a rename the two must agree. Groups whose id
+// the model does not own are left alone.
+func (s *Server) syncEnvGroupModel(ctx context.Context, model domain.Model) {
+	if model.DefaultEnvGroupID == "" {
+		return
+	}
+	group, err := s.store.EnvGroup(ctx, model.DefaultEnvGroupID)
+	if err != nil {
+		return
+	}
+	for _, name := range []string{"ANTHROPIC_MODEL", "OPENAI_MODEL"} {
+		for key := range group.Environment {
+			if strings.EqualFold(key, name) {
+				group.Environment[key] = model.WireModel
+			}
+		}
+	}
+	group.UpdatedAt = time.Now().UTC()
+	_ = s.store.UpsertEnvGroup(ctx, group)
 }

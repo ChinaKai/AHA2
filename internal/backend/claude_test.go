@@ -139,3 +139,57 @@ func TestFilterClaudeEnvironment(t *testing.T) {
 		t.Fatalf("OPENAI_API_KEY should not leak into claude env: %#v", filtered)
 	}
 }
+
+// The operator's borrowed Claude login travels in this variable. Filtering is a
+// deliberate allowlist, so a variable that authenticates the run has to be on
+// it: leaving it out discards the credential silently, and the Turn then fails
+// with "Not logged in" even though detection reported a login.
+func TestFilterClaudeEnvironmentKeepsOperatorLogin(t *testing.T) {
+	t.Parallel()
+	const token = "sk-ant-oat01-EXAMPLE-NOT-REAL"
+	filtered := filterClaudeEnvironment(map[string]string{
+		"CLAUDE_CODE_OAUTH_TOKEN": token,
+		"HOME":                    "/srv/build/users/kaikai",
+	})
+	if filtered["CLAUDE_CODE_OAUTH_TOKEN"] != token {
+		t.Fatalf("operator login was dropped: %#v", filtered)
+	}
+	if _, present := filtered["HOME"]; present {
+		t.Fatalf("the allowlist stopped being an allowlist: %#v", filtered)
+	}
+}
+
+type claudeEnvRunner struct {
+	env map[string]string
+}
+
+func (runner *claudeEnvRunner) Run(_ context.Context, command workspace.Command, onLine workspace.LineHandler) (workspace.Result, error) {
+	runner.env = map[string]string{}
+	for key, value := range command.Env {
+		runner.env[key] = value
+	}
+	onLine(`{"type":"result","subtype":"success","result":"done","session_id":"sess-env"}`)
+	return workspace.Result{ExitCode: 0}, nil
+}
+
+// The whole point of borrowing the operator's login is that the running backend
+// receives it. Asserting this through the adapter -- not through the filter
+// alone -- is what catches an allowlist that quietly drops the credential: the
+// symptom is a Turn that fails with "Not logged in" while detection, which takes
+// a different path, reports a healthy login.
+func TestClaudeAdapterPassesOperatorLoginToTheBackend(t *testing.T) {
+	t.Parallel()
+	const token = "sk-ant-oat01-EXAMPLE-NOT-REAL"
+	runner := &claudeEnvRunner{}
+
+	if _, err := (Claude{}).Execute(context.Background(), Request{
+		Runner:      runner,
+		WorkDir:     t.TempDir(),
+		Environment: map[string]string{"CLAUDE_CODE_OAUTH_TOKEN": token},
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := runner.env["CLAUDE_CODE_OAUTH_TOKEN"]; got != token {
+		t.Fatalf("backend received %q, want the operator's login", got)
+	}
+}

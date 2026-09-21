@@ -2375,7 +2375,7 @@ function modelDialog(): string {
 }
 
 function editModelDialog(): string {
-  return `<dialog id="model-edit-dialog"><div class="dialog-head"><h2>编辑模型</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div><div class="dialog-body"><label>显示名称<input id="model-edit-name"></label><div class="two"><label>协议 / Backend<select id="model-edit-wire"><option value="responses">Codex · Responses</option><option value="chat">Codex · Chat Completions</option><option value="anthropic_messages">Claude Code · Messages</option></select></label><label>默认推理强度<select id="model-edit-effort"><option value="">继承默认</option><option>high</option><option>medium</option><option>low</option></select></label></div><div class="two"><label>Context Window<input id="model-edit-context" type="number" value="0"></label><label>Max Output Tokens<input id="model-edit-maxout" type="number" value="0"></label></div><div class="dialog-actions"><button type="button" data-close>取消</button><button type="button" id="save-model-edit" class="primary">保存</button></div></div></dialog>`;
+  return `<dialog id="model-edit-dialog"><div class="dialog-head"><h2>编辑模型</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div><div class="dialog-body"><label>显示名称<input id="model-edit-name"></label><label>模型 ID（发送给后端）<input id="model-edit-wire-model" spellcheck="false"><span class="field-help">决定实际调用的模型；Claude 走网关且需要 1M 上下文时，在此追加 [1m]。</span></label><div class="two"><label>协议 / Backend<select id="model-edit-wire"><option value="responses">Codex · Responses</option><option value="chat">Codex · Chat Completions</option><option value="anthropic_messages">Claude Code · Messages</option></select></label><label>默认推理强度<select id="model-edit-effort"><option value="">继承默认</option><option>high</option><option>medium</option><option>low</option></select></label></div><div class="two"><label>Context Window<input id="model-edit-context" type="number" value="0"></label><label>Max Output Tokens<input id="model-edit-maxout" type="number" value="0"></label></div><div class="dialog-actions"><button type="button" data-close>取消</button><button type="button" id="save-model-edit" class="primary">保存</button></div></div></dialog>`;
 }
 
 function workspaceTakeoverDialog(): string {
@@ -3852,6 +3852,8 @@ function bindCommon(): void {
     const contextInput = document.querySelector<HTMLInputElement>("#model-edit-context");
     const maxoutInput = document.querySelector<HTMLInputElement>("#model-edit-maxout");
     if (nameInput) nameInput.value = model.display_name;
+    const wireModelInput = document.querySelector<HTMLInputElement>("#model-edit-wire-model");
+    if (wireModelInput) wireModelInput.value = model.wire_model || "";
     if (wireInput) {
       wireInput.value = model.backend === "claude" ? "anthropic_messages" : (model.wire_api || "responses");
       wireInput.disabled = false;
@@ -3867,8 +3869,13 @@ function bindCommon(): void {
     const id = button?.getAttribute("data-model-id");
     if (!id) return;
     void runWithFeedback(button, "保存中", async () => {
+      const wireModelValue = String((document.querySelector<HTMLInputElement>("#model-edit-wire-model"))?.value || "").trim();
       await api.updateModel(id, {
         display_name: String((document.querySelector<HTMLInputElement>("#model-edit-name"))?.value || "").trim(),
+        // Only send when actually changed: the server treats an empty value as
+        // "leave it alone", so sending the current value is harmless but
+        // sending "" would silently keep the old name.
+        ...(wireModelValue ? {wire_model: wireModelValue} : {}),
         wire_api: String((document.querySelector<HTMLSelectElement>("#model-edit-wire"))?.value || "responses"),
         context_window: Number((document.querySelector<HTMLInputElement>("#model-edit-context"))?.value || 0),
         max_output_tokens: Number((document.querySelector<HTMLInputElement>("#model-edit-maxout"))?.value || 0),
