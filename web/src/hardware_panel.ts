@@ -2,6 +2,7 @@ import {api} from "./api.js";
 import {mountHardwareTerminal} from "./hardware_terminal.js";
 import type {HardwareTerminalBinding} from "./hardware_terminal.js";
 import {icon} from "./icons.js";
+import {copyText} from "./ui_helpers.js";
 import type {
   HardwareGroup,
   HardwareIOEvent,
@@ -360,6 +361,7 @@ export function renderHardwarePanel(detail: TaskDetail): string {
         <div class="hardware-console-actions">
           <button type="button" id="hardware-connect" ${canConnect && !connected ? "" : "disabled"}>连接</button>
           <button type="button" id="hardware-disconnect" ${connected ? "" : "disabled"}>断开</button>
+          <button type="button" id="hardware-copy-output" title="复制终端内容（有选中时只复制选中部分）">${icon("copy")}</button>
           <button type="button" id="hardware-clear-output" title="清空当前显示">${icon("close")}</button>
         </div>
       </header>
@@ -630,6 +632,19 @@ export function bindHardwarePanel(detail: TaskDetail, notify: Notice): void {
       activeTerminal?.setStatus(response.status);
       updateTerminalDOM(currentStream(state));
     }).catch(reportError);
+  });
+  root.querySelector("#hardware-copy-output")?.addEventListener("click", () => {
+    if (!activeTerminal) return;
+    const selected = activeTerminal.selectedText();
+    const text = selected || activeTerminal.bufferText();
+    if (!text.trim()) {
+      notify("notice", "终端没有可复制的内容");
+      return;
+    }
+    void copyText(text).then(
+      () => notify("notice", selected ? "已复制选中内容" : "已复制终端内容"),
+      () => notify("error", "复制失败，请手动选择后复制"),
+    );
   });
   root.querySelector("#hardware-clear-output")?.addEventListener("click", () => {
     currentStream(state).items = [];

@@ -333,7 +333,10 @@ export async function executeAgentSessionAction(
   return true;
 }
 
-async function copyText(value: string): Promise<void> {
+// Shared so the hardware terminal copies through the same path as message
+// bubbles: the async clipboard API where it exists, and a hidden-textarea
+// fallback where it does not (plain HTTP, or a browser that withholds it).
+export async function copyText(value: string): Promise<void> {
   if (navigator.clipboard?.writeText) {
     await navigator.clipboard.writeText(value);
     return;

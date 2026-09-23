@@ -14,6 +14,7 @@ interface XTerm {
   buffer: {
     active: {
       viewportY: number;
+      length: number;
       getLine(index: number): {translateToString(trimRight?: boolean): string} | undefined;
     };
   };
@@ -23,6 +24,7 @@ interface XTerm {
   clear(): void;
   focus(): void;
   resize(cols: number, rows: number): void;
+  getSelection(): string;
   dispose(): void;
   onData(listener: (data: string) => void): XTermDisposable;
   onBinary(listener: (data: string) => void): XTermDisposable;
@@ -39,6 +41,8 @@ export interface HardwareTerminalBinding {
   key: string;
   clear(): void;
   focus(): void;
+  selectedText(): string;
+  bufferText(): string;
   send(data: string): void;
   writeFallback(data: Uint8Array): void;
   setStatus(status: HardwareTerminalStatus): void;
@@ -352,6 +356,22 @@ export function mountHardwareTerminal(options: MountOptions): HardwareTerminalBi
     },
     focus() {
       focusInput();
+    },
+    // The two copy sources the toolbar offers: a selection when there is one,
+    // otherwise everything the scrollback holds. Trailing blanks on each line
+    // are dropped, and blank lines at the end with them, so a copy does not
+    // arrive padded out to the terminal width.
+    selectedText() {
+      return terminal.getSelection();
+    },
+    bufferText() {
+      const buffer = terminal.buffer.active;
+      const lines: string[] = [];
+      for (let index = 0; index < buffer.length; index++) {
+        lines.push(buffer.getLine(index)?.translateToString(true) ?? "");
+      }
+      while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+      return lines.join("\n");
     },
     send(data: string) {
       queueInput(new TextEncoder().encode(data));

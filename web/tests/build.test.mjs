@@ -730,6 +730,15 @@ test("built web contains responsive application", async () => {
   assert.match(hardwarePanel, /\/vendor\/xterm\.js/);
   assert.match(hardwarePanel, /\/vendor\/xterm\.css/);
   assert.match(hardwarePanel, /data-hardware-terminal-key="ctrl-c"/);
+  // Copying the console: a selected region copies alone, otherwise the whole
+  // scrollback, and the result is only claimed once the write resolved.
+  assert.match(hardwarePanel, /id="hardware-copy-output"/);
+  assert.match(hardwarePanel, /if \(!activeTerminal\) return;/);
+  assert.match(hardwarePanel, /activeTerminal\.selectedText\(\)/);
+  assert.match(hardwarePanel, /selected \|\| activeTerminal\.bufferText\(\)/);
+  assert.match(hardwareTerminal, /getSelection\(\)/);
+  assert.match(hardwareTerminal, /translateToString\(true\)/);
+  assert.match(css, /#hardware-clear-output, #hardware-copy-output/);
   assert.match(hardwarePanel, /const sendForm = root\.querySelector/);
   assert.doesNotMatch(script, /data-task-tab=|mobile-agent-strip|conversation-filters/);
   assert.match(taskTools, /renderTaskMemory\(detail\.memory\)/);
