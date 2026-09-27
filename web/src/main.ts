@@ -2309,6 +2309,9 @@ function advancedSettingsView(): string {
   const network = state.networkSettings;
   const accessScope = origin.access_scope === "local" ? "local" : "lan";
   const restartRequired = Boolean(network.restart_required);
+  const agentAPI = state.agentAPISettings;
+  const allowInsecureAgentAPI = Boolean(agentAPI.effective_allow_insecure);
+  const forcedInsecureAgentAPI = Boolean(agentAPI.startup_allow_insecure) && !agentAPI.url;
   return shell(`<section class="page advanced-settings-page">
     <header class="page-head"><div><h1>高级设置</h1><p>管理 Backend、Owner 账号与本机恢复方式</p></div></header>
     <section class="advanced-tools-grid">
@@ -2343,6 +2346,15 @@ function advancedSettingsView(): string {
         <div class="field-help">AHA2 监听所有网卡，此处决定哪些来源会被响应。改为“仅本机”后，局域网内其他设备的访问会立即被拒绝；保存即生效，无需重启。</div>
         <div class="security-warning ${accessScope === "local" ? "active" : ""}">${accessScope === "local" ? `当前只响应本机地址的请求。其他设备上的浏览器、Agent 与同步都无法连接。工作区若通过局域网地址回连 AHA（Agent API 地址不是 127.0.0.1），也会一并失败。` : `局域网内可达的设备都能打开登录页，实际进入仍需 Owner 密码。`}</div>
         <div class="dialog-actions"><button class="primary" type="submit">保存访问范围</button></div>
+      </form>
+    </section>
+    <section class="panel spaced account-security-panel agent-api-security-panel">
+      <div class="panel-head"><strong>Agent API 地址安全</strong><span>${allowInsecureAgentAPI ? "允许明文 HTTP" : "仅 HTTPS"}</span></div>
+      <form id="agent-api-security-form">
+        <label class="security-setting-toggle"><input name="allow_insecure" type="checkbox" ${allowInsecureAgentAPI ? "checked" : ""} ${forcedInsecureAgentAPI ? "disabled" : ""}><span><strong>允许非 loopback 的明文 HTTP Agent API 地址</strong><small>远程工作区通过隧道回连时用 127.0.0.1，不需要这一项；只有让工作区用局域网明文地址直连 AHA2（如 http://192.168.1.10:8766）才需要。</small></span></label>
+        <div class="field-help">这一项与上面的“访问范围”是两件事：<strong>访问范围决定谁可以访问 AHA2</strong>（请求进来的方向）；<strong>这一项决定 AHA2 是否接受一个明文、非 loopback 的 Agent API 地址</strong>（AHA2 被回连的方向）。两者都要放行，局域网直连才走得通。</div>
+        <div class="security-warning ${allowInsecureAgentAPI ? "active" : ""}">${forcedInsecureAgentAPI ? `启动参数 <code>--allow-insecure-agent-api</code> 已强制允许明文地址；此时界面开关不再生效。` : allowInsecureAgentAPI ? `Agent API 令牌会以明文经过这段网络，局域网内的其他设备可以截获它。仅在本机可信的网络中开启。` : ""}</div>
+        <div class="dialog-actions"><button class="primary" type="submit" ${forcedInsecureAgentAPI ? "disabled" : ""}>保存 Agent API 安全设置</button></div>
       </form>
     </section>
     <section class="panel spaced account-security-panel listen-address-panel">
@@ -4157,6 +4169,20 @@ function bindCommon(): void {
     });
     state.securitySettings = response.security;
     setMessage("notice", accessScope === "local" ? "访问范围已改为仅本机" : "访问范围已改为本机与局域网");
+  }, "保存中");
+  bindForm("#agent-api-security-form", async form => {
+    const allowInsecure = form.get("allow_insecure") === "on";
+    // Loosening is the direction that needs a deliberate confirmation; turning it
+    // back off restores the safer default and should not be obstructed.
+    if (allowInsecure && !state.agentAPISettings.effective_allow_insecure &&
+      !window.confirm("开启后，Agent API 令牌会以明文经过局域网，同网段设备可截获。确定开启？")) return;
+    // Only the switch is being changed here; the global address is left as it is.
+    const response = await api.updateAgentAPISettings({
+      url: state.agentAPISettings.url,
+      allow_insecure: allowInsecure,
+    });
+    state.agentAPISettings = response.agent_api;
+    setMessage("notice", allowInsecure ? "已允许明文 HTTP Agent API 地址" : "Agent API 地址已恢复为仅允许 HTTPS 或 loopback");
   }, "保存中");
   bindForm("#listen-address-form", async form => {
     const listenAddress = String(form.get("listen_address") || "").trim();

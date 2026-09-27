@@ -418,9 +418,13 @@ test("Agent API is automatic by default with a manual Workspace exception", asyn
 
   // The global Agent API panel is gone. Keeping it implied the address needed
   // configuring, and a value set there overrode the loopback address that the
-  // reverse tunnel depends on.
+  // reverse tunnel depends on. Only the insecure-address switch is exposed, and
+  // deliberately without an address field: it carries the stored address through
+  // untouched, so it cannot reintroduce that override.
   assert.doesNotMatch(script, /agent-api-settings-form/);
-  assert.doesNotMatch(script, /api\.updateAgentAPISettings/);
+  assert.match(script, /agent-api-security-form/);
+  assert.match(script, /api\.updateAgentAPISettings/);
+  assert.match(script, /url:\s*state\.agentAPISettings\.url,/);
   // Only auto and manual remain; "global" duplicated the same decision one level up.
   assert.doesNotMatch(script, /value="global"/);
 
