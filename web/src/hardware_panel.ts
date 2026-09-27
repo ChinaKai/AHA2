@@ -57,6 +57,10 @@ const terminalKeys: Record<string, string> = {
   right: "\x1b[C",
 };
 let pollGeneration = 0;
+// True only while the panel's DOM is being swapped. Replacing the tree tears down
+// whatever control had focus, and the browser fires a change event for it on the
+// way out; that event must not be mistaken for a user edit.
+let swappingPanelDOM = false;
 let pollTimer = 0;
 let activeTerminal: HardwareTerminalBinding | null = null;
 let terminalAssetsPromise: Promise<void> | null = null;
@@ -160,6 +164,7 @@ function panelState(detail: TaskDetail): PanelState {
     const selected = state.selectedID;
     state.groups = cloneGroups(detail.hardware);
     state.selectedID = state.groups.some(group => group.id === selected) ? selected : (state.groups[0]?.id || "");
+    reconcileTransport(state);
   }
   return state;
 }
@@ -174,6 +179,18 @@ function supports(group: HardwareDraft | undefined, transport: Transport): boole
     return (group.mode === "serial" || group.mode === "both") && Boolean(group.serial.device);
   }
   return (group.mode === "network" || group.mode === "both") && Boolean(group.network.host);
+}
+
+// Whenever the group list or the selection changes without the user picking a
+// transport, the transport has to be one the selected group actually supports.
+// Otherwise the console stays bound to the previous group's transport: 连接 is
+// disabled and the terminal never mounts, which reads as "the new hardware needs
+// a page reload before it can be used".
+function reconcileTransport(state: PanelState): void {
+  const group = selectedGroup(state);
+  if (!supports(group, state.transport)) {
+    state.transport = group?.mode === "network" ? "network" : "serial";
+  }
 }
 
 function streamKey(state: PanelState): string {
@@ -409,7 +426,12 @@ export function bindHardwarePanel(detail: TaskDetail, notify: Notice): void {
   const rerender = () => {
     const body = document.querySelector<HTMLElement>("#task-tool-panel-body");
     if (!body) return;
-    body.innerHTML = renderHardwarePanel(detail);
+    swappingPanelDOM = true;
+    try {
+      body.innerHTML = renderHardwarePanel(detail);
+    } finally {
+      swappingPanelDOM = false;
+    }
     bindHardwarePanel(detail, notify);
   };
   const reportError = (error: unknown) => {
@@ -474,12 +496,23 @@ export function bindHardwarePanel(detail: TaskDetail, notify: Notice): void {
     const baudrateCustom = form?.querySelector<HTMLInputElement>('input[name="serial_baudrate_custom"]');
     if (baudrateCustom) baudrateCustom.hidden = baudrateChoice?.value !== customOption;
   };
-  form?.addEventListener("input", () => {
+  // Replacing the panel's DOM tears down whatever control had focus, and the
+  // browser can fire a change event for it on the way out. That is teardown, not
+  // an edit: treating it as one re-dirtied a panel that had just been saved, so
+  // 连接 kept answering "请先保存硬件配置" until the page was reloaded.
+  const isUserEdit = (event: Event) => {
+    if (swappingPanelDOM) return false;
+    const target = event.target;
+    return target instanceof Node ? target.isConnected : true;
+  };
+  form?.addEventListener("input", event => {
+    if (!isUserEdit(event)) return;
     readForm();
     markDirty();
     syncMode();
   });
   form?.addEventListener("change", event => {
+    if (!isUserEdit(event)) return;
     const target = event.target as HTMLInputElement | HTMLSelectElement;
     if (target.name === "network_protocol") {
       const port = form.querySelector<HTMLInputElement>('input[name="network_port"]');
@@ -511,6 +544,10 @@ export function bindHardwarePanel(detail: TaskDetail, notify: Notice): void {
     state.groups = cloneGroups(response.groups);
     state.dirty = false;
     state.selectedID = state.groups.some(group => group.id === state.selectedID) ? state.selectedID : (state.groups[0]?.id || "");
+    // A group saved with a mode the current transport cannot serve (a new SSH
+    // group while the console sits on 串口) would otherwise leave 连接 disabled
+    // until the page is reloaded.
+    reconcileTransport(state);
     clearHardwareDraft(detail.task.id);
     notify("notice", "硬件配置已保存");
     rerender();
@@ -701,8 +738,7 @@ export function refreshHardwarePanel(detail: TaskDetail, notify: Notice): boolea
   const selected = state.selectedID;
   state.groups = groups;
   state.selectedID = groups.some(group => group.id === selected) ? selected : (groups[0]?.id || "");
-  const group = selectedGroup(state);
-  if (!supports(group, state.transport)) state.transport = group?.mode === "network" ? "network" : "serial";
+  reconcileTransport(state);
   const body = document.querySelector<HTMLElement>("#task-tool-panel-body");
   if (!body) return false;
   body.innerHTML = renderHardwarePanel(detail);
