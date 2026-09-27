@@ -321,6 +321,15 @@ let taskLastSignalAt = 0;
 let scrollConversationToBottom = false;
 let conversationBottomPinVersion = 0;
 let conversationAutoScrollBlockedUntil = 0;
+// Whether new content should keep the view at the bottom. A position test alone
+// cannot answer this: the bottom test carries an 80px tolerance, so while a
+// reader is inside that band every render snaps them back to the exact bottom and
+// they never accumulate enough upward movement to leave it. On a phone that is
+// terminal, because touches arrive as one gesture rather than a stream of wheel
+// events. So the reader's intent is recorded when they scroll up during a
+// gesture, and only a return to the bottom clears it.
+let conversationFollowBottom = true;
+let composingConversationTouch = false;
 let composerFocusWasAtBottom = false;
 const conversationRenderedHTML = new WeakMap<HTMLElement, string>();
 let loadingOlderConversation = false;
@@ -3044,6 +3053,10 @@ function replaceRegionHTML(root: HTMLElement, html: string): void {
 
 function requestConversationBottom(): void {
   scrollConversationToBottom = true;
+  // An explicit request means the reader wants to be at the bottom from here on,
+  // so following resumes even if they had scrolled away before.
+  conversationFollowBottom = true;
+  composingConversationTouch = false;
   conversationBottomPinVersion++;
 }
 
@@ -3051,6 +3064,21 @@ function cancelConversationBottomPin(): void {
   conversationBottomPinVersion++;
   conversationAutoScrollBlockedUntil = Date.now() + 800;
   composerFocusWasAtBottom = false;
+}
+
+// A gesture that reaches for the scrollback stops the view from following new
+// content until the reader comes back to the bottom. This is deliberately not a
+// timeout: a phone drag lasts as long as it lasts, and an expiry that fires
+// mid-gesture hands the list back to the auto-scroll the reader is fighting.
+function beginConversationGesture(): void {
+  composingConversationTouch = true;
+  cancelConversationBottomPin();
+}
+
+function endConversationGesture(): void {
+  composingConversationTouch = false;
+  const list = document.querySelector<HTMLElement>("#conversation-list");
+  if (list && conversationIsAtBottom(list)) conversationFollowBottom = true;
 }
 
 function conversationIsAtBottom(list: HTMLElement): boolean {
@@ -3064,7 +3092,12 @@ function restoreComposerConversationBottom(): void {
 }
 
 function shouldAutoScrollConversation(wasAtBottom: boolean): boolean {
-  return scrollConversationToBottom || (wasAtBottom && Date.now() >= conversationAutoScrollBlockedUntil);
+  // An explicit request (opening a task, sending a message) always wins: the
+  // reader asked to be taken to the bottom.
+  if (scrollConversationToBottom) return true;
+  if (composingConversationTouch) return false;
+  if (!conversationFollowBottom) return false;
+  return wasAtBottom && Date.now() >= conversationAutoScrollBlockedUntil;
 }
 
 function stabilizeConversationBottom(list: HTMLElement): void {
@@ -3142,7 +3175,11 @@ function updateTaskLiveRegions(): void {
       restoreConversationImages(list, images);
       restoreRegionUI(list, ui, false);
       if (shouldAutoScrollConversation(wasAtBottom)) stabilizeConversationBottom(list);
-      else list.scrollTop = previousTop;
+      // Restoring the position captured before the replace is right for a reader
+      // who is sitting still, but during a live gesture it rewinds the drag: the
+      // finger has moved on since previousTop was read, and the assignment throws
+      // that movement away. Leave the list alone while the gesture owns it.
+      else if (!composingConversationTouch) list.scrollTop = previousTop;
       bindConversationLiveControls();
     } else if (scrollConversationToBottom) {
       stabilizeConversationBottom(list);
@@ -3309,7 +3346,9 @@ function render(): void {
       restoreRegionUI(nextConversation, previousConversationUI, false);
       if (shouldAutoScrollConversation(wasAtConversationBottom)) {
         stabilizeConversationBottom(nextConversation);
-      } else {
+      } else if (!composingConversationTouch) {
+        // Same reasoning as the live-region path: do not rewind a gesture that is
+        // still in progress.
         nextConversation.scrollTop = previousScrollTop;
       }
     }
@@ -4667,6 +4706,12 @@ function bindConversationLiveControls(): void {
     let previousTop = list.scrollTop;
     list.addEventListener("scroll", () => {
       const currentTop = list.scrollTop;
+      // Reaching for the scrollback during a gesture ends auto-follow, and
+      // returning to the bottom resumes it. Recording intent here, rather than
+      // inferring it from position at render time, is what lets a reader leave
+      // the bottom band at all.
+      if (currentTop < previousTop - 2 && composingConversationTouch) conversationFollowBottom = false;
+      else if (conversationIsAtBottom(list)) conversationFollowBottom = true;
       if (currentTop < previousTop && currentTop <= 80 && state.taskConversationHasMore) {
         void loadOlderConversation();
       }
@@ -4676,7 +4721,14 @@ function bindConversationLiveControls(): void {
   if (list && list.dataset.bottomPinBound !== "true") {
     list.dataset.bottomPinBound = "true";
     for (const eventName of ["wheel", "touchstart", "pointerdown"] as const) {
-      list.addEventListener(eventName, cancelConversationBottomPin, {passive: true});
+      list.addEventListener(eventName, beginConversationGesture, {passive: true});
+    }
+    // touchend/touchcancel close the touch gesture; pointerup/pointercancel do
+    // the same for mouse and pen. Without these the suppression would outlive the
+    // gesture and new messages would stop following while the reader sits at the
+    // bottom.
+    for (const eventName of ["touchend", "touchcancel", "pointerup", "pointercancel"] as const) {
+      list.addEventListener(eventName, endConversationGesture, {passive: true});
     }
   }
 }

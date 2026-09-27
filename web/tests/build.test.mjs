@@ -759,7 +759,20 @@ test("built web contains responsive application", async () => {
   assert.match(script, /function stabilizeConversationBottom[\s\S]*requestAnimationFrame[\s\S]*image\.addEventListener\("load"/);
   assert.match(script, /function stabilizeConversationBottom[\s\S]{0,120}const pinVersion = \+\+conversationBottomPinVersion/);
   assert.match(script, /for \(const delay of \[\s*80,\s*240,\s*600\s*\]\)[\s\S]{0,80}setTimeout\(apply,\s*delay\)/);
-  assert.match(script, /\[\s*"wheel",\s*"touchstart",\s*"pointerdown"\s*\][\s\S]*cancelConversationBottomPin/);
+  assert.match(script, /\[\s*"wheel",\s*"touchstart",\s*"pointerdown"\s*\][\s\S]*beginConversationGesture/);
+  // A touch gesture has to be closed explicitly, or the suppression outlives it
+  // and new messages stop following for a reader sitting at the bottom.
+  assert.match(script, /\[\s*"touchend",\s*"touchcancel",\s*"pointerup",\s*"pointercancel"\s*\][\s\S]*endConversationGesture/);
+  // Following new content is a matter of recorded intent, not of position: the
+  // bottom test carries an 80px tolerance, so while a reader is inside that band
+  // every render snaps them back to the exact bottom and they never get out.
+  assert.match(script, /function shouldAutoScrollConversation[\s\S]{0,400}composingConversationTouch\) return false[\s\S]{0,120}conversationFollowBottom\) return false/);
+  assert.match(script, /composingConversationTouch = true;[\s\S]{0,60}cancelConversationBottomPin\(\)/);
+  assert.match(script, /currentTop < previousTop - 2 && composingConversationTouch\) conversationFollowBottom = false/);
+  // Restoring the pre-replace position is right for a still reader but rewinds a
+  // drag that is still in progress, so both restore sites must skip it mid-gesture.
+  const restoreGuards = script.match(/else if \(!composingConversationTouch\)/g) || [];
+  assert.equal(restoreGuards.length, 2, `both conversation restore sites must defer to an active gesture, found ${restoreGuards.length}`);
   assert.match(script, /const conversationRenderedHTML = new WeakMap\(\)/);
   assert.match(script, /if \(conversationRenderedHTML\.get\(list\) !== nextHTML\)[\s\S]{0,500}list\.innerHTML = nextHTML[\s\S]{0,180}conversationRenderedHTML\.set\(list,\s*nextHTML\)/);
   assert.match(script, /const preservedConversation = previousConversation && preservePageUI[\s\S]{0,180}conversationRenderedHTML\.get\(previousConversation\) === nextConversationHTML/);
