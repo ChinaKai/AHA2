@@ -67,6 +67,7 @@ func newBackendRequest(request app.ExecutionRequest, model string, environment m
 		WorkDir: taskWorkDir(request),
 		Model:   model, ContextWindow: request.Model.ContextWindow,
 		ReasoningEffort: request.Snapshot.ReasoningEffort,
+		FastMode:        request.Snapshot.FastMode,
 		Environment:     environment,
 		Prompt:          request.Prompt, ProviderSessionID: request.ProviderSessionID,
 		Filesystem: request.Filesystem, Approval: request.Approval,

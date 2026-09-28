@@ -12,6 +12,8 @@ type Request struct {
 	Model               string
 	ContextWindow       int64
 	ReasoningEffort     string
+	// FastMode selects the accelerated service tier where the backend has one.
+	FastMode            bool
 	StreamIdleTimeoutMS int
 	StreamMaxRetries    int
 	Environment         map[string]string

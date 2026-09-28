@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -421,6 +422,44 @@ func TestAgentStateKnowledgeAndSkillAPIs(t *testing.T) {
 	if err != nil || len(updatedTask.SkillIDs) != 2 || updatedTask.SkillIDs[1] != createdSkillID {
 		t.Fatalf("created skill was not selected: task=%#v err=%v", updatedTask, err)
 	}
+	// A payload with a field the contract does not define is rejected, and the
+	// response has to say which field -- the bare code left callers guessing.
+	response = agentRequestRaw(t, server.URL+"/api/v1/agent/skills", http.MethodPost, token,
+		[]byte(`{"name":"Global checks","instructions":"Run them.","scope_bogus":"global"}`))
+	var rejectedPayload map[string]any
+	decodeResponse(t, response, &rejectedPayload)
+	if response.StatusCode != http.StatusBadRequest || rejectedPayload["error"] != "skill_create_invalid" {
+		t.Fatalf("unknown field was not rejected: status=%d payload=%#v", response.StatusCode, rejectedPayload)
+	}
+	if message, _ := rejectedPayload["message"].(string); !strings.Contains(message, "scope_bogus") {
+		t.Fatalf("the rejection does not name the offending field: %#v", rejectedPayload)
+	}
+
+	// scope defaults to project, and asking for global is honoured when allowed.
+	response = agentRequest(t, server.URL+"/api/v1/agent/skills", http.MethodPost, token, map[string]any{
+		"name": "Global checks", "description": "Applies everywhere", "instructions": "Run them.", "scope": "global",
+	})
+	var globalSkillPayload map[string]any
+	decodeResponse(t, response, &globalSkillPayload)
+	globalSkill := globalSkillPayload["skill"].(map[string]any)
+	// project_id is omitempty, so a global skill carries no project at all.
+	if response.StatusCode != http.StatusCreated || globalSkill["scope"] != "global" {
+		t.Fatalf("global skill status=%d payload=%#v", response.StatusCode, globalSkillPayload)
+	}
+	if projectID, present := globalSkill["project_id"]; present && projectID != "" {
+		t.Fatalf("global skill kept a project: %#v", globalSkill)
+	}
+
+	// An unknown scope is refused by name rather than silently treated as project.
+	response = agentRequest(t, server.URL+"/api/v1/agent/skills", http.MethodPost, token, map[string]any{
+		"name": "Bad scope", "instructions": "Run them.", "scope": "workspace",
+	})
+	var badScopePayload map[string]any
+	decodeResponse(t, response, &badScopePayload)
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("unknown scope was accepted: status=%d payload=%#v", response.StatusCode, badScopePayload)
+	}
+
 	response = agentRequest(t, server.URL+"/api/v1/agent/skills/"+createdSkillID, http.MethodGet, token, nil)
 	var selectedSkillPayload map[string]any
 	decodeResponse(t, response, &selectedSkillPayload)
@@ -469,6 +508,23 @@ func TestAgentStateKnowledgeAndSkillAPIs(t *testing.T) {
 		t.Fatalf("Agent progress attachment missing: %#v", page.Items)
 	}
 	close(executor.release)
+}
+
+// agentRequestRaw sends a body verbatim, which the map-based helper cannot do:
+// a field that must not be accepted cannot be expressed through a Go map.
+func agentRequestRaw(t *testing.T, url, method, token string, body []byte) *http.Response {
+	t.Helper()
+	request, err := http.NewRequest(method, url, bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return response
 }
 
 func agentRequest(t *testing.T, url, method, token string, body any) *http.Response {

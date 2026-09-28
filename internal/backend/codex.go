@@ -160,6 +160,11 @@ func codexArguments(request Request, catalogPath string) []string {
 	if effort := strings.TrimSpace(request.ReasoningEffort); effort != "" {
 		args = append(args, "-c", "model_reasoning_effort="+strconv.Quote(effort))
 	}
+	// Codex calls its accelerated tier "Fast": roughly 1.5x the speed at a higher
+	// token rate. It is requested by name, and only when the Task asked for it.
+	if request.FastMode {
+		args = append(args, "-c", "service_tier="+strconv.Quote("priority"))
+	}
 	if catalogPath != "" {
 		args = append(args, "-c", "model_catalog_json="+strconv.Quote(catalogPath))
 	} else if request.ContextWindow > 0 {

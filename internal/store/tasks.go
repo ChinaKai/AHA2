@@ -57,13 +57,7 @@ func (s *Store) CreateTaskWithSnapshot(ctx context.Context, snapshot domain.Runt
 		return domain.Task{}, err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO runtime_config_snapshots(id,workspace_id,backend,backend_version,model_id,wire_model,env_group_id,env_group_revision,codex_account_id,proxy_enabled,reasoning_effort,stream_idle_timeout_ms,stream_max_retries,permissions_json,created_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		snapshot.ID, snapshot.WorkspaceID, snapshot.Backend, snapshot.BackendVersion, snapshot.ModelID,
-		snapshot.WireModel, snapshot.EnvGroupID, snapshot.EnvGroupRevision, snapshot.CodexAccountID, boolInt(snapshot.ProxyEnabled), snapshot.ReasoningEffort,
-		snapshot.StreamIdleTimeoutMS, snapshot.StreamMaxRetries, snapshot.PermissionsJSON, timeString(snapshot.CreatedAt),
-	); err != nil {
+	if err := insertRuntimeSnapshot(ctx, tx, snapshot); err != nil {
 		return domain.Task{}, err
 	}
 	code, err := nextTaskCodeTx(ctx, tx)

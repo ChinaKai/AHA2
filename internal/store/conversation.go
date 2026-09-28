@@ -421,6 +421,84 @@ func (s *Store) UpdateAgentBatchRouteStatus(
 	return tx.Commit()
 }
 
+// MergeAgentBatchDispatch adds a later dispatch's agents to the routed-agent card
+// already recorded for this parent Turn, and reports whether such a card existed.
+//
+// A Turn may submit more than one batch of sub agents. The card is identified by
+// the parent Turn, so a second batch that inserted its own row would collide with
+// the first on that id; because the insert error was discarded, the second batch
+// vanished and the card named fewer agents than were actually running. Callers
+// merge into the existing card instead, and only insert when there is none.
+func (s *Store) MergeAgentBatchDispatch(
+	ctx context.Context,
+	parentTurnID string,
+	agentIDs []string,
+	routes []map[string]any,
+) (bool, error) {
+	if parentTurnID == "" || len(agentIDs) == 0 {
+		return false, nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	var id, payloadJSON string
+	err = tx.QueryRowContext(ctx, `
+		SELECT id,payload_json FROM conversation_items
+		WHERE turn_id=? AND kind='agent_batch_dispatched'
+		LIMIT 1`,
+		parentTurnID,
+	).Scan(&id, &payloadJSON)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	payload := decodeJSON(payloadJSON, map[string]any{})
+	seen := map[string]bool{}
+	mergedIDs := make([]any, 0, len(agentIDs))
+	if existing, ok := payload["agent_ids"].([]any); ok {
+		for _, raw := range existing {
+			value := strings.TrimSpace(fmt.Sprint(raw))
+			if value == "" || seen[value] {
+				continue
+			}
+			seen[value] = true
+			mergedIDs = append(mergedIDs, value)
+		}
+	}
+	mergedRoutes, _ := payload["agent_routes"].([]any)
+	added := false
+	for index, agentID := range agentIDs {
+		value := strings.TrimSpace(agentID)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		mergedIDs = append(mergedIDs, value)
+		if index < len(routes) {
+			mergedRoutes = append(mergedRoutes, routes[index])
+		}
+		added = true
+	}
+	if !added {
+		// The card is already complete for this Turn; nothing to write.
+		return true, nil
+	}
+	payload["agent_ids"] = mergedIDs
+	payload["agent_routes"] = mergedRoutes
+	summary := fmt.Sprintf("AHA 已向 %d 个子 Agent 路由任务", len(mergedIDs))
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE conversation_items SET payload_json=?, summary=? WHERE id=?`,
+		encodeJSON(payload), summary, id,
+	); err != nil {
+		return false, err
+	}
+	return true, tx.Commit()
+}
+
 func (s *Store) ConversationPage(
 	ctx context.Context,
 	taskID string,

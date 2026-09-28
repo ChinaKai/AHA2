@@ -192,6 +192,7 @@ type CreateTaskInput struct {
 	WireModel           string
 	CodexAccountID      string
 	ReasoningEffort     string
+	FastMode            bool
 	StreamIdleTimeoutMS *int
 	StreamMaxRetries    *int
 	Filesystem          string
@@ -336,6 +337,7 @@ func (s *Service) CreateTask(ctx context.Context, input CreateTaskInput) (domain
 		CodexAccountID:      accountID,
 		ProxyEnabled:        input.ProxyEnabled,
 		ReasoningEffort:     input.ReasoningEffort,
+		FastMode:            input.FastMode,
 		StreamIdleTimeoutMS: streamIdleTimeoutMS,
 		StreamMaxRetries:    streamMaxRetries,
 		PermissionsJSON:     permissionsJSON(input.Filesystem, input.Approval),
@@ -1806,13 +1808,31 @@ func (s *Service) spawnAgentTurns(ctx context.Context, task domain.Task, parent 
 	}
 	if len(routed) > 0 {
 		now := s.now().UTC()
-		_, _ = s.store.AddConversationItem(ctx, domain.ConversationItem{
-			ID: "conversation-agent-batch-" + parent.ID, TaskID: task.ID, RoundID: parent.RoundID, TurnID: parent.ID,
-			AgentID: "aha", StreamAgentID: "main", FromAgentID: "aha", ToAgentID: "main",
-			RouteKind: "orchestration", Category: "update", Kind: "agent_batch_dispatched",
-			Summary: fmt.Sprintf("AHA 已向 %d 个子 Agent 路由任务", len(routed)),
-			Payload: map[string]any{"parent_turn_id": parent.ID, "agent_ids": routed, "agent_routes": routes}, CreatedAt: now,
-		})
+		// A Turn may submit more than one batch. The card is identified by the
+		// parent Turn, so a later batch belongs on the card that is already there:
+		// inserting a second row for the same Turn collided on that id, and the
+		// discarded error left a card naming fewer agents than were running.
+		merged, mergeErr := s.store.MergeAgentBatchDispatch(ctx, parent.ID, routed, routes)
+		if mergeErr != nil {
+			s.emit(ctx, task.ID, "agent_batch", parent.ID, "agent_batch_card_failed", map[string]any{
+				"parent_turn_id": parent.ID, "error": mergeErr.Error(),
+			})
+		} else if !merged {
+			if _, err := s.store.AddConversationItem(ctx, domain.ConversationItem{
+				ID: "conversation-agent-batch-" + parent.ID, TaskID: task.ID, RoundID: parent.RoundID, TurnID: parent.ID,
+				AgentID: "aha", StreamAgentID: "main", FromAgentID: "aha", ToAgentID: "main",
+				RouteKind: "orchestration", Category: "update", Kind: "agent_batch_dispatched",
+				Summary: fmt.Sprintf("AHA 已向 %d 个子 Agent 路由任务", len(routed)),
+				Payload: map[string]any{"parent_turn_id": parent.ID, "agent_ids": routed, "agent_routes": routes}, CreatedAt: now,
+			}); err != nil {
+				// The sub agents are already queued, so the dispatch stands; the
+				// failure is recorded rather than swallowed, because a silently
+				// missing card is what let this go unnoticed.
+				s.emit(ctx, task.ID, "agent_batch", parent.ID, "agent_batch_card_failed", map[string]any{
+					"parent_turn_id": parent.ID, "error": err.Error(),
+				})
+			}
+		}
 		s.emit(ctx, task.ID, "agent_batch", parent.ID, "agent_batch_dispatched", map[string]any{
 			"round_id": parent.RoundID, "parent_turn_id": parent.ID, "agent_ids": routed,
 		})

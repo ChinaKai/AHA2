@@ -17,6 +17,9 @@ var (
 	ErrAgentTurnInactive  = errors.New("agent turn is not active")
 	ErrRevisionConflict   = errors.New("resource revision conflict")
 	ErrKnowledgeReadOnly  = errors.New("knowledge entry is available through a read-only library binding")
+	// A global skill applies to every Project on this machine, so creating one
+	// is refused outside a Main turn that is acting for the Owner directly.
+	ErrGlobalSkillForbidden = errors.New("global skill creation is not allowed in this Turn")
 )
 
 type AgentCallContext struct {
@@ -42,6 +45,9 @@ type AgentSkillCreateInput struct {
 	Name         string `json:"name"`
 	Description  string `json:"description"`
 	Instructions string `json:"instructions"`
+	// Scope is "project" (the default) or "global". A global skill applies to
+	// every Project, so it is accepted only where agentGlobalSkillAllowed says so.
+	Scope string `json:"scope"`
 }
 
 type AgentRuntimeOption struct {
@@ -80,6 +86,23 @@ func (s *Service) AgentCallContext(ctx context.Context, claims agentapi.Claims, 
 
 func (s *Service) AgentKnowledgePublishAllowed(ctx context.Context, call AgentCallContext) bool {
 	if call.Turn.AgentID != "main" || !knowledgeEnabled(call.Project, call.Task) {
+		return false
+	}
+	if channelContext, err := s.store.ChannelContextForInboxBatch(ctx, call.Turn.InboxBatchID); err == nil {
+		return channelRouteMode(channelContext) == "task_route"
+	}
+	return true
+}
+
+// AgentGlobalSkillAllowed reports whether this Turn may create a skill that
+// reaches beyond its own Project.
+//
+// Global scope applies to every Project on this machine, so it stays Main-only
+// and is refused on a restricted group route, which is not acting for the Owner.
+// It deliberately does not require Knowledge to be enabled: a skill is not
+// knowledge, and gating one on the other would refuse for an unrelated reason.
+func (s *Service) AgentGlobalSkillAllowed(ctx context.Context, call AgentCallContext) bool {
+	if call.Turn.AgentID != "main" {
 		return false
 	}
 	if channelContext, err := s.store.ChannelContextForInboxBatch(ctx, call.Turn.InboxBatchID); err == nil {
@@ -332,9 +355,25 @@ func (s *Service) CreateAgentSkill(ctx context.Context, claims agentapi.Claims, 
 	if input.Name == "" || input.Instructions == "" {
 		return domain.Skill{}, fmt.Errorf("skill name and instructions are required")
 	}
+	scope := strings.ToLower(strings.TrimSpace(input.Scope))
+	if scope == "" {
+		scope = "project"
+	}
+	if scope != "project" && scope != "global" {
+		return domain.Skill{}, fmt.Errorf(`skill scope must be "project" or "global"`)
+	}
+	projectID := call.Project.ID
+	if scope == "global" {
+		if !s.AgentGlobalSkillAllowed(ctx, call) {
+			return domain.Skill{}, ErrGlobalSkillForbidden
+		}
+		// A global skill belongs to no Project; that is how the existing global
+		// skills are stored, and what the scope listings filter on.
+		projectID = ""
+	}
 	now := s.now().UTC()
 	item := domain.Skill{
-		ID: domain.NewID("skill"), Scope: "project", ProjectID: call.Project.ID,
+		ID: domain.NewID("skill"), Scope: scope, ProjectID: projectID,
 		Name: input.Name, Description: input.Description, Instructions: input.Instructions,
 		Version: 1, Status: "active", Enabled: true, CreatedAt: now, UpdatedAt: now,
 	}

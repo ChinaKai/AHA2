@@ -330,6 +330,12 @@ let conversationAutoScrollBlockedUntil = 0;
 // gesture, and only a return to the bottom clears it.
 let conversationFollowBottom = true;
 let composingConversationTouch = false;
+// A wheel has no end event, so it cannot be tracked as a gesture the way a drag
+// can: a flag set by a wheel is never cleared, and every later render would
+// decline to follow. Wheel input opens a short window instead, refreshed by each
+// event, during which a scroll is attributed to the reader.
+const conversationUserScrollWindowMs = 1200;
+let conversationUserScrollUntil = 0;
 let composerFocusWasAtBottom = false;
 const conversationRenderedHTML = new WeakMap<HTMLElement, string>();
 let loadingOlderConversation = false;
@@ -3084,6 +3090,12 @@ function cancelConversationBottomPin(): void {
 // mid-gesture hands the list back to the auto-scroll the reader is fighting.
 function beginConversationGesture(): void {
   composingConversationTouch = true;
+  conversationUserScrollUntil = Date.now() + conversationUserScrollWindowMs;
+  cancelConversationBottomPin();
+}
+
+function noteConversationWheel(): void {
+  conversationUserScrollUntil = Date.now() + conversationUserScrollWindowMs;
   cancelConversationBottomPin();
 }
 
@@ -3973,6 +3985,7 @@ function bindCommon(): void {
       skill_ids: form.getAll("skill_ids").map(String),
       max_agents: Number(payload.max_agents || 3),
       proxy_enabled: proxyEnabledFrom(payload.proxy_enabled),
+      fast_mode: payload.fast_mode === "on",
       agent_capabilities: {
         workspace_read: form.get("cap_workspace_read") === "on",
         task_create: form.get("cap_task_create") === "on",
@@ -4075,6 +4088,7 @@ function bindCommon(): void {
       filesystem: String(form.get("filesystem") || ""),
       approval: String(form.get("approval") || ""),
       proxy_enabled: proxyEnabledFrom(form.get("proxy_enabled")),
+      fast_mode: form.get("fast_mode") === "on",
     });
     await refreshTaskRuntime(state.selectedTask.task.id);
     setMessage("notice", `${agentID} 配置已更新，下一个 Turn 生效`);
@@ -4118,6 +4132,7 @@ function bindCommon(): void {
         stream_idle_timeout_ms: Number(form.get("stream_idle_timeout_seconds") || 120) * 1000,
         stream_max_retries: Number(form.get("stream_max_retries") || 0),
         filesystem: String(form.get("filesystem") || "workspace-write"), approval: String(form.get("approval") || "never"), collaboration_mode: String(form.get("collaboration_mode") || "auto"),
+        fast_mode: form.get("fast_mode") === "on",
         max_agents: Number(form.get("max_agents") || 3), groups,
       });
       element.closest<HTMLDialogElement>("dialog")?.close();
@@ -4736,7 +4751,11 @@ function bindConversationLiveControls(): void {
       // returning to the bottom resumes it. Recording intent here, rather than
       // inferring it from position at render time, is what lets a reader leave
       // the bottom band at all.
-      if (currentTop < previousTop - 2 && composingConversationTouch) conversationFollowBottom = false;
+      // A scroll is the reader's own while a drag is in progress or shortly after
+      // wheel input; anything else is the app restoring a position, which must
+      // not be read as intent.
+      const userDriven = composingConversationTouch || Date.now() < conversationUserScrollUntil;
+      if (currentTop < previousTop - 2 && userDriven) conversationFollowBottom = false;
       else if (conversationIsAtBottom(list)) conversationFollowBottom = true;
       if (currentTop < previousTop && currentTop <= 80 && state.taskConversationHasMore) {
         void loadOlderConversation();
@@ -4746,7 +4765,11 @@ function bindConversationLiveControls(): void {
   }
   if (list && list.dataset.bottomPinBound !== "true") {
     list.dataset.bottomPinBound = "true";
-    for (const eventName of ["wheel", "touchstart", "pointerdown"] as const) {
+    // Wheel is tracked by a window, not as a gesture: it has no end event, so a
+    // gesture flag set here would never be cleared and new messages would stop
+    // following for the rest of the session.
+    list.addEventListener("wheel", noteConversationWheel, {passive: true});
+    for (const eventName of ["touchstart", "pointerdown"] as const) {
       list.addEventListener(eventName, beginConversationGesture, {passive: true});
     }
     // touchend/touchcancel close the touch gesture; pointerup/pointercancel do

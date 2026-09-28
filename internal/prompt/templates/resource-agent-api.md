@@ -90,6 +90,16 @@ Knowledge candidates use:
 
 Feedback uses `{"kind":"helped|stale|wrong"}`.
 
+Creating a Skill uses exactly these fields:
+
+```json
+{"name":"...","description":"...","instructions":"...","scope":"project"}
+```
+
+`scope` is optional and defaults to `project`; the other three are required, and `name` plus `instructions` must be non-empty. `scope:"global"` applies the Skill to every Project on this machine, so it is accepted only in a Main Turn that is not routed through a restricted group; `GET /api/v1/agent/capabilities` reports whether that is allowed as `skill_create_global`. Unknown fields are rejected rather than ignored, and the response names the offending field.
+
+Updating a Skill replaces the complete package: send the current `base_version` together with every file, not just the changed ones.
+
 ## Managed processes
 
 - `GET /api/v1/agent/processes`

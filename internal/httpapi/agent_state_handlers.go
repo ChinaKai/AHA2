@@ -38,6 +38,9 @@ func (s *Server) agentCapabilitiesInfo(writer http.ResponseWriter, request *http
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "capabilities": map[string]bool{
 		"progress": true, "knowledge_read": true, "knowledge_feedback": true,
 		"memory_update": main, "knowledge_publish": knowledgePublish, "knowledge_contribute_bound": knowledgePublish && boundKnowledgeContribute, "skill_create": main, "skill_update": main,
+		// Reported separately so a caller can tell whether a global skill is
+		// possible before sending one and being refused.
+		"skill_create_global": main && s.app.AgentGlobalSkillAllowed(request.Context(), call),
 		"workspace_read":   main && call.Task.AgentCapabilities["workspace_read"],
 		"task_create":      main && call.Task.AgentCapabilities["task_create"],
 		"clone_hardware":   main && call.Task.AgentCapabilities["clone_hardware"],
@@ -71,8 +74,12 @@ func (s *Server) agentProjectRuntimes(writer http.ResponseWriter, request *http.
 func (s *Server) createAgentTask(writer http.ResponseWriter, request *http.Request) {
 	claims, _ := agentClaimsFromContext(request.Context())
 	var payload app.AgentTaskCreateInput
-	if decodeJSON(request, &payload) != nil || strings.TrimSpace(payload.WorkspaceID) == "" || strings.TrimSpace(payload.Title) == "" || strings.TrimSpace(payload.Request) == "" {
-		writeError(writer, http.StatusBadRequest, "agent_task_invalid")
+	if err := decodeJSON(request, &payload); err != nil {
+		writeErrorDetail(writer, http.StatusBadRequest, "agent_task_invalid", err.Error())
+		return
+	}
+	if strings.TrimSpace(payload.WorkspaceID) == "" || strings.TrimSpace(payload.Title) == "" || strings.TrimSpace(payload.Request) == "" {
+		writeErrorDetail(writer, http.StatusBadRequest, "agent_task_invalid", "workspace_id, title and request are required")
 		return
 	}
 	item, turn, err := s.app.CreateAgentTask(request.Context(), claims, payload)
@@ -100,8 +107,8 @@ func (s *Server) updateAgentMemory(writer http.ResponseWriter, request *http.Req
 		Append  app.MemoryPatch  `json:"append"`
 		Replace *app.MemoryPatch `json:"replace"`
 	}
-	if decodeJSON(request, &payload) != nil {
-		writeError(writer, http.StatusBadRequest, "invalid_json")
+	if err := decodeJSON(request, &payload); err != nil {
+		writeErrorDetail(writer, http.StatusBadRequest, "invalid_json", err.Error())
 		return
 	}
 	appendValid := validMemoryPatch(payload.Append)
@@ -133,8 +140,8 @@ func (s *Server) addAgentProgressMessage(writer http.ResponseWriter, request *ht
 		Message       string   `json:"message"`
 		AttachmentIDs []string `json:"attachment_ids"`
 	}
-	if decodeJSON(request, &payload) != nil {
-		writeError(writer, http.StatusBadRequest, "invalid_json")
+	if err := decodeJSON(request, &payload); err != nil {
+		writeErrorDetail(writer, http.StatusBadRequest, "invalid_json", err.Error())
 		return
 	}
 	if err := s.app.AddAgentProgress(request.Context(), claims, payload.Message, payload.AttachmentIDs); err != nil {
@@ -149,8 +156,8 @@ func (s *Server) setAgentChannelReplyDecision(writer http.ResponseWriter, reques
 	var payload struct {
 		Decision string `json:"decision"`
 	}
-	if decodeJSON(request, &payload) != nil {
-		writeError(writer, http.StatusBadRequest, "invalid_json")
+	if err := decodeJSON(request, &payload); err != nil {
+		writeErrorDetail(writer, http.StatusBadRequest, "invalid_json", err.Error())
 		return
 	}
 	if err := s.app.SetAgentChannelReplyDecision(request.Context(), claims, strings.TrimSpace(payload.Decision)); err != nil {
@@ -192,8 +199,12 @@ func (s *Server) submitAgentKnowledge(writer http.ResponseWriter, request *http.
 	var payload struct {
 		Candidates []app.KnowledgeCandidate `json:"candidates"`
 	}
-	if decodeJSON(request, &payload) != nil || len(payload.Candidates) == 0 || len(payload.Candidates) > 20 {
-		writeError(writer, http.StatusBadRequest, "knowledge_candidates_invalid")
+	if err := decodeJSON(request, &payload); err != nil {
+		writeErrorDetail(writer, http.StatusBadRequest, "knowledge_candidates_invalid", err.Error())
+		return
+	}
+	if len(payload.Candidates) == 0 || len(payload.Candidates) > 20 {
+		writeErrorDetail(writer, http.StatusBadRequest, "knowledge_candidates_invalid", "candidates must contain 1 to 20 entries")
 		return
 	}
 	items, proposals, err := s.app.SubmitAgentKnowledgeProposals(request.Context(), claims, payload.Candidates)
@@ -210,8 +221,8 @@ func (s *Server) submitAgentKnowledgeFeedback(writer http.ResponseWriter, reques
 	var payload struct {
 		Kind string `json:"kind"`
 	}
-	if decodeJSON(request, &payload) != nil {
-		writeError(writer, http.StatusBadRequest, "invalid_json")
+	if err := decodeJSON(request, &payload); err != nil {
+		writeErrorDetail(writer, http.StatusBadRequest, "invalid_json", err.Error())
 		return
 	}
 	item, err := s.app.SubmitAgentKnowledgeFeedback(request.Context(), claims, app.KnowledgeFeedback{EntryID: request.PathValue("knowledge"), Kind: payload.Kind})
@@ -229,8 +240,12 @@ func (s *Server) submitAgentCollaboration(writer http.ResponseWriter, request *h
 		Actions      []app.AgentAction `json:"actions"`
 		MainFollowup string            `json:"main_followup"`
 	}
-	if decodeJSON(request, &payload) != nil || len(payload.Actions) == 0 || len(payload.Actions) > 8 {
-		writeError(writer, http.StatusBadRequest, "collaboration_batch_invalid")
+	if err := decodeJSON(request, &payload); err != nil {
+		writeErrorDetail(writer, http.StatusBadRequest, "collaboration_batch_invalid", err.Error())
+		return
+	}
+	if len(payload.Actions) == 0 || len(payload.Actions) > 8 {
+		writeErrorDetail(writer, http.StatusBadRequest, "collaboration_batch_invalid", "actions must contain 1 to 8 entries")
 		return
 	}
 	for index := range payload.Actions {
@@ -260,8 +275,8 @@ func (s *Server) agentSkills(writer http.ResponseWriter, request *http.Request) 
 func (s *Server) createAgentSkill(writer http.ResponseWriter, request *http.Request) {
 	claims, _ := agentClaimsFromContext(request.Context())
 	var payload app.AgentSkillCreateInput
-	if decodeJSON(request, &payload) != nil {
-		writeError(writer, http.StatusBadRequest, "skill_create_invalid")
+	if err := decodeJSON(request, &payload); err != nil {
+		writeErrorDetail(writer, http.StatusBadRequest, "skill_create_invalid", err.Error())
 		return
 	}
 	item, err := s.app.CreateAgentSkill(request.Context(), claims, payload)
@@ -318,7 +333,11 @@ func (s *Server) updateAgentSkill(writer http.ResponseWriter, request *http.Requ
 		Description string             `json:"description"`
 		Files       []domain.SkillFile `json:"files"`
 	}
-	if decodeJSON(request, &payload) != nil || payload.BaseVersion <= 0 || len(payload.Files) == 0 {
+	if err := decodeJSON(request, &payload); err != nil {
+		writeError(writer, http.StatusBadRequest, "skill_update_invalid")
+		return
+	}
+	if payload.BaseVersion <= 0 || len(payload.Files) == 0 {
 		writeError(writer, http.StatusBadRequest, "skill_update_invalid")
 		return
 	}
@@ -358,6 +377,8 @@ func writeAgentControlError(writer http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, app.ErrAgentCallForbidden):
 		writeError(writer, http.StatusForbidden, "agent_operation_forbidden")
+	case errors.Is(err, app.ErrGlobalSkillForbidden):
+		writeJSON(writer, http.StatusForbidden, map[string]any{"ok": false, "error": "global_skill_forbidden", "message": "全局 Skill 会影响本机所有 Project，只能在 Main 且非受限群聊路由的 Turn 中创建；请改用 scope=\"project\""})
 	case errors.Is(err, app.ErrKnowledgeReadOnly):
 		writeJSON(writer, http.StatusForbidden, map[string]any{"ok": false, "error": "knowledge_entry_read_only", "message": "该知识来自外部引用型绑定；请切换为项目协作型，或在来源 Project 中提交修订"})
 	case errors.Is(err, app.ErrAgentTurnInactive):

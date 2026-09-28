@@ -312,6 +312,7 @@ function renderAgentConfigCard(item: ConversationItem): string {
     ...(payload.codex_account_name ? [["账号", String(payload.codex_account_name)]] : []),
     ["推理", String(payload.reasoning_effort || "-")],
     ...(payload.backend === "codex" ? [
+      ["Fast", payload.fast_mode ? "开启" : "关闭"],
       ["SSE 超时", `${Math.round(Number(payload.stream_idle_timeout_ms || 300000) / 1000)} 秒`],
       ["流重试", String(Number(payload.stream_max_retries || 0) || 5)],
     ] : []),

@@ -76,6 +76,7 @@ type TaskAgent struct {
 	Filesystem              string    `json:"filesystem,omitempty"`
 	Approval                string    `json:"approval,omitempty"`
 	ProxyEnabled            bool      `json:"proxy_enabled"`
+	FastMode                bool      `json:"fast_mode"`
 	RuntimeConfigValid      bool      `json:"runtime_config_valid"`
 	RuntimeConfigError      string    `json:"runtime_config_error,omitempty"`
 	UnreadCount             int       `json:"unread_count"`

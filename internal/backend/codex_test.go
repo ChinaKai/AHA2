@@ -114,6 +114,31 @@ func TestCodexArgumentsResumeAndProvider(t *testing.T) {
 	}
 }
 
+// Codex's accelerated tier is requested by name. It must appear only when the
+// Task asked for it: it is billed at a higher rate, so an accidental default
+// would raise cost for every run.
+func TestCodexArgumentsRequestTheFastTierOnlyWhenAsked(t *testing.T) {
+	t.Parallel()
+	base := Request{
+		WorkDir: "/workspace", Model: "gpt-test", ContextWindow: 200000,
+		ReasoningEffort: "high",
+		Environment: map[string]string{
+			"AHA_PROVIDER_ID": "internal", "OPENAI_BASE_URL": "https://example.test/v1",
+			"CODEX_WIRE_API": "responses", "CODEX_ENV_KEY": "OPENAI_API_KEY",
+		},
+	}
+	off := strings.Join(codexArguments(base, ""), " ")
+	if strings.Contains(off, "service_tier") {
+		t.Fatalf("the accelerated tier was requested without being asked for: %s", off)
+	}
+	on := base
+	on.FastMode = true
+	joined := strings.Join(codexArguments(on, ""), " ")
+	if !strings.Contains(joined, `service_tier="priority"`) {
+		t.Fatalf("the accelerated tier was not requested: %s", joined)
+	}
+}
+
 func TestCodexArgumentsInjectConfiguredStreamRecovery(t *testing.T) {
 	t.Parallel()
 	request := Request{

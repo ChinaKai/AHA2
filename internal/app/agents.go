@@ -26,6 +26,7 @@ type UpdateAgentConfigInput struct {
 	Filesystem          string
 	Approval            string
 	ProxyEnabled        *bool
+	FastMode            *bool
 	InheritMain         *bool
 }
 
@@ -134,6 +135,7 @@ func (s *Service) TaskAgents(ctx context.Context, taskID string) ([]domain.TaskA
 		agents[index].StreamMaxRetries = snapshot.StreamMaxRetries
 		agents[index].Filesystem, agents[index].Approval = parsePermissionsJSON(snapshot.PermissionsJSON)
 		agents[index].ProxyEnabled = snapshot.ProxyEnabled
+		agents[index].FastMode = snapshot.FastMode
 		model, modelErr := s.store.Model(ctx, snapshot.ModelID)
 		if modelErr != nil {
 			agents[index].RuntimeConfigError = "模型已删除，请修改模型配置"
@@ -320,6 +322,7 @@ func (s *Service) recordAgentConfigUpdate(ctx context.Context, agent domain.Task
 			"reasoning_effort": agent.ReasoningEffort, "filesystem": agent.Filesystem,
 			"stream_idle_timeout_ms": agent.StreamIdleTimeoutMS, "stream_max_retries": agent.StreamMaxRetries,
 			"approval": agent.Approval, "proxy_enabled": agent.ProxyEnabled, "inherit_main": agent.InheritMain,
+			"fast_mode": agent.FastMode,
 		},
 		CreatedAt: now,
 	})
@@ -393,6 +396,12 @@ func (s *Service) deriveRuntimeSnapshot(
 	if input.ProxyEnabled != nil {
 		proxyEnabled = *input.ProxyEnabled
 	}
+	// Fast is a per-runtime choice like effort or proxy, and an edit that does not
+	// mention it must not silently drop the tier the Task was created with.
+	fastMode := base.FastMode
+	if input.FastMode != nil {
+		fastMode = *input.FastMode
+	}
 	streamIdleTimeoutMS := base.StreamIdleTimeoutMS
 	if input.StreamIdleTimeoutMS != nil {
 		streamIdleTimeoutMS = *input.StreamIdleTimeoutMS
@@ -410,6 +419,7 @@ func (s *Service) deriveRuntimeSnapshot(
 		EnvGroupRevision: envGroup.Revision, CodexAccountID: accountID, ReasoningEffort: effort,
 		StreamIdleTimeoutMS: streamIdleTimeoutMS, StreamMaxRetries: streamMaxRetries,
 		ProxyEnabled:    proxyEnabled,
+		FastMode:        fastMode,
 		PermissionsJSON: permissionsJSON(filesystem, approval), CreatedAt: s.now().UTC(),
 	}, nil
 }

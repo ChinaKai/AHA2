@@ -491,6 +491,7 @@ export interface TaskAgent {
   filesystem?: string;
   approval?: string;
   proxy_enabled: boolean;
+  fast_mode: boolean;
   runtime_config_valid: boolean;
   runtime_config_error?: string;
   unread_count: number;

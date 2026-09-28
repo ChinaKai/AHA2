@@ -122,6 +122,7 @@ type taskTakeoverPayload struct {
 	Filesystem          string                 `json:"filesystem"`
 	Approval            string                 `json:"approval"`
 	ProxyEnabled        bool                   `json:"proxy_enabled"`
+	FastMode            bool                   `json:"fast_mode"`
 	CollaborationMode   string                 `json:"collaboration_mode"`
 	MaxAgents           int                    `json:"max_agents"`
 	Groups              []hardwareGroupPayload `json:"groups"`
@@ -206,7 +207,8 @@ func (s *Server) takeoverTask(writer http.ResponseWriter, request *http.Request)
 		ReasoningEffort:     payload.ReasoningEffort,
 		StreamIdleTimeoutMS: payload.StreamIdleTimeoutMS, StreamMaxRetries: payload.StreamMaxRetries,
 		Filesystem: filesystem, Approval: approval,
-		ProxyEnabled: payload.ProxyEnabled, CollaborationMode: mode, MaxAgents: maxAgents,
+		ProxyEnabled: payload.ProxyEnabled, FastMode: payload.FastMode,
+		CollaborationMode: mode, MaxAgents: maxAgents,
 		KnowledgePolicy: source.Task.KnowledgePolicy,
 	})
 	if err != nil {

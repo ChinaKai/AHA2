@@ -763,7 +763,14 @@ test("built web contains responsive application", async () => {
   assert.match(script, /function stabilizeConversationBottom[\s\S]*requestAnimationFrame[\s\S]*image\.addEventListener\("load"/);
   assert.match(script, /function stabilizeConversationBottom[\s\S]{0,120}const pinVersion = \+\+conversationBottomPinVersion/);
   assert.match(script, /for \(const delay of \[\s*80,\s*240,\s*600\s*\]\)[\s\S]{0,80}setTimeout\(apply,\s*delay\)/);
-  assert.match(script, /\[\s*"wheel",\s*"touchstart",\s*"pointerdown"\s*\][\s\S]*beginConversationGesture/);
+  // Wheel is tracked by a time window rather than as a gesture: it has no end
+  // event, so treating it as one left the flag set forever and new messages
+  // stopped following after any wheel scroll.
+  assert.match(script, /addEventListener\("wheel",\s*noteConversationWheel/);
+  assert.doesNotMatch(script, /\[\s*"wheel",\s*"touchstart"/);
+  assert.match(script, /\[\s*"touchstart",\s*"pointerdown"\s*\][\s\S]*beginConversationGesture/);
+  assert.match(script, /conversationUserScrollUntil\s*=\s*Date\.now\(\)\s*\+\s*conversationUserScrollWindowMs/);
+  assert.match(script, /composingConversationTouch\s*\|\|\s*Date\.now\(\)\s*<\s*conversationUserScrollUntil/);
   // A touch gesture has to be closed explicitly, or the suppression outlives it
   // and new messages stop following for a reader sitting at the bottom.
   assert.match(script, /\[\s*"touchend",\s*"touchcancel",\s*"pointerup",\s*"pointercancel"\s*\][\s\S]*endConversationGesture/);
@@ -771,8 +778,8 @@ test("built web contains responsive application", async () => {
   // bottom test carries an 80px tolerance, so while a reader is inside that band
   // every render snaps them back to the exact bottom and they never get out.
   assert.match(script, /function shouldAutoScrollConversation[\s\S]{0,400}composingConversationTouch\) return false[\s\S]{0,120}conversationFollowBottom\) return false/);
-  assert.match(script, /composingConversationTouch = true;[\s\S]{0,60}cancelConversationBottomPin\(\)/);
-  assert.match(script, /currentTop < previousTop - 2 && composingConversationTouch\) conversationFollowBottom = false/);
+  assert.match(script, /composingConversationTouch = true;[\s\S]{0,160}cancelConversationBottomPin\(\)/);
+  assert.match(script, /currentTop < previousTop - 2 && userDriven\) conversationFollowBottom = false/);
   // Restoring the pre-replace position is right for a still reader but rewinds a
   // drag that is still in progress, so both restore sites must skip it mid-gesture.
   const restoreGuards = script.match(/else if \(!composingConversationTouch\)/g) || [];
@@ -1170,6 +1177,28 @@ test("task agent config selects skills explicitly", async () => {
   }, "main", [], [], [{id: "skill-1", scope: "global", project_id: "", name: "Review", description: "Review changes", instructions: "Review", version: 1, status: "active", enabled: true, source_path: "", created_at: "", updated_at: ""}]);
   assert.match(html, /Task Skills/);
   assert.match(html, /name="skill_ids" value="skill-1" checked/);
+});
+
+// The Agent config dialog is the only place an existing Task's runtime can be
+// edited, so the accelerated tier has to be offered there, seeded from the
+// stored snapshot, and gated on the Backend that is selected right now.
+test("agent config offers the Codex fast tier and follows the backend", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const {renderAgentConfigDialog} = await import(pathToFileURL(resolve(root, "dist", "task_agents.js")));
+  const dialog = (backend, fastMode) => renderAgentConfigDialog({
+    task: {id: "task-1", project_id: "project-1", workspace_id: "workspace-1", title: "Task", original_request: "", current_goal: "", status: "active", isolation: "inplace", collaboration_mode: "auto", max_agents: 3, knowledge_policy: "inherit", skill_ids: [], total_tokens: 0, created_at: "", updated_at: ""},
+    agents: [{agent_id: "main", role: "main", title: "Main", backend, model_source: "env", model_id: "model-1", reasoning_effort: "high", filesystem: "workspace-write", approval: "never", proxy_enabled: false, fast_mode: fastMode}],
+    turns: [], memory: {task_id: "task-1", current_goal: ""},
+  }, "main", [], [], []);
+  const on = dialog("codex", true);
+  assert.match(on, /id="agent-config-fast-mode-row"[^>]*>\s*<input name="fast_mode" type="checkbox" checked>/, "a stored tier is not shown as on");
+  const off = dialog("codex", false);
+  assert.doesNotMatch(off, /name="fast_mode" type="checkbox" checked/, "an unset tier is rendered as on");
+  // Hidden, never disabled: a disabled checkbox drops out of the form, which is
+  // what used to clear a stored tier whenever another Backend was saved.
+  const claude = dialog("claude", true);
+  assert.match(claude, /id="agent-config-fast-mode-row"[^>]* hidden>/, "the switch is not gated on the Backend");
+  assert.doesNotMatch(claude, /name="fast_mode"[^>]*disabled/, "the switch is disabled instead of hidden");
 });
 
 test("round card reports uncached turn input and hides ambiguous cache usage", async () => {

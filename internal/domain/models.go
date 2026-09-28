@@ -324,6 +324,9 @@ type RuntimeConfigSnapshot struct {
 	CodexAccountID      string    `json:"codex_account_id,omitempty"`
 	ProxyEnabled        bool      `json:"proxy_enabled"`
 	ReasoningEffort     string    `json:"reasoning_effort"`
+	// FastMode requests the provider's accelerated service tier. Codex calls it
+	// "Fast" (service_tier=priority): faster, and billed at a higher rate.
+	FastMode            bool      `json:"fast_mode"`
 	StreamIdleTimeoutMS int       `json:"stream_idle_timeout_ms"`
 	StreamMaxRetries    int       `json:"stream_max_retries"`
 	PermissionsJSON     string    `json:"-"`

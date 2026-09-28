@@ -191,12 +191,20 @@ try {
   await page.locator('#task-capabilities-fold input[name="cap_workspace_read"]').setChecked(true);
   assert.match(await page.locator("#task-capabilities-fold [data-fold-count]").innerText(), /已启用 1\/3/);
   await proxy.selectOption("enabled");
+  // The accelerated tier is a checkbox, so it is the one runtime field that
+  // submits the string "on" and has to reach the request as a boolean.
+  const fastTier = page.locator('#task-form input[name="fast_mode"]');
+  assert.equal(await fastTier.count(), 1, "the create panel has no Codex fast switch");
+  assert.equal(await fastTier.isChecked(), false, "the fast switch does not default to off");
+  assert.equal(await fastTier.isVisible(), true, "the fast switch is hidden for a Codex workspace");
+  await fastTier.setChecked(true);
   await page.fill('#task-form input[name="title"]', "New task");
   await page.fill('#task-form textarea[name="request"]', "Do something");
   await page.click('#task-form button[value="immediate"]');
   await page.waitForFunction(() => window.__created !== null, null, {timeout: 8000});
   const created = await page.evaluate(() => window.__created);
   assert.equal(created.proxy_enabled, true, "proxy select was not submitted");
+  assert.equal(created.fast_mode, true, "the fast switch was not submitted as a boolean");
   assert.equal(created.agent_capabilities.workspace_read, true, "the workspace grant was not submitted");
   assert.equal(created.agent_capabilities.task_create, false, "an unchecked grant was submitted as granted");
   assert.equal(created.agent_capabilities.clone_hardware, false, "an unchecked grant was submitted as granted");

@@ -130,6 +130,13 @@ func writeJSON(writer http.ResponseWriter, status int, value any) {
 	_ = json.NewEncoder(writer).Encode(value)
 }
 
+// writeErrorDetail adds the reason to the machine-readable code. A request body
+// that fails to decode has a precise cause -- an unknown field, a wrong type --
+// and callers cannot act on a bare code, so the decoder's message travels with it.
+func writeErrorDetail(writer http.ResponseWriter, status int, code, message string) {
+	writeJSON(writer, status, map[string]any{"ok": false, "error": code, "message": message})
+}
+
 func writeError(writer http.ResponseWriter, status int, code string) {
 	writeJSON(writer, status, map[string]any{"ok": false, "error": code})
 }

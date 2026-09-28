@@ -547,15 +547,27 @@ func boolInt(value bool) int {
 	return 0
 }
 
-func (s *Store) CreateRuntimeSnapshot(ctx context.Context, item domain.RuntimeConfigSnapshot) error {
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO runtime_config_snapshots(id,workspace_id,backend,backend_version,model_id,wire_model,env_group_id,env_group_revision,codex_account_id,proxy_enabled,reasoning_effort,stream_idle_timeout_ms,stream_max_retries,permissions_json,created_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+// snapshotExecer is the slice of *sql.DB and *sql.Tx the snapshot insert needs,
+// so a Task created inside a transaction writes the same columns as a standalone
+// insert. Keeping one column list matters: this insert lived in two places, and
+// the copy in CreateTaskWithSnapshot silently stopped at proxy_enabled.
+type snapshotExecer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+func insertRuntimeSnapshot(ctx context.Context, exec snapshotExecer, item domain.RuntimeConfigSnapshot) error {
+	_, err := exec.ExecContext(ctx, `
+		INSERT INTO runtime_config_snapshots(id,workspace_id,backend,backend_version,model_id,wire_model,env_group_id,env_group_revision,codex_account_id,proxy_enabled,reasoning_effort,fast_mode,stream_idle_timeout_ms,stream_max_retries,permissions_json,created_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		item.ID, item.WorkspaceID, item.Backend, item.BackendVersion, item.ModelID, item.WireModel,
-		item.EnvGroupID, item.EnvGroupRevision, item.CodexAccountID, boolInt(item.ProxyEnabled), item.ReasoningEffort,
+		item.EnvGroupID, item.EnvGroupRevision, item.CodexAccountID, boolInt(item.ProxyEnabled), item.ReasoningEffort, boolInt(item.FastMode),
 		item.StreamIdleTimeoutMS, item.StreamMaxRetries, item.PermissionsJSON, timeString(item.CreatedAt),
 	)
 	return err
+}
+
+func (s *Store) CreateRuntimeSnapshot(ctx context.Context, item domain.RuntimeConfigSnapshot) error {
+	return insertRuntimeSnapshot(ctx, s.db, item)
 }
 
 func sortedKeys(values map[string]string) []string {
@@ -570,8 +582,8 @@ func sortedKeys(values map[string]string) []string {
 func (s *Store) RuntimeSnapshot(ctx context.Context, id string) (domain.RuntimeConfigSnapshot, error) {
 	var item domain.RuntimeConfigSnapshot
 	var createdAt string
-	err := s.db.QueryRowContext(ctx, `SELECT id,workspace_id,backend,backend_version,model_id,wire_model,env_group_id,env_group_revision,codex_account_id,proxy_enabled,reasoning_effort,stream_idle_timeout_ms,stream_max_retries,permissions_json,created_at FROM runtime_config_snapshots WHERE id=?`, id).
-		Scan(&item.ID, &item.WorkspaceID, &item.Backend, &item.BackendVersion, &item.ModelID, &item.WireModel, &item.EnvGroupID, &item.EnvGroupRevision, &item.CodexAccountID, &item.ProxyEnabled, &item.ReasoningEffort, &item.StreamIdleTimeoutMS, &item.StreamMaxRetries, &item.PermissionsJSON, &createdAt)
+	err := s.db.QueryRowContext(ctx, `SELECT id,workspace_id,backend,backend_version,model_id,wire_model,env_group_id,env_group_revision,codex_account_id,proxy_enabled,reasoning_effort,fast_mode,stream_idle_timeout_ms,stream_max_retries,permissions_json,created_at FROM runtime_config_snapshots WHERE id=?`, id).
+		Scan(&item.ID, &item.WorkspaceID, &item.Backend, &item.BackendVersion, &item.ModelID, &item.WireModel, &item.EnvGroupID, &item.EnvGroupRevision, &item.CodexAccountID, &item.ProxyEnabled, &item.ReasoningEffort, &item.FastMode, &item.StreamIdleTimeoutMS, &item.StreamMaxRetries, &item.PermissionsJSON, &createdAt)
 	item.CreatedAt = parseTime(createdAt)
 	return item, err
 }
@@ -587,7 +599,7 @@ func (s *Store) RuntimeSnapshotsByIDs(ctx context.Context, ids []string) (map[st
 	for _, id := range ids {
 		args = append(args, id)
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id,workspace_id,backend,backend_version,model_id,wire_model,env_group_id,env_group_revision,codex_account_id,proxy_enabled,reasoning_effort,stream_idle_timeout_ms,stream_max_retries,permissions_json,created_at FROM runtime_config_snapshots WHERE id IN (`+placeholders(len(ids))+`)`, args...)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,workspace_id,backend,backend_version,model_id,wire_model,env_group_id,env_group_revision,codex_account_id,proxy_enabled,reasoning_effort,fast_mode,stream_idle_timeout_ms,stream_max_retries,permissions_json,created_at FROM runtime_config_snapshots WHERE id IN (`+placeholders(len(ids))+`)`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -595,7 +607,7 @@ func (s *Store) RuntimeSnapshotsByIDs(ctx context.Context, ids []string) (map[st
 	for rows.Next() {
 		var item domain.RuntimeConfigSnapshot
 		var createdAt string
-		if err := rows.Scan(&item.ID, &item.WorkspaceID, &item.Backend, &item.BackendVersion, &item.ModelID, &item.WireModel, &item.EnvGroupID, &item.EnvGroupRevision, &item.CodexAccountID, &item.ProxyEnabled, &item.ReasoningEffort, &item.StreamIdleTimeoutMS, &item.StreamMaxRetries, &item.PermissionsJSON, &createdAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.WorkspaceID, &item.Backend, &item.BackendVersion, &item.ModelID, &item.WireModel, &item.EnvGroupID, &item.EnvGroupRevision, &item.CodexAccountID, &item.ProxyEnabled, &item.ReasoningEffort, &item.FastMode, &item.StreamIdleTimeoutMS, &item.StreamMaxRetries, &item.PermissionsJSON, &createdAt); err != nil {
 			return nil, err
 		}
 		item.CreatedAt = parseTime(createdAt)

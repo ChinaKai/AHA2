@@ -207,6 +207,7 @@ func (s *Server) createTask(writer http.ResponseWriter, request *http.Request) {
 		WireModel           string           `json:"wire_model"`
 		CodexAccountID      string           `json:"codex_account_id"`
 		ReasoningEffort     string           `json:"reasoning_effort"`
+		FastMode            bool             `json:"fast_mode"`
 		StreamIdleTimeoutMS *int             `json:"stream_idle_timeout_ms"`
 		StreamMaxRetries    *int             `json:"stream_max_retries"`
 		Filesystem          string           `json:"filesystem"`
@@ -263,6 +264,7 @@ func (s *Server) createTask(writer http.ResponseWriter, request *http.Request) {
 		Isolation: payload.Isolation, WorktreeDir: payload.WorktreeDir, Backend: payload.Backend,
 		ModelSource: payload.ModelSource, ModelID: payload.ModelID, WireModel: payload.WireModel,
 		CodexAccountID: payload.CodexAccountID, ReasoningEffort: payload.ReasoningEffort,
+		FastMode:            payload.FastMode,
 		StreamIdleTimeoutMS: payload.StreamIdleTimeoutMS, StreamMaxRetries: payload.StreamMaxRetries,
 		Filesystem: filesystem, Approval: approval, CollaborationMode: payload.CollaborationMode,
 		MaxAgents: payload.MaxAgents, ProxyEnabled: payload.ProxyEnabled, KnowledgePolicy: payload.KnowledgePolicy,
@@ -1086,6 +1088,7 @@ func (s *Server) updateAgentConfig(writer http.ResponseWriter, request *http.Req
 		Filesystem          string `json:"filesystem"`
 		Approval            string `json:"approval"`
 		ProxyEnabled        *bool  `json:"proxy_enabled"`
+		FastMode            *bool  `json:"fast_mode"`
 		InheritMain         *bool  `json:"inherit_main"`
 	}
 	if err := decodeJSON(request, &payload); err != nil {
@@ -1098,7 +1101,8 @@ func (s *Server) updateAgentConfig(writer http.ResponseWriter, request *http.Req
 			Backend: payload.Backend, ModelSource: payload.ModelSource, ModelID: payload.ModelID,
 			WireModel: payload.WireModel, CodexAccountID: payload.CodexAccountID, ReasoningEffort: payload.ReasoningEffort,
 			StreamIdleTimeoutMS: payload.StreamIdleTimeoutMS, StreamMaxRetries: payload.StreamMaxRetries,
-			Filesystem: payload.Filesystem, Approval: payload.Approval, ProxyEnabled: payload.ProxyEnabled, InheritMain: payload.InheritMain,
+			Filesystem: payload.Filesystem, Approval: payload.Approval, ProxyEnabled: payload.ProxyEnabled,
+			FastMode: payload.FastMode, InheritMain: payload.InheritMain,
 		},
 	)
 	if err != nil {

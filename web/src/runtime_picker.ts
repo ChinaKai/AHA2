@@ -8,6 +8,7 @@ type RuntimeSelection = {
   wire_model?: string;
   stream_idle_timeout_ms?: number;
   stream_max_retries?: number;
+  fast_mode?: boolean;
 };
 
 export type ClaudeOfficialAvailability = "ready" | "loading" | "not_logged_in" | "unknown" | "unavailable";
@@ -152,7 +153,8 @@ export function runtimeFieldsHTML(
     <label>SSE 无数据超时（秒）<input name="stream_idle_timeout_seconds" type="number" min="30" max="1800" step="1" value="${Math.round(streamIdleTimeoutMS / 1000)}" required></label>
     <label>流中断重试次数<input name="stream_max_retries" type="number" min="1" max="10" step="1" value="${streamMaxRetries}" required></label>
     <div class="field-help" id="${prefix}-codex-stream-official-help" hidden>Codex 官方账号使用 CLI 默认的流超时与重试参数；两项设置仅适用于自定义 Env Provider。</div>
-  </div>`;
+  </div>
+  <label id="${prefix}-fast-mode-row" class="security-setting-toggle runtime-picker${runtimeClass}" ${backend === "codex" ? "" : "hidden"}><input name="fast_mode" type="checkbox" ${selection.fast_mode ? "checked" : ""}><span><strong>Codex 加速档（Fast）</strong><small>约 1.5 倍速度，但按更高费率计费。仅对 Codex 生效。</small></span></label>`;
 }
 
 export function setRuntimeBackends(prefix: string, backends: string[]): void {
@@ -178,6 +180,7 @@ export function syncRuntimeFields(prefix: string, models: Model[], accounts: Cod
   const nativeSelect = document.querySelector<HTMLSelectElement>(`#${prefix}-claude-native-model`);
   const streamSettings = document.querySelector<HTMLElement>(`#${prefix}-codex-stream-settings`);
   const streamOfficialHelp = document.querySelector<HTMLElement>(`#${prefix}-codex-stream-official-help`);
+  const fastModeRow = document.querySelector<HTMLElement>(`#${prefix}-fast-mode-row`);
   if (!sourceField || !sourceSelect || !envField || !modelSelect || !officialFields || !accountSelect || !wireSelect || !nativeFields || !nativeSelect) return;
 
   const supportsOfficial = backend === "codex";
@@ -211,6 +214,10 @@ export function syncRuntimeFields(prefix: string, models: Model[], accounts: Cod
     streamSettings.querySelectorAll<HTMLInputElement>("input").forEach(input => { input.disabled = !supportsOfficial || official; });
     if (streamOfficialHelp) streamOfficialHelp.hidden = !official;
   }
+  // Fast follows the Backend the same way. It stays enabled while hidden rather
+  // than disabled: a disabled checkbox drops out of the form, so saving an edit
+  // made while another Backend is selected would clear a stored tier.
+  if (fastModeRow) fastModeRow.hidden = !supportsOfficial;
   envField.hidden = official || native;
   modelSelect.disabled = official || native;
   modelSelect.required = !official && !native;

@@ -1318,6 +1318,112 @@ func TestMainTurnRetriesOnceAfterBackendIdleTimeout(t *testing.T) {
 	}
 }
 
+// twoBatchExecutor submits two batches inside the SAME main Turn. The
+// collaboration API allows that, and the routed-agent card -- identified by the
+// parent Turn -- has to end up naming every agent that was dispatched.
+type twoBatchExecutor struct {
+	service *Service
+	mu      sync.Mutex
+	done    bool
+}
+
+func (e *twoBatchExecutor) Execute(_ context.Context, request ExecutionRequest, emit func(ExecutionEvent)) (ExecutionResult, error) {
+	if request.Turn.AgentID == "main" && request.Turn.Generation == 0 {
+		e.mu.Lock()
+		first := !e.done
+		e.done = true
+		e.mu.Unlock()
+		if first {
+			claims := agentapi.Claims{TaskID: request.Task.ID, AgentID: request.Turn.AgentID, TurnID: request.Turn.ID}
+			_, _ = e.service.SubmitAgentCollaboration(context.Background(), claims, []AgentAction{
+				{AgentID: "sub-001", Title: "First", Assignment: "first assignment", Required: true},
+			}, "")
+			// A second call in the same Turn, as a Main agent may legitimately make.
+			_, _ = e.service.SubmitAgentCollaboration(context.Background(), claims, []AgentAction{
+				{AgentID: "sub-002", Title: "Second", Assignment: "second assignment", Required: true},
+			}, "")
+		}
+	}
+	emit(ExecutionEvent{Type: "agent_message", Data: map[string]any{"text": "reply " + request.Turn.AgentID}})
+	return ExecutionResult{Reply: "reply " + request.Turn.AgentID, ProviderSessionID: request.Turn.AgentID + "-session"}, nil
+}
+
+func TestSecondBatchInTheSameTurnStaysOnTheRoutedAgentCard(t *testing.T) {
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	secretStore, err := secrets.Open(filepath.Join(t.TempDir(), "secrets.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	project := domain.Project{ID: "project-batch", Name: "Batch", CreatedAt: now, UpdatedAt: now}
+	workspace := domain.Workspace{
+		ID: "workspace-batch", ProjectID: project.ID, Name: "local", Locality: "local",
+		Transport: "native", RootPath: t.TempDir(), Health: "ready", CreatedAt: now, UpdatedAt: now,
+	}
+	envGroup := domain.EnvGroup{
+		ID: "env-batch", Name: "stub", ProviderID: "stub", Backend: "stub", Revision: 1,
+		Environment: map[string]string{}, SecretRefs: map[string]string{}, CreatedAt: now, UpdatedAt: now,
+	}
+	model := domain.Model{
+		ID: "model-batch", DisplayName: "Stub", ProviderID: "stub", Backend: "stub", WireModel: "stub",
+		DefaultEnvGroupID: envGroup.ID, CreatedAt: now, UpdatedAt: now,
+	}
+	for _, operation := range []func() error{
+		func() error { return database.CreateProject(ctx, project) },
+		func() error { return database.CreateWorkspace(ctx, workspace) },
+		func() error { return database.UpsertEnvGroup(ctx, envGroup) },
+		func() error { return database.UpsertModel(ctx, model) },
+	} {
+		if err := operation(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	executor := &twoBatchExecutor{}
+	service := NewService(database, secretStore, executor)
+	executor.service = service
+	task, err := service.CreateTask(ctx, CreateTaskInput{
+		ProjectID: project.ID, WorkspaceID: workspace.ID, Title: "two batches",
+		Request: "delegate twice", ModelID: model.ID, CollaborationMode: "auto", MaxAgents: 3,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.SubmitMessage(ctx, task.ID, task.OriginalRequest); err != nil {
+		t.Fatal(err)
+	}
+	waitForTask(t, database, task.ID, domain.TaskWaitingUser)
+
+	page, err := database.ConversationPageForAgent(ctx, task.ID, "main", 0, 0, 200, []string{"update"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cards []domain.ConversationItem
+	for _, item := range page.Items {
+		if item.Kind == "agent_batch_dispatched" {
+			cards = append(cards, item)
+		}
+	}
+	if len(cards) != 1 {
+		t.Fatalf("expected one routed-agent card for the Turn, got %d", len(cards))
+	}
+	raw, _ := cards[0].Payload["agent_ids"].([]any)
+	names := map[string]bool{}
+	for _, value := range raw {
+		names[fmt.Sprint(value)] = true
+	}
+	if !names["sub-001"] || !names["sub-002"] {
+		t.Fatalf("the card does not name every dispatched agent: %#v", raw)
+	}
+	if summary := cards[0].Summary; !strings.Contains(summary, "2 个") {
+		t.Fatalf("the card summary does not count both agents: %q", summary)
+	}
+}
+
 func waitForTask(t *testing.T, database *store.Store, taskID string, expected domain.TaskStatus) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)

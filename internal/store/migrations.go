@@ -2368,5 +2368,17 @@ func (s *Store) migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(69, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
 		return fmt.Errorf("record schema v69: %w", err)
 	}
+	var hasV70 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=70)`).Scan(&hasV70)
+	if !hasV70 {
+		// Defaults to off: the accelerated tier is billed at a higher rate, so it
+		// must be a deliberate choice rather than something an upgrade switches on.
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE runtime_config_snapshots ADD COLUMN fast_mode INTEGER NOT NULL DEFAULT 0`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("apply schema v70 fast mode: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(70, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v70: %w", err)
+	}
 	return nil
 }
