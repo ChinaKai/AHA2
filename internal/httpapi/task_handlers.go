@@ -73,6 +73,15 @@ func (s *Server) listTasks(writer http.ResponseWriter, request *http.Request) {
 	writeJSON(writer, http.StatusOK, response)
 }
 
+func (s *Server) listTaskCloneSources(writer http.ResponseWriter, request *http.Request) {
+	tasks, err := s.store.ListTaskCloneSources(request.Context())
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, "list_task_clone_sources_failed")
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "tasks": tasks})
+}
+
 func (s *Server) applyTaskTokenTotals(ctx context.Context, tasks []domain.Task) {
 	ids := make([]string, 0, len(tasks))
 	for _, task := range tasks {
@@ -219,17 +228,46 @@ func (s *Server) createTask(writer http.ResponseWriter, request *http.Request) {
 		SkillIDs            []string         `json:"skill_ids"`
 		AgentCapabilities   *map[string]bool `json:"agent_capabilities"`
 		StartMode           string           `json:"start_mode"`
+		SourceTaskID        string           `json:"source_task_id"`
+		CloneHardware       bool             `json:"clone_hardware"`
+		CloneChannel        bool             `json:"clone_channel"`
 	}
 	if err := decodeJSON(request, &payload); err != nil {
 		writeError(writer, http.StatusBadRequest, "invalid_json")
 		return
 	}
-	if workspace, err := s.store.Workspace(request.Context(), payload.WorkspaceID); err == nil && workspace.ReadOnly {
+	workspace, workspaceErr := s.store.Workspace(request.Context(), payload.WorkspaceID)
+	if workspaceErr == nil && workspace.ReadOnly {
 		writeJSON(writer, http.StatusForbidden, map[string]any{"ok": false, "error": "workspace_read_only", "message": "该 Workspace 属于其他设备，只能查看同步历史"})
 		return
 	}
 	if s.rejectRetiredChannelWorkspaceWrite(writer, request, payload.WorkspaceID) {
 		return
+	}
+	sourceTaskID := strings.TrimSpace(payload.SourceTaskID)
+	if (payload.CloneHardware || payload.CloneChannel) && sourceTaskID == "" {
+		writeError(writer, http.StatusBadRequest, "clone_source_required")
+		return
+	}
+	if sourceTaskID != "" {
+		sourceTask, sourceErr := s.store.Task(request.Context(), sourceTaskID)
+		if sourceErr != nil {
+			writeError(writer, http.StatusBadRequest, "clone_source_not_found")
+			return
+		}
+		sourceWorkspace, sourceWorkspaceErr := s.store.Workspace(request.Context(), sourceTask.WorkspaceID)
+		if sourceWorkspaceErr != nil || sourceWorkspace.Locality != "local" || sourceWorkspace.ReadOnly {
+			writeError(writer, http.StatusBadRequest, "clone_source_not_local")
+			return
+		}
+		if payload.CloneHardware && (workspaceErr != nil || workspace.Locality != "local" || workspace.ReadOnly) {
+			writeError(writer, http.StatusBadRequest, "clone_target_not_local")
+			return
+		}
+		if payload.CloneChannel && s.store.IsManagedChannelTask(request.Context(), sourceTaskID) {
+			writeError(writer, http.StatusBadRequest, "clone_source_channel_unavailable")
+			return
+		}
 	}
 	filesystem := strings.TrimSpace(payload.Filesystem)
 	if filesystem == "" {
@@ -274,23 +312,42 @@ func (s *Server) createTask(writer http.ResponseWriter, request *http.Request) {
 		writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "create_task_failed", "message": err.Error()})
 		return
 	}
+	cloneWarnings := []string{}
+	if payload.CloneHardware {
+		if err := s.app.CloneTaskHardware(request.Context(), sourceTaskID, item.ID); err != nil {
+			cloneWarnings = append(cloneWarnings, "硬件配置复制失败："+err.Error())
+		}
+	}
+	if payload.CloneChannel {
+		if s.channels == nil {
+			cloneWarnings = append(cloneWarnings, "渠道配置复制失败：渠道服务不可用")
+		} else {
+			session, _ := sessionFromContext(request.Context())
+			if _, _, err := s.channels.HandoffTaskChannelRoute(request.Context(), session.OwnerID, sourceTaskID, item.ID); err != nil {
+				cloneWarnings = append(cloneWarnings, "渠道配置复制失败："+err.Error())
+			}
+		}
+	}
 	startMode := strings.TrimSpace(payload.StartMode)
 	if startMode == "" {
 		startMode = "immediate"
 	}
-	s.audit(request, "task.create", "task", item.ID, map[string]any{"project_id": item.ProjectID, "start_mode": startMode})
+	s.audit(request, "task.create", "task", item.ID, map[string]any{
+		"project_id": item.ProjectID, "start_mode": startMode, "source_task_id": sourceTaskID,
+		"clone_hardware": payload.CloneHardware, "clone_channel": payload.CloneChannel,
+	})
 	if startMode == "manual" {
-		writeJSON(writer, http.StatusCreated, map[string]any{"ok": true, "task": item, "started": false})
+		writeJSON(writer, http.StatusCreated, map[string]any{"ok": true, "task": item, "started": false, "clone_warnings": cloneWarnings})
 		return
 	}
 	turn, startErr := s.app.SubmitMessage(request.Context(), item.ID, item.OriginalRequest)
 	if startErr != nil {
 		writeJSON(writer, http.StatusCreated, map[string]any{
-			"ok": true, "task": item, "start_error": startErr.Error(),
+			"ok": true, "task": item, "start_error": startErr.Error(), "clone_warnings": cloneWarnings,
 		})
 		return
 	}
-	writeJSON(writer, http.StatusCreated, map[string]any{"ok": true, "task": item, "turn": turn, "started": true})
+	writeJSON(writer, http.StatusCreated, map[string]any{"ok": true, "task": item, "turn": turn, "started": true, "clone_warnings": cloneWarnings})
 }
 
 func (s *Server) startTask(writer http.ResponseWriter, request *http.Request) {
@@ -355,15 +412,17 @@ func (s *Server) taskDetail(writer http.ResponseWriter, request *http.Request) {
 	agents, _ := s.app.TaskAgents(request.Context(), taskID)
 	memory, _ := s.store.TaskMemory(request.Context(), taskID)
 	hardwareGroups, _ := s.store.HardwareGroups(request.Context(), taskID)
+	hardwareResources, _ := s.store.HardwareResources(request.Context())
 	now := time.Now().UTC()
 	applyRoundTiming(&round, now)
 	applyTurnTimings(turns, now)
 	s.applyTurnContextUsage(request.Context(), turns)
 	writeJSON(writer, http.StatusOK, map[string]any{
 		"ok": true, "task": task, "latest_round": round, "turns": turns, "agents": agents, "memory": memory,
-		"hardware":       hardwareGroups,
-		"event_cursor":   s.store.MaxEventSequence(request.Context(), taskID),
-		"server_time_ms": now.UnixMilli(),
+		"hardware":           hardwareGroups,
+		"hardware_resources": hardwareResources,
+		"event_cursor":       s.store.MaxEventSequence(request.Context(), taskID),
+		"server_time_ms":     now.UnixMilli(),
 	})
 }
 

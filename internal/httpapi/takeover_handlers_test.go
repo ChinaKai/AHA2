@@ -192,14 +192,28 @@ func TestRemoteConfigurationIsReadOnlyUntilExplicitTakeover(t *testing.T) {
 		Hardware []domain.HardwareGroup `json:"hardware"`
 	}
 	decodeResponse(t, response, &taskResponse)
-	if response.StatusCode != http.StatusCreated || taskResponse.Task.ID == publicTaskID || taskResponse.Task.ReadOnly || taskResponse.Task.WorkspaceID != localWorkspace.ID || len(taskResponse.Hardware) != 1 {
+	if response.StatusCode != http.StatusCreated || taskResponse.Task.ID == publicTaskID || taskResponse.Task.ReadOnly || taskResponse.Task.WorkspaceID != localWorkspace.ID || len(taskResponse.Hardware) != 2 {
 		t.Fatalf("task takeover status=%d payload=%#v", response.StatusCode, taskResponse)
 	}
-	localHardware, err := database.HardwareGroup(ctx, taskResponse.Task.ID, "board")
-	if err != nil || localHardware.Serial.Device != "COM9" || localHardware.Network.Host != "192.0.2.9" || localHardware.Access != domain.HardwareAccessReadWrite || localHardware.CredentialRef == "" {
+	localHardware, err := database.HardwareGroups(ctx, taskResponse.Task.ID)
+	if err != nil || len(localHardware) != 2 {
 		t.Fatalf("local hardware takeover=%#v err=%v", localHardware, err)
 	}
-	if value, ok := secretStore.Get(localHardware.CredentialRef); !ok || value != "synced-hardware-password" {
+	var serialHardware, networkHardware domain.HardwareGroup
+	for _, group := range localHardware {
+		switch group.Mode {
+		case domain.HardwareModeSerial:
+			serialHardware = group
+		case domain.HardwareModeNetwork:
+			networkHardware = group
+		}
+	}
+	if serialHardware.Serial.Device != "COM9" || networkHardware.Network.Host != "192.0.2.9" ||
+		serialHardware.Access != domain.HardwareAccessReadWrite || networkHardware.Access != domain.HardwareAccessReadWrite ||
+		serialHardware.CredentialRef == "" || serialHardware.CredentialRef != networkHardware.CredentialRef {
+		t.Fatalf("split local hardware takeover=%#v", localHardware)
+	}
+	if value, ok := secretStore.Get(serialHardware.CredentialRef); !ok || value != "synced-hardware-password" {
 		t.Fatal("local hardware credential was not stored separately")
 	}
 	remoteAfter, err := database.RemoteTaskMirror(ctx, publicTaskID)

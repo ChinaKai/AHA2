@@ -279,8 +279,18 @@ func (s *Server) startChannelOnboarding(writer http.ResponseWriter, request *htt
 		writeError(writer, http.StatusBadRequest, "idempotency_key_required")
 		return
 	}
+	var payload struct {
+		PermissionIDs []string `json:"permission_ids"`
+	}
+	if err := decodeJSON(request, &payload); err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_json")
+		return
+	}
 	session, _ := sessionFromContext(request.Context())
-	item, err := s.channels.StartOnboarding(request.Context(), session.OwnerID, session.ID, request.PathValue("id"), idempotencyKey)
+	item, err := s.channels.StartOnboarding(
+		request.Context(), session.OwnerID, session.ID, request.PathValue("id"), idempotencyKey,
+		payload.PermissionIDs,
+	)
 	if err != nil {
 		writeChannelError(writer, err, "start_channel_onboarding_failed")
 		return
@@ -288,6 +298,45 @@ func (s *Server) startChannelOnboarding(writer http.ResponseWriter, request *htt
 	writer.Header().Set("Cache-Control", "private, no-store")
 	s.audit(request, "channel.onboarding.start", "channel_instance", item.InstanceID, nil)
 	writeJSON(writer, http.StatusAccepted, map[string]any{"ok": true, "onboarding": item})
+}
+
+func (s *Server) channelOnboardingOptions(writer http.ResponseWriter, request *http.Request) {
+	if s.channels == nil {
+		writeError(writer, http.StatusServiceUnavailable, "channels_unavailable")
+		return
+	}
+	session, _ := sessionFromContext(request.Context())
+	options, err := s.channels.OnboardingOptions(request.Context(), session.OwnerID, request.PathValue("id"))
+	if err != nil {
+		writeChannelError(writer, err, "get_channel_onboarding_options_failed")
+		return
+	}
+	writer.Header().Set("Cache-Control", "private, no-store")
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "options": options})
+}
+
+func (s *Server) resetChannelRuntimeMenus(writer http.ResponseWriter, request *http.Request) {
+	if s.channels == nil {
+		writeError(writer, http.StatusServiceUnavailable, "channels_unavailable")
+		return
+	}
+	revision, ok := channelIfMatch(writer, request)
+	if !ok {
+		return
+	}
+	idempotencyKey := strings.TrimSpace(request.Header.Get("Idempotency-Key"))
+	if idempotencyKey == "" {
+		writeError(writer, http.StatusBadRequest, "idempotency_key_required")
+		return
+	}
+	session, _ := sessionFromContext(request.Context())
+	command, err := s.channels.ResetRuntimeMenus(request.Context(), session.OwnerID, request.PathValue("id"), idempotencyKey, revision)
+	if err != nil {
+		writeChannelError(writer, err, "reset_channel_runtime_menus_failed")
+		return
+	}
+	s.audit(request, "channel.runtime_menus.reset", "channel_instance", request.PathValue("id"), map[string]any{"command_id": command.ID})
+	writeJSON(writer, http.StatusAccepted, map[string]any{"ok": true, "command": command})
 }
 
 func (s *Server) channelOnboarding(writer http.ResponseWriter, request *http.Request) {

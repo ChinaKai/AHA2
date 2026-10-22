@@ -592,8 +592,8 @@ func (s *Service) submitAgentMessage(ctx context.Context, taskID, agentID, conte
 	if err != nil {
 		return domain.Turn{}, fmt.Errorf("运行配置不存在，请修改 %s 配置", agentID)
 	}
-	if _, err := s.store.Model(ctx, snapshot.ModelID); err != nil {
-		return domain.Turn{}, fmt.Errorf("模型已删除，请修改 %s 模型配置", agentID)
+	if _, unavailable := s.runtimeSnapshotAvailability(ctx, snapshot); unavailable != "" {
+		return domain.Turn{}, fmt.Errorf("%s，请修改 %s 模型配置", unavailable, agentID)
 	}
 	if task.Status == domain.TaskCompleted || task.Status == domain.TaskCancelled || task.Status == domain.TaskBlocked {
 		return domain.Turn{}, fmt.Errorf("task is %s", task.Status)
@@ -805,9 +805,9 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 		s.failTurn(ctx, &turn, task, err)
 		return
 	}
-	model, err := s.store.Model(ctx, snapshot.ModelID)
-	if err != nil {
-		s.failTurn(ctx, &turn, task, err)
+	model, unavailable := s.runtimeSnapshotAvailability(ctx, snapshot)
+	if unavailable != "" {
+		s.failTurn(ctx, &turn, task, fmt.Errorf("%s，请修改 %s 模型配置", unavailable, turn.AgentID))
 		return
 	}
 	envGroup, err := s.store.EnvGroup(ctx, snapshot.EnvGroupID)

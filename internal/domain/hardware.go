@@ -17,6 +17,7 @@ const (
 	HardwareProtocolTelnet = "telnet"
 	HardwareProtocolRaw    = "raw"
 	HardwareProtocolSSH    = "ssh"
+	HardwareProtocolADB    = "adb"
 
 	HardwareSSHAuthAuto     = "auto"
 	HardwareSSHAuthPassword = "password"
@@ -35,9 +36,46 @@ type HardwareNetworkConfig struct {
 	SSHAuth  string `json:"ssh_auth"`
 }
 
+type HardwareResource struct {
+	ID                 string                `json:"id"`
+	Description        string                `json:"description"`
+	Mode               string                `json:"mode"`
+	Serial             HardwareSerialConfig  `json:"serial"`
+	Network            HardwareNetworkConfig `json:"network"`
+	Username           string                `json:"username,omitempty"`
+	CredentialRef      string                `json:"-"`
+	PasswordConfigured bool                  `json:"password_configured"`
+	ADBPairedAt        string                `json:"adb_paired_at,omitempty"`
+	Access             string                `json:"access"`
+	BindingCount       int                   `json:"binding_count"`
+	CreatedAt          time.Time             `json:"created_at"`
+	UpdatedAt          time.Time             `json:"updated_at"`
+}
+
+type TaskHardwareBinding struct {
+	TaskID     string    `json:"task_id"`
+	ID         string    `json:"id"`
+	ResourceID string    `json:"resource_id"`
+	Position   int       `json:"position"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
+}
+
+func (item HardwareResource) Supports(transport string) bool {
+	switch transport {
+	case HardwareTransportSerial:
+		return (item.Mode == HardwareModeSerial || item.Mode == HardwareModeBoth) && item.Serial.Device != ""
+	case HardwareTransportNetwork:
+		return (item.Mode == HardwareModeNetwork || item.Mode == HardwareModeBoth) && item.Network.Host != ""
+	default:
+		return false
+	}
+}
+
 type HardwareGroup struct {
 	TaskID             string                `json:"task_id"`
 	ID                 string                `json:"id"`
+	ResourceID         string                `json:"resource_id,omitempty"`
 	Position           int                   `json:"position"`
 	Description        string                `json:"description"`
 	Mode               string                `json:"mode"`

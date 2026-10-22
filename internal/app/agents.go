@@ -136,15 +136,32 @@ func (s *Service) TaskAgents(ctx context.Context, taskID string) ([]domain.TaskA
 		agents[index].Filesystem, agents[index].Approval = parsePermissionsJSON(snapshot.PermissionsJSON)
 		agents[index].ProxyEnabled = snapshot.ProxyEnabled
 		agents[index].FastMode = snapshot.FastMode
-		model, modelErr := s.store.Model(ctx, snapshot.ModelID)
-		if modelErr != nil {
-			agents[index].RuntimeConfigError = "模型已删除，请修改模型配置"
+		model, unavailable := s.runtimeSnapshotAvailability(ctx, snapshot)
+		if unavailable != "" {
+			agents[index].RuntimeConfigError = unavailable + "，请修改模型配置"
 			continue
 		}
 		agents[index].ModelName = model.DisplayName
 		agents[index].RuntimeConfigValid = true
 	}
 	return agents, nil
+}
+
+// runtimeSnapshotAvailability identifies the two resources that can be removed
+// while preserving a historical Task snapshot: its model and its Codex account.
+// A missing account must invalidate the Agent even though the account's synthetic
+// model row may still be shared by another account.
+func (s *Service) runtimeSnapshotAvailability(ctx context.Context, snapshot domain.RuntimeConfigSnapshot) (domain.Model, string) {
+	model, err := s.store.Model(ctx, snapshot.ModelID)
+	if err != nil {
+		return domain.Model{}, "模型已删除"
+	}
+	if snapshot.CodexAccountID != "" {
+		if _, err := s.store.CodexAccount(ctx, snapshot.CodexAccountID); err != nil {
+			return domain.Model{}, "Codex 账号已删除"
+		}
+	}
+	return model, ""
 }
 
 func (s *Service) UpdateTaskCollaboration(ctx context.Context, taskID, mode string, maxAgents int) (domain.Task, error) {

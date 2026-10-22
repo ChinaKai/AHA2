@@ -271,6 +271,7 @@ func (s *Server) takeoverTask(writer http.ResponseWriter, request *http.Request)
 		writeError(writer, http.StatusInternalServerError, "hardware_takeover_failed")
 		return
 	}
+	groups, _ = s.store.HardwareGroups(request.Context(), created.ID)
 	s.audit(request, "task.takeover", "task", created.ID, map[string]any{"source_task_id": source.SourceTaskID, "owner_device_id": source.Task.OwnerDeviceID})
 	writeJSON(writer, http.StatusCreated, map[string]any{"ok": true, "task": created, "hardware": groups, "source_task_id": source.SourceTaskID})
 }

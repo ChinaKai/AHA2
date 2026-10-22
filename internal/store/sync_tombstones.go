@@ -91,11 +91,13 @@ func deleteSharedRow(ctx context.Context, tx *sql.Tx, objectType, objectID strin
 	case "skill":
 		result, err = tx.ExecContext(ctx, `DELETE FROM skills WHERE id=?`, objectID)
 	case "provider":
-		result, err = tx.ExecContext(ctx, `DELETE FROM providers WHERE id=?`, objectID)
+		result, err = tx.ExecContext(ctx, `UPDATE providers SET deleted_at=?,updated_at=? WHERE id=? AND deleted_at=''`, timeString(deletedAt), timeString(deletedAt), objectID)
 	case "model":
 		result, err = tx.ExecContext(ctx, `UPDATE models SET deleted_at=?,updated_at=? WHERE id=? AND deleted_at=''`, timeString(deletedAt), timeString(deletedAt), objectID)
 	case "env_group":
 		result, err = tx.ExecContext(ctx, `DELETE FROM env_groups WHERE id=?`, objectID)
+	case "codex_account":
+		result, err = tx.ExecContext(ctx, `DELETE FROM codex_accounts WHERE id=?`, objectID)
 	case "prompt_override":
 		result, err = tx.ExecContext(ctx, `DELETE FROM prompt_template_overrides WHERE id=?`, objectID)
 	default:

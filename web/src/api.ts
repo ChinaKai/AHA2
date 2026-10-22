@@ -12,6 +12,7 @@ import type {
   ChannelDelivery,
   ChannelHandoff,
   ChannelInstance,
+  ChannelOnboardingOptions,
   ChannelOnboardingSession,
   ChannelPlugin,
   ChannelPurgePreview,
@@ -45,6 +46,7 @@ import type {
   ConversationPage,
   HardwareGroup,
   HardwareIOPage,
+  HardwareResource,
   HardwareTerminalStatus,
   SerialPort,
 	SSHHostKeyInfo,
@@ -263,10 +265,21 @@ class APIClient {
     });
   }
 
-  startChannelOnboarding(id: string): Promise<{onboarding: ChannelOnboardingSession}> {
+  channelOnboardingOptions(id: string): Promise<{options: ChannelOnboardingOptions}> {
+    return this.request(`/api/v1/channel-instances/${encodeURIComponent(id)}/onboarding-options`);
+  }
+
+  resetChannelRuntimeMenus(id: string, revision: number): Promise<{command: {id: string; kind: string; state: string}}> {
+    const idempotencyKey = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
+    return this.request(`/api/v1/channel-instances/${encodeURIComponent(id)}/runtime-menus/reset`, {
+      method: "POST", headers: {"If-Match": `"${revision}"`, "Idempotency-Key": idempotencyKey}, body: "{}",
+    });
+  }
+
+  startChannelOnboarding(id: string, payload: {permission_ids: string[]}): Promise<{onboarding: ChannelOnboardingSession}> {
     const idempotencyKey = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
     return this.request(`/api/v1/channel-instances/${encodeURIComponent(id)}/onboarding-sessions`, {
-      method: "POST", headers: {"Idempotency-Key": idempotencyKey}, body: "{}",
+      method: "POST", headers: {"Idempotency-Key": idempotencyKey}, body: JSON.stringify(payload),
     });
   }
 
@@ -485,7 +498,11 @@ class APIClient {
     return this.request(`/api/v1/tasks${query.size ? `?${query}` : ""}`);
   }
 
-  createTask(payload: Record<string, unknown>): Promise<{task: Task; turn?: {id: string}; started?: boolean; start_error?: string}> {
+  taskCloneSources(): Promise<{tasks: Task[]}> {
+    return this.request("/api/v1/task-clone-sources");
+  }
+
+  createTask(payload: Record<string, unknown>): Promise<{task: Task; turn?: {id: string}; started?: boolean; start_error?: string; clone_warnings?: string[]}> {
     return this.request("/api/v1/tasks", {method: "POST", body: JSON.stringify(payload)});
   }
 
@@ -630,9 +647,41 @@ class APIClient {
     return this.request("/api/v1/hardware/serial-ports");
   }
 
+  hardwareResources(): Promise<{resources: HardwareResource[]}> {
+    return this.request("/api/v1/hardware-resources");
+  }
+
+  createHardwareResource(payload: Record<string, unknown>): Promise<{resource: HardwareResource}> {
+    return this.request("/api/v1/hardware-resources", {
+      method: "POST", body: JSON.stringify(payload),
+    });
+  }
+
+  updateHardwareResource(id: string, payload: Record<string, unknown>): Promise<{resource: HardwareResource}> {
+    return this.request(`/api/v1/hardware-resources/${encodeURIComponent(id)}`, {
+      method: "PUT", body: JSON.stringify(payload),
+    });
+  }
+
+  deleteHardwareResource(id: string): Promise<{deleted_bindings: number}> {
+    return this.request(`/api/v1/hardware-resources/${encodeURIComponent(id)}`, {method: "DELETE"});
+  }
+
+  pairHardwareADB(id: string, pairingPort: number, pairingCode: string): Promise<{message: string; output: string; resource: HardwareResource}> {
+    return this.request(`/api/v1/hardware-resources/${encodeURIComponent(id)}/adb/pair`, {
+      method: "POST", body: JSON.stringify({pairing_port: pairingPort, pairing_code: pairingCode}),
+    });
+  }
+
   updateTaskHardware(id: string, groups: Record<string, unknown>[]): Promise<{groups: HardwareGroup[]}> {
     return this.request(`/api/v1/tasks/${id}/hardware`, {
       method: "PUT", body: JSON.stringify({groups}),
+    });
+  }
+
+  updateTaskHardwareBindings(id: string, bindings: Record<string, unknown>[]): Promise<{groups: HardwareGroup[]; resources: HardwareResource[]}> {
+    return this.request(`/api/v1/tasks/${encodeURIComponent(id)}/hardware-bindings`, {
+      method: "PUT", body: JSON.stringify({bindings}),
     });
   }
 

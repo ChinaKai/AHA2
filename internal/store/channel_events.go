@@ -287,7 +287,7 @@ func channelGroupReplyStateTx(ctx context.Context, tx *sql.Tx, taskID, roundID, 
 		JOIN channel_instances instance ON instance.id=conversation.instance_id
 		WHERE conversation.id=?`,
 		domain.DefaultChannelBotDialogueMaxTurns, conversationID).Scan(&state.maxTurns)
-	if state.maxTurns < 1 || state.maxTurns > 50 {
+	if state.maxTurns < 1 || state.maxTurns > domain.MaxChannelBotDialogueMaxTurns {
 		state.maxTurns = domain.DefaultChannelBotDialogueMaxTurns
 	}
 	if state.isBot {

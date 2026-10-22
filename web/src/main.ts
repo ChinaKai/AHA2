@@ -5,6 +5,7 @@ import {bindChannels, exportRetiredChannelInstance, purgeRetiredChannelInstance,
 import {icon} from "./icons.js";
 import {bindKnowledgeWorkspace, renderKnowledgeWorkspace} from "./knowledge_workspace.js";
 import {bindHardwarePanel, refreshHardwarePanel, stopHardwarePanel} from "./hardware_panel.js";
+import {bindHardwareResources, renderHardwareResources} from "./hardware_resources.js";
 import {bindDesktopPanel, desktopPanelInteracting, refreshDesktopPanel, stopDesktopPanel} from "./desktop_panel.js";
 import {renderMarkdown} from "./markdown.js";
 import {bindPromptAdmin, loadPromptCatalog, renderPromptAdmin} from "./prompt_admin.js";
@@ -47,6 +48,7 @@ import type {
   ConversationItem,
   DetectedModel,
   EnvGroup,
+  HardwareResource,
   Knowledge,
   KnowledgeLibrary,
   NetworkSettings,
@@ -71,8 +73,8 @@ import type {
   TaskFacetCounts,
   Workspace,
 } from "./types.js";
-type View = "projects" | "channels" | "models" | "tasks" | "knowledge" | "prompts" | "proxy" | "sync" | "advanced";
-type ResourceKey = "projects" | "workspaces" | "tasks" | "system" | "providers" | "models" | "env" | "accounts" | "skills" | "channels" | "knowledge" | "proxy" | "advanced" | "sync" | "prompts";
+type View = "projects" | "channels" | "models" | "hardware" | "tasks" | "knowledge" | "prompts" | "proxy" | "sync" | "advanced";
+type ResourceKey = "projects" | "workspaces" | "tasks" | "system" | "providers" | "models" | "env" | "accounts" | "skills" | "channels" | "hardware" | "knowledge" | "proxy" | "advanced" | "sync" | "prompts";
 type TaskFilterKind = "project" | "status" | "device";
 interface ResourceState {loading: boolean; loaded: boolean; error: string; updatedAt: number}
 interface TaskChannelState {
@@ -111,7 +113,9 @@ interface State {
   envGroups: EnvGroup[];
   codexAccounts: CodexAccount[];
   models: Model[];
+  hardwareResources: HardwareResource[];
   tasks: Task[];
+  taskCloneSources: Task[];
   knowledge: Knowledge[];
   // Every project with a verified knowledge root, for scoping UI. Separate from
   // `knowledge`, which is only the current page of entries.
@@ -269,7 +273,9 @@ const state: State = {
   envGroups: [],
   codexAccounts: [],
   models: [],
+  hardwareResources: [],
   tasks: [],
+  taskCloneSources: [],
   knowledge: [],
   knowledgeIndexes: [],
   knowledgeLibraries: [],
@@ -373,7 +379,7 @@ document.addEventListener("keydown", event => {
 
 const resourceStates = Object.fromEntries([
   "projects", "workspaces", "tasks", "system", "providers", "models", "env", "accounts", "skills",
-  "channels", "knowledge", "proxy", "advanced", "sync", "prompts",
+  "channels", "hardware", "knowledge", "proxy", "advanced", "sync", "prompts",
 ].map(key => [key, {loading: false, loaded: false, error: "", updatedAt: 0}])) as Record<ResourceKey, ResourceState>;
 const resourceRequests = new Map<ResourceKey, Promise<void>>();
 const listPages: Record<"projects" | "tasks" | "knowledge", {cursor: string; hasMore: boolean; loadingMore: boolean}> = {
@@ -395,6 +401,7 @@ function resourcesForView(view: View): ResourceKey[] {
     case "tasks": return ["projects", "workspaces", "tasks", "models", "accounts", "skills"];
     case "channels": return ["channels", "projects", "workspaces", "models", "accounts", "knowledge"];
     case "models": return ["providers", "models", "env", "accounts"];
+    case "hardware": return ["hardware"];
     case "knowledge": return ["projects", "workspaces", "knowledge"];
     case "prompts": return ["prompts"];
     case "proxy": return ["proxy"];
@@ -1319,8 +1326,12 @@ async function loadCoreData(force = false): Promise<void> {
     }),
     loadResource("workspaces", force, async () => { state.workspaces = (await api.workspaces()).workspaces || []; }),
     loadResource("tasks", force, async () => {
-      const result = await api.tasks("", {limit: initialListPageSize});
+      const [result, cloneSources] = await Promise.all([
+        api.tasks("", {limit: initialListPageSize}),
+        api.taskCloneSources(),
+      ]);
       state.tasks = result.tasks || [];
+      state.taskCloneSources = cloneSources.tasks || [];
       state.taskFacetCounts = result.counts || null;
       listPages.tasks = {cursor: result.next_cursor || "", hasMore: Boolean(result.has_more), loadingMore: false};
     }),
@@ -1387,6 +1398,9 @@ async function ensureViewData(view: View, force = false): Promise<void> {
     jobs.push(loadResource("accounts", force, async () => { state.codexAccounts = (await api.codexAccounts()).accounts || []; }));
   }
   if (view === "models") jobs.push(loadResource("env", force, async () => { state.envGroups = (await api.envGroups()).env_groups || []; }));
+  if (view === "hardware") jobs.push(loadResource("hardware", force, async () => {
+    state.hardwareResources = (await api.hardwareResources()).resources || [];
+  }));
   if (view === "tasks") jobs.push(loadResource("skills", force, async () => { state.skills = (await api.skills()).skills || []; }));
   if (view === "channels") {
     jobs.push(loadResource("channels", force, async () => {
@@ -1440,7 +1454,7 @@ function persistNavigationState(): void {
   });
 }
 async function restoreNavigationState(saved = loadNavigationSnapshot()): Promise<void> {
-  if (["projects", "channels", "models", "tasks", "knowledge", "prompts", "proxy", "sync", "advanced"].includes(saved.view || "")) state.view = saved.view as View;
+  if (["projects", "channels", "models", "hardware", "tasks", "knowledge", "prompts", "proxy", "sync", "advanced"].includes(saved.view || "")) state.view = saved.view as View;
   const savedProject = state.projects.find(project => project.id === saved.projectID) || saved.project;
   state.selectedProject = savedProject || null;
   if (savedProject && !state.projects.some(project => project.id === savedProject.id)) {
@@ -1470,7 +1484,7 @@ function syncVisualViewportHeight(): void {
 
 function authErrorMessage(error: unknown, fallback: string): string {
   const typed = error as Error & {code?: string};
-  if (typed.code === "recovery_failed") return "Setup Token 或账号不正确";
+  if (typed.code === "recovery_failed") return "Setup Token 或账号不正确，请使用实际数据目录中的 setup-token";
   if (typed.code === "invalid_current_password") return "当前密码不正确";
   if (typed.code === "invalid_new_password") return "新密码至少需要 10 个字符";
   if (typed.code === "auth_rate_limited") return "尝试次数过多，请稍后再试";
@@ -2150,7 +2164,7 @@ function loginView(): string {
     <main class="login-main">
       ${recovery ? `<form id="password-recovery-form" class="auth-form">
         <h1>找回密码</h1>
-        <p>使用 AHA2 数据目录中的 setup-token 验证本机所有权；重置后其他登录会话将失效。</p>
+        <p>使用安装时选择的数据目录中的 setup-token，不是程序安装目录；修改或恢复该文件后需重启 AHA2。重置后其他登录会话将失效。</p>
         <label>账号<input name="username" value="${escapeHTML(state.auth?.username || "owner")}" autocomplete="username" required></label>
         <label>Setup Token<input name="setup_token" type="password" autocomplete="one-time-code" required></label>
         <label>新密码<input name="new_password" type="password" autocomplete="new-password" minlength="10" required></label>
@@ -2179,9 +2193,10 @@ function shell(content: string): string {
     ["channels", "bot", "渠道"],
     ["knowledge", "knowledge", "知识库"],
     ["models", "model", "模型"],
+    ["hardware", "hardware", "硬件资源"],
     ["proxy", "proxy", "代理"],
   ] as const;
-  const mobileNav = [...nav.slice(0, 5), ["advanced", "shield", "高级"] as const];
+  const mobileNav = [...nav.slice(0, 6), ["advanced", "shield", "高级"] as const];
   return `<div class="app-shell">
     <aside class="sidebar">
       <div class="brand-lockup"><span class="brand-mark">A</span><div><strong>AHA</strong><small>个人 AI 工作流</small></div></div>
@@ -2324,6 +2339,7 @@ function advancedSettingsView(): string {
       <article class="panel advanced-tool-card"><div>${icon("bot")}<span><strong>提示词</strong><small>查看和维护 AHA2 的提示词模板</small></span></div><button type="button" data-view="prompts">进入提示词设置</button></article>
       <article class="panel advanced-tool-card"><div>${icon("sync")}<span><strong>同步</strong><small>配置设备同步、检查差异与冲突</small></span></div><button type="button" data-view="sync">进入同步设置</button></article>
       <article class="panel advanced-tool-card"><div>${icon("proxy")}<span><strong>代理</strong><small>管理订阅、节点和连接状态</small></span></div><button type="button" data-view="proxy">进入代理设置</button></article>
+      <article class="panel advanced-tool-card"><div>${icon("hardware")}<span><strong>硬件资源</strong><small>维护系统级串口、网络设备和登录凭据</small></span></div><button type="button" data-view="hardware">进入硬件资源</button></article>
     </section>
     <section class="panel spaced account-security-panel backend-timeout-settings-panel">
       <div class="panel-head"><strong>Backend 超时</strong><span>Codex / Claude 统一生效</span></div>
@@ -2380,7 +2396,7 @@ function advancedSettingsView(): string {
         <div class="dialog-actions"><button class="primary" type="submit" ${origin.startup_override ? "disabled" : ""}>保存安全设置</button></div>
       </form>
     </section>
-    <section class="panel spaced recovery-note"><div class="panel-head"><strong>密码恢复</strong></div><div><p>忘记密码时，可在登录页使用数据目录中的 <code>setup-token</code> 重置。重置成功会撤销其他登录会话。</p><p>默认位置：<code>C:\\ProgramData\\AHA2\\setup-token</code></p></div></section>
+    <section class="panel spaced recovery-note"><div class="panel-head"><strong>密码恢复</strong></div><div><p>忘记密码时，可在登录页使用 AHA2 数据目录中的 <code>setup-token</code> 重置；它不是程序安装目录中的同名文件。</p><p>默认位置：<code>C:\\ProgramData\\AHA2\\setup-token</code>。安装时自定义过数据目录时，以计划任务 <code>--data-dir</code> 的实际路径为准；修改或恢复该文件后需重启 AHA2。重置成功会撤销其他登录会话。</p></div></section>
   </section>`);
 }
 
@@ -2522,7 +2538,7 @@ function taskCapabilitiesFold(capabilities: Record<string, boolean> | undefined)
     <p>\u9ed8\u8ba4\u5173\u95ed\uff1b\u4ec5 Main Agent \u53ef\u7528\u3002</p>
     <label><input type="checkbox" name="cap_workspace_read" ${granted.workspace_read ? "checked" : ""}>\u8bfb\u53d6\u540c Project Workspace</label>
     <label><input type="checkbox" name="cap_task_create" ${granted.task_create ? "checked" : ""}>\u521b\u5efa\u540c Project Task</label>
-    <label><input type="checkbox" name="cap_clone_hardware" ${granted.clone_hardware ? "checked" : ""}>\u514b\u9686\u5f53\u524d Task \u786c\u4ef6\u4e0e\u51ed\u636e</label>
+    <label><input type="checkbox" name="cap_clone_hardware" ${granted.clone_hardware ? "checked" : ""}>\u514b\u9686\u5f53\u524d Task \u786c\u4ef6\u542f\u7528\u5173\u7cfb</label>
   </div>`;
   return taskFormFold("task-capabilities-fold", "Agent \u9879\u76ee\u7ea7\u6388\u6743", body);
 }
@@ -2567,8 +2583,88 @@ function syncAgentFoldCounts(): void {
   syncSkillsFoldCount("agent-config-dialog", "agent-skills-fold");
 }
 
+function taskCloneSourceOptions(): string {
+  return `<option value="">不使用旧任务</option>${state.taskCloneSources.map(task => {
+    const project = state.projects.find(item => item.id === task.project_id)?.name || task.project_id;
+    return `<option value="${escapeHTML(task.id)}">${escapeHTML(task.code || task.id)} · ${escapeHTML(task.title)} · ${escapeHTML(project)}</option>`;
+  }).join("")}`;
+}
+
+function setTaskSelectValue(name: string, value: string | number | undefined): boolean {
+  const select = document.querySelector<HTMLSelectElement>(`#task-form select[name="${name}"]`);
+  if (!select || value === undefined || value === null) return false;
+  const text = String(value);
+  if (![...select.options].some(option => option.value === text)) return false;
+  select.value = text;
+  return true;
+}
+
+function applyTaskCloneMainConfig(detail: TaskDetail): string {
+  const main = detail.agents.find(agent => agent.agent_id === "main");
+  if (!main) return "来源任务没有 Main 配置";
+  if (!main.runtime_config_valid) return main.runtime_config_error || "来源任务的 Main 配置已失效";
+
+  const backend = document.querySelector<HTMLSelectElement>("#task-backend");
+  if (!backend || !main.backend || ![...backend.options].some(option => option.value === main.backend)) {
+    return `目标 Workspace 不支持来源 Backend：${main.backend || "未知"}`;
+  }
+  backend.value = main.backend;
+  syncRuntimeFields("task", state.models, state.codexAccounts, false);
+
+  const sourceSelect = document.querySelector<HTMLSelectElement>("#task-model-source");
+  if (sourceSelect && main.model_source && [...sourceSelect.options].some(option => option.value === main.model_source)) {
+    sourceSelect.value = main.model_source;
+    syncRuntimeFields("task", state.models, state.codexAccounts, false);
+  }
+  if (main.model_source === "official") {
+    if (main.codex_account_id) {
+      const account = document.querySelector<HTMLSelectElement>("#task-codex-account");
+      if (account && [...account.options].some(option => option.value === main.codex_account_id)) {
+        account.value = main.codex_account_id;
+        syncRuntimeFields("task", state.models, state.codexAccounts, false);
+      }
+    }
+    if (main.wire_model) {
+      const model = document.querySelector<HTMLSelectElement>("#task-wire-model");
+      if (model && [...model.options].some(option => option.value === main.wire_model)) model.value = main.wire_model;
+    }
+  } else if (main.model_source === "claude_native") {
+    if (main.wire_model) {
+      const model = document.querySelector<HTMLSelectElement>("#task-claude-native-model");
+      if (model && [...model.options].some(option => option.value === main.wire_model)) model.value = main.wire_model;
+    }
+  } else if (main.model_id) {
+    const model = document.querySelector<HTMLSelectElement>("#task-model");
+    if (model && [...model.options].some(option => option.value === main.model_id)) {
+      model.value = main.model_id;
+      syncRuntimeFields("task", state.models, state.codexAccounts, false);
+    }
+  }
+
+  if (main.reasoning_effort) setTaskSelectValue("reasoning_effort", main.reasoning_effort);
+  if (main.filesystem) setTaskSelectValue("filesystem", main.filesystem);
+  if (main.approval) setTaskSelectValue("approval", main.approval);
+  setTaskSelectValue("proxy_enabled", main.proxy_enabled ? "enabled" : "disabled");
+  setTaskSelectValue("collaboration_mode", detail.task.collaboration_mode);
+  setTaskSelectValue("knowledge_policy", detail.task.knowledge_policy);
+  const maxAgents = document.querySelector<HTMLInputElement>('#task-form input[name="max_agents"]');
+  if (maxAgents) maxAgents.value = String(Math.max(1, Number(detail.task.max_agents || 3)));
+  const fastMode = document.querySelector<HTMLInputElement>('#task-form input[name="fast_mode"]');
+  if (fastMode) fastMode.checked = Boolean(main.fast_mode);
+  const streamTimeout = document.querySelector<HTMLInputElement>('#task-form input[name="stream_idle_timeout_seconds"]');
+  if (streamTimeout && main.stream_idle_timeout_ms) streamTimeout.value = String(Math.round(main.stream_idle_timeout_ms / 1000));
+  const streamRetries = document.querySelector<HTMLInputElement>('#task-form input[name="stream_max_retries"]');
+  if (streamRetries && main.stream_max_retries) streamRetries.value = String(main.stream_max_retries);
+  const selectedSkills = new Set(detail.task.skill_ids || []);
+  document.querySelectorAll<HTMLInputElement>('#task-form input[name="skill_ids"]').forEach(input => {
+    input.checked = selectedSkills.has(input.value);
+  });
+  syncTaskFormFoldCounts();
+  return "";
+}
+
 function taskDialogBase(): string {
-  return `<dialog id="task-dialog" class="wide"><form id="task-form"><div class="dialog-head"><h2>创建任务</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div><label>标题<input name="title" required></label><label>需求<textarea name="request" required></textarea></label><div class="two"><label>项目<select name="project_id" id="task-project" required>${state.projects.filter(item => !item.channel_retired).map(item => `<option value="${item.id}">${escapeHTML(item.name)}</option>`).join("")}</select></label><label>Workspace<select name="workspace_id" id="task-workspace" required></select></label></div>${runtimeFieldsHTML("task", state.models, state.codexAccounts)}<div class="two"><label>推理强度<select name="reasoning_effort" id="task-effort"></select></label><label>沙箱（文件访问）<select name="filesystem"><option value="workspace-write">工作区可写</option><option value="read-only">只读</option><option value="danger-full-access">完全访问</option></select></label></div><div class="two"><label>协作模式<select name="collaboration_mode"><option value="auto">Auto</option><option value="single">Single</option></select></label><label>最大 Agent 数<input name="max_agents" type="number" min="1" value="3"></label></div><label>审批<select name="approval"><option value="never">无需确认</option><option value="auto">自动批准（跳过权限检查）</option></select></label><div id="task-git-isolation"><label>任务隔离<select name="isolation" id="task-isolation"><option value="worktree">独立 Worktree（推荐）</option><option value="inplace">原地执行</option></select></label><div id="task-worktree-settings"><label>Worktree 根目录<input name="worktree_dir" id="task-worktree-dir" placeholder="默认：仓库上一级/.aha2-worktrees"></label><div class="field-help">系统会在根目录下追加 Task ID；切换为原地执行后不使用此配置。</div></div><div class="two" id="task-branches"><label>目标分支<input name="target_branch" placeholder="默认当前分支"></label><label>任务分支<input name="task_branch" placeholder="aha/task-name"></label></div></div><div class="dialog-actions"><button type="button" data-close>取消</button><button type="submit" name="start_mode" value="manual">创建，稍后启动</button><button class="primary" type="submit" name="start_mode" value="immediate">创建并立即启动</button></div></form></dialog>`;
+return `<dialog id="task-dialog" class="wide"><form id="task-form"><div class="dialog-head"><h2>创建任务</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div><label>标题<input name="title" required></label><label>需求<textarea name="request" required></textarea></label><div class="two"><label>项目<select name="project_id" id="task-project" required>${state.projects.filter(item => !item.channel_retired).map(item => `<option value="${item.id}">${escapeHTML(item.name)}</option>`).join("")}</select></label><label>Workspace<select name="workspace_id" id="task-workspace" required></select></label></div><fieldset class="task-clone-source"><legend>旧任务配置</legend><label>来源任务<select name="source_task_id" id="task-clone-source">${taskCloneSourceOptions()}</select></label><div class="two"><label class="channel-check"><input type="checkbox" name="clone_hardware" id="task-clone-hardware" disabled>复制硬件启用关系</label><label class="channel-check"><input type="checkbox" name="clone_channel" id="task-clone-channel" disabled>复制并接续主渠道</label></div><div class="field-help" id="task-clone-source-help">选择旧任务后载入其 Main 配置，可继续修改。</div></fieldset>${runtimeFieldsHTML("task", state.models, state.codexAccounts)}<div class="two"><label>推理强度<select name="reasoning_effort" id="task-effort"></select></label><label>沙箱（文件访问）<select name="filesystem"><option value="workspace-write">工作区可写</option><option value="read-only">只读</option><option value="danger-full-access">完全访问</option></select></label></div><div class="two"><label>协作模式<select name="collaboration_mode"><option value="auto">Auto</option><option value="single">Single</option></select></label><label>最大 Agent 数<input name="max_agents" type="number" min="1" value="3"></label></div><label>审批<select name="approval"><option value="never">无需确认</option><option value="auto">自动批准（跳过权限检查）</option></select></label><div id="task-git-isolation"><label>任务隔离<select name="isolation" id="task-isolation"><option value="worktree">独立 Worktree（推荐）</option><option value="inplace">原地执行</option></select></label><div id="task-worktree-settings"><label>Worktree 根目录<input name="worktree_dir" id="task-worktree-dir" placeholder="默认：仓库上一级/.aha2-worktrees"></label><div class="field-help">系统会在根目录下追加 Task ID；切换为原地执行后不使用此配置。</div></div><div class="two" id="task-branches"><label>目标分支<input name="target_branch" placeholder="默认当前分支"></label><label>任务分支<input name="task_branch" placeholder="aha/task-name"></label></div></div><div class="dialog-actions"><button type="button" data-close>取消</button><button type="submit" name="start_mode" value="manual">创建，稍后启动</button><button class="primary" type="submit" name="start_mode" value="immediate">创建并立即启动</button></div></form></dialog>`;
 }
 
 let slashCommandSelection = 0;
@@ -3321,6 +3417,7 @@ function render(): void {
       projects: projectsView,
 		channels: () => shell(renderChannels(state.channelProviders, state.channelInstances, {models: state.models, accounts: state.codexAccounts, projects: state.projects, workspaces: state.workspaces, knowledgeIndexes: state.knowledgeIndexes, libraries: state.knowledgeLibraries})),
       models: modelsView,
+      hardware: () => shell(renderHardwareResources(state.hardwareResources)),
       tasks: tasksView,
       knowledge: () => shell(`${renderKnowledgeWorkspace({
         projects: state.projects,
@@ -3488,6 +3585,7 @@ function bindCommon(): void {
   });
   bindChannels({
 		context: {models: state.models, accounts: state.codexAccounts, projects: state.projects, workspaces: state.workspaces, knowledgeIndexes: state.knowledgeIndexes, libraries: state.knowledgeLibraries},
+    instances: state.channelInstances,
     refresh: async () => {
       const [providers, instances, projects, workspaces, tasks] = await Promise.all([
         api.channelProviders(), api.channelInstances(), api.projects({limit: initialListPageSize}), api.workspaces(), api.tasks("", {limit: initialListPageSize}),
@@ -3731,7 +3829,7 @@ function bindCommon(): void {
   document.querySelectorAll<HTMLElement>("[data-delete-provider]").forEach(button => button.addEventListener("click", async event => {
     event.stopPropagation();
     const id = button.dataset.deleteProvider!;
-    if (!window.confirm("删除该 Provider 及其未占用的模型 / Env Group？")) return;
+    if (!window.confirm("删除该 Provider 及其模型和凭据？使用这些模型的任务会暂停输入，进入任务后可重新选择模型。")) return;
     void runWithFeedback(button, "删除中", async () => {
       const result = await api.deleteProvider(id);
       setMessage("notice", result.warning || "Provider 已删除");
@@ -3897,7 +3995,7 @@ function bindCommon(): void {
   });
   document.querySelectorAll<HTMLElement>("[data-delete-model]").forEach(button => button.addEventListener("click", () => {
     const id = button.dataset.deleteModel!;
-    if (!window.confirm("删除该模型？使用此模型的任务将暂停输入，直到修改 Agent 模型配置。")) return;
+    if (!window.confirm("删除该模型？使用此模型的任务会暂停输入，进入任务后可重新选择模型。")) return;
     void runWithFeedback(button, "删除中", async () => {
       await api.deleteModel(id);
       setMessage("notice", "模型已删除");
@@ -3951,6 +4049,51 @@ function bindCommon(): void {
     });
   });
   document.querySelector("#task-project")?.addEventListener("change", syncTaskWorkspaces);
+  document.querySelector("#task-clone-source")?.addEventListener("change", async event => {
+    const sourceID = String((event.currentTarget as HTMLSelectElement).value || "");
+    const hardware = document.querySelector<HTMLInputElement>("#task-clone-hardware");
+    const channel = document.querySelector<HTMLInputElement>("#task-clone-channel");
+    const help = document.querySelector<HTMLElement>("#task-clone-source-help");
+    if (hardware) {
+      hardware.checked = false;
+      hardware.disabled = true;
+    }
+    if (channel) {
+      channel.checked = false;
+      channel.disabled = true;
+    }
+    if (!sourceID) {
+      if (help) help.textContent = "选择旧任务后载入其 Main 配置，可继续修改。";
+      return;
+    }
+    if (help) help.textContent = "正在载入来源任务配置…";
+    try {
+      const [detail, channelState] = await Promise.all([
+        api.task(sourceID),
+        api.taskChannelRoutes(sourceID).catch(() => null),
+      ]);
+      if (document.querySelector<HTMLSelectElement>("#task-clone-source")?.value !== sourceID) return;
+      const mainError = applyTaskCloneMainConfig(detail);
+      const hardwareCount = detail.hardware?.length || 0;
+      const channelAvailable = Boolean(channelState?.route);
+      if (hardware) {
+        hardware.disabled = hardwareCount === 0;
+        hardware.checked = hardwareCount > 0;
+      }
+      if (channel) {
+        channel.disabled = !channelAvailable;
+        channel.checked = channelAvailable;
+      }
+      if (help) {
+        const parts = [mainError ? `Main：${mainError}` : "已载入 Main 配置"];
+        parts.push(hardwareCount ? `硬件组 ${hardwareCount} 个` : "无硬件组");
+        parts.push(channelAvailable ? "可接续主渠道" : "无主渠道");
+        help.textContent = parts.join("；");
+      }
+    } catch (error) {
+      if (help) help.textContent = `来源任务载入失败：${error instanceof Error ? error.message : String(error)}`;
+    }
+  });
   // The collapsed summaries report what is selected inside them, so they must
   // follow every checkbox change, not just the initial render.
   document.querySelector<HTMLElement>("#task-dialog")?.addEventListener("change", event => {
@@ -3986,6 +4129,9 @@ function bindCommon(): void {
       max_agents: Number(payload.max_agents || 3),
       proxy_enabled: proxyEnabledFrom(payload.proxy_enabled),
       fast_mode: payload.fast_mode === "on",
+      clone_hardware: form.get("clone_hardware") === "on",
+      clone_channel: form.get("clone_channel") === "on",
+      source_task_id: payload.source_task_id || "",
       agent_capabilities: {
         workspace_read: form.get("cap_workspace_read") === "on",
         task_create: form.get("cap_task_create") === "on",
@@ -3995,9 +4141,11 @@ function bindCommon(): void {
       stream_max_retries: Number(payload.stream_max_retries || 0),
     });
     state.tasks = [result.task, ...state.tasks.filter(item => item.id !== result.task.id)];
+    state.taskCloneSources = [result.task, ...state.taskCloneSources.filter(item => item.id !== result.task.id)];
     setMessage("notice", result.task.status === "draft" ? "任务草稿已创建，可先完成配置" : "任务已创建并启动");
     await openTask(result.task.id);
     if (result.start_error) setMessage("error", `Task 已创建，但首个 Turn 启动失败：${result.start_error}`);
+    if (result.clone_warnings?.length) setMessage("error", result.clone_warnings.join("；"));
   }, "创建中", false);
   document.querySelector<HTMLElement>("#start-task")?.addEventListener("click", () => {
     if (!state.selectedTask) return;
@@ -4487,6 +4635,16 @@ function bindTaskToolsAndPanels(): void {
     setMessage,
   });
   if (state.view === "prompts") bindPromptAdmin(render, setMessage);
+  if (state.view === "hardware") bindHardwareResources(
+    state.hardwareResources,
+    async () => {
+      await loadResource("hardware", true, async () => {
+        state.hardwareResources = (await api.hardwareResources()).resources || [];
+      });
+      render();
+    },
+    setMessage,
+  );
 }
 
 function bindSessionActions(): void {

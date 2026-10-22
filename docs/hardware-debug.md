@@ -18,7 +18,7 @@ serial.device
 serial.baudrate
 network.host
 network.port
-network.protocol = telnet | raw | ssh
+network.protocol = telnet | raw | ssh | adb
 network.ssh_auth = auto | password | key
 username
 password -> Secret Store
@@ -51,6 +51,19 @@ Network：
 - `telnet` 处理 IAC negotiation、TTYPE、NAWS 和 BINARY。
 - `ssh` 使用 `golang.org/x/crypto/ssh` 建立 `xterm-256color` PTY 和交互 Shell，
   默认端口 22。
+- `adb` 使用运行 AHA2 的主机上的 Android Platform Tools：先执行
+  `adb connect <host>:<port>`，再通过 `adb shell -t -t` 建立 PTY Shell，默认端口
+  5555。无线调试的配对端口和六位配对码都在资源行的配对弹窗中临时输入；资源页
+  通过 `adb pair <host>:<pair_port>` 执行一次性配对。配对端口和配对码只进入
+  当前请求，不写入 SQLite、Audit、日志或页面状态。配对成功后资源保存
+  `adb_paired_at` 时间戳并显示“已配对”。设备授权由 ADB 自己管理，不使用硬件
+  用户名/密码。
+- ADB 客户端优先从 `PATH`、`ANDROID_HOME`、`ANDROID_SDK_ROOT` 和
+  `%LOCALAPPDATA%\Android\Sdk\platform-tools` 查找；也可用
+  `AHA2_ADB_PATH` 指定 `adb`/`adb.exe`。
+- 连接和通用执行前会检查 `adb mdns services`。如果同一配置 IP 只有一个
+  `_adb-tls-connect._tcp` 服务，AHA 自动使用当前 advertised 端口；存在多个候选时
+  拒绝猜测并要求检查资源端点。
 - 配置用户名/密码后，只在检测到 `login:`/`username:`/`password:` 时自动发送。
 - 密码发送记录固定显示为 `<password>`。
 - Agent 可调用显式 `login` API，按设备覆盖提示、换行、唤醒、超时和重试；提示匹配
@@ -90,6 +103,7 @@ GET  /api/v1/tasks/{task}/hardware/{hardware}/host-key?transport=network
 POST /api/v1/tasks/{task}/hardware/{hardware}/host-key/trust?transport=network
 POST /api/v1/tasks/{task}/hardware/{hardware}/disconnect?transport=serial|network
 POST /api/v1/tasks/{task}/hardware/{hardware}/send?transport=serial|network
+POST /api/v1/agent/hardware/{hardware}/adb/exec
 ```
 
 实时终端使用受认证 WebSocket：
@@ -105,6 +119,13 @@ GET /api/v1/tasks/{task}/hardware/{hardware}/terminal/ws?transport=serial|networ
 
 Terminal HTTP GET 继续支持 `after=<sequence>` 增量读取，作为历史查询、状态同步和
 WebSocket 不可用时的兜底。
+
+远端 Agent 可通过 `adb/exec` 在 AHA 宿主执行绑定到当前 Task 的 ADB 命令。
+请求参数为 `args` 数组、可选 base64 stdin 和 1-120 秒超时；响应返回退出码、
+base64 stdout/stderr 与耗时。该接口要求资源为 `read_write`，拒绝 `connect`、
+`pair`、`devices`、`kill-server` 等主机级命令。stdin 上限 1 MiB，stdout 和
+stderr 各上限 16 MiB。`push`/`pull` 等涉及本地路径的参数位于 AHA 宿主文件系统，
+不是远端 Workspace 路径。响应中的 `endpoint` 是本次 mDNS 解析后实际使用的端点。
 
 ## Prompt Context
 
@@ -136,10 +157,10 @@ xterm.js 6.0.0：
 
 - 桌面：左侧连接配置，右侧终端。
 - 移动端：连接配置默认折叠，终端占主视图。
-- 支持硬件组增删、Serial/Network 切换、连接/断开、清空显示、
+- 支持系统硬件资源维护、Serial/Network（含 ADB）选择、连接/断开、清空显示、
   文本/HEX、CRLF 和增量历史。
 - xterm 直接处理 ANSI、光标、键盘、IME、方向键、Ctrl 组合键和窗口 resize；
-  Serial/Telnet/SSH 共用同一 WebSocket 协议。
+  Serial/Telnet/SSH/ADB 共用同一 WebSocket 协议。
 - 黑色 xterm 区域是主输入入口；底部文本/HEX 表单仅用于粘贴、批量命令和原始
   HEX 辅助发送。
 - 移动端提供 Enter、Esc、Tab、Ctrl+C、Left、Up、Down、Right 快捷键栏。

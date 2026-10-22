@@ -2,12 +2,18 @@ package store
 
 import (
 	"context"
+	"time"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
 )
 
 func (s *Store) UpsertCodexAccount(ctx context.Context, item domain.CodexAccount) error {
-	_, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO codex_accounts(
 			id,label,email,account_id,plan_type,status,proxy_enabled,credential_ref,credential_configured,
 			usage_json,usage_updated_at,usage_error,models_json,models_updated_at,models_error,
@@ -23,8 +29,13 @@ func (s *Store) UpsertCodexAccount(ctx context.Context, item domain.CodexAccount
 		boolInt(item.CredentialConfigured), encodeJSON(item.Usage), timeString(item.UsageUpdatedAt), item.UsageError,
 		encodeJSON(item.AvailableModels), timeString(item.ModelsUpdatedAt), item.ModelsError,
 		timeString(item.CreatedAt), timeString(item.UpdatedAt), timeString(item.LastUsedAt),
-	)
-	return err
+	); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM sync_tombstones WHERE object_type='codex_account' AND object_id=?`, item.ID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 const codexAccountColumns = `id,label,email,account_id,plan_type,status,proxy_enabled,credential_ref,credential_configured,usage_json,usage_updated_at,usage_error,models_json,models_updated_at,models_error,created_at,updated_at,last_used_at`
@@ -73,7 +84,11 @@ func (s *Store) ListCodexAccounts(ctx context.Context) ([]domain.CodexAccount, e
 }
 
 func (s *Store) DeleteCodexAccount(ctx context.Context, id string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM codex_accounts WHERE id=?`, id)
+	item, err := s.CodexAccount(ctx, id)
+	if err != nil {
+		return err
+	}
+	_, err = s.deleteSharedObject(ctx, "codex_account", id, timeString(item.UpdatedAt), time.Now().UTC())
 	return err
 }
 

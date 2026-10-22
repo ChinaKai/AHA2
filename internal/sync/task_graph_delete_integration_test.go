@@ -72,8 +72,7 @@ func TestOwnedTaskAndWorkspaceDeletesConvergeWithoutReplayResurrection(t *testin
 		}
 	}
 	if err := source.store.ReplaceHardwareGroups(ctx, task.ID, []domain.HardwareGroup{{
-		TaskID: task.ID, ID: "board", Description: "Board", Mode: domain.HardwareModeBoth,
-		Serial:   domain.HardwareSerialConfig{Device: "/dev/cu.owner", Baudrate: 115200},
+		TaskID: task.ID, ID: "board", Description: "Board", Mode: domain.HardwareModeNetwork,
 		Network:  domain.HardwareNetworkConfig{Host: "board.owner", Port: 22, Protocol: domain.HardwareProtocolSSH, SSHAuth: domain.HardwareSSHAuthPassword},
 		Username: "root", CredentialRef: "private/hardware/credential", PasswordConfigured: true,
 		Access: domain.HardwareAccessReadWrite, CreatedAt: now, UpdatedAt: now,
@@ -105,7 +104,7 @@ func TestOwnedTaskAndWorkspaceDeletesConvergeWithoutReplayResurrection(t *testin
 		t.Fatalf("remote task hardware=%#v err=%v", detail.Hardware, err)
 	}
 	remoteHardware := detail.Hardware[0]
-	if remoteHardware.Access != domain.HardwareAccessReadOnly || remoteHardware.CredentialRef != "" || !remoteHardware.PasswordConfigured || remoteHardware.Serial.Device != "/dev/cu.owner" || remoteHardware.Network.Host != "board.owner" {
+	if remoteHardware.Access != domain.HardwareAccessReadOnly || remoteHardware.CredentialRef != "" || !remoteHardware.PasswordConfigured || remoteHardware.Network.Host != "board.owner" {
 		t.Fatalf("unsafe or incomplete remote hardware mirror: %#v", remoteHardware)
 	}
 	remoteWorkspaces, err := destination.store.ListWorkspaces(ctx, project.ID)

@@ -180,11 +180,177 @@ func TestHardwareAPIConfigNetworkTerminalAndPermissions(t *testing.T) {
 		t.Fatalf("SSH default auth mode missing: %#v", sshGroup)
 	}
 
+	response = requestJSON(t, client, http.MethodPut, server.URL+"/api/v1/tasks/"+task.ID+"/hardware", map[string]any{
+		"groups": []map[string]any{{
+			"id": "android", "mode": "network", "access": "read_only",
+			"network":  map[string]any{"host": "192.0.2.30", "port": 0, "protocol": "adb"},
+			"username": "ignored", "password": "ignored-secret",
+		}},
+	}, csrf)
+	var adbConfigured map[string]any
+	decodeResponse(t, response, &adbConfigured)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("configure ADB hardware: %d %#v", response.StatusCode, adbConfigured)
+	}
+	adbGroup := adbConfigured["groups"].([]any)[0].(map[string]any)
+	if adbGroup["network"].(map[string]any)["protocol"] != domain.HardwareProtocolADB ||
+		adbGroup["network"].(map[string]any)["port"] != float64(5555) {
+		t.Fatalf("ADB default port missing: %#v", adbGroup)
+	}
+	if adbGroup["password_configured"] != false || adbGroup["username"] != nil {
+		t.Fatalf("ADB accepted unrelated login credentials: %#v", adbGroup)
+	}
+	if _, stored := secretsStore.values["hardware/"+task.ID+"/android/credential"]; stored {
+		t.Fatal("ADB credential was stored even though ADB uses device authorization")
+	}
+
 	response = requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/hardware/serial-ports", nil, "")
 	var ports map[string]any
 	decodeResponse(t, response, &ports)
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("serial ports failed: %d %#v", response.StatusCode, ports)
+	}
+}
+
+func TestHardwareResourcesAreSystemLevelAndBindToTasks(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	firstTask := createHardwareAPITask(t, database)
+	secondTask := createHardwareAPITask(t, database)
+	secretsStore := &fakeSecretStore{}
+	authService := auth.NewService(database, "setup-test", time.Hour)
+	server := httptest.NewServer(New(Config{
+		Store: database, Auth: authService, App: app.NewService(database, nil, app.StubExecutor{}),
+		Secrets: secretsStore, Hardware: hardware.NewManager(database),
+	}).Handler())
+	defer server.Close()
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	csrf := registerOwner(t, client, server.URL)
+
+	response := requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/hardware-resources", map[string]any{
+		"description": "Shared board", "mode": "network", "access": "read_write",
+		"network":  map[string]any{"host": "192.0.2.50", "port": 23, "protocol": "raw"},
+		"username": "root", "password": "board-secret",
+	}, csrf)
+	var created struct {
+		Resource domain.HardwareResource `json:"resource"`
+	}
+	decodeResponse(t, response, &created)
+	if response.StatusCode != http.StatusCreated || created.Resource.ID == "" || !created.Resource.PasswordConfigured {
+		t.Fatalf("create resource status=%d payload=%#v", response.StatusCode, created)
+	}
+	if secretsStore.values["hardware-resource/"+created.Resource.ID+"/credential"] != "board-secret" {
+		t.Fatal("system hardware password was not stored out of band")
+	}
+
+	for index, task := range []domain.Task{firstTask, secondTask} {
+		response = requestJSON(t, client, http.MethodPut,
+			server.URL+"/api/v1/tasks/"+task.ID+"/hardware-bindings",
+			map[string]any{"bindings": []map[string]any{{"resource_id": created.Resource.ID, "access": domain.HardwareAccessReadOnly}}}, csrf)
+		var bound struct {
+			Groups []domain.HardwareGroup `json:"groups"`
+		}
+		decodeResponse(t, response, &bound)
+		if response.StatusCode != http.StatusOK || len(bound.Groups) != 1 || bound.Groups[0].ResourceID != created.Resource.ID || bound.Groups[0].Access != created.Resource.Access {
+			t.Fatalf("bind task %d status=%d payload=%#v", index, response.StatusCode, bound)
+		}
+	}
+
+	response = requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/hardware-resources", nil, "")
+	var listed struct {
+		Resources []domain.HardwareResource `json:"resources"`
+	}
+	decodeResponse(t, response, &listed)
+	if response.StatusCode != http.StatusOK || len(listed.Resources) != 1 || listed.Resources[0].BindingCount != 2 {
+		t.Fatalf("list resources status=%d payload=%#v", response.StatusCode, listed)
+	}
+
+	response = requestJSON(t, client, http.MethodDelete, server.URL+"/api/v1/hardware-resources/"+created.Resource.ID, nil, csrf)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("delete resource status=%d", response.StatusCode)
+	}
+	response.Body.Close()
+	if _, ok := secretsStore.values["hardware-resource/"+created.Resource.ID+"/credential"]; ok {
+		t.Fatal("deleted hardware resource left its credential behind")
+	}
+	for _, task := range []domain.Task{firstTask, secondTask} {
+		groups, err := database.HardwareGroups(ctx, task.ID)
+		if err != nil || len(groups) != 0 {
+			t.Fatalf("task %s retained deleted resource: %#v err=%v", task.ID, groups, err)
+		}
+	}
+}
+
+func TestHardwareADBPairUsesSeparatePortAndDoesNotPersistCode(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "aha2.db")
+	database, err := store.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	authService := auth.NewService(database, "setup-test", time.Hour)
+	pairedEndpoint, pairedCode := "", ""
+	server := httptest.NewServer(New(Config{
+		Store: database, Auth: authService, App: app.NewService(database, nil, app.StubExecutor{}),
+		PairADB: func(_ context.Context, endpoint, code string) (string, error) {
+			pairedEndpoint, pairedCode = endpoint, code
+			return "Successfully paired", nil
+		},
+	}).Handler())
+	defer server.Close()
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	csrf := registerOwner(t, client, server.URL)
+
+	response := requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/hardware-resources", map[string]any{
+		"description": "Android phone", "mode": "network", "access": "read_write",
+		"network": map[string]any{
+			"host": "192.0.2.82", "port": 5555, "protocol": "adb", "ssh_auth": "auto",
+		},
+	}, csrf)
+	var created struct {
+		Resource domain.HardwareResource `json:"resource"`
+	}
+	decodeResponse(t, response, &created)
+	if response.StatusCode != http.StatusCreated || created.Resource.ADBPairedAt != "" {
+		t.Fatalf("create ADB resource status=%d payload=%#v", response.StatusCode, created)
+	}
+	response = requestJSON(t, client, http.MethodPost,
+		server.URL+"/api/v1/hardware-resources/"+created.Resource.ID+"/adb/pair",
+		map[string]any{"pairing_port": 37124, "pairing_code": "123456"}, csrf)
+	var paired map[string]any
+	decodeResponse(t, response, &paired)
+	if response.StatusCode != http.StatusOK || paired["message"] != "Android 设备配对成功" {
+		t.Fatalf("pair ADB status=%d payload=%#v", response.StatusCode, paired)
+	}
+	if pairedEndpoint != "192.0.2.82:37124" || pairedCode != "123456" {
+		t.Fatalf("pair endpoint=%q code=%q", pairedEndpoint, pairedCode)
+	}
+	stored, err := database.HardwareResource(ctx, created.Resource.ID)
+	if err != nil || stored.Network.Port != 5555 || stored.ADBPairedAt == "" {
+		t.Fatalf("stored ADB resource=%#v err=%v", stored, err)
+	}
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	var pairingSecretsPersisted bool
+	if err := raw.QueryRowContext(ctx, `
+		SELECT EXISTS(SELECT 1 FROM audit_events
+		WHERE resource_id=? AND (data_json LIKE '%123456%' OR data_json LIKE '%37124%'))`, created.Resource.ID).Scan(&pairingSecretsPersisted); err != nil {
+		t.Fatal(err)
+	}
+	if pairingSecretsPersisted {
+		t.Fatal("ADB pairing port or code was persisted in audit data")
 	}
 }
 

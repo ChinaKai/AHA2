@@ -233,19 +233,8 @@ func (s *Server) cleanupTaskHardware(ctx context.Context, taskID string) {
 	if s.hardware != nil {
 		s.hardware.DisconnectTask(taskID)
 	}
-	if s.secrets == nil {
-		return
-	}
-	groups, _ := s.store.HardwareGroups(ctx, taskID)
-	var refs []string
-	for _, group := range groups {
-		if group.CredentialRef != "" {
-			refs = append(refs, group.CredentialRef)
-		}
-	}
-	if len(refs) > 0 {
-		_ = s.secrets.DeleteMany(refs)
-	}
+	// Bindings cascade with the Task. The resource and its credential are
+	// system-level and may still be used by other Tasks.
 }
 
 func (s *Server) taskHasActiveTurn(ctx context.Context, taskID string) (bool, error) {

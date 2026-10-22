@@ -6,8 +6,8 @@ import {copyText} from "./ui_helpers.js";
 import type {
   HardwareGroup,
   HardwareIOEvent,
+  HardwareResource,
   HardwareTerminalStatus,
-  SerialPort,
   TaskDetail,
 } from "./types.js";
 
@@ -25,27 +25,17 @@ interface StreamState {
 interface PanelState {
   taskID: string;
   groups: HardwareDraft[];
+  resources: HardwareResource[];
   selectedID: string;
   transport: Transport;
   sendEncoding: "text" | "hex";
   sendNewline: boolean;
   sendData: string;
-  dirty: boolean;
   configCollapsed: boolean;
-  ports: SerialPort[];
-  portsLoaded: boolean;
   streams: Record<string, StreamState>;
 }
 
-interface StoredDraft {
-  groups: HardwareGroup[];
-  selectedID: string;
-  transport: Transport;
-}
-
 const panelStates = new Map<string, PanelState>();
-const customOption = "__custom__";
-const commonBaudrates = [9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600];
 const terminalKeys: Record<string, string> = {
   enter: "\r",
   esc: "\x1b",
@@ -100,69 +90,28 @@ function cloneGroups(groups: HardwareGroup[] = []): HardwareDraft[] {
   }));
 }
 
-function hardwareDraftKey(taskID: string): string {
-  return `aha2:hardware-draft:${taskID}`;
-}
-
-function loadHardwareDraft(taskID: string): StoredDraft | null {
-  if (typeof sessionStorage === "undefined") return null;
-  try {
-    const value = JSON.parse(sessionStorage.getItem(hardwareDraftKey(taskID)) || "null") as StoredDraft | null;
-    return value && Array.isArray(value.groups) ? value : null;
-  } catch {
-    return null;
-  }
-}
-
-function persistHardwareDraft(state: PanelState): void {
-  if (typeof sessionStorage === "undefined") return;
-  const groups = state.groups.map(group => ({
-    task_id: group.task_id,
-    id: group.id,
-    position: group.position,
-    description: group.description,
-    mode: group.mode,
-    serial: {...group.serial},
-    network: {...group.network},
-    username: group.username || "",
-    password_configured: group.password_configured,
-    access: group.access,
-    created_at: group.created_at,
-    updated_at: group.updated_at,
-  }));
-  sessionStorage.setItem(hardwareDraftKey(state.taskID), JSON.stringify({
-    groups, selectedID: state.selectedID, transport: state.transport,
-  }));
-}
-
-function clearHardwareDraft(taskID: string): void {
-  if (typeof sessionStorage !== "undefined") sessionStorage.removeItem(hardwareDraftKey(taskID));
-}
-
 function panelState(detail: TaskDetail): PanelState {
   let state = panelStates.get(detail.task.id);
   if (!state) {
-    const stored = loadHardwareDraft(detail.task.id);
-    const groups = cloneGroups(stored?.groups || detail.hardware || []);
-    const selectedID = groups.some(group => group.id === stored?.selectedID) ? stored!.selectedID : (groups[0]?.id || "");
+    const groups = cloneGroups(detail.hardware || []);
+    const selectedID = groups[0]?.id || "";
     state = {
       taskID: detail.task.id,
       groups,
+      resources: detail.hardware_resources || [],
       selectedID,
-      transport: stored?.transport || (groups[0]?.mode === "network" ? "network" : "serial"),
+      transport: groups[0]?.mode === "network" ? "network" : "serial",
       sendEncoding: "text",
       sendNewline: true,
       sendData: "",
-      dirty: Boolean(stored),
       configCollapsed: groups.length > 0,
-      ports: [],
-      portsLoaded: false,
       streams: {},
     };
     panelStates.set(detail.task.id, state);
-  } else if (!state.dirty && detail.hardware) {
+  } else if (detail.hardware) {
     const selected = state.selectedID;
     state.groups = cloneGroups(detail.hardware);
+    state.resources = detail.hardware_resources || state.resources;
     state.selectedID = state.groups.some(group => group.id === selected) ? selected : (state.groups[0]?.id || "");
     reconcileTransport(state);
   }
@@ -202,22 +151,6 @@ function currentStream(state: PanelState): StreamState {
   return state.streams[key] ||= {items: [], latest: 0, status: null, lastError: ""};
 }
 
-function modeOptions(value: string): string {
-  return [
-    ["off", "关闭"],
-    ["serial", "串口"],
-    ["network", "网络"],
-    ["both", "串口 + 网络"],
-  ].map(([id, label]) => `<option value="${id}" ${value === id ? "selected" : ""}>${label}</option>`).join("");
-}
-
-function accessOptions(value: string): string {
-  return [
-    ["read_write", "读写"],
-    ["read_only", "只读"],
-  ].map(([id, label]) => `<option value="${id}" ${value === id ? "selected" : ""}>${label}</option>`).join("");
-}
-
 function groupOptions(state: PanelState): string {
   return state.groups.map((group, index) =>
     `<option value="${escapeHTML(group.id)}" ${group.id === state.selectedID ? "selected" : ""}>${escapeHTML(group.description || `硬件 ${index + 1}`)}</option>`,
@@ -227,7 +160,7 @@ function groupOptions(state: PanelState): string {
 function selectedGroupLabel(state: PanelState): string {
   const index = state.groups.findIndex(group => group.id === state.selectedID);
   const group = index >= 0 ? state.groups[index] : undefined;
-  return group?.description || (group ? `硬件 ${index + 1}` : "暂无硬件组");
+  return group?.description || (group ? `硬件 ${index + 1}` : "暂无硬件资源");
 }
 
 function syncTitleGroupSwitcher(state: PanelState): void {
@@ -245,6 +178,7 @@ function syncTitleGroupSwitcher(state: PanelState): void {
 function hardwareGroupsSignature(groups: HardwareGroup[]): string {
   return JSON.stringify(groups.map(group => ({
     id: group.id,
+    resource_id: group.resource_id || "",
     position: group.position,
     description: group.description,
     mode: group.mode,
@@ -265,28 +199,6 @@ export function renderHardwareGroupSwitcher(detail: TaskDetail): string {
     <button type="button" id="hardware-title-group-trigger" class="hardware-title-group-trigger" aria-haspopup="menu" aria-expanded="false" ${state.groups.length ? "" : "disabled"}><span>${escapeHTML(selectedGroupLabel(state))}</span>${icon("chevron-down")}</button>
     <div id="hardware-title-group-menu" class="hardware-title-group-menu" role="menu" hidden>${options}</div>
   </div>`;
-}
-
-function serialDeviceOptions(state: PanelState, current = ""): string {
-  const values = new Set<string>();
-  const detected = state.ports.some(port => port.device === current);
-  const options = [`<option value="" ${current ? "" : "selected"}>选择串口设备</option>`];
-  for (const port of state.ports) {
-    if (!port.device || values.has(port.device)) continue;
-    values.add(port.device);
-    const label = port.description && port.description !== port.device ? `${port.device} - ${port.description}` : port.device;
-    options.push(`<option value="${escapeHTML(port.device)}" ${current === port.device ? "selected" : ""}>${escapeHTML(label)}</option>`);
-  }
-  options.push(`<option value="${customOption}" ${current && !detected ? "selected" : ""}>自定义...</option>`);
-  return options.join("");
-}
-
-function baudrateOptions(current: number): string {
-  const known = commonBaudrates.includes(current);
-  return [
-    ...commonBaudrates.map(value => `<option value="${value}" ${current === value ? "selected" : ""}>${value}</option>`),
-    `<option value="${customOption}" ${!known ? "selected" : ""}>自定义...</option>`,
-  ].join("");
 }
 
 function statusClass(status: HardwareTerminalStatus | null): string {
@@ -316,13 +228,45 @@ function bytesToBase64(data: Uint8Array): string {
   return btoa(value);
 }
 
+function networkProtocolLabel(resource: HardwareResource): string {
+  return {telnet: "Telnet", raw: "Raw TCP", ssh: "SSH", adb: "ADB"}[resource.network.protocol] || resource.network.protocol;
+}
+
+function resourceNetworkPort(resource: HardwareResource): number {
+  if (resource.network.port) return resource.network.port;
+  if (resource.network.protocol === "ssh") return 22;
+  if (resource.network.protocol === "adb") return 5555;
+  return 23;
+}
+
+function resourceLabel(resource: HardwareResource): string {
+  const endpoints: string[] = [];
+  if (resource.serial.device) endpoints.push(resource.serial.device);
+  if (resource.network.host) endpoints.push(`${networkProtocolLabel(resource)} ${resource.network.host}:${resourceNetworkPort(resource)}`);
+  return `${resource.description || resource.id} · ${endpoints.join(" / ") || "未配置端点"}`;
+}
+
+function resourcePicker(state: PanelState): string {
+  return state.resources.map(resource => {
+    const binding = state.groups.find(group => (group.resource_id || group.id) === resource.id);
+    const resourceState = resource.network.protocol === "adb"
+      ? (resource.adb_paired_at ? " · 已配对" : " · 未配对")
+      : (resource.password_configured ? " · 凭据已配置" : "");
+    return `<article class="hardware-resource-choice ${binding ? "enabled" : ""} ${binding?.id === state.selectedID ? "selected" : ""}">
+      <button type="button" class="hardware-resource-copy" data-hardware-resource-select="${escapeHTML(resource.id)}" ${binding ? "" : "disabled"}><span><strong>${escapeHTML(resource.description || resource.id)}</strong><small>${escapeHTML(resourceLabel(resource).split(" · ").slice(1).join(" · "))}${resourceState}</small></span><em>${resource.access === "read_write" ? "读写" : "只读"}</em></button>
+      <button type="button" class="hardware-toggle ${binding ? "active" : ""}" data-hardware-resource-toggle="${escapeHTML(resource.id)}" role="switch" aria-checked="${binding ? "true" : "false"}" title="${binding ? "关闭任务硬件" : "开启任务硬件"}">${binding ? "关闭" : "开启"}</button>
+    </article>`;
+  }).join("");
+}
+
 export function renderHardwarePanel(detail: TaskDetail): string {
   const state = panelState(detail);
   const group = selectedGroup(state);
   const stream = currentStream(state);
-  const canConnect = supports(group, state.transport) && !state.dirty;
+  const canConnect = supports(group, state.transport);
   const connected = Boolean(stream.status?.connected);
   const readOnly = Boolean(stream.status?.read_only || group?.access !== "read_write" || detail.task.status === "completed" || detail.task.status === "failed" || detail.task.status === "cancelled");
+  const remoteReadOnly = Boolean(detail.task.read_only);
   const serialSelected = state.transport === "serial";
   const sendEncoding = serialSelected ? state.sendEncoding : "text";
   return `<div id="hardware-tool" class="hardware-tool ${state.configCollapsed ? "config-collapsed" : ""}" data-task-id="${escapeHTML(detail.task.id)}">
@@ -330,49 +274,24 @@ export function renderHardwarePanel(detail: TaskDetail): string {
       <summary>${icon("edit")}<span>连接配置</span></summary>
       <div class="hardware-config-body">
         <div class="hardware-group-row">
-          <select id="hardware-group-select" aria-label="硬件组">${groupOptions(state) || '<option value="">暂无硬件组</option>'}</select>
-          <button type="button" id="hardware-config-collapse" class="icon-button" title="收起硬件组" aria-label="收起硬件组">${icon("panel")}</button>
-          <button type="button" id="hardware-save-top" class="icon-button ${state.dirty ? "primary" : ""}" title="保存全部硬件组" ${state.dirty ? "" : "disabled"}>${icon("save")}</button>
-          <button type="button" id="hardware-add" class="icon-button" title="添加硬件组">${icon("plus")}</button>
-          <button type="button" id="hardware-remove" class="icon-button" title="删除当前硬件组" ${group ? "" : "disabled"}>${icon("close")}</button>
+          <select id="hardware-group-select" aria-label="已启用硬件">${groupOptions(state) || '<option value="">当前任务未启用硬件</option>'}</select>
+          <button type="button" id="hardware-config-collapse" class="icon-button" title="收起硬件资源" aria-label="收起硬件资源">${icon("panel")}</button>
+          ${remoteReadOnly ? "" : `<button type="button" id="hardware-manage-resources" class="icon-button" data-view="hardware" title="管理硬件资源" aria-label="管理硬件资源">${icon("hardware")}</button>`}
         </div>
-        ${group ? `<form id="hardware-config-form">
-          <label>描述<textarea name="description" rows="2">${escapeHTML(group.description)}</textarea></label>
-          <div class="two">
-            <label>连接方式<select name="mode">${modeOptions(group.mode)}</select></label>
-            <label>权限<select name="access">${accessOptions(group.access)}</select></label>
-          </div>
-          <section data-hardware-config="serial">
-            <label>串口设备<div class="hardware-picker-row"><select name="serial_device_choice">${serialDeviceOptions(state, group.serial.device)}</select><button type="button" id="hardware-refresh-ports" class="icon-button" title="刷新串口">${icon("refresh")}</button></div></label>
-            <input name="serial_device_custom" value="${escapeHTML(group.serial.device)}" placeholder="COM3 或 /dev/ttyUSB0" ${group.serial.device && !state.ports.some(port => port.device === group.serial.device) ? "" : "hidden"}>
-            <label>波特率<select name="serial_baudrate_choice">${baudrateOptions(group.serial.baudrate || 115200)}</select></label>
-            <input name="serial_baudrate_custom" type="number" min="1" value="${group.serial.baudrate || 115200}" ${commonBaudrates.includes(group.serial.baudrate || 115200) ? "hidden" : ""}>
-          </section>
-          <section data-hardware-config="network">
-            <div class="two">
-              <label>地址<input name="network_host" value="${escapeHTML(group.network.host)}" placeholder="192.168.1.20"></label>
-              <label>端口<input name="network_port" type="number" min="1" max="65535" value="${group.network.port || 23}"></label>
-            </div>
-            <label>协议<select name="network_protocol"><option value="telnet" ${group.network.protocol === "telnet" ? "selected" : ""}>Telnet</option><option value="raw" ${group.network.protocol === "raw" ? "selected" : ""}>Raw TCP</option><option value="ssh" ${group.network.protocol === "ssh" ? "selected" : ""}>SSH</option></select></label>
-            <section data-hardware-config="ssh">
-              <label>SSH 登录方式<select name="ssh_auth"><option value="auto" ${group.network.ssh_auth === "auto" ? "selected" : ""}>自动（有密码时优先密码）</option><option value="password" ${group.network.ssh_auth === "password" ? "selected" : ""}>密码</option><option value="key" ${group.network.ssh_auth === "key" ? "selected" : ""}>Key (~/.ssh)</option></select></label>
-            </section>
-          </section>
-          <section data-hardware-config="login">
-            <label>登录用户名<input name="username" value="${escapeHTML(group.username || "")}" autocomplete="off"></label>
-            <label>登录密码<input name="password" type="password" value="${escapeHTML(group._password || "")}" placeholder="${group.password_configured ? "已配置，留空保持不变" : "可选"}" autocomplete="new-password"></label>
-            <label class="hardware-clear-secret"><input name="clear_password" type="checkbox" ${group._clearPassword ? "checked" : ""}>清除已保存密码</label>
-          </section>
-          <div class="hardware-config-actions"><span id="hardware-save-state">${state.dirty ? "有未保存修改" : "配置已保存"}</span><button type="submit" class="primary">保存</button></div>
-        </form>` : `<div class="hardware-empty"><p>暂无硬件组</p><button type="button" data-hardware-add-empty>${icon("plus")}添加硬件</button></div>`}
+        <div class="hardware-binding-config">
+          ${group ? `<div class="hardware-binding-summary"><div><strong>${escapeHTML(group.description || group.id)}</strong><small>${escapeHTML(resourceLabel(state.resources.find(item => item.id === (group.resource_id || group.id)) || {
+            id: group.id, description: group.description, mode: group.mode, serial: group.serial, network: group.network,
+            password_configured: group.password_configured, access: group.access, binding_count: 0,
+            created_at: group.created_at, updated_at: group.updated_at,
+          }))}</small></div><span>${group.access === "read_write" ? "任务读写" : "任务只读"}</span></div>` : ""}
+          ${remoteReadOnly ? `<div class="field-help">这是其他设备的只读 Task，硬件绑定仅供查看；在本机接管后才能重新选择资源。</div>` : `<div class="hardware-resource-picker-head"><strong>系统硬件资源</strong><span>开启后仅供当前任务使用</span></div>
+          <div class="hardware-resource-picker">${resourcePicker(state) || `<div class="hardware-empty"><p>系统还没有硬件资源</p><button type="button" data-view="hardware">前往硬件资源页添加</button></div>`}</div>`}
+        </div>
       </div>
     </details>
     <section class="hardware-console">
       <header class="hardware-console-toolbar">
-        <div class="hardware-transport-switch">
-          <button type="button" data-hardware-transport="serial" class="${serialSelected ? "active" : ""}" ${supports(group, "serial") ? "" : "disabled"}>串口</button>
-          <button type="button" data-hardware-transport="network" class="${!serialSelected ? "active" : ""}" ${supports(group, "network") ? "" : "disabled"}>网络</button>
-        </div>
+        <span class="hardware-transport-label">${serialSelected ? "串口" : "网络"}</span>
         <span id="hardware-status" class="hardware-status ${statusClass(stream.status)}">${statusText(stream.status)}</span>
         <span id="hardware-endpoint">${escapeHTML(stream.status?.endpoint || (serialSelected ? group?.serial.device : group ? `${group.network.host}:${group.network.port}` : "") || "-")}</span>
         <div class="hardware-console-actions">
@@ -441,128 +360,47 @@ export function bindHardwarePanel(detail: TaskDetail, notify: Notice): void {
     if (inline) inline.textContent = message;
     notify("error", message);
   };
-  const form = root.querySelector<HTMLFormElement>("#hardware-config-form");
-  const readForm = () => {
-    const group = selectedGroup(state);
-    if (!group || !form) return;
-    const data = new FormData(form);
-    group.description = String(data.get("description") || "").trim();
-    group.mode = String(data.get("mode") || "off") as HardwareGroup["mode"];
-    group.access = String(data.get("access") || "read_write") as HardwareGroup["access"];
-    const deviceChoice = String(data.get("serial_device_choice") || "");
-    group.serial.device = String(deviceChoice === customOption ? data.get("serial_device_custom") : deviceChoice || "").trim();
-    const baudrateChoice = String(data.get("serial_baudrate_choice") || "115200");
-    group.serial.baudrate = Number(baudrateChoice === customOption ? data.get("serial_baudrate_custom") : baudrateChoice) || 115200;
-    group.network.host = String(data.get("network_host") || "").trim();
-    group.network.port = Number(data.get("network_port") || 23);
-    group.network.protocol = String(data.get("network_protocol") || "telnet") as HardwareGroup["network"]["protocol"];
-    group.network.ssh_auth = String(data.get("ssh_auth") || "auto") as HardwareGroup["network"]["ssh_auth"];
-    group.username = String(data.get("username") || "").trim();
-    group._password = String(data.get("password") || "");
-    group._clearPassword = data.get("clear_password") === "on";
-  };
-  const markDirty = () => {
-    state.dirty = true;
-    persistHardwareDraft(state);
-    const label = root.querySelector("#hardware-save-state");
-    if (label) label.textContent = "有未保存修改";
-    const save = root.querySelector<HTMLButtonElement>("#hardware-save-top");
-    if (save) {
-      save.disabled = false;
-      save.classList.add("primary");
-    }
-  };
-  const syncMode = () => {
-    const mode = String(new FormData(form || undefined).get("mode") || "off");
-    const protocol = String(new FormData(form || undefined).get("network_protocol") || "telnet");
-    root.querySelectorAll<HTMLElement>('[data-hardware-config="serial"]').forEach(element => {
-      element.hidden = mode !== "serial" && mode !== "both";
-    });
-    root.querySelectorAll<HTMLElement>('[data-hardware-config="network"]').forEach(element => {
-      element.hidden = mode !== "network" && mode !== "both";
-    });
-    root.querySelectorAll<HTMLElement>('[data-hardware-config="ssh"]').forEach(element => {
-      element.hidden = (mode !== "network" && mode !== "both") || protocol !== "ssh";
-    });
-    root.querySelectorAll<HTMLElement>('[data-hardware-config="login"]').forEach(element => {
-      element.hidden = mode === "off";
-    });
-    const username = form?.querySelector<HTMLInputElement>('input[name="username"]');
-    if (username) username.required = (mode === "network" || mode === "both") && protocol === "ssh";
-    const deviceChoice = form?.querySelector<HTMLSelectElement>('select[name="serial_device_choice"]');
-    const deviceCustom = form?.querySelector<HTMLInputElement>('input[name="serial_device_custom"]');
-    if (deviceCustom) deviceCustom.hidden = deviceChoice?.value !== customOption;
-    const baudrateChoice = form?.querySelector<HTMLSelectElement>('select[name="serial_baudrate_choice"]');
-    const baudrateCustom = form?.querySelector<HTMLInputElement>('input[name="serial_baudrate_custom"]');
-    if (baudrateCustom) baudrateCustom.hidden = baudrateChoice?.value !== customOption;
-  };
-  // Replacing the panel's DOM tears down whatever control had focus, and the
-  // browser can fire a change event for it on the way out. That is teardown, not
-  // an edit: treating it as one re-dirtied a panel that had just been saved, so
-  // 连接 kept answering "请先保存硬件配置" until the page was reloaded.
-  const isUserEdit = (event: Event) => {
-    if (swappingPanelDOM) return false;
-    const target = event.target;
-    return target instanceof Node ? target.isConnected : true;
-  };
-  form?.addEventListener("input", event => {
-    if (!isUserEdit(event)) return;
-    readForm();
-    markDirty();
-    syncMode();
-  });
-  form?.addEventListener("change", event => {
-    if (!isUserEdit(event)) return;
-    const target = event.target as HTMLInputElement | HTMLSelectElement;
-    if (target.name === "network_protocol") {
-      const port = form.querySelector<HTMLInputElement>('input[name="network_port"]');
-      if (port && target.value === "ssh" && (!port.value || port.value === "23")) port.value = "22";
-      if (port && target.value !== "ssh" && port.value === "22") port.value = "23";
-    }
-    readForm();
-    markDirty();
-    syncMode();
-  });
-  const saveGroups = async () => {
+  const saveBindings = async (resourceIDs: string[], message: string) => {
     if (detail.task.status === "completed") {
-      notify("error", "任务已完成，硬件配置只读；请先重新打开任务");
+      notify("error", "任务已完成，硬件启用关系只读；请先重新打开任务");
       return;
     }
-    readForm();
-    const response = await api.updateTaskHardware(detail.task.id, state.groups.map(group => ({
-      id: group.id,
-      description: group.description,
-      mode: group.mode,
-      serial: group.serial,
-      network: group.network,
-      username: group.username || "",
-      password: group._password || "",
-      clear_password: Boolean(group._clearPassword),
-      access: group.access,
-    })));
+    const bindings = resourceIDs.map(resourceID => {
+      const existing = state.groups.find(group => (group.resource_id || group.id) === resourceID);
+      return {id: existing?.id || resourceID, resource_id: resourceID};
+    });
+    const response = await api.updateTaskHardwareBindings(detail.task.id, bindings);
     detail.hardware = response.groups;
+    detail.hardware_resources = response.resources;
     state.groups = cloneGroups(response.groups);
-    state.dirty = false;
+    state.resources = response.resources;
     state.selectedID = state.groups.some(group => group.id === state.selectedID) ? state.selectedID : (state.groups[0]?.id || "");
     // A group saved with a mode the current transport cannot serve (a new SSH
     // group while the console sits on 串口) would otherwise leave 连接 disabled
     // until the page is reloaded.
     reconcileTransport(state);
-    clearHardwareDraft(detail.task.id);
-    notify("notice", "硬件配置已保存");
+    notify("notice", message);
     rerender();
   };
-  form?.addEventListener("submit", event => {
-    event.preventDefault();
-    void saveGroups().catch(reportError);
+  root.querySelectorAll<HTMLButtonElement>("[data-hardware-resource-toggle]").forEach(button => {
+    button.addEventListener("click", () => {
+      const resourceID = button.dataset.hardwareResourceToggle || "";
+      const enabled = state.groups.some(group => (group.resource_id || group.id) === resourceID);
+      const resourceIDs = state.groups.map(group => group.resource_id || group.id).filter(id => id !== resourceID);
+      if (!enabled) resourceIDs.push(resourceID);
+      button.disabled = true;
+      void saveBindings(resourceIDs, enabled ? "已从任务关闭硬件" : "已为任务开启硬件").catch(reportError).finally(() => {
+        if (button.isConnected) button.disabled = false;
+      });
+    });
   });
-  root.querySelector("#hardware-save-top")?.addEventListener("click", () => void saveGroups().catch(reportError));
+  root.querySelectorAll<HTMLButtonElement>("[data-hardware-resource-select]").forEach(button => {
+    button.addEventListener("click", () => selectGroup(button.dataset.hardwareResourceSelect || ""));
+  });
   const selectGroup = (value: string) => {
-    readForm();
     state.selectedID = value;
     const group = selectedGroup(state);
     state.transport = group?.mode === "network" ? "network" : "serial";
-    if (state.dirty) persistHardwareDraft(state);
     rerender();
   };
   root.querySelector("#hardware-group-select")?.addEventListener("change", event => {
@@ -595,49 +433,7 @@ export function bindHardwarePanel(detail: TaskDetail, notify: Notice): void {
       titleGroupTrigger.focus();
     });
   }
-  const addGroup = () => {
-    readForm();
-    const existing = new Set(state.groups.map(group => group.id));
-    let index = state.groups.length + 1;
-    while (existing.has(`hardware-${index}`)) index++;
-    const now = new Date().toISOString();
-    state.groups.push({
-      task_id: detail.task.id, id: `hardware-${index}`, position: state.groups.length,
-      description: "", mode: "serial", serial: {device: "", baudrate: 115200},
-      network: {host: "", port: 23, protocol: "telnet", ssh_auth: "auto"}, password_configured: false,
-      access: "read_write", created_at: now, updated_at: now,
-    });
-    state.selectedID = `hardware-${index}`;
-    state.transport = "serial";
-    state.dirty = true;
-    persistHardwareDraft(state);
-    rerender();
-  };
-  root.querySelector("#hardware-add")?.addEventListener("click", addGroup);
-  root.querySelector("[data-hardware-add-empty]")?.addEventListener("click", addGroup);
-  root.querySelector("#hardware-remove")?.addEventListener("click", () => {
-    const index = state.groups.findIndex(group => group.id === state.selectedID);
-    if (index < 0) return;
-    state.groups.splice(index, 1);
-    state.selectedID = state.groups[Math.min(index, state.groups.length - 1)]?.id || "";
-    state.transport = selectedGroup(state)?.mode === "network" ? "network" : "serial";
-    state.dirty = true;
-    persistHardwareDraft(state);
-    rerender();
-  });
-  root.querySelector("#hardware-refresh-ports")?.addEventListener("click", () => {
-    state.portsLoaded = false;
-    void loadPorts(state, root, rerender);
-  });
-  root.querySelectorAll<HTMLElement>("[data-hardware-transport]").forEach(button => button.addEventListener("click", () => {
-    state.transport = button.dataset.hardwareTransport as Transport;
-    rerender();
-  }));
   root.querySelector("#hardware-connect")?.addEventListener("click", () => {
-    if (state.dirty) {
-      notify("error", "请先保存硬件配置");
-      return;
-    }
     const button = root.querySelector<HTMLButtonElement>("#hardware-connect");
     if (button) button.disabled = true;
     const connect = async () => {
@@ -716,8 +512,6 @@ export function bindHardwarePanel(detail: TaskDetail, notify: Notice): void {
       if (input) input.value = "";
     }).catch(reportError);
   });
-  syncMode();
-  void loadPorts(state, root, rerender);
   void pollHardware(detail, state, generation);
   ensureHardwareTerminal(detail, state);
 }
@@ -732,11 +526,14 @@ export function stopHardwarePanel(): void {
 
 export function refreshHardwarePanel(detail: TaskDetail, notify: Notice): boolean {
   const state = panelStates.get(detail.task.id);
-  if (!state || state.dirty) return false;
+  if (!state) return false;
   const groups = cloneGroups(detail.hardware || []);
-  if (hardwareGroupsSignature(state.groups) === hardwareGroupsSignature(groups)) return false;
+  const resources = detail.hardware_resources || [];
+  if (hardwareGroupsSignature(state.groups) === hardwareGroupsSignature(groups)
+    && JSON.stringify(state.resources) === JSON.stringify(resources)) return false;
   const selected = state.selectedID;
   state.groups = groups;
+  state.resources = resources;
   state.selectedID = groups.some(group => group.id === selected) ? selected : (groups[0]?.id || "");
   reconcileTransport(state);
   const body = document.querySelector<HTMLElement>("#task-tool-panel-body");
@@ -746,23 +543,10 @@ export function refreshHardwarePanel(detail: TaskDetail, notify: Notice): boolea
   return true;
 }
 
-async function loadPorts(state: PanelState, root: HTMLElement, rerender: () => void): Promise<void> {
-  if (state.portsLoaded) return;
-  try {
-    const response = await api.serialPorts();
-    state.ports = response.ports || [];
-    state.portsLoaded = true;
-    if (document.querySelector("#hardware-tool") === root) rerender();
-  } catch {
-    state.portsLoaded = true;
-    // Manual serial device input remains available.
-  }
-}
-
 async function pollHardware(detail: TaskDetail, state: PanelState, generation: number): Promise<void> {
   if (generation !== pollGeneration || !document.querySelector("#hardware-tool")) return;
   const group = selectedGroup(state);
-  if (!group || !supports(group, state.transport) || state.dirty) {
+  if (!group || !supports(group, state.transport)) {
     pollTimer = window.setTimeout(() => void pollHardware(detail, state, generation), 1000);
     return;
   }
@@ -802,7 +586,7 @@ function ensureHardwareTerminal(detail: TaskDetail, state: PanelState): void {
   const stream = currentStream(state);
   const container = document.querySelector<HTMLElement>("#hardware-xterm");
   const group = selectedGroup(state);
-  if (!container || !group || state.dirty || !stream.status) {
+  if (!container || !group || !stream.status) {
     activeTerminal?.dispose();
     activeTerminal = null;
     if (container) container.replaceChildren();

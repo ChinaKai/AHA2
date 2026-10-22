@@ -1,6 +1,6 @@
 import {api} from "./api.js";
 import {icon} from "./icons.js";
-import type {ChannelInstance, ChannelOnboardingSession, ChannelPlugin, CodexAccount, Knowledge, KnowledgeLibrary, Model, Project, Workspace} from "./types.js";
+import type {ChannelInstance, ChannelOnboardingOptions, ChannelOnboardingSession, ChannelPlugin, CodexAccount, Knowledge, KnowledgeLibrary, Model, Project, Workspace} from "./types.js";
 
 interface ChannelUIContext {
 	models: Model[];
@@ -138,10 +138,10 @@ function instanceSettings(instance: ChannelInstance, context: ChannelUIContext):
 		const projectSelected = projectIDs.has(workspace.project_id);
 		return `<label class="channel-check" data-channel-workspace-option data-project-id="${escapeHTML(workspace.project_id)}"><input type="checkbox" name="allowed_workspace_ids" value="${escapeHTML(workspace.id)}" ${workspaceIDs.has(workspace.id) ? "checked" : ""} ${projectSelected ? "" : "disabled"}>${escapeHTML(project?.name || "-")} / ${escapeHTML(workspace.name)}</label>`;
 	}).join("");
-	const botDialogueMaxTurns = Number(config.bot_dialogue_max_turns || 6);
+	const botDialogueMaxTurns = Number(config.bot_dialogue_max_turns || 99);
 	const botDisplayName = String(config.runtime_bot_display_name_override || config.runtime_bot_display_name || "");
 	const providerBotDisplayName = String(config.runtime_bot_provider_display_name || "");
-	return `<details class="channel-instance-settings"><summary>Runtime、通知与访问范围</summary><form data-channel-settings="${escapeHTML(instance.id)}" data-revision="${instance.revision}">${runtimeEditor("default", "实例默认 Runtime", objectValue(config.runtime_default), context, false)}<details class="channel-runtime-overrides"><summary>私聊与群聊分别设置 Runtime</summary>${runtimeEditor("assistant", "私聊助手", objectValue(config.runtime_assistant_dm), context, true)}${runtimeEditor("group", "群聊电子人", objectValue(config.runtime_group_digital_human), context, true)}</details><fieldset><legend>机器人身份与对话</legend><label>机器人显示名称<input name="runtime_bot_display_name_override" maxlength="60" value="${escapeHTML(botDisplayName)}" placeholder="${escapeHTML(providerBotDisplayName || instance.name)}"></label><small>本地名称保存后不会被飞书应用名称或群内观察结果覆盖；留空时跟随飞书当前名称。</small><label>最大连续对话轮数<input name="bot_dialogue_max_turns" type="number" min="1" max="50" step="1" value="${Number.isFinite(botDialogueMaxTurns) ? botDialogueMaxTurns : 6}" required></label><small>仅限制群聊中由机器人发送者触发的连续回复；真人发送者不受此限制。</small></fieldset><fieldset><legend>消息通知</legend><label class="channel-check"><input type="checkbox" name="notify_task_status" ${config.notify_task_status === true ? "checked" : ""}>普通 Task 状态变更推送到飞书私聊助手</label><small>仅推送等待处理、完成、失败或中断等状态；不会推送普通消息、过程输出或渠道宿主 Task。</small></fieldset><fieldset><legend>私聊操作范围</legend><label>范围模式<select name="operation_scope_mode"><option value="all" ${operationScopeMode === "all" ? "selected" : ""}>全部 Project / Workspace</option><option value="selected" ${operationScopeMode === "selected" || legacyOperationRestricted ? "selected" : ""}>限制到所选范围</option></select></label><small>默认全部；渠道宿主、知识库项目和只读 Workspace 仍由服务端排除。</small></fieldset><div data-channel-operation-selected ${operationScopeMode === "all" ? "hidden" : ""}><fieldset><legend>私聊操作范围 · Project</legend><div class="channel-checkbox-list">${projectChecks || "<small>暂无可选项目</small>"}</div></fieldset><fieldset><legend>私聊操作范围 · Workspace</legend><small>先选择 Project，随后仅可选择该 Project 下的 Workspace。</small><div class="channel-checkbox-list">${workspaceChecks || "<small>暂无可选 Workspace</small>"}</div></fieldset></div><button class="primary" type="submit">保存渠道设置</button></form></details>`;
+	return `<details class="channel-instance-settings"><summary>Runtime、通知与访问范围</summary><form data-channel-settings="${escapeHTML(instance.id)}" data-revision="${instance.revision}">${runtimeEditor("default", "实例默认 Runtime", objectValue(config.runtime_default), context, false)}<details class="channel-runtime-overrides"><summary>私聊与群聊分别设置 Runtime</summary>${runtimeEditor("assistant", "私聊助手", objectValue(config.runtime_assistant_dm), context, true)}${runtimeEditor("group", "群聊电子人", objectValue(config.runtime_group_digital_human), context, true)}</details><fieldset><legend>机器人身份与对话</legend><label>机器人显示名称<input name="runtime_bot_display_name_override" maxlength="60" value="${escapeHTML(botDisplayName)}" placeholder="${escapeHTML(providerBotDisplayName || instance.name)}"></label><small>本地名称保存后不会被飞书应用名称或群内观察结果覆盖；留空时跟随飞书当前名称。</small><label>最大连续对话轮数<input name="bot_dialogue_max_turns" type="number" min="1" max="99" step="1" value="${Number.isFinite(botDialogueMaxTurns) ? botDialogueMaxTurns : 99}" required></label><small>仅限制群聊中由机器人发送者触发的连续回复；真人发送者不受此限制。</small></fieldset><fieldset><legend>消息通知</legend><label class="channel-check"><input type="checkbox" name="notify_task_status" ${config.notify_task_status === true ? "checked" : ""}>普通 Task 状态变更推送到飞书私聊助手</label><small>仅推送等待处理、完成、失败或中断等状态；不会推送普通消息、过程输出或渠道宿主 Task。</small></fieldset><fieldset><legend>私聊操作范围</legend><label>范围模式<select name="operation_scope_mode"><option value="all" ${operationScopeMode === "all" ? "selected" : ""}>全部 Project / Workspace</option><option value="selected" ${operationScopeMode === "selected" || legacyOperationRestricted ? "selected" : ""}>限制到所选范围</option></select></label><small>默认全部；渠道宿主、知识库项目和只读 Workspace 仍由服务端排除。</small></fieldset><div data-channel-operation-selected ${operationScopeMode === "all" ? "hidden" : ""}><fieldset><legend>私聊操作范围 · Project</legend><div class="channel-checkbox-list">${projectChecks || "<small>暂无可选项目</small>"}</div></fieldset><fieldset><legend>私聊操作范围 · Workspace</legend><small>先选择 Project，随后仅可选择该 Project 下的 Workspace。</small><div class="channel-checkbox-list">${workspaceChecks || "<small>暂无可选 Workspace</small>"}</div></fieldset></div><button class="primary" type="submit">保存渠道设置</button></form></details>`;
 }
 
 export function renderChannels(providers: ChannelPlugin[], instances: ChannelInstance[], context: ChannelUIContext): string {
@@ -164,11 +164,11 @@ export function renderChannels(providers: ChannelPlugin[], instances: ChannelIns
     <header><div><strong>${escapeHTML(instance.name)}</strong><small>${escapeHTML(instance.provider_key || instance.plugin_id)}</small></div><span><span class="status ${instance.status === "ready" ? "good" : instance.status === "error" || instance.status === "degraded" ? "bad" : "warn"}">${instanceState(instance)}</span><button type="button" data-channel-instance-toggle="${escapeHTML(instance.id)}" data-enabled="${instance.status !== "disabled"}" data-revision="${instance.revision}">${instance.status === "disabled" ? "启用" : "停用"}</button></span></header>
     <dl><div><dt>凭据</dt><dd>${instance.credential_configured ? "已安全保存" : "未配置"}</dd></div><div><dt>App ID</dt><dd>${instance.app_id ? escapeHTML(instance.app_id) : "尚未创建"}</dd></div></dl>
     <div class="channel-instance-actions">
-      <button type="button" class="primary" data-channel-onboard="${escapeHTML(instance.id)}">${!instance.owner_bound ? (instance.credential_configured ? "扫码确认唯一 Owner" : "扫码创建并绑定") : "扫码更新权限"}</button>
+      <button type="button" class="primary" data-channel-onboard="${escapeHTML(instance.id)}">${!instance.owner_bound ? (instance.credential_configured ? "扫码确认唯一 Owner" : "扫码创建并绑定") : "更新权限"}</button>
       <button type="button" data-channel-reset-binding="${escapeHTML(instance.id)}" data-revision="${instance.revision}">重置绑定</button>
       <button type="button" class="danger" data-channel-archive="${escapeHTML(instance.id)}" data-revision="${instance.revision}">归档实例</button>
     </div>
-    ${instance.owner_bound ? `<small class="channel-instance-hint">扫码仅增补当前应用权限并重新确认唯一 Owner，不修改已有菜单、事件、回调或应用信息。</small>` : ""}
+    ${instance.owner_bound ? `<small class="channel-instance-hint">权限更新仅做增量授权；AHA 运行时菜单可独立勾选，不修改飞书后台已有菜单。</small>` : ""}
 		${instanceSettings(instance, context)}
     <details class="channel-instance-knowledge" data-channel-knowledge="${escapeHTML(instance.id)}"><summary>Knowledge 访问范围</summary><div class="channel-knowledge"><small>展开后加载</small></div></details>
     ${activity}
@@ -184,7 +184,7 @@ export function renderChannels(providers: ChannelPlugin[], instances: ChannelIns
   </section>`;
 }
 
-export function bindChannels(options: {refresh: () => Promise<void>; setMessage: (kind: "error" | "success", message: string) => void; context: ChannelUIContext; openProject?: (projectID: string) => void}): void {
+export function bindChannels(options: {refresh: () => Promise<void>; setMessage: (kind: "error" | "success", message: string) => void; context: ChannelUIContext; instances: ChannelInstance[]; openProject?: (projectID: string) => void}): void {
   const refresh = async () => {
     await options.refresh();
   };
@@ -204,8 +204,13 @@ export function bindChannels(options: {refresh: () => Promise<void>; setMessage:
     void api.updateChannelPlugin(plugin, !current, revision).then(refresh).catch(error => options.setMessage("error", error instanceof Error ? error.message : String(error)));
   }));
   document.querySelectorAll<HTMLButtonElement>("[data-channel-onboard]").forEach(button => button.addEventListener("click", () => {
+    const instance = options.instances.find(item => item.id === button.dataset.channelOnboard);
+    if (!instance) return;
     button.disabled = true;
-    void api.startChannelOnboarding(button.dataset.channelOnboard || "").then(result => showOnboarding(result.onboarding, options)).catch(error => {
+    void api.channelOnboardingOptions(instance.id).then(result => {
+      button.disabled = false;
+      showOnboardingSetup(instance, result.options, options);
+    }).catch(error => {
       button.disabled = false;
       options.setMessage("error", error instanceof Error ? error.message : String(error));
     });
@@ -293,7 +298,7 @@ export function bindChannels(options: {refresh: () => Promise<void>; setMessage:
 			allowed_project_ids: values.getAll("allowed_project_ids").map(String),
 			allowed_workspace_ids: values.getAll("allowed_workspace_ids").map(String),
 			notify_task_status: values.get("notify_task_status") === "on",
-			bot_dialogue_max_turns: Number(values.get("bot_dialogue_max_turns") || 6),
+			bot_dialogue_max_turns: Number(values.get("bot_dialogue_max_turns") || 99),
 			runtime_bot_display_name_override: String(values.get("runtime_bot_display_name_override") || "").trim(),
 		};
 		void api.updateChannelInstance(settingsForm.dataset.channelSettings || "", {config}, Number(settingsForm.dataset.revision || 0)).then(async () => {
@@ -394,6 +399,80 @@ export function bindChannels(options: {refresh: () => Promise<void>; setMessage:
 
 let onboardingPoll = 0;
 let channelReadinessGeneration = 0;
+
+function permissionOptionsHTML(options: ChannelOnboardingOptions): string {
+  return options.permissions.map(item => {
+    const locked = item.required || (options.mode === "existing_app" && item.enabled);
+    const status = item.required ? "核心权限" : item.enabled ? "已开启" : "可新增";
+    return `<label class="channel-onboarding-option ${locked ? "locked" : ""}">
+      <input type="checkbox" name="channel_permission_id" value="${escapeHTML(item.id)}" ${item.enabled ? "checked" : ""} ${locked ? "disabled" : ""}>
+      <span><strong>${escapeHTML(item.name)}</strong><small>${escapeHTML(item.description)}</small></span>
+      <b>${status}</b>
+    </label>`;
+  }).join("");
+}
+
+function selectedPermissionIDs(dialog: HTMLDialogElement): string[] {
+  return [...dialog.querySelectorAll<HTMLInputElement>('input[name="channel_permission_id"]:checked')].map(input => input.value);
+}
+
+function showOnboardingSetup(instance: ChannelInstance, options: ChannelOnboardingOptions, uiOptions: {refresh: () => Promise<void>; setMessage: (kind: "error" | "success", message: string) => void}): void {
+  document.querySelector("#channel-onboarding-setup")?.remove();
+  const dialog = document.createElement("dialog");
+  dialog.id = "channel-onboarding-setup";
+  dialog.className = "channel-onboarding-setup";
+  const existingApp = options.mode === "existing_app";
+  dialog.innerHTML = `<form method="dialog"><div class="dialog-head"><div><h2>${existingApp ? "更新飞书权限与菜单" : "配置飞书扫码权限"}</h2><small>${existingApp ? "已开启权限不能在扫码中撤销；菜单可直接恢复默认。" : "核心权限固定启用，其他权限按需勾选。"}</small></div><button type="button" class="icon-button" data-setup-close>${icon("close")}</button></div>
+    <div class="dialog-body channel-onboarding-setup-body">
+      <fieldset><legend>飞书权限</legend><div class="channel-onboarding-option-list">${permissionOptionsHTML(options) || "<small>当前提供方没有可选权限。</small>"}</div><p class="field-help">扫码只增补权限。已开启权限需要到飞书开发者后台撤销。</p></fieldset>
+      <fieldset><legend>飞书机器人菜单</legend><div class="channel-onboarding-menu-reset"><span><strong>重置为 AHA 默认菜单</strong><small>重新初始化项目、Workspace、任务查询和创建任务菜单，可能提交应用发布。</small></span><button type="button" data-reset-runtime-menus>重置菜单</button></div></fieldset>
+      <div class="channel-onboarding-summary" data-onboarding-summary></div>
+    </div>
+    <div class="dialog-actions"><button type="button" data-setup-close>取消</button><button type="submit" class="primary" data-onboarding-confirm>${existingApp ? "更新权限" : "扫码创建并绑定"}</button></div></form>`;
+  document.body.append(dialog);
+  const close = () => { dialog.close(); dialog.remove(); };
+  dialog.querySelectorAll("[data-setup-close]").forEach(button => button.addEventListener("click", close));
+  dialog.addEventListener("cancel", event => { event.preventDefault(); close(); });
+  const summary = dialog.querySelector<HTMLElement>("[data-onboarding-summary]");
+  const confirm = dialog.querySelector<HTMLButtonElement>("[data-onboarding-confirm]");
+  const sync = () => {
+    const selectedPermissions = selectedPermissionIDs(dialog);
+    const additions = options.permissions.filter(item => !item.enabled && selectedPermissions.includes(item.id));
+    if (summary) {
+      summary.innerHTML = `<strong>将启动飞书扫码</strong><span>新增 ${additions.length} 项权限；菜单初始化由独立按钮执行。</span>`;
+    }
+  };
+  dialog.addEventListener("change", sync);
+  sync();
+  dialog.querySelector<HTMLButtonElement>("[data-reset-runtime-menus]")?.addEventListener("click", event => {
+    if (!window.confirm("重置菜单会在飞书后台重新初始化 AHA 默认菜单，并可能提交应用发布。确定重新初始化机器人菜单？")) return;
+    const button = event.currentTarget as HTMLButtonElement;
+    button.disabled = true;
+    void api.resetChannelRuntimeMenus(instance.id, instance.revision).then(async () => {
+      close();
+      uiOptions.setMessage("success", "已提交飞书菜单初始化，完成状态请查看渠道运行记录。");
+      await uiOptions.refresh();
+    }).catch(error => {
+      button.disabled = false;
+      uiOptions.setMessage("error", error instanceof Error ? error.message : String(error));
+    });
+  });
+  dialog.addEventListener("submit", event => {
+    event.preventDefault();
+    if (!confirm || confirm.disabled) return;
+    confirm.disabled = true;
+    void api.startChannelOnboarding(instance.id, {
+      permission_ids: selectedPermissionIDs(dialog),
+    }).then(result => {
+      close();
+      showOnboarding(result.onboarding, uiOptions);
+    }).catch(error => {
+      confirm.disabled = false;
+      uiOptions.setMessage("error", error instanceof Error ? error.message : String(error));
+    });
+  });
+  dialog.showModal();
+}
 
 export async function waitForChannelReadiness(instanceID: string, options: {refresh: () => Promise<void>; setMessage: (kind: "error" | "success", message: string) => void}): Promise<void> {
   const generation = ++channelReadinessGeneration;

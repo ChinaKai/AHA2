@@ -12,7 +12,11 @@ import (
 	"github.com/ChinaKai/AHA2/internal/store"
 )
 
-func (s *Service) StartOnboarding(ctx context.Context, ownerID, ownerSessionID, instanceID, idempotencyKey string) (domain.ChannelOnboardingSession, error) {
+func (s *Service) StartOnboarding(
+	ctx context.Context,
+	ownerID, ownerSessionID, instanceID, idempotencyKey string,
+	permissionIDs []string,
+) (domain.ChannelOnboardingSession, error) {
 	instance, err := s.store.ChannelInstance(ctx, instanceID)
 	if err != nil || instance.OwnerID != ownerID {
 		if err == nil {
@@ -26,6 +30,10 @@ func (s *Service) StartOnboarding(ctx context.Context, ownerID, ownerSessionID, 
 	plugin, err := s.store.ChannelPlugin(ctx, instance.PluginID)
 	if err != nil || !plugin.Available {
 		return domain.ChannelOnboardingSession{}, fmt.Errorf("one_click_registration_unavailable")
+	}
+	selection, err := resolveOnboardingSelection(instance, plugin, permissionIDs)
+	if err != nil {
+		return domain.ChannelOnboardingSession{}, err
 	}
 	s.processMu.Lock()
 	runtimeReady := s.runtimeBaseURL != "" && s.runCtx != nil
@@ -70,6 +78,7 @@ func (s *Service) StartOnboarding(ctx context.Context, ownerID, ownerSessionID, 
 	command, err := s.EnqueueCommand(ctx, instance.ID, "register_app", "register_app:"+onboarding.ID, map[string]any{
 		"onboarding_id": onboarding.ID, "app_name": instance.Name, "app_id": instance.AppID,
 		"create_only": !instance.CredentialConfigured, "minimal_preset": true,
+		"tenant_scopes": selection.TenantScopes, "permission_ids": selection.PermissionIDs,
 	})
 	if err != nil {
 		return domain.ChannelOnboardingSession{}, err

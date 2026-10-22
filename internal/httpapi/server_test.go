@@ -756,6 +756,69 @@ func TestAddModelsGeneratesEnvGroupsAndSecrets(t *testing.T) {
 	if len(secretsStore.values) != 1 {
 		t.Fatalf("provider credential should survive model delete, got %d secrets", len(secretsStore.values))
 	}
+
+	remainingModels, err := database.ListModels(ctx)
+	if err != nil || len(remainingModels) != 1 {
+		t.Fatalf("remaining provider model missing: models=%#v err=%v", remainingModels, err)
+	}
+	remainingModel := remainingModels[0]
+	remainingGroup, err := database.EnvGroup(ctx, remainingModel.DefaultEnvGroupID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CreateProject(ctx, domain.Project{
+		ID: "project-provider-delete", Name: "Provider Delete", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CreateWorkspace(ctx, domain.Workspace{
+		ID: "workspace-provider-delete", ProjectID: "project-provider-delete", Name: "Workspace",
+		Locality: "local", Transport: "native", RootPath: t.TempDir(), Health: "ready",
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CreateRuntimeSnapshot(ctx, domain.RuntimeConfigSnapshot{
+		ID: "snapshot-provider-delete", WorkspaceID: "workspace-provider-delete", Backend: remainingModel.Backend,
+		ModelID: remainingModel.ID, WireModel: remainingModel.WireModel, EnvGroupID: remainingGroup.ID,
+		EnvGroupRevision: remainingGroup.Revision, PermissionsJSON: "{}", CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CreateTask(ctx, domain.Task{
+		ID: "task-provider-delete", ProjectID: "project-provider-delete", WorkspaceID: "workspace-provider-delete",
+		Title: "Historical", OriginalRequest: "test", CurrentGoal: "test", Status: domain.TaskDraft,
+		RuntimeConfigSnapshotID: "snapshot-provider-delete", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if agents, err := appService.TaskAgents(ctx, "task-provider-delete"); err != nil || len(agents) != 1 || !agents[0].RuntimeConfigValid {
+		t.Fatalf("provider runtime should start valid: agents=%#v err=%v", agents, err)
+	}
+
+	// Deleting the provider also disables its remaining in-use model. The task
+	// snapshot and env group remain for history, but the Agent becomes invalid.
+	response = requestJSON(t, client, http.MethodDelete, server.URL+"/api/v1/providers/"+providerID, nil, csrf)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("delete provider failed: %d", response.StatusCode)
+	}
+	response.Body.Close()
+	if models, err := database.ListModels(ctx); err != nil || len(models) != 0 {
+		t.Fatalf("models survived provider delete: models=%#v err=%v", models, err)
+	}
+	if providers, err := database.ListProviders(ctx); err != nil || len(providers) != 0 {
+		t.Fatalf("provider survived delete: providers=%#v err=%v", providers, err)
+	}
+	if len(secretsStore.values) != 0 {
+		t.Fatalf("provider credentials survived delete: %#v", secretsStore.values)
+	}
+	if backfilled, err := database.BackfillProviders(ctx); err != nil || backfilled != 0 {
+		t.Fatalf("deleted provider was recreated by backfill: count=%d err=%v", backfilled, err)
+	}
+	agents, err := appService.TaskAgents(ctx, "task-provider-delete")
+	if err != nil || len(agents) != 1 || agents[0].RuntimeConfigValid || !strings.Contains(agents[0].RuntimeConfigError, "模型已删除") {
+		t.Fatalf("provider delete did not invalidate the historical task: agents=%#v err=%v", agents, err)
+	}
 }
 
 func TestMissingStaticAssetReturnsNotFound(t *testing.T) {

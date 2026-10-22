@@ -48,7 +48,7 @@ Linux 安装后由 systemd 自动启动。监听地址和数据目录可在 `/et
 
 ### 首次初始化
 
-默认打开 `http://127.0.0.1:8766`，使用数据目录中的 `setup-token` 创建 Owner；后续忘记密码时也使用该文件完成本机恢复：
+默认打开 `http://127.0.0.1:8766`，使用安装时选择的数据目录中的 `setup-token` 创建 Owner；后续忘记密码时也使用该文件完成本机恢复。这里指的是**数据目录，不是程序安装目录**；如果替换或恢复了该文件，需要重启 AHA2 才会加载新值：
 
 - Windows：安装时选择的数据目录，默认为 `C:\ProgramData\AHA2\setup-token`
 - Linux：`sudo cat /var/lib/aha2/setup-token`

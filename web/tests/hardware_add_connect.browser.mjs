@@ -1,9 +1,7 @@
 // Optional browser verification; dependencies and browser files stay in .tools.
 //
-// Adding a hardware group and saving it should leave the console ready to
-// connect that group. The Owner reports having to reload the page first, so this
-// drives the real panel through add -> configure -> save and then asks whether
-// the console is usable for the group just saved, without a reload.
+// Enabling a system hardware resource from a Task should leave the terminal
+// ready without asking the user to recreate the physical connection.
 import assert from "node:assert/strict";
 import {createServer} from "node:http";
 import {readFile, mkdir} from "node:fs/promises";
@@ -26,26 +24,43 @@ const TASK = {
   created_at: "2026-09-27T00:00:00Z", updated_at: "2026-09-27T00:00:00Z",
 };
 
-// One existing serial group, so the panel opens on a working console.
+// One existing binding, so the panel opens on a working console.
 const EXISTING = [{
-  id: "hardware-1", task_id: TASK.id, position: 0, description: "Board A", mode: "serial",
+  id: "resource-a", resource_id: "resource-a", task_id: TASK.id, position: 0, description: "Board A", mode: "serial",
   serial: {device: "/dev/ttyUSB0", baudrate: 115200},
   network: {host: "", port: 23, protocol: "telnet", ssh_auth: "auto"},
   username: "", password_configured: false, access: "read_write",
   created_at: "2026-09-27T00:00:00Z", updated_at: "2026-09-27T00:00:00Z",
 }];
+const RESOURCES = [
+  {
+    id: "resource-a", description: "Board A", mode: "serial",
+    serial: {device: "/dev/ttyUSB0", baudrate: 115200},
+    network: {host: "", port: 23, protocol: "telnet", ssh_auth: "auto"},
+    password_configured: false, access: "read_write", binding_count: 1,
+    created_at: "2026-09-27T00:00:00Z", updated_at: "2026-09-27T00:00:00Z",
+  },
+  {
+    id: "resource-b", description: "Network Board B", mode: "network",
+    serial: {device: "", baudrate: 115200},
+    network: {host: "192.168.0.50", port: 22, protocol: "ssh", ssh_auth: "auto"},
+    username: "kaikai", password_configured: false, access: "read_write", binding_count: 0,
+    created_at: "2026-09-27T00:00:00Z", updated_at: "2026-09-27T00:00:00Z",
+  },
+];
 
 const bootstrap = `
 const json = (value, status = 200) => new Response(JSON.stringify(value), {status, headers: {"Content-Type": "application/json"}});
 const TASK = ${JSON.stringify(TASK)};
 let GROUPS = ${JSON.stringify(EXISTING)};
+const RESOURCES = ${JSON.stringify(RESOURCES)};
 window.__saved = null;
 window.__connectCalls = [];
 window.__terminalStatusCalls = [];
 const detail = () => ({
   task: TASK, turns: [],
   agents: [{agent_id: "main", status: "idle", title: "Main", runtime_config_valid: true, unread_count: 0}],
-  latest_round: null, hardware: GROUPS, memory: {},
+  latest_round: null, hardware: GROUPS, hardware_resources: RESOURCES, memory: {},
 });
 window.fetch = async (input, init = {}) => {
   const url = new URL(typeof input === "string" ? input : input.url, location.origin);
@@ -53,14 +68,14 @@ window.fetch = async (input, init = {}) => {
   const method = (init.method || "GET").toUpperCase();
   if (path === "/api/v1/auth/status") return json({authenticated: true, csrf_token: "csrf", owner: {id: "owner-1", username: "owner"}});
   if (path === "/api/v1/tasks/t-hw" && method === "GET") return json(detail());
-  if (path === "/api/v1/tasks/t-hw/hardware" && method === "PUT") {
+  if (path === "/api/v1/tasks/t-hw/hardware-bindings" && method === "PUT") {
     const body = JSON.parse(init.body || "{}");
     window.__saved = body;
-    // The server keeps the ids the client sends, and echoes the stored groups.
-    GROUPS = (body.groups || []).map((group, index) => Object.assign({}, group, {
-      task_id: TASK.id, position: index, password_configured: Boolean(group.password),
-    }));
-    return json({ok: true, groups: GROUPS});
+    GROUPS = (body.bindings || []).map((binding, index) => {
+      const resource = RESOURCES.find(item => item.id === binding.resource_id);
+      return {...resource, id: binding.id, resource_id: resource.id, task_id: TASK.id, position: index};
+    });
+    return json({ok: true, groups: GROUPS, resources: RESOURCES});
   }
   if (path.includes("/hardware/") && path.endsWith("/connect")) {
     window.__connectCalls.push({group: path, transport: new URL(url, location.origin).searchParams.get("transport")});
@@ -136,47 +151,39 @@ try {
     document.querySelector("#task-tool-panel-body").innerHTML = mod.renderHardwarePanel(detail);
     window.__notices = [];
     mod.bindHardwarePanel(detail, (kind, message) => { window.__notices.push(kind + ":" + message); });
-    return document.querySelector("#hardware-add") !== null;
+    return document.querySelectorAll("[data-hardware-resource-toggle]").length;
   });
-  assert.equal(mounted, true, "the hardware panel did not mount");
+  assert.equal(mounted, 2, "the task panel did not list system resources");
   // The config section is a collapsed <details> once a group exists; open it the
   // way a user would before touching anything inside.
   await page.evaluate(() => {
     const details = document.querySelector("#task-tool-panel-body details.hardware-config");
     if (details) details.open = true;
   });
-  await page.waitForSelector("#hardware-add", {timeout: 15000});
+  await page.waitForSelector('[data-hardware-resource-toggle="resource-b"]', {timeout: 15000});
   assert.deepEqual(errors, [], "the panel threw while opening");
 
-  // Add a network/SSH group and configure it, exactly as a user would.
-  await page.evaluate(() => document.querySelector("#hardware-add").click());
-  await page.waitForTimeout(200);
-  const form = page.locator("#hardware-config-form");
-  await form.locator('select[name="mode"]').selectOption("network");
-  await form.locator('input[name="network_host"]').fill("192.168.0.50");
-  await form.locator('input[name="network_port"]').fill("22");
-  await form.locator('select[name="network_protocol"]').selectOption("ssh");
-  // SSH mode makes the login name required, so fill it as a user must.
-  await form.locator('input[name="username"]').fill("kaikai");
-  await page.waitForTimeout(150);
-  await page.evaluate(() => document.querySelector("#hardware-config-form").requestSubmit());
+  // Enable the second system resource for this Task and save the binding.
+  await page.click('[data-hardware-resource-toggle="resource-b"]');
   await page.waitForFunction(() => window.__saved !== null, null, {timeout: 10000});
 
   const saved = await page.evaluate(() => window.__saved);
-  const newID = saved.groups[saved.groups.length - 1].id;
+  const newID = saved.bindings[saved.bindings.length - 1].id;
+  assert.deepEqual(saved.bindings.map(item => item.resource_id), ["resource-a", "resource-b"]);
+  assert.equal(Object.hasOwn(saved.bindings[0], "access"), false);
+  await page.selectOption("#hardware-group-select", newID);
 
-  // The console must now be usable for the group that was just saved: the group
-  // is selected, the transport matches it, and connect is available.
+  // The enabled resource becomes usable immediately, with its own transport and
+  // task-level access.
   const view = await page.evaluate(() => {
     const select = document.querySelector("#hardware-group-select");
     const connect = document.querySelector("#hardware-connect");
-    const networkButton = document.querySelector('[data-hardware-transport="network"]');
     return {
       selected: select ? select.value : null,
       options: select ? [...select.options].map(option => option.value) : [],
       connectDisabled: connect ? connect.disabled : null,
-      networkActive: networkButton ? networkButton.classList.contains("active") : null,
-      networkDisabled: networkButton ? networkButton.disabled : null,
+      transportLabel: (document.querySelector(".hardware-transport-label") || {}).textContent || "",
+      transportSwitches: document.querySelectorAll("[data-hardware-transport]").length,
       status: (document.querySelector("#hardware-status") || {}).textContent || "",
     };
   });
@@ -184,8 +191,9 @@ try {
 
   assert.ok(view.options.includes(newID), `the new group is not in the picker: ${JSON.stringify(view)}`);
   assert.equal(view.selected, newID, `the picker did not follow the saved group: ${JSON.stringify(view)}`);
-  assert.equal(view.networkActive, true, `the transport did not follow the group's mode: ${JSON.stringify(view)}`);
-  assert.equal(view.connectDisabled, false, `connect is unavailable for the group just saved: ${JSON.stringify(view)}`);
+  assert.equal(view.transportLabel, "网络", `the transport did not follow the resource: ${JSON.stringify(view)}`);
+  assert.equal(view.transportSwitches, 0, `transport switches remained in the task panel: ${JSON.stringify(view)}`);
+  assert.equal(view.connectDisabled, false, `connect is unavailable for the enabled resource: ${JSON.stringify(view)}`);
 
   // And the console must actually poll that group, which is what makes it usable.
   await page.evaluate(() => { window.__terminalStatusCalls.length = 0; });
@@ -197,6 +205,9 @@ try {
   assert.deepEqual(errors, [], "the panel threw while connecting");
 
   await page.screenshot({path: resolve(output, "hardware-add-connect.png")});
+  await page.setViewportSize({width: 390, height: 844});
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
+  await page.screenshot({path: resolve(output, "hardware-add-connect-mobile.png")});
   console.log("connect call:", JSON.stringify(calls.connect[0]));
 } finally {
   if (browser) await browser.close();

@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"fmt"
 	"net/http"
 	"regexp"
 	"strings"
@@ -167,36 +166,51 @@ func (s *Server) deleteProvider(writer http.ResponseWriter, request *http.Reques
 	models, _ := s.store.ListModels(request.Context())
 	envGroups, _ := s.store.ListEnvGroups(request.Context())
 	var secretKeys []string
-	skippedModels := 0
-	credentialReferenced := false
+	deletedModels := 0
 	for _, model := range models {
 		if model.ProviderID != id {
 			continue
 		}
-		inUse, err := s.store.ModelInUse(request.Context(), model.ID)
-		if err == nil && inUse {
-			skippedModels++
-			credentialReferenced = true
-			continue
+		if err := s.store.DeleteModel(request.Context(), model.ID); err != nil {
+			writeError(writer, http.StatusInternalServerError, "delete_provider_models_failed")
+			return
 		}
-		_ = s.store.DeleteModel(request.Context(), model.ID)
+		deletedModels++
 	}
+	retainedGroups := 0
 	for _, group := range envGroups {
 		if group.ProviderID != id {
-			continue
-		}
-		inUse, err := s.store.EnvGroupInUse(request.Context(), group.ID)
-		if err == nil && inUse {
-			credentialReferenced = true
 			continue
 		}
 		for _, ref := range group.SecretRefs {
 			secretKeys = append(secretKeys, ref)
 		}
-		_ = s.store.DeleteEnvGroup(request.Context(), group.ID)
+		inUse, err := s.store.EnvGroupInUse(request.Context(), group.ID)
+		if err != nil {
+			writeError(writer, http.StatusInternalServerError, "delete_provider_env_groups_failed")
+			return
+		}
+		if !inUse {
+			if err := s.store.DeleteEnvGroup(request.Context(), group.ID); err != nil {
+				writeError(writer, http.StatusInternalServerError, "delete_provider_env_groups_failed")
+				return
+			}
+			continue
+		}
+		// Historical snapshots keep the env group row for referential integrity,
+		// but deleting a provider must still remove every credential it owned.
+		group.SecretRefs = map[string]string{}
+		group.SecretNames = nil
+		group.SecretConfigured = false
+		group.UpdatedAt = time.Now().UTC()
+		if err := s.store.UpsertEnvGroup(request.Context(), group); err != nil {
+			writeError(writer, http.StatusInternalServerError, "delete_provider_env_groups_failed")
+			return
+		}
+		retainedGroups++
 	}
 	provider, err := s.store.Provider(request.Context(), id)
-	if err == nil && provider.CredentialRef != "" && !credentialReferenced {
+	if err == nil && provider.CredentialRef != "" {
 		secretKeys = append(secretKeys, provider.CredentialRef)
 	}
 	if s.secrets != nil {
@@ -206,12 +220,13 @@ func (s *Server) deleteProvider(writer http.ResponseWriter, request *http.Reques
 		writeError(writer, http.StatusInternalServerError, "delete_provider_failed")
 		return
 	}
-	s.audit(request, "provider.delete", "provider", id, map[string]any{"skipped_models": skippedModels})
-	message := ""
-	if skippedModels > 0 {
-		message = "该 Provider 已删除；" + fmt.Sprintf("%d", skippedModels) + " 个被任务占用的模型已保留，其凭据仍可用。"
-	}
-	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "warning": message, "skipped_models": skippedModels})
+	s.audit(request, "provider.delete", "provider", id, map[string]any{
+		"deleted_models": deletedModels, "retained_env_groups": retainedGroups,
+	})
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"ok": true, "deleted_models": deletedModels,
+		"warning": "Provider 及其模型已删除；使用这些模型的任务会暂停输入，进入任务后可重新选择模型。",
+	})
 }
 
 func (s *Server) deleteModel(writer http.ResponseWriter, request *http.Request) {

@@ -105,6 +105,7 @@ type Manager struct {
 	openSerial  func(string, int) (io.ReadWriteCloser, error)
 	dialNetwork func(context.Context, string, string) (net.Conn, error)
 	openSSH     func(context.Context, string, string, string, string) (io.ReadWriteCloser, error)
+	openADB     func(context.Context, string) (io.ReadWriteCloser, error)
 
 	mu          sync.Mutex
 	sessions    map[string]*terminalSession
@@ -121,6 +122,7 @@ func NewManager(recorder Recorder) *Manager {
 			return dialer.DialContext(ctx, network, address)
 		},
 		openSSH:     openSSHTerminal,
+		openADB:     openADBTerminal,
 		sessions:    map[string]*terminalSession{},
 		attachments: map[string]*terminalSession{},
 	}
@@ -164,6 +166,15 @@ func (manager *Manager) Connect(ctx context.Context, request ConnectRequest) (do
 			return domain.HardwareTerminalStatus{}, fmt.Errorf("%s is already connected with different settings", endpoint)
 		}
 		current.mu.Lock()
+		if !request.ReadOnly {
+			for key, existing := range current.attachments {
+				if key != attachmentKey && !existing.readOnly {
+					current.mu.Unlock()
+					manager.mu.Unlock()
+					return domain.HardwareTerminalStatus{}, fmt.Errorf("%s is already attached to another task for read-write access", endpoint)
+				}
+			}
+		}
 		current.attachments[attachmentKey] = attachment{
 			taskID: request.TaskID, hardwareID: request.HardwareID, readOnly: request.ReadOnly,
 		}
@@ -180,12 +191,19 @@ func (manager *Manager) Connect(ctx context.Context, request ConnectRequest) (do
 		connection, err = manager.openSerial(request.Group.Serial.Device, baudrate)
 	} else if protocol == domain.HardwareProtocolSSH {
 		connection, err = manager.openSSH(ctx, endpoint, request.Group.Username, request.Password, sshAuth)
+	} else if protocol == domain.HardwareProtocolADB {
+		connection, err = manager.openADB(ctx, endpoint)
 	} else {
 		connection, err = manager.dialNetwork(ctx, "tcp", endpoint)
 	}
 	if err != nil {
 		manager.mu.Unlock()
 		return domain.HardwareTerminalStatus{}, fmt.Errorf("connect %s: %w", endpoint, err)
+	}
+	if resolved, ok := connection.(interface{ ResolvedEndpoint() string }); ok {
+		if value := strings.TrimSpace(resolved.ResolvedEndpoint()); value != "" {
+			endpoint = value
+		}
 	}
 	now := manager.now().UTC()
 	session := &terminalSession{
@@ -198,7 +216,7 @@ func (manager *Manager) Connect(ctx context.Context, request ConnectRequest) (do
 		subscribers: map[string]liveSubscriber{},
 	}
 	session.loginOptions = normalizeLoginOptions(LoginOptions{})
-	if protocol == domain.HardwareProtocolSSH {
+	if protocol == domain.HardwareProtocolSSH || protocol == domain.HardwareProtocolADB {
 		session.loginStatus = "authenticated"
 	} else if session.username != "" || session.password != "" {
 		session.loginStatus = "waiting"
@@ -833,17 +851,20 @@ func sessionTarget(group domain.HardwareGroup, transport string) (key, endpoint,
 		key = "serial:" + strings.ToLower(endpoint)
 	case domain.HardwareTransportNetwork:
 		host := strings.TrimSpace(group.Network.Host)
-		port := group.Network.Port
-		if port <= 0 {
-			port = 23
-		}
 		protocol = strings.TrimSpace(group.Network.Protocol)
 		if protocol == "" {
 			protocol = domain.HardwareProtocolTelnet
 		}
-		if protocol != domain.HardwareProtocolTelnet && protocol != domain.HardwareProtocolRaw && protocol != domain.HardwareProtocolSSH {
+		if protocol != domain.HardwareProtocolTelnet &&
+			protocol != domain.HardwareProtocolRaw &&
+			protocol != domain.HardwareProtocolSSH &&
+			protocol != domain.HardwareProtocolADB {
 			err = fmt.Errorf("unsupported network protocol %q", protocol)
 			return
+		}
+		port := group.Network.Port
+		if port <= 0 {
+			port = defaultNetworkPort(protocol)
 		}
 		if host == "" {
 			err = fmt.Errorf("network host is required")
@@ -855,6 +876,17 @@ func sessionTarget(group domain.HardwareGroup, transport string) (key, endpoint,
 		err = fmt.Errorf("unsupported hardware transport %q", transport)
 	}
 	return
+}
+
+func defaultNetworkPort(protocol string) int {
+	switch protocol {
+	case domain.HardwareProtocolSSH:
+		return 22
+	case domain.HardwareProtocolADB:
+		return 5555
+	default:
+		return 23
+	}
 }
 
 func decodeHex(value string) ([]byte, error) {

@@ -287,10 +287,14 @@ func registerApp(ctx context.Context, client *runtimeClient, item command) error
 }
 
 func registrationOptions(item command) *registration.Options {
+	tenantScopes := registrationTenantScopes()
+	if configured, present := stringValues(item.Payload, "tenant_scopes"); present {
+		tenantScopes = configured
+	}
 	options := &registration.Options{
 		CreateOnly: boolValue(item.Payload, "create_only"),
 		AppID:      stringValue(item.Payload, "app_id"),
-		Addons:     &registration.AppAddons{Scopes: registration.AppAddonsScopes{Tenant: registrationTenantScopes()}},
+		Addons:     &registration.AppAddons{Scopes: registration.AppAddonsScopes{Tenant: tenantScopes}},
 	}
 	if options.CreateOnly {
 		preset := false
@@ -308,6 +312,29 @@ func registrationTenantScopes() []string {
 		"application:bot.basic_info:read",
 		"im:chat:readonly", "contact:user.base:readonly", "cardkit:card:write", "application:application:patch", "im:resource", "im:message:readonly",
 	}
+}
+
+func stringValues(values map[string]any, key string) ([]string, bool) {
+	raw, present := values[key]
+	if !present {
+		return nil, false
+	}
+	result := []string{}
+	switch typed := raw.(type) {
+	case []any:
+		for _, item := range typed {
+			if value := strings.TrimSpace(fmt.Sprint(item)); value != "" && value != "<nil>" {
+				result = append(result, value)
+			}
+		}
+	case []string:
+		for _, item := range typed {
+			if value := strings.TrimSpace(item); value != "" {
+				result = append(result, value)
+			}
+		}
+	}
+	return result, true
 }
 
 func registrationErrorCode(err error) string {
@@ -614,7 +641,7 @@ func (c *runtimeClient) commandLoop(ctx context.Context, client *lark.Client, bo
 					continue
 				}
 				_ = c.complete(ctx, item, true, result, "")
-			case "configure_menu", "initialize_menu":
+			case "configure_menu", "initialize_menu", "reset_menu":
 				result, err := configureMenuCommand(ctx, client, boot.AppID, item)
 				if err != nil {
 					_ = c.complete(ctx, item, false, menuConfigurationFailureResult(err), menuConfigurationErrorCode(err))
@@ -703,17 +730,34 @@ func configureMenuCommand(ctx context.Context, client *lark.Client, appID string
 		return map[string]any{"status": "skipped", "reason": "existing_menu_preserved"}, nil
 	}
 	age := time.Since(item.CreatedAt)
+	if item.Kind == "reset_menu" {
+		if !boolValue(item.Payload, "reset_existing") || stringValue(item.Payload, "app_id") != appID || appID == "" || item.Attempts != 1 || item.CreatedAt.IsZero() || age < 0 || age > 5*time.Minute {
+			return nil, menuConfigFailure{stage: "confirmation_required"}
+		}
+		tenantScopes, present := stringValues(item.Payload, "tenant_scopes")
+		if !present {
+			tenantScopes = registrationTenantScopes()
+		}
+		if err := configureFeishuMenu(ctx, client, appID, tenantScopes, defaultFeishuMenuKeys()); err != nil {
+			return nil, err
+		}
+		return map[string]any{"status": "menu_initialized", "menu_version": 1}, nil
+	}
 	if item.Kind != "initialize_menu" || !boolValue(item.Payload, "new_app") || stringValue(item.Payload, "app_id") != appID || appID == "" || stringValue(item.Payload, "onboarding_id") == "" || item.Attempts != 1 || item.CreatedAt.IsZero() || age < 0 || age > 5*time.Minute {
 		return nil, menuConfigFailure{stage: "confirmation_required"}
 	}
-	if err := configureFeishuMenu(ctx, client, appID); err != nil {
+	tenantScopes, present := stringValues(item.Payload, "tenant_scopes")
+	if !present {
+		tenantScopes = registrationTenantScopes()
+	}
+	if err := configureFeishuMenu(ctx, client, appID, tenantScopes, defaultFeishuMenuKeys()); err != nil {
 		return nil, err
 	}
 	return map[string]any{"status": "publish_submitted", "menu_version": 1}, nil
 }
 
-func configureFeishuMenu(ctx context.Context, client *lark.Client, appID string) error {
-	scopeNames := []string{"im:chat:readonly", "contact:user.base:readonly", "im:resource", "im:message:readonly"}
+func configureFeishuMenu(ctx context.Context, client *lark.Client, appID string, scopeNames, menuKeys []string) error {
+	scopeNames = menuConfigurationScopes(scopeNames)
 	scopes := make([]*larkapplicationv7.AppConfigScopeItem, 0, len(scopeNames))
 	for _, name := range scopeNames {
 		scopes = append(scopes, larkapplicationv7.NewAppConfigScopeItemBuilder().ScopeName(name).TokenType("tenant").Build())
@@ -730,7 +774,7 @@ func configureFeishuMenu(ctx context.Context, client *lark.Client, appID string)
 		return rejectedMenuConfig("config", configResponse.CodeError)
 	}
 	abilityBody := larkapplicationv7.NewPatchApplicationAbilityReqBodyBuilder().Bot(
-		buildFeishuMenuAbility(),
+		buildFeishuMenuAbility(menuKeys),
 	).Build()
 	abilityRequest := larkapplicationv7.NewPatchApplicationAbilityReqBuilder().AppId(appID).Body(abilityBody).Build()
 	abilityResponse, err := client.Application.V7.ApplicationAbility.Patch(ctx, abilityRequest)
@@ -752,7 +796,33 @@ func configureFeishuMenu(ctx context.Context, client *lark.Client, appID string)
 	return nil
 }
 
-func buildFeishuMenuAbility() *larkapplicationv7.AppAbilityBot {
+func menuConfigurationScopes(selected []string) []string {
+	allowed := map[string]bool{
+		"im:chat:readonly": true, "contact:user.base:readonly": true,
+		"im:resource": true, "im:message:readonly": true,
+	}
+	result := []string{}
+	for _, scope := range selected {
+		if allowed[scope] {
+			result = append(result, scope)
+		}
+	}
+	if !containsString(result, "im:message:readonly") {
+		result = append(result, "im:message:readonly")
+	}
+	return result
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
+func buildFeishuMenuAbility(menuKeys []string) *larkapplicationv7.AppAbilityBot {
 	menu := func(id, parent, label string, sort, action int, eventKey string) *larkapplicationv7.BotMenuNode {
 		builder := larkapplicationv7.NewBotMenuNodeBuilder().MenuId(id).Sort(sort).DefaultName(label).I18nName(map[string]string{"zh_cn": label}).MenuContentType(action)
 		if parent != "" {
@@ -763,17 +833,49 @@ func buildFeishuMenuAbility() *larkapplicationv7.AppAbilityBot {
 		}
 		return builder.Build()
 	}
-	menus := []*larkapplicationv7.BotMenuNode{
-		menu("aha_project", "", "项目", 1, 3, ""),
-		menu("aha_project_query", "aha_project", "查询项目", 2, 2, "aha.project.query"),
-		menu("aha_workspace_query", "aha_project", "查询 Workspace", 3, 2, "aha.workspace.query"),
-		menu("aha_task", "", "任务", 4, 3, ""),
-		menu("aha_task_query", "aha_task", "查询任务", 5, 2, "aha.task.query"),
-		menu("aha_task_create", "aha_task", "创建任务", 6, 2, "aha.task.create"),
+	selected := map[string]bool{}
+	for _, key := range menuKeys {
+		selected[key] = true
 	}
+	menus := []*larkapplicationv7.BotMenuNode{}
+	sortOrder := 1
+	appendGroup := func(id, label string, children ...[3]any) {
+		active := false
+		for _, child := range children {
+			if selected[child[2].(string)] {
+				active = true
+				break
+			}
+		}
+		if !active {
+			return
+		}
+		menus = append(menus, menu(id, "", label, sortOrder, 3, ""))
+		sortOrder++
+		for _, child := range children {
+			eventKey := child[2].(string)
+			if !selected[eventKey] {
+				continue
+			}
+			menus = append(menus, menu(child[0].(string), id, child[1].(string), sortOrder, 2, eventKey))
+			sortOrder++
+		}
+	}
+	appendGroup("aha_project", "项目",
+		[3]any{"aha_project_query", "查询项目", "aha.project.query"},
+		[3]any{"aha_workspace_query", "查询 Workspace", "aha.workspace.query"},
+	)
+	appendGroup("aha_task", "任务",
+		[3]any{"aha_task_query", "查询任务", "aha.task.query"},
+		[3]any{"aha_task_create", "创建任务", "aha.task.create"},
+	)
 	return larkapplicationv7.NewAppAbilityBotBuilder().Enable(true).I18ns([]*larkapplicationv7.AppAbilityBotI18n{
 		larkapplicationv7.NewAppAbilityBotI18nBuilder().I18nKey("zh_cn").GetStartedDesc("使用 AHA2 管理项目和任务").Build(),
 	}).BotMenuEnable(true).BotMenus(menus).BotMenuDisplayStrategy(1).Build()
+}
+
+func defaultFeishuMenuKeys() []string {
+	return []string{"aha.project.query", "aha.workspace.query", "aha.task.query", "aha.task.create"}
 }
 
 func (c *runtimeClient) deliveryLoop(ctx context.Context, client *lark.Client) {

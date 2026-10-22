@@ -2,6 +2,7 @@ package sync
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"path/filepath"
@@ -122,6 +123,82 @@ func TestApplySecretBundlePreservesLocalReferencesAndRestoresCodexAccount(t *tes
 	credential, ok := destinationSecrets.Get(restored.CredentialRef)
 	if !ok || !strings.Contains(credential, "refresh-secret") {
 		t.Fatal("Codex credential not restored")
+	}
+}
+
+func TestApplySecretBundleDoesNotRestoreDeletedCodexAccount(t *testing.T) {
+	ctx, source, sourceSecrets := secretBundleFixture(t)
+	now := time.Now().UTC()
+	account := domain.CodexAccount{
+		ID: "codex-deleted", Label: "Deleted", Status: "ready",
+		CredentialRef: "codex-account/codex-deleted/auth", CredentialConfigured: true,
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := source.UpsertCodexAccount(ctx, account); err != nil {
+		t.Fatal(err)
+	}
+	if err := sourceSecrets.PutMany(map[string]string{account.CredentialRef: `{"auth_mode":"chatgpt","tokens":{"access_token":"secret"}}`}); err != nil {
+		t.Fatal(err)
+	}
+	obj, err := ExportSecretBundle(ctx, source, sourceSecrets, SecretSelection{CodexAccountIDs: []string{account.ID}}, "passphrase")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, destination, destinationSecrets := secretBundleFixture(t)
+	if err := destination.UpsertCodexAccount(ctx, account); err != nil {
+		t.Fatal(err)
+	}
+	if err := destinationSecrets.PutMany(map[string]string{account.CredentialRef: "local-secret"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := destination.DeleteCodexAccount(ctx, account.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := destinationSecrets.DeleteMany([]string{account.CredentialRef}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplySecretBundle(ctx, destination, destinationSecrets, obj, "passphrase"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := destination.CodexAccount(ctx, account.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("deleted Codex account was restored by stale bundle: %v", err)
+	}
+	if _, ok := destinationSecrets.Get(account.CredentialRef); ok {
+		t.Fatal("stale bundle restored a deleted Codex credential")
+	}
+}
+
+func TestCodexAccountTombstoneHandlerDeletesRowAndCredential(t *testing.T) {
+	ctx, database, secretStore := secretBundleFixture(t)
+	now := time.Now().UTC()
+	account := domain.CodexAccount{
+		ID: "codex-remote-delete", Label: "Remote", Status: "ready",
+		CredentialRef: "codex-account/codex-remote-delete/auth", CredentialConfigured: true,
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := database.UpsertCodexAccount(ctx, account); err != nil {
+		t.Fatal(err)
+	}
+	if err := secretStore.PutMany(map[string]string{account.CredentialRef: "remote-secret"}); err != nil {
+		t.Fatal(err)
+	}
+	engine := &Engine{}
+	RegisterCodexAccountTombstoneHandler(engine, database, secretStore)
+	if err := engine.handlers[TypeCodexAccount](ctx, domain.SyncObject{
+		Type: TypeCodexAccount, ID: account.ID, Operation: "delete",
+		SourceVersion: timeVersion(now), IdempotencyKey: "delete-codex-account",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.CodexAccount(ctx, account.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("remote Codex delete did not remove the row: %v", err)
+	}
+	if _, err := database.SyncTombstone(ctx, TypeCodexAccount, account.ID); err != nil {
+		t.Fatalf("remote Codex delete did not persist a tombstone: %v", err)
+	}
+	if _, ok := secretStore.Get(account.CredentialRef); ok {
+		t.Fatal("remote Codex delete left the credential in Secret Store")
 	}
 }
 

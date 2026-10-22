@@ -556,7 +556,7 @@ func (s *Service) CreateAgentTask(ctx context.Context, claims agentapi.Claims, i
 		return domain.Task{}, domain.Turn{}, err
 	}
 	if input.CloneHardware {
-		if err := s.cloneTaskHardware(ctx, call.Task.ID, item.ID); err != nil {
+		if err := s.CloneTaskHardware(ctx, call.Task.ID, item.ID); err != nil {
 			_ = s.store.UpdateTaskStatus(ctx, item.ID, item.Status, domain.TaskBlocked, timeString(s.now().UTC()), "")
 			return item, domain.Turn{}, fmt.Errorf("clone hardware: %w", err)
 		}
@@ -585,34 +585,21 @@ func (s *Service) AgentProjectTask(ctx context.Context, claims agentapi.Claims, 
 	return item, turns, err
 }
 
-func (s *Service) cloneTaskHardware(ctx context.Context, sourceTaskID, targetTaskID string) error {
+func (s *Service) CloneTaskHardware(ctx context.Context, sourceTaskID, targetTaskID string) error {
 	groups, err := s.store.HardwareGroups(ctx, sourceTaskID)
 	if err != nil {
 		return err
 	}
-	secretsToStore := map[string]string{}
-	for index := range groups {
-		groups[index].TaskID = targetTaskID
-		if groups[index].CredentialRef == "" {
-			continue
+	now := s.now().UTC()
+	bindings := make([]domain.TaskHardwareBinding, 0, len(groups))
+	for _, group := range groups {
+		if group.ResourceID == "" {
+			return fmt.Errorf("hardware %s has no system resource", group.ID)
 		}
-		if s.secrets == nil {
-			return fmt.Errorf("secret store is unavailable")
-		}
-		value, ok := s.secrets.Get(groups[index].CredentialRef)
-		if !ok {
-			return fmt.Errorf("hardware credential %s is unavailable", groups[index].ID)
-		}
-		groups[index].CredentialRef = "hardware/" + targetTaskID + "/" + groups[index].ID + "/credential"
-		secretsToStore[groups[index].CredentialRef] = value
+		bindings = append(bindings, domain.TaskHardwareBinding{
+			TaskID: targetTaskID, ID: group.ID, ResourceID: group.ResourceID,
+			CreatedAt: now, UpdatedAt: now,
+		})
 	}
-	if len(secretsToStore) > 0 {
-		if s.secrets == nil {
-			return fmt.Errorf("secret store is unavailable")
-		}
-		if err := s.secrets.PutMany(secretsToStore); err != nil {
-			return err
-		}
-	}
-	return s.store.ReplaceHardwareGroups(ctx, targetTaskID, groups)
+	return s.store.ReplaceTaskHardwareBindings(ctx, targetTaskID, bindings)
 }

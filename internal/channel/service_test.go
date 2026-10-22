@@ -126,6 +126,11 @@ func TestDiscoverAndCreateInstanceIsOptionalAndIdempotent(t *testing.T) {
 	if err != nil || item.RuntimeDeviceID != "device-local" || len(endpoints) != 2 {
 		t.Fatalf("instance=%#v endpoints=%#v err=%v", item, endpoints, err)
 	}
+	onboardingOptions, err := service.OnboardingOptions(ctx, owner.ID, item.ID)
+	if err != nil || onboardingOptions.Mode != "register_app" || len(onboardingOptions.Permissions) != len(feishuPermissionCatalog) ||
+		!onboardingOptions.Permissions[0].Required {
+		t.Fatalf("onboarding options=%#v err=%v", onboardingOptions, err)
+	}
 	project, err := database.Project(ctx, item.HostProjectID)
 	if err != nil || project.ProjectType != "channel" {
 		t.Fatalf("project=%#v err=%v", project, err)
@@ -193,7 +198,14 @@ func TestDiscoverAndCreateInstanceIsOptionalAndIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registerCommand, err := service.EnqueueCommand(ctx, item.ID, "register_app", "register-app-test", map[string]any{"onboarding_id": "onboarding-test"})
+	registerCommand, err := service.EnqueueCommand(ctx, item.ID, "register_app", "register-app-test", map[string]any{
+		"onboarding_id":  "onboarding-test",
+		"permission_ids": []string{"messages_core", "cards", "media"},
+		"tenant_scopes": []string{
+			"im:message.p2p_msg:readonly", "im:message:readonly", "im:message:send_as_bot",
+			"application:bot.basic_info:read", "cardkit:card:write", "im:resource",
+		},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,6 +258,9 @@ func TestDiscoverAndCreateInstanceIsOptionalAndIdempotent(t *testing.T) {
 	if err != nil || !registered.CredentialConfigured || registered.AppID != "cli_test" {
 		t.Fatalf("registered=%#v err=%v", registered, err)
 	}
+	if got, _ := stringListField(registered.Config, "channel_permission_ids"); strings.Join(got, ",") != "messages_core,cards,media" {
+		t.Fatalf("registered permissions=%#v", registered.Config["channel_permission_ids"])
+	}
 	encoded, _ := json.Marshal(registered)
 	if strings.Contains(string(encoded), "top-secret-value") || strings.Contains(string(encoded), "credential_ref") {
 		t.Fatalf("secret leaked: %s", encoded)
@@ -256,6 +271,33 @@ func TestDiscoverAndCreateInstanceIsOptionalAndIdempotent(t *testing.T) {
 	initialization, err := database.ClaimChannelCommands(ctx, item.ID, 10, now.Add(time.Second), time.Minute)
 	if err != nil || len(initialization) != 1 || initialization[0].Kind != "initialize_menu" || initialization[0].Attempts != 1 || initialization[0].Payload["app_id"] != "cli_test" {
 		t.Fatalf("initial menu command=%#v err=%v", initialization, err)
+	}
+	currentRegistration, _, err := service.Instance(ctx, owner.ID, item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resetCommand, err := service.ResetRuntimeMenus(ctx, owner.ID, item.ID, "reset-test", currentRegistration.Revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resetCommand.Kind != "reset_menu" || resetCommand.Payload["app_id"] != "cli_test" || resetCommand.Payload["reset_existing"] != true {
+		t.Fatalf("reset menu command=%#v", resetCommand)
+	}
+	resetClaims, err := database.ClaimChannelCommands(ctx, item.ID, 10, now.Add(3*time.Second), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var claimedReset *domain.ChannelPluginCommand
+	for index := range resetClaims {
+		if resetClaims[index].ID == resetCommand.ID {
+			claimedReset = &resetClaims[index]
+		}
+	}
+	if claimedReset == nil {
+		t.Fatalf("reset menu command was not claimable: %#v", resetClaims)
+	}
+	if err := service.CompleteCommand(ctx, registerClaims, claimedReset.ID, claimedReset.LeaseID, true, map[string]any{"status": "menu_initialized"}, ""); err != nil {
+		t.Fatal(err)
 	}
 	if _, err := database.BindChannelOwnerIdentity(ctx, domain.ChannelIdentityLink{ID: "other-owner", InstanceID: item.ID, OwnerID: owner.ID, ExternalUserID: "different-scanner", Role: "owner", Status: "active", LinkedAt: now}); err == nil {
 		t.Fatal("second active channel owner was accepted")

@@ -152,19 +152,31 @@ func (s *Store) CompleteChannelRegistration(ctx context.Context, onboardingID, c
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return domain.ChannelInstance{}, domain.ChannelIdentityLink{}, err
 	}
+	var registrationPayloadJSON string
+	if err := tx.QueryRowContext(ctx, `SELECT payload_json FROM channel_plugin_commands WHERE id=? AND instance_id=?`, onboarding.RegistrationCommandID, instance.ID).Scan(&registrationPayloadJSON); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return domain.ChannelInstance{}, domain.ChannelIdentityLink{}, err
+	}
+	registrationPayload := decodeJSON(registrationPayloadJSON, map[string]any{})
+	configPatch := map[string]any{"tenant_brand": tenantBrand}
+	if permissionIDs, present := registrationPayload["permission_ids"]; present {
+		configPatch["channel_permission_ids"] = permissionIDs
+	}
 	identityID := domain.NewID("channel_identity")
 	if _, err := tx.ExecContext(ctx, `INSERT INTO channel_identity_links(id,instance_id,owner_id,provider_tenant_id,external_user_id,union_id,role,display_name,status,linked_at,revoked_at) VALUES(?,?,?,'',?,'','owner','','active',?,'') ON CONFLICT(instance_id,external_user_id) DO UPDATE SET owner_id=excluded.owner_id,role='owner',status='active',linked_at=excluded.linked_at,revoked_at=''`,
 		identityID, instance.ID, instance.OwnerID, scannerExternalUserID, timeString(at)); err != nil {
 		return domain.ChannelInstance{}, domain.ChannelIdentityLink{}, err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE channel_instances SET app_id=?,credential_ref=?,credential_configured=1,status='onboarding',config_json=json_patch(config_json,?),revision=revision+1,updated_at=? WHERE id=?`, appID, credentialRef, encodeJSON(map[string]any{"tenant_brand": tenantBrand}), timeString(at), instance.ID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE channel_instances SET app_id=?,credential_ref=?,credential_configured=1,status='onboarding',config_json=json_patch(config_json,?),revision=revision+1,updated_at=? WHERE id=?`, appID, credentialRef, encodeJSON(configPatch), timeString(at), instance.ID); err != nil {
 		return domain.ChannelInstance{}, domain.ChannelIdentityLink{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE channel_onboarding_sessions SET status='succeeded',step='runtime_starting',secret_stage_ref=?,scanner_external_user_id=?,consumed_at=?,updated_at=? WHERE id=?`, credentialRef, scannerExternalUserID, timeString(at), timeString(at), onboarding.ID); err != nil {
 		return domain.ChannelInstance{}, domain.ChannelIdentityLink{}, err
 	}
 	if initializeMenu {
-		payload := encodeJSON(map[string]any{"app_id": appID, "onboarding_id": onboarding.ID, "new_app": true})
+		payload := encodeJSON(map[string]any{
+			"app_id": appID, "onboarding_id": onboarding.ID, "new_app": true,
+			"tenant_scopes": registrationPayload["tenant_scopes"],
+		})
 		if _, err := tx.ExecContext(ctx, `INSERT INTO channel_plugin_commands(id,instance_id,kind,idempotency_key,payload_json,progress_json,state,attempts,available_at,lease_id,lease_until,result_json,last_error_code,created_at,completed_at) VALUES(?,?,'initialize_menu',?,?,'{}','pending',0,?,'','','{}','',?,'')`,
 			domain.NewID("channel_command"), instance.ID, "initialize_menu:"+onboarding.ID, payload, timeString(at), timeString(at)); err != nil {
 			return domain.ChannelInstance{}, domain.ChannelIdentityLink{}, err

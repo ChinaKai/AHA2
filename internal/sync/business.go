@@ -24,6 +24,7 @@ const (
 	TypeProvider          = "provider"
 	TypeModel             = "model"
 	TypeEnvGroup          = "env_group"
+	TypeCodexAccount      = "codex_account"
 	TypePromptOverride    = "prompt_override"
 	TypeProject           = "project"
 	TypeProductLine       = "product_line"

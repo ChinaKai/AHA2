@@ -28,6 +28,7 @@ var bundleEnvPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 type SecretReaderWriter interface {
 	Get(string) (string, bool)
 	PutMany(map[string]string) error
+	DeleteMany([]string) error
 }
 
 // SecretSelection is an explicit override used by focused callers and tests.
@@ -179,10 +180,10 @@ func ExportInfrastructureSecretBundle(ctx context.Context, database *store.Store
 				continue
 			}
 			expected := localHardwareSecretRef(task.ID, group.ID)
-			if group.CredentialRef != expected {
+			if group.CredentialRef != expected && !isHardwareResourceSecretRef(group.CredentialRef) {
 				return domain.SyncObject{}, fmt.Errorf("hardware %s/%s has non-portable secret reference", task.ID, group.ID)
 			}
-			value, ok := secrets.Get(expected)
+			value, ok := secrets.Get(group.CredentialRef)
 			if !ok || value == "" {
 				return domain.SyncObject{}, fmt.Errorf("hardware %s/%s credential is missing", task.ID, group.ID)
 			}
@@ -315,6 +316,11 @@ func localHardwareSecretRef(taskID, hardwareID string) string {
 	return "hardware/" + taskID + "/" + hardwareID + "/credential"
 }
 
+func isHardwareResourceSecretRef(ref string) bool {
+	parts := strings.Split(ref, "/")
+	return len(parts) == 3 && parts[0] == "hardware-resource" && bundleIDPattern.MatchString(parts[1]) && parts[2] == "credential"
+}
+
 func mirrorSecretRef(kind string, values ...string) string {
 	hash := sha256.New()
 	_, _ = hash.Write([]byte(kind))
@@ -416,6 +422,11 @@ func ApplySecretBundle(ctx context.Context, database *store.Store, secrets Secre
 	for _, entry := range bundle.CodexAccounts {
 		if !validBundleIdentity(entry.Account.ID, entry.Value) {
 			return errors.New("invalid Codex account secret entry")
+		}
+		if _, tombstoneErr := database.SyncTombstone(ctx, TypeCodexAccount, entry.Account.ID); tombstoneErr == nil {
+			continue
+		} else if !errors.Is(tombstoneErr, sql.ErrNoRows) {
+			return tombstoneErr
 		}
 		account := entry.Account
 		local, err := database.CodexAccount(ctx, account.ID)

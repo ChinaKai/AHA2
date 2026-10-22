@@ -153,6 +153,49 @@ func (s *Store) ActiveChannelTaskRouteForTask(ctx context.Context, taskID string
 		FROM channel_task_routes WHERE target_task_id=? AND state='active'`, taskID))
 }
 
+// TransferOwnerChannelTaskRoute moves the source Task's active primary channel
+// to a new Task and copies its participant configuration in one transaction.
+// A conversation has only one active Task, so this is deliberately a handoff,
+// not a second subscription.
+func (s *Store) TransferOwnerChannelTaskRoute(ctx context.Context, ownerID, sourceTaskID, targetTaskID string, at time.Time) (domain.ChannelTaskRoute, bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return domain.ChannelTaskRoute{}, false, err
+	}
+	defer tx.Rollback()
+	route, err := scanChannelTaskRoute(tx.QueryRowContext(ctx, `
+		SELECT route.id,route.instance_id,route.conversation_id,route.target_task_id,route.state,
+		       route.revision,route.pending_action_id,route.activated_at,route.exited_at,route.exit_reason
+		FROM channel_task_routes route
+		JOIN channel_instances instance ON instance.id=route.instance_id
+		WHERE route.target_task_id=? AND route.state='active' AND instance.owner_id=?`,
+		sourceTaskID, ownerID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.ChannelTaskRoute{}, false, nil
+	}
+	if err != nil {
+		return domain.ChannelTaskRoute{}, false, err
+	}
+	if _, err := activateChannelTaskRouteTx(ctx, tx, route.InstanceID, route.ConversationID, targetTaskID, "", at); err != nil {
+		return domain.ChannelTaskRoute{}, false, err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO channel_task_contacts(
+			task_id,conversation_id,identity_link_id,collaboration_role,created_at,updated_at
+		)
+		SELECT ?,conversation_id,identity_link_id,collaboration_role,?,?
+		FROM channel_task_contacts
+		WHERE task_id=? AND conversation_id=?`,
+		targetTaskID, timeString(at), timeString(at), sourceTaskID, route.ConversationID); err != nil {
+		return domain.ChannelTaskRoute{}, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return domain.ChannelTaskRoute{}, false, err
+	}
+	transferred, err := s.ActiveChannelTaskRouteForTask(ctx, targetTaskID)
+	return transferred, true, err
+}
+
 func (s *Store) ActivateOwnerChannelTaskRoute(ctx context.Context, instanceID, conversationID, taskID string, at time.Time) (domain.ChannelTaskRoute, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

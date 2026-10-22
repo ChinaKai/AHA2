@@ -78,3 +78,54 @@ func TestInfrastructureSecretBundleIsEncryptedAndStoredOnlyAsMirrorSecrets(t *te
 		t.Fatal("sync token crossed the device boundary")
 	}
 }
+
+func TestInfrastructureBundleExportsSystemHardwareResourceCredential(t *testing.T) {
+	ctx, source, sourceSecrets := secretBundleFixture(t)
+	now := time.Now().UTC()
+	project := domain.Project{ID: "project-resource-sync", Name: "Resource", CreatedAt: now, UpdatedAt: now}
+	if err := source.CreateProject(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	workspace := domain.Workspace{ID: "workspace-resource-sync", ProjectID: project.ID, Name: "Local", Locality: "local", Transport: "native", RootPath: "/tmp", Health: "ready", CreatedAt: now, UpdatedAt: now}
+	if err := source.CreateWorkspace(ctx, workspace); err != nil {
+		t.Fatal(err)
+	}
+	provider := domain.Provider{ID: "provider-resource-sync", Name: "Provider", BaseURL: "https://example.test", CreatedAt: now, UpdatedAt: now}
+	env := domain.EnvGroup{ID: "env-resource-sync", Name: "Env", ProviderID: provider.ID, Backend: "stub", Revision: 1, Environment: map[string]string{}, SecretRefs: map[string]string{}, CreatedAt: now, UpdatedAt: now}
+	model := domain.Model{ID: "model-resource-sync", DisplayName: "Model", ProviderID: provider.ID, Backend: "stub", WireModel: "stub", DefaultEnvGroupID: env.ID, CreatedAt: now, UpdatedAt: now}
+	for _, operation := range []func() error{func() error { return source.UpsertProvider(ctx, provider) }, func() error { return source.UpsertEnvGroup(ctx, env) }, func() error { return source.UpsertModel(ctx, model) }} {
+		if err := operation(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snapshot := domain.RuntimeConfigSnapshot{ID: "runtime-resource-sync", WorkspaceID: workspace.ID, Backend: "stub", ModelID: model.ID, WireModel: model.WireModel, EnvGroupID: env.ID, EnvGroupRevision: 1, CreatedAt: now}
+	task := domain.Task{ID: "task-resource-sync", ProjectID: project.ID, WorkspaceID: workspace.ID, Title: "Task", OriginalRequest: "test", CurrentGoal: "test", Status: domain.TaskWaitingUser, Isolation: "inplace", RuntimeConfigSnapshotID: snapshot.ID, CollaborationMode: "single", MaxAgents: 1, CreatedAt: now, UpdatedAt: now}
+	if _, err := source.CreateTaskWithSnapshot(ctx, snapshot, task); err != nil {
+		t.Fatal(err)
+	}
+	credentialRef := "hardware-resource/resource-shared/credential"
+	group := domain.HardwareGroup{
+		TaskID: task.ID, ID: "resource-shared", Mode: domain.HardwareModeNetwork,
+		Network:       domain.HardwareNetworkConfig{Host: "10.0.0.9", Port: 23, Protocol: domain.HardwareProtocolRaw},
+		CredentialRef: credentialRef, PasswordConfigured: true, Access: domain.HardwareAccessReadOnly,
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := source.ReplaceHardwareGroups(ctx, task.ID, []domain.HardwareGroup{group}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sourceSecrets.PutMany(map[string]string{credentialRef: "resource-secret"}); err != nil {
+		t.Fatal(err)
+	}
+	object, err := ExportInfrastructureSecretBundle(ctx, source, sourceSecrets, "device-a", "passphrase")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, destination, destinationSecrets := secretBundleFixture(t)
+	if err := ApplySecretBundle(ctx, destination, destinationSecrets, object, "passphrase"); err != nil {
+		t.Fatal(err)
+	}
+	ref := MirrorHardwareSecretRef("device-a", task.ID, "resource-shared")
+	if value, ok := destinationSecrets.Get(ref); !ok || value != "resource-secret" {
+		t.Fatalf("system hardware resource credential not mirrored: ok=%t value=%q", ok, value)
+	}
+}

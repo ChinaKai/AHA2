@@ -310,7 +310,7 @@ func (s *Store) UpsertProvider(ctx context.Context, item domain.Provider) error 
 			name=excluded.name,base_url=excluded.base_url,anthropic_base_url=excluded.anthropic_base_url,
 			auth_style=excluded.auth_style,
 			credential_ref=excluded.credential_ref,credential_configured=excluded.credential_configured,
-			updated_at=excluded.updated_at`,
+			updated_at=excluded.updated_at,deleted_at=''`,
 		item.ID, item.Name, item.BaseURL, item.AnthropicBaseURL, item.AuthStyle, item.CredentialRef,
 		boolInt(item.CredentialConfigured), timeString(item.CreatedAt), timeString(item.UpdatedAt),
 	)
@@ -329,7 +329,7 @@ func scanProvider(scanner interface{ Scan(...any) error }) (domain.Provider, err
 func (s *Store) ListProviders(ctx context.Context) ([]domain.Provider, error) {
 	// The official runtimes are addressed by sentinel ids rather than by rows, so
 	// they are not providers the operator can pick or edit.
-	rows, err := s.db.QueryContext(ctx, `SELECT id,name,base_url,anthropic_base_url,auth_style,credential_ref,credential_configured,created_at,updated_at FROM providers WHERE id NOT IN (?,?) ORDER BY name`,
+	rows, err := s.db.QueryContext(ctx, `SELECT id,name,base_url,anthropic_base_url,auth_style,credential_ref,credential_configured,created_at,updated_at FROM providers WHERE deleted_at='' AND id NOT IN (?,?) ORDER BY name`,
 		domain.OfficialCodexProviderID, domain.OfficialClaudeProviderID)
 	if err != nil {
 		return nil, err
@@ -347,13 +347,25 @@ func (s *Store) ListProviders(ctx context.Context) ([]domain.Provider, error) {
 }
 
 func (s *Store) Provider(ctx context.Context, id string) (domain.Provider, error) {
-	return scanProvider(s.db.QueryRowContext(ctx, `SELECT id,name,base_url,anthropic_base_url,auth_style,credential_ref,credential_configured,created_at,updated_at FROM providers WHERE id=?`, id))
+	return scanProvider(s.db.QueryRowContext(ctx, `SELECT id,name,base_url,anthropic_base_url,auth_style,credential_ref,credential_configured,created_at,updated_at FROM providers WHERE id=? AND deleted_at=''`, id))
 }
 
 func (s *Store) DeleteProvider(ctx context.Context, id string) error {
 	item, err := s.Provider(ctx, id)
 	if err != nil {
 		return err
+	}
+	models, err := s.ListModels(ctx)
+	if err != nil {
+		return err
+	}
+	for _, model := range models {
+		if model.ProviderID != id {
+			continue
+		}
+		if err := s.DeleteModel(ctx, model.ID); err != nil {
+			return err
+		}
 	}
 	_, err = s.deleteSharedObject(ctx, "provider", id, timeString(item.UpdatedAt), time.Now().UTC())
 	return err
@@ -501,13 +513,27 @@ func (s *Store) BackfillProviders(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	providers, err := s.ListProviders(ctx)
+	// Deleted providers must still count as known here. Their tombstoned rows
+	// remain because historical runtime snapshots can reference an env group, and
+	// recreating the provider from that group would make deletion non-durable.
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM providers`)
 	if err != nil {
 		return 0, err
 	}
-	existing := make(map[string]bool, len(providers))
-	for _, provider := range providers {
-		existing[provider.ID] = true
+	existing := map[string]bool{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		existing[id] = true
+	}
+	if err := rows.Close(); err != nil {
+		return 0, err
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
 	}
 	now := time.Now().UTC()
 	count := 0

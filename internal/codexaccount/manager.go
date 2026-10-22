@@ -27,7 +27,6 @@ type AccountStore interface {
 	CodexAccount(context.Context, string) (domain.CodexAccount, error)
 	ListCodexAccounts(context.Context) ([]domain.CodexAccount, error)
 	DeleteCodexAccount(context.Context, string) error
-	CodexAccountInUse(context.Context, string) (bool, error)
 	ProxySettings(context.Context) (domain.ProxySettings, error)
 }
 
@@ -181,13 +180,6 @@ func (m *Manager) importWithProxy(ctx context.Context, data []byte, label string
 }
 
 func (m *Manager) Delete(ctx context.Context, id string) error {
-	inUse, err := m.store.CodexAccountInUse(ctx, id)
-	if err != nil {
-		return err
-	}
-	if inUse {
-		return fmt.Errorf("该账号已被模型或历史运行配置使用")
-	}
 	account, err := m.store.CodexAccount(ctx, id)
 	if err != nil {
 		return err

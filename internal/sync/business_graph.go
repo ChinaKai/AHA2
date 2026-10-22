@@ -338,6 +338,7 @@ func applyTaskGraphObject(ctx context.Context, database *store.Store, obj domain
 			return errors.New("hardware wire ownership mismatch")
 		}
 		group.TaskID = envelope.TaskID
+		group.ResourceID = ""
 		group.CredentialRef = ""
 		group.Access = domain.HardwareAccessReadOnly
 		value, _ = json.Marshal(group)

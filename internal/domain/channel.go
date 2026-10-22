@@ -10,7 +10,10 @@ const (
 	ChannelEndpointGroupDigitalHuman = "group_digital_human"
 )
 
-const DefaultChannelBotDialogueMaxTurns = 6
+const (
+	DefaultChannelBotDialogueMaxTurns = 99
+	MaxChannelBotDialogueMaxTurns     = 99
+)
 
 func ChannelBotDisplayName(config map[string]any, fallback string) string {
 	for _, key := range []string{
@@ -40,15 +43,15 @@ func ChannelBotDialogueMaxTurns(config map[string]any) int {
 	}
 	switch typed := value.(type) {
 	case int:
-		if typed > 0 && typed <= 50 {
+		if typed > 0 && typed <= MaxChannelBotDialogueMaxTurns {
 			return typed
 		}
 	case int64:
-		if typed > 0 && typed <= 50 {
+		if typed > 0 && typed <= MaxChannelBotDialogueMaxTurns {
 			return int(typed)
 		}
 	case float64:
-		if typed > 0 && typed <= 50 {
+		if typed > 0 && typed <= MaxChannelBotDialogueMaxTurns {
 			return int(typed)
 		}
 	}
@@ -435,4 +438,18 @@ type ChannelOnboardingSession struct {
 	ConsumedAt            time.Time `json:"consumed_at,omitempty"`
 	CreatedAt             time.Time `json:"created_at"`
 	UpdatedAt             time.Time `json:"updated_at"`
+}
+
+type ChannelOnboardingPermission struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Required    bool   `json:"required"`
+	Enabled     bool   `json:"enabled"`
+}
+
+type ChannelOnboardingOptions struct {
+	Mode                     string                        `json:"mode"`
+	PermissionCatalogVersion int                           `json:"permission_catalog_version"`
+	Permissions              []ChannelOnboardingPermission `json:"permissions"`
 }

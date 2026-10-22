@@ -218,7 +218,7 @@ export function bindCodexAccounts(options: {
   });
   document.querySelectorAll<HTMLElement>("[data-delete-codex-account]").forEach(button => button.addEventListener("click", () => {
     const id = button.dataset.deleteCodexAccount || "";
-    if (!id || !window.confirm("删除该 Codex 账号？已被模型或历史 Session 使用时不能删除。")) return;
+    if (!id || !window.confirm("删除该 Codex 账号及其凭据？使用该账号的任务会暂停输入，进入任务后可重新选择模型。")) return;
     void busy(button, "删除中", async () => {
       await api.deleteCodexAccount(id);
       options.setMessage("notice", "Codex 账号已删除");

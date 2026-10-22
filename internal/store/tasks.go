@@ -200,6 +200,35 @@ func (s *Store) ListTasks(ctx context.Context, projectID string) ([]domain.Task,
 	return result, rows.Err()
 }
 
+// ListTaskCloneSources returns every Task whose Workspace executes on this
+// machine. Task lists are paged, so task creation must not derive its source
+// picker from the currently loaded list page.
+func (s *Store) ListTaskCloneSources(ctx context.Context) ([]domain.Task, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT `+taskColumns+`
+		FROM tasks
+		WHERE workspace_id IN (
+			SELECT id FROM workspaces WHERE locality='local' AND read_only=0
+		)
+		  AND NOT EXISTS (
+			SELECT 1 FROM channel_conversations conversation WHERE conversation.host_task_id=tasks.id
+		  )
+		ORDER BY updated_at DESC,id DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []domain.Task{}
+	for rows.Next() {
+		item, scanErr := scanTask(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
 func (s *Store) ListTasksPage(ctx context.Context, projectID string, cursorAt time.Time, cursorID string, limit int) ([]domain.Task, bool, error) {
 	query := `SELECT ` + taskColumns + ` FROM tasks WHERE 1=1`
 	args := []any{}

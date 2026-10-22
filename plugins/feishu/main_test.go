@@ -128,7 +128,7 @@ func TestNewAppMenuInitializationRequestsMediaScopes(t *testing.T) {
 		}
 		return mediaTestResponse(200, `{"code":0}`), nil
 	}}))
-	if err := configureFeishuMenu(context.Background(), client, "media-scope-config"); err != nil {
+	if err := configureFeishuMenu(context.Background(), client, "media-scope-config", registrationTenantScopes(), defaultFeishuMenuKeys()); err != nil {
 		t.Fatal(err)
 	}
 	if !configured {
@@ -155,7 +155,7 @@ func TestMenuConfigurationErrorCodeIsSafeAndActionable(t *testing.T) {
 
 func TestMenuAbilityHasLocalizedNodesAndDeterministicOrdering(t *testing.T) {
 	t.Parallel()
-	ability := buildFeishuMenuAbility()
+	ability := buildFeishuMenuAbility(defaultFeishuMenuKeys())
 	if ability.Enable == nil || !*ability.Enable || ability.BotMenuEnable == nil || !*ability.BotMenuEnable || len(ability.BotMenus) != 6 || len(ability.I18ns) != 1 {
 		t.Fatalf("ability=%#v", ability)
 	}
@@ -168,6 +168,58 @@ func TestMenuAbilityHasLocalizedNodesAndDeterministicOrdering(t *testing.T) {
 		if item.Sort == nil || *item.Sort != index+1 || item.I18nName["zh_cn"] == "" {
 			t.Fatalf("menu %d=%#v", index, item)
 		}
+	}
+}
+
+func TestMenuAbilityOnlyPublishesSelectedMenus(t *testing.T) {
+	t.Parallel()
+	ability := buildFeishuMenuAbility([]string{"aha.task.query", "aha.task.create"})
+	if len(ability.BotMenus) != 3 {
+		t.Fatalf("selected menus=%#v", ability.BotMenus)
+	}
+	if ability.BotMenus[0].MenuId == nil || *ability.BotMenus[0].MenuId != "aha_task" {
+		t.Fatalf("root menu=%#v", ability.BotMenus[0])
+	}
+	for index, item := range ability.BotMenus {
+		if item.Sort == nil || *item.Sort != index+1 {
+			t.Fatalf("menu sort %d=%#v", index, item)
+		}
+	}
+}
+
+func TestResetMenuCommandReinitializesExistingApp(t *testing.T) {
+	t.Parallel()
+	publishCalled := false
+	client := lark.NewClient("reset-menu-app", "test-secret", lark.WithHttpClient(mockHTTPClient{do: func(request *http.Request) (*http.Response, error) {
+		if strings.Contains(request.URL.Path, "/auth/") {
+			return mediaTestResponse(200, `{"code":0,"tenant_access_token":"sdk-test","expire":7200}`), nil
+		}
+		if strings.Contains(request.URL.Path, "publish") {
+			publishCalled = true
+		}
+		return mediaTestResponse(200, `{"code":0}`), nil
+	}}))
+	result, err := configureMenuCommand(context.Background(), client, "reset-menu-app", command{
+		Kind: "reset_menu", Attempts: 1, CreatedAt: time.Now().UTC(),
+		Payload: map[string]any{"app_id": "reset-menu-app", "reset_existing": true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !publishCalled || result["status"] != "menu_initialized" {
+		t.Fatalf("reset menu did not publish defaults: result=%#v publish=%v", result, publishCalled)
+	}
+}
+
+func TestRegistrationUsesSelectedTenantScopes(t *testing.T) {
+	t.Parallel()
+	options := registrationOptions(command{Payload: map[string]any{
+		"app_id": "app", "tenant_scopes": []any{"im:message.p2p_msg:readonly", "cardkit:card:write"},
+	}})
+	if options.Addons == nil || len(options.Addons.Scopes.Tenant) != 2 ||
+		options.Addons.Scopes.Tenant[0] != "im:message.p2p_msg:readonly" ||
+		options.Addons.Scopes.Tenant[1] != "cardkit:card:write" {
+		t.Fatalf("scopes=%#v", options.Addons)
 	}
 }
 

@@ -174,4 +174,45 @@ func TestRunnerAutomaticallySynchronizesEveryConfiguredPortableCredential(t *tes
 	if _, err := destination.CodexAccount(ctx, "codex-invalid"); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("non-portable Codex account unexpectedly restored: %v", err)
 	}
+
+	// A local account deletion must also suppress a later, changed bundle from
+	// the still-configured source device. Updating the source label changes the
+	// bundle fingerprint, so this exercises a fresh center event rather than the
+	// already-consumed initial bundle.
+	updatedAccount, err := source.CodexAccount(ctx, "codex-one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	updatedAccount.Label = "Codex One Updated"
+	updatedAccount.UpdatedAt = now.Add(2 * time.Minute)
+	if err := source.UpsertCodexAccount(ctx, updatedAccount); err != nil {
+		t.Fatal(err)
+	}
+	if err := (syncer.Runner{Store: source, Secrets: sourceSecrets, TokenRef: syncer.DefaultTokenRef}).RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := destination.DeleteCodexAccount(ctx, "codex-one"); err != nil {
+		t.Fatal(err)
+	}
+	if err := destinationSecrets.DeleteMany([]string{"codex-account/codex-one/auth"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := (syncer.Runner{Store: destination, Secrets: destinationSecrets, TokenRef: syncer.DefaultTokenRef}).RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := destination.CodexAccount(ctx, "codex-one"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("deleted Codex account was restored by a later source bundle: %v", err)
+	}
+	if _, ok := destinationSecrets.Get("codex-account/codex-one/auth"); ok {
+		t.Fatal("deleted Codex credential was restored by a later source bundle")
+	}
+	if err := (syncer.Runner{Store: source, Secrets: sourceSecrets, TokenRef: syncer.DefaultTokenRef}).RunOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := source.CodexAccount(ctx, "codex-one"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("Codex account deletion did not propagate back to the source device: %v", err)
+	}
+	if _, ok := sourceSecrets.Get("codex-account/codex-one/auth"); ok {
+		t.Fatal("source Codex credential remained after propagated deletion")
+	}
 }

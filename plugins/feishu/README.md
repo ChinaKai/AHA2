@@ -36,3 +36,17 @@ Package 1.1 adds binary images and files through the existing versioned runtime.
 Runtime media capabilities are `channel.media.upload` and `channel.media.read`. Uploads are scoped to a download command; reads and upload-key acknowledgements are scoped to an active delivery lease. No API accepts an arbitrary local path or download URL. No credentials are included in attachment metadata.
 
 Media failures retain safe stage codes through command retries and delivery nacks: `media_download_*` is provider download, `media_transfer_*` is inbound attachment upload to AHA, `media_read_*` is outbound attachment read, `media_upload_image_*` / `media_upload_file_*` is provider upload, and `media_record_*` / `media_send_*` is resource-key persistence / message send. Suffixes contain only a numeric provider code, HTTP status, or `failed`; raw response bodies, resource keys and transport errors are not exposed. Inbound failure notices include the sanitized diagnostic code. A generic failure is not evidence of a size or permission problem. Existing failed records cannot recover codes that were previously discarded.
+### Selectable permissions and runtime menus (1.1.2)
+
+Existing applications keep additive-only Feishu permission authorization. AHA
+stores the selected feature permissions after a successful authorization and
+new applications initialize the default AHA bot menu. Reauthorization itself
+still does not rewrite an existing Feishu menu tree; the explicit reset command
+is introduced in 1.1.3.
+
+### Explicit menu reset (1.1.3)
+
+`reset_menu` is an Owner-triggered initialization for an existing application.
+It rewrites the Feishu bot menu to the AHA default menu and submits the normal
+application publish flow. It is not an AHA runtime response switch. AHA always
+handles all known menu actions after the application is ready.

@@ -44,6 +44,8 @@ type Config struct {
 	Channels          *channel.Service
 	ProbeSSHHostKey   func(context.Context, string) (hardware.SSHHostKeyInfo, error)
 	TrustSSHHostKey   func(context.Context, string, string) (hardware.SSHHostKeyInfo, error)
+	PairADB           func(context.Context, string, string) (string, error)
+	ExecuteADB        func(context.Context, string, []string, []byte, time.Duration) (hardware.ADBExecResult, error)
 	Version           string
 	WebVersion        string
 	// ListenAddress is what this process was launched with, reported so the UI can
@@ -75,6 +77,8 @@ type Server struct {
 	channels              *channel.Service
 	probeSSHHostKey       func(context.Context, string) (hardware.SSHHostKeyInfo, error)
 	trustSSHHostKey       func(context.Context, string, string) (hardware.SSHHostKeyInfo, error)
+	pairADB               func(context.Context, string, string) (string, error)
+	executeADB            func(context.Context, string, []string, []byte, time.Duration) (hardware.ADBExecResult, error)
 	version               string
 	webVersion            string
 	startedAt             time.Time
@@ -107,6 +111,14 @@ func New(config Config) *Server {
 	if trustSSHHostKey == nil {
 		trustSSHHostKey = hardware.TrustSSHHostKey
 	}
+	pairADB := config.PairADB
+	if pairADB == nil {
+		pairADB = hardware.PairADB
+	}
+	executeADB := config.ExecuteADB
+	if executeADB == nil {
+		executeADB = hardware.ExecuteADB
+	}
 	validateOrigin := !config.AllowCrossOrigin
 	// Default to the LAN scope: AHA2 binds 0.0.0.0, so narrowing on startup before
 	// anyone has chosen would cut off clients that already rely on it.
@@ -136,6 +148,8 @@ func New(config Config) *Server {
 		channels:              config.Channels,
 		probeSSHHostKey:       probeSSHHostKey,
 		trustSSHHostKey:       trustSSHHostKey,
+		pairADB:               pairADB,
+		executeADB:            executeADB,
 		version:               config.Version,
 		webVersion:            config.WebVersion,
 		startedAt:             startedAt,
@@ -224,6 +238,8 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/channel-instances/{id}/purge-preview", s.withAuth(http.HandlerFunc(s.channelPurgePreview)))
 	mux.Handle("POST /api/v1/channel-instances/{id}/purge", s.withAuth(http.HandlerFunc(s.purgeChannelInstance)))
 	mux.Handle("PUT /api/v1/channel-instances/{id}/credentials", s.withAuth(http.HandlerFunc(s.updateChannelCredentials)))
+	mux.Handle("GET /api/v1/channel-instances/{id}/onboarding-options", s.withAuth(http.HandlerFunc(s.channelOnboardingOptions)))
+	mux.Handle("POST /api/v1/channel-instances/{id}/runtime-menus/reset", s.withAuth(http.HandlerFunc(s.resetChannelRuntimeMenus)))
 	mux.Handle("POST /api/v1/channel-instances/{id}/onboarding-sessions", s.withAuth(http.HandlerFunc(s.startChannelOnboarding)))
 	mux.Handle("GET /api/v1/channel-onboarding-sessions/{id}", s.withAuth(http.HandlerFunc(s.channelOnboarding)))
 	mux.Handle("GET /api/v1/channel-onboarding-sessions/{id}/qr", s.withAuth(http.HandlerFunc(s.channelOnboardingQR)))
@@ -276,8 +292,14 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("PUT /api/v1/prompts/templates/{id}", s.withAuth(http.HandlerFunc(s.updatePromptTemplate)))
 	mux.Handle("POST /api/v1/prompts/templates/{id}/reset", s.withAuth(http.HandlerFunc(s.resetPromptTemplate)))
 	mux.Handle("GET /api/v1/hardware/serial-ports", s.withAuth(http.HandlerFunc(s.hardwareSerialPorts)))
+	mux.Handle("GET /api/v1/hardware-resources", s.withAuth(http.HandlerFunc(s.listHardwareResources)))
+	mux.Handle("POST /api/v1/hardware-resources", s.withAuth(http.HandlerFunc(s.createHardwareResource)))
+	mux.Handle("PUT /api/v1/hardware-resources/{id}", s.withAuth(http.HandlerFunc(s.updateHardwareResource)))
+	mux.Handle("DELETE /api/v1/hardware-resources/{id}", s.withAuth(http.HandlerFunc(s.deleteHardwareResource)))
+	mux.Handle("POST /api/v1/hardware-resources/{id}/adb/pair", s.withAuth(http.HandlerFunc(s.pairHardwareADB)))
 
 	mux.Handle("GET /api/v1/tasks", s.withAuth(http.HandlerFunc(s.listTasks)))
+	mux.Handle("GET /api/v1/task-clone-sources", s.withAuth(http.HandlerFunc(s.listTaskCloneSources)))
 	mux.Handle("POST /api/v1/tasks", s.withAuth(http.HandlerFunc(s.createTask)))
 	mux.Handle("POST /api/v1/tasks/{id}/start", s.withAuth(http.HandlerFunc(s.startTask)))
 	mux.Handle("DELETE /api/v1/tasks/{id}", s.withAuth(http.HandlerFunc(s.deleteTask)))
@@ -309,6 +331,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/tasks/{id}/hardware/{hardware}/terminal", s.withAuth(http.HandlerFunc(s.hardwareTerminal)))
 	mux.Handle("GET /api/v1/tasks/{id}/hardware/{hardware}/terminal/ws", s.withAuth(http.HandlerFunc(s.hardwareTerminalWebSocket)))
 	mux.Handle("POST /api/v1/tasks/{id}/hardware/{hardware}/connect", s.withAuth(http.HandlerFunc(s.connectHardware)))
+	mux.Handle("PUT /api/v1/tasks/{id}/hardware-bindings", s.withAuth(http.HandlerFunc(s.updateTaskHardwareBindings)))
 	mux.Handle("GET /api/v1/tasks/{id}/hardware/{hardware}/host-key", s.withAuth(http.HandlerFunc(s.hardwareSSHHostKey)))
 	mux.Handle("POST /api/v1/tasks/{id}/hardware/{hardware}/host-key/trust", s.withAuth(http.HandlerFunc(s.trustHardwareSSHHostKey)))
 	mux.Handle("POST /api/v1/tasks/{id}/hardware/{hardware}/disconnect", s.withAuth(http.HandlerFunc(s.disconnectHardware)))
@@ -319,6 +342,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/agent/hardware/{hardware}/disconnect", s.withAgentCapability(http.HandlerFunc(s.agentDisconnectHardware)))
 	mux.Handle("POST /api/v1/agent/hardware/{hardware}/send", s.withAgentCapability(http.HandlerFunc(s.agentSendHardware)))
 	mux.Handle("POST /api/v1/agent/hardware/{hardware}/login", s.withAgentCapability(http.HandlerFunc(s.agentLoginHardware)))
+	mux.Handle("POST /api/v1/agent/hardware/{hardware}/adb/exec", s.withAgentCapability(http.HandlerFunc(s.agentADBExec)))
 	mux.Handle("GET /api/v1/agent/processes", s.withAgentCapability(http.HandlerFunc(s.agentProcesses)))
 	mux.Handle("POST /api/v1/agent/processes", s.withAgentCapability(http.HandlerFunc(s.startAgentProcess)))
 	mux.Handle("GET /api/v1/agent/processes/{name}", s.withAgentCapability(http.HandlerFunc(s.agentProcessStatus)))

@@ -3,6 +3,7 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"mime/multipart"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	"github.com/ChinaKai/AHA2/internal/agentapi"
 	"github.com/ChinaKai/AHA2/internal/app"
 	"github.com/ChinaKai/AHA2/internal/domain"
+	"github.com/ChinaKai/AHA2/internal/hardware"
 	"github.com/ChinaKai/AHA2/internal/managedprocess"
 	"github.com/ChinaKai/AHA2/internal/secrets"
 	"github.com/ChinaKai/AHA2/internal/store"
@@ -92,6 +94,84 @@ func TestAgentAPIUsesTurnCapabilityAndTaskScope(t *testing.T) {
 	response = agentRequest(t, server.URL+"/api/v1/agent/processes", http.MethodGet, token, nil)
 	if response.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("revoked capability status = %d", response.StatusCode)
+	}
+	response.Body.Close()
+}
+
+func TestAgentADBExecUsesTaskDeviceAndReturnsBinary(t *testing.T) {
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	task := createHardwareAPITask(t, database)
+	now := time.Now().UTC()
+	group := domain.HardwareGroup{
+		TaskID: task.ID, ID: "phone", Description: "Android phone", Mode: domain.HardwareModeNetwork,
+		Network: domain.HardwareNetworkConfig{Host: "192.0.2.90", Port: 5555, Protocol: domain.HardwareProtocolADB, SSHAuth: domain.HardwareSSHAuthAuto},
+		Access:  domain.HardwareAccessReadWrite, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := database.ReplaceHardwareGroups(ctx, task.ID, []domain.HardwareGroup{group}); err != nil {
+		t.Fatal(err)
+	}
+	capabilities := agentapi.NewCapabilities()
+	server := httptest.NewServer(New(Config{
+		Store: database, AgentCapabilities: capabilities,
+		ExecuteADB: func(_ context.Context, endpoint string, args []string, input []byte, timeout time.Duration) (hardware.ADBExecResult, error) {
+			if endpoint != "192.0.2.90:5555" {
+				t.Fatalf("unexpected ADB endpoint %q", endpoint)
+			}
+			if strings.Join(args, " ") != "exec-out screencap -p" || string(input) != "input" || timeout != 9*time.Second {
+				t.Fatalf("unexpected ADB request args=%v input=%q timeout=%s", args, input, timeout)
+			}
+			return hardware.ADBExecResult{
+				Endpoint: "192.0.2.90:41467", ExitCode: 0,
+				Stdout: []byte("\x89PNG\r\n"), Stderr: []byte("warning"),
+				Duration: 12 * time.Millisecond,
+			}, nil
+		},
+	}).Handler())
+	defer server.Close()
+	token, err := capabilities.Issue(task.ID, "main", "turn-adb-exec", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer capabilities.Revoke(token)
+	response := agentRequest(t, server.URL+"/api/v1/agent/hardware/phone/adb/exec", http.MethodPost, token, map[string]any{
+		"args":            []string{"exec-out", "screencap", "-p"},
+		"stdin_base64":    base64.StdEncoding.EncodeToString([]byte("input")),
+		"timeout_seconds": 9,
+	})
+	var payload struct {
+		ExitCode      int    `json:"exit_code"`
+		Endpoint      string `json:"endpoint"`
+		StdoutBase64  string `json:"stdout_base64"`
+		StderrBase64  string `json:"stderr_base64"`
+		DurationMilli int64  `json:"duration_ms"`
+	}
+	decodeResponse(t, response, &payload)
+	stdout, _ := base64.StdEncoding.DecodeString(payload.StdoutBase64)
+	stderr, _ := base64.StdEncoding.DecodeString(payload.StderrBase64)
+	if response.StatusCode != http.StatusOK || payload.Endpoint != "192.0.2.90:41467" || payload.ExitCode != 0 || string(stdout) != "\x89PNG\r\n" || string(stderr) != "warning" || payload.DurationMilli != 12 {
+		t.Fatalf("ADB exec status=%d payload=%#v stdout=%q stderr=%q", response.StatusCode, payload, stdout, stderr)
+	}
+	response = agentRequest(t, server.URL+"/api/v1/agent/hardware/phone/adb/exec", http.MethodPost, token, map[string]any{
+		"args": []string{"devices"},
+	})
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("host-level ADB command status=%d", response.StatusCode)
+	}
+	response.Body.Close()
+	group.Access = domain.HardwareAccessReadOnly
+	if err := database.ReplaceHardwareGroups(ctx, task.ID, []domain.HardwareGroup{group}); err != nil {
+		t.Fatal(err)
+	}
+	response = agentRequest(t, server.URL+"/api/v1/agent/hardware/phone/adb/exec", http.MethodPost, token, map[string]any{
+		"args": []string{"exec-out", "screencap", "-p"},
+	})
+	if response.StatusCode != http.StatusForbidden {
+		t.Fatalf("read-only ADB exec status=%d", response.StatusCode)
 	}
 	response.Body.Close()
 }
@@ -211,11 +291,11 @@ func TestAgentStateKnowledgeAndSkillAPIs(t *testing.T) {
 		t.Fatalf("agent task status=%d payload=%#v", response.StatusCode, taskStatusPayload)
 	}
 	clonedGroups, err := database.HardwareGroups(ctx, createdTaskID)
-	if err != nil || len(clonedGroups) != 1 || clonedGroups[0].CredentialRef == "" || clonedGroups[0].CredentialRef == "hardware/"+task.ID+"/board/credential" {
+	if err != nil || len(clonedGroups) != 1 || clonedGroups[0].ResourceID == "" || clonedGroups[0].CredentialRef != "hardware/"+task.ID+"/board/credential" {
 		t.Fatalf("cloned groups=%#v err=%v", clonedGroups, err)
 	}
 	if value, ok := secretStore.Get(clonedGroups[0].CredentialRef); !ok || value != "test-secret" {
-		t.Fatal("hardware credential was not cloned server-side")
+		t.Fatal("cloned binding lost the shared hardware credential")
 	}
 
 	response = agentRequest(t, server.URL+"/api/v1/agent/tasks", http.MethodPost, token, map[string]any{

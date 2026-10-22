@@ -314,6 +314,41 @@ func (s *Service) BindTaskChannelRoute(ctx context.Context, ownerID, taskID, con
 	return route, nil
 }
 
+// HandoffTaskChannelRoute lets a newly-created Task inherit another local
+// Task's primary channel. The source route is superseded in the same
+// transaction because a conversation cannot route to two active Tasks.
+func (s *Service) HandoffTaskChannelRoute(ctx context.Context, ownerID, sourceTaskID, targetTaskID string) (domain.ChannelTaskRoute, bool, error) {
+	target, err := s.store.Task(ctx, targetTaskID)
+	if err != nil || target.ReadOnly || s.store.IsManagedChannelTask(ctx, targetTaskID) || !taskRouteEligible(target.Status) {
+		return domain.ChannelTaskRoute{}, false, fmt.Errorf("task is not eligible for a primary channel")
+	}
+	sourceRoute, err := s.store.ActiveChannelTaskRouteForTask(ctx, sourceTaskID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.ChannelTaskRoute{}, false, nil
+	}
+	if err != nil {
+		return domain.ChannelTaskRoute{}, false, err
+	}
+	destination, err := s.store.ChannelDestination(ctx, ownerID, sourceRoute.ConversationID)
+	if err != nil || destination.InstanceID != sourceRoute.InstanceID {
+		return domain.ChannelTaskRoute{}, false, fmt.Errorf("channel destination is not available")
+	}
+	instance, err := s.store.ChannelInstance(ctx, destination.InstanceID)
+	if err != nil || (instance.Status != "ready" && instance.Status != "degraded") || !channelOperationAllowed(instance.Config, target.ProjectID, target.WorkspaceID) {
+		return domain.ChannelTaskRoute{}, false, fmt.Errorf("channel destination is not eligible for this task")
+	}
+	route, transferred, err := s.store.TransferOwnerChannelTaskRoute(ctx, ownerID, sourceTaskID, targetTaskID, s.now().UTC())
+	if err != nil || !transferred {
+		return route, transferred, err
+	}
+	if destination.EndpointKind == domain.ChannelEndpointGroupDigitalHuman {
+		if conversation, conversationErr := s.store.ChannelConversation(ctx, route.ConversationID); conversationErr == nil {
+			_, _ = s.enqueueChannelMemberSync(ctx, route, conversation)
+		}
+	}
+	return route, true, nil
+}
+
 func (s *Service) UnbindTaskChannelRoute(ctx context.Context, ownerID, taskID, routeID string) error {
 	route, err := s.store.ChannelRouteOwnedBy(ctx, routeID, ownerID)
 	if err != nil || route.TargetTaskID != taskID || route.State != "active" {
@@ -460,7 +495,55 @@ func (s *Service) UpdateInstance(ctx context.Context, ownerID, id, name string, 
 	return s.store.UpdateChannelInstance(ctx, item, expectedRevision)
 }
 
+func (s *Service) ResetRuntimeMenus(ctx context.Context, ownerID, id, idempotencyKey string, expectedRevision int) (domain.ChannelPluginCommand, error) {
+	item, err := s.store.ChannelInstance(ctx, id)
+	if err != nil || item.OwnerID != ownerID {
+		if err == nil {
+			err = sql.ErrNoRows
+		}
+		return domain.ChannelPluginCommand{}, err
+	}
+	if item.Retired {
+		return domain.ChannelPluginCommand{}, fmt.Errorf("channel instance is archived")
+	}
+	if item.Revision != expectedRevision {
+		return domain.ChannelPluginCommand{}, store.ErrChannelRevision
+	}
+	plugin, err := s.store.ChannelPlugin(ctx, item.PluginID)
+	if err != nil {
+		return domain.ChannelPluginCommand{}, err
+	}
+	if plugin.ProviderKey != "feishu" || !plugin.Available {
+		return domain.ChannelPluginCommand{}, fmt.Errorf("channel menu initialization is not available")
+	}
+	if !item.CredentialConfigured || item.AppID == "" {
+		return domain.ChannelPluginCommand{}, fmt.Errorf("channel application is not ready")
+	}
+	idempotencyKey = strings.TrimSpace(idempotencyKey)
+	if idempotencyKey == "" {
+		return domain.ChannelPluginCommand{}, fmt.Errorf("idempotency key is required")
+	}
+	permissionIDs, present := stringListField(item.Config, "channel_permission_ids")
+	if !present {
+		permissionIDs = nil
+	}
+	selection, err := resolveOnboardingSelection(item, plugin, permissionIDs)
+	if err != nil {
+		return domain.ChannelPluginCommand{}, err
+	}
+	return s.EnqueueCommand(ctx, item.ID, "reset_menu", "reset-menu:"+idempotencyKey, map[string]any{
+		"app_id": item.AppID, "reset_existing": true, "tenant_scopes": selection.TenantScopes,
+	})
+}
+
 func (s *Service) validateChannelInstanceConfig(ctx context.Context, instance domain.ChannelInstance, config map[string]any) error {
+	if _, present := config["channel_permission_ids"]; present {
+		values, valid := stringListField(config, "channel_permission_ids")
+		existing, existingPresent := stringListField(instance.Config, "channel_permission_ids")
+		if !valid || !existingPresent || !sameStringSet(values, existing) {
+			return fmt.Errorf("channel permissions must be updated through onboarding")
+		}
+	}
 	if value, present := config["runtime_bot_display_name_override"]; present {
 		displayName, ok := value.(string)
 		if !ok || len([]rune(displayName)) > 60 || strings.IndexFunc(displayName, func(r rune) bool {
@@ -471,7 +554,7 @@ func (s *Service) validateChannelInstanceConfig(ctx context.Context, instance do
 	}
 	if _, present := config["bot_dialogue_max_turns"]; present {
 		maxTurns := intField(config, "bot_dialogue_max_turns")
-		if maxTurns < 1 || maxTurns > 50 {
+		if maxTurns < 1 || maxTurns > domain.MaxChannelBotDialogueMaxTurns {
 			return fmt.Errorf("invalid bot dialogue max turns")
 		}
 	}
@@ -511,6 +594,22 @@ func (s *Service) validateChannelInstanceConfig(ctx context.Context, instance do
 	}
 	_ = instance
 	return nil
+}
+
+func sameStringSet(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	leftSet, rightSet := sliceSet(left), sliceSet(right)
+	if len(leftSet) != len(rightSet) {
+		return false
+	}
+	for value := range leftSet {
+		if !rightSet[value] {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Service) SetInstanceEnabled(ctx context.Context, ownerID, id string, enabled bool, expectedRevision int) (domain.ChannelInstance, error) {

@@ -17,6 +17,7 @@ type SecretReader interface{ Get(string) (string, bool) }
 type SecretStore interface {
 	SecretReader
 	PutMany(map[string]string) error
+	DeleteMany([]string) error
 }
 
 type Runner struct {
@@ -141,6 +142,7 @@ func (r Runner) RunOnce(ctx context.Context) error {
 		return err
 	}
 	RegisterBusinessHandlersForDevice(engine, r.Store, settings.DeviceID)
+	RegisterCodexAccountTombstoneHandler(engine, r.Store, r.Secrets)
 	passphraseRef := r.PassphraseRef
 	if passphraseRef == "" {
 		passphraseRef = DefaultPassphraseRef

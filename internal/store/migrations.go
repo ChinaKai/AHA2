@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"strings"
+
+	"github.com/ChinaKai/AHA2/internal/domain"
 )
 
 const schemaV31 = `
@@ -1420,6 +1422,44 @@ const schemaV14 = `
 ALTER TABLE hardware_groups ADD COLUMN ssh_auth TEXT NOT NULL DEFAULT 'auto';
 `
 
+const schemaV73 = `
+CREATE TABLE IF NOT EXISTS hardware_resources (
+    id TEXT PRIMARY KEY,
+    description TEXT NOT NULL DEFAULT '',
+    mode TEXT NOT NULL DEFAULT 'off',
+    serial_device TEXT NOT NULL DEFAULT '',
+    serial_baudrate INTEGER NOT NULL DEFAULT 115200,
+    network_host TEXT NOT NULL DEFAULT '',
+    network_port INTEGER NOT NULL DEFAULT 23,
+    network_protocol TEXT NOT NULL DEFAULT 'telnet',
+    ssh_auth TEXT NOT NULL DEFAULT 'auto',
+    username TEXT NOT NULL DEFAULT '',
+    credential_ref TEXT NOT NULL DEFAULT '',
+    password_configured INTEGER NOT NULL DEFAULT 0,
+    access TEXT NOT NULL DEFAULT 'read_write',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_hardware_resources_updated
+ON hardware_resources(updated_at,id);
+
+CREATE TABLE IF NOT EXISTS task_hardware_bindings (
+    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    id TEXT NOT NULL,
+    resource_id TEXT NOT NULL REFERENCES hardware_resources(id) ON DELETE CASCADE,
+    position INTEGER NOT NULL DEFAULT 0,
+    access TEXT NOT NULL DEFAULT 'read_only',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(task_id,id),
+    UNIQUE(task_id,resource_id)
+);
+CREATE INDEX IF NOT EXISTS idx_task_hardware_bindings_task
+ON task_hardware_bindings(task_id,position,id);
+CREATE INDEX IF NOT EXISTS idx_task_hardware_bindings_resource
+ON task_hardware_bindings(resource_id,task_id);
+`
+
 const schemaV15 = `
 ALTER TABLE tasks ADD COLUMN isolation TEXT NOT NULL DEFAULT '';
 ALTER TABLE tasks ADD COLUMN worktree_dir TEXT NOT NULL DEFAULT '';
@@ -2379,6 +2419,292 @@ func (s *Store) migrate(ctx context.Context) error {
 	}
 	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(70, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
 		return fmt.Errorf("record schema v70: %w", err)
+	}
+	var hasV71 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=71)`).Scan(&hasV71)
+	if !hasV71 {
+		for _, statement := range []string{
+			`ALTER TABLE providers ADD COLUMN deleted_at TEXT NOT NULL DEFAULT ''`,
+			`CREATE INDEX IF NOT EXISTS idx_providers_visible ON providers(deleted_at,name)`,
+		} {
+			if _, err := s.db.ExecContext(ctx, statement); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+				return fmt.Errorf("apply schema v71: %w", err)
+			}
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(71, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v71: %w", err)
+	}
+	var hasV72 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=72)`).Scan(&hasV72)
+	if !hasV72 {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("begin schema v72: %w", err)
+		}
+		defer tx.Rollback()
+		for _, statement := range []string{
+			`UPDATE sync_state
+			 SET cursor='',last_pull_at='',last_error='',replay_required=1,
+			     updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+			 WHERE EXISTS(
+				SELECT 1 FROM sync_conflicts
+				WHERE object_type='codex_account' AND status='open'
+			 )`,
+			`DELETE FROM sync_applied
+			 WHERE object_type='codex_account'
+			   AND (idempotency_key LIKE 'center:%' OR idempotency_key LIKE 'center-object:%')
+			   AND EXISTS(
+				SELECT 1 FROM sync_conflicts
+				WHERE object_type='codex_account' AND status='open'
+			   )`,
+			`DELETE FROM sync_conflicts WHERE object_type='codex_account' AND status='open'`,
+			`INSERT OR IGNORE INTO schema_migrations(version, applied_at)
+			 VALUES(72, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
+		} {
+			if _, err := tx.ExecContext(ctx, statement); err != nil {
+				return fmt.Errorf("apply schema v72: %w", err)
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit schema v72: %w", err)
+		}
+	}
+	var hasV73 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=73)`).Scan(&hasV73)
+	if !hasV73 {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("begin schema v73: %w", err)
+		}
+		defer tx.Rollback()
+		if _, err := tx.ExecContext(ctx, schemaV73); err != nil {
+			return fmt.Errorf("apply schema v73: %w", err)
+		}
+		type legacyHardware struct {
+			taskID, id, description, mode, serialDevice, networkHost, networkProtocol, sshAuth string
+			position, networkPort, serialBaudrate                                              int
+			username, credentialRef, access, createdAt, updatedAt                              string
+			passwordConfigured                                                                 int
+		}
+		rows, err := tx.QueryContext(ctx, `
+			SELECT task_id,id,position,description,mode,serial_device,serial_baudrate,
+			       network_host,network_port,network_protocol,ssh_auth,username,
+			       credential_ref,password_configured,access,created_at,updated_at
+			FROM hardware_groups ORDER BY task_id,position,id`)
+		if err != nil {
+			return fmt.Errorf("load legacy hardware: %w", err)
+		}
+		var legacy []legacyHardware
+		for rows.Next() {
+			var item legacyHardware
+			if err := rows.Scan(
+				&item.taskID, &item.id, &item.position, &item.description, &item.mode, &item.serialDevice,
+				&item.serialBaudrate, &item.networkHost, &item.networkPort, &item.networkProtocol,
+				&item.sshAuth, &item.username, &item.credentialRef, &item.passwordConfigured,
+				&item.access, &item.createdAt, &item.updatedAt,
+			); err != nil {
+				rows.Close()
+				return fmt.Errorf("scan legacy hardware: %w", err)
+			}
+			legacy = append(legacy, item)
+		}
+		if err := rows.Close(); err != nil {
+			return fmt.Errorf("close legacy hardware: %w", err)
+		}
+		for _, item := range legacy {
+			resourceID := domain.NewID("hardware_resource")
+			if _, err := tx.ExecContext(ctx, `
+				INSERT INTO hardware_resources(
+					id,description,mode,serial_device,serial_baudrate,network_host,network_port,
+					network_protocol,ssh_auth,username,credential_ref,password_configured,access,
+					created_at,updated_at
+				) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+				resourceID, item.description, item.mode, item.serialDevice, item.serialBaudrate,
+				item.networkHost, item.networkPort, item.networkProtocol, item.sshAuth,
+				item.username, item.credentialRef, item.passwordConfigured, item.access,
+				item.createdAt, item.updatedAt,
+			); err != nil {
+				return fmt.Errorf("migrate hardware resource: %w", err)
+			}
+			if _, err := tx.ExecContext(ctx, `
+				INSERT INTO task_hardware_bindings(
+					task_id,id,resource_id,position,access,created_at,updated_at
+				) VALUES(?,?,?,?,?,?,?)`,
+				item.taskID, item.id, resourceID, item.position, item.access, item.createdAt, item.updatedAt,
+			); err != nil {
+				return fmt.Errorf("migrate hardware binding: %w", err)
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at)
+			VALUES(73, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+			return fmt.Errorf("record schema v73: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit schema v73: %w", err)
+		}
+	}
+	var hasV74 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=74)`).Scan(&hasV74)
+	if !hasV74 {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("begin schema v74: %w", err)
+		}
+		defer tx.Rollback()
+		var bindingsBeforeMigration int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM task_hardware_bindings`).Scan(&bindingsBeforeMigration); err != nil {
+			return fmt.Errorf("count hardware bindings before v74: %w", err)
+		}
+		type dualResource struct {
+			id, description, serialDevice, networkHost, networkProtocol, sshAuth string
+			serialBaudrate, networkPort                                          int
+			username, credentialRef, access, createdAt, updatedAt                string
+			passwordConfigured                                                   int
+		}
+		rows, err := tx.QueryContext(ctx, `
+			SELECT id,description,serial_device,serial_baudrate,network_host,network_port,
+			       network_protocol,ssh_auth,username,credential_ref,password_configured,
+			       access,created_at,updated_at
+			FROM hardware_resources WHERE mode='both' ORDER BY id`)
+		if err != nil {
+			return fmt.Errorf("load dual-transport resources: %w", err)
+		}
+		var dual []dualResource
+		for rows.Next() {
+			var item dualResource
+			if err := rows.Scan(
+				&item.id, &item.description, &item.serialDevice, &item.serialBaudrate,
+				&item.networkHost, &item.networkPort, &item.networkProtocol, &item.sshAuth,
+				&item.username, &item.credentialRef, &item.passwordConfigured,
+				&item.access, &item.createdAt, &item.updatedAt,
+			); err != nil {
+				rows.Close()
+				return fmt.Errorf("scan dual-transport resource: %w", err)
+			}
+			dual = append(dual, item)
+		}
+		if err := rows.Close(); err != nil {
+			return fmt.Errorf("close dual-transport resources: %w", err)
+		}
+		for _, item := range dual {
+			hasSerial := strings.TrimSpace(item.serialDevice) != ""
+			hasNetwork := strings.TrimSpace(item.networkHost) != ""
+			switch {
+			case hasSerial && hasNetwork:
+				networkID := domain.NewID("hardware_resource")
+				var originalBindingCount int
+				if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM task_hardware_bindings WHERE resource_id=?`, item.id).Scan(&originalBindingCount); err != nil {
+					return fmt.Errorf("count original hardware bindings: %w", err)
+				}
+				if _, err := tx.ExecContext(ctx, `
+					INSERT INTO hardware_resources(
+						id,description,mode,serial_device,serial_baudrate,network_host,network_port,
+						network_protocol,ssh_auth,username,credential_ref,password_configured,access,
+						created_at,updated_at
+					) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+					networkID, item.description+" · 网络", "network", "", item.serialBaudrate,
+					item.networkHost, item.networkPort, item.networkProtocol, item.sshAuth,
+					item.username, item.credentialRef, item.passwordConfigured, item.access,
+					item.createdAt, item.updatedAt,
+				); err != nil {
+					return fmt.Errorf("split network hardware resource: %w", err)
+				}
+				type originalBinding struct {
+					taskID, id, createdAt, updatedAt string
+					position                         int
+				}
+				bindingRows, err := tx.QueryContext(ctx, `
+					SELECT task_id,id,position,created_at,updated_at
+					FROM task_hardware_bindings WHERE resource_id=?`, item.id)
+				if err != nil {
+					return fmt.Errorf("load original hardware bindings: %w", err)
+				}
+				var originalBindings []originalBinding
+				for bindingRows.Next() {
+					var binding originalBinding
+					if err := bindingRows.Scan(&binding.taskID, &binding.id, &binding.position, &binding.createdAt, &binding.updatedAt); err != nil {
+						bindingRows.Close()
+						return fmt.Errorf("scan original hardware binding: %w", err)
+					}
+					originalBindings = append(originalBindings, binding)
+				}
+				if err := bindingRows.Close(); err != nil {
+					return fmt.Errorf("close original hardware bindings: %w", err)
+				}
+				for _, binding := range originalBindings {
+					if _, err := tx.ExecContext(ctx, `
+						INSERT INTO task_hardware_bindings(
+							task_id,id,resource_id,position,access,created_at,updated_at
+						) VALUES(?,?,?,?,?,?,?)`,
+						binding.taskID, networkID, networkID, binding.position+1,
+						item.access, binding.createdAt, binding.updatedAt,
+					); err != nil {
+						return fmt.Errorf("split network hardware binding: %w", err)
+					}
+				}
+				var splitBindingCount int
+				if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM task_hardware_bindings WHERE resource_id IN (?,?)`, item.id, networkID).Scan(&splitBindingCount); err != nil {
+					return fmt.Errorf("count split hardware bindings: %w", err)
+				}
+				if splitBindingCount != originalBindingCount*2 {
+					return fmt.Errorf("hardware resource split lost bindings: before=%d after=%d", originalBindingCount, splitBindingCount)
+				}
+				if _, err := tx.ExecContext(ctx, `
+					UPDATE hardware_resources
+					SET mode='serial',network_host='',network_port=23,
+					    network_protocol='telnet',ssh_auth='auto',
+					    description=CASE WHEN description='' THEN '串口' ELSE description || ' · 串口' END
+					WHERE id=?`, item.id); err != nil {
+					return fmt.Errorf("split serial hardware resource: %w", err)
+				}
+			case hasNetwork:
+				if _, err := tx.ExecContext(ctx, `UPDATE hardware_resources SET mode='network' WHERE id=?`, item.id); err != nil {
+					return fmt.Errorf("normalize network hardware resource: %w", err)
+				}
+			default:
+				if _, err := tx.ExecContext(ctx, `UPDATE hardware_resources SET mode='serial' WHERE id=?`, item.id); err != nil {
+					return fmt.Errorf("normalize serial hardware resource: %w", err)
+				}
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at)
+			VALUES(74, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+			return fmt.Errorf("record schema v74: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit schema v74: %w", err)
+		}
+		var bindingsAfterMigration int
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM task_hardware_bindings`).Scan(&bindingsAfterMigration); err != nil {
+			return fmt.Errorf("count hardware bindings after v74: %w", err)
+		}
+		if bindingsAfterMigration < bindingsBeforeMigration {
+			return fmt.Errorf("hardware binding count regressed during v74: before=%d after=%d", bindingsBeforeMigration, bindingsAfterMigration)
+		}
+	}
+	var hasV75 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=75)`).Scan(&hasV75)
+	if !hasV75 {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE hardware_resources ADD COLUMN adb_pair_port INTEGER NOT NULL DEFAULT 0`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("apply schema v75: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(75, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v75: %w", err)
+	}
+	var hasV76 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=76)`).Scan(&hasV76)
+	if !hasV76 {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE hardware_resources ADD COLUMN adb_paired_at TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("apply schema v76 paired state: %w", err)
+		}
+		if _, err := s.db.ExecContext(ctx, `UPDATE hardware_resources SET adb_pair_port=0 WHERE adb_pair_port<>0`); err != nil {
+			return fmt.Errorf("clear legacy ADB pair ports: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(76, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v76: %w", err)
 	}
 	return nil
 }

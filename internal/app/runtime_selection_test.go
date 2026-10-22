@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -66,6 +67,29 @@ func TestCreateTaskSelectsOfficialCodexModelFromAccount(t *testing.T) {
 	}
 	if model.Source != domain.ModelSourceOfficial || model.CodexAccountID != "" || model.ContextWindow != 1050000 {
 		t.Fatalf("unexpected hidden runtime model: %#v", model)
+	}
+	agents, err := service.TaskAgents(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(agents) != 1 || !agents[0].RuntimeConfigValid {
+		t.Fatalf("Codex account runtime should start valid: %#v", agents)
+	}
+	if err := database.DeleteCodexAccount(ctx, "account-official"); err != nil {
+		t.Fatal(err)
+	}
+	agents, err = service.TaskAgents(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(agents) != 1 || agents[0].RuntimeConfigValid || !strings.Contains(agents[0].RuntimeConfigError, "Codex 账号已删除") {
+		t.Fatalf("deleted Codex account did not invalidate the Agent: %#v", agents)
+	}
+	if err := database.UpdateTaskStatus(ctx, task.ID, task.Status, domain.TaskActive, time.Now().UTC().Format(time.RFC3339Nano), ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.SubmitAgentMessage(ctx, task.ID, "main", "must be blocked"); err == nil || !strings.Contains(err.Error(), "Codex 账号已删除") {
+		t.Fatalf("submission was not blocked after Codex account deletion: %v", err)
 	}
 }
 

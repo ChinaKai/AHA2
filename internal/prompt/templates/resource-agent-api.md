@@ -224,7 +224,10 @@ Shared control does not itself authorize destructive or sensitive operations.
 - `POST /api/v1/agent/hardware/{hardware}/disconnect`
 - `POST /api/v1/agent/hardware/{hardware}/send`
 - `POST /api/v1/agent/hardware/{hardware}/login`
+- `POST /api/v1/agent/hardware/{hardware}/adb/exec`
 
 Terminal reads accept `transport=serial|network`, `after`, and `limit`. Sends use `{"data":"...","encoding":"text|hex"}`. Login accepts configurable prompts, line ending, wakeup, timeout, and retries.
 
 The API cannot change hardware configuration and enforces the Task hardware access mode. All requests require `Authorization: Bearer $AHA2_AGENT_API_TOKEN`.
+
+ADB exec accepts `{"args":["exec-out","screencap","-p"],"stdin_base64":"","timeout_seconds":30}`. It targets the hardware resource bound to the current Task, rejects host-level ADB commands such as `connect`, `pair`, `devices`, `kill-server`, and requires a read-write resource. AHA resolves the current wireless-debug port through `adb mdns services` when that host has one unique ADB service, so stale configured ports do not force a hardware edit. The response contains the resolved `endpoint`, `exit_code`, base64 `stdout_base64`/`stderr_base64`, and `duration_ms`; stdout/stderr are each limited to 16 MiB and stdin to 1 MiB. Use it for binary ADB operations such as `exec-out screencap -p`; local AHA-host paths remain host-side paths.

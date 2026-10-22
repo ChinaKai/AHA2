@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -141,6 +142,41 @@ func TestManagerSerialReadWriteAndPermission(t *testing.T) {
 	}
 	if err := manager.Send("task-1", "board", "serial", "x", "text", "web"); !errors.Is(err, ErrReadOnly) {
 		t.Fatalf("expected read-only error, got %v", err)
+	}
+}
+
+func TestSharedHardwareAllowsOnlyOneReadWriteTask(t *testing.T) {
+	manager := NewManager(&memoryRecorder{})
+	device, bridge := net.Pipe()
+	manager.openSerial = func(string, int) (io.ReadWriteCloser, error) { return device, nil }
+	defer manager.Close()
+	defer bridge.Close()
+	group := domain.HardwareGroup{
+		ID: "board", Mode: domain.HardwareModeSerial,
+		Serial: domain.HardwareSerialConfig{Device: "COM4", Baudrate: 115200},
+		Access: domain.HardwareAccessReadWrite,
+	}
+	if _, err := manager.Connect(context.Background(), ConnectRequest{
+		TaskID: "task-1", HardwareID: "binding-1", Transport: "serial", Group: group,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Connect(context.Background(), ConnectRequest{
+		TaskID: "task-2", HardwareID: "binding-2", Transport: "serial", Group: group,
+	}); err == nil || !strings.Contains(err.Error(), "read-write access") {
+		t.Fatalf("second read-write task was allowed: %v", err)
+	}
+	status, err := manager.Connect(context.Background(), ConnectRequest{
+		TaskID: "task-2", HardwareID: "binding-2", Transport: "serial", Group: group, ReadOnly: true,
+	})
+	if err != nil || !status.Connected || !status.ReadOnly {
+		t.Fatalf("read-only attachment: %#v err=%v", status, err)
+	}
+	manager.Disconnect("task-1", "binding-1", "serial")
+	if _, err := manager.Connect(context.Background(), ConnectRequest{
+		TaskID: "task-3", HardwareID: "binding-3", Transport: "serial", Group: group,
+	}); err != nil {
+		t.Fatalf("read-write lease was not released: %v", err)
 	}
 }
 
@@ -290,6 +326,46 @@ func TestManagerNetworkSSHUsesInteractiveTerminal(t *testing.T) {
 	}
 	go server.Write([]byte("shell ready\r\n"))
 	waitForHardwareEvent(t, recorder, "rx", "shell ready\r\n")
+}
+
+func TestManagerNetworkADBUsesDeviceShell(t *testing.T) {
+	t.Parallel()
+	recorder := &memoryRecorder{}
+	manager := NewManager(recorder)
+	client, server := net.Pipe()
+	manager.openADB = func(_ context.Context, endpoint string) (io.ReadWriteCloser, error) {
+		if endpoint != "192.0.2.44:5555" {
+			t.Fatalf("unexpected ADB endpoint %q", endpoint)
+		}
+		return client, nil
+	}
+	defer manager.Close()
+	defer server.Close()
+	group := domain.HardwareGroup{
+		ID: "phone", Mode: domain.HardwareModeNetwork,
+		Network: domain.HardwareNetworkConfig{Host: "192.0.2.44", Protocol: domain.HardwareProtocolADB},
+		Access:  domain.HardwareAccessReadWrite,
+	}
+	status, err := manager.Connect(context.Background(), ConnectRequest{
+		TaskID: "task-1", HardwareID: group.ID, Transport: "network", Group: group,
+	})
+	if err != nil || !status.Connected || status.LoginStatus != "authenticated" {
+		t.Fatalf("connect ADB: %#v %v", status, err)
+	}
+	go server.Write([]byte("shell ready\r\n"))
+	waitForHardwareEvent(t, recorder, "rx", "shell ready\r\n")
+	received := make(chan string, 1)
+	go func() {
+		buffer := make([]byte, 64)
+		count, _ := server.Read(buffer)
+		received <- string(buffer[:count])
+	}()
+	if err := manager.Send("task-1", group.ID, "network", "getprop ro.product.model\r", "text", "web"); err != nil {
+		t.Fatal(err)
+	}
+	if value := <-received; value != "getprop ro.product.model\r" {
+		t.Fatalf("unexpected ADB input %q", value)
+	}
 }
 
 func TestManagerLiveSubscriptionRawInputAndResize(t *testing.T) {

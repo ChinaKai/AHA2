@@ -38,6 +38,256 @@ func (s *Server) hardwareSerialPorts(writer http.ResponseWriter, _ *http.Request
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "ports": s.hardware.SerialPorts()})
 }
 
+func (s *Server) listHardwareResources(writer http.ResponseWriter, request *http.Request) {
+	resources, err := s.store.HardwareResources(request.Context())
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, "hardware_resources_failed")
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "resources": resources})
+}
+
+func resourceFromPayload(
+	id string,
+	raw hardwareGroupPayload,
+	existing domain.HardwareResource,
+	now time.Time,
+) (domain.HardwareResource, error) {
+	group, err := normalizeHardwareGroup("", id, 0, raw, domain.HardwareGroup{
+		ID: existing.ID, Description: existing.Description, Mode: existing.Mode,
+		Serial: existing.Serial, Network: existing.Network, Username: existing.Username,
+		CredentialRef: existing.CredentialRef, PasswordConfigured: existing.PasswordConfigured,
+		Access: existing.Access, CreatedAt: existing.CreatedAt, UpdatedAt: existing.UpdatedAt,
+	}, now)
+	if err != nil {
+		return domain.HardwareResource{}, err
+	}
+	if group.Mode != domain.HardwareModeSerial && group.Mode != domain.HardwareModeNetwork {
+		return domain.HardwareResource{}, fmt.Errorf("硬件资源必须选择串口或网络中的一种连接方式")
+	}
+	pairedAt := existing.ADBPairedAt
+	if group.Mode != domain.HardwareModeNetwork || group.Network.Protocol != domain.HardwareProtocolADB || existing.Network.Host != group.Network.Host {
+		pairedAt = ""
+	}
+	return domain.HardwareResource{
+		ID: group.ID, Description: group.Description, Mode: group.Mode, Serial: group.Serial,
+		Network: group.Network, Username: group.Username, CredentialRef: group.CredentialRef,
+		PasswordConfigured: group.PasswordConfigured, ADBPairedAt: pairedAt, Access: group.Access,
+		CreatedAt: group.CreatedAt, UpdatedAt: group.UpdatedAt,
+	}, nil
+}
+
+func (s *Server) disconnectHardwareResource(ctx context.Context, resource domain.HardwareResource) {
+	if s.hardware == nil {
+		return
+	}
+	bindings, err := s.store.HardwareResourceBindings(ctx, resource.ID)
+	if err != nil {
+		return
+	}
+	for _, binding := range bindings {
+		if resource.Supports(domain.HardwareTransportSerial) {
+			s.hardware.Disconnect(binding.TaskID, binding.ID, domain.HardwareTransportSerial)
+		}
+		if resource.Supports(domain.HardwareTransportNetwork) {
+			s.hardware.Disconnect(binding.TaskID, binding.ID, domain.HardwareTransportNetwork)
+		}
+	}
+}
+
+func (s *Server) createHardwareResource(writer http.ResponseWriter, request *http.Request) {
+	var payload hardwareGroupPayload
+	if err := decodeJSON(request, &payload); err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_json")
+		return
+	}
+	now := time.Now().UTC()
+	id := normalizeHardwareID(payload.ID)
+	if id == "" {
+		id = domain.NewID("hardware_resource")
+	}
+	resource, err := resourceFromPayload(id, payload, domain.HardwareResource{}, now)
+	if err != nil {
+		writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "hardware_resource_invalid", "message": err.Error()})
+		return
+	}
+	if strings.TrimSpace(resource.Description) == "" {
+		resource.Description = resource.ID
+	}
+	if resource.Network.Protocol == domain.HardwareProtocolADB {
+		resource.Username = ""
+		resource.CredentialRef = ""
+		resource.PasswordConfigured = false
+		payload.Password = ""
+		payload.ClearSecret = true
+	}
+	var secretRef string
+	if payload.ClearSecret {
+		resource.CredentialRef = ""
+		resource.PasswordConfigured = false
+	} else if payload.Password != "" {
+		if s.secrets == nil {
+			writeError(writer, http.StatusInternalServerError, "secret_store_unavailable")
+			return
+		}
+		secretRef = "hardware-resource/" + resource.ID + "/credential"
+		resource.CredentialRef = secretRef
+		resource.PasswordConfigured = true
+		if err := s.secrets.PutMany(map[string]string{secretRef: payload.Password}); err != nil {
+			writeError(writer, http.StatusInternalServerError, "store_secrets_failed")
+			return
+		}
+	}
+	if err := s.store.UpsertHardwareResource(request.Context(), resource); err != nil {
+		if secretRef != "" && s.secrets != nil {
+			_ = s.secrets.DeleteMany([]string{secretRef})
+		}
+		writeError(writer, http.StatusInternalServerError, "create_hardware_resource_failed")
+		return
+	}
+	s.audit(request, "hardware_resource.create", "hardware_resource", resource.ID, map[string]any{
+		"mode": resource.Mode, "access": resource.Access,
+	})
+	writeJSON(writer, http.StatusCreated, map[string]any{"ok": true, "resource": resource})
+}
+
+func (s *Server) updateHardwareResource(writer http.ResponseWriter, request *http.Request) {
+	id := request.PathValue("id")
+	existing, err := s.store.HardwareResource(request.Context(), id)
+	if err != nil {
+		writeError(writer, http.StatusNotFound, "hardware_resource_not_found")
+		return
+	}
+	var payload hardwareGroupPayload
+	if err := decodeJSON(request, &payload); err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_json")
+		return
+	}
+	resource, err := resourceFromPayload(id, payload, existing, time.Now().UTC())
+	if err != nil {
+		writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "hardware_resource_invalid", "message": err.Error()})
+		return
+	}
+	if strings.TrimSpace(resource.Description) == "" {
+		resource.Description = resource.ID
+	}
+	if resource.Network.Protocol == domain.HardwareProtocolADB {
+		resource.Username = ""
+		resource.CredentialRef = ""
+		resource.PasswordConfigured = false
+		payload.Password = ""
+		payload.ClearSecret = true
+	}
+	oldSecretRef := existing.CredentialRef
+	var newSecretRef string
+	if payload.ClearSecret {
+		resource.CredentialRef = ""
+		resource.PasswordConfigured = false
+	} else if payload.Password != "" {
+		if s.secrets == nil {
+			writeError(writer, http.StatusInternalServerError, "secret_store_unavailable")
+			return
+		}
+		newSecretRef = "hardware-resource/" + resource.ID + "/credential"
+		resource.CredentialRef = newSecretRef
+		resource.PasswordConfigured = true
+		if err := s.secrets.PutMany(map[string]string{newSecretRef: payload.Password}); err != nil {
+			writeError(writer, http.StatusInternalServerError, "store_secrets_failed")
+			return
+		}
+	}
+	if err := s.store.UpsertHardwareResource(request.Context(), resource); err != nil {
+		writeError(writer, http.StatusInternalServerError, "update_hardware_resource_failed")
+		return
+	}
+	s.disconnectHardwareResource(request.Context(), existing)
+	if s.secrets != nil && oldSecretRef != "" && oldSecretRef != resource.CredentialRef {
+		shared, sharedErr := s.store.HardwareCredentialReferenced(request.Context(), oldSecretRef, resource.ID)
+		if sharedErr == nil && !shared {
+			_ = s.secrets.DeleteMany([]string{oldSecretRef})
+		}
+	}
+	s.audit(request, "hardware_resource.update", "hardware_resource", resource.ID, map[string]any{
+		"mode": resource.Mode, "access": resource.Access, "bindings": existing.BindingCount,
+	})
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "resource": resource})
+}
+
+func (s *Server) deleteHardwareResource(writer http.ResponseWriter, request *http.Request) {
+	id := request.PathValue("id")
+	resource, err := s.store.HardwareResource(request.Context(), id)
+	if err != nil {
+		writeError(writer, http.StatusNotFound, "hardware_resource_not_found")
+		return
+	}
+	s.disconnectHardwareResource(request.Context(), resource)
+	if err := s.store.DeleteHardwareResource(request.Context(), id); err != nil {
+		writeError(writer, http.StatusInternalServerError, "delete_hardware_resource_failed")
+		return
+	}
+	if s.secrets != nil && resource.CredentialRef != "" {
+		shared, sharedErr := s.store.HardwareCredentialReferenced(request.Context(), resource.CredentialRef, resource.ID)
+		if sharedErr == nil && !shared {
+			_ = s.secrets.DeleteMany([]string{resource.CredentialRef})
+		}
+	}
+	s.audit(request, "hardware_resource.delete", "hardware_resource", id, map[string]any{
+		"bindings": resource.BindingCount, "mode": resource.Mode,
+	})
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "deleted_bindings": resource.BindingCount})
+}
+
+func (s *Server) pairHardwareADB(writer http.ResponseWriter, request *http.Request) {
+	resource, err := s.store.HardwareResource(request.Context(), request.PathValue("id"))
+	if err != nil {
+		writeError(writer, http.StatusNotFound, "hardware_resource_not_found")
+		return
+	}
+	if resource.Mode != domain.HardwareModeNetwork || resource.Network.Protocol != domain.HardwareProtocolADB {
+		writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "adb_pair_unavailable", "message": "当前硬件资源不是 ADB 网络设备"})
+		return
+	}
+	var payload struct {
+		PairingPort int    `json:"pairing_port"`
+		PairingCode string `json:"pairing_code"`
+	}
+	if err := decodeJSON(request, &payload); err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_json")
+		return
+	}
+	pairingCode := strings.TrimSpace(payload.PairingCode)
+	if payload.PairingPort < 1 || payload.PairingPort > 65535 {
+		writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "adb_pairing_port_invalid", "message": "ADB 配对端口必须在 1 到 65535 之间"})
+		return
+	}
+	if len(pairingCode) != 6 {
+		writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "adb_pairing_code_invalid", "message": "ADB 配对码必须是 6 位数字"})
+		return
+	}
+	for _, character := range pairingCode {
+		if character < '0' || character > '9' {
+			writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "adb_pairing_code_invalid", "message": "ADB 配对码必须是 6 位数字"})
+			return
+		}
+	}
+	endpoint := net.JoinHostPort(resource.Network.Host, fmt.Sprint(payload.PairingPort))
+	ctx, cancel := context.WithTimeout(request.Context(), 35*time.Second)
+	defer cancel()
+	output, err := s.pairADB(ctx, endpoint, pairingCode)
+	if err != nil {
+		s.audit(request, "hardware_resource.adb_pair_failed", "hardware_resource", resource.ID, map[string]any{"connection_endpoint": net.JoinHostPort(resource.Network.Host, fmt.Sprint(resource.Network.Port))})
+		writeJSON(writer, http.StatusConflict, map[string]any{"ok": false, "error": "adb_pair_failed", "message": err.Error()})
+		return
+	}
+	resource.ADBPairedAt = time.Now().UTC().Format(time.RFC3339)
+	if err := s.store.UpsertHardwareResource(request.Context(), resource); err != nil {
+		writeJSON(writer, http.StatusInternalServerError, map[string]any{"ok": false, "error": "adb_pair_state_save_failed", "message": "设备已配对，但保存配对状态失败"})
+		return
+	}
+	s.audit(request, "hardware_resource.adb_pair", "hardware_resource", resource.ID, map[string]any{"connection_endpoint": net.JoinHostPort(resource.Network.Host, fmt.Sprint(resource.Network.Port))})
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "message": "Android 设备配对成功", "output": output, "resource": resource})
+}
+
 func (s *Server) taskHardware(writer http.ResponseWriter, request *http.Request) {
 	taskID := request.PathValue("id")
 	if _, err := s.store.Task(request.Context(), taskID); err != nil {
@@ -53,7 +303,97 @@ func (s *Server) taskHardware(writer http.ResponseWriter, request *http.Request)
 		writeError(writer, http.StatusInternalServerError, "hardware_groups_failed")
 		return
 	}
-	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "groups": groups})
+	resources, _ := s.store.HardwareResources(request.Context())
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "groups": groups, "resources": resources})
+}
+
+func (s *Server) updateTaskHardwareBindings(writer http.ResponseWriter, request *http.Request) {
+	taskID := request.PathValue("id")
+	if s.rejectRetiredChannelTaskWrite(writer, request, taskID) {
+		return
+	}
+	if s.rejectCompletedTaskWrite(writer, request, taskID) {
+		return
+	}
+	if _, err := s.store.Task(request.Context(), taskID); err != nil {
+		writeError(writer, http.StatusNotFound, "task_not_found")
+		return
+	}
+	var payload struct {
+		Bindings []struct {
+			ID         string `json:"id"`
+			ResourceID string `json:"resource_id"`
+			// Retained as an ignored compatibility field for pages loaded before
+			// access became authoritative on the system hardware resource.
+			Access string `json:"access"`
+		} `json:"bindings"`
+	}
+	if err := decodeJSON(request, &payload); err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_json")
+		return
+	}
+	if len(payload.Bindings) > 16 {
+		writeJSON(writer, http.StatusBadRequest, map[string]any{
+			"ok": false, "error": "hardware_bindings_invalid", "message": "每个任务最多启用 16 个硬件资源",
+		})
+		return
+	}
+	existing, _ := s.store.TaskHardwareBindings(request.Context(), taskID)
+	existingByID := map[string]domain.TaskHardwareBinding{}
+	for _, binding := range existing {
+		existingByID[binding.ID] = binding
+	}
+	now := time.Now().UTC()
+	bindings := make([]domain.TaskHardwareBinding, 0, len(payload.Bindings))
+	seenIDs, seenResources := map[string]bool{}, map[string]bool{}
+	for _, raw := range payload.Bindings {
+		resourceID := strings.TrimSpace(raw.ResourceID)
+		if resourceID == "" || seenResources[resourceID] {
+			writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "hardware_binding_duplicate"})
+			return
+		}
+		_, err := s.store.HardwareResource(request.Context(), resourceID)
+		if err != nil {
+			writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "hardware_resource_not_found"})
+			return
+		}
+		id := normalizeHardwareID(raw.ID)
+		if id == "" {
+			id = resourceID
+		}
+		if seenIDs[id] {
+			writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "hardware_binding_duplicate"})
+			return
+		}
+		createdAt := now
+		if previous, ok := existingByID[id]; ok && previous.ResourceID == resourceID {
+			createdAt = previous.CreatedAt
+		}
+		seenIDs[id], seenResources[resourceID] = true, true
+		bindings = append(bindings, domain.TaskHardwareBinding{
+			TaskID: taskID, ID: id, ResourceID: resourceID,
+			CreatedAt: createdAt, UpdatedAt: now,
+		})
+	}
+	if s.hardware != nil {
+		s.hardware.DisconnectTask(taskID)
+	}
+	if err := s.store.ReplaceTaskHardwareBindings(request.Context(), taskID, bindings); err != nil {
+		writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "update_hardware_bindings_failed", "message": err.Error()})
+		return
+	}
+	groups, _ := s.store.HardwareGroups(request.Context(), taskID)
+	resources, _ := s.store.HardwareResources(request.Context())
+	s.audit(request, "task.hardware.bindings.update", "task", taskID, map[string]any{
+		"bindings": len(bindings), "resource_ids": func() []string {
+			ids := make([]string, 0, len(bindings))
+			for _, binding := range bindings {
+				ids = append(ids, binding.ResourceID)
+			}
+			return ids
+		}(),
+	})
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "groups": groups, "resources": resources})
 }
 
 func (s *Server) updateTaskHardware(writer http.ResponseWriter, request *http.Request) {
@@ -113,6 +453,12 @@ func (s *Server) updateTaskHardware(writer http.ResponseWriter, request *http.Re
 				"ok": false, "error": "hardware_group_invalid", "message": err.Error(),
 			})
 			return
+		}
+		if item.Network.Protocol == domain.HardwareProtocolADB {
+			raw.ClearSecret = true
+			raw.Password = ""
+			item.CredentialRef = ""
+			item.PasswordConfigured = false
 		}
 		if raw.ClearSecret {
 			item.CredentialRef = ""
@@ -406,7 +752,8 @@ func normalizeHardwareGroup(
 	}
 	if raw.Network.Protocol != domain.HardwareProtocolTelnet &&
 		raw.Network.Protocol != domain.HardwareProtocolRaw &&
-		raw.Network.Protocol != domain.HardwareProtocolSSH {
+		raw.Network.Protocol != domain.HardwareProtocolSSH &&
+		raw.Network.Protocol != domain.HardwareProtocolADB {
 		return domain.HardwareGroup{}, fmt.Errorf("硬件组 %s 的网络协议无效", id)
 	}
 	raw.Network.SSHAuth = strings.TrimSpace(raw.Network.SSHAuth)
@@ -419,9 +766,12 @@ func normalizeHardwareGroup(
 		return domain.HardwareGroup{}, fmt.Errorf("硬件组 %s 的 SSH 登录方式无效", id)
 	}
 	if raw.Network.Port <= 0 {
-		if raw.Network.Protocol == domain.HardwareProtocolSSH {
+		switch raw.Network.Protocol {
+		case domain.HardwareProtocolSSH:
 			raw.Network.Port = 22
-		} else {
+		case domain.HardwareProtocolADB:
+			raw.Network.Port = 5555
+		default:
 			raw.Network.Port = 23
 		}
 	}
@@ -446,9 +796,13 @@ func normalizeHardwareGroup(
 	if createdAt.IsZero() {
 		createdAt = now
 	}
+	username := strings.TrimSpace(raw.Username)
+	if raw.Network.Protocol == domain.HardwareProtocolADB {
+		username = ""
+	}
 	return domain.HardwareGroup{
 		TaskID: taskID, ID: id, Position: position, Description: description, Mode: mode,
-		Serial: raw.Serial, Network: raw.Network, Username: strings.TrimSpace(raw.Username),
+		Serial: raw.Serial, Network: raw.Network, Username: username,
 		CredentialRef: existing.CredentialRef, PasswordConfigured: existing.PasswordConfigured,
 		Access: access, CreatedAt: createdAt, UpdatedAt: now,
 	}, nil

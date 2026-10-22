@@ -361,7 +361,7 @@ function agentCapabilitiesFold(capabilities: Record<string, boolean> | undefined
       <p>默认关闭；仅 Main Agent 可用。</p>
       <label><input type="checkbox" name="cap_workspace_read" ${granted.workspace_read ? "checked" : ""}>读取同 Project Workspace</label>
       <label><input type="checkbox" name="cap_task_create" ${granted.task_create ? "checked" : ""}>创建同 Project Task</label>
-      <label><input type="checkbox" name="cap_clone_hardware" ${granted.clone_hardware ? "checked" : ""}>克隆当前 Task 硬件与凭据</label>
+      <label><input type="checkbox" name="cap_clone_hardware" ${granted.clone_hardware ? "checked" : ""}>克隆当前 Task 硬件启用关系</label>
     </div></div>
   </details>`;
 }

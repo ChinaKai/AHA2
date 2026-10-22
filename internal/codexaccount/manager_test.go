@@ -45,9 +45,6 @@ func (f *fakeAccountStore) DeleteCodexAccount(_ context.Context, id string) erro
 	delete(f.items, id)
 	return nil
 }
-func (f *fakeAccountStore) CodexAccountInUse(context.Context, string) (bool, error) {
-	return false, nil
-}
 func (f *fakeAccountStore) ProxySettings(context.Context) (domain.ProxySettings, error) {
 	if f.proxy.HTTPProxy != "" || f.proxy.HTTPSProxy != "" {
 		return f.proxy, nil
@@ -56,6 +53,27 @@ func (f *fakeAccountStore) ProxySettings(context.Context) (domain.ProxySettings,
 		HTTPProxy: "http://127.0.0.1:7897", HTTPSProxy: "http://127.0.0.1:7897",
 		NoProxy: "localhost,127.0.0.1,::1",
 	}, nil
+}
+
+func TestDeleteCodexAccountRemovesCredential(t *testing.T) {
+	account := domain.CodexAccount{
+		ID: "codex-account-delete", Label: "Delete", Status: "ready",
+		CredentialRef: "codex-account/codex-account-delete/auth", CredentialConfigured: true,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	store := &fakeAccountStore{items: map[string]domain.CodexAccount{account.ID: account}}
+	secrets := &fakeSecretStore{items: map[string]string{account.CredentialRef: "credential"}}
+	manager := New(context.Background(), store, secrets, "", "")
+
+	if err := manager.Delete(context.Background(), account.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := store.items[account.ID]; ok {
+		t.Fatal("Codex account was not deleted")
+	}
+	if _, ok := secrets.items[account.CredentialRef]; ok {
+		t.Fatal("Codex account credential was not deleted")
+	}
 }
 
 func TestOAuthTokenExchangeUsesConfiguredProxy(t *testing.T) {

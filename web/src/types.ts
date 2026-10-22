@@ -525,13 +525,14 @@ export interface HardwareSerialConfig {
 export interface HardwareNetworkConfig {
   host: string;
   port: number;
-  protocol: "telnet" | "raw" | "ssh";
+  protocol: "telnet" | "raw" | "ssh" | "adb";
   ssh_auth: "auto" | "password" | "key";
 }
 
 export interface HardwareGroup {
   task_id: string;
   id: string;
+  resource_id?: string;
   position: number;
   description: string;
   mode: "off" | "serial" | "network" | "both";
@@ -539,7 +540,22 @@ export interface HardwareGroup {
   network: HardwareNetworkConfig;
   username?: string;
   password_configured: boolean;
+  adb_paired_at?: string;
   access: "read_only" | "read_write";
+  created_at: string;
+  updated_at: string;
+}
+
+export interface HardwareResource {
+  id: string;
+  description: string;
+  mode: "off" | "serial" | "network" | "both";
+  serial: HardwareSerialConfig;
+  network: HardwareNetworkConfig;
+  username?: string;
+  password_configured: boolean;
+  access: "read_only" | "read_write";
+  binding_count: number;
   created_at: string;
   updated_at: string;
 }
@@ -691,6 +707,7 @@ export interface TaskDetail {
   agents: TaskAgent[];
   memory?: TaskMemory;
   hardware?: HardwareGroup[];
+  hardware_resources?: HardwareResource[];
   event_cursor: number;
   server_time_ms: number;
 }
@@ -859,6 +876,20 @@ export interface ChannelOnboardingSession {
   consumed_at?: string;
   created_at: string;
   updated_at: string;
+}
+
+export interface ChannelOnboardingPermission {
+  id: string;
+  name: string;
+  description: string;
+  required: boolean;
+  enabled: boolean;
+}
+
+export interface ChannelOnboardingOptions {
+  mode: "register_app" | "existing_app";
+  permission_catalog_version: number;
+  permissions: ChannelOnboardingPermission[];
 }
 
 export interface ChannelHandoff {

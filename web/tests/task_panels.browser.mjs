@@ -50,6 +50,7 @@ window.fetch = async (input, init = {}) => {
   if (path === "/api/v1/auth/status") return json({authenticated: true, csrf_token: "csrf", owner: {id: "owner-1", username: "owner"}});
   if (path === "/api/v1/tasks" && method === "GET") return json({tasks: TASKS, has_more: false, counts: COUNTS});
   if (path === "/api/v1/tasks" && method === "POST") { window.__created = JSON.parse(init.body || "{}"); return json({task: {...TASKS[0], id: "t-new"}, started: true}); }
+  if (path === "/api/v1/task-clone-sources" && method === "GET") return json({tasks: TASKS.filter(task => !task.owner_device_id)});
   if (path === "/api/v1/projects") return json({projects: [
     {id: "project-1", name: "Project One", project_type: "folder", channel_retired: false, knowledge_policy: "enabled"},
     {id: "project-2", name: "Project Two", project_type: "folder", channel_retired: false, knowledge_policy: "enabled"},
@@ -61,6 +62,23 @@ window.fetch = async (input, init = {}) => {
   if (path === "/api/v1/env-groups") return json({env_groups: [{id: "env-1", name: "Env", provider_id: "provider-1", backend: "stub", revision: 1, environment: {}, secret_refs: {}}]});
   if (path === "/api/v1/codex/accounts") return json({accounts: []});
   if (path.includes("/conversation")) return json({conversation: {items: [], has_more: false, next_before: 0, latest_sequence: 0}});
+  if (path === "/api/v1/tasks/t-active" && method === "GET") return json({
+    task: {...TASKS[0], collaboration_mode: "single", max_agents: 2, knowledge_policy: "disabled", skill_ids: ["skill-b"]},
+    turns: [],
+    agents: [{
+      task_id: "t-active", agent_id: "main", role: "main", status: "idle", title: "Main",
+      backend: "codex", model_source: "provider", model_id: "model-1", model_name: "Stub model",
+      wire_model: "stub", reasoning_effort: "high", stream_idle_timeout_ms: 180000,
+      stream_max_retries: 3, filesystem: "read-only", approval: "auto", proxy_enabled: true,
+      fast_mode: true, runtime_config_valid: true, inherit_main: false, unread_count: 0,
+    }],
+    latest_round: null,
+    hardware: [{id: "board", task_id: "t-active", position: 0, description: "Board", mode: "off", serial: {}, network: {}}],
+    memory: {},
+  });
+  if (path === "/api/v1/tasks/t-active/channel-routes" && method === "GET") return json({
+    destinations: [], route: {id: "route-1", instance_id: "instance-1", conversation_id: "conversation-1", target_task_id: "t-active", state: "active", revision: 1}, contacts: [], members: [],
+  });
   if (path === "/api/v1/tasks/t-new" && method === "GET") return json({task: {...TASKS[0], id: "t-new"}, turns: [], agents: [{agent_id: "main", status: "idle", title: "Main", runtime_config_valid: true, unread_count: 0}], latest_round: null, hardware: [], memory: {}});
   if (path.startsWith("/api/v1/")) return json({});
   return json({});
@@ -190,12 +208,22 @@ try {
   await page.locator("#task-capabilities-fold summary").click();
   await page.locator('#task-capabilities-fold input[name="cap_workspace_read"]').setChecked(true);
   assert.match(await page.locator("#task-capabilities-fold [data-fold-count]").innerText(), /已启用 1\/3/);
+  await page.locator("#task-clone-source").selectOption("t-active");
+  await page.waitForFunction(() => document.querySelector("#task-clone-channel")?.checked === true);
+  assert.equal(await page.locator("#task-clone-hardware").isChecked(), true, "source hardware was not offered");
+  assert.equal(await page.locator("#task-clone-channel").isChecked(), true, "source channel was not offered");
+  assert.equal(await page.locator("#task-project").inputValue(), "project-1", "loading source Main changed the target project");
+  assert.equal(await page.locator("#task-workspace").inputValue(), "workspace-1", "loading source Main changed the target workspace");
+  assert.equal(await page.locator('#task-form select[name="filesystem"]').inputValue(), "read-only", "source Main filesystem was not loaded");
+  assert.equal(await page.locator('#task-form select[name="collaboration_mode"]').inputValue(), "single", "source Task policy was not loaded");
+  assert.deepEqual(await page.locator('#task-skills-fold input[name="skill_ids"]:checked').evaluateAll(nodes => nodes.map(node => node.value)), ["skill-b"]);
+  await page.screenshot({path: resolve(output, "task-clone-source.png")});
   await proxy.selectOption("enabled");
   // The accelerated tier is a checkbox, so it is the one runtime field that
   // submits the string "on" and has to reach the request as a boolean.
   const fastTier = page.locator('#task-form input[name="fast_mode"]');
   assert.equal(await fastTier.count(), 1, "the create panel has no Codex fast switch");
-  assert.equal(await fastTier.isChecked(), false, "the fast switch does not default to off");
+  assert.equal(await fastTier.isChecked(), true, "the source fast switch was not loaded");
   assert.equal(await fastTier.isVisible(), true, "the fast switch is hidden for a Codex workspace");
   await fastTier.setChecked(true);
   await page.fill('#task-form input[name="title"]', "New task");
@@ -208,7 +236,10 @@ try {
   assert.equal(created.agent_capabilities.workspace_read, true, "the workspace grant was not submitted");
   assert.equal(created.agent_capabilities.task_create, false, "an unchecked grant was submitted as granted");
   assert.equal(created.agent_capabilities.clone_hardware, false, "an unchecked grant was submitted as granted");
-  assert.deepEqual(created.skill_ids.sort(), ["skill-a", "skill-b"], "selected skills were not submitted");
+  assert.equal(created.source_task_id, "t-active", "the source Task was not submitted");
+  assert.equal(created.clone_hardware, true, "the hardware clone choice was not submitted");
+  assert.equal(created.clone_channel, true, "the channel handoff choice was not submitted");
+  assert.deepEqual(created.skill_ids.sort(), ["skill-b"], "source skills were not submitted");
   assert.deepEqual(errors, [], "the task panel threw while being driven");
 
   // 5. A memo can seed the create panel. The button only shows on a row that
@@ -253,6 +284,16 @@ try {
   // Opening the created Task must not leave an error banner behind.
   await page.waitForFunction(() => !document.querySelector(".banner.error"), null, {timeout: 10000});
   await page.screenshot({path: resolve(output, "memo-create-task.png")});
+
+  await page.setViewportSize({width: 390, height: 844});
+  await page.locator('.bottom-nav [data-view="tasks"]').click();
+  await page.waitForSelector(".task-filters", {timeout: 10000});
+  await page.click('[data-dialog="task"]');
+  await page.waitForSelector("#task-dialog[open]", {timeout: 5000});
+  await page.locator("#task-clone-source").selectOption("t-active");
+  await page.waitForFunction(() => document.querySelector("#task-clone-channel")?.checked === true);
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true, "the source clone panel overflows the mobile viewport");
+  await page.screenshot({path: resolve(output, "task-clone-source-mobile.png")});
   console.log("task panels verified in the built Web bundle");
 } finally {
   await browser?.close();
