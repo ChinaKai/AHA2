@@ -1121,8 +1121,16 @@ func TestMultiAgentRoundCreatesIntegrationTurn(t *testing.T) {
 	}
 	categories := map[string]bool{}
 	var orchestrationCards int
+	var collaborationResults int
 	for _, item := range page.Items {
 		categories[item.Category] = true
+		if item.Kind == "collaboration_result_routed" {
+			collaborationResults++
+			if item.StreamAgentID != "main" || item.AgentID == "main" ||
+				item.RouteKind != "collaboration_result" || item.Payload["batch_id"] == nil {
+				t.Fatalf("collaboration result leaked or lost routing metadata: %#v", item)
+			}
+		}
 		if item.Kind == "agent_batch_dispatched" {
 			orchestrationCards++
 			routes, _ := item.Payload["agent_routes"].([]any)
@@ -1144,6 +1152,9 @@ func TestMultiAgentRoundCreatesIntegrationTurn(t *testing.T) {
 	}
 	if orchestrationCards != 1 {
 		t.Fatalf("AHA orchestration card missing: %#v", page.Items)
+	}
+	if collaborationResults != 2 {
+		t.Fatalf("expected two child results in Main conversation, got %d: %#v", collaborationResults, page.Items)
 	}
 	turnDurationCards := 0
 	for _, item := range page.Items {

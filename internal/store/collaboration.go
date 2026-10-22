@@ -142,6 +142,26 @@ func (s *Store) RecordCollaborationResult(ctx context.Context, turn domain.Turn,
 		return "", false, err
 	}
 	inserted, _ := result.RowsAffected()
+	if inserted == 1 && turn.TaskID != "" && turn.RoundID != "" {
+		category, kind := "update", "collaboration_result_routed"
+		if status != string(domain.TurnSucceeded) {
+			category, kind = "error", "collaboration_error_routed"
+		}
+		if _, err := insertConversationItem(ctx, tx, domain.ConversationItem{
+			ID:     domain.CollaborationResultConversationID(turn.ID),
+			TaskID: turn.TaskID, RoundID: turn.RoundID, TurnID: turn.ID,
+			AgentID: agentID, StreamAgentID: "main", FromAgentID: agentID, ToAgentID: "main",
+			RouteKind: "collaboration_result", Category: category, Kind: kind, Summary: content,
+			Payload: map[string]any{
+				"batch_id": batchID, "parent_turn_id": turn.ParentTurnID,
+				"child_turn_id": turn.ID, "agent_id": agentID, "status": status,
+				"attempt": turn.Attempt, "result": turn.Result, "error": turn.Error,
+			},
+			CreatedAt: now,
+		}); err != nil {
+			return "", false, err
+		}
+	}
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE collaboration_members SET status=?,updated_at=?
 		WHERE batch_id=? AND agent_id=?`,

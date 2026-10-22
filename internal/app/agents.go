@@ -577,6 +577,11 @@ func (s *Service) routeAgentOutcome(ctx context.Context, task domain.Task, turn 
 	content = fmt.Sprintf("%s [%s, attempt %d]\n%s", turn.AgentID, turn.Status, turn.Attempt, content)
 	if batchID, inserted, batchErr := s.store.RecordCollaborationResult(ctx, turn, string(turn.Status), content); batchErr == nil && batchID != "" {
 		if inserted {
+			conversationID := domain.CollaborationResultConversationID(turn.ID)
+			s.emit(ctx, task.ID, "conversation", conversationID, "collaboration_result_routed", map[string]any{
+				"round_id": turn.RoundID, "turn_id": turn.ID, "agent_id": turn.AgentID,
+				"batch_id": batchID, "conversation_item_id": conversationID, "status": turn.Status,
+			})
 			s.emit(ctx, task.ID, "collaboration", batchID, "collaboration_result_recorded", map[string]any{
 				"batch_id": batchID, "agent_id": turn.AgentID,
 				"child_turn_id": turn.ID, "status": turn.Status,

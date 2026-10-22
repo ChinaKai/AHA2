@@ -61,3 +61,7 @@ type CollaborationProgress struct {
 	NextCursor      int64                `json:"next_cursor"`
 	DeliveredCursor int64                `json:"delivered_cursor"`
 }
+
+func CollaborationResultConversationID(turnID string) string {
+	return "conversation_collaboration_result_" + turnID
+}

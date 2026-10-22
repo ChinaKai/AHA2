@@ -1442,6 +1442,13 @@ test("conversation renders agent config, channel outreach, and turn duration car
       recipients: [{display_name: "张三", collaboration_role: "APP"}, {display_name: "WORK-AHA", is_bot: true}],
     },
     created_at: "2026-09-04T09:00:03Z",
+  }, {
+    sequence: 4, id: "collaboration-result-1", task_id: "task-1", agent_id: "sub-001",
+    stream_agent_id: "main", from_agent_id: "sub-001", to_agent_id: "main",
+    route_kind: "collaboration_result", category: "update", kind: "collaboration_result_routed",
+    summary: "sub-001 [succeeded, attempt 1]\\nstore verification passed",
+    payload: {batch_id: "collaboration_batch_1", child_turn_id: "turn-sub-1", status: "succeeded"},
+    created_at: "2026-09-04T09:00:04Z",
   }];
   const html = renderConversationList(items, null, false);
   assert.match(html, /Agent 配置更新/);
@@ -1453,6 +1460,9 @@ test("conversation renders agent config, channel outreach, and turn duration car
   assert.match(html, /WORK-AHA/);
   assert.match(html, /已排队/);
   assert.match(html, /接口字段需要确认 &lt;script&gt;/);
+  assert.match(html, /sub-001/);
+  assert.match(html, /store verification passed/);
+  assert.match(html, /agent-routed-message/);
   assert.doesNotMatch(html, /接口字段需要确认 <script>/);
 });
 
