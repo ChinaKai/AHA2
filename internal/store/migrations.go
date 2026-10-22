@@ -2755,5 +2755,22 @@ func (s *Store) migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(77, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
 		return fmt.Errorf("record schema v77: %w", err)
 	}
+	var hasV78 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=78)`).Scan(&hasV78)
+	if !hasV78 {
+		for _, statement := range []string{
+			`DROP INDEX IF EXISTS idx_agent_inbox_routed_turn`,
+			`CREATE UNIQUE INDEX idx_agent_inbox_routed_turn
+			 ON agent_inbox(task_id,target_agent_id,source_turn_id,source_kind)
+			 WHERE source_turn_id<>'' AND source_kind<>'collaboration_fallback'`,
+		} {
+			if _, err := s.db.ExecContext(ctx, statement); err != nil {
+				return fmt.Errorf("apply schema v78: %w", err)
+			}
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(78, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v78: %w", err)
+	}
 	return nil
 }

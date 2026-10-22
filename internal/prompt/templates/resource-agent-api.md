@@ -48,6 +48,8 @@ The dispatch response includes `batch_id`. Sub results are not injected into a r
 
 `POST /api/v1/agent/collaboration/batches/{batch}/wait` long-polls server-side for up to 30 seconds. Process returned `results`, retain `next_cursor`, and call again while `complete=false`. Do not claim child results or final completion before the batch is complete. If a wait times out with pending agents, continue useful work or wait again. `main_followup` remains an accepted compatibility alias for `integration_instructions`.
 
+If Main ends before a batch completes, AHA wakes it after the first unread result and briefly coalesces near-simultaneous completions. Process the supplied incremental results, continue polling every open batch from its supplied cursor, and give the one final answer only after all batches are complete.
+
 Task creation is Main-only, stays inside the current Project, and inherits the current runtime when model fields are omitted. To select another configured runtime, first read the project runtime list and submit its exact non-secret fields.
 
 ## Attachment delivery

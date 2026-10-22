@@ -2,7 +2,9 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -94,6 +96,13 @@ func (s *Service) ResumePending(ctx context.Context) error {
 		if _, _, err := s.scheduleAgent(ctx, agent.TaskID, agent.AgentID); err != nil {
 			return err
 		}
+	}
+	batches, err := s.store.OpenCollaborationBatchIDs(ctx)
+	if err != nil {
+		return err
+	}
+	for _, batchID := range batches {
+		s.maybeScheduleCollaborationFallback(ctx, batchID)
 	}
 	return nil
 }
@@ -652,12 +661,25 @@ func (s *Service) WaitAgentCollaboration(
 }
 
 func (s *Service) finalizeMainCollaboration(ctx context.Context, turn domain.Turn) {
-	_ = s.store.ConsumeFallbackCollaborationForInbox(ctx, turn.InboxBatchID, s.now().UTC())
-	batches, err := s.store.CollaborationBatchesForParentTurn(ctx, turn.ID)
-	if err != nil {
-		return
+	var batchIDs []string
+	if referenced, err := s.store.CollaborationBatchIDsForInbox(ctx, turn.InboxBatchID); err == nil {
+		batchIDs = append(batchIDs, referenced...)
 	}
-	for _, batch := range batches {
+	if batches, err := s.store.CollaborationBatchesForParentTurn(ctx, turn.ID); err == nil {
+		for _, batch := range batches {
+			batchIDs = append(batchIDs, batch.ID)
+		}
+	}
+	seen := map[string]bool{}
+	for _, batchID := range batchIDs {
+		if seen[batchID] {
+			continue
+		}
+		seen[batchID] = true
+		batch, err := s.store.CollaborationBatch(ctx, batchID)
+		if err != nil || batch.Status == domain.CollaborationBatchConsumed {
+			continue
+		}
 		progress, progressErr := s.store.CollaborationProgress(ctx, batch.ID, 0)
 		if progressErr != nil {
 			continue
@@ -667,7 +689,7 @@ func (s *Service) finalizeMainCollaboration(ctx context.Context, turn domain.Tur
 			continue
 		}
 		_ = s.store.MarkCollaborationFallback(ctx, batch.ID, s.now().UTC())
-		if progress.Complete {
+		if batch.DeliveredCursor < progress.NextCursor {
 			s.maybeScheduleCollaborationFallback(ctx, batch.ID)
 		}
 	}
@@ -682,25 +704,129 @@ func (s *Service) maybeScheduleCollaborationFallback(ctx context.Context, batchI
 	if err != nil || !parent.Status.Terminal() {
 		return
 	}
-	batches, err := s.store.CollaborationBatchesForParentTurn(ctx, batch.ParentTurnID)
+	round, err := s.store.Round(ctx, batch.RoundID)
+	if err != nil || round.Status.Terminal() {
+		return
+	}
+	if _, err := s.store.ActiveTurnForAgent(ctx, batch.TaskID, "main"); err == nil {
+		return
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return
+	}
+	s.armCollaborationWake(batch.ParentTurnID)
+}
+
+func (s *Service) armCollaborationWake(parentTurnID string) {
+	s.collaborationMu.Lock()
+	defer s.collaborationMu.Unlock()
+	if timer := s.collaborationTimers[parentTurnID]; timer != nil {
+		timer.Reset(s.collaborationWakeDelay())
+		return
+	}
+	var timer *time.Timer
+	timer = time.AfterFunc(s.collaborationWakeDelay(), func() {
+		s.collaborationMu.Lock()
+		if s.collaborationTimers[parentTurnID] == timer {
+			delete(s.collaborationTimers, parentTurnID)
+		}
+		s.collaborationMu.Unlock()
+		s.enqueueCollaborationWake(context.Background(), parentTurnID)
+	})
+	s.collaborationTimers[parentTurnID] = timer
+}
+
+func (s *Service) collaborationWakeDelay() time.Duration {
+	if s.collaborationDelay <= 0 {
+		return 350 * time.Millisecond
+	}
+	return s.collaborationDelay
+}
+
+func (s *Service) enqueueCollaborationWake(ctx context.Context, parentTurnID string) {
+	parent, err := s.store.Turn(ctx, parentTurnID)
+	if err != nil || !parent.Status.Terminal() {
+		return
+	}
+	round, err := s.store.Round(ctx, parent.RoundID)
+	if err != nil || round.Status.Terminal() {
+		return
+	}
+	if _, err := s.store.ActiveTurnForAgent(ctx, parent.TaskID, "main"); err == nil {
+		return
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return
+	}
+	pending, err := s.store.PendingAgentInbox(ctx, parent.TaskID, "main")
+	if err != nil {
+		return
+	}
+	for _, item := range pending {
+		itemParentID := strings.TrimSpace(fmt.Sprint(item.Payload["parent_turn_id"]))
+		if item.SourceKind == "collaboration_fallback" && itemParentID == parentTurnID {
+			return
+		}
+	}
+	batches, err := s.store.CollaborationBatchesForParentTurn(ctx, parentTurnID)
 	if err != nil || len(batches) == 0 {
 		return
 	}
-	var content strings.Builder
-	content.WriteString("Completed sub-agent results:\n")
-	batchIDs := make([]string, 0, len(batches))
-	for _, item := range batches {
-		progress, progressErr := s.store.CollaborationProgress(ctx, item.ID, 0)
-		if progressErr != nil || !progress.Complete {
+
+	type batchWake struct {
+		batch    domain.CollaborationBatch
+		progress domain.CollaborationProgress
+	}
+	wakes := make([]batchWake, 0, len(batches))
+	allComplete := true
+	hasUnread := false
+	keyParts := make([]string, 0, len(batches)*2+1)
+	keyParts = append(keyParts, parentTurnID)
+	for _, batch := range batches {
+		progress, progressErr := s.store.CollaborationProgress(ctx, batch.ID, batch.DeliveredCursor)
+		if progressErr != nil {
 			return
 		}
-		batchIDs = append(batchIDs, item.ID)
-		if strings.TrimSpace(item.IntegrationInstructions) != "" {
-			content.WriteString("\nIntegration instructions:\n")
-			content.WriteString(strings.TrimSpace(item.IntegrationInstructions))
+		if !progress.Complete {
+			allComplete = false
+		}
+		if len(progress.Results) > 0 {
+			hasUnread = true
+		}
+		wakes = append(wakes, batchWake{batch: batch, progress: progress})
+		keyParts = append(keyParts, batch.ID, fmt.Sprintf("%d", progress.NextCursor))
+	}
+	if !hasUnread {
+		return
+	}
+	digest := sha256.Sum256([]byte(strings.Join(keyParts, "\x00")))
+	wakeID := "inbox_collaboration_fallback_" + hex.EncodeToString(digest[:12])
+
+	var content strings.Builder
+	content.WriteString("Sub-agent collaboration has unread results.\n")
+	if allComplete {
+		content.WriteString("All required sub-agents are complete. Integrate every result before the final answer.\n")
+	} else {
+		content.WriteString("The collaboration is still running. Process these results incrementally, then continue waiting before giving the final answer.\n")
+	}
+	content.WriteString("\nOpen batches and cursors:\n")
+	batchIDs := make([]string, 0, len(wakes))
+	cursors := map[string]int64{}
+	for _, wake := range wakes {
+		batchIDs = append(batchIDs, wake.batch.ID)
+		cursors[wake.batch.ID] = wake.progress.NextCursor
+		content.WriteString("- `")
+		content.WriteString(wake.batch.ID)
+		content.WriteString("` after_cursor=")
+		content.WriteString(fmt.Sprintf("%d", wake.progress.NextCursor))
+		content.WriteString("\n")
+		if strings.TrimSpace(wake.batch.IntegrationInstructions) != "" {
+			content.WriteString("  Integration instructions: ")
+			content.WriteString(strings.TrimSpace(wake.batch.IntegrationInstructions))
 			content.WriteString("\n")
 		}
-		for _, result := range progress.Results {
+	}
+	content.WriteString("\nUnread sub-agent results:\n")
+	for _, wake := range wakes {
+		for _, result := range wake.progress.Results {
 			content.WriteString("\n### ")
 			content.WriteString(result.AgentID)
 			content.WriteString("\n")
@@ -708,23 +834,31 @@ func (s *Service) maybeScheduleCollaborationFallback(ctx context.Context, batchI
 			content.WriteString("\n")
 		}
 	}
+	if !allComplete {
+		content.WriteString("\nContinue polling every open batch with its saved cursor. Return the final answer only after every batch reports complete.\n")
+	}
+
 	_, err = s.store.EnqueueAgentRoute(ctx, domain.AgentInboxItem{
-		ID: "inbox_collaboration_fallback_" + batch.ParentTurnID, TaskID: batch.TaskID, RoundID: batch.RoundID,
+		ID: wakeID, TaskID: parent.TaskID, RoundID: parent.RoundID,
 		TargetAgentID: "main", SourceAgentID: "aha", SourceKind: "collaboration_fallback",
-		SourceTurnID: batch.ParentTurnID, Content: strings.TrimSpace(content.String()),
-		Payload: map[string]any{"batch_id": batch.ID, "batch_ids": batchIDs, "parent_turn_id": batch.ParentTurnID},
-		Status:  "pending", CreatedAt: s.now().UTC(),
+		SourceTurnID: parentTurnID, Content: strings.TrimSpace(content.String()),
+		Payload: map[string]any{
+			"batch_id": wakes[0].batch.ID, "batch_ids": batchIDs, "cursors": cursors,
+			"parent_turn_id": parentTurnID, "all_complete": allComplete,
+		},
+		Status: "pending", CreatedAt: s.now().UTC(),
 	})
 	if err != nil {
 		return
 	}
-	for _, item := range batches {
-		_ = s.store.MarkCollaborationFallback(ctx, item.ID, s.now().UTC())
+	now := s.now().UTC()
+	for _, wake := range wakes {
+		_ = s.store.MarkCollaborationDelivered(
+			ctx, wake.batch.ID, wake.progress.NextCursor, domain.CollaborationBatchFallback, now,
+		)
+		_ = s.store.MarkCollaborationFallback(ctx, wake.batch.ID, now)
 	}
-	// A prior caller may have inserted the durable fallback without starting
-	// it because the parent was still active. scheduleAgent is idempotent, so
-	// every later readiness callback retries the same fixed Inbox item.
-	_, _, _ = s.scheduleAgent(ctx, batch.TaskID, "main")
+	_, _, _ = s.scheduleAgent(ctx, parent.TaskID, "main")
 }
 
 func (s *Service) updateOrchestrationRouteStatus(ctx context.Context, turn domain.Turn) {

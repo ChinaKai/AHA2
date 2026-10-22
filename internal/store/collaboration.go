@@ -65,6 +65,35 @@ func (s *Store) CollaborationBatch(ctx context.Context, id string) (domain.Colla
 	return item, err
 }
 
+func (s *Store) CollaborationMembers(ctx context.Context, batchID string) ([]domain.CollaborationMember, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT batch_id,agent_id,required,child_turn_id,status,created_at,updated_at
+		FROM collaboration_members WHERE batch_id=? ORDER BY agent_id`,
+		batchID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []domain.CollaborationMember
+	for rows.Next() {
+		var item domain.CollaborationMember
+		var required int
+		var createdAt, updatedAt string
+		if err := rows.Scan(
+			&item.BatchID, &item.AgentID, &required, &item.ChildTurnID,
+			&item.Status, &createdAt, &updatedAt,
+		); err != nil {
+			return nil, err
+		}
+		item.Required = required != 0
+		item.CreatedAt = parseTime(createdAt)
+		item.UpdatedAt = parseTime(updatedAt)
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
 func (s *Store) LinkCollaborationMemberTurn(ctx context.Context, batchID, agentID, childTurnID string, updatedAt time.Time) error {
 	if batchID == "" || agentID == "" || childTurnID == "" {
 		return nil
@@ -122,8 +151,14 @@ func (s *Store) RecordCollaborationResult(ctx context.Context, turn domain.Turn,
 	}
 	var pending int
 	if err := tx.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM collaboration_members
-		WHERE batch_id=? AND status IN ('queued','running')`,
+		SELECT COUNT(*) FROM collaboration_members member
+		WHERE member.batch_id=? AND (
+			member.status IN ('queued','running')
+			OR NOT EXISTS (
+				SELECT 1 FROM collaboration_events event
+				WHERE event.batch_id=member.batch_id AND event.child_turn_id=member.child_turn_id
+			)
+		)`,
 		batchID,
 	).Scan(&pending); err != nil {
 		return "", false, err
@@ -145,11 +180,27 @@ func (s *Store) RecordCollaborationResult(ctx context.Context, turn domain.Turn,
 }
 
 func (s *Store) CollaborationProgress(ctx context.Context, batchID string, after int64) (domain.CollaborationProgress, error) {
-	batch, err := s.CollaborationBatch(ctx, batchID)
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return domain.CollaborationProgress{}, err
 	}
-	rows, err := s.db.QueryContext(ctx, `
+	defer tx.Rollback()
+	var batch domain.CollaborationBatch
+	var createdAt, updatedAt, consumedAt string
+	if err := tx.QueryRowContext(ctx, `
+		SELECT id,task_id,round_id,parent_turn_id,integration_instructions,status,
+		       delivered_cursor,created_at,updated_at,consumed_at
+		FROM collaboration_batches WHERE id=?`, batchID).Scan(
+		&batch.ID, &batch.TaskID, &batch.RoundID, &batch.ParentTurnID,
+		&batch.IntegrationInstructions, &batch.Status, &batch.DeliveredCursor,
+		&createdAt, &updatedAt, &consumedAt,
+	); err != nil {
+		return domain.CollaborationProgress{}, err
+	}
+	batch.CreatedAt = parseTime(createdAt)
+	batch.UpdatedAt = parseTime(updatedAt)
+	batch.ConsumedAt = parseTime(consumedAt)
+	rows, err := tx.QueryContext(ctx, `
 		SELECT sequence,id,batch_id,child_turn_id,agent_id,status,content,created_at
 		FROM collaboration_events WHERE batch_id=? AND sequence>? ORDER BY sequence`,
 		batchID, after,
@@ -185,9 +236,15 @@ func (s *Store) CollaborationProgress(ctx context.Context, batchID string, after
 	if err := rows.Close(); err != nil {
 		return domain.CollaborationProgress{}, err
 	}
-	pendingRows, err := s.db.QueryContext(ctx, `
-		SELECT agent_id FROM collaboration_members
-		WHERE batch_id=? AND status IN ('queued','running') ORDER BY agent_id`,
+	pendingRows, err := tx.QueryContext(ctx, `
+		SELECT member.agent_id FROM collaboration_members member
+		WHERE member.batch_id=? AND (
+			member.status IN ('queued','running')
+			OR NOT EXISTS (
+				SELECT 1 FROM collaboration_events event
+				WHERE event.batch_id=member.batch_id AND event.child_turn_id=member.child_turn_id
+			)
+		) ORDER BY member.agent_id`,
 		batchID,
 	)
 	if err != nil {
@@ -204,11 +261,17 @@ func (s *Store) CollaborationProgress(ctx context.Context, batchID string, after
 	if err := pendingRows.Err(); err != nil {
 		return domain.CollaborationProgress{}, err
 	}
+	if err := pendingRows.Close(); err != nil {
+		return domain.CollaborationProgress{}, err
+	}
 	progress.Complete = len(progress.PendingAgentIDs) == 0
 	if progress.Complete {
 		progress.Status = domain.CollaborationBatchComplete
 	} else {
 		progress.Status = domain.CollaborationBatchPending
+	}
+	if err := tx.Commit(); err != nil {
+		return domain.CollaborationProgress{}, err
 	}
 	return progress, nil
 }
@@ -260,6 +323,27 @@ func (s *Store) CollaborationBatchesForParentTurn(ctx context.Context, parentTur
 	return result, nil
 }
 
+func (s *Store) OpenCollaborationBatchIDs(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id FROM collaboration_batches
+		WHERE status<>? ORDER BY created_at,id`,
+		domain.CollaborationBatchConsumed,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 func (s *Store) OpenCollaborationBatchCountForRound(ctx context.Context, roundID string) (int, error) {
 	var count int
 	err := s.db.QueryRowContext(ctx, `
@@ -287,9 +371,9 @@ func (s *Store) MarkCollaborationFallback(ctx context.Context, batchID string, u
 	return err
 }
 
-func (s *Store) ConsumeFallbackCollaborationForInbox(ctx context.Context, inboxBatchID string, consumedAt time.Time) error {
+func (s *Store) CollaborationBatchIDsForInbox(ctx context.Context, inboxBatchID string) ([]string, error) {
 	if inboxBatchID == "" {
-		return nil
+		return nil, nil
 	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT payload_json FROM agent_inbox
@@ -297,7 +381,7 @@ func (s *Store) ConsumeFallbackCollaborationForInbox(ctx context.Context, inboxB
 		inboxBatchID,
 	)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	var batchIDs []string
 	seen := map[string]bool{}
@@ -305,7 +389,7 @@ func (s *Store) ConsumeFallbackCollaborationForInbox(ctx context.Context, inboxB
 		var payloadJSON string
 		if err := rows.Scan(&payloadJSON); err != nil {
 			rows.Close()
-			return err
+			return nil, err
 		}
 		payload := decodeJSON(payloadJSON, map[string]any{})
 		if rawBatchIDs, ok := payload["batch_ids"].([]any); ok {
@@ -323,15 +407,10 @@ func (s *Store) ConsumeFallbackCollaborationForInbox(ctx context.Context, inboxB
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
-		return err
+		return nil, err
 	}
 	if err := rows.Close(); err != nil {
-		return err
+		return nil, err
 	}
-	for _, batchID := range batchIDs {
-		if err := s.MarkCollaborationConsumed(ctx, batchID, consumedAt); err != nil {
-			return err
-		}
-	}
-	return nil
+	return batchIDs, nil
 }

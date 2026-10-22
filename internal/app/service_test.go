@@ -280,15 +280,18 @@ func TestRecoveredTurnReceivesInlineDurableHandoff(t *testing.T) {
 }
 
 type multiAgentExecutor struct {
-	mu               sync.Mutex
-	turns            []domain.Turn
-	service          *Service
-	waitForBatch     bool
-	blockAgentID     string
-	agentRelease     <-chan struct{}
-	collaboration    domain.CollaborationProgress
-	collaborationID  string
-	collaborationErr error
+	mu                     sync.Mutex
+	turns                  []domain.Turn
+	service                *Service
+	waitForBatch           bool
+	waitForBatchOnFallback bool
+	fallbackExitGeneration int
+	blockAgentID           string
+	agentRelease           <-chan struct{}
+	agentBlocked           chan<- struct{}
+	collaboration          domain.CollaborationProgress
+	collaborationID        string
+	collaborationErr       error
 }
 
 type idleThenSuccessExecutor struct {
@@ -328,6 +331,9 @@ func (s *multiAgentExecutor) Execute(_ context.Context, request ExecutionRequest
 				{AgentID: "sub-001", Title: "Store", Assignment: "implement store", Required: true},
 				{AgentID: "sub-002", Title: "Web", Assignment: "implement web", Required: true},
 			}, "")
+			s.mu.Lock()
+			s.collaborationID = batchID
+			s.mu.Unlock()
 			if s.waitForBatch {
 				var progress domain.CollaborationProgress
 				var waitErr error
@@ -355,7 +361,6 @@ func (s *multiAgentExecutor) Execute(_ context.Context, request ExecutionRequest
 				}
 				s.mu.Lock()
 				s.collaboration = progress
-				s.collaborationID = batchID
 				s.collaborationErr = waitErr
 				s.mu.Unlock()
 			}
@@ -367,10 +372,51 @@ func (s *multiAgentExecutor) Execute(_ context.Context, request ExecutionRequest
 		}
 		return ExecutionResult{Reply: "delegating"}, nil
 	case request.Turn.AgentID == "main":
+		if s.waitForBatchOnFallback {
+			s.mu.Lock()
+			batchID := s.collaborationID
+			s.mu.Unlock()
+			if batchID != "" {
+				claims := agentapi.Claims{TaskID: request.Task.ID, AgentID: request.Turn.AgentID, TurnID: request.Turn.ID}
+				progress, waitErr := s.service.WaitAgentCollaboration(context.Background(), claims, batchID, 0, 5*time.Second)
+				s.mu.Lock()
+				s.collaboration = progress
+				s.collaborationErr = waitErr
+				s.mu.Unlock()
+				if waitErr != nil {
+					return ExecutionResult{}, waitErr
+				}
+				if request.Turn.Generation == s.fallbackExitGeneration {
+					emit(ExecutionEvent{Type: "agent_message", Data: map[string]any{"text": "partial integration"}})
+					return ExecutionResult{Reply: "partial integration", ProviderSessionID: "main-session"}, nil
+				}
+				cursor := progress.NextCursor
+				for !progress.Complete {
+					next, err := s.service.WaitAgentCollaboration(context.Background(), claims, batchID, cursor, 5*time.Second)
+					if err != nil {
+						return ExecutionResult{}, err
+					}
+					progress.Results = append(progress.Results, next.Results...)
+					progress.PendingAgentIDs = next.PendingAgentIDs
+					progress.Complete = next.Complete
+					progress.NextCursor = next.NextCursor
+					cursor = next.NextCursor
+					s.mu.Lock()
+					s.collaboration = progress
+					s.mu.Unlock()
+				}
+			}
+		}
 		emit(ExecutionEvent{Type: "agent_message", Data: map[string]any{"text": "integrated result"}})
 		return ExecutionResult{Reply: "integrated result", ProviderSessionID: "main-session"}, nil
 	default:
 		if request.Turn.AgentID == s.blockAgentID && s.agentRelease != nil {
+			if s.agentBlocked != nil {
+				select {
+				case s.agentBlocked <- struct{}{}:
+				default:
+				}
+			}
 			<-s.agentRelease
 		}
 		emit(ExecutionEvent{Type: "agent_message", Data: map[string]any{"text": request.Turn.AgentID + " result"}})
@@ -1276,7 +1322,7 @@ func TestMultiAgentInlineWaitKeepsMainInOneTurn(t *testing.T) {
 	}
 }
 
-func TestMultiAgentFallbackWaitsForAllChildrenAndRunsOnce(t *testing.T) {
+func TestMultiAgentFallbackWakesOnFirstResultAndKeepsOneTurn(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
@@ -1313,12 +1359,16 @@ func TestMultiAgentFallbackWaitsForAllChildrenAndRunsOnce(t *testing.T) {
 		}
 	}
 	releaseSecondChild := make(chan struct{})
+	secondChildBlocked := make(chan struct{}, 1)
 	executor := &multiAgentExecutor{
-		blockAgentID: "sub-002",
-		agentRelease: releaseSecondChild,
+		blockAgentID:           "sub-002",
+		agentRelease:           releaseSecondChild,
+		agentBlocked:           secondChildBlocked,
+		waitForBatchOnFallback: true,
 	}
 	service := NewService(database, secretStore, executor)
 	executor.service = service
+	service.collaborationDelay = 20 * time.Millisecond
 	task, err := service.CreateTask(ctx, CreateTaskInput{
 		ProjectID: project.ID, WorkspaceID: workspace.ID, Title: "fallback agents",
 		Request: "coordinate fallback agents", ModelID: model.ID,
@@ -1330,12 +1380,18 @@ func TestMultiAgentFallbackWaitsForAllChildrenAndRunsOnce(t *testing.T) {
 	if _, err := service.SubmitMessage(ctx, task.ID, task.OriginalRequest); err != nil {
 		t.Fatal(err)
 	}
+	<-secondChildBlocked
 	round, err := database.LatestRound(ctx, task.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	waitForRoundAgentTurn(t, database, round.ID, "sub-001", domain.TurnSucceeded)
 	waitForRoundAgentTurn(t, database, round.ID, "sub-002", domain.TurnRunning)
+	fallbackMain := waitForRoundMainTurn(t, database, round.ID, 1, domain.TurnRunning)
+	if !strings.Contains(fallbackMain.Instruction, "after_cursor=") ||
+		!strings.Contains(fallbackMain.Instruction, "still running") {
+		t.Fatalf("first-result wake did not expose incremental cursors: %s", fallbackMain.Instruction)
+	}
 	turns, err := database.TurnsForRound(ctx, round.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -1346,14 +1402,29 @@ func TestMultiAgentFallbackWaitsForAllChildrenAndRunsOnce(t *testing.T) {
 			mainTurns++
 		}
 	}
-	if mainTurns != 1 {
-		t.Fatalf("a running child woke Main before fan-in completed: %#v", turns)
+	if mainTurns != 2 {
+		t.Fatalf("first child result did not wake Main while the second was running: %#v", turns)
 	}
 	if current, err := database.Task(ctx, task.ID); err != nil || current.Status == domain.TaskWaitingUser {
 		t.Fatalf("round settled while collaboration was still open: task=%#v err=%v", current, err)
 	}
 
 	close(releaseSecondChild)
+	waitForRoundMainTurn(t, database, round.ID, 1, domain.TurnSucceeded)
+	executor.mu.Lock()
+	batchID := executor.collaborationID
+	executor.mu.Unlock()
+	batch, err := database.CollaborationBatch(ctx, batchID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	progress, err := database.CollaborationProgress(ctx, batchID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if batch.DeliveredCursor < progress.NextCursor {
+		t.Fatalf("inline fallback exited with unread results: delivered=%d next=%d", batch.DeliveredCursor, progress.NextCursor)
+	}
 	waitForTask(t, database, task.ID, domain.TaskWaitingUser)
 	turns, err = database.TurnsForRound(ctx, round.ID)
 	if err != nil {
@@ -1381,6 +1452,106 @@ func TestMultiAgentFallbackWaitsForAllChildrenAndRunsOnce(t *testing.T) {
 	}
 	if pending, err := database.PendingInboxCount(ctx, task.ID); err != nil || pending != 0 {
 		t.Fatalf("fallback fan-in left pending inbox=%d err=%v", pending, err)
+	}
+}
+
+func TestMultiAgentFallbackCanWakeAgainForNewUnreadResults(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	secretStore, err := secrets.Open(filepath.Join(t.TempDir(), "secrets.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	project := domain.Project{ID: "project-repeat-fallback", Name: "AHA2", CreatedAt: now, UpdatedAt: now}
+	workspace := domain.Workspace{
+		ID: "workspace-repeat-fallback", ProjectID: project.ID, Name: "local", Locality: "local",
+		Transport: "native", RootPath: t.TempDir(), Health: "ready", CreatedAt: now, UpdatedAt: now,
+	}
+	envGroup := domain.EnvGroup{
+		ID: "env-repeat-fallback", Name: "stub", ProviderID: "stub", Backend: "stub", Revision: 1,
+		Environment: map[string]string{}, SecretRefs: map[string]string{}, CreatedAt: now, UpdatedAt: now,
+	}
+	model := domain.Model{
+		ID: "model-repeat-fallback", DisplayName: "Stub", ProviderID: "stub", Backend: "stub", WireModel: "stub",
+		ContextWindow: 1000, DefaultEnvGroupID: envGroup.ID, CreatedAt: now, UpdatedAt: now,
+	}
+	for _, operation := range []func() error{
+		func() error { return database.CreateProject(ctx, project) },
+		func() error { return database.CreateWorkspace(ctx, workspace) },
+		func() error { return database.UpsertModel(ctx, model) },
+		func() error { return database.UpsertEnvGroup(ctx, envGroup) },
+	} {
+		if err := operation(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	releaseSecondChild := make(chan struct{})
+	secondChildBlocked := make(chan struct{}, 1)
+	executor := &multiAgentExecutor{
+		blockAgentID:           "sub-002",
+		agentRelease:           releaseSecondChild,
+		agentBlocked:           secondChildBlocked,
+		waitForBatchOnFallback: true,
+		fallbackExitGeneration: 1,
+	}
+	service := NewService(database, secretStore, executor)
+	executor.service = service
+	service.collaborationDelay = 20 * time.Millisecond
+	task, err := service.CreateTask(ctx, CreateTaskInput{
+		ProjectID: project.ID, WorkspaceID: workspace.ID, Title: "repeat fallback",
+		Request: "coordinate repeat fallback", ModelID: model.ID,
+		CollaborationMode: "auto", MaxAgents: 3,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.SubmitMessage(ctx, task.ID, task.OriginalRequest); err != nil {
+		t.Fatal(err)
+	}
+	<-secondChildBlocked
+	round, err := database.LatestRound(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstFallback := waitForRoundMainTurn(t, database, round.ID, 1, domain.TurnRunning)
+	waitForRoundMainTurn(t, database, round.ID, 1, domain.TurnSucceeded)
+	waitForRoundAgentTurn(t, database, round.ID, "sub-002", domain.TurnRunning)
+	turns, err := database.TurnsForRound(ctx, round.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, turn := range turns {
+		if turn.AgentID == "main" && turn.Generation > 1 {
+			t.Fatalf("Main was prematurely woken again before another child result: %#v", turns)
+		}
+	}
+
+	close(releaseSecondChild)
+	waitForTask(t, database, task.ID, domain.TaskWaitingUser)
+	turns, err = database.TurnsForRound(ctx, round.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mainGenerations := map[int]string{}
+	for _, turn := range turns {
+		if turn.AgentID == "main" {
+			mainGenerations[turn.Generation] = turn.Result
+		}
+	}
+	if len(mainGenerations) != 3 ||
+		mainGenerations[1] != "partial integration" ||
+		mainGenerations[2] != "integrated result" {
+		t.Fatalf("unexpected fallback generations: %#v", turns)
+	}
+	batches, err := database.CollaborationBatchesForParentTurn(ctx, firstFallback.ParentTurnID)
+	if err != nil || len(batches) != 0 {
+		t.Fatalf("repeat fallback was not consumed: batches=%#v err=%v", batches, err)
 	}
 }
 
@@ -1735,6 +1906,31 @@ func waitForRoundAgentTurn(
 	}
 	turns, _ := database.TurnsForRound(context.Background(), roundID)
 	t.Fatalf("%s turn did not reach %s: %#v", agentID, expected, turns)
+	return domain.Turn{}
+}
+
+func waitForRoundMainTurn(
+	t *testing.T,
+	database *store.Store,
+	roundID string,
+	generation int,
+	expected domain.TurnStatus,
+) domain.Turn {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		turns, err := database.TurnsForRound(context.Background(), roundID)
+		if err == nil {
+			for _, turn := range turns {
+				if turn.AgentID == "main" && turn.Generation == generation && turn.Status == expected {
+					return turn
+				}
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	turns, _ := database.TurnsForRound(context.Background(), roundID)
+	t.Fatalf("Main generation %d did not reach %s: %#v", generation, expected, turns)
 	return domain.Turn{}
 }
 

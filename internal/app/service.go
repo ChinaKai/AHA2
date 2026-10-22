@@ -137,19 +137,22 @@ type Service struct {
 	agentAPIURL           string
 	agentAPIAllowInsecure bool
 
-	mu              sync.Mutex
-	cancels         map[string]context.CancelFunc
-	runContext      context.Context
-	runWG           sync.WaitGroup
-	closing         bool
-	settleMu        sync.Mutex
-	scheduleMu      sync.Mutex
-	mergeMu         sync.Mutex
-	mergeDelay      time.Duration
-	mergeTimers     map[string]*time.Timer
-	sharedContextMu sync.Mutex
-	sharedContexts  map[string]*sharedContextState
-	latestShared    map[string]string
+	mu                  sync.Mutex
+	cancels             map[string]context.CancelFunc
+	runContext          context.Context
+	runWG               sync.WaitGroup
+	closing             bool
+	settleMu            sync.Mutex
+	scheduleMu          sync.Mutex
+	mergeMu             sync.Mutex
+	mergeDelay          time.Duration
+	mergeTimers         map[string]*time.Timer
+	collaborationMu     sync.Mutex
+	collaborationDelay  time.Duration
+	collaborationTimers map[string]*time.Timer
+	sharedContextMu     sync.Mutex
+	sharedContexts      map[string]*sharedContextState
+	latestShared        map[string]string
 }
 
 func (s *Service) SetProxyRuntime(runtime ProxyRuntime) {
@@ -208,18 +211,20 @@ type CreateTaskInput struct {
 
 func NewService(database *store.Store, secretStore *secrets.FileStore, executor Executor) *Service {
 	return &Service{
-		store:          database,
-		secrets:        secretStore,
-		executor:       executor,
-		hub:            NewEventHub(),
-		now:            time.Now,
-		prompts:        prompt.NewEngine(database),
-		cancels:        map[string]context.CancelFunc{},
-		runContext:     context.Background(),
-		mergeDelay:     time.Second,
-		mergeTimers:    map[string]*time.Timer{},
-		sharedContexts: map[string]*sharedContextState{},
-		latestShared:   map[string]string{},
+		store:               database,
+		secrets:             secretStore,
+		executor:            executor,
+		hub:                 NewEventHub(),
+		now:                 time.Now,
+		prompts:             prompt.NewEngine(database),
+		cancels:             map[string]context.CancelFunc{},
+		runContext:          context.Background(),
+		mergeDelay:          time.Second,
+		mergeTimers:         map[string]*time.Timer{},
+		collaborationDelay:  350 * time.Millisecond,
+		collaborationTimers: map[string]*time.Timer{},
+		sharedContexts:      map[string]*sharedContextState{},
+		latestShared:        map[string]string{},
 	}
 }
 
@@ -248,6 +253,12 @@ func (s *Service) Shutdown(ctx context.Context) error {
 	for _, cancel := range cancels {
 		cancel()
 	}
+	s.collaborationMu.Lock()
+	for parentTurnID, timer := range s.collaborationTimers {
+		timer.Stop()
+		delete(s.collaborationTimers, parentTurnID)
+	}
+	s.collaborationMu.Unlock()
 	done := make(chan struct{})
 	go func() {
 		s.runWG.Wait()

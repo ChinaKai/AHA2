@@ -32,11 +32,18 @@ func TestCollaborationBatchCursorAndCompletion(t *testing.T) {
 	if count, err := database.OpenCollaborationBatchCountForRound(ctx, batch.RoundID); err != nil || count != 1 {
 		t.Fatalf("open collaboration count=%d err=%v", count, err)
 	}
+	if ids, err := database.OpenCollaborationBatchIDs(ctx); err != nil || len(ids) != 1 || ids[0] != batch.ID {
+		t.Fatalf("open collaboration IDs=%#v err=%v", ids, err)
+	}
 	if err := database.LinkCollaborationMemberTurn(ctx, batch.ID, "sub-001", "turn-sub-1", now); err != nil {
 		t.Fatal(err)
 	}
 	if err := database.LinkCollaborationMemberTurn(ctx, batch.ID, "sub-002", "turn-sub-2", now); err != nil {
 		t.Fatal(err)
+	}
+	members, err := database.CollaborationMembers(ctx, batch.ID)
+	if err != nil || len(members) != 2 || members[0].Status != domain.CollaborationMemberRunning {
+		t.Fatalf("collaboration members=%#v err=%v", members, err)
 	}
 	if _, inserted, err := database.RecordCollaborationResult(ctx, domain.Turn{
 		ID: "turn-sub-1", TaskID: "task-1", AgentID: "sub-001",
@@ -70,6 +77,9 @@ func TestCollaborationBatchCursorAndCompletion(t *testing.T) {
 	}
 	if count, err := database.OpenCollaborationBatchCountForRound(ctx, batch.RoundID); err != nil || count != 0 {
 		t.Fatalf("consumed collaboration count=%d err=%v", count, err)
+	}
+	if ids, err := database.OpenCollaborationBatchIDs(ctx); err != nil || len(ids) != 0 {
+		t.Fatalf("consumed collaboration IDs=%#v err=%v", ids, err)
 	}
 	stored, err := database.CollaborationBatch(ctx, batch.ID)
 	if err != nil || stored.Status != domain.CollaborationBatchConsumed || stored.DeliveredCursor != progress.NextCursor {
