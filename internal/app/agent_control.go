@@ -311,25 +311,15 @@ func (s *Service) SubmitAgentKnowledgeFeedback(ctx context.Context, claims agent
 	return entry, err
 }
 
-func (s *Service) SubmitAgentCollaboration(ctx context.Context, claims agentapi.Claims, actions []AgentAction, mainFollowup string) (int, error) {
+func (s *Service) SubmitAgentCollaboration(ctx context.Context, claims agentapi.Claims, actions []AgentAction, mainFollowup string) (string, int, error) {
 	call, err := s.AgentCallContext(ctx, claims, true)
 	if err != nil {
-		return 0, err
+		return "", 0, err
 	}
 	if channelContext, channelErr := s.store.ChannelContextForInboxBatch(ctx, call.Turn.InboxBatchID); channelErr == nil && channelRouteMode(channelContext) != "task_route" {
-		return 0, ErrAgentCallForbidden
+		return "", 0, ErrAgentCallForbidden
 	}
-	created := s.spawnAgentTurns(ctx, call.Task, call.Turn, actions)
-	if created > 0 && strings.TrimSpace(mainFollowup) != "" {
-		now := s.now().UTC()
-		_, _ = s.store.EnqueueAgentRoute(ctx, domain.AgentInboxItem{
-			ID: domain.NewID("inbox"), TaskID: call.Task.ID, RoundID: call.Turn.RoundID,
-			TargetAgentID: "main", SourceAgentID: "aha", SourceKind: "main_followup",
-			SourceTurnID: call.Turn.ID, Content: strings.TrimSpace(mainFollowup),
-			Payload: map[string]any{"parent_turn_id": call.Turn.ID}, Status: "pending", CreatedAt: now,
-		})
-	}
-	return created, nil
+	return s.spawnAgentTurns(ctx, call.Task, call.Turn, actions, strings.TrimSpace(mainFollowup))
 }
 
 func (s *Service) SelectedAgentSkills(ctx context.Context, claims agentapi.Claims) ([]domain.Skill, AgentCallContext, error) {

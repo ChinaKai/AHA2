@@ -357,6 +357,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/agent/knowledge/candidates", s.withAgentCapability(http.HandlerFunc(s.submitAgentKnowledge)))
 	mux.Handle("POST /api/v1/agent/knowledge/{knowledge}/feedback", s.withAgentCapability(http.HandlerFunc(s.submitAgentKnowledgeFeedback)))
 	mux.Handle("POST /api/v1/agent/collaboration/batches", s.withAgentCapability(http.HandlerFunc(s.submitAgentCollaboration)))
+	mux.Handle("POST /api/v1/agent/collaboration/batches/{batch}/wait", s.withAgentCapability(http.HandlerFunc(s.waitAgentCollaboration)))
 	mux.Handle("GET /api/v1/agent/skills", s.withAgentCapability(http.HandlerFunc(s.agentSkills)))
 	mux.Handle("POST /api/v1/agent/skills", s.withAgentCapability(http.HandlerFunc(s.createAgentSkill)))
 	mux.Handle("GET /api/v1/agent/skills/{skill}", s.withAgentCapability(http.HandlerFunc(s.agentSkill)))

@@ -432,6 +432,7 @@ func (s *Store) UpdateAgentBatchRouteStatus(
 func (s *Store) MergeAgentBatchDispatch(
 	ctx context.Context,
 	parentTurnID string,
+	collaborationBatchID string,
 	agentIDs []string,
 	routes []map[string]any,
 ) (bool, error) {
@@ -489,6 +490,23 @@ func (s *Store) MergeAgentBatchDispatch(
 	}
 	payload["agent_ids"] = mergedIDs
 	payload["agent_routes"] = mergedRoutes
+	var batchIDs []any
+	if existing, ok := payload["batch_ids"].([]any); ok {
+		batchIDs = append(batchIDs, existing...)
+	}
+	if collaborationBatchID != "" {
+		found := false
+		for _, raw := range batchIDs {
+			if strings.TrimSpace(fmt.Sprint(raw)) == collaborationBatchID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			batchIDs = append(batchIDs, collaborationBatchID)
+		}
+	}
+	payload["batch_ids"] = batchIDs
 	summary := fmt.Sprintf("AHA 已向 %d 个子 Agent 路由任务", len(mergedIDs))
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE conversation_items SET payload_json=?, summary=? WHERE id=?`,

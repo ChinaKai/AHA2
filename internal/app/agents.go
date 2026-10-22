@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ChinaKai/AHA2/internal/agentapi"
 	"github.com/ChinaKai/AHA2/internal/domain"
 	"github.com/ChinaKai/AHA2/internal/prompt"
 	"github.com/ChinaKai/AHA2/internal/store"
@@ -565,6 +566,16 @@ func (s *Service) routeAgentOutcome(ctx context.Context, task domain.Task, turn 
 		}
 	}
 	content = fmt.Sprintf("%s [%s, attempt %d]\n%s", turn.AgentID, turn.Status, turn.Attempt, content)
+	if batchID, inserted, batchErr := s.store.RecordCollaborationResult(ctx, turn, string(turn.Status), content); batchErr == nil && batchID != "" {
+		if inserted {
+			s.emit(ctx, task.ID, "collaboration", batchID, "collaboration_result_recorded", map[string]any{
+				"batch_id": batchID, "agent_id": turn.AgentID,
+				"child_turn_id": turn.ID, "status": turn.Status,
+			})
+			s.maybeScheduleCollaborationFallback(ctx, batchID)
+		}
+		return false
+	}
 	inserted, err := s.store.EnqueueAgentRoute(ctx, domain.AgentInboxItem{
 		ID: domain.NewID("inbox"), TaskID: task.ID, RoundID: turn.RoundID,
 		TargetAgentID: "main", SourceAgentID: turn.AgentID, SourceKind: sourceKind,
@@ -582,6 +593,138 @@ func (s *Service) routeAgentOutcome(ctx context.Context, task domain.Task, turn 
 		})
 	}
 	return err == nil && inserted
+}
+
+func (s *Service) WaitAgentCollaboration(
+	ctx context.Context,
+	claims agentapi.Claims,
+	batchID string,
+	after int64,
+	timeout time.Duration,
+) (domain.CollaborationProgress, error) {
+	call, err := s.AgentCallContext(ctx, claims, false)
+	if err != nil {
+		return domain.CollaborationProgress{}, err
+	}
+	if call.Turn.AgentID != "main" {
+		return domain.CollaborationProgress{}, ErrAgentCallForbidden
+	}
+	batch, err := s.store.CollaborationBatch(ctx, strings.TrimSpace(batchID))
+	if err != nil || batch.TaskID != call.Task.ID || batch.RoundID != call.Turn.RoundID {
+		return domain.CollaborationProgress{}, ErrAgentCallForbidden
+	}
+	if after < 0 {
+		after = 0
+	}
+	if timeout <= 0 {
+		timeout = 20 * time.Second
+	}
+	if timeout > 30*time.Second {
+		timeout = 30 * time.Second
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		progress, progressErr := s.store.CollaborationProgress(ctx, batch.ID, after)
+		if progressErr != nil {
+			return domain.CollaborationProgress{}, progressErr
+		}
+		if len(progress.Results) > 0 || progress.Complete {
+			status := batch.Status
+			if progress.Complete && (status == "" || status == domain.CollaborationBatchPending) {
+				status = domain.CollaborationBatchComplete
+			}
+			_ = s.store.MarkCollaborationDelivered(ctx, batch.ID, progress.NextCursor, status, s.now().UTC())
+			progress.DeliveredCursor = progress.NextCursor
+			progress.Status = status
+			return progress, nil
+		}
+		select {
+		case <-ctx.Done():
+			return domain.CollaborationProgress{}, ctx.Err()
+		case <-timer.C:
+			return progress, nil
+		case <-ticker.C:
+		}
+	}
+}
+
+func (s *Service) finalizeMainCollaboration(ctx context.Context, turn domain.Turn) {
+	_ = s.store.ConsumeFallbackCollaborationForInbox(ctx, turn.InboxBatchID, s.now().UTC())
+	batches, err := s.store.CollaborationBatchesForParentTurn(ctx, turn.ID)
+	if err != nil {
+		return
+	}
+	for _, batch := range batches {
+		progress, progressErr := s.store.CollaborationProgress(ctx, batch.ID, 0)
+		if progressErr != nil {
+			continue
+		}
+		if progress.Complete && batch.DeliveredCursor >= progress.NextCursor {
+			_ = s.store.MarkCollaborationConsumed(ctx, batch.ID, s.now().UTC())
+			continue
+		}
+		_ = s.store.MarkCollaborationFallback(ctx, batch.ID, s.now().UTC())
+		if progress.Complete {
+			s.maybeScheduleCollaborationFallback(ctx, batch.ID)
+		}
+	}
+}
+
+func (s *Service) maybeScheduleCollaborationFallback(ctx context.Context, batchID string) {
+	batch, err := s.store.CollaborationBatch(ctx, batchID)
+	if err != nil || batch.Status == domain.CollaborationBatchConsumed {
+		return
+	}
+	parent, err := s.store.Turn(ctx, batch.ParentTurnID)
+	if err != nil || !parent.Status.Terminal() {
+		return
+	}
+	batches, err := s.store.CollaborationBatchesForParentTurn(ctx, batch.ParentTurnID)
+	if err != nil || len(batches) == 0 {
+		return
+	}
+	var content strings.Builder
+	content.WriteString("Completed sub-agent results:\n")
+	batchIDs := make([]string, 0, len(batches))
+	for _, item := range batches {
+		progress, progressErr := s.store.CollaborationProgress(ctx, item.ID, 0)
+		if progressErr != nil || !progress.Complete {
+			return
+		}
+		batchIDs = append(batchIDs, item.ID)
+		if strings.TrimSpace(item.IntegrationInstructions) != "" {
+			content.WriteString("\nIntegration instructions:\n")
+			content.WriteString(strings.TrimSpace(item.IntegrationInstructions))
+			content.WriteString("\n")
+		}
+		for _, result := range progress.Results {
+			content.WriteString("\n### ")
+			content.WriteString(result.AgentID)
+			content.WriteString("\n")
+			content.WriteString(result.Content)
+			content.WriteString("\n")
+		}
+	}
+	_, err = s.store.EnqueueAgentRoute(ctx, domain.AgentInboxItem{
+		ID: "inbox_collaboration_fallback_" + batch.ParentTurnID, TaskID: batch.TaskID, RoundID: batch.RoundID,
+		TargetAgentID: "main", SourceAgentID: "aha", SourceKind: "collaboration_fallback",
+		SourceTurnID: batch.ParentTurnID, Content: strings.TrimSpace(content.String()),
+		Payload: map[string]any{"batch_id": batch.ID, "batch_ids": batchIDs, "parent_turn_id": batch.ParentTurnID},
+		Status:  "pending", CreatedAt: s.now().UTC(),
+	})
+	if err != nil {
+		return
+	}
+	for _, item := range batches {
+		_ = s.store.MarkCollaborationFallback(ctx, item.ID, s.now().UTC())
+	}
+	// A prior caller may have inserted the durable fallback without starting
+	// it because the parent was still active. scheduleAgent is idempotent, so
+	// every later readiness callback retries the same fixed Inbox item.
+	_, _, _ = s.scheduleAgent(ctx, batch.TaskID, "main")
 }
 
 func (s *Service) updateOrchestrationRouteStatus(ctx context.Context, turn domain.Turn) {
@@ -617,10 +760,10 @@ func (s *Service) scheduleMainAfterAgentResult(ctx context.Context, taskID, roun
 		_, _, _ = s.scheduleAgent(ctx, taskID, "main")
 		return
 	}
-	s.armMainResultMerge(taskID)
+	s.armMainResultMerge(taskID, roundID)
 }
 
-func (s *Service) armMainResultMerge(taskID string) {
+func (s *Service) armMainResultMerge(taskID, roundID string) {
 	s.mergeMu.Lock()
 	defer s.mergeMu.Unlock()
 	if s.mergeTimers[taskID] != nil {
@@ -637,7 +780,7 @@ func (s *Service) armMainResultMerge(taskID string) {
 			delete(s.mergeTimers, taskID)
 		}
 		s.mergeMu.Unlock()
-		_, _, _ = s.scheduleAgent(context.Background(), taskID, "main")
+		s.scheduleMainAfterAgentResult(context.Background(), taskID, roundID)
 	})
 	s.mergeTimers[taskID] = timer
 }
@@ -657,6 +800,7 @@ func (s *Service) enqueueAgentAction(
 	parent domain.Turn,
 	action AgentAction,
 	fallback int,
+	collaborationBatchID string,
 ) (string, bool) {
 	if task.CollaborationMode != "auto" {
 		s.recordOrchestrationError(ctx, task.ID, parent, "Task is in single-agent mode; sub-agent request was ignored")
@@ -757,6 +901,7 @@ func (s *Service) enqueueAgentAction(
 		SourceTurnID: parent.ID, Content: strings.TrimSpace(action.Assignment),
 		Payload: map[string]any{
 			"title": action.Title, "required": action.Required, "parent_turn_id": parent.ID,
+			"collaboration_batch_id": collaborationBatchID,
 		},
 		Status: "pending", CreatedAt: now,
 	})
@@ -867,6 +1012,8 @@ func (s *Service) afterTurnTerminal(ctx context.Context, task domain.Task, turn 
 	routedOutcome := false
 	if turn.AgentID != "main" {
 		routedOutcome = s.routeAgentOutcome(ctx, task, turn)
+	} else {
+		s.finalizeMainCollaboration(ctx, turn)
 	}
 	_, _, _ = s.scheduleAgent(ctx, task.ID, turn.AgentID)
 	if routedOutcome {

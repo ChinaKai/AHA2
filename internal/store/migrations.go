@@ -2706,5 +2706,54 @@ func (s *Store) migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(76, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
 		return fmt.Errorf("record schema v76: %w", err)
 	}
+	var hasV77 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=77)`).Scan(&hasV77)
+	if !hasV77 {
+		for _, statement := range []string{
+			`CREATE TABLE IF NOT EXISTS collaboration_batches (
+				id TEXT PRIMARY KEY,
+				task_id TEXT NOT NULL,
+				round_id TEXT NOT NULL,
+				parent_turn_id TEXT NOT NULL,
+				integration_instructions TEXT NOT NULL DEFAULT '',
+				status TEXT NOT NULL DEFAULT 'pending',
+				delivered_cursor INTEGER NOT NULL DEFAULT 0,
+				created_at TEXT NOT NULL,
+				updated_at TEXT NOT NULL,
+				consumed_at TEXT NOT NULL DEFAULT ''
+			)`,
+			`CREATE TABLE IF NOT EXISTS collaboration_members (
+				batch_id TEXT NOT NULL REFERENCES collaboration_batches(id) ON DELETE CASCADE,
+				agent_id TEXT NOT NULL,
+				required INTEGER NOT NULL DEFAULT 1,
+				child_turn_id TEXT NOT NULL DEFAULT '',
+				status TEXT NOT NULL DEFAULT 'queued',
+				created_at TEXT NOT NULL,
+				updated_at TEXT NOT NULL,
+				PRIMARY KEY(batch_id,agent_id)
+			)`,
+			`CREATE UNIQUE INDEX IF NOT EXISTS idx_collaboration_members_child_turn
+			 ON collaboration_members(child_turn_id) WHERE child_turn_id<>''`,
+			`CREATE TABLE IF NOT EXISTS collaboration_events (
+				sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+				id TEXT NOT NULL UNIQUE,
+				batch_id TEXT NOT NULL REFERENCES collaboration_batches(id) ON DELETE CASCADE,
+				child_turn_id TEXT NOT NULL,
+				agent_id TEXT NOT NULL,
+				status TEXT NOT NULL,
+				content TEXT NOT NULL,
+				created_at TEXT NOT NULL
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_collaboration_events_batch
+			 ON collaboration_events(batch_id,sequence)`,
+		} {
+			if _, err := s.db.ExecContext(ctx, statement); err != nil {
+				return fmt.Errorf("apply schema v77: %w", err)
+			}
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(77, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v77: %w", err)
+	}
 	return nil
 }

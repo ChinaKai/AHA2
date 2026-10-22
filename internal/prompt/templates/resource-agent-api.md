@@ -37,8 +37,16 @@ Progress messages use:
 Collaboration batches use:
 
 ```json
-{"actions":[{"agent_id":"sub-001","title":"...","assignment":"...","required":true}],"main_followup":"..."}
+{"actions":[{"agent_id":"sub-001","title":"...","assignment":"...","required":true}],"integration_instructions":"..."}
 ```
+
+The dispatch response includes `batch_id`. Sub results are not injected into a running Main Backend automatically. Continue independent work, then poll the durable batch serially with:
+
+```json
+{"after_cursor":0,"timeout_seconds":20}
+```
+
+`POST /api/v1/agent/collaboration/batches/{batch}/wait` long-polls server-side for up to 30 seconds. Process returned `results`, retain `next_cursor`, and call again while `complete=false`. Do not claim child results or final completion before the batch is complete. If a wait times out with pending agents, continue useful work or wait again. `main_followup` remains an accepted compatibility alias for `integration_instructions`.
 
 Task creation is Main-only, stays inside the current Project, and inherits the current runtime when model fields are omitted. To select another configured runtime, first read the project runtime list and submit its exact non-secret fields.
 

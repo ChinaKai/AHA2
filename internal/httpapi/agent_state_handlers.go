@@ -41,11 +41,11 @@ func (s *Server) agentCapabilitiesInfo(writer http.ResponseWriter, request *http
 		// Reported separately so a caller can tell whether a global skill is
 		// possible before sending one and being refused.
 		"skill_create_global": main && s.app.AgentGlobalSkillAllowed(request.Context(), call),
-		"workspace_read":   main && call.Task.AgentCapabilities["workspace_read"],
-		"task_create":      main && call.Task.AgentCapabilities["task_create"],
-		"clone_hardware":   main && call.Task.AgentCapabilities["clone_hardware"],
-		"collaboration":    main && call.Task.CollaborationMode == "auto",
-		"channel_outreach": channelOutreach, "channel_reply_decision": channelReplyDecision,
+		"workspace_read":      main && call.Task.AgentCapabilities["workspace_read"],
+		"task_create":         main && call.Task.AgentCapabilities["task_create"],
+		"clone_hardware":      main && call.Task.AgentCapabilities["clone_hardware"],
+		"collaboration":       main && call.Task.CollaborationMode == "auto",
+		"channel_outreach":    channelOutreach, "channel_reply_decision": channelReplyDecision,
 		"hardware": true, "managed_process": true,
 		"desktop": main && s.desktop.Status(call.Task.ID).Supported,
 	}})
@@ -237,8 +237,9 @@ func (s *Server) submitAgentKnowledgeFeedback(writer http.ResponseWriter, reques
 func (s *Server) submitAgentCollaboration(writer http.ResponseWriter, request *http.Request) {
 	claims, _ := agentClaimsFromContext(request.Context())
 	var payload struct {
-		Actions      []app.AgentAction `json:"actions"`
-		MainFollowup string            `json:"main_followup"`
+		Actions                 []app.AgentAction `json:"actions"`
+		IntegrationInstructions string            `json:"integration_instructions"`
+		MainFollowup            string            `json:"main_followup"`
 	}
 	if err := decodeJSON(request, &payload); err != nil {
 		writeErrorDetail(writer, http.StatusBadRequest, "collaboration_batch_invalid", err.Error())
@@ -253,13 +254,40 @@ func (s *Server) submitAgentCollaboration(writer http.ResponseWriter, request *h
 			payload.Actions[index].Required = true
 		}
 	}
-	created, err := s.app.SubmitAgentCollaboration(request.Context(), claims, payload.Actions, payload.MainFollowup)
+	instructions := strings.TrimSpace(payload.IntegrationInstructions)
+	if instructions == "" {
+		instructions = payload.MainFollowup
+	}
+	batchID, created, err := s.app.SubmitAgentCollaboration(request.Context(), claims, payload.Actions, instructions)
 	if err != nil {
 		writeAgentControlError(writer, err)
 		return
 	}
 	s.audit(request, "agent.collaboration.submit", "turn", claims.TurnID, map[string]any{"created": created})
-	writeJSON(writer, http.StatusAccepted, map[string]any{"ok": true, "created_agents": created})
+	writeJSON(writer, http.StatusAccepted, map[string]any{"ok": true, "batch_id": batchID, "created_agents": created})
+}
+
+func (s *Server) waitAgentCollaboration(writer http.ResponseWriter, request *http.Request) {
+	claims, _ := agentClaimsFromContext(request.Context())
+	var payload struct {
+		AfterCursor    int64 `json:"after_cursor"`
+		TimeoutSeconds int   `json:"timeout_seconds"`
+	}
+	if err := decodeJSON(request, &payload); err != nil {
+		writeErrorDetail(writer, http.StatusBadRequest, "collaboration_wait_invalid", err.Error())
+		return
+	}
+	if payload.AfterCursor < 0 || payload.TimeoutSeconds < 0 || payload.TimeoutSeconds > 30 {
+		writeErrorDetail(writer, http.StatusBadRequest, "collaboration_wait_invalid", "after_cursor must be non-negative and timeout_seconds must be 0-30")
+		return
+	}
+	timeout := time.Duration(payload.TimeoutSeconds) * time.Second
+	progress, err := s.app.WaitAgentCollaboration(request.Context(), claims, request.PathValue("batch"), payload.AfterCursor, timeout)
+	if err != nil {
+		writeAgentControlError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "progress": progress})
 }
 
 func (s *Server) agentSkills(writer http.ResponseWriter, request *http.Request) {

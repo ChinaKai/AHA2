@@ -1782,18 +1782,31 @@ func recoveryContextNeeds(current domain.Turn, turns []domain.Turn, hasReusableS
 	return recent, recoveryHandoff, diagnostics
 }
 
-func (s *Service) spawnAgentTurns(ctx context.Context, task domain.Task, parent domain.Turn, actions []AgentAction) int {
+func (s *Service) spawnAgentTurns(
+	ctx context.Context,
+	task domain.Task,
+	parent domain.Turn,
+	actions []AgentAction,
+	integrationInstructions string,
+) (string, int, error) {
 	seen := map[string]bool{}
 	var routed []string
 	var routes []map[string]any
+	var members []domain.CollaborationMember
+	batchID := domain.NewID("collaboration_batch")
 	for index, action := range actions {
 		agentID := normalizedSubAgentID(action.AgentID, index+1)
 		if seen[agentID] || strings.TrimSpace(action.Assignment) == "" {
 			continue
 		}
 		seen[agentID] = true
-		if actualAgentID, ok := s.enqueueAgentAction(ctx, task, parent, action, index+1); ok {
+		if actualAgentID, ok := s.enqueueAgentAction(ctx, task, parent, action, index+1, batchID); ok {
 			routed = append(routed, actualAgentID)
+			now := s.now().UTC()
+			members = append(members, domain.CollaborationMember{
+				BatchID: batchID, AgentID: actualAgentID, Required: true,
+				Status: domain.CollaborationMemberQueued, CreatedAt: now, UpdatedAt: now,
+			})
 			title := strings.TrimSpace(action.Title)
 			if title == "" {
 				if agent, err := s.store.TaskAgent(ctx, task.ID, actualAgentID); err == nil {
@@ -1806,13 +1819,23 @@ func (s *Service) spawnAgentTurns(ctx context.Context, task domain.Task, parent 
 			})
 		}
 	}
+	if len(routed) == 0 {
+		return "", 0, nil
+	}
+	now := s.now().UTC()
+	if err := s.store.CreateCollaborationBatch(ctx, domain.CollaborationBatch{
+		ID: batchID, TaskID: task.ID, RoundID: parent.RoundID, ParentTurnID: parent.ID,
+		IntegrationInstructions: integrationInstructions,
+		Status:                  domain.CollaborationBatchPending, CreatedAt: now, UpdatedAt: now,
+	}, members); err != nil {
+		return "", 0, err
+	}
 	if len(routed) > 0 {
-		now := s.now().UTC()
 		// A Turn may submit more than one batch. The card is identified by the
 		// parent Turn, so a later batch belongs on the card that is already there:
 		// inserting a second row for the same Turn collided on that id, and the
 		// discarded error left a card naming fewer agents than were running.
-		merged, mergeErr := s.store.MergeAgentBatchDispatch(ctx, parent.ID, routed, routes)
+		merged, mergeErr := s.store.MergeAgentBatchDispatch(ctx, parent.ID, batchID, routed, routes)
 		if mergeErr != nil {
 			s.emit(ctx, task.ID, "agent_batch", parent.ID, "agent_batch_card_failed", map[string]any{
 				"parent_turn_id": parent.ID, "error": mergeErr.Error(),
@@ -1823,7 +1846,7 @@ func (s *Service) spawnAgentTurns(ctx context.Context, task domain.Task, parent 
 				AgentID: "aha", StreamAgentID: "main", FromAgentID: "aha", ToAgentID: "main",
 				RouteKind: "orchestration", Category: "update", Kind: "agent_batch_dispatched",
 				Summary: fmt.Sprintf("AHA 已向 %d 个子 Agent 路由任务", len(routed)),
-				Payload: map[string]any{"parent_turn_id": parent.ID, "agent_ids": routed, "agent_routes": routes}, CreatedAt: now,
+				Payload: map[string]any{"parent_turn_id": parent.ID, "batch_id": batchID, "batch_ids": []string{batchID}, "agent_ids": routed, "agent_routes": routes}, CreatedAt: now,
 			}); err != nil {
 				// The sub agents are already queued, so the dispatch stands; the
 				// failure is recorded rather than swallowed, because a silently
@@ -1834,13 +1857,13 @@ func (s *Service) spawnAgentTurns(ctx context.Context, task domain.Task, parent 
 			}
 		}
 		s.emit(ctx, task.ID, "agent_batch", parent.ID, "agent_batch_dispatched", map[string]any{
-			"round_id": parent.RoundID, "parent_turn_id": parent.ID, "agent_ids": routed,
+			"round_id": parent.RoundID, "parent_turn_id": parent.ID, "batch_id": batchID, "agent_ids": routed,
 		})
 	}
 	for _, agentID := range routed {
 		_, _, _ = s.scheduleAgent(ctx, task.ID, agentID)
 	}
-	return len(routed)
+	return batchID, len(routed), nil
 }
 
 func normalizedSubAgentID(value string, fallback int) string {
@@ -1881,6 +1904,10 @@ func (s *Service) settleRound(ctx context.Context, taskID, roundID string) {
 	}
 	pending, err := s.store.PendingInboxCount(ctx, taskID)
 	if err != nil || pending > 0 {
+		return
+	}
+	openCollaborations, err := s.store.OpenCollaborationBatchCountForRound(ctx, roundID)
+	if err != nil || openCollaborations > 0 {
 		return
 	}
 	task, err := s.store.Task(ctx, taskID)

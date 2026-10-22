@@ -54,7 +54,7 @@ export function readableConversationText(item: Pick<ConversationItem, "category"
 function renderConversationItem(item: ConversationItem): string {
   const time = messageTime(item.created_at);
   const routeKind = item.route_kind || "";
-  const routed = ["assignment", "agent_result", "agent_error", "main_followup", "session_control"].includes(routeKind) || ["agent_assignment", "agent_result_routed", "agent_error_routed", "agent_main_followup", "backend_session_compacted", "backend_session_reset"].includes(item.kind);
+  const routed = ["assignment", "agent_result", "agent_error", "main_followup", "collaboration_fallback", "session_control"].includes(routeKind) || ["agent_assignment", "agent_result_routed", "agent_error_routed", "agent_main_followup", "agent_collaboration_fallback", "backend_session_compacted", "backend_session_reset"].includes(item.kind);
   const user = item.kind === "user_message";
   const update = !user && item.category === "update";
   const tool = !user && item.category === "tool";

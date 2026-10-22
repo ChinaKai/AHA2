@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
@@ -359,6 +360,9 @@ func (s *Store) EnqueueAgentRoute(ctx context.Context, item domain.AgentInboxIte
 	if item.SourceKind == "main_followup" {
 		kind = "agent_main_followup"
 	}
+	if item.SourceKind == "collaboration_fallback" {
+		kind = "agent_collaboration_fallback"
+	}
 	if item.SourceKind == "agent_error" {
 		category = "error"
 		kind = "agent_error_routed"
@@ -569,6 +573,23 @@ func (s *Store) ClaimInboxAndCreateTurn(
 			if _, err := tx.ExecContext(ctx, `UPDATE messages SET turn_id=? WHERE id=?`, turn.ID, item.MessageID); err != nil {
 				return domain.Turn{}, err
 			}
+		}
+		batchID := strings.TrimSpace(fmt.Sprint(item.Payload["collaboration_batch_id"]))
+		if batchID == "" || batchID == "<nil>" {
+			continue
+		}
+		result, err = tx.ExecContext(ctx, `
+			UPDATE collaboration_members
+			SET child_turn_id=?,status=?,updated_at=?
+			WHERE batch_id=? AND agent_id=? AND child_turn_id=''`,
+			turn.ID, domain.CollaborationMemberRunning, claimedAt, batchID, turn.AgentID,
+		)
+		if err != nil {
+			return domain.Turn{}, err
+		}
+		linked, _ := result.RowsAffected()
+		if linked != 1 {
+			return domain.Turn{}, fmt.Errorf("collaboration member %s/%s is missing or already linked", batchID, turn.AgentID)
 		}
 	}
 	if _, err := tx.ExecContext(ctx, `

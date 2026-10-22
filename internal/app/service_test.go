@@ -280,9 +280,15 @@ func TestRecoveredTurnReceivesInlineDurableHandoff(t *testing.T) {
 }
 
 type multiAgentExecutor struct {
-	mu      sync.Mutex
-	turns   []domain.Turn
-	service *Service
+	mu               sync.Mutex
+	turns            []domain.Turn
+	service          *Service
+	waitForBatch     bool
+	blockAgentID     string
+	agentRelease     <-chan struct{}
+	collaboration    domain.CollaborationProgress
+	collaborationID  string
+	collaborationErr error
 }
 
 type idleThenSuccessExecutor struct {
@@ -317,17 +323,56 @@ func (s *multiAgentExecutor) Execute(_ context.Context, request ExecutionRequest
 	switch {
 	case request.Turn.AgentID == "main" && request.Turn.Generation == 0:
 		if s.service != nil {
-			_, _ = s.service.SubmitAgentCollaboration(context.Background(), agentapi.Claims{TaskID: request.Task.ID, AgentID: request.Turn.AgentID, TurnID: request.Turn.ID}, []AgentAction{
+			claims := agentapi.Claims{TaskID: request.Task.ID, AgentID: request.Turn.AgentID, TurnID: request.Turn.ID}
+			batchID, _, _ := s.service.SubmitAgentCollaboration(context.Background(), claims, []AgentAction{
 				{AgentID: "sub-001", Title: "Store", Assignment: "implement store", Required: true},
 				{AgentID: "sub-002", Title: "Web", Assignment: "implement web", Required: true},
 			}, "")
+			if s.waitForBatch {
+				var progress domain.CollaborationProgress
+				var waitErr error
+				cursor := int64(0)
+				for {
+					next, err := s.service.WaitAgentCollaboration(context.Background(), claims, batchID, cursor, 5*time.Second)
+					if err != nil {
+						waitErr = err
+						break
+					}
+					progress.BatchID = next.BatchID
+					progress.RoundID = next.RoundID
+					progress.ParentTurnID = next.ParentTurnID
+					progress.Instructions = next.Instructions
+					progress.Status = next.Status
+					progress.Complete = next.Complete
+					progress.PendingAgentIDs = next.PendingAgentIDs
+					progress.NextCursor = next.NextCursor
+					progress.DeliveredCursor = next.DeliveredCursor
+					progress.Results = append(progress.Results, next.Results...)
+					cursor = next.NextCursor
+					if next.Complete {
+						break
+					}
+				}
+				s.mu.Lock()
+				s.collaboration = progress
+				s.collaborationID = batchID
+				s.collaborationErr = waitErr
+				s.mu.Unlock()
+			}
 		}
 		emit(ExecutionEvent{Type: "agent_message", Data: map[string]any{"text": "delegating"}})
+		if s.waitForBatch {
+			emit(ExecutionEvent{Type: "agent_message", Data: map[string]any{"text": "inline integrated"}})
+			return ExecutionResult{Reply: "inline integrated"}, nil
+		}
 		return ExecutionResult{Reply: "delegating"}, nil
 	case request.Turn.AgentID == "main":
 		emit(ExecutionEvent{Type: "agent_message", Data: map[string]any{"text": "integrated result"}})
 		return ExecutionResult{Reply: "integrated result", ProviderSessionID: "main-session"}, nil
 	default:
+		if request.Turn.AgentID == s.blockAgentID && s.agentRelease != nil {
+			<-s.agentRelease
+		}
 		emit(ExecutionEvent{Type: "agent_message", Data: map[string]any{"text": request.Turn.AgentID + " result"}})
 		return ExecutionResult{Reply: request.Turn.AgentID + " result", ProviderSessionID: request.Turn.AgentID + "-session"}, nil
 	}
@@ -1140,6 +1185,205 @@ func TestMultiAgentRoundCreatesIntegrationTurn(t *testing.T) {
 	}
 }
 
+func TestMultiAgentInlineWaitKeepsMainInOneTurn(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	secretStore, err := secrets.Open(filepath.Join(t.TempDir(), "secrets.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	project := domain.Project{ID: "project-inline-agents", Name: "AHA2", CreatedAt: now, UpdatedAt: now}
+	workspace := domain.Workspace{
+		ID: "workspace-inline-agents", ProjectID: project.ID, Name: "local", Locality: "local",
+		Transport: "native", RootPath: t.TempDir(), Health: "ready", CreatedAt: now, UpdatedAt: now,
+	}
+	envGroup := domain.EnvGroup{
+		ID: "env-inline-agents", Name: "stub", ProviderID: "stub", Backend: "stub", Revision: 1,
+		Environment: map[string]string{}, SecretRefs: map[string]string{}, CreatedAt: now, UpdatedAt: now,
+	}
+	model := domain.Model{
+		ID: "model-inline-agents", DisplayName: "Stub", ProviderID: "stub", Backend: "stub", WireModel: "stub",
+		ContextWindow: 1000, DefaultEnvGroupID: envGroup.ID, CreatedAt: now, UpdatedAt: now,
+	}
+	for _, operation := range []func() error{
+		func() error { return database.CreateProject(ctx, project) },
+		func() error { return database.CreateWorkspace(ctx, workspace) },
+		func() error { return database.UpsertModel(ctx, model) },
+		func() error { return database.UpsertEnvGroup(ctx, envGroup) },
+	} {
+		if err := operation(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	executor := &multiAgentExecutor{waitForBatch: true}
+	service := NewService(database, secretStore, executor)
+	executor.service = service
+	task, err := service.CreateTask(ctx, CreateTaskInput{
+		ProjectID: project.ID, WorkspaceID: workspace.ID, Title: "inline agents",
+		Request: "coordinate inline agents", ModelID: model.ID,
+		CollaborationMode: "auto", MaxAgents: 3,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.SubmitMessage(ctx, task.ID, task.OriginalRequest); err != nil {
+		t.Fatal(err)
+	}
+	waitForTask(t, database, task.ID, domain.TaskWaitingUser)
+	round, err := database.LatestRound(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	turns, err := database.TurnsForRound(ctx, round.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(turns) != 3 {
+		t.Fatalf("inline fan-in should create one Main and two Sub Turns; got %#v", turns)
+	}
+	var mainTurns int
+	for _, turn := range turns {
+		if turn.AgentID == "main" {
+			mainTurns++
+			if turn.Generation != 0 || turn.Result != "inline integrated" {
+				t.Fatalf("unexpected Main Turn: %#v", turn)
+			}
+		}
+	}
+	if mainTurns != 1 {
+		t.Fatalf("inline fan-in created %d Main Turns", mainTurns)
+	}
+	executor.mu.Lock()
+	progress := executor.collaboration
+	batchID := executor.collaborationID
+	waitErr := executor.collaborationErr
+	executor.mu.Unlock()
+	if waitErr != nil || batchID == "" || !progress.Complete || len(progress.Results) != 2 || len(progress.PendingAgentIDs) != 0 {
+		t.Fatalf("inline collaboration progress=%#v batch=%q err=%v", progress, batchID, waitErr)
+	}
+	batch, err := database.CollaborationBatch(ctx, batchID)
+	if err != nil || batch.Status != domain.CollaborationBatchConsumed {
+		t.Fatalf("inline batch=%#v err=%v", batch, err)
+	}
+	if pending, err := database.PendingInboxCount(ctx, task.ID); err != nil || pending != 0 {
+		t.Fatalf("inline fan-in left pending inbox=%d err=%v", pending, err)
+	}
+}
+
+func TestMultiAgentFallbackWaitsForAllChildrenAndRunsOnce(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	secretStore, err := secrets.Open(filepath.Join(t.TempDir(), "secrets.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	project := domain.Project{ID: "project-fallback-agents", Name: "AHA2", CreatedAt: now, UpdatedAt: now}
+	workspace := domain.Workspace{
+		ID: "workspace-fallback-agents", ProjectID: project.ID, Name: "local", Locality: "local",
+		Transport: "native", RootPath: t.TempDir(), Health: "ready", CreatedAt: now, UpdatedAt: now,
+	}
+	envGroup := domain.EnvGroup{
+		ID: "env-fallback-agents", Name: "stub", ProviderID: "stub", Backend: "stub", Revision: 1,
+		Environment: map[string]string{}, SecretRefs: map[string]string{}, CreatedAt: now, UpdatedAt: now,
+	}
+	model := domain.Model{
+		ID: "model-fallback-agents", DisplayName: "Stub", ProviderID: "stub", Backend: "stub", WireModel: "stub",
+		ContextWindow: 1000, DefaultEnvGroupID: envGroup.ID, CreatedAt: now, UpdatedAt: now,
+	}
+	for _, operation := range []func() error{
+		func() error { return database.CreateProject(ctx, project) },
+		func() error { return database.CreateWorkspace(ctx, workspace) },
+		func() error { return database.UpsertModel(ctx, model) },
+		func() error { return database.UpsertEnvGroup(ctx, envGroup) },
+	} {
+		if err := operation(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	releaseSecondChild := make(chan struct{})
+	executor := &multiAgentExecutor{
+		blockAgentID: "sub-002",
+		agentRelease: releaseSecondChild,
+	}
+	service := NewService(database, secretStore, executor)
+	executor.service = service
+	task, err := service.CreateTask(ctx, CreateTaskInput{
+		ProjectID: project.ID, WorkspaceID: workspace.ID, Title: "fallback agents",
+		Request: "coordinate fallback agents", ModelID: model.ID,
+		CollaborationMode: "auto", MaxAgents: 3,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.SubmitMessage(ctx, task.ID, task.OriginalRequest); err != nil {
+		t.Fatal(err)
+	}
+	round, err := database.LatestRound(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForRoundAgentTurn(t, database, round.ID, "sub-001", domain.TurnSucceeded)
+	waitForRoundAgentTurn(t, database, round.ID, "sub-002", domain.TurnRunning)
+	turns, err := database.TurnsForRound(ctx, round.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mainTurns := 0
+	for _, turn := range turns {
+		if turn.AgentID == "main" {
+			mainTurns++
+		}
+	}
+	if mainTurns != 1 {
+		t.Fatalf("a running child woke Main before fan-in completed: %#v", turns)
+	}
+	if current, err := database.Task(ctx, task.ID); err != nil || current.Status == domain.TaskWaitingUser {
+		t.Fatalf("round settled while collaboration was still open: task=%#v err=%v", current, err)
+	}
+
+	close(releaseSecondChild)
+	waitForTask(t, database, task.ID, domain.TaskWaitingUser)
+	turns, err = database.TurnsForRound(ctx, round.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(turns) != 4 {
+		t.Fatalf("fallback fan-in should append exactly one Main Turn: %#v", turns)
+	}
+	mainTurns = 0
+	for _, turn := range turns {
+		if turn.AgentID != "main" {
+			continue
+		}
+		mainTurns++
+		if turn.Generation == 1 && turn.Result != "integrated result" {
+			t.Fatalf("unexpected fallback Main result: %#v", turn)
+		}
+	}
+	if mainTurns != 2 {
+		t.Fatalf("fallback fan-in created %d Main Turns", mainTurns)
+	}
+	batches, err := database.CollaborationBatchesForParentTurn(ctx, turns[0].ID)
+	if err != nil || len(batches) != 0 {
+		t.Fatalf("fallback collaboration was not consumed: batches=%#v err=%v", batches, err)
+	}
+	if pending, err := database.PendingInboxCount(ctx, task.ID); err != nil || pending != 0 {
+		t.Fatalf("fallback fan-in left pending inbox=%d err=%v", pending, err)
+	}
+}
+
 func TestSingleModeRejectsAgentActions(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -1335,11 +1579,11 @@ func (e *twoBatchExecutor) Execute(_ context.Context, request ExecutionRequest, 
 		e.mu.Unlock()
 		if first {
 			claims := agentapi.Claims{TaskID: request.Task.ID, AgentID: request.Turn.AgentID, TurnID: request.Turn.ID}
-			_, _ = e.service.SubmitAgentCollaboration(context.Background(), claims, []AgentAction{
+			_, _, _ = e.service.SubmitAgentCollaboration(context.Background(), claims, []AgentAction{
 				{AgentID: "sub-001", Title: "First", Assignment: "first assignment", Required: true},
 			}, "")
 			// A second call in the same Turn, as a Main agent may legitimately make.
-			_, _ = e.service.SubmitAgentCollaboration(context.Background(), claims, []AgentAction{
+			_, _, _ = e.service.SubmitAgentCollaboration(context.Background(), claims, []AgentAction{
 				{AgentID: "sub-002", Title: "Second", Assignment: "second assignment", Required: true},
 			}, "")
 		}
@@ -1397,6 +1641,23 @@ func TestSecondBatchInTheSameTurnStaysOnTheRoutedAgentCard(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitForTask(t, database, task.ID, domain.TaskWaitingUser)
+	round, err := database.LatestRound(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	turns, err := database.TurnsForRound(ctx, round.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mainTurns := 0
+	for _, turn := range turns {
+		if turn.AgentID == "main" {
+			mainTurns++
+		}
+	}
+	if mainTurns != 2 {
+		t.Fatalf("two completed batches should produce one fallback Main Turn: %#v", turns)
+	}
 
 	page, err := database.ConversationPageForAgent(ctx, task.ID, "main", 0, 0, 200, []string{"update"})
 	if err != nil {
@@ -1450,6 +1711,31 @@ func waitForTurn(t *testing.T, database *store.Store, turnID string, expected do
 	}
 	turn, _ := database.Turn(context.Background(), turnID)
 	t.Fatalf("turn did not reach %s: %#v", expected, turn)
+}
+
+func waitForRoundAgentTurn(
+	t *testing.T,
+	database *store.Store,
+	roundID string,
+	agentID string,
+	expected domain.TurnStatus,
+) domain.Turn {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		turns, err := database.TurnsForRound(context.Background(), roundID)
+		if err == nil {
+			for _, turn := range turns {
+				if turn.AgentID == agentID && turn.Status == expected {
+					return turn
+				}
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	turns, _ := database.TurnsForRound(context.Background(), roundID)
+	t.Fatalf("%s turn did not reach %s: %#v", agentID, expected, turns)
+	return domain.Turn{}
 }
 
 func waitForNoPendingHandoff(t *testing.T, database *store.Store, taskID, agentID string) {
