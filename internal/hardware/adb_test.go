@@ -11,6 +11,30 @@ import (
 	"time"
 )
 
+func TestResolveADBExecutableFindsWingetPackage(t *testing.T) {
+	root := t.TempDir()
+	executable := filepath.Join(
+		root, "Microsoft", "WinGet", "Packages",
+		"Google.PlatformTools_Microsoft.Winget.Source_test",
+		"platform-tools", "adb",
+	)
+	if err := os.MkdirAll(filepath.Dir(executable), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(executable, []byte("adb"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", t.TempDir())
+	t.Setenv(adbExecutableEnvironment, "")
+	t.Setenv("ANDROID_HOME", "")
+	t.Setenv("ANDROID_SDK_ROOT", "")
+	t.Setenv("LOCALAPPDATA", root)
+	resolved, err := resolveADBExecutable()
+	if err != nil || filepath.Clean(resolved) != filepath.Clean(executable) {
+		t.Fatalf("resolved=%q want=%q err=%v", resolved, executable, err)
+	}
+}
+
 func TestOpenADBTerminalConnectsAndStartsDeviceShell(t *testing.T) {
 	directory := t.TempDir()
 	executable := filepath.Join(directory, "adb")

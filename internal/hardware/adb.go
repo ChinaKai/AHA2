@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -296,10 +297,20 @@ func resolveADBExecutable() (string, error) {
 	if runtime.GOOS == "windows" {
 		name = "adb.exe"
 	}
+	localAppData := strings.TrimSpace(os.Getenv("LOCALAPPDATA"))
+	if localAppData != "" {
+		candidates = append(candidates, filepath.Join(localAppData, "Microsoft", "WinGet", "Links", name))
+		packageMatches, _ := filepath.Glob(filepath.Join(
+			localAppData, "Microsoft", "WinGet", "Packages",
+			"Google.PlatformTools_*", "platform-tools", name,
+		))
+		sort.Strings(packageMatches)
+		candidates = append(candidates, packageMatches...)
+	}
 	for _, root := range []string{
 		os.Getenv("ANDROID_HOME"),
 		os.Getenv("ANDROID_SDK_ROOT"),
-		filepath.Join(os.Getenv("LOCALAPPDATA"), "Android", "Sdk"),
+		filepath.Join(localAppData, "Android", "Sdk"),
 	} {
 		if strings.TrimSpace(root) != "" {
 			candidates = append(candidates, filepath.Join(root, "platform-tools", name))

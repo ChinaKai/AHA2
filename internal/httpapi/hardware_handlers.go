@@ -276,7 +276,11 @@ func (s *Server) pairHardwareADB(writer http.ResponseWriter, request *http.Reque
 	output, err := s.pairADB(ctx, endpoint, pairingCode)
 	if err != nil {
 		s.audit(request, "hardware_resource.adb_pair_failed", "hardware_resource", resource.ID, map[string]any{"connection_endpoint": net.JoinHostPort(resource.Network.Host, fmt.Sprint(resource.Network.Port))})
-		writeJSON(writer, http.StatusConflict, map[string]any{"ok": false, "error": "adb_pair_failed", "message": err.Error()})
+		writeJSON(writer, http.StatusConflict, map[string]any{
+			"ok": false, "error": "adb_pair_failed",
+			"message": adbPairingFailureMessage(err),
+			"details": err.Error(),
+		})
 		return
 	}
 	resource.ADBPairedAt = time.Now().UTC().Format(time.RFC3339)
@@ -286,6 +290,31 @@ func (s *Server) pairHardwareADB(writer http.ResponseWriter, request *http.Reque
 	}
 	s.audit(request, "hardware_resource.adb_pair", "hardware_resource", resource.ID, map[string]any{"connection_endpoint": net.JoinHostPort(resource.Network.Host, fmt.Sprint(resource.Network.Port))})
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "message": "Android 设备配对成功", "output": output, "resource": resource})
+}
+
+func adbPairingFailureMessage(err error) string {
+	detail := strings.ToLower(strings.TrimSpace(err.Error()))
+	switch {
+	case strings.Contains(detail, "adb executable not found"),
+		strings.Contains(detail, "configured adb executable is unavailable"):
+		return "找不到 ADB。请安装 Android Platform-Tools，或在 AHA2 运行账户中把 AHA2_ADB_PATH 设置为 adb.exe 的完整路径，然后重启 AHA2 User。"
+	case strings.Contains(detail, "failed to authenticate"),
+		strings.Contains(detail, "wrong pairing"),
+		strings.Contains(detail, "pairing code"):
+		return "配对码不正确或已经过期。请在手机的无线调试页面重新生成配对码后再试。"
+	case strings.Contains(detail, "connection refused"),
+		strings.Contains(detail, "failed to connect"),
+		strings.Contains(detail, "cannot connect"),
+		strings.Contains(detail, "unable to connect"),
+		strings.Contains(detail, "no route"):
+		return "无法连接到手机配对端口。请确认手机和电脑在同一网络、无线调试仍开启，并使用当前显示的配对端口。"
+	case strings.Contains(detail, "timed out"),
+		strings.Contains(detail, "timeout"),
+		strings.Contains(detail, "deadline exceeded"):
+		return "ADB 配对超时。请保持无线调试页面打开，确认配对端口未变化后重试。"
+	default:
+		return "ADB 配对失败。请确认手机与电脑在同一网络、无线调试已开启，并重新生成配对端口和配对码。"
+	}
 }
 
 func (s *Server) taskHardware(writer http.ResponseWriter, request *http.Request) {

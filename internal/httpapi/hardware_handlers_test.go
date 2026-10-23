@@ -21,6 +21,23 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
+func TestADBPairingFailureMessagesAreActionable(t *testing.T) {
+	tests := []struct {
+		detail string
+		want   string
+	}{
+		{"ADB executable not found", "AHA2_ADB_PATH"},
+		{"adb pair: Failed to authenticate", "配对码不正确"},
+		{"adb pair: cannot connect to 192.0.2.1:37123", "同一网络"},
+		{"adb pair: context deadline exceeded", "配对超时"},
+	}
+	for _, test := range tests {
+		if message := adbPairingFailureMessage(fmt.Errorf("%s", test.detail)); !strings.Contains(message, test.want) {
+			t.Fatalf("detail=%q message=%q want=%q", test.detail, message, test.want)
+		}
+	}
+}
+
 func TestHardwareAPIConfigNetworkTerminalAndPermissions(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
