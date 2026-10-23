@@ -116,3 +116,58 @@ func TestRecoverInterruptedRequeuesClaimedInbox(t *testing.T) {
 		t.Fatalf("repeated restart left pending agents=%#v err=%v", pending, err)
 	}
 }
+
+func TestRecoverInterruptedRequeuesLiveInTurnInbox(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database, err := Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	task := createStoreTestTask(t, database)
+	now := time.Now().UTC()
+	message := domain.Message{
+		ID: domain.NewID("message"), TaskID: task.ID, Role: "user", Sender: "owner",
+		Content: "live instruction", CreatedAt: now,
+	}
+	round := domain.TaskRound{
+		ID: domain.NewID("round"), TaskID: task.ID, InputMessageID: message.ID,
+		Status: domain.RoundRunning, CreatedAt: now, StartedAt: now,
+	}
+	turn := domain.Turn{
+		ID: domain.NewID("turn"), TaskID: task.ID, RoundID: round.ID, AgentID: "main",
+		InputMessageID: message.ID, Status: domain.TurnRunning, RuntimeConfigSnapshotID: task.RuntimeConfigSnapshotID,
+		InboxBatchID: "batch-live", Attempt: 1, Required: true, QueuedAt: now,
+	}
+	if _, _, err := database.CreateMessageRoundAndTurn(ctx, message, round, turn); err != nil {
+		t.Fatal(err)
+	}
+	inboxID := domain.NewID("inbox")
+	if _, err := database.db.ExecContext(ctx, `
+		INSERT INTO agent_inbox(
+			id,task_id,round_id,target_agent_id,source_agent_id,source_kind,source_turn_id,message_id,
+			content,payload_json,status,batch_id,created_at,claimed_at,processed_at,
+			delivered_turn_id,delivered_at
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		inboxID, task.ID, round.ID, "main", "owner", "owner_message", "",
+		message.ID, message.Content, "{}", "delivered_in_turn", "", timeString(now),
+		timeString(now), "", turn.ID, timeString(now),
+	); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := database.RecoverInterrupted(ctx, now.Add(time.Second))
+	if err != nil || recovered.Turns != 1 || recovered.RequeuedInboxItems != 1 {
+		t.Fatalf("recovery=%#v err=%v", recovered, err)
+	}
+	var status, deliveredTurnID, deliveredAt string
+	if err := database.db.QueryRowContext(ctx, `
+		SELECT status,delivered_turn_id,delivered_at FROM agent_inbox WHERE id=?`,
+		inboxID,
+	).Scan(&status, &deliveredTurnID, &deliveredAt); err != nil {
+		t.Fatal(err)
+	}
+	if status != "pending" || deliveredTurnID != "" || deliveredAt != "" {
+		t.Fatalf("live inbox status=%q delivered_turn=%q delivered_at=%q", status, deliveredTurnID, deliveredAt)
+	}
+}

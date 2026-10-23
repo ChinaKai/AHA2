@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/ChinaKai/AHA2/internal/agentapi"
 	"github.com/ChinaKai/AHA2/internal/domain"
@@ -82,6 +83,104 @@ func (s *Service) AgentCallContext(ctx context.Context, claims agentapi.Claims, 
 		return AgentCallContext{}, err
 	}
 	return AgentCallContext{Task: task, Turn: turn, Project: project}, nil
+}
+
+func (s *Service) WaitAgentInbox(
+	ctx context.Context,
+	claims agentapi.Claims,
+	after int64,
+	timeout time.Duration,
+) ([]domain.LiveInboxMessage, int64, error) {
+	call, err := s.AgentCallContext(ctx, claims, false)
+	if err != nil {
+		return nil, after, err
+	}
+	if after < 0 {
+		after = 0
+	}
+	if timeout <= 0 {
+		timeout = 20 * time.Second
+	}
+	if timeout > 30*time.Second {
+		timeout = 30 * time.Second
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		items, claimErr := s.store.ClaimOwnerInboxForTurn(
+			ctx, call.Task.ID, call.Turn.AgentID, call.Turn.RoundID, call.Turn.ID, after, 100,
+		)
+		if claimErr != nil {
+			return nil, after, claimErr
+		}
+		if len(items) > 0 {
+			messages := make([]domain.LiveInboxMessage, 0, len(items))
+			for _, item := range items {
+				messages = append(messages, liveInboxMessage(item))
+				if item.Sequence > after {
+					after = item.Sequence
+				}
+			}
+			s.emit(ctx, call.Task.ID, "inbox", call.Turn.ID, "agent_inbox_delivered_in_turn", map[string]any{
+				"round_id": call.Turn.RoundID, "turn_id": call.Turn.ID, "agent_id": call.Turn.AgentID,
+				"message_count": len(messages), "next_cursor": after,
+			})
+			return messages, after, nil
+		}
+		select {
+		case <-ctx.Done():
+			return nil, after, ctx.Err()
+		case <-timer.C:
+			return []domain.LiveInboxMessage{}, after, nil
+		case <-ticker.C:
+		}
+	}
+}
+
+func liveInboxMessage(item domain.AgentInboxItem) domain.LiveInboxMessage {
+	result := domain.LiveInboxMessage{
+		Sequence: item.Sequence, ID: item.ID, RoundID: item.RoundID,
+		SourceKind: item.SourceKind, SourceAgentID: item.SourceAgentID,
+		Content: item.Content, Payload: item.Payload, CreatedAt: item.CreatedAt,
+		Source: domain.LiveInboxSource{Kind: "owner", Authority: "owner", AgentID: item.SourceAgentID},
+	}
+	channelContext, _ := item.Payload["channel_context"].(map[string]any)
+	if len(channelContext) == 0 {
+		return result
+	}
+	actor, _ := channelContext["actor"].(map[string]any)
+	route, _ := channelContext["route"].(map[string]any)
+	result.Source = domain.LiveInboxSource{
+		Kind: "channel", AgentID: item.SourceAgentID,
+		DisplayName:    strings.TrimSpace(fmt.Sprint(actor["display_name"])),
+		Role:           strings.TrimSpace(fmt.Sprint(actor["role"])),
+		IdentityLinkID: strings.TrimSpace(fmt.Sprint(actor["identity_link_id"])),
+		RouteMode:      strings.TrimSpace(fmt.Sprint(route["mode"])),
+		IsBot:          func() bool { value, _ := actor["is_bot"].(bool); return value }(),
+	}
+	if result.Source.DisplayName == "<nil>" {
+		result.Source.DisplayName = ""
+	}
+	if result.Source.Role == "<nil>" {
+		result.Source.Role = ""
+	}
+	if result.Source.IdentityLinkID == "<nil>" {
+		result.Source.IdentityLinkID = ""
+	}
+	if result.Source.RouteMode == "<nil>" {
+		result.Source.RouteMode = ""
+	}
+	switch {
+	case result.Source.Role == "owner":
+		result.Source.Authority = "owner_channel"
+	case result.Source.RouteMode == "task_route":
+		result.Source.Authority = "task_channel_participant"
+	default:
+		result.Source.Authority = "channel_context"
+	}
+	return result
 }
 
 func (s *Service) AgentKnowledgePublishAllowed(ctx context.Context, call AgentCallContext) bool {

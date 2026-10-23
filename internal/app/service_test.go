@@ -299,6 +299,33 @@ type idleThenSuccessExecutor struct {
 	calls int
 }
 
+type liveInboxExecutor struct {
+	mu        sync.Mutex
+	service   *Service
+	started   chan struct{}
+	delivered chan []domain.LiveInboxMessage
+	release   chan struct{}
+	once      sync.Once
+}
+
+func (s *liveInboxExecutor) Execute(_ context.Context, request ExecutionRequest, emit func(ExecutionEvent)) (ExecutionResult, error) {
+	emit(ExecutionEvent{Type: "agent_progress", Data: map[string]any{"message": "working on A"}})
+	if request.Turn.AgentID == "main" && s.service != nil {
+		s.once.Do(func() { close(s.started) })
+		claims := agentapi.Claims{TaskID: request.Task.ID, AgentID: request.Turn.AgentID, TurnID: request.Turn.ID}
+		messages, _, err := s.service.WaitAgentInbox(context.Background(), claims, 0, 5*time.Second)
+		if err != nil {
+			return ExecutionResult{}, err
+		}
+		s.mu.Lock()
+		s.delivered <- messages
+		s.mu.Unlock()
+		<-s.release
+	}
+	emit(ExecutionEvent{Type: "agent_message", Data: map[string]any{"text": "continued after live input"}})
+	return ExecutionResult{Reply: "continued after live input", ProviderSessionID: "main-live-inbox"}, nil
+}
+
 func (executor *idleThenSuccessExecutor) Execute(_ context.Context, _ ExecutionRequest, emit func(ExecutionEvent)) (ExecutionResult, error) {
 	executor.mu.Lock()
 	executor.calls++
@@ -311,6 +338,142 @@ func (executor *idleThenSuccessExecutor) Execute(_ context.Context, _ ExecutionR
 	}
 	emit(ExecutionEvent{Type: "agent_message", Data: map[string]any{"text": "recovered"}})
 	return ExecutionResult{Reply: "recovered", ProviderSessionID: "retry-session"}, nil
+}
+
+func TestOwnerMessageIsDeliveredInsideActiveMainTurn(t *testing.T) {
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	secretStore, err := secrets.Open(filepath.Join(t.TempDir(), "secrets.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	project := domain.Project{ID: "project-live-inbox", Name: "AHA2", CreatedAt: now, UpdatedAt: now}
+	workspace := domain.Workspace{
+		ID: "workspace-live-inbox", ProjectID: project.ID, Name: "local", Locality: "local",
+		Transport: "native", RootPath: t.TempDir(), Health: "ready", CreatedAt: now, UpdatedAt: now,
+	}
+	envGroup := domain.EnvGroup{
+		ID: "env-live-inbox", Name: "stub", ProviderID: "stub", Backend: "stub", Revision: 1,
+		Environment: map[string]string{}, SecretRefs: map[string]string{}, CreatedAt: now, UpdatedAt: now,
+	}
+	model := domain.Model{
+		ID: "model-live-inbox", DisplayName: "Stub", ProviderID: "stub", Backend: "stub", WireModel: "stub",
+		DefaultEnvGroupID: envGroup.ID, CreatedAt: now, UpdatedAt: now,
+	}
+	for _, operation := range []func() error{
+		func() error { return database.CreateProject(ctx, project) },
+		func() error { return database.CreateWorkspace(ctx, workspace) },
+		func() error { return database.UpsertEnvGroup(ctx, envGroup) },
+		func() error { return database.UpsertModel(ctx, model) },
+	} {
+		if err := operation(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	executor := &liveInboxExecutor{
+		started: make(chan struct{}), delivered: make(chan []domain.LiveInboxMessage, 1), release: make(chan struct{}),
+	}
+	service := NewService(database, secretStore, executor)
+	executor.service = service
+	task, err := service.CreateTask(ctx, CreateTaskInput{
+		ProjectID: project.ID, WorkspaceID: workspace.ID, Title: "live inbox",
+		Request: "work on A", ModelID: model.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.SubmitMessage(ctx, task.ID, "work on A"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-executor.started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Main Turn did not start waiting")
+	}
+	if _, err := service.SubmitMessage(ctx, task.ID, "这里有点问题，补充修正 A"); err != nil {
+		t.Fatal(err)
+	}
+	var messages []domain.LiveInboxMessage
+	select {
+	case messages = <-executor.delivered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("live Owner message was not delivered in the active Turn")
+	}
+	if len(messages) != 1 || messages[0].Content != "这里有点问题，补充修正 A" ||
+		messages[0].Source.Authority != "owner" {
+		t.Fatalf("live messages=%#v", messages)
+	}
+	round, err := database.LatestRound(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	turns, err := database.TurnsForRound(ctx, round.ID)
+	if err != nil || len(turns) != 1 {
+		t.Fatalf("live delivery created another Turn: turns=%#v err=%v", turns, err)
+	}
+	activeTask, err := database.Task(ctx, task.ID)
+	if err != nil || activeTask.CurrentGoal != "work on A" {
+		t.Fatalf("live message mechanically replaced current goal: task=%#v err=%v", activeTask, err)
+	}
+	close(executor.release)
+	waitForTask(t, database, task.ID, domain.TaskWaitingUser)
+	if pending, err := database.PendingInboxCount(ctx, task.ID); err != nil || pending != 0 {
+		t.Fatalf("live inbox was not completed: pending=%d err=%v", pending, err)
+	}
+	turns, err = database.TurnsForRound(ctx, round.ID)
+	if err != nil || len(turns) != 1 {
+		t.Fatalf("live delivery created a follow-up Turn after completion: turns=%#v err=%v", turns, err)
+	}
+}
+
+func TestLiveInboxSourceAuthority(t *testing.T) {
+	tests := []struct {
+		name      string
+		payload   map[string]any
+		authority string
+		kind      string
+	}{
+		{name: "owner", authority: "owner", kind: "owner"},
+		{
+			name: "owner channel",
+			payload: map[string]any{"channel_context": map[string]any{
+				"actor": map[string]any{"identity_link_id": "identity-owner", "role": "owner", "display_name": "Owner"},
+				"route": map[string]any{"mode": "task_route"},
+			}},
+			authority: "owner_channel", kind: "channel",
+		},
+		{
+			name: "task channel participant",
+			payload: map[string]any{"channel_context": map[string]any{
+				"actor": map[string]any{"identity_link_id": "identity-xiaohong", "role": "participant", "display_name": "小红"},
+				"route": map[string]any{"mode": "task_route"},
+			}},
+			authority: "task_channel_participant", kind: "channel",
+		},
+		{
+			name: "context only participant",
+			payload: map[string]any{"channel_context": map[string]any{
+				"actor": map[string]any{"identity_link_id": "identity-guest", "role": "participant", "display_name": "访客"},
+				"route": map[string]any{"mode": "group_qa"},
+			}},
+			authority: "channel_context", kind: "channel",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			message := liveInboxMessage(domain.AgentInboxItem{
+				ID: "inbox", SourceKind: "owner_message", SourceAgentID: "owner", Payload: test.payload,
+			})
+			if message.Source.Authority != test.authority || message.Source.Kind != test.kind {
+				t.Fatalf("source=%#v", message.Source)
+			}
+		})
+	}
 }
 
 func (s *multiAgentExecutor) Execute(_ context.Context, request ExecutionRequest, emit func(ExecutionEvent)) (ExecutionResult, error) {

@@ -350,6 +350,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/agent/capabilities", s.withAgentCapability(http.HandlerFunc(s.agentCapabilitiesInfo)))
 	mux.Handle("PATCH /api/v1/agent/turn/memory", s.withAgentCapability(http.HandlerFunc(s.updateAgentMemory)))
 	mux.Handle("POST /api/v1/agent/turn/messages", s.withAgentCapability(http.HandlerFunc(s.addAgentProgressMessage)))
+	mux.Handle("POST /api/v1/agent/turn/inbox/wait", s.withAgentCapability(http.HandlerFunc(s.waitAgentInbox)))
 	mux.Handle("POST /api/v1/agent/channel/reply-decision", s.withAgentCapability(http.HandlerFunc(s.setAgentChannelReplyDecision)))
 	mux.Handle("POST /api/v1/agent/turn/attachments", s.withAgentCapability(http.HandlerFunc(s.uploadAgentAttachment)))
 	mux.Handle("GET /api/v1/agent/knowledge", s.withAgentCapability(http.HandlerFunc(s.agentKnowledge)))

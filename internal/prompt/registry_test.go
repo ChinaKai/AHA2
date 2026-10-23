@@ -32,7 +32,7 @@ func TestEngineRoutesTemplatesAndBuildsContextManifest(t *testing.T) {
 	}
 	for id, marker := range map[string]string{
 		"core.default":             "Use the selected Task workspace as the default/primary workspace",
-		"role.main":                "You are the Main Agent",
+		"role.main":                "You own integration",
 		"protocol.knowledge":       "Knowledge is a progressive",
 		"context.recovery-handoff": "### Recovery handoff",
 		"resource.agent-api":       "# Agent API",
@@ -44,6 +44,17 @@ func TestEngineRoutesTemplatesAndBuildsContextManifest(t *testing.T) {
 	if templateBodies["core.default"] == templateBodies["role.main"] ||
 		templateBodies["core.default"] == templateBodies["protocol.knowledge"] {
 		t.Fatal("different templates returned the same body")
+	}
+	for _, marker := range []string{
+		"Verified Owner stop/cancel",
+		"does not automatically replace the goal",
+		"also do something adds work",
+		"Channel participants are message sources, not permission grants",
+		"Do not overwrite `current_goal` mechanically",
+	} {
+		if !strings.Contains(templateBodies["resource.agent-api"], marker) {
+			t.Fatalf("agent API resource is missing live inbox intent rule %q", marker)
+		}
 	}
 	if err := engine.UpdateTemplate(ctx, "role.main", "CUSTOM MAIN {{.AgentID}}", templates[0].UpdatedAt); err != nil {
 		t.Fatal(err)

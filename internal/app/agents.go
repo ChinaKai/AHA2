@@ -1136,6 +1136,7 @@ func (s *Service) retryTurn(ctx context.Context, turn domain.Turn) bool {
 
 func (s *Service) afterTurnTerminal(ctx context.Context, task domain.Task, turn domain.Turn) {
 	_ = s.store.MarkInboxBatchProcessed(ctx, turn.InboxBatchID, s.now().UTC())
+	_ = s.store.MarkLiveInboxProcessedForTurn(ctx, turn.ID, s.now().UTC())
 	if s.retryTurn(ctx, turn) {
 		s.settleRound(ctx, task.ID, turn.RoundID)
 		return

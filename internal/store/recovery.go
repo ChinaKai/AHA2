@@ -44,6 +44,21 @@ func (s *Store) RecoverInterrupted(ctx context.Context, now time.Time) (Recovery
 	if err != nil {
 		return RecoveryResult{}, fmt.Errorf("recover inbox: %w", err)
 	}
+	liveRequeueResult, err := tx.ExecContext(ctx, `
+		UPDATE agent_inbox
+		SET status='pending',claimed_at='',delivered_turn_id='',delivered_at='',
+		    recovery_attempts=recovery_attempts+1
+		WHERE status='delivered_in_turn'
+		  AND delivered_turn_id IN (
+			SELECT interrupted.id
+			FROM turns interrupted
+			WHERE interrupted.status=? AND interrupted.finished_at=?
+		  )`,
+		domain.TurnInterrupted, finishedAt,
+	)
+	if err != nil {
+		return RecoveryResult{}, fmt.Errorf("recover live inbox: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE task_agents
 		SET status='idle',updated_at=?
@@ -82,8 +97,9 @@ func (s *Store) RecoverInterrupted(ctx context.Context, now time.Time) (Recovery
 	turns, _ := turnResult.RowsAffected()
 	tasks, _ := taskResult.RowsAffected()
 	requeued, _ := requeueResult.RowsAffected()
+	liveRequeued, _ := liveRequeueResult.RowsAffected()
 	return RecoveryResult{
 		Turns: int(turns), Tasks: int(tasks),
-		RequeuedInboxItems: int(requeued),
+		RequeuedInboxItems: int(requeued + liveRequeued),
 	}, nil
 }

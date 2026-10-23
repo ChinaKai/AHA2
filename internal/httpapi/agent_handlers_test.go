@@ -233,8 +233,8 @@ func TestAgentStateKnowledgeAndSkillAPIs(t *testing.T) {
 		t.Fatal("turn did not start")
 	}
 	activeTask, err := database.Task(ctx, task.ID)
-	if err != nil || activeTask.CurrentGoal != "exercise Agent API" {
-		t.Fatalf("latest owner message did not become current goal: task=%#v err=%v", activeTask, err)
+	if err != nil || activeTask.CurrentGoal != "debug board" {
+		t.Fatalf("owner message mechanically replaced current goal: task=%#v err=%v", activeTask, err)
 	}
 	activeMemory, err := database.TaskMemory(ctx, task.ID)
 	if err != nil || activeMemory.CurrentGoal != activeTask.CurrentGoal {
@@ -251,8 +251,20 @@ func TestAgentStateKnowledgeAndSkillAPIs(t *testing.T) {
 	response := agentRequest(t, server.URL+"/api/v1/agent/capabilities", http.MethodGet, token, nil)
 	var capabilitiesPayload map[string]any
 	decodeResponse(t, response, &capabilitiesPayload)
-	if response.StatusCode != http.StatusOK || capabilitiesPayload["capabilities"].(map[string]any)["skill_create"] != true {
+	capabilityFlags := capabilitiesPayload["capabilities"].(map[string]any)
+	if response.StatusCode != http.StatusOK || capabilityFlags["skill_create"] != true || capabilityFlags["live_inbox_wait"] != true {
 		t.Fatalf("skill create capability status=%d payload=%#v", response.StatusCode, capabilitiesPayload)
+	}
+	response = agentRequest(t, server.URL+"/api/v1/agent/turn/inbox/wait", http.MethodPost, token, map[string]any{
+		"after_cursor": 0, "timeout_seconds": 1,
+	})
+	var inboxWaitPayload struct {
+		Messages   []map[string]any `json:"messages"`
+		NextCursor int64            `json:"next_cursor"`
+	}
+	decodeResponse(t, response, &inboxWaitPayload)
+	if response.StatusCode != http.StatusOK || len(inboxWaitPayload.Messages) != 0 || inboxWaitPayload.NextCursor != 0 {
+		t.Fatalf("inbox wait status=%d payload=%#v", response.StatusCode, inboxWaitPayload)
 	}
 
 	response = agentRequest(t, server.URL+"/api/v1/agent/project/workspaces", http.MethodGet, token, nil)

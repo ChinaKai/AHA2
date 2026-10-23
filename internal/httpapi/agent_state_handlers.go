@@ -36,7 +36,7 @@ func (s *Server) agentCapabilitiesInfo(writer http.ResponseWriter, request *http
 		}
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "capabilities": map[string]bool{
-		"progress": true, "knowledge_read": true, "knowledge_feedback": true,
+		"progress": true, "live_inbox_wait": true, "knowledge_read": true, "knowledge_feedback": true,
 		"memory_update": main, "knowledge_publish": knowledgePublish, "knowledge_contribute_bound": knowledgePublish && boundKnowledgeContribute, "skill_create": main, "skill_update": main,
 		// Reported separately so a caller can tell whether a global skill is
 		// possible before sending one and being refused.
@@ -149,6 +149,32 @@ func (s *Server) addAgentProgressMessage(writer http.ResponseWriter, request *ht
 		return
 	}
 	writeJSON(writer, http.StatusCreated, map[string]any{"ok": true})
+}
+
+func (s *Server) waitAgentInbox(writer http.ResponseWriter, request *http.Request) {
+	claims, _ := agentClaimsFromContext(request.Context())
+	var payload struct {
+		AfterCursor    int64 `json:"after_cursor"`
+		TimeoutSeconds int   `json:"timeout_seconds"`
+	}
+	if err := decodeJSON(request, &payload); err != nil {
+		writeErrorDetail(writer, http.StatusBadRequest, "inbox_wait_invalid", err.Error())
+		return
+	}
+	if payload.AfterCursor < 0 || payload.TimeoutSeconds < 0 || payload.TimeoutSeconds > 30 {
+		writeErrorDetail(writer, http.StatusBadRequest, "inbox_wait_invalid", "after_cursor must be non-negative and timeout_seconds must be 0-30")
+		return
+	}
+	messages, nextCursor, err := s.app.WaitAgentInbox(
+		request.Context(), claims, payload.AfterCursor, time.Duration(payload.TimeoutSeconds)*time.Second,
+	)
+	if err != nil {
+		writeAgentControlError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"ok": true, "messages": messages, "next_cursor": nextCursor,
+	})
 }
 
 func (s *Server) setAgentChannelReplyDecision(writer http.ResponseWriter, request *http.Request) {

@@ -103,6 +103,29 @@ type AgentInboxItem struct {
 	ProcessedAt   time.Time      `json:"processed_at,omitempty"`
 }
 
+type LiveInboxSource struct {
+	Kind           string `json:"kind"`
+	Authority      string `json:"authority"`
+	AgentID        string `json:"agent_id,omitempty"`
+	DisplayName    string `json:"display_name,omitempty"`
+	Role           string `json:"role,omitempty"`
+	IdentityLinkID string `json:"identity_link_id,omitempty"`
+	RouteMode      string `json:"route_mode,omitempty"`
+	IsBot          bool   `json:"is_bot,omitempty"`
+}
+
+type LiveInboxMessage struct {
+	Sequence      int64           `json:"sequence"`
+	ID            string          `json:"id"`
+	RoundID       string          `json:"round_id"`
+	SourceKind    string          `json:"source_kind"`
+	SourceAgentID string          `json:"source_agent_id"`
+	Content       string          `json:"content"`
+	Payload       map[string]any  `json:"payload,omitempty"`
+	Source        LiveInboxSource `json:"source"`
+	CreatedAt     time.Time       `json:"created_at"`
+}
+
 type AgentSessionHandoff struct {
 	ID                     string    `json:"id"`
 	TaskID                 string    `json:"task_id"`

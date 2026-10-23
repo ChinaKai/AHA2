@@ -422,6 +422,84 @@ func (s *Store) PendingAgentInbox(ctx context.Context, taskID, agentID string) (
 	return result, rows.Err()
 }
 
+func (s *Store) ClaimOwnerInboxForTurn(
+	ctx context.Context,
+	taskID, agentID, roundID, turnID string,
+	after int64,
+	limit int,
+) ([]domain.AgentInboxItem, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 100
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	rows, err := tx.QueryContext(ctx, `
+		SELECT `+inboxColumns+` FROM agent_inbox
+		WHERE task_id=? AND target_agent_id=? AND round_id=? AND sequence>?
+		  AND source_kind='owner_message' AND status='pending'
+		ORDER BY sequence LIMIT ?`,
+		taskID, agentID, roundID, after, limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	var items []domain.AgentInboxItem
+	for rows.Next() {
+		item, err := scanInbox(rows)
+		if err != nil {
+			rows.Close()
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if len(items) == 0 {
+		return nil, tx.Commit()
+	}
+	now := time.Now().UTC()
+	for _, item := range items {
+		result, err := tx.ExecContext(ctx, `
+			UPDATE agent_inbox
+			SET status='delivered_in_turn',claimed_at=?,delivered_turn_id=?,delivered_at=?
+			WHERE id=? AND status='pending'`,
+			timeString(now), turnID, timeString(now), item.ID,
+		)
+		if err != nil {
+			return nil, err
+		}
+		affected, _ := result.RowsAffected()
+		if affected != 1 {
+			return nil, fmt.Errorf("owner inbox item changed concurrently")
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+func (s *Store) MarkLiveInboxProcessedForTurn(ctx context.Context, turnID string, processedAt time.Time) error {
+	if turnID == "" {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE agent_inbox
+		SET status='processed',processed_at=?
+		WHERE delivered_turn_id=? AND status='delivered_in_turn'`,
+		timeString(processedAt), turnID,
+	)
+	return err
+}
+
 func (s *Store) PendingInboxAgents(ctx context.Context, taskID string) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT DISTINCT target_agent_id FROM agent_inbox

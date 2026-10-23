@@ -573,22 +573,6 @@ func (s *Service) submitAgentMessage(ctx context.Context, taskID, agentID, conte
 	if task.Status == domain.TaskDraft {
 		return domain.Turn{}, fmt.Errorf("task must be started before sending messages")
 	}
-	// Persist the latest owner instruction before prompt construction. A fresh
-	// Backend Session must not fall back to the immutable original request.
-	if agentID == "main" && content != "" && content != task.OriginalRequest {
-		now := s.now().UTC()
-		if err := s.store.UpdateTaskGoal(ctx, task.ID, content, timeString(now)); err != nil {
-			return domain.Turn{}, err
-		}
-		task.CurrentGoal = content
-		if memory, memoryErr := s.store.TaskMemory(ctx, task.ID); memoryErr == nil {
-			memory.CurrentGoal = content
-			memory.UpdatedAt = now
-			if err := s.store.UpsertTaskMemory(ctx, memory); err != nil {
-				return domain.Turn{}, err
-			}
-		}
-	}
 	if err := s.store.ValidateDraftAttachments(ctx, task.ID, attachmentIDs); err != nil {
 		return domain.Turn{}, err
 	}
