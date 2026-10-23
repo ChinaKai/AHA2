@@ -309,17 +309,21 @@ function renderChannelRouteCard(item: ConversationItem): string {
     const reason = String(payload.status_reason || "");
     const deliveryState = String(payload.delivery_state || "");
     const status = messageStatus === "replied" ? (deliveryState === "delivered" ? "已回复" : "回复已排队") :
-      messageStatus === "pending_reply" ? "等待回复" : messageStatus === "not_replied" ? "未回复" :
+      messageStatus === "pending_reply" ? "等待回复" : messageStatus === "not_replied" ? "无需回复" :
         messageStatus === "failed" ? "处理失败" : messageStatus === "interrupted" ? "已中断" : "已处理";
-    const detail = reason === "reply_decision_end" ? "已处理，Agent 选择结束机器人对话" :
-      reason === "reply_decision_continue" ? "已选择继续，等待渠道回复生成" :
-        reason === "no_channel_reply" ? "本轮处理完成，但未生成渠道回复" :
-          reason === "bot_dialogue_max_turns" ? "达到最大连续机器人轮数，未外发" :
-            reason === "turn_failed" ? "处理失败，未生成渠道回复" :
-              reason === "turn_interrupted" ? "处理已中断，未生成渠道回复" :
-                messageStatus === "replied" ? "已生成渠道回复" : "渠道消息处理结果";
+    const detail = reason === "reply_decision_end" ? "Agent 选择结束机器人对话" :
+      reason === "reply_decision_continue" ? "等待渠道回复生成" :
+        reason === "no_channel_reply" ? "处理完成，未产生回复内容" :
+          reason === "bot_dialogue_max_turns" ? "达到最大连续机器人轮数" :
+            reason === "turn_failed" ? "本轮处理失败" :
+              reason === "turn_interrupted" ? "本轮处理已中断" :
+                messageStatus === "replied" ? "渠道回复已生成" : "渠道消息处理结果";
     const who = String((payload.actor as Record<string, unknown> | undefined)?.display_name || "渠道参与者");
-    return `<article class="aha-orchestration-card aha-channel-route-card aha-channel-status-card" data-channel-status="${escapeHTML(messageStatus)}"><header><strong>${icon("send")}AHA 渠道状态</strong><span>${escapeHTML(status)}</span><time>${systemCardTime(item)}</time></header><p>${escapeHTML(destination)} · ${escapeHTML(who)} · ${escapeHTML(detail)}</p>${payload.message ? `<div class="aha-route-message">${escapeHTML(String(payload.message))}</div>` : ""}</article>`;
+    const replyMessage = String(payload.reply_message || (messageStatus === "replied" ? payload.message : "") || "");
+    const inboundMessage = String(payload.inbound_message || (messageStatus !== "replied" ? payload.message : "") || "");
+    const resultLabel = messageStatus === "replied" ? "已回复" : messageStatus === "not_replied" ? "无需回复" : status;
+    const result = messageStatus === "replied" ? replyMessage : detail;
+    return `<article class="aha-orchestration-card aha-channel-route-card aha-channel-status-card" data-channel-status="${escapeHTML(messageStatus)}"><header><strong>${icon("send")}AHA 渠道消息</strong><span>${escapeHTML(status)}</span><time>${systemCardTime(item)}</time></header><p>${escapeHTML(destination)} · ${escapeHTML(who)}</p>${result ? `<div class="aha-route-message"><strong>${escapeHTML(resultLabel)}：</strong>${escapeHTML(result)}</div>` : ""}${messageStatus !== "replied" && inboundMessage ? `<div class="aha-route-message">${escapeHTML(inboundMessage)}</div>` : ""}</article>`;
   }
   const state = String(payload.delivery_state || "pending");
   const status = state === "suppressed" ? "未外发" : state === "delivered" ? "已发送" : "已排队";
@@ -366,10 +370,17 @@ export function renderConversationWithOrchestration(
   detail: TaskDetail | null,
   renderItem: (item: ConversationItem) => string,
 ): string {
+  const repliedReceipts = new Set(items.filter(item => {
+    const payload = item.payload || {};
+    return item.kind === "agent_channel_route" && payload.status_card === true && payload.message_status === "replied";
+  }).map(item => String((item.payload || {}).inbound_receipt_id || "")).filter(Boolean));
   return items.map(item => {
     if (item.kind === "agent_batch_dispatched" && detail) return renderOrchestrationCard(item, detail);
     if (item.kind === "agent_channel_outreach") return renderChannelOutreachCard(item);
-    if (item.kind === "agent_channel_reply") return renderChannelReplyCard(item);
+    if (item.kind === "agent_channel_reply") {
+      const receiptID = String((item.payload || {}).inbound_receipt_id || "");
+      return receiptID && repliedReceipts.has(receiptID) ? "" : renderChannelReplyCard(item);
+    }
     if (item.kind === "agent_channel_route") return renderChannelRouteCard(item);
     if (item.kind === "agent_config_updated") return renderAgentConfigCard(item);
     if (item.kind === "turn_duration") return renderTurnDurationCard(item);

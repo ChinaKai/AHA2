@@ -167,15 +167,33 @@ func TestAgentChannelReplyIsReceiptBoundAndIdempotent(t *testing.T) {
 	if err != nil || retryCreated || retry.ID != delivery.ID || retryItemID != itemID {
 		t.Fatalf("reply retry=%#v item=%q created=%v err=%v", retry, retryItemID, retryCreated, err)
 	}
-	var cardSummary, cardPayloadJSON string
+	var cardRouteKind, cardKind, cardSummary, cardPayloadJSON string
 	if err := database.db.QueryRowContext(ctx,
-		`SELECT summary,payload_json FROM conversation_items WHERE id=?`, itemID,
-	).Scan(&cardSummary, &cardPayloadJSON); err != nil {
+		`SELECT route_kind,kind,summary,payload_json FROM conversation_items WHERE id=?`, itemID,
+	).Scan(&cardRouteKind, &cardKind, &cardSummary, &cardPayloadJSON); err != nil {
 		t.Fatal(err)
 	}
 	cardPayload := decodeJSON(cardPayloadJSON, map[string]any{})
-	if cardSummary != "AHA 已回复渠道消息：早上好" || cardPayload["message"] != "早上好" {
-		t.Fatalf("reply card summary=%q payload=%#v", cardSummary, cardPayload)
+	if cardRouteKind != "channel_route" || cardKind != "agent_channel_route" ||
+		cardSummary != "AHA 已回复渠道消息：早上好" ||
+		cardPayload["status_card"] != true || cardPayload["message_status"] != "replied" ||
+		cardPayload["message"] != "早上好" || cardPayload["reply_message"] != "早上好" ||
+		cardPayload["inbound_message"] != "你好" {
+		t.Fatalf("reply card route=%q kind=%q summary=%q payload=%#v", cardRouteKind, cardKind, cardSummary, cardPayload)
+	}
+	statuses, err := database.ReconcileChannelMessageStatuses(
+		ctx, task.ID, turn.ID, receiptID, "replied", "", now.Add(time.Second),
+	)
+	if err != nil || len(statuses) != 1 || statuses[0].ID != itemID {
+		t.Fatalf("merged reply statuses=%#v err=%v", statuses, err)
+	}
+	var receiptCardCount int
+	if err := database.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM conversation_items
+		WHERE task_id=? AND json_extract(payload_json,'$.inbound_receipt_id')=?`,
+		task.ID, receiptID,
+	).Scan(&receiptCardCount); err != nil || receiptCardCount != 1 {
+		t.Fatalf("receipt card count=%d err=%v", receiptCardCount, err)
 	}
 	target, err := database.ChannelDeliveryTarget(ctx, conversation.ID, delivery.SourceEventSequence)
 	if err != nil || target["reply_message_id"] != "provider-message-reply" ||
@@ -243,7 +261,7 @@ func TestAgentChannelReplyIsReceiptBoundAndIdempotent(t *testing.T) {
 	).Scan(&replyDecision); err != nil || replyDecision != "continue" {
 		t.Fatalf("bot reply decision=%q err=%v", replyDecision, err)
 	}
-	statuses, err := database.ReconcileChannelMessageStatuses(
+	statuses, err = database.ReconcileChannelMessageStatuses(
 		ctx, task.ID, turn.ID, botReceiptID, "replied", "", now.Add(2*time.Second),
 	)
 	if err != nil || len(statuses) != 1 || statuses[0].Payload["message_status"] != "replied" ||

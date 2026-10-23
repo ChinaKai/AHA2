@@ -1464,7 +1464,20 @@ test("conversation renders agent config, channel outreach, and turn duration car
     },
     created_at: "2026-09-04T09:00:05Z",
   }, {
-    sequence: 6, id: "channel-status-1", task_id: "task-1", agent_id: "aha",
+    sequence: 6, id: "channel-status-replied-1", task_id: "task-1", agent_id: "aha",
+    stream_agent_id: "main", from_agent_id: "aha", to_agent_id: "main",
+    route_kind: "channel_route", category: "update", kind: "agent_channel_route",
+    summary: "AHA 渠道回复已生成",
+    payload: {
+      status_card: true, message_status: "replied", status_reason: "",
+      inbound_receipt_id: "channel_inbox_1", delivery_state: "delivered",
+      inbound_message: "测试消息", reply_message: "早上好\n这是渠道回复内容",
+      channel: {display_name: "团队飞书", endpoint_kind: "assistant_dm"},
+      actor: {display_name: "Owner", is_bot: false},
+    },
+    created_at: "2026-09-04T09:00:06Z",
+  }, {
+    sequence: 7, id: "channel-status-1", task_id: "task-1", agent_id: "aha",
     stream_agent_id: "main", from_agent_id: "aha", to_agent_id: "main",
     route_kind: "channel_route", category: "update", kind: "agent_channel_route",
     summary: "AHA 已处理并选择不回复",
@@ -1474,7 +1487,7 @@ test("conversation renders agent config, channel outreach, and turn duration car
       channel: {display_name: "团队飞书", endpoint_kind: "group_digital_human"},
       actor: {display_name: "联调机器人", is_bot: true},
     },
-    created_at: "2026-09-04T09:00:06Z",
+    created_at: "2026-09-04T09:00:07Z",
   }];
   const html = renderConversationList(items, null, false);
   assert.match(html, /Agent 配置更新/);
@@ -1488,15 +1501,15 @@ test("conversation renders agent config, channel outreach, and turn duration car
   assert.match(html, /接口字段需要确认 &lt;script&gt;/);
   assert.match(html, /sub-001/);
   assert.match(html, /store verification passed/);
-  assert.match(html, /aha-channel-reply-card/);
-  assert.match(html, /AHA 渠道回复/);
+  assert.doesNotMatch(html, /aha-channel-reply-card/);
+  assert.equal((html.match(/AHA 渠道消息/g) || []).length, 2);
   assert.match(html, /团队飞书/);
   assert.match(html, /这是渠道回复内容/);
-  assert.match(html, /已发送/);
+  assert.match(html, /已回复/);
   assert.match(html, /aha-channel-status-card/);
-  assert.match(html, /AHA 渠道状态/);
+  assert.doesNotMatch(html, /AHA 渠道状态/);
   assert.match(html, /Agent 选择结束机器人对话/);
-  assert.match(html, /未回复/);
+  assert.match(html, /无需回复/);
   assert.match(html, /agent-routed-message/);
   assert.doesNotMatch(html, /接口字段需要确认 <script>/);
 });

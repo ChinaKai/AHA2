@@ -743,14 +743,14 @@ func (s *Store) EnqueueAgentChannelReply(
 	).Scan(&roundID, &turnInboxBatchID); err != nil {
 		return domain.ChannelDelivery{}, "", false, err
 	}
-	var inboxStatus, inboxBatchID, deliveredTurnID, inboxPayloadJSON string
+	var inboxStatus, inboxBatchID, deliveredTurnID, inboxContent, inboxPayloadJSON string
 	if err := tx.QueryRowContext(ctx, `
-		SELECT status,batch_id,delivered_turn_id,payload_json FROM agent_inbox
+		SELECT status,batch_id,delivered_turn_id,content,payload_json FROM agent_inbox
 		WHERE task_id=? AND target_agent_id='main'
 		  AND json_extract(payload_json,'$.channel_receipt_id')=?
 		ORDER BY sequence DESC LIMIT 1`,
 		taskID, inboundReceiptID,
-	).Scan(&inboxStatus, &inboxBatchID, &deliveredTurnID, &inboxPayloadJSON); err != nil {
+	).Scan(&inboxStatus, &inboxBatchID, &deliveredTurnID, &inboxContent, &inboxPayloadJSON); err != nil {
 		return domain.ChannelDelivery{}, "", false, err
 	}
 	authorized := inboxStatus == "delivered_in_turn" && deliveredTurnID == turnID ||
@@ -917,10 +917,12 @@ func (s *Store) EnqueueAgentChannelReply(
 	card := normalizeConversationItem(domain.ConversationItem{
 		ID: conversationItemID, TaskID: taskID, RoundID: roundID, TurnID: turnID,
 		AgentID: "aha", StreamAgentID: "main", FromAgentID: "aha", ToAgentID: "main",
-		RouteKind: "channel_reply", Category: "update", Kind: "agent_channel_reply",
+		RouteKind: "channel_route", Category: "update", Kind: "agent_channel_route",
 		Summary: "AHA 已回复渠道消息：" + compactChannelReply(message),
 		Payload: map[string]any{
-			"message": message, "delivery_id": deliveryID, "delivery_state": "pending",
+			"status_card": true, "message_status": "replied", "status_reason": "",
+			"message": message, "inbound_message": compactChannelReply(inboxContent),
+			"reply_message": message, "delivery_id": deliveryID, "delivery_state": "pending",
 			"inbound_receipt_id": inboundReceiptID,
 			"channel": map[string]any{
 				"conversation_id": conversationID, "display_name": conversationName,

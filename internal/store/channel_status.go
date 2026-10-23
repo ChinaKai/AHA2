@@ -80,7 +80,7 @@ func (s *Store) ReconcileChannelMessageStatuses(
 		if strings.TrimSpace(fmt.Sprint(route["mode"])) != "task_route" {
 			continue
 		}
-		replyPayload, replyFound, err := channelReplyPayloadTx(ctx, tx, taskID, inbound.receiptID)
+		replyPayload, replyItemID, replyFound, err := channelReplyPayloadTx(ctx, tx, taskID, inbound.receiptID)
 		if err != nil {
 			return nil, err
 		}
@@ -95,8 +95,38 @@ func (s *Store) ReconcileChannelMessageStatuses(
 		if channelName == "" || channelName == "<nil>" {
 			channelName = strings.TrimSpace(fmt.Sprint(actor["display_name"]))
 		}
+		inboundMessage := compactChannelReply(inbound.content)
+		replyMessage := strings.TrimSpace(stringValue(replyPayload["message"]))
+		message := inboundMessage
+		if messageStatus == "replied" && replyMessage != "" {
+			message = replyMessage
+		}
+		itemID := stableStoreID("conversation_channel_status", taskID, inbound.receiptID)
+		if replyFound && replyItemID != "" {
+			itemID = replyItemID
+		}
+		replyChannel, _ := replyPayload["channel"].(map[string]any)
+		channelPayload := map[string]any{
+			"display_name":  channelName,
+			"endpoint_kind": stringValue(channelContext["endpoint"]),
+		}
+		for _, key := range []string{"conversation_id", "instance_name", "endpoint_kind"} {
+			if value := stringValue(replyChannel[key]); value != "" {
+				channelPayload[key] = value
+			}
+		}
+		recipientPayload := map[string]any{
+			"identity_link_id": stringValue(actor["identity_link_id"]),
+			"display_name":     stringValue(actor["display_name"]),
+			"is_bot":           boolValue(actor["is_bot"]),
+		}
+		if replyRecipient, ok := replyPayload["recipient"].(map[string]any); ok {
+			for key, value := range replyRecipient {
+				recipientPayload[key] = value
+			}
+		}
 		item := normalizeConversationItem(domain.ConversationItem{
-			ID:     stableStoreID("conversation_channel_status", taskID, inbound.receiptID),
+			ID:     itemID,
 			TaskID: taskID, RoundID: roundID, TurnID: turnID,
 			AgentID: "aha", StreamAgentID: "main", FromAgentID: "aha", ToAgentID: "main",
 			RouteKind: "channel_route", Category: "update", Kind: "agent_channel_route",
@@ -107,14 +137,14 @@ func (s *Store) ReconcileChannelMessageStatuses(
 				"status_reason":      statusReason,
 				"reply_decision":     replyDecision,
 				"is_bot_dialogue":    boolValue(actor["is_bot"]),
-				"message":            compactChannelReply(inbound.content),
+				"message":            message,
+				"inbound_message":    inboundMessage,
+				"reply_message":      replyMessage,
 				"inbound_receipt_id": inbound.receiptID,
 				"delivery_state":     stringValue(replyPayload["delivery_state"]),
 				"delivery_id":        stringValue(replyPayload["delivery_id"]),
-				"channel": map[string]any{
-					"display_name":  channelName,
-					"endpoint_kind": stringValue(channelContext["endpoint"]),
-				},
+				"channel":            channelPayload,
+				"recipient":          recipientPayload,
 				"actor": map[string]any{
 					"display_name": stringValue(actor["display_name"]),
 					"is_bot":       boolValue(actor["is_bot"]),
@@ -128,7 +158,8 @@ func (s *Store) ReconcileChannelMessageStatuses(
 				route_kind,category,kind,summary,payload_json,created_at
 			) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 			ON CONFLICT(id) DO UPDATE SET
-				turn_id=excluded.turn_id,summary=excluded.summary,
+				turn_id=excluded.turn_id,route_kind=excluded.route_kind,
+				category=excluded.category,kind=excluded.kind,summary=excluded.summary,
 				payload_json=excluded.payload_json,created_at=excluded.created_at`,
 			item.ID, item.TaskID, item.RoundID, item.TurnID, item.AgentID, item.StreamAgentID,
 			item.FromAgentID, item.ToAgentID, item.RouteKind, item.Category, item.Kind,
@@ -147,22 +178,23 @@ func (s *Store) ReconcileChannelMessageStatuses(
 	return items, nil
 }
 
-func channelReplyPayloadTx(ctx context.Context, tx *sql.Tx, taskID, receiptID string) (map[string]any, bool, error) {
-	var payloadJSON string
+func channelReplyPayloadTx(ctx context.Context, tx *sql.Tx, taskID, receiptID string) (map[string]any, string, bool, error) {
+	var itemID, payloadJSON string
 	err := tx.QueryRowContext(ctx, `
-		SELECT payload_json FROM conversation_items
-		WHERE task_id=? AND kind='agent_channel_reply'
+		SELECT id,payload_json FROM conversation_items
+		WHERE task_id=?
+		  AND (kind='agent_channel_reply' OR json_extract(payload_json,'$.message_status')='replied')
 		  AND json_extract(payload_json,'$.inbound_receipt_id')=?
 		ORDER BY sequence DESC LIMIT 1`,
 		taskID, receiptID,
-	).Scan(&payloadJSON)
+	).Scan(&itemID, &payloadJSON)
 	if err == sql.ErrNoRows {
-		return map[string]any{}, false, nil
+		return map[string]any{}, "", false, nil
 	}
 	if err != nil {
-		return nil, false, err
+		return nil, "", false, err
 	}
-	return decodeJSON(payloadJSON, map[string]any{}), true, nil
+	return decodeJSON(payloadJSON, map[string]any{}), itemID, true, nil
 }
 
 func channelStatusOutcome(terminalState, overrideReason, replyDecision string, replied bool) (string, string) {
