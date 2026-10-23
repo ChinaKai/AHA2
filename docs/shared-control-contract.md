@@ -104,6 +104,9 @@ flight. Owner can inspect element list, select a control by screenshot hit
 testing, invoke supported operations and set values through an explicit form.
 Background mode has no free-form keyboard passthrough. Foreground mode provides
 direct image clicks/drags/wheel, a Unicode text form and bounded key chords.
+Local `Ctrl`/`Command` + wheel zoom is anchored at the pointer and preserves the
+logical desktop coordinate under it. Plain wheel remains foreground remote
+scrolling and must never be converted into local zoom.
 Provide window chooser, process/title, refresh, joint share, stop, error/status,
 image, elements and supported action controls. There is no Owner/Agent handoff
 button. Joint sharing includes explicit consent; old sessions remain legacy

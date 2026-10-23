@@ -309,6 +309,34 @@ try {
   await page.mouse.click(clickPoint.x, clickPoint.y);
   await waitUntil(() => actions.length > actionsBeforeZoom, "zoomed original-coordinate input");
   assert.ok(Math.abs(actions.at(-1).x - clickPoint.logicalX) < 2 && Math.abs(actions.at(-1).y - clickPoint.logicalY) < 2);
+  const anchor = await page.evaluate(() => {
+    const view = document.querySelector("#desktop-viewport");
+    const image = document.querySelector("#desktop-image").getBoundingClientRect();
+    const box = view.getBoundingClientRect();
+    const x = box.left + box.width * .72, y = box.top + box.height * .64;
+    return {x, y, logicalX: (x - image.left) / image.width * 2560, logicalY: (y - image.top) / image.height * 1440};
+  });
+  const actionsBeforeWheelZoom = actions.length;
+  await page.mouse.move(anchor.x, anchor.y);
+  await page.keyboard.down("Control");
+  await page.mouse.wheel(0, -100);
+  await page.keyboard.up("Control");
+  await delay(150);
+  const wheelZoom = await page.evaluate(({x, y}) => {
+    const image = document.querySelector("#desktop-image").getBoundingClientRect();
+    return {
+      zoom: document.querySelector("#desktop-zoom").value,
+      pageScale: visualViewport?.scale || 1,
+      logicalX: (x - image.left) / image.width * 2560,
+      logicalY: (y - image.top) / image.height * 1440,
+    };
+  }, anchor);
+  assert.equal(wheelZoom.zoom, "225");
+  assert.equal(wheelZoom.pageScale, 1);
+  assert.ok(Math.abs(wheelZoom.logicalX - anchor.logicalX) < 2, "wheel zoom preserves the pointed logical x");
+  assert.ok(Math.abs(wheelZoom.logicalY - anchor.logicalY) < 2, "wheel zoom preserves the pointed logical y");
+  assert.equal(actions.length, actionsBeforeWheelZoom, "local wheel zoom must not send remote scroll input");
+  await page.screenshot({path: resolve(output, "pointer-anchored-zoom-1440.png")});
   await page.click("#desktop-fit");
   await delay(100);
   await assertFit();

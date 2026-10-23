@@ -324,6 +324,39 @@ test("zoom cancels a pending gesture and resumes fallback observations", async (
   } finally { h.close(); }
 });
 
+test("ctrl wheel zooms without sending remote input while plain wheel still scrolls the target", async () => {
+  const h = harness("zoom-wheel", ({url}) => {
+    if (url.endsWith("/windows")) return {windows: []};
+    if (url.includes("/observation?")) return {observation: foregroundObservation()};
+    return {status: foregroundStatus(foregroundSession())};
+  });
+  try {
+    const view = h.panel.querySelector("#desktop-viewport");
+    view.clientWidth = 300;
+    view.clientHeight = 150;
+    h.bind();
+    await flush();
+    const image = h.panel.querySelector("#desktop-image");
+    const zoom = h.panel.querySelector("#desktop-zoom");
+    const actions = () => h.calls.filter(call => call.url.endsWith("/actions"));
+    image.focus();
+    let prevented = false;
+    image.fire("wheel", {
+      clientX: 190, clientY: 140, deltaX: 0, deltaY: -1, deltaMode: 0, ctrlKey: true,
+      preventDefault() { prevented = true; },
+    });
+    await flush();
+    assert.equal(prevented, true);
+    assert.equal(zoom.value, "125");
+    assert.equal(h.panel.querySelector("#desktop-zoom-value").textContent, "125%");
+    assert.equal(actions().length, 0, "local zoom must not become remote scroll input");
+    image.fire("wheel", {clientX: 50, clientY: 50, deltaX: 0, deltaY: 80, deltaMode: 0});
+    await flush();
+    assert.equal(actions().length, 1);
+    assert.equal(actions()[0].payload.kind, "scroll");
+  } finally { h.close(); }
+});
+
 test("observation polling is single-flight; refresh and chat updates preserve the editor", async () => {
   let held = null;
   const h = harness("single-flight", ({url}) => {

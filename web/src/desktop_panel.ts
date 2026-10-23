@@ -329,7 +329,7 @@ export function renderDesktopPanel(detail: TaskDetail, header = ""): string {
       <span id="desktop-video-metrics" role="status"></span>
       <div class="desktop-view-controls">
         <button type="button" id="desktop-fit" class="icon-button" title="完整适配画面" aria-label="完整适配画面">${icon("monitor")}</button>
-        <input type="range" id="desktop-zoom" min="100" max="300" step="25" value="${state.zoom * 100}" aria-label="画面放大比例">
+        <input type="range" id="desktop-zoom" min="100" max="300" step="25" value="${state.zoom * 100}" aria-label="画面放大比例，Ctrl 加滚轮以鼠标位置缩放" title="100%-300%；Ctrl 加滚轮以鼠标位置缩放">
         <output id="desktop-zoom-value">100%</output>
         <button type="button" id="desktop-fullscreen" class="icon-button" title="全屏" aria-label="全屏">${icon("expand")}</button>
       </div>
@@ -337,7 +337,7 @@ export function renderDesktopPanel(detail: TaskDetail, header = ""): string {
     <div id="task-tool-panel-body" class="desktop-body">
       <p id="desktop-error" class="desktop-error desktop-alert" role="alert" hidden></p>
       <div class="desktop-observation">
-        <div id="desktop-viewport" class="desktop-viewport"><div id="desktop-preview" class="desktop-preview" hidden>
+        <div id="desktop-viewport" class="desktop-viewport" title="Ctrl 加滚轮：以鼠标位置缩放；普通滚轮：发送到共享目标"><div id="desktop-preview" class="desktop-preview" hidden>
           <img id="desktop-image" alt="共享窗口画面" aria-label="共享画面控制区" draggable="false" tabindex="-1">
           <div id="desktop-highlight" class="desktop-highlight" hidden></div>
         </div></div>
@@ -1166,6 +1166,32 @@ function imagePoint(binding: Binding, event: MouseEvent): {x: number; y: number}
   };
 }
 
+function setZoom(binding: Binding, zoom: number, anchor?: {clientX: number; clientY: number}): void {
+  if (!current(binding)) return;
+  const {root, state} = binding;
+  const viewport = root.querySelector<HTMLElement>("#desktop-viewport");
+  const image = root.querySelector<HTMLImageElement>("#desktop-image");
+  if (!viewport) return;
+  const viewportBounds = viewport.getBoundingClientRect();
+  const before = image?.getBoundingClientRect();
+  const clientX = anchor?.clientX ?? viewportBounds.left + viewport.clientWidth / 2;
+  const clientY = anchor?.clientY ?? viewportBounds.top + viewport.clientHeight / 2;
+  const ratioX = before && before.width > 0
+    ? Math.max(0, Math.min(1, (clientX - before.left) / before.width)) : .5;
+  const ratioY = before && before.height > 0
+    ? Math.max(0, Math.min(1, (clientY - before.top) / before.height)) : .5;
+  cancelGesture(binding);
+  pauseObservation(binding);
+  state.zoom = Number.isFinite(zoom) ? Math.max(1, Math.min(3, zoom)) : 1;
+  layoutPreview(binding);
+  const after = image?.getBoundingClientRect();
+  if (before && after && before.width > 0 && before.height > 0 && after.width > 0 && after.height > 0) {
+    viewport.scrollLeft += after.left + after.width * ratioX - clientX;
+    viewport.scrollTop += after.top + after.height * ratioY - clientY;
+  }
+  schedule(binding);
+}
+
 function keyboardCommand(event: KeyboardEvent): {kind: "text" | "key"; fields: Record<string, unknown>} | null {
   if (event.isComposing || ["Control", "Alt", "Shift", "Meta", "Dead", "Unidentified"].includes(event.key)) return null;
   if (!event.ctrlKey && !event.altKey && !event.metaKey && [...event.key].length === 1) {
@@ -1243,6 +1269,13 @@ function bindInput(binding: Binding): void {
     if (foreground(state) && inputAllowed(state, "click")) event.preventDefault();
   });
   listen(binding, image, "wheel", event => {
+    if (event.ctrlKey || event.metaKey) {
+      if (!event.deltaY) return;
+      event.preventDefault();
+      const direction = event.deltaY < 0 ? 1 : -1;
+      setZoom(binding, Math.round(state.zoom * 4 + direction) / 4, {clientX: event.clientX, clientY: event.clientY});
+      return;
+    }
     if (document.activeElement !== image || !inputAllowed(state, "scroll")) return;
     event.preventDefault();
     const point = imagePoint(binding, event);
@@ -1423,16 +1456,8 @@ export function bindDesktopPanel(detail: TaskDetail, notify: Notice): void {
     observer?.disconnect();
     if (document.fullscreenElement === root) void document.exitFullscreen().catch(() => {});
   };
-  const setZoom = (zoom: number) => {
-    cancelGesture(binding);
-    pauseObservation(binding);
-    state.zoom = Number.isFinite(zoom) ? Math.max(1, Math.min(3, zoom)) : 1;
-    viewport.scrollTop = viewport.scrollLeft = 0;
-    layout();
-    schedule(binding);
-  };
-  listen(binding, root.querySelector("#desktop-fit"), "click", () => setZoom(1));
-  listen(binding, root.querySelector("#desktop-zoom"), "input", event => setZoom(Number((event.target as HTMLInputElement).value) / 100));
+  listen(binding, root.querySelector("#desktop-fit"), "click", () => setZoom(binding, 1));
+  listen(binding, root.querySelector("#desktop-zoom"), "input", event => setZoom(binding, Number((event.target as HTMLInputElement).value) / 100));
   listen(binding, root.querySelector("#desktop-fullscreen"), "click", async () => {
     cancelGesture(binding);
     try {
