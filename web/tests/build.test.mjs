@@ -1483,6 +1483,7 @@ test("conversation renders agent config, channel outreach, and turn duration car
     summary: "AHA 已处理并选择不回复",
     payload: {
       status_card: true, message_status: "not_replied", status_reason: "reply_decision_end",
+      status_reason_text: "这是群聊里的玩笑，没有需要处理的请求 <script>alert(1)</script>",
       inbound_receipt_id: "channel_inbox_2", message: "收到，本轮无需继续",
       channel: {display_name: "团队飞书", endpoint_kind: "group_digital_human"},
       actor: {display_name: "联调机器人", is_bot: true},
@@ -1508,7 +1509,8 @@ test("conversation renders agent config, channel outreach, and turn duration car
   assert.match(html, /已回复/);
   assert.match(html, /aha-channel-status-card/);
   assert.doesNotMatch(html, /AHA 渠道状态/);
-  assert.match(html, /Agent 选择结束机器人对话/);
+  assert.match(html, /这是群聊里的玩笑，没有需要处理的请求 &lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+  assert.doesNotMatch(html, /没有需要处理的请求 <script>/);
   assert.match(html, /无需回复/);
   assert.match(html, /agent-routed-message/);
   assert.doesNotMatch(html, /接口字段需要确认 <script>/);

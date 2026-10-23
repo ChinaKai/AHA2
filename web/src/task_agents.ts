@@ -307,17 +307,18 @@ function renderChannelRouteCard(item: ConversationItem): string {
   if (payload.status_card === true) {
     const messageStatus = String(payload.message_status || "");
     const reason = String(payload.status_reason || "");
+    const reasonText = String(payload.status_reason_text || "");
     const deliveryState = String(payload.delivery_state || "");
     const status = messageStatus === "replied" ? (deliveryState === "delivered" ? "已回复" : "回复已排队") :
       messageStatus === "pending_reply" ? "等待回复" : messageStatus === "not_replied" ? "无需回复" :
         messageStatus === "failed" ? "处理失败" : messageStatus === "interrupted" ? "已中断" : "已处理";
-    const detail = reason === "reply_decision_end" ? "Agent 选择结束机器人对话" :
+    const detail = reasonText || (reason === "reply_decision_end" ? "Agent 明确选择不回复" :
       reason === "reply_decision_continue" ? "等待渠道回复生成" :
         reason === "no_channel_reply" ? "处理完成，未产生回复内容" :
           reason === "bot_dialogue_max_turns" ? "达到最大连续机器人轮数" :
             reason === "turn_failed" ? "本轮处理失败" :
               reason === "turn_interrupted" ? "本轮处理已中断" :
-                messageStatus === "replied" ? "渠道回复已生成" : "渠道消息处理结果";
+                messageStatus === "replied" ? "渠道回复已生成" : "渠道消息处理结果");
     const who = String((payload.actor as Record<string, unknown> | undefined)?.display_name || "渠道参与者");
     const replyMessage = String(payload.reply_message || (messageStatus === "replied" ? payload.message : "") || "");
     const inboundMessage = String(payload.inbound_message || (messageStatus !== "replied" ? payload.message : "") || "");

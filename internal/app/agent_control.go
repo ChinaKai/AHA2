@@ -210,9 +210,19 @@ func (s *Service) AgentGlobalSkillAllowed(ctx context.Context, call AgentCallCon
 	return true
 }
 
-func (s *Service) SetAgentChannelReplyDecision(ctx context.Context, claims agentapi.Claims, decision string) error {
+func (s *Service) SetAgentChannelReplyDecision(ctx context.Context, claims agentapi.Claims, decision, inboundReceiptID, reason string) error {
 	if decision != "continue" && decision != "end" {
 		return fmt.Errorf("channel reply decision must be continue or end")
+	}
+	inboundReceiptID = strings.TrimSpace(inboundReceiptID)
+	reason = strings.TrimSpace(reason)
+	if decision == "end" {
+		if inboundReceiptID == "" {
+			return fmt.Errorf("inbound_receipt_id is required when ending a channel reply")
+		}
+		if reason == "" || len([]rune(reason)) > 300 {
+			return fmt.Errorf("reason must contain 1 to 300 characters when ending a channel reply")
+		}
 	}
 	call, err := s.AgentCallContext(ctx, claims, true)
 	if err != nil {
@@ -222,24 +232,33 @@ func (s *Service) SetAgentChannelReplyDecision(ctx context.Context, claims agent
 	if err != nil {
 		return ErrAgentCallForbidden
 	}
-	if strings.TrimSpace(fmt.Sprint(channelContext["endpoint"])) != domain.ChannelEndpointGroupDigitalHuman {
+	if strings.TrimSpace(fmt.Sprint(channelContext["endpoint"])) != domain.ChannelEndpointGroupDigitalHuman ||
+		channelRouteMode(channelContext) != "task_route" {
 		return ErrAgentCallForbidden
 	}
-	actor, _ := channelContext["actor"].(map[string]any)
-	isBot, _ := actor["is_bot"].(bool)
-	if !isBot {
-		return ErrAgentCallForbidden
+	if inboundReceiptID != "" {
+		delivered, err := s.store.ChannelReceiptDeliveredToTurn(
+			ctx, claims.TaskID, call.Turn.InboxBatchID, claims.TurnID, inboundReceiptID,
+		)
+		if err != nil {
+			return err
+		}
+		if !delivered {
+			return fmt.Errorf("inbound_receipt_id does not belong to this Turn")
+		}
 	}
 	if err := s.store.SetTurnChannelReplyDecision(ctx, claims.TurnID, claims.TaskID, claims.AgentID, decision); err != nil {
 		return err
 	}
 	terminalState := "decided_continue"
-	reason := "reply_decision_continue"
+	reasonCode := "reply_decision_continue"
+	reasonText := ""
 	if decision == "end" {
-		terminalState, reason = "decided_end", "reply_decision_end"
+		terminalState, reasonCode, reasonText = "decided_end", "reply_decision_end", reason
 	}
-	s.SyncAgentChannelMessageStatuses(ctx, claims.TaskID, claims.TurnID, "", terminalState, reason)
-	return nil
+	return s.SyncAgentChannelMessageStatuses(
+		ctx, claims.TaskID, claims.TurnID, inboundReceiptID, terminalState, reasonCode, reasonText,
+	)
 }
 
 func (s *Service) UpdateAgentMemory(ctx context.Context, claims agentapi.Claims, patch MemoryPatch) (domain.TaskMemory, error) {
@@ -328,16 +347,17 @@ func (s *Service) PublishAgentChannelReply(ctx context.Context, taskID, turnID, 
 	})
 }
 
-func (s *Service) SyncAgentChannelMessageStatuses(ctx context.Context, taskID, turnID, receiptID, terminalState, reason string) {
-	items, err := s.store.ReconcileChannelMessageStatuses(ctx, taskID, turnID, receiptID, terminalState, reason, s.now().UTC())
+func (s *Service) SyncAgentChannelMessageStatuses(ctx context.Context, taskID, turnID, receiptID, terminalState, reason, reasonText string) error {
+	items, err := s.store.ReconcileChannelMessageStatuses(ctx, taskID, turnID, receiptID, terminalState, reason, reasonText, s.now().UTC())
 	if err != nil {
-		return
+		return err
 	}
 	for _, item := range items {
 		s.emit(ctx, taskID, "conversation", item.ID, "agent_channel_status", map[string]any{
 			"turn_id": turnID, "receipt_id": receiptID,
 		})
 	}
+	return nil
 }
 
 func (s *Service) SubmitAgentKnowledge(ctx context.Context, claims agentapi.Claims, candidates []KnowledgeCandidate) ([]domain.KnowledgeEntry, error) {

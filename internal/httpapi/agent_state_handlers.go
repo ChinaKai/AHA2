@@ -32,9 +32,9 @@ func (s *Server) agentCapabilitiesInfo(writer http.ResponseWriter, request *http
 	}
 	if s.store != nil {
 		if channelContext, contextErr := s.store.ChannelContextForInboxBatch(request.Context(), call.Turn.InboxBatchID); contextErr == nil {
-			actor, _ := channelContext["actor"].(map[string]any)
-			isBot, _ := actor["is_bot"].(bool)
-			channelReplyDecision = strings.TrimSpace(fmt.Sprint(channelContext["endpoint"])) == domain.ChannelEndpointGroupDigitalHuman && isBot
+			route, _ := channelContext["route"].(map[string]any)
+			channelReplyDecision = strings.TrimSpace(fmt.Sprint(channelContext["endpoint"])) == domain.ChannelEndpointGroupDigitalHuman &&
+				strings.TrimSpace(fmt.Sprint(route["mode"])) == "task_route"
 		}
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "capabilities": map[string]bool{
@@ -182,18 +182,27 @@ func (s *Server) waitAgentInbox(writer http.ResponseWriter, request *http.Reques
 func (s *Server) setAgentChannelReplyDecision(writer http.ResponseWriter, request *http.Request) {
 	claims, _ := agentClaimsFromContext(request.Context())
 	var payload struct {
-		Decision string `json:"decision"`
+		Decision         string `json:"decision"`
+		InboundReceiptID string `json:"inbound_receipt_id"`
+		Reason           string `json:"reason"`
 	}
 	if err := decodeJSON(request, &payload); err != nil {
 		writeErrorDetail(writer, http.StatusBadRequest, "invalid_json", err.Error())
 		return
 	}
-	if err := s.app.SetAgentChannelReplyDecision(request.Context(), claims, strings.TrimSpace(payload.Decision)); err != nil {
+	if err := s.app.SetAgentChannelReplyDecision(
+		request.Context(), claims, strings.TrimSpace(payload.Decision),
+		strings.TrimSpace(payload.InboundReceiptID), strings.TrimSpace(payload.Reason),
+	); err != nil {
 		writeAgentControlError(writer, err)
 		return
 	}
-	s.audit(request, "agent.channel.reply_decision", "turn", claims.TurnID, map[string]any{"decision": payload.Decision})
-	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "decision": payload.Decision})
+	s.audit(request, "agent.channel.reply_decision", "turn", claims.TurnID, map[string]any{
+		"decision": payload.Decision, "reason_chars": len([]rune(strings.TrimSpace(payload.Reason))),
+	})
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"ok": true, "decision": payload.Decision, "inbound_receipt_id": payload.InboundReceiptID,
+	})
 }
 
 func (s *Server) agentKnowledge(writer http.ResponseWriter, request *http.Request) {

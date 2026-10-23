@@ -62,8 +62,10 @@ func TestGroupIntentPolicyReachesQAAndIntegrationRoutes(t *testing.T) {
 				"In a task-linked group (`task_route`)",
 				"is not a blanket request to edit, build, deploy, restart",
 				"must not expand the task or trigger blocker outreach",
+				"deliberately needs no channel reply",
+				"message receipt and a concise reason",
 				"Apply the same intent checks to bot messages",
-				"do not invent a human-chat silence",
+				"Never encode this decision as visible channel text",
 				"authorization is always enforced by the server",
 			} {
 				if required == "authorization is always enforced by the server" && tc.mode == "task_route" {
@@ -131,7 +133,11 @@ func TestGroupIntentPolicyDoesNotChangeWebOrOverrideOwnerCustomTemplates(t *test
 func TestDefaultGroupIntentTemplateVersionsAndChatBoundaries(t *testing.T) {
 	for _, id := range []string{"identity.channel-digital-human", "channel.external-channel"} {
 		template, ok := builtinTemplate(id)
-		if !ok || template.Version < 2 {
+		minimumVersion := 2
+		if id == "channel.external-channel" {
+			minimumVersion = 3
+		}
+		if !ok || template.Version < minimumVersion {
 			t.Fatalf("new group-intent template was not versioned: %s", id)
 		}
 	}
@@ -143,6 +149,7 @@ func TestDefaultGroupIntentTemplateVersionsAndChatBoundaries(t *testing.T) {
 		"In group conversations", "existing role, scope and confirmation checks",
 		"Do not expose raw IDs",
 		"verified bot", "receipt-bound channel reply", "reply-decision",
+		"message receipt and a concise reason",
 	} {
 		if !strings.Contains(string(external), required) {
 			t.Errorf("lost external-channel boundary: %s", required)

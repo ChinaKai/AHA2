@@ -182,7 +182,7 @@ func TestAgentChannelReplyIsReceiptBoundAndIdempotent(t *testing.T) {
 		t.Fatalf("reply card route=%q kind=%q summary=%q payload=%#v", cardRouteKind, cardKind, cardSummary, cardPayload)
 	}
 	statuses, err := database.ReconcileChannelMessageStatuses(
-		ctx, task.ID, turn.ID, receiptID, "replied", "", now.Add(time.Second),
+		ctx, task.ID, turn.ID, receiptID, "replied", "", "", now.Add(time.Second),
 	)
 	if err != nil || len(statuses) != 1 || statuses[0].ID != itemID {
 		t.Fatalf("merged reply statuses=%#v err=%v", statuses, err)
@@ -262,7 +262,7 @@ func TestAgentChannelReplyIsReceiptBoundAndIdempotent(t *testing.T) {
 		t.Fatalf("bot reply decision=%q err=%v", replyDecision, err)
 	}
 	statuses, err = database.ReconcileChannelMessageStatuses(
-		ctx, task.ID, turn.ID, botReceiptID, "replied", "", now.Add(2*time.Second),
+		ctx, task.ID, turn.ID, botReceiptID, "replied", "", "", now.Add(2*time.Second),
 	)
 	if err != nil || len(statuses) != 1 || statuses[0].Payload["message_status"] != "replied" ||
 		statuses[0].Payload["delivery_state"] != "pending" {
@@ -277,6 +277,65 @@ func TestAgentChannelReplyIsReceiptBoundAndIdempotent(t *testing.T) {
 		ctx, task.ID, turn.ID, "bot-reply-after-end", botReceiptID, "不应发送", nil, now.Add(2*time.Second),
 	); err == nil || !strings.Contains(err.Error(), "end decision") {
 		t.Fatalf("reply after bot dialogue end err=%v", err)
+	}
+
+	silentReceiptID := domain.NewID("channel_inbox")
+	silentContext := make(map[string]any, len(channelContext))
+	for key, value := range channelContext {
+		silentContext[key] = value
+	}
+	silentContext["inbound_receipt_id"] = silentReceiptID
+	silentPayloadJSON := encodeJSON(map[string]any{
+		"channel_receipt_id": silentReceiptID,
+		"channel_context":    silentContext,
+	})
+	if _, err := database.db.ExecContext(ctx, `
+		INSERT INTO channel_inbox_dedup(
+			id,instance_id,external_event_id,event_type,payload_digest,normalized_payload_json,
+			state,lease_id,lease_until,conversation_id,aha_message_id,outcome,
+			occurred_at,received_at,processed_at
+		) VALUES(?,?,?,?,?,?, 'processed','','',?,'','delivered_to_task',?,?,?)`,
+		silentReceiptID, instance.ID, "silent-event", "message", "silent-digest", `{"mentioned_bot":true}`,
+		conversation.ID, timeString(now.Add(2*time.Second)), timeString(now.Add(2*time.Second)), timeString(now.Add(2*time.Second)),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.db.ExecContext(ctx, `
+		INSERT INTO agent_inbox(
+			id,task_id,round_id,target_agent_id,source_agent_id,source_kind,source_turn_id,
+			message_id,content,payload_json,status,batch_id,created_at,claimed_at,processed_at,
+			delivered_turn_id,delivered_at
+		) VALUES(?,?,?, 'main','owner','owner_message','','',?,?, 'delivered_in_turn','',?,?,?,?,?)`,
+		domain.NewID("inbox"), task.ID, round.ID, "这只是一句玩笑", silentPayloadJSON,
+		timeString(now.Add(2*time.Second)), timeString(now.Add(2*time.Second)), "",
+		turn.ID, timeString(now.Add(2*time.Second)),
+	); err != nil {
+		t.Fatal(err)
+	}
+	delivered, err := database.ChannelReceiptDeliveredToTurn(ctx, task.ID, "", turn.ID, silentReceiptID)
+	if err != nil || !delivered {
+		t.Fatalf("silent receipt delivered=%v err=%v", delivered, err)
+	}
+	statuses, err = database.ReconcileChannelMessageStatuses(
+		ctx, task.ID, turn.ID, silentReceiptID, "decided_end", "reply_decision_end",
+		"这是群聊里的玩笑，没有需要处理的请求。", now.Add(2*time.Second),
+	)
+	if err != nil || len(statuses) != 1 ||
+		statuses[0].Payload["status_reason_text"] != "这是群聊里的玩笑，没有需要处理的请求。" {
+		t.Fatalf("dynamic no-reply status=%#v err=%v", statuses, err)
+	}
+	statuses, err = database.ReconcileChannelMessageStatuses(
+		ctx, task.ID, turn.ID, silentReceiptID, "succeeded", "", "", now.Add(3*time.Second),
+	)
+	if err != nil || len(statuses) != 1 ||
+		statuses[0].Payload["status_reason"] != "reply_decision_end" ||
+		statuses[0].Payload["status_reason_text"] != "这是群聊里的玩笑，没有需要处理的请求。" {
+		t.Fatalf("preserved dynamic no-reply status=%#v err=%v", statuses, err)
+	}
+	if _, _, _, err := database.EnqueueAgentChannelReply(
+		ctx, task.ID, turn.ID, "silent-reply-after-end", silentReceiptID, "不应发送", nil, now.Add(3*time.Second),
+	); err == nil || !strings.Contains(err.Error(), "end decision") {
+		t.Fatalf("reply after dynamic end decision err=%v", err)
 	}
 
 	if err := database.AppendChannelSourceAndProject(ctx, domain.ChannelSourceEvent{

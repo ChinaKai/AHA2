@@ -101,19 +101,20 @@ POST /api/v1/agent/channel/replies
 {"request_id":"stable-token","inbound_receipt_id":"channel_inbox_...","message":"..."}
 ```
 
-若明确结束机器人对话，则先调用：
+若明确判断某条 task-routed 消息不需要渠道回复，则先调用：
 
 ```text
 POST /api/v1/agent/channel/reply-decision
-{"decision":"end"}
+{"decision":"end","inbound_receipt_id":"channel_inbox_...","reason":"这是玩笑或确认消息，无需回复"}
 ```
 
-`end` 只保留 AHA Web，并阻止本 Turn 后续渠道外发；`reply-decision=continue`
-仍可显式设置，但普通机器人回复不再要求额外调用。服务端始终执行渠道配置的
-机器人连续对话最大轮数。
+`reason` 必须为 1 到 300 字，只在该回执对应的 AHA Web 状态卡展示，不发送到渠道。
+`end` 阻止之后回复该回执；机器人对话还会按 Turn 决策停止继续外发。
+`reply-decision=continue` 仍可显式设置，但普通回复不再要求额外调用。服务端始终
+执行渠道配置的机器人连续对话最大轮数。
 每个 task-routed 渠道回执都会在 Web 中形成一张按 receipt 去重的状态卡片，
-并随处理结果更新为回复已排队、等待回复、选择不回复、整轮无回复、失败或中断。
-真人发送者的群聊 Turn 继续沿用最终回复自动路由行为。
+并随处理结果更新为回复已排队、等待回复、选择不回复及模型给出的具体原因、
+整轮无回复、失败或中断。真人发送者与机器人发送者均可对已投递回执作此决策。
 
 群机器人候选不通过 Profile Sync 推导。当前渠道实例的自身机器人由运行时确认；其他机器人
 只有在当前群聊消息的 mention 等渠道事件中被实际观察到后，才可作为该群的联系人。渠道

@@ -15,6 +15,7 @@ import (
 var (
 	ErrChannelBotDialogueEnded    = errors.New("bot dialogue reply is blocked by an end decision")
 	ErrChannelBotDialogueMaxTurns = errors.New("bot dialogue reached its maximum turns")
+	ErrChannelReplyEnded          = errors.New("channel reply is blocked by an end decision")
 )
 
 func (s *Store) CreateChannelCapability(ctx context.Context, item domain.ChannelServiceCapability) error {
@@ -803,6 +804,21 @@ func (s *Store) EnqueueAgentChannelReply(
 			err = errors.New("channel receipt is not processed")
 		}
 		return domain.ChannelDelivery{}, "", false, err
+	}
+	var replyEnded bool
+	if err := tx.QueryRowContext(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM conversation_items
+			WHERE task_id=?
+			  AND json_extract(payload_json,'$.inbound_receipt_id')=?
+			  AND json_extract(payload_json,'$.status_reason')='reply_decision_end'
+		)`,
+		taskID, inboundReceiptID,
+	).Scan(&replyEnded); err != nil {
+		return domain.ChannelDelivery{}, "", false, err
+	}
+	if replyEnded {
+		return domain.ChannelDelivery{}, "", false, ErrChannelReplyEnded
 	}
 	if endpointKind == domain.ChannelEndpointGroupDigitalHuman {
 		state, stateErr := channelGroupReplyStateTx(ctx, tx, taskID, roundID, turnID, conversationID)

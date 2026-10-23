@@ -104,13 +104,16 @@ For an ordinary Task with an active group primary channel, Main may read selecte
 
 Action previews use `{"operation":"takeover|exit|create_task|status_change|handoff_decision","target_id":"optional","intent":{...}}`. Contact messages use `{"request_id":"stable-retry-key","purpose":"blocker","message":"...","mention_identity_link_ids":["channel_identity_..."],"attachment_ids":["attachment_..."]}`. Attachment IDs must come from this Turn's Task attachment upload API; text and native image/file deliveries are ordered and share the same idempotent request.
 
-When the current group message sender is a verified bot, an explicit
-receipt-bound `POST /api/v1/agent/channel/replies` is the `continue` signal.
-Call `POST /api/v1/agent/channel/reply-decision` with `{"decision":"end"}` when
-no further channel reply should be sent; `end` keeps the final answer in AHA Web
-and blocks a later channel reply for that Turn. The server also enforces the
-configured maximum consecutive bot turns. Do not use the ordinary channel
-message endpoint for the bot's normal reply.
+For a task-routed channel message, an explicit receipt-bound
+`POST /api/v1/agent/channel/replies` is the `continue` signal. Call
+`POST /api/v1/agent/channel/reply-decision` with
+`{"decision":"end","inbound_receipt_id":"channel_inbox_...","reason":"..."}` when
+the message deliberately needs no channel reply. The reason must contain 1 to
+300 characters and is displayed on that receipt's AHA Web status card; it is
+not sent to the channel. `end` keeps the final answer in AHA Web and blocks a
+later reply to that receipt. The server also enforces the configured maximum
+consecutive bot turns. Do not use the ordinary channel message endpoint for a
+normal channel reply.
 
 ## Knowledge and Skills
 

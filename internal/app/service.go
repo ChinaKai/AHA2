@@ -1220,7 +1220,7 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 		if turn.Status != domain.TurnSucceeded {
 			terminalState = "failed"
 		}
-		s.SyncAgentChannelMessageStatuses(context.Background(), task.ID, turn.ID, "", terminalState, "")
+		s.SyncAgentChannelMessageStatuses(context.Background(), task.ID, turn.ID, "", terminalState, "", "")
 	}
 	s.afterTurnTerminal(context.Background(), task, turn)
 }
@@ -1451,7 +1451,7 @@ func (s *Service) failTurn(ctx context.Context, turn *domain.Turn, task domain.T
 	s.recordTurnDuration(ctx, *turn)
 	s.emitTurn(ctx, *turn, "turn_failed", map[string]any{"error": cause.Error()})
 	if turn.AgentID == "main" {
-		s.SyncAgentChannelMessageStatuses(ctx, task.ID, turn.ID, "", "failed", "")
+		s.SyncAgentChannelMessageStatuses(ctx, task.ID, turn.ID, "", "failed", "", "")
 	}
 	s.afterTurnTerminal(ctx, task, *turn)
 }
@@ -1474,7 +1474,7 @@ func (s *Service) interruptTurn(ctx context.Context, turn *domain.Turn, task dom
 	s.recordTurnDuration(ctx, *turn)
 	s.emitTurn(ctx, *turn, "turn_interrupted", nil)
 	if turn.AgentID == "main" {
-		s.SyncAgentChannelMessageStatuses(ctx, task.ID, turn.ID, "", "interrupted", "")
+		s.SyncAgentChannelMessageStatuses(ctx, task.ID, turn.ID, "", "interrupted", "", "")
 	}
 	s.afterTurnTerminal(ctx, task, *turn)
 }

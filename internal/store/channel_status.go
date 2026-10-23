@@ -20,7 +20,7 @@ type channelInboundStatus struct {
 // for every channel receipt delivered to the current main Turn.
 func (s *Store) ReconcileChannelMessageStatuses(
 	ctx context.Context,
-	taskID, turnID, receiptFilter, terminalState, reason string,
+	taskID, turnID, receiptFilter, terminalState, reason, reasonText string,
 	at time.Time,
 ) ([]domain.ConversationItem, error) {
 	if taskID == "" || turnID == "" {
@@ -90,6 +90,16 @@ func (s *Store) ReconcileChannelMessageStatuses(
 		if messageStatus == "" {
 			continue
 		}
+		statusReasonText := ""
+		if messageStatus == "not_replied" && statusReason == "reply_decision_end" {
+			statusReasonText = strings.TrimSpace(reasonText)
+			if statusReasonText == "" {
+				statusReasonText, err = channelStatusReasonTextTx(ctx, tx, taskID, inbound.receiptID)
+				if err != nil {
+					return nil, err
+				}
+			}
+		}
 		actor, _ := channelContext["actor"].(map[string]any)
 		channelName := strings.TrimSpace(fmt.Sprint(channelContext["chat_display_name"]))
 		if channelName == "" || channelName == "<nil>" {
@@ -135,6 +145,7 @@ func (s *Store) ReconcileChannelMessageStatuses(
 				"status_card":        true,
 				"message_status":     messageStatus,
 				"status_reason":      statusReason,
+				"status_reason_text": statusReasonText,
 				"reply_decision":     replyDecision,
 				"is_bot_dialogue":    boolValue(actor["is_bot"]),
 				"message":            message,
@@ -176,6 +187,43 @@ func (s *Store) ReconcileChannelMessageStatuses(
 		return nil, err
 	}
 	return items, nil
+}
+
+func (s *Store) ChannelReceiptDeliveredToTurn(
+	ctx context.Context,
+	taskID, inboxBatchID, turnID, receiptID string,
+) (bool, error) {
+	if taskID == "" || receiptID == "" || (inboxBatchID == "" && turnID == "") {
+		return false, nil
+	}
+	var delivered bool
+	err := s.db.QueryRowContext(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM agent_inbox
+			WHERE task_id=? AND target_agent_id='main'
+			  AND (delivered_turn_id=? OR (?<>'' AND batch_id=?))
+			  AND json_extract(payload_json,'$.channel_receipt_id')=?
+		)`,
+		taskID, turnID, inboxBatchID, inboxBatchID, receiptID,
+	).Scan(&delivered)
+	return delivered, err
+}
+
+func channelStatusReasonTextTx(ctx context.Context, tx *sql.Tx, taskID, receiptID string) (string, error) {
+	var reasonText string
+	err := tx.QueryRowContext(ctx, `
+		SELECT COALESCE(json_extract(payload_json,'$.status_reason_text'),'')
+		FROM conversation_items
+		WHERE task_id=?
+		  AND json_extract(payload_json,'$.status_card')=1
+		  AND json_extract(payload_json,'$.inbound_receipt_id')=?
+		ORDER BY sequence DESC LIMIT 1`,
+		taskID, receiptID,
+	).Scan(&reasonText)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return strings.TrimSpace(reasonText), err
 }
 
 func channelReplyPayloadTx(ctx context.Context, tx *sql.Tx, taskID, receiptID string) (map[string]any, string, bool, error) {

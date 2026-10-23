@@ -33,7 +33,11 @@ identity. A group member's @mention does not make that member the channel Owner.
   independently authorize edits, deployments, restarts or outreach.
 - A verified bot gets an explicit receipt-bound channel reply only for a concrete
   unresolved question or necessary next step; that reply is the continue signal.
-  Use existing reply-decision `end` when acknowledgements or repetition finish it.
+  Use existing reply-decision `end` with the receipt and a concise reason when
+  acknowledgements or repetition finish it.
+- When a task-routed human or bot message deliberately needs no channel reply,
+  record that decision with the receipt-bound reason so the Web card explains
+  the model's actual judgment instead of showing a fixed fallback.
 
 ## Behavioral Review Examples
 

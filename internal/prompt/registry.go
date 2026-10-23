@@ -204,7 +204,7 @@ var builtinTemplates = []domain.PromptTemplate{
 	{ID: "identity.channel-assistant", Name: "Channel Assistant Identity", Layer: "identity", Description: "Owner 私聊渠道助手身份", Editable: true, Required: false, Version: 1},
 	{ID: "identity.channel-digital-human", Name: "Channel Digital Human Identity", Layer: "identity", Description: "受限群聊电子人身份", Editable: true, Required: false, Version: 2},
 	{ID: "channel.web", Name: "AHA Web Channel", Layer: "channel", Description: "Web 渠道消息行为", Editable: true, Required: false, Version: 1},
-	{ID: "channel.external-channel", Name: "External Channel", Layer: "channel", Description: "外部渠道消息行为", Editable: true, Required: false, Version: 2},
+	{ID: "channel.external-channel", Name: "External Channel", Layer: "channel", Description: "外部渠道消息行为", Editable: true, Required: false, Version: 3},
 	{ID: "policy.auto", Name: "Auto Collaboration", Layer: "policy", Description: "AHA 自动协作策略", Editable: true, Required: false, Version: 1},
 	{ID: "policy.single", Name: "Single Agent", Layer: "policy", Description: "单 Agent 策略", Editable: true, Required: false, Version: 1},
 	{ID: "protocol.knowledge", Name: "Knowledge Protocol", Layer: "protocol", Description: "按 index 渐进读取知识并形成反馈与修订闭环", Editable: true, Required: false, Version: 2},

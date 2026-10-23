@@ -1799,14 +1799,14 @@ func (s *Service) SendAgentChannelReply(ctx context.Context, claims agentapi.Cla
 	if err != nil {
 		reason := ""
 		switch {
-		case errors.Is(err, store.ErrChannelBotDialogueEnded):
+		case errors.Is(err, store.ErrChannelBotDialogueEnded), errors.Is(err, store.ErrChannelReplyEnded):
 			reason = "reply_decision_end"
 		case errors.Is(err, store.ErrChannelBotDialogueMaxTurns):
 			reason = "bot_dialogue_max_turns"
 		}
 		if reason != "" {
 			s.application.SyncAgentChannelMessageStatuses(
-				ctx, claims.TaskID, claims.TurnID, receiptID, "reply_rejected", reason,
+				ctx, claims.TaskID, claims.TurnID, receiptID, "reply_rejected", reason, "",
 			)
 		}
 		return delivery, err
@@ -1815,7 +1815,7 @@ func (s *Service) SendAgentChannelReply(ctx context.Context, claims agentapi.Cla
 		s.application.PublishAgentChannelReply(ctx, claims.TaskID, claims.TurnID, conversationItemID)
 	}
 	s.application.SyncAgentChannelMessageStatuses(
-		ctx, claims.TaskID, claims.TurnID, receiptID, "replied", "",
+		ctx, claims.TaskID, claims.TurnID, receiptID, "replied", "", "",
 	)
 	return delivery, nil
 }
