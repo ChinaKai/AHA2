@@ -35,7 +35,14 @@ Progress messages use:
 {"message":"concise user-facing progress","attachment_ids":[]}
 ```
 
-At tool boundaries, poll live Owner and channel messages already queued for this active Turn:
+These live-inbox checkpoints are mandatory:
+
+- After every tool result and before choosing the next action, poll the live inbox.
+- Before sending the final answer, drain it once more.
+- If a returned message changes the work, handle it before starting any unrelated action.
+- A silent timeout means no new message; continue the current work.
+
+Poll Owner and channel messages already queued for this active Turn:
 
 ```json
 {"after_cursor":0,"timeout_seconds":20}

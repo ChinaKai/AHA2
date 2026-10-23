@@ -46,6 +46,8 @@ func TestEngineRoutesTemplatesAndBuildsContextManifest(t *testing.T) {
 		t.Fatal("different templates returned the same body")
 	}
 	for _, marker := range []string{
+		"After every tool result and before choosing the next action",
+		"Before sending the final answer, drain it once more",
 		"Verified Owner stop/cancel",
 		"does not automatically replace the goal",
 		"also do something adds work",
