@@ -36,6 +36,7 @@ func TestChannelSubscriptionAllowsUpdatesOnlyForPrivateConversations(t *testing.
 	}{
 		{"assistant update", domain.ChannelEndpointAssistantDM, "conversation_host", "update", "agent_message_update", true},
 		{"routed update", domain.ChannelEndpointAssistantDM, "task_route", "update", "agent_progress", true},
+		{"routed final uses explicit reply", domain.ChannelEndpointAssistantDM, "task_route", "message", "agent_reply", false},
 		{"group final", domain.ChannelEndpointGroupDigitalHuman, "conversation_host", "message", "agent_reply", true},
 		{"group message update", domain.ChannelEndpointGroupDigitalHuman, "conversation_host", "update", "agent_message_update", false},
 		{"group progress", domain.ChannelEndpointGroupDigitalHuman, "conversation_host", "update", "agent_progress", false},

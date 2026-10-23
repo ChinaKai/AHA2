@@ -75,6 +75,13 @@ type AgentOutreachInput struct {
 	AttachmentIDs          []string `json:"attachment_ids,omitempty"`
 }
 
+type AgentChannelReplyInput struct {
+	RequestID        string   `json:"request_id"`
+	InboundReceiptID string   `json:"inbound_receipt_id"`
+	Message          string   `json:"message"`
+	AttachmentIDs    []string `json:"attachment_ids,omitempty"`
+}
+
 type KnowledgeGrantInput struct {
 	KnowledgeEntryID string `json:"knowledge_entry_id"`
 	GrantScope       string `json:"grant_scope"`
@@ -1763,6 +1770,34 @@ func (s *Service) SendAgentTaskChannelMessage(ctx context.Context, claims agenta
 	)
 	if err == nil && created && s.application != nil {
 		s.application.PublishAgentChannelOutreach(ctx, claims.TaskID, claims.TurnID, conversationItemID, len(identityIDs))
+	}
+	return delivery, err
+}
+
+func (s *Service) SendAgentChannelReply(ctx context.Context, claims agentapi.Claims, input AgentChannelReplyInput) (domain.ChannelDelivery, error) {
+	if s.application == nil {
+		return domain.ChannelDelivery{}, app.ErrAgentCallForbidden
+	}
+	if _, err := s.application.AgentCallContext(ctx, claims, true); err != nil {
+		return domain.ChannelDelivery{}, err
+	}
+	requestID := strings.TrimSpace(input.RequestID)
+	receiptID := strings.TrimSpace(input.InboundReceiptID)
+	message := strings.TrimSpace(input.Message)
+	if requestID == "" || len(requestID) > 120 || strings.ContainsAny(requestID, " \t\r\n/\\") {
+		return domain.ChannelDelivery{}, fmt.Errorf("request_id must be a stable token up to 120 characters")
+	}
+	if receiptID == "" {
+		return domain.ChannelDelivery{}, fmt.Errorf("inbound_receipt_id is required")
+	}
+	if message == "" || len([]rune(message)) > 4000 {
+		return domain.ChannelDelivery{}, fmt.Errorf("message must contain 1 to 4000 characters")
+	}
+	delivery, conversationItemID, created, err := s.store.EnqueueAgentChannelReply(
+		ctx, claims.TaskID, claims.TurnID, requestID, receiptID, message, input.AttachmentIDs, s.now().UTC(),
+	)
+	if err == nil && created {
+		s.application.PublishAgentChannelReply(ctx, claims.TaskID, claims.TurnID, conversationItemID)
 	}
 	return delivery, err
 }

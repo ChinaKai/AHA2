@@ -371,6 +371,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/agent/channel/handoffs", s.withAgentCapability(http.HandlerFunc(s.createAgentChannelHandoff)))
 	mux.Handle("GET /api/v1/agent/channel/contacts", s.withAgentCapability(http.HandlerFunc(s.agentTaskChannelContacts)))
 	mux.Handle("POST /api/v1/agent/channel/messages", s.withAgentCapability(http.HandlerFunc(s.sendAgentTaskChannelMessage)))
+	mux.Handle("POST /api/v1/agent/channel/replies", s.withAgentCapability(http.HandlerFunc(s.sendAgentChannelReply)))
 	mux.Handle("POST /api/v1/agent/tasks", s.withAgentCapability(http.HandlerFunc(s.createAgentTask)))
 	mux.Handle("GET /api/v1/agent/tasks/{task}", s.withAgentCapability(http.HandlerFunc(s.agentTaskStatus)))
 	mux.Handle("PATCH /api/v1/tasks/{id}", s.withAuth(http.HandlerFunc(s.updateTaskTitle)))

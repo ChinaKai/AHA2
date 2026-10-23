@@ -277,9 +277,17 @@ func TestTaskChannelRouteAPI(t *testing.T) {
 	response = agentRequest(t, server.URL+"/api/v1/agent/capabilities", http.MethodGet, token, nil)
 	var capabilityPayload map[string]any
 	decodeResponse(t, response, &capabilityPayload)
-	if response.StatusCode != http.StatusOK || capabilityPayload["capabilities"].(map[string]any)["channel_outreach"] != true {
+	capabilityFlags := capabilityPayload["capabilities"].(map[string]any)
+	if response.StatusCode != http.StatusOK || capabilityFlags["channel_outreach"] != true || capabilityFlags["channel_reply"] != true {
 		t.Fatalf("channel outreach capability status=%d payload=%#v", response.StatusCode, capabilityPayload)
 	}
+	response = agentRequest(t, server.URL+"/api/v1/agent/channel/replies", http.MethodPost, token, map[string]any{
+		"request_id": "missing-receipt-probe", "inbound_receipt_id": "channel_inbox_missing", "message": "不应发送",
+	})
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("missing channel reply receipt status=%d", response.StatusCode)
+	}
+	response.Body.Close()
 	response = agentRequest(t, server.URL+"/api/v1/agent/channel/contacts", http.MethodGet, token, nil)
 	rawContacts := readBody(t, response)
 	if response.StatusCode != http.StatusOK || strings.Contains(rawContacts, "provider-user-zhang") {

@@ -113,6 +113,28 @@ func (s *Server) sendAgentTaskChannelMessage(writer http.ResponseWriter, request
 	writeJSON(writer, http.StatusCreated, map[string]any{"ok": true, "delivery": delivery})
 }
 
+func (s *Server) sendAgentChannelReply(writer http.ResponseWriter, request *http.Request) {
+	if s.channels == nil {
+		writeError(writer, http.StatusForbidden, "channel_reply_unavailable")
+		return
+	}
+	var payload channel.AgentChannelReplyInput
+	if err := decodeJSON(request, &payload); err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_json")
+		return
+	}
+	claims, _ := agentClaimsFromContext(request.Context())
+	delivery, err := s.channels.SendAgentChannelReply(request.Context(), claims, payload)
+	if err != nil {
+		writeAgentChannelError(writer, err)
+		return
+	}
+	s.audit(request, "agent.channel.reply", "task", claims.TaskID, map[string]any{
+		"delivery_id": delivery.ID, "receipt_id": payload.InboundReceiptID,
+	})
+	writeJSON(writer, http.StatusCreated, map[string]any{"ok": true, "delivery": delivery})
+}
+
 func writeAgentChannelError(writer http.ResponseWriter, err error) {
 	if errors.Is(err, app.ErrAgentCallForbidden) || errors.Is(err, app.ErrAgentTurnInactive) {
 		writeError(writer, http.StatusForbidden, "channel_operation_forbidden")

@@ -313,6 +313,12 @@ func (s *Service) PublishAgentChannelOutreach(ctx context.Context, taskID, turnI
 	})
 }
 
+func (s *Service) PublishAgentChannelReply(ctx context.Context, taskID, turnID, conversationItemID string) {
+	s.emit(ctx, taskID, "conversation", conversationItemID, "agent_channel_reply", map[string]any{
+		"turn_id": turnID, "conversation_item_id": conversationItemID,
+	})
+}
+
 func (s *Service) SubmitAgentKnowledge(ctx context.Context, claims agentapi.Claims, candidates []KnowledgeCandidate) ([]domain.KnowledgeEntry, error) {
 	items, _, err := s.SubmitAgentKnowledgeProposals(ctx, claims, candidates)
 	return items, err

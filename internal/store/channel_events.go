@@ -58,6 +58,12 @@ func (s *Store) AppendChannelSourceAndProject(ctx context.Context, source domain
 		if !channelSubscriptionAllows(item.endpointKind, item.kind, source.EventClass, source.EventType) {
 			continue
 		}
+		if item.kind == "task_route" && source.EventType == "agent_reply" {
+			// Task-routed channels use an explicit receipt-bound reply API.
+			// The Main Turn result belongs to the Web conversation and must not
+			// be mirrored into whichever channel happened to share the Turn.
+			continue
+		}
 		if item.endpointKind == domain.ChannelEndpointGroupDigitalHuman && source.EventType == "agent_reply" {
 			matches, matchErr := channelGroupReplyMatchesRoundTx(ctx, tx, source.TaskID, source.RoundID, item.conversationID)
 			if matchErr != nil {
@@ -208,6 +214,9 @@ func channelDeliveryParts(payload map[string]any) []map[string]any {
 func channelSubscriptionAllows(endpointKind, subscriptionKind, eventClass, eventType string) bool {
 	if subscriptionKind == "owner_global" {
 		return eventClass == "status"
+	}
+	if subscriptionKind == "task_route" && eventType == "agent_reply" {
+		return false
 	}
 	if endpointKind == domain.ChannelEndpointGroupDigitalHuman {
 		return eventType == "agent_reply"

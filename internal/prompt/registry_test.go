@@ -53,6 +53,9 @@ func TestEngineRoutesTemplatesAndBuildsContextManifest(t *testing.T) {
 		"also do something adds work",
 		"Channel participants are message sources, not permission grants",
 		"Do not overwrite `current_goal` mechanically",
+		"The final Main answer belongs to AHA Web and is not automatically mirrored",
+		"send a separate receipt-bound reply",
+		"Do not include Web-only artifacts",
 	} {
 		if !strings.Contains(templateBodies["resource.agent-api"], marker) {
 			t.Fatalf("agent API resource is missing live inbox intent rule %q", marker)

@@ -1001,29 +1001,15 @@ func TestInboundOwnerAndGroupScopesAreServerEnforcedAndIdempotent(t *testing.T) 
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	routedReplyFound := false
-	for attempt := 0; attempt < 20 && !routedReplyFound; attempt++ {
-		deliveries, claimErr := service.ClaimDeliveries(ctx, deliveryClaims, 20)
-		if claimErr != nil {
-			t.Fatal(claimErr)
-		}
-		if len(deliveries) == 0 {
-			time.Sleep(20 * time.Millisecond)
-			continue
-		}
-		for _, delivery := range deliveries {
-			if delivery.ConversationID == groupConversation.ID &&
-				delivery.Target["reply_message_id"] == "group-message-second-sender" &&
-				strings.Contains(delivery.Target["mention_user_ids"], "another-user") {
-				routedReplyFound = true
-			}
-			if err := service.AckDelivery(ctx, deliveryClaims, delivery.ID, delivery.LeaseID, "provider-routed-reply", ""); err != nil {
-				t.Fatal(err)
-			}
-		}
+	deliveries, err := database.ChannelDeliveries(ctx, instance.ID, 100)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !routedReplyFound {
-		t.Fatal("group routed final reply did not target and mention the requesting participant")
+	for _, delivery := range deliveries {
+		if delivery.ConversationID == groupConversation.ID &&
+			delivery.Target["reply_message_id"] == "group-message-second-sender" {
+			t.Fatalf("ordinary Main final was automatically projected into the routed group: %#v", delivery)
+		}
 	}
 	if err := service.UnbindTaskChannelRoute(ctx, owner.ID, target.ID, groupRoute.ID); err != nil {
 		t.Fatal(err)

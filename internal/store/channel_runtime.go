@@ -454,7 +454,21 @@ func (s *Store) ChannelDeliveryTarget(ctx context.Context, conversationID string
 		_ = s.db.QueryRowContext(ctx, `SELECT task_id,round_id,semantic_payload_json FROM channel_source_events WHERE sequence=?`, sourceEventSequence).Scan(&taskID, &roundID, &sourcePayloadJSON)
 	}
 	sourcePayload := decodeJSON(sourcePayloadJSON, map[string]any{})
-	if taskID != "" && roundID != "" {
+	replyReceiptID := strings.TrimSpace(fmt.Sprint(sourcePayload["reply_to_receipt_id"]))
+	if replyReceiptID != "" && replyReceiptID != "<nil>" {
+		var normalizedPayloadJSON string
+		if err := s.db.QueryRowContext(ctx, `
+			SELECT normalized_payload_json FROM channel_inbox_dedup
+			WHERE id=? AND conversation_id=? AND state='processed'`,
+			replyReceiptID, conversationID,
+		).Scan(&normalizedPayloadJSON); err != nil {
+			return nil, err
+		}
+		normalizedPayload := decodeJSON(normalizedPayloadJSON, map[string]any{})
+		if messageID := strings.TrimSpace(fmt.Sprint(normalizedPayload["external_message_id"])); messageID != "" && messageID != "<nil>" {
+			target["reply_message_id"] = messageID
+		}
+	} else if taskID != "" && roundID != "" {
 		rows, err := s.db.QueryContext(ctx, `SELECT payload_json FROM conversation_items WHERE task_id=? AND round_id=? AND kind='user_message' ORDER BY sequence`, taskID, roundID)
 		if err == nil {
 			payloads := []string{}
@@ -698,6 +712,218 @@ func (s *Store) EnqueueTaskChannelOutreach(ctx context.Context, taskID, turnID, 
 		return domain.ChannelDelivery{}, "", false, err
 	}
 	item, err := scanChannelDelivery(tx.QueryRowContext(ctx, `SELECT `+channelDeliveryColumns+` FROM channel_delivery_outbox WHERE id=?`, deliveryID))
+	if err != nil {
+		return domain.ChannelDelivery{}, "", false, err
+	}
+	return item, conversationItemID, true, tx.Commit()
+}
+
+func (s *Store) EnqueueAgentChannelReply(
+	ctx context.Context,
+	taskID, turnID, requestID, inboundReceiptID, message string,
+	attachmentIDs []string,
+	at time.Time,
+) (domain.ChannelDelivery, string, bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return domain.ChannelDelivery{}, "", false, err
+	}
+	defer tx.Rollback()
+
+	var roundID, turnInboxBatchID string
+	if err := tx.QueryRowContext(ctx, `
+		SELECT round_id,inbox_batch_id FROM turns
+		WHERE id=? AND task_id=? AND status IN ('starting','running')`,
+		turnID, taskID,
+	).Scan(&roundID, &turnInboxBatchID); err != nil {
+		return domain.ChannelDelivery{}, "", false, err
+	}
+	var inboxStatus, inboxBatchID, deliveredTurnID, inboxPayloadJSON string
+	if err := tx.QueryRowContext(ctx, `
+		SELECT status,batch_id,delivered_turn_id,payload_json FROM agent_inbox
+		WHERE task_id=? AND target_agent_id='main'
+		  AND json_extract(payload_json,'$.channel_receipt_id')=?
+		ORDER BY sequence DESC LIMIT 1`,
+		taskID, inboundReceiptID,
+	).Scan(&inboxStatus, &inboxBatchID, &deliveredTurnID, &inboxPayloadJSON); err != nil {
+		return domain.ChannelDelivery{}, "", false, err
+	}
+	authorized := inboxStatus == "delivered_in_turn" && deliveredTurnID == turnID ||
+		inboxStatus == "claimed" && inboxBatchID == turnInboxBatchID
+	if !authorized {
+		return domain.ChannelDelivery{}, "", false, errors.New("channel receipt is not owned by this Turn")
+	}
+	inboxPayload := decodeJSON(inboxPayloadJSON, map[string]any{})
+	channelContext, _ := inboxPayload["channel_context"].(map[string]any)
+	routeContext, _ := channelContext["route"].(map[string]any)
+	if strings.TrimSpace(fmt.Sprint(routeContext["mode"])) != "task_route" {
+		return domain.ChannelDelivery{}, "", false, errors.New("channel receipt is not routed to this Task")
+	}
+	conversationID := strings.TrimSpace(fmt.Sprint(channelContext["conversation_id"]))
+	instanceID := strings.TrimSpace(fmt.Sprint(channelContext["instance_id"]))
+	actor, _ := channelContext["actor"].(map[string]any)
+	actorID := strings.TrimSpace(fmt.Sprint(actor["identity_link_id"]))
+	actorName := strings.TrimSpace(fmt.Sprint(actor["display_name"]))
+	actorIsBot, _ := actor["is_bot"].(bool)
+
+	route, err := scanChannelTaskRoute(tx.QueryRowContext(ctx, `
+		SELECT id,instance_id,conversation_id,target_task_id,state,revision,pending_action_id,activated_at,exited_at,exit_reason
+		FROM channel_task_routes
+		WHERE target_task_id=? AND conversation_id=? AND instance_id=? AND state='active'`,
+		taskID, conversationID, instanceID,
+	))
+	if err != nil {
+		return domain.ChannelDelivery{}, "", false, err
+	}
+	var endpointKind, conversationStatus, conversationName, instanceStatus, instanceName string
+	if err := tx.QueryRowContext(ctx, `
+		SELECT endpoint.kind,conversation.status,conversation.display_name,instance.status,instance.name
+		FROM channel_conversations conversation
+		JOIN channel_endpoints endpoint ON endpoint.id=conversation.endpoint_id
+		JOIN channel_instances instance ON instance.id=conversation.instance_id
+		WHERE conversation.id=? AND conversation.instance_id=?`,
+		conversationID, instanceID,
+	).Scan(&endpointKind, &conversationStatus, &conversationName, &instanceStatus, &instanceName); err != nil {
+		return domain.ChannelDelivery{}, "", false, err
+	}
+	if conversationStatus != "active" || (instanceStatus != "ready" && instanceStatus != "degraded") {
+		return domain.ChannelDelivery{}, "", false, errors.New("task channel is unavailable")
+	}
+	var receiptState string
+	if err := tx.QueryRowContext(ctx, `
+		SELECT state FROM channel_inbox_dedup WHERE id=? AND conversation_id=?`,
+		inboundReceiptID, conversationID,
+	).Scan(&receiptState); err != nil || receiptState != "processed" {
+		if err == nil {
+			err = errors.New("channel receipt is not processed")
+		}
+		return domain.ChannelDelivery{}, "", false, err
+	}
+	if endpointKind == domain.ChannelEndpointGroupDigitalHuman {
+		state, stateErr := channelGroupReplyStateTx(ctx, tx, taskID, roundID, turnID, conversationID)
+		if stateErr != nil {
+			return domain.ChannelDelivery{}, "", false, stateErr
+		}
+		if !state.matches {
+			return domain.ChannelDelivery{}, "", false, errors.New("group receipt is not eligible for a Task reply")
+		}
+		if state.isBot && state.decision != "continue" {
+			return domain.ChannelDelivery{}, "", false, errors.New("bot dialogue is not allowed to continue")
+		}
+		if state.isBot && state.turnCount > state.maxTurns {
+			return domain.ChannelDelivery{}, "", false, errors.New("bot dialogue reached its maximum turns")
+		}
+	}
+
+	sourceKey := "agent-channel-reply:" + taskID + ":" + inboundReceiptID + ":" + requestID
+	conversationItemID := stableStoreID("conversation_channel_reply", taskID, turnID, inboundReceiptID, requestID)
+	idempotencyKey := "channel-reply:" + sourceKey
+	if item, lookupErr := scanChannelDelivery(tx.QueryRowContext(ctx, `SELECT `+channelDeliveryColumns+` FROM channel_delivery_outbox WHERE idempotency_key=?`, idempotencyKey)); lookupErr == nil {
+		return item, conversationItemID, false, tx.Commit()
+	} else if lookupErr != sql.ErrNoRows {
+		return domain.ChannelDelivery{}, "", false, lookupErr
+	}
+
+	payload := map[string]any{
+		"kind": "agent_reply", "task_id": taskID, "text": message,
+		"reply_to_receipt_id": inboundReceiptID,
+	}
+	if endpointKind == domain.ChannelEndpointGroupDigitalHuman && actorID != "" {
+		payload["mention_identity_link_ids"] = []string{actorID}
+	}
+	attachments, err := bindAttachmentsTx(ctx, tx, taskID, conversationItemID, attachmentIDs)
+	if err != nil {
+		return domain.ChannelDelivery{}, "", false, err
+	}
+	if len(attachments) > 0 {
+		payload["attachments"] = attachments
+	}
+	sourceID := domain.NewID("channel_source_event")
+	result, err := tx.ExecContext(ctx, `
+		INSERT OR IGNORE INTO channel_source_events(
+			id,source_key,source_revision,task_id,round_id,turn_id,conversation_item_id,
+			event_class,event_type,semantic_payload_json,occurred_at
+		) VALUES(?,?,1,?,?,?,?, 'message','agent_reply',?,?)`,
+		sourceID, sourceKey, taskID, roundID, turnID, conversationItemID, encodeJSON(payload), timeString(at),
+	)
+	if err != nil {
+		return domain.ChannelDelivery{}, "", false, err
+	}
+	if inserted, _ := result.RowsAffected(); inserted == 0 {
+		item, lookupErr := scanChannelDelivery(tx.QueryRowContext(ctx,
+			`SELECT `+channelDeliveryColumns+` FROM channel_delivery_outbox WHERE idempotency_key=?`, idempotencyKey,
+		))
+		if lookupErr != nil {
+			return domain.ChannelDelivery{}, "", false, lookupErr
+		}
+		return item, conversationItemID, false, tx.Commit()
+	}
+	var sourceSequence, streamSequence int64
+	if err := tx.QueryRowContext(ctx, `SELECT sequence FROM channel_source_events WHERE id=?`, sourceID).Scan(&sourceSequence); err != nil {
+		return domain.ChannelDelivery{}, "", false, err
+	}
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COALESCE(MAX(stream_sequence),0)+1
+		FROM channel_delivery_outbox WHERE conversation_id=?`, conversationID,
+	).Scan(&streamSequence); err != nil {
+		return domain.ChannelDelivery{}, "", false, err
+	}
+	var subscriptionID string
+	if err := tx.QueryRowContext(ctx, `
+		SELECT id FROM channel_subscriptions
+		WHERE route_id=? AND kind='task_route' AND state='active'`, route.ID,
+	).Scan(&subscriptionID); err != nil {
+		return domain.ChannelDelivery{}, "", false, err
+	}
+	deliveryID := ""
+	for partIndex, part := range channelDeliveryParts(payload) {
+		partID := domain.NewID("channel_delivery")
+		partKey := idempotencyKey
+		if partIndex > 0 {
+			partKey += ":attachment:" + fmt.Sprint(part["attachment_id"])
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO channel_delivery_outbox(
+				id,instance_id,conversation_id,subscription_id,source_event_sequence,
+				stream_sequence,replay_generation,replay_of_id,idempotency_key,coalesce_key,
+				payload_version,semantic_payload_json,state,attempts,first_attempt_at,
+				available_at,lease_id,lease_until,provider_message_id,last_error_code,
+				outcome_certainty,created_at,updated_at,delivered_at
+			) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			partID, instanceID, conversationID, subscriptionID, sourceSequence,
+			streamSequence+int64(partIndex), 0, nil, partKey, "", 1, encodeJSON(part),
+			"pending", 0, "", timeString(at), "", "", "", "", "", timeString(at), timeString(at), "",
+		); err != nil {
+			return domain.ChannelDelivery{}, "", false, err
+		}
+		if partIndex == 0 {
+			deliveryID = partID
+		}
+	}
+	card := normalizeConversationItem(domain.ConversationItem{
+		ID: conversationItemID, TaskID: taskID, RoundID: roundID, TurnID: turnID,
+		AgentID: "aha", StreamAgentID: "main", FromAgentID: "aha", ToAgentID: "main",
+		RouteKind: "channel_reply", Category: "update", Kind: "agent_channel_reply",
+		Summary: "AHA 已回复渠道消息",
+		Payload: map[string]any{
+			"message": message, "delivery_id": deliveryID, "delivery_state": "pending",
+			"inbound_receipt_id": inboundReceiptID,
+			"channel": map[string]any{
+				"conversation_id": conversationID, "display_name": conversationName,
+				"instance_name": instanceName, "endpoint_kind": endpointKind,
+			},
+			"recipient": map[string]any{
+				"identity_link_id": actorID, "display_name": actorName, "is_bot": actorIsBot,
+			},
+		},
+		CreatedAt: at,
+	})
+	if _, err := insertConversationItem(ctx, tx, card); err != nil {
+		return domain.ChannelDelivery{}, "", false, err
+	}
+	item, err := scanChannelDelivery(tx.QueryRowContext(ctx,
+		`SELECT `+channelDeliveryColumns+` FROM channel_delivery_outbox WHERE id=?`, deliveryID,
+	))
 	if err != nil {
 		return domain.ChannelDelivery{}, "", false, err
 	}

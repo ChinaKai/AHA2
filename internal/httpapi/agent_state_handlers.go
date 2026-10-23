@@ -23,8 +23,10 @@ func (s *Server) agentCapabilitiesInfo(writer http.ResponseWriter, request *http
 	knowledgePublish := s.app.AgentKnowledgePublishAllowed(request.Context(), call)
 	boundKnowledgeContribute, _ := s.store.HasContributingKnowledgeBinding(request.Context(), call.Project.ID)
 	channelOutreach := false
+	channelReply := false
 	channelReplyDecision := false
 	if main && s.channels != nil {
+		channelReply = true
 		_, _, channelErr := s.channels.AgentTaskChannelContacts(request.Context(), claims)
 		channelOutreach = channelErr == nil
 	}
@@ -45,7 +47,7 @@ func (s *Server) agentCapabilitiesInfo(writer http.ResponseWriter, request *http
 		"task_create":         main && call.Task.AgentCapabilities["task_create"],
 		"clone_hardware":      main && call.Task.AgentCapabilities["clone_hardware"],
 		"collaboration":       main && call.Task.CollaborationMode == "auto",
-		"channel_outreach":    channelOutreach, "channel_reply_decision": channelReplyDecision,
+		"channel_outreach":    channelOutreach, "channel_reply": channelReply, "channel_reply_decision": channelReplyDecision,
 		"hardware": true, "managed_process": true,
 		"desktop": main && s.desktop.Status(call.Task.ID).Supported,
 	}})
