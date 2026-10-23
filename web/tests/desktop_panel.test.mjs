@@ -577,7 +577,7 @@ test("quarantined target remains observable but advertises no actions", async ()
 const foregroundStatus = value => ({supported: true, foreground_supported: true, shared_control_supported: true, session: value});
 const foregroundObservation = (overrides = {}) => observation({
   elements: [], surface: "geometry-1", image: "aGVsbG8=",
-  input_actions: ["click", "double_click", "drag", "scroll", "text", "key", "focus"], ...overrides,
+  input_actions: ["click", "double_click", "move", "drag", "scroll", "text", "key", "focus"], ...overrides,
 });
 const foregroundSession = (overrides = {}) => session({mode: "foreground", ...overrides});
 
@@ -801,14 +801,18 @@ test("floating virtual mouse drags, expands and sends button and wheel input", a
     const mouse = h.panel.querySelector("#desktop-mouse");
     const toggle = h.panel.querySelector("#desktop-mouse-ball");
     const wheel = h.panel.querySelector("#desktop-mouse-panel");
+    const pointerPad = h.panel.querySelector("#desktop-pointer-pad");
+    const pointerMarker = h.panel.querySelector("#desktop-pointer");
     const pad = h.panel.querySelector("#desktop-wheel-pad");
     const thumb = h.panel.querySelector("#desktop-wheel-pad .desktop-wheel-grip");
     const writes = () => h.calls.filter(call => call.url.endsWith("/actions"));
     assert.equal(toggle.hidden, false);
     assert.equal(wheel.hidden, true);
+    assert.equal(pointerMarker.hidden, true);
     toggle.fire("click");
     assert.equal(toggle.getAttribute("aria-expanded"), "true");
     assert.equal(wheel.hidden, false);
+    assert.equal(pointerMarker.hidden, false);
     h.panel.querySelector("#desktop-mouse-left").fire("click");
     await flush();
     assert.equal(writes().at(-1).payload.kind, "click");
@@ -827,8 +831,22 @@ test("floating virtual mouse drags, expands and sends button and wheel input", a
     pad.fire("pointerup", {pointerId: 11, clientX: 180, clientY: 90});
     await flush();
     assert.equal(writes().at(-1).payload.kind, "scroll");
-    assert.equal(writes().at(-1).payload.delta_y, 120);
+    assert.equal(writes().at(-1).payload.delta_y, 150);
     assert.equal(thumb.style.transform, "");
+    pointerPad.fire("pointerdown", {pointerId: 10, clientX: 100, clientY: 100});
+    pointerPad.fire("pointermove", {pointerId: 10, clientX: 130, clientY: 120});
+    pointerPad.fire("pointerup", {pointerId: 10, clientX: 130, clientY: 120});
+    await flush();
+    assert.equal(writes().at(-1).payload.kind, "move");
+    assert.ok(writes().at(-1).payload.x > 50);
+    assert.ok(writes().at(-1).payload.y > 50);
+    assert.equal(pointerMarker.style.left, "74%");
+    assert.equal(pointerMarker.style.top, "66%");
+    h.panel.querySelector("#desktop-mouse-left").fire("click");
+    await flush();
+    assert.equal(writes().at(-1).payload.kind, "click");
+    assert.equal(writes().at(-1).payload.x, 74);
+    assert.equal(writes().at(-1).payload.y, 66);
     toggle.fire("pointerdown", {pointerId: 12, clientX: 100, clientY: 100});
     toggle.fire("pointermove", {pointerId: 12, clientX: 70, clientY: 120});
     toggle.fire("pointerup", {pointerId: 12, clientX: 70, clientY: 120});
@@ -839,6 +857,24 @@ test("floating virtual mouse drags, expands and sends button and wheel input", a
     toggle.fire("click");
     assert.equal(toggle.getAttribute("aria-expanded"), "false");
     assert.equal(wheel.hidden, true);
+  } finally { h.close(); }
+});
+
+test("host cursor observation drives the visible virtual pointer", async () => {
+  const h = harness("cursor-observation", ({url}) => {
+    if (url.endsWith("/windows")) return {windows: []};
+    if (url.includes("/observation?")) return {
+      observation: foregroundObservation({cursor: {x: 25, y: 35, visible: true}}),
+    };
+    return {status: foregroundStatus(foregroundSession())};
+  });
+  try {
+    h.bind();
+    await flush();
+    const pointer = h.panel.querySelector("#desktop-pointer");
+    assert.equal(pointer.hidden, false);
+    assert.equal(pointer.style.left, "25%");
+    assert.equal(pointer.style.top, "35%");
   } finally { h.close(); }
 });
 

@@ -64,21 +64,28 @@ type Element struct {
 }
 
 type Observation struct {
-	ID            string    `json:"id"`
-	SessionID     string    `json:"session_id"`
-	Revision      uint64    `json:"revision"`
-	Window        Window    `json:"window"`
-	Elements      []Element `json:"elements"`
-	Image         string    `json:"image"` // PNG bytes encoded as base64, never a URL.
-	Width         int       `json:"width"`
-	Height        int       `json:"height"`
-	CaptureError  string    `json:"capture_error,omitempty"`
-	ControlError  string    `json:"control_error,omitempty"`
-	InputActions  []string  `json:"input_actions,omitempty"`
-	Surface       string    `json:"surface,omitempty"` // opaque, checked again before foreground input
-	Mime          string    `json:"mime,omitempty"`
-	PreviewWidth  int       `json:"preview_width,omitempty"`
-	PreviewHeight int       `json:"preview_height,omitempty"`
+	ID            string          `json:"id"`
+	SessionID     string          `json:"session_id"`
+	Revision      uint64          `json:"revision"`
+	Window        Window          `json:"window"`
+	Elements      []Element       `json:"elements"`
+	Image         string          `json:"image"` // PNG bytes encoded as base64, never a URL.
+	Width         int             `json:"width"`
+	Height        int             `json:"height"`
+	CaptureError  string          `json:"capture_error,omitempty"`
+	ControlError  string          `json:"control_error,omitempty"`
+	InputActions  []string        `json:"input_actions,omitempty"`
+	Cursor        *CursorPosition `json:"cursor,omitempty"`
+	Surface       string          `json:"surface,omitempty"` // opaque, checked again before foreground input
+	Mime          string          `json:"mime,omitempty"`
+	PreviewWidth  int             `json:"preview_width,omitempty"`
+	PreviewHeight int             `json:"preview_height,omitempty"`
+}
+
+type CursorPosition struct {
+	X       int  `json:"x"`
+	Y       int  `json:"y"`
+	Visible bool `json:"visible"`
 }
 
 type Action struct {

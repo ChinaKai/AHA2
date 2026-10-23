@@ -71,7 +71,7 @@ func validateNativeForegroundAction(a Action, width, height int) error {
 		}
 	}
 	point := func(x, y float64) bool { return x >= 0 && y >= 0 && x < float64(width) && y < float64(height) }
-	mouse := a.Kind == "click" || a.Kind == "double_click" || a.Kind == "drag" || a.Kind == "scroll"
+	mouse := a.Kind == "click" || a.Kind == "double_click" || a.Kind == "move" || a.Kind == "drag" || a.Kind == "scroll"
 	if mouse && !point(a.X, a.Y) {
 		return invalid
 	}
@@ -84,12 +84,16 @@ func validateNativeForegroundAction(a Action, width, height int) error {
 		if a.Button != "" && a.Button != "left" && a.Button != "right" && a.Button != "middle" {
 			return invalid
 		}
+	} else if a.Kind == "move" {
+		if a.Button != "" {
+			return invalid
+		}
 	} else if a.Button != "" {
 		return invalid
 	}
 	switch a.Kind {
 	case "focus":
-	case "click", "double_click":
+	case "click", "double_click", "move":
 	case "drag":
 		if !point(a.EndX, a.EndY) {
 			return invalid

@@ -3,7 +3,7 @@ import {icon} from "./icons.js";
 import type {TaskDetail} from "./types.js";
 
 type Notice = (type: "error" | "notice", message: string) => void;
-type InputKind = "click" | "double_click" | "drag" | "scroll" | "text" | "key" | "focus";
+type InputKind = "click" | "double_click" | "move" | "drag" | "scroll" | "text" | "key" | "focus";
 interface SharedWindow {
   id: string; title: string; process: string; desktop_id?: string; monitor_id?: string;
   desktop_name?: string; other_desktop?: boolean;
@@ -25,6 +25,7 @@ interface Observation {
   id: string; session_id: string; revision: number; window: SharedWindow;
   elements: SharedElement[]; image: string; width: number; height: number; capture_error?: string; control_error?: string;
   input_actions?: string[]; surface?: string;
+  cursor?: {x: number; y: number; visible: boolean};
   mime?: string; preview_width?: number; preview_height?: number;
 }
 type VideoMode = "auto" | "quality" | "bandwidth";
@@ -40,6 +41,7 @@ interface PanelState {
   actionError: string;
   videoMode: VideoMode; adaptive: AdaptiveState; transport: string; fps: number; cycleMS: number;
   zoom: number;
+  pointerX: number; pointerY: number; pointerVisible: boolean;
   targets: Targets | null; desktopID: string; monitorID: string; targetKind: TargetSelection["kind"];
   popover: "" | "targets" | "operations" | "keys";
 }
@@ -82,6 +84,17 @@ interface MouseControlDrag {
   originTop: number;
   moved: boolean;
 }
+interface PointerQueue {
+  x: number;
+  y: number;
+  timer: number;
+  dirty: boolean;
+}
+interface PointerDrag {
+  pointerID: number;
+  lastX: number;
+  lastY: number;
+}
 interface Binding {
   root: HTMLElement; state: PanelState; notify: Notice; timer: number;
   read: AbortController | null; write: AbortController | null; epoch: number;
@@ -90,6 +103,7 @@ interface Binding {
   touchPointers: Map<number, {x: number; y: number}>; touchGesture: TouchGesture | null;
   wheelQueue: WheelQueue; wheelDrag: WheelDrag | null;
   mouseOpen: boolean; mouseDrag: MouseControlDrag | null; mouseSuppressClick: boolean;
+  pointerQueue: PointerQueue; pointerDrag: PointerDrag | null; pointerLocalAt: number;
   refreshWindows: boolean;
   viewID: string; socket: WebSocket | null; socketKey: string; socketGeneration: number;
   socketReady: boolean; socketTimer: number; retries: number; retryAt: number; retryKey: string;
@@ -114,7 +128,9 @@ const touchSettleMS = 80;
 const touchScrollMin = 12;
 const wheelQueueStep = 24;
 const wheelFlushMS = 40;
-const wheelDragScale = 4;
+const wheelDragScale = 5;
+const pointerFlushMS = 50;
+const pointerMoveScale = 1.6;
 
 export function desktopPreviewSize(width: number, height: number, availableWidth: number, availableHeight: number, zoom = 1): {width: number; height: number} {
   if (![width, height, availableWidth, availableHeight, zoom].every(value => Number.isFinite(value) && value > 0)) return {width: 0, height: 0};
@@ -275,6 +291,7 @@ function stateFor(detail: TaskDetail): PanelState {
       error: "", sessionNote: "", loading: false, busy: "", denied: false,
       windowsLoaded: false, inputDraft: "", actionError: "",
       videoMode: "auto", adaptive: {level: 1, slow: 0, fast: 0}, transport: "HTTP 预览", fps: 0, cycleMS: 0, zoom: 1,
+      pointerX: -1, pointerY: -1, pointerVisible: false,
       targets: null, desktopID: "", monitorID: "", targetKind: "new-desktop", popover: "",
     };
     states.set(state.taskID, state);
@@ -386,18 +403,24 @@ export function renderDesktopPanel(detail: TaskDetail, header = ""): string {
       <div class="desktop-observation">
         <div id="desktop-viewport" class="desktop-viewport" title="移动端：单指双击为双击，双指轻点为右键，双指平行滑动为滚轮，双指捏合为缩放"><div id="desktop-preview" class="desktop-preview" hidden>
           <img id="desktop-image" alt="共享窗口画面" aria-label="共享画面控制区，移动端双指轻点为右键，双指平行滑动为滚轮，双指捏合为缩放" draggable="false" tabindex="-1">
+          <div id="desktop-pointer" class="desktop-pointer" aria-hidden="true" hidden>${icon("pointer")}</div>
           <div id="desktop-highlight" class="desktop-highlight" hidden></div>
         </div></div>
         <div id="desktop-mouse" class="desktop-mouse" hidden>
           <button type="button" id="desktop-mouse-ball" class="desktop-mouse-ball" title="虚拟鼠标" aria-label="虚拟鼠标" aria-controls="desktop-mouse-panel" aria-expanded="false">${icon("mouse")}</button>
           <div id="desktop-mouse-panel" class="desktop-mouse-panel" role="group" aria-label="虚拟鼠标" hidden>
-            <div class="desktop-mouse-buttons" role="group" aria-label="鼠标按键">
-              <button type="button" id="desktop-mouse-left" title="左键" aria-label="鼠标左键">L</button>
-              <button type="button" id="desktop-mouse-right" title="右键" aria-label="鼠标右键">R</button>
+            <div id="desktop-pointer-pad" class="desktop-pointer-pad" role="group" aria-label="拖动移动鼠标指针" title="拖动移动鼠标指针">
+              <span class="desktop-pointer-pad-mark" aria-hidden="true">${icon("pointer")}</span>
             </div>
-            <button type="button" id="desktop-wheel-up" class="icon-button" title="向上滚动" aria-label="向上滚动">${icon("chevron-up")}</button>
-            <div id="desktop-wheel-pad" class="desktop-wheel-pad" role="group" aria-label="拖动滚动画面" title="拖动以连续滚动"><span class="desktop-wheel-grip" aria-hidden="true"></span></div>
-            <button type="button" id="desktop-wheel-down" class="icon-button" title="向下滚动" aria-label="向下滚动">${icon("chevron-down")}</button>
+            <div class="desktop-mouse-lower">
+              <button type="button" id="desktop-mouse-left" class="desktop-mouse-key" title="左键" aria-label="鼠标左键">L</button>
+              <div class="desktop-wheel-stack" role="group" aria-label="鼠标滚轮">
+                <button type="button" id="desktop-wheel-up" class="icon-button" title="向上滚动" aria-label="向上滚动">${icon("chevron-up")}</button>
+                <div id="desktop-wheel-pad" class="desktop-wheel-pad" role="group" aria-label="拖动滚动画面" title="拖动以连续滚动"><span class="desktop-wheel-grip" aria-hidden="true"></span></div>
+                <button type="button" id="desktop-wheel-down" class="icon-button" title="向下滚动" aria-label="向下滚动">${icon("chevron-down")}</button>
+              </div>
+              <button type="button" id="desktop-mouse-right" class="desktop-mouse-key" title="右键" aria-label="鼠标右键">R</button>
+            </div>
           </div>
         </div>
         <p id="desktop-capture-status" class="desktop-empty desktop-capture-notice" role="status">尚无窗口画面</p>
@@ -460,6 +483,90 @@ function statusText(state: PanelState): string {
   return `共同控制 · ${session.claimed ? "Agent 已接入" : "Agent 可直接接入"} · 授权到期 ${new Date(session.expires_at).toLocaleTimeString()}`;
 }
 
+function positionPointerMarker(binding: Binding): void {
+  const {state, root} = binding;
+  const marker = root.querySelector<HTMLElement>("#desktop-pointer");
+  const observation = state.observation;
+  if (!marker) return;
+  marker.hidden = !state.pointerVisible || !observation || !(binding.imageURL || observation.image)
+    || observation.width <= 0 || observation.height <= 0;
+  if (marker.hidden || !observation) return;
+  marker.style.left = `${state.pointerX / observation.width * 100}%`;
+  marker.style.top = `${state.pointerY / observation.height * 100}%`;
+}
+
+function ensurePointer(binding: Binding): boolean {
+  const {state} = binding;
+  const observation = state.observation;
+  if (!observation || observation.width <= 0 || observation.height <= 0) return false;
+  if (!Number.isFinite(state.pointerX) || !Number.isFinite(state.pointerY) ||
+    state.pointerX < 0 || state.pointerY < 0) {
+    state.pointerX = observation.width / 2;
+    state.pointerY = observation.height / 2;
+  }
+  state.pointerX = Math.max(0, Math.min(observation.width - 1, state.pointerX));
+  state.pointerY = Math.max(0, Math.min(observation.height - 1, state.pointerY));
+  state.pointerVisible = true;
+  binding.pointerLocalAt = Date.now();
+  positionPointerMarker(binding);
+  return true;
+}
+
+function setVirtualPointer(binding: Binding, x: number, y: number): void {
+  const {state} = binding;
+  const observation = state.observation;
+  if (!observation) return;
+  state.pointerX = Math.max(0, Math.min(observation.width - 1, x));
+  state.pointerY = Math.max(0, Math.min(observation.height - 1, y));
+  state.pointerVisible = true;
+  binding.pointerLocalAt = Date.now();
+  positionPointerMarker(binding);
+}
+
+function pointerClientPoint(binding: Binding): {clientX: number; clientY: number} | null {
+  if (!ensurePointer(binding) || !binding.state.observation) return null;
+  const image = binding.root.querySelector<HTMLImageElement>("#desktop-image");
+  const bounds = image?.getBoundingClientRect();
+  if (!bounds || bounds.width <= 0 || bounds.height <= 0) return null;
+  return {
+    clientX: bounds.left + binding.state.pointerX / binding.state.observation.width * bounds.width,
+    clientY: bounds.top + binding.state.pointerY / binding.state.observation.height * bounds.height,
+  };
+}
+
+function schedulePointerMove(binding: Binding): void {
+  if (binding.pointerQueue.timer || !binding.pointerQueue.dirty) return;
+  binding.pointerQueue.timer = window.setTimeout(() => {
+    binding.pointerQueue.timer = 0;
+    flushPointerMove(binding);
+  }, pointerFlushMS);
+}
+
+function flushPointerMove(binding: Binding): void {
+  const {state, pointerQueue} = binding;
+  if (!current(binding) || !pointerQueue.dirty || !state.observation || !state.pointerVisible ||
+    !inputAllowed(state, "move")) return;
+  if (binding.write || state.busy || !actionable(state)) {
+    schedulePointerMove(binding);
+    return;
+  }
+  pointerQueue.dirty = false;
+  performInput(binding, "move", {x: pointerQueue.x, y: pointerQueue.y}, state.observation.id);
+}
+
+function queuePointerMove(binding: Binding, x: number, y: number, force = false): void {
+  setVirtualPointer(binding, x, y);
+  binding.pointerQueue.x = binding.state.pointerX;
+  binding.pointerQueue.y = binding.state.pointerY;
+  binding.pointerQueue.dirty = true;
+  if (force) {
+    window.clearTimeout(binding.pointerQueue.timer);
+    binding.pointerQueue.timer = 0;
+    flushPointerMove(binding);
+  }
+  else schedulePointerMove(binding);
+}
+
 function constrainMouseControl(binding: Binding): void {
   if (!current(binding)) return;
   const control = binding.root.querySelector<HTMLElement>("#desktop-mouse");
@@ -471,8 +578,8 @@ function constrainMouseControl(binding: Binding): void {
   if (bounds.width <= 0 || bounds.height <= 0) return;
   const ballWidth = ball.getBoundingClientRect().width || 44;
   const ballHeight = ball.getBoundingClientRect().height || 44;
-  const panelWidth = panel?.offsetWidth || 58;
-  const panelHeight = panel?.offsetHeight || 224;
+  const panelWidth = panel?.offsetWidth || 184;
+  const panelHeight = panel?.offsetHeight || 232;
   const currentLeft = Number.parseFloat(control.style.left);
   const currentTop = Number.parseFloat(control.style.top);
   const left = Math.max(8, Math.min(bounds.width - ballWidth - 8,
@@ -566,10 +673,19 @@ function updateDOM(binding: Binding): void {
   const hasImage = Boolean(observation && (binding.imageURL || (observation.image
     && ["image/png", "image/jpeg"].includes(mime) && /^[A-Za-z0-9+/=\r\n]+$/.test(observation.image)))
     && observation.width > 0 && observation.height > 0);
+  const cursorMatchesLocal = observation?.cursor && Math.hypot(
+    observation.cursor.x - state.pointerX, observation.cursor.y - state.pointerY) < 2;
+  if (observation?.cursor?.visible && !binding.pointerDrag && !binding.pointerQueue.dirty && !state.busy &&
+    (cursorMatchesLocal || Date.now() - binding.pointerLocalAt > 2000)) {
+    state.pointerX = observation.cursor.x;
+    state.pointerY = observation.cursor.y;
+    state.pointerVisible = true;
+  }
   const preview = root.querySelector<HTMLElement>("#desktop-preview")!;
   preview.hidden = !hasImage;
   const scrollReady = hasImage && actionable(state) && inputAllowed(state, "scroll");
   const clickReady = hasImage && actionable(state) && inputAllowed(state, "click");
+  const moveReady = hasImage && inputAllowed(state, "move") && (Boolean(binding.pointerDrag) || actionable(state));
   root.querySelector<HTMLElement>("#desktop-mouse")!.hidden = !hasImage;
   root.querySelector<HTMLButtonElement>("#desktop-mouse-ball")!.setAttribute("aria-expanded", String(binding.mouseOpen));
   root.querySelector<HTMLElement>("#desktop-mouse-panel")!.hidden = !binding.mouseOpen || !hasImage;
@@ -577,7 +693,9 @@ function updateDOM(binding: Binding): void {
     .forEach(button => { button.disabled = !clickReady; });
   root.querySelectorAll<HTMLButtonElement>("#desktop-wheel-up, #desktop-wheel-down")
     .forEach(button => { button.disabled = !scrollReady; });
+  root.querySelector<HTMLElement>("#desktop-pointer-pad")!.classList.toggle("disabled", !moveReady);
   constrainMouseControl(binding);
+  positionPointerMarker(binding);
   if (hasImage && observation) {
     const src = binding.imageURL || `data:${mime};base64,${observation.image}`;
     if (image.getAttribute("src") !== src) image.src = src;
@@ -1167,6 +1285,7 @@ async function mutate(binding: Binding, suffix: string, payload: object, busy: s
       state.busy = "";
       updateDOM(binding);
       if (binding.wheelQueue.pendingX || binding.wheelQueue.pendingY) scheduleWheelFlush(binding);
+      if (binding.pointerDrag && binding.pointerQueue.dirty) schedulePointerMove(binding);
       // Retain operation errors until the next scheduled status refresh.
       if (suffix === "/switch" && state.error) void poll(binding);
       else if (state.error) schedule(binding);
@@ -1264,14 +1383,6 @@ function imagePointAt(binding: Binding, clientX: number, clientY: number): {x: n
 
 function imagePoint(binding: Binding, event: MouseEvent): {x: number; y: number} | null {
   return imagePointAt(binding, event.clientX, event.clientY);
-}
-
-function surfaceCenter(binding: Binding): {clientX: number; clientY: number} {
-  const viewport = binding.root.querySelector<HTMLElement>("#desktop-viewport");
-  const bounds = viewport?.getBoundingClientRect();
-  return bounds
-    ? {clientX: bounds.left + bounds.width / 2, clientY: bounds.top + bounds.height / 2}
-    : {clientX: 0, clientY: 0};
 }
 
 function scheduleWheelFlush(binding: Binding): void {
@@ -1409,6 +1520,8 @@ function classifyTouchGesture(binding: Binding, touch: TouchGesture, settle = fa
   touch.lastScrollCenterX = geometry.centerX;
   touch.lastScrollCenterY = geometry.centerY;
   if (touch.mode === "scroll") {
+    const pointer = imagePointAt(binding, geometry.centerX, geometry.centerY);
+    if (pointer) setVirtualPointer(binding, pointer.x, pointer.y);
     queueWheel(binding, touch.initialCenterX - geometry.centerX, touch.initialCenterY - geometry.centerY,
       geometry.centerX, geometry.centerY);
   } else if (touch.mode === "pinch") {
@@ -1480,6 +1593,7 @@ function bindInput(binding: Binding): void {
     if (!actionable(state) || !["click", "double_click", "drag"].some(kind => inputAllowed(state, kind as InputKind))) return;
     const point = imagePoint(binding, event);
     if (!point || ![0, 1, 2].includes(event.button)) return;
+    setVirtualPointer(binding, point.x, point.y);
     pauseObservation(binding);
     image.focus({preventScroll: true});
     event.preventDefault();
@@ -1509,6 +1623,8 @@ function bindInput(binding: Binding): void {
       applyZoomAt(binding, touch.initialZoom * geometry.distance / touch.initialDistance,
         {clientX: geometry.centerX, clientY: geometry.centerY});
     } else if (touch.mode === "scroll") {
+      const pointer = imagePointAt(binding, geometry.centerX, geometry.centerY);
+      if (pointer) setVirtualPointer(binding, pointer.x, pointer.y);
       queueWheel(binding, touch.lastScrollCenterX - geometry.centerX, touch.lastScrollCenterY - geometry.centerY,
         geometry.centerX, geometry.centerY);
       touch.lastScrollCenterX = geometry.centerX;
@@ -1533,6 +1649,7 @@ function bindInput(binding: Binding): void {
       if (gesture.mode === "pending" && !gesture.moved && Date.now() - gesture.startedAt <= 500) {
         const point = imagePointAt(binding, gesture.initialCenterX, gesture.initialCenterY);
         if (point && actionable(state) && inputAllowed(state, "click")) {
+          setVirtualPointer(binding, point.x, point.y);
           performInput(binding, "click", {...point, button: "right"}, gesture.initialObservationID);
         }
       } else if (gesture.mode === "scroll") {
@@ -1598,6 +1715,7 @@ function bindInput(binding: Binding): void {
     event.preventDefault();
     const point = imagePoint(binding, event);
     if (!point || !actionable(state) || (!event.deltaX && !event.deltaY)) return;
+    setVirtualPointer(binding, point.x, point.y);
     const scale = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? image.clientHeight : 1;
     const clamp = (value: number) => Math.max(-2400, Math.min(2400, value * scale));
     performInput(binding, "scroll", {...point, delta_x: clamp(event.deltaX), delta_y: clamp(event.deltaY)});
@@ -1751,6 +1869,7 @@ export function bindDesktopPanel(detail: TaskDetail, notify: Notice): void {
     touchPointers: new Map(), touchGesture: null,
     wheelQueue: {pendingX: 0, pendingY: 0, clientX: 0, clientY: 0, timer: 0}, wheelDrag: null,
     mouseOpen: false, mouseDrag: null, mouseSuppressClick: false,
+    pointerQueue: {x: 0, y: 0, timer: 0, dirty: false}, pointerDrag: null, pointerLocalAt: 0,
     viewID: randomID(), socket: null, socketKey: "", socketGeneration: 0, socketReady: false, socketTimer: 0,
     retries: 0, retryAt: 0, retryKey: "", decoding: false, decoder: null, decodeTimer: 0, blobURLs: new Set(),
     imageURL: "", lastFrameAt: 0, lastStatusAt: 0, decodePending: 0, pendingText: null, removeLayout: () => {},
@@ -1799,6 +1918,8 @@ export function bindDesktopPanel(detail: TaskDetail, notify: Notice): void {
       binding.wheelDrag = null;
       resetWheelThumb();
       flushWheel(binding, true);
+    } else {
+      ensurePointer(binding);
     }
     updateDOM(binding);
   });
@@ -1846,8 +1967,55 @@ export function bindDesktopPanel(detail: TaskDetail, notify: Notice): void {
     binding.mouseSuppressClick = false;
     constrainMouseControl(binding);
   });
+  const pointerPad = root.querySelector<HTMLElement>("#desktop-pointer-pad");
+  listen(binding, pointerPad, "pointerdown", event => {
+    if (!ensurePointer(binding) || !inputAllowed(state, "move")) return;
+    binding.pointerDrag = {pointerID: event.pointerId, lastX: event.clientX, lastY: event.clientY};
+    cancelGesture(binding);
+    pauseObservation(binding);
+    pointerPad?.setPointerCapture(event.pointerId);
+    pointerPad?.classList.toggle("dragging", true);
+    event.preventDefault();
+  });
+  listen(binding, pointerPad, "pointermove", event => {
+    const drag = binding.pointerDrag;
+    const observation = state.observation;
+    const image = root.querySelector<HTMLImageElement>("#desktop-image");
+    const bounds = image?.getBoundingClientRect();
+    if (!drag || drag.pointerID !== event.pointerId || !observation || !bounds || bounds.width <= 0 || bounds.height <= 0) return;
+    event.preventDefault();
+    const deltaX = (event.clientX - drag.lastX) / bounds.width * observation.width * pointerMoveScale;
+    const deltaY = (event.clientY - drag.lastY) / bounds.height * observation.height * pointerMoveScale;
+    setVirtualPointer(binding, state.pointerX + deltaX, state.pointerY + deltaY);
+    queuePointerMove(binding, state.pointerX, state.pointerY);
+    drag.lastX = event.clientX;
+    drag.lastY = event.clientY;
+  });
+  listen(binding, pointerPad, "pointerup", event => {
+    const drag = binding.pointerDrag;
+    if (!drag || drag.pointerID !== event.pointerId) return;
+    const observation = state.observation;
+    const image = root.querySelector<HTMLImageElement>("#desktop-image");
+    const bounds = image?.getBoundingClientRect();
+    if (observation && bounds && bounds.width > 0 && bounds.height > 0) {
+      setVirtualPointer(binding,
+        state.pointerX + (event.clientX - drag.lastX) / bounds.width * observation.width * pointerMoveScale,
+        state.pointerY + (event.clientY - drag.lastY) / bounds.height * observation.height * pointerMoveScale);
+      queuePointerMove(binding, state.pointerX, state.pointerY, true);
+    }
+    binding.pointerDrag = null;
+    pointerPad?.classList.toggle("dragging", false);
+    if (pointerPad?.hasPointerCapture(event.pointerId)) pointerPad.releasePointerCapture(event.pointerId);
+    event.preventDefault();
+  });
+  listen(binding, pointerPad, "pointercancel", event => {
+    if (binding.pointerDrag?.pointerID !== event.pointerId) return;
+    binding.pointerDrag = null;
+    pointerPad?.classList.toggle("dragging", false);
+  });
   const mouseButton = (selector: string, button: "left" | "right") => listen(binding, root.querySelector(selector), "click", () => {
-    const point = surfaceCenter(binding);
+    ensurePointer(binding);
+    const point = {x: state.pointerX, y: state.pointerY};
     if (actionable(state) && inputAllowed(state, "click")) {
       performInput(binding, "click", {...point, button}, state.observation?.id);
     }
@@ -1855,13 +2023,14 @@ export function bindDesktopPanel(detail: TaskDetail, notify: Notice): void {
   mouseButton("#desktop-mouse-left", "left");
   mouseButton("#desktop-mouse-right", "right");
   const wheelButton = (selector: string, deltaY: number) => listen(binding, root.querySelector(selector), "click", () => {
-    const point = surfaceCenter(binding);
-    queueWheel(binding, 0, deltaY, point.clientX, point.clientY, true);
+    const point = pointerClientPoint(binding);
+    if (point) queueWheel(binding, 0, deltaY, point.clientX, point.clientY, true);
   });
   wheelButton("#desktop-wheel-up", -120);
   wheelButton("#desktop-wheel-down", 120);
   listen(binding, wheelPad, "pointerdown", event => {
     if (!inputAllowed(state, "scroll")) return;
+    ensurePointer(binding);
     binding.wheelDrag = {pointerID: event.pointerId, lastX: event.clientX, lastY: event.clientY};
     cancelGesture(binding);
     pauseObservation(binding);
@@ -1880,8 +2049,10 @@ export function bindDesktopPanel(detail: TaskDetail, notify: Notice): void {
       ? Math.max(-travel, Math.min(travel, event.clientY - (bounds.top + bounds.height / 2)))
       : 0;
     if (wheelThumb) wheelThumb.style.transform = `translateY(${offset}px)`;
+    const point = pointerClientPoint(binding);
+    if (!point) return;
     queueWheel(binding, (drag.lastX - event.clientX) * wheelDragScale,
-      (drag.lastY - event.clientY) * wheelDragScale, event.clientX, event.clientY);
+      (drag.lastY - event.clientY) * wheelDragScale, point.clientX, point.clientY);
     drag.lastX = event.clientX;
     drag.lastY = event.clientY;
   });
@@ -1890,8 +2061,10 @@ export function bindDesktopPanel(detail: TaskDetail, notify: Notice): void {
     if (!drag || drag.pointerID !== event.pointerId) return;
     binding.wheelDrag = null;
     if (wheelPad?.hasPointerCapture(event.pointerId)) wheelPad.releasePointerCapture(event.pointerId);
+    const point = pointerClientPoint(binding);
+    if (!point) return;
     queueWheel(binding, (drag.lastX - event.clientX) * wheelDragScale,
-      (drag.lastY - event.clientY) * wheelDragScale, event.clientX, event.clientY, true);
+      (drag.lastY - event.clientY) * wheelDragScale, point.clientX, point.clientY, true);
     resetWheelThumb();
     event.preventDefault();
     schedule(binding);
@@ -2012,6 +2185,10 @@ export function stopDesktopPanel(): void {
   window.clearTimeout(binding.wheelQueue.timer);
   binding.wheelQueue = {pendingX: 0, pendingY: 0, clientX: 0, clientY: 0, timer: 0};
   binding.wheelDrag = null;
+  window.clearTimeout(binding.pointerQueue.timer);
+  binding.pointerQueue = {x: 0, y: 0, timer: 0, dirty: false};
+  binding.pointerDrag = null;
+  binding.pointerLocalAt = 0;
   binding.mouseOpen = false;
   binding.mouseDrag = null;
   binding.mouseSuppressClick = false;

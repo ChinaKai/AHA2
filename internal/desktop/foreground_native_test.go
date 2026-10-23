@@ -32,7 +32,7 @@ func TestForegroundNativeUsesSeparateSourceAndTrustedSurface(t *testing.T) {
 func TestForegroundNativeValidation(t *testing.T) {
 	cases := []Action{
 		{Kind: "click", X: -1}, {Kind: "click", X: 400}, {Kind: "click", Y: math.Inf(1)},
-		{Kind: "click", Button: "invalid"}, {Kind: "drag", EndX: 401},
+		{Kind: "click", Button: "invalid"}, {Kind: "move", Button: "left"}, {Kind: "drag", EndX: 401},
 		{Kind: "scroll", DeltaY: 2401}, {Kind: "scroll"},
 		{Kind: "text", Value: strings.Repeat("a", 4097)}, {Kind: "text", Value: "null\x00byte"},
 		{Kind: "text", Value: "x", Keys: []string{"ENTER"}},
@@ -49,7 +49,7 @@ func TestForegroundNativeValidation(t *testing.T) {
 		}
 	}
 	for _, action := range []Action{
-		{Kind: "focus"}, {Kind: "click", X: 399, Y: 299, Button: "left"},
+		{Kind: "focus"}, {Kind: "click", X: 399, Y: 299, Button: "left"}, {Kind: "move", X: 200, Y: 150},
 		{Kind: "double_click"}, {Kind: "drag", X: 1, Y: 1, EndX: 200, EndY: 200},
 		{Kind: "scroll", DeltaX: 2400, DeltaY: -2400}, {Kind: "text", Value: "Unicode \u4e2d\u6587 \U0001f680"},
 		{Kind: "text", Value: "CRLF\r\nLF\nCR\rTab\t"},

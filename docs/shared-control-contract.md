@@ -116,9 +116,15 @@ emit an extra remote click.
 A compact floating virtual mouse provides an alternative when touch gestures are
 inconvenient. The collapsed ball can be dragged anywhere inside the observation
 area and tapped to expand a panel with left/right click buttons, up/down wheel
-buttons, and a visible draggable wheel thumb. The thumb follows the pointer and
-returns to center on release. Short drags use a 4x wheel-distance scale so the
-compact control still produces a usable scroll. Its input shares the same
+buttons, a two-dimensional pointer touchpad, and a visible draggable wheel thumb.
+The expanded panel must expose a visible virtual pointer over the shared image;
+touchpad movement updates that marker immediately and sends coalesced `move`
+actions to the host. Host observations return the real cursor position when it is
+inside the target; local movement remains authoritative briefly so an older
+in-flight frame cannot snap the marker backward. Left/right buttons click at the
+marker, not at the center of the viewport. The wheel thumb follows the pointer
+and returns to center on release. Short drags use a 5x wheel-distance scale so
+the compact control still produces a usable scroll. Its input shares the same
 serialized scroll queue as touch gestures.
 Local `Ctrl`/`Command` + wheel zoom is anchored at the pointer and preserves the
 logical desktop coordinate under it. Plain wheel remains foreground remote

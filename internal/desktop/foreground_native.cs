@@ -32,6 +32,7 @@ namespace AHADesktop {
         static bool probeClassRegistered;
         static long NativeInputRequestID = 0;
         [DllImport("user32.dll")] static extern uint SendInput(uint count, Input[] input, int size);
+        [DllImport("user32.dll")] static extern bool GetCursorPos(out Point point);
         [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr hwnd);
         [DllImport("user32.dll")] static extern bool ShowWindowAsync(IntPtr hwnd, int command);
         [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr hwnd, int command);
@@ -347,9 +348,19 @@ namespace AHADesktop {
             Surface after = ReadSurface(id, true);
             ReconcileCapture(surface, after, ref image, ref error);
             if (physicalWindow && !ForegroundUnobscured(after)) { image = ""; error = "window_capture_obscured"; }
+            Point cursor;
+            object cursorValue = null;
+            if (GetCursorPos(out cursor)) {
+                int cursorX = cursor.X - surface.Bounds.Left, cursorY = cursor.Y - surface.Bounds.Top;
+                if (cursorX >= 0 && cursorY >= 0 &&
+                    cursorX < surface.Bounds.Right - surface.Bounds.Left &&
+                    cursorY < surface.Bounds.Bottom - surface.Bounds.Top)
+                    cursorValue = Obj("x", (long)cursorX, "y", (long)cursorY, "visible", true);
+            }
             return Obj("window", surface.Window, "elements", new object[0], "image", image,
                 "width", Math.Max(0L, (long)surface.Bounds.Right - surface.Bounds.Left),
                 "height", Math.Max(0L, (long)surface.Bounds.Bottom - surface.Bounds.Top),
+                "cursor", cursorValue,
                 "surface", surface.Identity, "capture_error", error,
                 "control_error", surface.ControlError, "input_actions", CaptureActions(surface, image));
         }
@@ -367,7 +378,7 @@ namespace AHADesktop {
         static string[] CaptureActions(Surface surface, string image) {
             if (surface.ControlError != "") return new string[0];
             return image == "" ? new string[] { "focus" } :
-                new string[] { "click", "double_click", "scroll", "text", "key", "drag", "focus" };
+                new string[] { "click", "double_click", "move", "scroll", "text", "key", "drag", "focus" };
         }
         static void Activate(Target target) {
             InputDesktopGuard();
@@ -470,7 +481,7 @@ namespace AHADesktop {
             var action = request["action"] as Dictionary<string, object>;
             if (action == null || Text(action, "element_id") != "$surface") Fail("invalid_request");
             string kind = Text(action, "kind");
-            if (kind != "focus" && kind != "click" && kind != "double_click" && kind != "drag" &&
+            if (kind != "focus" && kind != "click" && kind != "double_click" && kind != "move" && kind != "drag" &&
                 kind != "scroll" && kind != "text" && kind != "key") Fail("unsupported_action");
             Surface surface = ReadSurface(id);
             if (kind == "focus") {
@@ -528,6 +539,11 @@ namespace AHADesktop {
             }
             Point start = ScreenPoint(surface, Number(action, "x"), Number(action, "y"));
             CheckPoint(surface, start);
+            if (kind == "move") {
+                CheckForeground(surface, id);
+                SendBatch(new List<Input> { Move(start) }, new List<Input>());
+                return;
+            }
             var inputs = new List<Input> { Move(start) };
             var release = new List<Input>();
             if (kind == "scroll") {

@@ -39,7 +39,9 @@ GET status includes `foreground_supported`; session includes `mode`.
 
 Foreground observation includes normal PNG/width/height plus:
 
-- `input_actions`: allowed kinds, e.g. click, double_click, scroll, text, key, drag, focus.
+- `input_actions`: allowed kinds, e.g. click, double_click, move, scroll, text, key, drag, focus.
+- `cursor`: optional host cursor `{x,y,visible}` in observation pixels when the
+  pointer is inside the shared target.
 - `surface`: opaque target/geometry identity; checked before input.
 - `elements`: may be empty; generic control must not depend on UIA enumeration.
 
@@ -53,6 +55,7 @@ POST actions keeps session_id, revision, observation_id. Foreground input uses
 `element_id:"$surface"` and a listed kind:
 
 - click / double_click: x,y in screenshot pixels, button left/right/middle.
+- move: x,y in screenshot pixels; move the pointer without sending a button event.
 - drag: x,y,end_x,end_y and button.
 - scroll: x,y,delta_x,delta_y (pixels; each delta bounded to 2400).
 - text: value, Unicode text, no clipboard.
@@ -88,7 +91,7 @@ Fetch window list on open/explicit refresh, not repeated empty-list polling.
 Separate initial loading from refresh; existing valid image remains operable
 while status reads occur, and urgent stop/takeover is always available.
 
-Foreground screenshot supports real click/double-click/drag/wheel and an explicit
+Foreground screenshot supports real pointer move, click/double-click/drag/wheel and an explicit
 Unicode text form + key shortcut buttons. Shortcut capture is opt-in via focused
 image surface, not document-wide. Printable typing moves to the real text editor
 and is explicitly submitted as one bounded text operation; do not drop characters

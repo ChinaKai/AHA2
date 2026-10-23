@@ -27,7 +27,7 @@ func (p *foregroundFixture) NewDesktop(ctx context.Context) (Window, error) {
 
 func (p *foregroundFixture) ObserveForeground(context.Context, Window) (Observation, error) {
 	return Observation{Width: 800, Height: 600, Surface: "trusted:800:600",
-		InputActions: []string{"click", "double_click", "drag", "scroll", "text", "key", "focus"}}, nil
+		InputActions: []string{"click", "double_click", "move", "drag", "scroll", "text", "key", "focus"}}, nil
 }
 
 func (p *foregroundFixture) ActForeground(ctx context.Context, target Window, action Action, capture Observation) error {
@@ -186,6 +186,22 @@ func TestForegroundInvalidInputsNeverReachProvider(t *testing.T) {
 	}
 	if p.inputs.Load() != 0 || p.calls.Load() != 0 {
 		t.Fatal("invalid input reached a provider")
+	}
+}
+
+func TestForegroundPointerMoveValidation(t *testing.T) {
+	if err := validateForegroundInput(Action{Kind: "move", X: 400, Y: 300}, 800, 600); err != nil {
+		t.Fatalf("valid pointer move rejected: %v", err)
+	}
+	for _, action := range []Action{
+		{Kind: "move", X: -1, Y: 10},
+		{Kind: "move", X: 800, Y: 10},
+		{Kind: "move", X: 10, Y: 600},
+		{Kind: "move", X: 10, Y: 10, Button: "left"},
+	} {
+		if err := validateForegroundInput(action, 800, 600); err == nil {
+			t.Fatalf("invalid pointer move accepted: %+v", action)
+		}
 	}
 }
 

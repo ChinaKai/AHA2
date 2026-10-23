@@ -91,6 +91,7 @@ try {
   let rejectSockets = false;
   let windowReads = 0;
   let logicalSize = {width: 2560, height: 1440};
+  let cursorPosition = {x: logicalSize.width / 2, y: logicalSize.height / 2, visible: true};
   let controlError = "";
   let captureError = "";
   let observationFailure = "";
@@ -119,7 +120,8 @@ try {
   const observation = (viewID, preview) => {
     const value = {id: `frame-${++sequence}`, session_id: session.id, revision: session.revision, window: target,
       width: logicalSize.width, height: logicalSize.height, preview_width: preview.width, preview_height: preview.height, mime: "image/jpeg",
-      image: "", elements: [], input_actions: ["click", "double_click", "drag", "scroll", "text", "key", "focus"],
+      cursor: {...cursorPosition},
+      image: "", elements: [], input_actions: ["click", "double_click", "move", "drag", "scroll", "text", "key", "focus"],
       surface: "logical-2560-1440", ...(controlError ? {control_error: controlError} : {}),
       ...(["desktop_foreground_unavailable", "desktop_foreground_changed"].includes(controlError) ? {input_actions: []} : {}),
       ...(captureError ? {capture_error: captureError, input_actions: ["focus"]} : {})};
@@ -152,6 +154,9 @@ try {
       assert.match(payload.action_id, /^[a-f0-9]{32}$/);
       assert.ok(!actions.some(item => item.action_id === payload.action_id));
       actions.push({...payload, receivedAt: Date.now()});
+      if (["move", "click", "double_click", "drag", "scroll"].includes(payload.kind)) {
+        cursorPosition = {x: payload.x, y: payload.y, visible: true};
+      }
       await route.fulfill({json: {status: status()}});
     } else if (endpoint.pathname.endsWith("/stop")) {
       session = null;
@@ -272,6 +277,7 @@ try {
     await page.setViewportSize(viewport);
     for (const logical of [{width: 2560, height: 1440}, {width: 900, height: 1600}, {width: 3840, height: 720}]) {
       logicalSize = logical;
+      cursorPosition = {x: logical.width / 2, y: logical.height / 2, visible: true};
       await page.waitForFunction(size => {
         const image = document.querySelector("#desktop-image");
         return +image.getAttribute("width") === size.width && +image.getAttribute("height") === size.height;
@@ -282,6 +288,7 @@ try {
     await page.screenshot({path: resolve(output, `fit-${viewport.width}.png`)});
   }
   logicalSize = {width: 2560, height: 1440};
+  cursorPosition = {x: logicalSize.width / 2, y: logicalSize.height / 2, visible: true};
   await page.setViewportSize({width: 1440, height: 900});
   await page.waitForFunction(() => +document.querySelector("#desktop-image").getAttribute("width") === 2560);
   assert.equal(await page.locator("#desktop-picture-controls").isVisible(), true);
@@ -428,6 +435,24 @@ try {
   assert.equal(actions.length, actionsBeforePinch, "pinch remains a local view gesture");
   await page.click("#desktop-mouse-ball");
   assert.equal(await page.locator("#desktop-mouse-panel").isVisible(), true);
+  assert.equal(await page.locator("#desktop-pointer").isVisible(), true);
+  const pointerBefore = await page.locator("#desktop-pointer").boundingBox();
+  const pointerPad = await page.locator("#desktop-pointer-pad").boundingBox();
+  const actionsBeforePointerMove = actions.length;
+  await touchClient.send("Input.dispatchTouchEvent", {
+    type: "touchStart",
+    touchPoints: [{x: pointerPad.x + pointerPad.width * .35, y: pointerPad.y + pointerPad.height * .5, id: 11}],
+  });
+  await touchClient.send("Input.dispatchTouchEvent", {
+    type: "touchMove",
+    touchPoints: [{x: pointerPad.x + pointerPad.width * .7, y: pointerPad.y + pointerPad.height * .5, id: 11}],
+  });
+  await touchClient.send("Input.dispatchTouchEvent", {type: "touchEnd", touchPoints: []});
+  await waitUntil(() => actions.some((action, index) => index >= actionsBeforePointerMove && action.kind === "move"),
+    "virtual pointer move");
+  const pointerAfter = await page.locator("#desktop-pointer").boundingBox();
+  assert.ok(pointerAfter.x > pointerBefore.x,
+    `visible virtual pointer follows touch-pad movement: ${JSON.stringify({pointerBefore, pointerAfter, move: actions.findLast(action => action.kind === "move")})}`);
   const actionsBeforeLeftButton = actions.length;
   await page.click("#desktop-mouse-left");
   await waitUntil(() => actions.length > actionsBeforeLeftButton, "virtual mouse left click");

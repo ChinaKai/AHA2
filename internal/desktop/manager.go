@@ -677,7 +677,7 @@ func (m *Manager) Act(ctx context.Context, taskID, actor string, request ActionR
 	// …) belonged to the removed background adapter and are refused here rather
 	// than silently accepted. validateForegroundInput owns the per-kind shape.
 	switch request.Kind {
-	case "click", "double_click", "drag", "scroll", "text", "key", "focus":
+	case "click", "double_click", "move", "drag", "scroll", "text", "key", "focus":
 	default:
 		return Status{}, failure("unsupported_action")
 	}
@@ -724,7 +724,8 @@ func validateForegroundInput(action Action, width, height int) error {
 	pointValid := func(x, y float64) bool {
 		return width > 0 && height > 0 && x >= 0 && y >= 0 && x < float64(width) && y < float64(height)
 	}
-	pointer := action.Kind == "click" || action.Kind == "double_click" || action.Kind == "drag" || action.Kind == "scroll"
+	pointer := action.Kind == "click" || action.Kind == "double_click" || action.Kind == "move" ||
+		action.Kind == "drag" || action.Kind == "scroll"
 	if !pointer && (action.X != 0 || action.Y != 0 || action.Button != "") ||
 		action.Kind != "key" && len(action.Keys) != 0 ||
 		action.Kind != "drag" && (action.EndX != 0 || action.EndY != 0) ||
@@ -732,11 +733,15 @@ func validateForegroundInput(action Action, width, height int) error {
 		return failure("invalid_action")
 	}
 	switch action.Kind {
-	case "click", "double_click", "drag", "scroll":
+	case "click", "double_click", "move", "drag", "scroll":
 		if !pointValid(action.X, action.Y) {
 			return failure("invalid_coordinates")
 		}
-		if action.Button != "" && action.Button != "left" && action.Button != "right" && action.Button != "middle" {
+		if (action.Kind == "click" || action.Kind == "double_click" || action.Kind == "drag") &&
+			action.Button != "" && action.Button != "left" && action.Button != "right" && action.Button != "middle" {
+			return failure("invalid_action")
+		}
+		if action.Kind == "move" && action.Button != "" {
 			return failure("invalid_action")
 		}
 		if action.Kind == "drag" && !pointValid(action.EndX, action.EndY) {

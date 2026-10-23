@@ -31,7 +31,7 @@ func (p *fakeProvider) ObserveForeground(ctx context.Context, window Window) (Ob
 		return p.observe(ctx, window)
 	}
 	return Observation{Width: 800, Height: 600, Surface: "trusted:800:600",
-		InputActions: []string{"click", "double_click", "drag", "scroll", "text", "key", "focus"}}, nil
+		InputActions: []string{"click", "double_click", "move", "drag", "scroll", "text", "key", "focus"}}, nil
 }
 
 func (p *fakeProvider) ActForeground(ctx context.Context, window Window, action Action, _ Observation) error {

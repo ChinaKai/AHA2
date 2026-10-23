@@ -2187,7 +2187,7 @@ test("background control is gone and control is foreground-only", async () => {
 
   // The only control mode the backend accepts is foreground, with consent.
   assert.match(manager, /if mode != "foreground" \{\s*return Status\{\}, failure\("invalid_mode"\)/);
-  assert.match(manager, /case "click", "double_click", "drag", "scroll", "text", "key", "focus":/);
+  assert.match(manager, /case "click", "double_click", "move", "drag", "scroll", "text", "key", "focus":/);
   // Element-shaped actions belonged to the removed adapter.
   assert.doesNotMatch(manager, /case "invoke", "set_value"/, "element actions are still accepted");
   assert.doesNotMatch(native, /SelectBackgroundWindow|background_observe/, "a background entry point remains");

@@ -33,7 +33,7 @@ func (p *desktopFixture) NewDesktop(context.Context) (desktop.Window, error) {
 
 func (*desktopFixture) ObserveForeground(context.Context, desktop.Window) (desktop.Observation, error) {
 	return desktop.Observation{Width: 800, Height: 600, Surface: "fixture-surface",
-		InputActions: []string{"click", "double_click", "drag", "scroll", "text", "key", "focus"}}, nil
+		InputActions: []string{"click", "double_click", "move", "drag", "scroll", "text", "key", "focus"}}, nil
 }
 
 func (p *desktopFixture) ActForeground(context.Context, desktop.Window, desktop.Action, desktop.Observation) error {
