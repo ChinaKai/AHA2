@@ -56,8 +56,23 @@ interface TouchGesture {
   startedAt: number;
   lastCenterX: number;
   lastCenterY: number;
+  lastScrollCenterX: number;
+  lastScrollCenterY: number;
   mode: TouchGestureMode;
   moved: boolean;
+  classifyTimer: number;
+}
+interface WheelQueue {
+  pendingX: number;
+  pendingY: number;
+  clientX: number;
+  clientY: number;
+  timer: number;
+}
+interface WheelDrag {
+  pointerID: number;
+  lastX: number;
+  lastY: number;
 }
 interface Binding {
   root: HTMLElement; state: PanelState; notify: Notice; timer: number;
@@ -65,6 +80,7 @@ interface Binding {
   removeVisibility: () => void;
   chooserActive: boolean; clickTimer: number; click: Gesture | null; gesture: Gesture | null;
   touchPointers: Map<number, {x: number; y: number}>; touchGesture: TouchGesture | null;
+  wheelQueue: WheelQueue; wheelDrag: WheelDrag | null; wheelOpen: boolean;
   refreshWindows: boolean;
   viewID: string; socket: WebSocket | null; socketKey: string; socketGeneration: number;
   socketReady: boolean; socketTimer: number; retries: number; retryAt: number; retryKey: string;
@@ -85,6 +101,10 @@ const frameProfiles: FrameOptions[] = [
   {max_width: 320, max_height: 180, quality: 35, interval_ms: 500},
 ];
 const maxDesktopZoom = 5;
+const touchSettleMS = 80;
+const touchScrollMin = 12;
+const wheelQueueStep = 24;
+const wheelFlushMS = 40;
 
 export function desktopPreviewSize(width: number, height: number, availableWidth: number, availableHeight: number, zoom = 1): {width: number; height: number} {
   if (![width, height, availableWidth, availableHeight, zoom].every(value => Number.isFinite(value) && value > 0)) return {width: 0, height: 0};
@@ -354,10 +374,16 @@ export function renderDesktopPanel(detail: TaskDetail, header = ""): string {
     <div id="task-tool-panel-body" class="desktop-body">
       <p id="desktop-error" class="desktop-error desktop-alert" role="alert" hidden></p>
       <div class="desktop-observation">
-        <div id="desktop-viewport" class="desktop-viewport" title="移动端：单指双击为双击，双指轻点为右键，双指滑动为滚轮，双指捏合为缩放"><div id="desktop-preview" class="desktop-preview" hidden>
-          <img id="desktop-image" alt="共享窗口画面" aria-label="共享画面控制区，移动端双指轻点为右键，双指滑动为滚轮，双指捏合为缩放" draggable="false" tabindex="-1">
+        <div id="desktop-viewport" class="desktop-viewport" title="移动端：单指双击为双击，双指轻点为右键，双指平行滑动为滚轮，双指捏合为缩放"><div id="desktop-preview" class="desktop-preview" hidden>
+          <img id="desktop-image" alt="共享窗口画面" aria-label="共享画面控制区，移动端双指轻点为右键，双指平行滑动为滚轮，双指捏合为缩放" draggable="false" tabindex="-1">
           <div id="desktop-highlight" class="desktop-highlight" hidden></div>
         </div></div>
+        <button type="button" id="desktop-wheel-toggle" class="icon-button desktop-wheel-toggle" title="虚拟滚轮" aria-label="虚拟滚轮" aria-controls="desktop-wheel" aria-expanded="false" hidden>${icon("chevron-up")}</button>
+        <div id="desktop-wheel" class="desktop-wheel" role="group" aria-label="虚拟滚轮" hidden>
+          <button type="button" id="desktop-wheel-up" class="icon-button" title="向上滚动" aria-label="向上滚动">${icon("chevron-up")}</button>
+          <div id="desktop-wheel-pad" class="desktop-wheel-pad" role="group" aria-label="拖动滚动画面"><span class="desktop-wheel-grip" aria-hidden="true"></span></div>
+          <button type="button" id="desktop-wheel-down" class="icon-button" title="向下滚动" aria-label="向下滚动">${icon("chevron-down")}</button>
+        </div>
         <p id="desktop-capture-status" class="desktop-empty desktop-capture-notice" role="status">尚无窗口画面</p>
         <button type="button" id="desktop-empty-target" class="desktop-empty-target">${icon("browser")}选择共享目标</button>
       </div>
@@ -500,6 +526,13 @@ function updateDOM(binding: Binding): void {
     && observation.width > 0 && observation.height > 0);
   const preview = root.querySelector<HTMLElement>("#desktop-preview")!;
   preview.hidden = !hasImage;
+  const scrollReady = hasImage && actionable(state) && inputAllowed(state, "scroll");
+  const wheelToggle = root.querySelector<HTMLButtonElement>("#desktop-wheel-toggle")!;
+  wheelToggle.hidden = !hasImage;
+  wheelToggle.disabled = !scrollReady;
+  wheelToggle.setAttribute("aria-expanded", String(binding.wheelOpen));
+  root.querySelectorAll<HTMLButtonElement>(".desktop-wheel button").forEach(button => { button.disabled = !scrollReady; });
+  root.querySelector<HTMLElement>("#desktop-wheel")!.hidden = !binding.wheelOpen || !hasImage;
   if (hasImage && observation) {
     const src = binding.imageURL || `data:${mime};base64,${observation.image}`;
     if (image.getAttribute("src") !== src) image.src = src;
@@ -1088,6 +1121,7 @@ async function mutate(binding: Binding, suffix: string, payload: object, busy: s
       binding.write = null;
       state.busy = "";
       updateDOM(binding);
+      if (binding.wheelQueue.pendingX || binding.wheelQueue.pendingY) scheduleWheelFlush(binding);
       // Retain operation errors until the next scheduled status refresh.
       if (suffix === "/switch" && state.error) void poll(binding);
       else if (state.error) schedule(binding);
@@ -1187,6 +1221,65 @@ function imagePoint(binding: Binding, event: MouseEvent): {x: number; y: number}
   return imagePointAt(binding, event.clientX, event.clientY);
 }
 
+function surfaceCenter(binding: Binding): {clientX: number; clientY: number} {
+  const viewport = binding.root.querySelector<HTMLElement>("#desktop-viewport");
+  const bounds = viewport?.getBoundingClientRect();
+  return bounds
+    ? {clientX: bounds.left + bounds.width / 2, clientY: bounds.top + bounds.height / 2}
+    : {clientX: 0, clientY: 0};
+}
+
+function scheduleWheelFlush(binding: Binding): void {
+  const wheel = binding.wheelQueue;
+  if (wheel.timer || (!wheel.pendingX && !wheel.pendingY)) return;
+  wheel.timer = window.setTimeout(() => {
+    wheel.timer = 0;
+    flushWheel(binding);
+  }, wheelFlushMS);
+}
+
+function flushWheel(binding: Binding, force = false): void {
+  const {state, wheelQueue: wheel} = binding;
+  if (!current(binding) || (!wheel.pendingX && !wheel.pendingY)) return;
+  if (!force && Math.max(Math.abs(wheel.pendingX), Math.abs(wheel.pendingY)) < wheelQueueStep) return;
+  if (!state.status?.session || !inputAllowed(state, "scroll")) {
+    wheel.pendingX = 0;
+    wheel.pendingY = 0;
+    return;
+  }
+  if (binding.write || state.busy || !actionable(state)) {
+    scheduleWheelFlush(binding);
+    return;
+  }
+  const point = imagePointAt(binding, wheel.clientX, wheel.clientY);
+  if (!point) {
+    scheduleWheelFlush(binding);
+    return;
+  }
+  const deltaX = clampScrollDelta(wheel.pendingX);
+  const deltaY = clampScrollDelta(wheel.pendingY);
+  wheel.pendingX -= deltaX;
+  wheel.pendingY -= deltaY;
+  if (Math.abs(wheel.pendingX) < 1) wheel.pendingX = 0;
+  if (Math.abs(wheel.pendingY) < 1) wheel.pendingY = 0;
+  performInput(binding, "scroll", {
+    ...point, delta_x: deltaX, delta_y: deltaY,
+  }, state.observation!.id);
+  scheduleWheelFlush(binding);
+}
+
+function queueWheel(binding: Binding, deltaX: number, deltaY: number,
+  clientX: number, clientY: number, force = false): void {
+  const wheel = binding.wheelQueue;
+  wheel.pendingX += Number.isFinite(deltaX) ? deltaX : 0;
+  wheel.pendingY += Number.isFinite(deltaY) ? deltaY : 0;
+  wheel.clientX = clientX;
+  wheel.clientY = clientY;
+  if (force || Math.max(Math.abs(wheel.pendingX), Math.abs(wheel.pendingY)) >= wheelQueueStep) {
+    flushWheel(binding, force);
+  }
+}
+
 function applyZoomAt(binding: Binding, zoom: number, anchor?: {clientX: number; clientY: number}): void {
   if (!current(binding)) return;
   const {root, state} = binding;
@@ -1211,6 +1304,7 @@ function applyZoomAt(binding: Binding, zoom: number, anchor?: {clientX: number; 
 }
 
 function cancelTouchGesture(binding: Binding): void {
+  if (binding.touchGesture?.classifyTimer) window.clearTimeout(binding.touchGesture.classifyTimer);
   binding.touchGesture = null;
   binding.touchPointers.clear();
 }
@@ -1234,6 +1328,48 @@ function pinchGeometry(pointers: Map<number, {x: number; y: number}>): {centerX:
     centerY: (first.y + second.y) / 2,
     distance: Math.hypot(deltaX, deltaY),
   };
+}
+
+function classifyTouchGesture(binding: Binding, touch: TouchGesture, settle = false): void {
+  if (touch.mode !== "pending") return;
+  const geometry = pinchGeometry(binding.touchPointers);
+  if (!geometry || touch.initialDistance <= 0) return;
+  const centerMoved = Math.hypot(geometry.centerX - touch.initialCenterX, geometry.centerY - touch.initialCenterY);
+  const distanceMoved = Math.abs(geometry.distance - touch.initialDistance);
+  const movements = Array.from(touch.pointers).flatMap(([id, point]) => {
+    const start = touch.startPointers.get(id);
+    return start ? [{x: point.x - start.x, y: point.y - start.y}] : [];
+  });
+  const bothMoving = movements.length === 2
+    && movements.every(move => Math.hypot(move.x, move.y) >= 6);
+  const sameDirection = bothMoving
+    && movements[0].x * movements[1].x + movements[0].y * movements[1].y > 0;
+  const strongPinch = bothMoving
+    && distanceMoved > Math.max(14, touch.initialDistance * .12)
+    && distanceMoved >= centerMoved * .9;
+  if (bothMoving && sameDirection && centerMoved >= touchScrollMin && centerMoved >= distanceMoved * .75) {
+    touch.mode = "scroll";
+  } else if (strongPinch) {
+    touch.mode = "pinch";
+  } else if (settle && centerMoved >= touchScrollMin && centerMoved >= distanceMoved * .8) {
+    touch.mode = "scroll";
+  } else if (settle && distanceMoved > 10 && distanceMoved > centerMoved * .9) {
+    touch.mode = "pinch";
+  }
+  if (touch.mode === "pending") return;
+  if (touch.classifyTimer) {
+    window.clearTimeout(touch.classifyTimer);
+    touch.classifyTimer = 0;
+  }
+  touch.lastScrollCenterX = geometry.centerX;
+  touch.lastScrollCenterY = geometry.centerY;
+  if (touch.mode === "scroll") {
+    queueWheel(binding, touch.initialCenterX - geometry.centerX, touch.initialCenterY - geometry.centerY,
+      geometry.centerX, geometry.centerY);
+  } else if (touch.mode === "pinch") {
+    applyZoomAt(binding, touch.initialZoom * geometry.distance / touch.initialDistance,
+      {clientX: geometry.centerX, clientY: geometry.centerY});
+  }
 }
 
 function clampScrollDelta(value: number): number {
@@ -1282,8 +1418,11 @@ function bindInput(binding: Binding): void {
             startedAt: Date.now(),
             lastCenterX: geometry.centerX,
             lastCenterY: geometry.centerY,
+            lastScrollCenterX: geometry.centerX,
+            lastScrollCenterY: geometry.centerY,
             mode: "pending",
             moved: false,
+            classifyTimer: 0,
           };
           image.setPointerCapture(event.pointerId);
           event.preventDefault();
@@ -1314,25 +1453,36 @@ function bindInput(binding: Binding): void {
     event.preventDefault();
     touch.lastCenterX = geometry.centerX;
     touch.lastCenterY = geometry.centerY;
-    const centerMoved = Math.hypot(geometry.centerX - touch.initialCenterX, geometry.centerY - touch.initialCenterY);
-    const distanceMoved = Math.abs(geometry.distance - touch.initialDistance);
-    if (touch.mode === "pending") {
-      if (distanceMoved > Math.max(8, touch.initialDistance * .08) && distanceMoved > centerMoved * 1.25) touch.mode = "pinch";
-      else if (centerMoved > 8) touch.mode = "scroll";
+    classifyTouchGesture(binding, touch);
+    if (touch.mode === "pending" && touch.moved && !touch.classifyTimer) {
+      touch.classifyTimer = window.setTimeout(() => {
+        touch.classifyTimer = 0;
+        if (binding.touchGesture === touch) classifyTouchGesture(binding, touch, true);
+      }, touchSettleMS);
     }
     if (touch.mode === "pinch") {
       applyZoomAt(binding, touch.initialZoom * geometry.distance / touch.initialDistance,
         {clientX: geometry.centerX, clientY: geometry.centerY});
+    } else if (touch.mode === "scroll") {
+      queueWheel(binding, touch.lastScrollCenterX - geometry.centerX, touch.lastScrollCenterY - geometry.centerY,
+        geometry.centerX, geometry.centerY);
+      touch.lastScrollCenterX = geometry.centerX;
+      touch.lastScrollCenterY = geometry.centerY;
     }
   });
   listen(binding, image, "pointerup", event => {
     const touchGesture = event.pointerType === "touch";
+    if (touchGesture && binding.touchGesture) {
+      binding.touchPointers.set(event.pointerId, {x: event.clientX, y: event.clientY});
+      classifyTouchGesture(binding, binding.touchGesture, true);
+    }
     if (touchGesture) binding.touchPointers.delete(event.pointerId);
     if (touchGesture && binding.touchGesture) {
       if (image.hasPointerCapture(event.pointerId)) image.releasePointerCapture(event.pointerId);
       event.preventDefault();
       if (binding.touchPointers.size > 0) return;
       const gesture = binding.touchGesture;
+      if (gesture.classifyTimer) window.clearTimeout(gesture.classifyTimer);
       binding.touchGesture = null;
       schedule(binding);
       if (gesture.mode === "pending" && !gesture.moved && Date.now() - gesture.startedAt <= 500) {
@@ -1340,13 +1490,8 @@ function bindInput(binding: Binding): void {
         if (point && actionable(state) && inputAllowed(state, "click")) {
           performInput(binding, "click", {...point, button: "right"}, gesture.initialObservationID);
         }
-      } else if (gesture.mode === "scroll" && actionable(state) && inputAllowed(state, "scroll")) {
-        const point = imagePointAt(binding, gesture.lastCenterX, gesture.lastCenterY);
-        const deltaX = clampScrollDelta(gesture.initialCenterX - gesture.lastCenterX);
-        const deltaY = clampScrollDelta(gesture.initialCenterY - gesture.lastCenterY);
-        if (point && (deltaX || deltaY)) {
-          performInput(binding, "scroll", {...point, delta_x: deltaX, delta_y: deltaY}, gesture.initialObservationID);
-        }
+      } else if (gesture.mode === "scroll") {
+        flushWheel(binding, true);
       }
       return;
     }
@@ -1380,8 +1525,10 @@ function bindInput(binding: Binding): void {
     }, inputAllowed(state, "double_click") || touchGesture ? 300 : 0);
   });
   listen(binding, image, "pointercancel", event => {
-    if (event.pointerType === "touch") binding.touchPointers.delete(event.pointerId);
-    binding.touchGesture = null;
+    if (event.pointerType === "touch") {
+      cancelTouchGesture(binding);
+      flushWheel(binding, true);
+    }
     cancelGesture(binding);
     schedule(binding);
   });
@@ -1557,13 +1704,14 @@ export function bindDesktopPanel(detail: TaskDetail, notify: Notice): void {
   const binding: Binding = {root, state, notify, timer: 0, read: null, write: null, epoch: 0,
     removeVisibility: () => {}, chooserActive: false, clickTimer: 0, click: null, gesture: null, refreshWindows: false,
     touchPointers: new Map(), touchGesture: null,
+    wheelQueue: {pendingX: 0, pendingY: 0, clientX: 0, clientY: 0, timer: 0}, wheelDrag: null, wheelOpen: false,
     viewID: randomID(), socket: null, socketKey: "", socketGeneration: 0, socketReady: false, socketTimer: 0,
     retries: 0, retryAt: 0, retryKey: "", decoding: false, decoder: null, decodeTimer: 0, blobURLs: new Set(),
     imageURL: "", lastFrameAt: 0, lastStatusAt: 0, decodePending: 0, pendingText: null, removeLayout: () => {},
     previewWidth: 0, previewHeight: 0, removePopover: () => {}, listeners: []};
   active = binding;
   root.querySelectorAll<HTMLInputElement | HTMLButtonElement | HTMLTextAreaElement>(
-    ".desktop-picture-bar button, .desktop-picture-bar input, .desktop-input-bar button, .desktop-input-bar textarea",
+    ".desktop-picture-bar button, .desktop-picture-bar input, .desktop-input-bar button, .desktop-input-bar textarea, .desktop-wheel button, .desktop-wheel-toggle",
   ).forEach(control => { control.disabled = state.remote; });
   if (state.remote) {
     root.querySelectorAll<HTMLButtonElement>(".desktop-header-controls button").forEach(button => { button.disabled = true; });
@@ -1586,6 +1734,52 @@ export function bindDesktopPanel(detail: TaskDetail, notify: Notice): void {
   };
   listen(binding, root.querySelector("#desktop-fit"), "click", () => setZoom(binding, 1));
   listen(binding, root.querySelector("#desktop-zoom"), "input", event => setZoom(binding, Number((event.target as HTMLInputElement).value) / 100));
+  listen(binding, root.querySelector("#desktop-wheel-toggle"), "click", () => {
+    binding.wheelOpen = !binding.wheelOpen;
+    if (!binding.wheelOpen) {
+      binding.wheelDrag = null;
+      flushWheel(binding, true);
+    }
+    updateDOM(binding);
+  });
+  const wheelButton = (selector: string, deltaY: number) => listen(binding, root.querySelector(selector), "click", () => {
+    const point = surfaceCenter(binding);
+    queueWheel(binding, 0, deltaY, point.clientX, point.clientY, true);
+  });
+  wheelButton("#desktop-wheel-up", -120);
+  wheelButton("#desktop-wheel-down", 120);
+  const wheelPad = root.querySelector<HTMLElement>("#desktop-wheel-pad");
+  listen(binding, wheelPad, "pointerdown", event => {
+    if (!inputAllowed(state, "scroll")) return;
+    binding.wheelDrag = {pointerID: event.pointerId, lastX: event.clientX, lastY: event.clientY};
+    cancelGesture(binding);
+    pauseObservation(binding);
+    wheelPad?.setPointerCapture(event.pointerId);
+    event.preventDefault();
+  });
+  listen(binding, wheelPad, "pointermove", event => {
+    const drag = binding.wheelDrag;
+    if (!drag || drag.pointerID !== event.pointerId) return;
+    event.preventDefault();
+    queueWheel(binding, drag.lastX - event.clientX, drag.lastY - event.clientY, event.clientX, event.clientY);
+    drag.lastX = event.clientX;
+    drag.lastY = event.clientY;
+  });
+  listen(binding, wheelPad, "pointerup", event => {
+    const drag = binding.wheelDrag;
+    if (!drag || drag.pointerID !== event.pointerId) return;
+    binding.wheelDrag = null;
+    if (wheelPad?.hasPointerCapture(event.pointerId)) wheelPad.releasePointerCapture(event.pointerId);
+    queueWheel(binding, drag.lastX - event.clientX, drag.lastY - event.clientY, event.clientX, event.clientY, true);
+    event.preventDefault();
+    schedule(binding);
+  });
+  listen(binding, wheelPad, "pointercancel", event => {
+    if (binding.wheelDrag?.pointerID !== event.pointerId) return;
+    binding.wheelDrag = null;
+    flushWheel(binding, true);
+    schedule(binding);
+  });
   listen(binding, root.querySelector("#desktop-fullscreen"), "click", async () => {
     cancelGesture(binding);
     try {
@@ -1691,6 +1885,10 @@ export function stopDesktopPanel(): void {
   binding.write?.abort();
   closeStream(binding);
   cancelGesture(binding);
+  cancelTouchGesture(binding);
+  window.clearTimeout(binding.wheelQueue.timer);
+  binding.wheelQueue = {pendingX: 0, pendingY: 0, clientX: 0, clientY: 0, timer: 0};
+  binding.wheelDrag = null;
   // Captures and element contents are transient, never browser storage or logs.
   binding.state.observation = null;
   binding.state.loading = false;

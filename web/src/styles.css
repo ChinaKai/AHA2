@@ -446,6 +446,13 @@ body.task-tool-resizing { cursor: col-resize; user-select: none; }
 .desktop-alert { position: absolute; top: 6px; left: 8px; right: 8px; z-index: 5; padding: 8px; border: 1px solid #efc4bd; border-radius: 4px; background: #fff2ee; }
 .desktop-empty-target { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); white-space: nowrap; }
 .desktop-capture-notice { position: absolute; bottom: 8px; left: 12px; right: 12px; text-align: center; pointer-events: none; }
+.desktop-wheel-toggle { position: absolute; top: 16px; right: 18px; z-index: 7; width: 32px; min-width: 32px; height: 32px; min-height: 32px; padding: 0; border-color: #b9c2ce; background: rgb(255 255 255 / 94%); box-shadow: 0 3px 12px rgb(15 23 42 / 16%); }
+.desktop-wheel { position: absolute; top: 54px; right: 18px; z-index: 7; display: grid; grid-template-rows: 34px 88px 34px; width: 42px; overflow: hidden; border: 1px solid #aeb8c5; border-radius: 8px; background: #f8fafc; box-shadow: 0 5px 18px rgb(15 23 42 / 20%); }
+.desktop-wheel button { width: 42px; min-width: 42px; height: 34px; min-height: 34px; padding: 0; border: 0; border-radius: 0; background: #f8fafc; }
+.desktop-wheel button:hover { background: #edf3ff; color: #1d4ed8; }
+.desktop-wheel-pad { display: grid; place-items: center; min-height: 88px; border-top: 1px solid #c7ced8; border-bottom: 1px solid #c7ced8; background: #e8edf3; cursor: ns-resize; touch-action: none; }
+.desktop-wheel-pad:active { background: #dce8ff; }
+.desktop-wheel-grip { width: 16px; height: 30px; background: repeating-linear-gradient(to bottom, #738096 0 2px, transparent 2px 7px); pointer-events: none; }
 @media (max-width: 360px) {
   .desktop-task-header { gap: 3px; padding: 6px 4px; }
   .desktop-header-controls, .desktop-task-header .task-tool-panel-actions { gap: 2px; }
@@ -484,7 +491,7 @@ body.task-tool-resizing { cursor: col-resize; user-select: none; }
 .desktop-controller button.active { position: relative; border-color: var(--green); background: #edf8f0; color: #126c34; }
 .desktop-status { margin: 4px 0 0; color: var(--muted); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
 .desktop-error { max-height: 56px; overflow: auto; margin: 4px 0 0; color: var(--red); line-height: 1.5; overflow-wrap: anywhere; }
-.desktop-observation { flex: 1 1 0; display: flex; flex-direction: column; min-height: 0; min-width: 0; padding: 8px; border-bottom: 1px solid var(--line); background: #f3f5f7; overflow: hidden; }
+.desktop-observation { position: relative; flex: 1 1 0; display: flex; flex-direction: column; min-height: 0; min-width: 0; padding: 8px; border-bottom: 1px solid var(--line); background: #f3f5f7; overflow: hidden; }
 .desktop-viewport { flex: 1 1 0; display: flex; width: 100%; min-height: 0; min-width: 0; overflow: auto; overscroll-behavior: contain; }
 .desktop-preview { flex: 0 0 auto; position: relative; width: 100%; margin: auto; overflow: hidden; background: #e5e8ec; }
 .desktop-preview img { display: block; width: 100%; height: 100%; object-fit: contain; }

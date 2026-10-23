@@ -107,9 +107,15 @@ direct image clicks/drags/wheel, a Unicode text form and bounded key chords.
 On touch screens, one finger retains tap/drag semantics and a double tap remains
 a left double click. Two-finger tap sends a right click, two-finger parallel
 swipe maps to remote wheel scroll, and two-finger pinch performs local zoom.
-The multi-touch arbiter must cancel the pending single-touch click and classify
-tap, swipe and pinch by movement threshold so a pinch or scroll never emits an
-extra remote click.
+The multi-touch arbiter must cancel the pending single-touch click, buffer
+ambiguous one-pointer updates, and classify tap, swipe and pinch only after both
+pointers have moved or a short settle interval expires. Scroll must accumulate
+center movement and emit queued wheel actions while the fingers move rather than
+waiting for pointer-up, while pinch must remain local and neither gesture may
+emit an extra remote click.
+A compact, collapsible virtual wheel overlay provides explicit up/down buttons
+and a draggable strip for devices where two-finger swipe recognition is
+inconvenient. Its input shares the same serialized scroll queue as touch gestures.
 Local `Ctrl`/`Command` + wheel zoom is anchored at the pointer and preserves the
 logical desktop coordinate under it. Plain wheel remains foreground remote
 scrolling and must never be converted into local zoom. Zoom ranges from 100% to

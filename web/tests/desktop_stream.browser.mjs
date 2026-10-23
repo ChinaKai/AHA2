@@ -426,7 +426,24 @@ try {
   await delay(150);
   assert.ok(Number(await page.locator("#desktop-zoom").inputValue()) > zoomBeforePinch, "pinch zooms in");
   assert.equal(actions.length, actionsBeforePinch, "pinch remains a local view gesture");
+  await page.click("#desktop-wheel-toggle");
+  assert.equal(await page.locator("#desktop-wheel").isVisible(), true);
+  const actionsBeforeWheelButton = actions.length;
+  await page.click("#desktop-wheel-down");
+  await waitUntil(() => actions.length > actionsBeforeWheelButton, "virtual wheel button scroll");
+  assert.equal(actions.at(-1).kind, "scroll");
+  assert.equal(actions.at(-1).delta_y, 120);
+  const wheelPad = await page.locator("#desktop-wheel-pad").boundingBox();
+  const actionsBeforeWheelDrag = actions.length;
+  await page.mouse.move(wheelPad.x + wheelPad.width / 2, wheelPad.y + wheelPad.height * .75);
+  await page.mouse.down();
+  await page.mouse.move(wheelPad.x + wheelPad.width / 2, wheelPad.y + wheelPad.height * .25, {steps: 3});
+  await page.mouse.up();
+  await waitUntil(() => actions.length > actionsBeforeWheelDrag, "virtual wheel drag scroll");
+  assert.equal(actions.at(-1).kind, "scroll");
+  assert.ok(actions.at(-1).delta_y > 0);
   await page.screenshot({path: resolve(output, "mobile-touch-gestures-390.png")});
+  await page.click("#desktop-wheel-toggle");
   for (const viewport of [{width: 1440, height: 1000}, {width: 390, height: 844}, {width: 320, height: 740}]) {
     await page.setViewportSize(viewport);
     await page.click('[data-desktop-video="bandwidth"]');
