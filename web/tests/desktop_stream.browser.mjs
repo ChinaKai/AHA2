@@ -464,6 +464,7 @@ try {
   assert.equal(actions.at(-1).kind, "click");
   assert.equal(actions.at(-1).button, "left");
   await page.waitForFunction(() => !document.querySelector("#desktop-pointer-pad").classList.contains("disabled"));
+  await page.waitForFunction(() => !document.querySelector("#desktop-mouse-left").disabled);
   const actionsBeforePointerRightTap = actions.length;
   await touchClient.send("Input.dispatchTouchEvent", {
     type: "touchStart",
@@ -548,6 +549,30 @@ try {
   assert.ok(Math.abs(mouseBallAfter.x - mouseBallBefore.x) > 20, "floating mouse moves horizontally");
   assert.ok(Math.abs(mouseBallAfter.y - mouseBallBefore.y) > 10, "floating mouse moves vertically");
   assert.equal(await page.locator("#desktop-mouse-panel").isVisible(), true, "dragging the ball keeps the panel open");
+  assert.equal(await page.locator("#desktop-mouse-opacity").inputValue(), "70");
+  await page.locator("#desktop-mouse-opacity").evaluate(element => {
+    element.value = "55";
+    element.dispatchEvent(new Event("input", {bubbles: true}));
+  });
+  assert.equal(await page.locator("#desktop-mouse-opacity-value").textContent(), "55%");
+  assert.equal(await page.locator("#desktop-mouse-core").evaluate(element => element.style.opacity), "0.55");
+  const cardinalLayout = await page.evaluate(() => {
+    const box = selector => {
+      const rect = document.querySelector(selector).getBoundingClientRect();
+      return {left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom};
+    };
+    return {up: box("#desktop-wheel-up"), left: box("#desktop-mouse-left"), pad: box("#desktop-pointer-pad"),
+      right: box("#desktop-mouse-right"), down: box("#desktop-wheel-down")};
+  });
+  assert.ok(cardinalLayout.up.bottom <= cardinalLayout.pad.top + 2, "scroll-up sits above the touchpad");
+  assert.ok(cardinalLayout.down.top >= cardinalLayout.pad.bottom - 2, "scroll-down sits below the touchpad");
+  assert.ok(cardinalLayout.left.right <= cardinalLayout.pad.left + 2, "left click sits left of the touchpad");
+  assert.ok(cardinalLayout.right.left >= cardinalLayout.pad.right - 2, "right click sits right of the touchpad");
+  await page.locator("#desktop-mouse-opacity").evaluate(element => {
+    element.value = "70";
+    element.dispatchEvent(new Event("input", {bubbles: true}));
+  });
+  assert.equal(await page.locator("#desktop-mouse-opacity-value").textContent(), "70%");
   assert.equal(await page.locator("#desktop-wheel-speed").textContent(), "2×");
   await page.click("#desktop-wheel-speed");
   assert.equal(await page.locator("#desktop-wheel-speed").textContent(), "4×");
@@ -566,6 +591,9 @@ try {
   for (const viewport of [{width: 1440, height: 1000}, {width: 390, height: 844}, {width: 320, height: 740}]) {
     await page.setViewportSize(viewport);
     await page.click("#desktop-mouse-ball");
+    assert.equal(await page.locator("#desktop-mouse-opacity").inputValue(), "70",
+      "virtual mouse opacity survives closing and reopening");
+    assert.equal(await page.locator("#desktop-mouse-opacity-value").textContent(), "70%");
     const mouseBounds = await page.evaluate(() => {
       const panel = document.querySelector("#desktop-mouse-panel").getBoundingClientRect();
       const observation = document.querySelector(".desktop-observation").getBoundingClientRect();
@@ -577,8 +605,8 @@ try {
       && mouseBounds.panel.right <= mouseBounds.observation.right + 1
       && mouseBounds.panel.bottom <= mouseBounds.observation.bottom + 1,
     `virtual mouse panel stays inside the ${viewport.width}px observation`);
-    assert.ok(mouseBounds.panel.width <= 152 && mouseBounds.panel.height <= 182,
-      `compact virtual mouse panel at ${viewport.width}px`);
+    assert.ok(mouseBounds.panel.width <= 238.5 && mouseBounds.panel.height <= 214.5,
+      `cardinal virtual mouse panel at ${viewport.width}px`);
     await page.click("#desktop-mouse-ball");
     await page.click('[data-desktop-video="bandwidth"]');
     await waitUntil(() => preferences.at(-1).quality === 45, "bandwidth profile");

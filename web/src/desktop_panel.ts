@@ -40,7 +40,7 @@ interface PanelState {
   windowsLoaded: boolean; inputDraft: string;
   actionError: string;
   videoMode: VideoMode; adaptive: AdaptiveState; transport: string; fps: number; cycleMS: number;
-  zoom: number;
+  zoom: number; mouseOpacity: number;
   pointerX: number; pointerY: number; pointerVisible: boolean;
   targets: Targets | null; desktopID: string; monitorID: string; targetKind: TargetSelection["kind"];
   popover: "" | "targets" | "operations" | "keys";
@@ -130,6 +130,9 @@ const touchScrollScale = 2.5;
 const wheelQueueStep = 24;
 const wheelFlushMS = 40;
 const wheelSpeeds = [1, 2, 4];
+const defaultMouseOpacity = 70;
+const minMouseOpacity = 30;
+const maxMouseOpacity = 100;
 const pointerFlushMS = 50;
 const pointerMoveScale = 1.6;
 
@@ -292,6 +295,7 @@ function stateFor(detail: TaskDetail): PanelState {
       error: "", sessionNote: "", loading: false, busy: "", denied: false,
       windowsLoaded: false, inputDraft: "", actionError: "",
       videoMode: "auto", adaptive: {level: 1, slow: 0, fast: 0}, transport: "HTTP 预览", fps: 0, cycleMS: 0, zoom: 1,
+      mouseOpacity: defaultMouseOpacity,
       pointerX: -1, pointerY: -1, pointerVisible: false,
       targets: null, desktopID: "", monitorID: "", targetKind: "new-desktop", popover: "",
     };
@@ -410,18 +414,21 @@ export function renderDesktopPanel(detail: TaskDetail, header = ""): string {
         <div id="desktop-mouse" class="desktop-mouse" hidden>
           <button type="button" id="desktop-mouse-ball" class="desktop-mouse-ball" title="虚拟鼠标" aria-label="虚拟鼠标" aria-controls="desktop-mouse-panel" aria-expanded="false">${icon("mouse")}</button>
           <div id="desktop-mouse-panel" class="desktop-mouse-panel" role="group" aria-label="虚拟鼠标" hidden>
-            <div id="desktop-pointer-pad" class="desktop-pointer-pad" role="group" aria-label="拖动移动鼠标指针" title="拖动移动鼠标指针">
-              <span class="desktop-pointer-pad-mark" aria-hidden="true">${icon("pointer")}</span>
-            </div>
-            <div class="desktop-mouse-lower">
-              <button type="button" id="desktop-mouse-left" class="desktop-mouse-key" title="左键" aria-label="鼠标左键">L</button>
-              <div class="desktop-wheel-stack" role="group" aria-label="鼠标滚轮">
-                <button type="button" id="desktop-wheel-up" class="icon-button" title="向上滚动" aria-label="向上滚动">${icon("chevron-up")}</button>
-                <button type="button" id="desktop-wheel-speed" class="desktop-wheel-speed" title="滚动灵敏度：点击切换" aria-label="滚动灵敏度，当前 2 倍" aria-live="polite">2×</button>
-                <button type="button" id="desktop-wheel-down" class="icon-button" title="向下滚动" aria-label="向下滚动">${icon("chevron-down")}</button>
+            <div id="desktop-mouse-core" class="desktop-mouse-core">
+              <button type="button" id="desktop-wheel-up" class="desktop-mouse-cardinal desktop-mouse-cardinal-up" title="向上滚动" aria-label="向上滚动">${icon("chevron-up")}</button>
+              <button type="button" id="desktop-mouse-left" class="desktop-mouse-key desktop-mouse-key-left" title="左键" aria-label="鼠标左键">L</button>
+              <div id="desktop-pointer-pad" class="desktop-pointer-pad" role="group" aria-label="拖动移动鼠标指针" title="拖动移动鼠标指针">
+                <span class="desktop-pointer-pad-mark" aria-hidden="true">${icon("pointer")}</span>
               </div>
-              <button type="button" id="desktop-mouse-right" class="desktop-mouse-key" title="右键" aria-label="鼠标右键">R</button>
+              <button type="button" id="desktop-mouse-right" class="desktop-mouse-key desktop-mouse-key-right" title="右键" aria-label="鼠标右键">R</button>
+              <button type="button" id="desktop-wheel-down" class="desktop-mouse-cardinal desktop-mouse-cardinal-down" title="向下滚动" aria-label="向下滚动">${icon("chevron-down")}</button>
             </div>
+            <label class="desktop-mouse-opacity" title="虚拟鼠标透明度">
+              <span aria-hidden="true">${icon("contrast")}</span>
+              <input id="desktop-mouse-opacity" type="range" min="${minMouseOpacity}" max="${maxMouseOpacity}" step="5" value="${defaultMouseOpacity}" aria-label="虚拟鼠标透明度">
+              <output id="desktop-mouse-opacity-value" for="desktop-mouse-opacity">${defaultMouseOpacity}%</output>
+            </label>
+            <button type="button" id="desktop-wheel-speed" class="desktop-wheel-speed" title="滚动灵敏度：点击切换" aria-label="滚动灵敏度，当前 2 倍" aria-live="polite">2×</button>
           </div>
         </div>
         <p id="desktop-capture-status" class="desktop-empty desktop-capture-notice" role="status">尚无窗口画面</p>
@@ -629,8 +636,8 @@ function constrainMouseControl(binding: Binding): void {
   if (bounds.width <= 0 || bounds.height <= 0) return;
   const ballWidth = ball.getBoundingClientRect().width || 44;
   const ballHeight = ball.getBoundingClientRect().height || 44;
-  const panelWidth = panel?.offsetWidth || 152;
-  const panelHeight = panel?.offsetHeight || 182;
+  const panelWidth = panel?.offsetWidth || 238;
+  const panelHeight = panel?.offsetHeight || 214;
   const currentLeft = Number.parseFloat(control.style.left);
   const currentTop = Number.parseFloat(control.style.top);
   const left = Math.max(8, Math.min(bounds.width - ballWidth - 8,
@@ -745,6 +752,10 @@ function updateDOM(binding: Binding): void {
     .forEach(button => { button.disabled = !clickReady; });
   root.querySelectorAll<HTMLButtonElement>("#desktop-wheel-up, #desktop-wheel-down")
     .forEach(button => { button.disabled = !scrollReady; });
+  const opacityInput = root.querySelector<HTMLInputElement>("#desktop-mouse-opacity")!;
+  opacityInput.value = String(state.mouseOpacity);
+  text("#desktop-mouse-opacity-value", `${state.mouseOpacity}%`);
+  root.querySelector<HTMLElement>("#desktop-mouse-core")!.style.opacity = String(state.mouseOpacity / 100);
   const wheelSpeed = root.querySelector<HTMLButtonElement>("#desktop-wheel-speed")!;
   const speed = wheelSpeeds[binding.scrollSpeedIndex];
   text("#desktop-wheel-speed", `${speed}×`);
@@ -1935,7 +1946,7 @@ export function bindDesktopPanel(detail: TaskDetail, notify: Notice): void {
     previewWidth: 0, previewHeight: 0, removePopover: () => {}, listeners: []};
   active = binding;
   root.querySelectorAll<HTMLInputElement | HTMLButtonElement | HTMLTextAreaElement>(
-    ".desktop-picture-bar button, .desktop-picture-bar input, .desktop-input-bar button, .desktop-input-bar textarea, .desktop-mouse button",
+    ".desktop-picture-bar button, .desktop-picture-bar input, .desktop-input-bar button, .desktop-input-bar textarea, .desktop-mouse button, .desktop-mouse input",
   ).forEach(control => { control.disabled = state.remote; });
   if (state.remote) {
     root.querySelectorAll<HTMLButtonElement>(".desktop-header-controls button").forEach(button => { button.disabled = true; });
@@ -2153,6 +2164,11 @@ export function bindDesktopPanel(detail: TaskDetail, notify: Notice): void {
     listen(binding, root.querySelector(selector), "click", () => clickPointer(button));
   mouseButton("#desktop-mouse-left", "left");
   mouseButton("#desktop-mouse-right", "right");
+  listen(binding, root.querySelector("#desktop-mouse-opacity"), "input", event => {
+    state.mouseOpacity = Math.max(minMouseOpacity,
+      Math.min(maxMouseOpacity, Number((event.target as HTMLInputElement).value) || defaultMouseOpacity));
+    updateDOM(binding);
+  });
   listen(binding, root.querySelector("#desktop-wheel-speed"), "click", () => {
     binding.scrollSpeedIndex = (binding.scrollSpeedIndex + 1) % wheelSpeeds.length;
     updateDOM(binding);

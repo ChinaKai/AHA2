@@ -810,6 +810,9 @@ test("floating virtual mouse drags, expands and sends button and wheel input", a
     const pointerPad = h.panel.querySelector("#desktop-pointer-pad");
     const pointerMarker = h.panel.querySelector("#desktop-pointer");
     const speed = h.panel.querySelector("#desktop-wheel-speed");
+    const opacity = h.panel.querySelector("#desktop-mouse-opacity");
+    const opacityValue = h.panel.querySelector("#desktop-mouse-opacity-value");
+    const mouseCore = h.panel.querySelector("#desktop-mouse-core");
     const writes = () => h.calls.filter(call => call.url.endsWith("/actions"));
     assert.equal(toggle.hidden, false);
     assert.equal(wheel.hidden, true);
@@ -818,6 +821,13 @@ test("floating virtual mouse drags, expands and sends button and wheel input", a
     assert.equal(toggle.getAttribute("aria-expanded"), "true");
     assert.equal(wheel.hidden, false);
     assert.equal(pointerMarker.hidden, false);
+    assert.equal(opacity.value, "70");
+    assert.equal(opacityValue.textContent, "70%");
+    assert.equal(mouseCore.style.opacity, "0.7");
+    opacity.value = "55";
+    opacity.fire("input");
+    assert.equal(opacityValue.textContent, "55%");
+    assert.equal(mouseCore.style.opacity, "0.55");
     h.panel.querySelector("#desktop-mouse-left").fire("click");
     await flush();
     assert.equal(writes().at(-1).payload.kind, "click");

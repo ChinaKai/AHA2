@@ -113,10 +113,13 @@ pointers have moved or a short settle interval expires. Scroll must accumulate
 center movement and emit queued wheel actions while the fingers move rather than
 waiting for pointer-up, while pinch must remain local and neither gesture may
 emit an extra remote click. Two-finger center movement uses a 2.5x scroll scale.
-A compact floating virtual mouse provides an alternative when touch gestures are
+A floating virtual mouse provides an alternative when touch gestures are
 inconvenient. The collapsed ball can be dragged anywhere inside the observation
-area and tapped to expand a panel with left/right click buttons, up/down wheel
-buttons, a two-dimensional pointer touchpad, and a scroll-speed button.
+area and tapped to expand a cardinal control surface. The large two-dimensional
+pointer touchpad is the visual center; left/right click buttons sit on its left
+and right, while scroll-up/down buttons sit above and below it. A compact
+scroll-speed control sits at the upper-right and an opacity slider at the
+upper-left.
 The expanded panel must expose a visible virtual pointer over the shared image;
 touchpad movement updates that marker immediately and sends coalesced `move`
 actions to the host. Host observations return the real cursor position when it is
@@ -124,10 +127,12 @@ inside the target; local movement remains authoritative briefly so an older
 in-flight frame cannot snap the marker backward. Left/right buttons click at the
 marker, not at the center of the viewport. The same touchpad also maps one-finger
 tap to left click, two-finger tap to right click, two-finger parallel swipe to
-wheel scroll, and two-finger pinch to local zoom. The expanded panel stays compact
-and translucent. Its scroll-speed button cycles through 1x, 2x and 4x; up/down
-buttons send 120px multiplied by the selected speed, with 2x as the default.
-That input shares the same serialized queue as touch gestures.
+wheel scroll, and two-finger pinch to local zoom. The cardinal control surface
+does not use a surrounding card. Its core controls support 30%-100% opacity
+without browser-storage side effects, while the utility controls remain legible.
+Its scroll-speed button cycles through 1x, 2x and 4x; up/down buttons send 120px
+multiplied by the selected speed, with 2x as the default. That input shares the
+same serialized queue as touch gestures.
 Local `Ctrl`/`Command` + wheel zoom is anchored at the pointer and preserves the
 logical desktop coordinate under it. Plain wheel remains foreground remote
 scrolling and must never be converted into local zoom. Zoom ranges from 100% to

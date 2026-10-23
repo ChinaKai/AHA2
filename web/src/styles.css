@@ -452,21 +452,36 @@ body.task-tool-resizing { cursor: col-resize; user-select: none; }
 .desktop-mouse-ball { display: grid; place-items: center; width: 44px; min-width: 44px; height: 44px; min-height: 44px; padding: 0; border: 1px solid rgb(255 255 255 / 28%); border-radius: 50%; background: rgb(37 51 70 / 94%); color: #fff; box-shadow: 0 4px 16px rgb(15 23 42 / 32%); cursor: grab; touch-action: none; backdrop-filter: blur(10px); }
 .desktop-mouse-ball .icon { width: 18px; height: 18px; }
 .desktop-mouse-ball[aria-expanded="true"] { border-color: #1d4ed8; background: #2563eb; box-shadow: 0 4px 18px rgb(37 99 235 / 38%); }
-.desktop-mouse-panel { position: absolute; top: 52px; left: 0; display: grid; gap: 6px; width: 152px; padding: 6px; border: 1px solid rgb(255 255 255 / 20%); border-radius: 8px; background: rgb(17 24 39 / 72%); color: #f8fafc; box-shadow: 0 8px 24px rgb(15 23 42 / 22%); backdrop-filter: blur(10px); }
+.desktop-mouse-panel { position: absolute; top: 52px; left: 0; width: 238px; height: 214px; color: #f8fafc; pointer-events: none; }
 .desktop-mouse.expand-left .desktop-mouse-panel { right: 0; left: auto; }
 .desktop-mouse.expand-up .desktop-mouse-panel { top: auto; bottom: 52px; }
-.desktop-pointer-pad { position: relative; display: grid; place-items: center; height: 72px; border: 1px solid rgb(255 255 255 / 14%); border-radius: 7px; background-color: rgb(255 255 255 / 5%); background-image: radial-gradient(rgb(255 255 255 / 17%) .6px, transparent .7px); background-size: 10px 10px; cursor: crosshair; touch-action: none; }
+.desktop-mouse-core { position: absolute; inset: 0; pointer-events: none; transition: opacity 100ms ease-out; }
+.desktop-pointer-pad { position: absolute; top: 39px; left: 51px; display: grid; place-items: center; width: 136px; height: 136px; overflow: hidden; border: 1px solid rgb(148 189 255 / 50%); border-radius: 34px; background-color: rgb(30 45 66 / 88%); background-image: radial-gradient(circle at 50% 48%, rgb(86 145 255 / 22%), transparent 27%), radial-gradient(rgb(255 255 255 / 25%) .8px, transparent 1px); background-size: auto, 12px 12px; box-shadow: 0 14px 32px rgb(15 23 42 / 25%), inset 0 1px rgb(255 255 255 / 16%); cursor: crosshair; pointer-events: auto; touch-action: none; backdrop-filter: blur(12px) saturate(125%); }
+.desktop-pointer-pad::before { position: absolute; width: 56px; height: 56px; border: 1px solid rgb(255 255 255 / 16%); border-radius: 50%; box-shadow: inset 0 0 18px rgb(96 165 250 / 12%); content: ""; pointer-events: none; }
 .desktop-pointer-pad.disabled { opacity: .45; cursor: default; pointer-events: none; }
-.desktop-pointer-pad.dragging { border-color: #60a5fa; background-color: rgb(37 99 235 / 20%); }
+.desktop-pointer-pad.dragging { border-color: #93c5fd; background-color: rgb(37 99 235 / 33%); }
 .desktop-pointer-pad-mark { display: grid; place-items: center; width: 28px; height: 28px; border: 1px solid rgb(255 255 255 / 18%); border-radius: 50%; color: rgb(255 255 255 / 68%); pointer-events: none; }
 .desktop-pointer-pad-mark .icon { width: 14px; height: 14px; fill: currentColor; }
-.desktop-mouse-lower { display: grid; grid-template-columns: 40px 48px 40px; align-items: center; justify-content: space-between; gap: 6px; }
-.desktop-mouse-panel button { width: 100%; min-width: 0; height: 24px; min-height: 24px; padding: 0; border: 1px solid rgb(255 255 255 / 14%); border-radius: 5px; background: rgb(255 255 255 / 7%); color: #f8fafc; }
-.desktop-mouse-panel button:hover { border-color: #60a5fa; background: rgb(37 99 235 / 30%); color: #fff; }
-.desktop-mouse-key { justify-self: center; width: 40px !important; height: 40px !important; min-height: 40px !important; border-radius: 50% !important; font-size: 12px; font-weight: 800; }
-.desktop-wheel-stack { display: grid; grid-template-rows: 22px 38px 22px; gap: 3px; }
-.desktop-wheel-speed { color: #bfdbfe !important; font-size: 11px; font-weight: 800; font-variant-numeric: tabular-nums; }
-.desktop-wheel-speed:hover { color: #fff !important; }
+.desktop-mouse-core button, .desktop-mouse-core .desktop-pointer-pad { pointer-events: auto; }
+.desktop-mouse-core button { position: absolute; display: grid; place-items: center; margin: 0; padding: 0; border: 1px solid rgb(255 255 255 / 56%); background: rgb(248 251 255 / 92%); color: #253246; box-shadow: 0 8px 22px rgb(15 23 42 / 19%), inset 0 1px #fff; backdrop-filter: blur(10px); }
+.desktop-mouse-core button:hover { border-color: #7ba8ff; background: #fff; color: #174ea6; }
+.desktop-mouse-core button:disabled { opacity: .45; }
+.desktop-mouse-core button .icon { width: 20px; height: 20px; }
+.desktop-mouse-cardinal { left: 89px; width: 60px !important; height: 40px !important; min-height: 40px !important; border-radius: 13px !important; }
+.desktop-mouse-cardinal-up { top: 0; }
+.desktop-mouse-cardinal-down { bottom: 0; }
+.desktop-mouse-key { top: 83px; width: 50px !important; height: 50px !important; min-height: 50px !important; border-radius: 50% !important; font-size: 10px; font-weight: 800; }
+.desktop-mouse-key-left { left: 0; }
+.desktop-mouse-key-right { right: 0; }
+.desktop-mouse-opacity { position: absolute; top: 4px; left: 0; z-index: 2; display: grid; grid-template-columns: 13px 31px 21px; align-items: center; gap: 3px; width: 86px; height: 27px; padding: 0 5px; border: 1px solid rgb(255 255 255 / 64%); border-radius: 10px; background: rgb(248 251 255 / 93%); color: #34445a; box-shadow: 0 6px 16px rgb(15 23 42 / 16%), inset 0 1px #fff; pointer-events: auto; backdrop-filter: blur(10px); }
+.desktop-mouse-opacity > span { display: grid; place-items: center; }
+.desktop-mouse-opacity .icon { width: 13px; height: 13px; }
+.desktop-mouse-opacity input[type="range"] { width: 31px !important; min-width: 31px !important; height: 20px !important; min-height: 20px !important; margin: 0; padding: 0; appearance: none; background: transparent; cursor: pointer; }
+.desktop-mouse-opacity input[type="range"]::-webkit-slider-runnable-track { height: 4px; border-radius: 999px; background: #d5deea; }
+.desktop-mouse-opacity input[type="range"]::-webkit-slider-thumb { width: 9px; height: 9px; margin-top: -2.5px; border: 2px solid #fff; border-radius: 50%; appearance: none; background: #3b6fd4; box-shadow: 0 1px 3px rgb(15 23 42 / 28%); }
+.desktop-mouse-opacity output { color: #42536a; font-size: 8px; font-weight: 800; font-variant-numeric: tabular-nums; text-align: right; }
+.desktop-wheel-speed { position: absolute; top: 4px; right: 0; z-index: 2; width: 36px !important; min-width: 36px !important; height: 27px !important; min-height: 27px !important; padding: 0; border: 1px solid rgb(147 197 253 / 44%); border-radius: 10px; background: rgb(37 99 235 / 84%); color: #fff; font-size: 10px; font-weight: 800; font-variant-numeric: tabular-nums; box-shadow: 0 5px 12px rgb(37 99 235 / 23%); pointer-events: auto; }
+.desktop-wheel-speed:hover { border-color: #bfdbfe; background: #1d4ed8; color: #fff; }
 @media (max-width: 360px) {
   .desktop-task-header { gap: 3px; padding: 6px 4px; }
   .desktop-header-controls, .desktop-task-header .task-tool-panel-actions { gap: 2px; }

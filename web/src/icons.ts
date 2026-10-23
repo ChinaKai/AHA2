@@ -28,6 +28,7 @@ const paths: Record<string, string> = {
   browser: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M7 6.5h.01M10 6.5h.01"/>',
   mouse: '<rect x="7" y="2" width="10" height="20" rx="5"/><path d="M12 2v7"/>',
   pointer: '<path d="m5 3 13 8-6 1.5-3 6z"/>',
+  contrast: '<circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor" stroke="none"/>',
   expand: '<path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"/><path d="m3 8 6-6M21 8l-6-6M3 16l6 6M21 16l-6 6"/>',
   panel: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M14 4v16"/>',
   pin: '<path d="m14 4 6 6"/><path d="m17 7-5 5"/><path d="m9 3 12 12-4 1-4 4-1-5L5 8z"/><path d="m5 19 4-4"/>',
