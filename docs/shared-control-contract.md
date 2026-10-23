@@ -104,9 +104,12 @@ flight. Owner can inspect element list, select a control by screenshot hit
 testing, invoke supported operations and set values through an explicit form.
 Background mode has no free-form keyboard passthrough. Foreground mode provides
 direct image clicks/drags/wheel, a Unicode text form and bounded key chords.
-On touch screens, one finger retains tap/drag semantics while a double tap sends
-a right click. Two-finger pinch performs local zoom only and must cancel the
-pending touch click so lifting the fingers never sends a remote pointer action.
+On touch screens, one finger retains tap/drag semantics and a double tap remains
+a left double click. Two-finger tap sends a right click, two-finger parallel
+swipe maps to remote wheel scroll, and two-finger pinch performs local zoom.
+The multi-touch arbiter must cancel the pending single-touch click and classify
+tap, swipe and pinch by movement threshold so a pinch or scroll never emits an
+extra remote click.
 Local `Ctrl`/`Command` + wheel zoom is anchored at the pointer and preserves the
 logical desktop coordinate under it. Plain wheel remains foreground remote
 scrolling and must never be converted into local zoom. Zoom ranges from 100% to

@@ -360,7 +360,7 @@ try {
     return {x: image.left + image.width * .58, y: image.top + image.height * .48};
   });
   const touchClient = await page.context().newCDPSession(page);
-  const actionsBeforeRightTap = actions.length;
+  const actionsBeforeDoubleTap = actions.length;
   await touchClient.send("Input.dispatchTouchEvent", {
     type: "touchStart", touchPoints: [{x: touchTarget.x, y: touchTarget.y, id: 1}],
   });
@@ -370,23 +370,56 @@ try {
     type: "touchStart", touchPoints: [{x: touchTarget.x, y: touchTarget.y, id: 2}],
   });
   await touchClient.send("Input.dispatchTouchEvent", {type: "touchEnd", touchPoints: []});
-  await waitUntil(() => actions.length > actionsBeforeRightTap, "mobile double tap right click");
-  assert.equal(actions.at(-1).kind, "click");
-  assert.equal(actions.at(-1).button, "right");
-  const actionsBeforePinch = actions.length;
-  const zoomBeforePinch = Number(await page.locator("#desktop-zoom").inputValue());
+  await waitUntil(() => actions.length > actionsBeforeDoubleTap, "mobile single-finger double click");
+  assert.equal(actions.at(-1).kind, "double_click");
+  await delay(120);
+  const actionsBeforeRightTap = actions.length;
   await touchClient.send("Input.dispatchTouchEvent", {
     type: "touchStart",
     touchPoints: [
-      {x: touchTarget.x - 30, y: touchTarget.y, id: 3},
-      {x: touchTarget.x + 30, y: touchTarget.y, id: 4},
+      {x: touchTarget.x - 25, y: touchTarget.y, id: 3},
+      {x: touchTarget.x + 25, y: touchTarget.y, id: 4},
+    ],
+  });
+  await touchClient.send("Input.dispatchTouchEvent", {type: "touchEnd", touchPoints: []});
+  await waitUntil(() => actions.length > actionsBeforeRightTap, "mobile two-finger right click");
+  assert.equal(actions.at(-1).kind, "click");
+  assert.equal(actions.at(-1).button, "right");
+  await delay(120);
+  const actionsBeforeTouchScroll = actions.length;
+  await touchClient.send("Input.dispatchTouchEvent", {
+    type: "touchStart",
+    touchPoints: [
+      {x: touchTarget.x - 25, y: touchTarget.y, id: 5},
+      {x: touchTarget.x + 25, y: touchTarget.y, id: 6},
     ],
   });
   await touchClient.send("Input.dispatchTouchEvent", {
     type: "touchMove",
     touchPoints: [
-      {x: touchTarget.x - 80, y: touchTarget.y, id: 3},
-      {x: touchTarget.x + 80, y: touchTarget.y, id: 4},
+      {x: touchTarget.x - 25, y: touchTarget.y - 80, id: 5},
+      {x: touchTarget.x + 25, y: touchTarget.y - 80, id: 6},
+    ],
+  });
+  await touchClient.send("Input.dispatchTouchEvent", {type: "touchEnd", touchPoints: []});
+  await waitUntil(() => actions.length > actionsBeforeTouchScroll, "mobile two-finger wheel scroll");
+  assert.equal(actions.at(-1).kind, "scroll");
+  assert.ok(actions.at(-1).delta_y >= 75);
+  await delay(120);
+  const actionsBeforePinch = actions.length;
+  const zoomBeforePinch = Number(await page.locator("#desktop-zoom").inputValue());
+  await touchClient.send("Input.dispatchTouchEvent", {
+    type: "touchStart",
+    touchPoints: [
+      {x: touchTarget.x - 30, y: touchTarget.y, id: 7},
+      {x: touchTarget.x + 30, y: touchTarget.y, id: 8},
+    ],
+  });
+  await touchClient.send("Input.dispatchTouchEvent", {
+    type: "touchMove",
+    touchPoints: [
+      {x: touchTarget.x - 80, y: touchTarget.y, id: 7},
+      {x: touchTarget.x + 80, y: touchTarget.y, id: 8},
     ],
   });
   await touchClient.send("Input.dispatchTouchEvent", {type: "touchEnd", touchPoints: []});

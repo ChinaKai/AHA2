@@ -722,7 +722,7 @@ test("foreground gestures map image pixels and serialize without replaying busy 
   } finally { h.close(); }
 });
 
-test("mobile double tap sends a right click and two-finger pinch zooms locally", async () => {
+test("mobile touch gestures distinguish double click, right click, wheel and pinch", async () => {
   const h = harness("touch-gestures", ({url}) => {
     if (url.endsWith("/windows")) return {windows: []};
     if (url.includes("/observation?")) return {observation: foregroundObservation()};
@@ -744,19 +744,39 @@ test("mobile double tap sends a right click and two-finger pinch zooms locally",
     tap(2, 40, 50);
     await flush();
     assert.equal(writes().length, 1);
-    assert.equal(writes()[0].payload.kind, "click");
-    assert.equal(writes()[0].payload.button, "right");
+    assert.equal(writes()[0].payload.kind, "double_click");
+    assert.equal(writes()[0].payload.button, "left");
 
     image.fire("pointerdown", {pointerType: "touch", pointerId: 3, clientX: 90, clientY: 100, button: 0});
     image.fire("pointerdown", {pointerType: "touch", pointerId: 4, clientX: 150, clientY: 100, button: 0});
-    image.fire("pointermove", {pointerType: "touch", pointerId: 4, clientX: 210, clientY: 100});
-    await flush();
-    assert.equal(writes().length, 1, "pinch must not send remote pointer input");
-    assert.ok(Number(h.panel.querySelector("#desktop-zoom").value) > 100);
-    image.fire("pointerup", {pointerType: "touch", pointerId: 4, clientX: 210, clientY: 100, button: 0});
+    image.fire("pointerup", {pointerType: "touch", pointerId: 4, clientX: 150, clientY: 100, button: 0});
     image.fire("pointerup", {pointerType: "touch", pointerId: 3, clientX: 90, clientY: 100, button: 0});
     await flush();
-    assert.equal(writes().length, 1);
+    assert.equal(writes().length, 2);
+    assert.equal(writes()[1].payload.kind, "click");
+    assert.equal(writes()[1].payload.button, "right");
+
+    image.fire("pointerdown", {pointerType: "touch", pointerId: 5, clientX: 90, clientY: 120, button: 0});
+    image.fire("pointerdown", {pointerType: "touch", pointerId: 6, clientX: 150, clientY: 120, button: 0});
+    image.fire("pointermove", {pointerType: "touch", pointerId: 5, clientX: 90, clientY: 80});
+    image.fire("pointermove", {pointerType: "touch", pointerId: 6, clientX: 150, clientY: 80});
+    image.fire("pointerup", {pointerType: "touch", pointerId: 6, clientX: 150, clientY: 80, button: 0});
+    image.fire("pointerup", {pointerType: "touch", pointerId: 5, clientX: 90, clientY: 80, button: 0});
+    await flush();
+    assert.equal(writes().length, 3);
+    assert.equal(writes()[2].payload.kind, "scroll");
+    assert.equal(writes()[2].payload.delta_y, 40);
+
+    image.fire("pointerdown", {pointerType: "touch", pointerId: 7, clientX: 90, clientY: 100, button: 0});
+    image.fire("pointerdown", {pointerType: "touch", pointerId: 8, clientX: 150, clientY: 100, button: 0});
+    image.fire("pointermove", {pointerType: "touch", pointerId: 8, clientX: 210, clientY: 100});
+    await flush();
+    assert.equal(writes().length, 3, "pinch must not send remote pointer input");
+    assert.ok(Number(h.panel.querySelector("#desktop-zoom").value) > 100);
+    image.fire("pointerup", {pointerType: "touch", pointerId: 8, clientX: 210, clientY: 100, button: 0});
+    image.fire("pointerup", {pointerType: "touch", pointerId: 7, clientX: 90, clientY: 100, button: 0});
+    await flush();
+    assert.equal(writes().length, 3);
   } finally { h.close(); }
 });
 
