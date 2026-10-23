@@ -434,14 +434,20 @@ try {
   assert.equal(actions.at(-1).kind, "scroll");
   assert.equal(actions.at(-1).delta_y, 120);
   const wheelPad = await page.locator("#desktop-wheel-pad").boundingBox();
+  const wheelThumbBefore = await page.locator("#desktop-wheel-pad .desktop-wheel-grip").boundingBox();
   const actionsBeforeWheelDrag = actions.length;
   await page.mouse.move(wheelPad.x + wheelPad.width / 2, wheelPad.y + wheelPad.height * .75);
   await page.mouse.down();
   await page.mouse.move(wheelPad.x + wheelPad.width / 2, wheelPad.y + wheelPad.height * .25, {steps: 3});
+  const wheelThumbDuring = await page.locator("#desktop-wheel-pad .desktop-wheel-grip").boundingBox();
+  assert.ok(wheelThumbDuring.y < wheelThumbBefore.y, "dragged wheel thumb follows the pointer");
   await page.mouse.up();
   await waitUntil(() => actions.length > actionsBeforeWheelDrag, "virtual wheel drag scroll");
   assert.equal(actions.at(-1).kind, "scroll");
   assert.ok(actions.at(-1).delta_y > 0);
+  await delay(150);
+  const wheelThumbAfter = await page.locator("#desktop-wheel-pad .desktop-wheel-grip").boundingBox();
+  assert.ok(Math.abs(wheelThumbAfter.y - wheelThumbBefore.y) < 1, "wheel thumb returns to its centered rest position");
   await page.screenshot({path: resolve(output, "mobile-touch-gestures-390.png")});
   await page.click("#desktop-wheel-toggle");
   for (const viewport of [{width: 1440, height: 1000}, {width: 390, height: 844}, {width: 320, height: 740}]) {

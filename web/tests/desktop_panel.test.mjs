@@ -801,6 +801,7 @@ test("virtual wheel toggles and sends fixed and dragged scroll input", async () 
     const toggle = h.panel.querySelector("#desktop-wheel-toggle");
     const wheel = h.panel.querySelector("#desktop-wheel");
     const pad = h.panel.querySelector("#desktop-wheel-pad");
+    const thumb = h.panel.querySelector("#desktop-wheel-pad .desktop-wheel-grip");
     const writes = () => h.calls.filter(call => call.url.endsWith("/actions"));
     assert.equal(toggle.hidden, false);
     assert.equal(wheel.hidden, true);
@@ -813,10 +814,12 @@ test("virtual wheel toggles and sends fixed and dragged scroll input", async () 
     assert.equal(writes().at(-1).payload.delta_y, -120);
     pad.fire("pointerdown", {pointerId: 11, clientX: 180, clientY: 120});
     pad.fire("pointermove", {pointerId: 11, clientX: 180, clientY: 90});
+    assert.match(thumb.style.transform, /^translateY\(-/);
     pad.fire("pointerup", {pointerId: 11, clientX: 180, clientY: 90});
     await flush();
     assert.equal(writes().at(-1).payload.kind, "scroll");
     assert.equal(writes().at(-1).payload.delta_y, 30);
+    assert.equal(thumb.style.transform, "");
     toggle.fire("click");
     assert.equal(toggle.getAttribute("aria-expanded"), "false");
     assert.equal(wheel.hidden, true);

@@ -73,6 +73,7 @@ interface WheelDrag {
   pointerID: number;
   lastX: number;
   lastY: number;
+  startY: number;
 }
 interface Binding {
   root: HTMLElement; state: PanelState; notify: Notice; timer: number;
@@ -381,7 +382,7 @@ export function renderDesktopPanel(detail: TaskDetail, header = ""): string {
         <button type="button" id="desktop-wheel-toggle" class="icon-button desktop-wheel-toggle" title="虚拟滚轮" aria-label="虚拟滚轮" aria-controls="desktop-wheel" aria-expanded="false" hidden>${icon("chevron-up")}</button>
         <div id="desktop-wheel" class="desktop-wheel" role="group" aria-label="虚拟滚轮" hidden>
           <button type="button" id="desktop-wheel-up" class="icon-button" title="向上滚动" aria-label="向上滚动">${icon("chevron-up")}</button>
-          <div id="desktop-wheel-pad" class="desktop-wheel-pad" role="group" aria-label="拖动滚动画面"><span class="desktop-wheel-grip" aria-hidden="true"></span></div>
+          <div id="desktop-wheel-pad" class="desktop-wheel-pad" role="group" aria-label="拖动滚动画面" title="拖动以连续滚动"><span class="desktop-wheel-grip" aria-hidden="true"></span></div>
           <button type="button" id="desktop-wheel-down" class="icon-button" title="向下滚动" aria-label="向下滚动">${icon("chevron-down")}</button>
         </div>
         <p id="desktop-capture-status" class="desktop-empty desktop-capture-notice" role="status">尚无窗口画面</p>
@@ -1734,10 +1735,17 @@ export function bindDesktopPanel(detail: TaskDetail, notify: Notice): void {
   };
   listen(binding, root.querySelector("#desktop-fit"), "click", () => setZoom(binding, 1));
   listen(binding, root.querySelector("#desktop-zoom"), "input", event => setZoom(binding, Number((event.target as HTMLInputElement).value) / 100));
+  const wheelPad = root.querySelector<HTMLElement>("#desktop-wheel-pad");
+  const wheelThumb = root.querySelector<HTMLElement>("#desktop-wheel-pad .desktop-wheel-grip");
+  const resetWheelThumb = () => {
+    wheelPad?.classList.toggle("dragging", false);
+    if (wheelThumb) wheelThumb.style.transform = "";
+  };
   listen(binding, root.querySelector("#desktop-wheel-toggle"), "click", () => {
     binding.wheelOpen = !binding.wheelOpen;
     if (!binding.wheelOpen) {
       binding.wheelDrag = null;
+      resetWheelThumb();
       flushWheel(binding, true);
     }
     updateDOM(binding);
@@ -1748,19 +1756,25 @@ export function bindDesktopPanel(detail: TaskDetail, notify: Notice): void {
   });
   wheelButton("#desktop-wheel-up", -120);
   wheelButton("#desktop-wheel-down", 120);
-  const wheelPad = root.querySelector<HTMLElement>("#desktop-wheel-pad");
   listen(binding, wheelPad, "pointerdown", event => {
     if (!inputAllowed(state, "scroll")) return;
-    binding.wheelDrag = {pointerID: event.pointerId, lastX: event.clientX, lastY: event.clientY};
+    binding.wheelDrag = {
+      pointerID: event.pointerId, lastX: event.clientX, lastY: event.clientY, startY: event.clientY,
+    };
     cancelGesture(binding);
     pauseObservation(binding);
     wheelPad?.setPointerCapture(event.pointerId);
+    wheelPad?.classList.toggle("dragging", true);
+    if (wheelThumb) wheelThumb.style.transform = "translateY(0)";
     event.preventDefault();
   });
   listen(binding, wheelPad, "pointermove", event => {
     const drag = binding.wheelDrag;
     if (!drag || drag.pointerID !== event.pointerId) return;
     event.preventDefault();
+    const travel = Math.max(0, (wheelPad?.clientHeight || 88) / 2 - 22);
+    const offset = Math.max(-travel, Math.min(travel, event.clientY - drag.startY));
+    if (wheelThumb) wheelThumb.style.transform = `translateY(${offset}px)`;
     queueWheel(binding, drag.lastX - event.clientX, drag.lastY - event.clientY, event.clientX, event.clientY);
     drag.lastX = event.clientX;
     drag.lastY = event.clientY;
@@ -1771,12 +1785,14 @@ export function bindDesktopPanel(detail: TaskDetail, notify: Notice): void {
     binding.wheelDrag = null;
     if (wheelPad?.hasPointerCapture(event.pointerId)) wheelPad.releasePointerCapture(event.pointerId);
     queueWheel(binding, drag.lastX - event.clientX, drag.lastY - event.clientY, event.clientX, event.clientY, true);
+    resetWheelThumb();
     event.preventDefault();
     schedule(binding);
   });
   listen(binding, wheelPad, "pointercancel", event => {
     if (binding.wheelDrag?.pointerID !== event.pointerId) return;
     binding.wheelDrag = null;
+    resetWheelThumb();
     flushWheel(binding, true);
     schedule(binding);
   });
