@@ -12,6 +12,11 @@ import (
 	"github.com/ChinaKai/AHA2/internal/domain"
 )
 
+var (
+	ErrChannelBotDialogueEnded    = errors.New("bot dialogue reply is blocked by an end decision")
+	ErrChannelBotDialogueMaxTurns = errors.New("bot dialogue reached its maximum turns")
+)
+
 func (s *Store) CreateChannelCapability(ctx context.Context, item domain.ChannelServiceCapability) error {
 	_, err := s.db.ExecContext(ctx, `INSERT INTO channel_service_capabilities(id,plugin_id,instance_id,token_hash,token_secret_ref,scopes_json,status,issued_at,expires_at,last_used_at,revoked_at,rotated_from_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
 		item.ID, item.PluginID, item.InstanceID, item.TokenHash, item.TokenSecretRef, encodeJSON(item.Scopes), item.Status,
@@ -808,10 +813,10 @@ func (s *Store) EnqueueAgentChannelReply(
 			return domain.ChannelDelivery{}, "", false, errors.New("group receipt is not eligible for a Task reply")
 		}
 		if state.isBot && state.decision == "end" {
-			return domain.ChannelDelivery{}, "", false, errors.New("bot dialogue reply is blocked by an end decision")
+			return domain.ChannelDelivery{}, "", false, ErrChannelBotDialogueEnded
 		}
 		if state.isBot && state.turnCount > state.maxTurns {
-			return domain.ChannelDelivery{}, "", false, errors.New("bot dialogue reached its maximum turns")
+			return domain.ChannelDelivery{}, "", false, ErrChannelBotDialogueMaxTurns
 		}
 		if state.isBot && state.decision == "" {
 			if _, err := tx.ExecContext(ctx, `

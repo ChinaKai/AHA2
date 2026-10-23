@@ -1796,10 +1796,28 @@ func (s *Service) SendAgentChannelReply(ctx context.Context, claims agentapi.Cla
 	delivery, conversationItemID, created, err := s.store.EnqueueAgentChannelReply(
 		ctx, claims.TaskID, claims.TurnID, requestID, receiptID, message, input.AttachmentIDs, s.now().UTC(),
 	)
-	if err == nil && created {
+	if err != nil {
+		reason := ""
+		switch {
+		case errors.Is(err, store.ErrChannelBotDialogueEnded):
+			reason = "reply_decision_end"
+		case errors.Is(err, store.ErrChannelBotDialogueMaxTurns):
+			reason = "bot_dialogue_max_turns"
+		}
+		if reason != "" {
+			s.application.SyncAgentChannelMessageStatuses(
+				ctx, claims.TaskID, claims.TurnID, receiptID, "reply_rejected", reason,
+			)
+		}
+		return delivery, err
+	}
+	if created {
 		s.application.PublishAgentChannelReply(ctx, claims.TaskID, claims.TurnID, conversationItemID)
 	}
-	return delivery, err
+	s.application.SyncAgentChannelMessageStatuses(
+		ctx, claims.TaskID, claims.TurnID, receiptID, "replied", "",
+	)
+	return delivery, nil
 }
 
 func (s *Service) PreviewAgentAction(ctx context.Context, claims agentapi.Claims, input ActionPreviewInput) (domain.ChannelPendingAction, error) {

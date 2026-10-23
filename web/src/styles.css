@@ -787,6 +787,12 @@ dd { margin: 3px 0 0; overflow-wrap: anywhere; font-size: 11px; }
 .aha-channel-route-card > div { border-top-color: #deeee5; }
 .aha-channel-route-card > div > div { grid-template-columns: minmax(92px,.8fr) minmax(0,1fr) auto; border-bottom-color: #e3efe8; }
 .aha-channel-route-card b { color: #166744; }
+.aha-channel-status-card[data-channel-status="not_replied"], .aha-channel-status-card[data-channel-status="pending_reply"] { border-color: #d9c58b; border-left-color: #b7791f; background: #fffaf0; }
+.aha-channel-status-card[data-channel-status="not_replied"] header, .aha-channel-status-card[data-channel-status="pending_reply"] header { border-bottom-color: #efe2bc; color: #8a5a14; }
+.aha-channel-status-card[data-channel-status="not_replied"] header > span, .aha-channel-status-card[data-channel-status="pending_reply"] header > span { background: #f8ebc8; color: #8a5a14; }
+.aha-channel-status-card[data-channel-status="failed"], .aha-channel-status-card[data-channel-status="interrupted"] { border-color: #e3bbb6; border-left-color: #b4443d; background: #fff8f7; }
+.aha-channel-status-card[data-channel-status="failed"] header, .aha-channel-status-card[data-channel-status="interrupted"] header { border-bottom-color: #efd6d2; color: #8f302b; }
+.aha-channel-status-card[data-channel-status="failed"] header > span, .aha-channel-status-card[data-channel-status="interrupted"] header > span { background: #fae5e2; color: #8f302b; }
 .aha-route-message { max-height: 220px; overflow: auto; padding: 9px 10px; color: #263445; font-size: 11px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
 .aha-status-card { margin: 0 8px 14px; overflow: hidden; border: 1px solid #ccd5df; border-left: 3px solid #64748b; border-radius: 4px; background: #fff; }
 .aha-status-card header { display: flex; align-items: center; gap: 8px; padding: 7px 9px; border-bottom: 1px solid #e3e7ec; color: #475569; font-size: 9px; }

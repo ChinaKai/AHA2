@@ -111,6 +111,8 @@ POST /api/v1/agent/channel/reply-decision
 `end` 只保留 AHA Web，并阻止本 Turn 后续渠道外发；`reply-decision=continue`
 仍可显式设置，但普通机器人回复不再要求额外调用。服务端始终执行渠道配置的
 机器人连续对话最大轮数。
+每个 task-routed 渠道回执都会在 Web 中形成一张按 receipt 去重的状态卡片，
+并随处理结果更新为回复已排队、等待回复、选择不回复、整轮无回复、失败或中断。
 真人发送者的群聊 Turn 继续沿用最终回复自动路由行为。
 
 群机器人候选不通过 Profile Sync 推导。当前渠道实例的自身机器人由运行时确认；其他机器人

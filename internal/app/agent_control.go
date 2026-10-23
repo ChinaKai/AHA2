@@ -230,7 +230,16 @@ func (s *Service) SetAgentChannelReplyDecision(ctx context.Context, claims agent
 	if !isBot {
 		return ErrAgentCallForbidden
 	}
-	return s.store.SetTurnChannelReplyDecision(ctx, claims.TurnID, claims.TaskID, claims.AgentID, decision)
+	if err := s.store.SetTurnChannelReplyDecision(ctx, claims.TurnID, claims.TaskID, claims.AgentID, decision); err != nil {
+		return err
+	}
+	terminalState := "decided_continue"
+	reason := "reply_decision_continue"
+	if decision == "end" {
+		terminalState, reason = "decided_end", "reply_decision_end"
+	}
+	s.SyncAgentChannelMessageStatuses(ctx, claims.TaskID, claims.TurnID, "", terminalState, reason)
+	return nil
 }
 
 func (s *Service) UpdateAgentMemory(ctx context.Context, claims agentapi.Claims, patch MemoryPatch) (domain.TaskMemory, error) {
@@ -317,6 +326,18 @@ func (s *Service) PublishAgentChannelReply(ctx context.Context, taskID, turnID, 
 	s.emit(ctx, taskID, "conversation", conversationItemID, "agent_channel_reply", map[string]any{
 		"turn_id": turnID, "conversation_item_id": conversationItemID,
 	})
+}
+
+func (s *Service) SyncAgentChannelMessageStatuses(ctx context.Context, taskID, turnID, receiptID, terminalState, reason string) {
+	items, err := s.store.ReconcileChannelMessageStatuses(ctx, taskID, turnID, receiptID, terminalState, reason, s.now().UTC())
+	if err != nil {
+		return
+	}
+	for _, item := range items {
+		s.emit(ctx, taskID, "conversation", item.ID, "agent_channel_status", map[string]any{
+			"turn_id": turnID, "receipt_id": receiptID,
+		})
+	}
 }
 
 func (s *Service) SubmitAgentKnowledge(ctx context.Context, claims agentapi.Claims, candidates []KnowledgeCandidate) ([]domain.KnowledgeEntry, error) {

@@ -304,6 +304,23 @@ function renderChannelRouteCard(item: ConversationItem): string {
   const payload = item.payload || {};
   const channel = payload.channel && typeof payload.channel === "object" ? payload.channel as Record<string, unknown> : {};
   const destination = String(channel.display_name || channel.instance_name || "外部渠道");
+  if (payload.status_card === true) {
+    const messageStatus = String(payload.message_status || "");
+    const reason = String(payload.status_reason || "");
+    const deliveryState = String(payload.delivery_state || "");
+    const status = messageStatus === "replied" ? (deliveryState === "delivered" ? "已回复" : "回复已排队") :
+      messageStatus === "pending_reply" ? "等待回复" : messageStatus === "not_replied" ? "未回复" :
+        messageStatus === "failed" ? "处理失败" : messageStatus === "interrupted" ? "已中断" : "已处理";
+    const detail = reason === "reply_decision_end" ? "已处理，Agent 选择结束机器人对话" :
+      reason === "reply_decision_continue" ? "已选择继续，等待渠道回复生成" :
+        reason === "no_channel_reply" ? "本轮处理完成，但未生成渠道回复" :
+          reason === "bot_dialogue_max_turns" ? "达到最大连续机器人轮数，未外发" :
+            reason === "turn_failed" ? "处理失败，未生成渠道回复" :
+              reason === "turn_interrupted" ? "处理已中断，未生成渠道回复" :
+                messageStatus === "replied" ? "已生成渠道回复" : "渠道消息处理结果";
+    const who = String((payload.actor as Record<string, unknown> | undefined)?.display_name || "渠道参与者");
+    return `<article class="aha-orchestration-card aha-channel-route-card aha-channel-status-card" data-channel-status="${escapeHTML(messageStatus)}"><header><strong>${icon("send")}AHA 渠道状态</strong><span>${escapeHTML(status)}</span><time>${systemCardTime(item)}</time></header><p>${escapeHTML(destination)} · ${escapeHTML(who)} · ${escapeHTML(detail)}</p>${payload.message ? `<div class="aha-route-message">${escapeHTML(String(payload.message))}</div>` : ""}</article>`;
+  }
   const state = String(payload.delivery_state || "pending");
   const status = state === "suppressed" ? "未外发" : state === "delivered" ? "已发送" : "已排队";
   const reason = String(payload.suppression_reason || "");

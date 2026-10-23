@@ -243,6 +243,13 @@ func TestAgentChannelReplyIsReceiptBoundAndIdempotent(t *testing.T) {
 	).Scan(&replyDecision); err != nil || replyDecision != "continue" {
 		t.Fatalf("bot reply decision=%q err=%v", replyDecision, err)
 	}
+	statuses, err := database.ReconcileChannelMessageStatuses(
+		ctx, task.ID, turn.ID, botReceiptID, "replied", "", now.Add(2*time.Second),
+	)
+	if err != nil || len(statuses) != 1 || statuses[0].Payload["message_status"] != "replied" ||
+		statuses[0].Payload["delivery_state"] != "pending" {
+		t.Fatalf("replied status cards=%#v err=%v", statuses, err)
+	}
 	if _, err := database.db.ExecContext(ctx,
 		`UPDATE turns SET channel_reply_decision='end' WHERE id=?`, turn.ID,
 	); err != nil {
@@ -266,6 +273,29 @@ func TestAgentChannelReplyIsReceiptBoundAndIdempotent(t *testing.T) {
 		!slices.ContainsFunc(deliveries, func(item domain.ChannelDelivery) bool { return item.ID == delivery.ID }) ||
 		!slices.ContainsFunc(deliveries, func(item domain.ChannelDelivery) bool { return item.ID == botDelivery.ID }) {
 		t.Fatalf("ordinary final reply leaked into task route: %#v err=%v", deliveries, err)
+	}
+}
+
+func TestChannelStatusOutcome(t *testing.T) {
+	for _, scenario := range []struct {
+		name, terminal, reason, decision string
+		replied                          bool
+		wantStatus, wantReason           string
+	}{
+		{"replied", "succeeded", "", "", true, "replied", ""},
+		{"decision end", "decided_end", "reply_decision_end", "end", false, "not_replied", "reply_decision_end"},
+		{"continue pending", "decided_continue", "reply_decision_continue", "continue", false, "pending_reply", "reply_decision_continue"},
+		{"turn success silent", "succeeded", "", "", false, "not_replied", "no_channel_reply"},
+		{"turn failed", "failed", "", "", false, "failed", "turn_failed"},
+		{"turn interrupted", "interrupted", "", "", false, "interrupted", "turn_interrupted"},
+		{"max turns", "reply_rejected", "bot_dialogue_max_turns", "", false, "not_replied", "bot_dialogue_max_turns"},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			status, reason := channelStatusOutcome(scenario.terminal, scenario.reason, scenario.decision, scenario.replied)
+			if status != scenario.wantStatus || reason != scenario.wantReason {
+				t.Fatalf("status=%q reason=%q", status, reason)
+			}
+		})
 	}
 }
 
