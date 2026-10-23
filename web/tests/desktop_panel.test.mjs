@@ -763,29 +763,35 @@ test("mobile touch gestures distinguish double click, right click, wheel and pin
     await flush();
     assert.equal(writes().length, 3);
     assert.equal(writes()[2].payload.kind, "scroll");
-    assert.equal(writes()[2].payload.delta_y, 40);
+    assert.equal(writes()[2].payload.delta_y, 100);
     image.fire("pointermove", {pointerType: "touch", pointerId: 5, clientX: 90, clientY: 40});
     image.fire("pointermove", {pointerType: "touch", pointerId: 6, clientX: 150, clientY: 40});
     await flush();
-    assert.equal(writes().length, 4, "parallel movement sends scroll before pointer-up");
-    assert.equal(writes()[3].payload.delta_y, 40);
+    h.tick();
+    await flush();
+    const continuedScroll = writes().slice(3)
+      .filter(call => call.payload.kind === "scroll")
+      .reduce((total, call) => total + call.payload.delta_y, 0);
+    assert.ok(writes().length > 3, "parallel movement sends scroll before pointer-up");
+    assert.equal(continuedScroll, 100);
     image.fire("pointerup", {pointerType: "touch", pointerId: 6, clientX: 150, clientY: 40, button: 0});
     image.fire("pointerup", {pointerType: "touch", pointerId: 5, clientX: 90, clientY: 40, button: 0});
     await flush();
+    const writesBeforePinch = writes().length;
 
     image.fire("pointerdown", {pointerType: "touch", pointerId: 7, clientX: 90, clientY: 100, button: 0});
     image.fire("pointerdown", {pointerType: "touch", pointerId: 8, clientX: 150, clientY: 100, button: 0});
     image.fire("pointermove", {pointerType: "touch", pointerId: 8, clientX: 210, clientY: 100});
     await flush();
-    assert.equal(writes().length, 4, "one moving pointer must wait for the second before deciding");
+    assert.equal(writes().length, writesBeforePinch, "one moving pointer must wait for the second before deciding");
     h.tick();
     await flush();
-    assert.equal(writes().length, 4, "pinch must not send remote pointer input");
+    assert.equal(writes().length, writesBeforePinch, "pinch must not send remote pointer input");
     assert.ok(Number(h.panel.querySelector("#desktop-zoom").value) > 100);
     image.fire("pointerup", {pointerType: "touch", pointerId: 8, clientX: 210, clientY: 100, button: 0});
     image.fire("pointerup", {pointerType: "touch", pointerId: 7, clientX: 90, clientY: 100, button: 0});
     await flush();
-    assert.equal(writes().length, 4);
+    assert.equal(writes().length, writesBeforePinch);
   } finally { h.close(); }
 });
 
@@ -824,14 +830,14 @@ test("floating virtual mouse drags, expands and sends button and wheel input", a
     h.panel.querySelector("#desktop-wheel-up").fire("click");
     await flush();
     assert.equal(writes().at(-1).payload.kind, "scroll");
-    assert.equal(writes().at(-1).payload.delta_y, -120);
+    assert.equal(writes().at(-1).payload.delta_y, -240);
     pad.fire("pointerdown", {pointerId: 11, clientX: 180, clientY: 120});
     pad.fire("pointermove", {pointerId: 11, clientX: 180, clientY: 90});
     assert.match(thumb.style.transform, /^translateY\(-/);
     pad.fire("pointerup", {pointerId: 11, clientX: 180, clientY: 90});
     await flush();
     assert.equal(writes().at(-1).payload.kind, "scroll");
-    assert.equal(writes().at(-1).payload.delta_y, 150);
+    assert.equal(writes().at(-1).payload.delta_y, 240);
     assert.equal(thumb.style.transform, "");
     pointerPad.fire("pointerdown", {pointerId: 10, clientX: 100, clientY: 100});
     pointerPad.fire("pointermove", {pointerId: 10, clientX: 130, clientY: 120});

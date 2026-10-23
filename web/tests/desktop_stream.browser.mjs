@@ -453,6 +453,71 @@ try {
   const pointerAfter = await page.locator("#desktop-pointer").boundingBox();
   assert.ok(pointerAfter.x > pointerBefore.x,
     `visible virtual pointer follows touch-pad movement: ${JSON.stringify({pointerBefore, pointerAfter, move: actions.findLast(action => action.kind === "move")})}`);
+  await page.waitForFunction(() => !document.querySelector("#desktop-pointer-pad").classList.contains("disabled"));
+  const actionsBeforePointerTap = actions.length;
+  await touchClient.send("Input.dispatchTouchEvent", {
+    type: "touchStart",
+    touchPoints: [{x: pointerPad.x + pointerPad.width * .5, y: pointerPad.y + pointerPad.height * .5, id: 12}],
+  });
+  await touchClient.send("Input.dispatchTouchEvent", {type: "touchEnd", touchPoints: []});
+  await waitUntil(() => actions.length > actionsBeforePointerTap, "virtual touch-pad tap");
+  assert.equal(actions.at(-1).kind, "click");
+  assert.equal(actions.at(-1).button, "left");
+  await page.waitForFunction(() => !document.querySelector("#desktop-pointer-pad").classList.contains("disabled"));
+  const actionsBeforePointerRightTap = actions.length;
+  await touchClient.send("Input.dispatchTouchEvent", {
+    type: "touchStart",
+    touchPoints: [
+      {x: pointerPad.x + pointerPad.width * .42, y: pointerPad.y + pointerPad.height * .5, id: 13},
+      {x: pointerPad.x + pointerPad.width * .58, y: pointerPad.y + pointerPad.height * .5, id: 14},
+    ],
+  });
+  await touchClient.send("Input.dispatchTouchEvent", {type: "touchEnd", touchPoints: []});
+  await waitUntil(() => actions.length > actionsBeforePointerRightTap, "virtual touch-pad two-finger right click");
+  assert.equal(actions.at(-1).kind, "click");
+  assert.equal(actions.at(-1).button, "right");
+  await page.waitForFunction(() => !document.querySelector("#desktop-pointer-pad").classList.contains("disabled"));
+  const actionsBeforePointerScroll = actions.length;
+  await touchClient.send("Input.dispatchTouchEvent", {
+    type: "touchStart",
+    touchPoints: [
+      {x: pointerPad.x + pointerPad.width * .42, y: pointerPad.y + pointerPad.height * .65, id: 15},
+      {x: pointerPad.x + pointerPad.width * .58, y: pointerPad.y + pointerPad.height * .65, id: 16},
+    ],
+  });
+  await touchClient.send("Input.dispatchTouchEvent", {
+    type: "touchMove",
+    touchPoints: [
+      {x: pointerPad.x + pointerPad.width * .42, y: pointerPad.y + pointerPad.height * .25, id: 15},
+      {x: pointerPad.x + pointerPad.width * .58, y: pointerPad.y + pointerPad.height * .25, id: 16},
+    ],
+  });
+  await touchClient.send("Input.dispatchTouchEvent", {type: "touchEnd", touchPoints: []});
+  await waitUntil(() => actions.length > actionsBeforePointerScroll, "virtual touch-pad two-finger scroll");
+  assert.equal(actions.at(-1).kind, "scroll");
+  await page.waitForFunction(() => !document.querySelector("#desktop-pointer-pad").classList.contains("disabled"));
+  const actionsBeforePointerPinch = actions.length;
+  const zoomBeforePointerPinch = Number(await page.locator("#desktop-zoom").inputValue());
+  await touchClient.send("Input.dispatchTouchEvent", {
+    type: "touchStart",
+    touchPoints: [
+      {x: pointerPad.x + pointerPad.width * .42, y: pointerPad.y + pointerPad.height * .5, id: 17},
+      {x: pointerPad.x + pointerPad.width * .58, y: pointerPad.y + pointerPad.height * .5, id: 18},
+    ],
+  });
+  await touchClient.send("Input.dispatchTouchEvent", {
+    type: "touchMove",
+    touchPoints: [
+      {x: pointerPad.x + pointerPad.width * .2, y: pointerPad.y + pointerPad.height * .5, id: 17},
+      {x: pointerPad.x + pointerPad.width * .8, y: pointerPad.y + pointerPad.height * .5, id: 18},
+    ],
+  });
+  await touchClient.send("Input.dispatchTouchEvent", {type: "touchEnd", touchPoints: []});
+  await delay(150);
+  assert.ok(Number(await page.locator("#desktop-zoom").inputValue()) > zoomBeforePointerPinch,
+    "virtual touch-pad pinch zooms locally");
+  assert.equal(actions.length, actionsBeforePointerPinch, "virtual touch-pad pinch sends no remote action");
+  await page.click("#desktop-fit");
   const actionsBeforeLeftButton = actions.length;
   await page.click("#desktop-mouse-left");
   await waitUntil(() => actions.length > actionsBeforeLeftButton, "virtual mouse left click");
@@ -467,7 +532,7 @@ try {
   await page.click("#desktop-wheel-down");
   await waitUntil(() => actions.length > actionsBeforeWheelButton, "virtual wheel button scroll");
   assert.equal(actions.at(-1).kind, "scroll");
-  assert.equal(actions.at(-1).delta_y, 120);
+  assert.equal(actions.at(-1).delta_y, 240);
   const mouseBallBefore = await page.locator("#desktop-mouse-ball").boundingBox();
   await touchClient.send("Input.dispatchTouchEvent", {
     type: "touchStart",
@@ -511,7 +576,7 @@ try {
     const mouseBounds = await page.evaluate(() => {
       const panel = document.querySelector("#desktop-mouse-panel").getBoundingClientRect();
       const observation = document.querySelector(".desktop-observation").getBoundingClientRect();
-      return {panel: {left: panel.left, top: panel.top, right: panel.right, bottom: panel.bottom},
+      return {panel: {left: panel.left, top: panel.top, right: panel.right, bottom: panel.bottom, width: panel.width, height: panel.height},
         observation: {left: observation.left, top: observation.top, right: observation.right, bottom: observation.bottom}};
     });
     assert.ok(mouseBounds.panel.left >= mouseBounds.observation.left - 1
@@ -519,6 +584,8 @@ try {
       && mouseBounds.panel.right <= mouseBounds.observation.right + 1
       && mouseBounds.panel.bottom <= mouseBounds.observation.bottom + 1,
     `virtual mouse panel stays inside the ${viewport.width}px observation`);
+    assert.ok(mouseBounds.panel.width <= 152 && mouseBounds.panel.height <= 182,
+      `compact virtual mouse panel at ${viewport.width}px`);
     await page.click("#desktop-mouse-ball");
     await page.click('[data-desktop-video="bandwidth"]');
     await waitUntil(() => preferences.at(-1).quality === 45, "bandwidth profile");

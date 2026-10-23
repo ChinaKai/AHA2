@@ -452,23 +452,23 @@ body.task-tool-resizing { cursor: col-resize; user-select: none; }
 .desktop-mouse-ball { display: grid; place-items: center; width: 44px; min-width: 44px; height: 44px; min-height: 44px; padding: 0; border: 1px solid rgb(255 255 255 / 28%); border-radius: 50%; background: rgb(37 51 70 / 94%); color: #fff; box-shadow: 0 4px 16px rgb(15 23 42 / 32%); cursor: grab; touch-action: none; backdrop-filter: blur(10px); }
 .desktop-mouse-ball .icon { width: 18px; height: 18px; }
 .desktop-mouse-ball[aria-expanded="true"] { border-color: #1d4ed8; background: #2563eb; box-shadow: 0 4px 18px rgb(37 99 235 / 38%); }
-.desktop-mouse-panel { position: absolute; top: 52px; left: 0; display: grid; gap: 8px; width: 184px; padding: 8px; border: 1px solid rgb(255 255 255 / 22%); border-radius: 8px; background: rgb(24 34 48 / 94%); color: #f8fafc; box-shadow: 0 8px 24px rgb(15 23 42 / 30%); backdrop-filter: blur(12px); }
+.desktop-mouse-panel { position: absolute; top: 52px; left: 0; display: grid; gap: 6px; width: 152px; padding: 6px; border: 1px solid rgb(255 255 255 / 20%); border-radius: 8px; background: rgb(17 24 39 / 72%); color: #f8fafc; box-shadow: 0 8px 24px rgb(15 23 42 / 22%); backdrop-filter: blur(10px); }
 .desktop-mouse.expand-left .desktop-mouse-panel { right: 0; left: auto; }
 .desktop-mouse.expand-up .desktop-mouse-panel { top: auto; bottom: 52px; }
-.desktop-pointer-pad { position: relative; display: grid; place-items: center; height: 96px; border: 1px solid rgb(255 255 255 / 18%); border-radius: 8px; background-color: rgb(255 255 255 / 7%); background-image: radial-gradient(rgb(255 255 255 / 25%) .7px, transparent .8px); background-size: 12px 12px; cursor: crosshair; touch-action: none; }
+.desktop-pointer-pad { position: relative; display: grid; place-items: center; height: 72px; border: 1px solid rgb(255 255 255 / 14%); border-radius: 7px; background-color: rgb(255 255 255 / 5%); background-image: radial-gradient(rgb(255 255 255 / 17%) .6px, transparent .7px); background-size: 10px 10px; cursor: crosshair; touch-action: none; }
 .desktop-pointer-pad.disabled { opacity: .45; cursor: default; pointer-events: none; }
 .desktop-pointer-pad.dragging { border-color: #60a5fa; background-color: rgb(37 99 235 / 20%); }
-.desktop-pointer-pad-mark { display: grid; place-items: center; width: 34px; height: 34px; border: 1px solid rgb(255 255 255 / 22%); border-radius: 50%; color: rgb(255 255 255 / 75%); pointer-events: none; }
-.desktop-pointer-pad-mark .icon { width: 17px; height: 17px; fill: currentColor; }
-.desktop-mouse-lower { display: grid; grid-template-columns: 50px 54px 50px; align-items: center; justify-content: space-between; gap: 7px; }
-.desktop-mouse-panel button { width: 100%; min-width: 0; height: 30px; min-height: 30px; padding: 0; border: 1px solid rgb(255 255 255 / 18%); border-radius: 6px; background: rgb(255 255 255 / 10%); color: #f8fafc; }
+.desktop-pointer-pad-mark { display: grid; place-items: center; width: 28px; height: 28px; border: 1px solid rgb(255 255 255 / 18%); border-radius: 50%; color: rgb(255 255 255 / 68%); pointer-events: none; }
+.desktop-pointer-pad-mark .icon { width: 14px; height: 14px; fill: currentColor; }
+.desktop-mouse-lower { display: grid; grid-template-columns: 40px 48px 40px; align-items: center; justify-content: space-between; gap: 6px; }
+.desktop-mouse-panel button { width: 100%; min-width: 0; height: 24px; min-height: 24px; padding: 0; border: 1px solid rgb(255 255 255 / 14%); border-radius: 5px; background: rgb(255 255 255 / 7%); color: #f8fafc; }
 .desktop-mouse-panel button:hover { border-color: #60a5fa; background: rgb(37 99 235 / 30%); color: #fff; }
-.desktop-mouse-key { justify-self: center; width: 50px !important; height: 50px !important; min-height: 50px !important; border-radius: 50% !important; font-size: 13px; font-weight: 800; }
-.desktop-wheel-stack { display: grid; grid-template-rows: 28px 48px 28px; gap: 4px; }
-.desktop-wheel-pad { position: relative; display: grid; place-items: center; min-height: 48px; border: 1px solid rgb(255 255 255 / 18%); border-radius: 6px; background: rgb(255 255 255 / 8%); cursor: grab; touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+.desktop-mouse-key { justify-self: center; width: 40px !important; height: 40px !important; min-height: 40px !important; border-radius: 50% !important; font-size: 12px; font-weight: 800; }
+.desktop-wheel-stack { display: grid; grid-template-rows: 22px 38px 22px; gap: 3px; }
+.desktop-wheel-pad { position: relative; display: grid; place-items: center; min-height: 38px; border: 1px solid rgb(255 255 255 / 14%); border-radius: 5px; background: rgb(255 255 255 / 6%); cursor: grab; touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
 .desktop-wheel-pad.dragging { cursor: grabbing; border-color: #60a5fa; background: rgb(37 99 235 / 24%); }
-.desktop-wheel-grip { position: relative; width: 22px; height: 30px; border: 1px solid rgb(255 255 255 / 38%); border-radius: 5px; background: rgb(255 255 255 / 16%); box-shadow: 0 1px 4px rgb(0 0 0 / 28%), inset 0 1px rgb(255 255 255 / 20%); pointer-events: none; transition: transform 100ms ease-out; }
-.desktop-wheel-grip::after { position: absolute; inset: 9px 5px; border-top: 2px solid rgb(255 255 255 / 62%); border-bottom: 2px solid rgb(255 255 255 / 62%); content: ""; }
+.desktop-wheel-grip { position: relative; width: 20px; height: 24px; border: 1px solid rgb(255 255 255 / 34%); border-radius: 5px; background: rgb(255 255 255 / 13%); box-shadow: 0 1px 4px rgb(0 0 0 / 24%), inset 0 1px rgb(255 255 255 / 18%); pointer-events: none; transition: transform 100ms ease-out; }
+.desktop-wheel-grip::after { position: absolute; inset: 7px 5px; border-top: 1px solid rgb(255 255 255 / 58%); border-bottom: 1px solid rgb(255 255 255 / 58%); content: ""; }
 .desktop-wheel-pad.dragging .desktop-wheel-grip { border-color: #93c5fd; background: rgb(96 165 250 / 34%); transition: none; }
 @media (max-width: 360px) {
   .desktop-task-header { gap: 3px; padding: 6px 4px; }

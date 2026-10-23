@@ -92,8 +92,12 @@ interface PointerQueue {
 }
 interface PointerDrag {
   pointerID: number;
+  startX: number;
+  startY: number;
   lastX: number;
   lastY: number;
+  startedAt: number;
+  moved: boolean;
 }
 interface Binding {
   root: HTMLElement; state: PanelState; notify: Notice; timer: number;
@@ -104,6 +108,7 @@ interface Binding {
   wheelQueue: WheelQueue; wheelDrag: WheelDrag | null;
   mouseOpen: boolean; mouseDrag: MouseControlDrag | null; mouseSuppressClick: boolean;
   pointerQueue: PointerQueue; pointerDrag: PointerDrag | null; pointerLocalAt: number;
+  mousePadPointers: Map<number, {x: number; y: number}>; mousePadGesture: TouchGesture | null;
   refreshWindows: boolean;
   viewID: string; socket: WebSocket | null; socketKey: string; socketGeneration: number;
   socketReady: boolean; socketTimer: number; retries: number; retryAt: number; retryKey: string;
@@ -126,9 +131,10 @@ const frameProfiles: FrameOptions[] = [
 const maxDesktopZoom = 5;
 const touchSettleMS = 80;
 const touchScrollMin = 12;
+const touchScrollScale = 2.5;
 const wheelQueueStep = 24;
 const wheelFlushMS = 40;
-const wheelDragScale = 5;
+const wheelDragScale = 8;
 const pointerFlushMS = 50;
 const pointerMoveScale = 1.6;
 
@@ -567,6 +573,56 @@ function queuePointerMove(binding: Binding, x: number, y: number, force = false)
   else schedulePointerMove(binding);
 }
 
+function classifyMousePadGesture(binding: Binding, gesture: TouchGesture, settle = false): void {
+  if (gesture.mode !== "pending") return;
+  const geometry = pinchGeometry(binding.mousePadPointers);
+  if (!geometry || gesture.initialDistance <= 0) return;
+  const centerMoved = Math.hypot(geometry.centerX - gesture.initialCenterX, geometry.centerY - gesture.initialCenterY);
+  const distanceMoved = Math.abs(geometry.distance - gesture.initialDistance);
+  const movements = Array.from(binding.mousePadPointers).flatMap(([id, point]) => {
+    const start = gesture.startPointers.get(id);
+    return start ? [{x: point.x - start.x, y: point.y - start.y}] : [];
+  });
+  const bothMoving = movements.length === 2
+    && movements.every(move => Math.hypot(move.x, move.y) >= 6);
+  const sameDirection = bothMoving
+    && movements[0].x * movements[1].x + movements[0].y * movements[1].y > 0;
+  const strongPinch = bothMoving
+    && distanceMoved > Math.max(12, gesture.initialDistance * .1)
+    && distanceMoved >= centerMoved * .85;
+  if (bothMoving && sameDirection && centerMoved >= touchScrollMin && centerMoved >= distanceMoved * .75) {
+    gesture.mode = "scroll";
+  } else if (strongPinch) {
+    gesture.mode = "pinch";
+  } else if (settle && centerMoved >= touchScrollMin && centerMoved >= distanceMoved * .8) {
+    gesture.mode = "scroll";
+  } else if (settle && distanceMoved > 10 && distanceMoved > centerMoved * .9) {
+    gesture.mode = "pinch";
+  }
+  if (gesture.mode === "pending") return;
+  if (gesture.classifyTimer) {
+    window.clearTimeout(gesture.classifyTimer);
+    gesture.classifyTimer = 0;
+  }
+  gesture.lastScrollCenterX = geometry.centerX;
+  gesture.lastScrollCenterY = geometry.centerY;
+  if (gesture.mode === "scroll") {
+    const point = pointerClientPoint(binding);
+    if (point) queueWheel(binding, (gesture.initialCenterX - geometry.centerX) * touchScrollScale,
+      (gesture.initialCenterY - geometry.centerY) * touchScrollScale, point.clientX, point.clientY);
+  } else {
+    const point = pointerClientPoint(binding);
+    applyZoomAt(binding, gesture.initialZoom * geometry.distance / gesture.initialDistance, point || undefined);
+  }
+}
+
+function cancelMousePadGesture(binding: Binding): void {
+  if (binding.mousePadGesture?.classifyTimer) window.clearTimeout(binding.mousePadGesture.classifyTimer);
+  binding.mousePadGesture = null;
+  binding.mousePadPointers.clear();
+  binding.pointerDrag = null;
+}
+
 function constrainMouseControl(binding: Binding): void {
   if (!current(binding)) return;
   const control = binding.root.querySelector<HTMLElement>("#desktop-mouse");
@@ -578,8 +634,8 @@ function constrainMouseControl(binding: Binding): void {
   if (bounds.width <= 0 || bounds.height <= 0) return;
   const ballWidth = ball.getBoundingClientRect().width || 44;
   const ballHeight = ball.getBoundingClientRect().height || 44;
-  const panelWidth = panel?.offsetWidth || 184;
-  const panelHeight = panel?.offsetHeight || 232;
+  const panelWidth = panel?.offsetWidth || 152;
+  const panelHeight = panel?.offsetHeight || 182;
   const currentLeft = Number.parseFloat(control.style.left);
   const currentTop = Number.parseFloat(control.style.top);
   const left = Math.max(8, Math.min(bounds.width - ballWidth - 8,
@@ -685,7 +741,8 @@ function updateDOM(binding: Binding): void {
   preview.hidden = !hasImage;
   const scrollReady = hasImage && actionable(state) && inputAllowed(state, "scroll");
   const clickReady = hasImage && actionable(state) && inputAllowed(state, "click");
-  const moveReady = hasImage && inputAllowed(state, "move") && (Boolean(binding.pointerDrag) || actionable(state));
+  const moveReady = hasImage && inputAllowed(state, "move") &&
+    (Boolean(binding.pointerDrag || binding.mousePadGesture) || actionable(state));
   root.querySelector<HTMLElement>("#desktop-mouse")!.hidden = !hasImage;
   root.querySelector<HTMLButtonElement>("#desktop-mouse-ball")!.setAttribute("aria-expanded", String(binding.mouseOpen));
   root.querySelector<HTMLElement>("#desktop-mouse-panel")!.hidden = !binding.mouseOpen || !hasImage;
@@ -1522,7 +1579,8 @@ function classifyTouchGesture(binding: Binding, touch: TouchGesture, settle = fa
   if (touch.mode === "scroll") {
     const pointer = imagePointAt(binding, geometry.centerX, geometry.centerY);
     if (pointer) setVirtualPointer(binding, pointer.x, pointer.y);
-    queueWheel(binding, touch.initialCenterX - geometry.centerX, touch.initialCenterY - geometry.centerY,
+    queueWheel(binding, (touch.initialCenterX - geometry.centerX) * touchScrollScale,
+      (touch.initialCenterY - geometry.centerY) * touchScrollScale,
       geometry.centerX, geometry.centerY);
   } else if (touch.mode === "pinch") {
     applyZoomAt(binding, touch.initialZoom * geometry.distance / touch.initialDistance,
@@ -1625,7 +1683,8 @@ function bindInput(binding: Binding): void {
     } else if (touch.mode === "scroll") {
       const pointer = imagePointAt(binding, geometry.centerX, geometry.centerY);
       if (pointer) setVirtualPointer(binding, pointer.x, pointer.y);
-      queueWheel(binding, touch.lastScrollCenterX - geometry.centerX, touch.lastScrollCenterY - geometry.centerY,
+      queueWheel(binding, (touch.lastScrollCenterX - geometry.centerX) * touchScrollScale,
+        (touch.lastScrollCenterY - geometry.centerY) * touchScrollScale,
         geometry.centerX, geometry.centerY);
       touch.lastScrollCenterX = geometry.centerX;
       touch.lastScrollCenterY = geometry.centerY;
@@ -1870,6 +1929,7 @@ export function bindDesktopPanel(detail: TaskDetail, notify: Notice): void {
     wheelQueue: {pendingX: 0, pendingY: 0, clientX: 0, clientY: 0, timer: 0}, wheelDrag: null,
     mouseOpen: false, mouseDrag: null, mouseSuppressClick: false,
     pointerQueue: {x: 0, y: 0, timer: 0, dirty: false}, pointerDrag: null, pointerLocalAt: 0,
+    mousePadPointers: new Map(), mousePadGesture: null,
     viewID: randomID(), socket: null, socketKey: "", socketGeneration: 0, socketReady: false, socketTimer: 0,
     retries: 0, retryAt: 0, retryKey: "", decoding: false, decoder: null, decodeTimer: 0, blobURLs: new Set(),
     imageURL: "", lastFrameAt: 0, lastStatusAt: 0, decodePending: 0, pendingText: null, removeLayout: () => {},
@@ -1968,22 +2028,84 @@ export function bindDesktopPanel(detail: TaskDetail, notify: Notice): void {
     constrainMouseControl(binding);
   });
   const pointerPad = root.querySelector<HTMLElement>("#desktop-pointer-pad");
+  const clickPointer = (button: "left" | "right") => {
+    ensurePointer(binding);
+    if (actionable(state) && inputAllowed(state, "click")) {
+      performInput(binding, "click", {x: state.pointerX, y: state.pointerY, button}, state.observation?.id);
+    }
+  };
   listen(binding, pointerPad, "pointerdown", event => {
     if (!ensurePointer(binding) || !inputAllowed(state, "move")) return;
-    binding.pointerDrag = {pointerID: event.pointerId, lastX: event.clientX, lastY: event.clientY};
     cancelGesture(binding);
     pauseObservation(binding);
     pointerPad?.setPointerCapture(event.pointerId);
     pointerPad?.classList.toggle("dragging", true);
+    binding.mousePadPointers.set(event.pointerId, {x: event.clientX, y: event.clientY});
+    if (binding.mousePadPointers.size === 1) {
+      binding.pointerDrag = {
+        pointerID: event.pointerId, startX: event.clientX, startY: event.clientY,
+        lastX: event.clientX, lastY: event.clientY, startedAt: Date.now(), moved: false,
+      };
+    } else if (binding.mousePadPointers.size === 2) {
+      binding.pointerDrag = null;
+      const geometry = pinchGeometry(binding.mousePadPointers);
+      if (geometry) binding.mousePadGesture = {
+        pointers: binding.mousePadPointers,
+        startPointers: new Map(binding.mousePadPointers),
+        initialCenterX: geometry.centerX,
+        initialCenterY: geometry.centerY,
+        initialDistance: geometry.distance,
+        initialZoom: state.zoom,
+        initialObservationID: state.observation?.id || "",
+        startedAt: Date.now(),
+        lastCenterX: geometry.centerX,
+        lastCenterY: geometry.centerY,
+        lastScrollCenterX: geometry.centerX,
+        lastScrollCenterY: geometry.centerY,
+        mode: "pending",
+        moved: false,
+        classifyTimer: 0,
+      };
+    }
     event.preventDefault();
   });
   listen(binding, pointerPad, "pointermove", event => {
-    const drag = binding.pointerDrag;
+    if (!binding.mousePadPointers.has(event.pointerId)) return;
+    binding.mousePadPointers.set(event.pointerId, {x: event.clientX, y: event.clientY});
+    const gesture = binding.mousePadGesture;
     const observation = state.observation;
     const image = root.querySelector<HTMLImageElement>("#desktop-image");
     const bounds = image?.getBoundingClientRect();
+    if (gesture) {
+      const start = gesture.startPointers.get(event.pointerId);
+      if (start && Math.hypot(event.clientX - start.x, event.clientY - start.y) > 8) gesture.moved = true;
+      const geometry = pinchGeometry(binding.mousePadPointers);
+      if (!geometry) return;
+      event.preventDefault();
+      classifyMousePadGesture(binding, gesture);
+      if (gesture.mode === "pending" && gesture.moved && !gesture.classifyTimer) {
+        gesture.classifyTimer = window.setTimeout(() => {
+          gesture.classifyTimer = 0;
+          if (binding.mousePadGesture === gesture) classifyMousePadGesture(binding, gesture, true);
+        }, touchSettleMS);
+      }
+      if (gesture.mode === "pinch") {
+        applyZoomAt(binding, gesture.initialZoom * geometry.distance / gesture.initialDistance,
+          pointerClientPoint(binding) || undefined);
+      } else if (gesture.mode === "scroll") {
+        const point = pointerClientPoint(binding);
+        if (point) queueWheel(binding, (gesture.lastScrollCenterX - geometry.centerX) * touchScrollScale,
+          (gesture.lastScrollCenterY - geometry.centerY) * touchScrollScale, point.clientX, point.clientY);
+        gesture.lastScrollCenterX = geometry.centerX;
+        gesture.lastScrollCenterY = geometry.centerY;
+      }
+      return;
+    }
+    const drag = binding.pointerDrag;
     if (!drag || drag.pointerID !== event.pointerId || !observation || !bounds || bounds.width <= 0 || bounds.height <= 0) return;
     event.preventDefault();
+    if (!drag.moved && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < 6) return;
+    drag.moved = true;
     const deltaX = (event.clientX - drag.lastX) / bounds.width * observation.width * pointerMoveScale;
     const deltaY = (event.clientY - drag.lastY) / bounds.height * observation.height * pointerMoveScale;
     setVirtualPointer(binding, state.pointerX + deltaX, state.pointerY + deltaY);
@@ -1992,42 +2114,60 @@ export function bindDesktopPanel(detail: TaskDetail, notify: Notice): void {
     drag.lastY = event.clientY;
   });
   listen(binding, pointerPad, "pointerup", event => {
+    if (!binding.mousePadPointers.has(event.pointerId)) return;
+    binding.mousePadPointers.set(event.pointerId, {x: event.clientX, y: event.clientY});
+    const gesture = binding.mousePadGesture;
+    if (gesture) {
+      classifyMousePadGesture(binding, gesture, true);
+      if (pointerPad?.hasPointerCapture(event.pointerId)) pointerPad.releasePointerCapture(event.pointerId);
+      binding.mousePadPointers.delete(event.pointerId);
+      event.preventDefault();
+      if (binding.mousePadPointers.size > 0) return;
+      if (gesture.classifyTimer) window.clearTimeout(gesture.classifyTimer);
+      binding.mousePadGesture = null;
+      pointerPad?.classList.toggle("dragging", false);
+      if (gesture.mode === "pending" && !gesture.moved && Date.now() - gesture.startedAt <= 500) {
+        clickPointer("right");
+      } else if (gesture.mode === "scroll") {
+        flushWheel(binding, true);
+      }
+      schedule(binding);
+      return;
+    }
     const drag = binding.pointerDrag;
     if (!drag || drag.pointerID !== event.pointerId) return;
     const observation = state.observation;
     const image = root.querySelector<HTMLImageElement>("#desktop-image");
     const bounds = image?.getBoundingClientRect();
-    if (observation && bounds && bounds.width > 0 && bounds.height > 0) {
+    if (drag.moved && observation && bounds && bounds.width > 0 && bounds.height > 0) {
       setVirtualPointer(binding,
         state.pointerX + (event.clientX - drag.lastX) / bounds.width * observation.width * pointerMoveScale,
         state.pointerY + (event.clientY - drag.lastY) / bounds.height * observation.height * pointerMoveScale);
       queuePointerMove(binding, state.pointerX, state.pointerY, true);
     }
+    const tapped = !drag.moved && Date.now() - drag.startedAt <= 350;
+    if (tapped) clickPointer("left");
     binding.pointerDrag = null;
+    binding.mousePadPointers.delete(event.pointerId);
     pointerPad?.classList.toggle("dragging", false);
     if (pointerPad?.hasPointerCapture(event.pointerId)) pointerPad.releasePointerCapture(event.pointerId);
     event.preventDefault();
   });
   listen(binding, pointerPad, "pointercancel", event => {
-    if (binding.pointerDrag?.pointerID !== event.pointerId) return;
-    binding.pointerDrag = null;
+    if (!binding.mousePadPointers.has(event.pointerId)) return;
+    cancelMousePadGesture(binding);
     pointerPad?.classList.toggle("dragging", false);
   });
-  const mouseButton = (selector: string, button: "left" | "right") => listen(binding, root.querySelector(selector), "click", () => {
-    ensurePointer(binding);
-    const point = {x: state.pointerX, y: state.pointerY};
-    if (actionable(state) && inputAllowed(state, "click")) {
-      performInput(binding, "click", {...point, button}, state.observation?.id);
-    }
-  });
+  const mouseButton = (selector: string, button: "left" | "right") =>
+    listen(binding, root.querySelector(selector), "click", () => clickPointer(button));
   mouseButton("#desktop-mouse-left", "left");
   mouseButton("#desktop-mouse-right", "right");
   const wheelButton = (selector: string, deltaY: number) => listen(binding, root.querySelector(selector), "click", () => {
     const point = pointerClientPoint(binding);
     if (point) queueWheel(binding, 0, deltaY, point.clientX, point.clientY, true);
   });
-  wheelButton("#desktop-wheel-up", -120);
-  wheelButton("#desktop-wheel-down", 120);
+  wheelButton("#desktop-wheel-up", -240);
+  wheelButton("#desktop-wheel-down", 240);
   listen(binding, wheelPad, "pointerdown", event => {
     if (!inputAllowed(state, "scroll")) return;
     ensurePointer(binding);
@@ -2044,7 +2184,8 @@ export function bindDesktopPanel(detail: TaskDetail, notify: Notice): void {
     if (!drag || drag.pointerID !== event.pointerId) return;
     event.preventDefault();
     const bounds = wheelPad?.getBoundingClientRect();
-    const travel = Math.max(0, (wheelPad?.clientHeight || 88) / 2 - 22);
+    const thumbHeight = wheelThumb?.offsetHeight || 24;
+    const travel = Math.max(2, ((wheelPad?.clientHeight || 38) - thumbHeight) / 2 - 1);
     const offset = bounds
       ? Math.max(-travel, Math.min(travel, event.clientY - (bounds.top + bounds.height / 2)))
       : 0;
@@ -2189,6 +2330,7 @@ export function stopDesktopPanel(): void {
   binding.pointerQueue = {x: 0, y: 0, timer: 0, dirty: false};
   binding.pointerDrag = null;
   binding.pointerLocalAt = 0;
+  cancelMousePadGesture(binding);
   binding.mouseOpen = false;
   binding.mouseDrag = null;
   binding.mouseSuppressClick = false;

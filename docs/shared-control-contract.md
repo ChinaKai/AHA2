@@ -112,7 +112,7 @@ ambiguous one-pointer updates, and classify tap, swipe and pinch only after both
 pointers have moved or a short settle interval expires. Scroll must accumulate
 center movement and emit queued wheel actions while the fingers move rather than
 waiting for pointer-up, while pinch must remain local and neither gesture may
-emit an extra remote click.
+emit an extra remote click. Two-finger center movement uses a 2.5x scroll scale.
 A compact floating virtual mouse provides an alternative when touch gestures are
 inconvenient. The collapsed ball can be dragged anywhere inside the observation
 area and tapped to expand a panel with left/right click buttons, up/down wheel
@@ -122,10 +122,12 @@ touchpad movement updates that marker immediately and sends coalesced `move`
 actions to the host. Host observations return the real cursor position when it is
 inside the target; local movement remains authoritative briefly so an older
 in-flight frame cannot snap the marker backward. Left/right buttons click at the
-marker, not at the center of the viewport. The wheel thumb follows the pointer
-and returns to center on release. Short drags use a 5x wheel-distance scale so
-the compact control still produces a usable scroll. Its input shares the same
-serialized scroll queue as touch gestures.
+marker, not at the center of the viewport. The same touchpad also maps one-finger
+tap to left click, two-finger tap to right click, two-finger parallel swipe to
+wheel scroll, and two-finger pinch to local zoom. The wheel thumb follows the pointer and returns to center on release. The expanded panel stays compact and
+translucent, with explicit wheel buttons sending 240px and short wheel drags
+using an 8x distance scale so the control does not obscure the image without
+becoming too slow. Its input shares the same serialized queue as touch gestures.
 Local `Ctrl`/`Command` + wheel zoom is anchored at the pointer and preserves the
 logical desktop coordinate under it. Plain wheel remains foreground remote
 scrolling and must never be converted into local zoom. Zoom ranges from 100% to
