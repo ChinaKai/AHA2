@@ -2716,18 +2716,17 @@ function taskChannelPanelHTML(): string {
   }
   const current = result.route;
   const currentDestination = current ? result.destinations.find(item => item.conversation_id === current.conversation_id) : undefined;
-  const selectable = result.destinations.filter(item => !item.target_task_id || item.target_task_id === taskID);
   const options = result.destinations.map(item => {
     const kind = item.endpoint_kind === "group_digital_human" ? "群聊" : "私聊";
     const label = item.display_name || (kind === "群聊" ? "未命名群聊" : "Owner 私聊");
     const occupied = Boolean(item.target_task_id && item.target_task_id !== taskID);
     const occupiedBy = item.target_task_code || item.target_task_name || "其他 Task";
-    const suffix = occupied ? ` · 已绑定 ${occupiedBy}` : "";
-    return `<option value="${escapeHTML(item.conversation_id)}" ${item.conversation_id === current?.conversation_id ? "selected" : ""} ${occupied ? "disabled" : ""}>${escapeHTML(item.instance_name)} · ${kind} · ${escapeHTML(label + suffix)}</option>`;
+    const suffix = occupied ? ` · 将从 ${occupiedBy} 接管` : "";
+    return `<option value="${escapeHTML(item.conversation_id)}" ${item.conversation_id === current?.conversation_id ? "selected" : ""}>${escapeHTML(item.instance_name)} · ${kind} · ${escapeHTML(label + suffix)}</option>`;
   }).join("");
   const switcher = `<form id="task-channel-route-form" class="task-channel-switcher">
     <label>绑定渠道<select name="conversation_id" required>${options || '<option value="">暂无可用渠道</option>'}</select></label>
-    <button type="submit" class="primary" ${selectable.length ? "" : "disabled"}>${icon("link")}${current ? "切换" : "连接"}</button>
+    <button type="submit" class="primary" ${result.destinations.length ? "" : "disabled"}>${icon("link")}${current ? "切换" : "连接"}</button>
     ${current ? `<button type="button" id="disconnect-task-channel" class="icon-button danger-quiet" title="解除主渠道" aria-label="解除主渠道">${icon("close")}</button>` : ""}
   </form>`;
   if (!current || !currentDestination) {
@@ -4701,11 +4700,17 @@ function bindTaskChannelPanel(): void {
     const conversationID = String(new FormData(event.currentTarget).get("conversation_id") || "");
     const current = state.taskChannelState?.route;
     if (!conversationID || conversationID === current?.conversation_id) return;
-    if (current && !window.confirm("切换主渠道后，旧渠道将停止接收该 Task 的回复。继续？")) return;
+    const destination = state.taskChannelState?.destinations.find(item => item.conversation_id === conversationID);
+    const takeover = Boolean(destination?.target_task_id && destination.target_task_id !== taskID);
+    const occupiedBy = destination?.target_task_code || destination?.target_task_name || "其他 Task";
+    const detail = takeover
+      ? `该渠道当前绑定 ${occupiedBy}，连接后会从原 Task 自动解绑并接管。`
+      : current ? "切换后旧渠道将停止接收该 Task 的回复。" : "";
+    if (detail && !window.confirm(`${detail}继续？`)) return;
     void runWithFeedback(event.submitter as HTMLElement | null, current ? "切换中" : "连接中", async () => {
       await api.bindTaskChannelRoute(taskID, conversationID);
       await reloadTaskChannelState();
-      setMessage("notice", current ? "Task 主渠道已切换" : "Task 主渠道已连接");
+      setMessage("notice", takeover ? "Task 主渠道已连接，原 Task 已自动解绑" : current ? "Task 主渠道已切换" : "Task 主渠道已连接");
       window.setTimeout(() => void reloadTaskChannelState().catch(() => undefined), 2200);
     });
   });

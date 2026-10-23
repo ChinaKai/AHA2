@@ -2,7 +2,9 @@ package httpapi
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -475,7 +477,35 @@ func TestTaskChannelRouteAPI(t *testing.T) {
 		}
 	}
 
-	response = requestJSON(t, client, http.MethodDelete, server.URL+"/api/v1/tasks/"+task.ID+"/channel-routes/"+bound.Route.ID, nil, csrf)
+	takeoverTask, err := appService.CreateTask(ctx, app.CreateTaskInput{
+		ProjectID: project.ID, WorkspaceID: workspace.ID, Title: "接管联调", Request: "takeover",
+		Isolation: "inplace", Backend: model.Backend, ModelSource: model.Source, ModelID: model.ID, WireModel: model.WireModel,
+		Filesystem: "workspace-write", Approval: "never", CollaborationMode: "single", MaxAgents: 1, KnowledgePolicy: "inherit",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response = requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/tasks/"+takeoverTask.ID+"/channel-routes", map[string]any{"conversation_id": conversation.ID}, csrf)
+	var takeoverBound struct {
+		Route domain.ChannelTaskRoute `json:"route"`
+	}
+	decodeResponse(t, response, &takeoverBound)
+	if response.StatusCode != http.StatusCreated || takeoverBound.Route.TargetTaskID != takeoverTask.ID {
+		t.Fatalf("takeover status=%d payload=%#v", response.StatusCode, takeoverBound)
+	}
+	if _, err := database.ActiveChannelTaskRouteForTask(ctx, task.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("source Task channel was not automatically unbound: %v", err)
+	}
+	currentRoute, err := database.ActiveChannelTaskRoute(ctx, conversation.ID)
+	if err != nil || currentRoute.TargetTaskID != takeoverTask.ID {
+		t.Fatalf("transferred route=%#v err=%v", currentRoute, err)
+	}
+	takeoverContacts, err := database.TaskChannelContacts(ctx, takeoverTask.ID, instance.ID, conversation.ID, 50)
+	if err != nil || len(takeoverContacts) != 1 {
+		t.Fatalf("transferred contacts=%#v err=%v", takeoverContacts, err)
+	}
+
+	response = requestJSON(t, client, http.MethodDelete, server.URL+"/api/v1/tasks/"+takeoverTask.ID+"/channel-routes/"+takeoverBound.Route.ID, nil, csrf)
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("unbind status=%d", response.StatusCode)
 	}

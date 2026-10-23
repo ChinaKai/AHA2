@@ -211,14 +211,16 @@ test("forms and action groups stay aligned without narrow-window button distorti
   assert.match(styles, /@media \(max-width:\s*360px\)[\s\S]*?\.hardware-terminal-keys \{[^}]*grid-template-columns:\s*repeat\(4,minmax\(0,1fr\)\);[^}]*overflow:\s*visible/);
 });
 
-test("task channel selector shows occupied destinations without allowing silent takeover", async () => {
+test("task channel selector explains and confirms occupied destination takeover", async () => {
   const main = await readFile(resolve(import.meta.dirname, "..", "src", "main.ts"), "utf8");
-  assert.match(main, /const selectable = result\.destinations\.filter\(item => !item\.target_task_id \|\| item\.target_task_id === taskID\)/);
   assert.match(main, /const options = result\.destinations\.map\(item =>/);
   assert.match(main, /const occupied = Boolean\(item\.target_task_id && item\.target_task_id !== taskID\)/);
   assert.match(main, /item\.target_task_code \|\| item\.target_task_name \|\| "其他 Task"/);
-  assert.match(main, /\$\{occupied \? "disabled" : ""\}/);
-  assert.match(main, /selectable\.length \? "" : "disabled"/);
+  assert.match(main, /将从 \$\{occupiedBy\} 接管/);
+  assert.match(main, /const takeover = Boolean\(destination\?\.target_task_id/);
+  assert.match(main, /连接后会从原 Task 自动解绑并接管/);
+  assert.match(main, /Task 主渠道已连接，原 Task 已自动解绑/);
+  assert.match(main, /result\.destinations\.length \? "" : "disabled"/);
   assert.doesNotMatch(main, /const available = result\.destinations\.filter/);
 });
 

@@ -292,15 +292,29 @@ func (s *Service) BindTaskChannelRoute(ctx context.Context, ownerID, taskID, con
 	if err != nil {
 		return domain.ChannelTaskRoute{}, fmt.Errorf("channel destination is not available")
 	}
-	if destination.TargetTaskID != "" && destination.TargetTaskID != taskID {
-		return domain.ChannelTaskRoute{}, fmt.Errorf("channel destination is already connected to another task")
-	}
 	instance, err := s.store.ChannelInstance(ctx, destination.InstanceID)
 	if err != nil || (instance.Status != "ready" && instance.Status != "degraded") || !channelOperationAllowed(instance.Config, task.ProjectID, task.WorkspaceID) {
 		return domain.ChannelTaskRoute{}, fmt.Errorf("channel destination is not eligible for this task")
 	}
 	if current, currentErr := s.store.ActiveChannelTaskRouteForTask(ctx, taskID); currentErr == nil && current.ConversationID == conversationID {
 		return current, nil
+	}
+	if destination.TargetTaskID != "" && destination.TargetTaskID != taskID {
+		route, transferred, err := s.store.TransferOwnerChannelTaskRoute(
+			ctx, ownerID, destination.TargetTaskID, taskID, s.now().UTC(),
+		)
+		if err != nil {
+			return domain.ChannelTaskRoute{}, err
+		}
+		if !transferred {
+			return domain.ChannelTaskRoute{}, fmt.Errorf("channel destination binding changed during takeover")
+		}
+		if destination.EndpointKind == domain.ChannelEndpointGroupDigitalHuman {
+			if conversation, conversationErr := s.store.ChannelConversation(ctx, conversationID); conversationErr == nil {
+				_, _ = s.enqueueChannelMemberSync(ctx, route, conversation)
+			}
+		}
+		return route, nil
 	}
 	route, err := s.store.ActivateOwnerChannelTaskRoute(ctx, destination.InstanceID, conversationID, taskID, s.now().UTC())
 	if err != nil {
