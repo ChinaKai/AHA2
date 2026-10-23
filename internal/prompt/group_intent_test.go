@@ -142,7 +142,7 @@ func TestDefaultGroupIntentTemplateVersionsAndChatBoundaries(t *testing.T) {
 	for _, required := range []string{
 		"In group conversations", "existing role, scope and confirmation checks",
 		"Do not expose raw IDs",
-		"verified bot", "advertised capability permit it", "reply-decision",
+		"verified bot", "receipt-bound channel reply", "reply-decision",
 	} {
 		if !strings.Contains(string(external), required) {
 			t.Errorf("lost external-channel boundary: %s", required)

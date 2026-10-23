@@ -807,11 +807,20 @@ func (s *Store) EnqueueAgentChannelReply(
 		if !state.matches {
 			return domain.ChannelDelivery{}, "", false, errors.New("group receipt is not eligible for a Task reply")
 		}
-		if state.isBot && state.decision != "continue" {
-			return domain.ChannelDelivery{}, "", false, errors.New("bot dialogue is not allowed to continue")
+		if state.isBot && state.decision == "end" {
+			return domain.ChannelDelivery{}, "", false, errors.New("bot dialogue reply is blocked by an end decision")
 		}
 		if state.isBot && state.turnCount > state.maxTurns {
 			return domain.ChannelDelivery{}, "", false, errors.New("bot dialogue reached its maximum turns")
+		}
+		if state.isBot && state.decision == "" {
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE turns SET channel_reply_decision='continue'
+				WHERE id=? AND task_id=? AND COALESCE(channel_reply_decision,'')=''`,
+				turnID, taskID,
+			); err != nil {
+				return domain.ChannelDelivery{}, "", false, err
+			}
 		}
 	}
 

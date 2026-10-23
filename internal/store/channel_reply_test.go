@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -182,6 +183,77 @@ func TestAgentChannelReplyIsReceiptBoundAndIdempotent(t *testing.T) {
 		t.Fatalf("reply target=%#v err=%v", target, err)
 	}
 
+	botReceiptID := domain.NewID("channel_inbox")
+	botNormalized, _ := json.Marshal(map[string]any{
+		"external_message_id": "provider-message-bot",
+		"mentioned_bot":       true,
+	})
+	botContext := make(map[string]any, len(channelContext))
+	for key, value := range channelContext {
+		botContext[key] = value
+	}
+	botContext["inbound_receipt_id"] = botReceiptID
+	botContext["actor"] = map[string]any{
+		"identity_link_id": actor.ID, "display_name": "联调机器人",
+		"role": "participant", "is_bot": true,
+	}
+	botPayloadJSON := encodeJSON(map[string]any{"channel_receipt_id": botReceiptID, "channel_context": botContext})
+	if _, err := database.db.ExecContext(ctx, `
+		INSERT INTO channel_inbox_dedup(
+			id,instance_id,external_event_id,event_type,payload_digest,normalized_payload_json,
+			state,lease_id,lease_until,conversation_id,aha_message_id,outcome,
+			occurred_at,received_at,processed_at
+		) VALUES(?,?,?,?,?,?, 'processed','','',?,'','delivered_to_task',?,?,?)`,
+		botReceiptID, instance.ID, "reply-bot-event", "message", "digest-bot", string(botNormalized),
+		conversation.ID, timeString(now.Add(time.Second)), timeString(now.Add(time.Second)), timeString(now.Add(time.Second)),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.db.ExecContext(ctx, `
+		INSERT INTO conversation_items(
+			id,task_id,round_id,turn_id,agent_id,stream_agent_id,from_agent_id,to_agent_id,
+			route_kind,category,kind,summary,payload_json,created_at
+		) VALUES(?,?,?,?, 'owner','main','owner','main','owner_message','chat','user_message',?,?,?)`,
+		domain.NewID("conversation"), task.ID, round.ID, turn.ID,
+		"机器人问题", botPayloadJSON, timeString(now.Add(time.Second)),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.db.ExecContext(ctx, `
+		INSERT INTO agent_inbox(
+			id,task_id,round_id,target_agent_id,source_agent_id,source_kind,source_turn_id,
+			message_id,content,payload_json,status,batch_id,created_at,claimed_at,processed_at,
+			delivered_turn_id,delivered_at
+		) VALUES(?,?,?, 'main','owner','owner_message','','',?,?, 'delivered_in_turn','',?,?,?,?,?)`,
+		domain.NewID("inbox"), task.ID, round.ID, "机器人问题", botPayloadJSON,
+		timeString(now.Add(time.Second)), timeString(now.Add(time.Second)), "", turn.ID, timeString(now.Add(time.Second)),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	botDelivery, _, _, err := database.EnqueueAgentChannelReply(
+		ctx, task.ID, turn.ID, "bot-reply-request", botReceiptID, "机器人回复", nil, now.Add(time.Second),
+	)
+	if err != nil || botDelivery.ID == "" {
+		t.Fatalf("explicit bot reply delivery=%#v err=%v", botDelivery, err)
+	}
+	var replyDecision string
+	if err := database.db.QueryRowContext(ctx,
+		`SELECT channel_reply_decision FROM turns WHERE id=?`, turn.ID,
+	).Scan(&replyDecision); err != nil || replyDecision != "continue" {
+		t.Fatalf("bot reply decision=%q err=%v", replyDecision, err)
+	}
+	if _, err := database.db.ExecContext(ctx,
+		`UPDATE turns SET channel_reply_decision='end' WHERE id=?`, turn.ID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := database.EnqueueAgentChannelReply(
+		ctx, task.ID, turn.ID, "bot-reply-after-end", botReceiptID, "不应发送", nil, now.Add(2*time.Second),
+	); err == nil || !strings.Contains(err.Error(), "end decision") {
+		t.Fatalf("reply after bot dialogue end err=%v", err)
+	}
+
 	if err := database.AppendChannelSourceAndProject(ctx, domain.ChannelSourceEvent{
 		ID: domain.NewID("source"), SourceKey: "ordinary-final-reply", TaskID: task.ID,
 		RoundID: round.ID, TurnID: turn.ID, EventClass: "message", EventType: "agent_reply",
@@ -190,7 +262,9 @@ func TestAgentChannelReplyIsReceiptBoundAndIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	deliveries, err := database.ChannelDeliveries(ctx, instance.ID, 20)
-	if err != nil || len(deliveries) != 1 || deliveries[0].ID != delivery.ID {
+	if err != nil || len(deliveries) != 2 ||
+		!slices.ContainsFunc(deliveries, func(item domain.ChannelDelivery) bool { return item.ID == delivery.ID }) ||
+		!slices.ContainsFunc(deliveries, func(item domain.ChannelDelivery) bool { return item.ID == botDelivery.ID }) {
 		t.Fatalf("ordinary final reply leaked into task route: %#v err=%v", deliveries, err)
 	}
 }

@@ -93,15 +93,24 @@ POST /api/v1/agent/channel/reply-decision
 重复创建消息、附件投递或 Web 路由卡片。
 该接口仅用于阻塞性联调协调，不替代 `POST /api/v1/agent/turn/messages` 的常规 Web 进度更新。
 
-对于发送者已由渠道确认是机器人的群聊 Turn，Agent 必须在最终回复前设置路由决策：
+对于发送者已由渠道确认是机器人的群聊 Turn，显式、receipt-bound 的
+`POST /api/v1/agent/channel/replies` 本身表示 `continue`：
+
+```text
+POST /api/v1/agent/channel/replies
+{"request_id":"stable-token","inbound_receipt_id":"channel_inbox_...","message":"..."}
+```
+
+若明确结束机器人对话，则先调用：
 
 ```text
 POST /api/v1/agent/channel/reply-decision
-{"decision":"continue|end"}
+{"decision":"end"}
 ```
 
-`continue` 会把最终 `agent_reply` 投递回外部渠道；`end` 只保留在 AHA Web。
-服务端即使收到 `continue`，仍会执行渠道配置的机器人连续对话最大轮数。
+`end` 只保留 AHA Web，并阻止本 Turn 后续渠道外发；`reply-decision=continue`
+仍可显式设置，但普通机器人回复不再要求额外调用。服务端始终执行渠道配置的
+机器人连续对话最大轮数。
 真人发送者的群聊 Turn 继续沿用最终回复自动路由行为。
 
 群机器人候选不通过 Profile Sync 推导。当前渠道实例的自身机器人由运行时确认；其他机器人
