@@ -71,11 +71,6 @@ interface WheelQueue {
   clientY: number;
   timer: number;
 }
-interface WheelDrag {
-  pointerID: number;
-  lastX: number;
-  lastY: number;
-}
 interface MouseControlDrag {
   pointerID: number;
   startX: number;
@@ -105,7 +100,7 @@ interface Binding {
   removeVisibility: () => void;
   chooserActive: boolean; clickTimer: number; click: Gesture | null; gesture: Gesture | null;
   touchPointers: Map<number, {x: number; y: number}>; touchGesture: TouchGesture | null;
-  wheelQueue: WheelQueue; wheelDrag: WheelDrag | null;
+  wheelQueue: WheelQueue; scrollSpeedIndex: number;
   mouseOpen: boolean; mouseDrag: MouseControlDrag | null; mouseSuppressClick: boolean;
   pointerQueue: PointerQueue; pointerDrag: PointerDrag | null; pointerLocalAt: number;
   mousePadPointers: Map<number, {x: number; y: number}>; mousePadGesture: TouchGesture | null;
@@ -134,7 +129,7 @@ const touchScrollMin = 12;
 const touchScrollScale = 2.5;
 const wheelQueueStep = 24;
 const wheelFlushMS = 40;
-const wheelDragScale = 8;
+const wheelSpeeds = [1, 2, 4];
 const pointerFlushMS = 50;
 const pointerMoveScale = 1.6;
 
@@ -422,7 +417,7 @@ export function renderDesktopPanel(detail: TaskDetail, header = ""): string {
               <button type="button" id="desktop-mouse-left" class="desktop-mouse-key" title="左键" aria-label="鼠标左键">L</button>
               <div class="desktop-wheel-stack" role="group" aria-label="鼠标滚轮">
                 <button type="button" id="desktop-wheel-up" class="icon-button" title="向上滚动" aria-label="向上滚动">${icon("chevron-up")}</button>
-                <div id="desktop-wheel-pad" class="desktop-wheel-pad" role="group" aria-label="拖动滚动画面" title="拖动以连续滚动"><span class="desktop-wheel-grip" aria-hidden="true"></span></div>
+                <button type="button" id="desktop-wheel-speed" class="desktop-wheel-speed" title="滚动灵敏度：点击切换" aria-label="滚动灵敏度，当前 2 倍" aria-live="polite">2×</button>
                 <button type="button" id="desktop-wheel-down" class="icon-button" title="向下滚动" aria-label="向下滚动">${icon("chevron-down")}</button>
               </div>
               <button type="button" id="desktop-mouse-right" class="desktop-mouse-key" title="右键" aria-label="鼠标右键">R</button>
@@ -750,6 +745,10 @@ function updateDOM(binding: Binding): void {
     .forEach(button => { button.disabled = !clickReady; });
   root.querySelectorAll<HTMLButtonElement>("#desktop-wheel-up, #desktop-wheel-down")
     .forEach(button => { button.disabled = !scrollReady; });
+  const wheelSpeed = root.querySelector<HTMLButtonElement>("#desktop-wheel-speed")!;
+  const speed = wheelSpeeds[binding.scrollSpeedIndex];
+  text("#desktop-wheel-speed", `${speed}×`);
+  wheelSpeed.setAttribute("aria-label", `滚动灵敏度，当前 ${speed} 倍`);
   root.querySelector<HTMLElement>("#desktop-pointer-pad")!.classList.toggle("disabled", !moveReady);
   constrainMouseControl(binding);
   positionPointerMarker(binding);
@@ -1926,7 +1925,7 @@ export function bindDesktopPanel(detail: TaskDetail, notify: Notice): void {
   const binding: Binding = {root, state, notify, timer: 0, read: null, write: null, epoch: 0,
     removeVisibility: () => {}, chooserActive: false, clickTimer: 0, click: null, gesture: null, refreshWindows: false,
     touchPointers: new Map(), touchGesture: null,
-    wheelQueue: {pendingX: 0, pendingY: 0, clientX: 0, clientY: 0, timer: 0}, wheelDrag: null,
+    wheelQueue: {pendingX: 0, pendingY: 0, clientX: 0, clientY: 0, timer: 0}, scrollSpeedIndex: 1,
     mouseOpen: false, mouseDrag: null, mouseSuppressClick: false,
     pointerQueue: {x: 0, y: 0, timer: 0, dirty: false}, pointerDrag: null, pointerLocalAt: 0,
     mousePadPointers: new Map(), mousePadGesture: null,
@@ -1962,12 +1961,6 @@ export function bindDesktopPanel(detail: TaskDetail, notify: Notice): void {
   listen(binding, root.querySelector("#desktop-zoom"), "input", event => setZoom(binding, Number((event.target as HTMLInputElement).value) / 100));
   const mouseControl = root.querySelector<HTMLElement>("#desktop-mouse");
   const mouseBall = root.querySelector<HTMLButtonElement>("#desktop-mouse-ball");
-  const wheelPad = root.querySelector<HTMLElement>("#desktop-wheel-pad");
-  const wheelThumb = root.querySelector<HTMLElement>("#desktop-wheel-pad .desktop-wheel-grip");
-  const resetWheelThumb = () => {
-    wheelPad?.classList.toggle("dragging", false);
-    if (wheelThumb) wheelThumb.style.transform = "";
-  };
   listen(binding, mouseBall, "click", () => {
     if (binding.mouseSuppressClick) {
       binding.mouseSuppressClick = false;
@@ -1975,8 +1968,6 @@ export function bindDesktopPanel(detail: TaskDetail, notify: Notice): void {
     }
     binding.mouseOpen = !binding.mouseOpen;
     if (!binding.mouseOpen) {
-      binding.wheelDrag = null;
-      resetWheelThumb();
       flushWheel(binding, true);
     } else {
       ensurePointer(binding);
@@ -2162,61 +2153,17 @@ export function bindDesktopPanel(detail: TaskDetail, notify: Notice): void {
     listen(binding, root.querySelector(selector), "click", () => clickPointer(button));
   mouseButton("#desktop-mouse-left", "left");
   mouseButton("#desktop-mouse-right", "right");
+  listen(binding, root.querySelector("#desktop-wheel-speed"), "click", () => {
+    binding.scrollSpeedIndex = (binding.scrollSpeedIndex + 1) % wheelSpeeds.length;
+    updateDOM(binding);
+  });
   const wheelButton = (selector: string, deltaY: number) => listen(binding, root.querySelector(selector), "click", () => {
     const point = pointerClientPoint(binding);
-    if (point) queueWheel(binding, 0, deltaY, point.clientX, point.clientY, true);
+    const speed = wheelSpeeds[binding.scrollSpeedIndex];
+    if (point) queueWheel(binding, 0, deltaY * speed, point.clientX, point.clientY, true);
   });
-  wheelButton("#desktop-wheel-up", -240);
-  wheelButton("#desktop-wheel-down", 240);
-  listen(binding, wheelPad, "pointerdown", event => {
-    if (!inputAllowed(state, "scroll")) return;
-    ensurePointer(binding);
-    binding.wheelDrag = {pointerID: event.pointerId, lastX: event.clientX, lastY: event.clientY};
-    cancelGesture(binding);
-    pauseObservation(binding);
-    wheelPad?.setPointerCapture(event.pointerId);
-    wheelPad?.classList.toggle("dragging", true);
-    if (wheelThumb) wheelThumb.style.transform = "translateY(0)";
-    event.preventDefault();
-  });
-  listen(binding, wheelPad, "pointermove", event => {
-    const drag = binding.wheelDrag;
-    if (!drag || drag.pointerID !== event.pointerId) return;
-    event.preventDefault();
-    const bounds = wheelPad?.getBoundingClientRect();
-    const thumbHeight = wheelThumb?.offsetHeight || 24;
-    const travel = Math.max(2, ((wheelPad?.clientHeight || 38) - thumbHeight) / 2 - 1);
-    const offset = bounds
-      ? Math.max(-travel, Math.min(travel, event.clientY - (bounds.top + bounds.height / 2)))
-      : 0;
-    if (wheelThumb) wheelThumb.style.transform = `translateY(${offset}px)`;
-    const point = pointerClientPoint(binding);
-    if (!point) return;
-    queueWheel(binding, (drag.lastX - event.clientX) * wheelDragScale,
-      (drag.lastY - event.clientY) * wheelDragScale, point.clientX, point.clientY);
-    drag.lastX = event.clientX;
-    drag.lastY = event.clientY;
-  });
-  listen(binding, wheelPad, "pointerup", event => {
-    const drag = binding.wheelDrag;
-    if (!drag || drag.pointerID !== event.pointerId) return;
-    binding.wheelDrag = null;
-    if (wheelPad?.hasPointerCapture(event.pointerId)) wheelPad.releasePointerCapture(event.pointerId);
-    const point = pointerClientPoint(binding);
-    if (!point) return;
-    queueWheel(binding, (drag.lastX - event.clientX) * wheelDragScale,
-      (drag.lastY - event.clientY) * wheelDragScale, point.clientX, point.clientY, true);
-    resetWheelThumb();
-    event.preventDefault();
-    schedule(binding);
-  });
-  listen(binding, wheelPad, "pointercancel", event => {
-    if (binding.wheelDrag?.pointerID !== event.pointerId) return;
-    binding.wheelDrag = null;
-    resetWheelThumb();
-    flushWheel(binding, true);
-    schedule(binding);
-  });
+  wheelButton("#desktop-wheel-up", -120);
+  wheelButton("#desktop-wheel-down", 120);
   listen(binding, root.querySelector("#desktop-fullscreen"), "click", async () => {
     cancelGesture(binding);
     try {
@@ -2325,7 +2272,6 @@ export function stopDesktopPanel(): void {
   cancelTouchGesture(binding);
   window.clearTimeout(binding.wheelQueue.timer);
   binding.wheelQueue = {pendingX: 0, pendingY: 0, clientX: 0, clientY: 0, timer: 0};
-  binding.wheelDrag = null;
   window.clearTimeout(binding.pointerQueue.timer);
   binding.pointerQueue = {x: 0, y: 0, timer: 0, dirty: false};
   binding.pointerDrag = null;

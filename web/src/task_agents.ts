@@ -285,6 +285,21 @@ function renderChannelOutreachCard(item: ConversationItem): string {
   return `<article class="aha-orchestration-card aha-channel-route-card"><header><strong>${icon("send")}AHA 主动路由</strong><span>阻塞协调</span><time>${systemCardTime(item)}</time></header><p>${escapeHTML(message)}</p><div>${rows || `<div><strong>${escapeHTML(destination)}</strong><span>群聊主渠道</span><b>${escapeHTML(status)}</b></div>`}</div></article>`;
 }
 
+function renderChannelReplyCard(item: ConversationItem): string {
+  const payload = item.payload || {};
+  const channel = payload.channel && typeof payload.channel === "object" ? payload.channel as Record<string, unknown> : {};
+  const recipient = payload.recipient && typeof payload.recipient === "object" ? payload.recipient as Record<string, unknown> : {};
+  const destination = String(channel.display_name || channel.instance_name || "外部渠道");
+  const recipientName = String(recipient.display_name || "渠道参与者");
+  const endpointKind = String(channel.endpoint_kind || "");
+  const sourceLabel = endpointKind === "group_digital_human" ? "群聊" : endpointKind === "assistant_dm" ? "私聊" : "渠道";
+  const state = String(payload.delivery_state || "pending");
+  const status = state === "suppressed" ? "未外发" : state === "delivered" ? "已发送" :
+    state === "failed" ? "发送失败" : "已排队";
+  const message = String(payload.message || item.summary || "");
+  return `<article class="aha-orchestration-card aha-channel-route-card aha-channel-reply-card"><header><strong>${icon("send")}AHA 渠道回复</strong><span>${escapeHTML(status)}</span><time>${systemCardTime(item)}</time></header><p>${escapeHTML(destination)} · 回复 ${escapeHTML(recipientName)}</p>${message ? `<div class="aha-route-message">${escapeHTML(message)}</div>` : ""}<div><div><strong>${escapeHTML(recipientName)}</strong><span>${escapeHTML(sourceLabel)}</span><b>${escapeHTML(status)}</b></div></div></article>`;
+}
+
 function renderChannelRouteCard(item: ConversationItem): string {
   const payload = item.payload || {};
   const channel = payload.channel && typeof payload.channel === "object" ? payload.channel as Record<string, unknown> : {};
@@ -337,6 +352,7 @@ export function renderConversationWithOrchestration(
   return items.map(item => {
     if (item.kind === "agent_batch_dispatched" && detail) return renderOrchestrationCard(item, detail);
     if (item.kind === "agent_channel_outreach") return renderChannelOutreachCard(item);
+    if (item.kind === "agent_channel_reply") return renderChannelReplyCard(item);
     if (item.kind === "agent_channel_route") return renderChannelRouteCard(item);
     if (item.kind === "agent_config_updated") return renderAgentConfigCard(item);
     if (item.kind === "turn_duration") return renderTurnDurationCard(item);

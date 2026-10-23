@@ -116,7 +116,7 @@ emit an extra remote click. Two-finger center movement uses a 2.5x scroll scale.
 A compact floating virtual mouse provides an alternative when touch gestures are
 inconvenient. The collapsed ball can be dragged anywhere inside the observation
 area and tapped to expand a panel with left/right click buttons, up/down wheel
-buttons, a two-dimensional pointer touchpad, and a visible draggable wheel thumb.
+buttons, a two-dimensional pointer touchpad, and a scroll-speed button.
 The expanded panel must expose a visible virtual pointer over the shared image;
 touchpad movement updates that marker immediately and sends coalesced `move`
 actions to the host. Host observations return the real cursor position when it is
@@ -124,10 +124,10 @@ inside the target; local movement remains authoritative briefly so an older
 in-flight frame cannot snap the marker backward. Left/right buttons click at the
 marker, not at the center of the viewport. The same touchpad also maps one-finger
 tap to left click, two-finger tap to right click, two-finger parallel swipe to
-wheel scroll, and two-finger pinch to local zoom. The wheel thumb follows the pointer and returns to center on release. The expanded panel stays compact and
-translucent, with explicit wheel buttons sending 240px and short wheel drags
-using an 8x distance scale so the control does not obscure the image without
-becoming too slow. Its input shares the same serialized queue as touch gestures.
+wheel scroll, and two-finger pinch to local zoom. The expanded panel stays compact
+and translucent. Its scroll-speed button cycles through 1x, 2x and 4x; up/down
+buttons send 120px multiplied by the selected speed, with 2x as the default.
+That input shares the same serialized queue as touch gestures.
 Local `Ctrl`/`Command` + wheel zoom is anchored at the pointer and preserves the
 logical desktop coordinate under it. Plain wheel remains foreground remote
 scrolling and must never be converted into local zoom. Zoom ranges from 100% to

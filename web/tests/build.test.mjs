@@ -1456,7 +1456,12 @@ test("conversation renders agent config, channel outreach, and turn duration car
     stream_agent_id: "main", from_agent_id: "aha", to_agent_id: "main",
     route_kind: "channel_reply", category: "update", kind: "agent_channel_reply",
     summary: "AHA 已回复渠道消息：早上好",
-    payload: {inbound_receipt_id: "channel_inbox_1", delivery_state: "pending"},
+    payload: {
+      inbound_receipt_id: "channel_inbox_1", delivery_state: "delivered",
+      message: "早上好\n这是渠道回复内容",
+      channel: {display_name: "团队飞书", instance_name: "飞书", endpoint_kind: "assistant_dm"},
+      recipient: {display_name: "Owner", is_bot: false},
+    },
     created_at: "2026-09-04T09:00:05Z",
   }];
   const html = renderConversationList(items, null, false);
@@ -1471,7 +1476,11 @@ test("conversation renders agent config, channel outreach, and turn duration car
   assert.match(html, /接口字段需要确认 &lt;script&gt;/);
   assert.match(html, /sub-001/);
   assert.match(html, /store verification passed/);
-  assert.match(html, /AHA 已回复渠道消息/);
+  assert.match(html, /aha-channel-reply-card/);
+  assert.match(html, /AHA 渠道回复/);
+  assert.match(html, /团队飞书/);
+  assert.match(html, /这是渠道回复内容/);
+  assert.match(html, /已发送/);
   assert.match(html, /agent-routed-message/);
   assert.doesNotMatch(html, /接口字段需要确认 <script>/);
 });

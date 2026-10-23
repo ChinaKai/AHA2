@@ -548,26 +548,19 @@ try {
   assert.ok(Math.abs(mouseBallAfter.x - mouseBallBefore.x) > 20, "floating mouse moves horizontally");
   assert.ok(Math.abs(mouseBallAfter.y - mouseBallBefore.y) > 10, "floating mouse moves vertically");
   assert.equal(await page.locator("#desktop-mouse-panel").isVisible(), true, "dragging the ball keeps the panel open");
-  const wheelPad = await page.locator("#desktop-wheel-pad").boundingBox();
-  const wheelThumbBefore = await page.locator("#desktop-wheel-pad .desktop-wheel-grip").boundingBox();
-  const actionsBeforeWheelDrag = actions.length;
-  await touchClient.send("Input.dispatchTouchEvent", {
-    type: "touchStart",
-    touchPoints: [{x: wheelPad.x + wheelPad.width / 2, y: wheelPad.y + wheelPad.height * .75, id: 10}],
-  });
-  await touchClient.send("Input.dispatchTouchEvent", {
-    type: "touchMove",
-    touchPoints: [{x: wheelPad.x + wheelPad.width / 2, y: wheelPad.y + wheelPad.height * .25, id: 10}],
-  });
-  const wheelThumbDuring = await page.locator("#desktop-wheel-pad .desktop-wheel-grip").boundingBox();
-  assert.ok(wheelThumbDuring.y < wheelThumbBefore.y, "dragged wheel thumb follows the pointer");
-  await touchClient.send("Input.dispatchTouchEvent", {type: "touchEnd", touchPoints: []});
-  await waitUntil(() => actions.length > actionsBeforeWheelDrag, "virtual wheel drag scroll");
-  assert.equal(actions.at(-1).kind, "scroll");
-  assert.ok(actions.at(-1).delta_y >= 120, "short wheel drag produces a usable scroll distance");
-  await delay(150);
-  const wheelThumbAfter = await page.locator("#desktop-wheel-pad .desktop-wheel-grip").boundingBox();
-  assert.ok(Math.abs(wheelThumbAfter.y - wheelThumbBefore.y) < 1, "wheel thumb returns to its centered rest position");
+  assert.equal(await page.locator("#desktop-wheel-speed").textContent(), "2×");
+  await page.click("#desktop-wheel-speed");
+  assert.equal(await page.locator("#desktop-wheel-speed").textContent(), "4×");
+  const actionsBeforeFastWheel = actions.length;
+  await page.click("#desktop-wheel-down");
+  await waitUntil(() => actions.length > actionsBeforeFastWheel, "4x virtual wheel button");
+  assert.equal(actions.at(-1).delta_y, 480);
+  await page.click("#desktop-wheel-speed");
+  assert.equal(await page.locator("#desktop-wheel-speed").textContent(), "1×");
+  const actionsBeforeSlowWheel = actions.length;
+  await page.click("#desktop-wheel-up");
+  await waitUntil(() => actions.length > actionsBeforeSlowWheel, "1x virtual wheel button");
+  assert.equal(actions.at(-1).delta_y, -120);
   await page.screenshot({path: resolve(output, "mobile-touch-gestures-390.png")});
   await page.click("#desktop-mouse-ball");
   for (const viewport of [{width: 1440, height: 1000}, {width: 390, height: 844}, {width: 320, height: 740}]) {

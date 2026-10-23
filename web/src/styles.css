@@ -465,11 +465,8 @@ body.task-tool-resizing { cursor: col-resize; user-select: none; }
 .desktop-mouse-panel button:hover { border-color: #60a5fa; background: rgb(37 99 235 / 30%); color: #fff; }
 .desktop-mouse-key { justify-self: center; width: 40px !important; height: 40px !important; min-height: 40px !important; border-radius: 50% !important; font-size: 12px; font-weight: 800; }
 .desktop-wheel-stack { display: grid; grid-template-rows: 22px 38px 22px; gap: 3px; }
-.desktop-wheel-pad { position: relative; display: grid; place-items: center; min-height: 38px; border: 1px solid rgb(255 255 255 / 14%); border-radius: 5px; background: rgb(255 255 255 / 6%); cursor: grab; touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
-.desktop-wheel-pad.dragging { cursor: grabbing; border-color: #60a5fa; background: rgb(37 99 235 / 24%); }
-.desktop-wheel-grip { position: relative; width: 20px; height: 24px; border: 1px solid rgb(255 255 255 / 34%); border-radius: 5px; background: rgb(255 255 255 / 13%); box-shadow: 0 1px 4px rgb(0 0 0 / 24%), inset 0 1px rgb(255 255 255 / 18%); pointer-events: none; transition: transform 100ms ease-out; }
-.desktop-wheel-grip::after { position: absolute; inset: 7px 5px; border-top: 1px solid rgb(255 255 255 / 58%); border-bottom: 1px solid rgb(255 255 255 / 58%); content: ""; }
-.desktop-wheel-pad.dragging .desktop-wheel-grip { border-color: #93c5fd; background: rgb(96 165 250 / 34%); transition: none; }
+.desktop-wheel-speed { color: #bfdbfe !important; font-size: 11px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.desktop-wheel-speed:hover { color: #fff !important; }
 @media (max-width: 360px) {
   .desktop-task-header { gap: 3px; padding: 6px 4px; }
   .desktop-header-controls, .desktop-task-header .task-tool-panel-actions { gap: 2px; }
@@ -775,6 +772,7 @@ dd { margin: 3px 0 0; overflow-wrap: anywhere; font-size: 11px; }
 .aha-channel-route-card > div { border-top-color: #deeee5; }
 .aha-channel-route-card > div > div { grid-template-columns: minmax(92px,.8fr) minmax(0,1fr) auto; border-bottom-color: #e3efe8; }
 .aha-channel-route-card b { color: #166744; }
+.aha-route-message { max-height: 220px; overflow: auto; padding: 9px 10px; color: #263445; font-size: 11px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
 .aha-status-card { margin: 0 8px 14px; overflow: hidden; border: 1px solid #ccd5df; border-left: 3px solid #64748b; border-radius: 4px; background: #fff; }
 .aha-status-card header { display: flex; align-items: center; gap: 8px; padding: 7px 9px; border-bottom: 1px solid #e3e7ec; color: #475569; font-size: 9px; }
 .aha-status-card header strong { display: inline-flex; align-items: center; gap: 5px; margin-right: auto; }

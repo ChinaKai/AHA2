@@ -904,7 +904,7 @@ func (s *Store) EnqueueAgentChannelReply(
 		ID: conversationItemID, TaskID: taskID, RoundID: roundID, TurnID: turnID,
 		AgentID: "aha", StreamAgentID: "main", FromAgentID: "aha", ToAgentID: "main",
 		RouteKind: "channel_reply", Category: "update", Kind: "agent_channel_reply",
-		Summary: "AHA 已回复渠道消息",
+		Summary: "AHA 已回复渠道消息：" + compactChannelReply(message),
 		Payload: map[string]any{
 			"message": message, "delivery_id": deliveryID, "delivery_state": "pending",
 			"inbound_receipt_id": inboundReceiptID,
@@ -928,6 +928,15 @@ func (s *Store) EnqueueAgentChannelReply(
 		return domain.ChannelDelivery{}, "", false, err
 	}
 	return item, conversationItemID, true, tx.Commit()
+}
+
+func compactChannelReply(message string) string {
+	text := strings.Join(strings.Fields(message), " ")
+	runes := []rune(text)
+	if len(runes) > 120 {
+		return string(runes[:119]) + "…"
+	}
+	return text
 }
 
 func isNoRows(err error) bool { return errors.Is(err, sql.ErrNoRows) }

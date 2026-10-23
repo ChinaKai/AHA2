@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -165,6 +166,16 @@ func TestAgentChannelReplyIsReceiptBoundAndIdempotent(t *testing.T) {
 	if err != nil || retryCreated || retry.ID != delivery.ID || retryItemID != itemID {
 		t.Fatalf("reply retry=%#v item=%q created=%v err=%v", retry, retryItemID, retryCreated, err)
 	}
+	var cardSummary, cardPayloadJSON string
+	if err := database.db.QueryRowContext(ctx,
+		`SELECT summary,payload_json FROM conversation_items WHERE id=?`, itemID,
+	).Scan(&cardSummary, &cardPayloadJSON); err != nil {
+		t.Fatal(err)
+	}
+	cardPayload := decodeJSON(cardPayloadJSON, map[string]any{})
+	if cardSummary != "AHA 已回复渠道消息：早上好" || cardPayload["message"] != "早上好" {
+		t.Fatalf("reply card summary=%q payload=%#v", cardSummary, cardPayload)
+	}
 	target, err := database.ChannelDeliveryTarget(ctx, conversation.ID, delivery.SourceEventSequence)
 	if err != nil || target["reply_message_id"] != "provider-message-reply" ||
 		target["mention_user_ids"] != `["provider-user-reply"]` {
@@ -181,5 +192,16 @@ func TestAgentChannelReplyIsReceiptBoundAndIdempotent(t *testing.T) {
 	deliveries, err := database.ChannelDeliveries(ctx, instance.ID, 20)
 	if err != nil || len(deliveries) != 1 || deliveries[0].ID != delivery.ID {
 		t.Fatalf("ordinary final reply leaked into task route: %#v err=%v", deliveries, err)
+	}
+}
+
+func TestCompactChannelReply(t *testing.T) {
+	if got := compactChannelReply("  第一行\n\n第二行\t内容  "); got != "第一行 第二行 内容" {
+		t.Fatalf("compact reply=%q", got)
+	}
+	long := strings.Repeat("字", 130)
+	got := compactChannelReply(long)
+	if len([]rune(got)) != 120 || !strings.HasSuffix(got, "…") {
+		t.Fatalf("long reply length=%d value=%q", len([]rune(got)), got)
 	}
 }
