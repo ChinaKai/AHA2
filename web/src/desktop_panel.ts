@@ -68,10 +68,11 @@ const frameProfiles: FrameOptions[] = [
   {max_width: 640, max_height: 360, quality: 45, interval_ms: 250},
   {max_width: 320, max_height: 180, quality: 35, interval_ms: 500},
 ];
+const maxDesktopZoom = 5;
 
 export function desktopPreviewSize(width: number, height: number, availableWidth: number, availableHeight: number, zoom = 1): {width: number; height: number} {
   if (![width, height, availableWidth, availableHeight, zoom].every(value => Number.isFinite(value) && value > 0)) return {width: 0, height: 0};
-  const scale = Math.min(availableWidth / width, availableHeight / height) * Math.max(1, Math.min(3, zoom));
+  const scale = Math.min(availableWidth / width, availableHeight / height) * Math.max(1, Math.min(maxDesktopZoom, zoom));
   return {width: width * scale, height: height * scale};
 }
 
@@ -329,7 +330,7 @@ export function renderDesktopPanel(detail: TaskDetail, header = ""): string {
       <span id="desktop-video-metrics" role="status"></span>
       <div class="desktop-view-controls">
         <button type="button" id="desktop-fit" class="icon-button" title="完整适配画面" aria-label="完整适配画面">${icon("monitor")}</button>
-        <input type="range" id="desktop-zoom" min="100" max="300" step="25" value="${state.zoom * 100}" aria-label="画面放大比例，Ctrl 加滚轮以鼠标位置缩放" title="100%-300%；Ctrl 加滚轮以鼠标位置缩放">
+        <input type="range" id="desktop-zoom" min="100" max="${maxDesktopZoom * 100}" step="25" value="${state.zoom * 100}" aria-label="画面放大比例，Ctrl 加滚轮以鼠标位置缩放" title="100%-${maxDesktopZoom * 100}%；Ctrl 加滚轮以鼠标位置缩放">
         <output id="desktop-zoom-value">100%</output>
         <button type="button" id="desktop-fullscreen" class="icon-button" title="全屏" aria-label="全屏">${icon("expand")}</button>
       </div>
@@ -1182,7 +1183,7 @@ function setZoom(binding: Binding, zoom: number, anchor?: {clientX: number; clie
     ? Math.max(0, Math.min(1, (clientY - before.top) / before.height)) : .5;
   cancelGesture(binding);
   pauseObservation(binding);
-  state.zoom = Number.isFinite(zoom) ? Math.max(1, Math.min(3, zoom)) : 1;
+  state.zoom = Number.isFinite(zoom) ? Math.max(1, Math.min(maxDesktopZoom, zoom)) : 1;
   layoutPreview(binding);
   const after = image?.getBoundingClientRect();
   if (before && after && before.width > 0 && before.height > 0 && after.width > 0 && after.height > 0) {

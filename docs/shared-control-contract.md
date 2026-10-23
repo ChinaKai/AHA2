@@ -106,7 +106,8 @@ Background mode has no free-form keyboard passthrough. Foreground mode provides
 direct image clicks/drags/wheel, a Unicode text form and bounded key chords.
 Local `Ctrl`/`Command` + wheel zoom is anchored at the pointer and preserves the
 logical desktop coordinate under it. Plain wheel remains foreground remote
-scrolling and must never be converted into local zoom.
+scrolling and must never be converted into local zoom. Zoom ranges from 100% to
+500% in 25% steps, with both the slider and wheel path clamped to the same limit.
 Provide window chooser, process/title, refresh, joint share, stop, error/status,
 image, elements and supported action controls. There is no Owner/Agent handoff
 button. Joint sharing includes explicit consent; old sessions remain legacy

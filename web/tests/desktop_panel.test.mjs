@@ -36,6 +36,11 @@ test("preview fits both axes without cropping and zoom preserves aspect ratio", 
     assert.equal(zoom.width, fit.width * 2);
     assert.equal(zoom.height, fit.height * 2);
   }
+  const fit = desktop.desktopPreviewSize(2560, 1440, 600, 300);
+  const max = desktop.desktopPreviewSize(2560, 1440, 600, 300, 5);
+  assert.equal(max.width, fit.width * 5);
+  assert.equal(max.height, fit.height * 5);
+  assert.deepEqual(desktop.desktopPreviewSize(2560, 1440, 600, 300, 9), max);
   assert.deepEqual(desktop.desktopPreviewSize(0, 100, 100, 100), {width: 0, height: 0});
 });
 function actionPayload(call) {
@@ -354,6 +359,11 @@ test("ctrl wheel zooms without sending remote input while plain wheel still scro
     await flush();
     assert.equal(actions().length, 1);
     assert.equal(actions()[0].payload.kind, "scroll");
+    zoom.value = "900";
+    zoom.fire("input");
+    await flush();
+    assert.equal(zoom.value, "500");
+    assert.equal(h.panel.querySelector("#desktop-zoom-value").textContent, "500%");
   } finally { h.close(); }
 });
 

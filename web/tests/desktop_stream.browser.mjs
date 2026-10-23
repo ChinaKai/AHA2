@@ -337,6 +337,18 @@ try {
   assert.ok(Math.abs(wheelZoom.logicalY - anchor.logicalY) < 2, "wheel zoom preserves the pointed logical y");
   assert.equal(actions.length, actionsBeforeWheelZoom, "local wheel zoom must not send remote scroll input");
   await page.screenshot({path: resolve(output, "pointer-anchored-zoom-1440.png")});
+  const actionsBeforeMaxZoom = actions.length;
+  await page.locator("#desktop-zoom").evaluate(node => {
+    node.value = "500"; node.dispatchEvent(new Event("input", {bubbles: true}));
+  });
+  await delay(150);
+  assert.deepEqual(await page.evaluate(() => ({
+    value: document.querySelector("#desktop-zoom").value,
+    max: document.querySelector("#desktop-zoom").max,
+    label: document.querySelector("#desktop-zoom-value").textContent,
+  })), {value: "500", max: "500", label: "500%"});
+  assert.equal(actions.length, actionsBeforeMaxZoom, "500% slider zoom remains local");
+  await page.screenshot({path: resolve(output, "max-zoom-500-1440.png")});
   await page.click("#desktop-fit");
   await delay(100);
   await assertFit();
