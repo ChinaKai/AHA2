@@ -789,7 +789,7 @@ test("mobile touch gestures distinguish double click, right click, wheel and pin
   } finally { h.close(); }
 });
 
-test("virtual wheel toggles and sends fixed and dragged scroll input", async () => {
+test("floating virtual mouse drags, expands and sends button and wheel input", async () => {
   const h = harness("virtual-wheel", ({url}) => {
     if (url.endsWith("/windows")) return {windows: []};
     if (url.includes("/observation?")) return {observation: foregroundObservation()};
@@ -798,8 +798,9 @@ test("virtual wheel toggles and sends fixed and dragged scroll input", async () 
   try {
     h.bind();
     await flush();
-    const toggle = h.panel.querySelector("#desktop-wheel-toggle");
-    const wheel = h.panel.querySelector("#desktop-wheel");
+    const mouse = h.panel.querySelector("#desktop-mouse");
+    const toggle = h.panel.querySelector("#desktop-mouse-ball");
+    const wheel = h.panel.querySelector("#desktop-mouse-panel");
     const pad = h.panel.querySelector("#desktop-wheel-pad");
     const thumb = h.panel.querySelector("#desktop-wheel-pad .desktop-wheel-grip");
     const writes = () => h.calls.filter(call => call.url.endsWith("/actions"));
@@ -808,6 +809,14 @@ test("virtual wheel toggles and sends fixed and dragged scroll input", async () 
     toggle.fire("click");
     assert.equal(toggle.getAttribute("aria-expanded"), "true");
     assert.equal(wheel.hidden, false);
+    h.panel.querySelector("#desktop-mouse-left").fire("click");
+    await flush();
+    assert.equal(writes().at(-1).payload.kind, "click");
+    assert.equal(writes().at(-1).payload.button, "left");
+    h.panel.querySelector("#desktop-mouse-right").fire("click");
+    await flush();
+    assert.equal(writes().at(-1).payload.kind, "click");
+    assert.equal(writes().at(-1).payload.button, "right");
     h.panel.querySelector("#desktop-wheel-up").fire("click");
     await flush();
     assert.equal(writes().at(-1).payload.kind, "scroll");
@@ -820,6 +829,13 @@ test("virtual wheel toggles and sends fixed and dragged scroll input", async () 
     assert.equal(writes().at(-1).payload.kind, "scroll");
     assert.equal(writes().at(-1).payload.delta_y, 120);
     assert.equal(thumb.style.transform, "");
+    toggle.fire("pointerdown", {pointerId: 12, clientX: 100, clientY: 100});
+    toggle.fire("pointermove", {pointerId: 12, clientX: 70, clientY: 120});
+    toggle.fire("pointerup", {pointerId: 12, clientX: 70, clientY: 120});
+    assert.equal(mouse.style.left, "8px");
+    assert.equal(wheel.hidden, false);
+    toggle.fire("click");
+    assert.equal(wheel.hidden, false, "synthetic click after a drag must not close the panel");
     toggle.fire("click");
     assert.equal(toggle.getAttribute("aria-expanded"), "false");
     assert.equal(wheel.hidden, true);

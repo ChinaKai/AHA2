@@ -113,12 +113,13 @@ pointers have moved or a short settle interval expires. Scroll must accumulate
 center movement and emit queued wheel actions while the fingers move rather than
 waiting for pointer-up, while pinch must remain local and neither gesture may
 emit an extra remote click.
-A compact, collapsible virtual wheel overlay provides explicit up/down buttons
-and a visible draggable thumb in a raised track for devices where two-finger
-swipe recognition is inconvenient. The thumb follows the pointer and returns to
-center on release. Short drags use a 4x wheel-distance scale so the compact
-control still produces a usable scroll. Its input shares the same serialized
-scroll queue as touch gestures.
+A compact floating virtual mouse provides an alternative when touch gestures are
+inconvenient. The collapsed ball can be dragged anywhere inside the observation
+area and tapped to expand a panel with left/right click buttons, up/down wheel
+buttons, and a visible draggable wheel thumb. The thumb follows the pointer and
+returns to center on release. Short drags use a 4x wheel-distance scale so the
+compact control still produces a usable scroll. Its input shares the same
+serialized scroll queue as touch gestures.
 Local `Ctrl`/`Command` + wheel zoom is anchored at the pointer and preserves the
 logical desktop coordinate under it. Plain wheel remains foreground remote
 scrolling and must never be converted into local zoom. Zoom ranges from 100% to

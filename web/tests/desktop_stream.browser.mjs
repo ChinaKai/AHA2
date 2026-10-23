@@ -426,23 +426,48 @@ try {
   await delay(150);
   assert.ok(Number(await page.locator("#desktop-zoom").inputValue()) > zoomBeforePinch, "pinch zooms in");
   assert.equal(actions.length, actionsBeforePinch, "pinch remains a local view gesture");
-  await page.click("#desktop-wheel-toggle");
-  assert.equal(await page.locator("#desktop-wheel").isVisible(), true);
+  await page.click("#desktop-mouse-ball");
+  assert.equal(await page.locator("#desktop-mouse-panel").isVisible(), true);
+  const actionsBeforeLeftButton = actions.length;
+  await page.click("#desktop-mouse-left");
+  await waitUntil(() => actions.length > actionsBeforeLeftButton, "virtual mouse left click");
+  assert.equal(actions.at(-1).kind, "click");
+  assert.equal(actions.at(-1).button, "left");
+  const actionsBeforeRightButton = actions.length;
+  await page.click("#desktop-mouse-right");
+  await waitUntil(() => actions.length > actionsBeforeRightButton, "virtual mouse right click");
+  assert.equal(actions.at(-1).kind, "click");
+  assert.equal(actions.at(-1).button, "right");
   const actionsBeforeWheelButton = actions.length;
   await page.click("#desktop-wheel-down");
   await waitUntil(() => actions.length > actionsBeforeWheelButton, "virtual wheel button scroll");
   assert.equal(actions.at(-1).kind, "scroll");
   assert.equal(actions.at(-1).delta_y, 120);
+  const mouseBallBefore = await page.locator("#desktop-mouse-ball").boundingBox();
+  await touchClient.send("Input.dispatchTouchEvent", {
+    type: "touchStart",
+    touchPoints: [{x: mouseBallBefore.x + mouseBallBefore.width / 2, y: mouseBallBefore.y + mouseBallBefore.height / 2, id: 9}],
+  });
+  await touchClient.send("Input.dispatchTouchEvent", {
+    type: "touchMove",
+    touchPoints: [{x: mouseBallBefore.x + mouseBallBefore.width / 2 - 34, y: mouseBallBefore.y + mouseBallBefore.height / 2 + 20, id: 9}],
+  });
+  await touchClient.send("Input.dispatchTouchEvent", {type: "touchEnd", touchPoints: []});
+  await delay(150);
+  const mouseBallAfter = await page.locator("#desktop-mouse-ball").boundingBox();
+  assert.ok(Math.abs(mouseBallAfter.x - mouseBallBefore.x) > 20, "floating mouse moves horizontally");
+  assert.ok(Math.abs(mouseBallAfter.y - mouseBallBefore.y) > 10, "floating mouse moves vertically");
+  assert.equal(await page.locator("#desktop-mouse-panel").isVisible(), true, "dragging the ball keeps the panel open");
   const wheelPad = await page.locator("#desktop-wheel-pad").boundingBox();
   const wheelThumbBefore = await page.locator("#desktop-wheel-pad .desktop-wheel-grip").boundingBox();
   const actionsBeforeWheelDrag = actions.length;
   await touchClient.send("Input.dispatchTouchEvent", {
     type: "touchStart",
-    touchPoints: [{x: wheelPad.x + wheelPad.width / 2, y: wheelPad.y + wheelPad.height * .75, id: 9}],
+    touchPoints: [{x: wheelPad.x + wheelPad.width / 2, y: wheelPad.y + wheelPad.height * .75, id: 10}],
   });
   await touchClient.send("Input.dispatchTouchEvent", {
     type: "touchMove",
-    touchPoints: [{x: wheelPad.x + wheelPad.width / 2, y: wheelPad.y + wheelPad.height * .25, id: 9}],
+    touchPoints: [{x: wheelPad.x + wheelPad.width / 2, y: wheelPad.y + wheelPad.height * .25, id: 10}],
   });
   const wheelThumbDuring = await page.locator("#desktop-wheel-pad .desktop-wheel-grip").boundingBox();
   assert.ok(wheelThumbDuring.y < wheelThumbBefore.y, "dragged wheel thumb follows the pointer");
@@ -454,9 +479,22 @@ try {
   const wheelThumbAfter = await page.locator("#desktop-wheel-pad .desktop-wheel-grip").boundingBox();
   assert.ok(Math.abs(wheelThumbAfter.y - wheelThumbBefore.y) < 1, "wheel thumb returns to its centered rest position");
   await page.screenshot({path: resolve(output, "mobile-touch-gestures-390.png")});
-  await page.click("#desktop-wheel-toggle");
+  await page.click("#desktop-mouse-ball");
   for (const viewport of [{width: 1440, height: 1000}, {width: 390, height: 844}, {width: 320, height: 740}]) {
     await page.setViewportSize(viewport);
+    await page.click("#desktop-mouse-ball");
+    const mouseBounds = await page.evaluate(() => {
+      const panel = document.querySelector("#desktop-mouse-panel").getBoundingClientRect();
+      const observation = document.querySelector(".desktop-observation").getBoundingClientRect();
+      return {panel: {left: panel.left, top: panel.top, right: panel.right, bottom: panel.bottom},
+        observation: {left: observation.left, top: observation.top, right: observation.right, bottom: observation.bottom}};
+    });
+    assert.ok(mouseBounds.panel.left >= mouseBounds.observation.left - 1
+      && mouseBounds.panel.top >= mouseBounds.observation.top - 1
+      && mouseBounds.panel.right <= mouseBounds.observation.right + 1
+      && mouseBounds.panel.bottom <= mouseBounds.observation.bottom + 1,
+    `virtual mouse panel stays inside the ${viewport.width}px observation`);
+    await page.click("#desktop-mouse-ball");
     await page.click('[data-desktop-video="bandwidth"]');
     await waitUntil(() => preferences.at(-1).quality === 45, "bandwidth profile");
     await page.click('[data-desktop-video="quality"]');

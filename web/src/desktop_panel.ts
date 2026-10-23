@@ -74,13 +74,22 @@ interface WheelDrag {
   lastX: number;
   lastY: number;
 }
+interface MouseControlDrag {
+  pointerID: number;
+  startX: number;
+  startY: number;
+  originLeft: number;
+  originTop: number;
+  moved: boolean;
+}
 interface Binding {
   root: HTMLElement; state: PanelState; notify: Notice; timer: number;
   read: AbortController | null; write: AbortController | null; epoch: number;
   removeVisibility: () => void;
   chooserActive: boolean; clickTimer: number; click: Gesture | null; gesture: Gesture | null;
   touchPointers: Map<number, {x: number; y: number}>; touchGesture: TouchGesture | null;
-  wheelQueue: WheelQueue; wheelDrag: WheelDrag | null; wheelOpen: boolean;
+  wheelQueue: WheelQueue; wheelDrag: WheelDrag | null;
+  mouseOpen: boolean; mouseDrag: MouseControlDrag | null; mouseSuppressClick: boolean;
   refreshWindows: boolean;
   viewID: string; socket: WebSocket | null; socketKey: string; socketGeneration: number;
   socketReady: boolean; socketTimer: number; retries: number; retryAt: number; retryKey: string;
@@ -379,11 +388,17 @@ export function renderDesktopPanel(detail: TaskDetail, header = ""): string {
           <img id="desktop-image" alt="共享窗口画面" aria-label="共享画面控制区，移动端双指轻点为右键，双指平行滑动为滚轮，双指捏合为缩放" draggable="false" tabindex="-1">
           <div id="desktop-highlight" class="desktop-highlight" hidden></div>
         </div></div>
-        <button type="button" id="desktop-wheel-toggle" class="icon-button desktop-wheel-toggle" title="虚拟滚轮" aria-label="虚拟滚轮" aria-controls="desktop-wheel" aria-expanded="false" hidden>${icon("chevron-up")}</button>
-        <div id="desktop-wheel" class="desktop-wheel" role="group" aria-label="虚拟滚轮" hidden>
-          <button type="button" id="desktop-wheel-up" class="icon-button" title="向上滚动" aria-label="向上滚动">${icon("chevron-up")}</button>
-          <div id="desktop-wheel-pad" class="desktop-wheel-pad" role="group" aria-label="拖动滚动画面" title="拖动以连续滚动"><span class="desktop-wheel-grip" aria-hidden="true"></span></div>
-          <button type="button" id="desktop-wheel-down" class="icon-button" title="向下滚动" aria-label="向下滚动">${icon("chevron-down")}</button>
+        <div id="desktop-mouse" class="desktop-mouse" hidden>
+          <button type="button" id="desktop-mouse-ball" class="desktop-mouse-ball" title="虚拟鼠标" aria-label="虚拟鼠标" aria-controls="desktop-mouse-panel" aria-expanded="false">${icon("mouse")}</button>
+          <div id="desktop-mouse-panel" class="desktop-mouse-panel" role="group" aria-label="虚拟鼠标" hidden>
+            <div class="desktop-mouse-buttons" role="group" aria-label="鼠标按键">
+              <button type="button" id="desktop-mouse-left" title="左键" aria-label="鼠标左键">L</button>
+              <button type="button" id="desktop-mouse-right" title="右键" aria-label="鼠标右键">R</button>
+            </div>
+            <button type="button" id="desktop-wheel-up" class="icon-button" title="向上滚动" aria-label="向上滚动">${icon("chevron-up")}</button>
+            <div id="desktop-wheel-pad" class="desktop-wheel-pad" role="group" aria-label="拖动滚动画面" title="拖动以连续滚动"><span class="desktop-wheel-grip" aria-hidden="true"></span></div>
+            <button type="button" id="desktop-wheel-down" class="icon-button" title="向下滚动" aria-label="向下滚动">${icon("chevron-down")}</button>
+          </div>
         </div>
         <p id="desktop-capture-status" class="desktop-empty desktop-capture-notice" role="status">尚无窗口画面</p>
         <button type="button" id="desktop-empty-target" class="desktop-empty-target">${icon("browser")}选择共享目标</button>
@@ -443,6 +458,32 @@ function statusText(state: PanelState): string {
   if (!session) return state.sessionNote || (!state.status.foreground_supported ? "此宿主不支持前台控制" : "尚未授权共享窗口");
   if (state.busy) return state.busy;
   return `共同控制 · ${session.claimed ? "Agent 已接入" : "Agent 可直接接入"} · 授权到期 ${new Date(session.expires_at).toLocaleTimeString()}`;
+}
+
+function constrainMouseControl(binding: Binding): void {
+  if (!current(binding)) return;
+  const control = binding.root.querySelector<HTMLElement>("#desktop-mouse");
+  const observation = binding.root.querySelector<HTMLElement>(".desktop-observation");
+  const ball = binding.root.querySelector<HTMLElement>("#desktop-mouse-ball");
+  const panel = binding.root.querySelector<HTMLElement>("#desktop-mouse-panel");
+  if (!control || control.hidden || !observation || !ball) return;
+  const bounds = observation.getBoundingClientRect();
+  if (bounds.width <= 0 || bounds.height <= 0) return;
+  const ballWidth = ball.getBoundingClientRect().width || 44;
+  const ballHeight = ball.getBoundingClientRect().height || 44;
+  const panelWidth = panel?.offsetWidth || 58;
+  const panelHeight = panel?.offsetHeight || 224;
+  const currentLeft = Number.parseFloat(control.style.left);
+  const currentTop = Number.parseFloat(control.style.top);
+  const left = Math.max(8, Math.min(bounds.width - ballWidth - 8,
+    Number.isFinite(currentLeft) ? currentLeft : bounds.width - ballWidth - 18));
+  const top = Math.max(8, Math.min(bounds.height - ballHeight - 8,
+    Number.isFinite(currentTop) ? currentTop : 16));
+  control.style.left = `${left}px`;
+  control.style.top = `${top}px`;
+  control.style.right = "auto";
+  control.classList.toggle("expand-left", left + ballWidth + panelWidth + 8 > bounds.width);
+  control.classList.toggle("expand-up", top + ballHeight + panelHeight + 8 > bounds.height);
 }
 
 function updateDOM(binding: Binding): void {
@@ -528,12 +569,15 @@ function updateDOM(binding: Binding): void {
   const preview = root.querySelector<HTMLElement>("#desktop-preview")!;
   preview.hidden = !hasImage;
   const scrollReady = hasImage && actionable(state) && inputAllowed(state, "scroll");
-  const wheelToggle = root.querySelector<HTMLButtonElement>("#desktop-wheel-toggle")!;
-  wheelToggle.hidden = !hasImage;
-  wheelToggle.disabled = !scrollReady;
-  wheelToggle.setAttribute("aria-expanded", String(binding.wheelOpen));
-  root.querySelectorAll<HTMLButtonElement>(".desktop-wheel button").forEach(button => { button.disabled = !scrollReady; });
-  root.querySelector<HTMLElement>("#desktop-wheel")!.hidden = !binding.wheelOpen || !hasImage;
+  const clickReady = hasImage && actionable(state) && inputAllowed(state, "click");
+  root.querySelector<HTMLElement>("#desktop-mouse")!.hidden = !hasImage;
+  root.querySelector<HTMLButtonElement>("#desktop-mouse-ball")!.setAttribute("aria-expanded", String(binding.mouseOpen));
+  root.querySelector<HTMLElement>("#desktop-mouse-panel")!.hidden = !binding.mouseOpen || !hasImage;
+  root.querySelectorAll<HTMLButtonElement>("#desktop-mouse-left, #desktop-mouse-right")
+    .forEach(button => { button.disabled = !clickReady; });
+  root.querySelectorAll<HTMLButtonElement>("#desktop-wheel-up, #desktop-wheel-down")
+    .forEach(button => { button.disabled = !scrollReady; });
+  constrainMouseControl(binding);
   if (hasImage && observation) {
     const src = binding.imageURL || `data:${mime};base64,${observation.image}`;
     if (image.getAttribute("src") !== src) image.src = src;
@@ -1705,14 +1749,15 @@ export function bindDesktopPanel(detail: TaskDetail, notify: Notice): void {
   const binding: Binding = {root, state, notify, timer: 0, read: null, write: null, epoch: 0,
     removeVisibility: () => {}, chooserActive: false, clickTimer: 0, click: null, gesture: null, refreshWindows: false,
     touchPointers: new Map(), touchGesture: null,
-    wheelQueue: {pendingX: 0, pendingY: 0, clientX: 0, clientY: 0, timer: 0}, wheelDrag: null, wheelOpen: false,
+    wheelQueue: {pendingX: 0, pendingY: 0, clientX: 0, clientY: 0, timer: 0}, wheelDrag: null,
+    mouseOpen: false, mouseDrag: null, mouseSuppressClick: false,
     viewID: randomID(), socket: null, socketKey: "", socketGeneration: 0, socketReady: false, socketTimer: 0,
     retries: 0, retryAt: 0, retryKey: "", decoding: false, decoder: null, decodeTimer: 0, blobURLs: new Set(),
     imageURL: "", lastFrameAt: 0, lastStatusAt: 0, decodePending: 0, pendingText: null, removeLayout: () => {},
     previewWidth: 0, previewHeight: 0, removePopover: () => {}, listeners: []};
   active = binding;
   root.querySelectorAll<HTMLInputElement | HTMLButtonElement | HTMLTextAreaElement>(
-    ".desktop-picture-bar button, .desktop-picture-bar input, .desktop-input-bar button, .desktop-input-bar textarea, .desktop-wheel button, .desktop-wheel-toggle",
+    ".desktop-picture-bar button, .desktop-picture-bar input, .desktop-input-bar button, .desktop-input-bar textarea, .desktop-mouse button",
   ).forEach(control => { control.disabled = state.remote; });
   if (state.remote) {
     root.querySelectorAll<HTMLButtonElement>(".desktop-header-controls button").forEach(button => { button.disabled = true; });
@@ -1723,6 +1768,7 @@ export function bindDesktopPanel(detail: TaskDetail, notify: Notice): void {
   const layout = () => {
     if (state.popover === "keys" && !root.querySelector("#desktop-more-keys")?.getClientRects().length) setPopover(binding, "");
     layoutPreview(binding);
+    constrainMouseControl(binding);
   };
   const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(layout);
   const viewport = root.querySelector<HTMLElement>("#desktop-viewport")!;
@@ -1735,21 +1781,79 @@ export function bindDesktopPanel(detail: TaskDetail, notify: Notice): void {
   };
   listen(binding, root.querySelector("#desktop-fit"), "click", () => setZoom(binding, 1));
   listen(binding, root.querySelector("#desktop-zoom"), "input", event => setZoom(binding, Number((event.target as HTMLInputElement).value) / 100));
+  const mouseControl = root.querySelector<HTMLElement>("#desktop-mouse");
+  const mouseBall = root.querySelector<HTMLButtonElement>("#desktop-mouse-ball");
   const wheelPad = root.querySelector<HTMLElement>("#desktop-wheel-pad");
   const wheelThumb = root.querySelector<HTMLElement>("#desktop-wheel-pad .desktop-wheel-grip");
   const resetWheelThumb = () => {
     wheelPad?.classList.toggle("dragging", false);
     if (wheelThumb) wheelThumb.style.transform = "";
   };
-  listen(binding, root.querySelector("#desktop-wheel-toggle"), "click", () => {
-    binding.wheelOpen = !binding.wheelOpen;
-    if (!binding.wheelOpen) {
+  listen(binding, mouseBall, "click", () => {
+    if (binding.mouseSuppressClick) {
+      binding.mouseSuppressClick = false;
+      return;
+    }
+    binding.mouseOpen = !binding.mouseOpen;
+    if (!binding.mouseOpen) {
       binding.wheelDrag = null;
       resetWheelThumb();
       flushWheel(binding, true);
     }
     updateDOM(binding);
   });
+  listen(binding, mouseBall, "pointerdown", event => {
+    const observation = root.querySelector<HTMLElement>(".desktop-observation");
+    const ballBounds = mouseBall?.getBoundingClientRect();
+    const bounds = observation?.getBoundingClientRect();
+    if (!mouseControl || !mouseBall || !ballBounds || !bounds) return;
+    binding.mouseDrag = {
+      pointerID: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      originLeft: ballBounds.left - bounds.left,
+      originTop: ballBounds.top - bounds.top,
+      moved: false,
+    };
+    binding.mouseSuppressClick = false;
+    mouseBall.setPointerCapture(event.pointerId);
+  });
+  listen(binding, mouseBall, "pointermove", event => {
+    const drag = binding.mouseDrag;
+    const observation = root.querySelector<HTMLElement>(".desktop-observation");
+    if (!drag || drag.pointerID !== event.pointerId || !mouseControl || !observation) return;
+    const deltaX = event.clientX - drag.startX;
+    const deltaY = event.clientY - drag.startY;
+    if (!drag.moved && Math.hypot(deltaX, deltaY) < 5) return;
+    drag.moved = true;
+    binding.mouseSuppressClick = true;
+    const bounds = observation.getBoundingClientRect();
+    mouseControl.style.left = `${drag.originLeft + deltaX}px`;
+    mouseControl.style.top = `${drag.originTop + deltaY}px`;
+    constrainMouseControl(binding);
+    event.preventDefault();
+  });
+  listen(binding, mouseBall, "pointerup", event => {
+    if (binding.mouseDrag?.pointerID !== event.pointerId) return;
+    const moved = binding.mouseDrag.moved;
+    binding.mouseDrag = null;
+    if (mouseBall?.hasPointerCapture(event.pointerId)) mouseBall.releasePointerCapture(event.pointerId);
+    if (moved) event.preventDefault();
+  });
+  listen(binding, mouseBall, "pointercancel", event => {
+    if (binding.mouseDrag?.pointerID !== event.pointerId) return;
+    binding.mouseDrag = null;
+    binding.mouseSuppressClick = false;
+    constrainMouseControl(binding);
+  });
+  const mouseButton = (selector: string, button: "left" | "right") => listen(binding, root.querySelector(selector), "click", () => {
+    const point = surfaceCenter(binding);
+    if (actionable(state) && inputAllowed(state, "click")) {
+      performInput(binding, "click", {...point, button}, state.observation?.id);
+    }
+  });
+  mouseButton("#desktop-mouse-left", "left");
+  mouseButton("#desktop-mouse-right", "right");
   const wheelButton = (selector: string, deltaY: number) => listen(binding, root.querySelector(selector), "click", () => {
     const point = surfaceCenter(binding);
     queueWheel(binding, 0, deltaY, point.clientX, point.clientY, true);
@@ -1908,6 +2012,9 @@ export function stopDesktopPanel(): void {
   window.clearTimeout(binding.wheelQueue.timer);
   binding.wheelQueue = {pendingX: 0, pendingY: 0, clientX: 0, clientY: 0, timer: 0};
   binding.wheelDrag = null;
+  binding.mouseOpen = false;
+  binding.mouseDrag = null;
+  binding.mouseSuppressClick = false;
   // Captures and element contents are transient, never browser storage or logs.
   binding.state.observation = null;
   binding.state.loading = false;
