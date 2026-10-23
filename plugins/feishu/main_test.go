@@ -94,6 +94,23 @@ func TestRegistrationRequestsBotMessagingScopes(t *testing.T) {
 	}
 }
 
+func TestRegistrationRequestsCloudDocumentScopes(t *testing.T) {
+	t.Parallel()
+	scopes := registrationTenantScopes()
+	for _, required := range []string{"wiki:node:read", "docx:document:readonly"} {
+		found := false
+		for _, scope := range scopes {
+			if scope == required {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("registration missing cloud document scope %s", required)
+		}
+	}
+}
+
 func TestNewAppMenuInitializationRequestsMediaScopes(t *testing.T) {
 	t.Parallel()
 	configured := false

@@ -292,26 +292,49 @@ type ChannelMention struct {
 	IsBot          bool   `json:"is_bot"`
 }
 
+type ChannelReplySender struct {
+	DisplayName string `json:"display_name,omitempty"`
+	IsBot       bool   `json:"is_bot,omitempty"`
+}
+
+type ChannelReplyResource struct {
+	Type     string `json:"type"`
+	FileName string `json:"file_name,omitempty"`
+}
+
+type ChannelReplyContext struct {
+	ParentMessageID string                 `json:"parent_message_id,omitempty"`
+	RootMessageID   string                 `json:"root_message_id,omitempty"`
+	ThreadID        string                 `json:"thread_id,omitempty"`
+	MessageType     string                 `json:"message_type,omitempty"`
+	Sender          ChannelReplySender     `json:"sender,omitempty"`
+	Content         string                 `json:"content,omitempty"`
+	Resources       []ChannelReplyResource `json:"resources,omitempty"`
+	Status          string                 `json:"status"`
+	ErrorCode       string                 `json:"error_code,omitempty"`
+}
+
 type ChannelInboundEnvelope struct {
-	SchemaVersion     int              `json:"schema_version"`
-	RequestID         string           `json:"request_id"`
-	InstanceID        string           `json:"instance_id"`
-	ExternalEventID   string           `json:"external_event_id"`
-	EventType         string           `json:"event_type"`
-	OccurredAt        time.Time        `json:"occurred_at"`
-	ChatType          string           `json:"chat_type"`
-	ExternalChatID    string           `json:"external_chat_id"`
-	ExternalSenderID  string           `json:"external_sender_id"`
-	ExternalMessageID string           `json:"external_message_id"`
-	Content           string           `json:"content"`
-	ChatDisplayName   string           `json:"chat_display_name,omitempty"`
-	SenderDisplayName string           `json:"sender_display_name,omitempty"`
-	SenderIsBot       bool             `json:"sender_is_bot,omitempty"`
-	Mentions          []ChannelMention `json:"mentions,omitempty"`
-	MentionedBot      bool             `json:"mentioned_bot"`
-	Resources         []map[string]any `json:"resources,omitempty"`
-	CardAction        map[string]any   `json:"card_action,omitempty"`
-	MenuAction        map[string]any   `json:"menu_action,omitempty"`
+	SchemaVersion     int                  `json:"schema_version"`
+	RequestID         string               `json:"request_id"`
+	InstanceID        string               `json:"instance_id"`
+	ExternalEventID   string               `json:"external_event_id"`
+	EventType         string               `json:"event_type"`
+	OccurredAt        time.Time            `json:"occurred_at"`
+	ChatType          string               `json:"chat_type"`
+	ExternalChatID    string               `json:"external_chat_id"`
+	ExternalSenderID  string               `json:"external_sender_id"`
+	ExternalMessageID string               `json:"external_message_id"`
+	Content           string               `json:"content"`
+	ChatDisplayName   string               `json:"chat_display_name,omitempty"`
+	SenderDisplayName string               `json:"sender_display_name,omitempty"`
+	SenderIsBot       bool                 `json:"sender_is_bot,omitempty"`
+	Mentions          []ChannelMention     `json:"mentions,omitempty"`
+	MentionedBot      bool                 `json:"mentioned_bot"`
+	ReplyContext      *ChannelReplyContext `json:"reply_context,omitempty"`
+	Resources         []map[string]any     `json:"resources,omitempty"`
+	CardAction        map[string]any       `json:"card_action,omitempty"`
+	MenuAction        map[string]any       `json:"menu_action,omitempty"`
 }
 
 type ChannelSourceEvent struct {

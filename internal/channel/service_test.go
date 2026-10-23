@@ -40,6 +40,25 @@ func (m *memorySecrets) DeleteMany(keys []string) error {
 	return nil
 }
 
+func TestNormalizedInboundReplyContext(t *testing.T) {
+	t.Parallel()
+	contextValue, err := normalizedInboundReplyContext(&domain.ChannelReplyContext{
+		Status: "unavailable", Content: "must not be retained", ErrorCode: "reply_parent_provider_230027",
+		Resources: []domain.ChannelReplyResource{{Type: " FILE ", FileName: " report.pdf "}, {Type: ""}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if contextValue.Status != "unavailable" || contextValue.Content != "" ||
+		len(contextValue.Resources) != 1 || contextValue.Resources[0].Type != "file" ||
+		contextValue.Resources[0].FileName != "report.pdf" {
+		t.Fatalf("reply context=%#v", contextValue)
+	}
+	if _, err := normalizedInboundReplyContext(&domain.ChannelReplyContext{Status: "unknown"}); err == nil {
+		t.Fatal("invalid reply status was accepted")
+	}
+}
+
 func TestSafeChannelDisplayNameIsStableAndSingleLine(t *testing.T) {
 	first := safeChannelDisplayName("", "群成员", "instance", "external-one")
 	if first != safeChannelDisplayName("", "群成员", "instance", "external-one") ||

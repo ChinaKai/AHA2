@@ -28,6 +28,55 @@ func TestReauthorizationOnlyAddsScopes(t *testing.T) {
 	if !initial.CreateOnly || initial.AppPreset == nil || initial.Addons.Preset == nil || *initial.Addons.Preset || len(initial.Addons.Events.Items.Tenant) != 2 || len(initial.Addons.Callbacks.Items) != 1 {
 		t.Fatal("new app registration lost its initial configuration")
 	}
+	noChanges := registrationOptions(command{Payload: map[string]any{
+		"create_only": false, "app_id": "existing-app", "tenant_scopes": []any{},
+	}})
+	if !reflect.DeepEqual(noChanges.Addons.Scopes.Tenant, []string{"im:message:readonly"}) {
+		t.Fatalf("no-op reauthorization anchor scopes=%#v", noChanges.Addons.Scopes.Tenant)
+	}
+}
+
+func TestReauthorizationPublishesWithoutChangingMenu(t *testing.T) {
+	t.Parallel()
+	paths := []string{}
+	client := lark.NewClient("existing-app", "test-secret", lark.WithHttpClient(mockHTTPClient{do: func(request *http.Request) (*http.Response, error) {
+		if strings.Contains(request.URL.Path, "/auth/") {
+			return mediaTestResponse(200, `{"code":0,"tenant_access_token":"test-token","expire":7200}`), nil
+		}
+		paths = append(paths, request.URL.Path)
+		if strings.Contains(request.URL.Path, "/publish") {
+			var payload map[string]any
+			if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+				t.Fatal(err)
+			}
+			if payload["mobile_default_ability"] != "bot" || payload["pc_default_ability"] != "bot" ||
+				payload["remark"] != "Update AHA channel permissions" ||
+				payload["changelog"] != "Apply Owner-authorized Feishu channel permissions" {
+				t.Fatalf("publish payload=%#v", payload)
+			}
+		}
+		return mediaTestResponse(200, `{"code":0}`), nil
+	}}))
+	if err := publishFeishuApplication(context.Background(), client, "existing-app"); err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) != 1 || !strings.Contains(paths[0], "/applications/existing-app/publish") {
+		t.Fatalf("publish paths=%v", paths)
+	}
+}
+
+func TestApplicationPublishFailureCodeIsActionable(t *testing.T) {
+	t.Parallel()
+	if got := applicationPublishErrorCode(applicationPublishFailure{code: 210011, message: "invalid"}); got != "registration_publish_rejected_210011" {
+		t.Fatalf("code=%q", got)
+	}
+	if got := applicationPublishErrorCode(applicationPublishFailure{}); got != "registration_publish_failed" {
+		t.Fatalf("fallback code=%q", got)
+	}
+	result := applicationPublishFailureResult(applicationPublishFailure{code: 210011, message: "invalid"})
+	if result["stage"] != "publish" || result["code"] != 210011 || result["message"] != "invalid" {
+		t.Fatalf("result=%#v", result)
+	}
 }
 
 func TestLegacyMenuCommandsPreserveCustomMenusWithoutProviderRequests(t *testing.T) {

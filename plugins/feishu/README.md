@@ -12,11 +12,58 @@ The build script writes the executable and a manifest containing its SHA-256 to 
 
 The plugin uses `github.com/larksuite/oapi-sdk-go/v3` v3.9.10 for Device Authorization app registration, WebSocket events, message normalization, and cards. Outbound create/reply calls use the lower-level IM API so AHA2's durable delivery key is mapped to Feishu's one-hour UUID deduplication field.
 
+## Cloud document read (1.1.5)
+
+Messages containing up to three Feishu wiki or docx links now include the
+resolved document text in the same untrusted inbound message. Wiki links are
+resolved with `GET /open-apis/wiki/v2/spaces/get_node`; docx content is read
+with `GET /open-apis/docx/v1/documents/:document_id/raw_content`. The plugin
+only accepts links whose host is under `feishu.cn`, `larksuite.com`, or
+`larkoffice.com`, applies a five-second total timeout, and caps appended source
+text at 24,000 runes.
+
+The optional `cloud_docs_read` permission requests `wiki:node:read` and
+`docx:document:readonly`. API scope alone is insufficient: the AHA2 app must
+also be granted access to the specific document, or to the containing wiki
+space. Existing applications must explicitly select the new permission through
+reauthorization. AHA submits the application release after Feishu accepts the
+incremental scopes; administrator approval and the final release state remain
+authoritative on Feishu.
+
+## Reply and quote context (1.1.4)
+
+The receive event exposes `parent_id` and `root_id` for replies, but not the
+quoted message body. When `parent_id` is present, the plugin calls
+`GET /open-apis/im/v1/messages/:message_id` with sender names enabled and sends
+the normalized parent as a separate `reply_context` field. The core injects it
+into the Inbox as untrusted data rather than concatenating it into the current
+sender's text. A failed parent lookup does not drop the incoming message; it
+produces an `unavailable` context with a stable, sanitized error code.
+
+The plugin does not request `im:message.group_msg` for quoted group messages.
+Live verification with the existing message read scope successfully loaded
+quoted text, image, and file messages without the sensitive group-history
+permission. Failed lookups remain optional context and never drop the incoming
+message.
+
 ## Images and files
 
-### Permission-only reauthorization (1.1.1)
+### Permission reauthorization and release (1.1.7)
 
-Existing-app QR authorization uses the SDK's incremental scope Addons and targets the same App ID. It does not send creation presets, names, events, callbacks, bot abilities, menus, or an AHA-initiated publish request. The server still enforces the same unique Owner. Permission approval and any necessary publication remain on the official confirmation/developer page; review all outstanding draft changes before publishing.
+Existing-app QR authorization uses the SDK's incremental scope Addons and targets the same App ID. It does not send creation presets, names, events, callbacks, bot abilities, or menus. The server still enforces the same unique Owner, and the scanner explicitly confirms the permission change on Feishu's official page.
+
+After Feishu accepts an existing application's incremental authorization, AHA
+submits one ordinary application release through the official publish API. It
+does not patch menus, events, callbacks, or bot abilities during this step. A
+release failure fails onboarding with a stable `registration_publish_*` error
+code instead of reporting authorization as complete. Administrator approval
+and the final release state remain authoritative in Feishu.
+
+The release flow also runs when no new permission is selected. Because the
+registration SDK requires a non-empty additive payload for reauthorization,
+AHA uses the existing `im:message:readonly` scope as a no-op anchor. The scanner
+still confirms the flow and the successful scan triggers the application
+release.
 
 Process startup and credential rotation no longer enqueue menu configuration. Queued legacy `configure_menu` commands complete as skipped without provider requests, including retries. New applications alone receive a transactional, onboarding-scoped `initialize_menu` command. The creation dialog explicitly discloses that initialization submits a release. Initialization is attempted only once within five minutes, against the newly created App ID; reauthorization cancels outstanding initialization. Rejected menus do not fall back to a single-node replacement, and interrupted/expired initialization requires manual review rather than automatic replay. Existing-app menu changes must be performed separately in the developer console; this release does not offer automatic merge or repair.
 
@@ -43,6 +90,14 @@ stores the selected feature permissions after a successful authorization and
 new applications initialize the default AHA bot menu. Reauthorization itself
 still does not rewrite an existing Feishu menu tree; the explicit reset command
 is introduced in 1.1.3.
+
+Permission-catalog additions are opt-in. If an existing instance predates the
+stored `channel_permission_ids` list, AHA assumes only the original catalog,
+not every feature added later. The update dialog lists the exact permission
+names in its request summary and disables confirmation when there is nothing
+new to request. For an existing application, only scopes for newly selected
+features are sent to Feishu; already enabled permissions remain in the stored
+union but are not resubmitted on every unrelated permission update.
 
 ### Explicit menu reset (1.1.3)
 

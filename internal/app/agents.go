@@ -551,6 +551,13 @@ func inboxTemplateItems(items []domain.AgentInboxItem) []prompt.InboxTemplateIte
 				}
 				rendered.MentionedParticipants = strings.Join(names, ", ")
 			}
+			if rawReplyContext, ok := channelContext["reply_context"]; ok {
+				data, _ := json.Marshal(rawReplyContext)
+				var replyContext domain.ChannelReplyContext
+				if json.Unmarshal(data, &replyContext) == nil {
+					rendered.ReplyContext = &replyContext
+				}
+			}
 		}
 		if raw, ok := item.Payload["attachments"]; ok {
 			data, _ := json.Marshal(raw)

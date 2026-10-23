@@ -155,6 +155,7 @@ type InboxTemplateItem struct {
 	ChannelSender         string
 	ChannelConversation   string
 	MentionedParticipants string
+	ReplyContext          *domain.ChannelReplyContext
 	Content               string
 	Attachments           []domain.Attachment
 }
@@ -204,7 +205,7 @@ var builtinTemplates = []domain.PromptTemplate{
 	{ID: "identity.channel-assistant", Name: "Channel Assistant Identity", Layer: "identity", Description: "Owner 私聊渠道助手身份", Editable: true, Required: false, Version: 1},
 	{ID: "identity.channel-digital-human", Name: "Channel Digital Human Identity", Layer: "identity", Description: "受限群聊电子人身份", Editable: true, Required: false, Version: 2},
 	{ID: "channel.web", Name: "AHA Web Channel", Layer: "channel", Description: "Web 渠道消息行为", Editable: true, Required: false, Version: 1},
-	{ID: "channel.external-channel", Name: "External Channel", Layer: "channel", Description: "外部渠道消息行为", Editable: true, Required: false, Version: 3},
+	{ID: "channel.external-channel", Name: "External Channel", Layer: "channel", Description: "外部渠道消息行为", Editable: true, Required: false, Version: 4},
 	{ID: "policy.auto", Name: "Auto Collaboration", Layer: "policy", Description: "AHA 自动协作策略", Editable: true, Required: false, Version: 1},
 	{ID: "policy.single", Name: "Single Agent", Layer: "policy", Description: "单 Agent 策略", Editable: true, Required: false, Version: 1},
 	{ID: "protocol.knowledge", Name: "Knowledge Protocol", Layer: "protocol", Description: "按 index 渐进读取知识并形成反馈与修订闭环", Editable: true, Required: false, Version: 2},
@@ -220,7 +221,7 @@ var builtinTemplates = []domain.PromptTemplate{
 	{ID: "section.task-workspace", Name: "Task And Workspace Section", Layer: "section", Description: "Task 与 Workspace 摘要段落", Editable: true, Required: true, Version: 1},
 	{ID: "section.available-context", Name: "Available Context Section", Layer: "section", Description: "可用上下文入口列表段落", Editable: true, Required: true, Version: 1},
 	{ID: "section.current-inbox", Name: "Current Inbox Section", Layer: "section", Description: "当前 Inbox Batch 段落", Editable: true, Required: true, Version: 1},
-	{ID: "section.inbox-batch-content", Name: "Inbox Batch Content", Layer: "section", Description: "Inbox 消息、渠道来源和附件引用的内容模板", Editable: true, Required: true, Version: 1},
+	{ID: "section.inbox-batch-content", Name: "Inbox Batch Content", Layer: "section", Description: "Inbox 消息、渠道来源、引用上下文和附件引用的内容模板", Editable: true, Required: true, Version: 2},
 	{ID: "resource.agent-api", Name: "Agent API Reference File", Layer: "resource", Description: "只读参考模板", Editable: false, Required: true, Version: 5},
 	{ID: "resource.attachment-protocol", Name: "Attachment Protocol File", Layer: "resource", Description: "只读参考模板；附件上传、绑定与回执规程", Editable: false, Required: true, Version: 1},
 }
@@ -237,6 +238,9 @@ var supersededBuiltinOverrideHashes = map[string]map[string]bool{
 	"role.sub": {
 		"388229947d72bbd80f97bd93a316e88bf8425b13a0d1845b66089c54d20a0d5f": true,
 		"05cfc5eb0815fde5b4ce67beea783dc3621faf239dd2817fa06d3652421af14c": true,
+	},
+	"section.inbox-batch-content": {
+		"5fa0f46660226c7ccc0d18c91ae55a813230b3651194dee277e3fe180df2356d": true,
 	},
 }
 

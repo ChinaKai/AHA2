@@ -64,6 +64,8 @@ func TestGroupIntentPolicyReachesQAAndIntegrationRoutes(t *testing.T) {
 				"must not expand the task or trigger blocker outreach",
 				"deliberately needs no channel reply",
 				"message receipt and a concise reason",
+				"Before the final response, resolve every task-routed receipt",
+				"Do not finish with neither call",
 				"Apply the same intent checks to bot messages",
 				"Never encode this decision as visible channel text",
 				"authorization is always enforced by the server",
@@ -135,7 +137,7 @@ func TestDefaultGroupIntentTemplateVersionsAndChatBoundaries(t *testing.T) {
 		template, ok := builtinTemplate(id)
 		minimumVersion := 2
 		if id == "channel.external-channel" {
-			minimumVersion = 3
+			minimumVersion = 4
 		}
 		if !ok || template.Version < minimumVersion {
 			t.Fatalf("new group-intent template was not versioned: %s", id)
@@ -150,6 +152,8 @@ func TestDefaultGroupIntentTemplateVersionsAndChatBoundaries(t *testing.T) {
 		"Do not expose raw IDs",
 		"verified bot", "receipt-bound channel reply", "reply-decision",
 		"message receipt and a concise reason",
+		"Before the final response, resolve every task-routed receipt",
+		"Do not finish with neither call",
 	} {
 		if !strings.Contains(string(external), required) {
 			t.Errorf("lost external-channel boundary: %s", required)

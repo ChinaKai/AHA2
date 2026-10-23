@@ -29,6 +29,7 @@ const options = {
   permissions: [
     {id: "messages_core", name: "基础消息与机器人身份", description: "基础权限", required: true, enabled: true},
     {id: "group_messages", name: "群聊消息", description: "群聊权限", required: false, enabled: true},
+    {id: "cloud_docs_read", name: "云文档只读", description: "云文档权限", required: false, enabled: false},
     {id: "media", name: "图片与文件", description: "附件权限", required: false, enabled: false},
     {id: "cards", name: "交互卡片与菜单", description: "卡片权限", required: false, enabled: true},
   ],
@@ -107,28 +108,47 @@ try {
   assert.equal(await page.locator('input[value="messages_core"]').isDisabled(), true);
   assert.equal(await page.locator('input[value="group_messages"]').isDisabled(), true);
   assert.equal(await page.locator('input[value="group_messages"]').isChecked(), true);
+  assert.equal(await page.locator('input[value="group_message_read"]').count(), 0);
+  assert.equal(await page.locator('input[value="cloud_docs_read"]').isChecked(), false);
   assert.equal(await page.locator('input[value="media"]').isDisabled(), false);
   assert.equal(await page.locator('input[value="media"]').isChecked(), false);
   assert.equal(await page.locator('input[name="channel_runtime_menu"]').count(), 0);
   assert.equal(await page.locator("[data-reset-runtime-menus]").count(), 1);
-  assert.match(await page.locator("[data-onboarding-confirm]").innerText(), /更新权限/);
+  assert.equal(await page.locator("[data-onboarding-confirm]").isDisabled(), false);
+  assert.match(await page.locator("[data-onboarding-summary]").innerText(), /没有权限变更/);
+  assert.match(await page.locator("[data-onboarding-summary]").innerText(), /仍会提交应用版本发布/);
+  assert.match(await page.locator("[data-onboarding-confirm]").innerText(), /扫码并发布/);
+  await page.click("[data-onboarding-confirm]");
+  await page.waitForSelector("#channel-onboarding-dialog[open]");
+  const noChangeOnboarding = await page.evaluate(() => window.__onboard);
+  assert.deepEqual(noChangeOnboarding.permission_ids, ["messages_core", "group_messages", "cards"]);
+  await page.locator("#channel-onboarding-dialog [data-onboarding-close]").click();
+  await page.waitForSelector('[data-channel-onboard="channel-1"]');
+  await page.click('[data-channel-onboard="channel-1"]');
+  await page.waitForSelector("#channel-onboarding-setup[open]");
   await page.click("[data-reset-runtime-menus]");
   await page.waitForFunction(() => window.__resetMenus !== null);
   assert.equal((await page.evaluate(() => window.__resetMenus)).revision, 7);
 
+  await page.evaluate(() => { window.__onboard = null; });
   await page.waitForSelector('[data-channel-onboard="channel-1"]');
   await page.click('[data-channel-onboard="channel-1"]');
   await page.waitForSelector("#channel-onboarding-setup[open]");
-  await page.locator('input[value="media"]').check();
-  assert.match(await page.locator("[data-onboarding-confirm]").innerText(), /更新权限/);
+  await page.locator('input[value="cloud_docs_read"]').check();
+  assert.equal(await page.locator("[data-onboarding-confirm]").isDisabled(), false);
+  const summary = await page.locator("[data-onboarding-summary]").innerText();
+  assert.match(summary, /本次请求：云文档只读/);
+  assert.doesNotMatch(summary, /群消息|群聊引用/);
+  assert.match(await page.locator("[data-onboarding-confirm]").innerText(), /扫码并发布/);
   await page.screenshot({path: resolve(output, "channel-onboarding-options.png")});
   await page.click("[data-onboarding-confirm]");
   await page.waitForFunction(() => window.__onboard !== null);
   const onboarding = await page.evaluate(() => window.__onboard);
-  assert.deepEqual(onboarding.permission_ids, ["messages_core", "group_messages", "media", "cards"]);
+  assert.deepEqual(onboarding.permission_ids, ["messages_core", "group_messages", "cloud_docs_read", "cards"]);
   assert.equal(Object.hasOwn(onboarding, "runtime_menu_keys"), false);
   await page.waitForSelector("#channel-onboarding-dialog[open]");
   assert.match(await page.locator("#channel-onboarding-dialog").innerText(), /扫码更新飞书权限/);
+  assert.match(await page.locator("#channel-onboarding-dialog").innerText(), /自动提交应用版本发布/);
   assert.deepEqual(errors, []);
 
   await page.setViewportSize({width: 390, height: 844});

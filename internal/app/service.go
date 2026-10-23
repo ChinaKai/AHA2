@@ -1169,6 +1169,19 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 			turn.Error = fmt.Sprintf("backend exited with code %d without a reply", result.ExitCode)
 		}
 	}
+	if turn.AgentID == "main" && turn.Status == domain.TurnSucceeded {
+		attachmentIDs := []string{}
+		if attachments, attachmentErr := s.store.TurnOutputAttachments(context.Background(), task.ID, turn.ID); attachmentErr == nil {
+			for _, attachment := range attachments {
+				attachmentIDs = append(attachmentIDs, attachment.ID)
+			}
+		}
+		if _, conversationItemID, created, err := s.store.EnqueuePrivateAssistantFinalReply(
+			context.Background(), task.ID, turn.ID, turn.Result, attachmentIDs, now,
+		); err == nil && created {
+			s.PublishAgentChannelReply(context.Background(), task.ID, turn.ID, conversationItemID)
+		}
+	}
 	if err := s.store.UpdateTurn(context.Background(), turn, previous); err != nil {
 		return
 	}

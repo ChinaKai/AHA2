@@ -239,8 +239,9 @@ func (s *Service) SetAgentChannelReplyDecision(ctx context.Context, claims agent
 	if err != nil {
 		return ErrAgentCallForbidden
 	}
-	if strings.TrimSpace(fmt.Sprint(channelContext["endpoint"])) != domain.ChannelEndpointGroupDigitalHuman ||
-		channelRouteMode(channelContext) != "task_route" {
+	endpointKind := strings.TrimSpace(fmt.Sprint(channelContext["endpoint"]))
+	if channelRouteMode(channelContext) != "task_route" ||
+		(endpointKind != domain.ChannelEndpointGroupDigitalHuman && endpointKind != domain.ChannelEndpointAssistantDM) {
 		return ErrAgentCallForbidden
 	}
 	if inboundReceiptID != "" {

@@ -962,6 +962,62 @@ func (s *Store) EnqueueAgentChannelReply(
 	return item, conversationItemID, true, tx.Commit()
 }
 
+// EnqueuePrivateAssistantFinalReply bridges the Task result back to a routed
+// private conversation when the model did not issue an explicit channel reply.
+// Group routes remain explicit because a Task may also include Web-only output.
+func (s *Store) EnqueuePrivateAssistantFinalReply(
+	ctx context.Context,
+	taskID, turnID, message string,
+	attachmentIDs []string,
+	at time.Time,
+) (domain.ChannelDelivery, string, bool, error) {
+	if strings.TrimSpace(message) == "" {
+		return domain.ChannelDelivery{}, "", false, nil
+	}
+	var inboundReceiptID string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT receipt.id
+		FROM agent_inbox inbox
+		JOIN turns current_turn ON current_turn.id=? AND current_turn.task_id=?
+		JOIN channel_inbox_dedup receipt
+		  ON receipt.id=json_extract(inbox.payload_json,'$.channel_receipt_id')
+		JOIN channel_conversations conversation ON conversation.id=receipt.conversation_id
+		JOIN channel_endpoints endpoint ON endpoint.id=conversation.endpoint_id
+		WHERE inbox.task_id=? AND inbox.target_agent_id='main'
+		  AND (
+			inbox.delivered_turn_id=current_turn.id
+			OR (current_turn.inbox_batch_id<>'' AND inbox.batch_id=current_turn.inbox_batch_id)
+		  )
+		  AND json_extract(inbox.payload_json,'$.channel_context.route.mode')='task_route'
+		  AND endpoint.kind=?
+		  AND receipt.state='processed'
+		  AND NOT EXISTS(
+			SELECT 1 FROM channel_source_events earlier
+			WHERE earlier.task_id=inbox.task_id AND earlier.turn_id=current_turn.id
+			  AND earlier.event_type='agent_reply'
+			  AND json_extract(earlier.semantic_payload_json,'$.reply_to_receipt_id')=receipt.id
+		  )
+		  AND NOT EXISTS(
+			SELECT 1 FROM conversation_items decision
+			WHERE decision.task_id=inbox.task_id
+			  AND json_extract(decision.payload_json,'$.inbound_receipt_id')=receipt.id
+			  AND json_extract(decision.payload_json,'$.status_reason')='reply_decision_end'
+		  )
+		ORDER BY inbox.sequence DESC LIMIT 1`,
+		turnID, taskID, taskID, domain.ChannelEndpointAssistantDM,
+	).Scan(&inboundReceiptID)
+	if err == sql.ErrNoRows {
+		return domain.ChannelDelivery{}, "", false, nil
+	}
+	if err != nil {
+		return domain.ChannelDelivery{}, "", false, err
+	}
+	return s.EnqueueAgentChannelReply(
+		ctx, taskID, turnID, "private-final-fallback:"+turnID,
+		inboundReceiptID, message, attachmentIDs, at,
+	)
+}
+
 func compactChannelReply(message string) string {
 	text := strings.Join(strings.Fields(message), " ")
 	runes := []rune(text)

@@ -539,7 +539,7 @@ func (s *Store) ChannelContextForInboxBatch(ctx context.Context, batchID string)
 		return nil, sql.ErrNoRows
 	}
 	if latest != nil {
-		for _, key := range []string{"actor", "mentions", "inbound_receipt_id", "chat_display_name"} {
+		for _, key := range []string{"actor", "mentions", "inbound_receipt_id", "chat_display_name", "reply_context"} {
 			if child, exists := latest[key]; exists {
 				result[key] = child
 			}

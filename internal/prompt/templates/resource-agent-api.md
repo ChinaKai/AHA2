@@ -23,6 +23,7 @@ Send UTF-8 JSON with `Content-Type: application/json; charset=utf-8`. Windows Po
 - `POST /api/v1/agent/turn/inbox/wait`
 - `POST /api/v1/agent/collaboration/batches`
 - `POST /api/v1/agent/channel/replies`
+- `POST /api/v1/agent/channel/reply-decision`
 - `GET /api/v1/agent/project/workspaces`
 - `GET /api/v1/agent/project/runtimes`
 - `POST /api/v1/agent/tasks`
@@ -65,6 +66,8 @@ The final Main answer belongs to AHA Web and is not automatically mirrored to a 
 ```
 
 Use the `inbound_receipt_id` from the live inbox message or its channel context. A channel reply may only answer that source conversation and actor. Do not include Web-only artifacts, private diagnostics, installation packages, or unrelated Task output unless the Owner explicitly asks to send them to that channel. Multiple channel messages require independently addressable replies; one Web final answer must not be reused as their combined response.
+
+Before the final response, resolve every task-routed receipt with either a receipt-bound channel reply or `reply-decision`. If intentionally silent, call `reply-decision` with `decision:"end"` and a reason specific to that message. A Web-only final answer is not a channel reply and leaves the receipt unresolved.
 
 Collaboration batches use:
 

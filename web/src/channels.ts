@@ -422,13 +422,13 @@ function showOnboardingSetup(instance: ChannelInstance, options: ChannelOnboardi
   dialog.id = "channel-onboarding-setup";
   dialog.className = "channel-onboarding-setup";
   const existingApp = options.mode === "existing_app";
-  dialog.innerHTML = `<form method="dialog"><div class="dialog-head"><div><h2>${existingApp ? "更新飞书权限与菜单" : "配置飞书扫码权限"}</h2><small>${existingApp ? "已开启权限不能在扫码中撤销；菜单可直接恢复默认。" : "核心权限固定启用，其他权限按需勾选。"}</small></div><button type="button" class="icon-button" data-setup-close>${icon("close")}</button></div>
+  dialog.innerHTML = `<form method="dialog"><div class="dialog-head"><div><h2>${existingApp ? "更新飞书权限与发布" : "配置飞书扫码权限"}</h2><small>${existingApp ? "每次确认都提交应用发布；已开启权限不能在扫码中撤销。" : "核心权限固定启用，其他权限按需勾选。"}</small></div><button type="button" class="icon-button" data-setup-close>${icon("close")}</button></div>
     <div class="dialog-body channel-onboarding-setup-body">
       <fieldset><legend>飞书权限</legend><div class="channel-onboarding-option-list">${permissionOptionsHTML(options) || "<small>当前提供方没有可选权限。</small>"}</div><p class="field-help">扫码只增补权限。已开启权限需要到飞书开发者后台撤销。</p></fieldset>
       <fieldset><legend>飞书机器人菜单</legend><div class="channel-onboarding-menu-reset"><span><strong>重置为 AHA 默认菜单</strong><small>重新初始化项目、Workspace、任务查询和创建任务菜单，可能提交应用发布。</small></span><button type="button" data-reset-runtime-menus>重置菜单</button></div></fieldset>
       <div class="channel-onboarding-summary" data-onboarding-summary></div>
     </div>
-    <div class="dialog-actions"><button type="button" data-setup-close>取消</button><button type="submit" class="primary" data-onboarding-confirm>${existingApp ? "更新权限" : "扫码创建并绑定"}</button></div></form>`;
+    <div class="dialog-actions"><button type="button" data-setup-close>取消</button><button type="submit" class="primary" data-onboarding-confirm>${existingApp ? "扫码并发布" : "扫码创建并绑定"}</button></div></form>`;
   document.body.append(dialog);
   const close = () => { dialog.close(); dialog.remove(); };
   dialog.querySelectorAll("[data-setup-close]").forEach(button => button.addEventListener("click", close));
@@ -438,9 +438,14 @@ function showOnboardingSetup(instance: ChannelInstance, options: ChannelOnboardi
   const sync = () => {
     const selectedPermissions = selectedPermissionIDs(dialog);
     const additions = options.permissions.filter(item => !item.enabled && selectedPermissions.includes(item.id));
+    const requested = existingApp ? additions : options.permissions.filter(item => selectedPermissions.includes(item.id));
     if (summary) {
-      summary.innerHTML = `<strong>将启动飞书扫码</strong><span>新增 ${additions.length} 项权限；菜单初始化由独立按钮执行。</span>`;
+      const names = requested.map(item => item.name).join("、");
+      summary.innerHTML = requested.length
+        ? `<strong>将启动飞书扫码</strong><span>本次请求：${escapeHTML(names)}；菜单初始化由独立按钮执行。</span>`
+        : `<strong>没有权限变更</strong><span>扫码成功后仍会提交应用版本发布。</span>`;
     }
+    if (confirm) confirm.disabled = false;
   };
   dialog.addEventListener("change", sync);
   sync();
@@ -511,7 +516,7 @@ function showOnboarding(initial: ChannelOnboardingSession, options: {refresh: ()
   dialog.className = "channel-onboarding-dialog";
   const existingApp = initial.mode === "existing_app";
   const title = existingApp ? "扫码更新飞书权限" : "扫码创建飞书应用";
-  const notice = existingApp ? "仅增补权限，不修改已有菜单或其他应用配置。请在飞书官方页面确认权限；如需审批或发布，请核对全部草稿变更后操作。" : "请在飞书官方页面核对应用名称与最小权限后确认。新应用会执行一次 AHA 菜单初始化并提交发布。";
+  const notice = existingApp ? "仅增补权限，不修改已有菜单或其他应用配置。即使没有新增权限，扫码确认后也会自动提交应用版本发布；审批结果以飞书后台为准。" : "请在飞书官方页面核对应用名称与最小权限后确认。新应用会执行一次 AHA 菜单初始化并提交发布。";
   dialog.innerHTML = `<div class="dialog-body"><header class="dialog-head"><div><h2>${title}</h2><p>${notice}</p></div><button type="button" class="icon-button" data-onboarding-close>${icon("close")}</button></header><div data-onboarding-state class="channel-onboarding-state"></div><div class="dialog-actions"><button type="button" data-onboarding-cancel>取消绑定</button></div></div>`;
   document.body.append(dialog);
   const close = () => { if (onboardingPoll) window.clearTimeout(onboardingPoll); onboardingPoll = 0; dialog.close(); dialog.remove(); };
@@ -533,7 +538,7 @@ function showOnboarding(initial: ChannelOnboardingSession, options: {refresh: ()
       const result = await api.channelOnboarding(initial.id);
       update(result.onboarding);
       if (result.onboarding.status === "succeeded") {
-        options.setMessage("success", existingApp ? "飞书增量授权已完成，正在等待渠道重新就绪。" : "飞书应用已创建并完成 Owner 绑定，正在等待渠道就绪。");
+        options.setMessage("success", existingApp ? "飞书增量授权已完成并已提交应用发布，正在等待渠道重新就绪。" : "飞书应用已创建并完成 Owner 绑定，正在等待渠道就绪。");
         window.setTimeout(() => {
           close();
           void options.refresh().finally(() => {

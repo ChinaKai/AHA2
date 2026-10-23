@@ -1489,6 +1489,18 @@ test("conversation renders agent config, channel outreach, and turn duration car
       actor: {display_name: "联调机器人", is_bot: true},
     },
     created_at: "2026-09-04T09:00:07Z",
+  }, {
+    sequence: 8, id: "channel-status-missing-decision", task_id: "task-1", agent_id: "aha",
+    stream_agent_id: "main", from_agent_id: "aha", to_agent_id: "main",
+    route_kind: "channel_route", category: "update", kind: "agent_channel_route",
+    summary: "AHA 未提交渠道回复或无需回复决策",
+    payload: {
+      status_card: true, message_status: "not_replied", status_reason: "no_channel_reply",
+      inbound_receipt_id: "channel_inbox_3", inbound_message: "你好",
+      channel: {display_name: "团队飞书", endpoint_kind: "assistant_dm"},
+      actor: {display_name: "Owner", is_bot: false},
+    },
+    created_at: "2026-09-04T09:00:08Z",
   }];
   const html = renderConversationList(items, null, false);
   assert.match(html, /Agent 配置更新/);
@@ -1503,7 +1515,7 @@ test("conversation renders agent config, channel outreach, and turn duration car
   assert.match(html, /sub-001/);
   assert.match(html, /store verification passed/);
   assert.doesNotMatch(html, /aha-channel-reply-card/);
-  assert.equal((html.match(/AHA 渠道消息/g) || []).length, 2);
+  assert.equal((html.match(/AHA 渠道消息/g) || []).length, 3);
   assert.match(html, /团队飞书/);
   assert.match(html, /这是渠道回复内容/);
   assert.match(html, /已回复/);
@@ -1512,6 +1524,8 @@ test("conversation renders agent config, channel outreach, and turn duration car
   assert.match(html, /这是群聊里的玩笑，没有需要处理的请求 &lt;script&gt;alert\(1\)&lt;\/script&gt;/);
   assert.doesNotMatch(html, /没有需要处理的请求 <script>/);
   assert.match(html, /无需回复/);
+  assert.match(html, /模型结束本轮时未提交渠道回复或无需回复决策/);
+  assert.match(html, /未回复/);
   assert.match(html, /agent-routed-message/);
   assert.doesNotMatch(html, /接口字段需要确认 <script>/);
 });

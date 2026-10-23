@@ -310,11 +310,12 @@ function renderChannelRouteCard(item: ConversationItem): string {
     const reasonText = String(payload.status_reason_text || "");
     const deliveryState = String(payload.delivery_state || "");
     const status = messageStatus === "replied" ? (deliveryState === "delivered" ? "已回复" : "回复已排队") :
-      messageStatus === "pending_reply" ? "等待回复" : messageStatus === "not_replied" ? "无需回复" :
+      messageStatus === "pending_reply" ? "等待回复" :
+        messageStatus === "not_replied" ? (reason === "reply_decision_end" ? "无需回复" : "未回复") :
         messageStatus === "failed" ? "处理失败" : messageStatus === "interrupted" ? "已中断" : "已处理";
     const detail = reasonText || (reason === "reply_decision_end" ? "Agent 明确选择不回复" :
       reason === "reply_decision_continue" ? "等待渠道回复生成" :
-        reason === "no_channel_reply" ? "处理完成，未产生回复内容" :
+        reason === "no_channel_reply" ? "模型结束本轮时未提交渠道回复或无需回复决策" :
           reason === "bot_dialogue_max_turns" ? "达到最大连续机器人轮数" :
             reason === "turn_failed" ? "本轮处理失败" :
               reason === "turn_interrupted" ? "本轮处理已中断" :
@@ -322,7 +323,8 @@ function renderChannelRouteCard(item: ConversationItem): string {
     const who = String((payload.actor as Record<string, unknown> | undefined)?.display_name || "渠道参与者");
     const replyMessage = String(payload.reply_message || (messageStatus === "replied" ? payload.message : "") || "");
     const inboundMessage = String(payload.inbound_message || (messageStatus !== "replied" ? payload.message : "") || "");
-    const resultLabel = messageStatus === "replied" ? "已回复" : messageStatus === "not_replied" ? "无需回复" : status;
+    const resultLabel = messageStatus === "replied" ? "已回复" :
+      messageStatus === "not_replied" ? (reason === "reply_decision_end" ? "无需回复" : "未回复") : status;
     const result = messageStatus === "replied" ? replyMessage : detail;
     return `<article class="aha-orchestration-card aha-channel-route-card aha-channel-status-card" data-channel-status="${escapeHTML(messageStatus)}"><header><strong>${icon("send")}AHA 渠道消息</strong><span>${escapeHTML(status)}</span><time>${systemCardTime(item)}</time></header><p>${escapeHTML(destination)} · ${escapeHTML(who)}</p>${result ? `<div class="aha-route-message"><strong>${escapeHTML(resultLabel)}：</strong>${escapeHTML(result)}</div>` : ""}${messageStatus !== "replied" && inboundMessage ? `<div class="aha-route-message">${escapeHTML(inboundMessage)}</div>` : ""}</article>`;
   }

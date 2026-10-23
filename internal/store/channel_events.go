@@ -215,6 +215,11 @@ func channelSubscriptionAllows(endpointKind, subscriptionKind, eventClass, event
 	if subscriptionKind == "owner_global" {
 		return eventClass == "status"
 	}
+	if eventClass == "status" && eventType == "waiting_user" {
+		// A successful assistant turn already produces a receipt-bound reply.
+		// Waiting-user notices are only useful for separately managed Tasks.
+		return false
+	}
 	if subscriptionKind == "task_route" && eventType == "agent_reply" {
 		return false
 	}

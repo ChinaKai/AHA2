@@ -8,7 +8,7 @@ import (
 	"github.com/ChinaKai/AHA2/internal/domain"
 )
 
-const feishuPermissionCatalogVersion = 1
+const feishuPermissionCatalogVersion = 4
 
 type onboardingPermissionDefinition struct {
 	ID          string
@@ -43,6 +43,11 @@ var feishuPermissionCatalog = []onboardingPermissionDefinition{
 		Scopes:      []string{"im:resource"},
 	},
 	{
+		ID: "cloud_docs_read", Name: "云文档只读",
+		Description: "读取消息中的飞书知识库节点和新版云文档正文。",
+		Scopes:      []string{"wiki:node:read", "docx:document:readonly"},
+	},
+	{
 		ID: "cards", Name: "交互卡片与菜单", Required: true,
 		Description: "发送菜单卡片并接收卡片操作；AHA 菜单始终启用，因此这是核心权限。",
 		Scopes:      []string{"cardkit:card:write"},
@@ -57,6 +62,7 @@ var feishuPermissionCatalog = []onboardingPermissionDefinition{
 type onboardingSelection struct {
 	PermissionIDs []string
 	TenantScopes  []string
+	RequestScopes []string
 }
 
 func (s *Service) OnboardingOptions(ctx context.Context, ownerID, instanceID string) (domain.ChannelOnboardingOptions, error) {
@@ -101,7 +107,11 @@ func resolveOnboardingSelection(instance domain.ChannelInstance, plugin domain.C
 	}
 	permissions := permissionIDs
 	if permissions == nil {
-		permissions = defaultFeishuPermissionIDs()
+		if instance.CredentialConfigured {
+			permissions = configuredPermissionIDs(instance.Config)
+		} else {
+			permissions = defaultFeishuPermissionIDs()
+		}
 	}
 	permissionOptions := map[string]onboardingPermissionDefinition{}
 	for _, definition := range feishuPermissionCatalog {
@@ -120,21 +130,33 @@ func resolveOnboardingSelection(instance domain.ChannelInstance, plugin domain.C
 		}
 	}
 	resolved := onboardingSelection{}
+	configured := configuredPermissionSet(instance.Config)
 	for _, definition := range feishuPermissionCatalog {
 		if !selected[definition.ID] {
 			continue
 		}
 		resolved.PermissionIDs = append(resolved.PermissionIDs, definition.ID)
 		resolved.TenantScopes = append(resolved.TenantScopes, definition.Scopes...)
+		if !instance.CredentialConfigured || !configured[definition.ID] {
+			resolved.RequestScopes = append(resolved.RequestScopes, definition.Scopes...)
+		}
 	}
 	resolved.TenantScopes = uniqueStrings(resolved.TenantScopes)
+	resolved.RequestScopes = uniqueStrings(resolved.RequestScopes)
 	return resolved, nil
 }
 
 func configuredPermissionSet(config map[string]any) map[string]bool {
+	return sliceSet(configuredPermissionIDs(config))
+}
+
+func configuredPermissionIDs(config map[string]any) []string {
 	values, present := stringListField(config, "channel_permission_ids")
 	if !present {
-		values = defaultFeishuPermissionIDs()
+		// Permission IDs were introduced after the original catalog. Without a
+		// stored list, assume only those legacy features, never later additions
+		// such as cloud-document scopes.
+		values = legacyFeishuPermissionIDs()
 	}
 	result := sliceSet(values)
 	for _, definition := range feishuPermissionCatalog {
@@ -142,7 +164,17 @@ func configuredPermissionSet(config map[string]any) map[string]bool {
 			result[definition.ID] = true
 		}
 	}
-	return result
+	ordered := make([]string, 0, len(result))
+	for _, definition := range feishuPermissionCatalog {
+		if result[definition.ID] {
+			ordered = append(ordered, definition.ID)
+		}
+	}
+	return ordered
+}
+
+func legacyFeishuPermissionIDs() []string {
+	return []string{"messages_core", "group_messages", "chat_members", "media", "cards", "app_menu_maintenance"}
 }
 
 func defaultFeishuPermissionIDs() []string {

@@ -331,6 +331,9 @@ func channelStatusSummary(status, reason string) string {
 		if reason == "reply_decision_end" {
 			return "AHA 已处理并选择不回复"
 		}
+		if reason == "no_channel_reply" {
+			return "AHA 未提交渠道回复或无需回复决策"
+		}
 		return "AHA 已处理但未生成渠道回复"
 	}
 }

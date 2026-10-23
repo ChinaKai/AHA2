@@ -86,6 +86,8 @@ type secretMessage struct {
 var secretOutput sync.Mutex
 var displayNameCache sync.Map
 
+const applicationPublishTimeout = 15 * time.Second
+
 type cachedDisplayName struct {
 	value     string
 	expiresAt time.Time
@@ -159,6 +161,39 @@ func menuConfigurationErrorCode(err error) string {
 		return failure.errorCode()
 	}
 	return "menu_configuration_failed"
+}
+
+type applicationPublishFailure struct {
+	code    int
+	message string
+}
+
+func rejectedApplicationPublish(providerError larkcore.CodeError) applicationPublishFailure {
+	return applicationPublishFailure{code: providerError.Code, message: safeProviderDetail(providerError.Msg)}
+}
+
+func applicationPublishFailureResult(err error) map[string]any {
+	var failure applicationPublishFailure
+	if !errors.As(err, &failure) {
+		return map[string]any{"stage": "publish"}
+	}
+	result := map[string]any{"stage": "publish", "code": failure.code}
+	if failure.message != "" {
+		result["message"] = failure.message
+	}
+	return result
+}
+
+func applicationPublishErrorCode(err error) string {
+	var failure applicationPublishFailure
+	if errors.As(err, &failure) && failure.code != 0 {
+		return fmt.Sprintf("registration_publish_rejected_%d", failure.code)
+	}
+	return "registration_publish_failed"
+}
+
+func (e applicationPublishFailure) Error() string {
+	return applicationPublishErrorCode(e)
 }
 
 func main() {
@@ -282,6 +317,22 @@ func registerApp(ctx context.Context, client *runtimeClient, item command) error
 		_ = client.complete(context.Background(), item, false, map[string]any{}, "scanner_identity_missing")
 		return err
 	}
+	if !options.CreateOnly {
+		if strings.TrimSpace(result.ClientID) == "" || result.ClientID != options.AppID {
+			err := errors.New("registration result app mismatch")
+			_ = client.complete(context.Background(), item, false, map[string]any{}, "reauthorization_app_mismatch")
+			return err
+		}
+		_ = client.progress(context.Background(), item, map[string]any{"status": "publishing", "interval": 0})
+		publishCtx, cancel := context.WithTimeout(ctx, applicationPublishTimeout)
+		publishClient := lark.NewClient(result.ClientID, result.ClientSecret)
+		publishErr := publishFeishuApplication(publishCtx, publishClient, result.ClientID)
+		cancel()
+		if publishErr != nil {
+			_ = client.complete(context.Background(), item, false, applicationPublishFailureResult(publishErr), applicationPublishErrorCode(publishErr))
+			return publishErr
+		}
+	}
 	emitSecret(secretMessage{Schema: "channel-secret/v1", Type: "registration_result", InstanceID: client.instanceID, OnboardingID: onboardingID, CommandID: item.ID, LeaseID: item.LeaseID, AppID: result.ClientID, AppSecret: result.ClientSecret, ScannerOpenID: result.UserInfo.OpenID, TenantBrand: result.UserInfo.TenantBrand})
 	return nil
 }
@@ -290,6 +341,12 @@ func registrationOptions(item command) *registration.Options {
 	tenantScopes := registrationTenantScopes()
 	if configured, present := stringValues(item.Payload, "tenant_scopes"); present {
 		tenantScopes = configured
+	}
+	if !boolValue(item.Payload, "create_only") && len(tenantScopes) == 0 {
+		// The registration API requires a non-empty additive payload. This scope
+		// is already part of every AHA channel app, so re-submitting it keeps the
+		// authorization a no-op while still allowing the scan-and-publish flow.
+		tenantScopes = []string{"im:message:readonly"}
 	}
 	options := &registration.Options{
 		CreateOnly: boolValue(item.Payload, "create_only"),
@@ -311,6 +368,7 @@ func registrationTenantScopes() []string {
 		"im:message.p2p_msg:readonly", "im:message.group_at_msg:readonly", "im:message.group_at_msg.include_bot:readonly", "im:message:send_as_bot",
 		"application:bot.basic_info:read",
 		"im:chat:readonly", "contact:user.base:readonly", "cardkit:card:write", "application:application:patch", "im:resource", "im:message:readonly",
+		"wiki:node:read", "docx:document:readonly",
 	}
 }
 
@@ -359,10 +417,21 @@ func runChannel(ctx context.Context, runtime *runtimeClient, boot bootstrap) err
 	channel.OnReady(func() { _ = runtime.health(context.Background(), "ready", "", healthMetadata) })
 	channel.OnReconnecting(func() { _ = runtime.health(context.Background(), "degraded", "feishu_reconnecting", healthMetadata) })
 	channel.OnMessage(func(eventCtx context.Context, message *channeltypes.NormalizedMessage) error {
-		chatName, senderName := feishuDisplayNames(eventCtx, client, message)
+		replyContextResult := make(chan map[string]any, 1)
+		go func() { replyContextResult <- inboundReplyContext(eventCtx, client, message) }()
 		restoreInboundMentionTypes(message)
 		content, resources := normalizedInboundMedia(message)
-		return runtime.inbound(eventCtx, map[string]any{"schema_version": 1, "request_id": message.EventID, "instance_id": runtime.instanceID, "external_event_id": message.EventID, "event_type": "message", "occurred_at": time.UnixMilli(message.CreateTimeMs).UTC(), "chat_type": message.ChatType, "external_chat_id": message.ChatID, "external_sender_id": message.UserID, "external_message_id": message.MessageID, "content": content, "chat_display_name": chatName, "sender_display_name": senderName, "sender_is_bot": inboundSenderIsBot(message), "mentions": normalizedInboundMentions(message, selfBotOpenID), "mentioned_bot": message.MentionedBot, "resources": resources})
+		cloudDocumentResult := make(chan string, 1)
+		go func() {
+			cloudDocumentResult <- enrichInboundCloudDocuments(eventCtx, larkCloudDocumentReader{client: client}, content)
+		}()
+		chatName, senderName := feishuDisplayNames(eventCtx, client, message)
+		content = <-cloudDocumentResult
+		payload := map[string]any{"schema_version": 1, "request_id": message.EventID, "instance_id": runtime.instanceID, "external_event_id": message.EventID, "event_type": "message", "occurred_at": time.UnixMilli(message.CreateTimeMs).UTC(), "chat_type": message.ChatType, "external_chat_id": message.ChatID, "external_sender_id": message.UserID, "external_message_id": message.MessageID, "content": content, "chat_display_name": chatName, "sender_display_name": senderName, "sender_is_bot": inboundSenderIsBot(message), "mentions": normalizedInboundMentions(message, selfBotOpenID), "mentioned_bot": message.MentionedBot, "resources": resources}
+		if replyContext := <-replyContextResult; replyContext != nil {
+			payload["reply_context"] = replyContext
+		}
+		return runtime.inbound(eventCtx, payload)
 	})
 	wsClient.EventHandler().OnP2BotMenuV6(func(eventCtx context.Context, event *larkapplication.P2BotMenuV6) error {
 		if event == nil || event.Event == nil || event.Event.Operator == nil || event.Event.Operator.OperatorId == nil || event.Event.Operator.OperatorId.OpenId == nil || event.Event.EventKey == nil || event.EventV2Base == nil || event.EventV2Base.Header == nil {
@@ -792,6 +861,27 @@ func configureFeishuMenu(ctx context.Context, client *lark.Client, appID string,
 			return menuConfigFailure{stage: "publish"}
 		}
 		return rejectedMenuConfig("publish", publishResponse.CodeError)
+	}
+	return nil
+}
+
+func publishFeishuApplication(ctx context.Context, client *lark.Client, appID string) error {
+	if client == nil || strings.TrimSpace(appID) == "" {
+		return applicationPublishFailure{}
+	}
+	publishBody := larkapplicationv7.NewCreateApplicationPublishReqBodyBuilder().
+		MobileDefaultAbility("bot").
+		PcDefaultAbility("bot").
+		Remark("Update AHA channel permissions").
+		Changelog("Apply Owner-authorized Feishu channel permissions").
+		Build()
+	publishRequest := larkapplicationv7.NewCreateApplicationPublishReqBuilder().AppId(appID).Body(publishBody).Build()
+	publishResponse, err := client.Application.V7.ApplicationPublish.Create(ctx, publishRequest)
+	if err != nil {
+		return applicationPublishFailure{}
+	}
+	if !publishResponse.Success() {
+		return rejectedApplicationPublish(publishResponse.CodeError)
 	}
 	return nil
 }

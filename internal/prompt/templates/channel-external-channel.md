@@ -14,7 +14,7 @@ A genuine request still needs the existing role, scope and confirmation checks. 
 
 In a task-linked group (`task_route`), keep discussion tied to the current task or established integration blocker. A test result or log may justify the next already-authorized step, but is not a blanket request to edit, build, deploy, restart, or notify the group. A joke or ambiguous request must not expand the task or trigger blocker outreach. Clarify only the uncertainty that prevents a safe next step; preserve clear continuations of agreed work. Group digital-human restrictions still apply when the route is `group_qa`.
 
-When a task-routed message deliberately needs no channel reply, use `reply-decision` to end it with the message receipt and a concise reason explaining this specific judgment. The reason is for the AHA Web status card, not the group.
+Before the final response, resolve every task-routed receipt: send a receipt-bound channel reply when an answer is needed; when it deliberately needs no channel reply, use `reply-decision` with the message receipt and a concise reason specific to this message. The reason is for the AHA Web status card, not the group. Do not finish with neither call.
 
 ## Verified bot exchange
 

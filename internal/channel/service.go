@@ -1179,10 +1179,63 @@ func containsSensitiveField(value any) bool {
 	return false
 }
 
+func normalizedInboundReplyContext(input *domain.ChannelReplyContext) (*domain.ChannelReplyContext, error) {
+	if input == nil {
+		return nil, nil
+	}
+	result := *input
+	result.ParentMessageID = strings.TrimSpace(result.ParentMessageID)
+	result.RootMessageID = strings.TrimSpace(result.RootMessageID)
+	result.ThreadID = strings.TrimSpace(result.ThreadID)
+	result.MessageType = strings.TrimSpace(result.MessageType)
+	result.Sender.DisplayName = strings.TrimSpace(result.Sender.DisplayName)
+	result.Content = strings.TrimSpace(result.Content)
+	result.Status = strings.ToLower(strings.TrimSpace(result.Status))
+	result.ErrorCode = strings.TrimSpace(result.ErrorCode)
+	if result.Status != "available" && result.Status != "unavailable" {
+		return nil, fmt.Errorf("invalid_envelope")
+	}
+	if len(result.ParentMessageID) > 256 || len(result.RootMessageID) > 256 || len(result.ThreadID) > 256 ||
+		len(result.MessageType) > 64 || len(result.Sender.DisplayName) > 256 || len(result.Content) > 128*1024 ||
+		len(result.Resources) > 16 || len(result.ErrorCode) > 80 {
+		return nil, fmt.Errorf("invalid_envelope")
+	}
+	for _, character := range result.ErrorCode {
+		if (character < 'a' || character > 'z') && (character < '0' || character > '9') && character != '_' {
+			return nil, fmt.Errorf("invalid_envelope")
+		}
+	}
+	if result.Status == "available" && result.Content == "" {
+		result.Content = "[" + result.MessageType + " message]"
+	}
+	if result.Status == "unavailable" {
+		result.Content = ""
+		if result.ErrorCode == "" {
+			result.ErrorCode = "reply_context_unavailable"
+		}
+	}
+	resources := make([]domain.ChannelReplyResource, 0, len(result.Resources))
+	for _, resource := range result.Resources {
+		resource.Type = strings.ToLower(strings.TrimSpace(resource.Type))
+		resource.FileName = strings.TrimSpace(resource.FileName)
+		if resource.Type == "" || len(resource.Type) > 32 || len(resource.FileName) > 256 {
+			continue
+		}
+		resources = append(resources, resource)
+	}
+	result.Resources = resources
+	return &result, nil
+}
+
 func (s *Service) ReceiveInbound(ctx context.Context, claims RuntimeClaims, envelope domain.ChannelInboundEnvelope) (domain.ChannelInboxReceipt, bool, error) {
 	if !claims.Scopes["channel.inbound.write"] {
 		return domain.ChannelInboxReceipt{}, false, fmt.Errorf("capability_scope_denied")
 	}
+	replyContext, err := normalizedInboundReplyContext(envelope.ReplyContext)
+	if err != nil {
+		return domain.ChannelInboxReceipt{}, false, err
+	}
+	envelope.ReplyContext = replyContext
 	if envelope.SchemaVersion != 1 || envelope.InstanceID != claims.InstanceID || strings.TrimSpace(envelope.ExternalEventID) == "" || strings.TrimSpace(envelope.ExternalSenderID) == "" {
 		return domain.ChannelInboxReceipt{}, false, fmt.Errorf("invalid_envelope")
 	}
@@ -1389,6 +1442,11 @@ func (s *Service) processInbound(ctx context.Context, receipt domain.ChannelInbo
 		"actor":    map[string]any{"identity_link_id": identity.ID, "role": role, "display_name": identity.DisplayName, "is_bot": envelope.SenderIsBot},
 		"mentions": mentions,
 		"route":    map[string]any{"mode": routeMode, "target_task_id": targetTaskID}, "inbound_receipt_id": receipt.ID,
+	}
+	if envelope.ReplyContext != nil {
+		replyContext := *envelope.ReplyContext
+		replyContext.Sender.DisplayName = safeChannelDisplayName(replyContext.Sender.DisplayName, "引用消息发送者", instance.ID, replyContext.ParentMessageID)
+		provenance["reply_context"] = replyContext
 	}
 	if endpointKind == domain.ChannelEndpointGroupDigitalHuman && envelope.SenderIsBot {
 		provenance["bot_dialogue"] = map[string]any{

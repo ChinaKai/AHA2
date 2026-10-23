@@ -78,7 +78,7 @@ func (s *Service) StartOnboarding(
 	command, err := s.EnqueueCommand(ctx, instance.ID, "register_app", "register_app:"+onboarding.ID, map[string]any{
 		"onboarding_id": onboarding.ID, "app_name": instance.Name, "app_id": instance.AppID,
 		"create_only": !instance.CredentialConfigured, "minimal_preset": true,
-		"tenant_scopes": selection.TenantScopes, "permission_ids": selection.PermissionIDs,
+		"tenant_scopes": selection.RequestScopes, "permission_ids": selection.PermissionIDs,
 	})
 	if err != nil {
 		return domain.ChannelOnboardingSession{}, err

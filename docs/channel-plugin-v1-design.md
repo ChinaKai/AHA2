@@ -50,7 +50,7 @@ SDK 返回的用户信息只有 `open_id` 与 `tenant_brand`，不返回 `tenant
 6. 核心在同一受控完成流程中把扫码用户建立为该实例唯一 active `owner` IdentityLink，并关联发起 onboarding 的 AHA Owner。Secret 已落但数据库提交失败时，核心清理暂存 Secret；重复完成按 onboarding ID 幂等返回原结果。
 7. 插件用新凭据启动官方 Channel/WebSocket，核心逐项验证长连接、机器人收消息、发消息及卡片交互；全部通过后实例才从 `onboarding` 进入 `ready`。
 
-最小申请集一期锁定为应用身份权限 `im:message.p2p_msg:readonly`、`im:message.group_at_msg:readonly`、`im:message:send_as_bot`，事件 `im.message.receive_v1`，回调 `card.action.trigger`，以及经真实 SDK 验活证明为卡片发送所必需的最小 CardKit 权限。实施时用官方权限目录再次校验标识；未知标识不能因为 SDK 只校验形状而被当作已配置成功。
+最小申请集一期锁定为应用身份权限 `im:message.p2p_msg:readonly`、`im:message.group_at_msg:readonly`、`im:message:send_as_bot`，事件 `im.message.receive_v1`，回调 `card.action.trigger`，以及经真实 SDK 验活证明为卡片发送所必需的最小 CardKit 权限。回复/引用消息的正文不在接收事件中，需按 `parent_id` 调用获取指定消息接口；该路径使用已有消息读取权限，不申请会扩大为读取群内全部消息的 `im:message.group_msg`。读取失败只让引用上下文降级为 unavailable，不影响原消息入站。实施时用官方权限目录再次校验标识；未知标识不能因为 SDK 只校验形状而被当作已配置成功。
 
 ### 3.3 明示的兼容分支
 
@@ -58,7 +58,9 @@ SDK 返回的用户信息只有 `open_id` 与 `tenant_brand`，不返回 `tenant
 
 ### 3.4 存量应用增量授权与菜单保护
 
-存量应用扫码仅通过官方 SDK 的增量 Addons 补充应用身份权限，固定目标 App ID；不传新建应用预设、应用名称、事件、回调或菜单配置，也不由 AHA 自动提交应用草稿发布。服务端同时校验原 App ID 和唯一 Owner，不能借重新授权换应用或换 Owner。平台审批与发布是否完成独立于扫码成功，Web 明示检查全部待发布草稿变更。
+存量应用扫码仅通过官方 SDK 的增量 Addons 补充应用身份权限，固定目标 App ID；不传新建应用预设、应用名称、事件、回调、菜单或机器人能力配置。每次扫码确认且飞书接受增量授权后，AHA 都通过官方发布接口提交一次普通应用版本发布，不修改菜单或其他应用配置；没有新增权限时也执行同样的扫码发布流程，并以已有的 `im:message:readonly` scope 作为 SDK 要求的无操作锚点。发布失败时 onboarding 明确失败，不把授权误报为完成。服务端同时校验原 App ID 和唯一 Owner，不能借重新授权换应用或换 Owner。管理员审批和最终发布状态仍以飞书平台为准。
+
+权限目录只做增量引入。已有实例若没有 `channel_permission_ids`（该字段早于后续目录项），只回退为最初目录，不能把之后新增的敏感群消息或云文档 scope 自动视为已开启。增量扫码只发送本次新选择权限对应的 tenant scopes，已开启权限仍保留在授权后的持久化并集中，但不在每次无关更新时重复请求。Web 在扫码前列出本次请求的权限名称；没有新权限时仍启动 onboarding，以便扫码成功后提交应用发布。
 
 插件启动、凭据轮换和重连均不得触发菜单重写。遗留 `configure_menu` 命令包含重试在内，均无提供方请求地结束为 skipped。仅首次创建新应用时，在绑定事务内持久化独立 `initialize_menu` 命令；Web 创建弹窗预先说明初始化及发布行为。命令限定相同 App ID、onboarding ID、首次领取和五分钟有效期。重新授权取消未完成初始化；超时、进程中断或提供方拒绝后停止，不以单菜单回退、不自动重放。存量应用的菜单维护与增权分离，当前通过开发者后台显式操作；本版不提供自动合并或修复入口，不能将增权作为菜单修复操作。
 
