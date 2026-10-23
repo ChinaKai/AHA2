@@ -316,6 +316,14 @@ func TestAgentChannelReplyIsReceiptBoundAndIdempotent(t *testing.T) {
 	if err != nil || !delivered {
 		t.Fatalf("silent receipt delivered=%v err=%v", delivered, err)
 	}
+	liveContext, err := database.ChannelContextForReceipt(ctx, task.ID, turn.ID, silentReceiptID)
+	if err != nil || liveContext["inbound_receipt_id"] != silentReceiptID {
+		t.Fatalf("live receipt context=%#v err=%v", liveContext, err)
+	}
+	activeGroupRoute, err := database.HasActiveTaskGroupRoute(ctx, task.ID)
+	if err != nil || !activeGroupRoute {
+		t.Fatalf("active task group route=%v err=%v", activeGroupRoute, err)
+	}
 	statuses, err = database.ReconcileChannelMessageStatuses(
 		ctx, task.ID, turn.ID, silentReceiptID, "decided_end", "reply_decision_end",
 		"这是群聊里的玩笑，没有需要处理的请求。", now.Add(2*time.Second),

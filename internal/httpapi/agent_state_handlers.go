@@ -2,7 +2,6 @@ package httpapi
 
 import (
 	"errors"
-	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -31,11 +30,7 @@ func (s *Server) agentCapabilitiesInfo(writer http.ResponseWriter, request *http
 		channelOutreach = channelErr == nil
 	}
 	if s.store != nil {
-		if channelContext, contextErr := s.store.ChannelContextForInboxBatch(request.Context(), call.Turn.InboxBatchID); contextErr == nil {
-			route, _ := channelContext["route"].(map[string]any)
-			channelReplyDecision = strings.TrimSpace(fmt.Sprint(channelContext["endpoint"])) == domain.ChannelEndpointGroupDigitalHuman &&
-				strings.TrimSpace(fmt.Sprint(route["mode"])) == "task_route"
-		}
+		channelReplyDecision, _ = s.store.HasActiveTaskGroupRoute(request.Context(), call.Task.ID)
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "capabilities": map[string]bool{
 		"progress": true, "live_inbox_wait": true, "knowledge_read": true, "knowledge_feedback": true,

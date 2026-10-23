@@ -228,7 +228,14 @@ func (s *Service) SetAgentChannelReplyDecision(ctx context.Context, claims agent
 	if err != nil {
 		return err
 	}
-	channelContext, err := s.store.ChannelContextForInboxBatch(ctx, call.Turn.InboxBatchID)
+	var channelContext map[string]any
+	if inboundReceiptID != "" {
+		channelContext, err = s.store.ChannelContextForReceipt(
+			ctx, claims.TaskID, call.Turn.ID, inboundReceiptID,
+		)
+	} else {
+		channelContext, err = s.store.ChannelContextForInboxBatch(ctx, call.Turn.InboxBatchID)
+	}
 	if err != nil {
 		return ErrAgentCallForbidden
 	}

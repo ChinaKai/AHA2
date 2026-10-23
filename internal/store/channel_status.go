@@ -209,6 +209,55 @@ func (s *Store) ChannelReceiptDeliveredToTurn(
 	return delivered, err
 }
 
+func (s *Store) ChannelContextForReceipt(
+	ctx context.Context,
+	taskID, turnID, receiptID string,
+) (map[string]any, error) {
+	if taskID == "" || turnID == "" || receiptID == "" {
+		return nil, sql.ErrNoRows
+	}
+	var payloadJSON string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT payload_json FROM agent_inbox
+		WHERE task_id=? AND target_agent_id='main'
+		  AND (delivered_turn_id=? OR batch_id=(
+			SELECT inbox_batch_id FROM turns WHERE id=? AND task_id=?
+		  ))
+		  AND json_extract(payload_json,'$.channel_receipt_id')=?
+		ORDER BY sequence DESC LIMIT 1`,
+		taskID, turnID, turnID, taskID, receiptID,
+	).Scan(&payloadJSON)
+	if err != nil {
+		return nil, err
+	}
+	payload := decodeJSON(payloadJSON, map[string]any{})
+	channelContext, ok := payload["channel_context"].(map[string]any)
+	if !ok || len(channelContext) == 0 {
+		return nil, sql.ErrNoRows
+	}
+	return channelContext, nil
+}
+
+func (s *Store) HasActiveTaskGroupRoute(ctx context.Context, taskID string) (bool, error) {
+	if strings.TrimSpace(taskID) == "" {
+		return false, nil
+	}
+	var active bool
+	err := s.db.QueryRowContext(ctx, `
+		SELECT EXISTS(
+			SELECT 1
+			FROM channel_task_routes route
+			JOIN channel_conversations conversation ON conversation.id=route.conversation_id
+			JOIN channel_endpoints endpoint ON endpoint.id=conversation.endpoint_id
+			WHERE route.target_task_id=? AND route.state='active'
+			  AND conversation.status='active'
+			  AND endpoint.kind=?
+		)`,
+		taskID, domain.ChannelEndpointGroupDigitalHuman,
+	).Scan(&active)
+	return active, err
+}
+
 func channelStatusReasonTextTx(ctx context.Context, tx *sql.Tx, taskID, receiptID string) (string, error) {
 	var reasonText string
 	err := tx.QueryRowContext(ctx, `
