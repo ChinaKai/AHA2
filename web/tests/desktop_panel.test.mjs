@@ -722,6 +722,44 @@ test("foreground gestures map image pixels and serialize without replaying busy 
   } finally { h.close(); }
 });
 
+test("mobile double tap sends a right click and two-finger pinch zooms locally", async () => {
+  const h = harness("touch-gestures", ({url}) => {
+    if (url.endsWith("/windows")) return {windows: []};
+    if (url.includes("/observation?")) return {observation: foregroundObservation()};
+    return {status: foregroundStatus(foregroundSession())};
+  });
+  try {
+    const view = h.panel.querySelector("#desktop-viewport");
+    view.clientWidth = 300;
+    view.clientHeight = 150;
+    h.bind();
+    await flush();
+    const image = h.panel.querySelector("#desktop-image");
+    const tap = (pointerId, x, y) => {
+      image.fire("pointerdown", {pointerType: "touch", pointerId, clientX: x, clientY: y, button: 0});
+      image.fire("pointerup", {pointerType: "touch", pointerId, clientX: x, clientY: y, button: 0});
+    };
+    const writes = () => h.calls.filter(call => call.url.endsWith("/actions"));
+    tap(1, 40, 50);
+    tap(2, 40, 50);
+    await flush();
+    assert.equal(writes().length, 1);
+    assert.equal(writes()[0].payload.kind, "click");
+    assert.equal(writes()[0].payload.button, "right");
+
+    image.fire("pointerdown", {pointerType: "touch", pointerId: 3, clientX: 90, clientY: 100, button: 0});
+    image.fire("pointerdown", {pointerType: "touch", pointerId: 4, clientX: 150, clientY: 100, button: 0});
+    image.fire("pointermove", {pointerType: "touch", pointerId: 4, clientX: 210, clientY: 100});
+    await flush();
+    assert.equal(writes().length, 1, "pinch must not send remote pointer input");
+    assert.ok(Number(h.panel.querySelector("#desktop-zoom").value) > 100);
+    image.fire("pointerup", {pointerType: "touch", pointerId: 4, clientX: 210, clientY: 100, button: 0});
+    image.fire("pointerup", {pointerType: "touch", pointerId: 3, clientX: 90, clientY: 100, button: 0});
+    await flush();
+    assert.equal(writes().length, 1);
+  } finally { h.close(); }
+});
+
 test("keyboard capture is focused-surface-only and explicit Unicode text form preserves drafts", async () => {
   const h = harness("keyboard-scope", ({url}) => {
     if (url.endsWith("/windows")) return {windows: []};

@@ -44,11 +44,17 @@ interface PanelState {
   popover: "" | "targets" | "operations" | "keys";
 }
 interface Gesture { x: number; y: number; button: string; pointerID: number; observationID: string }
+interface TouchPinch {
+  pointers: Map<number, {x: number; y: number}>;
+  initialDistance: number;
+  initialZoom: number;
+}
 interface Binding {
   root: HTMLElement; state: PanelState; notify: Notice; timer: number;
   read: AbortController | null; write: AbortController | null; epoch: number;
   removeVisibility: () => void;
   chooserActive: boolean; clickTimer: number; click: Gesture | null; gesture: Gesture | null;
+  touchPointers: Map<number, {x: number; y: number}>; pinch: TouchPinch | null;
   refreshWindows: boolean;
   viewID: string; socket: WebSocket | null; socketKey: string; socketGeneration: number;
   socketReady: boolean; socketTimer: number; retries: number; retryAt: number; retryKey: string;
@@ -338,8 +344,8 @@ export function renderDesktopPanel(detail: TaskDetail, header = ""): string {
     <div id="task-tool-panel-body" class="desktop-body">
       <p id="desktop-error" class="desktop-error desktop-alert" role="alert" hidden></p>
       <div class="desktop-observation">
-        <div id="desktop-viewport" class="desktop-viewport" title="Ctrl 加滚轮：以鼠标位置缩放；普通滚轮：发送到共享目标"><div id="desktop-preview" class="desktop-preview" hidden>
-          <img id="desktop-image" alt="共享窗口画面" aria-label="共享画面控制区" draggable="false" tabindex="-1">
+        <div id="desktop-viewport" class="desktop-viewport" title="移动端：双击为右键，双指缩放；桌面端：Ctrl 加滚轮以鼠标位置缩放"><div id="desktop-preview" class="desktop-preview" hidden>
+          <img id="desktop-image" alt="共享窗口画面" aria-label="共享画面控制区，移动端双击为右键，双指缩放" draggable="false" tabindex="-1">
           <div id="desktop-highlight" class="desktop-highlight" hidden></div>
         </div></div>
         <p id="desktop-capture-status" class="desktop-empty desktop-capture-notice" role="status">尚无窗口画面</p>
@@ -1167,7 +1173,7 @@ function imagePoint(binding: Binding, event: MouseEvent): {x: number; y: number}
   };
 }
 
-function setZoom(binding: Binding, zoom: number, anchor?: {clientX: number; clientY: number}): void {
+function applyZoomAt(binding: Binding, zoom: number, anchor?: {clientX: number; clientY: number}): void {
   if (!current(binding)) return;
   const {root, state} = binding;
   const viewport = root.querySelector<HTMLElement>("#desktop-viewport");
@@ -1181,8 +1187,6 @@ function setZoom(binding: Binding, zoom: number, anchor?: {clientX: number; clie
     ? Math.max(0, Math.min(1, (clientX - before.left) / before.width)) : .5;
   const ratioY = before && before.height > 0
     ? Math.max(0, Math.min(1, (clientY - before.top) / before.height)) : .5;
-  cancelGesture(binding);
-  pauseObservation(binding);
   state.zoom = Number.isFinite(zoom) ? Math.max(1, Math.min(maxDesktopZoom, zoom)) : 1;
   layoutPreview(binding);
   const after = image?.getBoundingClientRect();
@@ -1190,7 +1194,32 @@ function setZoom(binding: Binding, zoom: number, anchor?: {clientX: number; clie
     viewport.scrollLeft += after.left + after.width * ratioX - clientX;
     viewport.scrollTop += after.top + after.height * ratioY - clientY;
   }
+}
+
+function cancelTouchGesture(binding: Binding): void {
+  binding.pinch = null;
+  binding.touchPointers.clear();
+}
+
+function setZoom(binding: Binding, zoom: number, anchor?: {clientX: number; clientY: number}): void {
+  cancelGesture(binding);
+  cancelTouchGesture(binding);
+  pauseObservation(binding);
+  applyZoomAt(binding, zoom, anchor);
   schedule(binding);
+}
+
+function pinchGeometry(pointers: Map<number, {x: number; y: number}>): {centerX: number; centerY: number; distance: number} | null {
+  const points = Array.from(pointers.values());
+  if (points.length < 2) return null;
+  const [first, second] = points;
+  const deltaX = second.x - first.x;
+  const deltaY = second.y - first.y;
+  return {
+    centerX: (first.x + second.x) / 2,
+    centerY: (first.y + second.y) / 2,
+    distance: Math.hypot(deltaX, deltaY),
+  };
 }
 
 function keyboardCommand(event: KeyboardEvent): {kind: "text" | "key"; fields: Record<string, unknown>} | null {
@@ -1217,7 +1246,25 @@ function bindInput(binding: Binding): void {
   const {root, state} = binding;
   const image = root.querySelector<HTMLImageElement>("#desktop-image")!;
   listen(binding, image, "pointerdown", event => {
-    if (binding.gesture) return;
+    if (event.pointerType === "touch") {
+      binding.touchPointers.set(event.pointerId, {x: event.clientX, y: event.clientY});
+      if (binding.touchPointers.size >= 2) {
+        const geometry = pinchGeometry(binding.touchPointers);
+        if (geometry) {
+          cancelGesture(binding);
+          pauseObservation(binding);
+          binding.pinch ||= {
+            pointers: binding.touchPointers,
+            initialDistance: geometry.distance,
+            initialZoom: state.zoom,
+          };
+          image.setPointerCapture(event.pointerId);
+          event.preventDefault();
+          return;
+        }
+      }
+    }
+    if (binding.gesture || binding.pinch) return;
     if (!foreground(state)) return; // background pointer handling lives on click
     if (!actionable(state) || !["click", "double_click", "drag"].some(kind => inputAllowed(state, kind as InputKind))) return;
     const point = imagePoint(binding, event);
@@ -1229,7 +1276,27 @@ function bindInput(binding: Binding): void {
       pointerID: event.pointerId, observationID: state.observation!.id};
     image.setPointerCapture(event.pointerId);
   });
+  listen(binding, image, "pointermove", event => {
+    if (event.pointerType !== "touch" || !binding.pinch) return;
+    binding.touchPointers.set(event.pointerId, {x: event.clientX, y: event.clientY});
+    const geometry = pinchGeometry(binding.touchPointers);
+    if (!geometry || binding.pinch.initialDistance <= 0) return;
+    event.preventDefault();
+    applyZoomAt(binding, binding.pinch.initialZoom * geometry.distance / binding.pinch.initialDistance,
+      {clientX: geometry.centerX, clientY: geometry.centerY});
+  });
   listen(binding, image, "pointerup", event => {
+    const touchGesture = event.pointerType === "touch";
+    if (event.pointerType === "touch") {
+      binding.touchPointers.delete(event.pointerId);
+      if (binding.pinch) {
+        binding.pinch = null;
+        if (image.hasPointerCapture(event.pointerId)) image.releasePointerCapture(event.pointerId);
+        event.preventDefault();
+        schedule(binding);
+        return;
+      }
+    }
     const gesture = binding.gesture;
     if (!gesture || gesture.pointerID !== event.pointerId) return;
     binding.gesture = null;
@@ -1247,19 +1314,28 @@ function bindInput(binding: Binding): void {
       && binding.click.observationID === gesture.observationID
       && Math.hypot(binding.click.x - point.x, binding.click.y - point.y) < 8) {
       cancelGesture(binding);
-      performInput(binding, "double_click", {...point, button: gesture.button}, gesture.observationID);
+      if (touchGesture) {
+        performInput(binding, "click", {...point, button: "right"}, gesture.observationID);
+      } else {
+        performInput(binding, "double_click", {...point, button: gesture.button}, gesture.observationID);
+      }
       return;
     }
     // One bounded click discriminator, never a queue of inputs to replay.
     if (binding.click) return;
-    binding.click = gesture;
-    binding.clickTimer = window.setTimeout(() => {
+      binding.click = gesture;
+      binding.clickTimer = window.setTimeout(() => {
       binding.clickTimer = 0;
       binding.click = null;
       performInput(binding, "click", {...point, button: gesture.button}, gesture.observationID);
-    }, inputAllowed(state, "double_click") ? 300 : 0);
+    }, inputAllowed(state, "double_click") || touchGesture ? 300 : 0);
   });
-  listen(binding, image, "pointercancel", () => { cancelGesture(binding); schedule(binding); });
+  listen(binding, image, "pointercancel", event => {
+    if (event.pointerType === "touch") binding.touchPointers.delete(event.pointerId);
+    binding.pinch = null;
+    cancelGesture(binding);
+    schedule(binding);
+  });
   listen(binding, image, "blur", () => {
     // A completed click may still be waiting for the double-click discriminator.
     // Moving into the text editor must not silently discard that target click.
@@ -1321,6 +1397,7 @@ function bindInput(binding: Binding): void {
 
 export function desktopPanelInteracting(): boolean {
   return Boolean(active && current(active) && (active.state.popover || document.fullscreenElement === active.root || active.chooserActive || active.gesture || active.click
+    || active.pinch
     || (document.activeElement instanceof HTMLElement && active.root.contains(document.activeElement))));
 }
 
@@ -1430,6 +1507,7 @@ export function bindDesktopPanel(detail: TaskDetail, notify: Notice): void {
   state.remote = Boolean(detail.task.read_only);
   const binding: Binding = {root, state, notify, timer: 0, read: null, write: null, epoch: 0,
     removeVisibility: () => {}, chooserActive: false, clickTimer: 0, click: null, gesture: null, refreshWindows: false,
+    touchPointers: new Map(), pinch: null,
     viewID: randomID(), socket: null, socketKey: "", socketGeneration: 0, socketReady: false, socketTimer: 0,
     retries: 0, retryAt: 0, retryKey: "", decoding: false, decoder: null, decodeTimer: 0, blobURLs: new Set(),
     imageURL: "", lastFrameAt: 0, lastStatusAt: 0, decodePending: 0, pendingText: null, removeLayout: () => {},

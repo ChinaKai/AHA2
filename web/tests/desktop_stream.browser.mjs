@@ -353,6 +353,47 @@ try {
   await delay(100);
   await assertFit();
   await page.keyboard.press("Escape");
+  await page.setViewportSize({width: 390, height: 844});
+  await delay(150);
+  const touchTarget = await page.evaluate(() => {
+    const image = document.querySelector("#desktop-image").getBoundingClientRect();
+    return {x: image.left + image.width * .58, y: image.top + image.height * .48};
+  });
+  const touchClient = await page.context().newCDPSession(page);
+  const actionsBeforeRightTap = actions.length;
+  await touchClient.send("Input.dispatchTouchEvent", {
+    type: "touchStart", touchPoints: [{x: touchTarget.x, y: touchTarget.y, id: 1}],
+  });
+  await touchClient.send("Input.dispatchTouchEvent", {type: "touchEnd", touchPoints: []});
+  await delay(60);
+  await touchClient.send("Input.dispatchTouchEvent", {
+    type: "touchStart", touchPoints: [{x: touchTarget.x, y: touchTarget.y, id: 2}],
+  });
+  await touchClient.send("Input.dispatchTouchEvent", {type: "touchEnd", touchPoints: []});
+  await waitUntil(() => actions.length > actionsBeforeRightTap, "mobile double tap right click");
+  assert.equal(actions.at(-1).kind, "click");
+  assert.equal(actions.at(-1).button, "right");
+  const actionsBeforePinch = actions.length;
+  const zoomBeforePinch = Number(await page.locator("#desktop-zoom").inputValue());
+  await touchClient.send("Input.dispatchTouchEvent", {
+    type: "touchStart",
+    touchPoints: [
+      {x: touchTarget.x - 30, y: touchTarget.y, id: 3},
+      {x: touchTarget.x + 30, y: touchTarget.y, id: 4},
+    ],
+  });
+  await touchClient.send("Input.dispatchTouchEvent", {
+    type: "touchMove",
+    touchPoints: [
+      {x: touchTarget.x - 80, y: touchTarget.y, id: 3},
+      {x: touchTarget.x + 80, y: touchTarget.y, id: 4},
+    ],
+  });
+  await touchClient.send("Input.dispatchTouchEvent", {type: "touchEnd", touchPoints: []});
+  await delay(150);
+  assert.ok(Number(await page.locator("#desktop-zoom").inputValue()) > zoomBeforePinch, "pinch zooms in");
+  assert.equal(actions.length, actionsBeforePinch, "pinch remains a local view gesture");
+  await page.screenshot({path: resolve(output, "mobile-touch-gestures-390.png")});
   for (const viewport of [{width: 1440, height: 1000}, {width: 390, height: 844}, {width: 320, height: 740}]) {
     await page.setViewportSize(viewport);
     await page.click('[data-desktop-video="bandwidth"]');
