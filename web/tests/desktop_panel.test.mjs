@@ -818,7 +818,7 @@ test("virtual wheel toggles and sends fixed and dragged scroll input", async () 
     pad.fire("pointerup", {pointerId: 11, clientX: 180, clientY: 90});
     await flush();
     assert.equal(writes().at(-1).payload.kind, "scroll");
-    assert.equal(writes().at(-1).payload.delta_y, 30);
+    assert.equal(writes().at(-1).payload.delta_y, 120);
     assert.equal(thumb.style.transform, "");
     toggle.fire("click");
     assert.equal(toggle.getAttribute("aria-expanded"), "false");

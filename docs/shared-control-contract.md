@@ -116,8 +116,9 @@ emit an extra remote click.
 A compact, collapsible virtual wheel overlay provides explicit up/down buttons
 and a visible draggable thumb in a raised track for devices where two-finger
 swipe recognition is inconvenient. The thumb follows the pointer and returns to
-center on release. Its input shares the same serialized scroll queue as touch
-gestures.
+center on release. Short drags use a 4x wheel-distance scale so the compact
+control still produces a usable scroll. Its input shares the same serialized
+scroll queue as touch gestures.
 Local `Ctrl`/`Command` + wheel zoom is anchored at the pointer and preserves the
 logical desktop coordinate under it. Plain wheel remains foreground remote
 scrolling and must never be converted into local zoom. Zoom ranges from 100% to

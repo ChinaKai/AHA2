@@ -436,15 +436,20 @@ try {
   const wheelPad = await page.locator("#desktop-wheel-pad").boundingBox();
   const wheelThumbBefore = await page.locator("#desktop-wheel-pad .desktop-wheel-grip").boundingBox();
   const actionsBeforeWheelDrag = actions.length;
-  await page.mouse.move(wheelPad.x + wheelPad.width / 2, wheelPad.y + wheelPad.height * .75);
-  await page.mouse.down();
-  await page.mouse.move(wheelPad.x + wheelPad.width / 2, wheelPad.y + wheelPad.height * .25, {steps: 3});
+  await touchClient.send("Input.dispatchTouchEvent", {
+    type: "touchStart",
+    touchPoints: [{x: wheelPad.x + wheelPad.width / 2, y: wheelPad.y + wheelPad.height * .75, id: 9}],
+  });
+  await touchClient.send("Input.dispatchTouchEvent", {
+    type: "touchMove",
+    touchPoints: [{x: wheelPad.x + wheelPad.width / 2, y: wheelPad.y + wheelPad.height * .25, id: 9}],
+  });
   const wheelThumbDuring = await page.locator("#desktop-wheel-pad .desktop-wheel-grip").boundingBox();
   assert.ok(wheelThumbDuring.y < wheelThumbBefore.y, "dragged wheel thumb follows the pointer");
-  await page.mouse.up();
+  await touchClient.send("Input.dispatchTouchEvent", {type: "touchEnd", touchPoints: []});
   await waitUntil(() => actions.length > actionsBeforeWheelDrag, "virtual wheel drag scroll");
   assert.equal(actions.at(-1).kind, "scroll");
-  assert.ok(actions.at(-1).delta_y > 0);
+  assert.ok(actions.at(-1).delta_y >= 120, "short wheel drag produces a usable scroll distance");
   await delay(150);
   const wheelThumbAfter = await page.locator("#desktop-wheel-pad .desktop-wheel-grip").boundingBox();
   assert.ok(Math.abs(wheelThumbAfter.y - wheelThumbBefore.y) < 1, "wheel thumb returns to its centered rest position");

@@ -73,7 +73,6 @@ interface WheelDrag {
   pointerID: number;
   lastX: number;
   lastY: number;
-  startY: number;
 }
 interface Binding {
   root: HTMLElement; state: PanelState; notify: Notice; timer: number;
@@ -106,6 +105,7 @@ const touchSettleMS = 80;
 const touchScrollMin = 12;
 const wheelQueueStep = 24;
 const wheelFlushMS = 40;
+const wheelDragScale = 4;
 
 export function desktopPreviewSize(width: number, height: number, availableWidth: number, availableHeight: number, zoom = 1): {width: number; height: number} {
   if (![width, height, availableWidth, availableHeight, zoom].every(value => Number.isFinite(value) && value > 0)) return {width: 0, height: 0};
@@ -1758,9 +1758,7 @@ export function bindDesktopPanel(detail: TaskDetail, notify: Notice): void {
   wheelButton("#desktop-wheel-down", 120);
   listen(binding, wheelPad, "pointerdown", event => {
     if (!inputAllowed(state, "scroll")) return;
-    binding.wheelDrag = {
-      pointerID: event.pointerId, lastX: event.clientX, lastY: event.clientY, startY: event.clientY,
-    };
+    binding.wheelDrag = {pointerID: event.pointerId, lastX: event.clientX, lastY: event.clientY};
     cancelGesture(binding);
     pauseObservation(binding);
     wheelPad?.setPointerCapture(event.pointerId);
@@ -1772,10 +1770,14 @@ export function bindDesktopPanel(detail: TaskDetail, notify: Notice): void {
     const drag = binding.wheelDrag;
     if (!drag || drag.pointerID !== event.pointerId) return;
     event.preventDefault();
+    const bounds = wheelPad?.getBoundingClientRect();
     const travel = Math.max(0, (wheelPad?.clientHeight || 88) / 2 - 22);
-    const offset = Math.max(-travel, Math.min(travel, event.clientY - drag.startY));
+    const offset = bounds
+      ? Math.max(-travel, Math.min(travel, event.clientY - (bounds.top + bounds.height / 2)))
+      : 0;
     if (wheelThumb) wheelThumb.style.transform = `translateY(${offset}px)`;
-    queueWheel(binding, drag.lastX - event.clientX, drag.lastY - event.clientY, event.clientX, event.clientY);
+    queueWheel(binding, (drag.lastX - event.clientX) * wheelDragScale,
+      (drag.lastY - event.clientY) * wheelDragScale, event.clientX, event.clientY);
     drag.lastX = event.clientX;
     drag.lastY = event.clientY;
   });
@@ -1784,7 +1786,8 @@ export function bindDesktopPanel(detail: TaskDetail, notify: Notice): void {
     if (!drag || drag.pointerID !== event.pointerId) return;
     binding.wheelDrag = null;
     if (wheelPad?.hasPointerCapture(event.pointerId)) wheelPad.releasePointerCapture(event.pointerId);
-    queueWheel(binding, drag.lastX - event.clientX, drag.lastY - event.clientY, event.clientX, event.clientY, true);
+    queueWheel(binding, (drag.lastX - event.clientX) * wheelDragScale,
+      (drag.lastY - event.clientY) * wheelDragScale, event.clientX, event.clientY, true);
     resetWheelThumb();
     event.preventDefault();
     schedule(binding);
