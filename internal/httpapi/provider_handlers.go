@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"net/http"
 	"regexp"
 	"strings"
@@ -347,11 +348,13 @@ func (s *Server) probeProviderModel(writer http.ResponseWriter, request *http.Re
 func (s *Server) addModelsHandler(writer http.ResponseWriter, request *http.Request) {
 	var payload struct {
 		ProviderID       string   `json:"provider_id"`
+		Backend          string   `json:"backend"`
 		WireAPI          string   `json:"wire_api"`
 		AnthropicBaseURL string   `json:"anthropic_base_url"`
 		ModelIDs         []string `json:"model_ids"`
 		Models           []struct {
 			ID              string   `json:"id"`
+			Backend         string   `json:"backend"`
 			WireAPI         string   `json:"wire_api"`
 			WireAPIs        []string `json:"wire_apis"`
 			MaxInputTokens  int64    `json:"max_input_tokens"`
@@ -375,6 +378,7 @@ func (s *Server) addModelsHandler(writer http.ResponseWriter, request *http.Requ
 	type pick struct {
 		id              string
 		wireAPI         string
+		backend         string
 		maxInputTokens  int64
 		maxOutputTokens int64
 	}
@@ -385,6 +389,10 @@ func (s *Server) addModelsHandler(writer http.ResponseWriter, request *http.Requ
 		if id == "" {
 			continue
 		}
+		backend := strings.TrimSpace(item.Backend)
+		if backend == "" {
+			backend = strings.TrimSpace(payload.Backend)
+		}
 		wapis := item.WireAPIs
 		if len(wapis) == 0 && strings.TrimSpace(item.WireAPI) != "" {
 			wapis = []string{item.WireAPI}
@@ -394,25 +402,33 @@ func (s *Server) addModelsHandler(writer http.ResponseWriter, request *http.Requ
 		}
 		for _, wire := range wapis {
 			wire = normalizeWireAPI(wire)
-			key := id + "\x00" + wire
+			key := id + "\x00" + wire + "\x00" + backend
 			if seenPick[key] {
 				continue
 			}
 			seenPick[key] = true
-			picks = append(picks, pick{id, wire, item.MaxInputTokens, item.MaxOutputTokens})
+			picks = append(picks, pick{id: id, wireAPI: wire, backend: backend, maxInputTokens: item.MaxInputTokens, maxOutputTokens: item.MaxOutputTokens})
 		}
 	}
 	if len(picks) == 0 {
 		wire := normalizeWireAPI(payload.WireAPI)
 		for _, id := range payload.ModelIDs {
 			if id = strings.TrimSpace(id); id != "" {
-				picks = append(picks, pick{id: id, wireAPI: wire})
+				picks = append(picks, pick{id: id, wireAPI: wire, backend: strings.TrimSpace(payload.Backend)})
 			}
 		}
 	}
 	if len(picks) == 0 {
 		writeError(writer, http.StatusBadRequest, "models_required")
 		return
+	}
+	for index := range picks {
+		backend, err := resolveModelBackend(picks[index].backend, picks[index].wireAPI)
+		if err != nil {
+			writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid_model_backend", "message": err.Error()})
+			return
+		}
+		picks[index].backend = backend
 	}
 	existing, _ := s.store.ListModels(request.Context())
 	existingKey := make(map[string]bool, len(existing))
@@ -425,13 +441,13 @@ func (s *Server) addModelsHandler(writer http.ResponseWriter, request *http.Requ
 	var created []domain.Model
 	skipped := 0
 	for _, pick := range picks {
-		backend := backendForWire(pick.wireAPI)
+		backend := pick.backend
 		key := provider.ID + "\x00" + pick.id + "\x00" + backend
 		if existingKey[key] {
 			skipped++
 			continue
 		}
-		backendName, envGroup := buildEnvGroup(provider, pick.id, pick.wireAPI, now)
+		backendName, envGroup := buildEnvGroup(provider, pick.id, pick.wireAPI, backend, now)
 		if err := s.store.UpsertEnvGroup(request.Context(), envGroup); err != nil {
 			writeError(writer, http.StatusInternalServerError, "create_env_group_failed")
 			return
@@ -440,7 +456,7 @@ func (s *Server) addModelsHandler(writer http.ResponseWriter, request *http.Requ
 			ID: domain.NewID("model"), DisplayName: pick.id, ProviderID: provider.ID, Source: "provider", Backend: backendName,
 			WireModel: pick.id, WireAPI: pick.wireAPI, DefaultEnvGroupID: envGroup.ID,
 			ContextWindow: pick.maxInputTokens, MaxOutputTokens: pick.maxOutputTokens,
-			Capabilities: map[string]any{}, CreatedAt: now, UpdatedAt: now,
+			Capabilities: map[string]any{"supports_image_input": true}, CreatedAt: now, UpdatedAt: now,
 		}
 		if err := s.store.UpsertModel(request.Context(), item); err != nil {
 			writeError(writer, http.StatusInternalServerError, "create_model_failed")
@@ -462,6 +478,32 @@ func backendForWire(wireAPI string) string {
 	return "codex"
 }
 
+func resolveModelBackend(requested, wireAPI string) (string, error) {
+	backend := strings.ToLower(strings.TrimSpace(requested))
+	if backend == "" || backend == "auto" {
+		return backendForWire(wireAPI), nil
+	}
+	switch backend {
+	case "codex":
+		if wireAPI == "anthropic_messages" {
+			return "", fmt.Errorf("Codex Backend does not support Anthropic Messages")
+		}
+	case "claude":
+		if wireAPI != "anthropic_messages" {
+			return "", fmt.Errorf("Claude Code Backend requires Anthropic Messages")
+		}
+	case "dsh":
+		switch wireAPI {
+		case "responses", "chat", "anthropic_messages":
+		default:
+			return "", fmt.Errorf("DSH Backend does not support wire API %q", wireAPI)
+		}
+	default:
+		return "", fmt.Errorf("unknown model backend %q", requested)
+	}
+	return backend, nil
+}
+
 func (s *Server) updateModel(writer http.ResponseWriter, request *http.Request) {
 	id := request.PathValue("id")
 	model, err := s.store.Model(request.Context(), id)
@@ -476,9 +518,14 @@ func (s *Server) updateModel(writer http.ResponseWriter, request *http.Request) 
 		// marker from the name it is invoked with rather than from a variable.
 		WireModel       string `json:"wire_model"`
 		WireAPI         string `json:"wire_api"`
+		Backend         string `json:"backend"`
 		ContextWindow   int64  `json:"context_window"`
 		MaxOutputTokens int64  `json:"max_output_tokens"`
 		DefaultEffort   string `json:"default_reasoning_effort"`
+		// SupportsImageInput is a pointer so an update that only renames the
+		// model keeps the stored capability. Unset means enabled by default;
+		// an explicit false is what turns image input off.
+		SupportsImageInput *bool `json:"supports_image_input"`
 	}
 	if err := decodeJSON(request, &payload); err != nil {
 		writeError(writer, http.StatusBadRequest, "invalid_json")
@@ -508,44 +555,60 @@ func (s *Server) updateModel(writer http.ResponseWriter, request *http.Request) 
 	}
 	model.ContextWindow = payload.ContextWindow
 	model.MaxOutputTokens = payload.MaxOutputTokens
-	if wire := strings.TrimSpace(payload.WireAPI); wire != "" {
-		wire = normalizeWireAPI(wire)
-		if wire != model.WireAPI {
-			newBackend := "codex"
-			if wire == "anthropic_messages" {
-				newBackend = "claude"
-			}
-			provider, err := s.store.Provider(request.Context(), model.ProviderID)
-			if err != nil {
-				writeJSON(writer, http.StatusBadRequest, map[string]any{
-					"ok": false, "error": "provider_not_found", "message": "无法切换协议：该模型的 Provider 已不存在",
-				})
-				return
-			}
-			_, envGroup := buildEnvGroup(provider, model.WireModel, wire, now)
-			if err := s.store.UpsertEnvGroup(request.Context(), envGroup); err != nil {
-				writeError(writer, http.StatusInternalServerError, "create_env_group_failed")
-				return
-			}
-			if model.DefaultEnvGroupID != "" && model.DefaultEnvGroupID != envGroup.ID {
-				models, _ := s.store.ListModels(request.Context())
-				referenced := false
-				for _, other := range models {
-					if other.ID != model.ID && other.DefaultEnvGroupID == model.DefaultEnvGroupID {
-						referenced = true
-						break
-					}
-				}
-				if !referenced {
-					if inUse, _ := s.store.EnvGroupInUse(request.Context(), model.DefaultEnvGroupID); !inUse {
-						_ = s.store.DeleteEnvGroup(request.Context(), model.DefaultEnvGroupID)
-					}
-				}
-			}
-			model.DefaultEnvGroupID = envGroup.ID
-			model.Backend = newBackend
-			model.WireAPI = wire
+	if payload.SupportsImageInput != nil {
+		if model.Capabilities == nil {
+			model.Capabilities = map[string]any{}
 		}
+		// Store false explicitly: absence is the enabled default, so deleting
+		// the key would turn image input back on.
+		model.Capabilities["supports_image_input"] = *payload.SupportsImageInput
+	}
+	nextWire := model.WireAPI
+	if wire := strings.TrimSpace(payload.WireAPI); wire != "" {
+		nextWire = normalizeWireAPI(wire)
+	}
+	requestedBackend := strings.TrimSpace(payload.Backend)
+	if requestedBackend == "" {
+		requestedBackend = model.Backend
+	}
+	newBackend, backendErr := resolveModelBackend(requestedBackend, nextWire)
+	if backendErr != nil {
+		writeJSON(writer, http.StatusBadRequest, map[string]any{
+			"ok": false, "error": "invalid_model_backend", "message": backendErr.Error(),
+		})
+		return
+	}
+	if nextWire != model.WireAPI || newBackend != model.Backend {
+		provider, err := s.store.Provider(request.Context(), model.ProviderID)
+		if err != nil {
+			writeJSON(writer, http.StatusBadRequest, map[string]any{
+				"ok": false, "error": "provider_not_found", "message": "无法切换协议：该模型的 Provider 已不存在",
+			})
+			return
+		}
+		_, envGroup := buildEnvGroup(provider, model.WireModel, nextWire, newBackend, now)
+		if err := s.store.UpsertEnvGroup(request.Context(), envGroup); err != nil {
+			writeError(writer, http.StatusInternalServerError, "create_env_group_failed")
+			return
+		}
+		if model.DefaultEnvGroupID != "" && model.DefaultEnvGroupID != envGroup.ID {
+			models, _ := s.store.ListModels(request.Context())
+			referenced := false
+			for _, other := range models {
+				if other.ID != model.ID && other.DefaultEnvGroupID == model.DefaultEnvGroupID {
+					referenced = true
+					break
+				}
+			}
+			if !referenced {
+				if inUse, _ := s.store.EnvGroupInUse(request.Context(), model.DefaultEnvGroupID); !inUse {
+					_ = s.store.DeleteEnvGroup(request.Context(), model.DefaultEnvGroupID)
+				}
+			}
+		}
+		model.DefaultEnvGroupID = envGroup.ID
+		model.Backend = newBackend
+		model.WireAPI = nextWire
 	}
 	model.UpdatedAt = now
 	if err := s.store.UpsertModel(request.Context(), model); err != nil {
@@ -572,12 +635,11 @@ func normalizeWireAPI(value string) string {
 	}
 }
 
-func buildEnvGroup(provider domain.Provider, modelID, wireAPI string, now time.Time) (string, domain.EnvGroup) {
+func buildEnvGroup(provider domain.Provider, modelID, wireAPI, backendName string, now time.Time) (string, domain.EnvGroup) {
 	secretRefs := map[string]string{}
 	if provider.CredentialRef != "" {
 		secretRefs["OPENAI_API_KEY"] = provider.CredentialRef
 	}
-	backendName := "codex"
 	environment := map[string]string{
 		"OPENAI_BASE_URL": provider.BaseURL,
 		"OPENAI_MODEL":    modelID,
@@ -586,7 +648,6 @@ func buildEnvGroup(provider domain.Provider, modelID, wireAPI string, now time.T
 		"AHA_PROVIDER_ID": provider.ID,
 	}
 	if wireAPI == "anthropic_messages" {
-		backendName = "claude"
 		anthropicBase := strings.TrimSpace(provider.AnthropicBaseURL)
 		if anthropicBase == "" {
 			anthropicBase = provider.BaseURL

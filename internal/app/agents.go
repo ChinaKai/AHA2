@@ -265,7 +265,7 @@ func (s *Service) UpdateAgentConfig(
 	if err := s.store.UpdateTaskAgentSnapshot(ctx, taskID, agentID, snapshot.ID, inheritMain, now); err != nil {
 		return domain.TaskAgent{}, err
 	}
-	if backendSessionIdentityChanged(previousSnapshot, snapshot) {
+	if s.backendSessionShouldRotate(ctx, previousSnapshot, snapshot) {
 		_ = s.store.CloseBackendSessionsForAgent(ctx, taskID, agentID)
 	}
 	if agentID == "main" {
@@ -279,7 +279,7 @@ func (s *Service) UpdateAgentConfig(
 		for _, child := range agents {
 			if child.AgentID != "main" && child.InheritMain {
 				childSnapshot, captured := inheritedSnapshots[child.AgentID]
-				if captured && backendSessionIdentityChanged(childSnapshot, snapshot) {
+				if captured && s.backendSessionShouldRotate(ctx, childSnapshot, snapshot) {
 					_ = s.store.CloseBackendSessionsForAgent(ctx, taskID, child.AgentID)
 				}
 			}
@@ -309,6 +309,16 @@ func backendSessionIdentityChanged(previous, next domain.RuntimeConfigSnapshot) 
 		previous.EnvGroupID != next.EnvGroupID ||
 		previous.EnvGroupRevision != next.EnvGroupRevision ||
 		previous.CodexAccountID != next.CodexAccountID
+}
+
+func (s *Service) backendSessionShouldRotate(ctx context.Context, previous, next domain.RuntimeConfigSnapshot) bool {
+	if previous.Backend != "dsh" || next.Backend != "dsh" {
+		return backendSessionIdentityChanged(previous, next)
+	}
+	if previous.WorkspaceID != next.WorkspaceID || previous.CodexAccountID != next.CodexAccountID {
+		return true
+	}
+	return !s.dshSnapshotsShareSessionDomain(ctx, previous, next)
 }
 
 func (s *Service) recordAgentConfigUpdate(ctx context.Context, agent domain.TaskAgent, now time.Time) {

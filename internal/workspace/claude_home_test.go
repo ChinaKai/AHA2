@@ -26,6 +26,23 @@ func TestClaudeConfigDirIsolatesPerSession(t *testing.T) {
 	}
 }
 
+func TestDSHHomeDirIsolatesPerSession(t *testing.T) {
+	t.Parallel()
+	native := domain.Workspace{Transport: "native", RootPath: "/work"}
+	first := DSHHomeDir(native, "/work/task", "backend_session_a")
+	second := DSHHomeDir(native, "/work/task", "backend_session_b")
+	if first == second {
+		t.Fatalf("rotated sessions must not share a DSH home: %q", first)
+	}
+	if want := filepath.Join("/work/task", ".aha2-context", "runtime", "dsh-home", "backend_session_a"); first != want {
+		t.Fatalf("native DSH home = %q, want %q", first, want)
+	}
+	remote := domain.Workspace{Transport: "wsl", Distro: "Ubuntu", RootPath: "/home/user/repo"}
+	if got := DSHHomeDir(remote, "/home/user/repo/task", "session_1"); got != "/home/user/repo/task/.aha2-context/runtime/dsh-home/session_1" {
+		t.Fatalf("remote DSH home = %q", got)
+	}
+}
+
 func TestSessionHomeForRedirectsOnlyIsolatableRuns(t *testing.T) {
 	t.Parallel()
 	item := domain.Workspace{Transport: "native", RootPath: "/work"}
@@ -63,14 +80,37 @@ func TestSessionHomeForRedirectsOnlyIsolatableRuns(t *testing.T) {
 		t.Fatal("native claude still needs a reported dir")
 	}
 
+	dsh := base
+	dsh.Backend = "dsh"
+	home, ok = SessionHomeFor(dsh)
+	if !ok || home.EnvName != "DSH_HOME" || home.Dir == "" {
+		t.Fatalf("dsh home = %+v ok=%t, want DSH_HOME", home, ok)
+	}
+
 	if _, ok := SessionHomeFor(SessionHomeInput{Backend: "stub"}); ok {
 		t.Fatal("a backend without a session home must not claim support")
 	}
 	if SupportsSessionHome("stub") {
 		t.Fatal("stub backend must not report session-home support")
 	}
-	if !SupportsSessionHome("codex") || !SupportsSessionHome("claude") {
-		t.Fatal("codex and claude must report session-home support")
+	if !SupportsSessionHome("codex") || !SupportsSessionHome("claude") || !SupportsSessionHome("dsh") {
+		t.Fatal("codex, claude, and dsh must report session-home support")
+	}
+}
+
+func TestEnsureDSHHomeDirCreatesDirectory(t *testing.T) {
+	t.Parallel()
+	item := domain.Workspace{Transport: "native", RootPath: t.TempDir()}
+	target := DSHHomeDir(item, item.RootPath, "session_1")
+	if err := EnsureDSHHomeDir(context.Background(), item, LocalRunner{}, target); err != nil {
+		t.Fatalf("ensure DSH home: %v", err)
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		t.Fatalf("DSH home was not created: %v", err)
+	}
+	if !info.IsDir() {
+		t.Fatalf("DSH home is not a directory: %q", target)
 	}
 }
 

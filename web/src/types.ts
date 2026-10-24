@@ -177,8 +177,9 @@ export interface Workspace {
   capabilities?: Record<string, unknown> & {
     workspace?: WorkspaceProbe;
     platform?: WorkspaceProbe;
-    codex?: WorkspaceProbe;
-    claude?: WorkspaceProbe;
+  codex?: WorkspaceProbe;
+  claude?: WorkspaceProbe;
+  dsh?: WorkspaceProbe;
     agent_api?: WorkspaceProbe & {url?: string};
     git?: boolean;
   };
@@ -210,6 +211,8 @@ export interface Model {
   context_window?: number;
   max_output_tokens?: number;
   default_reasoning_effort?: string;
+  /** Model capability metadata; supports_image_input defaults to enabled. */
+  capabilities?: Record<string, unknown>;
 }
 
 export interface WorkspaceProbe {

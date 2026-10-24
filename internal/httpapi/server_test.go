@@ -704,7 +704,7 @@ func TestAddModelsGeneratesEnvGroupsAndSecrets(t *testing.T) {
 	response = requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/providers/add-models", map[string]any{
 		"provider_id": providerID,
 		"models": []map[string]any{
-			{"id": "gpt-4o", "wire_apis": []string{"responses"}, "max_input_tokens": 128000, "max_output_tokens": 16000},
+			{"id": "gpt-4o", "backend": "dsh", "wire_apis": []string{"responses"}, "max_input_tokens": 128000, "max_output_tokens": 16000},
 			{"id": "gpt-4o-mini", "wire_apis": []string{"responses"}, "max_input_tokens": 64000},
 		},
 	}, csrf)
@@ -719,6 +719,13 @@ func TestAddModelsGeneratesEnvGroupsAndSecrets(t *testing.T) {
 	}
 	if models[0].(map[string]any)["context_window"] != float64(128000) || models[0].(map[string]any)["max_output_tokens"] != float64(16000) {
 		t.Fatalf("detected token limits were not persisted: %#v", models[0])
+	}
+	if models[0].(map[string]any)["backend"] != "dsh" || models[1].(map[string]any)["backend"] != "codex" {
+		t.Fatalf("per-model backend selection was not applied: %#v %#v", models[0], models[1])
+	}
+	capabilities, _ := models[0].(map[string]any)["capabilities"].(map[string]any)
+	if capabilities["supports_image_input"] != true {
+		t.Fatalf("new models did not default image input on: %#v", models[0])
 	}
 	if _, present := models[0].(map[string]any)["default_env_group_id"]; present {
 		t.Fatalf("default_env_group_id leaked: %v", models[0])
@@ -1040,6 +1047,13 @@ func TestContextUsageUsesBackendSpecificFormula(t *testing.T) {
 	if actual := contextTokensForUsage("claude", claude); actual != 185 {
 		t.Fatalf("claude effective context input = %v", actual)
 	}
+	dsh := map[string]any{
+		"input_tokens": float64(90), "cached_input_tokens": float64(7),
+		"cache_creation_input_tokens": float64(3),
+	}
+	if actual := contextTokensForUsage("dsh", dsh); actual != 100 {
+		t.Fatalf("dsh effective context input = %v", actual)
+	}
 	turn := domain.Turn{
 		ContextWindow: 258400,
 		Usage: map[string]any{
@@ -1154,6 +1168,13 @@ func TestContextMetricsAggregateSessionHistory(t *testing.T) {
 	}
 	if got := usageTotalTokens(claude, "claude"); got != 190 {
 		t.Fatalf("claude total = %v", got)
+	}
+	dshTurns := []domain.Turn{
+		{Usage: map[string]any{"input_tokens": float64(10), "output_tokens": float64(2), "total_tokens": float64(15)}},
+		{Usage: map[string]any{"input_tokens": float64(20), "output_tokens": float64(3), "total_tokens": float64(25)}},
+	}
+	if got := usageTotalTokens(backendSessionTotalUsage("dsh", dshTurns, nil), "dsh"); got != 40 {
+		t.Fatalf("dsh session total = %v", got)
 	}
 	if got := usageCachedTokens(claude); got != 85 {
 		t.Fatalf("claude cached = %v", got)

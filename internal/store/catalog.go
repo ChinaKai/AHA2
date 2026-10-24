@@ -252,6 +252,17 @@ func (s *Store) Model(ctx context.Context, id string) (domain.Model, error) {
 	return item, err
 }
 
+// ModelProviderAndEnvGroup returns the identity needed to decide whether a DSH
+// Session can survive a model switch. Unlike Model, it also works for a
+// soft-deleted model retained by historical Backend Sessions.
+func (s *Store) ModelProviderAndEnvGroup(ctx context.Context, id string) (string, string, error) {
+	var providerID, envGroupID string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT provider_id,default_env_group_id FROM models WHERE id=?`, id).
+		Scan(&providerID, &envGroupID)
+	return providerID, envGroupID, err
+}
+
 func (s *Store) UpsertEnvGroup(ctx context.Context, item domain.EnvGroup) error {
 	item.Revision = s.sharedNumericVersion(ctx, "env_group", item.ID, item.Revision)
 	_, err := s.db.ExecContext(ctx, `

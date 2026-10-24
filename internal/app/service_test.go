@@ -94,6 +94,9 @@ func TestSessionHomeSupportGatesWriterCleanup(t *testing.T) {
 	if !workspacepkg.SupportsSessionHome("claude") {
 		t.Fatal("claude must support per-session homes")
 	}
+	if !workspacepkg.SupportsSessionHome("dsh") {
+		t.Fatal("dsh must support per-session homes")
+	}
 	if workspacepkg.SupportsSessionHome("stub") {
 		t.Fatal("a backend without a session home must not attempt writer cleanup")
 	}
@@ -496,6 +499,7 @@ func (s *multiAgentExecutor) Execute(_ context.Context, request ExecutionRequest
 	emit(ExecutionEvent{Type: "agent_command_started", Data: map[string]any{"command": "verify " + request.Turn.AgentID}})
 	emit(ExecutionEvent{Type: "agent_command_finished", Data: map[string]any{"command": "verify " + request.Turn.AgentID, "status": "completed"}})
 	emit(ExecutionEvent{Type: "agent_progress", Data: map[string]any{"message": "working " + request.Turn.AgentID}})
+	emit(ExecutionEvent{Type: "agent_reasoning", Data: map[string]any{"text": "reasoning " + request.Turn.AgentID, "reasoning": true}})
 	emit(ExecutionEvent{Type: "agent_message", Data: map[string]any{"text": "commentary one " + request.Turn.AgentID, "intermediate": true}})
 	emit(ExecutionEvent{Type: "agent_message", Data: map[string]any{"text": "commentary two " + request.Turn.AgentID, "intermediate": true}})
 	switch {
@@ -1231,7 +1235,7 @@ func TestMultiAgentRoundCreatesIntegrationTurn(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		finals, progress, commentary, backendStreams := 0, 0, 0, 0
+		finals, progress, commentary, reasoning, backendStreams := 0, 0, 0, 0, 0
 		for _, item := range stream.Items {
 			if item.TurnID != turn.ID {
 				continue
@@ -1245,12 +1249,15 @@ func TestMultiAgentRoundCreatesIntegrationTurn(t *testing.T) {
 			if item.Kind == "agent_message_update" && item.RouteKind == "agent_progress" {
 				commentary++
 			}
+			if item.Kind == "agent_reasoning_update" && item.Category == "update" {
+				reasoning++
+			}
 			if item.RouteKind == "backend_stream" || item.Kind == "agent_message_update" && item.RouteKind == "" {
 				backendStreams++
 			}
 		}
-		if finals != 1 || progress != 1 || commentary != 2 || backendStreams != 0 {
-			t.Fatalf("turn %s conversation was not finalized exactly once: finals=%d progress=%d commentary=%d streams=%d items=%#v", turn.ID, finals, progress, commentary, backendStreams, stream.Items)
+		if finals != 1 || progress != 1 || commentary != 2 || reasoning != 1 || backendStreams != 0 {
+			t.Fatalf("turn %s conversation was not finalized exactly once: finals=%d progress=%d commentary=%d reasoning=%d streams=%d items=%#v", turn.ID, finals, progress, commentary, reasoning, backendStreams, stream.Items)
 		}
 	}
 	agents, err := database.ListTaskAgents(ctx, task.ID)

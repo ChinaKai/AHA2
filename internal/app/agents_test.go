@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
 	"github.com/ChinaKai/AHA2/internal/prompt"
@@ -45,6 +46,215 @@ func TestBackendSessionIdentityChangedIgnoresPerTurnSettings(t *testing.T) {
 				t.Fatalf("backendSessionIdentityChanged()=%t want %t", got, test.want)
 			}
 		})
+	}
+}
+
+func TestDSHSessionSecurityDomainAllowsModelChangesOnlyWithinSameProviderBoundary(t *testing.T) {
+	t.Parallel()
+	base := domain.EnvGroup{
+		ProviderID: "provider-a", Backend: "dsh",
+		Environment: map[string]string{
+			"OPENAI_BASE_URL": "https://gateway.example/v1",
+			"CODEX_ENV_KEY":   "OPENAI_API_KEY",
+			"OPENAI_MODEL":    "model-a",
+		},
+		SecretRefs: map[string]string{"OPENAI_API_KEY": "secret-provider-a"},
+	}
+	next := base
+	next.Environment = map[string]string{
+		"OPENAI_BASE_URL": "https://gateway.example/v1",
+		"CODEX_ENV_KEY":   "OPENAI_API_KEY",
+		"OPENAI_MODEL":    "model-b",
+	}
+	if !sameDSHSessionSecurityDomain("provider-a", base, "provider-a", next) {
+		t.Fatal("same Provider origin and credential should allow a DSH model switch")
+	}
+	crossProtocol := next
+	crossProtocol.Environment = map[string]string{
+		"ANTHROPIC_BASE_URL": "https://gateway.example/anthropic",
+		"ANTHROPIC_MODEL":    "model-c",
+	}
+	crossProtocol.SecretRefs = map[string]string{"ANTHROPIC_API_KEY": "secret-provider-a"}
+	if !sameDSHSessionSecurityDomain("provider-a", base, "provider-a", crossProtocol) {
+		t.Fatal("same Provider origin and credential should allow an Anthropic/Responses switch")
+	}
+
+	differentProvider := next
+	differentProvider.ProviderID = "provider-b"
+	if sameDSHSessionSecurityDomain("provider-a", base, "provider-b", differentProvider) {
+		t.Fatal("cross-provider DSH reuse must rotate")
+	}
+	differentOrigin := next
+	differentOrigin.Environment = map[string]string{
+		"OPENAI_BASE_URL": "https://other.example/v1",
+		"CODEX_ENV_KEY":   "OPENAI_API_KEY",
+	}
+	if sameDSHSessionSecurityDomain("provider-a", base, "provider-a", differentOrigin) {
+		t.Fatal("changed Provider origin must rotate")
+	}
+	differentCredential := next
+	differentCredential.SecretRefs = map[string]string{"OPENAI_API_KEY": "secret-provider-b"}
+	if sameDSHSessionSecurityDomain("provider-a", base, "provider-a", differentCredential) {
+		t.Fatal("changed credential reference must rotate")
+	}
+}
+
+func TestDSHSessionRotationUsesProviderSecurityDomain(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	now := time.Now().UTC()
+	groups := []domain.EnvGroup{
+		{
+			ID: "env-dsh-responses", Name: "responses", ProviderID: "provider-dsh", Backend: "dsh", Revision: 1,
+			Environment: map[string]string{
+				"OPENAI_BASE_URL": "https://gateway.example/v1", "CODEX_ENV_KEY": "OPENAI_API_KEY",
+			},
+			SecretRefs: map[string]string{"OPENAI_API_KEY": "provider-secret"}, CreatedAt: now, UpdatedAt: now,
+		},
+		{
+			ID: "env-dsh-messages", Name: "messages", ProviderID: "provider-dsh", Backend: "dsh", Revision: 1,
+			Environment: map[string]string{"ANTHROPIC_BASE_URL": "https://gateway.example/anthropic"},
+			SecretRefs:  map[string]string{"ANTHROPIC_API_KEY": "provider-secret"}, CreatedAt: now, UpdatedAt: now,
+		},
+	}
+	for _, group := range groups {
+		if err := database.UpsertEnvGroup(ctx, group); err != nil {
+			t.Fatal(err)
+		}
+	}
+	models := []domain.Model{
+		{ID: "model-dsh-a", DisplayName: "A", ProviderID: "provider-dsh", Backend: "dsh", WireModel: "model-a", DefaultEnvGroupID: groups[0].ID, CreatedAt: now, UpdatedAt: now},
+		{ID: "model-dsh-b", DisplayName: "B", ProviderID: "provider-dsh", Backend: "dsh", WireModel: "model-b", DefaultEnvGroupID: groups[1].ID, CreatedAt: now, UpdatedAt: now},
+	}
+	for _, model := range models {
+		if err := database.UpsertModel(ctx, model); err != nil {
+			t.Fatal(err)
+		}
+	}
+	service := &Service{store: database}
+	previous := domain.RuntimeConfigSnapshot{WorkspaceID: "workspace-dsh", Backend: "dsh", ModelID: models[0].ID, WireModel: "model-a", EnvGroupID: groups[0].ID}
+	next := domain.RuntimeConfigSnapshot{WorkspaceID: "workspace-dsh", Backend: "dsh", ModelID: models[1].ID, WireModel: "model-b", EnvGroupID: groups[1].ID}
+	if service.backendSessionShouldRotate(ctx, previous, next) {
+		t.Fatal("same-provider DSH model and wire-protocol change rotated the session")
+	}
+	otherGroup := domain.EnvGroup{
+		ID: "env-dsh-other", Name: "other", ProviderID: "provider-dsh-other", Backend: "dsh", Revision: 1,
+		Environment: map[string]string{"OPENAI_BASE_URL": "https://other.example/v1"},
+		SecretRefs:  map[string]string{}, CreatedAt: now, UpdatedAt: now,
+	}
+	otherModel := domain.Model{ID: "model-dsh-other", DisplayName: "Other", ProviderID: otherGroup.ProviderID, Backend: "dsh", WireModel: "other", DefaultEnvGroupID: otherGroup.ID, CreatedAt: now, UpdatedAt: now}
+	if err := database.UpsertEnvGroup(ctx, otherGroup); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpsertModel(ctx, otherModel); err != nil {
+		t.Fatal(err)
+	}
+	otherProvider := domain.RuntimeConfigSnapshot{WorkspaceID: "workspace-dsh", Backend: "dsh", ModelID: otherModel.ID, WireModel: otherModel.WireModel, EnvGroupID: otherGroup.ID}
+	if !service.backendSessionShouldRotate(ctx, previous, otherProvider) {
+		t.Fatal("cross-provider DSH model change did not rotate the session")
+	}
+	next.WorkspaceID = "workspace-other"
+	if !service.backendSessionShouldRotate(ctx, previous, next) {
+		t.Fatal("workspace change did not rotate the DSH session")
+	}
+}
+
+func TestDSHReusesProviderSessionAcrossModelAndWireProtocolChange(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	now := time.Now().UTC()
+	project := domain.Project{ID: "project-dsh-reuse", Name: "P", CreatedAt: now, UpdatedAt: now}
+	workspace := domain.Workspace{
+		ID: "workspace-dsh-reuse", ProjectID: project.ID, Name: "W", Locality: "local",
+		Transport: "native", RootPath: t.TempDir(), Health: "ready", CreatedAt: now, UpdatedAt: now,
+	}
+	groups := []domain.EnvGroup{
+		{
+			ID: "env-dsh-reuse-responses", Name: "responses", ProviderID: "provider-dsh-reuse", Backend: "dsh", Revision: 1,
+			Environment: map[string]string{"OPENAI_BASE_URL": "https://gateway.example/v1", "CODEX_ENV_KEY": "OPENAI_API_KEY"},
+			SecretRefs:  map[string]string{}, CreatedAt: now, UpdatedAt: now,
+		},
+		{
+			ID: "env-dsh-reuse-messages", Name: "messages", ProviderID: "provider-dsh-reuse", Backend: "dsh", Revision: 1,
+			Environment: map[string]string{"ANTHROPIC_BASE_URL": "https://gateway.example/anthropic"},
+			SecretRefs:  map[string]string{}, CreatedAt: now, UpdatedAt: now,
+		},
+	}
+	models := []domain.Model{
+		{ID: "model-dsh-reuse-a", DisplayName: "A", ProviderID: "provider-dsh-reuse", Backend: "dsh", WireModel: "model-a", WireAPI: "responses", DefaultEnvGroupID: groups[0].ID, CreatedAt: now, UpdatedAt: now},
+		{ID: "model-dsh-reuse-b", DisplayName: "B", ProviderID: "provider-dsh-reuse", Backend: "dsh", WireModel: "model-b", WireAPI: "anthropic_messages", DefaultEnvGroupID: groups[1].ID, CreatedAt: now, UpdatedAt: now},
+	}
+	for _, operation := range []func() error{
+		func() error { return database.CreateProject(ctx, project) },
+		func() error { return database.CreateWorkspace(ctx, workspace) },
+		func() error { return database.UpsertEnvGroup(ctx, groups[0]) },
+		func() error { return database.UpsertEnvGroup(ctx, groups[1]) },
+		func() error { return database.UpsertModel(ctx, models[0]) },
+		func() error { return database.UpsertModel(ctx, models[1]) },
+	} {
+		if err := operation(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	executor := &stubExecutor{}
+	service := NewService(database, nil, executor)
+	service.SetRunContext(ctx)
+	task, err := service.CreateTask(ctx, CreateTaskInput{
+		ProjectID: project.ID, WorkspaceID: workspace.ID, Title: "DSH reuse", Request: "first",
+		Isolation: "inplace", Backend: "dsh", ModelSource: domain.ModelSourceProvider,
+		ModelID: models[0].ID, Filesystem: "workspace-write", Approval: "never", StartMode: "manual",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.StartTask(ctx, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	first, err := service.SubmitMessage(ctx, task.ID, "first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForTurn(t, database, first.ID, domain.TurnSucceeded)
+	if _, err := service.UpdateAgentConfig(ctx, task.ID, "main", UpdateAgentConfigInput{
+		Backend: "dsh", ModelSource: domain.ModelSourceProvider, ModelID: models[1].ID,
+		Filesystem: "workspace-write", Approval: "never",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	second, err := service.SubmitMessage(ctx, task.ID, "second")
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForTurn(t, database, second.ID, domain.TurnSucceeded)
+
+	turns, err := database.ListTurns(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(turns) != 2 || turns[0].BackendSessionID == "" || turns[0].BackendSessionID != turns[1].BackendSessionID {
+		t.Fatalf("DSH session was not reused across model change: %#v", turns)
+	}
+	_, providerInputs := executor.requestHistory()
+	if len(providerInputs) != 2 || providerInputs[0] != "" || providerInputs[1] != "stub-session-1" {
+		t.Fatalf("provider session was not resumed: %#v", providerInputs)
+	}
+	sessions, err := database.ListBackendSessionsForAgent(ctx, task.ID, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 || sessions[0].ModelID != models[1].ID || sessions[0].Status != "active" {
+		t.Fatalf("reused DSH session metadata did not advance: %#v", sessions)
 	}
 }
 

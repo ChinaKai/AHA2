@@ -144,14 +144,14 @@ func taskTotalTokens(
 	for _, session := range sessions {
 		var usage map[string]any
 		_ = json.Unmarshal([]byte(session.ContextUsageJSON), &usage)
-		usage = backendSessionUsage(session.Backend, turnsBySession[session.ID], usage)
+		usage = backendSessionTotalUsage(session.Backend, turnsBySession[session.ID], usage)
 		delete(turnsBySession, session.ID)
 		total += usageTotalTokens(usage, session.Backend)
 	}
 	for _, sessionTurns := range turnsBySession {
 		latest := latestUsageTurn(sessionTurns)
 		backend := backendBySnapshot[latest.RuntimeConfigSnapshotID]
-		total += usageTotalTokens(backendSessionUsage(backend, sessionTurns, nil), backend)
+		total += usageTotalTokens(backendSessionTotalUsage(backend, sessionTurns, nil), backend)
 	}
 	for _, turn := range withoutSession {
 		total += usageTotalTokens(turn.Usage, backendBySnapshot[turn.RuntimeConfigSnapshotID])
@@ -184,6 +184,19 @@ func backendSessionUsage(backend string, turns []domain.Turn, fallback map[strin
 		}
 		if present {
 			result[key] = total
+		}
+	}
+	return result
+}
+
+func backendSessionTotalUsage(backend string, turns []domain.Turn, fallback map[string]any) map[string]any {
+	if backend != "dsh" {
+		return backendSessionUsage(backend, turns, fallback)
+	}
+	result := map[string]any{}
+	for _, turn := range turns {
+		for key, value := range turn.Usage {
+			result[key] = usageNumber(result, key) + usageNumber(map[string]any{key: value}, key)
 		}
 	}
 	return result
@@ -784,8 +797,13 @@ func cloneUsage(usage map[string]any) map[string]any {
 }
 
 func usageTotalTokens(usage map[string]any, backend string) float64 {
+	if backend == "dsh" {
+		if total := usageNumber(usage, "total_tokens"); total > 0 {
+			return total
+		}
+	}
 	total := usageNumber(usage, "input_tokens") + usageNumber(usage, "output_tokens")
-	if backend == "claude" {
+	if backend == "claude" || backend == "dsh" {
 		cacheRead := usageNumber(usage, "cached_input_tokens")
 		if cacheRead <= 0 {
 			cacheRead = usageNumber(usage, "cache_read_input_tokens")
@@ -950,6 +968,12 @@ func (s *Server) applyCodexRuntimeContext(ctx context.Context, turns []domain.Tu
 		if !ok {
 			continue
 		}
+		// DSH reports per-step usage in its JSON projection, which AHA already
+		// stores on the Turn. Its private JSONL session format is not one of the
+		// Codex/Claude transcripts read below, so keep the recorded occupancy.
+		if session.Backend == "dsh" {
+			continue
+		}
 		sample, cached := samples[session.ID]
 		if !cached && !missing[session.ID] {
 			var found bool
@@ -1020,8 +1044,12 @@ func taskRuntimeWorkDir(task domain.Task, workspace domain.Workspace) string {
 
 func contextTokensForUsage(backend string, current map[string]any) float64 {
 	currentInput := usageNumber(current, "input_tokens")
-	if backend == "claude" {
-		return currentInput + usageNumber(current, "cache_read_input_tokens") +
+	if backend == "claude" || backend == "dsh" {
+		cacheRead := usageNumber(current, "cached_input_tokens")
+		if cacheRead <= 0 {
+			cacheRead = usageNumber(current, "cache_read_input_tokens")
+		}
+		return currentInput + cacheRead +
 			usageNumber(current, "cache_creation_input_tokens")
 	}
 	return currentInput

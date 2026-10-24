@@ -172,6 +172,45 @@ func TestFindWriterPIDsMatchesResumeFlagForm(t *testing.T) {
 	}
 }
 
+func TestFindWriterPIDsMatchesDSHSessionFlagForm(t *testing.T) {
+	t.Parallel()
+	if _, err := exec.LookPath("sleep"); err != nil {
+		t.Skip("sleep is unavailable")
+	}
+	runner := LocalRunner{}
+	wanted := "session-7e1ed1db-e770-4331-aae6-fd9dc89e4d6b"
+	script := filepath.Join(t.TempDir(), "fake-dsh.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nsleep 60\n"), 0o700); err != nil {
+		t.Fatalf("write fake DSH script: %v", err)
+	}
+	writer := exec.Command("sh", script, "--session-id", wanted)
+	if err := writer.Start(); err != nil {
+		t.Fatalf("start fake DSH writer: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = writer.Process.Kill()
+		_, _ = writer.Process.Wait()
+	})
+	time.Sleep(300 * time.Millisecond)
+
+	pids, err := FindWriterPIDs(context.Background(), runner, WriterQuery{
+		ResumeSessionID: wanted,
+		SessionFlag:     "--session-id",
+	})
+	if err != nil {
+		t.Fatalf("find DSH writer: %v", err)
+	}
+	found := false
+	for _, pid := range pids {
+		if pid == writer.Process.Pid {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("matched %v, want it to include %d", pids, writer.Process.Pid)
+	}
+}
+
 func TestFindWriterPIDsCombinesEnvAndResumeQueries(t *testing.T) {
 	t.Parallel()
 	if _, err := exec.LookPath("sleep"); err != nil {

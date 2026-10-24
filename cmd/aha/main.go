@@ -108,6 +108,7 @@ type serveOptions struct {
 	logLevel              string
 	codexBinary           string
 	claudeBinary          string
+	dshBinary             string
 }
 
 func serve(args []string) error {
@@ -133,6 +134,7 @@ func parseServeOptions(name string, args []string) (serveOptions, error) {
 	logLevel := flags.String("log-level", envOr("AHA2_LOG_LEVEL", "info"), "debug, info, warn, error")
 	codexBinary := flags.String("codex-bin", envOr("AHA2_CODEX_BIN", "codex"), "Codex executable")
 	claudeBinary := flags.String("claude-bin", envOr("AHA2_CLAUDE_BIN", "claude"), "Claude Code executable")
+	dshBinary := flags.String("dsh-bin", envOr("AHA2_DSH_BIN", "dsh"), "DeepSeek Harness executable")
 	if err := flags.Parse(args); err != nil {
 		return serveOptions{}, err
 	}
@@ -142,7 +144,8 @@ func parseServeOptions(name string, args []string) (serveOptions, error) {
 	return serveOptions{
 		listen: *listen, dataDir: *dataDir, setupToken: *setupToken, setupTokenFile: *setupTokenFile,
 		secureCookie: *secureCookie, allowCrossOrigin: *allowCrossOrigin, agentAPIURL: *agentAPIURL,
-		allowInsecureAgentAPI: *allowInsecureAgentAPI, logLevel: *logLevel, codexBinary: *codexBinary, claudeBinary: *claudeBinary,
+		allowInsecureAgentAPI: *allowInsecureAgentAPI, logLevel: *logLevel, codexBinary: *codexBinary,
+		claudeBinary: *claudeBinary, dshBinary: *dshBinary,
 	}, nil
 }
 
@@ -223,6 +226,7 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 	executor := execution.Executor{
 		Codex:    backend.Codex{Binary: options.codexBinary},
 		Claude:   backend.Claude{Binary: options.claudeBinary},
+		DSH:      backend.DSH{Binary: options.dshBinary},
 		Settings: database,
 	}
 	appService := app.NewService(database, secretStore, executor)

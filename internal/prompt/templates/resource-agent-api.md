@@ -8,6 +8,10 @@ Read its base URL from the `AHA2_AGENT_API_URL` environment variable, and use th
 curl -sS "$AHA2_AGENT_API_URL/api/v1/agent/capabilities" -H "Authorization: Bearer $AHA2_AGENT_API_TOKEN"
 ```
 
+In DSH runs, the same Turn-scoped values are also exposed through the trusted
+managed aliases `DSH_AHA_AGENT_API_URL` and `DSH_AHA_AGENT_API_TOKEN`. Use the
+`AHA2_*` pair when both are non-empty; otherwise use the `DSH_AHA_*` pair.
+
 **Why the variable rather than a literal address:** the reachable address is chosen per Turn and depends on this workspace's transport. For a remote workspace it is often a tunnel port assigned when the Turn starts, so it changes between Turns. An address that worked in an earlier turn — including one from your own session history, such as `{{.AgentAPIURL}}` — can be stale and unreachable now, and reusing it makes the control plane look broken when it is not. Read the variable at the point of use, and if a command fails to connect, read it again rather than falling back to a remembered address.
 
 Use `AHA2_AGENT_API_TOKEN` as a Bearer token. Never print, persist, or expose it. The capability expires when this Turn finishes.

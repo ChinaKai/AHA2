@@ -57,6 +57,7 @@ function renderConversationItem(item: ConversationItem): string {
   const routed = ["assignment", "agent_result", "agent_error", "main_followup", "collaboration_fallback", "collaboration_result", "channel_reply", "session_control"].includes(routeKind) || ["agent_assignment", "agent_result_routed", "agent_error_routed", "agent_main_followup", "agent_collaboration_fallback", "collaboration_result_routed", "collaboration_error_routed", "agent_channel_reply", "backend_session_compacted", "backend_session_reset"].includes(item.kind);
   const user = item.kind === "user_message";
   const update = !user && item.category === "update";
+  const reasoning = update && item.kind === "agent_reasoning_update";
   const tool = !user && item.category === "tool";
   const error = !user && item.category === "error";
   const payload = item.payload || {};
@@ -65,14 +66,14 @@ function renderConversationItem(item: ConversationItem): string {
   const actorName = String(actor.display_name || "").trim();
   const chatName = String(channelContext.chat_display_name || "").trim();
   const sender = actorName ? `${actorName}${chatName ? ` · ${chatName}` : ""}` : item.from_agent_id || item.agent_id || (user ? "owner" : "main");
-  const badge = error ? "错误" : tool ? "工具" : routed ? "路由" : actorName ? "渠道" : update ? "Update" : "";
+  const badge = error ? "错误" : tool ? "工具" : routed ? "路由" : actorName ? "渠道" : reasoning ? "思考" : update ? "Update" : "";
   const text = readableConversationText(item);
   const characters = Array.from(text);
   const characterCount = characters.length;
   const collapsible = characterCount > messageCollapseChars;
   const preview = collapsible ? `${Array.from(text.replace(/\s+/g, " ")).slice(0, messagePreviewChars - 1).join("").trim()}…` : text;
   const output = String(payload.output_tail || "");
-  return `<article class="message ${user ? "user" : "agent"} ${update ? "agent-update-message" : ""} ${tool ? "agent-tool-message" : ""} ${routed ? "agent-routed-message" : ""} ${error ? "agent-error-message" : ""}" data-message-id="${escapeHTML(item.id)}" data-message-chars="${characterCount}" data-copy-message-source="${escapeHTML(text)}"><header><strong>${escapeHTML(sender)}</strong>${badge ? `<span>${badge}</span>` : ""}<time>${time}</time><button type="button" data-copy-message class="message-copy icon-button" title="复制">${icon("copy")}</button></header><div class="message-bubble"><div class="message-text markdown-body message-preview">${renderMarkdown(preview)}</div>${collapsible ? `<div class="message-text markdown-body message-full-text" hidden>${renderMarkdown(text)}</div><button type="button" data-toggle-message class="message-toggle">展开 · ${characterCount.toLocaleString()}字符</button>` : ""}${renderAttachments(item)}${output ? `<details class="message-output"><summary>查看输出摘要</summary><pre>${escapeHTML(output)}</pre></details>` : ""}</div></article>`;
+  return `<article class="message ${user ? "user" : "agent"} ${update ? "agent-update-message" : ""} ${reasoning ? "agent-reasoning-message" : ""} ${tool ? "agent-tool-message" : ""} ${routed ? "agent-routed-message" : ""} ${error ? "agent-error-message" : ""}" data-message-id="${escapeHTML(item.id)}" data-message-chars="${characterCount}" data-copy-message-source="${escapeHTML(text)}"><header><strong>${escapeHTML(sender)}</strong>${badge ? `<span>${badge}</span>` : ""}<time>${time}</time><button type="button" data-copy-message class="message-copy icon-button" title="复制">${icon("copy")}</button></header><div class="message-bubble"><div class="message-text markdown-body message-preview">${renderMarkdown(preview)}</div>${collapsible ? `<div class="message-text markdown-body message-full-text" hidden>${renderMarkdown(text)}</div><button type="button" data-toggle-message class="message-toggle">展开 · ${characterCount.toLocaleString()}字符</button>` : ""}${renderAttachments(item)}${output ? `<details class="message-output"><summary>查看输出摘要</summary><pre>${escapeHTML(output)}</pre></details>` : ""}</div></article>`;
 }
 
 function toolLifecycleKey(item: ConversationItem): string {

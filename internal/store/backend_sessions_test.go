@@ -64,3 +64,66 @@ func TestReusableBackendSessionRequiresExactIdentityContext(t *testing.T) {
 		t.Fatalf("mismatched identity context returned err=%v", err)
 	}
 }
+
+func TestReusableDSHBackendSessionIgnoresModelAndRefreshesMetadata(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database, err := Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	now := time.Now().UTC()
+	project := domain.Project{ID: "project-dsh-session", Name: "P", ProjectType: "git", CreatedAt: now, UpdatedAt: now}
+	workspace := domain.Workspace{ID: "workspace-dsh", ProjectID: project.ID, Name: "W", Locality: "local", Transport: "native", RootPath: t.TempDir(), Health: "ready", CreatedAt: now, UpdatedAt: now}
+	envGroup := domain.EnvGroup{ID: "env-dsh-session", Name: "E", ProviderID: "provider-dsh", Backend: "dsh", Revision: 1, Environment: map[string]string{}, SecretRefs: map[string]string{}, CreatedAt: now, UpdatedAt: now}
+	modelA := domain.Model{ID: "model-a", DisplayName: "A", ProviderID: "provider-dsh", Backend: "dsh", WireModel: "model-a", DefaultEnvGroupID: envGroup.ID, CreatedAt: now, UpdatedAt: now}
+	modelB := domain.Model{ID: "model-b", DisplayName: "B", ProviderID: "provider-dsh", Backend: "dsh", WireModel: "model-b", DefaultEnvGroupID: envGroup.ID, CreatedAt: now, UpdatedAt: now}
+	for _, operation := range []func() error{
+		func() error { return database.CreateProject(ctx, project) },
+		func() error { return database.CreateWorkspace(ctx, workspace) },
+		func() error { return database.UpsertEnvGroup(ctx, envGroup) },
+		func() error { return database.UpsertModel(ctx, modelA) },
+		func() error { return database.UpsertModel(ctx, modelB) },
+	} {
+		if err := operation(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snapshot := domain.RuntimeConfigSnapshot{ID: "runtime-dsh-session", WorkspaceID: workspace.ID, Backend: "dsh", ModelID: modelA.ID, WireModel: modelA.WireModel, EnvGroupID: envGroup.ID, EnvGroupRevision: 1, PermissionsJSON: "{}", CreatedAt: now}
+	task := domain.Task{ID: "task-dsh", ProjectID: project.ID, WorkspaceID: workspace.ID, Title: "T", OriginalRequest: "test", CurrentGoal: "test", Status: domain.TaskWaitingUser, RuntimeConfigSnapshotID: snapshot.ID, CreatedAt: now, UpdatedAt: now}
+	if _, err := database.CreateTaskWithSnapshot(ctx, snapshot, task); err != nil {
+		t.Fatal(err)
+	}
+	session := domain.BackendSession{
+		ID: "dsh-session", TaskID: "task-dsh", AgentID: "main", WorkspaceID: "workspace-dsh",
+		Backend: "dsh", ModelID: "model-a", EnvGroupRevision: 1,
+		IdentityContext: "task-agent:web", ProviderSession: "provider-session",
+		Status: "active", CreatedAt: now, LastUsedAt: now,
+	}
+	if err := database.UpsertBackendSession(ctx, session); err != nil {
+		t.Fatal(err)
+	}
+	got, err := database.ReusableDSHBackendSession(ctx, session.TaskID, "main", session.WorkspaceID, session.IdentityContext)
+	if err != nil || got.ID != session.ID || got.ModelID != "model-a" {
+		t.Fatalf("initial DSH session=%#v err=%v", got, err)
+	}
+
+	session.ModelID = "model-b"
+	session.EnvGroupRevision = 2
+	session.LastUsedAt = now.Add(time.Minute)
+	if err := database.UpsertBackendSession(ctx, session); err != nil {
+		t.Fatal(err)
+	}
+	got, err = database.ReusableDSHBackendSession(ctx, session.TaskID, "main", session.WorkspaceID, session.IdentityContext)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ModelID != "model-b" || got.EnvGroupRevision != 2 || got.ProviderSession != "provider-session" {
+		t.Fatalf("DSH session metadata did not refresh: %#v", got)
+	}
+	if _, err := database.ReusableDSHBackendSession(ctx, session.TaskID, "main", session.WorkspaceID, "channel-assistant:external-channel"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("DSH identity mismatch returned err=%v", err)
+	}
+}

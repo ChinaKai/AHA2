@@ -616,12 +616,13 @@ function backendOptionsForWorkspace(ws?: Workspace): string[] {
     const ready: string[] = [];
     if (caps.codex?.status === "ready") ready.push("codex");
     if (caps.claude?.status === "ready") ready.push("claude");
+    if (caps.dsh?.status === "ready") ready.push("dsh");
     if (ready.length) return ready;
     if (ws.health !== "unknown") return ready; // detected, none ready
   }
   const present = new Set(state.models.map(item => item.backend));
   if (state.codexAccounts.length) present.add("codex");
-  return ["codex", "claude"].filter(backend => present.has(backend));
+  return ["codex", "claude", "dsh"].filter(backend => present.has(backend));
 }
 
 function claudeOfficialCatalog(workspace?: Workspace): ClaudeOfficialCatalog {
@@ -943,6 +944,10 @@ function backendProtocolLabel(model: Model): string {
   return `${model.backend}.${protocol}`;
 }
 
+function modelSupportsImage(model: Model): boolean {
+  return model.capabilities?.supports_image_input !== false;
+}
+
 function supportedWireAPIs(model: DetectedModel): string[] {
   const caps = model.capabilities || {};
   const order = ["responses", "chat_completions", "anthropic_messages"] as const;
@@ -954,22 +959,37 @@ function supportedWireAPIs(model: DetectedModel): string[] {
 function protoBadges(model: DetectedModel): string {
   const wire = supportedWireAPIs(model);
   const parts: string[] = [];
-  if (wire.includes("responses") || wire.includes("chat")) parts.push(`<span class="proto codex">Codex</span>`);
-  if (wire.includes("anthropic_messages")) parts.push(`<span class="proto claude">Claude</span>`);
+  if (wire.includes("responses")) parts.push(`<span class="proto codex">Responses</span>`);
+  if (wire.includes("chat")) parts.push(`<span class="proto codex">Chat</span>`);
+  if (wire.includes("anthropic_messages")) parts.push(`<span class="proto claude">Messages</span>`);
   return parts.length ? parts.join("") : `<span class="proto none">不支持</span>`;
 }
 
-function protoChecks(model: DetectedModel): string {
-  const wire = supportedWireAPIs(model);
-  if (!wire.length) {
+function backendSupportsWire(backend: string, wire: string): boolean {
+  if (backend === "claude") return wire === "anthropic_messages";
+  if (backend === "codex") return wire !== "anthropic_messages";
+  return true;
+}
+
+function compatibleWireAPIs(model: DetectedModel, backend: string): string[] {
+  return supportedWireAPIs(model).filter(api => backendSupportsWire(backend, api));
+}
+
+function protoChecks(model: DetectedModel, backend: string): string {
+  const allWire = supportedWireAPIs(model);
+  if (!allWire.length) {
     const caps = model.capabilities || {};
     const reasons = Object.entries(caps).map(([key, value]) => `${key.replace("_", " ")}=${value}`).join(" · ");
     return `<span class="proto none" title="${escapeHTML(reasons)}">${reasons ? "无支持协议" : "无可用协议"}</span>`;
   }
+  const wire = compatibleWireAPIs(model, backend);
+  if (!wire.length) {
+    return `<span class="proto none">该 Backend 无兼容协议</span>`;
+  }
   const labels: Record<string, string> = {
-    responses: "Codex · Responses",
-    chat: "Codex · Chat",
-    anthropic_messages: "Claude · Messages",
+    responses: "Responses",
+    chat: "Chat Completions",
+    anthropic_messages: "Messages",
   };
   return `<span class="proto-checks">${wire.map(api => `<label><input type="checkbox" value="${api}" checked><span>${labels[api] || api}</span></label>`).join("")}</span>`;
 }
@@ -1073,6 +1093,8 @@ interface ModelDetectionSession {
   detecting: Set<string>;
   probeErrors: Map<string, string>;
   selected: Set<string>;
+  // Backend the user picked for this detection batch; no automatic mapping.
+  backend: string;
   completed: number;
   total: number;
   anthropicBaseURL: string;
@@ -1087,8 +1109,9 @@ let activeModelDetection: ModelDetectionSession | null = null;
 function detectedModelRow(session: ModelDetectionSession, item: DetectedModel, ready: boolean): string {
   const detecting = session.detecting.has(item.id);
   const probeError = session.probeErrors.get(item.id) || "";
-  const addable = ready && supportedWireAPIs(item).length > 0;
-  return `<div class="detected-item${ready ? "" : " pending"}" data-model="${escapeHTML(item.id)}"><input type="checkbox" class="detected-model" value="${escapeHTML(item.id)}" ${addable && session.selected.has(item.id) ? "checked" : ""} ${addable ? "" : "disabled"}><span><strong>${escapeHTML(item.id)}</strong>${item.max_input_tokens ? `<small>context ${Math.round(item.max_input_tokens / 1000)}K</small>` : ""}${ready ? `<span class="proto-badges">${protoBadges(item)}</span>${protoChecks(item)}` : `<span class="proto pending">等待手动检测</span>`}${probeError ? `<small class="bad">${escapeHTML(probeError)}</small>` : ""}</span><button type="button" data-probe-model="${escapeHTML(item.id)}" ${detecting ? "disabled" : ""}>${detecting ? "检测中…" : ready ? "重新检测" : "检测"}</button></div>`;
+  const backend = session.backend;
+  const addable = ready && compatibleWireAPIs(item, backend).length > 0;
+  return `<div class="detected-item${ready ? "" : " pending"}" data-model="${escapeHTML(item.id)}"><input type="checkbox" class="detected-model" value="${escapeHTML(item.id)}" ${addable && session.selected.has(item.id) ? "checked" : ""} ${addable ? "" : "disabled"}><span><strong>${escapeHTML(item.id)}</strong>${item.max_input_tokens ? `<small>context ${Math.round(item.max_input_tokens / 1000)}K</small>` : ""}${ready ? `<span class="proto-badges">${protoBadges(item)}</span>${protoChecks(item, backend)}` : `<span class="proto pending">等待手动检测</span>`}${probeError ? `<small class="bad">${escapeHTML(probeError)}</small>` : ""}</span><button type="button" data-probe-model="${escapeHTML(item.id)}" ${detecting ? "disabled" : ""}>${detecting ? "检测中…" : ready ? "重新检测" : "检测"}</button></div>`;
 }
 
 function applyModelDetectionFilter(root: HTMLElement, query: string): void {
@@ -1170,7 +1193,9 @@ async function startModelDetection(providerID: string, button: HTMLElement, resu
     const source = new EventSource(api.modelDetectionEventsURL(providerID, created.job.id));
     const session: ModelDetectionSession = {
       providerID, jobID: created.job.id, authStyle: "", catalog: [], results: new Map(), detecting: new Set(),
-      probeErrors: new Map(), selected: new Set(), completed: 0, total: 0,
+      probeErrors: new Map(), selected: new Set(),
+      backend: String((document.querySelector<HTMLSelectElement>("#model-add-backend"))?.value || "dsh"),
+      completed: 0, total: 0,
       anthropicBaseURL: "", status: "queued", source, button, originalButtonHTML,
     };
     activeModelDetection = session;
@@ -1223,19 +1248,21 @@ async function startModelDetection(providerID: string, button: HTMLElement, resu
         return;
       }
       if (!target.closest("#add-selected-models")) return;
-      const picks = [...results.querySelectorAll<HTMLInputElement>(".detected-model:checked")].map(input => {
+      const backend = String((document.querySelector<HTMLSelectElement>("#model-add-backend"))?.value || "dsh");
+      const picks = [...results.querySelectorAll<HTMLInputElement>(".detected-model:checked")].flatMap(input => {
         const row = input.closest(".detected-item");
         const wireAPIs = [...(row?.querySelectorAll<HTMLInputElement>(".proto-checks input:checked") || [])].map(item => item.value);
+        if (!wireAPIs.length) return [];
         const detected = session.results.get(input.value);
-        return {id: input.value, wire_apis: wireAPIs.length ? wireAPIs : ["responses"], max_input_tokens: detected?.max_input_tokens || 0, max_output_tokens: detected?.max_output_tokens || 0};
+        return [{id: input.value, wire_apis: wireAPIs, max_input_tokens: detected?.max_input_tokens || 0, max_output_tokens: detected?.max_output_tokens || 0}];
       });
       if (!picks.length) {
-        setMessage("error", "请至少选择一个已检测模型");
+        setMessage("error", "请至少选择一个模型，并保留至少一个兼容协议");
         return;
       }
       const addButton = results.querySelector<HTMLElement>("#add-selected-models");
       void runWithFeedback(addButton, "添加中", async () => {
-        const result = await api.addModels({provider_id: providerID, models: picks, anthropic_base_url: session.anthropicBaseURL});
+        const result = await api.addModels({provider_id: providerID, backend, models: picks, anthropic_base_url: session.anthropicBaseURL});
         document.querySelector<HTMLDialogElement>("#model-dialog")?.close();
         setMessage("notice", `已添加 ${(result.models || []).length} 个模型${result.skipped ? `，跳过 ${result.skipped} 个已存在` : ""}`);
         await ensureViewData("models", true);
@@ -2310,9 +2337,9 @@ function modelsView(): string {
     <span class="status ${item.credential_configured ? "good" : "warn"}">${item.credential_configured ? "Key Ready" : "No Key"}</span>
     <span class="row-actions"><button type="button" data-edit-provider="${item.id}" class="icon-button" title="编辑 Provider">${icon("edit")}</button><button type="button" data-delete-provider="${item.id}" class="icon-button" title="删除 Provider">${icon("close")}</button></span>
   </article>`).join("");
-  const models = state.models.map(item => `<tr><td><strong>${escapeHTML(item.display_name)}</strong><small>${escapeHTML(item.wire_model)}</small></td><td><strong>${escapeHTML(item.provider_name || item.provider_id)}</strong><small>${escapeHTML(item.provider_id)}</small></td><td>${escapeHTML(backendProtocolLabel(item))}</td><td>${item.context_window ? Math.round(item.context_window / 1000) + "K" : "-"}</td><td class="row-actions"><button type="button" data-edit-model="${item.id}" class="icon-button" title="编辑模型">${icon("edit")}</button><button type="button" data-delete-model="${item.id}" class="icon-button" title="删除模型">${icon("close")}</button></td></tr>`).join("");
+  const models = state.models.map(item => `<tr><td><strong>${escapeHTML(item.display_name)}${modelSupportsImage(item) ? '<span class="capability-badge">图片</span>' : ''}</strong><small>${escapeHTML(item.wire_model)}</small></td><td><strong>${escapeHTML(item.provider_name || item.provider_id)}</strong><small>${escapeHTML(item.provider_id)}</small></td><td>${escapeHTML(backendProtocolLabel(item))}</td><td>${item.context_window ? Math.round(item.context_window / 1000) + "K" : "-"}</td><td class="row-actions"><button type="button" data-edit-model="${item.id}" class="icon-button" title="编辑模型">${icon("edit")}</button><button type="button" data-delete-model="${item.id}" class="icon-button" title="删除模型">${icon("close")}</button></td></tr>`).join("");
   return shell(`<section class="page">
-    ${pageHead("模型", "Models 管理 Provider / Env 模型；Codex 与 Claude Code 官方账号在创建或编辑 Task 时选择。")}
+    ${pageHead("模型", "Models 管理 Provider / Env 模型与 Agent Backend；Codex 与 Claude Code 官方账号在创建或编辑 Task 时选择。")}
     <div class="provider-layout">
       <div class="provider-sidebar">
         ${renderCodexAccounts(state.codexAccounts)}
@@ -2414,11 +2441,11 @@ function providerDialog(): string {
 
 function modelDialog(): string {
   const options = state.providers.map(item => `<option value="${item.id}">${escapeHTML(item.name)}</option>`).join("");
-  return `<dialog id="model-dialog" class="wide"><div class="dialog-head"><h2>添加模型</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div><div class="dialog-body"><label>Provider<select id="model-provider">${options || `<option value="">先添加 Provider</option>`}</select></label><div class="dialog-actions"><button type="button" id="detect-models" class="primary">${icon("refresh")}检测模型</button></div><div id="model-detect-results"></div></div></dialog>`;
+  return `<dialog id="model-dialog" class="wide"><div class="dialog-head"><h2>添加模型</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div><div class="dialog-body"><div class="two"><label>Provider<select id="model-provider">${options || `<option value="">先添加 Provider</option>`}</select></label><label>Agent Backend<select id="model-add-backend"><option value="dsh">DSH</option><option value="codex">Codex</option><option value="claude">Claude Code</option></select></label></div><div class="dialog-actions"><button type="button" id="detect-models" class="primary">${icon("refresh")}检测模型</button></div><div id="model-detect-results"></div></div></dialog>`;
 }
 
 function editModelDialog(): string {
-  return `<dialog id="model-edit-dialog"><div class="dialog-head"><h2>编辑模型</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div><div class="dialog-body"><label>显示名称<input id="model-edit-name"></label><label>模型 ID（发送给后端）<input id="model-edit-wire-model" spellcheck="false"><span class="field-help">决定实际调用的模型；Claude 走网关且需要 1M 上下文时，在此追加 [1m]。</span></label><div class="two"><label>协议 / Backend<select id="model-edit-wire"><option value="responses">Codex · Responses</option><option value="chat">Codex · Chat Completions</option><option value="anthropic_messages">Claude Code · Messages</option></select></label><label>默认推理强度<select id="model-edit-effort"><option value="">继承默认</option><option>high</option><option>medium</option><option>low</option></select></label></div><div class="two"><label>Context Window<input id="model-edit-context" type="number" value="0"></label><label>Max Output Tokens<input id="model-edit-maxout" type="number" value="0"></label></div><div class="dialog-actions"><button type="button" data-close>取消</button><button type="button" id="save-model-edit" class="primary">保存</button></div></div></dialog>`;
+  return `<dialog id="model-edit-dialog"><div class="dialog-head"><h2>编辑模型</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div><div class="dialog-body"><label>显示名称<input id="model-edit-name"></label><label>模型 ID（发送给后端）<input id="model-edit-wire-model" spellcheck="false"><span class="field-help">决定实际调用的模型；Claude 走网关且需要 1M 上下文时，在此追加 [1m]。</span></label><div class="two"><label>模型协议<select id="model-edit-wire"><option value="responses">Responses</option><option value="chat">Chat Completions</option><option value="anthropic_messages">Anthropic Messages</option></select></label><label>Agent Backend<select id="model-edit-backend"><option value="codex">Codex</option><option value="claude">Claude Code</option><option value="dsh">DSH</option></select></label></div><div class="two"><label>默认推理强度<select id="model-edit-effort"><option value="">继承默认</option><option>high</option><option>medium</option><option>low</option></select></label><label>Context Window<input id="model-edit-context" type="number" value="0"></label></div><label>Max Output Tokens<input id="model-edit-maxout" type="number" value="0"></label><label class="security-setting-toggle"><input id="model-edit-image" type="checkbox"><span><strong>支持图片输入</strong><small>默认开启；仅当该模型确实不能接收图片时关闭。DSH 会据此在 profile 里声明 input 模态。</small></span></label><div class="dialog-actions"><button type="button" data-close>取消</button><button type="button" id="save-model-edit" class="primary">保存</button></div></div></dialog>`;
 }
 
 function workspaceTakeoverDialog(): string {
@@ -3825,6 +3852,17 @@ function bindCommon(): void {
     if (!results || !button) return;
     void startModelDetection(providerID, button, results);
   });
+  document.querySelector("#model-add-backend")?.addEventListener("change", event => {
+    const backend = String((event.target as HTMLSelectElement)?.value || "dsh");
+    const session = activeModelDetection;
+    if (!session) return;
+    session.backend = backend;
+    for (const modelID of [...session.selected]) {
+      const model = session.results.get(modelID);
+      if (model && !compatibleWireAPIs(model, backend).length) session.selected.delete(modelID);
+    }
+    renderModelDetection(session);
+  });
   document.querySelectorAll<HTMLElement>("[data-delete-provider]").forEach(button => button.addEventListener("click", async event => {
     event.stopPropagation();
     const id = button.dataset.deleteProvider!;
@@ -4008,19 +4046,23 @@ function bindCommon(): void {
     if (!model) return;
     const nameInput = document.querySelector<HTMLInputElement>("#model-edit-name");
     const wireInput = document.querySelector<HTMLSelectElement>("#model-edit-wire");
+    const backendInput = document.querySelector<HTMLSelectElement>("#model-edit-backend");
     const effortInput = document.querySelector<HTMLSelectElement>("#model-edit-effort");
     const contextInput = document.querySelector<HTMLInputElement>("#model-edit-context");
     const maxoutInput = document.querySelector<HTMLInputElement>("#model-edit-maxout");
+    const imageInput = document.querySelector<HTMLInputElement>("#model-edit-image");
     if (nameInput) nameInput.value = model.display_name;
     const wireModelInput = document.querySelector<HTMLInputElement>("#model-edit-wire-model");
     if (wireModelInput) wireModelInput.value = model.wire_model || "";
     if (wireInput) {
-      wireInput.value = model.backend === "claude" ? "anthropic_messages" : (model.wire_api || "responses");
+      wireInput.value = model.wire_api || (model.backend === "claude" ? "anthropic_messages" : "responses");
       wireInput.disabled = false;
     }
+    if (backendInput) backendInput.value = model.backend;
     if (effortInput) effortInput.value = model.default_reasoning_effort || "";
     if (contextInput) contextInput.value = String(model.context_window || 0);
     if (maxoutInput) maxoutInput.value = String(model.max_output_tokens || 0);
+    if (imageInput) imageInput.checked = modelSupportsImage(model);
     (document.querySelector<HTMLDialogElement>("#model-edit-dialog"))?.showModal();
     document.querySelector<HTMLElement>("#save-model-edit")?.setAttribute("data-model-id", id);
   }));
@@ -4037,9 +4079,11 @@ function bindCommon(): void {
         // sending "" would silently keep the old name.
         ...(wireModelValue ? {wire_model: wireModelValue} : {}),
         wire_api: String((document.querySelector<HTMLSelectElement>("#model-edit-wire"))?.value || "responses"),
+        backend: String((document.querySelector<HTMLSelectElement>("#model-edit-backend"))?.value || ""),
         context_window: Number((document.querySelector<HTMLInputElement>("#model-edit-context"))?.value || 0),
         max_output_tokens: Number((document.querySelector<HTMLInputElement>("#model-edit-maxout"))?.value || 0),
         default_reasoning_effort: String((document.querySelector<HTMLSelectElement>("#model-edit-effort"))?.value || ""),
+        supports_image_input: Boolean((document.querySelector<HTMLInputElement>("#model-edit-image"))?.checked),
       });
       document.querySelector<HTMLDialogElement>("#model-edit-dialog")?.close();
       setMessage("notice", "模型已更新");

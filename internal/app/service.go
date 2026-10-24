@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/url"
 	"path"
 	"path/filepath"
@@ -852,10 +853,22 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 	conversation, _ := s.store.ConversationPageForAgent(ctx, task.ID, turn.AgentID, 0, 0, 200, nil)
 	allTurns, _ := s.store.ListTurns(ctx, task.ID)
 	identityContext := prompt.BackendSessionContext(channelContext)
-	reusableSession, reusableSessionErr := s.store.ReusableBackendSession(
-		ctx, task.ID, turn.AgentID, workspace.ID, snapshot.Backend, model.ID,
-		snapshot.EnvGroupRevision, snapshot.CodexAccountID, identityContext,
-	)
+	var reusableSession domain.BackendSession
+	var reusableSessionErr error
+	if snapshot.Backend == "dsh" {
+		reusableSession, reusableSessionErr = s.store.ReusableDSHBackendSession(
+			ctx, task.ID, turn.AgentID, workspace.ID, identityContext,
+		)
+		if reusableSessionErr == nil && !s.dshSessionCanReuse(ctx, reusableSession, model, envGroup) {
+			reusableSession = domain.BackendSession{}
+			reusableSessionErr = sql.ErrNoRows
+		}
+	} else {
+		reusableSession, reusableSessionErr = s.store.ReusableBackendSession(
+			ctx, task.ID, turn.AgentID, workspace.ID, snapshot.Backend, model.ID,
+			snapshot.EnvGroupRevision, snapshot.CodexAccountID, identityContext,
+		)
+	}
 	if reusableSessionErr != nil && !errors.Is(reusableSessionErr, sql.ErrNoRows) {
 		s.failTurn(ctx, &turn, task, fmt.Errorf("load reusable backend session: %w", reusableSessionErr))
 		return
@@ -965,6 +978,9 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 		query := workspacepkg.WriterQuery{
 			EnvName: home.EnvName, EnvValue: home.Dir,
 			ResumeSessionID: reusableSession.ProviderSession,
+		}
+		if snapshot.Backend == "dsh" {
+			query.SessionFlag = "--session-id"
 		}
 		if err := s.stopLeftoverBackendWriter(ctx, task, workspace, query); err != nil {
 			// The old writer could not be confirmed dead; starting a second one
@@ -1088,6 +1104,15 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 			}
 			environment[home.EnvName] = home.Dir
 		}
+	} else if snapshot.Backend == "dsh" {
+		home, _ := workspacepkg.SessionHomeFor(workspacepkg.SessionHomeInput{
+			Backend: "dsh", Workspace: workspace, WorkDir: workDir, SessionID: sessionID,
+		})
+		if err := workspacepkg.EnsureDSHHomeDir(ctx, workspace, workspacepkg.RunnerFor(workspace), home.Dir); err != nil {
+			s.failTurn(ctx, &turn, task, fmt.Errorf("prepare DSH home: %w", err))
+			return
+		}
+		environment[home.EnvName] = home.Dir
 	}
 	turn.SessionReadyAt = s.now().UTC()
 	if err := s.store.UpdateTurn(ctx, turn, turn.Status); err != nil {
@@ -1242,6 +1267,73 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 		s.SyncAgentChannelMessageStatuses(context.Background(), task.ID, turn.ID, "", terminalState, "", "")
 	}
 	s.afterTurnTerminal(context.Background(), task, turn)
+}
+
+func (s *Service) dshSessionCanReuse(ctx context.Context, session domain.BackendSession, model domain.Model, envGroup domain.EnvGroup) bool {
+	if session.Backend != "dsh" || model.Backend != "dsh" || envGroup.Backend != "dsh" {
+		return false
+	}
+	previousProviderID, previousEnvGroupID, err := s.store.ModelProviderAndEnvGroup(ctx, session.ModelID)
+	if err != nil || previousProviderID == "" || previousEnvGroupID == "" {
+		return false
+	}
+	previousEnvGroup, err := s.store.EnvGroup(ctx, previousEnvGroupID)
+	if err != nil {
+		return false
+	}
+	return sameDSHSessionSecurityDomain(previousProviderID, previousEnvGroup, model.ProviderID, envGroup)
+}
+
+func (s *Service) dshSnapshotsShareSessionDomain(ctx context.Context, previous, next domain.RuntimeConfigSnapshot) bool {
+	previousProviderID, previousEnvGroupID, previousErr := s.store.ModelProviderAndEnvGroup(ctx, previous.ModelID)
+	nextProviderID, nextEnvGroupID, nextErr := s.store.ModelProviderAndEnvGroup(ctx, next.ModelID)
+	if previousErr != nil || nextErr != nil || previousEnvGroupID == "" || nextEnvGroupID == "" {
+		return false
+	}
+	previousEnvGroup, previousErr := s.store.EnvGroup(ctx, previousEnvGroupID)
+	nextEnvGroup, nextErr := s.store.EnvGroup(ctx, nextEnvGroupID)
+	if previousErr != nil || nextErr != nil {
+		return false
+	}
+	return sameDSHSessionSecurityDomain(previousProviderID, previousEnvGroup, nextProviderID, nextEnvGroup)
+}
+
+func sameDSHSessionSecurityDomain(previousProviderID string, previous domain.EnvGroup, nextProviderID string, next domain.EnvGroup) bool {
+	if previousProviderID == "" || previousProviderID != nextProviderID ||
+		previous.ProviderID != previousProviderID || next.ProviderID != nextProviderID ||
+		previous.Backend != "dsh" || next.Backend != "dsh" {
+		return false
+	}
+	if !maps.Equal(credentialRefSet(previous.SecretRefs), credentialRefSet(next.SecretRefs)) {
+		return false
+	}
+	return dshEnvGroupOrigin(previous.Environment) != "" &&
+		dshEnvGroupOrigin(previous.Environment) == dshEnvGroupOrigin(next.Environment)
+}
+
+func credentialRefSet(refs map[string]string) map[string]bool {
+	result := map[string]bool{}
+	for _, ref := range refs {
+		if ref = strings.TrimSpace(ref); ref != "" {
+			result[ref] = true
+		}
+	}
+	return result
+}
+
+func dshEnvGroupOrigin(environment map[string]string) string {
+	for _, key := range []string{"OPENAI_BASE_URL", "ANTHROPIC_BASE_URL"} {
+		raw := strings.TrimSpace(environment[key])
+		if raw == "" {
+			continue
+		}
+		parsed, err := url.Parse(raw)
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+			return ""
+		}
+		return strings.ToLower(parsed.Scheme + "://" + parsed.Host)
+	}
+	return ""
 }
 
 func channelRouteMode(channelContext map[string]any) string {
@@ -2006,6 +2098,11 @@ func (s *Service) recordExecutionEvent(ctx context.Context, turn domain.Turn, ev
 	case "agent_progress":
 		category = "update"
 		summary = firstText(event.Data, "message", "phase", "status")
+	case "agent_reasoning":
+		category = "update"
+		kind = "agent_reasoning_update"
+		summary = firstText(event.Data, "text")
+		durableUpdate = true
 	case "agent_message":
 		text := firstText(event.Data, "text", "message")
 		if final, _ := event.Data["final"].(bool); final {

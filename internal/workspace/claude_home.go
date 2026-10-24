@@ -72,6 +72,11 @@ func SessionHomeFor(input SessionHomeInput) (SessionHome, bool) {
 		// Code account, whose credentials live in the default config dir, so it
 		// keeps that location and is identified from its command line instead.
 		return home, true
+	case "dsh":
+		return SessionHome{
+			Dir:     DSHHomeDir(input.Workspace, input.WorkDir, input.SessionID),
+			EnvName: "DSH_HOME",
+		}, true
 	}
 	return SessionHome{}, false
 }

@@ -366,6 +366,7 @@ test("workspace detection renders inaccessible, Git, and backend probe states", 
       platform: {status: "execution_failed", error: "平台检测执行失败: timeout"},
       codex: {status: "not_installed"},
       claude: {status: "execution_failed", error: "Claude 检测执行失败: bad config"},
+      dsh: {status: "not_installed"},
     },
     repository: {status: "not_repository", is_git: false, message: "该目录不是 Git 仓库"},
   });
@@ -389,11 +390,13 @@ test("workspace detection renders inaccessible, Git, and backend probe states", 
       workspace: {status: "ready"},
       codex: {status: "ready", version: "codex-cli 0.153.4"},
       claude: {status: "ready", version: "2.1.0"},
+      dsh: {status: "ready", version: "0.2.1-rc.2"},
     },
     repository: {status: "ready", is_git: true},
   });
   assert.match(versions, /Codex · codex-cli 0\.153\.4/);
   assert.match(versions, /Claude · 2\.1\.0/);
+  assert.match(versions, /DSH · 0\.2\.1-rc\.2/);
 
   const agentAPI = renderWorkspaceDetection({
     ...base,
@@ -1389,6 +1392,14 @@ test("runtime picker separates Env and Official Codex models", async () => {
   assert.match(nativeHTML, /id="native-claude-native-model"/);
   assert.match(nativeHTML, /value="sonnet" selected/);
   assert.match(nativeHTML, /claude_native/);
+  const dshHTML = runtimeFieldsHTML("dsh", [{
+    id: "model-dsh", display_name: "DSH Model", provider_id: "gateway", provider_name: "Gateway A",
+    source: "provider", backend: "dsh", wire_model: "dsh-model", created_at: "", updated_at: "",
+  }], [], {backend: "dsh", model_source: "env", model_id: "model-dsh"});
+  assert.match(dshHTML, />DSH<\/option>/);
+  assert.match(dshHTML, /value="model-dsh" selected/);
+  assert.doesNotMatch(dshHTML, /value="official"/);
+  assert.match(dshHTML, /id="dsh-codex-stream-settings"[^>]*hidden/);
 });
 
 test("knowledge update list keeps proposal bodies folded behind details", async () => {

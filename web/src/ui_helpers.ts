@@ -50,6 +50,9 @@ export function renderWorkspaceDetection(workspace: Workspace): string {
   if (capabilities.claude?.status === "ready") {
     badges.push(backendBadge("Claude", "claude", capabilities.claude));
   }
+  if (capabilities.dsh?.status === "ready") {
+    badges.push(backendBadge("DSH", "dsh", capabilities.dsh));
+  }
   if (workspaceProbe?.status === "unavailable") {
     details.push({kind: "bad", text: workspaceProbe.error || "Workspace 不可访问"});
   } else {
@@ -63,7 +66,7 @@ export function renderWorkspaceDetection(workspace: Workspace): string {
     if (capabilities.platform?.status === "execution_failed") {
       details.push({kind: "bad", text: capabilities.platform.error || "平台检测执行失败"});
     }
-    for (const [label, probe] of [["Codex", capabilities.codex], ["Claude", capabilities.claude]] as Array<[string, WorkspaceProbe | undefined]>) {
+    for (const [label, probe] of [["Codex", capabilities.codex], ["Claude", capabilities.claude], ["DSH", capabilities.dsh]] as Array<[string, WorkspaceProbe | undefined]>) {
       const text = failedProbe(label, probe);
       if (text) details.push({kind: probe?.status === "execution_failed" ? "bad" : "muted", text});
     }

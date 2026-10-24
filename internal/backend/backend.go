@@ -7,11 +7,16 @@ import (
 )
 
 type Request struct {
-	Runner              workspace.Runner
-	WorkDir             string
-	Model               string
-	ContextWindow       int64
-	ReasoningEffort     string
+	Runner          workspace.Runner
+	WorkDir         string
+	Model           string
+	WireAPI         string
+	ContextWindow   int64
+	ReasoningEffort string
+	// SupportsImageInput states whether the model may receive image content.
+	// AHA treats an unset capability as enabled, so a backend that can carry
+	// images reads the resolved value instead of re-guessing the default.
+	SupportsImageInput bool
 	// FastMode selects the accelerated service tier where the backend has one.
 	FastMode            bool
 	StreamIdleTimeoutMS int

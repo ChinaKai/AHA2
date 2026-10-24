@@ -31,6 +31,9 @@ type WriterQuery struct {
 	// can only be recognised from its command line. The two identifiers are
 	// alternatives: a process matching either one is a writer for this session.
 	ResumeSessionID string
+	// SessionFlag is the command-line flag immediately before ResumeSessionID.
+	// Empty keeps the original "resume" matcher; DSH uses "--session-id".
+	SessionFlag string
 }
 
 // safeSessionID is the shape a provider session id must have for the Windows
@@ -39,16 +42,25 @@ type WriterQuery struct {
 // string reaches a command interpreter.
 var safeSessionID = regexp.MustCompile(`^[A-Za-z0-9_-]{8,128}$`)
 
+var safeSessionFlag = regexp.MustCompile(`^-{0,2}[a-z][a-z0-9-]*$`)
+
 // FindWriterPIDs returns the PIDs of backend processes that match the query.
 func FindWriterPIDs(ctx context.Context, runner Runner, query WriterQuery) ([]int, error) {
 	envName := strings.TrimSpace(query.EnvName)
 	envValue := strings.TrimSpace(query.EnvValue)
 	resumeID := strings.TrimSpace(query.ResumeSessionID)
+	sessionFlag := strings.TrimSpace(query.SessionFlag)
+	if sessionFlag == "" {
+		sessionFlag = "resume"
+	}
 	if envName == "" && resumeID == "" {
 		return nil, fmt.Errorf("writer query needs an environment variable or a resume session id")
 	}
 	if envName != "" && envValue == "" {
 		return nil, fmt.Errorf("writer query needs a value for %s", envName)
+	}
+	if !safeSessionFlag.MatchString(sessionFlag) {
+		return nil, fmt.Errorf("unsafe backend session flag")
 	}
 	if IsWindowsRunner(runner) {
 		// A Windows target exposes a process command line but not its environment,
@@ -57,11 +69,12 @@ func FindWriterPIDs(ctx context.Context, runner Runner, query WriterQuery) ([]in
 		if resumeID == "" {
 			return nil, fmt.Errorf("a Windows target can only match a writer by resume session id")
 		}
-		return findWindowsWriterPIDs(ctx, runner, resumeID)
+		return findWindowsWriterPIDs(ctx, runner, resumeID, sessionFlag)
 	}
 	script := `env_name=$1
 env_value=$2
 resume_id=$3
+session_flag=$4
 for pid_dir in /proc/[0-9]*; do
   pid=${pid_dir#/proc/}
   # A plain -r test uses access(2), which does not apply the ptrace check that
@@ -90,11 +103,12 @@ EOF
   fi
   if [ "$hit" = 0 ] && [ -n "$resume_id" ]; then
     cmdline=$(tr '\0' ' ' < "$pid_dir/cmdline" 2>/dev/null) || cmdline=""
-    # Match the flag as the backend actually passes it ("--resume <id>"), and
+    # Match the flag as the backend actually passes it ("--resume <id>" or
+    # "--session-id <id>"), and
     # never anchor on a trailing space: the id may be the last argument, and a
     # command line built from NUL-separated argv can end with an extra space.
     case "$cmdline" in
-      *"resume $resume_id"*) hit=1 ;;
+      *"$session_flag $resume_id"*) hit=1 ;;
     esac
   fi
   [ "$hit" = 1 ] && printf '%s\n' "$pid"
@@ -107,7 +121,7 @@ done
 exit 0`
 	command := Command{
 		Executable: "sh",
-		Args:       []string{"-c", script, "aha-writer", envName, envValue, resumeID},
+		Args:       []string{"-c", script, "aha-writer", envName, envValue, resumeID, sessionFlag},
 		Timeout:    20 * time.Second,
 	}
 	result, err := runner.Run(ctx, command, nil)
@@ -146,19 +160,23 @@ func parseWriterPIDs(output string) []int {
 // command line is readable through CIM, and matching the resume id restricts the
 // result to this specific session: AHA spawns the backend directly, so only a
 // process AHA started for this session carries it.
-func findWindowsWriterPIDs(ctx context.Context, runner Runner, resumeID string) ([]int, error) {
+func findWindowsWriterPIDs(ctx context.Context, runner Runner, resumeID, sessionFlag string) ([]int, error) {
 	if !safeSessionID.MatchString(resumeID) {
 		return nil, fmt.Errorf("unsafe session id for a Windows writer lookup")
 	}
+	if !safeSessionFlag.MatchString(sessionFlag) {
+		return nil, fmt.Errorf("unsafe session flag for a Windows writer lookup")
+	}
 	// Contains() is a literal test, so the session id needs no escaping here.
 	script := `$id = $args[0]
-Get-CimInstance Win32_Process -Filter "Name='claude.exe' or Name='codex.exe'" |
-  Where-Object { $_.CommandLine -and $_.CommandLine.Contains('resume ' + $id) } |
+$flag = $args[1]
+Get-CimInstance Win32_Process -Filter "Name='claude.exe' or Name='codex.exe' or Name='dsh.exe' or Name='node.exe'" |
+  Where-Object { $_.CommandLine -and $_.CommandLine.Contains($flag + ' ' + $id) } |
   ForEach-Object { [Console]::Out.WriteLine($_.ProcessId) }`
 	result, err := runner.Run(ctx, Command{
 		Executable: "powershell.exe",
 		Args: []string{"-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
-			script, resumeID},
+			script, resumeID, sessionFlag},
 		Timeout: 30 * time.Second,
 	}, nil)
 	if err != nil {

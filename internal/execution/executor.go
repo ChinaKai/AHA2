@@ -19,21 +19,28 @@ type BackendSettingsProvider interface {
 type Executor struct {
 	Codex    backend.Codex
 	Claude   backend.Claude
+	DSH      backend.DSH
 	Settings BackendSettingsProvider
 }
 
 func (executor Executor) Execute(ctx context.Context, request app.ExecutionRequest, emit func(app.ExecutionEvent)) (app.ExecutionResult, error) {
-	codex, claude, err := executor.configuredAdapters(ctx)
+	codex, claude, dsh, err := executor.configuredAdapters(ctx)
 	if err != nil {
 		return app.ExecutionResult{}, err
 	}
-	if request.Snapshot.Backend == "claude" {
+	switch request.Snapshot.Backend {
+	case "codex":
+		return executor.runCodex(ctx, codex, request, emit)
+	case "claude":
 		return executor.runClaude(ctx, claude, request, emit)
+	case "dsh":
+		return executor.runDSH(ctx, dsh, request, emit)
+	default:
+		return app.ExecutionResult{}, fmt.Errorf("unsupported backend %q", request.Snapshot.Backend)
 	}
-	return executor.runCodex(ctx, codex, request, emit)
 }
 
-func (executor Executor) configuredAdapters(ctx context.Context) (backend.Codex, backend.Claude, error) {
+func (executor Executor) configuredAdapters(ctx context.Context) (backend.Codex, backend.Claude, backend.DSH, error) {
 	settings := domain.BackendSettings{
 		IdleTimeoutSeconds: domain.DefaultBackendIdleTimeoutSeconds,
 		TurnTimeoutSeconds: domain.DefaultBackendTurnTimeoutSeconds,
@@ -42,7 +49,7 @@ func (executor Executor) configuredAdapters(ctx context.Context) (backend.Codex,
 		var err error
 		settings, err = executor.Settings.BackendSettings(ctx)
 		if err != nil {
-			return backend.Codex{}, backend.Claude{}, fmt.Errorf("read backend timeout settings: %w", err)
+			return backend.Codex{}, backend.Claude{}, backend.DSH{}, fmt.Errorf("read backend timeout settings: %w", err)
 		}
 	}
 	codex := executor.Codex
@@ -51,7 +58,10 @@ func (executor Executor) configuredAdapters(ctx context.Context) (backend.Codex,
 	claude := executor.Claude
 	claude.IdleTimeout = time.Duration(settings.IdleTimeoutSeconds) * time.Second
 	claude.Timeout = time.Duration(settings.TurnTimeoutSeconds) * time.Second
-	return codex, claude, nil
+	dsh := executor.DSH
+	dsh.IdleTimeout = time.Duration(settings.IdleTimeoutSeconds) * time.Second
+	dsh.Timeout = time.Duration(settings.TurnTimeoutSeconds) * time.Second
+	return codex, claude, dsh, nil
 }
 
 // newBackendRequest fills the fields every backend shares.
@@ -65,14 +75,35 @@ func newBackendRequest(request app.ExecutionRequest, model string, environment m
 	return backend.Request{
 		Runner:  workspace.RunnerFor(request.Workspace),
 		WorkDir: taskWorkDir(request),
-		Model:   model, ContextWindow: request.Model.ContextWindow,
-		ReasoningEffort: request.Snapshot.ReasoningEffort,
-		FastMode:        request.Snapshot.FastMode,
-		Environment:     environment,
-		Prompt:          request.Prompt, ProviderSessionID: request.ProviderSessionID,
+		Model:   model, WireAPI: request.Model.WireAPI, ContextWindow: request.Model.ContextWindow,
+		ReasoningEffort:    request.Snapshot.ReasoningEffort,
+		SupportsImageInput: modelSupportsImageInput(request.Model),
+		FastMode:           request.Snapshot.FastMode,
+		Environment:        environment,
+		Prompt:             request.Prompt, ProviderSessionID: request.ProviderSessionID,
 		Filesystem: request.Filesystem, Approval: request.Approval,
 		ReverseForward: request.AgentAPIForward,
 	}
+}
+
+// modelSupportsImageInput resolves the model's input capability. The editor
+// leaves the key unset for a new model because image input is the default;
+// only an explicit false turns it off. A malformed value keeps the default.
+func modelSupportsImageInput(model domain.Model) bool {
+	value, declared := model.Capabilities["supports_image_input"].(bool)
+	if !declared {
+		return true
+	}
+	return value
+}
+
+func (executor Executor) runDSH(ctx context.Context, adapter backend.DSH, request app.ExecutionRequest, emit func(app.ExecutionEvent)) (app.ExecutionResult, error) {
+	result, err := adapter.Execute(ctx, newBackendRequest(request, request.Model.WireModel, request.Environment), func(event backend.Event) {
+		emit(app.ExecutionEvent{Type: event.Type, Data: event.Data})
+	})
+	return app.ExecutionResult{
+		Reply: result.Reply, ExitCode: result.ExitCode, ProviderSessionID: result.ProviderSessionID,
+	}, err
 }
 
 func (executor Executor) runCodex(ctx context.Context, adapter backend.Codex, request app.ExecutionRequest, emit func(app.ExecutionEvent)) (app.ExecutionResult, error) {

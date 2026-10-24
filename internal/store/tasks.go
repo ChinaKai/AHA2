@@ -674,12 +674,28 @@ func (s *Store) UpsertBackendSession(ctx context.Context, item domain.BackendSes
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO backend_sessions(id,task_id,agent_id,workspace_id,backend,model_id,env_group_revision,codex_account_id,identity_context,provider_session_id,status,context_usage_json,created_at,last_used_at)
 		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-		ON CONFLICT(id) DO UPDATE SET identity_context=excluded.identity_context,provider_session_id=excluded.provider_session_id,status=excluded.status,
+		ON CONFLICT(id) DO UPDATE SET model_id=excluded.model_id,env_group_revision=excluded.env_group_revision,
+			codex_account_id=excluded.codex_account_id,identity_context=excluded.identity_context,
+			provider_session_id=excluded.provider_session_id,status=excluded.status,
 			context_usage_json=excluded.context_usage_json,last_used_at=excluded.last_used_at`,
 		item.ID, item.TaskID, item.AgentID, item.WorkspaceID, item.Backend, item.ModelID, item.EnvGroupRevision,
 		item.CodexAccountID, item.IdentityContext, item.ProviderSession, item.Status, item.ContextUsageJSON, timeString(item.CreatedAt), timeString(item.LastUsedAt),
 	)
 	return err
+}
+
+// ReusableDSHBackendSession finds the active DSH session across model changes.
+// The caller must still validate that both models share one provider security
+// domain before resuming it.
+func (s *Store) ReusableDSHBackendSession(ctx context.Context, taskID, agentID, workspaceID, identityContext string) (domain.BackendSession, error) {
+	return scanBackendSession(s.db.QueryRowContext(ctx, `
+		SELECT `+backendSessionColumns+`
+		FROM backend_sessions
+		WHERE task_id=? AND agent_id=? AND workspace_id=? AND backend='dsh' AND identity_context=?
+		  AND status='active'
+		ORDER BY last_used_at DESC LIMIT 1`,
+		taskID, agentID, workspaceID, identityContext,
+	))
 }
 
 const backendSessionColumns = `id,task_id,agent_id,workspace_id,backend,model_id,env_group_revision,codex_account_id,identity_context,provider_session_id,status,context_usage_json,created_at,last_used_at`

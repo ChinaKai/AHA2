@@ -11,6 +11,13 @@ type RuntimeSelection = {
   fast_mode?: boolean;
 };
 
+export function backendLabel(backend: string): string {
+  if (backend === "codex") return "Codex";
+  if (backend === "claude") return "Claude Code";
+  if (backend === "dsh") return "DSH";
+  return backend;
+}
+
 export type ClaudeOfficialAvailability = "ready" | "loading" | "not_logged_in" | "unknown" | "unavailable";
 
 export type ClaudeOfficialCatalog = {
@@ -135,10 +142,12 @@ export function runtimeFieldsHTML(
     ? configuredStreamMaxRetries
     : (existingSelection ? 5 : 2);
   return `<div class="two runtime-picker${runtimeClass}">
-    <label>Backend<select name="backend" id="${prefix}-backend" required>${backends.map(item => option(item, item === "codex" ? "Codex" : "Claude Code", item === backend)).join("")}</select></label>
+    <label>Backend<select name="backend" id="${prefix}-backend" required>${backends.map(item => option(item, backendLabel(item), item === backend)).join("")}</select></label>
     <label id="${prefix}-model-source-field">模型使用方式<select name="model_source" id="${prefix}-model-source" ${existingSelection && source === "claude_native" ? 'data-initial-official="true"' : ""} required>${backend === "claude"
       ? `${option("env", "Env Provider", source === "env")}${option("claude_native", "Official", source === "claude_native")}`
-      : `${option("env", "Env", source === "env")}${option("official", "Official", source === "official")}`}</select></label>
+      : backend === "codex"
+        ? `${option("env", "Env", source === "env")}${option("official", "Official", source === "official")}`
+        : option("env", "Env Provider", true)}</select></label>
   </div>
   <label id="${prefix}-env-model-field" class="runtime-picker${runtimeClass}" ${official || native ? "hidden" : ""}>Env 模型<select name="model_id" id="${prefix}-model" ${official || native ? "disabled" : "required"}>${envModelOptions(envModels, selection.model_id || "")}</select></label>
   <div id="${prefix}-official-fields" class="two runtime-picker${runtimeClass}" ${official ? "" : "hidden"}>
@@ -162,7 +171,7 @@ export function setRuntimeBackends(prefix: string, backends: string[]): void {
   if (!select) return;
   const previous = select.value;
   select.innerHTML = backends.length
-    ? backends.map(item => option(item, item === "codex" ? "Codex" : "Claude Code", item === previous)).join("")
+    ? backends.map(item => option(item, backendLabel(item), item === previous)).join("")
     : '<option value="">该 Workspace 无可用的 Backend（请先检测）</option>';
   select.value = backends.includes(previous) ? previous : (backends[0] || "");
 }

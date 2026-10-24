@@ -26,26 +26,27 @@ func TestConfiguredAdaptersUsePersistedTimeoutsForBothBackends(t *testing.T) {
 		IdleTimeoutSeconds: 17 * 60,
 		TurnTimeoutSeconds: 11 * 60 * 60,
 	}}}
-	codex, claude, err := executor.configuredAdapters(context.Background())
+	codex, claude, dsh, err := executor.configuredAdapters(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if codex.IdleTimeout != 17*time.Minute || claude.IdleTimeout != 17*time.Minute {
-		t.Fatalf("idle timeouts differ: codex=%s claude=%s", codex.IdleTimeout, claude.IdleTimeout)
+	if codex.IdleTimeout != 17*time.Minute || claude.IdleTimeout != 17*time.Minute || dsh.IdleTimeout != 17*time.Minute {
+		t.Fatalf("idle timeouts differ: codex=%s claude=%s dsh=%s", codex.IdleTimeout, claude.IdleTimeout, dsh.IdleTimeout)
 	}
-	if codex.Timeout != 11*time.Hour || claude.Timeout != 11*time.Hour {
-		t.Fatalf("turn timeouts differ: codex=%s claude=%s", codex.Timeout, claude.Timeout)
+	if codex.Timeout != 11*time.Hour || claude.Timeout != 11*time.Hour || dsh.Timeout != 11*time.Hour {
+		t.Fatalf("turn timeouts differ: codex=%s claude=%s dsh=%s", codex.Timeout, claude.Timeout, dsh.Timeout)
 	}
 }
 
 func TestConfiguredAdaptersUseTenMinuteAndTenHourDefaults(t *testing.T) {
 	t.Parallel()
-	codex, claude, err := (Executor{}).configuredAdapters(context.Background())
+	codex, claude, dsh, err := (Executor{}).configuredAdapters(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if codex.IdleTimeout != 10*time.Minute || claude.IdleTimeout != 10*time.Minute || codex.Timeout != 10*time.Hour || claude.Timeout != 10*time.Hour {
-		t.Fatalf("unexpected defaults: codex=%#v claude=%#v", codex, claude)
+	if codex.IdleTimeout != 10*time.Minute || claude.IdleTimeout != 10*time.Minute || dsh.IdleTimeout != 10*time.Minute ||
+		codex.Timeout != 10*time.Hour || claude.Timeout != 10*time.Hour || dsh.Timeout != 10*time.Hour {
+		t.Fatalf("unexpected defaults: codex=%#v claude=%#v dsh=%#v", codex, claude, dsh)
 	}
 }
 
@@ -83,7 +84,7 @@ func TestClaudeNativeExecutionBorrowsProfileCredential(t *testing.T) {
 	local := domain.Workspace{ID: "ws", Locality: "local", Transport: "native"}
 
 	borrowed := lendNativeClaudeCredential(context.Background(), app.ExecutionRequest{
-		Snapshot: domain.RuntimeConfigSnapshot{EnvGroupID: domain.ClaudeNativeEnvGroupID},
+		Snapshot:  domain.RuntimeConfigSnapshot{EnvGroupID: domain.ClaudeNativeEnvGroupID},
 		Workspace: local,
 	}, map[string]string{})
 
@@ -112,5 +113,20 @@ func TestNonNativeExecutionKeepsItsOwnCredentials(t *testing.T) {
 	}
 	if after["ANTHROPIC_API_KEY"] != "env-group-key" {
 		t.Fatalf("non-native credentials were altered: %#v", after)
+	}
+}
+
+// Image input is the model default, so only an explicit false may turn it off.
+func TestBackendRequestResolvesImageInputDefault(t *testing.T) {
+	t.Parallel()
+	defaulted := app.ExecutionRequest{Model: domain.Model{}}
+	if got := newBackendRequest(defaulted, "default-model", nil); !got.SupportsImageInput {
+		t.Fatal("undeclared image capability did not default to enabled")
+	}
+	disabled := app.ExecutionRequest{Model: domain.Model{
+		Capabilities: map[string]any{"supports_image_input": false},
+	}}
+	if got := newBackendRequest(disabled, "text-model", nil); got.SupportsImageInput {
+		t.Fatal("explicitly disabled image capability was treated as enabled")
 	}
 }

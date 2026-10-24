@@ -755,6 +755,8 @@ dd { margin: 3px 0 0; overflow-wrap: anywhere; font-size: 11px; }
 .message-toggle[hidden] { display: none; }
 .message.user .message-bubble { border-color: #c6d7fb; background: #edf4ff; }
 .message.agent-update-message .message-bubble { border-left: 3px solid #3b82f6; background: #f8fbff; }
+.message.agent-reasoning-message .message-bubble { border-left: 3px solid #94a3b8; background: #f8fafc; }
+.message.agent-reasoning-message header span { background: #eef1f4; color: #475569; }
 .message.agent-tool-message .message-bubble { border-left: 3px solid #64748b; background: #f8fafc; }
 .message.agent-tool-message header span { background: #eef1f4; color: #475569; }
 .message.agent-routed-message .message-bubble { border-left: 3px solid #64748b; background: #f8fafc; }
@@ -1050,10 +1052,12 @@ dialog > .dialog-head { margin: 0; padding: 18px 18px 0; }
 .proto { padding: 2px 6px; border-radius: 999px; font-size: 9px; font-weight: 800; }
 .proto.codex { background: #edf4ff; color: #1d4ed8; }
 .proto.claude { background: #f3ecff; color: #7c3aed; }
+.proto.dsh { background: #e8f7f1; color: #087f5b; }
 .proto.none { background: #eef1f4; color: var(--muted); }
 .proto-checks { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 5px; }
 .proto-checks label { display: inline-flex; align-items: center; gap: 4px; margin: 0; padding: 3px 7px; border: 1px solid var(--line); border-radius: 4px; background: #fff; font-size: 10px; font-weight: 600; cursor: pointer; }
 .proto-checks input { width: auto; height: auto; }
+.capability-badge { display: inline-block; margin-left: 6px; padding: 1px 5px; border-radius: 999px; background: #e8f7f1; color: #087f5b; font-size: 9px; font-weight: 800; vertical-align: 1px; }
 .detect-status { margin-top: 10px; color: var(--muted); font-size: 11px; }
 .two { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; }
 .hardware-resource-dialog [hidden] { display: none !important; }

@@ -110,7 +110,7 @@ func detectWithRunner(ctx context.Context, item domain.Workspace, runner Runner)
 	}
 	item.Capabilities["git"] = item.Repository["is_git"] == true
 	item.Capabilities["git"] = item.Repository["is_git"] == true
-	for _, executable := range []string{"codex", "claude"} {
+	for _, executable := range []string{"codex", "claude", "dsh"} {
 		var failed bool
 		item.Capabilities[executable], failed = probeBackend(ctx, runner, item, executable)
 		degraded = degraded || failed

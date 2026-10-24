@@ -30,6 +30,8 @@ func (runner *windowsDetectRunner) Run(_ context.Context, command Command, _ Lin
 		return Result{ExitCode: 128, Stderr: "fatal: not a git repository"}, nil
 	case "codex":
 		return Result{Stdout: command.Executable + " 1.0"}, nil
+	case "dsh":
+		return Result{Stdout: "0.2.1-rc.2"}, nil
 	case "claude":
 		if len(command.Args) > 0 && command.Args[0] == "auth" {
 			return Result{Stdout: `{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty"}`}, nil
@@ -100,6 +102,8 @@ func TestDetectDistinguishesRepositoryAndBackendResults(t *testing.T) {
 			return Result{ExitCode: 128, Stderr: "fatal: not a git repository"}, nil
 		case "codex":
 			return Result{}, exec.ErrNotFound
+		case "dsh":
+			return Result{}, exec.ErrNotFound
 		case "claude":
 			return Result{ExitCode: 2, Stderr: "configuration invalid"}, nil
 		default:
@@ -136,6 +140,8 @@ func TestDetectReportsClaudeNativeLoginStatus(t *testing.T) {
 		case "git":
 			return Result{ExitCode: 128, Stderr: "not a git repository"}, nil
 		case "codex":
+			return Result{}, exec.ErrNotFound
+		case "dsh":
 			return Result{}, exec.ErrNotFound
 		case "claude":
 			if len(command.Args) > 0 && command.Args[0] == "auth" {
@@ -196,7 +202,7 @@ func TestDetectDistinguishesGitExecutionFailure(t *testing.T) {
 			return Result{Stdout: "Linux"}, nil
 		case "git":
 			return Result{ExitCode: 2, Stderr: "permission denied while running git"}, nil
-		case "codex", "claude":
+		case "codex", "claude", "dsh":
 			return Result{Stdout: command.Executable + " 1.0"}, nil
 		default:
 			return Result{}, errors.New("unexpected command")
@@ -226,7 +232,7 @@ func TestDetectRetriesOneTransientWSLDeadline(t *testing.T) {
 			return Result{Stdout: "Linux"}, nil
 		case "git":
 			return Result{ExitCode: 128, Stderr: "not a git repository"}, nil
-		case "codex", "claude":
+		case "codex", "claude", "dsh":
 			return Result{ExitCode: 127, Stderr: "command not found"}, nil
 		default:
 			return Result{}, errors.New("unexpected command")
