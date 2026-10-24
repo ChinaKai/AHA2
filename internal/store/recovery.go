@@ -46,9 +46,9 @@ func (s *Store) RecoverInterrupted(ctx context.Context, now time.Time) (Recovery
 	}
 	liveRequeueResult, err := tx.ExecContext(ctx, `
 		UPDATE agent_inbox
-		SET status='pending',claimed_at='',delivered_turn_id='',delivered_at='',
+		SET status='pending',batch_id='',claimed_at='',delivered_turn_id='',delivered_at='',
 		    recovery_attempts=recovery_attempts+1
-		WHERE status='delivered_in_turn'
+		WHERE status IN ('claimed_in_turn','delivered_in_turn')
 		  AND delivered_turn_id IN (
 			SELECT interrupted.id
 			FROM turns interrupted

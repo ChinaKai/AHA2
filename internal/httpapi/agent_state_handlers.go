@@ -174,6 +174,53 @@ func (s *Server) waitAgentInbox(writer http.ResponseWriter, request *http.Reques
 	})
 }
 
+func (s *Server) claimAgentInbox(writer http.ResponseWriter, request *http.Request) {
+	claims, _ := agentClaimsFromContext(request.Context())
+	var payload struct {
+		Limit int `json:"limit"`
+	}
+	if err := decodeJSON(request, &payload); err != nil {
+		writeErrorDetail(writer, http.StatusBadRequest, "inbox_claim_invalid", err.Error())
+		return
+	}
+	if payload.Limit < 0 || payload.Limit > 50 {
+		writeErrorDetail(writer, http.StatusBadRequest, "inbox_claim_invalid", "limit must be 0-50")
+		return
+	}
+	claim, err := s.app.ClaimAgentInbox(request.Context(), claims, payload.Limit)
+	if err != nil {
+		writeAgentControlError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"ok": true, "messages": claim.Messages, "next_cursor": claim.NextCursor,
+		"injection_text":           claim.InjectionText,
+		"materialized_attachments": claim.MaterializedAttachments,
+	})
+}
+
+func (s *Server) ackAgentInbox(writer http.ResponseWriter, request *http.Request) {
+	claims, _ := agentClaimsFromContext(request.Context())
+	var payload struct {
+		MessageIDs []string `json:"message_ids"`
+		Outcome    string   `json:"outcome"`
+	}
+	if err := decodeJSON(request, &payload); err != nil {
+		writeErrorDetail(writer, http.StatusBadRequest, "inbox_ack_invalid", err.Error())
+		return
+	}
+	count, err := s.app.AckAgentInbox(
+		request.Context(), claims, payload.MessageIDs, strings.TrimSpace(payload.Outcome),
+	)
+	if err != nil {
+		writeAgentControlError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"ok": true, "acknowledged": count, "outcome": strings.TrimSpace(payload.Outcome),
+	})
+}
+
 func (s *Server) setAgentChannelReplyDecision(writer http.ResponseWriter, request *http.Request) {
 	claims, _ := agentClaimsFromContext(request.Context())
 	var payload struct {

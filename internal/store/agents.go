@@ -500,6 +500,190 @@ func (s *Store) MarkLiveInboxProcessedForTurn(ctx context.Context, turnID string
 	return err
 }
 
+// RequeueClaimedInboxForTurn returns live-injection claims that were never
+// acknowledged before the turn ended. The message stays Pending for the next
+// turn, so a backend crash between claim and steer cannot lose it.
+func (s *Store) RequeueClaimedInboxForTurn(ctx context.Context, turnID string) (int, error) {
+	if turnID == "" {
+		return 0, nil
+	}
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE agent_inbox
+		SET status='pending',batch_id='',claimed_at='',delivered_turn_id='',delivered_at='',
+		    recovery_attempts=recovery_attempts+1
+		WHERE delivered_turn_id=? AND status='claimed_in_turn'`,
+		turnID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	affected, _ := result.RowsAffected()
+	return int(affected), nil
+}
+
+// ClaimOwnerInboxForLiveInjection atomically claims pending owner/channel
+// messages for a running turn without waiting. A claim is not a delivery: it
+// stays claimed_in_turn until the backend confirms the steer (Ack) or fails to
+// inject it (Nack). Unlike the model-driven Wait endpoint, this is called by
+// the DSH control plugin at tool boundaries inside the current turn.
+func (s *Store) ClaimOwnerInboxForLiveInjection(
+	ctx context.Context,
+	taskID, agentID, roundID, turnID string,
+	limit int,
+) ([]domain.AgentInboxItem, error) {
+	if limit <= 0 || limit > 50 {
+		limit = 20
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	rows, err := tx.QueryContext(ctx, `
+		SELECT `+inboxColumns+` FROM agent_inbox
+		WHERE task_id=? AND target_agent_id=? AND round_id=?
+		  AND source_kind='owner_message' AND status='pending'
+		ORDER BY sequence LIMIT ?`,
+		taskID, agentID, roundID, limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	var items []domain.AgentInboxItem
+	for rows.Next() {
+		item, scanErr := scanInbox(rows)
+		if scanErr != nil {
+			rows.Close()
+			return nil, scanErr
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if len(items) == 0 {
+		return nil, tx.Commit()
+	}
+	now := time.Now().UTC()
+	for _, item := range items {
+		result, execErr := tx.ExecContext(ctx, `
+			UPDATE agent_inbox
+			SET status='claimed_in_turn',claimed_at=?,delivered_turn_id=?
+			WHERE id=? AND status='pending'`,
+			timeString(now), turnID, item.ID,
+		)
+		if execErr != nil {
+			return nil, execErr
+		}
+		affected, _ := result.RowsAffected()
+		if affected != 1 {
+			return nil, fmt.Errorf("owner inbox item changed concurrently")
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+// AckLiveInboxForTurn confirms (delivered) or rolls back (failed) live-injection
+// claims. An already-confirmed or already-rolled-back item is accepted on a
+// retry so the plugin's at-least-once acknowledgement is idempotent.
+func (s *Store) AckLiveInboxForTurn(
+	ctx context.Context,
+	taskID, agentID, turnID string,
+	ids []string,
+	delivered bool,
+	at time.Time,
+) (int, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	args := make([]any, 0, len(ids)+3)
+	args = append(args, taskID, agentID, turnID)
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id,status,delivered_turn_id FROM agent_inbox
+		WHERE task_id=? AND target_agent_id=? AND delivered_turn_id=?
+		  AND id IN (`+placeholders(len(ids))+`)`,
+		args...,
+	)
+	if err != nil {
+		return 0, err
+	}
+	statusByID := map[string]string{}
+	for rows.Next() {
+		var id, status, deliveredTurnID string
+		if err := rows.Scan(&id, &status, &deliveredTurnID); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		statusByID[id] = status
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, err
+	}
+	if err := rows.Close(); err != nil {
+		return 0, err
+	}
+	if len(statusByID) != len(ids) {
+		return 0, fmt.Errorf("live inbox acknowledgement referenced an unknown delivery")
+	}
+	for _, id := range ids {
+		status := statusByID[id]
+		if delivered {
+			switch status {
+			case "claimed_in_turn":
+			case "delivered_in_turn":
+				continue // idempotent retry
+			default:
+				return 0, fmt.Errorf("live inbox item %s is not a pending delivery", id)
+			}
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE agent_inbox
+				SET status='delivered_in_turn',delivered_at=?,steered_at=?
+				WHERE id=? AND status='claimed_in_turn'`,
+				timeString(at), timeString(at), id,
+			); err != nil {
+				return 0, err
+			}
+			continue
+		}
+		switch status {
+		case "claimed_in_turn":
+		case "pending":
+			continue // idempotent retry
+		default:
+			return 0, fmt.Errorf("live inbox item %s is not a pending claim", id)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE agent_inbox
+			SET status='pending',batch_id='',claimed_at='',delivered_turn_id='',delivered_at='',
+			    recovery_attempts=recovery_attempts+1
+			WHERE id=? AND status='claimed_in_turn'`,
+			id,
+		); err != nil {
+			return 0, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return len(ids), nil
+}
+
 func (s *Store) PendingInboxAgents(ctx context.Context, taskID string) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT DISTINCT target_agent_id FROM agent_inbox

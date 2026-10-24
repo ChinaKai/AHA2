@@ -2,6 +2,7 @@ package backend
 
 import (
 	"context"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +17,9 @@ import (
 
 	"github.com/ChinaKai/AHA2/internal/workspace"
 )
+
+//go:embed aha_live_inbox.mjs
+var dshLiveInboxPluginSource string
 
 // DSH runs DeepSeek Harness in its one-shot headless profile. The profile patch
 // is generated per AHA backend session so DSH reuses the Env Provider selected
@@ -151,6 +155,7 @@ func filterDSHEnvironment(values map[string]string) map[string]string {
 		"ANTHROPIC_BASE_URL": true, "ANTHROPIC_MODEL": true,
 		"CODEX_WIRE_API": true, "CODEX_ENV_KEY": true, "AHA_PROVIDER_ID": true,
 		"AHA2_AGENT_API_URL": true, "AHA2_AGENT_API_TOKEN": true,
+		"AHA2_LIVE_INBOX": true, "AHA2_LIVE_INBOX_DEBUG": true,
 		"HTTP_PROXY": true, "HTTPS_PROXY": true, "NO_PROXY": true,
 	}
 	result := map[string]string{}
@@ -173,7 +178,10 @@ func (adapter DSH) ensureProfilePatch(ctx context.Context, request Request) (str
 	}
 	name := "aha-backend.yml"
 	pluginPath := filepath.Join(homeDir, "aha-agent-api-env.mjs")
-	payload, err := dshProfilePatch(request, dshPluginSpecifier(pluginPath))
+	liveInboxPath := filepath.Join(homeDir, "aha-live-inbox.mjs")
+	payload, err := dshProfilePatch(
+		request, dshPluginSpecifier(pluginPath), dshPluginSpecifier(liveInboxPath),
+	)
 	if err != nil {
 		return "", err
 	}
@@ -184,6 +192,9 @@ func (adapter DSH) ensureProfilePatch(ctx context.Context, request Request) (str
 		if err := os.WriteFile(pluginPath, []byte(dshAgentAPIEnvPlugin()), 0o600); err != nil {
 			return "", fmt.Errorf("write DSH Agent API environment plugin: %w", err)
 		}
+		if err := os.WriteFile(liveInboxPath, []byte(dshLiveInboxPluginSource), 0o600); err != nil {
+			return "", fmt.Errorf("write DSH live inbox plugin: %w", err)
+		}
 		path := filepath.Join(homeDir, name)
 		if err := os.WriteFile(path, []byte(payload), 0o600); err != nil {
 			return "", fmt.Errorf("write DSH profile patch: %w", err)
@@ -193,11 +204,16 @@ func (adapter DSH) ensureProfilePatch(ctx context.Context, request Request) (str
 	if err := workspace.EnsureRemoteDirectory(ctx, request.Runner, homeDir); err != nil {
 		return "", fmt.Errorf("prepare DSH home: %w", err)
 	}
-	remotePluginPath := pathpkg.Join(strings.ReplaceAll(homeDir, `\`, "/"), "aha-agent-api-env.mjs")
+	remoteDir := strings.ReplaceAll(homeDir, `\`, "/")
+	remotePluginPath := pathpkg.Join(remoteDir, "aha-agent-api-env.mjs")
 	if err := workspace.WriteRemoteTextFile(ctx, request.Runner, remotePluginPath, dshAgentAPIEnvPlugin()); err != nil {
 		return "", fmt.Errorf("write DSH Agent API environment plugin: %w", err)
 	}
-	path := pathpkg.Join(strings.ReplaceAll(homeDir, `\`, "/"), name)
+	remoteLiveInboxPath := pathpkg.Join(remoteDir, "aha-live-inbox.mjs")
+	if err := workspace.WriteRemoteTextFile(ctx, request.Runner, remoteLiveInboxPath, dshLiveInboxPluginSource); err != nil {
+		return "", fmt.Errorf("write DSH live inbox plugin: %w", err)
+	}
+	path := pathpkg.Join(remoteDir, name)
 	if err := workspace.WriteRemoteTextFile(ctx, request.Runner, path, payload); err != nil {
 		return "", fmt.Errorf("write DSH profile patch: %w", err)
 	}
@@ -230,7 +246,7 @@ export function apply(ctx) {
 `
 }
 
-func dshProfilePatch(request Request, pluginURL string) (string, error) {
+func dshProfilePatch(request Request, pluginURL, liveInboxURL string) (string, error) {
 	api, baseURL, apiKeyEnv, err := dshProviderRuntime(request)
 	if err != nil {
 		return "", err
@@ -287,6 +303,8 @@ func dshProfilePatch(request Request, pluginURL string) (string, error) {
 	output.WriteString("\n- insert:\n")
 	output.WriteString("    - id: aha-agent-api-env\n")
 	output.WriteString("      name: " + strconv.Quote(pluginURL) + "\n")
+	output.WriteString("    - id: aha-live-inbox\n")
+	output.WriteString("      name: " + strconv.Quote(liveInboxURL) + "\n")
 	for _, id := range []string{
 		"tool-subagent", "tool-subagent-fork", "tool-subagent-control", "tool-workflow",
 	} {

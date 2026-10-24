@@ -1153,6 +1153,9 @@ func (s *Service) retryTurn(ctx context.Context, turn domain.Turn) bool {
 
 func (s *Service) afterTurnTerminal(ctx context.Context, task domain.Task, turn domain.Turn) {
 	_ = s.store.MarkInboxBatchProcessed(ctx, turn.InboxBatchID, s.now().UTC())
+	// An unacknowledged live-injection claim was never confirmed as steered.
+	// Return it to Pending before the terminal sweep so the next turn sees it.
+	_, _ = s.store.RequeueClaimedInboxForTurn(ctx, turn.ID)
 	_ = s.store.MarkLiveInboxProcessedForTurn(ctx, turn.ID, s.now().UTC())
 	if s.retryTurn(ctx, turn) {
 		s.settleRound(ctx, task.ID, turn.RoundID)

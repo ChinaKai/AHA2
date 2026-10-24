@@ -755,6 +755,7 @@ func (s *Store) EnqueueAgentChannelReply(
 		return domain.ChannelDelivery{}, "", false, err
 	}
 	authorized := inboxStatus == "delivered_in_turn" && deliveredTurnID == turnID ||
+		inboxStatus == "claimed_in_turn" && deliveredTurnID == turnID ||
 		inboxStatus == "claimed" && inboxBatchID == turnInboxBatchID
 	if !authorized {
 		return domain.ChannelDelivery{}, "", false, errors.New("channel receipt is not owned by this Turn")

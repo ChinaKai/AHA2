@@ -34,7 +34,7 @@ func TestDSHProfilePatchReusesAHAEnvProviderWithoutSecret(t *testing.T) {
 			"OPENAI_API_KEY":  "must-not-enter-patch",
 			"CODEX_ENV_KEY":   "OPENAI_API_KEY",
 		},
-	}, "/tmp/aha-agent-api-env.mjs")
+	}, "/tmp/aha-agent-api-env.mjs", "/tmp/aha-live-inbox.mjs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,6 +57,8 @@ func TestDSHProfilePatchReusesAHAEnvProviderWithoutSecret(t *testing.T) {
 		"- insert:",
 		"id: aha-agent-api-env",
 		`name: "/tmp/aha-agent-api-env.mjs"`,
+		"id: aha-live-inbox",
+		`name: "/tmp/aha-live-inbox.mjs"`,
 		"id: tool-subagent",
 		"id: tool-workflow",
 	} {
@@ -80,7 +82,7 @@ func TestDSHProfilePatchDeclaresImageInputUnlessModelOptsOut(t *testing.T) {
 			"ANTHROPIC_AUTH_TOKEN": "must-not-enter-patch",
 		},
 	}
-	patch, err := dshProfilePatch(request, "/tmp/plugin.mjs")
+	patch, err := dshProfilePatch(request, "/tmp/plugin.mjs", "/tmp/live-inbox.mjs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +94,7 @@ func TestDSHProfilePatchDeclaresImageInputUnlessModelOptsOut(t *testing.T) {
 	}
 
 	request.SupportsImageInput = false
-	textPatch, err := dshProfilePatch(request, "/tmp/plugin.mjs")
+	textPatch, err := dshProfilePatch(request, "/tmp/plugin.mjs", "/tmp/live-inbox.mjs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,6 +113,41 @@ func TestDSHAgentAPIEnvPluginUsesTrustedDSHNamespace(t *testing.T) {
 		if !strings.Contains(plugin, expected) {
 			t.Fatalf("Agent API environment plugin missing %q:\n%s", expected, plugin)
 		}
+	}
+}
+
+func TestDSHLiveInboxPluginContract(t *testing.T) {
+	t.Parallel()
+	plugin := dshLiveInboxPluginSource
+	for _, expected := range []string{
+		"name = 'aha-live-inbox'", "inject = ['agents']",
+		"/api/v1/agent/turn/inbox/claim", "/api/v1/agent/turn/inbox/ack",
+		"event.type !== 'tool/result'", "agent/turn-stopping",
+		"queueMicrotask", "outcome: 'failed'", "outcome: 'delivered'",
+		"assistant/message", "event.type === 'tool/call'",
+		"AHA2_LIVE_INBOX", "steerAtBoundary",
+	} {
+		if !strings.Contains(plugin, expected) {
+			t.Fatalf("live inbox plugin missing %q:\n%s", expected, plugin)
+		}
+	}
+	if strings.Contains(plugin, "console.log") {
+		t.Fatal("live inbox plugin must not write to stdout and corrupt --json output")
+	}
+}
+
+func TestDSHEnvironmentAllowsLiveInboxSwitch(t *testing.T) {
+	t.Parallel()
+	filtered := filterDSHEnvironment(map[string]string{
+		"AHA2_LIVE_INBOX":       "0",
+		"AHA2_LIVE_INBOX_DEBUG": "1",
+		"UNRELATED_SECRET":      "must-not-pass",
+	})
+	if filtered["AHA2_LIVE_INBOX"] != "0" || filtered["AHA2_LIVE_INBOX_DEBUG"] != "1" {
+		t.Fatalf("live inbox switches were filtered: %#v", filtered)
+	}
+	if _, ok := filtered["UNRELATED_SECRET"]; ok {
+		t.Fatalf("unrelated environment leaked into DSH: %#v", filtered)
 	}
 }
 

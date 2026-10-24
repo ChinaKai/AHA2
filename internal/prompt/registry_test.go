@@ -1,12 +1,14 @@
 package prompt
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"text/template"
 	"time"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
@@ -356,6 +358,43 @@ func TestEngineRoutesTaskTakeoverWithoutChannelAssistantIdentity(t *testing.T) {
 				t.Fatal("task takeover received channel assistant identity")
 			}
 		})
+	}
+}
+
+func TestAgentAPIResourceMentionsDSHLiveInjection(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	templates, err := NewEngine(database).Templates(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body string
+	for _, item := range templates {
+		if item.ID == "resource.agent-api" {
+			body = item.Content
+		}
+	}
+	render := func(backend string) string {
+		parsed, err := template.New("agent-api").Option("missingkey=error").Parse(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var output bytes.Buffer
+		if err := parsed.Execute(&output, templateData{Backend: backend}); err != nil {
+			t.Fatal(err)
+		}
+		return output.String()
+	}
+	if dsh := render("dsh"); !strings.Contains(dsh, "[AHA live inbox]") || !strings.Contains(dsh, "do not call `inbox/wait` again") {
+		t.Fatalf("DSH Agent API resource missing live-inbox guidance:\n%s", dsh)
+	}
+	if other := render("codex"); strings.Contains(other, "[AHA live inbox]") {
+		t.Fatalf("non-DSH Agent API resource contains DSH live-inbox guidance:\n%s", other)
 	}
 }
 

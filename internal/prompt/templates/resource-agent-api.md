@@ -47,6 +47,8 @@ These live-inbox checkpoints are mandatory:
 
 - After every tool result and before choosing the next action, poll the live inbox.
 - Before sending the final answer, drain it once more.
+{{if eq .Backend "dsh"}}- On DSH an in-process plugin enforces these checkpoints: a claimed message appears as an injected user message starting with `[AHA live inbox]`. It is already acknowledged; do not call `inbox/wait` again for that message.
+{{end}}
 - If a returned message changes the work, handle it before starting any unrelated action.
 - A silent timeout means no new message; continue the current work.
 
