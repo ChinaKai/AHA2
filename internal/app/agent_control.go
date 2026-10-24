@@ -278,7 +278,7 @@ func (s *Service) UpdateAgentMemory(ctx context.Context, claims agentapi.Claims,
 	if err != nil {
 		return domain.TaskMemory{}, err
 	}
-	if err := s.applyMemoryPatch(ctx, call.Task, memory, patch); err != nil {
+	if err := s.applyMemoryPatch(ctx, call.Task, call.Turn, memory, patch); err != nil {
 		return domain.TaskMemory{}, err
 	}
 	return s.store.TaskMemory(ctx, call.Task.ID)
@@ -300,7 +300,16 @@ func (s *Service) ReplaceAgentMemory(ctx context.Context, claims agentapi.Claims
 		if goal == "" || len([]rune(goal)) > 2000 {
 			return domain.TaskMemory{}, fmt.Errorf("current goal is invalid")
 		}
-		if err := s.store.UpdateTaskGoal(ctx, call.Task.ID, goal, timeString(s.now().UTC())); err != nil {
+		changeType := strings.TrimSpace(replacement.GoalChangeType)
+		if changeType == "" {
+			changeType = "revise"
+		}
+		if err := s.store.UpdateTaskGoalWithEvent(ctx, domain.TaskGoalChange{
+			TaskID: call.Task.ID, RoundID: call.Turn.RoundID, TurnID: call.Turn.ID,
+			SourceMessageID: call.Turn.InputMessageID, GoalAfter: goal,
+			ChangeType: changeType, Reason: strings.TrimSpace(replacement.GoalReason),
+			CreatedAt: s.now().UTC(),
+		}); err != nil {
 			return domain.TaskMemory{}, err
 		}
 		memory.CurrentGoal = goal

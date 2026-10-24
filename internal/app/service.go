@@ -53,13 +53,15 @@ type ExecutionEvent struct {
 }
 
 type MemoryPatch struct {
-	CurrentGoal  *string  `json:"current_goal,omitempty"`
-	Decisions    []string `json:"decisions"`
-	Facts        []string `json:"facts"`
-	Excluded     []string `json:"excluded"`
-	Progress     []string `json:"progress"`
-	Verification []string `json:"verification"`
-	NextActions  []string `json:"next_actions"`
+	CurrentGoal    *string  `json:"current_goal,omitempty"`
+	GoalChangeType string   `json:"goal_change_type,omitempty"`
+	GoalReason     string   `json:"goal_reason,omitempty"`
+	Decisions      []string `json:"decisions"`
+	Facts          []string `json:"facts"`
+	Excluded       []string `json:"excluded"`
+	Progress       []string `json:"progress"`
+	Verification   []string `json:"verification"`
+	NextActions    []string `json:"next_actions"`
 }
 
 type KnowledgeCandidate struct {
@@ -864,7 +866,11 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 			previous := previousTurnForAgent(turn, allTurns)
 			return previous.ID != "" && !previous.Status.EndedCleanly()
 		}()
-	includeRecentContext, includeRecoveryHandoff, includeTurnDiagnostics := recoveryContextNeeds(turn, allTurns, reusableSessionErr == nil, handoff.Summary)
+	recoveryRecentContext, includeRecoveryHandoff, includeTurnDiagnostics := recoveryContextNeeds(turn, allTurns, reusableSessionErr == nil, handoff.Summary)
+	// The model needs an explicit dialogue anchor even when a backend session is
+	// resumed. Image-only follow-ups otherwise have no referent except a possibly
+	// stale current_goal.
+	includeRecentContext := includeRecentContextForTurn(turn.AgentID, recoveryRecentContext)
 	promptConversation := conversation.Items
 	if includeRecentContext {
 		if recentConversation, recentErr := s.store.ConversationPageForAgent(ctx, task.ID, turn.AgentID, 0, 0, 200, []string{"chat"}); recentErr == nil {
@@ -1530,7 +1536,7 @@ func elapsedBetween(start, end time.Time) int64 {
 	return end.Sub(start).Milliseconds()
 }
 
-func (s *Service) applyMemoryPatch(ctx context.Context, task domain.Task, memory domain.TaskMemory, patch MemoryPatch) error {
+func (s *Service) applyMemoryPatch(ctx context.Context, task domain.Task, turn domain.Turn, memory domain.TaskMemory, patch MemoryPatch) error {
 	memory.TaskID = task.ID
 	memory.CurrentGoal = task.CurrentGoal
 	if patch.CurrentGoal != nil {
@@ -1538,7 +1544,17 @@ func (s *Service) applyMemoryPatch(ctx context.Context, task domain.Task, memory
 		if goal == "" || len([]rune(goal)) > 2000 {
 			return fmt.Errorf("current goal is invalid")
 		}
-		if err := s.store.UpdateTaskGoal(ctx, task.ID, goal, timeString(s.now().UTC())); err != nil {
+		changeType := strings.TrimSpace(patch.GoalChangeType)
+		if changeType == "" {
+			changeType = "revise"
+		}
+		reason := strings.TrimSpace(patch.GoalReason)
+		now := s.now().UTC()
+		if err := s.store.UpdateTaskGoalWithEvent(ctx, domain.TaskGoalChange{
+			TaskID: task.ID, RoundID: turn.RoundID, TurnID: turn.ID,
+			SourceMessageID: turn.InputMessageID, GoalAfter: goal,
+			ChangeType: changeType, Reason: reason, CreatedAt: now,
+		}); err != nil {
 			return err
 		}
 		memory.CurrentGoal = goal
@@ -1801,6 +1817,10 @@ func recoveryContextNeeds(current domain.Turn, turns []domain.Turn, hasReusableS
 	diagnostics := abnormalPrevious || current.Attempt > 1
 	recent := !hasReusableSession || strings.TrimSpace(handoff) != "" || abnormalPrevious
 	return recent, recoveryHandoff, diagnostics
+}
+
+func includeRecentContextForTurn(agentID string, recovery bool) bool {
+	return agentID == "main" || recovery
 }
 
 func (s *Service) spawnAgentTurns(

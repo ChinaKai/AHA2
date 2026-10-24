@@ -128,7 +128,7 @@ func (s *Server) updateAgentMemory(writer http.ResponseWriter, request *http.Req
 		return
 	}
 	s.audit(request, "agent.memory.update", "task", claims.TaskID, map[string]any{"mode": mode})
-	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "memory": memory})
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "memory": compactTaskMemory(memory)})
 }
 
 func (s *Server) addAgentProgressMessage(writer http.ResponseWriter, request *http.Request) {
@@ -465,10 +465,22 @@ func validMemoryPatch(patch app.MemoryPatch) bool {
 	}
 	if patch.CurrentGoal != nil {
 		goal := strings.TrimSpace(*patch.CurrentGoal)
-		if goal == "" || len([]rune(goal)) > 2000 {
+		reason := strings.TrimSpace(patch.GoalReason)
+		changeType := strings.TrimSpace(patch.GoalChangeType)
+		if changeType == "" {
+			changeType = "revise"
+		}
+		if goal == "" || len([]rune(goal)) > 2000 || reason == "" || len([]rune(reason)) > 500 {
+			return false
+		}
+		switch changeType {
+		case "set", "revise", "pause", "resume", "complete", "reopen":
+		default:
 			return false
 		}
 		count++
+	} else if strings.TrimSpace(patch.GoalReason) != "" || strings.TrimSpace(patch.GoalChangeType) != "" {
+		return false
 	}
 	return count > 0 && count <= 100
 }

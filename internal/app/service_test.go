@@ -72,6 +72,18 @@ func TestRecoveryContextNeedsUsesSessionAndPreviousTurnState(t *testing.T) {
 	}
 }
 
+func TestMainAlwaysReceivesRecentContext(t *testing.T) {
+	if !includeRecentContextForTurn("main", false) {
+		t.Fatal("main turn did not require a recent dialogue anchor")
+	}
+	if includeRecentContextForTurn("sub-001", false) {
+		t.Fatal("healthy sub-agent turn received unnecessary recent context")
+	}
+	if !includeRecentContextForTurn("sub-001", true) {
+		t.Fatal("sub-agent recovery did not receive recent context")
+	}
+}
+
 func TestSessionHomeSupportGatesWriterCleanup(t *testing.T) {
 	t.Parallel()
 	// Writer cleanup depends on being able to address one backend session's own

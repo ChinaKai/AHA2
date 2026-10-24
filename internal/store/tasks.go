@@ -39,6 +39,12 @@ func (s *Store) CreateTask(ctx context.Context, item domain.Task) error {
 	if err != nil {
 		return err
 	}
+	if err := insertTaskGoalEventTx(ctx, tx, domain.TaskGoalChange{
+		ID: domain.NewID("goal"), TaskID: item.ID, GoalAfter: item.CurrentGoal,
+		ChangeType: "set", Reason: "Initial task goal", CreatedAt: item.CreatedAt,
+	}); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO task_agents(task_id,agent_id,role,status,title,runtime_config_snapshot_id,inherit_main,last_read_sequence,created_at,updated_at)
 		VALUES(?,?,?,?,?,?,?,?,?,?)`,
@@ -76,6 +82,12 @@ func (s *Store) CreateTaskWithSnapshot(ctx context.Context, snapshot domain.Runt
 		return domain.Task{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO task_memory(task_id,current_goal,updated_at) VALUES(?,?,?)`, item.ID, item.CurrentGoal, timeString(item.CreatedAt)); err != nil {
+		return domain.Task{}, err
+	}
+	if err := insertTaskGoalEventTx(ctx, tx, domain.TaskGoalChange{
+		ID: domain.NewID("goal"), TaskID: item.ID, GoalAfter: item.CurrentGoal,
+		ChangeType: "set", Reason: "Initial task goal", CreatedAt: item.CreatedAt,
+	}); err != nil {
 		return domain.Task{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `
@@ -357,8 +369,10 @@ func (s *Store) UpdateTaskStatus(ctx context.Context, id string, from, to domain
 }
 
 func (s *Store) UpdateTaskGoal(ctx context.Context, id, goal, updatedAt string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE tasks SET current_goal=?,updated_at=? WHERE id=?`, goal, updatedAt, id)
-	return err
+	return s.UpdateTaskGoalWithEvent(ctx, domain.TaskGoalChange{
+		TaskID: id, GoalAfter: goal, ChangeType: "revise", Reason: "Goal updated",
+		CreatedAt: parseTime(updatedAt),
+	})
 }
 
 func (s *Store) UpdateTaskTitle(ctx context.Context, id, title, updatedAt string) error {
@@ -779,7 +793,108 @@ func (s *Store) TaskMemory(ctx context.Context, taskID string) (domain.TaskMemor
 	item.NextActions = decodeJSON(nextActions, []string{})
 	item.Extra = decodeJSON(extra, map[string]any{})
 	item.UpdatedAt = parseTime(updatedAt)
+	if err != nil {
+		return item, err
+	}
+	item.GoalHistory, err = s.TaskGoalHistory(ctx, taskID, 20)
 	return item, err
+}
+
+func (s *Store) TaskGoalHistory(ctx context.Context, taskID string, limit int) ([]domain.TaskGoalChange, error) {
+	if limit <= 0 || limit > 20 {
+		limit = 20
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT sequence,id,task_id,round_id,turn_id,source_message_id,
+		       goal_before,goal_after,change_type,reason,created_at
+		FROM (
+			SELECT sequence,id,task_id,round_id,turn_id,source_message_id,
+			       goal_before,goal_after,change_type,reason,created_at
+			FROM task_goal_events
+			WHERE task_id=?
+			ORDER BY sequence DESC
+			LIMIT ?
+		)
+		ORDER BY sequence`, taskID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []domain.TaskGoalChange{}
+	for rows.Next() {
+		var item domain.TaskGoalChange
+		var createdAt string
+		if err := rows.Scan(
+			&item.Sequence, &item.ID, &item.TaskID, &item.RoundID, &item.TurnID,
+			&item.SourceMessageID, &item.GoalBefore, &item.GoalAfter,
+			&item.ChangeType, &item.Reason, &createdAt,
+		); err != nil {
+			return nil, err
+		}
+		item.CreatedAt = parseTime(createdAt)
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
+func (s *Store) UpdateTaskGoalWithEvent(ctx context.Context, event domain.TaskGoalChange) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := tx.QueryRowContext(ctx, `SELECT current_goal FROM tasks WHERE id=?`, event.TaskID).Scan(&event.GoalBefore); err != nil {
+		return err
+	}
+	event.GoalAfter = strings.TrimSpace(event.GoalAfter)
+	event.Reason = strings.TrimSpace(event.Reason)
+	event.ChangeType = strings.TrimSpace(event.ChangeType)
+	if event.GoalAfter == "" || event.Reason == "" || !validGoalChangeType(event.ChangeType) {
+		return fmt.Errorf("invalid task goal change")
+	}
+	if event.ID == "" {
+		event.ID = domain.NewID("goal")
+	}
+	if event.CreatedAt.IsZero() {
+		event.CreatedAt = time.Now().UTC()
+	}
+	if event.GoalBefore == event.GoalAfter && event.ChangeType != "pause" &&
+		event.ChangeType != "resume" && event.ChangeType != "complete" && event.ChangeType != "reopen" {
+		return tx.Commit()
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE tasks SET current_goal=?,updated_at=? WHERE id=?`,
+		event.GoalAfter, timeString(event.CreatedAt), event.TaskID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE task_memory SET current_goal=?,updated_at=? WHERE task_id=?`,
+		event.GoalAfter, timeString(event.CreatedAt), event.TaskID); err != nil {
+		return err
+	}
+	if err := insertTaskGoalEventTx(ctx, tx, event); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func validGoalChangeType(value string) bool {
+	switch value {
+	case "set", "revise", "pause", "resume", "complete", "reopen":
+		return true
+	default:
+		return false
+	}
+}
+
+func insertTaskGoalEventTx(ctx context.Context, tx *sql.Tx, event domain.TaskGoalChange) error {
+	_, err := tx.ExecContext(ctx, `
+		INSERT INTO task_goal_events(
+			id,task_id,round_id,turn_id,source_message_id,goal_before,
+			goal_after,change_type,reason,created_at
+		) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+		event.ID, event.TaskID, event.RoundID, event.TurnID, event.SourceMessageID,
+		event.GoalBefore, event.GoalAfter, event.ChangeType, event.Reason, timeString(event.CreatedAt),
+	)
+	return err
 }
 
 func (s *Store) UpsertTaskMemory(ctx context.Context, item domain.TaskMemory) error {

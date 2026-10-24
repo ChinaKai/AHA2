@@ -47,7 +47,9 @@ POST  /api/v1/agent/tasks
 GET   /api/v1/agent/tasks/{task}
 ```
 
-Task Memory API 继续支持 `{"append":{...}}` 与 `{"replace":{...}}`，两种模式都可携带 `current_goal`。Task Memory 不再进入默认 Prompt 或 `Available context`；普通 Turn 不应为了恢复语义而主动读取或维护它。只有显式的 Task 状态维护流程才应调用该接口，使用 replace 时必须由调用方保证携带所有仍有效内容。进度消息会立即写入 Conversation 并通过 Event Hub 推送。
+Task Memory API 继续支持 `{"append":{...}}` 与 `{"replace":{...}}`，两种模式都可携带 `current_goal`。目标真实变化时必须同时提交 `goal_change_type`（`set`、`revise`、`pause`、`resume`、`complete` 或 `reopen`）与 `goal_reason`；服务端会把变更记为独立目标事件并更新 Task 的权威目标。普通补充、执行进度和结果反馈不应重复更新目标。
+
+Task Memory 的旧 decisions/facts/progress/verification/next_actions 数组只为兼容和迁移保留，不再进入默认 Prompt 或 Web/Agent API 响应。Task Memory 页面和 Agent 状态使用当前目标及最近 20 次目标变更。普通 Turn 不应为了恢复语义而主动读取或维护旧数组；使用 replace 时必须由调用方保证携带所有仍有效内容。进度消息会立即写入 Conversation 并通过 Event Hub 推送。
 只有 Main Agent 可以修改 Memory 和提交协作批次；协作请求提交后立即由 AHA 编排。
 最终回复只包含自然语言，不再携带 Turn checkpoint。
 

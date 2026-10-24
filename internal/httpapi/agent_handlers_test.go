@@ -329,15 +329,39 @@ func TestAgentStateKnowledgeAndSkillAPIs(t *testing.T) {
 		t.Fatalf("alternate snapshot=%#v err=%v", alternateSnapshot, err)
 	}
 
-	response = agentRequest(t, server.URL+"/api/v1/agent/turn/memory", http.MethodPatch, token, map[string]any{"append": map[string]any{"current_goal": "Refined active objective", "facts": []string{"API fact"}}})
+	response = agentRequest(t, server.URL+"/api/v1/agent/turn/memory", http.MethodPatch, token, map[string]any{"append": map[string]any{
+		"current_goal": "Unreasoned objective",
+	}})
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("memory goal without reason status=%d", response.StatusCode)
+	}
+	response.Body.Close()
+	response = agentRequest(t, server.URL+"/api/v1/agent/turn/memory", http.MethodPatch, token, map[string]any{"append": map[string]any{
+		"current_goal": "Refined active objective", "goal_change_type": "revise",
+		"goal_reason": "The requested objective changed", "facts": []string{"API fact"},
+	}})
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("memory status=%d", response.StatusCode)
 	}
+	var memoryResponse struct {
+		Memory domain.TaskMemory `json:"memory"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&memoryResponse); err != nil {
+		t.Fatal(err)
+	}
 	response.Body.Close()
+	if len(memoryResponse.Memory.Facts) != 0 || len(memoryResponse.Memory.GoalHistory) == 0 {
+		t.Fatalf("memory response was not compact: %#v", memoryResponse.Memory)
+	}
 	memory, _ := database.TaskMemory(ctx, task.ID)
 	updatedGoalTask, _ := database.Task(ctx, task.ID)
 	if len(memory.Facts) != 1 || memory.Facts[0] != "API fact" || memory.CurrentGoal != "Refined active objective" || updatedGoalTask.CurrentGoal != memory.CurrentGoal {
 		t.Fatalf("memory=%#v", memory)
+	}
+	lastGoalChange := memory.GoalHistory[len(memory.GoalHistory)-1]
+	if lastGoalChange.GoalAfter != "Refined active objective" || lastGoalChange.ChangeType != "revise" ||
+		lastGoalChange.Reason != "The requested objective changed" || lastGoalChange.TurnID == "" {
+		t.Fatalf("goal change=%#v", lastGoalChange)
 	}
 	response = agentRequest(t, server.URL+"/api/v1/agent/turn/memory", http.MethodPatch, token, map[string]any{"replace": map[string]any{
 		"decisions": []string{"Keep the current decision"}, "facts": []string{"Compacted fact", "Compacted fact"},

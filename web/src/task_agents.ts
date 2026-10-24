@@ -247,9 +247,22 @@ export function renderTaskContextSummary(detail: TaskDetail): string {
 }
 
 export function renderTaskMemory(memory?: TaskMemory): string {
-  const list = (title: string, values: string[] = []) =>
-    `<section class="memory-block"><strong>${title}</strong>${values.length ? `<ul>${values.map(item => `<li>${escapeHTML(item)}</li>`).join("")}</ul>` : "<small>-</small>"}</section>`;
-  return `<div class="memory-goal"><small>Current Goal</small><p>${escapeHTML(memory?.current_goal || "-")}</p></div>${list("事实", memory?.facts)}${list("决策", memory?.decisions)}${list("排除项", memory?.excluded)}${list("进度", memory?.progress)}${list("验证", memory?.verification)}${list("下一步", memory?.next_actions)}`;
+  const labels: Record<string, string> = {
+    set: "设定", revise: "调整", pause: "暂停", resume: "恢复", complete: "完成", reopen: "重新打开",
+  };
+  const history = [...(memory?.goal_history || [])].slice(-20);
+  const timeline = history.map((event, index) => {
+    const date = event.created_at ? new Date(event.created_at).toLocaleString([], {
+      month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
+    }) : "";
+    return `<li class="memory-goal-event">
+      <div class="memory-goal-event-head"><span>${String(index + 1).padStart(2, "0")} · ${escapeHTML(labels[event.change_type] || event.change_type)}</span>${date ? `<time>${escapeHTML(date)}</time>` : ""}</div>
+      <p class="memory-goal-reason">${escapeHTML(event.reason || "-")}</p>
+      <div class="memory-goal-transition">${event.goal_before ? `<span>${escapeHTML(event.goal_before)}</span><b>→</b>` : ""}<strong>${escapeHTML(event.goal_after || "-")}</strong></div>
+    </li>`;
+  }).join("");
+  return `<div class="memory-goal"><small>Current Goal</small><p>${escapeHTML(memory?.current_goal || "-")}</p></div>
+    <section class="memory-goal-timeline"><header><strong>目标变更</strong><small>最近 ${history.length}/20 次 · 按时间顺序</small></header>${timeline ? `<ol>${timeline}</ol>` : `<p class="memory-empty">尚无目标变更记录</p>`}</section>`;
 }
 
 function renderOrchestrationCard(item: ConversationItem, detail: TaskDetail): string {

@@ -2790,5 +2790,38 @@ func (s *Store) migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(79, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
 		return fmt.Errorf("record schema v79: %w", err)
 	}
+	var hasV80 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=80)`).Scan(&hasV80)
+	if !hasV80 {
+		for _, statement := range []string{
+			`CREATE TABLE IF NOT EXISTS task_goal_events (
+				sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+				id TEXT NOT NULL UNIQUE,
+				task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+				round_id TEXT NOT NULL DEFAULT '',
+				turn_id TEXT NOT NULL DEFAULT '',
+				source_message_id TEXT NOT NULL DEFAULT '',
+				goal_before TEXT NOT NULL DEFAULT '',
+				goal_after TEXT NOT NULL,
+				change_type TEXT NOT NULL CHECK(change_type IN ('set','revise','pause','resume','complete','reopen')),
+				reason TEXT NOT NULL,
+				created_at TEXT NOT NULL
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_task_goal_events_task_sequence
+			 ON task_goal_events(task_id,sequence DESC)`,
+			`INSERT OR IGNORE INTO task_goal_events(
+				id,task_id,round_id,turn_id,source_message_id,goal_before,goal_after,change_type,reason,created_at
+			)
+			SELECT 'goal_migrated_' || id,id,'','','','',current_goal,'set','Migrated existing task goal',updated_at
+			FROM tasks WHERE current_goal<>''`,
+		} {
+			if _, err := s.db.ExecContext(ctx, statement); err != nil {
+				return fmt.Errorf("apply schema v80: %w", err)
+			}
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(80, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v80: %w", err)
+	}
 	return nil
 }

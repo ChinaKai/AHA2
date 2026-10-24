@@ -1220,6 +1220,28 @@ test("task agent config selects skills explicitly", async () => {
   assert.match(html, /name="skill_ids" value="skill-1" checked/);
 });
 
+test("task memory renders a bounded chronological goal timeline", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const {renderTaskMemory} = await import(pathToFileURL(resolve(root, "dist", "task_agents.js")));
+  const goal_history = Array.from({length: 21}, (_, index) => ({
+    sequence: index + 1,
+    id: `goal-${index + 1}`,
+    task_id: "task-1",
+    goal_before: index ? `goal-${index}` : "",
+    goal_after: `goal-${index + 1}`,
+    change_type: index ? "revise" : "set",
+    reason: `reason-${index + 1}`,
+    created_at: `2026-10-23T12:${String(index).padStart(2, "0")}:00Z`,
+  }));
+  const html = renderTaskMemory({task_id: "task-1", current_goal: "goal-21", goal_history});
+  assert.match(html, /最近 20\/20 次 · 按时间顺序/);
+  assert.doesNotMatch(html, /reason-1</);
+  assert.match(html, /reason-2</);
+  assert.match(html, /reason-21</);
+  assert.match(html, /goal-20<\/span><b>→<\/b><strong>goal-21<\/strong>/);
+  assert.doesNotMatch(html, /memory-block/);
+});
+
 // The Agent config dialog is the only place an existing Task's runtime can be
 // edited, so the accelerated tier has to be offered there, seeded from the
 // stored snapshot, and gated on the Backend that is selected right now.

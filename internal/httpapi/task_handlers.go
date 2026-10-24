@@ -403,7 +403,7 @@ func (s *Server) taskDetail(writer http.ResponseWriter, request *http.Request) {
 				turns = append(turns, turn)
 			}
 		}
-		writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "task": mirror.Task, "latest_round": latest, "turns": turns, "agents": mirror.Agents, "memory": mirror.Memory, "hardware": mirror.Hardware, "event_cursor": 0, "server_time_ms": time.Now().UTC().UnixMilli()})
+		writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "task": mirror.Task, "latest_round": latest, "turns": turns, "agents": mirror.Agents, "memory": compactTaskMemory(mirror.Memory), "hardware": mirror.Hardware, "event_cursor": 0, "server_time_ms": time.Now().UTC().UnixMilli()})
 		return
 	}
 	s.decorateChannelTask(request.Context(), &task)
@@ -418,7 +418,7 @@ func (s *Server) taskDetail(writer http.ResponseWriter, request *http.Request) {
 	applyTurnTimings(turns, now)
 	s.applyTurnContextUsage(request.Context(), turns)
 	writeJSON(writer, http.StatusOK, map[string]any{
-		"ok": true, "task": task, "latest_round": round, "turns": turns, "agents": agents, "memory": memory,
+		"ok": true, "task": task, "latest_round": round, "turns": turns, "agents": agents, "memory": compactTaskMemory(memory),
 		"hardware":           hardwareGroups,
 		"hardware_resources": hardwareResources,
 		"event_cursor":       s.store.MaxEventSequence(request.Context(), taskID),
@@ -503,7 +503,7 @@ func (s *Server) contextForAgent(writer http.ResponseWriter, request *http.Reque
 			writeError(writer, http.StatusNotFound, "task_not_found")
 			return
 		}
-		writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "task": mirror.Task, "turns": mirror.Turns, "memory": mirror.Memory, "context": map[string]any{"agent_id": agentID, "usage": map[string]any{}, "metrics": map[string]any{}}})
+		writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "task": mirror.Task, "turns": mirror.Turns, "memory": compactTaskMemory(mirror.Memory), "context": map[string]any{"agent_id": agentID, "usage": map[string]any{}, "metrics": map[string]any{}}})
 		return
 	}
 	memory, _ := s.store.TaskMemory(request.Context(), taskID)
@@ -551,7 +551,7 @@ func (s *Server) contextForAgent(writer http.ResponseWriter, request *http.Reque
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{
 		"ok": true, "task": task, "latest_round": round, "turns": turns,
-		"memory": memory, "context": contextData,
+		"memory": compactTaskMemory(memory), "context": contextData,
 	})
 }
 

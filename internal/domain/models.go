@@ -313,17 +313,17 @@ type EnvGroup struct {
 }
 
 type RuntimeConfigSnapshot struct {
-	ID                  string    `json:"id"`
-	WorkspaceID         string    `json:"workspace_id"`
-	Backend             string    `json:"backend"`
-	BackendVersion      string    `json:"backend_version,omitempty"`
-	ModelID             string    `json:"model_id"`
-	WireModel           string    `json:"wire_model"`
-	EnvGroupID          string    `json:"env_group_id"`
-	EnvGroupRevision    int       `json:"env_group_revision"`
-	CodexAccountID      string    `json:"codex_account_id,omitempty"`
-	ProxyEnabled        bool      `json:"proxy_enabled"`
-	ReasoningEffort     string    `json:"reasoning_effort"`
+	ID               string `json:"id"`
+	WorkspaceID      string `json:"workspace_id"`
+	Backend          string `json:"backend"`
+	BackendVersion   string `json:"backend_version,omitempty"`
+	ModelID          string `json:"model_id"`
+	WireModel        string `json:"wire_model"`
+	EnvGroupID       string `json:"env_group_id"`
+	EnvGroupRevision int    `json:"env_group_revision"`
+	CodexAccountID   string `json:"codex_account_id,omitempty"`
+	ProxyEnabled     bool   `json:"proxy_enabled"`
+	ReasoningEffort  string `json:"reasoning_effort"`
 	// FastMode requests the provider's accelerated service tier. Codex calls it
 	// "Fast" (service_tier=priority): faster, and billed at a higher rate.
 	FastMode            bool      `json:"fast_mode"`
@@ -461,16 +461,31 @@ type BackendSession struct {
 }
 
 type TaskMemory struct {
-	TaskID       string         `json:"task_id"`
-	CurrentGoal  string         `json:"current_goal"`
-	Decisions    []string       `json:"decisions"`
-	Facts        []string       `json:"facts"`
-	Excluded     []string       `json:"excluded"`
-	Progress     []string       `json:"progress"`
-	Verification []string       `json:"verification"`
-	NextActions  []string       `json:"next_actions"`
-	Extra        map[string]any `json:"extra,omitempty"`
-	UpdatedAt    time.Time      `json:"updated_at"`
+	TaskID       string           `json:"task_id"`
+	CurrentGoal  string           `json:"current_goal"`
+	Decisions    []string         `json:"decisions,omitempty"`
+	Facts        []string         `json:"facts,omitempty"`
+	Excluded     []string         `json:"excluded,omitempty"`
+	Progress     []string         `json:"progress,omitempty"`
+	Verification []string         `json:"verification,omitempty"`
+	NextActions  []string         `json:"next_actions,omitempty"`
+	GoalHistory  []TaskGoalChange `json:"goal_history,omitempty"`
+	Extra        map[string]any   `json:"extra,omitempty"`
+	UpdatedAt    time.Time        `json:"updated_at"`
+}
+
+type TaskGoalChange struct {
+	Sequence        int64     `json:"sequence"`
+	ID              string    `json:"id"`
+	TaskID          string    `json:"task_id"`
+	RoundID         string    `json:"round_id,omitempty"`
+	TurnID          string    `json:"turn_id,omitempty"`
+	SourceMessageID string    `json:"source_message_id,omitempty"`
+	GoalBefore      string    `json:"goal_before,omitempty"`
+	GoalAfter       string    `json:"goal_after"`
+	ChangeType      string    `json:"change_type"`
+	Reason          string    `json:"reason"`
+	CreatedAt       time.Time `json:"created_at"`
 }
 
 type KnowledgeEntry struct {

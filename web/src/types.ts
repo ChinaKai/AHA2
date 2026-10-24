@@ -509,12 +509,28 @@ export interface ConversationPage {
 export interface TaskMemory {
   task_id: string;
   current_goal: string;
-  decisions: string[];
-  facts: string[];
-  excluded: string[];
-  progress: string[];
-  verification: string[];
-  next_actions: string[];
+  goal_history?: TaskGoalChange[];
+  decisions?: string[];
+  facts?: string[];
+  excluded?: string[];
+  progress?: string[];
+  verification?: string[];
+  next_actions?: string[];
+  updated_at?: string;
+}
+
+export interface TaskGoalChange {
+  sequence: number;
+  id: string;
+  task_id: string;
+  round_id?: string;
+  turn_id?: string;
+  source_message_id?: string;
+  goal_before?: string;
+  goal_after: string;
+  change_type: "set" | "revise" | "pause" | "resume" | "complete" | "reopen";
+  reason: string;
+  created_at: string;
 }
 
 export interface HardwareSerialConfig {
