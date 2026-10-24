@@ -251,12 +251,21 @@ func commandUnavailable(result Result, err error) bool {
 }
 
 func safeProbeDetail(item domain.Workspace, result Result, err error) string {
+	// Backend CLIs differ in where they write failures: DSH and Claude use
+	// stderr, while several Go/Node CLIs print usage to stdout. Dropping stdout
+	// turns a readable "unknown flag --version" into a bare "exit code 1", so
+	// fall back to it before giving up on the text.
 	detail := strings.TrimSpace(result.Stderr)
+	if detail == "" {
+		detail = strings.TrimSpace(result.Stdout)
+	}
 	if detail == "" && err != nil {
 		detail = err.Error()
 	}
 	if detail == "" {
 		detail = fmt.Sprintf("exit code %d", result.ExitCode)
+	} else if result.ExitCode != 0 {
+		detail = fmt.Sprintf("exit code %d: %s", result.ExitCode, detail)
 	}
 	return safeDisplayText(item, detail)
 }
