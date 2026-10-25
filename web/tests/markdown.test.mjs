@@ -65,6 +65,18 @@ test("markdown escapes raw HTML and rejects active URL schemes", async () => {
   assert.match(renderMarkdown("![embedded](data:image/png;base64,iVBORw0KGgo=)"), /<img src="data:image\/png;base64,iVBORw0KGgo=" alt="embedded"/);
 });
 
+test("markdown keeps underscores inside words and still renders real emphasis", async () => {
+  const {renderMarkdown} = await markdownModule();
+  for (const literal of ["测_试_消息", "snake_case_name", "a_b_c", "MONTH_DAY"]) {
+    const html = renderMarkdown(literal);
+    assert.match(html, new RegExp(`<p>${literal}</p>`), `${literal} must stay literal`);
+    assert.doesNotMatch(html, /<em>|<strong>/);
+  }
+  assert.match(renderMarkdown("_italic_"), /<p><em>italic<\/em><\/p>/);
+  assert.match(renderMarkdown("__strong__"), /<p><strong>strong<\/strong><\/p>/);
+  assert.match(renderMarkdown("*star*"), /<p><em>star<\/em><\/p>/);
+});
+
 test("conversation preview and full message share the safe markdown renderer", async () => {
   const {renderConversationList} = await import(pathToFileURL(resolve(root, "dist", "conversation_ui.js")));
   const summary = `# Preview\n\n[unsafe](javascript:alert(1)) ${"long ".repeat(190)}`;

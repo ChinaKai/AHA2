@@ -120,6 +120,25 @@ function plainLabel(value: string): string {
   return value.replace(/\\([\\`*_[\]{}()#+.!~-])/g, "$1").replace(/[`*_~]/g, "");
 }
 
+function isWordCharacter(character: string | undefined): boolean {
+  return character !== undefined && /[\p{L}\p{N}]/u.test(character);
+}
+
+// CommonMark does not let `_` open or close emphasis inside a word, so
+// snake_case, 测_试_消息 or a bare a_b stay exactly as typed instead of
+// losing their underscores to italics. `*` keeps its intraword behaviour.
+function emphasisEnd(source: string, index: number, marker: string): number {
+  const start = index + marker.length;
+  if (!marker.startsWith("_")) return source.indexOf(marker, start);
+  if (start >= source.length || /\s/.test(source[start]) || isWordCharacter(source[index - 1])) return -1;
+  let end = source.indexOf(marker, start);
+  while (end > start) {
+    if (!isWordCharacter(source[end + marker.length]) && !/\s/.test(source[end - 1])) return end;
+    end = source.indexOf(marker, end + marker.length);
+  }
+  return -1;
+}
+
 function renderInline(source: string, depth = 0): string {
   if (depth > 24) return escapeHTML(source).replaceAll("\n", "<br>");
   let output = "";
@@ -171,7 +190,7 @@ function renderInline(source: string, depth = 0): string {
     ] as const).find(([marker]) => source.startsWith(marker, index));
     if (emphasis) {
       const [marker, tag] = emphasis;
-      const end = source.indexOf(marker, index + marker.length);
+      const end = emphasisEnd(source, index, marker);
       if (end > index + marker.length) {
         output += `<${tag}>${renderInline(source.slice(index + marker.length, end), depth + 1)}</${tag}>`;
         index = end + marker.length;
