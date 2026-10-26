@@ -325,7 +325,7 @@ export function renderHardwarePanel(detail: TaskDetail): string {
         <div class="hardware-console-actions">
           <button type="button" id="hardware-connect" ${canConnect && !connected ? "" : "disabled"}>连接</button>
           <button type="button" id="hardware-disconnect" ${connected ? "" : "disabled"}>断开</button>
-          <button type="button" id="hardware-auto-copy" class="hardware-auto-copy${hardwareAutoCopyEnabled() ? " active" : ""}" aria-pressed="${hardwareAutoCopyEnabled() ? "true" : "false"}" title="选中终端内容后自动复制到剪贴板">选中即复制</button>
+          <button type="button" id="hardware-auto-copy" class="terminal-toggle${hardwareAutoCopyEnabled() ? " active" : ""}" aria-pressed="${hardwareAutoCopyEnabled() ? "true" : "false"}" title="选中终端内容后自动复制到剪贴板">选中即复制</button>
           <button type="button" id="hardware-copy-output" title="复制终端内容（有选中时只复制选中部分）">${icon("copy")}</button>
           <button type="button" id="hardware-clear-output" title="清空当前显示">${icon("close")}</button>
         </div>
@@ -344,7 +344,7 @@ export function renderHardwarePanel(detail: TaskDetail): string {
       <form id="hardware-send-form" class="hardware-send">
         <select name="encoding" aria-label="发送格式" ${serialSelected ? "" : "disabled"}><option value="text" ${sendEncoding === "text" ? "selected" : ""}>文本</option><option value="hex" ${sendEncoding === "hex" ? "selected" : ""}>HEX</option></select>
         <textarea name="data" rows="1" placeholder="${readOnly ? "当前为只读" : "输入命令或数据"}" ${readOnly || !connected ? "disabled" : ""}>${escapeHTML(state.sendData)}</textarea>
-        <label title="仅文本模式发送后追加回车换行"><input name="newline" type="checkbox" ${state.sendNewline ? "checked" : ""} ${sendEncoding === "hex" ? "disabled" : ""}>CRLF</label>
+        <button type="button" id="hardware-newline" class="terminal-toggle${state.sendNewline ? " active" : ""}" aria-pressed="${state.sendNewline ? "true" : "false"}" title="仅文本模式发送后追加回车换行" ${sendEncoding === "hex" ? "disabled" : ""}>CRLF</button>
         <button type="submit" class="primary" title="发送" aria-label="发送" ${readOnly || !connected ? "disabled" : ""}>${icon("send")}</button>
       </form>
       <div id="hardware-inline-error" class="hardware-inline-error">${escapeHTML(stream.lastError || stream.status?.error || "")}</div>
@@ -527,14 +527,20 @@ export function bindHardwarePanel(detail: TaskDetail, notify: Notice): void {
   const readSendForm = () => {
     if (!sendForm) return;
     const data = new FormData(sendForm);
-    const newline = sendForm.querySelector<HTMLInputElement>('input[name="newline"]');
+    const newline = sendForm.querySelector<HTMLButtonElement>("#hardware-newline");
     state.sendEncoding = state.transport === "serial"
       ? String(data.get("encoding") || "text") as "text" | "hex"
       : "text";
-    state.sendNewline = newline?.checked ?? state.sendNewline;
+    state.sendNewline = newline?.getAttribute("aria-pressed") === "true";
     state.sendData = String(data.get("data") || "");
     if (newline) newline.disabled = state.sendEncoding === "hex";
   };
+  sendForm?.querySelector<HTMLButtonElement>("#hardware-newline")?.addEventListener("click", event => {
+    const button = event.currentTarget as HTMLButtonElement;
+    state.sendNewline = button.getAttribute("aria-pressed") !== "true";
+    button.setAttribute("aria-pressed", state.sendNewline ? "true" : "false");
+    button.classList.toggle("active", state.sendNewline);
+  });
   sendForm?.addEventListener("input", readSendForm);
   sendForm?.addEventListener("change", readSendForm);
   sendForm?.addEventListener("submit", event => {
