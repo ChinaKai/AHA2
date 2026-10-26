@@ -178,7 +178,9 @@ func openADBTerminal(ctx context.Context, endpoint string) (io.ReadWriteCloser, 
 	if err != nil {
 		return nil, err
 	}
-	connectCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	// Must outlast the authorization wait, or the deadline would cut the window
+	// in which the operator can confirm the prompt.
+	connectCtx, cancel := context.WithTimeout(ctx, adbAuthorizeWait+15*time.Second)
 	defer cancel()
 	resolvedEndpoint, err := connectADB(connectCtx, executable, endpoint)
 	if err != nil {
@@ -238,22 +240,44 @@ func connectADB(ctx context.Context, executable, endpoint string) (string, error
 	}
 	// `adb connect` reports success for a device it cannot actually use: until
 	// the device accepts this computer's ADB key it stays "unauthorized", and
-	// the shell below would fail with a bare exit code. Check the real state so
-	// the operator is told to confirm the prompt on the device, which is the
-	// only fix for a TV or phone that never paired.
-	if state, stateErr := adbDeviceState(ctx, executable, resolvedEndpoint); stateErr == nil {
+	// the shell below would fail with a bare exit code. Wait for that
+	// authorization instead of failing on the first probe, because the dialog
+	// usually appears only after the connection is attempted: the operator taps
+	// 允许 a second or two later and the session then opens by itself.
+	deadline := time.Now().Add(adbAuthorizeWait)
+	for {
+		state, stateErr := adbDeviceState(ctx, executable, resolvedEndpoint)
+		if stateErr != nil {
+			// No usable state on this adb build: keep the old behaviour and let
+			// the shell report whatever is really wrong, instead of stalling.
+			return resolvedEndpoint, nil
+		}
 		switch state {
 		case "", "device":
-		case "unauthorized":
-			return "", fmt.Errorf("设备未授权（%s）：请在电视/手机上确认「允许 USB 调试」弹窗（建议勾选一律允许）。若没有弹窗，先在开发者选项里「撤销 USB 调试授权」再重连本机。", resolvedEndpoint)
+			return resolvedEndpoint, nil
 		case "offline":
 			return "", fmt.Errorf("设备处于离线状态（%s）：请在设备上重新确认授权，或关闭再打开该设备的网络调试后重试。", resolvedEndpoint)
+		case "unauthorized":
+			if time.Now().After(deadline) {
+				return "", fmt.Errorf("设备未授权（%s）：请在电视/手机上确认「允许 USB 调试」弹窗（建议勾选一律允许）。若没有弹窗，先在开发者选项里「撤销 USB 调试授权」再重连本机。", resolvedEndpoint)
+			}
 		default:
 			return "", fmt.Errorf("ADB 设备状态异常（%s）：%s", resolvedEndpoint, state)
 		}
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(adbAuthorizePollInterval):
+		}
 	}
-	return resolvedEndpoint, nil
 }
+
+// Authorization is confirmed by a human tapping a dialog on the device, so give
+// them a window before declaring the connection unusable. Tests shrink these.
+var (
+	adbAuthorizeWait         = 30 * time.Second
+	adbAuthorizePollInterval = 700 * time.Millisecond
+)
 
 // adbDeviceState reports "device", "unauthorized", "offline" or "" when the
 // state cannot be read. A failure here must not block a working connection.

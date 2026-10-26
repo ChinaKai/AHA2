@@ -11,6 +11,14 @@ import (
 	"time"
 )
 
+// shrinkADBAuthorizeWait keeps tests fast; the production window is 30s.
+func shrinkADBAuthorizeWait(t *testing.T, wait time.Duration) {
+	t.Helper()
+	previousWait, previousInterval := adbAuthorizeWait, adbAuthorizePollInterval
+	adbAuthorizeWait, adbAuthorizePollInterval = wait, 5*time.Millisecond
+	t.Cleanup(func() { adbAuthorizeWait, adbAuthorizePollInterval = previousWait, previousInterval })
+}
+
 func TestResolveADBExecutableFindsWingetPackage(t *testing.T) {
 	root := t.TempDir()
 	executable := filepath.Join(
@@ -176,6 +184,7 @@ exit 2
 	if err := os.WriteFile(executable, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	shrinkADBAuthorizeWait(t, 30*time.Millisecond)
 	_, err := connectADB(context.Background(), executable, "192.0.2.50:5555")
 	if err == nil {
 		t.Fatal("an unauthorized device must not be reported as connected")
@@ -236,6 +245,47 @@ exit 2
 		t.Fatalf("ready device rejected: %v", err)
 	}
 	if endpoint != "192.0.2.52:5555" {
+		t.Fatalf("unexpected endpoint: %q", endpoint)
+	}
+}
+
+// The dialog appears only after the connection is attempted, so a device that
+// authorizes a moment later must still open instead of failing on first probe.
+func TestConnectADBWaitsForLateAuthorization(t *testing.T) {
+	directory := t.TempDir()
+	executable := filepath.Join(directory, "adb")
+	counter := filepath.Join(directory, "count")
+	script := `#!/bin/sh
+if [ "$1" = "mdns" ] && [ "$2" = "services" ]; then
+  exit 1
+fi
+if [ "$1" = "connect" ]; then
+  echo "connected to $2"
+  exit 0
+fi
+if [ "$1" = "-s" ] && [ "$3" = "get-state" ]; then
+  count=0
+  [ -f "` + counter + `" ] && count=$(cat "` + counter + `")
+  count=$((count + 1))
+  echo "$count" > "` + counter + `"
+  if [ "$count" -ge 3 ]; then
+    echo "device"
+    exit 0
+  fi
+  echo "unauthorized" >&2
+  exit 1
+fi
+exit 2
+`
+	if err := os.WriteFile(executable, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	shrinkADBAuthorizeWait(t, 2*time.Second)
+	endpoint, err := connectADB(context.Background(), executable, "192.0.2.53:5555")
+	if err != nil {
+		t.Fatalf("late authorization rejected: %v", err)
+	}
+	if endpoint != "192.0.2.53:5555" {
 		t.Fatalf("unexpected endpoint: %q", endpoint)
 	}
 }
