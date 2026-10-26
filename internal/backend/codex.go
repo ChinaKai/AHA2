@@ -356,6 +356,14 @@ func parseCodexLine(line string) (Event, string, string) {
 	case "item.started", "item.completed":
 		item, _ := payload["item"].(map[string]any)
 		itemType, _ := item["type"].(string)
+		if itemType == "reasoning" && rawType == "item.completed" {
+			// Codex reports the model's reasoning summary as its own item. The
+			// text lives in item.text on older builds and in summary[] entries
+			// (type summary_text) on newer ones; accept either.
+			if text := codexReasoningText(item); text != "" {
+				return Event{Type: "agent_reasoning", Data: map[string]any{"text": text, "reasoning": true}}, "", ""
+			}
+		}
 		if itemType == "agent_message" && rawType == "item.completed" {
 			text, _ := item["text"].(string)
 			data := map[string]any{"text": text}
@@ -429,4 +437,21 @@ func tail(value string, limit int) string {
 		return value
 	}
 	return value[len(value)-limit:]
+}
+
+// codexReasoningText joins the reasoning text Codex exposes for one item.
+func codexReasoningText(item map[string]any) string {
+	parts := make([]string, 0, 2)
+	if text, _ := item["text"].(string); strings.TrimSpace(text) != "" {
+		parts = append(parts, strings.TrimSpace(text))
+	}
+	if summary, ok := item["summary"].([]any); ok {
+		for _, entry := range summary {
+			block, _ := entry.(map[string]any)
+			if text, _ := block["text"].(string); strings.TrimSpace(text) != "" {
+				parts = append(parts, strings.TrimSpace(text))
+			}
+		}
+	}
+	return strings.Join(parts, "\n\n")
 }

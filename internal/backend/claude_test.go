@@ -152,6 +152,61 @@ func TestClaudeExecuteProjectsThinkingAsReasoning(t *testing.T) {
 	}
 }
 
+type claudeRepeatRunner struct{}
+
+func (claudeRepeatRunner) Run(_ context.Context, _ workspace.Command, onLine workspace.LineHandler) (workspace.Result, error) {
+	onLine(`{"type":"assistant","message":{"content":[{"type":"text","text":"同样的话"}]}}`)
+	onLine(`{"type":"result","subtype":"success","result":"同样的话","session_id":"sess-repeat"}`)
+	return workspace.Result{ExitCode: 0}, nil
+}
+
+func TestClaudeExecuteDropsCommentaryThatRepeatsFinalText(t *testing.T) {
+	var messages []Event
+	_, err := (Claude{}).Execute(context.Background(), Request{Runner: claudeRepeatRunner{}, WorkDir: t.TempDir()}, func(event Event) {
+		if event.Type == "agent_message" {
+			messages = append(messages, event)
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 1 {
+		t.Fatalf("repeated commentary must be dropped, got %#v", messages)
+	}
+	if messages[0].Data["final"] != true || messages[0].Data["text"] != "同样的话" {
+		t.Fatalf("unexpected message: %#v", messages[0])
+	}
+}
+
+type claudeDistinctCommentaryRunner struct{}
+
+func (claudeDistinctCommentaryRunner) Run(_ context.Context, _ workspace.Command, onLine workspace.LineHandler) (workspace.Result, error) {
+	onLine(`{"type":"assistant","message":{"content":[{"type":"text","text":"先看一下代码"},{"type":"tool_use","id":"tool-9","name":"Bash","input":{"command":"ls"}}]}}`)
+	onLine(`{"type":"result","subtype":"success","result":"做完了","session_id":"sess-distinct"}`)
+	return workspace.Result{ExitCode: 0}, nil
+}
+
+func TestClaudeExecuteKeepsDistinctCommentary(t *testing.T) {
+	var types []string
+	var commentary string
+	_, err := (Claude{}).Execute(context.Background(), Request{Runner: claudeDistinctCommentaryRunner{}, WorkDir: t.TempDir()}, func(event Event) {
+		types = append(types, event.Type)
+		if event.Type == "agent_message" && event.Data["intermediate"] == true {
+			commentary = event.Data["text"].(string)
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if commentary != "先看一下代码" {
+		t.Fatalf("distinct commentary was lost: %q", commentary)
+	}
+	joined := strings.Join(types, ",")
+	if !strings.Contains(joined, "agent_message,agent_command_started") {
+		t.Fatalf("commentary should be emitted before the tool start: %v", types)
+	}
+}
+
 func TestClaudeExitUsesProviderError(t *testing.T) {
 	t.Parallel()
 	_, err := (Claude{}).Execute(context.Background(), Request{

@@ -45,6 +45,7 @@ func (adapter Claude) Execute(ctx context.Context, request Request, emit func(Ev
 		args = append(args, "--resume", request.ProviderSessionID)
 	}
 	var reply, sessionID, providerError string
+	var stream claudeStream
 	var emitMu sync.Mutex
 	send := func(event Event) {
 		if event.Type == "" || emit == nil {
@@ -75,7 +76,7 @@ func (adapter Claude) Execute(ctx context.Context, request Request, emit func(Ev
 		if parsedSession != "" {
 			sessionID = parsedSession
 		}
-		for _, event := range events {
+		for _, event := range stream.Consume(events) {
 			select {
 			case activity <- event.Type:
 			default:
@@ -92,6 +93,9 @@ func (adapter Claude) Execute(ctx context.Context, request Request, emit func(Ev
 			send(event)
 		}
 	})
+	for _, event := range stream.Flush() {
+		send(event)
+	}
 	cause := context.Cause(runContext)
 	cancelRun(context.Canceled)
 	<-monitorDone
@@ -241,4 +245,57 @@ func filterClaudeEnvironment(values map[string]string) map[string]string {
 		}
 	}
 	return result
+}
+
+// claudeStream buffers intermediate assistant text until the next action and
+// drops the copy that only repeats the final answer. Claude Code sends the same
+// text twice — once as an assistant content block and again as result.result —
+// so emitting both put a duplicate Update above an identical final message.
+type claudeStream struct {
+	pending []string
+}
+
+func (stream *claudeStream) Consume(events []Event) []Event {
+	projected := make([]Event, 0, len(events))
+	for _, event := range events {
+		if event.Type == "agent_message" {
+			text := strings.TrimSpace(fmt.Sprint(event.Data["text"]))
+			if text == "<nil>" {
+				text = ""
+			}
+			if intermediate, _ := event.Data["intermediate"].(bool); intermediate {
+				if text != "" {
+					stream.pending = append(stream.pending, text)
+				}
+				continue
+			}
+			if final, _ := event.Data["final"].(bool); final {
+				projected = append(projected, stream.flush(text)...)
+				projected = append(projected, event)
+				continue
+			}
+		}
+		projected = append(projected, stream.flush("")...)
+		projected = append(projected, event)
+	}
+	return projected
+}
+
+// Flush emits whatever commentary is still buffered, for a run that ends
+// without a final result line.
+func (stream *claudeStream) Flush() []Event {
+	return stream.flush("")
+}
+
+func (stream *claudeStream) flush(trimTail string) []Event {
+	texts := stream.pending
+	stream.pending = nil
+	if trimTail != "" && len(texts) > 0 && texts[len(texts)-1] == trimTail {
+		texts = texts[:len(texts)-1]
+	}
+	joined := strings.TrimSpace(strings.Join(texts, "\n\n"))
+	if joined == "" {
+		return nil
+	}
+	return []Event{{Type: "agent_message", Data: map[string]any{"text": joined, "intermediate": true}}}
 }
