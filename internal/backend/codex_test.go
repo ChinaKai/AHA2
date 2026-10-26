@@ -355,3 +355,61 @@ func TestFilterEnvironmentAllowsDeclaredCredentialKey(t *testing.T) {
 		t.Fatal("dangerous environment variable was forwarded")
 	}
 }
+func TestCodexRolloutDrainsReasoningIncrementally(t *testing.T) {
+	home := t.TempDir()
+	dir := filepath.Join(home, "sessions", "2026", "10", "26")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "rollout-2026-10-26T13-00-00-thread-abc.jsonl")
+	first := `{"type":"response_item","payload":{"type":"reasoning","id":"r1","summary":[],"content":[{"type":"reasoning_text","text":"先想一下"}]}}` + "\n"
+	second := `{"type":"response_item","payload":{"type":"reasoning","id":"r2","summary":[],"content":[{"type":"reasoning_text","text":"再想一下"}]}}` + "\n"
+	if err := os.WriteFile(path, []byte(first), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rollout := &codexRollout{home: home, thread: "thread-abc"}
+
+	events := rollout.drain()
+	if len(events) != 1 || events[0].Type != "agent_reasoning" || events[0].Data["text"] != "先想一下" {
+		t.Fatalf("first drain: %#v", events)
+	}
+	if got := rollout.drain(); len(got) != 0 {
+		t.Fatalf("repeated drain must not repeat events: %#v", got)
+	}
+
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.WriteString(second); err != nil {
+		t.Fatal(err)
+	}
+	file.Close()
+	events = rollout.drain()
+	if len(events) != 1 || events[0].Data["text"] != "再想一下" {
+		t.Fatalf("second drain: %#v", events)
+	}
+}
+
+func TestCodexRolloutWaitsForCompleteLinesAndSkipsKnownText(t *testing.T) {
+	home := t.TempDir()
+	dir := filepath.Join(home, "sessions", "2026", "10", "26")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "rollout-2026-10-26T13-00-00-thread-part.jsonl")
+	if err := os.WriteFile(path, []byte(`{"type":"response_item","payload":{"type":"reasoning","id":"r1","content":[{"type":"reasoning_text","text":"已知"}]`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rollout := &codexRollout{home: home, thread: "thread-part"}
+	if events := rollout.drain(); len(events) != 0 {
+		t.Fatalf("partial line must not be read: %#v", events)
+	}
+	file, _ := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	file.WriteString("}}]}}\n")
+	file.Close()
+	rollout.note("已知")
+	if events := rollout.drain(); len(events) != 0 {
+		t.Fatalf("text already emitted from stdout must be skipped: %#v", events)
+	}
+}

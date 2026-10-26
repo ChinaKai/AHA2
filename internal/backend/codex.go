@@ -1,14 +1,17 @@
 package backend
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	pathpkg "path"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -40,6 +43,7 @@ func (adapter Codex) Execute(ctx context.Context, request Request, emit func(Eve
 	args := codexArguments(request, catalogPath)
 	environment := filterEnvironment(request.Environment)
 	var reply, sessionID, providerError string
+	rollout := &codexRollout{home: strings.TrimSpace(request.Environment["CODEX_HOME"])}
 	var pendingUnphasedMessage *Event
 	var emitMu sync.Mutex
 	send := func(event Event) {
@@ -73,6 +77,9 @@ func (adapter Codex) Execute(ctx context.Context, request Request, emit func(Eve
 		KillTree:       true,
 		ReverseForward: request.ReverseForward,
 	}, func(line string) {
+		for _, event := range rollout.drain() {
+			send(event)
+		}
 		event, parsedReply, parsedSession := parseCodexLine(line)
 		select {
 		case activity <- event.Type:
@@ -83,6 +90,7 @@ func (adapter Codex) Execute(ctx context.Context, request Request, emit func(Eve
 		}
 		if parsedSession != "" {
 			sessionID = parsedSession
+			rollout.thread = parsedSession
 		}
 		if event.Type == "agent_error" {
 			providerError = strings.TrimSpace(fmt.Sprint(event.Data["message"]))
@@ -100,8 +108,14 @@ func (adapter Codex) Execute(ctx context.Context, request Request, emit func(Eve
 		} else if pendingUnphasedMessage != nil && event.Type != "" {
 			flushPendingMessage(event.Type == "agent_usage")
 		}
+		if event.Type == "agent_reasoning" {
+			rollout.note(fmt.Sprint(event.Data["text"]))
+		}
 		send(event)
 	})
+	for _, event := range rollout.drain() {
+		send(event)
+	}
 	flushPendingMessage(true)
 	cause := context.Cause(runContext)
 	cancelRun(context.Canceled)
@@ -475,4 +489,107 @@ func codexReasoningText(item map[string]any) string {
 	appendList(item["summary"])
 	appendList(item["content"])
 	return strings.Join(parts, "\n\n")
+}
+
+// codexRollout follows the session rollout Codex writes under CODEX_HOME while
+// a turn runs. `codex exec --json` only exposes the model's reasoning summary,
+// and providers that return raw reasoning instead (reasoning_text content with
+// an empty summary) leave the stream with no reasoning item at all. The rollout
+// keeps the raw text, so AHA reads it from the file it already owns and projects
+// it as a reasoning event.
+//
+// The reader is intentionally pull-based: every stdout line first drains what
+// the rollout appended so far. That keeps ordering (a reasoning step appears
+// before the tool call it precedes) without a timer or an extra goroutine.
+type codexRollout struct {
+	home     string
+	thread   string
+	path     string
+	offset   int64
+	seenIDs  map[string]bool
+	seenText map[string]bool
+}
+
+// note records reasoning text already emitted from stdout so the rollout copy
+// is not shown twice.
+func (rollout *codexRollout) note(text string) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return
+	}
+	if rollout.seenText == nil {
+		rollout.seenText = map[string]bool{}
+	}
+	rollout.seenText[text] = true
+}
+
+func (rollout *codexRollout) drain() []Event {
+	if rollout == nil || rollout.home == "" || rollout.thread == "" {
+		return nil
+	}
+	if rollout.path == "" {
+		matches, err := filepath.Glob(filepath.Join(rollout.home, "sessions", "*", "*", "*", "rollout-*"+rollout.thread+".jsonl"))
+		if err != nil || len(matches) == 0 {
+			return nil
+		}
+		sort.Strings(matches)
+		rollout.path = matches[len(matches)-1]
+	}
+	file, err := os.Open(rollout.path)
+	if err != nil {
+		return nil
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || info.Size() <= rollout.offset {
+		return nil
+	}
+	if _, err := file.Seek(rollout.offset, io.SeekStart); err != nil {
+		return nil
+	}
+	data := make([]byte, info.Size()-rollout.offset)
+	read, _ := io.ReadFull(file, data)
+	data = data[:read]
+	// A line can be written in two flushes; only consume complete lines.
+	cut := bytes.LastIndexByte(data, '\n')
+	if cut < 0 {
+		return nil
+	}
+	rollout.offset += int64(cut + 1)
+	events := make([]Event, 0, 2)
+	for _, line := range strings.Split(string(data[:cut]), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var record struct {
+			Type    string         `json:"type"`
+			Payload map[string]any `json:"payload"`
+		}
+		if json.Unmarshal([]byte(line), &record) != nil || record.Type != "response_item" {
+			continue
+		}
+		if fmt.Sprint(record.Payload["type"]) != "reasoning" {
+			continue
+		}
+		id := strings.TrimSpace(fmt.Sprint(record.Payload["id"]))
+		if id != "" {
+			if rollout.seenIDs[id] {
+				continue
+			}
+		}
+		text := strings.TrimSpace(codexReasoningText(record.Payload))
+		if text == "" || rollout.seenText[text] {
+			continue
+		}
+		if id != "" {
+			if rollout.seenIDs == nil {
+				rollout.seenIDs = map[string]bool{}
+			}
+			rollout.seenIDs[id] = true
+		}
+		rollout.note(text)
+		events = append(events, Event{Type: "agent_reasoning", Data: map[string]any{"text": text, "reasoning": true}})
+	}
+	return events
 }
