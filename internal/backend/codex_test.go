@@ -284,13 +284,21 @@ func testCodexModelsCache() string {
 
 func TestParseCodexReasoningItem(t *testing.T) {
 	t.Parallel()
+	// Legacy flat text.
 	event, _, _ := parseCodexLine(`{"type":"item.completed","item":{"id":"r1","type":"reasoning","text":"先想一下"}}`)
 	if event.Type != "agent_reasoning" || event.Data["text"] != "先想一下" || event.Data["reasoning"] != true {
 		t.Fatalf("unexpected reasoning event: %#v", event)
 	}
-	summarized, _, _ := parseCodexLine(`{"type":"item.completed","item":{"id":"r2","type":"reasoning","summary":[{"type":"summary_text","text":"再想一下"}]}}`)
-	if summarized.Type != "agent_reasoning" || summarized.Data["text"] != "再想一下" {
-		t.Fatalf("summary reasoning event missing: %#v", summarized)
+	// Real codex-cli 0.146 rollout shape: summary is empty, the text is in
+	// content[] as a reasoning_text object.
+	content, _, _ := parseCodexLine(`{"type":"item.completed","item":{"id":"r2","type":"reasoning","summary":[],"content":[{"type":"reasoning_text","text":"再想一下"}]}}`)
+	if content.Type != "agent_reasoning" || content.Data["text"] != "再想一下" {
+		t.Fatalf("content reasoning event missing: %#v", content)
+	}
+	// App-server shape: plain string arrays.
+	flat, _, _ := parseCodexLine(`{"type":"item.completed","item":{"id":"r3","type":"reasoning","summary":["摘要一"],"content":["正文二"]}}`)
+	if flat.Type != "agent_reasoning" || flat.Data["text"] != "摘要一\n\n正文二" {
+		t.Fatalf("flat reasoning event missing: %#v", flat)
 	}
 }
 

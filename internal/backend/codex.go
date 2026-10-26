@@ -440,18 +440,39 @@ func tail(value string, limit int) string {
 }
 
 // codexReasoningText joins the reasoning text Codex exposes for one item.
+//
+// The shape depends on the surface: a rollout stores content[] entries as
+// {"type":"reasoning_text","text":...} and summary[] entries as summary_text
+// objects, while the app-server JSON stream flattens both to plain strings.
+// Real rollouts (codex-cli 0.146) carry summary: [] with everything in
+// content[], so content must be read or every reasoning step looks empty.
 func codexReasoningText(item map[string]any) string {
-	parts := make([]string, 0, 2)
-	if text, _ := item["text"].(string); strings.TrimSpace(text) != "" {
-		parts = append(parts, strings.TrimSpace(text))
+	parts := make([]string, 0, 4)
+	appendText := func(value string) {
+		if strings.TrimSpace(value) != "" {
+			parts = append(parts, strings.TrimSpace(value))
+		}
 	}
-	if summary, ok := item["summary"].([]any); ok {
-		for _, entry := range summary {
-			block, _ := entry.(map[string]any)
-			if text, _ := block["text"].(string); strings.TrimSpace(text) != "" {
-				parts = append(parts, strings.TrimSpace(text))
+	appendList := func(value any) {
+		list, ok := value.([]any)
+		if !ok {
+			return
+		}
+		for _, entry := range list {
+			switch typed := entry.(type) {
+			case string:
+				appendText(typed)
+			case map[string]any:
+				if text, _ := typed["text"].(string); text != "" {
+					appendText(text)
+				}
 			}
 		}
 	}
+	if text, _ := item["text"].(string); text != "" {
+		appendText(text)
+	}
+	appendList(item["summary"])
+	appendList(item["content"])
 	return strings.Join(parts, "\n\n")
 }
