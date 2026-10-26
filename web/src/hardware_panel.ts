@@ -55,6 +55,34 @@ let pollTimer = 0;
 let activeTerminal: HardwareTerminalBinding | null = null;
 let terminalAssetsPromise: Promise<void> | null = null;
 
+const HARDWARE_AUTO_COPY_KEY = "aha2.hardware.autoCopy";
+
+// Auto-copy is the default because selecting output is almost always followed by
+// a paste somewhere; the toggle exists only for operators who want to select
+// without touching the clipboard.
+// localStorage is absent in the server-side render tests and can throw in a
+// privacy-restricted context, so every access is best effort.
+function hardwareAutoCopyStorage(): Storage | null {
+  try {
+    return typeof window === "undefined" ? null : window.localStorage ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export function hardwareAutoCopyEnabled(): boolean {
+  return hardwareAutoCopyStorage()?.getItem(HARDWARE_AUTO_COPY_KEY) !== "0";
+}
+
+function setHardwareAutoCopy(enabled: boolean): void {
+  try {
+    hardwareAutoCopyStorage()?.setItem(HARDWARE_AUTO_COPY_KEY, enabled ? "1" : "0");
+  } catch {
+    // A blocked storage API must not break the console; the choice just does not
+    // survive a reload.
+  }
+}
+
 function loadTerminalAssets(): Promise<void> {
   if (window.Terminal) return Promise.resolve();
   if (terminalAssetsPromise) return terminalAssetsPromise;
@@ -297,6 +325,7 @@ export function renderHardwarePanel(detail: TaskDetail): string {
         <div class="hardware-console-actions">
           <button type="button" id="hardware-connect" ${canConnect && !connected ? "" : "disabled"}>连接</button>
           <button type="button" id="hardware-disconnect" ${connected ? "" : "disabled"}>断开</button>
+          <label class="hardware-auto-copy" title="选中终端内容后自动复制到剪贴板"><input type="checkbox" id="hardware-auto-copy"${hardwareAutoCopyEnabled() ? " checked" : ""}> 选中即复制</label>
           <button type="button" id="hardware-copy-output" title="复制终端内容（有选中时只复制选中部分）">${icon("copy")}</button>
           <button type="button" id="hardware-clear-output" title="清空当前显示">${icon("close")}</button>
         </div>
@@ -466,6 +495,9 @@ export function bindHardwarePanel(detail: TaskDetail, notify: Notice): void {
       updateTerminalDOM(currentStream(state));
     }).catch(reportError);
   });
+  root.querySelector<HTMLInputElement>("#hardware-auto-copy")?.addEventListener("change", event => {
+    setHardwareAutoCopy(Boolean((event.target as HTMLInputElement).checked));
+  });
   root.querySelector("#hardware-copy-output")?.addEventListener("click", () => {
     if (!activeTerminal) return;
     const selected = activeTerminal.selectedText();
@@ -611,6 +643,13 @@ function ensureHardwareTerminal(detail: TaskDetail, state: PanelState): void {
     initialData: terminalReplayData(stream),
     afterSequence: stream.latest,
     container,
+    onSelectionCopy(text) {
+      if (!hardwareAutoCopyEnabled()) return;
+      void copyText(text).then(
+        () => notify("notice", `已复制选中内容（${text.length} 字符）`),
+        () => notify("error", "自动复制失败，可用复制按钮或手动复制"),
+      );
+    },
     onFallbackSend(data) {
       return api.sendHardware(
         detail.task.id,

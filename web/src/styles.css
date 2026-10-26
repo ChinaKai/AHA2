@@ -674,6 +674,10 @@ body.task-tool-resizing { cursor: col-resize; user-select: none; }
 #hardware-endpoint { min-width: 0; overflow: hidden; color: var(--muted); font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; text-overflow: ellipsis; white-space: nowrap; }
 .hardware-console-actions { display: flex; gap: 5px; margin-left: auto; }
 .hardware-console-actions button { min-height: 30px; padding: 0 9px; font-size: 9px; }
+/* Selecting terminal output copies it; the label keeps that visible without
+   taking the width of a button on a narrow console toolbar. */
+.hardware-auto-copy { display: inline-flex; align-items: center; gap: 4px; padding: 0 4px; color: var(--muted); font-size: 9px; white-space: nowrap; cursor: pointer; }
+.hardware-auto-copy input { width: auto; height: auto; margin: 0; }
 #hardware-clear-output, #hardware-copy-output { width: 30px; padding: 0; }
 .hardware-xterm { position: relative; min-width: 0; min-height: 0; overflow: hidden; padding: 8px 6px; background: #11151b; color: #d7e0ea; }
 .hardware-xterm .xterm { height: 100%; color: #d7e0ea; }

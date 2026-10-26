@@ -29,6 +29,7 @@ interface XTerm {
   onData(listener: (data: string) => void): XTermDisposable;
   onBinary(listener: (data: string) => void): XTermDisposable;
   onRender(listener: () => void): XTermDisposable;
+  onSelectionChange?(listener: () => void): XTermDisposable;
 }
 
 declare global {
@@ -58,6 +59,9 @@ interface MountOptions {
   afterSequence: number;
   container: HTMLElement;
   onFallbackSend(data: Uint8Array): Promise<void>;
+  // Fired when the operator finishes selecting text, so the panel can put it on
+  // the clipboard without a second click on the copy button.
+  onSelectionCopy?(text: string): void;
   onStatus(status: HardwareTerminalStatus): void;
   onError(message: string): void;
 }
@@ -327,6 +331,8 @@ export function mountHardwareTerminal(options: MountOptions): HardwareTerminalBi
       pendingInput = [];
       pendingInputBytes = 0;
       if (inputTimer) clearTimeout(inputTimer);
+      if (selectionTimer) clearTimeout(selectionTimer);
+      options.container.removeEventListener("pointerup", handlePointerUp);
       inputTimer = 0;
       terminal.options.disableStdin = currentStatus.read_only || !currentStatus.connected;
       if (mobileInput) mobileInput.readOnly = Boolean(terminal.options.disableStdin);
@@ -336,6 +342,34 @@ export function mountHardwareTerminal(options: MountOptions): HardwareTerminalBi
       if (!disposed && socket === next && !ready) next.close();
     }, 2500);
   };
+  // Auto-copy selected output. A drag fires many selection changes, so debounce
+  // until the operator stops moving, and copy once per distinct selection to
+  // avoid overwriting the clipboard with the same fragment repeatedly.
+  let selectionTimer = 0;
+  let lastCopied = "";
+  const copySelection = () => {
+    const text = terminal.getSelection();
+    if (!text.trim() || text === lastCopied) return;
+    lastCopied = text;
+    options.onSelectionCopy?.(text);
+  };
+  const queueSelectionCopy = () => {
+    if (!options.onSelectionCopy) return;
+    if (selectionTimer) clearTimeout(selectionTimer);
+    selectionTimer = window.setTimeout(copySelection, 180);
+  };
+  if (terminal.onSelectionChange) {
+    disposables.push(terminal.onSelectionChange(queueSelectionCopy));
+  }
+  // Touch selection and some IME paths only settle on pointerup, so treat that
+  // as a second trigger; copySelection dedupes the repeat.
+  const handlePointerUp = () => {
+    if (!options.onSelectionCopy) return;
+    if (selectionTimer) clearTimeout(selectionTimer);
+    selectionTimer = window.setTimeout(copySelection, 0);
+  };
+  options.container.addEventListener("pointerup", handlePointerUp);
+
   disposables.push(terminal.onData(data => {
     queueInput(new TextEncoder().encode(data));
   }));
