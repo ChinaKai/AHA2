@@ -68,24 +68,24 @@ func (adapter Claude) Execute(ctx context.Context, request Request, emit func(Ev
 		KillTree:       true,
 		ReverseForward: request.ReverseForward,
 	}, func(line string) {
-		event, parsedReply, parsedSession := parseClaudeLine(line)
-		select {
-		case activity <- event.Type:
-		default:
-		}
+		events, parsedReply, parsedSession := parseClaudeLine(line)
 		if parsedReply != "" {
 			reply = parsedReply
 		}
 		if parsedSession != "" {
 			sessionID = parsedSession
 		}
-		if event.Type == "agent_error" {
-			providerError = strings.TrimSpace(fmt.Sprint(event.Data["message"]))
-			if providerError == "<nil>" {
-				providerError = ""
+		for _, event := range events {
+			select {
+			case activity <- event.Type:
+			default:
 			}
-		}
-		if event.Type != "" {
+			if event.Type == "agent_error" {
+				providerError = strings.TrimSpace(fmt.Sprint(event.Data["message"]))
+				if providerError == "<nil>" {
+					providerError = ""
+				}
+			}
 			if usage, ok := event.Data["usage"].(map[string]any); ok && len(usage) > 0 {
 				send(Event{Type: "agent_usage", Data: map[string]any{"usage": usage}})
 			}
@@ -137,10 +137,15 @@ func claudePermissionArgs(filesystem, approval string) []string {
 	}
 }
 
-func parseClaudeLine(line string) (Event, string, string) {
+// parseClaudeLine maps one stream-json line to the AHA events it carries. An
+// assistant message can hold several content blocks (thinking, text, tool_use)
+// and they must all be projected: returning only the first match used to drop
+// the visible text and the tool start that followed a thinking block, which is
+// why Claude turns showed almost no Agent Updates.
+func parseClaudeLine(line string) ([]Event, string, string) {
 	var payload map[string]any
 	if json.Unmarshal([]byte(line), &payload) != nil {
-		return Event{}, "", ""
+		return nil, "", ""
 	}
 	rawType, _ := payload["type"].(string)
 	switch rawType {
@@ -148,7 +153,7 @@ func parseClaudeLine(line string) (Event, string, string) {
 		subtype, _ := payload["subtype"].(string)
 		if subtype == "init" {
 			if sessionID, ok := payload["session_id"].(string); ok && sessionID != "" {
-				return Event{Type: "agent_session", Data: map[string]any{"provider_session_id": sessionID}}, "", sessionID
+				return []Event{{Type: "agent_session", Data: map[string]any{"provider_session_id": sessionID}}}, "", sessionID
 			}
 		}
 	case "result":
@@ -160,32 +165,42 @@ func parseClaudeLine(line string) (Event, string, string) {
 				if usage, ok := payload["usage"].(map[string]any); ok {
 					data["usage"] = usage
 				}
-				return Event{Type: "agent_message", Data: data}, text, sessionID
+				return []Event{{Type: "agent_message", Data: data}}, text, sessionID
 			}
 		} else if message, ok := payload["error"].(string); ok && message != "" {
-			return Event{Type: "agent_error", Data: map[string]any{"message": message}}, "", sessionID
+			return []Event{{Type: "agent_error", Data: map[string]any{"message": message}}}, "", sessionID
 		}
 	case "assistant":
 		message, _ := payload["message"].(map[string]any)
 		content, _ := message["content"].([]any)
+		events := make([]Event, 0, len(content))
 		for _, item := range content {
 			block, _ := item.(map[string]any)
-			if block["type"] == "tool_use" {
+			switch block["type"] {
+			case "thinking":
+				// Extended thinking arrives as a separate content block. Project
+				// it the same way DSH does so the operator sees the reasoning
+				// card instead of a silent gap before the tool call. Redacted
+				// thoughts carry no readable text and are skipped.
+				if text, ok := block["thinking"].(string); ok && strings.TrimSpace(text) != "" {
+					events = append(events, Event{Type: "agent_reasoning", Data: map[string]any{"text": text, "reasoning": true}})
+				}
+			case "tool_use":
 				input, _ := block["input"].(map[string]any)
 				command := strings.TrimSpace(fmt.Sprint(input["command"]))
 				if command == "<nil>" {
 					command = ""
 				}
-				return Event{Type: "agent_command_started", Data: map[string]any{
+				events = append(events, Event{Type: "agent_command_started", Data: map[string]any{
 					"tool_name": block["name"], "tool_use_id": block["id"], "command": command, "status": "in_progress",
-				}}, "", ""
-			}
-			if block["type"] == "text" {
+				}})
+			case "text":
 				if text, ok := block["text"].(string); ok && text != "" {
-					return Event{Type: "agent_message", Data: map[string]any{"text": text, "intermediate": true}}, "", ""
+					events = append(events, Event{Type: "agent_message", Data: map[string]any{"text": text, "intermediate": true}})
 				}
 			}
 		}
+		return events, "", ""
 	case "user":
 		message, _ := payload["message"].(map[string]any)
 		content, _ := message["content"].([]any)
@@ -198,12 +213,12 @@ func parseClaudeLine(line string) (Event, string, string) {
 			if output == "<nil>" {
 				output = ""
 			}
-			return Event{Type: "agent_command_finished", Data: map[string]any{
+			return []Event{{Type: "agent_command_finished", Data: map[string]any{
 				"tool_use_id": block["tool_use_id"], "status": "completed", "output_tail": tail(output, 2000),
-			}}, "", ""
+			}}}, "", ""
 		}
 	}
-	return Event{}, "", ""
+	return nil, "", ""
 }
 
 func filterClaudeEnvironment(values map[string]string) map[string]string {
@@ -216,7 +231,7 @@ func filterClaudeEnvironment(values map[string]string) map[string]string {
 		// run could not use.
 		"CLAUDE_CODE_OAUTH_TOKEN": true,
 		"CLAUDE_CONFIG_DIR":       true,
-		"AHA2_AGENT_API_URL": true, "AHA2_AGENT_API_TOKEN": true,
+		"AHA2_AGENT_API_URL":      true, "AHA2_AGENT_API_TOKEN": true,
 		"HTTP_PROXY": true, "HTTPS_PROXY": true, "NO_PROXY": true,
 	}
 	result := map[string]string{}

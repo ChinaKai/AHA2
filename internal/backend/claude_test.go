@@ -43,9 +43,17 @@ func (runner *claudeArgsRunner) Run(_ context.Context, command workspace.Command
 	return workspace.Result{ExitCode: 0}, nil
 }
 
+func firstClaudeEvent(events []Event) Event {
+	if len(events) == 0 {
+		return Event{}
+	}
+	return events[0]
+}
+
 func TestParseClaudeLineResult(t *testing.T) {
 	t.Parallel()
-	event, reply, session := parseClaudeLine(`{"type":"result","subtype":"success","result":"done","session_id":"sess-1"}`)
+	events, reply, session := parseClaudeLine(`{"type":"result","subtype":"success","result":"done","session_id":"sess-1"}`)
+	event := firstClaudeEvent(events)
 	if event.Type != "agent_message" || reply != "done" || session != "sess-1" {
 		t.Fatalf("unexpected parse: event=%q reply=%q session=%q", event.Type, reply, session)
 	}
@@ -53,7 +61,8 @@ func TestParseClaudeLineResult(t *testing.T) {
 
 func TestParseClaudeLineResultUsage(t *testing.T) {
 	t.Parallel()
-	event, _, _ := parseClaudeLine(`{"type":"result","subtype":"success","result":"done","session_id":"sess-1","usage":{"input_tokens":120,"output_tokens":8}}`)
+	events, _, _ := parseClaudeLine(`{"type":"result","subtype":"success","result":"done","session_id":"sess-1","usage":{"input_tokens":120,"output_tokens":8}}`)
+	event := firstClaudeEvent(events)
 	usage, _ := event.Data["usage"].(map[string]any)
 	if usage["input_tokens"] != float64(120) {
 		t.Fatalf("usage missing from result: %#v", event.Data)
@@ -62,11 +71,13 @@ func TestParseClaudeLineResultUsage(t *testing.T) {
 
 func TestParseClaudeToolEvents(t *testing.T) {
 	t.Parallel()
-	started, _, _ := parseClaudeLine(`{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tool-1","name":"Bash","input":{"command":"go test ./..."}}]}}`)
+	startedEvents, _, _ := parseClaudeLine(`{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tool-1","name":"Bash","input":{"command":"go test ./..."}}]}}`)
+	started := firstClaudeEvent(startedEvents)
 	if started.Type != "agent_command_started" || started.Data["command"] != "go test ./..." {
 		t.Fatalf("unexpected tool start: %#v", started)
 	}
-	finished, _, _ := parseClaudeLine(`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tool-1","content":"ok"}]}}`)
+	finishedEvents, _, _ := parseClaudeLine(`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tool-1","content":"ok"}]}}`)
+	finished := firstClaudeEvent(finishedEvents)
 	if finished.Type != "agent_command_finished" || finished.Data["output_tail"] != "ok" {
 		t.Fatalf("unexpected tool result: %#v", finished)
 	}
@@ -74,9 +85,70 @@ func TestParseClaudeToolEvents(t *testing.T) {
 
 func TestParseClaudeIntermediateMessage(t *testing.T) {
 	t.Parallel()
-	event, reply, _ := parseClaudeLine(`{"type":"assistant","message":{"content":[{"type":"text","text":"正在检查代码"}]}}`)
+	events, reply, _ := parseClaudeLine(`{"type":"assistant","message":{"content":[{"type":"text","text":"正在检查代码"}]}}`)
+	event := firstClaudeEvent(events)
 	if event.Type != "agent_message" || event.Data["text"] != "正在检查代码" || reply != "" {
 		t.Fatalf("unexpected intermediate message: %#v %q", event, reply)
+	}
+}
+
+func TestParseClaudeThinkingBecomesReasoning(t *testing.T) {
+	t.Parallel()
+	events, _, _ := parseClaudeLine(`{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"先看仓库结构","signature":"sig"},{"type":"text","text":"先检查一下"},{"type":"tool_use","id":"tool-2","name":"Bash","input":{"command":"ls"}}]}}`)
+	if len(events) != 3 {
+		t.Fatalf("expected thinking, text and tool events, got %#v", events)
+	}
+	if events[0].Type != "agent_reasoning" || events[0].Data["text"] != "先看仓库结构" || events[0].Data["reasoning"] != true {
+		t.Fatalf("thinking block was not projected: %#v", events[0])
+	}
+	if events[1].Type != "agent_message" || events[1].Data["intermediate"] != true || events[1].Data["text"] != "先检查一下" {
+		t.Fatalf("text block was lost: %#v", events[1])
+	}
+	if events[2].Type != "agent_command_started" || events[2].Data["command"] != "ls" {
+		t.Fatalf("tool block was lost: %#v", events[2])
+	}
+}
+
+func TestParseClaudeRedactedThinkingIsSkipped(t *testing.T) {
+	t.Parallel()
+	events, _, _ := parseClaudeLine(`{"type":"assistant","message":{"content":[{"type":"redacted_thinking","data":"opaque"},{"type":"text","text":"ok"}]}}`)
+	if len(events) != 1 || events[0].Type != "agent_message" {
+		t.Fatalf("redacted thinking must not produce an event: %#v", events)
+	}
+}
+
+type claudeThinkingRunner struct{}
+
+func (claudeThinkingRunner) Run(_ context.Context, _ workspace.Command, onLine workspace.LineHandler) (workspace.Result, error) {
+	onLine(`{"type":"system","subtype":"init","session_id":"sess-think"}`)
+	onLine(`{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"先读一下代码","signature":"sig"}]}}`)
+	onLine(`{"type":"assistant","message":{"content":[{"type":"text","text":"我看一下实现"}]}}`)
+	onLine(`{"type":"result","subtype":"success","result":"改好了","session_id":"sess-think"}`)
+	return workspace.Result{ExitCode: 0}, nil
+}
+
+func TestClaudeExecuteProjectsThinkingAsReasoning(t *testing.T) {
+	var events []Event
+	result, err := (Claude{}).Execute(context.Background(), Request{Runner: claudeThinkingRunner{}, WorkDir: t.TempDir()}, func(event Event) {
+		events = append(events, event)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Reply != "改好了" || result.ProviderSessionID != "sess-think" {
+		t.Fatalf("unexpected result: %#v", result)
+	}
+	var sawReasoning, sawUpdate bool
+	for _, event := range events {
+		if event.Type == "agent_reasoning" && event.Data["text"] == "先读一下代码" {
+			sawReasoning = true
+		}
+		if event.Type == "agent_message" && event.Data["intermediate"] == true && event.Data["text"] == "我看一下实现" {
+			sawUpdate = true
+		}
+	}
+	if !sawReasoning || !sawUpdate {
+		t.Fatalf("thinking/update events missing: %#v", events)
 	}
 }
 
@@ -110,7 +182,8 @@ func TestClaudeDisablesNativeAgentTools(t *testing.T) {
 
 func TestParseClaudeLineInitSession(t *testing.T) {
 	t.Parallel()
-	event, reply, session := parseClaudeLine(`{"type":"system","subtype":"init","session_id":"sess-2"}`)
+	events, reply, session := parseClaudeLine(`{"type":"system","subtype":"init","session_id":"sess-2"}`)
+	event := firstClaudeEvent(events)
 	if event.Type != "agent_session" || reply != "" || session != "sess-2" {
 		t.Fatalf("unexpected parse: event=%q reply=%q session=%q", event.Type, reply, session)
 	}
@@ -118,7 +191,8 @@ func TestParseClaudeLineInitSession(t *testing.T) {
 
 func TestParseClaudeLineError(t *testing.T) {
 	t.Parallel()
-	event, _, _ := parseClaudeLine(`{"type":"result","subtype":"error_max_turns","error":"too many turns"}`)
+	events, _, _ := parseClaudeLine(`{"type":"result","subtype":"error_max_turns","error":"too many turns"}`)
+	event := firstClaudeEvent(events)
 	if event.Type != "agent_error" {
 		t.Fatalf("expected agent_error, got %q", event.Type)
 	}
