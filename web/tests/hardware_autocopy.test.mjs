@@ -16,8 +16,11 @@ test("hardware terminal offers selection copy and cleans it up", async () => {
 
 test("hardware panel exposes the auto-copy toggle and copies on selection", async () => {
   const source = await readFile(resolve(root, "src", "hardware_panel.ts"), "utf8");
-  assert.match(source, /id="hardware-auto-copy"/);
+  assert.match(source, /id="hardware-auto-copy" class="hardware-auto-copy/);
+  assert.match(source, /aria-pressed=/);
   assert.match(source, /hardwareAutoCopyEnabled\(\)/);
   assert.match(source, /onSelectionCopy\(text\) \{/);
   assert.match(source, /setHardwareAutoCopy\(/);
+  // The toggle must read as a button like its neighbours, not a raw checkbox.
+  assert.doesNotMatch(source, /<input type="checkbox" id="hardware-auto-copy"/);
 });

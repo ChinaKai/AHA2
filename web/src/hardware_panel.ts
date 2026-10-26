@@ -325,7 +325,7 @@ export function renderHardwarePanel(detail: TaskDetail): string {
         <div class="hardware-console-actions">
           <button type="button" id="hardware-connect" ${canConnect && !connected ? "" : "disabled"}>连接</button>
           <button type="button" id="hardware-disconnect" ${connected ? "" : "disabled"}>断开</button>
-          <label class="hardware-auto-copy" title="选中终端内容后自动复制到剪贴板"><input type="checkbox" id="hardware-auto-copy"${hardwareAutoCopyEnabled() ? " checked" : ""}> 选中即复制</label>
+          <button type="button" id="hardware-auto-copy" class="hardware-auto-copy${hardwareAutoCopyEnabled() ? " active" : ""}" aria-pressed="${hardwareAutoCopyEnabled() ? "true" : "false"}" title="选中终端内容后自动复制到剪贴板">选中即复制</button>
           <button type="button" id="hardware-copy-output" title="复制终端内容（有选中时只复制选中部分）">${icon("copy")}</button>
           <button type="button" id="hardware-clear-output" title="清空当前显示">${icon("close")}</button>
         </div>
@@ -495,8 +495,12 @@ export function bindHardwarePanel(detail: TaskDetail, notify: Notice): void {
       updateTerminalDOM(currentStream(state));
     }).catch(reportError);
   });
-  root.querySelector<HTMLInputElement>("#hardware-auto-copy")?.addEventListener("change", event => {
-    setHardwareAutoCopy(Boolean((event.target as HTMLInputElement).checked));
+  root.querySelector<HTMLButtonElement>("#hardware-auto-copy")?.addEventListener("click", event => {
+    const button = event.currentTarget as HTMLButtonElement;
+    const enabled = button.getAttribute("aria-pressed") !== "true";
+    setHardwareAutoCopy(enabled);
+    button.setAttribute("aria-pressed", enabled ? "true" : "false");
+    button.classList.toggle("active", enabled);
   });
   root.querySelector("#hardware-copy-output")?.addEventListener("click", () => {
     if (!activeTerminal) return;
