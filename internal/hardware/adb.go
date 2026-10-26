@@ -236,7 +236,44 @@ func connectADB(ctx context.Context, executable, endpoint string) (string, error
 	if strings.Contains(lower, "failed to connect") || strings.Contains(lower, "cannot connect") {
 		return "", fmt.Errorf("adb connect %s: %s", resolvedEndpoint, message)
 	}
+	// `adb connect` reports success for a device it cannot actually use: until
+	// the device accepts this computer's ADB key it stays "unauthorized", and
+	// the shell below would fail with a bare exit code. Check the real state so
+	// the operator is told to confirm the prompt on the device, which is the
+	// only fix for a TV or phone that never paired.
+	if state, stateErr := adbDeviceState(ctx, executable, resolvedEndpoint); stateErr == nil {
+		switch state {
+		case "", "device":
+		case "unauthorized":
+			return "", fmt.Errorf("设备未授权（%s）：请在电视/手机上确认「允许 USB 调试」弹窗（建议勾选一律允许）。若没有弹窗，先在开发者选项里「撤销 USB 调试授权」再重连本机。", resolvedEndpoint)
+		case "offline":
+			return "", fmt.Errorf("设备处于离线状态（%s）：请在设备上重新确认授权，或关闭再打开该设备的网络调试后重试。", resolvedEndpoint)
+		default:
+			return "", fmt.Errorf("ADB 设备状态异常（%s）：%s", resolvedEndpoint, state)
+		}
+	}
 	return resolvedEndpoint, nil
+}
+
+// adbDeviceState reports "device", "unauthorized", "offline" or "" when the
+// state cannot be read. A failure here must not block a working connection.
+func adbDeviceState(ctx context.Context, executable, endpoint string) (string, error) {
+	stateCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	command := exec.CommandContext(stateCtx, executable, "-s", endpoint, "get-state")
+	configureADBCommand(command)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		message := strings.ToLower(strings.TrimSpace(string(output)))
+		// Older adb prints the state on stderr and exits non-zero.
+		for _, state := range []string{"unauthorized", "offline", "device"} {
+			if strings.Contains(message, state) {
+				return state, nil
+			}
+		}
+		return "", err
+	}
+	return strings.TrimSpace(string(output)), nil
 }
 
 func resolveADBMdnsEndpoint(ctx context.Context, executable, configuredEndpoint string) (string, error) {
