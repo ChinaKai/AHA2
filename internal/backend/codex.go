@@ -46,7 +46,6 @@ func (adapter Codex) Execute(ctx context.Context, request Request, emit func(Eve
 		home:   strings.TrimSpace(request.Environment["CODEX_HOME"]),
 		thread: strings.TrimSpace(request.ProviderSessionID),
 		runner: request.Runner,
-		since:  time.Now().Add(-5 * time.Second),
 	}
 	var pendingUnphasedMessage *Event
 	var emitMu sync.Mutex
@@ -68,6 +67,10 @@ func (adapter Codex) Execute(ctx context.Context, request Request, emit func(Eve
 		pendingUnphasedMessage = nil
 	}
 	runContext, cancelRun := context.WithCancelCause(ctx)
+	// A resumed session appends to the rollout it already owns. Skip everything
+	// that exists before the process starts so only this turn's thinking is
+	// projected; a fresh session has no file yet and starts at zero.
+	rollout.prime(runContext)
 	activity := make(chan string, 1)
 	monitorDone := make(chan struct{})
 	go monitorBackendActivity(runContext, idleWarning, idleTimeout, heartbeat, activity, send, cancelRun, monitorDone)
@@ -515,13 +518,64 @@ type codexRollout struct {
 	seenText  map[string]bool
 	runner    workspace.Runner
 	lastDrain time.Time
-	// since drops reasoning a resumed session already had on disk. Codex
-	// appends to the same rollout file across turns, so without it every
-	// follow-up turn replays the whole conversation's thinking.
-	since time.Time
 }
 
 const codexRolloutInterval = 700 * time.Millisecond
+
+// prime positions the reader at the end of an existing rollout, before the turn
+// starts writing. Reasoning for this turn is produced only after this point, so
+// nothing earlier has to be parsed, buffered or filtered: history is simply not
+// read. A fresh session has no rollout yet and stays at offset zero.
+func (rollout *codexRollout) prime(ctx context.Context) {
+	if rollout == nil || rollout.home == "" || rollout.thread == "" {
+		return
+	}
+	remote := rollout.runner != nil && !workspace.IsWindowsRunner(rollout.runner)
+	path := ""
+	if remote {
+		path = rollout.discover(ctx)
+	} else {
+		matches, err := filepath.Glob(filepath.Join(rollout.home, "sessions", "*", "*", "*", "rollout-*"+rollout.thread+".jsonl"))
+		if err == nil && len(matches) > 0 {
+			sort.Strings(matches)
+			path = matches[len(matches)-1]
+		}
+	}
+	if path == "" {
+		return
+	}
+	size, ok := rollout.fileSize(ctx, path, remote)
+	if !ok {
+		return
+	}
+	rollout.path = path
+	rollout.offset = size
+}
+
+// fileSize returns the current length of path, through the runner when the file
+// lives in the workspace.
+func (rollout *codexRollout) fileSize(ctx context.Context, path string, remote bool) (int64, bool) {
+	if !remote {
+		info, err := os.Stat(path)
+		if err != nil {
+			return 0, false
+		}
+		return info.Size(), true
+	}
+	result, err := rollout.runner.Run(ctx, workspace.Command{
+		Executable: "sh",
+		Args:       []string{"-c", "wc -c < " + quoteCommandWord(path)},
+		Timeout:    5 * time.Second,
+	}, nil)
+	if err != nil || result.ExitCode != 0 {
+		return 0, false
+	}
+	size, err := strconv.ParseInt(strings.TrimSpace(result.Stdout), 10, 64)
+	if err != nil || size < 0 {
+		return 0, false
+	}
+	return size, true
+}
 
 // note records reasoning text already emitted from stdout so the rollout copy
 // is not shown twice.
@@ -628,17 +682,11 @@ func (rollout *codexRollout) consume(chunk string) []Event {
 			continue
 		}
 		var record struct {
-			Timestamp string         `json:"timestamp"`
-			Type      string         `json:"type"`
-			Payload   map[string]any `json:"payload"`
+			Type    string         `json:"type"`
+			Payload map[string]any `json:"payload"`
 		}
 		if json.Unmarshal([]byte(line), &record) != nil || record.Type != "response_item" {
 			continue
-		}
-		if !rollout.since.IsZero() {
-			if stamp, err := time.Parse(time.RFC3339Nano, record.Timestamp); err == nil && stamp.Before(rollout.since) {
-				continue
-			}
 		}
 		if fmt.Sprint(record.Payload["type"]) != "reasoning" {
 			continue
