@@ -289,3 +289,58 @@ exit 2
 		t.Fatalf("unexpected endpoint: %q", endpoint)
 	}
 }
+
+// A TV whose dialog never appears usually needs a fresh server session: assert
+// that an unauthorized device triggers kill-server, one redial, and only then
+// reports the actionable error.
+func TestConnectADBRestartsServerBeforeGivingUp(t *testing.T) {
+	directory := t.TempDir()
+	executable := filepath.Join(directory, "adb")
+	log := filepath.Join(directory, "log")
+	script := `#!/bin/sh
+echo "$*" >> "` + log + `"
+if [ "$1" = "mdns" ] && [ "$2" = "services" ]; then
+  exit 1
+fi
+if [ "$1" = "kill-server" ]; then
+  exit 0
+fi
+if [ "$1" = "connect" ]; then
+  echo "connected to $2"
+  exit 0
+fi
+if [ "$1" = "-s" ] && [ "$3" = "get-state" ]; then
+  echo "unauthorized" >&2
+  exit 1
+fi
+exit 2
+`
+	if err := os.WriteFile(executable, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	shrinkADBAuthorizeWait(t, 20*time.Millisecond)
+	_, err := connectADB(context.Background(), executable, "192.0.2.60:5555")
+	if err == nil {
+		t.Fatal("unauthorized device must not be reported as connected")
+	}
+	calls, readErr := os.ReadFile(log)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	lines := strings.Split(strings.TrimSpace(string(calls)), "\n")
+	connects, restarts := 0, 0
+	for _, line := range lines {
+		switch {
+		case strings.HasPrefix(line, "connect "):
+			connects++
+		case line == "kill-server":
+			restarts++
+		}
+	}
+	if restarts != 1 || connects != 2 {
+		t.Fatalf("expected one server restart and two dials, got restarts=%d connects=%d log=%v", restarts, connects, lines)
+	}
+	if !strings.Contains(err.Error(), "已自动重启 ADB 服务") {
+		t.Fatalf("error should mention the restart: %v", err)
+	}
+}

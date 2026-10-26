@@ -227,42 +227,77 @@ func connectADB(ctx context.Context, executable, endpoint string) (string, error
 	if err != nil {
 		return "", err
 	}
-	connect := exec.CommandContext(ctx, executable, "connect", resolvedEndpoint)
+	if err := dialADB(ctx, executable, resolvedEndpoint); err != nil {
+		return "", err
+	}
+	state, err := waitForADBAuthorization(ctx, executable, resolvedEndpoint, adbAuthorizeWait)
+	if err != nil {
+		return "", err
+	}
+	if state == "unauthorized" {
+		// Android re-prompts only for a fresh server session: once a key was
+		// denied (or the stored key changed) the dialog stays away until the
+		// daemon restarts. A TV that "never shows the prompt" is almost always
+		// this case, so restart the server and give it one more window instead
+		// of sending the operator to the TV's developer options immediately.
+		restartADBServer(ctx, executable)
+		if err := dialADB(ctx, executable, resolvedEndpoint); err != nil {
+			return "", err
+		}
+		state, err = waitForADBAuthorization(ctx, executable, resolvedEndpoint, adbAuthorizeWait)
+		if err != nil {
+			return "", err
+		}
+	}
+	switch state {
+	case "", "device":
+		return resolvedEndpoint, nil
+	case "offline":
+		return "", fmt.Errorf("设备处于离线状态（%s）：请在设备上重新确认授权，或关闭再打开该设备的网络调试后重试。", resolvedEndpoint)
+	case "unauthorized":
+		return "", fmt.Errorf("设备未授权（%s）：请在电视/手机上确认「允许 USB 调试」弹窗（建议勾选一律允许）。已自动重启 ADB 服务重试仍未授权；若电视始终不弹窗，请在电视开发者选项里「撤销 USB 调试授权」，或在电视上关闭再打开 ADB 调试后重试。", resolvedEndpoint)
+	default:
+		return "", fmt.Errorf("ADB 设备状态异常（%s）：%s", resolvedEndpoint, state)
+	}
+}
+
+// dialADB runs `adb connect` and rejects the outputs that mean the socket never
+// opened. A device that is merely unauthorized still reports success here.
+func dialADB(ctx context.Context, executable, endpoint string) error {
+	connect := exec.CommandContext(ctx, executable, "connect", endpoint)
 	configureADBCommand(connect)
 	output, err := connect.CombinedOutput()
 	message := strings.TrimSpace(string(output))
 	if err != nil {
-		return "", fmt.Errorf("adb connect %s: %s", resolvedEndpoint, adbFailure(message, err))
+		return fmt.Errorf("adb connect %s: %s", endpoint, adbFailure(message, err))
 	}
 	lower := strings.ToLower(message)
 	if strings.Contains(lower, "failed to connect") || strings.Contains(lower, "cannot connect") {
-		return "", fmt.Errorf("adb connect %s: %s", resolvedEndpoint, message)
+		return fmt.Errorf("adb connect %s: %s", endpoint, message)
 	}
-	// `adb connect` reports success for a device it cannot actually use: until
-	// the device accepts this computer's ADB key it stays "unauthorized", and
-	// the shell below would fail with a bare exit code. Wait for that
-	// authorization instead of failing on the first probe, because the dialog
-	// usually appears only after the connection is attempted: the operator taps
-	// 允许 a second or two later and the session then opens by itself.
-	deadline := time.Now().Add(adbAuthorizeWait)
+	return nil
+}
+
+// waitForADBAuthorization polls the device state until it is usable, the window
+// closes, or the state cannot be read at all. It returns the last state seen.
+func waitForADBAuthorization(ctx context.Context, executable, endpoint string, wait time.Duration) (string, error) {
+	deadline := time.Now().Add(wait)
 	for {
-		state, stateErr := adbDeviceState(ctx, executable, resolvedEndpoint)
+		state, stateErr := adbDeviceState(ctx, executable, endpoint)
 		if stateErr != nil {
 			// No usable state on this adb build: keep the old behaviour and let
 			// the shell report whatever is really wrong, instead of stalling.
-			return resolvedEndpoint, nil
+			return "", nil
 		}
 		switch state {
-		case "", "device":
-			return resolvedEndpoint, nil
-		case "offline":
-			return "", fmt.Errorf("设备处于离线状态（%s）：请在设备上重新确认授权，或关闭再打开该设备的网络调试后重试。", resolvedEndpoint)
+		case "", "device", "offline":
+			return state, nil
 		case "unauthorized":
 			if time.Now().After(deadline) {
-				return "", fmt.Errorf("设备未授权（%s）：请在电视/手机上确认「允许 USB 调试」弹窗（建议勾选一律允许）。若没有弹窗，先在开发者选项里「撤销 USB 调试授权」再重连本机。", resolvedEndpoint)
+				return state, nil
 			}
 		default:
-			return "", fmt.Errorf("ADB 设备状态异常（%s）：%s", resolvedEndpoint, state)
+			return state, nil
 		}
 		select {
 		case <-ctx.Done():
@@ -272,10 +307,21 @@ func connectADB(ctx context.Context, executable, endpoint string) (string, error
 	}
 }
 
+// restartADBServer drops the daemon so the next dial is a fresh session, which
+// is what makes Android show its authorization dialog again.
+func restartADBServer(ctx context.Context, executable string) {
+	restartCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	command := exec.CommandContext(restartCtx, executable, "kill-server")
+	configureADBCommand(command)
+	_ = command.Run()
+}
+
 // Authorization is confirmed by a human tapping a dialog on the device, so give
-// them a window before declaring the connection unusable. Tests shrink these.
+// them a window before declaring the connection unusable, and one more window
+// after restarting the daemon. Tests shrink these.
 var (
-	adbAuthorizeWait         = 30 * time.Second
+	adbAuthorizeWait         = 20 * time.Second
 	adbAuthorizePollInterval = 700 * time.Millisecond
 )
 
