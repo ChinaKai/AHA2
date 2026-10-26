@@ -42,7 +42,11 @@ func (adapter Codex) Execute(ctx context.Context, request Request, emit func(Eve
 	args := codexArguments(request, catalogPath)
 	environment := filterEnvironment(request.Environment)
 	var reply, sessionID, providerError string
-	rollout := &codexRollout{home: strings.TrimSpace(request.Environment["CODEX_HOME"])}
+	rollout := &codexRollout{
+		home:   strings.TrimSpace(request.Environment["CODEX_HOME"]),
+		thread: strings.TrimSpace(request.ProviderSessionID),
+		runner: request.Runner,
+	}
 	var pendingUnphasedMessage *Event
 	var emitMu sync.Mutex
 	send := func(event Event) {
