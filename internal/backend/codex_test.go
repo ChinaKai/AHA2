@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -355,6 +356,53 @@ func TestFilterEnvironmentAllowsDeclaredCredentialKey(t *testing.T) {
 		t.Fatal("dangerous environment variable was forwarded")
 	}
 }
+
+type rolloutRunner struct {
+	commands []workspace.Command
+	tailOut  string
+}
+
+func (runner *rolloutRunner) Run(_ context.Context, command workspace.Command, _ workspace.LineHandler) (workspace.Result, error) {
+	runner.commands = append(runner.commands, command)
+	switch command.Executable {
+	case "sh":
+		return workspace.Result{ExitCode: 0, Stdout: "/home/u/.codex-env/sessions/2026/10/26/rollout-x-thread-r.jsonl\n"}, nil
+	case "tail":
+		return workspace.Result{ExitCode: 0, Stdout: runner.tailOut}, nil
+	}
+	return workspace.Result{ExitCode: 0}, nil
+}
+
+func TestCodexRolloutReadsThroughRunnerForWSLWorkspace(t *testing.T) {
+	firstLine := `{"type":"response_item","payload":{"type":"reasoning","id":"r1","summary":[],"content":[{"type":"reasoning_text","text":"想一下"}]}}` + "\n"
+	runner := &rolloutRunner{tailOut: firstLine}
+	rollout := &codexRollout{home: "/home/u/.codex-env", thread: "thread-r", runner: runner}
+
+	events := rollout.drain(context.Background(), true)
+	if len(events) != 1 || events[0].Type != "agent_reasoning" || events[0].Data["text"] != "想一下" {
+		t.Fatalf("runner drain: %#v", events)
+	}
+	if len(runner.commands) != 2 || runner.commands[0].Executable != "sh" || runner.commands[1].Executable != "tail" {
+		t.Fatalf("expected discovery then tail, got %#v", runner.commands)
+	}
+	if got := runner.commands[1].Args; len(got) != 3 || got[0] != "-c" || got[1] != "+1" {
+		t.Fatalf("unexpected tail args: %#v", got)
+	}
+
+	secondLine := `{"type":"response_item","payload":{"type":"reasoning","id":"r2","summary":[],"content":[{"type":"reasoning_text","text":"再想"}]}}` + "\n"
+	runner.tailOut = secondLine
+	events = rollout.drain(context.Background(), true)
+	if len(events) != 1 || events[0].Data["text"] != "再想" {
+		t.Fatalf("second runner drain: %#v", events)
+	}
+	runner.tailOut = ""
+	_ = rollout.drain(context.Background(), true)
+	last := runner.commands[len(runner.commands)-1]
+	if last.Args[1] != "+"+strconv.Itoa(len(firstLine)+len(secondLine)+1) {
+		t.Fatalf("tail must resume after the consumed bytes: %#v", last.Args)
+	}
+}
+
 func TestCodexRolloutDrainsReasoningIncrementally(t *testing.T) {
 	home := t.TempDir()
 	dir := filepath.Join(home, "sessions", "2026", "10", "26")
@@ -369,11 +417,11 @@ func TestCodexRolloutDrainsReasoningIncrementally(t *testing.T) {
 	}
 	rollout := &codexRollout{home: home, thread: "thread-abc"}
 
-	events := rollout.drain()
+	events := rollout.drain(context.Background(), true)
 	if len(events) != 1 || events[0].Type != "agent_reasoning" || events[0].Data["text"] != "先想一下" {
 		t.Fatalf("first drain: %#v", events)
 	}
-	if got := rollout.drain(); len(got) != 0 {
+	if got := rollout.drain(context.Background(), true); len(got) != 0 {
 		t.Fatalf("repeated drain must not repeat events: %#v", got)
 	}
 
@@ -385,7 +433,7 @@ func TestCodexRolloutDrainsReasoningIncrementally(t *testing.T) {
 		t.Fatal(err)
 	}
 	file.Close()
-	events = rollout.drain()
+	events = rollout.drain(context.Background(), true)
 	if len(events) != 1 || events[0].Data["text"] != "再想一下" {
 		t.Fatalf("second drain: %#v", events)
 	}
@@ -402,14 +450,14 @@ func TestCodexRolloutWaitsForCompleteLinesAndSkipsKnownText(t *testing.T) {
 		t.Fatal(err)
 	}
 	rollout := &codexRollout{home: home, thread: "thread-part"}
-	if events := rollout.drain(); len(events) != 0 {
+	if events := rollout.drain(context.Background(), true); len(events) != 0 {
 		t.Fatalf("partial line must not be read: %#v", events)
 	}
 	file, _ := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
 	file.WriteString("}}]}}\n")
 	file.Close()
 	rollout.note("已知")
-	if events := rollout.drain(); len(events) != 0 {
+	if events := rollout.drain(context.Background(), true); len(events) != 0 {
 		t.Fatalf("text already emitted from stdout must be skipped: %#v", events)
 	}
 }

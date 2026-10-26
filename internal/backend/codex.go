@@ -1,7 +1,6 @@
 package backend
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -77,7 +76,7 @@ func (adapter Codex) Execute(ctx context.Context, request Request, emit func(Eve
 		KillTree:       true,
 		ReverseForward: request.ReverseForward,
 	}, func(line string) {
-		for _, event := range rollout.drain() {
+		for _, event := range rollout.drain(runContext, false) {
 			send(event)
 		}
 		event, parsedReply, parsedSession := parseCodexLine(line)
@@ -113,7 +112,7 @@ func (adapter Codex) Execute(ctx context.Context, request Request, emit func(Eve
 		}
 		send(event)
 	})
-	for _, event := range rollout.drain() {
+	for _, event := range rollout.drain(runContext, true) {
 		send(event)
 	}
 	flushPendingMessage(true)
@@ -495,20 +494,25 @@ func codexReasoningText(item map[string]any) string {
 // a turn runs. `codex exec --json` only exposes the model's reasoning summary,
 // and providers that return raw reasoning instead (reasoning_text content with
 // an empty summary) leave the stream with no reasoning item at all. The rollout
-// keeps the raw text, so AHA reads it from the file it already owns and projects
-// it as a reasoning event.
+// keeps the raw text, so AHA reads it and projects it as a reasoning event.
 //
-// The reader is intentionally pull-based: every stdout line first drains what
-// the rollout appended so far. That keeps ordering (a reasoning step appears
-// before the tool call it precedes) without a timer or an extra goroutine.
+// The rollout lives inside the workspace, not on the AHA host: a WSL or SSH
+// workspace stores it under a path only the runner can open. Reads therefore go
+// through the runner (tail from the last offset); a Windows-local workspace
+// falls back to reading the file directly. Draining is throttled and happens on
+// stdout lines, so no extra goroutine races the runner.
 type codexRollout struct {
-	home     string
-	thread   string
-	path     string
-	offset   int64
-	seenIDs  map[string]bool
-	seenText map[string]bool
+	home      string
+	thread    string
+	path      string
+	offset    int64
+	seenIDs   map[string]bool
+	seenText  map[string]bool
+	runner    workspace.Runner
+	lastDrain time.Time
 }
+
+const codexRolloutInterval = 700 * time.Millisecond
 
 // note records reasoning text already emitted from stdout so the rollout copy
 // is not shown twice.
@@ -523,10 +527,23 @@ func (rollout *codexRollout) note(text string) {
 	rollout.seenText[text] = true
 }
 
-func (rollout *codexRollout) drain() []Event {
+func (rollout *codexRollout) drain(ctx context.Context, force bool) []Event {
 	if rollout == nil || rollout.home == "" || rollout.thread == "" {
 		return nil
 	}
+	if !force && time.Since(rollout.lastDrain) < codexRolloutInterval {
+		return nil
+	}
+	rollout.lastDrain = time.Now()
+	if rollout.runner == nil || workspace.IsWindowsRunner(rollout.runner) {
+		return rollout.drainFile()
+	}
+	return rollout.drainRunner(ctx)
+}
+
+// drainFile reads the rollout directly. Only valid when the file is visible to
+// the AHA process itself.
+func (rollout *codexRollout) drainFile() []Event {
 	if rollout.path == "" {
 		matches, err := filepath.Glob(filepath.Join(rollout.home, "sessions", "*", "*", "*", "rollout-*"+rollout.thread+".jsonl"))
 		if err != nil || len(matches) == 0 {
@@ -549,15 +566,54 @@ func (rollout *codexRollout) drain() []Event {
 	}
 	data := make([]byte, info.Size()-rollout.offset)
 	read, _ := io.ReadFull(file, data)
-	data = data[:read]
-	// A line can be written in two flushes; only consume complete lines.
-	cut := bytes.LastIndexByte(data, '\n')
+	return rollout.consume(string(data[:read]))
+}
+
+// drainRunner tails the rollout through the workspace runner, which is the only
+// way to reach a WSL or SSH workspace path from the AHA host.
+func (rollout *codexRollout) drainRunner(ctx context.Context) []Event {
+	if rollout.path == "" {
+		rollout.path = rollout.discover(ctx)
+	}
+	if rollout.path == "" {
+		return nil
+	}
+	result, err := rollout.runner.Run(ctx, workspace.Command{
+		Executable: "tail",
+		Args:       []string{"-c", "+" + strconv.FormatInt(rollout.offset+1, 10), rollout.path},
+		Timeout:    5 * time.Second,
+	}, nil)
+	if err != nil || result.ExitCode != 0 {
+		return nil
+	}
+	return rollout.consume(result.Stdout)
+}
+
+func (rollout *codexRollout) discover(ctx context.Context) string {
+	script := "ls -1t " + quoteCommandWord(filepath.ToSlash(rollout.home)) + "/sessions/*/*/*/rollout-*" +
+		quoteCommandWord(rollout.thread) + ".jsonl 2>/dev/null | head -1"
+	result, err := rollout.runner.Run(ctx, workspace.Command{
+		Executable: "sh",
+		Args:       []string{"-c", script},
+		Timeout:    5 * time.Second,
+	}, nil)
+	if err != nil || result.ExitCode != 0 {
+		return ""
+	}
+	return strings.TrimSpace(result.Stdout)
+}
+
+// consume parses complete rollout lines and advances the offset by exactly the
+// bytes consumed, so a partially written line is retried on the next drain.
+func (rollout *codexRollout) consume(chunk string) []Event {
+	cut := strings.LastIndexByte(chunk, '\n')
 	if cut < 0 {
 		return nil
 	}
-	rollout.offset += int64(cut + 1)
+	complete := chunk[:cut+1]
+	rollout.offset += int64(len(complete))
 	events := make([]Event, 0, 2)
-	for _, line := range strings.Split(string(data[:cut]), "\n") {
+	for _, line := range strings.Split(strings.TrimSuffix(complete, "\n"), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
@@ -573,10 +629,8 @@ func (rollout *codexRollout) drain() []Event {
 			continue
 		}
 		id := strings.TrimSpace(fmt.Sprint(record.Payload["id"]))
-		if id != "" {
-			if rollout.seenIDs[id] {
-				continue
-			}
+		if id != "" && rollout.seenIDs[id] {
+			continue
 		}
 		text := strings.TrimSpace(codexReasoningText(record.Payload))
 		if text == "" || rollout.seenText[text] {
@@ -592,4 +646,8 @@ func (rollout *codexRollout) drain() []Event {
 		events = append(events, Event{Type: "agent_reasoning", Data: map[string]any{"text": text, "reasoning": true}})
 	}
 	return events
+}
+
+func quoteCommandWord(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
