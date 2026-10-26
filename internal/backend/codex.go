@@ -46,6 +46,7 @@ func (adapter Codex) Execute(ctx context.Context, request Request, emit func(Eve
 		home:   strings.TrimSpace(request.Environment["CODEX_HOME"]),
 		thread: strings.TrimSpace(request.ProviderSessionID),
 		runner: request.Runner,
+		since:  time.Now().Add(-5 * time.Second),
 	}
 	var pendingUnphasedMessage *Event
 	var emitMu sync.Mutex
@@ -514,6 +515,10 @@ type codexRollout struct {
 	seenText  map[string]bool
 	runner    workspace.Runner
 	lastDrain time.Time
+	// since drops reasoning a resumed session already had on disk. Codex
+	// appends to the same rollout file across turns, so without it every
+	// follow-up turn replays the whole conversation's thinking.
+	since time.Time
 }
 
 const codexRolloutInterval = 700 * time.Millisecond
@@ -623,11 +628,17 @@ func (rollout *codexRollout) consume(chunk string) []Event {
 			continue
 		}
 		var record struct {
-			Type    string         `json:"type"`
-			Payload map[string]any `json:"payload"`
+			Timestamp string         `json:"timestamp"`
+			Type      string         `json:"type"`
+			Payload   map[string]any `json:"payload"`
 		}
 		if json.Unmarshal([]byte(line), &record) != nil || record.Type != "response_item" {
 			continue
+		}
+		if !rollout.since.IsZero() {
+			if stamp, err := time.Parse(time.RFC3339Nano, record.Timestamp); err == nil && stamp.Before(rollout.since) {
+				continue
+			}
 		}
 		if fmt.Sprint(record.Payload["type"]) != "reasoning" {
 			continue

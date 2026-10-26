@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/ChinaKai/AHA2/internal/workspace"
 )
@@ -68,4 +69,35 @@ func TestCodexRolloutReadsFileForLocalWindowsRunner(t *testing.T) {
 	if len(events) != 1 || events[0].Data["text"] != "摘要" {
 		t.Fatalf("direct read failed: %#v", events)
 	}
+}
+
+// A resumed session keeps one rollout file, so a follow-up turn must not replay
+// the thinking of the turns before it.
+func TestCodexRolloutSkipsReasoningFromEarlierTurns(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rollout-x-th.jsonl")
+	oldLine := `{"timestamp":"2026-10-26T01:00:00.000Z","type":"response_item","payload":{"type":"reasoning","id":"old","summary":[],"content":[{"type":"reasoning_text","text":"上一轮的思考"}]}}` + "\n"
+	newLine := `{"timestamp":"2026-10-26T02:00:00.000Z","type":"response_item","payload":{"type":"reasoning","id":"new","summary":[],"content":[{"type":"reasoning_text","text":"这一轮的思考"}]}}` + "\n"
+	if err := os.WriteFile(path, []byte(oldLine+newLine), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runner := &wslLikeRunner{path: path}
+	rollout := &codexRollout{
+		home: "/home/u/.codex-env", thread: "th", runner: runner,
+		since: mustParseTime(t, "2026-10-26T01:59:00.000Z"),
+	}
+
+	events := rollout.drain(context.Background(), true)
+	if len(events) != 1 || events[0].Data["text"] != "这一轮的思考" {
+		t.Fatalf("earlier turns must not be replayed: %#v", events)
+	}
+}
+
+func mustParseTime(t *testing.T, value string) time.Time {
+	t.Helper()
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return parsed
 }
