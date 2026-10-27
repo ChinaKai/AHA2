@@ -1806,8 +1806,13 @@ func (s *Service) SendAgentTaskChannelMessage(ctx context.Context, claims agenta
 	if message == "" || len([]rune(message)) > 1000 {
 		return domain.ChannelDelivery{}, fmt.Errorf("message must contain 1 to 1000 characters")
 	}
-	if len(input.MentionIdentityLinkIDs) < 1 || len(input.MentionIdentityLinkIDs) > 5 {
-		return domain.ChannelDelivery{}, fmt.Errorf("choose between 1 and 5 channel contacts")
+	// Mentions are optional: the Owner often asks for a message or attachment to
+	// be posted to the group itself, with nobody to summon. Requiring a mention
+	// made the Agent pick a random member just to pass validation, which pinged
+	// an uninvolved person. When mentions are given they must still be real
+	// contacts of this group.
+	if len(input.MentionIdentityLinkIDs) > 5 {
+		return domain.ChannelDelivery{}, fmt.Errorf("choose at most 5 channel contacts")
 	}
 	available := map[string]bool{}
 	for _, contact := range contacts {

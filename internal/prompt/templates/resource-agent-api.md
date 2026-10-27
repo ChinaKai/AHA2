@@ -103,7 +103,7 @@ The full upload, binding, and receipt procedure lives in the `attachment-protoco
 
 Channel context endpoints are available only with a server-verified ChannelContext. Private Owner assistants may read channel context/catalog and preview takeover, exit, task creation, status, or handoff decisions. Preview creates confirmation only. Group digital-human Turns may submit handoffs but cannot use catalog or control actions.
 
-For an ordinary Task with an active group primary channel, Main may read selected contacts and send one durable blocker coordination message. Use stable request IDs for retries, set `purpose` to `blocker`, and only mention contacts returned by the current Task channel.
+For an ordinary Task with an active group primary channel, Main may read selected contacts and send one durable blocker coordination message. Use stable request IDs for retries and set `purpose` to `blocker`. Mentions are optional: when the Owner asks you to post a message or attachment to the group itself, send it with no `mention_identity_link_ids` so nobody is pinged. Mention contacts returned by the current Task channel only when a specific person must act, and never pick someone at random just to satisfy the field.
 
 - `GET /api/v1/agent/channel/context`
 - `GET /api/v1/agent/channel/catalog`
@@ -113,7 +113,7 @@ For an ordinary Task with an active group primary channel, Main may read selecte
 - `POST /api/v1/agent/channel/reply-decision`
 - `POST /api/v1/agent/channel/handoffs`
 
-Action previews use `{"operation":"takeover|exit|create_task|status_change|handoff_decision","target_id":"optional","intent":{...}}`. Contact messages use `{"request_id":"stable-retry-key","purpose":"blocker","message":"...","mention_identity_link_ids":["channel_identity_..."],"attachment_ids":["attachment_..."]}`. Attachment IDs must come from this Turn's Task attachment upload API; text and native image/file deliveries are ordered and share the same idempotent request.
+Action previews use `{"operation":"takeover|exit|create_task|status_change|handoff_decision","target_id":"optional","intent":{...}}`. Contact messages use `{"request_id":"stable-retry-key","purpose":"blocker","message":"...","mention_identity_link_ids":[],"attachment_ids":["attachment_..."]}`; leave the mention list empty for a plain group post and fill it (up to 5 verified contacts) only when those people need to act. Attachment IDs must come from this Turn's Task attachment upload API; text and native image/file deliveries are ordered and share the same idempotent request.
 
 For a task-routed channel message, an explicit receipt-bound
 `POST /api/v1/agent/channel/replies` is the `continue` signal. Call

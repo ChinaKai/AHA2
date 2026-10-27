@@ -447,6 +447,31 @@ func TestTaskChannelRouteAPI(t *testing.T) {
 	if err := channelService.AckDelivery(ctx, deliveryClaims, claimed[0].ID, claimed[0].LeaseID, "provider-post-message", "provider-request"); err != nil {
 		t.Fatal(err)
 	}
+	// The Owner often asks for a plain group post, so no mention is required and
+	// nobody should be picked at random to satisfy validation.
+	plain := map[string]any{
+		"request_id":                "api-contract-plain-post-1",
+		"purpose":                   "blocker",
+		"message":                   "这条只发到群里，不打扰任何人。",
+		"mention_identity_link_ids": []string{},
+	}
+	response = agentRequest(t, server.URL+"/api/v1/agent/channel/messages", http.MethodPost, token, plain)
+	var plainSent struct {
+		Delivery domain.ChannelDelivery `json:"delivery"`
+	}
+	decodeResponse(t, response, &plainSent)
+	if response.StatusCode != http.StatusCreated || plainSent.Delivery.ID == "" {
+		t.Fatalf("plain group post status=%d payload=%#v", response.StatusCode, plainSent)
+	}
+	response = agentRequest(t, server.URL+"/api/v1/agent/channel/messages", http.MethodPost, token, map[string]any{
+		"request_id": "too-many-mentions", "purpose": "blocker", "message": "不应发送",
+		"mention_identity_link_ids": []string{"a", "b", "c", "d", "e", "f"},
+	})
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("more than five mentions status=%d", response.StatusCode)
+	}
+	response.Body.Close()
+
 	response = agentRequest(t, server.URL+"/api/v1/agent/channel/messages", http.MethodPost, token, map[string]any{
 		"request_id": "unknown-contact", "message": "不应发送",
 		"mention_identity_link_ids": []string{"channel-route-unknown"},
