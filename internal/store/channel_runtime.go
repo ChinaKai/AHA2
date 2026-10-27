@@ -532,6 +532,9 @@ func (s *Store) ChannelDeliveryTarget(ctx context.Context, conversationID string
 			}
 		}
 	}
+	// The Owner is a real member of their own group and can be the actor whose
+	// message a Task reply answers. Resolving only participant links silently
+	// dropped the @ from those replies, so owner links stay mentionable too.
 	if rawMentionIDs, ok := sourcePayload["mention_identity_link_ids"]; ok {
 		raw, _ := json.Marshal(rawMentionIDs)
 		var identityIDs []string
@@ -550,7 +553,8 @@ func (s *Store) ChannelDeliveryTarget(ctx context.Context, conversationID string
 					JOIN channel_conversation_members member
 					  ON member.identity_link_id=identity.id AND member.conversation_id=?
 					JOIN channel_conversations conversation ON conversation.id=member.conversation_id
-					WHERE identity.id=? AND identity.instance_id=? AND identity.status='active' AND identity.role='participant'
+					WHERE identity.id=? AND identity.instance_id=? AND identity.status='active'
+					  AND identity.role IN ('participant','owner')
 					  AND (
 						member.provider_active=1
 						OR (member.is_bot=1 AND member.observed_at<>'')
@@ -621,7 +625,7 @@ func (s *Store) EnqueueTaskChannelOutreach(ctx context.Context, taskID, turnID, 
 			JOIN channel_conversations conversation ON conversation.id=member.conversation_id
 			JOIN channel_identity_links identity ON identity.id=member.identity_link_id
 			WHERE contact.task_id=? AND contact.conversation_id=? AND contact.identity_link_id=?
-			  AND identity.instance_id=? AND identity.role='participant' AND identity.status='active'
+			  AND identity.instance_id=? AND identity.role IN ('participant','owner') AND identity.status='active'
 			  AND (
 					member.provider_active=1
 					OR (member.is_bot=1 AND member.observed_at<>'')

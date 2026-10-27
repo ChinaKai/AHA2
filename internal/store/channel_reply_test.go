@@ -201,6 +201,81 @@ func TestAgentChannelReplyIsReceiptBoundAndIdempotent(t *testing.T) {
 		t.Fatalf("reply target=%#v err=%v", target, err)
 	}
 
+	// The Owner is also a member of their group. A reply to the Owner's own
+	// group message must mention them, otherwise the answer is posted without a
+	// notification even though the identity link is active.
+	ownerIdentity, err := database.BindChannelOwnerIdentity(ctx, domain.ChannelIdentityLink{
+		ID: "reply-owner-identity", InstanceID: instance.ID, OwnerID: "reply-owner",
+		ExternalUserID: "provider-user-owner", Role: "owner", DisplayName: "负责人",
+		Status: "active", LinkedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpsertChannelConversationMember(ctx, conversation.ID, ownerIdentity.ID, false, now); err != nil {
+		t.Fatal(err)
+	}
+	ownerReceiptID := domain.NewID("channel_inbox")
+	ownerNormalized, _ := json.Marshal(map[string]any{
+		"external_message_id": "provider-message-owner",
+		"mentioned_bot":       true,
+	})
+	ownerContext := make(map[string]any, len(channelContext))
+	for key, value := range channelContext {
+		ownerContext[key] = value
+	}
+	ownerContext["inbound_receipt_id"] = ownerReceiptID
+	ownerContext["actor"] = map[string]any{
+		"identity_link_id": ownerIdentity.ID, "display_name": ownerIdentity.DisplayName,
+		"role": "owner", "is_bot": false,
+	}
+	ownerPayloadJSON := encodeJSON(map[string]any{
+		"channel_receipt_id": ownerReceiptID,
+		"channel_context":    ownerContext,
+	})
+	if _, err := database.db.ExecContext(ctx, `
+		INSERT INTO channel_inbox_dedup(
+			id,instance_id,external_event_id,event_type,payload_digest,normalized_payload_json,
+			state,lease_id,lease_until,conversation_id,aha_message_id,outcome,
+			occurred_at,received_at,processed_at
+		) VALUES(?,?,?,?,?,?, 'processed','','',?,'','delivered_to_task',?,?,?)`,
+		ownerReceiptID, instance.ID, "reply-owner-event", "message", "digest-owner", string(ownerNormalized),
+		conversation.ID, timeString(now), timeString(now), timeString(now),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.db.ExecContext(ctx, `
+		INSERT INTO conversation_items(
+			id,task_id,round_id,turn_id,agent_id,stream_agent_id,from_agent_id,to_agent_id,
+			route_kind,category,kind,summary,payload_json,created_at
+		) VALUES(?,?,?,?, 'owner','main','owner','main','owner_message','chat','user_message',?,?,?)`,
+		domain.NewID("conversation"), task.ID, round.ID, turn.ID,
+		"早上好", ownerPayloadJSON, timeString(now),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.db.ExecContext(ctx, `
+		INSERT INTO agent_inbox(
+			id,task_id,round_id,target_agent_id,source_agent_id,source_kind,source_turn_id,
+			message_id,content,payload_json,status,batch_id,created_at,claimed_at,processed_at,
+			delivered_turn_id,delivered_at
+		) VALUES(?,?,?, 'main','owner','owner_message','','',?,?, 'delivered_in_turn','',?,?,?,?,?)`,
+		domain.NewID("inbox"), task.ID, round.ID, "早上好", ownerPayloadJSON,
+		timeString(now), timeString(now), "", turn.ID, timeString(now),
+	); err != nil {
+		t.Fatal(err)
+	}
+	ownerDelivery, _, ownerCreated, err := database.EnqueueAgentChannelReply(
+		ctx, task.ID, turn.ID, "owner-reply-request", ownerReceiptID, "早上好", nil, now.Add(time.Second),
+	)
+	if err != nil || !ownerCreated || ownerDelivery.ID == "" {
+		t.Fatalf("owner reply delivery=%#v created=%v err=%v", ownerDelivery, ownerCreated, err)
+	}
+	ownerTarget, err := database.ChannelDeliveryTarget(ctx, conversation.ID, ownerDelivery.SourceEventSequence)
+	if err != nil || ownerTarget["mention_user_ids"] != `["provider-user-owner"]` {
+		t.Fatalf("owner reply target=%#v err=%v", ownerTarget, err)
+	}
+
 	botReceiptID := domain.NewID("channel_inbox")
 	botNormalized, _ := json.Marshal(map[string]any{
 		"external_message_id": "provider-message-bot",
@@ -354,8 +429,9 @@ func TestAgentChannelReplyIsReceiptBoundAndIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	deliveries, err := database.ChannelDeliveries(ctx, instance.ID, 20)
-	if err != nil || len(deliveries) != 2 ||
+	if err != nil || len(deliveries) != 3 ||
 		!slices.ContainsFunc(deliveries, func(item domain.ChannelDelivery) bool { return item.ID == delivery.ID }) ||
+		!slices.ContainsFunc(deliveries, func(item domain.ChannelDelivery) bool { return item.ID == ownerDelivery.ID }) ||
 		!slices.ContainsFunc(deliveries, func(item domain.ChannelDelivery) bool { return item.ID == botDelivery.ID }) {
 		t.Fatalf("ordinary final reply leaked into task route: %#v err=%v", deliveries, err)
 	}
