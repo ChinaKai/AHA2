@@ -409,13 +409,30 @@ func emitSecret(message secretMessage) {
 	_ = json.NewEncoder(os.Stdout).Encode(message)
 }
 
+type channelLifecycle interface {
+	OnReady(func())
+	OnReconnecting(func())
+	OnReconnected(func())
+}
+
+func registerChannelHealth(callbacks channelLifecycle, report func(status, errorCode string)) {
+	reportReady := func() { report("ready", "") }
+	callbacks.OnReady(reportReady)
+	callbacks.OnReconnecting(func() { report("degraded", "feishu_reconnecting") })
+	// A successful SDK reconnect only fires OnReconnected; it does not repeat
+	// OnReady. Without this handler the instance would stay degraded until the
+	// plugin process restarts.
+	callbacks.OnReconnected(reportReady)
+}
+
 func runChannel(ctx context.Context, runtime *runtimeClient, boot bootstrap) error {
 	client, wsClient := newFeishuClients(boot)
 	selfBotOpenID, selfBotName := feishuBotIdentity(ctx, client)
 	channel := larkchannel.NewChannel(client, wsClient)
 	healthMetadata := map[string]string{"bot_open_id": selfBotOpenID, "bot_display_name": selfBotName}
-	channel.OnReady(func() { _ = runtime.health(context.Background(), "ready", "", healthMetadata) })
-	channel.OnReconnecting(func() { _ = runtime.health(context.Background(), "degraded", "feishu_reconnecting", healthMetadata) })
+	registerChannelHealth(channel, func(status, errorCode string) {
+		_ = runtime.health(context.Background(), status, errorCode, healthMetadata)
+	})
 	channel.OnMessage(func(eventCtx context.Context, message *channeltypes.NormalizedMessage) error {
 		replyContextResult := make(chan map[string]any, 1)
 		go func() { replyContextResult <- inboundReplyContext(eventCtx, client, message) }()

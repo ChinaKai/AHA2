@@ -368,3 +368,37 @@ func TestRenderCoalescedFinalReplyPrefersReplyText(t *testing.T) {
 		t.Fatalf("coalesced final reply type=%s content=%s", msgType, content)
 	}
 }
+
+type fakeChannelLifecycle struct {
+	ready        func()
+	reconnecting func()
+	reconnected  func()
+}
+
+func (f *fakeChannelLifecycle) OnReady(handler func())        { f.ready = handler }
+func (f *fakeChannelLifecycle) OnReconnecting(handler func()) { f.reconnecting = handler }
+func (f *fakeChannelLifecycle) OnReconnected(handler func())  { f.reconnected = handler }
+
+func TestChannelHealthRecoversAfterReconnect(t *testing.T) {
+	t.Parallel()
+	fake := &fakeChannelLifecycle{}
+	reports := []string{}
+	registerChannelHealth(fake, func(status, errorCode string) {
+		reports = append(reports, status+":"+errorCode)
+	})
+	if fake.ready == nil || fake.reconnecting == nil || fake.reconnected == nil {
+		t.Fatalf("lifecycle handlers not registered: ready=%t reconnecting=%t reconnected=%t", fake.ready != nil, fake.reconnecting != nil, fake.reconnected != nil)
+	}
+	fake.ready()
+	fake.reconnecting()
+	fake.reconnected()
+	want := []string{"ready:", "degraded:feishu_reconnecting", "ready:"}
+	if len(reports) != len(want) {
+		t.Fatalf("health reports=%v want=%v", reports, want)
+	}
+	for index := range want {
+		if reports[index] != want[index] {
+			t.Fatalf("health reports=%v want=%v", reports, want)
+		}
+	}
+}
