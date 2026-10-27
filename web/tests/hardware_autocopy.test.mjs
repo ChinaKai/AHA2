@@ -1,9 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {readFile} from "node:fs/promises";
-import {resolve} from "node:path";
+import {fileURLToPath} from "node:url";
+import {dirname, resolve} from "node:path";
 
-const root = resolve("/home/kaikai/kk-workspace/my_project/AHA2", "web");
+const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 test("hardware terminal offers selection copy and cleans it up", async () => {
   const source = await readFile(resolve(root, "src", "hardware_terminal.ts"), "utf8");
