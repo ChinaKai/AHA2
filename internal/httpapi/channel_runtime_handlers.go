@@ -83,6 +83,8 @@ func (s *Server) channelRuntimeHealth(writer http.ResponseWriter, request *http.
 		ErrorCode      string `json:"error_code"`
 		BotOpenID      string `json:"bot_open_id"`
 		BotDisplayName string `json:"bot_display_name"`
+		LastInboundAt  string `json:"last_inbound_at"`
+		Heartbeat      string `json:"heartbeat"`
 	}
 	if err := decodeJSON(request, &payload); err != nil || payload.SchemaVersion != 1 {
 		writeError(writer, http.StatusUnprocessableEntity, "invalid_envelope")
@@ -91,6 +93,8 @@ func (s *Server) channelRuntimeHealth(writer http.ResponseWriter, request *http.
 	metadata := map[string]string{
 		"runtime_bot_open_id":               payload.BotOpenID,
 		"runtime_bot_provider_display_name": payload.BotDisplayName,
+		"last_inbound_at":                   payload.LastInboundAt,
+		"heartbeat":                         payload.Heartbeat,
 	}
 	if err := s.channels.UpdateHealth(request.Context(), channelRuntimeClaims(request.Context()), payload.Status, payload.ErrorCode, metadata); err != nil {
 		writeChannelRuntimeError(writer, err)

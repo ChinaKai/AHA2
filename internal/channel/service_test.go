@@ -183,6 +183,14 @@ func TestDiscoverAndCreateInstanceIsOptionalAndIdempotent(t *testing.T) {
 	if err != nil || claims.InstanceID != item.ID {
 		t.Fatalf("claims=%#v err=%v", claims, err)
 	}
+	capabilityDigest := sha256.Sum256([]byte(raw))
+	renewed, err := database.ChannelCapabilityByHash(ctx, hex.EncodeToString(capabilityDigest[:]))
+	if err != nil || !renewed.ExpiresAt.After(capability.ExpiresAt) || renewed.TTLSeconds != 3600 {
+		t.Fatalf("capability was not renewed: issued=%v renewed=%v ttl=%d err=%v", capability.ExpiresAt, renewed.ExpiresAt, renewed.TTLSeconds, err)
+	}
+	if !claims.ExpiresAt.Equal(renewed.ExpiresAt) {
+		t.Fatalf("claims expiry=%v renewed=%v", claims.ExpiresAt, renewed.ExpiresAt)
+	}
 	if _, err := service.AuthenticateCapability(ctx, raw, "channel.inbound.write"); err == nil {
 		t.Fatal("capability scope escalation was accepted")
 	}

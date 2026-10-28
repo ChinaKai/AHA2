@@ -409,16 +409,101 @@ func emitSecret(message secretMessage) {
 	_ = json.NewEncoder(os.Stdout).Encode(message)
 }
 
+const (
+	channelHeartbeatInterval = 30 * time.Second
+	channelHealthTimeout     = 5 * time.Second
+)
+
 type channelLifecycle interface {
 	OnReady(func())
 	OnReconnecting(func())
 	OnReconnected(func())
 }
 
-func registerChannelHealth(callbacks channelLifecycle, report func(status, errorCode string)) {
-	reportReady := func() { report("ready", "") }
+// channelHealthState is the latest lifecycle state plus the most recent
+// inbound observation. Lifecycle callbacks only update it; the reporter sends
+// it asynchronously so a slow AHA runtime can never block SDK reconnects.
+type channelHealthState struct {
+	mu            sync.Mutex
+	status        string
+	errorCode     string
+	lastInboundAt time.Time
+}
+
+func (s *channelHealthState) set(status, errorCode string) {
+	s.mu.Lock()
+	s.status, s.errorCode = status, errorCode
+	s.mu.Unlock()
+}
+
+func (s *channelHealthState) inbound() {
+	s.mu.Lock()
+	s.lastInboundAt = time.Now().UTC()
+	s.mu.Unlock()
+}
+
+func (s *channelHealthState) snapshot() (string, string, map[string]string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	metadata := map[string]string{}
+	if !s.lastInboundAt.IsZero() {
+		metadata["last_inbound_at"] = s.lastInboundAt.Format(time.RFC3339Nano)
+	}
+	return s.status, s.errorCode, metadata
+}
+
+type channelHealthReporter struct {
+	state  *channelHealthState
+	report func(context.Context, string, string, map[string]string) error
+	wake   chan struct{}
+}
+
+func newChannelHealthReporter(state *channelHealthState, report func(context.Context, string, string, map[string]string) error) *channelHealthReporter {
+	reporter := &channelHealthReporter{state: state, report: report, wake: make(chan struct{}, 1)}
+	reporter.state.set("degraded", "feishu_starting")
+	reporter.notify()
+	return reporter
+}
+
+func (r *channelHealthReporter) set(status, errorCode string) {
+	r.state.set(status, errorCode)
+	r.notify()
+}
+
+func (r *channelHealthReporter) notify() {
+	select {
+	case r.wake <- struct{}{}:
+	default:
+	}
+}
+
+// run coalesces lifecycle changes and additionally reports a heartbeat every
+// interval, so the control plane can distinguish a live plugin from a stale
+// "ready" row left behind by a dead process or an expired capability.
+func (r *channelHealthReporter) run(ctx context.Context) {
+	ticker := time.NewTicker(channelHeartbeatInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		case <-r.wake:
+		}
+		status, errorCode, metadata := r.state.snapshot()
+		if status == "" {
+			continue
+		}
+		reportCtx, cancel := context.WithTimeout(context.Background(), channelHealthTimeout)
+		_ = r.report(reportCtx, status, errorCode, metadata)
+		cancel()
+	}
+}
+
+func registerChannelHealth(callbacks channelLifecycle, set func(status, errorCode string)) {
+	reportReady := func() { set("ready", "") }
 	callbacks.OnReady(reportReady)
-	callbacks.OnReconnecting(func() { report("degraded", "feishu_reconnecting") })
+	callbacks.OnReconnecting(func() { set("degraded", "feishu_reconnecting") })
 	// A successful SDK reconnect only fires OnReconnected; it does not repeat
 	// OnReady. Without this handler the instance would stay degraded until the
 	// plugin process restarts.
@@ -430,10 +515,14 @@ func runChannel(ctx context.Context, runtime *runtimeClient, boot bootstrap) err
 	selfBotOpenID, selfBotName := feishuBotIdentity(ctx, client)
 	channel := larkchannel.NewChannel(client, wsClient)
 	healthMetadata := map[string]string{"bot_open_id": selfBotOpenID, "bot_display_name": selfBotName}
-	registerChannelHealth(channel, func(status, errorCode string) {
-		_ = runtime.health(context.Background(), status, errorCode, healthMetadata)
+	healthState := &channelHealthState{}
+	reporter := newChannelHealthReporter(healthState, func(reportCtx context.Context, status, errorCode string, metadata map[string]string) error {
+		return runtime.health(reportCtx, status, errorCode, healthMetadata, metadata)
 	})
+	go reporter.run(ctx)
+	registerChannelHealth(channel, reporter.set)
 	channel.OnMessage(func(eventCtx context.Context, message *channeltypes.NormalizedMessage) error {
+		healthState.inbound()
 		replyContextResult := make(chan map[string]any, 1)
 		go func() { replyContextResult <- inboundReplyContext(eventCtx, client, message) }()
 		restoreInboundMentionTypes(message)
@@ -454,6 +543,7 @@ func runChannel(ctx context.Context, runtime *runtimeClient, boot bootstrap) err
 		if event == nil || event.Event == nil || event.Event.Operator == nil || event.Event.Operator.OperatorId == nil || event.Event.Operator.OperatorId.OpenId == nil || event.Event.EventKey == nil || event.EventV2Base == nil || event.EventV2Base.Header == nil {
 			return nil
 		}
+		healthState.inbound()
 		occurredAt := time.Now().UTC()
 		if event.Event.Timestamp != nil && *event.Event.Timestamp > 0 {
 			occurredAt = feishuEventTime(*event.Event.Timestamp)
@@ -470,6 +560,7 @@ func runChannel(ctx context.Context, runtime *runtimeClient, boot bootstrap) err
 		})
 	})
 	channel.OnCardAction(func(eventCtx context.Context, action *channeltypes.CardActionEvent) error {
+		healthState.inbound()
 		messageID, chatID := action.MessageID, action.ChatID
 		if messageID == "" {
 			messageID = action.Context.OpenMessageID
@@ -684,10 +775,10 @@ func newFeishuClients(boot bootstrap) (*lark.Client, *larkws.Client) {
 }
 
 func (c *runtimeClient) health(ctx context.Context, status, code string, metadata ...map[string]string) error {
-	payload := map[string]any{"schema_version": 1, "status": status, "error_code": code}
+	payload := map[string]any{"schema_version": 1, "status": status, "error_code": code, "heartbeat": "1"}
 	for _, values := range metadata {
 		for key, value := range values {
-			if key == "bot_open_id" || key == "bot_display_name" {
+			if key == "bot_open_id" || key == "bot_display_name" || key == "last_inbound_at" {
 				payload[key] = strings.TrimSpace(value)
 			}
 		}

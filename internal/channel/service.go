@@ -936,6 +936,7 @@ func (s *Service) IssueCapability(ctx context.Context, instanceID string, scopes
 	item := domain.ChannelServiceCapability{
 		ID: domain.NewID("channel_capability"), PluginID: instance.PluginID, InstanceID: instance.ID,
 		TokenHash: hex.EncodeToString(digest[:]), Scopes: uniqueScopes(scopes), Status: "active", IssuedAt: now, ExpiresAt: now.Add(ttl),
+		TTLSeconds: int(ttl / time.Second),
 	}
 	item.TokenSecretRef = "channel/" + instance.ID + "/runtime/capability/" + item.ID
 	if s.secrets == nil {
@@ -970,8 +971,9 @@ func (s *Service) AuthenticateCapability(ctx context.Context, raw, requiredScope
 		return RuntimeClaims{}, fmt.Errorf("capability_invalid")
 	}
 	digest := sha256.Sum256([]byte(raw))
+	now := s.now().UTC()
 	item, err := s.store.ChannelCapabilityByHash(ctx, hex.EncodeToString(digest[:]))
-	if err != nil || item.Status != "active" || !item.ExpiresAt.After(s.now().UTC()) {
+	if err != nil || item.Status != "active" || !item.ExpiresAt.After(now) {
 		return RuntimeClaims{}, fmt.Errorf("capability_invalid")
 	}
 	scopes := map[string]bool{}
@@ -981,8 +983,20 @@ func (s *Service) AuthenticateCapability(ctx context.Context, raw, requiredScope
 	if requiredScope != "" && !scopes[requiredScope] {
 		return RuntimeClaims{}, fmt.Errorf("capability_scope_denied")
 	}
-	_ = s.store.TouchChannelCapability(ctx, item.ID, s.now().UTC())
-	return RuntimeClaims{CapabilityID: item.ID, PluginID: item.PluginID, InstanceID: item.InstanceID, Scopes: scopes, ExpiresAt: item.ExpiresAt}, nil
+	// Slide the expiry from every authenticated use. The plugin polls the
+	// runtime continuously, so a live channel never loses its capability at the
+	// original 24h boundary; an idle one still expires. Legacy rows carry no
+	// TTL and fall back to their original issued/expires span.
+	ttl := time.Duration(item.TTLSeconds) * time.Second
+	if ttl <= 0 {
+		ttl = item.ExpiresAt.Sub(item.IssuedAt)
+	}
+	expiresAt := now.Add(ttl)
+	if expiresAt.Before(item.ExpiresAt) {
+		expiresAt = item.ExpiresAt
+	}
+	_ = s.store.TouchChannelCapability(ctx, item.ID, now, expiresAt)
+	return RuntimeClaims{CapabilityID: item.ID, PluginID: item.PluginID, InstanceID: item.InstanceID, Scopes: scopes, ExpiresAt: expiresAt}, nil
 }
 
 func (s *Service) RevokeCapabilities(ctx context.Context, instanceID string) error {

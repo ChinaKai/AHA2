@@ -290,8 +290,18 @@ func (s *Store) UpdateChannelInstanceHealth(ctx context.Context, id, status, err
 	configPatch := map[string]any{"runtime_error_code": errorCode}
 	for _, values := range metadata {
 		for key, value := range values {
-			if key == "runtime_bot_open_id" || key == "runtime_bot_provider_display_name" {
-				if value = strings.TrimSpace(value); value != "" {
+			value = strings.TrimSpace(value)
+			if key == "heartbeat" {
+				if value == "1" {
+					configPatch["runtime_heartbeat_supported"] = "1"
+				}
+				continue
+			}
+			if key == "runtime_bot_open_id" || key == "runtime_bot_provider_display_name" || key == "last_inbound_at" {
+				if value != "" {
+					if key == "last_inbound_at" {
+						key = "runtime_last_inbound_at"
+					}
 					configPatch[key] = value
 				}
 			}

@@ -10,11 +10,14 @@ Build a package with:
 
 The build script writes the executable and a manifest containing its SHA-256 to `dist/plugins/feishu/<os>-<arch>/`. Installation copies those two files into the AHA2 data directory under `plugins/channels/feishu/`. The core remains buildable and usable when this nested Go module or its binary is absent.
 
-The plugin uses `github.com/larksuite/oapi-sdk-go/v3` v3.9.10 for Device Authorization app registration, WebSocket events, message normalization, and cards. Outbound create/reply calls use the lower-level IM API so AHA2's durable delivery key is mapped to Feishu's one-hour UUID deduplication field.
+The plugin uses `github.com/larksuite/oapi-sdk-go/v3` v3.12.2 for Device Authorization app registration, WebSocket events, message normalization, and cards. Outbound create/reply calls use the lower-level IM API so AHA2's durable delivery key is mapped to Feishu's one-hour UUID deduplication field.
 
-## Reconnect health (1.1.9)
+## Reliability (1.1.10)
 
-A WebSocket disconnect marks the instance `degraded / feishu_reconnecting`. The SDK reports a successful automatic reconnect through `OnReconnected`, not a second `OnReady`; the plugin now reports `ready` on both callbacks. Before this fix the instance stayed degraded until the plugin process restarted.
+- The SDK read deadline detects a silent connection loss (device sleep, network change, NAT timeout) and reconnects instead of leaving `ReadMessage` blocked forever. A WebSocket disconnect still marks the instance `degraded / feishu_reconnecting`; `OnReady` and `OnReconnected` both report `ready`.
+- The plugin sends a health heartbeat every 30 seconds with `last_inbound_at`. The supervisor marks a plugin without a heartbeat for 90 seconds as `degraded / channel_heartbeat_timeout` and restarts it.
+- Channel runtime capabilities slide forward on authenticated use, so a continuously polling plugin does not lose its capability at the original 24-hour boundary.
+- Plugin stderr is retained in the control-plane log instead of being discarded.
 
 ## Cloud document read (1.1.5)
 

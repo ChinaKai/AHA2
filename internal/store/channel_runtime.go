@@ -19,9 +19,9 @@ var (
 )
 
 func (s *Store) CreateChannelCapability(ctx context.Context, item domain.ChannelServiceCapability) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO channel_service_capabilities(id,plugin_id,instance_id,token_hash,token_secret_ref,scopes_json,status,issued_at,expires_at,last_used_at,revoked_at,rotated_from_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+	_, err := s.db.ExecContext(ctx, `INSERT INTO channel_service_capabilities(id,plugin_id,instance_id,token_hash,token_secret_ref,scopes_json,status,issued_at,expires_at,ttl_seconds,last_used_at,revoked_at,rotated_from_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		item.ID, item.PluginID, item.InstanceID, item.TokenHash, item.TokenSecretRef, encodeJSON(item.Scopes), item.Status,
-		timeString(item.IssuedAt), timeString(item.ExpiresAt), timeString(item.LastUsedAt), timeString(item.RevokedAt), nullableString(item.RotatedFromID))
+		timeString(item.IssuedAt), timeString(item.ExpiresAt), item.TTLSeconds, timeString(item.LastUsedAt), timeString(item.RevokedAt), nullableString(item.RotatedFromID))
 	return err
 }
 
@@ -29,7 +29,7 @@ func scanChannelCapability(scanner interface{ Scan(...any) error }) (domain.Chan
 	var item domain.ChannelServiceCapability
 	var scopes, issued, expires, lastUsed, revoked string
 	var rotated sql.NullString
-	err := scanner.Scan(&item.ID, &item.PluginID, &item.InstanceID, &item.TokenHash, &item.TokenSecretRef, &scopes, &item.Status, &issued, &expires, &lastUsed, &revoked, &rotated)
+	err := scanner.Scan(&item.ID, &item.PluginID, &item.InstanceID, &item.TokenHash, &item.TokenSecretRef, &scopes, &item.Status, &issued, &expires, &item.TTLSeconds, &lastUsed, &revoked, &rotated)
 	item.Scopes = decodeJSON(scopes, []string{})
 	item.IssuedAt, item.ExpiresAt, item.LastUsedAt, item.RevokedAt = parseTime(issued), parseTime(expires), parseTime(lastUsed), parseTime(revoked)
 	if rotated.Valid {
@@ -46,11 +46,15 @@ func nullableString(value string) any {
 }
 
 func (s *Store) ChannelCapabilityByHash(ctx context.Context, tokenHash string) (domain.ChannelServiceCapability, error) {
-	return scanChannelCapability(s.db.QueryRowContext(ctx, `SELECT id,plugin_id,instance_id,token_hash,token_secret_ref,scopes_json,status,issued_at,expires_at,last_used_at,revoked_at,rotated_from_id FROM channel_service_capabilities WHERE token_hash=?`, tokenHash))
+	return scanChannelCapability(s.db.QueryRowContext(ctx, `SELECT id,plugin_id,instance_id,token_hash,token_secret_ref,scopes_json,status,issued_at,expires_at,ttl_seconds,last_used_at,revoked_at,rotated_from_id FROM channel_service_capabilities WHERE token_hash=?`, tokenHash))
 }
 
-func (s *Store) TouchChannelCapability(ctx context.Context, id string, at time.Time) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE channel_service_capabilities SET last_used_at=? WHERE id=? AND status='active'`, timeString(at), id)
+// TouchChannelCapability records use and slides the expiry forward. A live
+// plugin polls the runtime continuously, so its capability stays valid without
+// a token rotation endpoint; an idle capability still expires.
+func (s *Store) TouchChannelCapability(ctx context.Context, id string, at, expiresAt time.Time) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE channel_service_capabilities SET last_used_at=?,expires_at=? WHERE id=? AND status='active'`,
+		timeString(at), timeString(expiresAt), id)
 	return err
 }
 

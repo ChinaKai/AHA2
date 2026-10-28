@@ -403,9 +403,12 @@ type ChannelServiceCapability struct {
 	Status         string    `json:"status"`
 	IssuedAt       time.Time `json:"issued_at"`
 	ExpiresAt      time.Time `json:"expires_at"`
-	LastUsedAt     time.Time `json:"last_used_at,omitempty"`
-	RevokedAt      time.Time `json:"revoked_at,omitempty"`
-	RotatedFromID  string    `json:"rotated_from_id,omitempty"`
+	// TTLSeconds is the lifetime granted at issuance. Authenticated use slides
+	// ExpiresAt forward by this amount so a live plugin keeps its capability.
+	TTLSeconds    int       `json:"ttl_seconds,omitempty"`
+	LastUsedAt    time.Time `json:"last_used_at,omitempty"`
+	RevokedAt     time.Time `json:"revoked_at,omitempty"`
+	RotatedFromID string    `json:"rotated_from_id,omitempty"`
 }
 
 type ChannelHandoff struct {

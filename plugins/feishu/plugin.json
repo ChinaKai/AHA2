@@ -3,7 +3,7 @@
   "plugin_id": "feishu",
   "provider_key": "feishu",
   "display_name": "飞书",
-  "package_version": "1.1.9",
+  "package_version": "1.1.10",
   "protocol_versions": ["channel-runtime/v1"],
   "endpoints": ["assistant_dm", "group_digital_human"],
   "executable": "aha2-channel-feishu.exe",

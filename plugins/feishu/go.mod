@@ -2,7 +2,7 @@ module github.com/ChinaKai/AHA2/plugins/feishu
 
 go 1.23
 
-require github.com/larksuite/oapi-sdk-go/v3 v3.9.10
+require github.com/larksuite/oapi-sdk-go/v3 v3.12.2
 
 require (
 	github.com/gogo/protobuf v1.3.2 // indirect

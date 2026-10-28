@@ -402,3 +402,58 @@ func TestChannelHealthRecoversAfterReconnect(t *testing.T) {
 		}
 	}
 }
+
+func TestChannelHealthStateTracksInbound(t *testing.T) {
+	t.Parallel()
+	state := &channelHealthState{}
+	state.set("ready", "")
+	before := time.Now().UTC()
+	state.inbound()
+	status, errorCode, metadata := state.snapshot()
+	if status != "ready" || errorCode != "" {
+		t.Fatalf("state=%s:%s", status, errorCode)
+	}
+	lastInboundAt, err := time.Parse(time.RFC3339Nano, metadata["last_inbound_at"])
+	if err != nil || lastInboundAt.Before(before) || lastInboundAt.After(time.Now().UTC()) {
+		t.Fatalf("last_inbound_at=%q err=%v", metadata["last_inbound_at"], err)
+	}
+}
+
+func TestChannelHealthReporterReportsInitialStateAndInbound(t *testing.T) {
+	state := &channelHealthState{}
+	type report struct {
+		status   string
+		metadata map[string]string
+	}
+	reports := make(chan report, 4)
+	reporter := newChannelHealthReporter(state, func(_ context.Context, status, _ string, metadata map[string]string) error {
+		reports <- report{status: status, metadata: metadata}
+		return nil
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go reporter.run(ctx)
+
+	readReport := func() report {
+		select {
+		case value := <-reports:
+			return value
+		case <-time.After(2 * time.Second):
+			t.Fatal("health reporter did not report")
+			return report{}
+		}
+	}
+	first := readReport()
+	if first.status != "degraded" {
+		t.Fatalf("initial status=%s", first.status)
+	}
+	state.inbound()
+	reporter.set("ready", "")
+	second := readReport()
+	if second.status != "ready" {
+		t.Fatalf("ready status=%s", second.status)
+	}
+	if _, ok := second.metadata["last_inbound_at"]; !ok {
+		t.Fatalf("metadata missing last_inbound_at: %#v", second.metadata)
+	}
+}

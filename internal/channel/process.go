@@ -17,10 +17,22 @@ import (
 	"github.com/ChinaKai/AHA2/internal/domain"
 )
 
+const (
+	// channelHeartbeatTimeout is the longest a running plugin may go without a
+	// health report before the supervisor treats it as hung. The plugin sends a
+	// heartbeat every 30s.
+	channelHeartbeatTimeout = 90 * time.Second
+	// Startup includes building the Feishu client, fetching bot identity and
+	// connecting the WebSocket, so it gets a wider grace period than a running
+	// plugin.
+	channelHeartbeatStartupGrace = 2 * channelHeartbeatTimeout
+)
+
 type managedPluginProcess struct {
-	command *exec.Cmd
-	cancel  context.CancelFunc
-	cleanup func()
+	command   *exec.Cmd
+	cancel    context.CancelFunc
+	cleanup   func()
+	startedAt time.Time
 }
 
 type pluginBootstrap struct {
@@ -69,10 +81,23 @@ func (s *Service) reconcileProcesses(ctx context.Context) {
 			continue
 		}
 		s.processMu.Lock()
-		_, running := s.processes[instance.ID]
+		process := s.processes[instance.ID]
 		retryAt := s.processRetry[instance.ID]
 		s.processMu.Unlock()
-		if running || retryAt.After(s.now().UTC()) {
+		now := s.now().UTC()
+		if process != nil {
+			// Registration-only plugin runs do not start the channel heartbeat;
+			// they are supervised by the onboarding flow and must not be
+			// restarted by the liveness watchdog.
+			if instance.Status != "onboarding" && channelHeartbeatSupported(instance.Config) && channelHeartbeatStale(process.startedAt, instance.LastSeenAt, now) {
+				s.logger.Warn("channel plugin heartbeat timed out", "instance_id", instance.ID)
+				_ = s.store.UpdateChannelInstanceHealth(ctx, instance.ID, "degraded", "channel_heartbeat_timeout", now)
+				s.stopPluginProcess(instance.ID)
+				s.scheduleProcessRetry(instance.ID, now)
+			}
+			continue
+		}
+		if retryAt.After(now) {
 			continue
 		}
 		if instance.Status == "onboarding" && instance.CredentialConfigured {
@@ -84,6 +109,39 @@ func (s *Service) reconcileProcesses(ctx context.Context) {
 			s.logger.Warn("channel plugin process start failed", "instance_id", instance.ID, "error", err)
 		}
 	}
+}
+
+// channelHeartbeatSupported keeps the liveness watchdog from restarting an
+// older plugin that has not opted into heartbeats.
+func channelHeartbeatSupported(config map[string]any) bool {
+	value, _ := config["runtime_heartbeat_supported"].(string)
+	return strings.TrimSpace(value) == "1"
+}
+
+// channelHeartbeatStale reports whether a running plugin has stopped reporting
+// health. Startup gets a wider grace period before the first report is due.
+func channelHeartbeatStale(startedAt, lastSeenAt, now time.Time) bool {
+	if startedAt.IsZero() || now.Sub(startedAt) < channelHeartbeatStartupGrace {
+		return false
+	}
+	if lastSeenAt.IsZero() {
+		return true
+	}
+	return lastSeenAt.Before(startedAt) || now.Sub(lastSeenAt) > channelHeartbeatTimeout
+}
+
+// scheduleProcessRetry backs off a supervisor-initiated restart so a plugin
+// that cannot reach the runtime is not killed and restarted every tick.
+func (s *Service) scheduleProcessRetry(instanceID string, now time.Time) {
+	s.processMu.Lock()
+	s.processFailures[instanceID]++
+	failures := s.processFailures[instanceID]
+	delay := time.Second << minInt(failures-1, 8)
+	if delay > 5*time.Minute {
+		delay = 5 * time.Minute
+	}
+	s.processRetry[instanceID] = now.Add(delay)
+	s.processMu.Unlock()
 }
 
 func (s *Service) ensurePluginProcess(instanceID, rawCapability string) error {
@@ -168,7 +226,7 @@ func (s *Service) ensurePluginProcess(instanceID, rawCapability string) error {
 		cleanup()
 		return nil
 	}
-	s.processes[instanceID] = &managedPluginProcess{command: command, cancel: cancel, cleanup: cleanup}
+	s.processes[instanceID] = &managedPluginProcess{command: command, cancel: cancel, cleanup: cleanup, startedAt: s.now().UTC()}
 	s.processMu.Unlock()
 	go func() {
 		defer stdin.Close()
@@ -179,7 +237,7 @@ func (s *Service) ensurePluginProcess(instanceID, rawCapability string) error {
 		defer close(ipcDone)
 		s.consumePluginSecretIPC(processCtx, instanceID, stdout)
 	}()
-	go func() { _, _ = io.Copy(io.Discard, stderr) }()
+	go s.consumePluginStderr(instanceID, stderr)
 	go func() {
 		// Stdout carries the one-time registration result, including the secret
 		// that makes the new app usable. Drain it before Wait tears down the pipe
@@ -272,6 +330,30 @@ func (s *Service) consumePluginSecretIPC(ctx context.Context, instanceID string,
 				s.logger.Warn("channel registration result persistence failed", "instance_id", instanceID, "error", err)
 			}
 		}
+	}
+}
+
+// consumePluginStderr keeps plugin failures observable. The previous code
+// discarded stderr, which made a dead WebSocket or an expired capability
+// invisible in the control plane. Keep the volume bounded: the first lines and
+// every hundredth line after that.
+func (s *Service) consumePluginStderr(instanceID string, reader io.Reader) {
+	scanner := bufio.NewScanner(reader)
+	scanner.Buffer(make([]byte, 4096), 64*1024)
+	lines := 0
+	for scanner.Scan() {
+		lines++
+		if lines > 20 && lines%100 != 0 {
+			continue
+		}
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		if len(line) > 1000 {
+			line = line[:1000] + "…"
+		}
+		s.logger.Warn("channel plugin stderr", "instance_id", instanceID, "line", line)
 	}
 }
 
