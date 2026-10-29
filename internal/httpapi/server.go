@@ -16,7 +16,6 @@ import (
 	"github.com/ChinaKai/AHA2/internal/codexaccount"
 	"github.com/ChinaKai/AHA2/internal/desktop"
 	"github.com/ChinaKai/AHA2/internal/domain"
-	"github.com/ChinaKai/AHA2/internal/gateway"
 	"github.com/ChinaKai/AHA2/internal/hardware"
 	"github.com/ChinaKai/AHA2/internal/managedprocess"
 	"github.com/ChinaKai/AHA2/internal/outboundproxy"
@@ -159,22 +158,11 @@ func New(config Config) *Server {
 	if server.webVersion == "" {
 		server.webVersion = server.version
 	}
-	if config.OutboundProxy != nil {
-		server.modelDetectionJobs.detect = func(ctx context.Context, provider domain.Provider, apiKey string) (gateway.Result, error) {
-			client, err := config.OutboundProxy.ServiceClient(ctx, &http.Client{Timeout: 15 * time.Second})
-			if err != nil {
-				return gateway.Result{}, err
-			}
-			return gateway.DetectModelsContextWithClient(ctx, provider.BaseURL, apiKey, provider.AuthStyle, 15*time.Second, client)
-		}
-		server.modelDetectionJobs.probe = func(ctx context.Context, provider domain.Provider, apiKey, authStyle, modelID string) (map[string]string, string, map[string]string) {
-			client, err := config.OutboundProxy.ServiceClient(ctx, &http.Client{Timeout: modelProbeTimeout})
-			if err != nil {
-				return map[string]string{"responses": "unavailable", "chat_completions": "unavailable", "anthropic_messages": "unavailable"}, "", map[string]string{"proxy": err.Error()}
-			}
-			return gateway.ProbeModelCapabilitiesContextWithClientDetailed(ctx, provider.BaseURL, apiKey, authStyle, modelID, modelProbeTimeout, client)
-		}
-	}
+	// Provider discovery and capability probes deliberately use direct
+	// connections, matching POST /api/v1/providers/detect-models. Routing only
+	// these calls through the managed proxy made the catalog work while every
+	// probe failed with "destination connection failed", because the catalog
+	// endpoint is direct.
 	return server
 }
 
