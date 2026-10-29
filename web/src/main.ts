@@ -1,4 +1,5 @@
 import {api} from "./api.js";
+import {mountAssistant, showPetSettings, notifyPetTaskIdle, notifyPetTaskReply, notifyPetTaskThinking, setAssistantVisible} from "./assistant.js";
 import {renderConversationList} from "./conversation_ui.js";
 import {bindCodexAccounts, renderCodexAccounts} from "./codex_accounts.js";
 import {bindChannels, exportRetiredChannelInstance, purgeRetiredChannelInstance, renderChannels} from "./channels.js";
@@ -55,6 +56,7 @@ import type {
   KnowledgeProposal,
   KnowledgeReviewSettings,
   Model,
+  MCPServer,
   Project,
   Provider,
   ProxySettings,
@@ -73,7 +75,7 @@ import type {
   TaskFacetCounts,
   Workspace,
 } from "./types.js";
-type View = "projects" | "channels" | "models" | "hardware" | "tasks" | "knowledge" | "prompts" | "proxy" | "sync" | "advanced";
+type View = "projects" | "channels" | "models" | "hardware" | "tasks" | "knowledge" | "prompts" | "proxy" | "sync" | "advanced" | "other" | "mcp" | "pet-settings" | "pet-diary";
 type ResourceKey = "projects" | "workspaces" | "tasks" | "system" | "providers" | "models" | "env" | "accounts" | "skills" | "channels" | "hardware" | "knowledge" | "proxy" | "advanced" | "sync" | "prompts";
 type TaskFilterKind = "project" | "status" | "device";
 interface ResourceState {loading: boolean; loaded: boolean; error: string; updatedAt: number}
@@ -124,6 +126,7 @@ interface State {
   knowledgeProposals: KnowledgeProposal[];
   knowledgeReviewSettings: KnowledgeReviewSettings;
   skills: Skill[];
+  mcpServers: MCPServer[];
   selectedTask: TaskDetail | null;
   taskConversation: ConversationItem[];
   taskConversationHasMore: boolean;
@@ -282,6 +285,7 @@ const state: State = {
   knowledgeProposals: [],
   knowledgeReviewSettings: {auto_approve: false},
   skills: [],
+  mcpServers: [],
   selectedTask: null,
   taskConversation: [],
   taskConversationHasMore: false,
@@ -407,6 +411,10 @@ function resourcesForView(view: View): ResourceKey[] {
     case "proxy": return ["proxy"];
     case "sync": return ["sync"];
     case "advanced": return ["advanced"];
+    case "mcp": return [];
+    case "other": return ["advanced"];
+    case "pet-settings": return ["advanced"];
+    case "pet-diary": return ["advanced"];
   }
 }
 
@@ -816,12 +824,22 @@ function syncTaskGitIsolation(): void {
   if (!useWorktree) worktreeDir.value = "";
 }
 
+function syncTaskMCPOptions(projectID: string): void {
+  const petProject = projectID === "project_pet";
+  document.querySelectorAll<HTMLElement>('#task-form [data-mcp-builtin="1"]').forEach(label => {
+    label.hidden = !petProject;
+    const input = label.querySelector<HTMLInputElement>('input[name="mcp_server_ids"]');
+    if (input && !petProject) input.checked = false;
+  });
+}
+
 function syncTaskWorkspaces(): void {
   const projectID = String((document.querySelector("#task-project") as HTMLSelectElement)?.value || "");
   const wsSelect = document.querySelector<HTMLSelectElement>("#task-workspace");
   if (!wsSelect) return;
   const items = state.workspaces.filter(item => item.project_id === projectID && !item.read_only);
   const current = wsSelect.value;
+  syncTaskMCPOptions(projectID);
   wsSelect.innerHTML = items.length
     ? items.map(item => `<option value="${item.id}">${escapeHTML(item.name)}</option>`).join("")
     : `<option value="">该项目下暂无 Workspace</option>`;
@@ -1047,7 +1065,7 @@ async function runWithFeedback(
 
 async function bootstrap(): Promise<void> {
   const savedNavigation = loadNavigationSnapshot();
-  if (["projects", "channels", "models", "tasks", "knowledge", "prompts", "proxy", "sync", "advanced"].includes(savedNavigation.view || "")) {
+  if (["projects", "channels", "models", "tasks", "knowledge", "prompts", "proxy", "sync", "advanced", "mcp", "other", "pet-diary", "pet-settings"].includes(savedNavigation.view || "")) {
     state.view = savedNavigation.view as View;
   }
   try {
@@ -1429,6 +1447,7 @@ async function ensureViewData(view: View, force = false): Promise<void> {
     state.hardwareResources = (await api.hardwareResources()).resources || [];
   }));
   if (view === "tasks") jobs.push(loadResource("skills", force, async () => { state.skills = (await api.skills()).skills || []; }));
+  if (view === "tasks" || view === "mcp") jobs.push(loadMCPServers(force));
   if (view === "channels") {
     jobs.push(loadResource("channels", force, async () => {
       const [providers, instances] = await Promise.all([api.channelProviders(), api.channelInstances()]);
@@ -2152,6 +2171,15 @@ async function refreshTaskRuntime(taskID: string): Promise<boolean> {
     if (appended.length) {
       state.taskConversation.push(...appended);
       changed = true;
+      if (taskID === "task_pet") {
+        const user = appended.find(item => item.kind === "user_message");
+        if (user) notifyPetTaskThinking();
+        const reply = [...appended].reverse().find(item => item.kind === "agent_message");
+        if (reply) notifyPetTaskReply(reply.summary || "");
+        if (!user && !reply && appended.some(item => item.kind === "turn_duration")) {
+          notifyPetTaskIdle();
+        }
+      }
     }
     if (state.taskConversation.length > 300) {
       state.taskConversation = state.taskConversation.slice(-300);
@@ -2221,7 +2249,6 @@ function shell(content: string): string {
     ["knowledge", "knowledge", "知识库"],
     ["models", "model", "模型"],
     ["hardware", "hardware", "硬件资源"],
-    ["proxy", "proxy", "代理"],
   ] as const;
   const mobileNav = [...nav.slice(0, 6), ["advanced", "shield", "高级"] as const];
   return `<div class="app-shell">
@@ -2367,7 +2394,24 @@ function advancedSettingsView(): string {
       <article class="panel advanced-tool-card"><div>${icon("sync")}<span><strong>同步</strong><small>配置设备同步、检查差异与冲突</small></span></div><button type="button" data-view="sync">进入同步设置</button></article>
       <article class="panel advanced-tool-card"><div>${icon("proxy")}<span><strong>代理</strong><small>管理订阅、节点和连接状态</small></span></div><button type="button" data-view="proxy">进入代理设置</button></article>
       <article class="panel advanced-tool-card"><div>${icon("hardware")}<span><strong>硬件资源</strong><small>维护系统级串口、网络设备和登录凭据</small></span></div><button type="button" data-view="hardware">进入硬件资源</button></article>
+      <article class="panel advanced-tool-card"><div>${icon("bot")}<span><strong>宠物日记</strong><small>在线查看宠物写下的日记</small></span></div><button type="button" data-view="pet-diary">打开宠物日记</button></article>
+      <article class="panel advanced-tool-card"><div>${icon("bot")}<span><strong>宠物</strong><small>形象、动作、模型与自主行为开关</small></span></div><button type="button" data-pet-settings onclick="window.dispatchEvent(new CustomEvent('aha:pet-settings'))">打开宠物设置</button></article>
+      <article class="panel advanced-tool-card"><div>${icon("bot")}<span><strong>MCP</strong><small>管理 MCP 服务与工具开关</small></span></div><button type="button" data-view="mcp">进入 MCP</button></article>
+      <article class="panel advanced-tool-card"><div>${icon("shield")}<span><strong>其他设置</strong><small>Backend 超时、密码、访问范围、Agent API、监听地址、Origin 校验</small></span></div><button type="button" data-view="other">进入其他设置</button></article>
     </section>
+  </section>`);
+}
+
+function otherSettingsView(): string {
+  const origin = state.securitySettings;
+  const backendSettings = state.backendSettings;
+  const network = state.networkSettings;
+  const accessScope = origin.access_scope === "local" ? "local" : "lan";
+  const restartRequired = Boolean(network.restart_required);
+  const agentAPI = state.agentAPISettings;
+  const allowInsecureAgentAPI = Boolean(agentAPI.effective_allow_insecure);
+  const forcedInsecureAgentAPI = Boolean(agentAPI.startup_allow_insecure) && !agentAPI.url;
+  return advancedSubview(`<section class="page advanced-settings-page"><header class="page-head"><div><h1>其他设置</h1><p>Backend、Owner 账号、访问范围与本机网络</p></div></header>
     <section class="panel spaced account-security-panel backend-timeout-settings-panel">
       <div class="panel-head"><strong>Backend 超时</strong><span>Codex / Claude 统一生效</span></div>
       <form id="backend-settings-form">
@@ -2574,6 +2618,11 @@ function taskSkillsFold(body: string): string {
   return taskFormFold("task-skills-fold", "Task Skills", `<div class="task-skill-options" id="task-skill-options">${body}</div>`);
 }
 
+function taskMCPFold(): string {
+  const options = state.mcpServers.filter(item => item.enabled).map(item => `<label class="task-skill-option" data-mcp-builtin="${item.builtin ? "1" : "0"}"><input type="checkbox" name="mcp_server_ids" value="${escapeHTML(item.id)}" ${item.builtin ? "checked" : ""}><span><strong>${escapeHTML(item.name)}</strong><small>${escapeHTML(item.description || item.transport)}</small></span></label>`).join("");
+  return taskFormFold("task-mcp-fold", "MCP 工具", `<div class="task-skill-options" id="task-mcp-options">${options || '<div class="field-help">还没有可用 MCP，先在侧边栏 MCP 页添加。</div>'}</div>`);
+}
+
 function taskFormFold(id: string, title: string, body: string): string {
   return `<details class="task-form-fold" id="${id}">
     <summary><strong>${title}</strong><b data-fold-count></b></summary>
@@ -2592,6 +2641,15 @@ function syncFoldCount(scope: string, id: string, total: number): void {
   if (badge) badge.textContent = on ? `\u5df2\u542f\u7528 ${on}/${total}` : "\u9ed8\u8ba4\u5173\u95ed";
 }
 
+function syncMCPFoldCount(scope: string, id: string): void {
+  const root = document.querySelector<HTMLElement>(`#${scope}`);
+  if (!root) return;
+  const selected = root.querySelectorAll<HTMLInputElement>(`#${id} input[name="mcp_server_ids"], #${id} input[name="task_mcp_ids"]`).length;
+  const checked = root.querySelectorAll<HTMLInputElement>(`#${id} input[name="mcp_server_ids"]:checked, #${id} input[name="task_mcp_ids"]:checked`).length;
+  const badge = root.querySelector<HTMLElement>(`#${id} [data-fold-count]`);
+  if (badge) badge.textContent = checked ? `已选 ${checked}` : (selected ? "未选择" : "无可用");
+}
+
 function syncSkillsFoldCount(scope: string, id: string): void {
   const root = document.querySelector<HTMLElement>(`#${scope}`);
   if (!root) return;
@@ -2603,11 +2661,13 @@ function syncSkillsFoldCount(scope: string, id: string): void {
 function syncTaskFormFoldCounts(): void {
   syncFoldCount("task-dialog", "task-capabilities-fold", 3);
   syncSkillsFoldCount("task-dialog", "task-skills-fold");
+  syncMCPFoldCount("task-dialog", "task-mcp-fold");
 }
 
 function syncAgentFoldCounts(): void {
   syncFoldCount("agent-config-dialog", "agent-capabilities-fold", 3);
   syncSkillsFoldCount("agent-config-dialog", "agent-skills-fold");
+  syncMCPFoldCount("agent-config-dialog", "agent-mcp-fold");
 }
 
 function taskCloneSourceOptions(): string {
@@ -2691,7 +2751,7 @@ function applyTaskCloneMainConfig(detail: TaskDetail): string {
 }
 
 function taskDialogBase(): string {
-return `<dialog id="task-dialog" class="wide"><form id="task-form"><div class="dialog-head"><h2>创建任务</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div><label>标题<input name="title" required></label><label>需求<textarea name="request" required></textarea></label><div class="two"><label>项目<select name="project_id" id="task-project" required>${state.projects.filter(item => !item.channel_retired).map(item => `<option value="${item.id}">${escapeHTML(item.name)}</option>`).join("")}</select></label><label>Workspace<select name="workspace_id" id="task-workspace" required></select></label></div><fieldset class="task-clone-source"><legend>旧任务配置</legend><label>来源任务<select name="source_task_id" id="task-clone-source">${taskCloneSourceOptions()}</select></label><div class="two"><label class="channel-check"><input type="checkbox" name="clone_hardware" id="task-clone-hardware" disabled>复制硬件启用关系</label><label class="channel-check"><input type="checkbox" name="clone_channel" id="task-clone-channel" disabled>复制并接续主渠道</label></div><div class="field-help" id="task-clone-source-help">选择旧任务后载入其 Main 配置，可继续修改。</div></fieldset>${runtimeFieldsHTML("task", state.models, state.codexAccounts)}<div class="two"><label>推理强度<select name="reasoning_effort" id="task-effort"></select></label><label>沙箱（文件访问）<select name="filesystem"><option value="workspace-write">工作区可写</option><option value="read-only">只读</option><option value="danger-full-access">完全访问</option></select></label></div><div class="two"><label>协作模式<select name="collaboration_mode"><option value="auto">Auto</option><option value="single">Single</option></select></label><label>最大 Agent 数<input name="max_agents" type="number" min="1" value="3"></label></div><label>审批<select name="approval"><option value="never">无需确认</option><option value="auto">自动批准（跳过权限检查）</option></select></label><div id="task-git-isolation"><label>任务隔离<select name="isolation" id="task-isolation"><option value="worktree">独立 Worktree（推荐）</option><option value="inplace">原地执行</option></select></label><div id="task-worktree-settings"><label>Worktree 根目录<input name="worktree_dir" id="task-worktree-dir" placeholder="默认：仓库上一级/.aha2-worktrees"></label><div class="field-help">系统会在根目录下追加 Task ID；切换为原地执行后不使用此配置。</div></div><div class="two" id="task-branches"><label>目标分支<input name="target_branch" placeholder="默认当前分支"></label><label>任务分支<input name="task_branch" placeholder="aha/task-name"></label></div></div><div class="dialog-actions"><button type="button" data-close>取消</button><button type="submit" name="start_mode" value="manual">创建，稍后启动</button><button class="primary" type="submit" name="start_mode" value="immediate">创建并立即启动</button></div></form></dialog>`;
+return `<dialog id="task-dialog" class="wide"><form id="task-form"><div class="dialog-head"><h2>创建任务</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div><label>标题<input name="title" required></label><label>需求<textarea name="request" required></textarea></label><div class="two"><label>项目<select name="project_id" id="task-project" required>${state.projects.filter(item => !item.channel_retired).map(item => `<option value="${item.id}">${escapeHTML(item.name)}</option>`).join("")}</select></label><label>Workspace<select name="workspace_id" id="task-workspace" required></select></label></div><fieldset class="task-clone-source"><legend>旧任务配置</legend><label>来源任务<select name="source_task_id" id="task-clone-source">${taskCloneSourceOptions()}</select></label><div class="two"><label class="channel-check"><input type="checkbox" name="clone_hardware" id="task-clone-hardware" disabled>复制硬件启用关系</label><label class="channel-check"><input type="checkbox" name="clone_channel" id="task-clone-channel" disabled>复制并接续主渠道</label></div><div class="field-help" id="task-clone-source-help">选择旧任务后载入其 Main 配置，可继续修改。</div></fieldset>${runtimeFieldsHTML("task", state.models, state.codexAccounts)}<div class="two"><label>推理强度<select name="reasoning_effort" id="task-effort"></select></label><label>沙箱（文件访问）<select name="filesystem"><option value="workspace-write">工作区可写</option><option value="read-only">只读</option><option value="danger-full-access">完全访问</option></select></label></div><div class="two"><label>协作模式<select name="collaboration_mode"><option value="auto">Auto</option><option value="single">Single</option></select></label><label>最大 Agent 数<input name="max_agents" type="number" min="1" value="3"></label></div><label>审批<select name="approval"><option value="never">无需确认</option><option value="auto">自动批准（跳过权限检查）</option></select></label><div id="task-git-isolation"><label>任务隔离<select name="isolation" id="task-isolation"><option value="worktree">独立 Worktree（推荐）</option><option value="inplace">原地执行</option></select></label><div id="task-worktree-settings"><label>Worktree 根目录<input name="worktree_dir" id="task-worktree-dir" placeholder="默认：仓库上一级/.aha2-worktrees"></label><div class="field-help">系统会在根目录下追加 Task ID；切换为原地执行后不使用此配置。</div></div><div class="two" id="task-branches"><label>目标分支<input name="target_branch" placeholder="默认当前分支"></label><label>任务分支<input name="task_branch" placeholder="aha/task-name"></label></div></div>${taskMCPFold()}<div class="dialog-actions"><button type="button" data-close>取消</button><button type="submit" name="start_mode" value="manual">创建，稍后启动</button><button class="primary" type="submit" name="start_mode" value="immediate">创建并立即启动</button></div></form></dialog>`;
 }
 
 let slashCommandSelection = 0;
@@ -3160,7 +3220,7 @@ function taskDetailView(detail: TaskDetail): string {
       ${chat}
       ${renderTaskToolPanel(state.taskTool, detail, state.selectedTaskAgent, taskCtxHtml(), state.taskToolMode, taskChannelPanelHTML(), state.taskToolPinned === state.taskTool)}
     </div>
-    ${renderAgentConfigDialog(detail, state.selectedTaskAgent, state.models, state.codexAccounts, state.skills)}${taskTakeoverDialog(detail)}<div id="task-screen-dialogs">${completed ? reopenTaskDialog(detail) : ""}</div>
+    ${renderAgentConfigDialog(detail, state.selectedTaskAgent, state.models, state.codexAccounts, state.skills, state.mcpServers)}${taskTakeoverDialog(detail)}<div id="task-screen-dialogs">${completed ? reopenTaskDialog(detail) : ""}</div>
   </section>`);
 }
 
@@ -3376,6 +3436,12 @@ function updateTaskLiveRegions(): void {
 
 function render(): void {
   if (!app) return;
+  if (state.auth?.authenticated) {
+    mountAssistant();
+    setAssistantVisible(true);
+  } else {
+    setAssistantVisible(false);
+  }
   if (!state.auth?.authenticated || !state.selectedTask || state.taskTool !== "browser"
     || document.querySelector<HTMLElement>("#desktop-tool")?.dataset.taskId !== state.selectedTask.task.id) stopDesktopPanel();
   document.body.classList.toggle("task-view-active", Boolean(state.selectedTask));
@@ -3443,7 +3509,7 @@ function render(): void {
       projects: projectsView,
 		channels: () => shell(renderChannels(state.channelProviders, state.channelInstances, {models: state.models, accounts: state.codexAccounts, projects: state.projects, workspaces: state.workspaces, knowledgeIndexes: state.knowledgeIndexes, libraries: state.knowledgeLibraries})),
       models: modelsView,
-      hardware: () => shell(renderHardwareResources(state.hardwareResources)),
+      hardware: () => advancedSubview(renderHardwareResources(state.hardwareResources)),
       tasks: tasksView,
       knowledge: () => shell(`${renderKnowledgeWorkspace({
         projects: state.projects,
@@ -3457,13 +3523,17 @@ function render(): void {
         setMessage,
       })}${loadMoreHTML("knowledge")}`),
       prompts: () => advancedSubview(renderPromptAdmin()),
-      proxy: () => shell(renderProxySettings(
+      proxy: () => advancedSubview(renderProxySettings(
         state.proxySettings,
         state.managedProxy,
         !resourceStates.proxy.loaded || resourceStates.proxy.loading,
       )),
       sync: () => advancedSubview(renderSyncSettings(state.syncSettings, state.syncState, state.syncPending, state.syncConflicts, state.syncPreview, state.syncRun, state.syncSettingsReady)),
       advanced: advancedSettingsView,
+      other: otherSettingsView,
+      mcp: () => advancedSubview(mcpView()),
+      "pet-settings": () => advancedSubview(`<section class="page pet-settings-page"><div id="pet-settings-host"><div class="field-help">正在打开宠物设置…</div></div></section>`),
+      "pet-diary": () => advancedSubview(petDiaryView()),
     };
     content = views[state.view]();
   }
@@ -3479,6 +3549,7 @@ function render(): void {
   if (!preservedConversation && renderedConversation) restoreConversationImages(renderedConversation, previousConversationImages);
   bindCommon();
   if (preservedConversation) document.querySelector("#conversation-list")?.replaceWith(preservedConversation);
+  if (state.view === "pet-settings") void showPetSettings();
   restoreRegionUI(app, previousAppUI, false);
   if (state.selectedTask) {
     restoreRegionUI(document.querySelector<HTMLElement>("#agent-turn-slot"), previousTurnUI);
@@ -3641,6 +3712,9 @@ function bindCommon(): void {
   bindClaudeOfficialDetection("task", () => String(document.querySelector<HTMLSelectElement>("#task-workspace")?.value || ""));
   bindClaudeOfficialDetection("takeover-task", () => String(document.querySelector<HTMLSelectElement>("#takeover-task-workspace")?.value || ""));
   bindClaudeOfficialDetection("agent-config", () => state.selectedTask?.task.workspace_id || "");
+  document.querySelectorAll<HTMLElement>("[data-pet-settings]").forEach(button => button.addEventListener("click", () => {
+    window.dispatchEvent(new CustomEvent("aha:pet-settings"));
+  }));
   document.querySelectorAll<HTMLElement>("[data-view]").forEach(button => button.addEventListener("click", () => {
     cancelTaskOpen();
     const nextView = button.dataset.view as View;
@@ -4169,6 +4243,7 @@ function bindCommon(): void {
     const result = await api.createTask({
       ...taskPayload,
       skill_ids: form.getAll("skill_ids").map(String),
+      mcp_server_ids: form.getAll("mcp_server_ids").map(String),
       max_agents: Number(payload.max_agents || 3),
       proxy_enabled: proxyEnabledFrom(payload.proxy_enabled),
       fast_mode: payload.fast_mode === "on",
@@ -4252,6 +4327,7 @@ function bindCommon(): void {
     const agentID = String(form.get("agent_id") || state.selectedTaskAgent);
     if (agentID === "main") {
       await api.updateTask(state.selectedTask.task.id, {
+        mcp_server_ids: form.getAll("task_mcp_ids").map(String),
         collaboration_mode: String(form.get("collaboration_mode") || "auto"),
         max_agents: Number(form.get("max_agents") || 3),
         knowledge_policy: String(form.get("knowledge_policy") || "inherit"),
@@ -4463,6 +4539,7 @@ function bindMessageComposer(): void {
     const attachments = [...currentAttachmentDrafts()];
     if (!content && attachments.length === 0) return;
     messageSubmitPending = true;
+    if (taskID === "task_pet") notifyPetTaskThinking();
     state.taskDrafts[agentID] = "";
     if (state.selectedTaskAgent === agentID) state.taskDraft = "";
     state.taskAttachmentDrafts[agentID] = [];
@@ -4677,6 +4754,8 @@ function bindTaskToolsAndPanels(): void {
     render,
     setMessage,
   });
+  if (state.view === "mcp") bindMCPPage();
+  if (state.view === "pet-diary") void bindPetDiaryPage();
   if (state.view === "prompts") bindPromptAdmin(render, setMessage);
   if (state.view === "hardware") bindHardwareResources(
     state.hardwareResources,
@@ -5053,7 +5132,7 @@ function flushDeferredRender(): void {
 document.addEventListener("close", event => {
   if (event.target instanceof HTMLDialogElement && event.target.id === "model-dialog" && activeModelDetection) {
     const session = activeModelDetection;
-    session.source.close();
+    session.source?.close();
     session.status = "cancelling";
     activeModelDetection = null;
     void api.cancelModelDetectionJob(session.providerID, session.jobID).catch(() => undefined);
@@ -5162,5 +5241,163 @@ window.visualViewport?.addEventListener("scroll", () => {
   restoreComposerConversationBottom();
 });
 window.setInterval(updateSystemUptime, 30_000);
+window.addEventListener("aha:open-pet-settings", () => {
+  cancelTaskOpen();
+  state.view = "pet-settings";
+  state.selectedTask = null;
+  state.selectedProject = null;
+  closeEvents();
+  render();
+});
+window.addEventListener("aha:open-advanced", () => {
+  cancelTaskOpen();
+  state.view = "advanced";
+  state.selectedTask = null;
+  state.selectedProject = null;
+  closeEvents();
+  render();
+  void ensureViewData("advanced").then(() => render());
+});
+window.addEventListener("aha:assistant-open-task", event => {
+  const taskID = (event as CustomEvent<string>).detail;
+  if (taskID) void openTask(taskID);
+});
+document.addEventListener("click", event => {
+  if (!(event.target instanceof Element) || !event.target.closest("[data-pet-settings]")) return;
+  window.dispatchEvent(new CustomEvent("aha:pet-settings"));
+});
 render();
 void bootstrap();
+
+async function loadMCPServers(force = false): Promise<void> {
+  try {
+    const result = await api.mcpServers();
+    state.mcpServers = result.servers || [];
+  } catch {
+    state.mcpServers = [];
+  }
+}
+
+function mcpView(): string {
+  const rows = state.mcpServers.map(item => `<tr>
+    <td><strong>${escapeHTML(item.name)}${item.builtin ? ' <span class="capability-badge">内置</span>' : ""}</strong><small>${escapeHTML(item.description || item.transport)}</small></td>
+    <td>${escapeHTML(item.transport)}${item.url ? `<small>${escapeHTML(item.url)}</small>` : item.command ? `<small>${escapeHTML([item.command, ...(item.args || [])].join(" "))}</small>` : ""}</td>
+    <td>${item.enabled ? "已启用" : "已停用"} · ${escapeHTML(item.health || "unknown")}</td>
+    <td class="row-actions"><button type="button" data-detail-mcp="${escapeHTML(item.id)}">详情</button>${item.builtin ? "" : `<button type="button" data-toggle-mcp="${escapeHTML(item.id)}">${item.enabled ? "停用" : "启用"}</button><button type="button" class="icon-button" data-delete-mcp="${escapeHTML(item.id)}" title="删除">${icon("close")}</button>`}</td>
+  </tr>`).join("");
+  return `${pageHead("MCP", "管理 MCP 能力提供方；在创建 Task 时选择该任务启用哪些 MCP。")}
+    <section class="panel"><div class="panel-head"><strong>MCP Servers</strong><button type="button" id="mcp-refresh">刷新</button></div>
+      <div class="table-wrap"><table class="models-table"><thead><tr><th>名称</th><th>连接</th><th>状态</th><th></th></tr></thead><tbody>${rows || `<tr><td colspan="4">还没有 MCP。内置宠物 MCP 会在首次启动时出现。</td></tr>`}</tbody></table></div>
+    </section>
+    <section class="panel"><div class="panel-head"><strong>添加 HTTP MCP</strong></div>
+      <form id="mcp-form" class="mcp-form">
+        <label>名称<input name="name" required placeholder="例如：filesystem"></label>
+        <label>传输<select name="transport" id="mcp-form-transport"><option value="http">HTTP</option><option value="stdio">stdio 命令</option></select></label>
+        <label id="mcp-form-url-label">URL<input name="url" placeholder="https://example.com/mcp"></label>
+        <label id="mcp-form-command-label" hidden>命令<input name="command" placeholder="npx"></label>
+        <label id="mcp-form-args-label" hidden>参数<input name="args" placeholder="-y @modelcontextprotocol/server-filesystem /path"></label>
+        <label>描述<input name="description" placeholder="可选"></label>
+        <button class="primary" type="submit">添加 MCP</button>
+      </form>
+      <div class="field-help">HTTP 只填 URL；stdio 会由 backend 在本机启动命令，请只安装可信 MCP。内置宠物 MCP 不可删除或修改。</div>
+    </section>
+    <dialog id="mcp-detail-dialog"><div class="dialog-head"><h2 id="mcp-detail-name">MCP 详情</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div><div class="dialog-body" id="mcp-detail-body"></div><div class="dialog-actions"><button type="button" id="mcp-detail-test">测试并读取工具</button><button type="button" class="primary" data-close>关闭</button></div></dialog>`;
+}
+
+function bindMCPPage(): void {
+  document.querySelector("#mcp-refresh")?.addEventListener("click", () => { void loadMCPServers(true).then(render); });
+  document.querySelector<HTMLSelectElement>("#mcp-form-transport")?.addEventListener("change", event => {
+    const stdio = (event.currentTarget as HTMLSelectElement).value === "stdio";
+    const urlLabel = document.querySelector<HTMLElement>("#mcp-form-url-label");
+    const commandLabel = document.querySelector<HTMLElement>("#mcp-form-command-label");
+    const argsLabel = document.querySelector<HTMLElement>("#mcp-form-args-label");
+    if (urlLabel) urlLabel.hidden = stdio;
+    if (commandLabel) commandLabel.hidden = !stdio;
+    if (argsLabel) argsLabel.hidden = !stdio;
+  });
+  document.querySelector("#mcp-form")?.addEventListener("submit", event => {
+    event.preventDefault();
+    const form = event.currentTarget as HTMLFormElement;
+    const data = new FormData(form);
+    const transport = String(data.get("transport") || "http");
+    const args = String(data.get("args") || "").trim();
+    void api.saveMCPServer({
+      name: String(data.get("name") || ""), url: String(data.get("url") || ""),
+      command: String(data.get("command") || ""),
+      args: args ? args.split(/\s+/) : [],
+      description: String(data.get("description") || ""), transport, enabled: true,
+    }).then(() => loadMCPServers(true)).then(() => { setMessage("notice", "MCP 已添加"); render(); })
+      .catch((error: unknown) => setMessage("error", error instanceof Error ? error.message : String(error)));
+  });
+  document.querySelectorAll<HTMLButtonElement>("[data-detail-mcp]").forEach(button => button.addEventListener("click", () => {
+    const id = button.dataset.detailMcp || "";
+    void openMCPDetail(id);
+  }));
+  document.querySelectorAll<HTMLButtonElement>("[data-toggle-mcp]").forEach(button => button.addEventListener("click", () => {
+    const item = state.mcpServers.find(server => server.id === button.dataset.toggleMcp);
+    if (!item) return;
+    void api.saveMCPServer({...item, enabled: !item.enabled}).then(() => loadMCPServers(true)).then(() => { setMessage("notice", item.enabled ? "MCP 已停用" : "MCP 已启用"); render(); })
+      .catch((error: unknown) => setMessage("error", error instanceof Error ? error.message : String(error)));
+  }));
+  document.querySelectorAll<HTMLButtonElement>("[data-delete-mcp]").forEach(button => button.addEventListener("click", () => {
+    const id = button.dataset.deleteMcp || "";
+    if (!id || !window.confirm("删除这个 MCP？")) return;
+    void api.deleteMCPServer(id).then(() => loadMCPServers(true)).then(() => { setMessage("notice", "MCP 已删除"); render(); })
+      .catch((error: unknown) => setMessage("error", error instanceof Error ? error.message : String(error)));
+  }));
+}
+
+async function openMCPDetail(id: string): Promise<void> {
+  const dialog = document.querySelector<HTMLDialogElement>("#mcp-detail-dialog");
+  if (!dialog) return;
+  const body = dialog.querySelector<HTMLElement>("#mcp-detail-body");
+  const name = dialog.querySelector<HTMLElement>("#mcp-detail-name");
+  const test = dialog.querySelector<HTMLButtonElement>("#mcp-detail-test");
+  if (!body || !name || !test) return;
+  const renderServer = (server: MCPServer) => {
+    name.textContent = server.name;
+    const disabled = new Set(server.disabled_tools || []);
+    const tools = (server.tools || []).map(tool => server.builtin
+      ? `<li><div class="mcp-tool-row"><span><strong>${escapeHTML(tool.name)}</strong><small>${escapeHTML(tool.description || "")}</small></span></div></li>`
+      : `<li><label class="mcp-tool-row"><input type="checkbox" data-tool-name="${escapeHTML(tool.name)}" ${disabled.has(tool.name) ? "" : "checked"}><span><strong>${escapeHTML(tool.name)}</strong><small>${escapeHTML(tool.description || "")}</small></span></label></li>`).join("");
+    body.innerHTML = `<p>${escapeHTML(server.description || "暂无描述")}</p><dl class="mcp-detail-meta"><dt>传输</dt><dd>${escapeHTML(server.transport)}</dd><dt>地址</dt><dd>${escapeHTML(server.url || "内置")}</dd><dt>状态</dt><dd>${server.enabled ? "已启用" : "已停用"} · ${escapeHTML(server.health || "unknown")}</dd></dl>${server.builtin ? "" : `<div class="mcp-edit-fields"><label>名称<input id="mcp-edit-name" value="${escapeHTML(server.name)}"></label>${server.transport === "stdio" ? "" : `<label>URL<input id="mcp-edit-url" value="${escapeHTML(server.url || "")}"></label>`}<label>描述<input id="mcp-edit-desc" value="${escapeHTML(server.description || "")}"></label>${server.transport === "stdio" ? `<label>命令<input id="mcp-edit-command" value="${escapeHTML(server.command || "")}"></label><label>参数<input id="mcp-edit-args" value="${escapeHTML((server.args || []).join(" "))}"></label>` : ""}<button type="button" id="mcp-edit-save">保存修改</button></div>`}<h3>支持的工具（${(server.tools || []).length}）</h3><ul class="mcp-tool-list">${tools || "<li>暂无工具信息，点“测试并读取工具”尝试读取。</li>"}</ul>${server.last_error ? `<p class="field-help">${escapeHTML(server.last_error)}</p>` : ""}`;
+    body.querySelector<HTMLButtonElement>("#mcp-edit-save")?.addEventListener("click", () => {
+      const name = body.querySelector<HTMLInputElement>("#mcp-edit-name")?.value || "";
+      const url = body.querySelector<HTMLInputElement>("#mcp-edit-url")?.value || "";
+      const description = body.querySelector<HTMLInputElement>("#mcp-edit-desc")?.value || "";
+      const disabledTools = [...body.querySelectorAll<HTMLInputElement>("[data-tool-name]")].filter(input => !input.checked).map(input => input.dataset.toolName || "");
+      const command = body.querySelector<HTMLInputElement>("#mcp-edit-command")?.value || server.command || "";
+      const argsText = body.querySelector<HTMLInputElement>("#mcp-edit-args")?.value || "";
+      void api.saveMCPServer({...server, name, url, description, command, args: argsText.trim() ? argsText.trim().split(/\s+/) : [], disabled_tools: disabledTools}).then(result => { renderServer(result.server); setMessage("notice", "MCP 已保存"); })
+        .catch((error: unknown) => setMessage("error", error instanceof Error ? error.message : String(error)));
+    });
+    test.onclick = () => {
+      test.disabled = true;
+      void api.testMCPServer(server.id).then(result => { renderServer(result.server); setMessage("notice", "MCP 工具已刷新"); })
+        .catch((error: unknown) => setMessage("error", error instanceof Error ? error.message : String(error)))
+        .finally(() => { test.disabled = false; });
+    };
+  };
+  body.innerHTML = `<p>正在读取…</p>`;
+  dialog.showModal();
+  try { const result = await api.mcpServer(id); renderServer(result.server); }
+  catch (error) { body.innerHTML = `<p class="field-help">${escapeHTML(error instanceof Error ? error.message : String(error))}</p>`; }
+}
+
+function petDiaryView(): string {
+  return `<section class="page pet-diary-page"><header class="page-head"><div><h1>宠物日记</h1><p>宠物在 Task 里写下的日记，按日期倒序。</p></div></header><div id="pet-diary-page-list" class="pet-diary-list">正在读取…</div></section>`;
+}
+
+async function bindPetDiaryPage(): Promise<void> {
+  const list = document.querySelector<HTMLElement>("#pet-diary-page-list");
+  if (!list) return;
+  try {
+    const result = await api.petDiary();
+    const entries = result.entries || [];
+    list.innerHTML = entries.length
+      ? entries.map(entry => `<details class="pet-diary-entry"><summary>${escapeHTML(entry.date)}</summary><pre>${escapeHTML(entry.content)}</pre></details>`).join("")
+      : `<div class="field-help">还没有日记。</div>`;
+  } catch (error) {
+    list.innerHTML = `<div class="field-help">${escapeHTML(error instanceof Error ? error.message : String(error))}</div>`;
+  }
+}

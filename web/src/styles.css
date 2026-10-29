@@ -71,7 +71,7 @@ textarea { min-height: 96px; padding: 10px; resize: vertical; line-height: 1.5; 
 .form-error { margin-top: 12px; color: var(--red); font-size: 12px; }
 
 .app-shell { --sidebar-width: 228px; display: grid; grid-template-columns: var(--sidebar-width) 8px minmax(0,1fr); min-height: 100vh; }
-.sidebar { position: sticky; top: 0; display: flex; flex-direction: column; height: 100vh; padding: 22px 14px 16px; background: var(--nav); color: #eef1f5; }
+.sidebar { position: sticky; top: 0; display: flex; flex-direction: column; height: 100vh; padding: 22px 14px 16px; overflow-y: auto; background: var(--nav); color: #eef1f5; }
 .sidebar nav { display: grid; gap: 5px; margin-top: 30px; }
 .sidebar nav button { justify-content: flex-start; border: 0; background: transparent; color: #b8c0ca; }
 .sidebar nav button.active { background: #343a43; color: #fff; }
@@ -80,7 +80,7 @@ textarea { min-height: 96px; padding: 10px; resize: vertical; line-height: 1.5; 
 .sidebar-resizer::after { position: absolute; top: 0; bottom: 0; left: 3px; width: 1px; background: transparent; content: ""; transition: background .15s ease,box-shadow .15s ease; }
 .sidebar-resizer:hover::after, .sidebar-resizer:focus-visible::after, body.sidebar-resizing .sidebar-resizer::after { background: var(--blue); box-shadow: 0 0 0 1px rgba(37,99,235,.14); }
 body.sidebar-resizing { cursor: col-resize; user-select: none; }
-.sidebar-memo { --memo-surface: #272c33; --memo-input: #20242a; --memo-border: #424953; --memo-text: #eef1f5; --memo-placeholder: #7f8996; display: flex; flex: 1 1 auto; flex-direction: column; min-height: 170px; margin-top: 24px; overflow: hidden; border: 1px solid var(--memo-border); border-radius: 6px; background: var(--memo-surface); color: var(--memo-text); }
+.sidebar-memo { --memo-surface: #272c33; --memo-input: #20242a; --memo-border: #424953; --memo-text: #eef1f5; --memo-placeholder: #7f8996; display: flex; flex: 0 0 auto; flex-direction: column; min-height: 120px; margin-top: 24px; overflow: hidden; border: 1px solid var(--memo-border); border-radius: 6px; background: var(--memo-surface); color: var(--memo-text); }
 .sidebar-memo > header { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 38px; padding: 0 8px 0 10px; border-bottom: 1px solid var(--memo-border); color: var(--memo-text); }
 .sidebar-memo > header strong { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; }
 .sidebar-memo > header .icon { width: 14px; height: 14px; color: #9fb7df; }
@@ -1738,3 +1738,516 @@ dialog > .dialog-head { margin: 0; padding: 18px 18px 0; }
   .hardware-terminal-keys { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); overflow: visible; }
   .hardware-terminal-keys button { width: 100%; min-width: 0; }
 }
+
+/* Owner assistant: a lightweight pet layer and a read-only chat panel. */
+.assistant-layer { position: fixed; inset: 0; z-index: 60; pointer-events: none; }
+.assistant-layer [hidden] { display: none !important; }
+.assistant-pet { position: absolute; top: 0; left: 0; z-index: 5; width: 64px; height: 64px; padding: 0; border: 0; background: transparent; color: inherit; pointer-events: auto; cursor: pointer; transition: transform 1.15s cubic-bezier(.22,.8,.24,1); }
+.assistant-pet.no-transition { transition: none; }
+.assistant-pet:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; border-radius: 50%; }
+.assistant-pet-shadow { position: absolute; right: 12px; bottom: 1px; left: 12px; height: 8px; border-radius: 50%; background: rgba(15,35,60,.16); filter: blur(2px); }
+.assistant-pet-body { position: relative; display: block; width: 64px; height: 64px; color: #8bd3ff; filter: drop-shadow(0 7px 9px rgba(31,86,132,.22)); transform-origin: 50% 85%; animation: assistant-breathe 3.8s ease-in-out infinite; }
+.assistant-pet-ear { fill: #8bd3ff; }
+.assistant-pet-eye { fill: #10233d; }
+.assistant-pet-mouth { fill: none; stroke: #10233d; stroke-width: 2; stroke-linecap: round; }
+.assistant-pet-cheek { fill: #ff9db2; opacity: .65; }
+.assistant-pet-dot { position: absolute; top: 3px; right: 4px; display: none; width: 10px; height: 10px; border: 2px solid #fff; border-radius: 50%; background: #ef4444; }
+.assistant-pet.has-hint .assistant-pet-dot { display: block; }
+.assistant-pet.thinking .assistant-pet-body { animation: assistant-think .85s ease-in-out infinite; }
+.assistant-pet.panel-open .assistant-pet-body { animation: assistant-perk 1.8s ease-in-out infinite; }
+.assistant-pet:hover .assistant-pet-body { transform: translateY(-2px) rotate(-2deg); }
+.assistant-panel { position: absolute; right: 16px; bottom: 16px; z-index: 4; display: flex; flex-direction: column; width: min(380px, calc(100vw - 32px)); height: min(560px, calc(100vh - 90px)); overflow: hidden; border: 1px solid #d7e2f0; border-radius: 18px; background: #fff; box-shadow: 0 24px 70px rgba(15,35,60,.22); pointer-events: auto; }
+.assistant-panel-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 13px 14px; border-bottom: 1px solid #e7eef7; background: linear-gradient(180deg,#f7fbff,#fff); }
+.assistant-identity { display: flex; align-items: center; gap: 9px; min-width: 0; }
+.assistant-mini-avatar { display: grid; flex: 0 0 auto; width: 34px; height: 34px; place-items: center; border-radius: 12px; background: #e6f5ff; color: #74c8ff; }
+.assistant-mini-avatar svg { width: 26px; height: 26px; }
+.assistant-identity div { display: grid; min-width: 0; }
+.assistant-identity strong { font-size: 14px; }
+.assistant-identity small { overflow: hidden; color: var(--muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.assistant-panel-actions { display: flex; align-items: center; gap: 4px; }
+.assistant-panel-actions select { width: 112px; min-height: 30px; padding: 0 6px; font-size: 11px; }
+.assistant-panel-actions .icon-button { width: 30px; min-height: 30px; font-size: 18px; }
+.assistant-messages { display: flex; flex: 1 1 auto; flex-direction: column; gap: 10px; min-height: 0; padding: 14px; overflow: auto; background: #fbfdff; }
+.assistant-message { display: flex; }
+.assistant-message.user { justify-content: flex-end; }
+.assistant-message-bubble { max-width: 86%; padding: 9px 11px; border-radius: 13px; background: #fff; box-shadow: 0 1px 2px rgba(15,35,60,.07); color: #1c2b3d; font-size: 13px; line-height: 1.55; overflow-wrap: anywhere; }
+.assistant-message.user .assistant-message-bubble { border-bottom-right-radius: 4px; background: #2563eb; color: #fff; }
+.assistant-message.assistant .assistant-message-bubble { border-bottom-left-radius: 4px; border: 1px solid #e4edf8; }
+.assistant-empty { display: grid; gap: 8px; padding: 10px 4px; color: #33465e; }
+.assistant-empty > strong { font-size: 14px; }
+.assistant-empty p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
+.assistant-quick { display: grid; gap: 6px; margin-top: 4px; }
+.assistant-quick button { justify-content: flex-start; padding: 8px 10px; border: 1px solid #dbe8f7; border-radius: 9px; background: #fff; color: #25517d; font-size: 12px; text-align: left; }
+.assistant-quick button:hover { border-color: #9fc4ee; background: #f4f9ff; }
+.assistant-composer { display: flex; align-items: flex-end; gap: 6px; padding: 8px 10px 10px; border-top: 1px solid #e7eef7; background: #fff; }
+.assistant-composer textarea { flex: 1 1 auto; height: 42px; min-height: 42px; max-height: 120px; padding: 9px 10px; resize: none; border: 1px solid #d6e2f0; border-radius: 11px; font: inherit; font-size: 13px; line-height: 1.4; }
+.assistant-composer textarea:focus { border-color: #8eb8e8; outline: 2px solid rgba(37,99,235,.12); }
+.assistant-composer button { min-height: 42px; padding: 0 15px; border: 0; border-radius: 11px; background: #2563eb; color: #fff; font-weight: 600; }
+#assistant-send { flex: 0 0 54px; width: 54px; min-width: 54px; height: 42px; min-height: 42px; padding: 0; white-space: nowrap; }
+.assistant-filter-popover { flex: 0 0 38px; }
+.assistant-composer button:disabled { opacity: .55; }
+.assistant-bubble { position: absolute; z-index: 6; display: grid; gap: 5px; padding: 11px 12px; border: 1px solid rgba(255,255,255,.14); border-radius: 14px; background: #10233d; box-shadow: 0 14px 38px rgba(15,35,60,.28); color: #eef6ff; pointer-events: auto; }
+.assistant-bubble::after { position: absolute; bottom: -6px; left: 22px; width: 12px; height: 12px; background: #10233d; content: ""; transform: rotate(45deg); }
+.assistant-bubble strong { font-size: 12px; }
+.assistant-bubble p { margin: 0; color: #c6d8ea; font-size: 11px; line-height: 1.5; }
+.assistant-bubble-actions { display: flex; gap: 6px; margin-top: 2px; }
+.assistant-bubble-actions button { min-height: 26px; padding: 0 9px; border: 1px solid rgba(255,255,255,.16); border-radius: 7px; background: rgba(255,255,255,.08); color: #eef6ff; font-size: 11px; }
+.assistant-bubble-actions button:first-child { background: #2f77d1; border-color: transparent; }
+
+@keyframes assistant-breathe {
+  0%, 100% { transform: translateY(0) scale(1); }
+  50% { transform: translateY(-2px) scale(1.015); }
+}
+@keyframes assistant-think {
+  0%, 100% { transform: translateY(0) rotate(-2deg); }
+  50% { transform: translateY(-5px) rotate(2deg); }
+}
+@keyframes assistant-perk {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-3px); }
+}
+
+@media (max-width: 720px) {
+  .assistant-pet { width: 58px; height: 58px; }
+  .assistant-pet-body { width: 58px; height: 58px; }
+  .assistant-panel { right: 8px; bottom: 8px; width: calc(100vw - 16px); height: min(72vh, 560px); }
+  .assistant-panel-actions select { width: 92px; }
+  .assistant-bubble { max-width: calc(100vw - 24px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .assistant-pet { transition: none; }
+  .assistant-pet-body, .assistant-pet.panel-open .assistant-pet-body { animation: none; }
+}
+
+/* Assistant character skins and the in-panel picker. */
+.assistant-pet-art { position: relative; display: block; width: 64px; height: 64px; }
+.assistant-pet-art .pet-svg { display: block; width: 64px; height: 64px; overflow: visible; filter: drop-shadow(0 7px 9px rgba(31,86,132,.22)); }
+.assistant-pet-art .pet-ground { fill: rgba(15,35,60,.16); }
+.assistant-pet-art .pet-main { fill: #8bd3ff; }
+.assistant-pet-art .pet-whale-body { fill: #4d6bfe; }
+.assistant-pet-art .pet-whale-belly { fill: #eaf0ff; }
+.assistant-pet-art .pet-whale-tail, .assistant-pet-art .pet-whale-fin { fill: #3b55d9; }
+.assistant-pet-art .pet-whale-smile { fill: none; stroke: #10233d; stroke-width: 2; stroke-linecap: round; }
+.assistant-pet-art .pet-whale-spout { fill: none; stroke: #9adcff; stroke-width: 3; stroke-linecap: round; opacity: 0; }
+.assistant-pet-art .pet-duck-body { fill: #ffd84d; }
+.assistant-pet-art .pet-duck-wing { fill: #f4c21c; }
+.assistant-pet-art .pet-duck-tail { fill: #f4c21c; }
+.assistant-pet-art .pet-duck-tuft { fill: none; stroke: #f4c21c; stroke-width: 3; stroke-linecap: round; }
+.assistant-pet-art .pet-duck-beak { fill: #ff9f1c; }
+.assistant-pet-art .pet-duck-beak-line { fill: none; stroke: #d97b00; stroke-width: 1.3; stroke-linecap: round; }
+.assistant-pet-art .pet-duck-foot { fill: none; stroke: #ff9f1c; stroke-width: 3.5; stroke-linecap: round; }
+.assistant-pet-art .pet-eyes-open { fill: #10233d; animation: pet-blink-open 6s infinite; }
+.assistant-pet-art .pet-eyes-closed { fill: none; stroke: #10233d; stroke-width: 2; stroke-linecap: round; opacity: 0; animation: pet-blink-closed 6s infinite; }
+.assistant-pet-art .pet-mouth { fill: none; stroke: #10233d; stroke-width: 2; stroke-linecap: round; }
+.assistant-pet-art .pet-cheek { fill: #ff9db2; opacity: .62; }
+.assistant-pet-art .pet-body-group { transform-origin: 50% 86%; animation: pet-breathe 3.8s ease-in-out infinite; }
+.assistant-pet[data-character="gugugaga"] .pet-duck-wing { transform-origin: 19px 39px; animation: pet-wing 3.1s ease-in-out infinite; }
+.assistant-pet[data-character="gugugaga"] .pet-duck-tail { transform-origin: 14px 38px; animation: pet-tail-small 2.9s ease-in-out infinite; }
+.assistant-pet[data-character="gugugaga"] .pet-duck-beak { transform-origin: 32px 35px; animation: pet-beak 5.2s ease-in-out infinite; }
+.assistant-pet[data-character="deepseek_fish"] .pet-whale-tail { transform-origin: 52px 36px; animation: pet-tail 2.6s ease-in-out infinite; }
+.assistant-pet[data-character="deepseek_fish"] .pet-whale-fin { transform-origin: 21px 46px; animation: pet-fin 3.4s ease-in-out infinite; }
+.assistant-pet[data-character="deepseek_fish"] .pet-whale-spout { animation: pet-spout 8s ease-in-out infinite; }
+.assistant-pet.walking .assistant-pet-art { animation: pet-walk .38s ease-in-out infinite; }
+.assistant-pet.thinking .assistant-pet-art { animation: pet-think .8s ease-in-out infinite; }
+.assistant-pet.has-hint .assistant-pet-art { animation: pet-alert .78s ease-in-out infinite; }
+.assistant-pet.panel-open .assistant-pet-art { animation: pet-perk 2s ease-in-out infinite; }
+.assistant-pet.character-changed .assistant-pet-art { animation: pet-pop .7s ease-out; }
+.assistant-character-button { position: relative; display: grid; flex: 0 0 auto; width: 32px; height: 32px; min-height: 32px; padding: 0; place-items: center; border: 1px solid #dbe8f7; border-radius: 10px; background: #f4f9ff; }
+.assistant-character-button:hover { border-color: #9fc4ee; background: #eaf4ff; }
+.assistant-character-mini { display: grid; width: 100%; height: 100%; place-items: center; }
+.assistant-character-mini .pet-svg { width: 25px; height: 25px; overflow: visible; }
+.assistant-character-badge { position: absolute; right: 0; bottom: -1px; color: #2563eb; font-size: 9px; line-height: 1; }
+.assistant-character-menu { position: absolute; top: 56px; right: 10px; z-index: 6; display: grid; gap: 8px; width: 264px; max-width: calc(100% - 20px); padding: 10px; border: 1px solid #dbe8f7; border-radius: 13px; background: #fff; box-shadow: 0 16px 40px rgba(15,35,60,.2); }
+.assistant-character-menu-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; padding: 1px 2px 3px; }
+.assistant-character-menu-head strong { font-size: 12px; }
+.assistant-character-menu-head small { color: var(--muted); font-size: 10px; }
+.assistant-character-options { display: grid; gap: 5px; }
+.assistant-character-option { display: flex; align-items: center; gap: 9px; width: 100%; padding: 7px; border: 1px solid transparent; border-radius: 10px; background: #f8fbff; text-align: left; }
+.assistant-character-option:hover { border-color: #c7dcf4; background: #eef7ff; }
+.assistant-character-option.active { border-color: #7eb2e8; background: #e8f3ff; }
+.assistant-character-preview { display: grid; flex: 0 0 auto; width: 42px; height: 42px; place-items: center; border-radius: 10px; background: #fff; }
+.assistant-character-preview .pet-svg { width: 38px; height: 38px; overflow: visible; }
+.assistant-character-copy { display: grid; gap: 1px; min-width: 0; }
+.assistant-character-copy strong { font-size: 12px; }
+.assistant-character-copy small { overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.assistant-identity .assistant-mini-avatar .pet-svg { width: 26px; height: 26px; overflow: visible; }
+
+@keyframes pet-breathe { 0%, 100% { transform: translateY(0) scale(1); } 50% { transform: translateY(-2px) scale(1.015); } }
+@keyframes pet-blink-open { 0%, 92%, 100% { opacity: 1; } 94%, 96% { opacity: 0; } }
+@keyframes pet-blink-closed { 0%, 92%, 100% { opacity: 0; } 94%, 96% { opacity: 1; } }
+@keyframes pet-wing { 0%, 100% { transform: rotate(0deg); } 50% { transform: rotate(-10deg); } }
+@keyframes pet-beak { 0%, 88%, 100% { transform: scaleY(1); } 91%, 94% { transform: scaleY(.55); } }
+@keyframes pet-tail { 0%, 100% { transform: rotate(0deg); } 50% { transform: rotate(8deg); } }
+@keyframes pet-tail-small { 0%, 100% { transform: rotate(0deg); } 50% { transform: rotate(-7deg); } }
+@keyframes pet-fin { 0%, 100% { transform: rotate(0deg); } 50% { transform: rotate(-8deg); } }
+@keyframes pet-spout { 0%, 72%, 100% { opacity: 0; transform: translateY(2px) scaleY(.7); } 78%, 86% { opacity: 1; transform: translateY(0) scaleY(1); } }
+@keyframes pet-walk { 0%, 100% { transform: translateY(0) rotate(-4deg); } 50% { transform: translateY(-6px) rotate(4deg); } }
+@keyframes pet-think { 0%, 100% { transform: translateY(0) rotate(-2deg); } 50% { transform: translateY(-5px) rotate(2deg); } }
+@keyframes pet-alert { 0%, 100% { transform: translateY(0) scale(1); } 45% { transform: translateY(-5px) scale(1.04); } }
+@keyframes pet-perk { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-3px); } }
+@keyframes pet-pop { 0% { transform: scale(.82); } 55% { transform: scale(1.1) rotate(-3deg); } 100% { transform: scale(1); } }
+
+@media (max-width: 720px) {
+  .assistant-pet-art, .assistant-pet-art .pet-svg { width: 58px; height: 58px; }
+  .assistant-character-menu { right: 8px; width: 244px; }
+  .assistant-character-button { width: 30px; height: 30px; min-height: 30px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .assistant-pet-art, .assistant-pet-art .pet-body-group, .assistant-pet-art .pet-eyes-open,
+  .assistant-pet-art .pet-eyes-closed, .assistant-pet-art .pet-whale-tail, .assistant-pet-art .pet-whale-fin,
+  .assistant-pet-art .pet-whale-spout, .assistant-pet-art .pet-duck-wing, .assistant-pet-art .pet-duck-tail,
+  .assistant-pet-art .pet-duck-beak { animation: none !important; }
+}
+
+/* Anime chibi skins: Gugugaga penguin girl and DeepSeek whale girl. */
+.pet-gugu-foot { stroke: #ffc21c; }
+.pet-gugu-beak { transform-origin: 32px 24px; }
+.pet-gugu-hood { fill: #23272e; }
+.assistant-pet[data-character="gugugaga"] .pet-gugu-flipper { transform-origin: 32px 52px; animation: pet-wing 3.1s ease-in-out infinite; }
+.assistant-pet[data-character="gugugaga"] .pet-gugu-beak { animation: pet-beak 5.2s ease-in-out infinite; }
+.assistant-pet[data-character="deepseek_fish"] .pet-whale-tail { transform-origin: 47px 50px; animation: pet-tail 2.6s ease-in-out infinite; }
+.assistant-pet[data-character="deepseek_fish"] .pet-whale-fin-ear { transform-origin: 32px 36px; animation: pet-fin 3.4s ease-in-out infinite; }
+.assistant-pet[data-character="deepseek_fish"] .pet-whale-hair { transform-origin: 32px 42px; animation: pet-hair 4.2s ease-in-out infinite; }
+.assistant-pet[data-character="deepseek_fish"] .pet-whale-ahoge { transform-origin: 32px 10px; animation: pet-ahoge 2.8s ease-in-out infinite; }
+@keyframes pet-hair { 0%, 100% { transform: rotate(0deg); } 50% { transform: rotate(2.2deg); } }
+@keyframes pet-ahoge { 0%, 100% { transform: rotate(-4deg); } 50% { transform: rotate(8deg); } }
+
+/* Real 3D/game assets: gugu uses the original transparent render, whale uses the original desk-pet video. */
+.assistant-pet-art .pet-img { display: block; height: 64px; width: auto; max-width: none; filter: drop-shadow(0 7px 9px rgba(31,86,132,.22)); }
+.assistant-pet-art .pet-video { position: absolute; bottom: 0; left: 50%; height: 76px; width: auto; max-width: none; transform: translateX(-50%); pointer-events: none; }
+.assistant-pet.has-video.walking .assistant-pet-art { animation: none; }
+.assistant-mini-avatar, .assistant-character-mini, .assistant-character-preview { overflow: hidden; }
+.assistant-mini-avatar .pet-img, .assistant-mini-avatar .pet-video { height: 31px; width: auto; max-width: none; }
+.assistant-character-mini .pet-img, .assistant-character-mini .pet-video { height: 30px; width: auto; max-width: none; }
+.assistant-character-preview .pet-img, .assistant-character-preview .pet-video { height: 50px; width: auto; max-width: none; }
+@media (max-width: 720px) {
+  .assistant-pet-art .pet-img { height: 58px; }
+  .assistant-pet-art .pet-video { height: 69px; }
+}
+
+/* Character previews must fit the original portrait without cropping. */
+.assistant-character-preview .pet-img { height: auto; width: auto; max-height: 38px; max-width: 38px; object-fit: contain; }
+.assistant-mini-avatar .pet-img { height: auto; width: auto; max-height: 26px; max-width: 26px; object-fit: contain; }
+.assistant-character-mini .pet-img { height: auto; width: auto; max-height: 25px; max-width: 25px; object-fit: contain; }
+/* The pet can be dragged anywhere in the viewport; touch dragging must not scroll the page. */
+.assistant-pet { touch-action: none; cursor: grab; }
+.assistant-pet.dragging { cursor: grabbing; transition: none; }
+.assistant-pet.dragging .assistant-pet-art { animation: none; }
+
+.assistant-pet-art .pet-img { margin: 0 auto; }
+.assistant-pet[data-character="deepseek_fish"] .pet-img { margin-top: 2px; }
+
+@keyframes pet-idle-float { 0%, 100% { transform: translateY(0) rotate(-1deg); } 50% { transform: translateY(-3px) rotate(1deg); } }
+.assistant-pet .pet-img { animation: pet-idle-float 4.4s ease-in-out infinite; transform-origin: 50% 90%; }
+.assistant-pet.walking .pet-img { animation: none; }
+.assistant-pet.has-hint .pet-img { animation: pet-alert .78s ease-in-out infinite; }
+.assistant-pet.thinking .pet-img { animation: pet-think .8s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .assistant-pet .pet-img { animation: none !important; } }
+
+/* Movement is driven by requestAnimationFrame; CSS transform transitions would
+   otherwise fight the per-frame tween and look like a teleport. */
+.assistant-pet { transition: none; will-change: transform; }
+
+/* Assistant motion picker and procedural motion layer. */
+.assistant-motion-button { font-size: 12px; font-weight: 700; color: #2563eb; background: #eef7ff; }
+.assistant-motion-menu { width: 232px; }
+.assistant-motion-options { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 5px; }
+.assistant-motion-option { min-height: 34px; padding: 6px 8px; border: 1px solid #dbe8f7; border-radius: 9px; background: #f8fbff; color: #25517d; font-size: 12px; }
+.assistant-motion-option:hover { border-color: #9fc4ee; background: #eaf4ff; }
+.pet-motion { display: grid; width: 100%; height: 100%; place-items: center; transform-origin: 50% 88%; }
+
+/* Keep the assistant panel below page-level menus/dialogs, but above content.
+   On mobile the panel sits above the bottom navigation so its composer is never
+   hidden; when it fills the screen the pet is hidden instead of sitting under it. */
+.assistant-layer { z-index: 25; }
+.assistant-panel { z-index: 10; }
+.assistant-bubble { z-index: 11; }
+.assistant-character-menu { z-index: 12; }
+@media (max-width: 720px) {
+  .assistant-panel { bottom: calc(var(--mobile-bottom-nav-height) + 8px); height: min(68vh, 560px); }
+}
+
+/* 2.5D layered pet: the original 2D art stays exact, the head sits on a
+   slightly forward Z-plane and the whole sprite is rendered with perspective. */
+.assistant-pet-art { perspective: 280px; }
+.pet-2_5d { position: relative; display: block; width: 100%; height: 100%; transform-style: preserve-3d; }
+.pet-2_5d .pet-img { position: absolute; inset: 0; width: 100%; height: 100%; margin: auto; object-fit: contain; animation: none; }
+.pet-2_5d .pet-head-layer { transform: translateZ(16px); transform-origin: 50% 78%; will-change: transform; }
+.pet-motion[data-motion="idle"] .pet-head-layer { animation: head-idle 4.4s ease-in-out infinite; }
+.pet-motion[data-motion="walk"] .pet-head-layer { animation: head-walk .38s ease-in-out infinite; }
+.pet-motion[data-motion="run"] .pet-head-layer { animation: head-run .24s ease-in-out infinite; }
+.pet-motion[data-motion="jump"] .pet-head-layer { animation: head-jump .9s ease-out both; }
+.pet-motion[data-motion="crouch"] .pet-head-layer { transform: translateZ(16px) translateY(3px) rotateX(7deg); }
+.pet-motion[data-motion="happy"] .pet-head-layer { animation: head-happy .65s ease-in-out infinite; }
+.pet-motion[data-motion="angry"] .pet-head-layer { animation: head-angry .28s linear infinite; }
+.pet-motion[data-motion="sad"] .pet-head-layer { transform: translateZ(16px) translateY(3px) rotateX(10deg); }
+.pet-motion[data-motion="joy"] .pet-head-layer { animation: head-joy .55s ease-in-out infinite; }
+@keyframes head-idle { 0%,100% { transform: translateZ(16px) rotateZ(-1deg); } 50% { transform: translateZ(16px) rotateZ(1deg); } }
+@keyframes head-walk { 0%,100% { transform: translateZ(16px) translateY(0) rotateZ(-3deg); } 50% { transform: translateZ(16px) translateY(-1px) rotateZ(3deg); } }
+@keyframes head-run { 0%,100% { transform: translateZ(16px) translateY(0) rotateZ(-5deg); } 50% { transform: translateZ(16px) translateY(-2px) rotateZ(5deg); } }
+@keyframes head-jump { 0%,100% { transform: translateZ(16px) translateY(0) rotateX(0); } 45% { transform: translateZ(16px) translateY(-3px) rotateX(-5deg); } }
+@keyframes head-happy { 0%,100% { transform: translateZ(16px) rotateZ(-4deg); } 50% { transform: translateZ(16px) translateY(-2px) rotateZ(4deg); } }
+@keyframes head-angry { 0%,100% { transform: translateZ(16px) translateX(-1px) rotateZ(-2deg); } 50% { transform: translateZ(16px) translateX(1px) rotateZ(2deg); } }
+@keyframes head-joy { 0%,100% { transform: translateZ(16px) rotateZ(-3deg); } 50% { transform: translateZ(16px) translateY(-3px) rotateZ(3deg); } }
+@media (prefers-reduced-motion: reduce) { .pet-2_5d .pet-head-layer { animation: none !important; } }
+
+/* Character picker: fixed icon column, both lines of copy share the same
+   left edge and are vertically centered with the preview. */
+.assistant-character-option { display: grid; grid-template-columns: 42px minmax(0, 1fr); align-items: center; gap: 10px; padding: 8px; }
+.assistant-character-preview { align-self: center; justify-self: center; }
+.assistant-character-copy { align-self: center; gap: 2px; }
+.assistant-character-copy strong, .assistant-character-copy small { display: block; line-height: 1.3; }
+.assistant-character-copy small { margin: 0; }
+
+.assistant-identity strong { max-width: 132px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 720px) { .assistant-identity strong { max-width: 104px; } }
+
+/* Pet settings: the single place for appearance, actions, model and switch. */
+#assistant-motion-button, #assistant-model { display: none !important; }
+.assistant-settings[hidden] { display: none !important; }
+.assistant-settings { position: absolute; inset: 0; z-index: 30; display: grid; place-items: center; padding: 12px; background: rgba(8, 20, 35, .38); pointer-events: auto; }
+.assistant-settings-card { display: flex; flex-direction: column; width: min(430px, 100%); max-height: 88vh; overflow: hidden; border: 1px solid #d7e2f0; border-radius: 18px; background: #fff; box-shadow: 0 30px 80px rgba(8, 20, 35, .35); }
+.assistant-settings-head { display: flex; align-items: center; justify-content: space-between; padding: 12px 14px; border-bottom: 1px solid #e7eef7; background: linear-gradient(180deg, #f7fbff, #fff); }
+.assistant-settings-head strong { font-size: 14px; }
+.assistant-settings-body { display: grid; gap: 14px; padding: 14px; overflow: auto; }
+.assistant-settings-body h3 { margin: 0 0 7px; color: #5c7187; font-size: 11px; font-weight: 700; letter-spacing: .04em; }
+.assistant-settings-switch { display: flex; align-items: flex-start; gap: 9px; padding: 10px; border: 1px solid #dbe8f7; border-radius: 11px; background: #f8fbff; }
+.assistant-settings-switch input { margin-top: 2px; }
+.assistant-settings-switch span { display: grid; gap: 2px; }
+.assistant-settings-switch b { font-size: 12px; }
+.assistant-settings-switch small { color: #71869b; font-size: 10px; line-height: 1.4; }
+.pet-character-options { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+.pet-character-option { display: grid; place-items: center; gap: 4px; padding: 8px; border: 1px solid #dbe8f7; border-radius: 11px; background: #f8fbff; color: #25517d; font-size: 11px; }
+.pet-character-option.active { border-color: #7eb2e8; background: #e8f3ff; }
+.pet-character-option .assistant-character-preview { width: 48px; height: 48px; }
+.pet-character-option .assistant-character-preview .pet-img { max-height: 42px; max-width: 42px; }
+.pet-action-options { display: flex; flex-wrap: wrap; gap: 6px; }
+.pet-action-option { display: flex; align-items: center; gap: 5px; padding: 7px 10px; border: 1px solid #dbe8f7; border-radius: 9px; background: #f8fbff; font-size: 12px; }
+.assistant-settings-field { display: grid; gap: 4px; margin-top: 7px; color: #5c7187; font-size: 11px; }
+.assistant-settings-field select { min-height: 32px; padding: 0 8px; border: 1px solid #d7e2f0; border-radius: 8px; background: #fff; color: #17324d; }
+.assistant-settings-error { margin: 0; color: #b42318; font-size: 11px; }
+.assistant-settings-foot { display: flex; justify-content: flex-end; gap: 7px; padding: 10px 14px; border-top: 1px solid #e7eef7; background: #fbfdff; }
+.assistant-settings-foot button { min-height: 32px; padding: 0 14px; border: 1px solid #d7e2f0; border-radius: 8px; background: #fff; color: #25517d; font-size: 12px; }
+.assistant-settings-foot button.primary { border-color: transparent; background: #2f77d1; color: #fff; }
+
+.assistant-settings-switch input[type="checkbox"] { flex: 0 0 auto; width: 18px; height: 18px; margin: 2px 0 0; accent-color: #2f77d1; }
+.pet-action-option input[type="checkbox"] { width: 15px; height: 15px; accent-color: #2f77d1; }
+
+/* The identity block (left avatar + nickname) is the settings entry. */
+.assistant-identity { padding: 0; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
+.assistant-identity-copy { display: grid; min-width: 0; }
+.assistant-identity:hover strong { color: #2f77d1; }
+#assistant-character-button { display: none !important; }
+
+.assistant-settings-field textarea { width: 100%; min-height: 62px; padding: 7px 8px; border: 1px solid #d7e2f0; border-radius: 8px; background: #fff; color: #17324d; font: 12px/1.5 system-ui; resize: vertical; }
+.pet-activity-list { display: grid; gap: 5px; max-height: 190px; overflow: auto; padding: 2px; }
+.pet-activity-row { display: grid; gap: 2px; padding: 7px 8px; border: 1px solid #e4eef9; border-radius: 8px; background: #f8fbff; }
+.pet-activity-row div { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.pet-activity-row strong { color: #25517d; font-size: 11px; }
+.pet-activity-row small { color: #7a8ba0; font-size: 9px; }
+.pet-activity-row p { margin: 0; color: #4d6178; font-size: 10px; line-height: 1.4; }
+
+/* Speech is transparent typewriter text; hints (disabled) keep the old card. */
+.assistant-bubble.speech { padding: 0 4px; border: 0; border-radius: 0; background: transparent; box-shadow: none; color: #17324d; text-shadow: 0 1px 0 #fff, 0 0 9px #fff, 0 0 3px #fff; }
+.assistant-bubble.speech::after { display: none; }
+.assistant-bubble.speech strong { color: #4b6580; font-size: 10px; font-weight: 700; letter-spacing: .03em; }
+.assistant-bubble.speech p { color: #17324d; font-size: 13px; font-weight: 600; line-height: 1.5; }
+.assistant-bubble.speech .assistant-bubble-actions { display: none; }
+
+.assistant-thinking { position: absolute; top: -9px; right: 1px; display: none; gap: 3px; align-items: flex-end; pointer-events: none; }
+.assistant-pet.thinking .assistant-thinking, .assistant-pet.brain-thinking .assistant-thinking { display: flex; }
+.assistant-thinking i { width: 6px; height: 6px; border-radius: 50%; background: #9fd0ff; box-shadow: 0 0 6px rgba(88, 166, 255, .55); animation: assistant-think-dot 1.15s ease-in-out infinite; }
+.assistant-thinking i:nth-child(2) { animation-delay: .16s; }
+.assistant-thinking i:nth-child(3) { animation-delay: .32s; }
+@keyframes assistant-think-dot { 0%, 100% { opacity: .35; transform: translateY(0) scale(.85); } 50% { opacity: 1; transform: translateY(-4px) scale(1.1); } }
+/*
+ * The pet deliberately keeps its thinking dots and typing animation even when
+ * the OS reduces motion: the owner uses them as the only reply-progress signal.
+ */
+
+.assistant-pet { overflow: visible; }
+
+.assistant-thinking.active { display: flex; }
+
+.assistant-typing-row { align-items: flex-start; }
+.assistant-typing { display: flex; align-items: center; gap: 4px; min-height: 22px; }
+.assistant-typing i { width: 6px; height: 6px; border-radius: 50%; background: #6d8fb3; animation: assistant-type-dot 1s ease-in-out infinite; }
+.assistant-typing i:nth-child(2) { animation-delay: .14s; }
+.assistant-typing i:nth-child(3) { animation-delay: .28s; }
+@keyframes assistant-type-dot { 0%, 100% { opacity: .35; transform: translateY(0); } 50% { opacity: 1; transform: translateY(-3px); } }
+.assistant-message-bubble.typing::after { display: inline-block; width: 2px; height: 1em; margin-left: 2px; background: currentColor; content: ""; vertical-align: -2px; animation: assistant-caret .8s step-end infinite; }
+@keyframes assistant-caret { 50% { opacity: 0; } }
+.assistant-panel-thinking { display: none; gap: 3px; align-items: center; margin-top: 2px; }
+.assistant-panel-thinking.active { display: inline-flex; }
+.assistant-panel-thinking i { width: 4px; height: 4px; border-radius: 50%; background: #7eb2e8; animation: assistant-type-dot 1s ease-in-out infinite; }
+.assistant-panel-thinking i:nth-child(2) { animation-delay: .14s; }
+.assistant-panel-thinking i:nth-child(3) { animation-delay: .28s; }
+.assistant-settings-note { margin: 0; color: #7a8ba0; font-size: 10px; line-height: 1.4; }
+.assistant-settings-field textarea[readonly] { background: #f6f9fd; color: #52677d; }
+.pet-prompt { max-height: 150px; margin: 0; overflow: auto; padding: 8px; border: 1px solid #e1ebf6; border-radius: 8px; background: #f8fbff; color: #40566d; font: 10px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; }
+@media (prefers-reduced-motion: reduce) { .assistant-typing i, .assistant-panel-thinking i { animation: none; } }
+
+#assistant-composer-typing { margin-top: 2px; }
+
+/* Black thinking dots read better on the light page. */
+.assistant-thinking i { width: 7px; height: 7px; background: #1b2b3d; box-shadow: 0 0 0 1px rgba(255, 255, 255, .7); }
+.assistant-panel-thinking i { width: 5px; height: 5px; background: #1b2b3d; }
+.assistant-bubble.speech.fade-out { opacity: 0; transition: opacity .36s ease; }
+
+.assistant-bubble.speech { height: 86px; min-height: 86px; max-height: 86px; overflow: hidden; }
+
+/* Speech lives in the same spot as the thinking dots: one fixed line. */
+.assistant-bubble.speech { width: auto; height: 22px; min-height: 22px; max-height: 22px; padding: 0 2px; overflow: hidden; white-space: nowrap; }
+.assistant-bubble.speech strong { display: none; }
+.assistant-bubble.speech p { display: block; overflow: hidden; font-size: 12px; line-height: 22px; white-space: nowrap; text-overflow: clip; }
+
+/* Side speech: 23 chars per line, two visible lines, scroll upward. */
+.assistant-bubble.speech { width: 264px; height: 60px; min-height: 60px; max-height: 60px; padding: 3px 2px; overflow: hidden; white-space: normal; }
+.assistant-bubble.speech p { height: 54px; overflow: hidden; font-size: 11px; line-height: 18px; white-space: pre-wrap; word-break: break-all; text-align: left; }
+
+.pet-budget-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+.pet-budget-grid input { min-height: 30px; padding: 0 7px; border: 1px solid #d7e2f0; border-radius: 8px; background: #fff; color: #17324d; font-size: 12px; }
+
+.assistant-chat-filter { display: flex; gap: 5px; padding: 6px 12px 2px; }
+.assistant-chat-filter button { border: 1px solid #d7e2f0; background: rgba(255,255,255,.72); color: #526b84; border-radius: 999px; padding: 2px 9px; font-size: 11px; }
+.assistant-chat-filter button.active { border-color: #9fc4e8; background: #eaf4ff; color: #173b5f; font-weight: 600; }
+.assistant-tool-row { margin: 3px 0 0; padding: 3px 7px; border-radius: 7px; background: rgba(236,245,255,.86); color: #31516d; font-size: 10px; display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap; }
+.assistant-update-row { margin: 3px 0 0; padding: 3px 7px; border-radius: 7px; background: rgba(240,244,248,.9); color: #4b6278; font-size: 10px; display: flex; gap: 6px; align-items: baseline; }
+.assistant-update-row b { font-weight: 700; }
+.assistant-update-row small { opacity: .82; }
+.assistant-tool-row[data-status="error"] { background: rgba(255,236,236,.9); color: #9d3434; }
+.assistant-tool-row[data-status="warning"] { background: rgba(255,247,226,.9); color: #8a6420; }
+.assistant-tool-name { font-weight: 700; }
+.assistant-tool-status { font-weight: 600; }
+.assistant-tool-row small { opacity: .8; }
+#assistant-messages[data-filter="tool"] .assistant-message-bubble,
+#assistant-messages[data-filter="error"] .assistant-message-bubble { display: none; }
+#assistant-messages[data-filter="tool"] .assistant-message:not(:has(.assistant-tool-row)) { display: none; }
+#assistant-messages[data-filter="error"] .assistant-message:not(:has(.assistant-tool-row[data-status="error"], .assistant-tool-row[data-status="warning"])) { display: none; }
+#assistant-messages[data-filter="error"] .assistant-tool-row[data-status="ok"] { display: none; }
+
+.assistant-filter-popover { position: relative; height: 42px; }
+.assistant-filter-trigger { position: relative; display: grid; place-items: center; width: 38px; height: 42px; border: 1px solid #cfd5dc; border-radius: 5px; color: #526b84; cursor: pointer; list-style: none; background: #fff; }
+.assistant-filter-trigger::-webkit-details-marker { display: none; }
+.assistant-filter-trigger small { position: absolute; top: -6px; right: -5px; min-width: 22px; padding: 1px 3px; border-radius: 5px; background: #edf4ff; color: #1d4ed8; font-size: 7px; text-align: center; }
+.assistant-filter-menu { position: absolute; right: 0; bottom: calc(100% + 8px); z-index: 40; display: none; width: 240px; padding: 8px; border: 1px solid var(--line); border-radius: 5px; background: #fff; box-shadow: 0 12px 30px rgba(15,23,42,.16); }
+.assistant-filter-popover[open] .assistant-filter-menu { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 6px; }
+.assistant-filter-menu header { grid-column: 1 / -1; display: flex; justify-content: space-between; padding: 2px 2px 5px; }
+.assistant-filter-menu header small { color: var(--muted); font-size: 9px; }
+.assistant-composer .assistant-filter-menu button { justify-content: flex-start; min-height: 32px; padding: 0 8px; border: 1px solid #e1e8f0; border-radius: 7px; background: #fff; color: #3c556d; font-size: 9px; font-weight: 500; }
+.assistant-composer .assistant-filter-menu button span { width: 10px; }
+.assistant-composer .assistant-filter-menu button.active { border-color: #bfd2f6; background: #edf4ff; color: #1d4ed8; }
+
+.assistant-pet.panel-open { z-index: 5; }
+
+.assistant-message { flex-wrap: wrap; }
+.assistant-raw { flex: 1 0 100%; margin: 4px 0 0; color: #526b84; font-size: 10px; }
+.assistant-raw summary { cursor: pointer; font-weight: 600; color: #506a83; }
+.assistant-raw summary small { margin-left: 4px; color: #8297aa; font-weight: 400; }
+.assistant-raw pre { max-height: 170px; margin: 5px 0 0; overflow: auto; padding: 7px; border: 1px solid #e1eaf4; border-radius: 7px; background: #f8fbff; color: #40566d; font: 9px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; }
+.assistant-raw-tools { display: grid; gap: 3px; margin-top: 5px; }
+.assistant-raw-tools div { display: grid; gap: 2px; padding: 4px 6px; border-radius: 6px; background: #f4f8fc; }
+.assistant-raw-tools code { overflow-wrap: anywhere; color: #58718a; font-size: 9px; }
+
+.pet-settings-details { margin: 0; padding: 7px 9px; border: 1px solid #e1eaf4; border-radius: 9px; background: #f9fcff; }
+.pet-settings-details > summary { cursor: pointer; color: #35526d; font-size: 12px; font-weight: 600; }
+.pet-settings-details[open] > summary { margin-bottom: 7px; }
+.pet-settings-details .assistant-settings-field:last-child { margin-bottom: 0; }
+.pet-tool-list { display: grid; gap: 5px; }
+.pet-tool-item { display: grid; gap: 2px; padding: 6px 8px; border: 1px solid #e4edf7; border-radius: 8px; background: #fbfdff; }
+.pet-tool-item strong { color: #24527d; font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.pet-tool-item small { color: #71869a; font-size: 10px; }
+
+.assistant-trail { position: absolute; inset: 0; z-index: 9; overflow: hidden; pointer-events: none; }
+.assistant-pet-ghost { position: absolute; top: 0; left: 0; width: 58px; height: 58px; opacity: .35; filter: saturate(.75) blur(.15px); transition: opacity 2.6s ease; /* overridden per-ghost by remaining walk time */ pointer-events: none; }
+.assistant-pet-ghost.trail-fade { opacity: 0; }
+.assistant-pet-ghost .assistant-pet-art, .assistant-pet-ghost .pet-img, .assistant-pet-ghost .pet-2_5d { width: 58px; height: 58px; }
+@media (min-width: 721px) { .assistant-pet-ghost { width: 64px; height: 64px; } .assistant-pet-ghost .assistant-pet-art, .assistant-pet-ghost .pet-img, .assistant-pet-ghost .pet-2_5d { width: 64px; height: 64px; } }
+
+/* The pet now opens the visible Pet Task; the old in-page chat panel is retired. */
+#assistant-panel { display: none !important; }
+
+.mcp-form { display: grid; gap: 10px; max-width: 620px; }
+.mcp-form label { display: grid; gap: 6px; }
+.mcp-form button { justify-self: start; }
+
+.mcp-form + .field-help { margin-top: 12px; }
+
+.mcp-detail-meta { display: grid; grid-template-columns: 70px 1fr; gap: 6px 12px; margin: 12px 0; }
+.mcp-detail-meta dt { color: var(--muted); }
+.mcp-detail-meta dd { margin: 0; word-break: break-all; }
+.mcp-tool-list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.mcp-tool-list li { padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; }
+.mcp-tool-list small { display: block; margin-top: 3px; color: var(--muted); }
+
+#mcp-detail-dialog { width: min(430px, calc(100vw - 32px)); max-height: min(72vh, 620px); margin: auto; }
+#mcp-detail-dialog .dialog-body { max-height: 46vh; overflow: auto; }
+#mcp-detail-dialog .mcp-tool-list { max-height: 220px; overflow: auto; }
+
+/* Pet thinking is a reply-progress signal, not decoration: keep it alive under
+   reduced-motion so the owner can still see that the task is working. */
+@media (prefers-reduced-motion: reduce) {
+  .assistant-pet.thinking .pet-img,
+  .assistant-pet.thinking .assistant-pet-art,
+  .assistant-pet.thinking .pet-2_5d .pet-head-layer { animation: pet-think .8s ease-in-out infinite !important; }
+  .assistant-pet.thinking .assistant-thinking i { animation: assistant-think-dot 1.15s ease-in-out infinite !important; }
+}
+
+.assistant-thinking b { display: grid; place-items: center; width: auto; height: auto; background: transparent; color: #1b2b3d; font-size: 16px; font-weight: 900; line-height: 1; text-shadow: 0 1px 2px rgba(255,255,255,.9); animation: pet-question 1.15s ease-in-out infinite; }
+@keyframes pet-question { 0%, 100% { transform: translateY(0) rotate(-8deg) scale(.92); opacity: .7; } 50% { transform: translateY(-3px) rotate(8deg) scale(1.08); opacity: 1; } }
+.assistant-pet.pet-moving .assistant-thinking,
+.assistant-pet.pet-typing .assistant-thinking { display: none !important; }
+@media (prefers-reduced-motion: reduce) { .assistant-pet.thinking .assistant-thinking b { animation: pet-question 1.15s ease-in-out infinite !important; } }
+
+.pet-diary-list { display: grid; gap: 8px; }
+.pet-diary-entry { border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; }
+.pet-diary-entry summary { cursor: pointer; font-weight: 800; }
+.pet-diary-entry pre { margin: 8px 0 0; white-space: pre-wrap; word-break: break-word; font: inherit; color: var(--muted); }
+
+.mcp-edit-fields { display: grid; gap: 8px; margin: 12px 0; }
+.mcp-edit-fields label { display: grid; gap: 4px; }
+.mcp-edit-fields button { justify-self: start; }
+
+/* Page headings stay readable even while the pet roams the page. */
+.page-head { position: relative; z-index: 12; }
+
+.mcp-tool-row { display: flex; align-items: flex-start; gap: 8px; cursor: pointer; }
+.mcp-tool-row input { margin-top: 2px; }
+
+.mcp-tool-row input[type="checkbox"] { width: 16px; height: 16px; min-width: 16px; flex: 0 0 16px; margin: 2px 0 0; }
+.mcp-tool-row span { flex: 1 1 auto; min-width: 0; }
+.mcp-tool-row strong { display: block; }
+
+.mcp-form label[hidden] { display: none; }
+
+.pet-settings-page #assistant-settings { position: static; inset: auto; z-index: auto; display: block; padding: 0; background: transparent; }
+.pet-settings-page #assistant-settings .assistant-settings-card { width: 100%; max-height: none; border: 0; border-radius: 0; box-shadow: none; }
+.pet-settings-page #assistant-settings .assistant-settings-body { max-width: 760px; width: 100%; margin: 0 auto; }
+
+.assistant-settings.assistant-settings-inline { position: static !important; inset: auto !important; z-index: auto !important; display: block !important; padding: 0 !important; background: transparent !important; }
+.assistant-settings.assistant-settings-inline .assistant-settings-card { width: 100% !important; max-height: none !important; border: 0 !important; border-radius: 0 !important; box-shadow: none !important; }
+
+.assistant-settings.assistant-settings-inline > .assistant-settings-card > .assistant-settings-head .icon-button { display: none; }
+.assistant-settings.assistant-settings-inline #pet-settings-cancel { display: none; }
+
+/* Pet settings is a page, not a modal: keep the sidebar visible and render
+   over the content column only. */
+.assistant-settings:not([hidden]) {
+  position: fixed;
+  left: calc(var(--sidebar-width) + 8px);
+  right: 0;
+  top: 0;
+  bottom: 0;
+  inset: auto;
+  place-items: start center;
+  padding: 18px;
+  background: var(--bg);
+}
+.assistant-settings .assistant-settings-head .icon-button,
+.assistant-settings #pet-settings-cancel { display: none; }
+.assistant-settings .assistant-settings-card { width: min(760px, 100%); max-height: none; border: 0; border-radius: 0; box-shadow: none; }
+@media (max-width: 720px) { .assistant-settings:not([hidden]) { left: 0; padding: 0; } }
+.pet-budget-grid .assistant-settings-switch { grid-column: 1 / -1; }
+.assistant-settings-trigger { margin-top: 8px; width: 100%; min-height: 34px; border: 1px solid #cfe0f3; border-radius: 9px; background: #f4f9ff; color: #25517d; font-size: 12px; }

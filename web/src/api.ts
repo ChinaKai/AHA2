@@ -2,6 +2,7 @@ import type {
   AgentAPISettings,
 	BackendSettings,
   Attachment,
+  AssistantToolEvent,
   AuthStatus,
   CodexAccount,
   CodexLogin,
@@ -24,6 +25,17 @@ import type {
   KnowledgeProposal,
   KnowledgeReviewSettings,
   Model,
+  OwnerAssistant,
+  OwnerAssistantView,
+  AssistantHint,
+  AssistantMessage,
+  AssistantModelOption,
+  PetState,
+  PetStatePatch,
+  PetBrainResult,
+  PetLayout,
+  PetEvent,
+  PetPrompts,
   Project,
   ProductLine,
   Provider,
@@ -406,8 +418,12 @@ class APIClient {
     return this.request("/api/v1/providers/detect-models", {method: "POST", body: JSON.stringify(payload)});
   }
 
-  createModelDetectionJob(providerID: string): Promise<{job: {id: string; provider_id: string; status: string}}> {
+  createModelDetectionJob(providerID: string): Promise<{job: {id: string; provider_id: string; status: string; completed?: number; total?: number; models?: DetectedModel[]; auth_style?: string; anthropic_base_url?: string; error?: string}}> {
     return this.request(`/api/v1/providers/${encodeURIComponent(providerID)}/model-detection-jobs`, {method: "POST", body: "{}"});
+  }
+
+  modelDetectionJob(providerID: string, jobID: string): Promise<{job: {id: string; provider_id: string; status: string; completed: number; total: number; models?: Array<{id: string; display_name?: string; wire_apis?: string[]; max_input_tokens?: number; max_output_tokens?: number}>; auth_style?: string; anthropic_base_url?: string; error?: string}}> {
+    return this.request(`/api/v1/providers/${encodeURIComponent(providerID)}/model-detection-jobs/${encodeURIComponent(jobID)}`);
   }
 
   cancelModelDetectionJob(providerID: string, jobID: string): Promise<{job: {id: string; status: string; completed: number; total: number}}> {
@@ -500,6 +516,34 @@ class APIClient {
 
   taskCloneSources(): Promise<{tasks: Task[]}> {
     return this.request("/api/v1/task-clone-sources");
+  }
+
+  petDiary(): Promise<{entries: import("./types").PetDiaryEntry[]}> {
+    return this.request("/api/v1/pet/diary");
+  }
+
+  mcpServers(): Promise<{servers: import("./types").MCPServer[]}> {
+    return this.request("/api/v1/mcp-servers");
+  }
+
+  mcpServer(id: string): Promise<{server: import("./types").MCPServer}> {
+    return this.request(`/api/v1/mcp-servers/${encodeURIComponent(id)}`);
+  }
+
+  testMCPServer(id: string): Promise<{server: import("./types").MCPServer}> {
+    return this.request("/api/v1/mcp-servers/test", {method: "POST", body: JSON.stringify({id})});
+  }
+
+  saveMCPServer(payload: Record<string, unknown>): Promise<{server: import("./types").MCPServer}> {
+    return this.request("/api/v1/mcp-servers", {method: "POST", body: JSON.stringify(payload)});
+  }
+
+  deleteMCPServer(id: string): Promise<{ok: boolean}> {
+    return this.request(`/api/v1/mcp-servers/${encodeURIComponent(id)}`, {method: "DELETE"});
+  }
+
+  setTaskMCPServers(id: string, serverIDs: string[]): Promise<{task: import("./types").Task}> {
+    return this.request(`/api/v1/tasks/${encodeURIComponent(id)}/mcp-servers`, {method: "PUT", body: JSON.stringify({server_ids: serverIDs})});
   }
 
   createTask(payload: Record<string, unknown>): Promise<{task: Task; turn?: {id: string}; started?: boolean; start_error?: string; clone_warnings?: string[]}> {
@@ -871,6 +915,58 @@ class APIClient {
 
   resetPromptTemplate(id: string): Promise<{ok: boolean}> {
     return this.request(`/api/v1/prompts/templates/${encodeURIComponent(id)}/reset`, {method: "POST", body: "{}"});
+  }
+
+  ownerAssistant(): Promise<{ok: boolean} & OwnerAssistantView> {
+    return this.request("/api/v1/assistant");
+  }
+
+  updateOwnerAssistant(payload: {model_id?: string; name?: string; character?: string}): Promise<{ok: boolean; assistant: OwnerAssistant; models: AssistantModelOption[]; model_name?: string}> {
+    return this.request("/api/v1/assistant", {method: "PUT", body: JSON.stringify(payload)});
+  }
+  petState(): Promise<{ok: boolean; state: PetState}> {
+    return this.request("/api/v1/pet");
+  }
+
+  updatePetState(patch: PetStatePatch): Promise<{ok: boolean; state: PetState}> {
+    return this.request("/api/v1/pet", {method: "PUT", body: JSON.stringify(patch)});
+  }
+  controlPet(payload: {say: string; actions: Array<{type: string; name?: string; zone?: string; task?: string}>}): Promise<{ok: boolean; say: string; actions: unknown[]}> {
+    return this.request("/api/v1/pet/control", {method: "POST", body: JSON.stringify(payload)});
+  }
+
+  petBrain(payload: {page: string; idle_seconds: number; device_id: string; layout?: PetLayout}): Promise<PetBrainResult> {
+    return this.request("/api/v1/pet/brain", {method: "POST", body: JSON.stringify(payload)});
+  }
+
+  petPrompts(): Promise<{ok: boolean; chat: string; brain: string}> {
+    return this.request("/api/v1/pet/prompts");
+  }
+
+  petActivity(limit = 20): Promise<{ok: boolean; events: PetEvent[]}> {
+    return this.request(`/api/v1/pet/activity?limit=${limit}`);
+  }
+
+  petEventsURL(): string {
+    return "/api/v1/pet/events";
+  }
+
+  updatePetSettings(payload: {enabled: boolean; character: string; chat_model_id: string; brain_model_id: string; actions: string[]; identity: string; principles: string; idle_minutes: number; quiet_start: number; quiet_end: number; hourly_limit: number}): Promise<{ok: boolean; assistant: OwnerAssistant; models: AssistantModelOption[]; model_name?: string; brain_model_name?: string}> {
+    return this.request("/api/v1/pet/settings", {method: "PUT", body: JSON.stringify(payload)});
+  }
+
+  askOwnerAssistant(content: string, layout?: PetLayout): Promise<{ok: boolean; message: AssistantMessage; reply: AssistantMessage; tool_events?: AssistantToolEvent[]; actions?: PetBrainAction[]}> {
+    return this.request("/api/v1/assistant/messages", {method: "POST", body: JSON.stringify({content, layout})});
+  }
+
+  assistantHints(): Promise<{ok: boolean; hints: AssistantHint[]}> {
+    return this.request("/api/v1/assistant/hints");
+  }
+
+  dismissAssistantHint(kind: string, targetID: string): Promise<{ok: boolean}> {
+    return this.request("/api/v1/assistant/hints/dismiss", {
+      method: "POST", body: JSON.stringify({kind, target_id: targetID}),
+    });
   }
 
 }

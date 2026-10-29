@@ -354,6 +354,7 @@ type Task struct {
 	KnowledgePolicy         string          `json:"knowledge_policy"`
 	SkillIDs                []string        `json:"skill_ids"`
 	AgentCapabilities       map[string]bool `json:"agent_capabilities"`
+	MCPServerIDs            []string        `json:"mcp_server_ids"`
 	TotalTokens             int64           `json:"total_tokens"`
 	CreatedAt               time.Time       `json:"created_at"`
 	UpdatedAt               time.Time       `json:"updated_at"`

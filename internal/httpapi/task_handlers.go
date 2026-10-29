@@ -239,6 +239,7 @@ func (s *Server) createTask(writer http.ResponseWriter, request *http.Request) {
 		MaxAgents           int              `json:"max_agents"`
 		KnowledgePolicy     string           `json:"knowledge_policy"`
 		SkillIDs            []string         `json:"skill_ids"`
+		MCPServerIDs        []string         `json:"mcp_server_ids"`
 		AgentCapabilities   *map[string]bool `json:"agent_capabilities"`
 		StartMode           string           `json:"start_mode"`
 		SourceTaskID        string           `json:"source_task_id"`
@@ -319,7 +320,8 @@ func (s *Server) createTask(writer http.ResponseWriter, request *http.Request) {
 		StreamIdleTimeoutMS: payload.StreamIdleTimeoutMS, StreamMaxRetries: payload.StreamMaxRetries,
 		Filesystem: filesystem, Approval: approval, CollaborationMode: payload.CollaborationMode,
 		MaxAgents: payload.MaxAgents, ProxyEnabled: payload.ProxyEnabled, KnowledgePolicy: payload.KnowledgePolicy,
-		SkillIDs: payload.SkillIDs, AgentCapabilities: capabilities, StartMode: payload.StartMode,
+		SkillIDs: payload.SkillIDs, MCPServerIDs: payload.MCPServerIDs,
+		AgentCapabilities: capabilities, StartMode: payload.StartMode,
 	})
 	if err != nil {
 		writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "create_task_failed", "message": err.Error()})
@@ -1276,13 +1278,14 @@ func (s *Server) updateTaskTitle(writer http.ResponseWriter, request *http.Reque
 		MaxAgents         *int             `json:"max_agents"`
 		KnowledgePolicy   *string          `json:"knowledge_policy"`
 		SkillIDs          *[]string        `json:"skill_ids"`
+		MCPServerIDs      *[]string        `json:"mcp_server_ids"`
 		AgentCapabilities *map[string]bool `json:"agent_capabilities"`
 	}
 	if err := decodeJSON(request, &payload); err != nil {
 		writeError(writer, http.StatusBadRequest, "invalid_json")
 		return
 	}
-	if payload.Title == nil && payload.CollaborationMode == nil && payload.MaxAgents == nil && payload.KnowledgePolicy == nil && payload.SkillIDs == nil && payload.AgentCapabilities == nil {
+	if payload.Title == nil && payload.CollaborationMode == nil && payload.MaxAgents == nil && payload.KnowledgePolicy == nil && payload.SkillIDs == nil && payload.MCPServerIDs == nil && payload.AgentCapabilities == nil {
 		writeError(writer, http.StatusBadRequest, "task_update_required")
 		return
 	}
@@ -1332,6 +1335,12 @@ func (s *Server) updateTaskTitle(writer http.ResponseWriter, request *http.Reque
 	if payload.SkillIDs != nil {
 		if _, err := s.app.UpdateTaskSkills(request.Context(), id, *payload.SkillIDs); err != nil {
 			writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "update_task_skills_failed", "message": err.Error()})
+			return
+		}
+	}
+	if payload.MCPServerIDs != nil {
+		if _, err := s.app.SetTaskMCPServers(request.Context(), id, *payload.MCPServerIDs); err != nil {
+			writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "update_task_mcp_failed", "message": err.Error()})
 			return
 		}
 	}

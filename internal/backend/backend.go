@@ -30,6 +30,8 @@ type Request struct {
 	ReverseForward *workspace.ReverseForward
 	Filesystem     string
 	Approval       string
+	MCPConfig      string
+	AllowedTools   []string
 }
 
 type Event struct {

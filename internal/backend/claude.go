@@ -44,6 +44,13 @@ func (adapter Claude) Execute(ctx context.Context, request Request, emit func(Ev
 	if request.ProviderSessionID != "" {
 		args = append(args, "--resume", request.ProviderSessionID)
 	}
+	if config := strings.TrimSpace(request.MCPConfig); config != "" {
+		args = append(args, "--mcp-config", config)
+	}
+	if len(request.AllowedTools) > 0 {
+		args = append(args, "--allowedTools")
+		args = append(args, request.AllowedTools...)
+	}
 	var reply, sessionID, providerError string
 	var stream claudeStream
 	var emitMu sync.Mutex

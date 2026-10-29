@@ -25,11 +25,11 @@ func (s *Store) CreateTask(ctx context.Context, item domain.Task) error {
 	}
 	item.Code = code
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO tasks(id,code,project_id,workspace_id,title,original_request,current_goal,status,target_branch,base_commit,task_branch,isolation,worktree_dir,task_workspace_path,runtime_config_snapshot_id,collaboration_mode,max_agents,knowledge_policy,skill_ids_json,agent_capabilities_json,created_at,updated_at,completed_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		INSERT INTO tasks(id,code,project_id,workspace_id,title,original_request,current_goal,status,target_branch,base_commit,task_branch,isolation,worktree_dir,task_workspace_path,runtime_config_snapshot_id,collaboration_mode,max_agents,knowledge_policy,skill_ids_json,agent_capabilities_json,mcp_server_ids_json,created_at,updated_at,completed_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		item.ID, item.Code, item.ProjectID, item.WorkspaceID, item.Title, item.OriginalRequest, item.CurrentGoal, item.Status,
 		item.TargetBranch, item.BaseCommit, item.TaskBranch, item.Isolation, item.WorktreeDir, item.TaskWorkspacePath, item.RuntimeConfigSnapshotID,
-		item.CollaborationMode, item.MaxAgents, item.KnowledgePolicy, encodeJSON(item.SkillIDs), encodeJSON(item.AgentCapabilities),
+		item.CollaborationMode, item.MaxAgents, item.KnowledgePolicy, encodeJSON(item.SkillIDs), encodeJSON(item.AgentCapabilities), encodeJSON(item.MCPServerIDs),
 		timeString(item.CreatedAt), timeString(item.UpdatedAt), timeString(item.CompletedAt),
 	)
 	if err != nil {
@@ -72,11 +72,11 @@ func (s *Store) CreateTaskWithSnapshot(ctx context.Context, snapshot domain.Runt
 	}
 	item.Code = code
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO tasks(id,code,project_id,workspace_id,title,original_request,current_goal,status,target_branch,base_commit,task_branch,isolation,worktree_dir,task_workspace_path,runtime_config_snapshot_id,collaboration_mode,max_agents,knowledge_policy,skill_ids_json,agent_capabilities_json,created_at,updated_at,completed_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		INSERT INTO tasks(id,code,project_id,workspace_id,title,original_request,current_goal,status,target_branch,base_commit,task_branch,isolation,worktree_dir,task_workspace_path,runtime_config_snapshot_id,collaboration_mode,max_agents,knowledge_policy,skill_ids_json,agent_capabilities_json,mcp_server_ids_json,created_at,updated_at,completed_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		item.ID, item.Code, item.ProjectID, item.WorkspaceID, item.Title, item.OriginalRequest, item.CurrentGoal, item.Status,
 		item.TargetBranch, item.BaseCommit, item.TaskBranch, item.Isolation, item.WorktreeDir, item.TaskWorkspacePath, item.RuntimeConfigSnapshotID,
-		item.CollaborationMode, item.MaxAgents, item.KnowledgePolicy, encodeJSON(item.SkillIDs), encodeJSON(item.AgentCapabilities),
+		item.CollaborationMode, item.MaxAgents, item.KnowledgePolicy, encodeJSON(item.SkillIDs), encodeJSON(item.AgentCapabilities), encodeJSON(item.MCPServerIDs),
 		timeString(item.CreatedAt), timeString(item.UpdatedAt), timeString(item.CompletedAt),
 	); err != nil {
 		return domain.Task{}, err
@@ -165,19 +165,20 @@ func (s *Store) BackfillTaskCodes(ctx context.Context) (int, error) {
 
 func scanTask(scanner interface{ Scan(...any) error }) (domain.Task, error) {
 	var item domain.Task
-	var skillIDsJSON, agentCapabilitiesJSON, createdAt, updatedAt, completedAt string
+	var skillIDsJSON, agentCapabilitiesJSON, mcpServerIDsJSON, createdAt, updatedAt, completedAt string
 	err := scanner.Scan(
 		&item.ID, &item.Code, &item.ProjectID, &item.WorkspaceID, &item.Title, &item.OriginalRequest, &item.CurrentGoal,
 		&item.Status, &item.TargetBranch, &item.BaseCommit, &item.TaskBranch, &item.Isolation, &item.WorktreeDir, &item.TaskWorkspacePath,
-		&item.RuntimeConfigSnapshotID, &item.CollaborationMode, &item.MaxAgents, &item.KnowledgePolicy, &skillIDsJSON, &agentCapabilitiesJSON, &createdAt, &updatedAt, &completedAt,
+		&item.RuntimeConfigSnapshotID, &item.CollaborationMode, &item.MaxAgents, &item.KnowledgePolicy, &skillIDsJSON, &agentCapabilitiesJSON, &mcpServerIDsJSON, &createdAt, &updatedAt, &completedAt,
 	)
 	item.SkillIDs = decodeJSON(skillIDsJSON, []string{})
 	item.AgentCapabilities = decodeJSON(agentCapabilitiesJSON, map[string]bool{})
+	item.MCPServerIDs = decodeJSON(mcpServerIDsJSON, []string{})
 	item.CreatedAt, item.UpdatedAt, item.CompletedAt = parseTime(createdAt), parseTime(updatedAt), parseTime(completedAt)
 	return item, err
 }
 
-const taskColumns = `id,code,project_id,workspace_id,title,original_request,current_goal,status,target_branch,base_commit,task_branch,isolation,worktree_dir,task_workspace_path,runtime_config_snapshot_id,collaboration_mode,max_agents,knowledge_policy,skill_ids_json,agent_capabilities_json,created_at,updated_at,completed_at`
+const taskColumns = `id,code,project_id,workspace_id,title,original_request,current_goal,status,target_branch,base_commit,task_branch,isolation,worktree_dir,task_workspace_path,runtime_config_snapshot_id,collaboration_mode,max_agents,knowledge_policy,skill_ids_json,agent_capabilities_json,mcp_server_ids_json,created_at,updated_at,completed_at`
 
 func (s *Store) Task(ctx context.Context, id string) (domain.Task, error) {
 	return scanTask(s.db.QueryRowContext(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=?`, id))

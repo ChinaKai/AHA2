@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"maps"
 	"net/url"
 	"path"
@@ -46,6 +47,8 @@ type ExecutionRequest struct {
 	AgentAPIForward *workspacepkg.ReverseForward
 	Filesystem      string
 	Approval        string
+	MCPConfig       string
+	AllowedTools    []string
 }
 
 type ExecutionEvent struct {
@@ -153,6 +156,12 @@ type Service struct {
 	collaborationMu     sync.Mutex
 	collaborationDelay  time.Duration
 	collaborationTimers map[string]*time.Timer
+	assistantMu         sync.Mutex
+	petBrainMu          sync.Mutex
+	petBrainAt          map[string]time.Time
+	petAutonomyLast     time.Time
+	petAutonomyNext     time.Time
+	petBrainRuns        map[string][]time.Time
 	sharedContextMu     sync.Mutex
 	sharedContexts      map[string]*sharedContextState
 	latestShared        map[string]string
@@ -209,6 +218,7 @@ type CreateTaskInput struct {
 	KnowledgePolicy     string
 	SkillIDs            []string
 	AgentCapabilities   map[string]bool
+	MCPServerIDs        []string
 	StartMode           string
 }
 
@@ -368,6 +378,10 @@ func (s *Service) CreateTask(ctx context.Context, input CreateTaskInput) (domain
 	if err != nil {
 		return domain.Task{}, err
 	}
+	mcpServerIDs, err := s.normalizeTaskMCPServers(ctx, project, input.MCPServerIDs)
+	if err != nil {
+		return domain.Task{}, err
+	}
 	taskStatus := domain.TaskPreparing
 	if startMode == "manual" {
 		taskStatus = domain.TaskDraft
@@ -391,6 +405,7 @@ func (s *Service) CreateTask(ctx context.Context, input CreateTaskInput) (domain
 		KnowledgePolicy:         normalizeKnowledgePolicy(input.KnowledgePolicy),
 		SkillIDs:                skillIDs,
 		AgentCapabilities:       input.AgentCapabilities,
+		MCPServerIDs:            mcpServerIDs,
 		CreatedAt:               now,
 		UpdatedAt:               now,
 	}
@@ -921,6 +936,12 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 			attachments = append(attachments, prompt.AttachmentResource{Attachment: item, Content: string(content)})
 		}
 	}
+	petDiaryPaths := []string{}
+	if task.ID == petTaskID {
+		if paths, pathsErr := s.PetDiaryPaths(ctx); pathsErr == nil {
+			petDiaryPaths = paths
+		}
+	}
 	preview, err := s.prompts.Build(ctx, prompt.BuildInput{
 		Project: project, Workspace: workspace, Task: task, Agent: agent, Snapshot: snapshot,
 		GlobalKnowledge: globalKB, ProjectKnowledge: projectKB, StaleKnowledge: staleKB, Skills: skills,
@@ -929,7 +950,7 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 		RecoveryConversation: conversation.Items,
 		Handoff:              handoff.Summary, AgentAPIURL: agentAPIURL, CurrentTurnID: turn.ID, CurrentRoundID: turn.RoundID,
 		IncludeRecentContext: includeRecentContext, IncludeRecoveryHandoff: includeRecoveryHandoff, IncludeTurnDiagnostics: includeTurnDiagnostics,
-		ChannelContext: channelContext,
+		ChannelContext: channelContext, Identity: petTaskIdentity(task), PetDiaryPaths: petDiaryPaths,
 	})
 	if err != nil {
 		s.failTurn(ctx, &turn, task, err)
@@ -1124,12 +1145,14 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 	}
 	filesystem, approval := parsePermissionsJSON(snapshot.PermissionsJSON)
 	latestSessionUsage := cloneUsageMap(sessionUsageBaseline)
+	mcpConfig, allowedTools := s.mcpRuntimeForTask(ctx, task)
 	result, executeErr := s.executor.Execute(ctx, ExecutionRequest{
 		Turn: turn, Task: task, Project: project, Workspace: workspace, Snapshot: snapshot,
 		Model: model, EnvGroup: envGroup, Environment: environment, Prompt: packedPrompt,
 		ProviderSessionID: providerSession, BackendSessionID: sessionID,
 		AgentAPIForward: agentAPIForward,
 		Filesystem:      filesystem, Approval: approval,
+		MCPConfig: mcpConfig, AllowedTools: allowedTools,
 	}, func(event ExecutionEvent) {
 		now := s.now().UTC()
 		watchdogEvent := event.Type == "agent_stalled" || event.Type == "agent_heartbeat" || event.Type == "agent_idle_timeout"
@@ -1856,6 +1879,12 @@ func (s *Service) startTurn(turn domain.Turn) {
 	s.mu.Unlock()
 	go func() {
 		defer s.runWG.Done()
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				log.Printf("turn %s panicked: %v", turn.ID, recovered)
+				recordPanic(s.store.DataDir(), "turn "+turn.ID, recovered)
+			}
+		}()
 		s.runTurn(runContext, turn.ID)
 	}()
 }

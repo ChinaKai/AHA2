@@ -354,6 +354,7 @@ export interface Task {
   knowledge_policy: "inherit" | "enabled" | "disabled" | string;
   skill_ids: string[];
   agent_capabilities: Record<string, boolean>;
+  mcp_server_ids?: string[];
   total_tokens: number;
   created_at: string;
   updated_at: string;
@@ -936,4 +937,187 @@ export interface ChannelDelivery {
   outcome_certainty?: string;
   created_at: string;
   delivered_at?: string;
+}
+
+export interface OwnerAssistant {
+  id: string;
+  name: string;
+  model_id: string;
+  character: string;
+  pet_enabled: boolean;
+  brain_model_id: string;
+  pet_actions: string[];
+  pet_identity: string;
+  pet_principles: string;
+  pet_idle_minutes: number;
+  pet_quiet_enabled: boolean;
+  pet_quiet_start: number;
+  pet_quiet_end: number;
+  pet_hourly_limit: number;
+  pet_task_id?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AssistantMessage {
+  id: string;
+  assistant_id: string;
+  role: "user" | "assistant" | string;
+  content: string;
+  created_at: string;
+}
+
+export interface AssistantToolEvent {
+  name: string;
+  status: "ok" | "error" | "warning" | string;
+  message: string;
+  arguments?: string;
+}
+
+export interface PetToolInfo {
+  name: string;
+  description: string;
+}
+
+export interface AssistantModelOption {
+  id: string;
+  display_name: string;
+  provider_name?: string;
+  wire_api: string;
+}
+
+export interface PetPrompts {
+  chat: string;
+  brain: string;
+}
+
+export interface PetEvent {
+  id: string;
+  at: string;
+  device_id: string;
+  actor: string;
+  kind: string;
+  page: string;
+  detail: string;
+  status: string;
+}
+
+export interface PetBrainAction {
+  type: "play" | "move_to" | "walk_path" | "open_task" | string;
+  name?: string;
+  zone?: string;
+  task?: string;
+  x?: number;
+  y?: number;
+  radius?: number;
+  turns?: number;
+  points?: Array<{x: number; y: number} | [number, number]>;
+  duration_ms?: number;
+  active?: boolean;
+}
+
+export interface PetLayoutRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+export interface PetLayoutElement extends PetLayoutRect {
+  name: string;
+}
+
+export interface PetLayout {
+  viewport_width: number;
+  viewport_height: number;
+  scroll_y: number;
+  pet: PetLayoutRect;
+  panel?: PetLayoutRect;
+  elements?: PetLayoutElement[];
+}
+
+export interface PetBrainResult {
+  ok: boolean;
+  say: string;
+  actions: PetBrainAction[];
+}
+
+export interface PetState {
+  id: string;
+  character: string;
+  mood: string;
+  action: string;
+  zone: string;
+  x: number;
+  y: number;
+  facing: number;
+  sleeping: boolean;
+  quiet: boolean;
+  version: number;
+  updated_at: string;
+}
+
+export interface PetStatePatch {
+  mood?: string;
+  action?: string;
+  zone?: string;
+  x?: number;
+  y?: number;
+  facing?: number;
+  sleeping?: boolean;
+  quiet?: boolean;
+  version?: number;
+}
+
+export interface AssistantHint {
+  kind: string;
+  target_type: "task" | "channel" | string;
+  target_id: string;
+  title: string;
+  body: string;
+  priority: number;
+}
+
+export interface OwnerAssistantView {
+  assistant: OwnerAssistant;
+  messages: AssistantMessage[];
+  models: AssistantModelOption[];
+  model_name?: string;
+  brain_model_name?: string;
+  tools?: PetToolInfo[];
+  pet_last_brain_at?: string;
+  pet_next_brain_at?: string;
+  pet_brain_runs?: number;
+}
+
+export interface MCPTool {
+  name: string;
+  description?: string;
+  input_schema?: Record<string, unknown>;
+}
+
+export interface MCPServer {
+  id: string;
+  name: string;
+  description: string;
+  transport: "http" | "stdio" | string;
+  url?: string;
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  headers?: Record<string, string>;
+  tools?: MCPTool[];
+  disabled_tools?: string[];
+  enabled: boolean;
+  builtin: boolean;
+  health?: string;
+  last_error?: string;
+  last_checked_at?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PetDiaryEntry {
+  date: string;
+  content: string;
 }

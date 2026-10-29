@@ -232,6 +232,7 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 	appService := app.NewService(database, secretStore, executor)
 	appService.SetProxyRuntime(proxyRuntime)
 	appService.SetRunContext(ctx)
+	appService.StartPetAutonomy()
 	defer func() {
 		shutdownContext, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()

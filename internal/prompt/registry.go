@@ -64,6 +64,8 @@ type BuildInput struct {
 	IncludeRecoveryHandoff bool
 	IncludeTurnDiagnostics bool
 	ChannelContext         map[string]any
+	Identity               string
+	PetDiaryPaths          []string
 }
 
 type AttachmentResource struct {
@@ -186,6 +188,7 @@ type templateData struct {
 	Recovery           *recoveryHandoffEvidence
 	AgentAPIURL        string
 	AvailableContext   []AvailableContextGroup
+	PetDiaryPaths      []string
 	RecentExchanges    []recentContextExchange
 	TurnDiagnostics    []turnDiagnostic
 	HardwareGroups     []hardwareContextGroup
@@ -204,6 +207,7 @@ var builtinTemplates = []domain.PromptTemplate{
 	{ID: "identity.task-agent", Name: "Task Agent Identity", Layer: "identity", Description: "代码与项目任务场景身份", Editable: true, Required: false, Version: 1},
 	{ID: "identity.channel-assistant", Name: "Channel Assistant Identity", Layer: "identity", Description: "Owner 私聊渠道助手身份", Editable: true, Required: false, Version: 1},
 	{ID: "identity.channel-digital-human", Name: "Channel Digital Human Identity", Layer: "identity", Description: "受限群聊电子人身份", Editable: true, Required: false, Version: 2},
+	{ID: "identity.pet-task", Name: "Pet Task Identity", Layer: "identity", Description: "宠物 Task 的人格与边界，注入 Task Prompt 顶部", Editable: true, Required: false, Version: 1},
 	{ID: "channel.web", Name: "AHA Web Channel", Layer: "channel", Description: "Web 渠道消息行为", Editable: true, Required: false, Version: 1},
 	{ID: "channel.external-channel", Name: "External Channel", Layer: "channel", Description: "外部渠道消息行为", Editable: true, Required: false, Version: 4},
 	{ID: "policy.auto", Name: "Auto Collaboration", Layer: "policy", Description: "AHA 自动协作策略", Editable: true, Required: false, Version: 1},
@@ -296,7 +300,11 @@ func (engine *Engine) UpdateTemplate(ctx context.Context, id, content string, no
 		return fmt.Errorf("invalid prompt template: %w", err)
 	}
 	var output bytes.Buffer
-	if err := parsed.Execute(&output, templateData{}); err != nil {
+	data := any(templateData{})
+	if strings.HasPrefix(id, "identity.pet-") {
+		data = map[string]any{"Nickname": "", "Identity": "", "Principles": "", "Snapshot": "", "Layout": "", "Tools": "", "Page": "", "IdleMinutes": 0}
+	}
+	if err := parsed.Execute(&output, data); err != nil {
 		return fmt.Errorf("invalid prompt template data reference: %w", err)
 	}
 	return engine.repository.UpsertPromptTemplateOverride(ctx, id, content, now)
@@ -336,6 +344,9 @@ func (engine *Engine) Build(ctx context.Context, input BuildInput) (BuildResult,
 	}
 	contextRoot := contextRootFor(input, workDir)
 	identityName, channelName := identityAndChannel(input.ChannelContext)
+	if strings.TrimSpace(input.Identity) != "" {
+		identityName = strings.TrimSpace(input.Identity)
+	}
 	identityTemplate := "identity." + identityName
 	channelTemplate := "channel." + channelName
 	data := templateData{
@@ -348,6 +359,7 @@ func (engine *Engine) Build(ctx context.Context, input BuildInput) (BuildResult,
 		CurrentGoal: input.Task.CurrentGoal, CurrentGoalSummary: truncate(input.Task.CurrentGoal, 800),
 		TaskBranch: input.Task.TaskBranch, InboxBatch: strings.TrimSpace(input.UserMessage),
 		CompactHandoff: strings.TrimSpace(input.Handoff), AgentAPIURL: strings.TrimRight(input.AgentAPIURL, "/"),
+		PetDiaryPaths: input.PetDiaryPaths,
 	}
 	if input.IncludeRecoveryHandoff {
 		if evidence := recoveryHandoffEvidenceFor(input); evidence != nil {
@@ -1540,4 +1552,29 @@ func normalizeHardwareSSHAuth(value string) string {
 	default:
 		return domain.HardwareSSHAuthAuto
 	}
+}
+
+// RenderTemplate renders a named builtin/override template with arbitrary data.
+// It lets feature prompts share the prompt registry without going through the
+// full Task prompt builder.
+func (engine *Engine) RenderTemplate(ctx context.Context, id string, data any) (string, error) {
+	templates, err := engine.Templates(ctx)
+	if err != nil {
+		return "", err
+	}
+	for _, item := range templates {
+		if item.ID != id {
+			continue
+		}
+		parsed, err := template.New(id).Option("missingkey=error").Parse(item.Content)
+		if err != nil {
+			return "", err
+		}
+		var output bytes.Buffer
+		if err := parsed.Execute(&output, data); err != nil {
+			return "", err
+		}
+		return strings.TrimSpace(output.String()), nil
+	}
+	return "", fmt.Errorf("prompt template %s not found", id)
 }

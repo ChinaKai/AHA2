@@ -1,6 +1,6 @@
 import {icon} from "./icons.js";
 import {proxyOptionsHTML, runtimeFieldsHTML} from "./runtime_picker.js";
-import type {CodexAccount, ConversationItem, Model, Skill, TaskAgent, TaskContextDetail, TaskDetail, TaskMemory, Turn} from "./types.js";
+import type {CodexAccount, ConversationItem, MCPServer, Model, Skill, TaskAgent, TaskContextDetail, TaskDetail, TaskMemory, Turn} from "./types.js";
 
 export type TaskRealtimeState = "connecting" | "live" | "fallback";
 
@@ -417,11 +417,10 @@ function agentCapabilitiesFold(capabilities: Record<string, boolean> | undefined
   const on = ["workspace_read", "task_create", "clone_hardware"].filter(name => granted[name]).length;
   return `<details class="task-form-fold" id="agent-capabilities-fold">
     <summary><strong>Agent 项目级授权</strong><b data-fold-count>${on ? `已启用 ${on}/3` : "默认关闭"}</b></summary>
-    <div class="task-form-fold-body"><div class="task-agent-capabilities">
-      <p>默认关闭；仅 Main Agent 可用。</p>
-      <label><input type="checkbox" name="cap_workspace_read" ${granted.workspace_read ? "checked" : ""}>读取同 Project Workspace</label>
-      <label><input type="checkbox" name="cap_task_create" ${granted.task_create ? "checked" : ""}>创建同 Project Task</label>
-      <label><input type="checkbox" name="cap_clone_hardware" ${granted.clone_hardware ? "checked" : ""}>克隆当前 Task 硬件启用关系</label>
+    <div class="task-form-fold-body"><div class="task-skill-options">
+      <label class="task-skill-option"><input type="checkbox" name="cap_workspace_read" ${granted.workspace_read ? "checked" : ""}><span><strong>读取同 Project Workspace</strong><small>允许读取当前项目其他 Workspace</small></span></label>
+      <label class="task-skill-option"><input type="checkbox" name="cap_task_create" ${granted.task_create ? "checked" : ""}><span><strong>创建同 Project Task</strong><small>允许在当前项目下创建 Task</small></span></label>
+      <label class="task-skill-option"><input type="checkbox" name="cap_clone_hardware" ${granted.clone_hardware ? "checked" : ""}><span><strong>克隆当前 Task 硬件启用关系</strong><small>新 Task 继承当前硬件配置</small></span></label>
     </div></div>
   </details>`;
 }
@@ -433,7 +432,7 @@ function agentSkillsFold(skills: Skill[], projectID: string, selected: string[])
   </details>`;
 }
 
-export function renderAgentConfigDialog(detail: TaskDetail, agentID: string, models: Model[], accounts: CodexAccount[], skills: Skill[]): string {
+export function renderAgentConfigDialog(detail: TaskDetail, agentID: string, models: Model[], accounts: CodexAccount[], skills: Skill[], mcpServers: MCPServer[] = []): string {
   const agent = (detail.agents || []).find(item => item.agent_id === agentID);
   if (!agent) return "";
   const effortLevels = agent.backend === "claude"
@@ -442,7 +441,7 @@ export function renderAgentConfigDialog(detail: TaskDetail, agentID: string, mod
   const mainSettings = agent.agent_id === "main" ? `<fieldset class="agent-collaboration-settings"><legend>Task \u7b56\u7565</legend><div class="two">
     <label>\u534f\u4f5c\u6a21\u5f0f<select name="collaboration_mode"><option value="single" ${detail.task.collaboration_mode === "single" ? "selected" : ""}>Single</option><option value="auto" ${detail.task.collaboration_mode !== "single" ? "selected" : ""}>Auto</option></select></label>
     <label>\u6700\u5927 Agent \u6570<input name="max_agents" type="number" min="1" value="${Math.max(1, Number(detail.task.max_agents || 3))}"></label>
-  </div><label>Knowledge<select name="knowledge_policy"><option value="inherit" ${detail.task.knowledge_policy === "inherit" ? "selected" : ""}>\u7ee7\u627f Project</option><option value="enabled" ${detail.task.knowledge_policy === "enabled" ? "selected" : ""}>\u5f00\u542f</option><option value="disabled" ${detail.task.knowledge_policy === "disabled" ? "selected" : ""}>\u5173\u95ed</option></select></label>${agentCapabilitiesFold(detail.task.agent_capabilities)}${agentSkillsFold(skills, detail.task.project_id, detail.task.skill_ids || [])}</fieldset>` : `<label class="agent-inherit-toggle"><input name="inherit_main" type="checkbox" ${agent.inherit_main ? "checked" : ""}>\u7ee7\u627f Main \u5f53\u524d\u914d\u7f6e</label>`;
+  </div><label>Knowledge<select name="knowledge_policy"><option value="inherit" ${detail.task.knowledge_policy === "inherit" ? "selected" : ""}>\u7ee7\u627f Project</option><option value="enabled" ${detail.task.knowledge_policy === "enabled" ? "selected" : ""}>\u5f00\u542f</option><option value="disabled" ${detail.task.knowledge_policy === "disabled" ? "selected" : ""}>\u5173\u95ed</option></select></label>${agentCapabilitiesFold(detail.task.agent_capabilities)}${agentSkillsFold(skills, detail.task.project_id, detail.task.skill_ids || [])}${agentMCPFold(detail, mcpServers)}</fieldset>` : `<label class="agent-inherit-toggle"><input name="inherit_main" type="checkbox" ${agent.inherit_main ? "checked" : ""}>\u7ee7\u627f Main \u5f53\u524d\u914d\u7f6e</label>`;
   return `<dialog id="agent-config-dialog"><form id="agent-config-form" method="dialog">
     <div class="dialog-head"><div><h2>${escapeHTML(agent.agent_id)} 配置</h2><small>${escapeHTML(agent.title || agent.role)}</small></div><button type="button" data-close class="icon-button">${icon("close")}</button></div>
     <input type="hidden" name="agent_id" value="${escapeHTML(agent.agent_id)}">
@@ -456,4 +455,14 @@ export function renderAgentConfigDialog(detail: TaskDetail, agentID: string, mod
     <label class="agent-runtime-fields">Backend 代理<select name="proxy_enabled">${proxyOptionsHTML(agent.proxy_enabled)}</select></label>
     <div class="dialog-actions"><button type="button" data-close>取消</button><button class="primary" value="default">保存</button></div>
   </form></dialog>`;
+}
+
+function agentMCPFold(detail: TaskDetail, mcpServers: MCPServer[]): string {
+  const petTask = detail.task.project_id === "project_pet";
+  const selected = new Set(detail.task.mcp_server_ids || []);
+  const options = mcpServers.filter(item => item.enabled && (item.id !== "mcp_pet" || petTask)).map(item => {
+    const forced = petTask && item.id === "mcp_pet";
+    return `<label class="task-skill-option"><input type="checkbox" name="task_mcp_ids" value="${escapeHTML(item.id)}" ${selected.has(item.id) ? "checked" : ""} ${forced ? "disabled checked" : ""}><span><strong>${escapeHTML(item.name)}</strong><small>${escapeHTML(item.description || item.transport)}</small></span></label>`;
+  }).join("");
+  return `<details class="task-form-fold" id="agent-mcp-fold"><summary><strong>MCP 工具</strong><b data-fold-count>${selected.size ? `已选 ${selected.size}` : "未选择"}</b></summary><div class="task-form-fold-body"><div class="task-skill-options">${options || '<div class="field-help">还没有可用 MCP。</div>'}</div></div></details>`;
 }

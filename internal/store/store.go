@@ -17,6 +17,13 @@ type Store struct {
 	dataDir string
 }
 
+func (s *Store) DataDir() string {
+	if s == nil {
+		return ""
+	}
+	return s.dataDir
+}
+
 func Open(ctx context.Context, path string) (*Store, error) {
 	if path == "" {
 		return nil, fmt.Errorf("database path is required")

@@ -25,7 +25,7 @@ func TestEngineRoutesTemplatesAndBuildsContextManifest(t *testing.T) {
 	defer database.Close()
 	engine := NewEngine(database)
 	templates, err := engine.Templates(ctx)
-	if err != nil || len(templates) != 26 {
+	if err != nil || len(templates) != 27 {
 		t.Fatalf("templates=%d err=%v", len(templates), err)
 	}
 	templateBodies := map[string]string{}
