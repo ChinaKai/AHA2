@@ -167,12 +167,12 @@ func New(config Config) *Server {
 			}
 			return gateway.DetectModelsContextWithClient(ctx, provider.BaseURL, apiKey, provider.AuthStyle, 15*time.Second, client)
 		}
-		server.modelDetectionJobs.probe = func(ctx context.Context, provider domain.Provider, apiKey, authStyle, modelID string) (map[string]string, string) {
-			client, err := config.OutboundProxy.ServiceClient(ctx, &http.Client{Timeout: 8 * time.Second})
+		server.modelDetectionJobs.probe = func(ctx context.Context, provider domain.Provider, apiKey, authStyle, modelID string) (map[string]string, string, map[string]string) {
+			client, err := config.OutboundProxy.ServiceClient(ctx, &http.Client{Timeout: modelProbeTimeout})
 			if err != nil {
-				return map[string]string{"responses": "unavailable", "chat_completions": "unavailable", "anthropic_messages": "unavailable"}, ""
+				return map[string]string{"responses": "unavailable", "chat_completions": "unavailable", "anthropic_messages": "unavailable"}, "", map[string]string{"proxy": err.Error()}
 			}
-			return gateway.ProbeModelCapabilitiesContextWithClient(ctx, provider.BaseURL, apiKey, authStyle, modelID, 8*time.Second, client)
+			return gateway.ProbeModelCapabilitiesContextWithClientDetailed(ctx, provider.BaseURL, apiKey, authStyle, modelID, modelProbeTimeout, client)
 		}
 	}
 	return server

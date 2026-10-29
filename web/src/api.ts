@@ -418,7 +418,7 @@ class APIClient {
     return this.request("/api/v1/providers/detect-models", {method: "POST", body: JSON.stringify(payload), signal: options.signal});
   }
 
-  probeModel(providerID: string, modelID: string, authStyle: string): Promise<{model: DetectedModel; anthropic_base_url?: string}> {
+  probeModel(providerID: string, modelID: string, authStyle: string): Promise<{model: DetectedModel; anthropic_base_url?: string; protocol_errors?: Record<string, string>}> {
     return this.request(`/api/v1/providers/${encodeURIComponent(providerID)}/model-probes`, {
       method: "POST", body: JSON.stringify({model_id: modelID, auth_style: authStyle}),
     });

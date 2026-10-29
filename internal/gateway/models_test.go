@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -94,6 +95,47 @@ func TestDetectModelsRejectsEmptyBaseURL(t *testing.T) {
 	t.Parallel()
 	if _, err := DetectModels("", "key", "auto", time.Second); err == nil {
 		t.Fatal("expected error for empty base_url")
+	}
+}
+
+func TestProbeModelCapabilitiesRunsProtocolsConcurrentlyAndReportsTimeout(t *testing.T) {
+	t.Parallel()
+	var active, peak int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		current := atomic.AddInt32(&active, 1)
+		defer atomic.AddInt32(&active, -1)
+		for {
+			old := atomic.LoadInt32(&peak)
+			if current <= old || atomic.CompareAndSwapInt32(&peak, old, current) {
+				break
+			}
+		}
+		time.Sleep(300 * time.Millisecond)
+		switch r.URL.Path {
+		case "/responses", "/chat/completions", "/v1/messages":
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	caps, _, errs := ProbeModelCapabilitiesContextWithClientDetailed(
+		context.Background(), server.URL, "secret", "bearer", "model", 3*time.Second, nil)
+	if caps["responses"] != "supported" || caps["chat_completions"] != "supported" ||
+		caps["anthropic_messages"] != "supported" || len(errs) != 0 {
+		t.Fatalf("caps=%v errs=%v", caps, errs)
+	}
+	if atomic.LoadInt32(&peak) < 2 {
+		t.Fatalf("probe did not run protocols concurrently: peak=%d", peak)
+	}
+
+	caps, _, errs = ProbeModelCapabilitiesContextWithClientDetailed(
+		context.Background(), server.URL, "secret", "bearer", "model", 100*time.Millisecond, nil)
+	for _, name := range []string{"responses", "chat_completions", "anthropic_messages"} {
+		if caps[name] != "unavailable" || errs[name] == "" {
+			t.Fatalf("%s caps=%v errs=%v", name, caps, errs)
+		}
 	}
 }
 

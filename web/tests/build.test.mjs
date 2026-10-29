@@ -1930,6 +1930,10 @@ test("model detection fetches the catalog once and probes only on manual request
   assert.match(main, /session\.selected/);
   assert.match(main, /protocolFailureDetail/);
   assert.match(main, /协议结果：/);
+  assert.match(main, /protocolErrors/);
+  assert.match(main, /获取模型列表/);
+  assert.match(main, /添加到 Backend/);
+  assert.match(main, /protocol_errors/);
   assert.match(api, /\/api\/v1\/providers\/detect-models/);
   assert.match(api, /model-probes/);
   assert.doesNotMatch(api, /model-detection-jobs/);

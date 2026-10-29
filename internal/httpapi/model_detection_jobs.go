@@ -18,12 +18,15 @@ import (
 const (
 	modelDetectionJobTTL    = 10 * time.Minute
 	modelDetectionHeartbeat = 15 * time.Second
+	// Capability probes run through the configured outbound proxy when one is
+	// active, which can be several times slower than a direct request.
+	modelProbeTimeout = 25 * time.Second
 )
 
 var errModelDetectionJobNotFound = errors.New("model detection job not found")
 
 type modelCatalogDetector func(context.Context, domain.Provider, string) (gateway.Result, error)
-type modelCapabilityProber func(context.Context, domain.Provider, string, string, string) (map[string]string, string)
+type modelCapabilityProber func(context.Context, domain.Provider, string, string, string) (map[string]string, string, map[string]string)
 
 type modelDetectionEvent struct {
 	ID   int64
@@ -88,8 +91,8 @@ func newModelDetectionJobs() *modelDetectionJobs {
 		detect: func(ctx context.Context, provider domain.Provider, apiKey string) (gateway.Result, error) {
 			return gateway.DetectModelsContext(ctx, provider.BaseURL, apiKey, provider.AuthStyle, 15*time.Second)
 		},
-		probe: func(ctx context.Context, provider domain.Provider, apiKey, authStyle, modelID string) (map[string]string, string) {
-			return gateway.ProbeModelCapabilitiesContext(ctx, provider.BaseURL, apiKey, authStyle, modelID, 8*time.Second)
+		probe: func(ctx context.Context, provider domain.Provider, apiKey, authStyle, modelID string) (map[string]string, string, map[string]string) {
+			return gateway.ProbeModelCapabilitiesContextWithClientDetailed(ctx, provider.BaseURL, apiKey, authStyle, modelID, modelProbeTimeout, nil)
 		},
 	}
 }

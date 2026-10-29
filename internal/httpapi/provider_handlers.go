@@ -337,7 +337,7 @@ func (s *Server) probeProviderModel(writer http.ResponseWriter, request *http.Re
 	if authStyle == "" {
 		authStyle = provider.AuthStyle
 	}
-	capabilities, anthropicBase := s.modelDetectionJobs.probe(request.Context(), provider, apiKey, authStyle, modelID)
+	capabilities, anthropicBase, protocolErrors := s.modelDetectionJobs.probe(request.Context(), provider, apiKey, authStyle, modelID)
 	retryStyle := ""
 	switch {
 	case modelProbeAllStatus(capabilities, "unavailable"):
@@ -350,16 +350,16 @@ func (s *Server) probeProviderModel(writer http.ResponseWriter, request *http.Re
 		retryStyle = "auto"
 	}
 	if retryStyle != "" && request.Context().Err() == nil {
-		if retried, retriedBase := s.modelDetectionJobs.probe(request.Context(), provider, apiKey, retryStyle, modelID); len(retried) > 0 {
-			capabilities, anthropicBase = retried, retriedBase
+		if retried, retriedBase, retriedErrors := s.modelDetectionJobs.probe(request.Context(), provider, apiKey, retryStyle, modelID); len(retried) > 0 {
+			capabilities, anthropicBase, protocolErrors = retried, retriedBase, retriedErrors
 		}
 	}
 	model := gateway.DetectedModel{ID: modelID, Capabilities: capabilities}
 	s.audit(request, "provider.model.probe", "provider", provider.ID, map[string]any{
-		"model_id": modelID, "auth_style": authStyle, "retried": retryStyle != "", "capabilities": capabilities,
+		"model_id": modelID, "auth_style": authStyle, "retried": retryStyle != "", "capabilities": capabilities, "errors": protocolErrors,
 	})
 	writeJSON(writer, http.StatusOK, map[string]any{
-		"ok": true, "provider_id": provider.ID, "model": model, "anthropic_base_url": anthropicBase,
+		"ok": true, "provider_id": provider.ID, "model": model, "anthropic_base_url": anthropicBase, "protocol_errors": protocolErrors,
 	})
 }
 

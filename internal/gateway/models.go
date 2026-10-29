@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -213,10 +214,18 @@ func ProbeModelCapabilitiesContext(ctx context.Context, baseURL, apiKey, authSty
 // ProbeModelCapabilitiesContextWithClient uses the supplied client while
 // preserving the legacy direct-client behavior when client is nil.
 func ProbeModelCapabilitiesContextWithClient(ctx context.Context, baseURL, apiKey, authStyle, modelID string, timeout time.Duration, client *http.Client) (map[string]string, string) {
+	capabilities, anthropicBase, _ := ProbeModelCapabilitiesContextWithClientDetailed(ctx, baseURL, apiKey, authStyle, modelID, timeout, client)
+	return capabilities, anthropicBase
+}
+
+// ProbeModelCapabilitiesContextWithClientDetailed also returns the transport
+// error behind each non-definitive protocol status, so a manual probe that
+// reports every protocol unavailable can explain why instead of hiding it.
+func ProbeModelCapabilitiesContextWithClientDetailed(ctx context.Context, baseURL, apiKey, authStyle, modelID string, timeout time.Duration, client *http.Client) (map[string]string, string, map[string]string) {
 	base := strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	key := strings.TrimSpace(apiKey)
 	if base == "" || modelID == "" || key == "" {
-		return map[string]string{}, ""
+		return map[string]string{}, "", map[string]string{}
 	}
 	normalizedAuth := strings.ToLower(strings.TrimSpace(authStyle))
 	if normalizedAuth == "" {
@@ -226,35 +235,59 @@ func ProbeModelCapabilitiesContextWithClient(ctx context.Context, baseURL, apiKe
 		client = &http.Client{Timeout: timeout}
 	}
 	capabilities := make(map[string]string)
-	for _, wireAPI := range []string{"responses", "chat_completions"} {
-		if ctx.Err() != nil {
-			return capabilities, ""
-		}
-		status, _ := probeWireAPI(ctx, client, base, key, normalizedAuth, modelID, wireAPI)
+	protocolErrors := make(map[string]string)
+	record := func(wireAPI, status, errText string) {
 		capabilities[wireAPI] = status
-	}
-	anthropicBase := ""
-	candidates := anthropicBaseCandidates(base)
-	if len(candidates) == 0 {
-		capabilities["anthropic_messages"] = "unavailable"
-		return capabilities, ""
-	}
-	status, _ := probeWireAPI(ctx, client, candidates[0], key, normalizedAuth, modelID, "anthropic_messages")
-	capabilities["anthropic_messages"] = status
-	if status == "unsupported" && len(candidates) > 1 {
-		for _, candidate := range candidates[1:] {
-			if ctx.Err() != nil {
-				return capabilities, ""
-			}
-			status, _ = probeWireAPI(ctx, client, candidate, key, normalizedAuth, modelID, "anthropic_messages")
-			if status == "supported" {
-				capabilities["anthropic_messages"] = "supported"
-				anthropicBase = candidate
-				break
-			}
+		if errText != "" && status != "supported" && status != "rate_limited" {
+			protocolErrors[wireAPI] = errText
 		}
 	}
-	return capabilities, anthropicBase
+	// Probes are independent: run them concurrently so a slow gateway does not
+	// multiply its latency by three before the UI gets a result.
+	var responsesStatus, responsesErr, chatStatus, chatErr string
+	var anthropicStatus, anthropicErr, anthropicBase string
+	var wg sync.WaitGroup
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		responsesStatus, _, responsesErr = probeWireAPI(ctx, client, base, key, normalizedAuth, modelID, "responses")
+	}()
+	go func() {
+		defer wg.Done()
+		chatStatus, _, chatErr = probeWireAPI(ctx, client, base, key, normalizedAuth, modelID, "chat_completions")
+	}()
+	go func() {
+		defer wg.Done()
+		candidates := anthropicBaseCandidates(base)
+		if len(candidates) == 0 {
+			anthropicStatus, anthropicErr = "unavailable", "provider base URL is empty"
+			return
+		}
+		status, _, errText := probeWireAPI(ctx, client, candidates[0], key, normalizedAuth, modelID, "anthropic_messages")
+		if status == "unsupported" && len(candidates) > 1 {
+			for _, candidate := range candidates[1:] {
+				if ctx.Err() != nil {
+					status, errText = "unavailable", ctx.Err().Error()
+					break
+				}
+				retriedStatus, _, retriedErr := probeWireAPI(ctx, client, candidate, key, normalizedAuth, modelID, "anthropic_messages")
+				if retriedStatus == "supported" {
+					status, errText = "supported", ""
+					anthropicBase = candidate
+					break
+				}
+				if retriedErr != "" && errText == "" {
+					status, errText = retriedStatus, retriedErr
+				}
+			}
+		}
+		anthropicStatus, anthropicErr = status, errText
+	}()
+	wg.Wait()
+	record("responses", responsesStatus, responsesErr)
+	record("chat_completions", chatStatus, chatErr)
+	record("anthropic_messages", anthropicStatus, anthropicErr)
+	return capabilities, anthropicBase, protocolErrors
 }
 
 // anthropicBaseCandidates returns the provider base first, then the /anthropic
@@ -284,7 +317,7 @@ func anthropicBaseCandidates(baseURL string) []string {
 // /v1-prefixed path for bare-host bases). Auth is narrowed to the confirmed
 // style when known so rate-limited gateways are not flooded with redundant
 // requests. A definitive result (supported or rate_limited) stops the probe.
-func probeWireAPI(ctx context.Context, client *http.Client, base, apiKey, authStyle, modelID, wireAPI string) (string, int) {
+func probeWireAPI(ctx context.Context, client *http.Client, base, apiKey, authStyle, modelID, wireAPI string) (string, int, string) {
 	rel := ""
 	var body []byte
 	switch wireAPI {
@@ -303,7 +336,7 @@ func probeWireAPI(ctx context.Context, client *http.Client, base, apiKey, authSt
 		})
 	}
 	if rel == "" {
-		return "unsupported", 0
+		return "unsupported", 0, ""
 	}
 	endpoints := []string{base + "/" + rel}
 	if !strings.HasSuffix(base, "/v1") && !strings.HasSuffix(base, "/v1/") {
@@ -323,10 +356,11 @@ func probeWireAPI(ctx context.Context, client *http.Client, base, apiKey, authSt
 	}
 	best := "unsupported"
 	bestCode := 0
+	bestError := ""
 	for _, endpoint := range endpoints {
 		for _, auth := range authOrder {
 			if ctx.Err() != nil {
-				return "unavailable", 0
+				return "unavailable", 0, ctx.Err().Error()
 			}
 			headers := map[string]string{"Content-Type": "application/json"}
 			if wireAPI == "anthropic_messages" {
@@ -340,46 +374,52 @@ func probeWireAPI(ctx context.Context, client *http.Client, base, apiKey, authSt
 			default:
 				headers["Authorization"] = "Bearer " + apiKey
 			}
-			status, code := probeOneEndpoint(ctx, client, endpoint, headers, body)
+			status, code, err := probeOneEndpoint(ctx, client, endpoint, headers, body)
 			if status == "supported" || status == "rate_limited" {
-				return status, code
+				return status, code, ""
 			}
 			if statusRank(status) > statusRank(best) {
 				best = status
 				bestCode = code
+				bestError = ""
+				if err != nil {
+					bestError = err.Error()
+				} else if status == "unavailable" {
+					bestError = fmt.Sprintf("HTTP %d", code)
+				}
 			}
 		}
 	}
-	return best, bestCode
+	return best, bestCode, bestError
 }
 
-func probeOneEndpoint(ctx context.Context, client *http.Client, endpoint string, headers map[string]string, body []byte) (string, int) {
+func probeOneEndpoint(ctx context.Context, client *http.Client, endpoint string, headers map[string]string, body []byte) (string, int, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return "unavailable", 0
+		return "unavailable", 0, err
 	}
 	for key, value := range headers {
 		request.Header.Set(key, value)
 	}
 	response, err := client.Do(request)
 	if err != nil {
-		return "unavailable", 0
+		return "unavailable", 0, err
 	}
 	defer response.Body.Close()
 	code := response.StatusCode
 	switch {
 	case code >= 200 && code < 300:
-		return "supported", code
+		return "supported", code, nil
 	case code == 401 || code == 403:
-		return "unauthorized", code
+		return "unauthorized", code, nil
 	case code == 429:
-		return "rate_limited", code
+		return "rate_limited", code, nil
 	case code == 404 || code == 405 || code == 501:
-		return "unsupported", code
+		return "unsupported", code, nil
 	case code >= 500:
-		return "unavailable", code
+		return "unavailable", code, fmt.Errorf("HTTP %d", code)
 	default:
-		return "inconclusive", code
+		return "inconclusive", code, nil
 	}
 }
 

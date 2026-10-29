@@ -94,9 +94,9 @@ func TestModelDetectionHTTPJobSSEAndCancelLifecycle(t *testing.T) {
 		}
 		return gateway.Result{AuthStyle: "bearer", Models: models}, nil
 	}
-	jobs.probe = func(context.Context, domain.Provider, string, string, string) (map[string]string, string) {
+	jobs.probe = func(context.Context, domain.Provider, string, string, string) (map[string]string, string, map[string]string) {
 		t.Fatal("catalog job must not probe model capabilities")
-		return nil, ""
+		return nil, "", nil
 	}
 	server, client, csrf, provider := newModelDetectionHTTPTest(t, jobs)
 	baseURL := server.URL + "/api/v1/providers/" + provider.ID + "/model-detection-jobs"
@@ -123,12 +123,12 @@ func TestModelDetectionHTTPJobSSEAndCancelLifecycle(t *testing.T) {
 	}
 
 	var probedModel string
-	jobs.probe = func(_ context.Context, _ domain.Provider, apiKey, authStyle, modelID string) (map[string]string, string) {
+	jobs.probe = func(_ context.Context, _ domain.Provider, apiKey, authStyle, modelID string) (map[string]string, string, map[string]string) {
 		if apiKey != "model-job-secret" || authStyle != "bearer" {
 			t.Fatalf("probe credentials=%q auth=%q", apiKey, authStyle)
 		}
 		probedModel = modelID
-		return map[string]string{"responses": "supported", "anthropic_messages": "unsupported"}, "https://provider.invalid/anthropic"
+		return map[string]string{"responses": "supported", "anthropic_messages": "unsupported"}, "https://provider.invalid/anthropic", nil
 	}
 	probeResponse := requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/providers/"+provider.ID+"/model-probes",
 		map[string]any{"model_id": "a", "auth_style": "bearer"}, csrf)
@@ -173,11 +173,11 @@ func TestModelDetectionHTTPJobSSEAndCancelLifecycle(t *testing.T) {
 func TestProbeProviderModelRetriesTransientAndAuthFailures(t *testing.T) {
 	jobs := newModelDetectionJobs()
 	var calls []string
-	jobs.probe = func(_ context.Context, _ domain.Provider, _ string, authStyle, _ string) (map[string]string, string) {
+	jobs.probe = func(_ context.Context, _ domain.Provider, _ string, authStyle, _ string) (map[string]string, string, map[string]string) {
 		calls = append(calls, authStyle)
 		return map[string]string{
 			"responses": "unavailable", "chat_completions": "unavailable", "anthropic_messages": "unavailable",
-		}, ""
+		}, "", nil
 	}
 	server, client, csrf, provider := newModelDetectionHTTPTest(t, jobs)
 	probe := func() (int, gateway.DetectedModel) {
@@ -196,14 +196,14 @@ func TestProbeProviderModelRetriesTransientAndAuthFailures(t *testing.T) {
 	}
 
 	calls = nil
-	jobs.probe = func(_ context.Context, _ domain.Provider, _ string, authStyle, _ string) (map[string]string, string) {
+	jobs.probe = func(_ context.Context, _ domain.Provider, _ string, authStyle, _ string) (map[string]string, string, map[string]string) {
 		calls = append(calls, authStyle)
 		if len(calls) == 1 {
 			return map[string]string{
 				"responses": "unauthorized", "chat_completions": "unauthorized", "anthropic_messages": "unauthorized",
-			}, ""
+			}, "", nil
 		}
-		return map[string]string{"responses": "supported"}, ""
+		return map[string]string{"responses": "supported"}, "", nil
 	}
 	if status, model := probe(); status != http.StatusOK || len(calls) != 2 || calls[1] != "auto" ||
 		model.Capabilities["responses"] != "supported" {

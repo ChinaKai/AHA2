@@ -33,9 +33,9 @@ func TestModelDetectionJobStreamsCatalogWithoutProbingModels(t *testing.T) {
 	jobs.detect = func(context.Context, domain.Provider, string) (gateway.Result, error) {
 		return gateway.Result{AuthStyle: "bearer", Models: []gateway.DetectedModel{{ID: "one"}, {ID: "two"}, {ID: "three"}}}, nil
 	}
-	jobs.probe = func(context.Context, domain.Provider, string, string, string) (map[string]string, string) {
+	jobs.probe = func(context.Context, domain.Provider, string, string, string) (map[string]string, string, map[string]string) {
 		t.Fatal("model detection job must not probe capabilities")
-		return nil, ""
+		return nil, "", nil
 	}
 	provider := domain.Provider{ID: "provider-stream", BaseURL: "https://example.invalid"}
 	created := jobs.start("owner-a", provider, "secret")
