@@ -414,30 +414,14 @@ class APIClient {
     return this.request("/api/v1/env-groups", {method: "POST", body: JSON.stringify(payload)});
   }
 
-  detectModels(payload: Record<string, unknown>): Promise<{models: DetectedModel[]; auth_style: string; anthropic_base_url?: string}> {
-    return this.request("/api/v1/providers/detect-models", {method: "POST", body: JSON.stringify(payload)});
-  }
-
-  createModelDetectionJob(providerID: string): Promise<{job: {id: string; provider_id: string; status: string; completed?: number; total?: number; models?: DetectedModel[]; auth_style?: string; anthropic_base_url?: string; error?: string}}> {
-    return this.request(`/api/v1/providers/${encodeURIComponent(providerID)}/model-detection-jobs`, {method: "POST", body: "{}"});
-  }
-
-  modelDetectionJob(providerID: string, jobID: string): Promise<{job: {id: string; provider_id: string; status: string; completed: number; total: number; models?: Array<{id: string; display_name?: string; wire_apis?: string[]; max_input_tokens?: number; max_output_tokens?: number}>; auth_style?: string; anthropic_base_url?: string; error?: string}}> {
-    return this.request(`/api/v1/providers/${encodeURIComponent(providerID)}/model-detection-jobs/${encodeURIComponent(jobID)}`);
-  }
-
-  cancelModelDetectionJob(providerID: string, jobID: string): Promise<{job: {id: string; status: string; completed: number; total: number}}> {
-    return this.request(`/api/v1/providers/${encodeURIComponent(providerID)}/model-detection-jobs/${encodeURIComponent(jobID)}/cancel`, {method: "POST", body: "{}"});
+  detectModels(payload: Record<string, unknown>, options: {signal?: AbortSignal} = {}): Promise<{models: DetectedModel[]; auth_style: string; anthropic_base_url?: string}> {
+    return this.request("/api/v1/providers/detect-models", {method: "POST", body: JSON.stringify(payload), signal: options.signal});
   }
 
   probeModel(providerID: string, modelID: string, authStyle: string): Promise<{model: DetectedModel; anthropic_base_url?: string}> {
     return this.request(`/api/v1/providers/${encodeURIComponent(providerID)}/model-probes`, {
       method: "POST", body: JSON.stringify({model_id: modelID, auth_style: authStyle}),
     });
-  }
-
-  modelDetectionEventsURL(providerID: string, jobID: string): string {
-    return `/api/v1/providers/${encodeURIComponent(providerID)}/model-detection-jobs/${encodeURIComponent(jobID)}/events`;
   }
 
   addModels(payload: Record<string, unknown>): Promise<{models: Model[]; provider_id: string; skipped?: number}> {
@@ -945,10 +929,6 @@ class APIClient {
 
   petActivity(limit = 20): Promise<{ok: boolean; events: PetEvent[]}> {
     return this.request(`/api/v1/pet/activity?limit=${limit}`);
-  }
-
-  petEventsURL(): string {
-    return "/api/v1/pet/events";
   }
 
   updatePetSettings(payload: {enabled: boolean; character: string; chat_model_id: string; brain_model_id: string; actions: string[]; identity: string; principles: string; idle_minutes: number; quiet_start: number; quiet_end: number; hourly_limit: number}): Promise<{ok: boolean; assistant: OwnerAssistant; models: AssistantModelOption[]; model_name?: string; brain_model_name?: string}> {

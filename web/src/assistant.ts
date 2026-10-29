@@ -78,7 +78,6 @@ let petMoving = false;
 let moveRAF = 0;
 let motionAnimation: Animation | null = null;
 let petState: PetState | null = null;
-let petSource: EventSource | null = null;
 let applyingRemote = false;
 let petSyncTimer = 0;
 let pendingPetPatch: PetStatePatch = {};
@@ -259,7 +258,7 @@ export function mountAssistant(): void {
   bindEvents();
   try { bubbleEnabled = localStorage.getItem("aha2.pet.bubble.v1") !== "0"; } catch {}
   void refreshPetState();
-  openPetEvents();
+  // Pet events arrive on the page's single global event stream; see handlePetStreamEvent.
   // Autonomy is scheduled by the server; the UI only exposes a manual kick.
   (window as unknown as {AHA2Assistant?: unknown}).AHA2Assistant = {
     play: (name: string, options?: {duration?: number}) => playMotion(name, options),
@@ -938,25 +937,22 @@ async function refreshPetState(): Promise<void> {
   }
 }
 
-function openPetEvents(): void {
-  if (petSource) return;
-  petSource = new EventSource(api.petEventsURL());
-  petSource.addEventListener("pet_state", event => {
-    try {
-      const state = JSON.parse((event as MessageEvent).data) as PetState;
-      applyPetState(state);
-    } catch {
-      // Ignore malformed state pushes and keep the last good state.
+// The global /api/v1/events stream carries every hub event, including pet_state
+// and pet_action. Handling them here avoids a second long-lived SSE connection
+// per page, which otherwise counts against the browser's per-origin limit.
+export function handlePetStreamEvent(type: string, data: unknown): void {
+  try {
+    if (type === "pet_state") {
+      const state = (data as {state?: PetState} | undefined)?.state;
+      if (state) applyPetState(state);
+      return;
     }
-  });
-  petSource.addEventListener("pet_action", event => {
-    try {
-      const payload = JSON.parse((event as MessageEvent).data) as {say?: string; actions?: PetBrainAction[]};
-      applyPetControl(payload);
-    } catch {
-      // Ignore malformed control pushes.
+    if (type === "pet_action") {
+      applyPetControl((data || {}) as {say?: string; actions?: PetBrainAction[]});
     }
-  });
+  } catch {
+    // Ignore malformed pushes and keep the last good state.
+  }
 }
 
 function applyPetState(state: PetState): void {

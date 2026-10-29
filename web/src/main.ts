@@ -1,5 +1,5 @@
 import {api} from "./api.js";
-import {mountAssistant, showPetSettings, notifyPetTaskIdle, notifyPetTaskReply, notifyPetTaskThinking, setAssistantVisible} from "./assistant.js";
+import {handlePetStreamEvent, mountAssistant, showPetSettings, notifyPetTaskIdle, notifyPetTaskReply, notifyPetTaskThinking, setAssistantVisible} from "./assistant.js";
 import {renderConversationList} from "./conversation_ui.js";
 import {bindCodexAccounts, renderCodexAccounts} from "./codex_accounts.js";
 import {bindChannels, exportRetiredChannelInstance, purgeRetiredChannelInstance, renderChannels} from "./channels.js";
@@ -1104,7 +1104,6 @@ async function loadAll(): Promise<void> {
 
 interface ModelDetectionSession {
   providerID: string;
-  jobID: string;
   authStyle: string;
   catalog: DetectedModel[];
   results: Map<string, DetectedModel>;
@@ -1113,14 +1112,16 @@ interface ModelDetectionSession {
   selected: Set<string>;
   // Backend the user picked for this detection batch; no automatic mapping.
   backend: string;
-  completed: number;
-  total: number;
   anthropicBaseURL: string;
-  status: "queued" | "running" | "cancelling" | "completed" | "cancelled" | "failed";
-  source: EventSource;
+  loading: boolean;
+  error: string;
+  abort?: AbortController;
+  listeners?: AbortController;
   button: HTMLElement;
   originalButtonHTML: string;
 }
+
+const MODEL_CATALOG_TIMEOUT_MS = 20_000;
 
 let activeModelDetection: ModelDetectionSession | null = null;
 
@@ -1140,10 +1141,8 @@ function applyModelDetectionFilter(root: HTMLElement, query: string): void {
 }
 
 function modelDetectionStatusText(session: ModelDetectionSession): string {
-  if (session.status === "failed") return `获取模型列表失败${session.authStyle ? `（认证：${session.authStyle}）` : ""}`;
-  if (session.status === "cancelled") return "已取消";
-  if (session.status === "cancelling") return "正在停止";
-  if (!session.catalog.length) return "正在获取模型目录";
+  if (session.loading) return "正在获取模型目录";
+  if (session.error) return `获取模型列表失败：${session.error}`;
   const inspected = session.results.size;
   return `模型列表已获取 · ${inspected}/${session.catalog.length} 已手动检测${session.authStyle ? `（认证：${session.authStyle}）` : ""}`;
 }
@@ -1158,11 +1157,6 @@ function updateModelDetectionProgress(session: ModelDetectionSession): void {
     note.hidden = !session.anthropicBaseURL;
     const value = note.querySelector<HTMLElement>("code");
     if (value) value.textContent = session.anthropicBaseURL;
-  }
-  const stop = root.querySelector<HTMLButtonElement>("#stop-model-detection");
-  if (stop && session.status === "cancelling") {
-    stop.disabled = true;
-    stop.textContent = "停止中";
   }
   const add = root.querySelector<HTMLButtonElement>("#add-selected-models");
   if (add) add.disabled = session.selected.size === 0;
@@ -1185,159 +1179,116 @@ function updateDetectedModelRow(session: ModelDetectionSession, modelID: string)
 function renderModelDetection(session: ModelDetectionSession): void {
   const root = document.querySelector<HTMLElement>("#model-detect-results");
   if (!root) return;
-  const terminal = ["completed", "cancelled", "failed"].includes(session.status);
   const rows = session.catalog.map(item => detectedModelRow(session, session.results.get(item.id) || item, session.results.has(item.id))).join("");
-  replaceRegionHTML(root, `<div class="detect-status" id="model-detect-progress">${escapeHTML(modelDetectionStatusText(session))}</div><div class="detect-status" id="model-detect-anthropic" ${session.anthropicBaseURL ? "" : "hidden"}>检测到 Anthropic 端点：<code>${escapeHTML(session.anthropicBaseURL)}</code></div><div class="detect-toolbar"><input type="search" id="detect-search" placeholder="搜索模型名称..."><button type="button" id="detect-select-all">全选</button><button type="button" id="detect-select-none">全不选</button>${terminal ? "" : `<button type="button" id="stop-model-detection" class="danger">停止检测</button>`}</div><div class="detected-list" data-ui-key="model-detection-list">${rows || `<div class="empty">正在读取模型目录…</div>`}</div><div class="dialog-actions"><button type="button" id="add-selected-models" class="primary" ${session.results.size ? "" : "disabled"}>添加已选模型</button></div>`);
+  const empty = session.loading ? "正在读取模型目录…" : session.error ? "获取模型目录失败" : "没有检测到模型";
+  replaceRegionHTML(root, `<div class="detect-status" id="model-detect-progress">${escapeHTML(modelDetectionStatusText(session))}</div><div class="detect-status" id="model-detect-anthropic" ${session.anthropicBaseURL ? "" : "hidden"}>检测到 Anthropic 端点：<code>${escapeHTML(session.anthropicBaseURL)}</code></div><div class="detect-toolbar"><input type="search" id="detect-search" placeholder="搜索模型名称..."><button type="button" id="detect-select-all">全选</button><button type="button" id="detect-select-none">全不选</button></div><div class="detected-list" data-ui-key="model-detection-list">${rows || `<div class="empty">${empty}</div>`}</div><div class="dialog-actions"><button type="button" id="add-selected-models" class="primary" ${session.results.size ? "" : "disabled"}>添加已选模型</button></div>`);
   applyModelDetectionFilter(root, root.querySelector<HTMLInputElement>("#detect-search")?.value || "");
 }
 
-function finishModelDetection(session: ModelDetectionSession): void {
-  session.source.close();
-  session.button.disabled = false;
-  session.button.innerHTML = session.originalButtonHTML;
-  updateModelDetectionProgress(session);
-  document.querySelector("#model-detect-results #stop-model-detection")?.remove();
-  if (activeModelDetection === session) activeModelDetection = null;
-}
-
 async function startModelDetection(providerID: string, button: HTMLElement, results: HTMLElement): Promise<void> {
-  if (activeModelDetection) return;
+  const previous = activeModelDetection;
+  if (previous) {
+    if (previous.loading) return;
+    previous.abort?.abort();
+    previous.listeners?.abort();
+  }
   const originalButtonHTML = button.innerHTML;
   button.disabled = true;
   button.innerHTML = `${icon("spinner", true)}<span>读取目录中</span>`;
   results.innerHTML = `<div class="detect-status">正在获取模型目录…</div>`;
-  try {
-    const created = await api.createModelDetectionJob(providerID);
-    const source = new EventSource(api.modelDetectionEventsURL(providerID, created.job.id));
-    const session: ModelDetectionSession = {
-      providerID, jobID: created.job.id, authStyle: "", catalog: [], results: new Map(), detecting: new Set(),
-      probeErrors: new Map(), selected: new Set(),
-      backend: String((document.querySelector<HTMLSelectElement>("#model-add-backend"))?.value || "dsh"),
-      completed: 0, total: 0,
-      anthropicBaseURL: "", status: "queued", source, button, originalButtonHTML,
-    };
-    activeModelDetection = session;
-    renderModelDetection(session);
-    results.addEventListener("input", event => {
-      if (!(event.target instanceof HTMLInputElement) || event.target.id !== "detect-search") return;
-      applyModelDetectionFilter(results, event.target.value);
-    });
-    results.addEventListener("change", event => {
-      if (!(event.target instanceof HTMLInputElement) || !event.target.classList.contains("detected-model")) return;
-      if (event.target.checked) session.selected.add(event.target.value);
-      else session.selected.delete(event.target.value);
-      updateModelDetectionProgress(session);
-    });
-    results.addEventListener("click", event => {
-      const target = event.target as HTMLElement;
-      if (target.closest("#stop-model-detection")) {
-        session.status = "cancelling";
-        updateModelDetectionProgress(session);
-        void api.cancelModelDetectionJob(session.providerID, session.jobID).catch(error => setMessage("error", error instanceof Error ? error.message : String(error)));
-        return;
-      }
-      const probeButton = target.closest<HTMLElement>("[data-probe-model]");
-      if (probeButton) {
-        const modelID = probeButton.dataset.probeModel || "";
-        if (!modelID || session.detecting.has(modelID)) return;
-        session.detecting.add(modelID);
-        session.probeErrors.delete(modelID);
+  const abort = new AbortController();
+  const listeners = new AbortController();
+  const session: ModelDetectionSession = {
+    providerID, authStyle: "", catalog: [], results: new Map(), detecting: new Set(),
+    probeErrors: new Map(), selected: new Set(),
+    backend: String((document.querySelector<HTMLSelectElement>("#model-add-backend"))?.value || "dsh"),
+    anthropicBaseURL: "", loading: true, error: "", abort, listeners, button, originalButtonHTML,
+  };
+  activeModelDetection = session;
+  renderModelDetection(session);
+  results.addEventListener("input", event => {
+    if (!(event.target instanceof HTMLInputElement) || event.target.id !== "detect-search") return;
+    applyModelDetectionFilter(results, event.target.value);
+  }, {signal: listeners.signal});
+  results.addEventListener("change", event => {
+    if (!(event.target instanceof HTMLInputElement) || !event.target.classList.contains("detected-model")) return;
+    if (event.target.checked) session.selected.add(event.target.value);
+    else session.selected.delete(event.target.value);
+    updateModelDetectionProgress(session);
+  }, {signal: listeners.signal});
+  results.addEventListener("click", event => {
+    const target = event.target as HTMLElement;
+    const probeButton = target.closest<HTMLElement>("[data-probe-model]");
+    if (probeButton) {
+      const modelID = probeButton.dataset.probeModel || "";
+      if (!modelID || session.detecting.has(modelID)) return;
+      session.detecting.add(modelID);
+      session.probeErrors.delete(modelID);
+      updateDetectedModelRow(session, modelID);
+      void api.probeModel(session.providerID, modelID, session.authStyle).then(response => {
+        session.results.set(modelID, response.model);
+        if (supportedWireAPIs(response.model).length === 0) session.selected.delete(modelID);
+        if (response.anthropic_base_url) session.anthropicBaseURL = response.anthropic_base_url;
+      }).catch(error => {
+        session.probeErrors.set(modelID, error instanceof Error ? error.message : String(error));
+      }).finally(() => {
+        session.detecting.delete(modelID);
         updateDetectedModelRow(session, modelID);
-        void api.probeModel(session.providerID, modelID, session.authStyle).then(response => {
-          session.results.set(modelID, response.model);
-          if (supportedWireAPIs(response.model).length === 0) session.selected.delete(modelID);
-          if (response.anthropic_base_url) session.anthropicBaseURL = response.anthropic_base_url;
-        }).catch(error => {
-          session.probeErrors.set(modelID, error instanceof Error ? error.message : String(error));
-        }).finally(() => {
-          session.detecting.delete(modelID);
-          updateDetectedModelRow(session, modelID);
-        });
-        return;
-      }
-      if (target.closest("#detect-select-all")) {
-        results.querySelectorAll<HTMLInputElement>(".detected-item:not([style*='display: none']) .detected-model:not(:disabled)").forEach(box => { box.checked = true; session.selected.add(box.value); });
-        updateModelDetectionProgress(session);
-        return;
-      }
-      if (target.closest("#detect-select-none")) {
-        results.querySelectorAll<HTMLInputElement>(".detected-model").forEach(box => { box.checked = false; session.selected.delete(box.value); });
-        updateModelDetectionProgress(session);
-        return;
-      }
-      if (!target.closest("#add-selected-models")) return;
-      const backend = String((document.querySelector<HTMLSelectElement>("#model-add-backend"))?.value || "dsh");
-      const picks = [...results.querySelectorAll<HTMLInputElement>(".detected-model:checked")].flatMap(input => {
-        const row = input.closest(".detected-item");
-        const wireAPIs = [...(row?.querySelectorAll<HTMLInputElement>(".proto-checks input:checked") || [])].map(item => item.value);
-        if (!wireAPIs.length) return [];
-        const detected = session.results.get(input.value);
-        return [{id: input.value, wire_apis: wireAPIs, max_input_tokens: detected?.max_input_tokens || 0, max_output_tokens: detected?.max_output_tokens || 0}];
       });
-      if (!picks.length) {
-        setMessage("error", "请至少选择一个模型，并保留至少一个兼容协议");
-        return;
-      }
-      const addButton = results.querySelector<HTMLElement>("#add-selected-models");
-      void runWithFeedback(addButton, "添加中", async () => {
-        const result = await api.addModels({provider_id: providerID, backend, models: picks, anthropic_base_url: session.anthropicBaseURL});
-        document.querySelector<HTMLDialogElement>("#model-dialog")?.close();
-        setMessage("notice", `已添加 ${(result.models || []).length} 个模型${result.skipped ? `，跳过 ${result.skipped} 个已存在` : ""}`);
-        await ensureViewData("models", true);
-        render();
-      });
-    });
-    source.addEventListener("catalog", event => {
-      const data = JSON.parse((event as MessageEvent).data) as {models?: DetectedModel[]; total?: number; auth_style?: string};
-      session.catalog = data.models || [];
-      session.total = data.total || session.catalog.length;
-      session.authStyle = data.auth_style || "";
-      session.status = "running";
-      button.innerHTML = `${icon("spinner", true)}<span>检测中 ${session.completed}/${session.total}</span>`;
-      renderModelDetection(session);
-    });
-    source.addEventListener("result", event => {
-      const data = JSON.parse((event as MessageEvent).data) as {model: DetectedModel; completed: number; total: number; anthropic_base_url?: string};
-      session.results.set(data.model.id, data.model);
-      session.completed = data.completed;
-      session.total = data.total;
-      if (data.anthropic_base_url) session.anthropicBaseURL = data.anthropic_base_url;
-      button.innerHTML = `${icon("spinner", true)}<span>检测中 ${session.completed}/${session.total}</span>`;
-      updateDetectedModelRow(session, data.model.id);
-    });
-    source.addEventListener("progress", event => {
-      const data = JSON.parse((event as MessageEvent).data) as {status?: ModelDetectionSession["status"]; completed?: number; total?: number};
-      if (data.status) session.status = data.status;
-      session.completed = data.completed ?? session.completed;
-      session.total = data.total ?? session.total;
+      return;
+    }
+    if (target.closest("#detect-select-all")) {
+      results.querySelectorAll<HTMLInputElement>(".detected-item:not([style*='display: none']) .detected-model:not(:disabled)").forEach(box => { box.checked = true; session.selected.add(box.value); });
       updateModelDetectionProgress(session);
+      return;
+    }
+    if (target.closest("#detect-select-none")) {
+      results.querySelectorAll<HTMLInputElement>(".detected-model").forEach(box => { box.checked = false; session.selected.delete(box.value); });
+      updateModelDetectionProgress(session);
+      return;
+    }
+    if (!target.closest("#add-selected-models")) return;
+    const backend = String((document.querySelector<HTMLSelectElement>("#model-add-backend"))?.value || "dsh");
+    const picks = [...results.querySelectorAll<HTMLInputElement>(".detected-model:checked")].flatMap(input => {
+      const row = input.closest(".detected-item");
+      const wireAPIs = [...(row?.querySelectorAll<HTMLInputElement>(".proto-checks input:checked") || [])].map(item => item.value);
+      if (!wireAPIs.length) return [];
+      const detected = session.results.get(input.value);
+      return [{id: input.value, wire_apis: wireAPIs, max_input_tokens: detected?.max_input_tokens || 0, max_output_tokens: detected?.max_output_tokens || 0}];
     });
-    source.addEventListener("done", event => {
-      const data = JSON.parse((event as MessageEvent).data) as {status: ModelDetectionSession["status"]; completed: number; total: number; anthropic_base_url?: string};
-      session.status = data.status;
-      session.completed = data.completed;
-      session.total = data.total;
-      if (data.anthropic_base_url) session.anthropicBaseURL = data.anthropic_base_url;
-      finishModelDetection(session);
+    if (!picks.length) {
+      setMessage("error", "请至少选择一个模型，并保留至少一个兼容协议");
+      return;
+    }
+    const addButton = results.querySelector<HTMLElement>("#add-selected-models");
+    void runWithFeedback(addButton, "添加中", async () => {
+      const result = await api.addModels({provider_id: providerID, backend, models: picks, anthropic_base_url: session.anthropicBaseURL});
+      document.querySelector<HTMLDialogElement>("#model-dialog")?.close();
+      setMessage("notice", `已添加 ${(result.models || []).length} 个模型${result.skipped ? `，跳过 ${result.skipped} 个已存在` : ""}`);
+      await ensureViewData("models", true);
+      render();
     });
-    source.addEventListener("error", event => {
-      if (event instanceof MessageEvent) {
-        const data = JSON.parse(event.data || "{}") as {message?: string};
-        session.status = "failed";
-        if (data.message) setMessage("error", data.message);
-        return;
-      }
-      if (!["completed", "cancelled", "failed"].includes(session.status)) {
-        session.status = "failed";
-        setMessage("error", "模型检测连接中断，可重新检测");
-        finishModelDetection(session);
-      }
-    });
+  }, {signal: listeners.signal});
+  const timeout = window.setTimeout(() => abort.abort(), MODEL_CATALOG_TIMEOUT_MS);
+  try {
+    const response = await api.detectModels({provider_id: providerID}, {signal: abort.signal});
+    session.catalog = response.models || [];
+    session.authStyle = response.auth_style || "";
+    session.anthropicBaseURL = response.anthropic_base_url || "";
+    if (!session.catalog.length) throw new Error("Provider 没有返回任何模型");
   } catch (error) {
+    session.error = abort.signal.aborted
+      ? `请求 ${MODEL_CATALOG_TIMEOUT_MS / 1000} 秒内没有完成，请检查是否有太多 AHA 页面占用了浏览器连接`
+      : error instanceof Error ? error.message : String(error);
+    if (activeModelDetection === session) setMessage("error", `获取模型列表失败：${session.error}`);
+  } finally {
+    window.clearTimeout(timeout);
+    session.loading = false;
+    session.abort = undefined;
     button.disabled = false;
     button.innerHTML = originalButtonHTML;
-    results.innerHTML = `<div class="detect-status">检测启动失败：${escapeHTML(error instanceof Error ? error.message : String(error))}</div>`;
   }
+  if (activeModelDetection === session) renderModelDetection(session);
 }
 
 function forgetProject(projectID: string): void {
@@ -5132,10 +5083,9 @@ function flushDeferredRender(): void {
 document.addEventListener("close", event => {
   if (event.target instanceof HTMLDialogElement && event.target.id === "model-dialog" && activeModelDetection) {
     const session = activeModelDetection;
-    session.source?.close();
-    session.status = "cancelling";
     activeModelDetection = null;
-    void api.cancelModelDetectionJob(session.providerID, session.jobID).catch(() => undefined);
+    session.abort?.abort();
+    session.listeners?.abort();
   }
   if (event.target instanceof HTMLDialogElement) flushDeferredRender();
 }, true);
@@ -5211,9 +5161,18 @@ function openGlobalEvents(): void {
   globalEvents = new EventSource("/api/v1/events");
   globalEvents.addEventListener("update", event => {
     let type = "";
+    let data: unknown = null;
     try {
-      type = String((JSON.parse((event as MessageEvent).data) as {type?: string}).type || "");
+      const payload = JSON.parse((event as MessageEvent).data) as {type?: string; data?: unknown};
+      type = String(payload.type || "");
+      data = payload.data ?? null;
     } catch {
+      return;
+    }
+    // The global stream is the page's single long-lived SSE: pet events ride on
+    // it so the assistant does not open a second connection per page.
+    if (type === "pet_state" || type === "pet_action") {
+      handlePetStreamEvent(type, data);
       return;
     }
     if (eventRefreshesTaskList(type)) {

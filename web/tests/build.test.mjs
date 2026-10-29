@@ -1911,31 +1911,38 @@ test("task creation supports manual draft and explicit start", async () => {
   assert.match(api, /\/tasks\/\$\{encodeURIComponent\(id\)\}\/start/);
 });
 
-test("model detection lists models and probes only on manual request", async () => {
+test("model detection fetches the catalog once and probes only on manual request", async () => {
   const root = resolve(import.meta.dirname, "..");
   const main = await readFile(resolve(root, "dist", "app.js"), "utf8");
   const api = await readFile(resolve(root, "dist", "api.js"), "utf8");
-  assert.match(main, /new EventSource\(api\.modelDetectionEventsURL/);
-  assert.match(main, /addEventListener\("catalog"/);
-  assert.match(main, /addEventListener\("result"/);
+  assert.match(main, /api\.detectModels\(\{/);
+  assert.match(main, /provider_id: providerID/);
+  assert.match(main, /new AbortController\(\)/);
+  assert.match(main, /MODEL_CATALOG_TIMEOUT_MS/);
+  assert.doesNotMatch(main, /modelDetectionEventsURL/);
+  assert.doesNotMatch(main, /new EventSource\(api\./);
+  assert.doesNotMatch(main, /stop-model-detection/);
   assert.match(main, /data-probe-model/);
   assert.match(main, /api\.probeModel/);
-  assert.match(main, /id="stop-model-detection"/);
-  assert.match(main, /cancelModelDetectionJob/);
   assert.match(main, /replaceRegionHTML\(root,/);
   assert.match(main, /data-ui-key="model-detection-list"/);
   assert.match(main, /applyModelDetectionFilter/);
   assert.match(main, /session\.selected/);
-  assert.match(main, /addEventListener\("result"[\s\S]{0,700}updateDetectedModelRow/);
-  assert.match(main, /addEventListener\("progress"[\s\S]{0,500}updateModelDetectionProgress/);
-  assert.match(main, /finishModelDetection[\s\S]{0,300}#stop-model-detection/);
-  const resultHandler = main.slice(main.indexOf('source.addEventListener("result"'), main.indexOf('source.addEventListener("progress"'));
-  const progressHandler = main.slice(main.indexOf('source.addEventListener("progress"'), main.indexOf('source.addEventListener("done"'));
-  assert.doesNotMatch(resultHandler, /renderModelDetection/);
-  assert.doesNotMatch(resultHandler, /session\.selected\.add/);
-  assert.doesNotMatch(progressHandler, /renderModelDetection/);
-  assert.match(api, /model-detection-jobs/);
+  assert.match(api, /\/api\/v1\/providers\/detect-models/);
   assert.match(api, /model-probes/);
+  assert.doesNotMatch(api, /model-detection-jobs/);
+});
+
+test("pet events share the page global event stream", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const main = await readFile(resolve(root, "dist", "app.js"), "utf8");
+  const assistant = await readFile(resolve(root, "dist", "assistant.js"), "utf8");
+  const api = await readFile(resolve(root, "dist", "api.js"), "utf8");
+  assert.match(main, /handlePetStreamEvent/);
+  assert.match(main, /type === "pet_state"/);
+  assert.match(assistant, /export function handlePetStreamEvent/);
+  assert.doesNotMatch(assistant, /new EventSource\(/);
+  assert.doesNotMatch(api, /pet\/events/);
 });
 
 test("same-page live renders preserve page interaction state", async () => {
