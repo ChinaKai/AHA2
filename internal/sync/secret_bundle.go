@@ -180,7 +180,7 @@ func ExportInfrastructureSecretBundle(ctx context.Context, database *store.Store
 				continue
 			}
 			expected := localHardwareSecretRef(task.ID, group.ID)
-			if group.CredentialRef != expected && !isHardwareResourceSecretRef(group.CredentialRef) {
+			if group.CredentialRef != expected && !isPortableHardwareSecretRef(group.CredentialRef) {
 				return domain.SyncObject{}, fmt.Errorf("hardware %s/%s has non-portable secret reference", task.ID, group.ID)
 			}
 			value, ok := secrets.Get(group.CredentialRef)
@@ -319,6 +319,18 @@ func localHardwareSecretRef(taskID, hardwareID string) string {
 func isHardwareResourceSecretRef(ref string) bool {
 	parts := strings.Split(ref, "/")
 	return len(parts) == 3 && parts[0] == "hardware-resource" && bundleIDPattern.MatchString(parts[1]) && parts[2] == "credential"
+}
+
+// isLegacyHardwareSecretRef accepts task-local hardware refs created before
+// hardware resources were promoted to first-class objects. The encrypted value
+// is still portable; only the local reference name is legacy.
+func isLegacyHardwareSecretRef(ref string) bool {
+	parts := strings.Split(ref, "/")
+	return len(parts) == 4 && parts[0] == "hardware" && bundleIDPattern.MatchString(parts[1]) && bundleIDPattern.MatchString(parts[2]) && parts[3] == "credential"
+}
+
+func isPortableHardwareSecretRef(ref string) bool {
+	return isHardwareResourceSecretRef(ref) || isLegacyHardwareSecretRef(ref)
 }
 
 func mirrorSecretRef(kind string, values ...string) string {
