@@ -338,11 +338,41 @@ func (s *Server) probeProviderModel(writer http.ResponseWriter, request *http.Re
 		authStyle = provider.AuthStyle
 	}
 	capabilities, anthropicBase := s.modelDetectionJobs.probe(request.Context(), provider, apiKey, authStyle, modelID)
+	retryStyle := ""
+	switch {
+	case modelProbeAllStatus(capabilities, "unavailable"):
+		// Transport failures and request timeouts are transient; give the
+		// gateway one more chance before reporting the protocols unsupported.
+		retryStyle = authStyle
+	case modelProbeAllStatus(capabilities, "unauthorized") && !strings.EqualFold(authStyle, "auto"):
+		// A catalog that accepts one header does not guarantee every model
+		// endpoint does; retry with both header styles.
+		retryStyle = "auto"
+	}
+	if retryStyle != "" && request.Context().Err() == nil {
+		if retried, retriedBase := s.modelDetectionJobs.probe(request.Context(), provider, apiKey, retryStyle, modelID); len(retried) > 0 {
+			capabilities, anthropicBase = retried, retriedBase
+		}
+	}
 	model := gateway.DetectedModel{ID: modelID, Capabilities: capabilities}
-	s.audit(request, "provider.model.probe", "provider", provider.ID, map[string]any{"model_id": modelID})
+	s.audit(request, "provider.model.probe", "provider", provider.ID, map[string]any{
+		"model_id": modelID, "auth_style": authStyle, "retried": retryStyle != "", "capabilities": capabilities,
+	})
 	writeJSON(writer, http.StatusOK, map[string]any{
 		"ok": true, "provider_id": provider.ID, "model": model, "anthropic_base_url": anthropicBase,
 	})
+}
+
+func modelProbeAllStatus(capabilities map[string]string, status string) bool {
+	if len(capabilities) == 0 {
+		return false
+	}
+	for _, value := range capabilities {
+		if value != status {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Server) addModelsHandler(writer http.ResponseWriter, request *http.Request) {

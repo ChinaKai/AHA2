@@ -170,6 +170,47 @@ func TestModelDetectionHTTPJobSSEAndCancelLifecycle(t *testing.T) {
 	}
 }
 
+func TestProbeProviderModelRetriesTransientAndAuthFailures(t *testing.T) {
+	jobs := newModelDetectionJobs()
+	var calls []string
+	jobs.probe = func(_ context.Context, _ domain.Provider, _ string, authStyle, _ string) (map[string]string, string) {
+		calls = append(calls, authStyle)
+		return map[string]string{
+			"responses": "unavailable", "chat_completions": "unavailable", "anthropic_messages": "unavailable",
+		}, ""
+	}
+	server, client, csrf, provider := newModelDetectionHTTPTest(t, jobs)
+	probe := func() (int, gateway.DetectedModel) {
+		response := requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/providers/"+provider.ID+"/model-probes",
+			map[string]any{"model_id": "retry-model", "auth_style": "bearer"}, csrf)
+		var payload struct {
+			Model gateway.DetectedModel `json:"model"`
+		}
+		decodeResponse(t, response, &payload)
+		return response.StatusCode, payload.Model
+	}
+
+	if status, model := probe(); status != http.StatusOK || len(calls) != 2 || calls[0] != "bearer" || calls[1] != "bearer" ||
+		model.Capabilities["responses"] != "unavailable" {
+		t.Fatalf("transient retry status=%d calls=%v model=%#v", status, calls, model)
+	}
+
+	calls = nil
+	jobs.probe = func(_ context.Context, _ domain.Provider, _ string, authStyle, _ string) (map[string]string, string) {
+		calls = append(calls, authStyle)
+		if len(calls) == 1 {
+			return map[string]string{
+				"responses": "unauthorized", "chat_completions": "unauthorized", "anthropic_messages": "unauthorized",
+			}, ""
+		}
+		return map[string]string{"responses": "supported"}, ""
+	}
+	if status, model := probe(); status != http.StatusOK || len(calls) != 2 || calls[1] != "auto" ||
+		model.Capabilities["responses"] != "supported" {
+		t.Fatalf("auth retry status=%d calls=%v model=%#v", status, calls, model)
+	}
+}
+
 func TestModelDetectionJobErrorAndTTLExpiry(t *testing.T) {
 	jobs := newModelDetectionJobs()
 	jobs.ttl = 50 * time.Millisecond

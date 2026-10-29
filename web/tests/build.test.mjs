@@ -1928,6 +1928,8 @@ test("model detection fetches the catalog once and probes only on manual request
   assert.match(main, /data-ui-key="model-detection-list"/);
   assert.match(main, /applyModelDetectionFilter/);
   assert.match(main, /session\.selected/);
+  assert.match(main, /protocolFailureDetail/);
+  assert.match(main, /协议结果：/);
   assert.match(api, /\/api\/v1\/providers\/detect-models/);
   assert.match(api, /model-probes/);
   assert.doesNotMatch(api, /model-detection-jobs/);

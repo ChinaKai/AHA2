@@ -1130,7 +1130,14 @@ function detectedModelRow(session: ModelDetectionSession, item: DetectedModel, r
   const probeError = session.probeErrors.get(item.id) || "";
   const backend = session.backend;
   const addable = ready && compatibleWireAPIs(item, backend).length > 0;
-  return `<div class="detected-item${ready ? "" : " pending"}" data-model="${escapeHTML(item.id)}"><input type="checkbox" class="detected-model" value="${escapeHTML(item.id)}" ${addable && session.selected.has(item.id) ? "checked" : ""} ${addable ? "" : "disabled"}><span><strong>${escapeHTML(item.id)}</strong>${item.max_input_tokens ? `<small>context ${Math.round(item.max_input_tokens / 1000)}K</small>` : ""}${ready ? `<span class="proto-badges">${protoBadges(item)}</span>${protoChecks(item, backend)}` : `<span class="proto pending">等待手动检测</span>`}${probeError ? `<small class="bad">${escapeHTML(probeError)}</small>` : ""}</span><button type="button" data-probe-model="${escapeHTML(item.id)}" ${detecting ? "disabled" : ""}>${detecting ? "检测中…" : ready ? "重新检测" : "检测"}</button></div>`;
+  return `<div class="detected-item${ready ? "" : " pending"}" data-model="${escapeHTML(item.id)}"><input type="checkbox" class="detected-model" value="${escapeHTML(item.id)}" ${addable && session.selected.has(item.id) ? "checked" : ""} ${addable ? "" : "disabled"}><span><strong>${escapeHTML(item.id)}</strong>${item.max_input_tokens ? `<small>context ${Math.round(item.max_input_tokens / 1000)}K</small>` : ""}${ready ? `<span class="proto-badges">${protoBadges(item)}</span>${protoChecks(item, backend)}${supportedWireAPIs(item).length ? "" : protocolFailureDetail(item)}` : `<span class="proto pending">等待手动检测</span>`}${probeError ? `<small class="bad">${escapeHTML(probeError)}</small>` : ""}</span><button type="button" data-probe-model="${escapeHTML(item.id)}" ${detecting ? "disabled" : ""}>${detecting ? "检测中…" : ready ? "重新检测" : "检测"}</button></div>`;
+}
+
+function protocolFailureDetail(model: DetectedModel): string {
+  const entries = Object.entries(model.capabilities || {});
+  if (!entries.length) return "";
+  const text = entries.map(([key, value]) => `${key.replace("_", " ")}=${value}`).join(" · ");
+  return `<small class="bad">协议结果：${escapeHTML(text)}</small>`;
 }
 
 function applyModelDetectionFilter(root: HTMLElement, query: string): void {
