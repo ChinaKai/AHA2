@@ -3,6 +3,7 @@ package workspace
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path"
 	"strings"
@@ -97,7 +98,7 @@ func ClaudeTranscriptExists(ctx context.Context, runner Runner, configDir, workD
 		command = Command{
 			Executable: "powershell.exe",
 			Args: []string{"-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
-				`param([string]$Target) if (Test-Path -LiteralPath $Target -PathType Leaf) { 'present' }`, target},
+				fmt.Sprintf(`if (Test-Path -LiteralPath %s -PathType Leaf) { 'present' }`, powershellQuote(target))},
 			Timeout: 20 * time.Second,
 		}
 	} else {
@@ -165,8 +166,7 @@ func readClaudeTranscriptTail(ctx context.Context, runner Runner, target string)
 		command = Command{
 			Executable: "powershell.exe",
 			Args: []string{"-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
-				`param([string]$Target) Get-Content -LiteralPath $Target -Tail 400 -Encoding UTF8 -ErrorAction Stop`,
-				target},
+				fmt.Sprintf(`Get-Content -LiteralPath %s -Tail 400 -Encoding UTF8 -ErrorAction Stop`, powershellQuote(target))},
 			Timeout: 20 * time.Second,
 		}
 	} else {
@@ -181,14 +181,21 @@ func readClaudeTranscriptTail(ctx context.Context, runner Runner, target string)
 	return result.Stdout
 }
 
+// powershellQuote embeds a path in a -Command script as a single-quoted
+// PowerShell literal. Passing a path as a trailing argv to -Command does not
+// bind it to a param() block, which made transcript checks silently look at an
+// empty path on native Windows.
+func powershellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
+}
+
 func newestClaudeTranscript(ctx context.Context, runner Runner, projectDir string) string {
 	var command Command
 	if IsWindowsRunner(runner) {
 		command = Command{
 			Executable: "powershell.exe",
 			Args: []string{"-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
-				`param([string]$Dir) Get-ChildItem -LiteralPath $Dir -Filter *.jsonl -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName`,
-				projectDir},
+				fmt.Sprintf(`Get-ChildItem -LiteralPath %s -Filter *.jsonl -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName`, powershellQuote(projectDir))},
 			Timeout: 20 * time.Second,
 		}
 	} else {

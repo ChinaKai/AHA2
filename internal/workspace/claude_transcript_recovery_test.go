@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -83,5 +84,51 @@ func TestLastClaudeAssistantTextRejectsIncompleteTurn(t *testing.T) {
 				t.Fatalf("incomplete turn recovered %q", got)
 			}
 		})
+	}
+}
+
+type capturingWindowsRunner struct {
+	command Command
+}
+
+func (runner *capturingWindowsRunner) DetectedPlatform() string { return "windows/amd64" }
+
+func (runner *capturingWindowsRunner) Run(_ context.Context, command Command, _ LineHandler) (Result, error) {
+	runner.command = command
+	return Result{Stdout: "present", ExitCode: 0}, nil
+}
+
+func TestLocalRunnerReportsHostPlatform(t *testing.T) {
+	t.Parallel()
+	want := runtime.GOOS + "/" + runtime.GOARCH
+	if got := (LocalRunner{}).DetectedPlatform(); got != want {
+		t.Fatalf("platform=%q, want %q", got, want)
+	}
+}
+
+func TestClaudeTranscriptExistsEmbedsWindowsPathInCommand(t *testing.T) {
+	t.Parallel()
+	runner := &capturingWindowsRunner{}
+	if !ClaudeTranscriptExists(context.Background(), runner, `C:\config`, `C:\work`, "sess") {
+		t.Fatal("transcript was not reported present")
+	}
+	if runner.command.Executable != "powershell.exe" {
+		t.Fatalf("executable=%q", runner.command.Executable)
+	}
+	script := strings.Join(runner.command.Args, " ")
+	if !strings.Contains(script, "sess.jsonl") || !strings.Contains(script, "Test-Path") {
+		t.Fatalf("windows script did not embed the target: %q", script)
+	}
+	for _, arg := range runner.command.Args {
+		if strings.HasSuffix(arg, "sess.jsonl") {
+			t.Fatalf("target was passed as a separate argv, which does not bind to param(): %#v", runner.command.Args)
+		}
+	}
+}
+
+func TestPowerShellQuoteEscapesSingleQuotes(t *testing.T) {
+	t.Parallel()
+	if got, want := powershellQuote(`C:\owner's dir\file.jsonl`), `'C:\owner''s dir\file.jsonl'`; got != want {
+		t.Fatalf("quote=%q, want %q", got, want)
 	}
 }

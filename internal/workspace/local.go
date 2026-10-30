@@ -18,6 +18,11 @@ import (
 
 type LocalRunner struct{}
 
+// DetectedPlatform identifies the host this runner executes on. Without it,
+// IsWindowsRunner treats a native Windows workspace as POSIX and tries to run
+// sh/tail there; Claude transcript recovery then silently finds nothing.
+func (LocalRunner) DetectedPlatform() string { return runtime.GOOS + "/" + runtime.GOARCH }
+
 func (runner LocalRunner) Run(parent context.Context, command Command, onLine LineHandler) (Result, error) {
 	env := localEnvironment(os.Environ(), command.Env)
 	command.Executable = resolveExecutable(command.Executable, env)
