@@ -369,6 +369,34 @@ func (s *Store) UpdateTaskStatus(ctx context.Context, id string, from, to domain
 	return nil
 }
 
+// ResetTaskToDraft returns a system-managed Task to draft when it has no
+// Turns. It deliberately bypasses the normal transition graph: the pet Task is
+// created and started by the server, and a failed automatic start must be
+// retryable on the next assistant page load instead of leaving a half-started
+// Task. The NOT EXISTS guard keeps a Task that already queued a Turn active.
+func (s *Store) ResetTaskToDraft(ctx context.Context, id, updatedAt string) error {
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE tasks SET status=?,updated_at=?
+		WHERE id=? AND status IN (?,?,?,?,?)
+		  AND NOT EXISTS (SELECT 1 FROM turns WHERE turns.task_id=tasks.id)`,
+		domain.TaskDraft, updatedAt, id,
+		domain.TaskPreparing, domain.TaskActive, domain.TaskWaitingUser, domain.TaskBlocked, domain.TaskFailed,
+	)
+	if err != nil {
+		return err
+	}
+	count, _ := result.RowsAffected()
+	if count != 1 {
+		return fmt.Errorf("task could not be reset to draft")
+	}
+	return nil
+}
+
+func (s *Store) UpdateTaskOriginalRequest(ctx context.Context, id, request, updatedAt string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE tasks SET original_request=?,updated_at=? WHERE id=?`, request, updatedAt, id)
+	return err
+}
+
 func (s *Store) UpdateTaskGoal(ctx context.Context, id, goal, updatedAt string) error {
 	return s.UpdateTaskGoalWithEvent(ctx, domain.TaskGoalChange{
 		TaskID: id, GoalAfter: goal, ChangeType: "revise", Reason: "Goal updated",
@@ -561,6 +589,12 @@ func scanTurn(scanner interface{ Scan(...any) error }) (domain.Turn, error) {
 }
 
 const turnColumns = `id,task_id,agent_id,sequence,input_message_id,status,waiting_reason,backend_session_id,runtime_config_snapshot_id,queued_at,prepared_at,started_at,finished_at,exit_code,result,error,round_id,parent_turn_id,attempt,generation,required,title,instruction,context_window,prompt_chars,prompt_snapshot,inbox_batch_id,usage_json,channel_reply_decision,context_ready_at,session_ready_at,first_event_at,last_activity_at,stalled_at,backend_finished_at`
+
+func (s *Store) TaskTurnCount(ctx context.Context, taskID string) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM turns WHERE task_id=?`, taskID).Scan(&count)
+	return count, err
+}
 
 func (s *Store) Turn(ctx context.Context, id string) (domain.Turn, error) {
 	return scanTurn(s.db.QueryRowContext(ctx, `SELECT `+turnColumns+` FROM turns WHERE id=?`, id))

@@ -2,9 +2,9 @@ package app
 
 import (
 	"context"
+	"log"
 	"os"
 	"path/filepath"
-	"time"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
 )
@@ -13,26 +13,49 @@ const (
 	petProjectID   = "project_pet"
 	petWorkspaceID = "workspace_pet"
 	petTaskID      = "task_pet"
+
+	// petTaskIntro is both the Task requirement and the first message. Web task
+	// creation treats "需求" as the first user message, so the pet follows the
+	// same semantics instead of keeping internal instructions in the Task.
+	petTaskIntro = "请用一两句话向主人做个自我介绍：你的名字、当前形象，以及你会陪主人聊天、写日记、做小动作。不要写代码或运行命令。"
 )
 
 // ensureOwnerPetTask creates the visible system Pet Task and its dedicated
 // writable workspace on first use. The pet is a normal Task so it can use the
 // normal backend conversation, while pet tools come from the MCP endpoint.
+// A brand-new draft with no Turns is started immediately with the
+// self-introduction as its first message.
 func (s *Service) ensureOwnerPetTask(ctx context.Context, assistant *domain.OwnerAssistant) (string, error) {
 	if assistant == nil {
 		return "", nil
 	}
 	s.ensurePetWorkspaceGuide()
+	// Serialize the lazy creation/start so concurrent assistant page loads
+	// cannot start the same draft twice or submit two introductions.
+	s.petTaskMu.Lock()
+	defer s.petTaskMu.Unlock()
+
+	recordPetTask := func(taskID string) {
+		if taskID == "" || assistant.PetTaskID == taskID {
+			return
+		}
+		assistant.PetTaskID = taskID
+		assistant.UpdatedAt = s.now().UTC()
+		_ = s.store.UpdateOwnerPetTask(ctx, assistant.ID, taskID, assistant.UpdatedAt)
+	}
 	if assistant.PetTaskID != "" {
-		if _, err := s.store.Task(ctx, assistant.PetTaskID); err == nil {
-			return assistant.PetTaskID, nil
+		if existing, err := s.store.Task(ctx, assistant.PetTaskID); err == nil {
+			s.ensurePetTaskStarted(ctx, existing)
+			recordPetTask(existing.ID)
+			return existing.ID, nil
 		}
 	}
 	if existing, err := s.store.Task(ctx, petTaskID); err == nil {
 		if existing.Status == domain.TaskFailed {
 			_ = s.ReopenTask(ctx, existing.ID)
 		}
-		assistant.PetTaskID = petTaskID
+		recordPetTask(petTaskID)
+		s.ensurePetTaskStarted(ctx, existing)
 		return petTaskID, nil
 	}
 	now := s.now().UTC()
@@ -83,20 +106,58 @@ func (s *Service) ensureOwnerPetTask(ctx context.Context, assistant *domain.Owne
 	}
 	task, err := s.CreateTask(ctx, CreateTaskInput{
 		ID: petTaskID, ProjectID: petProjectID, WorkspaceID: petWorkspaceID,
-		Title: "宠物", Request: "你是宠物，不是编码代理。只和主人对话、写 diary/ 日记、调用 aha2-pet MCP 工具；不要创建网页、代码或运行开发命令。", ModelID: assistant.ModelID,
+		Title: "宠物", Request: petTaskIntro, ModelID: assistant.ModelID,
 		Isolation: "inplace", Filesystem: "workspace-write", Approval: "never",
 		CollaborationMode: "single", MaxAgents: 1, StartMode: "manual",
 	})
 	if err != nil {
 		return "", err
 	}
-	assistant.PetTaskID = task.ID
-	assistant.UpdatedAt = s.now().UTC()
-	_ = s.store.UpdateOwnerPetTask(ctx, assistant.ID, task.ID, assistant.UpdatedAt)
+	recordPetTask(task.ID)
+	s.ensurePetTaskStarted(ctx, task)
 	return task.ID, nil
 }
 
-var _ = time.Time{}
+// ensurePetTaskStarted starts a pet Task that is still a draft. A draft with
+// no Turns gets the self-introduction as its requirement and first message.
+// A draft that already has Turns is only started, so a retry never duplicates
+// the introduction. Failures roll the Task back to draft for the next retry.
+func (s *Service) ensurePetTaskStarted(ctx context.Context, task domain.Task) {
+	if task.Status != domain.TaskDraft {
+		return
+	}
+	turns, err := s.store.TaskTurnCount(ctx, task.ID)
+	if err != nil {
+		return
+	}
+	if turns == 0 && task.OriginalRequest != petTaskIntro {
+		now := timeString(s.now().UTC())
+		if err := s.store.UpdateTaskOriginalRequest(ctx, task.ID, petTaskIntro, now); err != nil {
+			return
+		}
+		task.OriginalRequest = petTaskIntro
+		// The requirement is what the first message uses; a failed goal mirror
+		// still leaves a startable Task, so do not block startup on it.
+		_ = s.store.UpdateTaskGoal(ctx, task.ID, petTaskIntro, now)
+	}
+	started, err := s.StartTask(ctx, task.ID)
+	if err != nil {
+		s.resetPetTaskDraft(ctx, task.ID)
+		return
+	}
+	if turns > 0 {
+		return
+	}
+	if _, err := s.SubmitMessage(ctx, started.ID, petTaskIntro); err != nil {
+		s.resetPetTaskDraft(ctx, started.ID)
+	}
+}
+
+func (s *Service) resetPetTaskDraft(ctx context.Context, taskID string) {
+	if err := s.store.ResetTaskToDraft(ctx, taskID, timeString(s.now().UTC())); err != nil {
+		log.Printf("pet task %s start rollback failed: %v", taskID, err)
+	}
+}
 
 func (s *Service) ensurePetWorkspaceGuide() {
 	if s == nil || s.store == nil {

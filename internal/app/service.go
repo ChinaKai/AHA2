@@ -157,6 +157,7 @@ type Service struct {
 	collaborationDelay  time.Duration
 	collaborationTimers map[string]*time.Timer
 	assistantMu         sync.Mutex
+	petTaskMu           sync.Mutex
 	petBrainMu          sync.Mutex
 	petBrainAt          map[string]time.Time
 	petAutonomyLast     time.Time
