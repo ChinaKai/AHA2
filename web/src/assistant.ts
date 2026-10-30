@@ -118,7 +118,6 @@ let settingsQuietEnabled: HTMLInputElement;
 let settingsQuietEnd: HTMLInputElement;
 let settingsCharacters: HTMLElement;
 let settingsChatModel: HTMLSelectElement;
-let settingsBrainModel: HTMLSelectElement;
 let settingsBrainStatus: HTMLElement;
 let settingsError: HTMLElement;
 let currentMotionName: MotionName = "idle";
@@ -204,8 +203,7 @@ export function mountAssistant(): void {
           <section><h3>形象</h3><div id="pet-character-options" class="pet-character-options"></div></section>
           <section><h3>自主行为</h3><div id="pet-brain-status" class="assistant-settings-note">正在读取…</div><button type="button" id="pet-brain-trigger" class="assistant-settings-trigger">立即触发一次自主行为</button></section>
           <section><h3>模型</h3>
-            <label class="assistant-settings-field">聊天模型<select id="pet-chat-model"></select></label>
-            <label class="assistant-settings-field">自主思考模型<select id="pet-brain-model"></select></label>
+            <label class="assistant-settings-field">宠物模型（聊天 + 自主行为）<select id="pet-chat-model"></select></label>
           </section>
           <p id="pet-settings-error" class="assistant-settings-error" hidden></p>
         </div>
@@ -240,7 +238,6 @@ export function mountAssistant(): void {
   settingsQuietEnd = layer.querySelector<HTMLInputElement>("#pet-quiet-end")!;
   settingsCharacters = layer.querySelector<HTMLElement>("#pet-character-options")!;
   settingsChatModel = layer.querySelector<HTMLSelectElement>("#pet-chat-model")!;
-  settingsBrainModel = layer.querySelector<HTMLSelectElement>("#pet-brain-model")!;
   settingsBrainStatus = layer.querySelector<HTMLElement>("#pet-brain-status")!;
   settingsError = layer.querySelector<HTMLElement>("#pet-settings-error")!;
   trailLayer = layer.querySelector<HTMLElement>("#assistant-trail")!;
@@ -596,7 +593,6 @@ function renderPetSettings(): void {
     <strong>${escapeHTML(character.nickname)}</strong>
   </button>`).join("");
   settingsChatModel.innerHTML = view.models.map(model => `<option value="${escapeHTML(model.id)}" ${model.id === view!.assistant.model_id ? "selected" : ""}>${escapeHTML([model.provider_name, model.display_name].filter(Boolean).join(" / ") || model.id)}</option>`).join("");
-  settingsBrainModel.innerHTML = `<option value="">跟随聊天模型</option>` + view.models.map(model => `<option value="${escapeHTML(model.id)}" ${model.id === view!.assistant.brain_model_id ? "selected" : ""}>${escapeHTML(model.display_name || model.id)}</option>`).join("");
   settingsIdleMinutes.value = String(view.assistant.pet_idle_minutes || 5);
   settingsHourlyLimit.value = String(view.assistant.pet_hourly_limit ?? 6);
   settingsQuietEnabled.checked = view.assistant.pet_quiet_enabled !== false;
@@ -679,7 +675,7 @@ async function savePetSettings(): Promise<void> {
   try {
     const result = await api.updatePetSettings({
       enabled, character, chat_model_id: settingsChatModel.value,
-      brain_model_id: settingsBrainModel.value, actions,
+      brain_model_id: settingsChatModel.value, actions,
       idle_minutes: Number(settingsIdleMinutes.value) || 5,
       hourly_limit: Number(settingsHourlyLimit.value) || 0,
       quiet_enabled: settingsQuietEnabled.checked,

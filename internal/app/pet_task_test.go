@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -166,6 +167,29 @@ func TestOwnerAssistantStartsLegacyPetDraftWithIntroduction(t *testing.T) {
 	}
 }
 
+func TestOwnerAssistantStartsWaitingPetTaskWithNoTurns(t *testing.T) {
+	fixture := newPetTaskFixture(t)
+	fixture.createPetDraft(t, "旧的宠物需求")
+	if _, err := fixture.service.StartTask(fixture.ctx, petTaskID); err != nil {
+		t.Fatal(err)
+	}
+	now := fixture.service.now().UTC()
+	if err := fixture.database.UpdateTaskStatus(fixture.ctx, petTaskID, domain.TaskActive, domain.TaskWaitingUser, timeString(now), ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.service.OwnerAssistant(fixture.ctx); err != nil {
+		t.Fatal(err)
+	}
+	waitForTask(t, fixture.database, petTaskID, domain.TaskWaitingUser)
+	task := fixture.petTask(t)
+	if task.OriginalRequest != petTaskIntro {
+		t.Fatalf("request=%q", task.OriginalRequest)
+	}
+	if count := fixture.turnCount(t); count != 1 {
+		t.Fatalf("turn count=%d", count)
+	}
+}
+
 func TestOwnerAssistantLeavesStartedPetTaskAlone(t *testing.T) {
 	fixture := newPetTaskFixture(t)
 	fixture.createPetDraft(t, "旧的宠物需求")
@@ -216,6 +240,138 @@ func TestOwnerAssistantReopensFailedPetTask(t *testing.T) {
 	}
 	if count := fixture.turnCount(t); count != 1 {
 		t.Fatalf("reopen duplicated the introduction: turn count=%d", count)
+	}
+}
+
+func TestPetModelSettingsSyncToThePetTask(t *testing.T) {
+	fixture := newPetTaskFixture(t)
+	if _, err := fixture.service.OwnerAssistant(fixture.ctx); err != nil {
+		t.Fatal(err)
+	}
+	waitForTask(t, fixture.database, petTaskID, domain.TaskWaitingUser)
+	alternate := fixture.model
+	alternate.ID = "model-pet-task-alternate"
+	alternate.DisplayName = "Pet Model Alternate"
+	alternate.WireModel = "pet-alt"
+	alternate.UpdatedAt = fixture.service.now().UTC()
+	if err := fixture.database.UpsertModel(fixture.ctx, alternate); err != nil {
+		t.Fatal(err)
+	}
+
+	view, err := fixture.service.UpdateOwnerPetSettings(fixture.ctx, PetSettingsInput{
+		Enabled: true, ChatModelID: alternate.ID, Actions: []string{"walk"},
+		IdleMinutes: 20, QuietStart: 22, QuietEnd: 8, HourlyLimit: 6,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Assistant.ModelID != alternate.ID || view.Assistant.BrainModelID != alternate.ID {
+		t.Fatalf("assistant model was not updated: %#v", view.Assistant)
+	}
+	agent, err := fixture.database.TaskAgent(fixture.ctx, petTaskID, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := fixture.database.RuntimeSnapshot(fixture.ctx, agent.RuntimeConfigSnapshotID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.ModelID != alternate.ID {
+		t.Fatalf("pet task runtime model=%s, want %s", snapshot.ModelID, alternate.ID)
+	}
+}
+
+func TestOwnerAssistantReopensTerminalPetTaskStates(t *testing.T) {
+	cases := []struct {
+		name   string
+		status domain.TaskStatus
+		apply  func(t *testing.T, fixture *petTaskFixture, now time.Time)
+	}{
+		{name: "failed", status: domain.TaskFailed, apply: func(t *testing.T, fixture *petTaskFixture, now time.Time) {
+			if err := fixture.database.UpdateTaskStatus(fixture.ctx, petTaskID, domain.TaskWaitingUser, domain.TaskActive, timeString(now), ""); err != nil {
+				t.Fatal(err)
+			}
+			if err := fixture.database.UpdateTaskStatus(fixture.ctx, petTaskID, domain.TaskActive, domain.TaskFailed, timeString(now), ""); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "blocked", status: domain.TaskBlocked, apply: func(t *testing.T, fixture *petTaskFixture, now time.Time) {
+			if err := fixture.database.UpdateTaskStatus(fixture.ctx, petTaskID, domain.TaskWaitingUser, domain.TaskActive, timeString(now), ""); err != nil {
+				t.Fatal(err)
+			}
+			if err := fixture.database.UpdateTaskStatus(fixture.ctx, petTaskID, domain.TaskActive, domain.TaskBlocked, timeString(now), ""); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "completed", status: domain.TaskCompleted, apply: func(t *testing.T, fixture *petTaskFixture, now time.Time) {
+			if err := fixture.database.UpdateTaskStatus(fixture.ctx, petTaskID, domain.TaskWaitingUser, domain.TaskCompleted, timeString(now), timeString(now)); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "cancelled", status: domain.TaskCancelled, apply: func(t *testing.T, fixture *petTaskFixture, now time.Time) {
+			if err := fixture.database.UpdateTaskStatus(fixture.ctx, petTaskID, domain.TaskWaitingUser, domain.TaskCancelled, timeString(now), ""); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			fixture := newPetTaskFixture(t)
+			fixture.createPetDraft(t, "旧的宠物需求")
+			if _, err := fixture.service.StartTask(fixture.ctx, petTaskID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := fixture.service.SubmitMessage(fixture.ctx, petTaskID, "主人第一条消息"); err != nil {
+				t.Fatal(err)
+			}
+			waitForTask(t, fixture.database, petTaskID, domain.TaskWaitingUser)
+			testCase.apply(t, fixture, fixture.service.now().UTC())
+			if task := fixture.petTask(t); task.Status != testCase.status {
+				t.Fatalf("setup status=%s", task.Status)
+			}
+			if _, err := fixture.service.OwnerAssistant(fixture.ctx); err != nil {
+				t.Fatal(err)
+			}
+			task := fixture.petTask(t)
+			if task.Status != domain.TaskWaitingUser {
+				t.Fatalf("status=%s, want waiting_user", task.Status)
+			}
+			if count := fixture.turnCount(t); count != 1 {
+				t.Fatalf("reopen changed the turn count: %d", count)
+			}
+		})
+	}
+}
+
+func TestOwnerAssistantRemovesGeneratedPetWorkspaceGuides(t *testing.T) {
+	fixture := newPetTaskFixture(t)
+	root := filepath.Join(fixture.database.DataDir(), "pet-workspace")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"CLAUDE.md", "AGENTS.md"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(petWorkspaceGuides[0]), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := fixture.service.OwnerAssistant(fixture.ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"CLAUDE.md", "AGENTS.md"} {
+		if _, err := os.Stat(filepath.Join(root, name)); !os.IsNotExist(err) {
+			t.Fatalf("generated guide %s was not removed: %v", name, err)
+		}
+	}
+
+	custom := filepath.Join(root, "CLAUDE.md")
+	if err := os.WriteFile(custom, []byte("owner-customized guide"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.service.OwnerAssistant(fixture.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(custom); err != nil || string(data) != "owner-customized guide" {
+		t.Fatalf("customized guide was removed or changed: %q %v", string(data), err)
 	}
 }
 

@@ -314,6 +314,37 @@ func TestClaudeSyntheticErrorWithoutReplyIsNotReportedAsNoMessage(t *testing.T) 
 	}
 }
 
+type claudeTranscriptRecoveryRunner struct {
+	transcript string
+}
+
+func (runner *claudeTranscriptRecoveryRunner) Run(_ context.Context, command workspace.Command, onLine workspace.LineHandler) (workspace.Result, error) {
+	if command.Executable == "tail" || command.Executable == "powershell.exe" {
+		return workspace.Result{Stdout: runner.transcript, ExitCode: 0}, nil
+	}
+	onLine(`{"type":"system","subtype":"init","session_id":"sess-recovery"}`)
+	return workspace.Result{ExitCode: 0}, nil
+}
+
+func TestClaudeRecoversReplyFromTranscriptWhenResultIsMissing(t *testing.T) {
+	t.Parallel()
+	transcript := `{"type":"assistant","timestamp":"` + time.Now().UTC().Format(time.RFC3339Nano) + `","message":{"model":"m","content":[{"type":"text","text":"recovered from transcript"}]}}` + "\n" +
+		`{"type":"last-prompt","lastPrompt":"..."}`
+	runner := &claudeTranscriptRecoveryRunner{transcript: transcript}
+	result, err := (Claude{}).Execute(context.Background(), Request{
+		Runner:            runner,
+		WorkDir:           t.TempDir(),
+		ProviderSessionID: "sess-recovery",
+		Environment:       map[string]string{"CLAUDE_CONFIG_DIR": t.TempDir()},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Reply != "recovered from transcript" {
+		t.Fatalf("reply=%q", result.Reply)
+	}
+}
+
 func TestFilterClaudeEnvironment(t *testing.T) {
 	t.Parallel()
 	values := map[string]string{

@@ -2,6 +2,7 @@ package workspace
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path"
 	"strings"
@@ -110,4 +111,101 @@ func ClaudeTranscriptExists(ctx context.Context, runner Runner, configDir, workD
 		return strings.TrimSpace(result.Stdout) == "present"
 	}
 	return true
+}
+
+// ClaudeTranscriptLastAssistantText recovers the last user-visible assistant
+// text from a session transcript. It is a fallback for the case where the CLI
+// exits cleanly without emitting a final result: the transcript can already
+// contain the reply AHA never received. It never returns an older turn's text,
+// and it returns "" when the final record is a tool call/result, so an
+// incomplete turn is not reported as a successful reply.
+func ClaudeTranscriptLastAssistantText(ctx context.Context, runner Runner, configDir, workDir, sessionID string, since time.Time) string {
+	if strings.TrimSpace(configDir) == "" || strings.TrimSpace(sessionID) == "" {
+		return ""
+	}
+	target := path.Join(configDir, "projects", ClaudeProjectSlug(workDir), sessionID+".jsonl")
+	var command Command
+	if IsWindowsRunner(runner) {
+		command = Command{
+			Executable: "powershell.exe",
+			Args: []string{"-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+				`param([string]$Target) Get-Content -LiteralPath $Target -Tail 400 -Encoding UTF8 -ErrorAction Stop`,
+				target},
+			Timeout: 20 * time.Second,
+		}
+	} else {
+		command = Command{Executable: "tail", Args: []string{"-n", "400", target}, Timeout: 15 * time.Second}
+	}
+	result, err := runner.Run(ctx, command, nil)
+	if err != nil || result.ExitCode != 0 {
+		return ""
+	}
+	return lastClaudeAssistantText(result.Stdout, since)
+}
+
+// lastClaudeAssistantText walks the transcript tail backwards and decides what
+// the final visible record was. Metadata records are skipped; the first real
+// record decides. An assistant record with text and no tool_use is the only
+// recoverable reply; a tool_use/tool_result or a user prompt means the turn did
+// not end with text, so an older assistant text must not be reused.
+func lastClaudeAssistantText(output string, since time.Time) string {
+	lines := strings.Split(output, "\n")
+	for index := len(lines) - 1; index >= 0; index-- {
+		line := strings.TrimSpace(lines[index])
+		if line == "" {
+			continue
+		}
+		var record struct {
+			Type              string `json:"type"`
+			Timestamp         string `json:"timestamp"`
+			IsAPIErrorMessage bool   `json:"isApiErrorMessage"`
+			IsSidechain       bool   `json:"isSidechain"`
+			Message           struct {
+				Model   string `json:"model"`
+				Content []struct {
+					Type string `json:"type"`
+					Text string `json:"text"`
+				} `json:"content"`
+			} `json:"message"`
+		}
+		if json.Unmarshal([]byte(line), &record) != nil {
+			continue
+		}
+		switch record.Type {
+		case "last-prompt", "mode", "ai-title", "queue-operation", "attachment", "summary", "system":
+			continue
+		}
+		if record.IsSidechain {
+			return ""
+		}
+		if record.Type != "assistant" {
+			return ""
+		}
+		if record.IsAPIErrorMessage || record.Message.Model == "<synthetic>" {
+			return ""
+		}
+		if record.Timestamp != "" {
+			timestamp, err := time.Parse(time.RFC3339Nano, record.Timestamp)
+			if err == nil && timestamp.Before(since) {
+				return ""
+			}
+		}
+		texts := make([]string, 0, len(record.Message.Content))
+		hasTool := false
+		for _, block := range record.Message.Content {
+			switch block.Type {
+			case "text":
+				if strings.TrimSpace(block.Text) != "" {
+					texts = append(texts, block.Text)
+				}
+			case "tool_use":
+				hasTool = true
+			}
+		}
+		if hasTool || len(texts) == 0 {
+			return ""
+		}
+		return strings.TrimSpace(strings.Join(texts, "\n"))
+	}
+	return ""
 }

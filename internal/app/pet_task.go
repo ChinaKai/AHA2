@@ -5,9 +5,39 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
 )
+
+// petWorkspaceGuides are the files earlier versions wrote into the Pet
+// Workspace. The core instructions now live in the Task prompt only; these
+// strings exist so the assistant page can remove the generated copies without
+// touching a file the owner deliberately customized.
+var petWorkspaceGuides = []string{
+	`# 宠物 Task 工作区
+
+你是 AHA2 里的宠物，不是编码代理。
+只和主人对话、写 diary/YYYY-MM-DD.md 日记、调用 aha2-pet MCP 工具。
+不要创建网页、代码、应用；不要运行 npm/build/test/git；不要分析工作区文件。`,
+	`# 宠物 Task 工作区
+
+你是 AHA2 里的宠物，不是编码代理。
+
+你的职责只有：
+- 和主人进行简短、自然的宠物对话。
+- 需要写日记时，写到 diary/YYYY-MM-DD.md，用第一人称。
+- 需要做动作时，调用 aha2-pet MCP 工具：pet_play、pet_move_to、pet_walk_path、pet_mood、pet_open_task、pet_sleep、pet_wake。
+
+禁止：
+- 不要创建网页、CSS、JS、应用或任何代码。
+- 不要运行 npm、build、test、git 或开发服务器。
+- 不要分析这个工作区的文件结构，不要把它当成软件项目。
+- 除了 diary/ 下的日记，不要写其他文件。
+
+主人说话时直接回应；不要主动开发任何东西。
+`,
+}
 
 const (
 	petProjectID   = "project_pet"
@@ -20,12 +50,15 @@ const (
 	petTaskIntro = "请用一两句话向主人做个自我介绍：你的名字、当前形象，以及你会陪主人聊天、写日记、做小动作。不要写代码或运行命令。"
 )
 
-// reopenPetTaskIfFailed returns the Pet Task to waiting_user after a backend
-// failure. Without this an owner whose assistant already points at task_pet
-// would keep seeing the failed Task: the PetTaskID branch used to return it
-// unchanged, so the "reopen failed pet task" fallback below never ran.
-func (s *Service) reopenPetTaskIfFailed(ctx context.Context, task domain.Task) domain.Task {
-	if task.Status != domain.TaskFailed {
+// reopenPetTaskIfNeeded returns a system Pet Task to waiting_user after any
+// terminal or blocked state. The Pet Task is the pet itself, so a backend
+// failure, a transient block, or an accidental complete/cancel must not leave
+// the owner with a permanently dead pet. A deliberately edited workspace guide
+// is not touched by the reopen; disabling the pet is the supported off switch.
+func (s *Service) reopenPetTaskIfNeeded(ctx context.Context, task domain.Task) domain.Task {
+	switch task.Status {
+	case domain.TaskFailed, domain.TaskBlocked, domain.TaskCompleted, domain.TaskCancelled:
+	default:
 		return task
 	}
 	if err := s.ReopenTask(ctx, task.ID); err != nil {
@@ -37,6 +70,31 @@ func (s *Service) reopenPetTaskIfFailed(ctx context.Context, task domain.Task) d
 	return task
 }
 
+// syncPetTaskRuntime makes task_pet use the same model as the assistant
+// setting. The pet has one model for chat and autonomous behavior; changing
+// the setting must not leave the Task on a stale runtime snapshot.
+func (s *Service) syncPetTaskRuntime(ctx context.Context, modelID string) error {
+	modelID = strings.TrimSpace(modelID)
+	if modelID == "" {
+		return nil
+	}
+	agent, err := s.store.TaskAgent(ctx, petTaskID, "main")
+	if err != nil {
+		// The Task does not exist yet; ensureOwnerPetTask creates it with this
+		// model on the next step.
+		return nil
+	}
+	snapshot, err := s.store.RuntimeSnapshot(ctx, agent.RuntimeConfigSnapshotID)
+	if err != nil {
+		return err
+	}
+	if snapshot.ModelID == modelID {
+		return nil
+	}
+	_, err = s.UpdateAgentConfig(ctx, petTaskID, "main", UpdateAgentConfigInput{ModelID: modelID})
+	return err
+}
+
 // ensureOwnerPetTask creates the visible system Pet Task and its dedicated
 // writable workspace on first use. The pet is a normal Task so it can use the
 // normal backend conversation, while pet tools come from the MCP endpoint.
@@ -46,7 +104,12 @@ func (s *Service) ensureOwnerPetTask(ctx context.Context, assistant *domain.Owne
 	if assistant == nil {
 		return "", nil
 	}
-	s.ensurePetWorkspaceGuide()
+	s.removeGeneratedPetWorkspaceGuides()
+	// The pet has one model. Keep the existing Task's Agent runtime in step
+	// with the assistant setting; the settings save path reports failures,
+	// while this page-load path is best effort so a stale Task cannot block
+	// the assistant view.
+	_ = s.syncPetTaskRuntime(ctx, assistant.ModelID)
 	// Serialize the lazy creation/start so concurrent assistant page loads
 	// cannot start the same draft twice or submit two introductions.
 	s.petTaskMu.Lock()
@@ -62,14 +125,14 @@ func (s *Service) ensureOwnerPetTask(ctx context.Context, assistant *domain.Owne
 	}
 	if assistant.PetTaskID != "" {
 		if existing, err := s.store.Task(ctx, assistant.PetTaskID); err == nil {
-			existing = s.reopenPetTaskIfFailed(ctx, existing)
+			existing = s.reopenPetTaskIfNeeded(ctx, existing)
 			s.ensurePetTaskStarted(ctx, existing)
 			recordPetTask(existing.ID)
 			return existing.ID, nil
 		}
 	}
 	if existing, err := s.store.Task(ctx, petTaskID); err == nil {
-		existing = s.reopenPetTaskIfFailed(ctx, existing)
+		existing = s.reopenPetTaskIfNeeded(ctx, existing)
 		recordPetTask(petTaskID)
 		s.ensurePetTaskStarted(ctx, existing)
 		return petTaskID, nil
@@ -100,26 +163,6 @@ func (s *Service) ensureOwnerPetTask(ctx context.Context, assistant *domain.Owne
 		}
 	}
 	_ = os.MkdirAll(filepath.Join(s.store.DataDir(), "pet-workspace", "diary"), 0o700)
-	guide := `# 宠物 Task 工作区
-
-你是 AHA2 里的宠物，不是编码代理。
-
-你的职责只有：
-- 和主人进行简短、自然的宠物对话。
-- 需要写日记时，写到 diary/YYYY-MM-DD.md，用第一人称。
-- 需要做动作时，调用 aha2-pet MCP 工具：pet_play、pet_move_to、pet_walk_path、pet_mood、pet_open_task、pet_sleep、pet_wake。
-
-禁止：
-- 不要创建网页、CSS、JS、应用或任何代码。
-- 不要运行 npm、build、test、git 或开发服务器。
-- 不要分析这个工作区的文件结构，不要把它当成软件项目。
-- 除了 diary/ 下的日记，不要写其他文件。
-
-主人说话时直接回应；不要主动开发任何东西。
-`
-	for _, name := range []string{"CLAUDE.md", "AGENTS.md"} {
-		_ = os.WriteFile(filepath.Join(s.store.DataDir(), "pet-workspace", name), []byte(guide), 0o600)
-	}
 	task, err := s.CreateTask(ctx, CreateTaskInput{
 		ID: petTaskID, ProjectID: petProjectID, WorkspaceID: petWorkspaceID,
 		Title: "宠物", Request: petTaskIntro, ModelID: assistant.ModelID,
@@ -139,6 +182,16 @@ func (s *Service) ensureOwnerPetTask(ctx context.Context, assistant *domain.Owne
 // A draft that already has Turns is only started, so a retry never duplicates
 // the introduction. Failures roll the Task back to draft for the next retry.
 func (s *Service) ensurePetTaskStarted(ctx context.Context, task domain.Task) {
+	if task.Status == domain.TaskWaitingUser {
+		turns, err := s.store.TaskTurnCount(ctx, task.ID)
+		if err != nil || turns != 0 {
+			return
+		}
+		if err := s.store.ResetTaskToDraft(ctx, task.ID, timeString(s.now().UTC())); err != nil {
+			return
+		}
+		task.Status = domain.TaskDraft
+	}
 	if task.Status != domain.TaskDraft {
 		return
 	}
@@ -175,20 +228,26 @@ func (s *Service) resetPetTaskDraft(ctx context.Context, taskID string) {
 	}
 }
 
-func (s *Service) ensurePetWorkspaceGuide() {
+// removeGeneratedPetWorkspaceGuides deletes CLAUDE.md/AGENTS.md only when they
+// still match a guide AHA generated. A file the owner edited is left alone.
+func (s *Service) removeGeneratedPetWorkspaceGuides() {
 	if s == nil || s.store == nil {
 		return
 	}
 	root := filepath.Join(s.store.DataDir(), "pet-workspace")
-	_ = os.MkdirAll(filepath.Join(root, "diary"), 0o700)
-	guide := `# 宠物 Task 工作区
-
-你是 AHA2 里的宠物，不是编码代理。
-只和主人对话、写 diary/YYYY-MM-DD.md 日记、调用 aha2-pet MCP 工具。
-不要创建网页、代码、应用；不要运行 npm/build/test/git；不要分析工作区文件。
-`
 	for _, name := range []string{"CLAUDE.md", "AGENTS.md"} {
-		_ = os.WriteFile(filepath.Join(root, name), []byte(guide), 0o600)
+		path := filepath.Join(root, name)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		content := strings.TrimSpace(string(data))
+		for _, guide := range petWorkspaceGuides {
+			if content == strings.TrimSpace(guide) {
+				_ = os.Remove(path)
+				break
+			}
+		}
 	}
 }
 

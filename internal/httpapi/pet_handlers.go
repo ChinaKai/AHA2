@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/ChinaKai/AHA2/internal/app"
@@ -103,7 +104,15 @@ func (s *Server) ownerPetBrain(writer http.ResponseWriter, request *http.Request
 	}
 	result, err := s.app.AskOwnerPetBrain(request.Context(), input)
 	if err != nil {
-		writeJSON(writer, http.StatusTooManyRequests, map[string]any{"ok": false, "error": "pet_brain_failed", "message": err.Error()})
+		if app.IsPetBrainSkip(err) {
+			writeJSON(writer, http.StatusOK, map[string]any{"ok": false, "skipped": true, "message": err.Error()})
+			return
+		}
+		status := http.StatusInternalServerError
+		if strings.Contains(err.Error(), "宠物 Task") {
+			status = http.StatusConflict
+		}
+		writeJSON(writer, status, map[string]any{"ok": false, "error": "pet_brain_failed", "message": err.Error()})
 		return
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "say": result.Say, "actions": result.Actions})

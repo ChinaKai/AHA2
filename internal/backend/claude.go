@@ -51,6 +51,7 @@ func (adapter Claude) Execute(ctx context.Context, request Request, emit func(Ev
 		args = append(args, "--allowedTools")
 		args = append(args, request.AllowedTools...)
 	}
+	startedAt := time.Now().UTC()
 	var reply, sessionID, providerError string
 	var stream claudeStream
 	var emitMu sync.Mutex
@@ -135,10 +136,27 @@ func (adapter Claude) Execute(ctx context.Context, request Request, emit func(Ev
 	if providerError != "" && claudeContextWindowExceeded(providerError) {
 		return Result{Reply: reply, ExitCode: result.ExitCode, ProviderSessionID: sessionID}, fmt.Errorf("%w: %s", ErrContextWindowExceeded, tail(providerError, 2000))
 	}
+	if providerError != "" && strings.TrimSpace(reply) == "" {
+		return Result{ExitCode: result.ExitCode, ProviderSessionID: sessionID}, fmt.Errorf("%s", tail(providerError, 2000))
+	}
 	if strings.TrimSpace(reply) == "" {
-		if providerError != "" {
-			return Result{ExitCode: result.ExitCode, ProviderSessionID: sessionID}, fmt.Errorf("%s", tail(providerError, 2000))
+		// A clean exit without a result line can still have written the reply
+		// to its transcript (observed with Claude Code on Windows). Recover the
+		// final assistant text before reporting a missing agent message.
+		configDir := strings.TrimSpace(request.Environment["CLAUDE_CONFIG_DIR"])
+		if configDir == "" {
+			configDir = workspace.ClaudeDefaultConfigDirOn(ctx, request.Runner)
 		}
+		for attempt := 0; attempt < 3 && strings.TrimSpace(reply) == ""; attempt++ {
+			reply = workspace.ClaudeTranscriptLastAssistantText(
+				ctx, request.Runner, configDir, request.WorkDir, sessionID, startedAt.Add(-2*time.Second),
+			)
+			if strings.TrimSpace(reply) == "" {
+				time.Sleep(100 * time.Millisecond)
+			}
+		}
+	}
+	if strings.TrimSpace(reply) == "" {
 		return Result{ExitCode: result.ExitCode, ProviderSessionID: sessionID}, fmt.Errorf("claude returned no agent message")
 	}
 	return Result{Reply: strings.TrimSpace(reply), ExitCode: result.ExitCode, ProviderSessionID: sessionID}, nil

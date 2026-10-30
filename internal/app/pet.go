@@ -229,12 +229,18 @@ func (s *Service) AskOwnerPetBrain(ctx context.Context, input PetBrainContext) (
 	if page == "" {
 		page = "未知页面"
 	}
+	if _, err := s.ensureOwnerPetTask(ctx, &assistant); err != nil {
+		return PetBrainResult{}, fmt.Errorf("确保宠物 Task 可用失败：%w", err)
+	}
 	task, err := s.store.Task(ctx, petTaskID)
 	if err != nil {
 		return PetBrainResult{}, fmt.Errorf("宠物 Task 不存在")
 	}
 	if task.Status == domain.TaskDraft {
 		return PetBrainResult{}, fmt.Errorf("宠物 Task 尚未启动")
+	}
+	if task.Status != domain.TaskWaitingUser && task.Status != domain.TaskActive {
+		return PetBrainResult{}, fmt.Errorf("宠物 Task 状态为 %s，暂时无法自主行动", task.Status)
 	}
 	if _, activeErr := s.store.ActiveTurn(ctx, petTaskID); activeErr == nil {
 		return PetBrainResult{}, fmt.Errorf("宠物 Task 正在执行，跳过本次自主行为")
@@ -446,16 +452,13 @@ func (s *Service) UpdateOwnerPetSettings(ctx context.Context, input PetSettingsI
 	}
 	if chatModelID := strings.TrimSpace(input.ChatModelID); chatModelID != "" {
 		if !validModel(chatModelID) {
-			return OwnerAssistantView{}, fmt.Errorf("聊天模型不可用")
+			return OwnerAssistantView{}, fmt.Errorf("宠物模型不可用")
 		}
 		assistant.ModelID = chatModelID
 	}
-	if brainModelID := strings.TrimSpace(input.BrainModelID); brainModelID != "" {
-		if !validModel(brainModelID) {
-			return OwnerAssistantView{}, fmt.Errorf("自主思考模型不可用")
-		}
-		assistant.BrainModelID = brainModelID
-	}
+	// Chat and autonomous behavior share one model. The old brain_model_id
+	// field is kept in the stored row for compatibility but mirrors model_id.
+	assistant.BrainModelID = assistant.ModelID
 	allowed := map[string]bool{"walk": true, "jump": true, "happy": true, "angry": true}
 	actions := []string{}
 	seen := map[string]bool{}
@@ -508,6 +511,9 @@ func (s *Service) UpdateOwnerPetSettings(ctx context.Context, input PetSettingsI
 	}
 	if err := s.store.UpdateOwnerPetIdentity(ctx, assistant.ID, assistant.PetIdentity, assistant.PetPrinciples, assistant.UpdatedAt); err != nil {
 		return OwnerAssistantView{}, err
+	}
+	if err := s.syncPetTaskRuntime(ctx, assistant.ModelID); err != nil {
+		return OwnerAssistantView{}, fmt.Errorf("宠物 Task 模型同步失败：%w", err)
 	}
 	if state, stateErr := s.OwnerPetState(ctx); stateErr == nil {
 		s.publishPetState(state)
