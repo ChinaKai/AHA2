@@ -326,6 +326,33 @@ func (runner *claudeTranscriptRecoveryRunner) Run(_ context.Context, command wor
 	return workspace.Result{ExitCode: 0}, nil
 }
 
+type claudeTranscriptErrorRunner struct {
+	transcript string
+}
+
+func (runner *claudeTranscriptErrorRunner) Run(_ context.Context, command workspace.Command, onLine workspace.LineHandler) (workspace.Result, error) {
+	if command.Executable == "tail" || command.Executable == "powershell.exe" {
+		return workspace.Result{Stdout: runner.transcript, ExitCode: 0}, nil
+	}
+	onLine(`{"type":"system","subtype":"init","session_id":"sess-403"}`)
+	return workspace.Result{ExitCode: 1}, nil
+}
+
+func TestClaudeShowsProviderErrorFromTranscriptOnExitOne(t *testing.T) {
+	t.Parallel()
+	transcript := `{"type":"assistant","timestamp":"` + time.Now().UTC().Format(time.RFC3339Nano) + `","isApiErrorMessage":true,"apiErrorStatus":403,"message":{"model":"<synthetic>","content":[{"type":"text","text":"API Error: 403 litellm.PermissionDeniedError: You've reached your concurrent request limit"}]}}`
+	runner := &claudeTranscriptErrorRunner{transcript: transcript}
+	_, err := (Claude{}).Execute(context.Background(), Request{
+		Runner:            runner,
+		WorkDir:           t.TempDir(),
+		ProviderSessionID: "sess-403",
+		Environment:       map[string]string{"CLAUDE_CONFIG_DIR": t.TempDir()},
+	}, nil)
+	if err == nil || !strings.Contains(err.Error(), "concurrent request limit") || strings.Contains(err.Error(), "claude exited with code 1") {
+		t.Fatalf("provider error was not surfaced: %v", err)
+	}
+}
+
 func TestClaudeRecoversReplyFromTranscriptWhenResultIsMissing(t *testing.T) {
 	t.Parallel()
 	transcript := `{"type":"assistant","timestamp":"` + time.Now().UTC().Format(time.RFC3339Nano) + `","message":{"model":"m","content":[{"type":"text","text":"recovered from transcript"}]}}` + "\n" +

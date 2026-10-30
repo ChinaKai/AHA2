@@ -564,14 +564,15 @@ func (s *Server) createModel(writer http.ResponseWriter, request *http.Request) 
 		return
 	}
 	now := time.Now().UTC()
+	maxOutputTokens := domain.DefaultMaxOutputTokens(payload.ContextWindow, payload.MaxOutputTokens)
 	autoCompactWindow := payload.AutoCompactWindow
 	if autoCompactWindow <= 0 {
-		autoCompactWindow = domain.DefaultAutoCompactWindow(payload.ContextWindow, payload.MaxOutputTokens)
+		autoCompactWindow = domain.DefaultAutoCompactWindow(payload.ContextWindow, maxOutputTokens)
 	}
 	item := domain.Model{
 		ID: domain.NewID("model"), DisplayName: payload.DisplayName, ProviderID: payload.ProviderID,
 		Backend: payload.Backend, WireModel: payload.WireModel, WireAPI: strings.TrimSpace(payload.WireAPI),
-		ContextWindow: payload.ContextWindow, MaxOutputTokens: payload.MaxOutputTokens,
+		ContextWindow: payload.ContextWindow, MaxOutputTokens: maxOutputTokens,
 		AutoCompactWindow: autoCompactWindow,
 		DefaultEffort:     strings.TrimSpace(payload.DefaultEffort), DefaultEnvGroupID: strings.TrimSpace(payload.DefaultEnvGroupID),
 		Capabilities: map[string]any{}, CreatedAt: now, UpdatedAt: now,

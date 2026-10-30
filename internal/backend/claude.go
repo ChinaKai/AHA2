@@ -112,44 +112,62 @@ func (adapter Claude) Execute(ctx context.Context, request Request, emit func(Ev
 	}
 	if err != nil {
 		if providerError != "" && claudeContextWindowExceeded(providerError) {
-			return Result{Reply: reply, ExitCode: result.ExitCode, ProviderSessionID: sessionID}, fmt.Errorf("%w: %s", ErrContextWindowExceeded, tail(providerError, 2000))
+			return Result{Reply: reply, ExitCode: result.ExitCode, ProviderSessionID: sessionID}, fmt.Errorf("%w: %s", ErrContextWindowExceeded, clipError(providerError, 8000))
 		}
 		return Result{Reply: reply, ExitCode: result.ExitCode, ProviderSessionID: sessionID}, err
 	}
 	if sessionID == "" {
 		sessionID = request.ProviderSessionID
 	}
+	since := startedAt.Add(-2 * time.Second)
+	configDir := ""
+	transcriptError := ""
+	if result.ExitCode != 0 || strings.TrimSpace(reply) == "" {
+		configDir = strings.TrimSpace(request.Environment["CLAUDE_CONFIG_DIR"])
+		if configDir == "" {
+			configDir = workspace.ClaudeDefaultConfigDirOn(ctx, request.Runner)
+		}
+		transcriptError = workspace.ClaudeTranscriptLastErrorText(ctx, request.Runner, configDir, request.WorkDir, sessionID, since)
+	}
 	if result.ExitCode != 0 {
 		message := strings.TrimSpace(result.Stderr)
-		if message == "" {
+		if transcriptError != "" {
+			// The CLI can hide the provider's error in the transcript while
+			// exiting non-zero with an empty stderr. Prefer the transcript so
+			// every provider error is shown verbatim, not just the 400 case.
+			message = transcriptError
+		} else if message == "" {
 			message = providerError
 		}
 		if message == "" {
 			message = fmt.Sprintf("claude exited with code %d", result.ExitCode)
 		}
-		message = tail(message, 2000)
+		message = clipError(message, 8000)
 		if claudeContextWindowExceeded(message) {
 			return Result{Reply: reply, ExitCode: result.ExitCode, ProviderSessionID: sessionID}, fmt.Errorf("%w: %s", ErrContextWindowExceeded, message)
 		}
 		return Result{Reply: reply, ExitCode: result.ExitCode, ProviderSessionID: sessionID}, fmt.Errorf("%s", message)
 	}
 	if providerError != "" && claudeContextWindowExceeded(providerError) {
-		return Result{Reply: reply, ExitCode: result.ExitCode, ProviderSessionID: sessionID}, fmt.Errorf("%w: %s", ErrContextWindowExceeded, tail(providerError, 2000))
+		return Result{Reply: reply, ExitCode: result.ExitCode, ProviderSessionID: sessionID}, fmt.Errorf("%w: %s", ErrContextWindowExceeded, clipError(providerError, 8000))
+	}
+	if strings.TrimSpace(reply) == "" && transcriptError != "" {
+		message := clipError(transcriptError, 8000)
+		if claudeContextWindowExceeded(message) {
+			return Result{Reply: reply, ExitCode: result.ExitCode, ProviderSessionID: sessionID}, fmt.Errorf("%w: %s", ErrContextWindowExceeded, message)
+		}
+		return Result{ExitCode: result.ExitCode, ProviderSessionID: sessionID}, fmt.Errorf("%s", message)
 	}
 	if providerError != "" && strings.TrimSpace(reply) == "" {
-		return Result{ExitCode: result.ExitCode, ProviderSessionID: sessionID}, fmt.Errorf("%s", tail(providerError, 2000))
+		return Result{ExitCode: result.ExitCode, ProviderSessionID: sessionID}, fmt.Errorf("%s", clipError(providerError, 8000))
 	}
 	if strings.TrimSpace(reply) == "" {
 		// A clean exit without a result line can still have written the reply
 		// to its transcript (observed with Claude Code on Windows). Recover the
 		// final assistant text before reporting a missing agent message.
-		configDir := strings.TrimSpace(request.Environment["CLAUDE_CONFIG_DIR"])
-		if configDir == "" {
-			configDir = workspace.ClaudeDefaultConfigDirOn(ctx, request.Runner)
-		}
 		for attempt := 0; attempt < 3 && strings.TrimSpace(reply) == ""; attempt++ {
 			reply = workspace.ClaudeTranscriptLastAssistantText(
-				ctx, request.Runner, configDir, request.WorkDir, sessionID, startedAt.Add(-2*time.Second),
+				ctx, request.Runner, configDir, request.WorkDir, sessionID, since,
 			)
 			if strings.TrimSpace(reply) == "" {
 				time.Sleep(100 * time.Millisecond)

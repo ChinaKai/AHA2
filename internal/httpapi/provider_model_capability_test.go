@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -16,6 +17,48 @@ import (
 // The model editor toggles image input through this handler, so the capability
 // must survive the real request path. Absence means enabled, which makes the
 // explicit false the value that has to be stored rather than deleted.
+func TestAddModelsDefaultsMaxOutputTokensAndAutoCompact(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	now := time.Now().UTC()
+	provider := domain.Provider{
+		ID: "provider-add-default", Name: "Default Provider", BaseURL: "https://api.example.com/v1",
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := database.UpsertProvider(ctx, provider); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{store: database}
+	body := `{"provider_id":"provider-add-default","backend":"claude","models":[{"id":"claude-kimi-k3","backend":"claude","wire_apis":["anthropic_messages"],"max_input_tokens":1048576,"max_output_tokens":1048576}]}`
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/providers/add-models", strings.NewReader(body))
+	recorder := httptest.NewRecorder()
+	server.addModelsHandler(recorder, request)
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("add models failed: status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var payload struct {
+		Models []domain.Model `json:"models"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Models) != 1 {
+		t.Fatalf("models=%#v", payload.Models)
+	}
+	model := payload.Models[0]
+	if model.MaxOutputTokens != 128_000 {
+		t.Fatalf("max output=%d, want 128000", model.MaxOutputTokens)
+	}
+	if model.AutoCompactWindow != 838_860 {
+		t.Fatalf("auto compact=%d, want 838860", model.AutoCompactWindow)
+	}
+}
+
 func TestUpdateModelHandlerStoresAutoCompactWindow(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

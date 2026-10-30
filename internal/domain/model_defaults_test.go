@@ -2,6 +2,29 @@ package domain
 
 import "testing"
 
+func TestDefaultMaxOutputTokens(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		context  int64
+		provided int64
+		want     int64
+	}{
+		{name: "equal to context", context: 1_048_576, provided: 1_048_576, want: 128_000},
+		{name: "missing output", context: 1_048_576, provided: 0, want: 128_000},
+		{name: "plausible output kept", context: 1_048_576, provided: 32_000, want: 32_000},
+		{name: "small window", context: 64_000, provided: 0, want: 64_000},
+		{name: "unknown context keeps provided", context: 0, provided: 16_000, want: 16_000},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := DefaultMaxOutputTokens(testCase.context, testCase.provided); got != testCase.want {
+				t.Fatalf("DefaultMaxOutputTokens(%d, %d) = %d, want %d", testCase.context, testCase.provided, got, testCase.want)
+			}
+		})
+	}
+}
+
 func TestDefaultAutoCompactWindow(t *testing.T) {
 	t.Parallel()
 	cases := []struct {

@@ -484,14 +484,15 @@ func (s *Server) addModelsHandler(writer http.ResponseWriter, request *http.Requ
 			writeError(writer, http.StatusInternalServerError, "create_env_group_failed")
 			return
 		}
+		maxOutputTokens := domain.DefaultMaxOutputTokens(pick.maxInputTokens, pick.maxOutputTokens)
 		autoCompactWindow := pick.autoCompactWindow
 		if autoCompactWindow <= 0 {
-			autoCompactWindow = domain.DefaultAutoCompactWindow(pick.maxInputTokens, pick.maxOutputTokens)
+			autoCompactWindow = domain.DefaultAutoCompactWindow(pick.maxInputTokens, maxOutputTokens)
 		}
 		item := domain.Model{
 			ID: domain.NewID("model"), DisplayName: pick.id, ProviderID: provider.ID, Source: "provider", Backend: backendName,
 			WireModel: pick.id, WireAPI: pick.wireAPI, DefaultEnvGroupID: envGroup.ID,
-			ContextWindow: pick.maxInputTokens, MaxOutputTokens: pick.maxOutputTokens,
+			ContextWindow: pick.maxInputTokens, MaxOutputTokens: maxOutputTokens,
 			AutoCompactWindow: autoCompactWindow,
 			Capabilities:      map[string]any{"supports_image_input": true}, CreatedAt: now, UpdatedAt: now,
 		}
@@ -595,7 +596,7 @@ func (s *Server) updateModel(writer http.ResponseWriter, request *http.Request) 
 		model.DefaultEffort = strings.TrimSpace(payload.DefaultEffort)
 	}
 	model.ContextWindow = payload.ContextWindow
-	model.MaxOutputTokens = payload.MaxOutputTokens
+	model.MaxOutputTokens = domain.DefaultMaxOutputTokens(payload.ContextWindow, payload.MaxOutputTokens)
 	if payload.AutoCompactWindow != nil {
 		model.AutoCompactWindow = *payload.AutoCompactWindow
 		if model.AutoCompactWindow < 0 {

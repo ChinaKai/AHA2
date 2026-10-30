@@ -20,6 +20,22 @@ func TestLastClaudeAssistantTextReturnsFinalReply(t *testing.T) {
 	}
 }
 
+func TestLastClaudeErrorTextReturnsSyntheticProviderError(t *testing.T) {
+	t.Parallel()
+	now := time.Now().UTC()
+	transcript := strings.Join([]string{
+		`{"type":"assistant","timestamp":"` + now.Format(time.RFC3339Nano) + `","isApiErrorMessage":true,"apiErrorStatus":403,"message":{"model":"<synthetic>","content":[{"type":"text","text":"API Error: 403 You've reached your concurrent request limit"}]}}`,
+		`{"type":"result","timestamp":"` + now.Format(time.RFC3339Nano) + `","subtype":"error_during_execution","error":"unknown"}`,
+	}, "\n")
+	if got := lastClaudeErrorText(transcript, now.Add(-time.Minute)); !strings.Contains(got, "concurrent request limit") {
+		t.Fatalf("error text=%q", got)
+	}
+	old := `{"type":"assistant","timestamp":"` + now.Add(-time.Hour).Format(time.RFC3339Nano) + `","isApiErrorMessage":true,"message":{"model":"<synthetic>","content":[{"type":"text","text":"old error"}]}}`
+	if got := lastClaudeErrorText(old, now.Add(-time.Minute)); got != "" {
+		t.Fatalf("old error was reused: %q", got)
+	}
+}
+
 func TestLastClaudeAssistantTextRejectsIncompleteTurn(t *testing.T) {
 	t.Parallel()
 	now := time.Now().UTC()

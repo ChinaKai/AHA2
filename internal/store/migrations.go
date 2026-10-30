@@ -3104,5 +3104,28 @@ func (s *Store) migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(96, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
 		return fmt.Errorf("record schema v96: %w", err)
 	}
+	var hasV97 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=97)`).Scan(&hasV97)
+	if !hasV97 {
+		// Some catalogs report the context window as the output budget. That
+		// leaves no room for the completion and inflates the model metadata;
+		// clamp those rows to the standard 128K default and recompute the
+		// auto-compact window from the corrected budget.
+		if _, err := s.db.ExecContext(ctx, `
+			UPDATE models SET
+				max_output_tokens = MIN(128000, context_window),
+				auto_compact_window = CASE
+					WHEN context_window - MIN(128000, context_window) - 16000 > 0
+						AND context_window - MIN(128000, context_window) - 16000 < context_window * 80 / 100
+					THEN context_window - MIN(128000, context_window) - 16000
+					ELSE context_window * 80 / 100
+				END
+			WHERE context_window > 0 AND max_output_tokens >= context_window`); err != nil {
+			return fmt.Errorf("apply schema v97: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(97, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v97: %w", err)
+	}
 	return nil
 }

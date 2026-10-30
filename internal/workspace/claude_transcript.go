@@ -57,7 +57,7 @@ func ClaudeDefaultConfigDirOn(ctx context.Context, runner Runner) string {
 			Args: []string{"-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
 				`[Console]::Out.Write($env:USERPROFILE)`},
 			Timeout: 20 * time.Second,
-		}, nil)
+		}, func(string) {})
 		if err != nil || result.ExitCode != 0 {
 			return ""
 		}
@@ -71,7 +71,7 @@ func ClaudeDefaultConfigDirOn(ctx context.Context, runner Runner) string {
 		Executable: "sh",
 		Args:       []string{"-c", `printf '%s' "${HOME:-}/.claude"`},
 		Timeout:    15 * time.Second,
-	}, nil)
+	}, func(string) {})
 	if err == nil && result.ExitCode == 0 {
 		if directory := strings.TrimSpace(result.Stdout); directory != "" && directory != "/.claude" {
 			return directory
@@ -103,7 +103,7 @@ func ClaudeTranscriptExists(ctx context.Context, runner Runner, configDir, workD
 	} else {
 		command = Command{Executable: "test", Args: []string{"-f", target}, Timeout: 15 * time.Second}
 	}
-	result, err := runner.Run(ctx, command, nil)
+	result, err := runner.Run(ctx, command, func(string) {})
 	if err != nil || result.ExitCode != 0 {
 		return false
 	}
@@ -120,6 +120,19 @@ func ClaudeTranscriptExists(ctx context.Context, runner Runner, configDir, workD
 // and it returns "" when the final record is a tool call/result, so an
 // incomplete turn is not reported as a successful reply.
 func ClaudeTranscriptLastAssistantText(ctx context.Context, runner Runner, configDir, workDir, sessionID string, since time.Time) string {
+	return lastClaudeAssistantText(claudeTranscriptTail(ctx, runner, configDir, workDir, sessionID), since)
+}
+
+// ClaudeTranscriptLastErrorText returns the most recent provider error written
+// to the session transcript after since. The CLI sometimes reports a provider
+// failure only as a synthetic assistant message in the transcript, while the
+// process exits non-zero; using that text keeps the original error visible
+// instead of a generic "claude exited with code N".
+func ClaudeTranscriptLastErrorText(ctx context.Context, runner Runner, configDir, workDir, sessionID string, since time.Time) string {
+	return lastClaudeErrorText(claudeTranscriptTail(ctx, runner, configDir, workDir, sessionID), since)
+}
+
+func claudeTranscriptTail(ctx context.Context, runner Runner, configDir, workDir, sessionID string) string {
 	if strings.TrimSpace(configDir) == "" || strings.TrimSpace(sessionID) == "" {
 		return ""
 	}
@@ -136,11 +149,13 @@ func ClaudeTranscriptLastAssistantText(ctx context.Context, runner Runner, confi
 	} else {
 		command = Command{Executable: "tail", Args: []string{"-n", "400", target}, Timeout: 15 * time.Second}
 	}
-	result, err := runner.Run(ctx, command, nil)
+	// A no-op handler rather than nil keeps simple test runners that forward
+	// every stdout line safe; real runners ignore the handler when nil anyway.
+	result, err := runner.Run(ctx, command, func(string) {})
 	if err != nil || result.ExitCode != 0 {
 		return ""
 	}
-	return lastClaudeAssistantText(result.Stdout, since)
+	return result.Stdout
 }
 
 // lastClaudeAssistantText walks the transcript tail backwards and decides what
@@ -208,4 +223,70 @@ func lastClaudeAssistantText(output string, since time.Time) string {
 		return strings.TrimSpace(strings.Join(texts, "\n"))
 	}
 	return ""
+}
+
+func lastClaudeErrorText(output string, since time.Time) string {
+	lines := strings.Split(output, "\n")
+	for index := len(lines) - 1; index >= 0; index-- {
+		line := strings.TrimSpace(lines[index])
+		if line == "" {
+			continue
+		}
+		var record struct {
+			Type              string `json:"type"`
+			Timestamp         string `json:"timestamp"`
+			IsAPIErrorMessage bool   `json:"isApiErrorMessage"`
+			IsSidechain       bool   `json:"isSidechain"`
+			Error             string `json:"error"`
+			Subtype           string `json:"subtype"`
+			Result            string `json:"result"`
+			Message           struct {
+				Model   string `json:"model"`
+				Content []struct {
+					Type string `json:"type"`
+					Text string `json:"text"`
+				} `json:"content"`
+			} `json:"message"`
+		}
+		if json.Unmarshal([]byte(line), &record) != nil {
+			continue
+		}
+		if record.IsSidechain {
+			continue
+		}
+		if record.Timestamp != "" {
+			timestamp, err := time.Parse(time.RFC3339Nano, record.Timestamp)
+			if err == nil && timestamp.Before(since) {
+				return ""
+			}
+		}
+		text := assistantRecordText(record.Message.Content)
+		if record.IsAPIErrorMessage || record.Message.Model == "<synthetic>" {
+			if text != "" {
+				return text
+			}
+		}
+		if record.Type == "result" {
+			if message := strings.TrimSpace(record.Error); message != "" && message != "unknown" {
+				return message
+			}
+			if strings.TrimSpace(record.Result) != "" && record.Subtype != "success" {
+				return record.Result
+			}
+		}
+	}
+	return ""
+}
+
+func assistantRecordText(content []struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}) string {
+	parts := make([]string, 0, len(content))
+	for _, block := range content {
+		if block.Type == "text" && strings.TrimSpace(block.Text) != "" {
+			parts = append(parts, block.Text)
+		}
+	}
+	return strings.TrimSpace(strings.Join(parts, "\n"))
 }

@@ -121,7 +121,7 @@ func (adapter DSH) Execute(ctx context.Context, request Request, emit func(Event
 		if message == "" {
 			message = fmt.Sprintf("dsh exited with code %d", result.ExitCode)
 		}
-		return Result{Reply: reply, ExitCode: result.ExitCode, ProviderSessionID: sessionID}, fmt.Errorf("%s", tail(message, 2000))
+		return Result{Reply: reply, ExitCode: result.ExitCode, ProviderSessionID: sessionID}, fmt.Errorf("%s", clipError(message, 8000))
 	}
 	if strings.TrimSpace(reply) == "" {
 		return Result{ExitCode: result.ExitCode, ProviderSessionID: sessionID}, fmt.Errorf("dsh returned no agent message")

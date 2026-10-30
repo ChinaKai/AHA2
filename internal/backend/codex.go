@@ -144,7 +144,7 @@ func (adapter Codex) Execute(ctx context.Context, request Request, emit func(Eve
 		if message == "" {
 			message = fmt.Sprintf("codex exited with code %d", result.ExitCode)
 		}
-		message = tail(message, 2000)
+		message = clipError(message, 8000)
 		return Result{Reply: reply, ExitCode: result.ExitCode, ProviderSessionID: sessionID}, fmt.Errorf("%s", message)
 	}
 	if strings.TrimSpace(reply) == "" {
