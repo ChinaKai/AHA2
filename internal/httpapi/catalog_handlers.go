@@ -547,6 +547,7 @@ func (s *Server) createModel(writer http.ResponseWriter, request *http.Request) 
 		WireAPI           string `json:"wire_api"`
 		ContextWindow     int64  `json:"context_window"`
 		MaxOutputTokens   int64  `json:"max_output_tokens"`
+		AutoCompactWindow int64  `json:"auto_compact_window"`
 		DefaultEffort     string `json:"default_reasoning_effort"`
 		DefaultEnvGroupID string `json:"default_env_group_id"`
 	}
@@ -563,11 +564,16 @@ func (s *Server) createModel(writer http.ResponseWriter, request *http.Request) 
 		return
 	}
 	now := time.Now().UTC()
+	autoCompactWindow := payload.AutoCompactWindow
+	if autoCompactWindow <= 0 {
+		autoCompactWindow = domain.DefaultAutoCompactWindow(payload.ContextWindow, payload.MaxOutputTokens)
+	}
 	item := domain.Model{
 		ID: domain.NewID("model"), DisplayName: payload.DisplayName, ProviderID: payload.ProviderID,
 		Backend: payload.Backend, WireModel: payload.WireModel, WireAPI: strings.TrimSpace(payload.WireAPI),
 		ContextWindow: payload.ContextWindow, MaxOutputTokens: payload.MaxOutputTokens,
-		DefaultEffort: strings.TrimSpace(payload.DefaultEffort), DefaultEnvGroupID: strings.TrimSpace(payload.DefaultEnvGroupID),
+		AutoCompactWindow: autoCompactWindow,
+		DefaultEffort:     strings.TrimSpace(payload.DefaultEffort), DefaultEnvGroupID: strings.TrimSpace(payload.DefaultEnvGroupID),
 		Capabilities: map[string]any{}, CreatedAt: now, UpdatedAt: now,
 	}
 	if item.DefaultEnvGroupID != "" {

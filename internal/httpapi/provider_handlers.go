@@ -383,12 +383,13 @@ func (s *Server) addModelsHandler(writer http.ResponseWriter, request *http.Requ
 		AnthropicBaseURL string   `json:"anthropic_base_url"`
 		ModelIDs         []string `json:"model_ids"`
 		Models           []struct {
-			ID              string   `json:"id"`
-			Backend         string   `json:"backend"`
-			WireAPI         string   `json:"wire_api"`
-			WireAPIs        []string `json:"wire_apis"`
-			MaxInputTokens  int64    `json:"max_input_tokens"`
-			MaxOutputTokens int64    `json:"max_output_tokens"`
+			ID                string   `json:"id"`
+			Backend           string   `json:"backend"`
+			WireAPI           string   `json:"wire_api"`
+			WireAPIs          []string `json:"wire_apis"`
+			MaxInputTokens    int64    `json:"max_input_tokens"`
+			MaxOutputTokens   int64    `json:"max_output_tokens"`
+			AutoCompactWindow int64    `json:"auto_compact_window"`
 		} `json:"models"`
 	}
 	if err := decodeJSON(request, &payload); err != nil {
@@ -406,11 +407,12 @@ func (s *Server) addModelsHandler(writer http.ResponseWriter, request *http.Requ
 		_ = s.store.UpsertProvider(request.Context(), provider)
 	}
 	type pick struct {
-		id              string
-		wireAPI         string
-		backend         string
-		maxInputTokens  int64
-		maxOutputTokens int64
+		id                string
+		wireAPI           string
+		backend           string
+		maxInputTokens    int64
+		maxOutputTokens   int64
+		autoCompactWindow int64
 	}
 	var picks []pick
 	seenPick := make(map[string]bool)
@@ -437,7 +439,7 @@ func (s *Server) addModelsHandler(writer http.ResponseWriter, request *http.Requ
 				continue
 			}
 			seenPick[key] = true
-			picks = append(picks, pick{id: id, wireAPI: wire, backend: backend, maxInputTokens: item.MaxInputTokens, maxOutputTokens: item.MaxOutputTokens})
+			picks = append(picks, pick{id: id, wireAPI: wire, backend: backend, maxInputTokens: item.MaxInputTokens, maxOutputTokens: item.MaxOutputTokens, autoCompactWindow: item.AutoCompactWindow})
 		}
 	}
 	if len(picks) == 0 {
@@ -482,11 +484,16 @@ func (s *Server) addModelsHandler(writer http.ResponseWriter, request *http.Requ
 			writeError(writer, http.StatusInternalServerError, "create_env_group_failed")
 			return
 		}
+		autoCompactWindow := pick.autoCompactWindow
+		if autoCompactWindow <= 0 {
+			autoCompactWindow = domain.DefaultAutoCompactWindow(pick.maxInputTokens, pick.maxOutputTokens)
+		}
 		item := domain.Model{
 			ID: domain.NewID("model"), DisplayName: pick.id, ProviderID: provider.ID, Source: "provider", Backend: backendName,
 			WireModel: pick.id, WireAPI: pick.wireAPI, DefaultEnvGroupID: envGroup.ID,
 			ContextWindow: pick.maxInputTokens, MaxOutputTokens: pick.maxOutputTokens,
-			Capabilities: map[string]any{"supports_image_input": true}, CreatedAt: now, UpdatedAt: now,
+			AutoCompactWindow: autoCompactWindow,
+			Capabilities:      map[string]any{"supports_image_input": true}, CreatedAt: now, UpdatedAt: now,
 		}
 		if err := s.store.UpsertModel(request.Context(), item); err != nil {
 			writeError(writer, http.StatusInternalServerError, "create_model_failed")
@@ -551,7 +558,11 @@ func (s *Server) updateModel(writer http.ResponseWriter, request *http.Request) 
 		Backend         string `json:"backend"`
 		ContextWindow   int64  `json:"context_window"`
 		MaxOutputTokens int64  `json:"max_output_tokens"`
-		DefaultEffort   string `json:"default_reasoning_effort"`
+		// AutoCompactWindow is a pointer so an update that only renames the
+		// model keeps the stored threshold; an explicit 0 means "leave it to
+		// the CLI" and must not be replaced by a computed default here.
+		AutoCompactWindow *int64 `json:"auto_compact_window"`
+		DefaultEffort     string `json:"default_reasoning_effort"`
 		// SupportsImageInput is a pointer so an update that only renames the
 		// model keeps the stored capability. Unset means enabled by default;
 		// an explicit false is what turns image input off.
@@ -585,6 +596,15 @@ func (s *Server) updateModel(writer http.ResponseWriter, request *http.Request) 
 	}
 	model.ContextWindow = payload.ContextWindow
 	model.MaxOutputTokens = payload.MaxOutputTokens
+	if payload.AutoCompactWindow != nil {
+		model.AutoCompactWindow = *payload.AutoCompactWindow
+		if model.AutoCompactWindow < 0 {
+			model.AutoCompactWindow = 0
+		}
+		if model.AutoCompactWindow > model.ContextWindow && model.ContextWindow > 0 {
+			model.AutoCompactWindow = model.ContextWindow
+		}
+	}
 	if payload.SupportsImageInput != nil {
 		if model.Capabilities == nil {
 			model.Capabilities = map[string]any{}

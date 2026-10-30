@@ -301,6 +301,7 @@ func filterClaudeEnvironment(values map[string]string) map[string]string {
 	allowed := map[string]bool{
 		"ANTHROPIC_API_KEY": true, "ANTHROPIC_AUTH_TOKEN": true, "ANTHROPIC_BASE_URL": true,
 		"ANTHROPIC_MODEL": true, "CLAUDE_CODE_MAX_CONTEXT_TOKENS": true,
+		"CLAUDE_CODE_AUTO_COMPACT_WINDOW": true,
 		// The variable Claude Code reads to authenticate as the operator's own
 		// account. A machine whose login lives in a shell profile has it nowhere
 		// else, so dropping it here would leave detection reporting a login the

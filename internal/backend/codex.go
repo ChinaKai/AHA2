@@ -268,12 +268,16 @@ func (adapter Codex) ensureModelCatalog(ctx context.Context, request Request) st
 		maxWindow = request.ContextWindow
 	}
 	entry["max_context_window"] = maxWindow
-	delete(entry, "auto_compact_token_limit")
+	if request.AutoCompactWindow > 0 {
+		entry["auto_compact_token_limit"] = request.AutoCompactWindow
+	} else {
+		delete(entry, "auto_compact_token_limit")
+	}
 	payload, err := json.MarshalIndent(map[string]any{"models": []map[string]any{entry}}, "", "  ")
 	if err != nil {
 		return ""
 	}
-	sum := sha256.Sum256([]byte(fmt.Sprintf("%s:%d", request.Model, request.ContextWindow)))
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%s:%d:%d", request.Model, request.ContextWindow, request.AutoCompactWindow)))
 	name := fmt.Sprintf("%x.json", sum[:8])
 	if local {
 		path := filepath.Join(request.WorkDir, ".aha2-context", "runtime", "codex-models", name)

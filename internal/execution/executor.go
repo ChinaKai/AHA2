@@ -76,6 +76,7 @@ func newBackendRequest(request app.ExecutionRequest, model string, environment m
 		Runner:  workspace.RunnerFor(request.Workspace),
 		WorkDir: taskWorkDir(request),
 		Model:   model, WireAPI: request.Model.WireAPI, ContextWindow: request.Model.ContextWindow,
+		AutoCompactWindow:  request.Model.AutoCompactWindow,
 		ReasoningEffort:    request.Snapshot.ReasoningEffort,
 		SupportsImageInput: modelSupportsImageInput(request.Model),
 		FastMode:           request.Snapshot.FastMode,
@@ -123,6 +124,9 @@ func (executor Executor) runClaude(ctx context.Context, adapter backend.Claude, 
 	environment = lendNativeClaudeCredential(ctx, request, environment)
 	if request.Model.ContextWindow > 0 && environment["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "" {
 		environment["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = strconv.FormatInt(request.Model.ContextWindow, 10)
+	}
+	if request.Model.AutoCompactWindow > 0 && environment["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "" {
+		environment["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = strconv.FormatInt(request.Model.AutoCompactWindow, 10)
 	}
 	workDir := taskWorkDir(request)
 	home, _ := workspace.SessionHomeFor(workspace.SessionHomeInput{

@@ -988,6 +988,7 @@ CREATE TABLE IF NOT EXISTS models (
     wire_api TEXT NOT NULL DEFAULT '',
     context_window INTEGER NOT NULL DEFAULT 0,
     max_output_tokens INTEGER NOT NULL DEFAULT 0,
+    auto_compact_window INTEGER NOT NULL DEFAULT 0,
     default_effort TEXT NOT NULL DEFAULT '',
     capabilities_json TEXT NOT NULL DEFAULT '{}',
     default_env_group_id TEXT NOT NULL DEFAULT '',
@@ -3077,6 +3078,31 @@ func (s *Store) migrate(ctx context.Context) error {
 	}
 	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(95, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
 		return fmt.Errorf("record schema v95: %w", err)
+	}
+	var hasV96 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=96)`).Scan(&hasV96)
+	if !hasV96 {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE models ADD COLUMN auto_compact_window INTEGER NOT NULL DEFAULT 0`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("apply schema v96: %w", err)
+		}
+		// Existing models had no compaction setting; seed the same 80%-with-
+		// output-headroom default that new models receive. The CLI still treats
+		// this as an upper bound and caps it to the model's own window.
+		if _, err := s.db.ExecContext(ctx, `
+			UPDATE models SET auto_compact_window = CASE
+				WHEN context_window <= 0 THEN 0
+				WHEN max_output_tokens > 0
+					AND context_window - max_output_tokens - 16000 > 0
+					AND context_window - max_output_tokens - 16000 < context_window * 80 / 100
+				THEN context_window - max_output_tokens - 16000
+				ELSE context_window * 80 / 100
+			END
+			WHERE auto_compact_window = 0`); err != nil {
+			return fmt.Errorf("seed auto compact window: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(96, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v96: %w", err)
 	}
 	return nil
 }

@@ -2453,7 +2453,7 @@ function modelsView(): string {
     <span class="status ${item.credential_configured ? "good" : "warn"}">${item.credential_configured ? "Key Ready" : "No Key"}</span>
     <span class="row-actions"><button type="button" data-edit-provider="${item.id}" class="icon-button" title="编辑 Provider">${icon("edit")}</button><button type="button" data-delete-provider="${item.id}" class="icon-button" title="删除 Provider">${icon("close")}</button></span>
   </article>`).join("");
-  const models = state.models.map(item => `<tr><td><strong>${escapeHTML(item.display_name)}${modelSupportsImage(item) ? '<span class="capability-badge">图片</span>' : ''}</strong><small>${escapeHTML(item.wire_model)}</small></td><td><strong>${escapeHTML(item.provider_name || item.provider_id)}</strong><small>${escapeHTML(item.provider_id)}</small></td><td>${escapeHTML(backendProtocolLabel(item))}</td><td>${item.context_window ? Math.round(item.context_window / 1000) + "K" : "-"}</td><td class="row-actions"><button type="button" data-edit-model="${item.id}" class="icon-button" title="编辑模型">${icon("edit")}</button><button type="button" data-delete-model="${item.id}" class="icon-button" title="删除模型">${icon("close")}</button></td></tr>`).join("");
+  const models = state.models.map(item => `<tr><td><strong>${escapeHTML(item.display_name)}${modelSupportsImage(item) ? '<span class="capability-badge">图片</span>' : ''}</strong><small>${escapeHTML(item.wire_model)}</small></td><td><strong>${escapeHTML(item.provider_name || item.provider_id)}</strong><small>${escapeHTML(item.provider_id)}</small></td><td>${escapeHTML(backendProtocolLabel(item))}</td><td>${item.context_window ? Math.round(item.context_window / 1000) + "K" : "-"}${item.auto_compact_window ? `<small>自动压缩 ${Math.round(item.auto_compact_window / 1000)}K</small>` : ""}</td><td class="row-actions"><button type="button" data-edit-model="${item.id}" class="icon-button" title="编辑模型">${icon("edit")}</button><button type="button" data-delete-model="${item.id}" class="icon-button" title="删除模型">${icon("close")}</button></td></tr>`).join("");
   return shell(`<section class="page">
     ${pageHead("模型", "Models 管理 Provider / Env 模型与 Agent Backend；Codex 与 Claude Code 官方账号在创建或编辑 Task 时选择。")}
     <div class="provider-layout">
@@ -2578,7 +2578,7 @@ function modelDialog(): string {
 }
 
 function editModelDialog(): string {
-  return `<dialog id="model-edit-dialog"><div class="dialog-head"><h2>编辑模型</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div><div class="dialog-body"><label>显示名称<input id="model-edit-name"></label><label>模型 ID（发送给后端）<input id="model-edit-wire-model" spellcheck="false"><span class="field-help">决定实际调用的模型；Claude 走网关且需要 1M 上下文时，在此追加 [1m]。</span></label><div class="two"><label>模型协议<select id="model-edit-wire"><option value="responses">Responses</option><option value="chat">Chat Completions</option><option value="anthropic_messages">Anthropic Messages</option></select></label><label>Agent Backend<select id="model-edit-backend"><option value="codex">Codex</option><option value="claude">Claude Code</option><option value="dsh">DSH</option></select></label></div><div class="two"><label>默认推理强度<select id="model-edit-effort"><option value="">继承默认</option><option>high</option><option>medium</option><option>low</option></select></label><label>Context Window<input id="model-edit-context" type="number" value="0"></label></div><label>Max Output Tokens<input id="model-edit-maxout" type="number" value="0"></label><label class="security-setting-toggle"><input id="model-edit-image" type="checkbox"><span><strong>支持图片输入</strong><small>默认开启；仅当该模型确实不能接收图片时关闭。DSH 会据此在 profile 里声明 input 模态。</small></span></label><div class="dialog-actions"><button type="button" data-close>取消</button><button type="button" id="save-model-edit" class="primary">保存</button></div></div></dialog>`;
+  return `<dialog id="model-edit-dialog"><div class="dialog-head"><h2>编辑模型</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div><div class="dialog-body"><label>显示名称<input id="model-edit-name"></label><label>模型 ID（发送给后端）<input id="model-edit-wire-model" spellcheck="false"><span class="field-help">决定实际调用的模型；Claude 走网关且需要 1M 上下文时，在此追加 [1m]。</span></label><div class="two"><label>模型协议<select id="model-edit-wire"><option value="responses">Responses</option><option value="chat">Chat Completions</option><option value="anthropic_messages">Anthropic Messages</option></select></label><label>Agent Backend<select id="model-edit-backend"><option value="codex">Codex</option><option value="claude">Claude Code</option><option value="dsh">DSH</option></select></label></div><div class="two"><label>默认推理强度<select id="model-edit-effort"><option value="">继承默认</option><option>high</option><option>medium</option><option>low</option></select></label><label>Context Window<input id="model-edit-context" type="number" value="0"></label></div><label>Max Output Tokens<input id="model-edit-maxout" type="number" value="0"></label><label>自动压缩窗口（tokens）<input id="model-edit-compact" type="number" min="0" step="1000" value="0"><span class="field-help">按上下文窗口的 80% 计算，并预留最大输出与 16K 余量；0 表示交给 Agent CLI 自己决定。Claude Code 和 Codex 会读取该值。</span></label><label class="security-setting-toggle"><input id="model-edit-image" type="checkbox"><span><strong>支持图片输入</strong><small>默认开启；仅当该模型确实不能接收图片时关闭。DSH 会据此在 profile 里声明 input 模态。</small></span></label><div class="dialog-actions"><button type="button" data-close>取消</button><button type="button" id="save-model-edit" class="primary">保存</button></div></div></dialog>`;
 }
 
 function workspaceTakeoverDialog(): string {
@@ -4204,6 +4204,7 @@ function bindCommon(): void {
     const effortInput = document.querySelector<HTMLSelectElement>("#model-edit-effort");
     const contextInput = document.querySelector<HTMLInputElement>("#model-edit-context");
     const maxoutInput = document.querySelector<HTMLInputElement>("#model-edit-maxout");
+    const compactInput = document.querySelector<HTMLInputElement>("#model-edit-compact");
     const imageInput = document.querySelector<HTMLInputElement>("#model-edit-image");
     if (nameInput) nameInput.value = model.display_name;
     const wireModelInput = document.querySelector<HTMLInputElement>("#model-edit-wire-model");
@@ -4216,6 +4217,7 @@ function bindCommon(): void {
     if (effortInput) effortInput.value = model.default_reasoning_effort || "";
     if (contextInput) contextInput.value = String(model.context_window || 0);
     if (maxoutInput) maxoutInput.value = String(model.max_output_tokens || 0);
+    if (compactInput) compactInput.value = String(model.auto_compact_window || 0);
     if (imageInput) imageInput.checked = modelSupportsImage(model);
     (document.querySelector<HTMLDialogElement>("#model-edit-dialog"))?.showModal();
     document.querySelector<HTMLElement>("#save-model-edit")?.setAttribute("data-model-id", id);
@@ -4236,6 +4238,7 @@ function bindCommon(): void {
         backend: String((document.querySelector<HTMLSelectElement>("#model-edit-backend"))?.value || ""),
         context_window: Number((document.querySelector<HTMLInputElement>("#model-edit-context"))?.value || 0),
         max_output_tokens: Number((document.querySelector<HTMLInputElement>("#model-edit-maxout"))?.value || 0),
+        auto_compact_window: Number((document.querySelector<HTMLInputElement>("#model-edit-compact"))?.value || 0),
         default_reasoning_effort: String((document.querySelector<HTMLSelectElement>("#model-edit-effort"))?.value || ""),
         supports_image_input: Boolean((document.querySelector<HTMLInputElement>("#model-edit-image"))?.checked),
       });

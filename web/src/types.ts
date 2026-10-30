@@ -213,6 +213,7 @@ export interface Model {
   wire_api?: string;
   context_window?: number;
   max_output_tokens?: number;
+  auto_compact_window?: number;
   default_reasoning_effort?: string;
   /** Model capability metadata; supports_image_input defaults to enabled. */
   capabilities?: Record<string, unknown>;

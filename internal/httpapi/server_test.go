@@ -348,7 +348,7 @@ func TestCatalogProjectTypeAndManualModels(t *testing.T) {
 
 	response = requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/models", map[string]any{
 		"display_name": "Opus", "provider_id": "anthropic", "backend": "codex", "wire_model": "claude-opus-5",
-		"default_env_group_id": envGroupID,
+		"default_env_group_id": envGroupID, "context_window": 200000, "max_output_tokens": 32000,
 	}, csrf)
 	var model map[string]any
 	decodeResponse(t, response, &model)
@@ -357,6 +357,9 @@ func TestCatalogProjectTypeAndManualModels(t *testing.T) {
 	}
 	if _, present := model["model"].(map[string]any)["default_env_group_id"]; present {
 		t.Fatalf("default_env_group_id leaked to browser: %v", model)
+	}
+	if got := model["model"].(map[string]any)["auto_compact_window"]; got != float64(152000) {
+		t.Fatalf("manual model creation did not default the auto compact window: %v", model)
 	}
 	if err := database.UpsertModel(ctx, domain.Model{
 		ID: "model-hidden-official", DisplayName: "Hidden Official", ProviderID: domain.OfficialCodexProviderID,
@@ -719,6 +722,12 @@ func TestAddModelsGeneratesEnvGroupsAndSecrets(t *testing.T) {
 	}
 	if models[0].(map[string]any)["context_window"] != float64(128000) || models[0].(map[string]any)["max_output_tokens"] != float64(16000) {
 		t.Fatalf("detected token limits were not persisted: %#v", models[0])
+	}
+	if models[0].(map[string]any)["auto_compact_window"] != float64(96000) {
+		t.Fatalf("auto compact window did not reserve the output budget: %#v", models[0])
+	}
+	if models[1].(map[string]any)["auto_compact_window"] != float64(51200) {
+		t.Fatalf("auto compact window did not default to 80%%: %#v", models[1])
 	}
 	if models[0].(map[string]any)["backend"] != "dsh" || models[1].(map[string]any)["backend"] != "codex" {
 		t.Fatalf("per-model backend selection was not applied: %#v %#v", models[0], models[1])

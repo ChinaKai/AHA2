@@ -196,6 +196,7 @@ type Model struct {
 	WireAPI           string         `json:"wire_api,omitempty"`
 	ContextWindow     int64          `json:"context_window,omitempty"`
 	MaxOutputTokens   int64          `json:"max_output_tokens,omitempty"`
+	AutoCompactWindow int64          `json:"auto_compact_window,omitempty"`
 	DefaultEffort     string         `json:"default_reasoning_effort,omitempty"`
 	Capabilities      map[string]any `json:"capabilities,omitempty"`
 	DefaultEnvGroupID string         `json:"-"`

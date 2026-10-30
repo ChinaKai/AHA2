@@ -77,11 +77,11 @@ function syncPayloadSummary(objectType: string, raw: unknown): SyncPayloadSummar
   }
   const title = String(data.title || data.display_name || data.name || data.id || "").trim();
   const labels: Record<string, string> = {
-    backend: "Backend", wire_api: "协议", context_window: "上下文", max_output_tokens: "最大输出",
+    backend: "Backend", wire_api: "协议", context_window: "上下文", max_output_tokens: "最大输出", auto_compact_window: "自动压缩",
     updated_at: "更新时间", scope: "范围", project_id: "项目", status: "状态", project_type: "类型",
   };
   const order = objectType === "model"
-    ? ["backend", "wire_api", "context_window", "max_output_tokens", "updated_at"]
+    ? ["backend", "wire_api", "context_window", "max_output_tokens", "auto_compact_window", "updated_at"]
     : objectType === "knowledge"
       ? ["scope", "project_id", "updated_at"]
       : objectType === "project"

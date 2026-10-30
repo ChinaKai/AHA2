@@ -383,3 +383,18 @@ func TestClaudeAdapterPassesOperatorLoginToTheBackend(t *testing.T) {
 		t.Fatalf("backend received %q, want the operator's login", got)
 	}
 }
+
+func TestClaudeAdapterPassesAutoCompactWindow(t *testing.T) {
+	t.Parallel()
+	runner := &claudeEnvRunner{}
+	if _, err := (Claude{}).Execute(context.Background(), Request{
+		Runner:      runner,
+		WorkDir:     t.TempDir(),
+		Environment: map[string]string{"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "800000"},
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := runner.env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"]; got != "800000" {
+		t.Fatalf("backend received auto-compact window %q, want 800000", got)
+	}
+}

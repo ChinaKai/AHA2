@@ -23,7 +23,7 @@ func TestBackendRequestCarriesTheAgentAPIForwardForEveryBackend(t *testing.T) {
 		Task:      domain.Task{ID: "task-1", WorkspaceID: "ws-1"},
 		Workspace: domain.Workspace{ID: "ws-1", Transport: "native"},
 		Snapshot:  domain.RuntimeConfigSnapshot{ReasoningEffort: "low"},
-		Model:     domain.Model{WireModel: "claude-x", ContextWindow: 200000},
+		Model:     domain.Model{WireModel: "claude-x", ContextWindow: 200000, AutoCompactWindow: 160000},
 		Prompt:    "hello", ProviderSessionID: "session-1",
 		AgentAPIForward: forward,
 	}
@@ -42,8 +42,8 @@ func TestBackendRequestCarriesTheAgentAPIForwardForEveryBackend(t *testing.T) {
 	if built.Prompt != "hello" || built.ProviderSessionID != "session-1" {
 		t.Fatalf("shared fields were lost: prompt=%q session=%q", built.Prompt, built.ProviderSessionID)
 	}
-	if built.Model != "claude-x" || built.ContextWindow != 200000 {
-		t.Fatalf("model fields were lost: model=%q window=%d", built.Model, built.ContextWindow)
+	if built.Model != "claude-x" || built.ContextWindow != 200000 || built.AutoCompactWindow != 160000 {
+		t.Fatalf("model fields were lost: model=%q window=%d compact=%d", built.Model, built.ContextWindow, built.AutoCompactWindow)
 	}
 	if built.Environment["AHA2_AGENT_API_URL"] != "http://127.0.0.1:9" {
 		t.Fatalf("environment was lost: %#v", built.Environment)
