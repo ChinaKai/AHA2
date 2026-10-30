@@ -123,10 +123,7 @@ func (adapter Claude) Execute(ctx context.Context, request Request, emit func(Ev
 	configDir := ""
 	transcriptError := ""
 	if result.ExitCode != 0 || strings.TrimSpace(reply) == "" {
-		configDir = strings.TrimSpace(request.Environment["CLAUDE_CONFIG_DIR"])
-		if configDir == "" {
-			configDir = workspace.ClaudeDefaultConfigDirOn(ctx, request.Runner)
-		}
+		configDir = claudeTranscriptDir(ctx, request)
 		transcriptError = workspace.ClaudeTranscriptLastErrorText(ctx, request.Runner, configDir, request.WorkDir, sessionID, since)
 	}
 	if result.ExitCode != 0 {
@@ -318,6 +315,16 @@ func claudeAssistantText(payload map[string]any) string {
 // resumed context no longer fits. The LiteLLM gateway used by this project
 // returns a ContextWindowExceededError or "maximum context length" text; the
 // other forms cover Anthropic-compatible gateways that phrase it differently.
+func claudeTranscriptDir(ctx context.Context, request Request) string {
+	if dir := strings.TrimSpace(request.ClaudeConfigDir); dir != "" {
+		return dir
+	}
+	if dir := strings.TrimSpace(request.Environment["CLAUDE_CONFIG_DIR"]); dir != "" {
+		return dir
+	}
+	return workspace.ClaudeDefaultConfigDirOn(ctx, request.Runner)
+}
+
 func claudeContextWindowExceeded(message string) bool {
 	lower := strings.ToLower(message)
 	switch {

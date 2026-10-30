@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -350,6 +353,41 @@ func TestClaudeShowsProviderErrorFromTranscriptOnExitOne(t *testing.T) {
 	}, nil)
 	if err == nil || !strings.Contains(err.Error(), "concurrent request limit") || strings.Contains(err.Error(), "claude exited with code 1") {
 		t.Fatalf("provider error was not surfaced: %v", err)
+	}
+}
+
+type claudeNoInitTranscriptRunner struct{}
+
+func (claudeNoInitTranscriptRunner) Run(ctx context.Context, command workspace.Command, onLine workspace.LineHandler) (workspace.Result, error) {
+	switch command.Executable {
+	case "sh", "tail", "powershell.exe":
+		return workspace.LocalRunner{}.Run(ctx, command, onLine)
+	default:
+		return workspace.Result{ExitCode: 1}, nil
+	}
+}
+
+func (claudeNoInitTranscriptRunner) DetectedPlatform() string { return runtime.GOOS }
+
+func TestClaudeFindsTranscriptErrorWithoutSessionID(t *testing.T) {
+	t.Parallel()
+	workDir := t.TempDir()
+	configDir := t.TempDir()
+	projectDir := filepath.Join(configDir, "projects", workspace.ClaudeProjectSlug(workDir))
+	if err := os.MkdirAll(projectDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	transcript := `{"type":"assistant","timestamp":"` + time.Now().UTC().Format(time.RFC3339Nano) + `","isApiErrorMessage":true,"apiErrorStatus":403,"message":{"model":"<synthetic>","content":[{"type":"text","text":"API Error: 403 You've reached your concurrent request limit"}]}}`
+	if err := os.WriteFile(filepath.Join(projectDir, "orphan-session.jsonl"), []byte(transcript), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := (Claude{}).Execute(context.Background(), Request{
+		Runner:          claudeNoInitTranscriptRunner{},
+		WorkDir:         workDir,
+		ClaudeConfigDir: configDir,
+	}, nil)
+	if err == nil || !strings.Contains(err.Error(), "concurrent request limit") || strings.Contains(err.Error(), "claude exited with code 1") {
+		t.Fatalf("provider error was not surfaced without a session id: %v", err)
 	}
 }
 

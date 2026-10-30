@@ -1,6 +1,9 @@
 package workspace
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +20,25 @@ func TestLastClaudeAssistantTextReturnsFinalReply(t *testing.T) {
 	}, "\n")
 	if got := lastClaudeAssistantText(transcript, now.Add(-time.Minute)); got != "（趴在圈里，慢慢睡着了）" {
 		t.Fatalf("recovered text=%q", got)
+	}
+}
+
+func TestClaudeTranscriptWithoutSessionIDFindsNewestError(t *testing.T) {
+	t.Parallel()
+	workDir := t.TempDir()
+	configDir := t.TempDir()
+	projectDir := filepath.Join(configDir, "projects", ClaudeProjectSlug(workDir))
+	if err := os.MkdirAll(projectDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	transcript := `{"type":"assistant","timestamp":"` + now.Format(time.RFC3339Nano) + `","isApiErrorMessage":true,"apiErrorStatus":403,"message":{"model":"<synthetic>","content":[{"type":"text","text":"API Error: 403 You've reached your concurrent request limit"}]}}`
+	if err := os.WriteFile(filepath.Join(projectDir, "orphan-session.jsonl"), []byte(transcript), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := ClaudeTranscriptLastErrorText(context.Background(), LocalRunner{}, configDir, workDir, "", now.Add(-time.Minute))
+	if !strings.Contains(got, "concurrent request limit") {
+		t.Fatalf("error text=%q", got)
 	}
 }
 

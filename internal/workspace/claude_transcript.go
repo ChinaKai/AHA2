@@ -133,10 +133,33 @@ func ClaudeTranscriptLastErrorText(ctx context.Context, runner Runner, configDir
 }
 
 func claudeTranscriptTail(ctx context.Context, runner Runner, configDir, workDir, sessionID string) string {
-	if strings.TrimSpace(configDir) == "" || strings.TrimSpace(sessionID) == "" {
+	if strings.TrimSpace(configDir) == "" {
 		return ""
 	}
-	target := path.Join(configDir, "projects", ClaudeProjectSlug(workDir), sessionID+".jsonl")
+	projectDir := path.Join(configDir, "projects", ClaudeProjectSlug(workDir))
+	target := ""
+	if strings.TrimSpace(sessionID) != "" {
+		target = path.Join(projectDir, sessionID+".jsonl")
+	}
+	if target == "" {
+		target = newestClaudeTranscript(ctx, runner, projectDir)
+	}
+	if target == "" {
+		return ""
+	}
+	output := readClaudeTranscriptTail(ctx, runner, target)
+	if strings.TrimSpace(output) == "" && strings.TrimSpace(sessionID) != "" {
+		// The CLI can write the transcript under a session id it never emitted
+		// (for example when the provider rejects the first request). Fall back
+		// to the newest transcript in this project so the error is still shown.
+		if newest := newestClaudeTranscript(ctx, runner, projectDir); newest != "" && newest != target {
+			output = readClaudeTranscriptTail(ctx, runner, newest)
+		}
+	}
+	return output
+}
+
+func readClaudeTranscriptTail(ctx context.Context, runner Runner, target string) string {
 	var command Command
 	if IsWindowsRunner(runner) {
 		command = Command{
@@ -156,6 +179,30 @@ func claudeTranscriptTail(ctx context.Context, runner Runner, configDir, workDir
 		return ""
 	}
 	return result.Stdout
+}
+
+func newestClaudeTranscript(ctx context.Context, runner Runner, projectDir string) string {
+	var command Command
+	if IsWindowsRunner(runner) {
+		command = Command{
+			Executable: "powershell.exe",
+			Args: []string{"-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+				`param([string]$Dir) Get-ChildItem -LiteralPath $Dir -Filter *.jsonl -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName`,
+				projectDir},
+			Timeout: 20 * time.Second,
+		}
+	} else {
+		command = Command{
+			Executable: "sh",
+			Args:       []string{"-c", `ls -1t "$1"/*.jsonl 2>/dev/null | head -n 1`, "sh", projectDir},
+			Timeout:    15 * time.Second,
+		}
+	}
+	result, err := runner.Run(ctx, command, func(string) {})
+	if err != nil || result.ExitCode != 0 {
+		return ""
+	}
+	return strings.TrimSpace(strings.Trim(result.Stdout, "\x00"))
 }
 
 // lastClaudeAssistantText walks the transcript tail backwards and decides what

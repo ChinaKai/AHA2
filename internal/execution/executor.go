@@ -133,6 +133,7 @@ func (executor Executor) runClaude(ctx context.Context, adapter backend.Claude, 
 		Backend: "claude", Workspace: request.Workspace, WorkDir: workDir,
 		SessionID: request.BackendSessionID, EnvGroupID: request.Snapshot.EnvGroupID,
 	})
+	configDir := home.Dir
 	if home.EnvName != "" {
 		runner := workspace.RunnerFor(request.Workspace)
 		// A session can only be resumed from the config directory that holds its
@@ -145,7 +146,6 @@ func (executor Executor) runClaude(ctx context.Context, adapter backend.Claude, 
 		// the distro's home. Asking for the control plane's home instead would look
 		// in a directory that does not exist on the host, so the transcript would
 		// never be found and the turn would fail with "No conversation found".
-		configDir := home.Dir
 		if request.ProviderSessionID != "" {
 			if defaults := workspace.ClaudeDefaultConfigDirOn(ctx, runner); defaults != "" &&
 				workspace.ClaudeTranscriptExists(ctx, runner, defaults, workDir, request.ProviderSessionID) {
@@ -156,7 +156,9 @@ func (executor Executor) runClaude(ctx context.Context, adapter backend.Claude, 
 		}
 		environment[home.EnvName] = configDir
 	}
-	result, err := adapter.Execute(ctx, newBackendRequest(request, model, environment), func(event backend.Event) {
+	backendRequest := newBackendRequest(request, model, environment)
+	backendRequest.ClaudeConfigDir = configDir
+	result, err := adapter.Execute(ctx, backendRequest, func(event backend.Event) {
 		emit(app.ExecutionEvent{Type: event.Type, Data: event.Data})
 	})
 	return app.ExecutionResult{

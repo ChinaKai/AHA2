@@ -25,6 +25,10 @@ type Request struct {
 	Environment         map[string]string
 	Prompt              string
 	ProviderSessionID   string
+	// ClaudeConfigDir is the exact CLAUDE_CONFIG_DIR chosen for this run. It is
+	// used to locate the transcript when the CLI exits before emitting a session
+	// id (for example an upstream 403).
+	ClaudeConfigDir string
 	// ReverseForward asks the transport to carry an AHA-side address into the
 	// workspace for the lifetime of this run. Nil when the workspace can already
 	// reach AHA by address.
