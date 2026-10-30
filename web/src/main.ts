@@ -1112,6 +1112,18 @@ function modelWireSupported(model: DetectedModel | undefined, wire: string): boo
   return status === "supported" || status === "rate_limited";
 }
 
+// Probes only report protocol capabilities. Keep the catalog's token limits so
+// a probed row and the added model still carry the context window.
+function mergeProbedModel(catalogModel: DetectedModel | undefined, probed: DetectedModel): DetectedModel {
+  if (!catalogModel) return probed;
+  return {
+    ...catalogModel,
+    ...probed,
+    max_input_tokens: probed.max_input_tokens || catalogModel.max_input_tokens || 0,
+    max_output_tokens: probed.max_output_tokens || catalogModel.max_output_tokens || 0,
+  };
+}
+
 function detectedModelRow(session: ModelDetectionSession, item: DetectedModel, ready: boolean): string {
   const detecting = session.detecting.has(item.id);
   const probeError = session.probeErrors.get(item.id) || "";
@@ -1237,7 +1249,7 @@ async function probeSelectedModels(session: ModelDetectionSession, ids: string[]
       updateDetectedModelRow(session, modelID);
       try {
         const response = await api.probeModel(session.providerID, modelID, session.authStyle);
-        session.results.set(modelID, response.model);
+        session.results.set(modelID, mergeProbedModel(session.catalog.find(item => item.id === modelID), response.model));
         if (response.anthropic_base_url) session.anthropicBaseURL = response.anthropic_base_url;
         const detail = Object.entries(response.protocol_errors || {}).map(([key, value]) => `${key.replace("_", " ")}=${value}`).join(" · ");
         if (detail) session.protocolErrors.set(modelID, detail);
@@ -1356,7 +1368,7 @@ async function startModelDetection(providerID: string, button: HTMLElement, resu
       session.protocolErrors.delete(modelID);
       updateDetectedModelRow(session, modelID);
       void api.probeModel(session.providerID, modelID, session.authStyle).then(response => {
-        session.results.set(modelID, response.model);
+        session.results.set(modelID, mergeProbedModel(session.catalog.find(item => item.id === modelID), response.model));
         if (response.anthropic_base_url) session.anthropicBaseURL = response.anthropic_base_url;
         const detail = Object.entries(response.protocol_errors || {}).map(([key, value]) => `${key.replace("_", " ")}=${value}`).join(" · ");
         if (detail) session.protocolErrors.set(modelID, detail);
