@@ -63,7 +63,6 @@ import type {
   ManagedProxyView,
   SecuritySettings,
   SyncConflict,
-	SyncPreview,
 	SyncRunProgress,
   SyncSettings,
   SyncState,
@@ -105,7 +104,7 @@ interface State {
   syncState: SyncState;
   syncPending: number;
   syncConflicts: SyncConflict[];
-	syncPreview: SyncPreview;
+	syncNextRunAt: string;
 	syncRun: SyncRunProgress;
   projects: Project[];
   workspaces: Workspace[];
@@ -266,7 +265,7 @@ const state: State = {
   syncState: {scope:"default",cursor:"",last_error:""},
   syncPending: 0,
   syncConflicts: [],
-	syncPreview: {upserts: 0, deletes: 0, remote_upserts: 0, remote_deletes: 0, pending: 0, conflicts: 0},
+	syncNextRunAt: "",
 	syncRun: {running: false, phase: "", completed: 0, total: 0},
   projects: [],
   workspaces: [],
@@ -1568,9 +1567,8 @@ async function ensureViewData(view: View, force = false): Promise<void> {
     state.syncPending = status.pending || 0;
     state.syncRun = status.run || state.syncRun;
     state.syncConflicts = conflicts.conflicts || [];
+    state.syncNextRunAt = status.next_run_at || "";
     if (state.view === "sync") render();
-    const preview = await api.syncPreview();
-    state.syncPreview = preview.preview || state.syncPreview;
   }));
   if (view === "prompts") jobs.push(loadResource("prompts", force, loadPromptCatalog));
   await Promise.all(jobs);
@@ -3619,7 +3617,7 @@ function render(): void {
         state.managedProxy,
         !resourceStates.proxy.loaded || resourceStates.proxy.loading,
       )),
-      sync: () => advancedSubview(renderSyncSettings(state.syncSettings, state.syncState, state.syncPending, state.syncConflicts, state.syncPreview, state.syncRun, state.syncSettingsReady)),
+      sync: () => advancedSubview(renderSyncSettings(state.syncSettings, state.syncState, state.syncPending, state.syncConflicts, state.syncRun, state.syncSettingsReady, state.syncNextRunAt)),
       advanced: advancedSettingsView,
       other: otherSettingsView,
       mcp: () => advancedSubview(mcpView()),
@@ -3757,19 +3755,17 @@ function bindCommon(): void {
     settings: state.syncSettings,
     refresh: async () => {
       const [settings, status, conflicts] = await Promise.all([api.syncSettings(), api.syncStatus(), api.syncConflicts()]);
-      state.syncSettings = settings.sync; state.syncSettingsReady = true; state.syncState = status.state; state.syncPending = status.pending || 0; state.syncRun = status.run || state.syncRun; state.syncConflicts = conflicts.conflicts || [];
-      render();
-      const preview = await api.syncPreview();
-      state.syncPreview = preview.preview;
+      state.syncSettings = settings.sync; state.syncSettingsReady = true; state.syncState = status.state; state.syncPending = status.pending || 0; state.syncRun = status.run || state.syncRun; state.syncConflicts = conflicts.conflicts || []; state.syncNextRunAt = status.next_run_at || "";
       render();
     },
 	pollStatus: async () => {
 		const status = await api.syncStatus();
-		state.syncState = status.state; state.syncPending = status.pending || 0; state.syncRun = status.run || state.syncRun;
+		state.syncState = status.state; state.syncPending = status.pending || 0; state.syncRun = status.run || state.syncRun; state.syncNextRunAt = status.next_run_at || "";
 		return state.syncRun;
 	},
     setMessage,
     flushDeferredRender,
+    initialRun: state.syncRun,
   });
   bindChannels({
 		context: {models: state.models, accounts: state.codexAccounts, projects: state.projects, workspaces: state.workspaces, knowledgeIndexes: state.knowledgeIndexes, libraries: state.knowledgeLibraries},

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
 	"github.com/ChinaKai/AHA2/internal/store"
@@ -27,7 +26,7 @@ type Runner struct {
 	TokenRef        string
 	PassphraseRef   string
 	SecretSelection *SecretSelection
-	Progress        func(phase string)
+	Progress        func(phase, detail string, completed int)
 }
 
 type Preview struct {
@@ -134,7 +133,7 @@ func (r Runner) RunOnce(ctx context.Context) error {
 		return fmt.Errorf("sync token is not configured")
 	}
 	client := &Client{BaseURL: settings.Endpoint, DeviceID: settings.DeviceID, Credential: func(context.Context) (string, error) { return token, nil }}
-	engine := &Engine{Store: r.Store, Remote: client, Scope: r.scope(), DeviceID: settings.DeviceID}
+	engine := &Engine{Store: r.Store, Remote: client, Scope: r.scope(), DeviceID: settings.DeviceID, Report: r.Progress}
 	if err := r.Store.ClaimLocalWorkspaces(ctx, settings.DeviceID); err != nil {
 		return err
 	}
@@ -156,7 +155,7 @@ func (r Runner) RunOnce(ctx context.Context) error {
 		return err
 	}
 	if state.ReplayRequired {
-		r.report("replaying")
+		r.report("replaying", "回放远端历史", 0)
 		// Preserve changes that were already queued before the upgrade, then replay
 		// the center's ordered history before exporting the current local snapshot.
 		if err := r.drainPending(ctx, engine); err != nil {
@@ -176,7 +175,7 @@ func (r Runner) RunOnce(ctx context.Context) error {
 			return err
 		}
 	}
-	r.report("preparing")
+	r.report("preparing", "分析差异", 0)
 	objects, err := ExportBusinessObjectsForDevice(ctx, r.Store, settings.DeviceID)
 	if err != nil {
 		return err
@@ -210,22 +209,22 @@ func (r Runner) RunOnce(ctx context.Context) error {
 			return err
 		}
 	}
-	r.report("pushing")
+	r.report("pushing", "上传本机变更", 0)
 	if err := r.drainPending(ctx, engine); err != nil {
 		return err
 	}
-	r.report("pulling")
+	r.report("pulling", "拉取远端变化", 0)
 	if err := engine.Pull(ctx); err != nil {
 		return err
 	}
-	r.report("finalizing")
-	r.report("complete")
+	r.report("finalizing", "确认最终状态", 0)
+	r.report("complete", "同步完成", 0)
 	return nil
 }
 
-func (r Runner) report(phase string) {
+func (r Runner) report(phase, detail string, completed int) {
 	if r.Progress != nil {
-		r.Progress(phase)
+		r.Progress(phase, detail, completed)
 	}
 }
 
@@ -259,36 +258,6 @@ func (r Runner) drainPending(ctx context.Context, engine *Engine) error {
 		if after >= before {
 			// Conflicted or backoff-delayed items remain pending for a later run.
 			return nil
-		}
-	}
-}
-
-func (r Runner) Loop(ctx context.Context) {
-	for {
-		settings, err := r.Store.SyncSettings(ctx, r.scope())
-		interval := 5 * time.Minute
-		if err == nil && settings.IntervalSeconds >= 10 {
-			interval = time.Duration(settings.IntervalSeconds) * time.Second
-		}
-		if err == nil && settings.Enabled {
-			run, cancel := context.WithTimeout(ctx, 45*time.Second)
-			err = r.RunOnce(run)
-			cancel()
-			state, _ := r.Store.SyncState(context.Background(), r.scope())
-			if err != nil {
-				state.LastError = err.Error()
-			} else {
-				state.LastError = ""
-			}
-			state.UpdatedAt = time.Now().UTC()
-			_ = r.Store.UpdateSyncState(context.Background(), state)
-		}
-		timer := time.NewTimer(interval)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return
-		case <-timer.C:
 		}
 	}
 }

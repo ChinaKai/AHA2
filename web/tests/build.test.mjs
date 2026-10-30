@@ -2076,9 +2076,15 @@ test("knowledge proposals keep three approval actions on one mobile row", async 
 test("sync settings put status first and omit the static domain explainer", async () => {
   const root = resolve(import.meta.dirname, "..");
   const {bindSyncSettings, isSyncSettingsFormEditing, renderSyncSettings, syncPreviewMessage, syncSettingsPayload} = await import(pathToFileURL(resolve(root, "dist", "sync_settings.js")));
-  const html = renderSyncSettings({scope: "default", enabled: false, endpoint: "", device_id: "", device_name: "device", interval_seconds: 300, token_configured: false, passphrase_configured: false}, {scope: "default", cursor: "", last_error: ""}, 0, [], {upserts: 3, deletes: 2, remote_upserts: 4, remote_deletes: 1, pending: 0, conflicts: 0}, {running: true, phase: "pulling", completed: 5, total: 10});
+  const html = renderSyncSettings({scope: "default", enabled: false, endpoint: "", device_id: "", device_name: "device", interval_seconds: 300, token_configured: false, passphrase_configured: false}, {scope: "default", cursor: "", last_error: ""}, 0, [], {running: true, phase: "pulling", detail: "第 3 页 · 收到 20 项", completed: 5, total: 10}, true, "2026-10-30T01:00:00Z");
   assert.doesNotMatch(html, /sync-domain-grid|sync-dependency-note|界面按项目/);
   assert.ok(html.indexOf("同步状态") < html.indexOf("连接设置"));
+  assert.match(html, /上次成功/);
+  assert.match(html, /下次自动同步/);
+  assert.match(html, /待处理冲突/);
+  assert.match(html, /高级详情/);
+  assert.match(html, /sync-status-pill running/);
+  assert.match(html, /data-sync-detail>第 3 页 · 收到 20 项/);
 
   const values = new Map([["enabled", "on"], ["endpoint", "https://sync.example.com"], ["device_name", "Laptop"], ["interval_seconds", "60"], ["registration_code", "one-time-code"], ["passphrase", "long-passphrase"]]);
   const payload = syncSettingsPayload(
@@ -2087,7 +2093,6 @@ test("sync settings put status first and omit the static domain explainer", asyn
   );
   assert.deepEqual(payload, {enabled: true, endpoint: "https://sync.example.com", device_id: "dev_existing", device_name: "Laptop", interval_seconds: 60, registration_code: "one-time-code", passphrase: "long-passphrase", clear_passphrase: false});
   assert.doesNotMatch(html, /provider_ids|env_group_ids|codex_account_ids/);
-  assert.match(html, /远端待更新[\s\S]*?<strong>4<\/strong>/);
   assert.match(html, /data-sync-progress[\s\S]*?value="5"/);
   assert.match(syncPreviewMessage({upserts: 3, deletes: 2, remote_upserts: 4, remote_deletes: 1, pending: 1, conflicts: 4}), /远端将更新本机 4 项、删除 1 项/);
   assert.equal(syncPreviewMessage({upserts: 3, deletes: 2, remote_upserts: 4, remote_deletes: 1, pending: 0, conflicts: 1}, true), "同步完成：上传 3，本机删除 2，拉取更新 4，远端删除 1，剩余 0，冲突 1");
@@ -2128,21 +2133,26 @@ test("sync settings put status first and omit the static domain explainer", asyn
   }
 });
 
-test("sync settings render local connection data before remote preview", async () => {
+test("sync view loads local state without blocking on a remote preview", async () => {
   const root = resolve(import.meta.dirname, "..");
   const main = await readFile(resolve(root, "dist", "app.js"), "utf8");
   const sync = await readFile(resolve(root, "dist", "sync_settings.js"), "utf8");
   const coreLoad = main.indexOf("api.syncSettings()", main.indexOf('view === "sync"'));
-  const coreRendered = main.indexOf("render();", main.indexOf("state.syncConflicts = conflicts.conflicts || [];", coreLoad));
-  const previewLoad = main.indexOf("await api.syncPreview()", coreLoad);
-  assert.ok(coreLoad >= 0 && coreRendered > coreLoad && previewLoad > coreRendered);
-  assert.doesNotMatch(main, /Promise\.all\(\[api\.syncSettings\(\), api\.syncStatus\(\), api\.syncConflicts\(\), api\.syncPreview\(\)\]\)/);
-  assert.match(sync, /settings\.device_name\?\.trim\(\) \|\| settings\.device_id/);
+  const coreRendered = main.indexOf("render();", main.indexOf("state.syncNextRunAt", coreLoad));
+  assert.ok(coreLoad >= 0 && coreRendered > coreLoad);
+  assert.doesNotMatch(main, /api\.syncPreview\(\)/);
+  assert.match(main, /next_run_at/);
   assert.match(main, /syncSettingsReady: false/);
   const settingsReady = main.indexOf("state.syncSettingsReady = true;", coreLoad);
-  assert.ok(settingsReady > coreLoad && coreRendered > settingsReady && previewLoad > coreRendered);
+  assert.ok(settingsReady > coreLoad && coreRendered > settingsReady);
+  assert.match(sync, /settings\.device_name\?\.trim\(\) \|\| settings\.device_id/);
   assert.match(sync, /settingsReady \? "" : "disabled"/);
   assert.match(sync, /正在读取本地设置/);
+  assert.match(sync, /#preview-sync/);
+  assert.match(sync, /#run-sync/);
+  assert.match(sync, /initialRun\?\.running/);
+  assert.match(sync, /setInterval\(\(\)=>void poll\(\), 800\)/);
+  assert.match(sync, /sync_already_running/);
   assert.match(sync, /分析差异…/);
   assert.match(sync, /同步中…/);
 });

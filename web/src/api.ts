@@ -202,7 +202,7 @@ class APIClient {
     return this.request("/api/v1/settings/sync", {method: "PUT", body: JSON.stringify(payload)});
   }
 
-  syncStatus(): Promise<{state: SyncState; pending: number; run: SyncRunProgress}> {
+  syncStatus(): Promise<{state: SyncState; pending: number; run: SyncRunProgress; next_run_at?: string}> {
     return this.request("/api/v1/settings/sync/status");
   }
 
@@ -331,7 +331,7 @@ class APIClient {
     return this.request("/api/v1/settings/sync/preview");
   }
 
-  runSync(): Promise<{state: SyncState; pending: number; summary: SyncPreview}> {
+  runSync(): Promise<{ok: boolean; run?: SyncRunProgress}> {
     return this.request("/api/v1/settings/sync/run", {method: "POST", body: "{}"});
   }
 

@@ -30,7 +30,6 @@ import (
 	"github.com/ChinaKai/AHA2/internal/outboundproxy"
 	"github.com/ChinaKai/AHA2/internal/secrets"
 	"github.com/ChinaKai/AHA2/internal/store"
-	syncer "github.com/ChinaKai/AHA2/internal/sync"
 	"github.com/ChinaKai/AHA2/internal/webassets"
 	"github.com/ChinaKai/AHA2/internal/workspace"
 )
@@ -202,7 +201,6 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 	proxyRuntime := outboundproxy.New(database, secretStore)
 	proxyRuntime.Start(ctx)
 	defer proxyRuntime.Close()
-	go (syncer.Runner{Store: database, Secrets: secretStore, TokenRef: syncer.DefaultTokenRef}).Loop(ctx)
 	registrationOpen, err := database.OwnerExists(ctx)
 	if err != nil {
 		return err
@@ -292,6 +290,7 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 	if options.allowCrossOrigin {
 		logger.Warn("Origin host validation disabled")
 	}
+	apiServer.StartSyncLoop(ctx)
 	defer apiServer.CloseDesktop()
 	server := &http.Server{
 		Addr:              options.listen,

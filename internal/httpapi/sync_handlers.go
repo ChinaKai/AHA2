@@ -18,20 +18,31 @@ const localSyncScope = "default"
 const localSyncTokenRef = syncer.DefaultTokenRef
 const localSyncPassphraseRef = syncer.DefaultPassphraseRef
 
+const syncRunTimeout = 10 * time.Minute
+
 type syncRunProgress struct {
-	Running   bool      `json:"running"`
-	Phase     string    `json:"phase"`
-	Completed int       `json:"completed"`
-	Total     int       `json:"total"`
-	Error     string    `json:"error,omitempty"`
-	StartedAt time.Time `json:"started_at,omitempty"`
-	UpdatedAt time.Time `json:"updated_at,omitempty"`
+	Running    bool            `json:"running"`
+	Phase      string          `json:"phase"`
+	Detail     string          `json:"detail,omitempty"`
+	Completed  int             `json:"completed"`
+	Total      int             `json:"total"`
+	Error      string          `json:"error,omitempty"`
+	Summary    *syncer.Preview `json:"summary,omitempty"`
+	StartedAt  time.Time       `json:"started_at,omitempty"`
+	UpdatedAt  time.Time       `json:"updated_at,omitempty"`
+	FinishedAt time.Time       `json:"finished_at,omitempty"`
 }
 
 func (s *Server) syncRunSnapshot() syncRunProgress {
 	s.syncRunMu.RLock()
 	defer s.syncRunMu.RUnlock()
 	return s.syncRun
+}
+
+func (s *Server) syncNextRunSnapshot() time.Time {
+	s.syncRunMu.RLock()
+	defer s.syncRunMu.RUnlock()
+	return s.syncNextRunAt
 }
 
 func (s *Server) beginSyncRun(preview syncer.Preview) bool {
@@ -41,31 +52,50 @@ func (s *Server) beginSyncRun(preview syncer.Preview) bool {
 		return false
 	}
 	now := time.Now().UTC()
-	s.syncRun = syncRunProgress{Running: true, Phase: "preparing", Total: preview.Upserts + preview.Deletes + preview.RemoteUpserts + preview.RemoteDeletes, StartedAt: now, UpdatedAt: now}
+	summary := preview
+	s.syncRun = syncRunProgress{
+		Running: true, Phase: "preparing", Detail: "分析差异", Summary: &summary,
+		Total:     preview.Upserts + preview.Deletes + preview.RemoteUpserts + preview.RemoteDeletes,
+		StartedAt: now, UpdatedAt: now,
+	}
 	return true
 }
 
-func (s *Server) updateSyncRun(phase string, preview syncer.Preview) {
+func (s *Server) setSyncRunTotal(preview syncer.Preview) {
 	s.syncRunMu.Lock()
 	defer s.syncRunMu.Unlock()
-	remote := preview.RemoteUpserts + preview.RemoteDeletes
-	local := preview.Upserts + preview.Deletes
-	s.syncRun.Phase = phase
-	switch phase {
-	case "preparing", "pushing":
-		s.syncRun.Completed = 0
-	case "pulling":
-		s.syncRun.Completed = local
-	case "finalizing", "complete":
-		s.syncRun.Completed = remote + local
+	if !s.syncRun.Running {
+		return
 	}
+	summary := preview
+	s.syncRun.Total = preview.Upserts + preview.Deletes + preview.RemoteUpserts + preview.RemoteDeletes
+	s.syncRun.Summary = &summary
+	s.syncRun.UpdatedAt = time.Now().UTC()
+}
+
+func (s *Server) updateSyncRun(phase, detail string, completed int) {
+	s.syncRunMu.Lock()
+	defer s.syncRunMu.Unlock()
+	if !s.syncRun.Running {
+		return
+	}
+	s.syncRun.Phase = phase
+	if detail != "" {
+		s.syncRun.Detail = detail
+	}
+	if s.syncRun.Total > 0 && completed > s.syncRun.Total {
+		completed = s.syncRun.Total
+	}
+	s.syncRun.Completed = completed
 	s.syncRun.UpdatedAt = time.Now().UTC()
 }
 
 func (s *Server) finishSyncRun(err error) {
 	s.syncRunMu.Lock()
 	defer s.syncRunMu.Unlock()
+	now := time.Now().UTC()
 	s.syncRun.Running = false
+	s.syncRun.FinishedAt = now
 	if err != nil {
 		s.syncRun.Phase = "failed"
 		s.syncRun.Error = err.Error()
@@ -74,7 +104,107 @@ func (s *Server) finishSyncRun(err error) {
 		s.syncRun.Completed = s.syncRun.Total
 		s.syncRun.Error = ""
 	}
-	s.syncRun.UpdatedAt = time.Now().UTC()
+	s.syncRun.UpdatedAt = now
+}
+
+// StartSyncLoop starts the scheduled sync runner. Manual and scheduled runs
+// share the same in-memory run state and concurrency guard, so a page reload
+// can always reattach to whatever is running.
+func (s *Server) StartSyncLoop(ctx context.Context) {
+	s.syncRunMu.Lock()
+	if s.syncLoopStarted {
+		s.syncRunMu.Unlock()
+		return
+	}
+	s.syncLoopStarted = true
+	s.syncRunMu.Unlock()
+	go func() {
+		for {
+			settings, err := s.store.SyncSettings(ctx, localSyncScope)
+			interval := 5 * time.Minute
+			enabled := false
+			if err == nil {
+				if settings.IntervalSeconds >= 10 {
+					interval = time.Duration(settings.IntervalSeconds) * time.Second
+				}
+				enabled = settings.Enabled
+			}
+			s.syncRunMu.Lock()
+			s.syncNextRunAt = time.Now().Add(interval)
+			s.syncRunMu.Unlock()
+			if enabled {
+				s.startSyncRun(ctx, "")
+			}
+			timer := time.NewTimer(interval)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+		}
+	}()
+}
+
+func (s *Server) startSyncRun(appCtx context.Context, ownerID string) bool {
+	if !s.beginSyncRun(syncer.Preview{}) {
+		return false
+	}
+	go s.executeSyncRun(appCtx, ownerID)
+	return true
+}
+
+func (s *Server) executeSyncRun(appCtx context.Context, ownerID string) {
+	ctx, cancel := context.WithTimeout(appCtx, syncRunTimeout)
+	defer cancel()
+	fail := func(err error) {
+		s.finishSyncRun(err)
+		state, stateErr := s.store.SyncState(context.Background(), localSyncScope)
+		if stateErr == nil {
+			state.LastError = err.Error()
+			state.UpdatedAt = time.Now().UTC()
+			_ = s.store.UpdateSyncState(context.Background(), state)
+		}
+	}
+	if _, err := s.store.SyncSettings(ctx, localSyncScope); err != nil {
+		fail(err)
+		return
+	}
+	if s.secrets == nil {
+		fail(errors.New("secret store is unavailable"))
+		return
+	}
+	token, ok := s.secrets.Get(localSyncTokenRef)
+	if !ok || token == "" {
+		fail(errors.New("sync token is not configured"))
+		return
+	}
+	runner := syncer.Runner{Store: s.store, Secrets: s.secrets, Scope: localSyncScope, TokenRef: localSyncTokenRef}
+	preview, err := runner.Preview(ctx)
+	if err != nil {
+		fail(err)
+		return
+	}
+	s.setSyncRunTotal(preview)
+	completed := 0
+	runner.Progress = func(phase, detail string, delta int) {
+		completed += delta
+		s.updateSyncRun(phase, detail, completed)
+	}
+	if err := runner.RunOnce(ctx); err != nil {
+		fail(err)
+		return
+	}
+	state, stateErr := s.store.SyncState(context.Background(), localSyncScope)
+	if stateErr == nil {
+		state.LastError = ""
+		state.UpdatedAt = time.Now().UTC()
+		_ = s.store.UpdateSyncState(context.Background(), state)
+	}
+	s.finishSyncRun(nil)
+	if ownerID != "" {
+		_ = s.store.AppendAudit(context.Background(), ownerID, "sync.run", "settings", "sync", nil, time.Now().UTC().Format(time.RFC3339Nano))
+	}
 }
 
 type syncSettingsPayload struct {
@@ -232,7 +362,7 @@ func (s *Server) syncStatus(writer http.ResponseWriter, request *http.Request) {
 		writeError(writer, http.StatusInternalServerError, "sync_status_failed")
 		return
 	}
-	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "state": state, "pending": pending, "run": s.syncRunSnapshot()})
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "state": state, "pending": pending, "run": s.syncRunSnapshot(), "next_run_at": s.syncNextRunSnapshot()})
 }
 func (s *Server) syncConflicts(writer http.ResponseWriter, request *http.Request) {
 	items, err := s.store.SyncConflicts(request.Context(), localSyncScope)
@@ -260,8 +390,7 @@ func (s *Server) syncPreview(writer http.ResponseWriter, request *http.Request) 
 }
 
 func (s *Server) runSync(writer http.ResponseWriter, request *http.Request) {
-	_, err := s.store.SyncSettings(request.Context(), localSyncScope)
-	if err != nil {
+	if _, err := s.store.SyncSettings(request.Context(), localSyncScope); err != nil {
 		writeError(writer, http.StatusBadRequest, "sync_not_configured")
 		return
 	}
@@ -269,39 +398,14 @@ func (s *Server) runSync(writer http.ResponseWriter, request *http.Request) {
 		writeError(writer, http.StatusInternalServerError, "secret_store_unavailable")
 		return
 	}
-	token, ok := s.secrets.Get(localSyncTokenRef)
-	if !ok || token == "" {
+	if token, ok := s.secrets.Get(localSyncTokenRef); !ok || token == "" {
 		writeError(writer, http.StatusBadRequest, "sync_token_not_configured")
 		return
 	}
-	runner := syncer.Runner{Store: s.store, Secrets: s.secrets, Scope: localSyncScope, TokenRef: localSyncTokenRef}
-	preview, err := runner.Preview(request.Context())
-	if err != nil {
-		writeError(writer, http.StatusInternalServerError, "sync_preview_failed")
+	session, _ := sessionFromContext(request.Context())
+	if !s.startSyncRun(context.Background(), session.OwnerID) {
+		writeJSON(writer, http.StatusConflict, map[string]any{"ok": false, "error": "sync_already_running", "message": "同步正在进行中", "run": s.syncRunSnapshot()})
 		return
 	}
-	if !s.beginSyncRun(preview) {
-		writeJSON(writer, http.StatusConflict, map[string]any{"ok": false, "error": "sync_already_running", "message": "同步正在进行中"})
-		return
-	}
-	runner.Progress = func(phase string) { s.updateSyncRun(phase, preview) }
-	ctx, cancel := context.WithTimeout(request.Context(), 3*time.Minute)
-	defer cancel()
-	_ = token
-	err = runner.RunOnce(ctx)
-	s.finishSyncRun(err)
-	if err != nil {
-		state, _ := s.store.SyncState(request.Context(), localSyncScope)
-		state.LastError = err.Error()
-		state.UpdatedAt = time.Now().UTC()
-		_ = s.store.UpdateSyncState(request.Context(), state)
-		writeJSON(writer, http.StatusBadGateway, map[string]any{"ok": false, "error": "sync_failed", "message": err.Error()})
-		return
-	}
-	state, _ := s.store.SyncState(request.Context(), localSyncScope)
-	pending, _ := s.store.SyncOutboxCount(request.Context(), localSyncScope)
-	conflicts, _ := s.store.SyncConflicts(request.Context(), localSyncScope)
-	preview.Pending, preview.Conflicts = pending, len(conflicts)
-	s.audit(request, "sync.run", "settings", "sync", nil)
-	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "state": state, "pending": pending, "summary": preview})
+	writeJSON(writer, http.StatusAccepted, map[string]any{"ok": true, "run": s.syncRunSnapshot()})
 }

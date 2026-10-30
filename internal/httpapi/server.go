@@ -83,6 +83,8 @@ type Server struct {
 	startedAt             time.Time
 	syncRunMu             sync.RWMutex
 	syncRun               syncRunProgress
+	syncNextRunAt         time.Time
+	syncLoopStarted       bool
 	authLimiter           *authLimiter
 	modelDetectionJobs    *modelDetectionJobs
 	systemMu              sync.Mutex

@@ -117,11 +117,14 @@ export interface SyncPreview {
 export interface SyncRunProgress {
 	running: boolean;
 	phase: string;
+	detail?: string;
 	completed: number;
 	total: number;
 	error?: string;
+	summary?: SyncPreview;
 	started_at?: string;
 	updated_at?: string;
+	finished_at?: string;
 }
 
 export interface SyncConflict {

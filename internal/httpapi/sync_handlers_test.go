@@ -191,9 +191,9 @@ func TestSyncRunProgressTracksPhasesAndRejectsConcurrentRun(t *testing.T) {
 	if !server.beginSyncRun(preview) || server.beginSyncRun(preview) {
 		t.Fatal("sync run concurrency guard failed")
 	}
-	server.updateSyncRun("pulling", preview)
+	server.updateSyncRun("pulling", "第 1 页", 4)
 	progress := server.syncRunSnapshot()
-	if !progress.Running || progress.Total != 7 || progress.Completed != 4 || progress.Phase != "pulling" {
+	if !progress.Running || progress.Total != 7 || progress.Completed != 4 || progress.Phase != "pulling" || progress.Detail != "第 1 页" {
 		t.Fatalf("pull progress=%#v", progress)
 	}
 	server.finishSyncRun(nil)
@@ -414,13 +414,20 @@ func TestRunSyncUsesStoredTokenAndAuthenticatedRoutes(t *testing.T) {
 	response.Body.Close()
 	response = requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/settings/sync/run", map[string]any{}, csrf)
 	body := readBody(t, response)
-	if response.StatusCode != http.StatusOK {
+	if response.StatusCode != http.StatusAccepted {
 		t.Fatalf("run failed: %d %s", response.StatusCode, body)
 	}
-	response = requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/settings/sync/status", nil, "")
-	body = readBody(t, response)
-	if response.StatusCode != http.StatusOK || !strings.Contains(body, `"cursor":"7"`) {
-		t.Fatalf("status failed: %d %s", response.StatusCode, body)
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		response = requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/settings/sync/status", nil, "")
+		body = readBody(t, response)
+		if response.StatusCode == http.StatusOK && strings.Contains(body, `"cursor":"7"`) && strings.Contains(body, `"running":false`) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("status did not converge: %d %s", response.StatusCode, body)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 	response = requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/settings/sync/conflicts", nil, "")
 	if response.StatusCode != http.StatusOK {

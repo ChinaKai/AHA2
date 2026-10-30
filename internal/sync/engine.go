@@ -58,7 +58,14 @@ type Engine struct {
 	DeviceID  string
 	BatchSize int
 	Now       func() time.Time
+	Report    func(phase, detail string, delta int)
 	handlers  map[string]ApplyFunc
+}
+
+func (e *Engine) report(phase, detail string, delta int) {
+	if e.Report != nil {
+		e.Report(phase, detail, delta)
+	}
 }
 
 func (e *Engine) Register(objectType string, handler ApplyFunc) {
@@ -121,7 +128,11 @@ func (e *Engine) Push(ctx context.Context) error {
 			return err
 		}
 	}
-	return e.Store.AckSync(ctx, e.Scope, ids, e.now())
+	if err := e.Store.AckSync(ctx, e.Scope, ids, e.now()); err != nil {
+		return err
+	}
+	e.report("pushing", fmt.Sprintf("已上传 %d 项", len(ids)), len(ids))
+	return nil
 }
 
 func (e *Engine) Pull(ctx context.Context) error {
@@ -132,7 +143,9 @@ func (e *Engine) Pull(ctx context.Context) error {
 	cursor := state.Cursor
 	pending := []domain.SyncObject{}
 	seenCursors := map[string]bool{cursor: true}
+	page := 0
 	for {
+		page++
 		response, err := e.Remote.Pull(ctx, e.Scope, cursor, e.DeviceID, e.limit())
 		if err != nil {
 			return err
@@ -148,6 +161,7 @@ func (e *Engine) Pull(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		e.report("pulling", fmt.Sprintf("第 %d 页 · 收到 %d 项", page, len(response.Objects)), len(response.Objects))
 		if !response.HasMore {
 			// The center has nothing further to offer, so a dependency still
 			// waiting here can never be satisfied by a later object: this client
