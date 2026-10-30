@@ -68,6 +68,16 @@ func (e *Engine) report(phase, detail string, delta int) {
 	}
 }
 
+// Apply applies one remote object with the handler registered for its type.
+// It is used when an operator resolves a push conflict in favor of the remote.
+func (e *Engine) Apply(ctx context.Context, object domain.SyncObject) error {
+	handler := e.handlers[object.Type]
+	if handler == nil {
+		return fmt.Errorf("unsupported sync object type %q", object.Type)
+	}
+	return handler(ctx, object)
+}
+
 func (e *Engine) Register(objectType string, handler ApplyFunc) {
 	if e.handlers == nil {
 		e.handlers = map[string]ApplyFunc{}

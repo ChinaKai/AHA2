@@ -3766,6 +3766,7 @@ function bindCommon(): void {
     setMessage,
     flushDeferredRender,
     initialRun: state.syncRun,
+    conflicts: state.syncConflicts,
   });
   bindChannels({
 		context: {models: state.models, accounts: state.codexAccounts, projects: state.projects, workspaces: state.workspaces, knowledgeIndexes: state.knowledgeIndexes, libraries: state.knowledgeLibraries},

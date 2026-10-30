@@ -49,6 +49,64 @@ function syncStatusHeadline(settings: SyncSettings, state: SyncState, run: SyncR
   return {text: "已同步", level: "ok"};
 }
 
+interface SyncPayloadSummary {
+  title: string;
+  lines: string[];
+  empty: boolean;
+}
+
+function parseSyncPayload(raw: unknown): Record<string, unknown> | null {
+  if (raw && typeof raw === "object") return raw as Record<string, unknown>;
+  const text = String(raw ?? "").trim();
+  if (!text || text === "null") return null;
+  try {
+    const value = JSON.parse(text) as unknown;
+    return value && typeof value === "object" ? value as Record<string, unknown> : null;
+  } catch {
+    return null;
+  }
+}
+
+function syncPayloadSummary(objectType: string, raw: unknown): SyncPayloadSummary {
+  let data = parseSyncPayload(raw);
+  if (!data) return {title: "无内容（可能已删除）", lines: [], empty: true};
+  // Project/task graph objects carry the real value inside an envelope.
+  if (data.value && typeof data.value === "object") {
+    const context = data.project_id || data.task_id ? {project_id: data.project_id, task_id: data.task_id} : {};
+    data = {...(data.value as Record<string, unknown>), ...context};
+  }
+  const title = String(data.title || data.display_name || data.name || data.id || "").trim();
+  const labels: Record<string, string> = {
+    backend: "Backend", wire_api: "协议", context_window: "上下文", max_output_tokens: "最大输出",
+    updated_at: "更新时间", scope: "范围", project_id: "项目", status: "状态", project_type: "类型",
+  };
+  const order = objectType === "model"
+    ? ["backend", "wire_api", "context_window", "max_output_tokens", "updated_at"]
+    : objectType === "knowledge"
+      ? ["scope", "project_id", "updated_at"]
+      : objectType === "project"
+        ? ["project_type", "updated_at"]
+        : ["status", "updated_at"];
+  const lines: string[] = [];
+  for (const key of order) {
+    const value = data[key];
+    if (value === undefined || value === null || value === "") continue;
+    lines.push(`${labels[key] || key}：${String(value)}`);
+  }
+  return {title: title || "（无标题）", lines, empty: false};
+}
+
+function syncPayloadBlock(summary: SyncPayloadSummary): string {
+  if (summary.empty) return `<div class="sync-payload-empty">无内容</div>`;
+  return `<div class="sync-payload-title">${escapeHTML(summary.title)}</div>${summary.lines.length ? `<ul>${summary.lines.map(line => `<li>${escapeHTML(line)}</li>`).join("")}</ul>` : ""}`;
+}
+
+function conflictDetailHTML(conflict: SyncConflict): string {
+  const local = syncPayloadSummary(conflict.object_type, conflict.local_payload);
+  const remote = syncPayloadSummary(conflict.object_type, conflict.remote_payload);
+  return `<div class="sync-conflict-detail-head"><span class="sync-domain-badge">${syncDomainForType(conflict.object_type)}</span><strong>${escapeHTML(conflict.object_type)}</strong><small>${escapeHTML(conflict.object_id)}</small><small>${time(conflict.created_at)}</small></div><div class="sync-conflict-compare"><section><header>本机版本 ${escapeHTML(conflict.local_version || "—")}</header>${syncPayloadBlock(local)}</section><section><header>远端版本 ${escapeHTML(conflict.remote_version || "—")}</header>${syncPayloadBlock(remote)}</section></div><p class="field-help">保留本机会把本机内容推送到中心；采用远端会把远端内容写入本机；忽略只停止跟踪这条冲突，不修改两端内容。</p>`;
+}
+
 function syncErrorHint(message: string): string {
   if (!message) return "";
   if (message.includes("deadline") || message.includes("timeout")) {
@@ -138,7 +196,13 @@ export function renderSyncSettings(settings: SyncSettings, state: SyncState, pen
         </div>
         <div class="dialog-actions sync-actions"><button class="primary" type="submit" ${settingsDisabled}>${icon("save")}保存设置</button></div>
       </form>
-    <section class="panel sync-conflicts"><div class="panel-head"><strong>待处理冲突</strong><span>${conflicts.length} 项</span></div>${conflicts.length ? `<div class="table-wrap"><table class="sync-conflicts-table"><thead><tr><th>分类</th><th>对象类型</th><th>对象 ID</th><th>本地版本</th><th>远端版本</th><th>时间</th></tr></thead><tbody>${conflicts.map(item => `<tr><td><span class="sync-domain-badge">${syncDomainForType(item.object_type)}</span></td><td>${escapeHTML(item.object_type)}</td><td>${escapeHTML(item.object_id)}</td><td>${escapeHTML(item.local_version || "—")}</td><td>${escapeHTML(item.remote_version || "—")}</td><td>${time(item.created_at)}</td></tr>`).join("")}</tbody></table></div>` : '<div class="empty-state">当前没有同步冲突</div>'}</section>
+    <section class="panel sync-conflicts"><div class="panel-head"><strong>待处理冲突</strong><span>${conflicts.length} 项</span></div>${conflicts.length ? `<div class="sync-conflict-list">${conflicts.map(item => {
+      const remote = syncPayloadSummary(item.object_type, item.remote_payload);
+      const local = syncPayloadSummary(item.object_type, item.local_payload);
+      const title = !remote.empty ? remote.title : !local.empty ? local.title : item.object_id;
+      return `<article class="sync-conflict-card"><header><span class="sync-domain-badge">${syncDomainForType(item.object_type)}</span><strong>${escapeHTML(item.object_type)}</strong><small>${time(item.created_at)}</small></header><div class="sync-conflict-title">${escapeHTML(title)}</div><div class="sync-conflict-meta"><span>本机 ${escapeHTML(item.local_version || "—")}</span><span>远端 ${escapeHTML(item.remote_version || "—")}</span><span class="sync-conflict-id">${escapeHTML(item.object_id)}</span></div><button type="button" data-sync-conflict="${escapeHTML(item.id)}">查看并处理</button></article>`;
+    }).join("")}</div>` : '<div class="empty-state">当前没有同步冲突</div>'}</section>
+    <dialog id="sync-conflict-dialog"><div class="dialog-head"><h2>处理同步冲突</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div><div class="dialog-body"><div id="sync-conflict-detail"></div><div class="dialog-actions"><button type="button" data-sync-resolution="local">保留本机</button><button type="button" data-sync-resolution="remote">采用远端</button><button type="button" data-sync-resolution="ignore">忽略</button><button type="button" data-close>取消</button></div></div></dialog>
   </section>`;
 }
 
@@ -169,8 +233,9 @@ export function isSyncSettingsFormEditing(form: SyncSettingsFormState | null, ac
 }
 
 let syncPollTimer = 0;
+let syncConflictBusy = false;
 
-export function bindSyncSettings(options: {settings: SyncSettings; refresh: () => Promise<void>; pollStatus?: () => Promise<SyncRunProgress>; setMessage: (kind: "error" | "notice", message: string) => void; updateSettings?: (payload: Record<string, unknown>) => Promise<unknown>; flushDeferredRender?: () => void; initialRun?: SyncRunProgress}): void {
+export function bindSyncSettings(options: {settings: SyncSettings; refresh: () => Promise<void>; pollStatus?: () => Promise<SyncRunProgress>; setMessage: (kind: "error" | "notice", message: string) => void; updateSettings?: (payload: Record<string, unknown>) => Promise<unknown>; flushDeferredRender?: () => void; initialRun?: SyncRunProgress; conflicts?: SyncConflict[]}): void {
   const stopPolling = () => {
     if (syncPollTimer) window.clearInterval(syncPollTimer);
     syncPollTimer = 0;
@@ -259,4 +324,48 @@ export function bindSyncSettings(options: {settings: SyncSettings; refresh: () =
       options.setMessage("error", error instanceof Error ? error.message : String(error));
     }
   });
+
+  const conflictDialog = document.querySelector<HTMLDialogElement>("#sync-conflict-dialog");
+  const conflictDetail = document.querySelector<HTMLElement>("#sync-conflict-detail");
+  const resolutionButtons = [...document.querySelectorAll<HTMLButtonElement>("[data-sync-resolution]")];
+  let activeConflict: SyncConflict | null = null;
+  const applyResolutionState = (conflict: SyncConflict) => {
+    const local = syncPayloadSummary(conflict.object_type, conflict.local_payload);
+    const remote = syncPayloadSummary(conflict.object_type, conflict.remote_payload);
+    for (const button of resolutionButtons) {
+      const action = button.dataset.syncResolution;
+      button.disabled = syncConflictBusy || (action === "local" && local.empty) || (action === "remote" && remote.empty);
+    }
+  };
+  document.querySelectorAll<HTMLElement>("[data-sync-conflict]").forEach(button => button.addEventListener("click", () => {
+    const conflict = (options.conflicts || []).find(item => item.id === button.dataset.syncConflict);
+    if (!conflict || !conflictDialog || !conflictDetail) return;
+    activeConflict = conflict;
+    conflictDetail.innerHTML = conflictDetailHTML(conflict);
+    applyResolutionState(conflict);
+    if (!conflictDialog.open) conflictDialog.showModal();
+  }));
+  conflictDialog?.addEventListener("close", () => { activeConflict = null; });
+  for (const button of resolutionButtons) {
+    button.addEventListener("click", async () => {
+      if (!activeConflict || syncConflictBusy) return;
+      const action = button.dataset.syncResolution as "local" | "remote" | "ignore";
+      syncConflictBusy = true;
+      applyResolutionState(activeConflict);
+      const original = button.textContent || "处理";
+      button.textContent = "处理中…";
+      try {
+        await api.resolveSyncConflict(activeConflict.id, action);
+        conflictDialog?.close();
+        options.setMessage("notice", action === "local" ? "已保留本机并推送到中心" : action === "remote" ? "已采用远端内容" : "已忽略这条冲突");
+        await options.refresh();
+      } catch (error) {
+        options.setMessage("error", error instanceof Error ? error.message : String(error));
+      } finally {
+        syncConflictBusy = false;
+        button.textContent = original;
+        if (activeConflict) applyResolutionState(activeConflict);
+      }
+    });
+  }
 }

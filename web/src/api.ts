@@ -339,6 +339,10 @@ class APIClient {
     return this.request("/api/v1/settings/sync/conflicts");
   }
 
+  resolveSyncConflict(id: string, action: "local" | "remote" | "ignore"): Promise<{ok: boolean}> {
+    return this.request(`/api/v1/settings/sync/conflicts/${encodeURIComponent(id)}/resolve`, {method: "POST", body: JSON.stringify({action})});
+  }
+
   projects(options: {limit?: number; cursor?: string; summary?: boolean} = {}): Promise<{projects: Project[]; has_more?: boolean; next_cursor?: string}> {
     const query = new URLSearchParams();
     if (options.limit) query.set("limit", String(options.limit));

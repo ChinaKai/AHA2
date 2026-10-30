@@ -2085,6 +2085,11 @@ test("sync settings put status first and omit the static domain explainer", asyn
   assert.match(html, /高级详情/);
   assert.match(html, /sync-status-pill running/);
   assert.match(html, /data-sync-detail>第 3 页 · 收到 20 项/);
+  assert.match(html, /id="sync-conflict-dialog"/);
+  assert.match(html, /data-sync-resolution="local"/);
+  assert.match(html, /data-sync-resolution="remote"/);
+  assert.match(html, /data-sync-resolution="ignore"/);
+  assert.doesNotMatch(html, /sync-conflicts-table/);
 
   const values = new Map([["enabled", "on"], ["endpoint", "https://sync.example.com"], ["device_name", "Laptop"], ["interval_seconds", "60"], ["registration_code", "one-time-code"], ["passphrase", "long-passphrase"]]);
   const payload = syncSettingsPayload(
@@ -2110,7 +2115,7 @@ test("sync settings put status first and omit the static domain explainer", asyn
   const formElement = {dataset: {}, contains: () => false, addEventListener: (type, handler) => { handlers[type] = handler; }, querySelector: () => button};
   const originalDocument = globalThis.document;
   const OriginalFormData = globalThis.FormData;
-  globalThis.document = {querySelector: selector => selector === "#sync-settings-form" ? formElement : null};
+  globalThis.document = {querySelector: selector => selector === "#sync-settings-form" ? formElement : null, querySelectorAll: () => []};
   globalThis.FormData = class { get(name) { return values.get(name) ?? null; } getAll(name) { return selections.get(name) ?? []; } };
   try {
     bindSyncSettings({

@@ -124,10 +124,15 @@ func decodeJSONLimit(request *http.Request, destination any, limit int64) error 
 }
 
 func writeJSON(writer http.ResponseWriter, status int, value any) {
+	data, err := json.Marshal(value)
+	if err != nil {
+		http.Error(writer, "response encoding failed", http.StatusInternalServerError)
+		return
+	}
 	writer.Header().Set("Cache-Control", "no-store")
 	writer.Header().Set("Content-Type", "application/json; charset=utf-8")
 	writer.WriteHeader(status)
-	_ = json.NewEncoder(writer).Encode(value)
+	_, _ = writer.Write(append(data, '\n'))
 }
 
 // writeErrorDetail adds the reason to the machine-readable code. A request body

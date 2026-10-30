@@ -238,6 +238,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/settings/sync/preview", s.withAuth(http.HandlerFunc(s.syncPreview)))
 	mux.Handle("POST /api/v1/settings/sync/run", s.withAuth(http.HandlerFunc(s.runSync)))
 	mux.Handle("GET /api/v1/settings/sync/conflicts", s.withAuth(http.HandlerFunc(s.syncConflicts)))
+	mux.Handle("POST /api/v1/settings/sync/conflicts/{id}/resolve", s.withAuth(http.HandlerFunc(s.resolveSyncConflict)))
 	mux.Handle("GET /api/v1/channel-providers", s.withAuth(http.HandlerFunc(s.channelProviders)))
 	mux.Handle("PATCH /api/v1/channel-plugins/{id}", s.withAuth(http.HandlerFunc(s.updateChannelPlugin)))
 	mux.Handle("GET /api/v1/channel-instances", s.withAuth(http.HandlerFunc(s.channelInstances)))

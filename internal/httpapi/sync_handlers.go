@@ -1,9 +1,11 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/url"
@@ -408,4 +410,180 @@ func (s *Server) runSync(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 	writeJSON(writer, http.StatusAccepted, map[string]any{"ok": true, "run": s.syncRunSnapshot()})
+}
+
+var errSyncConflictRemoteChanged = errors.New("远端又更新了；请刷新冲突后重试")
+
+func (s *Server) resolveSyncConflict(writer http.ResponseWriter, request *http.Request) {
+	var payload struct {
+		Action string `json:"action"`
+	}
+	if err := decodeJSON(request, &payload); err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_json")
+		return
+	}
+	action := strings.ToLower(strings.TrimSpace(payload.Action))
+	if action != "local" && action != "remote" && action != "ignore" {
+		writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid_sync_conflict_action", "message": "action must be local, remote, or ignore"})
+		return
+	}
+	conflict, err := s.store.SyncConflict(request.Context(), localSyncScope, strings.TrimSpace(request.PathValue("id")))
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(writer, http.StatusNotFound, "sync_conflict_not_found")
+		return
+	}
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, "sync_conflict_failed")
+		return
+	}
+	localPayload := bytes.TrimSpace(conflict.LocalPayload)
+	remotePayload := bytes.TrimSpace(conflict.RemotePayload)
+	if action == "local" && (len(localPayload) == 0 || string(localPayload) == "null") {
+		writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "sync_conflict_local_missing", "message": "本机没有可推送的内容；请选择采用远端或忽略"})
+		return
+	}
+	if action == "remote" && (len(remotePayload) == 0 || string(remotePayload) == "null") {
+		writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "sync_conflict_remote_missing", "message": "远端没有可应用的内容；请选择保留本机或忽略"})
+		return
+	}
+	switch action {
+	case "local":
+		if err := s.resolveConflictWithLocal(request.Context(), conflict); err != nil {
+			status := http.StatusBadGateway
+			if errors.Is(err, errSyncConflictRemoteChanged) {
+				status = http.StatusConflict
+			}
+			writeJSON(writer, status, map[string]any{"ok": false, "error": "sync_conflict_resolve_failed", "message": err.Error()})
+			return
+		}
+	case "remote":
+		if err := s.resolveConflictWithRemote(request.Context(), conflict); err != nil {
+			writeJSON(writer, http.StatusConflict, map[string]any{"ok": false, "error": "sync_conflict_apply_failed", "message": err.Error()})
+			return
+		}
+	case "ignore":
+		if err := s.store.DropSyncOutboxObject(request.Context(), localSyncScope, conflict.ObjectType, conflict.ObjectID); err != nil {
+			writeError(writer, http.StatusInternalServerError, "sync_conflict_resolve_failed")
+			return
+		}
+		// A remote-only conflict has no local object to re-export; skip the
+		// export walk for those stale entries.
+		if len(localPayload) > 0 {
+			if settings, settingsErr := s.store.SyncSettings(request.Context(), localSyncScope); settingsErr == nil {
+				s.markLocalExportApplied(request.Context(), settings, conflict.ObjectType, conflict.ObjectID)
+			}
+		}
+	}
+	if _, err := s.store.ResolveSyncConflictsForObject(request.Context(), localSyncScope, conflict.ObjectType, conflict.ObjectID, time.Now().UTC()); err != nil {
+		writeError(writer, http.StatusInternalServerError, "sync_conflict_resolve_failed")
+		return
+	}
+	s.audit(request, "sync.conflict.resolve", "settings", "sync", map[string]any{"action": action, "object_type": conflict.ObjectType, "object_id": conflict.ObjectID})
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "action": action, "object_type": conflict.ObjectType, "object_id": conflict.ObjectID})
+}
+
+func (s *Server) resolveConflictWithLocal(ctx context.Context, conflict domain.SyncConflict) error {
+	settings, err := s.store.SyncSettings(ctx, localSyncScope)
+	if err != nil {
+		return fmt.Errorf("同步尚未配置")
+	}
+	if s.secrets == nil {
+		return fmt.Errorf("Secret Store 不可用")
+	}
+	token, ok := s.secrets.Get(localSyncTokenRef)
+	if !ok || token == "" {
+		return fmt.Errorf("同步 Token 未配置")
+	}
+	object := domain.SyncObject{
+		Type: conflict.ObjectType, ID: conflict.ObjectID, Operation: "upsert", Payload: conflict.LocalPayload,
+		BaseVersion: conflict.RemoteVersion, IdempotencyKey: domain.NewID("sync"),
+	}
+	if item, itemErr := s.store.SyncOutboxForObject(ctx, localSyncScope, conflict.ObjectType, conflict.ObjectID); itemErr == nil {
+		// Push the current local change, rebased on the remote version the center
+		// reported. Keep its idempotency key so the export bookkeeping matches.
+		object = item.Object
+		object.BaseVersion = conflict.RemoteVersion
+	} else if !errors.Is(itemErr, sql.ErrNoRows) {
+		return itemErr
+	}
+	client := &syncer.Client{BaseURL: settings.Endpoint, DeviceID: settings.DeviceID, Credential: func(context.Context) (string, error) { return token, nil }}
+	pushCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	response, err := client.Push(pushCtx, syncer.PushRequest{Scope: localSyncScope, DeviceID: settings.DeviceID, Objects: []domain.SyncObject{object}})
+	if err != nil {
+		return err
+	}
+	if len(response.Conflicts) > 0 {
+		_ = s.store.AddSyncConflict(ctx, response.Conflicts[0])
+		return errSyncConflictRemoteChanged
+	}
+	acked := false
+	for _, key := range response.AckedKeys {
+		if key == object.IdempotencyKey {
+			acked = true
+			break
+		}
+	}
+	if !acked {
+		return fmt.Errorf("中心没有确认本机变更")
+	}
+	now := time.Now().UTC()
+	_ = s.store.MarkSyncApplied(ctx, localSyncScope, object, now)
+	if err := s.store.DropSyncOutboxObject(ctx, localSyncScope, object.Type, object.ID); err != nil {
+		return err
+	}
+	s.markLocalExportApplied(ctx, settings, object.Type, object.ID)
+	state, stateErr := s.store.SyncState(ctx, localSyncScope)
+	if stateErr == nil {
+		state.LastPushAt = now
+		state.LastError = ""
+		state.UpdatedAt = now
+		_ = s.store.UpdateSyncState(ctx, state)
+	}
+	return nil
+}
+
+func (s *Server) resolveConflictWithRemote(ctx context.Context, conflict domain.SyncConflict) error {
+	settings, err := s.store.SyncSettings(ctx, localSyncScope)
+	if err != nil {
+		return fmt.Errorf("同步尚未配置")
+	}
+	engine := &syncer.Engine{Store: s.store, Scope: localSyncScope, DeviceID: settings.DeviceID, Now: time.Now}
+	syncer.RegisterBusinessHandlersForDevice(engine, s.store, settings.DeviceID)
+	if s.secrets != nil {
+		syncer.RegisterCodexAccountTombstoneHandler(engine, s.store, s.secrets)
+		if passphrase, ok := s.secrets.Get(localSyncPassphraseRef); ok && passphrase != "" {
+			syncer.RegisterSecretBundleHandler(engine, s.store, s.secrets, passphrase)
+		}
+	}
+	object := domain.SyncObject{
+		Type: conflict.ObjectType, ID: conflict.ObjectID, Operation: "upsert", Payload: conflict.RemotePayload,
+		RemoteVersion: conflict.RemoteVersion, IdempotencyKey: "conflict:" + conflict.ID, EventID: "conflict:" + conflict.ID,
+	}
+	applyCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if err := engine.Apply(applyCtx, object); err != nil {
+		return err
+	}
+	if err := s.store.DropSyncOutboxObject(ctx, localSyncScope, conflict.ObjectType, conflict.ObjectID); err != nil {
+		return err
+	}
+	s.markLocalExportApplied(ctx, settings, conflict.ObjectType, conflict.ObjectID)
+	return nil
+}
+
+// markLocalExportApplied records the object's export identity as applied so the
+// next run does not enqueue the same divergent object again.
+func (s *Server) markLocalExportApplied(ctx context.Context, settings domain.SyncSettings, objectType, objectID string) {
+	objects, err := syncer.ExportBusinessObjectsForDevice(ctx, s.store, settings.DeviceID)
+	if err != nil {
+		return
+	}
+	now := time.Now().UTC()
+	for _, object := range objects {
+		if object.Type == objectType && object.ID == objectID {
+			_ = s.store.MarkSyncApplied(ctx, localSyncScope, object, now)
+			return
+		}
+	}
 }

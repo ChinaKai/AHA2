@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
@@ -126,7 +128,7 @@ func (s *Store) PendingSync(ctx context.Context, scope string, limit int, now ti
 		if err := rows.Scan(&v.ID, &v.Scope, &v.Object.Type, &v.Object.ID, &v.Object.Operation, &payload, &v.Object.BaseVersion, &v.Object.SourceVersion, &v.Object.IdempotencyKey, &v.Status, &v.Attempts, &next, &v.LastError, &created, &updated); err != nil {
 			return nil, err
 		}
-		v.Object.Payload = json.RawMessage(payload)
+		v.Object.Payload = storedRawMessage(payload)
 		v.NextAttemptAt = parseTime(next)
 		v.CreatedAt = parseTime(created)
 		v.UpdatedAt = parseTime(updated)
@@ -187,7 +189,18 @@ func (s *Store) AddSyncConflict(ctx context.Context, v domain.SyncConflict) erro
 	if v.Status == "" {
 		v.Status = "open"
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO sync_conflicts(id,scope,object_type,object_id,local_payload_json,remote_payload_json,local_version,remote_version,status,created_at,resolved_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, v.ID, v.Scope, v.ObjectType, v.ObjectID, string(v.LocalPayload), string(v.RemotePayload), v.LocalVersion, v.RemoteVersion, v.Status, timeString(v.CreatedAt), timeString(v.ResolvedAt))
+	var existingID string
+	err := s.db.QueryRowContext(ctx, `SELECT id FROM sync_conflicts WHERE scope=? AND object_type=? AND object_id=? AND status='open' ORDER BY created_at DESC, id DESC LIMIT 1`,
+		v.Scope, v.ObjectType, v.ObjectID).Scan(&existingID)
+	if err == nil {
+		_, err = s.db.ExecContext(ctx, `UPDATE sync_conflicts SET local_payload_json=?,remote_payload_json=?,local_version=?,remote_version=? WHERE id=?`,
+			string(v.LocalPayload), string(v.RemotePayload), v.LocalVersion, v.RemoteVersion, existingID)
+		return err
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `INSERT INTO sync_conflicts(id,scope,object_type,object_id,local_payload_json,remote_payload_json,local_version,remote_version,status,created_at,resolved_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, v.ID, v.Scope, v.ObjectType, v.ObjectID, string(v.LocalPayload), string(v.RemotePayload), v.LocalVersion, v.RemoteVersion, v.Status, timeString(v.CreatedAt), timeString(v.ResolvedAt))
 	return err
 }
 
@@ -204,11 +217,71 @@ func (s *Store) SyncConflicts(ctx context.Context, scope string) ([]domain.SyncC
 		if err := rows.Scan(&v.ID, &v.Scope, &v.ObjectType, &v.ObjectID, &local, &remote, &v.LocalVersion, &v.RemoteVersion, &v.Status, &created, &resolved); err != nil {
 			return nil, err
 		}
-		v.LocalPayload = json.RawMessage(local)
-		v.RemotePayload = json.RawMessage(remote)
+		v.LocalPayload = storedRawMessage(local)
+		v.RemotePayload = storedRawMessage(remote)
 		v.CreatedAt = parseTime(created)
 		v.ResolvedAt = parseTime(resolved)
 		result = append(result, v)
 	}
 	return result, rows.Err()
+}
+
+func (s *Store) SyncConflict(ctx context.Context, scope, id string) (domain.SyncConflict, error) {
+	var v domain.SyncConflict
+	var local, remote, created, resolved string
+	err := s.db.QueryRowContext(ctx, `SELECT id,scope,object_type,object_id,local_payload_json,remote_payload_json,local_version,remote_version,status,created_at,resolved_at FROM sync_conflicts WHERE id=? AND scope=? AND status='open'`, id, scope).
+		Scan(&v.ID, &v.Scope, &v.ObjectType, &v.ObjectID, &local, &remote, &v.LocalVersion, &v.RemoteVersion, &v.Status, &created, &resolved)
+	if err != nil {
+		return domain.SyncConflict{}, err
+	}
+	v.LocalPayload = storedRawMessage(local)
+	v.RemotePayload = storedRawMessage(remote)
+	v.CreatedAt = parseTime(created)
+	v.ResolvedAt = parseTime(resolved)
+	return v, nil
+}
+
+func (s *Store) SyncOutboxForObject(ctx context.Context, scope, objectType, objectID string) (domain.SyncOutboxItem, error) {
+	var v domain.SyncOutboxItem
+	var payload, next, created, updated string
+	err := s.db.QueryRowContext(ctx, `SELECT id,scope,object_type,object_id,operation,payload_json,base_version,source_version,idempotency_key,status,attempts,next_attempt_at,last_error,created_at,updated_at FROM sync_outbox WHERE scope=? AND object_type=? AND object_id=? ORDER BY created_at,id LIMIT 1`,
+		scope, objectType, objectID).
+		Scan(&v.ID, &v.Scope, &v.Object.Type, &v.Object.ID, &v.Object.Operation, &payload, &v.Object.BaseVersion, &v.Object.SourceVersion, &v.Object.IdempotencyKey, &v.Status, &v.Attempts, &next, &v.LastError, &created, &updated)
+	if err != nil {
+		return domain.SyncOutboxItem{}, err
+	}
+	v.Object.Payload = storedRawMessage(payload)
+	v.NextAttemptAt = parseTime(next)
+	v.CreatedAt = parseTime(created)
+	v.UpdatedAt = parseTime(updated)
+	return v, nil
+}
+
+func (s *Store) RebaseSyncOutbox(ctx context.Context, id, baseVersion, idempotencyKey string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE sync_outbox SET base_version=?,idempotency_key=?,attempts=0,next_attempt_at='',last_error='',updated_at=? WHERE id=?`,
+		baseVersion, idempotencyKey, timeString(time.Now().UTC()), id)
+	return err
+}
+
+func (s *Store) DropSyncOutboxObject(ctx context.Context, scope, objectType, objectID string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM sync_outbox WHERE scope=? AND object_type=? AND object_id=?`, scope, objectType, objectID)
+	return err
+}
+
+func (s *Store) ResolveSyncConflictsForObject(ctx context.Context, scope, objectType, objectID string, at time.Time) (int64, error) {
+	result, err := s.db.ExecContext(ctx, `UPDATE sync_conflicts SET status='resolved',resolved_at=? WHERE scope=? AND object_type=? AND object_id=? AND status='open'`,
+		timeString(at), scope, objectType, objectID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+// storedRawMessage keeps an empty stored payload as JSON null; an empty
+// json.RawMessage is not valid JSON and would make encoding fail.
+func storedRawMessage(value string) json.RawMessage {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	return json.RawMessage(value)
 }
