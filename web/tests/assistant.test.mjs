@@ -43,3 +43,13 @@ test("built assistant ships the procedural motion controller", async () => {
     assert.ok(assistant.includes(token), token + " missing");
   }
 });
+
+test("pet uses the cached character before the first API response", async () => {
+  const assistant = await readFile(resolve(root, "dist", "assistant.js"), "utf8");
+  const styles = await readFile(resolve(root, "dist", "styles.css"), "utf8");
+  assert.match(assistant, /aha2\.pet\.character\.v1/);
+  assert.match(assistant, /function markCharacterReady/);
+  assert.match(assistant, /petState\?\.character \|\| cachedCharacter \|\| DEFAULT_CHARACTER/);
+  assert.match(assistant, /character-loading/);
+  assert.match(styles, /\.assistant-pet\.character-loading \{ visibility: hidden; \}/);
+});

@@ -78,6 +78,8 @@ let petMoving = false;
 let moveRAF = 0;
 let motionAnimation: Animation | null = null;
 let petState: PetState | null = null;
+let cachedCharacter = "";
+let characterReady = false;
 let applyingRemote = false;
 let petSyncTimer = 0;
 let pendingPetPatch: PetStatePatch = {};
@@ -252,6 +254,13 @@ export function mountAssistant(): void {
   panel.style.zIndex = "4";
   modelSelect = layer.querySelector<HTMLSelectElement>("#assistant-model")!;
   modelLabel = layer.querySelector<HTMLElement>("#assistant-model-name")!;
+  cachedCharacter = readCachedCharacter();
+  characterReady = Boolean(cachedCharacter);
+  if (!characterReady) {
+    // Do not flash the default character while the saved appearance loads.
+    pet.classList.add("character-loading");
+    window.setTimeout(markCharacterReady, 2500);
+  }
   renderCharacter();
   renderCharacterMenu();
   renderMotionMenu();
@@ -487,8 +496,10 @@ async function refreshAssistant(): Promise<void> {
   try {
     const result = await api.ownerAssistant();
     view = {assistant: result.assistant, messages: result.messages || [], models: result.models || [], model_name: result.model_name, brain_model_name: result.brain_model_name, tools: result.tools || []};
+    rememberCharacter(view.assistant.character);
     renderCharacter();
     renderCharacterMenu();
+    markCharacterReady();
     renderModel();
       if (view.models.length === 0 && view.messages.length === 0) {
       appendAssistantNotice("还没有可用于助手的 Provider 模型。请先到模型页配置一个 chat 或 anthropic 模型，我才能回答问题。");
@@ -676,7 +687,9 @@ async function savePetSettings(): Promise<void> {
       quiet_end: Number(settingsQuietEnd.value),
     });
     view = {...view, assistant: result.assistant, models: result.models || view.models, model_name: result.model_name ?? view.model_name, brain_model_name: result.brain_model_name ?? view.brain_model_name};
+    rememberCharacter(view.assistant.character);
     renderCharacter();
+    markCharacterReady();
     renderModel();
     applyPetEnabled(result.assistant.pet_enabled);
     closePetSettings();
@@ -959,10 +972,12 @@ function applyPetState(state: PetState): void {
   if (!state || !state.id) return;
   petState = state;
   applyingRemote = true;
+  if (state.character) rememberCharacter(state.character);
   if (view && state.character && state.character !== view.assistant.character) {
     view = {...view, assistant: {...view.assistant, character: state.character}};
-    renderCharacter();
   }
+  if (state.character && pet.dataset.character !== state.character) renderCharacter();
+  markCharacterReady();
   pet.dataset.mood = state.mood || "neutral";
   pet.classList.toggle("pet-sleeping", Boolean(state.sleeping));
   pet.classList.toggle("pet-quiet", Boolean(state.quiet));
@@ -1000,8 +1015,32 @@ function nickname(): string {
   return currentCharacter().nickname;
 }
 
+const PET_CHARACTER_KEY = "aha2.pet.character.v1";
+
+function readCachedCharacter(): string {
+  try {
+    const id = localStorage.getItem(PET_CHARACTER_KEY) || "";
+    return ASSISTANT_CHARACTERS.some(character => character.id === id) ? id : "";
+  } catch {
+    return "";
+  }
+}
+
+function rememberCharacter(id: string): void {
+  if (!id || id === cachedCharacter || !ASSISTANT_CHARACTERS.some(character => character.id === id)) return;
+  cachedCharacter = id;
+  try { localStorage.setItem(PET_CHARACTER_KEY, id); } catch {}
+}
+
+function markCharacterReady(): void {
+  if (!mounted || characterReady || !pet) return;
+  characterReady = true;
+  pet.classList.remove("character-loading");
+  renderCharacter();
+}
+
 function currentCharacter(): AssistantCharacter {
-  const id = view?.assistant.character || DEFAULT_CHARACTER;
+  const id = view?.assistant.character || petState?.character || cachedCharacter || DEFAULT_CHARACTER;
   return ASSISTANT_CHARACTERS.find(character => character.id === id) || ASSISTANT_CHARACTERS[0];
 }
 
@@ -1211,8 +1250,10 @@ async function chooseCharacter(characterID: string): Promise<void> {
       ...view, assistant: result.assistant,
       models: result.models || view.models, model_name: result.model_name ?? view.model_name,
     };
+    rememberCharacter(characterID);
     renderCharacter();
     renderCharacterMenu();
+    markCharacterReady();
     characterMenu.hidden = true;
     pet.classList.add("character-changed");
     window.setTimeout(() => pet.classList.remove("character-changed"), 720);

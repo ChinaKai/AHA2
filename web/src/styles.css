@@ -1773,6 +1773,7 @@ dialog > .dialog-head { margin: 0; padding: 18px 18px 0; }
 .assistant-layer { position: fixed; inset: 0; z-index: 60; pointer-events: none; }
 .assistant-layer [hidden] { display: none !important; }
 .assistant-pet { position: absolute; top: 0; left: 0; z-index: 5; width: 64px; height: 64px; padding: 0; border: 0; background: transparent; color: inherit; pointer-events: auto; cursor: pointer; transition: transform 1.15s cubic-bezier(.22,.8,.24,1); }
+.assistant-pet.character-loading { visibility: hidden; }
 .assistant-pet.no-transition { transition: none; }
 .assistant-pet:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; border-radius: 50%; }
 .assistant-pet-shadow { position: absolute; right: 12px; bottom: 1px; left: 12px; height: 8px; border-radius: 50%; background: rgba(15,35,60,.16); filter: blur(2px); }
