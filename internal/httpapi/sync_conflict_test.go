@@ -190,3 +190,48 @@ func TestSyncConflictsAPIEncodesEmptyPayload(t *testing.T) {
 		t.Fatalf("empty payload encoded as invalid JSON: %s", body)
 	}
 }
+
+func TestSyncConflictKeepLocalRetriesAfterRemoteVersionChange(t *testing.T) {
+	now := time.Now().UTC()
+	_, localRaw := conflictProjectPayload(t, "Local Name", now)
+	_, remoteRaw := conflictProjectPayload(t, "Remote Name", now.Add(time.Minute))
+	var bases []string
+	center := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/sync/push" {
+			http.NotFound(w, r)
+			return
+		}
+		var request syncer.PushRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Error(err)
+			return
+		}
+		bases = append(bases, request.Objects[0].BaseVersion)
+		if len(bases) == 1 {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"acked_keys": []string{},
+				"conflicts": []map[string]any{{
+					"scope": "default", "object_type": "project", "object_id": "project_conflict",
+					"local_payload": localRaw, "remote_payload": remoteRaw,
+					"local_version": "4", "remote_version": "5",
+				}},
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"acked_keys": []string{request.Objects[0].IdempotencyKey}})
+	}))
+	defer center.Close()
+	database, server, client, csrf := newConflictTestServer(t, center.URL)
+	id := seedConflict(t, database, true, localRaw, remoteRaw)
+	response := requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/settings/sync/conflicts/"+id+"/resolve", map[string]any{"action": "local"}, csrf)
+	body := readBody(t, response)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("resolve failed: %d %s", response.StatusCode, body)
+	}
+	if len(bases) != 2 || bases[0] != "4" || bases[1] != "5" {
+		t.Fatalf("bases=%v", bases)
+	}
+	if conflicts, _ := database.SyncConflicts(context.Background(), "default"); len(conflicts) != 0 {
+		t.Fatalf("conflicts=%#v", conflicts)
+	}
+}

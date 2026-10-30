@@ -509,20 +509,29 @@ func (s *Server) resolveConflictWithLocal(ctx context.Context, conflict domain.S
 	client := &syncer.Client{BaseURL: settings.Endpoint, DeviceID: settings.DeviceID, Credential: func(context.Context) (string, error) { return token, nil }}
 	pushCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	response, err := client.Push(pushCtx, syncer.PushRequest{Scope: localSyncScope, DeviceID: settings.DeviceID, Objects: []domain.SyncObject{object}})
-	if err != nil {
-		return err
-	}
-	if len(response.Conflicts) > 0 {
-		_ = s.store.AddSyncConflict(ctx, response.Conflicts[0])
-		return errSyncConflictRemoteChanged
-	}
 	acked := false
-	for _, key := range response.AckedKeys {
-		if key == object.IdempotencyKey {
-			acked = true
+	for attempt := 0; attempt < 2; attempt++ {
+		response, err := client.Push(pushCtx, syncer.PushRequest{Scope: localSyncScope, DeviceID: settings.DeviceID, Objects: []domain.SyncObject{object}})
+		if err != nil {
+			return err
+		}
+		if len(response.Conflicts) == 0 {
+			for _, key := range response.AckedKeys {
+				if key == object.IdempotencyKey {
+					acked = true
+					break
+				}
+			}
 			break
 		}
+		latest := response.Conflicts[0]
+		_ = s.store.AddSyncConflict(ctx, latest)
+		if attempt == 1 {
+			return errSyncConflictRemoteChanged
+		}
+		// The remote moved again since the conflict was recorded. Rebase the
+		// same local payload on the newest remote version and try once more.
+		object.BaseVersion = latest.RemoteVersion
 	}
 	if !acked {
 		return fmt.Errorf("中心没有确认本机变更")

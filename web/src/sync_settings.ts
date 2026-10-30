@@ -360,7 +360,12 @@ export function bindSyncSettings(options: {settings: SyncSettings; refresh: () =
         options.setMessage("notice", action === "local" ? "已保留本机并推送到中心" : action === "remote" ? "已采用远端内容" : "已忽略这条冲突");
         await options.refresh();
       } catch (error) {
+        // Show the failure where the dialog used to be and refresh the card so
+        // a rebased/updated conflict is visible instead of silently staying put.
         options.setMessage("error", error instanceof Error ? error.message : String(error));
+        conflictDialog?.close();
+        await options.refresh();
+        document.querySelector(".banner")?.scrollIntoView({block: "start", behavior: "smooth"});
       } finally {
         syncConflictBusy = false;
         button.textContent = original;
