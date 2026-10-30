@@ -983,35 +983,6 @@ function protoBadges(model: DetectedModel): string {
   return parts.length ? parts.join("") : `<span class="proto none">不支持</span>`;
 }
 
-function backendSupportsWire(backend: string, wire: string): boolean {
-  if (backend === "claude") return wire === "anthropic_messages";
-  if (backend === "codex") return wire !== "anthropic_messages";
-  return true;
-}
-
-function compatibleWireAPIs(model: DetectedModel, backend: string): string[] {
-  return supportedWireAPIs(model).filter(api => backendSupportsWire(backend, api));
-}
-
-function protoChecks(model: DetectedModel, backend: string): string {
-  const allWire = supportedWireAPIs(model);
-  if (!allWire.length) {
-    const caps = model.capabilities || {};
-    const reasons = Object.entries(caps).map(([key, value]) => `${key.replace("_", " ")}=${value}`).join(" · ");
-    return `<span class="proto none" title="${escapeHTML(reasons)}">${reasons ? "无支持协议" : "无可用协议"}</span>`;
-  }
-  const wire = compatibleWireAPIs(model, backend);
-  if (!wire.length) {
-    return `<span class="proto none">该 Backend 无兼容协议</span>`;
-  }
-  const labels: Record<string, string> = {
-    responses: "Responses",
-    chat: "Chat Completions",
-    anthropic_messages: "Messages",
-  };
-  return `<span class="proto-checks">${wire.map(api => `<label><input type="checkbox" value="${api}" checked><span>${labels[api] || api}</span></label>`).join("")}</span>`;
-}
-
 function applyProviderPreset(): void {
   const key = String((document.querySelector("#provider-preset") as HTMLSelectElement)?.value || "custom");
   const preset = PROVIDER_PRESETS[key] || PROVIDER_PRESETS.custom;
@@ -1111,8 +1082,6 @@ interface ModelDetectionSession {
   probeErrors: Map<string, string>;
   protocolErrors: Map<string, string>;
   selected: Set<string>;
-  // Backend the user picked for this detection batch; no automatic mapping.
-  backend: string;
   anthropicBaseURL: string;
   loading: boolean;
   error: string;
@@ -1123,16 +1092,32 @@ interface ModelDetectionSession {
 }
 
 const MODEL_CATALOG_TIMEOUT_MS = 20_000;
+const MODEL_PROBE_CONCURRENCY = 4;
+const MODEL_WIRE_OPTIONS: Array<{value: string; label: string; backends: string[]}> = [
+  {value: "responses", label: "Responses", backends: ["dsh", "codex"]},
+  {value: "chat_completions", label: "Chat Completions", backends: ["dsh", "codex"]},
+  {value: "anthropic_messages", label: "Anthropic Messages", backends: ["dsh", "claude"]},
+];
 
 let activeModelDetection: ModelDetectionSession | null = null;
+let modelAddRunning = false;
+let modelAddCancelled = false;
+
+function modelWireLabel(wire: string): string {
+  return MODEL_WIRE_OPTIONS.find(option => option.value === wire)?.label || wire;
+}
+
+function modelWireSupported(model: DetectedModel | undefined, wire: string): boolean {
+  const status = model?.capabilities?.[wire];
+  return status === "supported" || status === "rate_limited";
+}
 
 function detectedModelRow(session: ModelDetectionSession, item: DetectedModel, ready: boolean): string {
   const detecting = session.detecting.has(item.id);
   const probeError = session.probeErrors.get(item.id) || "";
-  const backend = session.backend;
-  const addable = ready && compatibleWireAPIs(item, backend).length > 0;
   const protocolError = session.protocolErrors.get(item.id) || "";
-  return `<div class="detected-item${ready ? "" : " pending"}" data-model="${escapeHTML(item.id)}"><input type="checkbox" class="detected-model" value="${escapeHTML(item.id)}" ${addable && session.selected.has(item.id) ? "checked" : ""} ${addable ? "" : "disabled"}><span><strong>${escapeHTML(item.id)}</strong>${item.max_input_tokens ? `<small>context ${Math.round(item.max_input_tokens / 1000)}K</small>` : ""}${ready ? `<span class="proto-badges">${protoBadges(item)}</span>${protoChecks(item, backend)}${supportedWireAPIs(item).length ? "" : protocolFailureDetail(item)}` : `<span class="proto pending">等待手动检测</span>`}${protocolError ? `<small class="bad">传输错误：${escapeHTML(protocolError)}</small>` : ""}${probeError ? `<small class="bad">${escapeHTML(probeError)}</small>` : ""}</span><button type="button" data-probe-model="${escapeHTML(item.id)}" ${detecting ? "disabled" : ""}>${detecting ? "检测中…" : ready ? "重新检测" : "检测"}</button></div>`;
+  const selected = session.selected.has(item.id);
+  return `<div class="detected-item${ready ? "" : " pending"}${selected ? " selected" : ""}" data-model="${escapeHTML(item.id)}"><input type="checkbox" class="detected-model" value="${escapeHTML(item.id)}" ${selected ? "checked" : ""}><span><strong>${escapeHTML(item.id)}</strong>${item.max_input_tokens ? `<small>context ${Math.round(item.max_input_tokens / 1000)}K</small>` : ""}${ready ? `<span class="proto-badges">${protoBadges(item)}</span>${supportedWireAPIs(item).length ? "" : protocolFailureDetail(item)}` : `<span class="proto pending">未检测</span>`}${protocolError ? `<small class="bad">传输错误：${escapeHTML(protocolError)}</small>` : ""}${probeError ? `<small class="bad">${escapeHTML(probeError)}</small>` : ""}</span><button type="button" data-probe-model="${escapeHTML(item.id)}" ${detecting ? "disabled" : ""}>${detecting ? "检测中…" : ready ? "重新检测" : "检测"}</button></div>`;
 }
 
 function protocolFailureDetail(model: DetectedModel): string {
@@ -1143,17 +1128,25 @@ function protocolFailureDetail(model: DetectedModel): string {
 }
 
 function applyModelDetectionFilter(root: HTMLElement, query: string): void {
-  const normalized = query.trim().toLowerCase();
+  const tokens = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  let visible = 0;
+  let total = 0;
   root.querySelectorAll<HTMLElement>(".detected-item").forEach(row => {
-    row.style.display = !normalized || String(row.dataset.model || "").toLowerCase().includes(normalized) ? "" : "none";
+    total++;
+    const haystack = String(row.dataset.model || "").toLowerCase();
+    const match = tokens.every(token => haystack.includes(token));
+    row.style.display = match ? "" : "none";
+    if (match) visible++;
   });
+  const count = root.querySelector<HTMLElement>("#detect-match-count");
+  if (count) count.textContent = `匹配 ${visible}/${total}`;
 }
 
 function modelDetectionStatusText(session: ModelDetectionSession): string {
   if (session.loading) return "正在获取模型列表";
   if (session.error) return `获取模型列表失败：${session.error}`;
   const inspected = session.results.size;
-  return `模型列表已获取 · ${inspected}/${session.catalog.length} 已手动检测${session.authStyle ? `（认证：${session.authStyle}）` : ""}`;
+  return `模型列表已获取 · ${inspected}/${session.catalog.length} 已检测${session.authStyle ? `（认证：${session.authStyle}）` : ""}`;
 }
 
 function updateModelDetectionProgress(session: ModelDetectionSession): void {
@@ -1167,8 +1160,13 @@ function updateModelDetectionProgress(session: ModelDetectionSession): void {
     const value = note.querySelector<HTMLElement>("code");
     if (value) value.textContent = session.anthropicBaseURL;
   }
-  const add = root.querySelector<HTMLButtonElement>("#add-selected-models");
-  if (add) add.disabled = session.selected.size === 0;
+  const selected = root.querySelector<HTMLElement>("#detect-selected-count");
+  if (selected) selected.textContent = `已选 ${session.selected.size}`;
+  const add = document.querySelector<HTMLButtonElement>("#open-model-add");
+  if (add) {
+    add.disabled = session.selected.size === 0 || modelAddRunning;
+    add.textContent = `添加 (${session.selected.size})`;
+  }
 }
 
 function updateDetectedModelRow(session: ModelDetectionSession, modelID: string): void {
@@ -1190,8 +1188,129 @@ function renderModelDetection(session: ModelDetectionSession): void {
   if (!root) return;
   const rows = session.catalog.map(item => detectedModelRow(session, session.results.get(item.id) || item, session.results.has(item.id))).join("");
   const empty = session.loading ? "正在获取模型列表…" : session.error ? "获取模型列表失败" : "没有检测到模型";
-  replaceRegionHTML(root, `<div class="detect-status" id="model-detect-progress">${escapeHTML(modelDetectionStatusText(session))}</div><div class="detect-status" id="model-detect-anthropic" ${session.anthropicBaseURL ? "" : "hidden"}>检测到 Anthropic 端点：<code>${escapeHTML(session.anthropicBaseURL)}</code></div><div class="detect-toolbar"><input type="search" id="detect-search" placeholder="搜索模型名称..."><button type="button" id="detect-select-all">全选</button><button type="button" id="detect-select-none">全不选</button></div><div class="detected-list" data-ui-key="model-detection-list">${rows || `<div class="empty">${empty}</div>`}</div><div class="dialog-actions"><button type="button" id="add-selected-models" class="primary" ${session.results.size ? "" : "disabled"}>添加已选模型</button></div>`);
+  replaceRegionHTML(root, `<div class="detect-status" id="model-detect-progress">${escapeHTML(modelDetectionStatusText(session))}</div><div class="detect-status" id="model-detect-anthropic" ${session.anthropicBaseURL ? "" : "hidden"}>检测到 Anthropic 端点：<code>${escapeHTML(session.anthropicBaseURL)}</code></div><div class="detect-toolbar"><input type="search" id="detect-search" placeholder="搜索模型名称（支持空格分词）..."><button type="button" id="detect-select-all">全选</button><button type="button" id="detect-select-none">全不选</button><span class="detect-count" id="detect-match-count"></span><span class="detect-count" id="detect-selected-count">已选 ${session.selected.size}</span></div><div class="detected-list" data-ui-key="model-detection-list">${rows || `<div class="empty">${empty}</div>`}</div>`);
   applyModelDetectionFilter(root, root.querySelector<HTMLInputElement>("#detect-search")?.value || "");
+}
+
+function syncModelAddWireOptions(): void {
+  const backend = String(document.querySelector<HTMLSelectElement>("#model-add-backend")?.value || "dsh");
+  const select = document.querySelector<HTMLSelectElement>("#model-add-wire");
+  if (!select) return;
+  const current = select.value;
+  const options = MODEL_WIRE_OPTIONS.filter(option => option.backends.includes(backend));
+  select.innerHTML = options.map(option => `<option value="${option.value}">${option.label}</option>`).join("");
+  if (options.some(option => option.value === current)) select.value = current;
+}
+
+function openModelAddDialog(): void {
+  const session = activeModelDetection;
+  const dialog = document.querySelector<HTMLDialogElement>("#model-add-dialog");
+  if (!session || !dialog || !session.selected.size) return;
+  modelAddCancelled = false;
+  const backend = document.querySelector<HTMLSelectElement>("#model-add-backend");
+  if (backend) backend.value = "dsh";
+  syncModelAddWireOptions();
+  const summary = document.querySelector<HTMLElement>("#model-add-summary");
+  if (summary) summary.textContent = `已选 ${session.selected.size} 个模型`;
+  const confirm = document.querySelector<HTMLButtonElement>("#confirm-model-add");
+  if (confirm) {
+    confirm.disabled = false;
+    confirm.textContent = "添加";
+  }
+  if (!dialog.open) dialog.showModal();
+  updateModelDetectionProgress(session);
+}
+
+async function probeSelectedModels(session: ModelDetectionSession, ids: string[], onProgress: (done: number, total: number) => void): Promise<void> {
+  const pending = ids.filter(id => !session.results.has(id));
+  if (!pending.length) return;
+  let next = 0;
+  let finished = 0;
+  const worker = async () => {
+    while (true) {
+      const index = next++;
+      if (index >= pending.length) return;
+      const modelID = pending[index];
+      session.detecting.add(modelID);
+      session.probeErrors.delete(modelID);
+      session.protocolErrors.delete(modelID);
+      updateDetectedModelRow(session, modelID);
+      try {
+        const response = await api.probeModel(session.providerID, modelID, session.authStyle);
+        session.results.set(modelID, response.model);
+        if (response.anthropic_base_url) session.anthropicBaseURL = response.anthropic_base_url;
+        const detail = Object.entries(response.protocol_errors || {}).map(([key, value]) => `${key.replace("_", " ")}=${value}`).join(" · ");
+        if (detail) session.protocolErrors.set(modelID, detail);
+        else session.protocolErrors.delete(modelID);
+      } catch (error) {
+        session.probeErrors.set(modelID, error instanceof Error ? error.message : String(error));
+      } finally {
+        session.detecting.delete(modelID);
+      }
+      finished++;
+      onProgress(finished, pending.length);
+      updateDetectedModelRow(session, modelID);
+    }
+  };
+  await Promise.all(Array.from({length: Math.min(MODEL_PROBE_CONCURRENCY, pending.length)}, () => worker()));
+}
+
+async function confirmModelAdd(): Promise<void> {
+  const session = activeModelDetection;
+  const dialog = document.querySelector<HTMLDialogElement>("#model-add-dialog");
+  if (!session || !dialog?.open || modelAddRunning) return;
+  const backend = String(document.querySelector<HTMLSelectElement>("#model-add-backend")?.value || "dsh");
+  const wire = String(document.querySelector<HTMLSelectElement>("#model-add-wire")?.value || "responses");
+  const confirm = document.querySelector<HTMLButtonElement>("#confirm-model-add");
+  const summary = document.querySelector<HTMLElement>("#model-add-summary");
+  const ids = [...session.selected];
+  if (!ids.length) return;
+  modelAddRunning = true;
+  modelAddCancelled = false;
+  if (confirm) {
+    confirm.disabled = true;
+    confirm.textContent = "检测中…";
+  }
+  updateModelDetectionProgress(session);
+  try {
+    const needProbe = ids.filter(id => !session.results.has(id));
+    if (needProbe.length) {
+      if (summary) summary.textContent = `正在检测所选模型 0/${needProbe.length}…`;
+      await probeSelectedModels(session, ids, (done, total) => {
+        if (summary) summary.textContent = `正在检测所选模型 ${done}/${total}…`;
+      });
+    }
+    if (modelAddCancelled || activeModelDetection !== session) return;
+    const supported = ids.filter(id => modelWireSupported(session.results.get(id), wire));
+    const skipped = ids.length - supported.length;
+    if (!supported.length) {
+      if (summary) summary.textContent = `所选模型都不支持 ${modelWireLabel(wire)}，未添加`;
+      return;
+    }
+    if (confirm) confirm.textContent = "添加中…";
+    if (summary) summary.textContent = `将添加 ${supported.length} 个模型${skipped ? `，跳过 ${skipped} 个不支持该协议` : ""}`;
+    const models = supported.map(id => {
+      const model = session.results.get(id) || session.catalog.find(item => item.id === id);
+      return {id, wire_apis: [wire], max_input_tokens: model?.max_input_tokens || 0, max_output_tokens: model?.max_output_tokens || 0};
+    });
+    const result = await api.addModels({provider_id: session.providerID, backend, models, anthropic_base_url: session.anthropicBaseURL});
+    dialog.close();
+    document.querySelector<HTMLDialogElement>("#model-dialog")?.close();
+    setMessage("notice", `已添加 ${(result.models || []).length} 个模型${skipped ? `，跳过 ${skipped} 个不支持该协议` : ""}${result.skipped ? `，${result.skipped} 个已存在` : ""}`);
+    await ensureViewData("models", true);
+    render();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (summary) summary.textContent = `添加失败：${message}`;
+    setMessage("error", `添加模型失败：${message}`);
+  } finally {
+    modelAddRunning = false;
+    if (confirm) {
+      confirm.disabled = false;
+      confirm.textContent = "添加";
+    }
+    if (activeModelDetection === session) updateModelDetectionProgress(session);
+  }
 }
 
 async function startModelDetection(providerID: string, button: HTMLElement, results: HTMLElement): Promise<void> {
@@ -1210,7 +1329,6 @@ async function startModelDetection(providerID: string, button: HTMLElement, resu
   const session: ModelDetectionSession = {
     providerID, authStyle: "", catalog: [], results: new Map(), detecting: new Set(),
     probeErrors: new Map(), protocolErrors: new Map(), selected: new Set(),
-    backend: String((document.querySelector<HTMLSelectElement>("#model-add-backend"))?.value || "dsh"),
     anthropicBaseURL: "", loading: true, error: "", abort, listeners, button, originalButtonHTML,
   };
   activeModelDetection = session;
@@ -1221,8 +1339,10 @@ async function startModelDetection(providerID: string, button: HTMLElement, resu
   }, {signal: listeners.signal});
   results.addEventListener("change", event => {
     if (!(event.target instanceof HTMLInputElement) || !event.target.classList.contains("detected-model")) return;
-    if (event.target.checked) session.selected.add(event.target.value);
-    else session.selected.delete(event.target.value);
+    const box = event.target;
+    if (box.checked) session.selected.add(box.value);
+    else session.selected.delete(box.value);
+    box.closest(".detected-item")?.classList.toggle("selected", box.checked);
     updateModelDetectionProgress(session);
   }, {signal: listeners.signal});
   results.addEventListener("click", event => {
@@ -1237,7 +1357,6 @@ async function startModelDetection(providerID: string, button: HTMLElement, resu
       updateDetectedModelRow(session, modelID);
       void api.probeModel(session.providerID, modelID, session.authStyle).then(response => {
         session.results.set(modelID, response.model);
-        if (supportedWireAPIs(response.model).length === 0) session.selected.delete(modelID);
         if (response.anthropic_base_url) session.anthropicBaseURL = response.anthropic_base_url;
         const detail = Object.entries(response.protocol_errors || {}).map(([key, value]) => `${key.replace("_", " ")}=${value}`).join(" · ");
         if (detail) session.protocolErrors.set(modelID, detail);
@@ -1251,36 +1370,32 @@ async function startModelDetection(providerID: string, button: HTMLElement, resu
       return;
     }
     if (target.closest("#detect-select-all")) {
-      results.querySelectorAll<HTMLInputElement>(".detected-item:not([style*='display: none']) .detected-model:not(:disabled)").forEach(box => { box.checked = true; session.selected.add(box.value); });
+      [...results.querySelectorAll<HTMLElement>(".detected-item")].filter(row => row.style.display !== "none").forEach(row => {
+        const box = row.querySelector<HTMLInputElement>(".detected-model");
+        if (!box) return;
+        box.checked = true;
+        row.classList.add("selected");
+        session.selected.add(box.value);
+      });
       updateModelDetectionProgress(session);
       return;
     }
     if (target.closest("#detect-select-none")) {
-      results.querySelectorAll<HTMLInputElement>(".detected-model").forEach(box => { box.checked = false; session.selected.delete(box.value); });
+      results.querySelectorAll<HTMLInputElement>(".detected-model").forEach(box => {
+        box.checked = false;
+        box.closest(".detected-item")?.classList.remove("selected");
+        session.selected.delete(box.value);
+      });
       updateModelDetectionProgress(session);
       return;
     }
-    if (!target.closest("#add-selected-models")) return;
-    const backend = String((document.querySelector<HTMLSelectElement>("#model-add-backend"))?.value || "dsh");
-    const picks = [...results.querySelectorAll<HTMLInputElement>(".detected-model:checked")].flatMap(input => {
-      const row = input.closest(".detected-item");
-      const wireAPIs = [...(row?.querySelectorAll<HTMLInputElement>(".proto-checks input:checked") || [])].map(item => item.value);
-      if (!wireAPIs.length) return [];
-      const detected = session.results.get(input.value);
-      return [{id: input.value, wire_apis: wireAPIs, max_input_tokens: detected?.max_input_tokens || 0, max_output_tokens: detected?.max_output_tokens || 0}];
-    });
-    if (!picks.length) {
-      setMessage("error", "请至少选择一个模型，并保留至少一个兼容协议");
-      return;
-    }
-    const addButton = results.querySelector<HTMLElement>("#add-selected-models");
-    void runWithFeedback(addButton, "添加中", async () => {
-      const result = await api.addModels({provider_id: providerID, backend, models: picks, anthropic_base_url: session.anthropicBaseURL});
-      document.querySelector<HTMLDialogElement>("#model-dialog")?.close();
-      setMessage("notice", `已添加 ${(result.models || []).length} 个模型${result.skipped ? `，跳过 ${result.skipped} 个已存在` : ""}`);
-      await ensureViewData("models", true);
-      render();
-    });
+    if (target instanceof HTMLInputElement) return;
+    const row = target.closest<HTMLElement>(".detected-item");
+    if (!row) return;
+    const box = row.querySelector<HTMLInputElement>(".detected-model");
+    if (!box) return;
+    box.checked = !box.checked;
+    box.dispatchEvent(new Event("change", {bubbles: true}));
   }, {signal: listeners.signal});
   const timeout = window.setTimeout(() => abort.abort(), MODEL_CATALOG_TIMEOUT_MS);
   try {
@@ -2449,7 +2564,7 @@ function providerDialog(): string {
 
 function modelDialog(): string {
   const options = state.providers.map(item => `<option value="${item.id}">${escapeHTML(item.name)}</option>`).join("");
-  return `<dialog id="model-dialog" class="wide"><div class="dialog-head"><h2>添加模型</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div><div class="dialog-body"><div class="two"><label>Provider<select id="model-provider">${options || `<option value="">先添加 Provider</option>`}</select></label><label>添加到 Backend<select id="model-add-backend"><option value="dsh">DSH</option><option value="codex">Codex</option><option value="claude">Claude Code</option></select><span class="field-help">获取列表只使用 Provider；Backend 决定模型添加后的运行方式。</span></label></div><div class="dialog-actions"><button type="button" id="detect-models" class="primary">${icon("refresh")}获取模型列表</button></div><div id="model-detect-results"></div></div></dialog>`;
+  return `<dialog id="model-dialog" class="wide"><div class="dialog-head"><h2>添加模型</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div><div class="dialog-body"><label>Provider<select id="model-provider">${options || `<option value="">先添加 Provider</option>`}</select></label><div class="dialog-actions"><button type="button" id="detect-models" class="primary">${icon("refresh")}获取模型列表</button><button type="button" id="open-model-add" disabled>添加 (0)</button></div><div id="model-detect-results"></div></div></dialog><dialog id="model-add-dialog"><div class="dialog-head"><h2>添加所选模型</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div><div class="dialog-body"><div class="two"><label>Backend<select id="model-add-backend"><option value="dsh">DSH</option><option value="codex">Codex</option><option value="claude">Claude Code</option></select></label><label>协议<select id="model-add-wire"></select></label></div><div class="field-help" id="model-add-summary">已选 0 个模型</div><div class="dialog-actions"><button type="button" data-close>取消</button><button type="button" id="confirm-model-add" class="primary">添加</button></div></div></dialog>`;
 }
 
 function editModelDialog(): string {
@@ -3890,17 +4005,9 @@ function bindCommon(): void {
     if (!results || !button) return;
     void startModelDetection(providerID, button, results);
   });
-  document.querySelector("#model-add-backend")?.addEventListener("change", event => {
-    const backend = String((event.target as HTMLSelectElement)?.value || "dsh");
-    const session = activeModelDetection;
-    if (!session) return;
-    session.backend = backend;
-    for (const modelID of [...session.selected]) {
-      const model = session.results.get(modelID);
-      if (model && !compatibleWireAPIs(model, backend).length) session.selected.delete(modelID);
-    }
-    renderModelDetection(session);
-  });
+  document.querySelector("#open-model-add")?.addEventListener("click", openModelAddDialog);
+  document.querySelector("#model-add-backend")?.addEventListener("change", syncModelAddWireOptions);
+  document.querySelector("#confirm-model-add")?.addEventListener("click", () => void confirmModelAdd());
   document.querySelectorAll<HTMLElement>("[data-delete-provider]").forEach(button => button.addEventListener("click", async event => {
     event.stopPropagation();
     const id = button.dataset.deleteProvider!;
@@ -5094,11 +5201,16 @@ function flushDeferredRender(): void {
 }
 
 document.addEventListener("close", event => {
+  if (event.target instanceof HTMLDialogElement && event.target.id === "model-add-dialog" && modelAddRunning) {
+    modelAddCancelled = true;
+  }
   if (event.target instanceof HTMLDialogElement && event.target.id === "model-dialog" && activeModelDetection) {
     const session = activeModelDetection;
     activeModelDetection = null;
     session.abort?.abort();
     session.listeners?.abort();
+    const addDialog = document.querySelector<HTMLDialogElement>("#model-add-dialog");
+    if (addDialog?.open) addDialog.close();
   }
   if (event.target instanceof HTMLDialogElement) flushDeferredRender();
 }, true);

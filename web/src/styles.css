@@ -1044,11 +1044,13 @@ dialog > .dialog-head { margin: 0; padding: 18px 18px 0; }
 .ctx-session-actions span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .form-error { margin-top: 12px; padding: 9px 11px; border: 1px solid #fecaca; border-radius: 5px; background: #fef2f2; color: #b91c1c; font-size: 10px; line-height: 1.5; }
 .field-help { color: var(--muted); font-size: 10px; font-weight: 400; margin-top: -8px; margin-bottom: 12px; }
-.detect-toolbar { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
-.detect-toolbar input { flex: 1; min-width: 0; }
+.detect-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 12px; }
+.detect-toolbar input { flex: 1; min-width: 120px; }
 .detect-toolbar button { min-height: 32px; padding: 0 10px; font-size: 11px; }
+.detect-count { color: var(--muted); font-size: 11px; white-space: nowrap; }
 .detected-list { display: grid; gap: 6px; max-height: 260px; overflow: auto; margin-top: 14px; padding: 10px; border: 1px solid var(--line); border-radius: 6px; background: #fafbfc; }
 .detected-item { display: flex; align-items: center; gap: 9px; margin: 0; padding: 8px 10px; border-radius: 4px; background: #fff; font-weight: 600; cursor: pointer; }
+.detected-item.selected { outline: 1px solid #6f8cff; background: #f4f7ff; }
 .detected-item input { width: auto; height: auto; }
 .detected-item > span { display: grid; gap: 2px; }
 .detected-item small { color: var(--muted); font-weight: 400; }
@@ -1061,9 +1063,6 @@ dialog > .dialog-head { margin: 0; padding: 18px 18px 0; }
 .proto.claude { background: #f3ecff; color: #7c3aed; }
 .proto.dsh { background: #e8f7f1; color: #087f5b; }
 .proto.none { background: #eef1f4; color: var(--muted); }
-.proto-checks { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 5px; }
-.proto-checks label { display: inline-flex; align-items: center; gap: 4px; margin: 0; padding: 3px 7px; border: 1px solid var(--line); border-radius: 4px; background: #fff; font-size: 10px; font-weight: 600; cursor: pointer; }
-.proto-checks input { width: auto; height: auto; }
 .capability-badge { display: inline-block; margin-left: 6px; padding: 1px 5px; border-radius: 999px; background: #e8f7f1; color: #087f5b; font-size: 9px; font-weight: 800; vertical-align: 1px; }
 .detect-status { margin-top: 10px; color: var(--muted); font-size: 11px; }
 .two { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; }

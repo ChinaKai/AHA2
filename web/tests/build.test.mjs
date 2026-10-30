@@ -1911,7 +1911,7 @@ test("task creation supports manual draft and explicit start", async () => {
   assert.match(api, /\/tasks\/\$\{encodeURIComponent\(id\)\}\/start/);
 });
 
-test("model detection fetches the catalog once and probes only on manual request", async () => {
+test("model detection fetches the catalog, supports multi-select and an add dialog", async () => {
   const root = resolve(import.meta.dirname, "..");
   const main = await readFile(resolve(root, "dist", "app.js"), "utf8");
   const api = await readFile(resolve(root, "dist", "api.js"), "utf8");
@@ -1927,13 +1927,21 @@ test("model detection fetches the catalog once and probes only on manual request
   assert.match(main, /replaceRegionHTML\(root,/);
   assert.match(main, /data-ui-key="model-detection-list"/);
   assert.match(main, /applyModelDetectionFilter/);
+  assert.match(main, /匹配 /);
+  assert.match(main, /已选 /);
   assert.match(main, /session\.selected/);
   assert.match(main, /protocolFailureDetail/);
   assert.match(main, /协议结果：/);
   assert.match(main, /protocolErrors/);
   assert.match(main, /获取模型列表/);
-  assert.match(main, /添加到 Backend/);
+  assert.match(main, /id="open-model-add"/);
+  assert.match(main, /id="model-add-dialog"/);
+  assert.match(main, /id="model-add-wire"/);
+  assert.match(main, /id="confirm-model-add"/);
   assert.match(main, /protocol_errors/);
+  assert.doesNotMatch(main, /proto-checks/);
+  assert.doesNotMatch(main, /add-selected-models/);
+  assert.doesNotMatch(main, /添加到 Backend/);
   assert.match(api, /\/api\/v1\/providers\/detect-models/);
   assert.match(api, /model-probes/);
   assert.doesNotMatch(api, /model-detection-jobs/);
