@@ -3,6 +3,7 @@ package backend
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -250,6 +251,66 @@ func TestParseClaudeLineError(t *testing.T) {
 	event := firstClaudeEvent(events)
 	if event.Type != "agent_error" {
 		t.Fatalf("expected agent_error, got %q", event.Type)
+	}
+}
+
+func TestParseClaudeLineSyntheticAPIErrorKeepsProviderText(t *testing.T) {
+	t.Parallel()
+	line := `{"type":"assistant","isApiErrorMessage":true,"apiErrorStatus":400,"message":{"model":"<synthetic>","content":[{"type":"text","text":"API Error: 400 litellm.ContextWindowExceededError: maximum context length is 1048576 tokens"}]}}`
+	events, reply, _ := parseClaudeLine(line)
+	event := firstClaudeEvent(events)
+	if event.Type != "agent_error" {
+		t.Fatalf("expected agent_error, got %q", event.Type)
+	}
+	if reply != "" {
+		t.Fatalf("synthetic error produced a reply: %q", reply)
+	}
+	message, _ := event.Data["message"].(string)
+	if !strings.Contains(message, "ContextWindowExceededError") || event.Data["status"] != float64(400) && event.Data["status"] != 400 {
+		t.Fatalf("provider error text was lost: %#v", event.Data)
+	}
+}
+
+type claudeContextWindowRunner struct{}
+
+func (claudeContextWindowRunner) Run(_ context.Context, _ workspace.Command, onLine workspace.LineHandler) (workspace.Result, error) {
+	onLine(`{"type":"assistant","isApiErrorMessage":true,"apiErrorStatus":400,"message":{"model":"<synthetic>","content":[{"type":"text","text":"API Error: 400 litellm.ContextWindowExceededError: This model's maximum context length is 1048576 tokens. However, you requested 1055361 tokens"}]}}`)
+	return workspace.Result{ExitCode: 1}, nil
+}
+
+func TestClaudeContextWindowErrorIsClassifiedAndVisible(t *testing.T) {
+	var events []Event
+	_, err := (Claude{}).Execute(context.Background(), Request{Runner: claudeContextWindowRunner{}, WorkDir: t.TempDir()}, func(event Event) {
+		events = append(events, event)
+	})
+	if !errors.Is(err, ErrContextWindowExceeded) {
+		t.Fatalf("context window error was not classified: %v", err)
+	}
+	if !strings.Contains(err.Error(), "ContextWindowExceededError") || strings.Contains(err.Error(), "claude exited with code 1") {
+		t.Fatalf("provider text was replaced by the generic exit error: %v", err)
+	}
+	sawError := false
+	for _, event := range events {
+		if event.Type == "agent_error" && strings.Contains(fmt.Sprint(event.Data["message"]), "ContextWindowExceededError") {
+			sawError = true
+		}
+	}
+	if !sawError {
+		t.Fatalf("agent_error event missing: %#v", events)
+	}
+}
+
+type claudeSyntheticErrorExitZeroRunner struct{}
+
+func (claudeSyntheticErrorExitZeroRunner) Run(_ context.Context, _ workspace.Command, onLine workspace.LineHandler) (workspace.Result, error) {
+	onLine(`{"type":"assistant","isApiErrorMessage":true,"apiErrorStatus":500,"message":{"model":"<synthetic>","content":[{"type":"text","text":"API Error: 500 provider unavailable"}]}}`)
+	return workspace.Result{ExitCode: 0}, nil
+}
+
+func TestClaudeSyntheticErrorWithoutReplyIsNotReportedAsNoMessage(t *testing.T) {
+	_, err := (Claude{}).Execute(context.Background(), Request{Runner: claudeSyntheticErrorExitZeroRunner{}, WorkDir: t.TempDir()}, nil)
+	if err == nil || !strings.Contains(err.Error(), "provider unavailable") || strings.Contains(err.Error(), "no agent message") {
+		t.Fatalf("synthetic error was hidden: %v", err)
 	}
 }
 

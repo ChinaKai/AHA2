@@ -188,6 +188,37 @@ func TestOwnerAssistantLeavesStartedPetTaskAlone(t *testing.T) {
 	}
 }
 
+func TestOwnerAssistantReopensFailedPetTask(t *testing.T) {
+	fixture := newPetTaskFixture(t)
+	fixture.createPetDraft(t, "旧的宠物需求")
+	if _, err := fixture.service.StartTask(fixture.ctx, petTaskID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.service.SubmitMessage(fixture.ctx, petTaskID, "主人第一条消息"); err != nil {
+		t.Fatal(err)
+	}
+	waitForTask(t, fixture.database, petTaskID, domain.TaskWaitingUser)
+
+	now := fixture.service.now().UTC()
+	if err := fixture.database.UpdateTaskStatus(fixture.ctx, petTaskID, domain.TaskWaitingUser, domain.TaskActive, timeString(now), ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.database.UpdateTaskStatus(fixture.ctx, petTaskID, domain.TaskActive, domain.TaskFailed, timeString(now), ""); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := fixture.service.OwnerAssistant(fixture.ctx); err != nil {
+		t.Fatal(err)
+	}
+	task := fixture.petTask(t)
+	if task.Status != domain.TaskWaitingUser {
+		t.Fatalf("failed pet task was not reopened: %s", task.Status)
+	}
+	if count := fixture.turnCount(t); count != 1 {
+		t.Fatalf("reopen duplicated the introduction: turn count=%d", count)
+	}
+}
+
 func TestOwnerAssistantRollsFailedPetStartBackToDraft(t *testing.T) {
 	fixture := newPetTaskFixture(t)
 	fixture.createPetDraft(t, "旧的宠物需求")

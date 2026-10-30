@@ -1106,8 +1106,9 @@ func (s *Service) recordOrchestrationError(ctx context.Context, taskID string, t
 }
 
 func (s *Service) retryTurn(ctx context.Context, turn domain.Turn) bool {
-	mainIdleRetry := turn.AgentID == "main" && turn.WaitingReason == "backend_idle_timeout"
-	if turn.Status != domain.TurnFailed || turn.Attempt >= 2 || turn.AgentID == "main" && !mainIdleRetry {
+	mainRetryable := turn.AgentID == "main" &&
+		(turn.WaitingReason == waitingReasonBackendIdleTimeout || turn.WaitingReason == waitingReasonContextWindow)
+	if turn.Status != domain.TurnFailed || turn.Attempt >= maxTurnAttempts || turn.AgentID == "main" && !mainRetryable {
 		return false
 	}
 	retry := turn

@@ -1926,6 +1926,135 @@ func TestMainTurnRetriesOnceAfterBackendIdleTimeout(t *testing.T) {
 	}
 }
 
+type contextWindowThenSuccessExecutor struct {
+	mu             sync.Mutex
+	calls          int
+	providerInputs []string
+}
+
+func (executor *contextWindowThenSuccessExecutor) Execute(_ context.Context, request ExecutionRequest, emit func(ExecutionEvent)) (ExecutionResult, error) {
+	executor.mu.Lock()
+	executor.calls++
+	call := executor.calls
+	executor.providerInputs = append(executor.providerInputs, request.ProviderSessionID)
+	executor.mu.Unlock()
+	emit(ExecutionEvent{Type: "agent_progress", Data: map[string]any{"message": fmt.Sprintf("attempt %d progress", call)}})
+	switch call {
+	case 1:
+		emit(ExecutionEvent{Type: "agent_message", Data: map[string]any{"text": "first reply"}})
+		return ExecutionResult{Reply: "first reply", ProviderSessionID: "session-one"}, nil
+	case 2:
+		return ExecutionResult{ProviderSessionID: "session-one"}, fmt.Errorf("%w: API Error: 400 litellm.ContextWindowExceededError: maximum context length is 1048576 tokens", backend.ErrContextWindowExceeded)
+	default:
+		emit(ExecutionEvent{Type: "agent_message", Data: map[string]any{"text": "recovered after reset"}})
+		return ExecutionResult{Reply: "recovered after reset", ProviderSessionID: "session-two"}, nil
+	}
+}
+
+func (executor *contextWindowThenSuccessExecutor) inputs() []string {
+	executor.mu.Lock()
+	defer executor.mu.Unlock()
+	return append([]string(nil), executor.providerInputs...)
+}
+
+func TestMainTurnResetsSessionAndRetriesOnceAfterContextWindowExceeded(t *testing.T) {
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	secretStore, err := secrets.Open(filepath.Join(t.TempDir(), "secrets.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	project := domain.Project{ID: "project-context-window", Name: "Context Window", CreatedAt: now, UpdatedAt: now}
+	workspace := domain.Workspace{ID: "workspace-context-window", ProjectID: project.ID, Name: "local", Locality: "local", Transport: "native", RootPath: t.TempDir(), Health: "ready", CreatedAt: now, UpdatedAt: now}
+	env := domain.EnvGroup{ID: "env-context-window", Name: "Env", ProviderID: "test", Backend: "codex", Revision: 1, Environment: map[string]string{}, SecretRefs: map[string]string{}, CreatedAt: now, UpdatedAt: now}
+	model := domain.Model{ID: "model-context-window", DisplayName: "Model", ProviderID: "test", Backend: "codex", WireModel: "model", DefaultEnvGroupID: env.ID, CreatedAt: now, UpdatedAt: now}
+	for _, operation := range []func() error{
+		func() error { return database.CreateProject(ctx, project) },
+		func() error { return database.CreateWorkspace(ctx, workspace) },
+		func() error { return database.UpsertEnvGroup(ctx, env) },
+		func() error { return database.UpsertModel(ctx, model) },
+	} {
+		if err := operation(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	executor := &contextWindowThenSuccessExecutor{}
+	service := NewService(database, secretStore, executor)
+	task, err := service.CreateTask(ctx, CreateTaskInput{ProjectID: project.ID, WorkspaceID: workspace.ID, Title: "context window", Request: "first", ModelID: model.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.SubmitMessage(ctx, task.ID, "first"); err != nil {
+		t.Fatal(err)
+	}
+	waitForTask(t, database, task.ID, domain.TaskWaitingUser)
+	if _, err := service.SubmitMessage(ctx, task.ID, "second"); err != nil {
+		t.Fatal(err)
+	}
+	waitForTask(t, database, task.ID, domain.TaskWaitingUser)
+
+	turns, err := database.ListTurns(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(turns) != 3 {
+		t.Fatalf("turns=%#v", turns)
+	}
+	var failedTurn, retriedTurn domain.Turn
+	for _, turn := range turns {
+		if turn.Status == domain.TurnFailed && turn.WaitingReason == waitingReasonContextWindow {
+			failedTurn = turn
+		}
+		if turn.Attempt == 2 {
+			retriedTurn = turn
+		}
+	}
+	if failedTurn.ID == "" {
+		t.Fatalf("context failure turn missing: %#v", turns)
+	}
+	if retriedTurn.Status != domain.TurnSucceeded || retriedTurn.Result != "recovered after reset" {
+		t.Fatalf("context retry state=%#v", retriedTurn)
+	}
+	inputs := executor.inputs()
+	if len(inputs) != 3 || inputs[0] != "" || inputs[1] != "session-one" || inputs[2] != "" {
+		t.Fatalf("retry reused the over-limit session: inputs=%#v", inputs)
+	}
+	sessions, err := database.ListBackendSessionsForAgent(ctx, task.ID, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	superseded := false
+	for _, session := range sessions {
+		if session.ProviderSession == "session-one" && session.Status == "superseded" {
+			superseded = true
+		}
+	}
+	if !superseded {
+		t.Fatalf("over-limit session was not superseded: %#v", sessions)
+	}
+	page, err := database.ConversationPageForAgent(ctx, task.ID, "main", 0, 0, 200, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sawReset, sawRetry := false, false
+	for _, item := range page.Items {
+		if item.Kind == "backend_session_auto_reset" {
+			sawReset = true
+		}
+		if item.Kind == "agent_retry" {
+			sawRetry = true
+		}
+	}
+	if !sawReset || !sawRetry {
+		t.Fatalf("recovery notices missing: reset=%t retry=%t items=%#v", sawReset, sawRetry, page.Items)
+	}
+}
+
 // twoBatchExecutor submits two batches inside the SAME main Turn. The
 // collaboration API allows that, and the routed-agent card -- identified by the
 // parent Turn -- has to end up naming every agent that was dispatched.

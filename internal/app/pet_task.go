@@ -20,6 +20,23 @@ const (
 	petTaskIntro = "请用一两句话向主人做个自我介绍：你的名字、当前形象，以及你会陪主人聊天、写日记、做小动作。不要写代码或运行命令。"
 )
 
+// reopenPetTaskIfFailed returns the Pet Task to waiting_user after a backend
+// failure. Without this an owner whose assistant already points at task_pet
+// would keep seeing the failed Task: the PetTaskID branch used to return it
+// unchanged, so the "reopen failed pet task" fallback below never ran.
+func (s *Service) reopenPetTaskIfFailed(ctx context.Context, task domain.Task) domain.Task {
+	if task.Status != domain.TaskFailed {
+		return task
+	}
+	if err := s.ReopenTask(ctx, task.ID); err != nil {
+		return task
+	}
+	if reloaded, err := s.store.Task(ctx, task.ID); err == nil {
+		return reloaded
+	}
+	return task
+}
+
 // ensureOwnerPetTask creates the visible system Pet Task and its dedicated
 // writable workspace on first use. The pet is a normal Task so it can use the
 // normal backend conversation, while pet tools come from the MCP endpoint.
@@ -45,15 +62,14 @@ func (s *Service) ensureOwnerPetTask(ctx context.Context, assistant *domain.Owne
 	}
 	if assistant.PetTaskID != "" {
 		if existing, err := s.store.Task(ctx, assistant.PetTaskID); err == nil {
+			existing = s.reopenPetTaskIfFailed(ctx, existing)
 			s.ensurePetTaskStarted(ctx, existing)
 			recordPetTask(existing.ID)
 			return existing.ID, nil
 		}
 	}
 	if existing, err := s.store.Task(ctx, petTaskID); err == nil {
-		if existing.Status == domain.TaskFailed {
-			_ = s.ReopenTask(ctx, existing.ID)
-		}
+		existing = s.reopenPetTaskIfFailed(ctx, existing)
 		recordPetTask(petTaskID)
 		s.ensurePetTaskStarted(ctx, existing)
 		return petTaskID, nil

@@ -777,6 +777,14 @@ func (s *Service) ReopenTask(ctx context.Context, taskID string) error {
 	return nil
 }
 
+const (
+	waitingReasonBackendIdleTimeout = "backend_idle_timeout"
+	waitingReasonContextWindow      = "context_window_exceeded"
+	// maxTurnAttempts bounds a Main turn to its first run plus one automatic
+	// retry, including the context-window recovery below.
+	maxTurnAttempts = 2
+)
+
 func (s *Service) runTurn(ctx context.Context, turnID string) {
 	defer func() {
 		s.mu.Lock()
@@ -1187,8 +1195,22 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 			s.interruptTurn(context.Background(), &turn, task)
 			return
 		}
-		if errors.Is(executeErr, backend.ErrBackendIdleTimeout) {
-			turn.WaitingReason = "backend_idle_timeout"
+		switch {
+		case errors.Is(executeErr, backend.ErrBackendIdleTimeout):
+			turn.WaitingReason = waitingReasonBackendIdleTimeout
+		case errors.Is(executeErr, backend.ErrContextWindowExceeded):
+			turn.WaitingReason = waitingReasonContextWindow
+			if turn.Attempt < maxTurnAttempts {
+				// Retrying the same provider session cannot recover: its
+				// transcript is already over the window. Supersede it so the
+				// retry starts from a fresh context and can fit again.
+				if err := s.store.CloseBackendSessionsForAgent(ctx, task.ID, turn.AgentID); err != nil {
+					log.Printf("context window recovery: close backend sessions for %s/%s: %v", task.ID, turn.AgentID, err)
+					turn.WaitingReason = ""
+				} else {
+					s.recordContextWindowReset(ctx, turn)
+				}
+			}
 		}
 		s.failTurn(context.Background(), &turn, task, executeErr)
 		return
@@ -1291,6 +1313,20 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 		s.SyncAgentChannelMessageStatuses(context.Background(), task.ID, turn.ID, "", terminalState, "", "")
 	}
 	s.afterTurnTerminal(context.Background(), task, turn)
+}
+
+// recordContextWindowReset tells the owner why the session was rotated. The
+// failed turn itself keeps the provider's original 400 text as its error, so
+// this is an explanation rather than a replacement for it.
+func (s *Service) recordContextWindowReset(ctx context.Context, turn domain.Turn) {
+	_, _ = s.store.AddConversationItem(ctx, domain.ConversationItem{
+		ID: domain.NewID("conversation"), TaskID: turn.TaskID, RoundID: turn.RoundID, TurnID: turn.ID,
+		AgentID: "aha", StreamAgentID: turn.AgentID, FromAgentID: "aha", ToAgentID: turn.AgentID,
+		RouteKind: "session_control", Category: "update", Kind: "backend_session_auto_reset",
+		Summary:   "上下文超出模型窗口，AHA 已重置该 Agent 的会话并自动重试一次",
+		Payload:   map[string]any{"reason": waitingReasonContextWindow, "attempt": turn.Attempt},
+		CreatedAt: s.now().UTC(),
+	})
 }
 
 func (s *Service) dshSessionCanReuse(ctx context.Context, session domain.BackendSession, model domain.Model, envGroup domain.EnvGroup) bool {

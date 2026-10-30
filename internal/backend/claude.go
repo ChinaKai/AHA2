@@ -110,6 +110,9 @@ func (adapter Claude) Execute(ctx context.Context, request Request, emit func(Ev
 		return Result{Reply: reply, ExitCode: result.ExitCode, ProviderSessionID: sessionID}, ErrBackendIdleTimeout
 	}
 	if err != nil {
+		if providerError != "" && claudeContextWindowExceeded(providerError) {
+			return Result{Reply: reply, ExitCode: result.ExitCode, ProviderSessionID: sessionID}, fmt.Errorf("%w: %s", ErrContextWindowExceeded, tail(providerError, 2000))
+		}
 		return Result{Reply: reply, ExitCode: result.ExitCode, ProviderSessionID: sessionID}, err
 	}
 	if sessionID == "" {
@@ -124,9 +127,18 @@ func (adapter Claude) Execute(ctx context.Context, request Request, emit func(Ev
 			message = fmt.Sprintf("claude exited with code %d", result.ExitCode)
 		}
 		message = tail(message, 2000)
+		if claudeContextWindowExceeded(message) {
+			return Result{Reply: reply, ExitCode: result.ExitCode, ProviderSessionID: sessionID}, fmt.Errorf("%w: %s", ErrContextWindowExceeded, message)
+		}
 		return Result{Reply: reply, ExitCode: result.ExitCode, ProviderSessionID: sessionID}, fmt.Errorf("%s", message)
 	}
+	if providerError != "" && claudeContextWindowExceeded(providerError) {
+		return Result{Reply: reply, ExitCode: result.ExitCode, ProviderSessionID: sessionID}, fmt.Errorf("%w: %s", ErrContextWindowExceeded, tail(providerError, 2000))
+	}
 	if strings.TrimSpace(reply) == "" {
+		if providerError != "" {
+			return Result{ExitCode: result.ExitCode, ProviderSessionID: sessionID}, fmt.Errorf("%s", tail(providerError, 2000))
+		}
 		return Result{ExitCode: result.ExitCode, ProviderSessionID: sessionID}, fmt.Errorf("claude returned no agent message")
 	}
 	return Result{Reply: strings.TrimSpace(reply), ExitCode: result.ExitCode, ProviderSessionID: sessionID}, nil
@@ -182,6 +194,21 @@ func parseClaudeLine(line string) ([]Event, string, string) {
 			return []Event{{Type: "agent_error", Data: map[string]any{"message": message}}}, "", sessionID
 		}
 	case "assistant":
+		// Claude Code reports provider failures (for example a context-window
+		// 400) as a synthetic assistant message instead of a result event. The
+		// text is the only place that carries the provider's explanation, so
+		// project it as an error and let Execute surface it verbatim.
+		if apiError, _ := payload["isApiErrorMessage"].(bool); apiError {
+			text := claudeAssistantText(payload)
+			if text == "" {
+				text = "Claude API error"
+			}
+			data := map[string]any{"message": text}
+			if status, ok := payload["apiErrorStatus"]; ok {
+				data["status"] = status
+			}
+			return []Event{{Type: "agent_error", Data: data}}, "", ""
+		}
 		message, _ := payload["message"].(map[string]any)
 		content, _ := message["content"].([]any)
 		events := make([]Event, 0, len(content))
@@ -230,6 +257,44 @@ func parseClaudeLine(line string) ([]Event, string, string) {
 		}
 	}
 	return nil, "", ""
+}
+
+// claudeAssistantText joins the text blocks of one assistant message. Claude
+// Code splits thinking and text into separate blocks (sometimes separate
+// stream lines) but only the text blocks are user-visible.
+func claudeAssistantText(payload map[string]any) string {
+	message, _ := payload["message"].(map[string]any)
+	content, _ := message["content"].([]any)
+	parts := make([]string, 0, len(content))
+	for _, item := range content {
+		block, _ := item.(map[string]any)
+		if block["type"] != "text" {
+			continue
+		}
+		if text, ok := block["text"].(string); ok && strings.TrimSpace(text) != "" {
+			parts = append(parts, text)
+		}
+	}
+	return strings.TrimSpace(strings.Join(parts, "\n"))
+}
+
+// claudeContextWindowExceeded recognizes the provider messages that mean the
+// resumed context no longer fits. The LiteLLM gateway used by this project
+// returns a ContextWindowExceededError or "maximum context length" text; the
+// other forms cover Anthropic-compatible gateways that phrase it differently.
+func claudeContextWindowExceeded(message string) bool {
+	lower := strings.ToLower(message)
+	switch {
+	case strings.Contains(lower, "contextwindowexceeded"),
+		strings.Contains(lower, "context_length_exceeded"),
+		strings.Contains(lower, "context length exceeded"),
+		strings.Contains(lower, "maximum context length"):
+		return true
+	case strings.Contains(lower, "context window") && strings.Contains(lower, "exceed"):
+		return true
+	default:
+		return false
+	}
 }
 
 func filterClaudeEnvironment(values map[string]string) map[string]string {
