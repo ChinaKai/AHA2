@@ -138,6 +138,9 @@ func (c *Client) do(ctx context.Context, method, path string, input, output any)
 			err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(output)
 			resp.Body.Close()
 			if err != nil {
+				if err == io.EOF {
+					return fmt.Errorf("decode sync response: EOF (sync center returned an empty body; usually a conflict with an empty remote payload — update the sync center)")
+				}
 				return fmt.Errorf("decode sync response: %w", err)
 			}
 			return nil

@@ -1,6 +1,7 @@
 package centersync
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -535,7 +536,7 @@ func (s *Store) Handler() http.Handler {
 				expected = currentVersion
 			}
 			if currentVersion != expected {
-				conflicts = append(conflicts, domain.SyncConflict{Scope: req.Scope, ObjectType: object.Type, ObjectID: object.ID, LocalPayload: object.Payload, RemotePayload: json.RawMessage(currentPayload), LocalVersion: object.BaseVersion, RemoteVersion: strconv.FormatInt(currentVersion, 10)})
+				conflicts = append(conflicts, domain.SyncConflict{Scope: req.Scope, ObjectType: object.Type, ObjectID: object.ID, LocalPayload: centerRawMessage(object.Payload), RemotePayload: centerRawMessage([]byte(currentPayload)), LocalVersion: object.BaseVersion, RemoteVersion: strconv.FormatInt(currentVersion, 10)})
 				continue
 			}
 			sourceVersion := object.SourceVersion
@@ -620,7 +621,21 @@ func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 	return true
 }
 func writeJSON(w http.ResponseWriter, status int, v any) {
+	data, err := json.Marshal(v)
+	if err != nil {
+		http.Error(w, "response encoding failed", http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
+	_, _ = w.Write(append(data, '\n'))
+}
+
+// centerRawMessage keeps an empty stored payload as JSON null; an empty
+// json.RawMessage is not valid JSON and would break the response encoding.
+func centerRawMessage(value []byte) json.RawMessage {
+	if len(bytes.TrimSpace(value)) == 0 {
+		return nil
+	}
+	return json.RawMessage(value)
 }

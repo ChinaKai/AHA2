@@ -104,7 +104,7 @@ function syncPayloadBlock(summary: SyncPayloadSummary): string {
 function conflictDetailHTML(conflict: SyncConflict): string {
   const local = syncPayloadSummary(conflict.object_type, conflict.local_payload);
   const remote = syncPayloadSummary(conflict.object_type, conflict.remote_payload);
-  return `<div class="sync-conflict-detail-head"><span class="sync-domain-badge">${syncDomainForType(conflict.object_type)}</span><strong>${escapeHTML(conflict.object_type)}</strong><small>${escapeHTML(conflict.object_id)}</small><small>${time(conflict.created_at)}</small></div><div class="sync-conflict-compare"><section><header>本机版本 ${escapeHTML(conflict.local_version || "—")}</header>${syncPayloadBlock(local)}</section><section><header>远端版本 ${escapeHTML(conflict.remote_version || "—")}</header>${syncPayloadBlock(remote)}</section></div><p class="field-help">保留本机会把本机内容推送到中心；采用远端会把远端内容写入本机；忽略只停止跟踪这条冲突，不修改两端内容。</p>`;
+  return `<div class="sync-conflict-detail-head"><span class="sync-domain-badge">${syncDomainForType(conflict.object_type)}</span><strong>${escapeHTML(conflict.object_type)}</strong><small>${escapeHTML(conflict.object_id)}</small><small>${time(conflict.created_at)}</small></div><div class="sync-conflict-compare"><section><header>本机版本 ${escapeHTML(conflict.local_version || "—")}</header>${syncPayloadBlock(local)}</section><section><header>远端版本 ${escapeHTML(conflict.remote_version || "—")}</header>${syncPayloadBlock(remote)}</section></div><p class="field-help">保留本机会用本机内容强制覆盖远端；采用远端会把远端内容写入本机；忽略只停止跟踪这条冲突，不修改两端内容。</p>`;
 }
 
 function syncErrorHint(message: string): string {

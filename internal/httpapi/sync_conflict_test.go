@@ -79,7 +79,7 @@ func seedConflict(t *testing.T, database *store.Store, enqueue bool, localRaw, r
 	return conflicts[0].ID
 }
 
-func TestSyncConflictKeepLocalPushesRebasedObject(t *testing.T) {
+func TestSyncConflictKeepLocalForcesRemoteOverwrite(t *testing.T) {
 	now := time.Now().UTC()
 	_, localRaw := conflictProjectPayload(t, "Local Name", now)
 	_, remoteRaw := conflictProjectPayload(t, "Remote Name", now.Add(time.Minute))
@@ -107,7 +107,7 @@ func TestSyncConflictKeepLocalPushesRebasedObject(t *testing.T) {
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("resolve failed: %d %s", response.StatusCode, body)
 	}
-	if len(pushed.Objects) != 1 || pushed.Objects[0].BaseVersion != "4" {
+	if len(pushed.Objects) != 1 || pushed.Objects[0].BaseVersion != "" {
 		t.Fatalf("pushed=%#v", pushed)
 	}
 	var pushedEnvelope struct {
@@ -228,7 +228,7 @@ func TestSyncConflictKeepLocalRetriesAfterRemoteVersionChange(t *testing.T) {
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("resolve failed: %d %s", response.StatusCode, body)
 	}
-	if len(bases) != 2 || bases[0] != "4" || bases[1] != "5" {
+	if len(bases) != 2 || bases[0] != "" || bases[1] != "5" {
 		t.Fatalf("bases=%v", bases)
 	}
 	if conflicts, _ := database.SyncConflicts(context.Background(), "default"); len(conflicts) != 0 {

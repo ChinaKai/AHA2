@@ -397,3 +397,33 @@ func TestRegistrationRejectsExpiredCodeAndInvalidDeviceID(t *testing.T) {
 		t.Fatal("invalid device name accepted")
 	}
 }
+
+func TestConflictResponseEncodesEmptyRemotePayload(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	if _, err := s.Push(ctx, "device-a", []Event{{
+		EventID: "delete-empty", ObjectID: "object-empty", ObjectType: "model", Operation: "delete", Version: 1,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	object := domain.SyncObject{
+		Type: "model", ID: "object-empty", Operation: "upsert", Payload: json.RawMessage(`{"id":"object-empty"}`),
+		BaseVersion: "99", IdempotencyKey: "conflict-empty-remote",
+	}
+	w := request(t, s.Handler(), "POST", "/v1/sync/push", map[string]any{"scope": "default", "device_id": "device-a", "objects": []domain.SyncObject{object}}, true)
+	if w.Code != http.StatusOK || w.Body.Len() == 0 {
+		t.Fatalf("push code=%d body=%q", w.Code, w.Body.String())
+	}
+	var response struct {
+		Conflicts []struct {
+			RemotePayload json.RawMessage `json:"remote_payload"`
+			RemoteVersion string          `json:"remote_version"`
+		} `json:"conflicts"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v body=%q", err, w.Body.String())
+	}
+	if len(response.Conflicts) != 1 || string(response.Conflicts[0].RemotePayload) != "null" {
+		t.Fatalf("conflicts=%#v", response.Conflicts)
+	}
+}

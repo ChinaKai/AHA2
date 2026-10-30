@@ -496,16 +496,18 @@ func (s *Server) resolveConflictWithLocal(ctx context.Context, conflict domain.S
 	}
 	object := domain.SyncObject{
 		Type: conflict.ObjectType, ID: conflict.ObjectID, Operation: "upsert", Payload: conflict.LocalPayload,
-		BaseVersion: conflict.RemoteVersion, IdempotencyKey: domain.NewID("sync"),
+		IdempotencyKey: domain.NewID("sync"),
 	}
 	if item, itemErr := s.store.SyncOutboxForObject(ctx, localSyncScope, conflict.ObjectType, conflict.ObjectID); itemErr == nil {
-		// Push the current local change, rebased on the remote version the center
-		// reported. Keep its idempotency key so the export bookkeeping matches.
+		// "Keep local" means force the remote to this payload. Leaving the base
+		// version empty makes the center skip the optimistic version check, so a
+		// stale remote version cannot turn this into another conflict (and does
+		// not depend on the center encoding a conflict response).
 		object = item.Object
-		object.BaseVersion = conflict.RemoteVersion
 	} else if !errors.Is(itemErr, sql.ErrNoRows) {
 		return itemErr
 	}
+	object.BaseVersion = ""
 	client := &syncer.Client{BaseURL: settings.Endpoint, DeviceID: settings.DeviceID, Credential: func(context.Context) (string, error) { return token, nil }}
 	pushCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
