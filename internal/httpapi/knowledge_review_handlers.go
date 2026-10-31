@@ -45,9 +45,10 @@ type knowledgeBatchFailure struct {
 
 func (s *Server) batchKnowledgeProposalReviews(writer http.ResponseWriter, request *http.Request) {
 	var payload struct {
-		Action      string   `json:"action"`
-		ProposalIDs []string `json:"proposal_ids"`
-		LegacyIDs   []string `json:"legacy_ids"`
+		Action         string   `json:"action"`
+		ProposalIDs    []string `json:"proposal_ids"`
+		LegacyIDs      []string `json:"legacy_ids"`
+		DecisionReason string   `json:"decision_reason"`
 	}
 	if decodeJSON(request, &payload) != nil {
 		writeError(writer, http.StatusBadRequest, "invalid_json")
@@ -58,6 +59,10 @@ func (s *Server) batchKnowledgeProposalReviews(writer http.ResponseWriter, reque
 		writeError(writer, http.StatusBadRequest, "knowledge_batch_invalid")
 		return
 	}
+	if payload.Action == "reject" && strings.TrimSpace(payload.DecisionReason) == "" {
+		writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "decision_reason_required", "message": "decision_reason 不能为空"})
+		return
+	}
 	processed := []string{}
 	failures := []knowledgeBatchFailure{}
 	now := time.Now().UTC()
@@ -66,13 +71,13 @@ func (s *Server) batchKnowledgeProposalReviews(writer http.ResponseWriter, reque
 		if payload.Action == "approve" {
 			var proposal domain.KnowledgeProposal
 			var entry domain.KnowledgeEntry
-			proposal, entry, err = s.store.ApproveKnowledgeProposal(request.Context(), id, now)
+			proposal, entry, err = s.store.ApproveKnowledgeProposal(request.Context(), id, now, payload.DecisionReason)
 			if err == nil {
 				s.audit(request, "knowledge.proposal.batch_approve", "knowledge_proposal", proposal.ID, map[string]any{"entry_id": entry.ID, "revision": entry.Revision})
 			}
 		} else {
 			var proposal domain.KnowledgeProposal
-			proposal, err = s.store.RejectKnowledgeProposal(request.Context(), id, now)
+			proposal, err = s.store.RejectKnowledgeProposal(request.Context(), id, now, payload.DecisionReason)
 			if err == nil {
 				s.audit(request, "knowledge.proposal.batch_reject", "knowledge_proposal", proposal.ID, map[string]any{"entry_id": proposal.EntryID})
 			}

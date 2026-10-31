@@ -1,0 +1,44 @@
+Using WSL Node at /home/kaikai/.nvm/versions/node/v24.18.0/bin/node
+==> Build Web assets
+<== Build Web assets (0.3s)
+==> Test Web build
+<== Test Web build (0.4s)
+==> Sync embedded Web assets
+<== Sync embedded Web assets (1.9s)
+==> Run Go tests
+<== Run Go tests (1.2s)
+==> Run go vet
+<== Run go vet (0.5s)
+==> Build Windows server
+<== Build Windows server (0.8s)
+==> Build Windows tray
+<== Build Windows tray (0.2s)
+==> Test Feishu plugin
+<== Test Feishu plugin (0.2s)
+==> Build Feishu plugin
+<== Build Feishu plugin (1.7s)
+==> Validate per-user deployment
+<== Validate per-user deployment (1.5s)
+==> Deploy and restart AHA2
+<== Deploy and restart AHA2 (4.4s)
+
+
+Repository    : \\wsl.localhost\Ubuntu-24.04\home\kaikai\kk-workspace\my_project\AHA2
+Version       : 0.5.198
+WebVersion    : v0.5.198.20261028.afa64ff8d8c7.dirty
+Mode          : build-and-deploy
+Distro        : Ubuntu-24.04
+NodeRuntime   : WSL:Ubuntu-24.04:/home/kaikai/.nvm/versions/node/v24.18.0/bin/node
+InstallDir    : D:\Program Files\AHA2
+DataDir       : D:\ProgramData\AHA2
+Listen        : 0.0.0.0:8766
+HealthURL     : http://127.0.0.1:8766/healthz
+ServerVersion : aha2 0.5.198
+ServerSHA256  : 9D33B2ED0171C5AE6E629061D287BDBE60CB14161E75D9DD0447B5141525F666
+TraySHA256    : 5263846C63B25884A13C7CEC00665618C159BFD2EDFEA6028B290E0D463BB08D
+PluginSHA256  : 912E8B070B0906D320E8E01FD64E88614CC92A0213D1B4E57323082C5E24D428
+ResultPath    : \\wsl.localhost\Ubuntu-24.04\home\kaikai\kk-workspace\my_project\AHA2\dist\user-deploy-result-20261028-
+                180156.json
+
+
+

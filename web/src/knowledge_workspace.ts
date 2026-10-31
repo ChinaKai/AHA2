@@ -1,5 +1,6 @@
 import {api} from "./api.js";
 import {icon} from "./icons.js";
+import {t} from "./i18n.js";
 import {renderMarkdown} from "./markdown.js";
 import type {Knowledge, KnowledgeLibrary, KnowledgeProposal, KnowledgeReviewSettings, ProductLine, Project, Skill, Workspace} from "./types.js";
 
@@ -598,6 +599,8 @@ export function bindKnowledgeWorkspace(context: KnowledgeWorkspaceContext): void
   const runKnowledgeBatch = (action: "approve" | "reject") => {
     if (!selectedUpdateIDs.size) return;
     if (action === "reject" && !window.confirm(`确定批量拒绝选中的 ${selectedUpdateIDs.size} 项知识更新？`)) return;
+    const decisionReason = action === "reject" ? (window.prompt(t("knowledgeProposal.rejectReasonPrompt")) || "").trim() : "";
+    if (action === "reject" && !decisionReason) return;
     const proposalIDs: string[] = [];
     const legacyIDs: string[] = [];
     for (const key of selectedUpdateIDs) {
@@ -605,7 +608,7 @@ export function bindKnowledgeWorkspace(context: KnowledgeWorkspaceContext): void
       if (key.startsWith("legacy:")) legacyIDs.push(key.slice("legacy:".length));
     }
     void mutate(context, async () => {
-      const result = await api.batchKnowledgeProposals({action, proposal_ids: proposalIDs, legacy_ids: legacyIDs});
+      const result = await api.batchKnowledgeProposals({action, proposal_ids: proposalIDs, legacy_ids: legacyIDs, decision_reason: decisionReason});
       for (const id of result.processed || []) {
         selectedUpdateIDs.delete(`proposal:${id}`);
         selectedUpdateIDs.delete(`legacy:${id}`);
@@ -631,8 +634,10 @@ export function bindKnowledgeWorkspace(context: KnowledgeWorkspaceContext): void
   }));
   document.querySelectorAll<HTMLElement>("[data-knowledge-proposal-reject]").forEach(button => button.addEventListener("click", () => {
     if (!window.confirm("\u786e\u5b9a\u62d2\u7edd\u8fd9\u9879\u77e5\u8bc6\u66f4\u65b0\uff1f")) return;
+    const reason = (window.prompt(t("knowledgeProposal.rejectReasonPrompt")) || "").trim();
+    if (!reason) return;
     const id = button.dataset.knowledgeProposalReject || "";
-    void mutate(context, () => api.rejectKnowledgeProposal(id), "\u77e5\u8bc6\u66f4\u65b0\u5df2\u62d2\u7edd");
+    void mutate(context, () => api.rejectKnowledgeProposal(id, reason), "\u77e5\u8bc6\u66f4\u65b0\u5df2\u62d2\u7edd");
   }));
   document.querySelectorAll<HTMLElement>("[data-knowledge-update-open]").forEach(button => button.addEventListener("click", () => {
     const item = context.knowledge.find(entry => entry.id === button.dataset.knowledgeUpdateOpen);

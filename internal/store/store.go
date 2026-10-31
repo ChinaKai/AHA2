@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -15,6 +16,9 @@ import (
 type Store struct {
 	db      *sql.DB
 	dataDir string
+
+	statusMu       sync.RWMutex
+	statusListener TaskStatusListener
 }
 
 func (s *Store) DataDir() string {

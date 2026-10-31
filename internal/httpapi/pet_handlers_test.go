@@ -6,6 +6,7 @@ import (
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -95,21 +96,53 @@ func TestOwnerPetSettingsAPI(t *testing.T) {
 		"enabled": false, "character": "deepseek_fish", "actions": []string{"walk", "jump"},
 		"identity": "should be ignored", "principles": "should be ignored",
 		"idle_minutes": 10, "hourly_limit": 4, "quiet_start": 22, "quiet_end": 7,
+		"allow_view_tasks": false, "allow_create_tasks": true,
+		"allow_create_workspaces": true, "allow_message_tasks": true, "allow_manage_models": true, "allow_manage_knowledge": true, "allow_manage_channels": true, "allow_manage_system": true,
 	}, csrf)
 	var payload struct {
 		Assistant struct {
-			PetEnabled   bool     `json:"pet_enabled"`
-			Character    string   `json:"character"`
-			PetActions   []string `json:"pet_actions"`
-			BrainModelID string   `json:"brain_model_id"`
-			PetIdentity  string   `json:"pet_identity"`
-			IdleMinutes  int      `json:"pet_idle_minutes"`
-			HourlyLimit  int      `json:"pet_hourly_limit"`
+			PetEnabled            bool     `json:"pet_enabled"`
+			Character             string   `json:"character"`
+			PetActions            []string `json:"pet_actions"`
+			BrainModelID          string   `json:"brain_model_id"`
+			PetIdentity           string   `json:"pet_identity"`
+			IdleMinutes           int      `json:"pet_idle_minutes"`
+			HourlyLimit           int      `json:"pet_hourly_limit"`
+			AllowViewTasks        bool     `json:"pet_allow_view_tasks"`
+			AllowCreateTasks      bool     `json:"pet_allow_create_tasks"`
+			AllowCreateWorkspaces bool     `json:"pet_allow_create_workspaces"`
+			AllowMessageTasks     bool     `json:"pet_allow_message_tasks"`
+			AllowManageModels     bool     `json:"pet_allow_manage_models"`
+			AllowManageKnowledge  bool     `json:"pet_allow_manage_knowledge"`
+			AllowManageChannels   bool     `json:"pet_allow_manage_channels"`
+			AllowManageSystem     bool     `json:"pet_allow_manage_system"`
 		} `json:"assistant"`
 	}
 	decodeResponse(t, response, &payload)
-	if response.StatusCode != http.StatusOK || payload.Assistant.PetEnabled || payload.Assistant.Character != "deepseek_fish" || len(payload.Assistant.PetActions) != 2 || payload.Assistant.PetIdentity != "" || payload.Assistant.IdleMinutes != 10 || payload.Assistant.HourlyLimit != 4 {
+	if response.StatusCode != http.StatusOK || payload.Assistant.PetEnabled || payload.Assistant.Character != "deepseek_fish" || len(payload.Assistant.PetActions) != 2 || payload.Assistant.PetIdentity != "" || payload.Assistant.IdleMinutes != 10 || payload.Assistant.HourlyLimit != 4 ||
+		payload.Assistant.AllowViewTasks || !payload.Assistant.AllowCreateTasks || !payload.Assistant.AllowCreateWorkspaces || !payload.Assistant.AllowMessageTasks || !payload.Assistant.AllowManageModels || !payload.Assistant.AllowManageKnowledge || !payload.Assistant.AllowManageChannels || !payload.Assistant.AllowManageSystem {
 		t.Fatalf("pet settings=%d %#v", response.StatusCode, payload)
+	}
+	response = requestJSON(t, client, http.MethodPut, server.URL+"/api/v1/pet/workbench/core/identity.md", map[string]any{
+		"content": "# 身份\n\n- 名字：API 宠物\n",
+	}, csrf)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("save pet document=%d", response.StatusCode)
+	}
+	response = requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/pet/workbench", nil, "")
+	var workbench struct {
+		Core []struct {
+			Name    string `json:"name"`
+			Content string `json:"content"`
+		} `json:"core"`
+	}
+	decodeResponse(t, response, &workbench)
+	if response.StatusCode != http.StatusOK || len(workbench.Core) == 0 || !strings.Contains(workbench.Core[0].Content, "API 宠物") {
+		t.Fatalf("workbench=%d %#v", response.StatusCode, workbench)
+	}
+	response = requestJSON(t, client, http.MethodPut, server.URL+"/api/v1/pet/workbench/diary/bad%20name.md", map[string]any{"content": "x"}, csrf)
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("invalid pet document path=%d", response.StatusCode)
 	}
 }
 

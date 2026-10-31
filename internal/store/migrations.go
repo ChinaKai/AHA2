@@ -3127,5 +3127,154 @@ func (s *Store) migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(97, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
 		return fmt.Errorf("record schema v97: %w", err)
 	}
+	var hasV98 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=98)`).Scan(&hasV98)
+	if !hasV98 {
+		for _, statement := range []string{
+			`ALTER TABLE owner_assistants ADD COLUMN pet_allow_view_tasks INTEGER NOT NULL DEFAULT 1`,
+			`ALTER TABLE owner_assistants ADD COLUMN pet_allow_create_tasks INTEGER NOT NULL DEFAULT 0`,
+			`ALTER TABLE owner_assistants ADD COLUMN pet_allow_create_workspaces INTEGER NOT NULL DEFAULT 0`,
+			`ALTER TABLE owner_assistants ADD COLUMN pet_allow_message_tasks INTEGER NOT NULL DEFAULT 0`,
+			`CREATE TABLE IF NOT EXISTS pet_approvals (
+				id TEXT PRIMARY KEY,
+				task_id TEXT NOT NULL DEFAULT 'task_pet',
+				kind TEXT NOT NULL,
+				title TEXT NOT NULL,
+				summary TEXT NOT NULL,
+				risk TEXT NOT NULL DEFAULT 'medium',
+				payload_json TEXT NOT NULL DEFAULT '{}',
+				status TEXT NOT NULL DEFAULT 'pending',
+				resolution TEXT NOT NULL DEFAULT '',
+				created_at TEXT NOT NULL,
+				resolved_at TEXT NOT NULL DEFAULT ''
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_pet_approvals_status ON pet_approvals(status,created_at DESC)`,
+		} {
+			if _, err := s.db.ExecContext(ctx, statement); err != nil &&
+				!strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+				return fmt.Errorf("apply schema v98: %w", err)
+			}
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(98, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v98: %w", err)
+	}
+	var hasV99 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=99)`).Scan(&hasV99)
+	if !hasV99 {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE owner_assistants ADD COLUMN pet_allow_manage_models INTEGER NOT NULL DEFAULT 0`); err != nil &&
+			!strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("apply schema v99: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(99, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v99: %w", err)
+	}
+	var hasV100 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=100)`).Scan(&hasV100)
+	if !hasV100 {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE owner_assistants ADD COLUMN pet_allow_manage_knowledge INTEGER NOT NULL DEFAULT 0`); err != nil &&
+			!strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("apply schema v100: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(100, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v100: %w", err)
+	}
+	var hasV101 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=101)`).Scan(&hasV101)
+	if !hasV101 {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE owner_assistants ADD COLUMN pet_allow_manage_channels INTEGER NOT NULL DEFAULT 0`); err != nil &&
+			!strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("apply schema v101: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(101, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v101: %w", err)
+	}
+	var hasV102 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=102)`).Scan(&hasV102)
+	if !hasV102 {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE owner_assistants ADD COLUMN pet_allow_manage_system INTEGER NOT NULL DEFAULT 0`); err != nil &&
+			!strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("apply schema v102: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(102, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v102: %w", err)
+	}
+	var hasV103 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=103)`).Scan(&hasV103)
+	if !hasV103 {
+		for _, statement := range []string{
+			`CREATE TABLE IF NOT EXISTS pet_task_watches(
+				task_id TEXT PRIMARY KEY,
+				reason TEXT NOT NULL DEFAULT '',
+				created_at TEXT NOT NULL,
+				updated_at TEXT NOT NULL,
+				last_status TEXT NOT NULL DEFAULT '',
+				last_turn_id TEXT NOT NULL DEFAULT '',
+				last_notified_status TEXT NOT NULL DEFAULT '',
+				last_notified_turn_id TEXT NOT NULL DEFAULT ''
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_pet_task_watches_updated ON pet_task_watches(updated_at DESC)`,
+		} {
+			if _, err := s.db.ExecContext(ctx, statement); err != nil {
+				return fmt.Errorf("apply schema v103: %w", err)
+			}
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(103, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v103: %w", err)
+	}
+	var hasV104 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=104)`).Scan(&hasV104)
+	if !hasV104 {
+		for _, statement := range []string{
+			`CREATE TABLE IF NOT EXISTS general_settings(
+				id INTEGER PRIMARY KEY,
+				language TEXT NOT NULL DEFAULT 'auto',
+				updated_at TEXT NOT NULL
+			)`,
+			`INSERT OR IGNORE INTO general_settings(id,language,updated_at)
+			 VALUES(1,'auto',strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
+		} {
+			if _, err := s.db.ExecContext(ctx, statement); err != nil {
+				return fmt.Errorf("apply schema v104: %w", err)
+			}
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(104, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v104: %w", err)
+	}
+	var hasV105 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=105)`).Scan(&hasV105)
+	if !hasV105 {
+		for _, statement := range []string{
+			`ALTER TABLE pet_approvals ADD COLUMN reason TEXT NOT NULL DEFAULT ''`,
+			`ALTER TABLE pet_approvals ADD COLUMN decision_reason TEXT NOT NULL DEFAULT ''`,
+			`ALTER TABLE knowledge_proposals ADD COLUMN reason TEXT NOT NULL DEFAULT ''`,
+			`ALTER TABLE knowledge_proposals ADD COLUMN decision_reason TEXT NOT NULL DEFAULT ''`,
+		} {
+			if _, err := s.db.ExecContext(ctx, statement); err != nil &&
+				!strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+				return fmt.Errorf("apply schema v105: %w", err)
+			}
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(105, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v105: %w", err)
+	}
+	var hasV106 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=106)`).Scan(&hasV106)
+	if !hasV106 {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE env_groups ADD COLUMN deleted_at TEXT NOT NULL DEFAULT ''`); err != nil &&
+			!strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("apply schema v106: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(106, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v106: %w", err)
+	}
 	return nil
 }

@@ -1,0 +1,26 @@
+==> Validate per-user deployment
+<== Validate per-user deployment (1.6s)
+==> Deploy and restart AHA2
+<== Deploy and restart AHA2 (3.9s)
+
+
+Repository    : \\wsl.localhost\Ubuntu-24.04\home\kaikai\kk-workspace\my_project\AHA2
+Version       : 0.5.134
+WebVersion    : 
+Mode          : deploy-only
+Distro        : 
+NodeRuntime   : 
+InstallDir    : D:\Program Files\AHA2
+DataDir       : D:\ProgramData\AHA2
+Listen        : 0.0.0.0:8766
+HealthURL     : http://127.0.0.1:8766/healthz
+ServerVersion : aha2 0.5.134
+ServerSHA256  : 55B2E710195F7DC96FE68F6F3A0F045394BED42754ADA140E91F1D8DB7617100
+TraySHA256    : 9A68F5DE080715BD7DF9DF3EBE04745FF8C0A2A78C87B3B19F0F09DF3316DCB7
+PluginSHA256  : F03B65C808B11FC657E6C2489208508B49231571C72B0D3608E6F0110466D53D
+ResultPath    : \\wsl.localhost\Ubuntu-24.04\home\kaikai\kk-workspace\my_project\AHA2\dist\user-deploy-result-05134-cod
+                ex-content.json
+
+
+
+deploy_exit=0

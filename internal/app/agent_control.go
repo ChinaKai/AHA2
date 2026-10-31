@@ -146,6 +146,11 @@ func liveInboxMessage(item domain.AgentInboxItem) domain.LiveInboxMessage {
 		Content: item.Content, Payload: item.Payload, CreatedAt: item.CreatedAt,
 		Source: domain.LiveInboxSource{Kind: "owner", Authority: "owner", AgentID: item.SourceAgentID},
 	}
+	if item.SourceKind == "pet_delegate_message" {
+		result.Source = domain.LiveInboxSource{
+			Kind: "pet", Authority: "owner_delegate", AgentID: "pet", DisplayName: "pet",
+		}
+	}
 	channelContext, _ := item.Payload["channel_context"].(map[string]any)
 	if len(channelContext) == 0 {
 		return result

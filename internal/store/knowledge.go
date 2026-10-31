@@ -776,6 +776,42 @@ func (s *Store) DeleteKnowledge(ctx context.Context, id string) error {
 	return err
 }
 
+// DeleteKnowledgeAndPruneEmptyAHA1Parents deletes an entry and then removes
+// empty AHA1 import directory nodes above it. The importer creates navigation
+// nodes such as knowledge_aha1_dir_* to hold many documents; deleting the last
+// child should not leave an empty directory in the global tree. Cleanup is
+// best-effort: the primary deletion has already succeeded, so a failed prune
+// must not turn an approved delete into a retry that finds nothing to delete.
+func (s *Store) DeleteKnowledgeAndPruneEmptyAHA1Parents(ctx context.Context, id string) error {
+	item, err := s.Knowledge(ctx, id)
+	if err != nil {
+		return err
+	}
+	parentID := item.ParentID
+	if err := s.DeleteKnowledge(ctx, id); err != nil {
+		return err
+	}
+	if item.Scope != "global" {
+		return nil
+	}
+	for strings.HasPrefix(parentID, "knowledge_aha1_dir_") {
+		parent, err := s.Knowledge(ctx, parentID)
+		if err != nil || parent.IsIndex || IsManagedGlobalKnowledgeCategory(parent.ID) {
+			return nil
+		}
+		var children int
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM knowledge_entries WHERE parent_id=?`, parent.ID).Scan(&children); err != nil || children > 0 {
+			return nil
+		}
+		next := parent.ParentID
+		if err := s.DeleteKnowledge(ctx, parent.ID); err != nil {
+			return nil
+		}
+		parentID = next
+	}
+	return nil
+}
+
 func (s *Store) VerifyKnowledge(ctx context.Context, id, updatedAt string) error {
 	item, err := s.Knowledge(ctx, id)
 	if err != nil {

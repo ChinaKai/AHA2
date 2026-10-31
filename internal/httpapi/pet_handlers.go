@@ -147,6 +147,10 @@ func (s *Server) ownerPetEvents(writer http.ResponseWriter, request *http.Reques
 				data, _ := json.Marshal(event.Data)
 				_, _ = fmt.Fprintf(writer, "event: pet_action\ndata: %s\n\n", data)
 				flusher.Flush()
+			case "pet_approval":
+				data, _ := json.Marshal(event.Data["approval"])
+				_, _ = fmt.Fprintf(writer, "event: pet_approval\ndata: %s\n\n", data)
+				flusher.Flush()
 			}
 		case <-heartbeat.C:
 			_, _ = fmt.Fprint(writer, "event: heartbeat\ndata: {}\n\n")

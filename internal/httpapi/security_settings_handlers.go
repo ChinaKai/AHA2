@@ -1,12 +1,38 @@
 package httpapi
 
 import (
+	"context"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
 )
+
+// ApplyPetSecuritySettings is the owner-approved path used by the pet. It
+// applies both the persisted value and the live gate, matching the Web handler.
+func (s *Server) ApplyPetSecuritySettings(ctx context.Context, validateOrigin bool, accessScope string) (domain.SecuritySettings, error) {
+	scope := strings.ToLower(strings.TrimSpace(accessScope))
+	if scope != "" && scope != domain.AccessScopeLocal && scope != domain.AccessScopeLAN {
+		return domain.SecuritySettings{}, fmt.Errorf("invalid_access_scope")
+	}
+	item, err := s.store.UpdateSecuritySettings(ctx, domain.SecuritySettings{
+		ValidateOrigin: validateOrigin,
+		AccessScope:    scope,
+		UpdatedAt:      time.Now().UTC(),
+	})
+	if err != nil {
+		return domain.SecuritySettings{}, err
+	}
+	s.setOriginValidation(item.ValidateOrigin)
+	if s.accessScope != nil {
+		s.accessScope.set(item.AccessScope)
+	}
+	item.ValidateOrigin = s.originValidationEnabled()
+	item.StartupOverride = s.originStartupOverride
+	return item, nil
+}
 
 func (s *Server) securitySettings(writer http.ResponseWriter, request *http.Request) {
 	item, err := s.store.SecuritySettings(request.Context())

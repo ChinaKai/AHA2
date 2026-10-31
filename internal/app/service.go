@@ -81,6 +81,7 @@ type KnowledgeCandidate struct {
 	Body          string  `json:"body"`
 	Confidence    float64 `json:"confidence"`
 	ProductLineID string  `json:"product_line_id"`
+	Reason        string  `json:"reason"`
 }
 
 type KnowledgeFeedback struct {
@@ -123,10 +124,34 @@ type WorkspacePreparer interface {
 type SecretResolver interface {
 	Get(string) (string, bool)
 	PutMany(map[string]string) error
+	DeleteMany([]string) error
 }
 
 type ProxyRuntime interface {
 	ApplyEnvironment(context.Context, map[string]string) error
+}
+
+// PetChannelSender is implemented by the channel runtime. Owner-delegate
+// channel sends are executed only after an owner approval, so the pet service
+// needs a narrow send path that does not depend on an Agent API Turn token.
+type PetChannelSender interface {
+	SendPetTaskChannelMessage(ctx context.Context, taskID, turnID, requestID, purpose, message string, mentionIDs, attachmentIDs []string, at time.Time) (domain.ChannelDelivery, error)
+	SetInstanceEnabled(ctx context.Context, ownerID, id string, enabled bool, expectedRevision int) (domain.ChannelInstance, error)
+	ResetBinding(ctx context.Context, ownerID, id string, expectedRevision int) (domain.ChannelInstance, error)
+	ArchiveInstance(ctx context.Context, ownerID, id string, expectedRevision int) (domain.ChannelInstance, error)
+	PurgeInstance(ctx context.Context, ownerID, id string, expectedRevision int) (domain.ChannelInstance, error)
+}
+
+// PetSecurityApplier applies an owner-approved security settings change to the
+// live HTTP gate, not just the database.
+type PetSecurityApplier interface {
+	ApplyPetSecuritySettings(ctx context.Context, validateOrigin bool, accessScope string) (domain.SecuritySettings, error)
+}
+
+// PetHardwareDisconnector closes live hardware terminals before the pet removes
+// a resource after owner approval.
+type PetHardwareDisconnector interface {
+	Disconnect(taskID, hardwareID, transport string)
 }
 
 type Service struct {
@@ -139,6 +164,9 @@ type Service struct {
 	prompts               *prompt.Engine
 	codex                 *codexaccount.Manager
 	proxyRuntime          ProxyRuntime
+	petChannels           PetChannelSender
+	petSecurity           PetSecurityApplier
+	petHardware           PetHardwareDisconnector
 	agentAPI              *agentapi.Capabilities
 	agentAPIURL           string
 	agentAPIAllowInsecure bool
@@ -170,6 +198,18 @@ type Service struct {
 
 func (s *Service) SetProxyRuntime(runtime ProxyRuntime) {
 	s.proxyRuntime = runtime
+}
+
+func (s *Service) SetPetChannelSender(sender PetChannelSender) {
+	s.petChannels = sender
+}
+
+func (s *Service) SetPetSecurityApplier(applier PetSecurityApplier) {
+	s.petSecurity = applier
+}
+
+func (s *Service) SetPetHardwareDisconnector(disconnector PetHardwareDisconnector) {
+	s.petHardware = disconnector
 }
 
 type sharedContextState struct {
@@ -257,6 +297,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	s.StopPetTaskNotifications()
 	s.mu.Lock()
 	s.closing = true
 	cancels := make([]context.CancelFunc, 0, len(s.cancels))
@@ -565,7 +606,18 @@ func (s *Service) SubmitAgentMessage(ctx context.Context, taskID, agentID, conte
 }
 
 func (s *Service) SubmitAgentMessageWithAttachments(ctx context.Context, taskID, agentID, content string, attachmentIDs []string) (domain.Turn, error) {
-	return s.submitAgentMessage(ctx, taskID, agentID, content, attachmentIDs, "", "", "", nil)
+	return s.submitMessageWithSource(ctx, taskID, agentID, content, attachmentIDs, "", "", "", nil, "owner", "owner_message")
+}
+
+// SubmitPetDelegatedMessage writes a target task message that is visibly from
+// the pet, not from the owner. It uses the same Turn pipeline while keeping the
+// source distinct so the target Agent does not inherit owner identity.
+func (s *Service) SubmitPetDelegatedMessage(ctx context.Context, taskID, content string) (domain.Turn, error) {
+	return s.SubmitPetDelegatedMessageWithAttachments(ctx, taskID, content, nil)
+}
+
+func (s *Service) SubmitPetDelegatedMessageWithAttachments(ctx context.Context, taskID, content string, attachmentIDs []string) (domain.Turn, error) {
+	return s.submitMessageWithSource(ctx, taskID, "main", content, attachmentIDs, "", "", "", nil, "pet", "pet_delegate_message")
 }
 
 func (s *Service) SubmitChannelMessage(ctx context.Context, receiptID, receiptLeaseID, conversationID, taskID, content string, provenance map[string]any) (domain.Turn, error) {
@@ -573,10 +625,10 @@ func (s *Service) SubmitChannelMessage(ctx context.Context, receiptID, receiptLe
 }
 
 func (s *Service) SubmitChannelMessageWithAttachments(ctx context.Context, receiptID, receiptLeaseID, conversationID, taskID, content string, provenance map[string]any, attachmentIDs []string) (domain.Turn, error) {
-	return s.submitAgentMessage(ctx, taskID, "main", content, attachmentIDs, receiptID, receiptLeaseID, conversationID, provenance)
+	return s.submitMessageWithSource(ctx, taskID, "main", content, attachmentIDs, receiptID, receiptLeaseID, conversationID, provenance, "owner", "owner_message")
 }
 
-func (s *Service) submitAgentMessage(ctx context.Context, taskID, agentID, content string, attachmentIDs []string, channelReceiptID, channelReceiptLeaseID, channelConversationID string, channelProvenance map[string]any) (domain.Turn, error) {
+func (s *Service) submitMessageWithSource(ctx context.Context, taskID, agentID, content string, attachmentIDs []string, channelReceiptID, channelReceiptLeaseID, channelConversationID string, channelProvenance map[string]any, sender, sourceKind string) (domain.Turn, error) {
 	content = strings.TrimSpace(content)
 	if content == "" && len(attachmentIDs) == 0 {
 		return domain.Turn{}, fmt.Errorf("message or attachment is required")
@@ -629,7 +681,7 @@ func (s *Service) submitAgentMessage(ctx context.Context, taskID, agentID, conte
 		ID:        domain.NewID("message"),
 		TaskID:    task.ID,
 		Role:      "user",
-		Sender:    "owner",
+		Sender:    sender,
 		Content:   content,
 		CreatedAt: now,
 	}
@@ -646,6 +698,9 @@ func (s *Service) submitAgentMessage(ctx context.Context, taskID, agentID, conte
 	var createdRound, inserted bool
 	if channelReceiptID != "" {
 		round, inbox, createdRound, inserted, err = s.store.EnqueueChannelOwnerMessage(ctx, channelReceiptID, channelReceiptLeaseID, channelConversationID, message, agentID, channelProvenance, attachmentIDs...)
+	} else if sourceKind == "pet_delegate_message" {
+		round, inbox, createdRound, err = s.store.EnqueuePetDelegatedMessage(ctx, message, agentID, attachmentIDs)
+		inserted = err == nil
 	} else {
 		round, inbox, createdRound, err = s.store.EnqueueOwnerMessage(ctx, message, agentID, attachmentIDs)
 		inserted = err == nil
@@ -945,11 +1000,17 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 			attachments = append(attachments, prompt.AttachmentResource{Attachment: item, Content: string(content)})
 		}
 	}
-	petDiaryPaths := []string{}
 	if task.ID == petTaskID {
-		if paths, pathsErr := s.PetDiaryPaths(ctx); pathsErr == nil {
-			petDiaryPaths = paths
+		// The assistant page normally seeds these, but a Turn can also run after a
+		// restart or a direct message. Filling missing files here keeps the prompt's
+		// core paths readable without ever replacing the pet's own content.
+		if err := s.ensurePetWorkspaceFiles(ctx, nil); err != nil {
+			log.Printf("prepare pet workspace for turn: %v", err)
 		}
+	}
+	responseLanguage := domain.LanguageAuto
+	if settings, settingsErr := s.store.GeneralSettings(ctx); settingsErr == nil {
+		responseLanguage = settings.Language
 	}
 	preview, err := s.prompts.Build(ctx, prompt.BuildInput{
 		Project: project, Workspace: workspace, Task: task, Agent: agent, Snapshot: snapshot,
@@ -959,7 +1020,7 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 		RecoveryConversation: conversation.Items,
 		Handoff:              handoff.Summary, AgentAPIURL: agentAPIURL, CurrentTurnID: turn.ID, CurrentRoundID: turn.RoundID,
 		IncludeRecentContext: includeRecentContext, IncludeRecoveryHandoff: includeRecoveryHandoff, IncludeTurnDiagnostics: includeTurnDiagnostics,
-		ChannelContext: channelContext, Identity: petTaskIdentity(task), PetDiaryPaths: petDiaryPaths,
+		ChannelContext: channelContext, Identity: petTaskIdentity(task), Language: responseLanguage,
 	})
 	if err != nil {
 		s.failTurn(ctx, &turn, task, err)
@@ -1790,7 +1851,7 @@ func (s *Service) createKnowledgeCandidates(ctx context.Context, projectID, task
 		proposal := domain.KnowledgeProposal{
 			ID: domain.NewID("knowledge_proposal"), EntryID: entry.ID, BaseRevision: baseRevision, Proposed: entry,
 			SourceTaskID: taskID, SourceTurnID: turnID, Status: domain.KnowledgeProposalPending,
-			ReviewMode: proposalReviewMode, CreatedAt: now, UpdatedAt: now,
+			ReviewMode: proposalReviewMode, Reason: strings.TrimSpace(candidate.Reason), CreatedAt: now, UpdatedAt: now,
 		}
 		created, err := s.store.CreateKnowledgeProposal(ctx, proposal)
 		if err != nil {

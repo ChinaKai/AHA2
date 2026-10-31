@@ -48,9 +48,15 @@ func renderBrandIcon(size int) []byte {
 		return nil
 	}
 	const (
-		blueR = 0x1d
-		blueG = 0x4e
-		blueB = 0xd8
+		tileR = 15
+		tileG = 23
+		tileB = 42
+		inkR  = 248
+		inkG  = 250
+		inkB  = 252
+		cyanR = 56
+		cyanG = 189
+		cyanB = 248
 	)
 	samples := brandIconSampleRate * brandIconSampleRate
 	pixels := make([]byte, size*size*4)
@@ -65,14 +71,19 @@ func renderBrandIcon(size int) []byte {
 						continue
 					}
 					alpha += 255
-					if insideBrandLetter(px, py) {
-						red += 255
-						green += 255
-						blue += 255
-					} else {
-						red += blueR
-						green += blueG
-						blue += blueB
+					switch {
+					case insideBrandCrossbar(px, py):
+						red += cyanR
+						green += cyanG
+						blue += cyanB
+					case insideBrandLetter(px, py):
+						red += inkR
+						green += inkG
+						blue += inkB
+					default:
+						red += tileR
+						green += tileG
+						blue += tileB
 					}
 				}
 			}
@@ -88,22 +99,47 @@ func renderBrandIcon(size int) []byte {
 
 func insideRoundedSquare(x, y float64) bool {
 	const (
-		minimum = 1.25
-		maximum = brandIconSize - minimum
-		radius  = 6.25
+		halfSize = brandIconSize / 2.0
+		radius   = brandIconSize * 14.0 / 64.0
 	)
-	nearestX := math.Max(minimum+radius, math.Min(x, maximum-radius))
-	nearestY := math.Max(minimum+radius, math.Min(y, maximum-radius))
-	deltaX := x - nearestX
-	deltaY := y - nearestY
-	return deltaX*deltaX+deltaY*deltaY <= radius*radius
+	// Signed distance to the rounded tile in assets/aha-logo.svg.
+	dx := math.Abs(x-halfSize) - (halfSize - radius)
+	dy := math.Abs(y-halfSize) - (halfSize - radius)
+	outsideX := math.Max(dx, 0)
+	outsideY := math.Max(dy, 0)
+	outside := math.Hypot(outsideX, outsideY)
+	inside := math.Min(math.Max(dx, dy), 0)
+	return outside+inside-radius <= 0
 }
 
+// insideBrandLetter follows the stroked double-A path in assets/aha-logo.svg.
+// The path is M12 48 22 17 32 48 42 17 52 48 in a 64px viewBox, stroked at
+// 5.2px with round caps and joins.
 func insideBrandLetter(x, y float64) bool {
-	const strokeRadius = 1.65
-	return pointSegmentDistanceSquared(x, y, 16, 6.6, 8.7, 25.3) <= strokeRadius*strokeRadius ||
-		pointSegmentDistanceSquared(x, y, 16, 6.6, 23.3, 25.3) <= strokeRadius*strokeRadius ||
-		pointSegmentDistanceSquared(x, y, 11.5, 18.7, 20.5, 18.7) <= 1.35*1.35
+	const (
+		scale        = brandIconSize / 64.0
+		strokeRadius = 5.2 * scale / 2
+	)
+	points := [][4]float64{
+		{12, 48, 22, 17},
+		{22, 17, 32, 48},
+		{32, 48, 42, 17},
+		{42, 17, 52, 48},
+	}
+	for _, line := range points {
+		if pointSegmentDistanceSquared(x, y, line[0]*scale, line[1]*scale, line[2]*scale, line[3]*scale) <= strokeRadius*strokeRadius {
+			return true
+		}
+	}
+	return false
+}
+
+func insideBrandCrossbar(x, y float64) bool {
+	const (
+		scale        = brandIconSize / 64.0
+		strokeRadius = 4.8 * scale / 2
+	)
+	return pointSegmentDistanceSquared(x, y, 16*scale, 35.5*scale, 48*scale, 35.5*scale) <= strokeRadius*strokeRadius
 }
 
 func pointSegmentDistanceSquared(px, py, ax, ay, bx, by float64) float64 {

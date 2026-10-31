@@ -589,6 +589,7 @@ test("built web contains responsive application", async () => {
   const knowledgeWorkspace = await readFile(resolve(root, "dist", "knowledge_workspace.js"), "utf8");
   const css = await readFile(resolve(root, "dist", "styles.css"), "utf8");
   const index = await readFile(resolve(root, "dist", "index.html"), "utf8");
+  const i18n = await readFile(resolve(root, "dist", "i18n.js"), "utf8");
   assert.match(script, /api\.authStatus/);
   assert.match(promptAdmin, /内置只读模板/);
   assert.doesNotMatch(promptAdmin, /协议由代码管理/);
@@ -602,12 +603,13 @@ test("built web contains responsive application", async () => {
   assert.match(api, /auth\/password/);
   assert.match(script, /id="forgot-password"/);
   assert.match(script, /id="password-recovery-form"/);
-  assert.match(script, /不是程序安装目录/);
-  assert.match(script, /修改或恢复该文件后需重启 AHA2/);
+  assert.match(i18n, /不是程序安装目录/);
+  assert.match(i18n, /修改或恢复该文件后需重启 AHA2/);
   assert.match(script, /以计划任务 <code>--data-dir<\/code> 的实际路径为准/);
-  assert.match(script, /请使用实际数据目录中的 setup-token/);
+  assert.match(i18n, /请使用实际数据目录中的 setup-token/);
   assert.match(script, /id="owner-avatar"/);
-  assert.match(script, /ownerAvatarClicks\s*>=\s*5/);
+  assert.match(script, /id="advanced-settings"[^>]*data-view="advanced"[^>]*aria-label="\$\{t\("owner\.advanced"\)\}"/);
+  assert.doesNotMatch(script, /ownerAvatarClicks\s*>=\s*5/);
   assert.match(script, /id="change-password-form"/);
   assert.match(script, /id="origin-validation-form"/);
   assert.match(script, /api\.updateSecuritySettings/);
@@ -635,6 +637,7 @@ test("built web contains responsive application", async () => {
   assert.match(script, /renderKnowledgeWorkspace/);
   assert.match(script, /name="knowledge_policy"/);
   assert.match(agents, /name="knowledge_policy"/);
+  assert.match(knowledgeWorkspace, /\.\/i18n\.js\?v=[a-f0-9]{12}/);
   assert.match(knowledgeWorkspace, /Workspace Bindings/);
   assert.match(knowledgeWorkspace, /Product Lines/);
   assert.match(knowledgeWorkspace, /SKILL\.md/);
@@ -903,14 +906,14 @@ test("built web contains responsive application", async () => {
   assert.match(script, /advancedSubview\(renderPromptAdmin\(\)\)/);
   assert.match(script, /data-view="prompts"/);
   assert.match(script, /data-view="sync"/);
-  assert.match(script, /data-view="advanced">← 返回高级设置/);
-  assert.match(script, /const mobileNav = \[[\s\S]{0,100}\.\.\.nav\.slice\(0, 6\)[\s\S]{0,100}"advanced"[\s\S]{0,40}"shield"[\s\S]{0,40}"高级"/);
+  assert.match(script, /data-view="advanced">\$\{t\("common\.backAdvanced"\)\}/);
+  assert.match(script, /const mobileNav = \[[\s\S]{0,100}\.\.\.nav\.slice\(0, 6\)[\s\S]{0,100}"advanced"[\s\S]{0,40}"settings"[\s\S]{0,40}"nav\.advanced"/);
   assert.match(script, /<nav class="bottom-nav">\$\{mobileNav\.map/);
-  assert.match(script, /data-view="proxy">进入代理设置/);
+  assert.match(script, /data-view="proxy">\$\{t\("advanced\.proxy\.action"\)\}/);
   assert.doesNotMatch(script, /\["prompts",\s*"bot",\s*"提示词"\]/);
   assert.doesNotMatch(script, /\["sync",\s*"sync",/);
   assert.match(css, /\.bottom-nav \{[^}]*grid-template-columns:\s*repeat\(7,1fr\)/);
-  assert.match(script, /"channels",\s*"bot",\s*"渠道"/);
+  assert.match(script, /"channels",\s*"bot",\s*"nav\.channels"/);
 	assert.match(script, /renderChannels\(state\.channelProviders, state\.channelInstances,/);
   assert.match(api, /api\/v1\/channel-providers/);
   assert.match(script, /channels\.js\?v=[a-f0-9]{12}/);
@@ -1067,10 +1070,14 @@ test("built web contains responsive application", async () => {
   assert.match(css, /overscroll-behavior: contain/);
   assert.match(index, /app\.js\?v=[a-f0-9]{12}/);
   assert.match(index, /styles\.css\?v=[a-f0-9]{12}/);
+  assert.match(index, /class="boot-spinner"/);
+  assert.doesNotMatch(index, /正在连接服务/);
+  assert.match(css, /\.boot-loading \.boot-spinner/);
   assert.match(script, /\.\/api\.js\?v=[a-f0-9]{12}/);
   assert.match(script, /\.\/task_agents\.js\?v=[a-f0-9]{12}/);
   assert.match(script, /\.\/task_composer\.js\?v=[a-f0-9]{12}/);
   assert.match(taskComposer, /\.\/icons\.js\?v=[a-f0-9]{12}/);
+  assert.match(taskComposer, /\.\/i18n\.js\?v=[a-f0-9]{12}/);
   assert.match(script, /\.\/task_tools\.js\?v=[a-f0-9]{12}/);
   assert.match(taskTools, /\.\/icons\.js\?v=[a-f0-9]{12}/);
   assert.match(taskTools, /\.\/task_agents\.js\?v=[a-f0-9]{12}/);
@@ -2318,4 +2325,101 @@ test("background control is gone and control is foreground-only", async () => {
   assert.doesNotMatch(native, /SelectBackgroundWindow|background_observe/, "a background entry point remains");
   // The element list may stay as an inspection aid, but it must not dispatch.
   assert.doesNotMatch(source, /data-desktop-action/, "element action buttons still render");
+});
+
+test("pet settings live inside the pet workbench", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const main = await readFile(resolve(root, "src", "main.ts"), "utf8");
+  const assistant = await readFile(resolve(root, "src", "assistant.ts"), "utf8");
+  const styles = await readFile(resolve(root, "src", "styles.css"), "utf8");
+
+  assert.match(main, /data-pet-workbench-tab="settings"/);
+  assert.match(main, /id="pet-settings-host"/);
+  assert.match(main, /void showPetSettings\(\)/);
+  assert.match(main, /petWorkbenchTab = "settings"/);
+  // The standalone advanced-settings card is gone; the workbench is the entry.
+  assert.doesNotMatch(main, /<strong>宠物<\/strong>/);
+  // Saving inline keeps the owner on the settings tab instead of bouncing to
+  // the advanced page, and the inline footer does not advertise a return path
+  // that no longer applies.
+  assert.match(assistant, /const inline = settingsPanel\.classList\.contains\("assistant-settings-inline"\)/);
+  assert.match(assistant, /if \(inline\) \{\s*renderPetSettings\(\);/);
+  assert.match(styles, /assistant-settings-inline #pet-settings-back \{ display: none; \}/);
+});
+
+test("data management shows scoped sizes and safe cleanup actions", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const main = await readFile(resolve(root, "src", "main.ts"), "utf8");
+  const api = await readFile(resolve(root, "src", "api.ts"), "utf8");
+  const types = await readFile(resolve(root, "src", "types.ts"), "utf8");
+  const backend = await readFile(resolve(root, "..", "internal", "httpapi", "data_management.go"), "utf8");
+  const styles = await readFile(resolve(root, "src", "styles.css"), "utf8");
+
+  assert.match(main, /function dataManagementView/);
+  assert.match(main, /function bindDataManagementPage/);
+  assert.match(main, /data-data-cleanup="backups"/);
+  assert.match(main, /data-data-cleanup="logs"/);
+  assert.match(main, /data-backup-keep/);
+  assert.match(main, /window\.confirm/);
+  assert.match(main, /class="data-category"/);
+  // The summary card and table notes must not inherit the form helper's
+  // negative margin, and narrow screens stack the table into readable rows.
+  assert.ok(styles.includes(".data-management-page .field-help { margin: 0; }"));
+  assert.ok(styles.includes(".data-summary { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 16px; }"));
+  assert.match(styles, /@media \(max-width: 640px\) \{[\s\S]*?\.data-table thead \{ display: none; \}/);
+  assert.match(styles, /\.data-table tr \{ display: block; padding: 12px 16px;/);
+  assert.match(api, /\/api\/v1\/system\/data/);
+  assert.match(api, /\/api\/v1\/system\/data\/cleanup/);
+  assert.match(types, /interface DataInventory/);
+  assert.match(types, /interface DataCategory/);
+  // Cleanup is deliberately limited to install backups and root log files; the
+  // database, secrets, attachments and runtime data are never candidates.
+  assert.match(backend, /strings\.HasPrefix\(entry\.Name\(\), "user-installed-"\)/);
+  assert.match(backend, /case "backups":/);
+  assert.match(backend, /case "logs":/);
+  assert.doesNotMatch(backend, /case "attachments":/);
+  assert.doesNotMatch(backend, /case "database":/);
+});
+
+test("the app shell, tab and tray share the AHA2 brand mark", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const index = await readFile(resolve(root, "index.html"), "utf8");
+  const main = await readFile(resolve(root, "src", "main.ts"), "utf8");
+  const styles = await readFile(resolve(root, "src", "styles.css"), "utf8");
+  const build = await readFile(resolve(root, "..", "scripts", "build-web.mjs"), "utf8");
+  const logo = await readFile(resolve(root, "..", "assets", "aha-logo.svg"), "utf8");
+
+  // The tab, shell and tray all use the supplied dark/cyan AHA SVG mark.
+  assert.match(index, /rel="icon" type="image\/svg\+xml" href="\/assets\/aha-logo\.svg"/);
+  assert.match(index, /rel="icon" href="\/favicon\.ico"/);
+  assert.match(main, /class="brand-mark"><img src="\/assets\/aha-logo\.svg"/);
+  assert.doesNotMatch(main, /class="brand-mark">A</);
+  assert.match(styles, /\.brand-mark img \{[^}]*width: 100%;[^}]*height: 100%;/);
+  assert.match(logo, /fill="#0f172a"/);
+  assert.match(logo, /stroke="#38bdf8"/);
+  assert.match(logo, /M12 48 22 17 32 48 42 17 52 48/);
+  assert.match(build, /copyFile\(resolve\(root, "assets", "aha-logo\.svg"\)/);
+  assert.match(build, /copyFile\(resolve\(root, "assets", "aha2\.ico"\), resolve\(output, "favicon\.ico"\)/);
+});
+
+test("i18n catalogs and language preference are wired into the shell", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const main = await readFile(resolve(root, "src", "main.ts"), "utf8");
+  const api = await readFile(resolve(root, "src", "api.ts"), "utf8");
+  const i18n = await import(pathToFileURL(resolve(root, "dist", "i18n.js")).href);
+
+  i18n.applyLocale("en-US");
+  assert.equal(i18n.t("nav.projects"), "Projects");
+  assert.equal(i18n.t("language.en"), "English (preview)");
+  assert.equal(i18n.t("data.cleanedBackups", {count: 2, size: "3 GB"}), "Removed 2 old backups and freed 3 GB.");
+  i18n.applyLocale("zh-CN");
+  assert.equal(i18n.t("nav.projects"), "项目");
+  assert.equal(i18n.resolveLocale("en-US"), "en-US");
+  assert.equal(i18n.resolveLocale("zh-CN"), "zh-CN");
+
+  assert.match(api, /\/api\/v1\/settings\/general/);
+  assert.match(main, /id="language-setting"/);
+  assert.match(main, /api\.updateGeneralSettings\(language\)/);
+  assert.match(main, /applyLocale\(result\.general\.language\)/);
+  assert.match(main, /generalSettings: \{language: "auto"\}/);
 });

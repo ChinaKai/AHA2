@@ -21,7 +21,7 @@ func TestOwnerAssistantViewAndHints(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer database.Close()
+	t.Cleanup(func() { _ = database.Close() })
 	secretStore, err := secrets.Open(filepath.Join(t.TempDir(), "secrets.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -52,6 +52,7 @@ func TestOwnerAssistantViewAndHints(t *testing.T) {
 		}
 	}
 	service := NewService(database, secretStore, &stubExecutor{})
+	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
 	create := func(title string) domain.Task {
 		task, createErr := service.CreateTask(ctx, CreateTaskInput{
 			ProjectID: project.ID, WorkspaceID: workspace.ID, Title: title,

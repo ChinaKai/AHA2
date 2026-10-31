@@ -1,0 +1,14 @@
+2026-10-27T05:31:03Z in_progress None
+2026-10-27T05:31:23Z in_progress None
+2026-10-27T05:31:44Z in_progress None
+2026-10-27T05:32:04Z in_progress None
+2026-10-27T05:32:25Z in_progress None
+2026-10-27T05:32:45Z in_progress None
+2026-10-27T05:33:06Z in_progress None
+2026-10-27T05:33:26Z completed failure
+=== JOBS ===
+test | completed failure
+build-macos-packages | completed skipped
+build-windows-installer | completed skipped
+build-linux-packages | completed skipped
+publish-release | completed skipped

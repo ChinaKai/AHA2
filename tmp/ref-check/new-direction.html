@@ -1,0 +1,172 @@
+<!doctype html><html lang="zh"><head><meta charset="utf-8"><style>
+body{margin:0;padding:24px;background:linear-gradient(135deg,#eef7ff,#f8fbff);font-family:"Microsoft YaHei",system-ui,sans-serif;color:#17324d}
+h1{font-size:22px;margin:0 0 4px}.sub{margin:0 0 16px;color:#60758d;font-size:13px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+.card{background:#fff;border:1px solid #dbe8f7;border-radius:18px;padding:14px;box-shadow:0 14px 34px rgba(31,86,132,.1)}
+.card h2{font-size:16px;margin:0 0 2px}.card p{margin:0 0 10px;color:#60758d;font-size:12px}
+.ref{width:100%;height:230px;object-fit:contain;border-radius:12px;background:#f7fbff}
+.ours{display:grid;place-items:center;height:170px;margin-top:10px;border-top:1px dashed #d7e6f6}
+.ours .assistant-pet{position:relative!important;width:150px!important;height:150px!important;transition:none!important}
+.ours .assistant-pet-art,.ours .pet-svg{width:150px!important;height:150px!important}
+.caption{font-size:11px;color:#7a8ba0;text-align:center;margin-top:2px}
+.footer{margin-top:16px;font-size:13px;color:#38516d;background:#fff;border:1px dashed #b9d4ef;border-radius:14px;padding:11px 14px}
+/* Assistant character skins and the in-panel picker. */
+.assistant-pet-art { position: relative; display: block; width: 64px; height: 64px; }
+.assistant-pet-art .pet-svg { display: block; width: 64px; height: 64px; overflow: visible; filter: drop-shadow(0 7px 9px rgba(31,86,132,.22)); }
+.assistant-pet-art .pet-ground { fill: rgba(15,35,60,.16); }
+.assistant-pet-art .pet-main { fill: #8bd3ff; }
+.assistant-pet-art .pet-whale-body { fill: #4d6bfe; }
+.assistant-pet-art .pet-whale-belly { fill: #eaf0ff; }
+.assistant-pet-art .pet-whale-tail, .assistant-pet-art .pet-whale-fin { fill: #3b55d9; }
+.assistant-pet-art .pet-whale-smile { fill: none; stroke: #10233d; stroke-width: 2; stroke-linecap: round; }
+.assistant-pet-art .pet-whale-spout { fill: none; stroke: #9adcff; stroke-width: 3; stroke-linecap: round; opacity: 0; }
+.assistant-pet-art .pet-duck-body { fill: #ffd84d; }
+.assistant-pet-art .pet-duck-wing { fill: #f4c21c; }
+.assistant-pet-art .pet-duck-tail { fill: #f4c21c; }
+.assistant-pet-art .pet-duck-tuft { fill: none; stroke: #f4c21c; stroke-width: 3; stroke-linecap: round; }
+.assistant-pet-art .pet-duck-beak { fill: #ff9f1c; }
+.assistant-pet-art .pet-duck-beak-line { fill: none; stroke: #d97b00; stroke-width: 1.3; stroke-linecap: round; }
+.assistant-pet-art .pet-duck-foot { fill: none; stroke: #ff9f1c; stroke-width: 3.5; stroke-linecap: round; }
+.assistant-pet-art .pet-eyes-open { fill: #10233d; animation: pet-blink-open 6s infinite; }
+.assistant-pet-art .pet-eyes-closed { fill: none; stroke: #10233d; stroke-width: 2; stroke-linecap: round; opacity: 0; animation: pet-blink-closed 6s infinite; }
+.assistant-pet-art .pet-mouth { fill: none; stroke: #10233d; stroke-width: 2; stroke-linecap: round; }
+.assistant-pet-art .pet-cheek { fill: #ff9db2; opacity: .62; }
+.assistant-pet-art .pet-body-group { transform-origin: 50% 86%; animation: pet-breathe 3.8s ease-in-out infinite; }
+.assistant-pet[data-character="gugugaga"] .pet-duck-wing { transform-origin: 19px 39px; animation: pet-wing 3.1s ease-in-out infinite; }
+.assistant-pet[data-character="gugugaga"] .pet-duck-tail { transform-origin: 14px 38px; animation: pet-tail-small 2.9s ease-in-out infinite; }
+.assistant-pet[data-character="gugugaga"] .pet-duck-beak { transform-origin: 32px 35px; animation: pet-beak 5.2s ease-in-out infinite; }
+.assistant-pet[data-character="deepseek_fish"] .pet-whale-tail { transform-origin: 52px 36px; animation: pet-tail 2.6s ease-in-out infinite; }
+.assistant-pet[data-character="deepseek_fish"] .pet-whale-fin { transform-origin: 21px 46px; animation: pet-fin 3.4s ease-in-out infinite; }
+.assistant-pet[data-character="deepseek_fish"] .pet-whale-spout { animation: pet-spout 8s ease-in-out infinite; }
+.assistant-pet.walking .assistant-pet-art { animation: pet-walk .44s ease-in-out infinite; }
+.assistant-pet.thinking .assistant-pet-art { animation: pet-think .8s ease-in-out infinite; }
+.assistant-pet.has-hint .assistant-pet-art { animation: pet-alert .78s ease-in-out infinite; }
+.assistant-pet.panel-open .assistant-pet-art { animation: pet-perk 2s ease-in-out infinite; }
+.assistant-pet.character-changed .assistant-pet-art { animation: pet-pop .7s ease-out; }
+.assistant-character-button { position: relative; display: grid; flex: 0 0 auto; width: 32px; height: 32px; min-height: 32px; padding: 0; place-items: center; border: 1px solid #dbe8f7; border-radius: 10px; background: #f4f9ff; }
+.assistant-character-button:hover { border-color: #9fc4ee; background: #eaf4ff; }
+.assistant-character-mini { display: grid; width: 100%; height: 100%; place-items: center; }
+.assistant-character-mini .pet-svg { width: 25px; height: 25px; overflow: visible; }
+.assistant-character-badge { position: absolute; right: 0; bottom: -1px; color: #2563eb; font-size: 9px; line-height: 1; }
+.assistant-character-menu { position: absolute; top: 56px; right: 10px; z-index: 6; display: grid; gap: 8px; width: 264px; max-width: calc(100% - 20px); padding: 10px; border: 1px solid #dbe8f7; border-radius: 13px; background: #fff; box-shadow: 0 16px 40px rgba(15,35,60,.2); }
+.assistant-character-menu-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; padding: 1px 2px 3px; }
+.assistant-character-menu-head strong { font-size: 12px; }
+.assistant-character-menu-head small { color: var(--muted); font-size: 10px; }
+.assistant-character-options { display: grid; gap: 5px; }
+.assistant-character-option { display: flex; align-items: center; gap: 9px; width: 100%; padding: 7px; border: 1px solid transparent; border-radius: 10px; background: #f8fbff; text-align: left; }
+.assistant-character-option:hover { border-color: #c7dcf4; background: #eef7ff; }
+.assistant-character-option.active { border-color: #7eb2e8; background: #e8f3ff; }
+.assistant-character-preview { display: grid; flex: 0 0 auto; width: 42px; height: 42px; place-items: center; border-radius: 10px; background: #fff; }
+.assistant-character-preview .pet-svg { width: 38px; height: 38px; overflow: visible; }
+.assistant-character-copy { display: grid; gap: 1px; min-width: 0; }
+.assistant-character-copy strong { font-size: 12px; }
+.assistant-character-copy small { overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.assistant-identity .assistant-mini-avatar .pet-svg { width: 26px; height: 26px; overflow: visible; }
+
+@keyframes pet-breathe { 0%, 100% { transform: translateY(0) scale(1); } 50% { transform: translateY(-2px) scale(1.015); } }
+@keyframes pet-blink-open { 0%, 92%, 100% { opacity: 1; } 94%, 96% { opacity: 0; } }
+@keyframes pet-blink-closed { 0%, 92%, 100% { opacity: 0; } 94%, 96% { opacity: 1; } }
+@keyframes pet-wing { 0%, 100% { transform: rotate(0deg); } 50% { transform: rotate(-10deg); } }
+@keyframes pet-beak { 0%, 88%, 100% { transform: scaleY(1); } 91%, 94% { transform: scaleY(.55); } }
+@keyframes pet-tail { 0%, 100% { transform: rotate(0deg); } 50% { transform: rotate(8deg); } }
+@keyframes pet-tail-small { 0%, 100% { transform: rotate(0deg); } 50% { transform: rotate(-7deg); } }
+@keyframes pet-fin { 0%, 100% { transform: rotate(0deg); } 50% { transform: rotate(-8deg); } }
+@keyframes pet-spout { 0%, 72%, 100% { opacity: 0; transform: translateY(2px) scaleY(.7); } 78%, 86% { opacity: 1; transform: translateY(0) scaleY(1); } }
+@keyframes pet-walk { 0%, 100% { transform: translateY(0) rotate(-2deg); } 50% { transform: translateY(-4px) rotate(2deg); } }
+@keyframes pet-think { 0%, 100% { transform: translateY(0) rotate(-2deg); } 50% { transform: translateY(-5px) rotate(2deg); } }
+@keyframes pet-alert { 0%, 100% { transform: translateY(0) scale(1); } 45% { transform: translateY(-5px) scale(1.04); } }
+@keyframes pet-perk { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-3px); } }
+@keyframes pet-pop { 0% { transform: scale(.82); } 55% { transform: scale(1.1) rotate(-3deg); } 100% { transform: scale(1); } }
+
+@media (max-width: 720px) {
+  .assistant-pet-art, .assistant-pet-art .pet-svg { width: 58px; height: 58px; }
+  .assistant-character-menu { right: 8px; width: 244px; }
+  .assistant-character-button { width: 30px; height: 30px; min-height: 30px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .assistant-pet-art, .assistant-pet-art .pet-body-group, .assistant-pet-art .pet-eyes-open,
+  .assistant-pet-art .pet-eyes-closed, .assistant-pet-art .pet-whale-tail, .assistant-pet-art .pet-whale-fin,
+  .assistant-pet-art .pet-whale-spout, .assistant-pet-art .pet-duck-wing, .assistant-pet-art .pet-duck-tail,
+  .assistant-pet-art .pet-duck-beak { animation: none !important; }
+}
+
+/* Anime chibi skins: Gugugaga penguin girl and DeepSeek whale girl. */
+.pet-gugu-foot { stroke: #ffc21c; }
+.pet-gugu-beak { transform-origin: 32px 24px; }
+.pet-gugu-hood { fill: #23272e; }
+.assistant-pet[data-character="gugugaga"] .pet-gugu-flipper { transform-origin: 32px 52px; animation: pet-wing 3.1s ease-in-out infinite; }
+.assistant-pet[data-character="gugugaga"] .pet-gugu-beak { animation: pet-beak 5.2s ease-in-out infinite; }
+.assistant-pet[data-character="deepseek_fish"] .pet-whale-tail { transform-origin: 47px 50px; animation: pet-tail 2.6s ease-in-out infinite; }
+.assistant-pet[data-character="deepseek_fish"] .pet-whale-fin-ear { transform-origin: 32px 36px; animation: pet-fin 3.4s ease-in-out infinite; }
+.assistant-pet[data-character="deepseek_fish"] .pet-whale-hair { transform-origin: 32px 42px; animation: pet-hair 4.2s ease-in-out infinite; }
+.assistant-pet[data-character="deepseek_fish"] .pet-whale-ahoge { transform-origin: 32px 10px; animation: pet-ahoge 2.8s ease-in-out infinite; }
+@keyframes pet-hair { 0%, 100% { transform: rotate(0deg); } 50% { transform: rotate(2.2deg); } }
+@keyframes pet-ahoge { 0%, 100% { transform: rotate(-4deg); } 50% { transform: rotate(8deg); } }
+
+</style></head><body>
+<h1>这次搜对了：咕咕嘎嘎是企鹅娘，大肥鱼是鲸鱼娘</h1>
+<p class="sub">上面是原参考，下面是我按参考画的 2D Q 版宠物</p>
+<div class="grid">
+<div class="card"><h2>咕咕嘎嘎</h2><p>黑企鹅连帽衫、黄嘴、黑发蓝夹、白肚皮、黄脚</p><img class="ref" src="gugu-drinking-milk.webp"><div class="ours"><div class="assistant-pet" data-character="gugugaga"><div class="assistant-pet-art"><svg viewBox="0 0 64 64" class="pet-svg" aria-hidden="true">
+  <ellipse class="pet-ground" cx="32" cy="60" rx="16" ry="3" fill="rgba(15,35,60,.16)"/>
+  <g class="pet-body-group">
+    <path class="pet-gugu-foot" fill="none" stroke="#ffc21c" stroke-width="4" stroke-linecap="round" d="M23 57l-6 3h11M41 57l6 3H36"/>
+    <path class="pet-gugu-body" fill="#23272e" d="M20 50c0-5 5-8 12-8s12 3 12 8v4c0 5-5 7-12 7s-12-2-12-7Z"/>
+    <path class="pet-gugu-belly" fill="#f7fbff" d="M26 50c0-3 2-5 6-5s6 2 6 5v5c-2 2-10 2-12 0Z"/>
+    <path class="pet-gugu-flipper" fill="#23272e" d="M19 48c-4 2-5 6-2 8 2 1 4-1 4-3"/>
+    <path class="pet-gugu-flipper" fill="#23272e" d="M45 48c4 2 5 6 2 8-2 1-4-1-4-3"/>
+    <path class="pet-gugu-hood" fill="#23272e" d="M9 31c0-14 10-23 23-23s23 9 23 23c0 13-9 21-23 21S9 44 9 31Z"/>
+    <ellipse cx="23" cy="16" rx="5.5" ry="5" fill="#f7fbff"/>
+    <ellipse cx="41" cy="16" rx="5.5" ry="5" fill="#f7fbff"/>
+    <circle cx="24" cy="16" r="2.2" fill="#1b2027"/>
+    <circle cx="40" cy="16" r="2.2" fill="#1b2027"/>
+    <path class="pet-gugu-beak" fill="#ffc21c" d="M27 22c1-4 9-4 10 0 0 3-2 5-5 5s-5-2-5-5Z"/>
+    <path class="pet-gugu-face" fill="#ffe3d2" d="M18 34c0-8 6-13 14-13s14 5 14 13c0 8-6 13-14 13s-14-5-14-13Z"/>
+    <path class="pet-gugu-hair" fill="#1b2027" d="M17 34c1-7 7-12 15-12s14 5 15 12c-4-2-8-3-15-3s-11 1-15 3Z"/>
+    <path class="pet-gugu-hair" fill="#1b2027" d="M18 33c-2 7-1 11 2 13-3-1-5-5-2-13Z"/>
+    <path class="pet-gugu-hair" fill="#1b2027" d="M46 33c2 7 1 11-2 13 3-1 5-5 2-13Z"/>
+    <rect x="18" y="30" width="6" height="2.2" rx="1.1" fill="#6ec8ff" transform="rotate(-24 21 31)"/>
+    <rect x="20" y="33" width="5" height="2" rx="1" fill="#3da9e8" transform="rotate(-24 22 34)"/>
+    <g class="pet-eyes-open" fill="#67788c"><ellipse cx="26" cy="40" rx="2.6" ry="3"/><ellipse cx="38" cy="40" rx="2.6" ry="3"/></g>
+    <g class="pet-eyes-closed" fill="none" stroke="#1b2027" stroke-width="2" stroke-linecap="round"><path d="M23 40h6M35 40h6"/></g>
+    <circle cx="26.8" cy="39" r=".8" fill="#fff"/><circle cx="38.8" cy="39" r=".8" fill="#fff"/>
+    <circle class="pet-cheek" cx="20" cy="44" r="2.2" fill="#ff9db2"/>
+    <circle class="pet-cheek" cx="44" cy="44" r="2.2" fill="#ff9db2"/>
+    <path d="M30 46c1.5 1.5 3.5 1.5 5 0" fill="none" stroke="#b05a4a" stroke-width="1.4" stroke-linecap="round"/>
+  </g>
+</svg></div></div></div><div class="caption">我画的 Q 版</div></div>
+<div class="card"><h2>DeepSeek 大肥鱼</h2><p>蓝色渐变长发、鲸鳍耳、大鲸尾、蓝眼睛、女仆裙</p><img class="ref" src="fish-05-chibi-blue-maid.webp"><div class="ours"><div class="assistant-pet" data-character="deepseek_fish"><div class="assistant-pet-art"><svg viewBox="0 0 64 64" class="pet-svg" aria-hidden="true">
+  <ellipse class="pet-ground" cx="32" cy="60" rx="18" ry="3" fill="rgba(15,35,60,.16)"/>
+  <g class="pet-body-group">
+    <path class="pet-whale-tail" fill="#3b5aa8" d="M44 48c8 0 13-4 14-10 3 5 2 11-3 14 4 2 6 6 5 10-5-3-10-3-14-1"/>
+    <path class="pet-whale-tail-light" fill="#6fa8dc" opacity=".55" d="M48 49c6 0 10-3 11-8 2 4 1 8-3 10 3 1 5 4 5 7-4-2-8-2-11 0Z"/>
+    <path class="pet-whale-hair" fill="#4169c8" d="M10 30c0-13 10-21 22-21s22 8 22 21c0 12-4 20-10 24l-3-7H23l-3 7c-6-4-10-12-10-24Z"/>
+    <path class="pet-whale-hair-light" fill="#7fc4f0" opacity=".6" d="M16 30c1-8 7-13 16-13 3 0 5 1 7 2-5 1-9 4-11 8-2 3-3 7-3 12 0 4 1 8 3 11-5-2-9-8-9-15 0-2 0-3-3-5Z"/>
+    <path class="pet-whale-fin-ear" fill="#4169c8" d="M14 32c-5-2-8 1-7 5 1 4 4 6 8 5Z"/>
+    <path class="pet-whale-fin-ear" fill="#4169c8" d="M50 32c5-2 8 1 7 5-1 4-4 6-8 5Z"/>
+    <path class="pet-whale-fin-ear-light" fill="#7fc4f0" opacity=".7" d="M15 34c-3-1-5 1-4 3 1 2 3 3 5 3Z"/>
+    <path class="pet-whale-fin-ear-light" fill="#7fc4f0" opacity=".7" d="M49 34c3-1 5 1 4 3-1 2-3 3-5 3Z"/>
+    <path class="pet-whale-ahoge" fill="none" stroke="#4169c8" stroke-width="2.4" stroke-linecap="round" d="M32 10c1-4 4-5 6-3"/>
+    <path class="pet-whale-face" fill="#ffe3d2" d="M22 32c0-7 4-11 10-11s10 4 10 11c0 7-4 11-10 11s-10-4-10-11Z"/>
+    <path class="pet-whale-hair" fill="#4169c8" d="M21 33c0-7 4-12 11-12s11 5 11 12c-3-2-6-3-11-3s-8 1-11 3Z"/>
+    <path class="pet-whale-hair" fill="#4169c8" d="M22 32c-1 4 0 7 2 9-3-1-4-4-2-9Z"/>
+    <path class="pet-whale-hair" fill="#4169c8" d="M42 32c1 4 0 7-2 9 3-1 4-4 2-9Z"/>
+    <g class="pet-eyes-open" fill="#3f79b8"><ellipse cx="27" cy="34" rx="2.4" ry="2.8"/><ellipse cx="37" cy="34" rx="2.4" ry="2.8"/></g>
+    <g class="pet-eyes-closed" fill="none" stroke="#1b2a3d" stroke-width="2" stroke-linecap="round"><path d="M24 34h6M34 34h6"/></g>
+    <circle cx="27.8" cy="33" r=".8" fill="#fff"/><circle cx="37.8" cy="33" r=".8" fill="#fff"/>
+    <circle class="pet-cheek" cx="22" cy="38" r="2" fill="#ff9db2"/>
+    <circle class="pet-cheek" cx="42" cy="38" r="2" fill="#ff9db2"/>
+    <path d="M30 40c1.5 1.2 2.5 1.2 4 0" fill="none" stroke="#b05a4a" stroke-width="1.3" stroke-linecap="round"/>
+    <path class="pet-maid-body" fill="#25386f" d="M23 48c0-4 4-7 9-7s9 3 9 7l2 8c-3 2-7 3-11 3s-8-1-11-3Z"/>
+    <path class="pet-maid-apron" fill="#f7fbff" d="M28 47c1-2 3-3 4-3s3 1 4 3l1 9c-2 1-3 1-5 1s-3 0-5-1Z"/>
+    <path class="pet-maid-collar" fill="#f7fbff" d="M27 45l3 2 2-2 2 2 3-2-2 4h-6Z"/>
+    <path class="pet-maid-arm" fill="#ffe3d2" d="M23 48c-3 1-4 4-2 5 1 1 3 0 3-2"/>
+    <path class="pet-maid-arm" fill="#ffe3d2" d="M41 48c3 1 4 4 2 5-1 1-3 0-3-2"/>
+    <path class="pet-maid-shoe" fill="#3f5fa8" d="M25 60h5v2h-6ZM34 60h5v2h-6Z"/>
+    <path fill="#6fa8dc" d="M31 44l-4-2v4ZM33 44l4-2v4Z"/>
+  </g>
+</svg></div></div></div><div class="caption">我画的 Q 版</div></div>
+</div>
+<div class="footer">方向对吗？如果 OK，我就部署 0.5.153；要调发型、脸型、服装、尾巴、配色也可以直接说。</div>
+</body></html>

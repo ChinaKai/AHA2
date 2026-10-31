@@ -1,0 +1,27 @@
+2026-10-27T05:36:14Z in_progress None
+2026-10-27T05:36:37Z in_progress None
+2026-10-27T05:36:58Z in_progress None
+2026-10-27T05:37:18Z in_progress None
+2026-10-27T05:37:39Z in_progress None
+2026-10-27T05:37:59Z in_progress None
+2026-10-27T05:38:20Z in_progress None
+2026-10-27T05:38:43Z in_progress None
+2026-10-27T05:39:04Z in_progress None
+2026-10-27T05:39:25Z in_progress None
+2026-10-27T05:39:45Z in_progress None
+2026-10-27T05:40:07Z in_progress None
+2026-10-27T05:40:27Z in_progress None
+2026-10-27T05:40:48Z in_progress None
+2026-10-27T05:41:09Z in_progress None
+2026-10-27T05:41:30Z in_progress None
+2026-10-27T05:41:50Z in_progress None
+2026-10-27T05:42:10Z in_progress None
+2026-10-27T05:42:31Z completed success
+=== JOBS ===
+test | completed success
+build-macos-packages (amd64) | completed success
+build-linux-packages (amd64, ubuntu-latest) | completed success
+build-macos-packages (arm64) | completed success
+build-linux-packages (arm64, ubuntu-24.04-arm) | completed success
+build-windows-installer | completed success
+publish-release | completed success

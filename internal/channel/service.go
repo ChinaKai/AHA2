@@ -1776,7 +1776,11 @@ func (s *Service) AgentTaskChannelContacts(ctx context.Context, claims agentapi.
 	if err != nil {
 		return domain.ChannelDestination{}, nil, err
 	}
-	route, err := s.store.ActiveChannelTaskRouteForTask(ctx, call.Task.ID)
+	return s.taskChannelContacts(ctx, call.Task.ID)
+}
+
+func (s *Service) taskChannelContacts(ctx context.Context, taskID string) (domain.ChannelDestination, []domain.ChannelContact, error) {
+	route, err := s.store.ActiveChannelTaskRouteForTask(ctx, taskID)
 	if err != nil {
 		return domain.ChannelDestination{}, nil, app.ErrAgentCallForbidden
 	}
@@ -1792,7 +1796,7 @@ func (s *Service) AgentTaskChannelContacts(ctx context.Context, claims agentapi.
 	if err != nil || (instance.Status != "ready" && instance.Status != "degraded") {
 		return domain.ChannelDestination{}, nil, app.ErrAgentCallForbidden
 	}
-	contacts, err := s.store.TaskChannelContacts(ctx, call.Task.ID, route.InstanceID, route.ConversationID, 50)
+	contacts, err := s.store.TaskChannelContacts(ctx, taskID, route.InstanceID, route.ConversationID, 50)
 	if err != nil {
 		return domain.ChannelDestination{}, nil, err
 	}
@@ -1804,10 +1808,43 @@ func (s *Service) AgentTaskChannelContacts(ctx context.Context, claims agentapi.
 }
 
 func (s *Service) SendAgentTaskChannelMessage(ctx context.Context, claims agentapi.Claims, input AgentOutreachInput) (domain.ChannelDelivery, error) {
-	_, contacts, err := s.AgentTaskChannelContacts(ctx, claims)
+	call, err := s.application.AgentCallContext(ctx, claims, true)
 	if err != nil {
 		return domain.ChannelDelivery{}, err
 	}
+	_, contacts, err := s.taskChannelContacts(ctx, call.Task.ID)
+	if err != nil {
+		return domain.ChannelDelivery{}, err
+	}
+	return s.sendTaskChannelOutreach(ctx, call.Task.ID, call.Turn.ID, contacts, input, s.now().UTC())
+}
+
+// SendPetTaskChannelMessage is the owner-approved path for the pet. It still
+// requires a live Task channel route and a ready primary channel, but does not
+// depend on an Agent API Turn token because the approval itself carries the
+// owner's authority.
+func (s *Service) SendPetTaskChannelMessage(ctx context.Context, taskID, turnID, requestID, purpose, message string, mentionIDs, attachmentIDs []string, at time.Time) (domain.ChannelDelivery, error) {
+	if s.application == nil {
+		return domain.ChannelDelivery{}, errors.New("channel runtime is unavailable")
+	}
+	task, err := s.store.Task(ctx, taskID)
+	if err != nil || task.ReadOnly {
+		return domain.ChannelDelivery{}, errors.New("task is not eligible for channel outreach")
+	}
+	_, contacts, err := s.taskChannelContacts(ctx, task.ID)
+	if err != nil {
+		return domain.ChannelDelivery{}, err
+	}
+	if at.IsZero() {
+		at = s.now().UTC()
+	}
+	return s.sendTaskChannelOutreach(ctx, task.ID, turnID, contacts, AgentOutreachInput{
+		RequestID: requestID, Purpose: purpose, Message: message,
+		MentionIdentityLinkIDs: mentionIDs, AttachmentIDs: attachmentIDs,
+	}, at)
+}
+
+func (s *Service) sendTaskChannelOutreach(ctx context.Context, taskID, turnID string, contacts []domain.ChannelContact, input AgentOutreachInput, at time.Time) (domain.ChannelDelivery, error) {
 	requestID := strings.TrimSpace(input.RequestID)
 	purpose := strings.TrimSpace(input.Purpose)
 	message := strings.TrimSpace(input.Message)
@@ -1843,10 +1880,10 @@ func (s *Service) SendAgentTaskChannelMessage(ctx context.Context, claims agenta
 		identityIDs = append(identityIDs, identityID)
 	}
 	delivery, conversationItemID, created, err := s.store.EnqueueTaskChannelOutreach(
-		ctx, claims.TaskID, claims.TurnID, requestID, purpose, message, identityIDs, input.AttachmentIDs, s.now().UTC(),
+		ctx, taskID, turnID, requestID, purpose, message, identityIDs, input.AttachmentIDs, at,
 	)
 	if err == nil && created && s.application != nil {
-		s.application.PublishAgentChannelOutreach(ctx, claims.TaskID, claims.TurnID, conversationItemID, len(identityIDs))
+		s.application.PublishAgentChannelOutreach(ctx, taskID, turnID, conversationItemID, len(identityIDs))
 	}
 	return delivery, err
 }

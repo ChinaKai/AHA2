@@ -56,7 +56,7 @@ const server = createServer(async (request, response) => {
     response.setHeader("Content-Security-Policy", csp);
     if (name === "/") { response.setHeader("Content-Type", "text/html; charset=utf-8"); response.end(html); }
     else if (name === "/fixture.js") { response.setHeader("Content-Type", "text/javascript"); response.end(bootstrap); }
-    else if (/^\/[a-z_]+\.(js|css)$/.test(name)) {
+    else if (/^\/[a-z0-9_]+\.(js|css)$/.test(name)) {
       response.setHeader("Content-Type", name.endsWith(".css") ? "text/css" : "text/javascript");
       response.end(await readFile(resolve(root, "web/dist", name.slice(1))));
     } else response.writeHead(404).end();

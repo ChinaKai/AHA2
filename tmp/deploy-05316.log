@@ -1,0 +1,129 @@
+Using WSL Node at /home/kaikai/.nvm/versions/node/v24.18.0/bin/node
+==> Build Web assets
+<== Build Web assets (0.5s)
+==> Test Web build
+<== Test Web build (0.4s)
+==> Sync embedded Web assets
+<== Sync embedded Web assets (2.3s)
+==> Run Go tests
+C:\WINDOWS\System32\wsl.exe exited with code 1. ok  	github.com/ChinaKai/AHA2/cmd/aha	1.200s
+?   	github.com/ChinaKai/AHA2/cmd/aha-sync	[no test files]
+?   	github.com/ChinaKai/AHA2/cmd/aha-tray	[no test files]
+ok  	github.com/ChinaKai/AHA2/internal/agentapi	(cached)
+--- FAIL: TestMultiAgentRoundCreatesIntegrationTurn (7.30s)
+    service_test.go:1203: task did not reach waiting_user: domain.Task{ID:"task_500d04c0a24dc7248280", Code:"task-001",
+ ProjectID:"project-agents", WorkspaceID:"workspace-agents", Title:"agents", OriginalRequest:"coordinate agents", Curre
+ntGoal:"coordinate agents", Status:"active", TargetBranch:"", BaseCommit:"", TaskBranch:"", Isolation:"inplace", Worktr
+eeDir:"", TaskWorkspacePath:"", RuntimeConfigSnapshotID:"runtime_f6b7eff00bd8f43d171a", CollaborationMode:"auto", MaxAg
+ents:3, KnowledgePolicy:"inherit", SkillIDs:[]string{}, AgentCapabilities:map[string]bool{}, MCPServerIDs:[]string{}, T
+otalTokens:0, CreatedAt:time.Date(2026, time.October, 30, 7, 21, 55, 644409589, time.UTC), UpdatedAt:time.Date(2026, ti
+me.October, 30, 7, 21, 55, 648176005, time.UTC), CompletedAt:time.Date(1, time.January, 1, 0, 0, 0, 0, time.UTC), Owner
+DeviceID:"", ReadOnly:false, ReadOnlyReason:"", ChannelInstanceID:"", ChannelRetired:false}
+--- FAIL: TestMultiAgentInlineWaitKeepsMainInOneTurn (7.34s)
+    service_test.go:1477: task did not reach waiting_user: domain.Task{ID:"task_bfab72490cfb4a363f25", Code:"task-001",
+ ProjectID:"project-inline-agents", WorkspaceID:"workspace-inline-agents", Title:"inline agents", OriginalRequest:"coor
+dinate inline agents", CurrentGoal:"coordinate inline agents", Status:"active", TargetBranch:"", BaseCommit:"", TaskBra
+nch:"", Isolation:"inplace", WorktreeDir:"", TaskWorkspacePath:"", RuntimeConfigSnapshotID:"runtime_fbdafb5e662d5d46707
+8", CollaborationMode:"auto", MaxAgents:3, KnowledgePolicy:"inherit", SkillIDs:[]string{}, AgentCapabilities:map[string
+]bool{}, MCPServerIDs:[]string{}, TotalTokens:0, CreatedAt:time.Date(2026, time.October, 30, 7, 21, 55, 642377767, time
+.UTC), UpdatedAt:time.Date(2026, time.October, 30, 7, 21, 55, 646438931, time.UTC), CompletedAt:time.Date(1, time.Janua
+ry, 1, 0, 0, 0, 0, time.UTC), OwnerDeviceID:"", ReadOnly:false, ReadOnlyReason:"", ChannelInstanceID:"", ChannelRetired
+:false}
+FAIL
+FAIL	github.com/ChinaKai/AHA2/internal/app	38.854s
+ok  	github.com/ChinaKai/AHA2/internal/auth	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/backend	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/centersync	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/channel	13.090s
+ok  	github.com/ChinaKai/AHA2/internal/codexaccount	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/configimport	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/desktop	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/domain	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/execution	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/gateway	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/hardware	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/httpapi	83.949s
+ok  	github.com/ChinaKai/AHA2/internal/legacyimport	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/managedprocess	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/outboundproxy	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/prompt	5.548s
+ok  	github.com/ChinaKai/AHA2/internal/proxyconfig	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/secrets	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/store	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/sync	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/tray	(cached)
+?   	github.com/ChinaKai/AHA2/internal/webassets	[no test files]
+ok  	github.com/ChinaKai/AHA2/internal/workspace	(cached)
+?   	github.com/ChinaKai/AHA2/tmp/db-inspect	[no test files]
+?   	github.com/ChinaKai/AHA2/tmp/diag-modeldetect	[no test files]
+?   	github.com/ChinaKai/AHA2/tmp/probe-direct	[no test files]
+?   	github.com/ChinaKai/AHA2/tmp/provider-probe	[no test files]
+?   	github.com/ChinaKai/AHA2/tmp/session-debug	[no test files]
+?   	github.com/ChinaKai/AHA2/tmp/sync-diag	[no test files]
+?   	github.com/ChinaKai/AHA2/tmp/winprobe	[no test files]
+FAIL
+ËùÔÚÎ»ÖÃ \\wsl.localhost\Ubuntu-24.04\home\kaikai\kk-workspace\my_project\AHA2\scripts\build-and-deploy-windows-user.ps
+1:109 ×Ö·û: 9
++         throw "$Executable exited with code $($process.ExitCode). $de ...
++         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : OperationStopped: (C:\WINDOWS\Syst...est files]
+FAIL:String) [], RuntimeException
+    + FullyQualifiedErrorId : C:\WINDOWS\System32\wsl.exe exited with code 1. ok  	github.com/ChinaKai/AHA2/cmd/aha	1. 
+   200s
+?   	github.com/ChinaKai/AHA2/cmd/aha-sync	[no test files]
+?   	github.com/ChinaKai/AHA2/cmd/aha-tray	[no test files]
+ok  	github.com/ChinaKai/AHA2/internal/agentapi	(cached)
+--- FAIL: TestMultiAgentRoundCreatesIntegrationTurn (7.30s)
+        service_test.go:1203: task did not reach waiting_user: domain.Task{ID:"task_500d04c0a24dc7248280", Code:"task- 
+   001", ProjectID:"project-agents", WorkspaceID:"workspace-agents", Title:"agents", OriginalRequest:"coordinate agen  
+  ts", CurrentGoal:"coordinate agents", Status:"active", TargetBranch:"", BaseCommit:"", TaskBranch:"", Isolation:"i   
+ nplace", WorktreeDir:"", TaskWorkspacePath:"", RuntimeConfigSnapshotID:"runtime_f6b7eff00bd8f43d171a", Collaborati    
+onMode:"auto", MaxAgents:3, KnowledgePolicy:"inherit", SkillIDs:[]string{}, AgentCapabilities:map[string]bool{}, M    C
+PServerIDs:[]string{}, TotalTokens:0, CreatedAt:time.Date(2026, time.October, 30, 7, 21, 55, 644409589, time.UTC)    , 
+UpdatedAt:time.Date(2026, time.October, 30, 7, 21, 55, 648176005, time.UTC), CompletedAt:time.Date(1, time.Janua    ry,
+ 1, 0, 0, 0, 0, time.UTC), OwnerDeviceID:"", ReadOnly:false, ReadOnlyReason:"", ChannelInstanceID:"", ChannelRe    tire
+d:false}
+--- FAIL: TestMultiAgentInlineWaitKeepsMainInOneTurn (7.34s)
+        service_test.go:1477: task did not reach waiting_user: domain.Task{ID:"task_bfab72490cfb4a363f25", Code:"task- 
+   001", ProjectID:"project-inline-agents", WorkspaceID:"workspace-inline-agents", Title:"inline agents", OriginalReq  
+  uest:"coordinate inline agents", CurrentGoal:"coordinate inline agents", Status:"active", TargetBranch:"", BaseCom   
+ mit:"", TaskBranch:"", Isolation:"inplace", WorktreeDir:"", TaskWorkspacePath:"", RuntimeConfigSnapshotID:"runtime    
+_fbdafb5e662d5d467078", CollaborationMode:"auto", MaxAgents:3, KnowledgePolicy:"inherit", SkillIDs:[]string{}, Age    n
+tCapabilities:map[string]bool{}, MCPServerIDs:[]string{}, TotalTokens:0, CreatedAt:time.Date(2026, time.October,     30
+, 7, 21, 55, 642377767, time.UTC), UpdatedAt:time.Date(2026, time.October, 30, 7, 21, 55, 646438931, time.UTC),     Com
+pletedAt:time.Date(1, time.January, 1, 0, 0, 0, 0, time.UTC), OwnerDeviceID:"", ReadOnly:false, ReadOnlyReason:    "", 
+ChannelInstanceID:"", ChannelRetired:false}
+FAIL
+FAIL	github.com/ChinaKai/AHA2/internal/app	38.854s
+ok  	github.com/ChinaKai/AHA2/internal/auth	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/backend	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/centersync	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/channel	13.090s
+ok  	github.com/ChinaKai/AHA2/internal/codexaccount	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/configimport	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/desktop	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/domain	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/execution	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/gateway	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/hardware	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/httpapi	83.949s
+ok  	github.com/ChinaKai/AHA2/internal/legacyimport	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/managedprocess	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/outboundproxy	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/prompt	5.548s
+ok  	github.com/ChinaKai/AHA2/internal/proxyconfig	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/secrets	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/store	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/sync	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/tray	(cached)
+?   	github.com/ChinaKai/AHA2/internal/webassets	[no test files]
+ok  	github.com/ChinaKai/AHA2/internal/workspace	(cached)
+?   	github.com/ChinaKai/AHA2/tmp/db-inspect	[no test files]
+?   	github.com/ChinaKai/AHA2/tmp/diag-modeldetect	[no test files]
+?   	github.com/ChinaKai/AHA2/tmp/probe-direct	[no test files]
+?   	github.com/ChinaKai/AHA2/tmp/provider-probe	[no test files]
+?   	github.com/ChinaKai/AHA2/tmp/session-debug	[no test files]
+?   	github.com/ChinaKai/AHA2/tmp/sync-diag	[no test files]
+?   	github.com/ChinaKai/AHA2/tmp/winprobe	[no test files]
+FAIL
+ 

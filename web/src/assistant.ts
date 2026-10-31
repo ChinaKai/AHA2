@@ -96,7 +96,6 @@ let petBrainInFlight = false;
 let speechTimer = 0;
 let speechTypeTimer = 0;
 let speechPageTimer = 0;
-let bubbleEnabled = true;
 let petFrozen = false;
 let actionMoveUntil = 0;
 const toolEventsByMessage = new Map<string, AssistantToolEvent[]>();
@@ -108,7 +107,6 @@ let typingMessageID = "";
 let messageTypeTimer = 0;
 let settingsPanel: HTMLElement;
 let settingsEnabled: HTMLInputElement;
-let settingsBubble: HTMLInputElement;
 let thinkingEl: HTMLElement;
 let panelThinkingEl: HTMLElement;
 let settingsIdleMinutes: HTMLInputElement;
@@ -120,6 +118,14 @@ let settingsCharacters: HTMLElement;
 let settingsChatModel: HTMLSelectElement;
 let settingsBrainStatus: HTMLElement;
 let settingsError: HTMLElement;
+let settingsAllowViewTasks: HTMLInputElement;
+let settingsAllowCreateTasks: HTMLInputElement;
+let settingsAllowCreateWorkspaces: HTMLInputElement;
+let settingsAllowMessageTasks: HTMLInputElement;
+let settingsAllowManageModels: HTMLInputElement;
+let settingsAllowManageKnowledge: HTMLInputElement;
+let settingsAllowManageChannels: HTMLInputElement;
+let settingsAllowManageSystem: HTMLInputElement;
 let currentMotionName: MotionName = "idle";
 let facing = 1;
 let motionIdleTimer = 0;
@@ -190,7 +196,6 @@ export function mountAssistant(): void {
         </header>
         <div class="assistant-settings-body">
           <label class="assistant-settings-switch"><input type="checkbox" id="pet-enabled"><span><b>启用宠物</b><small>关闭后隐藏宠物、停止自主思考和主动气泡</small></span></label>
-          <label class="assistant-settings-switch"><input type="checkbox" id="pet-bubble-enabled"><span><b>显示说话气泡</b><small>关闭后宠物仍会思考，但不再显示文字</small></span></label>
           <section><h3>自主行为</h3>
             <div class="pet-budget-grid">
               <label class="assistant-settings-field">空闲触发（分钟）<input id="pet-idle-minutes" type="number" min="1" max="120"></label>
@@ -202,6 +207,17 @@ export function mountAssistant(): void {
           </section>
           <section><h3>形象</h3><div id="pet-character-options" class="pet-character-options"></div></section>
           <section><h3>自主行为</h3><div id="pet-brain-status" class="assistant-settings-note">正在读取…</div><button type="button" id="pet-brain-trigger" class="assistant-settings-trigger">立即触发一次自主行为</button></section>
+          <section><h3>权限</h3>
+            <label class="assistant-settings-switch"><input type="checkbox" id="pet-allow-view-tasks"><span><b>查看其他任务信息</b><small>只读巡检；关闭后只能看到汇总数量</small></span></label>
+            <label class="assistant-settings-switch"><input type="checkbox" id="pet-allow-create-tasks"><span><b>主动创建/管理任务</b><small>创建、启动、完成、重开、中断和修改普通 AHA Task</small></span></label>
+            <label class="assistant-settings-switch"><input type="checkbox" id="pet-allow-create-workspaces"><span><b>主动管理项目/Workspace</b><small>创建、修改、删除和检测本地项目及 Workspace</small></span></label>
+            <label class="assistant-settings-switch"><input type="checkbox" id="pet-allow-message-tasks"><span><b>给其他任务发消息</b><small>内部消息显示为 pet；对外渠道仍需审批</small></span></label>
+            <label class="assistant-settings-switch"><input type="checkbox" id="pet-allow-manage-models"><span><b>管理模型/Provider</b><small>创建、修改、删除模型/Provider/Env Group；不读取凭据值</small></span></label>
+            <label class="assistant-settings-switch"><input type="checkbox" id="pet-allow-manage-knowledge"><span><b>管理知识/Skill/Prompt</b><small>提交知识候选、维护 Skill、读取 Prompt；Prompt 修改和删除需要审批</small></span></label>
+            <label class="assistant-settings-switch"><input type="checkbox" id="pet-allow-manage-channels"><span><b>管理渠道</b><small>查看渠道实例、目的地和联系人；对外发送需要审批</small></span></label>
+            <label class="assistant-settings-switch"><input type="checkbox" id="pet-allow-manage-system"><span><b>管理系统设置</b><small>查看安全/代理设置；安全设置修改需要审批</small></span></label>
+            <p class="assistant-settings-note">权限变更立即生效，不重置会话；无权限的工具调用会被服务端拒绝。删除 Task/项目/Workspace 会先创建审批，主人批准后才执行。</p>
+          </section>
           <section><h3>模型</h3>
             <label class="assistant-settings-field">宠物模型（聊天 + 自主行为）<select id="pet-chat-model"></select></label>
           </section>
@@ -228,7 +244,6 @@ export function mountAssistant(): void {
   motionOptions = layer.querySelector<HTMLElement>("#assistant-motion-options")!;
   settingsPanel = layer.querySelector<HTMLElement>("#assistant-settings")!;
   settingsEnabled = layer.querySelector<HTMLInputElement>("#pet-enabled")!;
-  settingsBubble = layer.querySelector<HTMLInputElement>("#pet-bubble-enabled")!;
   thinkingEl = layer.querySelector<HTMLElement>("#assistant-thinking")!;
   panelThinkingEl = layer.querySelector<HTMLElement>("#assistant-panel-thinking")!;
   settingsIdleMinutes = layer.querySelector<HTMLInputElement>("#pet-idle-minutes")!;
@@ -240,6 +255,14 @@ export function mountAssistant(): void {
   settingsChatModel = layer.querySelector<HTMLSelectElement>("#pet-chat-model")!;
   settingsBrainStatus = layer.querySelector<HTMLElement>("#pet-brain-status")!;
   settingsError = layer.querySelector<HTMLElement>("#pet-settings-error")!;
+  settingsAllowViewTasks = layer.querySelector<HTMLInputElement>("#pet-allow-view-tasks")!;
+  settingsAllowCreateTasks = layer.querySelector<HTMLInputElement>("#pet-allow-create-tasks")!;
+  settingsAllowCreateWorkspaces = layer.querySelector<HTMLInputElement>("#pet-allow-create-workspaces")!;
+  settingsAllowMessageTasks = layer.querySelector<HTMLInputElement>("#pet-allow-message-tasks")!;
+  settingsAllowManageModels = layer.querySelector<HTMLInputElement>("#pet-allow-manage-models")!;
+  settingsAllowManageKnowledge = layer.querySelector<HTMLInputElement>("#pet-allow-manage-knowledge")!;
+  settingsAllowManageChannels = layer.querySelector<HTMLInputElement>("#pet-allow-manage-channels")!;
+  settingsAllowManageSystem = layer.querySelector<HTMLInputElement>("#pet-allow-manage-system")!;
   trailLayer = layer.querySelector<HTMLElement>("#assistant-trail")!;
   trailLayer.style.zIndex = "9";
   bubble = layer.querySelector<HTMLDivElement>("#assistant-bubble")!;
@@ -262,7 +285,6 @@ export function mountAssistant(): void {
   renderCharacterMenu();
   renderMotionMenu();
   bindEvents();
-  try { bubbleEnabled = localStorage.getItem("aha2.pet.bubble.v1") !== "0"; } catch {}
   void refreshPetState();
   // Pet events arrive on the page's single global event stream; see handlePetStreamEvent.
   // Autonomy is scheduled by the server; the UI only exposes a manual kick.
@@ -587,7 +609,6 @@ function restoreLocalPetPosition(): void {
 function renderPetSettings(): void {
   if (!view) return;
   settingsEnabled.checked = Boolean(view.assistant.pet_enabled);
-  settingsBubble.checked = bubbleEnabled;
   settingsCharacters.innerHTML = ASSISTANT_CHARACTERS.map(character => `<button type="button" class="pet-character-option ${character.id === view!.assistant.character ? "active" : ""}" data-pet-character="${escapeHTML(character.id)}">
     <span class="assistant-character-preview">${characterMarkup(character)}</span>
     <strong>${escapeHTML(character.nickname)}</strong>
@@ -600,6 +621,14 @@ function renderPetSettings(): void {
   settingsQuietEnd.disabled = !settingsQuietEnabled.checked;
   settingsQuietStart.value = String(view.assistant.pet_quiet_start ?? 23);
   settingsQuietEnd.value = String(view.assistant.pet_quiet_end ?? 8);
+  settingsAllowViewTasks.checked = view.assistant.pet_allow_view_tasks !== false;
+  settingsAllowCreateTasks.checked = Boolean(view.assistant.pet_allow_create_tasks);
+  settingsAllowCreateWorkspaces.checked = Boolean(view.assistant.pet_allow_create_workspaces);
+  settingsAllowMessageTasks.checked = Boolean(view.assistant.pet_allow_message_tasks);
+  settingsAllowManageModels.checked = Boolean(view.assistant.pet_allow_manage_models);
+  settingsAllowManageKnowledge.checked = Boolean(view.assistant.pet_allow_manage_knowledge);
+  settingsAllowManageChannels.checked = Boolean(view.assistant.pet_allow_manage_channels);
+  settingsAllowManageSystem.checked = Boolean(view.assistant.pet_allow_manage_system);
   const idleMs = Math.max(1, Number(view.assistant.pet_idle_minutes) || 5) * 60_000;
   const serverLast = Date.parse(view.pet_last_brain_at || "");
   const last = serverLast || lastPetBrain || storedBrainLast();
@@ -666,11 +695,10 @@ function applyPetEnabled(enabled: boolean): void {
 
 async function savePetSettings(): Promise<void> {
   if (!view) return;
+  const inline = settingsPanel.classList.contains("assistant-settings-inline");
   const character = settingsCharacters.querySelector<HTMLElement>(".active")?.dataset.petCharacter || view.assistant.character;
   const actions = ["walk", "jump", "happy", "angry"];
   const enabled = settingsEnabled.checked;
-  bubbleEnabled = settingsBubble.checked;
-  try { localStorage.setItem("aha2.pet.bubble.v1", bubbleEnabled ? "1" : "0"); } catch {}
   settingsError.hidden = true;
   try {
     const result = await api.updatePetSettings({
@@ -681,6 +709,14 @@ async function savePetSettings(): Promise<void> {
       quiet_enabled: settingsQuietEnabled.checked,
       quiet_start: Number(settingsQuietStart.value),
       quiet_end: Number(settingsQuietEnd.value),
+      allow_view_tasks: settingsAllowViewTasks.checked,
+      allow_create_tasks: settingsAllowCreateTasks.checked,
+      allow_create_workspaces: settingsAllowCreateWorkspaces.checked,
+      allow_message_tasks: settingsAllowMessageTasks.checked,
+      allow_manage_models: settingsAllowManageModels.checked,
+      allow_manage_knowledge: settingsAllowManageKnowledge.checked,
+      allow_manage_channels: settingsAllowManageChannels.checked,
+      allow_manage_system: settingsAllowManageSystem.checked,
     });
     view = {...view, assistant: result.assistant, models: result.models || view.models, model_name: result.model_name ?? view.model_name, brain_model_name: result.brain_model_name ?? view.brain_model_name};
     rememberCharacter(view.assistant.character);
@@ -688,8 +724,12 @@ async function savePetSettings(): Promise<void> {
     markCharacterReady();
     renderModel();
     applyPetEnabled(result.assistant.pet_enabled);
-    closePetSettings();
-    window.dispatchEvent(new CustomEvent("aha:open-advanced"));
+    if (inline) {
+      renderPetSettings();
+    } else {
+      closePetSettings();
+      window.dispatchEvent(new CustomEvent("aha:open-advanced"));
+    }
     characterButton.title = "宠物设置";
   } catch (error) {
     settingsError.textContent = error instanceof Error ? error.message : String(error);
@@ -882,7 +922,7 @@ function clearSpeechTimers(): void {
 }
 
 function showPetSpeech(text: string, options: {holdMs?: number; fade?: boolean} = {}): void {
-  if (!bubble || panelOpen || !bubbleEnabled || !text) return;
+  if (!bubble || panelOpen || !text) return;
   clearSpeechTimers();
   setPetFrozen(true);
   activeHint = null;

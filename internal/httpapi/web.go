@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"path"
 	"strings"
+
+	"github.com/ChinaKai/AHA2/internal/domain"
 )
 
 func (s *Server) serveWeb(writer http.ResponseWriter, request *http.Request) {
@@ -29,6 +31,9 @@ func (s *Server) serveWeb(writer http.ResponseWriter, request *http.Request) {
 	if err != nil {
 		http.NotFound(writer, request)
 		return
+	}
+	if requestPath == "index.html" {
+		data = s.localizeIndex(data, request)
 	}
 	if contentType := mime.TypeByExtension(path.Ext(requestPath)); contentType != "" {
 		writer.Header().Set("Content-Type", contentType)
@@ -67,6 +72,32 @@ func (s *Server) serveWeb(writer http.ResponseWriter, request *http.Request) {
 	}
 	writer.WriteHeader(http.StatusOK)
 	_, _ = writer.Write(responseData)
+}
+
+// localizeIndex aligns the first HTML paint with the owner's saved language.
+// The boot card itself is language-neutral (logo plus spinner), but the html
+// lang attribute and any surrounding text should not wait for the Web bundle to
+// fetch general settings.
+func (s *Server) localizeIndex(data []byte, request *http.Request) []byte {
+	if s.store == nil {
+		return data
+	}
+	settings, err := s.store.GeneralSettings(request.Context())
+	if err != nil {
+		return data
+	}
+	language := domain.NormalizeLanguage(settings.Language)
+	if language == domain.LanguageAuto {
+		if strings.Contains(strings.ToLower(request.Header.Get("Accept-Language")), "zh") {
+			language = domain.LanguageSimplified
+		} else {
+			language = domain.LanguageEnglish
+		}
+	}
+	if language != domain.LanguageEnglish {
+		return data
+	}
+	return bytes.ReplaceAll(data, []byte(`<html lang="zh-CN">`), []byte(`<html lang="en-US">`))
 }
 
 func acceptsGzip(request *http.Request) bool {

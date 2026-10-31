@@ -4,6 +4,7 @@ import {renderConversationList} from "./conversation_ui.js";
 import {bindCodexAccounts, renderCodexAccounts} from "./codex_accounts.js";
 import {bindChannels, exportRetiredChannelInstance, purgeRetiredChannelInstance, renderChannels} from "./channels.js";
 import {icon} from "./icons.js";
+import {applyLocale, normalizeLanguagePreference, startUITranslationObserver, t, translateUI} from "./i18n.js";
 import {bindKnowledgeWorkspace, renderKnowledgeWorkspace} from "./knowledge_workspace.js";
 import {bindHardwarePanel, refreshHardwarePanel, stopHardwarePanel} from "./hardware_panel.js";
 import {bindHardwareResources, renderHardwareResources} from "./hardware_resources.js";
@@ -47,8 +48,10 @@ import type {
   ChannelTaskRoute,
   ConversationCategory,
   ConversationItem,
+  DataInventory,
   DetectedModel,
   EnvGroup,
+  GeneralSettings,
   HardwareResource,
   Knowledge,
   KnowledgeLibrary,
@@ -74,7 +77,7 @@ import type {
   TaskFacetCounts,
   Workspace,
 } from "./types.js";
-type View = "projects" | "channels" | "models" | "hardware" | "tasks" | "knowledge" | "prompts" | "proxy" | "sync" | "advanced" | "other" | "mcp" | "pet-settings" | "pet-diary";
+type View = "projects" | "channels" | "models" | "hardware" | "tasks" | "knowledge" | "prompts" | "proxy" | "sync" | "advanced" | "data" | "other" | "mcp" | "pet-settings" | "pet-diary";
 type ResourceKey = "projects" | "workspaces" | "tasks" | "system" | "providers" | "models" | "env" | "accounts" | "skills" | "channels" | "hardware" | "knowledge" | "proxy" | "advanced" | "sync" | "prompts";
 type TaskFilterKind = "project" | "status" | "device";
 interface ResourceState {loading: boolean; loaded: boolean; error: string; updatedAt: number}
@@ -99,6 +102,10 @@ interface State {
   networkSettings: NetworkSettings;
   agentAPISettings: AgentAPISettings;
 	backendSettings: BackendSettings;
+  generalSettings: GeneralSettings;
+  dataInventory: DataInventory | null;
+  dataInventoryLoading: boolean;
+  dataInventoryError: string;
   syncSettings: SyncSettings;
   syncSettingsReady: boolean;
   syncState: SyncState;
@@ -260,6 +267,10 @@ const state: State = {
   networkSettings: {listen_address: "", startup_listen_address: "", restart_required: false},
   agentAPISettings: {url: "", allow_insecure: false, effective_url: "http://127.0.0.1:8766", effective_allow_insecure: false},
 	backendSettings: {idle_timeout_seconds: 10 * 60, turn_timeout_seconds: 10 * 60 * 60},
+  generalSettings: {language: "auto"},
+  dataInventory: null,
+  dataInventoryLoading: false,
+  dataInventoryError: "",
   syncSettings: {scope:"default",enabled:false,endpoint:"",device_id:"",device_name:"",interval_seconds:300,token_configured:false,passphrase_configured:false},
   syncSettingsReady: false,
   syncState: {scope:"default",cursor:"",last_error:""},
@@ -319,7 +330,9 @@ const state: State = {
   sidebarMemoColor: savedSidebarSettings.memoColor,
 };
 
+applyLocale("auto");
 const app = document.querySelector<HTMLDivElement>("#app");
+let petWorkbenchTab = "diary";
 let events: EventSource | null = null;
 let taskRefreshTimer: number | null = null;
 let taskClockFrame: number | null = null;
@@ -355,8 +368,6 @@ let listRefreshInFlight = false;
 let listRefreshQueued = false;
 let authRecoveryOpen = false;
 let messageSubmitPending = false;
-let ownerAvatarClicks = 0;
-let ownerAvatarResetTimer = 0;
 let navigationRestoring = true;
 let taskOpenVersion = 0;
 let taskChannelLoadVersion = 0;
@@ -410,6 +421,7 @@ function resourcesForView(view: View): ResourceKey[] {
     case "proxy": return ["proxy"];
     case "sync": return ["sync"];
     case "advanced": return ["advanced"];
+    case "data": return [];
     case "mcp": return [];
     case "other": return ["advanced"];
     case "pet-settings": return ["advanced"];
@@ -1035,13 +1047,18 @@ async function runWithFeedback(
 
 async function bootstrap(): Promise<void> {
   const savedNavigation = loadNavigationSnapshot();
-  if (["projects", "channels", "models", "tasks", "knowledge", "prompts", "proxy", "sync", "advanced", "mcp", "other", "pet-diary", "pet-settings"].includes(savedNavigation.view || "")) {
+  if (["projects", "channels", "models", "tasks", "knowledge", "prompts", "proxy", "sync", "advanced", "data", "mcp", "other", "pet-diary", "pet-settings"].includes(savedNavigation.view || "")) {
     state.view = savedNavigation.view as View;
   }
   try {
     state.auth = await api.authStatus();
     api.setCSRF(state.auth.csrf_token);
     if (state.auth.authenticated) {
+      const general = await api.generalSettings().catch(() => null);
+      if (general?.general) {
+        state.generalSettings = general.general;
+        applyLocale(general.general.language);
+      }
       state.loading = false;
       state.hydrating = true;
       render();
@@ -1559,6 +1576,7 @@ async function ensureViewData(view: View, force = false): Promise<void> {
     if (backend.backend) state.backendSettings = backend.backend;
     if (network.network) state.networkSettings = network.network;
   }));
+  if (view === "data") jobs.push(loadDataInventory(force));
   if (view === "sync") jobs.push(loadResource("sync", force, async () => {
     const [settings, status, conflicts] = await Promise.all([api.syncSettings(), api.syncStatus(), api.syncConflicts()]);
     state.syncSettings = settings.sync;
@@ -1572,6 +1590,19 @@ async function ensureViewData(view: View, force = false): Promise<void> {
   }));
   if (view === "prompts") jobs.push(loadResource("prompts", force, loadPromptCatalog));
   await Promise.all(jobs);
+}
+
+async function loadDataInventory(_force = false): Promise<void> {
+  state.dataInventoryLoading = true;
+  state.dataInventoryError = "";
+  try {
+    const result = await api.dataInventory();
+    state.dataInventory = result.inventory;
+  } catch (error) {
+    state.dataInventoryError = error instanceof Error ? error.message : String(error);
+  } finally {
+    state.dataInventoryLoading = false;
+  }
 }
 
 function prefetchSecondaryData(): void {
@@ -1619,10 +1650,10 @@ function syncVisualViewportHeight(): void {
 
 function authErrorMessage(error: unknown, fallback: string): string {
   const typed = error as Error & {code?: string};
-  if (typed.code === "recovery_failed") return "Setup Token 或账号不正确，请使用实际数据目录中的 setup-token";
-  if (typed.code === "invalid_current_password") return "当前密码不正确";
-  if (typed.code === "invalid_new_password") return "新密码至少需要 10 个字符";
-  if (typed.code === "auth_rate_limited") return "尝试次数过多，请稍后再试";
+  if (typed.code === "recovery_failed") return t("login.recoveryFailed");
+  if (typed.code === "invalid_current_password") return t("login.invalidCurrentPassword");
+  if (typed.code === "invalid_new_password") return t("login.invalidNewPassword");
+  if (typed.code === "auth_rate_limited") return t("login.rateLimited");
   return error instanceof Error ? error.message : fallback;
 }
 
@@ -1680,10 +1711,10 @@ function sidebarMemoItemsHTML(): string {
   const items = state.sidebarMemoItems.length ? state.sidebarMemoItems : [newSidebarMemoItem()];
   return `<div class="sidebar-memo-list">${items.map(item => `<div class="sidebar-memo-item ${item.done ? "done" : ""} ${item.text ? "" : "sidebar-memo-empty"}" data-sidebar-memo-item="${escapeHTML(item.id)}">
     <input type="checkbox" data-sidebar-memo-done="${escapeHTML(item.id)}" ${item.done ? "checked" : ""} aria-label="标记完成">
-    <button type="button" class="sidebar-memo-preview" data-sidebar-memo-edit="${escapeHTML(item.id)}" aria-label="编辑备忘"><span class="sidebar-memo-preview-text">${escapeHTML(item.text || "写下备忘")}</span></button>
-    <textarea data-sidebar-memo-text="${escapeHTML(item.id)}" placeholder="写下备忘" maxlength="${SIDEBAR_MEMO_MAX_LENGTH}" rows="1" aria-label="编辑备忘">${escapeHTML(item.text)}</textarea>
+    <button type="button" class="sidebar-memo-preview" data-sidebar-memo-edit="${escapeHTML(item.id)}" aria-label="编辑备忘"><span class="sidebar-memo-preview-text">${escapeHTML(item.text || t("sidebar.notesPlaceholder"))}</span></button>
+    <textarea data-sidebar-memo-text="${escapeHTML(item.id)}" placeholder="${t("sidebar.notesPlaceholder")}" maxlength="${SIDEBAR_MEMO_MAX_LENGTH}" rows="1" aria-label="编辑备忘">${escapeHTML(item.text)}</textarea>
     <div class="sidebar-memo-actions"><button type="button" class="icon-button sidebar-memo-task" data-sidebar-memo-task="${escapeHTML(item.id)}" title="用这条便签创建任务" aria-label="用这条便签创建任务">${icon("tasks")}</button><button type="button" class="icon-button" data-sidebar-memo-remove="${escapeHTML(item.id)}" title="删除事项" aria-label="删除事项">${icon("close")}</button></div>
-  </div>`).join("")}</div><button type="button" class="sidebar-memo-add" id="add-sidebar-memo-item">${icon("plus")}添加事项</button>`;
+  </div>`).join("")}</div><button type="button" class="sidebar-memo-add" id="add-sidebar-memo-item">${icon("plus")}${t("sidebar.addItem")}</button>`;
 }
 
 // The first line becomes the Task title so the create form is immediately
@@ -1767,7 +1798,7 @@ function bindSidebarMemoItems(root: HTMLElement): void {
     item.text = input.value.slice(0, SIDEBAR_MEMO_MAX_LENGTH);
     const row = input.closest<HTMLElement>(".sidebar-memo-item");
     const preview = row?.querySelector<HTMLElement>(".sidebar-memo-preview-text");
-    if (preview) preview.textContent = item.text || "写下备忘";
+    if (preview) preview.textContent = item.text || t("sidebar.notesPlaceholder");
     row?.classList.toggle("sidebar-memo-empty", !item.text);
     fitSidebarMemoTextarea(input);
     scheduleSidebarMemoSave();
@@ -2301,29 +2332,29 @@ function loginView(): string {
   const recovery = !register && authRecoveryOpen;
   return `<div class="login-layout">
     <aside class="login-brand">
-      <div class="brand-lockup"><span class="brand-mark">A</span><strong>AHA</strong></div>
-      <p>以项目为基础，以任务为核心，通过知识闭环持续成长的个人 AI 工作流。</p>
-      <div class="secure-note">${icon("shield")}<span>公网访问 · 所有业务操作均需认证</span></div>
+      <div class="brand-lockup"><span class="brand-mark"><img src="/assets/aha-logo.svg" alt=""></span><strong>AHA</strong></div>
+      <p>${t("login.tagline")}</p>
+      <div class="secure-note">${icon("shield")}<span>${t("login.secure")}</span></div>
     </aside>
     <main class="login-main">
       ${recovery ? `<form id="password-recovery-form" class="auth-form">
-        <h1>找回密码</h1>
-        <p>使用安装时选择的数据目录中的 setup-token，不是程序安装目录；修改或恢复该文件后需重启 AHA2。重置后其他登录会话将失效。</p>
-        <label>账号<input name="username" value="${escapeHTML(state.auth?.username || "owner")}" autocomplete="username" required></label>
-        <label>Setup Token<input name="setup_token" type="password" autocomplete="one-time-code" required></label>
-        <label>新密码<input name="new_password" type="password" autocomplete="new-password" minlength="10" required></label>
-        <label>确认新密码<input name="confirm_password" type="password" autocomplete="new-password" minlength="10" required></label>
-        <button class="primary full" type="submit">重置并登录</button>
-        <button id="back-to-login" class="auth-link" type="button">返回登录</button>
+        <h1>${t("login.recoveryTitle")}</h1>
+        <p>${t("login.recoveryIntro")}</p>
+        <label>${t("login.account")}<input name="username" value="${escapeHTML(state.auth?.username || "owner")}" autocomplete="username" required></label>
+        <label>${t("login.setupToken")}<input name="setup_token" type="password" autocomplete="one-time-code" required></label>
+        <label>${t("login.newPassword")}<input name="new_password" type="password" autocomplete="new-password" minlength="10" required></label>
+        <label>${t("login.confirmPassword")}<input name="confirm_password" type="password" autocomplete="new-password" minlength="10" required></label>
+        <button class="primary full" type="submit">${t("login.resetLogin")}</button>
+        <button id="back-to-login" class="auth-link" type="button">${t("login.backLogin")}</button>
         ${state.error ? `<div class="form-error">${escapeHTML(state.error)}</div>` : ""}
       </form>` : `<form id="auth-form" class="auth-form">
-        <h1>${register ? "初始化 Owner" : "登录"}</h1>
-        <p>${register ? "创建唯一 Owner 后将关闭公开注册" : "进入项目、任务与知识工作区"}</p>
-        ${register ? `<label>Setup Token<input name="setup_token" autocomplete="one-time-code" required></label>` : ""}
-        <label>账号<input name="username" value="owner" autocomplete="username" required></label>
-        <label>密码<input name="password" type="password" autocomplete="${register ? "new-password" : "current-password"}" minlength="10" required></label>
-        <button class="primary full" type="submit">${register ? "创建 Owner" : "登录"}</button>
-        ${register ? "" : `<button id="forgot-password" class="auth-link" type="button">忘记密码？</button>`}
+        <h1>${register ? t("login.initOwner") : t("login.login")}</h1>
+        <p>${register ? t("login.initIntro") : t("login.loginIntro")}</p>
+        ${register ? `<label>${t("login.setupToken")}<input name="setup_token" autocomplete="one-time-code" required></label>` : ""}
+        <label>${t("login.account")}<input name="username" value="owner" autocomplete="username" required></label>
+        <label>${t("login.password")}<input name="password" type="password" autocomplete="${register ? "new-password" : "current-password"}" minlength="10" required></label>
+        <button class="primary full" type="submit">${register ? t("login.createOwner") : t("login.login")}</button>
+        ${register ? "" : `<button id="forgot-password" class="auth-link" type="button">${t("login.forgot")}</button>`}
         ${state.error ? `<div class="form-error">${escapeHTML(state.error)}</div>` : ""}
       </form>`}
     </main>
@@ -2332,30 +2363,30 @@ function loginView(): string {
 
 function shell(content: string): string {
   const nav = [
-    ["projects", "projects", "项目"],
-    ["tasks", "tasks", "任务"],
-    ["channels", "bot", "渠道"],
-    ["knowledge", "knowledge", "知识库"],
-    ["models", "model", "模型"],
-    ["hardware", "hardware", "硬件资源"],
+    ["projects", "projects", "nav.projects"],
+    ["tasks", "tasks", "nav.tasks"],
+    ["channels", "bot", "nav.channels"],
+    ["knowledge", "knowledge", "nav.knowledge"],
+    ["models", "model", "nav.models"],
+    ["hardware", "hardware", "nav.hardware"],
   ] as const;
-  const mobileNav = [...nav.slice(0, 6), ["advanced", "shield", "高级"] as const];
+  const mobileNav = [...nav.slice(0, 6), ["advanced", "settings", "nav.advanced"] as const];
   return `<div class="app-shell">
     <aside class="sidebar">
-      <div class="brand-lockup"><span class="brand-mark">A</span><div><strong>AHA</strong><small>个人 AI 工作流</small></div></div>
-      <nav>${nav.map(([view, glyph, label]) => `<button data-view="${view}" class="${state.view === view ? "active" : ""}">${icon(glyph)}<span>${label}</span></button>`).join("")}</nav>
+      <div class="brand-lockup"><span class="brand-mark"><img src="/assets/aha-logo.svg" alt=""></span><div><strong>AHA</strong><small>${t("brand.tagline")}</small></div></div>
+      <nav>${nav.map(([view, glyph, label]) => `<button data-view="${view}" class="${state.view === view ? "active" : ""}">${icon(glyph)}<span>${t(label)}</span></button>`).join("")}</nav>
       <section class="sidebar-memo ${state.sidebarMemoCollapsed ? "collapsed" : ""}">
         <header><strong>${icon("edit")}便签</strong><button id="toggle-sidebar-memo" class="icon-button" type="button" aria-label="${state.sidebarMemoCollapsed ? "展开便签" : "折叠便签"}" title="${state.sidebarMemoCollapsed ? "展开便签" : "折叠便签"}">${icon(state.sidebarMemoCollapsed ? "chevron-up" : "chevron-down")}</button></header>
         <div class="sidebar-memo-colors" role="group" aria-label="便签背景颜色">${Object.entries(SIDEBAR_MEMO_COLORS).map(([id, color]) => `<button type="button" class="sidebar-memo-swatch ${state.sidebarMemoColor === id ? "active" : ""}" data-sidebar-memo-color="${id}" aria-label="${color.label}" title="${color.label}" style="--swatch-color:${color.surface}"></button>`).join("")}</div>
         <div class="sidebar-memo-body">${sidebarMemoItemsHTML()}<small id="sidebar-memo-status">已保存</small></div>
       </section>
       <div class="system-meta"><span>AHA2 ${escapeHTML(state.system.web_version || state.system.version || "dev")}</span><span id="system-uptime">${systemUptimeText()}</span></div>
-      <div class="owner-block"><button id="owner-avatar" class="avatar" type="button" title="Owner">O</button><div><strong>${escapeHTML(state.auth?.username || "Owner")}</strong><small>已安全登录</small></div><button id="logout" class="icon-button" title="退出">${icon("logout")}</button></div>
+      <div class="owner-block"><button id="owner-avatar" class="avatar" type="button" title="Owner">O</button><div><strong>${escapeHTML(state.auth?.username || "Owner")}</strong><small>${t("owner.signedIn")}</small></div><div class="owner-actions"><button id="advanced-settings" class="icon-button" type="button" data-view="advanced" title="${t("owner.advanced")}" aria-label="${t("owner.advanced")}">${icon("settings")}</button><button id="logout" class="icon-button" title="${t("owner.logout")}">${icon("logout")}</button></div></div>
     </aside>
     <div id="sidebar-resizer" class="sidebar-resizer" role="separator" aria-label="调整侧栏宽度" aria-orientation="vertical" aria-valuemin="${SIDEBAR_MIN_WIDTH}" aria-valuemax="${SIDEBAR_MAX_WIDTH}" aria-valuenow="${state.sidebarWidth}" tabindex="0" title="拖动调整侧栏宽度，双击恢复默认"></div>
-    <header class="mobile-header"><div class="brand-lockup"><span class="brand-mark">A</span><strong>AHA</strong></div><button id="mobile-context" class="icon-button">${icon("menu")}</button></header>
+    <header class="mobile-header"><div class="brand-lockup"><span class="brand-mark"><img src="/assets/aha-logo.svg" alt=""></span><strong>AHA</strong></div><button id="mobile-context" class="icon-button">${icon("menu")}</button></header>
     <main class="workspace">${resourceStatusHTML()}${banner()}${content}</main>
-    <nav class="bottom-nav">${mobileNav.map(([view, glyph, label]) => `<button data-view="${view}" class="${state.view === view ? "active" : ""}">${icon(glyph)}<span>${label}</span></button>`).join("")}</nav>
+    <nav class="bottom-nav">${mobileNav.map(([view, glyph, label]) => `<button data-view="${view}" class="${state.view === view ? "active" : ""}">${icon(glyph)}<span>${t(label)}</span></button>`).join("")}</nav>
   </div>`;
 }
 
@@ -2367,18 +2398,19 @@ function banner(): string {
 function resourceStatusHTML(): string {
   const resources = resourcesForView(state.view);
   const failed = resources.filter(key => resourceStates[key].error);
-  if (failed.length) return `<div class="app-hydrating resource-error" role="alert"><span>部分数据加载失败，不影响其他区域。</span><button type="button" id="retry-view-data">重试</button></div>`;
+  if (failed.length) return `<div class="app-hydrating resource-error" role="alert"><span>${t("resource.partialFailure")}</span><button type="button" id="retry-view-data">${t("common.retry")}</button></div>`;
   return "";
 }
 
 function systemUptimeText(now = Date.now()): string {
   const started = Date.parse(state.system.started_at || "");
-  if (!Number.isFinite(started)) return "在线时间 —";
+  if (!Number.isFinite(started)) return t("uptime.unknown");
   const seconds = Math.max(0, Math.floor((now - started) / 1000));
   const days = Math.floor(seconds / 86400);
   const hours = Math.floor((seconds % 86400) / 3600);
   const minutes = Math.floor((seconds % 3600) / 60);
-  return `在线 ${days ? `${days}天 ` : ""}${hours ? `${hours}小时 ` : ""}${minutes}分`;
+  const value = `${days ? t("uptime.days", {count: days}) : ""}${hours ? t("uptime.hours", {count: hours}) : ""}${t("uptime.minutes", {count: minutes})}`;
+  return t("uptime.online", {value: value.trim()});
 }
 
 function updateSystemUptime(): void {
@@ -2468,27 +2500,141 @@ function modelsView(): string {
 }
 
 function advancedSettingsView(): string {
-  const origin = state.securitySettings;
-	const backendSettings = state.backendSettings;
-  const network = state.networkSettings;
-  const accessScope = origin.access_scope === "local" ? "local" : "lan";
-  const restartRequired = Boolean(network.restart_required);
-  const agentAPI = state.agentAPISettings;
-  const allowInsecureAgentAPI = Boolean(agentAPI.effective_allow_insecure);
-  const forcedInsecureAgentAPI = Boolean(agentAPI.startup_allow_insecure) && !agentAPI.url;
+  const language = normalizeLanguagePreference(state.generalSettings.language);
   return shell(`<section class="page advanced-settings-page">
-    <header class="page-head"><div><h1>高级设置</h1><p>管理 Backend、Owner 账号与本机恢复方式</p></div></header>
+    <header class="page-head"><div><h1>${t("advanced.title")}</h1><p>${t("advanced.subtitle")}</p></div></header>
+    <section class="panel language-settings-panel">
+      <div class="language-settings-copy">${icon("settings")}<div><strong>${t("language.title")}</strong><small>${t("language.desc")}</small></div></div>
+      <label class="language-settings-control"><span>${t("language.select")}</span><select id="language-setting">
+        <option value="auto" ${language === "auto" ? "selected" : ""}>${t("language.auto")}</option>
+        <option value="zh-CN" ${language === "zh-CN" ? "selected" : ""}>${t("language.zh")}</option>
+        <option value="en-US" ${language === "en-US" ? "selected" : ""}>${t("language.en")}</option>
+      </select></label>
+      <p class="field-help">${t("language.note")}</p>
+    </section>
     <section class="advanced-tools-grid">
-      <article class="panel advanced-tool-card"><div>${icon("bot")}<span><strong>提示词</strong><small>查看和维护 AHA2 的提示词模板</small></span></div><button type="button" data-view="prompts">进入提示词设置</button></article>
-      <article class="panel advanced-tool-card"><div>${icon("sync")}<span><strong>同步</strong><small>配置设备同步、检查差异与冲突</small></span></div><button type="button" data-view="sync">进入同步设置</button></article>
-      <article class="panel advanced-tool-card"><div>${icon("proxy")}<span><strong>代理</strong><small>管理订阅、节点和连接状态</small></span></div><button type="button" data-view="proxy">进入代理设置</button></article>
-      <article class="panel advanced-tool-card"><div>${icon("hardware")}<span><strong>硬件资源</strong><small>维护系统级串口、网络设备和登录凭据</small></span></div><button type="button" data-view="hardware">进入硬件资源</button></article>
-      <article class="panel advanced-tool-card"><div>${icon("bot")}<span><strong>宠物日记</strong><small>在线查看宠物写下的日记</small></span></div><button type="button" data-view="pet-diary">打开宠物日记</button></article>
-      <article class="panel advanced-tool-card"><div>${icon("bot")}<span><strong>宠物</strong><small>形象、动作、模型与自主行为开关</small></span></div><button type="button" data-pet-settings onclick="window.dispatchEvent(new CustomEvent('aha:pet-settings'))">打开宠物设置</button></article>
-      <article class="panel advanced-tool-card"><div>${icon("bot")}<span><strong>MCP</strong><small>管理 MCP 服务与工具开关</small></span></div><button type="button" data-view="mcp">进入 MCP</button></article>
-      <article class="panel advanced-tool-card"><div>${icon("shield")}<span><strong>其他设置</strong><small>Backend 超时、密码、访问范围、Agent API、监听地址、Origin 校验</small></span></div><button type="button" data-view="other">进入其他设置</button></article>
+      <article class="panel advanced-tool-card"><div>${icon("bot")}<span><strong>${t("advanced.prompts.title")}</strong><small>${t("advanced.prompts.desc")}</small></span></div><button type="button" data-view="prompts">${t("advanced.prompts.action")}</button></article>
+      <article class="panel advanced-tool-card"><div>${icon("sync")}<span><strong>${t("advanced.sync.title")}</strong><small>${t("advanced.sync.desc")}</small></span></div><button type="button" data-view="sync">${t("advanced.sync.action")}</button></article>
+      <article class="panel advanced-tool-card"><div>${icon("proxy")}<span><strong>${t("advanced.proxy.title")}</strong><small>${t("advanced.proxy.desc")}</small></span></div><button type="button" data-view="proxy">${t("advanced.proxy.action")}</button></article>
+      <article class="panel advanced-tool-card"><div>${icon("hardware")}<span><strong>${t("advanced.hardware.title")}</strong><small>${t("advanced.hardware.desc")}</small></span></div><button type="button" data-view="hardware">${t("advanced.hardware.action")}</button></article>
+      <article class="panel advanced-tool-card"><div>${icon("bot")}<span><strong>${t("advanced.pet.title")}</strong><small>${t("advanced.pet.desc")}</small></span></div><button type="button" data-view="pet-diary">${t("advanced.pet.action")}</button></article>
+      <article class="panel advanced-tool-card"><div>${icon("server")}<span><strong>${t("advanced.data.title")}</strong><small>${t("advanced.data.desc")}</small></span></div><button type="button" data-view="data">${t("advanced.data.action")}</button></article>
+      <article class="panel advanced-tool-card"><div>${icon("bot")}<span><strong>${t("advanced.mcp.title")}</strong><small>${t("advanced.mcp.desc")}</small></span></div><button type="button" data-view="mcp">${t("advanced.mcp.action")}</button></article>
+      <article class="panel advanced-tool-card"><div>${icon("shield")}<span><strong>${t("advanced.other.title")}</strong><small>${t("advanced.other.desc")}</small></span></div><button type="button" data-view="other">${t("advanced.other.action")}</button></article>
     </section>
   </section>`);
+}
+
+function formatDataSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit++;
+  }
+  return `${value >= 100 || unit === 0 ? Math.round(value) : value.toFixed(1)} ${units[unit]}`;
+}
+
+function dataCategoryText(category: {id: string; label: string; note?: string}, field: "label" | "note"): string {
+  const key = `data.category.${category.id}${field === "note" ? ".note" : ""}`;
+  const translated = t(key);
+  if (translated !== key) return translated;
+  return field === "note" ? (category.note || "") : category.label;
+}
+
+function dataManagementView(): string {
+  const inventory = state.dataInventory;
+  const rows = inventory
+    ? inventory.categories.map(category => {
+      const cleanup = category.id === "backups"
+        ? `<div class="data-cleanup-actions"><label>${t("data.keepRecent")} <input id="data-backup-keep" type="number" min="1" max="50" value="5" aria-label="${t("data.keepRecent")}"> ${t("data.copies")}</label><button type="button" data-data-cleanup="backups" ${category.bytes === 0 ? "disabled" : ""}>${t("data.cleanBackups")}</button></div>`
+        : category.id === "logs"
+          ? `<button type="button" data-data-cleanup="logs" ${category.bytes === 0 ? "disabled" : ""}>${t("data.cleanLogs")}</button>`
+          : `<span class="field-help">${t("common.readOnly")}</span>`;
+      const note = dataCategoryText(category, "note");
+      return `<tr>
+        <td><div class="data-category"><strong>${escapeHTML(dataCategoryText(category, "label"))}</strong>${note ? `<small class="field-help">${escapeHTML(note)}</small>` : ""}</div></td>
+        <td class="data-size">${formatDataSize(category.bytes)}</td>
+        <td>${cleanup}</td>
+      </tr>`;
+    }).join("")
+    : "";
+  return advancedSubview(`<section class="page data-management-page">
+    <header class="page-head"><div><h1>${t("data.title")}</h1><p>${t("data.subtitle")}</p></div><button type="button" data-data-refresh ${state.dataInventoryLoading ? "disabled" : ""}>${state.dataInventoryLoading ? `${icon("spinner", true)}${t("common.loading")}` : t("common.refresh")}</button></header>
+    ${state.dataInventoryError ? `<div class="security-warning active">${escapeHTML(state.dataInventoryError)}</div>` : ""}
+    <section class="panel data-summary">
+      <div><span class="field-help">${t("data.dataDir")}</span><code>${escapeHTML(inventory?.data_dir || t("common.loading"))}</code></div>
+      <strong>${inventory ? formatDataSize(inventory.total_bytes) : "—"}</strong>
+    </section>
+    <section class="panel spaced">
+      <div class="panel-head"><strong>${t("data.details")}</strong><small class="field-help">${t("data.detailsNote")}</small></div>
+      <div class="table-wrap"><table class="data-table"><thead><tr><th>${t("data.category")}</th><th>${t("data.size")}</th><th>${t("data.safeAction")}</th></tr></thead><tbody>${rows || `<tr><td colspan="3" class="field-help">${t("data.reading")}</td></tr>`}</tbody></table></div>
+    </section>
+    <section class="panel spaced">
+      <div class="panel-head"><strong>${t("data.cleanupScope")}</strong></div>
+      <div class="data-cleanup-note"><p class="field-help">${t("data.cleanupScopeBody")}</p></div>
+    </section>
+  </section>`);
+}
+
+function bindLanguageSetting(): void {
+  const select = document.querySelector<HTMLSelectElement>("#language-setting");
+  select?.addEventListener("change", () => {
+    const language = normalizeLanguagePreference(select.value);
+    select.disabled = true;
+    void api.updateGeneralSettings(language).then(result => {
+      state.generalSettings = result.general;
+      applyLocale(result.general.language);
+      setMessage("notice", t("language.saved"));
+      render();
+    }).catch((error: unknown) => {
+      select.disabled = false;
+      const message = error instanceof Error ? error.message : String(error);
+      setMessage("error", `${t("language.saveFailed")}: ${message}`);
+    });
+  });
+}
+
+function bindDataManagementPage(): void {
+  const refresh = document.querySelector<HTMLButtonElement>("[data-data-refresh]");
+  refresh?.addEventListener("click", () => {
+    void runWithFeedback(refresh, t("common.loading"), async () => {
+      await loadDataInventory(true);
+      render();
+    });
+  });
+  document.querySelectorAll<HTMLButtonElement>("[data-data-cleanup]").forEach(button => {
+    button.addEventListener("click", () => {
+      const category = button.dataset.dataCleanup || "";
+      if (category === "backups") {
+        const keepInput = document.querySelector<HTMLInputElement>("#data-backup-keep");
+        const keep = Math.max(1, Math.min(50, Number(keepInput?.value) || 5));
+        const backups = state.dataInventory?.categories.find(item => item.id === "backups");
+        if (!window.confirm(t("data.confirmBackups", {keep, size: formatDataSize(backups?.bytes || 0)}))) return;
+        void runWithFeedback(button, t("data.cleaning"), async () => {
+          const result = await api.cleanupData({category, keep, confirm: true});
+          state.dataInventory = result.result.inventory;
+          const skipped = result.result.skipped ? t("data.skipped", {count: result.result.skipped}) : "";
+          setMessage("notice", `${t("data.cleanedBackups", {count: result.result.removed, size: formatDataSize(result.result.freed_bytes)})}${skipped}`);
+          render();
+        });
+        return;
+      }
+      if (category === "logs") {
+        const logs = state.dataInventory?.categories.find(item => item.id === "logs");
+        if (!window.confirm(t("data.confirmLogs", {size: formatDataSize(logs?.bytes || 0)}))) return;
+        void runWithFeedback(button, t("data.cleaning"), async () => {
+          const result = await api.cleanupData({category, confirm: true});
+          state.dataInventory = result.result.inventory;
+          const skipped = result.result.skipped ? t("data.skipped", {count: result.result.skipped}) : "";
+          setMessage("notice", `${t("data.cleanedLogs", {count: result.result.removed, size: formatDataSize(result.result.freed_bytes)})}${skipped}`);
+          render();
+        });
+      }
+    });
+  });
 }
 
 function otherSettingsView(): string {
@@ -2561,7 +2707,7 @@ function otherSettingsView(): string {
 }
 
 function advancedSubview(content: string): string {
-  return shell(`<div class="advanced-subview"><div class="advanced-subview-back"><button type="button" data-view="advanced">← 返回高级设置</button></div>${content}</div>`);
+  return shell(`<div class="advanced-subview"><div class="advanced-subview-back"><button type="button" data-view="advanced">${t("common.backAdvanced")}</button></div>${content}</div>`);
 }
 
 function providerDialog(): string {
@@ -3536,7 +3682,7 @@ function render(): void {
   document.body.classList.toggle("task-view-active", Boolean(state.selectedTask));
   if (state.loading) {
     delete app.dataset.uiScope;
-    app.innerHTML = `<div class="loading boot-loading"><span class="brand-mark">A</span><strong>AHA2</strong><small>正在连接服务…</small></div>`;
+    app.innerHTML = `<div class="loading boot-loading" role="status" aria-busy="true"><span class="brand-mark"><img src="/assets/aha-logo.svg" alt=""></span><strong>AHA2</strong><span class="boot-spinner" aria-hidden="true"></span></div>`;
     return;
   }
   if (!state.auth?.authenticated) {
@@ -3619,6 +3765,7 @@ function render(): void {
       )),
       sync: () => advancedSubview(renderSyncSettings(state.syncSettings, state.syncState, state.syncPending, state.syncConflicts, state.syncRun, state.syncSettingsReady, state.syncNextRunAt)),
       advanced: advancedSettingsView,
+      data: dataManagementView,
       other: otherSettingsView,
       mcp: () => advancedSubview(mcpView()),
       "pet-settings": () => advancedSubview(`<section class="page pet-settings-page"><div id="pet-settings-host"><div class="field-help">正在打开宠物设置…</div></div></section>`),
@@ -3632,6 +3779,7 @@ function render(): void {
   const preservedConversation = previousConversation && preservePageUI
     && conversationRenderedHTML.get(previousConversation) === nextConversationHTML ? previousConversation : null;
   app.innerHTML = content;
+  translateUI(app);
   if (preservedDesktop) document.querySelector("#desktop-tool")?.replaceWith(preservedDesktop);
   app.dataset.uiScope = nextUIScope;
   const renderedConversation = document.querySelector<HTMLElement>("#conversation-list");
@@ -3821,21 +3969,6 @@ function bindCommon(): void {
   document.querySelectorAll<HTMLElement>("[data-load-more]").forEach(button => button.addEventListener("click", () => {
     void loadNextPage(button.dataset.loadMore as "projects" | "tasks" | "knowledge");
   }));
-  document.querySelector("#owner-avatar")?.addEventListener("click", () => {
-    ownerAvatarClicks++;
-    if (ownerAvatarResetTimer) window.clearTimeout(ownerAvatarResetTimer);
-    if (ownerAvatarClicks >= 5) {
-      ownerAvatarClicks = 0;
-      state.view = "advanced";
-      state.selectedTask = null;
-      state.selectedProject = null;
-      closeEvents();
-      render();
-      void ensureViewData(state.view).then(() => render());
-      return;
-    }
-    ownerAvatarResetTimer = window.setTimeout(() => { ownerAvatarClicks = 0; }, 1800);
-  });
   document.querySelector("#logout")?.addEventListener("click", () => {
     const button = document.querySelector<HTMLElement>("#logout");
     void runWithFeedback(button, "退出中", async () => {
@@ -4838,6 +4971,8 @@ function bindTaskToolsAndPanels(): void {
     setMessage,
   });
   if (state.view === "mcp") bindMCPPage();
+  if (state.view === "advanced") bindLanguageSetting();
+  if (state.view === "data") bindDataManagementPage();
   if (state.view === "pet-diary") void bindPetDiaryPage();
   if (state.view === "prompts") bindPromptAdmin(render, setMessage);
   if (state.view === "hardware") bindHardwareResources(
@@ -5339,11 +5474,13 @@ window.visualViewport?.addEventListener("scroll", () => {
 window.setInterval(updateSystemUptime, 30_000);
 window.addEventListener("aha:open-pet-settings", () => {
   cancelTaskOpen();
-  state.view = "pet-settings";
+  petWorkbenchTab = "settings";
+  state.view = "pet-diary";
   state.selectedTask = null;
   state.selectedProject = null;
   closeEvents();
   render();
+  void ensureViewData("advanced").then(() => render());
 });
 window.addEventListener("aha:open-advanced", () => {
   cancelTaskOpen();
@@ -5362,6 +5499,7 @@ document.addEventListener("click", event => {
   if (!(event.target instanceof Element) || !event.target.closest("[data-pet-settings]")) return;
   window.dispatchEvent(new CustomEvent("aha:pet-settings"));
 });
+startUITranslationObserver();
 render();
 void bootstrap();
 
@@ -5481,19 +5619,166 @@ async function openMCPDetail(id: string): Promise<void> {
 }
 
 function petDiaryView(): string {
-  return `<section class="page pet-diary-page"><header class="page-head"><div><h1>宠物日记</h1><p>宠物在 Task 里写下的日记，按日期倒序。</p></div></header><div id="pet-diary-page-list" class="pet-diary-list">正在读取…</div></section>`;
+  return `<section class="page pet-workbench-page">
+    <header class="page-head"><div><h1>${t("petWorkbench.title")}</h1><p>${t("petWorkbench.subtitle")}</p></div></header>
+    <div class="pet-workbench-tabs" role="tablist">
+      <button type="button" class="active" data-pet-workbench-tab="diary">${t("petWorkbench.diary")}</button>
+      <button type="button" data-pet-workbench-tab="core">${t("petWorkbench.core")}</button>
+      <button type="button" data-pet-workbench-tab="worklog">${t("petWorkbench.worklog")}</button>
+      <button type="button" data-pet-workbench-tab="approvals">${t("petWorkbench.approvals")} <span id="pet-approval-count"></span></button>
+      <button type="button" data-pet-workbench-tab="ideas">${t("petWorkbench.ideas")} <span id="pet-idea-count"></span></button>
+      <button type="button" data-pet-workbench-tab="settings">${t("petWorkbench.settings")}</button>
+    </div>
+    <div id="pet-workbench-body" class="pet-workbench-body"><div class="field-help">${t("common.loading")}</div></div>
+  </section>`;
 }
 
 async function bindPetDiaryPage(): Promise<void> {
-  const list = document.querySelector<HTMLElement>("#pet-diary-page-list");
-  if (!list) return;
-  try {
-    const result = await api.petDiary();
-    const entries = result.entries || [];
-    list.innerHTML = entries.length
-      ? entries.map(entry => `<details class="pet-diary-entry"><summary>${escapeHTML(entry.date)}</summary><pre>${escapeHTML(entry.content)}</pre></details>`).join("")
-      : `<div class="field-help">还没有日记。</div>`;
-  } catch (error) {
-    list.innerHTML = `<div class="field-help">${escapeHTML(error instanceof Error ? error.message : String(error))}</div>`;
-  }
+  const body = document.querySelector<HTMLElement>("#pet-workbench-body");
+  const tabs = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-pet-workbench-tab]"));
+  const count = document.querySelector<HTMLElement>("#pet-approval-count");
+  const ideaCount = document.querySelector<HTMLElement>("#pet-idea-count");
+  if (!body || tabs.length === 0) return;
+  let active = petWorkbenchTab;
+  let view: Awaited<ReturnType<typeof api.petWorkbench>> | null = null;
+
+  const renderTab = () => {
+    tabs.forEach(tab => tab.classList.toggle("active", tab.dataset.petWorkbenchTab === active));
+    if (!view) return;
+    if (active === "diary") {
+      body.innerHTML = renderPetMarkdownEntries(view.diary, t("petWorkbench.emptyDiary"), "diary");
+      bindPetDocEditors("diary", load);
+    } else if (active === "core") {
+      body.innerHTML = view.core.length
+        ? view.core.map(item => `<details class="pet-diary-entry" open><summary>${escapeHTML(item.name)}<button type="button" class="pet-doc-edit" data-pet-doc-section="core" data-pet-doc-name="${escapeHTML(item.name)}">${t("common.edit")}</button></summary><pre>${escapeHTML(item.content)}</pre></details>`).join("")
+        : `<div class="field-help">${t("petWorkbench.emptyCore")}</div>`;
+      bindPetDocEditors("core", load);
+    } else if (active === "worklog") {
+      body.innerHTML = renderPetMarkdownEntries(view.worklog, t("petWorkbench.emptyWorklog"), "worklog");
+      bindPetDocEditors("worklog", load);
+    } else if (active === "ideas") {
+      body.innerHTML = renderPetApprovals(view.approvals.filter(item => item.kind === "idea"), t("petWorkbench.emptyIdeas"));
+      bindApprovalActions();
+    } else if (active === "settings") {
+      body.innerHTML = `<div id="pet-settings-host" class="pet-workbench-settings"></div>`;
+      void showPetSettings();
+    } else {
+      body.innerHTML = renderPetApprovals(view.approvals.filter(item => item.kind !== "idea"), t("petWorkbench.emptyApprovals"));
+      bindApprovalActions();
+    }
+  };
+
+  const load = async () => {
+    try {
+      view = await api.petWorkbench();
+      const pending = view.approvals.filter(item => item.status === "pending" && item.kind !== "idea").length;
+      if (count) count.textContent = pending > 0 ? String(pending) : "";
+      const pendingIdeas = view.approvals.filter(item => item.status === "pending" && item.kind === "idea").length;
+      if (ideaCount) ideaCount.textContent = pendingIdeas > 0 ? String(pendingIdeas) : "";
+      renderTab();
+    } catch (error) {
+      body.innerHTML = `<div class="field-help">${escapeHTML(error instanceof Error ? error.message : String(error))}</div>`;
+    }
+  };
+
+  const bindApprovalActions = () => {
+    body.querySelectorAll<HTMLButtonElement>("[data-pet-approval-decision]").forEach(button => {
+      button.addEventListener("click", async () => {
+        const id = button.dataset.petApprovalId || "";
+        const decision = button.dataset.petApprovalDecision as "approve" | "reject";
+        if (!id || !decision) return;
+        let decisionReason = "";
+        if (decision === "reject") {
+          decisionReason = (window.prompt(t("petApproval.rejectReasonPrompt")) || "").trim();
+          if (!decisionReason) return;
+        }
+        button.disabled = true;
+        try {
+          await api.resolvePetApproval(id, decision, decisionReason);
+          await load();
+        } catch (error) {
+          button.disabled = false;
+          body.insertAdjacentHTML("afterbegin", `<div class="field-help">${escapeHTML(error instanceof Error ? error.message : String(error))}</div>`);
+        }
+      });
+    });
+  };
+
+  tabs.forEach(tab => tab.addEventListener("click", () => {
+    active = tab.dataset.petWorkbenchTab || "diary";
+    petWorkbenchTab = active;
+    renderTab();
+  }));
+  await load();
+}
+
+function renderPetMarkdownEntries(entries: Array<{date: string; content: string}>, empty: string, section: string): string {
+  return entries.length
+    ? entries.map(entry => `<details class="pet-diary-entry"><summary>${escapeHTML(entry.date)}<button type="button" class="pet-doc-edit" data-pet-doc-section="${escapeHTML(section)}" data-pet-doc-name="${escapeHTML(entry.date)}.md">${t("common.edit")}</button></summary><pre>${escapeHTML(entry.content)}</pre></details>`).join("")
+    : `<div class="field-help">${escapeHTML(empty)}</div>`;
+}
+
+function bindPetDocEditors(section: string, reload: () => Promise<void>): void {
+  const body = document.querySelector<HTMLElement>("#pet-workbench-body");
+  if (!body) return;
+  body.querySelectorAll<HTMLButtonElement>("[data-pet-doc-edit]").forEach(button => {
+    button.addEventListener("click", event => {
+      event.preventDefault();
+      event.stopPropagation();
+      const details = button.closest("details");
+      const pre = details?.querySelector<HTMLElement>("pre");
+      if (!details || !pre) return;
+      const name = button.dataset.petDocName || "";
+      const editor = document.createElement("div");
+      editor.className = "pet-doc-editor";
+      const textarea = document.createElement("textarea");
+      textarea.value = pre.textContent || "";
+      textarea.rows = Math.max(8, Math.min(24, textarea.value.split("\n").length + 2));
+      const actions = document.createElement("div");
+      actions.className = "pet-doc-editor-actions";
+      const save = document.createElement("button");
+      save.type = "button";
+      save.className = "primary";
+      save.textContent = t("common.save");
+      const cancel = document.createElement("button");
+      cancel.type = "button";
+      cancel.textContent = t("common.cancel");
+      actions.append(save, cancel);
+      editor.append(textarea, actions);
+      pre.replaceWith(editor);
+      button.remove();
+      cancel.addEventListener("click", () => {
+        const tab = document.querySelector<HTMLButtonElement>(`[data-pet-workbench-tab="${section}"]`);
+        tab?.click();
+      });
+      save.addEventListener("click", async () => {
+        save.disabled = true;
+        try {
+          await api.savePetWorkbenchDocument(section, name, textarea.value);
+          await reload();
+        } catch (error) {
+          save.disabled = false;
+          editor.insertAdjacentHTML("beforeend", `<div class="field-help">${escapeHTML(error instanceof Error ? error.message : String(error))}</div>`);
+        }
+      });
+    });
+  });
+}
+
+function renderPetApprovals(items: Array<{id: string; title: string; summary: string; reason?: string; status: string; risk: string; kind: string; resolution?: string; decision_reason?: string}>, empty = "还没有审批记录。"): string {
+  if (items.length === 0) return `<div class="field-help">${escapeHTML(empty)}</div>`;
+  return items.map(item => {
+    const pending = item.status === "pending";
+    const status = item.status === "approved" ? "已批准" : item.status === "rejected" ? "已拒绝" : "待审批";
+    const actions = pending
+      ? `<div class="pet-approval-actions"><button type="button" class="primary" data-pet-approval-decision="approve" data-pet-approval-id="${escapeHTML(item.id)}">批准</button><button type="button" data-pet-approval-decision="reject" data-pet-approval-id="${escapeHTML(item.id)}">拒绝</button></div>`
+      : "";
+    return `<article class="pet-approval-card ${pending ? "pending" : ""}">
+      <header><strong>${escapeHTML(item.title)}</strong><span class="pet-approval-status">${escapeHTML(status)} · ${escapeHTML(item.risk)}</span></header>
+      ${item.reason ? `<p class="pet-approval-reason"><strong>${t("petApproval.reason")}:</strong> ${escapeHTML(item.reason)}</p>` : ""}
+      <p>${escapeHTML(item.summary)}</p>
+      <small>${escapeHTML(item.kind)}${item.decision_reason ? ` · ${t("petApproval.decisionReason")}: ${escapeHTML(item.decision_reason)}` : item.resolution ? ` · ${escapeHTML(item.resolution)}` : ""}</small>
+      ${actions}
+    </article>`;
+  }).join("");
 }

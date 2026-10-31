@@ -1,0 +1,27 @@
+Using WSL Node at /home/kaikai/.nvm/versions/node/v24.18.0/bin/node
+==> Build Web assets
+<== Build Web assets (0.6s)
+==> Test Web build
+<== Test Web build (0.3s)
+==> Sync embedded Web assets
+<== Sync embedded Web assets (2.0s)
+==> Run Go tests
+<== Run Go tests (74.5s)
+==> Run go vet
+<== Run go vet (0.7s)
+==> Build Windows server
+<== Build Windows server (2.0s)
+==> Build Windows tray
+<== Build Windows tray (0.2s)
+==> Test Feishu plugin
+<== Test Feishu plugin (0.2s)
+==> Build Feishu plugin
+<== Build Feishu plugin (2.1s)
+Start-Process : 进程(99320)已退出，因此无法处理请求。
+所在位置 \\wsl.localhost\Ubuntu-24.04\home\kaikai\kk-workspace\my_project\AHA2\scripts\build-and-deploy-windows-user.ps
+1:330 字符: 27
++ ... onProcess = Start-Process -FilePath $versionCandidate -ArgumentList @ ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (:) [Start-Process], InvalidOperationException
+    + FullyQualifiedErrorId : System.InvalidOperationException,Microsoft.PowerShell.Commands.StartProcessCommand
+ 

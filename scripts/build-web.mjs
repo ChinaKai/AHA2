@@ -10,8 +10,11 @@ await rm(output, {recursive: true, force: true});
 await mkdir(output, {recursive: true});
 await mkdir(resolve(output, "vendor"), {recursive: true});
 await cp(resolve(source, "src", "assets", "assistant"), resolve(output, "assets", "assistant"), {recursive: true});
+await copyFile(resolve(root, "assets", "aha-logo.svg"), resolve(output, "assets", "aha-logo.svg"));
+await copyFile(resolve(root, "assets", "aha2-logo.png"), resolve(output, "assets", "aha2-logo.png"));
+await copyFile(resolve(root, "assets", "aha2.ico"), resolve(output, "favicon.ico"));
 
-for (const name of ["api", "icons", "types", "runtime_picker", "task_agents", "task_composer", "task_filters", "hardware_terminal", "hardware_panel", "hardware_resources", "desktop_panel", "task_tools", "markdown", "conversation_ui", "ui_helpers", "prompt_admin", "proxy_settings", "sync_settings", "codex_accounts", "knowledge_workspace", "channels", "assistant", "main"]) {
+for (const name of ["api", "i18n", "icons", "types", "runtime_picker", "task_agents", "task_composer", "task_filters", "hardware_terminal", "hardware_panel", "hardware_resources", "desktop_panel", "task_tools", "markdown", "conversation_ui", "ui_helpers", "prompt_admin", "proxy_settings", "sync_settings", "codex_accounts", "knowledge_workspace", "channels", "assistant", "main"]) {
   const input = await readFile(resolve(source, "src", `${name}.ts`), "utf8");
   const transformed = stripTypeScriptTypes(input, {mode: "transform", sourceMap: false});
   const outputName = name === "main" ? "app" : name;
@@ -26,6 +29,7 @@ for (const name of ["xterm.js", "xterm.css", "xterm.LICENSE"]) {
 const versionSource = await Promise.all([
   readFile(resolve(output, "app.js")),
   readFile(resolve(output, "api.js")),
+  readFile(resolve(output, "i18n.js")),
   readFile(resolve(output, "icons.js")),
   readFile(resolve(output, "runtime_picker.js")),
   readFile(resolve(output, "task_agents.js")),
@@ -54,6 +58,7 @@ const version = createHash("sha256").update(Buffer.concat(versionSource)).digest
 const appPath = resolve(output, "app.js");
 const versionedApp = (await readFile(appPath, "utf8"))
   .replaceAll('"./api.js"', `"./api.js?v=${version}"`)
+  .replaceAll('"./i18n.js"', `"./i18n.js?v=${version}"`)
   .replaceAll('"./icons.js"', `"./icons.js?v=${version}"`)
   .replaceAll('"./runtime_picker.js"', `"./runtime_picker.js?v=${version}"`)
   .replaceAll('"./task_agents.js"', `"./task_agents.js?v=${version}"`)
@@ -90,7 +95,8 @@ const versionedConversation = (await readFile(conversationPath, "utf8"))
 await writeFile(conversationPath, versionedConversation);
 const taskComposerPath = resolve(output, "task_composer.js");
 const versionedTaskComposer = (await readFile(taskComposerPath, "utf8"))
-  .replaceAll('"./icons.js"', `"./icons.js?v=${version}"`);
+  .replaceAll('"./icons.js"', `"./icons.js?v=${version}"`)
+  .replaceAll('"./i18n.js"', `"./i18n.js?v=${version}"`);
 await writeFile(taskComposerPath, versionedTaskComposer);
 const taskToolsPath = resolve(output, "task_tools.js");
 const versionedTaskTools = (await readFile(taskToolsPath, "utf8"))
@@ -138,6 +144,7 @@ const knowledgeWorkspacePath = resolve(output, "knowledge_workspace.js");
 const versionedKnowledgeWorkspace = (await readFile(knowledgeWorkspacePath, "utf8"))
   .replaceAll('"./api.js"', `"./api.js?v=${version}"`)
   .replaceAll('"./icons.js"', `"./icons.js?v=${version}"`)
+  .replaceAll('"./i18n.js"', `"./i18n.js?v=${version}"`)
   .replaceAll('"./markdown.js"', `"./markdown.js?v=${version}"`);
 await writeFile(knowledgeWorkspacePath, versionedKnowledgeWorkspace);
 const channelsPath = resolve(output, "channels.js");

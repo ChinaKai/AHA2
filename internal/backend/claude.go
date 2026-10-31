@@ -32,7 +32,6 @@ func (adapter Claude) Execute(ctx context.Context, request Request, emit func(Ev
 	idleWarning, idleTimeout, heartbeat := backendWatchdogDurations(adapter.IdleWarning, adapter.IdleTimeout, adapter.Heartbeat)
 	args := []string{
 		"-p", "--output-format", "stream-json", "--verbose",
-		"--disallowedTools", "Task,Agent",
 	}
 	if request.Model != "" {
 		args = append(args, "--model", request.Model)
@@ -177,19 +176,22 @@ func (adapter Claude) Execute(ctx context.Context, request Request, emit func(Ev
 	return Result{Reply: strings.TrimSpace(reply), ExitCode: result.ExitCode, ProviderSessionID: sessionID}, nil
 }
 
+const claudeCoordinatorDisallowedTools = "Task,Agent,Bash,Edit,Write,NotebookEdit,WebFetch,WebSearch,BashOutput,KillBash"
+
 // claudePermissionArgs maps the AHA2 sandbox (filesystem) + approval settings
 // to Claude Code permission flags. danger-full-access or approval=full bypass
-// all permission checks; read-only uses plan mode; workspace-write uses
-// acceptEdits (auto-accepts file edits within the workspace).
+// all permission checks. Read-only deliberately does not use plan mode: plan
+// mode blocks MCP tools such as pet_update_core, so the coordinator needs a
+// write-denied shell/edit surface with MCP tools still callable.
 func claudePermissionArgs(filesystem, approval string) []string {
 	if filesystem == "danger-full-access" || approval == "full" || approval == "auto" {
-		return []string{"--dangerously-skip-permissions"}
+		return []string{"--dangerously-skip-permissions", "--disallowedTools", "Task,Agent"}
 	}
 	switch filesystem {
 	case "read-only":
-		return []string{"--permission-mode", "plan"}
+		return []string{"--permission-mode", "bypassPermissions", "--disallowedTools", claudeCoordinatorDisallowedTools}
 	default:
-		return []string{"--permission-mode", "acceptEdits"}
+		return []string{"--permission-mode", "acceptEdits", "--disallowedTools", "Task,Agent"}
 	}
 }
 

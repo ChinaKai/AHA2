@@ -1,0 +1,11 @@
+2026-10-27T01:35:10Z in_progress None
+2026-10-27T01:35:30Z in_progress None
+2026-10-27T01:35:51Z completed failure
+=== JOBS ===
+test | completed failure
+build-windows-installer | completed skipped
+build-macos-packages | completed skipped
+build-linux-packages | completed skipped
+publish-release | completed skipped
+=== RELEASE ===
+id= None draft= None name= None

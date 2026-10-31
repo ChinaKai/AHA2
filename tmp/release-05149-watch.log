@@ -1,0 +1,21 @@
+2026-10-28T07:55:58Z in_progress None
+2026-10-28T07:56:28Z in_progress None
+2026-10-28T07:56:59Z in_progress None
+2026-10-28T07:57:29Z in_progress None
+2026-10-28T07:58:00Z in_progress None
+2026-10-28T07:58:31Z in_progress None
+2026-10-28T07:59:01Z in_progress None
+2026-10-28T07:59:32Z in_progress None
+2026-10-28T08:00:03Z in_progress None
+2026-10-28T08:00:33Z in_progress None
+2026-10-28T08:01:05Z in_progress None
+2026-10-28T08:01:35Z in_progress None
+2026-10-28T08:02:06Z completed success
+=== JOBS ===
+test | completed success
+build-linux-packages (amd64, ubuntu-latest) | completed success
+build-macos-packages (amd64) | completed success
+build-macos-packages (arm64) | completed success
+build-linux-packages (arm64, ubuntu-24.04-arm) | completed success
+build-windows-installer | completed success
+publish-release | completed success

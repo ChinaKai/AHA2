@@ -1,0 +1,50 @@
+package app
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"time"
+)
+
+func normalizePetEntryDate(value string, now time.Time) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return now.Format("2006-01-02"), nil
+	}
+	parsed, err := time.Parse("2006-01-02", value)
+	if err != nil || parsed.Format("2006-01-02") != value {
+		return "", fmt.Errorf("日期必须是 YYYY-MM-DD")
+	}
+	return value, nil
+}
+
+func (s *Service) PetWriteDiary(ctx context.Context, date, content string) error {
+	date, err := normalizePetEntryDate(date, s.now().UTC())
+	if err != nil {
+		return err
+	}
+	return s.PetSaveWorkbenchDocument(ctx, "diary", date+".md", content)
+}
+
+func (s *Service) PetWriteWorklog(ctx context.Context, date, content string) error {
+	date, err := normalizePetEntryDate(date, s.now().UTC())
+	if err != nil {
+		return err
+	}
+	return s.PetSaveWorkbenchDocument(ctx, "worklog", date+".md", content)
+}
+
+func (s *Service) PetUpdateCore(ctx context.Context, document, content string) error {
+	document = strings.ToLower(strings.TrimSpace(document))
+	switch document {
+	case "identity", "identity.md":
+		return s.PetSaveWorkbenchDocument(ctx, "core", "identity.md", content)
+	case "principles", "principles.md":
+		return s.PetSaveWorkbenchDocument(ctx, "core", "principles.md", content)
+	case "loops", "loops.md":
+		return s.PetSaveWorkbenchDocument(ctx, "core", "loops.md", content)
+	default:
+		return fmt.Errorf("document 必须是 identity、principles 或 loops")
+	}
+}

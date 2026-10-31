@@ -39,6 +39,8 @@ window.fetch = async (input, init = {}) => {
   const path = url.pathname;
   const method = (init.method || "GET").toUpperCase();
   if (path === "/api/v1/auth/status") return json({authenticated: true, csrf_token: "csrf", owner: {id: "owner-1", username: "owner"}});
+  if (path === "/api/v1/settings/general") return json({ok: true, general: {language: "zh-CN"}});
+  if (path === "/api/v1/assistant") return json({assistant: {character: "gugugaga", name: "AHA", nickname: "AHA", enabled: true}, messages: [], models: [], tools: []});
   if (path === "/api/v1/channel-providers") return json({providers: [{id: "feishu", provider_key: "feishu", display_name: "飞书", package_version: "1.1.3", install_state: "installed", enabled: true, available: true, revision: 1}]});
   if (path === "/api/v1/channel-instances") return json({instances: [instance()]});
   if (path === "/api/v1/channel-instances/channel-1/onboarding-options") return json({options});
@@ -86,7 +88,7 @@ const server = createServer(async (request, response) => {
       response.setHeader("Content-Type", "text/javascript");
       response.end(bootstrap);
     } else {
-      if (!/^\/[a-z_]+\.(?:js|css)$/.test(name)) { response.writeHead(404).end(); return; }
+      if (!/^\/[a-z0-9_]+\.(?:js|css)$/.test(name)) { response.writeHead(404).end(); return; }
       response.setHeader("Content-Type", name.endsWith(".css") ? "text/css" : "text/javascript");
       response.end(await readFile(resolve(root, "web/dist", name.slice(1))));
     }

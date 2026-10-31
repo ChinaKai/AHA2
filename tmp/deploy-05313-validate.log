@@ -1,0 +1,16 @@
+Using WSL Node at /home/kaikai/.nvm/versions/node/v24.18.0/bin/node
+
+
+Repository  : \\wsl.localhost\Ubuntu-24.04\home\kaikai\kk-workspace\my_project\AHA2
+Version     : 0.5.313
+WebVersion  : v0.5.313.20261030.d5fd7defa651.dirty
+Mode        : build-and-deploy
+Distro      : Ubuntu-24.04
+NodeRuntime : WSL:Ubuntu-24.04:/home/kaikai/.nvm/versions/node/v24.18.0/bin/node
+InstallDir  : D:\Program Files\AHA2
+DataDir     : D:\ProgramData\AHA2
+Listen      : 0.0.0.0:8766
+HealthURL   : http://127.0.0.1:8766/healthz
+
+
+

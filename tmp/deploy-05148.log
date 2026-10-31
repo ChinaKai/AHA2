@@ -1,0 +1,246 @@
+Repository: /home/kaikai/kk-workspace/my_project/AHA2
+Version: 0.5.148
+Web version: v0.5.148.20261027.11789c97c905.dirty
+Install dir: D:\Program Files\AHA2
+Data dir: D:\ProgramData\AHA2
+Result: /home/kaikai/kk-workspace/my_project/AHA2/dist/user-deploy-result-local-build.json
+Installer: /home/kaikai/kk-workspace/my_project/AHA2/dist/installer-user-0.5.148/AHA2-Setup-User-x64.exe
+
+
+Mode                : per-user-custom
+Repository          : \\wsl.localhost\Ubuntu-24.04\home\kaikai\kk-workspace\my_project\AHA2
+InstallDir          : D:\Program Files\AHA2
+DataDir             : D:\ProgramData\AHA2
+Listen              : 0.0.0.0:8766
+HealthURL           : http://127.0.0.1:8766/healthz
+WriteAccessVerified : True
+ElevationRequired   : False
+
+
+
+==> Build Web assets
+(node:931052) ExperimentalWarning: stripTypeScriptTypes is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+Built /home/kaikai/kk-workspace/my_project/AHA2/web/dist
+==> Test Web build
+✔ interactive region state restores scroll, focus, controls, and expansion (3.715693ms)
+✔ testing the current proxy never persists or switches settings (7.261036ms)
+✔ forms and action groups stay aligned without narrow-window button distortion (2.262271ms)
+✔ task channel selector explains and confirms occupied destination takeover (1.628689ms)
+✔ channel lifecycle renders active and retired actions with guarded purge (17.984285ms)
+✔ channel lifecycle API and archived projects share the purge path (1.877319ms)
+✔ channel reauthorization explains menu preservation and separate creation (0.741977ms)
+✔ workspace detection renders inaccessible, Git, and backend probe states (0.663422ms)
+✔ Agent API is automatic by default with a manual Workspace exception (2.317532ms)
+✔ advanced settings expose independent Backend idle and turn timeouts (2.427225ms)
+✔ task list refreshes after round terminal events (0.357396ms)
+✔ read-only task history opens on the latest page and lazily loads older rows (1.202582ms)
+✔ sidebar shows service version and live uptime (1.955084ms)
+✔ task detail can bind one primary private or group channel (1.939408ms)
+✔ task channel entry keeps a stable tool slot and exposes connected state (1.401964ms)
+✔ task channel saves preserve drafts and stale loads cannot overwrite current state (2.044926ms)
+✔ built web contains responsive application (16.07336ms)
+✔ composer agent selector stays populated while task detail loads (0.78569ms)
+✔ hardware tool title renders the active hardware group switcher (4.270163ms)
+✔ knowledge workspace defaults to actionable updates (12.399161ms)
+✔ task agent config selects skills explicitly (1.267025ms)
+✔ task memory renders a bounded chronological goal timeline (0.951485ms)
+✔ agent config offers the Codex fast tier and follows the backend (0.45783ms)
+✔ round card reports uncached turn input and hides ambiguous cache usage (0.48349ms)
+✔ codex accounts render compact weekly quota (1.364229ms)
+✔ runtime picker separates Env and Official Codex models (1.128387ms)
+✔ knowledge update list keeps proposal bodies folded behind details (0.257129ms)
+✔ knowledge proposal history marks automatic and manual review (0.261321ms)
+✔ message send clears draft state before awaiting the request (2.415704ms)
+✔ pending knowledge libraries fit mobile width (0.881511ms)
+✔ conversation renders agent config, channel outreach, and turn duration cards (2.778978ms)
+✔ stalled turns explain that backend streaming is silent (2.257701ms)
+✔ conversation replaces irrecoverable legacy progress mojibake (0.402319ms)
+✔ hardware terminal accepts WebView Blob binary frames (0.73802ms)
+✔ message collapse uses Unicode character count (4.518272ms)
+✔ tool events render as message bubbles (0.258119ms)
+✔ tool lifecycle events render as one completed message (0.242058ms)
+✔ hardware SSH requires explicit host fingerprint trust (1.887382ms)
+✔ conversation renders uploaded images and downloadable files (0.410565ms)
+✔ global knowledge opens as a virtual index document with described links (1.17421ms)
+✔ project navigation opens as an index document with child links (1.422748ms)
+✔ knowledge libraries support pending browse, bind, and unbind (1.555439ms)
+✔ project settings is a secondary page with a project entry back action (0.736482ms)
+✔ project knowledge keeps a merged view while exposing source labels and filters (1.454746ms)
+✔ knowledge library bindings distinguish collaboration from external reference (0.745404ms)
+✔ startup renders immediately and CRUD actions refresh local state with progress (1.620356ms)
+✔ route resources load silently and only surface failures (0.708926ms)
+✔ task creation supports manual draft and explicit start (2.179532ms)
+✔ model detection lists models and probes only on manual request (2.007217ms)
+✔ same-page live renders preserve page interaction state (3.849719ms)
+✔ large catalogs use independent route resources and cursor pages (0.919721ms)
+✔ task list protects clicks from live refresh and reports open failures (1.351913ms)
+✔ task list filters combine multi-select project, status, and device choices (2.033553ms)
+✔ stale knowledge action means keeping the current content (1.041516ms)
+✔ knowledge proposals keep three approval actions on one mobile row (1.212566ms)
+✔ sync settings put status first and omit the static domain explainer (1.345987ms)
+✔ sync settings render local connection data before remote preview (1.147013ms)
+✔ remote workspace and task mirrors expose explicit local takeover (1.715122ms)
+✔ channel UI context keys match between the interface and every call site (22.861965ms)
+✔ advanced settings expose access scope and listen address (2.095148ms)
+✔ completed tasks freeze the composer behind a confirmed reopen (2.162295ms)
+✔ background control is gone and control is foreground-only (1.243891ms)
+ℹ tests 62
+ℹ suites 0
+ℹ pass 62
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 205.584015
+==> Sync embedded Web assets
+==> Run Go tests
+ok  	github.com/ChinaKai/AHA2/cmd/aha	1.017s
+?   	github.com/ChinaKai/AHA2/cmd/aha-sync	[no test files]
+?   	github.com/ChinaKai/AHA2/cmd/aha-tray	[no test files]
+ok  	github.com/ChinaKai/AHA2/internal/agentapi	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/app	10.152s
+ok  	github.com/ChinaKai/AHA2/internal/auth	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/backend	0.141s
+ok  	github.com/ChinaKai/AHA2/internal/centersync	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/channel	12.511s
+ok  	github.com/ChinaKai/AHA2/internal/codexaccount	0.400s
+ok  	github.com/ChinaKai/AHA2/internal/configimport	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/desktop	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/domain	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/execution	0.022s
+ok  	github.com/ChinaKai/AHA2/internal/gateway	0.103s
+ok  	github.com/ChinaKai/AHA2/internal/hardware	0.357s
+ok  	github.com/ChinaKai/AHA2/internal/httpapi	71.790s
+ok  	github.com/ChinaKai/AHA2/internal/legacyimport	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/managedprocess	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/outboundproxy	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/prompt	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/proxyconfig	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/secrets	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/store	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/sync	57.315s
+ok  	github.com/ChinaKai/AHA2/internal/tray	(cached)
+?   	github.com/ChinaKai/AHA2/internal/webassets	[no test files]
+ok  	github.com/ChinaKai/AHA2/internal/workspace	16.228s
+?   	github.com/ChinaKai/AHA2/tmp/db-inspect	[no test files]
+==> Run go vet
+==> Build Windows server
+==> Build Windows tray
+==> Test Feishu plugin
+ok  	github.com/ChinaKai/AHA2/plugins/feishu	0.156s
+==> Vet Feishu plugin
+==> Build Feishu plugin
+==> Build Windows per-user installer
+Inno Setup 6 Command-Line Compiler
+Copyright (C) 1997-2026 Jordan Russell. All rights reserved.
+Portions Copyright (C) 2000-2026 Martijn Laan. All rights reserved.
+Portions Copyright (C) 2001-2004 Alex Yackimoff. All rights reserved.
+https://www.innosetup.com
+
+Compiler engine version: Inno Setup 6.7.3
+Non-commercial use only
+
+Preprocessing
+   Reading file: C:\Users\toope\AppData\Local\Programs\Inno Setup 6\ISPPBuiltins.iss
+Parsing [Setup] section, line 21
+Parsing [Setup] section, line 25
+Parsing [Setup] section, line 26
+Parsing [Setup] section, line 27
+Parsing [Setup] section, line 29
+Parsing [Setup] section, line 33
+Parsing [Setup] section, line 34
+Parsing [Setup] section, line 35
+Parsing [Setup] section, line 37
+Parsing [Setup] section, line 41
+Parsing [Setup] section, line 42
+Parsing [Setup] section, line 43
+Parsing [Setup] section, line 45
+Parsing [Setup] section, line 49
+Parsing [Setup] section, line 50
+Parsing [Setup] section, line 51
+Parsing [Setup] section, line 52
+Parsing [Setup] section, line 53
+Parsing [Setup] section, line 54
+Reading file (WizardImageFile)
+Reading file (WizardSmallImageFile)
+Preparing Setup program executable
+   Verification successful
+   Updating icons (Setup.e32)
+   Updating version info (Setup.e32)
+Determining language code pages
+   Reading file: C:\Users\toope\AppData\Local\Programs\Inno Setup 6\Default.isl
+   Messages in script file
+Reading default messages from Default.isl
+Parsing [LangOptions], [Messages], and [CustomMessages] sections
+   Reading file: C:\Users\toope\AppData\Local\Programs\Inno Setup 6\Default.isl
+   Messages in script file
+Reading [Code] section
+Parsing [Icons] section, line 88
+Parsing [Icons] section, line 89
+Parsing [Icons] section, line 90
+Parsing [InstallDelete] section, line 72
+Parsing [InstallDelete] section, line 76
+Parsing [Run] section, line 93
+Parsing [Files] section, line 57
+Parsing [Files] section, line 58
+Parsing [Files] section, line 59
+Parsing [Files] section, line 60
+Parsing [Files] section, line 61
+Parsing [Files] section, line 62
+Parsing [Files] section, line 63
+Parsing [Files] section, line 64
+Parsing [Files] section, line 65
+Parsing [Files] section, line 67
+Parsing [Files] section, line 68
+Compiling [Code] section
+Creating setup files
+   Verification successful
+   Updating icons (Setup.exe)
+   Compressing: \\wsl.localhost\Ubuntu-24.04\home\kaikai\kk-workspace\my_project\AHA2\dist\aha2-windows-amd64.exe
+   Compressing: \\wsl.localhost\Ubuntu-24.04\home\kaikai\kk-workspace\my_project\AHA2\dist\aha2-tray-windows-amd64.exe
+   Compressing: \\wsl.localhost\Ubuntu-24.04\home\kaikai\kk-workspace\my_project\AHA2\installer\windows\Register-AHA2UserTask.ps1
+   Compressing: \\wsl.localhost\Ubuntu-24.04\home\kaikai\kk-workspace\my_project\AHA2\installer\windows\Prepare-AHA2DataDir.ps1
+   Compressing: \\wsl.localhost\Ubuntu-24.04\home\kaikai\kk-workspace\my_project\AHA2\installer\windows\..\..\third_party\hysteria\LICENSE.md
+   Compressing: \\wsl.localhost\Ubuntu-24.04\home\kaikai\kk-workspace\my_project\AHA2\installer\windows\..\..\third_party\yaml-v3\LICENSE
+   Compressing: \\wsl.localhost\Ubuntu-24.04\home\kaikai\kk-workspace\my_project\AHA2\installer\windows\..\..\third_party\yaml-v3\NOTICE
+   Compressing: \\wsl.localhost\Ubuntu-24.04\home\kaikai\kk-workspace\my_project\AHA2\installer\windows\..\..\third_party\xray-core\LICENSE
+   Compressing: \\wsl.localhost\Ubuntu-24.04\home\kaikai\kk-workspace\my_project\AHA2\installer\windows\..\..\third_party\xray-core\README.AHA2.md
+   Compressing: \\wsl.localhost\Ubuntu-24.04\home\kaikai\kk-workspace\my_project\AHA2\dist\plugins\feishu\windows-amd64\aha2-channel-feishu.exe
+   Compressing: \\wsl.localhost\Ubuntu-24.04\home\kaikai\kk-workspace\my_project\AHA2\dist\plugins\feishu\windows-amd64\plugin.json
+   Compressing Setup program executable
+   Updating version info (Setup.exe)
+   Updating manifest (Setup.exe)
+
+Warning: Line 593, Column 3: [Hint] Variable 'RESULTCODE' never used
+Warning: Line 685, Column 3: [Hint] Variable 'RESULTCODE' never used
+
+Successful compile (19.859 sec). Resulting Setup program filename is:
+\\wsl.localhost\Ubuntu-24.04\home\kaikai\kk-workspace\my_project\AHA2\dist\installer-user-0.5.148\AHA2-Setup-User-x64.exe
+Installer: \\wsl.localhost\Ubuntu-24.04\home\kaikai\kk-workspace\my_project\AHA2\dist\installer-user-0.5.148\AHA2-Setup-User-x64.exe
+SHA256: \\wsl.localhost\Ubuntu-24.04\home\kaikai\kk-workspace\my_project\AHA2\dist\installer-user-0.5.148\AHA2-Setup-User-x64.exe.sha256
+==> Validate per-user deployment
+<== Validate per-user deployment (1.6s)
+==> Deploy and restart AHA2
+<== Deploy and restart AHA2 (4.4s)
+
+
+Repository    : \\wsl.localhost\Ubuntu-24.04\home\kaikai\kk-workspace\my_project\AHA2
+Version       : 0.5.148
+WebVersion    : 
+Mode          : deploy-only
+Distro        : 
+NodeRuntime   : 
+InstallDir    : D:\Program Files\AHA2
+DataDir       : D:\ProgramData\AHA2
+Listen        : 0.0.0.0:8766
+HealthURL     : http://127.0.0.1:8766/healthz
+ServerVersion : aha2 0.5.148
+ServerSHA256  : 89A16B11FC79A157F1C98CB77C9E7A6D89EAE74B7D80D76C327F524CFCC2E62E
+TraySHA256    : B34A90EA822CEFA807A283C59FA28D706A1F831949BC23349391F67AEBF34EDF
+PluginSHA256  : 58183C5904F3889811D9DD38BCF1A0BE7C24E6674A0E5F61BAE53AC35CF63987
+ResultPath    : \\wsl.localhost\Ubuntu-24.04\home\kaikai\kk-workspace\my_project\AHA2\dist\user-deploy-result-local-bui
+                ld.json
+
+
+

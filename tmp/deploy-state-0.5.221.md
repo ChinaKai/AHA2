@@ -1,0 +1,26 @@
+# 0.5.221 部署状态
+
+- MCP 注册表：
+  - 表 `mcp_servers`（migration v90），内置 `mcp_pet` 自动插入。
+  - tasks 增加 `mcp_server_ids_json`；`task_pet` 迁移为 `["mcp_pet"]`。
+- API：
+  - GET/POST `/api/v1/mcp-servers`
+  - DELETE `/api/v1/mcp-servers/{id}`
+  - POST `/api/v1/mcp-servers/test`（当前只做 URL 可达性）
+  - PUT `/api/v1/tasks/{id}/mcp-servers`
+- 服务端规则：
+  - `project_pet` 强制包含 `mcp_pet`；普通项目自动剔除。
+  - 内置 `mcp_pet` 不可修改/删除。
+  - 运行时按 Task 的 MCP 列表生成 Claude `--mcp-config` 和 allowedTools。
+- UI：
+  - 侧边栏新增 MCP 页：列表、添加 HTTP MCP、启停、删除、刷新。
+  - 创建 Task 表单增加 MCP 多选；普通项目隐藏宠物 MCP。
+- 提交：`a4271c1 feat: add MCP registry and task selection`。
+- 部署：`Status=succeeded`、`Health=ok`，`dist/user-deploy-result-20261029-022842.json`，备份 `D:\ProgramData\AHA2\backups\user-installed-20261029-022850`。
+- Server `2F9019EE2A3101D3AAD637975510503FBF7A64CF9646FC9994AB84185CC7F627`；Tray `E96C5174C43329CBBC18C77D621A2406A1E890B48A128051BBB196A037AC3EDC`。
+- 进程 2026-10-29 10:29 起；`/healthz` 200。
+- 未完成：
+  - Task 创建后的 MCP 编辑 UI（当前只有 PUT API）。
+  - stdio MCP 安装/命令管理。
+  - MCP 测试连接的 MCP initialize/tools/list（现在只检查 URL）。
+  - Codex/DSH 的 MCP 挂载。

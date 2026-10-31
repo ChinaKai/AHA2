@@ -72,7 +72,7 @@ const server = createServer(async (request, response) => {
       response.setHeader("Content-Type", "text/javascript");
       response.end(bootstrap);
     } else {
-      if (!/^\/(?:vendor\/)?[a-z_]+\.(?:js|css)$/.test(name)) { response.writeHead(404).end(); return; }
+      if (!/^\/(?:vendor\/)?[a-z0-9_]+\.(?:js|css)$/.test(name)) { response.writeHead(404).end(); return; }
       const file = name.startsWith("/vendor/")
         ? resolve(root, "web", name.slice(1))
         : resolve(root, "web/dist", name.slice(1));
@@ -94,11 +94,17 @@ try {
   // Attached, not visible: the nav entry can be inside a collapsed group at this
   // viewport, and the click below is dispatched rather than performed by a user.
   await page.waitForSelector('[data-view="advanced"]', {state: "attached", timeout: 15000});
-  // The nav entry can sit in a collapsed group depending on viewport; dispatch
-  // the click directly so the test does not depend on layout.
+  // The one-click gear in the owner block opens Advanced Settings; the Agent API
+  // form itself lives one level deeper in "其他设置".
   await page.evaluate(() => {
     const entry = document.querySelector('[data-view="advanced"]');
     if (!entry) throw new Error("advanced settings entry not found");
+    entry.click();
+  });
+  await page.waitForSelector('[data-view="other"]', {timeout: 15000});
+  await page.evaluate(() => {
+    const entry = document.querySelector('[data-view="other"]');
+    if (!entry) throw new Error("other settings entry not found");
     entry.click();
   });
   await page.waitForSelector("#agent-api-security-form", {timeout: 15000});
@@ -111,7 +117,7 @@ try {
   // The point of the panel is that the two settings are distinguishable, so make
   // sure the page says so rather than relying on the Owner remembering.
   const panelText = await page.locator(".agent-api-security-panel").innerText();
-  assert.match(panelText, /访问范围决定谁可以访问/, "the panel no longer explains how it differs from 访问范围");
+  assert.match(panelText, /Access scope decides who can reach AHA2/, "the panel no longer explains how it differs from access scope");
 
   await box.check();
   await page.locator("#agent-api-security-form button[type=submit]").click();

@@ -36,14 +36,20 @@ func TestBrandIconArtwork(t *testing.T) {
 		t.Fatalf("corner alpha = %d, want transparent", corner[3])
 	}
 
-	blue := brandPixel(pixels, 4, 16)
-	if blue[3] != 255 || blue[0] < 190 || blue[1] < 50 || blue[2] > 80 {
-		t.Fatalf("brand field BGRA = %v, want opaque blue", blue)
+	tile := brandPixel(pixels, 4, 16)
+	if tile[3] != 255 || tile[0] < 30 || tile[0] > 60 || tile[1] < 10 || tile[1] > 40 || tile[2] > 30 {
+		t.Fatalf("brand tile BGRA = %v, want opaque navy", tile)
 	}
 
-	white := brandPixel(pixels, 16, 8)
+	// assets/aha-logo.svg draws a white double-A and a cyan crossbar. Sample
+	// the left stroke and the crossbar, not the dark centre.
+	white := brandPixel(pixels, 9, 15)
 	if white[3] != 255 || white[0] < 235 || white[1] < 235 || white[2] < 235 {
 		t.Fatalf("brand letter BGRA = %v, want opaque white", white)
+	}
+	cyan := brandPixel(pixels, 16, 17)
+	if cyan[3] != 255 || cyan[0] < 235 || cyan[1] < 150 || cyan[1] > 220 || cyan[2] > 100 {
+		t.Fatalf("brand crossbar BGRA = %v, want opaque cyan", cyan)
 	}
 }
 

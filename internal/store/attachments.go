@@ -156,6 +156,25 @@ func (s *Store) ListTaskAttachments(ctx context.Context, taskID string) ([]domai
 	return result, rows.Err()
 }
 
+// ListTaskAttachmentsIncludingDrafts returns both message-bound attachments and
+// attachments uploaded for a Task but not yet sent with a message.
+func (s *Store) ListTaskAttachmentsIncludingDrafts(ctx context.Context, taskID string) ([]domain.Attachment, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id,task_id,message_id,name,media_type,size_bytes,sha256,created_at FROM attachments WHERE task_id=? ORDER BY created_at,id`, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []domain.Attachment{}
+	for rows.Next() {
+		item, scanErr := scanAttachment(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
 func (s *Store) AttachmentContent(item domain.Attachment) ([]byte, error) {
 	if len(item.SHA256) != 64 || strings.ContainsAny(item.SHA256, `/\\`) {
 		return nil, fmt.Errorf("invalid attachment hash")

@@ -1,0 +1,11 @@
+providers: [ 'hualai-e2e-d370466c2664:hualai-e2e' ]
+{"rows":57,"elapsedMs":235,"status":"模型列表已获取 · 0/57 已手动检测（认证：bearer）","stopPresent":0,"detectButtonHTML":"<svg class=\"icon\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.8\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M20 6v6h-6\"></path><path d=\"M4 18v-6h6\"></path><path d=\"M6.5 9a7 7 0 0 1 11.8-2.6L20 8M4 16l1.7 1.6A7 7 0 0 0 17.5 15\"></path></svg>检测模型"}
+target rows: 1
+probe click ms 39
+{"probeElapsedMs":37771,"badge":"ResponsesChatMessages","title":"","probeButtonText":"重新检测","probeTimings":[{"phase":"request","at":1793315329757},{"phase":"response","status":200,"at":1793315337472},{"phase":"finished","timing":{"startTime":1793315329756.398,"domainLookupStart":-1,"domainLookupEnd":-1,"connectStart":-1,"secureConnectionStart":-1,"connectEnd":-1,"requestStart":0.157,"responseStart":7715.111,"responseEnd":7716.424}}]}
+requests: []
+console: [
+  'error: Failed to load resource: the server responded with a status of 404 (Not Found)',
+  'verbose: [DOM] Password field is not contained in a form: (More info: https://goo.gl/9p2vKq) %o',
+  'verbose: [DOM] Password field is not contained in a form: (More info: https://goo.gl/9p2vKq) %o'
+]

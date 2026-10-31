@@ -18,8 +18,11 @@ import type {
   ChannelPlugin,
   ChannelPurgePreview,
   ChannelTaskRoute,
+  DataCleanupResult,
+  DataInventory,
   DetectedModel,
   EnvGroup,
+  GeneralSettings,
   Knowledge,
   KnowledgeLibrary,
   KnowledgeProposal,
@@ -122,6 +125,14 @@ class APIClient {
     return this.request("/api/v1/system");
   }
 
+  dataInventory(): Promise<{ok: boolean; inventory: DataInventory}> {
+    return this.request("/api/v1/system/data");
+  }
+
+  cleanupData(payload: {category: string; keep?: number; confirm: boolean}): Promise<{ok: boolean; result: DataCleanupResult}> {
+    return this.request("/api/v1/system/data/cleanup", {method: "POST", body: JSON.stringify(payload)});
+  }
+
   proxySettings(): Promise<{proxy: ProxySettings; managed?: ManagedProxyView}> {
     return this.request("/api/v1/settings/proxy");
   }
@@ -189,6 +200,14 @@ class APIClient {
   backendSettings(): Promise<{backend: BackendSettings}> {
 		return this.request("/api/v1/settings/backend");
 	}
+
+  generalSettings(): Promise<{ok: boolean; general: GeneralSettings}> {
+    return this.request("/api/v1/settings/general");
+  }
+
+  updateGeneralSettings(language: string): Promise<{ok: boolean; general: GeneralSettings}> {
+    return this.request("/api/v1/settings/general", {method: "PUT", body: JSON.stringify({language})});
+  }
 
 	updateBackendSettings(payload: {idle_timeout_seconds: number; turn_timeout_seconds: number}): Promise<{backend: BackendSettings}> {
 		return this.request("/api/v1/settings/backend", {method: "PUT", body: JSON.stringify(payload)});
@@ -508,6 +527,22 @@ class APIClient {
 
   petDiary(): Promise<{entries: import("./types").PetDiaryEntry[]}> {
     return this.request("/api/v1/pet/diary");
+  }
+
+  petWorkbench(): Promise<import("./types").PetWorkbench & {ok: boolean}> {
+    return this.request("/api/v1/pet/workbench");
+  }
+
+  savePetWorkbenchDocument(section: string, name: string, content: string): Promise<{ok: boolean}> {
+    return this.request(`/api/v1/pet/workbench/${encodeURIComponent(section)}/${encodeURIComponent(name)}`, {
+      method: "PUT", body: JSON.stringify({content}),
+    });
+  }
+
+  resolvePetApproval(id: string, decision: "approve" | "reject", note = ""): Promise<{ok: boolean; approval: import("./types").PetApproval}> {
+    return this.request(`/api/v1/pet/approvals/${encodeURIComponent(id)}/resolve`, {
+      method: "POST", body: JSON.stringify({decision, note}),
+    });
   }
 
   mcpServers(): Promise<{servers: import("./types").MCPServer[]}> {
@@ -836,7 +871,7 @@ class APIClient {
     return this.request("/api/v1/settings/knowledge-review", {method: "PUT", body: JSON.stringify({auto_approve: autoApprove})});
   }
 
-  batchKnowledgeProposals(payload: {action: "approve" | "reject"; proposal_ids: string[]; legacy_ids: string[]}): Promise<{ok: boolean; processed: string[]; failures: Array<{id: string; error: string}>}> {
+  batchKnowledgeProposals(payload: {action: "approve" | "reject"; proposal_ids: string[]; legacy_ids: string[]; decision_reason?: string}): Promise<{ok: boolean; processed: string[]; failures: Array<{id: string; error: string}>}> {
     return this.request("/api/v1/knowledge/proposals/batch", {method: "POST", body: JSON.stringify(payload)});
   }
 
@@ -935,7 +970,7 @@ class APIClient {
     return this.request(`/api/v1/pet/activity?limit=${limit}`);
   }
 
-  updatePetSettings(payload: {enabled: boolean; character: string; chat_model_id: string; brain_model_id: string; actions: string[]; identity: string; principles: string; idle_minutes: number; quiet_start: number; quiet_end: number; hourly_limit: number}): Promise<{ok: boolean; assistant: OwnerAssistant; models: AssistantModelOption[]; model_name?: string; brain_model_name?: string}> {
+  updatePetSettings(payload: {enabled: boolean; character: string; chat_model_id: string; brain_model_id: string; actions: string[]; identity?: string; principles?: string; idle_minutes: number; quiet_start: number; quiet_end: number; hourly_limit: number; allow_view_tasks?: boolean; allow_create_tasks?: boolean; allow_create_workspaces?: boolean; allow_message_tasks?: boolean; allow_manage_models?: boolean; allow_manage_knowledge?: boolean; allow_manage_channels?: boolean; allow_manage_system?: boolean}): Promise<{ok: boolean; assistant: OwnerAssistant; models: AssistantModelOption[]; model_name?: string; brain_model_name?: string}> {
     return this.request("/api/v1/pet/settings", {method: "PUT", body: JSON.stringify(payload)});
   }
 

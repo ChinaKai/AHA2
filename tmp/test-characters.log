@@ -1,0 +1,29 @@
+ok  	github.com/ChinaKai/AHA2/cmd/aha	1.158s
+?   	github.com/ChinaKai/AHA2/cmd/aha-sync	[no test files]
+?   	github.com/ChinaKai/AHA2/cmd/aha-tray	[no test files]
+ok  	github.com/ChinaKai/AHA2/internal/agentapi	0.002s
+ok  	github.com/ChinaKai/AHA2/internal/app	12.921s
+ok  	github.com/ChinaKai/AHA2/internal/auth	0.111s
+ok  	github.com/ChinaKai/AHA2/internal/backend	0.150s
+ok  	github.com/ChinaKai/AHA2/internal/centersync	0.493s
+ok  	github.com/ChinaKai/AHA2/internal/channel	13.995s
+ok  	github.com/ChinaKai/AHA2/internal/codexaccount	0.551s
+ok  	github.com/ChinaKai/AHA2/internal/configimport	0.005s
+ok  	github.com/ChinaKai/AHA2/internal/desktop	0.412s
+ok  	github.com/ChinaKai/AHA2/internal/domain	0.043s
+ok  	github.com/ChinaKai/AHA2/internal/execution	0.043s
+ok  	github.com/ChinaKai/AHA2/internal/gateway	0.120s
+ok  	github.com/ChinaKai/AHA2/internal/hardware	0.427s
+ok  	github.com/ChinaKai/AHA2/internal/httpapi	83.459s
+ok  	github.com/ChinaKai/AHA2/internal/legacyimport	1.191s
+ok  	github.com/ChinaKai/AHA2/internal/managedprocess	0.042s
+ok  	github.com/ChinaKai/AHA2/internal/outboundproxy	0.486s
+ok  	github.com/ChinaKai/AHA2/internal/prompt	4.974s
+ok  	github.com/ChinaKai/AHA2/internal/proxyconfig	0.045s
+ok  	github.com/ChinaKai/AHA2/internal/secrets	0.004s
+ok  	github.com/ChinaKai/AHA2/internal/store	30.995s
+ok  	github.com/ChinaKai/AHA2/internal/sync	72.991s
+ok  	github.com/ChinaKai/AHA2/internal/tray	0.014s
+?   	github.com/ChinaKai/AHA2/internal/webassets	[no test files]
+ok  	github.com/ChinaKai/AHA2/internal/workspace	16.338s
+?   	github.com/ChinaKai/AHA2/tmp/db-inspect	[no test files]

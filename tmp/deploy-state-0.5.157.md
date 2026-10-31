@@ -1,0 +1,21 @@
+# 0.5.157 部署状态
+
+- 变更：修复助手对话框被遮挡。
+  - assistant 层 z-index 从 60 降到 25，位于页面菜单（40）之下、内容之上；面板/气泡/菜单内部层级相应调整。
+  - 移动端面板 bottom 抬到 `--mobile-bottom-nav-height + 8px`，输入框不会被底栏盖住。
+  - 打开面板时宠物移到面板上方；空间不够（面板接近满屏）则隐藏宠物，关闭后恢复，避免宠物和面板互相遮挡。
+- 基础提交：`9945b28`；本次改动仍在工作区未提交，WebVersion 带 `.dirty`。
+- 候选 WebVersion：`v0.5.157.20261028.9945b281b5af.dirty`
+- 候选 SHA256：
+  - Server `C604348F06691B04C23CD5F827C1A271CA89050FA222BB7D00515A56D3C727AB`
+  - Tray `3F1D699C65939DDEFE41359D375F7DD0662EE18C24AA93C672FBACAD69558386`
+  - Plugin `CDB811FD17395A322A762E5804E77D73DDF0AF28A68F6532C619CFA4130BF749`
+- 部署结果：`Status=succeeded`、`Health=ok`，结果文件 `dist/user-deploy-result-20261028-113008.json`，备份 `D:\ProgramData\AHA2\backups\user-installed-20261028-113015`。
+- 安装：`D:\Program Files\AHA2`；数据 `D:\ProgramData\AHA2`；监听 `0.0.0.0:8766`。
+- 进程：tray 19:30:21、server 19:30:23、feishu plugin 19:30:26（2026-10-28）；`/healthz` 200；安装 server/tray 哈希与候选一致。
+- 浏览器验证：390×844 + 60px 底栏下，面板 rect y=214 h=560、底边 774（底栏从 784 开始），宠物在面板上方 y=140；截图中面板完整可见。
+- 3D 模型调研：
+  - Sketchfab `gugugaga penguin`（CC-BY，rigged，20k faces，免费下载需登录）
+  - Sketchfab `DeepSeek Big Fat Whale Yukkuri`（CC BY-NC-SA，3D，免费下载需登录）
+  - GitHub `TTZW1001/GuguGaga` 有 `assets/tomori/penguin.glb`（CC-BY，rigged，0 动画 clip，已下载到 `tmp/gugu3d/penguin.glb`）
+- 待办：Owner 提供 GLB/VRM 文件后接 Three.js + AnimationMixer；当前没有可直接下载的 whale 3D 文件。

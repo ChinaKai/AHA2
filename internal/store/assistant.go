@@ -22,15 +22,28 @@ func (s *Store) OwnerAssistant(ctx context.Context, id string) (domain.OwnerAssi
 	var item domain.OwnerAssistant
 	var created, updated, actions string
 	var enabled, quietEnabled int
+	var allowViewTasks, allowCreateTasks, allowCreateWorkspaces, allowMessageTasks, allowManageModels, allowManageKnowledge, allowManageChannels, allowManageSystem int
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id,name,model_id,COALESCE(NULLIF(character,''),'gugugaga'),
 			pet_enabled,pet_brain_model_id,pet_actions,pet_identity,pet_principles,
-			pet_idle_minutes,pet_quiet_enabled,pet_quiet_start,pet_quiet_end,pet_hourly_limit,pet_task_id,created_at,updated_at
+			pet_idle_minutes,pet_quiet_enabled,pet_quiet_start,pet_quiet_end,pet_hourly_limit,pet_task_id,
+			pet_allow_view_tasks,pet_allow_create_tasks,pet_allow_create_workspaces,pet_allow_message_tasks,pet_allow_manage_models,pet_allow_manage_knowledge,pet_allow_manage_channels,pet_allow_manage_system,
+			created_at,updated_at
 		FROM owner_assistants WHERE id=?`, id).
 		Scan(&item.ID, &item.Name, &item.ModelID, &item.Character, &enabled, &item.BrainModelID, &actions, &item.PetIdentity, &item.PetPrinciples,
-			&item.PetIdleMinutes, &quietEnabled, &item.PetQuietStart, &item.PetQuietEnd, &item.PetHourlyLimit, &item.PetTaskID, &created, &updated)
+			&item.PetIdleMinutes, &quietEnabled, &item.PetQuietStart, &item.PetQuietEnd, &item.PetHourlyLimit, &item.PetTaskID,
+			&allowViewTasks, &allowCreateTasks, &allowCreateWorkspaces, &allowMessageTasks, &allowManageModels, &allowManageKnowledge, &allowManageChannels, &allowManageSystem,
+			&created, &updated)
 	item.PetEnabled = enabled != 0
 	item.PetQuietEnabled = quietEnabled != 0
+	item.PetAllowViewTasks = allowViewTasks != 0
+	item.PetAllowCreateTasks = allowCreateTasks != 0
+	item.PetAllowCreateWorkspaces = allowCreateWorkspaces != 0
+	item.PetAllowMessageTasks = allowMessageTasks != 0
+	item.PetAllowManageModels = allowManageModels != 0
+	item.PetAllowManageKnowledge = allowManageKnowledge != 0
+	item.PetAllowManageChannels = allowManageChannels != 0
+	item.PetAllowManageSystem = allowManageSystem != 0
 	item.PetActions = splitPetActions(actions)
 	item.CreatedAt, item.UpdatedAt = parseTime(created), parseTime(updated)
 	return item, err
@@ -73,6 +86,16 @@ func petBoolInt(value bool) int {
 		return 1
 	}
 	return 0
+}
+
+func (s *Store) UpdateOwnerPetPermissions(ctx context.Context, id string, viewTasks, createTasks, createWorkspaces, messageTasks, manageModels, manageKnowledge, manageChannels, manageSystem bool, updatedAt time.Time) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE owner_assistants SET
+			pet_allow_view_tasks=?,pet_allow_create_tasks=?,pet_allow_create_workspaces=?,pet_allow_message_tasks=?,pet_allow_manage_models=?,pet_allow_manage_knowledge=?,pet_allow_manage_channels=?,pet_allow_manage_system=?,updated_at=?
+		WHERE id=?`,
+		petBoolInt(viewTasks), petBoolInt(createTasks), petBoolInt(createWorkspaces), petBoolInt(messageTasks), petBoolInt(manageModels), petBoolInt(manageKnowledge), petBoolInt(manageChannels), petBoolInt(manageSystem),
+		timeString(updatedAt), id)
+	return err
 }
 
 // AssistantMessages returns the most recent messages in chronological order.

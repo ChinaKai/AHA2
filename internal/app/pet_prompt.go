@@ -21,7 +21,7 @@ type petPromptData struct {
 
 func (s *Service) petToolPrompt() string {
 	var builder strings.Builder
-	for _, tool := range assistantPetTools() {
+	for _, tool := range allPetMCPTools() {
 		fmt.Fprintf(&builder, "- %s：%s\n", tool.Name, tool.Description)
 	}
 	return strings.TrimSpace(builder.String())

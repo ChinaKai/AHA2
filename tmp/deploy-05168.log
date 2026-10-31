@@ -1,0 +1,86 @@
+Using WSL Node at /home/kaikai/.nvm/versions/node/v24.18.0/bin/node
+==> Build Web assets
+<== Build Web assets (0.6s)
+==> Test Web build
+<== Test Web build (0.4s)
+==> Sync embedded Web assets
+<== Sync embedded Web assets (1.6s)
+==> Run Go tests
+C:\WINDOWS\System32\wsl.exe exited with code 1. ok  	github.com/ChinaKai/AHA2/cmd/aha	1.096s
+?   	github.com/ChinaKai/AHA2/cmd/aha-sync	[no test files]
+?   	github.com/ChinaKai/AHA2/cmd/aha-tray	[no test files]
+ok  	github.com/ChinaKai/AHA2/internal/agentapi	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/app	13.715s
+ok  	github.com/ChinaKai/AHA2/internal/auth	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/backend	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/centersync	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/channel	14.978s
+ok  	github.com/ChinaKai/AHA2/internal/codexaccount	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/configimport	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/desktop	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/domain	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/execution	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/gateway	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/hardware	(cached)
+--- FAIL: TestTaskAttachmentUploadDownloadAndDelete (3.35s)
+    testing.go:1617: TempDir RemoveAll cleanup: unlinkat /tmp/TestTaskAttachmentUploadDownloadAndDelete1628727880/003/.
+aha2-context/task_37bbf567eff1f02a4579/shared-4fe762377f72b24b7cd70980bed1effd539a2396cafe19110e1a5aa4d0a22e42/knowledg
+e/project: directory not empty
+FAIL
+FAIL	github.com/ChinaKai/AHA2/internal/httpapi	83.208s
+ok  	github.com/ChinaKai/AHA2/internal/legacyimport	1.122s
+ok  	github.com/ChinaKai/AHA2/internal/managedprocess	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/outboundproxy	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/prompt	5.053s
+ok  	github.com/ChinaKai/AHA2/internal/proxyconfig	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/secrets	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/store	28.445s
+ok  	github.com/ChinaKai/AHA2/internal/sync	69.445s
+ok  	github.com/ChinaKai/AHA2/internal/tray	(cached)
+?   	github.com/ChinaKai/AHA2/internal/webassets	[no test files]
+ok  	github.com/ChinaKai/AHA2/internal/workspace	(cached)
+?   	github.com/ChinaKai/AHA2/tmp/db-inspect	[no test files]
+FAIL
+ËùÔÚÎ»ÖÃ \\wsl.localhost\Ubuntu-24.04\home\kaikai\kk-workspace\my_project\AHA2\scripts\build-and-deploy-windows-user.ps
+1:109 ×Ö·û: 9
++         throw "$Executable exited with code $($process.ExitCode). $de ...
++         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : OperationStopped: (C:\WINDOWS\Syst...est files]
+FAIL:String) [], RuntimeException
+    + FullyQualifiedErrorId : C:\WINDOWS\System32\wsl.exe exited with code 1. ok  	github.com/ChinaKai/AHA2/cmd/aha	1. 
+   096s
+?   	github.com/ChinaKai/AHA2/cmd/aha-sync	[no test files]
+?   	github.com/ChinaKai/AHA2/cmd/aha-tray	[no test files]
+ok  	github.com/ChinaKai/AHA2/internal/agentapi	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/app	13.715s
+ok  	github.com/ChinaKai/AHA2/internal/auth	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/backend	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/centersync	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/channel	14.978s
+ok  	github.com/ChinaKai/AHA2/internal/codexaccount	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/configimport	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/desktop	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/domain	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/execution	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/gateway	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/hardware	(cached)
+--- FAIL: TestTaskAttachmentUploadDownloadAndDelete (3.35s)
+        testing.go:1617: TempDir RemoveAll cleanup: unlinkat /tmp/TestTaskAttachmentUploadDownloadAndDelete1628727880/ 
+   003/.aha2-context/task_37bbf567eff1f02a4579/shared-4fe762377f72b24b7cd70980bed1effd539a2396cafe19110e1a5aa4d0a22e4  
+  2/knowledge/project: directory not empty
+FAIL
+FAIL	github.com/ChinaKai/AHA2/internal/httpapi	83.208s
+ok  	github.com/ChinaKai/AHA2/internal/legacyimport	1.122s
+ok  	github.com/ChinaKai/AHA2/internal/managedprocess	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/outboundproxy	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/prompt	5.053s
+ok  	github.com/ChinaKai/AHA2/internal/proxyconfig	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/secrets	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/store	28.445s
+ok  	github.com/ChinaKai/AHA2/internal/sync	69.445s
+ok  	github.com/ChinaKai/AHA2/internal/tray	(cached)
+?   	github.com/ChinaKai/AHA2/internal/webassets	[no test files]
+ok  	github.com/ChinaKai/AHA2/internal/workspace	(cached)
+?   	github.com/ChinaKai/AHA2/tmp/db-inspect	[no test files]
+FAIL
+ 

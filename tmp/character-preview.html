@@ -1,0 +1,130 @@
+<!doctype html><html lang="zh"><head><meta charset="utf-8"><title>assistant characters</title>
+<style>
+body{margin:0;padding:36px;background:linear-gradient(135deg,#eef7ff,#f8fbff);font-family:system-ui,sans-serif;color:#17324d;display:flex;gap:28px;align-items:stretch}
+.preview-card{width:220px;padding:20px;border:1px solid #dbe8f7;border-radius:22px;background:#fff;box-shadow:0 18px 40px rgba(31,86,132,.12);display:grid;place-items:center;gap:6px}
+.preview-card strong{font-size:15px}.preview-card small{color:#7a8ba0;font-size:11px}
+.preview-pet{position:relative!important;width:180px!important;height:180px!important;transition:none!important;margin:8px}
+.preview-pet .assistant-pet-art,.preview-pet .pet-svg{width:180px!important;height:180px!important}
+/* Assistant character skins and the in-panel picker. */
+.assistant-pet-art { position: relative; display: block; width: 64px; height: 64px; }
+.assistant-pet-art .pet-svg { display: block; width: 64px; height: 64px; overflow: visible; filter: drop-shadow(0 7px 9px rgba(31,86,132,.22)); }
+.assistant-pet-art .pet-ground { fill: rgba(15,35,60,.16); }
+.assistant-pet-art .pet-main { fill: #8bd3ff; }
+.assistant-pet-art .pet-whale-body { fill: #4d6bfe; }
+.assistant-pet-art .pet-whale-belly { fill: #eaf0ff; }
+.assistant-pet-art .pet-whale-tail, .assistant-pet-art .pet-whale-fin { fill: #3b55d9; }
+.assistant-pet-art .pet-whale-smile { fill: none; stroke: #10233d; stroke-width: 2; stroke-linecap: round; }
+.assistant-pet-art .pet-whale-spout { fill: none; stroke: #9adcff; stroke-width: 3; stroke-linecap: round; opacity: 0; }
+.assistant-pet-art .pet-duck-body { fill: #ffd84d; }
+.assistant-pet-art .pet-duck-wing { fill: #f4c21c; }
+.assistant-pet-art .pet-duck-tail { fill: #f4c21c; }
+.assistant-pet-art .pet-duck-tuft { fill: none; stroke: #f4c21c; stroke-width: 3; stroke-linecap: round; }
+.assistant-pet-art .pet-duck-beak { fill: #ff9f1c; }
+.assistant-pet-art .pet-duck-beak-line { fill: none; stroke: #d97b00; stroke-width: 1.3; stroke-linecap: round; }
+.assistant-pet-art .pet-duck-foot { fill: none; stroke: #ff9f1c; stroke-width: 3.5; stroke-linecap: round; }
+.assistant-pet-art .pet-eyes-open { fill: #10233d; animation: pet-blink-open 6s infinite; }
+.assistant-pet-art .pet-eyes-closed { fill: none; stroke: #10233d; stroke-width: 2; stroke-linecap: round; opacity: 0; animation: pet-blink-closed 6s infinite; }
+.assistant-pet-art .pet-mouth { fill: none; stroke: #10233d; stroke-width: 2; stroke-linecap: round; }
+.assistant-pet-art .pet-cheek { fill: #ff9db2; opacity: .62; }
+.assistant-pet-art .pet-body-group { transform-origin: 50% 86%; animation: pet-breathe 3.8s ease-in-out infinite; }
+.assistant-pet[data-character="gugugaga"] .pet-duck-wing { transform-origin: 19px 39px; animation: pet-wing 3.1s ease-in-out infinite; }
+.assistant-pet[data-character="gugugaga"] .pet-duck-tail { transform-origin: 14px 38px; animation: pet-tail-small 2.9s ease-in-out infinite; }
+.assistant-pet[data-character="gugugaga"] .pet-duck-beak { transform-origin: 32px 35px; animation: pet-beak 5.2s ease-in-out infinite; }
+.assistant-pet[data-character="deepseek_fish"] .pet-whale-tail { transform-origin: 52px 36px; animation: pet-tail 2.6s ease-in-out infinite; }
+.assistant-pet[data-character="deepseek_fish"] .pet-whale-fin { transform-origin: 21px 46px; animation: pet-fin 3.4s ease-in-out infinite; }
+.assistant-pet[data-character="deepseek_fish"] .pet-whale-spout { animation: pet-spout 8s ease-in-out infinite; }
+.assistant-pet.walking .assistant-pet-art { animation: pet-walk .44s ease-in-out infinite; }
+.assistant-pet.thinking .assistant-pet-art { animation: pet-think .8s ease-in-out infinite; }
+.assistant-pet.has-hint .assistant-pet-art { animation: pet-alert .78s ease-in-out infinite; }
+.assistant-pet.panel-open .assistant-pet-art { animation: pet-perk 2s ease-in-out infinite; }
+.assistant-pet.character-changed .assistant-pet-art { animation: pet-pop .7s ease-out; }
+.assistant-character-button { position: relative; display: grid; flex: 0 0 auto; width: 32px; height: 32px; min-height: 32px; padding: 0; place-items: center; border: 1px solid #dbe8f7; border-radius: 10px; background: #f4f9ff; }
+.assistant-character-button:hover { border-color: #9fc4ee; background: #eaf4ff; }
+.assistant-character-mini { display: grid; width: 100%; height: 100%; place-items: center; }
+.assistant-character-mini .pet-svg { width: 25px; height: 25px; overflow: visible; }
+.assistant-character-badge { position: absolute; right: 0; bottom: -1px; color: #2563eb; font-size: 9px; line-height: 1; }
+.assistant-character-menu { position: absolute; top: 56px; right: 10px; z-index: 6; display: grid; gap: 8px; width: 264px; max-width: calc(100% - 20px); padding: 10px; border: 1px solid #dbe8f7; border-radius: 13px; background: #fff; box-shadow: 0 16px 40px rgba(15,35,60,.2); }
+.assistant-character-menu-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; padding: 1px 2px 3px; }
+.assistant-character-menu-head strong { font-size: 12px; }
+.assistant-character-menu-head small { color: var(--muted); font-size: 10px; }
+.assistant-character-options { display: grid; gap: 5px; }
+.assistant-character-option { display: flex; align-items: center; gap: 9px; width: 100%; padding: 7px; border: 1px solid transparent; border-radius: 10px; background: #f8fbff; text-align: left; }
+.assistant-character-option:hover { border-color: #c7dcf4; background: #eef7ff; }
+.assistant-character-option.active { border-color: #7eb2e8; background: #e8f3ff; }
+.assistant-character-preview { display: grid; flex: 0 0 auto; width: 42px; height: 42px; place-items: center; border-radius: 10px; background: #fff; }
+.assistant-character-preview .pet-svg { width: 38px; height: 38px; overflow: visible; }
+.assistant-character-copy { display: grid; gap: 1px; min-width: 0; }
+.assistant-character-copy strong { font-size: 12px; }
+.assistant-character-copy small { overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.assistant-identity .assistant-mini-avatar .pet-svg { width: 26px; height: 26px; overflow: visible; }
+
+@keyframes pet-breathe { 0%, 100% { transform: translateY(0) scale(1); } 50% { transform: translateY(-2px) scale(1.015); } }
+@keyframes pet-blink-open { 0%, 92%, 100% { opacity: 1; } 94%, 96% { opacity: 0; } }
+@keyframes pet-blink-closed { 0%, 92%, 100% { opacity: 0; } 94%, 96% { opacity: 1; } }
+@keyframes pet-wing { 0%, 100% { transform: rotate(0deg); } 50% { transform: rotate(-10deg); } }
+@keyframes pet-beak { 0%, 88%, 100% { transform: scaleY(1); } 91%, 94% { transform: scaleY(.55); } }
+@keyframes pet-tail { 0%, 100% { transform: rotate(0deg); } 50% { transform: rotate(8deg); } }
+@keyframes pet-tail-small { 0%, 100% { transform: rotate(0deg); } 50% { transform: rotate(-7deg); } }
+@keyframes pet-fin { 0%, 100% { transform: rotate(0deg); } 50% { transform: rotate(-8deg); } }
+@keyframes pet-spout { 0%, 72%, 100% { opacity: 0; transform: translateY(2px) scaleY(.7); } 78%, 86% { opacity: 1; transform: translateY(0) scaleY(1); } }
+@keyframes pet-walk { 0%, 100% { transform: translateY(0) rotate(-2deg); } 50% { transform: translateY(-4px) rotate(2deg); } }
+@keyframes pet-think { 0%, 100% { transform: translateY(0) rotate(-2deg); } 50% { transform: translateY(-5px) rotate(2deg); } }
+@keyframes pet-alert { 0%, 100% { transform: translateY(0) scale(1); } 45% { transform: translateY(-5px) scale(1.04); } }
+@keyframes pet-perk { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-3px); } }
+@keyframes pet-pop { 0% { transform: scale(.82); } 55% { transform: scale(1.1) rotate(-3deg); } 100% { transform: scale(1); } }
+
+@media (max-width: 720px) {
+  .assistant-pet-art, .assistant-pet-art .pet-svg { width: 58px; height: 58px; }
+  .assistant-character-menu { right: 8px; width: 244px; }
+  .assistant-character-button { width: 30px; height: 30px; min-height: 30px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .assistant-pet-art, .assistant-pet-art .pet-body-group, .assistant-pet-art .pet-eyes-open,
+  .assistant-pet-art .pet-eyes-closed, .assistant-pet-art .pet-whale-tail, .assistant-pet-art .pet-whale-fin,
+  .assistant-pet-art .pet-whale-spout, .assistant-pet-art .pet-duck-wing, .assistant-pet-art .pet-duck-tail,
+  .assistant-pet-art .pet-duck-beak { animation: none !important; }
+}
+
+</style></head><body><div class="preview-card"><div class="assistant-pet preview-pet" data-character="xiaoa"><div class="assistant-pet-art"><svg viewBox="0 0 64 64" class="pet-svg" aria-hidden="true">
+  <ellipse class="pet-ground" cx="32" cy="59" rx="17" ry="3"/>
+  <g class="pet-body-group">
+    <path class="pet-main" d="M14 20c-4-8-1-13 5-12 4 1 6 4 8 8h10c2-4 4-7 8-8 6-1 9 4 5 12 3 4 4 8 4 13 0 12-9 19-22 19S10 45 10 33c0-5 1-9 4-13Z"/>
+    <g class="pet-eyes-open"><ellipse cx="25" cy="33" rx="2.6" ry="3.2"/><ellipse cx="39" cy="33" rx="2.6" ry="3.2"/></g>
+    <g class="pet-eyes-closed"><path d="M22 33h6M36 33h6"/></g>
+    <path class="pet-mouth" d="M28 40c2 2 6 2 8 0"/>
+    <circle class="pet-cheek" cx="19" cy="39" r="3"/>
+    <circle class="pet-cheek" cx="45" cy="39" r="3"/>
+  </g>
+</svg></div></div><strong>小A</strong><small>xiaoa</small></div>
+<div class="preview-card"><div class="assistant-pet preview-pet" data-character="gugugaga"><div class="assistant-pet-art"><svg viewBox="0 0 64 64" class="pet-svg" aria-hidden="true">
+  <ellipse class="pet-ground" cx="32" cy="59" rx="17" ry="3"/>
+  <g class="pet-body-group">
+    <path class="pet-duck-foot" d="M22 54l-5 5h10M42 54l5 5H37"/>
+    <path class="pet-duck-tail" d="M12 35c-5-2-7 2-5 7 3-1 5 0 6 2"/>
+    <path class="pet-duck-body" d="M10 37c0-14 10-23 22-23s22 9 22 23c0 12-9 19-22 19S10 49 10 37Z"/>
+    <path class="pet-duck-wing" d="M16 36c-3 4-2 9 2 11 3 1 6-1 7-4"/>
+    <path class="pet-duck-tuft" d="M31 15c0-5 3-7 6-4"/>
+    <ellipse class="pet-duck-beak" cx="32" cy="35" rx="7.5" ry="4.2"/>
+    <path class="pet-duck-beak-line" d="M25 35h14"/>
+    <g class="pet-eyes-open"><circle cx="25" cy="27" r="2.5"/><circle cx="39" cy="27" r="2.5"/></g>
+    <g class="pet-eyes-closed"><path d="M22 27h6M36 27h6"/></g>
+    <circle class="pet-cheek" cx="20" cy="33" r="3"/>
+    <circle class="pet-cheek" cx="44" cy="33" r="3"/>
+  </g>
+</svg></div></div><strong>咕咕嘎嘎</strong><small>gugugaga</small></div>
+<div class="preview-card"><div class="assistant-pet preview-pet" data-character="deepseek_fish"><div class="assistant-pet-art"><svg viewBox="0 0 64 64" class="pet-svg" aria-hidden="true">
+  <ellipse class="pet-ground" cx="32" cy="59" rx="18" ry="3"/>
+  <g class="pet-body-group">
+    <g class="pet-whale-spout"><path d="M32 17c0-5 4-7 4-11M32 17c0-5-4-7-4-11"/></g>
+    <path class="pet-whale-tail" d="M50 35c5-1 8-5 8-10 4 4 3 10-1 13 4 1 7 4 7 8-4-2-9-2-13-1"/>
+    <path class="pet-whale-body" d="M7 37c0-12 11-21 25-21s25 8 25 19c0 12-11 20-25 20S7 49 7 37Z"/>
+    <path class="pet-whale-belly" d="M15 43c4 7 11 10 18 10s14-3 18-10c-4 8-11 12-18 12s-14-4-18-12Z"/>
+    <path class="pet-whale-fin" d="M19 43c-4 3-5 8-1 10 3 2 7-1 7-4"/>
+    <g class="pet-eyes-open"><circle cx="26" cy="31" r="2.5"/><circle cx="40" cy="31" r="2.5"/></g>
+    <g class="pet-eyes-closed"><path d="M23 31h6M37 31h6"/></g>
+    <path class="pet-whale-smile" d="M29 39c2 2 6 2 8 0"/>
+    <circle class="pet-cheek" cx="20" cy="37" r="3"/>
+    <circle class="pet-cheek" cx="46" cy="37" r="3"/>
+  </g>
+</svg></div></div><strong>DeepSeek 大肥鱼</strong><small>deepseek_fish</small></div></body></html>

@@ -82,6 +82,31 @@ type BackendSettings struct {
 	UpdatedAt          time.Time `json:"updated_at,omitempty"`
 }
 
+type GeneralSettings struct {
+	Language  string    `json:"language"`
+	UpdatedAt time.Time `json:"updated_at,omitempty"`
+}
+
+const (
+	LanguageAuto       = "auto"
+	LanguageSimplified = "zh-CN"
+	LanguageEnglish    = "en-US"
+)
+
+// NormalizeLanguage accepts only the values the UI and prompt builder know how
+// to apply. Unknown values fall back to automatic detection rather than
+// silently pinning the interface to a stale or misspelled locale.
+func NormalizeLanguage(value string) string {
+	switch strings.TrimSpace(value) {
+	case LanguageSimplified:
+		return LanguageSimplified
+	case LanguageEnglish:
+		return LanguageEnglish
+	default:
+		return LanguageAuto
+	}
+}
+
 type Session struct {
 	ID        string    `json:"id"`
 	OwnerID   string    `json:"owner_id"`
@@ -523,18 +548,20 @@ type KnowledgeEntry struct {
 }
 
 type KnowledgeProposal struct {
-	ID           string                  `json:"id"`
-	EntryID      string                  `json:"entry_id"`
-	BaseRevision int                     `json:"base_revision"`
-	BaseEntry    *KnowledgeEntry         `json:"base_entry,omitempty"`
-	Proposed     KnowledgeEntry          `json:"proposed"`
-	SourceTaskID string                  `json:"source_task_id,omitempty"`
-	SourceTurnID string                  `json:"source_turn_id,omitempty"`
-	Status       KnowledgeProposalStatus `json:"status"`
-	ReviewMode   string                  `json:"review_mode"`
-	CreatedAt    time.Time               `json:"created_at"`
-	UpdatedAt    time.Time               `json:"updated_at"`
-	DecidedAt    time.Time               `json:"decided_at,omitempty"`
+	ID             string                  `json:"id"`
+	EntryID        string                  `json:"entry_id"`
+	BaseRevision   int                     `json:"base_revision"`
+	BaseEntry      *KnowledgeEntry         `json:"base_entry,omitempty"`
+	Proposed       KnowledgeEntry          `json:"proposed"`
+	SourceTaskID   string                  `json:"source_task_id,omitempty"`
+	SourceTurnID   string                  `json:"source_turn_id,omitempty"`
+	Status         KnowledgeProposalStatus `json:"status"`
+	ReviewMode     string                  `json:"review_mode"`
+	Reason         string                  `json:"reason,omitempty"`
+	DecisionReason string                  `json:"decision_reason,omitempty"`
+	CreatedAt      time.Time               `json:"created_at"`
+	UpdatedAt      time.Time               `json:"updated_at"`
+	DecidedAt      time.Time               `json:"decided_at,omitempty"`
 }
 
 type KnowledgeReviewSettings struct {

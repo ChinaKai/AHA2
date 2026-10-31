@@ -1,0 +1,19 @@
+Using WSL Node at /home/kaikai/.nvm/versions/node/v24.18.0/bin/node
+==> Build Web assets
+<== Build Web assets (0.4s)
+==> Test Web build
+<== Test Web build (0.5s)
+==> Sync embedded Web assets
+<== Sync embedded Web assets (3.3s)
+==> Run Go tests
+<== Run Go tests (1.7s)
+==> Run go vet
+<== Run go vet (0.5s)
+==> Build Windows server
+<== Build Windows server (0.3s)
+==> Build Windows tray
+<== Build Windows tray (0.2s)
+==> Test Feishu plugin
+<== Test Feishu plugin (0.3s)
+==> Build Feishu plugin
+<== Build Feishu plugin (1.9s)

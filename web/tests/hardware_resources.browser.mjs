@@ -28,6 +28,8 @@ window.fetch = async (input, init = {}) => {
   const path = url.pathname;
   const method = (init.method || "GET").toUpperCase();
   if (path === "/api/v1/auth/status") return json({authenticated: true, csrf_token: "csrf", owner: {id: "owner-1", username: "owner"}});
+  if (path === "/api/v1/settings/general") return json({ok: true, general: {language: "zh-CN"}});
+  if (path === "/api/v1/assistant") return json({assistant: {character: "gugugaga", name: "AHA", nickname: "AHA", enabled: true}, messages: [], models: [], tools: []});
   if (path === "/api/v1/hardware-resources" && method === "GET") return json({resources: RESOURCES});
   if (path === "/api/v1/hardware-resources" && method === "POST") {
     const payload = JSON.parse(init.body || "{}");
@@ -67,7 +69,7 @@ const server = createServer(async (request, response) => {
       response.setHeader("Content-Type", "text/javascript");
       response.end(bootstrap);
     } else {
-      if (!/^\/(?:vendor\/)?[a-z_]+\.(?:js|css)$/.test(name)) { response.writeHead(404).end(); return; }
+      if (!/^\/(?:vendor\/)?[a-z0-9_]+\.(?:js|css)$/.test(name)) { response.writeHead(404).end(); return; }
       const file = name.startsWith("/vendor/") ? resolve(root, "web", name.slice(1)) : resolve(root, "web/dist", name.slice(1));
       response.setHeader("Content-Type", name.endsWith(".css") ? "text/css" : "text/javascript");
       response.end(await readFile(file));

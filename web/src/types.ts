@@ -34,6 +34,10 @@ export interface BackendSettings {
   turn_timeout_seconds: number;
   updated_at?: string;
 }
+export interface GeneralSettings {
+  language: string;
+  updated_at?: string;
+}
 export interface SystemInfo {
   os: string;
   arch: string;
@@ -42,6 +46,27 @@ export interface SystemInfo {
   version?: string;
   web_version?: string;
   started_at?: string;
+}
+
+export interface DataCategory {
+  id: string;
+  label: string;
+  bytes: number;
+  safe_cleanup: boolean;
+  note?: string;
+}
+
+export interface DataInventory {
+  data_dir: string;
+  total_bytes: number;
+  categories: DataCategory[];
+}
+
+export interface DataCleanupResult {
+  freed_bytes: number;
+  removed: number;
+  skipped: number;
+  inventory: DataInventory;
 }
 
 export interface ProxySettings {
@@ -670,6 +695,8 @@ export interface KnowledgeProposal {
   body?: string;
   status: string;
   review_mode?: "auto" | "manual" | string;
+  reason?: string;
+  decision_reason?: string;
   source_task_id?: string;
   source_turn_id?: string;
   created_at: string;
@@ -959,6 +986,14 @@ export interface OwnerAssistant {
   pet_quiet_end: number;
   pet_hourly_limit: number;
   pet_task_id?: string;
+  pet_allow_view_tasks: boolean;
+  pet_allow_create_tasks: boolean;
+  pet_allow_create_workspaces: boolean;
+  pet_allow_message_tasks: boolean;
+  pet_allow_manage_models: boolean;
+  pet_allow_manage_knowledge: boolean;
+  pet_allow_manage_channels: boolean;
+  pet_allow_manage_system: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -1124,4 +1159,34 @@ export interface MCPServer {
 export interface PetDiaryEntry {
   date: string;
   content: string;
+}
+
+export interface PetWorkspaceDocument {
+  name: string;
+  content: string;
+}
+
+export interface PetApproval {
+  id: string;
+  task_id: string;
+  kind: string;
+  title: string;
+  summary: string;
+  reason?: string;
+  risk: string;
+  payload?: string;
+  status: "pending" | "approved" | "rejected" | string;
+  resolution?: string;
+  decision_reason?: string;
+  created_at: string;
+  resolved_at?: string;
+}
+
+export interface PetWorkbench {
+  diary: PetDiaryEntry[];
+  core: PetWorkspaceDocument[];
+  worklog: PetDiaryEntry[];
+  approvals: PetApproval[];
+  task?: Task;
+  updated_at: string;
 }

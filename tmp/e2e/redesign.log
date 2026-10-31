@@ -1,0 +1,35 @@
+{
+ "detectLabel": "获取模型列表",
+ "total": 57,
+ "matchCount": "匹配 5/57",
+ "visible": 5,
+ "fuzzyOk": true,
+ "checked": true,
+ "addDisabled": false,
+ "addLabel": "添加 (1)",
+ "selectedCount": "已选 2",
+ "backendValue": "dsh",
+ "dshWires": [
+  "responses",
+  "chat_completions",
+  "anthropic_messages"
+ ],
+ "claudeWires": [
+  "anthropic_messages"
+ ],
+ "summaryBefore": "已选 2 个模型",
+ "notice": "已添加 0 个模型，2 个已存在",
+ "probes": 2,
+ "added": [
+  {
+   "name": "claude-kimi-k3",
+   "backend": "dsh",
+   "wire": "responses"
+  },
+  {
+   "name": "codex-gpt-5.6-terra",
+   "backend": "dsh",
+   "wire": "responses"
+  }
+ ]
+}

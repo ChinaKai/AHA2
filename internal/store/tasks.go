@@ -354,6 +354,21 @@ func (s *Store) TaskFacetCounts(ctx context.Context) (TaskFacetCounts, error) {
 	return counts, mirrors.Err()
 }
 
+type TaskStatusChange struct {
+	TaskID string
+	From   domain.TaskStatus
+	To     domain.TaskStatus
+	At     time.Time
+}
+
+type TaskStatusListener func(context.Context, TaskStatusChange)
+
+func (s *Store) SetTaskStatusListener(listener TaskStatusListener) {
+	s.statusMu.Lock()
+	s.statusListener = listener
+	s.statusMu.Unlock()
+}
+
 func (s *Store) UpdateTaskStatus(ctx context.Context, id string, from, to domain.TaskStatus, updatedAt, completedAt string) error {
 	if err := domain.ValidateTaskTransition(from, to); err != nil {
 		return err
@@ -365,6 +380,12 @@ func (s *Store) UpdateTaskStatus(ctx context.Context, id string, from, to domain
 	count, _ := result.RowsAffected()
 	if count != 1 {
 		return fmt.Errorf("task status changed concurrently")
+	}
+	s.statusMu.RLock()
+	listener := s.statusListener
+	s.statusMu.RUnlock()
+	if listener != nil {
+		listener(ctx, TaskStatusChange{TaskID: id, From: from, To: to, At: time.Now().UTC()})
 	}
 	return nil
 }

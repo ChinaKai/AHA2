@@ -197,7 +197,7 @@ export function renderAgentTurnCard(
   const outputTokens = Number(contextMetrics?.output_tokens ?? usageNumber(usage, "output_tokens"));
   return `<section class="agent-turn-card ${active.length ? "active" : ""}">
     <details>
-      <summary><span>Round ${round.sequence} · ${statusLabel(round.status)} · <time${liveElapsedAttributes(roundElapsed, active.length > 0)}>${formatDuration(roundElapsed)}</time> · ${completed}/${turns.length}</span><small>${turns.length} Agents · ${active.length} active</small><code data-round-channel class="round-channel ${realtimeState}">${realtimeState === "live" ? "SSE" : realtimeState === "fallback" ? "2s" : "..."}</code></summary>
+      <summary><span>Round ${round.sequence} · <span>${statusLabel(round.status)}</span> · <time${liveElapsedAttributes(roundElapsed, active.length > 0)}>${formatDuration(roundElapsed)}</time> · ${completed}/${turns.length}</span><small>${turns.length} Agents · ${active.length} active</small><code data-round-channel class="round-channel ${realtimeState}">${realtimeState === "live" ? "SSE" : realtimeState === "fallback" ? "2s" : "..."}</code></summary>
       <div class="agent-turn-rows">${rows}</div>
       <div class="turn-stage-grid">
         <span><small>排队</small><strong>${formatDuration(Number(focus.queue_duration_ms || 0))}</strong></span>

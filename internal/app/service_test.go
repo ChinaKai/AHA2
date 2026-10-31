@@ -2180,7 +2180,9 @@ func TestSecondBatchInTheSameTurnStaysOnTheRoutedAgentCard(t *testing.T) {
 
 func waitForTask(t *testing.T, database *store.Store, taskID string, expected domain.TaskStatus) {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
+	// Deployment validation runs the suite while the build and installer are
+	// competing for CPU, so a correct async transition can take well over 3s.
+	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		task, err := database.Task(context.Background(), taskID)
 		if err == nil && task.Status == expected {
@@ -2194,7 +2196,7 @@ func waitForTask(t *testing.T, database *store.Store, taskID string, expected do
 
 func waitForTurn(t *testing.T, database *store.Store, turnID string, expected domain.TurnStatus) {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		turn, err := database.Turn(context.Background(), turnID)
 		if err == nil && turn.Status == expected {

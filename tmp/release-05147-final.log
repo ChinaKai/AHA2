@@ -1,0 +1,38 @@
+2026-10-27T01:39:29Z in_progress None
+2026-10-27T01:39:49Z in_progress None
+2026-10-27T01:40:10Z in_progress None
+2026-10-27T01:40:30Z in_progress None
+2026-10-27T01:40:50Z in_progress None
+2026-10-27T01:41:11Z in_progress None
+2026-10-27T01:41:31Z queued None
+2026-10-27T01:41:51Z in_progress None
+2026-10-27T01:42:12Z in_progress None
+2026-10-27T01:42:32Z in_progress None
+2026-10-27T01:42:53Z in_progress None
+2026-10-27T01:43:13Z in_progress None
+2026-10-27T01:43:34Z in_progress None
+2026-10-27T01:43:54Z in_progress None
+2026-10-27T01:44:14Z completed success
+=== JOBS ===
+test | completed success
+build-macos-packages (amd64) | completed success
+build-windows-installer | completed success
+build-linux-packages (arm64, ubuntu-24.04-arm) | completed success
+build-macos-packages (arm64) | completed success
+build-linux-packages (amd64, ubuntu-latest) | completed success
+publish-release | completed success
+=== RELEASE ===
+id= 424949480 draft= False name= AHA2 v0.5.147
+asset aha2-0.5.147-1.aarch64.rpm 10594777
+asset aha2-0.5.147-1.x86_64.rpm 9522422
+asset AHA2-macos-amd64.pkg 11923950
+asset AHA2-macos-arm64.pkg 11076532
+asset AHA2-Setup-User-x64.exe 13652993
+asset AHA2-Setup-x64.exe 13653051
+asset aha2-sync-0.5.147-1.aarch64.rpm 4320135
+asset aha2-sync-0.5.147-1.x86_64.rpm 3988713
+asset aha2-sync_0.5.147_amd64.deb 3983342
+asset aha2-sync_0.5.147_arm64.deb 3667920
+asset aha2_0.5.147_amd64.deb 9513406
+asset aha2_0.5.147_arm64.deb 8576684
+asset SHA256SUMS 1095

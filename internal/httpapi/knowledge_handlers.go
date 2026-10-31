@@ -348,7 +348,14 @@ func writeKnowledgeMutationError(writer http.ResponseWriter, fallback string, er
 }
 
 func (s *Server) approveKnowledgeProposal(writer http.ResponseWriter, request *http.Request) {
-	proposal, entry, err := s.store.ApproveKnowledgeProposal(request.Context(), request.PathValue("id"), time.Now().UTC())
+	var payload struct {
+		DecisionReason string `json:"decision_reason"`
+	}
+	if request.ContentLength > 0 && decodeJSON(request, &payload) != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_json")
+		return
+	}
+	proposal, entry, err := s.store.ApproveKnowledgeProposal(request.Context(), request.PathValue("id"), time.Now().UTC(), payload.DecisionReason)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(writer, http.StatusNotFound, "knowledge_proposal_not_found")
@@ -362,7 +369,18 @@ func (s *Server) approveKnowledgeProposal(writer http.ResponseWriter, request *h
 }
 
 func (s *Server) rejectKnowledgeProposal(writer http.ResponseWriter, request *http.Request) {
-	proposal, err := s.store.RejectKnowledgeProposal(request.Context(), request.PathValue("id"), time.Now().UTC())
+	var payload struct {
+		DecisionReason string `json:"decision_reason"`
+	}
+	if request.ContentLength > 0 && decodeJSON(request, &payload) != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_json")
+		return
+	}
+	if strings.TrimSpace(payload.DecisionReason) == "" {
+		writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "decision_reason_required", "message": "decision_reason 不能为空"})
+		return
+	}
+	proposal, err := s.store.RejectKnowledgeProposal(request.Context(), request.PathValue("id"), time.Now().UTC(), payload.DecisionReason)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(writer, http.StatusNotFound, "knowledge_proposal_not_found")

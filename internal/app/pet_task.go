@@ -47,7 +47,7 @@ const (
 	// petTaskIntro is both the Task requirement and the first message. Web task
 	// creation treats "需求" as the first user message, so the pet follows the
 	// same semantics instead of keeping internal instructions in the Task.
-	petTaskIntro = "请用一两句话向主人做个自我介绍：你的名字、当前形象，以及你会陪主人聊天、写日记、做小动作。不要写代码或运行命令。"
+	petTaskIntro = "请用一两句话向主人做个自我介绍。先读 core/identity.md 和 core/principles.md；如果它们还是空模板，就用 pet_update_core 按你的想法补全名字、形象、性格、习惯和做事准则。不要写代码或运行命令。"
 )
 
 // reopenPetTaskIfNeeded returns a system Pet Task to waiting_user after any
@@ -75,23 +75,27 @@ func (s *Service) reopenPetTaskIfNeeded(ctx context.Context, task domain.Task) d
 // the setting must not leave the Task on a stale runtime snapshot.
 func (s *Service) syncPetTaskRuntime(ctx context.Context, modelID string) error {
 	modelID = strings.TrimSpace(modelID)
-	if modelID == "" {
-		return nil
-	}
 	agent, err := s.store.TaskAgent(ctx, petTaskID, "main")
 	if err != nil {
 		// The Task does not exist yet; ensureOwnerPetTask creates it with this
-		// model on the next step.
+		// model and read-only runtime on the next step.
 		return nil
 	}
 	snapshot, err := s.store.RuntimeSnapshot(ctx, agent.RuntimeConfigSnapshotID)
 	if err != nil {
 		return err
 	}
-	if snapshot.ModelID == modelID {
+	needsModel := modelID != "" && snapshot.ModelID != modelID
+	filesystem, approval := parsePermissionsJSON(snapshot.PermissionsJSON)
+	needsReadOnly := filesystem != "read-only" || approval != "never"
+	if !needsModel && !needsReadOnly {
 		return nil
 	}
-	_, err = s.UpdateAgentConfig(ctx, petTaskID, "main", UpdateAgentConfigInput{ModelID: modelID})
+	input := UpdateAgentConfigInput{Filesystem: "read-only", Approval: "never"}
+	if needsModel {
+		input.ModelID = modelID
+	}
+	_, err = s.UpdateAgentConfig(ctx, petTaskID, "main", input)
 	return err
 }
 
@@ -105,6 +109,12 @@ func (s *Service) ensureOwnerPetTask(ctx context.Context, assistant *domain.Owne
 		return "", nil
 	}
 	s.removeGeneratedPetWorkspaceGuides()
+	// Seed the pet's stable home before the Task starts. This runs on every
+	// assistant page load, but only fills missing files; the pet owns them after
+	// the first start and its edits are never overwritten.
+	if err := s.ensurePetWorkspaceFiles(ctx, assistant); err != nil {
+		log.Printf("prepare pet workspace: %v", err)
+	}
 	// The pet has one model. Keep the existing Task's Agent runtime in step
 	// with the assistant setting; the settings save path reports failures,
 	// while this page-load path is best effort so a stale Task cannot block
@@ -162,11 +172,10 @@ func (s *Service) ensureOwnerPetTask(ctx context.Context, assistant *domain.Owne
 			return "", err
 		}
 	}
-	_ = os.MkdirAll(filepath.Join(s.store.DataDir(), "pet-workspace", "diary"), 0o700)
 	task, err := s.CreateTask(ctx, CreateTaskInput{
 		ID: petTaskID, ProjectID: petProjectID, WorkspaceID: petWorkspaceID,
 		Title: "宠物", Request: petTaskIntro, ModelID: assistant.ModelID,
-		Isolation: "inplace", Filesystem: "workspace-write", Approval: "never",
+		Isolation: "inplace", Filesystem: "read-only", Approval: "never",
 		CollaborationMode: "single", MaxAgents: 1, StartMode: "manual",
 	})
 	if err != nil {

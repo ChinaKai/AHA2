@@ -1,0 +1,26 @@
+==> Validate per-user deployment
+<== Validate per-user deployment (1.6s)
+==> Deploy and restart AHA2
+<== Deploy and restart AHA2 (4.3s)
+
+
+Repository    : \\wsl.localhost\Ubuntu-24.04\home\kaikai\kk-workspace\my_project\AHA2
+Version       : 0.5.141
+WebVersion    : 
+Mode          : deploy-only
+Distro        : 
+NodeRuntime   : 
+InstallDir    : D:\Program Files\AHA2
+DataDir       : D:\ProgramData\AHA2
+Listen        : 0.0.0.0:8766
+HealthURL     : http://127.0.0.1:8766/healthz
+ServerVersion : aha2 0.5.141
+ServerSHA256  : D852E32482734762A1B8A448D83D96D99BFC2E877D65A94F817826CFFADA51EF
+TraySHA256    : 12A355299DD68874908B5A2EFB3E39AF444B420F6788370384B834E0DA52C84E
+PluginSHA256  : 498BC32D3F9EFED79BE698D0F64A097790E8A03A4D94AB37E10549BBB3887BFB
+ResultPath    : \\wsl.localhost\Ubuntu-24.04\home\kaikai\kk-workspace\my_project\AHA2\dist\user-deploy-result-05141-ter
+                minal-toggle.json
+
+
+
+deploy_exit=0

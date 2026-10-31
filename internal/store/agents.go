@@ -232,6 +232,28 @@ func (s *Store) EnqueueOwnerMessage(
 	targetAgentID string,
 	attachmentIDs []string,
 ) (domain.TaskRound, domain.AgentInboxItem, bool, error) {
+	return s.enqueueUserMessage(ctx, message, targetAgentID, "owner", "owner_message", "owner_message", attachmentIDs)
+}
+
+// EnqueuePetDelegatedMessage keeps a pet-sent message distinct from the
+// owner's own messages in both the target task conversation and its inbox.
+// The target Agent can see it was sent by the pet and must not treat it as an
+// owner identity or permission grant.
+func (s *Store) EnqueuePetDelegatedMessage(
+	ctx context.Context,
+	message domain.Message,
+	targetAgentID string,
+	attachmentIDs []string,
+) (domain.TaskRound, domain.AgentInboxItem, bool, error) {
+	return s.enqueueUserMessage(ctx, message, targetAgentID, "pet", "pet_delegate_message", "pet_delegate_message", attachmentIDs)
+}
+
+func (s *Store) enqueueUserMessage(
+	ctx context.Context,
+	message domain.Message,
+	targetAgentID, sourceAgentID, sourceKind, routeKind string,
+	attachmentIDs []string,
+) (domain.TaskRound, domain.AgentInboxItem, bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return domain.TaskRound{}, domain.AgentInboxItem{}, false, err
@@ -298,15 +320,15 @@ func (s *Store) EnqueueOwnerMessage(
 			id,task_id,round_id,turn_id,agent_id,stream_agent_id,from_agent_id,to_agent_id,route_kind,
 			category,kind,summary,payload_json,created_at
 		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		domain.NewID("conversation"), message.TaskID, round.ID, "", "owner", targetAgentID,
-		"owner", targetAgentID, "owner_message", "chat", "user_message", message.Content, encodeJSON(payload),
+		domain.NewID("conversation"), message.TaskID, round.ID, "", sourceAgentID, targetAgentID,
+		sourceAgentID, targetAgentID, routeKind, "chat", "user_message", message.Content, encodeJSON(payload),
 		timeString(message.CreatedAt),
 	); err != nil {
 		return domain.TaskRound{}, domain.AgentInboxItem{}, false, err
 	}
 	inbox := domain.AgentInboxItem{
 		ID: domain.NewID("inbox"), TaskID: message.TaskID, RoundID: round.ID,
-		TargetAgentID: targetAgentID, SourceAgentID: "owner", SourceKind: "owner_message",
+		TargetAgentID: targetAgentID, SourceAgentID: sourceAgentID, SourceKind: sourceKind,
 		MessageID: message.ID, Content: message.Content, Payload: payload, Status: "pending", CreatedAt: message.CreatedAt,
 	}
 	result, err := tx.ExecContext(ctx, `

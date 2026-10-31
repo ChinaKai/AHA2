@@ -1,0 +1,188 @@
+{
+  "version": 7,
+  "record": {
+    "identity": {
+      "formatVersion": 4,
+      "createdAt": 1792818629623,
+      "cwd": "/home/kaikai/kk-workspace/my_project/AHA2/tmp/dsh-steer-spike",
+      "isSeeded": false,
+      "inheritedEventCount": 0
+    },
+    "rows": {
+      "title": {
+        "ver": 1,
+        "seq": 28,
+        "val": "Use the bash tool exactly"
+      },
+      "titleInput": {
+        "ver": 3,
+        "seq": 28,
+        "val": {
+          "first": {
+            "seq": 8,
+            "text": "Use the bash tool exactly once to run: echo SPIKE-TOOL-RAN\nThen report the command output.\n"
+          },
+          "count": 2,
+          "lastSeq": 25
+        }
+      },
+      "llmRetry": {
+        "ver": 1,
+        "seq": 28,
+        "val": {}
+      },
+      "sandboxMode": {
+        "ver": 1,
+        "seq": 28,
+        "val": "danger-full-access"
+      },
+      "goal": {
+        "ver": 6,
+        "seq": 28,
+        "val": {
+          "current": null,
+          "seenGoalIds": [],
+          "failure": null
+        }
+      },
+      "tokenUsage": {
+        "ver": 2,
+        "seq": 28,
+        "val": {
+          "totals": {
+            "uncachedInputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadTokens": 0,
+            "cacheWriteTokens": 0
+          },
+          "last": {
+            "turn": 1,
+            "step": 3,
+            "buckets": {
+              "uncachedInputTokens": 0,
+              "outputTokens": 0,
+              "cacheReadTokens": 0,
+              "cacheWriteTokens": 0
+            }
+          }
+        }
+      },
+      "contextPressure": {
+        "ver": 5,
+        "seq": 28,
+        "val": {
+          "surfaceTokens": 926,
+          "contextWindow": 100000,
+          "pressureTokens": 0,
+          "sampledSurfaceTokens": 913
+        }
+      },
+      "contextBreakdown": {
+        "ver": 6,
+        "seq": 28,
+        "val": {
+          "systems": [
+            {
+              "seq": 7,
+              "tokens": 644
+            }
+          ],
+          "surfaceTokens": 926,
+          "breakdown": {
+            "systemTokens": 644,
+            "toolsTokens": 4899,
+            "messageTokens": 282
+          }
+        }
+      },
+      "todos": {
+        "ver": 2,
+        "seq": 28,
+        "val": null
+      },
+      "turnBoundary": {
+        "ver": 2,
+        "seq": 28,
+        "val": {
+          "openTurnStartSeq": null,
+          "lastStepStartSeq": 24,
+          "lastStepBoundary": {
+            "kind": "end",
+            "seq": 27
+          },
+          "lastTurn": 1
+        }
+      },
+      "inbox": {
+        "ver": 1,
+        "seq": 28,
+        "val": {
+          "next-turn": [],
+          "next-step": []
+        }
+      },
+      "userQuestions": {
+        "ver": 2,
+        "seq": 28,
+        "val": {
+          "inheritedEventCount": 0,
+          "timed": false,
+          "questions": {
+            "active": [],
+            "settled": []
+          }
+        }
+      },
+      "plan": {
+        "ver": 3,
+        "seq": 28,
+        "val": {
+          "active": false,
+          "wanted": null,
+          "running": null,
+          "activeAtLastHeader": false
+        }
+      },
+      "permissions": {
+        "ver": 2,
+        "seq": 28,
+        "val": {
+          "preset": "danger-full-access",
+          "sandbox": "danger-full-access",
+          "approval": "never",
+          "seeded": false
+        }
+      },
+      "workingDirectory": {
+        "ver": 1,
+        "seq": 28,
+        "val": "/home/kaikai/kk-workspace/my_project/AHA2/tmp/dsh-steer-spike"
+      },
+      "subagentCatalog": {
+        "ver": 6,
+        "seq": 28,
+        "val": {
+          "inheritedEventCount": 0
+        }
+      },
+      "subagentTiming": {
+        "ver": 3,
+        "seq": 28,
+        "val": {
+          "descriptorSeen": false,
+          "settledMs": 0
+        }
+      },
+      "subagent": {
+        "ver": 2,
+        "seq": 28,
+        "val": {}
+      },
+      "subagentModelSelectionPolicy": {
+        "ver": 1,
+        "seq": 28,
+        "val": null
+      }
+    }
+  }
+}

@@ -54,7 +54,13 @@ func TestOwnerAssistantAPIRequiresAuthAndReturnsSingleton(t *testing.T) {
 		} `json:"tools"`
 	}
 	decodeResponse(t, response, &payload)
-	if response.StatusCode != http.StatusOK || payload.Assistant.ID != "assistant_default" || payload.Assistant.Name == "" || payload.Assistant.Character != "gugugaga" || len(payload.Tools) != 8 {
+	hasPetSay := false
+	for _, tool := range payload.Tools {
+		if tool.Name == "pet_say" {
+			hasPetSay = true
+		}
+	}
+	if response.StatusCode != http.StatusOK || payload.Assistant.ID != "assistant_default" || payload.Assistant.Name == "" || payload.Assistant.Character != "gugugaga" || len(payload.Tools) < 8 || !hasPetSay {
 		t.Fatalf("assistant response=%d %#v", response.StatusCode, payload)
 	}
 

@@ -2,7 +2,6 @@ package httpapi
 
 import (
 	"encoding/json"
-	"fmt"
 	"net"
 	"net/http"
 	"strings"
@@ -25,7 +24,8 @@ type petMCPTool struct {
 }
 
 // petMCP is a local MCP endpoint for the pet Task backend. It is intentionally
-// loopback-only: it has no general AHA tools and only executes pet actions.
+// loopback-only and exposes only the pet actions plus the owner-gated read-only
+// AHA overview/detail and approval-request tools.
 func (s *Server) petMCP(writer http.ResponseWriter, request *http.Request) {
 	host, _, err := net.SplitHostPort(request.RemoteAddr)
 	if err != nil || !isLoopbackHost(host) {
@@ -57,7 +57,7 @@ func (s *Server) petMCP(writer http.ResponseWriter, request *http.Request) {
 		respond(map[string]any{}, nil)
 	case "tools/list":
 		tools := make([]petMCPTool, 0)
-		for _, tool := range s.app.PetMCPTools() {
+		for _, tool := range s.app.PetMCPTools(request.Context()) {
 			tools = append(tools, petMCPTool{Name: tool.Name, Description: tool.Description, InputSchema: tool.Parameters})
 		}
 		respond(map[string]any{"tools": tools}, nil)
@@ -73,7 +73,7 @@ func (s *Server) petMCP(writer http.ResponseWriter, request *http.Request) {
 		if len(call.Arguments) == 0 {
 			call.Arguments = json.RawMessage(`{}`)
 		}
-		result, err := s.app.ControlOwnerPetTool(request.Context(), call.Name, call.Arguments)
+		text, err := s.app.PetMCPTool(request.Context(), call.Name, call.Arguments)
 		if err != nil {
 			respond(map[string]any{
 				"isError": true,
@@ -81,9 +81,8 @@ func (s *Server) petMCP(writer http.ResponseWriter, request *http.Request) {
 			}, nil)
 			return
 		}
-		text, _ := json.Marshal(result.Actions)
 		respond(map[string]any{
-			"content": []map[string]any{{"type": "text", "text": fmt.Sprintf("ok %s", string(text))}},
+			"content": []map[string]any{{"type": "text", "text": text}},
 		}, nil)
 	default:
 		respond(nil, map[string]any{"code": -32601, "message": "method not found"})

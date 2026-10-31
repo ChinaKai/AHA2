@@ -1,0 +1,120 @@
+    responses                   2.56s http=200
+    chat/completions            2.16s http=200
+    messages                    0.03s http=404
+    v1/messages                 2.79s http=200
+round=1 model=gpt-6.1-terra total=7.54s statuses=map[anthropic_messages:supported chat_completions:supported responses:supported]
+    responses                   2.58s http=200
+    chat/completions            1.65s http=200
+    messages                    0.04s http=404
+    v1/messages                 2.43s http=200
+round=1 model=claude-gpt-6.1-terra total=6.69s statuses=map[anthropic_messages:supported chat_completions:supported responses:supported]
+    responses                   1.83s http=200
+    chat/completions            2.00s http=200
+    messages                    0.03s http=404
+    v1/messages                 2.95s http=200
+round=2 model=gpt-6.1-terra total=6.81s statuses=map[anthropic_messages:supported chat_completions:supported responses:supported]
+    responses                   1.71s http=200
+    chat/completions            1.80s http=200
+    messages                    0.03s http=404
+    v1/messages                 2.12s http=200
+round=2 model=claude-gpt-6.1-terra total=5.66s statuses=map[anthropic_messages:supported chat_completions:supported responses:supported]
+    responses                   2.44s http=200
+    chat/completions            1.75s http=200
+    messages                    0.03s http=404
+    v1/messages                 1.98s http=200
+round=3 model=gpt-6.1-terra total=6.20s statuses=map[anthropic_messages:supported chat_completions:supported responses:supported]
+    responses                   1.60s http=200
+    chat/completions            1.74s http=200
+    messages                    0.03s http=404
+    v1/messages                 2.01s http=200
+round=3 model=claude-gpt-6.1-terra total=5.39s statuses=map[anthropic_messages:supported chat_completions:supported responses:supported]
+    responses                   1.59s http=200
+    chat/completions            1.48s http=200
+    messages                    0.33s http=404
+    v1/messages                 3.14s http=200
+round=4 model=gpt-6.1-terra total=6.54s statuses=map[anthropic_messages:supported chat_completions:supported responses:supported]
+    responses                   1.87s http=200
+    chat/completions            3.74s http=200
+    messages                    0.03s http=404
+    v1/messages                 1.86s http=200
+round=4 model=claude-gpt-6.1-terra total=7.51s statuses=map[anthropic_messages:supported chat_completions:supported responses:supported]
+    responses                   1.91s http=200
+    chat/completions            2.49s http=200
+    messages                    0.03s http=404
+    v1/messages                 2.65s http=200
+round=5 model=gpt-6.1-terra total=7.09s statuses=map[anthropic_messages:supported chat_completions:supported responses:supported]
+    responses                   1.87s http=200
+    chat/completions            3.00s http=200
+    messages                    0.03s http=404
+    v1/messages                 1.75s http=200
+round=5 model=claude-gpt-6.1-terra total=6.66s statuses=map[anthropic_messages:supported chat_completions:supported responses:supported]
+    responses                   2.31s http=200
+    chat/completions            1.88s http=200
+    messages                    0.03s http=404
+    v1/messages                 1.82s http=200
+round=6 model=gpt-6.1-terra total=6.05s statuses=map[anthropic_messages:supported chat_completions:supported responses:supported]
+    responses                   1.93s http=200
+    chat/completions            2.27s http=200
+    messages                    0.03s http=404
+    v1/messages                 1.52s http=200
+round=6 model=claude-gpt-6.1-terra total=5.76s statuses=map[anthropic_messages:supported chat_completions:supported responses:supported]
+    responses                   1.65s http=200
+    chat/completions            2.07s http=200
+    messages                    0.03s http=404
+    v1/messages                 1.60s http=200
+round=7 model=gpt-6.1-terra total=5.35s statuses=map[anthropic_messages:supported chat_completions:supported responses:supported]
+    responses                   1.70s http=200
+    chat/completions            1.89s http=200
+    messages                    0.03s http=404
+    v1/messages                 2.69s http=200
+round=7 model=claude-gpt-6.1-terra total=6.33s statuses=map[anthropic_messages:supported chat_completions:supported responses:supported]
+    responses                   2.64s http=200
+    chat/completions            1.91s http=200
+    messages                    0.03s http=404
+    v1/messages                 1.57s http=200
+round=8 model=gpt-6.1-terra total=6.15s statuses=map[anthropic_messages:supported chat_completions:supported responses:supported]
+    responses                   2.54s http=200
+    chat/completions            4.87s http=200
+    messages                    0.03s http=404
+    v1/messages                 0.56s err=context deadline exceeded
+round=8 model=claude-gpt-6.1-terra total=8.00s statuses=map[anthropic_messages:unavailable chat_completions:supported responses:supported]
+    responses                   1.72s http=200
+    chat/completions            1.65s http=200
+    messages                    0.03s http=404
+    v1/messages                 2.06s http=200
+round=9 model=gpt-6.1-terra total=5.46s statuses=map[anthropic_messages:supported chat_completions:supported responses:supported]
+    responses                   1.96s http=200
+    chat/completions            1.72s http=200
+    messages                    0.03s http=404
+    v1/messages                 1.62s http=200
+round=9 model=claude-gpt-6.1-terra total=5.34s statuses=map[anthropic_messages:supported chat_completions:supported responses:supported]
+    responses                   2.00s http=200
+    chat/completions            1.57s http=200
+    messages                    0.03s http=404
+    v1/messages                 1.72s http=200
+round=10 model=gpt-6.1-terra total=5.32s statuses=map[anthropic_messages:supported chat_completions:supported responses:supported]
+    responses                   2.51s http=200
+    chat/completions            2.98s http=200
+    messages                    0.03s http=404
+    v1/messages                 2.48s err=context deadline exceeded
+round=10 model=claude-gpt-6.1-terra total=8.00s statuses=map[anthropic_messages:unavailable chat_completions:supported responses:supported]
+    responses                   1.69s http=200
+    chat/completions            1.72s http=200
+    messages                    0.03s http=404
+    v1/messages                 1.67s http=200
+round=11 model=gpt-6.1-terra total=5.12s statuses=map[anthropic_messages:supported chat_completions:supported responses:supported]
+    responses                   2.06s http=200
+    chat/completions            1.65s http=200
+    messages                    0.03s http=404
+    v1/messages                 1.81s http=200
+round=11 model=claude-gpt-6.1-terra total=5.55s statuses=map[anthropic_messages:supported chat_completions:supported responses:supported]
+    responses                   4.14s http=200
+    chat/completions            1.61s http=200
+    messages                    0.03s http=404
+    v1/messages                 1.75s http=200
+round=12 model=gpt-6.1-terra total=7.54s statuses=map[anthropic_messages:supported chat_completions:supported responses:supported]
+    responses                   1.73s http=200
+    chat/completions            1.74s http=200
+    messages                    0.03s http=404
+    v1/messages                 1.74s http=200
+round=12 model=claude-gpt-6.1-terra total=5.25s statuses=map[anthropic_messages:supported chat_completions:supported responses:supported]

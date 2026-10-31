@@ -17,7 +17,7 @@ import (
 	"github.com/ChinaKai/AHA2/internal/domain"
 )
 
-//go:embed templates/*.md
+//go:embed templates/*.md templates/zh-CN/*.md
 var templateFiles embed.FS
 
 type Repository interface {
@@ -65,7 +65,7 @@ type BuildInput struct {
 	IncludeTurnDiagnostics bool
 	ChannelContext         map[string]any
 	Identity               string
-	PetDiaryPaths          []string
+	Language               string
 }
 
 type AttachmentResource struct {
@@ -188,7 +188,6 @@ type templateData struct {
 	Recovery           *recoveryHandoffEvidence
 	AgentAPIURL        string
 	AvailableContext   []AvailableContextGroup
-	PetDiaryPaths      []string
 	RecentExchanges    []recentContextExchange
 	TurnDiagnostics    []turnDiagnostic
 	HardwareGroups     []hardwareContextGroup
@@ -207,7 +206,7 @@ var builtinTemplates = []domain.PromptTemplate{
 	{ID: "identity.task-agent", Name: "Task Agent Identity", Layer: "identity", Description: "代码与项目任务场景身份", Editable: true, Required: false, Version: 1},
 	{ID: "identity.channel-assistant", Name: "Channel Assistant Identity", Layer: "identity", Description: "Owner 私聊渠道助手身份", Editable: true, Required: false, Version: 1},
 	{ID: "identity.channel-digital-human", Name: "Channel Digital Human Identity", Layer: "identity", Description: "受限群聊电子人身份", Editable: true, Required: false, Version: 2},
-	{ID: "identity.pet-task", Name: "Pet Task Identity", Layer: "identity", Description: "宠物 Task 的人格与边界，注入 Task Prompt 顶部", Editable: true, Required: false, Version: 1},
+	{ID: "identity.pet-task", Name: "Pet Task Identity", Layer: "identity", Description: "宠物 Task 的电子分身定位、owner-delegate 权限和 core/diary/worklog 路径", Editable: true, Required: false, Version: 11},
 	{ID: "channel.web", Name: "AHA Web Channel", Layer: "channel", Description: "Web 渠道消息行为", Editable: true, Required: false, Version: 1},
 	{ID: "channel.external-channel", Name: "External Channel", Layer: "channel", Description: "外部渠道消息行为", Editable: true, Required: false, Version: 4},
 	{ID: "policy.auto", Name: "Auto Collaboration", Layer: "policy", Description: "AHA 自动协作策略", Editable: true, Required: false, Version: 1},
@@ -223,7 +222,7 @@ var builtinTemplates = []domain.PromptTemplate{
 	{ID: "context.attachments-index", Name: "Attachments Index File", Layer: "context", Description: "attachments/index.md 的内容模板", Editable: true, Required: false, Version: 1},
 	{ID: "section.compact-handoff", Name: "Compact Handoff Section", Layer: "section", Description: "Backend Session 压缩后的 Prompt 段落", Editable: true, Required: false, Version: 1},
 	{ID: "section.task-workspace", Name: "Task And Workspace Section", Layer: "section", Description: "Task 与 Workspace 摘要段落", Editable: true, Required: true, Version: 1},
-	{ID: "section.available-context", Name: "Available Context Section", Layer: "section", Description: "可用上下文入口列表段落", Editable: true, Required: true, Version: 1},
+	{ID: "section.available-context", Name: "Available Context Section", Layer: "section", Description: "可用上下文入口列表段落", Editable: true, Required: true, Version: 2},
 	{ID: "section.current-inbox", Name: "Current Inbox Section", Layer: "section", Description: "当前 Inbox Batch 段落", Editable: true, Required: true, Version: 1},
 	{ID: "section.inbox-batch-content", Name: "Inbox Batch Content", Layer: "section", Description: "Inbox 消息、渠道来源、引用上下文和附件引用的内容模板", Editable: true, Required: true, Version: 2},
 	{ID: "resource.agent-api", Name: "Agent API Reference File", Layer: "resource", Description: "只读参考模板", Editable: false, Required: true, Version: 7},
@@ -246,21 +245,70 @@ var supersededBuiltinOverrideHashes = map[string]map[string]bool{
 	"section.inbox-batch-content": {
 		"5fa0f46660226c7ccc0d18c91ae55a813230b3651194dee277e3fe180df2356d": true,
 	},
+	"identity.pet-task": {
+		// The v1 prompt described the pet's persona and duties inline. Those now
+		// live in core/identity.md and core/principles.md. The v2 prompt still
+		// scoped the pet to a chat/diary assistant; v3 makes it an owner-delegate
+		// that starts with read-only diagnostics; v4 added write tools; v5 added
+		// remote-mirror discovery, takeover, and retire tools; v6 added the
+		// knowledge/Skill/Prompt owner-delegate surface; v7 added channel
+		// discovery, contacts, and approval-gated external sends; v8 added
+		// channel enable/disable and security settings via approval; v9 added
+		// permission-change requests and channel lifecycle approvals; v10
+		// replaced the command dump with aha_capabilities and pet_say/idea; v11
+		// makes the pet a coordinator with a read-only runtime.
+		"9c13cd2859c558166db608c0195bc1809ace8c01d29425337fc87232700de19a": true,
+		"faa4cf84331e46273cbd52d9ec0cf0707864d8e0fd87a0f8b3e374f93f9d68f9": true,
+		"cfc4559e7cfcc119c3f7711255f4e8bf02be02f08ba2f958535545c8a338aa81": true,
+		"24a722080f6044380af1b8f6c98e856b7f8bb0952ef2afb98a422cebf654ecb5": true,
+		"a9b90a8bc7bfb1defcc8dddd0530b3cc06d6df14288da37142c1f6041b5488d5": true,
+		"b4b0a1889ef3013fbb23237bb19d4c855492cee832d6edf098b8b4efaac0d542": true,
+		"38fe86fac2740ac0a552419b1267ebe0c79b9bfb5347ec0f999881991f475b7d": true,
+		"61446d0c1c1e8d07504050bedaedd6499489151e2b36fc36e4722bf95eaa8903": true,
+		"c4d14681b31e310759633872da0d01d74d6f69fd1c0b3aa8a2758c55440f0bf5": true,
+	},
+	"section.available-context": {
+		// The previous builtins repeated the pet core/diary paths that Pet Task
+		// Identity already owns; discard an unmodified override of either version.
+		"88f7ddab63240d7dffe30efab3dd57f9fee0360f5cce5387c114ca3366ff0039": true,
+		"49803c2773aad1968094484789be9b8c253084b50fede4bda767ad9476e7c190": true,
+	},
 }
 
 func (engine *Engine) Templates(ctx context.Context) ([]domain.PromptTemplate, error) {
+	return engine.TemplatesForLanguage(ctx, "")
+}
+
+// TemplatesForLanguage returns the built-in template catalog in the requested
+// language. An explicit zh-CN preference selects the translated variants;
+// otherwise the canonical English templates remain the fallback. Owner
+// overrides are language-neutral and always win.
+func (engine *Engine) TemplatesForLanguage(ctx context.Context, language string) ([]domain.PromptTemplate, error) {
 	overrides, err := engine.repository.PromptTemplateOverrides(ctx)
 	if err != nil {
 		return nil, err
 	}
 	result := make([]domain.PromptTemplate, 0, len(builtinTemplates))
+	useChinese := domain.NormalizeLanguage(language) == domain.LanguageSimplified
 	for _, item := range builtinTemplates {
 		if item.Content == "" {
-			data, readErr := templateFiles.ReadFile("templates/" + strings.ReplaceAll(item.ID, ".", "-") + ".md")
+			name := strings.ReplaceAll(item.ID, ".", "-") + ".md"
+			path := "templates/" + name
+			if useChinese {
+				if _, statErr := templateFiles.ReadFile("templates/zh-CN/" + name); statErr == nil {
+					path = "templates/zh-CN/" + name
+				}
+			}
+			data, readErr := templateFiles.ReadFile(path)
 			if readErr != nil {
 				return nil, readErr
 			}
 			item.Content = strings.TrimSpace(string(data))
+		}
+		if useChinese {
+			localizeTemplateMeta(&item)
+		} else if description := englishTemplateDescriptions[item.ID]; description != "" {
+			item.Description = description
 		}
 		item.Source = "builtin"
 		if override, ok := overrides[item.ID]; ok && item.Editable && !isSupersededBuiltinOverride(item.ID, override.Content) {
@@ -272,6 +320,72 @@ func (engine *Engine) Templates(ctx context.Context) ([]domain.PromptTemplate, e
 		result = append(result, item)
 	}
 	return result, nil
+}
+
+var englishTemplateDescriptions = map[string]string{
+	"core.default":                   "Shared safety, Workspace, and AHA orchestration boundaries for all Agents",
+	"role.main":                      "Main's planning, integration, and final delivery responsibilities",
+	"role.sub":                       "Sub Agent's focused execution and isolation responsibilities",
+	"identity.task-agent":            "Identity for code and project Tasks",
+	"identity.channel-assistant":     "Identity for an Owner direct-channel assistant",
+	"identity.channel-digital-human": "Identity for a restricted group-chat digital human",
+	"identity.pet-task":              "Pet Task identity, owner-delegate permissions, and core/diary/worklog paths",
+	"channel.web":                    "Web channel message behavior",
+	"channel.external-channel":       "External channel message behavior",
+	"policy.auto":                    "AHA auto-collaboration policy",
+	"policy.single":                  "Single-Agent policy",
+	"protocol.knowledge":             "Progressively read knowledge by index and close the feedback and revision loop",
+	"protocol.agent-api":             "Agent API permission, progress, and output boundaries",
+	"protocol.attachment-delivery":   "Attachment upload, binding, and receipt boundaries required for every Task",
+	"context.task":                   "Task context template",
+	"context.recent-context":         "recent-context.md template",
+	"context.recovery-handoff":       "Recovery-handoff evidence template at the start of Current Inbox Batch",
+	"context.turn-diagnostics":       "diagnostics/turns.md template",
+	"context.hardware":               "Non-sensitive hardware context template for hardware.md",
+	"context.attachments-index":      "attachments/index.md template",
+	"section.compact-handoff":        "Prompt section after Backend Session compaction",
+	"section.task-workspace":         "Task and Workspace summary section",
+	"section.available-context":      "Available-context entry list section",
+	"section.current-inbox":          "Current Inbox Batch section",
+	"section.inbox-batch-content":    "Template for Inbox messages, channel sources, quoted context, and attachment references",
+	"resource.agent-api":             "Read-only reference template",
+	"resource.attachment-protocol":   "Read-only reference template; attachment upload, binding, and receipt protocol",
+}
+
+var chineseTemplateNames = map[string]string{
+	"core.default":                   "AHA 核心边界",
+	"role.main":                      "主 Agent",
+	"role.sub":                       "子 Agent",
+	"identity.task-agent":            "任务 Agent 身份",
+	"identity.channel-assistant":     "渠道助手身份",
+	"identity.channel-digital-human": "群聊电子人身份",
+	"identity.pet-task":              "宠物 Task 身份",
+	"channel.web":                    "AHA Web 渠道",
+	"channel.external-channel":       "外部渠道",
+	"policy.auto":                    "自动协作",
+	"policy.single":                  "单 Agent",
+	"protocol.knowledge":             "知识协议",
+	"protocol.agent-api":             "Agent 控制 API 协议",
+	"protocol.attachment-delivery":   "附件交付协议",
+	"context.task":                   "Task 上下文文件",
+	"context.recent-context":         "最近上下文文件",
+	"context.recovery-handoff":       "中断续接内联段落",
+	"context.turn-diagnostics":       "Turn 诊断文件",
+	"context.hardware":               "硬件上下文文件",
+	"context.attachments-index":      "附件索引文件",
+	"section.compact-handoff":        "压缩交接段落",
+	"section.task-workspace":         "Task 与 Workspace 段落",
+	"section.available-context":      "可用上下文段落",
+	"section.current-inbox":          "当前 Inbox 段落",
+	"section.inbox-batch-content":    "Inbox 批次内容",
+	"resource.agent-api":             "Agent API 参考文件",
+	"resource.attachment-protocol":   "附件协议文件",
+}
+
+func localizeTemplateMeta(item *domain.PromptTemplate) {
+	if name := chineseTemplateNames[item.ID]; name != "" {
+		item.Name = name
+	}
 }
 
 func isSupersededBuiltinOverride(id, content string) bool {
@@ -329,8 +443,22 @@ func (engine *Engine) RenderInboxBatch(ctx context.Context, items []InboxTemplat
 	return renderTemplateByID(templateByID, "section.inbox-batch-content", templateData{InboxItems: items})
 }
 
+// languageDirective tells the agent which language to use for Owner-facing
+// text. The resident prompts stay in Chinese because they are the control-plane
+// instructions; this small section changes only the response language.
+func languageDirective(language string) string {
+	switch domain.NormalizeLanguage(language) {
+	case domain.LanguageEnglish:
+		return "## Response language\nUse English for your user-facing answer, progress messages, and summaries unless the Owner explicitly asks for another language. When replying in an external channel, match the language used by that channel's participants."
+	case domain.LanguageSimplified:
+		return "## 回复语言\n除非主人本轮明确要求其他语言，否则使用简体中文回复主人、进度消息和总结。回复外部渠道时跟随该渠道参与者使用的语言。"
+	default:
+		return "## Response language\nReply in the language of the Owner's latest message. If the message language is ambiguous, use Simplified Chinese. In an external channel, match the participants' language."
+	}
+}
+
 func (engine *Engine) Build(ctx context.Context, input BuildInput) (BuildResult, error) {
-	templates, err := engine.Templates(ctx)
+	templates, err := engine.TemplatesForLanguage(ctx, input.Language)
 	if err != nil {
 		return BuildResult{}, err
 	}
@@ -359,7 +487,6 @@ func (engine *Engine) Build(ctx context.Context, input BuildInput) (BuildResult,
 		CurrentGoal: input.Task.CurrentGoal, CurrentGoalSummary: truncate(input.Task.CurrentGoal, 800),
 		TaskBranch: input.Task.TaskBranch, InboxBatch: strings.TrimSpace(input.UserMessage),
 		CompactHandoff: strings.TrimSpace(input.Handoff), AgentAPIURL: strings.TrimRight(input.AgentAPIURL, "/"),
-		PetDiaryPaths: input.PetDiaryPaths,
 	}
 	if input.IncludeRecoveryHandoff {
 		if evidence := recoveryHandoffEvidenceFor(input); evidence != nil {
@@ -415,6 +542,9 @@ func (engine *Engine) Build(ctx context.Context, input BuildInput) (BuildResult,
 		parts = append(parts, "## "+item.Name+"\n"+content)
 	}
 	effective := strings.Join(parts, "\n\n")
+	if directive := languageDirective(input.Language); directive != "" {
+		effective += "\n\n" + directive
+	}
 	return BuildResult{
 		EffectivePrompt: effective, ContextRoot: contextRoot, ContextManifest: contextResources,
 		SharedRoot: sharedRoot, SharedManifest: sharedManifest,
@@ -1090,10 +1220,21 @@ func staleKnowledgeResources(input BuildInput, directory string, entries []domai
 		return entries[left].Title < entries[right].Title
 	})
 	queuePath := joinContextPath(input, directory, "pending-updates", "index.md")
+	english := domain.NormalizeLanguage(input.Language) == domain.LanguageEnglish
+	title := "# 待修订知识"
+	intro := "以下文档已被标记为过时或错误，不得作为当前事实使用。仅当本轮工作获得相关代码、测试或文档证据时，读取对应旧文档并通过 Agent Knowledge API 提交完整修订提案。不要脱离当前任务猜测更新，也不要直接恢复 verified。"
+	pendingBodyTitle := "## 已发布但待修订的内容"
+	staleDescription := "待修订知识队列；仅在当前工作提供相关证据时读取并提交修订提案"
+	if english {
+		title = "# Knowledge pending revision"
+		intro = "The documents below are marked stale or wrong and must not be used as current facts. Only when this Turn has relevant code, test, or documentation evidence, read the old document and submit a complete revision proposal through the Agent Knowledge API. Do not guess updates or restore verified directly."
+		pendingBodyTitle = "## Published content pending revision"
+		staleDescription = "Knowledge pending revision; read only when this Turn has relevant evidence and submit a revision proposal"
+	}
 	lines := []string{
-		"# 待修订知识",
+		title,
 		"",
-		"以下文档已被标记为过时或错误，不得作为当前事实使用。仅当本轮工作获得相关代码、测试或文档证据时，读取对应旧文档并通过 Agent Knowledge API 提交完整修订提案。不要脱离当前任务猜测更新，也不要直接恢复 verified。",
+		intro,
 		"",
 		"## Documents",
 		"",
@@ -1108,10 +1249,14 @@ func staleKnowledgeResources(input BuildInput, directory string, entries []domai
 			feedback = "stale"
 		}
 		lines = append(lines, fmt.Sprintf("- [%s](%s) — %s / %s / revision %d / %s", entry.Title, relative, entry.Scope, entry.Type, entry.Revision, feedback))
-		body := fmt.Sprintf("# %s\n\n- entry_id: %s\n- base_revision: %d\n- scope: %s\n- project_id: %s\n- type: %s\n- feedback: %s\n\n## 已发布但待修订的内容\n\n%s\n", entry.Title, entry.ID, entry.Revision, entry.Scope, entry.ProjectID, entry.Type, feedback, entry.Body)
-		resources = append(resources, detailResource(input, "knowledge-stale-"+entry.ID, detailPath, entry.Title+"（待修订，非有效知识）", body))
+		staleSuffix := "（待修订，非有效知识）"
+		if english {
+			staleSuffix = " (stale, not current knowledge)"
+		}
+		body := fmt.Sprintf("# %s\n\n- entry_id: %s\n- base_revision: %d\n- scope: %s\n- project_id: %s\n- type: %s\n- feedback: %s\n\n%s\n\n%s\n", entry.Title, entry.ID, entry.Revision, entry.Scope, entry.ProjectID, entry.Type, feedback, pendingBodyTitle, entry.Body)
+		resources = append(resources, detailResource(input, "knowledge-stale-"+entry.ID, detailPath, entry.Title+staleSuffix, body))
 	}
-	index := resource(input, "knowledge-pending-updates", queuePath, "待修订知识队列；仅在当前工作提供相关证据时读取并提交修订提案", strings.Join(lines, "\n"))
+	index := resource(input, "knowledge-pending-updates", queuePath, staleDescription, strings.Join(lines, "\n"))
 	return append([]ContextResource{index}, resources...)
 }
 
@@ -1199,24 +1344,41 @@ func knowledgeScopeResources(input BuildInput, directory, scope string, entries 
 		rootBacked                          bool
 		include                             func(domain.KnowledgeEntry) bool
 	}
+	english := domain.NormalizeLanguage(input.Language) == domain.LanguageEnglish
+	globalTitle, globalDescription, globalEmpty := "全局知识", "这是 AHA2 全局知识页面。通用知识以人类阅读为主，Agent 仅在任务主题明确相关时按需读取；Agent 经验教训用于沉淀可跨项目复用的技术诊断与行为教训。请根据分类、标题与摘要选择阅读路径。", "当前没有可用的全局知识文档。"
+	if english {
+		globalTitle = "Global knowledge"
+		globalDescription = "This is AHA2's global knowledge page. General knowledge is primarily for human reading; Agents read it only when clearly relevant to the Task topic. Agent lessons capture technical diagnostics and behavioral lessons reusable across projects. Choose reading paths from the categories, titles, and summaries."
+		globalEmpty = "No global knowledge documents are available."
+	}
 	specs := []indexSpec{{
 		id: "knowledge-global-index", path: joinContextPath(input, scopeDirectory, "index.md"),
-		title: "全局知识", description: "这是 AHA2 全局知识页面。通用知识以人类阅读为主，Agent 仅在任务主题明确相关时按需读取；Agent 经验教训用于沉淀可跨项目复用的技术诊断与行为教训。请根据分类、标题与摘要选择阅读路径。",
-		empty: "当前没有可用的全局知识文档。", rootBacked: true,
+		title: globalTitle, description: globalDescription,
+		empty: globalEmpty, rootBacked: true,
 		include: func(domain.KnowledgeEntry) bool { return true },
 	}}
 	if scope == "project" {
+		projectTitle, projectDescription, projectEmpty := "项目知识", "这是当前项目的知识页面，保存项目实践、技术决策、诊断结论和可复用经验。请根据下面的标题与摘要按需打开文档。", "当前没有可用的项目知识文档。"
+		navigationTitle, navigationDescription, navigationEmpty := "项目导航", "这是当前项目的导航页面，按模块、代码路径、边界与关键流程组织入口。请根据下面的标题与摘要选择阅读路径。", "当前没有可用的项目导航文档。"
+		if english {
+			projectTitle = "Project knowledge"
+			projectDescription = "This page holds the current project's knowledge: practices, technical decisions, diagnostic conclusions, and reusable experience. Open documents as needed from the titles and summaries below."
+			projectEmpty = "No project knowledge documents are available."
+			navigationTitle = "Project navigation"
+			navigationDescription = "This page organizes the current project's entry points by module, code path, boundary, and key flow. Choose reading paths from the titles and summaries below."
+			navigationEmpty = "No project navigation documents are available."
+		}
 		specs = []indexSpec{
 			{
 				id: "knowledge-project-index", path: joinContextPath(input, scopeDirectory, "index.md"),
-				title: "项目知识", description: "这是当前项目的知识页面，保存项目实践、技术决策、诊断结论和可复用经验。请根据下面的标题与摘要按需打开文档。",
-				empty: "当前没有可用的项目知识文档。", rootBacked: true,
+				title: projectTitle, description: projectDescription,
+				empty: projectEmpty, rootBacked: true,
 				include: func(domain.KnowledgeEntry) bool { return true },
 			},
 			{
 				id: "knowledge-project-navigation-index", path: joinContextPath(input, scopeDirectory, "navigation", "index.md"),
-				title: "项目导航", description: "这是当前项目的导航页面，按模块、代码路径、边界与关键流程组织入口。请根据下面的标题与摘要选择阅读路径。",
-				empty:   "当前没有可用的项目导航文档。",
+				title: navigationTitle, description: navigationDescription,
+				empty:   navigationEmpty,
 				include: func(entry domain.KnowledgeEntry) bool { return navigationIDs[entry.ID] },
 			},
 		}

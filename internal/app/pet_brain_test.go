@@ -4,9 +4,28 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
 )
+
+func TestPetAutonomousMessageFollowsOwnerLanguage(t *testing.T) {
+	message := petAutonomousMessage(true, 20, "后台（服务端调度）", PetLayout{}, "- [waiting] Task A | check next turn | task completed")
+	for _, want := range []string{"[Autonomous behavior]", "20 minutes", "background (server scheduler)", "Page layout unavailable", "Open loops", "Task A | check next turn"} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("English autonomous message missing %q: %s", want, message)
+		}
+	}
+	for _, unwanted := range []string{"[自主行为]", "主人已经", "页面布局"} {
+		if strings.Contains(message, unwanted) {
+			t.Fatalf("English autonomous message still contains %q: %s", unwanted, message)
+		}
+	}
+	chinese := petAutonomousMessage(false, 20, "后台（服务端调度）", PetLayout{}, "- [waiting] 任务 A | 下轮检查 | 任务完成")
+	if !strings.Contains(chinese, "[自主行为] 主人已经 20 分钟没有互动") || !strings.Contains(chinese, "开放闭环") {
+		t.Fatalf("Chinese autonomous message changed: %s", chinese)
+	}
+}
 
 func TestParsePetBrainValidatesActionsAndSay(t *testing.T) {
 	result := parsePetBrain("```json\n{\"say\":\"我去看看\",\"actions\":[{\"type\":\"play\",\"name\":\"jump\"},{\"type\":\"play\",\"name\":\"turn\"},{\"type\":\"move_to\",\"zone\":\"left\"},{\"type\":\"open_task\",\"task\":\"task-032\"}]}\n```")
@@ -30,6 +49,15 @@ func TestParsePetBrainRejectsMalformedAndUnsafeActions(t *testing.T) {
 
 func TestAskOwnerPetBrainReopensFailedPetTask(t *testing.T) {
 	fixture := newPetTaskFixture(t)
+	// The autonomy gate is time-of-day dependent; disable the quiet window so
+	// this test does not start failing whenever the suite runs at night.
+	assistant, err := fixture.database.EnsureOwnerAssistant(fixture.ctx, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.database.UpdateOwnerPetBudget(fixture.ctx, assistant.ID, assistant.PetIdleMinutes, false, assistant.PetQuietStart, assistant.PetQuietEnd, assistant.PetHourlyLimit, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
 	fixture.createPetDraft(t, "旧的宠物需求")
 	if _, err := fixture.service.StartTask(fixture.ctx, petTaskID); err != nil {
 		t.Fatal(err)

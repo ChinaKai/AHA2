@@ -267,12 +267,12 @@ func (s *Store) ModelProviderAndEnvGroup(ctx context.Context, id string) (string
 func (s *Store) UpsertEnvGroup(ctx context.Context, item domain.EnvGroup) error {
 	item.Revision = s.sharedNumericVersion(ctx, "env_group", item.ID, item.Revision)
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO env_groups(id,name,provider_id,backend,revision,environment_json,secret_names_json,secret_configured,created_at,updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?)
+		INSERT INTO env_groups(id,name,provider_id,backend,revision,environment_json,secret_names_json,secret_configured,created_at,updated_at,deleted_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,'')
 		ON CONFLICT(id) DO UPDATE SET
 			name=excluded.name,provider_id=excluded.provider_id,backend=excluded.backend,revision=excluded.revision,
 			environment_json=excluded.environment_json,secret_names_json=excluded.secret_names_json,
-			secret_configured=excluded.secret_configured,updated_at=excluded.updated_at`,
+			secret_configured=excluded.secret_configured,updated_at=excluded.updated_at,deleted_at=''`,
 		item.ID, item.Name, item.ProviderID, item.Backend, item.Revision, encodeJSON(item.Environment),
 		encodeJSON(item.SecretRefs), item.SecretConfigured, timeString(item.CreatedAt), timeString(item.UpdatedAt),
 	)
@@ -280,7 +280,7 @@ func (s *Store) UpsertEnvGroup(ctx context.Context, item domain.EnvGroup) error 
 }
 
 func (s *Store) ListEnvGroups(ctx context.Context) ([]domain.EnvGroup, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,name,provider_id,backend,revision,environment_json,secret_names_json,secret_configured,created_at,updated_at FROM env_groups ORDER BY name`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,name,provider_id,backend,revision,environment_json,secret_names_json,secret_configured,created_at,updated_at FROM env_groups WHERE deleted_at='' ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -461,8 +461,86 @@ func (s *Store) DeleteEnvGroup(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
+	var deletedAt string
+	if err := s.db.QueryRowContext(ctx, `SELECT deleted_at FROM env_groups WHERE id=?`, id).Scan(&deletedAt); err == nil && deletedAt != "" {
+		return nil
+	}
+	blockers, err := s.envGroupReferenceBlockers(ctx, id)
+	if err != nil {
+		return err
+	}
+	if len(blockers) > 0 {
+		return fmt.Errorf("Env Group 仍被引用：%s", strings.Join(blockers, "、"))
+	}
+	// Historical runtime snapshots keep the env group row due to the foreign key.
+	// Mark it deleted so every list/selector hides it while immutable history
+	// remains readable; sync uses the tombstone returned by deleteSharedObject.
 	_, err = s.deleteSharedObject(ctx, "env_group", id, strconv.Itoa(item.Revision), time.Now().UTC())
 	return err
+}
+
+// envGroupReferenceBlockers lists only references that still need the env group.
+// Historical Turns are allowed: their runtime snapshots keep the logical row for
+// referential integrity, while the deleted row disappears from every selector.
+func (s *Store) envGroupReferenceBlockers(ctx context.Context, id string) ([]string, error) {
+	var blockers []string
+	rows, err := s.db.QueryContext(ctx, `SELECT display_name FROM models WHERE default_env_group_id=? AND deleted_at='' ORDER BY display_name`, id)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		blockers = append(blockers, "模型 "+name)
+	}
+	rows.Close()
+	rows, err = s.db.QueryContext(ctx, `SELECT t.code,t.title FROM tasks t JOIN runtime_config_snapshots snapshot ON t.runtime_config_snapshot_id=snapshot.id WHERE snapshot.env_group_id=? ORDER BY t.created_at`, id)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var code, title string
+		if err := rows.Scan(&code, &title); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		label := code
+		if label == "" {
+			label = title
+		}
+		blockers = append(blockers, "Task "+label)
+	}
+	rows.Close()
+	rows, err = s.db.QueryContext(ctx, `SELECT agent.task_id,agent.agent_id FROM task_agents agent JOIN runtime_config_snapshots snapshot ON agent.runtime_config_snapshot_id=snapshot.id WHERE snapshot.env_group_id=? ORDER BY agent.task_id,agent.agent_id`, id)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var taskID, agentID string
+		if err := rows.Scan(&taskID, &agentID); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		blockers = append(blockers, "Agent "+taskID+"/"+agentID)
+	}
+	rows.Close()
+	rows, err = s.db.QueryContext(ctx, `SELECT turn.id FROM turns turn JOIN runtime_config_snapshots snapshot ON turn.runtime_config_snapshot_id=snapshot.id WHERE snapshot.env_group_id=? AND turn.status NOT IN ('succeeded','failed','interrupted','blocked','cancelled') ORDER BY turn.queued_at`, id)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var turnID string
+		if err := rows.Scan(&turnID); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		blockers = append(blockers, "进行中 Turn "+turnID)
+	}
+	rows.Close()
+	return blockers, nil
 }
 
 func (s *Store) DeleteWorkspace(ctx context.Context, id string) error {
@@ -517,6 +595,9 @@ func (s *Store) EnvGroupInUse(ctx context.Context, id string) (bool, error) {
 		)`, id).Scan(&exists)
 	return exists, err
 }
+
+// BackfillProviders creates provider rows for existing env groups that predate
+// the providers table (legacy AHA imports). Returns the number created.
 
 // BackfillProviders creates provider rows for existing env groups that predate
 // the providers table (legacy AHA imports). Returns the number created.

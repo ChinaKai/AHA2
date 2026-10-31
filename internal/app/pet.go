@@ -245,7 +245,7 @@ func (s *Service) AskOwnerPetBrain(ctx context.Context, input PetBrainContext) (
 	if _, activeErr := s.store.ActiveTurn(ctx, petTaskID); activeErr == nil {
 		return PetBrainResult{}, fmt.Errorf("宠物 Task 正在执行，跳过本次自主行为")
 	}
-	message := fmt.Sprintf("[自主行为] 主人已经 %d 分钟没有互动。请按宠物身份决定是否说话或做动作；想做什么就调用宠物工具，不要写代码。当前页面：%s。\n\n页面布局：\n%s", idleMinutes, page, petLayoutPrompt(input.Layout))
+	message := petAutonomousMessage(s.petUsesEnglish(ctx), idleMinutes, page, input.Layout, s.PetOpenLoops(ctx))
 	if _, err := s.SubmitMessage(ctx, petTaskID, message); err != nil {
 		return PetBrainResult{}, err
 	}
@@ -337,6 +337,61 @@ func petActionsFromToolCalls(calls []gateway.ChatToolCall, limit int) []PetBrain
 	return actions
 }
 
+func petAutonomousMessage(english bool, idleMinutes int, page string, layout PetLayout, loops string) string {
+	runtimeState := "Web 前台（你可以使用 pet MCP 控制形象和主人互动）"
+	if strings.Contains(page, "后台") {
+		runtimeState = "后台运行（不要调用 pet MCP 控制形象；专注巡检、记录和提醒）"
+	}
+	loops = strings.TrimSpace(loops)
+	loopsBlock := ""
+	if loops != "" {
+		if english {
+			loopsBlock = "\n\nOpen loops (keep current in core/loops.md with pet_update_core; add Tasks you create/join, ideas, and approvals; close resolved items):\n" + loops
+		} else {
+			loopsBlock = "\n\n开放闭环（用 pet_update_core 更新 core/loops.md；记录自己创建/参与的任务、想法和审批，完成后关闭）：\n" + loops
+		}
+	}
+	if !english {
+		return fmt.Sprintf("[自主行为] 主人已经 %d 分钟没有互动。运行位置：%s。请按宠物身份决定是否说话或做动作；想做什么就调用宠物工具，不要写代码。当前页面：%s。\n\n页面布局：\n%s%s", idleMinutes, runtimeState, page, petLayoutPrompt(layout), loopsBlock)
+	}
+	if page == "未知页面" {
+		page = "unknown page"
+	}
+	if strings.Contains(page, "后台") {
+		page = "background (server scheduler)"
+	}
+	runtimeState = "web foreground (you may use pet MCP to control the avatar and interact with the owner)"
+	if strings.Contains(page, "background") {
+		runtimeState = "background run (do not use pet MCP to control the avatar; focus on inspection, notes, and reminders)"
+	}
+	return fmt.Sprintf("[Autonomous behavior] The owner has not interacted for %d minutes. Runtime: %s. Decide as your pet character whether to speak or act; use pet tools for anything you want to do, and do not write code. Current page: %s.\n\nPage layout:\n%s%s", idleMinutes, runtimeState, page, petLayoutPromptEnglish(layout), loopsBlock)
+}
+
+func (s *Service) petUsesEnglish(ctx context.Context) bool {
+	settings, err := s.store.GeneralSettings(ctx)
+	return err == nil && settings.Language == domain.LanguageEnglish
+}
+
+func petLayoutPromptEnglish(layout PetLayout) string {
+	if layout.ViewportWidth <= 0 || layout.ViewportHeight <= 0 {
+		return "Page layout unavailable; only zone movement is allowed."
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "Viewport %dx%d, scroll %.0f; pet rect x=%.0f y=%.0f w=%.0f h=%.0f.\n",
+		layout.ViewportWidth, layout.ViewportHeight, layout.ScrollY,
+		layout.Pet.X, layout.Pet.Y, layout.Pet.W, layout.Pet.H)
+	if layout.Panel != nil {
+		fmt.Fprintf(&b, "Chat panel x=%.0f y=%.0f w=%.0f h=%.0f.\n",
+			layout.Panel.X, layout.Panel.Y, layout.Panel.W, layout.Panel.H)
+	}
+	for _, element := range layout.Elements {
+		fmt.Fprintf(&b, "- %s: x=%.0f y=%.0f w=%.0f h=%.0f\n",
+			element.Name, element.X, element.Y, element.W, element.H)
+	}
+	b.WriteString("When moving, use pet_move_to x/y viewport fractions; avoid covering inputs, buttons, and chat panel text.")
+	return b.String()
+}
+
 func petLayoutPrompt(layout PetLayout) string {
 	if layout.ViewportWidth <= 0 || layout.ViewportHeight <= 0 {
 		return "页面布局未知；只能用区域移动。"
@@ -425,6 +480,15 @@ type PetSettingsInput struct {
 	QuietStart   int      `json:"quiet_start"`
 	QuietEnd     int      `json:"quiet_end"`
 	HourlyLimit  int      `json:"hourly_limit"`
+
+	AllowViewTasks        *bool `json:"allow_view_tasks"`
+	AllowCreateTasks      *bool `json:"allow_create_tasks"`
+	AllowCreateWorkspaces *bool `json:"allow_create_workspaces"`
+	AllowMessageTasks     *bool `json:"allow_message_tasks"`
+	AllowManageModels     *bool `json:"allow_manage_models"`
+	AllowManageKnowledge  *bool `json:"allow_manage_knowledge"`
+	AllowManageChannels   *bool `json:"allow_manage_channels"`
+	AllowManageSystem     *bool `json:"allow_manage_system"`
 }
 
 func (s *Service) UpdateOwnerPetSettings(ctx context.Context, input PetSettingsInput) (OwnerAssistantView, error) {
@@ -497,6 +561,30 @@ func (s *Service) UpdateOwnerPetSettings(ctx context.Context, input PetSettingsI
 	assistant.PetQuietStart = quietStart
 	assistant.PetQuietEnd = quietEnd
 	assistant.PetHourlyLimit = hourlyLimit
+	if input.AllowViewTasks != nil {
+		assistant.PetAllowViewTasks = *input.AllowViewTasks
+	}
+	if input.AllowCreateTasks != nil {
+		assistant.PetAllowCreateTasks = *input.AllowCreateTasks
+	}
+	if input.AllowCreateWorkspaces != nil {
+		assistant.PetAllowCreateWorkspaces = *input.AllowCreateWorkspaces
+	}
+	if input.AllowMessageTasks != nil {
+		assistant.PetAllowMessageTasks = *input.AllowMessageTasks
+	}
+	if input.AllowManageModels != nil {
+		assistant.PetAllowManageModels = *input.AllowManageModels
+	}
+	if input.AllowManageKnowledge != nil {
+		assistant.PetAllowManageKnowledge = *input.AllowManageKnowledge
+	}
+	if input.AllowManageChannels != nil {
+		assistant.PetAllowManageChannels = *input.AllowManageChannels
+	}
+	if input.AllowManageSystem != nil {
+		assistant.PetAllowManageSystem = *input.AllowManageSystem
+	}
 	// Identity/principles are system-managed for now; user-supplied values
 	// are ignored until the write permission is explicitly enabled.
 	assistant.UpdatedAt = s.now().UTC()
@@ -507,6 +595,12 @@ func (s *Service) UpdateOwnerPetSettings(ctx context.Context, input PetSettingsI
 		return OwnerAssistantView{}, err
 	}
 	if err := s.store.UpdateOwnerPetBudget(ctx, assistant.ID, assistant.PetIdleMinutes, assistant.PetQuietEnabled, assistant.PetQuietStart, assistant.PetQuietEnd, assistant.PetHourlyLimit, assistant.UpdatedAt); err != nil {
+		return OwnerAssistantView{}, err
+	}
+	if err := s.store.UpdateOwnerPetPermissions(ctx, assistant.ID,
+		assistant.PetAllowViewTasks, assistant.PetAllowCreateTasks,
+		assistant.PetAllowCreateWorkspaces, assistant.PetAllowMessageTasks,
+		assistant.PetAllowManageModels, assistant.PetAllowManageKnowledge, assistant.PetAllowManageChannels, assistant.PetAllowManageSystem, assistant.UpdatedAt); err != nil {
 		return OwnerAssistantView{}, err
 	}
 	if err := s.store.UpdateOwnerPetIdentity(ctx, assistant.ID, assistant.PetIdentity, assistant.PetPrinciples, assistant.UpdatedAt); err != nil {
@@ -608,13 +702,1645 @@ func (s *Service) ControlOwnerPet(ctx context.Context, input PetControlRequest) 
 	return result, nil
 }
 
-func (s *Service) PetMCPTools() []gateway.ChatTool {
-	return assistantPetTools()
+func (s *Service) PetMCPTools(ctx context.Context) []gateway.ChatTool {
+	// Tools are always advertised so a permission change takes effect without a
+	// backend-session reset; PetMCPTool enforces the switch on every call.
+	return allPetMCPTools()
+}
+
+func allPetMCPTools() []gateway.ChatTool {
+	tools := append([]gateway.ChatTool(nil), assistantPetTools()...)
+	return append(tools, ahaPetTools()...)
+}
+
+func petToolAllowed(assistant domain.OwnerAssistant, name string) bool {
+	switch name {
+	case "aha_overview", "aha_pet_work_state", "aha_pet_permissions", "aha_request_permission_change", "aha_capabilities", "pet_request_approval", "pet_list_approvals", "pet_submit_idea":
+		return true
+	case "pet_say", "pet_play", "pet_move_to", "pet_walk_path", "pet_mood", "pet_open_task", "pet_thinking", "pet_sleep", "pet_wake",
+		"pet_update_core", "pet_write_diary", "pet_write_worklog":
+		return true
+	case "aha_task_detail", "aha_task_conversation", "aha_task_turns", "aha_model_catalog", "aha_list_task_attachments", "aha_hardware_resources", "aha_task_hardware", "aha_task_channel_route", "aha_list_remote_tasks", "pet_watch_task", "pet_unwatch_task":
+		return assistant.PetAllowViewTasks
+	case "aha_list_knowledge", "aha_knowledge_detail", "aha_list_skills", "aha_skill_detail", "aha_list_prompt_templates":
+		return assistant.PetAllowViewTasks || assistant.PetAllowManageKnowledge
+	case "aha_submit_knowledge", "aha_create_skill", "aha_update_skill", "aha_delete_skill", "aha_delete_knowledge", "aha_prompt_template_detail", "aha_update_prompt_template":
+		return assistant.PetAllowManageKnowledge
+	case "aha_list_channels", "aha_channel_detail", "aha_list_channel_destinations", "aha_channel_contacts":
+		return assistant.PetAllowViewTasks || assistant.PetAllowManageChannels
+	case "aha_send_channel_message", "aha_set_channel_enabled", "aha_reset_channel_binding", "aha_archive_channel", "aha_purge_channel":
+		return assistant.PetAllowManageChannels
+	case "aha_system_settings":
+		return assistant.PetAllowViewTasks || assistant.PetAllowManageSystem
+	case "aha_update_security_settings", "aha_delete_hardware_resource":
+		return assistant.PetAllowManageSystem
+	case "aha_list_projects":
+		return assistant.PetAllowViewTasks || assistant.PetAllowCreateTasks || assistant.PetAllowCreateWorkspaces
+	case "aha_create_task", "aha_start_task", "aha_takeover_remote_task", "aha_complete_task", "aha_delete_task", "aha_reopen_task", "aha_interrupt_task", "aha_update_task", "aha_update_task_agent", "aha_upload_task_attachment", "aha_delete_task_attachment", "aha_update_task_hardware", "aha_bind_task_channel", "aha_unbind_task_channel", "aha_retire_remote_task_mirror", "aha_compact_task_session", "aha_reset_task_session":
+		return assistant.PetAllowCreateTasks
+	case "aha_create_project", "aha_create_workspace", "aha_takeover_remote_workspace", "aha_update_project", "aha_delete_project", "aha_update_workspace", "aha_delete_workspace", "aha_detect_workspace", "aha_retire_remote_workspace_mirror":
+		return assistant.PetAllowCreateWorkspaces
+	case "aha_send_task_message":
+		return assistant.PetAllowMessageTasks
+	case "aha_create_provider", "aha_update_provider", "aha_delete_provider", "aha_detect_models",
+		"aha_create_model", "aha_update_model", "aha_delete_model",
+		"aha_create_env_group", "aha_update_env_group", "aha_delete_env_group":
+		return assistant.PetAllowManageModels
+	default:
+		return false
+	}
+}
+
+func isAhaPetTool(name string) bool {
+	for _, tool := range ahaPetTools() {
+		if tool.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func ahaPetTools() []gateway.ChatTool {
+	return []gateway.ChatTool{
+		{Name: "aha_overview", Description: "只读查看 AHA2 项目、任务、渠道的汇总和需要关注的任务", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{},
+		}},
+		{Name: "aha_pet_work_state", Description: "开始工作前查看：审批是否有更新，最近创建/启动/发消息的 Task 当前进展和错误", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{},
+		}},
+		{Name: "aha_pet_permissions", Description: "只读查看当前宠物权限开关", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{},
+		}},
+		{Name: "aha_capabilities", Description: "按当前权限返回可用工具目录；需要知道有哪些命令时调用，不要凭记忆猜", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{},
+		}},
+		{Name: "aha_request_permission_change", Description: "提交权限变更审批；主人批准后才生效，宠物不能自行改权限", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"permission": map[string]any{"type": "string", "enum": []string{
+					"view_tasks", "create_tasks", "create_workspaces", "message_tasks",
+					"manage_models", "manage_knowledge", "manage_channels", "manage_system",
+				}},
+				"enabled": map[string]any{"type": "boolean"},
+				"reason":  map[string]any{"type": "string", "description": "为什么需要这项权限；必填"},
+			}, "required": []string{"permission", "enabled", "reason"},
+		}},
+		{Name: "aha_task_detail", Description: "只读查看一个 Task 的状态、目标和最近一次 Turn 的错误/结果", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"task_id": map[string]any{"type": "string"},
+			}, "required": []string{"task_id"},
+		}},
+		{Name: "aha_list_projects", Description: "只读列出项目和 Workspace，用于选择创建 Task 的位置", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{},
+		}},
+		{Name: "aha_list_remote_tasks", Description: "只读列出其他设备的 Task 镜像，可接管到本机", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"project_id": map[string]any{"type": "string"},
+			},
+		}},
+		{Name: "aha_list_knowledge", Description: "只读列出知识条目和待审知识候选；scope 为 project 时需要 project_id", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"scope":      map[string]any{"type": "string", "enum": []string{"project", "global"}},
+				"project_id": map[string]any{"type": "string"},
+				"limit":      map[string]any{"type": "integer", "minimum": 1, "maximum": 50},
+			},
+		}},
+		{Name: "aha_knowledge_detail", Description: "只读查看知识条目正文", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{"knowledge_id": map[string]any{"type": "string"}}, "required": []string{"knowledge_id"},
+		}},
+		{Name: "aha_submit_knowledge", Description: "提交知识候选或修订；scope 可为 project 或 global，是否直接发布取决于知识审核设置，自动审核开启时会直接发布", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"scope":      map[string]any{"type": "string", "enum": []string{"project", "global"}},
+				"project_id": map[string]any{"type": "string", "description": "scope=project 时必填"},
+				"candidates": map[string]any{"type": "array", "items": map[string]any{
+					"type": "object", "properties": map[string]any{
+						"entry_id":        map[string]any{"type": "string", "description": "可选；修订已有条目时提供"},
+						"base_revision":   map[string]any{"type": "integer"},
+						"parent_id":       map[string]any{"type": "string"},
+						"slug":            map[string]any{"type": "string"},
+						"sort_order":      map[string]any{"type": "integer"},
+						"is_index":        map[string]any{"type": "boolean"},
+						"type":            map[string]any{"type": "string", "enum": []string{"practice", "diagnostic"}},
+						"title":           map[string]any{"type": "string"},
+						"body":            map[string]any{"type": "string"},
+						"confidence":      map[string]any{"type": "number", "minimum": 0, "maximum": 1},
+						"product_line_id": map[string]any{"type": "string"},
+						"reason":          map[string]any{"type": "string", "description": "为什么提交或修订这条知识"},
+					}, "required": []string{"title", "body"},
+				}},
+			}, "required": []string{"candidates"},
+		}},
+		{Name: "aha_list_skills", Description: "只读列出 Skill；不返回包内文件内容", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"scope":      map[string]any{"type": "string", "enum": []string{"project", "global"}},
+				"project_id": map[string]any{"type": "string"},
+				"limit":      map[string]any{"type": "integer", "minimum": 1, "maximum": 50},
+			},
+		}},
+		{Name: "aha_skill_detail", Description: "只读查看 Skill 说明和文件名", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{"skill_id": map[string]any{"type": "string"}}, "required": []string{"skill_id"},
+		}},
+		{Name: "aha_create_skill", Description: "创建项目级 Skill", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"project_id":   map[string]any{"type": "string"},
+				"name":         map[string]any{"type": "string"},
+				"description":  map[string]any{"type": "string"},
+				"instructions": map[string]any{"type": "string"},
+				"status":       map[string]any{"type": "string", "enum": []string{"active", "draft", "disabled"}},
+				"enabled":      map[string]any{"type": "boolean"},
+			}, "required": []string{"project_id", "name", "instructions"},
+		}},
+		{Name: "aha_update_skill", Description: "修改项目级 Skill；未提供的字段保持不变", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"skill_id":     map[string]any{"type": "string"},
+				"name":         map[string]any{"type": "string"},
+				"description":  map[string]any{"type": "string"},
+				"instructions": map[string]any{"type": "string"},
+				"status":       map[string]any{"type": "string", "enum": []string{"active", "draft", "disabled"}},
+				"enabled":      map[string]any{"type": "boolean"},
+			}, "required": []string{"skill_id"},
+		}},
+		{Name: "aha_delete_skill", Description: "提交删除 Skill 审批；主人批准后才删除", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"skill_id": map[string]any{"type": "string"},
+				"reason":   map[string]any{"type": "string", "description": "为什么需要删除；必填"},
+			}, "required": []string{"skill_id", "reason"},
+		}},
+		{Name: "aha_delete_knowledge", Description: "提交删除知识条目审批（支持 project/global）；主人批准后才删除，空 AHA1 目录会自动清理", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"knowledge_id": map[string]any{"type": "string"},
+				"reason":       map[string]any{"type": "string", "description": "为什么需要删除；必填"},
+			}, "required": []string{"knowledge_id", "reason"},
+		}},
+		{Name: "aha_list_prompt_templates", Description: "只读列出 Prompt 模板元数据", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{},
+		}},
+		{Name: "aha_prompt_template_detail", Description: "查看 Prompt 模板内容；受保护的身份/安全/协议模板只读", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{"template_id": map[string]any{"type": "string"}}, "required": []string{"template_id"},
+		}},
+		{Name: "aha_update_prompt_template", Description: "提交 Prompt 模板修改审批；主人批准后才写入，身份/安全/协议模板不允许修改", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"template_id": map[string]any{"type": "string"},
+				"content":     map[string]any{"type": "string"},
+				"reason":      map[string]any{"type": "string", "description": "为什么需要修改；必填"},
+			}, "required": []string{"template_id", "content", "reason"},
+		}},
+		{Name: "aha_list_channels", Description: "只读列出渠道实例和健康状态（不返回凭据）", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{},
+		}},
+		{Name: "aha_channel_detail", Description: "只读查看渠道实例和端点（不返回凭据）", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{"instance_id": map[string]any{"type": "string"}}, "required": []string{"instance_id"},
+		}},
+		{Name: "aha_list_channel_destinations", Description: "只读列出可用渠道目的地和当前 Task 路由", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{},
+		}},
+		{Name: "aha_channel_contacts", Description: "只读查看渠道目的地的联系人", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{"conversation_id": map[string]any{"type": "string"}}, "required": []string{"conversation_id"},
+		}},
+		{Name: "aha_send_channel_message", Description: "提交对外渠道发送审批；主人批准后才发送到已绑定的群聊渠道", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"task_id":                   map[string]any{"type": "string"},
+				"message":                   map[string]any{"type": "string"},
+				"reason":                    map[string]any{"type": "string", "description": "为什么需要对外发送；至少 8 个字符"},
+				"mention_identity_link_ids": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"attachment_ids":            map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+			}, "required": []string{"task_id", "message", "reason"},
+		}},
+		{Name: "aha_set_channel_enabled", Description: "提交启用/停用渠道审批；主人批准后才执行", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"instance_id": map[string]any{"type": "string"},
+				"enabled":     map[string]any{"type": "boolean"},
+			}, "required": []string{"instance_id", "enabled"},
+		}},
+		{Name: "aha_reset_channel_binding", Description: "提交重置渠道绑定审批；批准后清理绑定和凭据", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"instance_id": map[string]any{"type": "string"},
+				"reason":      map[string]any{"type": "string", "description": "为什么执行该渠道操作；至少 8 个字符"},
+			}, "required": []string{"instance_id", "reason"},
+		}},
+		{Name: "aha_archive_channel", Description: "提交归档渠道审批；批准后停止运行时并归档", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"instance_id": map[string]any{"type": "string"},
+				"reason":      map[string]any{"type": "string", "description": "为什么执行该渠道操作；至少 8 个字符"},
+			}, "required": []string{"instance_id", "reason"},
+		}},
+		{Name: "aha_purge_channel", Description: "提交永久清理渠道审批；只能清理已归档渠道，批准后不可恢复", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"instance_id": map[string]any{"type": "string"},
+				"reason":      map[string]any{"type": "string", "description": "为什么执行该渠道操作；至少 8 个字符"},
+			}, "required": []string{"instance_id", "reason"},
+		}},
+		{Name: "aha_system_settings", Description: "只读查看系统安全设置和代理设置（代理凭据会脱敏）", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{},
+		}},
+		{Name: "aha_update_security_settings", Description: "提交安全设置修改审批；主人批准后立即应用 access_scope 和 Origin 校验", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"validate_origin": map[string]any{"type": "boolean"},
+				"access_scope":    map[string]any{"type": "string", "enum": []string{"local", "lan"}},
+				"reason":          map[string]any{"type": "string", "description": "为什么修改安全设置；至少 8 个字符"},
+			}, "required": []string{"validate_origin", "reason"},
+		}},
+		{Name: "aha_model_catalog", Description: "只读列出模型、Provider 和 Env Group（凭据值不会返回）", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{},
+		}},
+		{Name: "aha_create_provider", Description: "创建 LLM Provider；api_key 可选且不会在结果中返回", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"name":               map[string]any{"type": "string"},
+				"base_url":           map[string]any{"type": "string"},
+				"anthropic_base_url": map[string]any{"type": "string"},
+				"auth_style":         map[string]any{"type": "string"},
+				"api_key":            map[string]any{"type": "string"},
+			}, "required": []string{"name", "base_url"},
+		}},
+		{Name: "aha_update_provider", Description: "修改 Provider；api_key 留空则保留原凭据", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"provider_id":        map[string]any{"type": "string"},
+				"name":               map[string]any{"type": "string"},
+				"base_url":           map[string]any{"type": "string"},
+				"anthropic_base_url": map[string]any{"type": "string"},
+				"auth_style":         map[string]any{"type": "string"},
+				"api_key":            map[string]any{"type": "string"},
+				"reason":             map[string]any{"type": "string", "description": "修改 api_key 等凭据时必填；至少 8 个字符"},
+			}, "required": []string{"provider_id", "name", "base_url"},
+		}},
+		{Name: "aha_delete_provider", Description: "提交删除 Provider 审批；主人批准后才删除，且不能有模型引用", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"provider_id": map[string]any{"type": "string"},
+				"reason":      map[string]any{"type": "string", "description": "为什么删除；至少 8 个字符"},
+			}, "required": []string{"provider_id", "reason"},
+		}},
+		{Name: "aha_detect_models", Description: "调用 Provider 的 /models 检测可用模型（不会返回凭据）", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{"provider_id": map[string]any{"type": "string"}}, "required": []string{"provider_id"},
+		}},
+		{Name: "aha_create_model", Description: "创建 Provider 模型", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"display_name":             map[string]any{"type": "string"},
+				"provider_id":              map[string]any{"type": "string"},
+				"backend":                  map[string]any{"type": "string"},
+				"wire_model":               map[string]any{"type": "string"},
+				"wire_api":                 map[string]any{"type": "string"},
+				"context_window":           map[string]any{"type": "integer"},
+				"max_output_tokens":        map[string]any{"type": "integer"},
+				"auto_compact_window":      map[string]any{"type": "integer"},
+				"default_reasoning_effort": map[string]any{"type": "string"},
+				"default_env_group_id":     map[string]any{"type": "string"},
+			}, "required": []string{"display_name", "provider_id", "backend", "wire_model"},
+		}},
+		{Name: "aha_update_model", Description: "修改模型字段；未提供的字段保持不变", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"model_id":                 map[string]any{"type": "string"},
+				"display_name":             map[string]any{"type": "string"},
+				"provider_id":              map[string]any{"type": "string"},
+				"backend":                  map[string]any{"type": "string"},
+				"wire_model":               map[string]any{"type": "string"},
+				"wire_api":                 map[string]any{"type": "string"},
+				"context_window":           map[string]any{"type": "integer"},
+				"max_output_tokens":        map[string]any{"type": "integer"},
+				"auto_compact_window":      map[string]any{"type": "integer"},
+				"default_reasoning_effort": map[string]any{"type": "string"},
+				"default_env_group_id":     map[string]any{"type": "string"},
+			}, "required": []string{"model_id"},
+		}},
+		{Name: "aha_delete_model", Description: "提交删除模型审批；主人批准后才删除", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"model_id": map[string]any{"type": "string"},
+				"reason":   map[string]any{"type": "string", "description": "为什么删除；至少 8 个字符"},
+			}, "required": []string{"model_id", "reason"},
+		}},
+		{Name: "aha_create_env_group", Description: "创建 Env Group；environment 值不会在结果中返回", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"name":        map[string]any{"type": "string"},
+				"provider_id": map[string]any{"type": "string"},
+				"backend":     map[string]any{"type": "string"},
+				"environment": map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}},
+			}, "required": []string{"name", "provider_id", "backend"},
+		}},
+		{Name: "aha_update_env_group", Description: "修改 Env Group；environment 会整体替换", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"env_group_id": map[string]any{"type": "string"},
+				"name":         map[string]any{"type": "string"},
+				"provider_id":  map[string]any{"type": "string"},
+				"backend":      map[string]any{"type": "string"},
+				"environment":  map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}},
+				"reason":       map[string]any{"type": "string", "description": "修改 environment 等环境变量时必填；至少 8 个字符"},
+			}, "required": []string{"env_group_id"},
+		}},
+		{Name: "aha_delete_env_group", Description: "提交删除 Env Group 审批；主人批准后才删除", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"env_group_id": map[string]any{"type": "string"},
+				"reason":       map[string]any{"type": "string", "description": "为什么删除；至少 8 个字符"},
+			}, "required": []string{"env_group_id", "reason"},
+		}},
+		{Name: "aha_create_task", Description: "在指定项目/Workspace 创建普通 AHA Task，可选择立即启动", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"project_id":   map[string]any{"type": "string"},
+				"workspace_id": map[string]any{"type": "string"},
+				"title":        map[string]any{"type": "string"},
+				"request":      map[string]any{"type": "string"},
+				"model_id":     map[string]any{"type": "string", "description": "可选；默认使用宠物当前模型"},
+				"start":        map[string]any{"type": "boolean", "description": "默认 true"},
+			}, "required": []string{"project_id", "workspace_id", "title", "request"},
+		}},
+		{Name: "aha_start_task", Description: "启动一个草稿 Task", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"task_id": map[string]any{"type": "string"},
+			}, "required": []string{"task_id"},
+		}},
+		{Name: "aha_takeover_remote_task", Description: "把其他设备的只读 Task 接管为本机 Task；必须选择同项目的本机 Workspace，并逐项确认硬件组", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"task_id":            map[string]any{"type": "string"},
+				"workspace_id":       map[string]any{"type": "string"},
+				"title":              map[string]any{"type": "string"},
+				"request":            map[string]any{"type": "string"},
+				"backend":            map[string]any{"type": "string"},
+				"model_source":       map[string]any{"type": "string"},
+				"model_id":           map[string]any{"type": "string"},
+				"wire_model":         map[string]any{"type": "string"},
+				"codex_account_id":   map[string]any{"type": "string"},
+				"reasoning_effort":   map[string]any{"type": "string"},
+				"filesystem":         map[string]any{"type": "string", "enum": []string{"read-only", "workspace-write", "danger-full-access"}},
+				"approval":           map[string]any{"type": "string", "enum": []string{"never", "auto"}},
+				"proxy_enabled":      map[string]any{"type": "boolean"},
+				"fast_mode":          map[string]any{"type": "boolean"},
+				"collaboration_mode": map[string]any{"type": "string", "enum": []string{"single", "auto"}},
+				"max_agents":         map[string]any{"type": "integer", "minimum": 1, "maximum": 3},
+				"groups": map[string]any{"type": "array", "items": map[string]any{
+					"type": "object", "properties": map[string]any{
+						"id":          map[string]any{"type": "string"},
+						"description": map[string]any{"type": "string"},
+						"mode":        map[string]any{"type": "string", "enum": []string{"off", "serial", "network", "both"}},
+						"serial": map[string]any{"type": "object", "properties": map[string]any{
+							"device":   map[string]any{"type": "string"},
+							"baudrate": map[string]any{"type": "integer"},
+						}},
+						"network": map[string]any{"type": "object", "properties": map[string]any{
+							"host":     map[string]any{"type": "string"},
+							"port":     map[string]any{"type": "integer"},
+							"protocol": map[string]any{"type": "string", "enum": []string{"telnet", "raw", "ssh", "adb"}},
+							"ssh_auth": map[string]any{"type": "string", "enum": []string{"auto", "password", "key"}},
+						}},
+						"username":                map[string]any{"type": "string"},
+						"password":                map[string]any{"type": "string"},
+						"reuse_remote_credential": map[string]any{"type": "boolean"},
+					}, "required": []string{"id"},
+				}},
+			}, "required": []string{"task_id", "workspace_id"},
+		}},
+		{Name: "aha_create_project", Description: "创建 AHA 项目", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"name":                map[string]any{"type": "string"},
+				"description":         map[string]any{"type": "string"},
+				"project_type":        map[string]any{"type": "string", "enum": []string{"folder", "git"}},
+				"repository_identity": map[string]any{"type": "string"},
+				"default_branch":      map[string]any{"type": "string"},
+				"knowledge_policy":    map[string]any{"type": "string", "enum": []string{"enabled", "disabled"}},
+			}, "required": []string{"name"},
+		}},
+		{Name: "aha_create_workspace", Description: "创建本地 Workspace；需要项目已存在，native 路径必须已存在", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"project_id":   map[string]any{"type": "string"},
+				"name":         map[string]any{"type": "string"},
+				"transport":    map[string]any{"type": "string", "enum": []string{"native", "wsl", "ssh"}},
+				"root_path":    map[string]any{"type": "string"},
+				"distro":       map[string]any{"type": "string"},
+				"ssh_host":     map[string]any{"type": "string"},
+				"ssh_user":     map[string]any{"type": "string"},
+				"ssh_port":     map[string]any{"type": "integer"},
+				"ssh_auth":     map[string]any{"type": "string", "enum": []string{"auto", "password", "key"}},
+				"ssh_password": map[string]any{"type": "string"},
+			}, "required": []string{"project_id", "name", "root_path"},
+		}},
+		{Name: "aha_takeover_remote_workspace", Description: "把其他设备的只读 Workspace 接管为本机 Workspace；需要明确本机 root_path 和 transport", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"workspace_id":            map[string]any{"type": "string"},
+				"name":                    map[string]any{"type": "string"},
+				"locality":                map[string]any{"type": "string"},
+				"transport":               map[string]any{"type": "string", "enum": []string{"native", "wsl", "ssh"}},
+				"root_path":               map[string]any{"type": "string"},
+				"distro":                  map[string]any{"type": "string"},
+				"ssh_host":                map[string]any{"type": "string"},
+				"ssh_user":                map[string]any{"type": "string"},
+				"ssh_port":                map[string]any{"type": "integer"},
+				"ssh_auth":                map[string]any{"type": "string", "enum": []string{"auto", "password", "key"}},
+				"ssh_password":            map[string]any{"type": "string"},
+				"reuse_remote_credential": map[string]any{"type": "boolean"},
+			}, "required": []string{"workspace_id", "transport", "root_path"},
+		}},
+		{Name: "aha_update_project", Description: "修改 AHA 项目名称、描述、类型、仓库标识或知识策略", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"project_id":          map[string]any{"type": "string"},
+				"name":                map[string]any{"type": "string"},
+				"description":         map[string]any{"type": "string"},
+				"project_type":        map[string]any{"type": "string", "enum": []string{"folder", "git"}},
+				"repository_identity": map[string]any{"type": "string"},
+				"default_branch":      map[string]any{"type": "string"},
+				"knowledge_policy":    map[string]any{"type": "string", "enum": []string{"enabled", "disabled"}},
+			}, "required": []string{"project_id"},
+		}},
+		{Name: "aha_delete_project", Description: "提交删除项目审批；主人批准后才会删除项目及其本地任务和 Workspace", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"project_id": map[string]any{"type": "string"},
+				"reason":     map[string]any{"type": "string", "description": "为什么删除；至少 8 个字符"},
+			}, "required": []string{"project_id", "reason"},
+		}},
+		{Name: "aha_update_workspace", Description: "修改 Workspace 名称、路径、传输方式或发行版", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"workspace_id":       map[string]any{"type": "string"},
+				"name":               map[string]any{"type": "string"},
+				"root_path":          map[string]any{"type": "string"},
+				"transport":          map[string]any{"type": "string", "enum": []string{"native", "wsl", "ssh"}},
+				"distro":             map[string]any{"type": "string"},
+				"ssh_host":           map[string]any{"type": "string"},
+				"ssh_user":           map[string]any{"type": "string"},
+				"ssh_port":           map[string]any{"type": "integer"},
+				"ssh_auth":           map[string]any{"type": "string", "enum": []string{"auto", "password", "key"}},
+				"ssh_password":       map[string]any{"type": "string"},
+				"clear_ssh_password": map[string]any{"type": "boolean"},
+			}, "required": []string{"workspace_id"},
+		}},
+		{Name: "aha_delete_workspace", Description: "提交删除 Workspace 审批；主人批准后才会删除 Workspace 及其本地任务", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"workspace_id": map[string]any{"type": "string"},
+				"reason":       map[string]any{"type": "string", "description": "为什么删除；至少 8 个字符"},
+			}, "required": []string{"workspace_id", "reason"},
+		}},
+		{Name: "aha_detect_workspace", Description: "重新检测 Workspace 环境和健康状态", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{"workspace_id": map[string]any{"type": "string"}}, "required": []string{"workspace_id"},
+		}},
+		{Name: "aha_retire_remote_task_mirror", Description: "移除其他设备的只读 Task 镜像", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{"task_id": map[string]any{"type": "string"}}, "required": []string{"task_id"},
+		}},
+		{Name: "aha_retire_remote_workspace_mirror", Description: "移除其他设备的只读 Workspace 镜像", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{"workspace_id": map[string]any{"type": "string"}}, "required": []string{"workspace_id"},
+		}},
+		{Name: "aha_send_task_message", Description: "给另一个 AHA Task 发内部消息，对话框显示发送者为 pet；不会发送到外部渠道", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"task_id":        map[string]any{"type": "string"},
+				"content":        map[string]any{"type": "string"},
+				"attachment_ids": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+			}, "required": []string{"task_id"},
+		}},
+		{Name: "aha_list_task_attachments", Description: "列出 Task 附件元数据，不返回文件内容", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{"task_id": map[string]any{"type": "string"}}, "required": []string{"task_id"},
+		}},
+		{Name: "aha_upload_task_attachment", Description: "以 base64 上传 Task 附件（最大 10MB）", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"task_id":        map[string]any{"type": "string"},
+				"name":           map[string]any{"type": "string"},
+				"media_type":     map[string]any{"type": "string"},
+				"content_base64": map[string]any{"type": "string"},
+			}, "required": []string{"task_id", "content_base64"},
+		}},
+		{Name: "aha_delete_task_attachment", Description: "删除尚未绑定到消息的 Task 附件", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"task_id":       map[string]any{"type": "string"},
+				"attachment_id": map[string]any{"type": "string"},
+			}, "required": []string{"task_id", "attachment_id"},
+		}},
+		{Name: "aha_hardware_resources", Description: "只读列出可绑定硬件资源（不返回凭据）", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{},
+		}},
+		{Name: "aha_delete_hardware_resource", Description: "提交删除硬件资源审批；主人批准后才删除", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"resource_id": map[string]any{"type": "string"},
+				"reason":      map[string]any{"type": "string", "description": "为什么删除；至少 8 个字符"},
+			}, "required": []string{"resource_id", "reason"},
+		}},
+		{Name: "aha_task_hardware", Description: "只读查看 Task 的硬件绑定和硬件组", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{"task_id": map[string]any{"type": "string"}}, "required": []string{"task_id"},
+		}},
+		{Name: "aha_update_task_hardware", Description: "整体替换 Task 的硬件资源绑定", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"task_id":      map[string]any{"type": "string"},
+				"resource_ids": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+			}, "required": []string{"task_id"},
+		}},
+		{Name: "aha_task_channel_route", Description: "只读查看 Task 当前渠道路由", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{"task_id": map[string]any{"type": "string"}}, "required": []string{"task_id"},
+		}},
+		{Name: "aha_bind_task_channel", Description: "把 Task 绑定到指定渠道会话", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"task_id":         map[string]any{"type": "string"},
+				"instance_id":     map[string]any{"type": "string"},
+				"conversation_id": map[string]any{"type": "string"},
+			}, "required": []string{"task_id", "instance_id", "conversation_id"},
+		}},
+		{Name: "aha_unbind_task_channel", Description: "解除 Task 的渠道路由", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"task_id":  map[string]any{"type": "string"},
+				"route_id": map[string]any{"type": "string"},
+			}, "required": []string{"task_id", "route_id"},
+		}},
+		{Name: "aha_complete_task", Description: "把 Task 标记为完成", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{"task_id": map[string]any{"type": "string"}}, "required": []string{"task_id"},
+		}},
+		{Name: "aha_delete_task", Description: "提交删除 Task 审批；主人批准后才会删除", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"task_id": map[string]any{"type": "string"},
+				"reason":  map[string]any{"type": "string", "description": "为什么删除；至少 8 个字符"},
+			}, "required": []string{"task_id", "reason"},
+		}},
+		{Name: "aha_reopen_task", Description: "重新打开已完成/失败/阻塞/取消的 Task", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{"task_id": map[string]any{"type": "string"}}, "required": []string{"task_id"},
+		}},
+		{Name: "aha_interrupt_task", Description: "中断 Task 当前执行中的 Turn 或 Round", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{"task_id": map[string]any{"type": "string"}}, "required": []string{"task_id"},
+		}},
+		{Name: "aha_update_task", Description: "修改 Task 标题、Current Goal、协作模式或 Max Agents", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"task_id":            map[string]any{"type": "string"},
+				"title":              map[string]any{"type": "string"},
+				"current_goal":       map[string]any{"type": "string"},
+				"collaboration_mode": map[string]any{"type": "string", "enum": []string{"single", "auto"}},
+				"max_agents":         map[string]any{"type": "integer", "minimum": 1, "maximum": 3},
+			}, "required": []string{"task_id"},
+		}},
+		{Name: "aha_update_task_agent", Description: "修改 Task main Agent 的模型、推理强度、文件权限或审批方式", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"task_id":          map[string]any{"type": "string"},
+				"model_id":         map[string]any{"type": "string"},
+				"reasoning_effort": map[string]any{"type": "string"},
+				"filesystem":       map[string]any{"type": "string", "enum": []string{"read-only", "workspace-write", "danger-full-access"}},
+				"approval":         map[string]any{"type": "string", "enum": []string{"never", "auto"}},
+				"fast_mode":        map[string]any{"type": "boolean"},
+			}, "required": []string{"task_id"},
+		}},
+		{Name: "aha_compact_task_session", Description: "压缩并重置 Task main Agent 的 Backend Session", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{"task_id": map[string]any{"type": "string"}}, "required": []string{"task_id"},
+		}},
+		{Name: "aha_reset_task_session", Description: "重置 Task main Agent 的 Backend Session", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{"task_id": map[string]any{"type": "string"}}, "required": []string{"task_id"},
+		}},
+		{Name: "aha_task_conversation", Description: "只读读取 Task 的会话记录", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"task_id": map[string]any{"type": "string"},
+				"limit":   map[string]any{"type": "integer", "minimum": 1, "maximum": 100},
+			}, "required": []string{"task_id"},
+		}},
+		{Name: "aha_task_turns", Description: "只读读取 Task 的 Turn 状态、结果和错误", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"task_id": map[string]any{"type": "string"},
+				"limit":   map[string]any{"type": "integer", "minimum": 1, "maximum": 50},
+			}, "required": []string{"task_id"},
+		}},
+		{Name: "pet_watch_task", Description: "关注一个 Task 的状态变化；完成/失败/阻塞/等待时会主动通知", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{"task_id": map[string]any{"type": "string"}}, "required": []string{"task_id"},
+		}},
+		{Name: "pet_unwatch_task", Description: "取消关注一个 Task 的状态变化", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{"task_id": map[string]any{"type": "string"}}, "required": []string{"task_id"},
+		}},
+		{Name: "pet_submit_idea", Description: "提交一个想法审批；主人同意后再实现，不自动执行或授权", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"title":              map[string]any{"type": "string"},
+				"summary":            map[string]any{"type": "string"},
+				"reason":             map[string]any{"type": "string", "description": "为什么提出这个想法；必填"},
+				"plan":               map[string]any{"type": "string"},
+				"expected_outcome":   map[string]any{"type": "string"},
+				"risk":               map[string]any{"type": "string", "enum": []string{"low", "medium", "high"}},
+				"permissions_needed": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+			}, "required": []string{"title", "summary", "reason"},
+		}},
+		{Name: "pet_request_approval", Description: "向主人申请一次需要授权的操作；只创建审批，不执行操作", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"kind":    map[string]any{"type": "string", "description": "操作类型，例如 external_channel_send、delete_task"},
+				"title":   map[string]any{"type": "string"},
+				"summary": map[string]any{"type": "string"},
+				"reason":  map[string]any{"type": "string", "description": "为什么需要这次审批；高风险审批必填"},
+				"risk":    map[string]any{"type": "string", "enum": []string{"low", "medium", "high"}},
+				"payload": map[string]any{"type": "object", "description": "可选的操作参数"},
+			}, "required": []string{"kind", "title", "summary"},
+		}},
+		{Name: "pet_list_approvals", Description: "查看自己的审批记录", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 50},
+			},
+		}},
+	}
+}
+
+// PetMCPTool dispatches the pet MCP surface. Pet action tools still go through
+// the validated ControlOwnerPet path; AHA read tools and approval requests are
+// handled here.
+func (s *Service) PetMCPTool(ctx context.Context, name string, args json.RawMessage) (string, error) {
+	name = strings.TrimSpace(strings.ToLower(name))
+	if isAhaPetTool(name) {
+		assistant, err := s.petAssistant(ctx)
+		if err != nil {
+			return "", err
+		}
+		if !petToolAllowed(assistant, name) {
+			return "", fmt.Errorf("主人未开启该工具权限")
+		}
+	}
+	switch name {
+	case "aha_overview":
+		overview, err := s.PetAHAOverview(ctx)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(overview)
+		return string(data), nil
+	case "aha_pet_work_state":
+		state, err := s.PetWorkState(ctx)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(state)
+		return string(data), nil
+	case "aha_pet_permissions":
+		permissions, err := s.PetPermissions(ctx)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(permissions)
+		return string(data), nil
+	case "aha_capabilities":
+		capabilities, err := s.PetCapabilities(ctx)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(capabilities)
+		return string(data), nil
+	case "aha_request_permission_change":
+		var input PetPermissionChangeInput
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid permission change request")
+		}
+		approval, err := s.PetRequestPermissionChange(ctx, input)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(approval)
+		return string(data), nil
+	case "aha_task_detail":
+		var input struct {
+			TaskID string `json:"task_id"`
+		}
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid task_id")
+		}
+		detail, err := s.PetTaskDetail(ctx, input.TaskID)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(detail)
+		return string(data), nil
+	case "aha_list_projects":
+		projects, err := s.PetProjectCatalog(ctx)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(projects)
+		return string(data), nil
+	case "aha_list_remote_tasks":
+		var input struct {
+			ProjectID string `json:"project_id"`
+		}
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid list remote tasks request")
+		}
+		tasks, err := s.PetRemoteTaskMirrors(ctx, input.ProjectID)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(tasks)
+		return string(data), nil
+	case "aha_list_knowledge":
+		var input struct {
+			Scope     string `json:"scope"`
+			ProjectID string `json:"project_id"`
+			Limit     int    `json:"limit"`
+		}
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid list knowledge request")
+		}
+		view, err := s.PetListKnowledge(ctx, input.Scope, input.ProjectID, input.Limit)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(view)
+		return string(data), nil
+	case "aha_knowledge_detail":
+		var input struct {
+			KnowledgeID string `json:"knowledge_id"`
+		}
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid knowledge detail request")
+		}
+		detail, err := s.PetKnowledgeDetail(ctx, input.KnowledgeID)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(detail)
+		return string(data), nil
+	case "aha_submit_knowledge":
+		var input struct {
+			Scope      string               `json:"scope"`
+			ProjectID  string               `json:"project_id"`
+			Candidates []KnowledgeCandidate `json:"candidates"`
+		}
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid submit knowledge request")
+		}
+		result, err := s.PetSubmitKnowledge(ctx, input.Scope, input.ProjectID, input.Candidates)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(result)
+		return string(data), nil
+	case "aha_list_skills":
+		var input struct {
+			Scope     string `json:"scope"`
+			ProjectID string `json:"project_id"`
+			Limit     int    `json:"limit"`
+		}
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid list skills request")
+		}
+		items, err := s.PetListSkills(ctx, input.Scope, input.ProjectID, input.Limit)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(items)
+		return string(data), nil
+	case "aha_skill_detail":
+		var input struct {
+			SkillID string `json:"skill_id"`
+		}
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid skill detail request")
+		}
+		detail, err := s.PetSkillDetail(ctx, input.SkillID)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(detail)
+		return string(data), nil
+	case "aha_create_skill":
+		var input PetSkillInput
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid create skill request")
+		}
+		detail, err := s.PetCreateSkill(ctx, input)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(detail)
+		return string(data), nil
+	case "aha_update_skill":
+		var input PetSkillInput
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid update skill request")
+		}
+		detail, err := s.PetUpdateSkill(ctx, input)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(detail)
+		return string(data), nil
+	case "aha_delete_skill":
+		var input struct {
+			SkillID string `json:"skill_id"`
+			Reason  string `json:"reason"`
+		}
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid delete skill request")
+		}
+		approval, err := s.PetDeleteSkill(ctx, input.SkillID, input.Reason)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(approval)
+		return string(data), nil
+	case "aha_delete_knowledge":
+		var input struct {
+			KnowledgeID string `json:"knowledge_id"`
+			Reason      string `json:"reason"`
+		}
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid delete knowledge request")
+		}
+		approval, err := s.PetDeleteKnowledge(ctx, input.KnowledgeID, input.Reason)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(approval)
+		return string(data), nil
+	case "aha_list_prompt_templates":
+		items, err := s.PetListPromptTemplates(ctx)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(items)
+		return string(data), nil
+	case "aha_prompt_template_detail":
+		var input struct {
+			TemplateID string `json:"template_id"`
+		}
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid prompt template detail request")
+		}
+		detail, err := s.PetPromptTemplateDetail(ctx, input.TemplateID)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(detail)
+		return string(data), nil
+	case "aha_update_prompt_template":
+		var input struct {
+			TemplateID string `json:"template_id"`
+			Content    string `json:"content"`
+			Reason     string `json:"reason"`
+		}
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid update prompt template request")
+		}
+		approval, err := s.PetRequestPromptUpdate(ctx, input.TemplateID, input.Content, input.Reason)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(approval)
+		return string(data), nil
+	case "aha_list_channels":
+		items, err := s.PetListChannels(ctx)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(items)
+		return string(data), nil
+	case "aha_channel_detail":
+		var input struct {
+			InstanceID string `json:"instance_id"`
+		}
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid channel detail request")
+		}
+		detail, err := s.PetChannelDetail(ctx, input.InstanceID)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(detail)
+		return string(data), nil
+	case "aha_list_channel_destinations":
+		items, err := s.PetListChannelDestinations(ctx)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(items)
+		return string(data), nil
+	case "aha_channel_contacts":
+		var input struct {
+			ConversationID string `json:"conversation_id"`
+		}
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid channel contacts request")
+		}
+		view, err := s.PetChannelContacts(ctx, input.ConversationID)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(view)
+		return string(data), nil
+	case "aha_send_channel_message":
+		var input PetChannelSendInput
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid channel send request")
+		}
+		approval, err := s.PetRequestChannelSend(ctx, input)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(approval)
+		return string(data), nil
+	case "aha_set_channel_enabled":
+		var input struct {
+			InstanceID string `json:"instance_id"`
+			Enabled    bool   `json:"enabled"`
+		}
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid set channel enabled request")
+		}
+		approval, err := s.PetRequestChannelEnabled(ctx, input.InstanceID, input.Enabled)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(approval)
+		return string(data), nil
+	case "aha_reset_channel_binding", "aha_archive_channel", "aha_purge_channel":
+		var input struct {
+			InstanceID string `json:"instance_id"`
+			Reason     string `json:"reason"`
+		}
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid channel lifecycle request")
+		}
+		action := strings.TrimPrefix(name, "aha_")
+		action = strings.TrimSuffix(action, "_channel_binding")
+		action = strings.TrimSuffix(action, "_channel")
+		approval, err := s.PetRequestChannelLifecycle(ctx, input.InstanceID, action, input.Reason)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(approval)
+		return string(data), nil
+	case "aha_system_settings":
+		view, err := s.PetSystemSettings(ctx)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(view)
+		return string(data), nil
+	case "aha_update_security_settings":
+		var input struct {
+			ValidateOrigin bool   `json:"validate_origin"`
+			AccessScope    string `json:"access_scope"`
+			Reason         string `json:"reason"`
+		}
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid update security settings request")
+		}
+		approval, err := s.PetRequestSecuritySettingsUpdate(ctx, input.ValidateOrigin, input.AccessScope, input.Reason)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(approval)
+		return string(data), nil
+	case "aha_model_catalog":
+		catalog, err := s.PetModelCatalog(ctx)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(catalog)
+		return string(data), nil
+	case "aha_create_provider":
+		var input PetProviderInput
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid create provider request")
+		}
+		provider, err := s.PetCreateProvider(ctx, input)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(provider)
+		return string(data), nil
+	case "aha_update_provider":
+		var input PetProviderInput
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid update provider request")
+		}
+		provider, err := s.PetUpdateProvider(ctx, input)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(provider)
+		return string(data), nil
+	case "aha_delete_provider":
+		var input struct {
+			ProviderID string `json:"provider_id"`
+			Reason     string `json:"reason"`
+		}
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid delete provider request")
+		}
+		approval, err := s.PetRequestDeleteProvider(ctx, input.ProviderID, input.Reason)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(approval)
+		return string(data), nil
+	case "aha_detect_models":
+		var input struct {
+			ProviderID string `json:"provider_id"`
+		}
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid detect models request")
+		}
+		result, err := s.PetDetectModels(ctx, input.ProviderID)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(result)
+		return string(data), nil
+	case "aha_create_model":
+		var input PetModelInput
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid create model request")
+		}
+		model, err := s.PetCreateModel(ctx, input)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(model)
+		return string(data), nil
+	case "aha_update_model":
+		var input PetModelInput
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid update model request")
+		}
+		model, err := s.PetUpdateModel(ctx, input)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(model)
+		return string(data), nil
+	case "aha_delete_model":
+		var input struct {
+			ModelID string `json:"model_id"`
+			Reason  string `json:"reason"`
+		}
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid delete model request")
+		}
+		approval, err := s.PetRequestDeleteModel(ctx, input.ModelID, input.Reason)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(approval)
+		return string(data), nil
+	case "aha_create_env_group":
+		var input PetEnvGroupInput
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid create env group request")
+		}
+		group, err := s.PetCreateEnvGroup(ctx, input)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(group)
+		return string(data), nil
+	case "aha_update_env_group":
+		var input PetEnvGroupInput
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid update env group request")
+		}
+		group, err := s.PetUpdateEnvGroup(ctx, input)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(group)
+		return string(data), nil
+	case "aha_delete_env_group":
+		var input struct {
+			EnvGroupID string `json:"env_group_id"`
+			Reason     string `json:"reason"`
+		}
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid delete env group request")
+		}
+		approval, err := s.PetRequestDeleteEnvGroup(ctx, input.EnvGroupID, input.Reason)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(approval)
+		return string(data), nil
+	case "aha_create_task":
+		var input PetCreateTaskInput
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid create task request")
+		}
+		task, err := s.PetCreateTask(ctx, input)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(task)
+		return string(data), nil
+	case "aha_start_task":
+		var input struct {
+			TaskID string `json:"task_id"`
+		}
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid start task request")
+		}
+		task, err := s.PetStartTask(ctx, input.TaskID)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(task)
+		return string(data), nil
+	case "aha_takeover_remote_task":
+		var input PetTakeoverTaskInput
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid takeover remote task request")
+		}
+		task, groups, err := s.PetTakeoverRemoteTask(ctx, input)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(map[string]any{"task": task, "hardware": groups})
+		return string(data), nil
+	case "aha_create_project":
+		var input PetCreateProjectInput
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid create project request")
+		}
+		project, err := s.PetCreateProject(ctx, input)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(project)
+		return string(data), nil
+	case "aha_create_workspace":
+		var input PetCreateWorkspaceInput
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid create workspace request")
+		}
+		workspace, err := s.PetCreateWorkspace(ctx, input)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(workspace)
+		return string(data), nil
+	case "aha_takeover_remote_workspace":
+		var input PetTakeoverWorkspaceInput
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid takeover remote workspace request")
+		}
+		workspace, err := s.PetTakeoverRemoteWorkspace(ctx, input)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(workspace)
+		return string(data), nil
+	case "aha_update_project":
+		var input PetUpdateProjectInput
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid update project request")
+		}
+		project, err := s.PetUpdateProject(ctx, input)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(project)
+		return string(data), nil
+	case "aha_delete_project":
+		var input struct {
+			ProjectID string `json:"project_id"`
+			Reason    string `json:"reason"`
+		}
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid delete project request")
+		}
+		approval, err := s.PetDeleteProject(ctx, input.ProjectID, input.Reason)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(approval)
+		return string(data), nil
+	case "aha_update_workspace":
+		var input PetUpdateWorkspaceInput
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid update workspace request")
+		}
+		workspace, err := s.PetUpdateWorkspace(ctx, input)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(workspace)
+		return string(data), nil
+	case "aha_delete_workspace":
+		var input struct {
+			WorkspaceID string `json:"workspace_id"`
+			Reason      string `json:"reason"`
+		}
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid delete workspace request")
+		}
+		approval, err := s.PetDeleteWorkspace(ctx, input.WorkspaceID, input.Reason)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(approval)
+		return string(data), nil
+	case "aha_detect_workspace":
+		var input struct {
+			WorkspaceID string `json:"workspace_id"`
+		}
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid detect workspace request")
+		}
+		workspace, err := s.PetDetectWorkspace(ctx, input.WorkspaceID)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(workspace)
+		return string(data), nil
+	case "aha_retire_remote_task_mirror":
+		var input struct {
+			TaskID string `json:"task_id"`
+		}
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid retire remote task request")
+		}
+		result, err := s.PetRetireRemoteTaskMirror(ctx, input.TaskID)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(result)
+		return string(data), nil
+	case "aha_retire_remote_workspace_mirror":
+		var input struct {
+			WorkspaceID string `json:"workspace_id"`
+		}
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid retire remote workspace request")
+		}
+		result, err := s.PetRetireRemoteWorkspaceMirror(ctx, input.WorkspaceID)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(result)
+		return string(data), nil
+	case "aha_send_task_message":
+		var input PetSendTaskMessageInput
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid task message request")
+		}
+		turn, err := s.PetSendTaskMessage(ctx, input)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(turn)
+		return string(data), nil
+	case "aha_list_task_attachments":
+		var input struct {
+			TaskID string `json:"task_id"`
+		}
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid list attachments request")
+		}
+		items, err := s.PetTaskAttachments(ctx, input.TaskID)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(items)
+		return string(data), nil
+	case "aha_upload_task_attachment":
+		var input PetUploadAttachmentInput
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid upload attachment request")
+		}
+		item, err := s.PetUploadTaskAttachment(ctx, input)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(item)
+		return string(data), nil
+	case "aha_delete_task_attachment":
+		var input struct {
+			TaskID       string `json:"task_id"`
+			AttachmentID string `json:"attachment_id"`
+		}
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid delete attachment request")
+		}
+		if err := s.PetDeleteTaskAttachment(ctx, input.TaskID, input.AttachmentID); err != nil {
+			return "", err
+		}
+		return `{"ok":true}`, nil
+	case "aha_delete_hardware_resource":
+		var input struct {
+			ResourceID string `json:"resource_id"`
+			Reason     string `json:"reason"`
+		}
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid delete hardware resource request")
+		}
+		approval, err := s.PetRequestDeleteHardwareResource(ctx, input.ResourceID, input.Reason)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(approval)
+		return string(data), nil
+	case "aha_hardware_resources":
+		items, err := s.PetHardwareResources(ctx)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(items)
+		return string(data), nil
+	case "aha_task_hardware":
+		var input struct {
+			TaskID string `json:"task_id"`
+		}
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid task hardware request")
+		}
+		view, err := s.PetTaskHardware(ctx, input.TaskID)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(view)
+		return string(data), nil
+	case "aha_update_task_hardware":
+		var input PetUpdateTaskHardwareInput
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid update task hardware request")
+		}
+		view, err := s.PetUpdateTaskHardware(ctx, input)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(view)
+		return string(data), nil
+	case "aha_task_channel_route":
+		var input struct {
+			TaskID string `json:"task_id"`
+		}
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid task channel route request")
+		}
+		route, err := s.PetTaskChannelRoute(ctx, input.TaskID)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(route)
+		return string(data), nil
+	case "aha_bind_task_channel":
+		var input PetBindTaskChannelInput
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid bind task channel request")
+		}
+		route, err := s.PetBindTaskChannel(ctx, input)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(route)
+		return string(data), nil
+	case "aha_unbind_task_channel":
+		var input struct {
+			TaskID  string `json:"task_id"`
+			RouteID string `json:"route_id"`
+		}
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid unbind task channel request")
+		}
+		if err := s.PetUnbindTaskChannel(ctx, input.TaskID, input.RouteID); err != nil {
+			return "", err
+		}
+		return `{"ok":true}`, nil
+	case "aha_complete_task":
+		var input struct {
+			TaskID string `json:"task_id"`
+		}
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid complete task request")
+		}
+		task, err := s.PetCompleteTask(ctx, input.TaskID)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(task)
+		return string(data), nil
+	case "aha_delete_task":
+		var input struct {
+			TaskID string `json:"task_id"`
+			Reason string `json:"reason"`
+		}
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid delete task request")
+		}
+		approval, err := s.PetDeleteTask(ctx, input.TaskID, input.Reason)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(approval)
+		return string(data), nil
+	case "aha_reopen_task":
+		var input struct {
+			TaskID string `json:"task_id"`
+		}
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid reopen task request")
+		}
+		task, err := s.PetReopenTask(ctx, input.TaskID)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(task)
+		return string(data), nil
+	case "aha_interrupt_task":
+		var input struct {
+			TaskID string `json:"task_id"`
+		}
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid interrupt task request")
+		}
+		task, err := s.PetInterruptTask(ctx, input.TaskID)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(task)
+		return string(data), nil
+	case "aha_update_task":
+		var input PetUpdateTaskInput
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid update task request")
+		}
+		task, err := s.PetUpdateTask(ctx, input)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(task)
+		return string(data), nil
+	case "aha_update_task_agent":
+		var input PetUpdateTaskAgentInput
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid update task agent request")
+		}
+		agent, err := s.PetUpdateTaskAgent(ctx, input)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(agent)
+		return string(data), nil
+	case "aha_compact_task_session":
+		var input struct {
+			TaskID string `json:"task_id"`
+		}
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid compact session request")
+		}
+		session, err := s.PetCompactTaskSession(ctx, input.TaskID)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(session)
+		return string(data), nil
+	case "aha_reset_task_session":
+		var input struct {
+			TaskID string `json:"task_id"`
+		}
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid reset session request")
+		}
+		session, err := s.PetResetTaskSession(ctx, input.TaskID)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(session)
+		return string(data), nil
+	case "aha_task_conversation":
+		var input struct {
+			TaskID string `json:"task_id"`
+			Limit  int    `json:"limit"`
+		}
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid task conversation request")
+		}
+		items, err := s.PetTaskConversation(ctx, input.TaskID, input.Limit)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(items)
+		return string(data), nil
+	case "aha_task_turns":
+		var input struct {
+			TaskID string `json:"task_id"`
+			Limit  int    `json:"limit"`
+		}
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid task turns request")
+		}
+		items, err := s.PetTaskTurns(ctx, input.TaskID, input.Limit)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(items)
+		return string(data), nil
+	case "pet_update_core":
+		var input struct {
+			Document string `json:"document"`
+			Content  string `json:"content"`
+		}
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid update core request")
+		}
+		if err := s.PetUpdateCore(ctx, input.Document, input.Content); err != nil {
+			return "", err
+		}
+		return `{"ok":true}`, nil
+	case "pet_write_diary":
+		var input struct {
+			Date    string `json:"date"`
+			Content string `json:"content"`
+		}
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid write diary request")
+		}
+		if err := s.PetWriteDiary(ctx, input.Date, input.Content); err != nil {
+			return "", err
+		}
+		return `{"ok":true}`, nil
+	case "pet_write_worklog":
+		var input struct {
+			Date    string `json:"date"`
+			Content string `json:"content"`
+		}
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid write worklog request")
+		}
+		if err := s.PetWriteWorklog(ctx, input.Date, input.Content); err != nil {
+			return "", err
+		}
+		return `{"ok":true}`, nil
+	case "pet_submit_idea":
+		var input PetIdeaInput
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid idea request")
+		}
+		approval, err := s.PetSubmitIdea(ctx, input)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(approval)
+		return string(data), nil
+	case "pet_request_approval":
+		var input struct {
+			Kind    string          `json:"kind"`
+			Title   string          `json:"title"`
+			Summary string          `json:"summary"`
+			Reason  string          `json:"reason"`
+			Risk    string          `json:"risk"`
+			Payload json.RawMessage `json:"payload"`
+		}
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid approval request")
+		}
+		if strings.EqualFold(strings.TrimSpace(input.Risk), "high") {
+			reason, reasonErr := requirePetApprovalReason(input.Reason)
+			if reasonErr != nil {
+				return "", reasonErr
+			}
+			input.Reason = reason
+		}
+		payload := "{}"
+		if len(input.Payload) > 0 && string(input.Payload) != "null" {
+			payload = string(input.Payload)
+		}
+		item, err := s.CreatePetApproval(ctx, PetApprovalInput{
+			Kind: input.Kind, Title: input.Title, Summary: input.Summary, Reason: input.Reason,
+			Risk: input.Risk, Payload: payload,
+		})
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(item)
+		return string(data), nil
+	case "pet_list_approvals":
+		var input struct {
+			Limit int `json:"limit"`
+		}
+		_ = json.Unmarshal(args, &input)
+		items, err := s.PetApprovals(ctx, input.Limit)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(items)
+		return string(data), nil
+	case "pet_watch_task":
+		var input struct {
+			TaskID string `json:"task_id"`
+		}
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid watch task request")
+		}
+		watch, err := s.PetWatchTask(ctx, input.TaskID)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(watch)
+		return string(data), nil
+	case "pet_unwatch_task":
+		var input struct {
+			TaskID string `json:"task_id"`
+		}
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid unwatch task request")
+		}
+		if err := s.PetUnwatchTask(ctx, input.TaskID); err != nil {
+			return "", err
+		}
+		return `{"ok":true}`, nil
+	}
+	result, err := s.ControlOwnerPetTool(ctx, name, args)
+	if err != nil {
+		return "", err
+	}
+	data, _ := json.Marshal(result.Actions)
+	return "ok " + string(data), nil
 }
 
 // ControlOwnerPetTool maps one MCP tool call to a validated pet action.
 func (s *Service) ControlOwnerPetTool(ctx context.Context, name string, args json.RawMessage) (PetBrainResult, error) {
 	name = strings.TrimSpace(strings.ToLower(name))
+	if name == "pet_say" {
+		var input struct {
+			Text string `json:"text"`
+		}
+		if err := json.Unmarshal(args, &input); err != nil || strings.TrimSpace(input.Text) == "" {
+			return PetBrainResult{}, fmt.Errorf("pet_say 需要非空 text")
+		}
+		return s.ControlOwnerPet(ctx, PetControlRequest{Say: strings.TrimSpace(input.Text), Actor: "mcp"})
+	}
 	actions := petActionsFromToolCalls([]gateway.ChatToolCall{{Name: name, Arguments: string(args)}}, 1)
 	if len(actions) == 0 {
 		return PetBrainResult{}, fmt.Errorf("pet tool %q rejected its arguments", name)
@@ -633,6 +2359,29 @@ func petToolInfos() []PetToolInfo {
 
 func assistantPetTools() []gateway.ChatTool {
 	return []gateway.ChatTool{
+		{Name: "pet_say", Description: "在 Web 前台显示一句说话气泡；不想说话就不要调用", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"text": map[string]any{"type": "string", "description": "不超过 120 个字符"},
+			}, "required": []string{"text"},
+		}},
+		{Name: "pet_update_core", Description: "写入宠物核心文档 identity、principles 或 loops（运行时为只读，必须用此工具写；loops 记录任务/想法/审批闭环）", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"document": map[string]any{"type": "string", "enum": []string{"identity", "principles", "loops"}},
+				"content":  map[string]any{"type": "string"},
+			}, "required": []string{"document", "content"},
+		}},
+		{Name: "pet_write_diary", Description: "写入宠物日记 diary/YYYY-MM-DD.md", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"date":    map[string]any{"type": "string", "description": "可选，YYYY-MM-DD"},
+				"content": map[string]any{"type": "string"},
+			}, "required": []string{"content"},
+		}},
+		{Name: "pet_write_worklog", Description: "写入宠物工作记录 worklog/YYYY-MM-DD.md", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"date":    map[string]any{"type": "string", "description": "可选，YYYY-MM-DD"},
+				"content": map[string]any{"type": "string"},
+			}, "required": []string{"content"},
+		}},
 		{Name: "pet_play", Description: "播放宠物动作", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{"name": map[string]any{"type": "string", "enum": []string{"walk", "jump", "happy", "angry"}}},
 			"required": []string{"name"},

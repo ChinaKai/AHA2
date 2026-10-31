@@ -837,6 +837,51 @@ func TestAddModelsGeneratesEnvGroupsAndSecrets(t *testing.T) {
 	}
 }
 
+func TestIndexUsesOwnerLanguage(t *testing.T) {
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	index := []byte(`<html lang="zh-CN"><body><div class="boot-loading"><span class="boot-spinner"></span></div></body></html>`)
+	server := New(Config{
+		Store: database,
+		Web:   fstest.MapFS{"index.html": &fstest.MapFile{Data: index}},
+	})
+	request := func(acceptLanguage string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "http://example.test/", nil)
+		req.Header.Set("Accept-Language", acceptLanguage)
+		response := httptest.NewRecorder()
+		server.Handler().ServeHTTP(response, req)
+		return response
+	}
+
+	if _, err := database.UpdateGeneralSettings(ctx, domain.GeneralSettings{Language: domain.LanguageEnglish}); err != nil {
+		t.Fatal(err)
+	}
+	body := request("zh-CN").Body.String()
+	if !strings.Contains(body, `lang="en-US"`) {
+		t.Fatalf("saved English did not localize the first paint: %s", body)
+	}
+
+	if _, err := database.UpdateGeneralSettings(ctx, domain.GeneralSettings{Language: domain.LanguageSimplified}); err != nil {
+		t.Fatal(err)
+	}
+	body = request("en-US").Body.String()
+	if !strings.Contains(body, `lang="zh-CN"`) {
+		t.Fatalf("saved Chinese changed the first paint: %s", body)
+	}
+
+	if _, err := database.UpdateGeneralSettings(ctx, domain.GeneralSettings{Language: domain.LanguageAuto}); err != nil {
+		t.Fatal(err)
+	}
+	body = request("en-US,en;q=0.9").Body.String()
+	if !strings.Contains(body, `lang="en-US"`) {
+		t.Fatalf("auto language ignored the request locale: %s", body)
+	}
+}
+
 func TestMissingStaticAssetReturnsNotFound(t *testing.T) {
 	t.Parallel()
 	server := New(Config{
@@ -1386,7 +1431,7 @@ func TestKnowledgeWorkspaceAPI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	response = requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/knowledge/proposals/"+rejectedProposal.ID+"/reject", map[string]any{}, csrf)
+	response = requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/knowledge/proposals/"+rejectedProposal.ID+"/reject", map[string]any{"decision_reason": "test rejection"}, csrf)
 	decodeResponse(t, response, &payload)
 	if response.StatusCode != http.StatusOK || payload["proposal"].(map[string]any)["status"] != "rejected" {
 		t.Fatalf("proposal rejection failed: %d %#v", response.StatusCode, payload)

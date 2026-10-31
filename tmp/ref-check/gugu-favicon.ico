@@ -1,0 +1,249 @@
+<!DOCTYPE html><html lang="en"> <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover"><meta name="robots" content="max-image-preview:large"><meta name="theme-color" content="#0c1222"><meta name="description" content="The page you requested does not exist. Browse the Gugugaga Penguin tutorial, tools, prompts, and downloads from here."><meta name="author" content="gugugagapenguin.com editorial team"><meta name="google-adsense-account" content="ca-pub-7478986194841898"><link rel="canonical" href="https://gugugagapenguin.com/404/"><link rel="alternate" hreflang="en" href="https://gugugagapenguin.com/404/"><link rel="alternate" hreflang="x-default" href="https://gugugagapenguin.com/404/"><meta property="og:title" content="404 — Page Not Found | Gugugaga Penguin"><meta property="og:description" content="The page you requested does not exist. Browse the Gugugaga Penguin tutorial, tools, prompts, and downloads from here."><meta property="og:image" content="https://gugugagapenguin.com/og-image.png"><meta property="og:url" content="https://gugugagapenguin.com/404/"><meta property="og:type" content="website"><meta property="og:locale" content="en_US"><meta property="og:site_name" content="Gugugaga Penguin"><meta name="twitter:card" content="summary_large_image"><meta name="twitter:title" content="404 — Page Not Found | Gugugaga Penguin"><meta name="twitter:description" content="The page you requested does not exist. Browse the Gugugaga Penguin tutorial, tools, prompts, and downloads from here."><meta name="twitter:image" content="https://gugugagapenguin.com/og-image.png"><title>404 — Page Not Found | Gugugaga Penguin</title><link rel="icon" type="image/png" href="/logo.png" sizes="256x256"><link rel="sitemap" href="/sitemap-index.xml"><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Nunito:wght@700;800;900&family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400&display=swap" media="print" onload="this.media='all'"><noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Nunito:wght@700;800;900&family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400&display=swap"></noscript><script>
+      (function () {
+        var CLASS_KEY = "ggp_traffic_class";
+        var PAUSE_KEY = "ggp_ad_pause";
+        var PORTAL_UNTIL_KEY = "ggp_portal_until";
+        var CLICK_PAUSE_UNTIL_KEY = "ggp_ad_click_pause_until";
+        var cls = null;
+        var pauseAds = false;
+        try {
+          cls = sessionStorage.getItem(CLASS_KEY);
+          pauseAds = sessionStorage.getItem(PAUSE_KEY) === "1";
+        } catch (e) {}
+        if (!cls) {
+          var host = "";
+          try {
+            host = document.referrer ? new URL(document.referrer).hostname.toLowerCase() : "";
+          } catch (e) {}
+          if (!host) {
+            cls = /; wv\)/.test(navigator.userAgent) ? "direct_webview" : "direct";
+          } else if (host === location.hostname) {
+            cls = "internal";
+          } else if (/(^|\.)askapk\.com$/.test(host)) {
+            cls = "apk_portal";
+            pauseAds = true;
+          } else if (/^\d{8,}[a-z0-9-]*\./.test(host) || /(^|\.)(appmerica|topziz|appiff|apkzp|babojoy|kaiogame|miugameh5|slideh5|razzh5|niasai|apdownload|appposts|eezgm|goodkidsplay|happytracing|app-download-center|apk3c|yourapk|dazeh5|thumbh5|instanth5|gameonh5|more9game|karingame)\.[a-z.]+$/.test(host)) {
+            cls = "apk_portal";
+            pauseAds = true;
+          } else if (/(^|\.)(chatgpt\.com|openai\.com|perplexity\.ai|copilot\.microsoft\.com|gemini\.google\.com|claude\.ai|you\.com|phind\.com)$/.test(host)) {
+            cls = "ai";
+          } else if (/googlequicksearchbox|(^|\.)(google\.[a-z.]+|bing\.com|yahoo\.[a-z.]+|duckduckgo\.com|yandex\.[a-z.]+|baidu\.com|naver\.com|ecosia\.org|search\.brave\.com)$/.test(host)) {
+            cls = "search";
+          } else if (/(^|\.)(youtube\.com|tiktok\.com|facebook\.com|instagram\.com|x\.com|t\.co|twitter\.com|reddit\.com|pinterest\.[a-z.]+|discord\.com|bilibili\.com|douyin\.com|threads\.net|line\.me|vk\.com)$/.test(host)) {
+            cls = "social";
+          } else {
+            cls = "referral";
+          }
+          try {
+            sessionStorage.setItem(CLASS_KEY, cls);
+            if (pauseAds) sessionStorage.setItem(PAUSE_KEY, "1");
+          } catch (e) {}
+          if (cls === "apk_portal") {
+            try {
+              localStorage.setItem(PORTAL_UNTIL_KEY, String(Date.now() + 7 * 864e5));
+            } catch (e) {}
+          }
+        }
+        try {
+          var now = Date.now();
+          if (Number(localStorage.getItem(PORTAL_UNTIL_KEY)) > now || Number(localStorage.getItem(CLICK_PAUSE_UNTIL_KEY)) > now) {
+            pauseAds = true;
+          }
+        } catch (e) {}
+        if (navigator.webdriver || /^(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])$|\.local$|\.pages\.dev$/.test(location.hostname)) {
+          pauseAds = true;
+        }
+        window.__ggpTrafficClass = cls;
+        window.__ggpPauseAds = pauseAds;
+      })();
+    </script><script>(function(){const analyticsScriptSrc = "https://www.googletagmanager.com/gtag/js?id=G-ZDHHBR8NS0";
+const deferAnalytics = true;
+
+      window.dataLayer = window.dataLayer || [];
+      window["gtag"] = window["gtag"] || function(){window.dataLayer.push(arguments);};
+      window["gtag"]('js', new Date());
+      // Config parameters ride along on every event from this tag (GA4 event-parameters guide).
+      window["gtag"]('config', 'G-ZDHHBR8NS0', { traffic_class: window.__ggpTrafficClass || "unknown" });
+
+      if (deferAnalytics) {
+        let analyticsLoaded = false;
+        let idleHandle;
+        const wakeEvents = ["pointerdown", "keydown", "scroll", "touchstart"];
+
+        const cleanupWakeEvents = () => {
+          wakeEvents.forEach((eventName) => {
+            window.removeEventListener(eventName, loadAnalyticsScript, passiveOnceOptions);
+          });
+        };
+
+        const passiveOnceOptions = { passive: true, once: true };
+
+        function loadAnalyticsScript() {
+          if (analyticsLoaded) return;
+          analyticsLoaded = true;
+
+          if (typeof window.cancelIdleCallback === "function" && idleHandle) {
+            window.cancelIdleCallback(idleHandle);
+          } else if (idleHandle) {
+            window.clearTimeout(idleHandle);
+          }
+
+          cleanupWakeEvents();
+
+          const script = document.createElement("script");
+          script.async = true;
+          script.src = analyticsScriptSrc;
+          document.head.appendChild(script);
+        }
+
+        if (typeof window.requestIdleCallback === "function") {
+          idleHandle = window.requestIdleCallback(loadAnalyticsScript, { timeout: 2500 });
+        } else {
+          idleHandle = window.setTimeout(loadAnalyticsScript, 2000);
+        }
+
+        wakeEvents.forEach((eventName) => {
+          window.addEventListener(eventName, loadAnalyticsScript, passiveOnceOptions);
+        });
+
+        window.addEventListener("load", loadAnalyticsScript, { once: true });
+      }
+
+      window["ggpTrack"] = function(eventName, params = {}) {
+        if (typeof window["gtag"] !== "function") return;
+
+        const body = document.body;
+        const payload = {
+          page_slug: params.page_slug || body?.dataset.pageSlug || "unknown",
+          page_type: params.page_type || body?.dataset.pageType || "website",
+          cta_position: params.cta_position,
+          partner: params.partner,
+          destination: params.destination,
+          link_text: params.link_text,
+          platform: params.platform,
+          prompt_kind: params.prompt_kind,
+          scene: params.scene,
+          tool: params.tool,
+          category: params.category,
+          meme_id: params.meme_id,
+          format: params.format,
+          from_category: params.from_category,
+          to_category: params.to_category,
+          filter_type: params.filter_type,
+          file: params.file,
+        };
+
+        Object.keys(payload).forEach((key) => {
+          if (payload[key] == null || payload[key] === "") {
+            delete payload[key];
+          }
+        });
+
+        window["gtag"]("event", eventName, payload);
+      };
+
+      // Fallback partner label for outbound links that carry no data-partner, so
+      // Creem / Modrinth / CurseForge etc. clicks stop landing in partner "(not set)".
+      // Values match the ids already used in partners.ts and existing data-partner attributes.
+      const partnerHosts = [
+        [/(^|\.)creem\.io$/, "creem"],
+        [/(^|\.)playgama\.com$/, "playgama"],
+        [/kling/, "kling"],
+        [/hitpaw/, "hitpaw"],
+        [/^dreamina\.capcut\.com$|(^|\.)jianying\.com$/, "dreamina"],
+        [/capcut/, "capcut"],
+        [/pixverse|motivaiprivatelimited\.sjv\.io$/, "pixverse"],
+        [/elevenlabs/, "elevenlabs"],
+        [/(^|\.)modrinth\.com$/, "modrinth"],
+        [/(^|\.)curseforge\.com$/, "curseforge"],
+        [/(^|\.)hailuoai\.(video|com)$/, "hailuo"],
+        [/(^|\.)stability\.ai$/, "stable-diffusion"],
+        [/(^|\.)midjourney\.com$/, "midjourney"],
+        [/(^|\.)(amazon\.[a-z.]+|amzn\.to)$/, "amazon"],
+        [/(^|\.)roblox\.com$/, "roblox"],
+        [/(^|\.)civitai\.com$/, "civitai"],
+        [/(^|\.)runwayml\.com$/, "runway"],
+        [/^play\.google\.com$/, "google-play"],
+        [/^apps\.apple\.com$/, "app-store"],
+      ];
+      const partnerFromHref = (href) => {
+        if (!href) return undefined;
+        try {
+          const url = new URL(href, window.location.href);
+          if (url.origin === window.location.origin) return undefined;
+          const host = url.hostname.toLowerCase();
+          const match = partnerHosts.find(([pattern]) => pattern.test(host));
+          return match ? match[1] : undefined;
+        } catch {
+          return undefined;
+        }
+      };
+
+      document.addEventListener("click", (event) => {
+        const element = event.target instanceof Element ? event.target : null;
+        if (!element) return;
+
+        const tracked = element.closest("[data-analytics-event]");
+        if (tracked) {
+          const href = tracked instanceof HTMLAnchorElement
+            ? tracked.href
+            : tracked.getAttribute("href");
+
+          window["ggpTrack"](tracked.dataset.analyticsEvent, {
+            cta_position: tracked.dataset.ctaPosition,
+            partner: tracked.dataset.partner || partnerFromHref(href),
+            destination: href || undefined,
+            link_text: tracked.textContent?.trim().slice(0, 120),
+            prompt_kind: tracked.dataset.promptKind,
+            scene: tracked.dataset.scene,
+            tool: tracked.dataset.tool,
+            category: tracked.dataset.category,
+            meme_id: tracked.dataset.memeId,
+            format: tracked.dataset.format,
+            from_category: tracked.dataset.fromCategory,
+            to_category: tracked.dataset.toCategory,
+            filter_type: tracked.dataset.filterType || tracked.dataset.filter,
+            file: tracked.dataset.file,
+          });
+          return;
+        }
+
+        const link = element.closest("a[href]");
+        if (!link || link.dataset.analyticsSkip === "true") return;
+
+        const rawHref = link.getAttribute("href");
+        if (!rawHref || rawHref.startsWith("/") || rawHref.startsWith("#") || rawHref.startsWith("mailto:") || rawHref.startsWith("tel:")) {
+          return;
+        }
+
+        try {
+          const url = new URL(rawHref, window.location.href);
+          if (url.origin !== window.location.origin) {
+            window["ggpTrack"]("outbound_click", {
+              cta_position: link.dataset.ctaPosition,
+              partner: link.dataset.partner || partnerFromHref(url.toString()),
+              destination: url.toString(),
+              link_text: link.textContent?.trim().slice(0, 120),
+            });
+          }
+        } catch {
+          /* Ignore malformed URLs */
+        }
+      });
+    })();</script> <meta name="robots" content="noindex,follow"> <link rel="stylesheet" href="/_astro/BaseLayout.CNnW0qUe.css"></head> <body class="aurora-bg min-h-screen antialiased" data-page-slug="404" data-page-type="website" data-adsense-enabled="false">  <nav class="google-anno-skip sticky top-0 z-50 frost-panel"> <div class="mx-auto max-w-5xl px-4 py-3"> <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"> <a href="/" class="group flex items-center gap-2.5 self-start"> <img src="/logo.png" alt="Gugugaga Penguin" width="32" height="32" class="h-8 w-8 transition group-hover:scale-110"> <span class="font-display text-lg font-800 tracking-tight"> <span class="text-aurora-teal">Gugu</span><span class="text-blush-pink">gaga</span><span class="text-ice-white/60"> Penguin</span> </span> </a> <div class="relative overflow-x-clip"> <div class="-mx-1 overflow-x-auto sm:mx-0 sm:overflow-visible"> <div class="flex min-w-max items-center gap-1 pr-6 sm:pr-1 sm:min-w-0 sm:justify-end"> <a href="/make-your-own-gugugaga/" data-chrome-surface="nav" data-chrome-slot="nav.make" data-chrome-status="localized" data-analytics-event="internal_cta_click" data-cta-position="chrome-nav.make" class="rounded-lg px-3.5 py-3 text-sm font-medium transition-all duration-200 text-ice-white/60 hover:bg-ice-white/5 hover:text-ice-white"> <span class="hidden sm:inline">Make</span> <span class="sm:hidden">Make</span>  </a><a href="/what-is-gugugaga-penguin/" data-chrome-surface="nav" data-chrome-slot="nav.origin" data-chrome-status="localized" data-analytics-event="internal_cta_click" data-cta-position="chrome-nav.origin" class="rounded-lg px-3.5 py-3 text-sm font-medium transition-all duration-200 text-ice-white/60 hover:bg-ice-white/5 hover:text-ice-white"> <span class="hidden sm:inline">Origin</span> <span class="sm:hidden">Origin</span>  </a><a href="/how-to-make-gugugaga-penguin-ai-video/" data-chrome-surface="nav" data-chrome-slot="nav.tutorial" data-chrome-status="localized" data-analytics-event="internal_cta_click" data-cta-position="chrome-nav.tutorial" class="rounded-lg px-3.5 py-3 text-sm font-medium transition-all duration-200 text-ice-white/60 hover:bg-ice-white/5 hover:text-ice-white"> <span class="hidden sm:inline">Tutorial</span> <span class="sm:hidden">Tutorial</span>  </a><a href="/best-ai-tools-gugugaga-penguin/" data-chrome-surface="nav" data-chrome-slot="nav.tools" data-chrome-status="localized" data-analytics-event="internal_cta_click" data-cta-position="chrome-nav.tools" class="rounded-lg px-3.5 py-3 text-sm font-medium transition-all duration-200 text-ice-white/60 hover:bg-ice-white/5 hover:text-ice-white"> <span class="hidden sm:inline">AI Tools</span> <span class="sm:hidden">AI Tools</span>  </a><a href="/gugugaga-penguin-prompts/" data-chrome-surface="nav" data-chrome-slot="nav.prompts" data-chrome-status="localized" data-analytics-event="internal_cta_click" data-cta-position="chrome-nav.prompts" class="rounded-lg px-3.5 py-3 text-sm font-medium transition-all duration-200 text-ice-white/60 hover:bg-ice-white/5 hover:text-ice-white"> <span class="hidden sm:inline">Prompts</span> <span class="sm:hidden">Prompts</span>  </a><a href="/gugugaga-penguin-downloads/" data-chrome-surface="nav" data-chrome-slot="nav.wallpapers" data-chrome-status="localized" data-analytics-event="internal_cta_click" data-cta-position="chrome-nav.wallpapers" class="rounded-lg px-3.5 py-3 text-sm font-medium transition-all duration-200 text-ice-white/60 hover:bg-ice-white/5 hover:text-ice-white"> <span class="hidden sm:inline">Wallpapers</span> <span class="sm:hidden">Wallpapers</span>  </a><a href="/gugugaga-penguin-memes/" data-chrome-surface="nav" data-chrome-slot="nav.memes" data-chrome-status="localized" data-analytics-event="internal_cta_click" data-cta-position="chrome-nav.memes" class="rounded-lg px-3.5 py-3 text-sm font-medium transition-all duration-200 text-ice-white/60 hover:bg-ice-white/5 hover:text-ice-white"> <span class="hidden sm:inline">Memes</span> <span class="sm:hidden">Memes</span>  </a><a href="/gugugaga-penguin-merchandise/" data-chrome-surface="nav" data-chrome-slot="nav.toys" data-chrome-status="localized" data-analytics-event="internal_cta_click" data-cta-position="chrome-nav.toys" class="rounded-lg px-3.5 py-3 text-sm font-medium transition-all duration-200 text-ice-white/60 hover:bg-ice-white/5 hover:text-ice-white"> <span class="hidden sm:inline">Toys</span> <span class="sm:hidden">Toys</span>  </a><a href="/gugu-gaga-penguin-game/" data-chrome-surface="nav" data-chrome-slot="nav.games" data-chrome-status="localized" data-analytics-event="internal_cta_click" data-cta-position="chrome-nav.games" class="rounded-lg px-3.5 py-3 text-sm font-medium transition-all duration-200 text-ice-white/60 hover:bg-ice-white/5 hover:text-ice-white"> <span class="hidden sm:inline">Games</span> <span class="sm:hidden">Games</span>  </a> </div> </div> <div class="pointer-events-none absolute right-0 top-0 h-full w-8 bg-gradient-to-l from-arctic-panel/90 to-transparent sm:hidden" aria-hidden="true"></div> </div> </div> </div> </nav>  <main>   <section class="mx-auto max-w-5xl px-4 py-12 md:py-20"> <section class="relative overflow-hidden rounded-[2rem] border border-aurora-teal/20 bg-arctic-panel/70 p-8 shadow-[0_20px_70px_rgba(5,11,20,0.35)] md:p-12"> <div class="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(61,216,197,0.16),transparent_42%),radial-gradient(circle_at_bottom_right,rgba(255,157,197,0.14),transparent_36%)]"></div> <div class="relative max-w-3xl"> <p class="mb-4 font-mono text-xs uppercase tracking-[0.35em] text-aurora-teal/75">Error 404</p> <h1 class="font-display text-4xl font-900 leading-none tracking-tight text-ice-white md:text-6xl">
+This penguin page
+<span class="block bg-gradient-to-r from-aurora-teal to-blush-pink bg-clip-text text-transparent">
+slipped off the ice
+</span> </h1> <p class="mt-5 max-w-2xl text-base leading-8 text-ice-white/60 md:text-lg">
+The URL may be outdated, typed incorrectly, or replaced by a newer guide. Use the links below to get back to the pages that matter.
+</p> <div class="mt-8 flex flex-wrap gap-3"> <a href="/" class="inline-flex items-center gap-2 rounded-2xl bg-aurora-teal px-6 py-3.5 font-display text-sm font-800 text-arctic-night transition-all duration-300 hover:scale-[1.02] hover:shadow-[0_0_30px_rgba(61,216,197,0.3)] active:scale-[0.98]">
+Back to Home
+<svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path d="M9 5l7 7-7 7"></path></svg> </a> <a href="/gugugaga-penguin-prompts/" class="inline-flex items-center gap-2 rounded-2xl border border-ice-white/10 bg-ice-white/5 px-6 py-3.5 font-display text-sm font-800 text-ice-white transition hover:border-blush-pink/30 hover:bg-blush-pink/10">
+Browse Prompts
+</a> </div> </div> </section> <section class="mt-8 grid gap-4 md:grid-cols-3"> <a href="/make-your-own-gugugaga/" class="frost-panel rounded-2xl border border-ice-white/8 p-5 transition hover:-translate-y-0.5 hover:border-aurora-teal/30"> <p class="text-xs uppercase tracking-[0.28em] text-ice-white/35">Recovery Link</p> <h2 class="mt-3 font-display text-xl font-800 text-ice-white">Make Your Own</h2> <p class="mt-2 text-sm leading-7 text-ice-white/55">Jump into the prompt generator and build a new penguin scene.</p> <span class="mt-4 inline-flex items-center gap-2 text-sm font-semibold text-aurora-teal">
+Open page
+<svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path d="M9 5l7 7-7 7"></path></svg> </span> </a><a href="/how-to-make-gugugaga-penguin-ai-video/" class="frost-panel rounded-2xl border border-ice-white/8 p-5 transition hover:-translate-y-0.5 hover:border-aurora-teal/30"> <p class="text-xs uppercase tracking-[0.28em] text-ice-white/35">Recovery Link</p> <h2 class="mt-3 font-display text-xl font-800 text-ice-white">Tutorial</h2> <p class="mt-2 text-sm leading-7 text-ice-white/55">Follow the step-by-step guide if you were looking for the workflow.</p> <span class="mt-4 inline-flex items-center gap-2 text-sm font-semibold text-aurora-teal">
+Open page
+<svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path d="M9 5l7 7-7 7"></path></svg> </span> </a><a href="/tools/" class="frost-panel rounded-2xl border border-ice-white/8 p-5 transition hover:-translate-y-0.5 hover:border-aurora-teal/30"> <p class="text-xs uppercase tracking-[0.28em] text-ice-white/35">Recovery Link</p> <h2 class="mt-3 font-display text-xl font-800 text-ice-white">Tools Hub</h2> <p class="mt-2 text-sm leading-7 text-ice-white/55">Compare the AI tools and find the page you meant to open.</p> <span class="mt-4 inline-flex items-center gap-2 text-sm font-semibold text-aurora-teal">
+Open page
+<svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path d="M9 5l7 7-7 7"></path></svg> </span> </a> </section>  </section>  </main>         <nav class="google-anno-skip fixed bottom-0 left-0 right-0 z-50 border-t border-arctic-edge/30 bg-arctic-night sm:hidden safe-bottom" aria-label="Mobile navigation"> <div class="flex items-stretch justify-around"> <a href="/" data-chrome-surface="mobile" data-chrome-slot="mobile.home" data-chrome-status="localized" data-analytics-event="internal_cta_click" data-cta-position="chrome-mobile.home" class="mobile-tab flex flex-1 flex-col items-center gap-0.5 py-2.5 text-[10px] font-medium transition text-ice-white/60"> <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path d="M2.25 12l8.954-8.955a1.126 1.126 0 011.591 0L21.75 12M4.5 9.75v10.125c0 .621.504 1.125 1.125 1.125H9.75v-4.875c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125V21h4.125c.621 0 1.125-.504 1.125-1.125V9.75M8.25 21h8.25"></path></svg>     <span>Home</span> </a><a href="/make-your-own-gugugaga/" data-chrome-surface="mobile" data-chrome-slot="mobile.make" data-chrome-status="localized" data-analytics-event="internal_cta_click" data-cta-position="chrome-mobile.make" class="mobile-tab flex flex-1 flex-col items-center gap-0.5 py-2.5 text-[10px] font-medium transition text-ice-white/60">  <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.455 2.456L21.75 6l-1.036.259a3.375 3.375 0 00-2.455 2.456z"></path></svg>    <span>Make</span> </a><a href="/gugugaga-penguin-memes/" data-chrome-surface="mobile" data-chrome-slot="mobile.memes" data-chrome-status="localized" data-analytics-event="internal_cta_click" data-cta-position="chrome-mobile.memes" class="mobile-tab flex flex-1 flex-col items-center gap-0.5 py-2.5 text-[10px] font-medium transition text-ice-white/60">   <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path d="M15.182 15.182a4.5 4.5 0 01-6.364 0M21 12a9 9 0 11-18 0 9 9 0 0118 0zM9.75 9.75c0 .414-.168.75-.375.75S9 10.164 9 9.75 9.168 9 9.375 9s.375.336.375.75zm-.375 0h.008v.015h-.008V9.75zm5.625 0c0 .414-.168.75-.375.75s-.375-.336-.375-.75.168-.75.375-.75.375.336.375.75zm-.375 0h.008v.015h-.008V9.75z"></path></svg>   <span>Memes</span> </a><a href="/gugu-gaga-penguin-game/" data-chrome-surface="mobile" data-chrome-slot="mobile.game" data-chrome-status="localized" data-analytics-event="internal_cta_click" data-cta-position="chrome-mobile.game" class="mobile-tab flex flex-1 flex-col items-center gap-0.5 py-2.5 text-[10px] font-medium transition text-ice-white/60">    <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M14.25 6.087c0-.355.186-.676.401-.959.221-.29.349-.634.349-1.003 0-1.036-1.007-1.875-2.25-1.875s-2.25.84-2.25 1.875c0 .369.128.713.349 1.003.215.283.401.604.401.959v0a.64.64 0 01-.657.643 48.39 48.39 0 01-4.163-.3c.186 1.613.293 3.25.315 4.907a.656.656 0 01-.658.663v0c-.355 0-.676-.186-.959-.401a1.647 1.647 0 00-1.003-.349c-1.036 0-1.875 1.007-1.875 2.25s.84 2.25 1.875 2.25c.369 0 .713-.128 1.003-.349.283-.215.604-.401.959-.401v0c.31 0 .555.26.532.57a48.039 48.039 0 01-.642 5.056c1.518.19 3.058.309 4.616.354a.64.64 0 00.657-.643v0c0-.355-.186-.676-.401-.959a1.647 1.647 0 01-.349-1.003c0-1.035 1.008-1.875 2.25-1.875 1.243 0 2.25.84 2.25 1.875 0 .369-.128.713-.349 1.003-.215.283-.401.604-.401.959v0c0 .333.277.599.61.58a48.1 48.1 0 005.427-.63 48.05 48.05 0 00.582-4.717.532.532 0 00-.533-.57v0c-.355 0-.676.186-.959.401-.29.221-.634.349-1.003.349-1.036 0-1.875-1.007-1.875-2.25s.84-2.25 1.875-2.25c.369 0 .713.128 1.003.349.283.215.604.401.959.401v0a.656.656 0 00.659-.663 48.422 48.422 0 00-.31-4.82s-1.5.13-3.404.295a.64.64 0 01-.657-.643v0z"></path></svg>  <span>Game</span> </a><a href="/gugugaga-penguin-prompts/" data-chrome-surface="mobile" data-chrome-slot="mobile.prompts" data-chrome-status="localized" data-analytics-event="internal_cta_click" data-cta-position="chrome-mobile.prompts" class="mobile-tab flex flex-1 flex-col items-center gap-0.5 py-2.5 text-[10px] font-medium transition text-ice-white/60">     <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z"></path></svg> <span>Prompts</span> </a> </div> </nav>  <footer class="google-anno-skip border-t border-arctic-edge/50 px-4 pt-10 sm:pb-8 pb-20"> <div class="mx-auto max-w-5xl"> <div class="mb-8 flex flex-col items-center gap-6 sm:flex-row sm:items-start sm:justify-between">  <div class="text-center sm:text-left"> <div class="mb-2 flex items-center justify-center gap-2 sm:justify-start"> <img src="/logo.png" alt="Gugugaga Penguin" width="24" height="24" class="h-6 w-6"> <span class="font-display text-sm font-bold"> <span class="text-aurora-teal">Gugu</span><span class="text-blush-pink">gaga</span><span class="text-ice-white/60"> Penguin</span> </span> </div> <p class="text-xs text-ice-white/30"> The internet&#39;s home for the cutest AI meme of 2026. </p> </div>  <div class="flex gap-8 text-xs"> <div class="space-y-4"> <div class="space-y-0.5"> <p class="font-display font-bold text-ice-white/40 uppercase tracking-wider text-[10px] mb-1">Learn</p> <a href="/what-is-gugugaga-penguin/" data-chrome-surface="footer" data-chrome-slot="footer.learn.origin" data-chrome-status="localized" class="block py-2.5 text-ice-white/50 hover:text-aurora-teal transition"> Origin Story  </a><a href="/who-is-gugu-gaga-penguin/" data-chrome-surface="footer" data-chrome-slot="footer.learn.profile" data-chrome-status="localized" class="block py-2.5 text-ice-white/50 hover:text-aurora-teal transition"> Character Profile  </a><a href="/endmin-penguin-guide/" data-chrome-surface="footer" data-chrome-slot="footer.learn.endmin" data-chrome-status="localized" class="block py-2.5 text-ice-white/50 hover:text-aurora-teal transition"> Endmin &amp; Penguinistrator Guide  </a><a href="/gugu-gaga-penguin-meme-timeline-2026/" data-chrome-surface="footer" data-chrome-slot="footer.learn.timeline" data-chrome-status="localized" class="block py-2.5 text-ice-white/50 hover:text-aurora-teal transition"> 2026 Timeline  </a><a href="/about/" data-chrome-surface="footer" data-chrome-slot="footer.learn.about" data-chrome-status="localized" class="block py-2.5 text-ice-white/50 hover:text-aurora-teal transition"> About  </a> </div><div class="space-y-0.5"> <p class="font-display font-bold text-ice-white/40 uppercase tracking-wider text-[10px] mb-1">Create</p> <a href="/make-your-own-gugugaga/" data-chrome-surface="footer" data-chrome-slot="footer.crie.make" data-chrome-status="localized" class="block py-2.5 text-ice-white/50 hover:text-aurora-teal transition"> Make Your Own  </a><a href="/how-to-make-gugugaga-penguin-ai-video/" data-chrome-surface="footer" data-chrome-slot="footer.crie.tutorial" data-chrome-status="localized" class="block py-2.5 text-ice-white/50 hover:text-aurora-teal transition"> AI Tutorial  </a><a href="/best-ai-tools-gugugaga-penguin/" data-chrome-surface="footer" data-chrome-slot="footer.crie.tools" data-chrome-status="localized" class="block py-2.5 text-ice-white/50 hover:text-aurora-teal transition"> Best AI Tools  </a><a href="/tools/" data-chrome-surface="footer" data-chrome-slot="footer.crie.tool-guides" data-chrome-status="localized" class="block py-2.5 text-ice-white/50 hover:text-aurora-teal transition"> Tool Guides  </a><a href="/gugugaga-penguin-prompts/" data-chrome-surface="footer" data-chrome-slot="footer.crie.prompts" data-chrome-status="localized" class="block py-2.5 text-ice-white/50 hover:text-aurora-teal transition"> Free Prompts  </a><a href="/how-to-draw-gugugaga-penguin/" data-chrome-surface="footer" data-chrome-slot="footer.crie.draw" data-chrome-status="localized" class="block py-2.5 text-ice-white/50 hover:text-aurora-teal transition"> How to Draw Gugugaga Penguin  </a><a href="/gugugaga-penguin-coloring-pages/" data-chrome-surface="footer" data-chrome-slot="footer.crie.coloring" data-chrome-status="localized" class="block py-2.5 text-ice-white/50 hover:text-aurora-teal transition"> Coloring Pages  </a> </div><div class="space-y-0.5"> <p class="font-display font-bold text-ice-white/40 uppercase tracking-wider text-[10px] mb-1">Play</p> <a href="/gugu-gaga-penguin-game/" data-chrome-surface="footer" data-chrome-slot="footer.jogue.game-hub" data-chrome-status="localized" class="block py-2.5 text-ice-white/50 hover:text-aurora-teal transition"> Game Hub  </a><a href="/gugu-gaga-penguin-roblox/" data-chrome-surface="footer" data-chrome-slot="footer.jogue.roblox" data-chrome-status="localized" class="block py-2.5 text-ice-white/50 hover:text-aurora-teal transition"> Roblox Games  </a><a href="/gugu-gaga-penguin-minecraft/" data-chrome-surface="footer" data-chrome-slot="footer.jogue.minecraft" data-chrome-status="localized" class="block py-2.5 text-ice-white/50 hover:text-aurora-teal transition"> Minecraft Mods  </a><a href="/gugu-gaga-penguin-mods/" data-chrome-surface="footer" data-chrome-slot="footer.jogue.mods" data-chrome-status="localized" class="block py-2.5 text-ice-white/50 hover:text-aurora-teal transition"> Gmod &amp; Palworld  </a> </div><div class="space-y-0.5"> <p class="font-display font-bold text-ice-white/40 uppercase tracking-wider text-[10px] mb-1">Download</p> <a href="/gugugaga-penguin-downloads/" data-chrome-surface="footer" data-chrome-slot="footer.baixe.wallpapers" data-chrome-status="localized" class="block py-2.5 text-ice-white/50 hover:text-aurora-teal transition"> Wallpapers &amp; Stickers  </a><a href="/gugugaga-penguin-stickers-emotes/" data-chrome-surface="footer" data-chrome-slot="footer.baixe.stickers" data-chrome-status="localized" class="block py-2.5 text-ice-white/50 hover:text-aurora-teal transition"> Stickers &amp; Emotes  </a><a href="/gugugaga-penguin-merchandise/" data-chrome-surface="footer" data-chrome-slot="footer.baixe.merch" data-chrome-status="localized" class="block py-2.5 text-ice-white/50 hover:text-aurora-teal transition"> Merchandise / Toys  </a> </div> </div> <div class="space-y-0.5"> <p class="font-display font-bold text-ice-white/40 uppercase tracking-wider text-[10px] mb-1">Legal</p> <a href="/privacy-policy/" data-chrome-surface="legal" data-chrome-slot="legal.privacy" data-chrome-status="localized" class="block py-2.5 text-ice-white/50 hover:text-aurora-teal transition"> Privacy Policy  </a><a href="/terms-of-service/" data-chrome-surface="legal" data-chrome-slot="legal.terms" data-chrome-status="localized" class="block py-2.5 text-ice-white/50 hover:text-aurora-teal transition"> Terms of Service  </a><a href="/cookie-policy/" data-chrome-surface="legal" data-chrome-slot="legal.cookies" data-chrome-status="localized" class="block py-2.5 text-ice-white/50 hover:text-aurora-teal transition"> Cookie Policy  </a> </div> </div> </div>  <div class="border-t border-arctic-edge/30 pt-4 text-center text-[11px] leading-relaxed text-ice-white/25 space-y-1"> <p>Fan-made. Not affiliated with Hypergryph / Yostar / Arknights. Endmin/Endministrator and Arknights: Endfield are trademarks and/or copyrighted materials of their respective owners.</p> <p>As an Amazon Associate, gugugagapenguin.com earns from qualifying purchases. Other affiliate links are disclosed near the relevant recommendation.</p> <p>Curated by the <a href="/about/" class="underline decoration-ice-white/20 hover:decoration-aurora-teal hover:text-ice-white/55 transition">gugugagapenguin.com editorial team</a> · Independent fan project, run by one person.</p> <p>&copy; 2026 gugugagapenguin.com</p>  </div> </div> </footer>   </body></html>

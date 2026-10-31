@@ -1,0 +1,45 @@
+- id: llm-pi-ai
+  config:
+    providers:
+      mock:
+        displayName: Spike Mock Provider
+        api: openai-completions
+        baseURL: "http://127.0.0.1:18766/v1"
+        apiKeyEnv: MOCK_API_KEY
+        models:
+          - id: "mock-model"
+            contextWindow: 100000
+            reasoningEfforts:
+              off: off
+              low: low
+              medium: medium
+              high: high
+
+- id: agent-default-model
+  config:
+    provider: mock
+    model: "mock-model"
+
+- id: session-title-llm
+  disabled: true
+
+- id: approval
+  config:
+    policy: never
+
+- id: permission
+  config:
+    presets:
+      read-only:
+        sandbox: read-only
+        approval: never
+      workspace-write:
+        sandbox: workspace-write
+        approval: never
+      danger-full-access:
+        sandbox: danger-full-access
+        approval: never
+
+- insert:
+    - id: aha-live-inbox-spike
+      name: "/home/kaikai/kk-workspace/my_project/AHA2/tmp/dsh-steer-spike/steer-plugin.mjs"

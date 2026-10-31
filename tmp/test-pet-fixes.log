@@ -1,0 +1,33 @@
+ok  	github.com/ChinaKai/AHA2/cmd/aha	1.153s
+?   	github.com/ChinaKai/AHA2/cmd/aha-sync	[no test files]
+?   	github.com/ChinaKai/AHA2/cmd/aha-tray	[no test files]
+ok  	github.com/ChinaKai/AHA2/internal/agentapi	0.009s
+ok  	github.com/ChinaKai/AHA2/internal/app	13.490s
+ok  	github.com/ChinaKai/AHA2/internal/auth	0.217s
+ok  	github.com/ChinaKai/AHA2/internal/backend	0.197s
+ok  	github.com/ChinaKai/AHA2/internal/centersync	0.544s
+ok  	github.com/ChinaKai/AHA2/internal/channel	14.490s
+ok  	github.com/ChinaKai/AHA2/internal/codexaccount	0.453s
+ok  	github.com/ChinaKai/AHA2/internal/configimport	0.014s
+ok  	github.com/ChinaKai/AHA2/internal/desktop	0.428s
+ok  	github.com/ChinaKai/AHA2/internal/domain	0.006s
+--- FAIL: TestClaudeNativeExecutionBorrowsProfileCredential (0.03s)
+    executor_test.go:92: native execution credential = "", want the profile's token
+FAIL
+FAIL	github.com/ChinaKai/AHA2/internal/execution	0.039s
+ok  	github.com/ChinaKai/AHA2/internal/gateway	0.142s
+ok  	github.com/ChinaKai/AHA2/internal/hardware	0.402s
+ok  	github.com/ChinaKai/AHA2/internal/httpapi	76.464s
+ok  	github.com/ChinaKai/AHA2/internal/legacyimport	1.204s
+ok  	github.com/ChinaKai/AHA2/internal/managedprocess	0.015s
+ok  	github.com/ChinaKai/AHA2/internal/outboundproxy	0.263s
+ok  	github.com/ChinaKai/AHA2/internal/prompt	5.110s
+ok  	github.com/ChinaKai/AHA2/internal/proxyconfig	0.003s
+ok  	github.com/ChinaKai/AHA2/internal/secrets	0.006s
+ok  	github.com/ChinaKai/AHA2/internal/store	26.141s
+ok  	github.com/ChinaKai/AHA2/internal/sync	61.715s
+ok  	github.com/ChinaKai/AHA2/internal/tray	0.011s
+?   	github.com/ChinaKai/AHA2/internal/webassets	[no test files]
+ok  	github.com/ChinaKai/AHA2/internal/workspace	16.234s
+?   	github.com/ChinaKai/AHA2/tmp/db-inspect	[no test files]
+FAIL

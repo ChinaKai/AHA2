@@ -1,0 +1,10 @@
+Using WSL Node at /home/kaikai/.nvm/versions/node/v24.18.0/bin/node
+==> Build Web assets
+<== Build Web assets (0.4s)
+==> Test Web build
+<== Test Web build (0.5s)
+==> Sync embedded Web assets
+<== Sync embedded Web assets (3.0s)
+==> Run Go tests
+<== Run Go tests (19.1s)
+==> Run go vet

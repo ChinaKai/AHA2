@@ -17,6 +17,17 @@ func (s *Store) OwnerExists(ctx context.Context) (bool, error) {
 	return count > 0, nil
 }
 
+// PrimaryOwnerID returns the local owner account. AHA2 is a single-owner
+// control plane; background features such as the pet need the owner scope to
+// query owner-filtered channel destinations.
+func (s *Store) PrimaryOwnerID(ctx context.Context) (string, error) {
+	var id string
+	if err := s.db.QueryRowContext(ctx, `SELECT id FROM owners ORDER BY created_at,id LIMIT 1`).Scan(&id); err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
 func (s *Store) CreateOwner(ctx context.Context, owner domain.Owner) error {
 	_, err := s.db.ExecContext(
 		ctx,

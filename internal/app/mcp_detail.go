@@ -86,7 +86,7 @@ func (s *Service) TestMCPServer(ctx context.Context, id string) (domain.MCPServe
 }
 
 func petMCPToolDetails() []domain.MCPTool {
-	tools := assistantPetTools()
+	tools := allPetMCPTools()
 	result := make([]domain.MCPTool, 0, len(tools))
 	for _, tool := range tools {
 		result = append(result, domain.MCPTool{Name: tool.Name, Description: tool.Description, InputSchema: tool.Parameters})

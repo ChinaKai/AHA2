@@ -94,7 +94,7 @@ const server = createServer(async (request, response) => {
       response.end(bootstrap);
     } else {
       // The panel pulls xterm from /vendor, so that path has to be servable too.
-      if (!/^\/(?:vendor\/)?[a-z_]+\.(?:js|css)$/.test(name)) { response.writeHead(404).end(); return; }
+      if (!/^\/(?:vendor\/)?[a-z0-9_]+\.(?:js|css)$/.test(name)) { response.writeHead(404).end(); return; }
       const file = name.startsWith("/vendor/")
         ? resolve(root, "web", name.slice(1))
         : resolve(root, "web/dist", name.slice(1));

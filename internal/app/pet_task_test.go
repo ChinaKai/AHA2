@@ -375,6 +375,74 @@ func TestOwnerAssistantRemovesGeneratedPetWorkspaceGuides(t *testing.T) {
 	}
 }
 
+func TestOwnerAssistantSeedsPetCoreFilesWithoutOverwriting(t *testing.T) {
+	fixture := newPetTaskFixture(t)
+	if _, err := fixture.service.OwnerAssistant(fixture.ctx); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(fixture.database.DataDir(), "pet-workspace")
+	identityPath := filepath.Join(root, "core", "identity.md")
+	principlesPath := filepath.Join(root, "core", "principles.md")
+	for _, path := range []string{identityPath, principlesPath} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("core file %s: %v", path, err)
+		}
+		if !strings.Contains(string(data), "#") {
+			t.Fatalf("core file %s is not a markdown template: %q", path, string(data))
+		}
+	}
+	if _, err := os.Stat(filepath.Join(root, "diary")); err != nil {
+		t.Fatalf("diary directory: %v", err)
+	}
+
+	custom := "# 身份\n\n我叫小石头，是一只慢慢悠悠的乌龟。\n"
+	if err := os.WriteFile(identityPath, []byte(custom), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.service.OwnerAssistant(fixture.ctx); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(identityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != custom {
+		t.Fatalf("existing core identity was overwritten: %q", string(data))
+	}
+
+	if err := os.Remove(principlesPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.service.OwnerAssistant(fixture.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(principlesPath); err != nil || !strings.Contains(string(data), "#") {
+		t.Fatalf("missing core principles were not reseeded: %q %v", string(data), err)
+	}
+}
+
+func TestPetTaskPromptUsesCorePathsInsteadOfPersona(t *testing.T) {
+	fixture := newPetTaskFixture(t)
+	if _, err := fixture.service.OwnerAssistant(fixture.ctx); err != nil {
+		t.Fatal(err)
+	}
+	rendered, err := fixture.service.prompts.RenderTemplate(fixture.ctx, "identity.pet-task", petPromptData{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"core/identity.md", "core/principles.md", "core/loops.md", "diary/YYYY-MM-DD.md"} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("pet prompt does not point at %s:\n%s", want, rendered)
+		}
+	}
+	for _, unwanted := range []string{"咕咕嘎嘎", "大肥鱼", "你的职责"} {
+		if strings.Contains(rendered, unwanted) {
+			t.Fatalf("pet prompt still embeds persona %q:\n%s", unwanted, rendered)
+		}
+	}
+}
+
 func TestOwnerAssistantRollsFailedPetStartBackToDraft(t *testing.T) {
 	fixture := newPetTaskFixture(t)
 	fixture.createPetDraft(t, "旧的宠物需求")

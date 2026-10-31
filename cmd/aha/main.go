@@ -228,6 +228,7 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 		Settings: database,
 	}
 	appService := app.NewService(database, secretStore, executor)
+	appService.StartPetTaskNotifications()
 	appService.SetProxyRuntime(proxyRuntime)
 	appService.SetRunContext(ctx)
 	appService.StartPetAutonomy()
@@ -252,11 +253,13 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 	}
 	appService.SetAgentAPI(agentCapabilities, resolvedAgentAPIURL, options.allowInsecureAgentAPI)
 	channelService := channel.New(channel.Config{Store: database, App: appService, Secrets: secretStore, DataDir: absoluteDataDir, Logger: logger})
+	appService.SetPetChannelSender(channelService)
 	if err := channelService.RefreshPlugins(ctx); err != nil {
 		logger.Warn("channel plugin discovery failed", "error", err)
 	}
 	channelService.Start(ctx)
 	hardwareManager := hardware.NewManager(database)
+	appService.SetPetHardwareDisconnector(hardwareManager)
 	defer hardwareManager.Close()
 	if err := appService.ResumePending(ctx); err != nil {
 		return fmt.Errorf("resume pending agent inbox: %w", err)
@@ -290,6 +293,7 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 	if options.allowCrossOrigin {
 		logger.Warn("Origin host validation disabled")
 	}
+	appService.SetPetSecurityApplier(apiServer)
 	apiServer.StartSyncLoop(ctx)
 	defer apiServer.CloseDesktop()
 	server := &http.Server{

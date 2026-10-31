@@ -52,6 +52,8 @@ window.fetch = async (input, init = {}) => {
   window.__calls.push(method + " " + path);
   const status = window.__phase === "completed" ? "completed" : "waiting_user";
   if (path === "/api/v1/auth/status") return json({authenticated: true, csrf_token: "csrf", owner: {id: "owner-1", username: "owner"}});
+  if (path === "/api/v1/settings/general") return json({ok: true, general: {language: "zh-CN"}});
+  if (path === "/api/v1/assistant") return json({assistant: {character: "gugugaga", name: "AHA", nickname: "AHA", enabled: true}, messages: [], models: [], tools: []});
   if (path === "/api/v1/tasks/task-1/reopen" && method === "POST") { window.__reopened++; window.__phase = "reopened"; return json({ok: true}); }
   if (path === "/api/v1/tasks/task-1/agents/main/messages" && method === "POST") { window.__sent.push(JSON.parse(init.body || "{}").content || ""); return json({ok: true, started: false, queued: true}); }
   if (path === "/api/v1/tasks/task-1" && method === "GET") return json(detailOf(status));
@@ -86,7 +88,7 @@ const server = createServer(async (request, response) => {
       response.setHeader("Content-Type", "text/javascript");
       response.end(bootstrap);
     } else {
-      if (!/^\/[a-z_]+\.(?:js|css)$/.test(name)) { response.writeHead(404).end(); return; }
+      if (!/^\/[a-z0-9_]+\.(?:js|css)$/.test(name)) { response.writeHead(404).end(); return; }
       response.setHeader("Content-Type", name.endsWith(".css") ? "text/css" : "text/javascript");
       response.end(await readFile(resolve(root, "web/dist", name.slice(1))));
     }

@@ -36,8 +36,10 @@ var residentPromptBudget = map[string]int{
 	"policy-auto":                    450,
 	"identity-channel-digital-human": 1250,
 	"identity-channel-assistant":     850,
-	"role-sub":                       700,
-	"policy-single":                  150,
+	// The identity owns invariants; the command directory lives in aha_capabilities.
+	"identity-pet-task": 1600,
+	"role-sub":          700,
+	"policy-single":     150,
 }
 
 // The Available context list is the other per-Turn block, and it is rendered
@@ -128,7 +130,7 @@ func TestEveryResidentTemplateHasABudget(t *testing.T) {
 	for _, role := range []string{"main", "sub"} {
 		for _, mode := range []string{"auto", "single"} {
 			for _, knowledge := range []bool{true, false} {
-				for _, identity := range []string{identityTaskAgent, identityChannelAssistant, identityChannelDigitalHuman} {
+				for _, identity := range []string{identityTaskAgent, identityChannelAssistant, identityChannelDigitalHuman, "pet-task"} {
 					for _, channel := range []string{channelWeb, channelExternal} {
 						// The renderer concatenates the "identity."/"channel."
 						// prefix at the call site, so pass the same shape it does.

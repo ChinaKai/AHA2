@@ -239,6 +239,20 @@ func TestClaudeDisablesNativeAgentTools(t *testing.T) {
 	}
 }
 
+func TestClaudeReadOnlyKeepsMCPToolsCallable(t *testing.T) {
+	t.Parallel()
+	joined := strings.Join(claudePermissionArgs("read-only", "never"), " ")
+	if !strings.Contains(joined, "--permission-mode bypassPermissions") {
+		t.Fatalf("read-only should not use plan mode: %s", joined)
+	}
+	if !strings.Contains(joined, "--disallowedTools") || !strings.Contains(joined, "Bash") || !strings.Contains(joined, "Write") {
+		t.Fatalf("read-only write tools were not disabled: %s", joined)
+	}
+	if strings.Contains(joined, "--permission-mode plan") {
+		t.Fatalf("plan mode blocks MCP coordinator tools: %s", joined)
+	}
+}
+
 func TestParseClaudeLineInitSession(t *testing.T) {
 	t.Parallel()
 	events, reply, session := parseClaudeLine(`{"type":"system","subtype":"init","session_id":"sess-2"}`)

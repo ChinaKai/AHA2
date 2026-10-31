@@ -1,0 +1,82 @@
+Using WSL Node at /home/kaikai/.nvm/versions/node/v24.18.0/bin/node
+==> Build Web assets
+<== Build Web assets (0.3s)
+==> Test Web build
+<== Test Web build (0.4s)
+==> Sync embedded Web assets
+<== Sync embedded Web assets (2.2s)
+==> Run Go tests
+C:\WINDOWS\System32\wsl.exe exited with code 1. ok  	github.com/ChinaKai/AHA2/cmd/aha	1.181s
+?   	github.com/ChinaKai/AHA2/cmd/aha-sync	[no test files]
+?   	github.com/ChinaKai/AHA2/cmd/aha-tray	[no test files]
+ok  	github.com/ChinaKai/AHA2/internal/agentapi	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/app	12.765s
+ok  	github.com/ChinaKai/AHA2/internal/auth	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/backend	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/centersync	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/channel	13.037s
+ok  	github.com/ChinaKai/AHA2/internal/codexaccount	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/configimport	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/desktop	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/domain	(cached)
+--- FAIL: TestClaudeNativeExecutionBorrowsProfileCredential (0.02s)
+    executor_test.go:92: native execution credential = "", want the profile's token
+FAIL
+FAIL	github.com/ChinaKai/AHA2/internal/execution	0.027s
+ok  	github.com/ChinaKai/AHA2/internal/gateway	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/hardware	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/httpapi	66.816s
+ok  	github.com/ChinaKai/AHA2/internal/legacyimport	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/managedprocess	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/outboundproxy	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/prompt	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/proxyconfig	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/secrets	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/store	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/sync	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/tray	(cached)
+?   	github.com/ChinaKai/AHA2/internal/webassets	[no test files]
+ok  	github.com/ChinaKai/AHA2/internal/workspace	(cached)
+?   	github.com/ChinaKai/AHA2/tmp/db-inspect	[no test files]
+FAIL
+ËùÔÚÎ»ÖÃ \\wsl.localhost\Ubuntu-24.04\home\kaikai\kk-workspace\my_project\AHA2\scripts\build-and-deploy-windows-user.ps
+1:109 ×Ö·û: 9
++         throw "$Executable exited with code $($process.ExitCode). $de ...
++         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : OperationStopped: (C:\WINDOWS\Syst...est files]
+FAIL:String) [], RuntimeException
+    + FullyQualifiedErrorId : C:\WINDOWS\System32\wsl.exe exited with code 1. ok  	github.com/ChinaKai/AHA2/cmd/aha	1. 
+   181s
+?   	github.com/ChinaKai/AHA2/cmd/aha-sync	[no test files]
+?   	github.com/ChinaKai/AHA2/cmd/aha-tray	[no test files]
+ok  	github.com/ChinaKai/AHA2/internal/agentapi	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/app	12.765s
+ok  	github.com/ChinaKai/AHA2/internal/auth	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/backend	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/centersync	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/channel	13.037s
+ok  	github.com/ChinaKai/AHA2/internal/codexaccount	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/configimport	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/desktop	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/domain	(cached)
+--- FAIL: TestClaudeNativeExecutionBorrowsProfileCredential (0.02s)
+    executor_test.go:92: native execution credential = "", want the profile's token
+FAIL
+FAIL	github.com/ChinaKai/AHA2/internal/execution	0.027s
+ok  	github.com/ChinaKai/AHA2/internal/gateway	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/hardware	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/httpapi	66.816s
+ok  	github.com/ChinaKai/AHA2/internal/legacyimport	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/managedprocess	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/outboundproxy	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/prompt	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/proxyconfig	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/secrets	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/store	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/sync	(cached)
+ok  	github.com/ChinaKai/AHA2/internal/tray	(cached)
+?   	github.com/ChinaKai/AHA2/internal/webassets	[no test files]
+ok  	github.com/ChinaKai/AHA2/internal/workspace	(cached)
+?   	github.com/ChinaKai/AHA2/tmp/db-inspect	[no test files]
+FAIL
+ 

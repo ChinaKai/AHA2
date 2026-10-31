@@ -50,7 +50,7 @@ func TestKnowledgeProposalMigrationAndNewEntryApproval(t *testing.T) {
 	if _, err := database.db.ExecContext(ctx, `DROP TABLE knowledge_proposals`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := database.db.ExecContext(ctx, `DELETE FROM schema_migrations WHERE version IN (34,45)`); err != nil {
+	if _, err := database.db.ExecContext(ctx, `DELETE FROM schema_migrations WHERE version IN (34,45,105)`); err != nil {
 		t.Fatal(err)
 	}
 	if err := database.migrate(ctx); err != nil {
