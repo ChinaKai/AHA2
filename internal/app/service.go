@@ -47,7 +47,7 @@ type ExecutionRequest struct {
 	AgentAPIForward *workspacepkg.ReverseForward
 	Filesystem      string
 	Approval        string
-	MCPConfig       string
+	MCPServers      []backend.MCPServer
 	AllowedTools    []string
 }
 
@@ -1222,14 +1222,14 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 	}
 	filesystem, approval := parsePermissionsJSON(snapshot.PermissionsJSON)
 	latestSessionUsage := cloneUsageMap(sessionUsageBaseline)
-	mcpConfig, allowedTools := s.mcpRuntimeForTask(ctx, task)
+	mcpServers, allowedTools := s.mcpRuntimeForTask(ctx, task, agentAPIURL)
 	result, executeErr := s.executor.Execute(ctx, ExecutionRequest{
 		Turn: turn, Task: task, Project: project, Workspace: workspace, Snapshot: snapshot,
 		Model: model, EnvGroup: envGroup, Environment: environment, Prompt: packedPrompt,
 		ProviderSessionID: providerSession, BackendSessionID: sessionID,
 		AgentAPIForward: agentAPIForward,
 		Filesystem:      filesystem, Approval: approval,
-		MCPConfig: mcpConfig, AllowedTools: allowedTools,
+		MCPServers: mcpServers, AllowedTools: allowedTools,
 	}, func(event ExecutionEvent) {
 		now := s.now().UTC()
 		watchdogEvent := event.Type == "agent_stalled" || event.Type == "agent_heartbeat" || event.Type == "agent_idle_timeout"

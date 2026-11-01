@@ -215,6 +215,37 @@ func (s *Service) AgentGlobalSkillAllowed(ctx context.Context, call AgentCallCon
 	return true
 }
 
+// AgentChannelReceiptID resolves the group message receipt delivered to this
+// Turn. It backs the narrow channel MCP: the tool answers the current routed
+// message, so the model never has to reproduce an opaque receipt id.
+func (s *Service) AgentChannelReceiptID(ctx context.Context, claims agentapi.Claims) (string, error) {
+	call, err := s.AgentCallContext(ctx, claims, true)
+	if err != nil {
+		return "", err
+	}
+	channelContext, err := s.store.ChannelContextForInboxBatch(ctx, call.Turn.InboxBatchID)
+	if err != nil {
+		return "", ErrAgentCallForbidden
+	}
+	return channelMCPGroupReceipt(channelContext)
+}
+
+// channelMCPGroupReceipt accepts only a group task_route context. The narrow
+// MCP exists for the group gap; a private route already has the server-side
+// final-answer fallback, and a conversation_host mirrors its answer itself.
+func channelMCPGroupReceipt(channelContext map[string]any) (string, error) {
+	if channelRouteMode(channelContext) != "task_route" ||
+		strings.TrimSpace(fmt.Sprint(channelContext["endpoint"])) != domain.ChannelEndpointGroupDigitalHuman {
+		return "", ErrAgentCallForbidden
+	}
+	receiptID, _ := channelContext["inbound_receipt_id"].(string)
+	receiptID = strings.TrimSpace(receiptID)
+	if receiptID == "" {
+		return "", ErrAgentCallForbidden
+	}
+	return receiptID, nil
+}
+
 func (s *Service) SetAgentChannelReplyDecision(ctx context.Context, claims agentapi.Claims, decision, inboundReceiptID, reason string) error {
 	if decision != "continue" && decision != "end" {
 		return fmt.Errorf("channel reply decision must be continue or end")

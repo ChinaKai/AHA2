@@ -10,6 +10,7 @@ import (
 	pathpkg "path"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -305,6 +306,7 @@ func dshProfilePatch(request Request, pluginURL, liveInboxURL string) (string, e
 	output.WriteString("      name: " + strconv.Quote(pluginURL) + "\n")
 	output.WriteString("    - id: aha-live-inbox\n")
 	output.WriteString("      name: " + strconv.Quote(liveInboxURL) + "\n")
+	writeDSHMCPServers(&output, request.MCPServers)
 	for _, id := range []string{
 		"tool-subagent", "tool-subagent-fork", "tool-subagent-control", "tool-workflow",
 	} {
@@ -312,6 +314,120 @@ func dshProfilePatch(request Request, pluginURL, liveInboxURL string) (string, e
 		output.WriteString("  disabled: true\n")
 	}
 	return output.String(), nil
+}
+
+// writeDSHMCPServers appends one dsh-mcp-client insert per neutral MCP
+// registration. HTTP bearer auth is rendered as a JS expression over
+// process.env, so the generated patch never contains the turn credential.
+func writeDSHMCPServers(output *strings.Builder, servers []MCPServer) {
+	for _, server := range servers {
+		name := dshServerName(server.Name)
+		if name == "" {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(server.Transport)) {
+		case "http":
+			if strings.TrimSpace(server.URL) == "" {
+				continue
+			}
+			output.WriteString("\n    - id: aha-mcp-" + name + "\n")
+			output.WriteString("      name: '@deepseek-ai/dsh-mcp-client'\n")
+			output.WriteString("      config:\n")
+			output.WriteString("        serverName: " + name + "\n")
+			output.WriteString("        transport: streamable-http\n")
+			if env := strings.TrimSpace(server.URLFromEnv); safeEnvVarName(env) && !strings.ContainsAny(server.URLPath, "`\\") {
+				output.WriteString("        url: !!js '`${process.env." + env + "}" + server.URLPath + "`'\n")
+			} else {
+				output.WriteString("        url: " + yamlScalar(server.URL) + "\n")
+			}
+			headers := make([]string, 0, len(server.Headers)+1)
+			bearerEnv := strings.TrimSpace(server.BearerTokenEnv)
+			for key, value := range server.Headers {
+				if bearerEnv != "" && strings.EqualFold(strings.TrimSpace(key), "Authorization") {
+					continue
+				}
+				headers = append(headers, "          "+yamlScalar(key)+": "+yamlScalar(value))
+			}
+			if safeEnvVarName(bearerEnv) {
+				headers = append(headers, "          Authorization: !!js '`Bearer ${process.env."+bearerEnv+"}`'")
+			}
+			if len(headers) > 0 {
+				sort.Strings(headers)
+				output.WriteString("        headers:\n")
+				for _, line := range headers {
+					output.WriteString(line + "\n")
+				}
+			}
+		case "stdio":
+			if strings.TrimSpace(server.Command) == "" {
+				continue
+			}
+			output.WriteString("\n    - id: aha-mcp-" + name + "\n")
+			output.WriteString("      name: '@deepseek-ai/dsh-mcp-client'\n")
+			output.WriteString("      config:\n")
+			output.WriteString("        serverName: " + name + "\n")
+			output.WriteString("        transport: stdio\n")
+			output.WriteString("        command: " + yamlScalar(server.Command) + "\n")
+			if len(server.Args) > 0 {
+				output.WriteString("        args:\n")
+				for _, value := range server.Args {
+					output.WriteString("          - " + yamlScalar(value) + "\n")
+				}
+			}
+			if len(server.Env) > 0 {
+				keys := make([]string, 0, len(server.Env))
+				for key := range server.Env {
+					keys = append(keys, key)
+				}
+				sort.Strings(keys)
+				output.WriteString("        env:\n")
+				for _, key := range keys {
+					output.WriteString("          " + yamlScalar(key) + ": " + yamlScalar(server.Env[key]) + "\n")
+				}
+			}
+		}
+	}
+}
+
+// dshServerName enforces the mcp-client namespace contract:
+// [A-Za-z0-9_-]{1,32}. Skipping an unsafe name is better than emitting a patch
+// that DSH rejects at startup.
+func dshServerName(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" || len(name) > 32 {
+		return ""
+	}
+	for _, character := range name {
+		valid := character == '_' || character == '-' ||
+			character >= 'A' && character <= 'Z' ||
+			character >= 'a' && character <= 'z' ||
+			character >= '0' && character <= '9'
+		if !valid {
+			return ""
+		}
+	}
+	return name
+}
+
+func safeEnvVarName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for index, character := range name {
+		valid := character == '_' ||
+			character >= 'A' && character <= 'Z' ||
+			index > 0 && character >= '0' && character <= '9'
+		if !valid {
+			return false
+		}
+	}
+	return true
+}
+
+// yamlScalar is a JSON string, which is also a valid YAML double-quoted scalar.
+func yamlScalar(value string) string {
+	encoded, _ := json.Marshal(value)
+	return string(encoded)
 }
 
 var dshReasoningEfforts = []string{"off", "minimal", "low", "medium", "high", "xhigh", "max"}

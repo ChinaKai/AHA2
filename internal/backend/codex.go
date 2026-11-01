@@ -207,6 +207,7 @@ func codexArguments(request Request, catalogPath string) []string {
 	if baseURL != "" && request.StreamMaxRetries > 0 {
 		args = append(args, "-c", fmt.Sprintf("model_providers.%s.stream_max_retries=%d", providerID, request.StreamMaxRetries))
 	}
+	args = appendCodexMCPArguments(args, request.MCPServers)
 	if request.Model != "" {
 		args = append(args, "-m", request.Model)
 	}
@@ -222,6 +223,108 @@ func codexArguments(request Request, catalogPath string) []string {
 		args = append(args, "-")
 	}
 	return args
+}
+
+// appendCodexMCPArguments renders the neutral MCP registrations as Codex
+// config overrides. Codex has no --mcp-config file; every server field is a
+// dotted -c override instead. HTTP bearer auth uses bearer_token_env_var so the
+// turn credential stays in the environment.
+func appendCodexMCPArguments(args []string, servers []MCPServer) []string {
+	for _, server := range servers {
+		name := codexMCPKey(server.Name)
+		if name == "" {
+			continue
+		}
+		prefix := "mcp_servers." + name
+		switch strings.ToLower(strings.TrimSpace(server.Transport)) {
+		case "stdio":
+			if strings.TrimSpace(server.Command) == "" {
+				continue
+			}
+			args = append(args, "-c", prefix+".command="+tomlString(server.Command))
+			if len(server.Args) > 0 {
+				values := make([]string, 0, len(server.Args))
+				for _, value := range server.Args {
+					values = append(values, tomlString(value))
+				}
+				args = append(args, "-c", prefix+".args=["+strings.Join(values, ",")+"]")
+			}
+			if len(server.Env) > 0 {
+				args = append(args, "-c", prefix+".env="+tomlInlineTable(server.Env))
+			}
+		case "http":
+			if strings.TrimSpace(server.URL) == "" {
+				continue
+			}
+			args = append(args, "-c", prefix+".url="+tomlString(server.URL))
+			bearerEnv := strings.TrimSpace(server.BearerTokenEnv)
+			if bearerEnv != "" {
+				args = append(args, "-c", prefix+".bearer_token_env_var="+tomlString(bearerEnv))
+			}
+			headers := server.Headers
+			if bearerEnv != "" {
+				headers = headersWithoutAuthorization(server.Headers)
+			}
+			if len(headers) > 0 {
+				args = append(args, "-c", prefix+".http_headers="+tomlInlineTable(headers))
+			}
+		}
+	}
+	return args
+}
+
+// codexMCPKey accepts only TOML bare-key characters. The AHA registry uses
+// generated IDs, so an unsafe name means the entry cannot be addressed safely
+// through a dotted override; skipping it is better than emitting broken TOML.
+func codexMCPKey(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
+	}
+	for _, character := range name {
+		valid := character == '_' || character == '-' ||
+			character >= 'A' && character <= 'Z' ||
+			character >= 'a' && character <= 'z' ||
+			character >= '0' && character <= '9'
+		if !valid {
+			return ""
+		}
+	}
+	return name
+}
+
+// tomlString renders a TOML basic string. Go/JSON escaping is a compatible
+// subset for the URL, command and credential-key values Codex receives here.
+func tomlString(value string) string {
+	encoded, _ := json.Marshal(value)
+	return string(encoded)
+}
+
+func headersWithoutAuthorization(values map[string]string) map[string]string {
+	if len(values) == 0 {
+		return nil
+	}
+	result := make(map[string]string, len(values))
+	for key, value := range values {
+		if strings.EqualFold(strings.TrimSpace(key), "Authorization") {
+			continue
+		}
+		result[key] = value
+	}
+	return result
+}
+
+func tomlInlineTable(values map[string]string) string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts = append(parts, tomlString(key)+" = "+tomlString(values[key]))
+	}
+	return "{" + strings.Join(parts, ", ") + "}"
 }
 
 func (adapter Codex) ensureModelCatalog(ctx context.Context, request Request) string {

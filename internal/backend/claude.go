@@ -43,7 +43,7 @@ func (adapter Claude) Execute(ctx context.Context, request Request, emit func(Ev
 	if request.ProviderSessionID != "" {
 		args = append(args, "--resume", request.ProviderSessionID)
 	}
-	if config := strings.TrimSpace(request.MCPConfig); config != "" {
+	if config := claudeMCPConfig(request.MCPServers); config != "" {
 		args = append(args, "--mcp-config", config)
 	}
 	if len(request.AllowedTools) > 0 {
@@ -174,6 +174,59 @@ func (adapter Claude) Execute(ctx context.Context, request Request, emit func(Ev
 		return Result{ExitCode: result.ExitCode, ProviderSessionID: sessionID}, fmt.Errorf("claude returned no agent message")
 	}
 	return Result{Reply: strings.TrimSpace(reply), ExitCode: result.ExitCode, ProviderSessionID: sessionID}, nil
+}
+
+// claudeMCPConfig renders the neutral MCP registrations as Claude Code's
+// --mcp-config JSON. A bearer-token server references its environment variable
+// instead of embedding the value, so the turn credential never appears in argv.
+// Claude Code expands ${VAR} in the config it loads.
+func claudeMCPConfig(servers []MCPServer) string {
+	configs := map[string]any{}
+	for _, server := range servers {
+		name := strings.TrimSpace(server.Name)
+		if name == "" {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(server.Transport)) {
+		case "stdio":
+			if strings.TrimSpace(server.Command) == "" {
+				continue
+			}
+			entry := map[string]any{"type": "stdio", "command": server.Command}
+			if len(server.Args) > 0 {
+				entry["args"] = server.Args
+			}
+			if len(server.Env) > 0 {
+				entry["env"] = server.Env
+			}
+			configs[name] = entry
+		case "http":
+			if strings.TrimSpace(server.URL) == "" {
+				continue
+			}
+			url := server.URL
+			if env := strings.TrimSpace(server.URLFromEnv); env != "" {
+				url = "${" + env + "}" + server.URLPath
+			}
+			entry := map[string]any{"type": "http", "url": url}
+			headers := map[string]string{}
+			for key, value := range server.Headers {
+				headers[key] = value
+			}
+			if env := strings.TrimSpace(server.BearerTokenEnv); env != "" {
+				headers["Authorization"] = "Bearer ${" + env + "}"
+			}
+			if len(headers) > 0 {
+				entry["headers"] = headers
+			}
+			configs[name] = entry
+		}
+	}
+	if len(configs) == 0 {
+		return ""
+	}
+	encoded, _ := json.Marshal(map[string]any{"mcpServers": configs})
+	return string(encoded)
 }
 
 const claudeCoordinatorDisallowedTools = "Task,Agent,Bash,Edit,Write,NotebookEdit,WebFetch,WebSearch,BashOutput,KillBash"

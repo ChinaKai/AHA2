@@ -395,6 +395,9 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/agent/channel/contacts", s.withAgentCapability(http.HandlerFunc(s.agentTaskChannelContacts)))
 	mux.Handle("POST /api/v1/agent/channel/messages", s.withAgentCapability(http.HandlerFunc(s.sendAgentTaskChannelMessage)))
 	mux.Handle("POST /api/v1/agent/channel/replies", s.withAgentCapability(http.HandlerFunc(s.sendAgentChannelReply)))
+	// Narrow MCP for group task_route Turns. It uses the same turn capability
+	// as the Agent API and exposes only channel_reply / channel_reply_decision.
+	mux.Handle("POST /api/v1/agent/channel/mcp", s.withAgentCapability(http.HandlerFunc(s.agentChannelMCP)))
 	mux.Handle("POST /api/v1/agent/tasks", s.withAgentCapability(http.HandlerFunc(s.createAgentTask)))
 	mux.Handle("GET /api/v1/agent/tasks/{task}", s.withAgentCapability(http.HandlerFunc(s.agentTaskStatus)))
 	mux.Handle("PATCH /api/v1/tasks/{id}", s.withAuth(http.HandlerFunc(s.updateTaskTitle)))

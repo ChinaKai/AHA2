@@ -461,3 +461,38 @@ func TestCodexRolloutWaitsForCompleteLinesAndSkipsKnownText(t *testing.T) {
 		t.Fatalf("text already emitted from stdout must be skipped: %#v", events)
 	}
 }
+
+func TestCodexArgumentsRenderMCPServers(t *testing.T) {
+	t.Parallel()
+	args := codexArguments(Request{
+		Model: "gpt-test",
+		MCPServers: []MCPServer{
+			{
+				Name: "aha2_channel", Transport: "http",
+				URL:            "http://127.0.0.1:8766/api/v1/agent/channel/mcp",
+				BearerTokenEnv: "AHA2_AGENT_API_TOKEN",
+				Headers:        map[string]string{"X-Test": "yes"},
+			},
+			{
+				Name: "mcp_local", Transport: "stdio", Command: "node",
+				Args: []string{"server.mjs"}, Env: map[string]string{"MODE": "test"},
+			},
+		},
+	}, "")
+	joined := strings.Join(args, "\n")
+	for _, want := range []string{
+		`mcp_servers.aha2_channel.url="http://127.0.0.1:8766/api/v1/agent/channel/mcp"`,
+		`mcp_servers.aha2_channel.bearer_token_env_var="AHA2_AGENT_API_TOKEN"`,
+		`mcp_servers.aha2_channel.http_headers={"X-Test" = "yes"}`,
+		`mcp_servers.mcp_local.command="node"`,
+		`mcp_servers.mcp_local.args=["server.mjs"]`,
+		`mcp_servers.mcp_local.env={"MODE" = "test"}`,
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("missing %q in:\n%s", want, joined)
+		}
+	}
+	if strings.Contains(joined, "Bearer ${") {
+		t.Fatalf("codex must read the bearer token from the environment:\n%s", joined)
+	}
+}

@@ -412,3 +412,50 @@ func TestDSHLiveEnvProvider(t *testing.T) {
 		t.Fatalf("unexpected resumed DSH result: reply=%q session=%q want=%q", resumed.Reply, resumed.ProviderSessionID, result.ProviderSessionID)
 	}
 }
+
+func TestDSHProfilePatchRendersMCPClients(t *testing.T) {
+	t.Parallel()
+	patch, err := dshProfilePatch(Request{
+		Model:   "model-test",
+		WireAPI: "responses",
+		Environment: map[string]string{
+			"OPENAI_BASE_URL": "https://example.test/v1",
+			"OPENAI_API_KEY":  "test-key",
+		},
+		MCPServers: []MCPServer{
+			{
+				Name: "aha2_channel", Transport: "http",
+				URL:            "http://127.0.0.1:8766/api/v1/agent/channel/mcp",
+				URLFromEnv:     "AHA2_AGENT_API_URL",
+				URLPath:        "/api/v1/agent/channel/mcp",
+				BearerTokenEnv: "AHA2_AGENT_API_TOKEN",
+			},
+			{
+				Name: "mcp_local", Transport: "stdio", Command: "node",
+				Args: []string{"server.mjs"}, Env: map[string]string{"MODE": "test"},
+			},
+		},
+	}, "/tmp/plugin.mjs", "/tmp/inbox.mjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"name: '@deepseek-ai/dsh-mcp-client'",
+		"serverName: aha2_channel",
+		"transport: streamable-http",
+		"url: !!js '`${process.env.AHA2_AGENT_API_URL}/api/v1/agent/channel/mcp`'",
+		"Authorization: !!js '`Bearer ${process.env.AHA2_AGENT_API_TOKEN}`'",
+		"serverName: mcp_local",
+		"transport: stdio",
+		`command: "node"`,
+		`- "server.mjs"`,
+		`"MODE": "test"`,
+	} {
+		if !strings.Contains(patch, want) {
+			t.Fatalf("missing %q in patch:\n%s", want, patch)
+		}
+	}
+	if strings.Contains(patch, "test-key") {
+		t.Fatalf("DSH provider credential leaked into the patch:\n%s", patch)
+	}
+}

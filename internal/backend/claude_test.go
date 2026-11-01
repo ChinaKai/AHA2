@@ -508,3 +508,35 @@ func TestClaudeAdapterPassesAutoCompactWindow(t *testing.T) {
 		t.Fatalf("backend received auto-compact window %q, want 800000", got)
 	}
 }
+
+func TestClaudeMCPConfigKeepsBearerTokenInEnvironment(t *testing.T) {
+	t.Parallel()
+	config := claudeMCPConfig([]MCPServer{
+		{
+			Name: "aha2_channel", Transport: "http",
+			URL:            "http://127.0.0.1:8766/api/v1/agent/channel/mcp",
+			URLFromEnv:     "AHA2_AGENT_API_URL",
+			URLPath:        "/api/v1/agent/channel/mcp",
+			BearerTokenEnv: "AHA2_AGENT_API_TOKEN",
+		},
+		{
+			Name: "mcp_local", Transport: "stdio", Command: "node",
+			Args: []string{"server.mjs"}, Env: map[string]string{"MODE": "test"},
+		},
+	})
+	if !strings.Contains(config, `"url":"${AHA2_AGENT_API_URL}/api/v1/agent/channel/mcp"`) {
+		t.Fatalf("runtime URL placeholder missing: %s", config)
+	}
+	if !strings.Contains(config, `"Authorization":"Bearer ${AHA2_AGENT_API_TOKEN}"`) {
+		t.Fatalf("bearer placeholder missing: %s", config)
+	}
+	if !strings.Contains(config, `"command":"node"`) || !strings.Contains(config, `"MODE":"test"`) {
+		t.Fatalf("stdio server missing: %s", config)
+	}
+	if strings.Contains(config, "Bearer secret") {
+		t.Fatalf("credential value leaked into argv config: %s", config)
+	}
+	if got := claudeMCPConfig(nil); got != "" {
+		t.Fatalf("empty MCP list produced %q", got)
+	}
+}

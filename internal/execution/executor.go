@@ -83,7 +83,7 @@ func newBackendRequest(request app.ExecutionRequest, model string, environment m
 		Environment:        environment,
 		Prompt:             request.Prompt, ProviderSessionID: request.ProviderSessionID,
 		Filesystem: request.Filesystem, Approval: request.Approval,
-		MCPConfig: request.MCPConfig, AllowedTools: request.AllowedTools, ReverseForward: request.AgentAPIForward,
+		MCPServers: request.MCPServers, AllowedTools: request.AllowedTools, ReverseForward: request.AgentAPIForward,
 	}
 }
 

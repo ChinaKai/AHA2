@@ -35,8 +35,34 @@ type Request struct {
 	ReverseForward *workspace.ReverseForward
 	Filesystem     string
 	Approval       string
-	MCPConfig      string
-	AllowedTools   []string
+	// MCPServers is the structured MCP registration for this Turn. Each backend
+	// renders it in its own CLI format; keeping the list neutral is what lets
+	// Codex and DSH receive the same tools Claude already received through
+	// --mcp-config.
+	MCPServers   []MCPServer
+	AllowedTools []string
+}
+
+// MCPServer is one MCP registration for a Turn. Name is the model-facing
+// server namespace, so the tool name is mcp__<Name>__<tool> on every backend.
+// BearerTokenEnv names an environment variable that carries an HTTP bearer
+// token; adapters must reference the variable rather than copy its value into
+// argv or a generated file.
+type MCPServer struct {
+	Name      string
+	Transport string
+	// URL is the concrete endpoint. URLFromEnv/URLPath are set when the
+	// reachable address is only known inside the backend process (for example a
+	// workspace reached through the Agent API tunnel). Claude and DSH resolve
+	// the variable inline; Codex, which cannot, keeps using URL.
+	URL            string
+	URLFromEnv     string
+	URLPath        string
+	Command        string
+	Args           []string
+	Env            map[string]string
+	Headers        map[string]string
+	BearerTokenEnv string
 }
 
 type Event struct {
