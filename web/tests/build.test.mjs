@@ -2347,6 +2347,40 @@ test("pet settings live inside the pet workbench", async () => {
   assert.match(styles, /assistant-settings-inline #pet-settings-back \{ display: none; \}/);
 });
 
+test("pet factory reset requires typed confirmation", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const assistant = await readFile(resolve(root, "src", "assistant.ts"), "utf8");
+  const api = await readFile(resolve(root, "src", "api.ts"), "utf8");
+  const styles = await readFile(resolve(root, "src", "styles.css"), "utf8");
+  const handler = await readFile(resolve(root, "..", "internal", "httpapi", "pet_handlers.go"), "utf8");
+
+  assert.match(assistant, /const PET_RESET_CONFIRM = "重置宠物"/);
+  assert.match(assistant, /id="pet-reset-confirm"/);
+  assert.match(assistant, /resetExecuteButton\.disabled = resetRunning \|\| resetConfirmInput\.value\.trim\(\) !== PET_RESET_CONFIRM/);
+  assert.match(assistant, /api\.resetPet\(PET_RESET_CONFIRM\)/);
+  assert.match(assistant, /applyPetEnabled\(view\.assistant\.pet_enabled !== false\)/);
+  assert.match(styles, /\.assistant-layer > dialog \{ pointer-events: auto; \}/);
+  assert.match(api, /\/api\/v1\/pet\/reset/);
+  assert.match(handler, /Confirm string `json:"confirm"`/);
+  assert.match(handler, /s\.app\.ResetOwnerPet/);
+});
+
+test("pet speech uses an opaque collision-aware bubble", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const assistant = await readFile(resolve(root, "src", "assistant.ts"), "utf8");
+  const bubble = await readFile(resolve(root, "src", "pet_bubble.ts"), "utf8");
+  const styles = await readFile(resolve(root, "src", "styles.css"), "utf8");
+
+  assert.match(assistant, /computeSpeechBubblePlacement/);
+  assert.match(bubble, /export function computeSpeechBubblePlacement/);
+  assert.match(bubble, /export function petBubbleRectsOverlap/);
+  assert.match(bubble, /tail: "tail-left"/);
+  assert.match(assistant, /Array\.from\(text\.replace\(/);
+  assert.match(styles, /\.assistant-bubble\.speech \{[^}]*background: rgba\(255,255,255,\.98\)/);
+  assert.match(styles, /\.assistant-bubble\.speech \{[^}]*pointer-events: none/);
+  assert.match(styles, /\.assistant-bubble\.speech\.tail-left::after/);
+});
+
 test("data management shows scoped sizes and safe cleanup actions", async () => {
   const root = resolve(import.meta.dirname, "..");
   const main = await readFile(resolve(root, "src", "main.ts"), "utf8");

@@ -1041,6 +1041,17 @@ export interface PetEvent {
   status: string;
 }
 
+export interface PetResetResult {
+  tasks: number;
+  workspaces: number;
+  approvals: number;
+  events: number;
+  watches: number;
+  messages: number;
+  hints: number;
+  warnings?: string[];
+}
+
 export interface PetBrainAction {
   type: "play" | "move_to" | "walk_path" | "open_task" | string;
   name?: string;

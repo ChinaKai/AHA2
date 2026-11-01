@@ -1786,6 +1786,9 @@ dialog > .dialog-head { margin: 0; padding: 18px 18px 0; }
 /* Owner assistant: a lightweight pet layer and a read-only chat panel. */
 .assistant-layer { position: fixed; inset: 0; z-index: 60; pointer-events: none; }
 .assistant-layer [hidden] { display: none !important; }
+/* The layer is click-through so the page stays usable; modal dialogs inside it
+   still need their own pointer events or the backdrop and form are inert. */
+.assistant-layer > dialog { pointer-events: auto; }
 .assistant-pet { position: absolute; top: 0; left: 0; z-index: 5; width: 64px; height: 64px; padding: 0; border: 0; background: transparent; color: inherit; pointer-events: auto; cursor: pointer; transition: transform 1.15s cubic-bezier(.22,.8,.24,1); }
 .assistant-pet.character-loading { visibility: hidden; }
 .assistant-pet.no-transition { transition: none; }
@@ -2094,11 +2097,23 @@ dialog > .dialog-head { margin: 0; padding: 18px 18px 0; }
 .pet-activity-row small { color: #7a8ba0; font-size: 9px; }
 .pet-activity-row p { margin: 0; color: #4d6178; font-size: 10px; line-height: 1.4; }
 
-/* Speech is transparent typewriter text; hints (disabled) keep the old card. */
-.assistant-bubble.speech { padding: 0 4px; border: 0; border-radius: 0; background: transparent; box-shadow: none; color: #17324d; text-shadow: 0 1px 0 #fff, 0 0 9px #fff, 0 0 3px #fff; }
-.assistant-bubble.speech::after { display: none; }
-.assistant-bubble.speech strong { color: #4b6580; font-size: 10px; font-weight: 700; letter-spacing: .03em; }
-.assistant-bubble.speech p { color: #17324d; font-size: 13px; font-weight: 600; line-height: 1.5; }
+/* Speech is an opaque card with a tail, so typewriter text never mixes with
+   page content and the placement code can keep it clear of the pet. */
+.assistant-bubble-head { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.assistant-bubble-typing { display: none; gap: 3px; align-items: center; }
+.assistant-bubble-typing i { width: 4px; height: 4px; border-radius: 50%; background: #7eb2e8; animation: assistant-type-dot 1s ease-in-out infinite; }
+.assistant-bubble-typing i:nth-child(2) { animation-delay: .14s; }
+.assistant-bubble-typing i:nth-child(3) { animation-delay: .28s; }
+.assistant-bubble.speech { width: 264px; max-width: calc(100vw - 24px); max-height: 118px; padding: 9px 12px 10px; border: 1px solid #d7e2f0; border-radius: 14px; background: rgba(255,255,255,.98); box-shadow: 0 12px 32px rgba(15,35,60,.18); color: #17324d; text-shadow: none; pointer-events: none; overflow: visible; }
+.assistant-bubble.speech::after { display: block; top: auto; right: auto; bottom: auto; left: auto; width: 12px; height: 12px; border: 1px solid #d7e2f0; background: rgba(255,255,255,.98); transform: rotate(45deg); }
+.assistant-bubble.speech.tail-left::after { left: -7px; top: var(--tail-y, 20px); border-top: 0; border-right: 0; }
+.assistant-bubble.speech.tail-right::after { right: -7px; top: var(--tail-y, 20px); border-bottom: 0; border-left: 0; }
+.assistant-bubble.speech.tail-top::after { top: -7px; left: var(--tail-x, calc(50% - 6px)); border-bottom: 0; border-right: 0; }
+.assistant-bubble.speech.tail-bottom::after { bottom: -7px; left: var(--tail-x, calc(50% - 6px)); border-top: 0; border-left: 0; }
+.assistant-bubble.speech .assistant-bubble-head { gap: 6px; }
+.assistant-bubble.speech .assistant-bubble-typing { display: inline-flex; }
+.assistant-bubble.speech strong { display: block; color: #4b6580; font-size: 10px; font-weight: 700; letter-spacing: .03em; }
+.assistant-bubble.speech p { display: block; min-height: 18px; max-height: 72px; overflow: hidden; color: #17324d; font-size: 12px; font-weight: 500; line-height: 18px; white-space: pre-wrap; overflow-wrap: anywhere; text-align: left; }
 .assistant-bubble.speech .assistant-bubble-actions { display: none; }
 
 .assistant-thinking { position: absolute; top: -9px; right: 1px; display: none; gap: 3px; align-items: flex-end; pointer-events: none; }
@@ -2140,17 +2155,6 @@ dialog > .dialog-head { margin: 0; padding: 18px 18px 0; }
 .assistant-thinking i { width: 7px; height: 7px; background: #1b2b3d; box-shadow: 0 0 0 1px rgba(255, 255, 255, .7); }
 .assistant-panel-thinking i { width: 5px; height: 5px; background: #1b2b3d; }
 .assistant-bubble.speech.fade-out { opacity: 0; transition: opacity .36s ease; }
-
-.assistant-bubble.speech { height: 86px; min-height: 86px; max-height: 86px; overflow: hidden; }
-
-/* Speech lives in the same spot as the thinking dots: one fixed line. */
-.assistant-bubble.speech { width: auto; height: 22px; min-height: 22px; max-height: 22px; padding: 0 2px; overflow: hidden; white-space: nowrap; }
-.assistant-bubble.speech strong { display: none; }
-.assistant-bubble.speech p { display: block; overflow: hidden; font-size: 12px; line-height: 22px; white-space: nowrap; text-overflow: clip; }
-
-/* Side speech: 23 chars per line, two visible lines, scroll upward. */
-.assistant-bubble.speech { width: 264px; height: 60px; min-height: 60px; max-height: 60px; padding: 3px 2px; overflow: hidden; white-space: normal; }
-.assistant-bubble.speech p { height: 54px; overflow: hidden; font-size: 11px; line-height: 18px; white-space: pre-wrap; word-break: break-all; text-align: left; }
 
 .pet-budget-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
 .pet-budget-grid input { min-height: 30px; padding: 0 7px; border: 1px solid #d7e2f0; border-radius: 8px; background: #fff; color: #17324d; font-size: 12px; }

@@ -108,6 +108,19 @@ func (s *Service) ensureOwnerPetTask(ctx context.Context, assistant *domain.Owne
 	if assistant == nil {
 		return "", nil
 	}
+	// Serialize the lazy creation/start so concurrent assistant page loads
+	// cannot start the same draft twice or submit two introductions. Re-read the
+	// owner settings after taking the lock: a factory reset may have disabled
+	// the pet while this caller was waiting, and a queued brain call must not
+	// recreate the project immediately after the reset.
+	s.petTaskMu.Lock()
+	defer s.petTaskMu.Unlock()
+	if current, err := s.store.OwnerAssistant(ctx, assistant.ID); err == nil {
+		*assistant = current
+		if !assistant.PetEnabled {
+			return "", nil
+		}
+	}
 	s.removeGeneratedPetWorkspaceGuides()
 	// Seed the pet's stable home before the Task starts. This runs on every
 	// assistant page load, but only fills missing files; the pet owns them after
@@ -120,10 +133,6 @@ func (s *Service) ensureOwnerPetTask(ctx context.Context, assistant *domain.Owne
 	// while this page-load path is best effort so a stale Task cannot block
 	// the assistant view.
 	_ = s.syncPetTaskRuntime(ctx, assistant.ModelID)
-	// Serialize the lazy creation/start so concurrent assistant page loads
-	// cannot start the same draft twice or submit two introductions.
-	s.petTaskMu.Lock()
-	defer s.petTaskMu.Unlock()
 
 	recordPetTask := func(taskID string) {
 		if taskID == "" || assistant.PetTaskID == taskID {

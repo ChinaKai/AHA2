@@ -107,8 +107,12 @@ func (s *Service) OwnerAssistant(ctx context.Context) (OwnerAssistantView, error
 	if view.BrainModelName == "" {
 		view.BrainModelName = "跟随聊天模型"
 	}
-	if taskID, taskErr := s.ensureOwnerPetTask(ctx, &assistant); taskErr == nil && taskID != "" {
-		view.Assistant.PetTaskID = taskID
+	// A disabled pet has no runnable Task. This also keeps a just-reset pet
+	// from recreating its project while the owner reviews the disabled settings.
+	if assistant.PetEnabled {
+		if taskID, taskErr := s.ensureOwnerPetTask(ctx, &assistant); taskErr == nil && taskID != "" {
+			view.Assistant.PetTaskID = taskID
+		}
 	}
 	view.Tools = petToolInfos()
 	view.PetLastBrainAt, view.PetNextBrainAt, view.PetBrainRuns = s.petAutonomyStatus(assistant)

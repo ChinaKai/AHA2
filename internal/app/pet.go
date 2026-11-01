@@ -210,6 +210,9 @@ func (s *Service) AskOwnerPetBrain(ctx context.Context, input PetBrainContext) (
 	if err != nil {
 		return PetBrainResult{}, err
 	}
+	if !assistant.PetEnabled {
+		return PetBrainResult{}, fmt.Errorf("宠物已停用")
+	}
 	if petQuietNow(assistant, time.Now()) {
 		return PetBrainResult{}, fmt.Errorf("现在处于宠物安静时段")
 	}

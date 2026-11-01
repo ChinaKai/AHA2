@@ -96,6 +96,29 @@ func (s *Server) updateOwnerPetSettings(writer http.ResponseWriter, request *htt
 	})
 }
 
+func (s *Server) resetOwnerPet(writer http.ResponseWriter, request *http.Request) {
+	var input struct {
+		Confirm string `json:"confirm"`
+	}
+	if err := decodeJSON(request, &input); err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_json")
+		return
+	}
+	result, err := s.app.ResetOwnerPet(request.Context(), input.Confirm)
+	if err != nil {
+		writeJSON(writer, http.StatusBadRequest, map[string]any{
+			"ok": false, "error": "pet_reset_failed", "message": err.Error(),
+		})
+		return
+	}
+	s.audit(request, "pet.reset", "assistant", "owner_pet", map[string]any{
+		"tasks": result.Tasks, "workspaces": result.Workspaces,
+		"approvals": result.Approvals, "events": result.Events,
+		"watches": result.Watches, "messages": result.Messages,
+	})
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "result": result})
+}
+
 func (s *Server) ownerPetBrain(writer http.ResponseWriter, request *http.Request) {
 	var input app.PetBrainContext
 	if err := decodeJSON(request, &input); err != nil {

@@ -189,3 +189,61 @@ func TestOwnerPetControlAPI(t *testing.T) {
 	}
 	response.Body.Close()
 }
+
+func TestPetResetRequiresTypedConfirmation(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	secretStore, err := secrets.Open(filepath.Join(t.TempDir(), "secrets.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	authService := auth.NewService(database, "setup-test", time.Hour)
+	appService := app.NewService(database, secretStore, app.StubExecutor{})
+	server := httptest.NewServer(New(Config{Store: database, Auth: authService, App: appService}).Handler())
+	defer server.Close()
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	csrf := registerOwner(t, client, server.URL)
+
+	response := requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/pet/reset", map[string]any{
+		"confirm": "重置",
+	}, csrf)
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("wrong confirmation=%d", response.StatusCode)
+	}
+	response.Body.Close()
+
+	response = requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/pet/reset", map[string]any{
+		"confirm": "重置宠物",
+	}, csrf)
+	var payload struct {
+		OK     bool `json:"ok"`
+		Result struct {
+			Tasks      int `json:"tasks"`
+			Workspaces int `json:"workspaces"`
+		} `json:"result"`
+	}
+	decodeResponse(t, response, &payload)
+	if response.StatusCode != http.StatusOK || !payload.OK || payload.Result.Tasks != 0 || payload.Result.Workspaces != 0 {
+		t.Fatalf("pet reset=%d %#v", response.StatusCode, payload)
+	}
+	response.Body.Close()
+
+	response = requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/assistant", nil, "")
+	var view struct {
+		Assistant struct {
+			PetEnabled bool   `json:"pet_enabled"`
+			PetTaskID  string `json:"pet_task_id"`
+		} `json:"assistant"`
+	}
+	decodeResponse(t, response, &view)
+	if response.StatusCode != http.StatusOK || view.Assistant.PetEnabled || view.Assistant.PetTaskID != "" {
+		t.Fatalf("assistant after reset=%d %#v", response.StatusCode, view)
+	}
+	response.Body.Close()
+}

@@ -5491,6 +5491,15 @@ window.addEventListener("aha:open-advanced", () => {
   render();
   void ensureViewData("advanced").then(() => render());
 });
+window.addEventListener("aha:pet-reset", event => {
+  const detail = (event as CustomEvent<{tasks?: number; workspaces?: number; warnings?: string[]}>).detail;
+  const warning = detail?.warnings?.length ? `，${detail.warnings.length} 项文件清理警告` : "";
+  setMessage("notice", `宠物本机数据已重置：清理 ${detail?.tasks ?? 0} 个本机 Task、${detail?.workspaces ?? 0} 个本机 Workspace；宠物项目和其他设备数据保留${warning}`);
+  void loadAll().then(() => render()).catch(error => {
+    setMessage("error", error instanceof Error ? error.message : String(error));
+    render();
+  });
+});
 window.addEventListener("aha:assistant-open-task", event => {
   const taskID = (event as CustomEvent<string>).detail;
   if (taskID) void openTask(taskID);

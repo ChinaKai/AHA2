@@ -1,8 +1,10 @@
 import {api} from "./api.js";
 import {icon} from "./icons.js";
-import type {AssistantHint, AssistantMessage, AssistantToolEvent, OwnerAssistantView, PetBrainAction, PetLayout, PetState, PetStatePatch} from "./types.js";
+import {computeSpeechBubblePlacement} from "./pet_bubble.js";
+import type {AssistantHint, AssistantMessage, AssistantToolEvent, OwnerAssistantView, PetBrainAction, PetLayout, PetResetResult, PetState, PetStatePatch} from "./types.js";
 
 const PET_SIZE = 64;
+const PET_RESET_CONFIRM = "重置宠物";
 const HINT_POLL_MS = 15000;
 const ROAM_MIN_MS = 6000;
 const ROAM_MAX_MS = 12000;
@@ -15,8 +17,6 @@ const PET_QUIET_END = 8;
 const PET_HOURLY_LIMIT = 6;
 const PET_BRAIN_RUNS_KEY = "aha2.pet.brain.runs.v1";
 const PET_BRAIN_LAST_KEY = "aha2.pet.brain.last.v1";
-const SPEECH_LINE_CHARS = 23;
-const SPEECH_BUBBLE_HEIGHT = 60;
 
 type MotionName = "idle" | "walk" | "run" | "jump" | "crouch" | "stand" | "turn" | "happy" | "angry" | "sad" | "joy";
 
@@ -126,6 +126,14 @@ let settingsAllowManageModels: HTMLInputElement;
 let settingsAllowManageKnowledge: HTMLInputElement;
 let settingsAllowManageChannels: HTMLInputElement;
 let settingsAllowManageSystem: HTMLInputElement;
+let resetOpenButton: HTMLButtonElement;
+let resetDialog: HTMLDialogElement;
+let resetConfirmInput: HTMLInputElement;
+let resetExecuteButton: HTMLButtonElement;
+let resetCancelButton: HTMLButtonElement;
+let resetCloseButton: HTMLButtonElement;
+let resetError: HTMLElement;
+let resetRunning = false;
 let currentMotionName: MotionName = "idle";
 let facing = 1;
 let motionIdleTimer = 0;
@@ -175,7 +183,10 @@ export function mountAssistant(): void {
     </aside>
     <div id="assistant-trail" class="assistant-trail" aria-hidden="true"></div>
     <div id="assistant-bubble" class="assistant-bubble" role="status" aria-live="polite" hidden>
-      <strong id="assistant-bubble-title"></strong>
+      <div class="assistant-bubble-head">
+        <strong id="assistant-bubble-title"></strong>
+        <span class="assistant-bubble-typing" aria-hidden="true"><i></i><i></i><i></i></span>
+      </div>
       <p id="assistant-bubble-body"></p>
       <div class="assistant-bubble-actions">
         <button type="button" data-assistant-hint-open>查看</button>
@@ -221,6 +232,10 @@ export function mountAssistant(): void {
           <section><h3>模型</h3>
             <label class="assistant-settings-field">宠物模型（聊天 + 自主行为）<select id="pet-chat-model"></select></label>
           </section>
+          <section><h3>恢复出厂设置</h3>
+            <p class="assistant-settings-note">只清理本机宠物 Workspace、Task、日记/工作记录/身份设定、审批与活动记录、聊天记录，并停用本机宠物。宠物项目、同步镜像和其他设备的宠物不受影响；模型、形象和权限设置会保留。</p>
+            <button type="button" id="pet-reset-open" class="assistant-settings-trigger danger">恢复出厂设置…</button>
+          </section>
           <p id="pet-settings-error" class="assistant-settings-error" hidden></p>
         </div>
         <footer class="assistant-settings-foot">
@@ -229,7 +244,28 @@ export function mountAssistant(): void {
           <button id="pet-settings-save" type="button" class="primary">保存</button>
         </footer>
       </div>
-    </div>`;
+    </div>
+    <dialog id="pet-reset-dialog">
+      <div class="dialog-head">
+        <h2>确认恢复出厂设置</h2>
+        <button id="pet-reset-close" class="icon-button" type="button" aria-label="关闭">×</button>
+      </div>
+      <div class="dialog-body">
+        <p>此操作不可恢复，将清理本机：</p>
+        <ul>
+          <li>宠物 Workspace 和宠物 Task</li>
+          <li>日记、工作记录、身份/原则与开放闭环</li>
+          <li>审批、活动、任务关注和宠物聊天记录</li>
+        </ul>
+        <p class="assistant-settings-note">宠物项目、同步镜像和其他设备的宠物会保留；模型、形象和权限设置也会保留。本机宠物会被停用，重新启用后才会创建新的宠物 Task。</p>
+        <label class="assistant-settings-field">请输入“重置宠物”以确认<input id="pet-reset-confirm" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="重置宠物"></label>
+        <p id="pet-reset-error" class="assistant-settings-error" hidden></p>
+        <div class="dialog-actions">
+          <button id="pet-reset-cancel" type="button">取消</button>
+          <button id="pet-reset-execute" type="button" class="danger" disabled>确认重置</button>
+        </div>
+      </div>
+    </dialog>`;
   document.body.appendChild(layer);
   pet = layer.querySelector<HTMLButtonElement>("#assistant-pet")!;
   petArt = layer.querySelector<HTMLElement>("#assistant-pet-art")!;
@@ -263,6 +299,13 @@ export function mountAssistant(): void {
   settingsAllowManageKnowledge = layer.querySelector<HTMLInputElement>("#pet-allow-manage-knowledge")!;
   settingsAllowManageChannels = layer.querySelector<HTMLInputElement>("#pet-allow-manage-channels")!;
   settingsAllowManageSystem = layer.querySelector<HTMLInputElement>("#pet-allow-manage-system")!;
+  resetOpenButton = layer.querySelector<HTMLButtonElement>("#pet-reset-open")!;
+  resetDialog = layer.querySelector<HTMLDialogElement>("#pet-reset-dialog")!;
+  resetConfirmInput = layer.querySelector<HTMLInputElement>("#pet-reset-confirm")!;
+  resetExecuteButton = layer.querySelector<HTMLButtonElement>("#pet-reset-execute")!;
+  resetCancelButton = layer.querySelector<HTMLButtonElement>("#pet-reset-cancel")!;
+  resetCloseButton = layer.querySelector<HTMLButtonElement>("#pet-reset-close")!;
+  resetError = layer.querySelector<HTMLElement>("#pet-reset-error")!;
   trailLayer = layer.querySelector<HTMLElement>("#assistant-trail")!;
   trailLayer.style.zIndex = "9";
   bubble = layer.querySelector<HTMLDivElement>("#assistant-bubble")!;
@@ -446,6 +489,14 @@ function bindEvents(): void {
     window.dispatchEvent(new CustomEvent("aha:open-advanced"));
   });
   settingsPanel.querySelector("#pet-settings-save")!.addEventListener("click", () => { void savePetSettings(); });
+  resetOpenButton.addEventListener("click", openPetResetDialog);
+  resetConfirmInput.addEventListener("input", syncPetResetButton);
+  resetCancelButton.addEventListener("click", closePetResetDialog);
+  resetCloseButton.addEventListener("click", closePetResetDialog);
+  resetExecuteButton.addEventListener("click", () => { void executePetReset(); });
+  resetDialog.addEventListener("cancel", event => {
+    if (resetRunning) event.preventDefault();
+  });
   settingsPanel.querySelector("#pet-brain-trigger")!.addEventListener("click", () => {
     const button = settingsPanel.querySelector<HTMLButtonElement>("#pet-brain-trigger");
     if (button) button.disabled = true;
@@ -520,6 +571,9 @@ async function refreshAssistant(): Promise<void> {
     renderCharacterMenu();
     markCharacterReady();
     renderModel();
+    // The owner can disable the pet from this or another tab. Apply the stored
+    // switch on every load, not only after saving the settings form.
+    applyPetEnabled(view.assistant.pet_enabled !== false);
       if (view.models.length === 0 && view.messages.length === 0) {
       appendAssistantNotice("还没有可用于助手的 Provider 模型。请先到模型页配置一个 chat 或 anthropic 模型，我才能回答问题。");
     }
@@ -555,6 +609,8 @@ function showHint(hint: AssistantHint): void {
   activeHint = hint;
   bubbleTitle.textContent = hint.title;
   bubbleBody.textContent = hint.body;
+  bubble.classList.remove("speech", "fade-out", "typing");
+  clearBubbleTail();
   bubble.hidden = false;
   pet.classList.add("has-hint");
   const point = hintPoint(hint);
@@ -566,7 +622,8 @@ function hideBubble(): void {
   activeHint = null;
   clearSpeechTimers();
   bubble.hidden = true;
-  bubble.classList.remove("speech", "fade-out");
+  bubble.classList.remove("speech", "fade-out", "typing");
+  clearBubbleTail();
   const actions = bubble.querySelector<HTMLElement>(".assistant-bubble-actions");
   if (actions) actions.hidden = false;
   pet.classList.remove("has-hint");
@@ -734,6 +791,48 @@ async function savePetSettings(): Promise<void> {
   } catch (error) {
     settingsError.textContent = error instanceof Error ? error.message : String(error);
     settingsError.hidden = false;
+  }
+}
+
+function openPetResetDialog(): void {
+  resetRunning = false;
+  resetConfirmInput.value = "";
+  resetExecuteButton.textContent = "确认重置";
+  resetExecuteButton.disabled = true;
+  resetError.hidden = true;
+  resetDialog.showModal();
+  window.setTimeout(() => resetConfirmInput.focus(), 0);
+}
+
+function syncPetResetButton(): void {
+  resetExecuteButton.disabled = resetRunning || resetConfirmInput.value.trim() !== PET_RESET_CONFIRM;
+}
+
+function closePetResetDialog(): void {
+  if (resetRunning) return;
+  resetDialog.close();
+}
+
+async function executePetReset(): Promise<void> {
+  if (resetRunning || resetConfirmInput.value.trim() !== PET_RESET_CONFIRM) return;
+  resetRunning = true;
+  resetExecuteButton.disabled = true;
+  resetExecuteButton.textContent = "重置中…";
+  resetError.hidden = true;
+  try {
+    const response = await api.resetPet(PET_RESET_CONFIRM);
+    resetRunning = false;
+    resetDialog.close();
+    view = null;
+    applyPetEnabled(false);
+    closePetSettings();
+    window.dispatchEvent(new CustomEvent<PetResetResult>("aha:pet-reset", {detail: response.result}));
+  } catch (error) {
+    resetRunning = false;
+    resetError.textContent = error instanceof Error ? error.message : String(error);
+    resetError.hidden = false;
+    resetExecuteButton.textContent = "确认重置";
+    syncPetResetButton();
   }
 }
 
@@ -921,6 +1020,11 @@ function clearSpeechTimers(): void {
   window.clearTimeout(speechPageTimer);
 }
 
+function clearBubbleTail(): void {
+  if (!bubble) return;
+  bubble.classList.remove("tail-left", "tail-right", "tail-top", "tail-bottom");
+}
+
 function showPetSpeech(text: string, options: {holdMs?: number; fade?: boolean} = {}): void {
   if (!bubble || panelOpen || !text) return;
   clearSpeechTimers();
@@ -929,7 +1033,8 @@ function showPetSpeech(text: string, options: {holdMs?: number; fade?: boolean} 
   bubbleTitle.textContent = nickname();
   bubbleBody.textContent = "";
   bubble.classList.remove("fade-out");
-  bubble.classList.add("speech");
+  bubble.classList.add("speech", "typing");
+  clearBubbleTail();
   const actions = bubble.querySelector<HTMLElement>(".assistant-bubble-actions");
   if (actions) actions.hidden = true;
   bubble.hidden = false;
@@ -937,18 +1042,15 @@ function showPetSpeech(text: string, options: {holdMs?: number; fade?: boolean} 
   pet.classList.remove("has-hint");
   positionBubble();
   const holdMs = options.holdMs ?? 3000;
-  const normalized = text.replace(/\s+/g, " ").trim();
-  const lines: string[] = [];
-  for (let offset = 0; offset < normalized.length; offset += SPEECH_LINE_CHARS) {
-    lines.push(normalized.slice(offset, offset + SPEECH_LINE_CHARS));
-  }
-  const content = lines.join("\n");
+  const content = Array.from(text.replace(/\s+/g, " ").trim());
   const finish = () => {
     if (activeHint) return;
     pet.classList.remove("pet-typing");
+    bubble.classList.remove("typing");
     if (options.fade === false) {
       bubble.hidden = true;
       bubble.classList.remove("speech");
+      clearBubbleTail();
       if (actions) actions.hidden = false;
       setPetFrozen(false);
       return;
@@ -958,22 +1060,22 @@ function showPetSpeech(text: string, options: {holdMs?: number; fade?: boolean} 
       if (activeHint) return;
       bubble.hidden = true;
       bubble.classList.remove("speech", "fade-out");
+      clearBubbleTail();
       if (actions) actions.hidden = false;
       setPetFrozen(false);
     }, 360);
   };
   {
     let index = 0;
-    bubbleBody.textContent = "";
     speechTypeTimer = window.setInterval(() => {
       index += 1;
-      bubbleBody.textContent = content.slice(0, index);
+      bubbleBody.textContent = content.slice(0, index).join("");
       bubbleBody.scrollTop = bubbleBody.scrollHeight;
       positionBubble();
       if (index < content.length) return;
       window.clearInterval(speechTypeTimer);
       speechTimer = window.setTimeout(finish, holdMs);
-    }, 37);
+    }, 32);
   }
 }
 
@@ -1596,23 +1698,31 @@ function positionAtDock(animate: boolean): void {
 function positionBubble(): void {
   if (!bubble || bubble.hidden) return;
   const speech = bubble.classList.contains("speech");
-  const width = speech ? Math.min(264, window.innerWidth - PET_SIZE - 24) : Math.min(280, window.innerWidth - 24);
   const rect = pet.getBoundingClientRect();
-  const height = speech ? SPEECH_BUBBLE_HEIGHT : (bubble.offsetHeight || 0);
-  let left: number;
   if (speech) {
-    const onLeftHalf = rect.left + rect.width / 2 < window.innerWidth / 2;
-    left = onLeftHalf ? rect.right + 10 : rect.left - width - 10;
-    if (left + width > window.innerWidth - 8) left = rect.left - width - 10;
-    if (left < 8) left = rect.right + 10;
-    left = Math.max(8, Math.min(window.innerWidth - width - 8, left));
-  } else {
-    left = rect.left + rect.width / 2 - width / 2;
-    left = Math.max(12, Math.min(window.innerWidth - width - 12, left));
+    const width = Math.min(264, window.innerWidth - 24);
+    bubble.style.width = width + "px";
+    const height = Math.max(1, bubble.offsetHeight || 0);
+    const placement = computeSpeechBubblePlacement(
+      {left: rect.left, top: rect.top, width: rect.width, height: rect.height},
+      width, height, window.innerWidth, window.innerHeight,
+    );
+    clearBubbleTail();
+    bubble.classList.add(placement.tail);
+    bubble.style.left = placement.left + "px";
+    bubble.style.top = placement.top + "px";
+    bubble.style.setProperty("--tail-y", placement.tailY + "px");
+    bubble.style.setProperty("--tail-x", placement.tailX + "px");
+    return;
   }
-  let top = speech ? rect.top + (rect.height - height) / 2 : rect.top - height - 10;
+  const width = Math.min(280, window.innerWidth - 24);
+  const height = bubble.offsetHeight || 0;
+  let left = rect.left + rect.width / 2 - width / 2;
+  left = Math.max(12, Math.min(window.innerWidth - width - 12, left));
+  let top = rect.top - height - 10;
   if (top < 8) top = rect.bottom + 10;
   if (top + height > window.innerHeight - 8) top = Math.max(8, window.innerHeight - height - 8);
+  clearBubbleTail();
   bubble.style.width = width + "px";
   bubble.style.left = left + "px";
   bubble.style.top = top + "px";

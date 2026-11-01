@@ -203,6 +203,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/pet/events", s.withAuth(http.HandlerFunc(s.ownerPetEvents)))
 	mux.Handle("POST /api/v1/pet/brain", s.withAuth(http.HandlerFunc(s.ownerPetBrain)))
 	mux.Handle("PUT /api/v1/pet/settings", s.withAuth(http.HandlerFunc(s.updateOwnerPetSettings)))
+	mux.Handle("POST /api/v1/pet/reset", s.withAuth(http.HandlerFunc(s.resetOwnerPet)))
 	mux.Handle("GET /api/v1/pet/activity", s.withAuth(http.HandlerFunc(s.ownerPetActivity)))
 	mux.Handle("GET /api/v1/pet/prompts", s.withAuth(http.HandlerFunc(s.ownerPetPrompts)))
 	mux.Handle("POST /api/v1/pet/control", s.withAuth(http.HandlerFunc(s.controlOwnerPet)))
