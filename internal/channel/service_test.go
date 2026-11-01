@@ -1058,8 +1058,56 @@ func TestInboundOwnerAndGroupScopesAreServerEnforcedAndIdempotent(t *testing.T) 
 			t.Fatalf("ordinary Main final was automatically projected into the routed group: %#v", delivery)
 		}
 	}
+	// Unbinding must return the conversation to the most recently bound
+	// non-terminal channel-owned Task, instead of falling back to the original
+	// host and creating another continuation. Build that history explicitly: a
+	// channel-owned Task in the instance host Project, bound and then released,
+	// while an ordinary Task still holds the active route.
+	historical, err := appService.CreateTask(ctx, app.CreateTaskInput{
+		ProjectID: instance.HostProjectID, WorkspaceID: instance.HostWorkspaceID,
+		Title: "历史群聊任务", Request: "historical channel task",
+		Isolation: "inplace", Backend: model.Backend, ModelSource: model.Source,
+		ModelID: model.ID, WireModel: model.WireModel,
+		Filesystem: "read-only", Approval: "never",
+		CollaborationMode: "single", MaxAgents: 1, KnowledgePolicy: "enabled",
+		AllowSystemProject: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.ActivateOwnerChannelTaskRoute(ctx, instance.ID, groupConversation.ID, historical.ID, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	historicalRoute, err := database.ActiveChannelTaskRouteForTask(ctx, historical.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.ExitOwnerChannelTaskRoute(ctx, historicalRoute.ID, historical.ID, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	groupRoute, err = service.BindTaskChannelRoute(ctx, owner.ID, target.ID, groupConversation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeUnbind, err := database.ChannelConversation(ctx, groupConversation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if beforeUnbind.HostTaskID == historical.ID {
+		t.Fatalf("historical task unexpectedly hosted before unbind: %#v", beforeUnbind)
+	}
 	if err := service.UnbindTaskChannelRoute(ctx, owner.ID, target.ID, groupRoute.ID); err != nil {
 		t.Fatal(err)
+	}
+	afterUnbind, err := database.ChannelConversation(ctx, groupConversation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterUnbind.HostTaskID != historical.ID {
+		t.Fatalf("unbind did not adopt the latest non-terminal channel task: host=%s want=%s", afterUnbind.HostTaskID, historical.ID)
+	}
+	if _, err := database.ActiveChannelTaskRoute(ctx, groupConversation.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("unbind left an active route: %v", err)
 	}
 	deadline = time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {

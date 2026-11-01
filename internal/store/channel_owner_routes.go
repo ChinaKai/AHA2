@@ -260,6 +260,115 @@ func (s *Store) TerminalChannelTaskRoutes(ctx context.Context) ([]domain.Channel
 	return routes, rows.Err()
 }
 
+// LatestReusableChannelTask returns the most recently bound, non-terminal
+// channel-owned Task for a conversation. Channel-owned means the Task lives in
+// the instance's host Project/Workspace; ordinary Tasks the Owner bound to the
+// conversation live in their own Project and are deliberately excluded. The
+// caller passes the Task it just unbound so an unbind never immediately
+// re-selects the same Task. completed/cancelled/blocked Tasks are not reusable
+// because SubmitMessage rejects them.
+func (s *Store) LatestReusableChannelTask(ctx context.Context, conversationID, excludeTaskID string) (string, error) {
+	var taskID string
+	err := s.db.QueryRowContext(ctx, `
+		WITH candidates(task_id, sort_at) AS (
+			SELECT conversation.host_task_id, host_task.created_at
+			FROM channel_conversations conversation
+			JOIN tasks host_task ON host_task.id=conversation.host_task_id
+			WHERE conversation.id=?
+			UNION ALL
+			SELECT route.target_task_id, route.activated_at
+			FROM channel_task_routes route
+			WHERE route.conversation_id=?
+		)
+		SELECT task.id
+		FROM candidates
+		JOIN tasks task ON task.id=candidates.task_id
+		JOIN channel_conversations conversation ON conversation.id=?
+		JOIN channel_instances instance ON instance.id=conversation.instance_id
+		WHERE instance.retired_at=''
+		  AND task.project_id=instance.host_project_id
+		  AND task.workspace_id=instance.host_workspace_id
+		  AND task.status IN (?,?,?,?)
+		  AND task.id<>?
+		GROUP BY task.id
+		ORDER BY MAX(candidates.sort_at) DESC, task.updated_at DESC, task.id DESC
+		LIMIT 1`,
+		conversationID, conversationID, conversationID,
+		domain.TaskPreparing, domain.TaskActive, domain.TaskWaitingUser, domain.TaskFailed,
+		excludeTaskID,
+	).Scan(&taskID)
+	return taskID, err
+}
+
+// AdoptChannelConversationHost promotes an existing channel-owned Task to the
+// conversation's default host Task. The next inbound message then routes to it
+// in assistant/group_qa mode and keeps using the conversation_host mirror,
+// instead of creating another continuation or requiring an explicit task_route.
+func (s *Store) AdoptChannelConversationHost(ctx context.Context, conversationID, taskID string, at time.Time) error {
+	if strings.TrimSpace(conversationID) == "" || strings.TrimSpace(taskID) == "" {
+		return errors.New("conversation and task are required")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var instanceID, currentHost, endpointKind string
+	if err := tx.QueryRowContext(ctx, `
+		SELECT conversation.instance_id,conversation.host_task_id,endpoint.kind
+		FROM channel_conversations conversation
+		JOIN channel_endpoints endpoint ON endpoint.id=conversation.endpoint_id
+		WHERE conversation.id=?`, conversationID,
+	).Scan(&instanceID, &currentHost, &endpointKind); err != nil {
+		return err
+	}
+	if currentHost == taskID {
+		return tx.Commit()
+	}
+	var reusable bool
+	if err := tx.QueryRowContext(ctx, `
+		SELECT EXISTS(
+			SELECT 1
+			FROM tasks task
+			JOIN channel_instances instance ON instance.id=?
+			WHERE task.id=? AND task.project_id=instance.host_project_id
+			  AND task.workspace_id=instance.host_workspace_id
+			  AND task.status IN (?,?,?,?)
+		)`, instanceID, taskID,
+		domain.TaskPreparing, domain.TaskActive, domain.TaskWaitingUser, domain.TaskFailed,
+	).Scan(&reusable); err != nil {
+		return err
+	}
+	if !reusable {
+		return errors.New("channel fallback task is not reusable")
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE channel_conversations SET host_task_id=?,updated_at=? WHERE id=?`,
+		taskID, timeString(at), conversationID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE channel_subscriptions SET state='closed',updated_at=? WHERE conversation_id=? AND kind='conversation_host' AND state='active'`,
+		timeString(at), conversationID); err != nil {
+		return err
+	}
+	var cursor int64
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(sequence),0) FROM channel_source_events`).Scan(&cursor); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO channel_subscriptions(id,instance_id,conversation_id,route_id,source_task_id,kind,filter_version,filter_json,source_cursor,state,created_at,updated_at) VALUES(?,?,?,NULL,?,'conversation_host',1,'{}',?,'active',?,?)`,
+		domain.NewID("channel_subscription"), instanceID, conversationID, taskID, cursor, timeString(at), timeString(at)); err != nil {
+		return err
+	}
+	mode := "assistant"
+	if endpointKind == domain.ChannelEndpointGroupDigitalHuman {
+		mode = "group_qa"
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE channel_sessions SET mode=? WHERE conversation_id=? AND status='active'`,
+		mode, conversationID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func (s *Store) ChannelConversationSummaries(ctx context.Context, ownerID, instanceID string) ([]domain.ChannelConversationSummary, error) {
 	destinations, err := s.ChannelDestinations(ctx, ownerID)
 	if err != nil {

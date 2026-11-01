@@ -202,11 +202,37 @@ func (s *Service) reconcileTerminalTaskRoutes(ctx context.Context) error {
 		return err
 	}
 	for _, route := range routes {
-		if err := s.store.ExitTerminalChannelTaskRoute(ctx, route.ID, route.TargetTaskID, s.now().UTC()); err != nil && !errors.Is(err, sql.ErrNoRows) {
-			s.logger.Warn("terminal channel route cleanup failed", "route_id", route.ID, "task_id", route.TargetTaskID, "error", err)
+		if err := s.store.ExitTerminalChannelTaskRoute(ctx, route.ID, route.TargetTaskID, s.now().UTC()); err != nil {
+			if !errors.Is(err, sql.ErrNoRows) {
+				s.logger.Warn("terminal channel route cleanup failed", "route_id", route.ID, "task_id", route.TargetTaskID, "error", err)
+			}
+			continue
 		}
+		s.adoptLatestReusableChannelTask(ctx, route.ConversationID, route.TargetTaskID)
 	}
 	return nil
+}
+
+// adoptLatestReusableChannelTask moves the conversation's default host to the
+// most recently bound non-terminal channel-owned Task after an unbind. The
+// excluded Task is the one the caller just released, so an unbind never
+// immediately re-selects itself. When no reusable channel Task remains, the
+// host pointer stays in place and the normal continuation path applies.
+func (s *Service) adoptLatestReusableChannelTask(ctx context.Context, conversationID, excludeTaskID string) {
+	if strings.TrimSpace(conversationID) == "" {
+		return
+	}
+	taskID, err := s.store.LatestReusableChannelTask(ctx, conversationID, excludeTaskID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return
+	}
+	if err != nil {
+		s.logger.Warn("channel fallback lookup failed", "conversation_id", conversationID, "error", err)
+		return
+	}
+	if err := s.store.AdoptChannelConversationHost(ctx, conversationID, taskID, s.now().UTC()); err != nil {
+		s.logger.Warn("channel fallback adoption failed", "conversation_id", conversationID, "task_id", taskID, "error", err)
+	}
 }
 
 func (s *Service) TaskChannelRoutes(ctx context.Context, ownerID, taskID string) ([]domain.ChannelDestination, domain.ChannelTaskRoute, error) {
@@ -384,7 +410,11 @@ func (s *Service) UnbindTaskChannelRoute(ctx context.Context, ownerID, taskID, r
 	if err != nil || route.TargetTaskID != taskID || route.State != "active" {
 		return fmt.Errorf("active task channel route was not found")
 	}
-	return s.store.ExitOwnerChannelTaskRoute(ctx, route.ID, taskID, s.now().UTC())
+	if err := s.store.ExitOwnerChannelTaskRoute(ctx, route.ID, taskID, s.now().UTC()); err != nil {
+		return err
+	}
+	s.adoptLatestReusableChannelTask(ctx, route.ConversationID, taskID)
+	return nil
 }
 
 func (s *Service) SetPluginEnabled(ctx context.Context, id string, enabled bool, revision int) (domain.ChannelPlugin, error) {
@@ -2291,7 +2321,11 @@ func (s *Service) executePendingAction(ctx context.Context, action domain.Channe
 		if err != nil || route.ID != stringField(action.Precondition, "route_id") || route.Revision != intField(action.Precondition, "route_revision") {
 			return fmt.Errorf("exit precondition changed")
 		}
-		return s.store.ExitChannelTaskRoute(ctx, action, s.now().UTC())
+		if err := s.store.ExitChannelTaskRoute(ctx, action, s.now().UTC()); err != nil {
+			return err
+		}
+		s.adoptLatestReusableChannelTask(ctx, action.ConversationID, action.TargetID)
+		return nil
 	case "create_task":
 		return s.executeCreateTaskAction(ctx, action)
 	case "status_change":
