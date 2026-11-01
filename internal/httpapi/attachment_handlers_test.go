@@ -47,6 +47,10 @@ func TestTaskAttachmentUploadDownloadAndDelete(t *testing.T) {
 		}
 	}
 	service := app.NewService(database, secretStore, app.StubExecutor{})
+	// The test submits a message, which starts a Turn that writes runtime files
+	// under the workspace root. Waiting here keeps those writes out of the
+	// t.TempDir cleanup window.
+	defer func() { _ = service.Shutdown(context.Background()) }()
 	task, err := service.CreateTask(ctx, app.CreateTaskInput{ProjectID: project.ID, WorkspaceID: workspace.ID, Title: "Attachment", Request: "test", ModelID: model.ID})
 	if err != nil {
 		t.Fatal(err)
