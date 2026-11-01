@@ -258,6 +258,18 @@ func (s *Server) createTask(writer http.ResponseWriter, request *http.Request) {
 	if s.rejectRetiredChannelWorkspaceWrite(writer, request, payload.WorkspaceID) {
 		return
 	}
+	project, projectErr := s.store.Project(request.Context(), payload.ProjectID)
+	if projectErr != nil {
+		writeError(writer, http.StatusBadRequest, "project_not_found")
+		return
+	}
+	if domain.IsSystemManagedProject(project) {
+		writeJSON(writer, http.StatusForbidden, map[string]any{
+			"ok": false, "error": "system_project_read_only",
+			"message": "系统托管的项目只读，不能创建普通任务",
+		})
+		return
+	}
 	sourceTaskID := strings.TrimSpace(payload.SourceTaskID)
 	if (payload.CloneHardware || payload.CloneChannel) && sourceTaskID == "" {
 		writeError(writer, http.StatusBadRequest, "clone_source_required")

@@ -52,7 +52,6 @@ window.fetch = async (input, init = {}) => {
   if (path === "/api/v1/assistant") return json({assistant: {character: "gugugaga", name: "AHA", nickname: "AHA", enabled: true}, messages: [], models: [], tools: []});
   if (path === "/api/v1/tasks" && method === "GET") return json({tasks: TASKS, has_more: false, counts: COUNTS});
   if (path === "/api/v1/tasks" && method === "POST") { window.__created = JSON.parse(init.body || "{}"); return json({task: {...TASKS[0], id: "t-new"}, started: true}); }
-  if (path === "/api/v1/task-clone-sources" && method === "GET") return json({tasks: TASKS.filter(task => !task.owner_device_id)});
   if (path === "/api/v1/projects") return json({projects: [
     {id: "project-1", name: "Project One", project_type: "folder", channel_retired: false, knowledge_policy: "enabled"},
     {id: "project-2", name: "Project Two", project_type: "folder", channel_retired: false, knowledge_policy: "enabled"},
@@ -210,22 +209,18 @@ try {
   await page.locator("#task-capabilities-fold summary").click();
   await page.locator('#task-capabilities-fold input[name="cap_workspace_read"]').setChecked(true);
   assert.match(await page.locator("#task-capabilities-fold [data-fold-count]").innerText(), /已启用 1\/3/);
-  await page.locator("#task-clone-source").selectOption("t-active");
-  await page.waitForFunction(() => document.querySelector("#task-clone-channel")?.checked === true);
-  assert.equal(await page.locator("#task-clone-hardware").isChecked(), true, "source hardware was not offered");
-  assert.equal(await page.locator("#task-clone-channel").isChecked(), true, "source channel was not offered");
-  assert.equal(await page.locator("#task-project").inputValue(), "project-1", "loading source Main changed the target project");
-  assert.equal(await page.locator("#task-workspace").inputValue(), "workspace-1", "loading source Main changed the target workspace");
-  assert.equal(await page.locator('#task-form select[name="filesystem"]').inputValue(), "read-only", "source Main filesystem was not loaded");
-  assert.equal(await page.locator('#task-form select[name="collaboration_mode"]').inputValue(), "single", "source Task policy was not loaded");
-  assert.deepEqual(await page.locator('#task-skills-fold input[name="skill_ids"]:checked').evaluateAll(nodes => nodes.map(node => node.value)), ["skill-b"]);
-  await page.screenshot({path: resolve(output, "task-clone-source.png")});
+  await page.locator("#task-skills-fold summary").click();
+  await page.locator('#task-skills-fold input[value="skill-a"]').setChecked(true);
+  await page.locator('#task-skills-fold input[value="skill-b"]').setChecked(true);
+  await page.locator("#task-skills-fold summary").click();
+  await page.locator('#task-form select[name="filesystem"]').selectOption("read-only");
+  await page.locator('#task-form select[name="collaboration_mode"]').selectOption("single");
+  await page.screenshot({path: resolve(output, "task-panel-create.png")});
   await proxy.selectOption("enabled");
   // The accelerated tier is a checkbox, so it is the one runtime field that
   // submits the string "on" and has to reach the request as a boolean.
   const fastTier = page.locator('#task-form input[name="fast_mode"]');
   assert.equal(await fastTier.count(), 1, "the create panel has no Codex fast switch");
-  assert.equal(await fastTier.isChecked(), true, "the source fast switch was not loaded");
   assert.equal(await fastTier.isVisible(), true, "the fast switch is hidden for a Codex workspace");
   await fastTier.setChecked(true);
   await page.fill('#task-form input[name="title"]', "New task");
@@ -238,10 +233,7 @@ try {
   assert.equal(created.agent_capabilities.workspace_read, true, "the workspace grant was not submitted");
   assert.equal(created.agent_capabilities.task_create, false, "an unchecked grant was submitted as granted");
   assert.equal(created.agent_capabilities.clone_hardware, false, "an unchecked grant was submitted as granted");
-  assert.equal(created.source_task_id, "t-active", "the source Task was not submitted");
-  assert.equal(created.clone_hardware, true, "the hardware clone choice was not submitted");
-  assert.equal(created.clone_channel, true, "the channel handoff choice was not submitted");
-  assert.deepEqual(created.skill_ids.sort(), ["skill-b"], "source skills were not submitted");
+  assert.deepEqual(created.skill_ids.sort(), ["skill-a", "skill-b"], "selected skills were not submitted");
   assert.deepEqual(errors, [], "the task panel threw while being driven");
 
   // 5. A memo can seed the create panel. The button only shows on a row that
@@ -292,10 +284,8 @@ try {
   await page.waitForSelector(".task-filters", {timeout: 10000});
   await page.click('[data-dialog="task"]');
   await page.waitForSelector("#task-dialog[open]", {timeout: 5000});
-  await page.locator("#task-clone-source").selectOption("t-active");
-  await page.waitForFunction(() => document.querySelector("#task-clone-channel")?.checked === true);
-  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true, "the source clone panel overflows the mobile viewport");
-  await page.screenshot({path: resolve(output, "task-clone-source-mobile.png")});
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true, "the create panel overflows the mobile viewport");
+  await page.screenshot({path: resolve(output, "task-panel-mobile.png")});
   console.log("task panels verified in the built Web bundle");
 } finally {
   await browser?.close();

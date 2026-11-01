@@ -123,7 +123,6 @@ interface State {
   models: Model[];
   hardwareResources: HardwareResource[];
   tasks: Task[];
-  taskCloneSources: Task[];
   knowledge: Knowledge[];
   // Every project with a verified knowledge root, for scoping UI. Separate from
   // `knowledge`, which is only the current page of entries.
@@ -288,7 +287,6 @@ const state: State = {
   models: [],
   hardwareResources: [],
   tasks: [],
-  taskCloneSources: [],
   knowledge: [],
   knowledgeIndexes: [],
   knowledgeLibraries: [],
@@ -496,7 +494,11 @@ function statusLabel(status: string): string {
 }
 
 function projectTypeLabel(type?: string): string {
-  return type === "git" ? "Git 仓库" : type === "channel" ? "渠道宿主" : "普通文件夹";
+  return type === "git" ? "Git 仓库" : type === "channel" ? "渠道宿主" : type === "system" ? "系统托管" : "普通文件夹";
+}
+
+function isSystemProject(project: Project): boolean {
+  return project.project_type === "system" || project.project_type === "channel";
 }
 
 function formatDateTime(value?: string): string {
@@ -835,22 +837,12 @@ function syncTaskGitIsolation(): void {
   if (!useWorktree) worktreeDir.value = "";
 }
 
-function syncTaskMCPOptions(projectID: string): void {
-  const petProject = projectID === "project_pet";
-  document.querySelectorAll<HTMLElement>('#task-form [data-mcp-builtin="1"]').forEach(label => {
-    label.hidden = !petProject;
-    const input = label.querySelector<HTMLInputElement>('input[name="mcp_server_ids"]');
-    if (input && !petProject) input.checked = false;
-  });
-}
-
 function syncTaskWorkspaces(): void {
   const projectID = String((document.querySelector("#task-project") as HTMLSelectElement)?.value || "");
   const wsSelect = document.querySelector<HTMLSelectElement>("#task-workspace");
   if (!wsSelect) return;
   const items = state.workspaces.filter(item => item.project_id === projectID && !item.read_only);
   const current = wsSelect.value;
-  syncTaskMCPOptions(projectID);
   wsSelect.innerHTML = items.length
     ? items.map(item => `<option value="${item.id}">${escapeHTML(item.name)}</option>`).join("")
     : `<option value="">该项目下暂无 Workspace</option>`;
@@ -1478,12 +1470,8 @@ async function loadCoreData(force = false): Promise<void> {
     }),
     loadResource("workspaces", force, async () => { state.workspaces = (await api.workspaces()).workspaces || []; }),
     loadResource("tasks", force, async () => {
-      const [result, cloneSources] = await Promise.all([
-        api.tasks("", {limit: initialListPageSize}),
-        api.taskCloneSources(),
-      ]);
+      const result = await api.tasks("", {limit: initialListPageSize});
       state.tasks = result.tasks || [];
-      state.taskCloneSources = cloneSources.tasks || [];
       state.taskFacetCounts = result.counts || null;
       listPages.tasks = {cursor: result.next_cursor || "", hasMore: Boolean(result.has_more), loadingMore: false};
     }),
@@ -2427,8 +2415,9 @@ function projectsView(): string {
     const workspaces = state.workspaces.filter(item => item.project_id === project.id);
     const tasks = state.tasks.filter(item => item.project_id === project.id);
     const archived = project.channel_retired === true;
+    const system = isSystemProject(project);
     return `<article class="list-row project-row" data-project="${project.id}">
-      <div class="item-title"><span class="square-icon">${icon("projects")}</span><div><strong>${escapeHTML(project.name)}</strong><small>${projectTypeLabel(project.project_type)}${archived ? " · 渠道归档" : ""}</small></div><span class="row-actions">${archived ? `<span class="status warn">已归档</span><button type="button" data-delete-project="${project.id}" class="icon-button danger project-del" title="永久删除归档">${icon("close")}</button>` : `<button type="button" data-edit-project="${project.id}" class="icon-button" title="编辑项目">${icon("edit")}</button><button type="button" data-delete-project="${project.id}" class="icon-button project-del" title="删除项目">${icon("close")}</button>`}</span></div>
+      <div class="item-title"><span class="square-icon">${icon("projects")}</span><div><strong>${escapeHTML(project.name)}</strong><small>${projectTypeLabel(project.project_type)}${archived ? " · 渠道归档" : system ? " · 系统托管" : ""}</small></div><span class="row-actions">${archived ? `<span class="status warn">已归档</span><button type="button" data-delete-project="${project.id}" class="icon-button danger project-del" title="永久删除归档">${icon("close")}</button>` : system ? `<span class="status warn">系统托管</span>` : `<button type="button" data-edit-project="${project.id}" class="icon-button" title="编辑项目">${icon("edit")}</button><button type="button" data-delete-project="${project.id}" class="icon-button project-del" title="删除项目">${icon("close")}</button>`}</span></div>
       <div class="chips">${workspaces.map(item => `<span>${item.locality === "remote" ? icon("server") : icon("monitor")}${escapeHTML(item.name)}</span>`).join("") || "<span>暂无 Workspace</span>"}</div>
       <div><strong>${tasks.length}</strong><small>任务</small></div>
       <div><strong>${workspaces.filter(item => item.health === "ready").length}/${workspaces.length}</strong><small>Workspace Ready</small></div>
@@ -2446,14 +2435,15 @@ function projectDetailView(project: Project): string {
   const workspaces = state.workspaces.filter(item => item.project_id === project.id);
   const tasks = state.tasks.filter(item => item.project_id === project.id);
   const archived = project.channel_retired === true;
+  const system = isSystemProject(project);
   const rows = workspaces.map(item => `<article class="list-row ws-row ${item.read_only ? "read-only" : ""}">
     <div class="item-title">${item.locality === "remote" ? icon("server") : icon("monitor")}<div><strong>${escapeHTML(item.name)}</strong><small>${escapeHTML(item.root_path)}</small></div></div>
     <div class="ws-meta"><small>${escapeHTML(item.transport)}${item.distro ? ` · ${escapeHTML(item.distro)}` : ""}</small><strong>${item.channel_retired ? "渠道归档只读" : item.read_only ? `只读 · ${escapeHTML(item.owner_device_id || "其他设备")}` : `本机 · ${escapeHTML(item.owner_device_id || "待首次同步绑定")}`}</strong></div>
-    ${renderWorkspaceDetection(item)}
-    ${archived ? `<span class="status warn">归档只读</span>` : item.read_only ? `<span class="row-actions workspace-remote-actions"><button type="button" data-takeover-workspace="${item.id}">${icon("copy")}接管到本机</button><button type="button" data-retire-remote-workspace="${item.id}" class="icon-button danger" title="移除孤立 Workspace">${icon("close")}</button></span><span class="status warn">远端只读</span>` : `<button data-detect="${item.id}">${icon("refresh")}测试连接</button><span class="row-actions"><button type="button" data-edit-workspace="${item.id}" class="icon-button" title="编辑 Workspace">${icon("edit")}</button><button type="button" data-delete-workspace="${item.id}" class="icon-button" title="删除 Workspace">${icon("close")}</button></span>`}
+    ${system ? "" : renderWorkspaceDetection(item)}
+    ${archived ? `<span class="status warn">归档只读</span>` : system ? `<span class="status warn">系统托管 · 只读</span>` : item.read_only ? `<span class="row-actions workspace-remote-actions"><button type="button" data-takeover-workspace="${item.id}">${icon("copy")}接管到本机</button><button type="button" data-retire-remote-workspace="${item.id}" class="icon-button danger" title="移除孤立 Workspace">${icon("close")}</button></span><span class="status warn">远端只读</span>` : `<button data-detect="${item.id}">${icon("refresh")}测试连接</button><span class="row-actions"><button type="button" data-edit-workspace="${item.id}" class="icon-button" title="编辑 Workspace">${icon("edit")}</button><button type="button" data-delete-workspace="${item.id}" class="icon-button" title="删除 Workspace">${icon("close")}</button></span>`}
   </article>`).join("");
   return shell(`<section class="page">
-    <header class="page-head"><div><button id="back-projects" class="back-link">← 返回项目列表</button><h1>${escapeHTML(project.name)}${archived ? ` <span class="status warn">已归档</span>` : ""}</h1><p>${projectTypeLabel(project.project_type)}${project.repository_identity ? ` · ${escapeHTML(project.repository_identity)}` : ""}${project.default_branch ? ` · 默认分支 ${escapeHTML(project.default_branch)}` : ""}${archived ? " · 渠道宿主历史只读" : ""}</p></div><div class="actions">${archived ? `<button type="button" data-channel-project-export="${escapeHTML(project.channel_instance_id || "")}">导出归档</button><button id="delete-project" class="danger">${icon("close")}永久删除</button>` : `<button data-dialog="workspace">${icon("plus")}添加 Workspace</button><button type="button" data-edit-project-detail="${project.id}" class="icon-button" title="编辑项目">${icon("edit")}</button><button id="delete-project" class="danger">${icon("close")}删除项目</button>`}</div></header>
+    <header class="page-head"><div><button id="back-projects" class="back-link">← 返回项目列表</button><h1>${escapeHTML(project.name)}${archived ? ` <span class="status warn">已归档</span>` : system ? ` <span class="status warn">系统托管</span>` : ""}</h1><p>${projectTypeLabel(project.project_type)}${project.repository_identity ? ` · ${escapeHTML(project.repository_identity)}` : ""}${project.default_branch ? ` · 默认分支 ${escapeHTML(project.default_branch)}` : ""}${archived ? " · 渠道宿主历史只读" : system ? " · 系统托管，只读" : ""}</p></div><div class="actions">${archived ? `<button type="button" data-channel-project-export="${escapeHTML(project.channel_instance_id || "")}">导出归档</button><button id="delete-project" class="danger">${icon("close")}永久删除</button>` : system ? `<span class="status warn">系统托管 · 只读</span>` : `<button data-dialog="workspace">${icon("plus")}添加 Workspace</button><button type="button" data-edit-project-detail="${project.id}" class="icon-button" title="编辑项目">${icon("edit")}</button><button id="delete-project" class="danger">${icon("close")}删除项目</button>`}</div></header>
     <div class="metrics"><div><small>Workspace</small><strong>${workspaces.length}</strong></div><div><small>任务</small><strong>${tasks.length}</strong></div><div><small>Ready</small><strong>${workspaces.filter(item => item.health === "ready").length}</strong></div></div>
     <div class="panel"><div class="panel-head"><strong>Workspaces</strong><span>“测试连接”会刷新 Backend 能力并验证 Workspace → AHA2 Agent API</span></div>${rows || `<div class="empty">尚无 Workspace，点击右上角添加。</div>`}</div>
     ${workspaceDialog()}${workspaceTakeoverDialog()}
@@ -2468,7 +2458,7 @@ function workspaceDialog(): string {
   return `<dialog id="workspace-dialog"><form id="workspace-form" method="dialog">
     <div class="dialog-head"><h2>添加 Workspace</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div>
     <input type="hidden" id="ws-edit-id" name="ws_edit_id" value="">
-    <label>项目<select name="project_id" id="ws-project">${state.projects.filter(item => !item.channel_retired).map(item => `<option value="${item.id}" ${item.id === state.dialogProjectID ? "selected" : ""}>${escapeHTML(item.name)}</option>`).join("")}</select></label>
+    <label>项目<select name="project_id" id="ws-project">${state.projects.filter(item => !item.channel_retired && !isSystemProject(item)).map(item => `<option value="${item.id}" ${item.id === state.dialogProjectID ? "selected" : ""}>${escapeHTML(item.name)}</option>`).join("")}</select></label>
     <label>名称<input name="name" id="ws-name" value="本地开发" required></label>
     <div class="two"><label>位置<select name="locality" id="ws-locality"><option value="local">本地</option><option value="remote">远程</option></select></label><label>Transport<select name="transport" id="ws-transport"></select></label></div>
     <label>Root Path<input name="root_path" id="ws-root-path" placeholder="E:\project 或 /home/user/project" required></label>
@@ -2828,7 +2818,7 @@ function tasksView(): string {
 }
 
 function taskDialog(): string {
-  const projectID = state.projects.find(project => !project.channel_retired)?.id || "";
+  const projectID = state.projects.find(project => !project.channel_retired && !isSystemProject(project))?.id || "";
   return taskDialogBase().replace(
     '<div id="task-git-isolation">',
     `<div class="two"><label>Knowledge<select name="knowledge_policy"><option value="inherit">\u7ee7\u627f Project</option><option value="enabled">\u5f00\u542f</option><option value="disabled">\u5173\u95ed</option></select></label><label>Backend \u4ee3\u7406<select name="proxy_enabled">${proxyOptionsHTML(false)}</select></label></div>${taskCapabilitiesFold({})}${taskSkillsFold(taskSkillOptions(projectID))}<div id="task-git-isolation">`,
@@ -2854,8 +2844,10 @@ function taskSkillsFold(body: string): string {
 }
 
 function taskMCPFold(): string {
-  const options = state.mcpServers.filter(item => item.enabled).map(item => `<label class="task-skill-option" data-mcp-builtin="${item.builtin ? "1" : "0"}"><input type="checkbox" name="mcp_server_ids" value="${escapeHTML(item.id)}" ${item.builtin ? "checked" : ""}><span><strong>${escapeHTML(item.name)}</strong><small>${escapeHTML(item.description || item.transport)}</small></span></label>`).join("");
-  return taskFormFold("task-mcp-fold", "MCP 工具", `<div class="task-skill-options" id="task-mcp-options">${options || '<div class="field-help">还没有可用 MCP，先在侧边栏 MCP 页添加。</div>'}</div>`);
+  // mcp_pet is attached automatically only to the system pet Task. A normal
+  // user Task must not be able to select it.
+  const options = state.mcpServers.filter(item => item.enabled && item.id !== "mcp_pet").map(item => `<label class="task-skill-option"><input type="checkbox" name="mcp_server_ids" value="${escapeHTML(item.id)}" ${item.builtin ? "checked" : ""}><span><strong>${escapeHTML(item.name)}</strong><small>${escapeHTML(item.description || item.transport)}</small></span></label>`).join("");
+  return taskFormFold("task-mcp-fold", "MCP 工具", `<div class="task-skill-options" id="task-mcp-options">${options || '<div class="field-help">没有可供普通任务选择的 MCP。</div>'}</div>`);
 }
 
 function taskFormFold(id: string, title: string, body: string): string {
@@ -2905,88 +2897,8 @@ function syncAgentFoldCounts(): void {
   syncMCPFoldCount("agent-config-dialog", "agent-mcp-fold");
 }
 
-function taskCloneSourceOptions(): string {
-  return `<option value="">不使用旧任务</option>${state.taskCloneSources.map(task => {
-    const project = state.projects.find(item => item.id === task.project_id)?.name || task.project_id;
-    return `<option value="${escapeHTML(task.id)}">${escapeHTML(task.code || task.id)} · ${escapeHTML(task.title)} · ${escapeHTML(project)}</option>`;
-  }).join("")}`;
-}
-
-function setTaskSelectValue(name: string, value: string | number | undefined): boolean {
-  const select = document.querySelector<HTMLSelectElement>(`#task-form select[name="${name}"]`);
-  if (!select || value === undefined || value === null) return false;
-  const text = String(value);
-  if (![...select.options].some(option => option.value === text)) return false;
-  select.value = text;
-  return true;
-}
-
-function applyTaskCloneMainConfig(detail: TaskDetail): string {
-  const main = detail.agents.find(agent => agent.agent_id === "main");
-  if (!main) return "来源任务没有 Main 配置";
-  if (!main.runtime_config_valid) return main.runtime_config_error || "来源任务的 Main 配置已失效";
-
-  const backend = document.querySelector<HTMLSelectElement>("#task-backend");
-  if (!backend || !main.backend || ![...backend.options].some(option => option.value === main.backend)) {
-    return `目标 Workspace 不支持来源 Backend：${main.backend || "未知"}`;
-  }
-  backend.value = main.backend;
-  syncRuntimeFields("task", state.models, state.codexAccounts, false);
-
-  const sourceSelect = document.querySelector<HTMLSelectElement>("#task-model-source");
-  if (sourceSelect && main.model_source && [...sourceSelect.options].some(option => option.value === main.model_source)) {
-    sourceSelect.value = main.model_source;
-    syncRuntimeFields("task", state.models, state.codexAccounts, false);
-  }
-  if (main.model_source === "official") {
-    if (main.codex_account_id) {
-      const account = document.querySelector<HTMLSelectElement>("#task-codex-account");
-      if (account && [...account.options].some(option => option.value === main.codex_account_id)) {
-        account.value = main.codex_account_id;
-        syncRuntimeFields("task", state.models, state.codexAccounts, false);
-      }
-    }
-    if (main.wire_model) {
-      const model = document.querySelector<HTMLSelectElement>("#task-wire-model");
-      if (model && [...model.options].some(option => option.value === main.wire_model)) model.value = main.wire_model;
-    }
-  } else if (main.model_source === "claude_native") {
-    if (main.wire_model) {
-      const model = document.querySelector<HTMLSelectElement>("#task-claude-native-model");
-      if (model && [...model.options].some(option => option.value === main.wire_model)) model.value = main.wire_model;
-    }
-  } else if (main.model_id) {
-    const model = document.querySelector<HTMLSelectElement>("#task-model");
-    if (model && [...model.options].some(option => option.value === main.model_id)) {
-      model.value = main.model_id;
-      syncRuntimeFields("task", state.models, state.codexAccounts, false);
-    }
-  }
-
-  if (main.reasoning_effort) setTaskSelectValue("reasoning_effort", main.reasoning_effort);
-  if (main.filesystem) setTaskSelectValue("filesystem", main.filesystem);
-  if (main.approval) setTaskSelectValue("approval", main.approval);
-  setTaskSelectValue("proxy_enabled", main.proxy_enabled ? "enabled" : "disabled");
-  setTaskSelectValue("collaboration_mode", detail.task.collaboration_mode);
-  setTaskSelectValue("knowledge_policy", detail.task.knowledge_policy);
-  const maxAgents = document.querySelector<HTMLInputElement>('#task-form input[name="max_agents"]');
-  if (maxAgents) maxAgents.value = String(Math.max(1, Number(detail.task.max_agents || 3)));
-  const fastMode = document.querySelector<HTMLInputElement>('#task-form input[name="fast_mode"]');
-  if (fastMode) fastMode.checked = Boolean(main.fast_mode);
-  const streamTimeout = document.querySelector<HTMLInputElement>('#task-form input[name="stream_idle_timeout_seconds"]');
-  if (streamTimeout && main.stream_idle_timeout_ms) streamTimeout.value = String(Math.round(main.stream_idle_timeout_ms / 1000));
-  const streamRetries = document.querySelector<HTMLInputElement>('#task-form input[name="stream_max_retries"]');
-  if (streamRetries && main.stream_max_retries) streamRetries.value = String(main.stream_max_retries);
-  const selectedSkills = new Set(detail.task.skill_ids || []);
-  document.querySelectorAll<HTMLInputElement>('#task-form input[name="skill_ids"]').forEach(input => {
-    input.checked = selectedSkills.has(input.value);
-  });
-  syncTaskFormFoldCounts();
-  return "";
-}
-
 function taskDialogBase(): string {
-return `<dialog id="task-dialog" class="wide"><form id="task-form"><div class="dialog-head"><h2>创建任务</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div><label>标题<input name="title" required></label><label>需求<textarea name="request" required></textarea></label><div class="two"><label>项目<select name="project_id" id="task-project" required>${state.projects.filter(item => !item.channel_retired).map(item => `<option value="${item.id}">${escapeHTML(item.name)}</option>`).join("")}</select></label><label>Workspace<select name="workspace_id" id="task-workspace" required></select></label></div><fieldset class="task-clone-source"><legend>旧任务配置</legend><label>来源任务<select name="source_task_id" id="task-clone-source">${taskCloneSourceOptions()}</select></label><div class="two"><label class="channel-check"><input type="checkbox" name="clone_hardware" id="task-clone-hardware" disabled>复制硬件启用关系</label><label class="channel-check"><input type="checkbox" name="clone_channel" id="task-clone-channel" disabled>复制并接续主渠道</label></div><div class="field-help" id="task-clone-source-help">选择旧任务后载入其 Main 配置，可继续修改。</div></fieldset>${runtimeFieldsHTML("task", state.models, state.codexAccounts)}<div class="two"><label>推理强度<select name="reasoning_effort" id="task-effort"></select></label><label>沙箱（文件访问）<select name="filesystem"><option value="workspace-write">工作区可写</option><option value="read-only">只读</option><option value="danger-full-access">完全访问</option></select></label></div><div class="two"><label>协作模式<select name="collaboration_mode"><option value="auto">Auto</option><option value="single">Single</option></select></label><label>最大 Agent 数<input name="max_agents" type="number" min="1" value="3"></label></div><label>审批<select name="approval"><option value="never">无需确认</option><option value="auto">自动批准（跳过权限检查）</option></select></label><div id="task-git-isolation"><label>任务隔离<select name="isolation" id="task-isolation"><option value="worktree">独立 Worktree（推荐）</option><option value="inplace">原地执行</option></select></label><div id="task-worktree-settings"><label>Worktree 根目录<input name="worktree_dir" id="task-worktree-dir" placeholder="默认：仓库上一级/.aha2-worktrees"></label><div class="field-help">系统会在根目录下追加 Task ID；切换为原地执行后不使用此配置。</div></div><div class="two" id="task-branches"><label>目标分支<input name="target_branch" placeholder="默认当前分支"></label><label>任务分支<input name="task_branch" placeholder="aha/task-name"></label></div></div>${taskMCPFold()}<div class="dialog-actions"><button type="button" data-close>取消</button><button type="submit" name="start_mode" value="manual">创建，稍后启动</button><button class="primary" type="submit" name="start_mode" value="immediate">创建并立即启动</button></div></form></dialog>`;
+return `<dialog id="task-dialog" class="wide"><form id="task-form"><div class="dialog-head"><h2>创建任务</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div><label>标题<input name="title" required></label><label>需求<textarea name="request" required></textarea></label><div class="two"><label>项目<select name="project_id" id="task-project" required>${state.projects.filter(item => !item.channel_retired && !isSystemProject(item)).map(item => `<option value="${item.id}">${escapeHTML(item.name)}</option>`).join("")}</select></label><label>Workspace<select name="workspace_id" id="task-workspace" required></select></label></div>${runtimeFieldsHTML("task", state.models, state.codexAccounts)}<div class="two"><label>推理强度<select name="reasoning_effort" id="task-effort"></select></label><label>沙箱（文件访问）<select name="filesystem"><option value="workspace-write">工作区可写</option><option value="read-only">只读</option><option value="danger-full-access">完全访问</option></select></label></div><div class="two"><label>协作模式<select name="collaboration_mode"><option value="auto">Auto</option><option value="single">Single</option></select></label><label>最大 Agent 数<input name="max_agents" type="number" min="1" value="3"></label></div><label>审批<select name="approval"><option value="never">无需确认</option><option value="auto">自动批准（跳过权限检查）</option></select></label><div id="task-git-isolation"><label>任务隔离<select name="isolation" id="task-isolation"><option value="worktree">独立 Worktree（推荐）</option><option value="inplace">原地执行</option></select></label><div id="task-worktree-settings"><label>Worktree 根目录<input name="worktree_dir" id="task-worktree-dir" placeholder="默认：仓库上一级/.aha2-worktrees"></label><div class="field-help">系统会在根目录下追加 Task ID；切换为原地执行后不使用此配置。</div></div><div class="two" id="task-branches"><label>目标分支<input name="target_branch" placeholder="默认当前分支"></label><label>任务分支<input name="task_branch" placeholder="aha/task-name"></label></div></div>${taskMCPFold()}<div class="dialog-actions"><button type="button" data-close>取消</button><button type="submit" name="start_mode" value="manual">创建，稍后启动</button><button class="primary" type="submit" name="start_mode" value="immediate">创建并立即启动</button></div></form></dialog>`;
 }
 
 let slashCommandSelection = 0;
@@ -4382,51 +4294,6 @@ function bindCommon(): void {
     });
   });
   document.querySelector("#task-project")?.addEventListener("change", syncTaskWorkspaces);
-  document.querySelector("#task-clone-source")?.addEventListener("change", async event => {
-    const sourceID = String((event.currentTarget as HTMLSelectElement).value || "");
-    const hardware = document.querySelector<HTMLInputElement>("#task-clone-hardware");
-    const channel = document.querySelector<HTMLInputElement>("#task-clone-channel");
-    const help = document.querySelector<HTMLElement>("#task-clone-source-help");
-    if (hardware) {
-      hardware.checked = false;
-      hardware.disabled = true;
-    }
-    if (channel) {
-      channel.checked = false;
-      channel.disabled = true;
-    }
-    if (!sourceID) {
-      if (help) help.textContent = "选择旧任务后载入其 Main 配置，可继续修改。";
-      return;
-    }
-    if (help) help.textContent = "正在载入来源任务配置…";
-    try {
-      const [detail, channelState] = await Promise.all([
-        api.task(sourceID),
-        api.taskChannelRoutes(sourceID).catch(() => null),
-      ]);
-      if (document.querySelector<HTMLSelectElement>("#task-clone-source")?.value !== sourceID) return;
-      const mainError = applyTaskCloneMainConfig(detail);
-      const hardwareCount = detail.hardware?.length || 0;
-      const channelAvailable = Boolean(channelState?.route);
-      if (hardware) {
-        hardware.disabled = hardwareCount === 0;
-        hardware.checked = hardwareCount > 0;
-      }
-      if (channel) {
-        channel.disabled = !channelAvailable;
-        channel.checked = channelAvailable;
-      }
-      if (help) {
-        const parts = [mainError ? `Main：${mainError}` : "已载入 Main 配置"];
-        parts.push(hardwareCount ? `硬件组 ${hardwareCount} 个` : "无硬件组");
-        parts.push(channelAvailable ? "可接续主渠道" : "无主渠道");
-        help.textContent = parts.join("；");
-      }
-    } catch (error) {
-      if (help) help.textContent = `来源任务载入失败：${error instanceof Error ? error.message : String(error)}`;
-    }
-  });
   // The collapsed summaries report what is selected inside them, so they must
   // follow every checkbox change, not just the initial render.
   document.querySelector<HTMLElement>("#task-dialog")?.addEventListener("change", event => {
@@ -4463,9 +4330,6 @@ function bindCommon(): void {
       max_agents: Number(payload.max_agents || 3),
       proxy_enabled: proxyEnabledFrom(payload.proxy_enabled),
       fast_mode: payload.fast_mode === "on",
-      clone_hardware: form.get("clone_hardware") === "on",
-      clone_channel: form.get("clone_channel") === "on",
-      source_task_id: payload.source_task_id || "",
       agent_capabilities: {
         workspace_read: form.get("cap_workspace_read") === "on",
         task_create: form.get("cap_task_create") === "on",
@@ -4475,11 +4339,9 @@ function bindCommon(): void {
       stream_max_retries: Number(payload.stream_max_retries || 0),
     });
     state.tasks = [result.task, ...state.tasks.filter(item => item.id !== result.task.id)];
-    state.taskCloneSources = [result.task, ...state.taskCloneSources.filter(item => item.id !== result.task.id)];
     setMessage("notice", result.task.status === "draft" ? "任务草稿已创建，可先完成配置" : "任务已创建并启动");
     await openTask(result.task.id);
     if (result.start_error) setMessage("error", `Task 已创建，但首个 Turn 启动失败：${result.start_error}`);
-    if (result.clone_warnings?.length) setMessage("error", result.clone_warnings.join("；"));
   }, "创建中", false);
   document.querySelector<HTMLElement>("#start-task")?.addEventListener("click", () => {
     if (!state.selectedTask) return;

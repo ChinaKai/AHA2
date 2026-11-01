@@ -333,7 +333,7 @@ test("channel lifecycle API and archived projects share the purge path", async (
   assert.match(types, /"retired"/);
   assert.match(main, /project\.channel_retired[\s\S]*?purgeArchivedChannelProject/);
   assert.match(main, /purgeArchivedChannelProject[\s\S]*?purgeRetiredChannelInstance/);
-  assert.match(main, /state\.projects\.filter\(item => !item\.channel_retired\)/);
+  assert.match(main, /state\.projects\.filter\(item => !item\.channel_retired && !isSystemProject\(item\)\)/);
 });
 
 test("channel reauthorization explains menu preservation and separate creation", async () => {
@@ -1909,13 +1909,28 @@ test("task creation supports manual draft and explicit start", async () => {
   assert.match(main, /state\.selectedTask\?\.task\.status === "draft"/);
   assert.match(main, /尚无 Context/);
   assert.match(main, /if \(state\.selectedTask\.task\.status === "draft"\) \{[\s\S]{0,160}state\.taskContext = null;[\s\S]{0,80}render\(\);[\s\S]{0,80}return;/);
-  assert.match(main, /id="task-clone-source"/);
-  assert.match(main, /id="task-clone-hardware"/);
-  assert.match(main, /id="task-clone-channel"/);
-  assert.match(main, /applyTaskCloneMainConfig/);
-  assert.match(main, /clone_warnings/);
-  assert.match(api, /\/task-clone-sources/);
+  assert.doesNotMatch(main, /id="task-clone-source"/);
+  assert.doesNotMatch(main, /旧任务配置/);
+  assert.doesNotMatch(main, /clone_warnings/);
   assert.match(api, /\/tasks\/\$\{encodeURIComponent\(id\)\}\/start/);
+});
+
+test("system-managed resources are read-only and normal tasks exclude pet MCP", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const main = await readFile(resolve(root, "dist", "app.js"), "utf8");
+  const catalog = await readFile(resolve(root, "..", "internal", "httpapi", "catalog_handlers.go"), "utf8");
+  const tasks = await readFile(resolve(root, "..", "internal", "httpapi", "task_handlers.go"), "utf8");
+  const service = await readFile(resolve(root, "..", "internal", "app", "service.go"), "utf8");
+
+  assert.match(main, /function isSystemProject/);
+  assert.match(main, /!isSystemProject\(item\)/);
+  assert.match(main, /系统托管/);
+  assert.match(main, /item\.id !== "mcp_pet"/);
+  assert.match(catalog, /system_project_read_only/);
+  assert.match(catalog, /domain\.IsSystemManagedProject/);
+  assert.match(tasks, /system_project_read_only/);
+  assert.match(service, /AllowSystemProject bool/);
+  assert.match(service, /!input\.AllowSystemProject/);
 });
 
 test("model detection fetches the catalog, supports multi-select and an add dialog", async () => {
@@ -2260,6 +2275,14 @@ test("advanced settings expose access scope and listen address", async () => {
   assert.match(api, /\/api\/v1\/settings\/network/);
   assert.match(types, /access_scope: string/);
   assert.match(types, /NetworkSettings/);
+});
+
+test("advanced settings cards use the same details action label", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const i18n = await readFile(resolve(root, "src", "i18n.ts"), "utf8");
+  const actions = [...i18n.matchAll(/"advanced\.(prompts|sync|proxy|hardware|pet|data|mcp|other)\.action": "([^"]+)"/g)].map(match => match[2]);
+  assert.equal(actions.length, 16);
+  assert.deepEqual([...new Set(actions)].sort(), ["View details", "查看详情"]);
 });
 
 test("completed tasks freeze the composer behind a confirmed reopen", async () => {

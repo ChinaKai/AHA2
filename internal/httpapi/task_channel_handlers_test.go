@@ -98,6 +98,7 @@ func TestTaskChannelRouteAPI(t *testing.T) {
 		ProjectID: hostProject.ID, WorkspaceID: hostWorkspace.ID, Title: "飞书群聊 · APP 与固件联调群", Request: "host",
 		Isolation: "inplace", Backend: model.Backend, ModelSource: model.Source, ModelID: model.ID, WireModel: model.WireModel,
 		Filesystem: "read-only", Approval: "never", CollaborationMode: "single", MaxAgents: 1, KnowledgePolicy: "enabled",
+		AllowSystemProject: true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -303,6 +304,7 @@ func TestTaskChannelRouteAPI(t *testing.T) {
 		ProjectID: hostProject.ID, WorkspaceID: hostWorkspace.ID, Title: "飞书群聊 · 其他群聊", Request: "host",
 		Isolation: "inplace", Backend: model.Backend, ModelSource: model.Source, ModelID: model.ID, WireModel: model.WireModel,
 		Filesystem: "read-only", Approval: "never", CollaborationMode: "single", MaxAgents: 1, KnowledgePolicy: "enabled",
+		AllowSystemProject: true,
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -57,7 +57,7 @@ func exportTaskGraph(ctx context.Context, database *store.Store, deviceID string
 		return nil, err
 	}
 	for _, project := range projects {
-		if database.IsManagedChannelProject(ctx, project.ID) {
+		if database.IsManagedChannelProject(ctx, project.ID) || domain.IsSystemManagedProject(project) {
 			continue
 		}
 		project.DefaultWorkspaceID = ""

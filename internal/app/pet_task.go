@@ -186,6 +186,7 @@ func (s *Service) ensureOwnerPetTask(ctx context.Context, assistant *domain.Owne
 		Title: "宠物", Request: petTaskIntro, ModelID: assistant.ModelID,
 		Isolation: "inplace", Filesystem: "read-only", Approval: "never",
 		CollaborationMode: "single", MaxAgents: 1, StartMode: "manual",
+		AllowSystemProject: true,
 	})
 	if err != nil {
 		return "", err

@@ -95,6 +95,7 @@ func (f *petTaskFixture) createPetDraft(t *testing.T, request string) domain.Tas
 		Title: "宠物", Request: request, ModelID: f.model.ID,
 		Isolation: "inplace", Filesystem: "workspace-write", Approval: "never",
 		CollaborationMode: "single", MaxAgents: 1, StartMode: "manual",
+		AllowSystemProject: true,
 	})
 	if err != nil {
 		t.Fatal(err)

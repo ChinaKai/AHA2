@@ -128,8 +128,23 @@ func TestPetOverviewRequiresViewTasksPermission(t *testing.T) {
 	if _, err := fixture.service.OwnerAssistant(fixture.ctx); err != nil {
 		t.Fatal(err)
 	}
+	project := domain.Project{
+		ID: "project-pet-overview", Name: "Overview", KnowledgePolicy: "none",
+		CreatedAt: fixture.createdAt, UpdatedAt: fixture.createdAt,
+	}
+	workspace := domain.Workspace{
+		ID: "workspace-pet-overview", ProjectID: project.ID, Name: "overview",
+		Locality: "local", Transport: "native", RootPath: t.TempDir(), Health: "ready",
+		AgentAPIMode: "embedded", CreatedAt: fixture.createdAt, UpdatedAt: fixture.createdAt,
+	}
+	if err := fixture.database.CreateProject(fixture.ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.database.CreateWorkspace(fixture.ctx, workspace); err != nil {
+		t.Fatal(err)
+	}
 	other, err := fixture.service.CreateTask(fixture.ctx, CreateTaskInput{
-		ProjectID: petProjectID, WorkspaceID: petWorkspaceID, Title: "需要排查的任务",
+		ProjectID: project.ID, WorkspaceID: workspace.ID, Title: "需要排查的任务",
 		Request: "排查失败原因", ModelID: fixture.model.ID, Isolation: "inplace",
 		Filesystem: "workspace-write", Approval: "never", CollaborationMode: "single",
 		MaxAgents: 1, StartMode: "manual",

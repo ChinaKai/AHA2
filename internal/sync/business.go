@@ -82,9 +82,18 @@ func ExportBusinessObjects(ctx context.Context, database *store.Store) ([]domain
 
 func ExportBusinessObjectsForDevice(ctx context.Context, database *store.Store, ownerDeviceID string) ([]domain.SyncObject, error) {
 	var result []domain.SyncObject
-	channelProjects, err := database.ManagedChannelProjectIDs(ctx)
+	excludedProjects, err := database.ManagedChannelProjectIDs(ctx)
 	if err != nil {
 		return nil, err
+	}
+	allProjects, err := database.ListProjects(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, project := range allProjects {
+		if domain.IsSystemManagedProject(project) {
+			excludedProjects[project.ID] = true
+		}
 	}
 	add := func(kind, id, version string, value any) error {
 		raw, err := json.Marshal(value)
@@ -105,7 +114,7 @@ func ExportBusinessObjectsForDevice(ctx context.Context, database *store.Store, 
 			return nil, err
 		}
 		for _, project := range projects {
-			if channelProjects[project.ID] {
+			if excludedProjects[project.ID] {
 				continue
 			}
 			lines, err := database.ListProductLines(ctx, project.ID)
@@ -136,7 +145,7 @@ func ExportBusinessObjectsForDevice(ctx context.Context, database *store.Store, 
 		return nil, err
 	}
 	for _, binding := range bindings {
-		if channelProjects[binding.ProjectID] {
+		if excludedProjects[binding.ProjectID] {
 			continue
 		}
 		if err := add(TypeKnowledgeBinding, binding.LibraryID, timeVersion(binding.UpdatedAt), binding); err != nil {
@@ -148,7 +157,7 @@ func ExportBusinessObjectsForDevice(ctx context.Context, database *store.Store, 
 		return nil, err
 	}
 	addProposal := func(v domain.KnowledgeProposal) error {
-		if channelProjects[v.Proposed.ProjectID] {
+		if excludedProjects[v.Proposed.ProjectID] {
 			return nil
 		}
 		v.SourceTaskID, v.SourceTurnID = "", ""
@@ -181,7 +190,7 @@ func ExportBusinessObjectsForDevice(ctx context.Context, database *store.Store, 
 		return nil, err
 	}
 	for _, v := range sortKnowledgeEntriesForSync(knowledge) {
-		if channelProjects[v.ProjectID] {
+		if excludedProjects[v.ProjectID] {
 			continue
 		}
 		v.SourceTaskID = ""
@@ -203,7 +212,7 @@ func ExportBusinessObjectsForDevice(ctx context.Context, database *store.Store, 
 		return nil, err
 	}
 	for _, v := range skills {
-		if channelProjects[v.ProjectID] {
+		if excludedProjects[v.ProjectID] {
 			continue
 		}
 		project, projectErr := database.Project(ctx, v.ProjectID)
@@ -316,6 +325,11 @@ func registerBusinessHandlers(engine *Engine, database *store.Store, localDevice
 	for _, kind := range []string{TypeProject, TypeProductLine, TypeWorkspace, TypeTask, TypeTaskAgent, TypeRound, TypeTurn, TypeConversation, TypeTaskMemory, TypeHardware, TypeKnowledgeBinding, TypeKnowledgeProposal, TypeKnowledge, TypeSkill, TypeProvider, TypeModel, TypeEnvGroup, TypePromptOverride} {
 		objectType := kind
 		engine.Register(objectType, func(ctx context.Context, obj domain.SyncObject) error {
+			// Pet data is device-local. Older peers may still push its graph;
+			// ignore those objects so a migrated device cannot recreate mirrors.
+			if skipSystemManagedSyncObject(ctx, database, objectType, obj) {
+				return nil
+			}
 			if localDeviceID != "" && objectType != TypeProject && isTaskGraphType(objectType) {
 				if obj.Operation == "delete" && (objectType == TypeTask || objectType == TypeWorkspace) {
 					ownerDeviceID, _, _ := strings.Cut(obj.ID, ":")
@@ -341,6 +355,52 @@ func isTaskGraphType(kind string) bool {
 	switch kind {
 	case TypeProject, TypeWorkspace, TypeTask, TypeTaskAgent, TypeRound, TypeTurn, TypeConversation, TypeTaskMemory, TypeHardware:
 		return true
+	default:
+		return false
+	}
+}
+
+// Pet IDs are fixed system identifiers. A device-local pet project/workspace/
+// task must never be created, updated, or deleted by Profile Sync, including
+// when an older peer still exports those objects.
+func isPetSyncObjectID(id string) bool {
+	for _, petID := range []string{"project_pet", "workspace_pet", "task_pet"} {
+		if id == petID || strings.HasSuffix(id, ":"+petID) || strings.Contains(id, ":"+petID+":") {
+			return true
+		}
+	}
+	return false
+}
+
+func skipSystemManagedSyncObject(ctx context.Context, database *store.Store, kind string, obj domain.SyncObject) bool {
+	if isPetSyncObjectID(obj.ID) {
+		return true
+	}
+	switch kind {
+	case TypeProject:
+		if obj.Operation == "delete" {
+			project, err := database.Project(ctx, obj.ID)
+			return err == nil && domain.IsSystemManagedProject(project)
+		}
+		var envelope graphEnvelope
+		if decodePayload(obj, &envelope) == nil && len(envelope.Value) > 0 {
+			var project domain.Project
+			if json.Unmarshal(envelope.Value, &project) == nil {
+				return domain.IsSystemManagedProject(project)
+			}
+		}
+		var project domain.Project
+		if decodePayload(obj, &project) != nil {
+			return false
+		}
+		return domain.IsSystemManagedProject(project)
+	case TypeWorkspace, TypeTask, TypeTaskAgent, TypeRound, TypeTurn, TypeConversation, TypeTaskMemory, TypeHardware:
+		var envelope graphEnvelope
+		if decodePayload(obj, &envelope) != nil || envelope.ProjectID == "" {
+			return false
+		}
+		project, err := database.Project(ctx, envelope.ProjectID)
+		return err == nil && domain.IsSystemManagedProject(project)
 	default:
 		return false
 	}

@@ -2445,7 +2445,7 @@ func (s *Service) continueFinishedChannelTask(ctx context.Context, instance doma
 			Filesystem: filesystemOf(previous.PermissionsJSON), Approval: approvalOf(previous.PermissionsJSON),
 			ProxyEnabled: previous.ProxyEnabled, CollaborationMode: finished.CollaborationMode,
 			MaxAgents: finished.MaxAgents, KnowledgePolicy: finished.KnowledgePolicy,
-			SkillIDs: finished.SkillIDs,
+			SkillIDs: finished.SkillIDs, AllowSystemProject: true,
 		})
 		if err != nil {
 			return domain.Task{}, fmt.Errorf("continuation task: %w", err)
@@ -2622,7 +2622,7 @@ func (s *Service) ensureConversation(ctx context.Context, instance domain.Channe
 		Backend: runtimeChoice.Model.Backend, ModelSource: runtimeChoice.Model.Source, ModelID: runtimeChoice.Model.ID, WireModel: runtimeChoice.WireModel,
 		CodexAccountID: runtimeChoice.CodexAccountID, ProxyEnabled: runtimeChoice.ProxyEnabled,
 		ReasoningEffort: runtimeChoice.ReasoningEffort, Filesystem: "read-only", Approval: "never",
-		CollaborationMode: "single", MaxAgents: 1, KnowledgePolicy: "enabled",
+		CollaborationMode: "single", MaxAgents: 1, KnowledgePolicy: "enabled", AllowSystemProject: true,
 	})
 	if err != nil {
 		return domain.ChannelConversation{}, fmt.Errorf("channel runtime task: %w", err)

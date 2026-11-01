@@ -953,9 +953,6 @@ dd { margin: 3px 0 0; overflow-wrap: anywhere; font-size: 11px; }
 .channel-instance-settings form, .channel-runtime-editor { display: grid; gap: 10px; }
 .channel-instance-settings fieldset { margin: 0; padding: 10px; border: 1px solid var(--line); border-radius: 6px; }
 .channel-instance-settings legend { padding: 0 6px; color: var(--muted); font-size: 10px; font-weight: 700; }
-.task-clone-source { display: grid; gap: 8px; margin: 0; padding: 10px; border: 1px solid var(--line); border-radius: 6px; }
-.task-clone-source legend { padding: 0 6px; color: var(--muted); font-size: 10px; font-weight: 700; }
-.task-clone-source > label, .task-clone-source .field-help { margin: 0; }
 .channel-checkbox-list { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 7px 12px; max-height: 220px; overflow: auto; }
 .channel-checkbox-list .channel-check.disabled { opacity: .45; }
 .channel-batch-toolbar { display: flex; gap: 6px; }

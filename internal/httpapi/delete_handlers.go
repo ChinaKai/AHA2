@@ -113,6 +113,18 @@ func (s *Server) deleteWorkspace(writer http.ResponseWriter, request *http.Reque
 		writeJSON(writer, http.StatusForbidden, map[string]any{"ok": false, "error": "workspace_read_only", "message": "该 Workspace 属于其他设备，不能在本机删除"})
 		return
 	}
+	project, projectErr := s.store.Project(request.Context(), item.ProjectID)
+	if projectErr != nil {
+		writeError(writer, http.StatusNotFound, "project_not_found")
+		return
+	}
+	if domain.IsSystemManagedWorkspace(item, project) {
+		writeJSON(writer, http.StatusForbidden, map[string]any{
+			"ok": false, "error": "system_workspace_read_only",
+			"message": "系统托管的 Workspace 只读，请在对应的宠物或渠道页面管理",
+		})
+		return
+	}
 	tasks, _ := s.store.ListTasks(request.Context(), "")
 	var active []string
 	for _, task := range tasks {
@@ -169,8 +181,16 @@ func (s *Server) deleteProject(writer http.ResponseWriter, request *http.Request
 		writeJSON(writer, http.StatusConflict, map[string]any{"ok": false, "error": "managed_channel_resource", "message": "渠道宿主 Project 只能在渠道管理流程中删除"})
 		return
 	}
-	if _, err := s.store.Project(request.Context(), id); err != nil {
+	existing, err := s.store.Project(request.Context(), id)
+	if err != nil {
 		writeError(writer, http.StatusNotFound, "project_not_found")
+		return
+	}
+	if domain.IsSystemManagedProject(existing) {
+		writeJSON(writer, http.StatusForbidden, map[string]any{
+			"ok": false, "error": "system_project_read_only",
+			"message": "系统托管的项目只读，请在对应的宠物或渠道页面管理",
+		})
 		return
 	}
 	tasks, _ := s.store.ListTasks(request.Context(), "")

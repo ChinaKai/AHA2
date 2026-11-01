@@ -135,6 +135,23 @@ type Project struct {
 	UpdatedAt          time.Time `json:"updated_at"`
 }
 
+// IsSystemManagedProject reports whether AHA owns the project lifecycle. The
+// pet project and channel host projects are system-managed; their Projects and
+// Workspaces are visible to the owner but must not be edited or used as the
+// target of a normal Task.
+func IsSystemManagedProject(project Project) bool {
+	switch project.ProjectType {
+	case "system", "channel":
+		return true
+	default:
+		return false
+	}
+}
+
+func IsSystemManagedWorkspace(workspace Workspace, project Project) bool {
+	return IsSystemManagedProject(project)
+}
+
 type KnowledgeLibrary struct {
 	ID                 string    `json:"id"`
 	ContainerProjectID string    `json:"container_project_id"`

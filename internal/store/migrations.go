@@ -3276,5 +3276,37 @@ func (s *Store) migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(106, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
 		return fmt.Errorf("record schema v106: %w", err)
 	}
+	// Pet data is device-local. Newer live databases may already be at v110,
+	// so the local mirror cleanup starts at v111 rather than reusing v107.
+	var hasV111 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=111)`).Scan(&hasV111)
+	if !hasV111 {
+		for _, statement := range []string{
+			`DELETE FROM sync_remote_task_objects
+			 WHERE project_id='project_pet'
+			    OR task_id='task_pet'
+			    OR object_id='task_pet'
+			    OR json_extract(payload_json,'$.workspace_id') IN (
+			         SELECT id FROM workspaces WHERE project_id='project_pet' AND read_only=1
+			       )`,
+			`DELETE FROM runtime_config_snapshots
+			 WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id='project_pet' AND read_only=1)
+			   AND NOT EXISTS(SELECT 1 FROM tasks WHERE tasks.runtime_config_snapshot_id=runtime_config_snapshots.id)
+			   AND NOT EXISTS(SELECT 1 FROM task_agents WHERE task_agents.runtime_config_snapshot_id=runtime_config_snapshots.id)
+			   AND NOT EXISTS(SELECT 1 FROM turns WHERE turns.runtime_config_snapshot_id=runtime_config_snapshots.id)`,
+			`DELETE FROM workspaces
+			 WHERE project_id='project_pet' AND read_only=1
+			   AND NOT EXISTS(SELECT 1 FROM tasks WHERE tasks.workspace_id=workspaces.id)
+			   AND NOT EXISTS(SELECT 1 FROM backend_sessions WHERE backend_sessions.workspace_id=workspaces.id)
+			   AND NOT EXISTS(SELECT 1 FROM runtime_config_snapshots WHERE runtime_config_snapshots.workspace_id=workspaces.id)`,
+		} {
+			if _, err := s.db.ExecContext(ctx, statement); err != nil {
+				return fmt.Errorf("apply schema v111: %w", err)
+			}
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(111, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v111: %w", err)
+	}
 	return nil
 }

@@ -112,6 +112,13 @@ func (s *Server) updateProject(writer http.ResponseWriter, request *http.Request
 		writeError(writer, http.StatusNotFound, "project_not_found")
 		return
 	}
+	if domain.IsSystemManagedProject(existing) {
+		writeJSON(writer, http.StatusForbidden, map[string]any{
+			"ok": false, "error": "system_project_read_only",
+			"message": "系统托管的项目只读，请在对应的宠物或渠道页面管理",
+		})
+		return
+	}
 	var payload struct {
 		Name               string `json:"name"`
 		Description        string `json:"description"`
@@ -190,8 +197,16 @@ func (s *Server) createWorkspace(writer http.ResponseWriter, request *http.Reque
 		writeError(writer, http.StatusBadRequest, "invalid_json")
 		return
 	}
-	if _, err := s.store.Project(request.Context(), payload.ProjectID); err != nil {
+	project, err := s.store.Project(request.Context(), payload.ProjectID)
+	if err != nil {
 		writeError(writer, http.StatusBadRequest, "project_not_found")
+		return
+	}
+	if domain.IsSystemManagedProject(project) {
+		writeJSON(writer, http.StatusForbidden, map[string]any{
+			"ok": false, "error": "system_project_read_only",
+			"message": "系统托管的项目不能添加 Workspace",
+		})
 		return
 	}
 	if s.rejectRetiredChannelProjectWrite(writer, request, payload.ProjectID) {
@@ -270,6 +285,18 @@ func (s *Server) updateWorkspace(writer http.ResponseWriter, request *http.Reque
 	}
 	if existing.ReadOnly {
 		writeJSON(writer, http.StatusForbidden, map[string]any{"ok": false, "error": "workspace_read_only", "message": "该 Workspace 属于其他设备，只能查看"})
+		return
+	}
+	project, projectErr := s.store.Project(request.Context(), existing.ProjectID)
+	if projectErr != nil {
+		writeError(writer, http.StatusNotFound, "project_not_found")
+		return
+	}
+	if domain.IsSystemManagedWorkspace(existing, project) {
+		writeJSON(writer, http.StatusForbidden, map[string]any{
+			"ok": false, "error": "system_workspace_read_only",
+			"message": "系统托管的 Workspace 只读，请在对应的宠物或渠道页面管理",
+		})
 		return
 	}
 	var payload struct {

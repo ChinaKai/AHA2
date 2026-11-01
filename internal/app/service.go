@@ -261,6 +261,10 @@ type CreateTaskInput struct {
 	AgentCapabilities   map[string]bool
 	MCPServerIDs        []string
 	StartMode           string
+	// AllowSystemProject is reserved for trusted AHA services (channel runtime
+	// and pet system task) that create Tasks inside system-managed projects.
+	// It is never set from a user/agent HTTP payload.
+	AllowSystemProject bool
 }
 
 func NewService(database *store.Store, secretStore *secrets.FileStore, executor Executor) *Service {
@@ -354,6 +358,9 @@ func (s *Service) CreateTask(ctx context.Context, input CreateTaskInput) (domain
 	}
 	if workspace.ProjectID != project.ID {
 		return domain.Task{}, fmt.Errorf("workspace does not belong to project")
+	}
+	if domain.IsSystemManagedProject(project) && !input.AllowSystemProject {
+		return domain.Task{}, fmt.Errorf("系统托管的项目不允许创建普通任务")
 	}
 	isolation := strings.TrimSpace(input.Isolation)
 	worktreeDir := strings.TrimSpace(input.WorktreeDir)
