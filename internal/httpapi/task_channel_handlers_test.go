@@ -163,7 +163,7 @@ func TestTaskChannelRouteAPI(t *testing.T) {
 		}
 	}
 	if participant.DisplayName != "张三" ||
-		currentBot.DisplayName != "AHA-WORK" || !currentBot.IsSelf {
+		currentBot.DisplayName != "飞书应用原名" || !currentBot.IsSelf {
 		t.Fatalf("channel members=%#v", routeState.Members)
 	}
 	if err := database.UpdateChannelInstanceHealth(ctx, instance.ID, "ready", "", now.Add(time.Second), map[string]string{
@@ -177,14 +177,12 @@ func TestTaskChannelRouteAPI(t *testing.T) {
 	response = requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/tasks/"+task.ID+"/channel-routes", nil, "")
 	decodeResponse(t, response, &routeState)
 	for _, member := range routeState.Members {
-		if member.IsSelf && member.DisplayName != "AHA-WORK" {
-			t.Fatalf("runtime health overwrote bot display name: %#v", routeState.Members)
+		if member.IsSelf && member.DisplayName != "飞书应用新名称" {
+			t.Fatalf("runtime health did not refresh bot display name: %#v", routeState.Members)
 		}
 	}
 	storedInstance, err := database.ChannelInstance(ctx, instance.ID)
-	if err != nil ||
-		storedInstance.Config["runtime_bot_display_name_override"] != "AHA-WORK" ||
-		storedInstance.Config["runtime_bot_provider_display_name"] != "飞书应用新名称" {
+	if err != nil || storedInstance.Config["runtime_bot_provider_display_name"] != "飞书应用新名称" {
 		t.Fatalf("bot display name config=%#v err=%v", storedInstance.Config, err)
 	}
 	bot, err := database.UpsertChannelParticipant(ctx, domain.ChannelIdentityLink{

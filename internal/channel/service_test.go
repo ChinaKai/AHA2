@@ -135,8 +135,10 @@ func TestDiscoverAndCreateInstanceIsOptionalAndIdempotent(t *testing.T) {
 	if err != nil || second.ID != first.ID {
 		t.Fatalf("idempotent result=%#v err=%v", second, err)
 	}
-	if stringField(first.Config, "operation_scope_mode") != "all" {
-		t.Fatalf("new channel operation scope=%#v", first.Config)
+	for _, key := range []string{"group_operation_scope_mode", "group_allowed_project_ids", "group_allowed_workspace_ids"} {
+		if _, present := first.Config[key]; present {
+			t.Fatalf("new channel instance kept obsolete scope key %q: %#v", key, first.Config)
+		}
 	}
 	if _, err := service.CreateInstance(ctx, owner.ID, "feishu", "另一个名字", "request-1"); err == nil {
 		t.Fatal("reused idempotency key accepted different payload")
@@ -477,23 +479,6 @@ func TestMenuControlPayloadsUseStructuredForms(t *testing.T) {
 	}
 }
 
-func TestChannelOperationScopeDefaultsAllAndPreservesLegacyRestrictions(t *testing.T) {
-	t.Parallel()
-	projectID, workspaceID := "project", "workspace"
-	if !channelOperationAllowed(map[string]any{"operation_scope_mode": "all", "allowed_project_ids": []string{}, "allowed_workspace_ids": []string{}}, projectID, workspaceID) {
-		t.Fatal("explicit all scope was restricted by stale lists")
-	}
-	selected := map[string]any{"operation_scope_mode": "selected", "allowed_project_ids": []string{projectID}, "allowed_workspace_ids": []string{workspaceID}}
-	if !channelOperationAllowed(selected, projectID, workspaceID) || channelOperationAllowed(selected, "other", workspaceID) {
-		t.Fatal("selected scope did not enforce both allowlists")
-	}
-	legacy := map[string]any{"allowed_project_ids": []string{projectID}, "allowed_workspace_ids": []string{workspaceID}}
-	projectsRestricted, workspacesRestricted := channelOperationRestrictions(legacy)
-	if !projectsRestricted || !workspacesRestricted || !channelOperationAllowed(legacy, projectID, workspaceID) {
-		t.Fatal("legacy allowlists did not remain restricted")
-	}
-}
-
 func mapValueForTest(value any) map[string]any {
 	result, _ := value.(map[string]any)
 	return result
@@ -689,26 +674,61 @@ func TestInboundOwnerAndGroupScopesAreServerEnforcedAndIdempotent(t *testing.T) 
 	if !knowledgeEntryPresent(allowedKnowledge, externalKnowledgeRoot.ID) {
 		t.Fatal("new channel knowledge scope did not default to all")
 	}
+	// A legacy selected DM policy must no longer restrict the private chat.
+	storePolicies, err := database.ChannelKnowledgePolicies(ctx, instance.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, policy := range storePolicies {
+		if stringField(policy, "endpoint") != domain.ChannelEndpointAssistantDM {
+			continue
+		}
+		if err := database.ReplaceChannelKnowledgeGrants(ctx, instance.ID, domain.ChannelEndpointAssistantDM, owner.ID, "selected", intField(policy, "revision"), nil, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	allowedKnowledge, err = database.ChannelAllowedKnowledge(ctx, instance.ID, domain.ChannelEndpointAssistantDM, conversation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !knowledgeEntryPresent(allowedKnowledge, externalKnowledgeRoot.ID) {
+		t.Fatal("legacy selected DM knowledge policy restricted the private chat")
+	}
 	ownerPolicies, err := service.OwnerKnowledgePolicies(ctx, owner.ID, instance.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
+	groupRevision := 0
 	for _, policy := range ownerPolicies {
-		if stringField(policy, "endpoint") != endpoint.Kind {
-			continue
+		if stringField(policy, "endpoint") == domain.ChannelEndpointAssistantDM {
+			t.Fatal("private chat knowledge policy was exposed to the owner API")
 		}
-		ownerPolicies, err = service.ReplaceOwnerKnowledgeGrants(ctx, owner.ID, instance.ID, endpoint.Kind, "selected", intField(policy, "revision"), nil)
-		if err != nil || len(ownerPolicies) != 2 {
-			t.Fatalf("restrict knowledge policy=%#v err=%v", ownerPolicies, err)
+		if stringField(policy, "endpoint") == domain.ChannelEndpointGroupDigitalHuman {
+			groupRevision = intField(policy, "revision")
 		}
-		break
 	}
-	allowedKnowledge, err = database.ChannelAllowedKnowledge(ctx, instance.ID, endpoint.Kind, conversation.ID)
+	if groupRevision == 0 {
+		t.Fatal("group knowledge policy was not created")
+	}
+	if _, err := service.ReplaceOwnerKnowledgeGrants(ctx, owner.ID, instance.ID, domain.ChannelEndpointAssistantDM, "selected", 0, nil); err == nil {
+		t.Fatal("private chat knowledge scope was configurable")
+	}
+	allowedKnowledge, err = database.ChannelAllowedKnowledge(ctx, instance.ID, domain.ChannelEndpointAssistantDM, conversation.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if knowledgeEntryPresent(allowedKnowledge, externalKnowledgeRoot.ID) {
-		t.Fatal("selected knowledge scope ignored empty grants")
+	if !knowledgeEntryPresent(allowedKnowledge, externalKnowledgeRoot.ID) {
+		t.Fatal("private chat knowledge access was not global")
+	}
+	if _, err := service.ReplaceOwnerKnowledgeGrants(ctx, owner.ID, instance.ID, domain.ChannelEndpointGroupDigitalHuman, "selected", groupRevision, nil); err != nil {
+		t.Fatal(err)
+	}
+	groupKnowledge, err := database.ChannelAllowedKnowledge(ctx, instance.ID, domain.ChannelEndpointGroupDigitalHuman, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if knowledgeEntryPresent(groupKnowledge, externalKnowledgeRoot.ID) {
+		t.Fatal("group selected knowledge scope ignored empty grants")
 	}
 	regularWorkspace := domain.Workspace{ID: "regular-workspace", ProjectID: regularProject.ID, Name: "Regular", Locality: "local", Transport: "native", RootPath: dataDir, Health: "ready", CreatedAt: now, UpdatedAt: now, AgentAPIMode: "global", AgentAPIStatus: "unknown"}
 	if err := database.CreateWorkspace(ctx, regularWorkspace); err != nil {
@@ -1066,6 +1086,21 @@ func TestInboundOwnerAndGroupScopesAreServerEnforcedAndIdempotent(t *testing.T) 
 	if strings.Contains(prompt, "owner-open") || strings.Contains(prompt, "chat-owner") {
 		t.Fatal("raw provider identity leaked into prompt")
 	}
+
+	summaries, err := service.OwnerConversationSummaries(ctx, owner.ID, instance.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kinds := map[string]bool{}
+	for _, summary := range summaries {
+		kinds[summary.EndpointKind] = true
+		if summary.InboundCount == 0 || summary.LastInboundState == "" {
+			t.Fatalf("conversation summary missing inbound activity: %#v", summary)
+		}
+	}
+	if !kinds[domain.ChannelEndpointAssistantDM] || !kinds[domain.ChannelEndpointGroupDigitalHuman] {
+		t.Fatalf("conversation summaries did not include both endpoints: %#v", summaries)
+	}
 }
 
 func knowledgeEntryPresent(entries []domain.KnowledgeEntry, id string) bool {
@@ -1077,9 +1112,10 @@ func knowledgeEntryPresent(entries []domain.KnowledgeEntry, id string) bool {
 	return false
 }
 
-// A Task that already completed must not swallow the next private or group
-// message. The conversation continues in a new Task that carries the same
-// owner-chosen Runtime Snapshot, and the message is delivered to it.
+// The continuation helper must keep a finished Task from swallowing a
+// redelivery, and it still serves a completed channel-host Task. Production
+// workers normally release a routed Task's channel as soon as it is terminal;
+// this fixture exercises the helper directly without starting that worker.
 func TestCompletedChannelTaskContinuesInNewTask(t *testing.T) {
 	ctx := context.Background()
 	dataDir := t.TempDir()
@@ -1197,6 +1233,9 @@ func TestCompletedChannelTaskContinuesInNewTask(t *testing.T) {
 	if continuation.Status != domain.TaskActive {
 		t.Fatalf("continuation status=%s", continuation.Status)
 	}
+	if legacyID := stableID("task", "channel-continuation", target.ID); continuation.ID == legacyID {
+		t.Fatalf("continuation reused the legacy per-finished-task slot: %s", continuation.ID)
+	}
 	// The continuation carries the finished Task's owner-chosen runtime settings
 	// into an equivalent snapshot instead of re-resolving a channel default.
 	targetSnapshot, err := database.RuntimeSnapshot(ctx, target.RuntimeConfigSnapshotID)
@@ -1240,5 +1279,73 @@ func TestCompletedChannelTaskContinuesInNewTask(t *testing.T) {
 	}
 	if len(tasks) != 2 {
 		t.Fatalf("continuation was not idempotent: %#v", tasks)
+	}
+
+	// A model can be deleted after the predecessor finished. The continuation
+	// must fall back to a current channel runtime instead of dropping the next
+	// message with "continuation model is unavailable".
+	fallbackEnv := domain.EnvGroup{ID: "env-continue-fallback", Name: "Fallback", ProviderID: provider.ID, Backend: "stub", Revision: 1, Environment: map[string]string{}, SecretRefs: map[string]string{}, CreatedAt: now, UpdatedAt: now}
+	if err := database.UpsertEnvGroup(ctx, fallbackEnv); err != nil {
+		t.Fatal(err)
+	}
+	fallbackModel := domain.Model{ID: "model-continue-fallback", DisplayName: "Fallback", ProviderID: provider.ID, Source: "provider", Backend: "stub", WireModel: "stub-fallback", DefaultEnvGroupID: fallbackEnv.ID, CreatedAt: now, UpdatedAt: now}
+	if err := database.UpsertModel(ctx, fallbackModel); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.DeleteModel(ctx, model.ID); err != nil {
+		t.Fatal(err)
+	}
+	currentContinuation, err := database.Task(ctx, continuation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completionTime := time.Now().UTC().Format(time.RFC3339Nano)
+	if err := database.UpdateTaskStatus(ctx, continuation.ID, currentContinuation.Status, domain.TaskCompleted, completionTime, completionTime); err != nil {
+		t.Fatal(err)
+	}
+	next.RequestID, next.ExternalEventID, next.ExternalMessageID, next.Content = "req-3", "event-3", "message-3", "fallback please"
+	if _, _, err := service.ReceiveInbound(ctx, claims, next); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.processInboundBatch(ctx); err != nil {
+		t.Fatal(err)
+	}
+	route, err = database.ActiveChannelTaskRoute(ctx, conversation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fallbackContinuation, err := database.Task(ctx, route.TargetTaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fallbackContinuation.ID == continuation.ID || fallbackContinuation.Status != domain.TaskActive {
+		t.Fatalf("fallback continuation=%#v", fallbackContinuation)
+	}
+	fallbackSnapshot, err := database.RuntimeSnapshot(ctx, fallbackContinuation.RuntimeConfigSnapshotID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fallbackSnapshot.ModelID != fallbackModel.ID || fallbackSnapshot.WireModel != fallbackModel.WireModel {
+		t.Fatalf("fallback snapshot=%#v", fallbackSnapshot)
+	}
+	if fallbackSnapshot.PermissionsJSON != continuationSnapshot.PermissionsJSON {
+		t.Fatalf("fallback lost predecessor permissions: %#v", fallbackSnapshot)
+	}
+
+	// A routed Task reaching completed/cancelled must release the conversation
+	// so the next message returns to the channel's own default Task.
+	currentFallback, err := database.Task(ctx, fallbackContinuation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	terminalTime := time.Now().UTC().Format(time.RFC3339Nano)
+	if err := database.UpdateTaskStatus(ctx, fallbackContinuation.ID, currentFallback.Status, domain.TaskCompleted, terminalTime, terminalTime); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.reconcileTerminalTaskRoutes(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.ActiveChannelTaskRoute(ctx, conversation.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("terminal task kept the channel route: %v", err)
 	}
 }

@@ -10,14 +10,8 @@ const (
 	ChannelEndpointGroupDigitalHuman = "group_digital_human"
 )
 
-const (
-	DefaultChannelBotDialogueMaxTurns = 99
-	MaxChannelBotDialogueMaxTurns     = 99
-)
-
 func ChannelBotDisplayName(config map[string]any, fallback string) string {
 	for _, key := range []string{
-		"runtime_bot_display_name_override",
 		"runtime_bot_provider_display_name",
 		"runtime_bot_display_name",
 	} {
@@ -34,28 +28,6 @@ func ChannelBotDisplayName(config map[string]any, fallback string) string {
 func stringValue(value any) string {
 	typed, _ := value.(string)
 	return typed
-}
-
-func ChannelBotDialogueMaxTurns(config map[string]any) int {
-	value, ok := config["bot_dialogue_max_turns"]
-	if !ok {
-		return DefaultChannelBotDialogueMaxTurns
-	}
-	switch typed := value.(type) {
-	case int:
-		if typed > 0 && typed <= MaxChannelBotDialogueMaxTurns {
-			return typed
-		}
-	case int64:
-		if typed > 0 && typed <= MaxChannelBotDialogueMaxTurns {
-			return int(typed)
-		}
-	case float64:
-		if typed > 0 && typed <= MaxChannelBotDialogueMaxTurns {
-			return int(typed)
-		}
-	}
-	return DefaultChannelBotDialogueMaxTurns
 }
 
 type ChannelPlugin struct {
@@ -350,6 +322,24 @@ type ChannelSourceEvent struct {
 	EventType          string         `json:"event_type"`
 	SemanticPayload    map[string]any `json:"semantic_payload"`
 	OccurredAt         time.Time      `json:"occurred_at"`
+}
+
+type ChannelConversationSummary struct {
+	ID                 string `json:"id"`
+	EndpointKind       string `json:"endpoint_kind"`
+	DisplayName        string `json:"display_name"`
+	Status             string `json:"status"`
+	BoundTaskID        string `json:"bound_task_id,omitempty"`
+	BoundTaskCode      string `json:"bound_task_code,omitempty"`
+	BoundTaskTitle     string `json:"bound_task_title,omitempty"`
+	InboundCount       int    `json:"inbound_count"`
+	OutboundCount      int    `json:"outbound_count"`
+	LastInboundAt      string `json:"last_inbound_at,omitempty"`
+	LastInboundState   string `json:"last_inbound_state,omitempty"`
+	LastInboundOutcome string `json:"last_inbound_outcome,omitempty"`
+	LastOutboundAt     string `json:"last_outbound_at,omitempty"`
+	LastOutboundState  string `json:"last_outbound_state,omitempty"`
+	LastOutboundError  string `json:"last_outbound_error,omitempty"`
 }
 
 type ChannelDelivery struct {

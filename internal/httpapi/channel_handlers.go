@@ -449,6 +449,20 @@ func (s *Server) skipChannelDelivery(writer http.ResponseWriter, request *http.R
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true})
 }
 
+func (s *Server) channelConversationSummaries(writer http.ResponseWriter, request *http.Request) {
+	if s.channels == nil {
+		writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "conversations": []any{}})
+		return
+	}
+	session, _ := sessionFromContext(request.Context())
+	items, err := s.channels.OwnerConversationSummaries(request.Context(), session.OwnerID, request.PathValue("id"))
+	if err != nil {
+		writeChannelError(writer, err, "get_channel_conversations_failed")
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "conversations": items})
+}
+
 func (s *Server) channelKnowledgePolicy(writer http.ResponseWriter, request *http.Request) {
 	if s.channels == nil {
 		writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "policies": []any{}})

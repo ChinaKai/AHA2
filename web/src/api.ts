@@ -7,6 +7,7 @@ import type {
   CodexAccount,
   CodexLogin,
   ChannelContact,
+  ChannelConversationSummary,
   ChannelDestination,
   ChannelGroupMember,
   ChannelEndpoint,
@@ -321,6 +322,10 @@ class APIClient {
 
   cancelChannelOnboarding(id: string): Promise<{onboarding: ChannelOnboardingSession}> {
     return this.request(`/api/v1/channel-onboarding-sessions/${encodeURIComponent(id)}/cancel`, {method: "POST", body: "{}"});
+  }
+
+  channelConversations(id: string): Promise<{conversations: ChannelConversationSummary[]}> {
+    return this.request(`/api/v1/channel-instances/${encodeURIComponent(id)}/conversations`);
   }
 
   channelHandoffs(id: string): Promise<{handoffs: ChannelHandoff[]}> {

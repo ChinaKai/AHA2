@@ -13,9 +13,8 @@ import (
 )
 
 var (
-	ErrChannelBotDialogueEnded    = errors.New("bot dialogue reply is blocked by an end decision")
-	ErrChannelBotDialogueMaxTurns = errors.New("bot dialogue reached its maximum turns")
-	ErrChannelReplyEnded          = errors.New("channel reply is blocked by an end decision")
+	ErrChannelBotDialogueEnded = errors.New("bot dialogue reply is blocked by an end decision")
+	ErrChannelReplyEnded       = errors.New("channel reply is blocked by an end decision")
 )
 
 func (s *Store) CreateChannelCapability(ctx context.Context, item domain.ChannelServiceCapability) error {
@@ -839,9 +838,6 @@ func (s *Store) EnqueueAgentChannelReply(
 		}
 		if state.isBot && state.decision == "end" {
 			return domain.ChannelDelivery{}, "", false, ErrChannelBotDialogueEnded
-		}
-		if state.isBot && state.turnCount > state.maxTurns {
-			return domain.ChannelDelivery{}, "", false, ErrChannelBotDialogueMaxTurns
 		}
 		if state.isBot && state.decision == "" {
 			if _, err := tx.ExecContext(ctx, `

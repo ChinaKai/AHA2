@@ -249,36 +249,46 @@ test("channel lifecycle renders active and retired actions with guarded purge", 
   const active = module.renderChannels([], [instance], context);
   assert.match(active, /data-channel-reset-binding="channel-1"/);
   assert.match(active, /data-channel-archive="channel-1"/);
+  assert.match(active, /data-channel-settings-open="channel-1"/);
+  assert.match(active, /data-channel-conversations-open="channel-1"/);
+  assert.match(active, />设置</);
+  assert.match(active, />会话</);
   assert.match(active, /更新权限/);
   assert.match(active, /权限更新仅做增量授权/);
   assert.match(active, /AHA 运行时菜单可独立勾选/);
-  assert.match(active, /Runtime、通知与访问范围/);
-  assert.match(active, /机器人显示名称/);
-  assert.match(active, /runtime_bot_display_name_override/);
-  assert.match(active, /name="bot_dialogue_max_turns"[^>]*max="99"[^>]*value="99"/);
-  // The card is scan-only: the manual App ID/Secret form is gone, while the App
-  // ID stays visible as read-only text.
+  assert.doesNotMatch(active, /data-channel-activity|data-channel-knowledge="|Owner 收件箱与投递|机器人显示名称|runtime_bot_display_name_override/);
   assert.doesNotMatch(active, /data-channel-credentials/);
   assert.match(active, /<dt>App ID<\/dt>/);
-  // Scan, reset and archive share one equal-width row.
   assert.match(active, /channel-instance-actions/);
-  assert.match(styles, /\.channel-instance-actions \{[^}]*grid-template-columns:\s*repeat\(3,minmax\(0,1fr\)\)/);
-  // Knowledge scope is an access-control setting, not part of the delivery fold.
-  assert.match(active, /data-channel-knowledge="channel-1"/);
-  assert.doesNotMatch(active, /Knowledge allowlist/);
-  assert.doesNotMatch(active, /人工整理并共享/);
-  assert.doesNotMatch(active, /channel-record-promote/);
+  assert.match(styles, /\.channel-instance-actions \{[^}]*grid-template-columns:\s*repeat\(auto-fit,minmax\(86px,1fr\)\)/);
+  assert.doesNotMatch(active, /人工整理并共享|channel-record-promote/);
 
-  // A config saved by the older two-control UI can carry inherit:true next to a
-  // stale model_id. It has to render as "inherit", otherwise merely opening and
-  // saving the form would turn a stale leftover into a real runtime override.
-  const legacy = module.renderChannels([], [{...instance, config: {
+  const combinedContext = {
+    ...context,
+    models: [
+      {id: "model-codex", display_name: "GPT-5", provider_name: "Codex", source: "official", backend: "codex", wire_model: "gpt-5", provider_id: "official"},
+      {id: "model-provider", display_name: "Claude", provider_name: "Provider", source: "provider", backend: "claude", wire_model: "claude", provider_id: "provider"},
+    ],
+    accounts: [
+      {id: "account-a", label: "账号 A", status: "ready", credential_configured: true, available_models: [{wire_model: "gpt-5", display_name: "GPT-5"}]},
+      {id: "account-b", label: "账号 B", status: "ready", credential_configured: true, available_models: [{wire_model: "gpt-5", display_name: "GPT-5"}]},
+    ],
+  };
+  const combinedSelect = module.channelRuntimeOptions({runtime_default: {model_id: "model-codex", codex_account_id: "account-b"}}, combinedContext);
+  assert.match(combinedSelect, /自动选择可用模型/);
+  assert.match(combinedSelect, /Codex \/ GPT-5/);
+  assert.match(combinedSelect, /Provider \/ Claude/);
+  assert.match(combinedSelect, /账号 A/);
+  assert.match(combinedSelect, /data-codex-account-id="account-b" selected/);
+  assert.equal((combinedSelect.match(/ selected/g) || []).length, 1);
+
+  const legacySelect = module.channelRuntimeOptions({
+    runtime_default: {model_id: "", codex_account_id: ""},
     runtime_assistant_dm: {inherit: true, model_id: "model_stale", codex_account_id: "acct_stale"},
-  }}], context);
-  const assistantSelect = legacy.match(/<select name="assistant_model_id">[\s\S]*?<\/select>/)?.[0] || "";
-  assert.ok(assistantSelect, "assistant runtime select must render");
-  assert.match(assistantSelect, /value="" selected/, "inherit:true must select the inherit option");
-  assert.doesNotMatch(assistantSelect, /model_stale/, "a stale model must not stay selected beside inherit:true");
+    runtime_group_digital_human: {model_id: "model_stale"},
+  }, context);
+  assert.doesNotMatch(legacySelect, /model_stale|assistant_model_id|group_model_id/);
+  assert.match(legacySelect, /自动选择可用模型/);
 
   const retired = module.renderChannels([], [{...instance, status: "retired"}], context);
   for (const marker of ["已归档", "data-channel-view", "data-channel-export", "data-channel-purge", "永久删除"]) assert.match(retired, new RegExp(marker));
@@ -300,6 +310,15 @@ test("channel lifecycle renders active and retired actions with guarded purge", 
   assert.match(source, /已开启权限不能在扫码中撤销/);
   assert.match(source, /resetChannelRuntimeMenus/);
   assert.match(source, /重置菜单/);
+  assert.match(source, /openChannelSettings/);
+  assert.match(source, /openChannelConversations/);
+  assert.match(source, /api\.channelConversations/);
+  assert.match(source, /channel-conversation-card/);
+  assert.match(source, /绑定任务/);
+  assert.match(source, /最近入站/);
+  assert.match(source, /最近出站/);
+  assert.doesNotMatch(source, /data-channel-activity|data-channel-knowledge="|Owner 收件箱与投递/);
+  assert.doesNotMatch(source, /runtime_bot_display_name_override|机器人显示名称|data-channel-settings="/);
   const originalFetch = globalThis.fetch;
   const originalWindow = globalThis.window;
   let refreshed = 0;
@@ -907,12 +926,12 @@ test("built web contains responsive application", async () => {
   assert.match(script, /data-view="prompts"/);
   assert.match(script, /data-view="sync"/);
   assert.match(script, /data-view="advanced">\$\{t\("common\.backAdvanced"\)\}/);
-  assert.match(script, /const mobileNav = \[[\s\S]{0,100}\.\.\.nav\.slice\(0, 6\)[\s\S]{0,100}"advanced"[\s\S]{0,40}"settings"[\s\S]{0,40}"nav\.advanced"/);
+  assert.match(script, /const mobileNav = \[[\s\S]{0,160}\.\.\.nav,[\s\S]{0,160}"advanced",[\s\S]{0,80}"nav\.advanced"/);
   assert.match(script, /<nav class="bottom-nav">\$\{mobileNav\.map/);
   assert.match(script, /data-view="proxy">\$\{t\("advanced\.proxy\.action"\)\}/);
   assert.doesNotMatch(script, /\["prompts",\s*"bot",\s*"提示词"\]/);
   assert.doesNotMatch(script, /\["sync",\s*"sync",/);
-  assert.match(css, /\.bottom-nav \{[^}]*grid-template-columns:\s*repeat\(7,1fr\)/);
+  assert.match(css, /\.bottom-nav \{[^}]*grid-template-columns:\s*repeat\(8,1fr\)/);
   assert.match(script, /"channels",\s*"bot",\s*"nav\.channels"/);
 	assert.match(script, /renderChannels\(state\.channelProviders, state\.channelInstances,/);
   assert.match(api, /api\/v1\/channel-providers/);
@@ -924,14 +943,20 @@ test("built web contains responsive application", async () => {
   assert.doesNotMatch(channels, /name="channel_runtime_menu"/);
   assert.match(channels, /data-reset-runtime-menus/);
   assert.match(api, /runtime-menus\/reset/);
+  assert.match(api, /channel-instances\/.*\/conversations/);
   assert.match(channels, /权限更新仅做增量授权/);
   assert.doesNotMatch(channels, /name="app_secret" type="password"/);
-  assert.match(channels, /data-delivery-replay/);
-  assert.match(channels, /Owner 收件箱与投递/);
-	for (const marker of ["Runtime、通知与访问范围", "runtime_bot_display_name_override", "机器人显示名称", "allowed_project_ids", "allowed_workspace_ids", "notify_task_status", "普通 Task 状态变更推送到飞书私聊助手", "knowledge_entry_id"]) assert.match(channels, new RegExp(marker));
-	for (const marker of ["data-channel-project-scope", "data-channel-workspace-option", "data-channel-policy-select-all", "data-channel-policy-clear"]) assert.match(channels, new RegExp(marker));
-	assert.match(channels, /selectedProjects\.has/);
-	for (const marker of ["operation_scope_mode", "knowledge_scope_mode", "data-channel-operation-selected", "data-channel-knowledge-selected", "全部 Project \/ Workspace", "全部项目知识与知识库"]) assert.match(channels, new RegExp(marker));
+	for (const marker of ["渠道设置", "channel_runtime", "notify_task_status", "普通 Task 状态变更推送到飞书私聊助手", "knowledge_entry_id"]) assert.match(channels, new RegExp(marker));
+	for (const marker of ["data-channel-settings-open", "data-channel-conversations-open", "channelConversations", "channel-conversation-card", "绑定任务", "最近入站", "最近出站"] ) assert.match(channels, new RegExp(marker));
+	for (const marker of ["data-channel-policy-select-all", "data-channel-policy-clear", "knowledge_scope_mode", "data-channel-knowledge-selected", "全部项目知识与知识库"]) assert.match(channels, new RegExp(marker));
+	assert.match(channels, /私聊默认全部/);
+	assert.match(channels, /policy\.endpoint === "group_digital_human"/);
+	assert.doesNotMatch(channels, /group_operation_scope_mode|group_allowed_project_ids|group_allowed_workspace_ids/);
+	assert.doesNotMatch(channels, /name="operation_scope_mode"|name="allowed_project_ids"|name="allowed_workspace_ids"/);
+	assert.doesNotMatch(channels, /data-channel-activity|Owner 收件箱与投递/);
+	assert.doesNotMatch(channels, /runtime_bot_display_name_override|机器人显示名称/);
+	assert.match(channels, /runtime_assistant_dm:\s*\{[\s\S]{0,40}inherit: true/);
+	assert.match(channels, /runtime_group_digital_human:\s*\{[\s\S]{0,40}inherit: true/);
 	assert.match(channels, /channel_revision_conflict/);
 	assert.match(channels, /渠道设置已被其他更新修改/);
 	assert.match(channels, /扫码更新飞书权限/);
@@ -2280,9 +2305,30 @@ test("advanced settings expose access scope and listen address", async () => {
 test("advanced settings cards use the same details action label", async () => {
   const root = resolve(import.meta.dirname, "..");
   const i18n = await readFile(resolve(root, "src", "i18n.ts"), "utf8");
-  const actions = [...i18n.matchAll(/"advanced\.(prompts|sync|proxy|hardware|pet|data|mcp|other)\.action": "([^"]+)"/g)].map(match => match[2]);
-  assert.equal(actions.length, 16);
+  const actions = [...i18n.matchAll(/"advanced\.(prompts|sync|proxy|data|mcp|other)\.action": "([^"]+)"/g)].map(match => match[2]);
+  assert.equal(actions.length, 12);
   assert.deepEqual([...new Set(actions)].sort(), ["View details", "查看详情"]);
+});
+
+test("sidebar pages are not duplicated as advanced settings entries", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const main = await readFile(resolve(root, "src", "main.ts"), "utf8");
+  const cards = [...main.matchAll(/<article class="panel advanced-tool-card">[^\n]*?data-view="([^"]+)"/g)].map(match => match[1]);
+  assert.deepEqual(cards.sort(), ["data", "mcp", "other", "prompts", "proxy", "sync"]);
+  assert.match(main, /hardware: \(\) => shell\(renderHardwareResources\(state\.hardwareResources\)\)/);
+  assert.match(main, /"pet-diary": \(\) => shell\(petDiaryView\(\)\)/);
+  assert.doesNotMatch(main, /(?:hardware|"pet-diary"): \(\) => advancedSubview/);
+});
+
+test("sidebar and mobile navigation expose pet workbench and hardware", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const main = await readFile(resolve(root, "src", "main.ts"), "utf8");
+  const i18n = await readFile(resolve(root, "src", "i18n.ts"), "utf8");
+  assert.match(main, /\["hardware", "hardware", "nav\.hardware"\]/);
+  assert.match(main, /\["pet-diary", "bot", "petWorkbench\.title"\]/);
+  assert.match(main, /const mobileNav = \[\.\.\.nav, \["advanced", "settings", "nav\.advanced"\] as const\]/);
+  assert.match(i18n, /"petWorkbench\.title": "宠物工作台"/);
+  assert.match(i18n, /"petWorkbench\.title": "Pet workbench"/);
 });
 
 test("completed tasks freeze the composer behind a confirmed reopen", async () => {

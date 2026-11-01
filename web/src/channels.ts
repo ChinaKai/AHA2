@@ -1,6 +1,6 @@
 import {api} from "./api.js";
 import {icon} from "./icons.js";
-import type {ChannelInstance, ChannelOnboardingOptions, ChannelOnboardingSession, ChannelPlugin, CodexAccount, Knowledge, KnowledgeLibrary, Model, Project, Workspace} from "./types.js";
+import type {ChannelConversationSummary, ChannelInstance, ChannelOnboardingOptions, ChannelOnboardingSession, ChannelPlugin, CodexAccount, Knowledge, KnowledgeLibrary, Model, Project, Workspace} from "./types.js";
 
 interface ChannelUIContext {
 	models: Model[];
@@ -110,38 +110,197 @@ export async function exportRetiredChannelInstance(instanceID: string): Promise<
 	window.setTimeout(() => URL.revokeObjectURL(blobURL), 0);
 }
 
-function runtimeEditor(prefix: string, title: string, config: Record<string, unknown>, context: ChannelUIContext, allowInherit: boolean): string {
-	// A saved config may carry inherit:true alongside a stale model_id from the
-	// era of the separate checkbox. It must render as "inherit", not as that
-	// stale choice, or saving the form would silently promote it to an override.
-	const modelID = config.inherit === true ? "" : String(config.model_id || "");
-	const accountID = config.inherit === true ? "" : String(config.codex_account_id || "");
-	const models = context.models.map(model => `<option value="${escapeHTML(model.id)}" ${model.id === modelID ? "selected" : ""}>${escapeHTML(model.display_name)} · ${escapeHTML(model.backend)}${model.source === "official" ? " · 官方" : ""}</option>`).join("");
-	const accounts = context.accounts.filter(item => item.status === "ready" && item.credential_configured).map(item => `<option value="${escapeHTML(item.id)}" ${item.id === accountID ? "selected" : ""}>${escapeHTML(item.label)}</option>`).join("");
-	// Inheritance is expressed once, by the empty option of the model select: a
-	// second "inherit" checkbox that silently overrode that select made the two
-	// controls disagree. Leaving the select empty is the inherit signal.
-	return `<fieldset class="channel-runtime-editor"><legend>${escapeHTML(title)}</legend><label>Backend / Model<select name="${prefix}_model_id"><option value="" ${modelID === "" ? "selected" : ""}>${allowInherit ? "继承实例默认 Runtime" : "自动继承最近有效 Runtime"}</option>${models}</select></label><label>官方 Codex 账号<select name="${prefix}_codex_account_id"><option value="">自动选择就绪账号 / Provider Env</option>${accounts}</select></label></fieldset>`;
+function runtimeModelLabel(model: Model): string {
+  return escapeHTML([model.provider_name, model.display_name].filter(Boolean).join(" / ") || model.id);
 }
 
-function instanceSettings(instance: ChannelInstance, context: ChannelUIContext): string {
-	const config = objectValue(instance.config);
-	const normalProjects = context.projects.filter(project => !["channel", "knowledge"].includes(project.project_type || ""));
-	const normalWorkspaces = context.workspaces.filter(workspace => !workspace.read_only && normalProjects.some(project => project.id === workspace.project_id));
-	const legacyOperationRestricted = Array.isArray(config.allowed_project_ids) || Array.isArray(config.allowed_workspace_ids);
-	const operationScopeMode = config.operation_scope_mode === "all" ? "all" : config.operation_scope_mode === "selected" || legacyOperationRestricted ? "selected" : "all";
-	const projectIDs = new Set(stringList(config, "allowed_project_ids", normalProjects.map(item => item.id)));
-	const workspaceIDs = new Set(stringList(config, "allowed_workspace_ids", normalWorkspaces.map(item => item.id)));
-	const projectChecks = normalProjects.map(project => `<label class="channel-check"><input type="checkbox" name="allowed_project_ids" data-channel-project-scope value="${escapeHTML(project.id)}" ${projectIDs.has(project.id) ? "checked" : ""}>${escapeHTML(project.name)}</label>`).join("");
-	const workspaceChecks = normalWorkspaces.map(workspace => {
-		const project = normalProjects.find(item => item.id === workspace.project_id);
-		const projectSelected = projectIDs.has(workspace.project_id);
-		return `<label class="channel-check" data-channel-workspace-option data-project-id="${escapeHTML(workspace.project_id)}"><input type="checkbox" name="allowed_workspace_ids" value="${escapeHTML(workspace.id)}" ${workspaceIDs.has(workspace.id) ? "checked" : ""} ${projectSelected ? "" : "disabled"}>${escapeHTML(project?.name || "-")} / ${escapeHTML(workspace.name)}</label>`;
-	}).join("");
-	const botDialogueMaxTurns = Number(config.bot_dialogue_max_turns || 99);
-	const botDisplayName = String(config.runtime_bot_display_name_override || config.runtime_bot_display_name || "");
-	const providerBotDisplayName = String(config.runtime_bot_provider_display_name || "");
-	return `<details class="channel-instance-settings"><summary>Runtime、通知与访问范围</summary><form data-channel-settings="${escapeHTML(instance.id)}" data-revision="${instance.revision}">${runtimeEditor("default", "实例默认 Runtime", objectValue(config.runtime_default), context, false)}<details class="channel-runtime-overrides"><summary>私聊与群聊分别设置 Runtime</summary>${runtimeEditor("assistant", "私聊助手", objectValue(config.runtime_assistant_dm), context, true)}${runtimeEditor("group", "群聊电子人", objectValue(config.runtime_group_digital_human), context, true)}</details><fieldset><legend>机器人身份与对话</legend><label>机器人显示名称<input name="runtime_bot_display_name_override" maxlength="60" value="${escapeHTML(botDisplayName)}" placeholder="${escapeHTML(providerBotDisplayName || instance.name)}"></label><small>本地名称保存后不会被飞书应用名称或群内观察结果覆盖；留空时跟随飞书当前名称。</small><label>最大连续对话轮数<input name="bot_dialogue_max_turns" type="number" min="1" max="99" step="1" value="${Number.isFinite(botDialogueMaxTurns) ? botDialogueMaxTurns : 99}" required></label><small>仅限制群聊中由机器人发送者触发的连续回复；真人发送者不受此限制。</small></fieldset><fieldset><legend>消息通知</legend><label class="channel-check"><input type="checkbox" name="notify_task_status" ${config.notify_task_status === true ? "checked" : ""}>普通 Task 状态变更推送到飞书私聊助手</label><small>仅推送等待处理、完成、失败或中断等状态；不会推送普通消息、过程输出或渠道宿主 Task。</small></fieldset><fieldset><legend>私聊操作范围</legend><label>范围模式<select name="operation_scope_mode"><option value="all" ${operationScopeMode === "all" ? "selected" : ""}>全部 Project / Workspace</option><option value="selected" ${operationScopeMode === "selected" || legacyOperationRestricted ? "selected" : ""}>限制到所选范围</option></select></label><small>默认全部；渠道宿主、知识库项目和只读 Workspace 仍由服务端排除。</small></fieldset><div data-channel-operation-selected ${operationScopeMode === "all" ? "hidden" : ""}><fieldset><legend>私聊操作范围 · Project</legend><div class="channel-checkbox-list">${projectChecks || "<small>暂无可选项目</small>"}</div></fieldset><fieldset><legend>私聊操作范围 · Workspace</legend><small>先选择 Project，随后仅可选择该 Project 下的 Workspace。</small><div class="channel-checkbox-list">${workspaceChecks || "<small>暂无可选 Workspace</small>"}</div></fieldset></div><button class="primary" type="submit">保存渠道设置</button></form></details>`;
+function codexAccountSupportsModel(account: CodexAccount, model: Model): boolean {
+  const available = account.available_models || [];
+  return available.length === 0 || available.some(item => item.wire_model === model.wire_model);
+}
+
+export function channelRuntimeOptions(config: Record<string, unknown>, context: ChannelUIContext): string {
+  const runtime = objectValue(config.runtime_default);
+  const modelID = String(runtime.model_id || "");
+  const accountID = String(runtime.codex_account_id || "");
+  const options = [`<option value="" data-model-id="" data-codex-account-id="" ${modelID ? "" : "selected"}>自动选择可用模型</option>`];
+  let selected = !modelID;
+  const accounts = context.accounts.filter(item => item.status === "ready" && item.credential_configured);
+  for (const model of context.models) {
+    const label = runtimeModelLabel(model);
+    if (model.source === "official") {
+      const compatible = accounts.filter(account => codexAccountSupportsModel(account, model));
+      if (!compatible.length) {
+        options.push(`<option value="${escapeHTML(model.id)}" disabled>${label} · 无就绪 Codex 账号</option>`);
+        continue;
+      }
+      for (const account of compatible) {
+        const isSelected = model.id === modelID && account.id === accountID;
+        if (isSelected) selected = true;
+        options.push(`<option value="${escapeHTML(model.id)}" data-model-id="${escapeHTML(model.id)}" data-codex-account-id="${escapeHTML(account.id)}" ${isSelected ? "selected" : ""}>${label} · ${escapeHTML(account.label)}</option>`);
+      }
+      continue;
+    }
+    const isSelected = model.id === modelID;
+    if (isSelected) selected = true;
+    options.push(`<option value="${escapeHTML(model.id)}" data-model-id="${escapeHTML(model.id)}" data-codex-account-id="" ${isSelected ? "selected" : ""}>${label}</option>`);
+  }
+  if (modelID && !selected) {
+    const model = context.models.find(item => item.id === modelID);
+    const label = model ? runtimeModelLabel(model) : escapeHTML(modelID);
+    options.push(`<option value="${escapeHTML(modelID)}" data-model-id="${escapeHTML(modelID)}" data-codex-account-id="${escapeHTML(accountID)}" selected>${label} · 当前配置不可用</option>`);
+  }
+  return options.join("");
+}
+
+function channelRuntimeEditor(config: Record<string, unknown>, context: ChannelUIContext): string {
+  return `<fieldset class="channel-runtime-editor"><legend>运行模型</legend><label>模型与执行账号<select name="channel_runtime">${channelRuntimeOptions(config, context)}</select></label><small>私聊和群聊共用。官方 Codex 模型会同时指定账号。</small></fieldset>`;
+}
+
+function channelKnowledgeSources(context: ChannelUIContext): Array<{label: string; root: string}> {
+  const rootByProject = new Map(context.knowledgeIndexes.map(entry => [entry.project_id, entry.id]));
+  const projectSources = context.projects
+    .filter(project => !["channel", "knowledge"].includes(project.project_type || ""))
+    .map(project => ({label: `项目知识 · ${project.name}`, root: rootByProject.get(project.id) || ""}))
+    .filter(item => item.root);
+  const librarySources = context.libraries
+    .map(library => ({label: `知识库 · ${library.name}`, root: rootByProject.get(library.container_project_id) || ""}))
+    .filter(item => item.root);
+  return [...projectSources, ...librarySources];
+}
+
+function formatChannelTime(value?: string): string {
+  if (!value) return "—";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+}
+
+function bindChannelKnowledgeScope(container: HTMLElement): void {
+  const mode = container.querySelector<HTMLSelectElement>('select[name="knowledge_scope_mode"]');
+  const selected = container.querySelector<HTMLElement>("[data-channel-knowledge-selected]");
+  const setAll = (checked: boolean) => container.querySelectorAll<HTMLInputElement>('input[name="knowledge_entry_id"]').forEach(input => { input.checked = checked; });
+  container.querySelector<HTMLElement>("[data-channel-policy-select-all]")?.addEventListener("click", () => setAll(true));
+  container.querySelector<HTMLElement>("[data-channel-policy-clear]")?.addEventListener("click", () => setAll(false));
+  const syncMode = () => { if (selected) selected.hidden = mode?.value !== "selected"; };
+  mode?.addEventListener("change", syncMode);
+  syncMode();
+}
+
+function openChannelSettings(instance: ChannelInstance, context: ChannelUIContext, uiOptions: {refresh: () => Promise<void>; setMessage: (kind: "error" | "success", message: string) => void}): void {
+  document.querySelector("#channel-settings-dialog")?.remove();
+  const config = objectValue(instance.config);
+  const dialog = document.createElement("dialog");
+  dialog.id = "channel-settings-dialog";
+  dialog.className = "channel-settings-dialog";
+  dialog.innerHTML = `<div class="dialog-head"><div><h2>渠道设置</h2><p>${escapeHTML(instance.name)}</p></div><button type="button" class="icon-button" data-close>${icon("close")}</button></div>
+    <div class="dialog-body">
+      ${channelRuntimeEditor(config, context)}
+      <fieldset><legend>消息通知</legend><label class="channel-check"><input type="checkbox" name="notify_task_status" ${config.notify_task_status === true ? "checked" : ""}>普通 Task 状态变更推送到飞书私聊助手</label><small>仅推送等待处理、完成、失败或中断等状态；不会推送普通消息、过程输出或渠道宿主 Task。</small></fieldset>
+      <section class="channel-settings-knowledge"><div class="panel-head"><strong>Knowledge 访问范围</strong><span>私聊默认全部；此处只限制群聊电子人</span></div><div data-channel-settings-knowledge><small>加载中…</small></div></section>
+    </div>
+    <div class="dialog-actions"><button type="button" data-close>取消</button><button type="button" class="primary" data-save>保存设置</button></div>`;
+  document.body.append(dialog);
+  dialog.showModal();
+  const close = () => { dialog.close(); dialog.remove(); };
+  dialog.querySelectorAll("[data-close]").forEach(button => button.addEventListener("click", close));
+  dialog.addEventListener("cancel", event => { event.preventDefault(); close(); });
+  const knowledgeHost = dialog.querySelector<HTMLElement>("[data-channel-settings-knowledge]");
+  const saveButton = dialog.querySelector<HTMLButtonElement>("[data-save]");
+  void api.channelKnowledgePolicies(instance.id).then(policies => {
+    if (!dialog.isConnected || !knowledgeHost) return;
+    const groupPolicy = policies.policies.find(policy => policy.endpoint === "group_digital_human");
+    if (!groupPolicy) {
+      knowledgeHost.innerHTML = `<small>暂无群聊 Knowledge 策略。</small>`;
+      return;
+    }
+    const sources = channelKnowledgeSources(context);
+    const granted = new Set((groupPolicy.grants || []).map(grant => grant.knowledge_entry_id));
+    const scopeMode = groupPolicy.scope_mode === "all" ? "all" : "selected";
+    const choices = sources.map(source => `<label class="channel-check"><input type="checkbox" name="knowledge_entry_id" value="${escapeHTML(source.root)}" ${granted.has(source.root) ? "checked" : ""}>${escapeHTML(source.label)}</label>`).join("");
+    knowledgeHost.innerHTML = `<div data-channel-settings-policy data-revision="${groupPolicy.revision}"><label>范围模式<select name="knowledge_scope_mode"><option value="all" ${scopeMode === "all" ? "selected" : ""}>全部项目知识与知识库</option><option value="selected" ${scopeMode === "selected" ? "selected" : ""}>限制到所选知识源</option></select></label><div data-channel-knowledge-selected ${scopeMode === "all" ? "hidden" : ""}><div class="channel-batch-toolbar"><button type="button" data-channel-policy-select-all>全选</button><button type="button" data-channel-policy-clear>清空</button></div><div class="channel-checkbox-list">${choices || "<small>暂无可选知识源</small>"}</div></div><small>固定渠道索引始终可读。</small></div>`;
+    const policyContainer = knowledgeHost.querySelector<HTMLElement>("[data-channel-settings-policy]");
+    if (policyContainer) bindChannelKnowledgeScope(policyContainer);
+  }).catch(error => {
+    if (knowledgeHost) knowledgeHost.textContent = error instanceof Error ? error.message : String(error);
+  });
+  saveButton?.addEventListener("click", () => {
+    void (async () => {
+      const runtimeOption = dialog.querySelector<HTMLSelectElement>('select[name="channel_runtime"]')?.selectedOptions[0];
+      const configUpdate = {
+        runtime_default: {
+          model_id: runtimeOption?.dataset.modelId || "",
+          codex_account_id: runtimeOption?.dataset.codexAccountId || "",
+        },
+        runtime_assistant_dm: {inherit: true},
+        runtime_group_digital_human: {inherit: true},
+        notify_task_status: Boolean(dialog.querySelector<HTMLInputElement>('input[name="notify_task_status"]')?.checked),
+      };
+      if (saveButton) saveButton.disabled = true;
+      try {
+        await api.updateChannelInstance(instance.id, {config: configUpdate}, instance.revision);
+        const policy = dialog.querySelector<HTMLElement>("[data-channel-settings-policy]");
+        if (policy) {
+          const mode = policy.querySelector<HTMLSelectElement>('select[name="knowledge_scope_mode"]')?.value === "selected" ? "selected" : "all";
+          const grants = [...policy.querySelectorAll<HTMLInputElement>('input[name="knowledge_entry_id"]:checked')].map(input => ({knowledge_entry_id: input.value, grant_scope: "subtree"}));
+          await api.updateChannelKnowledgePolicy(instance.id, "group_digital_human", mode, Number(policy.dataset.revision || 0), grants);
+        }
+        close();
+        uiOptions.setMessage("success", "渠道设置已保存。");
+        await uiOptions.refresh();
+      } catch (error) {
+        uiOptions.setMessage("error", channelErrorMessage(error));
+        refreshAfterChannelConflict(error, uiOptions.refresh);
+        if (saveButton) saveButton.disabled = false;
+      }
+    })();
+  });
+}
+
+function conversationBoundTask(item: ChannelConversationSummary): string {
+  if (!item.bound_task_id) return "未绑定";
+  return [item.bound_task_code, item.bound_task_title].filter(Boolean).join(" · ") || item.bound_task_id;
+}
+
+function conversationCard(item: ChannelConversationSummary): string {
+  const kind = item.endpoint_kind === "group_digital_human" ? "群聊" : "私聊";
+  const inbound = item.last_inbound_state
+    ? `${item.last_inbound_state}${item.last_inbound_outcome ? ` · ${item.last_inbound_outcome}` : ""} · ${formatChannelTime(item.last_inbound_at)}`
+    : "暂无";
+  const outbound = item.last_outbound_state
+    ? `${item.last_outbound_state}${item.last_outbound_error ? ` · ${item.last_outbound_error}` : ""} · ${formatChannelTime(item.last_outbound_at)}`
+    : "暂无";
+  return `<article class="channel-conversation-card">
+    <header><strong>${escapeHTML(item.display_name || `${kind}会话`)}</strong><span class="status ${item.status === "active" ? "good" : "warn"}">${kind}</span></header>
+    <div class="channel-conversation-bound"><span>绑定任务</span><strong>${escapeHTML(conversationBoundTask(item))}</strong></div>
+    <div class="channel-conversation-counts"><span>入站 <b>${item.inbound_count}</b></span><span>出站 <b>${item.outbound_count}</b></span></div>
+    <small>最近入站：${escapeHTML(inbound)}</small>
+    <small>最近出站：${escapeHTML(outbound)}</small>
+  </article>`;
+}
+
+function openChannelConversations(instance: ChannelInstance, uiOptions: {setMessage: (kind: "error" | "success", message: string) => void}): void {
+  document.querySelector("#channel-conversations-dialog")?.remove();
+  const dialog = document.createElement("dialog");
+  dialog.id = "channel-conversations-dialog";
+  dialog.className = "channel-conversations-dialog";
+  dialog.innerHTML = `<div class="dialog-head"><div><h2>会话</h2><p>${escapeHTML(instance.name)} · 私聊与群聊</p></div><button type="button" class="icon-button" data-close>${icon("close")}</button></div><div class="dialog-body"><div data-conversations-body><small>加载中…</small></div></div><div class="dialog-actions"><button type="button" data-close>关闭</button></div>`;
+  document.body.append(dialog);
+  dialog.showModal();
+  const close = () => { dialog.close(); dialog.remove(); };
+  dialog.querySelectorAll("[data-close]").forEach(button => button.addEventListener("click", close));
+  dialog.addEventListener("cancel", event => { event.preventDefault(); close(); });
+  const body = dialog.querySelector<HTMLElement>("[data-conversations-body]");
+  if (!body) return;
+  void api.channelConversations(instance.id).then(result => {
+    if (!dialog.isConnected) return;
+    const direct = result.conversations.filter(item => item.endpoint_kind === "assistant_dm");
+    const groups = result.conversations.filter(item => item.endpoint_kind === "group_digital_human");
+    const section = (title: string, items: ChannelConversationSummary[]) => `<section class="channel-conversation-section"><header><strong>${title}</strong><span>${items.length}</span></header><div class="channel-conversation-grid">${items.map(conversationCard).join("") || `<small>暂无${title}</small>`}</div></section>`;
+    body.innerHTML = section("私聊", direct) + section("群聊", groups);
+  }).catch(error => {
+    body.textContent = error instanceof Error ? error.message : String(error);
+    uiOptions.setMessage("error", "会话列表加载失败。");
+  });
 }
 
 export function renderChannels(providers: ChannelPlugin[], instances: ChannelInstance[], context: ChannelUIContext): string {
@@ -153,25 +312,22 @@ export function renderChannels(providers: ChannelPlugin[], instances: ChannelIns
   </article>`).join("") : `<div class="empty channel-empty"><strong>无可用渠道提供方</strong><p>未安装渠道插件时，项目、任务和知识库仍可正常使用。</p></div>`;
   const instanceRows = instances.length ? instances.map(instance => {
 	const retired = instance.status === "retired";
-	const activity = `<details data-channel-activity="${escapeHTML(instance.id)}"><summary>${retired ? "查看归档记录" : "Owner 收件箱与投递"}</summary><div class="channel-activity"><small>展开后加载</small></div></details>`;
 	if (retired) return `<article class="channel-instance-card retired">
     <header><div><strong>${escapeHTML(instance.name)}</strong><small>${escapeHTML(instance.provider_key || instance.plugin_id)}</small></div><span class="status warn">${instanceState(instance)}</span></header>
     <p class="channel-retired-note">实例已归档，运行能力与本地凭据已移除；历史记录保持只读，飞书后台应用不会自动删除。</p>
     <div class="channel-retired-actions"><button type="button" data-channel-view="${escapeHTML(instance.id)}" data-project-id="${escapeHTML(instance.host_project_id)}">查看</button><button type="button" data-channel-export="${escapeHTML(instance.id)}">导出</button><button type="button" class="danger" data-channel-purge="${escapeHTML(instance.id)}" data-revision="${instance.revision}">永久删除</button></div>
-    ${activity}
   </article>`;
 	return `<article class="channel-instance-card">
     <header><div><strong>${escapeHTML(instance.name)}</strong><small>${escapeHTML(instance.provider_key || instance.plugin_id)}</small></div><span><span class="status ${instance.status === "ready" ? "good" : instance.status === "error" || instance.status === "degraded" ? "bad" : "warn"}">${instanceState(instance)}</span><button type="button" data-channel-instance-toggle="${escapeHTML(instance.id)}" data-enabled="${instance.status !== "disabled"}" data-revision="${instance.revision}">${instance.status === "disabled" ? "启用" : "停用"}</button></span></header>
     <dl><div><dt>凭据</dt><dd>${instance.credential_configured ? "已安全保存" : "未配置"}</dd></div><div><dt>App ID</dt><dd>${instance.app_id ? escapeHTML(instance.app_id) : "尚未创建"}</dd></div></dl>
     <div class="channel-instance-actions">
       <button type="button" class="primary" data-channel-onboard="${escapeHTML(instance.id)}">${!instance.owner_bound ? (instance.credential_configured ? "扫码确认唯一 Owner" : "扫码创建并绑定") : "更新权限"}</button>
+      <button type="button" data-channel-settings-open="${escapeHTML(instance.id)}">设置</button>
+      <button type="button" data-channel-conversations-open="${escapeHTML(instance.id)}">会话</button>
       <button type="button" data-channel-reset-binding="${escapeHTML(instance.id)}" data-revision="${instance.revision}">重置绑定</button>
       <button type="button" class="danger" data-channel-archive="${escapeHTML(instance.id)}" data-revision="${instance.revision}">归档实例</button>
     </div>
     ${instance.owner_bound ? `<small class="channel-instance-hint">权限更新仅做增量授权；AHA 运行时菜单可独立勾选，不修改飞书后台已有菜单。</small>` : ""}
-		${instanceSettings(instance, context)}
-    <details class="channel-instance-knowledge" data-channel-knowledge="${escapeHTML(instance.id)}"><summary>Knowledge 访问范围</summary><div class="channel-knowledge"><small>展开后加载</small></div></details>
-    ${activity}
   </article>`;
   }).join("") : `<div class="empty"><strong>尚未创建渠道实例</strong><p>每个实例独立绑定一个 Owner，并包含私聊助手与群聊电子人。</p></div>`;
   return `<section class="page channels-page">
@@ -244,16 +400,7 @@ export function bindChannels(options: {refresh: () => Promise<void>; setMessage:
 	}));
 	document.querySelectorAll<HTMLButtonElement>("[data-channel-view]").forEach(button => button.addEventListener("click", () => {
 		const projectID = button.dataset.projectId || "";
-		if (options.openProject && projectID) {
-			options.openProject(projectID);
-			return;
-		}
-		const card = button.closest<HTMLElement>(".channel-instance-card");
-		const details = card?.querySelector<HTMLDetailsElement>("[data-channel-activity]");
-		if (details) {
-			details.open = true;
-			details.scrollIntoView({block: "nearest"});
-		}
+		if (options.openProject && projectID) options.openProject(projectID);
 	}));
 	document.querySelectorAll<HTMLButtonElement>("[data-channel-export]").forEach(button => button.addEventListener("click", () => {
 		button.disabled = true;
@@ -281,120 +428,15 @@ export function bindChannels(options: {refresh: () => Promise<void>; setMessage:
 			button.disabled = false;
 		});
 	}));
-	document.querySelectorAll<HTMLFormElement>("[data-channel-settings]").forEach(settingsForm => settingsForm.addEventListener("submit", event => {
-		event.preventDefault();
-		const values = new FormData(settingsForm);
-		const runtime = (prefix: string, allowInherit: boolean) => {
-			const modelID = String(values.get(`${prefix}_model_id`) || "");
-			// An empty select is the whole inherit signal; there is no second control.
-			if (allowInherit && !modelID) return {inherit: true};
-			return {model_id: modelID, codex_account_id: String(values.get(`${prefix}_codex_account_id`) || "")};
-		};
-		const config = {
-			runtime_default: runtime("default", false),
-			runtime_assistant_dm: runtime("assistant", true),
-			runtime_group_digital_human: runtime("group", true),
-			operation_scope_mode: String(values.get("operation_scope_mode") || "all"),
-			allowed_project_ids: values.getAll("allowed_project_ids").map(String),
-			allowed_workspace_ids: values.getAll("allowed_workspace_ids").map(String),
-			notify_task_status: values.get("notify_task_status") === "on",
-			bot_dialogue_max_turns: Number(values.get("bot_dialogue_max_turns") || 99),
-			runtime_bot_display_name_override: String(values.get("runtime_bot_display_name_override") || "").trim(),
-		};
-		void api.updateChannelInstance(settingsForm.dataset.channelSettings || "", {config}, Number(settingsForm.dataset.revision || 0)).then(async () => {
-			options.setMessage("success", "渠道 Runtime、机器人身份、通知与访问范围已保存。");
-			await refresh();
-		}).catch(error => {
-			options.setMessage("error", channelErrorMessage(error));
-			refreshAfterChannelConflict(error, refresh);
-		});
+	document.querySelectorAll<HTMLButtonElement>("[data-channel-settings-open]").forEach(button => button.addEventListener("click", () => {
+		const instance = options.instances.find(item => item.id === button.dataset.channelSettingsOpen);
+		if (instance) openChannelSettings(instance, options.context, {refresh, setMessage: options.setMessage});
 	}));
-	document.querySelectorAll<HTMLFormElement>("[data-channel-settings]").forEach(settingsForm => {
-		const operationMode = settingsForm.querySelector<HTMLSelectElement>('select[name="operation_scope_mode"]');
-		const operationSelected = settingsForm.querySelector<HTMLElement>("[data-channel-operation-selected]");
-		const syncWorkspaceScope = () => {
-			const selectedProjects = new Set(Array.from(settingsForm.querySelectorAll<HTMLInputElement>('input[name="allowed_project_ids"]:checked')).map(input => input.value));
-			settingsForm.querySelectorAll<HTMLElement>("[data-channel-workspace-option]").forEach(option => {
-				const enabled = selectedProjects.has(option.dataset.projectId || "");
-				option.classList.toggle("disabled", !enabled);
-				const input = option.querySelector<HTMLInputElement>('input[name="allowed_workspace_ids"]');
-				if (input) input.disabled = !enabled;
-			});
-		};
-		settingsForm.querySelectorAll<HTMLInputElement>("[data-channel-project-scope]").forEach(input => input.addEventListener("change", syncWorkspaceScope));
-		const syncOperationMode = () => { if (operationSelected) operationSelected.hidden = operationMode?.value !== "selected"; };
-		operationMode?.addEventListener("change", syncOperationMode);
-		syncOperationMode();
-		syncWorkspaceScope();
-	});
-  document.querySelectorAll<HTMLDetailsElement>("[data-channel-activity]").forEach(details => details.addEventListener("toggle", () => {
-    if (!details.open || details.dataset.loaded === "true") return;
-    const instanceID = details.dataset.channelActivity || "";
-    const body = details.querySelector<HTMLElement>(".channel-activity");
-    if (!body) return;
-    body.innerHTML = `<small>加载中…</small>`;
-    void Promise.all([api.channelHandoffs(instanceID), api.channelDeliveries(instanceID)]).then(([handoffs, deliveries]) => {
-      const handoffRows = handoffs.handoffs.map(item => `<li><strong>${escapeHTML(item.summary)}</strong><small>${escapeHTML(item.state)}${item.created_task_id ? ` · Task ${escapeHTML(item.created_task_id)}` : ""}</small></li>`).join("");
-      const failed = deliveries.deliveries.filter(item => item.state === "dead_letter");
-      const deliveryRows = failed.map(item => `<li><strong>#${item.stream_sequence} · ${escapeHTML(item.last_error_code || "投递失败")}</strong><small>${item.attempts} 次 · ${escapeHTML(item.outcome_certainty || "unknown")}</small><span><button type="button" data-delivery-replay="${escapeHTML(item.id)}">重放</button><button type="button" data-delivery-skip="${escapeHTML(item.id)}">跳过</button></span></li>`).join("");
-      // Each block is omitted when it has nothing to show. Rendering a permanent
-      // "none" placeholder for both made this fold read as clutter while carrying
-      // no information at all on a healthy instance.
-      const sections = [
-        handoffs.handoffs.length ? `<h4>Handoff</h4><ul>${handoffRows}</ul>` : "",
-        failed.length ? `<h4>Dead letter</h4><ul>${deliveryRows}</ul>` : "",
-      ].filter(Boolean).join("");
-      body.innerHTML = sections || `<small>暂无转单记录与投递故障。</small>`;
-      details.dataset.loaded = "true";
-      body.querySelectorAll<HTMLButtonElement>("[data-delivery-replay]").forEach(button => button.addEventListener("click", () => void api.replayChannelDelivery(button.dataset.deliveryReplay || "").then(() => { details.dataset.loaded = "false"; details.open = false; details.open = true; }).catch(error => options.setMessage("error", String(error)))));
-      body.querySelectorAll<HTMLButtonElement>("[data-delivery-skip]").forEach(button => button.addEventListener("click", () => void api.skipChannelDelivery(button.dataset.deliverySkip || "").then(() => { details.dataset.loaded = "false"; details.open = false; details.open = true; }).catch(error => options.setMessage("error", String(error)))));
-    }).catch(error => { body.textContent = error instanceof Error ? error.message : String(error); });
-  }));
-  // Knowledge scope is an access-control setting, so it lives with the other
-  // settings rather than inside the runtime activity fold, where its title gave
-  // no hint that a permission lived there.
-  document.querySelectorAll<HTMLDetailsElement>("[data-channel-knowledge]").forEach(details => details.addEventListener("toggle", () => {
-    if (!details.open || details.dataset.loaded === "true") return;
-    const instanceID = details.dataset.channelKnowledge || "";
-    const body = details.querySelector<HTMLElement>(".channel-knowledge");
-    if (!body) return;
-    body.innerHTML = `<small>加载中…</small>`;
-    void api.channelKnowledgePolicies(instanceID).then(policies => {
-      // Keyed by project so a source is never missed: the list is every project
-      // with a verified root, not a recency-ordered page of entries.
-      const rootByProject = new Map(options.context.knowledgeIndexes.map(entry => [entry.project_id, entry.id]));
-      const projectSources = options.context.projects.filter(project => !["channel", "knowledge"].includes(project.project_type || "")).map(project => ({label: `项目知识 · ${project.name}`, root: rootByProject.get(project.id) || ""})).filter(item => item.root);
-      const librarySources = options.context.libraries.map(library => ({label: `知识库 · ${library.name}`, root: rootByProject.get(library.container_project_id) || ""})).filter(item => item.root);
-      const knowledgeSources = [...projectSources, ...librarySources];
-      body.innerHTML = policies.policies.map(policy => {
-        const granted = new Set(policy.grants.map(grant => grant.knowledge_entry_id));
-        const scopeMode = policy.scope_mode === "all" ? "all" : "selected";
-        const choices = knowledgeSources.map(source => `<label class="channel-check"><input type="checkbox" name="knowledge_entry_id" value="${escapeHTML(source.root)}" ${granted.has(source.root) ? "checked" : ""}>${escapeHTML(source.label)}</label>`).join("");
-        return `<form data-channel-policy="${escapeHTML(instanceID)}" data-endpoint="${escapeHTML(policy.endpoint)}" data-revision="${policy.revision}"><strong>${policy.endpoint === "group_digital_human" ? "群聊电子人" : "私聊助手"}</strong><small>固定渠道索引始终可读</small><label>Knowledge 范围<select name="knowledge_scope_mode"><option value="all" ${scopeMode === "all" ? "selected" : ""}>全部项目知识与知识库</option><option value="selected" ${scopeMode === "selected" ? "selected" : ""}>限制到所选知识源</option></select></label><div data-channel-knowledge-selected ${scopeMode === "all" ? "hidden" : ""}><div class="channel-batch-toolbar"><button type="button" data-channel-policy-select-all>全选</button><button type="button" data-channel-policy-clear>清空</button></div><div class="channel-checkbox-list">${choices || "<small>暂无可选知识源</small>"}</div></div><button type="submit">保存 Knowledge 范围</button></form>`;
-      }).join("") || `<small>暂无可配置的知识源。</small>`;
-      details.dataset.loaded = "true";
-      body.querySelectorAll<HTMLFormElement>("[data-channel-policy]").forEach(form => {
-        const mode = form.querySelector<HTMLSelectElement>('select[name="knowledge_scope_mode"]');
-        const selected = form.querySelector<HTMLElement>("[data-channel-knowledge-selected]");
-        const setAll = (checked: boolean) => form.querySelectorAll<HTMLInputElement>('input[name="knowledge_entry_id"]').forEach(input => { input.checked = checked; });
-        form.querySelector<HTMLElement>("[data-channel-policy-select-all]")?.addEventListener("click", () => setAll(true));
-        form.querySelector<HTMLElement>("[data-channel-policy-clear]")?.addEventListener("click", () => setAll(false));
-        const syncMode = () => { if (selected) selected.hidden = mode?.value !== "selected"; };
-        mode?.addEventListener("change", syncMode);
-        syncMode();
-        form.addEventListener("submit", event => {
-          event.preventDefault();
-          const values = new FormData(form);
-          const grants = values.getAll("knowledge_entry_id").map(value => ({knowledge_entry_id: String(value), grant_scope: "subtree"}));
-          const scopeMode = String(values.get("knowledge_scope_mode") || "all") as "all" | "selected";
-          void api.updateChannelKnowledgePolicy(form.dataset.channelPolicy || "", form.dataset.endpoint || "", scopeMode, Number(form.dataset.revision || 0), grants).then(() => { options.setMessage("success", "Knowledge 范围已更新。"); details.dataset.loaded = "false"; }).catch(error => {
-            options.setMessage("error", channelErrorMessage(error));
-            refreshAfterChannelConflict(error, options.refresh);
-          });
-        });
-      });
-    }).catch(error => { body.textContent = error instanceof Error ? error.message : String(error); });
-  }));
+	document.querySelectorAll<HTMLButtonElement>("[data-channel-conversations-open]").forEach(button => button.addEventListener("click", () => {
+		const instance = options.instances.find(item => item.id === button.dataset.channelConversationsOpen);
+		if (instance) openChannelConversations(instance, {setMessage: options.setMessage});
+	}));
+
 }
 
 let onboardingPoll = 0;

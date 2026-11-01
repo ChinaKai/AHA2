@@ -212,6 +212,14 @@ func (s *Store) ActivateOwnerChannelTaskRoute(ctx context.Context, instanceID, c
 }
 
 func (s *Store) ExitOwnerChannelTaskRoute(ctx context.Context, routeID, taskID string, at time.Time) error {
+	return s.exitChannelTaskRoute(ctx, routeID, taskID, "owner disconnected task channel", at)
+}
+
+func (s *Store) ExitTerminalChannelTaskRoute(ctx context.Context, routeID, taskID string, at time.Time) error {
+	return s.exitChannelTaskRoute(ctx, routeID, taskID, "task reached terminal state", at)
+}
+
+func (s *Store) exitChannelTaskRoute(ctx context.Context, routeID, taskID, reason string, at time.Time) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -223,10 +231,72 @@ func (s *Store) ExitOwnerChannelTaskRoute(ctx context.Context, routeID, taskID s
 	if err != nil {
 		return err
 	}
-	if err := exitChannelTaskRouteTx(ctx, tx, route, "owner disconnected task channel", at); err != nil {
+	if err := exitChannelTaskRouteTx(ctx, tx, route, reason, at); err != nil {
 		return err
 	}
 	return tx.Commit()
+}
+
+func (s *Store) TerminalChannelTaskRoutes(ctx context.Context) ([]domain.ChannelTaskRoute, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT route.id,route.instance_id,route.conversation_id,route.target_task_id,route.state,
+		       route.revision,route.pending_action_id,route.activated_at,route.exited_at,route.exit_reason
+		FROM channel_task_routes route
+		JOIN tasks task ON task.id=route.target_task_id
+		WHERE route.state='active' AND task.status IN (?,?)
+		ORDER BY route.id`, domain.TaskCompleted, domain.TaskCancelled)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	routes := []domain.ChannelTaskRoute{}
+	for rows.Next() {
+		route, err := scanChannelTaskRoute(rows)
+		if err != nil {
+			return nil, err
+		}
+		routes = append(routes, route)
+	}
+	return routes, rows.Err()
+}
+
+func (s *Store) ChannelConversationSummaries(ctx context.Context, ownerID, instanceID string) ([]domain.ChannelConversationSummary, error) {
+	destinations, err := s.ChannelDestinations(ctx, ownerID)
+	if err != nil {
+		return nil, err
+	}
+	result := []domain.ChannelConversationSummary{}
+	for _, destination := range destinations {
+		if destination.InstanceID != instanceID {
+			continue
+		}
+		summary := domain.ChannelConversationSummary{
+			ID: destination.ConversationID, EndpointKind: destination.EndpointKind,
+			DisplayName: destination.DisplayName, Status: destination.Status,
+			BoundTaskID: destination.TargetTaskID, BoundTaskCode: destination.TargetTaskCode,
+			BoundTaskTitle: destination.TargetTaskName,
+		}
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM channel_inbox_dedup WHERE conversation_id=?`, destination.ConversationID).Scan(&summary.InboundCount); err != nil {
+			return nil, err
+		}
+		var receivedAt string
+		if err := s.db.QueryRowContext(ctx, `SELECT state,outcome,received_at FROM channel_inbox_dedup WHERE conversation_id=? ORDER BY received_at DESC,id DESC LIMIT 1`, destination.ConversationID).Scan(&summary.LastInboundState, &summary.LastInboundOutcome, &receivedAt); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return nil, err
+		} else if err == nil {
+			summary.LastInboundAt = receivedAt
+		}
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM channel_delivery_outbox WHERE conversation_id=?`, destination.ConversationID).Scan(&summary.OutboundCount); err != nil {
+			return nil, err
+		}
+		var updatedAt string
+		if err := s.db.QueryRowContext(ctx, `SELECT state,last_error_code,updated_at FROM channel_delivery_outbox WHERE conversation_id=? ORDER BY updated_at DESC,id DESC LIMIT 1`, destination.ConversationID).Scan(&summary.LastOutboundState, &summary.LastOutboundError, &updatedAt); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return nil, err
+		} else if err == nil {
+			summary.LastOutboundAt = updatedAt
+		}
+		result = append(result, summary)
+	}
+	return result, nil
 }
 
 func (s *Store) ChannelRouteOwnedBy(ctx context.Context, routeID, ownerID string) (domain.ChannelTaskRoute, error) {

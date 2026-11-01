@@ -897,6 +897,24 @@ export interface ChannelDestination {
   updated_at: string;
 }
 
+export interface ChannelConversationSummary {
+  id: string;
+  endpoint_kind: "assistant_dm" | "group_digital_human";
+  display_name: string;
+  status: string;
+  bound_task_id?: string;
+  bound_task_code?: string;
+  bound_task_title?: string;
+  inbound_count: number;
+  outbound_count: number;
+  last_inbound_at?: string;
+  last_inbound_state?: string;
+  last_inbound_outcome?: string;
+  last_outbound_at?: string;
+  last_outbound_state?: string;
+  last_outbound_error?: string;
+}
+
 export interface ChannelContact {
   identity_link_id: string;
   display_name: string;

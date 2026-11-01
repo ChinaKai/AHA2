@@ -44,6 +44,11 @@ window.fetch = async (input, init = {}) => {
   if (path === "/api/v1/channel-providers") return json({providers: [{id: "feishu", provider_key: "feishu", display_name: "飞书", package_version: "1.1.3", install_state: "installed", enabled: true, available: true, revision: 1}]});
   if (path === "/api/v1/channel-instances") return json({instances: [instance()]});
   if (path === "/api/v1/channel-instances/channel-1/onboarding-options") return json({options});
+  if (path === "/api/v1/channel-instances/channel-1/knowledge-policy") return json({policies: [{id: "policy-1", endpoint: "group_digital_human", fixed_index_entry_id: "", scope_mode: "all", revision: 1, grants: []}]});
+  if (path === "/api/v1/channel-instances/channel-1/conversations") return json({conversations: [
+    {id: "dm-1", endpoint_kind: "assistant_dm", display_name: "Owner 私聊", status: "active", bound_task_id: "task-1", bound_task_code: "task-001", bound_task_title: "Task One", inbound_count: 3, outbound_count: 2, last_inbound_at: "2026-10-22T00:00:00Z", last_inbound_state: "processed", last_inbound_outcome: "delivered_to_task", last_outbound_at: "2026-10-22T00:00:01Z", last_outbound_state: "delivered"},
+    {id: "group-1", endpoint_kind: "group_digital_human", display_name: "研发群", status: "active", inbound_count: 5, outbound_count: 4, last_inbound_at: "2026-10-22T00:00:02Z", last_inbound_state: "processed", last_inbound_outcome: "delivered_to_task", last_outbound_at: "2026-10-22T00:00:03Z", last_outbound_state: "delivered"}
+  ]});
   if (path === "/api/v1/channel-instances/channel-1/runtime-menus/reset" && method === "POST") {
     window.__resetMenus = {revision: channelRevision};
     channelRevision++;
@@ -159,6 +164,30 @@ try {
   await page.waitForSelector("#channel-onboarding-setup[open]");
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
   await page.screenshot({path: resolve(output, "channel-onboarding-options-mobile.png")});
+  await page.locator("#channel-onboarding-setup [data-setup-close]").first().click();
+  await page.click('[data-channel-settings-open="channel-1"]');
+  await page.waitForSelector("#channel-settings-dialog[open]");
+  assert.equal(await page.locator("#channel-settings-dialog select[name=\"channel_runtime\"]").count(), 1);
+  assert.equal(await page.locator("#channel-settings-dialog input[name=\"runtime_bot_display_name_override\"]").count(), 0);
+  assert.match(await page.locator("#channel-settings-dialog").innerText(), /Knowledge 访问范围/);
+  await page.click("#channel-settings-dialog [data-save]");
+  await page.waitForSelector("#channel-settings-dialog", {state: "detached"});
+  const savedConfig = await page.evaluate(() => window.__patch?.config || {});
+  assert.ok(savedConfig.runtime_default);
+  assert.equal(Object.hasOwn(savedConfig, "runtime_bot_display_name_override"), false);
+  assert.equal(Object.hasOwn(savedConfig, "bot_dialogue_max_turns"), false);
+  await page.click('[data-channel-conversations-open="channel-1"]');
+  await page.waitForSelector("#channel-conversations-dialog[open]");
+  await page.waitForSelector("#channel-conversations-dialog .channel-conversation-card");
+  const conversationsText = await page.locator("#channel-conversations-dialog").innerText();
+  assert.match(conversationsText, /私聊/);
+  assert.match(conversationsText, /群聊/);
+  assert.match(conversationsText, /task-001/);
+  assert.match(conversationsText, /入站 3/);
+  assert.match(conversationsText, /出站 4/);
+  assert.match(conversationsText, /最近入站/);
+  assert.match(conversationsText, /最近出站/);
+  await page.locator("#channel-conversations-dialog [data-close]").first().click();
   console.log("channel onboarding options verified");
 } finally {
   await browser?.close();

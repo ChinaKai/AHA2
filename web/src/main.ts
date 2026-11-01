@@ -2357,8 +2357,9 @@ function shell(content: string): string {
     ["knowledge", "knowledge", "nav.knowledge"],
     ["models", "model", "nav.models"],
     ["hardware", "hardware", "nav.hardware"],
+    ["pet-diary", "bot", "petWorkbench.title"],
   ] as const;
-  const mobileNav = [...nav.slice(0, 6), ["advanced", "settings", "nav.advanced"] as const];
+  const mobileNav = [...nav, ["advanced", "settings", "nav.advanced"] as const];
   return `<div class="app-shell">
     <aside class="sidebar">
       <div class="brand-lockup"><span class="brand-mark"><img src="/assets/aha-logo.svg" alt=""></span><div><strong>AHA</strong><small>${t("brand.tagline")}</small></div></div>
@@ -2506,8 +2507,6 @@ function advancedSettingsView(): string {
       <article class="panel advanced-tool-card"><div>${icon("bot")}<span><strong>${t("advanced.prompts.title")}</strong><small>${t("advanced.prompts.desc")}</small></span></div><button type="button" data-view="prompts">${t("advanced.prompts.action")}</button></article>
       <article class="panel advanced-tool-card"><div>${icon("sync")}<span><strong>${t("advanced.sync.title")}</strong><small>${t("advanced.sync.desc")}</small></span></div><button type="button" data-view="sync">${t("advanced.sync.action")}</button></article>
       <article class="panel advanced-tool-card"><div>${icon("proxy")}<span><strong>${t("advanced.proxy.title")}</strong><small>${t("advanced.proxy.desc")}</small></span></div><button type="button" data-view="proxy">${t("advanced.proxy.action")}</button></article>
-      <article class="panel advanced-tool-card"><div>${icon("hardware")}<span><strong>${t("advanced.hardware.title")}</strong><small>${t("advanced.hardware.desc")}</small></span></div><button type="button" data-view="hardware">${t("advanced.hardware.action")}</button></article>
-      <article class="panel advanced-tool-card"><div>${icon("bot")}<span><strong>${t("advanced.pet.title")}</strong><small>${t("advanced.pet.desc")}</small></span></div><button type="button" data-view="pet-diary">${t("advanced.pet.action")}</button></article>
       <article class="panel advanced-tool-card"><div>${icon("server")}<span><strong>${t("advanced.data.title")}</strong><small>${t("advanced.data.desc")}</small></span></div><button type="button" data-view="data">${t("advanced.data.action")}</button></article>
       <article class="panel advanced-tool-card"><div>${icon("bot")}<span><strong>${t("advanced.mcp.title")}</strong><small>${t("advanced.mcp.desc")}</small></span></div><button type="button" data-view="mcp">${t("advanced.mcp.action")}</button></article>
       <article class="panel advanced-tool-card"><div>${icon("shield")}<span><strong>${t("advanced.other.title")}</strong><small>${t("advanced.other.desc")}</small></span></div><button type="button" data-view="other">${t("advanced.other.action")}</button></article>
@@ -3656,7 +3655,7 @@ function render(): void {
       projects: projectsView,
 		channels: () => shell(renderChannels(state.channelProviders, state.channelInstances, {models: state.models, accounts: state.codexAccounts, projects: state.projects, workspaces: state.workspaces, knowledgeIndexes: state.knowledgeIndexes, libraries: state.knowledgeLibraries})),
       models: modelsView,
-      hardware: () => advancedSubview(renderHardwareResources(state.hardwareResources)),
+      hardware: () => shell(renderHardwareResources(state.hardwareResources)),
       tasks: tasksView,
       knowledge: () => shell(`${renderKnowledgeWorkspace({
         projects: state.projects,
@@ -3681,7 +3680,7 @@ function render(): void {
       other: otherSettingsView,
       mcp: () => advancedSubview(mcpView()),
       "pet-settings": () => advancedSubview(`<section class="page pet-settings-page"><div id="pet-settings-host"><div class="field-help">正在打开宠物设置…</div></div></section>`),
-      "pet-diary": () => advancedSubview(petDiaryView()),
+      "pet-diary": () => shell(petDiaryView()),
     };
     content = views[state.view]();
   }

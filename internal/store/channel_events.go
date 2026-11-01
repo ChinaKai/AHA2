@@ -99,7 +99,6 @@ func (s *Store) AppendChannelSourceAndProject(ctx context.Context, source domain
 		isBotDialogue := false
 		replyDecision := ""
 		botTurnCount := 0
-		botMaxTurns := 0
 		if source.EventType == "agent_reply" {
 			if target.endpointKind == domain.ChannelEndpointGroupDigitalHuman {
 				state, stateErr := channelGroupReplyStateTx(ctx, tx, source.TaskID, source.RoundID, source.TurnID, target.conversationID)
@@ -109,16 +108,13 @@ func (s *Store) AppendChannelSourceAndProject(ctx context.Context, source domain
 				if !state.matches {
 					continue
 				}
-				isBotDialogue, replyDecision, botTurnCount, botMaxTurns = state.isBot, state.decision, state.turnCount, state.maxTurns
+				isBotDialogue, replyDecision, botTurnCount = state.isBot, state.decision, state.turnCount
 				if state.isBot && state.decision != "continue" {
 					deliveryState = "suppressed"
 					suppressionReason = "bot_dialogue_ended"
-				} else if state.isBot && state.turnCount > state.maxTurns {
-					deliveryState = "suppressed"
-					suppressionReason = "bot_dialogue_max_turns"
 				}
 			}
-			if err := insertChannelRouteCardTx(ctx, tx, source, target, deliveryState, suppressionReason, isBotDialogue, replyDecision, botTurnCount, botMaxTurns); err != nil {
+			if err := insertChannelRouteCardTx(ctx, tx, source, target, deliveryState, suppressionReason, isBotDialogue, replyDecision, botTurnCount); err != nil {
 				return err
 			}
 		}
@@ -264,11 +260,10 @@ type channelBotReplyState struct {
 	isBot     bool
 	decision  string
 	turnCount int
-	maxTurns  int
 }
 
 func channelGroupReplyStateTx(ctx context.Context, tx *sql.Tx, taskID, roundID, turnID, conversationID string) (channelBotReplyState, error) {
-	state := channelBotReplyState{maxTurns: domain.DefaultChannelBotDialogueMaxTurns}
+	state := channelBotReplyState{}
 	var payloadJSON string
 	if err := tx.QueryRowContext(ctx, `
 		SELECT item.payload_json
@@ -294,15 +289,6 @@ func channelGroupReplyStateTx(ctx context.Context, tx *sql.Tx, taskID, roundID, 
 	state.isBot, _ = actor["is_bot"].(bool)
 	if turnID != "" {
 		_ = tx.QueryRowContext(ctx, `SELECT channel_reply_decision FROM turns WHERE id=? AND task_id=?`, turnID, taskID).Scan(&state.decision)
-	}
-	_ = tx.QueryRowContext(ctx, `
-		SELECT COALESCE(json_extract(instance.config_json,'$.bot_dialogue_max_turns'),?)
-		FROM channel_conversations conversation
-		JOIN channel_instances instance ON instance.id=conversation.instance_id
-		WHERE conversation.id=?`,
-		domain.DefaultChannelBotDialogueMaxTurns, conversationID).Scan(&state.maxTurns)
-	if state.maxTurns < 1 || state.maxTurns > domain.MaxChannelBotDialogueMaxTurns {
-		state.maxTurns = domain.DefaultChannelBotDialogueMaxTurns
 	}
 	if state.isBot {
 		rows, err := tx.QueryContext(ctx, `
@@ -339,7 +325,7 @@ func channelGroupReplyStateTx(ctx context.Context, tx *sql.Tx, taskID, roundID, 
 
 func insertChannelRouteCardTx(ctx context.Context, tx *sql.Tx, source domain.ChannelSourceEvent, target struct {
 	subscriptionID, instanceID, conversationID, kind, endpointKind string
-}, deliveryState, suppressionReason string, isBotDialogue bool, replyDecision string, botTurnCount, botMaxTurns int) error {
+}, deliveryState, suppressionReason string, isBotDialogue bool, replyDecision string, botTurnCount int) error {
 	var conversationName, instanceName string
 	if err := tx.QueryRowContext(ctx, `
 		SELECT conversation.display_name,instance.name
@@ -356,7 +342,6 @@ func insertChannelRouteCardTx(ctx context.Context, tx *sql.Tx, source domain.Cha
 		"reply_decision":     replyDecision,
 		"is_bot_dialogue":    isBotDialogue,
 		"bot_turn":           botTurnCount,
-		"bot_max_turns":      botMaxTurns,
 		"channel": map[string]any{
 			"conversation_id": target.conversationID,
 			"display_name":    conversationName,

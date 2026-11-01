@@ -47,7 +47,6 @@ func (s *Store) EnsureCurrentChannelBot(ctx context.Context, conversationID stri
 		SELECT conversation.instance_id,
 		       COALESCE(json_extract(instance.config_json,'$.runtime_bot_open_id'),''),
 		       COALESCE(
-		           NULLIF(TRIM(json_extract(instance.config_json,'$.runtime_bot_display_name_override')),''),
 		           NULLIF(TRIM(json_extract(instance.config_json,'$.runtime_bot_provider_display_name')),''),
 		           NULLIF(TRIM(json_extract(instance.config_json,'$.runtime_bot_display_name')),''),
 		           ''
@@ -140,7 +139,6 @@ func (s *Store) ChannelMembersForConversation(ctx context.Context, instanceID, c
 		       CASE
 		           WHEN identity.external_user_id=json_extract(current_instance.config_json,'$.runtime_bot_open_id')
 		           THEN COALESCE(
-		               NULLIF(TRIM(json_extract(current_instance.config_json,'$.runtime_bot_display_name_override')),''),
 		               NULLIF(TRIM(json_extract(current_instance.config_json,'$.runtime_bot_provider_display_name')),''),
 		               NULLIF(TRIM(json_extract(current_instance.config_json,'$.runtime_bot_display_name')),''),
 		               NULLIF(TRIM(identity.display_name),''),

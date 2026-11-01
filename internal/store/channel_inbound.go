@@ -17,6 +17,11 @@ func (s *Store) ChannelAllowedKnowledge(ctx context.Context, instanceID, endpoin
 	if err != nil {
 		return nil, err
 	}
+	if endpointKind == domain.ChannelEndpointAssistantDM {
+		// The private chat is verified as the bound Owner; it always sees all
+		// normal project knowledge. Only the group digital human is scoped.
+		scopeMode = "all"
+	}
 	all, err := s.ListKnowledge(ctx, "", "", nil)
 	if err != nil {
 		return nil, err
