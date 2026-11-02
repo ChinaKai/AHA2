@@ -406,6 +406,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("PATCH /api/v1/tasks/{id}", s.withAuth(http.HandlerFunc(s.updateTaskTitle)))
 	mux.Handle("POST /api/v1/tasks/{id}/complete", s.withAuth(http.HandlerFunc(s.completeTask)))
 	mux.Handle("POST /api/v1/tasks/{id}/reopen", s.withAuth(http.HandlerFunc(s.reopenTask)))
+	mux.Handle("POST /api/v1/tasks/{id}/permission-requests/{request}/resolve", s.withAuth(http.HandlerFunc(s.resolveTaskPermissionRequest)))
 	mux.Handle("POST /api/v1/turns/{id}/interrupt", s.withAuth(http.HandlerFunc(s.interruptTurn)))
 	mux.Handle("POST /api/v1/rounds/{id}/interrupt", s.withAuth(http.HandlerFunc(s.interruptRound)))
 	mux.Handle("GET /api/v1/tasks/{id}/events", s.withAuth(http.HandlerFunc(s.taskEvents)))

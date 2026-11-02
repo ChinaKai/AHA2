@@ -75,6 +75,7 @@ import type {
   TaskContextDetail,
   TaskDetail,
   TaskFacetCounts,
+  TaskPermissionRequest,
   Workspace,
 } from "./types.js";
 type View = "projects" | "channels" | "models" | "hardware" | "tasks" | "knowledge" | "prompts" | "proxy" | "sync" | "advanced" | "data" | "other" | "mcp" | "pet-settings" | "pet-diary";
@@ -3323,6 +3324,29 @@ function completedTaskBannerHtml(detail: TaskDetail): string {
   return `<div class="task-failure-banner task-completed-banner"><strong>任务已完成</strong><span>已完成的任务禁止编辑和继续输入，历史内容仍可查看和导出。</span><small>需要继续这个目标时，先重新打开任务再发送消息。</small></div>`;
 }
 
+function taskPermissionRequestsHtml(items: TaskPermissionRequest[]): string {
+  const visible = items.filter(item => item.status === "pending" || item.status === "approved" || item.status === "rejected" || item.status === "expired");
+  if (visible.length === 0) return "";
+  const cards = visible.slice(0, 6).map(item => {
+    const pending = item.status === "pending";
+    const status = item.status === "approved" ? "已批准" : item.status === "rejected" ? "已拒绝" : item.status === "expired" ? "已过期" : "待审批";
+    const applicant = item.applicant_name || "群成员";
+    const actions = pending
+      ? `<div class="task-permission-actions"><button type="button" class="primary" data-task-permission-decision="approve" data-task-permission-id="${escapeHTML(item.id)}">批准</button><button type="button" data-task-permission-decision="reject" data-task-permission-id="${escapeHTML(item.id)}">拒绝</button></div>`
+      : "";
+    return `<article class="task-permission-card ${pending ? "pending" : ""}">
+      <header><strong>权限申请 · ${escapeHTML(applicant)}${item.applicant_is_bot ? "（Bot）" : ""}</strong><span class="pet-approval-status">${escapeHTML(status)}</span></header>
+      <p><strong>动作：</strong>${escapeHTML(item.action)}</p>
+      ${item.scope ? `<p><strong>范围：</strong>${escapeHTML(item.scope)}</p>` : ""}
+      ${item.reason ? `<p><strong>原因：</strong>${escapeHTML(item.reason)}</p>` : ""}
+      ${item.decision_reason ? `<small>审批说明：${escapeHTML(item.decision_reason)}</small>` : ""}
+      <small>${escapeHTML(formatDateTime(item.created_at))}${item.decider_name ? ` · ${escapeHTML(item.decider_name)}` : ""}</small>
+      ${actions}
+    </article>`;
+  }).join("");
+  return `<section class="task-permission-requests"><div class="task-permission-head"><strong>权限申请</strong><small>群成员请求的敏感操作需要 Owner 批准；批准只对这一次动作有效。</small></div>${cards}</section>`;
+}
+
 function taskCtxHtml(): string {
   if (state.selectedTask?.task.status === "draft") {
     return `<div class="task-tool-placeholder">${icon("context")}<h3>尚无 Context</h3><p>启动任务后将生成 Agent Context。</p></div>`;
@@ -3353,6 +3377,7 @@ function taskDetailView(detail: TaskDetail): string {
     ${archivedReadOnly ? `<div class="task-failure-banner remote-readonly"><strong>渠道归档只读</strong><span>该渠道实例已归档</span><small>历史内容可查看和导出，不能继续执行或修改</small></div>` : remoteReadOnly ? `<div class="task-failure-banner remote-readonly"><strong>其他设备的只读 Task</strong><span>所属设备：${escapeHTML(detail.task.owner_device_id || "未知")}</span><small>可查看同步历史，不能在本机执行或修改</small><div class="remote-readonly-actions"><button type="button" id="takeover-task">${icon("copy")}接管到本机</button><button type="button" class="danger" data-retire-remote-task="${detail.task.id}">${icon("close")}移除孤立任务</button></div></div>` : ""}
     <div id="task-failure-slot">${taskFailureBannerHtml(detail)}</div>
     ${draft ? `<div class="task-failure-banner task-draft-banner"><strong>任务尚未启动</strong><span>可以先配置 Agent、Skill 和硬件调试，准备好后再启动。</span><button type="button" id="start-task" class="primary">${icon("play")}启动任务</button></div>` : ""}
+    ${taskPermissionRequestsHtml(detail.permission_requests || [])}
     <div class="messages" id="conversation-list">${loadingDetail ? `<div class="task-detail-loading" role="status">${icon("spinner", true)}<strong>正在打开任务</strong><small>加载最近 ${initialConversationPageSize} 条消息…</small></div>` : conversationListHtml()}</div>
     <div id="agent-turn-slot">${renderAgentTurnCard(detail, state.taskRealtimeState, state.taskContext?.context.metrics)}</div>
     <div id="task-frozen-slot">${completedTaskBannerHtml(detail)}</div>
@@ -4818,6 +4843,7 @@ function bindMessageComposer(): void {
 
 function bindTaskToolsAndPanels(): void {
   bindTaskToolLayout();
+  bindTaskPermissionActions();
   if (state.taskTool === "hardware" && state.selectedTask) bindHardwarePanel(state.selectedTask, setMessage);
   if (state.taskTool === "browser" && state.selectedTask) bindDesktopPanel(state.selectedTask, setMessage);
   if (state.taskTool === "channel" && state.selectedTask) bindTaskChannelPanel();
@@ -4889,6 +4915,26 @@ function syncTaskChannelContactSelection(): void {
     const checkbox = Array.from(form.querySelectorAll<HTMLInputElement>('input[name="contact_id"]')).find(item => item.value === identityID);
     if (checkbox) checkbox.dataset.memberRole = input.value;
   }));
+}
+
+function bindTaskPermissionActions(): void {
+  const task = state.selectedTask;
+  if (!task) return;
+  document.querySelectorAll<HTMLButtonElement>("[data-task-permission-decision]").forEach(button => {
+    button.addEventListener("click", async () => {
+      const requestID = button.dataset.taskPermissionId || "";
+      const decision = button.dataset.taskPermissionDecision as "approve" | "reject";
+      if (!requestID || !decision) return;
+      button.disabled = true;
+      try {
+        await api.resolveTaskPermissionRequest(task.task.id, requestID, decision);
+        await openTask(task.task.id);
+      } catch (error) {
+        button.disabled = false;
+        setMessage("error", error instanceof Error ? error.message : String(error));
+      }
+    });
+  });
 }
 
 function bindTaskChannelPanel(): void {

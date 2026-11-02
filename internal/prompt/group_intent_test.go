@@ -77,6 +77,9 @@ func TestGroupIntentPolicyReachesQAAndIntegrationRoutes(t *testing.T) {
 					t.Errorf("missing mode policy: %s", required)
 				}
 			}
+			if tc.mode == "task_route" && !strings.Contains(prompt, "group-permissions.md") {
+				t.Error("group task route did not expose the group permission resource")
+			}
 			if strings.Count(prompt, "## Group request intent") != 1 {
 				t.Fatal("intent policy missing or duplicated")
 			}

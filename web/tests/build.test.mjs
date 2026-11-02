@@ -2351,6 +2351,20 @@ test("pet workbench follows tab exposes unfollow and ignore actions", async () =
   assert.match(i18n, /"petWorkbench\.followTask": "Follow"/);
 });
 
+test("task detail renders owner permission request decisions", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const main = await readFile(resolve(root, "src", "main.ts"), "utf8");
+  const api = await readFile(resolve(root, "src", "api.ts"), "utf8");
+  const types = await readFile(resolve(root, "src", "types.ts"), "utf8");
+  assert.match(main, /taskPermissionRequestsHtml\(detail\.permission_requests/);
+  assert.match(main, /data-task-permission-decision="approve"/);
+  assert.match(main, /data-task-permission-decision="reject"/);
+  assert.match(main, /bindTaskPermissionActions/);
+  assert.match(api, /resolveTaskPermissionRequest/);
+  assert.match(types, /interface TaskPermissionRequest/);
+  assert.match(types, /permission_requests\?: TaskPermissionRequest\[\]/);
+});
+
 test("completed tasks freeze the composer behind a confirmed reopen", async () => {
   const root = resolve(import.meta.dirname, "..");
   const main = await readFile(resolve(root, "src", "main.ts"), "utf8");

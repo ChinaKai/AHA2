@@ -4,10 +4,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 
 	"github.com/ChinaKai/AHA2/internal/agentapi"
+	"github.com/ChinaKai/AHA2/internal/app"
 	"github.com/ChinaKai/AHA2/internal/channel"
 )
 
@@ -107,6 +109,36 @@ func channelMCPTools() []mcpTool {
 			},
 		},
 		{
+			Name: "channel_request_permission",
+			Description: "Create an Owner permission request before a sensitive action requested by a " +
+				"non-Owner group participant. Do not perform the action until the request is approved. " +
+				"The confirmation card is sent to the channel Owner.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"action": map[string]any{
+						"type":        "string",
+						"description": "Concrete action that needs Owner permission, 1 to 800 characters.",
+					},
+					"scope": map[string]any{
+						"type":        "string",
+						"description": "Exact files, commands, branch, environment, or data the action may touch.",
+					},
+					"reason": map[string]any{
+						"type":        "string",
+						"description": "Why the group participant is asking for this action.",
+					},
+					"risk": map[string]any{
+						"type":        "string",
+						"enum":        []string{"low", "medium", "high"},
+						"description": "Risk level; defaults to high.",
+					},
+				},
+				"required":             []string{"action", "reason"},
+				"additionalProperties": false,
+			},
+		},
+		{
 			Name: "channel_reply_decision",
 			Description: "End this channel Turn without replying. Use only when the message " +
 				"deliberately needs no reply. The reason is shown on the AHA Web status card, " +
@@ -188,6 +220,69 @@ func (s *Server) callChannelMCPTool(writer http.ResponseWriter, request *http.Re
 		}
 		respond(map[string]any{
 			"content": []map[string]any{{"type": "text", "text": "Reply queued for the channel."}},
+		})
+	case "channel_request_permission":
+		var input struct {
+			Action string `json:"action"`
+			Scope  string `json:"scope"`
+			Reason string `json:"reason"`
+			Risk   string `json:"risk"`
+		}
+		if err := json.Unmarshal(call.Arguments, &input); err != nil || strings.TrimSpace(input.Action) == "" || strings.TrimSpace(input.Reason) == "" {
+			toolError("invalid channel_request_permission arguments")
+			return
+		}
+		agentCall, err := s.app.AgentCallContext(request.Context(), claims, false)
+		if err != nil {
+			toolError(err.Error())
+			return
+		}
+		channelContext, err := s.store.ChannelContextForInboxBatch(request.Context(), agentCall.Turn.InboxBatchID)
+		if err != nil {
+			toolError("this Turn has no channel context")
+			return
+		}
+		route, _ := channelContext["route"].(map[string]any)
+		actor, _ := channelContext["actor"].(map[string]any)
+		if fmt.Sprint(route["mode"]) != "task_route" || fmt.Sprint(channelContext["endpoint"]) != "group_digital_human" {
+			toolError("permission requests are only available for group task routes")
+			return
+		}
+		if owner, _ := actor["is_owner"].(bool); owner {
+			toolError("Owner requests do not need a permission request")
+			return
+		}
+		requestItem, err := s.app.CreateTaskPermissionRequest(request.Context(), app.TaskPermissionRequestInput{
+			TaskID:                  agentCall.Task.ID,
+			TurnID:                  agentCall.Turn.ID,
+			InboundReceiptID:        fmt.Sprint(channelContext["inbound_receipt_id"]),
+			ChannelInstanceID:       fmt.Sprint(channelContext["instance_id"]),
+			ChannelConversationID:   fmt.Sprint(channelContext["conversation_id"]),
+			ApplicantIdentityLinkID: fmt.Sprint(actor["identity_link_id"]),
+			ApplicantName:           fmt.Sprint(actor["display_name"]),
+			ApplicantIsBot:          actor["is_bot"] == true,
+			Action:                  input.Action,
+			Scope:                   input.Scope,
+			Reason:                  input.Reason,
+			Risk:                    input.Risk,
+		})
+		if err != nil {
+			toolError(err.Error())
+			return
+		}
+		actionID, err := s.channels.SendTaskPermissionRequestCard(
+			request.Context(), requestItem.ChannelInstanceID, requestItem.ChannelConversationID, requestItem,
+		)
+		if err != nil {
+			toolError("permission request " + requestItem.ID + " was created but the confirmation card could not be delivered: " + err.Error())
+			return
+		}
+		if err := s.app.SetTaskPermissionRequestChannelAction(request.Context(), requestItem.ID, actionID); err != nil {
+			toolError(err.Error())
+			return
+		}
+		respond(map[string]any{
+			"content": []map[string]any{{"type": "text", "text": "Permission request " + requestItem.ID + " created and sent to the Owner."}},
 		})
 	case "channel_reply_decision":
 		var input struct {

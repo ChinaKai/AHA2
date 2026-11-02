@@ -1407,6 +1407,9 @@ func (s *Service) processInbound(ctx context.Context, receipt domain.ChannelInbo
 		if err != nil {
 			return err
 		}
+		if identity.Role == "owner" && identity.OwnerID == instance.OwnerID {
+			role = "owner"
+		}
 		envelope.SenderDisplayName = identity.DisplayName
 	}
 	endpoint, err := s.store.ChannelEndpoint(ctx, instance.ID, endpointKind)
@@ -1479,7 +1482,7 @@ func (s *Service) processInbound(ctx context.Context, receipt domain.ChannelInbo
 	provenance := map[string]any{
 		"schema": "aha.channel-context/v1", "instance_id": instance.ID, "provider": instance.ProviderKey,
 		"endpoint": endpointKind, "conversation_id": conversation.ID, "chat_display_name": conversation.DisplayName,
-		"actor":    map[string]any{"identity_link_id": identity.ID, "role": role, "display_name": identity.DisplayName, "is_bot": envelope.SenderIsBot},
+		"actor":    map[string]any{"identity_link_id": identity.ID, "role": role, "is_owner": role == "owner", "display_name": identity.DisplayName, "is_bot": envelope.SenderIsBot},
 		"mentions": mentions,
 		"route":    map[string]any{"mode": routeMode, "target_task_id": targetTaskID}, "inbound_receipt_id": receipt.ID,
 	}
@@ -2072,6 +2075,9 @@ func (s *Service) processCardAction(ctx context.Context, receipt domain.ChannelI
 	}
 	if !execute {
 		return s.store.FinishChannelInbox(ctx, receipt.ID, receipt.LeaseID, "processed", conversation.ID, "", "duplicate_action", s.now().UTC())
+	}
+	if action.Operation == "task_permission" {
+		return s.resolveTaskPermissionCardAction(ctx, receipt, instance, identity, action, decision)
 	}
 	if decision == "cancel" {
 		err = s.store.FinishChannelPendingAction(ctx, action.ID, action.TargetID, "cancelled", map[string]any{"cancelled": true}, s.now().UTC())

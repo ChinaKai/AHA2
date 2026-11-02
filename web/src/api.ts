@@ -601,6 +601,12 @@ class APIClient {
     return this.request(`/api/v1/tasks/${id}`);
   }
 
+  resolveTaskPermissionRequest(taskID: string, requestID: string, decision: "approve" | "reject", reason = ""): Promise<{ok: boolean; request: import("./types").TaskPermissionRequest}> {
+    return this.request(`/api/v1/tasks/${encodeURIComponent(taskID)}/permission-requests/${encodeURIComponent(requestID)}/resolve`, {
+      method: "POST", body: JSON.stringify({decision, reason}),
+    });
+  }
+
   conversation(
     id: string,
     options: {before?: number; after?: number; limit?: number; categories?: ConversationCategory[]} = {},

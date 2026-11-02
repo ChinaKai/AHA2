@@ -126,6 +126,36 @@ func (s *Store) BeginChannelPendingAction(ctx context.Context, id, instanceID, c
 	return action, false, ErrChannelRevision
 }
 
+// FinishChannelPendingActionFromOwner finalizes a pending card after a Web
+// Owner decision. Unlike the card-action path it does not require a provider
+// message ID because the decision did not come from the chat provider.
+func (s *Store) FinishChannelPendingActionFromOwner(ctx context.Context, id, targetID, status string, resultPayload map[string]any, at time.Time) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	action, err := scanChannelPendingAction(tx.QueryRowContext(ctx, `SELECT `+channelPendingActionColumns+` FROM channel_pending_actions WHERE id=?`, id))
+	if err != nil {
+		return err
+	}
+	if action.Status == status {
+		return tx.Commit()
+	}
+	if action.Status != "pending" && action.Status != "executing" {
+		return ErrChannelRevision
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE channel_pending_actions SET target_id=?,status=?,consumed_at=?,updated_at=? WHERE id=? AND status IN ('pending','executing')`,
+		targetID, status, timeString(at), timeString(at), id); err != nil {
+		return err
+	}
+	payload := map[string]any{"kind": "action_result", "action_id": id, "operation": action.Operation, "status": status, "result": resultPayload}
+	if err := enqueueChannelActionDeliveryTx(ctx, tx, action.InstanceID, action.ConversationID, id+":result:"+status, "action_result", payload, at); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func (s *Store) FinishChannelPendingAction(ctx context.Context, id, targetID, status string, resultPayload map[string]any, at time.Time) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

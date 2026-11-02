@@ -751,6 +751,25 @@ export interface KnowledgeLibrary {
   updated_at: string;
 }
 
+export interface TaskPermissionRequest {
+  id: string;
+  task_id: string;
+  turn_id?: string;
+  applicant_identity_link_id?: string;
+  applicant_name?: string;
+  applicant_is_bot?: boolean;
+  action: string;
+  scope?: string;
+  reason?: string;
+  risk?: string;
+  status: "pending" | "approved" | "rejected" | "expired" | string;
+  decider_name?: string;
+  decision_reason?: string;
+  created_at: string;
+  decided_at?: string;
+  expires_at: string;
+}
+
 export interface TaskDetail {
   task: Task;
   latest_round?: TaskRound;
@@ -759,6 +778,7 @@ export interface TaskDetail {
   memory?: TaskMemory;
   hardware?: HardwareGroup[];
   hardware_resources?: HardwareResource[];
+  permission_requests?: TaskPermissionRequest[];
   event_cursor: number;
   server_time_ms: number;
 }

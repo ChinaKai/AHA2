@@ -155,8 +155,10 @@ func TestTaskRouteAddsNarrowChannelMCP(t *testing.T) {
 			wantAllowed := []string{
 				"mcp__aha2_channel__channel_reply",
 				"mcp__aha2_channel__channel_reply_decision",
+				"mcp__aha2_channel__channel_request_permission",
 			}
-			if len(allowed) != len(wantAllowed) || allowed[0] != wantAllowed[0] || allowed[1] != wantAllowed[1] {
+			if len(allowed) != len(wantAllowed) || allowed[0] != wantAllowed[0] ||
+				allowed[1] != wantAllowed[1] || allowed[2] != wantAllowed[2] {
 				t.Fatalf("allowed=%#v", allowed)
 			}
 		})

@@ -440,17 +440,65 @@ func (s *Server) taskDetail(writer http.ResponseWriter, request *http.Request) {
 	memory, _ := s.store.TaskMemory(request.Context(), taskID)
 	hardwareGroups, _ := s.store.HardwareGroups(request.Context(), taskID)
 	hardwareResources, _ := s.store.HardwareResources(request.Context())
+	permissionRequests, _ := s.app.TaskPermissionRequests(request.Context(), taskID, 50)
 	now := time.Now().UTC()
 	applyRoundTiming(&round, now)
 	applyTurnTimings(turns, now)
 	s.applyTurnContextUsage(request.Context(), turns)
 	writeJSON(writer, http.StatusOK, map[string]any{
 		"ok": true, "task": task, "latest_round": round, "turns": turns, "agents": agents, "memory": compactTaskMemory(memory),
-		"hardware":           hardwareGroups,
-		"hardware_resources": hardwareResources,
-		"event_cursor":       s.store.MaxEventSequence(request.Context(), taskID),
-		"server_time_ms":     now.UnixMilli(),
+		"hardware":            hardwareGroups,
+		"hardware_resources":  hardwareResources,
+		"permission_requests": permissionRequests,
+		"event_cursor":        s.store.MaxEventSequence(request.Context(), taskID),
+		"server_time_ms":      now.UnixMilli(),
 	})
+}
+
+func (s *Server) resolveTaskPermissionRequest(writer http.ResponseWriter, request *http.Request) {
+	taskID := strings.TrimSpace(request.PathValue("id"))
+	requestID := strings.TrimSpace(request.PathValue("request"))
+	var input struct {
+		Decision string `json:"decision"`
+		Reason   string `json:"reason"`
+	}
+	if err := decodeJSON(request, &input); err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_json")
+		return
+	}
+	existing, err := s.store.TaskPermissionRequest(request.Context(), requestID)
+	if err != nil || existing.TaskID != taskID {
+		writeError(writer, http.StatusNotFound, "permission_request_not_found")
+		return
+	}
+	session, _ := sessionFromContext(request.Context())
+	decider := session.OwnerID
+	if strings.TrimSpace(decider) == "" {
+		decider = "Owner"
+	}
+	resolved, changed, err := s.app.ResolveTaskPermissionRequest(
+		request.Context(), requestID, input.Decision, "", decider, input.Reason,
+	)
+	if err != nil {
+		writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "permission_decision_failed", "message": err.Error()})
+		return
+	}
+	if !changed {
+		writeJSON(writer, http.StatusConflict, map[string]any{"ok": false, "error": "permission_already_decided", "request": resolved})
+		return
+	}
+	if s.channels != nil {
+		_ = s.channels.FinishTaskPermissionCardFromWeb(request.Context(), resolved.ID, resolved.Status)
+	}
+	result := map[string]any{"ok": true, "request": resolved}
+	if resolved.Status == "approved" {
+		content := fmt.Sprintf("Owner 已批准权限申请 %s（%s）。请继续执行已授权动作，不要扩大范围，完成后汇报结果。", resolved.ID, resolved.Action)
+		if _, submitErr := s.app.SubmitMessage(request.Context(), resolved.TaskID, content); submitErr != nil {
+			result["continuation_error"] = submitErr.Error()
+		}
+	}
+	s.audit(request, "task.permission.resolve", "task", taskID, map[string]any{"request_id": resolved.ID, "decision": resolved.Status})
+	writeJSON(writer, http.StatusOK, result)
 }
 
 func (s *Server) taskConversation(writer http.ResponseWriter, request *http.Request) {

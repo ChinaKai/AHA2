@@ -1143,6 +1143,15 @@ dialog > .dialog-head { margin: 0; padding: 18px 18px 0; }
 .task-failure-banner span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .task-failure-banner small { color: #8c4a45; }
 .task-draft-banner button { justify-self: end; }
+.task-permission-requests { display: grid; gap: 8px; margin: 8px 12px 0; padding: 10px; border: 1px solid #e8c98d; border-radius: 8px; background: #fffaf0; }
+.task-permission-head { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
+.task-permission-head small { color: var(--muted); }
+.task-permission-card { display: grid; gap: 6px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
+.task-permission-card.pending { border-color: #d9a441; }
+.task-permission-card header { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
+.task-permission-card p { margin: 0; color: var(--muted); white-space: pre-wrap; }
+.task-permission-card small { color: var(--muted); }
+.task-permission-actions { display: flex; gap: 6px; }
 .slash-command-menu { position: absolute; right: 12px; bottom: calc(100% - 2px); left: 12px; z-index: 25; overflow: hidden; border: 1px solid #cfd8e3; border-radius: 6px; background: #fff; box-shadow: 0 12px 32px rgba(15,23,42,.18); }
 .slash-command-menu[hidden] { display: none; }
 .slash-command-menu button { display: grid; grid-template-columns: 42px 110px minmax(0,1fr); justify-content: stretch; width: 100%; min-height: 38px; padding: 6px 9px; border: 0; border-bottom: 1px solid #edf0f3; border-radius: 0; text-align: left; }

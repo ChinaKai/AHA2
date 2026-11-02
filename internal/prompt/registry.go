@@ -227,6 +227,7 @@ var builtinTemplates = []domain.PromptTemplate{
 	{ID: "section.inbox-batch-content", Name: "Inbox Batch Content", Layer: "section", Description: "Inbox 消息、渠道来源、引用上下文和附件引用的内容模板", Editable: true, Required: true, Version: 2},
 	{ID: "resource.agent-api", Name: "Agent API Reference File", Layer: "resource", Description: "只读参考模板", Editable: false, Required: true, Version: 10},
 	{ID: "resource.attachment-protocol", Name: "Attachment Protocol File", Layer: "resource", Description: "只读参考模板；附件上传、绑定与回执规程", Editable: false, Required: true, Version: 1},
+	{ID: "resource.group-permissions", Name: "Group Permission Rules File", Layer: "resource", Description: "只读参考模板；群聊 task_route 的 Owner 权限申请规则", Editable: false, Required: false, Version: 1},
 }
 
 var supersededBuiltinOverrideHashes = map[string]map[string]bool{
@@ -350,6 +351,7 @@ var englishTemplateDescriptions = map[string]string{
 	"section.inbox-batch-content":    "Template for Inbox messages, channel sources, quoted context, and attachment references",
 	"resource.agent-api":             "Read-only reference template",
 	"resource.attachment-protocol":   "Read-only reference template; attachment upload, binding, and receipt protocol",
+	"resource.group-permissions":     "Read-only reference template; Owner permission rules for group task routes",
 }
 
 var chineseTemplateNames = map[string]string{
@@ -380,6 +382,7 @@ var chineseTemplateNames = map[string]string{
 	"section.inbox-batch-content":    "Inbox 批次内容",
 	"resource.agent-api":             "Agent API 参考文件",
 	"resource.attachment-protocol":   "附件协议文件",
+	"resource.group-permissions":     "群聊权限申请规则文件",
 }
 
 func localizeTemplateMeta(item *domain.PromptTemplate) {
@@ -726,10 +729,27 @@ func buildResources(
 		resources = append(resources, attachments...)
 	}
 	if len(input.ChannelContext) > 0 {
+		if channelGroupTaskRoute(input.ChannelContext) {
+			permissions, renderErr := renderTemplateByID(templates, "resource.group-permissions", data)
+			if renderErr != nil {
+				return nil, renderErr
+			}
+			resources = append(resources, resource(input, "group-permissions",
+				joinContextPath(input, root, "group-permissions.md"),
+				templates["resource.group-permissions"].Description, permissions))
+		}
 		data, _ := json.MarshalIndent(input.ChannelContext, "", "  ")
 		resources = append(resources, resource(input, "channel-context", joinContextPath(input, root, "channel-context.json"), "服务端验证的只读渠道上下文；不授予额外权限", string(data)))
 	}
 	return resources, nil
+}
+
+func channelGroupTaskRoute(values map[string]any) bool {
+	if contextString(values, "endpoint") != domain.ChannelEndpointGroupDigitalHuman {
+		return false
+	}
+	route, _ := values["route"].(map[string]any)
+	return contextString(route, "mode") == "task_route"
 }
 
 func buildSharedSnapshot(

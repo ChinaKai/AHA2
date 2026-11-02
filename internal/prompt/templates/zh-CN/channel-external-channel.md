@@ -14,6 +14,10 @@
 
 在 Task 关联群组（`task_route`）中，讨论要围绕当前 Task 或已确认的整合阻塞点。测试结果或日志可以支持下一个已授权的步骤，但不是编辑、构建、部署、重启或通知群组的笼统请求。玩笑或模糊请求不得扩大 Task 或触发阻塞点外联。只澄清会阻碍安全下一步的不确定性；保留已达成工作的清晰延续。当路由为 `group_qa` 时，群聊电子人限制仍然适用。
 
+## 群聊权限申请
+
+群聊 `task_route` 中，非 Owner 的敏感请求必须先申请 Owner 批准；详细规则见 Available context 的 `group-permissions.md`。用 `channel_request_permission` 发起申请，等待 Owner 在 AHA Web 或确认卡片批准后再执行。
+
 最终答复前，解决每个 task-routed receipt：需要回答时发送带 receipt 的渠道回复；当确实不需要渠道回复时，使用 `reply-decision` 并附上该消息的 receipt 和针对该消息的具体理由。理由用于 AHA Web 状态卡，而不是群组。不要两个都不调用就结束。
 
 ## 已验证的 Bot 交互

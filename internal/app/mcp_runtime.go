@@ -98,6 +98,7 @@ func (s *Service) mcpRuntimeForTask(ctx context.Context, task domain.Task, agent
 			allowed = append(allowed,
 				"mcp__"+channelMCPName+"__channel_reply",
 				"mcp__"+channelMCPName+"__channel_reply_decision",
+				"mcp__"+channelMCPName+"__channel_request_permission",
 			)
 		}
 	}

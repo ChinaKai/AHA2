@@ -530,6 +530,9 @@ func (s *Store) deleteTask(ctx context.Context, id string, tombstone bool) error
 			return err
 		}
 	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM task_permission_requests WHERE task_id=?`, id); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM tasks WHERE id=?`, id); err != nil {
 		return err
 	}

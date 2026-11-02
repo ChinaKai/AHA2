@@ -3319,5 +3319,44 @@ func (s *Store) migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(112, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
 		return fmt.Errorf("record schema v112: %w", err)
 	}
+	var hasV113 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=113)`).Scan(&hasV113)
+	if !hasV113 {
+		for _, statement := range []string{
+			`CREATE TABLE IF NOT EXISTS task_permission_requests(
+				id TEXT PRIMARY KEY,
+				task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+				turn_id TEXT NOT NULL DEFAULT '',
+				inbound_receipt_id TEXT NOT NULL DEFAULT '',
+				channel_instance_id TEXT NOT NULL DEFAULT '',
+				channel_conversation_id TEXT NOT NULL DEFAULT '',
+				channel_action_id TEXT NOT NULL DEFAULT '',
+				applicant_identity_link_id TEXT NOT NULL DEFAULT '',
+				applicant_name TEXT NOT NULL DEFAULT '',
+				applicant_is_bot INTEGER NOT NULL DEFAULT 0,
+				action TEXT NOT NULL,
+				scope TEXT NOT NULL DEFAULT '',
+				reason TEXT NOT NULL DEFAULT '',
+				risk TEXT NOT NULL DEFAULT '',
+				status TEXT NOT NULL DEFAULT 'pending',
+				decider_identity_link_id TEXT NOT NULL DEFAULT '',
+				decider_name TEXT NOT NULL DEFAULT '',
+				decision_reason TEXT NOT NULL DEFAULT '',
+				created_at TEXT NOT NULL,
+				updated_at TEXT NOT NULL,
+				decided_at TEXT NOT NULL DEFAULT '',
+				expires_at TEXT NOT NULL
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_task_permission_requests_task ON task_permission_requests(task_id, status, created_at DESC)`,
+			`CREATE INDEX IF NOT EXISTS idx_task_permission_requests_pending ON task_permission_requests(status, expires_at)`,
+		} {
+			if _, err := s.db.ExecContext(ctx, statement); err != nil {
+				return fmt.Errorf("apply schema v113: %w", err)
+			}
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(113, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v113: %w", err)
+	}
 	return nil
 }

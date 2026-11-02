@@ -1283,8 +1283,12 @@ func renderDelivery(payload map[string]any) (string, string) {
 	}
 	if stringValue(payload, "kind") == "confirmation" {
 		actionID := stringValue(payload, "action_id")
+		title, confirmLabel, cancelLabel := "请确认 AHA 操作", "确认", "取消"
+		if stringValue(payload, "operation") == "task_permission" {
+			title, confirmLabel, cancelLabel = "AHA 权限申请", "批准", "拒绝"
+		}
 		preview, _ := json.MarshalIndent(payload["preview"], "", "  ")
-		card := map[string]any{"schema": "2.0", "header": map[string]any{"title": map[string]any{"tag": "plain_text", "content": "请确认 AHA 操作"}}, "body": map[string]any{"elements": []any{map[string]any{"tag": "markdown", "content": "```\n" + string(preview) + "\n```"}, map[string]any{"tag": "column_set", "columns": []any{buttonColumn("确认", "primary", actionID, "confirm"), buttonColumn("取消", "default", actionID, "cancel")}}}}}
+		card := map[string]any{"schema": "2.0", "header": map[string]any{"title": map[string]any{"tag": "plain_text", "content": title}}, "body": map[string]any{"elements": []any{map[string]any{"tag": "markdown", "content": "```\n" + string(preview) + "\n```"}, map[string]any{"tag": "column_set", "columns": []any{buttonColumn(confirmLabel, "primary", actionID, "confirm"), buttonColumn(cancelLabel, "default", actionID, "cancel")}}}}}
 		raw, _ := json.Marshal(card)
 		return "interactive", string(raw)
 	}
