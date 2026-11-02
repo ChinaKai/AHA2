@@ -770,6 +770,12 @@ func (s *Store) EnqueueAgentChannelReply(
 	inboxPayload := decodeJSON(inboxPayloadJSON, map[string]any{})
 	channelContext, _ := inboxPayload["channel_context"].(map[string]any)
 	routeContext, _ := channelContext["route"].(map[string]any)
+	// An Owner decision on a permission card is a normal inbound receipt but
+	// not a bot mention. The following Turn must still be able to answer the
+	// group: it resumes the applicant's request rather than replying to a new
+	// group message.
+	permissionContext, _ := channelContext["permission_request"].(map[string]any)
+	permissionApproved := stringValue(permissionContext["decision"]) == "approved"
 	if strings.TrimSpace(fmt.Sprint(routeContext["mode"])) != "task_route" {
 		return domain.ChannelDelivery{}, "", false, errors.New("channel receipt is not routed to this Task")
 	}
@@ -828,7 +834,7 @@ func (s *Store) EnqueueAgentChannelReply(
 	if replyEnded {
 		return domain.ChannelDelivery{}, "", false, ErrChannelReplyEnded
 	}
-	if endpointKind == domain.ChannelEndpointGroupDigitalHuman {
+	if endpointKind == domain.ChannelEndpointGroupDigitalHuman && !permissionApproved {
 		state, stateErr := channelGroupReplyStateTx(ctx, tx, taskID, roundID, turnID, conversationID)
 		if stateErr != nil {
 			return domain.ChannelDelivery{}, "", false, stateErr
@@ -859,12 +865,26 @@ func (s *Store) EnqueueAgentChannelReply(
 		return domain.ChannelDelivery{}, "", false, lookupErr
 	}
 
+	replyToReceiptID := inboundReceiptID
+	recipientID, recipientName, recipientIsBot := actorID, actorName, actorIsBot
+	if permissionApproved {
+		// Quote the applicant's original request and notify them, instead of
+		// answering the Owner's card click with an @ to the Owner.
+		if applicantReceiptID := stringValue(permissionContext["applicant_receipt_id"]); applicantReceiptID != "" {
+			replyToReceiptID = applicantReceiptID
+		}
+		if applicantID := stringValue(permissionContext["applicant_identity_link_id"]); applicantID != "" {
+			recipientID = applicantID
+			recipientName = stringValue(permissionContext["applicant_name"])
+			recipientIsBot = boolValue(permissionContext["applicant_is_bot"])
+		}
+	}
 	payload := map[string]any{
 		"kind": "agent_reply", "task_id": taskID, "text": message,
-		"reply_to_receipt_id": inboundReceiptID,
+		"reply_to_receipt_id": replyToReceiptID,
 	}
-	if endpointKind == domain.ChannelEndpointGroupDigitalHuman && actorID != "" {
-		payload["mention_identity_link_ids"] = []string{actorID}
+	if endpointKind == domain.ChannelEndpointGroupDigitalHuman && recipientID != "" {
+		payload["mention_identity_link_ids"] = []string{recipientID}
 	}
 	attachments, err := bindAttachmentsTx(ctx, tx, taskID, conversationItemID, attachmentIDs)
 	if err != nil {
@@ -950,7 +970,7 @@ func (s *Store) EnqueueAgentChannelReply(
 				"instance_name": instanceName, "endpoint_kind": endpointKind,
 			},
 			"recipient": map[string]any{
-				"identity_link_id": actorID, "display_name": actorName, "is_bot": actorIsBot,
+				"identity_link_id": recipientID, "display_name": recipientName, "is_bot": recipientIsBot,
 			},
 		},
 		CreatedAt: at,

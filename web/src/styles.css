@@ -1143,13 +1143,13 @@ dialog > .dialog-head { margin: 0; padding: 18px 18px 0; }
 .task-failure-banner span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .task-failure-banner small { color: #8c4a45; }
 .task-draft-banner button { justify-self: end; }
-.task-permission-requests { display: grid; gap: 8px; margin: 0; padding: 10px; border: 1px solid #e8c98d; border-radius: 8px; background: #fffaf0; }
-.panel-permissions { margin: 10px; }
+.task-permission-requests { display: grid; grid-template-columns: minmax(0,1fr); gap: 8px; margin: 0; padding: 10px; border: 1px solid #e8c98d; border-radius: 8px; background: #fffaf0; }
+.panel-permissions { min-width: 0; margin: 10px; }
 .task-permission-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 12px; align-items: baseline; }
 .task-permission-head small { color: var(--muted); }
-.task-permission-item { border: 1px solid var(--line); border-radius: 6px; background: #fff; }
+.task-permission-item { min-width: 0; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
 .task-permission-item.pending { border-color: #d9a441; }
-.task-permission-item > summary { display: flex; align-items: center; gap: 8px; padding: 8px 10px; cursor: pointer; list-style: none; }
+.task-permission-item > summary { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 8px 10px; cursor: pointer; list-style: none; }
 .task-permission-item > summary::-webkit-details-marker { display: none; }
 .task-permission-item > summary::after { content: "▾"; flex: none; margin-left: auto; color: var(--muted); font-size: 10px; transition: transform .15s ease; }
 .task-permission-item[open] > summary::after { transform: rotate(180deg); }

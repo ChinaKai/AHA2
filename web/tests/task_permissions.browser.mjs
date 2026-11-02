@@ -19,7 +19,8 @@ const now = new Date().toISOString();
 const bootstrap = `
 let permissionStatus = "pending";
 const permission = () => ({
-  id: "perm-1", task_id: "t-perm", action: "向 AHA-TEST 群发送实现代码",
+  id: "perm-1", task_id: "t-perm",
+  action: "在当前 AHA2 仓库本地 main 分支提交现有未提交改动（权限申请 UI 优化、渠道权限卡片、飞书插件及相关测试、Windows 部署/安装测试脚本）",
   scope: "群聊权限申请 / Owner 认证相关实现", reason: "群成员请求展示源码，需要 Owner 批准",
   status: permissionStatus, applicant_name: "蒋开开", risk: "high",
   created_at: ${JSON.stringify(now)}, expires_at: ${JSON.stringify(new Date(Date.now() + 900000).toISOString())},
@@ -101,6 +102,23 @@ try {
 
   await button.click();
   await page.waitForSelector("#task-tool-panel-body .task-permission-item", {timeout: 5000});
+  // A long request action must not widen the grid item past the split panel:
+  // the row text ellipsizes instead of clipping the card on the right.
+  const overflow = await page.evaluate(() => {
+    const body = document.querySelector("#task-tool-panel-body");
+    const item = document.querySelector(".task-permission-item");
+    const action = document.querySelector(".task-permission-summary-action");
+    const bodyRect = body.getBoundingClientRect();
+    const itemRect = item.getBoundingClientRect();
+    return {
+      body: body.scrollWidth - body.clientWidth,
+      item: Math.round(itemRect.right - bodyRect.right),
+      actionClipped: action.scrollWidth > action.clientWidth,
+    };
+  });
+  assert.ok(overflow.body <= 1, `permission panel overflows horizontally (${overflow.body}px)`);
+  assert.ok(overflow.item <= 1, `permission card extends past the panel (${overflow.item}px)`);
+  assert.ok(overflow.actionClipped, "long permission action should ellipsize inside the row");
   const item = page.locator("#task-tool-panel-body .task-permission-item").first();
   assert.equal(await item.evaluate(node => node.open), false, "permission list should start collapsed");
   const collapsedHeight = (await item.boundingBox()).height;

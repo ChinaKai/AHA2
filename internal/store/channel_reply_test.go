@@ -421,6 +421,106 @@ func TestAgentChannelReplyIsReceiptBoundAndIdempotent(t *testing.T) {
 		t.Fatalf("reply after dynamic end decision err=%v", err)
 	}
 
+	// An Owner decision on a group permission card is a processed inbound
+	// receipt but not a bot mention. The approval Turn must still be allowed to
+	// answer the group, quote the applicant's original request, and notify that
+	// applicant rather than the Owner who clicked the card.
+	if _, err := database.db.ExecContext(ctx,
+		`UPDATE task_rounds SET status='completed' WHERE id=?`, round.ID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.db.ExecContext(ctx,
+		`UPDATE turns SET status='succeeded' WHERE id=?`, turn.ID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	approvalMessage := domain.Message{
+		ID: domain.NewID("message"), TaskID: task.ID, Role: "user", Sender: "负责人",
+		Content: "Owner 已批准权限申请 task_permission_reply（申请人：小红）。", CreatedAt: now.Add(3 * time.Second),
+	}
+	approvalRound := domain.TaskRound{
+		ID: domain.NewID("round"), TaskID: task.ID, InputMessageID: approvalMessage.ID,
+		Status: domain.RoundRunning, CreatedAt: now.Add(3 * time.Second), StartedAt: now.Add(3 * time.Second),
+	}
+	approvalTurn := domain.Turn{
+		ID: domain.NewID("turn"), TaskID: task.ID, RoundID: approvalRound.ID, AgentID: "main",
+		InputMessageID: approvalMessage.ID, Status: domain.TurnRunning,
+		RuntimeConfigSnapshotID: task.RuntimeConfigSnapshotID,
+		InboxBatchID:            domain.NewID("inbox_batch"), Attempt: 1, Required: true, QueuedAt: now.Add(3 * time.Second),
+	}
+	if _, _, err := database.CreateMessageRoundAndTurn(ctx, approvalMessage, approvalRound, approvalTurn); err != nil {
+		t.Fatal(err)
+	}
+	approvalReceiptID := domain.NewID("channel_inbox")
+	approvalNormalized, _ := json.Marshal(map[string]any{
+		"external_message_id": "provider-message-card",
+		"mentioned_bot":       false,
+	})
+	if _, err := database.db.ExecContext(ctx, `
+		INSERT INTO channel_inbox_dedup(
+			id,instance_id,external_event_id,event_type,payload_digest,normalized_payload_json,
+			state,lease_id,lease_until,conversation_id,aha_message_id,outcome,
+			occurred_at,received_at,processed_at
+		) VALUES(?,?,?,?,?,?, 'processed','','',?,'','delivered_to_task',?,?,?)`,
+		approvalReceiptID, instance.ID, "approval-card-event", "card_action", "digest-card", string(approvalNormalized),
+		conversation.ID, timeString(now.Add(3*time.Second)), timeString(now.Add(3*time.Second)), timeString(now.Add(3*time.Second)),
+	); err != nil {
+		t.Fatal(err)
+	}
+	approvalContext := make(map[string]any, len(channelContext)+1)
+	for key, value := range channelContext {
+		approvalContext[key] = value
+	}
+	approvalContext["inbound_receipt_id"] = approvalReceiptID
+	approvalContext["actor"] = map[string]any{
+		"identity_link_id": ownerIdentity.ID, "display_name": ownerIdentity.DisplayName,
+		"role": "owner", "is_bot": false,
+	}
+	approvalContext["permission_request"] = map[string]any{
+		"id": "task_permission_reply", "decision": "approved",
+		"applicant_identity_link_id": actor.ID, "applicant_name": actor.DisplayName,
+		"applicant_is_bot": false, "applicant_receipt_id": receiptID,
+	}
+	approvalPayloadJSON := encodeJSON(map[string]any{
+		"channel_receipt_id": approvalReceiptID,
+		"channel_context":    approvalContext,
+	})
+	if _, err := database.db.ExecContext(ctx, `
+		INSERT INTO conversation_items(
+			id,task_id,round_id,turn_id,agent_id,stream_agent_id,from_agent_id,to_agent_id,
+			route_kind,category,kind,summary,payload_json,created_at
+		) VALUES(?,?,?,?, 'owner','main','owner','main','owner_message','chat','user_message',?,?,?)`,
+		domain.NewID("conversation"), task.ID, approvalRound.ID, approvalTurn.ID,
+		approvalMessage.Content, approvalPayloadJSON, timeString(approvalMessage.CreatedAt),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.db.ExecContext(ctx, `
+		INSERT INTO agent_inbox(
+			id,task_id,round_id,target_agent_id,source_agent_id,source_kind,source_turn_id,
+			message_id,content,payload_json,status,batch_id,created_at,claimed_at,processed_at,
+			delivered_turn_id,delivered_at
+		) VALUES(?,?,?, 'main','owner','owner_message','','',?,?, 'delivered_in_turn','',?,?,?,?,?)`,
+		domain.NewID("inbox"), task.ID, approvalRound.ID, approvalMessage.Content, approvalPayloadJSON,
+		timeString(approvalMessage.CreatedAt), timeString(approvalMessage.CreatedAt), "",
+		approvalTurn.ID, timeString(approvalMessage.CreatedAt),
+	); err != nil {
+		t.Fatal(err)
+	}
+	approvalDelivery, _, approvalCreated, err := database.EnqueueAgentChannelReply(
+		ctx, task.ID, approvalTurn.ID, "permission-approval-reply", approvalReceiptID,
+		"已按批准执行完成。", nil, now.Add(3*time.Second),
+	)
+	if err != nil || !approvalCreated || approvalDelivery.ID == "" {
+		t.Fatalf("permission approval reply delivery=%#v created=%v err=%v", approvalDelivery, approvalCreated, err)
+	}
+	approvalTarget, err := database.ChannelDeliveryTarget(ctx, conversation.ID, approvalDelivery.SourceEventSequence)
+	if err != nil || approvalTarget["reply_message_id"] != "provider-message-reply" ||
+		approvalTarget["mention_user_ids"] != `["provider-user-reply"]` {
+		t.Fatalf("permission approval reply target=%#v err=%v", approvalTarget, err)
+	}
+
 	if err := database.AppendChannelSourceAndProject(ctx, domain.ChannelSourceEvent{
 		ID: domain.NewID("source"), SourceKey: "ordinary-final-reply", TaskID: task.ID,
 		RoundID: round.ID, TurnID: turn.ID, EventClass: "message", EventType: "agent_reply",
@@ -429,10 +529,11 @@ func TestAgentChannelReplyIsReceiptBoundAndIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	deliveries, err := database.ChannelDeliveries(ctx, instance.ID, 20)
-	if err != nil || len(deliveries) != 3 ||
+	if err != nil || len(deliveries) != 4 ||
 		!slices.ContainsFunc(deliveries, func(item domain.ChannelDelivery) bool { return item.ID == delivery.ID }) ||
 		!slices.ContainsFunc(deliveries, func(item domain.ChannelDelivery) bool { return item.ID == ownerDelivery.ID }) ||
-		!slices.ContainsFunc(deliveries, func(item domain.ChannelDelivery) bool { return item.ID == botDelivery.ID }) {
+		!slices.ContainsFunc(deliveries, func(item domain.ChannelDelivery) bool { return item.ID == botDelivery.ID }) ||
+		!slices.ContainsFunc(deliveries, func(item domain.ChannelDelivery) bool { return item.ID == approvalDelivery.ID }) {
 		t.Fatalf("ordinary final reply leaked into task route: %#v err=%v", deliveries, err)
 	}
 }

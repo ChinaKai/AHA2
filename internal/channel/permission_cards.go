@@ -85,7 +85,17 @@ func (s *Service) resolveTaskPermissionCardAction(
 		},
 		"route":              map[string]any{"mode": "task_route", "target_task_id": resolved.TaskID},
 		"inbound_receipt_id": receipt.ID,
-		"permission_request": map[string]any{"id": resolved.ID, "decision": "approved"},
+		// The approval Turn answers the applicant's original request, not the
+		// Owner's card click. Keep enough context for the reply to quote that
+		// message and notify the applicant who asked for the action.
+		"permission_request": map[string]any{
+			"id":                         resolved.ID,
+			"decision":                   "approved",
+			"applicant_identity_link_id": resolved.ApplicantIdentityLinkID,
+			"applicant_name":             resolved.ApplicantName,
+			"applicant_is_bot":           resolved.ApplicantIsBot,
+			"applicant_receipt_id":       resolved.InboundReceiptID,
+		},
 	}
 	_, err = s.application.SubmitChannelMessageWithAttachments(
 		ctx, receipt.ID, receipt.LeaseID, action.ConversationID, resolved.TaskID, content, provenance, nil,
