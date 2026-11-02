@@ -1283,23 +1283,32 @@ func renderDelivery(payload map[string]any) (string, string) {
 	}
 	if stringValue(payload, "kind") == "confirmation" {
 		actionID := stringValue(payload, "action_id")
+		operation := stringValue(payload, "operation")
 		title, confirmLabel, cancelLabel := "请确认 AHA 操作", "确认", "取消"
-		if stringValue(payload, "operation") == "task_permission" {
+		if operation == "task_permission" {
 			title, confirmLabel, cancelLabel = "AHA 权限申请", "批准", "拒绝"
 		}
-		preview, _ := json.MarshalIndent(payload["preview"], "", "  ")
-		card := map[string]any{"schema": "2.0", "header": map[string]any{"title": map[string]any{"tag": "plain_text", "content": title}}, "body": map[string]any{"elements": []any{map[string]any{"tag": "markdown", "content": "```\n" + string(preview) + "\n```"}, map[string]any{"tag": "column_set", "columns": []any{buttonColumn(confirmLabel, "primary", actionID, "confirm"), buttonColumn(cancelLabel, "default", actionID, "cancel")}}}}}
+		preview, _ := payload["preview"].(map[string]any)
+		content := renderConfirmationPreview(preview)
+		if operation == "task_permission" {
+			content += "\n\n**状态：** 待审批"
+			if expiresAt := stringValue(payload, "expires_at"); expiresAt != "" {
+				if parsed, err := time.Parse(time.RFC3339, expiresAt); err == nil {
+					content += "\n\n**有效期至：** " + parsed.Local().Format("2006-01-02 15:04")
+				}
+			}
+		}
+		elements := []any{}
+		if strings.TrimSpace(content) != "" {
+			elements = append(elements, map[string]any{"tag": "markdown", "content": content})
+		}
+		elements = append(elements, map[string]any{"tag": "column_set", "columns": []any{buttonColumn(confirmLabel, "primary", actionID, "confirm"), buttonColumn(cancelLabel, "default", actionID, "cancel")}})
+		card := map[string]any{"schema": "2.0", "header": map[string]any{"title": map[string]any{"tag": "plain_text", "content": title}}, "body": map[string]any{"elements": elements}}
 		raw, _ := json.Marshal(card)
 		return "interactive", string(raw)
 	}
 	if stringValue(payload, "kind") == "action_result" {
-		status := stringValue(payload, "status")
-		template := "green"
-		if status != "succeeded" {
-			template = "grey"
-		}
-		result, _ := json.MarshalIndent(payload["result"], "", "  ")
-		card := map[string]any{"schema": "2.0", "header": map[string]any{"template": template, "title": map[string]any{"tag": "plain_text", "content": "AHA 操作"}}, "body": map[string]any{"elements": []any{map[string]any{"tag": "markdown", "content": status + "\n```\n" + string(result) + "\n```"}}}}
+		card := renderActionResultCard(payload)
 		raw, _ := json.Marshal(card)
 		return "interactive", string(raw)
 	}
@@ -1341,6 +1350,145 @@ func renderDelivery(payload map[string]any) (string, string) {
 	text = string(rawPayload)
 	raw, _ := json.Marshal(map[string]string{"text": text})
 	return "text", string(raw)
+}
+
+// Confirmation cards used to dump the raw preview JSON into a code block.
+// Render the known fields as labeled markdown instead so the Owner can read
+// what is being approved without decoding internal keys.
+var confirmationFields = []struct{ Key, Label string }{
+	{"task_code", "Task"},
+	{"title", "标题"},
+	{"applicant", "申请人"},
+	{"action", "动作"},
+	{"scope", "范围"},
+	{"reason", "原因"},
+	{"risk", "风险"},
+	{"effect", "影响"},
+	{"project", "项目"},
+	{"workspace", "Workspace"},
+	{"request", "请求"},
+	{"summary", "摘要"},
+	{"details", "详情"},
+	{"decision", "决策"},
+	{"current_status", "当前状态"},
+}
+
+func renderConfirmationPreview(preview map[string]any) string {
+	lines := make([]string, 0, len(confirmationFields))
+	for _, field := range confirmationFields {
+		value, ok := preview[field.Key]
+		if !ok || value == nil {
+			continue
+		}
+		text := strings.TrimSpace(fmt.Sprint(value))
+		if text == "" {
+			continue
+		}
+		if field.Key == "risk" {
+			text = confirmationRiskLabel(text)
+		}
+		if field.Key == "decision" {
+			text = actionDecisionLabel(text)
+		}
+		lines = append(lines, "**"+field.Label+"：** "+text)
+	}
+	if len(lines) > 0 {
+		return strings.Join(lines, "\n\n")
+	}
+	if len(preview) == 0 {
+		return ""
+	}
+	raw, _ := json.MarshalIndent(preview, "", "  ")
+	return "```\n" + string(raw) + "\n```"
+}
+
+func confirmationRiskLabel(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "high":
+		return "高"
+	case "medium":
+		return "中"
+	case "low":
+		return "低"
+	}
+	return value
+}
+
+var actionStatusLabels = map[string]string{
+	"succeeded": "已完成",
+	"cancelled": "已取消",
+	"failed":    "处理失败",
+}
+
+// renderActionResultCard replaces a confirmation card in place after the
+// decision. It used to print the raw status and result JSON, so the updated
+// permission card was unreadable; render the same labeled fields as the
+// confirmation card plus a Chinese status instead.
+func renderActionResultCard(payload map[string]any) map[string]any {
+	status := strings.TrimSpace(stringValue(payload, "status"))
+	operation := strings.TrimSpace(stringValue(payload, "operation"))
+	result, _ := payload["result"].(map[string]any)
+	preview, _ := payload["preview"].(map[string]any)
+
+	title, template := "AHA 操作", "grey"
+	statusLabel := actionStatusLabels[status]
+	if statusLabel == "" {
+		statusLabel = status
+	}
+	if statusLabel == "" {
+		statusLabel = "已处理"
+	}
+	if operation == "task_permission" {
+		title = "AHA 权限申请"
+		switch status {
+		case "succeeded":
+			statusLabel, template = "已批准", "green"
+		case "cancelled":
+			statusLabel, template = "已拒绝", "grey"
+		case "failed":
+			statusLabel, template = "处理失败", "red"
+		}
+	} else if status == "succeeded" {
+		template = "green"
+	}
+
+	lines := []string{"**状态：** " + statusLabel}
+	if content := renderConfirmationPreview(preview); content != "" {
+		lines = append(lines, content)
+	}
+	// Permission cards already show 已批准/已拒绝 as the status, so repeating
+	// the decision would only add noise.
+	if decision := actionDecisionLabel(stringValue(result, "decision")); decision != "" && operation != "task_permission" {
+		lines = append(lines, "**决策：** "+decision)
+	}
+	target := stringValue(result, "target_task_id")
+	if target == "" {
+		target = stringValue(payload, "target_task_id")
+	}
+	if target != "" {
+		lines = append(lines, "**目标 Task：** "+target)
+	}
+	return map[string]any{
+		"schema": "2.0",
+		"header": map[string]any{"template": template, "title": map[string]any{"tag": "plain_text", "content": title}},
+		"body":   map[string]any{"elements": []any{map[string]any{"tag": "markdown", "content": strings.Join(lines, "\n\n")}}},
+	}
+}
+
+func actionDecisionLabel(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "approve", "approved", "confirm":
+		return "批准"
+	case "reject", "rejected", "cancel":
+		return "拒绝"
+	case "accepted_todo":
+		return "整理为待办"
+	case "accepted_task":
+		return "创建 Task"
+	case "dismissed":
+		return "忽略"
+	}
+	return strings.TrimSpace(value)
 }
 
 func renderMenuCard(payload map[string]any) map[string]any {

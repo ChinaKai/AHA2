@@ -309,8 +309,100 @@ func TestDeterministicUUIDAndConfirmationCard(t *testing.T) {
 	if json.Unmarshal([]byte(content), &card) != nil || card["schema"] != "2.0" {
 		t.Fatalf("card=%s", content)
 	}
+	if !strings.Contains(content, "影响：") || !strings.Contains(content, "route only") {
+		t.Fatalf("confirmation preview is not human-readable: %s", content)
+	}
 	if delay := deliveryBackoffMS("delivery-1", 4); delay < 1 || delay > 120000 {
 		t.Fatalf("backoff=%d", delay)
+	}
+}
+
+func TestRenderTaskPermissionConfirmationCardIsHumanReadable(t *testing.T) {
+	t.Parallel()
+	msgType, content := renderDelivery(map[string]any{
+		"kind":       "confirmation",
+		"action_id":  "action-1",
+		"operation":  "task_permission",
+		"expires_at": "2026-11-02T05:30:40Z",
+		"preview": map[string]any{
+			"request_id": "task_permission_1", "task_id": "task-1",
+			"applicant": "蒋开开", "action": "向 AHA-TEST 群发送实现代码",
+			"scope": "Owner 认证相关实现", "reason": "群成员请求展示源码", "risk": "high",
+		},
+	})
+	if msgType != "interactive" {
+		t.Fatalf("msgType=%s", msgType)
+	}
+	if strings.Contains(content, "request_id") || strings.Contains(content, `\"scope\":`) || strings.Contains(content, "{\n") {
+		t.Fatalf("raw preview JSON leaked into card: %s", content)
+	}
+	for _, want := range []string{"申请人：", "蒋开开", "动作：", "向 AHA-TEST 群发送实现代码", "范围：", "原因：", "风险：", "高", "待审批", "有效期至："} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("card missing %q: %s", want, content)
+		}
+	}
+}
+
+func TestRenderTaskPermissionActionResultCardIsHumanReadable(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name      string
+		status    string
+		decision  string
+		wantState string
+		wantLabel string
+	}{
+		{name: "approved", status: "succeeded", decision: "approved", wantState: "已批准", wantLabel: "批准"},
+		{name: "rejected", status: "cancelled", decision: "rejected", wantState: "已拒绝", wantLabel: "拒绝"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			msgType, content := renderDelivery(map[string]any{
+				"kind": "action_result", "action_id": "action-1", "operation": "task_permission", "status": tc.status,
+				"result": map[string]any{"request_id": "task_permission_1", "decision": tc.decision},
+				"preview": map[string]any{
+					"request_id": "task_permission_1", "task_id": "task-1",
+					"applicant": "蒋开开", "action": "向 AHA-TEST 群发送实现代码",
+					"scope": "Owner 认证相关实现", "reason": "群成员请求展示源码", "risk": "high",
+				},
+			})
+			if msgType != "interactive" {
+				t.Fatalf("msgType=%s", msgType)
+			}
+			if strings.Contains(content, "request_id") || strings.Contains(content, tc.status) || strings.Contains(content, "```") {
+				t.Fatalf("raw result leaked into card: %s", content)
+			}
+			for _, want := range []string{"状态：", tc.wantState, "申请人：", "蒋开开", "动作：", "范围：", "原因：", "风险：", "高"} {
+				if !strings.Contains(content, want) {
+					t.Fatalf("card missing %q: %s", want, content)
+				}
+			}
+			if strings.Contains(content, "决策：") {
+				t.Fatalf("permission card repeats the decision already shown by status: %s", content)
+			}
+		})
+	}
+}
+
+func TestRenderHandoffActionResultCardIsHumanReadable(t *testing.T) {
+	t.Parallel()
+	_, content := renderDelivery(map[string]any{
+		"kind": "action_result", "action_id": "action-2", "operation": "handoff_decision", "status": "succeeded",
+		"result": map[string]any{"handoff_id": "handoff-1", "decision": "accepted_todo"},
+		"preview": map[string]any{
+			"operation": "handoff_decision", "decision": "accepted_todo",
+			"summary": "周会事项", "details": "整理本周开发进展",
+		},
+	})
+	for _, want := range []string{"已完成", "决策：", "整理为待办", "摘要：", "周会事项"} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("card missing %q: %s", want, content)
+		}
+	}
+	if strings.Contains(content, "accepted_todo") || strings.Contains(content, "```") {
+		t.Fatalf("raw decision leaked into card: %s", content)
 	}
 }
 

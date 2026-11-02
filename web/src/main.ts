@@ -3324,27 +3324,80 @@ function completedTaskBannerHtml(detail: TaskDetail): string {
   return `<div class="task-failure-banner task-completed-banner"><strong>任务已完成</strong><span>已完成的任务禁止编辑和继续输入，历史内容仍可查看和导出。</span><small>需要继续这个目标时，先重新打开任务再发送消息。</small></div>`;
 }
 
-function taskPermissionRequestsHtml(items: TaskPermissionRequest[]): string {
-  const visible = items.filter(item => item.status === "pending" || item.status === "approved" || item.status === "rejected" || item.status === "expired");
-  if (visible.length === 0) return "";
-  const cards = visible.slice(0, 6).map(item => {
+function visibleTaskPermissionRequests(items: TaskPermissionRequest[]): TaskPermissionRequest[] {
+  return items.filter(item => item.status === "pending" || item.status === "approved" || item.status === "rejected" || item.status === "expired");
+}
+
+function taskPermissionPendingCount(detail: TaskDetail): number {
+  return (detail.permission_requests || []).filter(item => item.status === "pending").length;
+}
+
+function taskPermissionRiskLabel(risk?: string): string {
+  if (risk === "high") return "高";
+  if (risk === "medium") return "中";
+  if (risk === "low") return "低";
+  return risk || "";
+}
+
+// Requests are collapsed rows so a long history does not take over the panel.
+// Expanding one shows the full request and, when it is still pending, the
+// Owner decision buttons.
+function taskPermissionCardsHtml(items: TaskPermissionRequest[]): string {
+  return visibleTaskPermissionRequests(items).slice(0, 12).map(item => {
     const pending = item.status === "pending";
     const status = item.status === "approved" ? "已批准" : item.status === "rejected" ? "已拒绝" : item.status === "expired" ? "已过期" : "待审批";
+    const statusClass = item.status === "approved" ? "approved" : item.status === "rejected" ? "rejected" : item.status === "expired" ? "expired" : "pending";
     const applicant = item.applicant_name || "群成员";
+    const action = item.action || "未填写动作";
+    const risk = taskPermissionRiskLabel(item.risk);
     const actions = pending
       ? `<div class="task-permission-actions"><button type="button" class="primary" data-task-permission-decision="approve" data-task-permission-id="${escapeHTML(item.id)}">批准</button><button type="button" data-task-permission-decision="reject" data-task-permission-id="${escapeHTML(item.id)}">拒绝</button></div>`
       : "";
-    return `<article class="task-permission-card ${pending ? "pending" : ""}">
-      <header><strong>权限申请 · ${escapeHTML(applicant)}${item.applicant_is_bot ? "（Bot）" : ""}</strong><span class="pet-approval-status">${escapeHTML(status)}</span></header>
-      <p><strong>动作：</strong>${escapeHTML(item.action)}</p>
-      ${item.scope ? `<p><strong>范围：</strong>${escapeHTML(item.scope)}</p>` : ""}
-      ${item.reason ? `<p><strong>原因：</strong>${escapeHTML(item.reason)}</p>` : ""}
-      ${item.decision_reason ? `<small>审批说明：${escapeHTML(item.decision_reason)}</small>` : ""}
-      <small>${escapeHTML(formatDateTime(item.created_at))}${item.decider_name ? ` · ${escapeHTML(item.decider_name)}` : ""}</small>
-      ${actions}
-    </article>`;
+    return `<details class="task-permission-item ${pending ? "pending" : ""}" data-task-permission-request="${escapeHTML(item.id)}">
+      <summary>
+        <span class="task-permission-summary"><strong>${escapeHTML(applicant)}${item.applicant_is_bot ? "（Bot）" : ""}</strong><span class="task-permission-summary-action">${escapeHTML(action)}</span></span>
+        <span class="task-permission-status ${statusClass}">${escapeHTML(status)}</span>
+      </summary>
+      <div class="task-permission-detail">
+        <p><strong>动作</strong><span>${escapeHTML(action)}</span></p>
+        ${item.scope ? `<p><strong>范围</strong><span>${escapeHTML(item.scope)}</span></p>` : ""}
+        ${item.reason ? `<p><strong>原因</strong><span>${escapeHTML(item.reason)}</span></p>` : ""}
+        ${risk ? `<p><strong>风险</strong><span>${escapeHTML(risk)}</span></p>` : ""}
+        ${item.decision_reason ? `<p><strong>审批说明</strong><span>${escapeHTML(item.decision_reason)}</span></p>` : ""}
+        <p><strong>申请时间</strong><span>${escapeHTML(formatDateTime(item.created_at))}${item.decider_name ? ` · ${escapeHTML(item.decider_name)}` : ""}</span></p>
+        ${actions}
+      </div>
+    </details>`;
   }).join("");
-  return `<section class="task-permission-requests"><div class="task-permission-head"><strong>权限申请</strong><small>群成员请求的敏感操作需要 Owner 批准；批准只对这一次动作有效。</small></div>${cards}</section>`;
+}
+
+// The toolbar panel stays reachable even when there are no requests, so the
+// entry point never disappears from the Task toolbar.
+function taskPermissionPanelHtml(detail: TaskDetail): string {
+  const cards = taskPermissionCardsHtml(detail.permission_requests || []);
+  return `<section class="task-permission-requests panel-permissions"><div class="task-permission-head"><strong>权限申请</strong><small>点击申请查看详情；批准只对这一次动作有效。</small></div>${cards || `<div class="task-permission-empty">当前没有权限申请记录。</div>`}</section>`;
+}
+
+// SSE refreshes only patch the conversation. Keep the toolbar badge in sync so
+// a request created while the Task is open is visible without reloading.
+function syncTaskPermissionIndicators(detail: TaskDetail): void {
+  const button = document.querySelector<HTMLButtonElement>('[data-task-tool="permissions"]');
+  if (!button) return;
+  const pending = taskPermissionPendingCount(detail);
+  const badge = button.querySelector<HTMLElement>(".task-tool-badge");
+  if (pending > 0) {
+    const label = `权限申请（${pending} 条待审批）`;
+    button.classList.add("has-pending");
+    button.title = label;
+    button.setAttribute("aria-label", label);
+    if (badge) badge.textContent = pending > 99 ? "99+" : String(pending);
+    else button.insertAdjacentHTML("beforeend", `<span class="task-tool-badge">${pending > 99 ? "99+" : pending}</span>`);
+  } else {
+    button.classList.remove("has-pending");
+    button.title = "权限申请";
+    button.setAttribute("aria-label", "权限申请");
+    badge?.remove();
+  }
 }
 
 function taskCtxHtml(): string {
@@ -3377,7 +3430,6 @@ function taskDetailView(detail: TaskDetail): string {
     ${archivedReadOnly ? `<div class="task-failure-banner remote-readonly"><strong>渠道归档只读</strong><span>该渠道实例已归档</span><small>历史内容可查看和导出，不能继续执行或修改</small></div>` : remoteReadOnly ? `<div class="task-failure-banner remote-readonly"><strong>其他设备的只读 Task</strong><span>所属设备：${escapeHTML(detail.task.owner_device_id || "未知")}</span><small>可查看同步历史，不能在本机执行或修改</small><div class="remote-readonly-actions"><button type="button" id="takeover-task">${icon("copy")}接管到本机</button><button type="button" class="danger" data-retire-remote-task="${detail.task.id}">${icon("close")}移除孤立任务</button></div></div>` : ""}
     <div id="task-failure-slot">${taskFailureBannerHtml(detail)}</div>
     ${draft ? `<div class="task-failure-banner task-draft-banner"><strong>任务尚未启动</strong><span>可以先配置 Agent、Skill 和硬件调试，准备好后再启动。</span><button type="button" id="start-task" class="primary">${icon("play")}启动任务</button></div>` : ""}
-    ${taskPermissionRequestsHtml(detail.permission_requests || [])}
     <div class="messages" id="conversation-list">${loadingDetail ? `<div class="task-detail-loading" role="status">${icon("spinner", true)}<strong>正在打开任务</strong><small>加载最近 ${initialConversationPageSize} 条消息…</small></div>` : conversationListHtml()}</div>
     <div id="agent-turn-slot">${renderAgentTurnCard(detail, state.taskRealtimeState, state.taskContext?.context.metrics)}</div>
     <div id="task-frozen-slot">${completedTaskBannerHtml(detail)}</div>
@@ -3386,10 +3438,10 @@ function taskDetailView(detail: TaskDetail): string {
   const toolLayout = state.taskTool ? ` task-tool-open task-tool-${state.taskToolMode}` : "";
   const channelVisible = !readOnly && !detail.task.channel_instance_id;
   return shell(`<section class="task-screen">
-    <header class="task-head"><button id="back-tasks">←</button><div class="task-title-block"><h1><span class="task-code">${escapeHTML(detail.task.code || "")}</span><span class="task-title-text">${escapeHTML(detail.task.title)}</span></h1><div class="task-head-subline"><span class="task-head-meta" title="${escapeHTML(taskMeta)}">${escapeHTML(taskMeta)}</span><span id="task-detail-status" class="status ${statusClass(detail.task.status)}">${statusLabel(detail.task.status)}</span><span class="task-branch">${escapeHTML(detail.task.task_branch || "")}</span></div></div><div class="actions task-tool-actions">${renderTaskToolButtons(state.taskTool, {includeChannel: channelVisible, channelConnected: Boolean(state.taskChannelDestination), channelLabel: taskChannelButtonLabel(state.taskChannelDestination)})}</div></header>
+    <header class="task-head"><button id="back-tasks">←</button><div class="task-title-block"><h1><span class="task-code">${escapeHTML(detail.task.code || "")}</span><span class="task-title-text">${escapeHTML(detail.task.title)}</span></h1><div class="task-head-subline"><span class="task-head-meta" title="${escapeHTML(taskMeta)}">${escapeHTML(taskMeta)}</span><span id="task-detail-status" class="status ${statusClass(detail.task.status)}">${statusLabel(detail.task.status)}</span><span class="task-branch">${escapeHTML(detail.task.task_branch || "")}</span></div></div><div class="actions task-tool-actions">${renderTaskToolButtons(state.taskTool, {includeChannel: channelVisible, channelConnected: Boolean(state.taskChannelDestination), channelLabel: taskChannelButtonLabel(state.taskChannelDestination), pendingPermissions: taskPermissionPendingCount(detail)})}</div></header>
     <div class="task-grid${toolLayout}" style="--task-tool-width:${state.taskToolWidth}%">
       ${chat}
-      ${renderTaskToolPanel(state.taskTool, detail, state.selectedTaskAgent, taskCtxHtml(), state.taskToolMode, taskChannelPanelHTML(), state.taskToolPinned === state.taskTool)}
+      ${renderTaskToolPanel(state.taskTool, detail, state.selectedTaskAgent, taskCtxHtml(), state.taskToolMode, taskChannelPanelHTML(), state.taskToolPinned === state.taskTool, taskPermissionPanelHtml(detail))}
     </div>
     ${renderAgentConfigDialog(detail, state.selectedTaskAgent, state.models, state.codexAccounts, state.skills, state.mcpServers)}${taskTakeoverDialog(detail)}<div id="task-screen-dialogs">${completed ? reopenTaskDialog(detail) : ""}</div>
   </section>`);
@@ -3568,6 +3620,7 @@ function updateTaskLiveRegions(): void {
   const failureSlot = document.querySelector<HTMLElement>("#task-failure-slot");
   const nextFailure = taskFailureBannerHtml(detail);
   if (failureSlot && failureSlot.innerHTML !== nextFailure) failureSlot.innerHTML = nextFailure;
+  syncTaskPermissionIndicators(detail);
   const agentSelect = document.querySelector<HTMLSelectElement>("#composer-agent");
   if (!detail.agents.some(agent => agent.agent_id === state.selectedTaskAgent)) {
     state.selectedTaskAgent = detail.agents.some(agent => agent.agent_id === "main")
@@ -3590,9 +3643,10 @@ function updateTaskLiveRegions(): void {
   } else if (toolBody && state.taskTool === "browser") {
     refreshDesktopPanel(detail, setMessage);
   } else if (toolBody && state.taskTool) {
-    replaceRegionHTML(toolBody, renderTaskToolContent(state.taskTool, detail, taskCtxHtml(), taskChannelPanelHTML()));
+    replaceRegionHTML(toolBody, renderTaskToolContent(state.taskTool, detail, taskCtxHtml(), taskChannelPanelHTML(), taskPermissionPanelHtml(detail)));
     bindSessionActions();
     if (state.taskTool === "channel") bindTaskChannelPanel();
+    if (state.taskTool === "permissions") bindTaskPermissionActions(toolBody);
   }
   const count = document.querySelector<HTMLElement>("#conversation-filter-loaded");
   if (count) count.textContent = `${state.taskConversation.length} 条已加载`;
@@ -4790,6 +4844,20 @@ function bindMessageComposer(): void {
       state.taskToolPinned = tool;
       persistTaskToolLayout();
     }
+    if (tool === "permissions") {
+      if (state.selectedTask) {
+        try {
+          const detail = await api.task(state.selectedTask.task.id);
+          if (state.selectedTask && state.selectedTask.task.id === detail.task.id) {
+            state.selectedTask.permission_requests = detail.permission_requests || [];
+          }
+        } catch (error) {
+          setMessage("error", error instanceof Error ? error.message : String(error));
+        }
+      }
+      render();
+      return;
+    }
     if (tool === "channel") {
       try {
         await reloadTaskChannelState();
@@ -4885,8 +4953,9 @@ function bindSessionActions(): void {
       await refreshTaskRuntime(state.selectedTask!.task.id);
       const content = document.querySelector<HTMLElement>("#task-tool-panel-body");
       if (content) {
-        content.innerHTML = renderTaskToolContent(state.taskTool, state.selectedTask!, taskCtxHtml(), taskChannelPanelHTML());
+        content.innerHTML = renderTaskToolContent(state.taskTool, state.selectedTask!, taskCtxHtml(), taskChannelPanelHTML(), taskPermissionPanelHtml(state.selectedTask!));
         bindSessionActions();
+        if (state.taskTool === "permissions") bindTaskPermissionActions(content);
       }
     });
   }));
@@ -4917,18 +4986,27 @@ function syncTaskChannelContactSelection(): void {
   }));
 }
 
-function bindTaskPermissionActions(): void {
+function bindTaskPermissionActions(root: ParentNode = document): void {
   const task = state.selectedTask;
   if (!task) return;
-  document.querySelectorAll<HTMLButtonElement>("[data-task-permission-decision]").forEach(button => {
+  root.querySelectorAll<HTMLButtonElement>("[data-task-permission-decision]").forEach(button => {
     button.addEventListener("click", async () => {
       const requestID = button.dataset.taskPermissionId || "";
       const decision = button.dataset.taskPermissionDecision as "approve" | "reject";
       if (!requestID || !decision) return;
       button.disabled = true;
       try {
-        await api.resolveTaskPermissionRequest(task.task.id, requestID, decision);
-        await openTask(task.task.id);
+        const result = await api.resolveTaskPermissionRequest(task.task.id, requestID, decision);
+        if (state.selectedTask && state.selectedTask.task.id === task.task.id) {
+          // Keep the panel open and patch the decided request in place instead
+          // of reloading the whole Task, which would close an unpinned panel.
+          const requests = state.selectedTask.permission_requests || [];
+          const index = requests.findIndex(item => item.id === requestID);
+          if (index >= 0) requests[index] = result.request;
+          else requests.unshift(result.request);
+          state.selectedTask.permission_requests = requests;
+          render();
+        }
       } catch (error) {
         button.disabled = false;
         setMessage("error", error instanceof Error ? error.message : String(error));

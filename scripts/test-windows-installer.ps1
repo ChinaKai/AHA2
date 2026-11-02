@@ -121,10 +121,13 @@ try {
 
 $userDeployPath = Join-Path $repo "scripts\deploy-windows-user.ps1"
 $userDeploy = Get-Content -Raw -Encoding UTF8 -LiteralPath $userDeployPath
-foreach ($contract in @("ProviderPath", "GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)", "-WorkingDirectory `$install", "AllowCustomUserWritableInstallDir", "UpdateExistingInstallInPlace", "existing-install-in-place", "Custom install directory is not writable", "WriteAccessVerified", "-PerUser", "ElevationRequired=`$false", "AHA2-Setup-User-x64.exe", "Wait-AHA2Health", "Get-FileHash", "AHA2 User", "AHA2 User Update", "DetachedWorker", "New-ScheduledTaskAction", "RunLevel Limited", "Stop-AHA2ProcessTrees", "System32\taskkill.exe", "`$taskkillExecutable", "`$global:LASTEXITCODE = 0", "/T", "/SKIPUSERTASK=1", "user-deploy-result.json")) {
+foreach ($contract in @("ProviderPath", "GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)", "-WorkingDirectory `$install", "AllowCustomUserWritableInstallDir", "UpdateExistingInstallInPlace", "existing-install-in-place", "Custom install directory is not writable", "WriteAccessVerified", "-PerUser", "ElevationRequired=`$false", "AHA2-Setup-User-x64.exe", "Wait-AHA2Health", "Get-FileHash", "AHA2 User", "AHA2 User Update", "DetachedWorker", "New-ScheduledTaskAction", "RunLevel Limited", "Stop-AHA2ProcessTrees", "System32\taskkill.exe", "`$taskkillExecutable", "`$global:LASTEXITCODE = 0", "/T", "/SKIPUSERTASK=1", "user-deploy-result.json", "stagedInstaller", "Unblock-File", "Start-Process -FilePath `$stagedInstaller")) {
     if (-not $userDeploy.Contains($contract)) {
         throw "Per-user deployment contract is missing: $contract"
     }
+}
+if ($userDeploy.Contains("Start-Process -FilePath `$installer")) {
+    throw "Per-user deployment must not launch the installer directly from the WSL UNC path; stage a local copy first."
 }
 $taskSnapshotIndex = $userDeploy.IndexOf('$previousTaskXML')
 $stopBeforeBackupIndex = $userDeploy.IndexOf('Stop-AHA2ProcessTrees', $taskSnapshotIndex)

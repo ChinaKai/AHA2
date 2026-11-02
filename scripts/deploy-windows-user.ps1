@@ -304,9 +304,20 @@ try {
       Copy-Item -LiteralPath $pluginManifestInput -Destination $pluginManifest -Force
     }
   } else {
-    $arguments = @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/CLOSEAPPLICATIONS','/SKIPUSERTASK=1',('/DIR="{0}"' -f $install),('/DATADIR="{0}"' -f $data))
-    $process = Start-Process -FilePath $installer -ArgumentList $arguments -WindowStyle Hidden -Wait -PassThru
-    if ($process.ExitCode -ne 0) { throw "Per-user installer exited with code $($process.ExitCode)." }
+    # The repo lives on the WSL filesystem, so $installer is a UNC path. Windows
+    # shows "Open File - Security Warning" for executables launched from a
+    # network location and waits for a click, which breaks unattended deploys.
+    # Stage a local copy and clear any Mark-of-the-Web before launching it.
+    $stagedInstaller = Join-Path ([IO.Path]::GetTempPath()) ("AHA2-Setup-User-x64-{0}.exe" -f $stamp)
+    Copy-Item -LiteralPath $installer -Destination $stagedInstaller -Force
+    Unblock-File -LiteralPath $stagedInstaller -ErrorAction SilentlyContinue
+    try {
+      $arguments = @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/CLOSEAPPLICATIONS','/SKIPUSERTASK=1',('/DIR="{0}"' -f $install),('/DATADIR="{0}"' -f $data))
+      $process = Start-Process -FilePath $stagedInstaller -ArgumentList $arguments -WindowStyle Hidden -Wait -PassThru
+      if ($process.ExitCode -ne 0) { throw "Per-user installer exited with code $($process.ExitCode)." }
+    } finally {
+      Remove-Item -LiteralPath $stagedInstaller -Force -ErrorAction SilentlyContinue
+    }
   }
   if (-not (Test-Path -LiteralPath $registerTask -PathType Leaf)) { throw "Installed task registration script is missing." }
   Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue

@@ -4,7 +4,7 @@ import {renderDesktopHeaderControls, renderDesktopPanel} from "./desktop_panel.j
 import {renderTaskMemory} from "./task_agents.js";
 import type {TaskDetail} from "./types.js";
 
-export type TaskTool = "channel" | "context" | "hardware" | "browser" | "memory";
+export type TaskTool = "permissions" | "channel" | "context" | "hardware" | "browser" | "memory";
 export type TaskToolMode = "split" | "fullscreen";
 
 export const TASK_TOOL_DEFAULT_WIDTH = 42;
@@ -24,6 +24,7 @@ export function normalizePinnedTaskTool(value: unknown): TaskTool | "" {
 }
 
 const tools: Array<{id: TaskTool; label: string; iconName: string}> = [
+  {id: "permissions", label: "权限申请", iconName: "shield"},
   {id: "channel", label: "渠道", iconName: "bot"},
   {id: "context", label: "Context", iconName: "context"},
   {id: "hardware", label: "硬件调试", iconName: "hardware"},
@@ -39,12 +40,14 @@ function escapeHTML(value: unknown): string {
 
 export function renderTaskToolButtons(
   active: TaskTool | "",
-  options: {includeChannel?: boolean; channelConnected?: boolean; channelLabel?: string} = {},
+  options: {includeChannel?: boolean; channelConnected?: boolean; channelLabel?: string; pendingPermissions?: number} = {},
 ): string {
   return tools.filter(tool => tool.id !== "channel" || options.includeChannel !== false).map(tool => {
     const connected = tool.id === "channel" && options.channelConnected;
     const label = tool.id === "channel" && options.channelLabel ? options.channelLabel : tool.label;
-    return `<button type="button" data-task-tool="${tool.id}" class="icon-button task-tool-button ${active === tool.id ? "active" : ""} ${connected ? "connected" : ""}" title="${escapeHTML(label)}" aria-label="${escapeHTML(label)}">${icon(tool.iconName)}</button>`;
+    const pending = tool.id === "permissions" ? Math.max(0, Number(options.pendingPermissions) || 0) : 0;
+    const badge = pending > 0 ? `<span class="task-tool-badge">${pending > 99 ? "99+" : pending}</span>` : "";
+    return `<button type="button" data-task-tool="${tool.id}" class="icon-button task-tool-button ${active === tool.id ? "active" : ""} ${connected ? "connected" : ""} ${pending > 0 ? "has-pending" : ""}" title="${escapeHTML(label)}${pending > 0 ? `（${pending} 条待审批）` : ""}" aria-label="${escapeHTML(label)}">${icon(tool.iconName)}${badge}</button>`;
   }).join("");
 }
 
@@ -57,7 +60,9 @@ export function renderTaskToolContent(
   detail: TaskDetail,
   contextHTML: string,
   channelHTML = "",
+  permissionHTML = "",
 ): string {
+  if (tool === "permissions") return permissionHTML;
   if (tool === "channel") return channelHTML;
   if (tool === "context") return contextHTML;
   if (tool === "memory") return `<div class="task-memory-tool">${renderTaskMemory(detail.memory)}</div>`;
@@ -74,6 +79,7 @@ export function renderTaskToolPanel(
   mode: TaskToolMode,
   channelHTML = "",
   pinned = false,
+  permissionHTML = "",
 ): string {
   const switchLabel = mode === "split" ? "全屏" : "小窗";
   const switchIcon = mode === "split" ? "expand" : "panel";
@@ -90,6 +96,6 @@ export function renderTaskToolPanel(
   return `<aside class="task-tool-panel ${tool ? "open" : ""} ${mode}">
     <div id="task-tool-resizer" class="task-tool-resizer" role="separator" aria-label="调整工具面板宽度" aria-orientation="vertical" aria-valuemin="30" aria-valuemax="70" tabindex="0" title="拖动调整宽度，双击恢复默认"></div>
     <header class="task-tool-panel-head"><div class="task-tool-panel-title"><div class="task-tool-panel-title-row"><h3>${escapeHTML(taskToolTitle(tool))}</h3>${hardwareSwitcher}</div><small>${escapeHTML(agentID)}</small></div><div class="task-tool-panel-actions">${pinButton}<button type="button" id="toggle-task-tool-mode" class="task-tool-mode-toggle" title="切换为${switchLabel}" aria-label="切换为${switchLabel}">${icon(switchIcon)}<span>${switchLabel}</span></button><button type="button" id="close-task-tool" class="icon-button" title="关闭">${icon("close")}</button></div></header>
-    <div id="task-tool-panel-body">${renderTaskToolContent(tool, detail, contextHTML, channelHTML)}</div>
+    <div id="task-tool-panel-body">${renderTaskToolContent(tool, detail, contextHTML, channelHTML, permissionHTML)}</div>
   </aside>`;
 }

@@ -125,7 +125,7 @@ func (s *Service) SendTaskPermissionRequestCard(ctx context.Context, instanceID,
 		Preview: map[string]any{
 			"request_id": request.ID, "task_id": request.TaskID,
 			"applicant": request.ApplicantName, "action": request.Action,
-			"scope": request.Scope, "reason": request.Reason,
+			"scope": request.Scope, "reason": request.Reason, "risk": request.Risk,
 		},
 		Precondition: map[string]any{"request_status": "pending"},
 		Status:       "pending", ExpiresAt: request.ExpiresAt, CreatedAt: now, UpdatedAt: now,

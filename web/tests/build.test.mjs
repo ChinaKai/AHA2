@@ -549,7 +549,7 @@ test("task detail can bind one primary private or group channel", async () => {
   }
   assert.match(script, /同时 @ 当前渠道机器人和目标机器人/);
   assert.doesNotMatch(script, /task-channel-route-dialog/);
-  assert.match(script, /renderTaskToolPanel\([\s\S]*?taskChannelPanelHTML\(\)\)/);
+  assert.match(script, /renderTaskToolPanel\([\s\S]*?taskChannelPanelHTML\(\)/);
   assert.match(api, /\/tasks\/\$\{encodeURIComponent\(id\)\}\/channel-routes/);
   assert.match(api, /channel-members:refresh/);
   assert.match(api, /channel-contacts/);
@@ -2354,12 +2354,21 @@ test("pet workbench follows tab exposes unfollow and ignore actions", async () =
 test("task detail renders owner permission request decisions", async () => {
   const root = resolve(import.meta.dirname, "..");
   const main = await readFile(resolve(root, "src", "main.ts"), "utf8");
+  const tools = await readFile(resolve(root, "src", "task_tools.ts"), "utf8");
   const api = await readFile(resolve(root, "src", "api.ts"), "utf8");
   const types = await readFile(resolve(root, "src", "types.ts"), "utf8");
-  assert.match(main, /taskPermissionRequestsHtml\(detail\.permission_requests/);
+  assert.match(main, /taskPermissionPanelHtml\(detail\)/);
+  assert.match(main, /<details class="task-permission-item/);
+  assert.match(main, /task-permission-detail/);
   assert.match(main, /data-task-permission-decision="approve"/);
   assert.match(main, /data-task-permission-decision="reject"/);
   assert.match(main, /bindTaskPermissionActions/);
+  assert.match(main, /syncTaskPermissionIndicators/);
+  // The inline block above the conversation was replaced by the toolbar panel.
+  assert.doesNotMatch(main, /<div id="task-permission-slot">/);
+  assert.doesNotMatch(main, /class="conversation-top"/);
+  assert.match(tools, /\{id: "permissions", label: "权限申请", iconName: "shield"\}/);
+  assert.match(tools, /task-tool-badge/);
   assert.match(api, /resolveTaskPermissionRequest/);
   assert.match(types, /interface TaskPermissionRequest/);
   assert.match(types, /permission_requests\?: TaskPermissionRequest\[\]/);

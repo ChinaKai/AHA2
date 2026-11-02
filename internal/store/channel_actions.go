@@ -149,7 +149,7 @@ func (s *Store) FinishChannelPendingActionFromOwner(ctx context.Context, id, tar
 		targetID, status, timeString(at), timeString(at), id); err != nil {
 		return err
 	}
-	payload := map[string]any{"kind": "action_result", "action_id": id, "operation": action.Operation, "status": status, "result": resultPayload}
+	payload := map[string]any{"kind": "action_result", "action_id": id, "operation": action.Operation, "status": status, "result": resultPayload, "preview": action.Preview}
 	if err := enqueueChannelActionDeliveryTx(ctx, tx, action.InstanceID, action.ConversationID, id+":result:"+status, "action_result", payload, at); err != nil {
 		return err
 	}
@@ -175,7 +175,7 @@ func (s *Store) FinishChannelPendingAction(ctx context.Context, id, targetID, st
 	if _, err := tx.ExecContext(ctx, `UPDATE channel_pending_actions SET target_id=?,status=?,updated_at=? WHERE id=? AND status='executing'`, targetID, status, timeString(at), id); err != nil {
 		return err
 	}
-	payload := map[string]any{"kind": "action_result", "action_id": id, "operation": action.Operation, "status": status, "result": resultPayload}
+	payload := map[string]any{"kind": "action_result", "action_id": id, "operation": action.Operation, "status": status, "result": resultPayload, "preview": action.Preview}
 	if err := enqueueChannelActionDeliveryTx(ctx, tx, action.InstanceID, action.ConversationID, id+":result:"+status, "action_result", payload, at); err != nil {
 		return err
 	}
@@ -194,7 +194,7 @@ func (s *Store) ActivateChannelTaskRoute(ctx context.Context, action domain.Chan
 	if _, err := tx.ExecContext(ctx, `UPDATE channel_pending_actions SET status='succeeded',updated_at=? WHERE id=? AND status='executing'`, timeString(at), action.ID); err != nil {
 		return err
 	}
-	payload := map[string]any{"kind": "action_result", "action_id": action.ID, "operation": "takeover", "status": "succeeded", "target_task_id": action.TargetID}
+	payload := map[string]any{"kind": "action_result", "action_id": action.ID, "operation": "takeover", "status": "succeeded", "target_task_id": action.TargetID, "preview": action.Preview}
 	if err := enqueueChannelActionDeliveryTx(ctx, tx, action.InstanceID, action.ConversationID, action.ID+":result:succeeded", "route_entered", payload, at); err != nil {
 		return err
 	}
@@ -266,7 +266,7 @@ func (s *Store) ExitChannelTaskRoute(ctx context.Context, action domain.ChannelP
 	if _, err := tx.ExecContext(ctx, `UPDATE channel_pending_actions SET status='succeeded',updated_at=? WHERE id=? AND status='executing'`, timeString(at), action.ID); err != nil {
 		return err
 	}
-	payload := map[string]any{"kind": "action_result", "action_id": action.ID, "operation": "exit", "status": "succeeded"}
+	payload := map[string]any{"kind": "action_result", "action_id": action.ID, "operation": "exit", "status": "succeeded", "preview": action.Preview}
 	if err := enqueueChannelActionDeliveryTx(ctx, tx, action.InstanceID, action.ConversationID, action.ID+":result:succeeded", "route_exited", payload, at); err != nil {
 		return err
 	}
