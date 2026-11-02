@@ -26,6 +26,19 @@ func (s *Server) petWorkbench(writer http.ResponseWriter, request *http.Request)
 	})
 }
 
+func (s *Server) followPetWatch(writer http.ResponseWriter, request *http.Request) {
+	taskID := strings.TrimSpace(request.PathValue("task"))
+	watch, err := s.app.FollowPetTask(request.Context(), taskID)
+	if err != nil {
+		writeJSON(writer, http.StatusBadRequest, map[string]any{
+			"ok": false, "error": "pet_watch_follow_failed", "message": err.Error(),
+		})
+		return
+	}
+	s.audit(request, "pet.watch.follow", "task", taskID, nil)
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "watch": watch})
+}
+
 func (s *Server) deletePetWatch(writer http.ResponseWriter, request *http.Request) {
 	taskID := strings.TrimSpace(request.PathValue("task"))
 	if err := s.app.RemovePetTaskWatch(request.Context(), taskID); err != nil {

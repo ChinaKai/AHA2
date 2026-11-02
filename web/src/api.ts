@@ -545,6 +545,10 @@ class APIClient {
     });
   }
 
+  followPetTask(taskID: string): Promise<{ok: boolean; watch: import("./types").PetTaskWatch}> {
+    return this.request(`/api/v1/pet/watches/${encodeURIComponent(taskID)}`, {method: "POST"});
+  }
+
   removePetTaskWatch(taskID: string): Promise<{ok: boolean}> {
     return this.request(`/api/v1/pet/watches/${encodeURIComponent(taskID)}`, {method: "DELETE"});
   }

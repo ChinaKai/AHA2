@@ -5579,6 +5579,20 @@ async function bindPetDiaryPage(): Promise<void> {
   };
 
   const bindPetWatchActions = () => {
+    body.querySelectorAll<HTMLButtonElement>("[data-pet-watch-follow]").forEach(button => {
+      button.addEventListener("click", async () => {
+        const taskID = button.dataset.petWatchTask || "";
+        if (!taskID) return;
+        button.disabled = true;
+        try {
+          await api.followPetTask(taskID);
+          await load();
+        } catch (error) {
+          button.disabled = false;
+          body.insertAdjacentHTML("afterbegin", `<div class="field-help">${escapeHTML(error instanceof Error ? error.message : String(error))}</div>`);
+        }
+      });
+    });
     body.querySelectorAll<HTMLButtonElement>("[data-pet-watch-unfollow]").forEach(button => {
       button.addEventListener("click", async () => {
         const taskID = button.dataset.petWatchTask || "";
@@ -5677,17 +5691,27 @@ function petWatchReasonLabel(reason: string): string {
   return label === key ? reason : label;
 }
 
-function renderPetWatches(items: Array<{task_id: string; code: string; title: string; status: string; reason: string; ignored: boolean; updated_at: string}>): string {
-  if (items.length === 0) return `<div class="field-help">${escapeHTML(t("petWorkbench.emptyFollows"))}</div>`;
-  return items.map(item => {
+function renderPetWatches(items: Array<{task_id: string; code: string; title: string; status: string; watched: boolean; reason: string; ignored: boolean; updated_at: string}>): string {
+  const hint = `<div class="field-help">${escapeHTML(t("petWorkbench.followHint"))}</div>`;
+  if (items.length === 0) return `${hint}<div class="field-help">${escapeHTML(t("petWorkbench.emptyFollows"))}</div>`;
+  return hint + items.map(item => {
     const title = `${item.code || item.task_id} · ${item.title || item.task_id}`;
     const reason = item.reason ? petWatchReasonLabel(item.reason) : "-";
-    const actions = item.ignored
-      ? `<div class="pet-watch-actions"><button type="button" data-pet-watch-ignore="false" data-pet-watch-task="${escapeHTML(item.task_id)}">${t("petWorkbench.restoreFollow")}</button></div>`
-      : `<div class="pet-watch-actions"><button type="button" data-pet-watch-unfollow data-pet-watch-task="${escapeHTML(item.task_id)}">${t("petWorkbench.unfollowTask")}</button><button type="button" data-pet-watch-ignore="true" data-pet-watch-task="${escapeHTML(item.task_id)}">${t("petWorkbench.ignoreTask")}</button></div>`;
-    return `<article class="pet-watch-card ${item.ignored ? "ignored" : ""}">
-      <header><strong>${escapeHTML(title)}</strong><span class="pet-approval-status">${escapeHTML(statusLabel(item.status))}${item.ignored ? ` · ${t("petWorkbench.followIgnored")}` : ""}</span></header>
-      <small>${t("petWorkbench.followReason")}: ${escapeHTML(reason)} · ${t("petWorkbench.followUpdated")}: ${escapeHTML(formatDateTime(item.updated_at))}</small>
+    let actions: string;
+    if (!item.watched) {
+      actions = `<div class="pet-watch-actions"><button type="button" data-pet-watch-follow data-pet-watch-task="${escapeHTML(item.task_id)}">${t("petWorkbench.followTask")}</button></div>`;
+    } else if (item.ignored) {
+      actions = `<div class="pet-watch-actions"><button type="button" data-pet-watch-ignore="false" data-pet-watch-task="${escapeHTML(item.task_id)}">${t("petWorkbench.restoreFollow")}</button></div>`;
+    } else {
+      actions = `<div class="pet-watch-actions"><button type="button" data-pet-watch-unfollow data-pet-watch-task="${escapeHTML(item.task_id)}">${t("petWorkbench.unfollowTask")}</button><button type="button" data-pet-watch-ignore="true" data-pet-watch-task="${escapeHTML(item.task_id)}">${t("petWorkbench.ignoreTask")}</button></div>`;
+    }
+    const followState = !item.watched ? "" : item.ignored ? ` · ${t("petWorkbench.followIgnored")}` : ` · ${t("petWorkbench.following")}`;
+    const meta = item.watched
+      ? `${t("petWorkbench.followReason")}: ${escapeHTML(reason)} · ${t("petWorkbench.followUpdated")}: ${escapeHTML(formatDateTime(item.updated_at))}`
+      : `${t("petWorkbench.followUpdated")}: ${escapeHTML(formatDateTime(item.updated_at))}`;
+    return `<article class="pet-watch-card ${item.ignored ? "ignored" : ""} ${item.watched ? "" : "unwatched"}">
+      <header><strong>${escapeHTML(title)}</strong><span class="pet-approval-status">${escapeHTML(statusLabel(item.status))}${followState}</span></header>
+      <small>${meta}</small>
       ${actions}
     </article>`;
   }).join("");

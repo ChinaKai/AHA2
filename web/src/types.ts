@@ -1216,6 +1216,7 @@ export interface PetTaskWatch {
   code: string;
   title: string;
   status: string;
+  watched: boolean;
   reason: string;
   ignored: boolean;
   ignored_at?: string;

@@ -54,7 +54,7 @@ func TestIgnoredPetWatchSuppressesNotificationsAndPetCannotReactivate(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(watches) != 1 || !watches[0].Ignored || watches[0].TaskID != task.ID {
+	if len(watches) != 1 || !watches[0].Watched || !watches[0].Ignored || watches[0].TaskID != task.ID {
 		t.Fatalf("ignored watches=%#v", watches)
 	}
 
@@ -83,6 +83,79 @@ func TestIgnoredPetWatchSuppressesNotificationsAndPetCannotReactivate(t *testing
 	if watches, err := fixture.service.PetTaskWatchList(fixture.ctx); err != nil || len(watches) != 0 {
 		t.Fatalf("watches after owner removal=%#v err=%v", watches, err)
 	}
+}
+
+func TestPetTaskWatchListIncludesUnwatchedActiveOrdinaryTasks(t *testing.T) {
+	fixture := newPetTaskFixture(t)
+	if _, err := fixture.service.OwnerAssistant(fixture.ctx); err != nil {
+		t.Fatal(err)
+	}
+	now := fixture.service.now().UTC()
+	project := domain.Project{ID: "project-follow-list", Name: "Follow list", ProjectType: "local", CreatedAt: now, UpdatedAt: now}
+	workspace := domain.Workspace{
+		ID: "workspace-follow-list", ProjectID: project.ID, Name: "Follow list",
+		Locality: "local", Transport: "native", RootPath: t.TempDir(), Health: "ready",
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := fixture.database.CreateProject(fixture.ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.database.CreateWorkspace(fixture.ctx, workspace); err != nil {
+		t.Fatal(err)
+	}
+	create := func(title string) domain.Task {
+		t.Helper()
+		task, err := fixture.service.CreateTask(fixture.ctx, CreateTaskInput{
+			ProjectID: project.ID, WorkspaceID: workspace.ID, Title: title, Request: title,
+			ModelID: fixture.model.ID, Isolation: "inplace", Filesystem: "workspace-write",
+			Approval: "never", CollaborationMode: "single", MaxAgents: 1,
+			KnowledgePolicy: "inherit", StartMode: "manual",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return task
+	}
+	active := create("active task")
+	terminal := create("terminal task")
+	if err := fixture.database.UpdateTaskStatus(fixture.ctx, terminal.ID, domain.TaskDraft, domain.TaskCancelled, timeString(now), ""); err != nil {
+		t.Fatal(err)
+	}
+
+	views, err := fixture.service.PetTaskWatchList(fixture.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]PetTaskWatchView{}
+	for _, view := range views {
+		byID[view.TaskID] = view
+	}
+	activeView, ok := byID[active.ID]
+	if !ok || activeView.Watched || activeView.Ignored {
+		t.Fatalf("active task view=%#v ok=%v", activeView, ok)
+	}
+	if _, ok := byID[terminal.ID]; ok {
+		t.Fatalf("terminal task was listed: %#v", byID[terminal.ID])
+	}
+	if _, ok := byID[petTaskID]; ok {
+		t.Fatal("pet task was listed")
+	}
+	if _, err := fixture.service.FollowPetTask(fixture.ctx, active.ID); err != nil {
+		t.Fatal(err)
+	}
+	views, err = fixture.service.PetTaskWatchList(fixture.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, view := range views {
+		if view.TaskID == active.ID {
+			if !view.Watched || view.Reason != "manual" {
+				t.Fatalf("followed task view=%#v", view)
+			}
+			return
+		}
+	}
+	t.Fatalf("followed task disappeared from list: %#v", views)
 }
 
 func TestPetWatchedTaskStatusNotification(t *testing.T) {

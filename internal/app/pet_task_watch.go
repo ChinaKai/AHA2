@@ -13,11 +13,13 @@ import (
 )
 
 // PetTaskWatchView is the Owner-facing row for the Pet Workbench follows tab.
+// Unwatched rows are ordinary non-terminal Tasks the Owner can start following.
 type PetTaskWatchView struct {
 	TaskID    string            `json:"task_id"`
 	Code      string            `json:"code"`
 	Title     string            `json:"title"`
 	Status    domain.TaskStatus `json:"status"`
+	Watched   bool              `json:"watched"`
 	Reason    string            `json:"reason"`
 	Ignored   bool              `json:"ignored"`
 	IgnoredAt time.Time         `json:"ignored_at,omitempty"`
@@ -194,23 +196,49 @@ func (s *Service) PetUnwatchTask(ctx context.Context, taskID string) error {
 	return s.store.DeletePetTaskWatch(ctx, task.ID)
 }
 
-// PetTaskWatchList returns all watched Tasks for the Owner workbench. Ignored
-// watches stay visible so the Owner can restore them.
+// PetTaskWatchList returns the Owner workbench follows tab: every non-terminal
+// ordinary Task, plus any watched Task (including terminal or ignored ones) so
+// the Owner can manage existing follows.
 func (s *Service) PetTaskWatchList(ctx context.Context) ([]PetTaskWatchView, error) {
 	watches, err := s.store.PetTaskWatches(ctx)
 	if err != nil {
 		return nil, err
 	}
-	views := make([]PetTaskWatchView, 0, len(watches))
+	tasks, err := s.store.ListTasks(ctx, "")
+	if err != nil {
+		return nil, err
+	}
+	projects, err := s.store.ListProjects(ctx)
+	if err != nil {
+		return nil, err
+	}
+	ordinaryProjects := make(map[string]bool, len(projects))
+	for _, project := range projects {
+		if !domain.IsSystemManagedProject(project) {
+			ordinaryProjects[project.ID] = true
+		}
+	}
+	watchByTask := make(map[string]domain.PetTaskWatch, len(watches))
 	for _, watch := range watches {
-		task, taskErr := s.store.Task(ctx, watch.TaskID)
-		if taskErr != nil {
+		watchByTask[watch.TaskID] = watch
+	}
+	views := make([]PetTaskWatchView, 0, len(tasks))
+	for _, task := range tasks {
+		if task.ID == petTaskID {
 			continue
+		}
+		watch, watched := watchByTask[task.ID]
+		if !watched && (task.Status.Terminal() || !ordinaryProjects[task.ProjectID]) {
+			continue
+		}
+		updatedAt := task.UpdatedAt
+		if watched && watch.UpdatedAt.After(updatedAt) {
+			updatedAt = watch.UpdatedAt
 		}
 		views = append(views, PetTaskWatchView{
 			TaskID: task.ID, Code: task.Code, Title: task.Title, Status: task.Status,
-			Reason: watch.Reason, Ignored: watch.Ignored, IgnoredAt: watch.IgnoredAt,
-			CreatedAt: watch.CreatedAt, UpdatedAt: watch.UpdatedAt,
+			Watched: watched, Reason: watch.Reason, Ignored: watch.Ignored,
+			IgnoredAt: watch.IgnoredAt, CreatedAt: task.CreatedAt, UpdatedAt: updatedAt,
 		})
 	}
 	sort.SliceStable(views, func(i, j int) bool {
@@ -220,6 +248,42 @@ func (s *Service) PetTaskWatchList(ctx context.Context) ([]PetTaskWatchView, err
 		return views[i].UpdatedAt.After(views[j].UpdatedAt)
 	})
 	return views, nil
+}
+
+// FollowPetTask is the Owner-facing follow action for an ordinary non-terminal
+// Task that the pet is not already watching.
+func (s *Service) FollowPetTask(ctx context.Context, taskID string) (domain.PetTaskWatch, error) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return domain.PetTaskWatch{}, fmt.Errorf("task_id 不能为空")
+	}
+	task, err := s.store.Task(ctx, taskID)
+	if err != nil {
+		return domain.PetTaskWatch{}, fmt.Errorf("Task 不存在")
+	}
+	if task.ID == petTaskID {
+		return domain.PetTaskWatch{}, fmt.Errorf("不能关注宠物自己的 Task")
+	}
+	project, err := s.store.Project(ctx, task.ProjectID)
+	if err != nil {
+		return domain.PetTaskWatch{}, fmt.Errorf("Task 所属项目不存在")
+	}
+	if domain.IsSystemManagedProject(project) {
+		return domain.PetTaskWatch{}, fmt.Errorf("系统托管任务不能关注")
+	}
+	if task.Status.Terminal() {
+		return domain.PetTaskWatch{}, fmt.Errorf("只能关注未结束的任务")
+	}
+	if watch, watchErr := s.store.PetTaskWatch(ctx, task.ID); watchErr == nil {
+		if watch.Ignored {
+			return domain.PetTaskWatch{}, fmt.Errorf("该任务已被忽略，请恢复关注")
+		}
+		return watch, nil
+	}
+	if err := s.store.UpsertPetTaskWatch(ctx, task.ID, "manual", s.now().UTC()); err != nil {
+		return domain.PetTaskWatch{}, err
+	}
+	return s.store.PetTaskWatch(ctx, task.ID)
 }
 
 // RemovePetTaskWatch is the Owner-facing unfollow action. Unlike the pet tool,

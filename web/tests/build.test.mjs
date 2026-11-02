@@ -2338,13 +2338,17 @@ test("pet workbench follows tab exposes unfollow and ignore actions", async () =
   const i18n = await readFile(resolve(root, "src", "i18n.ts"), "utf8");
   assert.match(main, /data-pet-workbench-tab="follows"/);
   assert.match(main, /renderPetWatches\(view\.watches\)/);
+  assert.match(main, /data-pet-watch-follow/);
   assert.match(main, /data-pet-watch-unfollow/);
   assert.match(main, /data-pet-watch-ignore="true"/);
   assert.match(main, /data-pet-watch-ignore="false"/);
+  assert.match(api, /followPetTask/);
   assert.match(api, /removePetTaskWatch/);
   assert.match(api, /setPetTaskWatchIgnored/);
   assert.match(i18n, /"petWorkbench\.follows": "关注"/);
   assert.match(i18n, /"petWorkbench\.follows": "Following"/);
+  assert.match(i18n, /"petWorkbench\.followTask": "关注"/);
+  assert.match(i18n, /"petWorkbench\.followTask": "Follow"/);
 });
 
 test("completed tasks freeze the composer behind a confirmed reopen", async () => {

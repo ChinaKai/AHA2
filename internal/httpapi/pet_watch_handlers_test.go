@@ -79,21 +79,30 @@ func TestPetWatchAPIListIgnoreAndRemove(t *testing.T) {
 	if err := database.CreateTask(ctx, task); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.UpsertPetTaskWatch(ctx, task.ID, "manual", now); err != nil {
-		t.Fatal(err)
-	}
 
 	response := requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/pet/workbench", nil, "")
 	var workbench struct {
 		Watches []struct {
 			TaskID  string `json:"task_id"`
+			Watched bool   `json:"watched"`
 			Ignored bool   `json:"ignored"`
 		} `json:"watches"`
 	}
 	decodeResponse(t, response, &workbench)
 	if response.StatusCode != http.StatusOK || len(workbench.Watches) != 1 ||
-		workbench.Watches[0].TaskID != task.ID || workbench.Watches[0].Ignored {
+		workbench.Watches[0].TaskID != task.ID || workbench.Watches[0].Watched || workbench.Watches[0].Ignored {
 		t.Fatalf("workbench=%d %#v", response.StatusCode, workbench)
+	}
+
+	response = requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/pet/watches/"+task.ID, nil, csrf)
+	var followed struct {
+		Watch struct {
+			TaskID string `json:"task_id"`
+		} `json:"watch"`
+	}
+	decodeResponse(t, response, &followed)
+	if response.StatusCode != http.StatusOK || followed.Watch.TaskID != task.ID {
+		t.Fatalf("follow=%d %#v", response.StatusCode, followed)
 	}
 
 	response = requestJSON(t, client, http.MethodPatch, server.URL+"/api/v1/pet/watches/"+task.ID,
@@ -115,7 +124,7 @@ func TestPetWatchAPIListIgnoreAndRemove(t *testing.T) {
 	response.Body.Close()
 	response = requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/pet/workbench", nil, "")
 	decodeResponse(t, response, &workbench)
-	if len(workbench.Watches) != 0 {
+	if len(workbench.Watches) != 1 || workbench.Watches[0].TaskID != task.ID || workbench.Watches[0].Watched {
 		t.Fatalf("watches after remove=%#v", workbench.Watches)
 	}
 }
