@@ -81,8 +81,8 @@ func channelMCPTools() []mcpTool {
 	return []mcpTool{
 		{
 			Name: "channel_reply",
-			Description: "Reply to the group message that triggered this Turn. " +
-				"Use this instead of finishing silently when the group needs an answer. " +
+			Description: "Reply to the channel message that triggered this Turn. " +
+				"Use this instead of finishing silently when the conversation needs an answer. " +
 				"The current message's receipt is resolved automatically.",
 			InputSchema: map[string]any{
 				"type": "object",
@@ -93,7 +93,7 @@ func channelMCPTools() []mcpTool {
 					},
 					"inbound_receipt_id": map[string]any{
 						"type":        "string",
-						"description": "Optional receipt override. Defaults to the current Turn's group message.",
+						"description": "Optional receipt override. Defaults to the current Turn's routed message.",
 					},
 					"attachment_ids": map[string]any{
 						"type":        "array",
@@ -119,7 +119,7 @@ func channelMCPTools() []mcpTool {
 					},
 					"inbound_receipt_id": map[string]any{
 						"type":        "string",
-						"description": "Optional receipt override. Defaults to the current Turn's group message.",
+						"description": "Optional receipt override. Defaults to the current Turn's routed message.",
 					},
 				},
 				"required":             []string{"reason"},
@@ -172,7 +172,7 @@ func (s *Server) callChannelMCPTool(writer http.ResponseWriter, request *http.Re
 		}
 		receiptID, err := s.channelMCPReceiptID(request, claims, input.InboundReceiptID)
 		if err != nil {
-			toolError("this Turn has no group message to reply to")
+			toolError("this Turn has no routed channel message to reply to")
 			return
 		}
 		_, err = s.channels.SendAgentChannelReply(request.Context(), claims, channel.AgentChannelReplyInput{
@@ -199,7 +199,7 @@ func (s *Server) callChannelMCPTool(writer http.ResponseWriter, request *http.Re
 		}
 		receiptID, err := s.channelMCPReceiptID(request, claims, input.InboundReceiptID)
 		if err != nil {
-			toolError("this Turn has no group message to resolve")
+			toolError("this Turn has no routed channel message to resolve")
 			return
 		}
 		if err := s.app.SetAgentChannelReplyDecision(request.Context(), claims, "end", receiptID, input.Reason); err != nil {

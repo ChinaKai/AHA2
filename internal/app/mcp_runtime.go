@@ -87,7 +87,7 @@ func (s *Service) mcpRuntimeForTask(ctx context.Context, task domain.Task, agent
 		}
 	}
 	if agentAPIURL = strings.TrimSpace(agentAPIURL); agentAPIURL != "" {
-		if group, _ := s.store.HasActiveTaskGroupRoute(ctx, task.ID); group {
+		if routed, _ := s.store.HasActiveChannelTaskRoute(ctx, task.ID); routed {
 			servers = append(servers, backend.MCPServer{
 				Name: channelMCPName, Transport: "http",
 				URL:            strings.TrimRight(agentAPIURL, "/") + channelMCPPath,

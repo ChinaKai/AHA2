@@ -239,8 +239,26 @@ func (s *Store) ChannelContextForReceipt(
 }
 
 func (s *Store) HasActiveTaskGroupRoute(ctx context.Context, taskID string) (bool, error) {
-	if strings.TrimSpace(taskID) == "" {
+	return s.hasActiveTaskRoute(ctx, taskID, domain.ChannelEndpointGroupDigitalHuman)
+}
+
+// HasActiveChannelTaskRoute reports whether the Task is currently routed by a
+// private assistant or group conversation in task_route mode. Both route modes
+// have no automatic reply mirror and use the narrow channel MCP instead.
+func (s *Store) HasActiveChannelTaskRoute(ctx context.Context, taskID string) (bool, error) {
+	return s.hasActiveTaskRoute(ctx, taskID,
+		domain.ChannelEndpointGroupDigitalHuman, domain.ChannelEndpointAssistantDM)
+}
+
+func (s *Store) hasActiveTaskRoute(ctx context.Context, taskID string, endpointKinds ...string) (bool, error) {
+	if strings.TrimSpace(taskID) == "" || len(endpointKinds) == 0 {
 		return false, nil
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(endpointKinds)), ",")
+	args := make([]any, 0, len(endpointKinds)+1)
+	args = append(args, taskID)
+	for _, kind := range endpointKinds {
+		args = append(args, kind)
 	}
 	var active bool
 	err := s.db.QueryRowContext(ctx, `
@@ -251,10 +269,8 @@ func (s *Store) HasActiveTaskGroupRoute(ctx context.Context, taskID string) (boo
 			JOIN channel_endpoints endpoint ON endpoint.id=conversation.endpoint_id
 			WHERE route.target_task_id=? AND route.state='active'
 			  AND conversation.status='active'
-			  AND endpoint.kind=?
-		)`,
-		taskID, domain.ChannelEndpointGroupDigitalHuman,
-	).Scan(&active)
+			  AND endpoint.kind IN (`+placeholders+`)
+		)`, args...).Scan(&active)
 	return active, err
 }
 

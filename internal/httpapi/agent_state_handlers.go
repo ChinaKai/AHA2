@@ -30,7 +30,7 @@ func (s *Server) agentCapabilitiesInfo(writer http.ResponseWriter, request *http
 		channelOutreach = channelErr == nil
 	}
 	if s.store != nil {
-		channelReplyDecision, _ = s.store.HasActiveTaskGroupRoute(request.Context(), call.Task.ID)
+		channelReplyDecision, _ = s.store.HasActiveChannelTaskRoute(request.Context(), call.Task.ID)
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "capabilities": map[string]bool{
 		"progress": true, "live_inbox_wait": true, "knowledge_read": true, "knowledge_feedback": true,

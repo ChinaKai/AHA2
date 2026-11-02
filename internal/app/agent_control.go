@@ -215,7 +215,7 @@ func (s *Service) AgentGlobalSkillAllowed(ctx context.Context, call AgentCallCon
 	return true
 }
 
-// AgentChannelReceiptID resolves the group message receipt delivered to this
+// AgentChannelReceiptID resolves the routed channel receipt delivered to this
 // Turn. It backs the narrow channel MCP: the tool answers the current routed
 // message, so the model never has to reproduce an opaque receipt id.
 func (s *Service) AgentChannelReceiptID(ctx context.Context, claims agentapi.Claims) (string, error) {
@@ -227,15 +227,18 @@ func (s *Service) AgentChannelReceiptID(ctx context.Context, claims agentapi.Cla
 	if err != nil {
 		return "", ErrAgentCallForbidden
 	}
-	return channelMCPGroupReceipt(channelContext)
+	return channelMCPReceipt(channelContext)
 }
 
-// channelMCPGroupReceipt accepts only a group task_route context. The narrow
-// MCP exists for the group gap; a private route already has the server-side
-// final-answer fallback, and a conversation_host mirrors its answer itself.
-func channelMCPGroupReceipt(channelContext map[string]any) (string, error) {
-	if channelRouteMode(channelContext) != "task_route" ||
-		strings.TrimSpace(fmt.Sprint(channelContext["endpoint"])) != domain.ChannelEndpointGroupDigitalHuman {
+// channelMCPReceipt accepts a group or private task_route context. Both modes
+// have no automatic reply mirror and must answer explicitly. A
+// conversation_host mirrors its answer itself, so it is deliberately excluded.
+func channelMCPReceipt(channelContext map[string]any) (string, error) {
+	if channelRouteMode(channelContext) != "task_route" {
+		return "", ErrAgentCallForbidden
+	}
+	endpoint := strings.TrimSpace(fmt.Sprint(channelContext["endpoint"]))
+	if endpoint != domain.ChannelEndpointGroupDigitalHuman && endpoint != domain.ChannelEndpointAssistantDM {
 		return "", ErrAgentCallForbidden
 	}
 	receiptID, _ := channelContext["inbound_receipt_id"].(string)
