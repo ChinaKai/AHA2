@@ -477,6 +477,10 @@ func TestCodexArgumentsRenderMCPServers(t *testing.T) {
 				Name: "mcp_local", Transport: "stdio", Command: "node",
 				Args: []string{"server.mjs"}, Env: map[string]string{"MODE": "test"},
 			},
+			{
+				Name: "aha2-pet", Transport: "http",
+				URL: "http://127.0.0.1:8766/api/v1/pet/mcp",
+			},
 		},
 	}, "")
 	joined := strings.Join(args, "\n")
@@ -489,6 +493,8 @@ func TestCodexArgumentsRenderMCPServers(t *testing.T) {
 		`mcp_servers.mcp_local.command="node"`,
 		`mcp_servers.mcp_local.args=["server.mjs"]`,
 		`mcp_servers.mcp_local.env={"MODE" = "test"}`,
+		`mcp_servers.aha2_pet.default_tools_approval_mode="approve"`,
+		`mcp_servers.aha2_pet.url="http://127.0.0.1:8766/api/v1/pet/mcp"`,
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("missing %q in:\n%s", want, joined)
@@ -496,5 +502,8 @@ func TestCodexArgumentsRenderMCPServers(t *testing.T) {
 	}
 	if strings.Contains(joined, "Bearer ${") {
 		t.Fatalf("codex must read the bearer token from the environment:\n%s", joined)
+	}
+	if strings.Contains(joined, "mcp_servers.aha2-pet") {
+		t.Fatalf("hyphenated MCP key must be normalized:\n%s", joined)
 	}
 }

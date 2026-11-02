@@ -281,11 +281,13 @@ func appendCodexMCPArguments(args []string, servers []MCPServer) []string {
 	return args
 }
 
-// codexMCPKey accepts only TOML bare-key characters. The AHA registry uses
-// generated IDs, so an unsafe name means the entry cannot be addressed safely
-// through a dotted override; skipping it is better than emitting broken TOML.
+// codexMCPKey accepts only TOML bare-key characters and normalizes hyphens to
+// underscores. Codex derives the model-facing tool namespace from this key;
+// a hyphenated namespace (aha2-pet) was accepted by mcp list but its tools did
+// not register in headless exec, while the underscore namespace (aha2_channel)
+// worked. Keeping the key to [A-Za-z0-9_] makes the two paths identical.
 func codexMCPKey(name string) string {
-	name = strings.TrimSpace(name)
+	name = strings.ReplaceAll(strings.TrimSpace(name), "-", "_")
 	if name == "" {
 		return ""
 	}
