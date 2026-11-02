@@ -134,8 +134,11 @@ func TestOwnerAssistantStartsNewPetTaskWithIntroduction(t *testing.T) {
 	if task.Status != domain.TaskActive {
 		t.Fatalf("pet task status=%s", task.Status)
 	}
-	if task.OriginalRequest != petTaskIntro || task.CurrentGoal != petTaskIntro {
-		t.Fatalf("request=%q goal=%q", task.OriginalRequest, task.CurrentGoal)
+	if task.OriginalRequest != petTaskIntro {
+		t.Fatalf("request=%q, want the introduction", task.OriginalRequest)
+	}
+	if task.CurrentGoal != petTaskMissionGoal {
+		t.Fatalf("goal=%q, want the mission goal", task.CurrentGoal)
 	}
 	if count := fixture.turnCount(t); count != 1 {
 		t.Fatalf("turn count=%d", count)
@@ -151,7 +154,8 @@ func TestOwnerAssistantStartsNewPetTaskWithIntroduction(t *testing.T) {
 
 func TestOwnerAssistantStartsLegacyPetDraftWithIntroduction(t *testing.T) {
 	fixture := newPetTaskFixture(t)
-	fixture.createPetDraft(t, "你是宠物，不是编码代理。只和主人对话……")
+	const legacyRequest = "你是宠物，不是编码代理。只和主人对话……"
+	fixture.createPetDraft(t, legacyRequest)
 
 	if _, err := fixture.service.OwnerAssistant(fixture.ctx); err != nil {
 		t.Fatal(err)
@@ -160,8 +164,13 @@ func TestOwnerAssistantStartsLegacyPetDraftWithIntroduction(t *testing.T) {
 	if task.Status != domain.TaskActive {
 		t.Fatalf("pet task status=%s", task.Status)
 	}
-	if task.OriginalRequest != petTaskIntro || task.CurrentGoal != petTaskIntro {
-		t.Fatalf("request=%q goal=%q", task.OriginalRequest, task.CurrentGoal)
+	if task.OriginalRequest != petTaskIntro {
+		t.Fatalf("request=%q, want the introduction", task.OriginalRequest)
+	}
+	// The intro-only migration must not rewrite a goal that was never the
+	// introduction, even for a legacy draft that is being started now.
+	if task.CurrentGoal != legacyRequest {
+		t.Fatalf("goal=%q, want the untouched legacy goal", task.CurrentGoal)
 	}
 	if count := fixture.turnCount(t); count != 1 {
 		t.Fatalf("turn count=%d", count)
@@ -210,6 +219,119 @@ func TestOwnerAssistantLeavesStartedPetTaskAlone(t *testing.T) {
 	}
 	if count := fixture.turnCount(t); count != 1 {
 		t.Fatalf("turn count=%d", count)
+	}
+}
+
+func TestOwnerAssistantMigratesIntroPetGoalToMission(t *testing.T) {
+	fixture := newPetTaskFixture(t)
+	fixture.createPetDraft(t, petTaskIntro)
+	if _, err := fixture.service.StartTask(fixture.ctx, petTaskID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.service.SubmitMessage(fixture.ctx, petTaskID, "主人第一条消息"); err != nil {
+		t.Fatal(err)
+	}
+	waitForTask(t, fixture.database, petTaskID, domain.TaskWaitingUser)
+
+	// Two page loads: the first migrates, the second must be a no-op.
+	for attempt := 1; attempt <= 2; attempt++ {
+		if _, err := fixture.service.OwnerAssistant(fixture.ctx); err != nil {
+			t.Fatal(err)
+		}
+		task := fixture.petTask(t)
+		if task.CurrentGoal != petTaskMissionGoal {
+			t.Fatalf("attempt %d goal=%q, want the mission goal", attempt, task.CurrentGoal)
+		}
+		if task.OriginalRequest != petTaskIntro {
+			t.Fatalf("attempt %d request=%q, want the introduction", attempt, task.OriginalRequest)
+		}
+		if count := fixture.turnCount(t); count != 1 {
+			t.Fatalf("attempt %d turn count=%d", attempt, count)
+		}
+		memory, err := fixture.database.TaskMemory(fixture.ctx, petTaskID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if memory.CurrentGoal != petTaskMissionGoal {
+			t.Fatalf("attempt %d memory goal=%q, want the mission goal", attempt, memory.CurrentGoal)
+		}
+		history, err := fixture.database.TaskGoalHistory(fixture.ctx, petTaskID, 20)
+		if err != nil {
+			t.Fatal(err)
+		}
+		migrations := 0
+		for _, event := range history {
+			if event.ChangeType == "revise" && event.GoalAfter == petTaskMissionGoal {
+				migrations++
+			}
+		}
+		if migrations != 1 {
+			t.Fatalf("attempt %d migration events=%d, want 1", attempt, migrations)
+		}
+	}
+}
+
+func TestPetTaskMessageMigratesIntroGoal(t *testing.T) {
+	fixture := newPetTaskFixture(t)
+	fixture.createPetDraft(t, petTaskIntro)
+	if _, err := fixture.service.StartTask(fixture.ctx, petTaskID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.service.SubmitMessage(fixture.ctx, petTaskID, "主人直接发消息"); err != nil {
+		t.Fatal(err)
+	}
+	if goal := fixture.petTask(t).CurrentGoal; goal != petTaskMissionGoal {
+		t.Fatalf("goal=%q, want the mission goal", goal)
+	}
+}
+
+func TestOwnerAssistantMigratesLegacyIntroPetGoalToMission(t *testing.T) {
+	fixture := newPetTaskFixture(t)
+	fixture.createPetDraft(t, petTaskLegacyIntro)
+	if _, err := fixture.service.StartTask(fixture.ctx, petTaskID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.service.SubmitMessage(fixture.ctx, petTaskID, "主人第一条消息"); err != nil {
+		t.Fatal(err)
+	}
+	waitForTask(t, fixture.database, petTaskID, domain.TaskWaitingUser)
+	if _, err := fixture.service.OwnerAssistant(fixture.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if goal := fixture.petTask(t).CurrentGoal; goal != petTaskMissionGoal {
+		t.Fatalf("legacy intro goal=%q, want the mission goal", goal)
+	}
+}
+
+func TestOwnerAssistantLeavesCustomPetGoalAlone(t *testing.T) {
+	fixture := newPetTaskFixture(t)
+	fixture.createPetDraft(t, "旧的宠物需求")
+	if _, err := fixture.service.StartTask(fixture.ctx, petTaskID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.service.SubmitMessage(fixture.ctx, petTaskID, "主人第一条消息"); err != nil {
+		t.Fatal(err)
+	}
+	waitForTask(t, fixture.database, petTaskID, domain.TaskWaitingUser)
+
+	const customGoal = "只负责整理主人的周报。"
+	if err := fixture.database.UpdateTaskGoal(fixture.ctx, petTaskID, customGoal, timeString(fixture.service.now().UTC())); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.service.OwnerAssistant(fixture.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if goal := fixture.petTask(t).CurrentGoal; goal != customGoal {
+		t.Fatalf("custom goal was overwritten: %q", goal)
+	}
+	history, err := fixture.database.TaskGoalHistory(fixture.ctx, petTaskID, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range history {
+		if event.GoalAfter == petTaskMissionGoal {
+			t.Fatalf("custom goal task received a mission goal event")
+		}
 	}
 }
 

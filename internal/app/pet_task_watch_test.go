@@ -8,6 +8,83 @@ import (
 	"github.com/ChinaKai/AHA2/internal/domain"
 )
 
+func TestIgnoredPetWatchSuppressesNotificationsAndPetCannotReactivate(t *testing.T) {
+	fixture := newPetTaskFixture(t)
+	if _, err := fixture.service.OwnerAssistant(fixture.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.service.UpdateOwnerPetSettings(fixture.ctx, PetSettingsInput{
+		Enabled: true, ChatModelID: fixture.model.ID, Actions: []string{"walk"},
+		IdleMinutes: 5, QuietStart: 22, QuietEnd: 8, HourlyLimit: 2,
+		AllowViewTasks: boolPointer(true), AllowCreateTasks: boolPointer(true),
+		AllowCreateWorkspaces: boolPointer(true), AllowMessageTasks: boolPointer(true),
+		AllowManageModels: boolPointer(true), AllowManageKnowledge: boolPointer(true),
+		AllowManageChannels: boolPointer(true), AllowManageSystem: boolPointer(true),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fixture.service.StartPetTaskNotifications()
+	project, err := fixture.service.PetCreateProject(fixture.ctx, PetCreateProjectInput{Name: "忽略项目"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := fixture.service.PetCreateWorkspace(fixture.ctx, PetCreateWorkspaceInput{
+		ProjectID: project.ID, Name: "忽略 Workspace", RootPath: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := fixture.service.PetCreateTask(fixture.ctx, PetCreateTaskInput{
+		ProjectID: project.ID, WorkspaceID: workspace.ID, Title: "忽略任务",
+		Request: "忽略后不应通知", Start: boolPointer(false),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.service.SetPetTaskWatchIgnored(fixture.ctx, task.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.service.PetWatchTask(fixture.ctx, task.ID); err == nil {
+		t.Fatal("pet re-watched an ignored Task")
+	}
+	if err := fixture.service.PetUnwatchTask(fixture.ctx, task.ID); err == nil {
+		t.Fatal("pet removed an ignored watch")
+	}
+	watches, err := fixture.service.PetTaskWatchList(fixture.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(watches) != 1 || !watches[0].Ignored || watches[0].TaskID != task.ID {
+		t.Fatalf("ignored watches=%#v", watches)
+	}
+
+	now := fixture.service.now().UTC()
+	if err := fixture.database.UpdateTaskStatus(fixture.ctx, task.ID, domain.TaskDraft, domain.TaskPreparing, now.Format(time.RFC3339Nano), ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.database.UpdateTaskStatus(fixture.ctx, task.ID, domain.TaskPreparing, domain.TaskFailed, now.Format(time.RFC3339Nano), ""); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	watch, err := fixture.database.PetTaskWatch(fixture.ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if watch.LastNotifiedStatus != "" {
+		t.Fatalf("ignored watch was notified: %#v", watch)
+	}
+
+	if _, err := fixture.service.SetPetTaskWatchIgnored(fixture.ctx, task.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.service.RemovePetTaskWatch(fixture.ctx, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if watches, err := fixture.service.PetTaskWatchList(fixture.ctx); err != nil || len(watches) != 0 {
+		t.Fatalf("watches after owner removal=%#v err=%v", watches, err)
+	}
+}
+
 func TestPetWatchedTaskStatusNotification(t *testing.T) {
 	fixture := newPetTaskFixture(t)
 	if _, err := fixture.service.OwnerAssistant(fixture.ctx); err != nil {

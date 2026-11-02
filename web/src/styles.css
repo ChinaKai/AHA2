@@ -2273,6 +2273,11 @@ dialog > .dialog-head { margin: 0; padding: 18px 18px 0; }
 .pet-approval-status { font-size: 12px; color: var(--muted); white-space: nowrap; }
 .pet-approval-reason { color: var(--text) !important; }
 .pet-approval-actions { display: flex; gap: 6px; }
+.pet-watch-card { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; display: grid; gap: 6px; }
+.pet-watch-card.ignored { opacity: 0.72; }
+.pet-watch-card header { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
+.pet-watch-card small { color: var(--muted); }
+.pet-watch-actions { display: flex; gap: 6px; }
 
 .mcp-edit-fields { display: grid; gap: 8px; margin: 12px 0; }
 .mcp-edit-fields label { display: grid; gap: 4px; }

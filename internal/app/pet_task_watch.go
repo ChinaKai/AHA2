@@ -4,12 +4,26 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
 	"github.com/ChinaKai/AHA2/internal/store"
 )
+
+// PetTaskWatchView is the Owner-facing row for the Pet Workbench follows tab.
+type PetTaskWatchView struct {
+	TaskID    string            `json:"task_id"`
+	Code      string            `json:"code"`
+	Title     string            `json:"title"`
+	Status    domain.TaskStatus `json:"status"`
+	Reason    string            `json:"reason"`
+	Ignored   bool              `json:"ignored"`
+	IgnoredAt time.Time         `json:"ignored_at,omitempty"`
+	CreatedAt time.Time         `json:"created_at"`
+	UpdatedAt time.Time         `json:"updated_at"`
+}
 
 func petStatusNotifies(status domain.TaskStatus) bool {
 	switch status {
@@ -41,7 +55,7 @@ func (s *Service) handlePetTaskStatusChange(ctx context.Context, change store.Ta
 		return
 	}
 	watch, err := s.store.PetTaskWatch(ctx, change.TaskID)
-	if err != nil {
+	if err != nil || watch.Ignored {
 		return
 	}
 	task, err := s.store.Task(ctx, change.TaskID)
@@ -67,15 +81,20 @@ func (s *Service) handlePetTaskStatusChange(ctx context.Context, change store.Ta
 	if petQuietNow(assistant, now) && (change.To == domain.TaskCompleted || change.To == domain.TaskCancelled) {
 		delay := petQuietRemaining(assistant, now)
 		if delay > 0 {
-			time.AfterFunc(delay, func() { s.deliverPetTaskStatusMessage(message) })
+			time.AfterFunc(delay, func() { s.deliverPetTaskStatusMessage(task.ID, message) })
 			return
 		}
 	}
-	go s.deliverPetTaskStatusMessage(message)
+	go s.deliverPetTaskStatusMessage(task.ID, message)
 }
 
-func (s *Service) deliverPetTaskStatusMessage(message string) {
+func (s *Service) deliverPetTaskStatusMessage(taskID, message string) {
 	if s == nil || strings.TrimSpace(message) == "" {
+		return
+	}
+	// The watch may have been ignored or removed while a quiet-hours callback
+	// was waiting. Re-check before starting a new pet turn.
+	if watch, err := s.store.PetTaskWatch(context.Background(), taskID); err != nil || watch.Ignored {
 		return
 	}
 	s.mu.Lock()
@@ -154,6 +173,9 @@ func (s *Service) PetWatchTask(ctx context.Context, taskID string) (domain.PetTa
 	if task.ID == petTaskID {
 		return domain.PetTaskWatch{}, fmt.Errorf("不能关注宠物自己的 Task")
 	}
+	if watch, watchErr := s.store.PetTaskWatch(ctx, task.ID); watchErr == nil && watch.Ignored {
+		return domain.PetTaskWatch{}, fmt.Errorf("该任务已被主人忽略，不能重新关注")
+	}
 	now := s.now().UTC()
 	if err := s.store.UpsertPetTaskWatch(ctx, task.ID, "manual", now); err != nil {
 		return domain.PetTaskWatch{}, err
@@ -166,11 +188,73 @@ func (s *Service) PetUnwatchTask(ctx context.Context, taskID string) error {
 	if err != nil {
 		return err
 	}
+	if watch, watchErr := s.store.PetTaskWatch(ctx, task.ID); watchErr == nil && watch.Ignored {
+		return fmt.Errorf("该任务已被主人忽略，请由主人在宠物工作台取消关注")
+	}
 	return s.store.DeletePetTaskWatch(ctx, task.ID)
+}
+
+// PetTaskWatchList returns all watched Tasks for the Owner workbench. Ignored
+// watches stay visible so the Owner can restore them.
+func (s *Service) PetTaskWatchList(ctx context.Context) ([]PetTaskWatchView, error) {
+	watches, err := s.store.PetTaskWatches(ctx)
+	if err != nil {
+		return nil, err
+	}
+	views := make([]PetTaskWatchView, 0, len(watches))
+	for _, watch := range watches {
+		task, taskErr := s.store.Task(ctx, watch.TaskID)
+		if taskErr != nil {
+			continue
+		}
+		views = append(views, PetTaskWatchView{
+			TaskID: task.ID, Code: task.Code, Title: task.Title, Status: task.Status,
+			Reason: watch.Reason, Ignored: watch.Ignored, IgnoredAt: watch.IgnoredAt,
+			CreatedAt: watch.CreatedAt, UpdatedAt: watch.UpdatedAt,
+		})
+	}
+	sort.SliceStable(views, func(i, j int) bool {
+		if views[i].Ignored != views[j].Ignored {
+			return !views[i].Ignored
+		}
+		return views[i].UpdatedAt.After(views[j].UpdatedAt)
+	})
+	return views, nil
+}
+
+// RemovePetTaskWatch is the Owner-facing unfollow action. Unlike the pet tool,
+// it may remove an ignored watch as well.
+func (s *Service) RemovePetTaskWatch(ctx context.Context, taskID string) error {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return fmt.Errorf("task_id 不能为空")
+	}
+	if _, err := s.store.PetTaskWatch(ctx, taskID); err != nil {
+		return fmt.Errorf("该任务未被关注")
+	}
+	return s.store.DeletePetTaskWatch(ctx, taskID)
+}
+
+// SetPetTaskWatchIgnored mutes or restores one watch from the Owner workbench.
+func (s *Service) SetPetTaskWatchIgnored(ctx context.Context, taskID string, ignored bool) (domain.PetTaskWatch, error) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return domain.PetTaskWatch{}, fmt.Errorf("task_id 不能为空")
+	}
+	if _, err := s.store.PetTaskWatch(ctx, taskID); err != nil {
+		return domain.PetTaskWatch{}, fmt.Errorf("该任务未被关注")
+	}
+	if err := s.store.SetPetTaskWatchIgnored(ctx, taskID, ignored, s.now().UTC()); err != nil {
+		return domain.PetTaskWatch{}, err
+	}
+	return s.store.PetTaskWatch(ctx, taskID)
 }
 
 func (s *Service) watchPetTask(ctx context.Context, taskID, reason string) {
 	if s == nil || s.store == nil || strings.TrimSpace(taskID) == "" || taskID == petTaskID {
+		return
+	}
+	if watch, err := s.store.PetTaskWatch(ctx, taskID); err == nil && watch.Ignored {
 		return
 	}
 	_ = s.store.UpsertPetTaskWatch(ctx, taskID, reason, s.now().UTC())

@@ -425,6 +425,46 @@ func (s *Store) UpdateTaskGoal(ctx context.Context, id, goal, updatedAt string) 
 	})
 }
 
+// UpdateTaskGoalIfCurrent changes a Task goal only when it still has the
+// expected value. It returns false without writing when the goal has moved on,
+// which keeps migrations exact-match and idempotent.
+func (s *Store) UpdateTaskGoalIfCurrent(ctx context.Context, id, from, to, updatedAt string) (bool, error) {
+	from = strings.TrimSpace(from)
+	to = strings.TrimSpace(to)
+	if from == "" || to == "" || from == to {
+		return false, nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `UPDATE tasks SET current_goal=?,updated_at=? WHERE id=? AND current_goal=?`,
+		to, updatedAt, id, from)
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if affected != 1 {
+		return false, nil
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE task_memory SET current_goal=?,updated_at=? WHERE task_id=?`,
+		to, updatedAt, id); err != nil {
+		return false, err
+	}
+	if err := insertTaskGoalEventTx(ctx, tx, domain.TaskGoalChange{
+		ID: domain.NewID("goal"), TaskID: id, GoalBefore: from, GoalAfter: to,
+		ChangeType: "revise", Reason: "Migrate pet Task goal to mission",
+		CreatedAt: parseTime(updatedAt),
+	}); err != nil {
+		return false, err
+	}
+	return true, tx.Commit()
+}
+
 func (s *Store) UpdateTaskTitle(ctx context.Context, id, title, updatedAt string) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE tasks SET title=?,updated_at=? WHERE id=?`, title, updatedAt, id)
 	return err

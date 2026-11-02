@@ -237,6 +237,7 @@ type CreateTaskInput struct {
 	WorkspaceID         string
 	Title               string
 	Request             string
+	CurrentGoal         string
 	TargetBranch        string
 	BaseCommit          string
 	TaskBranch          string
@@ -435,13 +436,19 @@ func (s *Service) CreateTask(ctx context.Context, input CreateTaskInput) (domain
 	if startMode == "manual" {
 		taskStatus = domain.TaskDraft
 	}
+	// Most callers let the request double as the goal. The Pet Task supplies a
+	// stable mission goal while keeping its introduction as the request.
+	currentGoal := strings.TrimSpace(input.CurrentGoal)
+	if currentGoal == "" {
+		currentGoal = input.Request
+	}
 	task := domain.Task{
 		ID:                      strings.TrimSpace(input.ID),
 		ProjectID:               project.ID,
 		WorkspaceID:             workspace.ID,
 		Title:                   input.Title,
 		OriginalRequest:         input.Request,
-		CurrentGoal:             input.Request,
+		CurrentGoal:             currentGoal,
 		Status:                  taskStatus,
 		TargetBranch:            input.TargetBranch,
 		BaseCommit:              input.BaseCommit,
@@ -647,6 +654,9 @@ func (s *Service) submitMessageWithSource(ctx context.Context, taskID, agentID, 
 	task, err := s.store.Task(ctx, taskID)
 	if err != nil {
 		return domain.Turn{}, err
+	}
+	if task.ID == petTaskID {
+		task = s.migratePetTaskGoal(ctx, task)
 	}
 	if task.Status == domain.TaskDraft {
 		return domain.Turn{}, fmt.Errorf("task must be started before sending messages")

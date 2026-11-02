@@ -545,6 +545,16 @@ class APIClient {
     });
   }
 
+  removePetTaskWatch(taskID: string): Promise<{ok: boolean}> {
+    return this.request(`/api/v1/pet/watches/${encodeURIComponent(taskID)}`, {method: "DELETE"});
+  }
+
+  setPetTaskWatchIgnored(taskID: string, ignored: boolean): Promise<{ok: boolean; watch: import("./types").PetTaskWatch}> {
+    return this.request(`/api/v1/pet/watches/${encodeURIComponent(taskID)}`, {
+      method: "PATCH", body: JSON.stringify({ignored}),
+    });
+  }
+
   resolvePetApproval(id: string, decision: "approve" | "reject", note = ""): Promise<{ok: boolean; approval: import("./types").PetApproval}> {
     return this.request(`/api/v1/pet/approvals/${encodeURIComponent(id)}/resolve`, {
       method: "POST", body: JSON.stringify({decision, note}),

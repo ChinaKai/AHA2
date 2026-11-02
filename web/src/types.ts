@@ -1211,11 +1211,24 @@ export interface PetApproval {
   resolved_at?: string;
 }
 
+export interface PetTaskWatch {
+  task_id: string;
+  code: string;
+  title: string;
+  status: string;
+  reason: string;
+  ignored: boolean;
+  ignored_at?: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface PetWorkbench {
   diary: PetDiaryEntry[];
   core: PetWorkspaceDocument[];
   worklog: PetDiaryEntry[];
   approvals: PetApproval[];
+  watches: PetTaskWatch[];
   task?: Task;
   updated_at: string;
 }

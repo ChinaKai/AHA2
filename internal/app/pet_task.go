@@ -48,7 +48,27 @@ const (
 	// creation treats "需求" as the first user message, so the pet follows the
 	// same semantics instead of keeping internal instructions in the Task.
 	petTaskIntro = "请用一两句话向主人做个自我介绍。先读 core/identity.md 和 core/principles.md；如果它们还是空模板，就用 pet_update_core 按你的想法补全名字、形象、性格、习惯和做事准则。不要写代码或运行命令。"
+	// petTaskMissionGoal is the Pet Task's long-lived goal. The self-introduction
+	// is only the first request; the authoritative goal must describe the pet's
+	// ongoing role as the owner's electronic stand-in and project coordinator.
+	petTaskMissionGoal = "作为主人的电子分身和项目调度者，持续发现问题和机会，规划、创建和协调项目、Workspace 与 Task，跟踪进展并主动向主人汇报；不亲自实现代码或操作硬件，对代码工作区只做只读诊断，高风险操作先请求审批。"
+
+	// petTaskLegacyIntro is the onboarding goal used before the current
+	// self-introduction text. Both are one-time onboarding prompts, not stable
+	// goals, so an existing Pet Task carrying either can be migrated.
+	petTaskLegacyIntro = "请用一两句话向主人做个自我介绍：你的名字、当前形象，以及你会陪主人聊天、写日记、做小动作。不要写代码或运行命令。"
 )
+
+// isPetTaskIntroGoal reports whether value is one of the generated onboarding
+// prompts. An owner- or pet-authored goal must never match this by accident.
+func isPetTaskIntroGoal(value string) bool {
+	switch strings.TrimSpace(value) {
+	case petTaskIntro, petTaskLegacyIntro:
+		return true
+	default:
+		return false
+	}
+}
 
 // reopenPetTaskIfNeeded returns a system Pet Task to waiting_user after any
 // terminal or blocked state. The Pet Task is the pet itself, so a backend
@@ -145,6 +165,7 @@ func (s *Service) ensureOwnerPetTask(ctx context.Context, assistant *domain.Owne
 	if assistant.PetTaskID != "" {
 		if existing, err := s.store.Task(ctx, assistant.PetTaskID); err == nil {
 			existing = s.reopenPetTaskIfNeeded(ctx, existing)
+			existing = s.migratePetTaskGoal(ctx, existing)
 			s.ensurePetTaskStarted(ctx, existing)
 			recordPetTask(existing.ID)
 			return existing.ID, nil
@@ -152,6 +173,7 @@ func (s *Service) ensureOwnerPetTask(ctx context.Context, assistant *domain.Owne
 	}
 	if existing, err := s.store.Task(ctx, petTaskID); err == nil {
 		existing = s.reopenPetTaskIfNeeded(ctx, existing)
+		existing = s.migratePetTaskGoal(ctx, existing)
 		recordPetTask(petTaskID)
 		s.ensurePetTaskStarted(ctx, existing)
 		return petTaskID, nil
@@ -183,7 +205,7 @@ func (s *Service) ensureOwnerPetTask(ctx context.Context, assistant *domain.Owne
 	}
 	task, err := s.CreateTask(ctx, CreateTaskInput{
 		ID: petTaskID, ProjectID: petProjectID, WorkspaceID: petWorkspaceID,
-		Title: "宠物", Request: petTaskIntro, ModelID: assistant.ModelID,
+		Title: "宠物", Request: petTaskIntro, CurrentGoal: petTaskMissionGoal, ModelID: assistant.ModelID,
 		Isolation: "inplace", Filesystem: "read-only", Approval: "never",
 		CollaborationMode: "single", MaxAgents: 1, StartMode: "manual",
 		AllowSystemProject: true,
@@ -219,14 +241,13 @@ func (s *Service) ensurePetTaskStarted(ctx context.Context, task domain.Task) {
 		return
 	}
 	if turns == 0 && task.OriginalRequest != petTaskIntro {
+		// The requirement is what the first message uses. The goal is kept
+		// separate: an existing custom goal is never overwritten here.
 		now := timeString(s.now().UTC())
 		if err := s.store.UpdateTaskOriginalRequest(ctx, task.ID, petTaskIntro, now); err != nil {
 			return
 		}
 		task.OriginalRequest = petTaskIntro
-		// The requirement is what the first message uses; a failed goal mirror
-		// still leaves a startable Task, so do not block startup on it.
-		_ = s.store.UpdateTaskGoal(ctx, task.ID, petTaskIntro, now)
 	}
 	started, err := s.StartTask(ctx, task.ID)
 	if err != nil {
@@ -239,6 +260,40 @@ func (s *Service) ensurePetTaskStarted(ctx context.Context, task domain.Task) {
 	if _, err := s.SubmitMessage(ctx, started.ID, petTaskIntro); err != nil {
 		s.resetPetTaskDraft(ctx, started.ID)
 	}
+}
+
+// migratePetTaskGoal replaces the legacy self-introduction goal with the stable
+// mission goal. Only known generated onboarding prompts are eligible: a goal
+// the owner or pet set to anything else is left untouched, and the conditional
+// store update makes repeated calls idempotent.
+func (s *Service) migratePetTaskGoal(ctx context.Context, task domain.Task) domain.Task {
+	if !isPetTaskIntroGoal(task.CurrentGoal) {
+		return task
+	}
+	from := task.CurrentGoal
+	migrated, err := s.store.UpdateTaskGoalIfCurrent(ctx, task.ID, from, petTaskMissionGoal, timeString(s.now().UTC()))
+	if err != nil {
+		log.Printf("migrate pet task goal: %v", err)
+		return task
+	}
+	if migrated {
+		task.CurrentGoal = petTaskMissionGoal
+	}
+	return task
+}
+
+// MigratePetTaskGoal applies the Pet Task goal migration once at server start
+// so an upgraded installation does not keep the onboarding goal until the
+// assistant page happens to load.
+func (s *Service) MigratePetTaskGoal(ctx context.Context) {
+	if s == nil || s.store == nil {
+		return
+	}
+	task, err := s.store.Task(ctx, petTaskID)
+	if err != nil {
+		return
+	}
+	s.migratePetTaskGoal(ctx, task)
 }
 
 func (s *Service) resetPetTaskDraft(ctx context.Context, taskID string) {

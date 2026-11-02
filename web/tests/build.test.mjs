@@ -2331,6 +2331,22 @@ test("sidebar and mobile navigation expose pet workbench and hardware", async ()
   assert.match(i18n, /"petWorkbench\.title": "Pet workbench"/);
 });
 
+test("pet workbench follows tab exposes unfollow and ignore actions", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const main = await readFile(resolve(root, "src", "main.ts"), "utf8");
+  const api = await readFile(resolve(root, "src", "api.ts"), "utf8");
+  const i18n = await readFile(resolve(root, "src", "i18n.ts"), "utf8");
+  assert.match(main, /data-pet-workbench-tab="follows"/);
+  assert.match(main, /renderPetWatches\(view\.watches\)/);
+  assert.match(main, /data-pet-watch-unfollow/);
+  assert.match(main, /data-pet-watch-ignore="true"/);
+  assert.match(main, /data-pet-watch-ignore="false"/);
+  assert.match(api, /removePetTaskWatch/);
+  assert.match(api, /setPetTaskWatchIgnored/);
+  assert.match(i18n, /"petWorkbench\.follows": "关注"/);
+  assert.match(i18n, /"petWorkbench\.follows": "Following"/);
+});
+
 test("completed tasks freeze the composer behind a confirmed reopen", async () => {
   const root = resolve(import.meta.dirname, "..");
   const main = await readFile(resolve(root, "src", "main.ts"), "utf8");

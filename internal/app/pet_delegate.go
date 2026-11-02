@@ -25,6 +25,7 @@ type PetWorkbenchView struct {
 	Core      []PetWorkspaceDocument `json:"core"`
 	Worklog   []PetDiaryEntry        `json:"worklog"`
 	Approvals []domain.PetApproval   `json:"approvals"`
+	Watches   []PetTaskWatchView     `json:"watches"`
 	Task      *domain.Task           `json:"task,omitempty"`
 	UpdatedAt time.Time              `json:"updated_at"`
 }
@@ -48,8 +49,12 @@ func (s *Service) PetWorkbench(ctx context.Context) (PetWorkbenchView, error) {
 	if err != nil {
 		return PetWorkbenchView{}, err
 	}
+	watches, err := s.PetTaskWatchList(ctx)
+	if err != nil {
+		return PetWorkbenchView{}, err
+	}
 	view := PetWorkbenchView{
-		Diary: diary, Core: core, Worklog: worklog, Approvals: approvals,
+		Diary: diary, Core: core, Worklog: worklog, Approvals: approvals, Watches: watches,
 		UpdatedAt: s.now().UTC(),
 	}
 	if task, taskErr := s.store.Task(ctx, petTaskID); taskErr == nil {

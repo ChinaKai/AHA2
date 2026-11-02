@@ -22,8 +22,40 @@ func (s *Server) petWorkbench(writer http.ResponseWriter, request *http.Request)
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{
 		"ok": true, "diary": view.Diary, "core": view.Core, "worklog": view.Worklog,
-		"approvals": view.Approvals, "task": view.Task, "updated_at": view.UpdatedAt,
+		"approvals": view.Approvals, "watches": view.Watches, "task": view.Task, "updated_at": view.UpdatedAt,
 	})
+}
+
+func (s *Server) deletePetWatch(writer http.ResponseWriter, request *http.Request) {
+	taskID := strings.TrimSpace(request.PathValue("task"))
+	if err := s.app.RemovePetTaskWatch(request.Context(), taskID); err != nil {
+		writeJSON(writer, http.StatusBadRequest, map[string]any{
+			"ok": false, "error": "pet_watch_remove_failed", "message": err.Error(),
+		})
+		return
+	}
+	s.audit(request, "pet.watch.remove", "task", taskID, nil)
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) updatePetWatch(writer http.ResponseWriter, request *http.Request) {
+	var input struct {
+		Ignored *bool `json:"ignored"`
+	}
+	if err := decodeJSON(request, &input); err != nil || input.Ignored == nil {
+		writeError(writer, http.StatusBadRequest, "invalid_json")
+		return
+	}
+	taskID := strings.TrimSpace(request.PathValue("task"))
+	watch, err := s.app.SetPetTaskWatchIgnored(request.Context(), taskID, *input.Ignored)
+	if err != nil {
+		writeJSON(writer, http.StatusBadRequest, map[string]any{
+			"ok": false, "error": "pet_watch_update_failed", "message": err.Error(),
+		})
+		return
+	}
+	s.audit(request, "pet.watch.update", "task", taskID, map[string]any{"ignored": watch.Ignored})
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "watch": watch})
 }
 
 func (s *Server) savePetWorkbenchDocument(writer http.ResponseWriter, request *http.Request) {

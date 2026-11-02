@@ -210,6 +210,8 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/pet/diary", s.withAuth(http.HandlerFunc(s.listPetDiary)))
 	mux.Handle("GET /api/v1/pet/workbench", s.withAuth(http.HandlerFunc(s.petWorkbench)))
 	mux.Handle("PUT /api/v1/pet/workbench/{section}/{name}", s.withAuth(http.HandlerFunc(s.savePetWorkbenchDocument)))
+	mux.Handle("DELETE /api/v1/pet/watches/{task}", s.withAuth(http.HandlerFunc(s.deletePetWatch)))
+	mux.Handle("PATCH /api/v1/pet/watches/{task}", s.withAuth(http.HandlerFunc(s.updatePetWatch)))
 	mux.Handle("POST /api/v1/pet/approvals/{id}/resolve", s.withAuth(http.HandlerFunc(s.resolvePetApproval)))
 	mux.Handle("GET /api/v1/mcp-servers", s.withAuth(http.HandlerFunc(s.listMCPServers)))
 	mux.Handle("GET /api/v1/mcp-servers/{id}", s.withAuth(http.HandlerFunc(s.mcpServerDetail)))

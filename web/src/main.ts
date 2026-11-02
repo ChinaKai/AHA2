@@ -5497,6 +5497,7 @@ function petDiaryView(): string {
       <button type="button" data-pet-workbench-tab="worklog">${t("petWorkbench.worklog")}</button>
       <button type="button" data-pet-workbench-tab="approvals">${t("petWorkbench.approvals")} <span id="pet-approval-count"></span></button>
       <button type="button" data-pet-workbench-tab="ideas">${t("petWorkbench.ideas")} <span id="pet-idea-count"></span></button>
+      <button type="button" data-pet-workbench-tab="follows">${t("petWorkbench.follows")}</button>
       <button type="button" data-pet-workbench-tab="settings">${t("petWorkbench.settings")}</button>
     </div>
     <div id="pet-workbench-body" class="pet-workbench-body"><div class="field-help">${t("common.loading")}</div></div>
@@ -5529,6 +5530,9 @@ async function bindPetDiaryPage(): Promise<void> {
     } else if (active === "ideas") {
       body.innerHTML = renderPetApprovals(view.approvals.filter(item => item.kind === "idea"), t("petWorkbench.emptyIdeas"));
       bindApprovalActions();
+    } else if (active === "follows") {
+      body.innerHTML = renderPetWatches(view.watches);
+      bindPetWatchActions();
     } else if (active === "settings") {
       body.innerHTML = `<div id="pet-settings-host" class="pet-workbench-settings"></div>`;
       void showPetSettings();
@@ -5565,6 +5569,38 @@ async function bindPetDiaryPage(): Promise<void> {
         button.disabled = true;
         try {
           await api.resolvePetApproval(id, decision, decisionReason);
+          await load();
+        } catch (error) {
+          button.disabled = false;
+          body.insertAdjacentHTML("afterbegin", `<div class="field-help">${escapeHTML(error instanceof Error ? error.message : String(error))}</div>`);
+        }
+      });
+    });
+  };
+
+  const bindPetWatchActions = () => {
+    body.querySelectorAll<HTMLButtonElement>("[data-pet-watch-unfollow]").forEach(button => {
+      button.addEventListener("click", async () => {
+        const taskID = button.dataset.petWatchTask || "";
+        if (!taskID) return;
+        button.disabled = true;
+        try {
+          await api.removePetTaskWatch(taskID);
+          await load();
+        } catch (error) {
+          button.disabled = false;
+          body.insertAdjacentHTML("afterbegin", `<div class="field-help">${escapeHTML(error instanceof Error ? error.message : String(error))}</div>`);
+        }
+      });
+    });
+    body.querySelectorAll<HTMLButtonElement>("[data-pet-watch-ignore]").forEach(button => {
+      button.addEventListener("click", async () => {
+        const taskID = button.dataset.petWatchTask || "";
+        const ignored = button.dataset.petWatchIgnore === "true";
+        if (!taskID) return;
+        button.disabled = true;
+        try {
+          await api.setPetTaskWatchIgnored(taskID, ignored);
           await load();
         } catch (error) {
           button.disabled = false;
@@ -5633,6 +5669,28 @@ function bindPetDocEditors(section: string, reload: () => Promise<void>): void {
       });
     });
   });
+}
+
+function petWatchReasonLabel(reason: string): string {
+  const key = `petWorkbench.reason.${reason}`;
+  const label = t(key);
+  return label === key ? reason : label;
+}
+
+function renderPetWatches(items: Array<{task_id: string; code: string; title: string; status: string; reason: string; ignored: boolean; updated_at: string}>): string {
+  if (items.length === 0) return `<div class="field-help">${escapeHTML(t("petWorkbench.emptyFollows"))}</div>`;
+  return items.map(item => {
+    const title = `${item.code || item.task_id} · ${item.title || item.task_id}`;
+    const reason = item.reason ? petWatchReasonLabel(item.reason) : "-";
+    const actions = item.ignored
+      ? `<div class="pet-watch-actions"><button type="button" data-pet-watch-ignore="false" data-pet-watch-task="${escapeHTML(item.task_id)}">${t("petWorkbench.restoreFollow")}</button></div>`
+      : `<div class="pet-watch-actions"><button type="button" data-pet-watch-unfollow data-pet-watch-task="${escapeHTML(item.task_id)}">${t("petWorkbench.unfollowTask")}</button><button type="button" data-pet-watch-ignore="true" data-pet-watch-task="${escapeHTML(item.task_id)}">${t("petWorkbench.ignoreTask")}</button></div>`;
+    return `<article class="pet-watch-card ${item.ignored ? "ignored" : ""}">
+      <header><strong>${escapeHTML(title)}</strong><span class="pet-approval-status">${escapeHTML(statusLabel(item.status))}${item.ignored ? ` · ${t("petWorkbench.followIgnored")}` : ""}</span></header>
+      <small>${t("petWorkbench.followReason")}: ${escapeHTML(reason)} · ${t("petWorkbench.followUpdated")}: ${escapeHTML(formatDateTime(item.updated_at))}</small>
+      ${actions}
+    </article>`;
+  }).join("");
 }
 
 function renderPetApprovals(items: Array<{id: string; title: string; summary: string; reason?: string; status: string; risk: string; kind: string; resolution?: string; decision_reason?: string}>, empty = "还没有审批记录。"): string {

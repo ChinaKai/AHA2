@@ -92,6 +92,8 @@ type PetTaskWatch struct {
 	LastTurnID         string    `json:"last_turn_id,omitempty"`
 	LastNotifiedStatus string    `json:"last_notified_status,omitempty"`
 	LastNotifiedTurnID string    `json:"last_notified_turn_id,omitempty"`
+	Ignored            bool      `json:"ignored,omitempty"`
+	IgnoredAt          time.Time `json:"ignored_at,omitempty"`
 }
 
 type PetEvent struct {
