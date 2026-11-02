@@ -371,10 +371,6 @@ func (s *Service) deriveRuntimeSnapshot(
 	base domain.RuntimeConfigSnapshot,
 	input UpdateAgentConfigInput,
 ) (domain.RuntimeConfigSnapshot, error) {
-	backend := strings.TrimSpace(input.Backend)
-	if backend == "" {
-		backend = base.Backend
-	}
 	modelSource := strings.TrimSpace(input.ModelSource)
 	if modelSource == "" {
 		modelSource = domain.ModelSourceProvider
@@ -382,6 +378,28 @@ func (s *Service) deriveRuntimeSnapshot(
 			modelSource = domain.ModelSourceClaudeNative
 		} else if base.CodexAccountID != "" {
 			modelSource = domain.ModelSourceOfficial
+		}
+	}
+	backend := strings.TrimSpace(input.Backend)
+	if backend == "" {
+		switch modelSource {
+		case domain.ModelSourceOfficial:
+			backend = "codex"
+		case domain.ModelSourceClaudeNative:
+			backend = "claude"
+		default:
+			backend = base.Backend
+			// A provider model fixes its backend. When the caller switches the
+			// model without naming a backend, inheriting the previous snapshot's
+			// backend rejects every cross-backend switch (for example a pet
+			// moving from a codex model to a claude model).
+			if modelID := strings.TrimSpace(input.ModelID); modelID != "" {
+				if model, err := s.store.Model(ctx, modelID); err == nil {
+					if value := strings.TrimSpace(model.Backend); value != "" {
+						backend = value
+					}
+				}
+			}
 		}
 	}
 	modelID := strings.TrimSpace(input.ModelID)

@@ -172,6 +172,115 @@ func TestOwnerAssistantMigratesPetRuntimeToOwnerDefaults(t *testing.T) {
 	}
 }
 
+func TestUpdateOwnerPetSettingsCreatesEnvGroupForModelWithoutDefault(t *testing.T) {
+	fixture := newPetTaskFixture(t)
+	fixture.createPetDraft(t, petTaskIntro)
+	now := time.Now().UTC()
+	provider := domain.Provider{
+		ID: "provider-pet-no-env", Name: "No Env Provider", BaseURL: "https://no-env.example.test/v1",
+		AuthStyle: "bearer", CreatedAt: now, UpdatedAt: now,
+	}
+	if err := fixture.database.UpsertProvider(fixture.ctx, provider); err != nil {
+		t.Fatal(err)
+	}
+	model := domain.Model{
+		ID: "model-pet-no-env", DisplayName: "No Env Model", ProviderID: provider.ID,
+		Source: domain.ModelSourceProvider, Backend: "codex", WireModel: "pet-no-env", WireAPI: "chat",
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := fixture.database.UpsertModel(fixture.ctx, model); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.service.UpdateOwnerPetSettings(fixture.ctx, PetSettingsInput{
+		Enabled: true, ChatModelID: model.ID, Actions: []string{"walk"}, IdleMinutes: 5,
+	}); err != nil {
+		t.Fatalf("switch pet model without env group: %v", err)
+	}
+	stored, err := fixture.database.Model(fixture.ctx, model.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.DefaultEnvGroupID == "" {
+		t.Fatal("default env group was not created")
+	}
+	group, err := fixture.database.EnvGroup(fixture.ctx, stored.DefaultEnvGroupID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if group.ProviderID != provider.ID || group.Environment["OPENAI_MODEL"] != model.WireModel {
+		t.Fatalf("unexpected env group: %#v", group)
+	}
+	agent, err := fixture.database.TaskAgent(fixture.ctx, petTaskID, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := fixture.database.RuntimeSnapshot(fixture.ctx, agent.RuntimeConfigSnapshotID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.ModelID != model.ID || snapshot.EnvGroupID != stored.DefaultEnvGroupID {
+		t.Fatalf("pet runtime was not switched: %#v", snapshot)
+	}
+	if _, err := fixture.service.UpdateOwnerPetSettings(fixture.ctx, PetSettingsInput{
+		Enabled: true, ChatModelID: model.ID, Actions: []string{"walk"}, IdleMinutes: 5,
+	}); err != nil {
+		t.Fatalf("repeat pet model switch: %v", err)
+	}
+	again, err := fixture.database.Model(fixture.ctx, model.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.DefaultEnvGroupID != stored.DefaultEnvGroupID {
+		t.Fatalf("repeat switch created another env group: %q -> %q", stored.DefaultEnvGroupID, again.DefaultEnvGroupID)
+	}
+}
+
+func TestUpdateOwnerPetSettingsSwitchesModelBackend(t *testing.T) {
+	fixture := newPetTaskFixture(t)
+	fixture.createPetDraft(t, petTaskIntro)
+	now := time.Now().UTC()
+	provider := domain.Provider{
+		ID: "provider-pet-claude", Name: "Claude Provider", BaseURL: "https://claude.example.test",
+		AnthropicBaseURL: "https://claude.example.test", AuthStyle: "x-api-key",
+		CreatedAt: now, UpdatedAt: now,
+	}
+	model := domain.Model{
+		ID: "model-pet-claude", DisplayName: "Claude Pet", ProviderID: provider.ID,
+		Source: domain.ModelSourceProvider, Backend: "claude", WireModel: "claude-pet", WireAPI: "anthropic_messages",
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := fixture.database.UpsertProvider(fixture.ctx, provider); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.database.UpsertModel(fixture.ctx, model); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.service.UpdateOwnerPetSettings(fixture.ctx, PetSettingsInput{
+		Enabled: true, ChatModelID: model.ID, Actions: []string{"walk"}, IdleMinutes: 5,
+	}); err != nil {
+		t.Fatalf("switch pet model backend: %v", err)
+	}
+	agent, err := fixture.database.TaskAgent(fixture.ctx, petTaskID, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := fixture.database.RuntimeSnapshot(fixture.ctx, agent.RuntimeConfigSnapshotID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Backend != "claude" || snapshot.ModelID != model.ID {
+		t.Fatalf("pet runtime did not switch backend: %#v", snapshot)
+	}
+	group, err := fixture.database.EnvGroup(fixture.ctx, snapshot.EnvGroupID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if group.Environment["ANTHROPIC_MODEL"] != model.WireModel ||
+		group.Environment["ANTHROPIC_BASE_URL"] != provider.AnthropicBaseURL {
+		t.Fatalf("unexpected claude env group: %#v", group)
+	}
+}
+
 func TestOwnerAssistantStartsLegacyPetDraftWithIntroduction(t *testing.T) {
 	fixture := newPetTaskFixture(t)
 	const legacyRequest = "你是宠物，不是编码代理。只和主人对话……"

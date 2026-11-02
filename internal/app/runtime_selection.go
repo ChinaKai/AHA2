@@ -186,7 +186,7 @@ func (s *Service) repairDefaultEnvGroup(ctx context.Context, model *domain.Model
 		candidates = generic
 	}
 	if len(candidates) != 1 {
-		return domain.EnvGroup{}, fmt.Errorf("model has no default env group")
+		return s.createDefaultEnvGroup(ctx, model)
 	}
 	model.DefaultEnvGroupID = candidates[0].ID
 	model.UpdatedAt = s.now().UTC()
@@ -194,6 +194,103 @@ func (s *Service) repairDefaultEnvGroup(ctx context.Context, model *domain.Model
 		return domain.EnvGroup{}, fmt.Errorf("save model default env group: %w", err)
 	}
 	return candidates[0], nil
+}
+
+// createDefaultEnvGroup provisions a dedicated env group for a provider model
+// that has no unambiguous default. Models created without an env group (for
+// example from the pet model admin) would otherwise fail every Task runtime
+// sync with "model has no default env group". The environment mirrors
+// /api/v1/providers/add-models so the two creation paths stay equivalent.
+func (s *Service) createDefaultEnvGroup(ctx context.Context, model *domain.Model) (domain.EnvGroup, error) {
+	provider, err := s.store.Provider(ctx, strings.TrimSpace(model.ProviderID))
+	if err != nil {
+		return domain.EnvGroup{}, fmt.Errorf("model provider is unavailable")
+	}
+	wireAPI, err := defaultModelWireAPI(model.Backend, model.WireAPI)
+	if err != nil {
+		return domain.EnvGroup{}, err
+	}
+	now := s.now().UTC()
+	secretRefs := map[string]string{}
+	var environment map[string]string
+	if wireAPI == "anthropic_messages" {
+		anthropicBase := strings.TrimSpace(provider.AnthropicBaseURL)
+		if anthropicBase == "" {
+			anthropicBase = provider.BaseURL
+		}
+		credentialEnv := "ANTHROPIC_API_KEY"
+		if provider.AuthStyle == "bearer" {
+			credentialEnv = "ANTHROPIC_AUTH_TOKEN"
+		}
+		if provider.CredentialRef != "" {
+			secretRefs[credentialEnv] = provider.CredentialRef
+		}
+		environment = map[string]string{
+			"ANTHROPIC_BASE_URL": anthropicBase,
+			"ANTHROPIC_MODEL":    model.WireModel,
+		}
+	} else {
+		if provider.CredentialRef != "" {
+			secretRefs["OPENAI_API_KEY"] = provider.CredentialRef
+		}
+		environment = map[string]string{
+			"OPENAI_BASE_URL": provider.BaseURL,
+			"OPENAI_MODEL":    model.WireModel,
+			"CODEX_WIRE_API":  wireAPI,
+			"CODEX_ENV_KEY":   "OPENAI_API_KEY",
+			"AHA_PROVIDER_ID": provider.ID,
+		}
+	}
+	group := domain.EnvGroup{
+		ID: domain.NewID("env"), Name: provider.Name + " / " + model.WireModel,
+		ProviderID: provider.ID, Backend: model.Backend, Revision: 1,
+		Environment: environment, SecretRefs: secretRefs,
+		SecretConfigured: provider.CredentialConfigured, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := s.store.UpsertEnvGroup(ctx, group); err != nil {
+		return domain.EnvGroup{}, fmt.Errorf("create default env group: %w", err)
+	}
+	model.DefaultEnvGroupID = group.ID
+	model.UpdatedAt = now
+	if err := s.store.UpsertModel(ctx, *model); err != nil {
+		return domain.EnvGroup{}, fmt.Errorf("save model default env group: %w", err)
+	}
+	return group, nil
+}
+
+func defaultModelWireAPI(backend, wireAPI string) (string, error) {
+	wireAPI = strings.ToLower(strings.TrimSpace(wireAPI))
+	if wireAPI == "chat_completions" {
+		wireAPI = "chat"
+	}
+	switch strings.ToLower(strings.TrimSpace(backend)) {
+	case "claude":
+		if wireAPI == "" {
+			wireAPI = "anthropic_messages"
+		}
+		if wireAPI != "anthropic_messages" {
+			return "", fmt.Errorf("Claude Backend requires Anthropic Messages")
+		}
+	case "codex":
+		if wireAPI == "" {
+			wireAPI = "responses"
+		}
+		if wireAPI != "responses" && wireAPI != "chat" {
+			return "", fmt.Errorf("Codex Backend does not support wire API %q", wireAPI)
+		}
+	case "dsh":
+		if wireAPI == "" {
+			wireAPI = "responses"
+		}
+		switch wireAPI {
+		case "responses", "chat", "anthropic_messages":
+		default:
+			return "", fmt.Errorf("DSH Backend does not support wire API %q", wireAPI)
+		}
+	default:
+		return "", fmt.Errorf("unknown model backend %q", backend)
+	}
+	return wireAPI, nil
 }
 
 func (s *Service) resolveOfficialCodexSelection(

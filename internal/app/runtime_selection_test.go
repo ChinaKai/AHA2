@@ -298,7 +298,7 @@ func TestUpdateAgentConfigSwitchesOfficialToLegacySyncedEnvModel(t *testing.T) {
 	}
 }
 
-func TestEnvModelRepairRejectsGroupConfiguredForDifferentModel(t *testing.T) {
+func TestEnvModelRepairCreatesDedicatedGroupInsteadOfUsingDifferentModel(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
@@ -307,31 +307,42 @@ func TestEnvModelRepairRejectsGroupConfiguredForDifferentModel(t *testing.T) {
 	}
 	defer database.Close()
 	now := time.Now().UTC()
+	provider := domain.Provider{
+		ID: "gateway", Name: "Gateway", BaseURL: "https://gateway.test/v1", CreatedAt: now, UpdatedAt: now,
+	}
 	group := domain.EnvGroup{
-		ID: "env-other-model", Name: "Gateway / other", ProviderID: "gateway", Backend: "codex", Revision: 1,
+		ID: "env-other-model", Name: "Gateway / other", ProviderID: provider.ID, Backend: "codex", Revision: 1,
 		Environment: map[string]string{"OPENAI_MODEL": "other-model"}, CreatedAt: now, UpdatedAt: now,
 	}
 	model := domain.Model{
-		ID: "model-missing-group", DisplayName: "Requested", ProviderID: "gateway", Backend: "codex",
-		WireModel: "requested-model", CreatedAt: now, UpdatedAt: now,
+		ID: "model-missing-group", DisplayName: "Requested", ProviderID: provider.ID, Backend: "codex",
+		WireModel: "requested-model", WireAPI: "responses", CreatedAt: now, UpdatedAt: now,
 	}
-	if err := database.UpsertEnvGroup(ctx, group); err != nil {
-		t.Fatal(err)
-	}
-	if err := database.UpsertModel(ctx, model); err != nil {
-		t.Fatal(err)
+	for _, operation := range []func() error{
+		func() error { return database.UpsertProvider(ctx, provider) },
+		func() error { return database.UpsertEnvGroup(ctx, group) },
+		func() error { return database.UpsertModel(ctx, model) },
+	} {
+		if err := operation(); err != nil {
+			t.Fatal(err)
+		}
 	}
 	service := NewService(database, nil, nil)
-	if _, _, _, err := service.resolveRuntimeSelection(ctx, runtimeSelectionInput{
+	_, envGroup, _, err := service.resolveRuntimeSelection(ctx, runtimeSelectionInput{
 		Backend: "codex", ModelSource: "env", ModelID: model.ID,
-	}); err == nil {
-		t.Fatal("group configured for a different wire model was accepted")
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 	stored, err := database.Model(ctx, model.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stored.DefaultEnvGroupID != "" {
-		t.Fatalf("mismatched group was persisted as the default: %#v", stored)
+	if stored.DefaultEnvGroupID == "" || stored.DefaultEnvGroupID == group.ID {
+		t.Fatalf("repair reused a group configured for another model: %#v", stored)
+	}
+	if envGroup.ID != stored.DefaultEnvGroupID || envGroup.ProviderID != provider.ID ||
+		envGroup.Environment["OPENAI_MODEL"] != model.WireModel {
+		t.Fatalf("unexpected repaired env group: %#v", envGroup)
 	}
 }
