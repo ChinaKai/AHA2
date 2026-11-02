@@ -481,9 +481,11 @@ func TestCodexArgumentsRenderMCPServers(t *testing.T) {
 	}, "")
 	joined := strings.Join(args, "\n")
 	for _, want := range []string{
+		`mcp_servers.aha2_channel.default_tools_approval_mode="approve"`,
 		`mcp_servers.aha2_channel.url="http://127.0.0.1:8766/api/v1/agent/channel/mcp"`,
 		`mcp_servers.aha2_channel.bearer_token_env_var="AHA2_AGENT_API_TOKEN"`,
 		`mcp_servers.aha2_channel.http_headers={"X-Test" = "yes"}`,
+		`mcp_servers.mcp_local.default_tools_approval_mode="approve"`,
 		`mcp_servers.mcp_local.command="node"`,
 		`mcp_servers.mcp_local.args=["server.mjs"]`,
 		`mcp_servers.mcp_local.env={"MODE" = "test"}`,

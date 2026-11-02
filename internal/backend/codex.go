@@ -229,6 +229,12 @@ func codexArguments(request Request, catalogPath string) []string {
 // config overrides. Codex has no --mcp-config file; every server field is a
 // dotted -c override instead. HTTP bearer auth uses bearer_token_env_var so the
 // turn credential stays in the environment.
+//
+// Codex treats MCP tool calls as separately approvable actions. With
+// approval_policy=never it refuses them outright ("MCP tool call requires
+// approval, but approval policy is never"), so a bound MCP server must declare
+// its tools auto-approved. This is the Codex equivalent of Claude's
+// --allowedTools pre-approval; it does not widen shell or network approval.
 func appendCodexMCPArguments(args []string, servers []MCPServer) []string {
 	for _, server := range servers {
 		name := codexMCPKey(server.Name)
@@ -241,6 +247,7 @@ func appendCodexMCPArguments(args []string, servers []MCPServer) []string {
 			if strings.TrimSpace(server.Command) == "" {
 				continue
 			}
+			args = append(args, "-c", prefix+".default_tools_approval_mode="+tomlString("approve"))
 			args = append(args, "-c", prefix+".command="+tomlString(server.Command))
 			if len(server.Args) > 0 {
 				values := make([]string, 0, len(server.Args))
@@ -256,6 +263,7 @@ func appendCodexMCPArguments(args []string, servers []MCPServer) []string {
 			if strings.TrimSpace(server.URL) == "" {
 				continue
 			}
+			args = append(args, "-c", prefix+".default_tools_approval_mode="+tomlString("approve"))
 			args = append(args, "-c", prefix+".url="+tomlString(server.URL))
 			bearerEnv := strings.TrimSpace(server.BearerTokenEnv)
 			if bearerEnv != "" {

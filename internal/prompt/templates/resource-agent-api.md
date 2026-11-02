@@ -77,7 +77,7 @@ Use the `inbound_receipt_id` from the live inbox message or its channel context.
 
 Before the final response, resolve every task-routed receipt with either a receipt-bound channel reply or `reply-decision`. If intentionally silent, call `reply-decision` with `decision:"end"` and a reason specific to that message. A Web-only final answer is not a channel reply and leaves the receipt unresolved.
 
-`task_route` Turns (group or private) receive the built-in `channel_reply` and `channel_reply_decision` MCP tools. Use them to resolve the current message's receipt; there is no server-side final-answer fallback for these routes. Include relevant `attachment_ids` in `channel_reply` when the answer needs files. The HTTP endpoints remain available when the MCP tools are absent.
+`task_route` Turns (group or private) receive the built-in `channel_reply` and `channel_reply_decision` MCP tools. Use them to resolve the current message's receipt; there is no server-side final-answer fallback for these routes. `channel_reply` is delivered immediately: call it once with the final answer, not for progress, planning, or tool-error narration. Include relevant `attachment_ids` when the answer needs files. The HTTP endpoints remain available when the MCP tools are absent.
 
 Collaboration batches use:
 

@@ -82,7 +82,8 @@ func channelMCPTools() []mcpTool {
 		{
 			Name: "channel_reply",
 			Description: "Reply to the channel message that triggered this Turn. " +
-				"Use this instead of finishing silently when the conversation needs an answer. " +
+				"The message is delivered immediately: call this once at the end with the final answer, " +
+				"not for progress, planning, or tool-failure narration. " +
 				"The current message's receipt is resolved automatically.",
 			InputSchema: map[string]any{
 				"type": "object",

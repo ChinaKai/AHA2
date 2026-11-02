@@ -274,7 +274,10 @@ func materializeRemoteContext(ctx context.Context, item domain.Workspace, runner
 			return err
 		}
 		if result.ExitCode != 0 {
-			return fmt.Errorf("materialize context %s: %s", root, strings.TrimSpace(result.Stderr))
+			// When the host is being torn down (for example the WSL VM is
+			// OOM-killed), the command dies without stderr. Fall back to the
+			// exit code so the error is not an empty suffix.
+			return fmt.Errorf("materialize context %s: %s", root, remoteCommandDetail(result))
 		}
 		return nil
 	}()

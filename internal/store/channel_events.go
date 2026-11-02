@@ -216,8 +216,14 @@ func channelSubscriptionAllows(endpointKind, subscriptionKind, eventClass, event
 		// Waiting-user notices are only useful for separately managed Tasks.
 		return false
 	}
-	if subscriptionKind == "task_route" && eventType == "agent_reply" {
-		return false
+	if subscriptionKind == "task_route" {
+		// task_route is explicit-reply only. Suppress the final answer (it must
+		// go through channel_reply) and agent-authored progress updates. Without
+		// the latter, a private task_route leaks every intermediate "I am
+		// checking..." message to the chat while the final answer stays hidden.
+		if eventType == "agent_reply" || eventClass == "update" {
+			return false
+		}
 	}
 	if endpointKind == domain.ChannelEndpointGroupDigitalHuman {
 		return eventType == "agent_reply"

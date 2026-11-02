@@ -35,7 +35,8 @@ func TestChannelSubscriptionAllowsUpdatesOnlyForPrivateConversations(t *testing.
 		want                                                bool
 	}{
 		{"assistant update", domain.ChannelEndpointAssistantDM, "conversation_host", "update", "agent_message_update", true},
-		{"routed update", domain.ChannelEndpointAssistantDM, "task_route", "update", "agent_progress", true},
+		{"routed message update stays explicit", domain.ChannelEndpointAssistantDM, "task_route", "update", "agent_message_update", false},
+		{"routed progress stays explicit", domain.ChannelEndpointAssistantDM, "task_route", "update", "agent_progress", false},
 		{"routed final uses explicit reply", domain.ChannelEndpointAssistantDM, "task_route", "message", "agent_reply", false},
 		{"host success status is redundant", domain.ChannelEndpointAssistantDM, "conversation_host", "status", "waiting_user", false},
 		{"routed success status is redundant", domain.ChannelEndpointAssistantDM, "task_route", "status", "waiting_user", false},
