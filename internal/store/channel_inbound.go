@@ -413,28 +413,68 @@ func (s *Store) EnqueueChannelOwnerMessage(
 	provenance map[string]any,
 	attachmentIDs ...string,
 ) (domain.TaskRound, domain.AgentInboxItem, bool, bool, error) {
+	return s.enqueueChannelMessage(ctx, receiptID, leaseID, conversationID, message, targetAgentID, provenance, true, attachmentIDs...)
+}
+
+// EnqueueChannelContinuationMessage resumes a channel-originated request after
+// an Owner decision made outside the channel, such as a permission approval in
+// AHA Web. The original receipt is already processed, so it is referenced for
+// reply routing only: it is not claimed or marked processed again.
+func (s *Store) EnqueueChannelContinuationMessage(
+	ctx context.Context,
+	receiptID, conversationID string,
+	message domain.Message,
+	targetAgentID string,
+	provenance map[string]any,
+	attachmentIDs ...string,
+) (domain.TaskRound, domain.AgentInboxItem, bool, error) {
+	round, inbox, createdRound, _, err := s.enqueueChannelMessage(
+		ctx, receiptID, "", conversationID, message, targetAgentID, provenance, false, attachmentIDs...,
+	)
+	return round, inbox, createdRound, err
+}
+
+func (s *Store) enqueueChannelMessage(
+	ctx context.Context,
+	receiptID, leaseID, conversationID string,
+	message domain.Message,
+	targetAgentID string,
+	provenance map[string]any,
+	claimReceipt bool,
+	attachmentIDs ...string,
+) (domain.TaskRound, domain.AgentInboxItem, bool, bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return domain.TaskRound{}, domain.AgentInboxItem{}, false, false, err
 	}
 	defer tx.Rollback()
-	var receiptState, existingMessageID string
-	if err := tx.QueryRowContext(ctx, `SELECT state,aha_message_id FROM channel_inbox_dedup WHERE id=? AND lease_id=?`, receiptID, leaseID).Scan(&receiptState, &existingMessageID); err != nil {
-		return domain.TaskRound{}, domain.AgentInboxItem{}, false, false, err
-	}
-	if existingMessageID != "" {
-		inbox, err := scanInbox(tx.QueryRowContext(ctx, `SELECT `+inboxColumns+` FROM agent_inbox WHERE message_id=? ORDER BY sequence LIMIT 1`, existingMessageID))
-		if err != nil {
+	if claimReceipt {
+		var receiptState, existingMessageID string
+		if err := tx.QueryRowContext(ctx, `SELECT state,aha_message_id FROM channel_inbox_dedup WHERE id=? AND lease_id=?`, receiptID, leaseID).Scan(&receiptState, &existingMessageID); err != nil {
 			return domain.TaskRound{}, domain.AgentInboxItem{}, false, false, err
 		}
-		round, err := scanRound(tx.QueryRowContext(ctx, `SELECT `+roundColumns+` FROM task_rounds WHERE id=?`, inbox.RoundID))
-		if err != nil {
+		if existingMessageID != "" {
+			inbox, err := scanInbox(tx.QueryRowContext(ctx, `SELECT `+inboxColumns+` FROM agent_inbox WHERE message_id=? ORDER BY sequence LIMIT 1`, existingMessageID))
+			if err != nil {
+				return domain.TaskRound{}, domain.AgentInboxItem{}, false, false, err
+			}
+			round, err := scanRound(tx.QueryRowContext(ctx, `SELECT `+roundColumns+` FROM task_rounds WHERE id=?`, inbox.RoundID))
+			if err != nil {
+				return domain.TaskRound{}, domain.AgentInboxItem{}, false, false, err
+			}
+			return round, inbox, false, false, tx.Commit()
+		}
+		if receiptState != "processing" {
+			return domain.TaskRound{}, domain.AgentInboxItem{}, false, false, ErrChannelRevision
+		}
+	} else {
+		var receiptState, receiptConversationID string
+		if err := tx.QueryRowContext(ctx, `SELECT state,COALESCE(conversation_id,'') FROM channel_inbox_dedup WHERE id=?`, receiptID).Scan(&receiptState, &receiptConversationID); err != nil {
 			return domain.TaskRound{}, domain.AgentInboxItem{}, false, false, err
 		}
-		return round, inbox, false, false, tx.Commit()
-	}
-	if receiptState != "processing" {
-		return domain.TaskRound{}, domain.AgentInboxItem{}, false, false, ErrChannelRevision
+		if receiptState != "processed" || receiptConversationID != conversationID {
+			return domain.TaskRound{}, domain.AgentInboxItem{}, false, false, ErrChannelRevision
+		}
 	}
 	var exists bool
 	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM task_agents WHERE task_id=? AND agent_id=?)`, message.TaskID, targetAgentID).Scan(&exists); err != nil {
@@ -490,13 +530,15 @@ func (s *Store) EnqueueChannelOwnerMessage(
 	if err != nil {
 		return domain.TaskRound{}, domain.AgentInboxItem{}, false, false, err
 	}
-	result, err = tx.ExecContext(ctx, `UPDATE channel_inbox_dedup SET state='processed',conversation_id=?,aha_message_id=?,outcome='delivered_to_task',lease_id='',lease_until='',processed_at=? WHERE id=? AND state='processing' AND lease_id=? AND aha_message_id=''`,
-		conversationID, message.ID, timeString(message.CreatedAt), receiptID, leaseID)
-	if err != nil {
-		return domain.TaskRound{}, domain.AgentInboxItem{}, false, false, err
-	}
-	if affected, _ := result.RowsAffected(); affected != 1 {
-		return domain.TaskRound{}, domain.AgentInboxItem{}, false, false, ErrChannelRevision
+	if claimReceipt {
+		result, err = tx.ExecContext(ctx, `UPDATE channel_inbox_dedup SET state='processed',conversation_id=?,aha_message_id=?,outcome='delivered_to_task',lease_id='',lease_until='',processed_at=? WHERE id=? AND state='processing' AND lease_id=? AND aha_message_id=''`,
+			conversationID, message.ID, timeString(message.CreatedAt), receiptID, leaseID)
+		if err != nil {
+			return domain.TaskRound{}, domain.AgentInboxItem{}, false, false, err
+		}
+		if affected, _ := result.RowsAffected(); affected != 1 {
+			return domain.TaskRound{}, domain.AgentInboxItem{}, false, false, ErrChannelRevision
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return domain.TaskRound{}, domain.AgentInboxItem{}, false, false, err

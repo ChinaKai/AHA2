@@ -103,3 +103,61 @@ func (s *Service) ResolveTaskPermissionRequest(
 func (s *Service) SetTaskPermissionRequestChannelAction(ctx context.Context, id, actionID string) error {
 	return s.store.SetTaskPermissionRequestChannelAction(ctx, id, actionID, s.now().UTC())
 }
+
+// SubmitTaskPermissionApprovalContinuation resumes an approved channel request
+// when the Owner decided in AHA Web instead of clicking the channel card. The
+// continuation keeps the applicant's route and receipt so the follow-up Turn
+// can answer the group and notify the applicant.
+func (s *Service) SubmitTaskPermissionApprovalContinuation(
+	ctx context.Context, request domain.TaskPermissionRequest, content string,
+) (domain.Turn, error) {
+	provenance, err := s.taskPermissionContinuationContext(ctx, request)
+	if err != nil {
+		return domain.Turn{}, err
+	}
+	return s.submitMessageWithSource(
+		ctx, request.TaskID, "main", content, nil,
+		request.InboundReceiptID, "", request.ChannelConversationID,
+		provenance, "owner", "owner_message", true,
+	)
+}
+
+func (s *Service) taskPermissionContinuationContext(
+	ctx context.Context, request domain.TaskPermissionRequest,
+) (map[string]any, error) {
+	if strings.TrimSpace(request.ChannelInstanceID) == "" ||
+		strings.TrimSpace(request.ChannelConversationID) == "" ||
+		strings.TrimSpace(request.InboundReceiptID) == "" ||
+		strings.TrimSpace(request.ApplicantIdentityLinkID) == "" {
+		return nil, fmt.Errorf("permission request has no channel route")
+	}
+	instance, err := s.store.ChannelInstance(ctx, request.ChannelInstanceID)
+	if err != nil {
+		return nil, err
+	}
+	conversation, err := s.store.ChannelConversation(ctx, request.ChannelConversationID)
+	if err != nil {
+		return nil, err
+	}
+	if conversation.InstanceID != instance.ID {
+		return nil, fmt.Errorf("permission request channel route is inconsistent")
+	}
+	return map[string]any{
+		"schema": "aha.channel-context/v1", "instance_id": instance.ID, "provider": instance.ProviderKey,
+		"endpoint": domain.ChannelEndpointGroupDigitalHuman, "conversation_id": conversation.ID,
+		"chat_display_name": conversation.DisplayName,
+		"actor": map[string]any{
+			"identity_link_id": "", "role": "owner", "display_name": "Owner", "is_bot": false,
+		},
+		"route":              map[string]any{"mode": "task_route", "target_task_id": request.TaskID},
+		"inbound_receipt_id": request.InboundReceiptID,
+		"permission_request": map[string]any{
+			"id":                         request.ID,
+			"decision":                   "approved",
+			"applicant_identity_link_id": request.ApplicantIdentityLinkID,
+			"applicant_name":             request.ApplicantName,
+			"applicant_is_bot":           request.ApplicantIsBot,
+			"applicant_receipt_id":       request.InboundReceiptID,
+		},
+	}, nil
+}

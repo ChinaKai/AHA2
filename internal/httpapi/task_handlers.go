@@ -492,13 +492,42 @@ func (s *Server) resolveTaskPermissionRequest(writer http.ResponseWriter, reques
 	}
 	result := map[string]any{"ok": true, "request": resolved}
 	if resolved.Status == "approved" {
-		content := fmt.Sprintf("Owner 已批准权限申请 %s（%s）。请继续执行已授权动作，不要扩大范围，完成后汇报结果。", resolved.ID, resolved.Action)
-		if _, submitErr := s.app.SubmitMessage(request.Context(), resolved.TaskID, content); submitErr != nil {
+		content := permissionApprovalContinuationContent(resolved)
+		var submitErr error
+		if taskPermissionHasChannelRoute(resolved) {
+			// The approval happened in AHA Web, but the request came from the
+			// group. Keep its route so the follow-up Turn can answer the group
+			// and notify the applicant instead of stopping at AHA Web.
+			_, submitErr = s.app.SubmitTaskPermissionApprovalContinuation(request.Context(), resolved, content)
+		} else {
+			_, submitErr = s.app.SubmitMessage(request.Context(), resolved.TaskID, content)
+		}
+		if submitErr != nil {
 			result["continuation_error"] = submitErr.Error()
 		}
 	}
 	s.audit(request, "task.permission.resolve", "task", taskID, map[string]any{"request_id": resolved.ID, "decision": resolved.Status})
 	writeJSON(writer, http.StatusOK, result)
+}
+
+func taskPermissionHasChannelRoute(request domain.TaskPermissionRequest) bool {
+	return strings.TrimSpace(request.ChannelInstanceID) != "" &&
+		strings.TrimSpace(request.ChannelConversationID) != "" &&
+		strings.TrimSpace(request.InboundReceiptID) != "" &&
+		strings.TrimSpace(request.ApplicantIdentityLinkID) != ""
+}
+
+func permissionApprovalContinuationContent(request domain.TaskPermissionRequest) string {
+	if taskPermissionHasChannelRoute(request) {
+		return fmt.Sprintf(
+			"Owner 已批准权限申请 %s（申请人：%s）。请继续执行已授权的动作：%s。不要扩大范围，完成后向渠道汇报结果。",
+			request.ID, request.ApplicantName, request.Action,
+		)
+	}
+	return fmt.Sprintf(
+		"Owner 已批准权限申请 %s（%s）。请继续执行已授权动作，不要扩大范围，完成后汇报结果。",
+		request.ID, request.Action,
+	)
 }
 
 func (s *Server) taskConversation(writer http.ResponseWriter, request *http.Request) {

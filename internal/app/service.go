@@ -620,7 +620,7 @@ func (s *Service) SubmitAgentMessage(ctx context.Context, taskID, agentID, conte
 }
 
 func (s *Service) SubmitAgentMessageWithAttachments(ctx context.Context, taskID, agentID, content string, attachmentIDs []string) (domain.Turn, error) {
-	return s.submitMessageWithSource(ctx, taskID, agentID, content, attachmentIDs, "", "", "", nil, "owner", "owner_message")
+	return s.submitMessageWithSource(ctx, taskID, agentID, content, attachmentIDs, "", "", "", nil, "owner", "owner_message", false)
 }
 
 // SubmitPetDelegatedMessage writes a target task message that is visibly from
@@ -631,7 +631,7 @@ func (s *Service) SubmitPetDelegatedMessage(ctx context.Context, taskID, content
 }
 
 func (s *Service) SubmitPetDelegatedMessageWithAttachments(ctx context.Context, taskID, content string, attachmentIDs []string) (domain.Turn, error) {
-	return s.submitMessageWithSource(ctx, taskID, "main", content, attachmentIDs, "", "", "", nil, "pet", "pet_delegate_message")
+	return s.submitMessageWithSource(ctx, taskID, "main", content, attachmentIDs, "", "", "", nil, "pet", "pet_delegate_message", false)
 }
 
 func (s *Service) SubmitChannelMessage(ctx context.Context, receiptID, receiptLeaseID, conversationID, taskID, content string, provenance map[string]any) (domain.Turn, error) {
@@ -639,10 +639,13 @@ func (s *Service) SubmitChannelMessage(ctx context.Context, receiptID, receiptLe
 }
 
 func (s *Service) SubmitChannelMessageWithAttachments(ctx context.Context, receiptID, receiptLeaseID, conversationID, taskID, content string, provenance map[string]any, attachmentIDs []string) (domain.Turn, error) {
-	return s.submitMessageWithSource(ctx, taskID, "main", content, attachmentIDs, receiptID, receiptLeaseID, conversationID, provenance, "owner", "owner_message")
+	return s.submitMessageWithSource(ctx, taskID, "main", content, attachmentIDs, receiptID, receiptLeaseID, conversationID, provenance, "owner", "owner_message", false)
 }
 
-func (s *Service) submitMessageWithSource(ctx context.Context, taskID, agentID, content string, attachmentIDs []string, channelReceiptID, channelReceiptLeaseID, channelConversationID string, channelProvenance map[string]any, sender, sourceKind string) (domain.Turn, error) {
+// submitMessageWithSource enqueues a user message and schedules the Agent.
+// channelContinuation references an already-processed receipt instead of
+// consuming a fresh one, for decisions made outside the channel.
+func (s *Service) submitMessageWithSource(ctx context.Context, taskID, agentID, content string, attachmentIDs []string, channelReceiptID, channelReceiptLeaseID, channelConversationID string, channelProvenance map[string]any, sender, sourceKind string, channelContinuation bool) (domain.Turn, error) {
 	content = strings.TrimSpace(content)
 	if content == "" && len(attachmentIDs) == 0 {
 		return domain.Turn{}, fmt.Errorf("message or attachment is required")
@@ -714,7 +717,12 @@ func (s *Service) submitMessageWithSource(ctx context.Context, taskID, agentID, 
 	var inbox domain.AgentInboxItem
 	var createdRound, inserted bool
 	if channelReceiptID != "" {
-		round, inbox, createdRound, inserted, err = s.store.EnqueueChannelOwnerMessage(ctx, channelReceiptID, channelReceiptLeaseID, channelConversationID, message, agentID, channelProvenance, attachmentIDs...)
+		if channelContinuation {
+			round, inbox, createdRound, err = s.store.EnqueueChannelContinuationMessage(ctx, channelReceiptID, channelConversationID, message, agentID, channelProvenance, attachmentIDs...)
+			inserted = err == nil
+		} else {
+			round, inbox, createdRound, inserted, err = s.store.EnqueueChannelOwnerMessage(ctx, channelReceiptID, channelReceiptLeaseID, channelConversationID, message, agentID, channelProvenance, attachmentIDs...)
+		}
 	} else if sourceKind == "pet_delegate_message" {
 		round, inbox, createdRound, err = s.store.EnqueuePetDelegatedMessage(ctx, message, agentID, attachmentIDs)
 		inserted = err == nil

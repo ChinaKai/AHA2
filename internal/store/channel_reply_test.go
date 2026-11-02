@@ -521,6 +521,59 @@ func TestAgentChannelReplyIsReceiptBoundAndIdempotent(t *testing.T) {
 		t.Fatalf("permission approval reply target=%#v err=%v", approvalTarget, err)
 	}
 
+	// An approval in AHA Web has no fresh card receipt. Its continuation
+	// references the applicant's already-processed receipt without claiming it
+	// again, and must still answer the group and notify the applicant.
+	webMessage := domain.Message{
+		ID: domain.NewID("message"), TaskID: task.ID, Role: "user", Sender: "owner",
+		Content: "Owner 已批准权限申请 task_permission_web（申请人：小红）。", CreatedAt: now.Add(4 * time.Second),
+	}
+	webContext := map[string]any{
+		"schema": "aha.channel-context/v1", "provider": "feishu", "instance_id": instance.ID,
+		"conversation_id": conversation.ID, "endpoint": endpoint.Kind,
+		"chat_display_name":  conversation.DisplayName,
+		"inbound_receipt_id": receiptID,
+		"route":              map[string]any{"mode": "task_route", "target_task_id": task.ID},
+		"actor": map[string]any{
+			"identity_link_id": "", "role": "owner", "display_name": "Owner", "is_bot": false,
+		},
+		"permission_request": map[string]any{
+			"id": "task_permission_web", "decision": "approved",
+			"applicant_identity_link_id": actor.ID, "applicant_name": actor.DisplayName,
+			"applicant_is_bot": false, "applicant_receipt_id": receiptID,
+		},
+	}
+	webRound, webInbox, _, err := database.EnqueueChannelContinuationMessage(
+		ctx, receiptID, conversation.ID, webMessage, "main", webContext,
+	)
+	if err != nil || webRound.ID == "" || webInbox.ID == "" {
+		t.Fatalf("permission continuation round=%#v inbox=%#v err=%v", webRound, webInbox, err)
+	}
+	var receiptState, receiptMessageID string
+	if err := database.db.QueryRowContext(ctx,
+		`SELECT state,aha_message_id FROM channel_inbox_dedup WHERE id=?`, receiptID,
+	).Scan(&receiptState, &receiptMessageID); err != nil || receiptState != "processed" {
+		t.Fatalf("continuation changed the original receipt: state=%q message=%q err=%v", receiptState, receiptMessageID, err)
+	}
+	if _, err := database.db.ExecContext(ctx, `
+		UPDATE agent_inbox SET status='delivered_in_turn',delivered_turn_id=?,delivered_at=? WHERE id=?`,
+		approvalTurn.ID, timeString(now.Add(4*time.Second)), webInbox.ID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	webDelivery, _, webReplyCreated, err := database.EnqueueAgentChannelReply(
+		ctx, task.ID, approvalTurn.ID, "web-permission-approval-reply", receiptID,
+		"已按批准执行完成。", nil, now.Add(4*time.Second),
+	)
+	if err != nil || !webReplyCreated || webDelivery.ID == "" {
+		t.Fatalf("web permission continuation reply delivery=%#v created=%v err=%v", webDelivery, webReplyCreated, err)
+	}
+	webTarget, err := database.ChannelDeliveryTarget(ctx, conversation.ID, webDelivery.SourceEventSequence)
+	if err != nil || webTarget["reply_message_id"] != "provider-message-reply" ||
+		webTarget["mention_user_ids"] != `["provider-user-reply"]` {
+		t.Fatalf("web permission continuation reply target=%#v err=%v", webTarget, err)
+	}
+
 	if err := database.AppendChannelSourceAndProject(ctx, domain.ChannelSourceEvent{
 		ID: domain.NewID("source"), SourceKey: "ordinary-final-reply", TaskID: task.ID,
 		RoundID: round.ID, TurnID: turn.ID, EventClass: "message", EventType: "agent_reply",
@@ -529,11 +582,12 @@ func TestAgentChannelReplyIsReceiptBoundAndIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	deliveries, err := database.ChannelDeliveries(ctx, instance.ID, 20)
-	if err != nil || len(deliveries) != 4 ||
+	if err != nil || len(deliveries) != 5 ||
 		!slices.ContainsFunc(deliveries, func(item domain.ChannelDelivery) bool { return item.ID == delivery.ID }) ||
 		!slices.ContainsFunc(deliveries, func(item domain.ChannelDelivery) bool { return item.ID == ownerDelivery.ID }) ||
 		!slices.ContainsFunc(deliveries, func(item domain.ChannelDelivery) bool { return item.ID == botDelivery.ID }) ||
-		!slices.ContainsFunc(deliveries, func(item domain.ChannelDelivery) bool { return item.ID == approvalDelivery.ID }) {
+		!slices.ContainsFunc(deliveries, func(item domain.ChannelDelivery) bool { return item.ID == approvalDelivery.ID }) ||
+		!slices.ContainsFunc(deliveries, func(item domain.ChannelDelivery) bool { return item.ID == webDelivery.ID }) {
 		t.Fatalf("ordinary final reply leaked into task route: %#v err=%v", deliveries, err)
 	}
 }
