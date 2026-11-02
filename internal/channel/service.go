@@ -1443,11 +1443,20 @@ func (s *Service) processInbound(ctx context.Context, receipt domain.ChannelInbo
 	if finished, finishedErr := s.finishedChannelTarget(ctx, targetTaskID); finishedErr != nil {
 		return finishedErr
 	} else if finished.ID != "" {
-		continued, continueErr := s.continueFinishedChannelTask(ctx, instance, conversation, finished, receipt.ID)
+		continued, continueErr := s.continueFinishedChannelTask(ctx, instance, conversation, endpointKind, finished, receipt.ID)
 		if continueErr != nil {
 			return continueErr
 		}
 		targetTaskID, routeMode = continued.ID, "task_route"
+	}
+	if endpointKind == domain.ChannelEndpointAssistantDM {
+		// Private-chat system Tasks (the conversation host and its
+		// continuations) follow the Owner-chosen defaults. A Task the Owner
+		// explicitly bound to the conversation keeps its own runtime; only
+		// Tasks living in the channel host Project are system-managed.
+		if targetTask, taskErr := s.store.Task(ctx, targetTaskID); taskErr == nil && targetTask.ProjectID == instance.HostProjectID {
+			s.ensurePrivateChatTaskRuntime(ctx, targetTaskID)
+		}
 	}
 	mentions := make([]map[string]any, 0, len(envelope.Mentions))
 	for _, mention := range envelope.Mentions {
@@ -2413,7 +2422,7 @@ func (s *Service) finishedChannelTarget(ctx context.Context, taskID string) (dom
 // the triggering message is delivered to it instead of the frozen Task. It is
 // idempotent: repeating a delivery for the same finished Task reuses the
 // continuation it already created.
-func (s *Service) continueFinishedChannelTask(ctx context.Context, instance domain.ChannelInstance, conversation domain.ChannelConversation, finished domain.Task, receiptID string) (domain.Task, error) {
+func (s *Service) continueFinishedChannelTask(ctx context.Context, instance domain.ChannelInstance, conversation domain.ChannelConversation, endpointKind string, finished domain.Task, receiptID string) (domain.Task, error) {
 	previous, snapshotErr := s.store.RuntimeSnapshot(ctx, finished.RuntimeConfigSnapshotID)
 	if snapshotErr != nil && !errors.Is(snapshotErr, sql.ErrNoRows) {
 		return domain.Task{}, fmt.Errorf("continuation runtime is unavailable")
@@ -2445,6 +2454,16 @@ func (s *Service) continueFinishedChannelTask(ctx context.Context, instance doma
 	if modelSource == "" {
 		modelSource = domain.ModelSourceProvider
 	}
+	effort := previous.ReasoningEffort
+	filesystem := filesystemOf(previous.PermissionsJSON)
+	approval := approvalOf(previous.PermissionsJSON)
+	if endpointKind == domain.ChannelEndpointAssistantDM && finished.ProjectID == instance.HostProjectID {
+		// A finished private-chat system Task continues on the owner's current
+		// defaults instead of inheriting the previous read-only snapshot.
+		effort = privateChatReasoningEffort
+		filesystem = privateChatFilesystem
+		approval = "never"
+	}
 	// Deriving the ID from the finished Task and the inbound receipt keeps a
 	// redelivery idempotent without ever reusing an older continuation that has
 	// already finished (the conversation keeps pointing at its original host).
@@ -2457,9 +2476,9 @@ func (s *Service) continueFinishedChannelTask(ctx context.Context, instance doma
 			Isolation: finished.Isolation, WorktreeDir: finished.WorktreeDir,
 			TargetBranch: finished.TargetBranch, TaskBranch: finished.TaskBranch,
 			Backend: previous.Backend, ModelSource: modelSource, ModelID: model.ID, WireModel: previous.WireModel,
-			CodexAccountID: previous.CodexAccountID, ReasoningEffort: previous.ReasoningEffort,
+			CodexAccountID: previous.CodexAccountID, ReasoningEffort: effort,
 			StreamIdleTimeoutMS: intPointer(previous.StreamIdleTimeoutMS), StreamMaxRetries: intPointer(previous.StreamMaxRetries),
-			Filesystem: filesystemOf(previous.PermissionsJSON), Approval: approvalOf(previous.PermissionsJSON),
+			Filesystem: filesystem, Approval: approval,
 			ProxyEnabled: previous.ProxyEnabled, CollaborationMode: finished.CollaborationMode,
 			MaxAgents: finished.MaxAgents, KnowledgePolicy: finished.KnowledgePolicy,
 			SkillIDs: finished.SkillIDs, AllowSystemProject: true,
@@ -2488,6 +2507,37 @@ func channelContinuationRequest(finished domain.Task) string {
 
 func intPointer(value int) *int {
 	return &value
+}
+
+// privateChatReasoningEffort and privateChatFilesystem are the Owner-chosen
+// defaults for system-managed private-chat Tasks. Group conversations keep
+// their own read-only/workspace settings.
+const (
+	privateChatReasoningEffort = "high"
+	privateChatFilesystem      = "danger-full-access"
+)
+
+// ensurePrivateChatTaskRuntime upgrades an existing private-chat host or
+// continuation Task to the current defaults. It is best effort: a failed
+// runtime refresh must not drop the incoming message.
+func (s *Service) ensurePrivateChatTaskRuntime(ctx context.Context, taskID string) {
+	agent, err := s.store.TaskAgent(ctx, taskID, "main")
+	if err != nil {
+		return
+	}
+	snapshot, err := s.store.RuntimeSnapshot(ctx, agent.RuntimeConfigSnapshotID)
+	if err != nil {
+		return
+	}
+	filesystem, approval := parsePermissions(snapshot.PermissionsJSON)
+	if snapshot.ReasoningEffort == privateChatReasoningEffort && filesystem == privateChatFilesystem && approval == "never" {
+		return
+	}
+	if _, err := s.application.UpdateAgentConfig(ctx, taskID, "main", app.UpdateAgentConfigInput{
+		ReasoningEffort: privateChatReasoningEffort, Filesystem: privateChatFilesystem, Approval: "never",
+	}); err != nil {
+		s.logger.Warn("apply private chat runtime defaults", "task", taskID, "error", err)
+	}
 }
 
 func filesystemOf(permissionsJSON string) string {
@@ -2632,13 +2682,19 @@ func (s *Service) ensureConversation(ctx context.Context, instance domain.Channe
 		return domain.ChannelConversation{}, err
 	}
 	conversationID := domain.NewID("channel_conversation")
+	effort := runtimeChoice.ReasoningEffort
+	filesystem := "read-only"
+	if endpoint.Kind == domain.ChannelEndpointAssistantDM {
+		effort = privateChatReasoningEffort
+		filesystem = privateChatFilesystem
+	}
 	task, err := s.application.CreateTask(ctx, app.CreateTaskInput{
 		ProjectID: instance.HostProjectID, WorkspaceID: instance.HostWorkspaceID,
 		Title:   s.channelConversationTitle(ctx, instance, endpoint.Kind, envelope),
 		Request: "System-managed external channel conversation host.", Isolation: "inplace",
 		Backend: runtimeChoice.Model.Backend, ModelSource: runtimeChoice.Model.Source, ModelID: runtimeChoice.Model.ID, WireModel: runtimeChoice.WireModel,
 		CodexAccountID: runtimeChoice.CodexAccountID, ProxyEnabled: runtimeChoice.ProxyEnabled,
-		ReasoningEffort: runtimeChoice.ReasoningEffort, Filesystem: "read-only", Approval: "never",
+		ReasoningEffort: effort, Filesystem: filesystem, Approval: "never",
 		CollaborationMode: "single", MaxAgents: 1, KnowledgePolicy: "enabled", AllowSystemProject: true,
 	})
 	if err != nil {

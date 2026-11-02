@@ -15,7 +15,7 @@ func TestPetSystemSettingsAndWorkbenchEditing(t *testing.T) {
 		t.Fatal(err)
 	}
 	agents, err := fixture.service.TaskAgents(fixture.ctx, petTaskID)
-	if err != nil || len(agents) == 0 || agents[0].Filesystem != "read-only" {
+	if err != nil || len(agents) == 0 || agents[0].Filesystem != "danger-full-access" || agents[0].Approval != "never" || agents[0].ReasoningEffort != "high" {
 		t.Fatalf("pet runtime=%#v err=%v", agents, err)
 	}
 	if _, err := fixture.service.UpdateOwnerPetSettings(fixture.ctx, PetSettingsInput{

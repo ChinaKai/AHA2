@@ -152,6 +152,26 @@ func TestOwnerAssistantStartsNewPetTaskWithIntroduction(t *testing.T) {
 	}
 }
 
+func TestOwnerAssistantMigratesPetRuntimeToOwnerDefaults(t *testing.T) {
+	fixture := newPetTaskFixture(t)
+	fixture.createPetDraft(t, petTaskIntro)
+	if _, err := fixture.service.UpdateAgentConfig(fixture.ctx, petTaskID, "main", UpdateAgentConfigInput{
+		Filesystem: "read-only", Approval: "never", ReasoningEffort: "low",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.service.OwnerAssistant(fixture.ctx); err != nil {
+		t.Fatal(err)
+	}
+	agents, err := fixture.service.TaskAgents(fixture.ctx, petTaskID)
+	if err != nil || len(agents) == 0 {
+		t.Fatalf("pet agents=%#v err=%v", agents, err)
+	}
+	if agents[0].Filesystem != "danger-full-access" || agents[0].Approval != "never" || agents[0].ReasoningEffort != "high" {
+		t.Fatalf("legacy pet runtime was not migrated: %#v", agents[0])
+	}
+}
+
 func TestOwnerAssistantStartsLegacyPetDraftWithIntroduction(t *testing.T) {
 	fixture := newPetTaskFixture(t)
 	const legacyRequest = "你是宠物，不是编码代理。只和主人对话……"

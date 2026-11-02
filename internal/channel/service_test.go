@@ -1238,6 +1238,17 @@ func TestCompletedChannelTaskContinuesInNewTask(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	hostTask, err := database.Task(ctx, conversation.HostTaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hostSnapshot, err := database.RuntimeSnapshot(ctx, hostTask.RuntimeConfigSnapshotID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hostSnapshot.ReasoningEffort != "high" || hostSnapshot.PermissionsJSON != `{"approval":"never","filesystem":"danger-full-access"}` {
+		t.Fatalf("private chat host runtime=%#v", hostSnapshot)
+	}
 	// The owner explicitly takes over a real Task; that Task is the one that
 	// will complete and must not swallow the next message.
 	project := domain.Project{ID: "continue-project", Name: "Continue", ProjectType: "folder", DefaultWorkspaceID: "continue-workspace", KnowledgePolicy: "enabled", CreatedAt: now, UpdatedAt: now}
@@ -1395,5 +1406,30 @@ func TestCompletedChannelTaskContinuesInNewTask(t *testing.T) {
 	}
 	if _, err := database.ActiveChannelTaskRoute(ctx, conversation.ID); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("terminal task kept the channel route: %v", err)
+	}
+
+	// A finished private-chat host Task is a system-managed task, so its
+	// continuation uses the owner's current defaults instead of inheriting the
+	// legacy read-only runtime.
+	hostTask, err = database.Task(ctx, conversation.HostTaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hostTask.Status != domain.TaskCompleted {
+		terminalTime = time.Now().UTC().Format(time.RFC3339Nano)
+		if err := database.UpdateTaskStatus(ctx, hostTask.ID, hostTask.Status, domain.TaskCompleted, terminalTime, terminalTime); err != nil {
+			t.Fatal(err)
+		}
+	}
+	continuedHost, err := service.continueFinishedChannelTask(ctx, instance, conversation, domain.ChannelEndpointAssistantDM, hostTask, "private-host-continuation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	continuedHostSnapshot, err := database.RuntimeSnapshot(ctx, continuedHost.RuntimeConfigSnapshotID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if continuedHostSnapshot.ReasoningEffort != "high" || continuedHostSnapshot.PermissionsJSON != `{"approval":"never","filesystem":"danger-full-access"}` {
+		t.Fatalf("private chat continuation runtime=%#v", continuedHostSnapshot)
 	}
 }

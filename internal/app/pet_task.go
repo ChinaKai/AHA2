@@ -44,6 +44,13 @@ const (
 	petWorkspaceID = "workspace_pet"
 	petTaskID      = "task_pet"
 
+	// petTaskReasoningEffort and petTaskFilesystem are the Owner-chosen runtime
+	// defaults for the pet Task: high reasoning with full filesystem access.
+	// Approval stays "never", and the model still comes from the assistant
+	// setting.
+	petTaskReasoningEffort = "high"
+	petTaskFilesystem      = "danger-full-access"
+
 	// petTaskIntro is both the Task requirement and the first message. Web task
 	// creation treats "需求" as the first user message, so the pet follows the
 	// same semantics instead of keeping internal instructions in the Task.
@@ -97,8 +104,8 @@ func (s *Service) syncPetTaskRuntime(ctx context.Context, modelID string) error 
 	modelID = strings.TrimSpace(modelID)
 	agent, err := s.store.TaskAgent(ctx, petTaskID, "main")
 	if err != nil {
-		// The Task does not exist yet; ensureOwnerPetTask creates it with this
-		// model and read-only runtime on the next step.
+		// The Task does not exist yet; ensureOwnerPetTask creates it with the
+		// Owner-chosen runtime defaults on the next step.
 		return nil
 	}
 	snapshot, err := s.store.RuntimeSnapshot(ctx, agent.RuntimeConfigSnapshotID)
@@ -107,11 +114,13 @@ func (s *Service) syncPetTaskRuntime(ctx context.Context, modelID string) error 
 	}
 	needsModel := modelID != "" && snapshot.ModelID != modelID
 	filesystem, approval := parsePermissionsJSON(snapshot.PermissionsJSON)
-	needsReadOnly := filesystem != "read-only" || approval != "never"
-	if !needsModel && !needsReadOnly {
+	needsRuntime := filesystem != petTaskFilesystem || approval != "never" || snapshot.ReasoningEffort != petTaskReasoningEffort
+	if !needsModel && !needsRuntime {
 		return nil
 	}
-	input := UpdateAgentConfigInput{Filesystem: "read-only", Approval: "never"}
+	input := UpdateAgentConfigInput{
+		Filesystem: petTaskFilesystem, Approval: "never", ReasoningEffort: petTaskReasoningEffort,
+	}
 	if needsModel {
 		input.ModelID = modelID
 	}
@@ -206,7 +215,8 @@ func (s *Service) ensureOwnerPetTask(ctx context.Context, assistant *domain.Owne
 	task, err := s.CreateTask(ctx, CreateTaskInput{
 		ID: petTaskID, ProjectID: petProjectID, WorkspaceID: petWorkspaceID,
 		Title: "宠物", Request: petTaskIntro, CurrentGoal: petTaskMissionGoal, ModelID: assistant.ModelID,
-		Isolation: "inplace", Filesystem: "read-only", Approval: "never",
+		ReasoningEffort: petTaskReasoningEffort,
+		Isolation:       "inplace", Filesystem: petTaskFilesystem, Approval: "never",
 		CollaborationMode: "single", MaxAgents: 1, StartMode: "manual",
 		AllowSystemProject: true,
 	})

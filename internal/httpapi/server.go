@@ -438,7 +438,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("DELETE /api/v1/skills/{id}", s.withAuth(http.HandlerFunc(s.deleteSkill)))
 
 	mux.HandleFunc("/", s.serveWeb)
-	return s.securityHeaders(s.requestLog(s.enforceAccessScope(mux)))
+	return s.securityHeaders(s.requestLog(s.enforceAccessScope(s.repairTextEncoding(mux))))
 }
 
 func (s *Server) securityHeaders(next http.Handler) http.Handler {
