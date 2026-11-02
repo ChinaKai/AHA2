@@ -53,8 +53,11 @@ func (s *Server) petMCP(writer http.ResponseWriter, request *http.Request) {
 			"capabilities":    map[string]any{"tools": map[string]any{}},
 			"serverInfo":      map[string]any{"name": "aha2-pet", "version": "1.0.0"},
 		}, nil)
-	case "notifications/initialized", "ping":
-		respond(map[string]any{}, nil)
+	case "notifications/initialized", "notifications/cancelled", "notifications/progress":
+		// A JSON-RPC notification must not receive a response. Codex's rmcp
+		// client treats a JSON result here as a protocol error and drops the
+		// whole MCP server, so acknowledge with 202 and an empty body.
+		writer.WriteHeader(http.StatusAccepted)
 	case "tools/list":
 		tools := make([]petMCPTool, 0)
 		for _, tool := range s.app.PetMCPTools(request.Context()) {
@@ -84,7 +87,13 @@ func (s *Server) petMCP(writer http.ResponseWriter, request *http.Request) {
 		respond(map[string]any{
 			"content": []map[string]any{{"type": "text", "text": text}},
 		}, nil)
+	case "ping":
+		respond(map[string]any{}, nil)
 	default:
+		if strings.HasPrefix(payload.Method, "notifications/") {
+			writer.WriteHeader(http.StatusAccepted)
+			return
+		}
 		respond(nil, map[string]any{"code": -32601, "message": "method not found"})
 	}
 }
