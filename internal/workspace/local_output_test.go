@@ -170,6 +170,19 @@ func TestOutputBufferByteAndRuneWritesKeepTail(t *testing.T) {
 			want:   "cde",
 		},
 		{
+			name:   "byte limit one writes into empty buffer",
+			limit:  1,
+			writes: writeBytes('a'),
+			want:   "a",
+		},
+		{
+			name:   "byte limit one replaces existing content",
+			limit:  1,
+			prefix: "x",
+			writes: writeBytes('y'),
+			want:   "y",
+		},
+		{
 			name:   "rune zero limit is unlimited",
 			limit:  0,
 			writes: writeRunes('é', '中', '😀'),
@@ -261,6 +274,24 @@ func TestOutputBufferByteAndRuneWritesKeepTail(t *testing.T) {
 				t.Fatalf("content = %q, want %q", got, test.want)
 			}
 		})
+	}
+}
+
+// An out-of-range rune encodes as the replacement character U+FFFD (three
+// bytes). WriteRune must report that full encoded length even when the limit
+// keeps only the tail of the encoding. This is split out of the table above
+// because utf8.RuneLen reports -1 for invalid runes.
+func TestOutputBufferInvalidRuneWriteKeepsTail(t *testing.T) {
+	buffer := newOutputBuffer(2)
+	written, err := buffer.WriteRune(rune(-1))
+	if err != nil {
+		t.Fatalf("WriteRune(rune(-1)): %v", err)
+	}
+	if written != 3 {
+		t.Fatalf("WriteRune(rune(-1)) wrote %d bytes, want 3", written)
+	}
+	if got, want := buffer.String(), "\xbf\xbd"; got != want {
+		t.Fatalf("content = %q, want %q", got, want)
 	}
 }
 
