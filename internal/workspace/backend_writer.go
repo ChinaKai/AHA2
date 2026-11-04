@@ -152,6 +152,23 @@ func parseWriterPIDs(output string) []int {
 	return pids
 }
 
+// windowsPIDCommand builds a PowerShell command that invokes body as a script
+// block, with each PID passed as a positional argument so it reaches $args.
+//
+// "powershell.exe -Command" takes one command string: anything after it is
+// appended to the command text instead of being bound to $args. That made the
+// PID list invisible on Windows, so a terminate was a no-op and the running
+// check always reported nothing alive. The "& { ... }" wrapper is what makes
+// the trailing arguments bind to the script block's $args. PIDs are formatted
+// from ints, so they cannot inject commands.
+func windowsPIDCommand(body string, timeout time.Duration, pids []int) Command {
+	arguments := []string{"-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "& {\n" + body + "\n}"}
+	for _, pid := range pids {
+		arguments = append(arguments, strconv.Itoa(pid))
+	}
+	return Command{Executable: "powershell.exe", Args: arguments, Timeout: timeout}
+}
+
 // findWindowsWriterPIDs returns the PIDs of processes whose command line resumes
 // the given provider session.
 //
@@ -207,12 +224,10 @@ func TerminateProcesses(ctx context.Context, runner Runner, pids []int) error {
 		return nil
 	}
 	if IsWindowsRunner(runner) {
-		if _, err := runner.Run(ctx, Command{
-			Executable: "powershell.exe",
-			Args: []string{"-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
-				`foreach ($id in [int[]]$args) { Stop-Process -Id $id -Force -ErrorAction SilentlyContinue }`,
-			}, Timeout: 15 * time.Second,
-		}, nil); err != nil {
+		command := windowsPIDCommand(
+			`foreach ($id in [int[]]$args) { Stop-Process -Id $id -Force -ErrorAction SilentlyContinue }`,
+			15*time.Second, pids)
+		if _, err := runner.Run(ctx, command, nil); err != nil {
 			return err
 		}
 	} else {
@@ -261,12 +276,10 @@ func runningPIDs(ctx context.Context, runner Runner, pids []int) ([]int, error) 
 		// Get-Process omits a PID that no longer exists, and a terminated Windows
 		// process is reaped by the OS rather than left as a zombie, so no state
 		// check is needed here.
-		result, err := runner.Run(ctx, Command{
-			Executable: "powershell.exe",
-			Args: []string{"-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
-				`foreach ($id in [int[]]$args) { if (Get-Process -Id $id -ErrorAction SilentlyContinue) { [Console]::Out.WriteLine($id) } }`,
-			}, Timeout: 15 * time.Second,
-		}, nil)
+		command := windowsPIDCommand(
+			`foreach ($id in [int[]]$args) { if (Get-Process -Id $id -ErrorAction SilentlyContinue) { [Console]::Out.WriteLine($id) } }`,
+			15*time.Second, pids)
+		result, err := runner.Run(ctx, command, nil)
 		if err != nil {
 			return nil, err
 		}

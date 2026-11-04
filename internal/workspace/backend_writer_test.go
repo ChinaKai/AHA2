@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -264,13 +265,13 @@ type windowsWriterRunner struct {
 	stdout   string
 	fail     bool
 	shCalls  int
-	commands []string
+	commands []Command
 }
 
 func (runner *windowsWriterRunner) DetectedPlatform() string { return runner.platform }
 
 func (runner *windowsWriterRunner) Run(_ context.Context, command Command, _ LineHandler) (Result, error) {
-	runner.commands = append(runner.commands, command.Executable)
+	runner.commands = append(runner.commands, command)
 	if command.Executable == "sh" {
 		runner.shCalls++
 		return Result{ExitCode: 127, Stderr: "'sh' is not recognized"}, nil
@@ -334,5 +335,119 @@ func TestTerminateProcessesUsesWindowsStopOnWindowsTargets(t *testing.T) {
 	}
 	if runner.shCalls != 0 {
 		t.Fatalf("an empty pid list must not run anything, saw %d sh calls", runner.shCalls)
+	}
+}
+
+// assertWindowsPIDCommand checks that command invokes its PowerShell script as
+// "& { ... }" and passes the PIDs as trailing arguments, where they bind to
+// $args. Without the wrapper the trailing arguments become extra command text
+// and $args stays empty, which made a Windows terminate a no-op.
+func assertWindowsPIDCommand(t *testing.T, command Command, body string, pids []int) {
+	t.Helper()
+	if command.Executable != "powershell.exe" {
+		t.Fatalf("executable = %q, want powershell.exe", command.Executable)
+	}
+	if len(command.Args) < 5 || command.Args[3] != "-Command" {
+		t.Fatalf("args = %v, want a -Command script", command.Args)
+	}
+	script := command.Args[4]
+	if !strings.HasPrefix(script, "& {") || !strings.HasSuffix(script, "}") {
+		t.Fatalf("script = %q, want it wrapped in & { ... }", script)
+	}
+	if !strings.Contains(script, body) {
+		t.Fatalf("script = %q, want it to contain %q", script, body)
+	}
+	tail := command.Args[5:]
+	if len(tail) != len(pids) {
+		t.Fatalf("command tail = %v, want %d pid arguments", tail, len(pids))
+	}
+	for index, pid := range pids {
+		want := strconv.Itoa(pid)
+		if tail[index] != want {
+			t.Fatalf("command tail = %v, want %q at position %d", tail, want, index)
+		}
+		if strings.Contains(script, want) {
+			t.Fatalf("pid %d is embedded in the script instead of being passed as $args", pid)
+		}
+	}
+}
+
+func TestTerminateProcessesOnWindowsPassesPIDsToScriptBlock(t *testing.T) {
+	t.Parallel()
+	runner := &windowsWriterRunner{t: t, platform: "windows/amd64"}
+	pids := []int{4120, 9981}
+	if err := TerminateProcesses(context.Background(), runner, pids); err != nil {
+		t.Fatalf("terminate on a Windows target: %v", err)
+	}
+	// One Stop-Process command, then one running check. The fake runner reports
+	// no live process, so the wait loop ends after a single poll.
+	if len(runner.commands) != 2 {
+		t.Fatalf("ran %d commands, want a stop command and a running check", len(runner.commands))
+	}
+	assertWindowsPIDCommand(t, runner.commands[0], "Stop-Process", pids)
+	assertWindowsPIDCommand(t, runner.commands[1], "Get-Process", pids)
+}
+
+func TestRunningPIDsOnWindowsPassesPIDsToScriptBlock(t *testing.T) {
+	t.Parallel()
+	runner := &windowsWriterRunner{t: t, platform: "windows/amd64", stdout: "9981\r\n"}
+	alive, err := runningPIDs(context.Background(), runner, []int{4120, 9981})
+	if err != nil {
+		t.Fatalf("running check on a Windows target: %v", err)
+	}
+	if len(alive) != 1 || alive[0] != 9981 {
+		t.Fatalf("alive pids = %v, want [9981]", alive)
+	}
+	if len(runner.commands) != 1 {
+		t.Fatalf("ran %d commands, want one running check", len(runner.commands))
+	}
+	assertWindowsPIDCommand(t, runner.commands[0], "Get-Process", []int{4120, 9981})
+}
+
+// TestWindowsWriterHelperProcess is the child process used by
+// TestTerminateProcessesStopsRealWindowsProcess; it is not a test of its own.
+func TestWindowsWriterHelperProcess(t *testing.T) {
+	if os.Getenv("AHA2_WRITER_HELPER") != "1" {
+		t.Skip("helper process for TestTerminateProcessesStopsRealWindowsProcess")
+	}
+	time.Sleep(30 * time.Second)
+}
+
+// TestTerminateProcessesStopsRealWindowsProcess exercises the real
+// powershell.exe path end to end: the helper process is alive, TerminateProcesses
+// kills it, and a follow-up runningPIDs call reports it gone. The helper is the
+// test binary itself, so the test depends on no external long-lived process.
+func TestTerminateProcessesStopsRealWindowsProcess(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("this exercises the native Windows Stop-Process path")
+	}
+	child := exec.Command(os.Args[0], "-test.run=^TestWindowsWriterHelperProcess$")
+	child.Env = append(os.Environ(), "AHA2_WRITER_HELPER=1")
+	if err := child.Start(); err != nil {
+		t.Fatalf("start helper process: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = child.Process.Kill()
+		_, _ = child.Process.Wait()
+	})
+	pid := child.Process.Pid
+	runner := LocalRunner{}
+
+	alive, err := runningPIDs(context.Background(), runner, []int{pid})
+	if err != nil {
+		t.Fatalf("running check: %v", err)
+	}
+	if len(alive) != 1 || alive[0] != pid {
+		t.Fatalf("running pids = %v, want [%d]", alive, pid)
+	}
+	if err := TerminateProcesses(context.Background(), runner, []int{pid}); err != nil {
+		t.Fatalf("terminate real process: %v", err)
+	}
+	alive, err = runningPIDs(context.Background(), runner, []int{pid})
+	if err != nil {
+		t.Fatalf("running check after terminate: %v", err)
+	}
+	if len(alive) != 0 {
+		t.Fatalf("process %d is still running after terminate: %v", pid, alive)
 	}
 }
