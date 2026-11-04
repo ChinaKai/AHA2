@@ -244,13 +244,18 @@ func (s *Store) ClaimChannelDeliveries(ctx context.Context, instanceID string, l
 	if _, err := tx.ExecContext(ctx, `UPDATE channel_delivery_outbox SET state='pending',lease_id='',lease_until='',updated_at=? WHERE instance_id=? AND state='leased' AND lease_until<>'' AND lease_until<=?`, timeString(now), instanceID, timeString(now)); err != nil {
 		return nil, err
 	}
+	// Only in-flight rows (pending for backoff and leased for an active
+	// attempt) preserve per-conversation ordering. Terminal rows must never
+	// block later stream sequences: a dead letter is explicitly replayable or
+	// skippable, and treating it as a head-of-line blocker strands every later
+	// message forever with attempts=0.
 	rows, err := tx.QueryContext(ctx, `
 		SELECT d.id FROM channel_delivery_outbox d
 		WHERE d.instance_id=? AND d.state='pending' AND d.available_at<=?
 		  AND NOT EXISTS(
 		    SELECT 1 FROM channel_delivery_outbox prior
 		    WHERE prior.conversation_id=d.conversation_id
-		      AND prior.state IN ('pending','leased','dead_letter')
+		      AND prior.state IN ('pending','leased')
 		      AND (prior.stream_sequence<d.stream_sequence OR (prior.stream_sequence=d.stream_sequence AND prior.replay_generation<d.replay_generation))
 		  )
 		ORDER BY d.available_at,d.conversation_id,d.stream_sequence,d.replay_generation LIMIT ?`, instanceID, timeString(now), limit)
@@ -294,13 +299,17 @@ func (s *Store) ClaimChannelDeliveries(ctx context.Context, instanceID string, l
 	return claimed, nil
 }
 
+// AckChannelDelivery records that the provider accepted the outbound request
+// and assigned a provider message ID. It does not prove the message reached or
+// was rendered on the recipient's device; the certainty is therefore
+// "provider_accepted", never "confirmed".
 func (s *Store) AckChannelDelivery(ctx context.Context, instanceID, id, leaseID, providerMessageID, providerRequestID string, at time.Time) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	result, err := tx.ExecContext(ctx, `UPDATE channel_delivery_outbox SET state='delivered',provider_message_id=?,outcome_certainty='confirmed',lease_id='',lease_until='',updated_at=?,delivered_at=? WHERE id=? AND instance_id=? AND state='leased' AND lease_id=?`,
+	result, err := tx.ExecContext(ctx, `UPDATE channel_delivery_outbox SET state='delivered',provider_message_id=?,outcome_certainty='provider_accepted',lease_id='',lease_until='',updated_at=?,delivered_at=? WHERE id=? AND instance_id=? AND state='leased' AND lease_id=?`,
 		providerMessageID, timeString(at), timeString(at), id, instanceID, leaseID)
 	if err != nil {
 		return err
@@ -332,13 +341,13 @@ func (s *Store) AckChannelDelivery(ctx context.Context, instanceID, id, leaseID,
 			}
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE channel_delivery_attempts SET outcome='delivered',provider_request_id=?,finished_at=? WHERE delivery_id=? AND lease_id=?`, providerRequestID, timeString(at), id, leaseID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE channel_delivery_attempts SET outcome='provider_accepted',provider_request_id=?,finished_at=? WHERE delivery_id=? AND lease_id=?`, providerRequestID, timeString(at), id, leaseID); err != nil {
 		return err
 	}
 	return tx.Commit()
 }
 
-func (s *Store) NackChannelDelivery(ctx context.Context, instanceID, id, leaseID, errorCode, certainty string, retryAfter time.Duration, permanent bool, at time.Time) error {
+func (s *Store) NackChannelDelivery(ctx context.Context, instanceID, id, leaseID, errorCode, certainty string, retryAfter time.Duration, permanent bool, providerRequestID string, at time.Time) error {
 	state := "pending"
 	available := at.Add(retryAfter)
 	if permanent {
@@ -363,8 +372,8 @@ func (s *Store) NackChannelDelivery(ctx context.Context, instanceID, id, leaseID
 		}
 		return ErrChannelRevision
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE channel_delivery_attempts SET outcome=?,error_code=?,retry_after_ms=?,finished_at=? WHERE delivery_id=? AND lease_id=?`,
-		state, errorCode, retryAfter.Milliseconds(), timeString(at), id, leaseID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE channel_delivery_attempts SET outcome=?,error_code=?,retry_after_ms=?,provider_request_id=?,finished_at=? WHERE delivery_id=? AND lease_id=?`,
+		state, errorCode, retryAfter.Milliseconds(), providerRequestID, timeString(at), id, leaseID); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -442,6 +451,28 @@ func (s *Store) ChannelDeliveries(ctx context.Context, instanceID string, limit 
 
 func (s *Store) ChannelDelivery(ctx context.Context, id string) (domain.ChannelDelivery, error) {
 	return scanChannelDelivery(s.db.QueryRowContext(ctx, `SELECT `+channelDeliveryColumns+` FROM channel_delivery_outbox WHERE id=?`, id))
+}
+
+// ChannelDeliveryAttempts returns the sanitized audit trail for one delivery,
+// oldest attempt first. Provider request IDs are retained so a failed send can
+// be traced with the provider without persisting raw responses.
+func (s *Store) ChannelDeliveryAttempts(ctx context.Context, deliveryID string) ([]domain.ChannelDeliveryAttempt, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id,delivery_id,attempt_no,lease_id,outcome,error_code,retry_after_ms,provider_request_id,started_at,finished_at FROM channel_delivery_attempts WHERE delivery_id=? ORDER BY attempt_no`, deliveryID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []domain.ChannelDeliveryAttempt{}
+	for rows.Next() {
+		var item domain.ChannelDeliveryAttempt
+		var started, finished string
+		if err := rows.Scan(&item.ID, &item.DeliveryID, &item.AttemptNo, &item.LeaseID, &item.Outcome, &item.ErrorCode, &item.RetryAfterMS, &item.ProviderRequestID, &started, &finished); err != nil {
+			return nil, err
+		}
+		item.StartedAt, item.FinishedAt = parseTime(started), parseTime(finished)
+		result = append(result, item)
+	}
+	return result, rows.Err()
 }
 
 func (s *Store) ChannelDeliveryTarget(ctx context.Context, conversationID string, sourceEventSequence int64) (map[string]string, error) {

@@ -215,18 +215,19 @@ func (s *Server) channelRuntimeDeliveryAck(writer http.ResponseWriter, request *
 
 func (s *Server) channelRuntimeDeliveryNack(writer http.ResponseWriter, request *http.Request) {
 	var payload struct {
-		SchemaVersion int    `json:"schema_version"`
-		LeaseID       string `json:"lease_id"`
-		ErrorCode     string `json:"error_code"`
-		Certainty     string `json:"outcome_certainty"`
-		RetryAfterMS  int64  `json:"retry_after_ms"`
-		Permanent     bool   `json:"permanent"`
+		SchemaVersion     int    `json:"schema_version"`
+		LeaseID           string `json:"lease_id"`
+		ErrorCode         string `json:"error_code"`
+		Certainty         string `json:"outcome_certainty"`
+		RetryAfterMS      int64  `json:"retry_after_ms"`
+		Permanent         bool   `json:"permanent"`
+		ProviderRequestID string `json:"provider_request_id"`
 	}
 	if err := decodeJSON(request, &payload); err != nil || payload.SchemaVersion != 1 || payload.LeaseID == "" || payload.ErrorCode == "" || payload.RetryAfterMS < 0 {
 		writeError(writer, http.StatusUnprocessableEntity, "invalid_envelope")
 		return
 	}
-	if err := s.channels.NackDelivery(request.Context(), channelRuntimeClaims(request.Context()), request.PathValue("id"), payload.LeaseID, payload.ErrorCode, payload.Certainty, time.Duration(payload.RetryAfterMS)*time.Millisecond, payload.Permanent); err != nil {
+	if err := s.channels.NackDelivery(request.Context(), channelRuntimeClaims(request.Context()), request.PathValue("id"), payload.LeaseID, payload.ErrorCode, payload.Certainty, time.Duration(payload.RetryAfterMS)*time.Millisecond, payload.Permanent, payload.ProviderRequestID); err != nil {
 		writeChannelRuntimeError(writer, err)
 		return
 	}

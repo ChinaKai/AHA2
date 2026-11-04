@@ -420,6 +420,20 @@ func (s *Server) channelDeliveries(writer http.ResponseWriter, request *http.Req
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "deliveries": items})
 }
 
+func (s *Server) channelDeliveryAttempts(writer http.ResponseWriter, request *http.Request) {
+	if s.channels == nil {
+		writeError(writer, http.StatusServiceUnavailable, "channels_unavailable")
+		return
+	}
+	session, _ := sessionFromContext(request.Context())
+	items, err := s.channels.OwnerDeliveryAttempts(request.Context(), session.OwnerID, request.PathValue("id"))
+	if err != nil {
+		writeChannelError(writer, err, "list_channel_delivery_attempts_failed")
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "attempts": items})
+}
+
 func (s *Server) replayChannelDelivery(writer http.ResponseWriter, request *http.Request) {
 	if s.channels == nil {
 		writeError(writer, http.StatusServiceUnavailable, "channels_unavailable")

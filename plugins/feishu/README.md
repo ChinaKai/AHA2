@@ -12,6 +12,14 @@ The build script writes the executable and a manifest containing its SHA-256 to 
 
 The plugin uses `github.com/larksuite/oapi-sdk-go/v3` v3.12.2 for Device Authorization app registration, WebSocket events, message normalization, and cards. Outbound create/reply calls use the lower-level IM API so AHA2's durable delivery key is mapped to Feishu's one-hour UUID deduplication field.
 
+## Outbound delivery diagnostics (1.1.11)
+
+- Feishu can answer HTTP 200 with a non-zero business code. Outbound sends now classify both layers into stable codes such as `feishu_target_unavailable`, `feishu_bot_disabled`, `feishu_permission_denied`, `feishu_rate_limited`, `feishu_reply_target_unavailable`, `feishu_provider_unavailable`, and `feishu_*_rejected_<code>`.
+- A reply whose parent message was withdrawn or deleted (`230011`) now falls back to a fresh message in the same chat. Retrying the same reply could never succeed and previously consumed all attempts before dead-lettering.
+- NACK requests include the provider request ID so the core records a traceable attempt without persisting raw responses.
+- Permanent target/permission errors dead-letter immediately; rate limits and unknown provider failures retry with full-jitter backoff up to 12 attempts; ambiguous transport failures retry only inside Feishu's one-hour deduplication window.
+- `delivered` remains provider acceptance only. The core records `outcome_certainty=provider_accepted`; it is not proof that the recipient's client displayed the message.
+
 ## Reliability (1.1.10)
 
 - The SDK read deadline detects a silent connection loss (device sleep, network change, NAT timeout) and reconnects instead of leaving `ReadMessage` blocked forever. A WebSocket disconnect still marks the instance `degraded / feishu_reconnecting`; `OnReady` and `OnReconnected` both report `ready`.

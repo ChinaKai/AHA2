@@ -85,7 +85,7 @@ func TestMediaDeliveriesAreOrderedScopedAndDurable(t *testing.T) {
 			if err := service.RecordMediaUpload(ctx, claims, item.ID, item.LeaseID, "", "file", "uploaded-key"); err != nil {
 				t.Fatal(err)
 			}
-			if err := service.NackDelivery(ctx, claims, item.ID, item.LeaseID, "transport_failed", "confirmed_failure", 0, false); err != nil {
+			if err := service.NackDelivery(ctx, claims, item.ID, item.LeaseID, "transport_failed", "confirmed_failure", 0, false, ""); err != nil {
 				t.Fatal(err)
 			}
 			deliveries, err = service.ClaimDeliveries(ctx, claims, 20)

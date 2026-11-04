@@ -12,6 +12,7 @@ import type {
   ChannelGroupMember,
   ChannelEndpoint,
   ChannelDelivery,
+  ChannelDeliveryAttempt,
   ChannelHandoff,
   ChannelInstance,
   ChannelOnboardingOptions,
@@ -334,6 +335,10 @@ class APIClient {
 
   channelDeliveries(id: string): Promise<{deliveries: ChannelDelivery[]}> {
     return this.request(`/api/v1/channel-instances/${encodeURIComponent(id)}/deliveries`);
+  }
+
+  channelDeliveryAttempts(id: string): Promise<{attempts: ChannelDeliveryAttempt[]}> {
+    return this.request(`/api/v1/channel-deliveries/${encodeURIComponent(id)}/attempts`);
   }
 
   replayChannelDelivery(id: string): Promise<{delivery: ChannelDelivery}> {

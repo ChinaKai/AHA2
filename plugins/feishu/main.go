@@ -1109,16 +1109,13 @@ func (c *runtimeClient) deliver(ctx context.Context, client *lark.Client, item d
 		_ = c.request(ctx, http.MethodPost, "/api/channel-runtime/v1/deliveries/"+item.ID+"/ack", map[string]any{"schema_version": 1, "lease_id": item.LeaseID, "provider_message_id": messageID, "provider_request_id": requestID}, &map[string]any{})
 		return
 	}
-	permanent, certainty, retry := item.Attempts >= 12, "confirmed_failure", deliveryBackoffMS(item.IdempotencyKey, item.Attempts)
-	if isAmbiguous(err) {
-		certainty = "unknown"
-		permanent = !item.FirstAttemptAt.IsZero() && time.Since(item.FirstAttemptAt) >= 55*time.Minute
-	}
-	errorCode := "feishu_send_failed"
-	if stringValue(item.SemanticPayload, "kind") == "attachment" || len(deliveryImageItems(item.SemanticPayload)) > 0 {
-		errorCode = mediaErrorCode(err)
-	}
-	_ = c.request(ctx, http.MethodPost, "/api/channel-runtime/v1/deliveries/"+item.ID+"/nack", map[string]any{"schema_version": 1, "lease_id": item.LeaseID, "error_code": errorCode, "outcome_certainty": certainty, "retry_after_ms": retry, "permanent": permanent}, &map[string]any{})
+	failure := classifyDeliveryError(err)
+	certainty, permanent := deliveryRetryDecision(item, failure, time.Now())
+	_ = c.request(ctx, http.MethodPost, "/api/channel-runtime/v1/deliveries/"+item.ID+"/nack", map[string]any{
+		"schema_version": 1, "lease_id": item.LeaseID, "error_code": failure.code,
+		"outcome_certainty": certainty, "retry_after_ms": deliveryBackoffMS(item.IdempotencyKey, item.Attempts),
+		"permanent": permanent, "provider_request_id": requestID,
+	}, &map[string]any{})
 }
 
 func deliveryBackoffMS(key string, attempt int) int64 {
@@ -1152,7 +1149,7 @@ func sendRenderedDelivery(ctx context.Context, client *lark.Client, item deliver
 		receiveIDType = "chat_id"
 	}
 	if receiveID == "" {
-		return "", "", errors.New("missing target chat")
+		return "", "", deliverySendFailure{code: "feishu_target_missing"}
 	}
 	if updateID := item.Target["update_message_id"]; updateID != "" {
 		request := larkim.NewPatchMessageReqBuilder().MessageId(updateID).Body(larkim.NewPatchMessageReqBodyBuilder().Content(content).Build()).Build()
@@ -1161,7 +1158,7 @@ func sendRenderedDelivery(ctx context.Context, client *lark.Client, item deliver
 			return "", "", err
 		}
 		if !response.Success() {
-			return "", response.RequestId(), fmt.Errorf("feishu card update rejected: %d", response.Code)
+			return "", response.RequestId(), deliveryResponseError(item, "patch", response.StatusCode, response.Code)
 		}
 		return updateID, response.RequestId(), nil
 	}
@@ -1172,13 +1169,20 @@ func sendRenderedDelivery(ctx context.Context, client *lark.Client, item deliver
 		if err != nil {
 			return "", "", err
 		}
-		if !response.Success() || response.Data == nil || response.Data.MessageId == nil {
-			if stringValue(item.SemanticPayload, "kind") == "provider_media" {
-				return "", response.RequestId(), mediaProviderError("send", response.StatusCode, response.Code)
-			}
-			return "", response.RequestId(), fmt.Errorf("feishu reply rejected: %d", response.Code)
+		if response.Success() && response.Data != nil && response.Data.MessageId != nil {
+			return *response.Data.MessageId, response.RequestId(), nil
 		}
-		return *response.Data.MessageId, response.RequestId(), nil
+		failure := providerDeliveryFailure("reply", response.StatusCode, response.Code)
+		if response.Success() {
+			failure = invalidDeliveryResponse("reply")
+		}
+		// A withdrawn/deleted parent permanently rejects Reply, and retrying
+		// the same reply can never succeed. Deliver the content as a fresh
+		// message in the same chat instead; ordering and idempotency still come
+		// from the outbox delivery and its deterministic UUID.
+		if !failure.replyTargetInvalid {
+			return "", response.RequestId(), deliveryResponseError(item, "reply", response.StatusCode, response.Code)
+		}
 	}
 	request := larkim.NewCreateMessageReqBuilder().ReceiveIdType(receiveIDType).Body(larkim.NewCreateMessageReqBodyBuilder().ReceiveId(receiveID).MsgType(msgType).Content(content).Uuid(uuid).Build()).Build()
 	response, err := client.Im.V1.Message.Create(ctx, request)
@@ -1186,10 +1190,10 @@ func sendRenderedDelivery(ctx context.Context, client *lark.Client, item deliver
 		return "", "", err
 	}
 	if !response.Success() || response.Data == nil || response.Data.MessageId == nil {
-		if stringValue(item.SemanticPayload, "kind") == "provider_media" {
-			return "", response.RequestId(), mediaProviderError("send", response.StatusCode, response.Code)
+		if response.Success() {
+			return "", response.RequestId(), invalidDeliveryResponse("create")
 		}
-		return "", response.RequestId(), fmt.Errorf("feishu create rejected: %d", response.Code)
+		return "", response.RequestId(), deliveryResponseError(item, "create", response.StatusCode, response.Code)
 	}
 	return *response.Data.MessageId, response.RequestId(), nil
 }

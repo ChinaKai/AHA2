@@ -289,7 +289,7 @@ function renderChannelOutreachCard(item: ConversationItem): string {
   const channel = payload.channel && typeof payload.channel === "object" ? payload.channel as Record<string, unknown> : {};
   const destination = String(channel.display_name || channel.instance_name || "群聊主渠道");
   const message = String(payload.message || item.summary || "");
-  const status = String(payload.delivery_state || "pending") === "pending" ? "已排队" : String(payload.delivery_state || "");
+  const status = channelDeliveryStateLabel(String(payload.delivery_state || "pending"));
   const rows = recipients.map(recipient => {
     const name = String(recipient.display_name || "联调人");
     const role = String(recipient.collaboration_role || (recipient.is_bot ? "机器人" : "群成员"));
@@ -307,8 +307,7 @@ function renderChannelReplyCard(item: ConversationItem): string {
   const endpointKind = String(channel.endpoint_kind || "");
   const sourceLabel = endpointKind === "group_digital_human" ? "群聊" : endpointKind === "assistant_dm" ? "私聊" : "渠道";
   const state = String(payload.delivery_state || "pending");
-  const status = state === "suppressed" ? "未外发" : state === "delivered" ? "已发送" :
-    state === "failed" ? "发送失败" : "已排队";
+  const status = state === "failed" ? "发送失败" : channelDeliveryStateLabel(state);
   const message = String(payload.message || item.summary || "");
   return `<article class="aha-orchestration-card aha-channel-route-card aha-channel-reply-card"><header><strong>${icon("send")}AHA 渠道回复</strong><span>${escapeHTML(status)}</span><time>${systemCardTime(item)}</time></header><p>${escapeHTML(destination)} · 回复 ${escapeHTML(recipientName)}</p>${message ? `<div class="aha-route-message">${escapeHTML(message)}</div>` : ""}<div><div><strong>${escapeHTML(recipientName)}</strong><span>${escapeHTML(sourceLabel)}</span><b>${escapeHTML(status)}</b></div></div></article>`;
 }
@@ -322,7 +321,7 @@ function renderChannelRouteCard(item: ConversationItem): string {
     const reason = String(payload.status_reason || "");
     const reasonText = String(payload.status_reason_text || "");
     const deliveryState = String(payload.delivery_state || "");
-    const status = messageStatus === "replied" ? (deliveryState === "delivered" ? "已回复" : "回复已排队") :
+    const status = messageStatus === "replied" ? (deliveryState === "delivered" ? "已回复（飞书已接受）" : "回复已排队") :
       messageStatus === "pending_reply" ? "等待回复" :
         messageStatus === "not_replied" ? (reason === "reply_decision_end" ? "无需回复" : "未回复") :
         messageStatus === "failed" ? "处理失败" : messageStatus === "interrupted" ? "已中断" : "已处理";
@@ -342,13 +341,28 @@ function renderChannelRouteCard(item: ConversationItem): string {
     return `<article class="aha-orchestration-card aha-channel-route-card aha-channel-status-card" data-channel-status="${escapeHTML(messageStatus)}"><header><strong>${icon("send")}AHA 渠道消息</strong><span>${escapeHTML(status)}</span><time>${systemCardTime(item)}</time></header><p>${escapeHTML(destination)} · ${escapeHTML(who)}</p>${result ? `<div class="aha-route-message"><strong>${escapeHTML(resultLabel)}：</strong>${escapeHTML(result)}</div>` : ""}${messageStatus !== "replied" && inboundMessage ? `<div class="aha-route-message">${escapeHTML(inboundMessage)}</div>` : ""}</article>`;
   }
   const state = String(payload.delivery_state || "pending");
-  const status = state === "suppressed" ? "未外发" : state === "delivered" ? "已发送" : "已排队";
+  const status = channelDeliveryStateLabel(state);
   const reason = String(payload.suppression_reason || "");
   const bot = Boolean(payload.is_bot_dialogue);
   const decision = String(payload.reply_decision || "");
   const detail = reason === "bot_dialogue_max_turns" ? "达到机器人最大连续轮数" :
     reason === "bot_dialogue_ended" ? "机器人对话已结束" : bot ? `机器人对话 · ${decision || "未设置决策"}` : "最终回复";
   return `<article class="aha-orchestration-card aha-channel-route-card"><header><strong>${icon("send")}AHA 外部路由</strong><span>${escapeHTML(status)}</span><time>${systemCardTime(item)}</time></header><p>${escapeHTML(destination)} · ${escapeHTML(detail)}</p>${payload.message ? `<div class="aha-route-message">${escapeHTML(String(payload.message))}</div>` : ""}</article>`;
+}
+
+// "delivered" only means the provider accepted the message and returned an ID.
+// It is not a client delivery/read receipt, so the label must not claim the
+// recipient saw it.
+function channelDeliveryStateLabel(state: string): string {
+  switch (state) {
+    case "pending": return "已排队";
+    case "leased": return "发送中";
+    case "delivered": return "飞书已接受";
+    case "dead_letter": return "投递失败（待重放）";
+    case "suppressed":
+    case "skipped": return "未外发";
+    default: return state || "已排队";
+  }
 }
 
 function systemCardTime(item: ConversationItem): string {

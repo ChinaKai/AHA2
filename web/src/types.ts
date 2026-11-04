@@ -1009,6 +1009,18 @@ export interface ChannelDelivery {
   delivered_at?: string;
 }
 
+export interface ChannelDeliveryAttempt {
+  id: string;
+  delivery_id: string;
+  attempt_no: number;
+  outcome: string;
+  error_code?: string;
+  retry_after_ms?: number;
+  provider_request_id?: string;
+  started_at: string;
+  finished_at?: string;
+}
+
 export interface OwnerAssistant {
   id: string;
   name: string;

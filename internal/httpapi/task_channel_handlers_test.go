@@ -433,7 +433,7 @@ func TestTaskChannelRouteAPI(t *testing.T) {
 	if err := channelService.RecordMediaUpload(ctx, deliveryClaims, leased.ID, leased.LeaseID, attachment.ID, "image", "provider-image-key"); err != nil {
 		t.Fatal(err)
 	}
-	if err := channelService.NackDelivery(ctx, deliveryClaims, leased.ID, leased.LeaseID, "transport_failed", "confirmed_failure", 0, false); err != nil {
+	if err := channelService.NackDelivery(ctx, deliveryClaims, leased.ID, leased.LeaseID, "transport_failed", "confirmed_failure", 0, false, ""); err != nil {
 		t.Fatal(err)
 	}
 	claimed, err = channelService.ClaimDeliveries(ctx, deliveryClaims, 10)

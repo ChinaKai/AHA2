@@ -3369,5 +3369,21 @@ func (s *Store) migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(114, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
 		return fmt.Errorf("record schema v114: %w", err)
 	}
+	var hasV115 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=115)`).Scan(&hasV115)
+	if !hasV115 {
+		// "confirmed" was a misleading name for provider acceptance: it never
+		// meant the recipient's client displayed the message. Normalize old rows
+		// so existing deliveries report the same certainty as new ones.
+		if _, err := s.db.ExecContext(ctx, `UPDATE channel_delivery_outbox SET outcome_certainty='provider_accepted' WHERE state='delivered' AND outcome_certainty='confirmed'`); err != nil {
+			return fmt.Errorf("apply schema v115: %w", err)
+		}
+		if _, err := s.db.ExecContext(ctx, `UPDATE channel_delivery_attempts SET outcome='provider_accepted' WHERE outcome='delivered'`); err != nil {
+			return fmt.Errorf("apply schema v115: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(115, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v115: %w", err)
+	}
 	return nil
 }

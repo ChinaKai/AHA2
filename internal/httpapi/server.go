@@ -270,6 +270,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/channel-instances/{id}/conversations", s.withAuth(http.HandlerFunc(s.channelConversationSummaries)))
 	mux.Handle("GET /api/v1/channel-instances/{id}/handoffs", s.withAuth(http.HandlerFunc(s.channelHandoffs)))
 	mux.Handle("GET /api/v1/channel-instances/{id}/deliveries", s.withAuth(http.HandlerFunc(s.channelDeliveries)))
+	mux.Handle("GET /api/v1/channel-deliveries/{id}/attempts", s.withAuth(http.HandlerFunc(s.channelDeliveryAttempts)))
 	mux.Handle("POST /api/v1/channel-deliveries/{id}/replay", s.withAuth(http.HandlerFunc(s.replayChannelDelivery)))
 	mux.Handle("POST /api/v1/channel-deliveries/{id}/skip", s.withAuth(http.HandlerFunc(s.skipChannelDelivery)))
 	mux.Handle("GET /api/v1/channel-instances/{id}/knowledge-policy", s.withAuth(http.HandlerFunc(s.channelKnowledgePolicy)))

@@ -853,12 +853,30 @@ func TestInboundOwnerAndGroupScopesAreServerEnforcedAndIdempotent(t *testing.T) 
 		t.Fatalf("result deliveries=%#v err=%v", resultDeliveries, err)
 	}
 	dead := resultDeliveries[0]
-	if err := service.NackDelivery(ctx, deliveryClaims, dead.ID, dead.LeaseID, "rate_limited", "confirmed_failure", 0, true); err != nil {
+	for _, item := range resultDeliveries[1:] {
+		if err := service.AckDelivery(ctx, deliveryClaims, item.ID, item.LeaseID, "provider-prior", "request-prior"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := service.NackDelivery(ctx, deliveryClaims, dead.ID, dead.LeaseID, "rate_limited", "confirmed_failure", 0, true, "request-dead"); err != nil {
 		t.Fatal(err)
 	}
-	blocked, err := service.ClaimDeliveries(ctx, deliveryClaims, 10)
-	if err != nil || len(blocked) != 0 {
-		t.Fatalf("dead letter did not block stream: %#v err=%v", blocked, err)
+	// A dead letter is terminal and must not head-of-line block the
+	// conversation; later deliveries are still claimed even before the Owner
+	// replays or skips the failed row.
+	if err := database.EnqueueChannelControlDelivery(ctx, instance.ID, conversation.ID, "dead-letter-unblock", "menu_result", map[string]any{"kind": "test"}, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	unblocked, err := service.ClaimDeliveries(ctx, deliveryClaims, 10)
+	if err != nil || len(unblocked) != 1 || unblocked[0].StreamSequence <= dead.StreamSequence {
+		t.Fatalf("dead letter blocked later delivery: %#v err=%v", unblocked, err)
+	}
+	if err := service.AckDelivery(ctx, deliveryClaims, unblocked[0].ID, unblocked[0].LeaseID, "provider-unblocked", "request-unblocked"); err != nil {
+		t.Fatal(err)
+	}
+	attempts, err := database.ChannelDeliveryAttempts(ctx, dead.ID)
+	if err != nil || len(attempts) != 1 || attempts[0].Outcome != "dead_letter" || attempts[0].ProviderRequestID != "request-dead" {
+		t.Fatalf("dead attempt audit=%#v err=%v", attempts, err)
 	}
 	replay, err := database.ReplayChannelDelivery(ctx, dead.ID, instance.ID, time.Now().UTC())
 	if err != nil || replay.ReplayGeneration != 1 {
@@ -870,6 +888,14 @@ func TestInboundOwnerAndGroupScopesAreServerEnforcedAndIdempotent(t *testing.T) 
 	}
 	if err := service.AckDelivery(ctx, deliveryClaims, replayed[0].ID, replayed[0].LeaseID, "provider-replay", "request-replay"); err != nil {
 		t.Fatal(err)
+	}
+	replayItem, err := database.ChannelDelivery(ctx, replayed[0].ID)
+	if err != nil || replayItem.State != "delivered" || replayItem.OutcomeCertainty != "provider_accepted" {
+		t.Fatalf("delivered semantics=%#v err=%v", replayItem, err)
+	}
+	replayAttempts, err := database.ChannelDeliveryAttempts(ctx, replayItem.ID)
+	if err != nil || len(replayAttempts) != 1 || replayAttempts[0].Outcome != "provider_accepted" || replayAttempts[0].ProviderRequestID != "request-replay" {
+		t.Fatalf("delivered attempt audit=%#v err=%v", replayAttempts, err)
 	}
 	exitAction := domain.ChannelPendingAction{ID: "action-exit", InstanceID: instance.ID, ConversationID: conversation.ID, ActorIdentityLinkID: "channel-owner", Operation: "exit", TargetType: "task_route", TargetID: target.ID, Intent: map[string]any{}, Preview: map[string]any{"effect": "unbind only"}, Precondition: map[string]any{}, PreconditionHash: "hash", Status: "pending", ProviderMessageID: "provider-card-exit", ExpiresAt: actionNow.Add(time.Hour), CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
 	if _, err := database.CreateChannelPendingAction(ctx, exitAction); err != nil {

@@ -768,6 +768,20 @@ func (s *Service) OwnerDeliveries(ctx context.Context, ownerID, instanceID strin
 	return items, err
 }
 
+// OwnerDeliveryAttempts exposes the per-attempt audit trail for one delivery.
+// The caller must own the delivery's channel instance.
+func (s *Service) OwnerDeliveryAttempts(ctx context.Context, ownerID, deliveryID string) ([]domain.ChannelDeliveryAttempt, error) {
+	delivery, err := s.store.ChannelDelivery(ctx, deliveryID)
+	if err != nil {
+		return nil, err
+	}
+	instance, err := s.store.ChannelInstance(ctx, delivery.InstanceID)
+	if err != nil || instance.OwnerID != ownerID {
+		return nil, sql.ErrNoRows
+	}
+	return s.store.ChannelDeliveryAttempts(ctx, deliveryID)
+}
+
 func (s *Service) OwnerConversationSummaries(ctx context.Context, ownerID, instanceID string) ([]domain.ChannelConversationSummary, error) {
 	instance, err := s.store.ChannelInstance(ctx, instanceID)
 	if err != nil || instance.OwnerID != ownerID {
@@ -1172,11 +1186,14 @@ func (s *Service) AckDelivery(ctx context.Context, claims RuntimeClaims, id, lea
 	return s.store.AckChannelDelivery(ctx, claims.InstanceID, id, leaseID, providerMessageID, providerRequestID, s.now().UTC())
 }
 
-func (s *Service) NackDelivery(ctx context.Context, claims RuntimeClaims, id, leaseID, errorCode, certainty string, retryAfter time.Duration, permanent bool) error {
+func (s *Service) NackDelivery(ctx context.Context, claims RuntimeClaims, id, leaseID, errorCode, certainty string, retryAfter time.Duration, permanent bool, providerRequestID string) error {
 	if !claims.Scopes["channel.delivery.ack"] {
 		return fmt.Errorf("capability_scope_denied")
 	}
-	return s.store.NackChannelDelivery(ctx, claims.InstanceID, id, leaseID, errorCode, certainty, retryAfter, permanent, s.now().UTC())
+	if certainty != "confirmed_failure" && certainty != "unknown" {
+		return fmt.Errorf("invalid_envelope")
+	}
+	return s.store.NackChannelDelivery(ctx, claims.InstanceID, id, leaseID, errorCode, certainty, retryAfter, permanent, providerRequestID, s.now().UTC())
 }
 
 func (s *Service) UpdateHealth(ctx context.Context, claims RuntimeClaims, status, errorCode string, metadata ...map[string]string) error {

@@ -364,10 +364,16 @@ type ChannelDelivery struct {
 	LeaseUntil          time.Time         `json:"lease_until,omitempty"`
 	ProviderMessageID   string            `json:"provider_message_id,omitempty"`
 	LastErrorCode       string            `json:"last_error_code,omitempty"`
-	OutcomeCertainty    string            `json:"outcome_certainty,omitempty"`
-	CreatedAt           time.Time         `json:"created_at"`
-	UpdatedAt           time.Time         `json:"updated_at"`
-	DeliveredAt         time.Time         `json:"delivered_at,omitempty"`
+	// OutcomeCertainty distinguishes provider acceptance from client receipt.
+	// "provider_accepted" means the provider created or updated the message and
+	// returned an ID; it does not prove the recipient's client displayed it.
+	// Failures use "confirmed_failure" or "unknown".
+	OutcomeCertainty string    `json:"outcome_certainty,omitempty"`
+	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
+	// DeliveredAt is the provider-acceptance timestamp, not a client delivery
+	// receipt.
+	DeliveredAt time.Time `json:"delivered_at,omitempty"`
 }
 
 type ChannelDeliveryAttempt struct {

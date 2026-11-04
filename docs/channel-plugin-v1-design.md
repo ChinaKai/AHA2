@@ -179,8 +179,8 @@ Secret 不走普通 runtime HTTP。核心为每个受管插件进程建立受 OS
 | `channel_knowledge_records` | `id, instance_id, conversation_id, knowledge_entry_id, requester_identity_link_id, question, answer, source_json, visibility, authority_status, occurred_at, created_at` | `knowledge_entry_id UNIQUE`；authority 默认 `observed`，不得自动变 `verified`。 |
 | `channel_inbox_dedup` | `id, instance_id, external_event_id, event_type, payload_digest, normalized_payload_json, state, lease_id, lease_until, conversation_id, aha_message_id, outcome, occurred_at, received_at, processed_at` | `(instance_id,external_event_id) UNIQUE`；同 payload 返回原结果，ID 相同但 digest 不同进入安全错误。 |
 | `channel_source_events` | `sequence INTEGER PK AUTOINCREMENT, id, source_key, source_revision, task_id, round_id, turn_id, conversation_item_id, event_class, event_type, semantic_payload_json, occurred_at` | `id UNIQUE`、`(source_key,source_revision) UNIQUE`；stream item 每次更新递增 revision，Task transition 使用稳定 source key。 |
-| `channel_delivery_outbox` | `id, instance_id, conversation_id, subscription_id, source_event_sequence, stream_sequence, replay_generation, replay_of_id, idempotency_key, coalesce_key, payload_version, semantic_payload_json, state, attempts, first_attempt_at, available_at, lease_id, lease_until, provider_message_id, last_error_code, outcome_certainty, created_at, updated_at, delivered_at` | `idempotency_key UNIQUE`、`(conversation_id,stream_sequence,replay_generation) UNIQUE`；只能领取该会话最小未完成序号/代。 |
-| `channel_delivery_attempts` | `id, delivery_id, attempt_no, lease_id, outcome, error_code, retry_after_ms, provider_request_id, started_at, finished_at` | `(delivery_id,attempt_no) UNIQUE`；只存稳定错误码和脱敏 request ID。 |
+| `channel_delivery_outbox` | `id, instance_id, conversation_id, subscription_id, source_event_sequence, stream_sequence, replay_generation, replay_of_id, idempotency_key, coalesce_key, payload_version, semantic_payload_json, state, attempts, first_attempt_at, available_at, lease_id, lease_until, provider_message_id, last_error_code, outcome_certainty, created_at, updated_at, delivered_at` | `idempotency_key UNIQUE`、`(conversation_id,stream_sequence,replay_generation) UNIQUE`；按该会话最小未完成序号/代领取，只有 `pending/leased` 参与顺序阻塞，终态（含 `dead_letter`）不阻塞后续消息。`delivered`/`delivered_at` 仅表示服务商已接受并返回 message ID，不表示客户端已送达或已读；`outcome_certainty=provider_accepted`。 |
+| `channel_delivery_attempts` | `id, delivery_id, attempt_no, lease_id, outcome, error_code, retry_after_ms, provider_request_id, started_at, finished_at` | `(delivery_id,attempt_no) UNIQUE`；只存稳定错误码和脱敏 request ID，Owner 可按 delivery 查询。 |
 | `channel_handoffs` | `id, instance_id, origin_conversation_id, origin_inbox_id, requester_identity_link_id, owner_conversation_id, summary, details, source_json, state, decision, accepted_action_id, created_task_id, created_at, updated_at, resolved_at` | origin idempotency unique；接受者必须是该实例唯一 active Owner。 |
 | `channel_service_capabilities` | `id, plugin_id, instance_id, token_hash, token_secret_ref, scopes_json, status, issued_at, expires_at, last_used_at, revoked_at, rotated_from_id` | token hash unique；raw token 只在 Secret Store；实例/插件/scope 每次请求都校验。 |
 | `channel_onboarding_sessions` | `id, instance_id, owner_session_id, mode, registration_command_id, verification_url_secret_ref, status, step, secret_stage_ref, scanner_external_user_id, expires_at, consumed_at, created_at, updated_at` | 一次性、短时、绑定发起 Web Owner；verification URL/Secret 暂存只保存 ref。 |
@@ -209,6 +209,7 @@ Secret 不走普通 runtime HTTP。核心为每个受管插件进程建立受 OS
 | `GET` | `/api/v1/channel-instances/{id}/handoffs` | Owner 收件箱和 accepted_todo 列表。 |
 | `POST` | `/api/v1/channel-handoffs/{id}/actions/preview` | 预览“保留为渠道待办 / 创建 Task / 忽略”。 |
 | `GET` | `/api/v1/channel-instances/{id}/deliveries` | 查看 pending/dead-letter，脱敏错误。 |
+| `GET` | `/api/v1/channel-deliveries/{id}/attempts` | Owner 查询单条投递的每次领取/结果/稳定错误码/retry-after/provider request ID。 |
 | `POST` | `/api/v1/channel-deliveries/{id}/replay` | Owner 显式重放：原记录标为 replayed，新记录沿用 stream sequence、递增 replay generation 并生成新 idempotency key。 |
 | `POST` | `/api/v1/channel-deliveries/{id}/skip` | Owner 明确跳过 dead-letter 并解除本会话顺序阻塞；审计不可删除。 |
 
@@ -351,17 +352,17 @@ sequenceDiagram
   P->>F: render and send with idempotency context
   alt success
     P->>DB: ACK(lease, provider_message_id)
-    DB->>DB: delivered; advance session outbound cursor
+    DB->>DB: delivered/provider_accepted; advance session outbound cursor
   else rate limit/transient
     P->>DB: NACK(code, retry_after)
     DB->>DB: pending; attempts++; available_at=backoff
   else permanent
-    P->>DB: NACK(permanent code)
-    DB->>DB: dead_letter; later rows remain ordered/explicitly skipped by Owner
+    P->>DB: NACK(permanent code, request_id)
+    DB->>DB: dead_letter; later rows stay claimable and are surfaced for replay/skip
   end
 ```
 
-重试采用 provider `Retry-After` 优先，否则 full-jitter 指数退避（1s、5s、30s、2m、10m、1h 上限），默认 12 次后 dead-letter。租约到期自动回收。同会话严格按 `(stream_sequence,replay_generation)`，不同会话可并行；dead-letter 默认阻塞该会话后续序号，Owner 明确 skip 或 replay 后才能继续。Outbox 至少保留 30 天，delivered receipt 至少保留 7 天。Replay 原子地把原记录标为 `replayed`，并创建同一 stream sequence、下一 generation 的新 delivery；因此重放先于后续序号，且不会把原记录改回 pending。
+重试采用 provider `Retry-After` 优先，否则 full-jitter 指数退避（1s、5s、30s、2m、10m、1h 上限），默认 12 次后 dead-letter。租约到期自动回收。同会话严格按 `(stream_sequence,replay_generation)`，不同会话可并行；只有 `pending/leased` 阻塞同会话后续序号，`dead_letter` 是终态，不会把后续消息永久卡在 `attempts=0`，Owner 仍可 replay 或 skip 并留下审计记录。发送错误保存稳定错误码、`outcome_certainty` 与 provider request ID；Owner 可通过 `GET /api/v1/channel-deliveries/{id}/attempts` 查询每次尝试。`delivered` 只表示服务商 API 接受（`provider_accepted`），客户端是否收到/已读仍需外部回执或 Owner 验收。Outbox 至少保留 30 天，delivered receipt 至少保留 7 天。Replay 原子地把原记录标为 `replayed`，并创建同一 stream sequence、下一 generation 的新 delivery；因此重放先于后续序号，且不会把原记录改回 pending。
 
 飞书 create/reply message body 都支持 `uuid` 请求去重。插件必须把 AHA2 delivery idempotency key 稳定映射为合法 UUID，并在每次重试复用；官方 Go SDK 高层 Channel `Send` 当前没有暴露调用方 UUID，因此一期收件/归一化可复用 Channel 模块，可靠出站要使用底层 `im.v1.message.create/reply` 适配器或经测试的上层补丁。若请求得到明确 429/5xx，可按策略重试；若连接在响应前断开且可能已被飞书接受，只能在 provider 去重窗口内自动重试，超窗后进入 `dead_letter + outcome_certainty=unknown`，禁止盲发。AHA2 保证自身队列 exactly-once 投影和 provider 窗口内幂等，但不虚假承诺跨越外部平台去重窗口的绝对 exactly-once。
 

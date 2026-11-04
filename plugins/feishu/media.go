@@ -46,6 +46,10 @@ func mediaStageError(stage string, err error) error {
 	if errors.As(err, &existing) {
 		return err
 	}
+	var sendFailure deliverySendFailure
+	if errors.As(err, &sendFailure) {
+		return err
+	}
 	code := "media_" + stage + "_failed"
 	var status runtimeStatusError
 	if errors.As(err, &status) {
@@ -338,6 +342,10 @@ func mediaErrorCode(err error) string {
 	var failure mediaFailure
 	if errors.As(err, &failure) {
 		return failure.code
+	}
+	var sendFailure deliverySendFailure
+	if errors.As(err, &sendFailure) {
+		return sendFailure.code
 	}
 	return "resource_download_failed"
 }
