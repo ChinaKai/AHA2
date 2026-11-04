@@ -676,8 +676,8 @@ try {
   $inputStream.CopyTo($child.StandardInput.BaseStream)
   $child.StandardInput.Close()
   $child.WaitForExit()
-  $stdoutTask.GetAwaiter().GetResult()
-  $stderrTask.GetAwaiter().GetResult()
+  $null = $stdoutTask.GetAwaiter().GetResult()
+  $null = $stderrTask.GetAwaiter().GetResult()
   exit $child.ExitCode
 } catch {
   [Console]::Error.WriteLine('AHA2_SSH_BOOTSTRAP_ERROR:' + $_.Exception.Message)
