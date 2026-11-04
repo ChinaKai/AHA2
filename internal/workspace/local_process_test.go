@@ -17,9 +17,10 @@ import (
 )
 
 const (
-	processHelperModeEnv   = "AHA2_WORKSPACE_PROCESS_HELPER_MODE"
-	processHelperExitEnv   = "AHA2_WORKSPACE_PROCESS_HELPER_EXIT"
-	processHelperMarkerEnv = "AHA2_WORKSPACE_PROCESS_HELPER_MARKER"
+	processHelperModeEnv    = "AHA2_WORKSPACE_PROCESS_HELPER_MODE"
+	processHelperExitEnv    = "AHA2_WORKSPACE_PROCESS_HELPER_EXIT"
+	processHelperMarkerEnv  = "AHA2_WORKSPACE_PROCESS_HELPER_MARKER"
+	processHelperMarker2Env = "AHA2_WORKSPACE_PROCESS_HELPER_MARKER2"
 
 	processQuickStdout = "quick-stdout\n"
 	processQuickStderr = "quick-stderr\n"
@@ -103,20 +104,19 @@ func TestRunProcessHelperProcess(t *testing.T) {
 		_, _ = io.WriteString(os.Stdout, processHandlerStallOutput("stdout", processHandlerStallLineCount()))
 	case "backpressure":
 		_, _ = io.WriteString(os.Stdout, processStallFirstLine)
-		marker := os.Getenv(processHelperMarkerEnv)
-		deadline := time.Now().Add(10 * time.Second)
-		for {
-			if _, err := os.Stat(marker); err == nil {
-				break
-			}
-			if time.Now().After(deadline) {
-				_, _ = fmt.Fprintln(os.Stderr, "handler marker timeout")
-				os.Exit(94)
-			}
-			time.Sleep(5 * time.Millisecond)
-		}
+		waitForHelperMarker(processHelperMarkerEnv)
 		burst, _ := processBackpressureOutput()
 		_, _ = io.WriteString(os.Stdout, burst)
+	case "backpressure-descendant":
+		// Backpressure first, then let the consumer drain everything before a
+		// grandchild inherits the pipes and the child exits. The capture is
+		// complete, so it must not be reported as truncated.
+		_, _ = io.WriteString(os.Stdout, processStallFirstLine)
+		waitForHelperMarker(processHelperMarkerEnv)
+		burst, _ := processBackpressureOutput()
+		_, _ = io.WriteString(os.Stdout, burst)
+		waitForHelperMarker(processHelperMarker2Env)
+		startOutputInheritingGrandchild()
 	case "slow":
 		_, _ = io.WriteString(os.Stdout, "slow-start\n")
 		time.Sleep(5 * time.Second)
@@ -126,6 +126,21 @@ func TestRunProcessHelperProcess(t *testing.T) {
 	}
 	exitCode, _ := strconv.Atoi(os.Getenv(processHelperExitEnv))
 	os.Exit(exitCode)
+}
+
+func waitForHelperMarker(env string) {
+	marker := os.Getenv(env)
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := os.Stat(marker); err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			_, _ = fmt.Fprintln(os.Stderr, "helper marker timeout")
+			os.Exit(94)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 func processFloodOutput(prefix string) string {
@@ -357,19 +372,66 @@ func TestRunProcessSlowHandlerKeepsBufferedOutput(t *testing.T) {
 	}
 }
 
-// Once the spool is full, the copy goroutine waits for the consumer and
-// WaitDelay can close the process pipe with unread bytes still in it. That must
-// not be reported as a successful run: a truncated capture needs an error.
+// Once the spool is full, the drainer waits for the consumer and the pipe is
+// closed with unread bytes still in it. That must be reported as truncation for
+// every exit code, not just successful ones.
 func TestRunProcessBackpressureDoesNotHideTruncation(t *testing.T) {
+	for _, exitCode := range []int{0, 3} {
+		t.Run(fmt.Sprintf("exit_%d", exitCode), func(t *testing.T) {
+			burst, burstLines := processBackpressureOutput()
+			want := processStallFirstLine + burst
+			marker := filepath.Join(t.TempDir(), "handler-started")
+			const handlerStall = 5 * time.Second
+			handled := 0
+			start := time.Now()
+			result, err := executeProcessHelper(t, "backpressure", exitCode, func(command *Command) {
+				command.Timeout = 60 * time.Second
+				command.Env[processHelperMarkerEnv] = marker
+			}, func(line string) {
+				if handled == 0 {
+					if writeErr := os.WriteFile(marker, []byte("1"), 0o600); writeErr != nil {
+						t.Errorf("write handler marker: %v", writeErr)
+					}
+					time.Sleep(handlerStall)
+				}
+				handled++
+			})
+			elapsed := time.Since(start)
+			if err == nil {
+				t.Fatalf("Run reported success with a full spool: exit=%d stdout %d/%d bytes, %d/%d lines",
+					result.ExitCode, len(result.Stdout), len(want), handled, burstLines+1)
+			}
+			if !errors.Is(err, errProcessOutputTruncated) {
+				t.Fatalf("error = %v, want errProcessOutputTruncated", err)
+			}
+			if result.ExitCode != exitCode {
+				t.Fatalf("exit code = %d, want %d", result.ExitCode, exitCode)
+			}
+			if len(result.Stdout) >= len(want) || handled >= burstLines+1 {
+				t.Fatalf("backpressure probe kept all output, so it did not exercise truncation")
+			}
+			if elapsed < handlerStall {
+				t.Fatalf("Run returned in %s, before the stalled handler finished", elapsed)
+			}
+		})
+	}
+}
+
+// Backpressure early in the run is not truncation if the consumer drained
+// everything before a descendant kept the pipes open. The capture is complete,
+// so a later idle-pipe close must not be reported as an error.
+func TestRunProcessDrainedBackpressureWithHeldPipesIsNotTruncated(t *testing.T) {
 	burst, burstLines := processBackpressureOutput()
 	want := processStallFirstLine + burst
 	marker := filepath.Join(t.TempDir(), "handler-started")
+	marker2 := filepath.Join(t.TempDir(), "handler-drained")
 	const handlerStall = 5 * time.Second
 	handled := 0
 	start := time.Now()
-	result, err := executeProcessHelper(t, "backpressure", 0, func(command *Command) {
+	result, err := executeProcessHelper(t, "backpressure-descendant", 0, func(command *Command) {
 		command.Timeout = 60 * time.Second
 		command.Env[processHelperMarkerEnv] = marker
+		command.Env[processHelperMarker2Env] = marker2
 	}, func(line string) {
 		if handled == 0 {
 			if writeErr := os.WriteFile(marker, []byte("1"), 0o600); writeErr != nil {
@@ -378,17 +440,21 @@ func TestRunProcessBackpressureDoesNotHideTruncation(t *testing.T) {
 			time.Sleep(handlerStall)
 		}
 		handled++
+		if handled == burstLines+1 {
+			if writeErr := os.WriteFile(marker2, []byte("1"), 0o600); writeErr != nil {
+				t.Errorf("write drained marker: %v", writeErr)
+			}
+		}
 	})
 	elapsed := time.Since(start)
-	if err == nil {
-		t.Fatalf("Run reported success with a full spool: stdout %d/%d bytes, %d/%d lines",
-			len(result.Stdout), len(want), handled, burstLines+1)
+	if err != nil {
+		t.Fatalf("run helper: %v (stdout %d/%d bytes, %d/%d lines)", err, len(result.Stdout), len(want), handled, burstLines+1)
 	}
-	if !errors.Is(err, errProcessOutputTruncated) {
-		t.Fatalf("error = %v, want errProcessOutputTruncated", err)
+	if result.Stdout != want {
+		t.Fatalf("stdout truncated: got %d bytes, want %d", len(result.Stdout), len(want))
 	}
-	if len(result.Stdout) >= len(want) || handled >= burstLines+1 {
-		t.Fatalf("backpressure probe kept all output, so it did not exercise truncation")
+	if handled != burstLines+1 {
+		t.Fatalf("line handler saw %d lines, want %d", handled, burstLines+1)
 	}
 	if elapsed < handlerStall {
 		t.Fatalf("Run returned in %s, before the stalled handler finished", elapsed)
