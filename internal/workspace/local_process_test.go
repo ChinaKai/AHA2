@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -16,8 +17,9 @@ import (
 )
 
 const (
-	processHelperModeEnv = "AHA2_WORKSPACE_PROCESS_HELPER_MODE"
-	processHelperExitEnv = "AHA2_WORKSPACE_PROCESS_HELPER_EXIT"
+	processHelperModeEnv   = "AHA2_WORKSPACE_PROCESS_HELPER_MODE"
+	processHelperExitEnv   = "AHA2_WORKSPACE_PROCESS_HELPER_EXIT"
+	processHelperMarkerEnv = "AHA2_WORKSPACE_PROCESS_HELPER_MARKER"
 
 	processQuickStdout = "quick-stdout\n"
 	processQuickStderr = "quick-stderr\n"
@@ -99,6 +101,22 @@ func TestRunProcessHelperProcess(t *testing.T) {
 	case "handler-stall":
 		_, _ = io.WriteString(os.Stdout, processStallFirstLine)
 		_, _ = io.WriteString(os.Stdout, processHandlerStallOutput("stdout", processHandlerStallLineCount()))
+	case "backpressure":
+		_, _ = io.WriteString(os.Stdout, processStallFirstLine)
+		marker := os.Getenv(processHelperMarkerEnv)
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			if _, err := os.Stat(marker); err == nil {
+				break
+			}
+			if time.Now().After(deadline) {
+				_, _ = fmt.Fprintln(os.Stderr, "handler marker timeout")
+				os.Exit(94)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		burst, _ := processBackpressureOutput()
+		_, _ = io.WriteString(os.Stdout, burst)
 	case "slow":
 		_, _ = io.WriteString(os.Stdout, "slow-start\n")
 		time.Sleep(5 * time.Second)
@@ -144,6 +162,21 @@ func processHandlerStallOutput(prefix string, lines int) string {
 		fmt.Fprintf(&builder, "%s-%04d-%s\n", prefix, index, line)
 	}
 	return builder.String()
+}
+
+// processBackpressureOutput emits a burst slightly larger than the per-stream
+// spool plus one io.Copy chunk, so a stalled handler makes the copy goroutine
+// block on the spool while a few KiB are still unread in the process pipe.
+func processBackpressureOutput() (string, int) {
+	body := strings.Repeat("q", 88)
+	lineLength := len("out-00000-") + len(body) + 1
+	lines := (processOutputSpoolLimit + 34*1024) / lineLength
+	var builder strings.Builder
+	builder.Grow(lines * lineLength)
+	for index := 0; index < lines; index++ {
+		fmt.Fprintf(&builder, "out-%05d-%s\n", index, body)
+	}
+	return builder.String(), lines
 }
 
 // startOutputInheritingGrandchild launches a long-lived copy of this test
@@ -318,6 +351,44 @@ func TestRunProcessSlowHandlerKeepsBufferedOutput(t *testing.T) {
 	}
 	if handled != lines+1 {
 		t.Fatalf("line handler saw %d lines, want %d", handled, lines+1)
+	}
+	if elapsed < handlerStall {
+		t.Fatalf("Run returned in %s, before the stalled handler finished", elapsed)
+	}
+}
+
+// Once the spool is full, the copy goroutine waits for the consumer and
+// WaitDelay can close the process pipe with unread bytes still in it. That must
+// not be reported as a successful run: a truncated capture needs an error.
+func TestRunProcessBackpressureDoesNotHideTruncation(t *testing.T) {
+	burst, burstLines := processBackpressureOutput()
+	want := processStallFirstLine + burst
+	marker := filepath.Join(t.TempDir(), "handler-started")
+	const handlerStall = 5 * time.Second
+	handled := 0
+	start := time.Now()
+	result, err := executeProcessHelper(t, "backpressure", 0, func(command *Command) {
+		command.Timeout = 60 * time.Second
+		command.Env[processHelperMarkerEnv] = marker
+	}, func(line string) {
+		if handled == 0 {
+			if writeErr := os.WriteFile(marker, []byte("1"), 0o600); writeErr != nil {
+				t.Errorf("write handler marker: %v", writeErr)
+			}
+			time.Sleep(handlerStall)
+		}
+		handled++
+	})
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatalf("Run reported success with a full spool: stdout %d/%d bytes, %d/%d lines",
+			len(result.Stdout), len(want), handled, burstLines+1)
+	}
+	if !errors.Is(err, errProcessOutputTruncated) {
+		t.Fatalf("error = %v, want errProcessOutputTruncated", err)
+	}
+	if len(result.Stdout) >= len(want) || handled >= burstLines+1 {
+		t.Fatalf("backpressure probe kept all output, so it did not exercise truncation")
 	}
 	if elapsed < handlerStall {
 		t.Fatalf("Run returned in %s, before the stalled handler finished", elapsed)

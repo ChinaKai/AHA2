@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -171,6 +172,11 @@ const processPipeDrainTimeout = 3 * time.Second
 // memory without bound.
 const processOutputSpoolLimit = 4 * 1024 * 1024
 
+// errProcessOutputTruncated reports that WaitDelay closed a process pipe while
+// the spool was backpressured, so output still in that pipe was lost. Callers
+// must not mistake this for a successful run with complete output.
+var errProcessOutputTruncated = fmt.Errorf("workspace: process output truncated after backpressure stall: %w", exec.ErrWaitDelay)
+
 // runProcess executes a command on the local Windows host with the given
 // environment and streams stdout lines through onLine.
 func runProcess(parent context.Context, command Command, env []string, onLine LineHandler) (Result, error) {
@@ -216,11 +222,18 @@ func runProcess(parent context.Context, command Command, env []string, onLine Li
 	stdoutSpool.CloseWrite()
 	stderrSpool.CloseWrite()
 	wait.Wait()
-	// ErrWaitDelay means the child exited successfully but a descendant kept
-	// its output handles open past the drain bound; that is not a command
-	// failure.
+	// ErrWaitDelay means the child exited successfully but its pipes stayed
+	// open past the drain bound. When no stream was ever backpressured that
+	// only happens because a descendant holds the handles, which is not a
+	// command failure. If a spool did fill, the copy goroutine was waiting for
+	// the consumer, so WaitDelay closed the pipe with unread output still in
+	// it: report that instead of returning a successful-looking result.
 	if errors.Is(processErr, exec.ErrWaitDelay) {
-		processErr = nil
+		if stdoutSpool.Backpressured() || stderrSpool.Backpressured() {
+			processErr = errProcessOutputTruncated
+		} else {
+			processErr = nil
+		}
 	}
 	result := Result{Stdout: stdout.String(), Stderr: stderr.String(), Duration: time.Since(start)}
 	if process.ProcessState != nil {
@@ -261,13 +274,14 @@ func scanOutput(reader io.Reader, destination io.Writer, handler LineHandler, wa
 // backlog reaches limit, so the os/exec copy goroutines never wait for a slow
 // line handler; reads block until data arrives or CloseWrite is called.
 type processSpool struct {
-	mu     sync.Mutex
-	ready  *sync.Cond
-	chunks [][]byte
-	offset int
-	queued int
-	limit  int
-	closed bool
+	mu      sync.Mutex
+	ready   *sync.Cond
+	chunks  [][]byte
+	offset  int
+	queued  int
+	limit   int
+	stalled bool
+	closed  bool
 }
 
 func newProcessSpool(limit int) *processSpool {
@@ -281,6 +295,7 @@ func (spool *processSpool) Write(data []byte) (int, error) {
 	for len(data) > 0 {
 		spool.mu.Lock()
 		for !spool.closed && spool.queued >= spool.limit {
+			spool.stalled = true
 			spool.ready.Wait()
 		}
 		if spool.closed {
@@ -330,6 +345,15 @@ func (spool *processSpool) Read(buffer []byte) (int, error) {
 	}
 	spool.ready.Broadcast()
 	return read, nil
+}
+
+// Backpressured reports whether a writer ever waited for the reader to catch
+// up. In that state WaitDelay may close the process pipes before the copy
+// goroutine has drained them.
+func (spool *processSpool) Backpressured() bool {
+	spool.mu.Lock()
+	defer spool.mu.Unlock()
+	return spool.stalled
 }
 
 // CloseWrite marks EOF for readers once the os/exec copy goroutines are done.
