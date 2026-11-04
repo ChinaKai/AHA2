@@ -72,6 +72,52 @@ func TestOwnerPetStateAPIAndVersionConflict(t *testing.T) {
 	response.Body.Close()
 }
 
+func TestPetApprovalCancelRequiresOwnerSession(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	secretStore, err := secrets.Open(filepath.Join(t.TempDir(), "secrets.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	authService := auth.NewService(database, "setup-test", time.Hour)
+	appService := app.NewService(database, secretStore, app.StubExecutor{})
+	approval, err := appService.CreatePetApproval(ctx, app.PetApprovalInput{
+		Kind: "owner_decision", Title: "取消权限测试", Summary: "只有主人可以取消这条审批", Risk: "medium",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(New(Config{Store: database, Auth: authService, App: appService}).Handler())
+	defer server.Close()
+	resolveURL := server.URL + "/api/v1/pet/approvals/" + approval.ID + "/resolve"
+
+	anonymous := &http.Client{}
+	response := requestJSON(t, anonymous, http.MethodPost, resolveURL, map[string]any{"decision": "cancel"}, "")
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("anonymous cancel=%d", response.StatusCode)
+	}
+	response.Body.Close()
+
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	csrf := registerOwner(t, client, server.URL)
+	response = requestJSON(t, client, http.MethodPost, resolveURL, map[string]any{"decision": "cancel"}, csrf)
+	var payload struct {
+		Approval struct {
+			Status string `json:"status"`
+		} `json:"approval"`
+	}
+	decodeResponse(t, response, &payload)
+	if response.StatusCode != http.StatusOK || payload.Approval.Status != "cancelled" {
+		t.Fatalf("owner cancel=%d %#v", response.StatusCode, payload)
+	}
+}
+
 func TestOwnerPetSettingsAPI(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

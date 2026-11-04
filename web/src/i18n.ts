@@ -138,6 +138,7 @@ const zhCN: Record<string, string> = {
   "petWorkbench.filterPending": "未处理",
   "petWorkbench.filterApproved": "已批准",
   "petWorkbench.filterRejected": "已拒绝",
+  "petWorkbench.filterCancelled": "已取消",
   "petWorkbench.ideas": "想法",
   "petWorkbench.follows": "关注",
   "petWorkbench.settings": "设置",
@@ -305,6 +306,7 @@ const enUS: Record<string, string> = {
   "petWorkbench.filterPending": "Pending",
   "petWorkbench.filterApproved": "Approved",
   "petWorkbench.filterRejected": "Rejected",
+  "petWorkbench.filterCancelled": "Cancelled",
   "petWorkbench.ideas": "Ideas",
   "petWorkbench.follows": "Following",
   "petWorkbench.settings": "Settings",
@@ -1486,7 +1488,7 @@ function translatePatternText(text: string): string | null {
     const quiet = match[5] ? ` · ${legacyEnglish[match[5].trim()] ?? match[5]}` : "";
     return `Last: ${last} · Next: ${next} · ${match[3]}/${match[4]} this hour${quiet}`;
   }
-  match = /^(待审批|已批准|已拒绝) · (low|medium|high)$/.exec(text);
+  match = /^(待审批|已批准|已拒绝|已取消) · (low|medium|high)$/.exec(text);
   if (match) return `${legacyEnglish[match[1]] ?? match[1]} · ${match[2]}`;
   match = /^删除 Task「(.*)」$/.exec(text);
   if (match) return `Delete Task "${match[1]}"`;

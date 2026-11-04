@@ -15,9 +15,10 @@ import (
 )
 
 const (
-	petApprovalPending  = "pending"
-	petApprovalApproved = "approved"
-	petApprovalRejected = "rejected"
+	petApprovalPending   = "pending"
+	petApprovalApproved  = "approved"
+	petApprovalRejected  = "rejected"
+	petApprovalCancelled = "cancelled"
 )
 
 type PetWorkbenchView struct {
@@ -168,8 +169,12 @@ func (s *Service) ResolvePetApproval(ctx context.Context, id, decision, note str
 		status = petApprovalApproved
 	case "reject", "rejected":
 		status = petApprovalRejected
+	case "cancel", "cancelled":
+		// Cancelling keeps the record for history but removes it from the
+		// pending queue. It never executes the requested action.
+		status = petApprovalCancelled
 	default:
-		return domain.PetApproval{}, fmt.Errorf("审批决定必须是 approve 或 reject")
+		return domain.PetApproval{}, fmt.Errorf("审批决定必须是 approve、reject 或 cancel")
 	}
 	item, err := s.store.PetApproval(ctx, id)
 	if err != nil {
@@ -208,8 +213,11 @@ func (s *Service) ResolvePetApproval(ctx context.Context, id, decision, note str
 	message := ""
 	if s.petUsesEnglish(ctx) {
 		decisionText := "approved"
-		if status == petApprovalRejected {
+		switch status {
+		case petApprovalRejected:
 			decisionText = "rejected"
+		case petApprovalCancelled:
+			decisionText = "cancelled"
 		}
 		message = fmt.Sprintf("[Approval result] The owner %s the approval「%s」（%s）.", decisionText, item.Title, item.ID)
 		if item.Resolution != "" {
@@ -217,8 +225,11 @@ func (s *Service) ResolvePetApproval(ctx context.Context, id, decision, note str
 		}
 	} else {
 		decisionText := "批准"
-		if status == petApprovalRejected {
+		switch status {
+		case petApprovalRejected:
 			decisionText = "拒绝"
+		case petApprovalCancelled:
+			decisionText = "取消"
 		}
 		message = fmt.Sprintf("[审批结果] 主人%s了审批「%s」（%s）。", decisionText, item.Title, item.ID)
 		if item.Resolution != "" {

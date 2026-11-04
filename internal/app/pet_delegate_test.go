@@ -185,6 +185,71 @@ func TestPetOverviewRequiresViewTasksPermission(t *testing.T) {
 	}
 }
 
+func TestPetApprovalCancelKeepsHistoryAndClearsPending(t *testing.T) {
+	fixture := newPetTaskFixture(t)
+	approval, err := fixture.service.CreatePetApproval(fixture.ctx, PetApprovalInput{
+		Kind: "owner_decision", Title: "旧的 pin 审批", Summary: "已被后续操作取代，需要取消",
+		Reason: "验证取消入口", Risk: "medium",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := fixture.service.PetWorkState(fixture.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.PendingApprovals != 1 || state.Inspection.PendingApprovals != 1 {
+		t.Fatalf("pending before cancel=%#v", state.Inspection)
+	}
+
+	cancelled, err := fixture.service.ResolvePetApproval(fixture.ctx, approval.ID, "cancel", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cancelled.Status != petApprovalCancelled || cancelled.ResolvedAt.IsZero() {
+		t.Fatalf("cancelled=%#v", cancelled)
+	}
+
+	readback, err := fixture.database.PetApproval(fixture.ctx, approval.ID)
+	if err != nil || readback.Status != petApprovalCancelled {
+		t.Fatalf("readback=%#v err=%v", readback, err)
+	}
+	pending, err := fixture.database.ListPendingPetApprovals(fixture.ctx, 10)
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("pending after cancel=%#v err=%v", pending, err)
+	}
+	items, err := fixture.database.ListPetApprovals(fixture.ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, item := range items {
+		if item.ID == approval.ID {
+			found = true
+			if item.Status != petApprovalCancelled {
+				t.Fatalf("history status=%q", item.Status)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("cancelled approval disappeared from history")
+	}
+	state, err = fixture.service.PetWorkState(fixture.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.PendingApprovals != 0 || state.Inspection.PendingApprovals != 0 {
+		t.Fatalf("pending after cancel=%#v", state.Inspection)
+	}
+
+	// Cancelled is terminal: approve, reject, and a second cancel all fail.
+	for _, decision := range []string{"approve", "reject", "cancel"} {
+		if _, err := fixture.service.ResolvePetApproval(fixture.ctx, approval.ID, decision, "再次处理"); err == nil || !strings.Contains(err.Error(), "已经处理过") {
+			t.Fatalf("%s on cancelled approval err=%v", decision, err)
+		}
+	}
+}
+
 func TestPetApprovalDecisionReasonIsRequiredAndReadable(t *testing.T) {
 	fixture := newPetTaskFixture(t)
 	approval, err := fixture.service.CreatePetApproval(fixture.ctx, PetApprovalInput{

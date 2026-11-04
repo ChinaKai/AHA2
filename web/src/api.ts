@@ -564,7 +564,7 @@ class APIClient {
     });
   }
 
-  resolvePetApproval(id: string, decision: "approve" | "reject", note = ""): Promise<{ok: boolean; approval: import("./types").PetApproval}> {
+  resolvePetApproval(id: string, decision: "approve" | "reject" | "cancel", note = ""): Promise<{ok: boolean; approval: import("./types").PetApproval}> {
     return this.request(`/api/v1/pet/approvals/${encodeURIComponent(id)}/resolve`, {
       method: "POST", body: JSON.stringify({decision, note}),
     });

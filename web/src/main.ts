@@ -341,7 +341,7 @@ applyLocale("auto");
 const app = document.querySelector<HTMLDivElement>("#app");
 let petWorkbenchTab = "diary";
 let petApprovalFilter: "all" | "idea" | "decision" = "all";
-let petApprovalStatusFilter: "all" | "pending" | "approved" | "rejected" = "all";
+let petApprovalStatusFilter: "all" | "pending" | "approved" | "rejected" | "cancelled" = "all";
 let events: EventSource | null = null;
 let taskRefreshTimer: number | null = null;
 let taskClockFrame: number | null = null;
@@ -5868,6 +5868,7 @@ async function bindPetDiaryPage(): Promise<void> {
         ["pending", t("petWorkbench.filterPending")],
         ["approved", t("petWorkbench.filterApproved")],
         ["rejected", t("petWorkbench.filterRejected")],
+        ["cancelled", t("petWorkbench.filterCancelled")],
       ];
       body.innerHTML = `<div class="pet-approval-filters">${kindFilters.map(([id, label]) => `<button type="button" class="${petApprovalFilter === id ? "active" : ""}" data-pet-approval-filter="${id}">${label}</button>`).join("")}</div><div class="pet-approval-filters">${statusFilters.map(([id, label]) => `<button type="button" class="${petApprovalStatusFilter === id ? "active" : ""}" data-pet-approval-status-filter="${id}">${label}</button>`).join("")}</div>${renderPetApprovals(items, empty)}${loadMoreFooter("approval", view.approvals.length, view.approval_total ?? view.approvals.length)}`;
       body.querySelectorAll<HTMLButtonElement>("[data-pet-approval-filter]").forEach(button => button.addEventListener("click", () => {
@@ -5879,7 +5880,7 @@ async function bindPetDiaryPage(): Promise<void> {
       }));
       body.querySelectorAll<HTMLButtonElement>("[data-pet-approval-status-filter]").forEach(button => button.addEventListener("click", () => {
         const next = button.dataset.petApprovalStatusFilter;
-        if (next === "all" || next === "pending" || next === "approved" || next === "rejected") {
+        if (next === "all" || next === "pending" || next === "approved" || next === "rejected" || next === "cancelled") {
           petApprovalStatusFilter = next;
           renderTab();
         }
@@ -5935,7 +5936,7 @@ async function bindPetDiaryPage(): Promise<void> {
     body.querySelectorAll<HTMLButtonElement>("[data-pet-approval-decision]").forEach(button => {
       button.addEventListener("click", async () => {
         const id = button.dataset.petApprovalId || "";
-        const decision = button.dataset.petApprovalDecision as "approve" | "reject";
+        const decision = button.dataset.petApprovalDecision as "approve" | "reject" | "cancel";
         if (!id || !decision) return;
         let decisionReason = "";
         if (decision === "reject") {
@@ -6097,10 +6098,10 @@ function renderPetApprovals(items: Array<{id: string; title: string; summary: st
   if (items.length === 0) return `<div class="field-help">${escapeHTML(empty)}</div>`;
   return items.map(item => {
     const pending = item.status === "pending";
-    const status = item.status === "approved" ? tr("已批准") : item.status === "rejected" ? tr("已拒绝") : tr("待审批");
+    const status = item.status === "approved" ? tr("已批准") : item.status === "rejected" ? tr("已拒绝") : item.status === "cancelled" ? tr("已取消") : tr("待审批");
     const kind = item.kind === "idea" ? t("petWorkbench.ideas") : t("petWorkbench.approvals");
     const actions = pending
-      ? `<div class="pet-approval-actions"><button type="button" class="primary" data-pet-approval-decision="approve" data-pet-approval-id="${escapeHTML(item.id)}">${tr("批准")}</button><button type="button" data-pet-approval-decision="reject" data-pet-approval-id="${escapeHTML(item.id)}">${tr("拒绝")}</button></div>`
+      ? `<div class="pet-approval-actions"><button type="button" class="primary" data-pet-approval-decision="approve" data-pet-approval-id="${escapeHTML(item.id)}">${tr("批准")}</button><button type="button" data-pet-approval-decision="reject" data-pet-approval-id="${escapeHTML(item.id)}">${tr("拒绝")}</button><button type="button" data-pet-approval-decision="cancel" data-pet-approval-id="${escapeHTML(item.id)}">${tr("取消")}</button></div>`
       : "";
     return `<article class="pet-approval-card ${pending ? "pending" : ""}">
       <header><strong>${escapeHTML(item.title)}</strong><span class="pet-approval-status">${kind} · ${escapeHTML(status)} · ${escapeHTML(item.risk)}</span></header>
