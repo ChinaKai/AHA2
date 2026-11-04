@@ -180,6 +180,47 @@ func TestPetInspectionChannelHealthClassification(t *testing.T) {
 		}
 	})
 
+	t.Run("queued_behind_retry_does_not_use_five_minutes", func(t *testing.T) {
+		candidate := channel("channel-queued", "排队渠道", "ready")
+		inspection := apply(candidate, domain.ChannelOutboxHealth{
+			InstanceID: candidate.ID, Pending: 2, QueuedPending: 1, AttemptedPending: 1,
+			OldestPendingAt:          now.Add(-10 * time.Minute),
+			OldestQueuedPendingAt:    now.Add(-10 * time.Minute),
+			OldestAttemptedPendingAt: now.Add(-10 * time.Minute),
+		})
+		if inspection.Health != "ok" || inspection.Channels[0].Degraded {
+			t.Fatalf("queued row behind retry degraded too early: %#v", inspection)
+		}
+	})
+
+	t.Run("queued_pending_threshold_boundary", func(t *testing.T) {
+		for _, scenario := range []struct {
+			name     string
+			age      time.Duration
+			degraded bool
+		}{
+			{"just_under", petChannelAttemptedPendingThreshold - time.Second, false},
+			{"exactly_at", petChannelAttemptedPendingThreshold, true},
+			{"just_over", petChannelAttemptedPendingThreshold + time.Second, true},
+		} {
+			t.Run(scenario.name, func(t *testing.T) {
+				candidate := channel("channel-queued", "排队渠道", "ready")
+				inspection := apply(candidate, domain.ChannelOutboxHealth{
+					InstanceID: candidate.ID, Pending: 1, QueuedPending: 1,
+					OldestPendingAt:       now.Add(-scenario.age),
+					OldestQueuedPendingAt: now.Add(-scenario.age),
+				})
+				gotDegraded := inspection.Health == "degraded" && inspection.Channels[0].Degraded
+				if gotDegraded != scenario.degraded {
+					t.Fatalf("age=%v degraded=%v inspection=%#v", scenario.age, gotDegraded, inspection)
+				}
+				if scenario.degraded && !strings.Contains(inspection.Note, "排队等待前序消息 1 条") {
+					t.Fatalf("queued note=%q", inspection.Note)
+				}
+			})
+		}
+	})
+
 	t.Run("backlog_boundary", func(t *testing.T) {
 		for _, scenario := range []struct {
 			pending  int

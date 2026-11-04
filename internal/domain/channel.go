@@ -383,9 +383,11 @@ type ChannelOutboxHealth struct {
 	InstanceID                 string    `json:"instance_id"`
 	Pending                    int       `json:"pending"`
 	StuckPending               int       `json:"stuck_pending"`
+	QueuedPending              int       `json:"queued_pending"`
 	AttemptedPending           int       `json:"attempted_pending"`
 	OldestPendingAt            time.Time `json:"oldest_pending_at,omitempty"`
 	OldestUnattemptedPendingAt time.Time `json:"oldest_unattempted_pending_at,omitempty"`
+	OldestQueuedPendingAt      time.Time `json:"oldest_queued_pending_at,omitempty"`
 	OldestAttemptedPendingAt   time.Time `json:"oldest_attempted_pending_at,omitempty"`
 	ExpiredLeases              int       `json:"expired_leases"`
 	OldestExpiredLeaseAt       time.Time `json:"oldest_expired_lease_at,omitempty"`

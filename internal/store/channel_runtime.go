@@ -429,31 +429,48 @@ func (s *Store) SkipChannelDelivery(ctx context.Context, id, instanceID string, 
 	return nil
 }
 
-// channelOutboxHealthQuery keeps the WHERE predicate identical to the partial
-// index predicate so SQLite can SEARCH the health index instead of scanning
-// the whole outbox. See TestChannelOutboxHealthQueryUsesPartialIndex.
+// channelOutboxHealthQuery forces the v117 partial indexes. The outer read is
+// a bounded SCAN of idx_channel_delivery_health, which contains only
+// pending/leased/dead_letter rows (never terminal history); the correlated
+// last-error lookup is a SEARCH of idx_channel_delivery_health_error.
+// queued_unattempted marks an attempts=0 pending row that is behind an earlier
+// pending/leased row in the same conversation. ClaimChannelDeliveries will not
+// claim it yet, so it must not use the never-claimed 5-minute threshold.
+// See TestChannelOutboxHealthQueryUsesPartialIndex.
 const channelOutboxHealthQuery = `
-	SELECT o.instance_id,
-	       SUM(CASE WHEN o.state='pending' THEN 1 ELSE 0 END),
-	       SUM(CASE WHEN o.state='pending' AND o.attempts=0 THEN 1 ELSE 0 END),
-	       SUM(CASE WHEN o.state='pending' AND o.attempts>0 THEN 1 ELSE 0 END),
-	       MIN(CASE WHEN o.state='pending' THEN o.created_at END),
-	       MIN(CASE WHEN o.state='pending' AND o.attempts=0 THEN o.created_at END),
-	       MIN(CASE WHEN o.state='pending' AND o.attempts>0 THEN o.created_at END),
-	       SUM(CASE WHEN o.state='dead_letter' THEN 1 ELSE 0 END),
-	       SUM(CASE WHEN o.state='leased' AND o.lease_until<>'' AND o.lease_until<=? THEN 1 ELSE 0 END),
-	       MIN(CASE WHEN o.state='leased' AND o.lease_until<>'' AND o.lease_until<=? THEN o.lease_until END),
+	SELECT x.instance_id,
+	       SUM(CASE WHEN x.state='pending' THEN 1 ELSE 0 END),
+	       SUM(CASE WHEN x.state='pending' AND x.attempts=0 AND x.queued_unattempted=0 THEN 1 ELSE 0 END),
+	       SUM(CASE WHEN x.state='pending' AND x.attempts=0 AND x.queued_unattempted=1 THEN 1 ELSE 0 END),
+	       SUM(CASE WHEN x.state='pending' AND x.attempts>0 THEN 1 ELSE 0 END),
+	       MIN(CASE WHEN x.state='pending' THEN x.created_at END),
+	       MIN(CASE WHEN x.state='pending' AND x.attempts=0 AND x.queued_unattempted=0 THEN x.created_at END),
+	       MIN(CASE WHEN x.state='pending' AND x.attempts=0 AND x.queued_unattempted=1 THEN x.created_at END),
+	       MIN(CASE WHEN x.state='pending' AND x.attempts>0 THEN x.created_at END),
+	       SUM(CASE WHEN x.state='dead_letter' THEN 1 ELSE 0 END),
+	       SUM(CASE WHEN x.state='leased' AND x.lease_until<>'' AND x.lease_until<=? THEN 1 ELSE 0 END),
+	       MIN(CASE WHEN x.state='leased' AND x.lease_until<>'' AND x.lease_until<=? THEN x.lease_until END),
 	       COALESCE((
-	         SELECT e.last_error_code FROM channel_delivery_outbox e
-	         WHERE e.instance_id=o.instance_id
+	         SELECT e.last_error_code FROM channel_delivery_outbox e INDEXED BY idx_channel_delivery_health_error
+	         WHERE e.instance_id=x.instance_id
 	           AND e.state IN ('pending','leased','dead_letter')
 	           AND e.last_error_code<>''
 	         ORDER BY e.updated_at DESC, e.id DESC LIMIT 1
 	       ),'')
-	FROM channel_delivery_outbox o
-	WHERE o.state IN ('pending','leased','dead_letter')
-	GROUP BY o.instance_id
-	ORDER BY o.instance_id`
+	FROM (
+	  SELECT o.instance_id, o.state, o.attempts, o.created_at, o.lease_until,
+	         CASE WHEN o.state='pending' AND o.attempts=0 AND EXISTS (
+	           SELECT 1 FROM channel_delivery_outbox prior INDEXED BY idx_channel_delivery_blocking
+	           WHERE prior.conversation_id=o.conversation_id
+	             AND prior.state IN ('pending','leased')
+	             AND (prior.stream_sequence<o.stream_sequence
+	                  OR (prior.stream_sequence=o.stream_sequence AND prior.replay_generation<o.replay_generation))
+	         ) THEN 1 ELSE 0 END AS queued_unattempted
+	  FROM channel_delivery_outbox o INDEXED BY idx_channel_delivery_health
+	  WHERE o.state IN ('pending','leased','dead_letter')
+	) x
+	GROUP BY x.instance_id
+	ORDER BY x.instance_id`
 
 // ChannelOutboxHealth aggregates the non-terminal outbound queue per instance.
 // It reads counters, timestamps and error codes only. There is intentionally
@@ -468,10 +485,10 @@ func (s *Store) ChannelOutboxHealth(ctx context.Context, now time.Time) (map[str
 	result := map[string]domain.ChannelOutboxHealth{}
 	for rows.Next() {
 		var item domain.ChannelOutboxHealth
-		var oldest, oldestUnattempted, oldestAttempted, oldestExpiredLease sql.NullString
+		var oldest, oldestStuck, oldestQueued, oldestAttempted, oldestExpiredLease sql.NullString
 		if err := rows.Scan(
-			&item.InstanceID, &item.Pending, &item.StuckPending, &item.AttemptedPending,
-			&oldest, &oldestUnattempted, &oldestAttempted, &item.DeadLetter,
+			&item.InstanceID, &item.Pending, &item.StuckPending, &item.QueuedPending, &item.AttemptedPending,
+			&oldest, &oldestStuck, &oldestQueued, &oldestAttempted, &item.DeadLetter,
 			&item.ExpiredLeases, &oldestExpiredLease, &item.LastErrorCode,
 		); err != nil {
 			return nil, err
@@ -479,8 +496,11 @@ func (s *Store) ChannelOutboxHealth(ctx context.Context, now time.Time) (map[str
 		if oldest.Valid {
 			item.OldestPendingAt = parseTime(oldest.String)
 		}
-		if oldestUnattempted.Valid {
-			item.OldestUnattemptedPendingAt = parseTime(oldestUnattempted.String)
+		if oldestStuck.Valid {
+			item.OldestUnattemptedPendingAt = parseTime(oldestStuck.String)
+		}
+		if oldestQueued.Valid {
+			item.OldestQueuedPendingAt = parseTime(oldestQueued.String)
 		}
 		if oldestAttempted.Valid {
 			item.OldestAttemptedPendingAt = parseTime(oldestAttempted.String)

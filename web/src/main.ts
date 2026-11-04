@@ -6116,8 +6116,8 @@ function renderPetChannelHealth(items: PetChannelHealth[], note: string, total =
     const oldest = item.oldest_pending_minutes > 0
       ? t("petWorkbench.channelAgeMinutes", {minutes: String(item.oldest_pending_minutes)})
       : "-";
-    const attempts = item.stuck_pending || item.attempted_pending
-      ? ` (attempts=0 ${item.stuck_pending} / attempts>0 ${item.attempted_pending})`
+    const attempts = item.stuck_pending || item.queued_pending || item.attempted_pending
+      ? ` (attempts=0 ${item.stuck_pending}，${t("petWorkbench.channelQueuedPending")} ${item.queued_pending}，attempts>0 ${item.attempted_pending})`
       : "";
     const expired = item.expired_leases > 0
       ? `<span>${t("petWorkbench.channelExpiredLeases")}: ${item.expired_leases}</span>`

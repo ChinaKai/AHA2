@@ -190,7 +190,7 @@ func TestChannelOutboxHealthSummarizesQueue(t *testing.T) {
 	if !ok {
 		t.Fatalf("instance missing from outbox health: %#v", health)
 	}
-	if got.Pending != 2 || got.StuckPending != 1 || got.AttemptedPending != 1 || got.DeadLetter != 1 || got.ExpiredLeases != 1 {
+	if got.Pending != 2 || got.StuckPending != 1 || got.QueuedPending != 0 || got.AttemptedPending != 1 || got.DeadLetter != 1 || got.ExpiredLeases != 1 {
 		t.Fatalf("outbox health counts=%#v", got)
 	}
 	if got.LastErrorCode != "feishu_target_unavailable" {
@@ -213,6 +213,71 @@ func TestChannelOutboxHealthSummarizesQueue(t *testing.T) {
 	}
 }
 
+func TestChannelOutboxHealthClassifiesQueuedUnattemptedRows(t *testing.T) {
+	ctx := context.Background()
+	database, err := Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	instance, conversation := createDeliveryTestInstance(t, database)
+	now := time.Now().UTC()
+	first := enqueueTestDelivery(t, database, instance, conversation, 1, now.Add(-time.Minute))
+	second := enqueueTestDelivery(t, database, instance, conversation, 2, now.Add(-time.Minute))
+	if _, err := database.db.ExecContext(ctx, `UPDATE channel_delivery_outbox SET attempts=2,created_at=?,updated_at=? WHERE id=?`,
+		timeString(now.Add(-10*time.Minute)), timeString(now.Add(-10*time.Minute)), first.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.db.ExecContext(ctx, `UPDATE channel_delivery_outbox SET attempts=0,created_at=?,updated_at=? WHERE id=?`,
+		timeString(now.Add(-10*time.Minute)), timeString(now.Add(-10*time.Minute)), second.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	health, err := database.ChannelOutboxHealth(ctx, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := health[instance.ID]
+	if got.Pending != 2 || got.StuckPending != 0 || got.QueuedPending != 1 || got.AttemptedPending != 1 {
+		t.Fatalf("queued classification=%#v", got)
+	}
+	if !got.OldestUnattemptedPendingAt.IsZero() {
+		t.Fatalf("queued row leaked into head-of-line bucket: %#v", got)
+	}
+	if now.Sub(got.OldestQueuedPendingAt) < 9*time.Minute {
+		t.Fatalf("oldest queued=%v", got.OldestQueuedPendingAt)
+	}
+
+	// The queued row uses the wider 20-minute threshold, not the 5-minute one.
+	if _, err := database.db.ExecContext(ctx, `UPDATE channel_delivery_outbox SET created_at=?,updated_at=? WHERE id=?`,
+		timeString(now.Add(-25*time.Minute)), timeString(now.Add(-25*time.Minute)), second.ID); err != nil {
+		t.Fatal(err)
+	}
+	health, err = database.ChannelOutboxHealth(ctx, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got = health[instance.ID]
+	if got.StuckPending != 0 || got.QueuedPending != 1 || now.Sub(got.OldestQueuedPendingAt) < 24*time.Minute {
+		t.Fatalf("long queued classification=%#v", got)
+	}
+
+	// A head-of-line attempts=0 row still counts as stuck; the row behind it
+	// counts as queued.
+	if _, err := database.db.ExecContext(ctx, `UPDATE channel_delivery_outbox SET attempts=0,created_at=?,updated_at=? WHERE id=?`,
+		timeString(now.Add(-10*time.Minute)), timeString(now.Add(-10*time.Minute)), first.ID); err != nil {
+		t.Fatal(err)
+	}
+	health, err = database.ChannelOutboxHealth(ctx, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got = health[instance.ID]
+	if got.StuckPending != 1 || got.QueuedPending != 1 || got.AttemptedPending != 0 {
+		t.Fatalf("head and queued classification=%#v", got)
+	}
+}
+
 func TestChannelOutboxHealthQueryUsesPartialIndex(t *testing.T) {
 	ctx := context.Background()
 	database, err := Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
@@ -220,7 +285,17 @@ func TestChannelOutboxHealthQueryUsesPartialIndex(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer database.Close()
+	instance, conversation := createDeliveryTestInstance(t, database)
 	now := time.Now().UTC()
+	for sequence := int64(1); sequence <= 5; sequence++ {
+		enqueueTestDelivery(t, database, instance, conversation, sequence, now.Add(-time.Minute))
+	}
+	if _, err := database.db.ExecContext(ctx, `UPDATE channel_delivery_outbox SET state='dead_letter',last_error_code='feishu_target_unavailable' WHERE stream_sequence=3`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.db.ExecContext(ctx, `UPDATE channel_delivery_outbox SET state='delivered' WHERE stream_sequence=4`); err != nil {
+		t.Fatal(err)
+	}
 	rows, err := database.db.QueryContext(ctx, "EXPLAIN QUERY PLAN "+channelOutboxHealthQuery, timeString(now), timeString(now))
 	if err != nil {
 		t.Fatal(err)
@@ -239,13 +314,30 @@ func TestChannelOutboxHealthQueryUsesPartialIndex(t *testing.T) {
 		t.Fatal(err)
 	}
 	plan := strings.Join(details, "\n")
-	if !strings.Contains(plan, "SEARCH") ||
-		!strings.Contains(plan, "idx_channel_delivery_health") ||
-		!strings.Contains(plan, "idx_channel_delivery_health_error") {
-		t.Fatalf("outbox health query did not use both partial indexes:\n%s", plan)
+	outerScan := false
+	errorSearch := false
+	for _, detail := range details {
+		if strings.Contains(detail, "idx_channel_delivery_claim") {
+			t.Fatalf("outbox health query used the claim index instead of the health index:\n%s", plan)
+		}
+		if strings.Contains(detail, "SCAN o USING INDEX idx_channel_delivery_health_error") {
+			t.Fatalf("outer scan used the error index:\n%s", plan)
+		}
+		if strings.HasPrefix(detail, "SCAN o USING INDEX idx_channel_delivery_health") {
+			outerScan = true
+		}
+		if strings.HasPrefix(detail, "SEARCH e USING INDEX idx_channel_delivery_health_error") {
+			errorSearch = true
+		}
 	}
-	if strings.Contains(plan, "SCAN channel_delivery_outbox") {
-		t.Fatalf("outbox health query scans the whole table:\n%s", plan)
+	if !outerScan {
+		t.Fatalf("outer aggregate did not scan idx_channel_delivery_health:\n%s", plan)
+	}
+	if !errorSearch {
+		t.Fatalf("last-error subquery did not search idx_channel_delivery_health_error:\n%s", plan)
+	}
+	if !strings.Contains(plan, "idx_channel_delivery_blocking") {
+		t.Fatalf("queued-behind lookup did not use idx_channel_delivery_blocking:\n%s", plan)
 	}
 }
 

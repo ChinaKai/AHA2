@@ -3422,5 +3422,20 @@ func (s *Store) migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(117, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
 		return fmt.Errorf("record schema v117: %w", err)
 	}
+	var hasV118 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=118)`).Scan(&hasV118)
+	if !hasV118 {
+		// Health classification checks whether an attempts=0 pending row is
+		// queued behind an earlier pending/leased row in the same conversation.
+		// This partial index keeps that per-row EXISTS a SEARCH.
+		if _, err := s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_channel_delivery_blocking
+			ON channel_delivery_outbox(conversation_id,stream_sequence,replay_generation)
+			WHERE state IN ('pending','leased')`); err != nil {
+			return fmt.Errorf("apply schema v118: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(118, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v118: %w", err)
+	}
 	return nil
 }

@@ -18,7 +18,9 @@ const (
 	// the strongest signal that outbound delivery is stuck.
 	petChannelStuckPendingThreshold = 5 * time.Minute
 	// petChannelAttemptedPendingThreshold is wider because rows with attempts>0
-	// may legitimately sit in retry backoff before the next claim.
+	// may legitimately sit in retry backoff before the next claim. It also
+	// applies to attempts=0 rows queued behind an earlier pending/leased row:
+	// ClaimChannelDeliveries intentionally will not claim them yet.
 	petChannelAttemptedPendingThreshold = 20 * time.Minute
 	// petChannelPendingBacklog marks sustained accumulation even when the
 	// oldest row has not crossed either age threshold yet.
@@ -73,10 +75,12 @@ type PetChannelHealth struct {
 	EffectiveAvailability    string `json:"effective_availability,omitempty"`
 	Pending                  int    `json:"pending"`
 	StuckPending             int    `json:"stuck_pending"`
+	QueuedPending            int    `json:"queued_pending"`
 	AttemptedPending         int    `json:"attempted_pending"`
 	ExpiredLeases            int    `json:"expired_leases"`
 	OldestPendingMinutes     int    `json:"oldest_pending_minutes"`
 	OldestUnattemptedMinutes int    `json:"oldest_unattempted_minutes"`
+	OldestQueuedMinutes      int    `json:"oldest_queued_minutes"`
 	OldestAttemptedMinutes   int    `json:"oldest_attempted_minutes"`
 	ExpiredLeaseMinutes      int    `json:"expired_lease_minutes"`
 	DeadLetter               int    `json:"dead_letter"`
@@ -452,12 +456,12 @@ func petChannelAgeMinutes(at, now time.Time) int {
 }
 
 // buildPetChannelHealth merges instance state with outbox counters. A channel
-// is degraded when it has a dead letter, when unattempted pending rows exceed
-// the 5-minute threshold, when retrying pending rows exceed the wider
-// 20-minute threshold, when a lease has expired, when the pending backlog
-// crosses its cap, or when the instance itself is not ready. Degraded rows
-// sort first so the render cap cannot hide them; the total count is returned
-// so truncation is explicit.
+// is degraded when it has a dead letter, when head-of-line unattempted pending
+// rows exceed the 5-minute threshold, when retrying or queued-behind rows
+// exceed the wider 20-minute threshold, when a lease has expired, when the
+// pending backlog crosses its cap, or when the instance itself is not ready.
+// Degraded rows sort first so the render cap cannot hide them; the total count
+// is returned so truncation is explicit.
 func buildPetChannelHealth(channels []domain.ChannelInstance, outbox map[string]domain.ChannelOutboxHealth, now time.Time) ([]PetChannelHealth, []string, int) {
 	health := make([]PetChannelHealth, 0, len(channels))
 	degraded := []string{}
@@ -471,6 +475,7 @@ func buildPetChannelHealth(channels []domain.ChannelInstance, outbox map[string]
 			EffectiveAvailability: channel.EffectiveAvailability,
 			Pending:               row.Pending,
 			StuckPending:          row.StuckPending,
+			QueuedPending:         row.QueuedPending,
 			AttemptedPending:      row.AttemptedPending,
 			ExpiredLeases:         row.ExpiredLeases,
 			DeadLetter:            row.DeadLetter,
@@ -478,6 +483,7 @@ func buildPetChannelHealth(channels []domain.ChannelInstance, outbox map[string]
 		}
 		item.OldestPendingMinutes = petChannelAgeMinutes(row.OldestPendingAt, now)
 		item.OldestUnattemptedMinutes = petChannelAgeMinutes(row.OldestUnattemptedPendingAt, now)
+		item.OldestQueuedMinutes = petChannelAgeMinutes(row.OldestQueuedPendingAt, now)
 		item.OldestAttemptedMinutes = petChannelAgeMinutes(row.OldestAttemptedPendingAt, now)
 		item.ExpiredLeaseMinutes = petChannelAgeMinutes(row.OldestExpiredLeaseAt, now)
 
@@ -493,22 +499,40 @@ func buildPetChannelHealth(channels []domain.ChannelInstance, outbox map[string]
 			if item.OldestPendingMinutes > 0 {
 				detail += fmt.Sprintf("，最老 %d 分钟", item.OldestPendingMinutes)
 			}
-			if row.StuckPending > 0 {
-				detail += fmt.Sprintf("，attempts=0 %d 条", row.StuckPending)
-			}
-			if row.AttemptedPending > 0 {
-				detail += fmt.Sprintf("，attempts>0 %d 条", row.AttemptedPending)
-			}
 			details = append(details, detail)
 		}
 		if row.Pending >= petChannelPendingBacklog {
 			degradedReasons = append(degradedReasons, fmt.Sprintf("pending 堆积 %d 条", row.Pending))
 		}
-		if row.StuckPending > 0 && !row.OldestUnattemptedPendingAt.IsZero() && now.Sub(row.OldestUnattemptedPendingAt) >= petChannelStuckPendingThreshold {
-			degradedReasons = append(degradedReasons, fmt.Sprintf("attempts=0 pending %d 条最老 %d 分钟", row.StuckPending, item.OldestUnattemptedMinutes))
+		if row.StuckPending > 0 {
+			detail := fmt.Sprintf("attempts=0 可领取 %d 条", row.StuckPending)
+			if item.OldestUnattemptedMinutes > 0 {
+				detail += fmt.Sprintf("，最老 %d 分钟", item.OldestUnattemptedMinutes)
+			}
+			details = append(details, detail)
+			if !row.OldestUnattemptedPendingAt.IsZero() && now.Sub(row.OldestUnattemptedPendingAt) >= petChannelStuckPendingThreshold {
+				degradedReasons = append(degradedReasons, detail)
+			}
 		}
-		if row.AttemptedPending > 0 && !row.OldestAttemptedPendingAt.IsZero() && now.Sub(row.OldestAttemptedPendingAt) >= petChannelAttemptedPendingThreshold {
-			degradedReasons = append(degradedReasons, fmt.Sprintf("attempts>0 pending %d 条最老 %d 分钟", row.AttemptedPending, item.OldestAttemptedMinutes))
+		if row.QueuedPending > 0 {
+			detail := fmt.Sprintf("attempts=0 排队等待前序消息 %d 条", row.QueuedPending)
+			if item.OldestQueuedMinutes > 0 {
+				detail += fmt.Sprintf("，最老 %d 分钟", item.OldestQueuedMinutes)
+			}
+			details = append(details, detail)
+			if !row.OldestQueuedPendingAt.IsZero() && now.Sub(row.OldestQueuedPendingAt) >= petChannelAttemptedPendingThreshold {
+				degradedReasons = append(degradedReasons, detail)
+			}
+		}
+		if row.AttemptedPending > 0 {
+			detail := fmt.Sprintf("attempts>0 重试 %d 条", row.AttemptedPending)
+			if item.OldestAttemptedMinutes > 0 {
+				detail += fmt.Sprintf("，最老 %d 分钟", item.OldestAttemptedMinutes)
+			}
+			details = append(details, detail)
+			if !row.OldestAttemptedPendingAt.IsZero() && now.Sub(row.OldestAttemptedPendingAt) >= petChannelAttemptedPendingThreshold {
+				degradedReasons = append(degradedReasons, detail)
+			}
 		}
 		if row.ExpiredLeases > 0 {
 			detail := fmt.Sprintf("过期租约 %d 条", row.ExpiredLeases)

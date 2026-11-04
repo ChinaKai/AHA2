@@ -1265,10 +1265,12 @@ export interface PetChannelHealth {
   effective_availability?: string;
   pending: number;
   stuck_pending: number;
+  queued_pending: number;
   attempted_pending: number;
   expired_leases: number;
   oldest_pending_minutes: number;
   oldest_unattempted_minutes: number;
+  oldest_queued_minutes: number;
   oldest_attempted_minutes: number;
   expired_lease_minutes: number;
   dead_letter: number;
