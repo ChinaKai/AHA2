@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -458,6 +459,42 @@ func TestRunProcessDrainedBackpressureWithHeldPipesIsNotTruncated(t *testing.T) 
 	}
 	if elapsed < handlerStall {
 		t.Fatalf("Run returned in %s, before the stalled handler finished", elapsed)
+	}
+}
+
+// Every Run must release the read end of its stdout/stderr pipes, including
+// when the drainer reaches EOF normally. Disable the GC so a missing close
+// cannot be hidden by finalizers.
+func TestRunProcessReleasesPipeReadEnds(t *testing.T) {
+	if _, ok := countOpenProcessHandles(); !ok {
+		t.Skip("process handle counting is not available on this platform")
+	}
+	// Warm up lazy runtime and library initialization before the baseline.
+	if _, err := executeProcessHelper(t, "quick", 0, nil, nil); err != nil {
+		t.Fatalf("warm-up run: %v", err)
+	}
+	previous := debug.SetGCPercent(-1)
+	defer debug.SetGCPercent(previous)
+	before, ok := countOpenProcessHandles()
+	if !ok {
+		t.Skip("process handle counting is not available on this platform")
+	}
+	const iterations = 100
+	for index := 0; index < iterations; index++ {
+		result, err := executeProcessHelper(t, "quick", 0, nil, nil)
+		if err != nil {
+			t.Fatalf("iteration %d: run helper: %v", index, err)
+		}
+		if result.Stdout != processQuickStdout || result.Stderr != processQuickStderr {
+			t.Fatalf("iteration %d: truncated output: stdout=%q stderr=%q", index, result.Stdout, result.Stderr)
+		}
+	}
+	after, ok := countOpenProcessHandles()
+	if !ok {
+		t.Skip("process handle counting is not available on this platform")
+	}
+	if delta := after - before; delta > 5 {
+		t.Fatalf("open handles grew by %d after %d runs (%d -> %d)", delta, iterations, before, after)
 	}
 }
 

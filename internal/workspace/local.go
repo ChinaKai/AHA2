@@ -156,20 +156,19 @@ func prependPathDirectories(value string, dirs []string) string {
 	return strings.Join(ordered, string(os.PathListSeparator))
 }
 
-// processPipeDrainTimeout bounds how long Wait may block on stdout/stderr
-// pipes that a descendant keeps open after the direct child exits. The timer
-// starts when the child exits, so commands that close their own output still
-// return as soon as it has been drained. Without this bound a daemonized
-// helper holding the inherited handles would hang the runner forever.
+// processPipeDrainTimeout bounds how long runProcess waits for a descendant
+// that inherited the child's stdout/stderr handles to close them after the
+// direct child exits. When the grace expires the runner closes its read ends;
+// a drainer still blocked on a full spool means unread pipe data was lost,
+// while a drainer waiting on an empty pipe has already captured everything.
 const processPipeDrainTimeout = 3 * time.Second
 
 // processOutputSpoolLimit caps how many unread bytes each stream may buffer
-// before the os/exec copying goroutine is backpressured. The spool decouples
-// the copying goroutine from the line handler, so a handler that is busy for
-// longer than processPipeDrainTimeout does not lose the tail: WaitDelay then
-// only fires when a descendant keeps the child's output handles open. Beyond
+// before its pipe drainer is backpressured. The spool decouples the drainer
+// from the line handler, so a busy handler does not discard the tail; beyond
 // this backlog the command is deliberately slowed down instead of growing
-// memory without bound.
+// memory without bound. If a read end must be closed while the drainer is
+// still blocked writing here, the capture is reported as truncated.
 const processOutputSpoolLimit = 4 * 1024 * 1024
 
 // errProcessOutputTruncated reports that a process pipe was closed while the
@@ -280,9 +279,9 @@ func scanOutput(reader io.Reader, destination io.Writer, handler LineHandler, wa
 		}
 	}
 	// A line longer than the scanner's maximum stops the scan loop, but the
-	// producer may still be writing. Keep draining so a blocked writer (the
-	// os/exec copy goroutine and, behind it, the command) can finish instead
-	// of deadlocking Wait forever.
+	// pipe drainer may still be delivering data. Keep consuming so a
+	// backpressured drainer (and the command behind it) can finish instead of
+	// blocking forever.
 	_, _ = io.Copy(io.Discard, reader)
 }
 
@@ -401,6 +400,9 @@ func startProcessDrainer(source *os.File, spool *processSpool) *processDrainer {
 
 func (drainer *processDrainer) run() {
 	defer drainer.wg.Done()
+	// Release the read end even on a normal EOF, when closeSource was not
+	// called; the finalizer would otherwise be the only owner.
+	defer func() { _ = drainer.source.Close() }()
 	buffer := make([]byte, 32*1024)
 	for {
 		read, readErr := drainer.source.Read(buffer)
