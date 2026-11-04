@@ -1,6 +1,8 @@
 package app
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -215,6 +217,111 @@ func TestPetFinalizeTaskWorktreeRestoresCurrentBranch(t *testing.T) {
 	}
 }
 
+// stubGitRunner answers only the git calls removeFinalizedWorktree makes. The
+// worktree remove call fails with the Windows long-path message, which is the
+// condition the local fallback must handle.
+type stubGitRunner struct {
+	root     string
+	worktree string
+	locked   bool
+	calls    []string
+}
+
+func (r *stubGitRunner) Run(_ context.Context, command workspacepkg.Command, _ workspacepkg.LineHandler) (workspacepkg.Result, error) {
+	joined := strings.Join(command.Args, " ")
+	r.calls = append(r.calls, joined)
+	switch {
+	case strings.Contains(joined, "worktree list --porcelain"):
+		output := "worktree " + r.root + "\nHEAD abc\nbranch refs/heads/main\n\nworktree " + r.worktree + "\nHEAD def\nbranch refs/heads/aha/task\n"
+		if r.locked {
+			output += "locked maintenance\n"
+		}
+		return workspacepkg.Result{ExitCode: 0, Stdout: output}, nil
+	case strings.Contains(joined, "submodule status --recursive"):
+		return workspacepkg.Result{ExitCode: 0}, nil
+	case strings.Contains(joined, "worktree remove"):
+		return workspacepkg.Result{
+			ExitCode: 128,
+			Stderr:   "error: failed to delete '" + r.worktree + "': Filename too long",
+		}, fmt.Errorf("git exited with code 128")
+	case strings.Contains(joined, "worktree prune"):
+		return workspacepkg.Result{ExitCode: 0}, nil
+	default:
+		return workspacepkg.Result{ExitCode: 0}, nil
+	}
+}
+
+func TestRemoveFinalizedWorktreeFallsBackToLongPathDelete(t *testing.T) {
+	root := realTempDir(t)
+	worktree := filepath.Join(root, "task")
+	if err := os.MkdirAll(filepath.Join(worktree, "nested"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, "nested", "file.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	item := domain.Workspace{Locality: "local", Transport: "native", RootPath: root}
+	runner := &stubGitRunner{root: root, worktree: worktree}
+
+	service := &Service{}
+	if err := service.removeFinalizedWorktree(context.Background(), item, runner, root, worktree); err != nil {
+		t.Fatalf("fallback removal failed: %v", err)
+	}
+	if _, err := os.Stat(worktree); !os.IsNotExist(err) {
+		t.Fatalf("worktree still exists after fallback: %v", err)
+	}
+	pruned := false
+	for _, call := range runner.calls {
+		if strings.Contains(call, "worktree prune") {
+			pruned = true
+		}
+	}
+	if !pruned {
+		t.Fatalf("stale worktree metadata was not pruned: %v", runner.calls)
+	}
+}
+
+func TestRemoveFinalizedWorktreeKeepsRemoteWorktreeAndReportsPath(t *testing.T) {
+	root := realTempDir(t)
+	worktree := filepath.Join(root, "task")
+	if err := os.MkdirAll(worktree, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	item := domain.Workspace{Locality: "remote", Transport: "ssh", RootPath: root}
+	runner := &stubGitRunner{root: root, worktree: worktree}
+
+	service := &Service{}
+	err := service.removeFinalizedWorktree(context.Background(), item, runner, root, worktree)
+	if err == nil {
+		t.Fatal("remote worktree removal did not fail")
+	}
+	if !strings.Contains(err.Error(), worktree) || !strings.Contains(err.Error(), "Filename too long") {
+		t.Fatalf("remote removal error is not actionable: %v", err)
+	}
+	if _, statErr := os.Stat(worktree); statErr != nil {
+		t.Fatalf("remote worktree was removed locally: %v", statErr)
+	}
+}
+
+func TestRemoveFinalizedWorktreeKeepsLockedWorktree(t *testing.T) {
+	root := realTempDir(t)
+	worktree := filepath.Join(root, "task")
+	if err := os.MkdirAll(worktree, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	item := domain.Workspace{Locality: "local", Transport: "native", RootPath: root}
+	runner := &stubGitRunner{root: root, worktree: worktree, locked: true}
+
+	service := &Service{}
+	err := service.removeFinalizedWorktree(context.Background(), item, runner, root, worktree)
+	if err == nil || !strings.Contains(err.Error(), "lock") {
+		t.Fatalf("locked worktree error = %v", err)
+	}
+	if _, statErr := os.Stat(worktree); statErr != nil {
+		t.Fatalf("locked worktree was removed: %v", statErr)
+	}
+}
+
 func TestPetFinalizeTaskWorktreeRefusesDirtyWorktree(t *testing.T) {
 	fixture, project, ws, root := petGitFixture(t)
 	task, worktree := createPreparedPetWorktreeTask(t, fixture, project, ws)
@@ -223,14 +330,56 @@ func TestPetFinalizeTaskWorktreeRefusesDirtyWorktree(t *testing.T) {
 	}
 	completeTaskForTest(t, fixture, task)
 
-	if _, err := fixture.service.PetFinalizeTaskWorktree(fixture.ctx, task.ID); err == nil {
+	_, err := fixture.service.PetFinalizeTaskWorktree(fixture.ctx, task.ID)
+	if err == nil {
 		t.Fatal("dirty worktree was finalized")
+	}
+	if !strings.Contains(err.Error(), worktree) {
+		t.Fatalf("dirty worktree error does not include the retained path: %v", err)
 	}
 	if _, err := os.Stat(worktree); err != nil {
 		t.Fatalf("dirty worktree was removed: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(root, "dirty.txt")); !os.IsNotExist(err) {
 		t.Fatalf("dirty file leaked into primary worktree: %v", err)
+	}
+}
+
+func TestPetFinalizeTaskWorktreeRefusesUnmergedWorktree(t *testing.T) {
+	fixture, project, ws, root := petGitFixture(t)
+	task, worktree := createPreparedPetWorktreeTask(t, fixture, project, ws)
+	if err := os.WriteFile(filepath.Join(worktree, "conflict.txt"), []byte("task side\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, worktree, "add", "conflict.txt")
+	runGitTest(t, worktree, "commit", "-m", "task side")
+	// Advance the target branch with a conflicting change so the task branch
+	// cannot be merged automatically.
+	if err := os.WriteFile(filepath.Join(root, "conflict.txt"), []byte("main side\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, root, "add", "conflict.txt")
+	runGitTest(t, root, "commit", "-m", "main side")
+	completeTaskForTest(t, fixture, task)
+
+	result, err := fixture.service.PetFinalizeTaskWorktree(fixture.ctx, task.ID)
+	if err == nil {
+		t.Fatal("unmerged worktree was finalized")
+	}
+	if !strings.Contains(err.Error(), "worktree 已保留") || !strings.Contains(err.Error(), worktree) {
+		t.Fatalf("unmerged error is not actionable: %v", err)
+	}
+	if result.WorktreeRemoved {
+		t.Fatalf("unmerged finalize reported worktree removal: %#v", result)
+	}
+	if _, err := os.Stat(filepath.Join(worktree, "conflict.txt")); err != nil {
+		t.Fatalf("unmerged worktree was removed: %v", err)
+	}
+	if output := runGitTest(t, root, "show", "main:conflict.txt"); !strings.Contains(output, "main side") {
+		t.Fatalf("target branch was rewritten: %q", output)
+	}
+	if err := exec.Command("git", "-C", root, "rev-parse", "--verify", task.TaskBranch).Run(); err != nil {
+		t.Fatalf("unmerged task branch was deleted: %v", err)
 	}
 }
 

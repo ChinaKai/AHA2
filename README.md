@@ -85,6 +85,19 @@ sudo rm /var/lib/aha2-sync/registration-code
 
 中心配置、升级、卸载与反向代理说明见 [Sync Center 部署](docs/sync-center.md)。
 
+## 任务 worktree 与手工清理
+
+worktree 隔离的 Task 完成后，收尾会先把任务分支合并回目标分支，再检查 worktree 是否干净、HEAD 是否已合入目标分支、是否被 git lock、是否包含子模块；全部满足才删除，且不会使用 `--force`。Windows 上超过 260 字符的路径会用 `\\?\` 扩展路径删除，不需要调用方手工清理。
+
+旧版本在收尾日志报 `Filename too long` 时可能留下未删除的 `.aha2-worktrees/<task>` 目录。AHA2 不会自动清理这些历史残留；确认以下条件后可以手工删除该目录：
+
+- `git worktree list` 已不再列出它（worktree 元数据已移除）；
+- `git -C <目录> status --porcelain` 为空，或目录里已没有可用的 checkout；
+- 目录 HEAD 的所有提交都已合入目标分支（`git -C <仓库> merge-base --is-ancestor <task-head> <target>`）；
+- 没有被 git lock，也没有包含未推送提交的子模块。
+
+不确定时请保留目录：它只占用磁盘空间，不影响正确性。
+
 ## 文档
 
 - [核心设计](docs/core-design.md)
