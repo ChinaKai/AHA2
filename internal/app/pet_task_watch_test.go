@@ -219,7 +219,7 @@ func TestPetWatchedTaskStatusNotification(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	message := fixture.service.petTaskStatusMessage(fixture.ctx, task, domain.TaskFailed)
-	if !strings.Contains(message, task.Code) || !strings.Contains(message, "failed") || !strings.Contains(message, "aha_pet_work_state") {
+	if !strings.Contains(message, task.Code) || !strings.Contains(message, "failed") || !strings.Contains(message, "aha_pet_work_state") || !strings.Contains(message, "core/agenda.md") || !strings.Contains(message, "owner_decision") || !strings.Contains(message, "NOOP") {
 		t.Fatalf("notification message=%q", message)
 	}
 	if _, err := fixture.database.UpdateGeneralSettings(fixture.ctx, domain.GeneralSettings{Language: domain.LanguageEnglish}); err != nil {

@@ -43,8 +43,16 @@ func (s *Service) PetUpdateCore(ctx context.Context, document, content string) e
 	case "principles", "principles.md":
 		return s.PetSaveWorkbenchDocument(ctx, "core", "principles.md", content)
 	case "loops", "loops.md":
+		if len(content) > petCoreLoopsMaxBytes {
+			return fmt.Errorf("loops 文档不能超过 %d 字节；请先删除已关闭项并把留痕写入当天 worklog", petCoreLoopsMaxBytes)
+		}
 		return s.PetSaveWorkbenchDocument(ctx, "core", "loops.md", content)
+	case "agenda", "agenda.md":
+		if len(content) > petCoreAgendaMaxBytes {
+			return fmt.Errorf("agenda 文档不能超过 %d 字节；请先删除已完成项并把留痕写入当天 worklog", petCoreAgendaMaxBytes)
+		}
+		return s.PetSaveWorkbenchDocument(ctx, "core", "agenda.md", content)
 	default:
-		return fmt.Errorf("document 必须是 identity、principles 或 loops")
+		return fmt.Errorf("document 必须是 identity、principles、loops 或 agenda")
 	}
 }

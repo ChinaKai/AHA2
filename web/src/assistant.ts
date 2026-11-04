@@ -209,7 +209,7 @@ export function mountAssistant(): void {
           <label class="assistant-settings-switch"><input type="checkbox" id="pet-enabled"><span><b>启用宠物</b><small>关闭后隐藏宠物、停止自主思考和主动气泡</small></span></label>
           <section><h3>自主行为</h3>
             <div class="pet-budget-grid">
-              <label class="assistant-settings-field">空闲触发（分钟）<input id="pet-idle-minutes" type="number" min="1" max="120"></label>
+              <label class="assistant-settings-field">空闲触发（分钟，最低 5 分钟复盘）<input id="pet-idle-minutes" type="number" min="1" max="120"></label>
               <label class="assistant-settings-field">每小时上限（次，0=不限）<input id="pet-hourly-limit" type="number" min="0" max="60"></label>
               <label class="assistant-settings-switch"><input type="checkbox" id="pet-quiet-enabled"><span><b>启用安静时段</b><small>关闭后任何时间都可能自主互动</small></span></label>
               <label class="assistant-settings-field">免打扰开始（点）<input id="pet-quiet-start" type="number" min="0" max="23"></label>

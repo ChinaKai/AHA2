@@ -27,8 +27,8 @@ func (s *Service) PetSaveWorkbenchDocument(ctx context.Context, section, name, c
 	var directory string
 	switch section {
 	case "core":
-		if name != "identity.md" && name != "principles.md" && name != "loops.md" {
-			return fmt.Errorf("核心文档只能编辑 identity.md、principles.md 或 loops.md")
+		if name != "identity.md" && name != "principles.md" && name != "loops.md" && name != "agenda.md" {
+			return fmt.Errorf("核心文档只能编辑 identity.md、principles.md、loops.md 或 agenda.md")
 		}
 		directory = filepath.Join(root, "core")
 	case "diary", "worklog":

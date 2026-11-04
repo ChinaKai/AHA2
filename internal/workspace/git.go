@@ -14,9 +14,10 @@ import (
 )
 
 type PreparedTaskWorkspace struct {
-	Path       string
-	BaseCommit string
-	Branch     string
+	Path         string
+	BaseCommit   string
+	Branch       string
+	TargetBranch string
 }
 
 func PrepareTaskWorkspace(ctx context.Context, item domain.Workspace, taskID, targetBranch, taskBranch, isolation, worktreeDir string) (PreparedTaskWorkspace, error) {
@@ -65,6 +66,17 @@ func PrepareTaskWorkspace(ctx context.Context, item domain.Workspace, taskID, ta
 			return PreparedTaskWorkspace{Path: item.RootPath}, nil
 		}
 	}
+	resolvedTarget := baseRef
+	if resolvedTarget == "HEAD" {
+		if branchName, branchErr := runner.Run(ctx, Command{
+			Executable: "git", Args: []string{"-C", item.RootPath, "symbolic-ref", "--short", "HEAD"},
+			Timeout: 20 * time.Second,
+		}, nil); branchErr == nil && branchName.ExitCode == 0 {
+			resolvedTarget = strings.TrimSpace(branchName.Stdout)
+		} else {
+			resolvedTarget = ""
+		}
+	}
 	worktree := worktreePath(item, taskID, worktreeDir)
 	if item.Locality == "remote" || item.Transport == "ssh" || item.Transport == "wsl" {
 		parent := path.Dir(worktree)
@@ -93,6 +105,7 @@ func PrepareTaskWorkspace(ctx context.Context, item domain.Workspace, taskID, ta
 	}
 	return PreparedTaskWorkspace{
 		Path: worktree, BaseCommit: strings.TrimSpace(base.Stdout), Branch: taskBranch,
+		TargetBranch: resolvedTarget,
 	}, nil
 }
 

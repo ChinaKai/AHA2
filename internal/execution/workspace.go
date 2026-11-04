@@ -12,5 +12,5 @@ type WorkspacePreparer struct{}
 
 func (WorkspacePreparer) Prepare(ctx context.Context, item domain.Workspace, taskID, targetBranch, taskBranch, isolation, worktreeDir string) (app.PreparedWorkspace, error) {
 	prepared, err := workspace.PrepareTaskWorkspace(ctx, item, taskID, targetBranch, taskBranch, isolation, worktreeDir)
-	return app.PreparedWorkspace{Path: prepared.Path, BaseCommit: prepared.BaseCommit, Branch: prepared.Branch}, err
+	return app.PreparedWorkspace{Path: prepared.Path, BaseCommit: prepared.BaseCommit, Branch: prepared.Branch, TargetBranch: prepared.TargetBranch}, err
 }

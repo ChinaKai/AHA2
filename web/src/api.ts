@@ -839,7 +839,7 @@ class APIClient {
     return this.request(`/api/v1/rounds/${id}/interrupt`, {method: "POST", body: "{}"});
   }
 
-  knowledge(scope = "", projectID = "", status = "", options: {limit?: number; cursor?: string; summary?: boolean} = {}): Promise<{knowledge: Knowledge[]; proposals?: KnowledgeProposal[]; review_settings?: KnowledgeReviewSettings; has_more?: boolean; next_cursor?: string}> {
+  knowledge(scope = "", projectID = "", status = "", options: {limit?: number; cursor?: string; summary?: boolean; includeProposals?: boolean} = {}): Promise<{knowledge: Knowledge[]; proposals?: KnowledgeProposal[]; review_settings?: KnowledgeReviewSettings; has_more?: boolean; next_cursor?: string}> {
     const query = new URLSearchParams();
     if (scope) query.set("scope", scope);
     if (projectID) query.set("project_id", projectID);
@@ -847,7 +847,18 @@ class APIClient {
     if (options.limit) query.set("limit", String(options.limit));
     if (options.cursor) query.set("cursor", options.cursor);
     if (options.summary) query.set("summary", "true");
+    if (options.includeProposals === false) query.set("include_proposals", "false");
     return this.request(`/api/v1/knowledge?${query}`);
+  }
+
+  knowledgeProposals(options: {status?: "pending" | "approved" | "rejected" | "all"; page?: number; limit?: number; scope?: string; projectID?: string} = {}): Promise<{proposals: KnowledgeProposal[]; total: number; page: number; pages: number; has_more: boolean}> {
+    const query = new URLSearchParams();
+    query.set("status", options.status || "all");
+    if (options.page) query.set("page", String(options.page));
+    if (options.limit !== undefined) query.set("limit", String(options.limit));
+    if (options.scope) query.set("scope", options.scope);
+    if (options.projectID) query.set("project_id", options.projectID);
+    return this.request(`/api/v1/knowledge/proposals?${query}`);
   }
 
   knowledgeEntry(id: string): Promise<{knowledge: Knowledge}> {

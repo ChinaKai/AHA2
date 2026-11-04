@@ -38,15 +38,25 @@ func (s *Service) StartPetAutonomy() {
 	}()
 }
 
+// petAutonomyMinimumReview is the floor for the time-based wake-up. Task status
+// notifications already cover events; the floor only prevents an accidental
+// sub-five-minute loop from spamming repeated inspection turns.
+const petAutonomyMinimumReview = 5 * time.Minute
+
+func petAutonomyInterval(assistant domain.OwnerAssistant) time.Duration {
+	interval := time.Duration(assistant.PetIdleMinutes) * time.Minute
+	if interval < petAutonomyMinimumReview {
+		return petAutonomyMinimumReview
+	}
+	return interval
+}
+
 func (s *Service) runPetAutonomyOnce(ctx context.Context) {
 	assistant, err := s.store.EnsureOwnerAssistant(ctx, s.now().UTC())
 	if err != nil || !assistant.PetEnabled {
 		return
 	}
-	idle := assistant.PetIdleMinutes
-	if idle < 1 {
-		idle = 5
-	}
+	interval := petAutonomyInterval(assistant)
 	s.petBrainMu.Lock()
 	if s.petBrainAt == nil {
 		s.petBrainAt = map[string]time.Time{}
@@ -55,20 +65,20 @@ func (s *Service) runPetAutonomyOnce(ctx context.Context) {
 	if last.IsZero() {
 		now := s.now().UTC()
 		s.petBrainAt["server_autonomy_schedule"] = now
-		s.petAutonomyNext = now.Add(time.Duration(idle) * time.Minute)
+		s.petAutonomyNext = now.Add(interval)
 		s.petBrainMu.Unlock()
 		return
 	}
-	if s.now().UTC().Sub(last) < time.Duration(idle)*time.Minute {
+	if s.now().UTC().Sub(last) < interval {
 		s.petBrainMu.Unlock()
 		return
 	}
 	now := s.now().UTC()
 	s.petBrainAt["server_autonomy_schedule"] = now
-	s.petAutonomyNext = now.Add(time.Duration(idle) * time.Minute)
+	s.petAutonomyNext = now.Add(interval)
 	s.petBrainMu.Unlock()
 	_, err = s.AskOwnerPetBrain(ctx, PetBrainContext{
-		DeviceID: "server_autonomy", IdleSeconds: idle * 60, Page: "后台（服务端调度）",
+		DeviceID: "server_autonomy", IdleSeconds: int(interval.Minutes()) * 60, Page: "后台（服务端调度）",
 	})
 	if err != nil && !petAutonomySkip(err) {
 		s.recordPetAutonomyError(ctx, err)
@@ -118,12 +128,8 @@ func (s *Service) petAutonomyStatus(assistant domain.OwnerAssistant) (time.Time,
 	next := s.petAutonomyNext
 	runs := len(s.petBrainRuns["server_autonomy"])
 	s.petBrainMu.Unlock()
-	idle := assistant.PetIdleMinutes
-	if idle < 1 {
-		idle = 5
-	}
 	if next.IsZero() {
-		next = s.now().UTC().Add(time.Duration(idle) * time.Minute)
+		next = s.now().UTC().Add(petAutonomyInterval(assistant))
 	}
 	return last, next, runs
 }

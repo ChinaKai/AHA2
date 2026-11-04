@@ -629,12 +629,20 @@ func sharedSnapshotTestInput() BuildInput {
 func TestRecoveryResourcesKeepCompletedExchangesAndExcludeUpdateNoise(t *testing.T) {
 	t.Parallel()
 	var items []domain.ConversationItem
+	base := time.Date(2026, 11, 4, 9, 30, 0, 0, time.FixedZone("CST", 8*3600))
 	for index := 0; index < 7; index++ {
 		roundID := fmt.Sprintf("round-%d", index)
+		at := base.Add(time.Duration(index) * time.Minute)
+		var payload map[string]any
+		if index == 1 {
+			payload = map[string]any{"channel_context": map[string]any{
+				"actor": map[string]any{"display_name": "张三", "role": "participant"},
+			}}
+		}
 		items = append(items,
-			domain.ConversationItem{Category: "chat", Kind: "user_message", RouteKind: "owner_message", FromAgentID: "owner", Summary: fmt.Sprintf("request-%d", index), RoundID: roundID},
-			domain.ConversationItem{Category: "update", Kind: "agent_message_update", RouteKind: "agent_progress", FromAgentID: "main", Summary: fmt.Sprintf("update-%d", index), RoundID: roundID},
-			domain.ConversationItem{Category: "chat", Kind: "agent_message", RouteKind: "turn_result", AgentID: "main", FromAgentID: "main", Summary: fmt.Sprintf("reply-%d", index), RoundID: roundID},
+			domain.ConversationItem{Category: "chat", Kind: "user_message", RouteKind: "owner_message", FromAgentID: "owner", Summary: fmt.Sprintf("request-%d", index), RoundID: roundID, CreatedAt: at, Payload: payload},
+			domain.ConversationItem{Category: "update", Kind: "agent_message_update", RouteKind: "agent_progress", FromAgentID: "main", Summary: fmt.Sprintf("update-%d", index), RoundID: roundID, CreatedAt: at.Add(time.Second)},
+			domain.ConversationItem{Category: "chat", Kind: "agent_message", RouteKind: "turn_result", AgentID: "main", FromAgentID: "main", Summary: fmt.Sprintf("reply-%d", index), RoundID: roundID, CreatedAt: at.Add(2 * time.Second)},
 		)
 	}
 	items = append(items,
@@ -643,7 +651,9 @@ func TestRecoveryResourcesKeepCompletedExchangesAndExcludeUpdateNoise(t *testing
 	)
 	recent := recentContextExchanges(items, "turn-current", "round-current")
 	if len(recent) != 6 || recent[0].Users[0].Summary != "request-1" || recent[0].Reply != "reply-1" ||
-		recent[5].Users[0].Summary != "request-6" || recent[5].Reply != "reply-6" {
+		recent[5].Users[0].Summary != "request-6" || recent[5].Reply != "reply-6" ||
+		recent[0].Users[0].Sender != "张三" || recent[0].Users[0].Role != "participant" ||
+		recent[0].Users[0].Time == "" || recent[0].Time == "" {
 		t.Fatalf("recent context=%#v", recent)
 	}
 	turns := []domain.Turn{

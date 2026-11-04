@@ -138,10 +138,11 @@ func (s *Service) petTaskStatusMessage(ctx context.Context, task domain.Task, st
 		}
 	}
 	if english {
-		b.WriteString("\nUse aha_pet_work_state / aha_task_detail / aha_task_turns to inspect it and decide whether to continue.")
+		b.WriteString("\nUse aha_task_detail/aha_task_turns for details.")
 	} else {
-		b.WriteString("\n请用 aha_pet_work_state / aha_task_detail / aha_task_turns 查看后决定是否继续处理。")
+		b.WriteString("\n可用 aha_task_detail / aha_task_turns 查看细节。")
 	}
+	b.WriteString(petWakeActionContract(english))
 	return b.String()
 }
 

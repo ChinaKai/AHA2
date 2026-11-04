@@ -270,7 +270,7 @@ button.danger:hover { background: #fff1f0; }
 .task-card-actions { display: flex; align-items: center; gap: 4px; }
 .task-title-input { width: min(420px, 80%); }
 
-.provider-layout { display: grid; grid-template-columns: 1fr 1.5fr; gap: 16px; }
+.provider-layout { display: grid; grid-template-columns: 1fr 1.5fr; align-items: start; gap: 16px; }
 .provider-sidebar { display: grid; align-content: start; gap: 16px; min-width: 0; }
 .provider-layout .list-row { grid-template-columns: minmax(0,1fr) auto auto; }
 .codex-account-panel { min-width: 0; }
@@ -390,6 +390,14 @@ button.danger:hover { background: #fff1f0; }
 .workspace-remote-actions { flex-wrap: nowrap; }
 .models-grid { display: grid; grid-template-columns: 1.25fr .75fr; gap: 16px; }
 .table-wrap { overflow: auto; }
+.panel-head-actions { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.panel-head-actions > button { flex: 0 0 auto; white-space: nowrap; }
+.model-search { width: 230px; min-width: 0; }
+.list-footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 15px; border-top: 1px solid var(--line); color: var(--muted); font-size: 11px; }
+.table-wrap + .list-footer, .list-footer-providers { border-top: 0; }
+.pager-controls { display: flex; align-items: center; gap: 8px; }
+.pager-controls button { padding: 4px 10px; font-size: 11px; }
+.pager-controls span { white-space: nowrap; font-variant-numeric: tabular-nums; }
 table { width: 100%; border-collapse: collapse; }
 th, td { padding: 12px 14px; border-bottom: 1px solid var(--line); font-size: 11px; text-align: left; }
 th { color: var(--muted); font-size: 9px; text-transform: uppercase; }
@@ -1016,6 +1024,7 @@ dd { margin: 3px 0 0; overflow-wrap: anywhere; font-size: 11px; }
 }
 
 dialog { width: min(520px,calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow: auto; padding: 0; border: 1px solid var(--line); border-radius: 6px; box-shadow: 0 18px 60px rgba(15,23,42,.22); }
+#skill-editor-dialog [hidden], #knowledge-editor-dialog [hidden] { display: none !important; }
 dialog.wide { width: min(700px,calc(100vw - 32px)); }
 dialog::backdrop { background: rgba(15,23,42,.45); }
 dialog form, .dialog-body { padding: 18px; }
@@ -1401,6 +1410,22 @@ dialog > .dialog-head { margin: 0; padding: 18px 18px 0; }
 .skill-card footer > span { overflow: hidden; color: var(--muted); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
 .skill-card footer > div { display: flex; gap: 5px; }
 .skill-card footer button { width: 28px; min-height: 28px; }
+.knowledge-project-search { display: block; padding: 0 7px 7px; }
+.knowledge-project-search input { width: 100%; }
+.knowledge-list-footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 10px; color: var(--muted); font-size: 10px; }
+.knowledge-pager-controls { display: flex; align-items: center; gap: 6px; }
+.knowledge-pager-controls button { padding: 2px 7px; font-size: 10px; }
+.knowledge-primary-rail { max-height: calc(100vh - 36px); overflow-y: auto; }
+.knowledge-load-more { min-height: 30px; padding: 0 10px; font-size: 10px; white-space: nowrap; }
+.knowledge-primary-rail .knowledge-list-footer { position: sticky; bottom: 0; z-index: 2; display: grid; gap: 4px; padding: 6px 8px; border-top: 1px solid var(--line); background: #fff; }
+.knowledge-primary-rail .knowledge-load-more { width: 100%; }
+.knowledge-pager-controls span { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.knowledge-skill-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 0 12px; }
+.knowledge-skill-toolbar input, .knowledge-skill-toolbar select { width: auto; }
+.knowledge-skill-toolbar input { flex: 1 1 220px; min-width: 0; }
+.knowledge-skill-toolbar select { flex: 0 0 auto; min-width: 120px; max-width: 220px; }
+.skill-detail-meta { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.skill-detail-instructions { max-height: 50vh; overflow: auto; padding: 10px; border: 1px solid var(--line); border-radius: 6px; background: #fafbfc; }
 .skill-switch { position: relative; display: block; margin: 0; }
 .skill-switch input { position: absolute; width: 1px; height: 1px; opacity: 0; }
 .skill-switch span { display: block; width: 34px; height: 20px; padding: 2px; border-radius: 10px; background: #cbd5e1; }
@@ -1543,6 +1568,8 @@ dialog > .dialog-head { margin: 0; padding: 18px 18px 0; }
   .knowledge-primary-rail > nav, .knowledge-project-group > div, .knowledge-section-rail nav { display: flex; overflow-x: auto; }
   .knowledge-primary-rail > nav button { flex: 0 0 auto; width: auto; min-width: max-content; padding-inline: 12px; white-space: nowrap; }
   .knowledge-project-group button { flex: 0 0 150px; }
+  .knowledge-skill-toolbar input { flex-basis: 100%; }
+  .knowledge-list-footer { flex-wrap: wrap; }
   .knowledge-section-rail nav button { flex: 0 0 auto; width: auto; min-height: 32px; padding: 0 10px; }
   .knowledge-hero, .knowledge-section-head, .knowledge-setting-card { align-items: stretch; flex-direction: column; }
   .knowledge-update-controls { align-items: stretch; flex-direction: column; }
@@ -1616,7 +1643,7 @@ dialog > .dialog-head { margin: 0; padding: 18px 18px 0; }
   .page-head h1 { font-size: 21px; }
   .page-head > .actions { flex-wrap: wrap; justify-content: flex-start; overflow: visible; }
   .page-head > .actions button:not(.icon-button) { flex: 1 1 auto; }
-  .panel-head { min-height: 50px; height: auto; padding-top: 8px; padding-bottom: 8px; }
+  .panel-head { min-height: 50px; height: auto; padding-top: 8px; padding-bottom: 8px; flex-wrap: wrap; }
   .panel-head > span { flex: 1 1 160px; text-align: right; }
   .dialog-actions { display: grid; grid-template-columns: repeat(auto-fit,minmax(120px,1fr)); width: 100%; }
   .dialog-actions > button { width: 100%; min-width: 0; padding-right: 8px; padding-left: 8px; }
@@ -1644,6 +1671,9 @@ dialog > .dialog-head { margin: 0; padding: 18px 18px 0; }
   .provider-layout .provider-row .item-title { grid-column: 1 / -1; }
   .provider-layout .provider-row > .status { grid-column: 1; justify-self: start; }
   .provider-layout .provider-row > .row-actions { grid-column: 2; justify-self: end; }
+  .panel-head-actions { flex: 1 1 100%; }
+  .model-search { width: auto; flex: 1 1 160px; }
+  .list-footer { flex-wrap: wrap; }
   .prompt-page { height: calc(var(--visual-viewport-height) - var(--mobile-bottom-nav-height) - 46px); }
   .prompt-template-layout { grid-template-columns: 1fr; grid-template-rows: 116px minmax(0,1fr); }
   .prompt-template-list { display: flex; max-width: 100%; overflow-x: auto; overflow-y: hidden; border-right: 0; border-bottom: 1px solid var(--line); }

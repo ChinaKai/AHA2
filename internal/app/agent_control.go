@@ -48,7 +48,8 @@ type AgentSkillCreateInput struct {
 	Instructions string `json:"instructions"`
 	// Scope is "project" (the default) or "global". A global skill applies to
 	// every Project, so it is accepted only where agentGlobalSkillAllowed says so.
-	Scope string `json:"scope"`
+	Scope      string `json:"scope"`
+	AutoAttach bool   `json:"auto_attach"`
 }
 
 type AgentRuntimeOption struct {
@@ -567,7 +568,7 @@ func (s *Service) CreateAgentSkill(ctx context.Context, claims agentapi.Claims, 
 	item := domain.Skill{
 		ID: domain.NewID("skill"), Scope: scope, ProjectID: projectID,
 		Name: input.Name, Description: input.Description, Instructions: input.Instructions,
-		Version: 1, Status: "active", Enabled: true, CreatedAt: now, UpdatedAt: now,
+		Version: 1, Status: "active", Enabled: true, AutoAttach: input.AutoAttach, CreatedAt: now, UpdatedAt: now,
 	}
 	if err := s.store.CreateSkill(ctx, item); err != nil {
 		return domain.Skill{}, err

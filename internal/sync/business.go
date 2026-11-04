@@ -215,10 +215,11 @@ func ExportBusinessObjectsForDevice(ctx context.Context, database *store.Store, 
 		if excludedProjects[v.ProjectID] {
 			continue
 		}
-		project, projectErr := database.Project(ctx, v.ProjectID)
-		if v.ProjectID != "" && (projectErr != nil || project.ProjectType != "knowledge") {
-			v.Scope = "global"
-			v.ProjectID = ""
+		if v.ProjectID != "" {
+			if _, projectErr := database.Project(ctx, v.ProjectID); projectErr != nil {
+				v.Scope = "global"
+				v.ProjectID = ""
+			}
 		}
 		v.SourcePath = ""
 		v.Files = nil
@@ -642,8 +643,10 @@ func upsertBusinessObject(ctx context.Context, database *store.Store, obj domain
 			return err
 		}
 		p.Skill.ID = obj.ID
-		project, projectErr := database.Project(ctx, p.Skill.ProjectID)
-		if p.Skill.ProjectID != "" && (projectErr != nil || project.ProjectType != "knowledge") {
+		if p.Skill.Scope != "project" || strings.TrimSpace(p.Skill.ProjectID) == "" {
+			p.Skill.Scope = "global"
+			p.Skill.ProjectID = ""
+		} else if _, projectErr := database.Project(ctx, p.Skill.ProjectID); projectErr != nil {
 			p.Skill.Scope = "global"
 			p.Skill.ProjectID = ""
 		}

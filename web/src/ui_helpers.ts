@@ -399,3 +399,37 @@ export function bindMessageBubbleControls(root: ParentNode = document): void {
     if (previewImage) previewImage.removeAttribute("src");
   });
 }
+
+export interface PageSlice<T> {
+  items: T[];
+  page: number;
+  pages: number;
+  total: number;
+}
+
+// Client-side list pagination. The requested page is clamped rather than
+// trusted: a filter, delete, or data refresh can shrink the list between the
+// click and the next render.
+export function paginateItems<T>(items: T[], requestedPage: number, pageSize: number): PageSlice<T> {
+  const size = Math.max(1, Math.floor(pageSize) || 1);
+  const total = items.length;
+  const pages = Math.max(1, Math.ceil(total / size));
+  const page = Math.min(pages, Math.max(1, Math.floor(requestedPage) || 1));
+  const start = (page - 1) * size;
+  return {items: items.slice(start, start + size), page, pages, total};
+}
+
+export function textMatchesQuery(values: Array<string | null | undefined>, query: string): boolean {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return true;
+  return values.some(value => String(value ?? "").toLowerCase().includes(needle));
+}
+
+export function paginationHTML(kind: string, slice: PageSlice<unknown>, totalLabel = ""): string {
+  if (slice.total === 0) return "";
+  const label = totalLabel || `共 ${slice.total} 个`;
+  const controls = slice.pages > 1
+    ? `<div class="pager-controls"><button type="button" data-page-kind="${kind}" data-page-delta="-1"${slice.page <= 1 ? " disabled" : ""}>上一页</button><span>第 ${slice.page}/${slice.pages} 页</span><button type="button" data-page-kind="${kind}" data-page-delta="1"${slice.page >= slice.pages ? " disabled" : ""}>下一页</button></div>`
+    : "";
+  return `<div class="list-footer list-footer-${kind}"><span>${label}</span>${controls}</div>`;
+}

@@ -26,6 +26,12 @@ type PetWorkState struct {
 	Approvals        []domain.PetApproval `json:"approvals"`
 	Work             []PetWorkItem        `json:"work"`
 	OpenLoops        string               `json:"open_loops,omitempty"`
+	OpenLoopsPath    string               `json:"open_loops_path,omitempty"`
+	OpenLoopsNote    string               `json:"open_loops_note,omitempty"`
+	Agenda           string               `json:"agenda,omitempty"`
+	AgendaPath       string               `json:"agenda_path,omitempty"`
+	AgendaNote       string               `json:"agenda_note,omitempty"`
+	LabPath          string               `json:"lab_path,omitempty"`
 	Note             string               `json:"note,omitempty"`
 }
 
@@ -38,7 +44,14 @@ func (s *Service) PetWorkState(ctx context.Context) (PetWorkState, error) {
 	if err != nil {
 		return PetWorkState{}, err
 	}
-	state := PetWorkState{Approvals: approvals, Work: make([]PetWorkItem, 0), OpenLoops: s.PetOpenLoops(ctx)}
+	loops := s.PetOpenLoops(ctx)
+	agenda := s.PetAgenda(ctx)
+	state := PetWorkState{
+		Approvals: approvals, Work: make([]PetWorkItem, 0),
+		OpenLoops: loops, OpenLoopsPath: s.petOpenLoopsPath(ctx), OpenLoopsNote: petLoopsNote(loops),
+		Agenda: agenda, AgendaPath: s.petAgendaPath(ctx), AgendaNote: petAgendaNote(agenda),
+		LabPath: s.petLabPath(ctx),
+	}
 	for _, approval := range approvals {
 		if approval.Status == petApprovalPending {
 			state.PendingApprovals++

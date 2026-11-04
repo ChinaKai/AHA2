@@ -10,20 +10,25 @@ import (
 )
 
 func TestPetAutonomousMessageFollowsOwnerLanguage(t *testing.T) {
-	message := petAutonomousMessage(true, 20, "后台（服务端调度）", PetLayout{}, "- [waiting] Task A | check next turn | task completed")
-	for _, want := range []string{"[Autonomous behavior]", "20 minutes", "background (server scheduler)", "Page layout unavailable", "Open loops", "Task A | check next turn"} {
+	message := petAutonomousMessage(true, 20, "后台（服务端调度）", PetLayout{})
+	for _, want := range []string{"[Autonomous behavior]", "20 minutes since the last autonomous review", "background (server scheduler)", "Page layout unavailable", "work wake-up", "core/agenda.md", "aha_pet_work_state", "owner_decision", "pet_request_approval", "NOOP"} {
 		if !strings.Contains(message, want) {
 			t.Fatalf("English autonomous message missing %q: %s", want, message)
 		}
 	}
-	for _, unwanted := range []string{"[自主行为]", "主人已经", "页面布局"} {
+	for _, unwanted := range []string{"[自主行为]", "主人已经", "页面布局", "Task A | check next turn"} {
 		if strings.Contains(message, unwanted) {
 			t.Fatalf("English autonomous message still contains %q: %s", unwanted, message)
 		}
 	}
-	chinese := petAutonomousMessage(false, 20, "后台（服务端调度）", PetLayout{}, "- [waiting] 任务 A | 下轮检查 | 任务完成")
-	if !strings.Contains(chinese, "[自主行为] 主人已经 20 分钟没有互动") || !strings.Contains(chinese, "开放闭环") {
-		t.Fatalf("Chinese autonomous message changed: %s", chinese)
+	chinese := petAutonomousMessage(false, 20, "后台（服务端调度）", PetLayout{})
+	for _, want := range []string{"[自主行为] 距上次自主复盘约 20 分钟", "工作唤醒", "core/agenda.md", "aha_pet_work_state", "owner_decision", "pet_request_approval", "NOOP"} {
+		if !strings.Contains(chinese, want) {
+			t.Fatalf("Chinese autonomous message missing %q: %s", want, chinese)
+		}
+	}
+	if strings.Contains(chinese, "任务 A") {
+		t.Fatalf("Chinese autonomous message should not inline open loops: %s", chinese)
 	}
 }
 

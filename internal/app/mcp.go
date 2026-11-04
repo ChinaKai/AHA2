@@ -35,7 +35,7 @@ func (s *Service) normalizeTaskMCPServers(ctx context.Context, project domain.Pr
 	}
 	for _, id := range requested {
 		id = strings.TrimSpace(id)
-		if id == "mcp_pet" && project.ID != petProjectID {
+		if id == "mcp_channel" || (id == "mcp_pet" && project.ID != petProjectID) {
 			continue
 		}
 		server, ok := allowed[id]
@@ -59,11 +59,46 @@ func (s *Service) MCPServers(ctx context.Context) ([]domain.MCPServer, error) {
 			items[index].Tools = petMCPToolDetails()
 		}
 	}
-	return items, nil
+	// The channel MCP is turn-scoped: its URL and token come from the current
+	// Agent capability and it is attached only to channel-routed Turns. Keep it
+	// virtual instead of persisting a server whose address would be misleading,
+	// but still list it so the MCP page shows every built-in capability.
+	channel := s.channelMCPDetail()
+	insertAt := 0
+	for index, item := range items {
+		if item.Builtin {
+			insertAt = index + 1
+		}
+	}
+	combined := make([]domain.MCPServer, 0, len(items)+1)
+	combined = append(combined, items[:insertAt]...)
+	combined = append(combined, channel)
+	combined = append(combined, items[insertAt:]...)
+	return combined, nil
+}
+
+// channelMCPDetail describes the built-in channel MCP without claiming a
+// static URL. The actual endpoint is injected per Turn by mcpRuntimeForTask.
+func (s *Service) channelMCPDetail() domain.MCPServer {
+	now := s.now().UTC()
+	return domain.MCPServer{
+		ID: "mcp_channel", Name: "渠道（内置）",
+		Description: "群聊路由的 Turn 自动注入；提供渠道回复、结束回复和 Owner 权限申请工具。",
+		Transport:   "builtin", Enabled: true, Builtin: true, AutoInject: true, Health: "ok",
+		Tools: []domain.MCPTool{
+			{Name: "channel_reply", Description: "回复触发本 Turn 的渠道消息；立即送达，只在最终答复时调用一次。"},
+			{Name: "channel_reply_decision", Description: "本 Turn 无需回复时结束；理由只显示在 AHA Web 状态卡，不发到群里。"},
+			{Name: "channel_request_permission", Description: "为非 Owner 群成员的敏感操作创建 Owner 权限申请；批准前不要执行。"},
+		},
+		CreatedAt: now, UpdatedAt: now,
+	}
 }
 
 func (s *Service) SaveMCPServer(ctx context.Context, item domain.MCPServer) (domain.MCPServer, error) {
 	item.ID = strings.TrimSpace(item.ID)
+	if item.ID == "mcp_pet" || item.ID == "mcp_channel" {
+		return domain.MCPServer{}, fmt.Errorf("builtin MCP cannot be modified")
+	}
 	item.Name = strings.TrimSpace(item.Name)
 	item.URL = strings.TrimSpace(item.URL)
 	item.Transport = strings.TrimSpace(strings.ToLower(item.Transport))
@@ -108,6 +143,9 @@ func (s *Service) SaveMCPServer(ctx context.Context, item domain.MCPServer) (dom
 }
 
 func (s *Service) MCPServerByID(ctx context.Context, id string) (domain.MCPServer, error) {
+	if strings.TrimSpace(id) == "mcp_channel" {
+		return s.channelMCPDetail(), nil
+	}
 	items, err := s.store.ListMCPServers(ctx)
 	if err != nil {
 		return domain.MCPServer{}, err
@@ -121,7 +159,7 @@ func (s *Service) MCPServerByID(ctx context.Context, id string) (domain.MCPServe
 }
 
 func (s *Service) DeleteMCPServer(ctx context.Context, id string) error {
-	if strings.TrimSpace(id) == "mcp_pet" {
+	if strings.TrimSpace(id) == "mcp_pet" || strings.TrimSpace(id) == "mcp_channel" {
 		return fmt.Errorf("builtin MCP cannot be deleted")
 	}
 	return s.store.DeleteMCPServer(ctx, id)

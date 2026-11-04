@@ -112,9 +112,10 @@ type Executor interface {
 }
 
 type PreparedWorkspace struct {
-	Path       string
-	BaseCommit string
-	Branch     string
+	Path         string
+	BaseCommit   string
+	Branch       string
+	TargetBranch string
 }
 
 type WorkspacePreparer interface {
@@ -259,9 +260,13 @@ type CreateTaskInput struct {
 	MaxAgents           int
 	KnowledgePolicy     string
 	SkillIDs            []string
-	AgentCapabilities   map[string]bool
-	MCPServerIDs        []string
-	StartMode           string
+	// ApplyAutoSkills defaults to true. Web task creation pre-checks auto-attach
+	// skills in the picker and explicitly disables this so a user's unchecked
+	// selection is honoured; internal/API callers get the defaults.
+	ApplyAutoSkills   *bool
+	AgentCapabilities map[string]bool
+	MCPServerIDs      []string
+	StartMode         string
 	// AllowSystemProject is reserved for trusted AHA services (channel runtime
 	// and pet system task) that create Tasks inside system-managed projects.
 	// It is never set from a user/agent HTTP payload.
@@ -369,7 +374,7 @@ func (s *Service) CreateTask(ctx context.Context, input CreateTaskInput) (domain
 		isolation = "inplace"
 	}
 	if isolation == "" {
-		isolation = "worktree"
+		isolation = "inplace"
 	}
 	if isolation != "worktree" && isolation != "inplace" {
 		return domain.Task{}, fmt.Errorf("invalid task isolation")
@@ -423,6 +428,13 @@ func (s *Service) CreateTask(ctx context.Context, input CreateTaskInput) (domain
 	collaborationMode, err := validateCollaborationMode(input.CollaborationMode)
 	if err != nil {
 		return domain.Task{}, err
+	}
+	if input.ApplyAutoSkills == nil || *input.ApplyAutoSkills {
+		autoIDs, autoErr := s.autoAttachSkillIDs(ctx, project.ID)
+		if autoErr != nil {
+			return domain.Task{}, autoErr
+		}
+		input.SkillIDs = mergeSkillIDs(input.SkillIDs, autoIDs)
 	}
 	skillIDs, err := s.validateTaskSkillIDs(ctx, project.ID, input.SkillIDs)
 	if err != nil {
@@ -519,7 +531,10 @@ func (s *Service) prepareAndActivateTask(ctx context.Context, workspace domain.W
 		task.TaskWorkspacePath = prepared.Path
 		task.BaseCommit = prepared.BaseCommit
 		task.TaskBranch = prepared.Branch
-		if err := s.store.UpdateTaskWorkspace(ctx, task.ID, task.TaskWorkspacePath, task.BaseCommit, task.TaskBranch, timeString(now)); err != nil {
+		if prepared.TargetBranch != "" {
+			task.TargetBranch = prepared.TargetBranch
+		}
+		if err := s.store.UpdateTaskWorkspace(ctx, task.ID, task.TaskWorkspacePath, task.BaseCommit, task.TaskBranch, task.TargetBranch, timeString(now)); err != nil {
 			return task, err
 		}
 	}
@@ -564,13 +579,56 @@ func (s *Service) validateTaskSkillIDs(ctx context.Context, projectID string, id
 		if err != nil {
 			return nil, fmt.Errorf("skill %s is unavailable", id)
 		}
-		if !item.Enabled || item.Status != "active" || (item.Scope != "global" && (item.Scope != "project" || item.ProjectID != projectID)) {
+		if !item.Enabled || item.Status != "active" || !skillAppliesToProject(item, projectID) {
 			return nil, fmt.Errorf("skill %s is not enabled for this project", id)
 		}
 		seen[id] = true
 		result = append(result, id)
 	}
 	return result, nil
+}
+
+func skillAppliesToProject(item domain.Skill, projectID string) bool {
+	if item.Scope == "global" {
+		return true
+	}
+	if item.Scope != "project" {
+		return false
+	}
+	return item.ProjectID == projectID || item.BoundProjectID == projectID
+}
+
+func (s *Service) autoAttachSkillIDs(ctx context.Context, projectID string) ([]string, error) {
+	items, err := s.store.ListSkills(ctx, "", "", true)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]string, 0)
+	for _, item := range items {
+		// Auto-attach follows the skill's own Project. Bound external skills are
+		// available for manual selection in the bound project, but they are
+		// read-only mirrors and must not be enabled implicitly.
+		if item.AutoAttach && (item.Scope == "global" || (item.Scope == "project" && item.ProjectID == projectID)) {
+			result = append(result, item.ID)
+		}
+	}
+	return result, nil
+}
+
+func mergeSkillIDs(existing, extra []string) []string {
+	seen := make(map[string]bool, len(existing)+len(extra))
+	result := make([]string, 0, len(existing)+len(extra))
+	for _, group := range [][]string{existing, extra} {
+		for _, id := range group {
+			id = strings.TrimSpace(id)
+			if id == "" || seen[id] {
+				continue
+			}
+			seen[id] = true
+			result = append(result, id)
+		}
+	}
+	return result
 }
 
 func (s *Service) UpdateTaskSkills(ctx context.Context, taskID string, ids []string) (domain.Task, error) {
@@ -604,7 +662,7 @@ func (s *Service) activeTaskSkills(ctx context.Context, task domain.Task) []doma
 		if !item.Enabled || item.Status != "active" {
 			continue
 		}
-		if item.Scope == "global" || (item.Scope == "project" && item.ProjectID == task.ProjectID) {
+		if skillAppliesToProject(item, task.ProjectID) {
 			result = append(result, item)
 		}
 	}

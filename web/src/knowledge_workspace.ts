@@ -32,6 +32,22 @@ let selectedLibraryID = "";
 let knowledgeReaderOpen = false;
 let updateFilter: "pending" | "all" = "pending";
 let selectedKnowledgeSourceID = "all";
+let projectSearch = "";
+let skillSearch = "";
+let skillScopeFilter: "all" | "global" | "project" | "bound" = "all";
+let skillProjectFilter = "";
+let skillStatusFilter = "all";
+const PROJECT_BATCH_SIZE = 10;
+const SKILL_BATCH_SIZE = 6;
+let projectLimit = PROJECT_BATCH_SIZE;
+let skillLimit = SKILL_BATCH_SIZE;
+const PROPOSAL_PAGE_SIZE = 10;
+let allProposals: KnowledgeProposal[] = [];
+let allProposalsTotal = 0;
+let allProposalsPage = 1;
+let allProposalsPages = 1;
+let allProposalsLoaded = false;
+let allProposalsLoading = false;
 const selectedUpdateIDs = new Set<string>();
 const syntheticHomeID = "__knowledge_home__";
 const globalGeneralKnowledgeID = "knowledge_global_general";
@@ -284,9 +300,84 @@ function renderOverview(project: Project, entries: Knowledge[], projectWorkspace
     <section class="knowledge-entry-portals">${portal("project", "knowledge", "\u9879\u76ee\u77e5\u8bc6", "\u5f53\u524d\u9879\u76ee\u7684\u5b9e\u8df5\u3001\u51b3\u7b56\u548c\u8bca\u65ad", `${projectCount} \u7bc7`)}${portal("navigation", "branch", "\u9879\u76ee\u5bfc\u822a", "\u6a21\u5757\u5165\u53e3\u3001\u8def\u5f84\u8fb9\u754c\u548c\u5173\u952e\u6d41\u7a0b", `${navigationCount} \u7bc7`)}${portal("settings", "model", "\u8bbe\u7f6e", "\u77e5\u8bc6\u5e93\u5f00\u5173\u3001\u4ea7\u54c1\u7ebf\u548c Workspace \u7ed1\u5b9a", "\u914d\u7f6e")}</section>`;
 }
 
-function renderSkills(): string {
+function filteredProjectList(context: KnowledgeWorkspaceContext): Project[] {
+  const query = projectSearch.trim().toLowerCase();
+  if (!query) return context.projects;
+  return context.projects.filter(item => `${item.name} ${item.id}`.toLowerCase().includes(query));
+}
+
+function proposalPager(slice: {page: number; pages: number; total: number}, totalLabel = ""): string {
+  if (slice.total === 0) return "";
+  const controls = slice.pages > 1
+    ? `<div class="knowledge-pager-controls"><button type="button" data-knowledge-proposal-page="-1" ${slice.page <= 1 ? "disabled" : ""}>上一页</button><span>第 ${slice.page}/${slice.pages} 页</span><button type="button" data-knowledge-proposal-page="1" ${slice.page >= slice.pages ? "disabled" : ""}>下一页</button></div>`
+    : "";
+  return `<div class="knowledge-list-footer"><span>${totalLabel || `共 ${slice.total} 个`}</span>${controls}</div>`;
+}
+
+function knowledgeListFooter(kind: "project" | "skill", shown: number, total: number, totalLabel = ""): string {
+  if (total === 0) return "";
+  const attr = kind === "project" ? "data-knowledge-project-more" : "data-knowledge-skill-more";
+  const summary = totalLabel || `\u5171 ${total} \u4e2a`;
+  if (shown >= total) return `<div class="knowledge-list-footer"><span>${summary}</span></div>`;
+  return `<div class="knowledge-list-footer"><span>${summary} \u00b7 \u5df2\u663e\u793a ${shown} \u4e2a</span><button type="button" class="knowledge-load-more" ${attr}>\u52a0\u8f7d\u66f4\u591a</button></div>`;
+}
+
+function skillProjectName(context: KnowledgeWorkspaceContext, item: Skill): string {
+  const project = context.projects.find(candidate => candidate.id === (item.bound_project_id || item.project_id));
+  return project?.name || item.bound_project_id || item.project_id || "";
+}
+
+function skillScopeLabel(context: KnowledgeWorkspaceContext, item: Skill): string {
+  if (item.scope === "global") return "\u5168\u5c40";
+  if (item.bound_project_id || item.binding_mode) return `\u5916\u90e8 \u00b7 ${skillProjectName(context, item)}`;
+  return `\u9879\u76ee \u00b7 ${skillProjectName(context, item)}`;
+}
+
+function filteredSkillList(context: KnowledgeWorkspaceContext): Skill[] {
+  const query = skillSearch.trim().toLowerCase();
+  return skills.filter(item => {
+    if (query && ![item.name, item.description].some(value => String(value || "").toLowerCase().includes(query))) return false;
+    if (skillScopeFilter === "global" && item.scope !== "global") return false;
+    if (skillScopeFilter === "project" && item.scope !== "project") return false;
+    if (skillScopeFilter === "bound" && !item.bound_project_id && !item.binding_mode) return false;
+    if (skillProjectFilter && item.project_id !== skillProjectFilter && item.bound_project_id !== skillProjectFilter) return false;
+    if (skillStatusFilter !== "all" && item.status !== skillStatusFilter) return false;
+    return true;
+  });
+}
+
+function skillCard(context: KnowledgeWorkspaceContext, item: Skill): string {
+  const auto = item.auto_attach ? '<span class="capability-badge">\u81ea\u52a8\u542f\u7528</span>' : "";
+  return `<article class="skill-card ${item.enabled ? "" : "disabled"}"><header><div class="skill-mark">${icon("bot")}</div><div><strong>${escapeHTML(item.name)}${auto}</strong><small>${escapeHTML(skillScopeLabel(context, item))} \u00b7 v${item.version} \u00b7 ${escapeHTML(item.status)}</small></div><label class="skill-switch"><input type="checkbox" data-skill-toggle="${item.id}" ${item.enabled ? "checked" : ""}><span></span></label></header><p>${escapeHTML(item.description || "\u672a\u586b\u5199\u63cf\u8ff0")}</p><div class="skill-package-files"><strong>Skill Package</strong><span>${(item.files || []).map(file => `<code>${escapeHTML(file)}</code>`).join("") || "<code>SKILL.md</code>"}</span></div><footer><span title="${escapeHTML(item.source_path || "")}">${escapeHTML(item.source_path || "AHA managed package")}</span><div><button class="icon-button" type="button" data-skill-view="${item.id}" title="\u67e5\u770b Skill">${icon("eye")}</button><button class="icon-button" type="button" data-skill-edit="${item.id}">${icon("edit")}</button><button class="icon-button" type="button" data-skill-delete="${item.id}">${icon("close")}</button></div></footer></article>`;
+}
+
+function renderSkills(context: KnowledgeWorkspaceContext): string {
+  const visible = filteredSkillList(context);
+  const shown = visible.slice(0, skillLimit);
+  const projectOptions = context.projects.map(project => `<option value="${escapeHTML(project.id)}" ${project.id === skillProjectFilter ? "selected" : ""}>${escapeHTML(project.name)}</option>`).join("");
+  const filtering = Boolean(skillSearch.trim()) || skillScopeFilter !== "all" || Boolean(skillProjectFilter) || skillStatusFilter !== "all";
+  const totalLabel = filtering ? `\u5339\u914d ${visible.length} / \u5171 ${skills.length} \u4e2a` : `\u5171 ${skills.length} \u4e2a`;
   return `<div class="knowledge-section-head"><div><h2>Skills</h2><p>Skill \u91c7\u7528 AHA \u6258\u7ba1\u5305\uff1aSKILL.md \u662f\u5165\u53e3\uff0cscripts / assets / agents \u4e0e\u6280\u80fd\u4e00\u8d77\u6309 Task \u9009\u62e9\u7269\u5316\u3002</p></div><button class="primary" type="button" data-skill-new>${icon("plus")}\u65b0\u5efa Skill</button></div>
-    <div class="skill-grid">${skills.map(item => `<article class="skill-card ${item.enabled ? "" : "disabled"}"><header><div class="skill-mark">${icon("bot")}</div><div><strong>${escapeHTML(item.name)}</strong><small>${escapeHTML(item.scope)} \u00b7 v${item.version} \u00b7 ${escapeHTML(item.status)}</small></div><label class="skill-switch"><input type="checkbox" data-skill-toggle="${item.id}" ${item.enabled ? "checked" : ""}><span></span></label></header><p>${escapeHTML(item.description || "\u672a\u586b\u5199\u63cf\u8ff0")}</p><div class="skill-package-files"><strong>Skill Package</strong><span>${(item.files || []).map(file => `<code>${escapeHTML(file)}</code>`).join("") || "<code>SKILL.md</code>"}</span></div><footer><span title="${escapeHTML(item.source_path || "")}">${escapeHTML(item.source_path || "AHA managed package")}</span><div><button class="icon-button" type="button" data-skill-edit="${item.id}">${icon("edit")}</button><button class="icon-button" type="button" data-skill-delete="${item.id}">${icon("close")}</button></div></footer></article>`).join("") || renderEmpty("\u8fd8\u6ca1\u6709 Skill\u3002")}</div>`;
+    <div class="knowledge-skill-toolbar">
+      <input id="knowledge-skill-search" type="search" autocomplete="off" data-allow-rerender="true" placeholder="\u641c\u7d22 Skill \u540d\u79f0/\u63cf\u8ff0" value="${escapeHTML(skillSearch)}">
+      <select id="knowledge-skill-scope" aria-label="Skill \u4f5c\u7528\u57df">
+        <option value="all" ${skillScopeFilter === "all" ? "selected" : ""}>\u5168\u90e8\u4f5c\u7528\u57df</option>
+        <option value="global" ${skillScopeFilter === "global" ? "selected" : ""}>\u5168\u5c40</option>
+        <option value="project" ${skillScopeFilter === "project" ? "selected" : ""}>\u9879\u76ee</option>
+        <option value="bound" ${skillScopeFilter === "bound" ? "selected" : ""}>\u5916\u90e8\u7ed1\u5b9a</option>
+      </select>
+      <select id="knowledge-skill-project" aria-label="Skill \u9879\u76ee">
+        <option value="">\u5168\u90e8\u9879\u76ee</option>${projectOptions}
+      </select>
+      <select id="knowledge-skill-status" aria-label="Skill \u72b6\u6001">
+        <option value="all" ${skillStatusFilter === "all" ? "selected" : ""}>\u5168\u90e8\u72b6\u6001</option>
+        <option value="active" ${skillStatusFilter === "active" ? "selected" : ""}>active</option>
+        <option value="draft" ${skillStatusFilter === "draft" ? "selected" : ""}>draft</option>
+        <option value="archived" ${skillStatusFilter === "archived" ? "selected" : ""}>archived</option>
+      </select>
+    </div>
+    <div class="skill-grid">${shown.map(item => skillCard(context, item)).join("") || renderEmpty("\u6ca1\u6709\u5339\u914d\u7684 Skill\u3002")}</div>
+    ${knowledgeListFooter("skill", shown.length, visible.length, totalLabel)}`;
 }
 
 function renderKnowledgeLibraries(context: KnowledgeWorkspaceContext): string {
@@ -365,15 +456,41 @@ function proposalStatus(status: string): [string, string] {
   return ["warn", "\u5f85\u5ba1\u6279"];
 }
 
+async function loadAllProposals(context: KnowledgeWorkspaceContext, page: number, renderAfter = true): Promise<void> {
+  if (allProposalsLoading) return;
+  allProposalsLoading = true;
+  try {
+    const result = await api.knowledgeProposals({status: "all", page, limit: PROPOSAL_PAGE_SIZE});
+    allProposals = result.proposals || [];
+    allProposalsTotal = Number(result.total || 0);
+    allProposalsPage = Math.max(1, Number(result.page || page));
+    allProposalsPages = Math.max(1, Number(result.pages || 1));
+    allProposalsLoaded = true;
+  } catch (error) {
+    allProposalsLoaded = true;
+    allProposals = [];
+    allProposalsTotal = 0;
+    allProposalsPages = 1;
+    context.setMessage("error", error instanceof Error ? error.message : String(error));
+  } finally {
+    allProposalsLoading = false;
+    if (renderAfter) context.render();
+  }
+}
+
 export function renderUpdates(entries: Knowledge[], proposals: KnowledgeProposal[], projects: Project[], reviewSettings: KnowledgeReviewSettings = {auto_approve: false}): string {
   const pending = proposals.filter(item => item.status === "pending");
   const legacyCandidates = entries.filter(item => !item.is_index && item.status === "candidate");
   const pendingCount = pending.length + legacyCandidates.length;
   const pendingKeys = new Set([...pending.map(item => `proposal:${item.id}`), ...legacyCandidates.map(item => `legacy:${item.id}`)]);
   for (const key of selectedUpdateIDs) if (!pendingKeys.has(key)) selectedUpdateIDs.delete(key);
-  const visible = (updateFilter === "pending" ? pending : proposals).sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
+  const allLegacyCount = legacyCandidates.length;
+  const allCount = allProposalsLoaded ? allProposalsTotal + allLegacyCount : null;
+  const visible = updateFilter === "pending"
+    ? [...pending].sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))
+    : allProposals;
   const projectNames = new Map(projects.map(project => [project.id, project.name]));
-  const filters = `<div class="knowledge-update-controls"><div class="knowledge-update-filters" role="tablist" aria-label="\u63d0\u6848\u7b5b\u9009"><button type="button" data-knowledge-update-filter="pending" class="${updateFilter === "pending" ? "active" : ""}">\u5f85\u5904\u7406 <b>${pendingCount}</b></button><button type="button" data-knowledge-update-filter="all" class="${updateFilter === "all" ? "active" : ""}">\u5168\u90e8\u63d0\u6848 <b>${proposals.length + legacyCandidates.length}</b></button></div><label class="knowledge-auto-review-toggle"><input type="checkbox" data-knowledge-auto-review ${reviewSettings.auto_approve ? "checked" : ""}><span><strong>\u81ea\u52a8\u8bc4\u5ba1</strong><small>${reviewSettings.auto_approve ? "\u65b0\u63d0\u6848\u5c06\u81ea\u52a8\u6279\u51c6" : "\u65b0\u63d0\u6848\u9700\u624b\u52a8\u8bc4\u5ba1"}</small></span></label></div>`;
+  const filters = `<div class="knowledge-update-controls"><div class="knowledge-update-filters" role="tablist" aria-label="\u63d0\u6848\u7b5b\u9009"><button type="button" data-knowledge-update-filter="pending" class="${updateFilter === "pending" ? "active" : ""}">\u5f85\u5904\u7406 <b>${pendingCount}</b></button><button type="button" data-knowledge-update-filter="all" class="${updateFilter === "all" ? "active" : ""}">\u5168\u90e8\u63d0\u6848 <b>${allCount === null ? "\u2026" : allCount}</b></button></div><label class="knowledge-auto-review-toggle"><input type="checkbox" data-knowledge-auto-review ${reviewSettings.auto_approve ? "checked" : ""}><span><strong>\u81ea\u52a8\u8bc4\u5ba1</strong><small>${reviewSettings.auto_approve ? "\u65b0\u63d0\u6848\u5c06\u81ea\u52a8\u6279\u51c6" : "\u65b0\u63d0\u6848\u9700\u624b\u52a8\u8bc4\u5ba1"}</small></span></label></div>`;
   const batch = updateFilter === "pending" && pendingCount ? `<div class="knowledge-batch-toolbar"><button type="button" data-knowledge-batch-all>${selectedUpdateIDs.size === pendingKeys.size ? "\u53d6\u6d88\u5168\u9009" : "\u5168\u9009"}</button><span>\u5df2\u9009 ${selectedUpdateIDs.size} / ${pendingCount}</span><div><button type="button" class="primary" data-knowledge-batch-approve ${selectedUpdateIDs.size ? "" : "disabled"}>\u6279\u91cf\u6279\u51c6</button><button type="button" class="danger" data-knowledge-batch-reject ${selectedUpdateIDs.size ? "" : "disabled"}>\u6279\u91cf\u62d2\u7edd</button></div></div>` : "";
   const cards = visible.map(proposal => {
     const [statusClass, statusLabel] = proposalStatus(proposal.status);
@@ -396,7 +513,13 @@ export function renderUpdates(entries: Knowledge[], proposals: KnowledgeProposal
   const stale = entries.filter(item => !item.is_index && !pendingEntryIDs.has(item.id) && (item.status === "stale" || item.feedback_state === "wrong"));
   const staleFallback = stale.length ? `<section class="knowledge-stale-fallback"><div><h3>\u7b49\u5f85 Agent \u4fee\u8ba2</h3><p>\u8fd9\u4e9b\u6587\u6863\u5df2\u505c\u6b62\u4f5c\u4e3a\u6709\u6548\u77e5\u8bc6\u6ce8\u5165\u3002\u540e\u7eed\u76f8\u5173 Turn \u4e2d，Agent \u83b7\u5f97\u65b0\u8bc1\u636e\u540e\u4f1a\u63d0\u4ea4\u4fee\u8ba2\u63d0\u6848；\u5982\u679c\u8fc7\u65f6\u53cd\u9988\u662f\u8bef\u5224，\u53ef\u786e\u8ba4\u5f53\u524d\u5185\u5bb9\u4ecd\u7136\u6709\u6548\u3002</p></div>${stale.map(item => `<article><span><strong>${escapeHTML(item.title)}</strong><small>${escapeHTML(item.scope === "global" ? "\u5168\u5c40\u77e5\u8bc6" : projectNames.get(item.project_id || "") || "\u9879\u76ee\u77e5\u8bc6")}</small></span><button type="button" data-knowledge-verify="${escapeHTML(item.id)}">\u786e\u8ba4\u4ecd\u6709\u6548</button></article>`).join("")}</section>` : "";
   const reviewCards = `${cards}${legacyCards}`;
-  return `<div class="knowledge-section-head"><div><h2>\u77e5\u8bc6\u66f4\u65b0</h2><p>\u5ba1\u9605 Agent \u63d0\u4ea4\u7684\u65b0\u77e5\u8bc6\u548c\u4fee\u8ba2\u5efa\u8bae\uff0c\u6279\u51c6\u540e\u624d\u4f1a\u66f4\u65b0\u77e5\u8bc6\u5e93\u3002</p></div><span class="status ${pendingCount ? "warn" : "good"}">${pendingCount ? `${pendingCount} \u9879\u5f85\u5ba1\u6279` : "\u6ca1\u6709\u5f85\u5ba1\u6279\u63d0\u6848"}</span></div>${filters}${batch}<div class="knowledge-update-feed">${reviewCards || renderEmpty(updateFilter === "pending" ? "\u6ca1\u6709\u5f85\u5ba1\u6279\u7684\u77e5\u8bc6\u63d0\u6848\u3002" : "\u5c1a\u65e0\u77e5\u8bc6\u63d0\u6848\u3002")}</div>${staleFallback}`;
+  const proposalPagerHTML = updateFilter === "all" && allProposalsLoaded && allCount
+    ? proposalPager({page: allProposalsPage, pages: allProposalsPages, total: allCount}, `\u5171 ${allCount} \u4e2a\u63d0\u6848`)
+    : "";
+  const emptyMessage = updateFilter === "pending"
+    ? "\u6ca1\u6709\u5f85\u5ba1\u6279\u7684\u77e5\u8bc6\u63d0\u6848\u3002"
+    : !allProposalsLoaded ? "\u6b63\u5728\u52a0\u8f7d\u63d0\u6848\u2026" : "\u5c1a\u65e0\u77e5\u8bc6\u63d0\u6848\u3002";
+  return `<div class="knowledge-section-head"><div><h2>\u77e5\u8bc6\u66f4\u65b0</h2><p>\u5ba1\u9605 Agent \u63d0\u4ea4\u7684\u65b0\u77e5\u8bc6\u548c\u4fee\u8ba2\u5efa\u8bae\uff0c\u6279\u51c6\u540e\u624d\u4f1a\u66f4\u65b0\u77e5\u8bc6\u5e93\u3002</p></div><span class="status ${pendingCount ? "warn" : "good"}">${pendingCount ? `${pendingCount} \u9879\u5f85\u5ba1\u6279` : "\u6ca1\u6709\u5f85\u5ba1\u6279\u63d0\u6848"}</span></div>${filters}${batch}<div class="knowledge-update-feed">${reviewCards || renderEmpty(emptyMessage)}</div>${proposalPagerHTML}${staleFallback}`;
 }
 
 function renderSettings(project: Project, projectWorkspaces: Workspace[], context: KnowledgeWorkspaceContext): string {
@@ -435,7 +558,7 @@ function renderSection(project: Project, context: KnowledgeWorkspaceContext): st
 
 function renderTopLevelSection(context: KnowledgeWorkspaceContext): string {
   if (activeArea === "libraries") return renderKnowledgeLibraries(context);
-  if (activeArea === "skills") return renderSkills();
+  if (activeArea === "skills") return renderSkills(context);
   if (activeArea === "updates") return renderUpdates(context.knowledge, context.proposals, context.projects, context.reviewSettings);
   return renderKnowledgeDocumentWorkspace(context.knowledge.filter(item => item.scope === "global"), "\u8fd8\u6ca1\u6709 AHA \u5168\u5c40\u77e5\u8bc6\u3002", "global");
 }
@@ -450,11 +573,23 @@ function proposalReviewDialog(): string {
 }
 
 function skillDialog(projects: Project[], projectID: string): string {
-  return `<dialog id="skill-editor-dialog" class="wide"><form id="skill-editor-form"><div class="dialog-head"><h2>Skill Package</h2><button type="button" data-kb-close class="icon-button">${icon("close")}</button></div><div class="dialog-body"><input type="hidden" name="id"><div class="two"><label>\u4f5c\u7528\u57df<select name="scope"><option value="global">Global</option><option value="project">Project</option></select></label><label>\u72b6\u6001<select name="status"><option value="active">active</option><option value="draft">draft</option><option value="archived">archived</option></select></label></div><label class="skill-project-field" hidden>Project<select name="project_id"><option value="">\u8bf7\u9009\u62e9</option>${projects.map(item => `<option value="${item.id}" ${item.id === projectID ? "selected" : ""}>${escapeHTML(item.name)}</option>`).join("")}</select></label><label>\u540d\u79f0<input name="name" required></label><label>\u63cf\u8ff0<input name="description" placeholder="\u7528\u4e8e Task \u9009\u62e9\u65f6\u5224\u65ad\u8be5 Skill \u662f\u5426\u9002\u7528"></label><label>SKILL.md \u6307\u4ee4<textarea name="instructions" rows="12" required></textarea></label><p class="field-help">AHA \u4f1a\u81ea\u52a8\u7ba1\u7406 Skill \u76ee\u5f55\u3002\u811a\u672c\u653e\u5165\u8be5\u76ee\u5f55\u7684 <code>scripts/</code> \u540e\uff0c\u4f1a\u968f\u9009\u4e2d\u7684 Skill \u4e00\u8d77\u8fdb\u5165 Task Context\u3002</p><label class="skill-enabled"><input name="enabled" type="checkbox" checked>\u542f\u7528</label></div><div class="dialog-actions"><button type="button" data-kb-close>\u53d6\u6d88</button><button class="primary" type="submit">\u4fdd\u5b58</button></div></form></dialog>`;
+  return `<dialog id="skill-editor-dialog" class="wide"><form id="skill-editor-form"><div class="dialog-head"><h2>Skill Package</h2><button type="button" data-kb-close class="icon-button">${icon("close")}</button></div><div class="dialog-body"><input type="hidden" name="id"><div class="two"><label>\u4f5c\u7528\u57df<select name="scope"><option value="global">Global</option><option value="project">Project</option></select></label><label>\u72b6\u6001<select name="status"><option value="active">active</option><option value="draft">draft</option><option value="archived">archived</option></select></label></div><label class="skill-project-field" hidden>Project<select name="project_id"><option value="">\u8bf7\u9009\u62e9</option>${projects.map(item => `<option value="${item.id}" ${item.id === projectID ? "selected" : ""}>${escapeHTML(item.name)}</option>`).join("")}</select></label><label>\u540d\u79f0<input name="name" required></label><label>\u63cf\u8ff0<input name="description" placeholder="\u7528\u4e8e Task \u9009\u62e9\u65f6\u5224\u65ad\u8be5 Skill \u662f\u5426\u9002\u7528"></label><label>SKILL.md \u6307\u4ee4<textarea name="instructions" rows="12" required></textarea></label><p class="field-help">AHA \u4f1a\u81ea\u52a8\u7ba1\u7406 Skill \u76ee\u5f55\u3002\u811a\u672c\u653e\u5165\u8be5\u76ee\u5f55\u7684 <code>scripts/</code> \u540e\uff0c\u4f1a\u968f\u9009\u4e2d\u7684 Skill \u4e00\u8d77\u8fdb\u5165 Task Context\u3002</p><label class="skill-enabled"><input name="enabled" type="checkbox" checked>\u542f\u7528</label><label class="skill-enabled"><input name="auto_attach" type="checkbox">\u65b0\u5efa\u4efb\u52a1\u65f6\u81ea\u52a8\u542f\u7528</label><p class="field-help">\u81ea\u52a8\u542f\u7528\u9ed8\u8ba4\u52fe\u9009\u3001\u521b\u5efa\u4efb\u52a1\u65f6\u53ef\u53d6\u6d88\uff1b\u5168\u5c40 Skill \u5bf9\u6240\u6709\u65b0\u4efb\u52a1\u751f\u6548\uff08\u542b\u5ba0\u7269\u548c\u6e20\u9053\u7cfb\u7edf\u4efb\u52a1\uff09\uff0c\u9879\u76ee Skill \u4ec5\u5bf9\u8be5\u9879\u76ee\u751f\u6548\u3002\u5916\u90e8\u7ed1\u5b9a Skill \u4e0d\u81ea\u52a8\u542f\u7528\u3002</p></div><div class="dialog-actions"><button type="button" data-kb-close>\u53d6\u6d88</button><button class="primary" type="submit">\u4fdd\u5b58</button></div></form></dialog>`;
+}
+
+function skillDetailDialog(): string {
+  return `<dialog id="skill-detail-dialog" class="wide"><div class="dialog-head"><h2 id="skill-detail-name">Skill</h2><button type="button" data-kb-close class="icon-button">${icon("close")}</button></div><div class="dialog-body" id="skill-detail-body"></div><div class="dialog-actions"><button type="button" id="skill-detail-edit">\u7f16\u8f91</button><button type="button" class="primary" data-kb-close>\u5173\u95ed</button></div></dialog>`;
 }
 
 function productLineDialog(): string {
   return `<dialog id="product-line-dialog"><form id="product-line-form"><div class="dialog-head"><h2>Product Line</h2><button type="button" data-kb-close class="icon-button">${icon("close")}</button></div><div class="dialog-body"><label>\u540d\u79f0<input name="name" required placeholder="Main / Enterprise"></label><label>Git Branch Pattern<input name="branch_pattern" placeholder="main / release/*"></label><label class="skill-enabled"><input name="default" type="checkbox">\u4f5c\u4e3a\u9ed8\u8ba4\u4ea7\u54c1\u7ebf</label></div><div class="dialog-actions"><button type="button" data-kb-close>\u53d6\u6d88</button><button class="primary" type="submit">\u4fdd\u5b58</button></div></form></dialog>`;
+}
+
+// The server-paginated knowledge entry list only appears in the global view
+// and in a selected project's document sections. Skills, updates and library
+// views render their own lists and must not inherit the entry load-more button.
+export function knowledgeEntryListVisible(projects: Project[]): boolean {
+  if (activeArea === "global") return true;
+  return activeArea === "project" && Boolean(selectedProject(projects));
 }
 
 export function renderKnowledgeWorkspace(context: KnowledgeWorkspaceContext): string {
@@ -462,14 +597,16 @@ export function renderKnowledgeWorkspace(context: KnowledgeWorkspaceContext): st
   if (!project && activeArea === "project") activeArea = "global";
   const projectKnowledge = project ? projectEntries(context, project.id).filter(item => !item.is_index).length : 0;
   const projectMode = activeArea === "project" && project;
+  const visibleProjects = filteredProjectList(context);
+  const projectShown = visibleProjects.slice(0, projectLimit);
   const editorEntries = projectMode ? projectEntries(context, project.id) : context.knowledge.filter(item => item.scope === "global");
   const reading = knowledgeReaderOpen && projectMode && activeSection !== "overview";
   return `<section class="page knowledge-page ${reading ? "knowledge-reading" : ""}"><div class="page-head"><div><h1>\u77e5\u8bc6\u5e93</h1><p>\u7ba1\u7406\u5168\u5c40\u77e5\u8bc6\u3001\u9879\u76ee\u6587\u6863\u3001Skills \u548c\u5185\u5bb9\u66f4\u65b0\u3002</p></div><button id="knowledge-refresh" type="button">${icon("refresh")}\u5237\u65b0</button></div>
     <div class="knowledge-workspace-layout ${projectMode ? "project-mode" : "top-level"}">
-      <aside class="panel knowledge-primary-rail"><header><strong>\u77e5\u8bc6\u5e93</strong><small>${context.projects.length} \u4e2a\u9879\u76ee</small></header><nav>${topLevelLabels.map(([id, iconName, label]) => `<button type="button" data-knowledge-area="${id}" class="${activeArea === id ? "active" : ""}">${icon(iconName)}<span>${label}</span></button>`).join("")}</nav><div class="knowledge-project-group"><header><strong>\u9879\u76ee</strong><small>${context.projects.length}</small></header><div>${context.projects.map(item => `<button type="button" data-knowledge-project="${item.id}" class="${projectMode && item.id === project?.id ? "active" : ""}"><span class="knowledge-project-avatar">${escapeHTML(item.name.slice(0, 1).toUpperCase())}</span><span><strong>${escapeHTML(item.name)}</strong><small>${item.id === project?.id ? `${projectKnowledge} \u7bc7\u5185\u5bb9` : "\u9879\u76ee\u77e5\u8bc6"}</small></span></button>`).join("") || renderEmpty("\u6682\u65e0\u9879\u76ee\u3002")}</div></div></aside>
+      <aside class="panel knowledge-primary-rail"><header><strong>\u77e5\u8bc6\u5e93</strong><small>${context.projects.length} \u4e2a\u9879\u76ee</small></header><nav>${topLevelLabels.map(([id, iconName, label]) => `<button type="button" data-knowledge-area="${id}" class="${activeArea === id ? "active" : ""}">${icon(iconName)}<span>${label}</span></button>`).join("")}</nav><div class="knowledge-project-group"><header><strong>\u9879\u76ee</strong><small>${visibleProjects.length}${projectSearch.trim() ? `/${context.projects.length}` : ""}</small></header><label class="knowledge-project-search"><input id="knowledge-project-search" type="search" autocomplete="off" data-allow-rerender="true" placeholder="\u641c\u7d22\u9879\u76ee" value="${escapeHTML(projectSearch)}"></label><div>${projectShown.map(item => `<button type="button" data-knowledge-project="${item.id}" class="${projectMode && item.id === project?.id ? "active" : ""}"><span class="knowledge-project-avatar">${escapeHTML(item.name.slice(0, 1).toUpperCase())}</span><span><strong>${escapeHTML(item.name)}</strong><small>${item.id === project?.id ? `${projectKnowledge} \u7bc7\u5185\u5bb9` : "\u9879\u76ee\u77e5\u8bc6"}</small></span></button>`).join("") || renderEmpty(projectSearch.trim() ? "\u6ca1\u6709\u5339\u914d\u7684\u9879\u76ee\u3002" : "\u6682\u65e0\u9879\u76ee\u3002")}</div>${knowledgeListFooter("project", projectShown.length, visibleProjects.length)}</div></aside>
       <main class="knowledge-content ${catalogLoading ? "loading-catalog" : ""}">${projectMode ? renderSection(project, context) : renderTopLevelSection(context)}</main>
     </div>
-    ${knowledgeDialog(project || ({id: ""} as Project), editorEntries)}${proposalReviewDialog()}${skillDialog(context.projects, project?.id || "")}${productLineDialog()}
+    ${knowledgeDialog(project || ({id: ""} as Project), editorEntries)}${proposalReviewDialog()}${skillDialog(context.projects, project?.id || "")}${skillDetailDialog()}${productLineDialog()}
   </section>`;
 }
 
@@ -513,6 +650,8 @@ async function mutate(context: KnowledgeWorkspaceContext, action: () => Promise<
     context.render();
     catalogProjectID = "";
     await Promise.all([context.refreshData(), loadCatalog(selectedProjectID)]);
+    allProposalsLoaded = false;
+    if (updateFilter === "all") await loadAllProposals(context, allProposalsPage, false);
     context.render();
   } catch (error) {
     context.setMessage("error", error instanceof Error ? error.message : String(error));
@@ -551,9 +690,48 @@ function syncSkillScope(form: HTMLFormElement): void {
   form.querySelectorAll<HTMLElement>(".skill-project-field").forEach(element => element.hidden = scope !== "project");
 }
 
+let knowledgeFilterRenderTimer: number | null = null;
+
+function scheduleKnowledgeFilterRender(context: KnowledgeWorkspaceContext): void {
+  if (knowledgeFilterRenderTimer !== null) window.clearTimeout(knowledgeFilterRenderTimer);
+  knowledgeFilterRenderTimer = window.setTimeout(() => {
+    knowledgeFilterRenderTimer = null;
+    context.render();
+  }, 140);
+}
+
+function openSkillEditor(context: KnowledgeWorkspaceContext, item?: Skill): void {
+  const form = document.querySelector<HTMLFormElement>("#skill-editor-form");
+  if (!form) return;
+  form.reset();
+  fillForm(form, item ? (item as unknown as Record<string, unknown>) : {
+    scope: "global", project_id: selectedProject(context.projects)?.id || "",
+    status: "active", enabled: true, auto_attach: false,
+  });
+  syncSkillScope(form);
+  openDialog("#skill-editor-dialog");
+}
+
+function openSkillDetail(context: KnowledgeWorkspaceContext, id: string): void {
+  const item = skills.find(skill => skill.id === id);
+  const dialog = document.querySelector<HTMLDialogElement>("#skill-detail-dialog");
+  const body = dialog?.querySelector<HTMLElement>("#skill-detail-body");
+  const name = dialog?.querySelector<HTMLElement>("#skill-detail-name");
+  if (!item || !dialog || !body || !name) return;
+  name.textContent = item.name;
+  const updated = item.updated_at ? new Date(item.updated_at).toLocaleString("zh-CN") : "未知";
+  body.innerHTML = `<div class="skill-detail-meta"><span class="capability-badge">${escapeHTML(skillScopeLabel(context, item))}</span>${item.auto_attach ? '<span class="capability-badge">自动启用</span>' : ""}</div><p>${escapeHTML(item.description || "未填写描述")}</p><dl class="mcp-detail-meta"><dt>版本</dt><dd>v${item.version}</dd><dt>状态</dt><dd>${escapeHTML(item.status)} · ${item.enabled ? "已启用" : "已停用"}</dd><dt>来源</dt><dd>${escapeHTML(item.source_path || "AHA managed package")}</dd><dt>更新时间</dt><dd>${escapeHTML(updated)}</dd></dl><h3>SKILL.md</h3><div class="markdown-body skill-detail-instructions">${renderMarkdown(item.instructions || "")}</div><h3>Skill Package</h3><div class="skill-package-files"><span>${(item.files || []).map(file => `<code>${escapeHTML(file)}</code>`).join("") || "<code>SKILL.md</code>"}</span></div>`;
+  const edit = dialog.querySelector<HTMLButtonElement>("#skill-detail-edit");
+  if (edit) edit.onclick = () => { dialog.close(); openSkillEditor(context, item); };
+  dialog.showModal();
+}
+
 export function bindKnowledgeWorkspace(context: KnowledgeWorkspaceContext): void {
   const project = selectedProject(context.projects);
   ensureCatalog(context, project?.id || "");
+  if (activeArea === "updates" && !allProposalsLoaded && !allProposalsLoading) {
+    void loadAllProposals(context, 1);
+  }
   document.querySelectorAll<HTMLElement>("[data-knowledge-area]").forEach(button => button.addEventListener("click", () => {
     activeArea = (button.dataset.knowledgeArea || "global") as KnowledgeArea;
     if (activeArea !== "libraries") selectedLibraryID = "";
@@ -562,7 +740,13 @@ export function bindKnowledgeWorkspace(context: KnowledgeWorkspaceContext): void
     context.render();
   }));
   document.querySelectorAll<HTMLElement>("[data-knowledge-update-filter]").forEach(button => button.addEventListener("click", () => {
-    updateFilter = button.dataset.knowledgeUpdateFilter === "all" ? "all" : "pending";
+    const next = button.dataset.knowledgeUpdateFilter === "all" ? "all" : "pending";
+    updateFilter = next;
+    if (next === "all" && !allProposalsLoaded) {
+      context.render();
+      void loadAllProposals(context, 1);
+      return;
+    }
     context.render();
   }));
   document.querySelector<HTMLSelectElement>("[data-knowledge-source-filter]")?.addEventListener("change", event => {
@@ -570,6 +754,46 @@ export function bindKnowledgeWorkspace(context: KnowledgeWorkspaceContext): void
     selectedKnowledgeID = "";
     context.render();
   });
+  document.querySelector<HTMLInputElement>("#knowledge-project-search")?.addEventListener("input", event => {
+    projectSearch = (event.currentTarget as HTMLInputElement).value;
+    projectLimit = PROJECT_BATCH_SIZE;
+    scheduleKnowledgeFilterRender(context);
+  });
+  document.querySelectorAll<HTMLElement>("[data-knowledge-project-more]").forEach(button => button.addEventListener("click", () => {
+    projectLimit += PROJECT_BATCH_SIZE;
+    context.render();
+  }));
+  document.querySelector<HTMLInputElement>("#knowledge-skill-search")?.addEventListener("input", event => {
+    skillSearch = (event.currentTarget as HTMLInputElement).value;
+    skillLimit = SKILL_BATCH_SIZE;
+    scheduleKnowledgeFilterRender(context);
+  });
+  document.querySelector<HTMLSelectElement>("#knowledge-skill-scope")?.addEventListener("change", event => {
+    skillScopeFilter = ((event.currentTarget as HTMLSelectElement).value || "all") as typeof skillScopeFilter;
+    skillLimit = SKILL_BATCH_SIZE;
+    context.render();
+  });
+  document.querySelector<HTMLSelectElement>("#knowledge-skill-project")?.addEventListener("change", event => {
+    skillProjectFilter = (event.currentTarget as HTMLSelectElement).value || "";
+    skillLimit = SKILL_BATCH_SIZE;
+    context.render();
+  });
+  document.querySelector<HTMLSelectElement>("#knowledge-skill-status")?.addEventListener("change", event => {
+    skillStatusFilter = (event.currentTarget as HTMLSelectElement).value || "all";
+    skillLimit = SKILL_BATCH_SIZE;
+    context.render();
+  });
+  document.querySelectorAll<HTMLElement>("[data-knowledge-skill-more]").forEach(button => button.addEventListener("click", () => {
+    skillLimit += SKILL_BATCH_SIZE;
+    context.render();
+  }));
+  document.querySelectorAll<HTMLElement>("[data-knowledge-proposal-page]").forEach(button => button.addEventListener("click", () => {
+    const delta = Number(button.dataset.knowledgeProposalPage || 0);
+    if (!delta) return;
+    const next = Math.min(allProposalsPages, Math.max(1, allProposalsPage + delta));
+    if (next !== allProposalsPage) void loadAllProposals(context, next);
+  }));
+  document.querySelectorAll<HTMLElement>("[data-skill-view]").forEach(button => button.addEventListener("click", () => openSkillDetail(context, button.dataset.skillView || "")));
   document.querySelector<HTMLInputElement>("[data-knowledge-auto-review]")?.addEventListener("change", event => {
     const input = event.currentTarget;
     const enabled = input.checked;
@@ -795,22 +1019,10 @@ export function bindKnowledgeWorkspace(context: KnowledgeWorkspaceContext): void
   document.querySelectorAll<HTMLElement>("[data-knowledge-verify]").forEach(button => button.addEventListener("click", () => void mutate(context, () => api.verifyKnowledge(button.dataset.knowledgeVerify || ""), "\u5185\u5bb9\u5df2\u786e\u8ba4")));
   document.querySelectorAll<HTMLElement>("[data-knowledge-feedback]").forEach(button => button.addEventListener("click", () => void mutate(context, () => api.feedbackKnowledge(button.dataset.knowledgeId || "", button.dataset.knowledgeFeedback as "helped" | "stale" | "wrong"), "\u53cd\u9988\u5df2\u8bb0\u5f55")));
 
-  document.querySelector("[data-skill-new]")?.addEventListener("click", () => {
-    const form = document.querySelector<HTMLFormElement>("#skill-editor-form");
-    if (!form) return;
-    form.reset();
-    fillForm(form, {scope: "global", project_id: project?.id || "", status: "active", enabled: true});
-    syncSkillScope(form);
-    openDialog("#skill-editor-dialog");
-  });
+  document.querySelector("[data-skill-new]")?.addEventListener("click", () => openSkillEditor(context));
   document.querySelectorAll<HTMLElement>("[data-skill-edit]").forEach(button => button.addEventListener("click", () => {
     const item = skills.find(skill => skill.id === button.dataset.skillEdit);
-    const form = document.querySelector<HTMLFormElement>("#skill-editor-form");
-    if (!item || !form) return;
-    form.reset();
-    fillForm(form, item as unknown as Record<string, unknown>);
-    syncSkillScope(form);
-    openDialog("#skill-editor-dialog");
+    if (item) openSkillEditor(context, item);
   }));
   document.querySelector<HTMLSelectElement>("#skill-editor-form [name=scope]")?.addEventListener("change", event => syncSkillScope(event.currentTarget.form!));
   document.querySelector<HTMLFormElement>("#skill-editor-form")?.addEventListener("submit", event => {
@@ -820,6 +1032,7 @@ export function bindKnowledgeWorkspace(context: KnowledgeWorkspaceContext): void
     const id = String(payload.id || "");
     delete payload.id;
     payload.enabled = form.get("enabled") === "on";
+    payload.auto_attach = form.get("auto_attach") === "on";
     if (payload.scope === "global") payload.project_id = "";
     void mutate(context, () => id ? api.updateSkill(id, payload) : api.createSkill(payload), id ? "Skill \u5df2\u66f4\u65b0" : "Skill \u5df2\u521b\u5efa", event.currentTarget, "\u4fdd\u5b58\u4e2d");
   });

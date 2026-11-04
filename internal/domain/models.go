@@ -600,6 +600,7 @@ type Skill struct {
 	Version        int         `json:"version"`
 	Status         string      `json:"status"`
 	Enabled        bool        `json:"enabled"`
+	AutoAttach     bool        `json:"auto_attach"`
 	SourcePath     string      `json:"source_path,omitempty"`
 	Files          []string    `json:"files,omitempty"`
 	PackageFiles   []SkillFile `json:"-"`

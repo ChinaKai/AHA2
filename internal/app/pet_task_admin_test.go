@@ -32,7 +32,7 @@ func TestPetTaskLifecycleAndRead(t *testing.T) {
 	}
 	task, err := fixture.service.PetCreateTask(fixture.ctx, PetCreateTaskInput{
 		ProjectID: project.ID, WorkspaceID: workspace.ID, Title: "生命周期任务",
-		Request: "先运行再完成", Start: boolPointer(true),
+		Request: "先运行再完成", Filesystem: "read-only", Start: boolPointer(true),
 	})
 	if err != nil {
 		t.Fatal(err)

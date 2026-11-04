@@ -51,6 +51,9 @@ func TestPetWorkStateShowsApprovalsAndPriorWork(t *testing.T) {
 	if !strings.Contains(state.OpenLoops, "跟进任务 A") {
 		t.Fatalf("open loops missing from work state: %#v", state)
 	}
+	if !strings.HasSuffix(state.OpenLoopsPath, "core/loops.md") && !strings.HasSuffix(state.OpenLoopsPath, `core\loops.md`) {
+		t.Fatalf("open loops path missing from work state: %#v", state)
+	}
 	if state.PendingApprovals != 1 || len(state.Approvals) == 0 || state.Approvals[0].ID != approval.ID {
 		t.Fatalf("approvals=%#v", state)
 	}

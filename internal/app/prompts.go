@@ -5,12 +5,16 @@ import (
 	"github.com/ChinaKai/AHA2/internal/domain"
 )
 
-func (s *Service) PromptTemplates(ctx context.Context) ([]domain.PromptTemplate, error) {
+func (s *Service) promptLanguage(ctx context.Context) string {
 	language := domain.LanguageAuto
 	if settings, err := s.store.GeneralSettings(ctx); err == nil {
 		language = settings.Language
 	}
-	return s.prompts.TemplatesForLanguage(ctx, language)
+	return language
+}
+
+func (s *Service) PromptTemplates(ctx context.Context) ([]domain.PromptTemplate, error) {
+	return s.prompts.TemplatesForLanguage(ctx, s.promptLanguage(ctx))
 }
 
 func (s *Service) UpdatePromptTemplate(ctx context.Context, id, content string) error {

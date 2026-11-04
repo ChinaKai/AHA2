@@ -57,7 +57,7 @@ function usageHTML(account: CodexAccount): string {
   </div>${error}`;
 }
 
-function renderCodexAccountsBase(accounts: CodexAccount[]): string {
+function renderCodexAccountsBase(accounts: CodexAccount[], footer = ""): string {
   const rows = accounts.map(account => {
     const resetCredits = Number(account.usage?.reset_credits_available || 0);
     const displayName = account.email || accountIdentity(account);
@@ -81,6 +81,7 @@ function renderCodexAccountsBase(accounts: CodexAccount[]): string {
   return `<section class="panel codex-account-panel">
     <div class="panel-head"><strong>Codex 官方账号</strong><button type="button" id="add-codex-account">${icon("plus")}添加账号</button></div>
     ${rows || `<div class="empty">添加 OpenAI Codex 账号后，可为每个模型选择独立账号。</div>`}
+    ${footer}
   </section>
   <dialog id="codex-account-dialog" class="wide"><div class="dialog-head"><h2>添加 Codex 账号</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div><div class="dialog-body">
     <label>账号备注<input id="codex-account-label" placeholder="可选，例如 工作账号"></label>
@@ -92,8 +93,8 @@ function renderCodexAccountsBase(accounts: CodexAccount[]): string {
   </div></dialog>`;
 }
 
-export function renderCodexAccounts(accounts: CodexAccount[]): string {
-  return renderCodexAccountsBase(accounts).replace(
+export function renderCodexAccounts(accounts: CodexAccount[], footer = ""): string {
+  return renderCodexAccountsBase(accounts, footer).replace(
     "<label>Callback URL",
     '<label class="proxy-toggle"><input id="codex-login-proxy" type="checkbox" checked>OAuth Token 交换使用共享代理</label><label>Callback URL',
   );

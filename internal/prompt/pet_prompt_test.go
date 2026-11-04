@@ -10,11 +10,11 @@ func TestPetTaskIdentityOwnsWorkspacePaths(t *testing.T) {
 		path string
 		want []string
 	}{
-		{"templates/identity-pet-task.md", []string{"electronic avatar", "project orchestrator", "Do not implement code", "Unclosed"}},
-		{"templates/zh-CN/identity-pet-task.md", []string{"电子分身", "项目调度者", "不亲自实现代码", "未闭环"}},
+		{"templates/identity-pet-task.md", []string{"electronic avatar", "project orchestrator", "Do not change project code", "pet-lab", "Unclosed"}},
+		{"templates/zh-CN/identity-pet-task.md", []string{"电子分身", "项目调度者", "不直接修改项目源码", "pet-lab", "未闭环"}},
 	}
 	common := []string{
-		"core/identity.md", "core/principles.md", "core/loops.md",
+		"core/identity.md", "core/principles.md", "core/loops.md", "core/agenda.md", "pet-lab/",
 		"pet_update_core", "pet_write_diary", "pet_write_worklog",
 		"aha_pet_work_state", "aha_capabilities", "pet_say", "pet_submit_idea",
 		"aha_request_permission_change", "aha_pet_permissions", "pet_open_task",

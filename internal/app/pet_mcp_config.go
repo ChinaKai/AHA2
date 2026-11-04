@@ -86,6 +86,8 @@ func petMCPAllowedTools(task domain.Task) []string {
 		"mcp__aha2-pet__aha_bind_task_channel",
 		"mcp__aha2-pet__aha_unbind_task_channel",
 		"mcp__aha2-pet__aha_complete_task",
+		"mcp__aha2-pet__aha_finalize_task_worktree",
+		"mcp__aha2-pet__aha_request_code_review",
 		"mcp__aha2-pet__aha_delete_task",
 		"mcp__aha2-pet__aha_reopen_task",
 		"mcp__aha2-pet__aha_interrupt_task",

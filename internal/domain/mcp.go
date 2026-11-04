@@ -18,6 +18,7 @@ type MCPServer struct {
 	DisabledTools []string          `json:"disabled_tools,omitempty"`
 	Enabled       bool              `json:"enabled"`
 	Builtin       bool              `json:"builtin"`
+	AutoInject    bool              `json:"auto_inject,omitempty"`
 	Health        string            `json:"health"`
 	LastError     string            `json:"last_error,omitempty"`
 	LastCheckedAt time.Time         `json:"last_checked_at,omitempty"`

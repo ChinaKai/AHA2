@@ -3358,5 +3358,16 @@ func (s *Store) migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(113, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
 		return fmt.Errorf("record schema v113: %w", err)
 	}
+	var hasV114 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=114)`).Scan(&hasV114)
+	if !hasV114 {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE skills ADD COLUMN auto_attach INTEGER NOT NULL DEFAULT 0`); err != nil &&
+			!strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("apply schema v114: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(114, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v114: %w", err)
+	}
 	return nil
 }

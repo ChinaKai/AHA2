@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +14,17 @@ const (
 	petCoreIdentityPath   = "core/identity.md"
 	petCorePrinciplesPath = "core/principles.md"
 	petCoreLoopsPath      = "core/loops.md"
+	petCoreAgendaPath     = "core/agenda.md"
+	petLabDir             = "pet-lab"
+
+	// The loops and agenda ledgers are injected into every wake-up, unlike the
+	// diary and worklog. Keep them bounded so a long-lived pet cannot silently
+	// crowd out the rest of its context; the pet compacts them by deleting
+	// resolved items.
+	petCoreLoopsMaxBytes  = 16 * 1024
+	petCoreLoopsSoftBytes = 8 * 1024
+	petCoreLoopsSoftItems = 20
+	petCoreAgendaMaxBytes = 16 * 1024
 )
 
 // The core files hold everything that makes the pet itself: its name, shape,
@@ -33,10 +45,27 @@ var (
 `
 	petCoreLoopsSeed = `# 开放闭环
 
-- 记录自己创建/参与的任务、想法和审批，直到真正闭环。
-- 每项写：状态（open/waiting/blocked/done）| 事项 | 下一步 | 关闭条件
-- 闭环后删除，或移到“已闭环”。
-- 每次最终回复列出未闭环事项及原因；没有则写“无”。
+- 只记录尚未真正闭环的事项；已关闭的立即删除，需要留痕就写入当天 worklog。
+- 每项写：状态（open/waiting/blocked）| 事项 | 下一步 | 关闭条件
+- 每次最终回复只列出新增、变化或需要主人决定的未闭环事项；没有变化时回复 NOOP。
+`
+	petCoreAgendaSeed = `# 自主议程
+
+- 只记录宠物自己可以推进、不需要主人立即决策的事项。
+- 每项写：状态（next/doing/waiting）| 目标 | 下一步 | 验收标准 | 是否需要主人决策
+- 每次唤醒最多推进一项；真正闭环后才删除，留痕写入当天 worklog。
+- 完成但留下主人决策的事项改为 waiting，不能删除；同一决策只创建一次。
+- 需要主人决定时用 pet_request_approval 创建 kind=owner_decision，并在本议程或 loops 写 waiting 项；不能只写在最终回复里。
+- 没有可推进项时，从最近 worklog/loops 选一个低风险、可验证的 AHA 使用体验改进并启动 Task；不要用 NOOP 逃避。
+- 小工具/原型写在 pet-lab/，可以直接读写和运行；需要改 AHA2 源码时创建普通 Task。
+- 创建任务默认 high 推理和完全访问；简单/只读任务可显式降级，复杂任务选择更强的模型。
+- 写权限任务完成前必须用 aha_request_code_review 创建独立、只读、高推理的 Review Task，等待 Verdict: APPROVE 后才能完成或合入。
+`
+	petLabReadmeSeed = `# 宠物实验室
+
+- 这里可以直接写脚本、原型和临时文件，也可以运行它们。
+- 只在此目录内直接写；core/、diary/、worklog/ 仍用宠物工具。
+- 不要写工作区之外；不要在这里保存凭据或秘密。
 `
 )
 
@@ -70,6 +99,9 @@ func (s *Service) ensurePetWorkspaceFiles(ctx context.Context, assistant *domain
 	if err := os.MkdirAll(filepath.Join(root, "worklog"), 0o700); err != nil {
 		return err
 	}
+	if err := os.MkdirAll(filepath.Join(root, petLabDir), 0o700); err != nil {
+		return err
+	}
 	identity := petCoreIdentitySeed
 	principles := petCorePrinciplesSeed
 	if assistant != nil {
@@ -86,7 +118,13 @@ func (s *Service) ensurePetWorkspaceFiles(ctx context.Context, assistant *domain
 	if err := writePetCoreFile(filepath.Join(root, petCorePrinciplesPath), principles); err != nil {
 		return err
 	}
-	return writePetCoreFile(filepath.Join(root, petCoreLoopsPath), petCoreLoopsSeed)
+	if err := writePetCoreFile(filepath.Join(root, petCoreLoopsPath), petCoreLoopsSeed); err != nil {
+		return err
+	}
+	if err := writePetCoreFile(filepath.Join(root, petCoreAgendaPath), petCoreAgendaSeed); err != nil {
+		return err
+	}
+	return writePetCoreFile(filepath.Join(root, petLabDir, "README.md"), petLabReadmeSeed)
 }
 
 type PetWorkspaceDocument struct {
@@ -111,7 +149,7 @@ func (s *Service) PetCoreDocuments(ctx context.Context) ([]PetWorkspaceDocument,
 		return []PetWorkspaceDocument{}, nil
 	}
 	items := []PetWorkspaceDocument{}
-	for _, relative := range []string{petCoreIdentityPath, petCorePrinciplesPath, petCoreLoopsPath} {
+	for _, relative := range []string{petCoreIdentityPath, petCorePrinciplesPath, petCoreLoopsPath, petCoreAgendaPath} {
 		data, err := os.ReadFile(filepath.Join(root, relative))
 		if err != nil {
 			if os.IsNotExist(err) {
@@ -125,8 +163,9 @@ func (s *Service) PetCoreDocuments(ctx context.Context) ([]PetWorkspaceDocument,
 }
 
 // PetOpenLoops returns the pet's durable open-loop ledger. It is injected into
-// aha_pet_work_state and the autonomous trigger so commitments survive context
-// compaction and several wake-ups without the pet having to remember them.
+// aha_pet_work_state so commitments survive context compaction and several
+// wake-ups without the pet having to remember them. Archived sections stay on
+// disk for the owner, but are deliberately left out of the prompt.
 func (s *Service) PetOpenLoops(ctx context.Context) string {
 	root := strings.TrimSpace(s.petWorkspaceRoot(ctx))
 	if root == "" {
@@ -139,7 +178,118 @@ func (s *Service) PetOpenLoops(ctx context.Context) string {
 	if err != nil {
 		return ""
 	}
-	return string(data)
+	return activePetLoops(string(data))
+}
+
+func (s *Service) petOpenLoopsPath(ctx context.Context) string {
+	return s.petCorePath(ctx, petCoreLoopsPath)
+}
+
+// PetAgenda returns the pet's own initiative queue. Unlike open loops, which
+// often wait on the owner, agenda items are things the pet can advance without
+// a new decision.
+func (s *Service) PetAgenda(ctx context.Context) string {
+	root := strings.TrimSpace(s.petWorkspaceRoot(ctx))
+	if root == "" {
+		return ""
+	}
+	if err := s.ensurePetWorkspaceFiles(ctx, nil); err != nil {
+		return ""
+	}
+	data, err := os.ReadFile(filepath.Join(root, petCoreAgendaPath))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+func (s *Service) petAgendaPath(ctx context.Context) string {
+	return s.petCorePath(ctx, petCoreAgendaPath)
+}
+
+func (s *Service) petLabPath(ctx context.Context) string {
+	return s.petCorePath(ctx, petLabDir)
+}
+
+func (s *Service) petCorePath(ctx context.Context, relative string) string {
+	root := strings.TrimSpace(s.petWorkspaceRoot(ctx))
+	if root == "" {
+		return relative
+	}
+	return filepath.Join(root, relative)
+}
+
+// activePetLoops drops a trailing archived section (## 已关闭, ## Closed, ...)
+// while keeping later sections such as 备注. Without this, moving resolved
+// items to an archive made the file grow forever and every wake-up paid for the
+// whole history.
+func activePetLoops(content string) string {
+	lines := strings.Split(content, "\n")
+	kept := make([]string, 0, len(lines))
+	skipLevel := 0
+	for _, line := range lines {
+		level, title := petMarkdownHeading(line)
+		if skipLevel > 0 {
+			if level == 0 || level > skipLevel {
+				continue
+			}
+			skipLevel = 0
+		}
+		if level == 2 && isPetClosedLoopsHeading(title) {
+			skipLevel = level
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return strings.TrimSpace(strings.Join(kept, "\n"))
+}
+
+func petMarkdownHeading(line string) (int, string) {
+	trimmed := strings.TrimSpace(line)
+	level := 0
+	for level < len(trimmed) && trimmed[level] == '#' {
+		level++
+	}
+	if level == 0 || level > 6 {
+		return 0, ""
+	}
+	return level, strings.ToLower(strings.TrimSpace(trimmed[level:]))
+}
+
+func isPetClosedLoopsHeading(title string) bool {
+	for _, prefix := range []string{"已关闭", "已闭环", "closed", "archive", "archived"} {
+		if strings.HasPrefix(title, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// petLoopsNote warns the pet when the active ledger is getting large. The hard
+// limit prevents writes, so this soft note is the chance to compact first.
+func petLoopsNote(loops string) string {
+	return petLedgerNote("开放闭环", petCoreLoopsPath, loops, petCoreLoopsSoftBytes, petCoreLoopsSoftItems)
+}
+
+func petAgendaNote(agenda string) string {
+	return petLedgerNote("自主议程", petCoreAgendaPath, agenda, petCoreLoopsSoftBytes, petCoreLoopsSoftItems)
+}
+
+func petLedgerNote(label, path, content string, softBytes, softItems int) string {
+	if content == "" {
+		return ""
+	}
+	items := 0
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "- ") || strings.HasPrefix(trimmed, "* ") {
+			items++
+		}
+	}
+	if len(content) <= softBytes && items <= softItems {
+		return ""
+	}
+	return fmt.Sprintf("%s偏多（%d 条 / %d 字节）。请先用 pet_update_core 压缩 %s：删除已关闭项并把留痕写入当天 worklog，只保留尚未闭环的事项。", label, items, len(content), path)
 }
 
 func writePetCoreFile(path, content string) error {

@@ -16,6 +16,7 @@ const paths: Record<string, string> = {
   clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
   refresh: '<path d="M20 6v6h-6"/><path d="M4 18v-6h6"/><path d="M6.5 9a7 7 0 0 1 11.8-2.6L20 8M4 16l1.7 1.6A7 7 0 0 0 17.5 15"/>',
   edit: '<path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/>',
+  eye: '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/>',
   logout: '<path d="M10 17l5-5-5-5M15 12H3"/><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/>',
   menu: '<path d="M4 6h16M4 12h16M4 18h16"/>',
   close: '<path d="M18 6 6 18M6 6l12 12"/>',

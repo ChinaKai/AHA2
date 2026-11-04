@@ -104,9 +104,9 @@ func (s *Store) CreateSkill(ctx context.Context, item domain.Skill) error {
 		return err
 	}
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO skills(id,package_slug,scope,project_id,name,description,instructions,version,status,enabled,source_path,created_at,updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, item.ID, item.PackageSlug, item.Scope, item.ProjectID, item.Name, item.Description, item.Instructions,
-		item.Version, item.Status, boolInt(item.Enabled), item.SourcePath, timeString(item.CreatedAt), timeString(item.UpdatedAt))
+		INSERT INTO skills(id,package_slug,scope,project_id,name,description,instructions,version,status,enabled,auto_attach,source_path,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, item.ID, item.PackageSlug, item.Scope, item.ProjectID, item.Name, item.Description, item.Instructions,
+		item.Version, item.Status, boolInt(item.Enabled), boolInt(item.AutoAttach), item.SourcePath, timeString(item.CreatedAt), timeString(item.UpdatedAt))
 	if err != nil {
 		_ = s.removeSkillPackage(item)
 	}
@@ -114,7 +114,7 @@ func (s *Store) CreateSkill(ctx context.Context, item domain.Skill) error {
 }
 
 func (s *Store) ListSkills(ctx context.Context, scope, projectID string, enabledOnly bool) ([]domain.Skill, error) {
-	query := `SELECT id,package_slug,scope,project_id,name,description,instructions,version,status,enabled,source_path,created_at,updated_at FROM skills WHERE 1=1`
+	query := `SELECT id,package_slug,scope,project_id,name,description,instructions,version,status,enabled,auto_attach,source_path,created_at,updated_at FROM skills WHERE 1=1`
 	args := []any{}
 	if scope != "" {
 		query += ` AND scope=?`
@@ -138,7 +138,7 @@ func (s *Store) ListSkills(ctx context.Context, scope, projectID string, enabled
 		var item domain.Skill
 		var createdAt, updatedAt string
 		if err := rows.Scan(&item.ID, &item.PackageSlug, &item.Scope, &item.ProjectID, &item.Name, &item.Description, &item.Instructions,
-			&item.Version, &item.Status, &item.Enabled, &item.SourcePath, &createdAt, &updatedAt); err != nil {
+			&item.Version, &item.Status, &item.Enabled, &item.AutoAttach, &item.SourcePath, &createdAt, &updatedAt); err != nil {
 			return nil, err
 		}
 		item.CreatedAt, item.UpdatedAt = parseTime(createdAt), parseTime(updatedAt)
@@ -172,18 +172,18 @@ func (s *Store) UpdateSkill(ctx context.Context, item domain.Skill) error {
 		return err
 	}
 	_, err := s.db.ExecContext(ctx, `
-		UPDATE skills SET package_slug=?,scope=?,project_id=?,name=?,description=?,instructions=?,version=?,status=?,enabled=?,source_path=?,updated_at=? WHERE id=?`,
+		UPDATE skills SET package_slug=?,scope=?,project_id=?,name=?,description=?,instructions=?,version=?,status=?,enabled=?,auto_attach=?,source_path=?,updated_at=? WHERE id=?`,
 		item.PackageSlug, item.Scope, item.ProjectID, item.Name, item.Description, item.Instructions, item.Version, item.Status,
-		boolInt(item.Enabled), item.SourcePath, timeString(item.UpdatedAt), item.ID)
+		boolInt(item.Enabled), boolInt(item.AutoAttach), item.SourcePath, timeString(item.UpdatedAt), item.ID)
 	return err
 }
 
 func (s *Store) Skill(ctx context.Context, id string) (domain.Skill, error) {
 	var item domain.Skill
 	var createdAt, updatedAt string
-	err := s.db.QueryRowContext(ctx, `SELECT id,package_slug,scope,project_id,name,description,instructions,version,status,enabled,source_path,created_at,updated_at FROM skills WHERE id=?`, id).
+	err := s.db.QueryRowContext(ctx, `SELECT id,package_slug,scope,project_id,name,description,instructions,version,status,enabled,auto_attach,source_path,created_at,updated_at FROM skills WHERE id=?`, id).
 		Scan(&item.ID, &item.PackageSlug, &item.Scope, &item.ProjectID, &item.Name, &item.Description, &item.Instructions,
-			&item.Version, &item.Status, &item.Enabled, &item.SourcePath, &createdAt, &updatedAt)
+			&item.Version, &item.Status, &item.Enabled, &item.AutoAttach, &item.SourcePath, &createdAt, &updatedAt)
 	item.CreatedAt, item.UpdatedAt = parseTime(createdAt), parseTime(updatedAt)
 	if err == nil {
 		if bindings, bindingErr := s.knowledgeLibraryBindings(ctx); bindingErr == nil {

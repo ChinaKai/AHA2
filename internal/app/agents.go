@@ -525,7 +525,7 @@ func (s *Service) scheduleAgent(ctx context.Context, taskID, agentID string) (do
 			parentTurnID = item.SourceTurnID
 		}
 	}
-	instruction, err := s.prompts.RenderInboxBatch(ctx, inboxTemplateItems(items))
+	instruction, err := s.prompts.RenderInboxBatch(ctx, s.promptLanguage(ctx), inboxTemplateItems(items))
 	if err != nil {
 		return domain.Turn{}, false, err
 	}
@@ -556,14 +556,34 @@ func inboxTemplateItems(items []domain.AgentInboxItem) []prompt.InboxTemplateIte
 	for _, item := range items {
 		rendered := prompt.InboxTemplateItem{
 			Sequence: item.Sequence, SourceKind: item.SourceKind, SourceAgentID: item.SourceAgentID,
-			Content: strings.TrimSpace(item.Content),
+			CreatedAt: prompt.FormatPromptTime(item.CreatedAt), Content: strings.TrimSpace(item.Content),
 		}
 		if channelContext, ok := item.Payload["channel_context"].(map[string]any); ok {
+			// A channel message is never a Web Owner message even when it was
+			// delivered into owner_message storage. The actor role decides
+			// whether it actually carries Owner authority.
+			rendered.SourceKind = "channel_message"
 			actor, _ := channelContext["actor"].(map[string]any)
 			displayName := strings.TrimSpace(fmt.Sprint(actor["display_name"]))
 			if displayName != "" && displayName != "<nil>" {
 				rendered.SourceAgentID = displayName
 				rendered.ChannelSender = displayName
+			}
+			role := strings.TrimSpace(fmt.Sprint(actor["role"]))
+			if role == "" || role == "<nil>" {
+				role = "unknown"
+			}
+			rendered.ChannelSenderRole = role
+			if isOwner, ok := actor["is_owner"].(bool); ok {
+				rendered.ChannelSenderIsOwner = isOwner
+			} else {
+				rendered.ChannelSenderIsOwner = role == "owner"
+			}
+			if isBot, ok := actor["is_bot"].(bool); ok {
+				rendered.ChannelSenderIsBot = isBot
+			}
+			if receiptID := strings.TrimSpace(fmt.Sprint(channelContext["inbound_receipt_id"])); receiptID != "" && receiptID != "<nil>" {
+				rendered.ChannelReceiptID = receiptID
 			}
 			if chatName := strings.TrimSpace(fmt.Sprint(channelContext["chat_display_name"])); chatName != "" && chatName != "<nil>" {
 				rendered.ChannelConversation = chatName

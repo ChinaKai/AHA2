@@ -239,6 +239,7 @@ func (s *Server) createTask(writer http.ResponseWriter, request *http.Request) {
 		MaxAgents           int              `json:"max_agents"`
 		KnowledgePolicy     string           `json:"knowledge_policy"`
 		SkillIDs            []string         `json:"skill_ids"`
+		ApplyAutoSkills     *bool            `json:"apply_auto_skills"`
 		MCPServerIDs        []string         `json:"mcp_server_ids"`
 		AgentCapabilities   *map[string]bool `json:"agent_capabilities"`
 		StartMode           string           `json:"start_mode"`
@@ -332,7 +333,7 @@ func (s *Server) createTask(writer http.ResponseWriter, request *http.Request) {
 		StreamIdleTimeoutMS: payload.StreamIdleTimeoutMS, StreamMaxRetries: payload.StreamMaxRetries,
 		Filesystem: filesystem, Approval: approval, CollaborationMode: payload.CollaborationMode,
 		MaxAgents: payload.MaxAgents, ProxyEnabled: payload.ProxyEnabled, KnowledgePolicy: payload.KnowledgePolicy,
-		SkillIDs: payload.SkillIDs, MCPServerIDs: payload.MCPServerIDs,
+		SkillIDs: payload.SkillIDs, ApplyAutoSkills: payload.ApplyAutoSkills, MCPServerIDs: payload.MCPServerIDs,
 		AgentCapabilities: capabilities, StartMode: payload.StartMode,
 	})
 	if err != nil {

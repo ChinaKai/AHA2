@@ -554,10 +554,10 @@ func (s *Store) DeleteRuntimeSnapshot(ctx context.Context, id string) error {
 	return err
 }
 
-func (s *Store) UpdateTaskWorkspace(ctx context.Context, id, path, baseCommit, branch, updatedAt string) error {
+func (s *Store) UpdateTaskWorkspace(ctx context.Context, id, path, baseCommit, branch, targetBranch, updatedAt string) error {
 	_, err := s.db.ExecContext(ctx, `
-		UPDATE tasks SET task_workspace_path=?,base_commit=?,task_branch=?,updated_at=? WHERE id=?`,
-		path, baseCommit, branch, updatedAt, id,
+		UPDATE tasks SET task_workspace_path=?,base_commit=?,task_branch=?,target_branch=?,updated_at=? WHERE id=?`,
+		path, baseCommit, branch, targetBranch, updatedAt, id,
 	)
 	return err
 }

@@ -602,7 +602,7 @@ const legacyEnglish: Record<string, string> = {
   "创建、修改、删除模型/Provider/Env Group；不读取凭据值": "Create, edit, and delete models, providers, and env groups; credential values are never read",
   "提交知识候选、维护 Skill、读取 Prompt；Prompt 修改和删除需要审批": "Submit knowledge candidates, maintain Skills, and read Prompts; prompt edits and deletions need approval",
   "权限变更立即生效，不重置会话；无权限的工具调用会被服务端拒绝。删除 Task/项目/Workspace 会先创建审批，主人批准后才执行。": "Permission changes apply immediately without resetting the session; unauthorized tool calls are rejected server-side. Deleting Tasks, projects, or Workspaces creates an approval first and runs after the Owner approves.",
-  "空闲触发（分钟）": "Idle trigger (minutes)",
+  "空闲触发（分钟，最低 5 分钟复盘）": "Idle trigger (minutes; review runs at least every 5 min)",
   "每小时上限（次，0=不限）": "Hourly limit (0 = unlimited)",
   "免打扰开始（点）": "Quiet hours start (hour)",
   "免打扰结束（点）": "Quiet hours end (hour)",

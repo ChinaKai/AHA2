@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -222,6 +223,48 @@ func (s *Store) ListKnowledgeProposals(ctx context.Context, scope, projectID str
 		filtered = append(filtered, item)
 	}
 	return filtered, nil
+}
+
+// ListKnowledgeProposalsPage returns one page of proposals for the updates
+// history. Pending proposals are usually fetched unpaginated (limit 0) for the
+// batch review flow; the "all" tab uses a small page so the response and the
+// rendered feed stay bounded.
+func (s *Store) ListKnowledgeProposalsPage(ctx context.Context, scope, projectID, status string, page, limit int) ([]domain.KnowledgeProposal, int, error) {
+	items, err := s.ListKnowledgeProposals(ctx, scope, projectID)
+	if err != nil {
+		return nil, 0, err
+	}
+	if status != "" && status != "all" {
+		filtered := make([]domain.KnowledgeProposal, 0, len(items))
+		for _, item := range items {
+			if string(item.Status) == status {
+				filtered = append(filtered, item)
+			}
+		}
+		items = filtered
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		if items[i].CreatedAt.Equal(items[j].CreatedAt) {
+			return items[i].ID > items[j].ID
+		}
+		return items[i].CreatedAt.After(items[j].CreatedAt)
+	})
+	total := len(items)
+	if limit <= 0 {
+		return items, total, nil
+	}
+	if page < 1 {
+		page = 1
+	}
+	start := (page - 1) * limit
+	if start >= total {
+		return []domain.KnowledgeProposal{}, total, nil
+	}
+	end := start + limit
+	if end > total {
+		end = total
+	}
+	return append([]domain.KnowledgeProposal(nil), items[start:end]...), total, nil
 }
 
 func (s *Store) CreateKnowledgeProposal(ctx context.Context, item domain.KnowledgeProposal) (domain.KnowledgeProposal, error) {

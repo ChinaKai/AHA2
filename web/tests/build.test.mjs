@@ -1041,6 +1041,8 @@ test("built web contains responsive application", async () => {
   assert.match(script, /id="task-isolation"/);
   assert.match(script, /id="task-worktree-settings"/);
   assert.match(script, /syncTaskGitIsolation/);
+  assert.match(script, /<option value="inplace" selected>原地执行（默认）<\/option>/);
+  assert.match(script, /isolation\.value = "inplace"/);
   assert.doesNotMatch(script, /id="ws-isolation"|id="ws-worktree-dir"/);
   assert.match(conversation, /agent-update-message/);
   assert.match(conversation, /agent-tool-message/);
@@ -1950,7 +1952,7 @@ test("system-managed resources are read-only and normal tasks exclude pet MCP", 
   assert.match(main, /function isSystemProject/);
   assert.match(main, /!isSystemProject\(item\)/);
   assert.match(main, /系统托管/);
-  assert.match(main, /item\.id !== "mcp_pet"/);
+  assert.match(main, /item\.enabled && !item\.builtin/);
   assert.match(catalog, /system_project_read_only/);
   assert.match(catalog, /domain\.IsSystemManagedProject/);
   assert.match(tasks, /system_project_read_only/);
@@ -2568,4 +2570,89 @@ test("i18n catalogs and language preference are wired into the shell", async () 
   assert.match(main, /api\.updateGeneralSettings\(language\)/);
   assert.match(main, /applyLocale\(result\.general\.language\)/);
   assert.match(main, /generalSettings: \{language: "auto"\}/);
+});
+
+test("list pagination clamps pages and keeps counts visible", async () => {
+  const {paginateItems, paginationHTML, textMatchesQuery} = await import(pathToFileURL(resolve(import.meta.dirname, "..", "dist", "ui_helpers.js")).href);
+  const empty = paginateItems([], 3, 8);
+  assert.deepEqual(empty, {items: [], page: 1, pages: 1, total: 0});
+  const items = Array.from({length: 17}, (_, index) => index);
+  assert.deepEqual(paginateItems(items, 99, 8), {items: [16], page: 3, pages: 3, total: 17});
+  assert.equal(paginateItems(items, 0, 8).page, 1);
+  assert.equal(paginateItems(items, 2, 8).items.length, 8);
+  assert.equal(paginationHTML("models", empty), "");
+  const single = paginationHTML("providers", paginateItems([1, 2], 1, 5));
+  assert.match(single, /共 2 个/);
+  assert.doesNotMatch(single, /data-page-kind/);
+  const paged = paginationHTML("models", paginateItems(items, 2, 8));
+  assert.match(paged, /data-page-kind="models"/);
+  assert.match(paged, /第 2\/3 页/);
+  assert.match(paged, /data-page-delta="-1"/);
+  assert.match(paged, /data-page-delta="1"/);
+  assert.equal(textMatchesQuery(["Claude Sonnet", "huailai"], "sonnet"), true);
+  assert.equal(textMatchesQuery(["Claude Sonnet"], "codex"), false);
+  assert.equal(textMatchesQuery(["x"], "  "), true);
+});
+
+test("models page paginates accounts, providers and models", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const main = await readFile(resolve(root, "src", "main.ts"), "utf8");
+  const codex = await readFile(resolve(root, "src", "codex_accounts.ts"), "utf8");
+  assert.match(main, /const MODEL_PAGE_SIZE = 8/);
+  assert.match(main, /const PROVIDER_PAGE_SIZE = 5/);
+  assert.match(main, /const CODEX_ACCOUNT_PAGE_SIZE = 3/);
+  assert.match(main, /paginateItems\(visibleModels, state\.modelPage, MODEL_PAGE_SIZE\)/);
+  assert.match(main, /paginateItems\(state\.providers, state\.providerPage, PROVIDER_PAGE_SIZE\)/);
+  assert.match(main, /paginateItems\(state\.codexAccounts, state\.codexAccountPage, CODEX_ACCOUNT_PAGE_SIZE\)/);
+  assert.match(main, /id="model-search"/);
+  assert.match(main, /data-1p-ignore/);
+  assert.match(main, /readonly placeholder="搜索模型/);
+  assert.match(main, /modelSearchUserInput/);
+  assert.match(main, /nextView === "models"/);
+  assert.match(main, /data-page-kind/);
+  assert.match(codex, /footer = ""/);
+});
+
+test("built-in channel MCP is read-only and auto-injected in the MCP page", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const main = await readFile(resolve(root, "src", "main.ts"), "utf8");
+  const types = await readFile(resolve(root, "src", "types.ts"), "utf8");
+  const agents = await readFile(resolve(root, "src", "task_agents.ts"), "utf8");
+  assert.match(types, /auto_inject\?: boolean/);
+  assert.match(main, /item\.auto_inject/);
+  assert.match(main, /自动注入/);
+  assert.match(main, /由当前 Turn 动态注入/);
+  assert.match(main, /state\.mcpServers\.filter\(item => item\.enabled && !item\.builtin\)/);
+  assert.match(agents, /!item\.auto_inject/);
+});
+
+test("knowledge page filters projects and skills, exposes skill details and auto-attach", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const knowledge = await readFile(resolve(root, "src", "knowledge_workspace.ts"), "utf8");
+  const main = await readFile(resolve(root, "src", "main.ts"), "utf8");
+  const agents = await readFile(resolve(root, "src", "task_agents.ts"), "utf8");
+  const types = await readFile(resolve(root, "src", "types.ts"), "utf8");
+  assert.match(knowledge, /PROJECT_BATCH_SIZE = 10/);
+  assert.match(knowledge, /SKILL_BATCH_SIZE = 6/);
+  assert.match(knowledge, /data-knowledge-project-more/);
+  assert.match(knowledge, /data-knowledge-skill-more/);
+  assert.match(knowledge, /id="knowledge-project-search"/);
+  assert.match(knowledge, /id="knowledge-skill-search"/);
+  assert.match(knowledge, /id="knowledge-skill-scope"/);
+  assert.match(knowledge, /id="knowledge-skill-project"/);
+  assert.match(knowledge, /data-skill-view/);
+  assert.match(knowledge, /skill-detail-dialog/);
+  assert.match(knowledge, /name="auto_attach"/);
+  assert.match(knowledge, /payload\.auto_attach/);
+  assert.match(types, /auto_attach\?: boolean/);
+  assert.match(main, /autoTaskSkillIDs/);
+  assert.match(main, /includeAutoDefaults/);
+  assert.match(main, /apply_auto_skills: false/);
+  assert.match(main, /active\.dataset\.allowRerender/);
+  assert.match(agents, /auto_attach/);
+  assert.match(knowledge, /PROPOSAL_PAGE_SIZE = 10/);
+  assert.match(knowledge, /data-knowledge-proposal-page/);
+  assert.match(knowledge, /knowledgeProposals\(\{status: "all"/);
+  assert.match(main, /includeProposals: false/);
+  assert.match(main, /knowledgeProposals\(\{status: "pending", limit: 0\}\)/);
 });

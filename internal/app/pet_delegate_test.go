@@ -64,7 +64,7 @@ func TestPetPermissionsAndWorkbench(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(workbench.Diary) != 1 || len(workbench.Core) != 3 || len(workbench.Worklog) != 1 || len(workbench.Approvals) != 1 {
+	if len(workbench.Diary) != 1 || len(workbench.Core) != 4 || len(workbench.Worklog) != 1 || len(workbench.Approvals) != 1 {
 		t.Fatalf("workbench=%#v", workbench)
 	}
 	if workbench.Approvals[0].ID != approval.ID || workbench.Approvals[0].Status != petApprovalPending {

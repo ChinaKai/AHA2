@@ -100,6 +100,9 @@ func TestBusinessExportStripsLocalAndSecretFields(t *testing.T) {
 	if len(full.Files) != 2 {
 		t.Fatalf("skill files=%d", len(full.Files))
 	}
+	if full.Skill.Scope != "project" || full.Skill.ProjectID != "project-private" {
+		t.Fatalf("exported skill scope=%q project=%q", full.Skill.Scope, full.Skill.ProjectID)
+	}
 }
 
 func TestModelSyncPreservesDefaultEnvGroup(t *testing.T) {
@@ -491,6 +494,43 @@ func TestApplySkillPackageAndVersionConflict(t *testing.T) {
 	obj.BaseVersion = "0"
 	if err := applyBusinessObject(ctx, db, obj); !errors.Is(err, ErrConflict) {
 		t.Fatalf("skill conflict=%v", err)
+	}
+}
+
+func TestApplySkillPreservesProjectScopeForExistingProject(t *testing.T) {
+	ctx, db, now := context.Background(), businessStore(t), time.Now().UTC()
+	if err := db.CreateProject(ctx, domain.Project{ID: "project-regular", Name: "Regular", ProjectType: "git", CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	skill := domain.Skill{ID: "s-project", Scope: "project", ProjectID: "project-regular", Name: "demo", Description: "demo", Instructions: "body", Version: 1, Status: "active", Enabled: true, CreatedAt: now, UpdatedAt: now}
+	payload := skillPayload{Skill: skill, Files: []domain.SkillFile{{Path: "SKILL.md", Content: "---\nname: demo\ndescription: demo\n---\n\nbody"}}}
+	raw, _ := json.Marshal(payload)
+	if err := applyBusinessObject(ctx, db, domain.SyncObject{Type: TypeSkill, ID: skill.ID, Operation: "upsert", Payload: raw}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := db.Skill(ctx, skill.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Scope != "project" || got.ProjectID != "project-regular" {
+		t.Fatalf("applied skill scope=%q project=%q", got.Scope, got.ProjectID)
+	}
+}
+
+func TestApplySkillFallsBackToGlobalWhenProjectIsMissing(t *testing.T) {
+	ctx, db, now := context.Background(), businessStore(t), time.Now().UTC()
+	skill := domain.Skill{ID: "s-missing", Scope: "project", ProjectID: "project-missing", Name: "demo", Description: "demo", Instructions: "body", Version: 1, Status: "active", Enabled: true, CreatedAt: now, UpdatedAt: now}
+	payload := skillPayload{Skill: skill, Files: []domain.SkillFile{{Path: "SKILL.md", Content: "---\nname: demo\ndescription: demo\n---\n\nbody"}}}
+	raw, _ := json.Marshal(payload)
+	if err := applyBusinessObject(ctx, db, domain.SyncObject{Type: TypeSkill, ID: skill.ID, Operation: "upsert", Payload: raw}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := db.Skill(ctx, skill.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Scope != "global" || got.ProjectID != "" {
+		t.Fatalf("missing-project skill scope=%q project=%q", got.Scope, got.ProjectID)
 	}
 }
 

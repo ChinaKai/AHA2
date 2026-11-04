@@ -248,7 +248,7 @@ func (s *Service) AskOwnerPetBrain(ctx context.Context, input PetBrainContext) (
 	if _, activeErr := s.store.ActiveTurn(ctx, petTaskID); activeErr == nil {
 		return PetBrainResult{}, fmt.Errorf("宠物 Task 正在执行，跳过本次自主行为")
 	}
-	message := petAutonomousMessage(s.petUsesEnglish(ctx), idleMinutes, page, input.Layout, s.PetOpenLoops(ctx))
+	message := petAutonomousMessage(s.petUsesEnglish(ctx), idleMinutes, page, input.Layout)
 	if _, err := s.SubmitMessage(ctx, petTaskID, message); err != nil {
 		return PetBrainResult{}, err
 	}
@@ -340,22 +340,13 @@ func petActionsFromToolCalls(calls []gateway.ChatToolCall, limit int) []PetBrain
 	return actions
 }
 
-func petAutonomousMessage(english bool, idleMinutes int, page string, layout PetLayout, loops string) string {
+func petAutonomousMessage(english bool, idleMinutes int, page string, layout PetLayout) string {
 	runtimeState := "Web 前台（你可以使用 pet MCP 控制形象和主人互动）"
 	if strings.Contains(page, "后台") {
-		runtimeState = "后台运行（不要调用 pet MCP 控制形象；专注巡检、记录和提醒）"
-	}
-	loops = strings.TrimSpace(loops)
-	loopsBlock := ""
-	if loops != "" {
-		if english {
-			loopsBlock = "\n\nOpen loops (keep current in core/loops.md with pet_update_core; add Tasks you create/join, ideas, and approvals; close resolved items):\n" + loops
-		} else {
-			loopsBlock = "\n\n开放闭环（用 pet_update_core 更新 core/loops.md；记录自己创建/参与的任务、想法和审批，完成后关闭）：\n" + loops
-		}
+		runtimeState = "后台运行（不要调用 pet MCP 控制形象；专注推进自主议程）"
 	}
 	if !english {
-		return fmt.Sprintf("[自主行为] 主人已经 %d 分钟没有互动。运行位置：%s。请按宠物身份决定是否说话或做动作；想做什么就调用宠物工具，不要写代码。当前页面：%s。\n\n页面布局：\n%s%s", idleMinutes, runtimeState, page, petLayoutPrompt(layout), loopsBlock)
+		return fmt.Sprintf("[自主行为] 距上次自主复盘约 %d 分钟。运行位置：%s。请按宠物身份和自主议程决定要推进的事项；不要只汇报。想做什么就调用宠物工具，不要写代码。当前页面：%s。\n\n页面布局：\n%s%s", idleMinutes, runtimeState, page, petLayoutPrompt(layout), petWakeActionContract(false))
 	}
 	if page == "未知页面" {
 		page = "unknown page"
@@ -365,9 +356,20 @@ func petAutonomousMessage(english bool, idleMinutes int, page string, layout Pet
 	}
 	runtimeState = "web foreground (you may use pet MCP to control the avatar and interact with the owner)"
 	if strings.Contains(page, "background") {
-		runtimeState = "background run (do not use pet MCP to control the avatar; focus on inspection, notes, and reminders)"
+		runtimeState = "background run (do not use pet MCP to control the avatar; focus on advancing the agenda)"
 	}
-	return fmt.Sprintf("[Autonomous behavior] The owner has not interacted for %d minutes. Runtime: %s. Decide as your pet character whether to speak or act; use pet tools for anything you want to do, and do not write code. Current page: %s.\n\nPage layout:\n%s%s", idleMinutes, runtimeState, page, petLayoutPromptEnglish(layout), loopsBlock)
+	return fmt.Sprintf("[Autonomous behavior] About %d minutes since the last autonomous review. Runtime: %s. Use your identity and agenda to decide what to advance; do not only report. Use pet tools for anything you want to do, and do not write code. Current page: %s.\n\nPage layout:\n%s%s", idleMinutes, runtimeState, page, petLayoutPromptEnglish(layout), petWakeActionContract(true))
+}
+
+// petWakeActionContract turns both scheduled and event-driven wake-ups into a
+// work decision instead of another status summary. NOOP is the explicit quiet
+// outcome, so an idle pet does not repeat the same open-loop list every few
+// minutes.
+func petWakeActionContract(english bool) string {
+	if english {
+		return "\n\nThis is a work wake-up, not a status report. Call aha_pet_work_state, read core/agenda.md and pending approvals. Every wake must leave one verifiable result:\n1) handle an event or pending item;\n2) if the owner must decide, create a kind=owner_decision approval with pet_request_approval and write a waiting item to core/agenda.md or core/loops.md; never only state it in the final answer, and create each decision once;\n3) if nothing can be advanced, pick one low-risk, verifiable AHA experience improvement from recent worklog/loops and create+start a normal Task, or add it to the agenda and start it; do not escape with NOOP;\n4) reply NOOP only after completing an action this turn and when nothing else remains.\nDo not repeat the open-loop list or only summarize."
+	}
+	return "\n\n这是工作唤醒，不是状态汇报。先调用 aha_pet_work_state，读取 core/agenda.md 和待审批项。每次唤醒必须留下一个可验证结果：\n1) 有事件或待办：处理它；\n2) 需要主人决定：用 pet_request_approval 创建 kind=owner_decision 的待审批，并在 core/agenda.md 或 core/loops.md 写 waiting 项；不能只写在最终回复里，同一决策只创建一次；\n3) 没有可推进项：从最近 worklog/loops 选一个低风险、可验证的 AHA 使用体验改进，创建并启动普通 Task，或先写入议程再启动；不要只回 NOOP；\n4) 只有本轮已经完成一个动作且确实没有剩余事项时，才回复 NOOP。\n不要重复列出未闭环清单，不要只汇报。"
 }
 
 func (s *Service) petUsesEnglish(ctx context.Context) bool {
@@ -739,7 +741,7 @@ func petToolAllowed(assistant domain.OwnerAssistant, name string) bool {
 		return assistant.PetAllowManageSystem
 	case "aha_list_projects":
 		return assistant.PetAllowViewTasks || assistant.PetAllowCreateTasks || assistant.PetAllowCreateWorkspaces
-	case "aha_create_task", "aha_start_task", "aha_takeover_remote_task", "aha_complete_task", "aha_delete_task", "aha_reopen_task", "aha_interrupt_task", "aha_update_task", "aha_update_task_agent", "aha_upload_task_attachment", "aha_delete_task_attachment", "aha_update_task_hardware", "aha_bind_task_channel", "aha_unbind_task_channel", "aha_retire_remote_task_mirror", "aha_compact_task_session", "aha_reset_task_session":
+	case "aha_create_task", "aha_start_task", "aha_takeover_remote_task", "aha_complete_task", "aha_finalize_task_worktree", "aha_request_code_review", "aha_delete_task", "aha_reopen_task", "aha_interrupt_task", "aha_update_task", "aha_update_task_agent", "aha_upload_task_attachment", "aha_delete_task_attachment", "aha_update_task_hardware", "aha_bind_task_channel", "aha_unbind_task_channel", "aha_retire_remote_task_mirror", "aha_compact_task_session", "aha_reset_task_session":
 		return assistant.PetAllowCreateTasks
 	case "aha_create_project", "aha_create_workspace", "aha_takeover_remote_workspace", "aha_update_project", "aha_delete_project", "aha_update_workspace", "aha_delete_workspace", "aha_detect_workspace", "aha_retire_remote_workspace_mirror":
 		return assistant.PetAllowCreateWorkspaces
@@ -1033,14 +1035,18 @@ func ahaPetTools() []gateway.ChatTool {
 				"reason":       map[string]any{"type": "string", "description": "为什么删除；至少 8 个字符"},
 			}, "required": []string{"env_group_id", "reason"},
 		}},
-		{Name: "aha_create_task", Description: "在指定项目/Workspace 创建普通 AHA Task，可选择立即启动", Parameters: map[string]any{
+		{Name: "aha_create_task", Description: "在指定项目/Workspace 创建普通 AHA Task，可选择立即启动；git 项目默认独立 worktree，high 推理和完全访问", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{
-				"project_id":   map[string]any{"type": "string"},
-				"workspace_id": map[string]any{"type": "string"},
-				"title":        map[string]any{"type": "string"},
-				"request":      map[string]any{"type": "string"},
-				"model_id":     map[string]any{"type": "string", "description": "可选；默认使用宠物当前模型"},
-				"start":        map[string]any{"type": "boolean", "description": "默认 true"},
+				"project_id":       map[string]any{"type": "string"},
+				"workspace_id":     map[string]any{"type": "string"},
+				"title":            map[string]any{"type": "string"},
+				"request":          map[string]any{"type": "string"},
+				"model_id":         map[string]any{"type": "string", "description": "可选；默认使用宠物当前模型；可按难度选择更强模型"},
+				"reasoning_effort": map[string]any{"type": "string", "enum": []string{"low", "medium", "high", "xhigh", "max"}, "description": "可选；默认 high"},
+				"filesystem":       map[string]any{"type": "string", "enum": []string{"read-only", "workspace-write", "danger-full-access"}, "description": "可选；默认完全访问"},
+				"approval":         map[string]any{"type": "string", "enum": []string{"never", "auto"}, "description": "可选；默认 never"},
+				"isolation":        map[string]any{"type": "string", "enum": []string{"worktree", "inplace"}, "description": "可选；git 项目默认 worktree；只读或非代码任务可显式用 inplace；非 git 项目强制 inplace"},
+				"start":            map[string]any{"type": "boolean", "description": "默认 true"},
 			}, "required": []string{"project_id", "workspace_id", "title", "request"},
 		}},
 		{Name: "aha_start_task", Description: "启动一个草稿 Task", Parameters: map[string]any{
@@ -1233,8 +1239,23 @@ func ahaPetTools() []gateway.ChatTool {
 				"route_id": map[string]any{"type": "string"},
 			}, "required": []string{"task_id", "route_id"},
 		}},
-		{Name: "aha_complete_task", Description: "把 Task 标记为完成", Parameters: map[string]any{
-			"type": "object", "properties": map[string]any{"task_id": map[string]any{"type": "string"}}, "required": []string{"task_id"},
+		{Name: "aha_complete_task", Description: "把 Task 标记为完成；写权限任务必须提供高级模型 Review Task", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"task_id":        map[string]any{"type": "string"},
+				"review_task_id": map[string]any{"type": "string", "description": "写权限任务必填：已通过 Verdict: APPROVE 的只读高推理 Review Task ID"},
+			}, "required": []string{"task_id"},
+		}},
+		{Name: "aha_finalize_task_worktree", Description: "仅用于已完成的 worktree Task：检查提交、合并回目标分支、删除临时 worktree 和分支；有未提交改动或冲突时保留并报错", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"task_id": map[string]any{"type": "string"},
+			}, "required": []string{"task_id"},
+		}},
+		{Name: "aha_request_code_review", Description: "为源 Task 创建独立、只读、高推理的高级模型 Review Task；写权限任务完成前必须使用", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"task_id":         map[string]any{"type": "string"},
+				"review_model_id": map[string]any{"type": "string", "description": "评审模型，必须与源 Task 模型不同；用 aha_model_catalog 选择更强的模型"},
+				"focus":           map[string]any{"type": "string", "description": "可选：额外关注的审查重点"},
+			}, "required": []string{"task_id", "review_model_id"},
 		}},
 		{Name: "aha_delete_task", Description: "提交删除 Task 审批；主人批准后才会删除", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{
@@ -2082,12 +2103,37 @@ func (s *Service) PetMCPTool(ctx context.Context, name string, args json.RawMess
 		return `{"ok":true}`, nil
 	case "aha_complete_task":
 		var input struct {
-			TaskID string `json:"task_id"`
+			TaskID       string `json:"task_id"`
+			ReviewTaskID string `json:"review_task_id"`
 		}
 		if err := json.Unmarshal(args, &input); err != nil {
 			return "", fmt.Errorf("invalid complete task request")
 		}
-		task, err := s.PetCompleteTask(ctx, input.TaskID)
+		task, err := s.PetCompleteTaskWithReview(ctx, input.TaskID, input.ReviewTaskID)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(task)
+		return string(data), nil
+	case "aha_finalize_task_worktree":
+		var input struct {
+			TaskID string `json:"task_id"`
+		}
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid finalize task worktree request")
+		}
+		result, err := s.PetFinalizeTaskWorktree(ctx, input.TaskID)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(result)
+		return string(data), nil
+	case "aha_request_code_review":
+		var input PetRequestCodeReviewInput
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid code review request")
+		}
+		task, err := s.PetRequestCodeReview(ctx, input)
 		if err != nil {
 			return "", err
 		}
@@ -2367,9 +2413,9 @@ func assistantPetTools() []gateway.ChatTool {
 				"text": map[string]any{"type": "string", "description": "不超过 120 个字符"},
 			}, "required": []string{"text"},
 		}},
-		{Name: "pet_update_core", Description: "写入宠物核心文档 identity、principles 或 loops（运行时为只读，必须用此工具写；loops 记录任务/想法/审批闭环）", Parameters: map[string]any{
+		{Name: "pet_update_core", Description: "写入宠物核心文档 identity、principles、loops 或 agenda（运行时为只读，必须用此工具写；loops 记录未闭环事项，agenda 记录可自主推进事项）", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{
-				"document": map[string]any{"type": "string", "enum": []string{"identity", "principles", "loops"}},
+				"document": map[string]any{"type": "string", "enum": []string{"identity", "principles", "loops", "agenda"}},
 				"content":  map[string]any{"type": "string"},
 			}, "required": []string{"document", "content"},
 		}},

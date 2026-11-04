@@ -93,6 +93,8 @@ type BuildResult struct {
 
 type recentContextUser struct {
 	Sender  string
+	Role    string
+	Time    string
 	Summary string
 }
 
@@ -100,6 +102,17 @@ type recentContextExchange struct {
 	Number int
 	Users  []recentContextUser
 	Reply  string
+	Time   string
+}
+
+// FormatPromptTime gives the model an unambiguous local timestamp. It is used
+// by both the Inbox Batch and recent-context.md so message order and relative
+// references are stable across turns.
+func FormatPromptTime(value time.Time) string {
+	if value.IsZero() {
+		return ""
+	}
+	return value.Local().Format("2006-01-02 15:04:05 -07:00")
 }
 
 type recoveryHandoffEvidence struct {
@@ -154,7 +167,12 @@ type InboxTemplateItem struct {
 	Sequence              int64
 	SourceKind            string
 	SourceAgentID         string
+	CreatedAt             string
 	ChannelSender         string
+	ChannelSenderRole     string
+	ChannelSenderIsOwner  bool
+	ChannelSenderIsBot    bool
+	ChannelReceiptID      string
 	ChannelConversation   string
 	MentionedParticipants string
 	ReplyContext          *domain.ChannelReplyContext
@@ -434,8 +452,8 @@ func (engine *Engine) ResetTemplate(ctx context.Context, id string) error {
 	return engine.repository.DeletePromptTemplateOverride(ctx, id)
 }
 
-func (engine *Engine) RenderInboxBatch(ctx context.Context, items []InboxTemplateItem) (string, error) {
-	templates, err := engine.Templates(ctx)
+func (engine *Engine) RenderInboxBatch(ctx context.Context, language string, items []InboxTemplateItem) (string, error) {
+	templates, err := engine.TemplatesForLanguage(ctx, language)
 	if err != nil {
 		return "", err
 	}
@@ -1536,10 +1554,28 @@ func skillResources(input BuildInput, root string) []ContextResource {
 	return resources
 }
 
+func recentContextSender(item domain.ConversationItem) (string, string) {
+	sender := strings.TrimSpace(item.FromAgentID)
+	if sender == "" {
+		sender = "owner"
+	}
+	channelContext, _ := item.Payload["channel_context"].(map[string]any)
+	actor, _ := channelContext["actor"].(map[string]any)
+	if name := strings.TrimSpace(fmt.Sprint(actor["display_name"])); name != "" && name != "<nil>" {
+		sender = name
+	}
+	role := strings.TrimSpace(fmt.Sprint(actor["role"]))
+	if role == "<nil>" {
+		role = ""
+	}
+	return sender, role
+}
+
 func recentContextExchanges(items []domain.ConversationItem, currentTurnID, currentRoundID string) []recentContextExchange {
 	type exchange struct {
-		users []recentContextUser
-		reply string
+		users     []recentContextUser
+		reply     string
+		replyTime time.Time
 	}
 	exchanges := map[string]*exchange{}
 	var order []string
@@ -1566,11 +1602,8 @@ func recentContextExchanges(items []domain.ConversationItem, currentTurnID, curr
 		}
 		switch item.Kind {
 		case "user_message":
-			sender := strings.TrimSpace(item.FromAgentID)
-			if sender == "" {
-				sender = "owner"
-			}
-			current.users = append(current.users, recentContextUser{Sender: sender, Summary: summary})
+			sender, role := recentContextSender(item)
+			current.users = append(current.users, recentContextUser{Sender: sender, Role: role, Time: FormatPromptTime(item.CreatedAt), Summary: summary})
 		case "agent_message":
 			if item.AgentID != "" && item.AgentID != "main" {
 				continue
@@ -1579,6 +1612,7 @@ func recentContextExchanges(items []domain.ConversationItem, currentTurnID, curr
 				continue
 			}
 			current.reply = summary
+			current.replyTime = item.CreatedAt
 		}
 	}
 	var completed []*exchange
@@ -1598,6 +1632,7 @@ func recentContextExchanges(items []domain.ConversationItem, currentTurnID, curr
 			Number: index + 1,
 			Users:  item.users,
 			Reply:  item.reply,
+			Time:   FormatPromptTime(item.replyTime),
 		})
 	}
 	return result

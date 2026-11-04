@@ -414,6 +414,24 @@ func TestPetTaskMessageMigratesIntroGoal(t *testing.T) {
 	}
 }
 
+func TestOwnerAssistantMigratesLegacyMissionPetGoalToPetLabGoal(t *testing.T) {
+	fixture := newPetTaskFixture(t)
+	fixture.createPetDraft(t, petTaskLegacyMissionGoal)
+	if _, err := fixture.service.StartTask(fixture.ctx, petTaskID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.service.SubmitMessage(fixture.ctx, petTaskID, "主人第一条消息"); err != nil {
+		t.Fatal(err)
+	}
+	waitForTask(t, fixture.database, petTaskID, domain.TaskWaitingUser)
+	if _, err := fixture.service.OwnerAssistant(fixture.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if goal := fixture.petTask(t).CurrentGoal; goal != petTaskMissionGoal {
+		t.Fatalf("legacy mission goal=%q, want the pet-lab mission goal", goal)
+	}
+}
+
 func TestOwnerAssistantMigratesLegacyIntroPetGoalToMission(t *testing.T) {
 	fixture := newPetTaskFixture(t)
 	fixture.createPetDraft(t, petTaskLegacyIntro)
@@ -683,7 +701,7 @@ func TestPetTaskPromptUsesCorePathsInsteadOfPersona(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"core/identity.md", "core/principles.md", "core/loops.md", "diary/YYYY-MM-DD.md"} {
+	for _, want := range []string{"core/identity.md", "core/principles.md", "core/loops.md", "core/agenda.md", "diary/YYYY-MM-DD.md"} {
 		if !strings.Contains(rendered, want) {
 			t.Fatalf("pet prompt does not point at %s:\n%s", want, rendered)
 		}

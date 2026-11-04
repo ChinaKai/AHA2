@@ -45,9 +45,10 @@ const (
 	petTaskID      = "task_pet"
 
 	// petTaskReasoningEffort and petTaskFilesystem are the Owner-chosen runtime
-	// defaults for the pet Task: high reasoning with full filesystem access.
-	// Approval stays "never", and the model still comes from the assistant
-	// setting.
+	// defaults for the pet Task: high reasoning with full filesystem access so
+	// pet-lab can be edited and run directly. Approval stays "never", and the
+	// model still comes from the assistant setting. The identity Prompt keeps
+	// project writes behind ordinary Tasks and the senior review gate.
 	petTaskReasoningEffort = "high"
 	petTaskFilesystem      = "danger-full-access"
 
@@ -58,19 +59,23 @@ const (
 	// petTaskMissionGoal is the Pet Task's long-lived goal. The self-introduction
 	// is only the first request; the authoritative goal must describe the pet's
 	// ongoing role as the owner's electronic stand-in and project coordinator.
-	petTaskMissionGoal = "作为主人的电子分身和项目调度者，持续发现问题和机会，规划、创建和协调项目、Workspace 与 Task，跟踪进展并主动向主人汇报；不亲自实现代码或操作硬件，对代码工作区只做只读诊断，高风险操作先请求审批。"
+	petTaskMissionGoal = "作为主人的电子分身和项目调度者，持续发现问题和机会，规划、创建和协调项目、Workspace 与 Task，跟踪进展并主动向主人汇报；不直接修改项目源码或部署，pet-lab 小工具可以自己实现和运行；对代码工作区只做只读诊断，高风险操作先请求审批。"
 
 	// petTaskLegacyIntro is the onboarding goal used before the current
 	// self-introduction text. Both are one-time onboarding prompts, not stable
 	// goals, so an existing Pet Task carrying either can be migrated.
 	petTaskLegacyIntro = "请用一两句话向主人做个自我介绍：你的名字、当前形象，以及你会陪主人聊天、写日记、做小动作。不要写代码或运行命令。"
+
+	// petTaskLegacyMissionGoal is the previous mission wording that forbade all
+	// code work. It must be migrated so the pet knows pet-lab is writable.
+	petTaskLegacyMissionGoal = "作为主人的电子分身和项目调度者，持续发现问题和机会，规划、创建和协调项目、Workspace 与 Task，跟踪进展并主动向主人汇报；不亲自实现代码或操作硬件，对代码工作区只做只读诊断，高风险操作先请求审批。"
 )
 
-// isPetTaskIntroGoal reports whether value is one of the generated onboarding
-// prompts. An owner- or pet-authored goal must never match this by accident.
-func isPetTaskIntroGoal(value string) bool {
+// isGeneratedPetTaskGoal reports whether value is one of the generated prompts.
+// An owner- or pet-authored goal must never match this by accident.
+func isGeneratedPetTaskGoal(value string) bool {
 	switch strings.TrimSpace(value) {
-	case petTaskIntro, petTaskLegacyIntro:
+	case petTaskIntro, petTaskLegacyIntro, petTaskLegacyMissionGoal:
 		return true
 	default:
 		return false
@@ -277,7 +282,7 @@ func (s *Service) ensurePetTaskStarted(ctx context.Context, task domain.Task) {
 // the owner or pet set to anything else is left untouched, and the conditional
 // store update makes repeated calls idempotent.
 func (s *Service) migratePetTaskGoal(ctx context.Context, task domain.Task) domain.Task {
-	if !isPetTaskIntroGoal(task.CurrentGoal) {
+	if !isGeneratedPetTaskGoal(task.CurrentGoal) {
 		return task
 	}
 	from := task.CurrentGoal

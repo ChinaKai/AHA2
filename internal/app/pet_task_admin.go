@@ -34,9 +34,18 @@ func (s *Service) petManageableTask(ctx context.Context, taskID string) (domain.
 }
 
 func (s *Service) PetCompleteTask(ctx context.Context, taskID string) (domain.Task, error) {
+	return s.PetCompleteTaskWithReview(ctx, taskID, "")
+}
+
+// PetCompleteTaskWithReview keeps the existing pet tool compatible while making
+// write-capable Tasks pass through an independent, high-reasoning review Task.
+func (s *Service) PetCompleteTaskWithReview(ctx context.Context, taskID, reviewTaskID string) (domain.Task, error) {
 	task, _, err := s.petManageableTask(ctx, taskID)
 	if err != nil {
 		return domain.Task{}, err
+	}
+	if err := s.requirePetCodeReview(ctx, task, reviewTaskID); err != nil {
+		return task, err
 	}
 	if err := s.CompleteTask(ctx, task.ID); err != nil {
 		return task, err

@@ -406,7 +406,10 @@ export function renderConversationWithOrchestration(
 
 function renderTaskSkills(skills: Skill[], projectID: string, selected: string[]): string {
   const visible = skills.filter(item => item.enabled && item.status === "active" && (item.scope === "global" || item.project_id === projectID || item.bound_project_id === projectID));
-  return visible.map(item => `<label class="task-skill-option"><input type="checkbox" name="skill_ids" value="${item.id}" ${selected.includes(item.id) ? "checked" : ""}><span><strong>${escapeHTML(item.name)}</strong><small>${escapeHTML(item.scope)} \u00b7 ${escapeHTML(item.description || "\u65e0\u63cf\u8ff0")}</small></span></label>`).join("") || `<div class="field-help">\u5f53\u524d Project \u6ca1\u6709\u53ef\u7528 Skill\u3002</div>`;
+  return visible.map(item => {
+    const auto = item.auto_attach ? ' <span class="capability-badge">\u81ea\u52a8</span>' : "";
+    return `<label class="task-skill-option"><input type="checkbox" name="skill_ids" value="${item.id}" ${selected.includes(item.id) ? "checked" : ""}><span><strong>${escapeHTML(item.name)}${auto}</strong><small>${escapeHTML(item.scope)} \u00b7 ${escapeHTML(item.description || "\u65e0\u63cf\u8ff0")}</small></span></label>`;
+  }).join("") || `<div class="field-help">\u5f53\u524d Project \u6ca1\u6709\u53ef\u7528 Skill\u3002</div>`;
 }
 
 // Both optional modules collapse to one row so they stop growing the dialog;
@@ -460,7 +463,7 @@ export function renderAgentConfigDialog(detail: TaskDetail, agentID: string, mod
 function agentMCPFold(detail: TaskDetail, mcpServers: MCPServer[]): string {
   const petTask = detail.task.project_id === "project_pet";
   const selected = new Set(detail.task.mcp_server_ids || []);
-  const options = mcpServers.filter(item => item.enabled && (item.id !== "mcp_pet" || petTask)).map(item => {
+  const options = mcpServers.filter(item => item.enabled && !item.auto_inject && (item.id !== "mcp_pet" || petTask)).map(item => {
     const forced = petTask && item.id === "mcp_pet";
     return `<label class="task-skill-option"><input type="checkbox" name="task_mcp_ids" value="${escapeHTML(item.id)}" ${selected.has(item.id) ? "checked" : ""} ${forced ? "disabled checked" : ""}><span><strong>${escapeHTML(item.name)}</strong><small>${escapeHTML(item.description || item.transport)}</small></span></label>`;
   }).join("");

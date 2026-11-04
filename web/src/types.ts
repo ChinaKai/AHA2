@@ -731,6 +731,7 @@ export interface Skill {
   version: number;
   status: string;
   enabled: boolean;
+  auto_attach?: boolean;
   source_path?: string;
   files?: string[];
   created_at: string;
@@ -1198,6 +1199,7 @@ export interface MCPServer {
   disabled_tools?: string[];
   enabled: boolean;
   builtin: boolean;
+  auto_inject?: boolean;
   health?: string;
   last_error?: string;
   last_checked_at?: string;

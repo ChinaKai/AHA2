@@ -5,7 +5,7 @@ import {bindCodexAccounts, renderCodexAccounts} from "./codex_accounts.js";
 import {bindChannels, exportRetiredChannelInstance, purgeRetiredChannelInstance, renderChannels} from "./channels.js";
 import {icon} from "./icons.js";
 import {applyLocale, normalizeLanguagePreference, startUITranslationObserver, t, translateUI} from "./i18n.js";
-import {bindKnowledgeWorkspace, renderKnowledgeWorkspace} from "./knowledge_workspace.js";
+import {bindKnowledgeWorkspace, knowledgeEntryListVisible, renderKnowledgeWorkspace} from "./knowledge_workspace.js";
 import {bindHardwarePanel, refreshHardwarePanel, stopHardwarePanel} from "./hardware_panel.js";
 import {bindHardwareResources, renderHardwareResources} from "./hardware_resources.js";
 import {bindDesktopPanel, desktopPanelInteracting, refreshDesktopPanel, stopDesktopPanel} from "./desktop_panel.js";
@@ -20,7 +20,7 @@ import {DEFAULT_TASK_STATUS_FILTERS, LOCAL_TASK_DEVICE_FILTER, TASK_STATUS_GROUP
 import type {TaskStatusGroup} from "./task_filters.js";
 import {TASK_TOOL_DEFAULT_WIDTH, normalizePinnedTaskTool, normalizeTaskToolMode, normalizeTaskToolWidth, renderTaskToolButtons, renderTaskToolContent, renderTaskToolPanel} from "./task_tools.js";
 import type {TaskTool, TaskToolMode} from "./task_tools.js";
-import {TASK_SLASH_COMMANDS, bindMessageBubbleControls, captureInteractiveRegion, clearNavigationSnapshot, eventRefreshesTaskList, exactSlashCommand, executeAgentSessionAction, loadNavigationSnapshot, matchingSlashCommands, renderWorkspaceDetection, restoreInteractiveRegion, saveNavigationSnapshot} from "./ui_helpers.js";
+import {TASK_SLASH_COMMANDS, bindMessageBubbleControls, captureInteractiveRegion, clearNavigationSnapshot, eventRefreshesTaskList, exactSlashCommand, executeAgentSessionAction, loadNavigationSnapshot, matchingSlashCommands, paginateItems, paginationHTML, renderWorkspaceDetection, restoreInteractiveRegion, saveNavigationSnapshot, textMatchesQuery} from "./ui_helpers.js";
 import type {InteractiveRegionState} from "./ui_helpers.js";
 import {
   compactNumber,
@@ -122,6 +122,10 @@ interface State {
   envGroups: EnvGroup[];
   codexAccounts: CodexAccount[];
   models: Model[];
+  modelPage: number;
+  modelSearch: string;
+  providerPage: number;
+  codexAccountPage: number;
   hardwareResources: HardwareResource[];
   tasks: Task[];
   knowledge: Knowledge[];
@@ -286,6 +290,10 @@ const state: State = {
   envGroups: [],
   codexAccounts: [],
   models: [],
+  modelPage: 1,
+  modelSearch: "",
+  providerPage: 1,
+  codexAccountPage: 1,
   hardwareResources: [],
   tasks: [],
   knowledge: [],
@@ -850,22 +858,35 @@ function syncTaskWorkspaces(): void {
   if (items.some(item => item.id === current)) wsSelect.value = current;
   else if (items.length) wsSelect.value = items[0].id;
   else wsSelect.value = "";
-  const project = state.projects.find(item => item.id === projectID);
   const isolation = document.querySelector<HTMLSelectElement>("#task-isolation");
-  if (isolation) isolation.value = project?.project_type === "git" ? "worktree" : "inplace";
+  if (isolation) isolation.value = "inplace";
   const worktreeDir = document.querySelector<HTMLInputElement>("#task-worktree-dir");
   if (worktreeDir) worktreeDir.value = "";
   syncTaskSkills();
   syncTaskBackend();
 }
 
+let taskSkillsDirty = false;
+
+function autoTaskSkillIDs(projectID: string): string[] {
+  return state.skills
+    .filter(item => item.enabled && item.status === "active" && item.auto_attach &&
+      (item.scope === "global" || (item.scope === "project" && item.project_id === projectID)))
+    .map(item => item.id);
+}
+
 function availableTaskSkills(projectID: string): Skill[] {
   return state.skills.filter(item => item.enabled && item.status === "active" && (item.scope === "global" || item.project_id === projectID || item.bound_project_id === projectID));
 }
 
-function taskSkillOptions(projectID: string, selected: string[] = []): string {
+function taskSkillOptions(projectID: string, selected: string[] = [], includeAutoDefaults = false): string {
   const items = availableTaskSkills(projectID);
-  return items.map(item => `<label class="task-skill-option"><input type="checkbox" name="skill_ids" value="${item.id}" ${selected.includes(item.id) ? "checked" : ""}><span><strong>${escapeHTML(item.name)}</strong><small>${escapeHTML(item.scope)} \u00b7 ${escapeHTML(item.description || "\u65e0\u63cf\u8ff0")}</small></span></label>`).join("") || `<div class="field-help">\u5f53\u524d Project \u6ca1\u6709\u53ef\u7528 Skill\uff0cTask \u4e0d\u4f1a\u6ce8\u5165\u4efb\u4f55 Skill \u8def\u5f84\u3002</div>`;
+  const defaults = new Set(includeAutoDefaults ? autoTaskSkillIDs(projectID) : []);
+  return items.map(item => {
+    const checked = selected.includes(item.id) || defaults.has(item.id);
+    const auto = item.auto_attach ? ' <span class="capability-badge">\u81ea\u52a8</span>' : "";
+    return `<label class="task-skill-option"><input type="checkbox" name="skill_ids" value="${item.id}" ${checked ? "checked" : ""}><span><strong>${escapeHTML(item.name)}${auto}</strong><small>${escapeHTML(item.scope)} \u00b7 ${escapeHTML(item.description || "\u65e0\u63cf\u8ff0")}</small></span></label>`;
+  }).join("") || `<div class="field-help">\u5f53\u524d Project \u6ca1\u6709\u53ef\u7528 Skill\uff0cTask \u4e0d\u4f1a\u6ce8\u5165\u4efb\u4f55 Skill \u8def\u5f84\u3002</div>`;
 }
 
 function syncTaskSkills(): void {
@@ -873,7 +894,8 @@ function syncTaskSkills(): void {
   const container = document.querySelector<HTMLElement>("#task-skill-options");
   if (!container) return;
   const selected = [...container.querySelectorAll<HTMLInputElement>('input[name="skill_ids"]:checked')].map(input => input.value);
-  container.innerHTML = taskSkillOptions(projectID, selected);
+  const nextSelected = taskSkillsDirty ? selected : autoTaskSkillIDs(projectID);
+  container.innerHTML = taskSkillOptions(projectID, nextSelected);
   syncTaskFormFoldCounts();
 }
 
@@ -1485,11 +1507,16 @@ async function loadCoreData(force = false): Promise<void> {
 
 async function loadKnowledgeData(force = true): Promise<void> {
   await loadResource("knowledge", force, async () => {
-    const [knowledge, libraries, indexes] = await Promise.all([api.knowledge("", "", "", {limit: initialListPageSize, summary: true}), api.knowledgeLibraries(), api.knowledgeIndexes()]);
+    const [knowledge, libraries, indexes, pendingProposals] = await Promise.all([
+      api.knowledge("", "", "", {limit: initialListPageSize, summary: true, includeProposals: false}),
+      api.knowledgeLibraries(),
+      api.knowledgeIndexes(),
+      api.knowledgeProposals({status: "pending", limit: 0}).catch(() => ({proposals: []})),
+    ]);
     state.knowledge = knowledge.knowledge || [];
     state.knowledgeLibraries = libraries.libraries || [];
     state.knowledgeIndexes = indexes.indexes || [];
-    state.knowledgeProposals = knowledge.proposals || [];
+    state.knowledgeProposals = pendingProposals.proposals || [];
     state.knowledgeReviewSettings = knowledge.review_settings || {auto_approve: false};
     listPages.knowledge = {cursor: knowledge.next_cursor || "", hasMore: Boolean(knowledge.has_more), loadingMore: false};
   });
@@ -1736,6 +1763,7 @@ async function createTaskFromMemo(memoID: string): Promise<void> {
   if (!form || !dialog) return;
   // Populates the workspace list for the selected project and, with it, the
   // runtime fields and the offered skills.
+  taskSkillsDirty = false;
   syncTaskWorkspaces();
   const title = form.querySelector<HTMLInputElement>('input[name="title"]');
   const request = form.querySelector<HTMLTextAreaElement>('textarea[name="request"]');
@@ -2471,21 +2499,104 @@ function workspaceDialog(): string {
   </form></dialog>`;
 }
 
+const MODEL_PAGE_SIZE = 8;
+const PROVIDER_PAGE_SIZE = 5;
+const CODEX_ACCOUNT_PAGE_SIZE = 3;
+let modelSearchRenderTimer: number | null = null;
+
+function filteredModels(): Model[] {
+  return state.models.filter(item => textMatchesQuery([
+    item.display_name,
+    item.wire_model,
+    item.provider_name,
+    item.provider_id,
+    item.backend,
+    backendProtocolLabel(item),
+  ], state.modelSearch));
+}
+
+function scheduleModelPageRender(): void {
+  if (modelSearchRenderTimer !== null) window.clearTimeout(modelSearchRenderTimer);
+  modelSearchRenderTimer = window.setTimeout(() => {
+    modelSearchRenderTimer = null;
+    refreshModelResults();
+  }, 120);
+}
+
+function modelResultsHTML(): string {
+  const visibleModels = filteredModels();
+  const modelPage = paginateItems(visibleModels, state.modelPage, MODEL_PAGE_SIZE);
+  const models = modelPage.items.map(item => `<tr><td><strong>${escapeHTML(item.display_name)}${modelSupportsImage(item) ? '<span class="capability-badge">图片</span>' : ''}</strong><small>${escapeHTML(item.wire_model)}</small></td><td><strong>${escapeHTML(item.provider_name || item.provider_id)}</strong><small>${escapeHTML(item.provider_id)}</small></td><td>${escapeHTML(backendProtocolLabel(item))}</td><td>${item.context_window ? Math.round(item.context_window / 1000) + "K" : "-"}${item.max_output_tokens ? `<small>输出 ${Math.round(item.max_output_tokens / 1000)}K</small>` : ""}${item.auto_compact_window ? `<small>自动压缩 ${Math.round(item.auto_compact_window / 1000)}K</small>` : ""}</td><td class="row-actions"><button type="button" data-edit-model="${item.id}" class="icon-button" title="编辑模型">${icon("edit")}</button><button type="button" data-delete-model="${item.id}" class="icon-button" title="删除模型">${icon("close")}</button></td></tr>`).join("");
+  const modelEmpty = state.models.length === 0 ? "选择 Provider 后添加模型。" : "没有匹配的模型。";
+  const modelTotal = state.modelSearch.trim()
+    ? `匹配 ${visibleModels.length} / 共 ${state.models.length} 个`
+    : `共 ${state.models.length} 个`;
+  return `<div class="table-wrap"><table class="models-table"><thead><tr><th>模型</th><th>Provider</th><th>Backend</th><th>Context</th><th></th></tr></thead><tbody>${models || `<tr><td colspan="5">${modelEmpty}</td></tr>`}</tbody></table></div>${paginationHTML("models", modelPage, modelTotal)}`;
+}
+
+// Search results must not go through render(): the global render defers while
+// a text input is focused. Replace only the results region so the search box
+// and its focus (and caret) stay intact while typing.
+function refreshModelResults(): void {
+  const container = document.querySelector<HTMLElement>("#model-results");
+  if (container) container.innerHTML = modelResultsHTML();
+}
+
+function openEditModelDialog(id: string): void {
+  const model = state.models.find(item => item.id === id);
+  if (!model) return;
+  const nameInput = document.querySelector<HTMLInputElement>("#model-edit-name");
+  const wireInput = document.querySelector<HTMLSelectElement>("#model-edit-wire");
+  const backendInput = document.querySelector<HTMLSelectElement>("#model-edit-backend");
+  const effortInput = document.querySelector<HTMLSelectElement>("#model-edit-effort");
+  const contextInput = document.querySelector<HTMLInputElement>("#model-edit-context");
+  const maxoutInput = document.querySelector<HTMLInputElement>("#model-edit-maxout");
+  const compactInput = document.querySelector<HTMLInputElement>("#model-edit-compact");
+  const imageInput = document.querySelector<HTMLInputElement>("#model-edit-image");
+  if (nameInput) nameInput.value = model.display_name;
+  const wireModelInput = document.querySelector<HTMLInputElement>("#model-edit-wire-model");
+  if (wireModelInput) wireModelInput.value = model.wire_model || "";
+  if (wireInput) {
+    wireInput.value = model.wire_api || (model.backend === "claude" ? "anthropic_messages" : "responses");
+    wireInput.disabled = false;
+  }
+  if (backendInput) backendInput.value = model.backend;
+  if (effortInput) effortInput.value = model.default_reasoning_effort || "";
+  if (contextInput) contextInput.value = String(model.context_window || 0);
+  if (maxoutInput) maxoutInput.value = String(model.max_output_tokens || 0);
+  if (compactInput) compactInput.value = String(model.auto_compact_window || 0);
+  if (imageInput) imageInput.checked = modelSupportsImage(model);
+  (document.querySelector<HTMLDialogElement>("#model-edit-dialog"))?.showModal();
+  document.querySelector<HTMLElement>("#save-model-edit")?.setAttribute("data-model-id", id);
+}
+
+function deleteModelByID(id: string, button: HTMLElement | null): void {
+  if (!id) return;
+  if (!window.confirm("删除该模型？使用此模型的任务会暂停输入，进入任务后可重新选择模型。")) return;
+  void runWithFeedback(button, "删除中", async () => {
+    await api.deleteModel(id);
+    setMessage("notice", "模型已删除");
+    await loadAll();
+    render();
+  });
+}
+
 function modelsView(): string {
-  const providers = state.providers.map(item => `<article class="list-row provider-row">
+  const providerPage = paginateItems(state.providers, state.providerPage, PROVIDER_PAGE_SIZE);
+  const providers = providerPage.items.map(item => `<article class="list-row provider-row">
     <div class="item-title">${icon("server")}<div><strong>${escapeHTML(item.name)}</strong><small>${escapeHTML(item.base_url || item.id)}</small></div></div>
     <span class="status ${item.credential_configured ? "good" : "warn"}">${item.credential_configured ? "Key Ready" : "No Key"}</span>
     <span class="row-actions"><button type="button" data-edit-provider="${item.id}" class="icon-button" title="编辑 Provider">${icon("edit")}</button><button type="button" data-delete-provider="${item.id}" class="icon-button" title="删除 Provider">${icon("close")}</button></span>
   </article>`).join("");
-  const models = state.models.map(item => `<tr><td><strong>${escapeHTML(item.display_name)}${modelSupportsImage(item) ? '<span class="capability-badge">图片</span>' : ''}</strong><small>${escapeHTML(item.wire_model)}</small></td><td><strong>${escapeHTML(item.provider_name || item.provider_id)}</strong><small>${escapeHTML(item.provider_id)}</small></td><td>${escapeHTML(backendProtocolLabel(item))}</td><td>${item.context_window ? Math.round(item.context_window / 1000) + "K" : "-"}${item.max_output_tokens ? `<small>输出 ${Math.round(item.max_output_tokens / 1000)}K</small>` : ""}${item.auto_compact_window ? `<small>自动压缩 ${Math.round(item.auto_compact_window / 1000)}K</small>` : ""}</td><td class="row-actions"><button type="button" data-edit-model="${item.id}" class="icon-button" title="编辑模型">${icon("edit")}</button><button type="button" data-delete-model="${item.id}" class="icon-button" title="删除模型">${icon("close")}</button></td></tr>`).join("");
+  const codexPage = paginateItems(state.codexAccounts, state.codexAccountPage, CODEX_ACCOUNT_PAGE_SIZE);
   return shell(`<section class="page">
     ${pageHead("模型", "Models 管理 Provider / Env 模型与 Agent Backend；Codex 与 Claude Code 官方账号在创建或编辑 Task 时选择。")}
     <div class="provider-layout">
       <div class="provider-sidebar">
-        ${renderCodexAccounts(state.codexAccounts)}
-        <section class="panel"><div class="panel-head"><strong>Providers</strong><button data-dialog="provider">${icon("plus")}添加 Provider</button></div>${providers || `<div class="empty">先添加 Provider（API Base URL + API Key）。</div>`}</section>
+        ${renderCodexAccounts(codexPage.items, paginationHTML("codex-accounts", codexPage))}
+        <section class="panel"><div class="panel-head"><strong>Providers</strong><button data-dialog="provider">${icon("plus")}添加 Provider</button></div>${providers || `<div class="empty">先添加 Provider（API Base URL + API Key）。</div>`}${paginationHTML("providers", providerPage)}</section>
       </div>
-      <section class="panel"><div class="panel-head"><strong>Models</strong><button data-dialog="model">${icon("plus")}添加模型</button></div><div class="table-wrap"><table class="models-table"><thead><tr><th>模型</th><th>Provider</th><th>Backend</th><th>Context</th><th></th></tr></thead><tbody>${models || `<tr><td colspan="5">选择 Provider 后添加模型。</td></tr>`}</tbody></table></div></section>
+      <section class="panel"><div class="panel-head"><strong>Models</strong><div class="panel-head-actions"><input id="model-search" name="model-query" class="model-search" type="search" autocomplete="off" data-1p-ignore="true" data-lpignore="true" data-bwignore="true" spellcheck="false" readonly placeholder="搜索模型 / Provider / Backend" value="${escapeHTML(state.modelSearch)}"><button data-dialog="model">${icon("plus")}添加模型</button></div></div><div id="model-results">${modelResultsHTML()}</div></section>
     </div>
     ${providerDialog()}${modelDialog()}${editModelDialog()}
   </section>`);
@@ -2821,7 +2932,7 @@ function taskDialog(): string {
   const projectID = state.projects.find(project => !project.channel_retired && !isSystemProject(project))?.id || "";
   return taskDialogBase().replace(
     '<div id="task-git-isolation">',
-    `<div class="two"><label>Knowledge<select name="knowledge_policy"><option value="inherit">\u7ee7\u627f Project</option><option value="enabled">\u5f00\u542f</option><option value="disabled">\u5173\u95ed</option></select></label><label>Backend \u4ee3\u7406<select name="proxy_enabled">${proxyOptionsHTML(false)}</select></label></div>${taskCapabilitiesFold({})}${taskSkillsFold(taskSkillOptions(projectID))}<div id="task-git-isolation">`,
+    `<div class="two"><label>Knowledge<select name="knowledge_policy"><option value="inherit">\u7ee7\u627f Project</option><option value="enabled">\u5f00\u542f</option><option value="disabled">\u5173\u95ed</option></select></label><label>Backend \u4ee3\u7406<select name="proxy_enabled">${proxyOptionsHTML(false)}</select></label></div>${taskCapabilitiesFold({})}${taskSkillsFold(taskSkillOptions(projectID, [], true))}<div id="task-git-isolation">`,
   );
 }
 
@@ -2846,7 +2957,7 @@ function taskSkillsFold(body: string): string {
 function taskMCPFold(): string {
   // mcp_pet is attached automatically only to the system pet Task. A normal
   // user Task must not be able to select it.
-  const options = state.mcpServers.filter(item => item.enabled && item.id !== "mcp_pet").map(item => `<label class="task-skill-option"><input type="checkbox" name="mcp_server_ids" value="${escapeHTML(item.id)}" ${item.builtin ? "checked" : ""}><span><strong>${escapeHTML(item.name)}</strong><small>${escapeHTML(item.description || item.transport)}</small></span></label>`).join("");
+  const options = state.mcpServers.filter(item => item.enabled && !item.builtin).map(item => `<label class="task-skill-option"><input type="checkbox" name="mcp_server_ids" value="${escapeHTML(item.id)}"><span><strong>${escapeHTML(item.name)}</strong><small>${escapeHTML(item.description || item.transport)}</small></span></label>`).join("");
   return taskFormFold("task-mcp-fold", "MCP 工具", `<div class="task-skill-options" id="task-mcp-options">${options || '<div class="field-help">没有可供普通任务选择的 MCP。</div>'}</div>`);
 }
 
@@ -2898,7 +3009,7 @@ function syncAgentFoldCounts(): void {
 }
 
 function taskDialogBase(): string {
-return `<dialog id="task-dialog" class="wide"><form id="task-form"><div class="dialog-head"><h2>创建任务</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div><label>标题<input name="title" required></label><label>需求<textarea name="request" required></textarea></label><div class="two"><label>项目<select name="project_id" id="task-project" required>${state.projects.filter(item => !item.channel_retired && !isSystemProject(item)).map(item => `<option value="${item.id}">${escapeHTML(item.name)}</option>`).join("")}</select></label><label>Workspace<select name="workspace_id" id="task-workspace" required></select></label></div>${runtimeFieldsHTML("task", state.models, state.codexAccounts)}<div class="two"><label>推理强度<select name="reasoning_effort" id="task-effort"></select></label><label>沙箱（文件访问）<select name="filesystem"><option value="workspace-write">工作区可写</option><option value="read-only">只读</option><option value="danger-full-access">完全访问</option></select></label></div><div class="two"><label>协作模式<select name="collaboration_mode"><option value="auto">Auto</option><option value="single">Single</option></select></label><label>最大 Agent 数<input name="max_agents" type="number" min="1" value="3"></label></div><label>审批<select name="approval"><option value="never">无需确认</option><option value="auto">自动批准（跳过权限检查）</option></select></label><div id="task-git-isolation"><label>任务隔离<select name="isolation" id="task-isolation"><option value="worktree">独立 Worktree（推荐）</option><option value="inplace">原地执行</option></select></label><div id="task-worktree-settings"><label>Worktree 根目录<input name="worktree_dir" id="task-worktree-dir" placeholder="默认：仓库上一级/.aha2-worktrees"></label><div class="field-help">系统会在根目录下追加 Task ID；切换为原地执行后不使用此配置。</div></div><div class="two" id="task-branches"><label>目标分支<input name="target_branch" placeholder="默认当前分支"></label><label>任务分支<input name="task_branch" placeholder="aha/task-name"></label></div></div>${taskMCPFold()}<div class="dialog-actions"><button type="button" data-close>取消</button><button type="submit" name="start_mode" value="manual">创建，稍后启动</button><button class="primary" type="submit" name="start_mode" value="immediate">创建并立即启动</button></div></form></dialog>`;
+return `<dialog id="task-dialog" class="wide"><form id="task-form"><div class="dialog-head"><h2>创建任务</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div><label>标题<input name="title" required></label><label>需求<textarea name="request" required></textarea></label><div class="two"><label>项目<select name="project_id" id="task-project" required>${state.projects.filter(item => !item.channel_retired && !isSystemProject(item)).map(item => `<option value="${item.id}">${escapeHTML(item.name)}</option>`).join("")}</select></label><label>Workspace<select name="workspace_id" id="task-workspace" required></select></label></div>${runtimeFieldsHTML("task", state.models, state.codexAccounts)}<div class="two"><label>推理强度<select name="reasoning_effort" id="task-effort"></select></label><label>沙箱（文件访问）<select name="filesystem"><option value="workspace-write">工作区可写</option><option value="read-only">只读</option><option value="danger-full-access">完全访问</option></select></label></div><div class="two"><label>协作模式<select name="collaboration_mode"><option value="auto">Auto</option><option value="single">Single</option></select></label><label>最大 Agent 数<input name="max_agents" type="number" min="1" value="3"></label></div><label>审批<select name="approval"><option value="never">无需确认</option><option value="auto">自动批准（跳过权限检查）</option></select></label><div id="task-git-isolation"><label>任务隔离<select name="isolation" id="task-isolation"><option value="inplace" selected>原地执行（默认）</option><option value="worktree">独立 Worktree</option></select></label><div id="task-worktree-settings"><label>Worktree 根目录<input name="worktree_dir" id="task-worktree-dir" placeholder="默认：仓库上一级/.aha2-worktrees"></label><div class="field-help">系统会在根目录下追加 Task ID；切换为原地执行后不使用此配置。</div></div><div class="two" id="task-branches"><label>目标分支<input name="target_branch" placeholder="默认当前分支"></label><label>任务分支<input name="task_branch" placeholder="aha/task-name"></label></div></div>${taskMCPFold()}<div class="dialog-actions"><button type="button" data-close>取消</button><button type="submit" name="start_mode" value="manual">创建，稍后启动</button><button class="primary" type="submit" name="start_mode" value="immediate">创建并立即启动</button></div></form></dialog>`;
 }
 
 let slashCommandSelection = 0;
@@ -3577,6 +3688,9 @@ function renderUIScope(): string {
 function hasActiveTextEditor(): boolean {
   const active = document.activeElement;
   if (!(active instanceof HTMLElement) || !app?.contains(active)) return false;
+  // Search boxes opt into full re-renders: the region restore puts focus and
+  // caret back, so filtering can update while the user is still typing.
+  if (active.dataset.allowRerender === "true") return false;
   if (active instanceof HTMLTextAreaElement || active.isContentEditable) return true;
   if (!(active instanceof HTMLInputElement)) return false;
   return !["button", "checkbox", "color", "file", "hidden", "image", "radio", "range", "reset", "submit"].includes(active.type);
@@ -3746,7 +3860,7 @@ function render(): void {
         refreshData: loadKnowledgeData,
         render,
         setMessage,
-      })}${loadMoreHTML("knowledge")}`),
+      })}${knowledgeEntryListVisible(state.projects) ? loadMoreHTML("knowledge") : ""}`),
       prompts: () => advancedSubview(renderPromptAdmin()),
       proxy: () => advancedSubview(renderProxySettings(
         state.proxySettings,
@@ -3945,6 +4059,12 @@ function bindCommon(): void {
     cancelTaskOpen();
     const nextView = button.dataset.view as View;
     state.view = nextView;
+    if (nextView === "models") {
+      state.modelSearch = "";
+      state.modelPage = 1;
+      state.providerPage = 1;
+      state.codexAccountPage = 1;
+    }
     if (nextView === "proxy") resourceStates.proxy.loaded = false;
     state.selectedTask = null;
     state.selectedProject = null;
@@ -3998,6 +4118,7 @@ function bindCommon(): void {
       return;
     }
     if (button.dataset.dialog === "task") {
+      taskSkillsDirty = false;
       syncTaskWorkspaces();
     }
     document.querySelector<HTMLDialogElement>(`#${button.dataset.dialog}-dialog`)?.showModal();
@@ -4044,6 +4165,74 @@ function bindCommon(): void {
   document.querySelectorAll<HTMLElement>("[data-edit-provider]").forEach(button => button.addEventListener("click", () => {
     const provider = state.providers.find(item => item.id === button.dataset.editProvider!);
     if (provider) openProviderDialog(provider);
+  }));
+  const modelSearch = document.querySelector<HTMLInputElement>("#model-search");
+  if (modelSearch) {
+    // Browser autofill can target the first text input on the page and fill it
+    // with the saved username. Keep it read-only until the user interacts, and
+    // ignore input events that did not come from a real edit.
+    let modelSearchUserInput = false;
+    const markModelSearchInput = () => { modelSearchUserInput = true; };
+    modelSearch.addEventListener("focus", () => {
+      modelSearchUserInput = false;
+      modelSearch.readOnly = false;
+      if (modelSearch.value !== state.modelSearch) modelSearch.value = state.modelSearch;
+    });
+    modelSearch.addEventListener("blur", () => {
+      modelSearchUserInput = false;
+      modelSearch.readOnly = true;
+      modelSearch.value = state.modelSearch;
+    });
+    for (const eventName of ["keydown", "pointerdown", "paste", "compositionend"]) {
+      modelSearch.addEventListener(eventName, markModelSearchInput);
+    }
+    modelSearch.addEventListener("beforeinput", event => {
+      if (event.inputType !== "insertReplacementText") modelSearchUserInput = true;
+    });
+    modelSearch.addEventListener("input", () => {
+      if (modelSearch.readOnly || !modelSearchUserInput) {
+        modelSearch.value = state.modelSearch;
+        return;
+      }
+      state.modelSearch = modelSearch.value;
+      state.modelPage = 1;
+      scheduleModelPageRender();
+    });
+  }
+  const modelResults = document.querySelector<HTMLElement>("#model-results");
+  modelResults?.addEventListener("click", event => {
+    const target = event.target as HTMLElement;
+    const edit = target.closest<HTMLElement>("[data-edit-model]");
+    if (edit) {
+      openEditModelDialog(edit.dataset.editModel || "");
+      return;
+    }
+    const remove = target.closest<HTMLElement>("[data-delete-model]");
+    if (remove) {
+      deleteModelByID(remove.dataset.deleteModel || "", remove);
+      return;
+    }
+    const pager = target.closest<HTMLElement>('[data-page-kind="models"]');
+    if (!pager) return;
+    const delta = Number(pager.dataset.pageDelta || 0);
+    if (!delta) return;
+    const pages = paginateItems(filteredModels(), state.modelPage, MODEL_PAGE_SIZE).pages;
+    state.modelPage = Math.min(pages, Math.max(1, state.modelPage + delta));
+    refreshModelResults();
+  });
+  document.querySelectorAll<HTMLElement>("[data-page-kind]").forEach(button => button.addEventListener("click", () => {
+    const kind = button.dataset.pageKind || "";
+    if (!kind || kind === "models") return;
+    const delta = Number(button.dataset.pageDelta || 0);
+    if (!delta) return;
+    if (kind === "providers") {
+      const pages = paginateItems(state.providers, state.providerPage, PROVIDER_PAGE_SIZE).pages;
+      state.providerPage = Math.min(pages, Math.max(1, state.providerPage + delta));
+    } else if (kind === "codex-accounts") {
+      const pages = paginateItems(state.codexAccounts, state.codexAccountPage, CODEX_ACCOUNT_PAGE_SIZE).pages;
+      state.codexAccountPage = Math.min(pages, Math.max(1, state.codexAccountPage + delta));
+    }
+    render();
   }));
   document.querySelector<HTMLSelectElement>("#project-type")?.addEventListener("change", syncProjectTypeFields);
   document.querySelector<HTMLSelectElement>("#ws-locality")?.addEventListener("change", syncWorkspaceFields);
@@ -4307,44 +4496,8 @@ function bindCommon(): void {
       render();
     });
   });
-  document.querySelectorAll<HTMLElement>("[data-delete-model]").forEach(button => button.addEventListener("click", () => {
-    const id = button.dataset.deleteModel!;
-    if (!window.confirm("删除该模型？使用此模型的任务会暂停输入，进入任务后可重新选择模型。")) return;
-    void runWithFeedback(button, "删除中", async () => {
-      await api.deleteModel(id);
-      setMessage("notice", "模型已删除");
-      await loadAll();
-      render();
-    });
-  }));
-  document.querySelectorAll<HTMLElement>("[data-edit-model]").forEach(button => button.addEventListener("click", () => {
-    const id = button.dataset.editModel!;
-    const model = state.models.find(item => item.id === id);
-    if (!model) return;
-    const nameInput = document.querySelector<HTMLInputElement>("#model-edit-name");
-    const wireInput = document.querySelector<HTMLSelectElement>("#model-edit-wire");
-    const backendInput = document.querySelector<HTMLSelectElement>("#model-edit-backend");
-    const effortInput = document.querySelector<HTMLSelectElement>("#model-edit-effort");
-    const contextInput = document.querySelector<HTMLInputElement>("#model-edit-context");
-    const maxoutInput = document.querySelector<HTMLInputElement>("#model-edit-maxout");
-    const compactInput = document.querySelector<HTMLInputElement>("#model-edit-compact");
-    const imageInput = document.querySelector<HTMLInputElement>("#model-edit-image");
-    if (nameInput) nameInput.value = model.display_name;
-    const wireModelInput = document.querySelector<HTMLInputElement>("#model-edit-wire-model");
-    if (wireModelInput) wireModelInput.value = model.wire_model || "";
-    if (wireInput) {
-      wireInput.value = model.wire_api || (model.backend === "claude" ? "anthropic_messages" : "responses");
-      wireInput.disabled = false;
-    }
-    if (backendInput) backendInput.value = model.backend;
-    if (effortInput) effortInput.value = model.default_reasoning_effort || "";
-    if (contextInput) contextInput.value = String(model.context_window || 0);
-    if (maxoutInput) maxoutInput.value = String(model.max_output_tokens || 0);
-    if (compactInput) compactInput.value = String(model.auto_compact_window || 0);
-    if (imageInput) imageInput.checked = modelSupportsImage(model);
-    (document.querySelector<HTMLDialogElement>("#model-edit-dialog"))?.showModal();
-    document.querySelector<HTMLElement>("#save-model-edit")?.setAttribute("data-model-id", id);
-  }));
+  // Model row actions are handled by the delegated #model-results listener so
+  // the same handlers survive search-result refreshes.
   document.querySelector("#save-model-edit")?.addEventListener("click", () => {
     const button = document.querySelector<HTMLElement>("#save-model-edit");
     const id = button?.getAttribute("data-model-id");
@@ -4376,7 +4529,10 @@ function bindCommon(): void {
   // follow every checkbox change, not just the initial render.
   document.querySelector<HTMLElement>("#task-dialog")?.addEventListener("change", event => {
     const target = event.target;
-    if (target instanceof HTMLInputElement && target.type === "checkbox") syncTaskFormFoldCounts();
+    if (target instanceof HTMLInputElement && target.type === "checkbox") {
+      if (target.name === "skill_ids") taskSkillsDirty = true;
+      syncTaskFormFoldCounts();
+    }
   });
   document.querySelector("#task-workspace")?.addEventListener("change", () => {
     const worktreeDir = document.querySelector<HTMLInputElement>("#task-worktree-dir");
@@ -4404,6 +4560,7 @@ function bindCommon(): void {
     const result = await api.createTask({
       ...taskPayload,
       skill_ids: form.getAll("skill_ids").map(String),
+      apply_auto_skills: false,
       mcp_server_ids: form.getAll("mcp_server_ids").map(String),
       max_agents: Number(payload.max_agents || 3),
       proxy_enabled: proxyEnabledFrom(payload.proxy_enabled),
@@ -5508,14 +5665,14 @@ async function loadMCPServers(force = false): Promise<void> {
 
 function mcpView(): string {
   const rows = state.mcpServers.map(item => `<tr>
-    <td><strong>${escapeHTML(item.name)}${item.builtin ? ' <span class="capability-badge">内置</span>' : ""}</strong><small>${escapeHTML(item.description || item.transport)}</small></td>
-    <td>${escapeHTML(item.transport)}${item.url ? `<small>${escapeHTML(item.url)}</small>` : item.command ? `<small>${escapeHTML([item.command, ...(item.args || [])].join(" "))}</small>` : ""}</td>
+    <td><strong>${escapeHTML(item.name)}${item.builtin ? ' <span class="capability-badge">内置</span>' : ""}${item.auto_inject ? ' <span class="capability-badge">自动注入</span>' : ""}</strong><small>${escapeHTML(item.description || item.transport)}</small></td>
+    <td>${item.auto_inject ? "自动注入" : escapeHTML(item.transport)}${item.url ? `<small>${escapeHTML(item.url)}</small>` : item.command ? `<small>${escapeHTML([item.command, ...(item.args || [])].join(" "))}</small>` : ""}</td>
     <td>${item.enabled ? "已启用" : "已停用"} · ${escapeHTML(item.health || "unknown")}</td>
     <td class="row-actions"><button type="button" data-detail-mcp="${escapeHTML(item.id)}">详情</button>${item.builtin ? "" : `<button type="button" data-toggle-mcp="${escapeHTML(item.id)}">${item.enabled ? "停用" : "启用"}</button><button type="button" class="icon-button" data-delete-mcp="${escapeHTML(item.id)}" title="删除">${icon("close")}</button>`}</td>
   </tr>`).join("");
   return `${pageHead("MCP", "管理 MCP 能力提供方；在创建 Task 时选择该任务启用哪些 MCP。")}
     <section class="panel"><div class="panel-head"><strong>MCP Servers</strong><button type="button" id="mcp-refresh">刷新</button></div>
-      <div class="table-wrap"><table class="models-table"><thead><tr><th>名称</th><th>连接</th><th>状态</th><th></th></tr></thead><tbody>${rows || `<tr><td colspan="4">还没有 MCP。内置宠物 MCP 会在首次启动时出现。</td></tr>`}</tbody></table></div>
+      <div class="table-wrap"><table class="models-table"><thead><tr><th>名称</th><th>连接</th><th>状态</th><th></th></tr></thead><tbody>${rows || `<tr><td colspan="4">还没有 MCP。内置 MCP 会在首次启动时出现。</td></tr>`}</tbody></table></div>
     </section>
     <section class="panel"><div class="panel-head"><strong>添加 HTTP MCP</strong></div>
       <form id="mcp-form" class="mcp-form">
@@ -5527,7 +5684,7 @@ function mcpView(): string {
         <label>描述<input name="description" placeholder="可选"></label>
         <button class="primary" type="submit">添加 MCP</button>
       </form>
-      <div class="field-help">HTTP 只填 URL；stdio 会由 backend 在本机启动命令，请只安装可信 MCP。内置宠物 MCP 不可删除或修改。</div>
+      <div class="field-help">HTTP 只填 URL；stdio 会由 backend 在本机启动命令，请只安装可信 MCP。内置 MCP（宠物、渠道）不可删除或修改；渠道 MCP 仅在群聊路由的 Turn 自动注入。</div>
     </section>
     <dialog id="mcp-detail-dialog"><div class="dialog-head"><h2 id="mcp-detail-name">MCP 详情</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div><div class="dialog-body" id="mcp-detail-body"></div><div class="dialog-actions"><button type="button" id="mcp-detail-test">测试并读取工具</button><button type="button" class="primary" data-close>关闭</button></div></dialog>`;
 }
@@ -5588,7 +5745,7 @@ async function openMCPDetail(id: string): Promise<void> {
     const tools = (server.tools || []).map(tool => server.builtin
       ? `<li><div class="mcp-tool-row"><span><strong>${escapeHTML(tool.name)}</strong><small>${escapeHTML(tool.description || "")}</small></span></div></li>`
       : `<li><label class="mcp-tool-row"><input type="checkbox" data-tool-name="${escapeHTML(tool.name)}" ${disabled.has(tool.name) ? "" : "checked"}><span><strong>${escapeHTML(tool.name)}</strong><small>${escapeHTML(tool.description || "")}</small></span></label></li>`).join("");
-    body.innerHTML = `<p>${escapeHTML(server.description || "暂无描述")}</p><dl class="mcp-detail-meta"><dt>传输</dt><dd>${escapeHTML(server.transport)}</dd><dt>地址</dt><dd>${escapeHTML(server.url || "内置")}</dd><dt>状态</dt><dd>${server.enabled ? "已启用" : "已停用"} · ${escapeHTML(server.health || "unknown")}</dd></dl>${server.builtin ? "" : `<div class="mcp-edit-fields"><label>名称<input id="mcp-edit-name" value="${escapeHTML(server.name)}"></label>${server.transport === "stdio" ? "" : `<label>URL<input id="mcp-edit-url" value="${escapeHTML(server.url || "")}"></label>`}<label>描述<input id="mcp-edit-desc" value="${escapeHTML(server.description || "")}"></label>${server.transport === "stdio" ? `<label>命令<input id="mcp-edit-command" value="${escapeHTML(server.command || "")}"></label><label>参数<input id="mcp-edit-args" value="${escapeHTML((server.args || []).join(" "))}"></label>` : ""}<button type="button" id="mcp-edit-save">保存修改</button></div>`}<h3>支持的工具（${(server.tools || []).length}）</h3><ul class="mcp-tool-list">${tools || "<li>暂无工具信息，点“测试并读取工具”尝试读取。</li>"}</ul>${server.last_error ? `<p class="field-help">${escapeHTML(server.last_error)}</p>` : ""}`;
+    body.innerHTML = `<p>${escapeHTML(server.description || "暂无描述")}</p><dl class="mcp-detail-meta"><dt>传输</dt><dd>${escapeHTML(server.transport)}</dd><dt>地址</dt><dd>${server.auto_inject ? "由当前 Turn 动态注入" : escapeHTML(server.url || "内置")}</dd><dt>状态</dt><dd>${server.enabled ? "已启用" : "已停用"} · ${escapeHTML(server.health || "unknown")}</dd></dl>${server.builtin ? "" : `<div class="mcp-edit-fields"><label>名称<input id="mcp-edit-name" value="${escapeHTML(server.name)}"></label>${server.transport === "stdio" ? "" : `<label>URL<input id="mcp-edit-url" value="${escapeHTML(server.url || "")}"></label>`}<label>描述<input id="mcp-edit-desc" value="${escapeHTML(server.description || "")}"></label>${server.transport === "stdio" ? `<label>命令<input id="mcp-edit-command" value="${escapeHTML(server.command || "")}"></label><label>参数<input id="mcp-edit-args" value="${escapeHTML((server.args || []).join(" "))}"></label>` : ""}<button type="button" id="mcp-edit-save">保存修改</button></div>`}<h3>支持的工具（${(server.tools || []).length}）</h3><ul class="mcp-tool-list">${tools || "<li>暂无工具信息，点“测试并读取工具”尝试读取。</li>"}</ul>${server.last_error ? `<p class="field-help">${escapeHTML(server.last_error)}</p>` : ""}`;
     body.querySelector<HTMLButtonElement>("#mcp-edit-save")?.addEventListener("click", () => {
       const name = body.querySelector<HTMLInputElement>("#mcp-edit-name")?.value || "";
       const url = body.querySelector<HTMLInputElement>("#mcp-edit-url")?.value || "";

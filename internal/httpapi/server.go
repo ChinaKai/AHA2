@@ -426,6 +426,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("DELETE /api/v1/knowledge/{id}", s.withAuth(http.HandlerFunc(s.deleteKnowledge)))
 	mux.Handle("POST /api/v1/knowledge/{id}/verify", s.withAuth(http.HandlerFunc(s.verifyKnowledge)))
 	mux.Handle("POST /api/v1/knowledge/{id}/feedback", s.withAuth(http.HandlerFunc(s.feedbackKnowledge)))
+	mux.Handle("GET /api/v1/knowledge/proposals", s.withAuth(http.HandlerFunc(s.listKnowledgeProposals)))
 	mux.Handle("POST /api/v1/knowledge/proposals/{id}/approve", s.withAuth(http.HandlerFunc(s.approveKnowledgeProposal)))
 	mux.Handle("POST /api/v1/knowledge/proposals/{id}/reject", s.withAuth(http.HandlerFunc(s.rejectKnowledgeProposal)))
 	mux.Handle("POST /api/v1/knowledge/proposals/batch", s.withAuth(http.HandlerFunc(s.batchKnowledgeProposalReviews)))

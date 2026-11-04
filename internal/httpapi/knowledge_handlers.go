@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -70,17 +71,24 @@ func (s *Server) listKnowledge(writer http.ResponseWriter, request *http.Request
 			return
 		}
 	}
-	proposals, err := s.store.ListKnowledgeProposals(request.Context(), request.URL.Query().Get("scope"), request.URL.Query().Get("project_id"))
-	if err != nil {
-		writeError(writer, http.StatusInternalServerError, "list_knowledge_proposals_failed")
-		return
+	includeProposals := request.URL.Query().Get("include_proposals") != "false"
+	var proposals []domain.KnowledgeProposal
+	if includeProposals {
+		proposals, err = s.store.ListKnowledgeProposals(request.Context(), request.URL.Query().Get("scope"), request.URL.Query().Get("project_id"))
+		if err != nil {
+			writeError(writer, http.StatusInternalServerError, "list_knowledge_proposals_failed")
+			return
+		}
 	}
 	reviewSettings, err := s.store.KnowledgeReviewSettings(request.Context())
 	if err != nil {
 		writeError(writer, http.StatusInternalServerError, "knowledge_review_settings_failed")
 		return
 	}
-	response := map[string]any{"ok": true, "proposals": proposals, "review_settings": reviewSettings}
+	response := map[string]any{"ok": true, "review_settings": reviewSettings}
+	if includeProposals {
+		response["proposals"] = proposals
+	}
 	if options.Summary {
 		response["knowledge"] = summarizeKnowledge(page.Items)
 	} else {
@@ -91,6 +99,52 @@ func (s *Server) listKnowledge(writer http.ResponseWriter, request *http.Request
 		response["next_cursor"] = page.NextCursor
 	}
 	writeJSON(writer, http.StatusOK, response)
+}
+
+func (s *Server) listKnowledgeProposals(writer http.ResponseWriter, request *http.Request) {
+	status := strings.ToLower(strings.TrimSpace(request.URL.Query().Get("status")))
+	if status == "" {
+		status = "all"
+	}
+	switch status {
+	case "all", "pending", "approved", "rejected":
+	default:
+		writeError(writer, http.StatusBadRequest, "invalid_status")
+		return
+	}
+	page, limit := 1, 10
+	if value := strings.TrimSpace(request.URL.Query().Get("page")); value != "" {
+		if parsed, parseErr := strconv.Atoi(value); parseErr == nil {
+			page = parsed
+		}
+	}
+	if value := strings.TrimSpace(request.URL.Query().Get("limit")); value != "" {
+		if parsed, parseErr := strconv.Atoi(value); parseErr == nil {
+			limit = parsed
+		}
+	}
+	if page < 1 {
+		page = 1
+	}
+	if limit < 0 {
+		limit = 0
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	items, total, err := s.store.ListKnowledgeProposalsPage(request.Context(), request.URL.Query().Get("scope"), request.URL.Query().Get("project_id"), status, page, limit)
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, "list_knowledge_proposals_failed")
+		return
+	}
+	pages := 0
+	if limit > 0 {
+		pages = (total + limit - 1) / limit
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"ok": true, "proposals": items, "total": total, "page": page, "pages": pages,
+		"has_more": limit > 0 && page < pages,
+	})
 }
 
 func (s *Server) withGlobalKnowledgeNavigation(ctx context.Context, items []domain.KnowledgeEntry) ([]domain.KnowledgeEntry, error) {
@@ -492,6 +546,7 @@ type skillPayload struct {
 	Instructions string `json:"instructions"`
 	Status       string `json:"status"`
 	Enabled      *bool  `json:"enabled"`
+	AutoAttach   *bool  `json:"auto_attach"`
 }
 
 func normalizeSkillPayload(payload *skillPayload) error {
@@ -527,8 +582,12 @@ func (s *Server) createSkill(writer http.ResponseWriter, request *http.Request) 
 	if payload.Enabled != nil {
 		enabled = *payload.Enabled
 	}
+	autoAttach := false
+	if payload.AutoAttach != nil {
+		autoAttach = *payload.AutoAttach
+	}
 	now := time.Now().UTC()
-	item := domain.Skill{ID: domain.NewID("skill"), Scope: payload.Scope, ProjectID: strings.TrimSpace(payload.ProjectID), Name: payload.Name, Description: strings.TrimSpace(payload.Description), Instructions: payload.Instructions, Version: 1, Status: payload.Status, Enabled: enabled, CreatedAt: now, UpdatedAt: now}
+	item := domain.Skill{ID: domain.NewID("skill"), Scope: payload.Scope, ProjectID: strings.TrimSpace(payload.ProjectID), Name: payload.Name, Description: strings.TrimSpace(payload.Description), Instructions: payload.Instructions, Version: 1, Status: payload.Status, Enabled: enabled, AutoAttach: autoAttach, CreatedAt: now, UpdatedAt: now}
 	if err := s.store.CreateSkill(request.Context(), item); err != nil {
 		writeError(writer, http.StatusInternalServerError, "create_skill_failed")
 		return
@@ -556,6 +615,9 @@ func (s *Server) updateSkill(writer http.ResponseWriter, request *http.Request) 
 	item.Status, item.UpdatedAt = payload.Status, time.Now().UTC()
 	if payload.Enabled != nil {
 		item.Enabled = *payload.Enabled
+	}
+	if payload.AutoAttach != nil {
+		item.AutoAttach = *payload.AutoAttach
 	}
 	item.Version++
 	if err := s.store.UpdateSkill(request.Context(), item); err != nil {

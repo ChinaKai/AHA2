@@ -73,13 +73,26 @@ func (s *Service) PetProjectCatalog(ctx context.Context) ([]PetProjectBrief, err
 }
 
 type PetCreateTaskInput struct {
-	ProjectID   string `json:"project_id"`
-	WorkspaceID string `json:"workspace_id"`
-	Title       string `json:"title"`
-	Request     string `json:"request"`
-	ModelID     string `json:"model_id"`
-	Start       *bool  `json:"start"`
+	ProjectID       string `json:"project_id"`
+	WorkspaceID     string `json:"workspace_id"`
+	Title           string `json:"title"`
+	Request         string `json:"request"`
+	ModelID         string `json:"model_id"`
+	ReasoningEffort string `json:"reasoning_effort"`
+	Filesystem      string `json:"filesystem"`
+	Approval        string `json:"approval"`
+	Isolation       string `json:"isolation"`
+	Start           *bool  `json:"start"`
 }
+
+// Pet-created code work defaults to the strongest runtime the owner asked for:
+// high reasoning and full filesystem access. The pet may lower either per Task
+// when the work is trivial, but must pass the values explicitly.
+const (
+	petCreatedTaskReasoningEffort = "high"
+	petCreatedTaskFilesystem      = "danger-full-access"
+	petCreatedTaskApproval        = "never"
+)
 
 func (s *Service) PetCreateTask(ctx context.Context, input PetCreateTaskInput) (domain.Task, error) {
 	assistant, err := s.petAssistant(ctx)
@@ -106,6 +119,42 @@ func (s *Service) PetCreateTask(ctx context.Context, input PetCreateTaskInput) (
 	if modelID == "" {
 		modelID = assistant.ModelID
 	}
+	reasoningEffort := strings.ToLower(strings.TrimSpace(input.ReasoningEffort))
+	if reasoningEffort == "" {
+		reasoningEffort = petCreatedTaskReasoningEffort
+	}
+	switch reasoningEffort {
+	case "low", "medium", "high", "xhigh", "max":
+	default:
+		return domain.Task{}, fmt.Errorf("reasoning_effort 必须是 low、medium、high、xhigh 或 max")
+	}
+	filesystem := strings.TrimSpace(input.Filesystem)
+	if filesystem == "" {
+		filesystem = petCreatedTaskFilesystem
+	}
+	switch filesystem {
+	case "read-only", "workspace-write", "danger-full-access":
+	default:
+		return domain.Task{}, fmt.Errorf("filesystem 必须是 read-only、workspace-write 或 danger-full-access")
+	}
+	approval := strings.TrimSpace(input.Approval)
+	if approval == "" {
+		approval = petCreatedTaskApproval
+	}
+	switch approval {
+	case "never", "auto":
+	default:
+		return domain.Task{}, fmt.Errorf("approval 必须是 never 或 auto")
+	}
+	isolation := strings.ToLower(strings.TrimSpace(input.Isolation))
+	if isolation == "" {
+		isolation = "worktree"
+	}
+	switch isolation {
+	case "worktree", "inplace":
+	default:
+		return domain.Task{}, fmt.Errorf("isolation 必须是 worktree 或 inplace")
+	}
 	project, err := s.store.Project(ctx, projectID)
 	if err != nil {
 		return domain.Task{}, fmt.Errorf("项目不存在")
@@ -119,8 +168,8 @@ func (s *Service) PetCreateTask(ctx context.Context, input PetCreateTaskInput) (
 	}
 	task, err := s.CreateTask(ctx, CreateTaskInput{
 		ProjectID: projectID, WorkspaceID: workspaceID, Title: title, Request: request,
-		ModelID: modelID, Filesystem: "workspace-write", Approval: "never",
-		CollaborationMode: "single", MaxAgents: 1, KnowledgePolicy: project.KnowledgePolicy,
+		ModelID: modelID, ReasoningEffort: reasoningEffort, Filesystem: filesystem, Approval: approval,
+		Isolation: isolation, CollaborationMode: "single", MaxAgents: 1, KnowledgePolicy: project.KnowledgePolicy,
 		StartMode: "manual",
 	})
 	if err != nil {
