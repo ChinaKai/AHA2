@@ -1,10 +1,12 @@
 package app
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
 )
@@ -160,26 +162,227 @@ func TestInterruptTurnLeavesTerminalTurnUntouched(t *testing.T) {
 	}
 }
 
+// blockingSecretResolver stalls the preparation phase exactly where runTurn
+// reads the workspace SSH credential. The turn status is already preparing at
+// that point, which makes the interruption deterministic instead of relying on
+// a scheduling race.
+type blockingSecretResolver struct {
+	entered chan struct{}
+	release <-chan struct{}
+	once    sync.Once
+}
+
+func (r *blockingSecretResolver) Get(string) (string, bool) {
+	r.once.Do(func() { close(r.entered) })
+	<-r.release
+	return "", false
+}
+
+func (r *blockingSecretResolver) PutMany(map[string]string) error { return nil }
+func (r *blockingSecretResolver) DeleteMany([]string) error       { return nil }
+
+// blockingSuccessExecutor ignores its context on purpose: it models a backend
+// that already produced a successful result while the owner interrupted the
+// turn, so the success must not be overwritten by the interrupt.
+type blockingSuccessExecutor struct {
+	entered chan struct{}
+	release <-chan struct{}
+	once    sync.Once
+}
+
+func (e *blockingSuccessExecutor) Execute(_ context.Context, _ ExecutionRequest, emit func(ExecutionEvent)) (ExecutionResult, error) {
+	e.once.Do(func() { close(e.entered) })
+	<-e.release
+	emit(ExecutionEvent{Type: "agent_message", Data: map[string]any{"text": "done"}})
+	return ExecutionResult{Reply: "done", ProviderSessionID: "interrupted-then-succeeded"}, nil
+}
+
+func (f *petTaskFixture) assertTurnSettledTerminally(t *testing.T, taskID, turnID string, want domain.TurnStatus) {
+	t.Helper()
+	waitForTurn(t, f.database, turnID, want)
+	stored, err := f.database.Turn(f.ctx, turnID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.FinishedAt.IsZero() {
+		t.Fatalf("turn %s is %s but has no finished_at", turnID, stored.Status)
+	}
+	if _, err := f.database.ActiveTurn(f.ctx, taskID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("ActiveTurn err=%v, want sql.ErrNoRows", err)
+	}
+	wantItems := 0
+	if want == domain.TurnInterrupted {
+		wantItems = 1
+	}
+	if count := f.interruptedItems(t, taskID, turnID); count != wantItems {
+		t.Fatalf("turn_interrupted items=%d, want %d", count, wantItems)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		f.service.mu.Lock()
+		_, hasHandle := f.service.cancels[turnID]
+		f.service.mu.Unlock()
+		if !hasHandle {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("cancel handle remained registered after the terminal write")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestInterruptTurnBeforePreparationSettlesQueuedTurn(t *testing.T) {
+	fixture := newPetTaskFixture(t)
+	task, turn := fixture.createOrphanTurn(t, domain.TurnQueued)
+	runCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fixture.service.mu.Lock()
+	fixture.service.cancels[turn.ID] = cancel
+	fixture.service.mu.Unlock()
+
+	// InterruptTurn owns the cancel handle, so it only cancels and returns; the
+	// turn goroutine must still write the interrupted terminal state itself.
+	if err := fixture.service.InterruptTurn(fixture.ctx, turn.ID); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		fixture.service.runTurn(runCtx, turn.ID)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("runTurn did not return after cancel")
+	}
+	fixture.assertTurnSettledTerminally(t, task.ID, turn.ID, domain.TurnInterrupted)
+}
+
+func TestInterruptTurnDuringPreparationSettlesPreparingTurn(t *testing.T) {
+	fixture := newPetTaskFixture(t)
+	task, turn := fixture.createOrphanTurn(t, domain.TurnQueued)
+	workspace, err := fixture.database.Workspace(fixture.ctx, petWorkspaceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace.SSHCredentialRef = "workspace/interrupt-during-preparation"
+	workspace.UpdatedAt = fixture.service.now().UTC()
+	if err := fixture.database.UpdateWorkspaceConfig(fixture.ctx, workspace); err != nil {
+		t.Fatal(err)
+	}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	fixture.service.secrets = &blockingSecretResolver{entered: entered, release: release}
+
+	runCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fixture.service.mu.Lock()
+	fixture.service.cancels[turn.ID] = cancel
+	fixture.service.mu.Unlock()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		fixture.service.runTurn(runCtx, turn.ID)
+	}()
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("runTurn never reached the preparation secret lookup")
+	}
+	stored, err := fixture.database.Turn(fixture.ctx, turn.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != domain.TurnPreparing {
+		t.Fatalf("interrupt race started at status=%s, want preparing", stored.Status)
+	}
+
+	if err := fixture.service.InterruptTurn(fixture.ctx, turn.ID); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("runTurn did not return after cancel")
+	}
+	fixture.assertTurnSettledTerminally(t, task.ID, turn.ID, domain.TurnInterrupted)
+}
+
+func TestInterruptTurnWhileRunningDoesNotOverwriteSuccessfulResult(t *testing.T) {
+	fixture := newPetTaskFixture(t)
+	fixture.createPetDraft(t, "旧的宠物需求")
+	if _, err := fixture.service.StartTask(fixture.ctx, petTaskID); err != nil {
+		t.Fatal(err)
+	}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	fixture.service.executor = &blockingSuccessExecutor{entered: entered, release: release}
+
+	turn, err := fixture.service.SubmitMessage(fixture.ctx, petTaskID, "主人发来一条消息")
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(15 * time.Second):
+		t.Fatal("turn never reached the executor")
+	}
+	// A handled running turn only gets canceled; InterruptTurn must not rewrite
+	// the stored status before the executor settles.
+	if err := fixture.service.InterruptTurn(fixture.ctx, turn.ID); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := fixture.database.Turn(fixture.ctx, turn.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != domain.TurnRunning {
+		t.Fatalf("InterruptTurn rewrote running turn to %s", stored.Status)
+	}
+	close(release)
+	waitForTask(t, fixture.database, petTaskID, domain.TaskWaitingUser)
+	fixture.assertTurnSettledTerminally(t, petTaskID, turn.ID, domain.TurnSucceeded)
+	stored, err = fixture.database.Turn(fixture.ctx, turn.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Result != "done" {
+		t.Fatalf("successful result was lost: %q", stored.Result)
+	}
+}
+
 func TestInterruptTurnConcurrentWithCompletionKeepsOneTerminalState(t *testing.T) {
 	for iteration := 0; iteration < 3; iteration++ {
 		fixture := newPetTaskFixture(t)
 		task, turn := fixture.createOrphanTurn(t, domain.TurnRunning)
-		var wait sync.WaitGroup
+		var wait, ready sync.WaitGroup
+		start := make(chan struct{})
 		errs := make(chan error, 5)
 		wait.Add(5)
+		ready.Add(5)
 		go func() {
 			defer wait.Done()
 			succeeded := turn
 			succeeded.Status, succeeded.Result, succeeded.FinishedAt = domain.TurnSucceeded, "done", fixture.service.now().UTC()
+			// The barrier releases the completion and all interrupts together so
+			// the compare-and-set race is actually exercised.
+			ready.Done()
+			<-start
 			// Losing the compare-and-set to an interrupt is expected here.
 			_ = fixture.database.UpdateTurn(fixture.ctx, succeeded, domain.TurnRunning)
 		}()
 		for range 4 {
 			go func() {
 				defer wait.Done()
+				ready.Done()
+				<-start
 				errs <- fixture.service.InterruptTurn(fixture.ctx, turn.ID)
 			}()
 		}
+		ready.Wait()
+		close(start)
 		wait.Wait()
 		close(errs)
 		for err := range errs {

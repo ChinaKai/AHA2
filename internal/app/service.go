@@ -960,6 +960,10 @@ const (
 
 func (s *Service) runTurn(ctx context.Context, turnID string) {
 	defer func() {
+		// A canceled preparation can return before any terminal write happens.
+		// Settle it while the cancel handle is still registered, then remove the
+		// handle so a later InterruptTurn can fall back to the stored status.
+		s.settleCanceledTurn(ctx, turnID)
 		s.mu.Lock()
 		delete(s.cancels, turnID)
 		s.mu.Unlock()
@@ -1770,7 +1774,66 @@ func (s *Service) transitionTurn(ctx context.Context, turn *domain.Turn, status 
 	return nil
 }
 
+// terminalWriteTimeout bounds a terminal-state write that must outlive the run
+// context. It only covers one settlement, so a short timeout keeps a stuck
+// database from blocking shutdown.
+const terminalWriteTimeout = 5 * time.Second
+
+// terminalWriteContext detaches a terminal settlement from the context that ran
+// the turn. A canceled run context or a disconnected client must not prevent
+// the interrupted/failed state from being stored, otherwise the turn stays
+// non-terminal after its cancel handle is gone.
+func terminalWriteContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), terminalWriteTimeout)
+}
+
+// settleCanceledTurn settles a turn whose run context was canceled before it
+// started executing. Such a turn returns through preparation error paths that
+// cannot write with the canceled context, and the runTurn defer removes the
+// cancel handle afterwards; without this the turn becomes a zombie.
+//
+// Only queued/preparing/starting turns are touched: once execution started the
+// executor's own cancellation path settles the turn, and a stored succeeded or
+// failed result always wins because terminal statuses are skipped.
+func (s *Service) settleCanceledTurn(runCtx context.Context, turnID string) {
+	if runCtx.Err() == nil {
+		return
+	}
+	s.mu.Lock()
+	closing := s.closing
+	s.mu.Unlock()
+	if closing {
+		// Shutdown recovery marks unfinished turns interrupted on the next start;
+		// settling here would also schedule successor turns while shutting down.
+		return
+	}
+	ctx, cancel := terminalWriteContext()
+	defer cancel()
+	turn, err := s.store.Turn(ctx, turnID)
+	if err != nil || turn.Status.Terminal() {
+		return
+	}
+	switch turn.Status {
+	case domain.TurnQueued, domain.TurnPreparing, domain.TurnStarting:
+	default:
+		return
+	}
+	task, err := s.store.Task(ctx, turn.TaskID)
+	if err != nil {
+		return
+	}
+	s.interruptTurn(ctx, &turn, task)
+}
+
 func (s *Service) failTurn(ctx context.Context, turn *domain.Turn, task domain.Task, cause error) {
+	if ctx.Err() != nil || errors.Is(cause, context.Canceled) {
+		// Cancellation is an interruption, not a backend failure, and the
+		// settlement must not inherit the canceled run context.
+		s.interruptTurn(context.Background(), turn, task)
+		return
+	}
+	ctx, cancel := terminalWriteContext()
+	defer cancel()
 	now := s.now().UTC()
 	previous := turn.Status
 	turn.Status, turn.Error, turn.FinishedAt = domain.TurnFailed, cause.Error(), now
@@ -1794,7 +1857,12 @@ func (s *Service) failTurn(ctx context.Context, turn *domain.Turn, task domain.T
 }
 
 // interruptTurn reports whether this call moved the turn to interrupted.
-func (s *Service) interruptTurn(ctx context.Context, turn *domain.Turn, task domain.Task) bool {
+// The caller's context is intentionally ignored: interruption is often the
+// reason it is already canceled, so the settlement must run detached to store
+// the terminal status and its conversation item.
+func (s *Service) interruptTurn(_ context.Context, turn *domain.Turn, task domain.Task) bool {
+	ctx, cancel := terminalWriteContext()
+	defer cancel()
 	now := s.now().UTC()
 	previous := turn.Status
 	turn.Status, turn.FinishedAt = domain.TurnInterrupted, now
