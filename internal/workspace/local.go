@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -155,6 +156,26 @@ func prependPathDirectories(value string, dirs []string) string {
 	return strings.Join(ordered, string(os.PathListSeparator))
 }
 
+// processPipeDrainTimeout bounds how long runProcess waits for a descendant
+// that inherited the child's stdout/stderr handles to close them after the
+// direct child exits. When the grace expires the runner closes its read ends;
+// a drainer still blocked on a full spool means unread pipe data was lost,
+// while a drainer waiting on an empty pipe has already captured everything.
+const processPipeDrainTimeout = 3 * time.Second
+
+// processOutputSpoolLimit caps how many unread bytes each stream may buffer
+// before its pipe drainer is backpressured. The spool decouples the drainer
+// from the line handler, so a busy handler does not discard the tail; beyond
+// this backlog the command is deliberately slowed down instead of growing
+// memory without bound. If a read end must be closed while the drainer is
+// still blocked writing here, the capture is reported as truncated.
+const processOutputSpoolLimit = 4 * 1024 * 1024
+
+// errProcessOutputTruncated reports that a process pipe was closed while the
+// consumer was backpressured, so output still in that pipe was lost. Callers
+// must not mistake this for a successful run with complete output.
+var errProcessOutputTruncated = fmt.Errorf("workspace: process output truncated after backpressure stall: %w", exec.ErrWaitDelay)
+
 // runProcess executes a command on the local Windows host with the given
 // environment and streams stdout lines through onLine.
 func runProcess(parent context.Context, command Command, env []string, onLine LineHandler) (Result, error) {
@@ -172,30 +193,69 @@ func runProcess(parent context.Context, command Command, env []string, onLine Li
 	process.Dir = command.Dir
 	process.Env = env
 	process.Stdin = strings.NewReader(command.Stdin)
-	stdoutPipe, err := process.StdoutPipe()
+	// Own the stdout/stderr pipes instead of letting os/exec copy them. The
+	// runner has to decide when a pipe held open by a descendant may be closed
+	// and whether the drainer was idle or blocked on a full spool at that
+	// moment; os/exec's WaitDelay exposes neither, and it also discards the
+	// delay error when the process exits non-zero.
+	stdoutRead, stdoutWrite, err := os.Pipe()
 	if err != nil {
 		return Result{}, err
 	}
-	stderrPipe, err := process.StderrPipe()
+	stderrRead, stderrWrite, err := os.Pipe()
 	if err != nil {
+		_ = stdoutRead.Close()
+		_ = stdoutWrite.Close()
 		return Result{}, err
 	}
+	process.Stdout = stdoutWrite
+	process.Stderr = stderrWrite
+	// No c.Pipe is managed by exec here, so WaitDelay only bounds a child that
+	// ignores cancellation; it cannot cut off our output pipes.
+	process.WaitDelay = processPipeDrainTimeout
 	if err := process.Start(); err != nil {
+		_ = stdoutRead.Close()
+		_ = stdoutWrite.Close()
+		_ = stderrRead.Close()
+		_ = stderrWrite.Close()
 		return Result{}, err
 	}
+	// The child inherited the write ends; keeping the parent's copies open
+	// would keep the drainers from ever seeing EOF.
+	_ = stdoutWrite.Close()
+	_ = stderrWrite.Close()
+	stdoutSpool := newProcessSpool(processOutputSpoolLimit)
+	stderrSpool := newProcessSpool(processOutputSpoolLimit)
+	stdoutDrainer := startProcessDrainer(stdoutRead, stdoutSpool)
+	stderrDrainer := startProcessDrainer(stderrRead, stderrSpool)
 	stdout, stderr := newOutputBuffer(command.OutputLimit), newOutputBuffer(command.OutputLimit)
 	var wait sync.WaitGroup
 	wait.Add(2)
-	go scanOutput(stdoutPipe, stdout, onLine, &wait)
-	go scanOutput(stderrPipe, stderr, nil, &wait)
+	go scanOutput(stdoutSpool, stdout, onLine, &wait)
+	go scanOutput(stderrSpool, stderr, nil, &wait)
 	processErr := process.Wait()
+	// Wait returns as soon as the direct child exits. Give the drainers a
+	// bounded window to reach EOF; a descendant holding the pipes keeps them
+	// open, so close the read ends after the grace period. If a drainer was
+	// blocked writing into a full spool at that point, unread pipe data is
+	// lost and the result must be reported as truncated regardless of the
+	// process exit code.
+	truncated := finishProcessDrainers(processPipeDrainTimeout, stdoutDrainer, stderrDrainer)
+	stdoutSpool.CloseWrite()
+	stderrSpool.CloseWrite()
 	wait.Wait()
+	if errors.Is(processErr, exec.ErrWaitDelay) {
+		processErr = nil
+	}
 	result := Result{Stdout: stdout.String(), Stderr: stderr.String(), Duration: time.Since(start)}
 	if process.ProcessState != nil {
 		result.ExitCode = process.ProcessState.ExitCode()
 	}
 	if ctx.Err() != nil {
 		return result, ctx.Err()
+	}
+	if truncated {
+		return result, errProcessOutputTruncated
 	}
 	if processErr != nil {
 		var exitErr *exec.ExitError
@@ -218,6 +278,219 @@ func scanOutput(reader io.Reader, destination io.Writer, handler LineHandler, wa
 			handler(line)
 		}
 	}
+	// A line longer than the scanner's maximum stops the scan loop, but the
+	// pipe drainer may still be delivering data. Keep consuming so a
+	// backpressured drainer (and the command behind it) can finish instead of
+	// blocking forever.
+	_, _ = io.Copy(io.Discard, reader)
+}
+
+// processSpool is a bounded in-memory byte pipe. Writes block only when the
+// backlog reaches limit, so the pipe drainer never waits for a slow line
+// handler; reads block until data arrives or CloseWrite is called.
+type processSpool struct {
+	mu            sync.Mutex
+	ready         *sync.Cond
+	chunks        [][]byte
+	offset        int
+	queued        int
+	limit         int
+	writerWaiting bool
+	closed        bool
+}
+
+func newProcessSpool(limit int) *processSpool {
+	spool := &processSpool{limit: limit}
+	spool.ready = sync.NewCond(&spool.mu)
+	return spool
+}
+
+func (spool *processSpool) Write(data []byte) (int, error) {
+	written := 0
+	for len(data) > 0 {
+		spool.mu.Lock()
+		for !spool.closed && spool.queued >= spool.limit {
+			spool.writerWaiting = true
+			spool.ready.Wait()
+			spool.writerWaiting = false
+		}
+		if spool.closed {
+			spool.mu.Unlock()
+			return written, io.ErrClosedPipe
+		}
+		size := len(data)
+		if space := spool.limit - spool.queued; size > space {
+			size = space
+		}
+		chunk := make([]byte, size)
+		copy(chunk, data[:size])
+		spool.chunks = append(spool.chunks, chunk)
+		spool.queued += size
+		written += size
+		data = data[size:]
+		spool.ready.Broadcast()
+		spool.mu.Unlock()
+	}
+	return written, nil
+}
+
+func (spool *processSpool) Read(buffer []byte) (int, error) {
+	if len(buffer) == 0 {
+		return 0, nil
+	}
+	spool.mu.Lock()
+	defer spool.mu.Unlock()
+	for spool.queued == 0 && !spool.closed {
+		spool.ready.Wait()
+	}
+	if spool.queued == 0 {
+		return 0, io.EOF
+	}
+	read := 0
+	for read < len(buffer) && len(spool.chunks) > 0 {
+		chunk := spool.chunks[0]
+		copied := copy(buffer[read:], chunk[spool.offset:])
+		read += copied
+		spool.offset += copied
+		spool.queued -= copied
+		if spool.offset == len(chunk) {
+			spool.chunks[0] = nil
+			spool.chunks = spool.chunks[1:]
+			spool.offset = 0
+		}
+	}
+	spool.ready.Broadcast()
+	return read, nil
+}
+
+// WriterWaiting reports whether a writer is currently blocked because the
+// backlog reached the limit.
+func (spool *processSpool) WriterWaiting() bool {
+	spool.mu.Lock()
+	defer spool.mu.Unlock()
+	return spool.writerWaiting
+}
+
+// CloseWrite marks EOF for readers once the pipe drainer is done.
+func (spool *processSpool) CloseWrite() {
+	spool.mu.Lock()
+	spool.closed = true
+	spool.ready.Broadcast()
+	spool.mu.Unlock()
+}
+
+// processDrainer copies one owned process pipe into a spool. Keeping the read
+// side here lets runProcess decide when a descendant-held pipe may be closed
+// and whether closing it would discard unread output.
+type processDrainer struct {
+	source *os.File
+	spool  *processSpool
+	wg     sync.WaitGroup
+	mu     sync.Mutex
+	err    error
+	closed bool
+}
+
+func startProcessDrainer(source *os.File, spool *processSpool) *processDrainer {
+	drainer := &processDrainer{source: source, spool: spool}
+	drainer.wg.Add(1)
+	go drainer.run()
+	return drainer
+}
+
+func (drainer *processDrainer) run() {
+	defer drainer.wg.Done()
+	// Release the read end even on a normal EOF, when closeSource was not
+	// called; the finalizer would otherwise be the only owner.
+	defer func() { _ = drainer.source.Close() }()
+	buffer := make([]byte, 32*1024)
+	for {
+		read, readErr := drainer.source.Read(buffer)
+		if read > 0 {
+			if _, writeErr := drainer.spool.Write(buffer[:read]); writeErr != nil {
+				drainer.recordError(writeErr)
+				return
+			}
+		}
+		if readErr != nil {
+			if readErr != io.EOF {
+				drainer.recordError(readErr)
+			}
+			return
+		}
+	}
+}
+
+func (drainer *processDrainer) recordError(err error) {
+	drainer.mu.Lock()
+	defer drainer.mu.Unlock()
+	if drainer.closed {
+		return
+	}
+	if drainer.err == nil {
+		drainer.err = err
+	}
+}
+
+func (drainer *processDrainer) closeSource() {
+	drainer.mu.Lock()
+	drainer.closed = true
+	drainer.mu.Unlock()
+	_ = drainer.source.Close()
+}
+
+func (drainer *processDrainer) failed() bool {
+	drainer.mu.Lock()
+	defer drainer.mu.Unlock()
+	return drainer.err != nil
+}
+
+// finishProcessDrainers waits for both pipes to reach EOF, or closes their
+// read ends after grace when a descendant keeps the write ends open. It
+// reports truncation when a pipe is closed while its drainer is blocked on a
+// full spool (unread bytes are still in that pipe), and when a drainer fails
+// for any reason other than our own close.
+func finishProcessDrainers(grace time.Duration, drainers ...*processDrainer) (truncated bool) {
+	done := make(chan *processDrainer, len(drainers))
+	for _, drainer := range drainers {
+		go func(drainer *processDrainer) {
+			drainer.wg.Wait()
+			done <- drainer
+		}(drainer)
+	}
+	pending := make(map[*processDrainer]bool, len(drainers))
+	for _, drainer := range drainers {
+		pending[drainer] = true
+	}
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+	for len(pending) > 0 {
+		select {
+		case drainer := <-done:
+			delete(pending, drainer)
+			if drainer.failed() {
+				truncated = true
+			}
+		case <-timer.C:
+			for drainer := range pending {
+				if drainer.spool.WriterWaiting() {
+					truncated = true
+				}
+				drainer.closeSource()
+			}
+			// A drainer blocked on a full spool resumes once the handler
+			// catches up; Run must not return before that handler call ends.
+			for len(pending) > 0 {
+				drainer := <-done
+				delete(pending, drainer)
+				if drainer.failed() {
+					truncated = true
+				}
+			}
+			return truncated
+		}
+	}
+	return truncated
 }
 
 type outputBuffer struct {
