@@ -3385,5 +3385,18 @@ func (s *Store) migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(115, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
 		return fmt.Errorf("record schema v115: %w", err)
 	}
+	var hasV116 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=116)`).Scan(&hasV116)
+	if !hasV116 {
+		// Pet inspection summarizes pending/dead-letter rows per channel
+		// instance and reads the most recent error code; this index keeps that
+		// aggregate bounded instead of scanning the whole outbox.
+		if _, err := s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_channel_delivery_health ON channel_delivery_outbox(instance_id,state,updated_at)`); err != nil {
+			return fmt.Errorf("apply schema v116: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(116, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v116: %w", err)
+	}
 	return nil
 }

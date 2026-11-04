@@ -2337,6 +2337,16 @@ dialog > .dialog-head { margin: 0; padding: 18px 18px 0; }
 .pet-watch-card header { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
 .pet-watch-card small { color: var(--muted); }
 .pet-watch-actions { display: flex; gap: 6px; }
+.pet-channel-note { color: #b91c1c; margin-bottom: 8px; }
+.pet-channel-list { display: grid; gap: 8px; }
+.pet-channel-card { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; display: grid; gap: 6px; }
+.pet-channel-card.degraded { border-color: #dc2626; }
+.pet-channel-card header { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
+.pet-channel-card small { color: var(--muted); }
+.pet-channel-grid { display: flex; flex-wrap: wrap; gap: 4px 16px; color: var(--muted); font-size: 12px; }
+.pet-channel-badge { border-radius: 999px; padding: 2px 8px; font-size: 11px; border: 1px solid var(--line); }
+.pet-channel-badge.degraded { color: #b91c1c; border-color: #fecaca; background: #fef2f2; }
+.pet-channel-badge.ok { color: #047857; border-color: #a7f3d0; background: #ecfdf5; }
 
 .mcp-edit-fields { display: grid; gap: 8px; margin: 12px 0; }
 .mcp-edit-fields label { display: grid; gap: 4px; }

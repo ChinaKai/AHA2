@@ -11,7 +11,19 @@ import (
 	"github.com/ChinaKai/AHA2/internal/domain"
 )
 
-const petOpenTaskListLimit = 50
+const (
+	petOpenTaskListLimit = 50
+	// petChannelPendingThreshold is how long a delivery may sit in the outbox
+	// before an uninspected "ready" instance is treated as degraded.
+	petChannelPendingThreshold = 5 * time.Minute
+	// petChannelPendingBacklog marks sustained accumulation even when the
+	// oldest row has not crossed the age threshold yet.
+	petChannelPendingBacklog = 20
+	// petChannelHealthListLimit bounds how many channel rows reach work-state
+	// and the Web workbench. Degraded rows are sorted first so the cap never
+	// hides the reason for attention.
+	petChannelHealthListLimit = 20
+)
 
 type PetWorkItem struct {
 	Kind           string `json:"kind"`
@@ -48,26 +60,43 @@ type PetOpenTask struct {
 	PendingApprovalID string `json:"pending_approval_id,omitempty"`
 }
 
+// PetChannelHealth is the pet's view of one channel instance plus its outbound
+// queue. Instance config, credentials and message payloads are never included.
+type PetChannelHealth struct {
+	ID                    string `json:"id"`
+	Name                  string `json:"name"`
+	Status                string `json:"status"`
+	EffectiveAvailability string `json:"effective_availability,omitempty"`
+	Pending               int    `json:"pending"`
+	StuckPending          int    `json:"stuck_pending"`
+	OldestPendingMinutes  int    `json:"oldest_pending_minutes"`
+	DeadLetter            int    `json:"dead_letter"`
+	LastErrorCode         string `json:"last_error_code,omitempty"`
+	Degraded              bool   `json:"degraded"`
+	Note                  string `json:"note,omitempty"`
+}
+
 // PetInspection is the compact, server-derived snapshot the pet quotes at the
 // end of an inspection reply. It never replaces the detailed worklog evidence.
 type PetInspection struct {
-	CheckedAt        string   `json:"checked_at"`
-	Version          string   `json:"version,omitempty"`
-	WebVersion       string   `json:"web_version,omitempty"`
-	StartedAt        string   `json:"started_at,omitempty"`
-	UptimeMinutes    int      `json:"uptime_minutes,omitempty"`
-	Health           string   `json:"health"`
-	TasksTotal       int      `json:"tasks_total"`
-	Active           int      `json:"active"`
-	WaitingUser      int      `json:"waiting_user"`
-	Failed           int      `json:"failed"`
-	Blocked          int      `json:"blocked"`
-	Completed        int      `json:"completed"`
-	PendingApprovals int      `json:"pending_approvals"`
-	DegradedChannels []string `json:"degraded_channels,omitempty"`
-	OpenTasks        int      `json:"open_tasks"`
-	AttentionTasks   int      `json:"attention_tasks"`
-	Note             string   `json:"note,omitempty"`
+	CheckedAt        string             `json:"checked_at"`
+	Version          string             `json:"version,omitempty"`
+	WebVersion       string             `json:"web_version,omitempty"`
+	StartedAt        string             `json:"started_at,omitempty"`
+	UptimeMinutes    int                `json:"uptime_minutes,omitempty"`
+	Health           string             `json:"health"`
+	TasksTotal       int                `json:"tasks_total"`
+	Active           int                `json:"active"`
+	WaitingUser      int                `json:"waiting_user"`
+	Failed           int                `json:"failed"`
+	Blocked          int                `json:"blocked"`
+	Completed        int                `json:"completed"`
+	PendingApprovals int                `json:"pending_approvals"`
+	DegradedChannels []string           `json:"degraded_channels,omitempty"`
+	Channels         []PetChannelHealth `json:"channels,omitempty"`
+	OpenTasks        int                `json:"open_tasks"`
+	AttentionTasks   int                `json:"attention_tasks"`
+	Note             string             `json:"note,omitempty"`
 }
 
 type PetWorkState struct {
@@ -323,14 +352,6 @@ func (s *Service) petInspection(ctx context.Context, tasks []domain.Task, pendin
 			inspection.Completed++
 		}
 	}
-	if channels, err := s.store.ChannelInstances(ctx, ""); err == nil {
-		for _, channel := range channels {
-			if channel.Retired || channel.Status == "ready" || channel.Status == "disabled" {
-				continue
-			}
-			inspection.DegradedChannels = append(inspection.DegradedChannels, fmt.Sprintf("%s（%s）", channel.Name, channel.Status))
-		}
-	}
 	switch {
 	case attentionTasks > 0:
 		inspection.Note = fmt.Sprintf("有 %d 个未闭环任务需要处理；先处理最早的，真实阻塞提交一次 owner_decision 审批。", attentionTasks)
@@ -339,7 +360,145 @@ func (s *Service) petInspection(ctx context.Context, tasks []domain.Task, pendin
 	default:
 		inspection.Note = "没有未闭环任务。"
 	}
+	s.applyPetChannelHealth(ctx, &inspection, now)
 	return inspection
+}
+
+// applyPetChannelHealth adds the sanitized channel/outbox snapshot to an
+// inspection. A lost outbox read is surfaced as degraded instead of silently
+// claiming the channels are healthy.
+func (s *Service) applyPetChannelHealth(ctx context.Context, inspection *PetInspection, now time.Time) {
+	channels, err := s.store.ChannelInstances(ctx, "")
+	if err != nil {
+		return
+	}
+	outbox, outboxErr := s.store.ChannelOutboxHealth(ctx)
+	if outboxErr != nil {
+		outbox = map[string]domain.ChannelOutboxHealth{}
+	}
+	applyPetChannelHealthValues(inspection, channels, outbox, now, outboxErr != nil)
+}
+
+func applyPetChannelHealthValues(inspection *PetInspection, channels []domain.ChannelInstance, outbox map[string]domain.ChannelOutboxHealth, now time.Time, outboxFailed bool) {
+	health, degraded := buildPetChannelHealth(channels, outbox, now)
+	inspection.Channels = health
+	if outboxFailed {
+		inspection.Health = "degraded"
+		inspection.DegradedChannels = append(inspection.DegradedChannels, "出站队列状态读取失败")
+	}
+	if len(degraded) > 0 {
+		inspection.Health = "degraded"
+		inspection.DegradedChannels = append(inspection.DegradedChannels, degraded...)
+	}
+	if len(inspection.DegradedChannels) > 0 {
+		note := "渠道状态异常：" + strings.Join(inspection.DegradedChannels, "；") + "，请先核查出站队列。"
+		if inspection.Note == "" {
+			inspection.Note = note
+		} else {
+			inspection.Note += " " + note
+		}
+	}
+}
+
+// petChannelSnapshot is the read-only channel summary shared by the pet
+// workbench and inspection. It never fails the page: a channel read error is
+// reported as text instead.
+func (s *Service) petChannelSnapshot(ctx context.Context) ([]PetChannelHealth, string) {
+	channels, err := s.store.ChannelInstances(ctx, "")
+	if err != nil {
+		return nil, "渠道状态读取失败。"
+	}
+	outbox, outboxErr := s.store.ChannelOutboxHealth(ctx)
+	if outboxErr != nil {
+		outbox = map[string]domain.ChannelOutboxHealth{}
+	}
+	health, degraded := buildPetChannelHealth(channels, outbox, s.now().UTC())
+	if outboxErr != nil {
+		return health, "出站队列状态读取失败。"
+	}
+	if len(degraded) == 0 {
+		return health, ""
+	}
+	return health, "渠道状态异常：" + strings.Join(degraded, "；") + "。"
+}
+
+// buildPetChannelHealth merges instance state with outbox counters. A channel
+// is degraded when it has a dead letter, when pending rows stay unattempted
+// past the threshold, when the backlog crosses its cap, or when the instance
+// itself is not ready. Degraded rows sort first so a list cap cannot hide them.
+func buildPetChannelHealth(channels []domain.ChannelInstance, outbox map[string]domain.ChannelOutboxHealth, now time.Time) ([]PetChannelHealth, []string) {
+	health := make([]PetChannelHealth, 0, len(channels))
+	degraded := []string{}
+	for _, channel := range channels {
+		if channel.Retired {
+			continue
+		}
+		row := outbox[channel.ID]
+		item := PetChannelHealth{
+			ID: channel.ID, Name: channel.Name, Status: channel.Status,
+			EffectiveAvailability: channel.EffectiveAvailability,
+			Pending:               row.Pending, StuckPending: row.StuckPending, DeadLetter: row.DeadLetter,
+			LastErrorCode: row.LastErrorCode,
+		}
+		if !row.OldestPendingAt.IsZero() {
+			if age := now.Sub(row.OldestPendingAt); age > 0 {
+				item.OldestPendingMinutes = int(age.Minutes())
+			}
+		}
+		details := []string{}
+		degradedReasons := []string{}
+		if channel.Status != "ready" && channel.Status != "disabled" {
+			detail := "实例状态 " + channel.Status
+			details = append(details, detail)
+			degradedReasons = append(degradedReasons, detail)
+		}
+		if row.Pending > 0 {
+			detail := fmt.Sprintf("pending %d", row.Pending)
+			if item.OldestPendingMinutes > 0 {
+				detail += fmt.Sprintf("，最老 %d 分钟", item.OldestPendingMinutes)
+			}
+			if row.StuckPending > 0 {
+				detail += fmt.Sprintf("，attempts=0 %d 条", row.StuckPending)
+			}
+			details = append(details, detail)
+			if !row.OldestPendingAt.IsZero() && now.Sub(row.OldestPendingAt) >= petChannelPendingThreshold && row.StuckPending > 0 {
+				degradedReasons = append(degradedReasons, detail)
+			} else if row.Pending >= petChannelPendingBacklog {
+				degradedReasons = append(degradedReasons, detail)
+			}
+		}
+		if row.DeadLetter > 0 {
+			detail := fmt.Sprintf("dead_letter %d", row.DeadLetter)
+			details = append(details, detail)
+			degradedReasons = append(degradedReasons, detail)
+		}
+		if row.LastErrorCode != "" {
+			details = append(details, "最近错误码 "+row.LastErrorCode)
+		}
+		item.Note = strings.Join(details, "；")
+		item.Degraded = len(degradedReasons) > 0
+		if item.Degraded {
+			label := item.Note
+			if channel.Status == "ready" {
+				label = "ready→degraded；" + item.Note
+			}
+			degraded = append(degraded, fmt.Sprintf("%s（%s）", channel.Name, label))
+		}
+		health = append(health, item)
+	}
+	sort.SliceStable(health, func(i, j int) bool {
+		if health[i].Degraded != health[j].Degraded {
+			return health[i].Degraded
+		}
+		if health[i].Name == health[j].Name {
+			return health[i].ID < health[j].ID
+		}
+		return health[i].Name < health[j].Name
+	})
+	if len(health) > petChannelHealthListLimit {
+		health = health[:petChannelHealthListLimit]
+	}
+	return health, degraded
 }
 
 func (s *Service) recordPetWork(ctx context.Context, kind, targetID, status string) {

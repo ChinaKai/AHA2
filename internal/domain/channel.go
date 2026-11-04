@@ -376,6 +376,18 @@ type ChannelDelivery struct {
 	DeliveredAt time.Time `json:"delivered_at,omitempty"`
 }
 
+// ChannelOutboxHealth is a sanitized, per-instance summary of the outbound
+// delivery queue. It contains counters, timestamps and error codes only;
+// message payloads and credentials never cross this boundary.
+type ChannelOutboxHealth struct {
+	InstanceID      string    `json:"instance_id"`
+	Pending         int       `json:"pending"`
+	StuckPending    int       `json:"stuck_pending"`
+	OldestPendingAt time.Time `json:"oldest_pending_at,omitempty"`
+	DeadLetter      int       `json:"dead_letter"`
+	LastErrorCode   string    `json:"last_error_code,omitempty"`
+}
+
 type ChannelDeliveryAttempt struct {
 	ID                string    `json:"id"`
 	DeliveryID        string    `json:"delivery_id"`

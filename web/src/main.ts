@@ -60,6 +60,7 @@ import type {
   KnowledgeReviewSettings,
   Model,
   MCPServer,
+  PetChannelHealth,
   Project,
   Provider,
   ProxySettings,
@@ -5778,6 +5779,7 @@ function petDiaryView(): string {
       <button type="button" class="active" data-pet-workbench-tab="diary">${t("petWorkbench.diary")}</button>
       <button type="button" data-pet-workbench-tab="core">${t("petWorkbench.core")}</button>
       <button type="button" data-pet-workbench-tab="worklog">${t("petWorkbench.worklog")}</button>
+      <button type="button" data-pet-workbench-tab="inspection">${t("petWorkbench.inspection")} <span id="pet-channel-count"></span></button>
       <button type="button" data-pet-workbench-tab="approvals">${t("petWorkbench.approvalsAndIdeas")} <span id="pet-approval-count"></span></button>
       <button type="button" data-pet-workbench-tab="follows">${t("petWorkbench.follows")}</button>
       <button type="button" data-pet-workbench-tab="settings">${t("petWorkbench.settings")}</button>
@@ -5790,6 +5792,7 @@ async function bindPetDiaryPage(): Promise<void> {
   const body = document.querySelector<HTMLElement>("#pet-workbench-body");
   const tabs = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-pet-workbench-tab]"));
   const count = document.querySelector<HTMLElement>("#pet-approval-count");
+  const channelCount = document.querySelector<HTMLElement>("#pet-channel-count");
   if (!body || tabs.length === 0) return;
   if (body.dataset.petWorkbenchBound === "1") return;
   body.dataset.petWorkbenchBound = "1";
@@ -5851,6 +5854,8 @@ async function bindPetDiaryPage(): Promise<void> {
       body.innerHTML = renderPetMarkdownEntries(view.worklog, t("petWorkbench.emptyWorklog"), "worklog") + loadMoreFooter("worklog", view.worklog.length, view.worklog_total ?? view.worklog.length);
       bindPetDocEditors("worklog", load);
       bindLoadMore();
+    } else if (active === "inspection") {
+      body.innerHTML = renderPetChannelHealth(view.channels || [], view.channel_note || "");
     } else if (active === "approvals") {
       const items = view.approvals.filter(item => {
         if (petApprovalFilter !== "all" && (petApprovalFilter === "idea" ? item.kind !== "idea" : item.kind === "idea")) return false;
@@ -5922,6 +5927,8 @@ async function bindPetDiaryPage(): Promise<void> {
       view = await withTimeout(api.petWorkbench({approvalLimit, diaryLimit, worklogLimit}), 12000, t("petWorkbench.loadTimeout"));
       const pending = view.approvals.filter(item => item.status === "pending").length;
       if (count) count.textContent = pending > 0 ? String(pending) : "";
+      const degradedChannels = (view.channels || []).filter(item => item.degraded).length;
+      if (channelCount) channelCount.textContent = degradedChannels > 0 ? String(degradedChannels) : "";
       renderTab();
     } catch (error) {
       view = null;
@@ -6092,6 +6099,33 @@ function renderPetWatches(items: Array<{task_id: string; code: string; title: st
       ${actions}
     </article>`;
   }).join("");
+}
+
+function renderPetChannelHealth(items: PetChannelHealth[], note: string): string {
+  if (items.length === 0) {
+    return `<div class="field-help">${escapeHTML(t("petWorkbench.emptyChannels"))}</div>${note ? `<div class="pet-channel-note">${escapeHTML(note)}</div>` : ""}`;
+  }
+  const summary = note
+    ? `<div class="pet-channel-note">${escapeHTML(note)}</div>`
+    : `<div class="field-help">${escapeHTML(t("petWorkbench.channelHealthy"))}</div>`;
+  const cards = items.map(item => {
+    const availability = item.effective_availability ? ` / ${item.effective_availability}` : "";
+    const oldest = item.oldest_pending_minutes > 0
+      ? t("petWorkbench.channelAgeMinutes", {minutes: String(item.oldest_pending_minutes)})
+      : "-";
+    return `<article class="pet-channel-card${item.degraded ? " degraded" : ""}">
+      <header><strong>${escapeHTML(item.name)}</strong><span class="pet-channel-badge ${item.degraded ? "degraded" : "ok"}">${escapeHTML(item.degraded ? t("petWorkbench.channelDegraded") : t("petWorkbench.channelHealthyLabel"))}</span></header>
+      <div class="pet-channel-grid">
+        <span>${t("petWorkbench.channelStatus")}: ${escapeHTML(item.status || "-")}${escapeHTML(availability)}</span>
+        <span>${t("petWorkbench.channelPending")}: ${item.pending}</span>
+        <span>${t("petWorkbench.channelOldestPending")}: ${escapeHTML(oldest)}</span>
+        <span>${t("petWorkbench.channelDeadLetter")}: ${item.dead_letter}</span>
+        ${item.last_error_code ? `<span>${t("petWorkbench.channelLastError")}: ${escapeHTML(item.last_error_code)}</span>` : ""}
+      </div>
+      ${item.note ? `<small>${escapeHTML(item.note)}</small>` : ""}
+    </article>`;
+  }).join("");
+  return `${summary}<div class="pet-channel-list">${cards}</div>`;
 }
 
 function renderPetApprovals(items: Array<{id: string; title: string; summary: string; reason?: string; status: string; risk: string; kind: string; resolution?: string; decision_reason?: string}>, empty = t("petWorkbench.emptyApprovals")): string {

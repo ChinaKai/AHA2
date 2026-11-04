@@ -429,6 +429,47 @@ func (s *Store) SkipChannelDelivery(ctx context.Context, id, instanceID string, 
 	return nil
 }
 
+// ChannelOutboxHealth aggregates the non-terminal outbound queue per instance.
+// It reads counters, timestamps and error codes only, and is bounded by the
+// number of instances (with a hard LIMIT guard) so work-state stays cheap.
+func (s *Store) ChannelOutboxHealth(ctx context.Context) (map[string]domain.ChannelOutboxHealth, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT o.instance_id,
+		       SUM(CASE WHEN o.state='pending' THEN 1 ELSE 0 END),
+		       SUM(CASE WHEN o.state='pending' AND o.attempts=0 THEN 1 ELSE 0 END),
+		       MIN(CASE WHEN o.state='pending' THEN o.created_at END),
+		       SUM(CASE WHEN o.state='dead_letter' THEN 1 ELSE 0 END),
+		       COALESCE((
+		         SELECT e.last_error_code FROM channel_delivery_outbox e
+		         WHERE e.instance_id=o.instance_id
+		           AND e.state IN ('pending','dead_letter')
+		           AND e.last_error_code<>''
+		         ORDER BY e.updated_at DESC, e.id DESC LIMIT 1
+		       ),'')
+		FROM channel_delivery_outbox o
+		WHERE o.state IN ('pending','dead_letter')
+		GROUP BY o.instance_id
+		ORDER BY o.instance_id
+		LIMIT 200`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := map[string]domain.ChannelOutboxHealth{}
+	for rows.Next() {
+		var item domain.ChannelOutboxHealth
+		var oldest sql.NullString
+		if err := rows.Scan(&item.InstanceID, &item.Pending, &item.StuckPending, &oldest, &item.DeadLetter, &item.LastErrorCode); err != nil {
+			return nil, err
+		}
+		if oldest.Valid {
+			item.OldestPendingAt = parseTime(oldest.String)
+		}
+		result[item.InstanceID] = item
+	}
+	return result, rows.Err()
+}
+
 func (s *Store) ChannelDeliveries(ctx context.Context, instanceID string, limit int) ([]domain.ChannelDelivery, error) {
 	if limit < 1 || limit > 500 {
 		limit = 100

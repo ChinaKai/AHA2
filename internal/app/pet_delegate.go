@@ -31,6 +31,8 @@ type PetWorkbenchView struct {
 	ApprovalTotal int                    `json:"approval_total"`
 	Watches       []PetTaskWatchView     `json:"watches"`
 	Task          *domain.Task           `json:"task,omitempty"`
+	Channels      []PetChannelHealth     `json:"channels"`
+	ChannelNote   string                 `json:"channel_note,omitempty"`
 	UpdatedAt     time.Time              `json:"updated_at"`
 }
 
@@ -67,9 +69,11 @@ func (s *Service) PetWorkbenchWithOptions(ctx context.Context, options PetWorkbe
 	if err != nil {
 		return PetWorkbenchView{}, err
 	}
+	channels, channelNote := s.petChannelSnapshot(ctx)
 	view := PetWorkbenchView{
 		Diary: diary, DiaryTotal: diaryTotal, Core: core, Worklog: worklog, WorklogTotal: worklogTotal,
 		Approvals: approvals, ApprovalTotal: approvalTotal, Watches: watches,
+		Channels: channels, ChannelNote: channelNote,
 		UpdatedAt: s.now().UTC(),
 	}
 	if task, taskErr := s.store.Task(ctx, petTaskID); taskErr == nil {

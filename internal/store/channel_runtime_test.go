@@ -140,6 +140,52 @@ func TestChannelDeliveryClaimUnblocksAfterDeadLetter(t *testing.T) {
 	}
 }
 
+func TestChannelOutboxHealthSummarizesQueue(t *testing.T) {
+	ctx := context.Background()
+	database, err := Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	instance, conversation := createDeliveryTestInstance(t, database)
+	now := time.Now().UTC()
+
+	oldPending := enqueueTestDelivery(t, database, instance, conversation, 1, now.Add(-time.Minute))
+	enqueueTestDelivery(t, database, instance, conversation, 2, now.Add(-time.Minute))
+	dead := enqueueTestDelivery(t, database, instance, conversation, 3, now.Add(-time.Minute))
+	delivered := enqueueTestDelivery(t, database, instance, conversation, 4, now.Add(-time.Minute))
+	if _, err := database.db.ExecContext(ctx, `UPDATE channel_delivery_outbox SET created_at=?,updated_at=? WHERE id=?`,
+		timeString(now.Add(-9*time.Minute)), timeString(now.Add(-9*time.Minute)), oldPending.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.db.ExecContext(ctx, `UPDATE channel_delivery_outbox SET state='dead_letter',last_error_code=?,updated_at=? WHERE id=?`,
+		"feishu_target_unavailable", timeString(now.Add(-time.Minute)), dead.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.db.ExecContext(ctx, `UPDATE channel_delivery_outbox SET state='delivered',updated_at=? WHERE id=?`,
+		timeString(now), delivered.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	health, err := database.ChannelOutboxHealth(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok := health[instance.ID]
+	if !ok {
+		t.Fatalf("instance missing from outbox health: %#v", health)
+	}
+	if got.Pending != 2 || got.StuckPending != 2 || got.DeadLetter != 1 || got.LastErrorCode != "feishu_target_unavailable" {
+		t.Fatalf("outbox health=%#v", got)
+	}
+	if got.OldestPendingAt.IsZero() || now.Sub(got.OldestPendingAt) < 8*time.Minute {
+		t.Fatalf("oldest pending not preserved: %#v", got)
+	}
+	if _, ok := health["missing-instance"]; ok {
+		t.Fatalf("healthy instance should have no health row: %#v", health)
+	}
+}
+
 func TestChannelDeliveryCertaintyMigrationNormalizesConfirmed(t *testing.T) {
 	ctx := context.Background()
 	database, err := Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))

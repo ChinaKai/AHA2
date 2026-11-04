@@ -39,6 +39,7 @@ func (s *Server) petWorkbench(writer http.ResponseWriter, request *http.Request)
 		"core": view.Core, "worklog": view.Worklog, "worklog_total": view.WorklogTotal,
 		"approvals": view.Approvals, "approval_total": view.ApprovalTotal,
 		"watches": view.Watches, "task": view.Task, "updated_at": view.UpdatedAt,
+		"channels": view.Channels, "channel_note": view.ChannelNote,
 	})
 }
 

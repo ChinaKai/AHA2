@@ -1258,6 +1258,20 @@ export interface PetTaskWatch {
   updated_at: string;
 }
 
+export interface PetChannelHealth {
+  id: string;
+  name: string;
+  status: string;
+  effective_availability?: string;
+  pending: number;
+  stuck_pending: number;
+  oldest_pending_minutes: number;
+  dead_letter: number;
+  last_error_code?: string;
+  degraded: boolean;
+  note?: string;
+}
+
 export interface PetWorkbench {
   diary: PetDiaryEntry[];
   diary_total?: number;
@@ -1268,5 +1282,7 @@ export interface PetWorkbench {
   approval_total?: number;
   watches: PetTaskWatch[];
   task?: Task;
+  channels: PetChannelHealth[];
+  channel_note?: string;
   updated_at: string;
 }
