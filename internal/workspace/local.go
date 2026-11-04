@@ -188,8 +188,13 @@ func runProcess(parent context.Context, command Command, env []string, onLine Li
 	wait.Add(2)
 	go scanOutput(stdoutPipe, stdout, onLine, &wait)
 	go scanOutput(stderrPipe, stderr, nil, &wait)
-	processErr := process.Wait()
+	// Wait closes the stdout/stderr pipes as soon as the process exits, so the
+	// scan goroutines must finish first. os/exec documents that Wait must not
+	// run before all reads from a StdoutPipe/StderrPipe have completed;
+	// otherwise a fast-exiting command loses whatever is still buffered in
+	// the pipe.
 	wait.Wait()
+	processErr := process.Wait()
 	result := Result{Stdout: stdout.String(), Stderr: stderr.String(), Duration: time.Since(start)}
 	if process.ProcessState != nil {
 		result.ExitCode = process.ProcessState.ExitCode()
