@@ -162,6 +162,15 @@ func prependPathDirectories(value string, dirs []string) string {
 // helper holding the inherited handles would hang the runner forever.
 const processPipeDrainTimeout = 3 * time.Second
 
+// processOutputSpoolLimit caps how many unread bytes each stream may buffer
+// before the os/exec copying goroutine is backpressured. The spool decouples
+// the copying goroutine from the line handler, so a handler that is busy for
+// longer than processPipeDrainTimeout does not lose the tail: WaitDelay then
+// only fires when a descendant keeps the child's output handles open. Beyond
+// this backlog the command is deliberately slowed down instead of growing
+// memory without bound.
+const processOutputSpoolLimit = 4 * 1024 * 1024
+
 // runProcess executes a command on the local Windows host with the given
 // environment and streams stdout lines through onLine.
 func runProcess(parent context.Context, command Command, env []string, onLine LineHandler) (Result, error) {
@@ -179,33 +188,33 @@ func runProcess(parent context.Context, command Command, env []string, onLine Li
 	process.Dir = command.Dir
 	process.Env = env
 	process.Stdin = strings.NewReader(command.Stdin)
-	// Feed stdout/stderr through io.Pipe writers instead of StdoutPipe so that
+	// Feed stdout/stderr through bounded spools instead of StdoutPipe so that
 	// os/exec owns the copying goroutines: Wait drains them before returning
 	// and WaitDelay bounds the drain when a descendant inherits the child's
 	// output handles and outlives it. StdoutPipe would instead be closed by
-	// Wait, truncating a fast-exiting command's buffered output.
-	stdoutReader, stdoutWriter := io.Pipe()
-	stderrReader, stderrWriter := io.Pipe()
-	process.Stdout = stdoutWriter
-	process.Stderr = stderrWriter
+	// Wait, truncating a fast-exiting command's buffered output. The spool
+	// also keeps the copying goroutines independent of onLine progress, so a
+	// blocked handler cannot make WaitDelay discard output.
+	stdoutSpool := newProcessSpool(processOutputSpoolLimit)
+	stderrSpool := newProcessSpool(processOutputSpoolLimit)
+	process.Stdout = stdoutSpool
+	process.Stderr = stderrSpool
 	process.WaitDelay = processPipeDrainTimeout
 	if err := process.Start(); err != nil {
-		_ = stdoutReader.Close()
-		_ = stdoutWriter.Close()
-		_ = stderrReader.Close()
-		_ = stderrWriter.Close()
+		stdoutSpool.CloseWrite()
+		stderrSpool.CloseWrite()
 		return Result{}, err
 	}
 	stdout, stderr := newOutputBuffer(command.OutputLimit), newOutputBuffer(command.OutputLimit)
 	var wait sync.WaitGroup
 	wait.Add(2)
-	go scanOutput(stdoutReader, stdout, onLine, &wait)
-	go scanOutput(stderrReader, stderr, nil, &wait)
+	go scanOutput(stdoutSpool, stdout, onLine, &wait)
+	go scanOutput(stderrSpool, stderr, nil, &wait)
 	processErr := process.Wait()
 	// The copy goroutines have finished, so closing the writers only delivers
 	// EOF to the scanners; no pending output can be cut off here.
-	_ = stdoutWriter.Close()
-	_ = stderrWriter.Close()
+	stdoutSpool.CloseWrite()
+	stderrSpool.CloseWrite()
 	wait.Wait()
 	// ErrWaitDelay means the child exited successfully but a descendant kept
 	// its output handles open past the drain bound; that is not a command
@@ -241,6 +250,94 @@ func scanOutput(reader io.Reader, destination io.Writer, handler LineHandler, wa
 			handler(line)
 		}
 	}
+	// A line longer than the scanner's maximum stops the scan loop, but the
+	// producer may still be writing. Keep draining so a blocked writer (the
+	// os/exec copy goroutine and, behind it, the command) can finish instead
+	// of deadlocking Wait forever.
+	_, _ = io.Copy(io.Discard, reader)
+}
+
+// processSpool is a bounded in-memory byte pipe. Writes block only when the
+// backlog reaches limit, so the os/exec copy goroutines never wait for a slow
+// line handler; reads block until data arrives or CloseWrite is called.
+type processSpool struct {
+	mu     sync.Mutex
+	ready  *sync.Cond
+	chunks [][]byte
+	offset int
+	queued int
+	limit  int
+	closed bool
+}
+
+func newProcessSpool(limit int) *processSpool {
+	spool := &processSpool{limit: limit}
+	spool.ready = sync.NewCond(&spool.mu)
+	return spool
+}
+
+func (spool *processSpool) Write(data []byte) (int, error) {
+	written := 0
+	for len(data) > 0 {
+		spool.mu.Lock()
+		for !spool.closed && spool.queued >= spool.limit {
+			spool.ready.Wait()
+		}
+		if spool.closed {
+			spool.mu.Unlock()
+			return written, io.ErrClosedPipe
+		}
+		size := len(data)
+		if space := spool.limit - spool.queued; size > space {
+			size = space
+		}
+		chunk := make([]byte, size)
+		copy(chunk, data[:size])
+		spool.chunks = append(spool.chunks, chunk)
+		spool.queued += size
+		written += size
+		data = data[size:]
+		spool.ready.Broadcast()
+		spool.mu.Unlock()
+	}
+	return written, nil
+}
+
+func (spool *processSpool) Read(buffer []byte) (int, error) {
+	if len(buffer) == 0 {
+		return 0, nil
+	}
+	spool.mu.Lock()
+	defer spool.mu.Unlock()
+	for spool.queued == 0 && !spool.closed {
+		spool.ready.Wait()
+	}
+	if spool.queued == 0 {
+		return 0, io.EOF
+	}
+	read := 0
+	for read < len(buffer) && len(spool.chunks) > 0 {
+		chunk := spool.chunks[0]
+		copied := copy(buffer[read:], chunk[spool.offset:])
+		read += copied
+		spool.offset += copied
+		spool.queued -= copied
+		if spool.offset == len(chunk) {
+			spool.chunks[0] = nil
+			spool.chunks = spool.chunks[1:]
+			spool.offset = 0
+		}
+	}
+	spool.ready.Broadcast()
+	return read, nil
+}
+
+// CloseWrite marks EOF for readers once the os/exec copy goroutines are done.
+func (spool *processSpool) CloseWrite() {
+	spool.mu.Lock()
+	spool.closed = true
+	spool.ready.Broadcast()
+	spool.mu.Unlock()
 }
 
 type outputBuffer struct {

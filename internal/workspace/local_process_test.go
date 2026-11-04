@@ -27,8 +27,13 @@ const (
 	processOrphanStdout = "orphan-stdout\n"
 	processOrphanStderr = "orphan-stderr\n"
 
+	processStallFirstLine = "stall-first\n"
+
 	// Long enough to outlive processPipeDrainTimeout several times over.
 	processGrandchildSleep = 8 * time.Second
+
+	// One line far beyond bufio.Scanner's 4 MiB token limit.
+	processOversizedLineBytes = 5 * 1024 * 1024
 
 	processFloodLines = 700
 
@@ -75,26 +80,25 @@ func TestRunProcessHelperProcess(t *testing.T) {
 	case "orphan":
 		_, _ = io.WriteString(os.Stdout, processOrphanStdout)
 		_, _ = io.WriteString(os.Stderr, processOrphanStderr)
-		grandchild, err := os.Executable()
-		if err != nil {
-			_, _ = fmt.Fprintf(os.Stderr, "locate grandchild executable: %v\n", err)
-			os.Exit(92)
-		}
-		command := exec.Command(grandchild, "-test.run=^TestRunProcessHelperProcess$")
-		command.Env = mergeEnvironment(os.Environ(), map[string]string{
-			processHelperModeEnv: "grandchild-sleep",
-			processHelperExitEnv: "0",
-		})
-		command.Stdout = os.Stdout
-		command.Stderr = os.Stderr
-		if err := command.Start(); err != nil {
-			_, _ = fmt.Fprintf(os.Stderr, "start grandchild: %v\n", err)
-			os.Exit(93)
-		}
+		startOutputInheritingGrandchild()
 		// Deliberately do not wait: the grandchild inherits this process's
 		// stdout/stderr and keeps those pipe handles open after we exit.
+	case "orphan-alive":
+		_, _ = io.WriteString(os.Stdout, processOrphanStdout)
+		_, _ = io.WriteString(os.Stderr, processOrphanStderr)
+		startOutputInheritingGrandchild()
+		// Stay alive so a timeout, not the child exit, ends the command while
+		// the grandchild still holds the inherited output handles.
+		time.Sleep(30 * time.Second)
 	case "grandchild-sleep":
 		time.Sleep(processGrandchildSleep)
+	case "oversized":
+		_, _ = io.WriteString(os.Stdout, strings.Repeat("x", processOversizedLineBytes))
+		_, _ = io.WriteString(os.Stderr, strings.Repeat("y", processOversizedLineBytes))
+		time.Sleep(30 * time.Second)
+	case "handler-stall":
+		_, _ = io.WriteString(os.Stdout, processStallFirstLine)
+		_, _ = io.WriteString(os.Stdout, processHandlerStallOutput("stdout", processHandlerStallLineCount()))
 	case "slow":
 		_, _ = io.WriteString(os.Stdout, "slow-start\n")
 		time.Sleep(5 * time.Second)
@@ -122,6 +126,45 @@ func processBurstOutput(prefix string, lines int) string {
 		fmt.Fprintf(&builder, "%s-%04d-%s\n", prefix, index, line)
 	}
 	return builder.String()
+}
+
+// processHandlerStallLineCount stays below the 4 KiB Windows pipe buffer so
+// the child can finish and exit while the parent's line handler is stalled.
+func processHandlerStallLineCount() int {
+	if runtime.GOOS == "windows" {
+		return 100
+	}
+	return 2000
+}
+
+func processHandlerStallOutput(prefix string, lines int) string {
+	var builder strings.Builder
+	line := strings.Repeat("z", 24)
+	for index := 0; index < lines; index++ {
+		fmt.Fprintf(&builder, "%s-%04d-%s\n", prefix, index, line)
+	}
+	return builder.String()
+}
+
+// startOutputInheritingGrandchild launches a long-lived copy of this test
+// binary that inherits the current stdout/stderr handles.
+func startOutputInheritingGrandchild() {
+	executable, err := os.Executable()
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "locate grandchild executable: %v\n", err)
+		os.Exit(92)
+	}
+	command := exec.Command(executable, "-test.run=^TestRunProcessHelperProcess$")
+	command.Env = mergeEnvironment(os.Environ(), map[string]string{
+		processHelperModeEnv: "grandchild-sleep",
+		processHelperExitEnv: "0",
+	})
+	command.Stdout = os.Stdout
+	command.Stderr = os.Stderr
+	if err := command.Start(); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "start grandchild: %v\n", err)
+		os.Exit(93)
+	}
 }
 
 // executeProcessHelper runs this test binary as a child process through the
@@ -202,6 +245,82 @@ func TestRunProcessReturnsWhenDescendantsHoldOutputPipes(t *testing.T) {
 				t.Fatalf("stderr = %q, want %q", result.Stderr, processOrphanStderr)
 			}
 		})
+	}
+}
+
+// A timeout must still end the command when both the direct child and a
+// descendant holding its output pipes are alive at cancellation.
+func TestRunProcessTimeoutWithLiveDescendants(t *testing.T) {
+	for _, killTree := range []bool{false, true} {
+		t.Run(fmt.Sprintf("kill_tree=%t", killTree), func(t *testing.T) {
+			start := time.Now()
+			result, err := executeProcessHelper(t, "orphan-alive", 0, func(command *Command) {
+				command.KillTree = killTree
+				command.Timeout = time.Second
+			}, nil)
+			elapsed := time.Since(start)
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("error = %v, want context.DeadlineExceeded", err)
+			}
+			if elapsed > 12*time.Second {
+				t.Fatalf("Run took %s after a 1s timeout", elapsed)
+			}
+			if result.Stdout != processOrphanStdout {
+				t.Fatalf("stdout = %q, want %q", result.Stdout, processOrphanStdout)
+			}
+			if result.Stderr != processOrphanStderr {
+				t.Fatalf("stderr = %q, want %q", result.Stderr, processOrphanStderr)
+			}
+		})
+	}
+}
+
+// A single line beyond bufio.Scanner's token limit stops the scan loop. The
+// runner must keep draining so the child and the os/exec copy goroutine can
+// finish, otherwise Wait deadlocks and even the command timeout cannot fire.
+func TestRunProcessOversizedLineReturnsUnderTimeout(t *testing.T) {
+	start := time.Now()
+	_, err := executeProcessHelper(t, "oversized", 0, func(command *Command) {
+		command.Timeout = 2 * time.Second
+	}, nil)
+	elapsed := time.Since(start)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error = %v, want context.DeadlineExceeded", err)
+	}
+	if elapsed > 15*time.Second {
+		t.Fatalf("Run took %s for an oversized line with a 2s timeout", elapsed)
+	}
+}
+
+// A line handler that stays busy longer than processPipeDrainTimeout must not
+// cause the tail to be dropped: the copy goroutines feed the spool without
+// waiting for the handler, so WaitDelay never fires here.
+func TestRunProcessSlowHandlerKeepsBufferedOutput(t *testing.T) {
+	lines := processHandlerStallLineCount()
+	want := processStallFirstLine + processHandlerStallOutput("stdout", lines)
+	const handlerStall = 4 * time.Second
+	handled := 0
+	start := time.Now()
+	result, err := executeProcessHelper(t, "handler-stall", 0, func(command *Command) {
+		command.Timeout = 60 * time.Second
+	}, func(line string) {
+		if handled == 0 {
+			time.Sleep(handlerStall)
+		}
+		handled++
+	})
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("run helper: %v", err)
+	}
+	if result.Stdout != want {
+		t.Fatalf("stdout truncated: got %d bytes, want %d", len(result.Stdout), len(want))
+	}
+	if handled != lines+1 {
+		t.Fatalf("line handler saw %d lines, want %d", handled, lines+1)
+	}
+	if elapsed < handlerStall {
+		t.Fatalf("Run returned in %s, before the stalled handler finished", elapsed)
 	}
 }
 
