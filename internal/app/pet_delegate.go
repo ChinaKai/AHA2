@@ -21,19 +21,32 @@ const (
 )
 
 type PetWorkbenchView struct {
-	Diary     []PetDiaryEntry        `json:"diary"`
-	Core      []PetWorkspaceDocument `json:"core"`
-	Worklog   []PetDiaryEntry        `json:"worklog"`
-	Approvals []domain.PetApproval   `json:"approvals"`
-	Watches   []PetTaskWatchView     `json:"watches"`
-	Task      *domain.Task           `json:"task,omitempty"`
-	UpdatedAt time.Time              `json:"updated_at"`
+	Diary         []PetDiaryEntry        `json:"diary"`
+	DiaryTotal    int                    `json:"diary_total"`
+	Core          []PetWorkspaceDocument `json:"core"`
+	Worklog       []PetDiaryEntry        `json:"worklog"`
+	WorklogTotal  int                    `json:"worklog_total"`
+	Approvals     []domain.PetApproval   `json:"approvals"`
+	ApprovalTotal int                    `json:"approval_total"`
+	Watches       []PetTaskWatchView     `json:"watches"`
+	Task          *domain.Task           `json:"task,omitempty"`
+	UpdatedAt     time.Time              `json:"updated_at"`
+}
+
+type PetWorkbenchOptions struct {
+	ApprovalLimit int
+	DiaryLimit    int
+	WorklogLimit  int
 }
 
 // PetWorkbench is the data behind the pet's workbench page. It is owner-only
 // and read-only; the pet writes diary/core/worklog files through its Task.
 func (s *Service) PetWorkbench(ctx context.Context) (PetWorkbenchView, error) {
-	diary, err := s.PetDiary(ctx)
+	return s.PetWorkbenchWithOptions(ctx, PetWorkbenchOptions{})
+}
+
+func (s *Service) PetWorkbenchWithOptions(ctx context.Context, options PetWorkbenchOptions) (PetWorkbenchView, error) {
+	diary, diaryTotal, err := s.PetDiaryPage(ctx, petWorkbenchLimit(options.DiaryLimit, 30))
 	if err != nil {
 		return PetWorkbenchView{}, err
 	}
@@ -41,11 +54,11 @@ func (s *Service) PetWorkbench(ctx context.Context) (PetWorkbenchView, error) {
 	if err != nil {
 		return PetWorkbenchView{}, err
 	}
-	worklog, err := s.PetWorklog(ctx)
+	worklog, worklogTotal, err := s.PetWorklogPage(ctx, petWorkbenchLimit(options.WorklogLimit, 30))
 	if err != nil {
 		return PetWorkbenchView{}, err
 	}
-	approvals, err := s.PetApprovals(ctx, 50)
+	approvals, approvalTotal, err := s.PetApprovalsWithTotal(ctx, petWorkbenchLimit(options.ApprovalLimit, 50))
 	if err != nil {
 		return PetWorkbenchView{}, err
 	}
@@ -54,7 +67,8 @@ func (s *Service) PetWorkbench(ctx context.Context) (PetWorkbenchView, error) {
 		return PetWorkbenchView{}, err
 	}
 	view := PetWorkbenchView{
-		Diary: diary, Core: core, Worklog: worklog, Approvals: approvals, Watches: watches,
+		Diary: diary, DiaryTotal: diaryTotal, Core: core, Worklog: worklog, WorklogTotal: worklogTotal,
+		Approvals: approvals, ApprovalTotal: approvalTotal, Watches: watches,
 		UpdatedAt: s.now().UTC(),
 	}
 	if task, taskErr := s.store.Task(ctx, petTaskID); taskErr == nil {
@@ -63,8 +77,23 @@ func (s *Service) PetWorkbench(ctx context.Context) (PetWorkbenchView, error) {
 	return view, nil
 }
 
+func petWorkbenchLimit(value, fallback int) int {
+	if value <= 0 {
+		value = fallback
+	}
+	if value > 200 {
+		value = 200
+	}
+	return value
+}
+
 func (s *Service) PetApprovals(ctx context.Context, limit int) ([]domain.PetApproval, error) {
-	return s.store.ListPetApprovals(ctx, limit)
+	approvals, _, err := s.PetApprovalsWithTotal(ctx, limit)
+	return approvals, err
+}
+
+func (s *Service) PetApprovalsWithTotal(ctx context.Context, limit int) ([]domain.PetApproval, int, error) {
+	return s.store.ListPetApprovalsWithTotal(ctx, limit)
 }
 
 type PetApprovalInput struct {

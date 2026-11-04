@@ -79,18 +79,21 @@ func (s *Service) handlePetTaskStatusChange(ctx context.Context, change store.Ta
 	if err != nil || !assistant.PetEnabled {
 		return
 	}
+	// A completed or cancelled Task no longer needs a follow. Remove the watch
+	// only after the final notification has been delivered.
+	removeWatch := change.To == domain.TaskCompleted || change.To == domain.TaskCancelled
 	now := s.now().UTC()
 	if petQuietNow(assistant, now) && (change.To == domain.TaskCompleted || change.To == domain.TaskCancelled) {
 		delay := petQuietRemaining(assistant, now)
 		if delay > 0 {
-			time.AfterFunc(delay, func() { s.deliverPetTaskStatusMessage(task.ID, message) })
+			time.AfterFunc(delay, func() { s.deliverPetTaskStatusMessage(task.ID, message, removeWatch) })
 			return
 		}
 	}
-	go s.deliverPetTaskStatusMessage(task.ID, message)
+	go s.deliverPetTaskStatusMessage(task.ID, message, removeWatch)
 }
 
-func (s *Service) deliverPetTaskStatusMessage(taskID, message string) {
+func (s *Service) deliverPetTaskStatusMessage(taskID, message string, removeWatch bool) {
 	if s == nil || strings.TrimSpace(message) == "" {
 		return
 	}
@@ -107,6 +110,12 @@ func (s *Service) deliverPetTaskStatusMessage(taskID, message string) {
 	}
 	if _, err := s.SubmitMessage(context.Background(), petTaskID, message); err != nil {
 		log.Printf("notify pet task about watched task status: %v", err)
+		return
+	}
+	if removeWatch {
+		if err := s.store.DeletePetTaskWatch(context.Background(), taskID); err != nil {
+			log.Printf("remove completed pet task watch: %v", err)
+		}
 	}
 }
 
@@ -226,6 +235,11 @@ func (s *Service) PetTaskWatchList(ctx context.Context) ([]PetTaskWatchView, err
 	views := make([]PetTaskWatchView, 0, len(tasks))
 	for _, task := range tasks {
 		if task.ID == petTaskID {
+			continue
+		}
+		// Completed and cancelled Tasks are closed history; they must not stay
+		// in the follows list even if an older watch row still exists.
+		if task.Status == domain.TaskCompleted || task.Status == domain.TaskCancelled {
 			continue
 		}
 		watch, watched := watchByTask[task.ID]

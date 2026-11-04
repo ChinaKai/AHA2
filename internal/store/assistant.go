@@ -205,6 +205,30 @@ func (s *Store) ListPetEvents(ctx context.Context, limit int) ([]domain.PetEvent
 	return result, rows.Err()
 }
 
+// PetCreatedTaskIDs returns every Task id the pet created, oldest first. The
+// work-state briefing uses this instead of the bounded recent-event list so an
+// old, still-open Task cannot silently fall out of the pet's view.
+func (s *Store) PetCreatedTaskIDs(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT detail FROM pet_events
+		WHERE kind='task_created' AND detail<>''
+		GROUP BY detail
+		ORDER BY MIN(at), detail`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		result = append(result, id)
+	}
+	return result, rows.Err()
+}
+
 func (s *Store) UpdateOwnerPetBudget(ctx context.Context, id string, idleMinutes int, quietEnabled bool, quietStart, quietEnd, hourlyLimit int, updatedAt time.Time) error {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE owner_assistants SET pet_idle_minutes=?,pet_quiet_enabled=?,pet_quiet_start=?,pet_quiet_end=?,pet_hourly_limit=?,updated_at=? WHERE id=?`,

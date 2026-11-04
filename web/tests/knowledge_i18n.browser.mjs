@@ -77,6 +77,8 @@ try {
   assert.equal((await page.locator("[data-knowledge-area=global] span").textContent()).trim(), "Global knowledge");
   assert.equal((await page.locator("[data-knowledge-area=libraries] span").textContent()).trim(), "Unbound");
   assert.equal((await page.locator("[data-knowledge-area=skills] span").textContent()).trim(), "Skills");
+  // Load-more belongs to the global/project entry lists, not the default updates tab.
+  await page.evaluate(() => document.querySelector("[data-knowledge-area=global]")?.click());
   await page.waitForFunction(() => document.querySelector("[data-load-more=knowledge]")?.textContent === "Load more", null, {timeout: 10000});
 
   const scan = async (label) => {

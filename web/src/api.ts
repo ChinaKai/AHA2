@@ -535,8 +535,13 @@ class APIClient {
     return this.request("/api/v1/pet/diary");
   }
 
-  petWorkbench(): Promise<import("./types").PetWorkbench & {ok: boolean}> {
-    return this.request("/api/v1/pet/workbench");
+  petWorkbench(options: {approvalLimit?: number; diaryLimit?: number; worklogLimit?: number} = {}): Promise<import("./types").PetWorkbench & {ok: boolean}> {
+    const query = new URLSearchParams();
+    if (options.approvalLimit) query.set("approval_limit", String(options.approvalLimit));
+    if (options.diaryLimit) query.set("diary_limit", String(options.diaryLimit));
+    if (options.worklogLimit) query.set("worklog_limit", String(options.worklogLimit));
+    const suffix = query.toString();
+    return this.request(`/api/v1/pet/workbench${suffix ? `?${suffix}` : ""}`);
   }
 
   savePetWorkbenchDocument(section: string, name: string, content: string): Promise<{ok: boolean}> {

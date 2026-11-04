@@ -15,22 +15,32 @@ type PetDiaryEntry struct {
 }
 
 func (s *Service) PetDiary(ctx context.Context) ([]PetDiaryEntry, error) {
-	return readPetMarkdownEntries(filepath.Join(s.petWorkspaceRoot(ctx), "diary"))
+	entries, _, err := s.PetDiaryPage(ctx, 30)
+	return entries, err
+}
+
+func (s *Service) PetDiaryPage(ctx context.Context, limit int) ([]PetDiaryEntry, int, error) {
+	return readPetMarkdownEntries(filepath.Join(s.petWorkspaceRoot(ctx), "diary"), limit)
 }
 
 // PetWorklog returns the pet's own work notes. The pet writes them with its
 // workspace file tools; AHA only reads them for the workbench.
 func (s *Service) PetWorklog(ctx context.Context) ([]PetDiaryEntry, error) {
-	return readPetMarkdownEntries(filepath.Join(s.petWorkspaceRoot(ctx), "worklog"))
+	entries, _, err := s.PetWorklogPage(ctx, 30)
+	return entries, err
 }
 
-func readPetMarkdownEntries(root string) ([]PetDiaryEntry, error) {
+func (s *Service) PetWorklogPage(ctx context.Context, limit int) ([]PetDiaryEntry, int, error) {
+	return readPetMarkdownEntries(filepath.Join(s.petWorkspaceRoot(ctx), "worklog"), limit)
+}
+
+func readPetMarkdownEntries(root string, limit int) ([]PetDiaryEntry, int, error) {
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return []PetDiaryEntry{}, nil
+			return []PetDiaryEntry{}, 0, nil
 		}
-		return nil, err
+		return nil, 0, err
 	}
 	items := make([]PetDiaryEntry, 0)
 	for _, entry := range entries {
@@ -44,10 +54,17 @@ func readPetMarkdownEntries(root string) ([]PetDiaryEntry, error) {
 		items = append(items, PetDiaryEntry{Date: strings.TrimSuffix(entry.Name(), ".md"), Content: string(raw)})
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].Date > items[j].Date })
-	if len(items) > 30 {
-		items = items[:30]
+	total := len(items)
+	if limit <= 0 {
+		limit = 30
 	}
-	return items, nil
+	if limit > 200 {
+		limit = 200
+	}
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	return items, total, nil
 }
 
 func (s *Service) WritePetDiary(ctx context.Context, date, content string) error {

@@ -1,8 +1,13 @@
 package httpapi
 
 import (
+	"context"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
+
+	"github.com/ChinaKai/AHA2/internal/app"
 )
 
 func (s *Server) listPetDiary(writer http.ResponseWriter, request *http.Request) {
@@ -15,15 +20,34 @@ func (s *Server) listPetDiary(writer http.ResponseWriter, request *http.Request)
 }
 
 func (s *Server) petWorkbench(writer http.ResponseWriter, request *http.Request) {
-	view, err := s.app.PetWorkbench(request.Context())
+	// A workbench read can wait behind a busy database. Bound it so the page
+	// gets a retryable error instead of an indefinite "reading" state.
+	ctx, cancel := context.WithTimeout(request.Context(), 10*time.Second)
+	defer cancel()
+	query := request.URL.Query()
+	view, err := s.app.PetWorkbenchWithOptions(ctx, app.PetWorkbenchOptions{
+		ApprovalLimit: petWorkbenchQueryLimit(query.Get("approval_limit"), 50),
+		DiaryLimit:    petWorkbenchQueryLimit(query.Get("diary_limit"), 30),
+		WorklogLimit:  petWorkbenchQueryLimit(query.Get("worklog_limit"), 30),
+	})
 	if err != nil {
 		writeError(writer, http.StatusInternalServerError, "pet_workbench_failed")
 		return
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{
-		"ok": true, "diary": view.Diary, "core": view.Core, "worklog": view.Worklog,
-		"approvals": view.Approvals, "watches": view.Watches, "task": view.Task, "updated_at": view.UpdatedAt,
+		"ok": true, "diary": view.Diary, "diary_total": view.DiaryTotal,
+		"core": view.Core, "worklog": view.Worklog, "worklog_total": view.WorklogTotal,
+		"approvals": view.Approvals, "approval_total": view.ApprovalTotal,
+		"watches": view.Watches, "task": view.Task, "updated_at": view.UpdatedAt,
 	})
+}
+
+func petWorkbenchQueryLimit(raw string, fallback int) int {
+	value, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || value <= 0 {
+		return fallback
+	}
+	return value
 }
 
 func (s *Server) followPetWatch(writer http.ResponseWriter, request *http.Request) {

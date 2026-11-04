@@ -16,7 +16,8 @@ func TestPetTaskIdentityOwnsWorkspacePaths(t *testing.T) {
 	common := []string{
 		"core/identity.md", "core/principles.md", "core/loops.md", "core/agenda.md", "pet-lab/",
 		"pet_update_core", "pet_write_diary", "pet_write_worklog",
-		"aha_pet_work_state", "aha_capabilities", "pet_say", "pet_submit_idea",
+		"aha_pet_work_state", "inspection", "open_tasks", "owner_decision",
+		"aha_capabilities", "pet_say", "pet_submit_idea",
 		"aha_request_permission_change", "aha_pet_permissions", "pet_open_task",
 	}
 	for _, test := range cases {

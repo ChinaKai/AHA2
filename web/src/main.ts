@@ -4,7 +4,7 @@ import {renderConversationList} from "./conversation_ui.js";
 import {bindCodexAccounts, renderCodexAccounts} from "./codex_accounts.js";
 import {bindChannels, exportRetiredChannelInstance, purgeRetiredChannelInstance, renderChannels} from "./channels.js";
 import {icon} from "./icons.js";
-import {applyLocale, normalizeLanguagePreference, startUITranslationObserver, t, translateUI} from "./i18n.js";
+import {applyLocale, normalizeLanguagePreference, startUITranslationObserver, t, tr, translateUI} from "./i18n.js";
 import {bindKnowledgeWorkspace, knowledgeEntryListVisible, renderKnowledgeWorkspace} from "./knowledge_workspace.js";
 import {bindHardwarePanel, refreshHardwarePanel, stopHardwarePanel} from "./hardware_panel.js";
 import {bindHardwareResources, renderHardwareResources} from "./hardware_resources.js";
@@ -340,6 +340,8 @@ const state: State = {
 applyLocale("auto");
 const app = document.querySelector<HTMLDivElement>("#app");
 let petWorkbenchTab = "diary";
+let petApprovalFilter: "all" | "idea" | "decision" = "all";
+let petApprovalStatusFilter: "all" | "pending" | "approved" | "rejected" = "all";
 let events: EventSource | null = null;
 let taskRefreshTimer: number | null = null;
 let taskClockFrame: number | null = null;
@@ -5776,8 +5778,7 @@ function petDiaryView(): string {
       <button type="button" class="active" data-pet-workbench-tab="diary">${t("petWorkbench.diary")}</button>
       <button type="button" data-pet-workbench-tab="core">${t("petWorkbench.core")}</button>
       <button type="button" data-pet-workbench-tab="worklog">${t("petWorkbench.worklog")}</button>
-      <button type="button" data-pet-workbench-tab="approvals">${t("petWorkbench.approvals")} <span id="pet-approval-count"></span></button>
-      <button type="button" data-pet-workbench-tab="ideas">${t("petWorkbench.ideas")} <span id="pet-idea-count"></span></button>
+      <button type="button" data-pet-workbench-tab="approvals">${t("petWorkbench.approvalsAndIdeas")} <span id="pet-approval-count"></span></button>
       <button type="button" data-pet-workbench-tab="follows">${t("petWorkbench.follows")}</button>
       <button type="button" data-pet-workbench-tab="settings">${t("petWorkbench.settings")}</button>
     </div>
@@ -5789,28 +5790,102 @@ async function bindPetDiaryPage(): Promise<void> {
   const body = document.querySelector<HTMLElement>("#pet-workbench-body");
   const tabs = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-pet-workbench-tab]"));
   const count = document.querySelector<HTMLElement>("#pet-approval-count");
-  const ideaCount = document.querySelector<HTMLElement>("#pet-idea-count");
   if (!body || tabs.length === 0) return;
-  let active = petWorkbenchTab;
+  if (body.dataset.petWorkbenchBound === "1") return;
+  body.dataset.petWorkbenchBound = "1";
+  let active = petWorkbenchTab === "ideas" ? "approvals" : petWorkbenchTab;
+  petWorkbenchTab = active;
   let view: Awaited<ReturnType<typeof api.petWorkbench>> | null = null;
+  let loading = false;
+  let loadError = "";
+  let approvalLimit = 50;
+  let diaryLimit = 30;
+  let worklogLimit = 30;
+
+  const loadMoreFooter = (kind: "approval" | "diary" | "worklog", shown: number, total: number): string => {
+    if (!total || shown >= total) return "";
+    return `<div class="knowledge-list-footer"><span>${t("petWorkbench.loadedCount", {shown: String(shown), total: String(total)})}</span><button type="button" class="knowledge-load-more" data-pet-load-more="${kind}">${t("petWorkbench.loadMore")}</button></div>`;
+  };
+
+  const bindLoadMore = () => {
+    body.querySelectorAll<HTMLButtonElement>("[data-pet-load-more]").forEach(button => button.addEventListener("click", () => {
+      const kind = button.dataset.petLoadMore;
+      if (kind === "approval") approvalLimit += 30;
+      else if (kind === "diary") diaryLimit += 30;
+      else if (kind === "worklog") worklogLimit += 30;
+      else return;
+      button.disabled = true;
+      void load();
+    }));
+  };
+
+  const showLoadState = () => {
+    if (loadError) {
+      body.innerHTML = `<div class="field-help">${escapeHTML(loadError)} <button type="button" data-pet-workbench-retry>${t("common.retry")}</button></div>`;
+      body.querySelector<HTMLButtonElement>("[data-pet-workbench-retry]")?.addEventListener("click", () => {
+        loadError = "";
+        void load();
+      });
+    } else {
+      body.innerHTML = `<div class="field-help">${escapeHTML(t("common.loading"))}</div>`;
+    }
+  };
 
   const renderTab = () => {
+    if (!tabs.some(tab => tab.dataset.petWorkbenchTab === active)) active = "diary";
     tabs.forEach(tab => tab.classList.toggle("active", tab.dataset.petWorkbenchTab === active));
-    if (!view) return;
+    if (!view) {
+      showLoadState();
+      return;
+    }
     if (active === "diary") {
-      body.innerHTML = renderPetMarkdownEntries(view.diary, t("petWorkbench.emptyDiary"), "diary");
+      body.innerHTML = renderPetMarkdownEntries(view.diary, t("petWorkbench.emptyDiary"), "diary") + loadMoreFooter("diary", view.diary.length, view.diary_total ?? view.diary.length);
       bindPetDocEditors("diary", load);
+      bindLoadMore();
     } else if (active === "core") {
       body.innerHTML = view.core.length
         ? view.core.map(item => `<details class="pet-diary-entry" open><summary>${escapeHTML(item.name)}<button type="button" class="pet-doc-edit" data-pet-doc-section="core" data-pet-doc-name="${escapeHTML(item.name)}">${t("common.edit")}</button></summary><pre>${escapeHTML(item.content)}</pre></details>`).join("")
         : `<div class="field-help">${t("petWorkbench.emptyCore")}</div>`;
       bindPetDocEditors("core", load);
     } else if (active === "worklog") {
-      body.innerHTML = renderPetMarkdownEntries(view.worklog, t("petWorkbench.emptyWorklog"), "worklog");
+      body.innerHTML = renderPetMarkdownEntries(view.worklog, t("petWorkbench.emptyWorklog"), "worklog") + loadMoreFooter("worklog", view.worklog.length, view.worklog_total ?? view.worklog.length);
       bindPetDocEditors("worklog", load);
-    } else if (active === "ideas") {
-      body.innerHTML = renderPetApprovals(view.approvals.filter(item => item.kind === "idea"), t("petWorkbench.emptyIdeas"));
+      bindLoadMore();
+    } else if (active === "approvals") {
+      const items = view.approvals.filter(item => {
+        if (petApprovalFilter !== "all" && (petApprovalFilter === "idea" ? item.kind !== "idea" : item.kind === "idea")) return false;
+        return petApprovalStatusFilter === "all" || item.status === petApprovalStatusFilter;
+      });
+      const filtering = petApprovalFilter !== "all" || petApprovalStatusFilter !== "all";
+      const empty = filtering ? t("petWorkbench.emptyFiltered") : t("petWorkbench.emptyApprovalsAndIdeas");
+      const kindFilters: Array<[string, string]> = [
+        ["all", t("petWorkbench.filterAll")],
+        ["idea", t("petWorkbench.ideas")],
+        ["decision", t("petWorkbench.approvals")],
+      ];
+      const statusFilters: Array<[string, string]> = [
+        ["all", t("petWorkbench.filterAll")],
+        ["pending", t("petWorkbench.filterPending")],
+        ["approved", t("petWorkbench.filterApproved")],
+        ["rejected", t("petWorkbench.filterRejected")],
+      ];
+      body.innerHTML = `<div class="pet-approval-filters">${kindFilters.map(([id, label]) => `<button type="button" class="${petApprovalFilter === id ? "active" : ""}" data-pet-approval-filter="${id}">${label}</button>`).join("")}</div><div class="pet-approval-filters">${statusFilters.map(([id, label]) => `<button type="button" class="${petApprovalStatusFilter === id ? "active" : ""}" data-pet-approval-status-filter="${id}">${label}</button>`).join("")}</div>${renderPetApprovals(items, empty)}${loadMoreFooter("approval", view.approvals.length, view.approval_total ?? view.approvals.length)}`;
+      body.querySelectorAll<HTMLButtonElement>("[data-pet-approval-filter]").forEach(button => button.addEventListener("click", () => {
+        const next = button.dataset.petApprovalFilter;
+        if (next === "all" || next === "idea" || next === "decision") {
+          petApprovalFilter = next;
+          renderTab();
+        }
+      }));
+      body.querySelectorAll<HTMLButtonElement>("[data-pet-approval-status-filter]").forEach(button => button.addEventListener("click", () => {
+        const next = button.dataset.petApprovalStatusFilter;
+        if (next === "all" || next === "pending" || next === "approved" || next === "rejected") {
+          petApprovalStatusFilter = next;
+          renderTab();
+        }
+      }));
       bindApprovalActions();
+      bindLoadMore();
     } else if (active === "follows") {
       body.innerHTML = renderPetWatches(view.watches);
       bindPetWatchActions();
@@ -5818,21 +5893,41 @@ async function bindPetDiaryPage(): Promise<void> {
       body.innerHTML = `<div id="pet-settings-host" class="pet-workbench-settings"></div>`;
       void showPetSettings();
     } else {
-      body.innerHTML = renderPetApprovals(view.approvals.filter(item => item.kind !== "idea"), t("petWorkbench.emptyApprovals"));
-      bindApprovalActions();
+      body.innerHTML = renderPetMarkdownEntries(view.diary, t("petWorkbench.emptyDiary"), "diary");
+      bindPetDocEditors("diary", load);
+    }
+  };
+
+  const withTimeout = async <T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> => {
+    let timer = 0;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise<T>((_, reject) => {
+          timer = window.setTimeout(() => reject(new Error(message)), timeoutMs);
+        }),
+      ]);
+    } finally {
+      window.clearTimeout(timer);
     }
   };
 
   const load = async () => {
+    if (loading) return;
+    loading = true;
+    loadError = "";
+    if (!view) showLoadState();
     try {
-      view = await api.petWorkbench();
-      const pending = view.approvals.filter(item => item.status === "pending" && item.kind !== "idea").length;
+      view = await withTimeout(api.petWorkbench({approvalLimit, diaryLimit, worklogLimit}), 12000, t("petWorkbench.loadTimeout"));
+      const pending = view.approvals.filter(item => item.status === "pending").length;
       if (count) count.textContent = pending > 0 ? String(pending) : "";
-      const pendingIdeas = view.approvals.filter(item => item.status === "pending" && item.kind === "idea").length;
-      if (ideaCount) ideaCount.textContent = pendingIdeas > 0 ? String(pendingIdeas) : "";
       renderTab();
     } catch (error) {
-      body.innerHTML = `<div class="field-help">${escapeHTML(error instanceof Error ? error.message : String(error))}</div>`;
+      view = null;
+      loadError = error instanceof Error ? error.message : String(error);
+      showLoadState();
+    } finally {
+      loading = false;
     }
   };
 
@@ -5998,16 +6093,17 @@ function renderPetWatches(items: Array<{task_id: string; code: string; title: st
   }).join("");
 }
 
-function renderPetApprovals(items: Array<{id: string; title: string; summary: string; reason?: string; status: string; risk: string; kind: string; resolution?: string; decision_reason?: string}>, empty = "还没有审批记录。"): string {
+function renderPetApprovals(items: Array<{id: string; title: string; summary: string; reason?: string; status: string; risk: string; kind: string; resolution?: string; decision_reason?: string}>, empty = t("petWorkbench.emptyApprovals")): string {
   if (items.length === 0) return `<div class="field-help">${escapeHTML(empty)}</div>`;
   return items.map(item => {
     const pending = item.status === "pending";
-    const status = item.status === "approved" ? "已批准" : item.status === "rejected" ? "已拒绝" : "待审批";
+    const status = item.status === "approved" ? tr("已批准") : item.status === "rejected" ? tr("已拒绝") : tr("待审批");
+    const kind = item.kind === "idea" ? t("petWorkbench.ideas") : t("petWorkbench.approvals");
     const actions = pending
-      ? `<div class="pet-approval-actions"><button type="button" class="primary" data-pet-approval-decision="approve" data-pet-approval-id="${escapeHTML(item.id)}">批准</button><button type="button" data-pet-approval-decision="reject" data-pet-approval-id="${escapeHTML(item.id)}">拒绝</button></div>`
+      ? `<div class="pet-approval-actions"><button type="button" class="primary" data-pet-approval-decision="approve" data-pet-approval-id="${escapeHTML(item.id)}">${tr("批准")}</button><button type="button" data-pet-approval-decision="reject" data-pet-approval-id="${escapeHTML(item.id)}">${tr("拒绝")}</button></div>`
       : "";
     return `<article class="pet-approval-card ${pending ? "pending" : ""}">
-      <header><strong>${escapeHTML(item.title)}</strong><span class="pet-approval-status">${escapeHTML(status)} · ${escapeHTML(item.risk)}</span></header>
+      <header><strong>${escapeHTML(item.title)}</strong><span class="pet-approval-status">${kind} · ${escapeHTML(status)} · ${escapeHTML(item.risk)}</span></header>
       ${item.reason ? `<p class="pet-approval-reason"><strong>${t("petApproval.reason")}:</strong> ${escapeHTML(item.reason)}</p>` : ""}
       <p>${escapeHTML(item.summary)}</p>
       <small>${escapeHTML(item.kind)}${item.decision_reason ? ` · ${t("petApproval.decisionReason")}: ${escapeHTML(item.decision_reason)}` : item.resolution ? ` · ${escapeHTML(item.resolution)}` : ""}</small>

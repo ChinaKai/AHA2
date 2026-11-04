@@ -77,7 +77,8 @@ try{
  };
  await scan("pet workbench diary");
  await page.evaluate(()=>document.querySelector('[data-pet-workbench-tab="approvals"]')?.click());await page.waitForTimeout(300);await scan("pet approvals");
- await page.evaluate(()=>document.querySelector('[data-pet-workbench-tab="ideas"]')?.click());await page.waitForTimeout(300);await scan("pet ideas");
+ await page.evaluate(()=>document.querySelector('[data-pet-approval-filter="idea"]')?.click());await page.waitForTimeout(200);await scan("pet ideas filter");
+ await page.evaluate(()=>document.querySelector('[data-pet-approval-status-filter="pending"]')?.click());await page.waitForTimeout(200);await scan("pet approval status filter");
  await page.evaluate(()=>document.querySelector('[data-pet-workbench-tab="settings"]')?.click());await page.waitForTimeout(600);await scan("pet settings");
  await page.evaluate(()=>document.querySelector("#assistant-pet")?.click());await page.waitForTimeout(300);await scan("assistant panel");
  assert.deepEqual(errors,[]);

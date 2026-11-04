@@ -228,6 +228,7 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 		Settings: database,
 	}
 	appService := app.NewService(database, secretStore, executor)
+	appService.SetBuildInfo(version, webVersion, time.Now().UTC())
 	appService.MigratePetTaskGoal(ctx)
 	appService.StartPetTaskNotifications()
 	appService.SetProxyRuntime(proxyRuntime)

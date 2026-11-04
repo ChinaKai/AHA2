@@ -171,6 +171,9 @@ type Service struct {
 	agentAPI              *agentapi.Capabilities
 	agentAPIURL           string
 	agentAPIAllowInsecure bool
+	buildVersion          string
+	webVersion            string
+	startedAt             time.Time
 
 	mu                  sync.Mutex
 	cancels             map[string]context.CancelFunc
@@ -230,6 +233,17 @@ func (s *Service) SetAgentAPI(capabilities *agentapi.Capabilities, baseURL strin
 	s.agentAPI = capabilities
 	s.agentAPIURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	s.agentAPIAllowInsecure = len(allowInsecure) > 0 && allowInsecure[0]
+}
+
+// SetBuildInfo lets the pet's read-only inspection snapshot report the same
+// build identity as the HTTP server without reaching into internal/httpapi.
+func (s *Service) SetBuildInfo(version, webVersion string, startedAt time.Time) {
+	s.buildVersion = strings.TrimSpace(version)
+	s.webVersion = strings.TrimSpace(webVersion)
+	if s.webVersion == "" {
+		s.webVersion = s.buildVersion
+	}
+	s.startedAt = startedAt
 }
 
 type CreateTaskInput struct {

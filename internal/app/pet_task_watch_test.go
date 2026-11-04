@@ -236,3 +236,124 @@ func TestPetWatchedTaskStatusNotification(t *testing.T) {
 		t.Fatalf("watch=%#v err=%v", watch, err)
 	}
 }
+
+func TestCompletedPetWatchIsRemovedAfterNotification(t *testing.T) {
+	fixture := newPetTaskFixture(t)
+	if _, err := fixture.service.OwnerAssistant(fixture.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.service.UpdateOwnerPetSettings(fixture.ctx, PetSettingsInput{
+		Enabled: true, ChatModelID: fixture.model.ID, Actions: []string{"walk"},
+		IdleMinutes: 5, QuietEnabled: boolPointer(false), QuietStart: 22, QuietEnd: 8, HourlyLimit: 2,
+		AllowViewTasks: boolPointer(true), AllowCreateTasks: boolPointer(true),
+		AllowCreateWorkspaces: boolPointer(true), AllowMessageTasks: boolPointer(true),
+		AllowManageModels: boolPointer(true), AllowManageKnowledge: boolPointer(true),
+		AllowManageChannels: boolPointer(true), AllowManageSystem: boolPointer(true),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fixture.service.StartPetTaskNotifications()
+	project, err := fixture.service.PetCreateProject(fixture.ctx, PetCreateProjectInput{Name: "完成关注项目"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := fixture.service.PetCreateWorkspace(fixture.ctx, PetCreateWorkspaceInput{
+		ProjectID: project.ID, Name: "完成关注 Workspace", RootPath: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := fixture.service.PetCreateTask(fixture.ctx, PetCreateTaskInput{
+		ProjectID: project.ID, WorkspaceID: workspace.ID, Title: "完成关注任务",
+		Request: "完成后自动取消关注", Start: boolPointer(false),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.service.PetWatchTask(fixture.ctx, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	now := fixture.service.now().UTC()
+	for _, step := range []struct{ from, to domain.TaskStatus }{
+		{domain.TaskDraft, domain.TaskPreparing},
+		{domain.TaskPreparing, domain.TaskActive},
+		{domain.TaskActive, domain.TaskCompleted},
+	} {
+		if err := fixture.database.UpdateTaskStatus(fixture.ctx, task.ID, step.from, step.to, now.Format(time.RFC3339Nano), ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if _, err := fixture.database.PetTaskWatch(fixture.ctx, task.ID); err != nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("completed watch was not removed")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	views, err := fixture.service.PetTaskWatchList(fixture.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, view := range views {
+		if view.TaskID == task.ID {
+			t.Fatalf("completed task still listed: %#v", view)
+		}
+	}
+}
+
+func TestCompletedTaskIsHiddenFromFollowsWithLegacyWatch(t *testing.T) {
+	fixture := newPetTaskFixture(t)
+	if _, err := fixture.service.OwnerAssistant(fixture.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.service.UpdateOwnerPetSettings(fixture.ctx, PetSettingsInput{
+		Enabled: true, ChatModelID: fixture.model.ID, Actions: []string{"walk"},
+		IdleMinutes: 5, QuietEnabled: boolPointer(false), QuietStart: 22, QuietEnd: 8, HourlyLimit: 2,
+		AllowViewTasks: boolPointer(true), AllowCreateTasks: boolPointer(true),
+		AllowCreateWorkspaces: boolPointer(true), AllowMessageTasks: boolPointer(true),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	project, err := fixture.service.PetCreateProject(fixture.ctx, PetCreateProjectInput{Name: "历史关注项目"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := fixture.service.PetCreateWorkspace(fixture.ctx, PetCreateWorkspaceInput{
+		ProjectID: project.ID, Name: "历史关注 Workspace", RootPath: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := fixture.service.PetCreateTask(fixture.ctx, PetCreateTaskInput{
+		ProjectID: project.ID, WorkspaceID: workspace.ID, Title: "历史完成任务",
+		Request: "完成后的旧关注不应展示", Start: boolPointer(false),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := fixture.service.now().UTC()
+	for _, step := range []struct{ from, to domain.TaskStatus }{
+		{domain.TaskDraft, domain.TaskPreparing},
+		{domain.TaskPreparing, domain.TaskActive},
+		{domain.TaskActive, domain.TaskCompleted},
+	} {
+		if err := fixture.database.UpdateTaskStatus(fixture.ctx, task.ID, step.from, step.to, now.Format(time.RFC3339Nano), ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := fixture.database.UpsertPetTaskWatch(fixture.ctx, task.ID, "manual", now); err != nil {
+		t.Fatal(err)
+	}
+	views, err := fixture.service.PetTaskWatchList(fixture.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, view := range views {
+		if view.TaskID == task.ID {
+			t.Fatalf("completed task with legacy watch was listed: %#v", view)
+		}
+	}
+}

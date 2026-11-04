@@ -367,9 +367,9 @@ func petAutonomousMessage(english bool, idleMinutes int, page string, layout Pet
 // minutes.
 func petWakeActionContract(english bool) string {
 	if english {
-		return "\n\nThis is a work wake-up, not a status report. Call aha_pet_work_state, read core/agenda.md and pending approvals. Every wake must leave one verifiable result:\n1) handle an event or pending item;\n2) if the owner must decide, create a kind=owner_decision approval with pet_request_approval and write a waiting item to core/agenda.md or core/loops.md; never only state it in the final answer, and create each decision once;\n3) if nothing can be advanced, pick one low-risk, verifiable AHA experience improvement from recent worklog/loops and create+start a normal Task, or add it to the agenda and start it; do not escape with NOOP;\n4) reply NOOP only after completing an action this turn and when nothing else remains.\nDo not repeat the open-loop list or only summarize."
+		return "\n\nThis is a work wake-up, not a status report. Call aha_pet_work_state, read inspection, open_tasks, core/agenda.md and pending approvals. Every wake must leave one verifiable result:\n0) close the oldest pet-created open Task before new work: verify and complete/cancel it, or file one kind=owner_decision approval (payload task_id) for a real blocker; waiting/blocked needs a decision, failed gets one retry then escalation; never leave it silent;\n1) handle an event or pending item;\n2) if the owner must decide, create a kind=owner_decision approval with pet_request_approval and write a waiting item to core/agenda.md or core/loops.md; never only state it in the final answer, and create each decision once;\n3) if nothing can be advanced, pick one low-risk, verifiable AHA experience improvement from recent worklog/loops and create+start a normal Task, or add it to the agenda and start it; do not escape with NOOP;\n4) reply NOOP only after completing an action this turn and when nothing else remains;\n5) final replies: add one compact inspection line from inspection (scope, result, changes, unclosed).\nDo not repeat the open-loop list or only summarize. Approvals/ideas are created once in the approval center; agenda/loops cite them, worklog keeps execution evidence, diary stays personal. Do not copy the same body across layers."
 	}
-	return "\n\n这是工作唤醒，不是状态汇报。先调用 aha_pet_work_state，读取 core/agenda.md 和待审批项。每次唤醒必须留下一个可验证结果：\n1) 有事件或待办：处理它；\n2) 需要主人决定：用 pet_request_approval 创建 kind=owner_decision 的待审批，并在 core/agenda.md 或 core/loops.md 写 waiting 项；不能只写在最终回复里，同一决策只创建一次；\n3) 没有可推进项：从最近 worklog/loops 选一个低风险、可验证的 AHA 使用体验改进，创建并启动普通 Task，或先写入议程再启动；不要只回 NOOP；\n4) 只有本轮已经完成一个动作且确实没有剩余事项时，才回复 NOOP。\n不要重复列出未闭环清单，不要只汇报。"
+	return "\n\n这是工作唤醒，不是状态汇报。先调用 aha_pet_work_state，读取 inspection、open_tasks、core/agenda.md 和待审批项。每次唤醒必须留下一个可验证结果：\n0) 先关闭最早的未闭环宠物任务：验证后完成/取消，或为真实阻塞提交一次 kind=owner_decision 审批（payload 带 task_id）；waiting/blocked 需要决定，failed 先重试一次再升级；不能静默停留；\n1) 有事件或待办：处理它；\n2) 需要主人决定：用 pet_request_approval 创建 kind=owner_decision 的待审批，并在 core/agenda.md 或 core/loops.md 写 waiting 项；不能只写在最终回复里，同一决策只创建一次；\n3) 没有可推进项：从最近 worklog/loops 选一个低风险、可验证的 AHA 使用体验改进，创建并启动普通 Task，或先写入议程再启动；不要只回 NOOP；\n4) 只有本轮已经完成一个动作且确实没有剩余事项时，才回复 NOOP；\n5) 最终回复附一行巡检摘要（范围、结果、变化、未闭环），数据来自 inspection。\n不要重复列出未闭环清单，不要只汇报。审批/想法只在审批中心创建一次；agenda/loops 只写引用和状态，worklog 只写执行证据，diary 只写个人叙事，不要跨层复制正文。"
 }
 
 func (s *Service) petUsesEnglish(ctx context.Context) bool {
@@ -770,7 +770,7 @@ func ahaPetTools() []gateway.ChatTool {
 		{Name: "aha_overview", Description: "只读查看 AHA2 项目、任务、渠道的汇总和需要关注的任务", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{},
 		}},
-		{Name: "aha_pet_work_state", Description: "开始工作前查看：审批是否有更新，最近创建/启动/发消息的 Task 当前进展和错误", Parameters: map[string]any{
+		{Name: "aha_pet_work_state", Description: "开始工作前查看：巡检快照、所有未关闭的宠物任务、审批和最近 Task 进展", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{},
 		}},
 		{Name: "aha_pet_permissions", Description: "只读查看当前宠物权限开关", Parameters: map[string]any{
@@ -1323,14 +1323,14 @@ func ahaPetTools() []gateway.ChatTool {
 				"permissions_needed": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 			}, "required": []string{"title", "summary", "reason"},
 		}},
-		{Name: "pet_request_approval", Description: "向主人申请一次需要授权的操作；只创建审批，不执行操作", Parameters: map[string]any{
+		{Name: "pet_request_approval", Description: "向主人申请一次需要授权的操作；只创建审批，不执行操作；任务相关审批在 payload 中带 task_id", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{
-				"kind":    map[string]any{"type": "string", "description": "操作类型，例如 external_channel_send、delete_task"},
+				"kind":    map[string]any{"type": "string", "description": "操作类型，例如 external_channel_send、delete_task、owner_decision"},
 				"title":   map[string]any{"type": "string"},
 				"summary": map[string]any{"type": "string"},
 				"reason":  map[string]any{"type": "string", "description": "为什么需要这次审批；高风险审批必填"},
 				"risk":    map[string]any{"type": "string", "enum": []string{"low", "medium", "high"}},
-				"payload": map[string]any{"type": "object", "description": "可选的操作参数"},
+				"payload": map[string]any{"type": "object", "description": "可选的操作参数；任务相关审批带 task_id"},
 			}, "required": []string{"kind", "title", "summary"},
 		}},
 		{Name: "pet_list_approvals", Description: "查看自己的审批记录", Parameters: map[string]any{

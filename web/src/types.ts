@@ -1248,9 +1248,12 @@ export interface PetTaskWatch {
 
 export interface PetWorkbench {
   diary: PetDiaryEntry[];
+  diary_total?: number;
   core: PetWorkspaceDocument[];
   worklog: PetDiaryEntry[];
+  worklog_total?: number;
   approvals: PetApproval[];
+  approval_total?: number;
   watches: PetTaskWatch[];
   task?: Task;
   updated_at: string;

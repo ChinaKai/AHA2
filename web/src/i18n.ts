@@ -133,6 +133,11 @@ const zhCN: Record<string, string> = {
   "petWorkbench.core": "核心文档",
   "petWorkbench.worklog": "工作记录",
   "petWorkbench.approvals": "审批",
+  "petWorkbench.approvalsAndIdeas": "审批与想法",
+  "petWorkbench.filterAll": "全部",
+  "petWorkbench.filterPending": "未处理",
+  "petWorkbench.filterApproved": "已批准",
+  "petWorkbench.filterRejected": "已拒绝",
   "petWorkbench.ideas": "想法",
   "petWorkbench.follows": "关注",
   "petWorkbench.settings": "设置",
@@ -141,6 +146,11 @@ const zhCN: Record<string, string> = {
   "petWorkbench.emptyWorklog": "还没有工作记录。",
   "petWorkbench.emptyIdeas": "还没有想法。",
   "petWorkbench.emptyApprovals": "还没有审批记录。",
+  "petWorkbench.emptyApprovalsAndIdeas": "还没有审批或想法。",
+  "petWorkbench.emptyFiltered": "没有符合筛选条件的记录。",
+  "petWorkbench.loadTimeout": "加载超时，请重试",
+  "petWorkbench.loadMore": "加载更多",
+  "petWorkbench.loadedCount": "已显示 {shown} / 共 {total} 条",
   "petWorkbench.emptyFollows": "暂无未结束的普通任务。",
   "petWorkbench.followHint": "这里展示全部未结束的普通任务；关注后宠物会跟踪其状态。",
   "petWorkbench.followTask": "关注",
@@ -290,6 +300,11 @@ const enUS: Record<string, string> = {
   "petWorkbench.core": "Core documents",
   "petWorkbench.worklog": "Work log",
   "petWorkbench.approvals": "Approvals",
+  "petWorkbench.approvalsAndIdeas": "Approvals & ideas",
+  "petWorkbench.filterAll": "All",
+  "petWorkbench.filterPending": "Pending",
+  "petWorkbench.filterApproved": "Approved",
+  "petWorkbench.filterRejected": "Rejected",
   "petWorkbench.ideas": "Ideas",
   "petWorkbench.follows": "Following",
   "petWorkbench.settings": "Settings",
@@ -298,6 +313,11 @@ const enUS: Record<string, string> = {
   "petWorkbench.emptyWorklog": "No work log entries yet.",
   "petWorkbench.emptyIdeas": "No ideas yet.",
   "petWorkbench.emptyApprovals": "No approvals yet.",
+  "petWorkbench.emptyApprovalsAndIdeas": "No approvals or ideas yet.",
+  "petWorkbench.emptyFiltered": "No matching records.",
+  "petWorkbench.loadTimeout": "Loading timed out. Please retry.",
+  "petWorkbench.loadMore": "Load more",
+  "petWorkbench.loadedCount": "Showing {shown} of {total}",
   "petWorkbench.emptyFollows": "No active ordinary tasks.",
   "petWorkbench.followHint": "All active ordinary tasks. Follow one to have the pet track its status.",
   "petWorkbench.followTask": "Follow",
@@ -611,6 +631,17 @@ const legacyEnglish: Record<string, string> = {
   "宠物模型（聊天 + 自主行为）": "Pet model (chat + autonomy)",
   "立即触发一次自主行为": "Trigger autonomy now",
   "已请求一次自主行为，等待 Task 执行…": "Autonomy requested; waiting for the Task",
+  "只清理本机宠物 Workspace、Task、日记/工作记录/身份设定、审批与活动记录、聊天记录，并停用本机宠物。宠物项目、同步镜像和其他设备的宠物不受影响；模型、形象和权限设置会保留。": "Only clear this device's pet Workspace, pet Task, diary/worklog/identity, approvals and activity, and chat history, then disable this device's pet. Pet projects, sync mirrors, and pets on other devices are unaffected; models, appearance, and permissions are kept.",
+  "恢复出厂设置": "Factory reset",
+  "恢复出厂设置…": "Factory reset…",
+  "确认恢复出厂设置": "Confirm factory reset",
+  "此操作不可恢复，将清理本机：": "This cannot be undone. It clears this device:",
+  "宠物 Workspace 和宠物 Task": "Pet Workspace and pet Tasks",
+  "日记、工作记录、身份/原则与开放闭环": "Diary, worklog, identity/principles, and open loops",
+  "审批、活动、任务关注和宠物聊天记录": "Approvals, activity, task follows, and pet chat history",
+  "宠物项目、同步镜像和其他设备的宠物会保留；模型、形象和权限设置也会保留。本机宠物会被停用，重新启用后才会创建新的宠物 Task。": "Pet projects, sync mirrors, and pets on other devices remain; models, appearance, and permissions are kept. This device's pet is disabled and creates a new pet Task only after you re-enable it.",
+  "请输入“重置宠物”以确认": "Type the confirmation phrase to continue",
+  "确认重置": "Confirm reset",
   "正在加载模型…": "Loading models…",
   "正在读取…": "Loading…",
   "还没有可用于助手的 Provider 模型。请先到模型页配置一个 chat 或 anthropic 模型，我才能回答问题。": "No provider model is available. Configure a chat or Anthropic model on the Models page first.",
@@ -1271,6 +1302,17 @@ const legacyEnglish: Record<string, string> = {
   "保存类型": "Save type",
   "当前项目未绑定知识库。": "This project has no bound knowledge library.",
   "Skill 采用 AHA 托管包：SKILL.md 是入口，scripts / assets / agents 与技能一起按 Task 选择物化。": "Skills use AHA-managed packages: SKILL.md is the entry point; scripts / assets / agents are materialized by Task selection.",
+  "全局": "Global",
+  "外部绑定": "Externally bound",
+  "全部作用域": "All scopes",
+  "全部状态": "All statuses",
+  "全部项目": "All projects",
+  "Skill 作用域": "Skill scope",
+  "Skill 项目": "Skill project",
+  "Skill 状态": "Skill status",
+  "查看 Skill": "View Skill",
+  "新建任务时自动启用": "Enable automatically for new Tasks",
+  "自动启用默认勾选、创建任务时可取消；全局 Skill 对所有新任务生效（含宠物和渠道系统任务），项目 Skill 仅对该项目生效。外部绑定 Skill 不自动启用。": "Enabled by default; can be unchecked when creating a Task. Global Skills apply to all new Tasks (including pet and channel system Tasks); project Skills apply only to that project. Externally bound Skills are not auto-enabled.",
   "新建 Skill": "New Skill",
   "未填写描述": "No description",
   "还没有 Skill。": "No Skills yet.",
@@ -1409,8 +1451,12 @@ const uiAttributeSkipSelector = [
 ].join(",");
 
 function translatePatternText(text: string): string | null {
-  let match = /^已保存 (\d+) \/ (\d+)$/.exec(text);
+  let match = /^共 (\d+) 个$/.exec(text);
+  if (match) return `${match[1]} ${match[1] === "1" ? "item" : "items"}`;
+  match = /^已保存 (\d+) \/ (\d+)$/.exec(text);
   if (match) return `Saved ${match[1]} / ${match[2]}`;
+  match = /^(.+?) · v(\d+) · (active|draft|archived)$/.exec(text);
+  if (match) return `${legacyEnglish[match[1].trim()] ?? match[1]} · v${match[2]} · ${match[3]}`;
   match = /^(.*?) · (.*?) · 可用$/.exec(text);
   if (match) return `${match[1]} · ${match[2]} · Available`;
   match = /^HTTP 预览 · (.*?) · 帧周期 (.*)$/.exec(text);

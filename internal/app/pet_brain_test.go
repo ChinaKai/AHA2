@@ -11,7 +11,7 @@ import (
 
 func TestPetAutonomousMessageFollowsOwnerLanguage(t *testing.T) {
 	message := petAutonomousMessage(true, 20, "后台（服务端调度）", PetLayout{})
-	for _, want := range []string{"[Autonomous behavior]", "20 minutes since the last autonomous review", "background (server scheduler)", "Page layout unavailable", "work wake-up", "core/agenda.md", "aha_pet_work_state", "owner_decision", "pet_request_approval", "NOOP"} {
+	for _, want := range []string{"[Autonomous behavior]", "20 minutes since the last autonomous review", "background (server scheduler)", "Page layout unavailable", "work wake-up", "core/agenda.md", "aha_pet_work_state", "inspection", "open_tasks", "owner_decision", "pet_request_approval", "NOOP"} {
 		if !strings.Contains(message, want) {
 			t.Fatalf("English autonomous message missing %q: %s", want, message)
 		}
@@ -22,7 +22,7 @@ func TestPetAutonomousMessageFollowsOwnerLanguage(t *testing.T) {
 		}
 	}
 	chinese := petAutonomousMessage(false, 20, "后台（服务端调度）", PetLayout{})
-	for _, want := range []string{"[自主行为] 距上次自主复盘约 20 分钟", "工作唤醒", "core/agenda.md", "aha_pet_work_state", "owner_decision", "pet_request_approval", "NOOP"} {
+	for _, want := range []string{"[自主行为] 距上次自主复盘约 20 分钟", "工作唤醒", "core/agenda.md", "aha_pet_work_state", "inspection", "open_tasks", "owner_decision", "pet_request_approval", "巡检摘要", "NOOP"} {
 		if !strings.Contains(chinese, want) {
 			t.Fatalf("Chinese autonomous message missing %q: %s", want, chinese)
 		}

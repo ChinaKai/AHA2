@@ -47,13 +47,15 @@ var (
 
 - 只记录尚未真正闭环的事项；已关闭的立即删除，需要留痕就写入当天 worklog。
 - 每项写：状态（open/waiting/blocked）| 事项 | 下一步 | 关闭条件
-- 每次最终回复只列出新增、变化或需要主人决定的未闭环事项；没有变化时回复 NOOP。
+- 每次最终回复附一行巡检摘要；只列新增、变化或需要主人决定的未闭环事项，没有变化时回复 NOOP。
 `
 	petCoreAgendaSeed = `# 自主议程
 
 - 只记录宠物自己可以推进、不需要主人立即决策的事项。
 - 每项写：状态（next/doing/waiting）| 目标 | 下一步 | 验收标准 | 是否需要主人决策
 - 每次唤醒最多推进一项；真正闭环后才删除，留痕写入当天 worklog。
+- 先关闭最早的未闭环宠物任务；waiting/blocked 需决定就提交 owner_decision，failed 先重试一次再升级。
+- 最终回复附一行巡检摘要；只写新增、变化、未闭环，无变化回 NOOP。
 - 完成但留下主人决策的事项改为 waiting，不能删除；同一决策只创建一次。
 - 需要主人决定时用 pet_request_approval 创建 kind=owner_decision，并在本议程或 loops 写 waiting 项；不能只写在最终回复里。
 - 没有可推进项时，从最近 worklog/loops 选一个低风险、可验证的 AHA 使用体验改进并启动 Task；不要用 NOOP 逃避。
