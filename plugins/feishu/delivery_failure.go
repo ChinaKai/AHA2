@@ -125,8 +125,12 @@ func classifyDeliveryError(err error) deliverySendFailure {
 	if errors.As(err, &mediaErr) {
 		// Media transfer/upload failures were historically retried until the
 		// attempt limit; keep that behavior instead of dead-lettering on the
-		// first transient failure.
-		return deliverySendFailure{code: mediaErr.code, retryable: true}
+		// first transient failure. Preserve ambiguity here: a connection drop
+		// during the send stage may already have been accepted by Feishu, so it
+		// must use the bounded uncertain-outcome window rather than claiming a
+		// confirmed failure.
+		ambiguous := mediaErr.cause != nil && isAmbiguous(mediaErr.cause)
+		return deliverySendFailure{code: mediaErr.code, retryable: true, ambiguous: ambiguous}
 	}
 	if isAmbiguous(err) {
 		return deliverySendFailure{code: "feishu_send_ambiguous", retryable: true, ambiguous: true}

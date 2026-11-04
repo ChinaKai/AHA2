@@ -143,6 +143,67 @@ func TestDeliveryRetryDecision(t *testing.T) {
 	}
 }
 
+func TestMediaSendDisconnectUsesAmbiguousOutcomeWindow(t *testing.T) {
+	t.Parallel()
+	nacks := []map[string]any{}
+	runtimeServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch {
+		case request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/deliveries/delivery/media"):
+			writer.Write([]byte(`{"ok":true}`))
+		case request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/deliveries/delivery/attachment"):
+			writer.Header().Set("Content-Type", "image/png")
+			writer.Write([]byte("\x89PNG\r\n\x1a\nfixture"))
+		case request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/nack"):
+			var payload map[string]any
+			if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+				t.Error(err)
+			}
+			nacks = append(nacks, payload)
+			writer.Write([]byte(`{"ok":true}`))
+		default:
+			t.Errorf("unexpected runtime request %s %s", request.Method, request.URL.Path)
+			writer.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer runtimeServer.Close()
+	client := lark.NewClient("media-disconnect", "test-secret", lark.WithHttpClient(mockHTTPClient{do: func(request *http.Request) (*http.Response, error) {
+		switch {
+		case strings.Contains(request.URL.Path, "/auth/"):
+			return mediaTestResponse(200, `{"code":0,"tenant_access_token":"token","expire":3600}`), nil
+		case strings.HasSuffix(request.URL.Path, "/images"):
+			return mediaTestResponse(200, `{"code":0,"data":{"image_key":"img-key"}}`), nil
+		case strings.HasSuffix(request.URL.Path, "/messages"):
+			return nil, errors.New("connection reset by peer")
+		default:
+			t.Errorf("unexpected provider request %s", request.URL.Path)
+			return mediaTestResponse(404, `{"code":404}`), nil
+		}
+	}}))
+	runtime := &runtimeClient{baseURL: runtimeServer.URL, http: runtimeServer.Client()}
+	item := delivery{
+		ID: "delivery", LeaseID: "lease", Attempts: 1, IdempotencyKey: "media-disconnect-key",
+		FirstAttemptAt:  time.Now().Add(-time.Minute),
+		Target:          map[string]string{"chat_id": "oc_chat"},
+		SemanticPayload: map[string]any{"kind": "attachment", "name": "a.png"},
+	}
+	runtime.deliver(context.Background(), client, item)
+	if len(nacks) != 1 {
+		t.Fatalf("nacks=%#v", nacks)
+	}
+	if nacks[0]["outcome_certainty"] != deliveryCertaintyUnknown || nacks[0]["permanent"] != false || nacks[0]["error_code"] != "media_send_failed" {
+		t.Fatalf("fresh disconnect nack=%#v", nacks[0])
+	}
+
+	item.FirstAttemptAt = time.Now().Add(-deliveryAmbiguousWindow - time.Minute)
+	runtime.deliver(context.Background(), client, item)
+	if len(nacks) != 2 {
+		t.Fatalf("nacks=%#v", nacks)
+	}
+	if nacks[1]["outcome_certainty"] != deliveryCertaintyUnknown || nacks[1]["permanent"] != true || nacks[1]["error_code"] != "media_send_failed" {
+		t.Fatalf("expired uncertain window nack=%#v", nacks[1])
+	}
+}
+
 func TestDeliveryNackRecordsStableCodeAndProviderRequestID(t *testing.T) {
 	t.Parallel()
 	nack := map[string]any{}

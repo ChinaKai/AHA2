@@ -140,6 +140,71 @@ func TestChannelDeliveryClaimUnblocksAfterDeadLetter(t *testing.T) {
 	}
 }
 
+func TestChannelDeliveryCertaintyMigrationNormalizesConfirmed(t *testing.T) {
+	ctx := context.Background()
+	database, err := Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	instance, conversation := createDeliveryTestInstance(t, database)
+	now := time.Now().UTC()
+	converted := enqueueTestDelivery(t, database, instance, conversation, 1, now)
+	confirmedFailure := enqueueTestDelivery(t, database, instance, conversation, 2, now)
+	unknown := enqueueTestDelivery(t, database, instance, conversation, 3, now)
+	pending := enqueueTestDelivery(t, database, instance, conversation, 4, now)
+	for _, update := range []struct {
+		id, state, certainty string
+	}{
+		{converted.ID, "delivered", "confirmed"},
+		{confirmedFailure.ID, "delivered", "confirmed_failure"},
+		{unknown.ID, "delivered", "unknown"},
+		{pending.ID, "pending", "confirmed"},
+	} {
+		if _, err := database.db.ExecContext(ctx, `UPDATE channel_delivery_outbox SET state=?,outcome_certainty=? WHERE id=?`, update.state, update.certainty, update.id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := database.db.ExecContext(ctx, `INSERT INTO channel_delivery_attempts(id,delivery_id,attempt_no,lease_id,outcome,error_code,retry_after_ms,provider_request_id,started_at,finished_at) VALUES(?,?,1,'lease','delivered','',0,'',?, '')`,
+		"attempt-converted", converted.ID, timeString(now)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.db.ExecContext(ctx, `INSERT INTO channel_delivery_attempts(id,delivery_id,attempt_no,lease_id,outcome,error_code,retry_after_ms,provider_request_id,started_at,finished_at) VALUES(?,?,1,'lease','pending','',0,'',?, '')`,
+		"attempt-pending", pending.ID, timeString(now)); err != nil {
+		t.Fatal(err)
+	}
+
+	// Re-run the migration exactly as an existing pre-v115 database would.
+	if _, err := database.db.ExecContext(ctx, `DELETE FROM schema_migrations WHERE version=115`); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, scenario := range []struct {
+		id, state, certainty string
+	}{
+		{converted.ID, "delivered", "provider_accepted"},
+		{confirmedFailure.ID, "delivered", "confirmed_failure"},
+		{unknown.ID, "delivered", "unknown"},
+		{pending.ID, "pending", "confirmed"},
+	} {
+		item, err := database.ChannelDelivery(ctx, scenario.id)
+		if err != nil || item.State != scenario.state || item.OutcomeCertainty != scenario.certainty {
+			t.Fatalf("delivery %s state=%q certainty=%q err=%v", scenario.id, item.State, item.OutcomeCertainty, err)
+		}
+	}
+	convertedAttempts, err := database.ChannelDeliveryAttempts(ctx, converted.ID)
+	if err != nil || len(convertedAttempts) != 1 || convertedAttempts[0].Outcome != "provider_accepted" {
+		t.Fatalf("converted attempt=%#v err=%v", convertedAttempts, err)
+	}
+	pendingAttempts, err := database.ChannelDeliveryAttempts(ctx, pending.ID)
+	if err != nil || len(pendingAttempts) != 1 || pendingAttempts[0].Outcome != "pending" {
+		t.Fatalf("pending attempt=%#v err=%v", pendingAttempts, err)
+	}
+}
+
 func TestChannelDeliveryRetryBackoffAndLeaseRecovery(t *testing.T) {
 	ctx := context.Background()
 	database, err := Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
