@@ -469,9 +469,15 @@ func TestRunProcessReleasesPipeReadEnds(t *testing.T) {
 	if _, ok := countOpenProcessHandles(); !ok {
 		t.Skip("process handle counting is not available on this platform")
 	}
-	// Warm up lazy runtime and library initialization before the baseline.
-	if _, err := executeProcessHelper(t, "quick", 0, nil, nil); err != nil {
-		t.Fatalf("warm-up run: %v", err)
+	// A fresh process lazily allocates a handful of runtime and loader
+	// handles during its first commands. Warm those up so the baseline is
+	// stable; on Windows a single warm-up still left a one-time delta of 6-8
+	// handles that was not a per-run leak.
+	const warmups = 10
+	for index := 0; index < warmups; index++ {
+		if _, err := executeProcessHelper(t, "quick", 0, nil, nil); err != nil {
+			t.Fatalf("warm-up %d: run helper: %v", index, err)
+		}
 	}
 	previous := debug.SetGCPercent(-1)
 	defer debug.SetGCPercent(previous)
