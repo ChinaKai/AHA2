@@ -493,6 +493,13 @@ func finishProcessDrainers(grace time.Duration, drainers ...*processDrainer) (tr
 	return truncated
 }
 
+// outputBuffer keeps only the last limit bytes written to it. limit <= 0
+// disables the cap.
+//
+// bytes.Buffer is embedded for its read-side methods, but every write method it
+// promotes is overridden below: io.WriteString and io.Copy select WriteString
+// and ReadFrom through interfaces before falling back to Write, so an inherited
+// method would append past the cap.
 type outputBuffer struct {
 	bytes.Buffer
 	limit int
@@ -501,24 +508,71 @@ type outputBuffer struct {
 func newOutputBuffer(limit int) *outputBuffer { return &outputBuffer{limit: limit} }
 
 func (buffer *outputBuffer) Write(value []byte) (int, error) {
-	written := len(value)
+	consumed := len(value)
+	skip := buffer.retainTail(consumed)
+	_, err := buffer.Buffer.Write(value[skip:])
+	return consumed, err
+}
+
+func (buffer *outputBuffer) WriteString(value string) (int, error) {
+	consumed := len(value)
+	skip := buffer.retainTail(consumed)
+	_, err := buffer.Buffer.WriteString(value[skip:])
+	return consumed, err
+}
+
+func (buffer *outputBuffer) WriteByte(value byte) error {
+	buffer.retainTail(1)
+	return buffer.Buffer.WriteByte(value)
+}
+
+func (buffer *outputBuffer) WriteRune(value rune) (int, error) {
+	return buffer.Write([]byte(string(value)))
+}
+
+// ReadFrom drains reader completely while enforcing the same cap, so
+// io.Copy(destination, reader) cannot bypass OutputLimit.
+func (buffer *outputBuffer) ReadFrom(reader io.Reader) (int64, error) {
+	var consumed int64
+	chunk := make([]byte, 32*1024)
+	for {
+		read, readErr := reader.Read(chunk)
+		if read > 0 {
+			written, writeErr := buffer.Write(chunk[:read])
+			consumed += int64(written)
+			if writeErr != nil {
+				return consumed, writeErr
+			}
+		}
+		if readErr == io.EOF {
+			return consumed, nil
+		}
+		if readErr != nil {
+			return consumed, readErr
+		}
+	}
+}
+
+// retainTail makes room for size more bytes and reports how many leading bytes
+// of the incoming value to skip, so only the last limit bytes survive.
+func (buffer *outputBuffer) retainTail(size int) int {
 	if buffer.limit <= 0 {
-		_, err := buffer.Buffer.Write(value)
-		return written, err
+		return 0
 	}
-	if len(value) >= buffer.limit {
+	if size >= buffer.limit {
 		buffer.Buffer.Reset()
-		_, err := buffer.Buffer.Write(value[len(value)-buffer.limit:])
-		return written, err
+		return size - buffer.limit
 	}
-	overflow := buffer.Len() + len(value) - buffer.limit
-	if overflow > 0 {
-		current := append([]byte(nil), buffer.Buffer.Bytes()[overflow:]...)
-		buffer.Buffer.Reset()
-		_, _ = buffer.Buffer.Write(current)
+	if overflow := buffer.Len() + size - buffer.limit; overflow > 0 {
+		buffer.discardPrefix(overflow)
 	}
-	_, err := buffer.Buffer.Write(value)
-	return written, err
+	return 0
+}
+
+func (buffer *outputBuffer) discardPrefix(count int) {
+	remaining := append([]byte(nil), buffer.Buffer.Bytes()[count:]...)
+	buffer.Buffer.Reset()
+	_, _ = buffer.Buffer.Write(remaining)
 }
 
 func mergeEnvironment(base []string, overrides map[string]string) []string {

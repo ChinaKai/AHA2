@@ -41,6 +41,10 @@ const (
 
 	processFloodLines = 700
 
+	// Multi-line stdout far beyond the OutputLimit used by the end-to-end cap
+	// test, so the retained tail cannot fit every line.
+	processOutputLimitLines = 240
+
 	// The burst child must finish writing stdout while the parent's stdout
 	// scanner is stalled in the line handler. Keep stdout below the smallest
 	// platform pipe buffer (4 KiB on Windows) so those writes never block.
@@ -69,6 +73,8 @@ func TestRunProcessHelperProcess(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 		_, _ = io.WriteString(os.Stdout, processBurstOutput("stdout", processBurstStdoutLines))
 		_, _ = io.WriteString(os.Stderr, processBurstOutput("stderr", processBurstStderrLines))
+	case "output-limit":
+		_, _ = io.WriteString(os.Stdout, processOutputLimitOutput())
 	case "flood":
 		var wait sync.WaitGroup
 		wait.Add(2)
@@ -149,6 +155,15 @@ func processFloodOutput(prefix string) string {
 	line := strings.Repeat("0123456789abcdef", 48)
 	for index := 0; index < processFloodLines; index++ {
 		fmt.Fprintf(&builder, "%s-%04d-%s\n", prefix, index, line)
+	}
+	return builder.String()
+}
+
+func processOutputLimitOutput() string {
+	var builder strings.Builder
+	line := strings.Repeat("y", 40)
+	for index := 0; index < processOutputLimitLines; index++ {
+		fmt.Fprintf(&builder, "limit-%04d-%s\n", index, line)
 	}
 	return builder.String()
 }
