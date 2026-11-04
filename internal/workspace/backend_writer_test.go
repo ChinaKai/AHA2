@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -120,33 +119,19 @@ func TestCodexSessionHomeDirFollowsAccountLayout(t *testing.T) {
 }
 
 // startFakeResumeWriter launches a process whose command line carries the same
-// "<flag> <id>" shape AHA uses for a backend, so the matcher is exercised
-// against the real argument form rather than an assumed one.
-func startFakeResumeWriter(t *testing.T, flag, sessionID string) *exec.Cmd {
+// "--resume <id>" shape AHA uses for Claude, so the matcher is exercised against
+// the real argument form rather than an assumed one.
+func startFakeResumeWriter(t *testing.T, sessionID string) *exec.Cmd {
 	t.Helper()
-	var command *exec.Cmd
-	if runtime.GOOS == "windows" {
-		// The Windows lookup reads command lines only of the backend image names
-		// it knows, so a POSIX shell fixture would be invisible there. node is one
-		// of those names, and arguments after "--" still reach its command line.
-		if _, err := exec.LookPath("node"); err != nil {
-			t.Skip("node is unavailable")
-		}
-		command = exec.Command("node", "-e", "setTimeout(() => {}, 60000)", "--", flag, sessionID)
-	} else {
-		if _, err := exec.LookPath("sleep"); err != nil {
-			t.Skip("sleep is unavailable")
-		}
-		// A script file carries the flag form in its command line while staying
-		// alive. Running a file (rather than `sh -c`) keeps the extra arguments:
-		// a single `-c` command is collapsed into an exec that discards them, and
-		// sleep itself would reject the unknown flag.
-		script := filepath.Join(t.TempDir(), "fake-backend.sh")
-		if err := os.WriteFile(script, []byte("#!/bin/sh\nsleep 60\n"), 0o700); err != nil {
-			t.Fatalf("write fake backend script: %v", err)
-		}
-		command = exec.Command("sh", script, flag, sessionID)
+	// A script file carries the flag form in its command line while staying
+	// alive. Running a file (rather than `sh -c`) keeps the extra arguments:
+	// a single `-c` command is collapsed into an exec that discards them, and
+	// sleep itself would reject the unknown flag.
+	script := filepath.Join(t.TempDir(), "fake-backend.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nsleep 60\n"), 0o700); err != nil {
+		t.Fatalf("write fake backend script: %v", err)
 	}
+	command := exec.Command("sh", script, "--resume", sessionID)
 	if err := command.Start(); err != nil {
 		t.Fatalf("start fake resume writer: %v", err)
 	}
@@ -159,9 +144,12 @@ func startFakeResumeWriter(t *testing.T, flag, sessionID string) *exec.Cmd {
 
 func TestFindWriterPIDsMatchesResumeFlagForm(t *testing.T) {
 	t.Parallel()
+	if _, err := exec.LookPath("sleep"); err != nil {
+		t.Skip("sleep is unavailable")
+	}
 	runner := LocalRunner{}
 	wanted := "b81e3c4b-3d99-4963-ad4b-7755e831bcd4"
-	writer := startFakeResumeWriter(t, "--resume", wanted)
+	writer := startFakeResumeWriter(t, wanted)
 	time.Sleep(300 * time.Millisecond)
 
 	// The backend passes the flag as "--resume <id>"; a pattern expecting a
@@ -186,9 +174,23 @@ func TestFindWriterPIDsMatchesResumeFlagForm(t *testing.T) {
 
 func TestFindWriterPIDsMatchesDSHSessionFlagForm(t *testing.T) {
 	t.Parallel()
+	if _, err := exec.LookPath("sleep"); err != nil {
+		t.Skip("sleep is unavailable")
+	}
 	runner := LocalRunner{}
 	wanted := "session-7e1ed1db-e770-4331-aae6-fd9dc89e4d6b"
-	writer := startFakeResumeWriter(t, "--session-id", wanted)
+	script := filepath.Join(t.TempDir(), "fake-dsh.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nsleep 60\n"), 0o700); err != nil {
+		t.Fatalf("write fake DSH script: %v", err)
+	}
+	writer := exec.Command("sh", script, "--session-id", wanted)
+	if err := writer.Start(); err != nil {
+		t.Fatalf("start fake DSH writer: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = writer.Process.Kill()
+		_, _ = writer.Process.Wait()
+	})
 	time.Sleep(300 * time.Millisecond)
 
 	pids, err := FindWriterPIDs(context.Background(), runner, WriterQuery{
@@ -211,26 +213,16 @@ func TestFindWriterPIDsMatchesDSHSessionFlagForm(t *testing.T) {
 
 func TestFindWriterPIDsCombinesEnvAndResumeQueries(t *testing.T) {
 	t.Parallel()
+	if _, err := exec.LookPath("sleep"); err != nil {
+		t.Skip("sleep is unavailable")
+	}
 	runner := LocalRunner{}
 	home := "/tmp/aha2-writer-combined-home"
-	var writer *exec.Cmd
-	if runtime.GOOS == "windows" {
-		// A Windows target cannot read another process's environment, so a
-		// combined query resolves its resume half there. Use a backend-shaped
-		// process that carries it; the env branch itself is covered below on the
-		// platforms where the lookup can see it.
-		writer = startFakeResumeWriter(t, "resume", "unused-session")
-	} else {
-		if _, err := exec.LookPath("sleep"); err != nil {
-			t.Skip("sleep is unavailable")
-		}
-		writer = startFakeWriter(t, home)
-	}
+	writer := startFakeWriter(t, home)
 	time.Sleep(300 * time.Millisecond)
 
-	// A query carrying both must still find a match: on POSIX the env branch must
-	// not skip the resume branch, and on Windows the resume half alone identifies
-	// the writer.
+	// A query carrying both must still find the env match: the env branch runs
+	// first and a miss there must not skip the resume branch or vice versa.
 	pids, err := FindWriterPIDs(context.Background(), runner, WriterQuery{
 		EnvName: "CODEX_HOME", EnvValue: home, ResumeSessionID: "unused-session",
 	})
