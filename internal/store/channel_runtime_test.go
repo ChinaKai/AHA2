@@ -509,3 +509,125 @@ func TestConversationPageReadsLiveChannelDeliveryState(t *testing.T) {
 		t.Fatalf("dead letter card state=%q", state)
 	}
 }
+
+func TestChannelRouteCardFollowsLiveDeliveryAndReplayChain(t *testing.T) {
+	ctx := context.Background()
+	database, err := Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	instance, conversation := createDeliveryTestInstance(t, database)
+	now := time.Now().UTC()
+	// Use a private assistant endpoint so an ordinary agent_reply is mirrored
+	// through the real channel_events path instead of the group task-route one.
+	if _, err := database.db.ExecContext(ctx,
+		`UPDATE channel_endpoints SET kind=? WHERE id=(SELECT endpoint_id FROM channel_conversations WHERE id=?)`,
+		domain.ChannelEndpointAssistantDM, conversation.ID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.EnsureConversationHostSubscription(ctx, instance.ID, conversation.ID, conversation.HostTaskID, now); err != nil {
+		t.Fatal(err)
+	}
+	source := domain.ChannelSourceEvent{
+		ID: domain.NewID("source"), SourceKey: "route-card-live-delivery", TaskID: conversation.HostTaskID,
+		EventClass: "message", EventType: "agent_reply",
+		SemanticPayload: map[string]any{"task_id": conversation.HostTaskID, "text": "route card body"},
+		OccurredAt:      now,
+	}
+	if err := database.AppendChannelSourceAndProject(ctx, source, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	var cardID, payloadJSON string
+	if err := database.db.QueryRowContext(ctx, `
+		SELECT id,payload_json FROM conversation_items
+		WHERE task_id=? AND kind='agent_channel_route'
+		ORDER BY sequence DESC LIMIT 1`, conversation.HostTaskID,
+	).Scan(&cardID, &payloadJSON); err != nil {
+		t.Fatal(err)
+	}
+	payload := decodeJSON(payloadJSON, map[string]any{})
+	deliveryID := stringValue(payload["delivery_id"])
+	if deliveryID == "" {
+		t.Fatalf("route card has no delivery_id: %#v", payload)
+	}
+	readState := func() string {
+		t.Helper()
+		page, err := database.ConversationPage(ctx, conversation.HostTaskID, 0, 0, 50, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, item := range page.Items {
+			if item.ID == cardID {
+				return stringValue(item.Payload["delivery_state"])
+			}
+		}
+		t.Fatalf("route card %s missing from conversation page", cardID)
+		return ""
+	}
+	if state := readState(); state != "pending" {
+		t.Fatalf("card state before send=%q", state)
+	}
+
+	claim := func(at time.Time) domain.ChannelDelivery {
+		t.Helper()
+		claimed, err := database.ClaimChannelDeliveries(ctx, instance.ID, 10, at, 30*time.Second)
+		if err != nil || len(claimed) != 1 {
+			t.Fatalf("claimed=%#v err=%v", claimed, err)
+		}
+		return claimed[0]
+	}
+	claimed := claim(now)
+	if claimed.ID != deliveryID {
+		t.Fatalf("claimed %s, want card delivery %s", claimed.ID, deliveryID)
+	}
+	if err := database.NackChannelDelivery(ctx, instance.ID, deliveryID, claimed.LeaseID,
+		"feishu_target_unavailable", "confirmed_failure", 0, true, "req-dead", now); err != nil {
+		t.Fatal(err)
+	}
+	if state := readState(); state != "dead_letter" {
+		t.Fatalf("card state after dead letter=%q", state)
+	}
+
+	// Replaying keeps the original row in state='replayed' and appends a new
+	// pending generation; the card must follow replay_of_id.
+	replay, err := database.ReplayChannelDelivery(ctx, deliveryID, instance.ID, now.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state := readState(); state != "pending" {
+		t.Fatalf("card state after replay=%q", state)
+	}
+	claimed = claim(now.Add(2 * time.Second))
+	if claimed.ID != replay.ID {
+		t.Fatalf("claimed replay %s, want %s", claimed.ID, replay.ID)
+	}
+	if err := database.NackChannelDelivery(ctx, instance.ID, replay.ID, claimed.LeaseID,
+		"feishu_target_unavailable", "confirmed_failure", 0, true, "req-dead-2", now.Add(2*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if state := readState(); state != "dead_letter" {
+		t.Fatalf("card state after replay dead letter=%q", state)
+	}
+
+	secondReplay, err := database.ReplayChannelDelivery(ctx, replay.ID, instance.ID, now.Add(3*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state := readState(); state != "pending" {
+		t.Fatalf("card state after second replay=%q", state)
+	}
+	claimed = claim(now.Add(4 * time.Second))
+	if claimed.ID != secondReplay.ID {
+		t.Fatalf("claimed second replay %s, want %s", claimed.ID, secondReplay.ID)
+	}
+	if err := database.AckChannelDelivery(ctx, instance.ID, secondReplay.ID, claimed.LeaseID,
+		"om_second_replay", "req-second-replay", now.Add(4*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if state := readState(); state != "provider_accepted" {
+		t.Fatalf("card state after replay delivery=%q", state)
+	}
+}

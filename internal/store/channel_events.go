@@ -99,6 +99,7 @@ func (s *Store) AppendChannelSourceAndProject(ctx context.Context, source domain
 		isBotDialogue := false
 		replyDecision := ""
 		botTurnCount := 0
+		routeCardID := ""
 		if source.EventType == "agent_reply" {
 			if target.endpointKind == domain.ChannelEndpointGroupDigitalHuman {
 				state, stateErr := channelGroupReplyStateTx(ctx, tx, source.TaskID, source.RoundID, source.TurnID, target.conversationID)
@@ -114,6 +115,7 @@ func (s *Store) AppendChannelSourceAndProject(ctx context.Context, source domain
 					suppressionReason = "bot_dialogue_ended"
 				}
 			}
+			routeCardID = stableStoreID("conversation_channel_route", source.ID, target.subscriptionID)
 			if err := insertChannelRouteCardTx(ctx, tx, source, target, deliveryState, suppressionReason, isBotDialogue, replyDecision, botTurnCount); err != nil {
 				return err
 			}
@@ -124,6 +126,7 @@ func (s *Store) AppendChannelSourceAndProject(ctx context.Context, source domain
 			}
 			continue
 		}
+		firstDeliveryID := ""
 		for partIndex, part := range channelDeliveryParts(source.SemanticPayload) {
 			partCoalesceKey := coalesceKey
 			idempotencyKey := "channel-delivery:" + source.ID + ":" + target.subscriptionID
@@ -131,6 +134,7 @@ func (s *Store) AppendChannelSourceAndProject(ctx context.Context, source domain
 				partCoalesceKey = ""
 				idempotencyKey = "channel-attachment:" + source.TaskID + ":" + fmt.Sprint(part["attachment_id"]) + ":" + target.subscriptionID
 			}
+			partDeliveryID := ""
 			if partCoalesceKey != "" {
 				var existingID string
 				err := tx.QueryRowContext(ctx, `SELECT id FROM channel_delivery_outbox WHERE conversation_id=? AND coalesce_key=? AND state='pending' ORDER BY stream_sequence DESC LIMIT 1`, target.conversationID, partCoalesceKey).Scan(&existingID)
@@ -138,26 +142,40 @@ func (s *Store) AppendChannelSourceAndProject(ctx context.Context, source domain
 					if _, err := tx.ExecContext(ctx, `UPDATE channel_delivery_outbox SET source_event_sequence=?,semantic_payload_json=json_patch(semantic_payload_json,?),updated_at=? WHERE id=?`, source.Sequence, encodeJSON(part), timeString(source.OccurredAt), existingID); err != nil {
 						return err
 					}
-					if _, err := tx.ExecContext(ctx, `UPDATE channel_subscriptions SET source_cursor=?,updated_at=? WHERE id=?`, source.Sequence, timeString(source.OccurredAt), target.subscriptionID); err != nil {
-						return err
-					}
-					continue
-				}
-				if err != nil && err != sql.ErrNoRows {
+					partDeliveryID = existingID
+				} else if err != sql.ErrNoRows {
 					return err
 				}
 			}
-			var streamSequence int64
-			if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(stream_sequence),0)+1 FROM channel_delivery_outbox WHERE conversation_id=?`, target.conversationID).Scan(&streamSequence); err != nil {
-				return err
+			if partDeliveryID == "" {
+				var streamSequence int64
+				if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(stream_sequence),0)+1 FROM channel_delivery_outbox WHERE conversation_id=?`, target.conversationID).Scan(&streamSequence); err != nil {
+					return err
+				}
+				deliveryID := domain.NewID("channel_delivery")
+				if _, err := tx.ExecContext(ctx, `INSERT INTO channel_delivery_outbox(id,instance_id,conversation_id,subscription_id,source_event_sequence,stream_sequence,replay_generation,replay_of_id,idempotency_key,coalesce_key,payload_version,semantic_payload_json,state,attempts,first_attempt_at,available_at,lease_id,lease_until,provider_message_id,last_error_code,outcome_certainty,created_at,updated_at,delivered_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(idempotency_key) DO NOTHING`,
+					deliveryID, target.instanceID, target.conversationID, target.subscriptionID, source.Sequence, streamSequence, 0, nil,
+					idempotencyKey, partCoalesceKey, 1, encodeJSON(part), "pending", 0, "", timeString(source.OccurredAt), "", "", "", "", "", timeString(source.OccurredAt), timeString(source.OccurredAt), ""); err != nil {
+					return err
+				}
+				// On an idempotency conflict DO NOTHING keeps the earlier row; read
+				// the stored id so the route card follows the row that really sends.
+				if err := tx.QueryRowContext(ctx, `SELECT id FROM channel_delivery_outbox WHERE idempotency_key=?`, idempotencyKey).Scan(&partDeliveryID); err != nil {
+					return err
+				}
 			}
-			deliveryID := domain.NewID("channel_delivery")
-			if _, err := tx.ExecContext(ctx, `INSERT INTO channel_delivery_outbox(id,instance_id,conversation_id,subscription_id,source_event_sequence,stream_sequence,replay_generation,replay_of_id,idempotency_key,coalesce_key,payload_version,semantic_payload_json,state,attempts,first_attempt_at,available_at,lease_id,lease_until,provider_message_id,last_error_code,outcome_certainty,created_at,updated_at,delivered_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(idempotency_key) DO NOTHING`,
-				deliveryID, target.instanceID, target.conversationID, target.subscriptionID, source.Sequence, streamSequence, 0, nil,
-				idempotencyKey, partCoalesceKey, 1, encodeJSON(part), "pending", 0, "", timeString(source.OccurredAt), "", "", "", "", "", timeString(source.OccurredAt), timeString(source.OccurredAt), ""); err != nil {
-				return err
+			if partIndex == 0 {
+				firstDeliveryID = partDeliveryID
 			}
 			if _, err := tx.ExecContext(ctx, `UPDATE channel_subscriptions SET source_cursor=?,updated_at=? WHERE id=?`, source.Sequence, timeString(source.OccurredAt), target.subscriptionID); err != nil {
+				return err
+			}
+		}
+		// The route card is created before the outbox row exists. Backfill the
+		// text delivery id once it is known so the card can render the live
+		// delivery_state instead of the creation-time pending snapshot.
+		if routeCardID != "" && firstDeliveryID != "" {
+			if _, err := tx.ExecContext(ctx, `UPDATE conversation_items SET payload_json=json_set(payload_json,'$.delivery_id',?) WHERE id=?`, firstDeliveryID, routeCardID); err != nil {
 				return err
 			}
 		}

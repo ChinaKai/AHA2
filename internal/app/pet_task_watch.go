@@ -199,7 +199,16 @@ func (s *Service) PetWatchTask(ctx context.Context, taskID string) (domain.PetTa
 	if err := s.store.UpsertPetTaskWatch(ctx, task.ID, "manual", now); err != nil {
 		return domain.PetTaskWatch{}, err
 	}
-	return s.store.PetTaskWatch(ctx, task.ID)
+	watch, err := s.store.PetTaskWatch(ctx, task.ID)
+	if err != nil {
+		return domain.PetTaskWatch{}, err
+	}
+	// An ignore may have landed between the pre-check and the upsert. The
+	// conditional upsert preserves it, so report the same error as before.
+	if watch.Ignored {
+		return domain.PetTaskWatch{}, fmt.Errorf("该任务已被主人忽略，不能重新关注")
+	}
+	return watch, nil
 }
 
 func (s *Service) PetUnwatchTask(ctx context.Context, taskID string) error {
@@ -308,7 +317,16 @@ func (s *Service) FollowPetTask(ctx context.Context, taskID string) (domain.PetT
 	if err := s.store.UpsertPetTaskWatch(ctx, task.ID, "manual", s.now().UTC()); err != nil {
 		return domain.PetTaskWatch{}, err
 	}
-	return s.store.PetTaskWatch(ctx, task.ID)
+	watch, err := s.store.PetTaskWatch(ctx, task.ID)
+	if err != nil {
+		return domain.PetTaskWatch{}, err
+	}
+	// An ignore may have landed between the pre-check and the upsert. The
+	// conditional upsert preserves it, so report the same error as before.
+	if watch.Ignored {
+		return domain.PetTaskWatch{}, fmt.Errorf("该任务已被忽略，请恢复关注")
+	}
+	return watch, nil
 }
 
 // RemovePetTaskWatch is the Owner-facing unfollow action. Unlike the pet tool,
@@ -325,55 +343,53 @@ func (s *Service) RemovePetTaskWatch(ctx context.Context, taskID string) error {
 }
 
 // SetPetTaskWatchIgnored mutes or restores one watch from the Owner workbench.
-// Ignoring an unfollowed Task stores an ignore-only row, so the Owner can mute
-// a Task without following it first. Restoring such a row removes it and the
-// Task returns to the ordinary unfollowed list.
+// Ignoring an unfollowed Task stores an ignore-only row in one statement, so
+// the Owner can mute a Task without following it first. Restoring such a row
+// deletes it and the Task returns to the ordinary unfollowed list.
 func (s *Service) SetPetTaskWatchIgnored(ctx context.Context, taskID string, ignored bool) (domain.PetTaskWatch, error) {
 	taskID = strings.TrimSpace(taskID)
 	if taskID == "" {
 		return domain.PetTaskWatch{}, fmt.Errorf("task_id 不能为空")
 	}
-	watch, watchErr := s.store.PetTaskWatch(ctx, taskID)
-	if watchErr != nil && !errors.Is(watchErr, sql.ErrNoRows) {
-		return domain.PetTaskWatch{}, watchErr
-	}
-	if watchErr != nil && !ignored {
-		return domain.PetTaskWatch{}, fmt.Errorf("该任务未被关注")
-	}
-	if watchErr != nil {
-		task, err := s.store.Task(ctx, taskID)
-		if err != nil {
-			return domain.PetTaskWatch{}, fmt.Errorf("Task 不存在")
-		}
-		if task.ID == petTaskID {
-			return domain.PetTaskWatch{}, fmt.Errorf("不能关注宠物自己的 Task")
-		}
-		project, err := s.store.Project(ctx, task.ProjectID)
-		if err != nil {
-			return domain.PetTaskWatch{}, fmt.Errorf("Task 所属项目不存在")
-		}
-		if domain.IsSystemManagedProject(project) {
-			return domain.PetTaskWatch{}, fmt.Errorf("系统托管任务不能忽略")
-		}
-		if task.Status.Terminal() {
-			return domain.PetTaskWatch{}, fmt.Errorf("只能忽略未结束的任务")
-		}
-		now := s.now().UTC()
-		if err := s.store.UpsertPetTaskWatch(ctx, task.ID, petWatchReasonIgnored, now); err != nil {
+	now := s.now().UTC()
+	if ignored {
+		// Validate a Task that is not already watched. An existing follow needs
+		// no re-validation; the atomic store operation applies the ignore flag
+		// without touching its reason.
+		if _, err := s.store.PetTaskWatch(ctx, taskID); errors.Is(err, sql.ErrNoRows) {
+			task, err := s.store.Task(ctx, taskID)
+			if err != nil {
+				return domain.PetTaskWatch{}, fmt.Errorf("Task 不存在")
+			}
+			if task.ID == petTaskID {
+				return domain.PetTaskWatch{}, fmt.Errorf("不能关注宠物自己的 Task")
+			}
+			project, err := s.store.Project(ctx, task.ProjectID)
+			if err != nil {
+				return domain.PetTaskWatch{}, fmt.Errorf("Task 所属项目不存在")
+			}
+			if domain.IsSystemManagedProject(project) {
+				return domain.PetTaskWatch{}, fmt.Errorf("系统托管任务不能忽略")
+			}
+			if task.Status.Terminal() {
+				return domain.PetTaskWatch{}, fmt.Errorf("只能忽略未结束的任务")
+			}
+		} else if err != nil {
 			return domain.PetTaskWatch{}, err
 		}
-		watch, watchErr = s.store.PetTaskWatch(ctx, task.ID)
-		if watchErr != nil {
-			return domain.PetTaskWatch{}, watchErr
+		if err := s.store.IgnorePetTaskWatch(ctx, taskID, petWatchReasonIgnored, now); err != nil {
+			return domain.PetTaskWatch{}, err
 		}
+		return s.store.PetTaskWatch(ctx, taskID)
 	}
-	if err := s.store.SetPetTaskWatchIgnored(ctx, taskID, ignored, s.now().UTC()); err != nil {
+	removed, found, err := s.store.RestorePetTaskWatch(ctx, taskID, petWatchReasonIgnored, now)
+	if err != nil {
 		return domain.PetTaskWatch{}, err
 	}
-	if !ignored && watch.Reason == petWatchReasonIgnored {
-		if err := s.store.DeletePetTaskWatch(ctx, taskID); err != nil {
-			return domain.PetTaskWatch{}, err
-		}
+	if !found {
+		return domain.PetTaskWatch{}, fmt.Errorf("该任务未被关注")
+	}
+	if removed {
 		return domain.PetTaskWatch{TaskID: taskID}, nil
 	}
 	return s.store.PetTaskWatch(ctx, taskID)

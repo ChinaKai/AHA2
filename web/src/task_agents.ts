@@ -363,7 +363,7 @@ function channelDeliveryStateLabel(state: string): string {
     case "leased": return "发送中";
     case "provider_accepted":
     case "delivered": return "飞书已接受";
-    case "replayed": return "已重新投递";
+    case "replayed": return "已重新排队";
     case "failed": return "发送失败";
     case "dead_letter": return "投递失败（待重放）";
     case "suppressed":
@@ -382,7 +382,7 @@ function repliedDeliveryLabel(state: string, deliveryStatus: string): string {
     case "leased": return "回复发送中";
     case "provider_accepted":
     case "delivered": return `已回复（${deliveryStatus}）`;
-    case "replayed": return "回复已重新投递";
+    case "replayed": return "回复已重新排队";
     case "failed":
     case "dead_letter":
     case "suppressed":

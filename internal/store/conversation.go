@@ -607,9 +607,30 @@ func (s *Store) ConversationPageForAgent(
 	if err := rows.Err(); err != nil {
 		return domain.ConversationPage{}, err
 	}
+	if err := rows.Close(); err != nil {
+		return domain.ConversationPage{}, err
+	}
 	hasMore := len(items) > limit
 	if hasMore {
 		items = items[:limit]
+	}
+	// A replay leaves the card's original row in state='replayed' and appends a
+	// new generation. Follow that chain so the card shows the newest attempt.
+	for index := range items {
+		if stringValue(items[index].Payload["delivery_state"]) != "replayed" {
+			continue
+		}
+		deliveryID := stringValue(items[index].Payload["delivery_id"])
+		if deliveryID == "" {
+			continue
+		}
+		state, err := s.channelDeliveryDisplayState(ctx, deliveryID)
+		if err != nil {
+			return domain.ConversationPage{}, err
+		}
+		if state != "" {
+			items[index].Payload["delivery_state"] = state
+		}
 	}
 	if after == 0 {
 		for left, right := 0, len(items)-1; left < right; left, right = left+1, right-1 {
@@ -629,6 +650,44 @@ func (s *Store) ConversationPageForAgent(
 		}
 	}
 	return page, nil
+}
+
+// channelDeliveryDisplayState resolves the newest generation of a delivery
+// chain. ReplayChannelDelivery marks the original row "replayed" and inserts a
+// new pending row linked by replay_of_id, so a card bound to the original id
+// must follow the chain before reporting a final state.
+func (s *Store) channelDeliveryDisplayState(ctx context.Context, deliveryID string) (string, error) {
+	currentID := strings.TrimSpace(deliveryID)
+	for depth := 0; currentID != "" && depth < 32; depth++ {
+		var state, certainty string
+		err := s.db.QueryRowContext(ctx, `SELECT state,outcome_certainty FROM channel_delivery_outbox WHERE id=?`, currentID).Scan(&state, &certainty)
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", nil
+		}
+		if err != nil {
+			return "", err
+		}
+		if state != "replayed" {
+			// "delivered" is only provider acceptance, never a client read receipt.
+			if state == "delivered" && certainty == "provider_accepted" {
+				return "provider_accepted", nil
+			}
+			return state, nil
+		}
+		var nextID string
+		err = s.db.QueryRowContext(ctx, `
+			SELECT id FROM channel_delivery_outbox
+			WHERE replay_of_id=?
+			ORDER BY replay_generation DESC LIMIT 1`, currentID).Scan(&nextID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return "replayed", nil
+		}
+		if err != nil {
+			return "", err
+		}
+		currentID = nextID
+	}
+	return "replayed", nil
 }
 
 func (s *Store) MaxEventSequence(ctx context.Context, taskID string) int64 {

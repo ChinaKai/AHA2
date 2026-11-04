@@ -1619,11 +1619,15 @@ test("channel route cards map provider acceptance without claiming read receipts
   assert.doesNotMatch(failed, /已回复：/);
   assert.match(failed, /回复内容：/);
   assert.match(status({delivery_state: "dead_letter"}), /回复投递失败（待重放）/);
+  // Replay only enqueues a new generation; it must not claim it was delivered.
+  assert.match(status({delivery_state: "replayed"}), /回复已重新排队/);
+  assert.doesNotMatch(status({delivery_state: "replayed"}), /已重新投递/);
   assert.doesNotMatch(status({delivery_state: "failed"}), /已回复/);
 
   // Non-status route and outreach cards use the same delivery labels.
   assert.match(render("agent_channel_outreach", {delivery_state: "leased", message: "协调"}), /发送中/);
   assert.match(render("agent_channel_route", {delivery_state: "provider_accepted"}), /飞书已接受/);
+  assert.match(render("agent_channel_route", {delivery_state: "replayed"}), /已重新排队/);
   assert.doesNotMatch(render("agent_channel_route", {delivery_state: "provider_accepted"}), /已读|已接收/);
 });
 

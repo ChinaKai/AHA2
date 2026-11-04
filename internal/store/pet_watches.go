@@ -26,11 +26,15 @@ func scanPetTaskWatch(scanner interface{ Scan(...any) error }) (domain.PetTaskWa
 	return item, err
 }
 
+// UpsertPetTaskWatch creates or updates a real follow. Ignored rows are never
+// overwritten: the conditional update closes the check-then-upsert race where a
+// concurrent ignore could otherwise be turned into a follow (or vice versa).
 func (s *Store) UpsertPetTaskWatch(ctx context.Context, taskID, reason string, at time.Time) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO pet_task_watches(task_id,reason,created_at,updated_at)
 		VALUES(?,?,?,?)
-		ON CONFLICT(task_id) DO UPDATE SET reason=excluded.reason,updated_at=excluded.updated_at`,
+		ON CONFLICT(task_id) DO UPDATE SET reason=excluded.reason,updated_at=excluded.updated_at
+		WHERE pet_task_watches.ignored_at=''`,
 		taskID, reason, timeString(at), timeString(at))
 	return err
 }
@@ -62,24 +66,41 @@ func (s *Store) DeletePetTaskWatch(ctx context.Context, taskID string) error {
 	return err
 }
 
-// SetPetTaskWatchIgnored mutes or restores an existing watch. An ignored watch
-// stays in the list so the Owner can restore it, but it is excluded from status
-// notifications and automatic re-watching.
-func (s *Store) SetPetTaskWatchIgnored(ctx context.Context, taskID string, ignored bool, at time.Time) error {
-	ignoredAt := ""
-	if ignored {
-		ignoredAt = timeString(at)
-	}
+// IgnorePetTaskWatch marks a Task ignored without changing whether it is
+// followed. When no row exists the insert also writes ignored_at, so creating
+// an ignore-only row is one atomic statement and no notification window opens
+// between "watch created" and "watch ignored". ignoreOnlyReason is used only on
+// insert; an existing real follow keeps its reason.
+func (s *Store) IgnorePetTaskWatch(ctx context.Context, taskID, ignoreOnlyReason string, at time.Time) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO pet_task_watches(task_id,reason,created_at,updated_at,ignored_at)
+		VALUES(?,?,?,?,?)
+		ON CONFLICT(task_id) DO UPDATE SET ignored_at=excluded.ignored_at,updated_at=excluded.updated_at`,
+		taskID, ignoreOnlyReason, timeString(at), timeString(at), timeString(at))
+	return err
+}
+
+// RestorePetTaskWatch clears an ignored watch. An ignore-only row is deleted so
+// the Task returns to the unfollowed list; a real follow is only un-ignored.
+// The DELETE is scoped by reason, so it can never remove a follow that raced in
+// between the Owner's ignore and restore actions.
+func (s *Store) RestorePetTaskWatch(ctx context.Context, taskID, ignoreOnlyReason string, at time.Time) (removed, found bool, err error) {
 	result, err := s.db.ExecContext(ctx, `
-		UPDATE pet_task_watches SET ignored_at=?,updated_at=? WHERE task_id=?`,
-		ignoredAt, timeString(at), taskID)
+		DELETE FROM pet_task_watches WHERE task_id=? AND reason=?`, taskID, ignoreOnlyReason)
 	if err != nil {
-		return err
+		return false, false, err
 	}
-	if affected, _ := result.RowsAffected(); affected != 1 {
-		return sql.ErrNoRows
+	if affected, _ := result.RowsAffected(); affected > 0 {
+		return true, true, nil
 	}
-	return nil
+	result, err = s.db.ExecContext(ctx, `
+		UPDATE pet_task_watches SET ignored_at='',updated_at=? WHERE task_id=?`,
+		timeString(at), taskID)
+	if err != nil {
+		return false, false, err
+	}
+	affected, _ := result.RowsAffected()
+	return false, affected > 0, nil
 }
 
 func (s *Store) MarkPetTaskWatchNotified(ctx context.Context, taskID, status, turnID string, at time.Time) error {
