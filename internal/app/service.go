@@ -830,16 +830,37 @@ func (s *Service) InterruptTurn(ctx context.Context, turnID string) error {
 	if err != nil {
 		return err
 	}
-	if turn.Status.Terminal() {
-		return nil
+	const attempts = 3
+	for attempt := 1; ; attempt++ {
+		if turn.Status.Terminal() {
+			return nil
+		}
+		s.mu.Lock()
+		cancel := s.cancels[turnID]
+		s.mu.Unlock()
+		if cancel != nil {
+			// The running goroutine settles the turn once it observes the
+			// cancellation; do not race it on the stored status.
+			cancel()
+			return nil
+		}
+		if attempt > attempts {
+			return fmt.Errorf("interrupt turn %s: status keeps changing", turnID)
+		}
+		// No goroutine in this process owns the turn, so cancelling cannot end
+		// it. Mark it interrupted with a compare-and-set on the observed status;
+		// a concurrent terminal update wins and the loop then returns nil.
+		task, err := s.store.Task(ctx, turn.TaskID)
+		if err != nil {
+			return err
+		}
+		if s.interruptTurn(ctx, &turn, task) {
+			return nil
+		}
+		if turn, err = s.store.Turn(ctx, turnID); err != nil {
+			return err
+		}
 	}
-	s.mu.Lock()
-	cancel := s.cancels[turnID]
-	s.mu.Unlock()
-	if cancel != nil {
-		cancel()
-	}
-	return nil
 }
 
 func (s *Service) InterruptRound(ctx context.Context, roundID string) error {
@@ -1772,14 +1793,15 @@ func (s *Service) failTurn(ctx context.Context, turn *domain.Turn, task domain.T
 	s.afterTurnTerminal(ctx, task, *turn)
 }
 
-func (s *Service) interruptTurn(ctx context.Context, turn *domain.Turn, task domain.Task) {
+// interruptTurn reports whether this call moved the turn to interrupted.
+func (s *Service) interruptTurn(ctx context.Context, turn *domain.Turn, task domain.Task) bool {
 	now := s.now().UTC()
 	previous := turn.Status
 	turn.Status, turn.FinishedAt = domain.TurnInterrupted, now
 	code := 130
 	turn.ExitCode = &code
 	if err := s.store.UpdateTurn(ctx, *turn, previous); err != nil {
-		return
+		return false
 	}
 	s.updateOrchestrationRouteStatus(ctx, *turn)
 	_, _ = s.store.AddConversationItem(ctx, domain.ConversationItem{
@@ -1793,6 +1815,7 @@ func (s *Service) interruptTurn(ctx context.Context, turn *domain.Turn, task dom
 		s.SyncAgentChannelMessageStatuses(ctx, task.ID, turn.ID, "", "interrupted", "", "")
 	}
 	s.afterTurnTerminal(ctx, task, *turn)
+	return true
 }
 
 func (s *Service) recordTurnDuration(ctx context.Context, turn domain.Turn) {
