@@ -429,28 +429,38 @@ func (s *Store) SkipChannelDelivery(ctx context.Context, id, instanceID string, 
 	return nil
 }
 
+// channelOutboxHealthQuery keeps the WHERE predicate identical to the partial
+// index predicate so SQLite can SEARCH the health index instead of scanning
+// the whole outbox. See TestChannelOutboxHealthQueryUsesPartialIndex.
+const channelOutboxHealthQuery = `
+	SELECT o.instance_id,
+	       SUM(CASE WHEN o.state='pending' THEN 1 ELSE 0 END),
+	       SUM(CASE WHEN o.state='pending' AND o.attempts=0 THEN 1 ELSE 0 END),
+	       SUM(CASE WHEN o.state='pending' AND o.attempts>0 THEN 1 ELSE 0 END),
+	       MIN(CASE WHEN o.state='pending' THEN o.created_at END),
+	       MIN(CASE WHEN o.state='pending' AND o.attempts=0 THEN o.created_at END),
+	       MIN(CASE WHEN o.state='pending' AND o.attempts>0 THEN o.created_at END),
+	       SUM(CASE WHEN o.state='dead_letter' THEN 1 ELSE 0 END),
+	       SUM(CASE WHEN o.state='leased' AND o.lease_until<>'' AND o.lease_until<=? THEN 1 ELSE 0 END),
+	       MIN(CASE WHEN o.state='leased' AND o.lease_until<>'' AND o.lease_until<=? THEN o.lease_until END),
+	       COALESCE((
+	         SELECT e.last_error_code FROM channel_delivery_outbox e
+	         WHERE e.instance_id=o.instance_id
+	           AND e.state IN ('pending','leased','dead_letter')
+	           AND e.last_error_code<>''
+	         ORDER BY e.updated_at DESC, e.id DESC LIMIT 1
+	       ),'')
+	FROM channel_delivery_outbox o
+	WHERE o.state IN ('pending','leased','dead_letter')
+	GROUP BY o.instance_id
+	ORDER BY o.instance_id`
+
 // ChannelOutboxHealth aggregates the non-terminal outbound queue per instance.
-// It reads counters, timestamps and error codes only, and is bounded by the
-// number of instances (with a hard LIMIT guard) so work-state stays cheap.
-func (s *Store) ChannelOutboxHealth(ctx context.Context) (map[string]domain.ChannelOutboxHealth, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT o.instance_id,
-		       SUM(CASE WHEN o.state='pending' THEN 1 ELSE 0 END),
-		       SUM(CASE WHEN o.state='pending' AND o.attempts=0 THEN 1 ELSE 0 END),
-		       MIN(CASE WHEN o.state='pending' THEN o.created_at END),
-		       SUM(CASE WHEN o.state='dead_letter' THEN 1 ELSE 0 END),
-		       COALESCE((
-		         SELECT e.last_error_code FROM channel_delivery_outbox e
-		         WHERE e.instance_id=o.instance_id
-		           AND e.state IN ('pending','dead_letter')
-		           AND e.last_error_code<>''
-		         ORDER BY e.updated_at DESC, e.id DESC LIMIT 1
-		       ),'')
-		FROM channel_delivery_outbox o
-		WHERE o.state IN ('pending','dead_letter')
-		GROUP BY o.instance_id
-		ORDER BY o.instance_id
-		LIMIT 200`)
+// It reads counters, timestamps and error codes only. There is intentionally
+// no row LIMIT: every instance with non-terminal work is returned, so a
+// truncated result can never make an unchecked channel look healthy.
+func (s *Store) ChannelOutboxHealth(ctx context.Context, now time.Time) (map[string]domain.ChannelOutboxHealth, error) {
+	rows, err := s.db.QueryContext(ctx, channelOutboxHealthQuery, timeString(now), timeString(now))
 	if err != nil {
 		return nil, err
 	}
@@ -458,12 +468,25 @@ func (s *Store) ChannelOutboxHealth(ctx context.Context) (map[string]domain.Chan
 	result := map[string]domain.ChannelOutboxHealth{}
 	for rows.Next() {
 		var item domain.ChannelOutboxHealth
-		var oldest sql.NullString
-		if err := rows.Scan(&item.InstanceID, &item.Pending, &item.StuckPending, &oldest, &item.DeadLetter, &item.LastErrorCode); err != nil {
+		var oldest, oldestUnattempted, oldestAttempted, oldestExpiredLease sql.NullString
+		if err := rows.Scan(
+			&item.InstanceID, &item.Pending, &item.StuckPending, &item.AttemptedPending,
+			&oldest, &oldestUnattempted, &oldestAttempted, &item.DeadLetter,
+			&item.ExpiredLeases, &oldestExpiredLease, &item.LastErrorCode,
+		); err != nil {
 			return nil, err
 		}
 		if oldest.Valid {
 			item.OldestPendingAt = parseTime(oldest.String)
+		}
+		if oldestUnattempted.Valid {
+			item.OldestUnattemptedPendingAt = parseTime(oldestUnattempted.String)
+		}
+		if oldestAttempted.Valid {
+			item.OldestAttemptedPendingAt = parseTime(oldestAttempted.String)
+		}
+		if oldestExpiredLease.Valid {
+			item.OldestExpiredLeaseAt = parseTime(oldestExpiredLease.String)
 		}
 		result[item.InstanceID] = item
 	}

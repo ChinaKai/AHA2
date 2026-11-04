@@ -1265,7 +1265,12 @@ export interface PetChannelHealth {
   effective_availability?: string;
   pending: number;
   stuck_pending: number;
+  attempted_pending: number;
+  expired_leases: number;
   oldest_pending_minutes: number;
+  oldest_unattempted_minutes: number;
+  oldest_attempted_minutes: number;
+  expired_lease_minutes: number;
   dead_letter: number;
   last_error_code?: string;
   degraded: boolean;
@@ -1283,6 +1288,7 @@ export interface PetWorkbench {
   watches: PetTaskWatch[];
   task?: Task;
   channels: PetChannelHealth[];
+  channel_total?: number;
   channel_note?: string;
   updated_at: string;
 }

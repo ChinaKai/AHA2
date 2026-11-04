@@ -3398,5 +3398,29 @@ func (s *Store) migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(116, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
 		return fmt.Errorf("record schema v116: %w", err)
 	}
+	var hasV117 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=117)`).Scan(&hasV117)
+	if !hasV117 {
+		// v116's (instance_id,state,updated_at) index could not satisfy the
+		// health aggregate because the state IN predicate was not part of the
+		// index. Partial indexes whose predicate matches the query let SQLite
+		// SEARCH only in-flight/dead rows instead of scanning the whole outbox.
+		for _, statement := range []string{
+			`DROP INDEX IF EXISTS idx_channel_delivery_health`,
+			`CREATE INDEX IF NOT EXISTS idx_channel_delivery_health
+			 ON channel_delivery_outbox(instance_id,state,created_at)
+			 WHERE state IN ('pending','leased','dead_letter')`,
+			`CREATE INDEX IF NOT EXISTS idx_channel_delivery_health_error
+			 ON channel_delivery_outbox(instance_id,state,updated_at)
+			 WHERE state IN ('pending','leased','dead_letter')`,
+		} {
+			if _, err := s.db.ExecContext(ctx, statement); err != nil {
+				return fmt.Errorf("apply schema v117: %w", err)
+			}
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(117, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v117: %w", err)
+	}
 	return nil
 }

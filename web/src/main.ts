@@ -5855,7 +5855,7 @@ async function bindPetDiaryPage(): Promise<void> {
       bindPetDocEditors("worklog", load);
       bindLoadMore();
     } else if (active === "inspection") {
-      body.innerHTML = renderPetChannelHealth(view.channels || [], view.channel_note || "");
+      body.innerHTML = renderPetChannelHealth(view.channels || [], view.channel_note || "", view.channel_total || (view.channels || []).length);
     } else if (active === "approvals") {
       const items = view.approvals.filter(item => {
         if (petApprovalFilter !== "all" && (petApprovalFilter === "idea" ? item.kind !== "idea" : item.kind === "idea")) return false;
@@ -6101,31 +6101,41 @@ function renderPetWatches(items: Array<{task_id: string; code: string; title: st
   }).join("");
 }
 
-function renderPetChannelHealth(items: PetChannelHealth[], note: string): string {
+function renderPetChannelHealth(items: PetChannelHealth[], note: string, total = items.length): string {
   if (items.length === 0) {
     return `<div class="field-help">${escapeHTML(t("petWorkbench.emptyChannels"))}</div>${note ? `<div class="pet-channel-note">${escapeHTML(note)}</div>` : ""}`;
   }
   const summary = note
     ? `<div class="pet-channel-note">${escapeHTML(note)}</div>`
     : `<div class="field-help">${escapeHTML(t("petWorkbench.channelHealthy"))}</div>`;
+  const truncated = total > items.length
+    ? `<div class="field-help">${escapeHTML(t("petWorkbench.channelShown", {shown: String(items.length), total: String(total)}))}</div>`
+    : "";
   const cards = items.map(item => {
     const availability = item.effective_availability ? ` / ${item.effective_availability}` : "";
     const oldest = item.oldest_pending_minutes > 0
       ? t("petWorkbench.channelAgeMinutes", {minutes: String(item.oldest_pending_minutes)})
       : "-";
+    const attempts = item.stuck_pending || item.attempted_pending
+      ? ` (attempts=0 ${item.stuck_pending} / attempts>0 ${item.attempted_pending})`
+      : "";
+    const expired = item.expired_leases > 0
+      ? `<span>${t("petWorkbench.channelExpiredLeases")}: ${item.expired_leases}</span>`
+      : "";
     return `<article class="pet-channel-card${item.degraded ? " degraded" : ""}">
       <header><strong>${escapeHTML(item.name)}</strong><span class="pet-channel-badge ${item.degraded ? "degraded" : "ok"}">${escapeHTML(item.degraded ? t("petWorkbench.channelDegraded") : t("petWorkbench.channelHealthyLabel"))}</span></header>
       <div class="pet-channel-grid">
         <span>${t("petWorkbench.channelStatus")}: ${escapeHTML(item.status || "-")}${escapeHTML(availability)}</span>
-        <span>${t("petWorkbench.channelPending")}: ${item.pending}</span>
+        <span>${t("petWorkbench.channelPending")}: ${item.pending}${attempts}</span>
         <span>${t("petWorkbench.channelOldestPending")}: ${escapeHTML(oldest)}</span>
+        ${expired}
         <span>${t("petWorkbench.channelDeadLetter")}: ${item.dead_letter}</span>
         ${item.last_error_code ? `<span>${t("petWorkbench.channelLastError")}: ${escapeHTML(item.last_error_code)}</span>` : ""}
       </div>
       ${item.note ? `<small>${escapeHTML(item.note)}</small>` : ""}
     </article>`;
   }).join("");
-  return `${summary}<div class="pet-channel-list">${cards}</div>`;
+  return `${summary}${truncated}<div class="pet-channel-list">${cards}</div>`;
 }
 
 function renderPetApprovals(items: Array<{id: string; title: string; summary: string; reason?: string; status: string; risk: string; kind: string; resolution?: string; decision_reason?: string}>, empty = t("petWorkbench.emptyApprovals")): string {

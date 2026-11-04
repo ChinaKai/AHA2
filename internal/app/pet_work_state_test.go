@@ -1,6 +1,7 @@
 package app
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -99,23 +100,26 @@ func TestPetWorkStateShowsInspectionAndAllOpenTasks(t *testing.T) {
 
 func TestPetInspectionChannelHealthClassification(t *testing.T) {
 	now := time.Now().UTC()
-	healthy := domain.ChannelInstance{
-		ID: "channel-healthy", Name: "健康渠道", Status: "ready", EffectiveAvailability: "available",
+	channel := func(id, name, status string) domain.ChannelInstance {
+		return domain.ChannelInstance{ID: id, Name: name, Status: status, EffectiveAvailability: "available"}
 	}
-	backlog := domain.ChannelInstance{
-		ID: "channel-backlog", Name: "堆积渠道", Status: "ready", EffectiveAvailability: "available",
-	}
-	deadLetter := domain.ChannelInstance{
-		ID: "channel-dead", Name: "死信渠道", Status: "ready", EffectiveAvailability: "available",
-	}
+	healthy := channel("channel-healthy", "健康渠道", "ready")
 	newInspection := func() PetInspection {
 		return PetInspection{Health: "ok", Note: "没有未闭环任务。"}
 	}
+	apply := func(channel domain.ChannelInstance, row domain.ChannelOutboxHealth) PetInspection {
+		inspection := newInspection()
+		outbox := map[string]domain.ChannelOutboxHealth{}
+		if row.InstanceID != "" {
+			outbox[channel.ID] = row
+		}
+		applyPetChannelHealthValues(&inspection, []domain.ChannelInstance{channel}, outbox, now, false)
+		return inspection
+	}
 
 	t.Run("healthy", func(t *testing.T) {
-		inspection := newInspection()
-		applyPetChannelHealthValues(&inspection, []domain.ChannelInstance{healthy}, nil, now, false)
-		if inspection.Health != "ok" || len(inspection.DegradedChannels) != 0 || len(inspection.Channels) != 1 {
+		inspection := apply(healthy, domain.ChannelOutboxHealth{})
+		if inspection.Health != "ok" || len(inspection.DegradedChannels) != 0 || len(inspection.Channels) != 1 || inspection.ChannelsTotal != 1 {
 			t.Fatalf("healthy inspection=%#v", inspection)
 		}
 		if inspection.Channels[0].Degraded || inspection.Channels[0].Note != "" || inspection.Channels[0].EffectiveAvailability != "available" {
@@ -126,32 +130,99 @@ func TestPetInspectionChannelHealthClassification(t *testing.T) {
 		}
 	})
 
-	t.Run("pending_backlog", func(t *testing.T) {
-		inspection := newInspection()
-		outbox := map[string]domain.ChannelOutboxHealth{
-			backlog.ID: {InstanceID: backlog.ID, Pending: 3, StuckPending: 3, OldestPendingAt: now.Add(-9 * time.Minute)},
+	t.Run("unattempted_pending_threshold_boundary", func(t *testing.T) {
+		for _, scenario := range []struct {
+			name     string
+			age      time.Duration
+			degraded bool
+		}{
+			{"just_under", petChannelStuckPendingThreshold - time.Second, false},
+			{"exactly_at", petChannelStuckPendingThreshold, true},
+			{"just_over", petChannelStuckPendingThreshold + time.Second, true},
+		} {
+			t.Run(scenario.name, func(t *testing.T) {
+				candidate := channel("channel-attempted", "尝试渠道", "ready")
+				inspection := apply(candidate, domain.ChannelOutboxHealth{
+					InstanceID: candidate.ID, Pending: 1, StuckPending: 1,
+					OldestPendingAt:            now.Add(-scenario.age),
+					OldestUnattemptedPendingAt: now.Add(-scenario.age),
+				})
+				gotDegraded := inspection.Health == "degraded" && inspection.Channels[0].Degraded
+				if gotDegraded != scenario.degraded {
+					t.Fatalf("age=%v degraded=%v inspection=%#v", scenario.age, gotDegraded, inspection)
+				}
+			})
 		}
-		applyPetChannelHealthValues(&inspection, []domain.ChannelInstance{backlog}, outbox, now, false)
-		if inspection.Health != "degraded" || len(inspection.DegradedChannels) != 1 {
-			t.Fatalf("backlog inspection=%#v", inspection)
+	})
+
+	t.Run("attempted_pending_threshold_boundary", func(t *testing.T) {
+		for _, scenario := range []struct {
+			name     string
+			age      time.Duration
+			degraded bool
+		}{
+			{"just_under", petChannelAttemptedPendingThreshold - time.Second, false},
+			{"exactly_at", petChannelAttemptedPendingThreshold, true},
+			{"just_over", petChannelAttemptedPendingThreshold + time.Second, true},
+		} {
+			t.Run(scenario.name, func(t *testing.T) {
+				candidate := channel("channel-retrying", "重试渠道", "ready")
+				inspection := apply(candidate, domain.ChannelOutboxHealth{
+					InstanceID: candidate.ID, Pending: 1, AttemptedPending: 1,
+					OldestPendingAt:          now.Add(-scenario.age),
+					OldestAttemptedPendingAt: now.Add(-scenario.age),
+				})
+				gotDegraded := inspection.Health == "degraded" && inspection.Channels[0].Degraded
+				if gotDegraded != scenario.degraded {
+					t.Fatalf("age=%v degraded=%v inspection=%#v", scenario.age, gotDegraded, inspection)
+				}
+			})
 		}
-		channel := inspection.Channels[0]
-		if !channel.Degraded || channel.Pending != 3 || channel.StuckPending != 3 || channel.OldestPendingMinutes != 9 {
-			t.Fatalf("backlog channel=%#v", channel)
+	})
+
+	t.Run("backlog_boundary", func(t *testing.T) {
+		for _, scenario := range []struct {
+			pending  int
+			degraded bool
+		}{
+			{petChannelPendingBacklog - 1, false},
+			{petChannelPendingBacklog, true},
+		} {
+			candidate := channel("channel-backlog", "堆积渠道", "ready")
+			inspection := apply(candidate, domain.ChannelOutboxHealth{
+				InstanceID: candidate.ID, Pending: scenario.pending, StuckPending: scenario.pending,
+				OldestPendingAt: now, OldestUnattemptedPendingAt: now,
+			})
+			gotDegraded := inspection.Health == "degraded"
+			if gotDegraded != scenario.degraded {
+				t.Fatalf("pending=%d degraded=%v inspection=%#v", scenario.pending, gotDegraded, inspection)
+			}
+			if scenario.degraded && !strings.Contains(inspection.Note, fmt.Sprintf("pending 堆积 %d 条", scenario.pending)) {
+				t.Fatalf("backlog note=%q", inspection.Note)
+			}
 		}
-		for _, want := range []string{"pending 3", "最老 9 分钟", "attempts=0", "渠道状态异常"} {
+	})
+
+	t.Run("expired_lease", func(t *testing.T) {
+		candidate := channel("channel-lease", "租约渠道", "ready")
+		inspection := apply(candidate, domain.ChannelOutboxHealth{
+			InstanceID: candidate.ID, ExpiredLeases: 1, OldestExpiredLeaseAt: now.Add(-2 * time.Minute),
+		})
+		if inspection.Health != "degraded" || !inspection.Channels[0].Degraded || inspection.Channels[0].ExpiredLeases != 1 {
+			t.Fatalf("expired lease inspection=%#v", inspection)
+		}
+		for _, want := range []string{"过期租约 1 条", "最久 2 分钟"} {
 			if !strings.Contains(inspection.Note, want) {
-				t.Fatalf("backlog note %q missing %q", inspection.Note, want)
+				t.Fatalf("expired lease note %q missing %q", inspection.Note, want)
 			}
 		}
 	})
 
 	t.Run("dead_letter", func(t *testing.T) {
-		inspection := newInspection()
-		outbox := map[string]domain.ChannelOutboxHealth{
-			deadLetter.ID: {InstanceID: deadLetter.ID, DeadLetter: 1, LastErrorCode: "feishu_target_unavailable"},
-		}
-		applyPetChannelHealthValues(&inspection, []domain.ChannelInstance{deadLetter}, outbox, now, false)
+		candidate := channel("channel-dead", "死信渠道", "ready")
+		inspection := apply(candidate, domain.ChannelOutboxHealth{
+			InstanceID: candidate.ID, DeadLetter: 1, LastErrorCode: "feishu_target_unavailable",
+		})
 		if inspection.Health != "degraded" || len(inspection.DegradedChannels) != 1 {
 			t.Fatalf("dead letter inspection=%#v", inspection)
 		}
@@ -169,6 +240,28 @@ func TestPetInspectionChannelHealthClassification(t *testing.T) {
 		}
 	})
 
+	t.Run("instance_status_variants", func(t *testing.T) {
+		for _, status := range []string{"error", "degraded", "draft", "onboarding"} {
+			candidate := channel("channel-"+status, status, status)
+			inspection := apply(candidate, domain.ChannelOutboxHealth{})
+			if inspection.Health != "degraded" || !strings.Contains(inspection.Note, "实例状态 "+status) {
+				t.Fatalf("status=%s inspection=%#v", status, inspection)
+			}
+		}
+		disabled := channel("channel-disabled", "已停用", "disabled")
+		if inspection := apply(disabled, domain.ChannelOutboxHealth{}); inspection.Health != "ok" {
+			t.Fatalf("disabled channel should stay healthy: %#v", inspection)
+		}
+	})
+
+	t.Run("outbox_read_failure", func(t *testing.T) {
+		inspection := newInspection()
+		applyPetChannelHealthValues(&inspection, []domain.ChannelInstance{healthy}, nil, now, true)
+		if inspection.Health != "degraded" || len(inspection.DegradedChannels) != 1 || !strings.Contains(inspection.Note, "出站队列状态读取失败") {
+			t.Fatalf("outbox failure inspection=%#v", inspection)
+		}
+	})
+
 	t.Run("no_channel", func(t *testing.T) {
 		inspection := newInspection()
 		applyPetChannelHealthValues(&inspection, nil, nil, now, false)
@@ -179,6 +272,40 @@ func TestPetInspectionChannelHealthClassification(t *testing.T) {
 			t.Fatalf("no channel note changed: %q", inspection.Note)
 		}
 	})
+}
+
+func TestPetChannelHealthSortsDegradedFirstAndCapsRendering(t *testing.T) {
+	now := time.Now().UTC()
+	channels := make([]domain.ChannelInstance, 0, 25)
+	outbox := map[string]domain.ChannelOutboxHealth{}
+	for i := 0; i < 22; i++ {
+		id := fmt.Sprintf("healthy-%02d", i)
+		channels = append(channels, domain.ChannelInstance{ID: id, Name: "a-" + id, Status: "ready"})
+	}
+	for i := 0; i < 3; i++ {
+		id := fmt.Sprintf("degraded-%02d", i)
+		channels = append(channels, domain.ChannelInstance{ID: id, Name: "z-" + id, Status: "ready"})
+		outbox[id] = domain.ChannelOutboxHealth{InstanceID: id, DeadLetter: 1, LastErrorCode: "feishu_target_unavailable"}
+	}
+
+	health, degraded, total := buildPetChannelHealth(channels, outbox, now)
+	if total != 25 || len(health) != petChannelHealthListLimit || len(degraded) != 3 {
+		t.Fatalf("total=%d shown=%d degraded=%d", total, len(health), len(degraded))
+	}
+	for index := 0; index < 3; index++ {
+		if !health[index].Degraded || !strings.HasPrefix(health[index].ID, "degraded-") {
+			t.Fatalf("degraded rows not sorted first at %d: %#v", index, health)
+		}
+	}
+
+	allDegraded := map[string]domain.ChannelOutboxHealth{}
+	for _, item := range channels {
+		allDegraded[item.ID] = domain.ChannelOutboxHealth{InstanceID: item.ID, DeadLetter: 1}
+	}
+	health, degraded, total = buildPetChannelHealth(channels, allDegraded, now)
+	if total != 25 || len(health) != petChannelHealthListLimit || len(degraded) != 25 {
+		t.Fatalf("all degraded total=%d shown=%d degraded=%d", total, len(health), len(degraded))
+	}
 }
 
 func TestPetWorkStateShowsApprovalsAndPriorWork(t *testing.T) {

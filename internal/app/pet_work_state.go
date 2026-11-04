@@ -13,15 +13,19 @@ import (
 
 const (
 	petOpenTaskListLimit = 50
-	// petChannelPendingThreshold is how long a delivery may sit in the outbox
-	// before an uninspected "ready" instance is treated as degraded.
-	petChannelPendingThreshold = 5 * time.Minute
+	// petChannelStuckPendingThreshold applies only to rows that have never
+	// been attempted (attempts=0): a worker that never even claimed them is
+	// the strongest signal that outbound delivery is stuck.
+	petChannelStuckPendingThreshold = 5 * time.Minute
+	// petChannelAttemptedPendingThreshold is wider because rows with attempts>0
+	// may legitimately sit in retry backoff before the next claim.
+	petChannelAttemptedPendingThreshold = 20 * time.Minute
 	// petChannelPendingBacklog marks sustained accumulation even when the
-	// oldest row has not crossed the age threshold yet.
+	// oldest row has not crossed either age threshold yet.
 	petChannelPendingBacklog = 20
-	// petChannelHealthListLimit bounds how many channel rows reach work-state
-	// and the Web workbench. Degraded rows are sorted first so the cap never
-	// hides the reason for attention.
+	// petChannelHealthListLimit bounds only the rendered channel rows. Every
+	// channel is inspected; degraded rows sort first so this cap never hides a
+	// degraded channel (the full degraded list is kept separately).
 	petChannelHealthListLimit = 20
 )
 
@@ -63,17 +67,22 @@ type PetOpenTask struct {
 // PetChannelHealth is the pet's view of one channel instance plus its outbound
 // queue. Instance config, credentials and message payloads are never included.
 type PetChannelHealth struct {
-	ID                    string `json:"id"`
-	Name                  string `json:"name"`
-	Status                string `json:"status"`
-	EffectiveAvailability string `json:"effective_availability,omitempty"`
-	Pending               int    `json:"pending"`
-	StuckPending          int    `json:"stuck_pending"`
-	OldestPendingMinutes  int    `json:"oldest_pending_minutes"`
-	DeadLetter            int    `json:"dead_letter"`
-	LastErrorCode         string `json:"last_error_code,omitempty"`
-	Degraded              bool   `json:"degraded"`
-	Note                  string `json:"note,omitempty"`
+	ID                       string `json:"id"`
+	Name                     string `json:"name"`
+	Status                   string `json:"status"`
+	EffectiveAvailability    string `json:"effective_availability,omitempty"`
+	Pending                  int    `json:"pending"`
+	StuckPending             int    `json:"stuck_pending"`
+	AttemptedPending         int    `json:"attempted_pending"`
+	ExpiredLeases            int    `json:"expired_leases"`
+	OldestPendingMinutes     int    `json:"oldest_pending_minutes"`
+	OldestUnattemptedMinutes int    `json:"oldest_unattempted_minutes"`
+	OldestAttemptedMinutes   int    `json:"oldest_attempted_minutes"`
+	ExpiredLeaseMinutes      int    `json:"expired_lease_minutes"`
+	DeadLetter               int    `json:"dead_letter"`
+	LastErrorCode            string `json:"last_error_code,omitempty"`
+	Degraded                 bool   `json:"degraded"`
+	Note                     string `json:"note,omitempty"`
 }
 
 // PetInspection is the compact, server-derived snapshot the pet quotes at the
@@ -94,6 +103,7 @@ type PetInspection struct {
 	PendingApprovals int                `json:"pending_approvals"`
 	DegradedChannels []string           `json:"degraded_channels,omitempty"`
 	Channels         []PetChannelHealth `json:"channels,omitempty"`
+	ChannelsTotal    int                `json:"channels_total,omitempty"`
 	OpenTasks        int                `json:"open_tasks"`
 	AttentionTasks   int                `json:"attention_tasks"`
 	Note             string             `json:"note,omitempty"`
@@ -370,9 +380,12 @@ func (s *Service) petInspection(ctx context.Context, tasks []domain.Task, pendin
 func (s *Service) applyPetChannelHealth(ctx context.Context, inspection *PetInspection, now time.Time) {
 	channels, err := s.store.ChannelInstances(ctx, "")
 	if err != nil {
+		inspection.Health = "degraded"
+		inspection.DegradedChannels = append(inspection.DegradedChannels, "渠道状态读取失败")
+		inspection.Note = petChannelAppendNote(inspection.Note, inspection.DegradedChannels)
 		return
 	}
-	outbox, outboxErr := s.store.ChannelOutboxHealth(ctx)
+	outbox, outboxErr := s.store.ChannelOutboxHealth(ctx, now)
 	if outboxErr != nil {
 		outbox = map[string]domain.ChannelOutboxHealth{}
 	}
@@ -380,8 +393,9 @@ func (s *Service) applyPetChannelHealth(ctx context.Context, inspection *PetInsp
 }
 
 func applyPetChannelHealthValues(inspection *PetInspection, channels []domain.ChannelInstance, outbox map[string]domain.ChannelOutboxHealth, now time.Time, outboxFailed bool) {
-	health, degraded := buildPetChannelHealth(channels, outbox, now)
+	health, degraded, total := buildPetChannelHealth(channels, outbox, now)
 	inspection.Channels = health
+	inspection.ChannelsTotal = total
 	if outboxFailed {
 		inspection.Health = "degraded"
 		inspection.DegradedChannels = append(inspection.DegradedChannels, "出站队列状态读取失败")
@@ -391,42 +405,60 @@ func applyPetChannelHealthValues(inspection *PetInspection, channels []domain.Ch
 		inspection.DegradedChannels = append(inspection.DegradedChannels, degraded...)
 	}
 	if len(inspection.DegradedChannels) > 0 {
-		note := "渠道状态异常：" + strings.Join(inspection.DegradedChannels, "；") + "，请先核查出站队列。"
-		if inspection.Note == "" {
-			inspection.Note = note
-		} else {
-			inspection.Note += " " + note
-		}
+		inspection.Note = petChannelAppendNote(inspection.Note, inspection.DegradedChannels)
 	}
+}
+
+func petChannelAppendNote(note string, degraded []string) string {
+	channelNote := "渠道状态异常：" + strings.Join(degraded, "；") + "，请先核查出站队列。"
+	if strings.TrimSpace(note) == "" {
+		return channelNote
+	}
+	return note + " " + channelNote
 }
 
 // petChannelSnapshot is the read-only channel summary shared by the pet
 // workbench and inspection. It never fails the page: a channel read error is
 // reported as text instead.
-func (s *Service) petChannelSnapshot(ctx context.Context) ([]PetChannelHealth, string) {
+func (s *Service) petChannelSnapshot(ctx context.Context) ([]PetChannelHealth, string, int) {
+	now := s.now().UTC()
 	channels, err := s.store.ChannelInstances(ctx, "")
 	if err != nil {
-		return nil, "渠道状态读取失败。"
+		return nil, "渠道状态读取失败。", 0
 	}
-	outbox, outboxErr := s.store.ChannelOutboxHealth(ctx)
+	outbox, outboxErr := s.store.ChannelOutboxHealth(ctx, now)
 	if outboxErr != nil {
 		outbox = map[string]domain.ChannelOutboxHealth{}
 	}
-	health, degraded := buildPetChannelHealth(channels, outbox, s.now().UTC())
+	health, degraded, total := buildPetChannelHealth(channels, outbox, now)
 	if outboxErr != nil {
-		return health, "出站队列状态读取失败。"
+		return health, "出站队列状态读取失败。", total
 	}
 	if len(degraded) == 0 {
-		return health, ""
+		return health, "", total
 	}
-	return health, "渠道状态异常：" + strings.Join(degraded, "；") + "。"
+	return health, "渠道状态异常：" + strings.Join(degraded, "；") + "。", total
+}
+
+func petChannelAgeMinutes(at, now time.Time) int {
+	if at.IsZero() {
+		return 0
+	}
+	age := now.Sub(at)
+	if age <= 0 {
+		return 0
+	}
+	return int(age.Minutes())
 }
 
 // buildPetChannelHealth merges instance state with outbox counters. A channel
-// is degraded when it has a dead letter, when pending rows stay unattempted
-// past the threshold, when the backlog crosses its cap, or when the instance
-// itself is not ready. Degraded rows sort first so a list cap cannot hide them.
-func buildPetChannelHealth(channels []domain.ChannelInstance, outbox map[string]domain.ChannelOutboxHealth, now time.Time) ([]PetChannelHealth, []string) {
+// is degraded when it has a dead letter, when unattempted pending rows exceed
+// the 5-minute threshold, when retrying pending rows exceed the wider
+// 20-minute threshold, when a lease has expired, when the pending backlog
+// crosses its cap, or when the instance itself is not ready. Degraded rows
+// sort first so the render cap cannot hide them; the total count is returned
+// so truncation is explicit.
+func buildPetChannelHealth(channels []domain.ChannelInstance, outbox map[string]domain.ChannelOutboxHealth, now time.Time) ([]PetChannelHealth, []string, int) {
 	health := make([]PetChannelHealth, 0, len(channels))
 	degraded := []string{}
 	for _, channel := range channels {
@@ -437,14 +469,18 @@ func buildPetChannelHealth(channels []domain.ChannelInstance, outbox map[string]
 		item := PetChannelHealth{
 			ID: channel.ID, Name: channel.Name, Status: channel.Status,
 			EffectiveAvailability: channel.EffectiveAvailability,
-			Pending:               row.Pending, StuckPending: row.StuckPending, DeadLetter: row.DeadLetter,
-			LastErrorCode: row.LastErrorCode,
+			Pending:               row.Pending,
+			StuckPending:          row.StuckPending,
+			AttemptedPending:      row.AttemptedPending,
+			ExpiredLeases:         row.ExpiredLeases,
+			DeadLetter:            row.DeadLetter,
+			LastErrorCode:         row.LastErrorCode,
 		}
-		if !row.OldestPendingAt.IsZero() {
-			if age := now.Sub(row.OldestPendingAt); age > 0 {
-				item.OldestPendingMinutes = int(age.Minutes())
-			}
-		}
+		item.OldestPendingMinutes = petChannelAgeMinutes(row.OldestPendingAt, now)
+		item.OldestUnattemptedMinutes = petChannelAgeMinutes(row.OldestUnattemptedPendingAt, now)
+		item.OldestAttemptedMinutes = petChannelAgeMinutes(row.OldestAttemptedPendingAt, now)
+		item.ExpiredLeaseMinutes = petChannelAgeMinutes(row.OldestExpiredLeaseAt, now)
+
 		details := []string{}
 		degradedReasons := []string{}
 		if channel.Status != "ready" && channel.Status != "disabled" {
@@ -460,12 +496,27 @@ func buildPetChannelHealth(channels []domain.ChannelInstance, outbox map[string]
 			if row.StuckPending > 0 {
 				detail += fmt.Sprintf("，attempts=0 %d 条", row.StuckPending)
 			}
-			details = append(details, detail)
-			if !row.OldestPendingAt.IsZero() && now.Sub(row.OldestPendingAt) >= petChannelPendingThreshold && row.StuckPending > 0 {
-				degradedReasons = append(degradedReasons, detail)
-			} else if row.Pending >= petChannelPendingBacklog {
-				degradedReasons = append(degradedReasons, detail)
+			if row.AttemptedPending > 0 {
+				detail += fmt.Sprintf("，attempts>0 %d 条", row.AttemptedPending)
 			}
+			details = append(details, detail)
+		}
+		if row.Pending >= petChannelPendingBacklog {
+			degradedReasons = append(degradedReasons, fmt.Sprintf("pending 堆积 %d 条", row.Pending))
+		}
+		if row.StuckPending > 0 && !row.OldestUnattemptedPendingAt.IsZero() && now.Sub(row.OldestUnattemptedPendingAt) >= petChannelStuckPendingThreshold {
+			degradedReasons = append(degradedReasons, fmt.Sprintf("attempts=0 pending %d 条最老 %d 分钟", row.StuckPending, item.OldestUnattemptedMinutes))
+		}
+		if row.AttemptedPending > 0 && !row.OldestAttemptedPendingAt.IsZero() && now.Sub(row.OldestAttemptedPendingAt) >= petChannelAttemptedPendingThreshold {
+			degradedReasons = append(degradedReasons, fmt.Sprintf("attempts>0 pending %d 条最老 %d 分钟", row.AttemptedPending, item.OldestAttemptedMinutes))
+		}
+		if row.ExpiredLeases > 0 {
+			detail := fmt.Sprintf("过期租约 %d 条", row.ExpiredLeases)
+			if item.ExpiredLeaseMinutes > 0 {
+				detail += fmt.Sprintf("，最久 %d 分钟", item.ExpiredLeaseMinutes)
+			}
+			details = append(details, detail)
+			degradedReasons = append(degradedReasons, detail)
 		}
 		if row.DeadLetter > 0 {
 			detail := fmt.Sprintf("dead_letter %d", row.DeadLetter)
@@ -475,7 +526,20 @@ func buildPetChannelHealth(channels []domain.ChannelInstance, outbox map[string]
 		if row.LastErrorCode != "" {
 			details = append(details, "最近错误码 "+row.LastErrorCode)
 		}
-		item.Note = strings.Join(details, "；")
+		// The note must explain every degradation reason, including the
+		// threshold/backlog reasons that are not part of the raw counters.
+		noteParts := make([]string, 0, len(details)+len(degradedReasons))
+		seen := map[string]bool{}
+		for _, parts := range [][]string{details, degradedReasons} {
+			for _, part := range parts {
+				if part == "" || seen[part] {
+					continue
+				}
+				seen[part] = true
+				noteParts = append(noteParts, part)
+			}
+		}
+		item.Note = strings.Join(noteParts, "；")
 		item.Degraded = len(degradedReasons) > 0
 		if item.Degraded {
 			label := item.Note
@@ -486,6 +550,7 @@ func buildPetChannelHealth(channels []domain.ChannelInstance, outbox map[string]
 		}
 		health = append(health, item)
 	}
+	total := len(health)
 	sort.SliceStable(health, func(i, j int) bool {
 		if health[i].Degraded != health[j].Degraded {
 			return health[i].Degraded
@@ -498,7 +563,7 @@ func buildPetChannelHealth(channels []domain.ChannelInstance, outbox map[string]
 	if len(health) > petChannelHealthListLimit {
 		health = health[:petChannelHealthListLimit]
 	}
-	return health, degraded
+	return health, degraded, total
 }
 
 func (s *Service) recordPetWork(ctx context.Context, kind, targetID, status string) {

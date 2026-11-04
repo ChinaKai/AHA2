@@ -380,12 +380,17 @@ type ChannelDelivery struct {
 // delivery queue. It contains counters, timestamps and error codes only;
 // message payloads and credentials never cross this boundary.
 type ChannelOutboxHealth struct {
-	InstanceID      string    `json:"instance_id"`
-	Pending         int       `json:"pending"`
-	StuckPending    int       `json:"stuck_pending"`
-	OldestPendingAt time.Time `json:"oldest_pending_at,omitempty"`
-	DeadLetter      int       `json:"dead_letter"`
-	LastErrorCode   string    `json:"last_error_code,omitempty"`
+	InstanceID                 string    `json:"instance_id"`
+	Pending                    int       `json:"pending"`
+	StuckPending               int       `json:"stuck_pending"`
+	AttemptedPending           int       `json:"attempted_pending"`
+	OldestPendingAt            time.Time `json:"oldest_pending_at,omitempty"`
+	OldestUnattemptedPendingAt time.Time `json:"oldest_unattempted_pending_at,omitempty"`
+	OldestAttemptedPendingAt   time.Time `json:"oldest_attempted_pending_at,omitempty"`
+	ExpiredLeases              int       `json:"expired_leases"`
+	OldestExpiredLeaseAt       time.Time `json:"oldest_expired_lease_at,omitempty"`
+	DeadLetter                 int       `json:"dead_letter"`
+	LastErrorCode              string    `json:"last_error_code,omitempty"`
 }
 
 type ChannelDeliveryAttempt struct {

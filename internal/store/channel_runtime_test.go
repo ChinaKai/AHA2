@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -150,12 +151,18 @@ func TestChannelOutboxHealthSummarizesQueue(t *testing.T) {
 	instance, conversation := createDeliveryTestInstance(t, database)
 	now := time.Now().UTC()
 
-	oldPending := enqueueTestDelivery(t, database, instance, conversation, 1, now.Add(-time.Minute))
-	enqueueTestDelivery(t, database, instance, conversation, 2, now.Add(-time.Minute))
+	unattempted := enqueueTestDelivery(t, database, instance, conversation, 1, now.Add(-time.Minute))
+	attempted := enqueueTestDelivery(t, database, instance, conversation, 2, now.Add(-time.Minute))
 	dead := enqueueTestDelivery(t, database, instance, conversation, 3, now.Add(-time.Minute))
 	delivered := enqueueTestDelivery(t, database, instance, conversation, 4, now.Add(-time.Minute))
+	activeLease := enqueueTestDelivery(t, database, instance, conversation, 5, now.Add(-time.Minute))
+	expiredLease := enqueueTestDelivery(t, database, instance, conversation, 6, now.Add(-time.Minute))
 	if _, err := database.db.ExecContext(ctx, `UPDATE channel_delivery_outbox SET created_at=?,updated_at=? WHERE id=?`,
-		timeString(now.Add(-9*time.Minute)), timeString(now.Add(-9*time.Minute)), oldPending.ID); err != nil {
+		timeString(now.Add(-9*time.Minute)), timeString(now.Add(-9*time.Minute)), unattempted.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.db.ExecContext(ctx, `UPDATE channel_delivery_outbox SET attempts=2,created_at=?,updated_at=? WHERE id=?`,
+		timeString(now.Add(-25*time.Minute)), timeString(now.Add(-25*time.Minute)), attempted.ID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := database.db.ExecContext(ctx, `UPDATE channel_delivery_outbox SET state='dead_letter',last_error_code=?,updated_at=? WHERE id=?`,
@@ -166,8 +173,16 @@ func TestChannelOutboxHealthSummarizesQueue(t *testing.T) {
 		timeString(now), delivered.ID); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := database.db.ExecContext(ctx, `UPDATE channel_delivery_outbox SET state='leased',attempts=1,lease_id='lease-active',lease_until=? WHERE id=?`,
+		timeString(now.Add(5*time.Minute)), activeLease.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.db.ExecContext(ctx, `UPDATE channel_delivery_outbox SET state='leased',attempts=1,lease_id='lease-expired',lease_until=? WHERE id=?`,
+		timeString(now.Add(-3*time.Minute)), expiredLease.ID); err != nil {
+		t.Fatal(err)
+	}
 
-	health, err := database.ChannelOutboxHealth(ctx)
+	health, err := database.ChannelOutboxHealth(ctx, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,14 +190,62 @@ func TestChannelOutboxHealthSummarizesQueue(t *testing.T) {
 	if !ok {
 		t.Fatalf("instance missing from outbox health: %#v", health)
 	}
-	if got.Pending != 2 || got.StuckPending != 2 || got.DeadLetter != 1 || got.LastErrorCode != "feishu_target_unavailable" {
-		t.Fatalf("outbox health=%#v", got)
+	if got.Pending != 2 || got.StuckPending != 1 || got.AttemptedPending != 1 || got.DeadLetter != 1 || got.ExpiredLeases != 1 {
+		t.Fatalf("outbox health counts=%#v", got)
 	}
-	if got.OldestPendingAt.IsZero() || now.Sub(got.OldestPendingAt) < 8*time.Minute {
+	if got.LastErrorCode != "feishu_target_unavailable" {
+		t.Fatalf("last error=%q", got.LastErrorCode)
+	}
+	if now.Sub(got.OldestPendingAt) < 24*time.Minute {
 		t.Fatalf("oldest pending not preserved: %#v", got)
+	}
+	if now.Sub(got.OldestUnattemptedPendingAt) < 8*time.Minute || now.Sub(got.OldestUnattemptedPendingAt) > 10*time.Minute {
+		t.Fatalf("oldest unattempted pending=%v", got.OldestUnattemptedPendingAt)
+	}
+	if now.Sub(got.OldestAttemptedPendingAt) < 24*time.Minute {
+		t.Fatalf("oldest attempted pending=%v", got.OldestAttemptedPendingAt)
+	}
+	if now.Sub(got.OldestExpiredLeaseAt) < 2*time.Minute || now.Sub(got.OldestExpiredLeaseAt) > 4*time.Minute {
+		t.Fatalf("expired lease=%v", got.OldestExpiredLeaseAt)
 	}
 	if _, ok := health["missing-instance"]; ok {
 		t.Fatalf("healthy instance should have no health row: %#v", health)
+	}
+}
+
+func TestChannelOutboxHealthQueryUsesPartialIndex(t *testing.T) {
+	ctx := context.Background()
+	database, err := Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	now := time.Now().UTC()
+	rows, err := database.db.QueryContext(ctx, "EXPLAIN QUERY PLAN "+channelOutboxHealthQuery, timeString(now), timeString(now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	details := []string{}
+	for rows.Next() {
+		var id, parent, notUsed int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notUsed, &detail); err != nil {
+			t.Fatal(err)
+		}
+		details = append(details, detail)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	plan := strings.Join(details, "\n")
+	if !strings.Contains(plan, "SEARCH") ||
+		!strings.Contains(plan, "idx_channel_delivery_health") ||
+		!strings.Contains(plan, "idx_channel_delivery_health_error") {
+		t.Fatalf("outbox health query did not use both partial indexes:\n%s", plan)
+	}
+	if strings.Contains(plan, "SCAN channel_delivery_outbox") {
+		t.Fatalf("outbox health query scans the whole table:\n%s", plan)
 	}
 }
 
