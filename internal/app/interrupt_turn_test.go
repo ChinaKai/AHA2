@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -197,6 +198,24 @@ func (e *blockingSuccessExecutor) Execute(_ context.Context, _ ExecutionRequest,
 	return ExecutionResult{Reply: "done", ProviderSessionID: "interrupted-then-succeeded"}, nil
 }
 
+// blockPreparation points the workspace at a secret ref and replaces the
+// secret resolver with one that stalls runTurn right after it enters preparing.
+func (f *petTaskFixture) blockPreparation(t *testing.T) (entered, release chan struct{}) {
+	t.Helper()
+	workspace, err := f.database.Workspace(f.ctx, petWorkspaceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace.SSHCredentialRef = "workspace/" + domain.NewID("interrupt")
+	workspace.UpdatedAt = f.service.now().UTC()
+	if err := f.database.UpdateWorkspaceConfig(f.ctx, workspace); err != nil {
+		t.Fatal(err)
+	}
+	entered, release = make(chan struct{}), make(chan struct{})
+	f.service.secrets = &blockingSecretResolver{entered: entered, release: release}
+	return entered, release
+}
+
 func (f *petTaskFixture) assertTurnSettledTerminally(t *testing.T, taskID, turnID string, want domain.TurnStatus) {
 	t.Helper()
 	waitForTurn(t, f.database, turnID, want)
@@ -262,18 +281,7 @@ func TestInterruptTurnBeforePreparationSettlesQueuedTurn(t *testing.T) {
 func TestInterruptTurnDuringPreparationSettlesPreparingTurn(t *testing.T) {
 	fixture := newPetTaskFixture(t)
 	task, turn := fixture.createOrphanTurn(t, domain.TurnQueued)
-	workspace, err := fixture.database.Workspace(fixture.ctx, petWorkspaceID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	workspace.SSHCredentialRef = "workspace/interrupt-during-preparation"
-	workspace.UpdatedAt = fixture.service.now().UTC()
-	if err := fixture.database.UpdateWorkspaceConfig(fixture.ctx, workspace); err != nil {
-		t.Fatal(err)
-	}
-	entered := make(chan struct{})
-	release := make(chan struct{})
-	fixture.service.secrets = &blockingSecretResolver{entered: entered, release: release}
+	entered, release := fixture.blockPreparation(t)
 
 	runCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -350,6 +358,153 @@ func TestInterruptTurnWhileRunningDoesNotOverwriteSuccessfulResult(t *testing.T)
 	}
 	if stored.Result != "done" {
 		t.Fatalf("successful result was lost: %q", stored.Result)
+	}
+}
+
+// A SIGTERM cancels the shared run context before Shutdown can set closing.
+// The canceled preparation must stay non-terminal so RecoverInterrupted can
+// requeue the claimed inbox instead of the turn's terminal settlement silently
+// consuming the owner messages queued behind it.
+func TestShutdownCancelWindowLeavesQueuedOwnerMessageRecoverable(t *testing.T) {
+	fixture := newPetTaskFixture(t)
+	task, turn := fixture.createOrphanTurn(t, domain.TurnQueued)
+	if _, err := fixture.service.SubmitMessage(fixture.ctx, task.ID, "queued owner message"); err != nil {
+		t.Fatal(err)
+	}
+	if pending, err := fixture.database.PendingInboxCount(fixture.ctx, task.ID); err != nil || pending != 1 {
+		t.Fatalf("queued owner message pending=%d err=%v, want 1", pending, err)
+	}
+	entered, release := fixture.blockPreparation(t)
+
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	defer cancelRun()
+	fixture.service.SetRunContext(runCtx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		fixture.service.runTurn(runCtx, turn.ID)
+	}()
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("runTurn never reached the preparation secret lookup")
+	}
+	stored, err := fixture.database.Turn(fixture.ctx, turn.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != domain.TurnPreparing {
+		t.Fatalf("signal window started at status=%s, want preparing", stored.Status)
+	}
+
+	// Signal window: the shared run context is canceled while closing is still
+	// false, exactly the ordering used by main on SIGTERM.
+	cancelRun()
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("runTurn did not return after the signal cancellation")
+	}
+	// Wait for any successor turn the old ordering scheduled.
+	fixture.service.runWG.Wait()
+	stored, err = fixture.database.Turn(fixture.ctx, turn.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status.Terminal() {
+		t.Fatalf("shutdown cancellation settled the turn as %s", stored.Status)
+	}
+
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelShutdown()
+	if err := fixture.service.Shutdown(shutdownCtx); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+	recovered, err := fixture.database.RecoverInterrupted(fixture.ctx, fixture.service.now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered.Turns == 0 {
+		t.Fatal("recovery did not settle the canceled preparation turn")
+	}
+	stored, err = fixture.database.Turn(fixture.ctx, turn.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != domain.TurnInterrupted {
+		t.Fatalf("recovered turn status=%s, want interrupted", stored.Status)
+	}
+	pending, err := fixture.database.PendingInboxCount(fixture.ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending != 1 {
+		t.Fatalf("queued owner message pending after recovery=%d, want 1 (message was consumed during shutdown)", pending)
+	}
+}
+
+// A real user interruption is not a shutdown cancellation: it must still
+// settle the turn as interrupted and let its afterTurnTerminal consume the
+// queued owner message through a successor turn.
+func TestUserInterruptStillSettlesAndConsumesQueuedOwnerMessage(t *testing.T) {
+	fixture := newPetTaskFixture(t)
+	task, turn := fixture.createOrphanTurn(t, domain.TurnQueued)
+	if _, err := fixture.service.SubmitMessage(fixture.ctx, task.ID, "queued owner message"); err != nil {
+		t.Fatal(err)
+	}
+	entered, release := fixture.blockPreparation(t)
+
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	defer cancelRun()
+	fixture.service.SetRunContext(runCtx)
+	turnCtx, cancelTurn := context.WithCancel(runCtx)
+	defer cancelTurn()
+	fixture.service.mu.Lock()
+	fixture.service.cancels[turn.ID] = cancelTurn
+	fixture.service.mu.Unlock()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		fixture.service.runTurn(turnCtx, turn.ID)
+	}()
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("runTurn never reached the preparation secret lookup")
+	}
+	if err := fixture.service.InterruptTurn(fixture.ctx, turn.ID); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("runTurn did not return after the user interruption")
+	}
+	stored, err := fixture.database.Turn(fixture.ctx, turn.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != domain.TurnInterrupted || stored.FinishedAt.IsZero() {
+		t.Fatalf("user interrupt left status=%s finished_at=%v", stored.Status, stored.FinishedAt)
+	}
+	if count := fixture.interruptedItems(t, task.ID, turn.ID); count != 1 {
+		t.Fatalf("turn_interrupted items=%d, want 1", count)
+	}
+	waitForTask(t, fixture.database, task.ID, domain.TaskWaitingUser)
+	turns, err := fixture.database.ListTurns(fixture.ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(turns) != 2 {
+		t.Fatalf("turns after user interruption=%d, want successor turn for the queued message", len(turns))
+	}
+	if turns[1].Status != domain.TurnSucceeded || !strings.Contains(turns[1].Instruction, "queued owner message") {
+		t.Fatalf("queued owner message was not delivered to a successor turn: %#v", turns[1])
+	}
+	if pending, err := fixture.database.PendingInboxCount(fixture.ctx, task.ID); err != nil || pending != 0 {
+		t.Fatalf("pending after user interruption=%d err=%v, want 0", pending, err)
 	}
 }
 

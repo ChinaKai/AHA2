@@ -1375,7 +1375,12 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 	_ = s.store.UpdateTurn(context.Background(), turn, turn.Status)
 	if executeErr != nil {
 		if errors.Is(executeErr, context.Canceled) {
-			s.interruptTurn(context.Background(), &turn, task)
+			if !s.runCanceled() {
+				// A user interruption settles the running turn; a shutdown
+				// cancellation is left to RecoverInterrupted so its claimed inbox
+				// messages are requeued rather than marked processed.
+				s.interruptTurn(context.Background(), &turn, task)
+			}
 			return
 		}
 		switch {
@@ -1787,6 +1792,18 @@ func terminalWriteContext() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), terminalWriteTimeout)
 }
 
+// runCanceled reports whether the shared run context has been canceled, i.e.
+// the process is shutting down. A turn canceled by that shared context is left
+// non-terminal on purpose: RecoverInterrupted requeues its claimed inbox items
+// on the next start, while settling it here would mark them processed and
+// silently drop queued owner messages. A user interruption cancels only the
+// turn's own context, so this stays false and keeps the original semantics.
+func (s *Service) runCanceled() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.closing || s.runContext != nil && s.runContext.Err() != nil
+}
+
 // settleCanceledTurn settles a turn whose run context was canceled before it
 // started executing. Such a turn returns through preparation error paths that
 // cannot write with the canceled context, and the runTurn defer removes the
@@ -1794,17 +1811,11 @@ func terminalWriteContext() (context.Context, context.CancelFunc) {
 //
 // Only queued/preparing/starting turns are touched: once execution started the
 // executor's own cancellation path settles the turn, and a stored succeeded or
-// failed result always wins because terminal statuses are skipped.
+// failed result always wins because terminal statuses are skipped. A shutdown
+// cancellation is not a user interruption, so it leaves the turn non-terminal
+// for RecoverInterrupted to requeue its claimed inbox items.
 func (s *Service) settleCanceledTurn(runCtx context.Context, turnID string) {
-	if runCtx.Err() == nil {
-		return
-	}
-	s.mu.Lock()
-	closing := s.closing
-	s.mu.Unlock()
-	if closing {
-		// Shutdown recovery marks unfinished turns interrupted on the next start;
-		// settling here would also schedule successor turns while shutting down.
+	if runCtx.Err() == nil || s.runCanceled() {
 		return
 	}
 	ctx, cancel := terminalWriteContext()
@@ -1827,7 +1838,13 @@ func (s *Service) settleCanceledTurn(runCtx context.Context, turnID string) {
 
 func (s *Service) failTurn(ctx context.Context, turn *domain.Turn, task domain.Task, cause error) {
 	if ctx.Err() != nil || errors.Is(cause, context.Canceled) {
-		// Cancellation is an interruption, not a backend failure, and the
+		if s.runCanceled() {
+			// Shutdown canceled the turn. Leave it non-terminal so the claimed
+			// inbox stays recoverable instead of being marked processed through
+			// afterTurnTerminal.
+			return
+		}
+		// A user interruption is an interruption, not a backend failure, and the
 		// settlement must not inherit the canceled run context.
 		s.interruptTurn(context.Background(), turn, task)
 		return
