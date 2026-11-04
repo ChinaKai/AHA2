@@ -20,7 +20,7 @@ import {DEFAULT_TASK_STATUS_FILTERS, LOCAL_TASK_DEVICE_FILTER, TASK_STATUS_GROUP
 import type {TaskStatusGroup} from "./task_filters.js";
 import {TASK_TOOL_DEFAULT_WIDTH, normalizePinnedTaskTool, normalizeTaskToolMode, normalizeTaskToolWidth, renderTaskToolButtons, renderTaskToolContent, renderTaskToolPanel} from "./task_tools.js";
 import type {TaskTool, TaskToolMode} from "./task_tools.js";
-import {TASK_SLASH_COMMANDS, bindMessageBubbleControls, captureInteractiveRegion, clearNavigationSnapshot, eventRefreshesTaskList, exactSlashCommand, executeAgentSessionAction, loadNavigationSnapshot, matchingSlashCommands, paginateItems, paginationHTML, renderWorkspaceDetection, restoreInteractiveRegion, saveNavigationSnapshot, textMatchesQuery} from "./ui_helpers.js";
+import {TASK_SLASH_COMMANDS, bindMessageBubbleControls, captureInteractiveRegion, clearNavigationSnapshot, eventRefreshesTaskList, exactSlashCommand, executeAgentSessionAction, loadNavigationSnapshot, matchingSlashCommands, paginateItems, paginationHTML, petWatchActionKeys, renderWorkspaceDetection, restoreInteractiveRegion, saveNavigationSnapshot, textMatchesQuery} from "./ui_helpers.js";
 import type {InteractiveRegionState} from "./ui_helpers.js";
 import {
   compactNumber,
@@ -6081,15 +6081,18 @@ function renderPetWatches(items: Array<{task_id: string; code: string; title: st
   return hint + items.map(item => {
     const title = `${item.code || item.task_id} · ${item.title || item.task_id}`;
     const reason = item.reason ? petWatchReasonLabel(item.reason) : "-";
-    let actions: string;
-    if (!item.watched) {
-      actions = `<div class="pet-watch-actions"><button type="button" data-pet-watch-follow data-pet-watch-task="${escapeHTML(item.task_id)}">${t("petWorkbench.followTask")}</button></div>`;
-    } else if (item.ignored) {
-      actions = `<div class="pet-watch-actions"><button type="button" data-pet-watch-ignore="false" data-pet-watch-task="${escapeHTML(item.task_id)}">${t("petWorkbench.restoreFollow")}</button></div>`;
-    } else {
-      actions = `<div class="pet-watch-actions"><button type="button" data-pet-watch-unfollow data-pet-watch-task="${escapeHTML(item.task_id)}">${t("petWorkbench.unfollowTask")}</button><button type="button" data-pet-watch-ignore="true" data-pet-watch-task="${escapeHTML(item.task_id)}">${t("petWorkbench.ignoreTask")}</button></div>`;
-    }
-    const followState = !item.watched ? "" : item.ignored ? ` · ${t("petWorkbench.followIgnored")}` : ` · ${t("petWorkbench.following")}`;
+    const taskID = escapeHTML(item.task_id);
+    const actions = `<div class="pet-watch-actions">${petWatchActionKeys(item).map(action => {
+      switch (action) {
+        case "follow": return `<button type="button" data-pet-watch-follow data-pet-watch-task="${taskID}">${t("petWorkbench.followTask")}</button>`;
+        case "unfollow": return `<button type="button" data-pet-watch-unfollow data-pet-watch-task="${taskID}">${t("petWorkbench.unfollowTask")}</button>`;
+        case "ignore": return `<button type="button" data-pet-watch-ignore="true" data-pet-watch-task="${taskID}">${t("petWorkbench.ignoreTask")}</button>`;
+        case "restoreIgnored": return `<button type="button" data-pet-watch-ignore="false" data-pet-watch-task="${taskID}">${t("petWorkbench.restoreIgnored")}</button>`;
+        case "restoreFollow": return `<button type="button" data-pet-watch-ignore="false" data-pet-watch-task="${taskID}">${t("petWorkbench.restoreFollow")}</button>`;
+        default: return "";
+      }
+    }).join("")}</div>`;
+    const followState = item.ignored ? ` · ${t("petWorkbench.followIgnored")}` : item.watched ? ` · ${t("petWorkbench.following")}` : "";
     const meta = item.watched
       ? `${t("petWorkbench.followReason")}: ${escapeHTML(reason)} · ${t("petWorkbench.followUpdated")}: ${escapeHTML(formatDateTime(item.updated_at))}`
       : `${t("petWorkbench.followUpdated")}: ${escapeHTML(formatDateTime(item.updated_at))}`;

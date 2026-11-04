@@ -443,3 +443,69 @@ func TestChannelDeliveryRetryBackoffAndLeaseRecovery(t *testing.T) {
 		t.Fatalf("lease recovery claim=%#v err=%v", claimed, err)
 	}
 }
+
+func TestConversationPageReadsLiveChannelDeliveryState(t *testing.T) {
+	ctx := context.Background()
+	database, err := Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	instance, conversation := createDeliveryTestInstance(t, database)
+	now := time.Now().UTC()
+	item := enqueueTestDelivery(t, database, instance, conversation, 1, now.Add(-time.Minute))
+
+	// The route card snapshots delivery_state=pending when the outbox row is
+	// created.
+	itemID := domain.NewID("conversation")
+	payload := encodeJSON(map[string]any{
+		"status_card": true, "message_status": "replied",
+		"delivery_id": item.ID, "delivery_state": "pending",
+		"inbound_receipt_id": "receipt-live-state",
+	})
+	if _, err := database.db.ExecContext(ctx, `
+		INSERT INTO conversation_items(
+			id,task_id,round_id,turn_id,agent_id,stream_agent_id,from_agent_id,to_agent_id,
+			route_kind,category,kind,summary,payload_json,created_at
+		) VALUES(?,?,'','', 'aha','main','aha','main','channel_route','update','agent_channel_route','reply',?,?)`,
+		itemID, conversation.HostTaskID, payload, timeString(now),
+	); err != nil {
+		t.Fatal(err)
+	}
+	readState := func() string {
+		t.Helper()
+		page, err := database.ConversationPage(ctx, conversation.HostTaskID, 0, 0, 10, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, conversationItem := range page.Items {
+			if conversationItem.ID == itemID {
+				return stringValue(conversationItem.Payload["delivery_state"])
+			}
+		}
+		t.Fatalf("conversation item %s missing from page", itemID)
+		return ""
+	}
+
+	if state := readState(); state != "pending" {
+		t.Fatalf("pending card state=%q", state)
+	}
+	if _, err := database.db.ExecContext(ctx,
+		`UPDATE channel_delivery_outbox SET state='delivered',outcome_certainty='provider_accepted' WHERE id=?`, item.ID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	// The card must not claim client delivery: stored "delivered" is only the
+	// provider accepting the message, so it reads back as provider_accepted.
+	if state := readState(); state != "provider_accepted" {
+		t.Fatalf("provider accepted card state=%q", state)
+	}
+	if _, err := database.db.ExecContext(ctx,
+		`UPDATE channel_delivery_outbox SET state='dead_letter',outcome_certainty='confirmed_failure' WHERE id=?`, item.ID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if state := readState(); state != "dead_letter" {
+		t.Fatalf("dead letter card state=%q", state)
+	}
+}

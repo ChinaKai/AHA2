@@ -94,6 +94,51 @@ func TestPetWatchAPIListIgnoreAndRemove(t *testing.T) {
 		t.Fatalf("workbench=%d %#v", response.StatusCode, workbench)
 	}
 
+	// Ignore directly without following first, then restore back to the
+	// unfollowed list instead of silently starting a follow.
+	var ignored struct {
+		Watch struct {
+			Ignored bool `json:"ignored"`
+		} `json:"watch"`
+	}
+	response = requestJSON(t, client, http.MethodPatch, server.URL+"/api/v1/pet/watches/"+task.ID,
+		map[string]any{"ignored": true}, csrf)
+	decodeResponse(t, response, &ignored)
+	if response.StatusCode != http.StatusOK || !ignored.Watch.Ignored {
+		t.Fatalf("ignore without follow=%d %#v", response.StatusCode, ignored)
+	}
+	response.Body.Close()
+	response = requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/pet/workbench", nil, "")
+	var ignoredWorkbench struct {
+		Watches []struct {
+			TaskID  string `json:"task_id"`
+			Watched bool   `json:"watched"`
+			Ignored bool   `json:"ignored"`
+		} `json:"watches"`
+	}
+	decodeResponse(t, response, &ignoredWorkbench)
+	if len(ignoredWorkbench.Watches) != 1 || ignoredWorkbench.Watches[0].Watched || !ignoredWorkbench.Watches[0].Ignored {
+		t.Fatalf("ignored-unwatched workbench=%#v", ignoredWorkbench.Watches)
+	}
+	response = requestJSON(t, client, http.MethodPatch, server.URL+"/api/v1/pet/watches/"+task.ID,
+		map[string]any{"ignored": false}, csrf)
+	var restored struct {
+		Watch struct {
+			Ignored bool `json:"ignored"`
+		} `json:"watch"`
+	}
+	decodeResponse(t, response, &restored)
+	if response.StatusCode != http.StatusOK || restored.Watch.Ignored {
+		t.Fatalf("restore without follow=%d %#v", response.StatusCode, restored)
+	}
+	response.Body.Close()
+	response = requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/pet/workbench", nil, "")
+	decodeResponse(t, response, &ignoredWorkbench)
+	if len(ignoredWorkbench.Watches) != 1 || ignoredWorkbench.Watches[0].Watched || ignoredWorkbench.Watches[0].Ignored {
+		t.Fatalf("restored-unwatched workbench=%#v", ignoredWorkbench.Watches)
+	}
+	response.Body.Close()
+
 	response = requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/pet/watches/"+task.ID, nil, csrf)
 	var followed struct {
 		Watch struct {
@@ -107,11 +152,6 @@ func TestPetWatchAPIListIgnoreAndRemove(t *testing.T) {
 
 	response = requestJSON(t, client, http.MethodPatch, server.URL+"/api/v1/pet/watches/"+task.ID,
 		map[string]any{"ignored": true}, csrf)
-	var ignored struct {
-		Watch struct {
-			Ignored bool `json:"ignored"`
-		} `json:"watch"`
-	}
 	decodeResponse(t, response, &ignored)
 	if response.StatusCode != http.StatusOK || !ignored.Watch.Ignored {
 		t.Fatalf("ignore=%d %#v", response.StatusCode, ignored)

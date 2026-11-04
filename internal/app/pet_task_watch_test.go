@@ -158,6 +158,85 @@ func TestPetTaskWatchListIncludesUnwatchedActiveOrdinaryTasks(t *testing.T) {
 	t.Fatalf("followed task disappeared from list: %#v", views)
 }
 
+func TestPetTaskWatchIgnoreWithoutFollowRestoresToUnfollowed(t *testing.T) {
+	fixture := newPetTaskFixture(t)
+	if _, err := fixture.service.OwnerAssistant(fixture.ctx); err != nil {
+		t.Fatal(err)
+	}
+	now := fixture.service.now().UTC()
+	project := domain.Project{ID: "project-ignore-unwatched", Name: "Ignore unwatched", ProjectType: "local", CreatedAt: now, UpdatedAt: now}
+	workspace := domain.Workspace{
+		ID: "workspace-ignore-unwatched", ProjectID: project.ID, Name: "Ignore unwatched",
+		Locality: "local", Transport: "native", RootPath: t.TempDir(), Health: "ready",
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := fixture.database.CreateProject(fixture.ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.database.CreateWorkspace(fixture.ctx, workspace); err != nil {
+		t.Fatal(err)
+	}
+	task, err := fixture.service.CreateTask(fixture.ctx, CreateTaskInput{
+		ProjectID: project.ID, WorkspaceID: workspace.ID, Title: "ignored without follow", Request: "ignore me",
+		ModelID: fixture.model.ID, Isolation: "inplace", Filesystem: "workspace-write",
+		Approval: "never", CollaborationMode: "single", MaxAgents: 1,
+		KnowledgePolicy: "inherit", StartMode: "manual",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Ignoring an unfollowed Task stores an ignore-only row instead of starting
+	// a follow.
+	watch, err := fixture.service.SetPetTaskWatchIgnored(fixture.ctx, task.ID, true)
+	if err != nil || !watch.Ignored || watch.Reason != petWatchReasonIgnored {
+		t.Fatalf("ignore without follow watch=%#v err=%v", watch, err)
+	}
+	views, err := fixture.service.PetTaskWatchList(fixture.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ignoredView, found := PetTaskWatchView{}, false
+	for _, view := range views {
+		if view.TaskID == task.ID {
+			ignoredView, found = view, true
+		}
+	}
+	if !found || ignoredView.Watched || !ignoredView.Ignored {
+		t.Fatalf("ignored-unwatched view=%#v found=%v", ignoredView, found)
+	}
+	if _, err := fixture.service.PetWatchTask(fixture.ctx, task.ID); err == nil {
+		t.Fatal("pet re-watched an ignored but unfollowed Task")
+	}
+	// Automatic watching must respect the ignore decision too.
+	fixture.service.watchPetTask(fixture.ctx, task.ID, "auto")
+	if stored, err := fixture.database.PetTaskWatch(fixture.ctx, task.ID); err != nil || !stored.Ignored || stored.Reason != petWatchReasonIgnored {
+		t.Fatalf("auto watch revived ignore row=%#v err=%v", stored, err)
+	}
+
+	// Restoring returns the Task to the unfollowed list rather than following it.
+	restored, err := fixture.service.SetPetTaskWatchIgnored(fixture.ctx, task.ID, false)
+	if err != nil || restored.Ignored {
+		t.Fatalf("restore watch=%#v err=%v", restored, err)
+	}
+	if _, err := fixture.database.PetTaskWatch(fixture.ctx, task.ID); err == nil {
+		t.Fatal("restore of an ignore-only row kept the watch row")
+	}
+	views, err = fixture.service.PetTaskWatchList(fixture.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, view := range views {
+		if view.TaskID == task.ID {
+			if view.Watched || view.Ignored {
+				t.Fatalf("restored-unwatched view=%#v", view)
+			}
+			return
+		}
+	}
+	t.Fatalf("restored Task disappeared from the unfollowed list: %#v", views)
+}
+
 func TestPetWatchedTaskStatusNotification(t *testing.T) {
 	fixture := newPetTaskFixture(t)
 	if _, err := fixture.service.OwnerAssistant(fixture.ctx); err != nil {

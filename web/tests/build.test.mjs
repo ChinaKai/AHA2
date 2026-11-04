@@ -1597,6 +1597,36 @@ test("conversation renders agent config, channel outreach, and turn duration car
   assert.doesNotMatch(html, /接口字段需要确认 <script>/);
 });
 
+test("channel route cards map provider acceptance without claiming read receipts", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const {renderConversationWithOrchestration} = await import(pathToFileURL(resolve(root, "dist", "task_agents.js")));
+  const render = (kind, payload) => renderConversationWithOrchestration([{
+    sequence: 1, id: "card-1", task_id: "task-1", agent_id: "aha", stream_agent_id: "main",
+    category: "update", kind, summary: "渠道消息",
+    payload: {inbound_receipt_id: "receipt-1", channel: {display_name: "团队飞书"}, ...payload},
+    created_at: "2026-11-04T09:00:00Z",
+  }], null, () => "");
+  const status = payload => render("agent_channel_route", {status_card: true, message_status: "replied", reply_message: "测试回复", ...payload});
+
+  assert.match(status({delivery_state: "pending"}), /回复已排队/);
+  assert.match(status({delivery_state: "leased"}), /回复发送中/);
+  const accepted = status({delivery_state: "provider_accepted"});
+  assert.match(accepted, /已回复（飞书已接受）/);
+  assert.doesNotMatch(accepted, /已读|已接收/);
+  assert.match(status({delivery_state: "delivered"}), /已回复（飞书已接受）/);
+  const failed = status({delivery_state: "failed"});
+  assert.match(failed, /回复发送失败/);
+  assert.doesNotMatch(failed, /已回复：/);
+  assert.match(failed, /回复内容：/);
+  assert.match(status({delivery_state: "dead_letter"}), /回复投递失败（待重放）/);
+  assert.doesNotMatch(status({delivery_state: "failed"}), /已回复/);
+
+  // Non-status route and outreach cards use the same delivery labels.
+  assert.match(render("agent_channel_outreach", {delivery_state: "leased", message: "协调"}), /发送中/);
+  assert.match(render("agent_channel_route", {delivery_state: "provider_accepted"}), /飞书已接受/);
+  assert.doesNotMatch(render("agent_channel_route", {delivery_state: "provider_accepted"}), /已读|已接收/);
+});
+
 test("stalled turns explain that backend streaming is silent", async () => {
   const root = resolve(import.meta.dirname, "..");
   const agents = await readFile(resolve(root, "dist", "task_agents.js"), "utf8");
@@ -2344,6 +2374,7 @@ test("pet workbench follows tab exposes unfollow and ignore actions", async () =
   assert.match(main, /data-pet-watch-unfollow/);
   assert.match(main, /data-pet-watch-ignore="true"/);
   assert.match(main, /data-pet-watch-ignore="false"/);
+  assert.match(main, /petWatchActionKeys\(item\)/);
   assert.match(api, /followPetTask/);
   assert.match(api, /removePetTaskWatch/);
   assert.match(api, /setPetTaskWatchIgnored/);
@@ -2351,6 +2382,28 @@ test("pet workbench follows tab exposes unfollow and ignore actions", async () =
   assert.match(i18n, /"petWorkbench\.follows": "Following"/);
   assert.match(i18n, /"petWorkbench\.followTask": "关注"/);
   assert.match(i18n, /"petWorkbench\.followTask": "Follow"/);
+  assert.match(i18n, /"petWorkbench\.restoreIgnored": "恢复"/);
+  assert.match(i18n, /"petWorkbench\.restoreIgnored": "Restore"/);
+});
+
+test("pet workbench actions cover unfollowed, followed, ignored, and restored rows", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const {petWatchActionKeys} = await import(pathToFileURL(resolve(root, "dist", "ui_helpers.js")));
+  // An unfollowed row offers follow and ignore without a prior follow.
+  assert.deepEqual(petWatchActionKeys({watched: false, ignored: false}), ["follow", "ignore"]);
+  // A followed row keeps unfollow plus ignore.
+  assert.deepEqual(petWatchActionKeys({watched: true, ignored: false}), ["unfollow", "ignore"]);
+  // Restoring a followed row resumes following; restoring an ignore-only row
+  // returns it to the unfollowed list instead of silently following it.
+  assert.deepEqual(petWatchActionKeys({watched: true, ignored: true}), ["restoreFollow"]);
+  assert.deepEqual(petWatchActionKeys({watched: false, ignored: true}), ["restoreIgnored"]);
+
+  const main = await readFile(resolve(root, "src", "main.ts"), "utf8");
+  // The unwatched branch now renders the same ignore action, and its restore
+  // button reuses the existing ignored=false handler.
+  assert.match(main, /case "ignore": return `<button[^`]*data-pet-watch-ignore="true"/);
+  assert.match(main, /case "restoreIgnored": return `<button[^`]*data-pet-watch-ignore="false"/);
+  assert.match(main, /\[data-pet-watch-ignore\]"\)\.forEach[\s\S]*?const ignored = button\.dataset\.petWatchIgnore === "true"[\s\S]*?api\.setPetTaskWatchIgnored\(taskID, ignored\)[\s\S]*?await load\(\)/);
 });
 
 test("task detail renders owner permission request decisions", async () => {

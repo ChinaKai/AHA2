@@ -307,7 +307,7 @@ function renderChannelReplyCard(item: ConversationItem): string {
   const endpointKind = String(channel.endpoint_kind || "");
   const sourceLabel = endpointKind === "group_digital_human" ? "群聊" : endpointKind === "assistant_dm" ? "私聊" : "渠道";
   const state = String(payload.delivery_state || "pending");
-  const status = state === "failed" ? "发送失败" : channelDeliveryStateLabel(state);
+  const status = channelDeliveryStateLabel(state);
   const message = String(payload.message || item.summary || "");
   return `<article class="aha-orchestration-card aha-channel-route-card aha-channel-reply-card"><header><strong>${icon("send")}AHA 渠道回复</strong><span>${escapeHTML(status)}</span><time>${systemCardTime(item)}</time></header><p>${escapeHTML(destination)} · 回复 ${escapeHTML(recipientName)}</p>${message ? `<div class="aha-route-message">${escapeHTML(message)}</div>` : ""}<div><div><strong>${escapeHTML(recipientName)}</strong><span>${escapeHTML(sourceLabel)}</span><b>${escapeHTML(status)}</b></div></div></article>`;
 }
@@ -321,7 +321,8 @@ function renderChannelRouteCard(item: ConversationItem): string {
     const reason = String(payload.status_reason || "");
     const reasonText = String(payload.status_reason_text || "");
     const deliveryState = String(payload.delivery_state || "");
-    const status = messageStatus === "replied" ? (deliveryState === "delivered" ? "已回复（飞书已接受）" : "回复已排队") :
+    const deliveryStatus = channelDeliveryStateLabel(deliveryState);
+    const status = messageStatus === "replied" ? repliedDeliveryLabel(deliveryState, deliveryStatus) :
       messageStatus === "pending_reply" ? "等待回复" :
         messageStatus === "not_replied" ? (reason === "reply_decision_end" ? "无需回复" : "未回复") :
         messageStatus === "failed" ? "处理失败" : messageStatus === "interrupted" ? "已中断" : "已处理";
@@ -335,7 +336,10 @@ function renderChannelRouteCard(item: ConversationItem): string {
     const who = String((payload.actor as Record<string, unknown> | undefined)?.display_name || "渠道参与者");
     const replyMessage = String(payload.reply_message || (messageStatus === "replied" ? payload.message : "") || "");
     const inboundMessage = String(payload.inbound_message || (messageStatus !== "replied" ? payload.message : "") || "");
-    const resultLabel = messageStatus === "replied" ? "已回复" :
+    // Only provider-accepted replies are "已回复"; queued or failed deliveries
+    // still show the generated body, but the label must not claim it went out.
+    const replyAccepted = deliveryState === "provider_accepted" || deliveryState === "delivered";
+    const resultLabel = messageStatus === "replied" ? (replyAccepted ? "已回复" : "回复内容") :
       messageStatus === "not_replied" ? (reason === "reply_decision_end" ? "无需回复" : "未回复") : status;
     const result = messageStatus === "replied" ? replyMessage : detail;
     return `<article class="aha-orchestration-card aha-channel-route-card aha-channel-status-card" data-channel-status="${escapeHTML(messageStatus)}"><header><strong>${icon("send")}AHA 渠道消息</strong><span>${escapeHTML(status)}</span><time>${systemCardTime(item)}</time></header><p>${escapeHTML(destination)} · ${escapeHTML(who)}</p>${result ? `<div class="aha-route-message"><strong>${escapeHTML(resultLabel)}：</strong>${escapeHTML(result)}</div>` : ""}${messageStatus !== "replied" && inboundMessage ? `<div class="aha-route-message">${escapeHTML(inboundMessage)}</div>` : ""}</article>`;
@@ -350,18 +354,40 @@ function renderChannelRouteCard(item: ConversationItem): string {
   return `<article class="aha-orchestration-card aha-channel-route-card"><header><strong>${icon("send")}AHA 外部路由</strong><span>${escapeHTML(status)}</span><time>${systemCardTime(item)}</time></header><p>${escapeHTML(destination)} · ${escapeHTML(detail)}</p>${payload.message ? `<div class="aha-route-message">${escapeHTML(String(payload.message))}</div>` : ""}</article>`;
 }
 
-// "delivered" only means the provider accepted the message and returned an ID.
-// It is not a client delivery/read receipt, so the label must not claim the
-// recipient saw it.
+// "delivered"/"provider_accepted" only mean the provider accepted the message
+// and returned an ID. They are not client delivery/read receipts, so no label
+// may claim the recipient saw it.
 function channelDeliveryStateLabel(state: string): string {
   switch (state) {
     case "pending": return "已排队";
     case "leased": return "发送中";
+    case "provider_accepted":
     case "delivered": return "飞书已接受";
+    case "replayed": return "已重新投递";
+    case "failed": return "发送失败";
     case "dead_letter": return "投递失败（待重放）";
     case "suppressed":
     case "skipped": return "未外发";
     default: return state || "已排队";
+  }
+}
+
+// A replied status card reports the delivery of the generated reply, not just
+// the inbound message status. Pending/sending messages are not "replied yet"
+// from the provider's point of view, and failures must not look delivered.
+function repliedDeliveryLabel(state: string, deliveryStatus: string): string {
+  switch (state) {
+    case "":
+    case "pending": return "回复已排队";
+    case "leased": return "回复发送中";
+    case "provider_accepted":
+    case "delivered": return `已回复（${deliveryStatus}）`;
+    case "replayed": return "回复已重新投递";
+    case "failed":
+    case "dead_letter":
+    case "suppressed":
+    case "skipped": return `回复${deliveryStatus}`;
+    default: return `已回复（${deliveryStatus}）`;
   }
 }
 

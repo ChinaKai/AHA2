@@ -541,13 +541,13 @@ func (s *Store) ConversationPageForAgent(
 		limit = 50
 	}
 	args := []any{taskID, agentID}
-	where := []string{"task_id=?", "stream_agent_id=?"}
+	where := []string{"item.task_id=?", "item.stream_agent_id=?"}
 	if before > 0 {
-		where = append(where, "sequence<?")
+		where = append(where, "item.sequence<?")
 		args = append(args, before)
 	}
 	if after > 0 {
-		where = append(where, "sequence>?")
+		where = append(where, "item.sequence>?")
 		args = append(args, after)
 	}
 	if len(categories) > 0 {
@@ -556,19 +556,26 @@ func (s *Store) ConversationPageForAgent(
 			placeholders = append(placeholders, "?")
 			args = append(args, category)
 		}
-		where = append(where, "category IN ("+strings.Join(placeholders, ",")+")")
+		where = append(where, "item.category IN ("+strings.Join(placeholders, ",")+")")
 	}
 	order := "DESC"
 	if after > 0 {
 		order = "ASC"
 	}
 	args = append(args, limit+1)
+	// Channel route cards are created while the outbox row is still pending.
+	// Read the live delivery row by delivery_id so the card never keeps a stale
+	// delivery_state snapshot (or diverges from what the sender actually did).
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT sequence,id,task_id,round_id,turn_id,agent_id,stream_agent_id,from_agent_id,to_agent_id,route_kind,
-		       category,kind,summary,payload_json,created_at
-		FROM conversation_items
+		SELECT item.sequence,item.id,item.task_id,item.round_id,item.turn_id,item.agent_id,item.stream_agent_id,
+		       item.from_agent_id,item.to_agent_id,item.route_kind,item.category,item.kind,item.summary,
+		       item.payload_json,item.created_at,
+		       COALESCE(delivery.state,''),COALESCE(delivery.outcome_certainty,'')
+		FROM conversation_items item
+		LEFT JOIN channel_delivery_outbox delivery
+		  ON delivery.id=json_extract(item.payload_json,'$.delivery_id')
 		WHERE `+strings.Join(where, " AND ")+`
-		ORDER BY sequence `+order+` LIMIT ?`, args...)
+		ORDER BY item.sequence `+order+` LIMIT ?`, args...)
 	if err != nil {
 		return domain.ConversationPage{}, err
 	}
@@ -576,15 +583,24 @@ func (s *Store) ConversationPageForAgent(
 	items := make([]domain.ConversationItem, 0, limit+1)
 	for rows.Next() {
 		var item domain.ConversationItem
-		var payload, createdAt string
+		var payload, createdAt, deliveryState, deliveryCertainty string
 		if err := rows.Scan(
 			&item.Sequence, &item.ID, &item.TaskID, &item.RoundID, &item.TurnID, &item.AgentID,
 			&item.StreamAgentID, &item.FromAgentID, &item.ToAgentID, &item.RouteKind,
 			&item.Category, &item.Kind, &item.Summary, &payload, &createdAt,
+			&deliveryState, &deliveryCertainty,
 		); err != nil {
 			return domain.ConversationPage{}, err
 		}
 		item.Payload = decodeJSON(payload, map[string]any{})
+		if deliveryState != "" {
+			// "delivered" in the outbox means the provider accepted the message
+			// and returned an ID; it is never a client delivery/read receipt.
+			if deliveryState == "delivered" && deliveryCertainty == "provider_accepted" {
+				deliveryState = "provider_accepted"
+			}
+			item.Payload["delivery_state"] = deliveryState
+		}
 		item.CreatedAt = parseTime(createdAt)
 		items = append(items, item)
 	}

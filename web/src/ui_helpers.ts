@@ -1,5 +1,15 @@
 import type {Project, Task, Workspace, WorkspaceProbe} from "./types.js";
 
+export type PetWatchAction = "follow" | "unfollow" | "ignore" | "restoreIgnored" | "restoreFollow";
+
+// The follows tab lists both watched and unwatched Tasks. Ignoring is available
+// in either case, but restore must return an ignore-only row to the unfollowed
+// state instead of silently following it.
+export function petWatchActionKeys(item: {watched: boolean; ignored: boolean}): PetWatchAction[] {
+  if (!item.watched) return item.ignored ? ["restoreIgnored"] : ["follow", "ignore"];
+  return item.ignored ? ["restoreFollow"] : ["unfollow", "ignore"];
+}
+
 export interface NavigationSnapshot {
   view?: string;
   projectID?: string;
