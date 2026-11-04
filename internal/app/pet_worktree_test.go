@@ -217,14 +217,16 @@ func TestPetFinalizeTaskWorktreeRestoresCurrentBranch(t *testing.T) {
 	}
 }
 
-// stubGitRunner answers only the git calls removeFinalizedWorktree makes. The
-// worktree remove call fails with the Windows long-path message, which is the
-// condition the local fallback must handle.
+// stubGitRunner answers only the git calls removeFinalizedWorktree makes. By
+// default the worktree remove call fails with the Windows long-path message,
+// which is the condition the local fallback must handle.
 type stubGitRunner struct {
-	root     string
-	worktree string
-	locked   bool
-	calls    []string
+	root         string
+	worktree     string
+	locked       bool
+	removeReason string
+	statusStderr string
+	calls        []string
 }
 
 func (r *stubGitRunner) Run(_ context.Context, command workspacepkg.Command, _ workspacepkg.LineHandler) (workspacepkg.Result, error) {
@@ -239,15 +241,58 @@ func (r *stubGitRunner) Run(_ context.Context, command workspacepkg.Command, _ w
 		return workspacepkg.Result{ExitCode: 0, Stdout: output}, nil
 	case strings.Contains(joined, "submodule status --recursive"):
 		return workspacepkg.Result{ExitCode: 0}, nil
+	case strings.Contains(joined, "status --porcelain"):
+		return workspacepkg.Result{ExitCode: 0, Stderr: r.statusStderr}, nil
 	case strings.Contains(joined, "worktree remove"):
-		return workspacepkg.Result{
-			ExitCode: 128,
-			Stderr:   "error: failed to delete '" + r.worktree + "': Filename too long",
-		}, fmt.Errorf("git exited with code 128")
+		reason := r.removeReason
+		if reason == "" {
+			reason = "error: failed to delete '" + r.worktree + "': Filename too long"
+		}
+		return workspacepkg.Result{ExitCode: 128, Stderr: reason}, fmt.Errorf("git exited with code 128")
 	case strings.Contains(joined, "worktree prune"):
 		return workspacepkg.Result{ExitCode: 0}, nil
 	default:
 		return workspacepkg.Result{ExitCode: 0}, nil
+	}
+}
+
+func TestGitWorktreeStatusRejectsLongPathWarning(t *testing.T) {
+	runner := &stubGitRunner{
+		root: "r", worktree: "w",
+		statusStderr: "warning: could not open directory 'deep': Filename too long",
+	}
+	if _, err := gitWorktreeStatus(context.Background(), runner, "w"); err == nil {
+		t.Fatal("long-path status warning was treated as a clean tree")
+	}
+}
+
+func TestRemoveFinalizedWorktreeDoesNotFallbackForOtherErrors(t *testing.T) {
+	root := realTempDir(t)
+	worktree := filepath.Join(root, "task")
+	if err := os.MkdirAll(worktree, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	item := domain.Workspace{Locality: "local", Transport: "native", RootPath: root}
+	runner := &stubGitRunner{
+		root: root, worktree: worktree,
+		removeReason: "error: failed to delete '" + worktree + "': Permission denied",
+	}
+
+	service := &Service{}
+	err := service.removeFinalizedWorktree(context.Background(), item, runner, root, worktree)
+	if err == nil {
+		t.Fatal("permission failure was not reported")
+	}
+	if !strings.Contains(err.Error(), worktree) || !strings.Contains(err.Error(), "Permission denied") {
+		t.Fatalf("removal error is not actionable: %v", err)
+	}
+	if _, statErr := os.Stat(worktree); statErr != nil {
+		t.Fatalf("worktree was deleted after a non-MAX_PATH git failure: %v", statErr)
+	}
+	for _, call := range runner.calls {
+		if strings.Contains(call, "worktree prune") {
+			t.Fatalf("fallback pruned metadata after a non-MAX_PATH failure: %v", runner.calls)
+		}
 	}
 }
 
@@ -426,4 +471,157 @@ func TestPetFinalizeTaskWorktreeCleansUnchangedTask(t *testing.T) {
 	if err := exec.Command("git", "-C", root, "rev-parse", "--verify", task.TaskBranch).Run(); err == nil {
 		t.Fatalf("task branch %s still exists", task.TaskBranch)
 	}
+}
+
+func TestPetFinalizeTaskWorktreeRefusesLockedWorktreeWithCaseMismatchedPath(t *testing.T) {
+	fixture, project, ws, root := petGitFixture(t)
+	task, worktree := createPreparedPetWorktreeTask(t, fixture, project, ws)
+	if err := os.WriteFile(filepath.Join(worktree, "change.txt"), []byte("merged\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, worktree, "add", "change.txt")
+	runGitTest(t, worktree, "commit", "-m", "task change")
+	runGitTest(t, root, "worktree", "lock", "--reason", "test lock", worktree)
+
+	// Git records a canonical uppercase drive, while the Task record may use a
+	// lowercase drive or another spelling. Both must still resolve to the lock.
+	recorded := worktree
+	if len(recorded) > 1 && recorded[1] == ':' {
+		recorded = strings.ToLower(recorded[:1]) + recorded[1:]
+	}
+	stored, err := fixture.database.Task(fixture.ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.database.UpdateTaskWorkspace(fixture.ctx, task.ID, recorded, stored.BaseCommit, stored.TaskBranch, stored.TargetBranch, timeString(fixture.createdAt)); err != nil {
+		t.Fatal(err)
+	}
+	completeTaskForTest(t, fixture, task)
+
+	result, err := fixture.service.PetFinalizeTaskWorktree(fixture.ctx, task.ID)
+	if err == nil {
+		t.Fatal("locked worktree was finalized")
+	}
+	if !strings.Contains(err.Error(), "已被 git lock") {
+		t.Fatalf("lock was not detected before removal: %v", err)
+	}
+	if result.WorktreeRemoved {
+		t.Fatalf("locked finalize reported worktree removal: %#v", result)
+	}
+	if _, statErr := os.Stat(filepath.Join(worktree, "change.txt")); statErr != nil {
+		t.Fatalf("locked worktree was deleted: %v", statErr)
+	}
+}
+
+func TestPetFinalizeTaskWorktreeRefusesDeepUntrackedFile(t *testing.T) {
+	fixture, project, ws, _ := petGitFixture(t)
+	task, worktree := createPreparedPetWorktreeTask(t, fixture, project, ws)
+	segments := make([]string, 0, 10)
+	for i := 0; i < 10; i++ {
+		segments = append(segments, fmt.Sprintf("%02d-%s", i, strings.Repeat("d", 28)))
+	}
+	deep := filepath.Join(append([]string{worktree}, segments...)...)
+	if len(deep) <= 260 {
+		t.Fatalf("test path is not long enough: %d characters", len(deep))
+	}
+	writeLongPathFile(t, filepath.Join(deep, "tracked.txt"), "tracked\n")
+	runGitTest(t, worktree, "-c", "core.longpaths=true", "add", ".")
+	runGitTest(t, worktree, "commit", "-m", "deep tracked directory")
+	untracked := filepath.Join(deep, "untracked.txt")
+	writeLongPathFile(t, untracked, "must survive\n")
+	if output := runGitTest(t, worktree, "-c", "core.longpaths=true", "status", "--porcelain"); !strings.Contains(output, "untracked.txt") {
+		t.Fatalf("test setup: git status does not see the deep untracked file: %q", output)
+	}
+	completeTaskForTest(t, fixture, task)
+
+	_, err := fixture.service.PetFinalizeTaskWorktree(fixture.ctx, task.ID)
+	if err == nil {
+		t.Fatal("worktree with a deep untracked file was finalized")
+	}
+	if !strings.Contains(err.Error(), "未提交改动") {
+		t.Fatalf("deep untracked file was not reported as dirty: %v", err)
+	}
+	if !longPathExists(untracked) {
+		t.Fatal("deep untracked file was deleted")
+	}
+	if _, statErr := os.Stat(worktree); statErr != nil {
+		t.Fatalf("worktree with deep untracked file was removed: %v", statErr)
+	}
+}
+
+func TestVerifyWorktreeSafeToRemoveRejectsUnmergedHead(t *testing.T) {
+	fixture, _, ws, root := petGitFixture(t)
+	taskID := domain.NewID("task")
+	taskBranch := "aha/" + taskID
+	prepared, err := workspacepkg.PrepareTaskWorkspace(fixture.ctx, ws, taskID, "main", taskBranch, "worktree", realTempDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(prepared.Path, "unmerged.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, prepared.Path, "add", "unmerged.txt")
+	runGitTest(t, prepared.Path, "commit", "-m", "unmerged change")
+
+	runner := workspacepkg.RunnerFor(ws)
+	err = verifyWorktreeSafeToRemove(fixture.ctx, runner, root, prepared.Path, "main")
+	if err == nil || !strings.Contains(err.Error(), "尚未合入") {
+		t.Fatalf("unmerged HEAD guard = %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(prepared.Path, "unmerged.txt")); statErr != nil {
+		t.Fatalf("unmerged worktree was modified: %v", statErr)
+	}
+}
+
+func TestPetFinalizeTaskWorktreeRefusesInitializedSubmodule(t *testing.T) {
+	fixture, project, ws, root := petGitFixture(t)
+	sub := realTempDir(t)
+	runGitTest(t, sub, "init", "-b", "main")
+	runGitTest(t, sub, "config", "user.name", "AHA2 Test")
+	runGitTest(t, sub, "config", "user.email", "aha2-test@example.com")
+	if err := os.WriteFile(filepath.Join(sub, "sub.txt"), []byte("sub\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, sub, "add", "sub.txt")
+	runGitTest(t, sub, "commit", "-m", "sub base")
+	runGitTest(t, root, "-c", "protocol.file.allow=always", "submodule", "add", filepath.ToSlash(sub), "sub")
+	runGitTest(t, root, "commit", "-m", "add submodule")
+
+	task, worktree := createPreparedPetWorktreeTask(t, fixture, project, ws)
+	runGitTest(t, worktree, "-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive")
+	completeTaskForTest(t, fixture, task)
+
+	_, err := fixture.service.PetFinalizeTaskWorktree(fixture.ctx, task.ID)
+	if err == nil {
+		t.Fatal("worktree with an initialized submodule was finalized")
+	}
+	if !strings.Contains(err.Error(), "子模块") {
+		t.Fatalf("submodule worktree error = %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(worktree, "sub")); statErr != nil {
+		t.Fatalf("submodule worktree was removed: %v", statErr)
+	}
+}
+
+func writeLongPathFile(t *testing.T, target, content string) {
+	t.Helper()
+	long, err := workspacepkg.LocalLongPath(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(long), 0o755); err != nil {
+		t.Fatalf("create long-path parent: %v", err)
+	}
+	if err := os.WriteFile(long, []byte(content), 0o644); err != nil {
+		t.Fatalf("write long-path file: %v", err)
+	}
+}
+
+func longPathExists(target string) bool {
+	long, err := workspacepkg.LocalLongPath(target)
+	if err != nil {
+		return false
+	}
+	_, statErr := os.Lstat(long)
+	return statErr == nil
 }

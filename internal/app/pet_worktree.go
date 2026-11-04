@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -65,6 +66,13 @@ func (s *Service) PetFinalizeTaskWorktree(ctx context.Context, taskID string) (P
 		return PetFinalizeTaskWorktreeResult{}, fmt.Errorf("Workspace 不存在")
 	}
 	runner := workspace.RunnerFor(item)
+	if gitLongPathConfigRequired(item) {
+		// Git for Windows only descends past MAX_PATH when core.longpaths is
+		// enabled. Without it, status can report a clean tree while missing
+		// untracked files in deep directories, so every finalize git command
+		// runs with the config explicitly enabled.
+		runner = longPathsGitRunner{Runner: runner}
+	}
 	root := item.RootPath
 	if sameGitPath(worktreePath, root) {
 		return PetFinalizeTaskWorktreeResult{}, fmt.Errorf("Task 没有实际创建独立 worktree（路径等于 Workspace 根目录），拒绝合并/清理")
@@ -81,11 +89,11 @@ func (s *Service) PetFinalizeTaskWorktree(ctx context.Context, taskID string) (P
 	if err != nil || !sameGitPath(toplevel, worktreePath) {
 		return PetFinalizeTaskWorktreeResult{}, fmt.Errorf("worktree 路径与仓库记录不一致，拒绝清理：%s", worktreePath)
 	}
-	status, err := gitText(ctx, runner, worktreePath, "status", "--porcelain")
+	status, err := gitWorktreeStatus(ctx, runner, worktreePath)
 	if err != nil {
 		return PetFinalizeTaskWorktreeResult{}, fmt.Errorf("检查 worktree 状态失败：%w", err)
 	}
-	if strings.TrimSpace(status) != "" {
+	if status != "" {
 		return PetFinalizeTaskWorktreeResult{}, fmt.Errorf("worktree 有未提交改动；请先在 Task 内提交或处理，未合并/清理：%s", worktreePath)
 	}
 
@@ -200,11 +208,11 @@ func (s *Service) mergeTaskWorktree(ctx context.Context, runner workspace.Runner
 // target branch, so a worktree can never be deleted before its commits are
 // merged. Force deletion is never used.
 func verifyWorktreeSafeToRemove(ctx context.Context, runner workspace.Runner, root, worktreePath, target string) error {
-	status, err := gitText(ctx, runner, worktreePath, "status", "--porcelain")
+	status, err := gitWorktreeStatus(ctx, runner, worktreePath)
 	if err != nil {
 		return fmt.Errorf("删除前检查 worktree 状态失败（路径 %s）：%w", worktreePath, err)
 	}
-	if strings.TrimSpace(status) != "" {
+	if status != "" {
 		return fmt.Errorf("worktree 有未提交改动，已保留：%s", worktreePath)
 	}
 	head, err := gitText(ctx, runner, worktreePath, "rev-parse", "HEAD")
@@ -245,7 +253,11 @@ func (s *Service) removeFinalizedWorktree(ctx context.Context, item domain.Works
 		return nil
 	}
 	gitReason := gitErrorText(removed, removeErr)
-	if !workspace.SupportsLocalRemoval(item) {
+	// Only a MAX_PATH failure may use the long-path fallback. Other failures
+	// (permissions, dirty contents, submodules, corrupt metadata, ...) must be
+	// reported and must keep the directory; bypassing git there could destroy
+	// data it deliberately refused to remove.
+	if !isPathTooLongFailure(gitReason) || !workspace.SupportsLocalRemoval(item) {
 		return fmt.Errorf("删除 worktree 失败（路径 %s）：%s", worktreePath, gitReason)
 	}
 	if err := workspace.RemoveAllLongPath(worktreePath); err != nil {
@@ -263,7 +275,6 @@ func gitWorktreeLocked(ctx context.Context, runner workspace.Runner, root, workt
 	if err != nil {
 		return false, err
 	}
-	want := cleanGitPath(worktreePath)
 	current := ""
 	for _, line := range strings.Split(output, "\n") {
 		line = strings.TrimSpace(line)
@@ -275,7 +286,10 @@ func gitWorktreeLocked(ctx context.Context, runner workspace.Runner, root, workt
 			continue
 		}
 		if line == "locked" || strings.HasPrefix(line, "locked ") {
-			if cleanGitPath(current) == want {
+			// Git records the canonical (usually uppercase-drive) path while
+			// Task records may use lowercase or backslashes. Compare with the
+			// same case-insensitive path rule used for registration checks.
+			if sameGitPath(current, worktreePath) {
 				return true, nil
 			}
 		}
@@ -303,6 +317,51 @@ func worktreeHasInitializedSubmodules(ctx context.Context, runner workspace.Runn
 		}
 	}
 	return false, nil
+}
+
+// longPathsGitRunner injects -c core.longpaths=true into git -C commands so
+// Git for Windows can traverse and delete deep paths. It is only applied when
+// the git process itself runs on Windows.
+type longPathsGitRunner struct {
+	workspace.Runner
+}
+
+func (r longPathsGitRunner) Run(ctx context.Context, command workspace.Command, handler workspace.LineHandler) (workspace.Result, error) {
+	if command.Executable == "git" && len(command.Args) >= 2 && command.Args[0] == "-C" {
+		args := make([]string, 0, len(command.Args)+2)
+		args = append(args, command.Args[0], command.Args[1], "-c", "core.longpaths=true")
+		args = append(args, command.Args[2:]...)
+		command.Args = args
+	}
+	return r.Runner.Run(ctx, command, handler)
+}
+
+func gitLongPathConfigRequired(item domain.Workspace) bool {
+	if workspace.IsWindowsWorkspace(item) {
+		return true
+	}
+	return runtime.GOOS == "windows" && workspace.SupportsLocalRemoval(item)
+}
+
+// gitWorktreeStatus returns porcelain status and treats a MAX_PATH warning on
+// stderr as an inspection failure. Git for Windows can exit 0 while silently
+// skipping deep untracked files; treating that as clean would delete data.
+func gitWorktreeStatus(ctx context.Context, runner workspace.Runner, worktreePath string) (string, error) {
+	result, err := gitRun(ctx, runner, worktreePath, "status", "--porcelain")
+	if err != nil {
+		return "", fmt.Errorf("%s", gitErrorText(result, err))
+	}
+	if isPathTooLongFailure(result.Stderr) {
+		return "", fmt.Errorf("git status 无法检查超长路径，拒绝判定为干净：%s", strings.TrimSpace(result.Stderr))
+	}
+	return strings.TrimSpace(result.Stdout), nil
+}
+
+func isPathTooLongFailure(text string) bool {
+	lower := strings.ToLower(text)
+	return strings.Contains(lower, "filename too long") ||
+		strings.Contains(lower, "file name too long") ||
+		strings.Contains(lower, "filename or extension is too long")
 }
 
 func gitWorktreePaths(ctx context.Context, runner workspace.Runner, root string) ([]string, error) {
