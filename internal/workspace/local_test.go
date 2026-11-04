@@ -11,8 +11,12 @@ import (
 )
 
 func TestPrependPathDirectoriesDeduplicatesAndPreservesOrder(t *testing.T) {
-	got := prependPathDirectories("/usr/bin:/bin", []string{"/home/u/.local/bin", "/usr/bin", " /home/u/.local/bin ", ""})
-	want := strings.Join([]string{"/home/u/.local/bin", "/usr/bin", "/bin"}, string(os.PathListSeparator))
+	sep := string(os.PathListSeparator)
+	got := prependPathDirectories(
+		strings.Join([]string{"/usr/bin", "/bin"}, sep),
+		[]string{"/home/u/.local/bin", "/usr/bin", " /home/u/.local/bin ", ""},
+	)
+	want := strings.Join([]string{"/home/u/.local/bin", "/usr/bin", "/bin"}, sep)
 	if got != want {
 		t.Fatalf("unexpected PATH: got %q want %q", got, want)
 	}
