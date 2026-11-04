@@ -167,12 +167,19 @@ func findWindowsWriterPIDs(ctx context.Context, runner Runner, resumeID, session
 	if !safeSessionFlag.MatchString(sessionFlag) {
 		return nil, fmt.Errorf("unsafe session flag for a Windows writer lookup")
 	}
-	// Contains() is a literal test, so the session id needs no escaping here.
-	script := `$id = $args[0]
+	// The script block is invoked with "&", so the arguments that follow the
+	// -Command text become $args entries. Without it, PowerShell appends them to
+	// the command text and the pipeline tries to bind them as more script blocks,
+	// which fails with "Cannot bind parameter 'RemainingScripts'". Both values
+	// pass the shape checks above, so they cannot terminate the block or inject
+	// further commands. Contains() is a literal test, so the id needs no escaping.
+	script := `& {
+$id = $args[0]
 $flag = $args[1]
 Get-CimInstance Win32_Process -Filter "Name='claude.exe' or Name='codex.exe' or Name='dsh.exe' or Name='node.exe'" |
   Where-Object { $_.CommandLine -and $_.CommandLine.Contains($flag + ' ' + $id) } |
-  ForEach-Object { [Console]::Out.WriteLine($_.ProcessId) }`
+  ForEach-Object { [Console]::Out.WriteLine($_.ProcessId) }
+}`
 	result, err := runner.Run(ctx, Command{
 		Executable: "powershell.exe",
 		Args: []string{"-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
