@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"unicode/utf8"
 )
 
 // io.WriteString prefers StringWriter over Writer, so an embedded
@@ -90,21 +91,176 @@ func TestOutputBufferReadFromKeepsTail(t *testing.T) {
 	}
 }
 
+type outputWriteKind uint8
+
+const (
+	outputByteWrite outputWriteKind = iota
+	outputRuneWrite
+)
+
+type outputWrite struct {
+	kind      outputWriteKind
+	byteValue byte
+	runeValue rune
+}
+
+func writeBytes(values ...byte) []outputWrite {
+	writes := make([]outputWrite, len(values))
+	for index, value := range values {
+		writes[index] = outputWrite{kind: outputByteWrite, byteValue: value}
+	}
+	return writes
+}
+
+func writeRunes(values ...rune) []outputWrite {
+	writes := make([]outputWrite, len(values))
+	for index, value := range values {
+		writes[index] = outputWrite{kind: outputRuneWrite, runeValue: value}
+	}
+	return writes
+}
+
+func joinWrites(groups ...[]outputWrite) []outputWrite {
+	var writes []outputWrite
+	for _, group := range groups {
+		writes = append(writes, group...)
+	}
+	return writes
+}
+
 // WriteByte and WriteRune are promoted from bytes.Buffer too; they must not
-// append past the limit.
+// append past the limit, and WriteRune must report the full consumed length
+// even when only the tail survives.
 func TestOutputBufferByteAndRuneWritesKeepTail(t *testing.T) {
-	buffer := newOutputBuffer(3)
-	if _, err := io.WriteString(buffer, "ab"); err != nil {
-		t.Fatalf("write string: %v", err)
+	tests := []struct {
+		name   string
+		limit  int
+		prefix string
+		writes []outputWrite
+		want   string
+	}{
+		{
+			name:   "byte zero limit is unlimited",
+			limit:  0,
+			writes: writeBytes('a', 'b', 'c'),
+			want:   "abc",
+		},
+		{
+			name:   "byte negative limit is unlimited",
+			limit:  -2,
+			writes: writeBytes('a', 'b', 'c'),
+			want:   "abc",
+		},
+		{
+			name:   "byte under limit",
+			limit:  5,
+			writes: writeBytes('a', 'b'),
+			want:   "ab",
+		},
+		{
+			name:   "byte exactly at limit",
+			limit:  3,
+			writes: writeBytes('a', 'b', 'c'),
+			want:   "abc",
+		},
+		{
+			name:   "byte cumulative writes over limit",
+			limit:  3,
+			writes: writeBytes('a', 'b', 'c', 'd', 'e'),
+			want:   "cde",
+		},
+		{
+			name:   "rune zero limit is unlimited",
+			limit:  0,
+			writes: writeRunes('é', '中', '😀'),
+			want:   "é中😀",
+		},
+		{
+			name:   "rune negative limit is unlimited",
+			limit:  -1,
+			writes: writeRunes('é', '😀'),
+			want:   "é😀",
+		},
+		{
+			name:   "rune under limit",
+			limit:  6,
+			writes: writeRunes('é', '中'),
+			want:   "é中",
+		},
+		{
+			name:   "rune exactly at limit",
+			limit:  5,
+			writes: writeRunes('é', '中'),
+			want:   "é中",
+		},
+		{
+			name:   "rune single write over limit keeps tail bytes",
+			limit:  2,
+			writes: writeRunes('中'),
+			want:   "\xb8\xad",
+		},
+		{
+			name:   "emoji single write over limit keeps tail bytes",
+			limit:  3,
+			writes: writeRunes('😀'),
+			want:   "\x9f\x98\x80",
+		},
+		{
+			name:   "emoji exactly at limit",
+			limit:  4,
+			writes: writeRunes('😀'),
+			want:   "😀",
+		},
+		{
+			name:   "mixed cumulative writes over limit",
+			limit:  4,
+			writes: joinWrites(writeBytes('a'), writeRunes('é', '中')),
+			want:   "\xa9中",
+		},
+		{
+			name:   "rune boundary keeps whole rune",
+			limit:  3,
+			writes: writeRunes('é', '中'),
+			want:   "中",
+		},
+		{
+			name:   "original byte and rune scenario",
+			limit:  3,
+			prefix: "ab",
+			writes: joinWrites(writeBytes('c'), writeRunes('é')),
+			want:   "cé",
+		},
 	}
-	if err := buffer.WriteByte('c'); err != nil {
-		t.Fatalf("write byte: %v", err)
-	}
-	if _, err := buffer.WriteRune('é'); err != nil {
-		t.Fatalf("write rune: %v", err)
-	}
-	if got, want := buffer.String(), "cé"; got != want {
-		t.Fatalf("content = %q, want %q", got, want)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			buffer := newOutputBuffer(test.limit)
+			if test.prefix != "" {
+				if _, err := io.WriteString(buffer, test.prefix); err != nil {
+					t.Fatalf("write prefix %q: %v", test.prefix, err)
+				}
+			}
+			for index, write := range test.writes {
+				switch write.kind {
+				case outputByteWrite:
+					if err := buffer.WriteByte(write.byteValue); err != nil {
+						t.Fatalf("write %d: WriteByte(%q): %v", index, write.byteValue, err)
+					}
+				case outputRuneWrite:
+					written, err := buffer.WriteRune(write.runeValue)
+					if err != nil {
+						t.Fatalf("write %d: WriteRune(%q): %v", index, write.runeValue, err)
+					}
+					if want := utf8.RuneLen(write.runeValue); written != want {
+						t.Fatalf("write %d: WriteRune(%q) wrote %d bytes, want %d", index, write.runeValue, written, want)
+					}
+				default:
+					t.Fatalf("write %d: unknown kind %d", index, write.kind)
+				}
+			}
+			if got := buffer.String(); got != test.want {
+				t.Fatalf("content = %q, want %q", got, test.want)
+			}
+		})
 	}
 }
 
