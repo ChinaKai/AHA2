@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -31,6 +32,13 @@ func startFakeWriter(t *testing.T, codexHome string) *exec.Cmd {
 
 func TestFindCodexWriterPIDsMatchesOnlyThatHome(t *testing.T) {
 	t.Parallel()
+	if runtime.GOOS == "windows" {
+		// A Windows target exposes a process command line but not its environment,
+		// so the env-only query under test is rejected there by design. The /proc
+		// matching this test exercises is POSIX-only; the Windows resume-id path is
+		// covered by the fake-runner tests.
+		t.Skip("env-only writer matching is unsupported on Windows: another process's environment is not readable there")
+	}
 	if _, err := exec.LookPath("sleep"); err != nil {
 		t.Skip("sleep is unavailable")
 	}
@@ -60,6 +68,14 @@ func TestFindCodexWriterPIDsMatchesOnlyThatHome(t *testing.T) {
 
 func TestTerminateProcessesStopsWriterAndReportsGone(t *testing.T) {
 	t.Parallel()
+	if runtime.GOOS == "windows" {
+		// This flow starts by identifying the writer through an env-only query,
+		// which a Windows target rejects by design because it cannot read another
+		// process's environment. The POSIX /proc matching it depends on does not
+		// exist here; the Windows resume-id path is covered by the fake-runner
+		// tests.
+		t.Skip("env-only writer matching is unsupported on Windows: another process's environment is not readable there")
+	}
 	if _, err := exec.LookPath("sleep"); err != nil {
 		t.Skip("sleep is unavailable")
 	}
