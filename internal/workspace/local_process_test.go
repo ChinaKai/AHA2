@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"runtime"
 	"strconv"
 	"strings"
@@ -22,6 +23,12 @@ const (
 	processQuickStderr = "quick-stderr\n"
 
 	processStagedFirstLine = "staged-first\n"
+
+	processOrphanStdout = "orphan-stdout\n"
+	processOrphanStderr = "orphan-stderr\n"
+
+	// Long enough to outlive processPipeDrainTimeout several times over.
+	processGrandchildSleep = 8 * time.Second
 
 	processFloodLines = 700
 
@@ -65,6 +72,29 @@ func TestRunProcessHelperProcess(t *testing.T) {
 			_, _ = io.WriteString(os.Stderr, processFloodOutput("stderr"))
 		}()
 		wait.Wait()
+	case "orphan":
+		_, _ = io.WriteString(os.Stdout, processOrphanStdout)
+		_, _ = io.WriteString(os.Stderr, processOrphanStderr)
+		grandchild, err := os.Executable()
+		if err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "locate grandchild executable: %v\n", err)
+			os.Exit(92)
+		}
+		command := exec.Command(grandchild, "-test.run=^TestRunProcessHelperProcess$")
+		command.Env = mergeEnvironment(os.Environ(), map[string]string{
+			processHelperModeEnv: "grandchild-sleep",
+			processHelperExitEnv: "0",
+		})
+		command.Stdout = os.Stdout
+		command.Stderr = os.Stderr
+		if err := command.Start(); err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "start grandchild: %v\n", err)
+			os.Exit(93)
+		}
+		// Deliberately do not wait: the grandchild inherits this process's
+		// stdout/stderr and keeps those pipe handles open after we exit.
+	case "grandchild-sleep":
+		time.Sleep(processGrandchildSleep)
 	case "slow":
 		_, _ = io.WriteString(os.Stdout, "slow-start\n")
 		time.Sleep(5 * time.Second)
@@ -141,6 +171,37 @@ func TestRunProcessDrainsPipesWhileLineHandlerIsBusy(t *testing.T) {
 	wantStderr := processBurstOutput("stderr", processBurstStderrLines)
 	if result.Stderr != wantStderr {
 		t.Fatalf("stderr truncated: got %d bytes, want %d", len(result.Stderr), len(wantStderr))
+	}
+}
+
+// A grandchild that inherits stdout/stderr keeps those pipes open after the
+// direct child exits. Run must still return in bounded time (WaitDelay), keep
+// the child's own output intact and report success, with and without KillTree.
+func TestRunProcessReturnsWhenDescendantsHoldOutputPipes(t *testing.T) {
+	for _, killTree := range []bool{false, true} {
+		t.Run(fmt.Sprintf("kill_tree=%t", killTree), func(t *testing.T) {
+			start := time.Now()
+			result, err := executeProcessHelper(t, "orphan", 0, func(command *Command) {
+				command.KillTree = killTree
+				command.Timeout = 30 * time.Second
+			}, nil)
+			elapsed := time.Since(start)
+			if err != nil {
+				t.Fatalf("run helper: %v", err)
+			}
+			if result.ExitCode != 0 {
+				t.Fatalf("exit code = %d, want 0", result.ExitCode)
+			}
+			if elapsed > processPipeDrainTimeout+4*time.Second {
+				t.Fatalf("Run took %s; descendant-held pipes were not bounded", elapsed)
+			}
+			if result.Stdout != processOrphanStdout {
+				t.Fatalf("stdout = %q, want %q", result.Stdout, processOrphanStdout)
+			}
+			if result.Stderr != processOrphanStderr {
+				t.Fatalf("stderr = %q, want %q", result.Stderr, processOrphanStderr)
+			}
+		})
 	}
 }
 

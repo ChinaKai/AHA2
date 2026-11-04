@@ -155,6 +155,13 @@ func prependPathDirectories(value string, dirs []string) string {
 	return strings.Join(ordered, string(os.PathListSeparator))
 }
 
+// processPipeDrainTimeout bounds how long Wait may block on stdout/stderr
+// pipes that a descendant keeps open after the direct child exits. The timer
+// starts when the child exits, so commands that close their own output still
+// return as soon as it has been drained. Without this bound a daemonized
+// helper holding the inherited handles would hang the runner forever.
+const processPipeDrainTimeout = 3 * time.Second
+
 // runProcess executes a command on the local Windows host with the given
 // environment and streams stdout lines through onLine.
 func runProcess(parent context.Context, command Command, env []string, onLine LineHandler) (Result, error) {
@@ -172,29 +179,40 @@ func runProcess(parent context.Context, command Command, env []string, onLine Li
 	process.Dir = command.Dir
 	process.Env = env
 	process.Stdin = strings.NewReader(command.Stdin)
-	stdoutPipe, err := process.StdoutPipe()
-	if err != nil {
-		return Result{}, err
-	}
-	stderrPipe, err := process.StderrPipe()
-	if err != nil {
-		return Result{}, err
-	}
+	// Feed stdout/stderr through io.Pipe writers instead of StdoutPipe so that
+	// os/exec owns the copying goroutines: Wait drains them before returning
+	// and WaitDelay bounds the drain when a descendant inherits the child's
+	// output handles and outlives it. StdoutPipe would instead be closed by
+	// Wait, truncating a fast-exiting command's buffered output.
+	stdoutReader, stdoutWriter := io.Pipe()
+	stderrReader, stderrWriter := io.Pipe()
+	process.Stdout = stdoutWriter
+	process.Stderr = stderrWriter
+	process.WaitDelay = processPipeDrainTimeout
 	if err := process.Start(); err != nil {
+		_ = stdoutReader.Close()
+		_ = stdoutWriter.Close()
+		_ = stderrReader.Close()
+		_ = stderrWriter.Close()
 		return Result{}, err
 	}
 	stdout, stderr := newOutputBuffer(command.OutputLimit), newOutputBuffer(command.OutputLimit)
 	var wait sync.WaitGroup
 	wait.Add(2)
-	go scanOutput(stdoutPipe, stdout, onLine, &wait)
-	go scanOutput(stderrPipe, stderr, nil, &wait)
-	// Wait closes the stdout/stderr pipes as soon as the process exits, so the
-	// scan goroutines must finish first. os/exec documents that Wait must not
-	// run before all reads from a StdoutPipe/StderrPipe have completed;
-	// otherwise a fast-exiting command loses whatever is still buffered in
-	// the pipe.
-	wait.Wait()
+	go scanOutput(stdoutReader, stdout, onLine, &wait)
+	go scanOutput(stderrReader, stderr, nil, &wait)
 	processErr := process.Wait()
+	// The copy goroutines have finished, so closing the writers only delivers
+	// EOF to the scanners; no pending output can be cut off here.
+	_ = stdoutWriter.Close()
+	_ = stderrWriter.Close()
+	wait.Wait()
+	// ErrWaitDelay means the child exited successfully but a descendant kept
+	// its output handles open past the drain bound; that is not a command
+	// failure.
+	if errors.Is(processErr, exec.ErrWaitDelay) {
+		processErr = nil
+	}
 	result := Result{Stdout: stdout.String(), Stderr: stderr.String(), Duration: time.Since(start)}
 	if process.ProcessState != nil {
 		result.ExitCode = process.ProcessState.ExitCode()
