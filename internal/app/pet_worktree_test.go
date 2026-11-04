@@ -31,7 +31,7 @@ func petGitFixture(t *testing.T) (*petTaskFixture, domain.Project, domain.Worksp
 	t.Helper()
 	fixture := newPetTaskFixture(t)
 	enablePetTaskCreation(t, fixture)
-	root := t.TempDir()
+	root := realTempDir(t)
 	runGitTest(t, root, "init", "-b", "main")
 	runGitTest(t, root, "config", "user.name", "AHA2 Test")
 	runGitTest(t, root, "config", "user.email", "aha2-test@example.com")
@@ -59,6 +59,19 @@ func petGitFixture(t *testing.T) (*petTaskFixture, domain.Project, domain.Worksp
 	return fixture, project, ws, root
 }
 
+// realTempDir resolves the temp root because GitHub's runner sets a symlinked
+// TMPDIR while git reports the resolved path. Leaving the symlink in a
+// workspace or worktree path makes sameWorkspaceRoot and the registered-
+// worktree check disagree even though both point at the same directory.
+func realTempDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		return resolved
+	}
+	return dir
+}
+
 func runGitTest(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	command := exec.Command("git", append([]string{"-C", dir}, args...)...)
@@ -82,7 +95,7 @@ func createPreparedPetWorktreeTask(t *testing.T, fixture *petTaskFixture, projec
 	if err != nil {
 		t.Fatal(err)
 	}
-	prepared, err := workspacepkg.PrepareTaskWorkspace(fixture.ctx, ws, task.ID, "main", taskBranch, "worktree", t.TempDir())
+	prepared, err := workspacepkg.PrepareTaskWorkspace(fixture.ctx, ws, task.ID, "main", taskBranch, "worktree", realTempDir(t))
 	if err != nil {
 		t.Fatal(err)
 	}
