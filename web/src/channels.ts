@@ -1,6 +1,6 @@
 import {api} from "./api.js";
 import {icon} from "./icons.js";
-import type {ChannelConversationSummary, ChannelInstance, ChannelOnboardingOptions, ChannelOnboardingSession, ChannelPlugin, CodexAccount, Knowledge, KnowledgeLibrary, Model, Project, Workspace} from "./types.js";
+import type {ChannelConversationSummary, ChannelDelivery, ChannelInstance, ChannelOnboardingOptions, ChannelOnboardingSession, ChannelPlugin, CodexAccount, Knowledge, KnowledgeLibrary, Model, Project, Workspace} from "./types.js";
 
 interface ChannelUIContext {
 	models: Model[];
@@ -256,6 +256,48 @@ function openChannelSettings(instance: ChannelInstance, context: ChannelUIContex
   });
 }
 
+export const channelDeliveryConfirmMessages = {
+	replay: "重放会把这条旧消息重新发送到真实渠道，对方会再次收到。确定重放？",
+	skip: "跳过后这条消息将归档不再发送。确定跳过？",
+} as const;
+
+// Only dead letters need an Owner decision; delivered/replayed/skipped rows are history.
+export function renderChannelDeliveryIssues(instanceID: string, deliveries: ChannelDelivery[]): string {
+	const deadLetters = deliveries.filter(item => item.state === "dead_letter");
+	if (!deadLetters.length) return "";
+	const rows = deadLetters.map(item => `<li class="channel-delivery-issue">
+      <div><code>${escapeHTML(item.id)}</code><small>创建于 ${escapeHTML(formatChannelTime(item.created_at))} · 尝试 ${escapeHTML(item.attempts)} 次 · 错误 ${escapeHTML(item.last_error_code || "—")}</small></div>
+      <span><button type="button" data-channel-delivery-action="replay" data-channel-delivery-id="${escapeHTML(item.id)}" data-channel-instance-id="${escapeHTML(instanceID)}">重放</button><button type="button" data-channel-delivery-action="skip" data-channel-delivery-id="${escapeHTML(item.id)}" data-channel-instance-id="${escapeHTML(instanceID)}">跳过</button></span>
+    </li>`).join("");
+	return `<section class="channel-delivery-issues"><header><strong>投递异常</strong><span class="status bad">死信 ${deadLetters.length}</span></header><ul>${rows}</ul><small>不会自动重放或跳过；请逐条确认处理。</small></section>`;
+}
+
+// Page re-renders rebind the channel page; a short cache keeps unrelated
+// re-renders from refetching every instance's outbox.
+const deliveryIssueCache = new Map<string, {at: number; deliveries: ChannelDelivery[]}>();
+const deliveryIssueCacheMs = 5000;
+
+async function loadChannelDeliveryIssues(host: HTMLElement, instanceID: string, bindActions: (host: HTMLElement) => void): Promise<void> {
+	const cached = deliveryIssueCache.get(instanceID);
+	const show = (deliveries: ChannelDelivery[]) => {
+		if (!host.isConnected) return;
+		host.innerHTML = renderChannelDeliveryIssues(instanceID, deliveries);
+		host.hidden = !host.innerHTML;
+		bindActions(host);
+	};
+	if (cached) show(cached.deliveries);
+	if (cached && Date.now() - cached.at < deliveryIssueCacheMs) return;
+	try {
+		const result = await api.channelDeliveries(instanceID);
+		deliveryIssueCache.set(instanceID, {at: Date.now(), deliveries: result.deliveries || []});
+		show(result.deliveries || []);
+	} catch (error) {
+		if (!host.isConnected) return;
+		host.hidden = false;
+		host.innerHTML = `<section class="channel-delivery-issues"><header><strong>投递异常</strong></header><small>投递列表加载失败：${escapeHTML(channelErrorMessage(error))}</small></section>`;
+	}
+}
+
 function conversationBoundTask(item: ChannelConversationSummary): string {
   if (!item.bound_task_id) return "未绑定";
   return [item.bound_task_code, item.bound_task_title].filter(Boolean).join(" · ") || item.bound_task_id;
@@ -328,6 +370,7 @@ export function renderChannels(providers: ChannelPlugin[], instances: ChannelIns
       <button type="button" class="danger" data-channel-archive="${escapeHTML(instance.id)}" data-revision="${instance.revision}">归档实例</button>
     </div>
     ${instance.owner_bound ? `<small class="channel-instance-hint">权限更新仅做增量授权；AHA 运行时菜单可独立勾选，不修改飞书后台已有菜单。</small>` : ""}
+    <div data-channel-deliveries="${escapeHTML(instance.id)}" hidden></div>
   </article>`;
   }).join("") : `<div class="empty"><strong>尚未创建渠道实例</strong><p>每个实例独立绑定一个 Owner，并包含私聊助手与群聊电子人。</p></div>`;
   return `<section class="page channels-page">
@@ -342,6 +385,7 @@ export function renderChannels(providers: ChannelPlugin[], instances: ChannelIns
 
 export function bindChannels(options: {refresh: () => Promise<void>; setMessage: (kind: "error" | "success", message: string) => void; context: ChannelUIContext; instances: ChannelInstance[]; openProject?: (projectID: string) => void}): void {
   const refresh = async () => {
+    deliveryIssueCache.clear();
     await options.refresh();
   };
   document.querySelector("#refresh-channels")?.addEventListener("click", () => void refresh().catch(error => options.setMessage("error", String(error))));
@@ -436,7 +480,30 @@ export function bindChannels(options: {refresh: () => Promise<void>; setMessage:
 		const instance = options.instances.find(item => item.id === button.dataset.channelConversationsOpen);
 		if (instance) openChannelConversations(instance, {setMessage: options.setMessage});
 	}));
-
+	const bindDeliveryActions = (host: HTMLElement) => host.querySelectorAll<HTMLButtonElement>("[data-channel-delivery-action]").forEach(button => button.addEventListener("click", () => {
+		const action = button.dataset.channelDeliveryAction === "replay" ? "replay" : "skip";
+		const deliveryID = button.dataset.channelDeliveryId || "";
+		const instanceID = button.dataset.channelInstanceId || "";
+		if (!deliveryID || !window.confirm(channelDeliveryConfirmMessages[action])) return;
+		const buttons = button.parentElement?.querySelectorAll<HTMLButtonElement>("button") || [];
+		buttons.forEach(item => { item.disabled = true; });
+		const request = action === "replay" ? api.replayChannelDelivery(deliveryID) : api.skipChannelDelivery(deliveryID);
+		void request.then(async () => {
+			deliveryIssueCache.delete(instanceID);
+			options.setMessage("success", action === "replay" ? `已重放投递 ${deliveryID}，旧消息将重新发送。` : `已跳过投递 ${deliveryID}，不再发送。`);
+			await refresh();
+		}).catch(error => {
+			buttons.forEach(item => { item.disabled = false; });
+			options.setMessage("error", `${action === "replay" ? "重放" : "跳过"}失败：${channelErrorMessage(error)}`);
+			// The page message only shows on the next render, and a failed action
+			// often means the row changed elsewhere, so reload the list either way.
+			void refresh().catch(() => undefined);
+		});
+	}));
+	document.querySelectorAll<HTMLElement>("[data-channel-deliveries]").forEach(host => {
+		const instanceID = host.dataset.channelDeliveries || "";
+		if (instanceID) void loadChannelDeliveryIssues(host, instanceID, bindDeliveryActions);
+	});
 }
 
 let onboardingPoll = 0;

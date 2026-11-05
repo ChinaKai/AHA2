@@ -959,6 +959,14 @@ dd { margin: 3px 0 0; overflow-wrap: anywhere; font-size: 11px; }
 .channel-instance-actions { display: grid; grid-template-columns: repeat(auto-fit,minmax(86px,1fr)); gap: 8px; margin: 12px 0; }
 .channel-instance-actions > button { min-width: 0; padding: 0 8px; }
 .channel-instance-hint { display: block; margin: -4px 0 12px; }
+.channel-delivery-issues { display: grid; gap: 6px; border-top: 1px solid var(--line); padding-top: 8px; }
+.channel-delivery-issues > header { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 10px; }
+.channel-delivery-issues ul { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.channel-delivery-issue { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px; border: 1px solid var(--line); border-radius: 6px; }
+.channel-delivery-issue > div { display: grid; min-width: 0; gap: 2px; }
+.channel-delivery-issue code { font-size: 9px; overflow-wrap: anywhere; }
+.channel-delivery-issue > span { display: flex; flex-shrink: 0; gap: 6px; }
+.channel-delivery-issue button { min-height: 28px; padding: 0 10px; white-space: nowrap; }
 .channel-retired-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin: 12px 0; }
 .channel-retired-note { margin: 12px 0; color: var(--muted); font-size: 10px; line-height: 1.6; }
 .channel-runtime-editor { display: grid; gap: 10px; margin: 0; padding: 10px; border: 1px solid var(--line); border-radius: 6px; }
@@ -2334,6 +2342,8 @@ dialog > .dialog-head { margin: 0; padding: 18px 18px 0; }
 .pet-approval-status { font-size: 12px; color: var(--muted); white-space: nowrap; }
 .pet-approval-reason { color: var(--text) !important; }
 .pet-approval-actions { display: flex; gap: 6px; }
+.pet-approval-choice { display: grid; gap: 4px; margin: 0; font-size: 12px; color: var(--text); }
+.pet-approval-choice select { max-width: 240px; }
 .pet-approval-filters { display: flex; gap: 6px; margin-bottom: 10px; }
 .pet-approval-filters button { min-height: 30px; padding: 0 10px; font-size: 10px; }
 .pet-approval-filters button.active { border-color: #bfdbfe; background: #eff6ff; color: #1d4ed8; }
