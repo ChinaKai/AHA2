@@ -3464,5 +3464,8 @@ func (s *Store) migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(119, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
 		return fmt.Errorf("record schema v119: %w", err)
 	}
+	if err := s.applyMailSchemaV120(ctx); err != nil {
+		return err
+	}
 	return nil
 }
