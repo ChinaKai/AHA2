@@ -2455,4 +2455,4 @@ dialog > .dialog-head { margin: 0; padding: 18px 18px 0; }
 .perf-panel-rows dd { margin: 0; font-variant-numeric: tabular-nums; text-align: right; overflow-wrap: anywhere; }
 .perf-panel-action { min-height: 24px; padding: 0 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
 #perf-copy { justify-self: end; }
-@media (max-width: 640px) { .perf-panel { right: 8px; bottom: 8px; width: min(220px, calc(100vw - 16px)); } }
+@media (max-width: 640px) { .perf-panel { right: 8px; bottom: calc(var(--mobile-bottom-nav-height) + 8px); width: min(220px, calc(100vw - 16px)); } }

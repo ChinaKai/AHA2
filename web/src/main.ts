@@ -488,6 +488,9 @@ function startPerfPanel(): void {
 
   let feedbackTimer: number | undefined;
   const showCopyFeedback = (label: string) => {
+    // An async clipboard result may arrive after the panel was hidden; touching
+    // a detached button would only arm a timer nobody can see.
+    if (!panel.isConnected) return;
     // Rapid clicks must replace the pending reset instead of stacking timers.
     if (feedbackTimer !== undefined) window.clearTimeout(feedbackTimer);
     copyButton.textContent = label;
@@ -499,7 +502,12 @@ function startPerfPanel(): void {
   const fallbackCopy = (text: string) => {
     console.warn(`[aha-perf] clipboard unavailable, metrics text:\n${text}`);
     const selection = window.getSelection();
-    if (!selection) return;
+    if (!selection) {
+      // Without a selection API the fallback cannot highlight anything; still
+      // answer the click instead of leaving the button silent.
+      showCopyFeedback("复制失败");
+      return;
+    }
     const range = document.createRange();
     range.selectNodeContents(rows);
     selection.removeAllRanges();

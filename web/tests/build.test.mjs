@@ -749,6 +749,12 @@ test("opt-in perf panel reports timing metrics with copy and hide controls", asy
   // and clears the feedback timer when the panel is hidden.
   assert.match(script, /showCopyFeedback\("已复制"\)/);
   assert.match(script, /showCopyFeedback\("已选中"\)/);
+  // A clipboard promise can settle after the user hid the panel; bail out before
+  // touching the detached button or arming another timer.
+  assert.match(script, /const showCopyFeedback = \(label\)=>\{\s*if \(!panel\.isConnected\) return;/);
+  // When the selection API is unavailable the fallback cannot highlight text,
+  // but the button still reports failure instead of doing nothing.
+  assert.match(script, /if \(!selection\) \{\s*showCopyFeedback\("复制失败"\);\s*return;\s*\}/);
   assert.match(script, /if \(feedbackTimer !== undefined\) window\.clearTimeout\(feedbackTimer\);\s*copyButton\.textContent = label;/);
   assert.match(script, /feedbackTimer = window\.setTimeout\(\(\)=>\{\s*feedbackTimer = undefined;\s*copyButton\.textContent = "复制";\s*\}, 1200\);/);
   assert.match(script, /window\.clearInterval\(timer\);\s*if \(feedbackTimer !== undefined\) window\.clearTimeout\(feedbackTimer\);\s*feedbackTimer = undefined;\s*panel\.remove\(\);/);
@@ -756,6 +762,11 @@ test("opt-in perf panel reports timing metrics with copy and hide controls", asy
   // native top-layer dialogs.
   assert.match(styles, /\.perf-panel \{[^}]*z-index: 70;/);
   assert.doesNotMatch(styles, /\.perf-panel \{[^}]*z-index: 50;/);
+  // Desktop keeps the original corner; on narrow screens the fixed panel must
+  // clear the bottom navigation instead of covering it.
+  assert.match(styles, /\.perf-panel \{[^}]*bottom: 16px;/);
+  assert.match(styles, /@media \(max-width: 640px\) \{ \.perf-panel \{[^}]*bottom: calc\(var\(--mobile-bottom-nav-height\) \+ 8px\);[^}]*\}/);
+  assert.doesNotMatch(styles, /@media \(max-width: 640px\) \{ \.perf-panel \{[^}]*bottom: 8px;/);
 });
 
 test("SSE list refresh is debounced and deferred while a task detail is open", async () => {
