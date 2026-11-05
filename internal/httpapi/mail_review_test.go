@@ -1,6 +1,8 @@
 package httpapi
 
 import (
+	"bytes"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -372,6 +374,89 @@ func TestMailPreviewAllowsBracesFromVariableValues(t *testing.T) {
 	if !strings.Contains(body["body_text"].(string), "{{braces}}") ||
 		!strings.Contains(body["body_html"].(string), "{{braces}}") {
 		t.Fatalf("braces lost = %#v", body)
+	}
+}
+
+// asyncRequest performs one Owner API call without calling testing.T from the
+// goroutine, so a blocked connection test can race with a configuration change.
+func (f *mailAPIFixture) asyncRequest(method, path string, payload any) <-chan map[string]any {
+	result := make(chan map[string]any, 1)
+	go func() {
+		var body []byte
+		if payload != nil {
+			body, _ = json.Marshal(payload)
+		}
+		request, err := http.NewRequest(method, f.server.URL+path, bytes.NewReader(body))
+		if err != nil {
+			result <- map[string]any{"_error": err.Error()}
+			return
+		}
+		if payload != nil {
+			request.Header.Set("Content-Type", "application/json")
+		}
+		request.Header.Set("X-CSRF-Token", f.csrf)
+		response, err := f.client.Do(request)
+		if err != nil {
+			result <- map[string]any{"_error": err.Error()}
+			return
+		}
+		defer response.Body.Close()
+		decoded := map[string]any{}
+		_ = json.NewDecoder(response.Body).Decode(&decoded)
+		decoded["_status"] = float64(response.StatusCode)
+		result <- decoded
+	}()
+	return result
+}
+
+func TestMailConnectionTestDiscardsStaleResult(t *testing.T) {
+	tests := []struct {
+		name           string
+		mutation       map[string]any
+		expectedStatus domain.MailAccountStatus
+	}{
+		{"disable", map[string]any{"status": "disabled"}, domain.MailAccountDisabled},
+		{"host", map[string]any{"smtp_host": domain.MailBackupSMTPHost}, domain.MailAccountUnverified},
+		{"username", map[string]any{"smtp_username": "changed@example.com"}, domain.MailAccountUnverified},
+		{"rotate", map[string]any{"authorization_code": "rotated-during-test"}, domain.MailAccountUnverified},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			f := newMailAPIFixture(t)
+			account := f.createAccount("race-code")
+			id := account["id"].(string)
+			started := make(chan struct{})
+			release := make(chan struct{})
+			f.tester.beforeTest = func() {
+				close(started)
+				<-release
+			}
+			done := f.asyncRequest(http.MethodPost, "/api/v1/mail-accounts/"+id+"/test", map[string]any{})
+			<-started
+			mutation := f.request(http.MethodPut, "/api/v1/mail-accounts/"+id, test.mutation, f.csrf)
+			if mutation["_status"].(float64) != http.StatusOK {
+				t.Fatalf("mutation = %#v", mutation)
+			}
+			close(release)
+			body := <-done
+			if body["_status"].(float64) != http.StatusOK {
+				t.Fatalf("test response = %#v", body)
+			}
+			if body["applied"] != false || body["ok"] != false {
+				t.Fatalf("stale test result was applied = %#v", body)
+			}
+			responseStatus := body["account"].(map[string]any)["status"]
+			if responseStatus != string(test.expectedStatus) {
+				t.Fatalf("response status = %#v, want %s", responseStatus, test.expectedStatus)
+			}
+			stored, err := f.database.MailAccount(f.ctx, id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stored.Status != test.expectedStatus {
+				t.Fatalf("stored status = %s, want %s", stored.Status, test.expectedStatus)
+			}
+		})
 	}
 }
 

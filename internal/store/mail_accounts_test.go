@@ -276,3 +276,94 @@ func TestDisabledMailAccountStaysDisabledAcrossCredentialAndHostChanges(t *testi
 		t.Fatalf("explicit enable failed: %#v", stored)
 	}
 }
+
+func TestMailAccountTestResultRequiresUnchangedEnabledAccount(t *testing.T) {
+	ctx := context.Background()
+	database := openMailTestStore(t)
+	accountID := domain.NewID("mail_account")
+	account, err := database.CreateMailAccount(ctx, domain.MailAccount{
+		ID: accountID, Name: "Race account", Address: "race@example.com",
+		CredentialRef: domain.MailAccountCredentialRef(accountID), CredentialConfigured: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, err := database.MailAccountCredentialRef(ctx, accountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectation := MailAccountTestExpectation{
+		SMTPHost: account.SMTPHost, SMTPUsername: account.SMTPUsername,
+		CredentialRef: ref, UpdatedAt: account.UpdatedAt,
+	}
+	applied, err := database.SetMailAccountTestResult(ctx, accountID, expectation, domain.MailAccountOK, "", time.Now().UTC())
+	if err != nil || !applied {
+		t.Fatalf("matching test result applied=%v err=%v", applied, err)
+	}
+	stored, err := database.MailAccount(ctx, accountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != domain.MailAccountOK {
+		t.Fatalf("status = %s", stored.Status)
+	}
+
+	if err := database.SetMailAccountStatus(ctx, accountID, domain.MailAccountDisabled, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	stale := expectation
+	applied, err = database.SetMailAccountTestResult(ctx, accountID, stale, domain.MailAccountOK, "", time.Now().UTC())
+	if err != nil || applied {
+		t.Fatalf("disabled account accepted stale test result: applied=%v err=%v", applied, err)
+	}
+	stored, err = database.MailAccount(ctx, accountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != domain.MailAccountDisabled {
+		t.Fatalf("disabled account status = %s", stored.Status)
+	}
+
+	if err := database.SetMailAccountStatus(ctx, accountID, domain.MailAccountUnverified, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	enabled, err := database.MailAccount(ctx, accountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeRotation := MailAccountTestExpectation{
+		SMTPHost: enabled.SMTPHost, SMTPUsername: enabled.SMTPUsername,
+		CredentialRef: ref, UpdatedAt: enabled.UpdatedAt,
+	}
+	if err := database.SetMailAccountCredential(ctx, accountID, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	applied, err = database.SetMailAccountTestResult(ctx, accountID, beforeRotation, domain.MailAccountOK, "", time.Now().UTC())
+	if err != nil || applied {
+		t.Fatalf("credential rotation accepted stale test result: applied=%v err=%v", applied, err)
+	}
+	stored, err = database.MailAccount(ctx, accountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != domain.MailAccountUnverified {
+		t.Fatalf("rotation status = %s", stored.Status)
+	}
+
+	beforeHost, err := database.MailAccount(ctx, accountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeHostExpectation := MailAccountTestExpectation{
+		SMTPHost: beforeHost.SMTPHost, SMTPUsername: beforeHost.SMTPUsername,
+		CredentialRef: ref, UpdatedAt: beforeHost.UpdatedAt,
+	}
+	beforeHost.SMTPHost = domain.MailBackupSMTPHost
+	if _, err := database.UpdateMailAccount(ctx, beforeHost); err != nil {
+		t.Fatal(err)
+	}
+	applied, err = database.SetMailAccountTestResult(ctx, accountID, beforeHostExpectation, domain.MailAccountOK, "", time.Now().UTC())
+	if err != nil || applied {
+		t.Fatalf("host change accepted stale test result: applied=%v err=%v", applied, err)
+	}
+}

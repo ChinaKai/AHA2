@@ -368,27 +368,42 @@ func (s *Store) ResetMailAccountVerification(ctx context.Context, id string, now
 	return nil
 }
 
-// SetMailAccountTestResult records the outcome of an Owner-triggered
-// connection test. The error code is a stable SMTP code, never a transcript or
-// credential.
-func (s *Store) SetMailAccountTestResult(ctx context.Context, id string, status domain.MailAccountStatus, errorCode string, now time.Time) error {
+// MailAccountTestExpectation is the connection configuration observed before a
+// test starts. UpdatedAt also detects a credential rotation, because the
+// Secret Store reference is stable across rotations.
+type MailAccountTestExpectation struct {
+	SMTPHost      string
+	SMTPUsername  string
+	CredentialRef string
+	UpdatedAt     time.Time
+}
+
+// SetMailAccountTestResult records a connection test only if the account is
+// still the same configuration and still enabled. A test that raced with a
+// disable or a host/username/credential change is discarded: no status or test
+// result is written, and the caller reloads the real account state.
+func (s *Store) SetMailAccountTestResult(ctx context.Context, id string, expected MailAccountTestExpectation, status domain.MailAccountStatus, errorCode string, now time.Time) (bool, error) {
 	if !status.Valid() {
-		return fmt.Errorf("invalid mail account status %q", status)
+		return false, fmt.Errorf("invalid mail account status %q", status)
 	}
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
+	if expected.UpdatedAt.IsZero() {
+		return false, fmt.Errorf("mail account test expectation requires updated_at")
+	}
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE mail_accounts SET status=?,last_test_at=?,last_test_error_code=?,updated_at=?
-		WHERE id=?`,
-		status, mailTimeString(now), strings.TrimSpace(errorCode), mailTimeString(now), id)
+		WHERE id=? AND smtp_host=? AND smtp_username=? AND credential_ref=? AND updated_at=?
+		  AND status<>'disabled'`,
+		status, mailTimeString(now), strings.TrimSpace(errorCode), mailTimeString(now),
+		id, expected.SMTPHost, expected.SMTPUsername, expected.CredentialRef,
+		mailTimeString(expected.UpdatedAt))
 	if err != nil {
-		return err
+		return false, err
 	}
-	if affected, _ := result.RowsAffected(); affected != 1 {
-		return sql.ErrNoRows
-	}
-	return nil
+	affected, _ := result.RowsAffected()
+	return affected == 1, nil
 }
 
 func (s *Store) SetMailAccountStatus(ctx context.Context, id string, status domain.MailAccountStatus, now time.Time) error {

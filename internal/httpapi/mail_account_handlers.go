@@ -347,6 +347,10 @@ func (s *Server) testMailAccount(writer http.ResponseWriter, request *http.Reque
 		writeMailError(writer, http.StatusUnprocessableEntity, domain.MailErrCredentialMissing, "请先配置客户端授权码")
 		return
 	}
+	expected := store.MailAccountTestExpectation{
+		SMTPHost: account.SMTPHost, SMTPUsername: account.SMTPUsername,
+		CredentialRef: ref, UpdatedAt: account.UpdatedAt,
+	}
 	result := s.mailTester.Test(ctx, account, credential)
 	status := domain.MailAccountOK
 	errorCode := ""
@@ -354,7 +358,8 @@ func (s *Server) testMailAccount(writer http.ResponseWriter, request *http.Reque
 		status = domain.MailAccountError
 		errorCode = string(result.ErrorCode)
 	}
-	if err := s.store.SetMailAccountTestResult(ctx, id, status, errorCode, time.Now().UTC()); err != nil {
+	applied, err := s.store.SetMailAccountTestResult(ctx, id, expected, status, errorCode, time.Now().UTC())
+	if err != nil {
 		writeMailError(writer, http.StatusInternalServerError, "mail_internal_error", "记录连接测试结果失败")
 		return
 	}
@@ -364,9 +369,9 @@ func (s *Server) testMailAccount(writer http.ResponseWriter, request *http.Reque
 		return
 	}
 	s.audit(request, "mail.account.test", "mail_account", id, map[string]any{
-		"ok": result.OK, "error_code": string(result.ErrorCode),
+		"ok": result.OK && applied, "applied": applied, "error_code": string(result.ErrorCode),
 	})
 	writeJSON(writer, http.StatusOK, map[string]any{
-		"ok": result.OK, "result": result, "account": updated,
+		"ok": result.OK && applied, "result": result, "applied": applied, "account": updated,
 	})
 }

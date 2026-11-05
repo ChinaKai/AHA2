@@ -23,11 +23,15 @@ type fakeMailTester struct {
 	result      mailpkg.TestResult
 	credentials []string
 	accounts    []domain.MailAccount
+	beforeTest  func()
 }
 
 func (f *fakeMailTester) Test(_ context.Context, account domain.MailAccount, credential string) mailpkg.TestResult {
 	f.accounts = append(f.accounts, account)
 	f.credentials = append(f.credentials, credential)
+	if f.beforeTest != nil {
+		f.beforeTest()
+	}
 	if f.result.ErrorCode == "" && !f.result.OK {
 		return mailpkg.TestResult{
 			OK: true, Level: "connect", Host: account.SMTPHost, Port: account.SMTPPort,
@@ -304,7 +308,7 @@ func TestMailConnectionTestOutcomes(t *testing.T) {
 	}
 
 	success := f.request(http.MethodPost, "/api/v1/mail-accounts/"+id+"/test", map[string]any{}, f.csrf)
-	if success["ok"] != true {
+	if success["ok"] != true || success["applied"] != true {
 		t.Fatalf("success = %#v", success)
 	}
 	if f.tester.credentials[len(f.tester.credentials)-1] != "connection-test-code" {
