@@ -189,22 +189,23 @@ func (s *Store) UpdateMailMessageStatusInTx(ctx context.Context, exec mailDBTX, 
 	if strings.TrimSpace(id) == "" {
 		return false, fmt.Errorf("mail message id is required")
 	}
+	if len(from) == 0 {
+		return false, fmt.Errorf("mail message expected statuses are required")
+	}
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
 	query := `UPDATE mail_messages SET status=?,updated_at=? WHERE id=?`
 	args := []any{to, mailTimeString(now), id}
-	if len(from) > 0 {
-		placeholders := make([]string, 0, len(from))
-		for _, state := range from {
-			if !state.Valid() {
-				return false, fmt.Errorf("invalid mail message status %q", state)
-			}
-			placeholders = append(placeholders, "?")
-			args = append(args, state)
+	placeholders := make([]string, 0, len(from))
+	for _, state := range from {
+		if !state.Valid() {
+			return false, fmt.Errorf("invalid mail message status %q", state)
 		}
-		query += ` AND status IN (` + strings.Join(placeholders, ",") + `)`
+		placeholders = append(placeholders, "?")
+		args = append(args, state)
 	}
+	query += ` AND status IN (` + strings.Join(placeholders, ",") + `)`
 	result, err := exec.ExecContext(ctx, query, args...)
 	if err != nil {
 		return false, err

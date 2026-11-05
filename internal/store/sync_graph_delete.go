@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
@@ -71,6 +72,9 @@ func (s *Store) DeleteWorkspaceWithSyncTombstone(ctx context.Context, id string)
 	if _, err := tx.ExecContext(ctx, `UPDATE projects SET default_workspace_id='' WHERE default_workspace_id=?`, id); err != nil {
 		return err
 	}
+	if _, err := s.DeleteMailBindingsForScopeInTx(ctx, tx, domain.MailBindingScopeWorkspace, id); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM workspaces WHERE id=? AND read_only=0`, id); err != nil {
 		return err
 	}
@@ -117,6 +121,9 @@ func (s *Store) RetireRemoteWorkspaceMirror(ctx context.Context, id string) (dom
 		}
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE projects SET default_workspace_id='' WHERE default_workspace_id=?`, item.ID); err != nil {
+		return domain.Workspace{}, false, err
+	}
+	if _, err := s.DeleteMailBindingsForScopeInTx(ctx, tx, domain.MailBindingScopeWorkspace, item.ID); err != nil {
 		return domain.Workspace{}, false, err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM workspaces WHERE id=? AND owner_device_id=? AND read_only=1`, item.ID, item.OwnerDeviceID); err != nil {
@@ -195,6 +202,13 @@ func (s *Store) ApplyRemoteGraphDelete(ctx context.Context, objectType, ownerDev
 			return err
 		}
 	} else {
+		// Legacy tombstones may not carry a local workspace ID; only clean up
+		// bindings when there is a local scope to match.
+		if strings.TrimSpace(localWorkspaceID) != "" {
+			if _, err := s.DeleteMailBindingsForScopeInTx(ctx, tx, domain.MailBindingScopeWorkspace, localWorkspaceID); err != nil {
+				return err
+			}
+		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM workspaces WHERE id=? AND owner_device_id=? AND read_only=1`, localWorkspaceID, ownerDeviceID); err != nil {
 			return err
 		}

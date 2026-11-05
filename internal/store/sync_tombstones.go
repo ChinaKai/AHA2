@@ -79,6 +79,9 @@ func deleteSharedRow(ctx context.Context, tx *sql.Tx, objectType, objectID strin
 	var err error
 	switch objectType {
 	case "project":
+		if err := deleteMailBindingsForProjectTx(ctx, tx, objectID); err != nil {
+			return 0, err
+		}
 		result, err = tx.ExecContext(ctx, `DELETE FROM projects WHERE id=?`, objectID)
 	case "product_line":
 		result, err = tx.ExecContext(ctx, `DELETE FROM product_lines WHERE id=?`, objectID)

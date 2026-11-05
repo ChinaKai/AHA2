@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+
+	"github.com/ChinaKai/AHA2/internal/domain"
 )
 
 // DeleteWorkspaceLocal removes a writable Workspace from this device without
@@ -38,6 +40,9 @@ func (s *Store) DeleteWorkspaceLocal(ctx context.Context, id string) error {
 		return ErrWorkspaceInUse
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE projects SET default_workspace_id='' WHERE default_workspace_id=?`, id); err != nil {
+		return err
+	}
+	if _, err := s.DeleteMailBindingsForScopeInTx(ctx, tx, domain.MailBindingScopeWorkspace, id); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM workspaces WHERE id=? AND read_only=0`, id); err != nil {

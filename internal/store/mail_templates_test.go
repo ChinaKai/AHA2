@@ -2,8 +2,10 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -55,6 +57,9 @@ func TestMailTemplateVersionsAreImmutable(t *testing.T) {
 		updated.Description != "Second" || len(updated.RequiredVariables) != 2 {
 		t.Fatalf("updated template = %+v", updated)
 	}
+	if !updated.UpdatedAt.After(created.UpdatedAt) {
+		t.Fatalf("template update did not advance updated_at: %v <= %v", updated.UpdatedAt, created.UpdatedAt)
+	}
 
 	versions, err := database.MailTemplateVersions(ctx, created.ID, 10)
 	if err != nil {
@@ -68,6 +73,9 @@ func TestMailTemplateVersionsAreImmutable(t *testing.T) {
 	}
 	if versions[0].SubjectTemplate != "[AHA] v2" {
 		t.Fatalf("version 2 content = %+v", versions[0])
+	}
+	if !versions[0].CreatedAt.After(versions[1].CreatedAt) {
+		t.Fatalf("version 2 created_at %v is not newer than version 1 %v", versions[0].CreatedAt, versions[1].CreatedAt)
 	}
 
 	created.SubjectTemplate = "stale"
@@ -88,6 +96,55 @@ func TestMailTemplateVersionsAreImmutable(t *testing.T) {
 	archived.SubjectTemplate = "after archive"
 	if _, err := database.UpdateMailTemplate(ctx, archived, 2); !errors.Is(err, ErrMailTemplateArchived) {
 		t.Fatalf("archived update error = %v, want ErrMailTemplateArchived", err)
+	}
+	if err := database.ArchiveMailTemplate(ctx, created.ID, time.Now().UTC()); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("second archive error = %v, want sql.ErrNoRows", err)
+	}
+}
+
+func TestMailTemplateUpdateRollsBackWhenVersionInsertConflicts(t *testing.T) {
+	ctx := context.Background()
+	database := openMailTestStore(t)
+
+	template, err := database.CreateMailTemplate(ctx, domain.MailTemplate{
+		Scope: domain.MailTemplateScopeGlobal, Name: "Manual version",
+		SubjectTemplate: "v1", BodyTextTemplate: "body",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a competing writer that already produced version 2.
+	if _, err := database.db.ExecContext(ctx, `
+		INSERT INTO mail_template_versions(
+			template_id,version,subject_template,body_text_template,body_html_template,
+			required_variables_json,created_by,created_at
+		) VALUES(?,?,?,?,?,?,?,?)`,
+		template.ID, 2, "manual v2", "body", "", "[]", "",
+		mailTimeString(time.Now().UTC())); err != nil {
+		t.Fatal(err)
+	}
+
+	template.SubjectTemplate = "store v2"
+	_, err = database.UpdateMailTemplate(ctx, template, 1)
+	if !errors.Is(err, ErrMailTemplateVersionConflict) {
+		t.Fatalf("duplicate version insert error = %v, want ErrMailTemplateVersionConflict", err)
+	}
+	stored, err := database.MailTemplate(ctx, template.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.CurrentVersion != 1 {
+		t.Fatalf("current_version after rollback = %d, want 1", stored.CurrentVersion)
+	}
+	if stored.SubjectTemplate != "v1" {
+		t.Fatalf("template content was not rolled back: %q", stored.SubjectTemplate)
+	}
+	versions, err := database.MailTemplateVersions(ctx, template.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(versions) != 2 || versions[0].Version != 2 || versions[0].SubjectTemplate != "manual v2" {
+		t.Fatalf("versions after rollback = %+v", versions)
 	}
 }
 
@@ -157,6 +214,70 @@ func TestMailTemplateConcurrentUpdatesDoNotDuplicateVersions(t *testing.T) {
 	}
 	if len(versions) != 2 {
 		t.Fatalf("versions = %+v, want 2", versions)
+	}
+}
+
+func TestMailTemplateConcurrentUpdatesAcrossConnections(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "aha2.db")
+	first, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	second, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+
+	template, err := first.CreateMailTemplate(ctx, domain.MailTemplate{
+		Scope: domain.MailTemplateScopeGlobal, Name: "Cross connection",
+		SubjectTemplate: "v1", BodyTextTemplate: "body",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	results := make([]error, 2)
+	var wait sync.WaitGroup
+	start := make(chan struct{})
+	for index, store := range []*Store{first, second} {
+		wait.Add(1)
+		go func(index int, database *Store) {
+			defer wait.Done()
+			<-start
+			candidate := template
+			candidate.SubjectTemplate = fmt.Sprintf("cross v2 %d", index)
+			_, err := database.UpdateMailTemplate(ctx, candidate, 1)
+			results[index] = err
+		}(index, store)
+	}
+	close(start)
+	wait.Wait()
+
+	successes, conflicts := 0, 0
+	for _, result := range results {
+		switch {
+		case result == nil:
+			successes++
+		case errors.Is(result, ErrMailTemplateVersionConflict):
+			conflicts++
+		default:
+			t.Fatalf("unexpected cross-connection update error: %v", result)
+		}
+	}
+	if successes != 1 || conflicts != 1 {
+		t.Fatalf("cross-connection updates: %d success, %d conflict; want 1/1", successes, conflicts)
+	}
+	var duplicates int
+	if err := first.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM mail_template_versions WHERE template_id=? AND version=2`,
+		template.ID).Scan(&duplicates); err != nil {
+		t.Fatal(err)
+	}
+	if duplicates != 1 {
+		t.Fatalf("version 2 rows = %d, want 1", duplicates)
 	}
 }
 

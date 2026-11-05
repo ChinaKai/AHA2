@@ -222,6 +222,15 @@ func (s *Store) PurgeRetiredChannelInstance(ctx context.Context, id, ownerID str
 	if _, err := tx.ExecContext(ctx, `DELETE FROM channel_instances WHERE id=? AND owner_id=? AND revision=? AND retired_at<>''`, id, ownerID, expectedRevision); err != nil {
 		return domain.ChannelInstance{}, err
 	}
+	if err := deleteMailBindingsForProjectTx(ctx, tx, instance.HostProjectID); err != nil {
+		return domain.ChannelInstance{}, err
+	}
+	// build_artifacts.attachment_id is ON DELETE RESTRICT; remove task
+	// artifacts before the task cascade deletes their source attachments.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM build_artifacts
+		WHERE task_id IN (SELECT id FROM tasks WHERE project_id=?)`, instance.HostProjectID); err != nil {
+		return domain.ChannelInstance{}, err
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM tasks WHERE project_id=?`, instance.HostProjectID); err != nil {
 		return domain.ChannelInstance{}, err
 	}

@@ -618,6 +618,14 @@ func (s *Store) deleteTask(ctx context.Context, id string, tombstone bool) error
 			return err
 		}
 	}
+	if _, err := s.DeleteMailBindingsForScopeInTx(ctx, tx, domain.MailBindingScopeTask, id); err != nil {
+		return err
+	}
+	// Delete build artifacts before the task cascade removes their attachment
+	// rows; build_artifacts.attachment_id is ON DELETE RESTRICT.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM build_artifacts WHERE task_id=?`, id); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM task_permission_requests WHERE task_id=?`, id); err != nil {
 		return err
 	}

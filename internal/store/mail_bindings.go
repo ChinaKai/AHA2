@@ -97,9 +97,7 @@ func (s *Store) UpdateMailBinding(ctx context.Context, item domain.MailBinding) 
 	if err != nil {
 		return err
 	}
-	if normalized.UpdatedAt.IsZero() {
-		normalized.UpdatedAt = time.Now().UTC()
-	}
+	normalized.UpdatedAt = time.Now().UTC()
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE mail_bindings SET account_id=?,default_template_id=?,approval_mode=?,
 			allowed_recipients_json=?,auto_send_enabled=?,enabled=?,updated_at=?
@@ -205,18 +203,51 @@ func (s *Store) DeleteMailBinding(ctx context.Context, id string) error {
 	return nil
 }
 
-// DeleteMailBindingsForScope is the application-level cascade for a deleted
-// Project, Workspace or Task. Mail messages keep their snapshot and have their
-// binding_id cleared by the foreign key.
-func (s *Store) DeleteMailBindingsForScope(ctx context.Context, scopeType domain.MailBindingScopeType, scopeID string) (int64, error) {
+// DeleteMailBindingsForScopeInTx is the application-level cascade for a deleted
+// Project, Workspace or Task. Deletion paths must call it inside the same
+// transaction that removes the scope row, otherwise an orphan binding keeps its
+// account undeletable forever. An empty scope ID is rejected instead of
+// matching unrelated rows.
+func (s *Store) DeleteMailBindingsForScopeInTx(ctx context.Context, exec mailDBTX, scopeType domain.MailBindingScopeType, scopeID string) (int64, error) {
 	if !scopeType.Valid() {
 		return 0, fmt.Errorf("invalid mail binding scope type %q", scopeType)
 	}
-	result, err := s.db.ExecContext(ctx,
+	scopeID = strings.TrimSpace(scopeID)
+	if scopeID == "" {
+		return 0, fmt.Errorf("mail binding scope_id is required")
+	}
+	result, err := exec.ExecContext(ctx,
 		`DELETE FROM mail_bindings WHERE scope_type=? AND scope_id=?`,
-		scopeType, strings.TrimSpace(scopeID))
+		scopeType, scopeID)
 	if err != nil {
 		return 0, err
 	}
 	return result.RowsAffected()
+}
+
+func (s *Store) DeleteMailBindingsForScope(ctx context.Context, scopeType domain.MailBindingScopeType, scopeID string) (int64, error) {
+	return s.DeleteMailBindingsForScopeInTx(ctx, s.db, scopeType, scopeID)
+}
+
+// deleteMailBindingsForProjectTx removes task-, workspace- and project-scoped
+// bindings before a Project graph is deleted. SQLite cannot express the
+// polymorphic scope_id as a foreign key, so this must be an explicit cascade.
+func deleteMailBindingsForProjectTx(ctx context.Context, exec mailDBTX, projectID string) error {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return nil
+	}
+	for _, statement := range []string{
+		`DELETE FROM mail_bindings WHERE scope_type='task'
+			AND scope_id IN (SELECT id FROM tasks WHERE project_id=?)`,
+		`DELETE FROM mail_bindings WHERE scope_type='workspace'
+			AND scope_id IN (SELECT id FROM workspaces WHERE project_id=?)`,
+	} {
+		if _, err := exec.ExecContext(ctx, statement, projectID); err != nil {
+			return err
+		}
+	}
+	_, err := exec.ExecContext(ctx,
+		`DELETE FROM mail_bindings WHERE scope_type='project' AND scope_id=?`, projectID)
+	return err
 }

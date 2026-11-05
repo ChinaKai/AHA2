@@ -86,6 +86,13 @@ func normalizeMailDelivery(item domain.MailDelivery, create bool) (domain.MailDe
 	if item.SMTPPhase != "" && !item.SMTPPhase.Valid() {
 		return item, fmt.Errorf("invalid mail smtp phase %q", item.SMTPPhase)
 	}
+	if item.State == domain.MailDeliverySending {
+		if strings.TrimSpace(item.LeaseID) == "" || item.LeaseUntil.IsZero() {
+			return item, fmt.Errorf("sending mail delivery requires a lease")
+		}
+	} else if strings.TrimSpace(item.LeaseID) != "" || !item.LeaseUntil.IsZero() {
+		return item, fmt.Errorf("only sending mail deliveries may carry a lease")
+	}
 	now := time.Now().UTC()
 	if item.AvailableAt.IsZero() {
 		item.AvailableAt = now
@@ -154,8 +161,10 @@ func (s *Store) MailDeliveriesByMessage(ctx context.Context, messageID string, l
 }
 
 // UpdateMailDeliveryState is the conditional write used by claim, result and
-// recovery paths. from lists the states the writer expects; an empty write
-// count means another writer already moved the row.
+// recovery paths. from must list the states the writer expects; an empty write
+// count means another writer already moved the row. Writes from sending require
+// a lease guard, entering sending requires a new lease, and every other target
+// state clears the lease so the state invariant cannot drift.
 func (s *Store) UpdateMailDeliveryState(ctx context.Context, id string, from []domain.MailDeliveryState, to domain.MailDeliveryState, patch MailDeliveryStatePatch, now time.Time) (bool, error) {
 	return s.UpdateMailDeliveryStateInTx(ctx, s.db, id, from, to, patch, now)
 }
@@ -166,6 +175,29 @@ func (s *Store) UpdateMailDeliveryStateInTx(ctx context.Context, exec mailDBTX, 
 	}
 	if strings.TrimSpace(id) == "" {
 		return false, fmt.Errorf("mail delivery id is required")
+	}
+	if len(from) == 0 {
+		return false, fmt.Errorf("mail delivery expected states are required")
+	}
+	fromSending := false
+	placeholders := make([]string, 0, len(from))
+	for _, state := range from {
+		if !state.Valid() {
+			return false, fmt.Errorf("invalid mail delivery state %q", state)
+		}
+		if state == domain.MailDeliverySending {
+			fromSending = true
+		}
+		placeholders = append(placeholders, "?")
+	}
+	if fromSending && strings.TrimSpace(patch.RequireLeaseID) == "" {
+		return false, fmt.Errorf("mail delivery lease guard is required for sending")
+	}
+	if to == domain.MailDeliverySending {
+		if patch.LeaseID == nil || strings.TrimSpace(*patch.LeaseID) == "" ||
+			patch.LeaseUntil == nil || patch.LeaseUntil.IsZero() {
+			return false, fmt.Errorf("mail delivery entering sending requires a lease")
+		}
 	}
 	if now.IsZero() {
 		now = time.Now().UTC()
@@ -180,20 +212,21 @@ func (s *Store) UpdateMailDeliveryStateInTx(ctx context.Context, exec mailDBTX, 
 		sets = append(sets, `available_at=?`)
 		args = append(args, mailTimeString(*patch.AvailableAt))
 	}
-	if patch.LeaseID != nil {
-		sets = append(sets, `lease_id=?`)
-		args = append(args, *patch.LeaseID)
+	if to == domain.MailDeliverySending {
+		sets = append(sets, `lease_id=?`, `lease_until=?`)
+		args = append(args, *patch.LeaseID, mailTimeString(*patch.LeaseUntil))
+	} else {
+		// Leaving sending (or writing any other state) always clears the lease.
+		sets = append(sets, `lease_id=''`, `lease_until=''`)
 	}
-	if patch.LeaseUntil != nil {
-		sets = append(sets, `lease_until=?`)
-		args = append(args, mailTimeString(*patch.LeaseUntil))
-	}
+	phaseGuard := ""
 	if patch.SMTPPhase != nil {
 		if *patch.SMTPPhase != "" && !patch.SMTPPhase.Valid() {
 			return false, fmt.Errorf("invalid mail smtp phase %q", *patch.SMTPPhase)
 		}
 		sets = append(sets, `smtp_phase=?`)
 		args = append(args, string(*patch.SMTPPhase))
+		phaseGuard = mailSMTPPhaseRegressionGuard(*patch.SMTPPhase)
 	}
 	if patch.MessageIDHeader != nil {
 		sets = append(sets, `message_id_header=?`)
@@ -225,21 +258,15 @@ func (s *Store) UpdateMailDeliveryStateInTx(ctx context.Context, exec mailDBTX, 
 	}
 	query := `UPDATE mail_deliveries SET ` + strings.Join(sets, `,`) + ` WHERE id=?`
 	args = append(args, id)
-	if len(from) > 0 {
-		placeholders := make([]string, 0, len(from))
-		for _, state := range from {
-			if !state.Valid() {
-				return false, fmt.Errorf("invalid mail delivery state %q", state)
-			}
-			placeholders = append(placeholders, "?")
-			args = append(args, state)
-		}
-		query += ` AND state IN (` + strings.Join(placeholders, ",") + `)`
+	query += ` AND state IN (` + strings.Join(placeholders, ",") + `)`
+	for _, state := range from {
+		args = append(args, state)
 	}
 	if patch.RequireLeaseID != "" {
 		query += ` AND lease_id=?`
 		args = append(args, patch.RequireLeaseID)
 	}
+	query += phaseGuard
 	result, err := exec.ExecContext(ctx, query, args...)
 	if err != nil {
 		return false, err
@@ -249,6 +276,20 @@ func (s *Store) UpdateMailDeliveryStateInTx(ctx context.Context, exec mailDBTX, 
 		return false, err
 	}
 	return affected == 1, nil
+}
+
+// mailSMTPPhaseRegressionGuard prevents a failed or stale worker from moving
+// smtp_phase back before DATA. Once DATA or finished is recorded, a blind
+// resend would be unsafe, so only forward transitions are permitted.
+func mailSMTPPhaseRegressionGuard(phase domain.MailSMTPPhase) string {
+	switch phase {
+	case domain.MailSMTPPhaseFinished:
+		return ""
+	case domain.MailSMTPPhaseData:
+		return ` AND smtp_phase<>'finished'`
+	default:
+		return ` AND smtp_phase NOT IN ('data','finished')`
+	}
 }
 
 // SetMailDeliveryPhaseInTx records a phase before the worker proceeds. In
@@ -261,9 +302,11 @@ func (s *Store) SetMailDeliveryPhaseInTx(ctx context.Context, exec mailDBTX, id,
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
-	result, err := exec.ExecContext(ctx, `
+	query := `
 		UPDATE mail_deliveries SET smtp_phase=?,updated_at=?
-		WHERE id=? AND state='sending' AND lease_id=? AND lease_until>?`,
+		WHERE id=? AND state='sending' AND lease_id=? AND lease_until>?` +
+		mailSMTPPhaseRegressionGuard(phase)
+	result, err := exec.ExecContext(ctx, query,
 		string(phase), mailTimeString(now), id, leaseID, mailTimeString(now))
 	if err != nil {
 		return false, err

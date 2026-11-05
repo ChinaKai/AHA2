@@ -51,15 +51,36 @@ func TestMailDeliveryConditionalStateAndLeasePrimitives(t *testing.T) {
 		t.Fatalf("claimed delivery = %+v", stored)
 	}
 
-	// A second claimer that still expects queued must lose.
+	// A second claimer that still expects queued must lose. It supplies its own
+	// lease so the failure is the conditional UPDATE, not input validation.
+	staleLease := "lease-2"
+	staleUntil := now.Add(5 * time.Minute)
 	claimed, err = database.UpdateMailDeliveryState(ctx, delivery.ID,
 		[]domain.MailDeliveryState{domain.MailDeliveryQueued},
-		domain.MailDeliverySending, MailDeliveryStatePatch{AttemptsDelta: 1}, now)
+		domain.MailDeliverySending,
+		MailDeliveryStatePatch{AttemptsDelta: 1, LeaseID: &staleLease, LeaseUntil: &staleUntil}, now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if claimed {
 		t.Fatal("stale queued claim overwrote a sending delivery")
+	}
+
+	// Degenerate writes must be rejected instead of turning into an
+	// unconditional UPDATE or a lease-less sending write.
+	if _, err := database.UpdateMailDeliveryState(ctx, delivery.ID, nil,
+		domain.MailDeliverySending, MailDeliveryStatePatch{LeaseID: &staleLease, LeaseUntil: &staleUntil}, now); err == nil {
+		t.Fatal("empty expected-state list was accepted")
+	}
+	if _, err := database.UpdateMailDeliveryState(ctx, delivery.ID,
+		[]domain.MailDeliveryState{domain.MailDeliveryQueued},
+		domain.MailDeliverySending, MailDeliveryStatePatch{AttemptsDelta: 1}, now); err == nil {
+		t.Fatal("entering sending without a lease was accepted")
+	}
+	if _, err := database.UpdateMailDeliveryState(ctx, delivery.ID,
+		[]domain.MailDeliveryState{domain.MailDeliverySending},
+		domain.MailDeliveryQueued, MailDeliveryStatePatch{}, now); err == nil {
+		t.Fatal("writing from sending without a lease guard was accepted")
 	}
 
 	dataPhase := domain.MailSMTPPhaseData
@@ -79,6 +100,36 @@ func TestMailDeliveryConditionalStateAndLeasePrimitives(t *testing.T) {
 		t.Fatalf("smtp phase = %q, want data", stored.SMTPPhase)
 	}
 
+	// Once DATA is recorded the phase is monotonic: a stale worker cannot move
+	// it back to connect or empty, either through the phase helper or a state
+	// patch.
+	connectPhase := domain.MailSMTPPhaseConnect
+	emptyPhase := domain.MailSMTPPhaseNone
+	if ok, err := database.SetMailDeliveryPhaseInTx(ctx, database.db, delivery.ID,
+		leaseID, connectPhase, now); err != nil || ok {
+		t.Fatalf("phase regression to connect: ok=%v err=%v", ok, err)
+	}
+	if ok, err := database.SetMailDeliveryPhaseInTx(ctx, database.db, delivery.ID,
+		leaseID, emptyPhase, now); err != nil || ok {
+		t.Fatalf("phase regression to empty: ok=%v err=%v", ok, err)
+	}
+	if ok, err := database.UpdateMailDeliveryState(ctx, delivery.ID,
+		[]domain.MailDeliveryState{domain.MailDeliverySending},
+		domain.MailDeliverySending,
+		MailDeliveryStatePatch{
+			SMTPPhase: &connectPhase, LeaseID: &leaseID, LeaseUntil: &leaseUntil,
+			RequireLeaseID: leaseID,
+		}, now); err != nil || ok {
+		t.Fatalf("phase patch regression to connect: ok=%v err=%v", ok, err)
+	}
+	stored, err = database.MailDelivery(ctx, delivery.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.SMTPPhase != domain.MailSMTPPhaseData {
+		t.Fatalf("smtp phase after regression attempts = %q, want data", stored.SMTPPhase)
+	}
+
 	extended := now.Add(10 * time.Minute)
 	if ok, err := database.RenewMailDeliveryLeaseInTx(ctx, database.db, delivery.ID,
 		leaseID, extended, now); err != nil || !ok {
@@ -91,12 +142,11 @@ func TestMailDeliveryConditionalStateAndLeasePrimitives(t *testing.T) {
 
 	accepted := domain.MailOutcomeProviderAccepted
 	finished := domain.MailSMTPPhaseFinished
-	clear := ""
 	header := "<mail-message@example.com>"
 	response := "250 accepted"
 	sentAt := now.Add(time.Second)
 	final := MailDeliveryStatePatch{
-		LeaseID: &clear, SMTPPhase: &finished, OutcomeCertainty: &accepted,
+		SMTPPhase: &finished, OutcomeCertainty: &accepted,
 		MessageIDHeader: &header, SMTPResponse: &response, SentAt: &sentAt,
 		RequireLeaseID: leaseID,
 	}
@@ -112,7 +162,7 @@ func TestMailDeliveryConditionalStateAndLeasePrimitives(t *testing.T) {
 	if stored.State != domain.MailDeliverySent ||
 		stored.OutcomeCertainty != domain.MailOutcomeProviderAccepted ||
 		stored.MessageIDHeader != header || stored.SMTPResponse != response ||
-		stored.SentAt.IsZero() || stored.LeaseID != "" {
+		stored.SentAt.IsZero() || stored.LeaseID != "" || !stored.LeaseUntil.IsZero() {
 		t.Fatalf("final delivery = %+v", stored)
 	}
 	if ok, err := database.UpdateMailDeliveryState(ctx, delivery.ID,
@@ -206,6 +256,70 @@ func TestMailDeliveryPhaseRejectsExpiredLease(t *testing.T) {
 	}
 }
 
+func TestMailDeliveryActiveMessageUniqueness(t *testing.T) {
+	ctx := context.Background()
+	database := openMailTestStore(t)
+	taskID, _, _ := createMailTaskFixture(t, database)
+	account := createMailAccountFixture(t, database, "Active", "active@example.com")
+	message := createMailMessageFixture(t, database, taskID, account.ID, "active-1")
+	now := time.Now().UTC()
+
+	if _, err := database.CreateMailDelivery(ctx, domain.MailDelivery{
+		MessageID: message.ID, AccountID: account.ID, State: domain.MailDeliverySending,
+	}); err == nil {
+		t.Fatal("created a sending delivery without a lease")
+	}
+	if _, err := database.CreateMailDelivery(ctx, domain.MailDelivery{
+		MessageID: message.ID, AccountID: account.ID, State: domain.MailDeliveryQueued,
+		LeaseID: "queued-lease",
+	}); err == nil {
+		t.Fatal("created a queued delivery with a lease")
+	}
+	first, err := database.CreateMailDelivery(ctx, domain.MailDelivery{
+		MessageID: message.ID, AccountID: account.ID, Generation: 0,
+		State: domain.MailDeliveryQueued, AvailableAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.CreateMailDelivery(ctx, domain.MailDelivery{
+		MessageID: message.ID, AccountID: account.ID, Generation: 1,
+		State: domain.MailDeliveryQueued, AvailableAt: now,
+	}); err == nil {
+		t.Fatal("second active generation passed idx_mail_deliveries_active_message")
+	}
+
+	ok, err := database.UpdateMailDeliveryState(ctx, first.ID,
+		[]domain.MailDeliveryState{domain.MailDeliveryQueued},
+		domain.MailDeliveryCancelled, MailDeliveryStatePatch{}, now)
+	if err != nil || !ok {
+		t.Fatalf("cancel first generation: ok=%v err=%v", ok, err)
+	}
+	second, err := database.CreateMailDelivery(ctx, domain.MailDelivery{
+		MessageID: message.ID, AccountID: account.ID, Generation: 1,
+		State: domain.MailDeliveryQueued, AvailableAt: now,
+	})
+	if err != nil {
+		t.Fatalf("new generation after terminal state: %v", err)
+	}
+	if _, err := database.CreateMailDelivery(ctx, domain.MailDelivery{
+		MessageID: message.ID, AccountID: account.ID, Generation: 2,
+		State: domain.MailDeliveryQueued, AvailableAt: now,
+	}); err == nil {
+		t.Fatal("third active generation passed idx_mail_deliveries_active_message")
+	}
+	storedFirst, err := database.MailDelivery(ctx, first.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if storedFirst.State != domain.MailDeliveryCancelled || storedFirst.LeaseID != "" || !storedFirst.LeaseUntil.IsZero() {
+		t.Fatalf("cancelled delivery = %+v", storedFirst)
+	}
+	if storedSecond, err := database.MailDelivery(ctx, second.ID); err != nil || storedSecond.State != domain.MailDeliveryQueued {
+		t.Fatalf("second generation = %+v, err=%v", storedSecond, err)
+	}
+}
+
 func TestMailDeliveryTransactionCompositionAndRollback(t *testing.T) {
 	ctx := context.Background()
 	database := openMailTestStore(t)
@@ -253,18 +367,28 @@ func TestMailDeliveryTransactionCompositionAndRollback(t *testing.T) {
 		t.Fatalf("message status = %q, want sending", storedMessage.Status)
 	}
 
+	// The rollback case needs its own message: the unique active-delivery index
+	// permits only one queued/sending generation per message.
+	rollbackMessage, err := database.CreateMailMessage(ctx, domain.MailMessage{
+		TaskID: taskID, AccountID: account.ID, Source: domain.MailMessageSourceAgent,
+		IdempotencyKey: "tx-2", FromAddress: "noreply@example.com",
+		To: []string{"qa@example.com"}, Subject: "Tx rollback", Status: domain.MailMessageQueued,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	rollbackID := domain.NewID("mail_delivery")
 	abort := errors.New("abort transaction")
 	err = database.WithMailTx(ctx, func(tx *sql.Tx) error {
 		if _, err := database.CreateMailDeliveryInTx(ctx, tx, domain.MailDelivery{
-			ID: rollbackID, MessageID: message.ID, AccountID: account.ID,
-			Generation: 1, State: domain.MailDeliveryQueued, AvailableAt: now,
+			ID: rollbackID, MessageID: rollbackMessage.ID, AccountID: account.ID,
+			State: domain.MailDeliveryQueued, AvailableAt: now,
 		}); err != nil {
 			return err
 		}
-		if _, err := database.UpdateMailMessageStatusInTx(ctx, tx, message.ID,
-			[]domain.MailMessageStatus{domain.MailMessageSending},
-			domain.MailMessageQueued, now); err != nil {
+		if _, err := database.UpdateMailMessageStatusInTx(ctx, tx, rollbackMessage.ID,
+			[]domain.MailMessageStatus{domain.MailMessageQueued},
+			domain.MailMessageSending, now); err != nil {
 			return err
 		}
 		return abort
@@ -275,11 +399,11 @@ func TestMailDeliveryTransactionCompositionAndRollback(t *testing.T) {
 	if _, err := database.MailDelivery(ctx, rollbackID); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("rolled back delivery is still visible: %v", err)
 	}
-	storedMessage, err = database.MailMessage(ctx, message.ID)
+	storedRollback, err := database.MailMessage(ctx, rollbackMessage.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if storedMessage.Status != domain.MailMessageSending {
-		t.Fatalf("message status after rollback = %q, want sending", storedMessage.Status)
+	if storedRollback.Status != domain.MailMessageQueued {
+		t.Fatalf("message status after rollback = %q, want queued", storedRollback.Status)
 	}
 }

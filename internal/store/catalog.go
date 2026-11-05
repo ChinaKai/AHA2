@@ -544,8 +544,18 @@ func (s *Store) envGroupReferenceBlockers(ctx context.Context, id string) ([]str
 }
 
 func (s *Store) DeleteWorkspace(ctx context.Context, id string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM workspaces WHERE id=?`, id)
-	return err
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := s.DeleteMailBindingsForScopeInTx(ctx, tx, domain.MailBindingScopeWorkspace, id); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM workspaces WHERE id=?`, id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) DeleteProject(ctx context.Context, id string) error {

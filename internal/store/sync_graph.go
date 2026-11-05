@@ -274,6 +274,10 @@ func (s *Store) PurgeOwnRemoteMirrors(ctx context.Context, deviceID string) erro
 	if _, err := tx.ExecContext(ctx, `DELETE FROM sync_remote_task_objects WHERE owner_device_id=?`, deviceID); err != nil {
 		return err
 	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM mail_bindings WHERE scope_type='workspace'
+		AND scope_id IN (SELECT id FROM workspaces WHERE read_only=1 AND owner_device_id=?)`, deviceID); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM workspaces WHERE read_only=1 AND owner_device_id=?`, deviceID); err != nil {
 		return err
 	}

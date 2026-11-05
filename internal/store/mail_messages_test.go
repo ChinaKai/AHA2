@@ -113,4 +113,8 @@ func TestMailMessageConditionalStatusUpdates(t *testing.T) {
 		"not_a_status", now); err == nil {
 		t.Fatal("invalid target status was accepted")
 	}
+	if _, err := database.UpdateMailMessageStatus(ctx, message.ID, nil,
+		domain.MailMessageCancelled, now); err == nil {
+		t.Fatal("empty expected-status list was accepted")
+	}
 }

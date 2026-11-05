@@ -91,6 +91,7 @@ func TestMailBindingScopeIsolationAndCleanup(t *testing.T) {
 		t.Fatalf("enabled project bindings = %+v", enabledProjectBindings)
 	}
 
+	beforeUpdate := projectBinding.UpdatedAt
 	projectBinding.Enabled = false
 	projectBinding.AllowedRecipients = []string{"qa.example.com"}
 	if err := database.UpdateMailBinding(ctx, projectBinding); err != nil {
@@ -102,6 +103,9 @@ func TestMailBindingScopeIsolationAndCleanup(t *testing.T) {
 	}
 	if updated.Enabled || len(updated.AllowedRecipients) != 1 || updated.AllowedRecipients[0] != "qa.example.com" {
 		t.Fatalf("updated binding = %+v", updated)
+	}
+	if !updated.UpdatedAt.After(beforeUpdate) {
+		t.Fatalf("binding update did not advance updated_at: %v <= %v", updated.UpdatedAt, beforeUpdate)
 	}
 
 	message, err := database.CreateMailMessage(ctx, domain.MailMessage{

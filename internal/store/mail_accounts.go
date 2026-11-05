@@ -53,6 +53,11 @@ func normalizeMailAccount(item domain.MailAccount, create bool) (domain.MailAcco
 	if create && item.ID == "" {
 		item.ID = domain.NewID("mail_account")
 	}
+	if item.CredentialRef != "" {
+		// The Secret key format is fixed by the design; never accept an
+		// arbitrary reference that could point at another account's secret.
+		item.CredentialRef = domain.MailAccountCredentialRef(item.ID)
+	}
 	if item.Provider == "" {
 		item.Provider = domain.MailProviderNeteaseQiye
 	}
@@ -93,6 +98,9 @@ func normalizeMailAccount(item domain.MailAccount, create bool) (domain.MailAcco
 		key := strings.ToLower(address)
 		if seen[key] {
 			continue
+		}
+		if strings.EqualFold(address, item.Address) {
+			return item, ErrMailAddressInUse
 		}
 		seen[key] = true
 		aliases = append(aliases, domain.MailAccountAlias{
@@ -191,9 +199,7 @@ func (s *Store) UpdateMailAccount(ctx context.Context, item domain.MailAccount) 
 	if err != nil {
 		return domain.MailAccount{}, err
 	}
-	if item.UpdatedAt.IsZero() {
-		item.UpdatedAt = time.Now().UTC()
-	}
+	item.UpdatedAt = time.Now().UTC()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return domain.MailAccount{}, err
@@ -237,8 +243,9 @@ func (s *Store) UpdateMailAccount(ctx context.Context, item domain.MailAccount) 
 	if err := tx.Commit(); err != nil {
 		return domain.MailAccount{}, err
 	}
-	item.CredentialRef = ""
-	return item, nil
+	// Re-read so CredentialConfigured and aliases come from the database rather
+	// than from caller-supplied fields.
+	return s.MailAccount(ctx, item.ID)
 }
 
 func (s *Store) MailAccount(ctx context.Context, id string) (domain.MailAccount, error) {
@@ -315,11 +322,12 @@ func (s *Store) MailAccountCredentialRef(ctx context.Context, id string) (string
 
 // SetMailAccountCredential stores a rotated Secret reference, marks the
 // credential configured, clears the last test result and requires a new test.
-func (s *Store) SetMailAccountCredential(ctx context.Context, id, ref string, now time.Time) error {
-	ref = strings.TrimSpace(ref)
-	if ref == "" {
-		return fmt.Errorf("mail credential reference is required")
+func (s *Store) SetMailAccountCredential(ctx context.Context, id string, now time.Time) error {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return fmt.Errorf("mail account id is required")
 	}
+	ref := domain.MailAccountCredentialRef(id)
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}

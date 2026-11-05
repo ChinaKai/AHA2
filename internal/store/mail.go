@@ -7,6 +7,9 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 // Mail timestamps use fixed-width UTC RFC3339 with nine fractional digits.
@@ -19,7 +22,27 @@ var (
 	ErrMailAddressInUse            = errors.New("mail address already in use")
 	ErrMailTemplateVersionConflict = errors.New("mail template version conflict")
 	ErrMailTemplateArchived        = errors.New("mail template is archived")
+	ErrAttachmentInUse             = errors.New("attachment is referenced by a build artifact")
 )
+
+// isUniqueConstraintError and isForeignKeyConstraintError inspect the driver's
+// typed result code instead of matching message text, which is localized and
+// version-dependent.
+func isUniqueConstraintError(err error) bool {
+	var sqliteErr *sqlite.Error
+	if !errors.As(err, &sqliteErr) {
+		return false
+	}
+	// SQLite reports a composite PRIMARY KEY collision separately from a
+	// UNIQUE index collision; both mean "a competing version already exists".
+	return sqliteErr.Code() == sqlite3.SQLITE_CONSTRAINT_UNIQUE ||
+		sqliteErr.Code() == sqlite3.SQLITE_CONSTRAINT_PRIMARYKEY
+}
+
+func isForeignKeyConstraintError(err error) bool {
+	var sqliteErr *sqlite.Error
+	return errors.As(err, &sqliteErr) && sqliteErr.Code() == sqlite3.SQLITE_CONSTRAINT_FOREIGNKEY
+}
 
 func mailTimeString(value time.Time) string {
 	if value.IsZero() {

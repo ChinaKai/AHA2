@@ -96,9 +96,15 @@ func TestMailAccountLifecycleAndCredentialIsolation(t *testing.T) {
 	if !updated.CredentialConfigured {
 		t.Fatal("updating account settings must not clear credential_configured")
 	}
+	if updated.CredentialRef != "" {
+		t.Fatal("updated account read leaked credential_ref")
+	}
+	if !updated.UpdatedAt.After(created.UpdatedAt) {
+		t.Fatalf("update did not advance updated_at: %v <= %v", updated.UpdatedAt, created.UpdatedAt)
+	}
 
-	rotatedRef := domain.MailAccountCredentialRef(accountID) + "-rotated"
-	if err := database.SetMailAccountCredential(ctx, accountID, rotatedRef, time.Now().UTC()); err != nil {
+	rotatedRef := domain.MailAccountCredentialRef(accountID)
+	if err := database.SetMailAccountCredential(ctx, accountID, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	rotated, err := database.MailAccount(ctx, accountID)
@@ -144,6 +150,14 @@ func TestMailAccountLifecycleAndCredentialIsolation(t *testing.T) {
 	}
 	if plain.CredentialConfigured {
 		t.Fatal("account without a Secret reference was marked configured")
+	}
+
+	if _, err := database.CreateMailAccount(ctx, domain.MailAccount{
+		ID: domain.NewID("mail_account"), Name: "Self alias",
+		Address: "self@example.com",
+		Aliases: []domain.MailAccountAlias{{Address: "SELF@example.com"}},
+	}); !errors.Is(err, ErrMailAddressInUse) {
+		t.Fatalf("alias equal to the primary address error = %v, want ErrMailAddressInUse", err)
 	}
 }
 

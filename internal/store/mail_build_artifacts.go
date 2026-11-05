@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -49,17 +50,13 @@ func normalizeBuildArtifact(item domain.BuildArtifact) (domain.BuildArtifact, er
 	if item.StorageType == "" {
 		item.StorageType = domain.BuildArtifactStorageAHAAttachment
 	}
-	switch item.StorageType {
-	case domain.BuildArtifactStorageAHAAttachment:
-		if item.AttachmentID == "" || item.ExternalURL != "" {
-			return item, fmt.Errorf("aha_attachment build artifact requires attachment_id and no external_url")
-		}
-	case domain.BuildArtifactStorageExternalURL:
-		if item.ExternalURL == "" || item.AttachmentID != "" {
-			return item, fmt.Errorf("external_url build artifact requires external_url and no attachment_id")
-		}
-	default:
-		return item, fmt.Errorf("invalid build artifact storage_type %q", item.StorageType)
+	// external_url is reserved for phase two; phase one only registers controlled
+	// AHA attachment references.
+	if item.StorageType != domain.BuildArtifactStorageAHAAttachment {
+		return item, fmt.Errorf("phase one only supports aha_attachment build artifacts")
+	}
+	if item.AttachmentID == "" || item.ExternalURL != "" {
+		return item, fmt.Errorf("aha_attachment build artifact requires attachment_id and no external_url")
 	}
 	if item.ID == "" {
 		item.ID = domain.NewID("build_artifact")
@@ -74,6 +71,22 @@ func (s *Store) CreateBuildArtifact(ctx context.Context, item domain.BuildArtifa
 	item, err := normalizeBuildArtifact(item)
 	if err != nil {
 		return domain.BuildArtifact{}, err
+	}
+	var sourceTaskID, sourceSHA string
+	var sourceSize int64
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT task_id,size_bytes,sha256 FROM attachments WHERE id=?`, item.AttachmentID).
+		Scan(&sourceTaskID, &sourceSize, &sourceSHA); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return domain.BuildArtifact{}, fmt.Errorf("build artifact attachment not found")
+		}
+		return domain.BuildArtifact{}, err
+	}
+	if sourceTaskID != item.TaskID {
+		return domain.BuildArtifact{}, fmt.Errorf("build artifact attachment belongs to another task")
+	}
+	if sourceSize != item.SizeBytes || !strings.EqualFold(sourceSHA, item.SHA256) {
+		return domain.BuildArtifact{}, fmt.Errorf("build artifact size or sha256 does not match the source attachment")
 	}
 	if _, err := s.db.ExecContext(ctx, `
 		INSERT INTO build_artifacts(

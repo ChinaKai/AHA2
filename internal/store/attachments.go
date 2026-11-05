@@ -243,8 +243,19 @@ func (s *Store) DeleteDraftAttachment(ctx context.Context, taskID, id string) er
 	if item.MessageID != "" {
 		return fmt.Errorf("sent attachment cannot be deleted")
 	}
+	var referenced bool
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM build_artifacts WHERE attachment_id=?)`, id).Scan(&referenced); err != nil {
+		return err
+	}
+	if referenced {
+		return ErrAttachmentInUse
+	}
 	result, err := s.db.ExecContext(ctx, `DELETE FROM attachments WHERE id=? AND task_id=? AND message_id=''`, id, taskID)
 	if err != nil {
+		if isForeignKeyConstraintError(err) {
+			return ErrAttachmentInUse
+		}
 		return err
 	}
 	if affected, _ := result.RowsAffected(); affected != 1 {

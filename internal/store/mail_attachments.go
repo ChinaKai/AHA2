@@ -62,6 +62,19 @@ func normalizeMailAttachment(item domain.MailAttachment) (domain.MailAttachment,
 	if !item.DeliveryMode.Valid() {
 		return item, fmt.Errorf("invalid mail attachment delivery_mode %q", item.DeliveryMode)
 	}
+	hasLinkFields := item.LinkTokenRef != "" || item.LinkTokenHash != "" ||
+		!item.LinkExpiresAt.IsZero() || item.LinkMaxDownloads != 0 ||
+		item.LinkDownloadCount != 0 || !item.LinkRevokedAt.IsZero()
+	switch item.DeliveryMode {
+	case domain.MailAttachmentDirect:
+		if hasLinkFields {
+			return item, fmt.Errorf("direct mail attachment must not carry link fields")
+		}
+	case domain.MailAttachmentLink:
+		if item.LinkTokenRef == "" || item.LinkTokenHash == "" || item.LinkExpiresAt.IsZero() {
+			return item, fmt.Errorf("link mail attachment requires token_ref, token_hash and expires_at")
+		}
+	}
 	if item.Disposition == "" {
 		item.Disposition = domain.MailAttachmentDispositionAttachment
 	}

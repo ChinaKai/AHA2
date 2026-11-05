@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -148,44 +149,49 @@ func (s *Store) UpdateMailTemplate(ctx context.Context, item domain.MailTemplate
 	if err != nil {
 		return domain.MailTemplate{}, err
 	}
+	now := time.Now().UTC()
+	item.UpdatedAt = now
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return domain.MailTemplate{}, err
 	}
 	defer tx.Rollback()
-	var currentVersion int
-	var status domain.MailTemplateStatus
-	if err := tx.QueryRowContext(ctx,
-		`SELECT current_version,status FROM mail_templates WHERE id=?`, item.ID).
-		Scan(&currentVersion, &status); err != nil {
-		return domain.MailTemplate{}, err
-	}
-	if status == domain.MailTemplateStatusArchived {
-		return domain.MailTemplate{}, ErrMailTemplateArchived
-	}
-	if currentVersion != expectedVersion {
-		return domain.MailTemplate{}, ErrMailTemplateVersionConflict
-	}
-	nextVersion := currentVersion + 1
-	// Advance the version pointer with a conditional UPDATE first. A concurrent
-	// editor that read the same expected version loses here (0 rows) before it
-	// can insert a duplicate version snapshot; the composite primary key on
-	// (template_id, version) remains the final guard.
+	// A single conditional UPDATE is the sole decision point: it both checks the
+	// version the editor read and advances the pointer while holding the write
+	// lock. A competing editor sees 0 rows and never reaches the version insert.
 	result, err := tx.ExecContext(ctx, `
 		UPDATE mail_templates SET
 			name=?,description=?,subject_template=?,body_text_template=?,body_html_template=?,
 			default_to_json=?,default_cc_json=?,required_variables_json=?,
-			current_version=?,updated_at=?
-		WHERE id=? AND current_version=?`,
+			current_version=current_version+1,updated_at=?
+		WHERE id=? AND current_version=? AND status='active'`,
 		item.Name, item.Description, item.SubjectTemplate, item.BodyTextTemplate,
 		item.BodyHTMLTemplate, encodeJSON(item.DefaultTo), encodeJSON(item.DefaultCC),
-		encodeJSON(item.RequiredVariables), nextVersion, mailTimeString(item.UpdatedAt),
-		item.ID, currentVersion)
+		encodeJSON(item.RequiredVariables), mailTimeString(now),
+		item.ID, expectedVersion)
 	if err != nil {
 		return domain.MailTemplate{}, err
 	}
 	if affected, _ := result.RowsAffected(); affected != 1 {
+		var status domain.MailTemplateStatus
+		var currentVersion int
+		if err := tx.QueryRowContext(ctx,
+			`SELECT status,current_version FROM mail_templates WHERE id=?`, item.ID).
+			Scan(&status, &currentVersion); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return domain.MailTemplate{}, err
+			}
+			return domain.MailTemplate{}, err
+		}
+		if status == domain.MailTemplateStatusArchived {
+			return domain.MailTemplate{}, ErrMailTemplateArchived
+		}
 		return domain.MailTemplate{}, ErrMailTemplateVersionConflict
+	}
+	var nextVersion int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT current_version FROM mail_templates WHERE id=?`, item.ID).Scan(&nextVersion); err != nil {
+		return domain.MailTemplate{}, err
 	}
 	if err := insertMailTemplateVersionTx(ctx, tx, domain.MailTemplateVersion{
 		TemplateID:        item.ID,
@@ -195,9 +201,9 @@ func (s *Store) UpdateMailTemplate(ctx context.Context, item domain.MailTemplate
 		BodyHTMLTemplate:  item.BodyHTMLTemplate,
 		RequiredVariables: item.RequiredVariables,
 		CreatedBy:         item.CreatedBy,
-		CreatedAt:         item.UpdatedAt,
+		CreatedAt:         now,
 	}); err != nil {
-		if strings.Contains(strings.ToLower(err.Error()), "unique constraint failed") {
+		if isUniqueConstraintError(err) {
 			return domain.MailTemplate{}, ErrMailTemplateVersionConflict
 		}
 		return domain.MailTemplate{}, err
@@ -256,7 +262,7 @@ func (s *Store) ArchiveMailTemplate(ctx context.Context, id string, now time.Tim
 		now = time.Now().UTC()
 	}
 	result, err := s.db.ExecContext(ctx,
-		`UPDATE mail_templates SET status='archived',updated_at=? WHERE id=?`,
+		`UPDATE mail_templates SET status='archived',updated_at=? WHERE id=? AND status='active'`,
 		mailTimeString(now), id)
 	if err != nil {
 		return err

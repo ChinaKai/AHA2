@@ -490,6 +490,9 @@ CREATE INDEX IF NOT EXISTS idx_mail_deliveries_account
     ON mail_deliveries(account_id, state, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_mail_deliveries_claim_account
     ON mail_deliveries(account_id, state, available_at) WHERE state = 'queued';
+-- 同一消息同一时刻最多一个 active delivery；重试只在旧 generation 结束后创建
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mail_deliveries_active_message
+    ON mail_deliveries(message_id) WHERE state IN ('queued','sending');
 
 CREATE TABLE IF NOT EXISTS mail_delivery_attempts (
     id TEXT PRIMARY KEY,
@@ -522,6 +525,7 @@ CREATE INDEX IF NOT EXISTS idx_mail_delivery_attempts_delivery
 | `idx_mail_deliveries_claim` | worker 以 `(state, available_at)` 领取 queued，避免全表扫描 |
 | `idx_mail_deliveries_reclaim` | 回收 `state='sending' AND lease_until<now` 的失联租约 |
 | `idx_mail_deliveries_claim_account` | 按账号并发/限速时领取各自 queued 队列 |
+| `idx_mail_deliveries_active_message` | 唯一约束保证同一消息最多一个 queued/sending generation |
 | `idx_mail_attachments_source` | 校验引用来源、清理时按来源反查 |
 | `idx_mail_attachments_link_hash` | 受控下载端点按令牌摘要唯一定位附件 |
 

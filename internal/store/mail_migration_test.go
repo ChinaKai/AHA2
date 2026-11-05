@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"errors"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -49,6 +51,7 @@ func TestMailSchemaV120MigrationIsIdempotent(t *testing.T) {
 		"idx_mail_attachments_source", "idx_mail_attachments_link_hash",
 		"idx_mail_deliveries_claim", "idx_mail_deliveries_reclaim",
 		"idx_mail_deliveries_account", "idx_mail_deliveries_claim_account",
+		"idx_mail_deliveries_active_message",
 		"idx_mail_delivery_attempts_delivery",
 	}
 	for _, index := range indexes {
@@ -237,5 +240,175 @@ func TestMailSchemaV120Constraints(t *testing.T) {
 		To: []string{"qa@example.com"}, Subject: "Duplicate",
 	}); err == nil {
 		t.Fatal("duplicate task idempotency key passed the unique constraint")
+	}
+}
+
+func TestMailSchemaIndexShapesAndQueryPlans(t *testing.T) {
+	ctx := context.Background()
+	database := openMailTestStore(t)
+
+	indexColumns := func(index string) []string {
+		rows, err := database.db.QueryContext(ctx, `PRAGMA index_info(`+index+`)`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var columns []string
+		for rows.Next() {
+			var seqno, cid int
+			var name string
+			if err := rows.Scan(&seqno, &cid, &name); err != nil {
+				t.Fatal(err)
+			}
+			columns = append(columns, name)
+		}
+		return columns
+	}
+	indexSQL := func(index string) string {
+		var sql string
+		if err := database.db.QueryRowContext(ctx,
+			`SELECT COALESCE(sql,'') FROM sqlite_master WHERE type='index' AND name=?`, index).Scan(&sql); err != nil {
+			t.Fatal(err)
+		}
+		return sql
+	}
+
+	for _, check := range []struct {
+		index   string
+		columns []string
+	}{
+		{"idx_mail_deliveries_claim", []string{"state", "available_at"}},
+		{"idx_mail_deliveries_reclaim", []string{"state", "lease_until"}},
+		{"idx_mail_deliveries_active_message", []string{"message_id"}},
+		{"idx_mail_messages_task", []string{"task_id", "status", "created_at"}},
+	} {
+		columns := indexColumns(check.index)
+		if strings.Join(columns, ",") != strings.Join(check.columns, ",") {
+			t.Errorf("%s columns = %v, want %v", check.index, columns, check.columns)
+		}
+	}
+	for _, check := range []struct {
+		index    string
+		fragment string
+	}{
+		{"idx_mail_deliveries_claim", "WHERE state = 'queued'"},
+		{"idx_mail_deliveries_reclaim", "WHERE state = 'sending'"},
+		{"idx_mail_deliveries_active_message", "WHERE state IN ('queued','sending')"},
+	} {
+		if sql := indexSQL(check.index); !strings.Contains(sql, check.fragment) {
+			t.Errorf("%s SQL %q does not contain %q", check.index, sql, check.fragment)
+		}
+	}
+
+	plan := func(query string, args ...any) string {
+		rows, err := database.db.QueryContext(ctx, `EXPLAIN QUERY PLAN `+query, args...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var details []string
+		for rows.Next() {
+			var id, parent, notUsed int
+			var detail string
+			if err := rows.Scan(&id, &parent, &notUsed, &detail); err != nil {
+				t.Fatal(err)
+			}
+			details = append(details, detail)
+		}
+		return strings.Join(details, " | ")
+	}
+	now := mailTimeString(time.Now().UTC())
+	if plan := plan(`SELECT id FROM mail_deliveries
+		WHERE state='queued' AND available_at<=?
+		ORDER BY available_at,created_at LIMIT 1`, now); !strings.Contains(plan, "idx_mail_deliveries_claim") {
+		t.Errorf("claim query plan did not use idx_mail_deliveries_claim: %s", plan)
+	}
+	if plan := plan(`SELECT id FROM mail_deliveries
+		WHERE state='sending' AND lease_until<=?
+		ORDER BY lease_until LIMIT 1`, now); !strings.Contains(plan, "idx_mail_deliveries_reclaim") {
+		t.Errorf("reclaim query plan did not use idx_mail_deliveries_reclaim: %s", plan)
+	}
+}
+
+func TestV119BusinessDataUpgradesToV120(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "aha2.db")
+	database, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, projectID, _ := createMailTaskFixture(t, database)
+
+	// Roll the mail objects back out to simulate a v119 database that already
+	// holds business data. Dropping children first keeps foreign keys happy.
+	for _, table := range []string{
+		"mail_delivery_attempts", "mail_deliveries", "mail_attachments",
+		"mail_messages", "build_artifacts", "mail_bindings",
+		"mail_template_versions", "mail_templates", "mail_account_aliases",
+		"mail_accounts",
+	} {
+		if _, err := database.db.ExecContext(ctx, `DROP TABLE IF EXISTS `+table); err != nil {
+			t.Fatalf("drop %s: %v", table, err)
+		}
+	}
+	if _, err := database.db.ExecContext(ctx, `DELETE FROM schema_migrations WHERE version=120`); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	upgraded, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("reopen v119 database: %v", err)
+	}
+	defer upgraded.Close()
+
+	if _, err := upgraded.Task(ctx, taskID); err != nil {
+		t.Fatalf("business task did not survive upgrade: %v", err)
+	}
+	if _, err := upgraded.Project(ctx, projectID); err != nil {
+		t.Fatalf("business project did not survive upgrade: %v", err)
+	}
+	var version int
+	if err := upgraded.db.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version < 120 {
+		t.Fatalf("schema version after upgrade = %d", version)
+	}
+	account := createMailAccountFixture(t, upgraded, "Upgraded", "upgraded@example.com")
+	if _, err := upgraded.MailAccount(ctx, account.ID); err != nil {
+		t.Fatalf("mail tables were not recreated: %v", err)
+	}
+}
+
+func TestSQLiteConstraintErrorClassification(t *testing.T) {
+	ctx := context.Background()
+	database := openMailTestStore(t)
+	account := createMailAccountFixture(t, database, "Classification", "classification@example.com")
+	now := mailTimeString(time.Now().UTC())
+
+	_, err := database.db.ExecContext(ctx, `
+		INSERT INTO mail_accounts(id,address,smtp_username,created_at,updated_at)
+		VALUES(?,?,?,?,?)`,
+		domain.NewID("mail_account"), account.Address, account.Address, now, now)
+	if err == nil || !isUniqueConstraintError(err) {
+		t.Fatalf("duplicate address error = %v, want a typed unique constraint", err)
+	}
+	if isForeignKeyConstraintError(err) {
+		t.Fatalf("unique constraint misclassified as foreign key: %v", err)
+	}
+
+	_, err = database.db.ExecContext(ctx, `
+		INSERT INTO mail_bindings(id,scope_type,scope_id,account_id,created_at,updated_at)
+		VALUES(?,?,?,?,?,?)`,
+		domain.NewID("mail_binding"), domain.MailBindingScopeProject,
+		"project-classification", "mail_account_missing", now, now)
+	if err == nil || !isForeignKeyConstraintError(err) {
+		t.Fatalf("missing account error = %v, want a typed foreign key constraint", err)
+	}
+	if isUniqueConstraintError(err) {
+		t.Fatalf("foreign key misclassified as unique: %v", err)
 	}
 }

@@ -52,6 +52,40 @@ func TestMailAttachmentSnapshotsAndBuildArtifacts(t *testing.T) {
 	}); err == nil {
 		t.Fatal("aha_attachment artifact without attachment_id was accepted")
 	}
+	if _, err := database.CreateBuildArtifact(ctx, domain.BuildArtifact{
+		TaskID: taskID, Label: "External", SizeBytes: 1, SHA256: source.SHA256,
+		StorageType: domain.BuildArtifactStorageExternalURL,
+		ExternalURL: "https://example.com/firmware.bin",
+	}); err == nil {
+		t.Fatal("phase one accepted an external_url build artifact")
+	}
+	otherTaskID, _, _ := createMailTaskFixture(t, database)
+	otherSource, err := database.CreateAttachment(ctx, otherTaskID, "other.bin",
+		"application/octet-stream", []byte("other-bytes"), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.CreateBuildArtifact(ctx, domain.BuildArtifact{
+		TaskID: taskID, Label: "Cross task", SizeBytes: otherSource.Size,
+		SHA256: otherSource.SHA256, AttachmentID: otherSource.ID,
+		StorageType: domain.BuildArtifactStorageAHAAttachment,
+	}); err == nil {
+		t.Fatal("build artifact accepted an attachment from another task")
+	}
+	if _, err := database.CreateBuildArtifact(ctx, domain.BuildArtifact{
+		TaskID: taskID, Label: "Wrong size", SizeBytes: source.Size + 1,
+		SHA256: source.SHA256, AttachmentID: source.ID,
+		StorageType: domain.BuildArtifactStorageAHAAttachment,
+	}); err == nil {
+		t.Fatal("build artifact accepted a mismatched size")
+	}
+	if _, err := database.CreateBuildArtifact(ctx, domain.BuildArtifact{
+		TaskID: taskID, Label: "Wrong hash", SizeBytes: source.Size,
+		SHA256: strings.Repeat("0", 64), AttachmentID: source.ID,
+		StorageType: domain.BuildArtifactStorageAHAAttachment,
+	}); err == nil {
+		t.Fatal("build artifact accepted a mismatched sha256")
+	}
 
 	direct, err := database.CreateMailAttachment(ctx, domain.MailAttachment{
 		MessageID: message.ID, Position: 0,
@@ -115,6 +149,32 @@ func TestMailAttachmentSnapshotsAndBuildArtifacts(t *testing.T) {
 		DeliveryMode: domain.MailAttachmentDirect,
 	}); err == nil {
 		t.Fatal("duplicate message/position passed the unique constraint")
+	}
+	if _, err := database.CreateMailAttachment(ctx, domain.MailAttachment{
+		MessageID: message.ID, Position: 3,
+		SourceType: domain.MailAttachmentSourceTaskAttachment, SourceID: source.ID,
+		FileName: "direct-with-link.bin", SizeBytes: 1, SHA256: source.SHA256,
+		DeliveryMode: domain.MailAttachmentDirect, LinkTokenHash: linkHash,
+	}); err == nil {
+		t.Fatal("direct delivery mode accepted link fields")
+	}
+	if _, err := database.CreateMailAttachment(ctx, domain.MailAttachment{
+		MessageID: message.ID, Position: 4,
+		SourceType: domain.MailAttachmentSourceTaskAttachment, SourceID: source.ID,
+		FileName: "link-missing-expiry.bin", SizeBytes: 1, SHA256: source.SHA256,
+		DeliveryMode: domain.MailAttachmentLink,
+		LinkTokenRef: "mail-link/missing", LinkTokenHash: strings.Repeat("c", 64),
+	}); err == nil {
+		t.Fatal("link delivery mode accepted a missing expiry")
+	}
+	if _, err := database.CreateMailAttachment(ctx, domain.MailAttachment{
+		MessageID: message.ID, Position: 5,
+		SourceType: domain.MailAttachmentSourceTaskAttachment, SourceID: source.ID,
+		FileName: "link-missing-ref.bin", SizeBytes: 1, SHA256: source.SHA256,
+		DeliveryMode: domain.MailAttachmentLink, LinkTokenHash: strings.Repeat("d", 64),
+		LinkExpiresAt: now.Add(time.Hour),
+	}); err == nil {
+		t.Fatal("link delivery mode accepted a missing token ref")
 	}
 	if _, err := database.CreateMailAttachment(ctx, domain.MailAttachment{
 		MessageID: message.ID, Position: 2,

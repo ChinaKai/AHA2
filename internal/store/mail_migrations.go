@@ -241,6 +241,10 @@ var mailSchemaV120Statements = []string{
 		ON mail_deliveries(account_id, state, updated_at DESC)`,
 	`CREATE INDEX IF NOT EXISTS idx_mail_deliveries_claim_account
 		ON mail_deliveries(account_id, state, available_at) WHERE state = 'queued'`,
+	// At most one queued/sending generation per message. Owner retries create a
+	// new generation only after the previous one is sent/failed/dead/cancelled.
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_mail_deliveries_active_message
+		ON mail_deliveries(message_id) WHERE state IN ('queued','sending')`,
 
 	`CREATE TABLE IF NOT EXISTS mail_delivery_attempts (
 		id TEXT PRIMARY KEY,
