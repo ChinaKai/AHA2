@@ -163,8 +163,9 @@ func (s *Store) MailDeliveriesByMessage(ctx context.Context, messageID string, l
 // UpdateMailDeliveryState is the conditional write used by claim, result and
 // recovery paths. from must list the states the writer expects; an empty write
 // count means another writer already moved the row. Writes from sending require
-// a lease guard, entering sending requires a new lease, and every other target
-// state clears the lease so the state invariant cannot drift.
+// a lease guard, entering sending requires a new lease, every other target
+// state clears the lease, and a queued target also clears smtp_phase so a
+// temporary DATA-phase failure can be retried.
 func (s *Store) UpdateMailDeliveryState(ctx context.Context, id string, from []domain.MailDeliveryState, to domain.MailDeliveryState, patch MailDeliveryStatePatch, now time.Time) (bool, error) {
 	return s.UpdateMailDeliveryStateInTx(ctx, s.db, id, from, to, patch, now)
 }
@@ -220,13 +221,27 @@ func (s *Store) UpdateMailDeliveryStateInTx(ctx context.Context, exec mailDBTX, 
 		sets = append(sets, `lease_id=''`, `lease_until=''`)
 	}
 	phaseGuard := ""
-	if patch.SMTPPhase != nil {
+	if to == domain.MailDeliveryQueued {
+		// A retry returns to queued with no in-flight phase. The Store owns this
+		// invariant and overrides any phase the caller observed, so a stale
+		// `data` value can never leave a queued row that the next claim cannot
+		// pick up.
+		if patch.SMTPPhase != nil && *patch.SMTPPhase != "" && !patch.SMTPPhase.Valid() {
+			return false, fmt.Errorf("invalid mail smtp phase %q", *patch.SMTPPhase)
+		}
+		sets = append(sets, `smtp_phase=''`)
+	} else if patch.SMTPPhase != nil {
 		if *patch.SMTPPhase != "" && !patch.SMTPPhase.Valid() {
 			return false, fmt.Errorf("invalid mail smtp phase %q", *patch.SMTPPhase)
 		}
 		sets = append(sets, `smtp_phase=?`)
 		args = append(args, string(*patch.SMTPPhase))
-		phaseGuard = mailSMTPPhaseRegressionGuard(*patch.SMTPPhase)
+		if to == domain.MailDeliverySending {
+			// Only in-place sending progress is monotonic. Terminal and retry
+			// writes must not be rejected because the attempt already reached
+			// DATA or finished.
+			phaseGuard = mailSMTPPhaseRegressionGuard(*patch.SMTPPhase)
+		}
 	}
 	if patch.MessageIDHeader != nil {
 		sets = append(sets, `message_id_header=?`)

@@ -256,6 +256,101 @@ func TestMailDeliveryPhaseRejectsExpiredLease(t *testing.T) {
 	}
 }
 
+func TestMailDeliveryDataPhaseTemporaryFailureRecovery(t *testing.T) {
+	ctx := context.Background()
+	database := openMailTestStore(t)
+	taskID, _, _ := createMailTaskFixture(t, database)
+	account := createMailAccountFixture(t, database, "Retry", "retry@example.com")
+	message := createMailMessageFixture(t, database, taskID, account.ID, "retry-1")
+	now := time.Now().UTC()
+
+	delivery, err := database.CreateMailDelivery(ctx, domain.MailDelivery{
+		MessageID: message.ID, AccountID: account.ID, State: domain.MailDeliveryQueued,
+		AvailableAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	connect := domain.MailSMTPPhaseConnect
+	data := domain.MailSMTPPhaseData
+
+	claim := func(leaseID string, at time.Time) {
+		t.Helper()
+		until := at.Add(5 * time.Minute)
+		ok, err := database.UpdateMailDeliveryState(ctx, delivery.ID,
+			[]domain.MailDeliveryState{domain.MailDeliveryQueued},
+			domain.MailDeliverySending,
+			MailDeliveryStatePatch{
+				AttemptsDelta: 1, LeaseID: &leaseID, LeaseUntil: &until,
+				SMTPPhase: &connect,
+			}, at)
+		if err != nil || !ok {
+			t.Fatalf("claim with %s: ok=%v err=%v", leaseID, ok, err)
+		}
+	}
+
+	claim("lease-retry-1", now)
+	if ok, err := database.SetMailDeliveryPhaseInTx(ctx, database.db, delivery.ID,
+		"lease-retry-1", data, now); err != nil || !ok {
+		t.Fatalf("enter DATA: ok=%v err=%v", ok, err)
+	}
+
+	// A temporary 4xx after DATA returns the delivery to queued. The caller may
+	// still carry the observed early phase; the Store must override it to empty
+	// and clear the lease, otherwise the next claim can never succeed.
+	nextAttempt := now.Add(time.Second)
+	early := connect
+	ok, err := database.UpdateMailDeliveryState(ctx, delivery.ID,
+		[]domain.MailDeliveryState{domain.MailDeliverySending},
+		domain.MailDeliveryQueued,
+		MailDeliveryStatePatch{
+			RequireLeaseID: "lease-retry-1", SMTPPhase: &early,
+			AvailableAt: &nextAttempt,
+		}, now)
+	if err != nil || !ok {
+		t.Fatalf("sending -> queued after DATA: ok=%v err=%v", ok, err)
+	}
+	stored, err := database.MailDelivery(ctx, delivery.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.State != domain.MailDeliveryQueued || stored.SMTPPhase != domain.MailSMTPPhaseNone ||
+		stored.LeaseID != "" || !stored.LeaseUntil.IsZero() {
+		t.Fatalf("recovered delivery = %+v", stored)
+	}
+
+	claim("lease-retry-2", nextAttempt)
+
+	// Recovery without a phase patch behaves the same: queued never keeps an
+	// in-flight phase.
+	if ok, err := database.SetMailDeliveryPhaseInTx(ctx, database.db, delivery.ID,
+		"lease-retry-2", data, now); err != nil || !ok {
+		t.Fatalf("enter DATA second time: ok=%v err=%v", ok, err)
+	}
+	ok, err = database.UpdateMailDeliveryState(ctx, delivery.ID,
+		[]domain.MailDeliveryState{domain.MailDeliverySending},
+		domain.MailDeliveryQueued,
+		MailDeliveryStatePatch{RequireLeaseID: "lease-retry-2"}, now)
+	if err != nil || !ok {
+		t.Fatalf("sending -> queued without phase patch: ok=%v err=%v", ok, err)
+	}
+	stored, err = database.MailDelivery(ctx, delivery.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.SMTPPhase != domain.MailSMTPPhaseNone {
+		t.Fatalf("queued delivery kept phase %q", stored.SMTPPhase)
+	}
+	claim("lease-retry-3", now.Add(2*time.Second))
+	stored, err = database.MailDelivery(ctx, delivery.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.State != domain.MailDeliverySending || stored.SMTPPhase != domain.MailSMTPPhaseConnect {
+		t.Fatalf("third claim delivery = %+v", stored)
+	}
+}
+
 func TestMailDeliveryActiveMessageUniqueness(t *testing.T) {
 	ctx := context.Background()
 	database := openMailTestStore(t)
