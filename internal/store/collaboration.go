@@ -115,6 +115,230 @@ func (s *Store) LinkCollaborationMemberTurn(ctx context.Context, batchID, agentI
 	return nil
 }
 
+// CollaborationAssignmentRecovery records how one pending assignment Inbox
+// item was reconciled when its collaboration member was already linked to a
+// child Turn. Restart recovery requeues claimed Inbox items indiscriminately,
+// but a collaboration member link still owns the assignment that created it.
+type CollaborationAssignmentRecovery struct {
+	InboxID     string
+	BatchID     string
+	AgentID     string
+	ChildTurnID string
+	ChildStatus string
+	Action      string
+	Reason      string
+}
+
+const (
+	// CollaborationRecoveryReusedActive keeps the assignment with the child
+	// Turn that is still active and closes the duplicate pending Inbox item.
+	CollaborationRecoveryReusedActive = "reused_active"
+	// CollaborationRecoveryReclaimedTerminal closes an assignment whose child
+	// Turn already reached a terminal state and can no longer produce a result.
+	CollaborationRecoveryReclaimedTerminal = "reclaimed_terminal"
+	// CollaborationRecoveryUnresolved leaves the Inbox item pending because the
+	// linked member or child Turn cannot be read.
+	CollaborationRecoveryUnresolved = "unresolved"
+)
+
+func collaborationTurnActive(status domain.TurnStatus) bool {
+	switch status {
+	case domain.TurnQueued, domain.TurnPreparing, domain.TurnStarting, domain.TurnRunning, domain.TurnWaiting:
+		return true
+	}
+	return false
+}
+
+func collaborationMemberStatusForTurn(status domain.TurnStatus) string {
+	switch status {
+	case domain.TurnSucceeded:
+		return domain.CollaborationMemberSucceeded
+	case domain.TurnInterrupted:
+		return domain.CollaborationMemberInterrupted
+	case domain.TurnBlocked:
+		return domain.CollaborationMemberBlocked
+	default:
+		return domain.CollaborationMemberFailed
+	}
+}
+
+func updateCollaborationBatchStatusTx(ctx context.Context, tx *sql.Tx, batchID string, now time.Time) error {
+	var pending int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM collaboration_members member
+		WHERE member.batch_id=? AND (
+			member.status IN ('queued','running')
+			OR NOT EXISTS (
+				SELECT 1 FROM collaboration_events event
+				WHERE event.batch_id=member.batch_id AND event.child_turn_id=member.child_turn_id
+			)
+		)`,
+		batchID,
+	).Scan(&pending); err != nil {
+		return err
+	}
+	batchStatus := domain.CollaborationBatchPending
+	if pending == 0 {
+		batchStatus = domain.CollaborationBatchComplete
+	}
+	_, err := tx.ExecContext(ctx, `
+		UPDATE collaboration_batches SET status=?,updated_at=? WHERE id=?`,
+		batchStatus, timeString(now), batchID,
+	)
+	return err
+}
+
+// ReconcilePendingCollaborationAssignments inspects pending assignment Inbox
+// items for one Agent. When the collaboration member is already linked to a
+// child Turn, a new Turn must not be created for that item: the member link is
+// authoritative, and the original claim was only requeued because the service
+// restarted. An active child Turn keeps its assignment; a terminal child Turn
+// is reclaimed so the batch can finish instead of failing service startup.
+func (s *Store) ReconcilePendingCollaborationAssignments(
+	ctx context.Context,
+	taskID, agentID string,
+	now time.Time,
+) ([]CollaborationAssignmentRecovery, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id,payload_json FROM agent_inbox
+		WHERE task_id=? AND target_agent_id=? AND status='pending' AND source_kind='assignment'
+		ORDER BY sequence`,
+		taskID, agentID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	type pendingAssignment struct {
+		id      string
+		payload map[string]any
+	}
+	var pending []pendingAssignment
+	for rows.Next() {
+		var id, payload string
+		if err := rows.Scan(&id, &payload); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		pending = append(pending, pendingAssignment{id: id, payload: decodeJSON(payload, map[string]any{})})
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	recordedAt := timeString(now)
+	var recoveries []CollaborationAssignmentRecovery
+	for _, item := range pending {
+		batchID := strings.TrimSpace(fmt.Sprint(item.payload["collaboration_batch_id"]))
+		if batchID == "" || batchID == "<nil>" {
+			continue
+		}
+		var childTurnID string
+		if err := tx.QueryRowContext(ctx, `
+			SELECT child_turn_id FROM collaboration_members WHERE batch_id=? AND agent_id=?`,
+			batchID, agentID,
+		).Scan(&childTurnID); err != nil {
+			if err == sql.ErrNoRows {
+				recoveries = append(recoveries, CollaborationAssignmentRecovery{
+					InboxID: item.id, BatchID: batchID, AgentID: agentID,
+					Action: CollaborationRecoveryUnresolved,
+					Reason: "collaboration member is missing",
+				})
+				continue
+			}
+			return nil, err
+		}
+		childTurnID = strings.TrimSpace(childTurnID)
+		if childTurnID == "" {
+			// Normal path: the member is not linked yet, so a Turn may be created.
+			continue
+		}
+		var childStatus string
+		if err := tx.QueryRowContext(ctx, `SELECT status FROM turns WHERE id=?`, childTurnID).Scan(&childStatus); err != nil {
+			if err == sql.ErrNoRows {
+				recoveries = append(recoveries, CollaborationAssignmentRecovery{
+					InboxID: item.id, BatchID: batchID, AgentID: agentID,
+					ChildTurnID: childTurnID,
+					Action:      CollaborationRecoveryUnresolved,
+					Reason:      "linked child turn is missing",
+				})
+				continue
+			}
+			return nil, err
+		}
+		status := domain.TurnStatus(strings.TrimSpace(childStatus))
+		switch {
+		case status.Terminal():
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE collaboration_members SET status=?,updated_at=?
+				WHERE batch_id=? AND agent_id=?`,
+				collaborationMemberStatusForTurn(status), recordedAt, batchID, agentID,
+			); err != nil {
+				return nil, err
+			}
+			content := fmt.Sprintf(
+				"%s [%s] assignment recovered after restart: child turn %s was already terminal",
+				agentID, status, childTurnID,
+			)
+			if _, err := tx.ExecContext(ctx, `
+				INSERT OR IGNORE INTO collaboration_events(
+					id,batch_id,child_turn_id,agent_id,status,content,created_at
+				) VALUES(?,?,?,?,?,?,?)`,
+				"collaboration_event_"+childTurnID, batchID, childTurnID, agentID,
+				string(status), content, recordedAt,
+			); err != nil {
+				return nil, err
+			}
+			if err := updateCollaborationBatchStatusTx(ctx, tx, batchID, now); err != nil {
+				return nil, err
+			}
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE agent_inbox SET status='processed',processed_at=?
+				WHERE id=? AND status='pending'`,
+				recordedAt, item.id,
+			); err != nil {
+				return nil, err
+			}
+			recoveries = append(recoveries, CollaborationAssignmentRecovery{
+				InboxID: item.id, BatchID: batchID, AgentID: agentID,
+				ChildTurnID: childTurnID, ChildStatus: string(status),
+				Action: CollaborationRecoveryReclaimedTerminal,
+			})
+		case collaborationTurnActive(status):
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE agent_inbox SET status='processed',processed_at=?
+				WHERE id=? AND status='pending'`,
+				recordedAt, item.id,
+			); err != nil {
+				return nil, err
+			}
+			recoveries = append(recoveries, CollaborationAssignmentRecovery{
+				InboxID: item.id, BatchID: batchID, AgentID: agentID,
+				ChildTurnID: childTurnID, ChildStatus: string(status),
+				Action: CollaborationRecoveryReusedActive,
+			})
+		default:
+			recoveries = append(recoveries, CollaborationAssignmentRecovery{
+				InboxID: item.id, BatchID: batchID, AgentID: agentID,
+				ChildTurnID: childTurnID, ChildStatus: string(status),
+				Action: CollaborationRecoveryUnresolved,
+				Reason: "child turn status is unknown",
+			})
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return recoveries, nil
+}
+
 func (s *Store) RecordCollaborationResult(ctx context.Context, turn domain.Turn, status, content string) (string, bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -169,28 +393,7 @@ func (s *Store) RecordCollaborationResult(ctx context.Context, turn domain.Turn,
 	); err != nil {
 		return "", false, err
 	}
-	var pending int
-	if err := tx.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM collaboration_members member
-		WHERE member.batch_id=? AND (
-			member.status IN ('queued','running')
-			OR NOT EXISTS (
-				SELECT 1 FROM collaboration_events event
-				WHERE event.batch_id=member.batch_id AND event.child_turn_id=member.child_turn_id
-			)
-		)`,
-		batchID,
-	).Scan(&pending); err != nil {
-		return "", false, err
-	}
-	batchStatus := domain.CollaborationBatchPending
-	if pending == 0 {
-		batchStatus = domain.CollaborationBatchComplete
-	}
-	if _, err := tx.ExecContext(ctx, `
-		UPDATE collaboration_batches SET status=?,updated_at=? WHERE id=?`,
-		batchStatus, timeString(now), batchID,
-	); err != nil {
+	if err := updateCollaborationBatchStatusTx(ctx, tx, batchID, now); err != nil {
 		return "", false, err
 	}
 	if err := tx.Commit(); err != nil {

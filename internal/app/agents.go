@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -94,7 +95,9 @@ func (s *Service) ResumePending(ctx context.Context) error {
 	}
 	for _, agent := range agents {
 		if _, _, err := s.scheduleAgent(ctx, agent.TaskID, agent.AgentID); err != nil {
-			return err
+			// One inconsistent pending Inbox item must never keep the service
+			// from starting. Record it and leave it for a later attempt.
+			log.Printf("resume pending agent inbox %s/%s: %v", agent.TaskID, agent.AgentID, err)
 		}
 	}
 	batches, err := s.store.OpenCollaborationBatchIDs(ctx)
@@ -492,13 +495,24 @@ func validateCodexStreamSettings(idleTimeoutMS, maxRetries int) error {
 func (s *Service) scheduleAgent(ctx context.Context, taskID, agentID string) (domain.Turn, bool, error) {
 	s.scheduleMu.Lock()
 	defer s.scheduleMu.Unlock()
+	items, err := s.store.PendingAgentInbox(ctx, taskID, agentID)
+	if err != nil || len(items) == 0 {
+		return domain.Turn{}, false, err
+	}
+	// A pending assignment whose member is already linked to a child Turn was
+	// claimed before a restart and requeued by recovery. Reconcile it before
+	// the active-Turn check so an active child Turn keeps its assignment and a
+	// terminal one cannot force a second Turn or an unstartable service.
+	items, err = s.reconcilePendingCollaborationAssignments(ctx, taskID, agentID, items)
+	if err != nil {
+		return domain.Turn{}, false, err
+	}
+	if len(items) == 0 {
+		return domain.Turn{}, false, nil
+	}
 	if _, err := s.store.ActiveTurnForAgent(ctx, taskID, agentID); err == nil {
 		return domain.Turn{}, false, nil
 	} else if !errors.Is(err, sql.ErrNoRows) {
-		return domain.Turn{}, false, err
-	}
-	items, err := s.store.PendingAgentInbox(ctx, taskID, agentID)
-	if err != nil || len(items) == 0 {
 		return domain.Turn{}, false, err
 	}
 	agent, err := s.store.TaskAgent(ctx, taskID, agentID)
@@ -549,6 +563,54 @@ func (s *Service) scheduleAgent(ctx context.Context, taskID, agentID string) (do
 	})
 	s.startTurn(turn)
 	return turn, true, nil
+}
+
+// reconcilePendingCollaborationAssignments closes or quarantines pending
+// assignment items whose collaboration member is already linked to a child
+// Turn. It returns the items that may still create a new Turn.
+func (s *Service) reconcilePendingCollaborationAssignments(
+	ctx context.Context,
+	taskID, agentID string,
+	items []domain.AgentInboxItem,
+) ([]domain.AgentInboxItem, error) {
+	if len(items) == 0 {
+		return items, nil
+	}
+	recoveries, err := s.store.ReconcilePendingCollaborationAssignments(ctx, taskID, agentID, s.now().UTC())
+	if err != nil {
+		return nil, err
+	}
+	if len(recoveries) == 0 {
+		return items, nil
+	}
+	handled := make(map[string]bool, len(recoveries))
+	for _, recovery := range recoveries {
+		handled[recovery.InboxID] = true
+		switch recovery.Action {
+		case store.CollaborationRecoveryReclaimedTerminal:
+			log.Printf(
+				"WARN collaboration assignment recovery: batch=%s agent=%s child_turn=%s child_status=%s inbox=%s: child turn already terminal; reclaimed assignment without creating a turn",
+				recovery.BatchID, recovery.AgentID, recovery.ChildTurnID, recovery.ChildStatus, recovery.InboxID,
+			)
+		case store.CollaborationRecoveryReusedActive:
+			log.Printf(
+				"WARN collaboration assignment recovery: batch=%s agent=%s child_turn=%s child_status=%s inbox=%s: linked child turn is still active; reused it and closed the duplicate inbox item",
+				recovery.BatchID, recovery.AgentID, recovery.ChildTurnID, recovery.ChildStatus, recovery.InboxID,
+			)
+		default:
+			log.Printf(
+				"ERROR collaboration assignment recovery: batch=%s agent=%s child_turn=%s inbox=%s: %s; leaving the inbox pending and skipping turn creation",
+				recovery.BatchID, recovery.AgentID, recovery.ChildTurnID, recovery.InboxID, recovery.Reason,
+			)
+		}
+	}
+	remaining := make([]domain.AgentInboxItem, 0, len(items))
+	for _, item := range items {
+		if !handled[item.ID] {
+			remaining = append(remaining, item)
+		}
+	}
+	return remaining, nil
 }
 
 func inboxTemplateItems(items []domain.AgentInboxItem) []prompt.InboxTemplateItem {
