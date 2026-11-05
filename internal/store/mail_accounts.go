@@ -344,6 +344,29 @@ func (s *Store) SetMailAccountCredential(ctx context.Context, id string, now tim
 	return nil
 }
 
+// SetMailAccountTestResult records the outcome of an Owner-triggered
+// connection test. The error code is a stable SMTP code, never a transcript or
+// credential.
+func (s *Store) SetMailAccountTestResult(ctx context.Context, id string, status domain.MailAccountStatus, errorCode string, now time.Time) error {
+	if !status.Valid() {
+		return fmt.Errorf("invalid mail account status %q", status)
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE mail_accounts SET status=?,last_test_at=?,last_test_error_code=?,updated_at=?
+		WHERE id=?`,
+		status, mailTimeString(now), strings.TrimSpace(errorCode), mailTimeString(now), id)
+	if err != nil {
+		return err
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
 func (s *Store) SetMailAccountStatus(ctx context.Context, id string, status domain.MailAccountStatus, now time.Time) error {
 	if !status.Valid() {
 		return fmt.Errorf("invalid mail account status %q", status)

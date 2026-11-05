@@ -17,6 +17,7 @@ import (
 	"github.com/ChinaKai/AHA2/internal/desktop"
 	"github.com/ChinaKai/AHA2/internal/domain"
 	"github.com/ChinaKai/AHA2/internal/hardware"
+	mailpkg "github.com/ChinaKai/AHA2/internal/mail"
 	"github.com/ChinaKai/AHA2/internal/managedprocess"
 	"github.com/ChinaKai/AHA2/internal/outboundproxy"
 	"github.com/ChinaKai/AHA2/internal/store"
@@ -41,6 +42,7 @@ type Config struct {
 	ManagedProcesses  *managedprocess.Manager
 	OutboundProxy     *outboundproxy.Controller
 	Channels          *channel.Service
+	MailTester        mailpkg.Tester
 	ProbeSSHHostKey   func(context.Context, string) (hardware.SSHHostKeyInfo, error)
 	TrustSSHHostKey   func(context.Context, string, string) (hardware.SSHHostKeyInfo, error)
 	PairADB           func(context.Context, string, string) (string, error)
@@ -74,6 +76,7 @@ type Server struct {
 	managedProcesses      *managedprocess.Manager
 	outboundProxy         *outboundproxy.Controller
 	channels              *channel.Service
+	mailTester            mailpkg.Tester
 	probeSSHHostKey       func(context.Context, string) (hardware.SSHHostKeyInfo, error)
 	trustSSHHostKey       func(context.Context, string, string) (hardware.SSHHostKeyInfo, error)
 	pairADB               func(context.Context, string, string) (string, error)
@@ -121,6 +124,10 @@ func New(config Config) *Server {
 	if executeADB == nil {
 		executeADB = hardware.ExecuteADB
 	}
+	mailTester := config.MailTester
+	if mailTester == nil {
+		mailTester = mailpkg.NewSMTPTester()
+	}
 	validateOrigin := !config.AllowCrossOrigin
 	// Default to the LAN scope: AHA2 binds 0.0.0.0, so narrowing on startup before
 	// anyone has chosen would cut off clients that already rely on it.
@@ -148,6 +155,7 @@ func New(config Config) *Server {
 		managedProcesses:      config.ManagedProcesses,
 		outboundProxy:         config.OutboundProxy,
 		channels:              config.Channels,
+		mailTester:            mailTester,
 		probeSSHHostKey:       probeSSHHostKey,
 		trustSSHHostKey:       trustSSHHostKey,
 		pairADB:               pairADB,
@@ -323,6 +331,27 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("PUT /api/v1/hardware-resources/{id}", s.withAuth(http.HandlerFunc(s.updateHardwareResource)))
 	mux.Handle("DELETE /api/v1/hardware-resources/{id}", s.withAuth(http.HandlerFunc(s.deleteHardwareResource)))
 	mux.Handle("POST /api/v1/hardware-resources/{id}/adb/pair", s.withAuth(http.HandlerFunc(s.pairHardwareADB)))
+
+	// Mail resources phase one task B: Owner-only account/template/binding
+	// management, preview and connection test. Agent capability routes are
+	// deliberately absent (task D).
+	mux.Handle("GET /api/v1/mail-accounts", s.withAuth(http.HandlerFunc(s.listMailAccounts)))
+	mux.Handle("POST /api/v1/mail-accounts", s.withAuth(http.HandlerFunc(s.createMailAccount)))
+	mux.Handle("GET /api/v1/mail-accounts/{id}", s.withAuth(http.HandlerFunc(s.mailAccountDetail)))
+	mux.Handle("PUT /api/v1/mail-accounts/{id}", s.withAuth(http.HandlerFunc(s.updateMailAccount)))
+	mux.Handle("DELETE /api/v1/mail-accounts/{id}", s.withAuth(http.HandlerFunc(s.deleteMailAccount)))
+	mux.Handle("POST /api/v1/mail-accounts/{id}/test", s.withAuth(http.HandlerFunc(s.testMailAccount)))
+	mux.Handle("GET /api/v1/mail-templates", s.withAuth(http.HandlerFunc(s.listMailTemplates)))
+	mux.Handle("POST /api/v1/mail-templates", s.withAuth(http.HandlerFunc(s.createMailTemplate)))
+	mux.Handle("GET /api/v1/mail-templates/{id}", s.withAuth(http.HandlerFunc(s.mailTemplateDetail)))
+	mux.Handle("PUT /api/v1/mail-templates/{id}", s.withAuth(http.HandlerFunc(s.updateMailTemplate)))
+	mux.Handle("DELETE /api/v1/mail-templates/{id}", s.withAuth(http.HandlerFunc(s.archiveMailTemplate)))
+	mux.Handle("GET /api/v1/mail-templates/{id}/versions", s.withAuth(http.HandlerFunc(s.mailTemplateVersions)))
+	mux.Handle("POST /api/v1/mail-templates/{id}/preview", s.withAuth(http.HandlerFunc(s.previewMailTemplate)))
+	mux.Handle("GET /api/v1/mail-bindings", s.withAuth(http.HandlerFunc(s.listMailBindings)))
+	mux.Handle("POST /api/v1/mail-bindings", s.withAuth(http.HandlerFunc(s.createMailBinding)))
+	mux.Handle("PUT /api/v1/mail-bindings/{id}", s.withAuth(http.HandlerFunc(s.updateMailBinding)))
+	mux.Handle("DELETE /api/v1/mail-bindings/{id}", s.withAuth(http.HandlerFunc(s.deleteMailBinding)))
 
 	mux.Handle("GET /api/v1/tasks", s.withAuth(http.HandlerFunc(s.listTasks)))
 	mux.Handle("GET /api/v1/task-clone-sources", s.withAuth(http.HandlerFunc(s.listTaskCloneSources)))
