@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -351,7 +352,9 @@ func TestV119BusinessDataUpgradesToV120(t *testing.T) {
 			t.Fatalf("drop %s: %v", table, err)
 		}
 	}
-	if _, err := database.db.ExecContext(ctx, `DELETE FROM schema_migrations WHERE version=120`); err != nil {
+	// Roll back both mail migrations: v121 ALTERs the v120 tables, so leaving
+	// v121 recorded would skip the revision column after the tables are dropped.
+	if _, err := database.db.ExecContext(ctx, `DELETE FROM schema_migrations WHERE version IN (120,121)`); err != nil {
 		t.Fatal(err)
 	}
 	if err := database.Close(); err != nil {
@@ -374,7 +377,7 @@ func TestV119BusinessDataUpgradesToV120(t *testing.T) {
 	if err := upgraded.db.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version < 120 {
+	if version < 121 {
 		t.Fatalf("schema version after upgrade = %d", version)
 	}
 	account := createMailAccountFixture(t, upgraded, "Upgraded", "upgraded@example.com")
@@ -410,5 +413,66 @@ func TestSQLiteConstraintErrorClassification(t *testing.T) {
 	}
 	if isUniqueConstraintError(err) {
 		t.Fatalf("foreign key misclassified as unique: %v", err)
+	}
+}
+
+func TestMailSchemaV121RevisionColumnIsIdempotent(t *testing.T) {
+	ctx := context.Background()
+	database := openMailTestStore(t)
+	var version int
+	if err := database.db.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version < 121 {
+		t.Fatalf("schema version = %d, want at least 121", version)
+	}
+	hasRevision := func() bool {
+		rows, err := database.db.QueryContext(ctx, `PRAGMA table_info(mail_accounts)`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var cid, notNull, primaryKey int
+			var name, columnType string
+			var defaultValue sql.NullString
+			if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+				t.Fatal(err)
+			}
+			if name == "revision" {
+				return true
+			}
+		}
+		return false
+	}
+	if !hasRevision() {
+		t.Fatal("mail_accounts.revision column is missing")
+	}
+	if _, err := database.db.ExecContext(ctx, `DELETE FROM schema_migrations WHERE version=121`); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.migrate(ctx); err != nil {
+		t.Fatalf("re-applying schema v121: %v", err)
+	}
+	if err := database.migrate(ctx); err != nil {
+		t.Fatalf("applying schema v121 a third time: %v", err)
+	}
+	if !hasRevision() {
+		t.Fatal("re-migration dropped or failed to keep revision")
+	}
+	var recorded int
+	if err := database.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations WHERE version=121`).Scan(&recorded); err != nil {
+		t.Fatal(err)
+	}
+	if recorded != 1 {
+		t.Fatalf("schema v121 recorded %d times, want 1", recorded)
+	}
+	account := createMailAccountFixture(t, database, "V121", "v121@example.com")
+	stored, err := database.MailAccount(ctx, account.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Revision != 0 {
+		t.Fatalf("new account revision = %d, want 0", stored.Revision)
 	}
 }

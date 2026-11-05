@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"strings"
 )
 
 // mailSchemaV120Statements is the schema v120 migration from
@@ -276,6 +277,25 @@ func (s *Store) applyMailSchemaV120(ctx context.Context) error {
 	}
 	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(120, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
 		return fmt.Errorf("record schema v120: %w", err)
+	}
+	return nil
+}
+
+// applyMailSchemaV121 adds the account revision counter used as the
+// optimistic-concurrency token for connection tests. It is a separate
+// migration because schema v120 is already part of the mail data layer.
+func (s *Store) applyMailSchemaV121(ctx context.Context) error {
+	var applied bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=121)`).Scan(&applied)
+	if !applied {
+		if _, err := s.db.ExecContext(ctx,
+			`ALTER TABLE mail_accounts ADD COLUMN revision INTEGER NOT NULL DEFAULT 0`); err != nil &&
+			!strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("apply schema v121: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(121, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v121: %w", err)
 	}
 	return nil
 }

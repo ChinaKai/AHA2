@@ -348,8 +348,8 @@ func (s *Server) testMailAccount(writer http.ResponseWriter, request *http.Reque
 		return
 	}
 	expected := store.MailAccountTestExpectation{
-		SMTPHost: account.SMTPHost, SMTPUsername: account.SMTPUsername,
-		CredentialRef: ref, UpdatedAt: account.UpdatedAt,
+		Revision: account.Revision, SMTPHost: account.SMTPHost,
+		SMTPUsername: account.SMTPUsername, CredentialRef: ref,
 	}
 	result := s.mailTester.Test(ctx, account, credential)
 	status := domain.MailAccountOK

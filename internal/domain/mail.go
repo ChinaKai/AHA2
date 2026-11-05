@@ -49,26 +49,29 @@ func (status MailAccountStatus) Valid() bool {
 // connection test needs it. CredentialConfigured is the only credential-related
 // value exposed to APIs, logs and events.
 type MailAccount struct {
-	ID                   string             `json:"id"`
-	Name                 string             `json:"name"`
-	Address              string             `json:"address"`
-	DisplayName          string             `json:"display_name"`
-	Provider             string             `json:"provider"`
-	SMTPHost             string             `json:"smtp_host"`
-	SMTPPort             int                `json:"smtp_port"`
-	SMTPSecurity         string             `json:"smtp_security"`
-	SMTPUsername         string             `json:"smtp_username"`
-	CredentialRef        string             `json:"-"`
-	CredentialConfigured bool               `json:"credential_configured"`
-	Status               MailAccountStatus  `json:"status"`
-	LastTestAt           time.Time          `json:"last_test_at,omitempty"`
-	LastTestErrorCode    string             `json:"last_test_error_code,omitempty"`
-	IMAPHost             string             `json:"imap_host,omitempty"`
-	IMAPPort             int                `json:"imap_port,omitempty"`
-	IMAPEnabled          bool               `json:"imap_enabled"`
-	Aliases              []MailAccountAlias `json:"aliases,omitempty"`
-	CreatedAt            time.Time          `json:"created_at"`
-	UpdatedAt            time.Time          `json:"updated_at"`
+	ID                   string            `json:"id"`
+	Name                 string            `json:"name"`
+	Address              string            `json:"address"`
+	DisplayName          string            `json:"display_name"`
+	Provider             string            `json:"provider"`
+	SMTPHost             string            `json:"smtp_host"`
+	SMTPPort             int               `json:"smtp_port"`
+	SMTPSecurity         string            `json:"smtp_security"`
+	SMTPUsername         string            `json:"smtp_username"`
+	CredentialRef        string            `json:"-"`
+	CredentialConfigured bool              `json:"credential_configured"`
+	Status               MailAccountStatus `json:"status"`
+	// Revision is an internal optimistic-concurrency counter. It is never
+	// exposed through the API and must not be treated as a display timestamp.
+	Revision          int64              `json:"-"`
+	LastTestAt        time.Time          `json:"last_test_at,omitempty"`
+	LastTestErrorCode string             `json:"last_test_error_code,omitempty"`
+	IMAPHost          string             `json:"imap_host,omitempty"`
+	IMAPPort          int                `json:"imap_port,omitempty"`
+	IMAPEnabled       bool               `json:"imap_enabled"`
+	Aliases           []MailAccountAlias `json:"aliases,omitempty"`
+	CreatedAt         time.Time          `json:"created_at"`
+	UpdatedAt         time.Time          `json:"updated_at"`
 }
 
 // MailAccountAlias is an additional From address registered for an account.

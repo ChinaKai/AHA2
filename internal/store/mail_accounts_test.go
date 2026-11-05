@@ -71,24 +71,41 @@ func TestMailAccountLifecycleAndCredentialIsolation(t *testing.T) {
 	if strings.Contains(string(encoded), "credential_ref") || strings.Contains(string(encoded), credentialRef) {
 		t.Fatalf("account JSON leaked credential data: %s", encoded)
 	}
+	if strings.Contains(string(encoded), `"revision"`) {
+		t.Fatalf("account JSON exposed internal revision: %s", encoded)
+	}
 	if !strings.Contains(string(encoded), `"credential_configured":true`) {
 		t.Fatalf("account JSON should expose only the configured flag: %s", encoded)
 	}
 
-	testedAt := time.Now().UTC().Add(-time.Minute)
-	stored.Status = domain.MailAccountOK
-	stored.LastTestAt = testedAt
 	stored.Name = "Build notices v2"
 	stored.Address = "release@example.com"
 	stored.DisplayName = "AHA release"
 	stored.Aliases = []domain.MailAccountAlias{{Address: "release-bot@example.com"}}
+	// Settings updates must not touch status or the last test result.
+	stored.Status = domain.MailAccountOK
+	stored.LastTestAt = time.Now().UTC().Add(-time.Minute)
+	stored.LastTestErrorCode = "stale"
 	updated, err := database.UpdateMailAccount(ctx, stored)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if updated.Name != "Build notices v2" || updated.Address != "release@example.com" ||
-		updated.Status != domain.MailAccountOK || updated.LastTestAt.IsZero() {
+	if updated.Name != "Build notices v2" || updated.Address != "release@example.com" {
 		t.Fatalf("updated account = %+v", updated)
+	}
+	if updated.Status != domain.MailAccountUnverified || !updated.LastTestAt.IsZero() ||
+		updated.LastTestErrorCode != "" {
+		t.Fatalf("settings update overwrote status/test state: %+v", updated)
+	}
+	if err := database.SetMailAccountStatus(ctx, accountID, domain.MailAccountOK, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	updated, err = database.MailAccount(ctx, accountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status != domain.MailAccountOK {
+		t.Fatalf("explicit status update = %+v", updated)
 	}
 	if len(updated.Aliases) != 1 || updated.Aliases[0].Address != "release-bot@example.com" {
 		t.Fatalf("replaced aliases = %+v", updated.Aliases)
@@ -293,8 +310,8 @@ func TestMailAccountTestResultRequiresUnchangedEnabledAccount(t *testing.T) {
 		t.Fatal(err)
 	}
 	expectation := MailAccountTestExpectation{
-		SMTPHost: account.SMTPHost, SMTPUsername: account.SMTPUsername,
-		CredentialRef: ref, UpdatedAt: account.UpdatedAt,
+		Revision: account.Revision, SMTPHost: account.SMTPHost,
+		SMTPUsername: account.SMTPUsername, CredentialRef: ref,
 	}
 	applied, err := database.SetMailAccountTestResult(ctx, accountID, expectation, domain.MailAccountOK, "", time.Now().UTC())
 	if err != nil || !applied {
@@ -332,15 +349,27 @@ func TestMailAccountTestResultRequiresUnchangedEnabledAccount(t *testing.T) {
 		t.Fatal(err)
 	}
 	beforeRotation := MailAccountTestExpectation{
-		SMTPHost: enabled.SMTPHost, SMTPUsername: enabled.SMTPUsername,
-		CredentialRef: ref, UpdatedAt: enabled.UpdatedAt,
+		Revision: enabled.Revision, SMTPHost: enabled.SMTPHost,
+		SMTPUsername: enabled.SMTPUsername, CredentialRef: ref,
 	}
-	if err := database.SetMailAccountCredential(ctx, accountID, time.Now().UTC()); err != nil {
+	// Rotate with the exact timestamp already stored. updated_at cannot detect
+	// this change; only the revision counter can.
+	if err := database.SetMailAccountCredential(ctx, accountID, enabled.UpdatedAt); err != nil {
 		t.Fatal(err)
+	}
+	rotated, err := database.MailAccount(ctx, accountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rotated.UpdatedAt.Equal(enabled.UpdatedAt) {
+		t.Fatalf("rotation unexpectedly changed timestamp: %v -> %v", enabled.UpdatedAt, rotated.UpdatedAt)
+	}
+	if rotated.Revision <= enabled.Revision {
+		t.Fatalf("rotation did not advance revision: %d <= %d", rotated.Revision, enabled.Revision)
 	}
 	applied, err = database.SetMailAccountTestResult(ctx, accountID, beforeRotation, domain.MailAccountOK, "", time.Now().UTC())
 	if err != nil || applied {
-		t.Fatalf("credential rotation accepted stale test result: applied=%v err=%v", applied, err)
+		t.Fatalf("same-timestamp rotation accepted stale test result: applied=%v err=%v", applied, err)
 	}
 	stored, err = database.MailAccount(ctx, accountID)
 	if err != nil {
@@ -355,8 +384,8 @@ func TestMailAccountTestResultRequiresUnchangedEnabledAccount(t *testing.T) {
 		t.Fatal(err)
 	}
 	beforeHostExpectation := MailAccountTestExpectation{
-		SMTPHost: beforeHost.SMTPHost, SMTPUsername: beforeHost.SMTPUsername,
-		CredentialRef: ref, UpdatedAt: beforeHost.UpdatedAt,
+		Revision: beforeHost.Revision, SMTPHost: beforeHost.SMTPHost,
+		SMTPUsername: beforeHost.SMTPUsername, CredentialRef: ref,
 	}
 	beforeHost.SMTPHost = domain.MailBackupSMTPHost
 	if _, err := database.UpdateMailAccount(ctx, beforeHost); err != nil {
@@ -365,5 +394,69 @@ func TestMailAccountTestResultRequiresUnchangedEnabledAccount(t *testing.T) {
 	applied, err = database.SetMailAccountTestResult(ctx, accountID, beforeHostExpectation, domain.MailAccountOK, "", time.Now().UTC())
 	if err != nil || applied {
 		t.Fatalf("host change accepted stale test result: applied=%v err=%v", applied, err)
+	}
+}
+
+func TestMailAccountStaleSettingsUpdateCannotOverwriteStatusOrTestState(t *testing.T) {
+	ctx := context.Background()
+	database := openMailTestStore(t)
+	accountID := domain.NewID("mail_account")
+	account, err := database.CreateMailAccount(ctx, domain.MailAccount{
+		ID: accountID, Name: "Stale account", Address: "stale@example.com",
+		CredentialRef: domain.MailAccountCredentialRef(accountID), CredentialConfigured: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate a handler that read the account, then a concurrent disable
+	// committed before the settings update was written back.
+	stale := account
+	if err := database.SetMailAccountStatus(ctx, accountID, domain.MailAccountDisabled, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	stale.Name = "Renamed while disabled"
+	stale.Status = domain.MailAccountOK
+	stale.LastTestAt = time.Now().UTC()
+	stale.LastTestErrorCode = "stale-error"
+	updated, err := database.UpdateMailAccount(ctx, stale)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status != domain.MailAccountDisabled {
+		t.Fatalf("stale update overwrote disabled: %#v", updated)
+	}
+	if !updated.LastTestAt.IsZero() || updated.LastTestErrorCode != "" {
+		t.Fatalf("stale update overwrote test state: %#v", updated)
+	}
+	if updated.Name != "Renamed while disabled" {
+		t.Fatalf("settings update did not apply: %#v", updated)
+	}
+
+	// The same applies to a rotation: its unverified status/test reset survives
+	// a stale settings write.
+	if err := database.SetMailAccountStatus(ctx, accountID, domain.MailAccountUnverified, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	stale2, err := database.MailAccount(ctx, accountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetMailAccountCredential(ctx, accountID, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	stale2.Name = "Renamed after rotation"
+	stale2.Status = domain.MailAccountOK
+	stale2.LastTestAt = time.Now().UTC()
+	stale2.LastTestErrorCode = "stale-error"
+	updated, err = database.UpdateMailAccount(ctx, stale2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status != domain.MailAccountUnverified {
+		t.Fatalf("stale update overwrote rotation status: %#v", updated)
+	}
+	if !updated.LastTestAt.IsZero() || updated.LastTestErrorCode != "" {
+		t.Fatalf("stale update overwrote rotation test state: %#v", updated)
 	}
 }

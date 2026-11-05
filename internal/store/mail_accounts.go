@@ -14,7 +14,7 @@ import (
 // must never carry the Secret reference; use MailAccountCredentialRef when a
 // worker or connection test needs it.
 const mailAccountColumns = `id,name,address,display_name,provider,smtp_host,smtp_port,
-	smtp_security,smtp_username,credential_configured,status,last_test_at,
+	smtp_security,smtp_username,credential_configured,status,revision,last_test_at,
 	last_test_error_code,imap_host,imap_port,imap_enabled,created_at,updated_at`
 
 func scanMailAccount(scanner interface{ Scan(...any) error }) (domain.MailAccount, error) {
@@ -24,7 +24,7 @@ func scanMailAccount(scanner interface{ Scan(...any) error }) (domain.MailAccoun
 	err := scanner.Scan(
 		&item.ID, &item.Name, &item.Address, &item.DisplayName, &item.Provider,
 		&item.SMTPHost, &item.SMTPPort, &item.SMTPSecurity, &item.SMTPUsername,
-		&configured, &item.Status, &lastTestAt, &item.LastTestErrorCode,
+		&configured, &item.Status, &item.Revision, &lastTestAt, &item.LastTestErrorCode,
 		&item.IMAPHost, &item.IMAPPort, &imapEnabled, &createdAt, &updatedAt,
 	)
 	item.CredentialConfigured = configured != 0
@@ -82,8 +82,9 @@ func normalizeMailAccount(item domain.MailAccount, create bool) (domain.MailAcco
 	if create {
 		// A stored Secret reference is the only source of truth for the
 		// write-only flag; a caller cannot mark an account configured without
-		// one.
+		// one. Revision is server managed and starts at zero.
 		item.CredentialConfigured = item.CredentialRef != ""
+		item.Revision = 0
 	}
 	if item.IMAPPort < 0 {
 		item.IMAPPort = 0
@@ -199,7 +200,16 @@ func (s *Store) UpdateMailAccount(ctx context.Context, item domain.MailAccount) 
 	if err != nil {
 		return domain.MailAccount{}, err
 	}
-	item.UpdatedAt = time.Now().UTC()
+	// Read outside the write transaction so the conditional/UPDATE statements
+	// remain the first writers and concurrent updates do not deadlock on a
+	// read-lock upgrade. A coarse platform clock can also return the same
+	// instant twice; force updated_at strictly forward for stable ordering.
+	var previousUpdatedAt string
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT updated_at FROM mail_accounts WHERE id=?`, item.ID).Scan(&previousUpdatedAt); err != nil {
+		return domain.MailAccount{}, err
+	}
+	item.UpdatedAt = nextMailTimestamp(time.Now().UTC(), parseMailTime(previousUpdatedAt))
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return domain.MailAccount{}, err
@@ -217,15 +227,17 @@ func (s *Store) UpdateMailAccount(ctx context.Context, item domain.MailAccount) 
 			return domain.MailAccount{}, ErrMailAddressInUse
 		}
 	}
+	// Status and last-test fields are intentionally absent: only the dedicated
+	// status/credential/test methods may change them, so a stale object read by
+	// an editor can never resurrect a concurrent disable or rotation.
 	result, err := tx.ExecContext(ctx, `
 		UPDATE mail_accounts SET
 			name=?,address=?,display_name=?,provider=?,smtp_host=?,smtp_port=?,
-			smtp_security=?,smtp_username=?,status=?,last_test_at=?,
-			last_test_error_code=?,imap_host=?,imap_port=?,imap_enabled=?,updated_at=?
+			smtp_security=?,smtp_username=?,imap_host=?,imap_port=?,imap_enabled=?,
+			revision=revision+1,updated_at=?
 		WHERE id=?`,
 		item.Name, item.Address, item.DisplayName, item.Provider, item.SMTPHost,
-		item.SMTPPort, item.SMTPSecurity, item.SMTPUsername, item.Status,
-		mailTimeString(item.LastTestAt), item.LastTestErrorCode, item.IMAPHost,
+		item.SMTPPort, item.SMTPSecurity, item.SMTPUsername, item.IMAPHost,
 		item.IMAPPort, boolInt(item.IMAPEnabled), mailTimeString(item.UpdatedAt), item.ID,
 	)
 	if err != nil {
@@ -336,7 +348,7 @@ func (s *Store) SetMailAccountCredential(ctx context.Context, id string, now tim
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE mail_accounts SET credential_ref=?,credential_configured=1,
 			status=CASE WHEN status='disabled' THEN 'disabled' ELSE 'unverified' END,
-			last_test_at='',last_test_error_code='',updated_at=?
+			last_test_at='',last_test_error_code='',revision=revision+1,updated_at=?
 		WHERE id=?`, ref, mailTimeString(now), id)
 	if err != nil {
 		return err
@@ -357,7 +369,7 @@ func (s *Store) ResetMailAccountVerification(ctx context.Context, id string, now
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE mail_accounts SET
 			status=CASE WHEN status='disabled' THEN 'disabled' ELSE 'unverified' END,
-			last_test_at='',last_test_error_code='',updated_at=?
+			last_test_at='',last_test_error_code='',revision=revision+1,updated_at=?
 		WHERE id=?`, mailTimeString(now), id)
 	if err != nil {
 		return err
@@ -368,20 +380,21 @@ func (s *Store) ResetMailAccountVerification(ctx context.Context, id string, now
 	return nil
 }
 
-// MailAccountTestExpectation is the connection configuration observed before a
-// test starts. UpdatedAt also detects a credential rotation, because the
-// Secret Store reference is stable across rotations.
+// MailAccountTestExpectation is the account revision and connection
+// configuration observed before a test starts. Revision is the primary token:
+// it advances on every account write, including credential rotation where the
+// Secret Store reference itself stays stable.
 type MailAccountTestExpectation struct {
+	Revision      int64
 	SMTPHost      string
 	SMTPUsername  string
 	CredentialRef string
-	UpdatedAt     time.Time
 }
 
 // SetMailAccountTestResult records a connection test only if the account is
-// still the same configuration and still enabled. A test that raced with a
-// disable or a host/username/credential change is discarded: no status or test
-// result is written, and the caller reloads the real account state.
+// still at the expected revision/config and still enabled. A test that raced
+// with a disable or a host/username/credential change is discarded: no status
+// or test result is written, and the caller reloads the real account state.
 func (s *Store) SetMailAccountTestResult(ctx context.Context, id string, expected MailAccountTestExpectation, status domain.MailAccountStatus, errorCode string, now time.Time) (bool, error) {
 	if !status.Valid() {
 		return false, fmt.Errorf("invalid mail account status %q", status)
@@ -389,16 +402,13 @@ func (s *Store) SetMailAccountTestResult(ctx context.Context, id string, expecte
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
-	if expected.UpdatedAt.IsZero() {
-		return false, fmt.Errorf("mail account test expectation requires updated_at")
-	}
 	result, err := s.db.ExecContext(ctx, `
-		UPDATE mail_accounts SET status=?,last_test_at=?,last_test_error_code=?,updated_at=?
-		WHERE id=? AND smtp_host=? AND smtp_username=? AND credential_ref=? AND updated_at=?
+		UPDATE mail_accounts SET status=?,last_test_at=?,last_test_error_code=?,
+			revision=revision+1,updated_at=?
+		WHERE id=? AND revision=? AND smtp_host=? AND smtp_username=? AND credential_ref=?
 		  AND status<>'disabled'`,
 		status, mailTimeString(now), strings.TrimSpace(errorCode), mailTimeString(now),
-		id, expected.SMTPHost, expected.SMTPUsername, expected.CredentialRef,
-		mailTimeString(expected.UpdatedAt))
+		id, expected.Revision, expected.SMTPHost, expected.SMTPUsername, expected.CredentialRef)
 	if err != nil {
 		return false, err
 	}
@@ -414,7 +424,7 @@ func (s *Store) SetMailAccountStatus(ctx context.Context, id string, status doma
 		now = time.Now().UTC()
 	}
 	result, err := s.db.ExecContext(ctx,
-		`UPDATE mail_accounts SET status=?,updated_at=? WHERE id=?`,
+		`UPDATE mail_accounts SET status=?,revision=revision+1,updated_at=? WHERE id=?`,
 		status, mailTimeString(now), id)
 	if err != nil {
 		return err
