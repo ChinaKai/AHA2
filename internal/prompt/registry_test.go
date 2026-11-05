@@ -163,7 +163,7 @@ func TestEngineRoutesTemplatesAndBuildsContextManifest(t *testing.T) {
 		if resource.ID == "knowledge-project-navigation-index" && resource.EntryPoint && strings.Contains(resource.Content, "modules.md") && strings.Contains(resource.Content, "Choose a module.") && !strings.Contains(resource.Content, "Project map") {
 			projectNavigationIndexFound = true
 		}
-		if resource.ID == "knowledge-project-navigation-group" && !resource.EntryPoint && strings.Contains(resource.Path, filepath.Join("knowledge", "project", "navigation", "modules.md")) && strings.Contains(resource.Content, filepath.Join("modules", "project-navigation.md")) {
+		if resource.ID == "knowledge-project-navigation-group" && !resource.EntryPoint && strings.Contains(resource.Path, filepath.Join("knowledge", "project", "navigation", "modules.md")) && strings.Contains(resource.Content, "modules/project-navigation.md") {
 			navigationGroupFound = true
 		}
 		if resource.ID == "knowledge-stale-project-stale" && !resource.EntryPoint && strings.Contains(resource.Content, "entry_id: project-stale") && strings.Contains(resource.Content, "base_revision: 3") && strings.Contains(resource.Content, "Outdated instructions") {
@@ -196,10 +196,12 @@ func TestEngineRoutesTemplatesAndBuildsContextManifest(t *testing.T) {
 		if resource.ID == "attachment-attachment-1" && !resource.EntryPoint && resource.Content == "PNG!" {
 			attachmentFileFound = true
 		}
-		if resource.ID == "skill-skill-1" && resource.EntryPoint && strings.Contains(resource.Path, "skills/review/SKILL.md") {
+		// Native Windows manifest paths use "\"; the skill layout is asserted
+		// in "/" form, so compare on the slash form of the path.
+		if resource.ID == "skill-skill-1" && resource.EntryPoint && strings.Contains(filepath.ToSlash(resource.Path), "skills/review/SKILL.md") {
 			skillDetailFound = true
 		}
-		if strings.Contains(resource.Path, "skills/review/scripts/check.sh") && !resource.EntryPoint && strings.Contains(resource.Content, "reviewed") {
+		if strings.Contains(filepath.ToSlash(resource.Path), "skills/review/scripts/check.sh") && !resource.EntryPoint && strings.Contains(resource.Content, "reviewed") {
 			skillScriptFound = true
 		}
 		if resource.ID == "manifest" {
@@ -246,13 +248,16 @@ func TestEngineRoutesTemplatesAndBuildsContextManifest(t *testing.T) {
 	if strings.Contains(preview.EffectivePrompt, strings.Repeat("review", 20)) || strings.Contains(preview.EffectivePrompt, "global-1.md") {
 		t.Fatal("knowledge or skill detail leaked into the effective prompt")
 	}
-	for _, expected := range []string{filepath.Join("knowledge", "global", "index.md"), filepath.Join("knowledge", "global", "agent-lessons.md"), filepath.Join("knowledge", "project", "index.md"), filepath.Join("knowledge", "project", "navigation", "index.md"), filepath.Join("knowledge", "pending-updates", "index.md")} {
-		if !strings.Contains(preview.EffectivePrompt, expected) {
+	// Entries under a printed root are shown with "/" even on native Windows,
+	// so compare on the slash form of both sides.
+	slashPrompt := strings.ReplaceAll(preview.EffectivePrompt, `\`, "/")
+	for _, expected := range []string{"knowledge/global/index.md", "knowledge/global/agent-lessons.md", "knowledge/project/index.md", "knowledge/project/navigation/index.md", "knowledge/pending-updates/index.md"} {
+		if !strings.Contains(slashPrompt, expected) {
 			t.Fatalf("effective prompt missing knowledge entrypoint %q", expected)
 		}
 	}
-	for _, hidden := range []string{"project-practice.md", "project-navigation.md", filepath.Join("project-navigation", "deep.md")} {
-		if strings.Contains(preview.EffectivePrompt, hidden) {
+	for _, hidden := range []string{"project-practice.md", "project-navigation.md", "project-navigation/deep.md"} {
+		if strings.Contains(slashPrompt, hidden) {
 			t.Fatalf("knowledge detail %q leaked into effective prompt", hidden)
 		}
 	}
@@ -491,17 +496,20 @@ func TestSharedSnapshotIsSharedByTaskAgents(t *testing.T) {
 // appear. The listing is rebuilt from the entry points the same way the template
 // renders it, which keeps the assertion about the prompt's content instead of
 // about whichever pairing of root and entry the current code happens to make.
+// Separators are compared alike: the printed root uses "/" while a native
+// Windows manifest path uses "\", and both name the same file.
 func contextEntryPointResolves(result BuildResult, path string) bool {
 	if strings.Contains(result.EffectivePrompt, path) {
 		return true
 	}
+	want := strings.ReplaceAll(path, `\`, "/")
 	for _, group := range availableContextEntries(result.ContextManifest, result.SharedManifest) {
 		for _, entry := range group.Entries {
 			resolved := entry.Path
 			if group.Root != "" {
 				resolved = group.Root + "/" + entry.Path
 			}
-			if resolved == path {
+			if strings.ReplaceAll(resolved, `\`, "/") == want {
 				return true
 			}
 		}

@@ -39,8 +39,10 @@ func TestPetTaskIdentityOwnsWorkspacePaths(t *testing.T) {
 				t.Fatalf("%s still carries the command dump %q:\n%s", test.path, unwanted, body)
 			}
 		}
-		if len([]rune(body)) > 1600 {
-			t.Fatalf("%s grew back to %d runes; keep command lists in aha_capabilities:\n%s", test.path, len([]rune(body)), body)
+		// Measure the logical text: a CRLF checkout adds one \r per line that
+		// never reaches the prompt as content.
+		if runes := len([]rune(strings.ReplaceAll(body, "\r\n", "\n"))); runes > 1600 {
+			t.Fatalf("%s grew back to %d runes; keep command lists in aha_capabilities:\n%s", test.path, runes, body)
 		}
 	}
 }
