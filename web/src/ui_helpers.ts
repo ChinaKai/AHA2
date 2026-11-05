@@ -26,6 +26,76 @@ export function eventRefreshesTaskList(type: string): boolean {
   return ["task_", "turn_", "round_", "knowledge_"].some(prefix => type.startsWith(prefix));
 }
 
+export interface ListRefreshSchedulerOptions {
+  debounceMs: number;
+  maxWaitMs: number;
+  now: () => number;
+  schedule: (callback: () => void, delay: number) => number;
+  cancel: (handle: number) => void;
+  canRefresh: () => boolean;
+  isInFlight: () => boolean;
+  refresh: () => Promise<void>;
+}
+
+export interface ListRefreshScheduler {
+  request: () => void;
+  flush: () => void;
+  pending: () => boolean;
+  scheduled: () => boolean;
+}
+
+// A dense SSE burst can outrun a list request by an order of magnitude. Coalesce
+// events into one trailing refresh, cap how long the first event may wait, and
+// keep a minimum gap between request starts so a burst cannot become a request
+// loop. The scheduler owns no DOM or API knowledge: the caller decides when a
+// refresh is allowed and performs the fetch.
+export function createListRefreshScheduler(options: ListRefreshSchedulerOptions): ListRefreshScheduler {
+  let timer = 0;
+  let windowStartedAt: number | null = null;
+  let lastStartedAt = 0;
+  let pending = false;
+
+  function schedule(): void {
+    if (!pending) return;
+    const now = options.now();
+    if (windowStartedAt === null) windowStartedAt = now;
+    if (timer) options.cancel(timer);
+    const sinceWindow = now - windowStartedAt;
+    const gapRemaining = lastStartedAt ? Math.max(0, options.debounceMs - (now - lastStartedAt)) : Number.POSITIVE_INFINITY;
+    const delay = Math.max(0, Math.min(options.debounceMs, options.maxWaitMs - sinceWindow, gapRemaining));
+    timer = options.schedule(flush, delay);
+  }
+
+  function flush(): void {
+    timer = 0;
+    if (!pending) {
+      windowStartedAt = null;
+      return;
+    }
+    // Keep the request pending: a hidden page, an open task detail, or an
+    // in-flight refresh must not drop the event. The caller retries this flush
+    // when the page becomes visible or the detail closes, and the finally below
+    // retries after the in-flight request settles.
+    if (!options.canRefresh() || options.isInFlight()) return;
+    pending = false;
+    windowStartedAt = null;
+    lastStartedAt = options.now();
+    void options.refresh().catch(() => undefined).finally(() => {
+      if (pending) schedule();
+    });
+  }
+
+  return {
+    request(): void {
+      pending = true;
+      schedule();
+    },
+    flush,
+    pending: () => pending,
+    scheduled: () => timer !== 0,
+  };
+}
+
 function escapeWorkspaceHTML(value: unknown): string {
   return String(value ?? "")
     .replaceAll("&", "&amp;")

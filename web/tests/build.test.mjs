@@ -489,6 +489,154 @@ test("task list refreshes after round terminal events", async () => {
   assert.equal(eventRefreshesTaskList("agent_progress"), false);
 });
 
+test("list refresh scheduler coalesces bursts, stays single-flight, and defers off-screen", async () => {
+  // (The test body below is async so resolved refresh promises can settle
+  // between simulated timer advances.)
+  const root = resolve(import.meta.dirname, "..");
+  const {createListRefreshScheduler} = await import(pathToFileURL(resolve(root, "dist", "ui_helpers.js")));
+
+  let now = 0;
+  let nextHandle = 1;
+  const timers = new Map();
+  let allowed = true;
+  let inFlight = false;
+  let runs = 0;
+  let finishRun = () => {};
+  const schedule = (callback, delay) => {
+    const handle = nextHandle++;
+    timers.set(handle, {callback, at: now + delay});
+    return handle;
+  };
+  const advance = ms => {
+    now += ms;
+    for (let changed = true; changed;) {
+      changed = false;
+      for (const [handle, timer] of [...timers]) {
+        if (timer.at <= now) {
+          timers.delete(handle);
+          timer.callback();
+          changed = true;
+          break;
+        }
+      }
+    }
+  };
+  // Let the refresh promise chain (catch/finally) settle before the next timer.
+  const settle = () => new Promise(resolve => setTimeout(resolve, 0));
+  const scheduler = createListRefreshScheduler({
+    debounceMs: 350,
+    maxWaitMs: 1000,
+    now: () => now,
+    schedule,
+    cancel: handle => timers.delete(handle),
+    canRefresh: () => allowed,
+    isInFlight: () => inFlight,
+    refresh: () => {
+      runs++;
+      inFlight = true;
+      return new Promise(resolve => {
+        finishRun = () => { inFlight = false; resolve(); };
+      });
+    },
+  });
+
+  // Four events inside the debounce window produce one trailing request.
+  scheduler.request();
+  advance(80);
+  scheduler.request();
+  advance(80);
+  scheduler.request();
+  advance(80);
+  scheduler.request();
+  assert.equal(runs, 0);
+  advance(349);
+  assert.equal(runs, 0, "the trailing window must expire before refreshing");
+  advance(1);
+  assert.equal(runs, 1);
+
+  // Events during the in-flight request stay pending; the next request waits
+  // for the first to settle and never overlaps it.
+  advance(50);
+  scheduler.request();
+  scheduler.request();
+  advance(400);
+  assert.equal(runs, 1, "only one list request may be in flight");
+  finishRun();
+  await settle();
+  advance(350);
+  assert.equal(runs, 2);
+  finishRun();
+  await settle();
+
+  // A hidden page (canRefresh false) keeps the pending event instead of sending.
+  allowed = false;
+  advance(50);
+  scheduler.request();
+  advance(1500);
+  assert.equal(runs, 2, "a hidden page must not send list requests");
+  assert.equal(scheduler.pending(), true);
+  allowed = true;
+  scheduler.flush();
+  assert.equal(runs, 3);
+  finishRun();
+  assert.equal(scheduler.pending(), false);
+
+  // A continuous burst cannot postpone the first refresh forever: the maximum
+  // wait fires it even though each new event would reset the trailing timer.
+  let bursts = 0;
+  const maxWaitScheduler = createListRefreshScheduler({
+    debounceMs: 350,
+    maxWaitMs: 1000,
+    now: () => now,
+    schedule,
+    cancel: handle => timers.delete(handle),
+    canRefresh: () => true,
+    isInFlight: () => false,
+    refresh: () => { bursts++; return Promise.resolve(); },
+  });
+  maxWaitScheduler.request();
+  for (let i = 0; i < 9; i++) {
+    advance(100);
+    maxWaitScheduler.request();
+  }
+  assert.equal(bursts, 0);
+  advance(100);
+  maxWaitScheduler.request();
+  advance(0);
+  assert.equal(bursts, 1, "max wait caps a continuous burst");
+});
+
+test("startup prefetch is idle-only and never chains secondary views", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const script = await readFile(resolve(root, "dist", "app.js"), "utf8");
+  assert.match(script, /function prefetchSecondaryData\(\)/);
+  assert.match(script, /function cancelSecondaryPrefetch\(\)/);
+  assert.match(script, /requestIdleCallback/);
+  assert.match(script, /requestIdle\(run, \{\s*timeout: 2500\s*\}\)/);
+  assert.match(script, /secondaryPrefetchTimer = window\.setTimeout\(run, 1200\)/);
+  assert.doesNotMatch(script, /ensureViewData\("models"\)\.then\(\(\)=>ensureViewData\("channels"\)\)/);
+  assert.doesNotMatch(script, /ensureViewData\("channels"\)\)\.then\(\(\)=>ensureViewData\("knowledge"\)\)/);
+  assert.match(script, /ensureViewData\(state\.view\)/);
+  assert.match(script, /!state\.auth\?\.authenticated \|\| userInteracted \|\| state\.selectedTask \|\| openingTaskID/);
+  assert.match(script, /window\.addEventListener\("pointerdown", noteUserInteraction/);
+  assert.match(script, /__ahaPerf/);
+});
+
+test("SSE list refresh is debounced and deferred while a task detail is open", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const script = await readFile(resolve(root, "dist", "app.js"), "utf8");
+  assert.match(script, /debounceMs: 350/);
+  assert.match(script, /maxWaitMs: 1000/);
+  assert.match(script, /canRefresh: \(\)=>Boolean\(state\.auth\?\.authenticated\) && !document\.hidden && !state\.selectedTask && !openingTaskID/);
+  assert.match(script, /isInFlight: \(\)=>listRefreshInFlight/);
+  assert.match(script, /function refreshListData\(\)/);
+  assert.match(script, /listRefreshScheduler\.request\(\)/);
+  assert.match(script, /addEventListener\("visibilitychange"/);
+  assert.match(script, /!state\.selectedTask && !openingTaskID && listPageVisible/);
+  assert.match(script, /listRefreshRequests\+\+/);
+  assert.match(script, /taskOpenLastMs/);
+});
+
 test("read-only task history opens on the latest page and lazily loads older rows", async () => {
   const root = resolve(import.meta.dirname, "..");
   const script = await readFile(resolve(root, "dist", "app.js"), "utf8");
@@ -2082,9 +2230,12 @@ test("task list protects clicks from live refresh and reports open failures", as
   assert.match(source, /window\.setTimeout\(flushDeferredRender, 0\)/);
   assert.match(source, /openingTaskID = taskID/);
   assert.match(source, /setMessage\("error", error instanceof Error/);
-  assert.match(source, /if \(listRefreshInFlight\) \{\s*listRefreshQueued = true/);
-  assert.match(source, /do \{\s*listRefreshQueued = false/);
-  assert.match(source, /while \(listRefreshQueued\)/);
+  // Live refresh requests are coalesced by the scheduler and never overlap; a
+  // pointer press keeps the resulting render deferred as before.
+  assert.match(source, /isInFlight: \(\) => listRefreshInFlight/);
+  assert.match(source, /listRefreshScheduler\.request\(\)/);
+  assert.match(source, /async function performListRefresh\(\): Promise<void> \{\s*if \(listRefreshInFlight\) return;/);
+  assert.match(source, /!state\.selectedTask && !openingTaskID && listPageVisible/);
 });
 
 test("task list filters combine multi-select project, status, and device choices", async () => {
