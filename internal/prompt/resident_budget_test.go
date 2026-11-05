@@ -180,7 +180,12 @@ var conditionalMarker = regexp.MustCompile(`\{\{if[^}]*\}\}`)
 // for the templates that have conditionals, so the ceiling would sit partly on
 // text no Turn ever sees. A rune count, not bytes: these templates mix English
 // and Chinese, and bytes would penalise the Chinese text unfairly.
+//
+// Line endings are normalised first: a Windows checkout with autocrlf stores
+// the embedded templates with CRLF, and counting each \r would push a template
+// over its ceiling by one rune per line without any prompt text having changed.
 func residentTemplateRunes(content string) int {
+	content = strings.ReplaceAll(content, "\r\n", "\n")
 	worstCase := conditionalMarker.ReplaceAllString(content, "")
 	worstCase = strings.ReplaceAll(worstCase, "{{end}}", "")
 	return len([]rune(strings.TrimSpace(worstCase)))
@@ -198,6 +203,35 @@ func TestResidentPromptLayersStayWithinBudget(t *testing.T) {
 				t.Errorf("resident template %s grew to %d runes (budget %d); move the new detail into an on-demand resource instead of the per-Turn prompt", id, got, limit)
 			}
 		})
+	}
+}
+
+// The budget measures prompt text, and a line ending is not prompt text: the
+// same template checked out with CRLF must count exactly as it does with LF, or
+// every Windows build fails the guard on the longer templates.
+func TestResidentTemplateRunesIgnoresLineEndings(t *testing.T) {
+	t.Parallel()
+	lf := "# 标题\n\n{{if .Main}}main only\n{{end}}shared line\n"
+	crlf := strings.ReplaceAll(lf, "\n", "\r\n")
+	want := len([]rune("# 标题\n\nmain only\nshared line"))
+	if got := residentTemplateRunes(lf); got != want {
+		t.Fatalf("LF template counted %d runes, want %d", got, want)
+	}
+	if got := residentTemplateRunes(crlf); got != want {
+		t.Fatalf("CRLF template counted %d runes, want %d as for LF", got, want)
+	}
+	// The embedded templates are whatever the checkout produced, so check the
+	// real files both ways too.
+	for id := range residentPromptBudget {
+		data, err := templateFiles.ReadFile("templates/" + id + ".md")
+		if err != nil {
+			t.Fatalf("resident template %s is missing: %v", id, err)
+		}
+		asLF := strings.ReplaceAll(string(data), "\r\n", "\n")
+		asCRLF := strings.ReplaceAll(asLF, "\n", "\r\n")
+		if lfRunes, crlfRunes := residentTemplateRunes(asLF), residentTemplateRunes(asCRLF); lfRunes != crlfRunes {
+			t.Errorf("resident template %s counts %d runes with LF but %d with CRLF", id, lfRunes, crlfRunes)
+		}
 	}
 }
 
