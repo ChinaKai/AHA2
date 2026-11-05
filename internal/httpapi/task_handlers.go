@@ -22,10 +22,42 @@ func (s *Server) listTasks(writer http.ResponseWriter, request *http.Request) {
 		writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid_list_options", "message": err.Error()})
 		return
 	}
+	order, err := parseTaskListOrder(request)
+	if err != nil {
+		writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid_list_options", "message": err.Error()})
+		return
+	}
 	projectID := request.URL.Query().Get("project_id")
 	mirrors, _ := s.store.RemoteTaskMirrors(request.Context(), projectID)
 	var page listPage[domain.Task]
-	if options.Paged && len(mirrors) == 0 {
+	if order == taskOrderAttention && options.Paged && len(mirrors) == 0 {
+		cursorRank, cursorAt, cursorID, cursorErr := taskAttentionCursorPosition(options)
+		if cursorErr != nil {
+			writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid_cursor", "message": cursorErr.Error()})
+			return
+		}
+		items, hasMore, listErr := s.store.ListTasksAttentionPage(request.Context(), projectID, cursorRank, cursorAt, cursorID, options.Limit)
+		if listErr != nil {
+			writeError(writer, http.StatusInternalServerError, "list_tasks_failed")
+			return
+		}
+		page = taskAttentionPage(items, hasMore)
+	} else if order == taskOrderAttention {
+		items, listErr := s.store.ListTasks(request.Context(), projectID)
+		if listErr != nil {
+			writeError(writer, http.StatusInternalServerError, "list_tasks_failed")
+			return
+		}
+		for _, mirror := range mirrors {
+			items = append(items, mirror.Task)
+		}
+		var pageErr error
+		page, pageErr = paginateTasksByAttention(items, options)
+		if pageErr != nil {
+			writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid_cursor", "message": pageErr.Error()})
+			return
+		}
+	} else if options.Paged && len(mirrors) == 0 {
 		cursorAt, cursorID, cursorErr := listCursorPosition(options, "tasks")
 		if cursorErr != nil {
 			writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid_cursor", "message": cursorErr.Error()})

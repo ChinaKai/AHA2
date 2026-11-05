@@ -281,6 +281,59 @@ func (s *Store) ListTasksPage(ctx context.Context, projectID string, cursorAt ti
 	return items, hasMore, nil
 }
 
+// TaskAttentionRank is the group a Task sorts into when the list puts the work
+// that still needs the owner first: every unfinished or failed status is 0 and
+// only completed is 1.
+func TaskAttentionRank(status domain.TaskStatus) int {
+	if status == domain.TaskCompleted {
+		return 1
+	}
+	return 0
+}
+
+const taskAttentionRankSQL = `(CASE WHEN status='completed' THEN 1 ELSE 0 END)`
+
+// ListTasksAttentionPage pages Tasks with every non-completed Task ahead of the
+// completed ones, newest first within each group. The cursor carries the group
+// as well as the creation time and id, because a cursor without the group
+// cannot tell where the open group ends and skips or repeats rows there.
+func (s *Store) ListTasksAttentionPage(ctx context.Context, projectID string, cursorRank int, cursorAt time.Time, cursorID string, limit int) ([]domain.Task, bool, error) {
+	query := `SELECT ` + taskColumns + ` FROM tasks WHERE 1=1`
+	args := []any{}
+	if projectID != "" {
+		query += ` AND project_id=?`
+		args = append(args, projectID)
+	}
+	if !cursorAt.IsZero() && cursorID != "" {
+		query += ` AND (` + taskAttentionRankSQL + `>? OR (` + taskAttentionRankSQL + `=? AND (created_at<? OR (created_at=? AND id<?))))`
+		cursor := timeString(cursorAt)
+		args = append(args, cursorRank, cursorRank, cursor, cursor, cursorID)
+	}
+	query += ` ORDER BY ` + taskAttentionRankSQL + ` ASC,created_at DESC,id DESC LIMIT ?`
+	args = append(args, limit+1)
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, false, err
+	}
+	defer rows.Close()
+	items := make([]domain.Task, 0, limit+1)
+	for rows.Next() {
+		item, err := scanTask(rows)
+		if err != nil {
+			return nil, false, err
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, err
+	}
+	hasMore := len(items) > limit
+	if hasMore {
+		items = items[:limit]
+	}
+	return items, hasMore, nil
+}
+
 // TaskFacetCounts holds the total number of Tasks behind each list filter.
 type TaskFacetCounts struct {
 	Status  map[string]int

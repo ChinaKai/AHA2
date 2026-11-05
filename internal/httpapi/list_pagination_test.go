@@ -195,6 +195,90 @@ func TestListOptionsBoundariesAndCursorKinds(t *testing.T) {
 	}
 }
 
+// TestPaginateTasksByAttentionMatchesStoreOrder covers the in-memory path used
+// when remote mirrors are merged in: unfinished and failed Tasks come first even
+// though every completed Task is newer, and the cursor crosses the group edge.
+func TestPaginateTasksByAttentionMatchesStoreOrder(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)
+	items := []domain.Task{
+		{ID: "done-new", Status: domain.TaskCompleted, CreatedAt: now.Add(3 * time.Minute)},
+		{ID: "open-old", Status: domain.TaskActive, CreatedAt: now.Add(-time.Minute)},
+		{ID: "done-old", Status: domain.TaskCompleted, CreatedAt: now.Add(time.Minute)},
+		{ID: "failed-b", Status: domain.TaskFailed, CreatedAt: now},
+		{ID: "blocked-a", Status: domain.TaskBlocked, CreatedAt: now},
+	}
+	options := listOptions{Paged: true, Limit: 2}
+	var got []string
+	for pageCount := 0; pageCount < 5; pageCount++ {
+		page, err := paginateTasksByAttention(append([]domain.Task(nil), items...), options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, item := range page.Items {
+			got = append(got, item.ID)
+		}
+		if !page.HasMore {
+			if page.NextCursor != "" {
+				t.Fatalf("last page kept a cursor: %q", page.NextCursor)
+			}
+			break
+		}
+		options.Cursor = page.NextCursor
+	}
+	if want := []string{"failed-b", "blocked-a", "open-old", "done-new", "done-old"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("attention order=%v want %v", got, want)
+	}
+	unpaged, err := paginateTasksByAttention(append([]domain.Task(nil), items...), listOptions{})
+	if err != nil || len(unpaged.Items) != len(items) || unpaged.Items[0].ID != "failed-b" || unpaged.HasMore {
+		t.Fatalf("unpaged attention list=%#v err=%v", unpaged, err)
+	}
+}
+
+// TestTaskListOrderCursorsDoNotCrossOrders keeps the default creation-order
+// cursor working as before and rejects a cursor continued under another order,
+// which would otherwise skip or repeat Tasks silently.
+func TestTaskListOrderCursorsDoNotCrossOrders(t *testing.T) {
+	t.Parallel()
+	for rawURL, want := range map[string]string{
+		"/api/v1/tasks":                    "",
+		"/api/v1/tasks?order=created":      "",
+		"/api/v1/tasks?order=%20Attention": taskOrderAttention,
+	} {
+		order, err := parseTaskListOrder(httptest.NewRequest("GET", rawURL, nil))
+		if err != nil || order != want {
+			t.Fatalf("%s order=%q err=%v want %q", rawURL, order, err, want)
+		}
+	}
+	if _, err := parseTaskListOrder(httptest.NewRequest("GET", "/api/v1/tasks?order=updated", nil)); err == nil {
+		t.Fatal("unknown order accepted")
+	}
+
+	at := time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC).Format(time.RFC3339Nano)
+	legacy := encodeListCursor(listCursor{Kind: "tasks", UpdatedAt: at, ID: "task-a"})
+	created := encodeListCursor(listCursor{Kind: "tasks", At: at, ID: "task-a"})
+	attention := taskAttentionCursor(domain.Task{ID: "task-a", Status: domain.TaskCompleted, CreatedAt: time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)})
+	for _, cursor := range []string{legacy, created} {
+		if _, _, err := listCursorPosition(listOptions{Paged: true, Limit: 10, Cursor: cursor}, "tasks"); err != nil {
+			t.Fatalf("creation-order cursor rejected: %v", err)
+		}
+		if _, _, _, err := taskAttentionCursorPosition(listOptions{Paged: true, Limit: 10, Cursor: cursor}); err == nil {
+			t.Fatal("creation-order cursor accepted by the attention order")
+		}
+	}
+	if _, _, err := listCursorPosition(listOptions{Paged: true, Limit: 10, Cursor: attention}, "tasks"); err == nil {
+		t.Fatal("attention cursor accepted by the creation order")
+	}
+	rank, position, id, err := taskAttentionCursorPosition(listOptions{Paged: true, Limit: 10, Cursor: attention})
+	if err != nil || rank != 1 || id != "task-a" || position.Format(time.RFC3339Nano) != at {
+		t.Fatalf("attention cursor rank=%d at=%s id=%s err=%v", rank, position, id, err)
+	}
+	badRank := encodeListCursor(listCursor{Kind: "tasks", Order: taskOrderAttention, Rank: 2, At: at, ID: "task-a"})
+	if _, _, _, err := taskAttentionCursorPosition(listOptions{Paged: true, Limit: 10, Cursor: badRank}); err == nil {
+		t.Fatal("out-of-range attention rank accepted")
+	}
+}
+
 func TestSummaryViewsOmitHeavyDetailFields(t *testing.T) {
 	t.Parallel()
 	projectsJSON, err := json.Marshal(summarizeProjects([]domain.Project{{ID: "project-a", RepositoryIdentity: "large-repository-identity"}}))
