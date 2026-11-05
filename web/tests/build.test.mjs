@@ -762,11 +762,32 @@ test("opt-in perf panel reports timing metrics with copy and hide controls", asy
   // native top-layer dialogs.
   assert.match(styles, /\.perf-panel \{[^}]*z-index: 70;/);
   assert.doesNotMatch(styles, /\.perf-panel \{[^}]*z-index: 50;/);
-  // Desktop keeps the original corner; on narrow screens the fixed panel must
-  // clear the bottom navigation instead of covering it.
+  // Desktop keeps the original corner; from the navigation's own breakpoint up
+  // the fixed panel must clear the bottom navigation instead of covering it.
   assert.match(styles, /\.perf-panel \{[^}]*bottom: 16px;/);
-  assert.match(styles, /@media \(max-width: 640px\) \{ \.perf-panel \{[^}]*bottom: calc\(var\(--mobile-bottom-nav-height\) \+ 8px\);[^}]*\}/);
+  // Resolve the media max-width that actually wraps a selector, so the panel
+  // offset and `.bottom-nav` can be compared without assuming rule order.
+  const mediaMaxWidthFor = (selector) => {
+    for (const match of styles.matchAll(/@media \(max-width: (\d+)px\) \{/g)) {
+      let depth = 1;
+      let index = match.index + match[0].length;
+      const bodyStart = index;
+      while (index < styles.length && depth > 0) {
+        if (styles[index] === "{") depth++;
+        else if (styles[index] === "}") depth--;
+        index++;
+      }
+      if (styles.slice(bodyStart, index).includes(selector)) return match[1];
+    }
+    return undefined;
+  };
+  const perfPanelBreakpoint = mediaMaxWidthFor(".perf-panel {");
+  // 641-760px still shows `.bottom-nav`; the panel must follow the same breakpoint.
+  assert.equal(perfPanelBreakpoint, "760");
+  assert.equal(perfPanelBreakpoint, mediaMaxWidthFor(".bottom-nav {"));
+  assert.match(styles, /@media \(max-width: 760px\) \{ \.perf-panel \{[^}]*bottom: calc\(var\(--mobile-bottom-nav-height\) \+ 8px\);[^}]*\}/);
   assert.doesNotMatch(styles, /@media \(max-width: 640px\) \{ \.perf-panel \{[^}]*bottom: 8px;/);
+  assert.doesNotMatch(styles, /@media \(max-width: 640px\) \{ \.perf-panel \{[^}]*bottom: calc/);
 });
 
 test("SSE list refresh is debounced and deferred while a task detail is open", async () => {
