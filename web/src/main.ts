@@ -415,6 +415,116 @@ const perfMetrics: AhaPerfMetrics = {
 (window as unknown as {__ahaPerf: AhaPerfMetrics}).__ahaPerf = perfMetrics;
 const bootStartedAt = performance.now();
 
+// `?perf=1` opens a small, dismissible snapshot of `__ahaPerf`. This is opt-in:
+// a normal visit creates no panel DOM and schedules no refresh timer.
+function startPerfPanel(): void {
+  if (!perfEnabled || document.getElementById("perf-panel")) return;
+
+  const panel = document.createElement("section");
+  panel.id = "perf-panel";
+  panel.className = "perf-panel";
+  panel.setAttribute("role", "status");
+  panel.setAttribute("aria-live", "off");
+
+  const head = document.createElement("div");
+  head.className = "perf-panel-head";
+  const title = document.createElement("strong");
+  title.textContent = "性能";
+  const hideButton = document.createElement("button");
+  hideButton.type = "button";
+  hideButton.id = "perf-hide";
+  hideButton.className = "perf-panel-action";
+  hideButton.textContent = "隐藏";
+  head.append(title, hideButton);
+
+  const rows = document.createElement("dl");
+  rows.className = "perf-panel-rows";
+  const addRow = (label: string): HTMLElement => {
+    const term = document.createElement("dt");
+    term.textContent = label;
+    const value = document.createElement("dd");
+    rows.append(term, value);
+    return value;
+  };
+  const firstScreenValue = addRow("首屏");
+  const prefetchValue = addRow("预取");
+  const listRefreshValue = addRow("列表刷新");
+  const taskOpenValue = addRow("任务打开");
+
+  const copyButton = document.createElement("button");
+  copyButton.type = "button";
+  copyButton.id = "perf-copy";
+  copyButton.className = "perf-panel-action";
+  copyButton.textContent = "复制";
+
+  const snapshot = () => {
+    const listRefreshAvgMs = perfMetrics.listRefreshRequests > 0 ? Math.round(perfMetrics.listRefreshTotalMs / perfMetrics.listRefreshRequests) : 0;
+    const taskOpenAvgMs = perfMetrics.taskOpenCount > 0 ? Math.round(perfMetrics.taskOpenTotalMs / perfMetrics.taskOpenCount) : 0;
+    return {
+      firstScreen: `${perfMetrics.firstScreenMs}ms`,
+      prefetch: `${perfMetrics.prefetchRuns} 次 / ${perfMetrics.prefetchRequests} 请求`,
+      listRefresh: `${perfMetrics.listRefreshRequests} 次 / 最近 ${perfMetrics.listRefreshLastMs}ms / 平均 ${listRefreshAvgMs}ms`,
+      taskOpen: `${perfMetrics.taskOpenCount} 次 / 最近 ${perfMetrics.taskOpenLastMs}ms / 平均 ${taskOpenAvgMs}ms`,
+      text: [
+        `首屏: ${perfMetrics.firstScreenMs}ms`,
+        `预取: ${perfMetrics.prefetchRuns} 次 / ${perfMetrics.prefetchRequests} 请求`,
+        `列表刷新: ${perfMetrics.listRefreshRequests} 次 / 最近 ${perfMetrics.listRefreshLastMs}ms / 平均 ${listRefreshAvgMs}ms`,
+        `任务打开: ${perfMetrics.taskOpenCount} 次 / 最近 ${perfMetrics.taskOpenLastMs}ms / 平均 ${taskOpenAvgMs}ms`,
+      ].join("\n"),
+    };
+  };
+  let latestText = "";
+  const renderValues = () => {
+    const values = snapshot();
+    firstScreenValue.textContent = values.firstScreen;
+    prefetchValue.textContent = values.prefetch;
+    listRefreshValue.textContent = values.listRefresh;
+    taskOpenValue.textContent = values.taskOpen;
+    latestText = values.text;
+  };
+
+  const fallbackCopy = (text: string) => {
+    console.warn(`[aha-perf] clipboard unavailable, metrics text:\n${text}`);
+    const selection = window.getSelection();
+    if (!selection) return;
+    const range = document.createRange();
+    range.selectNodeContents(rows);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  };
+  copyButton.addEventListener("click", () => {
+    const text = latestText || snapshot().text;
+    const clipboard = navigator.clipboard;
+    if (!clipboard || typeof clipboard.writeText !== "function") {
+      fallbackCopy(text);
+      return;
+    }
+    try {
+      void clipboard.writeText(text).then(() => {
+        copyButton.textContent = "已复制";
+        window.setTimeout(() => { copyButton.textContent = "复制"; }, 1200);
+      }, () => fallbackCopy(text));
+    } catch {
+      fallbackCopy(text);
+    }
+  });
+
+  panel.append(head, rows, copyButton);
+  document.body.append(panel);
+  renderValues();
+  const timer = window.setInterval(() => {
+    if (!panel.isConnected) {
+      window.clearInterval(timer);
+      return;
+    }
+    renderValues();
+  }, 1000);
+  hideButton.addEventListener("click", () => {
+    window.clearInterval(timer);
+    panel.remove();
+  });
+}
+
 const listRefreshScheduler = createListRefreshScheduler({
   debounceMs: 350,
   maxWaitMs: 1000,
@@ -5843,6 +5953,7 @@ document.addEventListener("click", event => {
 });
 startUITranslationObserver();
 render();
+if (perfEnabled) startPerfPanel();
 void bootstrap();
 
 function loadMCPServers(force = false): Promise<void> {

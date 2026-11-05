@@ -719,6 +719,31 @@ test("startup prefetch is idle-only and never chains secondary views", async () 
   assert.match(script, /prefetchRequestTracking > 0\) perfMetrics\.prefetchRequests\+\+/);
 });
 
+test("opt-in perf panel reports timing metrics with copy and hide controls", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const script = await readFile(resolve(root, "dist", "app.js"), "utf8");
+  const styles = await readFile(resolve(root, "dist", "styles.css"), "utf8");
+  // `?perf=1` is the only path that creates the panel; a normal visit adds no DOM.
+  assert.match(script, /if \(perfEnabled\) startPerfPanel\(\)/);
+  assert.match(script, /if \(!perfEnabled \|\| document\.getElementById\("perf-panel"\)\) return/);
+  assert.match(script, /panel\.id = "perf-panel"/);
+  assert.match(script, /panel\.setAttribute\("role", "status"\)/);
+  assert.match(script, /panel\.setAttribute\("aria-live", "off"\)/);
+  assert.match(script, /hideButton\.type = "button"/);
+  assert.match(script, /hideButton\.textContent = "隐藏"/);
+  assert.match(script, /copyButton\.type = "button"/);
+  assert.match(script, /copyButton\.textContent = "复制"/);
+  // Averages come from TotalMs / count, falling back to 0 without samples.
+  assert.match(script, /Math\.round\(perfMetrics\.listRefreshTotalMs \/ perfMetrics\.listRefreshRequests\) : 0/);
+  assert.match(script, /Math\.round\(perfMetrics\.taskOpenTotalMs \/ perfMetrics\.taskOpenCount\) : 0/);
+  // Copy uses the async clipboard and degrades to selecting the values.
+  assert.match(script, /navigator\.clipboard/);
+  assert.match(script, /console\.warn\(`\[aha-perf\] clipboard unavailable/);
+  assert.match(script, /range\.selectNodeContents\(rows\)/);
+  assert.match(script, /window\.setInterval\(\(\)=>\{/);
+  assert.match(styles, /\.perf-panel \{ position: fixed; right: 16px; bottom: 16px;/);
+});
+
 test("SSE list refresh is debounced and deferred while a task detail is open", async () => {
   const root = resolve(import.meta.dirname, "..");
   const script = await readFile(resolve(root, "dist", "app.js"), "utf8");
