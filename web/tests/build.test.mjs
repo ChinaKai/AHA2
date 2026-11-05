@@ -752,6 +752,9 @@ test("opt-in perf panel reports timing metrics with copy and hide controls", asy
   // A clipboard promise can settle after the user hid the panel; bail out before
   // touching the detached button or arming another timer.
   assert.match(script, /const showCopyFeedback = \(label\)=>\{\s*if \(!panel\.isConnected\) return;/);
+  // The degraded path must also bail out before touching the page selection:
+  // selecting the detached panel rows would otherwise wipe the user's selection.
+  assert.match(script, /const fallbackCopy = \(text\)=>\{\s*if \(!panel\.isConnected\) return;/);
   // When the selection API is unavailable the fallback cannot highlight text,
   // but the button still reports failure instead of doing nothing.
   assert.match(script, /if \(!selection\) \{\s*showCopyFeedback\("复制失败"\);\s*return;\s*\}/);
@@ -765,9 +768,9 @@ test("opt-in perf panel reports timing metrics with copy and hide controls", asy
   // Desktop keeps the original corner; from the navigation's own breakpoint up
   // the fixed panel must clear the bottom navigation instead of covering it.
   assert.match(styles, /\.perf-panel \{[^}]*bottom: 16px;/);
-  // Resolve the media max-width that actually wraps a selector, so the panel
-  // offset and `.bottom-nav` can be compared without assuming rule order.
-  const mediaMaxWidthFor = (selector) => {
+  // Resolve the media rule that actually wraps a selector, so the panel offset
+  // and `.bottom-nav` can be compared without assuming rule order.
+  const mediaRuleFor = (selector) => {
     for (const match of styles.matchAll(/@media \(max-width: (\d+)px\) \{/g)) {
       let depth = 1;
       let index = match.index + match[0].length;
@@ -777,15 +780,22 @@ test("opt-in perf panel reports timing metrics with copy and hide controls", asy
         else if (styles[index] === "}") depth--;
         index++;
       }
-      if (styles.slice(bodyStart, index).includes(selector)) return match[1];
+      const body = styles.slice(bodyStart, index);
+      if (body.includes(selector)) return { width: match[1], body };
     }
     return undefined;
   };
-  const perfPanelBreakpoint = mediaMaxWidthFor(".perf-panel {");
+  const perfPanelMedia = mediaRuleFor(".perf-panel {");
   // 641-760px still shows `.bottom-nav`; the panel must follow the same breakpoint.
-  assert.equal(perfPanelBreakpoint, "760");
-  assert.equal(perfPanelBreakpoint, mediaMaxWidthFor(".bottom-nav {"));
-  assert.match(styles, /@media \(max-width: 760px\) \{ \.perf-panel \{[^}]*bottom: calc\(var\(--mobile-bottom-nav-height\) \+ 8px\);[^}]*\}/);
+  assert.equal(perfPanelMedia?.width, "760");
+  assert.equal(perfPanelMedia?.width, mediaRuleFor(".bottom-nav {")?.width);
+  // Without a bottom navigation (login/loading) the narrow panel keeps the
+  // regular 16px corner instead of leaving an empty nav-height gap.
+  assert.match(perfPanelMedia.body, /\.perf-panel \{[^}]*bottom: 16px;/);
+  const withoutNavScope = perfPanelMedia.body.replace(/body:has\(\.bottom-nav\) \.perf-panel \{[^}]*\}/g, "");
+  assert.doesNotMatch(withoutNavScope, /\.perf-panel \{[^}]*bottom: calc/);
+  // The shell renders `.bottom-nav`; only then is the panel lifted by its height.
+  assert.match(perfPanelMedia.body, /body:has\(\.bottom-nav\) \.perf-panel \{[^}]*bottom: calc\(var\(--mobile-bottom-nav-height\) \+ 8px\);/);
   assert.doesNotMatch(styles, /@media \(max-width: 640px\) \{ \.perf-panel \{[^}]*bottom: 8px;/);
   assert.doesNotMatch(styles, /@media \(max-width: 640px\) \{ \.perf-panel \{[^}]*bottom: calc/);
 });

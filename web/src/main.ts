@@ -500,6 +500,10 @@ function startPerfPanel(): void {
     }, 1200);
   };
   const fallbackCopy = (text: string) => {
+    // The clipboard promise may reject only after the panel was hidden. In that
+    // case selecting the panel rows would wipe the user's current page
+    // selection, so bail out before touching the selection or feedback timer.
+    if (!panel.isConnected) return;
     console.warn(`[aha-perf] clipboard unavailable, metrics text:\n${text}`);
     const selection = window.getSelection();
     if (!selection) {

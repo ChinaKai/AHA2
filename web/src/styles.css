@@ -2455,4 +2455,6 @@ dialog > .dialog-head { margin: 0; padding: 18px 18px 0; }
 .perf-panel-rows dd { margin: 0; font-variant-numeric: tabular-nums; text-align: right; overflow-wrap: anywhere; }
 .perf-panel-action { min-height: 24px; padding: 0 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
 #perf-copy { justify-self: end; }
-@media (max-width: 760px) { .perf-panel { right: 8px; bottom: calc(var(--mobile-bottom-nav-height) + 8px); width: min(220px, calc(100vw - 16px)); } }
+/* Login/loading screens render no `.bottom-nav`, so only lift the panel above
+   the navigation when the shell actually provides one. */
+@media (max-width: 760px) { .perf-panel { right: 8px; bottom: 16px; width: min(220px, calc(100vw - 16px)); } body:has(.bottom-nav) .perf-panel { bottom: calc(var(--mobile-bottom-nav-height) + 8px); } }
