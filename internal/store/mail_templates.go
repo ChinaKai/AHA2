@@ -149,7 +149,18 @@ func (s *Store) UpdateMailTemplate(ctx context.Context, item domain.MailTemplate
 	if err != nil {
 		return domain.MailTemplate{}, err
 	}
-	now := time.Now().UTC()
+	// Read the previous timestamp outside the write transaction so the first
+	// statement inside it remains the conditional UPDATE. Starting a deferred
+	// transaction with a SELECT makes concurrent writers fail with SQLITE_BUSY
+	// when they try to upgrade their read lock. The version predicate below is
+	// still the sole concurrency decision: a writer that commits between this
+	// read and the UPDATE makes the UPDATE affect zero rows.
+	var previousUpdatedAt string
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT updated_at FROM mail_templates WHERE id=?`, item.ID).Scan(&previousUpdatedAt); err != nil {
+		return domain.MailTemplate{}, err
+	}
+	now := nextMailTimestamp(time.Now().UTC(), parseMailTime(previousUpdatedAt))
 	item.UpdatedAt = now
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

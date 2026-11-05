@@ -331,3 +331,48 @@ func TestMailTemplateScopeAndListing(t *testing.T) {
 		t.Fatalf("templates leaked across projects: %+v", otherProject)
 	}
 }
+
+func TestMailTemplateUpdateStrictlyAdvancesFromFutureTimestamp(t *testing.T) {
+	ctx := context.Background()
+	database := openMailTestStore(t)
+	created, err := database.CreateMailTemplate(ctx, domain.MailTemplate{
+		Scope: domain.MailTemplateScopeGlobal, Name: "Clock regression",
+		SubjectTemplate: "v1", BodyTextTemplate: "text v1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Force a timestamp in the future so a plain time.Now() on every platform
+	// cannot advance it. The update must still move strictly past it.
+	forced := time.Now().UTC().Add(time.Hour)
+	if _, err := database.db.ExecContext(ctx,
+		`UPDATE mail_templates SET updated_at=? WHERE id=?`, mailTimeString(forced), created.ID); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := database.MailTemplate(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !stored.UpdatedAt.Equal(forced) {
+		t.Fatalf("forced updated_at = %v, want %v", stored.UpdatedAt, forced)
+	}
+	stored.SubjectTemplate = "v2"
+	stored.BodyTextTemplate = "text v2"
+	updated, err := database.UpdateMailTemplate(ctx, stored, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !updated.UpdatedAt.After(stored.UpdatedAt) {
+		t.Fatalf("updated_at did not advance: %v <= %v", updated.UpdatedAt, stored.UpdatedAt)
+	}
+	if !updated.UpdatedAt.Equal(stored.UpdatedAt.Add(time.Nanosecond)) {
+		t.Fatalf("updated_at = %v, want %v", updated.UpdatedAt, stored.UpdatedAt.Add(time.Nanosecond))
+	}
+	version2, err := database.MailTemplateVersion(ctx, created.ID, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !version2.CreatedAt.Equal(updated.UpdatedAt) {
+		t.Fatalf("version 2 created_at = %v, want %v", version2.CreatedAt, updated.UpdatedAt)
+	}
+}

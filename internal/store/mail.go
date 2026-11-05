@@ -44,6 +44,19 @@ func isForeignKeyConstraintError(err error) bool {
 	return errors.As(err, &sqliteErr) && sqliteErr.Code() == sqlite3.SQLITE_CONSTRAINT_FOREIGNKEY
 }
 
+// nextMailTimestamp guarantees a strict advance even when the platform clock
+// has coarse resolution or steps backwards. Template version ordering and the
+// audit trail rely on updated_at increasing across edits.
+func nextMailTimestamp(now, previous time.Time) time.Time {
+	if previous.IsZero() {
+		return now
+	}
+	if now.After(previous) {
+		return now
+	}
+	return previous.Add(time.Nanosecond)
+}
+
 func mailTimeString(value time.Time) string {
 	if value.IsZero() {
 		return ""
