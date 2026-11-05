@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -89,6 +90,7 @@ type Server struct {
 	mailDownloadBaseURL   string
 	mailDownloadKey       []byte
 	mailDownloadLimiter   *mailDownloadLimiter
+	mailDownloadHosts     map[string]bool
 	mailDownloadNonceMu   sync.Mutex
 	mailDownloadNonces    map[string]time.Time
 	probeSSHHostKey       func(context.Context, string) (hardware.SSHHostKeyInfo, error)
@@ -148,6 +150,14 @@ func New(config Config) *Server {
 		// it makes the endpoint return 503 instead of accepting unsigned forms.
 		downloadKey = nil
 	}
+	// The independent download entry only accepts its configured public Host.
+	// With no download base URL config there is no valid Host and every request
+	// is rejected, which is the safe default.
+	downloadHosts := map[string]bool{}
+	if parsed, err := url.Parse(strings.TrimSpace(config.MailDownloadBaseURL)); err == nil &&
+		strings.EqualFold(parsed.Scheme, "https") && parsed.Hostname() != "" {
+		downloadHosts[strings.ToLower(parsed.Hostname())] = true
+	}
 	validateOrigin := !config.AllowCrossOrigin
 	// Default to the LAN scope: AHA2 binds 0.0.0.0, so narrowing on startup before
 	// anyone has chosen would cut off clients that already rely on it.
@@ -180,6 +190,7 @@ func New(config Config) *Server {
 		mailDownloadBaseURL:   strings.TrimRight(strings.TrimSpace(config.MailDownloadBaseURL), "/"),
 		mailDownloadKey:       downloadKey,
 		mailDownloadLimiter:   newMailDownloadLimiter(),
+		mailDownloadHosts:     downloadHosts,
 		mailDownloadNonces:    map[string]time.Time{},
 		probeSSHHostKey:       probeSSHHostKey,
 		trustSSHHostKey:       trustSSHHostKey,

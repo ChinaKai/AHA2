@@ -87,7 +87,7 @@ func TestMailRejectAndRetry(t *testing.T) {
 	ctx := context.Background()
 	database, _, message, _, digest := newMailOutboxFixture(t)
 	now := time.Now().UTC()
-	if err := database.RejectMailMessage(ctx, message.ID, "recipient list wrong", "owner-1", now); err != nil {
+	if err := database.RejectMailMessage(ctx, message.ID, "recipient list wrong", now); err != nil {
 		t.Fatal(err)
 	}
 	stored, err := database.MailMessage(ctx, message.ID)
@@ -96,6 +96,9 @@ func TestMailRejectAndRetry(t *testing.T) {
 	}
 	if stored.Status != domain.MailMessageRejected || stored.RejectedReason != "recipient list wrong" {
 		t.Fatalf("rejected = %+v", stored)
+	}
+	if stored.ApprovedBy != "" || !stored.ApprovedAt.IsZero() {
+		t.Fatalf("rejection was recorded as an approval: %+v", stored)
 	}
 
 	// Build a failed generation, then retry it with the same snapshot.
@@ -283,6 +286,57 @@ func TestMailCancelQueuedBackoff(t *testing.T) {
 	}
 	if cancelled.Status != domain.MailMessageCancelled || stored.State != domain.MailDeliveryCancelled {
 		t.Fatalf("cancel backoff = %+v delivery = %+v", cancelled, stored)
+	}
+}
+
+func TestMailReclaimRollsBackWhenMessageCannotFollow(t *testing.T) {
+	ctx := context.Background()
+	database, account, message, _, _ := newMailOutboxFixture(t)
+	now := time.Now().UTC()
+	if _, err := database.db.ExecContext(ctx,
+		`UPDATE mail_messages SET status='sent' WHERE id=?`, message.ID); err != nil {
+		t.Fatal(err)
+	}
+	delivery, err := database.CreateMailDelivery(ctx, domain.MailDelivery{
+		MessageID: message.ID, AccountID: account.ID, State: domain.MailDeliverySending,
+		LeaseID: "expired-lease", LeaseUntil: now.Add(-time.Second), AvailableAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.ReclaimExpiredMailDeliveries(ctx, now); err == nil {
+		t.Fatal("reclaim accepted a Message that could not follow its Delivery")
+	}
+	stored, err := database.MailDelivery(ctx, delivery.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.State != domain.MailDeliverySending {
+		t.Fatalf("delivery changed despite rollback: %+v", stored)
+	}
+	storedMessage, err := database.MailMessage(ctx, message.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if storedMessage.Status != domain.MailMessageSent {
+		t.Fatalf("message changed despite rollback: %s", storedMessage.Status)
+	}
+	countAudit := func() int {
+		var count int
+		if err := database.db.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM audit_events WHERE action='mail.delivery.reclaim_failed' AND resource_id=?`,
+			delivery.ID).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		return count
+	}
+	if countAudit() != 1 {
+		t.Fatalf("reclaim failure audit count = %d, want 1", countAudit())
+	}
+	// A repeated failed round must not grow the audit table.
+	_, _ = database.ReclaimExpiredMailDeliveries(ctx, now)
+	if countAudit() != 1 {
+		t.Fatalf("reclaim failure audit repeated: %d", countAudit())
 	}
 }
 

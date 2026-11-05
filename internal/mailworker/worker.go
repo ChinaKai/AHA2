@@ -40,11 +40,14 @@ type Config struct {
 	Sender  Sender
 	Logger  *slog.Logger
 
-	Interval        time.Duration
-	LeaseDuration   time.Duration
-	RenewInterval   time.Duration
-	MaxPerMinute    int
-	MaxPerHour      int
+	Interval      time.Duration
+	LeaseDuration time.Duration
+	RenewInterval time.Duration
+	MaxPerMinute  int
+	MaxPerHour    int
+	// MaxConcurrent is the per-account cap for one polling round. Rounds are
+	// serialized by Worker.mu and deliveries within an account are sent one at
+	// a time; the durable lease, not this value, is the cross-process mutex.
 	MaxConcurrent   int
 	DownloadBaseURL string
 	Jitter          func(time.Duration) time.Duration
@@ -145,7 +148,10 @@ func (w *Worker) Run(ctx context.Context) {
 }
 
 // ProcessOnce reclaims expired leases, then claims and sends claimable
-// deliveries per account while honoring rate and concurrency limits.
+// deliveries per account while honoring rate and concurrency limits. Rounds are
+// deliberately serialized: SQLite has a single writer, and a single in-process
+// round keeps lease renewal and result writeback ordering easy to reason about.
+// MaxConcurrent bounds how many deliveries one account may process per round.
 func (w *Worker) ProcessOnce(ctx context.Context) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -229,6 +235,15 @@ func accountSendable(account domain.MailAccount) bool {
 	return account.Status == domain.MailAccountOK || account.Status == domain.MailAccountUnverified
 }
 
+// writebackTimeout bounds the final state write after a send. It is detached
+// from the worker's run context: once SMTP has accepted a message, a shutdown
+// signal must not turn a known 250 into an unknown/dead-letter result.
+const writebackTimeout = 5 * time.Second
+
+func (w *Worker) writebackContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), writebackTimeout)
+}
+
 func (w *Worker) sendDelivery(ctx context.Context, delivery domain.MailDelivery, baseline accountSnapshot) {
 	started := w.now()
 	logger := w.config.Logger.With(
@@ -236,7 +251,9 @@ func (w *Worker) sendDelivery(ctx context.Context, delivery domain.MailDelivery,
 		"account_id", delivery.AccountID, "attempt", delivery.Attempts,
 	)
 	finish := func(result store.MailDeliveryResultPatch) bool {
-		ok, err := w.config.Store.FinishMailDelivery(ctx, delivery, delivery.LeaseID, result, w.now())
+		writeCtx, cancel := w.writebackContext(ctx)
+		defer cancel()
+		ok, err := w.config.Store.FinishMailDelivery(writeCtx, delivery, delivery.LeaseID, result, w.now())
 		if err != nil {
 			logger.Warn("mail delivery result write failed", "error", err, "state", result.State, "error_code", string(result.ErrorCode))
 			return false
@@ -251,7 +268,9 @@ func (w *Worker) sendDelivery(ctx context.Context, delivery domain.MailDelivery,
 		return true
 	}
 	deferMessage := func(code domain.MailErrorCode, detail string) {
-		if _, err := w.config.Store.DeferMailDelivery(ctx, delivery.ID, delivery.LeaseID,
+		writeCtx, cancel := w.writebackContext(ctx)
+		defer cancel()
+		if _, err := w.config.Store.DeferMailDelivery(writeCtx, delivery.ID, delivery.LeaseID,
 			delivery.MessageID, code, detail, w.now().Add(time.Minute), w.now()); err != nil {
 			logger.Warn("mail delivery defer failed", "error", err, "error_code", string(code))
 		}
@@ -487,48 +506,55 @@ func (w *Worker) sendDelivery(ctx context.Context, delivery domain.MailDelivery,
 	if leaseLost.Load() {
 		logger.Warn("mail delivery lease renewal failed; writing result under original lease")
 	}
+	applied := false
 	switch result.Outcome {
 	case domain.MailAttemptSent:
-		finish(store.MailDeliveryResultPatch{
+		applied = finish(store.MailDeliveryResultPatch{
 			State: domain.MailDeliverySent, Outcome: domain.MailAttemptSent,
 			OutcomeCertainty: domain.MailOutcomeProviderAccepted,
 			SMTPCode:         result.SMTPCode, SMTPResponse: result.Response,
 			MessageIDHeader: messageID, Phase: domain.MailSMTPPhaseFinished,
 		})
 	case domain.MailAttemptUnknown:
-		finish(store.MailDeliveryResultPatch{
+		applied = finish(store.MailDeliveryResultPatch{
 			State: domain.MailDeliveryDeadLetter, Outcome: domain.MailAttemptUnknown,
 			OutcomeCertainty: domain.MailOutcomeUnknown,
 			ErrorCode:        domain.MailErrSMTPAmbiguousAfterData,
 			SMTPCode:         result.SMTPCode, Phase: result.Phase,
 		})
 	case domain.MailAttemptPermanentFailure:
-		certainty := domain.MailOutcomePermanentFailure
-		applied := finish(store.MailDeliveryResultPatch{
+		applied = finish(store.MailDeliveryResultPatch{
 			State: domain.MailDeliveryFailed, Outcome: domain.MailAttemptPermanentFailure,
-			OutcomeCertainty: certainty, ErrorCode: result.ErrorCode,
+			OutcomeCertainty: domain.MailOutcomePermanentFailure, ErrorCode: result.ErrorCode,
 			SMTPCode: result.SMTPCode, SMTPResponse: result.Response, Phase: result.Phase,
 		})
-		if applied && accountFailureCode(result.ErrorCode) {
-			if _, err := w.config.Store.MarkMailAccountError(ctx, delivery.AccountID, baseline.Revision, w.now()); err != nil {
-				logger.Warn("mail account error status write failed", "error", err)
-			}
-		}
 	default:
 		if delivery.Attempts >= domain.MailDeliveryMaxAttempts {
-			finish(store.MailDeliveryResultPatch{
+			applied = finish(store.MailDeliveryResultPatch{
 				State: domain.MailDeliveryDeadLetter, Outcome: domain.MailAttemptTransientFailure,
 				ErrorCode: domain.MailErrSMTPAttemptsExhausted,
 				SMTPCode:  result.SMTPCode, Phase: result.Phase,
 			})
-			return
+			break
 		}
 		backoff := BackoffForFailedAttempt(delivery.Attempts, w.config.Jitter)
-		finish(store.MailDeliveryResultPatch{
+		applied = finish(store.MailDeliveryResultPatch{
 			State: domain.MailDeliveryQueued, Outcome: domain.MailAttemptTransientFailure,
 			ErrorCode: result.ErrorCode, Backoff: backoff,
 			AvailableAt: w.now().Add(backoff), SMTPCode: result.SMTPCode, Phase: result.Phase,
 		})
+	}
+	// A TLS/DNS/auth failure is a property of the account, not only of this
+	// attempt. It applies to transient outcomes too (for example a TLS failure
+	// is retried later, but the account must stop being claimed until Owner
+	// action). Only an applied result may update the account; a stale worker
+	// must not clobber a newer revision.
+	if applied && accountFailureCode(result.ErrorCode) {
+		writeCtx, cancel := w.writebackContext(ctx)
+		defer cancel()
+		if _, err := w.config.Store.MarkMailAccountError(writeCtx, delivery.AccountID, baseline.Revision, w.now()); err != nil {
+			logger.Warn("mail account error status write failed", "error", err)
+		}
 	}
 }
 

@@ -6,9 +6,9 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
-	"encoding/hex"
 	"fmt"
 	"html"
+	"io"
 	"mime"
 	"net"
 	"net/http"
@@ -77,6 +77,20 @@ func mailClientIP(request *http.Request) string {
 		return request.RemoteAddr
 	}
 	return host
+}
+
+func requestHostname(request *http.Request) string {
+	host := request.Host
+	if value, _, err := net.SplitHostPort(host); err == nil {
+		host = value
+	}
+	return strings.ToLower(strings.TrimSuffix(host, "."))
+}
+
+// mailDownloadHostAllowed rejects requests whose Host is not the configured
+// public download domain. A spoofed Host cannot reach the entry.
+func (s *Server) mailDownloadHostAllowed(request *http.Request) bool {
+	return s.mailDownloadHosts[requestHostname(request)]
 }
 
 func mailTokenPrefix(hash string) string {
@@ -181,6 +195,10 @@ func (s *Server) lookupMailDownloadLink(request *http.Request, token string) (do
 }
 
 func (s *Server) mailDownloadConfirmPage(writer http.ResponseWriter, request *http.Request) {
+	if !s.mailDownloadHostAllowed(request) {
+		http.NotFound(writer, request)
+		return
+	}
 	now := nowUTC()
 	if !s.mailDownloadLimiter.allow("ip:"+mailClientIP(request), 120, now) {
 		writer.Header().Set("Retry-After", "60")
@@ -200,19 +218,23 @@ func (s *Server) mailDownloadConfirmPage(writer http.ResponseWriter, request *ht
 	}
 	writer.Header().Set("Content-Type", "text/html; charset=utf-8")
 	writer.Header().Set("Cache-Control", "no-store")
-	writer.Header().Set("Referrer-Policy", "no-referrer")
+	// same-origin keeps the form POST's Origin meaningful while still avoiding
+	// token leakage to third parties. Origin: null is accepted after nonce
+	// verification because some browsers/privacy modes send it for same-origin
+	// POSTs; a genuine cross-site Origin is always rejected.
+	writer.Header().Set("Referrer-Policy", "same-origin")
 	writer.Header().Set("X-Content-Type-Options", "nosniff")
 	writer.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'")
 	page := fmt.Sprintf(`<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>下载附件</title><style>body{font-family:system-ui,sans-serif;max-width:36rem;margin:3rem auto;padding:0 1rem;color:#0f172a}dl{display:grid;grid-template-columns:6rem 1fr;gap:.4rem}dt{color:#475569}dd{margin:0;word-break:break-all}button{padding:.7rem 1.2rem;font-size:1rem}</style></head>
 <body><h1>下载确认</h1><dl><dt>文件名</dt><dd>%s</dd><dt>大小</dt><dd>%d 字节</dd><dt>SHA256</dt><dd>%s</dd><dt>有效期</dt><dd>%s</dd></dl>
-<form method="post" action="/d/%s/confirm"><input type="hidden" name="expires" value="%d"><input type="hidden" name="nonce" value="%s"><button type="submit">确认下载</button></form>
+<form method="post" action="confirm"><input type="hidden" name="expires" value="%d"><input type="hidden" name="nonce" value="%s"><button type="submit">确认下载</button></form>
 <p>此页面不会消耗下载次数；点击确认后才会计数。</p></body></html>`,
 		html.EscapeString(attachment.FileName), attachment.SizeBytes,
 		html.EscapeString(attachment.SHA256),
 		html.EscapeString(attachment.LinkExpiresAt.Format("2006-01-02 15:04 MST")),
-		html.EscapeString(request.PathValue("token")), expires.Unix(), html.EscapeString(nonce))
+		expires.Unix(), html.EscapeString(nonce))
 	_, _ = writer.Write([]byte(page))
 	s.audit(request, "mail.link.view", "mail_attachment", attachment.ID, map[string]any{
 		"message_id": attachment.MessageID, "token_hash_prefix": mailTokenPrefix(attachment.LinkTokenHash),
@@ -220,6 +242,10 @@ func (s *Server) mailDownloadConfirmPage(writer http.ResponseWriter, request *ht
 }
 
 func (s *Server) mailDownloadConfirm(writer http.ResponseWriter, request *http.Request) {
+	if !s.mailDownloadHostAllowed(request) {
+		http.NotFound(writer, request)
+		return
+	}
 	now := nowUTC()
 	if !s.mailDownloadLimiter.allow("ip:"+mailClientIP(request), 120, now) {
 		writer.Header().Set("Retry-After", "60")
@@ -260,19 +286,26 @@ func (s *Server) mailDownloadConfirm(writer http.ResponseWriter, request *http.R
 		http.Error(writer, "link is no longer available", http.StatusGone)
 		return
 	}
-	content, err := s.store.AttachmentContent(source)
-	if err != nil || int64(len(content)) != attachment.SizeBytes || !strings.EqualFold(hexDigest(content), attachment.SHA256) {
+	file, err := s.store.OpenAttachmentContent(source)
+	if err != nil {
 		http.Error(writer, "link is no longer available", http.StatusGone)
 		return
 	}
-	// Consume the download slot only after the file is known to be intact.
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || info.Size() != attachment.SizeBytes {
+		http.Error(writer, "link is no longer available", http.StatusGone)
+		return
+	}
+	// Consume the download slot only after the file is known to be present and
+	// the right size. The response is streamed; the file is never buffered.
 	consumed, err := s.store.IncrementMailAttachmentLinkDownload(request.Context(), attachment.ID, now)
 	if err != nil || !consumed {
 		http.Error(writer, "link is no longer available", http.StatusGone)
 		return
 	}
 	contentType := source.MediaType
-	if strings.TrimSpace(contentType) == "" {
+	if _, _, parseErr := mime.ParseMediaType(contentType); parseErr != nil {
 		contentType = "application/octet-stream"
 	}
 	writer.Header().Set("Content-Type", contentType)
@@ -283,7 +316,7 @@ func (s *Server) mailDownloadConfirm(writer http.ResponseWriter, request *http.R
 	writer.Header().Set("Cache-Control", "no-store")
 	writer.Header().Set("Referrer-Policy", "no-referrer")
 	writer.Header().Set("X-Content-Type-Options", "nosniff")
-	_, _ = writer.Write(content)
+	_, _ = io.Copy(writer, file)
 	s.audit(request, "mail.link.download", "mail_attachment", attachment.ID, map[string]any{
 		"message_id": attachment.MessageID, "token_hash_prefix": mailTokenPrefix(hash),
 		"download_count": attachment.LinkDownloadCount + 1,
@@ -311,16 +344,17 @@ type mailDownloadError struct{ message string }
 
 func (e *mailDownloadError) Error() string { return e.message }
 
-func hexDigest(content []byte) string {
-	sum := sha256.Sum256(content)
-	return hex.EncodeToString(sum[:])
-}
-
 func sameOriginRequest(request *http.Request) bool {
-	if origin := strings.TrimSpace(request.Header.Get("Origin")); origin != "" {
-		parsed, err := url.Parse(origin)
-		if err != nil || !strings.EqualFold(parsed.Host, request.Host) {
-			return false
+	origin := strings.TrimSpace(request.Header.Get("Origin"))
+	if origin != "" {
+		// Browsers may send Origin: null for a same-origin POST (for example
+		// with privacy modes). The one-time nonce still binds the request to the
+		// confirmation page; a concrete cross-site origin is rejected.
+		if !strings.EqualFold(origin, "null") {
+			parsed, err := url.Parse(origin)
+			if err != nil || !strings.EqualFold(parsed.Host, request.Host) {
+				return false
+			}
 		}
 	}
 	if referer := strings.TrimSpace(request.Header.Get("Referer")); referer != "" {

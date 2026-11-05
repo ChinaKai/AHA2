@@ -545,7 +545,11 @@ func (s *Server) approveMailMessage(writer http.ResponseWriter, request *http.Re
 		return
 	}
 	expected := strings.TrimSpace(payload.ExpectedDigest)
-	if expected != "" && expected != current {
+	if expected == "" {
+		writeMailError(writer, http.StatusUnprocessableEntity, domain.MailErrApprovalDigestMismatch, "expected_digest 必填")
+		return
+	}
+	if expected != current {
 		writeMailError(writer, http.StatusConflict, domain.MailErrApprovalDigestMismatch, "审批摘要已变化，请刷新")
 		return
 	}
@@ -576,7 +580,7 @@ func (s *Server) rejectMailMessage(writer http.ResponseWriter, request *http.Req
 		writeMailStoreFailure(writer, err, "读取邮件消息失败")
 		return
 	}
-	if err := s.store.RejectMailMessage(request.Context(), message.ID, reason, mailOwnerID(request), nowUTC()); err != nil {
+	if err := s.store.RejectMailMessage(request.Context(), message.ID, reason, nowUTC()); err != nil {
 		writeMailStoreFailure(writer, err, "拒绝邮件失败")
 		return
 	}

@@ -182,6 +182,16 @@ func (s *Store) AttachmentContent(item domain.Attachment) ([]byte, error) {
 	return os.ReadFile(filepath.Join(s.dataDir, "attachments", "blobs", item.SHA256[:2], item.SHA256))
 }
 
+// OpenAttachmentContent opens the controlled blob for streaming. The caller
+// must close it. The hash is validated as a path component, so no client
+// supplied path can escape the blob directory.
+func (s *Store) OpenAttachmentContent(item domain.Attachment) (*os.File, error) {
+	if len(item.SHA256) != 64 || strings.ContainsAny(item.SHA256, `/\\`) {
+		return nil, fmt.Errorf("invalid attachment hash")
+	}
+	return os.Open(filepath.Join(s.dataDir, "attachments", "blobs", item.SHA256[:2], item.SHA256))
+}
+
 func (s *Store) ValidateDraftAttachments(ctx context.Context, taskID string, ids []string) error {
 	if len(ids) > 8 {
 		return fmt.Errorf("at most 8 attachments are allowed")

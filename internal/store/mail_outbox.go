@@ -44,6 +44,24 @@ type MailDeliveryResultPatch struct {
 	Backoff          time.Duration
 }
 
+// appendMailAuditDeduped records an operational warning at most once per
+// ten-minute window for the same resource. Repeated claim/reclaim collisions
+// must not grow the audit table without bound.
+func (s *Store) appendMailAuditDeduped(ctx context.Context, actor, action, resourceType, resourceID string, data map[string]any, now time.Time) {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	var exists bool
+	err := s.db.QueryRowContext(ctx, `
+		SELECT EXISTS(SELECT 1 FROM audit_events
+		WHERE action=? AND resource_type=? AND resource_id=? AND occurred_at>=?)`,
+		action, resourceType, resourceID, now.Add(-10*time.Minute).Format(time.RFC3339Nano)).Scan(&exists)
+	if err == nil && exists {
+		return
+	}
+	_ = s.AppendAudit(ctx, actor, action, resourceType, resourceID, data, now.Format(time.RFC3339Nano))
+}
+
 func appendMailAuditTx(ctx context.Context, exec mailDBTX, actor, action, resourceType, resourceID string, data map[string]any, now time.Time) error {
 	_, err := exec.ExecContext(ctx, `
 		INSERT INTO audit_events(id,owner_id,action,resource_type,resource_id,data_json,occurred_at)
@@ -103,11 +121,9 @@ func (s *Store) ReclaimExpiredMailDeliveries(ctx context.Context, now time.Time)
 		return result, err
 	}
 	for _, item := range exhausted {
-		if _, err := tx.ExecContext(ctx, `
-			UPDATE mail_messages SET status='dead_letter',updated_at=?
-			WHERE id=? AND status IN ('queued','sending')`,
-			mailTimeString(now), item.messageID); err != nil {
-			return result, err
+		if err := updateReclaimMessage(ctx, tx, item.messageID,
+			domain.MailMessageDeadLetter, []domain.MailMessageStatus{domain.MailMessageQueued, domain.MailMessageSending}, now); err != nil {
+			return s.failMailReclaim(ctx, tx, item, "exhausted", now, err)
 		}
 		if err := appendMailAuditTx(ctx, tx, "mail_worker", "mail.delivery.reclaim_exhausted",
 			"mail_delivery", item.id, map[string]any{
@@ -136,11 +152,9 @@ func (s *Store) ReclaimExpiredMailDeliveries(ctx context.Context, now time.Time)
 		return result, err
 	}
 	for _, item := range requeued {
-		if _, err := tx.ExecContext(ctx, `
-			UPDATE mail_messages SET status='queued',updated_at=?
-			WHERE id=? AND status='sending'`,
-			mailTimeString(now), item.messageID); err != nil {
-			return result, err
+		if err := updateReclaimMessage(ctx, tx, item.messageID,
+			domain.MailMessageQueued, []domain.MailMessageStatus{domain.MailMessageSending}, now); err != nil {
+			return s.failMailReclaim(ctx, tx, item, "requeued", now, err)
 		}
 		if err := appendMailAuditTx(ctx, tx, "mail_worker", "mail.delivery.reclaim_requeued",
 			"mail_delivery", item.id, map[string]any{
@@ -170,11 +184,9 @@ func (s *Store) ReclaimExpiredMailDeliveries(ctx context.Context, now time.Time)
 		return result, err
 	}
 	for _, item := range ambiguous {
-		if _, err := tx.ExecContext(ctx, `
-			UPDATE mail_messages SET status='dead_letter',updated_at=?
-			WHERE id=? AND status IN ('queued','sending')`,
-			mailTimeString(now), item.messageID); err != nil {
-			return result, err
+		if err := updateReclaimMessage(ctx, tx, item.messageID,
+			domain.MailMessageDeadLetter, []domain.MailMessageStatus{domain.MailMessageQueued, domain.MailMessageSending}, now); err != nil {
+			return s.failMailReclaim(ctx, tx, item, "ambiguous", now, err)
 		}
 		if err := appendMailAuditTx(ctx, tx, "mail_worker", "mail.delivery.reclaim_ambiguous",
 			"mail_delivery", item.id, map[string]any{
@@ -189,6 +201,41 @@ func (s *Store) ReclaimExpiredMailDeliveries(ctx context.Context, now time.Time)
 		return result, err
 	}
 	return result, nil
+}
+
+func updateReclaimMessage(ctx context.Context, tx *sql.Tx, messageID string, to domain.MailMessageStatus, from []domain.MailMessageStatus, now time.Time) error {
+	if len(from) == 0 {
+		return fmt.Errorf("reclaim message expected states are required")
+	}
+	placeholders := make([]string, 0, len(from))
+	args := []any{to, mailTimeString(now), messageID}
+	for _, status := range from {
+		if !status.Valid() {
+			return fmt.Errorf("invalid mail message status %q", status)
+		}
+		placeholders = append(placeholders, "?")
+		args = append(args, status)
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE mail_messages SET status=?,updated_at=?
+		WHERE id=? AND status IN (`+strings.Join(placeholders, ",")+`)`, args...)
+	if err != nil {
+		return err
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return fmt.Errorf("reclaim message %s did not move from %v to %s", messageID, from, to)
+	}
+	return nil
+}
+
+// failMailReclaim rolls the whole sweep back when a Message cannot follow its
+// Delivery. A partial reclaim would leave Message and Delivery split.
+func (s *Store) failMailReclaim(ctx context.Context, tx *sql.Tx, item mailDeliveryIDPair, reason string, now time.Time, cause error) (MailDeliveryReclaimResult, error) {
+	_ = tx.Rollback()
+	s.appendMailAuditDeduped(ctx, "mail_worker", "mail.delivery.reclaim_failed",
+		"mail_delivery", item.id, map[string]any{
+			"message_id": item.messageID, "reason": reason, "error": cause.Error(),
+		}, now)
+	return MailDeliveryReclaimResult{DeadLettered: []string{}, Requeued: []string{}}, fmt.Errorf("reclaim mail delivery %s: %w", item.id, cause)
 }
 
 type mailDeliveryIDPair struct {
@@ -270,10 +317,10 @@ func (s *Store) ClaimMailDelivery(ctx context.Context, accountID string, now tim
 		// claim back so the delivery does not look in flight, then audit the
 		// discarded claim outside the transaction.
 		_ = tx.Rollback()
-		_ = s.AppendAudit(ctx, "mail_worker", "mail.delivery.claim_rejected",
+		s.appendMailAuditDeduped(ctx, "mail_worker", "mail.delivery.claim_rejected",
 			"mail_delivery", item.ID, map[string]any{
 				"message_id": item.MessageID, "reason": "message_not_queued",
-			}, now.Format(time.RFC3339Nano))
+			}, now)
 		return domain.MailDelivery{}, false, nil
 	}
 	if err := tx.Commit(); err != nil {
@@ -312,10 +359,10 @@ func (s *Store) DeferMailDelivery(ctx context.Context, deliveryID, leaseID, mess
 	}
 	if !ok {
 		_ = tx.Rollback()
-		_ = s.AppendAudit(ctx, "mail_worker", "mail.delivery.defer_discarded",
+		s.appendMailAuditDeduped(ctx, "mail_worker", "mail.delivery.defer_discarded",
 			"mail_delivery", deliveryID, map[string]any{
 				"message_id": messageID, "error_code": string(errorCode),
-			}, now.Format(time.RFC3339Nano))
+			}, now)
 		return false, nil
 	}
 	result, err := tx.ExecContext(ctx, `
@@ -393,11 +440,11 @@ func (s *Store) FinishMailDelivery(ctx context.Context, delivery domain.MailDeli
 		// Stale worker: record the discarded result for audit, keep any newer
 		// owner's state, and never update the Message.
 		_ = tx.Rollback()
-		_ = s.AppendAudit(ctx, "mail_worker", "mail.delivery.writeback_discarded",
+		s.appendMailAuditDeduped(ctx, "mail_worker", "mail.delivery.writeback_discarded",
 			"mail_delivery", delivery.ID, map[string]any{
 				"message_id": delivery.MessageID, "attempt": delivery.Attempts,
 				"result_state": string(result.State), "error_code": string(result.ErrorCode),
-			}, now.Format(time.RFC3339Nano))
+			}, now)
 		return false, nil
 	}
 	backoffMS := result.Backoff.Milliseconds()
@@ -580,14 +627,16 @@ func (s *Store) ApproveMailMessage(ctx context.Context, id, digest, ownerID stri
 }
 
 // RejectMailMessage moves pending_approval to rejected.
-func (s *Store) RejectMailMessage(ctx context.Context, id, reason, ownerID string, now time.Time) error {
+func (s *Store) RejectMailMessage(ctx context.Context, id, reason string, now time.Time) error {
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
+	// A rejection is a decision, not an approval: approved_by/approved_at
+	// remain empty so a rejected message can never look approved.
 	result, err := s.db.ExecContext(ctx, `
-		UPDATE mail_messages SET status='rejected',rejected_reason=?,approved_by=?,approved_at=?,updated_at=?
+		UPDATE mail_messages SET status='rejected',rejected_reason=?,updated_at=?
 		WHERE id=? AND status='pending_approval'`,
-		strings.TrimSpace(reason), ownerID, mailTimeString(now), mailTimeString(now), id)
+		strings.TrimSpace(reason), mailTimeString(now), id)
 	if err != nil {
 		return err
 	}

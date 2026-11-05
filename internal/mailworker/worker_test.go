@@ -148,8 +148,12 @@ func workerTestSender(server *mailtest.Server) *mailpkg.SMTPSender {
 }
 
 func (f *workerFixture) newWorker(server *mailtest.Server, baseURL string) *Worker {
+	return f.newWorkerWithSender(workerTestSender(server), baseURL)
+}
+
+func (f *workerFixture) newWorkerWithSender(sender Sender, baseURL string) *Worker {
 	return New(Config{
-		Store: f.db, Secrets: fakeSecrets(f.secrets), Sender: workerTestSender(server),
+		Store: f.db, Secrets: fakeSecrets(f.secrets), Sender: sender,
 		Logger: f.logger, Interval: time.Hour, LeaseDuration: 5 * time.Minute,
 		RenewInterval: time.Minute, DownloadBaseURL: baseURL,
 		Jitter: func(d time.Duration) time.Duration { return d },
@@ -447,6 +451,25 @@ func TestWorkerRejectsDeliveryForUnapprovedMessage(t *testing.T) {
 	if findMessage(t, f.db, message.ID).Status != domain.MailMessagePendingApproval {
 		t.Fatalf("message status = %s", findMessage(t, f.db, message.ID).Status)
 	}
+	countClaimAudit := func() int {
+		var count int
+		if err := f.raw.QueryRowContext(f.ctx,
+			`SELECT COUNT(*) FROM audit_events WHERE action='mail.delivery.claim_rejected' AND resource_id=?`,
+			delivery.ID).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		return count
+	}
+	if countClaimAudit() != 1 {
+		t.Fatalf("claim-rejected audit count = %d, want 1", countClaimAudit())
+	}
+	// A second identical round must be deduped, not append another audit row.
+	if _, err := worker.ProcessOnce(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if countClaimAudit() != 1 || server.Connections() != 0 {
+		t.Fatalf("repeated claim audit grew: count=%d connections=%d", countClaimAudit(), server.Connections())
+	}
 }
 
 func TestWorkerDigestMismatchFailsBeforeSMTP(t *testing.T) {
@@ -644,6 +667,104 @@ func TestWorkerAuthFailureMarksAccountError(t *testing.T) {
 	}
 	if server.DataSeen() != 0 {
 		t.Fatal("DATA was sent after auth failure")
+	}
+	second := f.createQueuedMessage("auth-2", "body", false, false)
+	if _, err := worker.ProcessOnce(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if stored := findDelivery(t, f.db, second.delivery.ID); stored.Attempts != 0 || stored.State != domain.MailDeliveryQueued {
+		t.Fatalf("worker claimed for an errored account: %+v", stored)
+	}
+}
+
+func TestWorkerTLSFailureMarksAccountError(t *testing.T) {
+	f := newWorkerFixture(t)
+	server := mailtest.Start(t, mailtest.Script{})
+	queued := f.createQueuedMessage("tls", "body", false, false)
+	sender := workerTestSender(server)
+	// Trust nothing: the fake server certificate must fail the real TLS path.
+	sender.TLSConfig = func(host string) *tls.Config {
+		return &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12}
+	}
+	worker := f.newWorkerWithSender(sender, "")
+	if _, err := worker.ProcessOnce(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	delivery := findDelivery(t, f.db, queued.delivery.ID)
+	if delivery.State != domain.MailDeliveryQueued || delivery.LastErrorCode != string(domain.MailErrSMTPTLSFailed) {
+		t.Fatalf("delivery = %+v", delivery)
+	}
+	if findAccount(t, f.db, f.account.ID).Status != domain.MailAccountError {
+		t.Fatalf("account status = %s", findAccount(t, f.db, f.account.ID).Status)
+	}
+	if server.DataSeen() != 0 {
+		t.Fatal("DATA was sent over a failed TLS session")
+	}
+}
+
+func TestWorkerDNSFailureMarksAccountError(t *testing.T) {
+	f := newWorkerFixture(t)
+	server := mailtest.Start(t, mailtest.Script{})
+	queued := f.createQueuedMessage("dns", "body", false, false)
+	sender := workerTestSender(server)
+	sender.DialContext = func(context.Context, string, string) (net.Conn, error) {
+		return nil, &net.DNSError{Err: "no such host", Name: domain.MailDefaultSMTPHost, IsNotFound: true}
+	}
+	worker := f.newWorkerWithSender(sender, "")
+	if _, err := worker.ProcessOnce(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	delivery := findDelivery(t, f.db, queued.delivery.ID)
+	if delivery.State != domain.MailDeliveryQueued || delivery.LastErrorCode != string(domain.MailErrSMTPDNSFailed) {
+		t.Fatalf("delivery = %+v", delivery)
+	}
+	if findAccount(t, f.db, f.account.ID).Status != domain.MailAccountError {
+		t.Fatalf("account status = %s", findAccount(t, f.db, f.account.ID).Status)
+	}
+	if server.Connections() != 0 {
+		t.Fatalf("dial reached the fake server: %d", server.Connections())
+	}
+}
+
+type cancelingSentSender struct {
+	cancel context.CancelFunc
+	result mailpkg.DeliveryResult
+}
+
+func (sender *cancelingSentSender) Send(context.Context, domain.MailAccount, string, mailpkg.Outgoing, mailpkg.DeliveryHooks) mailpkg.DeliveryResult {
+	sender.cancel()
+	return sender.result
+}
+
+func TestWorkerPersistsKnown250AfterShutdownSignal(t *testing.T) {
+	f := newWorkerFixture(t)
+	queued := f.createQueuedMessage("shutdown", "body", false, false)
+	now := time.Now().UTC()
+	delivery, ok, err := f.db.ClaimMailDelivery(f.ctx, f.account.ID, now, 5*time.Minute)
+	if err != nil || !ok {
+		t.Fatalf("claim: ok=%v err=%v", ok, err)
+	}
+	baselineAccount := findAccount(t, f.db, f.account.ID)
+	baseline := accountSnapshot{
+		Revision: baselineAccount.Revision, CredentialRef: domain.MailAccountCredentialRef(f.account.ID),
+		SMTPHost: baselineAccount.SMTPHost, SMTPUsername: baselineAccount.SMTPUsername,
+	}
+	sendCtx, cancel := context.WithCancel(f.ctx)
+	sender := &cancelingSentSender{
+		cancel: cancel,
+		result: mailpkg.DeliveryResult{
+			Outcome: domain.MailAttemptSent, SMTPCode: 250,
+			Phase: domain.MailSMTPPhaseFinished, Response: "250 queued",
+		},
+	}
+	worker := f.newWorkerWithSender(sender, "")
+	worker.sendDelivery(sendCtx, delivery, baseline)
+	stored := findDelivery(t, f.db, queued.delivery.ID)
+	if stored.State != domain.MailDeliverySent || stored.OutcomeCertainty != domain.MailOutcomeProviderAccepted {
+		t.Fatalf("250 was lost on shutdown: %+v", stored)
+	}
+	if findMessage(t, f.db, queued.message.ID).Status != domain.MailMessageSent {
+		t.Fatalf("message status = %s", findMessage(t, f.db, queued.message.ID).Status)
 	}
 }
 

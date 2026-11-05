@@ -4,7 +4,10 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"mime"
+	"mime/multipart"
 	"net"
+	"net/mail"
 	"strings"
 	"sync"
 	"testing"
@@ -335,6 +338,74 @@ func TestSMTPSenderTimeoutAfterDataIsUnknown(t *testing.T) {
 	}
 	if server.DataSeen() != 1 {
 		t.Fatalf("DATA count = %d", server.DataSeen())
+	}
+}
+
+func TestBuildMessageMediaTypeParametersAndLongSubject(t *testing.T) {
+	longSubject := strings.TrimSpace(strings.Repeat("very long ascii subject ", 20))
+	outgoing := testOutgoing()
+	outgoing.Subject = longSubject
+	outgoing.Attachments = []OutgoingAttachment{{
+		FileName: "firmware.bin", MediaType: "text/plain; charset=utf-8", Content: []byte("payload"),
+	}}
+	message, err := BuildMessage(outgoing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(string(message), "\r\n") {
+		if len(line) > 998 {
+			t.Fatalf("header line exceeds RFC 5322 limit: %d bytes", len(line))
+		}
+	}
+	parsed, err := mail.ReadMessage(strings.NewReader(string(message)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := (&mime.WordDecoder{}).DecodeHeader(parsed.Header.Get("Subject"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded != longSubject {
+		t.Fatalf("subject round-trip = %q", decoded)
+	}
+	mediaType, params, err := mime.ParseMediaType(parsed.Header.Get("Content-Type"))
+	if err != nil || !strings.HasPrefix(mediaType, "multipart/") {
+		t.Fatalf("top content type = %q params=%v err=%v", mediaType, params, err)
+	}
+	reader := multipart.NewReader(parsed.Body, params["boundary"])
+	found := false
+	for {
+		part, err := reader.NextPart()
+		if err != nil {
+			break
+		}
+		if part.FileName() != "firmware.bin" {
+			continue
+		}
+		found = true
+		contentType := part.Header.Get("Content-Type")
+		if strings.TrimSpace(contentType) == "" ||
+			!strings.Contains(contentType, "text/plain") ||
+			!strings.Contains(contentType, "firmware.bin") {
+			t.Fatalf("attachment Content-Type = %q", contentType)
+		}
+	}
+	if !found {
+		t.Fatal("attachment part missing")
+	}
+}
+
+func TestSMTPSenderBuildsMessageBeforeConnecting(t *testing.T) {
+	server := mailtest.Start(t, mailtest.Script{})
+	sender := newDeliverySender(server)
+	outgoing := testOutgoing()
+	outgoing.Subject = "bad\r\nBcc: evil@example.com"
+	result := sender.Send(context.Background(), deliveryAccount(), "secret", outgoing, &recordingHooks{})
+	if result.Outcome != domain.MailAttemptPermanentFailure {
+		t.Fatalf("result = %+v", result)
+	}
+	if server.Connections() != 0 {
+		t.Fatalf("invalid local message opened %d SMTP connections", server.Connections())
 	}
 }
 

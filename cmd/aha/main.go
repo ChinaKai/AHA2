@@ -314,7 +314,23 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 		Store: database, Secrets: secretStore, Sender: mailpkg.NewSMTPSender(),
 		Logger: logger, DownloadBaseURL: options.mailDownloadBaseURL,
 	})
-	go mailWorker.Run(ctx)
+	// The worker's final writeback is detached from the run context, but the
+	// process still waits for the round to finish so a known SMTP 250 is not
+	// lost on shutdown.
+	workerCtx, workerCancel := context.WithCancel(ctx)
+	workerDone := make(chan struct{})
+	go func() {
+		defer close(workerDone)
+		mailWorker.Run(workerCtx)
+	}()
+	defer func() {
+		workerCancel()
+		select {
+		case <-workerDone:
+		case <-time.After(10 * time.Second):
+			logger.Warn("mail worker shutdown timed out")
+		}
+	}()
 	if address := strings.TrimSpace(options.mailDownloadListen); address != "" {
 		downloadServer := &http.Server{
 			Addr: address, Handler: apiServer.MailDownloadHandler(),

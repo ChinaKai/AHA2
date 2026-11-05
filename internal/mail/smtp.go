@@ -274,13 +274,23 @@ func (sender *SMTPSender) Send(ctx context.Context, account domain.MailAccount, 
 	if strings.TrimSpace(credential) == "" {
 		return senderResult(domain.MailAttemptPermanentFailure, domain.MailErrCredentialMissing, 0, domain.MailSMTPPhaseAuth, "")
 	}
+	// Render the MIME message before opening a connection. Header/local errors
+	// must not consume an SMTP session or leave the server waiting.
+	messageBytes, buildErr := BuildMessage(outgoing)
+	if buildErr != nil {
+		code := domain.MailErrSMTPPermanentFailure
+		if mailErr, ok := CodeOf(buildErr); ok {
+			code = mailErr
+		}
+		return senderResult(domain.MailAttemptPermanentFailure, code, 0, domain.MailSMTPPhaseConnect, "")
+	}
 	totalTimeout := durationOrDefault(sender.totalTimeout(), 180*time.Second)
 	sendCtx, cancel := context.WithTimeout(ctx, totalTimeout)
 	defer cancel()
 
 	var last DeliveryResult
 	for index, host := range hosts {
-		result, failover := sender.sendToHost(sendCtx, host, account, credential, outgoing, hooks)
+		result, failover := sender.sendToHost(sendCtx, host, account, credential, outgoing, messageBytes, hooks)
 		last = result
 		if !failover || index == len(hosts)-1 {
 			return result
@@ -296,7 +306,7 @@ func (sender *SMTPSender) totalTimeout() time.Duration {
 	return sender.TotalTimeout
 }
 
-func (sender *SMTPSender) sendToHost(ctx context.Context, host string, account domain.MailAccount, credential string, outgoing Outgoing, hooks DeliveryHooks) (DeliveryResult, bool) {
+func (sender *SMTPSender) sendToHost(ctx context.Context, host string, account domain.MailAccount, credential string, outgoing Outgoing, messageBytes []byte, hooks DeliveryHooks) (DeliveryResult, bool) {
 	phase := domain.MailSMTPPhaseConnect
 	enter := func(next domain.MailSMTPPhase) error {
 		phase = next
@@ -433,15 +443,6 @@ func (sender *SMTPSender) sendToHost(ctx context.Context, host string, account d
 	if accepted != len(recipients) {
 		session.resetAndQuit()
 		return senderResult(domain.MailAttemptPermanentFailure, domain.MailErrSMTPProtocolError, 0, domain.MailSMTPPhaseRcptTo, ""), false
-	}
-
-	messageBytes, err := BuildMessage(outgoing)
-	if err != nil {
-		session.resetAndQuit()
-		if mailErr, ok := CodeOf(err); ok {
-			return senderResult(domain.MailAttemptPermanentFailure, mailErr, 0, domain.MailSMTPPhaseRcptTo, ""), false
-		}
-		return senderResult(domain.MailAttemptPermanentFailure, domain.MailErrSMTPPermanentFailure, 0, domain.MailSMTPPhaseRcptTo, ""), false
 	}
 
 	// Entering DATA is the single mutual-exclusion point with lease recovery.
