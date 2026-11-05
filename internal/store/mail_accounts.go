@@ -331,9 +331,12 @@ func (s *Store) SetMailAccountCredential(ctx context.Context, id string, now tim
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
+	// A disabled account stays disabled: rotating its credential may clear the
+	// old test result, but only an explicit enable may leave the disabled state.
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE mail_accounts SET credential_ref=?,credential_configured=1,
-			status='unverified',last_test_at='',last_test_error_code='',updated_at=?
+			status=CASE WHEN status='disabled' THEN 'disabled' ELSE 'unverified' END,
+			last_test_at='',last_test_error_code='',updated_at=?
 		WHERE id=?`, ref, mailTimeString(now), id)
 	if err != nil {
 		return err
@@ -352,7 +355,9 @@ func (s *Store) ResetMailAccountVerification(ctx context.Context, id string, now
 		now = time.Now().UTC()
 	}
 	result, err := s.db.ExecContext(ctx, `
-		UPDATE mail_accounts SET status='unverified',last_test_at='',last_test_error_code='',updated_at=?
+		UPDATE mail_accounts SET
+			status=CASE WHEN status='disabled' THEN 'disabled' ELSE 'unverified' END,
+			last_test_at='',last_test_error_code='',updated_at=?
 		WHERE id=?`, mailTimeString(now), id)
 	if err != nil {
 		return err

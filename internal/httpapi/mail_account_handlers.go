@@ -143,11 +143,15 @@ func validateMailAccount(item domain.MailAccount) (domain.MailAccount, error) {
 }
 
 func validateMailAccountStatusTransition(status string) (domain.MailAccountStatus, bool) {
-	switch domain.MailAccountStatus(strings.TrimSpace(status)) {
+	switch strings.ToLower(strings.TrimSpace(status)) {
 	case "":
 		return "", true
-	case domain.MailAccountDisabled, domain.MailAccountUnverified:
-		return domain.MailAccountStatus(strings.TrimSpace(status)), true
+	case string(domain.MailAccountDisabled):
+		return domain.MailAccountDisabled, true
+	case "enabled", string(domain.MailAccountUnverified):
+		// Re-enabling is explicit only; no credential/host update performs it
+		// implicitly.
+		return domain.MailAccountUnverified, true
 	default:
 		return "", false
 	}

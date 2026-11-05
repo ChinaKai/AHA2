@@ -225,3 +225,54 @@ func TestMailAccountDeleteProtection(t *testing.T) {
 		t.Fatalf("expected no bindings after cleanup, got %d", len(bindings))
 	}
 }
+
+func TestDisabledMailAccountStaysDisabledAcrossCredentialAndHostChanges(t *testing.T) {
+	ctx := context.Background()
+	database := openMailTestStore(t)
+	account, err := database.CreateMailAccount(ctx, domain.MailAccount{
+		ID: domain.NewID("mail_account"), Name: "Disabled account",
+		Address: "disabled@example.com",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetMailAccountStatus(ctx, account.ID, domain.MailAccountDisabled, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetMailAccountCredential(ctx, account.ID, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := database.MailAccount(ctx, account.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != domain.MailAccountDisabled {
+		t.Fatalf("credential rotation re-enabled disabled account: %#v", stored)
+	}
+	if !stored.CredentialConfigured {
+		t.Fatal("credential rotation did not set credential_configured")
+	}
+	if !stored.LastTestAt.IsZero() || stored.LastTestErrorCode != "" {
+		t.Fatalf("test result was not cleared: %#v", stored)
+	}
+	if err := database.ResetMailAccountVerification(ctx, account.ID, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	stored, err = database.MailAccount(ctx, account.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != domain.MailAccountDisabled {
+		t.Fatalf("verification reset re-enabled disabled account: %#v", stored)
+	}
+	if err := database.SetMailAccountStatus(ctx, account.ID, domain.MailAccountUnverified, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	stored, err = database.MailAccount(ctx, account.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != domain.MailAccountUnverified {
+		t.Fatalf("explicit enable failed: %#v", stored)
+	}
+}

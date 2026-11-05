@@ -374,3 +374,56 @@ func TestMailPreviewAllowsBracesFromVariableValues(t *testing.T) {
 		t.Fatalf("braces lost = %#v", body)
 	}
 }
+
+func TestDisabledMailAccountCannotBeImplicitlyReenabled(t *testing.T) {
+	f := newMailAPIFixture(t)
+	account := f.createAccount("disabled-rotate-code")
+	id := account["id"].(string)
+	disabled := f.request(http.MethodPut, "/api/v1/mail-accounts/"+id, map[string]any{"status": "disabled"}, f.csrf)
+	if disabled["account"].(map[string]any)["status"] != string(domain.MailAccountDisabled) {
+		t.Fatalf("disable = %#v", disabled)
+	}
+
+	rotated := f.request(http.MethodPut, "/api/v1/mail-accounts/"+id, map[string]any{
+		"authorization_code": "disabled-rotated-code",
+	}, f.csrf)
+	if rotated["_status"].(float64) != http.StatusOK ||
+		rotated["account"].(map[string]any)["status"] != string(domain.MailAccountDisabled) {
+		t.Fatalf("rotation re-enabled account = %#v", rotated)
+	}
+	blocked := f.request(http.MethodPost, "/api/v1/mail-accounts/"+id+"/test", map[string]any{}, f.csrf)
+	if blocked["_status"].(float64) != http.StatusConflict ||
+		mailErrorCode(t, blocked) != string(domain.MailErrAccountDisabled) {
+		t.Fatalf("disabled test after rotation = %#v", blocked)
+	}
+
+	hostChanged := f.request(http.MethodPut, "/api/v1/mail-accounts/"+id, map[string]any{
+		"smtp_host": domain.MailBackupSMTPHost,
+	}, f.csrf)
+	if hostChanged["account"].(map[string]any)["status"] != string(domain.MailAccountDisabled) {
+		t.Fatalf("host change re-enabled account = %#v", hostChanged)
+	}
+	if again := f.request(http.MethodPost, "/api/v1/mail-accounts/"+id+"/test", map[string]any{}, f.csrf); again["_status"].(float64) != http.StatusConflict {
+		t.Fatalf("disabled test after host change = %#v", again)
+	}
+
+	usernameChanged := f.request(http.MethodPut, "/api/v1/mail-accounts/"+id, map[string]any{
+		"smtp_username": "disabled-alt@example.com",
+	}, f.csrf)
+	if usernameChanged["account"].(map[string]any)["status"] != string(domain.MailAccountDisabled) {
+		t.Fatalf("username change re-enabled account = %#v", usernameChanged)
+	}
+	if again := f.request(http.MethodPost, "/api/v1/mail-accounts/"+id+"/test", map[string]any{}, f.csrf); again["_status"].(float64) != http.StatusConflict {
+		t.Fatalf("disabled test after username change = %#v", again)
+	}
+
+	enabled := f.request(http.MethodPut, "/api/v1/mail-accounts/"+id, map[string]any{"status": "enabled"}, f.csrf)
+	if enabled["_status"].(float64) != http.StatusOK ||
+		enabled["account"].(map[string]any)["status"] != string(domain.MailAccountUnverified) {
+		t.Fatalf("explicit enable = %#v", enabled)
+	}
+	success := f.request(http.MethodPost, "/api/v1/mail-accounts/"+id+"/test", map[string]any{}, f.csrf)
+	if success["ok"] != true || success["account"].(map[string]any)["status"] != string(domain.MailAccountOK) {
+		t.Fatalf("test after explicit enable = %#v", success)
+	}
+}
