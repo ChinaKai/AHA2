@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"crypto/rand"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -46,12 +47,16 @@ type Config struct {
 	// MailTaskBaseURL is the external https base used for task.url template
 	// variables. Relative or non-https values are treated as unconfigured.
 	MailTaskBaseURL string
-	ProbeSSHHostKey func(context.Context, string) (hardware.SSHHostKeyInfo, error)
-	TrustSSHHostKey func(context.Context, string, string) (hardware.SSHHostKeyInfo, error)
-	PairADB         func(context.Context, string, string) (string, error)
-	ExecuteADB      func(context.Context, string, []string, []byte, time.Duration) (hardware.ADBExecResult, error)
-	Version         string
-	WebVersion      string
+	// MailDownloadBaseURL is the public https base of the independent
+	// controlled-download entry (for example https://mail-downloads.example.com).
+	// Link-mode attachments are rejected when it is unconfigured.
+	MailDownloadBaseURL string
+	ProbeSSHHostKey     func(context.Context, string) (hardware.SSHHostKeyInfo, error)
+	TrustSSHHostKey     func(context.Context, string, string) (hardware.SSHHostKeyInfo, error)
+	PairADB             func(context.Context, string, string) (string, error)
+	ExecuteADB          func(context.Context, string, []string, []byte, time.Duration) (hardware.ADBExecResult, error)
+	Version             string
+	WebVersion          string
 	// ListenAddress is what this process was launched with, reported so the UI can
 	// tell a saved-but-not-yet-applied address from an active one.
 	ListenAddress string
@@ -81,6 +86,11 @@ type Server struct {
 	channels              *channel.Service
 	mailTester            mailpkg.Tester
 	mailTaskBaseURL       string
+	mailDownloadBaseURL   string
+	mailDownloadKey       []byte
+	mailDownloadLimiter   *mailDownloadLimiter
+	mailDownloadNonceMu   sync.Mutex
+	mailDownloadNonces    map[string]time.Time
 	probeSSHHostKey       func(context.Context, string) (hardware.SSHHostKeyInfo, error)
 	trustSSHHostKey       func(context.Context, string, string) (hardware.SSHHostKeyInfo, error)
 	pairADB               func(context.Context, string, string) (string, error)
@@ -132,6 +142,12 @@ func New(config Config) *Server {
 	if mailTester == nil {
 		mailTester = mailpkg.NewSMTPTester()
 	}
+	downloadKey := make([]byte, 32)
+	if _, err := rand.Read(downloadKey); err != nil {
+		// A download nonce key is required for confirm-page integrity. Wiping
+		// it makes the endpoint return 503 instead of accepting unsigned forms.
+		downloadKey = nil
+	}
 	validateOrigin := !config.AllowCrossOrigin
 	// Default to the LAN scope: AHA2 binds 0.0.0.0, so narrowing on startup before
 	// anyone has chosen would cut off clients that already rely on it.
@@ -161,6 +177,10 @@ func New(config Config) *Server {
 		channels:              config.Channels,
 		mailTester:            mailTester,
 		mailTaskBaseURL:       strings.TrimRight(strings.TrimSpace(config.MailTaskBaseURL), "/"),
+		mailDownloadBaseURL:   strings.TrimRight(strings.TrimSpace(config.MailDownloadBaseURL), "/"),
+		mailDownloadKey:       downloadKey,
+		mailDownloadLimiter:   newMailDownloadLimiter(),
+		mailDownloadNonces:    map[string]time.Time{},
 		probeSSHHostKey:       probeSSHHostKey,
 		trustSSHHostKey:       trustSSHHostKey,
 		pairADB:               pairADB,
@@ -357,6 +377,17 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/mail-bindings", s.withAuth(http.HandlerFunc(s.createMailBinding)))
 	mux.Handle("PUT /api/v1/mail-bindings/{id}", s.withAuth(http.HandlerFunc(s.updateMailBinding)))
 	mux.Handle("DELETE /api/v1/mail-bindings/{id}", s.withAuth(http.HandlerFunc(s.deleteMailBinding)))
+	mux.Handle("GET /api/v1/mail-messages", s.withAuth(http.HandlerFunc(s.listMailMessages)))
+	mux.Handle("POST /api/v1/mail-messages", s.withAuth(http.HandlerFunc(s.createMailMessage)))
+	mux.Handle("GET /api/v1/mail-messages/{id}", s.withAuth(http.HandlerFunc(s.mailMessageDetail)))
+	mux.Handle("POST /api/v1/mail-messages/{id}/submit", s.withAuth(http.HandlerFunc(s.submitMailMessage)))
+	mux.Handle("POST /api/v1/mail-messages/{id}/approve", s.withAuth(http.HandlerFunc(s.approveMailMessage)))
+	mux.Handle("POST /api/v1/mail-messages/{id}/reject", s.withAuth(http.HandlerFunc(s.rejectMailMessage)))
+	mux.Handle("POST /api/v1/mail-messages/{id}/cancel", s.withAuth(http.HandlerFunc(s.cancelMailMessage)))
+	mux.Handle("POST /api/v1/mail-messages/{id}/retry", s.withAuth(http.HandlerFunc(s.retryMailMessage)))
+	mux.Handle("GET /api/v1/mail-messages/{id}/attempts", s.withAuth(http.HandlerFunc(s.mailMessageAttempts)))
+	mux.Handle("GET /api/v1/mail-messages/{id}/download-links", s.withAuth(http.HandlerFunc(s.mailMessageDownloadLinks)))
+	mux.Handle("POST /api/v1/mail-messages/{id}/download-links/{attachment_id}/revoke", s.withAuth(http.HandlerFunc(s.revokeMailMessageDownloadLink)))
 
 	mux.Handle("GET /api/v1/tasks", s.withAuth(http.HandlerFunc(s.listTasks)))
 	mux.Handle("GET /api/v1/task-clone-sources", s.withAuth(http.HandlerFunc(s.listTaskCloneSources)))

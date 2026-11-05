@@ -26,6 +26,8 @@ import (
 	"github.com/ChinaKai/AHA2/internal/execution"
 	"github.com/ChinaKai/AHA2/internal/hardware"
 	"github.com/ChinaKai/AHA2/internal/httpapi"
+	mailpkg "github.com/ChinaKai/AHA2/internal/mail"
+	"github.com/ChinaKai/AHA2/internal/mailworker"
 	"github.com/ChinaKai/AHA2/internal/managedprocess"
 	"github.com/ChinaKai/AHA2/internal/outboundproxy"
 	"github.com/ChinaKai/AHA2/internal/secrets"
@@ -105,6 +107,8 @@ type serveOptions struct {
 	agentAPIURL           string
 	allowInsecureAgentAPI bool
 	mailTaskBaseURL       string
+	mailDownloadBaseURL   string
+	mailDownloadListen    string
 	logLevel              string
 	codexBinary           string
 	claudeBinary          string
@@ -132,6 +136,8 @@ func parseServeOptions(name string, args []string) (serveOptions, error) {
 	agentAPIURL := flags.String("agent-api-url", os.Getenv("AHA2_AGENT_API_URL"), "Agent-reachable AHA2 base URL (required for remote workspaces)")
 	allowInsecureAgentAPI := flags.Bool("allow-insecure-agent-api", envBool("AHA2_ALLOW_INSECURE_AGENT_API"), "allow a non-loopback http:// Agent API URL for trusted development networks")
 	mailTaskBaseURL := flags.String("mail-task-base-url", os.Getenv("AHA2_MAIL_TASK_BASE_URL"), "external https base URL used for task.url mail template variables")
+	mailDownloadBaseURL := flags.String("mail-download-base-url", os.Getenv("AHA2_MAIL_DOWNLOAD_BASE_URL"), "external https base URL of the independent controlled-download entry")
+	mailDownloadListen := flags.String("mail-download-listen", os.Getenv("AHA2_MAIL_DOWNLOAD_LISTEN"), "optional separate listen address for the controlled-download entry (for example 127.0.0.1:8767)")
 	logLevel := flags.String("log-level", envOr("AHA2_LOG_LEVEL", "info"), "debug, info, warn, error")
 	codexBinary := flags.String("codex-bin", envOr("AHA2_CODEX_BIN", "codex"), "Codex executable")
 	claudeBinary := flags.String("claude-bin", envOr("AHA2_CLAUDE_BIN", "claude"), "Claude Code executable")
@@ -146,6 +152,7 @@ func parseServeOptions(name string, args []string) (serveOptions, error) {
 		listen: *listen, dataDir: *dataDir, setupToken: *setupToken, setupTokenFile: *setupTokenFile,
 		secureCookie: *secureCookie, allowCrossOrigin: *allowCrossOrigin, agentAPIURL: *agentAPIURL,
 		allowInsecureAgentAPI: *allowInsecureAgentAPI, mailTaskBaseURL: *mailTaskBaseURL,
+		mailDownloadBaseURL: *mailDownloadBaseURL, mailDownloadListen: *mailDownloadListen,
 		logLevel: *logLevel, codexBinary: *codexBinary,
 		claudeBinary: *claudeBinary, dshBinary: *dshBinary,
 	}, nil
@@ -283,18 +290,19 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 	apiServer := httpapi.New(httpapi.Config{
 		Store: database, Auth: authService, App: appService, Web: webassets.FS(),
 		Logger: logger, SecureCookie: options.secureCookie, AllowCrossOrigin: options.allowCrossOrigin,
-		DetectWorkspace:   workspace.Detect,
-		Secrets:           secretStore,
-		Hardware:          hardwareManager,
-		CodexAccounts:     codexAccounts,
-		AgentCapabilities: agentCapabilities,
-		ManagedProcesses:  managedProcesses,
-		OutboundProxy:     proxyRuntime,
-		Channels:          channelService,
-		MailTaskBaseURL:   options.mailTaskBaseURL,
-		Version:           version,
-		WebVersion:        webVersion,
-		ListenAddress:     options.listen,
+		DetectWorkspace:     workspace.Detect,
+		Secrets:             secretStore,
+		Hardware:            hardwareManager,
+		CodexAccounts:       codexAccounts,
+		AgentCapabilities:   agentCapabilities,
+		ManagedProcesses:    managedProcesses,
+		OutboundProxy:       proxyRuntime,
+		Channels:            channelService,
+		MailTaskBaseURL:     options.mailTaskBaseURL,
+		MailDownloadBaseURL: options.mailDownloadBaseURL,
+		Version:             version,
+		WebVersion:          webVersion,
+		ListenAddress:       options.listen,
 	})
 	if options.allowCrossOrigin {
 		logger.Warn("Origin host validation disabled")
@@ -302,6 +310,32 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 	appService.SetPetSecurityApplier(apiServer)
 	apiServer.StartSyncLoop(ctx)
 	defer apiServer.CloseDesktop()
+	mailWorker := mailworker.New(mailworker.Config{
+		Store: database, Secrets: secretStore, Sender: mailpkg.NewSMTPSender(),
+		Logger: logger, DownloadBaseURL: options.mailDownloadBaseURL,
+	})
+	go mailWorker.Run(ctx)
+	if address := strings.TrimSpace(options.mailDownloadListen); address != "" {
+		downloadServer := &http.Server{
+			Addr: address, Handler: apiServer.MailDownloadHandler(),
+			ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 90 * time.Second,
+			MaxHeaderBytes: 1 << 20,
+		}
+		downloadListener, listenErr := net.Listen("tcp", address)
+		if listenErr != nil {
+			return fmt.Errorf("listen mail download entry: %w", listenErr)
+		}
+		defer downloadListener.Close()
+		go func() {
+			logger.Info("mail controlled-download entry listening", "address", downloadListener.Addr().String())
+			if serveErr := downloadServer.Serve(downloadListener); serveErr != nil && serveErr != http.ErrServerClosed {
+				logger.Warn("mail controlled-download entry stopped", "error", serveErr)
+			}
+		}()
+		defer downloadServer.Close()
+	} else if strings.TrimSpace(options.mailDownloadBaseURL) != "" {
+		logger.Warn("mail download base URL is configured but no separate listener is set; the front proxy must route /d/")
+	}
 	server := &http.Server{
 		Addr:              options.listen,
 		Handler:           apiServer.Handler(),

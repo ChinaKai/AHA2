@@ -3470,5 +3470,8 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := s.applyMailSchemaV121(ctx); err != nil {
 		return err
 	}
+	if err := s.applyMailSchemaV122(ctx); err != nil {
+		return err
+	}
 	return nil
 }

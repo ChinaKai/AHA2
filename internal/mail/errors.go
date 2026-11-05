@@ -1,6 +1,6 @@
-// Package mail implements the template rendering, sanitizing and connection
-// test pieces of the mail resource phase one. It deliberately has no SMTP
-// delivery worker: sending is task C.
+// Package mail implements template rendering, sanitizing, approval digests,
+// MIME assembly, implicit-TLS SMTP delivery and connection tests for the mail
+// resource phase one. The durable outbox loop lives in internal/mailworker.
 package mail
 
 import (

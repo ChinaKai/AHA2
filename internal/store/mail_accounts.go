@@ -416,6 +416,24 @@ func (s *Store) SetMailAccountTestResult(ctx context.Context, id string, expecte
 	return affected == 1, nil
 }
 
+// MarkMailAccountError records a transport/authentication failure observed by
+// the delivery worker. The revision guard discards the result if the Owner
+// rotated the credential, changed the host or re-tested the account meanwhile.
+func (s *Store) MarkMailAccountError(ctx context.Context, id string, expectedRevision int64, now time.Time) (bool, error) {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE mail_accounts SET status='error',revision=revision+1,updated_at=?
+		WHERE id=? AND revision=? AND status<>'disabled'`,
+		mailTimeString(now), id, expectedRevision)
+	if err != nil {
+		return false, err
+	}
+	affected, _ := result.RowsAffected()
+	return affected == 1, nil
+}
+
 func (s *Store) SetMailAccountStatus(ctx context.Context, id string, status domain.MailAccountStatus, now time.Time) error {
 	if !status.Valid() {
 		return fmt.Errorf("invalid mail account status %q", status)

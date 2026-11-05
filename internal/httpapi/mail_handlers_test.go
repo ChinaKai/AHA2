@@ -47,6 +47,8 @@ type mailAPIFixture struct {
 	dbPath   string
 	database *store.Store
 	server   *httptest.Server
+	download *httptest.Server
+	api      *Server
 	client   *http.Client
 	csrf     string
 	secrets  *fakeSecretStore
@@ -75,17 +77,22 @@ func newMailAPIFixtureWith(t *testing.T, mutate func(*Config)) *mailAPIFixture {
 	config := Config{
 		Store: database, Auth: authService, App: appService,
 		Secrets: secretsStore, MailTester: tester,
-		MailTaskBaseURL: "https://aha.example.com",
+		MailTaskBaseURL:     "https://aha.example.com",
+		MailDownloadBaseURL: "https://mail-downloads.example.com",
 	}
 	if mutate != nil {
 		mutate(&config)
 	}
-	server := httptest.NewServer(New(config).Handler())
+	api := New(config)
+	server := httptest.NewServer(api.Handler())
 	t.Cleanup(server.Close)
+	download := httptest.NewServer(api.MailDownloadHandler())
+	t.Cleanup(download.Close)
 	jar, _ := cookiejar.New(nil)
 	client := &http.Client{Jar: jar}
 	return &mailAPIFixture{
-		t: t, ctx: ctx, dbPath: path, database: database, server: server, client: client,
+		t: t, ctx: ctx, dbPath: path, database: database, server: server, download: download,
+		api: api, client: client,
 		csrf: registerOwner(t, client, server.URL), secrets: secretsStore,
 		tester: tester, task: task,
 	}

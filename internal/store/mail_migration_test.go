@@ -354,7 +354,7 @@ func TestV119BusinessDataUpgradesToV120(t *testing.T) {
 	}
 	// Roll back both mail migrations: v121 ALTERs the v120 tables, so leaving
 	// v121 recorded would skip the revision column after the tables are dropped.
-	if _, err := database.db.ExecContext(ctx, `DELETE FROM schema_migrations WHERE version IN (120,121)`); err != nil {
+	if _, err := database.db.ExecContext(ctx, `DELETE FROM schema_migrations WHERE version IN (120,121,122)`); err != nil {
 		t.Fatal(err)
 	}
 	if err := database.Close(); err != nil {

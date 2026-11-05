@@ -108,11 +108,15 @@ func normalizeMailMessage(item domain.MailMessage, create bool) (domain.MailMess
 // duplicate-content decisions belong to the service layer, which can look the
 // existing row up with MailMessageByTaskIdempotencyKey.
 func (s *Store) CreateMailMessage(ctx context.Context, item domain.MailMessage) (domain.MailMessage, error) {
+	return s.CreateMailMessageInTx(ctx, s.db, item)
+}
+
+func (s *Store) CreateMailMessageInTx(ctx context.Context, exec mailDBTX, item domain.MailMessage) (domain.MailMessage, error) {
 	item, err := normalizeMailMessage(item, true)
 	if err != nil {
 		return domain.MailMessage{}, err
 	}
-	if _, err := s.db.ExecContext(ctx, `
+	if _, err := exec.ExecContext(ctx, `
 		INSERT INTO mail_messages(
 			id,task_id,project_id,workspace_id,turn_id,agent_id,account_id,binding_id,
 			template_id,template_version,source,idempotency_key,from_address,from_name,

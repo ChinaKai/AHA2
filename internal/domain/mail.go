@@ -18,12 +18,56 @@ const (
 
 	MailCredentialRefPrefix = "mail-account/"
 	MailCredentialRefSuffix = "/smtp/credential"
+
+	MailLinkTokenRefPrefix = "mail-download/"
+	MailLinkTokenRefSuffix = "/token"
+
+	// MailDeliveryMaxAttempts is the total SMTP attempt budget from design
+	// section 3.4: one initial attempt plus seven retries.
+	MailDeliveryMaxAttempts = 8
+
+	// MailLinkDefaultTTL and MailLinkDefaultMaxDownloads are the controlled
+	// download defaults from design section 7.3.
+	MailLinkDefaultTTL          = 7 * 24 * time.Hour
+	MailLinkDefaultMaxDownloads = 20
 )
 
 // MailAccountCredentialRef returns the Secret Store key for an account's SMTP
 // authorization code. The code itself is never stored in the database.
 func MailAccountCredentialRef(accountID string) string {
 	return MailCredentialRefPrefix + strings.TrimSpace(accountID) + MailCredentialRefSuffix
+}
+
+// MailAttachmentLinkTokenRef returns the Secret Store key holding the original
+// controlled-download token. The database only stores its SHA-256 digest.
+func MailAttachmentLinkTokenRef(attachmentID string) string {
+	return MailLinkTokenRefPrefix + strings.TrimSpace(attachmentID) + MailLinkTokenRefSuffix
+}
+
+// MailFromAddresses returns the From allowlist for an account: the primary
+// address plus every registered alias.
+func (account MailAccount) MailFromAddresses() []string {
+	result := make([]string, 0, len(account.Aliases)+1)
+	if strings.TrimSpace(account.Address) != "" {
+		result = append(result, strings.TrimSpace(account.Address))
+	}
+	for _, alias := range account.Aliases {
+		if strings.TrimSpace(alias.Address) != "" {
+			result = append(result, strings.TrimSpace(alias.Address))
+		}
+	}
+	return result
+}
+
+// AllowsFrom reports whether address may be used as the visible From address.
+func (account MailAccount) AllowsFrom(address string) bool {
+	address = strings.TrimSpace(address)
+	for _, allowed := range account.MailFromAddresses() {
+		if strings.EqualFold(allowed, address) {
+			return true
+		}
+	}
+	return false
 }
 
 type MailAccountStatus string
@@ -389,6 +433,7 @@ type MailDeliveryAttempt struct {
 	Outcome    MailAttemptOutcome `json:"outcome"`
 	ErrorCode  string             `json:"error_code,omitempty"`
 	SMTPCode   int                `json:"smtp_code,omitempty"`
+	SMTPPhase  MailSMTPPhase      `json:"smtp_phase,omitempty"`
 	BackoffMS  int64              `json:"backoff_ms,omitempty"`
 	StartedAt  time.Time          `json:"started_at"`
 	FinishedAt time.Time          `json:"finished_at,omitempty"`
@@ -424,9 +469,11 @@ type MailErrorCode string
 const (
 	MailErrAccountNotFound         MailErrorCode = "mail_account_not_found"
 	MailErrAccountInvalid          MailErrorCode = "mail_account_invalid"
+	MailErrMessageNotFound         MailErrorCode = "mail_message_not_found"
 	MailErrBindingNotFound         MailErrorCode = "mail_binding_not_found"
 	MailErrAccountNotBound         MailErrorCode = "mail_account_not_bound"
 	MailErrAccountDisabled         MailErrorCode = "mail_account_disabled"
+	MailErrAccountChanged          MailErrorCode = "mail_account_changed"
 	MailErrCredentialMissing       MailErrorCode = "mail_credential_missing"
 	MailErrTemplateNotFound        MailErrorCode = "mail_template_not_found"
 	MailErrTemplateVersionConflict MailErrorCode = "mail_template_version_conflict"

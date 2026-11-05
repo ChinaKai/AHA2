@@ -333,6 +333,17 @@ func (s *Store) SetMailDeliveryPhaseInTx(ctx context.Context, exec mailDBTX, id,
 	return affected == 1, nil
 }
 
+// SetMailDeliveryPhase is the standalone form used by the delivery worker; the
+// InTx variant remains available for transactions composed inside this package.
+func (s *Store) SetMailDeliveryPhase(ctx context.Context, id, leaseID string, phase domain.MailSMTPPhase, now time.Time) (bool, error) {
+	return s.SetMailDeliveryPhaseInTx(ctx, s.db, id, leaseID, phase, now)
+}
+
+// RenewMailDeliveryLease extends a live worker's lease in place.
+func (s *Store) RenewMailDeliveryLease(ctx context.Context, id, leaseID string, until, now time.Time) (bool, error) {
+	return s.RenewMailDeliveryLeaseInTx(ctx, s.db, id, leaseID, until, now)
+}
+
 func (s *Store) RenewMailDeliveryLeaseInTx(ctx context.Context, exec mailDBTX, id, leaseID string, until, now time.Time) (bool, error) {
 	if now.IsZero() {
 		now = time.Now().UTC()
@@ -352,14 +363,14 @@ func (s *Store) RenewMailDeliveryLeaseInTx(ctx context.Context, exec mailDBTX, i
 }
 
 const mailDeliveryAttemptColumns = `id,delivery_id,attempt_no,lease_id,outcome,
-	error_code,smtp_code,backoff_ms,started_at,finished_at`
+	error_code,smtp_code,smtp_phase,backoff_ms,started_at,finished_at`
 
 func scanMailDeliveryAttempt(scanner interface{ Scan(...any) error }) (domain.MailDeliveryAttempt, error) {
 	var item domain.MailDeliveryAttempt
 	var startedAt, finishedAt string
 	err := scanner.Scan(&item.ID, &item.DeliveryID, &item.AttemptNo,
 		&item.LeaseID, &item.Outcome, &item.ErrorCode, &item.SMTPCode,
-		&item.BackoffMS, &startedAt, &finishedAt)
+		&item.SMTPPhase, &item.BackoffMS, &startedAt, &finishedAt)
 	item.StartedAt = parseMailTime(startedAt)
 	item.FinishedAt = parseMailTime(finishedAt)
 	return item, err
@@ -402,10 +413,10 @@ func (s *Store) CreateMailDeliveryAttemptInTx(ctx context.Context, exec mailDBTX
 	if _, err := exec.ExecContext(ctx, `
 		INSERT INTO mail_delivery_attempts(
 			id,delivery_id,attempt_no,lease_id,outcome,error_code,smtp_code,
-			backoff_ms,started_at,finished_at
-		) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+			smtp_phase,backoff_ms,started_at,finished_at
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
 		item.ID, item.DeliveryID, item.AttemptNo, item.LeaseID, item.Outcome,
-		item.ErrorCode, item.SMTPCode, item.BackoffMS,
+		item.ErrorCode, item.SMTPCode, item.SMTPPhase, item.BackoffMS,
 		mailTimeString(item.StartedAt), mailTimeString(item.FinishedAt)); err != nil {
 		return domain.MailDeliveryAttempt{}, err
 	}

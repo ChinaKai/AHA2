@@ -299,3 +299,22 @@ func (s *Store) applyMailSchemaV121(ctx context.Context) error {
 	}
 	return nil
 }
+
+// applyMailSchemaV122 records the SMTP phase on each delivery attempt. The
+// delivery row only holds the latest phase, while attempts need their own phase
+// for postmortem diagnosis (design sections 3.4 and 6.4).
+func (s *Store) applyMailSchemaV122(ctx context.Context) error {
+	var applied bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=122)`).Scan(&applied)
+	if !applied {
+		if _, err := s.db.ExecContext(ctx,
+			`ALTER TABLE mail_delivery_attempts ADD COLUMN smtp_phase TEXT NOT NULL DEFAULT ''`); err != nil &&
+			!strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("apply schema v122: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(122, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v122: %w", err)
+	}
+	return nil
+}
