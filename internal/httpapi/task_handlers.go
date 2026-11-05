@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"strconv"
@@ -443,6 +444,31 @@ func (s *Server) startTask(writer http.ResponseWriter, request *http.Request) {
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "task": item, "turn": turn, "started": true})
 }
 
+// taskDetailPanicRecorder records a panic recovered from one parallel detail
+// query. It is a parameter so tests can observe the task and query names
+// without capturing log output.
+type taskDetailPanicRecorder func(taskID, query string, recovered any)
+
+// runTaskDetailQuery runs one parallel detail query and traps a panic so a
+// single failing section cannot terminate the process. The caller's result
+// variables keep their zero values and the remaining sections still complete.
+func runTaskDetailQuery(taskID, query string, record taskDetailPanicRecorder, run func()) {
+	defer func() {
+		if recovered := recover(); recovered != nil && record != nil {
+			record(taskID, query, recovered)
+		}
+	}()
+	run()
+}
+
+func (s *Server) recordTaskDetailPanic(taskID, query string, recovered any) {
+	logger := s.logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.Error("task detail query panicked", "task_id", taskID, "query", query, "panic", recovered)
+}
+
 func (s *Server) taskDetail(writer http.ResponseWriter, request *http.Request) {
 	taskID := request.PathValue("id")
 	task, err := s.store.Task(request.Context(), taskID)
@@ -488,14 +514,23 @@ func (s *Server) taskDetail(writer http.ResponseWriter, request *http.Request) {
 	)
 	var pending sync.WaitGroup
 	pending.Add(8)
-	go func() { defer pending.Done(); s.decorateChannelTask(ctx, &task) }()
-	go func() { defer pending.Done(); agents, _ = s.app.TaskAgents(ctx, taskID) }()
-	go func() { defer pending.Done(); memory, _ = s.store.TaskMemory(ctx, taskID) }()
-	go func() { defer pending.Done(); hardwareGroups, _ = s.store.HardwareGroups(ctx, taskID) }()
-	go func() { defer pending.Done(); hardwareResources, _ = s.store.HardwareResources(ctx) }()
-	go func() { defer pending.Done(); permissionRequests, _ = s.app.TaskPermissionRequests(ctx, taskID, 50) }()
-	go func() { defer pending.Done(); eventCursor = s.store.MaxEventSequence(ctx, taskID) }()
-	go func() { defer pending.Done(); s.applyTurnContextUsage(ctx, turns) }()
+	// Each goroutine gets its own recovery: net/http only traps panics on the
+	// handler goroutine, so without this a panic here would take down the whole
+	// process instead of failing one section of one response.
+	query := func(name string, run func()) {
+		go func() {
+			defer pending.Done()
+			runTaskDetailQuery(taskID, name, s.recordTaskDetailPanic, run)
+		}()
+	}
+	query("decorateChannelTask", func() { s.decorateChannelTask(ctx, &task) })
+	query("TaskAgents", func() { agents, _ = s.app.TaskAgents(ctx, taskID) })
+	query("TaskMemory", func() { memory, _ = s.store.TaskMemory(ctx, taskID) })
+	query("HardwareGroups", func() { hardwareGroups, _ = s.store.HardwareGroups(ctx, taskID) })
+	query("HardwareResources", func() { hardwareResources, _ = s.store.HardwareResources(ctx) })
+	query("TaskPermissionRequests", func() { permissionRequests, _ = s.app.TaskPermissionRequests(ctx, taskID, 50) })
+	query("MaxEventSequence", func() { eventCursor = s.store.MaxEventSequence(ctx, taskID) })
+	query("applyTurnContextUsage", func() { s.applyTurnContextUsage(ctx, turns) })
 	pending.Wait()
 	now := time.Now().UTC()
 	applyRoundTiming(&round, now)

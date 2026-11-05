@@ -1,13 +1,17 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -122,6 +126,91 @@ func getTaskDetailSections(t *testing.T, fixture taskDetailFixture) map[string]j
 		t.Fatal(err)
 	}
 	return sections
+}
+
+// A panic inside one fan-out goroutine must not escape: net/http recovers only
+// the handler goroutine, so the wrapper has to return normally and report the
+// task and query through its recorder.
+func TestRunTaskDetailQueryRecoversPanic(t *testing.T) {
+	var (
+		recordedTaskID string
+		recordedQuery  string
+		recordedPanic  any
+		records        int
+	)
+	runTaskDetailQuery("task-parallel-panic", "TaskAgents", func(taskID, query string, recovered any) {
+		records++
+		recordedTaskID, recordedQuery, recordedPanic = taskID, query, recovered
+	}, func() {
+		panic("query exploded")
+	})
+	if records != 1 {
+		t.Fatalf("panic recorder calls = %d, want 1", records)
+	}
+	if recordedTaskID != "task-parallel-panic" || recordedQuery != "TaskAgents" {
+		t.Fatalf("recorded task/query = %q/%q", recordedTaskID, recordedQuery)
+	}
+	if recordedPanic != "query exploded" {
+		t.Fatalf("recorded panic = %#v", recordedPanic)
+	}
+
+	// The production hook writes the task ID and query name to the log.
+	var logged bytes.Buffer
+	server := &Server{logger: slog.New(slog.NewTextHandler(&logged, nil))}
+	runTaskDetailQuery("task-logged", "TaskMemory", server.recordTaskDetailPanic, func() { panic("boom") })
+	if output := logged.String(); !strings.Contains(output, "task-logged") || !strings.Contains(output, "TaskMemory") {
+		t.Fatalf("panic log lost task/query: %s", output)
+	}
+
+	// A nil recorder still contains the panic, and a query that does not panic
+	// never calls the recorder.
+	runTaskDetailQuery("task-nil-hook", "HardwareGroups", nil, func() { panic("boom") })
+	ran := false
+	runTaskDetailQuery("task-ok", "HardwareGroups", func(string, string, any) {
+		t.Fatal("recorder called for a successful query")
+	}, func() { ran = true })
+	if !ran {
+		t.Fatal("successful query did not run")
+	}
+}
+
+// A Server without an App makes TaskAgents and TaskPermissionRequests panic.
+// The handler must still answer 200, keep the unaffected sections, and leave
+// the two panicking sections at their zero values.
+func TestTaskDetailSurvivesPanickingSection(t *testing.T) {
+	fixture := newTaskDetailFixture(t, true)
+	server := New(Config{Store: fixture.database, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/tasks/"+fixture.task.ID, nil)
+	request.SetPathValue("id", fixture.task.ID)
+	recorder := httptest.NewRecorder()
+	server.taskDetail(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("task detail status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var detail struct {
+		Ok                 bool                           `json:"ok"`
+		Task               domain.Task                    `json:"task"`
+		Turns              []domain.Turn                  `json:"turns"`
+		Agents             []domain.TaskAgent             `json:"agents"`
+		Memory             domain.TaskMemory              `json:"memory"`
+		PermissionRequests []domain.TaskPermissionRequest `json:"permission_requests"`
+		EventCursor        int64                          `json:"event_cursor"`
+	}
+	if err := json.NewDecoder(recorder.Body).Decode(&detail); err != nil {
+		t.Fatal(err)
+	}
+	if !detail.Ok || detail.Task.ID != fixture.task.ID || detail.Memory.CurrentGoal != "keep the same JSON" {
+		t.Fatalf("unaffected sections changed: ok=%t task=%q memory=%q", detail.Ok, detail.Task.ID, detail.Memory.CurrentGoal)
+	}
+	if len(detail.Turns) != 1 || detail.Turns[0].Usage["context_tokens"] != float64(100) {
+		t.Fatalf("turn decoration changed: %#v", detail.Turns)
+	}
+	if detail.EventCursor == 0 {
+		t.Fatal("event cursor was not filled by the surviving query")
+	}
+	if len(detail.Agents) != 0 || len(detail.PermissionRequests) != 0 {
+		t.Fatalf("panicking sections were not zero: agents=%#v requests=%#v", detail.Agents, detail.PermissionRequests)
+	}
 }
 
 // The detail handler fans independent queries out into goroutines. The response

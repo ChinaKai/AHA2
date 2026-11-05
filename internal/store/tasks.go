@@ -370,6 +370,21 @@ const taskFacetMirrorCountsQuery = `
 	WHERE object_type='task'
 	GROUP BY owner_device_id,json_extract(payload_json,'$.project_id'),json_extract(payload_json,'$.status')`
 
+// taskFacetMirrorCountsFallbackQuery is the same count without the index hint.
+// It is slower when the planner chooses the unfiltered task index, but it still
+// returns the right rows if the v119 partial index is missing.
+const taskFacetMirrorCountsFallbackQuery = `
+	SELECT owner_device_id,json_extract(payload_json,'$.project_id'),json_extract(payload_json,'$.status'),COUNT(*)
+	FROM sync_remote_task_objects
+	WHERE object_type='task'
+	GROUP BY owner_device_id,json_extract(payload_json,'$.project_id'),json_extract(payload_json,'$.status')`
+
+// isMissingIndexError reports whether SQLite rejected a query because an
+// INDEXED BY hint names an index that does not exist.
+func isMissingIndexError(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "no such index")
+}
+
 // TaskFacetCounts reports how many Tasks carry each status, belong to each
 // project, and sit on each device. The Task list is paged, so counting the
 // loaded page reports wrong numbers as soon as the list outgrows one page;
@@ -397,6 +412,11 @@ func (s *Store) TaskFacetCounts(ctx context.Context) (TaskFacetCounts, error) {
 	// Mirrors carry their Task as a synced payload, so the status and project
 	// come from the JSON rather than from columns.
 	mirrors, err := s.db.QueryContext(ctx, taskFacetMirrorCountsQuery)
+	if isMissingIndexError(err) {
+		// The hint is only a performance choice; a migrated or hand-edited
+		// database without the v119 index must still produce the counts.
+		mirrors, err = s.db.QueryContext(ctx, taskFacetMirrorCountsFallbackQuery)
+	}
 	if err != nil {
 		return counts, err
 	}

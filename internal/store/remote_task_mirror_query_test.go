@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -240,6 +241,49 @@ func TestTaskFacetCountsStillCountsMirrorsAndLocalTasks(t *testing.T) {
 		counts.Device[TaskDeviceRemotePrefix+"dev-b"] != 2 ||
 		counts.Device[TaskDeviceRemoteUnknown] != 1 {
 		t.Fatalf("device counts = %#v", counts.Device)
+	}
+}
+
+// The INDEXED BY hint is an optimization, not a correctness requirement: if the
+// v119 partial index disappears the counts must still come from the equivalent
+// unhinted query, while other SQL errors still surface.
+func TestTaskFacetCountsFallsBackWhenIndexMissing(t *testing.T) {
+	ctx := context.Background()
+	database, err := Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	local := createStoreTestTask(t, database)
+	now := time.Now().UTC()
+	seedMirrorTask(t, database, "dev-a", "source-fallback-1", "project-fallback", "mirror 1", string(domain.TaskWaitingUser), now)
+	seedMirrorTask(t, database, "dev-b", "source-fallback-2", "project-fallback", "mirror 2", string(domain.TaskCompleted), now)
+	seedMirrorTask(t, database, "", "source-fallback-3", "project-fallback-2", "mirror 3", string(domain.TaskDraft), now)
+
+	indexed, err := database.TaskFacetCounts(ctx)
+	if err != nil {
+		t.Fatalf("facet counts with index: %v", err)
+	}
+	if _, err := database.db.ExecContext(ctx, `DROP INDEX idx_sync_remote_task_objects_task_updated`); err != nil {
+		t.Fatalf("drop v119 index: %v", err)
+	}
+	fallback, err := database.TaskFacetCounts(ctx)
+	if err != nil {
+		t.Fatalf("facet counts without index: %v", err)
+	}
+	if !reflect.DeepEqual(indexed, fallback) {
+		t.Fatalf("fallback counts differ: indexed=%#v fallback=%#v", indexed, fallback)
+	}
+	if fallback.Project[local.ProjectID] != 1 || fallback.Project["project-fallback"] != 2 || fallback.Project["project-fallback-2"] != 1 {
+		t.Fatalf("fallback project counts = %#v", fallback.Project)
+	}
+
+	// Only a missing index may fall back; an unrelated error must be returned.
+	if _, err := database.db.ExecContext(ctx, `DROP TABLE sync_remote_task_objects`); err != nil {
+		t.Fatalf("drop mirror table: %v", err)
+	}
+	if _, err := database.TaskFacetCounts(ctx); err == nil {
+		t.Fatal("facet counts swallowed a non-index SQL error")
 	}
 }
 
