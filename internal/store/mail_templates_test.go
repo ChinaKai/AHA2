@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -86,6 +88,75 @@ func TestMailTemplateVersionsAreImmutable(t *testing.T) {
 	archived.SubjectTemplate = "after archive"
 	if _, err := database.UpdateMailTemplate(ctx, archived, 2); !errors.Is(err, ErrMailTemplateArchived) {
 		t.Fatalf("archived update error = %v, want ErrMailTemplateArchived", err)
+	}
+}
+
+func TestMailTemplateConcurrentUpdatesDoNotDuplicateVersions(t *testing.T) {
+	ctx := context.Background()
+	database := openMailTestStore(t)
+
+	template, err := database.CreateMailTemplate(ctx, domain.MailTemplate{
+		Scope: domain.MailTemplateScopeGlobal, Name: "Concurrent",
+		SubjectTemplate: "v1", BodyTextTemplate: "body",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	results := make([]error, 2)
+	var wait sync.WaitGroup
+	start := make(chan struct{})
+	for index := 0; index < 2; index++ {
+		wait.Add(1)
+		go func(index int) {
+			defer wait.Done()
+			<-start
+			candidate := template
+			candidate.SubjectTemplate = fmt.Sprintf("concurrent v2 %d", index)
+			_, err := database.UpdateMailTemplate(ctx, candidate, 1)
+			results[index] = err
+		}(index)
+	}
+	close(start)
+	wait.Wait()
+
+	successes, conflicts := 0, 0
+	for _, result := range results {
+		switch {
+		case result == nil:
+			successes++
+		case errors.Is(result, ErrMailTemplateVersionConflict):
+			conflicts++
+		default:
+			t.Fatalf("unexpected concurrent update error: %v", result)
+		}
+	}
+	if successes != 1 || conflicts != 1 {
+		t.Fatalf("concurrent update results: %d success, %d conflict; want 1/1", successes, conflicts)
+	}
+
+	var duplicateCount int
+	if err := database.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM mail_template_versions WHERE template_id=? AND version=2`,
+		template.ID).Scan(&duplicateCount); err != nil {
+		t.Fatal(err)
+	}
+	if duplicateCount != 1 {
+		t.Fatalf("version 2 rows = %d, want exactly 1", duplicateCount)
+	}
+	stored, err := database.MailTemplate(ctx, template.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.CurrentVersion != 2 {
+		t.Fatalf("current_version = %d, want 2", stored.CurrentVersion)
+	}
+	versions, err := database.MailTemplateVersions(ctx, template.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(versions) != 2 {
+		t.Fatalf("versions = %+v, want 2", versions)
 	}
 }
 

@@ -102,6 +102,78 @@ func TestMailTimeStringsAreFixedWidthAndOrdered(t *testing.T) {
 	}
 }
 
+func TestMailTemplateVersionPrimaryKeyIsPerTemplate(t *testing.T) {
+	ctx := context.Background()
+	database := openMailTestStore(t)
+
+	first, err := database.CreateMailTemplate(ctx, domain.MailTemplate{
+		Scope: domain.MailTemplateScopeGlobal, Name: "First",
+		SubjectTemplate: "first v1", BodyTextTemplate: "body",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := database.CreateMailTemplate(ctx, domain.MailTemplate{
+		Scope: domain.MailTemplateScopeGlobal, Name: "Second",
+		SubjectTemplate: "second v1", BodyTextTemplate: "body",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Both templates own a v1; the version number is scoped by template_id, not
+	// globally unique.
+	for _, template := range []domain.MailTemplate{first, second} {
+		if _, err := database.MailTemplateVersion(ctx, template.ID, 1); err != nil {
+			t.Fatalf("template %s v1: %v", template.ID, err)
+		}
+	}
+
+	first.SubjectTemplate = "first v2"
+	if _, err := database.UpdateMailTemplate(ctx, first, 1); err != nil {
+		t.Fatal(err)
+	}
+	second.SubjectTemplate = "second v2"
+	if _, err := database.UpdateMailTemplate(ctx, second, 1); err != nil {
+		t.Fatal(err)
+	}
+	firstV2, err := database.MailTemplateVersion(ctx, first.ID, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondV2, err := database.MailTemplateVersion(ctx, second.ID, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstV2.SubjectTemplate != "first v2" || secondV2.SubjectTemplate != "second v2" {
+		t.Fatalf("per-template v2 snapshots: %+v / %+v", firstV2, secondV2)
+	}
+
+	var version1Count, version2Count int
+	if err := database.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM mail_template_versions WHERE version=1`).Scan(&version1Count); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM mail_template_versions WHERE version=2`).Scan(&version2Count); err != nil {
+		t.Fatal(err)
+	}
+	if version1Count != 2 || version2Count != 2 {
+		t.Fatalf("version row counts = %d/%d, want 2/2", version1Count, version2Count)
+	}
+
+	// The composite primary key still rejects a duplicate within one template.
+	if _, err := database.db.ExecContext(ctx, `
+		INSERT INTO mail_template_versions(
+			template_id,version,subject_template,body_text_template,body_html_template,
+			required_variables_json,created_by,created_at
+		) VALUES(?,?,?,?,?,?,?,?)`,
+		first.ID, 2, "duplicate", "", "", "[]", "",
+		mailTimeString(time.Now().UTC())); err == nil {
+		t.Fatal("duplicate (template_id, version) passed the composite primary key")
+	}
+}
+
 func TestMailSchemaV120Constraints(t *testing.T) {
 	ctx := context.Background()
 	database := openMailTestStore(t)

@@ -167,18 +167,10 @@ func (s *Store) UpdateMailTemplate(ctx context.Context, item domain.MailTemplate
 		return domain.MailTemplate{}, ErrMailTemplateVersionConflict
 	}
 	nextVersion := currentVersion + 1
-	if err := insertMailTemplateVersionTx(ctx, tx, domain.MailTemplateVersion{
-		TemplateID:        item.ID,
-		Version:           nextVersion,
-		SubjectTemplate:   item.SubjectTemplate,
-		BodyTextTemplate:  item.BodyTextTemplate,
-		BodyHTMLTemplate:  item.BodyHTMLTemplate,
-		RequiredVariables: item.RequiredVariables,
-		CreatedBy:         item.CreatedBy,
-		CreatedAt:         item.UpdatedAt,
-	}); err != nil {
-		return domain.MailTemplate{}, err
-	}
+	// Advance the version pointer with a conditional UPDATE first. A concurrent
+	// editor that read the same expected version loses here (0 rows) before it
+	// can insert a duplicate version snapshot; the composite primary key on
+	// (template_id, version) remains the final guard.
 	result, err := tx.ExecContext(ctx, `
 		UPDATE mail_templates SET
 			name=?,description=?,subject_template=?,body_text_template=?,body_html_template=?,
@@ -194,6 +186,21 @@ func (s *Store) UpdateMailTemplate(ctx context.Context, item domain.MailTemplate
 	}
 	if affected, _ := result.RowsAffected(); affected != 1 {
 		return domain.MailTemplate{}, ErrMailTemplateVersionConflict
+	}
+	if err := insertMailTemplateVersionTx(ctx, tx, domain.MailTemplateVersion{
+		TemplateID:        item.ID,
+		Version:           nextVersion,
+		SubjectTemplate:   item.SubjectTemplate,
+		BodyTextTemplate:  item.BodyTextTemplate,
+		BodyHTMLTemplate:  item.BodyHTMLTemplate,
+		RequiredVariables: item.RequiredVariables,
+		CreatedBy:         item.CreatedBy,
+		CreatedAt:         item.UpdatedAt,
+	}); err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "unique constraint failed") {
+			return domain.MailTemplate{}, ErrMailTemplateVersionConflict
+		}
+		return domain.MailTemplate{}, err
 	}
 	if err := tx.Commit(); err != nil {
 		return domain.MailTemplate{}, err
