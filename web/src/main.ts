@@ -16,7 +16,7 @@ import {bindSyncSettings, isSyncSettingsFormEditing, renderSyncSettings} from ".
 import {bindRuntimeFields, proxyEnabledFrom, proxyOptionsHTML, runtimeFieldsHTML, setClaudeOfficialCatalog, setClaudeOfficialLoading, setRuntimeBackends, syncRuntimeFields} from "./runtime_picker.js";
 import type {ClaudeOfficialCatalog} from "./runtime_picker.js";
 import {renderComposerAgentOptions, renderComposerTools} from "./task_composer.js";
-import {DEFAULT_TASK_STATUS_FILTERS, LOCAL_TASK_DEVICE_FILTER, TASK_STATUS_GROUP_LABELS, taskDeviceFilterOptions, taskMatchesFilters, taskStatusGroupCounts} from "./task_filters.js";
+import {DEFAULT_TASK_STATUS_FILTERS, LOCAL_TASK_DEVICE_FILTER, TASK_STATUS_GROUP_LABELS, hiddenTaskStatusGroups, hiddenTaskStatusText, taskDeviceFilterOptions, taskMatchesFilters, taskStatusGroupCounts} from "./task_filters.js";
 import type {TaskStatusGroup} from "./task_filters.js";
 import {TASK_TOOL_DEFAULT_WIDTH, normalizePinnedTaskTool, normalizeTaskToolMode, normalizeTaskToolWidth, renderTaskToolButtons, renderTaskToolContent, renderTaskToolPanel} from "./task_tools.js";
 import type {TaskTool, TaskToolMode} from "./task_tools.js";
@@ -412,6 +412,17 @@ const listPages: Record<"projects" | "tasks" | "knowledge", {cursor: string; has
   knowledge: {cursor: "", hasMore: false, loadingMore: false},
 };
 const initialListPageSize = 50;
+// Matches the server's maxListPageSize.
+const maxListPageSize = 200;
+// Set when "加载更多" brought in tasks but none of them pass the current filters,
+// so the unchanged list does not read as a broken page.
+let taskLoadMoreNoMatch = false;
+
+// Live refreshes re-read as many tasks as are already loaded, so pages the owner
+// pulled in with "加载更多" do not collapse back to the first page.
+function taskRefreshLimit(): number {
+  return Math.min(Math.max(initialListPageSize, state.tasks.length), maxListPageSize);
+}
 
 function mergeByID<T extends {id: string}>(current: T[], incoming: T[]): T[] {
   const merged = new Map(current.map(item => [item.id, item]));
@@ -1496,9 +1507,10 @@ async function loadCoreData(force = false): Promise<void> {
     }),
     loadResource("workspaces", force, async () => { state.workspaces = (await api.workspaces()).workspaces || []; }),
     loadResource("tasks", force, async () => {
-      const result = await api.tasks("", {limit: initialListPageSize});
+      const result = await api.tasks("", {limit: taskRefreshLimit()});
       state.tasks = result.tasks || [];
       state.taskFacetCounts = result.counts || null;
+      taskLoadMoreNoMatch = false;
       listPages.tasks = {cursor: result.next_cursor || "", hasMore: Boolean(result.has_more), loadingMore: false};
     }),
   ]);
@@ -1538,7 +1550,10 @@ async function loadNextPage(kind: "projects" | "tasks" | "knowledge"): Promise<v
       page.hasMore = Boolean(result.has_more);
     } else if (kind === "tasks") {
       const result = await api.tasks("", {limit: initialListPageSize, cursor: page.cursor});
+      const matchedBefore = filteredTasks().length;
       state.tasks = mergeByID(state.tasks, result.tasks || []);
+      if (result.counts) state.taskFacetCounts = result.counts;
+      taskLoadMoreNoMatch = filteredTasks().length === matchedBefore;
       page.cursor = result.next_cursor || "";
       page.hasMore = Boolean(result.has_more);
     } else {
@@ -2897,6 +2912,15 @@ function taskCardHtml(task: Task): string {
   </article>`;
 }
 
+function filteredTasks(): Task[] {
+  return state.tasks.filter(item => taskMatchesFilters(
+    item,
+    state.taskProjectFilters,
+    state.taskStatusFilters,
+    state.taskDeviceFilters,
+  ));
+}
+
 function tasksView(): string {
   if (state.selectedTask) return taskDetailView(state.selectedTask);
   // Counts describe the whole set, so they come from the server aggregate
@@ -2911,22 +2935,24 @@ function tasksView(): string {
     value: group, label: TASK_STATUS_GROUP_LABELS[group], count: groupedStatus[group],
   }));
   const deviceOptions = taskDeviceFilterOptions(counts?.device || {});
-  const filtered = state.tasks.filter(item => taskMatchesFilters(
-    item,
-    state.taskProjectFilters,
-    state.taskStatusFilters,
-    state.taskDeviceFilters,
-  ));
+  const filtered = filteredTasks();
   const rows = filtered.map(item => taskCardHtml(item)).join("");
+  const hiddenText = counts ? hiddenTaskStatusText(hiddenTaskStatusGroups(groupedStatus, state.taskStatusFilters)) : "";
+  const totalTasks = counts ? Object.values(counts.status || {}).reduce((sum, value) => sum + value, 0) : 0;
+  const countTitle = `符合筛选 ${filtered.length} 个 / 已加载 ${state.tasks.length} 个${counts ? ` / 全部 ${totalTasks} 个` : ""}；“加载更多”只增加已加载数量，筛选保持不变`;
+  const noMatchHint = taskLoadMoreNoMatch
+    ? `<div class="task-filter-hint" data-task-load-more-empty>${icon("filter")}<span>新加载的任务都不符合当前筛选${listPages.tasks.hasMore ? "，可继续加载或显示全部" : "，可显示全部"}</span>${state.taskStatusFilters.size && !hiddenText ? `<button type="button" data-task-show-all>显示全部</button>` : ""}</div>`
+    : "";
   return shell(`<section class="page">
     ${pageHead("任务", "Task 是长期目标，每条用户输入创建一个独立 Turn。", `<button data-dialog="task">${icon("plus")}创建任务</button>`)}
     <div class="task-filters">
       ${taskFilterPopover("project", "项目", "全部项目", projectOptions)}
       ${taskFilterPopover("status", "状态", "全部状态", statusOptions)}
       ${taskFilterPopover("device", "设备", "全部设备", deviceOptions)}
-      <span class="task-count">${filtered.length} / ${state.tasks.length}</span>
+      <span class="task-count" title="${escapeHTML(countTitle)}">匹配 ${filtered.length} / 已加载 ${state.tasks.length}${counts ? ` / 全部 ${totalTasks}` : ""}</span>
     </div>
-    <div class="task-list">${rows || `<div class="empty">${state.tasks.length ? "没有符合条件的任务" : "创建第一个任务开始执行。"}</div>`}${loadMoreHTML("tasks")}</div>
+    ${hiddenText ? `<div class="task-filter-hint" data-task-hidden-status>${icon("filter")}<span>${escapeHTML(hiddenText)}</span><button type="button" data-task-show-all>显示全部</button></div>` : ""}
+    <div class="task-list">${rows || `<div class="empty">${state.tasks.length ? "没有符合条件的任务" : "创建第一个任务开始执行。"}</div>`}${noMatchHint}${loadMoreHTML("tasks")}</div>
     ${taskDialog()}
   </section>`);
 }
@@ -4028,7 +4054,7 @@ function bindCommon(): void {
     instances: state.channelInstances,
     refresh: async () => {
       const [providers, instances, projects, workspaces, tasks] = await Promise.all([
-        api.channelProviders(), api.channelInstances(), api.projects({limit: initialListPageSize}), api.workspaces(), api.tasks("", {limit: initialListPageSize}),
+        api.channelProviders(), api.channelInstances(), api.projects({limit: initialListPageSize}), api.workspaces(), api.tasks("", {limit: taskRefreshLimit()}),
       ]);
       state.channelProviders = providers.providers || [];
       state.channelInstances = instances.instances || [];
@@ -4430,12 +4456,20 @@ function bindCommon(): void {
     if (input.checked) selected.add(input.value);
     else selected.delete(input.value);
     state.taskOpenFilter = kind;
+    taskLoadMoreNoMatch = false;
     render();
   }));
   document.querySelectorAll<HTMLButtonElement>("[data-task-filter-clear]").forEach(button => button.addEventListener("click", () => {
     const kind = button.dataset.taskFilterClear as TaskFilterKind;
     taskFilterSelection(kind).clear();
     state.taskOpenFilter = kind;
+    taskLoadMoreNoMatch = false;
+    render();
+  }));
+  document.querySelectorAll<HTMLButtonElement>("[data-task-show-all]").forEach(button => button.addEventListener("click", () => {
+    state.taskStatusFilters.clear();
+    state.taskOpenFilter = "";
+    taskLoadMoreNoMatch = false;
     render();
   }));
   document.querySelectorAll<HTMLElement>("[data-edit-task-title]").forEach(button => button.addEventListener("click", async event => {
@@ -5525,8 +5559,9 @@ async function refreshListData(): Promise<void> {
 	do {
 	  listRefreshQueued = false;
 	  try {
-		const [tasks, projects, workspaces] = await Promise.all([api.tasks("", {limit: initialListPageSize}), api.projects({limit: initialListPageSize}), api.workspaces()]);
+		const [tasks, projects, workspaces] = await Promise.all([api.tasks("", {limit: taskRefreshLimit()}), api.projects({limit: initialListPageSize}), api.workspaces()]);
 		state.tasks = tasks.tasks || [];
+		if (tasks.counts) state.taskFacetCounts = tasks.counts;
 		state.projects = projects.projects || [];
 		state.workspaces = workspaces.workspaces || [];
 		listPages.projects = {cursor: projects.next_cursor || "", hasMore: Boolean(projects.has_more), loadingMore: false};

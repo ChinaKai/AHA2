@@ -247,6 +247,11 @@ button.danger:hover { background: #fff1f0; }
 .task-filter-option strong { overflow: hidden; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .task-filter-option small { color: var(--muted); font-size: 9px; font-weight: 500; }
 .task-count { margin-left: auto; color: var(--muted); font-size: 11px; }
+.task-filter-hint { display: flex; align-items: center; gap: 8px; margin: 0 0 10px; padding: 7px 10px; border: 1px solid #dbe5f5; border-radius: 5px; background: #f7faff; color: #334155; font-size: 11px; }
+.task-filter-hint .icon { flex: none; width: 13px; color: #1d4ed8; }
+.task-filter-hint > span { flex: 1; min-width: 0; }
+.task-filter-hint button { flex: none; min-height: 26px; padding: 0 9px; font-size: 10px; }
+.task-list > .task-filter-hint { margin: 0; }
 .list-load-more { display: flex; justify-content: center; padding: 16px; }
 .list-load-more button { min-width: 132px; }
 .resource-error { justify-content: space-between; }

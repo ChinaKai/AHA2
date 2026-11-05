@@ -70,6 +70,30 @@ export function taskStatusGroupCounts(counts: Record<string, number>): Record<Ta
   return totals;
 }
 
+export interface HiddenTaskStatusGroup {
+  group: TaskStatusGroup;
+  label: string;
+  count: number;
+}
+
+// Groups the status filter leaves out that still hold tasks, from the server
+// totals. Without this line the default view reads as "only one task exists"
+// when every completed task is merely filtered out.
+export function hiddenTaskStatusGroups(
+  grouped: Record<TaskStatusGroup, number>,
+  statusGroups: ReadonlySet<string>,
+): HiddenTaskStatusGroup[] {
+  if (statusGroups.size === 0) return [];
+  return (Object.keys(TASK_STATUS_GROUP_LABELS) as TaskStatusGroup[])
+    .filter(group => !statusGroups.has(group) && grouped[group] > 0)
+    .map(group => ({group, label: TASK_STATUS_GROUP_LABELS[group], count: grouped[group]}));
+}
+
+export function hiddenTaskStatusText(hidden: HiddenTaskStatusGroup[]): string {
+  if (hidden.length === 0) return "";
+  return `已隐藏 ${hidden.map(item => `${item.count} 个${item.label}`).join("、")}任务`;
+}
+
 export function taskMatchesFilters(
   task: Task,
   projectIDs: ReadonlySet<string>,

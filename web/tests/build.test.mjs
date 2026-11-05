@@ -2118,6 +2118,15 @@ test("task list filters combine multi-select project, status, and device choices
   assert.deepEqual(filters.taskStatusGroupCounts({active: 2, blocked: 1, completed: 3, cancelled: 1}), {open: 2, done: 3, error: 2});
   // An unknown status must not vanish from every bucket.
   assert.deepEqual(filters.taskStatusGroupCounts({something_new: 4}), {open: 4, done: 0, error: 0});
+  // The default filter must say how many tasks it hides, so one visible task does
+  // not read as "only one task exists".
+  const grouped = filters.taskStatusGroupCounts({active: 1, completed: 73});
+  const hidden = filters.hiddenTaskStatusGroups(grouped, new Set(filters.DEFAULT_TASK_STATUS_FILTERS));
+  assert.deepEqual(hidden, [{group: "done", label: "已完成", count: 73}]);
+  assert.equal(filters.hiddenTaskStatusText(hidden), "已隐藏 73 个已完成任务");
+  assert.deepEqual(filters.hiddenTaskStatusGroups(grouped, new Set()), []);
+  assert.deepEqual(filters.hiddenTaskStatusGroups(grouped, new Set(["done", "error"])), [{group: "open", label: "未完成", count: 1}]);
+  assert.equal(filters.hiddenTaskStatusText([]), "");
 
   assert.equal(filters.taskMatchesFilters(local, new Set(["p1"]), new Set(["open"]), new Set(["local"])), true);
   assert.equal(filters.taskMatchesFilters(remoteA, new Set(["p1"]), new Set(["open"]), new Set()), false);
@@ -2132,6 +2141,17 @@ test("task list filters combine multi-select project, status, and device choices
   // Counts must come from the server aggregate, never from the loaded page.
   assert.match(main, /state\.taskFacetCounts = result\.counts/);
   assert.doesNotMatch(main, /statusCounts\.set\(task\.status/);
+  // The count names both numbers instead of reading like a page indicator, and
+  // the hidden-status line offers a one-click way back to every status.
+  assert.match(main, /匹配 \$\{filtered\.length\} \/ 已加载 \$\{state\.tasks\.length\}/);
+  assert.match(main, /data-task-show-all/);
+  assert.match(main, /state\.taskStatusFilters\.clear\(\)/);
+  // "加载更多" merges the next page without touching the filters, and says so when
+  // nothing new matches; live refreshes keep the pages already loaded.
+  assert.match(main, /data-task-load-more-empty/);
+  assert.match(main, /state\.tasks = mergeByID\(state\.tasks, result\.tasks \|\| \[\]\)/);
+  assert.match(main, /api\.tasks\("", \{\s*limit: taskRefreshLimit\(\)\s*\}\)/);
+  assert.match(styles, /\.task-filter-hint/);
   assert.match(styles, /\.task-filter-menu/);
   assert.match(styles, /@media \(max-width: 760px\)[\s\S]*?\.task-filters \{[^}]*grid-template-columns:\s*repeat\(2,minmax\(0,1fr\)\)/);
 });
