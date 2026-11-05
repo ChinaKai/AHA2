@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
@@ -18,9 +19,100 @@ import (
 
 const runtimeContextScanLines = 4000
 
+// runtimeContextCacheTTL bounds how long a transcript sample may be served
+// without re-reading the file. Appends touch mtime/size and bypass the TTL
+// immediately, so the TTL only matters for scans that found nothing (for
+// example while a session is still starting). Remote runners are not cached:
+// validating their file identity would cost another round-trip.
+const runtimeContextCacheTTL = 5 * time.Second
+
 type runtimeContextSample struct {
 	InputTokens   float64
 	ContextWindow int64
+}
+
+type runtimeContextCacheEntry struct {
+	size      int64
+	modTime   time.Time
+	expiresAt time.Time
+	sample    runtimeContextSample
+	found     bool
+}
+
+// runtimeContextCache memoizes transcript tails keyed by the resolved file
+// path. Every lookup compares the file's size and mtime, so an append or
+// rewrite invalidates the entry even before the TTL elapses; the TTL keeps
+// negative results from rescanning a file that exists but has no usage record
+// yet. The mutex makes it safe for concurrent detail requests.
+type runtimeContextCache struct {
+	mu      sync.Mutex
+	entries map[string]runtimeContextCacheEntry
+	ttl     time.Duration
+}
+
+func (c *runtimeContextCache) lifetime() time.Duration {
+	if c.ttl > 0 {
+		return c.ttl
+	}
+	return runtimeContextCacheTTL
+}
+
+func (c *runtimeContextCache) get(key string, size int64, modTime, now time.Time) (runtimeContextSample, bool, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry, ok := c.entries[key]
+	if !ok || now.After(entry.expiresAt) || entry.size != size || !entry.modTime.Equal(modTime) {
+		return runtimeContextSample{}, false, false
+	}
+	return entry.sample, entry.found, true
+}
+
+func (c *runtimeContextCache) put(key string, size int64, modTime, now time.Time, sample runtimeContextSample, found bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.entries == nil {
+		c.entries = map[string]runtimeContextCacheEntry{}
+	}
+	if len(c.entries) >= 64 {
+		for existing, entry := range c.entries {
+			if now.After(entry.expiresAt) {
+				delete(c.entries, existing)
+			}
+		}
+	}
+	c.entries[key] = runtimeContextCacheEntry{
+		size: size, modTime: modTime, expiresAt: now.Add(c.lifetime()), sample: sample, found: found,
+	}
+}
+
+// scanLocalSessionFile reads a transcript tail, reusing a cached sample when
+// the file identity is unchanged. A nil cache keeps the uncached behaviour.
+func scanLocalSessionFile(
+	path string,
+	limit int,
+	cache *runtimeContextCache,
+	extract func(map[string]any) (runtimeContextSample, bool),
+) (runtimeContextSample, bool) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return runtimeContextSample{}, false
+	}
+	now := time.Now()
+	if cache != nil {
+		if sample, found, hit := cache.get(path, info.Size(), info.ModTime(), now); hit {
+			return sample, found
+		}
+	}
+	var sample runtimeContextSample
+	found := scanJSONLinesReverse(path, limit, func(record map[string]any) bool {
+		var ok bool
+		sample, ok = extract(record)
+		return ok
+	})
+	if cache != nil {
+		cache.put(path, info.Size(), info.ModTime(), now, sample, found)
+	}
+	return sample, found
 }
 
 // claudeContextSample reads the context a Claude request actually occupied.
@@ -59,18 +151,13 @@ func codexRuntimeContext(
 	session domain.BackendSession,
 	item domain.Workspace,
 	workDir string,
+	cache *runtimeContextCache,
 ) (runtimeContextSample, bool) {
 	if session.ProviderSession == "" {
 		return runtimeContextSample{}, false
 	}
 	if sessionPath, ok := backendSessionArtifactPath(session, item, workDir); ok {
-		var sample runtimeContextSample
-		found := scanJSONLinesReverse(sessionPath, runtimeContextScanLines, func(record map[string]any) bool {
-			var ok bool
-			sample, ok = codexContextSample(record)
-			return ok
-		})
-		return sample, found
+		return scanLocalSessionFile(sessionPath, runtimeContextScanLines, cache, codexContextSample)
 	}
 	if item.Transport != "wsl" && item.Transport != "ssh" && item.Locality != "remote" {
 		return runtimeContextSample{}, false
@@ -135,18 +222,13 @@ func claudeRuntimeContext(
 	session domain.BackendSession,
 	item domain.Workspace,
 	workDir string,
+	cache *runtimeContextCache,
 ) (runtimeContextSample, bool) {
 	if session.ProviderSession == "" {
 		return runtimeContextSample{}, false
 	}
 	if sessionPath, ok := backendSessionArtifactPath(session, item, workDir); ok {
-		var sample runtimeContextSample
-		found := scanJSONLinesReverse(sessionPath, runtimeContextScanLines, func(record map[string]any) bool {
-			var ok bool
-			sample, ok = claudeContextSample(record)
-			return ok
-		})
-		return sample, found
+		return scanLocalSessionFile(sessionPath, runtimeContextScanLines, cache, claudeContextSample)
 	}
 	if item.Transport != "wsl" && item.Transport != "ssh" && item.Locality != "remote" {
 		return runtimeContextSample{}, false

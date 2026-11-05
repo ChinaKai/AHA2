@@ -3437,5 +3437,32 @@ func (s *Store) migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(118, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
 		return fmt.Errorf("record schema v118: %w", err)
 	}
+	var hasV119 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=119)`).Scan(&hasV119)
+	if !hasV119 {
+		// Task mirrors are a tiny slice of this table (50 of ~133k rows on the
+		// production database, the rest conversation items). Without a partial
+		// index the list query scanned the whole table and sorted it in a
+		// temporary B-tree (~160-200ms). Both indexes carry the exact ORDER BY
+		// of RemoteTaskMirrors so SQLite can return rows in index order, and the
+		// project variant turns the project filter into an index SEARCH instead
+		// of a post-filter. TaskFacetCounts pins the order-by index with
+		// INDEXED BY so its GROUP BY also reads only task rows.
+		for _, statement := range []string{
+			`CREATE INDEX IF NOT EXISTS idx_sync_remote_task_objects_task_updated
+			 ON sync_remote_task_objects(updated_at DESC,owner_device_id DESC,task_id DESC)
+			 WHERE object_type='task'`,
+			`CREATE INDEX IF NOT EXISTS idx_sync_remote_task_objects_task_project_updated
+			 ON sync_remote_task_objects(project_id,updated_at DESC,owner_device_id DESC,task_id DESC)
+			 WHERE object_type='task'`,
+		} {
+			if _, err := s.db.ExecContext(ctx, statement); err != nil {
+				return fmt.Errorf("apply schema v119: %w", err)
+			}
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(119, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v119: %w", err)
+	}
 	return nil
 }

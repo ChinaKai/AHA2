@@ -5,7 +5,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
 	"github.com/ChinaKai/AHA2/internal/workspace"
@@ -140,7 +142,7 @@ func TestOfficialCodexRuntimeContextUsesIsolatedProfile(t *testing.T) {
 		t.Fatal(err)
 	}
 	sample, ok := codexRuntimeContext(
-		context.Background(), session, domain.Workspace{Transport: "native"}, workDir,
+		context.Background(), session, domain.Workspace{Transport: "native"}, workDir, nil,
 	)
 	if !ok || sample.ContextWindow != 872000 || sample.InputTokens != 32000 {
 		t.Fatalf("official runtime sample = %#v, ok=%v", sample, ok)
@@ -228,4 +230,117 @@ func TestBackendSessionArtifactPathKeepsLocalPathsLocal(t *testing.T) {
 	if path != file {
 		t.Fatalf("path = %q, want %q", path, file)
 	}
+}
+
+func TestRuntimeContextCacheInvalidatesOnFileIdentityAndTTL(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
+	cache := &runtimeContextCache{ttl: time.Minute}
+	cache.put("session.jsonl", 100, now, now, runtimeContextSample{InputTokens: 7}, true)
+	if sample, found, hit := cache.get("session.jsonl", 100, now, now.Add(time.Second)); !hit || !found || sample.InputTokens != 7 {
+		t.Fatalf("unchanged file missed its cache entry: sample=%#v found=%t hit=%t", sample, found, hit)
+	}
+	if _, _, hit := cache.get("session.jsonl", 101, now, now.Add(time.Second)); hit {
+		t.Fatal("a size change must invalidate the sample")
+	}
+	if _, _, hit := cache.get("session.jsonl", 100, now.Add(time.Second), now.Add(time.Second)); hit {
+		t.Fatal("an mtime change must invalidate the sample")
+	}
+	cache.put("session.jsonl", 100, now, now, runtimeContextSample{}, false)
+	if _, found, hit := cache.get("session.jsonl", 100, now, now.Add(2*time.Minute)); hit || found {
+		t.Fatalf("expired entry was served: found=%t hit=%t", found, hit)
+	}
+}
+
+func TestScanLocalSessionFileCachesUntilFileChanges(t *testing.T) {
+	t.Parallel()
+	file := filepath.Join(t.TempDir(), "session.jsonl")
+	if err := os.WriteFile(file, []byte(`{"message":{"usage":{"input_tokens":10}}}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cache := &runtimeContextCache{ttl: time.Minute}
+	calls := 0
+	extract := func(record map[string]any) (runtimeContextSample, bool) {
+		calls++
+		return claudeContextSample(record)
+	}
+	first, ok := scanLocalSessionFile(file, runtimeContextScanLines, cache, extract)
+	if !ok || first.InputTokens != 10 || calls != 1 {
+		t.Fatalf("first scan = %#v ok=%t calls=%d", first, ok, calls)
+	}
+	if second, ok := scanLocalSessionFile(file, runtimeContextScanLines, cache, extract); !ok || second.InputTokens != 10 {
+		t.Fatalf("cached scan = %#v ok=%t", second, ok)
+	}
+	if calls != 1 {
+		t.Fatalf("unchanged transcript was rescanned %d times", calls)
+	}
+	// Appending changes the file size, which must invalidate the entry without
+	// waiting for the TTL.
+	if err := os.WriteFile(file, []byte(`{"message":{"usage":{"input_tokens":25}}}`+"\n"+`{"type":"summary"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	callsBeforeChange := calls
+	third, ok := scanLocalSessionFile(file, runtimeContextScanLines, cache, extract)
+	if !ok || third.InputTokens != 25 || calls <= callsBeforeChange {
+		t.Fatalf("changed scan = %#v ok=%t calls=%d (before %d)", third, ok, calls, callsBeforeChange)
+	}
+}
+
+func TestRuntimeContextCacheIsConcurrencySafe(t *testing.T) {
+	t.Parallel()
+	file := filepath.Join(t.TempDir(), "session.jsonl")
+	if err := os.WriteFile(file, []byte(`{"message":{"usage":{"input_tokens":3}}}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cache := &runtimeContextCache{ttl: time.Minute}
+	var wait sync.WaitGroup
+	for worker := 0; worker < 8; worker++ {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			for attempt := 0; attempt < 20; attempt++ {
+				sample, ok := scanLocalSessionFile(file, runtimeContextScanLines, cache, claudeContextSample)
+				if !ok || sample.InputTokens != 3 {
+					t.Errorf("concurrent scan = %#v ok=%t", sample, ok)
+					return
+				}
+			}
+		}()
+	}
+	wait.Wait()
+}
+
+// BenchmarkClaudeRuntimeContextTranscriptCache uses a 4000-line tail whose only
+// usage record sits on the first line, so every uncached call has to walk the
+// whole tail. The cached case still stats the file and validates size/mtime.
+func BenchmarkClaudeRuntimeContextTranscriptCache(b *testing.B) {
+	file := filepath.Join(b.TempDir(), "session.jsonl")
+	var builder strings.Builder
+	builder.WriteString(`{"message":{"usage":{"input_tokens":42}}}` + "\n")
+	for index := 0; index < runtimeContextScanLines-1; index++ {
+		builder.WriteString(`{"type":"summary"}` + "\n")
+	}
+	if err := os.WriteFile(file, []byte(builder.String()), 0o600); err != nil {
+		b.Fatal(err)
+	}
+	b.Run("uncached", func(b *testing.B) {
+		b.ReportAllocs()
+		for index := 0; index < b.N; index++ {
+			if _, ok := scanLocalSessionFile(file, runtimeContextScanLines, nil, claudeContextSample); !ok {
+				b.Fatal("no sample")
+			}
+		}
+	})
+	cache := &runtimeContextCache{ttl: time.Minute}
+	if _, ok := scanLocalSessionFile(file, runtimeContextScanLines, cache, claudeContextSample); !ok {
+		b.Fatal("no sample")
+	}
+	b.Run("cached", func(b *testing.B) {
+		b.ReportAllocs()
+		for index := 0; index < b.N; index++ {
+			if _, ok := scanLocalSessionFile(file, runtimeContextScanLines, cache, claudeContextSample); !ok {
+				b.Fatal("no sample")
+			}
+		}
+	})
 }

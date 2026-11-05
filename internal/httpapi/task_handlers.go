@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ChinaKai/AHA2/internal/app"
@@ -466,24 +467,45 @@ func (s *Server) taskDetail(writer http.ResponseWriter, request *http.Request) {
 		writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "task": mirror.Task, "latest_round": latest, "turns": turns, "agents": mirror.Agents, "memory": compactTaskMemory(mirror.Memory), "hardware": mirror.Hardware, "event_cursor": 0, "server_time_ms": time.Now().UTC().UnixMilli()})
 		return
 	}
-	s.decorateChannelTask(request.Context(), &task)
-	round, _ := s.store.LatestRound(request.Context(), taskID)
-	turns, _ := s.store.TurnsForRound(request.Context(), round.ID)
-	agents, _ := s.app.TaskAgents(request.Context(), taskID)
-	memory, _ := s.store.TaskMemory(request.Context(), taskID)
-	hardwareGroups, _ := s.store.HardwareGroups(request.Context(), taskID)
-	hardwareResources, _ := s.store.HardwareResources(request.Context())
-	permissionRequests, _ := s.app.TaskPermissionRequests(request.Context(), taskID, 50)
+	ctx := request.Context()
+	// The round decides which turns belong to the detail, so that pair stays
+	// ordered. Everything else only depends on the task ID and runs
+	// concurrently: the transcript tail read in applyTurnContextUsage overlaps
+	// the remaining work instead of following it. store.Open exposes one SQLite
+	// connection, so statements still serialize; the overlap that matters is
+	// the file read against queued statements, and the shape stays correct if
+	// the pool is widened. Each query keeps the previous error tolerance
+	// (errors leave the zero value).
+	round, _ := s.store.LatestRound(ctx, taskID)
+	turns, _ := s.store.TurnsForRound(ctx, round.ID)
+	var (
+		agents             []domain.TaskAgent
+		memory             domain.TaskMemory
+		hardwareGroups     []domain.HardwareGroup
+		hardwareResources  []domain.HardwareResource
+		permissionRequests []domain.TaskPermissionRequest
+		eventCursor        int64
+	)
+	var pending sync.WaitGroup
+	pending.Add(8)
+	go func() { defer pending.Done(); s.decorateChannelTask(ctx, &task) }()
+	go func() { defer pending.Done(); agents, _ = s.app.TaskAgents(ctx, taskID) }()
+	go func() { defer pending.Done(); memory, _ = s.store.TaskMemory(ctx, taskID) }()
+	go func() { defer pending.Done(); hardwareGroups, _ = s.store.HardwareGroups(ctx, taskID) }()
+	go func() { defer pending.Done(); hardwareResources, _ = s.store.HardwareResources(ctx) }()
+	go func() { defer pending.Done(); permissionRequests, _ = s.app.TaskPermissionRequests(ctx, taskID, 50) }()
+	go func() { defer pending.Done(); eventCursor = s.store.MaxEventSequence(ctx, taskID) }()
+	go func() { defer pending.Done(); s.applyTurnContextUsage(ctx, turns) }()
+	pending.Wait()
 	now := time.Now().UTC()
 	applyRoundTiming(&round, now)
 	applyTurnTimings(turns, now)
-	s.applyTurnContextUsage(request.Context(), turns)
 	writeJSON(writer, http.StatusOK, map[string]any{
 		"ok": true, "task": task, "latest_round": round, "turns": turns, "agents": agents, "memory": compactTaskMemory(memory),
 		"hardware":            hardwareGroups,
 		"hardware_resources":  hardwareResources,
 		"permission_requests": permissionRequests,
-		"event_cursor":        s.store.MaxEventSequence(request.Context(), taskID),
+		"event_cursor":        eventCursor,
 		"server_time_ms":      now.UnixMilli(),
 	})
 }
@@ -1103,11 +1125,11 @@ func (s *Server) applyCodexRuntimeContext(ctx context.Context, turns []domain.Tu
 			var found bool
 			if session.Backend == "claude" {
 				sample, found = claudeRuntimeContext(
-					ctx, session, workspace, taskRuntimeWorkDir(task, workspace),
+					ctx, session, workspace, taskRuntimeWorkDir(task, workspace), &s.runtimeContextCache,
 				)
 			} else {
 				sample, found = codexRuntimeContext(
-					ctx, session, workspace, taskRuntimeWorkDir(task, workspace),
+					ctx, session, workspace, taskRuntimeWorkDir(task, workspace), &s.runtimeContextCache,
 				)
 			}
 			if found {

@@ -360,6 +360,16 @@ func taskDeviceFilterKey(readOnly bool, ownerDeviceID string) string {
 	return TaskDeviceRemotePrefix + ownerDeviceID
 }
 
+// taskFacetMirrorCountsQuery pins the partial index from schema v119. Left to
+// itself the planner picks idx_sync_remote_task_objects_task, whose leading
+// column cannot filter object_type, so it walks every mirror row (~133k on the
+// production database) instead of the ~50 Task rows.
+const taskFacetMirrorCountsQuery = `
+	SELECT owner_device_id,json_extract(payload_json,'$.project_id'),json_extract(payload_json,'$.status'),COUNT(*)
+	FROM sync_remote_task_objects INDEXED BY idx_sync_remote_task_objects_task_updated
+	WHERE object_type='task'
+	GROUP BY owner_device_id,json_extract(payload_json,'$.project_id'),json_extract(payload_json,'$.status')`
+
 // TaskFacetCounts reports how many Tasks carry each status, belong to each
 // project, and sit on each device. The Task list is paged, so counting the
 // loaded page reports wrong numbers as soon as the list outgrows one page;
@@ -386,10 +396,7 @@ func (s *Store) TaskFacetCounts(ctx context.Context) (TaskFacetCounts, error) {
 	}
 	// Mirrors carry their Task as a synced payload, so the status and project
 	// come from the JSON rather than from columns.
-	mirrors, err := s.db.QueryContext(ctx, `
-		SELECT owner_device_id,json_extract(payload_json,'$.project_id'),json_extract(payload_json,'$.status'),COUNT(*)
-		FROM sync_remote_task_objects WHERE object_type='task'
-		GROUP BY owner_device_id,json_extract(payload_json,'$.project_id'),json_extract(payload_json,'$.status')`)
+	mirrors, err := s.db.QueryContext(ctx, taskFacetMirrorCountsQuery)
 	if err != nil {
 		return counts, err
 	}

@@ -90,6 +90,7 @@ type Server struct {
 	systemMu              sync.Mutex
 	systemCachedAt        time.Time
 	systemCache           map[string]any
+	runtimeContextCache   runtimeContextCache
 }
 
 func New(config Config) *Server {

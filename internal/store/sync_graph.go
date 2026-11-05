@@ -28,8 +28,25 @@ func remoteTaskPublicID(ownerDeviceID, sourceTaskID string) string {
 	return "remote_" + hex.EncodeToString(sum[:12])
 }
 
+// Both mirror list queries match the column order of the partial indexes
+// created in schema v119. Keep them literal so tests can assert the plan.
+const (
+	remoteTaskMirrorsQuery          = `SELECT owner_device_id,task_id,payload_json FROM sync_remote_task_objects WHERE object_type='task' ORDER BY updated_at DESC,owner_device_id DESC,task_id DESC`
+	remoteTaskMirrorsQueryByProject = `SELECT owner_device_id,task_id,payload_json FROM sync_remote_task_objects WHERE object_type='task' AND project_id=? ORDER BY updated_at DESC,owner_device_id DESC,task_id DESC`
+)
+
 func (s *Store) RemoteTaskMirrors(ctx context.Context, projectID string) ([]RemoteTaskMirror, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT owner_device_id,task_id,payload_json FROM sync_remote_task_objects WHERE object_type='task' AND (?='' OR project_id=?) ORDER BY updated_at DESC,owner_device_id DESC,task_id DESC`, projectID, projectID)
+	// Branch on the project filter instead of binding (?='' OR project_id=?).
+	// The OR form hides the equality from SQLite, which then cannot use the
+	// project index added in schema v119. Both branches keep the original
+	// ordering and equality semantics.
+	query := remoteTaskMirrorsQuery
+	var args []any
+	if projectID != "" {
+		query = remoteTaskMirrorsQueryByProject
+		args = append(args, projectID)
+	}
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
