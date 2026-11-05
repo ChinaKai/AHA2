@@ -21,7 +21,7 @@ import {DEFAULT_TASK_STATUS_FILTERS, LOCAL_TASK_DEVICE_FILTER, TASK_STATUS_GROUP
 import type {TaskStatusGroup} from "./task_filters.js";
 import {TASK_TOOL_DEFAULT_WIDTH, normalizePinnedTaskTool, normalizeTaskToolMode, normalizeTaskToolWidth, renderTaskToolButtons, renderTaskToolContent, renderTaskToolPanel} from "./task_tools.js";
 import type {TaskTool, TaskToolMode} from "./task_tools.js";
-import {TASK_SLASH_COMMANDS, bindMessageBubbleControls, captureInteractiveRegion, clearNavigationSnapshot, createListRefreshScheduler, eventRefreshesTaskList, exactSlashCommand, executeAgentSessionAction, loadNavigationSnapshot, matchingSlashCommands, paginateItems, paginationHTML, petWatchActionKeys, renderWorkspaceDetection, restoreInteractiveRegion, saveNavigationSnapshot, textMatchesQuery} from "./ui_helpers.js";
+import {TASK_SLASH_COMMANDS, bindMessageBubbleControls, captureInteractiveRegion, clearNavigationSnapshot, createListRefreshScheduler, createResourceLoader, eventRefreshesTaskList, exactSlashCommand, executeAgentSessionAction, loadNavigationSnapshot, matchingSlashCommands, paginateItems, paginationHTML, petWatchActionKeys, renderWorkspaceDetection, restoreInteractiveRegion, saveNavigationSnapshot, textMatchesQuery} from "./ui_helpers.js";
 import type {InteractiveRegionState} from "./ui_helpers.js";
 import {
   compactNumber,
@@ -81,7 +81,7 @@ import type {
   Workspace,
 } from "./types.js";
 type View = "projects" | "channels" | "models" | "hardware" | "tasks" | "knowledge" | "prompts" | "proxy" | "sync" | "advanced" | "data" | "other" | "mcp" | "pet-settings" | "pet-diary";
-type ResourceKey = "projects" | "workspaces" | "tasks" | "system" | "providers" | "models" | "env" | "accounts" | "skills" | "channels" | "hardware" | "knowledge" | "proxy" | "advanced" | "sync" | "prompts";
+type ResourceKey = "projects" | "workspaces" | "tasks" | "system" | "providers" | "models" | "env" | "accounts" | "skills" | "channels" | "hardware" | "knowledge" | "proxy" | "advanced" | "sync" | "prompts" | "mcp" | "data";
 type TaskFilterKind = "project" | "status" | "device";
 interface ResourceState {loading: boolean; loaded: boolean; error: string; updatedAt: number}
 interface TaskChannelState {
@@ -455,7 +455,7 @@ document.addEventListener("keydown", event => {
 
 const resourceStates = Object.fromEntries([
   "projects", "workspaces", "tasks", "system", "providers", "models", "env", "accounts", "skills",
-  "channels", "hardware", "knowledge", "proxy", "advanced", "sync", "prompts",
+  "channels", "hardware", "knowledge", "proxy", "advanced", "sync", "prompts", "mcp", "data",
 ].map(key => [key, {loading: false, loaded: false, error: "", updatedAt: 0}])) as Record<ResourceKey, ResourceState>;
 const resourceRequests = new Map<ResourceKey, Promise<void>>();
 const listPages: Record<"projects" | "tasks" | "knowledge", {cursor: string; hasMore: boolean; loadingMore: boolean}> = {
@@ -508,29 +508,21 @@ function resourcesForView(view: View): ResourceKey[] {
   }
 }
 
-async function loadResource(key: ResourceKey, force: boolean, action: () => Promise<void>): Promise<void> {
-  if (!force && resourceStates[key].loaded) return;
-  const current = resourceRequests.get(key);
-  if (current) return current;
-  if (prefetchRequestTracking > 0) perfMetrics.prefetchRequests++;
-  resourceStates[key].loading = true;
-  resourceStates[key].error = "";
-  window.queueMicrotask(() => {
+const loadResource = createResourceLoader({
+  states: resourceStates,
+  requests: resourceRequests,
+  onStart: () => {
+    // Counted after the cache/in-flight early returns, so this reflects requests
+    // actually issued during an idle prefetch.
+    if (prefetchRequestTracking > 0) perfMetrics.prefetchRequests++;
+    window.queueMicrotask(() => {
+      if (state.auth?.authenticated) render();
+    });
+  },
+  onFinish: () => {
     if (state.auth?.authenticated) render();
-  });
-  const request = action().then(() => {
-    resourceStates[key].loaded = true;
-    resourceStates[key].updatedAt = Date.now();
-  }).catch(error => {
-    resourceStates[key].error = error instanceof Error ? error.message : String(error);
-  }).finally(() => {
-    resourceStates[key].loading = false;
-    resourceRequests.delete(key);
-    if (state.auth?.authenticated) render();
-  });
-  resourceRequests.set(key, request);
-  return request;
-}
+  },
+});
 
 function escapeHTML(value: unknown): string {
   return String(value ?? "")
@@ -1700,17 +1692,22 @@ async function ensureViewData(view: View, force = false): Promise<void> {
   await Promise.all(jobs);
 }
 
-async function loadDataInventory(_force = false): Promise<void> {
-  state.dataInventoryLoading = true;
-  state.dataInventoryError = "";
-  try {
-    const result = await api.dataInventory();
-    state.dataInventory = result.inventory;
-  } catch (error) {
-    state.dataInventoryError = error instanceof Error ? error.message : String(error);
-  } finally {
-    state.dataInventoryLoading = false;
-  }
+function loadDataInventory(force = false): Promise<void> {
+  return loadResource("data", force, async () => {
+    state.dataInventoryLoading = true;
+    state.dataInventoryError = "";
+    try {
+      const result = await api.dataInventory();
+      state.dataInventory = result.inventory;
+    } catch (error) {
+      state.dataInventoryError = error instanceof Error ? error.message : String(error);
+      // Rethrow so the loader does not mark a failed inventory as loaded; an
+      // idle prefetch may retry it later.
+      throw error;
+    } finally {
+      state.dataInventoryLoading = false;
+    }
+  });
 }
 
 function cancelSecondaryPrefetch(): void {
@@ -1745,10 +1742,15 @@ function prefetchSecondaryData(): void {
     if (document.hidden) return;
     secondaryPrefetchDone = true;
     perfMetrics.prefetchRuns++;
+    // ensureViewData issues all of its loader calls synchronously, so the count
+    // window only needs to cover the call itself; counting in its finally would
+    // also attribute unrelated loads that start while it is in flight.
     prefetchRequestTracking++;
-    void ensureViewData(state.view).finally(() => {
+    try {
+      void ensureViewData(state.view);
+    } finally {
       prefetchRequestTracking = Math.max(0, prefetchRequestTracking - 1);
-    });
+    }
   };
   const requestIdle = (window as unknown as {requestIdleCallback?: (callback: () => void, options?: {timeout: number}) => number}).requestIdleCallback;
   if (requestIdle) {
@@ -5693,8 +5695,10 @@ function flushDeferredListRefresh(): void {
   listRefreshScheduler.flush();
 }
 
+// Only the scheduler calls this, and it never starts a second request while
+// `listRefreshInFlight` is set, so there is no in-flight guard here that could
+// silently drop a pending refresh.
 async function performListRefresh(): Promise<void> {
-  if (listRefreshInFlight) return;
   listRefreshInFlight = true;
   perfMetrics.listRefreshRequests++;
   const startedAt = performance.now();
@@ -5841,13 +5845,15 @@ startUITranslationObserver();
 render();
 void bootstrap();
 
-async function loadMCPServers(force = false): Promise<void> {
-  try {
-    const result = await api.mcpServers();
-    state.mcpServers = result.servers || [];
-  } catch {
-    state.mcpServers = [];
-  }
+function loadMCPServers(force = false): Promise<void> {
+  return loadResource("mcp", force, async () => {
+    try {
+      const result = await api.mcpServers();
+      state.mcpServers = result.servers || [];
+    } catch {
+      state.mcpServers = [];
+    }
+  });
 }
 
 function mcpView(): string {

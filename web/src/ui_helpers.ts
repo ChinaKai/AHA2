@@ -26,6 +26,49 @@ export function eventRefreshesTaskList(type: string): boolean {
   return ["task_", "turn_", "round_", "knowledge_"].some(prefix => type.startsWith(prefix));
 }
 
+export interface ResourceStateLike {
+  loading: boolean;
+  loaded: boolean;
+  error: string;
+  updatedAt: number;
+}
+
+export interface ResourceLoaderOptions {
+  states: Record<string, ResourceStateLike>;
+  requests: Map<string, Promise<void>>;
+  onStart?: (key: string) => void;
+  onFinish?: (key: string) => void;
+}
+
+// Cache plus single-flight for lazily loaded view resources. Both the cached-hit
+// early return and the in-flight dedupe happen before onStart, so a caller can
+// count real requests instead of prefetch attempts. Every view resource must go
+// through this loader; a fetch helper that bypasses it is re-requested by the
+// idle prefetch even when its data is already on screen.
+export function createResourceLoader(options: ResourceLoaderOptions): (key: string, force: boolean, action: () => Promise<void>) => Promise<void> {
+  return (key, force, action) => {
+    const state = options.states[key];
+    if (!force && state.loaded) return Promise.resolve();
+    const current = options.requests.get(key);
+    if (current) return current;
+    state.loading = true;
+    state.error = "";
+    options.onStart?.(key);
+    const request = action().then(() => {
+      state.loaded = true;
+      state.updatedAt = Date.now();
+    }).catch(error => {
+      state.error = error instanceof Error ? error.message : String(error);
+    }).finally(() => {
+      state.loading = false;
+      options.requests.delete(key);
+      options.onFinish?.(key);
+    });
+    options.requests.set(key, request);
+    return request;
+  };
+}
+
 export interface ListRefreshSchedulerOptions {
   debounceMs: number;
   maxWaitMs: number;
@@ -45,10 +88,14 @@ export interface ListRefreshScheduler {
 }
 
 // A dense SSE burst can outrun a list request by an order of magnitude. Coalesce
-// events into one trailing refresh, cap how long the first event may wait, and
-// keep a minimum gap between request starts so a burst cannot become a request
-// loop. The scheduler owns no DOM or API knowledge: the caller decides when a
-// refresh is allowed and performs the fetch.
+// events into one trailing refresh at min(last event + debounce, first event +
+// maxWait), keep a minimum gap between request starts, and never overlap
+// requests. The scheduler owns no DOM or API knowledge: the caller decides when
+// a refresh is allowed and performs the fetch.
+//
+// A flush that cannot run (hidden page, open task detail, request in flight)
+// leaves the request pending so the caller can retry it when the obstacle
+// clears; the in-flight case is retried from the refresh promise's finally.
 export function createListRefreshScheduler(options: ListRefreshSchedulerOptions): ListRefreshScheduler {
   let timer = 0;
   let windowStartedAt: number | null = null;
@@ -60,10 +107,15 @@ export function createListRefreshScheduler(options: ListRefreshSchedulerOptions)
     const now = options.now();
     if (windowStartedAt === null) windowStartedAt = now;
     if (timer) options.cancel(timer);
-    const sinceWindow = now - windowStartedAt;
-    const gapRemaining = lastStartedAt ? Math.max(0, options.debounceMs - (now - lastStartedAt)) : Number.POSITIVE_INFINITY;
-    const delay = Math.max(0, Math.min(options.debounceMs, options.maxWaitMs - sinceWindow, gapRemaining));
-    timer = options.schedule(flush, delay);
+    // Fire at the earlier of "quiet for one debounce window" and "the first
+    // event has waited the maximum". A request start gap is a lower bound only:
+    // it must not pin a continuous stream to the debounce cadence, because then
+    // the max wait would never apply after the first refresh.
+    const debounceAt = now + options.debounceMs;
+    const maxWaitAt = windowStartedAt + options.maxWaitMs;
+    const gapAt = lastStartedAt ? lastStartedAt + options.debounceMs : 0;
+    const fireAt = Math.max(gapAt, Math.min(debounceAt, maxWaitAt));
+    timer = options.schedule(flush, Math.max(0, fireAt - now));
   }
 
   function flush(): void {
