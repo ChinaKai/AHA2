@@ -241,7 +241,7 @@ erDiagram
 ### 2.1 约定
 
 - 当前仓库 schema 为 v119，本文按 **schema v120** 编写；实现时以当时最大版本 +1 为准，迁移必须从现网版本可重入执行。
-- SQLite 显式迁移、无 ORM。ID 为 TEXT，时间统一 UTC RFC3339Nano 字符串，布尔用 INTEGER 0/1，JSON 列用 Store helper 编解码。
+- SQLite 显式迁移、无 ORM。ID 为 TEXT；时间统一 UTC RFC3339 定长字符串（固定 9 位小数，例如 `2026-11-05T15:04:05.123456789Z`）或整数 epoch 毫秒，二者必须全局选定一种。`lease_until` / `available_at` 等 SQL 时间比较必须使用同一种定长格式/单位，避免同秒字典序误差；布尔用 INTEGER 0/1，JSON 列用 Store helper 编解码。
 - 新增表全部使用 `CREATE TABLE IF NOT EXISTS`；新增索引使用 `CREATE INDEX IF NOT EXISTS`；不修改或删除既有表。
 - 所有列表查询必须有稳定排序与分页上限；邮件正文与收件人属于敏感业务数据，默认日志不打印。
 
@@ -592,7 +592,7 @@ stateDiagram-v2
 - 只有 Owner 会话/CSRF 校验的接口能 `approve` / `reject` / `retry` / `cancel`。
 - Agent capability 不能调用审批接口；即使 Agent 知道 `message_id`，服务端也必须按路由和身份拒绝。
 - 审批前服务端重新计算 `approval_digest` 并与提交时保存的值比较；不一致则拒绝批准（防止审批后被修改）。
-- `approval_digest` 的计算范围固定为：`content_revision`、账号 ID、From 地址/显示名、To/CC/BCC、`reply_to`、主题、纯文本、HTML、每个附件的 `source_type/source_id/file_name/size_bytes/sha256/delivery_mode` 以及链接策略（有效期/下载上限）。不包含创建时间、审批人、尝试次数等易变字段；对规范化 JSON 计算 SHA-256。这样正常重试与状态变化不会改变审批对象。账号/From、收件人、附件或链接策略的任何变化都会改变摘要，必须重新审批；`retry` 不接受改绑字段。
+- `approval_digest` 的计算范围固定为：`content_revision`、账号 ID、From 地址/显示名、To/CC/BCC、`reply_to`、主题、纯文本、HTML、每个附件的 `source_type/source_id/file_name/size_bytes/sha256/delivery_mode` 以及链接策略（有效期/下载上限）。不包含创建时间、审批人、尝试次数等易变字段；对规范化 JSON 计算 SHA-256。这样正常重试与状态变化不会改变审批对象。账号/From、收件人、附件或链接策略的任何变化都会改变摘要，必须复制为新草稿并重新审批；已提交消息不能回到 `pending_approval`，`retry` 不接受改绑字段。
 - 批准时把 `approved_digest` 写入 Delivery；worker 发送前再次校验，任何不一致进入 `failed`，错误码 `mail_approval_digest_mismatch`。
 
 ### 2.5 Secret 引用与凭据
@@ -857,7 +857,7 @@ POST /api/v1/mail-messages/mail_message_.../retry
 {"reason": "已确认收件人地址"}
 ```
 
-重试只对 `failed` / `dead_letter` 有效，且只重试原快照（账号、From、收件人、附件、链接策略不变）；创建新的 delivery generation，旧记录保留。改账号或改链接策略必须复制为新草稿并重新审批。`cancel` 对 `pending_approval` / `queued`（含退避）/ `failed` / `dead_letter` 有效，`sending` 返回 `mail_invalid_state`。Owner 创建草稿时如命中内容指纹，必须显式传 `duplicate_override=true` 与 `override_reason`；Agent API 不提供该开关。
+重试只对 `failed` / `dead_letter` 有效，且只重试原快照（账号、From、收件人、附件、链接策略不变）；创建新的 delivery generation，旧记录保留。改账号、From、收件人或链接策略必须复制为新草稿并重新审批；**已提交的消息不能回到 `pending_approval`**。`cancel` 对 `pending_approval` / `queued`（含退避）/ `failed` / `dead_letter` 有效，`sending` 返回 `mail_invalid_state`。Owner 创建草稿时如命中内容指纹，必须显式传 `duplicate_override=true` 与 `override_reason`；Agent API 不提供该开关。
 
 ### 4.3 Agent API
 
@@ -1120,8 +1120,8 @@ HTML 模板只使用安全子集，变量值自动转义；示例中不包含真
   - 风险提示：外部域名、白名单未命中、合计大小接近阈值、含受控链接、含 BCC、模板版本被归档等。
   - 审批摘要短码（`approval_digest` 前 12 位）与「批准/拒绝」按钮。
 - 审批后内容不可改；需要修改时必须拒绝或退回，重新提交并生成新的 `content_revision` 与摘要。
-- **账号/From 冻结**：消息提交后 `account_id`、`from_address`、`from_name` 与收件人集合冻结。`retry` 只能重试同一账号、同一 From、同一收件人、同一附件和同一链接策略，不能携带改绑字段。Owner 要换账号或换名额，必须复制为新草稿、重新提交并重新审批；禁止「改绑后重试」。
-- **链接策略属于审批内容**：修改有效期或下载上限会改变 `approval_digest`，消息回到 `pending_approval`，必须重新审批；旧 delivery 的 `approved_digest` 不再匹配，不能直接发送。
+- **账号/From 冻结**：消息提交后 `account_id`、`from_address`、`from_name` 与收件人集合冻结。`retry` 只能重试同一账号、同一 From、同一收件人、同一附件和同一链接策略，不能携带改绑字段。Owner 要改账号、From 或收件人，必须复制为新草稿、重新提交并重新审批；禁止「改绑后重试」。
+- **链接策略属于审批内容**：修改链接有效期或下载上限同样必须复制为新草稿并重新审批；已提交的消息**不能回到 `pending_approval`**。原消息提交后只允许撤销链接（见 7.3），撤销不改变审批摘要，也不允许「缩短有效期后继续沿用原审批」。
 - **Task 终态策略**：Task 进入 `completed/failed/cancelled` 后，已存在的 `pending_approval` 仍允许 Owner 审批/拒绝，`queued`（含退避等待）继续投递，`failed/dead_letter` 仍允许按同一快照重试/取消；已存在的 `draft` 保持只读、可取消/归档但不能提交；不允许新建邮件、修改内容或改绑。这样已批准的提测邮件不会因 Task 结束而静默丢失，同时不会扩大新外发范围。所有终态后的审批/重试都写审计。
 - 审批卡在 Task 时间线与「资源 → 邮件 → 发送记录」都可操作，服务端使用同一审批接口与审计。
 
@@ -1134,14 +1134,22 @@ HTML 模板只使用安全子集，变量值自动转义；示例中不包含真
 - 临时失败：Delivery → `queued`，`attempts++`，按退避更新 `available_at`；Message 保持/回到 `queued`，时间线显示「重试中」。
 - 永久失败：Delivery → `failed`，Message → `failed`，Owner 可修复后重试。
 - 重试耗尽或结果不确定：Delivery → `dead_letter`，Message → `dead_letter`，保留每次 Attempt，Owner 可重试或取消。
-- 取消：Owner 可取消 `pending_approval`、`queued`（含退避等待）、`failed`、`dead_letter`。取消 `queued` 时在同一事务把 Message 与 Delivery 都置为 `cancelled`；worker 的领取条件包含 `state='queued'`，自然不会再领取。`sending` 拒绝取消，避免与已发出的 DATA 竞态。
+- 取消：Owner 可取消 `pending_approval`、`queued`（含退避等待）、`failed`、`dead_letter`。取消 `queued` 时，Delivery 的 UPDATE 必须带 `state='queued'` 条件：
+
+  ```sql
+  UPDATE mail_deliveries
+  SET state='cancelled', lease_id='', lease_until='', updated_at=:now
+  WHERE message_id=:message_id AND state='queued';
+  ```
+
+  影响行数为 0 说明记录已被 worker 领取或状态已变，此时回滚 Message 取消并返回 `mail_invalid_state`，不能把 `sending` 误取消。`sending` 一律拒绝取消，避免与已发出的 DATA 竞态。
 - 死信不阻塞同账号其他邮件；但同账号连续认证失败或限速时，worker 应暂停领取并显示阻塞原因。
 - 同一账号默认并发 2；不同账号可并行。邮件没有跨消息顺序要求，不实现会话级严格顺序。
 - 时间线投影：状态变化写 Event Hub 事件，并 upsert 既有 `conversation_items`（`category='mail'`，`kind='mail_message'`）的同一张卡片；`payload_json` 只放 `message_id`、状态、错误码摘要与时间，不放正文/凭据。审批卡需要正文时按 `message_id` 读取 Owner API。事件名建议 `mail_approval_requested`、`mail_approved`、`mail_rejected`、`mail_queued`、`mail_sent`、`mail_failed`、`mail_dead_letter`、`mail_cancelled`、`mail_retried`；这些是 Task 时间线事件，不是渠道 source event。
 
 ### 6.3 租约、阶段落盘与回收
 
-发送过程用两道数据库条件更新防止重复邮件：进入 DATA 前先把 `smtp_phase='data'` 带租约条件落盘；所有最终结果写回也校验 `lease_id`。任何一步影响行数为 0，worker 必须停止，不得继续发送或覆盖状态。
+发送过程用两道数据库条件更新防止重复邮件：进入 DATA 前先把 `smtp_phase='data'` 带租约条件落盘；所有最终结果写回也校验 `lease_id`。任何一步影响行数为 0，worker 必须停止，不得继续发送或覆盖状态。所有 `available_at` / `lease_until` 比较使用同一种定长时间格式（固定 9 位小数 RFC3339）或整数 epoch 毫秒，避免同秒字典序误差。
 
 **领取 queued**：
 
@@ -1151,14 +1159,24 @@ SET state='sending', lease_id=:lease, lease_until=:lease_until,
     attempts=attempts+1, smtp_phase='connect', updated_at=:now
 WHERE id = (
     SELECT id FROM mail_deliveries
-    WHERE state='queued' AND available_at<=:now
+    WHERE state='queued' AND available_at<=:now AND attempts<8
     ORDER BY available_at, created_at
     LIMIT 1
 )
-AND state='queued' AND available_at<=:now;
+AND state='queued' AND available_at<=:now AND attempts<8;
 ```
 
-影响行数必须为 1；SQLite 可用 `RETURNING` 取回记录。按账号并发时用 `idx_mail_deliveries_claim_account` 对应的候选子查询。worker 每轮应先回收过期 `sending`，再领取 `queued`，避免同一记录被两个 worker 同时处理。
+影响行数必须为 1；SQLite 可用 `RETURNING` 取回记录。按账号并发时用 `idx_mail_deliveries_claim_account` 对应的候选子查询。worker 每轮应先回收过期 `sending`，再领取 `queued`，避免同一记录被两个 worker 同时处理。`attempts<8` 保证耗尽预算的记录不会被再次领取。
+
+领取 Delivery 的同一事务必须把 Mail Message 从 `queued` 条件更新为 `sending`：
+
+```sql
+UPDATE mail_messages
+SET status='sending', updated_at=:now
+WHERE id=:message_id AND status='queued';
+```
+
+若 Message 影响行数不为 1，必须回滚整个领取（Delivery 回到 `queued`），避免出现 Message 与 Delivery 状态分裂。
 
 **进入 SMTP DATA 前**：
 
@@ -1195,22 +1213,34 @@ WHERE id=:id AND state='sending' AND lease_id=:lease;
 **回收过期 sending**：worker 每轮先执行两条条件 UPDATE。
 
 ```sql
--- DATA 之前失联：安全重试
+-- 1) 重试预算耗尽：过期 sending（或残留 queued）直接死信，避免崩溃循环
+UPDATE mail_deliveries
+SET state='dead_letter',
+    outcome_certainty=CASE WHEN smtp_phase IN ('data','finished') THEN 'unknown' ELSE '' END,
+    lease_id='', lease_until='',
+    last_error_code=CASE WHEN smtp_phase IN ('data','finished')
+                         THEN 'smtp_ambiguous_after_data' ELSE 'smtp_attempts_exhausted' END,
+    updated_at=:now
+WHERE ((state='sending' AND lease_until<=:now) OR state='queued')
+  AND attempts>=8;
+
+-- 2) DATA 之前失联且仍有预算：安全重试
 UPDATE mail_deliveries
 SET state='queued', smtp_phase='', lease_id='', lease_until='',
     available_at=:now, last_error_code='smtp_lease_expired_before_data', updated_at=:now
-WHERE state='sending' AND lease_until<=:now
+WHERE state='sending' AND lease_until<=:now AND attempts<8
   AND smtp_phase IN ('','connect','tls','auth','mail_from','rcpt_to');
 
--- DATA 或 finished 阶段失联：结果不确定，禁止自动重发
+-- 3) DATA 或 finished 阶段失联且仍有预算：结果不确定，禁止自动重发
 UPDATE mail_deliveries
 SET state='dead_letter', outcome_certainty='unknown',
     lease_id='', lease_until='',
     last_error_code='smtp_ambiguous_after_data', updated_at=:now
-WHERE state='sending' AND lease_until<=:now AND smtp_phase IN ('data','finished');
+WHERE state='sending' AND lease_until<=:now AND attempts<8
+  AND smtp_phase IN ('data','finished');
 ```
 
-对应索引为 `idx_mail_deliveries_reclaim(state, lease_until) WHERE state='sending'`。回收导致 Delivery 进入 `dead_letter` 时，必须在同一事务把对应 Mail Message 置为 `dead_letter` 并写时间线/审计；回收为 `queued` 时 Message 保持 `queued`。
+对应索引为 `idx_mail_deliveries_reclaim(state, lease_until) WHERE state='sending'`。三条回收 SQL 必须按 1→2→3 顺序执行，`attempts>=8` 的记录只能进入 `dead_letter`，错误码为 `smtp_attempts_exhausted`（DATA 前）或 `smtp_ambiguous_after_data`（DATA 后）。回收导致 Delivery 进入 `dead_letter` 时，必须在同一事务把对应 Mail Message 置为 `dead_letter` 并写时间线/审计；回收为 `queued` 时 Message 保持 `queued`。
 
 **状态不变量**：
 
@@ -1222,7 +1252,7 @@ WHERE state='sending' AND lease_until<=:now AND smtp_phase IN ('data','finished'
 
 ### 6.4 重试、退避与不确定性
 
-- 最多 8 次 SMTP 尝试（1 次首发 + 7 次重试）。首发立即；第 1–6 次失败后的等待依次为 1s、5s、30s、2m、10m、1h；第 7 次失败后再等 1h 进行第 8 次尝试；第 8 次失败后进入 `dead_letter`。等待时间使用 full jitter。
+- 最多 8 次 SMTP 尝试（1 次首发 + 7 次重试）。首发立即；第 1–6 次失败后的等待依次为 1s、5s、30s、2m、10m、1h；第 7 次失败后再等 1h 进行第 8 次尝试；第 8 次失败后进入 `dead_letter`。过期回收发现 `attempts>=8` 时也直接进入 `dead_letter`，错误码为 `smtp_attempts_exhausted`（DATA 前）或 `smtp_ambiguous_after_data`（DATA 后），不能继续领取。等待时间使用 full jitter。
 - SMTP 没有 HTTP 风格的 `Retry-After` 响应头，禁止解析；服务端 421/4xx 响应文本中的建议等待只记录为诊断，不改变本地退避。
 - `smtp_phase` 在 `data` 之前失败可自动重试；进入 `data` 后必须区分「服务端明确响应」与「断线/超时」：
   - 收到明确 4xx/5xx：按 3.4 的「阶段 + 状态码」映射；4xx 可安全整封重试，5xx 永久失败。
@@ -1275,7 +1305,7 @@ WHERE state='sending' AND lease_until<=:now AND smtp_phase IN ('data','finished'
 ### 7.3 受控下载链接
 
 - 令牌：32 字节随机值；Secret Store 保存原值（`link_token_ref`），数据库保存 SHA-256 摘要（`link_token_hash`），下载端点只比较摘要。
-- 有效期默认 7 天；最大下载次数默认 20；Owner 可缩短/撤销；过期或达上限返回 404/410，不泄露文件是否存在。
+- 有效期默认 7 天；最大下载次数默认 20；**Owner 只能撤销链接，撤销立即生效且不改变审批摘要**；不能缩短有效期/减少下载上限后继续使用原审批，此类修改必须复制新草稿重新审批（见 6.1）。过期或达上限返回 404/410，不泄露文件是否存在。
 - **独立下载入口**：链接指向专用域名/监听器，例如 `https://mail-downloads.example.com/d/{token}`，只暴露 `GET /d/{token}`（确认页）与 `POST /d/{token}/confirm`（实际下载）。不得让外部收件人访问 `/api/v1/`、控制面路由、登录页或其他 AHA 页面；独立监听器不携带 Session/CSRF/Cookie，只校验 Host allowlist、令牌与确认 nonce。
 - **确认页避免网关预取消耗配额**：`GET /d/{token}` 只返回最小确认页（文件名、大小、SHA256、有效期、下载按钮），不返回文件、不增加下载计数；`POST /d/{token}/confirm` 校验确认 nonce 后才流式返回文件并原子递增 `link_download_count`。邮件安全网关的 GET 预取不会消耗 20 次上限；HEAD 请求同样不计数。
 - 确认页使用一次性、短时有效的签名 nonce（绑定 token 与过期时间），表单 POST 校验 Origin/Referer 与 nonce；页面 `Cache-Control: no-store`、`Referrer-Policy: no-referrer`，下载响应 `X-Content-Type-Options: nosniff`、`Content-Disposition: attachment`。
@@ -1283,7 +1313,7 @@ WHERE state='sending' AND lease_until<=:now AND smtp_phase IN ('data','finished'
 - **令牌路径必须脱敏**：AHA 访问日志、反向代理 access log、错误日志与追踪系统都不得记录完整 `/d/{token}`；记录 `token_hash` 前 8 位或固定 `[redacted]`。部署时必须同步修改代理日志规则，不能只依赖应用层。
 - 邮件正文只保存稳定占位符 `%%MAIL_LINK:<mail_attachment_id>%%`；发送时替换为真实链接。审批卡显示「受控链接，有效期 7 天，最多 20 次」与附件 SHA256，不显示令牌。
 - 撤销：Owner 设置 `link_revoked_at`；worker 发送时发现已撤销则失败，不发送失效链接。
-- 链接策略（有效期、下载上限）属于审批内容；Owner 修改后必须重新审批，不能沿用旧 `approved_digest`（见 6.1）。
+- 链接策略（有效期、下载上限）属于审批内容；任何修改必须复制新草稿并重新审批，不能沿用旧 `approved_digest`（见 6.1）。已提交消息上唯一允许的链接操作是撤销，且撤销不改变审批摘要。
 - 审计：链接生成、确认页访问、实际下载、撤销都写 Audit；日志不打印完整令牌。
 
 ### 7.4 构建产物与外部 URL
@@ -1450,7 +1480,7 @@ WHERE state='sending' AND lease_until<=:now AND smtp_phase IN ('data','finished'
   - DATA 前条件更新影响行数为 0 时不得发送 DATA；旧 worker 的最终结果写回影响行数为 0 时不得覆盖新状态；`sending` 过期按 `smtp_phase` 分流回收，`data`/`finished` 只能进死信，EXPLAIN 命中 `idx_mail_deliveries_reclaim`。
   - 多收件人：任一 RCPT 5xx 或 4xx 时 RSET 且不发送 DATA，不出现部分投递；只有全部 2xx 才进入 DATA。
   - 幂等键与内容指纹不产生双发；仅换新 key 仍命中指纹，Owner `duplicate_override` 才可绕过并写审计；限速与重试退避可观测，不解析 `Retry-After`。
-  - 重试不改账号/From/收件人/链接策略；改绑或改链接策略必须重新审批；`queued`（含退避）可取消，`sending` 不可取消。
+  - 重试不改账号/From/收件人/链接策略；改账号/From/收件人或链接策略必须复制新草稿重新审批，已提交消息不能回 `pending_approval`；`queued`（含退避）可取消，`sending` 不可取消。
   - 直接附件 ≤20 MiB、受控链接 >20 MiB、>25 MiB 拒绝；哈希不符时发送前失败。
   - 日志脱敏测试：授权码、AUTH 行、完整正文、下载令牌不出现在测试日志。
 
@@ -1534,3 +1564,12 @@ WHERE state='sending' AND lease_until<=:now AND smtp_phase IN ('data','finished'
 | S5 | §5.2、§9.6、§10.2 | 变量替换后二次 sanitize + URL scheme 校验 |
 | S6 | §4.2、§7.3、§9.4、§11.12 | 独立下载入口、确认页防预取、令牌日志脱敏、限速 |
 | N | §3.4、§4.5、§6.4、§6.5 | 删除 SMTP Retry-After；8 次尝试的最后两次按 1h；指纹 override 仅 Owner 显式开启 |
+
+## 附录 B. task-120 增量快审修订（S-1、N1–N3）
+
+| 项 | 修订位置 | 摘要 |
+| --- | --- | --- |
+| S-1 | §2.4、§4.2、§6.1、§7.3 | 改账号/From/收件人/链接策略一律复制新草稿重审；已提交消息不能回到 `pending_approval`；原消息只能撤销链接且不改变摘要 |
+| N1 | §2.1、§6.3 | `available_at`/`lease_until` 使用定长 RFC3339（9 位小数）或 epoch 毫秒，避免同秒字典序误差 |
+| N2 | §6.3、§6.4 | 领取/回收要求 `attempts<8`；`attempts>=8` 的过期记录直接 `dead_letter`，不再无限重试 |
+| N3 | §6.2、§6.3 | Message 与 Delivery 领取同事务进入 `sending`；取消 queued 的条件 UPDATE 影响 0 行返回 `mail_invalid_state` |
