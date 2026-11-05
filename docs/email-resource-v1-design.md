@@ -583,7 +583,7 @@ stateDiagram-v2
 ```
 
 - `smtp_phase` 是判断「可安全重试」的关键：连接、TLS、AUTH、MAIL FROM、RCPT TO 阶段断线可重试；`DATA` 之后断线属于结果不确定，禁止盲目重发，进入 `dead_letter` 并标记 `outcome_certainty=unknown`。
-- 租赁过期（worker 崩溃）时，如果 `smtp_phase` 在 `data` 之前，回收为 `queued`；否则进入 `dead_letter`，由 Owner 决定是否重试。
+- 租赁过期（worker 崩溃）时，如果 `smtp_phase` 在 `data` 之前，Delivery 回收为 `queued` 并在同一事务把 Message 条件更新回 `queued`；否则进入 `dead_letter`，由 Owner 决定是否重试。
 - 同一封邮件同一时刻最多一个 active delivery；重放生成新 `generation`，但不并发。
 - 租约、进入 DATA 前的 `smtp_phase` 条件落盘、最终结果的 lease 校验、以及过期 `sending` 的回收 SQL 见 6.3；这些规则是本设计避免重复发送的强制约束，不能只由 worker 内存状态保证。
 
@@ -1131,7 +1131,7 @@ HTML 模板只使用安全子集，变量值自动转义；示例中不包含真
 - worker 以条件 UPDATE 领取 `queued`（条件包含 `available_at<=now`），写入 `lease_id` / `lease_until`；同一轮必须先回收过期 `sending`（见 6.3）。领取、回收、DATA 前阶段落盘和结果写回都必须带 `lease_id` 条件，不能只依赖内存状态。
 - 发送前校验：账号已启用、凭据存在、`approved_digest` 与当前消息摘要一致、附件源仍存在且 SHA256 匹配、链接令牌可解析。
 - 成功（SMTP 250）：Delivery → `sent`，Message → `sent`，记录 `message_id_header`、`smtp_response`、`outcome_certainty=provider_accepted`。
-- 临时失败：Delivery → `queued`，`attempts++`，按退避更新 `available_at`；Message 保持/回到 `queued`，时间线显示「重试中」。
+- 临时失败：Delivery → `queued`，`attempts++`，按退避更新 `available_at`；Message 在同一事务条件更新回 `queued`（`WHERE status='sending'`），时间线显示「重试中」。Message 更新影响行数不为 1 时回滚本次写回并写审计，避免 Message 与 Delivery 分裂。
 - 永久失败：Delivery → `failed`，Message → `failed`，Owner 可修复后重试。
 - 重试耗尽或结果不确定：Delivery → `dead_letter`，Message → `dead_letter`，保留每次 Attempt，Owner 可重试或取消。
 - 取消：Owner 可取消 `pending_approval`、`queued`（含退避等待）、`failed`、`dead_letter`。取消 `queued` 时，Delivery 的 UPDATE 必须带 `state='queued'` 条件：
@@ -1240,7 +1240,17 @@ WHERE state='sending' AND lease_until<=:now AND attempts<8
   AND smtp_phase IN ('data','finished');
 ```
 
-对应索引为 `idx_mail_deliveries_reclaim(state, lease_until) WHERE state='sending'`。三条回收 SQL 必须按 1→2→3 顺序执行，`attempts>=8` 的记录只能进入 `dead_letter`，错误码为 `smtp_attempts_exhausted`（DATA 前）或 `smtp_ambiguous_after_data`（DATA 后）。回收导致 Delivery 进入 `dead_letter` 时，必须在同一事务把对应 Mail Message 置为 `dead_letter` 并写时间线/审计；回收为 `queued` 时 Message 保持 `queued`。
+对应索引为 `idx_mail_deliveries_reclaim(state, lease_until) WHERE state='sending'`。三条回收 SQL 必须按 1→2→3 顺序执行，`attempts>=8` 的记录只能进入 `dead_letter`，错误码为 `smtp_attempts_exhausted`（DATA 前）或 `smtp_ambiguous_after_data`（DATA 后）。
+
+回收为 `queued` 时，必须在同一事务把对应 Mail Message 条件更新回 `queued`：
+
+```sql
+UPDATE mail_messages
+SET status='queued', updated_at=:now
+WHERE id=:message_id AND status='sending';
+```
+
+该 UPDATE 影响行数必须为 1；为 0 时回滚本次回收并写安全审计，不能让 Message 停在 `sending`（否则会阻塞后续领取且 Owner 无法取消）。回收导致 Delivery 进入 `dead_letter` 时，必须在同一事务把对应 Mail Message 置为 `dead_letter` 并写时间线/审计。
 
 **状态不变量**：
 
@@ -1570,6 +1580,7 @@ WHERE state='sending' AND lease_until<=:now AND attempts<8
 | 项 | 修订位置 | 摘要 |
 | --- | --- | --- |
 | S-1 | §2.4、§4.2、§6.1、§7.3 | 改账号/From/收件人/链接策略一律复制新草稿重审；已提交消息不能回到 `pending_approval`；原消息只能撤销链接且不改变摘要 |
+| S-2 | §2.4、§6.2、§6.3 | 回收为 `queued` 时 Message 条件更新回 `queued`；禁止 Message 停在 `sending` |
 | N1 | §2.1、§6.3 | `available_at`/`lease_until` 使用定长 RFC3339（9 位小数）或 epoch 毫秒，避免同秒字典序误差 |
 | N2 | §6.3、§6.4 | 领取/回收要求 `attempts<8`；`attempts>=8` 的过期记录直接 `dead_letter`，不再无限重试 |
 | N3 | §6.2、§6.3 | Message 与 Delivery 领取同事务进入 `sending`；取消 queued 的条件 UPDATE 影响 0 行返回 `mail_invalid_state` |
