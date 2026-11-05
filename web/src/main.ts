@@ -21,7 +21,7 @@ import {DEFAULT_TASK_STATUS_FILTERS, LOCAL_TASK_DEVICE_FILTER, TASK_STATUS_GROUP
 import type {TaskStatusGroup} from "./task_filters.js";
 import {TASK_TOOL_DEFAULT_WIDTH, normalizePinnedTaskTool, normalizeTaskToolMode, normalizeTaskToolWidth, renderTaskToolButtons, renderTaskToolContent, renderTaskToolPanel} from "./task_tools.js";
 import type {TaskTool, TaskToolMode} from "./task_tools.js";
-import {TASK_SLASH_COMMANDS, bindMessageBubbleControls, captureInteractiveRegion, clearNavigationSnapshot, eventRefreshesTaskList, exactSlashCommand, executeAgentSessionAction, loadNavigationSnapshot, matchingSlashCommands, paginateItems, paginationHTML, petWatchActionKeys, renderWorkspaceDetection, restoreInteractiveRegion, saveNavigationSnapshot, textMatchesQuery} from "./ui_helpers.js";
+import {TASK_SLASH_COMMANDS, bindMessageBubbleControls, captureInteractiveRegion, clearNavigationSnapshot, createListRefreshScheduler, createResourceLoader, eventRefreshesTaskList, exactSlashCommand, executeAgentSessionAction, loadNavigationSnapshot, matchingSlashCommands, paginateItems, paginationHTML, petWatchActionKeys, renderWorkspaceDetection, restoreInteractiveRegion, saveNavigationSnapshot, textMatchesQuery} from "./ui_helpers.js";
 import type {InteractiveRegionState} from "./ui_helpers.js";
 import {
   compactNumber,
@@ -81,7 +81,7 @@ import type {
   Workspace,
 } from "./types.js";
 type View = "projects" | "channels" | "models" | "hardware" | "tasks" | "knowledge" | "prompts" | "proxy" | "sync" | "advanced" | "data" | "other" | "mcp" | "pet-settings" | "pet-diary";
-type ResourceKey = "projects" | "workspaces" | "tasks" | "system" | "providers" | "models" | "env" | "accounts" | "skills" | "channels" | "hardware" | "knowledge" | "proxy" | "advanced" | "sync" | "prompts";
+type ResourceKey = "projects" | "workspaces" | "tasks" | "system" | "providers" | "models" | "env" | "accounts" | "skills" | "channels" | "hardware" | "knowledge" | "proxy" | "advanced" | "sync" | "prompts" | "mcp" | "data";
 type TaskFilterKind = "project" | "status" | "device";
 interface ResourceState {loading: boolean; loaded: boolean; error: string; updatedAt: number}
 interface TaskChannelState {
@@ -376,7 +376,58 @@ let taskListPointerActive = false;
 let appPointerActive = false;
 let openingTaskID = "";
 let listRefreshInFlight = false;
-let listRefreshQueued = false;
+// Startup prefetch never chains other views. It runs at most once, on idle, and
+// only while the user has not interacted or opened a Task.
+let secondaryPrefetchHandle: number | null = null;
+let secondaryPrefetchTimer = 0;
+let secondaryPrefetchDone = false;
+let userInteracted = false;
+// Bumped while a prefetch is issuing loadResource() calls so those requests can
+// be counted without treating the first-screen loads as prefetch.
+let prefetchRequestTracking = 0;
+
+// Lightweight, UI-free metrics for real-browser checks. `?perf=1` adds sparse
+// console output; production stays silent and the counters are readable from
+// `window.__ahaPerf`.
+interface AhaPerfMetrics {
+  firstScreenMs: number;
+  prefetchRuns: number;
+  prefetchRequests: number;
+  listRefreshRequests: number;
+  listRefreshLastMs: number;
+  listRefreshTotalMs: number;
+  taskOpenCount: number;
+  taskOpenLastMs: number;
+  taskOpenTotalMs: number;
+}
+const perfEnabled = new URLSearchParams(window.location.search).get("perf") === "1";
+const perfMetrics: AhaPerfMetrics = {
+  firstScreenMs: 0,
+  prefetchRuns: 0,
+  prefetchRequests: 0,
+  listRefreshRequests: 0,
+  listRefreshLastMs: 0,
+  listRefreshTotalMs: 0,
+  taskOpenCount: 0,
+  taskOpenLastMs: 0,
+  taskOpenTotalMs: 0,
+};
+(window as unknown as {__ahaPerf: AhaPerfMetrics}).__ahaPerf = perfMetrics;
+const bootStartedAt = performance.now();
+
+const listRefreshScheduler = createListRefreshScheduler({
+  debounceMs: 350,
+  maxWaitMs: 1000,
+  now: () => Date.now(),
+  schedule: (callback, delay) => window.setTimeout(callback, delay),
+  cancel: handle => window.clearTimeout(handle),
+  // While a Task detail is open (or opening), the per-Task SSE keeps the detail
+  // current; a list refresh would only contend with it and reset the list behind
+  // the user. It stays pending until the list is visible again.
+  canRefresh: () => Boolean(state.auth?.authenticated) && !document.hidden && !state.selectedTask && !openingTaskID,
+  isInFlight: () => listRefreshInFlight,
+  refresh: performListRefresh,
+});
 let authRecoveryOpen = false;
 let messageSubmitPending = false;
 let navigationRestoring = true;
@@ -404,7 +455,7 @@ document.addEventListener("keydown", event => {
 
 const resourceStates = Object.fromEntries([
   "projects", "workspaces", "tasks", "system", "providers", "models", "env", "accounts", "skills",
-  "channels", "hardware", "knowledge", "proxy", "advanced", "sync", "prompts",
+  "channels", "hardware", "knowledge", "proxy", "advanced", "sync", "prompts", "mcp", "data",
 ].map(key => [key, {loading: false, loaded: false, error: "", updatedAt: 0}])) as Record<ResourceKey, ResourceState>;
 const resourceRequests = new Map<ResourceKey, Promise<void>>();
 const listPages: Record<"projects" | "tasks" | "knowledge", {cursor: string; hasMore: boolean; loadingMore: boolean}> = {
@@ -457,28 +508,21 @@ function resourcesForView(view: View): ResourceKey[] {
   }
 }
 
-async function loadResource(key: ResourceKey, force: boolean, action: () => Promise<void>): Promise<void> {
-  if (!force && resourceStates[key].loaded) return;
-  const current = resourceRequests.get(key);
-  if (current) return current;
-  resourceStates[key].loading = true;
-  resourceStates[key].error = "";
-  window.queueMicrotask(() => {
+const loadResource = createResourceLoader({
+  states: resourceStates,
+  requests: resourceRequests,
+  onStart: () => {
+    // Counted after the cache/in-flight early returns, so this reflects requests
+    // actually issued during an idle prefetch.
+    if (prefetchRequestTracking > 0) perfMetrics.prefetchRequests++;
+    window.queueMicrotask(() => {
+      if (state.auth?.authenticated) render();
+    });
+  },
+  onFinish: () => {
     if (state.auth?.authenticated) render();
-  });
-  const request = action().then(() => {
-    resourceStates[key].loaded = true;
-    resourceStates[key].updatedAt = Date.now();
-  }).catch(error => {
-    resourceStates[key].error = error instanceof Error ? error.message : String(error);
-  }).finally(() => {
-    resourceStates[key].loading = false;
-    resourceRequests.delete(key);
-    if (state.auth?.authenticated) render();
-  });
-  resourceRequests.set(key, request);
-  return request;
-}
+  },
+});
 
 function escapeHTML(value: unknown): string {
   return String(value ?? "")
@@ -1118,6 +1162,10 @@ async function bootstrap(): Promise<void> {
     state.loading = false;
     if (state.selectedTask) requestConversationBottom();
     render();
+    if (state.auth?.authenticated && !perfMetrics.firstScreenMs) {
+      perfMetrics.firstScreenMs = Math.round(performance.now() - bootStartedAt);
+      if (perfEnabled) console.info(`[aha-perf] first screen ${perfMetrics.firstScreenMs}ms`);
+    }
   }
 }
 
@@ -1644,25 +1692,82 @@ async function ensureViewData(view: View, force = false): Promise<void> {
   await Promise.all(jobs);
 }
 
-async function loadDataInventory(_force = false): Promise<void> {
-  state.dataInventoryLoading = true;
-  state.dataInventoryError = "";
-  try {
-    const result = await api.dataInventory();
-    state.dataInventory = result.inventory;
-  } catch (error) {
-    state.dataInventoryError = error instanceof Error ? error.message : String(error);
-  } finally {
-    state.dataInventoryLoading = false;
+function loadDataInventory(force = false): Promise<void> {
+  return loadResource("data", force, async () => {
+    state.dataInventoryLoading = true;
+    state.dataInventoryError = "";
+    try {
+      const result = await api.dataInventory();
+      state.dataInventory = result.inventory;
+    } catch (error) {
+      state.dataInventoryError = error instanceof Error ? error.message : String(error);
+      // Rethrow so the loader does not mark a failed inventory as loaded; an
+      // idle prefetch may retry it later.
+      throw error;
+    } finally {
+      state.dataInventoryLoading = false;
+    }
+  });
+}
+
+function cancelSecondaryPrefetch(): void {
+  if (secondaryPrefetchHandle !== null) {
+    const cancelIdle = (window as unknown as {cancelIdleCallback?: (handle: number) => void}).cancelIdleCallback;
+    if (cancelIdle) cancelIdle(secondaryPrefetchHandle);
+    secondaryPrefetchHandle = null;
+  }
+  if (secondaryPrefetchTimer) {
+    window.clearTimeout(secondaryPrefetchTimer);
+    secondaryPrefetchTimer = 0;
   }
 }
 
+// Warm only the current view once the page is idle. The previous version chained
+// models -> channels -> knowledge 250 ms after paint, which fired ~10 requests
+// into the exact window where a user opens a Task. Here a skip is final: once the
+// user has interacted or opened a Task there is no background warm-up at all, and
+// loaded resources are deduplicated by loadResource().
 function prefetchSecondaryData(): void {
-  window.setTimeout(() => {
-    if (!state.auth?.authenticated) return;
-    void ensureViewData("models").then(() => ensureViewData("channels")).then(() => ensureViewData("knowledge"));
-  }, 250);
+  cancelSecondaryPrefetch();
+  if (secondaryPrefetchDone || userInteracted) return;
+  const run = (): void => {
+    secondaryPrefetchHandle = null;
+    secondaryPrefetchTimer = 0;
+    if (secondaryPrefetchDone) return;
+    if (!state.auth?.authenticated || userInteracted || state.selectedTask || openingTaskID) {
+      secondaryPrefetchDone = true;
+      return;
+    }
+    // A hidden tab stays idle-worthy for later; the visibility handler retries.
+    if (document.hidden) return;
+    secondaryPrefetchDone = true;
+    perfMetrics.prefetchRuns++;
+    // ensureViewData issues all of its loader calls synchronously, so the count
+    // window only needs to cover the call itself; counting in its finally would
+    // also attribute unrelated loads that start while it is in flight.
+    prefetchRequestTracking++;
+    try {
+      void ensureViewData(state.view);
+    } finally {
+      prefetchRequestTracking = Math.max(0, prefetchRequestTracking - 1);
+    }
+  };
+  const requestIdle = (window as unknown as {requestIdleCallback?: (callback: () => void, options?: {timeout: number}) => number}).requestIdleCallback;
+  if (requestIdle) {
+    secondaryPrefetchHandle = requestIdle(run, {timeout: 2500});
+  } else {
+    // Short fallback for browsers/WebViews without requestIdleCallback.
+    secondaryPrefetchTimer = window.setTimeout(run, 1200);
+  }
 }
+
+function noteUserInteraction(): void {
+  if (userInteracted) return;
+  userInteracted = true;
+  cancelSecondaryPrefetch();
+}
+window.addEventListener("pointerdown", noteUserInteraction, {capture: true, passive: true});
+window.addEventListener("keydown", noteUserInteraction, {capture: true});
 function persistNavigationState(): void {
   if (navigationRestoring) return;
   saveNavigationSnapshot({
@@ -2111,6 +2216,10 @@ function showTaskLoading(task: Task): void {
 }
 
 async function openTask(taskID: string): Promise<void> {
+  // Opening a Task takes priority over any idle warm-up or queued list refresh.
+  cancelSecondaryPrefetch();
+  secondaryPrefetchDone = true;
+  const openStartedAt = performance.now();
   const version = ++taskOpenVersion;
   openingTaskID = taskID;
   const summary = state.tasks.find(task => task.id === taskID);
@@ -2168,7 +2277,14 @@ async function openTask(taskID: string): Promise<void> {
     }
     throw error;
   } finally {
-    if (version === taskOpenVersion) openingTaskID = "";
+    if (version === taskOpenVersion) {
+      openingTaskID = "";
+      const elapsed = performance.now() - openStartedAt;
+      perfMetrics.taskOpenCount++;
+      perfMetrics.taskOpenLastMs = Math.round(elapsed);
+      perfMetrics.taskOpenTotalMs += elapsed;
+      if (perfEnabled) console.debug(`[aha-perf] openTask ${perfMetrics.taskOpenLastMs}ms`);
+    }
   }
 }
 
@@ -3822,6 +3938,7 @@ function updateTaskLiveRegions(): void {
 
 function render(): void {
   if (!app) return;
+  flushDeferredListRefresh();
   if (state.auth?.authenticated) {
     mountAssistant();
     setAssistantVisible(true);
@@ -5562,41 +5679,59 @@ document.addEventListener("focusout", () => window.setTimeout(flushDeferredRende
 
 // Event-driven list refresh: one global SSE stream keeps the task list (and
 // project/workspace labels) fresh without polling. The task detail view keeps
-// its own per-task SSE; while a detail is open we still refresh list state in
-// the background but only re-render when not inside the detail.
+// its own per-task SSE, so global list refreshes are coalesced and deferred
+// while a detail is open instead of resetting the list underneath it.
 let globalEvents: EventSource | null = null;
 
-async function refreshListData(): Promise<void> {
-  if (!state.auth?.authenticated) return;
-  if (listRefreshInFlight) {
-	listRefreshQueued = true;
-	return;
-  }
+function refreshListData(): void {
+  listRefreshScheduler.request();
+}
+
+// Called by render(): once the detail view closes there is no pending timer for
+// a refresh that was held back, so run it now (the scheduler keeps it pending
+// when a task is still open or the page is hidden).
+function flushDeferredListRefresh(): void {
+  if (!listRefreshScheduler.pending() || listRefreshScheduler.scheduled()) return;
+  listRefreshScheduler.flush();
+}
+
+// Only the scheduler calls this, and it never starts a second request while
+// `listRefreshInFlight` is set, so there is no in-flight guard here that could
+// silently drop a pending refresh.
+async function performListRefresh(): Promise<void> {
   listRefreshInFlight = true;
+  perfMetrics.listRefreshRequests++;
+  const startedAt = performance.now();
   try {
-	do {
-	  listRefreshQueued = false;
-	  try {
-		const [tasks, projects, workspaces] = await Promise.all([api.tasks("", {limit: taskRefreshLimit(), order: taskListOrder}), api.projects({limit: initialListPageSize}), api.workspaces()]);
-		state.tasks = tasks.tasks || [];
-		if (tasks.counts) state.taskFacetCounts = tasks.counts;
-		state.projects = projects.projects || [];
-		state.workspaces = workspaces.workspaces || [];
-		listPages.projects = {cursor: projects.next_cursor || "", hasMore: Boolean(projects.has_more), loadingMore: false};
-		listPages.tasks = {cursor: tasks.next_cursor || "", hasMore: Boolean(tasks.has_more), loadingMore: false};
-		const listPageVisible = state.view === "projects" || state.view === "tasks" || Boolean(state.selectedProject);
-		if (!state.selectedTask && listPageVisible) {
-		  if (taskListPointerActive) state.renderPending = true;
-		  else render();
-		}
-	  } catch {
-		// Transient failures are retried by a queued event or SSE reconnect.
-	  }
-	} while (listRefreshQueued);
+    const [tasks, projects, workspaces] = await Promise.all([api.tasks("", {limit: taskRefreshLimit(), order: taskListOrder}), api.projects({limit: initialListPageSize}), api.workspaces()]);
+    state.tasks = tasks.tasks || [];
+    if (tasks.counts) state.taskFacetCounts = tasks.counts;
+    state.projects = projects.projects || [];
+    state.workspaces = workspaces.workspaces || [];
+    listPages.projects = {cursor: projects.next_cursor || "", hasMore: Boolean(projects.has_more), loadingMore: false};
+    listPages.tasks = {cursor: tasks.next_cursor || "", hasMore: Boolean(tasks.has_more), loadingMore: false};
+    const listPageVisible = state.view === "projects" || state.view === "tasks" || Boolean(state.selectedProject);
+    if (!state.selectedTask && !openingTaskID && listPageVisible) {
+      if (taskListPointerActive) state.renderPending = true;
+      else render();
+    }
+  } catch {
+    // Transient failures are retried by a queued event or SSE reconnect.
   } finally {
-	listRefreshInFlight = false;
+    listRefreshInFlight = false;
+    const elapsed = performance.now() - startedAt;
+    perfMetrics.listRefreshLastMs = Math.round(elapsed);
+    perfMetrics.listRefreshTotalMs += elapsed;
+    if (perfEnabled) console.debug(`[aha-perf] list refresh ${perfMetrics.listRefreshLastMs}ms`);
   }
 }
+
+// A hidden page pauses refresh traffic; on return, one coalesced catch-up runs.
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) return;
+  if (listRefreshScheduler.pending()) listRefreshScheduler.request();
+  if (!secondaryPrefetchDone) prefetchSecondaryData();
+});
 
 app?.addEventListener("pointerdown", event => {
   if (event.isPrimary) appPointerActive = true;
@@ -5646,12 +5781,12 @@ function openGlobalEvents(): void {
       return;
     }
     if (eventRefreshesTaskList(type)) {
-      void refreshListData();
+      refreshListData();
     }
   });
   // The stream auto-reconnects; refresh on (re)open so events missed while
   // disconnected are caught up.
-  globalEvents.addEventListener("open", () => void refreshListData());
+  globalEvents.addEventListener("open", () => refreshListData());
 }
 
 function closeGlobalEvents(): void {
@@ -5710,13 +5845,15 @@ startUITranslationObserver();
 render();
 void bootstrap();
 
-async function loadMCPServers(force = false): Promise<void> {
-  try {
-    const result = await api.mcpServers();
-    state.mcpServers = result.servers || [];
-  } catch {
-    state.mcpServers = [];
-  }
+function loadMCPServers(force = false): Promise<void> {
+  return loadResource("mcp", force, async () => {
+    try {
+      const result = await api.mcpServers();
+      state.mcpServers = result.servers || [];
+    } catch {
+      state.mcpServers = [];
+    }
+  });
 }
 
 function mcpView(): string {

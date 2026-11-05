@@ -26,6 +26,128 @@ export function eventRefreshesTaskList(type: string): boolean {
   return ["task_", "turn_", "round_", "knowledge_"].some(prefix => type.startsWith(prefix));
 }
 
+export interface ResourceStateLike {
+  loading: boolean;
+  loaded: boolean;
+  error: string;
+  updatedAt: number;
+}
+
+export interface ResourceLoaderOptions {
+  states: Record<string, ResourceStateLike>;
+  requests: Map<string, Promise<void>>;
+  onStart?: (key: string) => void;
+  onFinish?: (key: string) => void;
+}
+
+// Cache plus single-flight for lazily loaded view resources. Both the cached-hit
+// early return and the in-flight dedupe happen before onStart, so a caller can
+// count real requests instead of prefetch attempts. Every view resource must go
+// through this loader; a fetch helper that bypasses it is re-requested by the
+// idle prefetch even when its data is already on screen.
+export function createResourceLoader(options: ResourceLoaderOptions): (key: string, force: boolean, action: () => Promise<void>) => Promise<void> {
+  return (key, force, action) => {
+    const state = options.states[key];
+    if (!force && state.loaded) return Promise.resolve();
+    const current = options.requests.get(key);
+    if (current) return current;
+    state.loading = true;
+    state.error = "";
+    options.onStart?.(key);
+    const request = action().then(() => {
+      state.loaded = true;
+      state.updatedAt = Date.now();
+    }).catch(error => {
+      state.error = error instanceof Error ? error.message : String(error);
+    }).finally(() => {
+      state.loading = false;
+      options.requests.delete(key);
+      options.onFinish?.(key);
+    });
+    options.requests.set(key, request);
+    return request;
+  };
+}
+
+export interface ListRefreshSchedulerOptions {
+  debounceMs: number;
+  maxWaitMs: number;
+  now: () => number;
+  schedule: (callback: () => void, delay: number) => number;
+  cancel: (handle: number) => void;
+  canRefresh: () => boolean;
+  isInFlight: () => boolean;
+  refresh: () => Promise<void>;
+}
+
+export interface ListRefreshScheduler {
+  request: () => void;
+  flush: () => void;
+  pending: () => boolean;
+  scheduled: () => boolean;
+}
+
+// A dense SSE burst can outrun a list request by an order of magnitude. Coalesce
+// events into one trailing refresh at min(last event + debounce, first event +
+// maxWait), keep a minimum gap between request starts, and never overlap
+// requests. The scheduler owns no DOM or API knowledge: the caller decides when
+// a refresh is allowed and performs the fetch.
+//
+// A flush that cannot run (hidden page, open task detail, request in flight)
+// leaves the request pending so the caller can retry it when the obstacle
+// clears; the in-flight case is retried from the refresh promise's finally.
+export function createListRefreshScheduler(options: ListRefreshSchedulerOptions): ListRefreshScheduler {
+  let timer = 0;
+  let windowStartedAt: number | null = null;
+  let lastStartedAt = 0;
+  let pending = false;
+
+  function schedule(): void {
+    if (!pending) return;
+    const now = options.now();
+    if (windowStartedAt === null) windowStartedAt = now;
+    if (timer) options.cancel(timer);
+    // Fire at the earlier of "quiet for one debounce window" and "the first
+    // event has waited the maximum". A request start gap is a lower bound only:
+    // it must not pin a continuous stream to the debounce cadence, because then
+    // the max wait would never apply after the first refresh.
+    const debounceAt = now + options.debounceMs;
+    const maxWaitAt = windowStartedAt + options.maxWaitMs;
+    const gapAt = lastStartedAt ? lastStartedAt + options.debounceMs : 0;
+    const fireAt = Math.max(gapAt, Math.min(debounceAt, maxWaitAt));
+    timer = options.schedule(flush, Math.max(0, fireAt - now));
+  }
+
+  function flush(): void {
+    timer = 0;
+    if (!pending) {
+      windowStartedAt = null;
+      return;
+    }
+    // Keep the request pending: a hidden page, an open task detail, or an
+    // in-flight refresh must not drop the event. The caller retries this flush
+    // when the page becomes visible or the detail closes, and the finally below
+    // retries after the in-flight request settles.
+    if (!options.canRefresh() || options.isInFlight()) return;
+    pending = false;
+    windowStartedAt = null;
+    lastStartedAt = options.now();
+    void options.refresh().catch(() => undefined).finally(() => {
+      if (pending) schedule();
+    });
+  }
+
+  return {
+    request(): void {
+      pending = true;
+      schedule();
+    },
+    flush,
+    pending: () => pending,
+    scheduled: () => timer !== 0,
+  };
+}
+
 function escapeWorkspaceHTML(value: unknown): string {
   return String(value ?? "")
     .replaceAll("&", "&amp;")
