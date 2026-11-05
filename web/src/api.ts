@@ -516,7 +516,10 @@ class APIClient {
     });
   }
 
-  tasks(projectID = "", options: {limit?: number; cursor?: string; summary?: boolean} = {}): Promise<{
+  // order "attention" lists every non-completed Task before the completed ones,
+  // newest first within each group. A cursor only continues the order that
+  // minted it; the server answers invalid_cursor otherwise.
+  tasks(projectID = "", options: {limit?: number; cursor?: string; summary?: boolean; order?: "attention"} = {}): Promise<{
     tasks: Task[];
     has_more?: boolean;
     next_cursor?: string;
@@ -529,6 +532,7 @@ class APIClient {
     if (options.limit) query.set("limit", String(options.limit));
     if (options.cursor) query.set("cursor", options.cursor);
     if (options.summary) query.set("summary", "true");
+    if (options.order) query.set("order", options.order);
     return this.request(`/api/v1/tasks${query.size ? `?${query}` : ""}`);
   }
 

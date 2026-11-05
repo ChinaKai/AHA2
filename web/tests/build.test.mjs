@@ -2150,7 +2150,14 @@ test("task list filters combine multi-select project, status, and device choices
   // nothing new matches; live refreshes keep the pages already loaded.
   assert.match(main, /data-task-load-more-empty/);
   assert.match(main, /state\.tasks = mergeByID\(state\.tasks, result\.tasks \|\| \[\]\)/);
-  assert.match(main, /api\.tasks\("", \{\s*limit: taskRefreshLimit\(\)\s*\}\)/);
+  assert.match(main, /api\.tasks\("", \{\s*limit: taskRefreshLimit\(\),\s*order: taskListOrder\s*\}\)/);
+  // The task page lists unfinished and failed Tasks before completed ones, and a
+  // cursor only continues the order that minted it, so every task list request
+  // must ask for the same order.
+  assert.match(main, /const taskListOrder = "attention"/);
+  for (const call of main.match(/api\.tasks\("", \{[^}]*\}\)/g) || []) {
+    assert.match(call, /order: taskListOrder/, `task list request without the attention order: ${call}`);
+  }
   assert.match(styles, /\.task-filter-hint/);
   assert.match(styles, /\.task-filter-menu/);
   assert.match(styles, /@media \(max-width: 760px\)[\s\S]*?\.task-filters \{[^}]*grid-template-columns:\s*repeat\(2,minmax\(0,1fr\)\)/);

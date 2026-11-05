@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
+	"github.com/ChinaKai/AHA2/internal/store"
 )
 
 const maxListPageSize = 200
@@ -36,6 +37,12 @@ type listCursor struct {
 	// written, so a cursor minted before this field existed still decodes.
 	UpdatedAt string `json:"updated_at,omitempty"`
 	ID        string `json:"id"`
+	// Order names a non-default list order. A cursor is only valid for the order
+	// that minted it: continuing one order with another's position silently
+	// skips or repeats rows, so a mismatch is rejected instead.
+	Order string `json:"order,omitempty"`
+	// Rank is the sort group of the last row, for orders that group rows first.
+	Rank int `json:"rank,omitempty"`
 }
 
 // position returns the cursor timestamp, preferring the current field.
@@ -162,15 +169,107 @@ func encodeListCursor(cursor listCursor) string {
 }
 
 func decodeListCursor(value, kind string) (listCursor, error) {
+	return decodeOrderedListCursor(value, kind, "")
+}
+
+func decodeOrderedListCursor(value, kind, order string) (listCursor, error) {
 	payload, err := base64.RawURLEncoding.DecodeString(value)
 	if err != nil {
 		return listCursor{}, fmt.Errorf("invalid cursor")
 	}
 	var cursor listCursor
-	if err := json.Unmarshal(payload, &cursor); err != nil || cursor.Kind != kind || cursor.position() == "" || cursor.ID == "" {
+	if err := json.Unmarshal(payload, &cursor); err != nil || cursor.Kind != kind || cursor.Order != order || cursor.position() == "" || cursor.ID == "" {
 		return listCursor{}, fmt.Errorf("invalid cursor")
 	}
 	return cursor, nil
+}
+
+// taskOrderAttention lists every non-completed Task before the completed ones,
+// newest first within each group, so the first page shows the work that still
+// needs the owner even when completed Tasks far outnumber it.
+const taskOrderAttention = "attention"
+
+func parseTaskListOrder(request *http.Request) (string, error) {
+	switch order := strings.ToLower(strings.TrimSpace(request.URL.Query().Get("order"))); order {
+	case "", "created":
+		return "", nil
+	case taskOrderAttention:
+		return order, nil
+	default:
+		return "", fmt.Errorf("order must be created or attention")
+	}
+}
+
+func taskAttentionCursorPosition(options listOptions) (int, time.Time, string, error) {
+	if options.Cursor == "" {
+		return 0, time.Time{}, "", nil
+	}
+	cursor, err := decodeOrderedListCursor(options.Cursor, "tasks", taskOrderAttention)
+	if err != nil {
+		return 0, time.Time{}, "", err
+	}
+	position, err := time.Parse(time.RFC3339Nano, cursor.position())
+	if err != nil || cursor.Rank < 0 || cursor.Rank > 1 {
+		return 0, time.Time{}, "", fmt.Errorf("invalid cursor")
+	}
+	return cursor.Rank, position, cursor.ID, nil
+}
+
+func taskAttentionCursor(task domain.Task) string {
+	return encodeListCursor(listCursor{
+		Kind: "tasks", Order: taskOrderAttention, Rank: store.TaskAttentionRank(task.Status),
+		At: task.CreatedAt.UTC().Format(time.RFC3339Nano), ID: task.ID,
+	})
+}
+
+func taskAttentionPage(items []domain.Task, hasMore bool) listPage[domain.Task] {
+	page := listPage[domain.Task]{Items: items, HasMore: hasMore}
+	if hasMore && len(items) > 0 {
+		page.NextCursor = taskAttentionCursor(items[len(items)-1])
+	}
+	return page
+}
+
+// taskAttentionBefore reports whether left sorts ahead of right in the
+// attention order: group first, then newest creation time, then id.
+func taskAttentionBefore(leftRank int, leftAt time.Time, leftID string, rightRank int, rightAt time.Time, rightID string) bool {
+	if leftRank != rightRank {
+		return leftRank < rightRank
+	}
+	if !leftAt.Equal(rightAt) {
+		return leftAt.After(rightAt)
+	}
+	return leftID > rightID
+}
+
+// paginateTasksByAttention is the in-memory counterpart of
+// store.ListTasksAttentionPage for lists that merge in remote Task mirrors.
+func paginateTasksByAttention(items []domain.Task, options listOptions) (listPage[domain.Task], error) {
+	sort.SliceStable(items, func(left, right int) bool {
+		return taskAttentionBefore(
+			store.TaskAttentionRank(items[left].Status), items[left].CreatedAt, items[left].ID,
+			store.TaskAttentionRank(items[right].Status), items[right].CreatedAt, items[right].ID,
+		)
+	})
+	if !options.Paged {
+		return listPage[domain.Task]{Items: items}, nil
+	}
+	start := 0
+	if options.Cursor != "" {
+		rank, at, id, err := taskAttentionCursorPosition(options)
+		if err != nil {
+			return listPage[domain.Task]{}, err
+		}
+		start = sort.Search(len(items), func(index int) bool {
+			item := items[index]
+			return taskAttentionBefore(rank, at, id, store.TaskAttentionRank(item.Status), item.CreatedAt, item.ID)
+		})
+	}
+	end := start + options.Limit
+	if end > len(items) {
+		end = len(items)
+	}
+	return taskAttentionPage(items[start:end], end < len(items)), nil
 }
 
 type projectSummary struct {

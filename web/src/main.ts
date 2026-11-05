@@ -419,6 +419,12 @@ const maxListPageSize = 200;
 // so the unchanged list does not read as a broken page.
 let taskLoadMoreNoMatch = false;
 
+// The task page asks for unfinished and failed Tasks ahead of completed ones,
+// so the first page shows the work that needs the owner even when completed
+// Tasks are the majority. Every task list request must use the same order,
+// because a cursor only continues the order that minted it.
+const taskListOrder = "attention" as const;
+
 // Live refreshes re-read as many tasks as are already loaded, so pages the owner
 // pulled in with "加载更多" do not collapse back to the first page.
 function taskRefreshLimit(): number {
@@ -1508,7 +1514,7 @@ async function loadCoreData(force = false): Promise<void> {
     }),
     loadResource("workspaces", force, async () => { state.workspaces = (await api.workspaces()).workspaces || []; }),
     loadResource("tasks", force, async () => {
-      const result = await api.tasks("", {limit: taskRefreshLimit()});
+      const result = await api.tasks("", {limit: taskRefreshLimit(), order: taskListOrder});
       state.tasks = result.tasks || [];
       state.taskFacetCounts = result.counts || null;
       taskLoadMoreNoMatch = false;
@@ -1550,7 +1556,18 @@ async function loadNextPage(kind: "projects" | "tasks" | "knowledge"): Promise<v
       page.cursor = result.next_cursor || "";
       page.hasMore = Boolean(result.has_more);
     } else if (kind === "tasks") {
-      const result = await api.tasks("", {limit: initialListPageSize, cursor: page.cursor});
+      const result = await api.tasks("", {limit: initialListPageSize, cursor: page.cursor, order: taskListOrder}).catch(error => {
+        if ((error as {code?: string})?.code !== "invalid_cursor") throw error;
+        // The cursor no longer matches the list order, so continuing it would
+        // skip or repeat Tasks. Start the list over from the first page.
+        page.cursor = "";
+        page.hasMore = false;
+        return null;
+      });
+      if (!result) {
+        await loadCoreData(true);
+        return;
+      }
       const matchedBefore = filteredTasks().length;
       state.tasks = mergeByID(state.tasks, result.tasks || []);
       if (result.counts) state.taskFacetCounts = result.counts;
@@ -4055,7 +4072,7 @@ function bindCommon(): void {
     instances: state.channelInstances,
     refresh: async () => {
       const [providers, instances, projects, workspaces, tasks] = await Promise.all([
-        api.channelProviders(), api.channelInstances(), api.projects({limit: initialListPageSize}), api.workspaces(), api.tasks("", {limit: taskRefreshLimit()}),
+        api.channelProviders(), api.channelInstances(), api.projects({limit: initialListPageSize}), api.workspaces(), api.tasks("", {limit: taskRefreshLimit(), order: taskListOrder}),
       ]);
       state.channelProviders = providers.providers || [];
       state.channelInstances = instances.instances || [];
@@ -5560,7 +5577,7 @@ async function refreshListData(): Promise<void> {
 	do {
 	  listRefreshQueued = false;
 	  try {
-		const [tasks, projects, workspaces] = await Promise.all([api.tasks("", {limit: taskRefreshLimit()}), api.projects({limit: initialListPageSize}), api.workspaces()]);
+		const [tasks, projects, workspaces] = await Promise.all([api.tasks("", {limit: taskRefreshLimit(), order: taskListOrder}), api.projects({limit: initialListPageSize}), api.workspaces()]);
 		state.tasks = tasks.tasks || [];
 		if (tasks.counts) state.taskFacetCounts = tasks.counts;
 		state.projects = projects.projects || [];
