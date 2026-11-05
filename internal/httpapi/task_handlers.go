@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -466,7 +467,10 @@ func (s *Server) recordTaskDetailPanic(taskID, query string, recovered any) {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	logger.Error("task detail query panicked", "task_id", taskID, "query", query, "panic", recovered)
+	// The panic is recovered on a fan-out goroutine, so net/http can no longer
+	// report it: the stack is the only way to locate the failure afterwards.
+	// Only the panic value and stack frames are recorded, no request payload.
+	logger.Error("task detail query panicked", "task_id", taskID, "query", query, "panic", recovered, "stack", string(debug.Stack()))
 }
 
 func (s *Server) taskDetail(writer http.ResponseWriter, request *http.Request) {

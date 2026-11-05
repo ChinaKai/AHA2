@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -338,6 +339,86 @@ func TestChannelOutboxHealthQueryUsesPartialIndex(t *testing.T) {
 	}
 	if !strings.Contains(plan, "idx_channel_delivery_blocking") {
 		t.Fatalf("queued-behind lookup did not use idx_channel_delivery_blocking:\n%s", plan)
+	}
+}
+
+// The INDEXED BY hints steer the planner, not correctness: if the v117/v118
+// partial indexes disappear the same counters must come from the equivalent
+// unhinted query, while unrelated SQL errors still surface.
+func TestChannelOutboxHealthFallsBackWhenIndexMissing(t *testing.T) {
+	ctx := context.Background()
+	database, err := Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	instance, conversation := createDeliveryTestInstance(t, database)
+	now := time.Now().UTC()
+	head := enqueueTestDelivery(t, database, instance, conversation, 1, now.Add(-time.Minute))
+	queued := enqueueTestDelivery(t, database, instance, conversation, 2, now.Add(-time.Minute))
+	dead := enqueueTestDelivery(t, database, instance, conversation, 3, now.Add(-time.Minute))
+	delivered := enqueueTestDelivery(t, database, instance, conversation, 4, now.Add(-time.Minute))
+	if _, err := database.db.ExecContext(ctx, `UPDATE channel_delivery_outbox SET attempts=2,created_at=?,updated_at=? WHERE id=?`,
+		timeString(now.Add(-10*time.Minute)), timeString(now.Add(-10*time.Minute)), head.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.db.ExecContext(ctx, `UPDATE channel_delivery_outbox SET created_at=?,updated_at=? WHERE id=?`,
+		timeString(now.Add(-10*time.Minute)), timeString(now.Add(-10*time.Minute)), queued.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.db.ExecContext(ctx, `UPDATE channel_delivery_outbox SET state='dead_letter',last_error_code=?,updated_at=? WHERE id=?`,
+		"feishu_target_unavailable", timeString(now.Add(-time.Minute)), dead.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.db.ExecContext(ctx, `UPDATE channel_delivery_outbox SET state='delivered',updated_at=? WHERE id=?`,
+		timeString(now), delivered.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	indexed, err := database.ChannelOutboxHealth(ctx, now)
+	if err != nil {
+		t.Fatalf("outbox health with indexes: %v", err)
+	}
+	for _, index := range []string{"idx_channel_delivery_health", "idx_channel_delivery_health_error", "idx_channel_delivery_blocking"} {
+		if _, err := database.db.ExecContext(ctx, `DROP INDEX `+index); err != nil {
+			t.Fatalf("drop %s: %v", index, err)
+		}
+	}
+	fallback, err := database.ChannelOutboxHealth(ctx, now)
+	if err != nil {
+		t.Fatalf("outbox health without indexes: %v", err)
+	}
+	if !reflect.DeepEqual(indexed, fallback) {
+		t.Fatalf("fallback health differs: indexed=%#v fallback=%#v", indexed, fallback)
+	}
+	got, ok := fallback[instance.ID]
+	if !ok {
+		t.Fatalf("instance missing from fallback health: %#v", fallback)
+	}
+	if got.Pending != 2 || got.StuckPending != 0 || got.QueuedPending != 1 || got.AttemptedPending != 1 ||
+		got.DeadLetter != 1 || got.LastErrorCode != "feishu_target_unavailable" {
+		t.Fatalf("fallback health counts=%#v", got)
+	}
+}
+
+// Only a missing index may trigger the fallback. A different SQL error must be
+// returned unchanged even when the unhinted query would have succeeded.
+func TestQueryWithIndexFallbackIgnoresNonIndexErrors(t *testing.T) {
+	ctx := context.Background()
+	database, err := Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	rows, err := database.queryWithIndexFallback(ctx,
+		`SELECT 1 FROM channel_delivery_outbox WHERE missing_column=1`,
+		`SELECT 1`)
+	if rows != nil {
+		rows.Close()
+		t.Fatal("non-index error returned rows, want the error")
+	}
+	if err == nil || !strings.Contains(err.Error(), "no such column") {
+		t.Fatalf("non-index error = %v, want no such column", err)
 	}
 }
 

@@ -472,12 +472,51 @@ const channelOutboxHealthQuery = `
 	GROUP BY x.instance_id
 	ORDER BY x.instance_id`
 
+// channelOutboxHealthFallbackQuery is channelOutboxHealthQuery without the
+// INDEXED BY hints. The hints only steer the planner toward the v117/v118
+// partial indexes; a database that lost them must still report the same
+// counters instead of failing with "no such index".
+const channelOutboxHealthFallbackQuery = `
+	SELECT x.instance_id,
+	       SUM(CASE WHEN x.state='pending' THEN 1 ELSE 0 END),
+	       SUM(CASE WHEN x.state='pending' AND x.attempts=0 AND x.queued_unattempted=0 THEN 1 ELSE 0 END),
+	       SUM(CASE WHEN x.state='pending' AND x.attempts=0 AND x.queued_unattempted=1 THEN 1 ELSE 0 END),
+	       SUM(CASE WHEN x.state='pending' AND x.attempts>0 THEN 1 ELSE 0 END),
+	       MIN(CASE WHEN x.state='pending' THEN x.created_at END),
+	       MIN(CASE WHEN x.state='pending' AND x.attempts=0 AND x.queued_unattempted=0 THEN x.created_at END),
+	       MIN(CASE WHEN x.state='pending' AND x.attempts=0 AND x.queued_unattempted=1 THEN x.created_at END),
+	       MIN(CASE WHEN x.state='pending' AND x.attempts>0 THEN x.created_at END),
+	       SUM(CASE WHEN x.state='dead_letter' THEN 1 ELSE 0 END),
+	       SUM(CASE WHEN x.state='leased' AND x.lease_until<>'' AND x.lease_until<=? THEN 1 ELSE 0 END),
+	       MIN(CASE WHEN x.state='leased' AND x.lease_until<>'' AND x.lease_until<=? THEN x.lease_until END),
+	       COALESCE((
+	         SELECT e.last_error_code FROM channel_delivery_outbox e
+	         WHERE e.instance_id=x.instance_id
+	           AND e.state IN ('pending','leased','dead_letter')
+	           AND e.last_error_code<>''
+	         ORDER BY e.updated_at DESC, e.id DESC LIMIT 1
+	       ),'')
+	FROM (
+	  SELECT o.instance_id, o.state, o.attempts, o.created_at, o.lease_until,
+	         CASE WHEN o.state='pending' AND o.attempts=0 AND EXISTS (
+	           SELECT 1 FROM channel_delivery_outbox prior
+	           WHERE prior.conversation_id=o.conversation_id
+	             AND prior.state IN ('pending','leased')
+	             AND (prior.stream_sequence<o.stream_sequence
+	                  OR (prior.stream_sequence=o.stream_sequence AND prior.replay_generation<o.replay_generation))
+	         ) THEN 1 ELSE 0 END AS queued_unattempted
+	  FROM channel_delivery_outbox o
+	  WHERE o.state IN ('pending','leased','dead_letter')
+	) x
+	GROUP BY x.instance_id
+	ORDER BY x.instance_id`
+
 // ChannelOutboxHealth aggregates the non-terminal outbound queue per instance.
 // It reads counters, timestamps and error codes only. There is intentionally
 // no row LIMIT: every instance with non-terminal work is returned, so a
 // truncated result can never make an unchecked channel look healthy.
 func (s *Store) ChannelOutboxHealth(ctx context.Context, now time.Time) (map[string]domain.ChannelOutboxHealth, error) {
-	rows, err := s.db.QueryContext(ctx, channelOutboxHealthQuery, timeString(now), timeString(now))
+	rows, err := s.queryWithIndexFallback(ctx, channelOutboxHealthQuery, channelOutboxHealthFallbackQuery, timeString(now), timeString(now))
 	if err != nil {
 		return nil, err
 	}

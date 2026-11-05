@@ -385,6 +385,19 @@ func isMissingIndexError(err error) bool {
 	return err != nil && strings.Contains(strings.ToLower(err.Error()), "no such index")
 }
 
+// queryWithIndexFallback runs query and, only when SQLite says an INDEXED BY
+// hint names a missing index, retries fallback. The hint is a planner choice,
+// not a correctness requirement, so a migrated or hand-edited database without
+// the index must still produce the same rows. Any other error is returned
+// unchanged: fallback is deliberately narrower than "query failed".
+func (s *Store) queryWithIndexFallback(ctx context.Context, query, fallback string, args ...any) (*sql.Rows, error) {
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if !isMissingIndexError(err) {
+		return rows, err
+	}
+	return s.db.QueryContext(ctx, fallback, args...)
+}
+
 // TaskFacetCounts reports how many Tasks carry each status, belong to each
 // project, and sit on each device. The Task list is paged, so counting the
 // loaded page reports wrong numbers as soon as the list outgrows one page;
@@ -411,12 +424,7 @@ func (s *Store) TaskFacetCounts(ctx context.Context) (TaskFacetCounts, error) {
 	}
 	// Mirrors carry their Task as a synced payload, so the status and project
 	// come from the JSON rather than from columns.
-	mirrors, err := s.db.QueryContext(ctx, taskFacetMirrorCountsQuery)
-	if isMissingIndexError(err) {
-		// The hint is only a performance choice; a migrated or hand-edited
-		// database without the v119 index must still produce the counts.
-		mirrors, err = s.db.QueryContext(ctx, taskFacetMirrorCountsFallbackQuery)
-	}
+	mirrors, err := s.queryWithIndexFallback(ctx, taskFacetMirrorCountsQuery, taskFacetMirrorCountsFallbackQuery)
 	if err != nil {
 		return counts, err
 	}

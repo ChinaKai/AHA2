@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"net/http/cookiejar"
@@ -154,12 +153,16 @@ func TestRunTaskDetailQueryRecoversPanic(t *testing.T) {
 		t.Fatalf("recorded panic = %#v", recordedPanic)
 	}
 
-	// The production hook writes the task ID and query name to the log.
+	// The production hook writes the task ID, query name, and stack to the log.
 	var logged bytes.Buffer
 	server := &Server{logger: slog.New(slog.NewTextHandler(&logged, nil))}
 	runTaskDetailQuery("task-logged", "TaskMemory", server.recordTaskDetailPanic, func() { panic("boom") })
-	if output := logged.String(); !strings.Contains(output, "task-logged") || !strings.Contains(output, "TaskMemory") {
+	output := logged.String()
+	if !strings.Contains(output, "task-logged") || !strings.Contains(output, "TaskMemory") {
 		t.Fatalf("panic log lost task/query: %s", output)
+	}
+	if !strings.Contains(output, "goroutine") {
+		t.Fatalf("panic log lost stack: %s", output)
 	}
 
 	// A nil recorder still contains the panic, and a query that does not panic
@@ -179,7 +182,8 @@ func TestRunTaskDetailQueryRecoversPanic(t *testing.T) {
 // the two panicking sections at their zero values.
 func TestTaskDetailSurvivesPanickingSection(t *testing.T) {
 	fixture := newTaskDetailFixture(t, true)
-	server := New(Config{Store: fixture.database, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	var logged bytes.Buffer
+	server := New(Config{Store: fixture.database, Logger: slog.New(slog.NewTextHandler(&logged, nil))})
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/tasks/"+fixture.task.ID, nil)
 	request.SetPathValue("id", fixture.task.ID)
 	recorder := httptest.NewRecorder()
@@ -210,6 +214,19 @@ func TestTaskDetailSurvivesPanickingSection(t *testing.T) {
 	}
 	if len(detail.Agents) != 0 || len(detail.PermissionRequests) != 0 {
 		t.Fatalf("panicking sections were not zero: agents=%#v requests=%#v", detail.Agents, detail.PermissionRequests)
+	}
+
+	// The production recorder must actually fire once per panic site with the
+	// expected Task ID and query names. Zero-value assertions alone would keep
+	// passing if a future dependency became nil-safe and stopped panicking.
+	output := logged.String()
+	if records := strings.Count(output, "task detail query panicked"); records != 2 {
+		t.Fatalf("panic recorder records = %d, want 2: %s", records, output)
+	}
+	for _, want := range []string{fixture.task.ID, "TaskAgents", "TaskPermissionRequests", "goroutine"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("panic log missing %q: %s", want, output)
+		}
 	}
 }
 
