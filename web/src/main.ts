@@ -4,6 +4,7 @@ import {renderConversationList} from "./conversation_ui.js";
 import {bindCodexAccounts, renderCodexAccounts} from "./codex_accounts.js";
 import {bindChannels, exportRetiredChannelInstance, purgeRetiredChannelInstance, renderChannels} from "./channels.js";
 import {icon} from "./icons.js";
+import {petApprovalOptions, renderPetApprovalOptionPicker, selectedPetApprovalOption} from "./pet_approvals.js";
 import {applyLocale, normalizeLanguagePreference, startUITranslationObserver, t, tr, translateUI} from "./i18n.js";
 import {bindKnowledgeWorkspace, knowledgeEntryListVisible, renderKnowledgeWorkspace} from "./knowledge_workspace.js";
 import {bindHardwarePanel, refreshHardwarePanel, stopHardwarePanel} from "./hardware_panel.js";
@@ -5981,6 +5982,21 @@ async function bindPetDiaryPage(): Promise<void> {
         const decision = button.dataset.petApprovalDecision as "approve" | "reject" | "cancel";
         if (!id || !decision) return;
         let decisionReason = "";
+        if (decision === "approve") {
+          // Owner-decision approvals with payload options require a choice; the
+          // chosen option value is the note so the pet knows which plan won.
+          const approval = view?.approvals.find(item => item.id === id);
+          const options = approval ? petApprovalOptions(approval) : [];
+          if (options.length) {
+            const select = [...body.querySelectorAll<HTMLSelectElement>("[data-pet-approval-option]")].find(item => item.dataset.petApprovalOption === id);
+            decisionReason = selectedPetApprovalOption(options, select?.value);
+            if (!decisionReason) {
+              body.insertAdjacentHTML("afterbegin", `<div class="field-help">${escapeHTML(tr("请先选择一个方案再批准。"))}</div>`);
+              select?.focus();
+              return;
+            }
+          }
+        }
         if (decision === "reject") {
           decisionReason = (window.prompt(t("petApproval.rejectReasonPrompt")) || "").trim();
           if (!decisionReason) return;
@@ -6176,14 +6192,15 @@ function renderPetChannelHealth(items: PetChannelHealth[], note: string, total =
   return `${summary}${truncated}<div class="pet-channel-list">${cards}</div>`;
 }
 
-function renderPetApprovals(items: Array<{id: string; title: string; summary: string; reason?: string; status: string; risk: string; kind: string; resolution?: string; decision_reason?: string}>, empty = t("petWorkbench.emptyApprovals")): string {
+function renderPetApprovals(items: Array<{id: string; title: string; summary: string; reason?: string; status: string; risk: string; kind: string; payload?: string; resolution?: string; decision_reason?: string}>, empty = t("petWorkbench.emptyApprovals")): string {
   if (items.length === 0) return `<div class="field-help">${escapeHTML(empty)}</div>`;
   return items.map(item => {
     const pending = item.status === "pending";
     const status = item.status === "approved" ? tr("已批准") : item.status === "rejected" ? tr("已拒绝") : item.status === "cancelled" ? tr("已取消") : tr("待审批");
     const kind = item.kind === "idea" ? t("petWorkbench.ideas") : t("petWorkbench.approvals");
+    const picker = pending ? renderPetApprovalOptionPicker(item.id, petApprovalOptions(item), tr) : "";
     const actions = pending
-      ? `<div class="pet-approval-actions"><button type="button" class="primary" data-pet-approval-decision="approve" data-pet-approval-id="${escapeHTML(item.id)}">${tr("批准")}</button><button type="button" data-pet-approval-decision="reject" data-pet-approval-id="${escapeHTML(item.id)}">${tr("拒绝")}</button><button type="button" data-pet-approval-decision="cancel" data-pet-approval-id="${escapeHTML(item.id)}">${tr("取消")}</button></div>`
+      ? `${picker}<div class="pet-approval-actions"><button type="button" class="primary" data-pet-approval-decision="approve" data-pet-approval-id="${escapeHTML(item.id)}">${tr("批准")}</button><button type="button" data-pet-approval-decision="reject" data-pet-approval-id="${escapeHTML(item.id)}">${tr("拒绝")}</button><button type="button" data-pet-approval-decision="cancel" data-pet-approval-id="${escapeHTML(item.id)}">${tr("取消")}</button></div>`
       : "";
     return `<article class="pet-approval-card ${pending ? "pending" : ""}">
       <header><strong>${escapeHTML(item.title)}</strong><span class="pet-approval-status">${kind} · ${escapeHTML(status)} · ${escapeHTML(item.risk)}</span></header>
