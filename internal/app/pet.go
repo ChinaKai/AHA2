@@ -1035,7 +1035,7 @@ func ahaPetTools() []gateway.ChatTool {
 				"reason":       map[string]any{"type": "string", "description": "为什么删除；至少 8 个字符"},
 			}, "required": []string{"env_group_id", "reason"},
 		}},
-		{Name: "aha_create_task", Description: "在指定项目/Workspace 创建普通 AHA Task，可选择立即启动；git 项目默认独立 worktree，high 推理和完全访问", Parameters: map[string]any{
+		{Name: "aha_create_task", Description: "在指定项目/Workspace 创建普通 AHA Task，可选择立即启动、用 skill_ids 选择 Skill；git 项目默认独立 worktree，high 推理和完全访问", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{
 				"project_id":       map[string]any{"type": "string"},
 				"workspace_id":     map[string]any{"type": "string"},
@@ -1047,6 +1047,7 @@ func ahaPetTools() []gateway.ChatTool {
 				"approval":         map[string]any{"type": "string", "enum": []string{"never", "auto"}, "description": "可选；默认 never"},
 				"isolation":        map[string]any{"type": "string", "enum": []string{"worktree", "inplace"}, "description": "可选；git 项目默认 worktree；只读或非代码任务可显式用 inplace；非 git 项目强制 inplace"},
 				"start":            map[string]any{"type": "boolean", "description": "默认 true"},
+				"skill_ids":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "可选；该项目或全局可用的已启用 Skill ID（可用 aha_list_skills 查询）；项目自动挂载的 Skill 仍会合并；任一 ID 不可用则创建失败"},
 			}, "required": []string{"project_id", "workspace_id", "title", "request"},
 		}},
 		{Name: "aha_start_task", Description: "启动一个草稿 Task", Parameters: map[string]any{
@@ -1269,13 +1270,14 @@ func ahaPetTools() []gateway.ChatTool {
 		{Name: "aha_interrupt_task", Description: "中断 Task 当前执行中的 Turn 或 Round", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{"task_id": map[string]any{"type": "string"}}, "required": []string{"task_id"},
 		}},
-		{Name: "aha_update_task", Description: "修改 Task 标题、Current Goal、协作模式或 Max Agents", Parameters: map[string]any{
+		{Name: "aha_update_task", Description: "修改 Task 标题、Current Goal、协作模式、Max Agents 或所选 Skill", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{
 				"task_id":            map[string]any{"type": "string"},
 				"title":              map[string]any{"type": "string"},
 				"current_goal":       map[string]any{"type": "string"},
 				"collaboration_mode": map[string]any{"type": "string", "enum": []string{"single", "auto"}},
 				"max_agents":         map[string]any{"type": "integer", "minimum": 1, "maximum": 3},
+				"skill_ids":          map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "可选；整体替换 Task 的 Skill 选择（该项目或全局可用的已启用 Skill ID），空数组表示清空；不传则保持不变；任一 ID 不可用则报错且不做任何修改"},
 			}, "required": []string{"task_id"},
 		}},
 		{Name: "aha_update_task_agent", Description: "修改 Task main Agent 的模型、推理强度、文件权限或审批方式", Parameters: map[string]any{

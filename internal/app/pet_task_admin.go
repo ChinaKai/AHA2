@@ -95,6 +95,9 @@ type PetUpdateTaskInput struct {
 	CurrentGoal       *string `json:"current_goal"`
 	CollaborationMode *string `json:"collaboration_mode"`
 	MaxAgents         *int    `json:"max_agents"`
+	// SkillIDs replaces the Task's whole Skill selection when present, like the
+	// Web PATCH; an empty list clears it. Omitted or null leaves it unchanged.
+	SkillIDs *[]string `json:"skill_ids"`
 }
 
 func (s *Service) PetUpdateTask(ctx context.Context, input PetUpdateTaskInput) (domain.Task, error) {
@@ -106,6 +109,14 @@ func (s *Service) PetUpdateTask(ctx context.Context, input PetUpdateTaskInput) (
 		return task, fmt.Errorf("Task 已处于 %s，不能修改", task.Status)
 	}
 	changed := false
+	// Skills go first: UpdateTaskSkills validates every ID before writing, so an
+	// unavailable Skill rejects the call before any other field is touched.
+	if input.SkillIDs != nil {
+		if _, err := s.UpdateTaskSkills(ctx, task.ID, *input.SkillIDs); err != nil {
+			return task, err
+		}
+		changed = true
+	}
 	if input.Title != nil {
 		title := strings.TrimSpace(*input.Title)
 		if title == "" || len([]rune(title)) > 120 {

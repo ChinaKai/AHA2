@@ -41,6 +41,7 @@ func TestFetchMCPToolsAndExactAllowlist(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer database.Close()
 	service := NewService(database, nil, nil)
 	item := domain.MCPServer{ID: "mcp_test", Name: "test", Transport: "http", URL: server.URL, Enabled: true, Tools: tools}
 	if err := database.UpsertMCPServer(context.Background(), item); err != nil {
