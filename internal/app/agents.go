@@ -93,6 +93,10 @@ func (s *Service) ResumePending(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// Backfill results for child Turns that ended before the service stopped.
+	// This must run before pending Agents start so a resumed main Turn can
+	// finalize old batches instead of racing their recovery.
+	s.reconcileInterruptedCollaboration(ctx)
 	for _, agent := range agents {
 		if _, _, err := s.scheduleAgent(ctx, agent.TaskID, agent.AgentID); err != nil {
 			// One inconsistent pending Inbox item must never keep the service
@@ -613,6 +617,30 @@ func (s *Service) reconcilePendingCollaborationAssignments(
 	return remaining, nil
 }
 
+// reconcileInterruptedCollaboration applies the store-wide backfill for
+// terminal child Turns that never produced a collaboration result.
+func (s *Service) reconcileInterruptedCollaboration(ctx context.Context) {
+	recoveries, err := s.store.ReconcileInterruptedCollaboration(ctx, s.now().UTC())
+	if err != nil {
+		log.Printf("ERROR collaboration batch recovery: %v", err)
+		return
+	}
+	for _, recovery := range recoveries {
+		switch recovery.Action {
+		case store.CollaborationRecoveryEventBackfilled:
+			log.Printf(
+				"WARN collaboration batch recovery: batch=%s agent=%s child_turn=%s child_status=%s: backfilled missing collaboration result",
+				recovery.BatchID, recovery.AgentID, recovery.ChildTurnID, recovery.ChildStatus,
+			)
+		default:
+			log.Printf(
+				"ERROR collaboration batch recovery: batch=%s agent=%s child_turn=%s: %s",
+				recovery.BatchID, recovery.AgentID, recovery.ChildTurnID, recovery.Reason,
+			)
+		}
+	}
+}
+
 func inboxTemplateItems(items []domain.AgentInboxItem) []prompt.InboxTemplateItem {
 	result := make([]prompt.InboxTemplateItem, 0, len(items))
 	for _, item := range items {
@@ -790,6 +818,14 @@ func (s *Service) finalizeMainCollaboration(ctx context.Context, turn domain.Tur
 	if batches, err := s.store.CollaborationBatchesForParentTurn(ctx, turn.ID); err == nil {
 		for _, batch := range batches {
 			batchIDs = append(batchIDs, batch.ID)
+		}
+	}
+	if turn.RoundID != "" {
+		// A resumed main Turn is not the parent of batches dispatched by the
+		// interrupted Turn. Without Round scope those batches stay open and
+		// keep the Round running forever.
+		if batches, err := s.store.CollaborationBatchesForRoundWithTerminalParent(ctx, turn.RoundID); err == nil {
+			batchIDs = append(batchIDs, batches...)
 		}
 	}
 	seen := map[string]bool{}

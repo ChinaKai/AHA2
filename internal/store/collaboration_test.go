@@ -92,15 +92,21 @@ func TestReconcilePendingCollaborationAssignment(t *testing.T) {
 				t.Fatalf("reconciliation created a turn: before=%d after=%d", turnsBefore, turnsAfter)
 			}
 			if test.childStatus.Terminal() {
-				var events int
+				var events, conversations int
 				if err := database.db.QueryRowContext(ctx,
 					`SELECT COUNT(*) FROM collaboration_events WHERE batch_id=? AND child_turn_id=?`,
 					batchID, childTurnID,
 				).Scan(&events); err != nil {
 					t.Fatal(err)
 				}
-				if events != 1 {
-					t.Fatalf("collaboration events=%d", events)
+				if err := database.db.QueryRowContext(ctx,
+					`SELECT COUNT(*) FROM conversation_items WHERE id=?`,
+					domain.CollaborationResultConversationID(childTurnID),
+				).Scan(&conversations); err != nil {
+					t.Fatal(err)
+				}
+				if events != 1 || conversations != 1 {
+					t.Fatalf("collaboration events=%d conversations=%d", events, conversations)
 				}
 			}
 		})
@@ -194,6 +200,148 @@ func createCollaborationReconciliationFixture(
 		t.Fatal(err)
 	}
 	return task.ID, batchID, inboxID, child.ID, turns
+}
+
+// Historical data and the crash window between Inbox processing and
+// routeAgentOutcome leave a terminal child Turn without a collaboration event.
+// Recovery must backfill both the event and the Web conversation item, and a
+// repeated recovery must not duplicate them.
+func TestReconcileInterruptedCollaborationBackfillsMissingEvent(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database, err := Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	now := time.Now().UTC()
+	_, batchID, inboxID, childTurnID, _ := createCollaborationReconciliationFixture(
+		t, database, domain.TurnInterrupted, false,
+	)
+	for _, statement := range []struct {
+		query string
+		args  []any
+	}{
+		{`UPDATE agent_inbox SET status='processed',processed_at=? WHERE id=?`, []any{timeString(now), inboxID}},
+		{`UPDATE collaboration_members SET status='interrupted',updated_at=? WHERE batch_id=? AND agent_id='sub-001'`, []any{timeString(now), batchID}},
+		{`UPDATE collaboration_batches SET status='complete',updated_at=? WHERE id=?`, []any{timeString(now), batchID}},
+	} {
+		if _, err := database.db.ExecContext(ctx, statement.query, statement.args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	recoveries, err := database.ReconcileInterruptedCollaboration(ctx, now.Add(time.Second))
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if len(recoveries) != 1 || recoveries[0].BatchID != batchID ||
+		recoveries[0].AgentID != "sub-001" || recoveries[0].ChildTurnID != childTurnID ||
+		recoveries[0].ChildStatus != string(domain.TurnInterrupted) ||
+		recoveries[0].Action != CollaborationRecoveryEventBackfilled {
+		t.Fatalf("recoveries=%#v", recoveries)
+	}
+	assertBackfilledResultRows(t, database, ctx, batchID, childTurnID, 1)
+	var batchStatus, memberStatus string
+	if err := database.db.QueryRowContext(ctx, `SELECT status FROM collaboration_batches WHERE id=?`, batchID).Scan(&batchStatus); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.db.QueryRowContext(ctx,
+		`SELECT status FROM collaboration_members WHERE batch_id=? AND agent_id='sub-001'`, batchID,
+	).Scan(&memberStatus); err != nil {
+		t.Fatal(err)
+	}
+	if batchStatus != domain.CollaborationBatchComplete || memberStatus != domain.CollaborationMemberInterrupted {
+		t.Fatalf("batch=%q member=%q", batchStatus, memberStatus)
+	}
+	recoveries, err = database.ReconcileInterruptedCollaboration(ctx, now.Add(2*time.Second))
+	if err != nil || len(recoveries) != 0 {
+		t.Fatalf("repeated reconcile=%#v err=%v", recoveries, err)
+	}
+	assertBackfilledResultRows(t, database, ctx, batchID, childTurnID, 1)
+}
+
+// Recovery must leave fallback and consumed delivery states untouched while
+// still recording a missing result. Consumed batches are not scanned at all.
+func TestReconcileInterruptedCollaborationPreservesTerminalBatchStatus(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database, err := Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	now := time.Now().UTC()
+	_, batchID, _, childTurnID, _ := createCollaborationReconciliationFixture(
+		t, database, domain.TurnInterrupted, false,
+	)
+	if _, err := database.db.ExecContext(ctx,
+		`UPDATE collaboration_batches SET status=?,updated_at=? WHERE id=?`,
+		domain.CollaborationBatchFallback, timeString(now), batchID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	recoveries, err := database.ReconcileInterruptedCollaboration(ctx, now.Add(time.Second))
+	if err != nil || len(recoveries) != 1 {
+		t.Fatalf("fallback reconcile=%#v err=%v", recoveries, err)
+	}
+	assertBackfilledResultRows(t, database, ctx, batchID, childTurnID, 1)
+	var status string
+	if err := database.db.QueryRowContext(ctx, `SELECT status FROM collaboration_batches WHERE id=?`, batchID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != domain.CollaborationBatchFallback {
+		t.Fatalf("fallback batch was reopened as %q", status)
+	}
+
+	if _, err := database.db.ExecContext(ctx,
+		`UPDATE collaboration_batches SET status=?,updated_at=? WHERE id=?`,
+		domain.CollaborationBatchConsumed, timeString(now), batchID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []struct {
+		query string
+		args  []any
+	}{
+		{`DELETE FROM collaboration_events WHERE batch_id=? AND child_turn_id=?`, []any{batchID, childTurnID}},
+		{`DELETE FROM conversation_items WHERE id=?`, []any{domain.CollaborationResultConversationID(childTurnID)}},
+	} {
+		if _, err := database.db.ExecContext(ctx, statement.query, statement.args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	recoveries, err = database.ReconcileInterruptedCollaboration(ctx, now.Add(2*time.Second))
+	if err != nil || len(recoveries) != 0 {
+		t.Fatalf("consumed reconcile=%#v err=%v", recoveries, err)
+	}
+	assertBackfilledResultRows(t, database, ctx, batchID, childTurnID, 0)
+	if err := database.db.QueryRowContext(ctx, `SELECT status FROM collaboration_batches WHERE id=?`, batchID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != domain.CollaborationBatchConsumed {
+		t.Fatalf("consumed batch was reopened as %q", status)
+	}
+}
+
+func assertBackfilledResultRows(t *testing.T, database *Store, ctx context.Context, batchID, childTurnID string, want int) {
+	t.Helper()
+	var events, conversations int
+	if err := database.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM collaboration_events WHERE batch_id=? AND child_turn_id=?`,
+		batchID, childTurnID,
+	).Scan(&events); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM conversation_items
+		WHERE id=? AND kind='collaboration_error_routed' AND category='error' AND stream_agent_id='main'`,
+		domain.CollaborationResultConversationID(childTurnID),
+	).Scan(&conversations); err != nil {
+		t.Fatal(err)
+	}
+	if events != want || conversations != want {
+		t.Fatalf("events=%d conversations=%d want %d", events, conversations, want)
+	}
 }
 
 func TestCollaborationBatchCursorAndCompletion(t *testing.T) {
