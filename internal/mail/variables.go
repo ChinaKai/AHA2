@@ -114,13 +114,62 @@ func validatePlaceholders(value string) ([]string, error) {
 	return names, nil
 }
 
-// ValidateVariableNames verifies caller supplied variable names. Values are
-// validated separately because extra.* has aggregate size limits.
+// CallerVariableAllowed reports whether a caller may supply a variable. Server
+// resolved namespaces (task/project/workspace/agent/owner/package) can only be
+// filled by trusted resolution so an Agent or Owner payload cannot forge them.
+func CallerVariableAllowed(name string) bool {
+	switch {
+	case strings.HasPrefix(name, "build."):
+		return allowedVariables[name]
+	case strings.HasPrefix(name, "test."):
+		return allowedVariables[name]
+	case strings.HasPrefix(name, "release."):
+		return allowedVariables[name]
+	case strings.HasPrefix(name, "extra."):
+		return VariableNameAllowed(name)
+	default:
+		return false
+	}
+}
+
+// ServerVariableAllowed reports whether a variable belongs to a server
+// resolved namespace.
+func ServerVariableAllowed(name string) bool {
+	switch name {
+	case "task.id", "task.title", "task.url",
+		"project.name", "workspace.name", "agent.name", "owner.name",
+		"package.name", "package.size", "package.sha256":
+		return true
+	default:
+		return false
+	}
+}
+
+// ValidateVariableNames verifies caller supplied variable names.
 func ValidateVariableNames(variables map[string]string) error {
 	for name := range variables {
 		if !VariableNameAllowed(name) {
 			return errorf(domain.MailErrTemplateVariableUnknown, "unknown variable %q", name)
 		}
+		if !CallerVariableAllowed(name) {
+			return errorf(domain.MailErrForbidden, "variable %q is resolved by the server", name)
+		}
+	}
+	return nil
+}
+
+func validateVariableValue(name, value string) error {
+	if !utf8.ValidString(value) {
+		return errorf(domain.MailErrTemplateInvalid, "variable %q is not valid UTF-8", name)
+	}
+	if strings.ContainsRune(value, 0) {
+		return errorf(domain.MailErrTemplateInvalid, "variable %q contains a NUL byte", name)
+	}
+	if len(value) > MaxVariableValueBytes {
+		return errorf(domain.MailErrTemplateInvalid, "variable %q is too long", name)
+	}
+	if strings.Contains(value, "%%MAIL_LINK:") {
+		return errorf(domain.MailErrTemplateInvalid, "variable %q must not contain a mail link placeholder", name)
 	}
 	return nil
 }
@@ -136,14 +185,8 @@ func normalizeVariables(input map[string]string) (map[string]string, error) {
 	extraCount := 0
 	extraBytes := 0
 	for name, value := range input {
-		if !utf8.ValidString(value) {
-			return nil, errorf(domain.MailErrTemplateInvalid, "variable %q is not valid UTF-8", name)
-		}
-		if strings.ContainsRune(value, 0) {
-			return nil, errorf(domain.MailErrTemplateInvalid, "variable %q contains a NUL byte", name)
-		}
-		if len(value) > MaxVariableValueBytes {
-			return nil, errorf(domain.MailErrTemplateInvalid, "variable %q is too long", name)
+		if err := validateVariableValue(name, value); err != nil {
+			return nil, err
 		}
 		if strings.HasPrefix(name, "extra.") {
 			extraCount++
@@ -156,6 +199,22 @@ func normalizeVariables(input map[string]string) (map[string]string, error) {
 	}
 	if extraBytes > MaxExtraBytes {
 		return nil, errorf(domain.MailErrTemplateInvalid, "extra variables exceed %d bytes", MaxExtraBytes)
+	}
+	return result, nil
+}
+
+// normalizeServerVariables validates trusted server resolved values with the
+// same size/character rules as caller values.
+func normalizeServerVariables(input map[string]string) (map[string]string, error) {
+	result := make(map[string]string, len(input))
+	for name, value := range input {
+		if !ServerVariableAllowed(name) {
+			return nil, errorf(domain.MailErrTemplateInvalid, "server variable %q is not allowed", name)
+		}
+		if err := validateVariableValue(name, value); err != nil {
+			return nil, err
+		}
+		result[name] = value
 	}
 	return result, nil
 }

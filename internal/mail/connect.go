@@ -87,6 +87,7 @@ func (tester *SMTPTester) Test(ctx context.Context, account domain.MailAccount, 
 	if host == "" {
 		host = domain.MailDefaultSMTPHost
 	}
+	normalizedHost, allowedHost := NormalizeSMTPHost(host)
 	port := account.SMTPPort
 	if port <= 0 {
 		port = domain.MailDefaultSMTPPort
@@ -106,6 +107,14 @@ func (tester *SMTPTester) Test(ctx context.Context, account domain.MailAccount, 
 		return finish()
 	}
 
+	if !allowedHost {
+		return fail("connect", domain.MailErrAccountInvalid, false, "SMTP 主机不在允许列表")
+	}
+	if port != domain.MailDefaultSMTPPort {
+		return fail("connect", domain.MailErrAccountInvalid, false, "SMTP 端口必须是 465")
+	}
+	host = normalizedHost
+	result.Host = host
 	if strings.TrimSpace(credential) == "" {
 		return fail("auth", domain.MailErrCredentialMissing, false, "缺少客户端授权码")
 	}

@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"context"
 	"errors"
 	"net/http"
 	"strings"
@@ -35,23 +34,62 @@ func (s *Server) listMailAccounts(writer http.ResponseWriter, request *http.Requ
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "accounts": accounts})
 }
 
-func validateMailAccountPayload(payload mailAccountPayload, item domain.MailAccount) (domain.MailAccount, error) {
-	item.Name = strings.TrimSpace(payload.Name)
-	item.Address = strings.TrimSpace(payload.Address)
-	item.DisplayName = strings.TrimSpace(payload.DisplayName)
-	item.Provider = strings.TrimSpace(payload.Provider)
-	item.SMTPHost = strings.TrimSpace(payload.SMTPHost)
-	item.SMTPSecurity = strings.TrimSpace(payload.SMTPSecurity)
-	item.SMTPUsername = strings.TrimSpace(payload.SMTPUsername)
+// applyMailAccountPayload applies only explicitly supplied fields. On update an
+// omitted or empty string leaves the existing value untouched, so a partial PUT
+// such as {"status":"disabled"} cannot erase the account name.
+func applyMailAccountPayload(item domain.MailAccount, payload mailAccountPayload, create bool) domain.MailAccount {
+	if create || strings.TrimSpace(payload.Name) != "" {
+		item.Name = strings.TrimSpace(payload.Name)
+	}
+	if create || strings.TrimSpace(payload.Address) != "" {
+		item.Address = strings.TrimSpace(payload.Address)
+	}
+	if create || strings.TrimSpace(payload.DisplayName) != "" {
+		item.DisplayName = strings.TrimSpace(payload.DisplayName)
+	}
+	if create || strings.TrimSpace(payload.Provider) != "" {
+		item.Provider = strings.TrimSpace(payload.Provider)
+	}
+	if create || strings.TrimSpace(payload.SMTPHost) != "" {
+		item.SMTPHost = strings.TrimSpace(payload.SMTPHost)
+	}
+	if create || payload.SMTPPort != 0 {
+		item.SMTPPort = payload.SMTPPort
+	}
+	if create || strings.TrimSpace(payload.SMTPSecurity) != "" {
+		item.SMTPSecurity = strings.TrimSpace(payload.SMTPSecurity)
+	}
+	if create || strings.TrimSpace(payload.SMTPUsername) != "" {
+		item.SMTPUsername = strings.TrimSpace(payload.SMTPUsername)
+	}
+	if payload.Aliases != nil {
+		aliases := make([]domain.MailAccountAlias, 0, len(payload.Aliases))
+		for _, raw := range payload.Aliases {
+			aliases = append(aliases, domain.MailAccountAlias{Address: strings.TrimSpace(raw)})
+		}
+		item.Aliases = aliases
+	}
+	return item
+}
+
+func validateMailAccount(item domain.MailAccount) (domain.MailAccount, error) {
+	item.Name = strings.TrimSpace(item.Name)
+	item.Address = strings.TrimSpace(item.Address)
+	item.DisplayName = strings.TrimSpace(item.DisplayName)
+	if item.Name == "" {
+		return domain.MailAccount{}, errors.New("账号名称必填")
+	}
 	if _, err := mailpkg.NormalizeRecipient(item.Address); err != nil {
 		return domain.MailAccount{}, errors.New("发件地址格式不正确")
 	}
+	item.Provider = strings.TrimSpace(item.Provider)
 	if item.Provider == "" {
 		item.Provider = domain.MailProviderNeteaseQiye
 	}
 	if item.Provider != domain.MailProviderNeteaseQiye {
 		return domain.MailAccount{}, errors.New("一期只支持网易企业邮箱")
 	}
+	item.SMTPSecurity = strings.TrimSpace(item.SMTPSecurity)
 	if item.SMTPSecurity == "" {
 		item.SMTPSecurity = domain.MailSMTPSecuritySSL
 	}
@@ -64,22 +102,55 @@ func validateMailAccountPayload(payload mailAccountPayload, item domain.MailAcco
 	if item.SMTPPort != domain.MailDefaultSMTPPort {
 		return domain.MailAccount{}, errors.New("网易企业邮箱仅允许 465 端口")
 	}
-	if item.SMTPHost == "" {
-		item.SMTPHost = domain.MailDefaultSMTPHost
+	rawHost := strings.TrimSpace(item.SMTPHost)
+	if rawHost == "" {
+		rawHost = domain.MailDefaultSMTPHost
 	}
+	host, ok := mailpkg.NormalizeSMTPHost(rawHost)
+	if !ok {
+		return domain.MailAccount{}, errors.New("SMTP 主机必须是网易企业邮箱的主用或备用主机")
+	}
+	item.SMTPHost = host
+	item.SMTPUsername = strings.TrimSpace(item.SMTPUsername)
 	if item.SMTPUsername == "" {
 		item.SMTPUsername = item.Address
 	}
-	aliases := make([]domain.MailAccountAlias, 0, len(payload.Aliases))
-	for _, raw := range payload.Aliases {
-		address, err := mailpkg.NormalizeRecipient(strings.TrimSpace(raw))
-		if err != nil {
+	if _, err := mailpkg.NormalizeRecipient(item.SMTPUsername); err != nil {
+		return domain.MailAccount{}, errors.New("SMTP 用户名格式不正确")
+	}
+	aliases := make([]domain.MailAccountAlias, 0, len(item.Aliases))
+	seen := map[string]bool{}
+	for _, alias := range item.Aliases {
+		address := strings.TrimSpace(alias.Address)
+		if address == "" {
+			return domain.MailAccount{}, errors.New("别名地址不能为空")
+		}
+		if _, err := mailpkg.NormalizeRecipient(address); err != nil {
 			return domain.MailAccount{}, errors.New("别名地址格式不正确")
 		}
+		if strings.EqualFold(address, item.Address) {
+			return domain.MailAccount{}, errors.New("别名不能与发件地址相同")
+		}
+		key := strings.ToLower(address)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
 		aliases = append(aliases, domain.MailAccountAlias{Address: address})
 	}
 	item.Aliases = aliases
 	return item, nil
+}
+
+func validateMailAccountStatusTransition(status string) (domain.MailAccountStatus, bool) {
+	switch domain.MailAccountStatus(strings.TrimSpace(status)) {
+	case "":
+		return "", true
+	case domain.MailAccountDisabled, domain.MailAccountUnverified:
+		return domain.MailAccountStatus(strings.TrimSpace(status)), true
+	default:
+		return "", false
+	}
 }
 
 func (s *Server) createMailAccount(writer http.ResponseWriter, request *http.Request) {
@@ -88,21 +159,17 @@ func (s *Server) createMailAccount(writer http.ResponseWriter, request *http.Req
 		writeMailError(writer, http.StatusBadRequest, "invalid_json", "请求格式不正确")
 		return
 	}
-	item := domain.MailAccount{
-		ID:      domain.NewID("mail_account"),
-		Status:  domain.MailAccountUnverified,
-		Aliases: nil,
-	}
-	item, err := validateMailAccountPayload(payload, item)
+	item := applyMailAccountPayload(domain.MailAccount{
+		ID: domain.NewID("mail_account"), Status: domain.MailAccountUnverified,
+	}, payload, true)
+	item, err := validateMailAccount(item)
 	if err != nil {
-		writeMailError(writer, http.StatusUnprocessableEntity, domain.MailErrInvalidState, err.Error())
+		writeMailError(writer, http.StatusUnprocessableEntity, domain.MailErrAccountInvalid, err.Error())
 		return
 	}
 	code := strings.TrimSpace(payload.AuthorizationCode)
 	if code != "" {
 		item.CredentialRef = domain.MailAccountCredentialRef(item.ID)
-	}
-	if code != "" {
 		if err := s.putMailCredential(item.ID, code); err != nil {
 			writeMailError(writer, http.StatusInternalServerError, "mail_internal_error", "保存授权码失败")
 			return
@@ -114,12 +181,15 @@ func (s *Server) createMailAccount(writer http.ResponseWriter, request *http.Req
 			s.deleteMailCredential(item.ID)
 		}
 		if errors.Is(err, store.ErrMailAddressInUse) {
-			writeMailError(writer, http.StatusConflict, domain.MailErrInvalidState, "发件地址或别名已被其他账号使用")
+			writeMailError(writer, http.StatusConflict, domain.MailErrAccountInvalid, "发件地址或别名已被其他账号使用")
 			return
 		}
-		writeMailError(writer, http.StatusUnprocessableEntity, domain.MailErrInvalidState, "邮箱账号参数不正确")
+		writeMailError(writer, http.StatusUnprocessableEntity, domain.MailErrAccountInvalid, "邮箱账号参数不正确")
 		return
 	}
+	s.audit(request, "mail.account.create", "mail_account", created.ID, map[string]any{
+		"status": string(created.Status), "credential_configured": created.CredentialConfigured,
+	})
 	writeJSON(writer, http.StatusCreated, map[string]any{"ok": true, "account": created})
 }
 
@@ -137,8 +207,9 @@ func (s *Server) mailAccountDetail(writer http.ResponseWriter, request *http.Req
 }
 
 func (s *Server) updateMailAccount(writer http.ResponseWriter, request *http.Request) {
+	ctx := request.Context()
 	id := request.PathValue("id")
-	existing, err := s.store.MailAccount(request.Context(), id)
+	existing, err := s.store.MailAccount(ctx, id)
 	if err != nil {
 		if isNoRows(err) {
 			writeMailError(writer, http.StatusNotFound, domain.MailErrAccountNotFound, "邮箱账号不存在")
@@ -152,102 +223,70 @@ func (s *Server) updateMailAccount(writer http.ResponseWriter, request *http.Req
 		writeMailError(writer, http.StatusBadRequest, "invalid_json", "请求格式不正确")
 		return
 	}
-	item := existing
-	if strings.TrimSpace(payload.Name) != "" || payload.Name == "" {
-		item.Name = strings.TrimSpace(payload.Name)
-	}
-	item = domain.MailAccount{
-		ID: item.ID, Name: item.Name, Address: item.Address, DisplayName: item.DisplayName,
-		Provider: item.Provider, SMTPHost: item.SMTPHost, SMTPPort: item.SMTPPort,
-		SMTPSecurity: item.SMTPSecurity, SMTPUsername: item.SMTPUsername,
-		Status: item.Status, LastTestAt: item.LastTestAt,
-		LastTestErrorCode: item.LastTestErrorCode, IMAPHost: item.IMAPHost,
-		IMAPPort: item.IMAPPort, IMAPEnabled: item.IMAPEnabled,
-		CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt, Aliases: item.Aliases,
-	}
-	if payload.Aliases != nil {
-		item.Aliases = nil
-	} else {
-		converted := make([]string, 0, len(existing.Aliases))
-		for _, alias := range existing.Aliases {
-			converted = append(converted, alias.Address)
-		}
-		payload.Aliases = converted
-	}
-	if strings.TrimSpace(payload.Address) == "" {
-		payload.Address = item.Address
-	}
-	if strings.TrimSpace(payload.DisplayName) == "" {
-		payload.DisplayName = item.DisplayName
-	}
-	if strings.TrimSpace(payload.Provider) == "" {
-		payload.Provider = item.Provider
-	}
-	if strings.TrimSpace(payload.SMTPHost) == "" {
-		payload.SMTPHost = item.SMTPHost
-	}
-	if payload.SMTPPort == 0 {
-		payload.SMTPPort = item.SMTPPort
-	}
-	if strings.TrimSpace(payload.SMTPSecurity) == "" {
-		payload.SMTPSecurity = item.SMTPSecurity
-	}
-	if strings.TrimSpace(payload.SMTPUsername) == "" {
-		payload.SMTPUsername = item.SMTPUsername
-	}
-	if payload.Name == "" {
-		payload.Name = item.Name
-	}
-	item, err = validateMailAccountPayload(payload, item)
-	if err != nil {
-		writeMailError(writer, http.StatusUnprocessableEntity, domain.MailErrInvalidState, err.Error())
+	statusTransition, statusOK := validateMailAccountStatusTransition(payload.Status)
+	if !statusOK {
+		writeMailError(writer, http.StatusUnprocessableEntity, domain.MailErrAccountInvalid, "状态只能由连接测试或停用/启用操作修改")
 		return
 	}
-	// Status transitions are limited to disable/enable; ok/error are only set
-	// by a connection test.
-	if status := strings.TrimSpace(payload.Status); status != "" {
-		switch domain.MailAccountStatus(status) {
-		case domain.MailAccountDisabled, domain.MailAccountUnverified:
-			item.Status = domain.MailAccountStatus(status)
-		default:
-			writeMailError(writer, http.StatusUnprocessableEntity, domain.MailErrInvalidState, "状态只能由连接测试或停用/启用操作修改")
-			return
-		}
+	item := applyMailAccountPayload(existing, payload, false)
+	item, err = validateMailAccount(item)
+	if err != nil {
+		writeMailError(writer, http.StatusUnprocessableEntity, domain.MailErrAccountInvalid, err.Error())
+		return
 	}
-	updated, err := s.store.UpdateMailAccount(request.Context(), item)
+	hostChanged := !strings.EqualFold(existing.SMTPHost, item.SMTPHost) ||
+		!strings.EqualFold(existing.SMTPUsername, item.SMTPUsername)
+	updated, err := s.store.UpdateMailAccount(ctx, item)
 	if err != nil {
 		if errors.Is(err, store.ErrMailAddressInUse) {
-			writeMailError(writer, http.StatusConflict, domain.MailErrInvalidState, "发件地址或别名已被其他账号使用")
+			writeMailError(writer, http.StatusConflict, domain.MailErrAccountInvalid, "发件地址或别名已被其他账号使用")
 			return
 		}
 		if isNoRows(err) {
 			writeMailError(writer, http.StatusNotFound, domain.MailErrAccountNotFound, "邮箱账号不存在")
 			return
 		}
-		writeMailError(writer, http.StatusUnprocessableEntity, domain.MailErrInvalidState, "邮箱账号参数不正确")
+		writeMailError(writer, http.StatusUnprocessableEntity, domain.MailErrAccountInvalid, "邮箱账号参数不正确")
 		return
 	}
-	if code := strings.TrimSpace(payload.AuthorizationCode); code != "" {
-		if err := s.putMailCredential(id, code); err != nil {
+	rotated := strings.TrimSpace(payload.AuthorizationCode) != ""
+	if rotated {
+		if err := s.putMailCredential(id, strings.TrimSpace(payload.AuthorizationCode)); err != nil {
 			writeMailError(writer, http.StatusInternalServerError, "mail_internal_error", "保存授权码失败")
 			return
 		}
-		if err := s.store.SetMailAccountCredential(request.Context(), id, time.Now().UTC()); err != nil {
+		if err := s.store.SetMailAccountCredential(ctx, id, time.Now().UTC()); err != nil {
 			writeMailError(writer, http.StatusInternalServerError, "mail_internal_error", "更新授权码状态失败")
 			return
 		}
-		// Rotation requires a re-test, but must not silently re-enable a
-		// disabled account.
-		if existing.Status == domain.MailAccountDisabled && strings.TrimSpace(payload.Status) == "" {
-			if err := s.store.SetMailAccountStatus(request.Context(), id, domain.MailAccountDisabled, time.Now().UTC()); err != nil {
-				writeMailError(writer, http.StatusInternalServerError, "mail_internal_error", "更新账号状态失败")
-				return
-			}
-		}
-		if updated, err = s.store.MailAccount(request.Context(), id); err != nil {
-			writeMailError(writer, http.StatusInternalServerError, "mail_internal_error", "读取邮箱账号失败")
+	} else if hostChanged {
+		// A different SMTP endpoint must never inherit "ok" from the old host.
+		if err := s.store.ResetMailAccountVerification(ctx, id, time.Now().UTC()); err != nil {
+			writeMailError(writer, http.StatusInternalServerError, "mail_internal_error", "重置账号验证状态失败")
 			return
 		}
+	}
+	if statusTransition != "" {
+		if err := s.store.SetMailAccountStatus(ctx, id, statusTransition, time.Now().UTC()); err != nil {
+			writeMailError(writer, http.StatusInternalServerError, "mail_internal_error", "更新账号状态失败")
+			return
+		}
+	}
+	updated, err = s.store.MailAccount(ctx, id)
+	if err != nil {
+		writeMailError(writer, http.StatusInternalServerError, "mail_internal_error", "读取邮箱账号失败")
+		return
+	}
+	s.audit(request, "mail.account.update", "mail_account", id, map[string]any{
+		"status": string(updated.Status), "credential_rotated": rotated, "host_changed": hostChanged,
+	})
+	if rotated {
+		s.audit(request, "mail.account.credential_rotate", "mail_account", id, map[string]any{
+			"status": string(updated.Status),
+		})
+	}
+	if statusTransition == domain.MailAccountDisabled {
+		s.audit(request, "mail.account.disable", "mail_account", id, nil)
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "account": updated})
 }
@@ -267,6 +306,7 @@ func (s *Server) deleteMailAccount(writer http.ResponseWriter, request *http.Req
 		return
 	}
 	s.deleteMailCredential(id)
+	s.audit(request, "mail.account.delete", "mail_account", id, nil)
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -284,6 +324,10 @@ func (s *Server) testMailAccount(writer http.ResponseWriter, request *http.Reque
 	}
 	if account.Status == domain.MailAccountDisabled {
 		writeMailError(writer, http.StatusConflict, domain.MailErrAccountDisabled, "账号已停用，请先启用")
+		return
+	}
+	if _, ok := mailpkg.NormalizeSMTPHost(account.SMTPHost); !ok {
+		writeMailError(writer, http.StatusUnprocessableEntity, domain.MailErrAccountInvalid, "SMTP 主机不在允许列表")
 		return
 	}
 	ref, err := s.store.MailAccountCredentialRef(ctx, id)
@@ -315,10 +359,10 @@ func (s *Server) testMailAccount(writer http.ResponseWriter, request *http.Reque
 		writeMailError(writer, http.StatusInternalServerError, "mail_internal_error", "读取邮箱账号失败")
 		return
 	}
+	s.audit(request, "mail.account.test", "mail_account", id, map[string]any{
+		"ok": result.OK, "error_code": string(result.ErrorCode),
+	})
 	writeJSON(writer, http.StatusOK, map[string]any{
 		"ok": result.OK, "result": result, "account": updated,
 	})
 }
-
-// ensure context import stays used when the file evolves.
-var _ context.Context

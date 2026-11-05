@@ -22,7 +22,7 @@ func writeMailError(writer http.ResponseWriter, status int, code domain.MailErro
 func mailErrorStatus(code domain.MailErrorCode) int {
 	switch code {
 	case domain.MailErrAccountNotFound, domain.MailErrTemplateNotFound,
-		domain.MailErrAttachmentNotFound:
+		domain.MailErrAttachmentNotFound, domain.MailErrBindingNotFound:
 		return http.StatusNotFound
 	case domain.MailErrAccountNotBound, domain.MailErrForbidden:
 		return http.StatusForbidden

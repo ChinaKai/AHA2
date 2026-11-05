@@ -19,13 +19,20 @@ func baseTemplate() Template {
 	}
 }
 
-func baseVariables() map[string]string {
+func baseCallerVariables() map[string]string {
+	return map[string]string{"build.version": "v1.2.3"}
+}
+
+func baseServerVariables() map[string]string {
 	return map[string]string{
-		"project.name":  "Example",
-		"build.version": "v1.2.3",
-		"task.id":       "task_1",
-		"task.title":    "OTA 回归",
+		"project.name": "Example",
+		"task.id":      "task_1",
+		"task.title":   "OTA 回归",
 	}
+}
+
+func baseInput() Input {
+	return Input{Variables: baseCallerVariables(), ServerVariables: baseServerVariables()}
 }
 
 func requireCode(t *testing.T, err error, want domain.MailErrorCode) {
@@ -40,11 +47,10 @@ func requireCode(t *testing.T, err error, want domain.MailErrorCode) {
 }
 
 func TestRenderGoldenTextAndHTML(t *testing.T) {
-	preview, err := Render(baseTemplate(), Input{
-		Variables: baseVariables(),
-		To:        []string{"qa-team@example.com"},
-		CC:        []string{"release-manager@example.com"},
-	})
+	input := baseInput()
+	input.To = []string{"qa-team@example.com"}
+	input.CC = []string{"release-manager@example.com"}
+	preview, err := Render(baseTemplate(), input)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +84,7 @@ func TestRenderEscapesVariableValues(t *testing.T) {
 		BodyTextTemplate: "{{task.title}}",
 		BodyHTMLTemplate: `<p>{{task.title}}</p><a href="https://example.com/{{task.id}}">open</a>`,
 	}
-	preview, err := Render(template, Input{Variables: map[string]string{
+	preview, err := Render(template, Input{ServerVariables: map[string]string{
 		"task.title": `<script>alert("x")</script>`,
 		"task.id":    "task_1",
 	}})
@@ -96,30 +102,50 @@ func TestRenderEscapesVariableValues(t *testing.T) {
 func TestTemplateRejectsUnknownAndMalformedVariables(t *testing.T) {
 	template := baseTemplate()
 	template.SubjectTemplate = "[AHA] {{secret.token}}"
-	_, err := Render(template, Input{Variables: baseVariables()})
+	_, err := Render(template, baseInput())
 	requireCode(t, err, domain.MailErrTemplateVariableUnknown)
 
 	template = baseTemplate()
 	template.BodyTextTemplate = "{{task.title"
-	_, err = Render(template, Input{Variables: baseVariables()})
+	_, err = Render(template, baseInput())
 	requireCode(t, err, domain.MailErrTemplateInvalid)
 
 	template = baseTemplate()
 	template.BodyTextTemplate = "{{ task.title }}"
-	_, err = Render(template, Input{Variables: baseVariables()})
+	_, err = Render(template, baseInput())
 	requireCode(t, err, domain.MailErrTemplateInvalid)
 }
 
 func TestRenderRejectsMissingVariables(t *testing.T) {
-	variables := baseVariables()
-	delete(variables, "task.id")
-	_, err := Render(baseTemplate(), Input{Variables: variables})
+	input := baseInput()
+	delete(input.ServerVariables, "task.id")
+	_, err := Render(baseTemplate(), input)
 	requireCode(t, err, domain.MailErrTemplateVariableMissing)
 
-	variables = baseVariables()
-	delete(variables, "project.name")
-	_, err = Render(baseTemplate(), Input{Variables: variables})
+	input = baseInput()
+	delete(input.ServerVariables, "project.name")
+	_, err = Render(baseTemplate(), input)
 	requireCode(t, err, domain.MailErrTemplateVariableMissing)
+}
+
+func TestRenderRejectsCallerSuppliedServerVariables(t *testing.T) {
+	template := Template{SubjectTemplate: "s", BodyTextTemplate: "t"}
+	for _, name := range []string{"task.id", "project.name", "workspace.name", "agent.name", "owner.name", "package.sha256"} {
+		_, err := Render(template, Input{Variables: map[string]string{name: "forged"}})
+		requireCode(t, err, domain.MailErrForbidden)
+	}
+	// Caller-controlled namespaces remain accepted.
+	for _, name := range []string{"build.version", "test.scope", "release.version", "extra.note"} {
+		if _, err := Render(template, Input{Variables: map[string]string{name: "ok"}}); err != nil {
+			t.Fatalf("%s rejected: %v", name, err)
+		}
+	}
+}
+
+func TestRenderRejectsVariableLinkPlaceholder(t *testing.T) {
+	template := Template{SubjectTemplate: "s", BodyTextTemplate: "{{extra.note}}"}
+	_, err := Render(template, Input{Variables: map[string]string{"extra.note": "%%MAIL_LINK:attachment_1%%"}})
+	requireCode(t, err, domain.MailErrTemplateInvalid)
 }
 
 func TestTemplateRejectsUnsafeHTML(t *testing.T) {
@@ -142,6 +168,8 @@ func TestTemplateRejectsUnsafeHTML(t *testing.T) {
 		`<a href="http://example.com">x</a>`,
 		`<img src="{{task.id}}">`,
 		`<!-- {{task.id}} -->`,
+		`<p>x<!--[if mso]><img src="https://tracker.example.com/p.gif"><![endif]--></p>`,
+		`<![CDATA[<img src="https://tracker.example.com/p.gif">]]>`,
 	}
 	for _, html := range tests {
 		template := Template{SubjectTemplate: "s", BodyTextTemplate: "t", BodyHTMLTemplate: html}
@@ -150,6 +178,47 @@ func TestTemplateRejectsUnsafeHTML(t *testing.T) {
 			t.Fatalf("HTML %q was accepted", html)
 		}
 		requireCode(t, err, domain.MailErrTemplateInvalid)
+	}
+}
+
+func TestURLValidationRejectsAmbiguousForms(t *testing.T) {
+	tests := []string{
+		`https:evil.example`,
+		`https://good.example.com@evil.example/`,
+		`https://exam​ple.com/`,
+		`https://пример.example/`,
+		`mailto:a@example.com?bcc=victim@example.com`,
+		`mailto:a@example.com?subject=x`,
+		`mailto://a@example.com`,
+		`https://`,
+		`https:///path`,
+	}
+	for _, raw := range tests {
+		template := Template{SubjectTemplate: "s", BodyTextTemplate: "t", BodyHTMLTemplate: `<a href="` + raw + `">x</a>`}
+		requireCode(t, ValidateTemplate(template), domain.MailErrTemplateInvalid)
+	}
+	valid := Template{
+		SubjectTemplate: "s", BodyTextTemplate: "t",
+		BodyHTMLTemplate: `<a href="https://example.com/a">x</a><a href="mailto:qa@example.com">m</a>`,
+	}
+	if err := ValidateTemplate(valid); err != nil {
+		t.Fatalf("valid URLs rejected: %v", err)
+	}
+}
+
+func TestFinalSanitizeAllowsBraceTextFromVariables(t *testing.T) {
+	template := Template{
+		SubjectTemplate:  "{{test.scope}}",
+		BodyTextTemplate: "{{test.scope}}",
+		BodyHTMLTemplate: `<p>{{test.scope}}</p>`,
+	}
+	preview, err := Render(template, Input{Variables: map[string]string{"test.scope": "literal {{not-a-variable}}"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(preview.BodyText, "{{not-a-variable}}") ||
+		!strings.Contains(preview.BodyHTML, "{{not-a-variable}}") {
+		t.Fatalf("braces were consumed: %q / %q", preview.BodyText, preview.BodyHTML)
 	}
 }
 
@@ -188,7 +257,7 @@ func TestRenderRejectsAttributeEscapeAttempts(t *testing.T) {
 		t.Fatal(err)
 	}
 	template.BodyHTMLTemplate = `<a href="https://example.com/{{task.id}}">x</a>`
-	_, err = Render(template, Input{Variables: map[string]string{"task.id": `"><img src=x onerror=alert(1)>`}})
+	_, err = Render(template, Input{ServerVariables: map[string]string{"task.id": `"><img src=x onerror=alert(1)>`}})
 	requireCode(t, err, domain.MailErrTemplateInvalid)
 }
 
@@ -285,6 +354,40 @@ func TestExtraVariableLimits(t *testing.T) {
 	_, err = Render(Template{SubjectTemplate: "s", BodyTextTemplate: "{{extra.a}}"}, Input{Variables: variables})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestLinkModeAttachmentCannotBeCIDReferenced(t *testing.T) {
+	template := Template{
+		SubjectTemplate:  "s",
+		BodyTextTemplate: "t",
+		BodyHTMLTemplate: `<img src="cid:attachment_1">`,
+	}
+	attachment := Attachment{
+		SourceType: "task_attachment", SourceID: "attachment_1", FileName: "big.zip",
+		MediaType: "application/zip", SizeBytes: MaxDirectAttachmentSize + 1,
+		SHA256: strings.Repeat("c", 64), ContentID: "attachment_1",
+	}
+	_, err := Render(template, Input{Attachments: []Attachment{attachment}})
+	requireCode(t, err, domain.MailErrTemplateInvalid)
+}
+
+func TestDuplicateAttachmentSourcesAreDeduped(t *testing.T) {
+	template := Template{SubjectTemplate: "s", BodyTextTemplate: "t"}
+	attachment := Attachment{
+		SourceType: "task_attachment", SourceID: "attachment_1", FileName: "a.bin",
+		MediaType: "application/octet-stream", SizeBytes: 10,
+		SHA256: strings.Repeat("d", 64), ContentID: "attachment_1",
+	}
+	artifact := attachment
+	artifact.SourceType = "build_artifact"
+	artifact.SourceID = "build_artifact_1"
+	preview, err := Render(template, Input{Attachments: []Attachment{attachment, artifact}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(preview.Attachments) != 1 || preview.Attachments[0].SourceType != "task_attachment" {
+		t.Fatalf("attachments = %#v", preview.Attachments)
 	}
 }
 

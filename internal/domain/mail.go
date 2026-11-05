@@ -13,6 +13,7 @@ const (
 	MailProviderNeteaseQiye = "netease_qiye"
 	MailSMTPSecuritySSL     = "ssl"
 	MailDefaultSMTPHost     = "smtp.qiye.163.com"
+	MailBackupSMTPHost      = "smtphz.qiye.163.com"
 	MailDefaultSMTPPort     = 465
 
 	MailCredentialRefPrefix = "mail-account/"
@@ -419,6 +420,8 @@ type MailErrorCode string
 
 const (
 	MailErrAccountNotFound         MailErrorCode = "mail_account_not_found"
+	MailErrAccountInvalid          MailErrorCode = "mail_account_invalid"
+	MailErrBindingNotFound         MailErrorCode = "mail_binding_not_found"
 	MailErrAccountNotBound         MailErrorCode = "mail_account_not_bound"
 	MailErrAccountDisabled         MailErrorCode = "mail_account_disabled"
 	MailErrCredentialMissing       MailErrorCode = "mail_credential_missing"

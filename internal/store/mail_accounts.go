@@ -344,6 +344,25 @@ func (s *Store) SetMailAccountCredential(ctx context.Context, id string, now tim
 	return nil
 }
 
+// ResetMailAccountVerification requires a new connection test after account
+// connection settings change. It clears the previous test result but never
+// touches the credential reference.
+func (s *Store) ResetMailAccountVerification(ctx context.Context, id string, now time.Time) error {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE mail_accounts SET status='unverified',last_test_at='',last_test_error_code='',updated_at=?
+		WHERE id=?`, mailTimeString(now), id)
+	if err != nil {
+		return err
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
 // SetMailAccountTestResult records the outcome of an Owner-triggered
 // connection test. The error code is a stable SMTP code, never a transcript or
 // credential.

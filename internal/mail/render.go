@@ -53,10 +53,14 @@ type Attachment struct {
 // Task/Project/Workspace resolution is the caller's responsibility because
 // this package must not depend on the store.
 type Input struct {
-	Variables   map[string]string
-	To          []string
-	CC          []string
-	Attachments []Attachment
+	// Variables are caller supplied (build/test/release/extra only).
+	Variables map[string]string
+	// ServerVariables are resolved by trusted server code (task/project/
+	// workspace/agent/owner/package). They take precedence over caller input.
+	ServerVariables map[string]string
+	To              []string
+	CC              []string
+	Attachments     []Attachment
 }
 
 // Preview is the rendered, sanitized snapshot candidate. Creating a Mail
@@ -129,6 +133,13 @@ func Render(template Template, input Input) (Preview, error) {
 	if err != nil {
 		return Preview{}, err
 	}
+	serverVariables, err := normalizeServerVariables(input.ServerVariables)
+	if err != nil {
+		return Preview{}, err
+	}
+	for name, value := range serverVariables {
+		variables[name] = value
+	}
 	names, err := templatePlaceholders(template)
 	if err != nil {
 		return Preview{}, err
@@ -163,19 +174,44 @@ func Render(template Template, input Input) (Preview, error) {
 	}
 	bodyText = normalizeNewlines(bodyText)
 
+	attachments, err := prepareAttachments(input.Attachments)
+	if err != nil {
+		return Preview{}, err
+	}
+	if len(attachments) > MaxAttachments {
+		return Preview{}, errorf(domain.MailErrAttachmentTooLarge, "at most %d attachments are allowed", MaxAttachments)
+	}
+	total := int64(0)
+	for _, attachment := range attachments {
+		if attachment.SizeBytes > MaxAttachmentBytes {
+			return Preview{}, errorf(domain.MailErrAttachmentTooLarge, "attachment %q exceeds %d bytes", attachment.FileName, MaxAttachmentBytes)
+		}
+		total += attachment.SizeBytes
+	}
+	mode := "direct"
+	if total > MaxDirectAttachmentSize {
+		mode = "link"
+	}
+	allowedCIDs := make(map[string]bool, len(attachments))
+	for index := range attachments {
+		// Delivery mode is server computed: an over-size set cannot keep a cid
+		// reference that the delivery worker would replace with a link.
+		attachments[index].DeliveryMode = mode
+		if attachments[index].DeliveryMode == "link" {
+			attachments[index].LinkPlaceholder = "%%MAIL_LINK:" + attachments[index].ContentID + "%%"
+			continue
+		}
+		if attachments[index].ContentID != "" {
+			allowedCIDs[attachments[index].ContentID] = true
+		}
+	}
+
 	bodyHTML := ""
 	warnings := make([]string, 0)
 	if strings.TrimSpace(template.BodyHTMLTemplate) != "" {
 		substituted, err := substituteTemplate(template.BodyHTMLTemplate, variables, true)
 		if err != nil {
 			return Preview{}, err
-		}
-		attachments := prepareAttachments(input.Attachments)
-		allowedCIDs := make(map[string]bool, len(attachments))
-		for _, attachment := range attachments {
-			if attachment.ContentID != "" {
-				allowedCIDs[attachment.ContentID] = true
-			}
 		}
 		if bodyHTML, _, warnings, err = processHTML(substituted, htmlFinalMode, allowedCIDs); err != nil {
 			return Preview{}, err
@@ -195,31 +231,6 @@ func Render(template Template, input Input) (Preview, error) {
 	to, cc, err := normalizeRecipientSet(input.To, input.CC)
 	if err != nil {
 		return Preview{}, err
-	}
-	attachments := prepareAttachments(input.Attachments)
-	if len(attachments) > MaxAttachments {
-		return Preview{}, errorf(domain.MailErrAttachmentTooLarge, "at most %d attachments are allowed", MaxAttachments)
-	}
-	for _, attachment := range attachments {
-		if attachment.SizeBytes > MaxAttachmentBytes {
-			return Preview{}, errorf(domain.MailErrAttachmentTooLarge, "attachment %q exceeds %d bytes", attachment.FileName, MaxAttachmentBytes)
-		}
-	}
-	total := int64(0)
-	for _, attachment := range attachments {
-		total += attachment.SizeBytes
-	}
-	mode := "direct"
-	if total > MaxDirectAttachmentSize {
-		mode = "link"
-	}
-	for index := range attachments {
-		if attachments[index].DeliveryMode == "" {
-			attachments[index].DeliveryMode = mode
-		}
-		if attachments[index].DeliveryMode == "link" && attachments[index].LinkPlaceholder == "" {
-			attachments[index].LinkPlaceholder = "%%MAIL_LINK:" + attachments[index].ContentID + "%%"
-		}
 	}
 
 	return Preview{
@@ -360,20 +371,30 @@ func normalizeRecipientSet(to, cc []string) ([]string, []string, error) {
 	return normalizedTo, normalizedCC, nil
 }
 
-func prepareAttachments(input []Attachment) []Attachment {
+func prepareAttachments(input []Attachment) ([]Attachment, error) {
 	if len(input) == 0 {
-		return []Attachment{}
+		return []Attachment{}, nil
 	}
-	result := make([]Attachment, len(input))
-	copy(result, input)
-	for index := range result {
-		if result[index].ContentID == "" {
+	result := make([]Attachment, 0, len(input))
+	seen := make(map[string]bool, len(input))
+	for _, attachment := range input {
+		if attachment.ContentID == "" {
 			// The content id of a preview snapshot is the underlying Task
 			// attachment id: stable, unique within the Task and not a path.
-			result[index].ContentID = result[index].SourceID
+			attachment.ContentID = attachment.SourceID
 		}
+		if attachment.ContentID == "" {
+			return nil, ErrAttachmentNotFound()
+		}
+		if seen[attachment.ContentID] {
+			// The same source attachment may arrive through both
+			// attachment_ids and build_artifact_ids; keep exactly one snapshot.
+			continue
+		}
+		seen[attachment.ContentID] = true
+		result = append(result, attachment)
 	}
-	return result
+	return result, nil
 }
 
 // htmlToText produces the required text/plain alternative from sanitized HTML.

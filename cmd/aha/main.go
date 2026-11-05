@@ -104,6 +104,7 @@ type serveOptions struct {
 	allowCrossOrigin      bool
 	agentAPIURL           string
 	allowInsecureAgentAPI bool
+	mailTaskBaseURL       string
 	logLevel              string
 	codexBinary           string
 	claudeBinary          string
@@ -130,6 +131,7 @@ func parseServeOptions(name string, args []string) (serveOptions, error) {
 	allowCrossOrigin := flags.Bool("allow-cross-origin", envBool("AHA2_ALLOW_CROSS_ORIGIN"), "disable Origin host validation for reverse proxies and embedded WebViews")
 	agentAPIURL := flags.String("agent-api-url", os.Getenv("AHA2_AGENT_API_URL"), "Agent-reachable AHA2 base URL (required for remote workspaces)")
 	allowInsecureAgentAPI := flags.Bool("allow-insecure-agent-api", envBool("AHA2_ALLOW_INSECURE_AGENT_API"), "allow a non-loopback http:// Agent API URL for trusted development networks")
+	mailTaskBaseURL := flags.String("mail-task-base-url", os.Getenv("AHA2_MAIL_TASK_BASE_URL"), "external https base URL used for task.url mail template variables")
 	logLevel := flags.String("log-level", envOr("AHA2_LOG_LEVEL", "info"), "debug, info, warn, error")
 	codexBinary := flags.String("codex-bin", envOr("AHA2_CODEX_BIN", "codex"), "Codex executable")
 	claudeBinary := flags.String("claude-bin", envOr("AHA2_CLAUDE_BIN", "claude"), "Claude Code executable")
@@ -143,7 +145,8 @@ func parseServeOptions(name string, args []string) (serveOptions, error) {
 	return serveOptions{
 		listen: *listen, dataDir: *dataDir, setupToken: *setupToken, setupTokenFile: *setupTokenFile,
 		secureCookie: *secureCookie, allowCrossOrigin: *allowCrossOrigin, agentAPIURL: *agentAPIURL,
-		allowInsecureAgentAPI: *allowInsecureAgentAPI, logLevel: *logLevel, codexBinary: *codexBinary,
+		allowInsecureAgentAPI: *allowInsecureAgentAPI, mailTaskBaseURL: *mailTaskBaseURL,
+		logLevel: *logLevel, codexBinary: *codexBinary,
 		claudeBinary: *claudeBinary, dshBinary: *dshBinary,
 	}, nil
 }
@@ -288,6 +291,7 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 		ManagedProcesses:  managedProcesses,
 		OutboundProxy:     proxyRuntime,
 		Channels:          channelService,
+		MailTaskBaseURL:   options.mailTaskBaseURL,
 		Version:           version,
 		WebVersion:        webVersion,
 		ListenAddress:     options.listen,

@@ -43,12 +43,15 @@ type Config struct {
 	OutboundProxy     *outboundproxy.Controller
 	Channels          *channel.Service
 	MailTester        mailpkg.Tester
-	ProbeSSHHostKey   func(context.Context, string) (hardware.SSHHostKeyInfo, error)
-	TrustSSHHostKey   func(context.Context, string, string) (hardware.SSHHostKeyInfo, error)
-	PairADB           func(context.Context, string, string) (string, error)
-	ExecuteADB        func(context.Context, string, []string, []byte, time.Duration) (hardware.ADBExecResult, error)
-	Version           string
-	WebVersion        string
+	// MailTaskBaseURL is the external https base used for task.url template
+	// variables. Relative or non-https values are treated as unconfigured.
+	MailTaskBaseURL string
+	ProbeSSHHostKey func(context.Context, string) (hardware.SSHHostKeyInfo, error)
+	TrustSSHHostKey func(context.Context, string, string) (hardware.SSHHostKeyInfo, error)
+	PairADB         func(context.Context, string, string) (string, error)
+	ExecuteADB      func(context.Context, string, []string, []byte, time.Duration) (hardware.ADBExecResult, error)
+	Version         string
+	WebVersion      string
 	// ListenAddress is what this process was launched with, reported so the UI can
 	// tell a saved-but-not-yet-applied address from an active one.
 	ListenAddress string
@@ -77,6 +80,7 @@ type Server struct {
 	outboundProxy         *outboundproxy.Controller
 	channels              *channel.Service
 	mailTester            mailpkg.Tester
+	mailTaskBaseURL       string
 	probeSSHHostKey       func(context.Context, string) (hardware.SSHHostKeyInfo, error)
 	trustSSHHostKey       func(context.Context, string, string) (hardware.SSHHostKeyInfo, error)
 	pairADB               func(context.Context, string, string) (string, error)
@@ -156,6 +160,7 @@ func New(config Config) *Server {
 		outboundProxy:         config.OutboundProxy,
 		channels:              config.Channels,
 		mailTester:            mailTester,
+		mailTaskBaseURL:       strings.TrimRight(strings.TrimSpace(config.MailTaskBaseURL), "/"),
 		probeSSHHostKey:       probeSSHHostKey,
 		trustSSHHostKey:       trustSSHHostKey,
 		pairADB:               pairADB,

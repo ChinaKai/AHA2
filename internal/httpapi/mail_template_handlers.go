@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -114,6 +115,9 @@ func (s *Server) createMailTemplate(writer http.ResponseWriter, request *http.Re
 		writeMailFailure(writer, err, "创建邮件模板失败")
 		return
 	}
+	s.audit(request, "mail.template.create", "mail_template", created.ID, map[string]any{
+		"scope": string(created.Scope), "version": created.CurrentVersion,
+	})
 	writeJSON(writer, http.StatusCreated, map[string]any{"ok": true, "template": created})
 }
 
@@ -187,6 +191,10 @@ func (s *Server) updateMailTemplate(writer http.ResponseWriter, request *http.Re
 	if payload.Name == nil {
 		item.Name = existing.Name
 	}
+	if strings.TrimSpace(item.Name) == "" {
+		writeMailError(writer, http.StatusUnprocessableEntity, domain.MailErrTemplateInvalid, "模板名称必填")
+		return
+	}
 	if err := mailpkg.ValidateTemplate(mailTemplateContent(item)); err != nil {
 		writeMailFailure(writer, err, "邮件模板校验失败")
 		return
@@ -207,6 +215,9 @@ func (s *Server) updateMailTemplate(writer http.ResponseWriter, request *http.Re
 		}
 		return
 	}
+	s.audit(request, "mail.template.update", "mail_template", id, map[string]any{
+		"version": updated.CurrentVersion,
+	})
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "template": updated})
 }
 
@@ -229,6 +240,7 @@ func (s *Server) archiveMailTemplate(writer http.ResponseWriter, request *http.R
 		writeMailError(writer, http.StatusInternalServerError, "mail_internal_error", "归档邮件模板失败")
 		return
 	}
+	s.audit(request, "mail.template.archive", "mail_template", id, nil)
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -261,15 +273,20 @@ func (s *Server) previewMailTemplate(writer http.ResponseWriter, request *http.R
 		writeMailError(writer, http.StatusInternalServerError, "mail_internal_error", "读取邮件模板失败")
 		return
 	}
+	if item.Status != domain.MailTemplateStatusActive {
+		writeMailError(writer, http.StatusConflict, domain.MailErrInvalidState, "已归档模板不能预览")
+		return
+	}
 	var payload mailPreviewPayload
 	if err := decodeJSON(request, &payload); err != nil {
 		writeMailError(writer, http.StatusBadRequest, "invalid_json", "请求格式不正确")
 		return
 	}
-	variables := make(map[string]string, len(payload.Variables)+8)
+	variables := make(map[string]string, len(payload.Variables))
 	for name, value := range payload.Variables {
 		variables[name] = value
 	}
+	serverVariables := make(map[string]string, 8)
 	taskID := strings.TrimSpace(payload.TaskID)
 	if taskID != "" {
 		task, err := s.store.Task(ctx, taskID)
@@ -281,15 +298,19 @@ func (s *Server) previewMailTemplate(writer http.ResponseWriter, request *http.R
 			writeMailError(writer, http.StatusInternalServerError, "mail_internal_error", "读取任务失败")
 			return
 		}
-		// Server-resolved values win over caller input, matching design 5.1.
-		variables["task.id"] = task.ID
-		variables["task.title"] = task.Title
-		variables["task.url"] = "/tasks/" + task.ID
+		serverVariables["task.id"] = task.ID
+		serverVariables["task.title"] = task.Title
+		if taskURL, ok := s.mailTaskURL(task.ID); ok {
+			serverVariables["task.url"] = taskURL
+		} else if templateReferencesVariable(item, "task.url") {
+			writeMailError(writer, http.StatusUnprocessableEntity, domain.MailErrTemplateInvalid, "task.url 未配置外部 https 基地址")
+			return
+		}
 		if project, err := s.store.Project(ctx, task.ProjectID); err == nil {
-			variables["project.name"] = project.Name
+			serverVariables["project.name"] = project.Name
 		}
 		if workspace, err := s.store.Workspace(ctx, task.WorkspaceID); err == nil {
-			variables["workspace.name"] = workspace.Name
+			serverVariables["workspace.name"] = workspace.Name
 		}
 	}
 	attachments, packageVariables, err := s.mailPreviewAttachments(ctx, taskID, payload.AttachmentIDs, payload.BuildArtifactIDs)
@@ -297,23 +318,16 @@ func (s *Server) previewMailTemplate(writer http.ResponseWriter, request *http.R
 		writeMailFailure(writer, err, "预览附件校验失败")
 		return
 	}
-	if len(packageVariables) == 0 {
-		// package.* values are server computed from a selected build artifact;
-		// accepting caller supplied values would let them forge size/SHA256.
-		for name := range variables {
-			if strings.HasPrefix(name, "package.") {
-				writeMailError(writer, http.StatusUnprocessableEntity, domain.MailErrTemplateInvalid, "package 变量必须由所选构建产物解析")
-				return
-			}
-		}
-	}
 	for name, value := range packageVariables {
-		// package.* is server authoritative. build.version may come from the
-		// registered artifact but the caller may override it (design 5.1).
-		if name == "build.version" && strings.TrimSpace(variables[name]) != "" {
+		// package.* is server authoritative. build.version is a caller
+		// overridable build field even when it originated from the artifact.
+		if name == "build.version" {
+			if strings.TrimSpace(variables[name]) == "" {
+				variables[name] = value
+			}
 			continue
 		}
-		variables[name] = value
+		serverVariables[name] = value
 	}
 	to := payload.To
 	if len(to) == 0 {
@@ -324,7 +338,8 @@ func (s *Server) previewMailTemplate(writer http.ResponseWriter, request *http.R
 		cc = item.DefaultCC
 	}
 	preview, err := mailpkg.Render(mailTemplateContent(item), mailpkg.Input{
-		Variables: variables, To: to, CC: cc, Attachments: attachments,
+		Variables: variables, ServerVariables: serverVariables,
+		To: to, CC: cc, Attachments: attachments,
 	})
 	if err != nil {
 		writeMailFailure(writer, err, "邮件预览校验失败")
@@ -333,27 +348,57 @@ func (s *Server) previewMailTemplate(writer http.ResponseWriter, request *http.R
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "preview": preview})
 }
 
+// mailTaskURL builds an absolute external task link. Relative, non-https or
+// otherwise malformed base URLs are treated as unconfigured.
+func (s *Server) mailTaskURL(taskID string) (string, bool) {
+	base := strings.TrimRight(strings.TrimSpace(s.mailTaskBaseURL), "/")
+	if base == "" {
+		return "", false
+	}
+	parsed, err := url.Parse(base)
+	if err != nil || !strings.EqualFold(parsed.Scheme, "https") || parsed.Host == "" ||
+		parsed.User != nil || parsed.Opaque != "" || parsed.RawQuery != "" ||
+		parsed.Fragment != "" {
+		return "", false
+	}
+	for _, r := range parsed.Hostname() {
+		if r > 0x7f {
+			return "", false
+		}
+	}
+	return base + "/tasks/" + url.PathEscape(taskID), true
+}
+
+func templateReferencesVariable(item domain.MailTemplate, name string) bool {
+	token := "{{" + name + "}}"
+	return strings.Contains(item.SubjectTemplate, token) ||
+		strings.Contains(item.BodyTextTemplate, token) ||
+		strings.Contains(item.BodyHTMLTemplate, token)
+}
+
 // mailPreviewAttachments turns controlled attachment references into metadata
 // only. It never reads file bytes and never resolves a client supplied path.
+// The same underlying task attachment is snapshotted at most once.
 func (s *Server) mailPreviewAttachments(ctx context.Context, taskID string, attachmentIDs, buildArtifactIDs []string) ([]mailpkg.Attachment, map[string]string, error) {
+	if len(attachmentIDs) > mailpkg.MaxAttachments || len(buildArtifactIDs) > mailpkg.MaxAttachments {
+		return nil, nil, mailpkg.ErrAttachmentLimit()
+	}
 	total := len(attachmentIDs) + len(buildArtifactIDs)
 	if total == 0 {
 		return []mailpkg.Attachment{}, nil, nil
 	}
-	if total > mailpkg.MaxAttachments {
-		return nil, nil, mailpkg.ErrAttachmentLimit()
-	}
 	if taskID == "" {
 		return nil, nil, mailpkg.ErrAttachmentTaskRequired()
 	}
-	seen := make(map[string]bool, total)
+	seenRefs := make(map[string]bool, total)
+	seenSources := make(map[string]bool, total)
 	result := make([]mailpkg.Attachment, 0, total)
 	for _, id := range attachmentIDs {
 		id = strings.TrimSpace(id)
-		if id == "" || seen[id] {
+		if id == "" || seenRefs[id] {
 			return nil, nil, mailpkg.ErrAttachmentNotFound()
 		}
-		seen[id] = true
+		seenRefs[id] = true
 		item, err := s.store.Attachment(ctx, taskID, id)
 		if err != nil {
 			if isNoRows(err) {
@@ -364,6 +409,10 @@ func (s *Server) mailPreviewAttachments(ctx context.Context, taskID string, atta
 		if item.Size > mailpkg.MaxAttachmentBytes {
 			return nil, nil, mailpkg.ErrAttachmentTooLarge()
 		}
+		if seenSources[item.ID] {
+			continue
+		}
+		seenSources[item.ID] = true
 		result = append(result, mailpkg.Attachment{
 			SourceType: string(domain.MailAttachmentSourceTaskAttachment),
 			SourceID:   item.ID,
@@ -377,10 +426,10 @@ func (s *Server) mailPreviewAttachments(ctx context.Context, taskID string, atta
 	packageVariables := map[string]string{}
 	for index, id := range buildArtifactIDs {
 		id = strings.TrimSpace(id)
-		if id == "" || seen[id] {
+		if id == "" || seenRefs[id] {
 			return nil, nil, mailpkg.ErrAttachmentNotFound()
 		}
-		seen[id] = true
+		seenRefs[id] = true
 		artifact, err := s.store.BuildArtifact(ctx, id)
 		if err != nil {
 			if isNoRows(err) {
@@ -404,15 +453,18 @@ func (s *Server) mailPreviewAttachments(ctx context.Context, taskID string, atta
 		if artifact.SizeBytes > mailpkg.MaxAttachmentBytes {
 			return nil, nil, mailpkg.ErrAttachmentTooLarge()
 		}
-		result = append(result, mailpkg.Attachment{
-			SourceType: string(domain.MailAttachmentSourceBuildArtifact),
-			SourceID:   artifact.ID,
-			FileName:   source.Name,
-			MediaType:  source.MediaType,
-			SizeBytes:  artifact.SizeBytes,
-			SHA256:     artifact.SHA256,
-			ContentID:  source.ID,
-		})
+		if !seenSources[source.ID] {
+			seenSources[source.ID] = true
+			result = append(result, mailpkg.Attachment{
+				SourceType: string(domain.MailAttachmentSourceBuildArtifact),
+				SourceID:   artifact.ID,
+				FileName:   source.Name,
+				MediaType:  source.MediaType,
+				SizeBytes:  artifact.SizeBytes,
+				SHA256:     artifact.SHA256,
+				ContentID:  source.ID,
+			})
+		}
 		if index == 0 {
 			packageVariables["package.name"] = firstNonEmpty(artifact.PackageName, source.Name)
 			packageVariables["package.size"] = strconv.FormatInt(artifact.SizeBytes, 10)

@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/cookiejar"
@@ -39,6 +40,7 @@ func (f *fakeMailTester) Test(_ context.Context, account domain.MailAccount, cre
 type mailAPIFixture struct {
 	t        *testing.T
 	ctx      context.Context
+	dbPath   string
 	database *store.Store
 	server   *httptest.Server
 	client   *http.Client
@@ -49,9 +51,14 @@ type mailAPIFixture struct {
 }
 
 func newMailAPIFixture(t *testing.T) *mailAPIFixture {
+	return newMailAPIFixtureWith(t, nil)
+}
+
+func newMailAPIFixtureWith(t *testing.T, mutate func(*Config)) *mailAPIFixture {
 	t.Helper()
 	ctx := context.Background()
-	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	path := filepath.Join(t.TempDir(), "aha2.db")
+	database, err := store.Open(ctx, path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,18 +68,33 @@ func newMailAPIFixture(t *testing.T) *mailAPIFixture {
 	tester := &fakeMailTester{}
 	authService := auth.NewService(database, "setup-test", time.Hour)
 	appService := app.NewService(database, nil, app.StubExecutor{})
-	server := httptest.NewServer(New(Config{
+	config := Config{
 		Store: database, Auth: authService, App: appService,
 		Secrets: secretsStore, MailTester: tester,
-	}).Handler())
+		MailTaskBaseURL: "https://aha.example.com",
+	}
+	if mutate != nil {
+		mutate(&config)
+	}
+	server := httptest.NewServer(New(config).Handler())
 	t.Cleanup(server.Close)
 	jar, _ := cookiejar.New(nil)
 	client := &http.Client{Jar: jar}
 	return &mailAPIFixture{
-		t: t, ctx: ctx, database: database, server: server, client: client,
+		t: t, ctx: ctx, dbPath: path, database: database, server: server, client: client,
 		csrf: registerOwner(t, client, server.URL), secrets: secretsStore,
 		tester: tester, task: task,
 	}
+}
+
+func (f *mailAPIFixture) rawDB() *sql.DB {
+	f.t.Helper()
+	raw, err := sql.Open("sqlite", f.dbPath)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	f.t.Cleanup(func() { raw.Close() })
+	return raw
 }
 
 func (f *mailAPIFixture) request(method, path string, payload any, csrf string) map[string]any {
@@ -119,6 +141,38 @@ func mailErrorCode(t *testing.T, body map[string]any) string {
 	}
 	code, _ := errorBody["code"].(string)
 	return code
+}
+
+func (f *mailAPIFixture) auditCount(action, resourceID string) int {
+	f.t.Helper()
+	var count int
+	query := `SELECT COUNT(*) FROM audit_events WHERE action=?`
+	args := []any{action}
+	if resourceID != "" {
+		query += ` AND resource_id=?`
+		args = append(args, resourceID)
+	}
+	if err := f.rawDB().QueryRowContext(f.ctx, query, args...).Scan(&count); err != nil {
+		f.t.Fatal(err)
+	}
+	return count
+}
+
+func (f *mailAPIFixture) countAuditContaining(needle string) int {
+	f.t.Helper()
+	var count int
+	if err := f.rawDB().QueryRowContext(f.ctx,
+		`SELECT COUNT(*) FROM audit_events WHERE data_json LIKE ?`, "%"+needle+"%").Scan(&count); err != nil {
+		f.t.Fatal(err)
+	}
+	return count
+}
+
+func (f *mailAPIFixture) execRaw(query string, args ...any) {
+	f.t.Helper()
+	if _, err := f.rawDB().ExecContext(f.ctx, query, args...); err != nil {
+		f.t.Fatal(err)
+	}
 }
 
 func TestMailOwnerRoutesRequireSessionAndCSRF(t *testing.T) {
@@ -300,8 +354,11 @@ func TestMailConnectionTestOutcomes(t *testing.T) {
 	}
 
 	unconfigured := f.request(http.MethodPost, "/api/v1/mail-accounts", map[string]any{
-		"address": "other@example.com",
+		"name": "未配置", "address": "other@example.com",
 	}, f.csrf)
+	if unconfigured["_status"].(float64) != http.StatusCreated {
+		t.Fatalf("unconfigured create = %#v", unconfigured)
+	}
 	missing := f.request(http.MethodPost, "/api/v1/mail-accounts/"+unconfigured["account"].(map[string]any)["id"].(string)+"/test", map[string]any{}, f.csrf)
 	if missing["_status"].(float64) != http.StatusUnprocessableEntity || mailErrorCode(t, missing) != string(domain.MailErrCredentialMissing) {
 		t.Fatalf("missing credential = %#v", missing)
@@ -523,8 +580,8 @@ func TestMailBuildArtifactPreviewUsesServerPackageValues(t *testing.T) {
 		"task_id":   f.task.ID,
 		"variables": map[string]string{"package.sha256": strings.Repeat("0", 64)},
 	}, f.csrf)
-	if forged["_status"].(float64) != http.StatusUnprocessableEntity ||
-		mailErrorCode(t, forged) != string(domain.MailErrTemplateInvalid) {
+	if forged["_status"].(float64) != http.StatusForbidden ||
+		mailErrorCode(t, forged) != string(domain.MailErrForbidden) {
 		t.Fatalf("forged package value = %#v", forged)
 	}
 }
@@ -539,7 +596,7 @@ func TestMailMessageSnapshotDoesNotFollowTemplateUpdate(t *testing.T) {
 	rendered, err := mailpkg.Render(mailpkg.Template{
 		ID: template["id"].(string), Version: 1,
 		SubjectTemplate: "版本 1 {{task.title}}", BodyTextTemplate: "正文 1 {{task.title}}",
-	}, mailpkg.Input{Variables: map[string]string{"task.title": f.task.Title}})
+	}, mailpkg.Input{ServerVariables: map[string]string{"task.title": f.task.Title}})
 	if err != nil {
 		t.Fatal(err)
 	}

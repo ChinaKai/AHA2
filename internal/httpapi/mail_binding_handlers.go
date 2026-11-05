@@ -37,28 +37,28 @@ func (s *Server) listMailBindings(writer http.ResponseWriter, request *http.Requ
 
 // mailBindingScopeProjectID validates that the binding target exists and
 // returns the Project id used for template visibility.
-func (s *Server) mailBindingScopeProjectID(ctx context.Context, scopeType domain.MailBindingScopeType, scopeID string) (string, bool, error) {
+func (s *Server) mailBindingScopeProjectID(ctx context.Context, scopeType domain.MailBindingScopeType, scopeID string) (projectID string, taskStatus domain.TaskStatus, exists bool, err error) {
 	switch scopeType {
 	case domain.MailBindingScopeProject:
 		project, err := s.store.Project(ctx, scopeID)
 		if err != nil {
-			return "", false, err
+			return "", "", false, err
 		}
-		return project.ID, true, nil
+		return project.ID, "", true, nil
 	case domain.MailBindingScopeWorkspace:
 		workspace, err := s.store.Workspace(ctx, scopeID)
 		if err != nil {
-			return "", false, err
+			return "", "", false, err
 		}
-		return workspace.ProjectID, true, nil
+		return workspace.ProjectID, "", true, nil
 	case domain.MailBindingScopeTask:
 		task, err := s.store.Task(ctx, scopeID)
 		if err != nil {
-			return "", false, err
+			return "", "", false, err
 		}
-		return task.ProjectID, true, nil
+		return task.ProjectID, task.Status, true, nil
 	default:
-		return "", false, nil
+		return "", "", false, nil
 	}
 }
 
@@ -98,9 +98,13 @@ func (s *Server) createMailBinding(writer http.ResponseWriter, request *http.Req
 		writeMailError(writer, http.StatusUnprocessableEntity, domain.MailErrInvalidState, "作用域与账号必填")
 		return
 	}
-	projectID, exists, err := s.mailBindingScopeProjectID(ctx, scopeType, scopeID)
+	projectID, taskStatus, exists, err := s.mailBindingScopeProjectID(ctx, scopeType, scopeID)
 	if err != nil || !exists {
 		writeMailError(writer, http.StatusUnprocessableEntity, domain.MailErrInvalidState, "绑定作用域不存在")
+		return
+	}
+	if scopeType == domain.MailBindingScopeTask && taskStatus.Terminal() {
+		writeMailError(writer, http.StatusConflict, domain.MailErrInvalidState, "任务已结束，不能新增邮件绑定")
 		return
 	}
 	if _, err := s.store.MailAccount(ctx, accountID); err != nil {
@@ -164,6 +168,9 @@ func (s *Server) createMailBinding(writer http.ResponseWriter, request *http.Req
 		writeMailError(writer, http.StatusUnprocessableEntity, domain.MailErrInvalidState, "邮件绑定参数不正确")
 		return
 	}
+	s.audit(request, "mail.binding.create", "mail_binding", created.ID, map[string]any{
+		"scope_type": string(created.ScopeType), "account_id": created.AccountID, "enabled": created.Enabled,
+	})
 	writeJSON(writer, http.StatusCreated, map[string]any{"ok": true, "binding": created})
 }
 
@@ -173,7 +180,7 @@ func (s *Server) updateMailBinding(writer http.ResponseWriter, request *http.Req
 	existing, err := s.store.MailBinding(ctx, id)
 	if err != nil {
 		if isNoRows(err) {
-			writeMailError(writer, http.StatusNotFound, domain.MailErrInvalidState, "邮件绑定不存在")
+			writeMailNotFound(writer, domain.MailErrBindingNotFound, "邮件绑定不存在")
 			return
 		}
 		writeMailError(writer, http.StatusInternalServerError, "mail_internal_error", "读取邮件绑定失败")
@@ -184,9 +191,13 @@ func (s *Server) updateMailBinding(writer http.ResponseWriter, request *http.Req
 		writeMailError(writer, http.StatusBadRequest, "invalid_json", "请求格式不正确")
 		return
 	}
-	projectID, exists, err := s.mailBindingScopeProjectID(ctx, existing.ScopeType, existing.ScopeID)
+	projectID, taskStatus, exists, err := s.mailBindingScopeProjectID(ctx, existing.ScopeType, existing.ScopeID)
 	if err != nil || !exists {
 		writeMailError(writer, http.StatusUnprocessableEntity, domain.MailErrInvalidState, "绑定作用域不存在")
+		return
+	}
+	if existing.ScopeType == domain.MailBindingScopeTask && taskStatus.Terminal() {
+		writeMailError(writer, http.StatusConflict, domain.MailErrInvalidState, "任务已结束，不能修改邮件绑定")
 		return
 	}
 	accountID := strings.TrimSpace(payload.AccountID)
@@ -250,7 +261,7 @@ func (s *Server) updateMailBinding(writer http.ResponseWriter, request *http.Req
 	}
 	if err := s.store.UpdateMailBinding(ctx, item); err != nil {
 		if isNoRows(err) {
-			writeMailError(writer, http.StatusNotFound, domain.MailErrInvalidState, "邮件绑定不存在")
+			writeMailNotFound(writer, domain.MailErrBindingNotFound, "邮件绑定不存在")
 			return
 		}
 		if isUniqueNameError(err) {
@@ -265,17 +276,24 @@ func (s *Server) updateMailBinding(writer http.ResponseWriter, request *http.Req
 		writeMailError(writer, http.StatusInternalServerError, "mail_internal_error", "读取邮件绑定失败")
 		return
 	}
+	s.audit(request, "mail.binding.update", "mail_binding", id, map[string]any{
+		"scope_type": string(updated.ScopeType), "account_id": updated.AccountID, "enabled": updated.Enabled,
+	})
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "binding": updated})
 }
 
 func (s *Server) deleteMailBinding(writer http.ResponseWriter, request *http.Request) {
-	if err := s.store.DeleteMailBinding(request.Context(), request.PathValue("id")); err != nil {
+	id := request.PathValue("id")
+	if err := s.store.DeleteMailBinding(request.Context(), id); err != nil {
 		if isNoRows(err) {
-			writeMailError(writer, http.StatusNotFound, domain.MailErrInvalidState, "邮件绑定不存在")
+			writeMailNotFound(writer, domain.MailErrBindingNotFound, "邮件绑定不存在")
 			return
 		}
 		writeMailError(writer, http.StatusInternalServerError, "mail_internal_error", "删除邮件绑定失败")
 		return
 	}
+	// Deleting a binding is the allowed stop-loss action for a terminal Task,
+	// so it remains available and is always audited.
+	s.audit(request, "mail.binding.delete", "mail_binding", id, nil)
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true})
 }

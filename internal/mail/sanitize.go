@@ -1,6 +1,7 @@
 package mail
 
 import (
+	"net/url"
 	"regexp"
 	"strings"
 	"unicode"
@@ -59,10 +60,13 @@ type htmlState struct {
 // canonically re-serialized fragment containing only allowlisted nodes. In
 // template mode only validation and placeholder collection happen.
 func processHTML(input string, mode htmlMode, allowedCIDs map[string]bool) (string, []string, []string, error) {
-	// Validate placeholder grammar across the whole fragment before parsing so
-	// malformed braces in attribute values cannot slip through a parser quirk.
-	if _, err := ParsePlaceholders(input); err != nil {
-		return "", nil, nil, err
+	// Validate placeholder grammar only for Owner-authored templates. Final
+	// HTML may legitimately contain braces from a variable value; it has
+	// already been escaped and must only be checked for structure and URLs.
+	if mode == htmlTemplateMode {
+		if _, err := ParsePlaceholders(input); err != nil {
+			return "", nil, nil, err
+		}
 	}
 	contextNode := &html.Node{Type: html.ElementNode, Data: "body", DataAtom: atom.Body}
 	nodes, err := html.ParseFragment(strings.NewReader(input), contextNode)
@@ -98,6 +102,9 @@ func validateHTMLNode(node *html.Node, state *htmlState) error {
 		if !utf8.ValidString(node.Data) || strings.ContainsRune(node.Data, 0) {
 			return errorf(domain.MailErrTemplateInvalid, "HTML text contains invalid characters")
 		}
+		if state.mode != htmlTemplateMode {
+			return nil
+		}
 		names, err := ParsePlaceholders(node.Data)
 		if err != nil {
 			return err
@@ -110,10 +117,10 @@ func validateHTMLNode(node *html.Node, state *htmlState) error {
 		state.placeholders = append(state.placeholders, names...)
 		return nil
 	case html.CommentNode:
-		if strings.Contains(node.Data, "{{") || strings.Contains(node.Data, "}}") {
-			return errorf(domain.MailErrTemplateInvalid, "placeholders are not allowed in HTML comments")
-		}
-		return nil
+		// Conditional comments (including nested markup and CDATA-derived
+		// comments) can hide external images from a shallow walker. Reject
+		// comments at any depth instead of trying to sanitize inside them.
+		return errorf(domain.MailErrTemplateInvalid, "HTML comments are not allowed")
 	case html.DoctypeNode:
 		return errorf(domain.MailErrTemplateInvalid, "doctype is not allowed")
 	case html.ElementNode:
@@ -149,11 +156,13 @@ func validateHTMLElement(node *html.Node, state *htmlState) error {
 			if err := validateURLAttribute(attribute.Val, name, state); err != nil {
 				return err
 			}
-			names, err := ParsePlaceholders(attribute.Val)
-			if err != nil {
-				return err
+			if state.mode == htmlTemplateMode {
+				names, err := ParsePlaceholders(attribute.Val)
+				if err != nil {
+					return err
+				}
+				state.placeholders = append(state.placeholders, names...)
 			}
-			state.placeholders = append(state.placeholders, names...)
 		}
 	}
 	if tag == "img" && !seenAttrs["src"] {
@@ -176,9 +185,9 @@ func validateURLAttribute(value, attribute string, state *htmlState) error {
 					// A bare placeholder is validated after substitution.
 					return nil
 				}
-				return validateStrictURL(replacePlaceholders(value, "x"), "href", nil)
+				return validateStrictURLWith(replacePlaceholders(value, "x"), "href", nil, true)
 			}
-			return validateStrictURL(value, "href", nil)
+			return validateStrictURLWith(value, "href", nil, false)
 		}
 		// Images may only use cid: references. The individual content id is
 		// checked against the attachment snapshot after substitution.
@@ -186,20 +195,21 @@ func validateURLAttribute(value, attribute string, state *htmlState) error {
 			return errorf(domain.MailErrTemplateInvalid, "img src must use cid:")
 		}
 		if hasPlaceholder {
-			return validateStrictURL(replacePlaceholders(value, "x"), "src", nil)
+			return validateStrictURLWith(replacePlaceholders(value, "x"), "src", nil, false)
 		}
-		return validateStrictURL(value, "src", nil)
+		return validateStrictURLWith(value, "src", nil, false)
 	}
 	if attribute == "href" {
-		return validateStrictURL(value, "href", nil)
+		return validateStrictURLWith(value, "href", nil, false)
 	}
-	return validateStrictURL(value, "src", state.allowedCIDs)
+	return validateStrictURLWith(value, "src", state.allowedCIDs, false)
 }
 
-// validateStrictURL enforces the design's URL policy: https/mailto for links,
-// cid for embedded images, no relative or protocol-relative URLs, no
-// whitespace/control obfuscation and no attribute-breaking characters.
-func validateStrictURL(raw, attribute string, allowedCIDs map[string]bool) error {
+// validateStrictURLWith enforces the design's URL policy with url.Parse:
+// https/mailto for links, cid for embedded images, no userinfo, no relative or
+// protocol-relative URLs, ASCII/punycode hosts only, no whitespace/control
+// obfuscation and no mailto query/header parameters.
+func validateStrictURLWith(raw, attribute string, allowedCIDs map[string]bool, templateMailto bool) error {
 	if raw == "" || raw != strings.TrimSpace(raw) {
 		return errorf(domain.MailErrTemplateInvalid, "URL is empty or has surrounding whitespace")
 	}
@@ -207,44 +217,81 @@ func validateStrictURL(raw, attribute string, allowedCIDs map[string]bool) error
 		if r <= 0x20 || r == 0x7f || unicode.IsSpace(r) || unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
 			return errorf(domain.MailErrTemplateInvalid, "URL contains whitespace or control characters")
 		}
-		if strings.ContainsRune("\"'<>`\\", r) {
+		if strings.ContainsRune("\\\"'<>`", r) {
 			return errorf(domain.MailErrTemplateInvalid, "URL contains an unsafe character")
 		}
 	}
 	if strings.HasPrefix(raw, "//") {
 		return errorf(domain.MailErrTemplateInvalid, "protocol-relative URLs are not allowed")
 	}
-	colon := strings.IndexByte(raw, ':')
-	if colon <= 0 {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme == "" {
 		return errorf(domain.MailErrTemplateInvalid, "URL must be absolute")
 	}
-	scheme := strings.ToLower(raw[:colon])
-	for _, r := range scheme {
-		if !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9') && r != '+' && r != '-' && r != '.' {
-			return errorf(domain.MailErrTemplateInvalid, "URL scheme is invalid")
-		}
-	}
-	rest := raw[colon+1:]
+	scheme := strings.ToLower(parsed.Scheme)
 	switch attribute {
 	case "href":
-		if scheme != "https" && scheme != "mailto" {
-			return errorf(domain.MailErrTemplateInvalid, "URL scheme %q is not allowed", scheme)
+		if parsed.User != nil {
+			return errorf(domain.MailErrTemplateInvalid, "URL must not contain userinfo")
 		}
-		if rest == "" {
-			return errorf(domain.MailErrTemplateInvalid, "URL is missing a target")
+		switch scheme {
+		case "https":
+			if parsed.Opaque != "" || parsed.Host == "" || parsed.Hostname() == "" {
+				return errorf(domain.MailErrTemplateInvalid, "https URL requires a host")
+			}
+			if !asciiHost(parsed.Hostname()) {
+				return errorf(domain.MailErrTemplateInvalid, "URL host must be ASCII or punycode")
+			}
+		case "mailto":
+			if parsed.Host != "" {
+				return errorf(domain.MailErrTemplateInvalid, "mailto URL must not contain a host")
+			}
+			if parsed.RawQuery != "" || parsed.ForceQuery {
+				return errorf(domain.MailErrTemplateInvalid, "mailto query parameters are not allowed")
+			}
+			target := parsed.Opaque
+			if target == "" {
+				target = parsed.Path
+			}
+			if target == "" {
+				return errorf(domain.MailErrTemplateInvalid, "mailto URL is missing a recipient")
+			}
+			if !templateMailto {
+				if _, err := NormalizeRecipient(target); err != nil {
+					return errorf(domain.MailErrTemplateInvalid, "mailto recipient is invalid")
+				}
+			}
+		default:
+			return errorf(domain.MailErrTemplateInvalid, "URL scheme %q is not allowed", scheme)
 		}
 	case "src":
 		if scheme != "cid" {
 			return errorf(domain.MailErrTemplateInvalid, "image URL scheme %q is not allowed", scheme)
 		}
-		if !cidValuePattern.MatchString(rest) {
+		if parsed.User != nil || parsed.Host != "" || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
 			return errorf(domain.MailErrTemplateInvalid, "cid reference is invalid")
 		}
-		if allowedCIDs != nil && !allowedCIDs[rest] {
+		cid := parsed.Opaque
+		if cid == "" {
+			cid = parsed.Path
+		}
+		if !cidValuePattern.MatchString(cid) {
+			return errorf(domain.MailErrTemplateInvalid, "cid reference is invalid")
+		}
+		if allowedCIDs != nil && !allowedCIDs[cid] {
 			return errorf(domain.MailErrTemplateInvalid, "cid reference does not match a selected attachment")
 		}
 	}
 	return nil
+}
+
+func asciiHost(host string) bool {
+	for _, r := range host {
+		if r > 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 func stripPlaceholders(value string) string {
