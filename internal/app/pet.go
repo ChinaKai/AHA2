@@ -727,8 +727,13 @@ func petToolAllowed(assistant domain.OwnerAssistant, name string) bool {
 		return true
 	case "aha_task_detail", "aha_task_conversation", "aha_task_turns", "aha_model_catalog", "aha_list_task_attachments", "aha_hardware_resources", "aha_task_hardware", "aha_task_channel_route", "aha_list_remote_tasks", "pet_watch_task", "pet_unwatch_task":
 		return assistant.PetAllowViewTasks
-	case "aha_list_knowledge", "aha_knowledge_detail", "aha_list_skills", "aha_skill_detail", "aha_list_prompt_templates":
+	case "aha_list_knowledge", "aha_knowledge_detail", "aha_skill_detail", "aha_list_prompt_templates":
 		return assistant.PetAllowViewTasks || assistant.PetAllowManageKnowledge
+	case "aha_list_skills":
+		// create_tasks may attach Skill IDs to aha_create_task/aha_update_task, so
+		// it must be able to discover them. Mutating Skill tools stay behind
+		// manage_knowledge.
+		return assistant.PetAllowViewTasks || assistant.PetAllowManageKnowledge || assistant.PetAllowCreateTasks
 	case "aha_submit_knowledge", "aha_create_skill", "aha_update_skill", "aha_delete_skill", "aha_delete_knowledge", "aha_prompt_template_detail", "aha_update_prompt_template":
 		return assistant.PetAllowManageKnowledge
 	case "aha_list_channels", "aha_channel_detail", "aha_list_channel_destinations", "aha_channel_contacts":

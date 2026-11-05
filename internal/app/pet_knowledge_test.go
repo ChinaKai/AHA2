@@ -1,6 +1,7 @@
 package app
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -251,5 +252,116 @@ func TestPetKnowledgeDeletePrunesEmptyAHA1Directories(t *testing.T) {
 		if _, err := fixture.database.Knowledge(fixture.ctx, id); err == nil {
 			t.Fatalf("empty AHA1 node %s was not pruned", id)
 		}
+	}
+}
+
+func setPetSkillTestPermissions(t *testing.T, fixture petSkillFixture, viewTasks, createTasks, manageKnowledge bool) {
+	t.Helper()
+	if _, err := fixture.service.UpdateOwnerPetSettings(fixture.ctx, PetSettingsInput{
+		Enabled: true, ChatModelID: fixture.model.ID, Actions: []string{"walk"},
+		IdleMinutes: 5, QuietStart: 22, QuietEnd: 8, HourlyLimit: 2,
+		AllowViewTasks: boolPointer(viewTasks), AllowCreateTasks: boolPointer(createTasks),
+		AllowCreateWorkspaces: boolPointer(false), AllowMessageTasks: boolPointer(false),
+		AllowManageModels: boolPointer(false), AllowManageKnowledge: boolPointer(manageKnowledge),
+		AllowManageChannels: boolPointer(false), AllowManageSystem: boolPointer(false),
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func petSkillsFromMCP(t *testing.T, fixture petSkillFixture) []PetSkillBrief {
+	t.Helper()
+	raw, err := fixture.service.PetMCPTool(fixture.ctx, "aha_list_skills", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("aha_list_skills: %v", err)
+	}
+	var skills []PetSkillBrief
+	if err := json.Unmarshal([]byte(raw), &skills); err != nil {
+		t.Fatal(err)
+	}
+	return skills
+}
+
+func TestPetListSkillsAllowedWithCreateTasksOnly(t *testing.T) {
+	fixture := newPetSkillFixture(t)
+	setPetSkillTestPermissions(t, fixture, false, true, false)
+
+	skills := petSkillsFromMCP(t, fixture)
+	found := false
+	for _, skill := range skills {
+		if skill.ID == "skill-pet-project" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("create_tasks-only pet cannot see project Skill IDs: %#v", skills)
+	}
+	if _, err := fixture.service.PetListSkills(fixture.ctx, "project", fixture.project.ID, 10); err != nil {
+		t.Fatalf("service-level Skill listing rejected create_tasks-only pet: %v", err)
+	}
+
+	createArgs, _ := json.Marshal(map[string]any{
+		"project_id": fixture.project.ID, "name": "越权 Skill", "instructions": "不应创建",
+	})
+	if _, err := fixture.service.PetMCPTool(fixture.ctx, "aha_create_skill", createArgs); err == nil ||
+		!strings.Contains(err.Error(), "未开启该工具权限") {
+		t.Fatalf("aha_create_skill was not permission-gated: %v", err)
+	}
+	if _, err := fixture.service.PetMCPTool(fixture.ctx, "aha_update_skill",
+		json.RawMessage(`{"skill_id":"skill-pet-project","name":"越权修改"}`)); err == nil ||
+		!strings.Contains(err.Error(), "未开启该工具权限") {
+		t.Fatalf("aha_update_skill was not permission-gated: %v", err)
+	}
+	if _, err := fixture.service.PetMCPTool(fixture.ctx, "aha_skill_detail",
+		json.RawMessage(`{"skill_id":"skill-pet-project"}`)); err == nil ||
+		!strings.Contains(err.Error(), "未开启该工具权限") {
+		t.Fatalf("aha_skill_detail unexpectedly widened: %v", err)
+	}
+	items, err := fixture.database.ListSkills(fixture.ctx, "project", fixture.project.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range items {
+		if item.Name == "越权 Skill" {
+			t.Fatal("rejected aha_create_skill still created a Skill")
+		}
+	}
+}
+
+func TestPetListSkillsDeniedWithoutRelatedPermission(t *testing.T) {
+	fixture := newPetSkillFixture(t)
+	setPetSkillTestPermissions(t, fixture, false, false, false)
+
+	if _, err := fixture.service.PetMCPTool(fixture.ctx, "aha_list_skills", json.RawMessage(`{}`)); err == nil ||
+		!strings.Contains(err.Error(), "未开启该工具权限") {
+		t.Fatalf("aha_list_skills was not permission-gated: %v", err)
+	}
+	if _, err := fixture.service.PetListSkills(fixture.ctx, "project", fixture.project.ID, 10); err == nil ||
+		!strings.Contains(err.Error(), "Skill") {
+		t.Fatalf("service-level Skill listing was not permission-gated: %v", err)
+	}
+}
+
+func TestPetListSkillsKeepsViewAndManagePermission(t *testing.T) {
+	for _, testCase := range []struct {
+		name            string
+		viewTasks       bool
+		manageKnowledge bool
+	}{
+		{name: "view_tasks", viewTasks: true},
+		{name: "manage_knowledge", manageKnowledge: true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			fixture := newPetSkillFixture(t)
+			setPetSkillTestPermissions(t, fixture, testCase.viewTasks, false, testCase.manageKnowledge)
+
+			if skills := petSkillsFromMCP(t, fixture); len(skills) == 0 {
+				t.Fatal("Skill listing returned no Skills")
+			}
+			if _, err := fixture.service.PetMCPTool(fixture.ctx, "aha_skill_detail",
+				json.RawMessage(`{"skill_id":"skill-pet-project"}`)); err != nil {
+				t.Fatalf("aha_skill_detail regressed: %v", err)
+			}
+		})
 	}
 }

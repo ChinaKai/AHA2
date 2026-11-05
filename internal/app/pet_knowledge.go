@@ -64,6 +64,21 @@ func (s *Service) petKnowledgeReadable(ctx context.Context) (domain.OwnerAssista
 	return assistant, nil
 }
 
+// petSkillListReadable allows create_tasks because a pet that can create or
+// update tasks needs to discover usable Skill IDs for skill_ids. It is only
+// used by the read-only Skill listing; Skill management stays on
+// petKnowledgeWritable and other knowledge reads stay on petKnowledgeReadable.
+func (s *Service) petSkillListReadable(ctx context.Context) (domain.OwnerAssistant, error) {
+	assistant, err := s.petAssistant(ctx)
+	if err != nil {
+		return domain.OwnerAssistant{}, err
+	}
+	if !assistant.PetAllowViewTasks && !assistant.PetAllowManageKnowledge && !assistant.PetAllowCreateTasks {
+		return domain.OwnerAssistant{}, fmt.Errorf("主人未开启查看 Skill 信息权限")
+	}
+	return assistant, nil
+}
+
 func (s *Service) petKnowledgeWritable(ctx context.Context) (domain.OwnerAssistant, error) {
 	assistant, err := s.petAssistant(ctx)
 	if err != nil {
@@ -290,7 +305,7 @@ type PetSkillDetail struct {
 }
 
 func (s *Service) PetListSkills(ctx context.Context, scope, projectID string, limit int) ([]PetSkillBrief, error) {
-	if _, err := s.petKnowledgeReadable(ctx); err != nil {
+	if _, err := s.petSkillListReadable(ctx); err != nil {
 		return nil, err
 	}
 	scope = strings.TrimSpace(scope)
