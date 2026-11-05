@@ -2447,7 +2447,7 @@ dialog > .dialog-head { margin: 0; padding: 18px 18px 0; }
 .assistant-settings-trigger { margin-top: 8px; width: 100%; min-height: 34px; border: 1px solid #cfe0f3; border-radius: 9px; background: #f4f9ff; color: #25517d; font-size: 12px; }
 
 /* Opt-in `?perf=1` metrics panel. Kept small and out of the main flow. */
-.perf-panel { position: fixed; right: 16px; bottom: 16px; z-index: 50; display: grid; gap: 7px; width: 250px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: rgba(255,255,255,.96); box-shadow: 0 8px 24px rgba(15,23,42,.14); color: var(--ink); font-size: 12px; line-height: 1.45; }
+.perf-panel { position: fixed; right: 16px; bottom: 16px; z-index: 70; display: grid; gap: 7px; width: 250px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: rgba(255,255,255,.96); box-shadow: 0 8px 24px rgba(15,23,42,.14); color: var(--ink); font-size: 12px; line-height: 1.45; }
 .perf-panel-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .perf-panel-head strong { font-size: 12px; }
 .perf-panel-rows { display: grid; grid-template-columns: auto minmax(0,1fr); gap: 3px 8px; margin: 0; }

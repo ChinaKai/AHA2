@@ -460,13 +460,16 @@ function startPerfPanel(): void {
   const snapshot = () => {
     const listRefreshAvgMs = perfMetrics.listRefreshRequests > 0 ? Math.round(perfMetrics.listRefreshTotalMs / perfMetrics.listRefreshRequests) : 0;
     const taskOpenAvgMs = perfMetrics.taskOpenCount > 0 ? Math.round(perfMetrics.taskOpenTotalMs / perfMetrics.taskOpenCount) : 0;
+    // 0 means "not measured yet" in `perfMetrics`, so show a placeholder instead
+    // of a 0ms that looks like a real measurement.
+    const firstScreen = perfMetrics.firstScreenMs > 0 ? `${perfMetrics.firstScreenMs}ms` : "—";
     return {
-      firstScreen: `${perfMetrics.firstScreenMs}ms`,
+      firstScreen,
       prefetch: `${perfMetrics.prefetchRuns} 次 / ${perfMetrics.prefetchRequests} 请求`,
       listRefresh: `${perfMetrics.listRefreshRequests} 次 / 最近 ${perfMetrics.listRefreshLastMs}ms / 平均 ${listRefreshAvgMs}ms`,
       taskOpen: `${perfMetrics.taskOpenCount} 次 / 最近 ${perfMetrics.taskOpenLastMs}ms / 平均 ${taskOpenAvgMs}ms`,
       text: [
-        `首屏: ${perfMetrics.firstScreenMs}ms`,
+        `首屏: ${firstScreen}`,
         `预取: ${perfMetrics.prefetchRuns} 次 / ${perfMetrics.prefetchRequests} 请求`,
         `列表刷新: ${perfMetrics.listRefreshRequests} 次 / 最近 ${perfMetrics.listRefreshLastMs}ms / 平均 ${listRefreshAvgMs}ms`,
         `任务打开: ${perfMetrics.taskOpenCount} 次 / 最近 ${perfMetrics.taskOpenLastMs}ms / 平均 ${taskOpenAvgMs}ms`,
@@ -483,6 +486,16 @@ function startPerfPanel(): void {
     latestText = values.text;
   };
 
+  let feedbackTimer: number | undefined;
+  const showCopyFeedback = (label: string) => {
+    // Rapid clicks must replace the pending reset instead of stacking timers.
+    if (feedbackTimer !== undefined) window.clearTimeout(feedbackTimer);
+    copyButton.textContent = label;
+    feedbackTimer = window.setTimeout(() => {
+      feedbackTimer = undefined;
+      copyButton.textContent = "复制";
+    }, 1200);
+  };
   const fallbackCopy = (text: string) => {
     console.warn(`[aha-perf] clipboard unavailable, metrics text:\n${text}`);
     const selection = window.getSelection();
@@ -491,6 +504,7 @@ function startPerfPanel(): void {
     range.selectNodeContents(rows);
     selection.removeAllRanges();
     selection.addRange(range);
+    showCopyFeedback("已选中");
   };
   copyButton.addEventListener("click", () => {
     const text = latestText || snapshot().text;
@@ -501,8 +515,7 @@ function startPerfPanel(): void {
     }
     try {
       void clipboard.writeText(text).then(() => {
-        copyButton.textContent = "已复制";
-        window.setTimeout(() => { copyButton.textContent = "复制"; }, 1200);
+        showCopyFeedback("已复制");
       }, () => fallbackCopy(text));
     } catch {
       fallbackCopy(text);
@@ -521,6 +534,8 @@ function startPerfPanel(): void {
   }, 1000);
   hideButton.addEventListener("click", () => {
     window.clearInterval(timer);
+    if (feedbackTimer !== undefined) window.clearTimeout(feedbackTimer);
+    feedbackTimer = undefined;
     panel.remove();
   });
 }

@@ -741,7 +741,21 @@ test("opt-in perf panel reports timing metrics with copy and hide controls", asy
   assert.match(script, /console\.warn\(`\[aha-perf\] clipboard unavailable/);
   assert.match(script, /range\.selectNodeContents\(rows\)/);
   assert.match(script, /window\.setInterval\(\(\)=>\{/);
-  assert.match(styles, /\.perf-panel \{ position: fixed; right: 16px; bottom: 16px;/);
+  // 0ms means "not measured yet"; the panel shows a placeholder until a real
+  // sample arrives, in both the visible row and the copied text.
+  assert.match(script, /perfMetrics\.firstScreenMs > 0 \? `\$\{perfMetrics\.firstScreenMs\}ms` : "—"/);
+  assert.match(script, /`首屏: \$\{firstScreen\}`/);
+  // Copy reports success/failure briefly, replaces stale timers on repeat clicks,
+  // and clears the feedback timer when the panel is hidden.
+  assert.match(script, /showCopyFeedback\("已复制"\)/);
+  assert.match(script, /showCopyFeedback\("已选中"\)/);
+  assert.match(script, /if \(feedbackTimer !== undefined\) window\.clearTimeout\(feedbackTimer\);\s*copyButton\.textContent = label;/);
+  assert.match(script, /feedbackTimer = window\.setTimeout\(\(\)=>\{\s*feedbackTimer = undefined;\s*copyButton\.textContent = "复制";\s*\}, 1200\);/);
+  assert.match(script, /window\.clearInterval\(timer\);\s*if \(feedbackTimer !== undefined\) window\.clearTimeout\(feedbackTimer\);\s*feedbackTimer = undefined;\s*panel\.remove\(\);/);
+  // The panel must clear the assistant/banner layer (60) without covering the
+  // native top-layer dialogs.
+  assert.match(styles, /\.perf-panel \{[^}]*z-index: 70;/);
+  assert.doesNotMatch(styles, /\.perf-panel \{[^}]*z-index: 50;/);
 });
 
 test("SSE list refresh is debounced and deferred while a task detail is open", async () => {
