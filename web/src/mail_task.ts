@@ -1,7 +1,8 @@
 import {api} from "./api.js";
 import {icon} from "./icons.js";
 import {formatMailBytes, mailCanCancel, mailCanRetry, mailCardHtml, openMailPreviewDialog} from "./mail_cards.js";
-import type {MailAccount, MailMessageCard, MailTemplate, TaskDetail, TaskMailAccount, TaskMailOptions} from "./types.js";
+import type {MailPreviewData} from "./mail_cards.js";
+import type {MailAccount, MailAttachment, MailMessageCard, MailTemplate, TaskDetail, TaskMailAccount, TaskMailOptions} from "./types.js";
 
 type Notice = (type: "error" | "notice", message: string) => void;
 
@@ -91,6 +92,30 @@ function csvValues(value: unknown): string[] {
   return String(value || "").split(",").map(item => item.trim()).filter(Boolean);
 }
 
+// Builds the shared WYSIWYG preview model from the server render result and
+// the currently selected account. Used by both the template and direct send
+// paths so the Owner always sees the real HTML before submitting.
+export function taskMailPreviewData(
+  preview: Record<string, any>,
+  account?: Pick<TaskMailAccount, "display_name" | "from_address">,
+  title = "发送预览",
+  width: 600 | 375 = 600,
+): MailPreviewData {
+  return {
+    title,
+    subject: String(preview.subject || ""),
+    fromName: account?.display_name || "",
+    fromAddress: account?.from_address || "",
+    to: Array.isArray(preview.to) ? preview.to as string[] : [],
+    cc: Array.isArray(preview.cc) ? preview.cc as string[] : [],
+    bodyText: String(preview.body_text || ""),
+    bodyHtml: String(preview.body_html || ""),
+    attachments: Array.isArray(preview.attachments) ? preview.attachments as MailAttachment[] : [],
+    warnings: Array.isArray(preview.warnings) ? preview.warnings as string[] : [],
+    width,
+  };
+}
+
 // Direct mail keeps template_id empty and supplies subject + body_html. The
 // server derives body_text from HTML when it is empty. Template mail keeps the
 // existing payload shape; subject/body inputs are disabled and absent.
@@ -161,7 +186,6 @@ export async function openTaskMailCompose(
           <div class="mail-attachment-list-scroll">${artifactOptions || `<p class="field-help">没有登记的构建产物。</p>`}</div>
         </section>
       </div>
-      <div class="mail-compose-preview" id="mail-compose-preview" hidden></div>
     </div>
     <div class="dialog-actions"><button type="button" data-close>取消</button><button type="button" id="mail-compose-preview-button">预览</button><button type="submit" class="primary">提交审批</button></div>
   </form>`;
@@ -170,7 +194,6 @@ export async function openTaskMailCompose(
   const templateSelect = form.querySelector<HTMLSelectElement>('select[name="template_id"]')!;
   const accountSelect = form.querySelector<HTMLSelectElement>('select[name="account_id"]')!;
   const variablesBox = form.querySelector<HTMLElement>("#mail-compose-variables")!;
-  const previewBox = form.querySelector<HTMLElement>("#mail-compose-preview")!;
   const directBox = form.querySelector<HTMLElement>("#mail-compose-direct")!;
   const directFields = [...directBox.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>("input, textarea")];
   const syncDirectFields = (enabled: boolean) => {
@@ -207,7 +230,6 @@ export async function openTaskMailCompose(
       if (!to.value) to.value = (template?.default_to || []).join(", ");
       if (!cc.value) cc.value = (template?.default_cc || []).join(", ");
     }
-    previewBox.hidden = true;
   };
   templateSelect.addEventListener("change", syncTemplate);
   accountSelect.addEventListener("change", () => {
@@ -258,10 +280,10 @@ export async function openTaskMailCompose(
         attachment_ids: payload.attachment_ids, build_artifact_ids: payload.build_artifact_ids,
       });
     void previewRequest.then(result => {
-      const preview = result.preview as Record<string, any>;
-      const attachments = Array.isArray(preview.attachments) ? preview.attachments as Array<Record<string, any>> : [];
-      previewBox.hidden = false;
-      previewBox.innerHTML = `<strong>预览：${escapeHTML(preview.subject || "")}</strong><p>To：${escapeHTML((preview.to || []).join(", "))}</p><p>CC：${escapeHTML((preview.cc || []).join(", "))}</p>${(preview.warnings || []).length ? `<p class="mail-card-warning">${escapeHTML((preview.warnings as string[]).join(" · "))}</p>` : ""}<p>附件：${escapeHTML(attachments.map(item => item.file_name).join(", ") || "无")}</p><pre>${escapeHTML(preview.body_text || "")}</pre>`;
+      // Both template and direct paths render the real HTML through the same
+      // server pipeline; show it in the shared sandboxed preview dialog.
+      const account = options.accounts.find(item => item.account_id === payload.account_id);
+      openMailPreviewDialog(taskMailPreviewData(result.preview as Record<string, any>, account, "发送预览", 600));
     }).catch(error => actions.notify("error", error instanceof Error ? error.message : String(error)));
   });
   form.addEventListener("submit", event => {

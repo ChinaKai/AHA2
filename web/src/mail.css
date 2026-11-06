@@ -72,13 +72,11 @@
 .mail-attachment-option span { display: grid; gap: 2px; min-width: 0; text-align: left; }
 .mail-attachment-option strong, .mail-attachment-option small { overflow-wrap: anywhere; text-align: left; }
 .mail-attachment-option small { color: var(--muted); }
-.mail-compose-preview { display: grid; gap: 5px; padding: 9px; border: 1px solid #bcd3f5; border-radius: 5px; background: #f7fbff; font-size: 11px; }
-.mail-compose-preview pre { max-height: 160px; overflow: auto; white-space: pre-wrap; }
 .mail-compose-direct { display: grid; gap: 8px; padding: 8px; border: 1px solid var(--line); border-radius: 5px; background: #fbfcfe; }
 .mail-compose-direct label { display: grid; gap: 4px; }
 .mail-compose-direct textarea { min-height: 180px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
 /* Author display rules otherwise override the UA [hidden] rule. */
-.mail-compose-direct[hidden], .mail-compose-preview[hidden] { display: none; }
+.mail-compose-direct[hidden] { display: none; }
 .task-mail-panel { display: grid; gap: 12px; }
 .task-mail-panel-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .task-mail-panel-head > div { display: grid; gap: 3px; }

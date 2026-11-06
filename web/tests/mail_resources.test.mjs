@@ -119,6 +119,62 @@ test("template editor insert-table skeleton is sanitizer-safe and editable", () 
   assert.equal((mailResources.mailTemplateTableSkeleton(999, 99).match(/<td /g) || []).length, 500);
 });
 
+test("send preview uses the selected account and renders server HTML in a sandbox", () => {
+  const data = mailTask.taskMailPreviewData({
+    subject: "构建完成",
+    to: ["qa@example.com"],
+    cc: ["lead@example.com"],
+    body_text: "纯文本回退",
+    body_html: "<p>HTML 正文</p>",
+    warnings: ["示例警告"],
+    attachments: [{
+      source_type: "task_attachment", source_id: "att_1", file_name: "log.txt",
+      media_type: "text/plain", size_bytes: 12, sha256: "abcdef",
+      content_id: "att_1", delivery_mode: "direct",
+    }],
+  }, {display_name: "AHA 构建通知", from_address: "noreply@example.com"});
+  assert.equal(data.title, "发送预览");
+  assert.equal(data.fromName, "AHA 构建通知");
+  assert.equal(data.fromAddress, "noreply@example.com");
+  assert.equal(data.bodyHtml, "<p>HTML 正文</p>");
+  assert.equal(data.bodyText, "纯文本回退");
+  assert.equal(data.width, 600);
+  assert.deepEqual(data.warnings, ["示例警告"]);
+
+  const html = cards.mailPreviewDialogHtml(data);
+  assert.match(html, /sandbox=""/, "HTML preview is sandboxed");
+  assert.match(html, /srcdoc="[^"]*&lt;p&gt;HTML 正文&lt;\/p&gt;"/, "srcdoc carries the server HTML");
+  assert.match(html, /纯文本回退/);
+  assert.match(html, /AHA 构建通知/);
+  assert.match(html, /noreply@example\.com/);
+  assert.match(html, /qa@example\.com/);
+  assert.match(html, /log\.txt/);
+});
+
+test("message detail preview renders the stored HTML snapshot in a sandbox", () => {
+  const snapshot = message({
+    from_name: "AHA 构建通知",
+    body_text: "审批纯文本",
+    body_html: "<p>审批 HTML 正文</p>",
+  });
+  const data = mailResources.messagePreviewData(snapshot, [{
+    id: "mail_attachment_1", message_id: snapshot.id, position: 0,
+    source_type: "task_attachment", source_id: "att_1", file_name: "log.txt",
+    media_type: "text/plain", size_bytes: 12, sha256: "abcdef",
+    delivery_mode: "direct", disposition: "attachment", created_at: "2026-11-06T09:00:00Z",
+  }]);
+  assert.equal(data.subject, snapshot.subject);
+  assert.equal(data.fromAddress, snapshot.from_address);
+  assert.equal(data.bodyHtml, snapshot.body_html);
+  assert.equal(data.width, 600);
+
+  const html = cards.mailPreviewDialogHtml(data);
+  assert.match(html, /sandbox=""/);
+  assert.match(html, /srcdoc="[^"]*&lt;p&gt;审批 HTML 正文&lt;\/p&gt;"/);
+  assert.match(html, /审批纯文本/);
+  assert.match(html, /log\.txt/);
+});
+
 test("task compose offers no-template direct fields and builds a direct payload", async () => {
   const source = await readFile(resolve(dist, "mail_task.js"), "utf8");
   assert.match(source, /不使用模板/);

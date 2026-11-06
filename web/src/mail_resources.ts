@@ -513,6 +513,29 @@ export function bindMailResources(data: MailResourcesData, actions: MailResource
   }));
 }
 
+// Snapshot-driven preview for the Owner detail dialog. The approval decision
+// must see the same HTML that will actually be delivered, not only the text
+// fallback, because Agent messages may carry different text and HTML bodies.
+export function messagePreviewData(
+  message: MailMessage,
+  attachments: MailAttachment[] = [],
+  title = "邮件详情预览",
+): MailPreviewData {
+  return {
+    title,
+    subject: message.subject,
+    fromName: message.from_name,
+    fromAddress: message.from_address,
+    to: message.to,
+    cc: message.cc,
+    bcc: message.bcc,
+    bodyText: message.body_text || "",
+    bodyHtml: message.body_html || "",
+    attachments,
+    width: 600,
+  };
+}
+
 async function openMessageDetail(messageID: string, actions: MailResourceActions, accounts: MailAccount[], reload: (options?: {status?: string; account?: string}) => Promise<void>): Promise<void> {
   if (!messageID) return;
   const [detail, attemptsResult, linksResult] = await Promise.all([
@@ -546,12 +569,17 @@ async function openMessageDetail(messageID: string, actions: MailResourceActions
       ${(attemptsResult.deliveries || []).length ? (attemptsResult.deliveries as Array<{delivery: MailDelivery; attempts: MailDeliveryAttempt[]}>).map(item => `<details class="mail-version" open><summary>generation ${Number(item.delivery.generation)} · ${escapeHTML(mailStatusLabel(item.delivery.state))} · 尝试 ${Number(item.delivery.attempts || 0)} 次</summary><p>${escapeHTML(item.delivery.last_error_code || "无错误码")} ${escapeHTML(item.delivery.outcome_certainty || "")}</p>${(item.attempts || []).map(attempt => `<p class="field-help">#${Number(attempt.attempt_no)} ${escapeHTML(attempt.outcome)} ${escapeHTML(attempt.error_code || "")} ${escapeHTML(formatMailTime(attempt.started_at))}</p>`).join("")}</details>`).join("") : `<p>尚未创建投递。</p>`}
       <details class="mail-version"><summary>正文快照</summary><pre>${escapeHTML(message.body_text || "")}</pre></details>
     </div>
-    <div class="dialog-actions">${actionsRow.join("")}<button type="button" data-close>关闭</button></div>`;
+    <div class="dialog-actions"><button type="button" data-message-preview>预览完整邮件</button>${actionsRow.join("")}<button type="button" data-close>关闭</button></div>`;
   document.body.appendChild(dialog);
   const close = () => { dialog.close(); dialog.remove(); };
   dialog.querySelectorAll("[data-close]").forEach(button => button.addEventListener("click", close));
   dialog.addEventListener("cancel", close);
   dialog.showModal();
+  // Keep the detail dialog open behind the shared sandboxed preview so the
+  // Owner can inspect HTML and then decide with the original digest.
+  dialog.querySelector("[data-message-preview]")?.addEventListener("click", () => {
+    openMailPreviewDialog(messagePreviewData(message, detail.attachments || []));
+  });
   const refreshAfter = async (messageText: string) => {
     close();
     await reload();
