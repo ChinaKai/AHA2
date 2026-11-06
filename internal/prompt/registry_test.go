@@ -97,7 +97,7 @@ func TestEngineRoutesTemplatesAndBuildsContextManifest(t *testing.T) {
 		StaleKnowledge: []domain.KnowledgeEntry{
 			{ID: "project-stale", Scope: "project", ProjectID: "project-1", Slug: "old-flow", Type: "practice", Title: "Old flow", Body: "Outdated instructions", Status: domain.KnowledgeStale, FeedbackState: "wrong", Revision: 3},
 		},
-		Attachments: []AttachmentResource{{Attachment: domain.Attachment{ID: "attachment-1", TaskID: "task-1", Name: "screen.png", MediaType: "image/png", Size: 4}, Content: "PNG!"}},
+		Attachments: []AttachmentResource{{Attachment: domain.Attachment{ID: "attachment-1", TaskID: "task-1", Name: "screen.png", MediaType: "image/png", Size: 4}, Content: "PNG!", Inline: true}},
 		Skills: []domain.Skill{{ID: "skill-1", PackageSlug: "review", Scope: "global", Name: "Review", Description: "Review code", Instructions: strings.Repeat("review", 200), Version: 1, Enabled: true, PackageFiles: []domain.SkillFile{
 			{Path: "SKILL.md", Content: "---\nname: Review\ndescription: Review code\n---\n\n" + strings.Repeat("review", 200)},
 			{Path: "scripts/check.sh", Content: "echo reviewed"},

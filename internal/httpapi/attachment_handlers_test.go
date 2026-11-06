@@ -42,6 +42,16 @@ func TestTaskAttachmentLimitIs200MiB(t *testing.T) {
 	}
 }
 
+func TestAttachmentMultipartMemoryStaysBelowUploadCap(t *testing.T) {
+	t.Parallel()
+	if maxMultipartMemory != 32<<20 {
+		t.Fatalf("maxMultipartMemory = %d, want %d", maxMultipartMemory, int64(32<<20))
+	}
+	if maxMultipartMemory >= maxAttachmentBytes {
+		t.Fatalf("multipart memory threshold %d must stay below the %d attachment cap", maxMultipartMemory, maxAttachmentBytes)
+	}
+}
+
 func TestTaskAttachmentUploadDownloadAndDelete(t *testing.T) {
 	t.Parallel()
 	ctx, now := context.Background(), time.Now().UTC()

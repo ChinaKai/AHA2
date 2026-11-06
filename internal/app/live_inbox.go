@@ -12,6 +12,7 @@ import (
 
 	"github.com/ChinaKai/AHA2/internal/agentapi"
 	"github.com/ChinaKai/AHA2/internal/domain"
+	promptpkg "github.com/ChinaKai/AHA2/internal/prompt"
 	workspacepkg "github.com/ChinaKai/AHA2/internal/workspace"
 )
 
@@ -116,6 +117,7 @@ func (s *Service) materializeLiveInboxAttachments(
 	items []domain.AgentInboxItem,
 ) map[string]string {
 	paths := map[string]string{}
+	var inlineBytesUsed int64
 	workspace, err := s.store.Workspace(ctx, task.WorkspaceID)
 	if err != nil {
 		return paths
@@ -145,10 +147,14 @@ func (s *Service) materializeLiveInboxAttachments(
 			if err != nil {
 				continue
 			}
-			content, err := s.store.AttachmentContent(attachment)
-			if err != nil {
+			limit := inlineAttachmentLimit(promptpkg.MaxInlineAttachmentBytes, promptpkg.MaxInlineAttachmentBytesPerTurn, inlineBytesUsed)
+			content, inline, err := inlineAttachmentBytes(attachment, limit, func() ([]byte, error) {
+				return s.store.AttachmentContent(attachment)
+			})
+			if err != nil || !inline {
 				continue
 			}
+			inlineBytesUsed += int64(len(content))
 			relative := pathpkg.Join(".aha2-context", "live-attachments", attachment.ID, liveAttachmentName(attachment.Name))
 			if err := writeLiveAttachment(ctx, workspace, workDir, relative, content); err != nil {
 				continue
@@ -253,9 +259,18 @@ func liveInboxAttachmentLines(payload map[string]any, materialized map[string]st
 	var output strings.Builder
 	output.WriteString("Attachments:\n")
 	for _, reference := range references {
-		fmt.Fprintf(&output, "- %s (%s, %d bytes)", liveAttachmentName(reference.Name), reference.MediaType, reference.Size)
-		if relative := materialized[reference.ID]; relative != "" {
-			fmt.Fprintf(&output, ": %s", relative)
+		fmt.Fprintf(&output, "- %s (%s, %d bytes, id %s, sha256 %s)",
+			liveAttachmentName(reference.Name), reference.MediaType, reference.Size, reference.ID, reference.SHA256)
+		switch {
+		case materialized[reference.ID] != "":
+			fmt.Fprintf(&output, ": %s", materialized[reference.ID])
+		case reference.Size > promptpkg.MaxInlineAttachmentBytes:
+			fmt.Fprintf(&output,
+				"; content not inlined: it exceeds the %d MiB per-Turn Context inline limit. "+
+					"Download: GET /api/v1/tasks/%s/attachments/%s (an Owner session is required)",
+				promptpkg.MaxInlineAttachmentBytes/(1<<20), reference.TaskID, reference.ID)
+		default:
+			output.WriteString(": not materialized")
 		}
 		output.WriteString("\n")
 	}

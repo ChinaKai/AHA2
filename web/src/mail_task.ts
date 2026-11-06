@@ -33,6 +33,26 @@ export function mailAttachmentUnavailableReason(name: string): string {
     : "";
 }
 
+export interface MailArtifactSource {
+  label: string;
+  attachment_id?: string;
+}
+
+export interface MailAttachmentSource {
+  id: string;
+  name: string;
+}
+
+// The server checks the underlying Task attachment name, not the artifact
+// label. Use the same source name for the client-side warning and validation.
+export function mailArtifactSourceName(artifact: MailArtifactSource, attachments: MailAttachmentSource[]): string {
+  if (artifact.attachment_id) {
+    const source = attachments.find(item => item.id === artifact.attachment_id);
+    if (source?.name) return source.name;
+  }
+  return artifact.label;
+}
+
 export interface MailAttachmentCandidate {
   name: string;
   size: number;
@@ -228,8 +248,9 @@ export async function openTaskMailCompose(
     return `<label class="mail-attachment-option${unavailable ? " unavailable" : ""}" title="${escapeHTML(unavailable ? `${attachment.name} · ${unavailable}` : attachment.name)}"><input type="checkbox" name="attachment_ids" value="${escapeHTML(attachment.id)}" data-mail-name="${escapeHTML(attachment.name)}" data-mail-size="${Number(attachment.size) || 0}"${unavailable ? " disabled" : ""}><span class="mail-attachment-option-name">${escapeHTML(attachment.name)}</span><small>${formatMailBytes(attachment.size)}${attachment.media_type ? ` · ${escapeHTML(attachment.media_type)}` : ""}${unavailable ? ` · <span class="mail-attachment-unavailable">不支持：${escapeHTML(unavailable)}</span>` : ""}</small></label>`;
   }).join("");
   const artifactOptions = (options.build_artifacts || []).map(artifact => {
-    const unavailable = mailAttachmentUnavailableReason(artifact.label);
-    return `<label class="mail-attachment-option${unavailable ? " unavailable" : ""}" title="${escapeHTML(`${artifact.label} · SHA256 ${artifact.sha256 || ""}${unavailable ? ` · ${unavailable}` : ""}`)}"><input type="checkbox" name="build_artifact_ids" value="${escapeHTML(artifact.id)}" data-mail-name="${escapeHTML(artifact.label)}" data-mail-size="${Number(artifact.size_bytes) || 0}"${unavailable ? " disabled" : ""}><span class="mail-attachment-option-name">${escapeHTML(artifact.label)}</span><small>${escapeHTML(artifact.package_name || "")}${artifact.version ? ` · ${escapeHTML(artifact.version)}` : ""} · ${formatMailBytes(artifact.size_bytes)}${unavailable ? ` · <span class="mail-attachment-unavailable">不支持：${escapeHTML(unavailable)}</span>` : ""}</small></label>`;
+    const sourceName = mailArtifactSourceName(artifact, options.attachments || []);
+    const unavailable = mailAttachmentUnavailableReason(sourceName);
+    return `<label class="mail-attachment-option${unavailable ? " unavailable" : ""}" title="${escapeHTML(`${artifact.label} · SHA256 ${artifact.sha256 || ""}${unavailable ? ` · ${unavailable}` : ""}`)}"><input type="checkbox" name="build_artifact_ids" value="${escapeHTML(artifact.id)}" data-mail-name="${escapeHTML(sourceName)}" data-mail-size="${Number(artifact.size_bytes) || 0}"${unavailable ? " disabled" : ""}><span class="mail-attachment-option-name">${escapeHTML(artifact.label)}</span><small>${escapeHTML(artifact.package_name || "")}${artifact.version ? ` · ${escapeHTML(artifact.version)}` : ""} · ${formatMailBytes(artifact.size_bytes)}${unavailable ? ` · <span class="mail-attachment-unavailable">不支持：${escapeHTML(unavailable)}</span>` : ""}</small></label>`;
   }).join("");
   const dialog = document.createElement("dialog");
   dialog.id = "task-mail-compose-dialog";

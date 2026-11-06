@@ -71,6 +71,19 @@ test("mail attachment hint keeps 10 / 25MiB / 20MiB and marks executable rows un
     /可执行或脚本/,
   );
 
+  assert.equal(
+    mailTask.mailArtifactSourceName({label: "installer", attachment_id: "att-1"}, [{id: "att-1", name: "setup.exe"}]),
+    "setup.exe",
+    "build artifact checks use the underlying attachment name",
+  );
+  assert.equal(
+    mailTask.mailArtifactSourceName({label: "setup.exe", attachment_id: "missing"}, []),
+    "setup.exe",
+    "the label remains the fallback when the source is unavailable",
+  );
+  assert.match(mailSource, /mailArtifactSourceName\(artifact, options\.attachments/, "artifact rows resolve the source name");
+  assert.match(mailSource, /data-mail-name="\$\{escapeHTML\(sourceName\)\}"/, "validation stores the source name, not the label");
+
   assert.match(mailSource, /data-mail-attachment-limit/, "the mail limit hint is rendered");
   assert.match(mailSource, /MAIL_ATTACHMENT_LIMIT_HINT/, "the rendered hint uses the shared constant");
   assert.match(mailSource, /unavailable \? " disabled" : ""/, "executable or script rows disable their checkbox");

@@ -10,6 +10,11 @@ import (
 	"github.com/ChinaKai/AHA2/internal/gateway"
 )
 
+// petMCPMaxRequestBytes bounds one JSON-RPC request. A 200MiB attachment is
+// about 267MiB once base64-encoded, so keep headroom above the storage cap.
+// The model's own output limit is the practical ceiling for MCP uploads.
+const petMCPMaxRequestBytes int64 = 300 << 20
+
 type petMCPRequest struct {
 	JSONRPC string          `json:"jsonrpc"`
 	ID      json.RawMessage `json:"id"`
@@ -32,6 +37,7 @@ func (s *Server) petMCP(writer http.ResponseWriter, request *http.Request) {
 		writeError(writer, http.StatusForbidden, "pet_mcp_local_only")
 		return
 	}
+	request.Body = http.MaxBytesReader(writer, request.Body, petMCPMaxRequestBytes)
 	var payload petMCPRequest
 	if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
 		writeError(writer, http.StatusBadRequest, "invalid_json")

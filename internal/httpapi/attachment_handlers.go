@@ -13,6 +13,11 @@ import (
 
 const maxAttachmentBytes int64 = 200 << 20
 
+// maxMultipartMemory is the in-memory multipart threshold, not the upload cap.
+// Anything larger spills to a temporary file, so the 200MiB request does not
+// also sit in memory as a multipart buffer while it is being read.
+const maxMultipartMemory int64 = 32 << 20
+
 // taskAttachmentSizeValid keeps the boundary in one place so tests can assert
 // it without allocating a 200MiB buffer.
 func taskAttachmentSizeValid(size int64) bool {
@@ -46,7 +51,7 @@ func (s *Server) uploadAgentAttachment(writer http.ResponseWriter, request *http
 
 func (s *Server) createTaskAttachment(writer http.ResponseWriter, request *http.Request, taskID, auditAction string) {
 	request.Body = http.MaxBytesReader(writer, request.Body, maxAttachmentBytes+(1<<20))
-	if err := request.ParseMultipartForm(maxAttachmentBytes + (1 << 20)); err != nil {
+	if err := request.ParseMultipartForm(maxMultipartMemory); err != nil {
 		writeError(writer, http.StatusBadRequest, "invalid_attachment")
 		return
 	}

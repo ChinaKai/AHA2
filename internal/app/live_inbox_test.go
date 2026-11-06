@@ -34,7 +34,7 @@ func TestLiveInboxInjectionTextCarriesSourceAndAttachments(t *testing.T) {
 		"蒋开开 (channel, role=owner, authority=task_channel_participant)",
 		"Channel reply receipt: channel_inbox_123",
 		"please stop and check the screenshot",
-		"screen shot.png (image/png, 2048 bytes)",
+		"screen shot.png (image/png, 2048 bytes, id attachment-1, sha256 )",
 		".aha2-context/live-attachments/attachment-1/screen shot.png",
 		"owner (authority=owner)",
 	} {
@@ -44,6 +44,32 @@ func TestLiveInboxInjectionTextCarriesSourceAndAttachments(t *testing.T) {
 	}
 	if !strings.Contains(text, "do not call inbox/wait for them") {
 		t.Fatalf("injection text must tell the model not to poll again:\n%s", text)
+	}
+}
+
+func TestLiveInboxInjectionTextKeepsLargeAttachmentMetadataOnly(t *testing.T) {
+	t.Parallel()
+	hash := strings.Repeat("a", 64)
+	messages := []domain.LiveInboxMessage{{
+		ID: "inbox-1", Content: "large log attached",
+		Payload: map[string]any{
+			"attachments": []any{map[string]any{
+				"id": "attachment-big", "task_id": "task-1", "name": "large.log",
+				"media_type": "text/plain", "size": float64(5 << 20), "sha256": hash,
+			}},
+		},
+		Source: domain.LiveInboxSource{Kind: "owner", Authority: "owner"},
+	}}
+	text := liveInboxInjectionText(messages, nil)
+	for _, expected := range []string{
+		"large.log (text/plain, 5242880 bytes, id attachment-big, sha256 " + hash + ")",
+		"content not inlined",
+		"4 MiB per-Turn Context inline limit",
+		"GET /api/v1/tasks/task-1/attachments/attachment-big",
+	} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("injection text missing %q:\n%s", expected, text)
+		}
 	}
 }
 

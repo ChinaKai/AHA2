@@ -1325,7 +1325,7 @@ WHERE id=:message_id AND status='sending';
 
 ### 7.1 阈值
 
-现有 AHA 附件上限为 **25 MiB**（`internal/httpapi/attachment_handlers.go` 中 `maxAttachmentBytes = 25 << 20`）。一期建议：
+AHA Task 附件存储上限现为 **200 MiB**（`internal/httpapi/attachment_handlers.go` 中 `maxAttachmentBytes = 200 << 20`），但邮件发送策略独立，单文件仍保持 **25 MiB**。一期建议：
 
 | 条件 | 处理 |
 | --- | --- |
@@ -1359,7 +1359,7 @@ WHERE id=:message_id AND status='sending';
 
 ### 7.4 构建产物与外部 URL
 
-- 一期优先把构建产物登记为 Task 附件，复用 25 MiB 上限与哈希校验。
+- 一期优先把构建产物登记为 Task 附件，复用邮件 25 MiB 上限与哈希校验（Task 附件存储上限 200 MiB 不改变邮件发送阈值）。
 - `build_artifacts.storage_type='external_url'` 为二期预留：只允许 Owner/CI 受控注册，校验 HTTPS、主机 allowlist、禁止重定向到私网、登记大小与 SHA256；Agent 不能提供 URL。默认关闭，避免 SSRF 与任意文件引用。
 - 任何构建产物被删除或哈希不符，发送前失败为 `mail_attachment_unavailable`，不允许「先发出去再说」。
 

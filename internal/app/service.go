@@ -1095,6 +1095,7 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 	mailAccounts, mailTemplates, mailDefaultTemplates := s.MailTaskResources(ctx, task)
 	attachments := []prompt.AttachmentResource{}
 	seenAttachments := map[string]bool{}
+	var inlineAttachmentBytesUsed int64
 	for _, conversationItem := range conversation.Items {
 		raw, ok := conversationItem.Payload["attachments"]
 		if !ok {
@@ -1115,12 +1116,23 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 				s.failTurn(ctx, &turn, task, fmt.Errorf("load attachment %s: %w", reference.ID, attachmentErr))
 				return
 			}
-			content, readErr := s.store.AttachmentContent(item)
+			limit := inlineAttachmentLimit(prompt.MaxInlineAttachmentBytes, prompt.MaxInlineAttachmentBytesPerTurn, inlineAttachmentBytesUsed)
+			content, inline, readErr := inlineAttachmentBytes(item, limit, func() ([]byte, error) {
+				return s.store.AttachmentContent(item)
+			})
 			if readErr != nil {
 				s.failTurn(ctx, &turn, task, fmt.Errorf("read attachment %s: %w", item.ID, readErr))
 				return
 			}
-			attachments = append(attachments, prompt.AttachmentResource{Attachment: item, Content: string(content)})
+			// Oversized attachments stay metadata-only. Reading them on every
+			// Turn and rewriting them into Context would multiply the 200MiB
+			// storage cap into per-Turn memory and remote write time.
+			resource := prompt.AttachmentResource{Attachment: item, Inline: inline}
+			if inline {
+				resource.Content = string(content)
+				inlineAttachmentBytesUsed += int64(len(content))
+			}
+			attachments = append(attachments, resource)
 		}
 	}
 	if task.ID == petTaskID {

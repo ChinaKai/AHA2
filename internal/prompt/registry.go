@@ -71,9 +71,24 @@ type BuildInput struct {
 	Language               string
 }
 
+// MaxInlineAttachmentBytes is the per-Turn Context inline cap. It is
+// deliberately independent of the upload/storage cap: a large upload remains
+// available as metadata, but its bytes are never read into the prompt or
+// materialized into the workspace on every Turn.
+const MaxInlineAttachmentBytes int64 = 4 << 20
+
+// MaxInlineAttachmentBytesPerTurn bounds the total attachment bytes inlined
+// into one Turn. The per-attachment cap alone still multiplies across a long
+// conversation; this ceiling keeps the per-Turn memory and Context write cost
+// bounded no matter how many attachments were posted.
+const MaxInlineAttachmentBytesPerTurn int64 = 16 << 20
+
 type AttachmentResource struct {
 	Attachment domain.Attachment
-	Content    string
+	// Content is populated only when Inline is true. A metadata-only resource
+	// keeps Content empty so binary bytes never enter the prompt.
+	Content string
+	Inline  bool
 }
 
 type ContextResource struct {
@@ -183,6 +198,9 @@ type attachmentIndexEntry struct {
 	RelativePath string
 	MediaType    string
 	Size         int64
+	SHA256       string
+	Inline       bool
+	DownloadPath string
 }
 
 type InboxTemplateItem struct {
@@ -262,7 +280,7 @@ var builtinTemplates = []domain.PromptTemplate{
 	{ID: "context.turn-diagnostics", Name: "Turn Diagnostics File", Layer: "context", Description: "diagnostics/turns.md 的内容模板", Editable: true, Required: false, Version: 1},
 	{ID: "context.hardware", Name: "Hardware Context File", Layer: "context", Description: "hardware.md 的非敏感硬件上下文模板", Editable: true, Required: false, Version: 1},
 	{ID: "context.mail", Name: "Mail Context File", Layer: "context", Description: "mail.md 的非敏感邮件上下文模板；不含凭据、正文或收件人历史", Editable: true, Required: false, Version: 1},
-	{ID: "context.attachments-index", Name: "Attachments Index File", Layer: "context", Description: "attachments/index.md 的内容模板", Editable: true, Required: false, Version: 1},
+	{ID: "context.attachments-index", Name: "Attachments Index File", Layer: "context", Description: "attachments/index.md 的内容模板", Editable: true, Required: false, Version: 2},
 	{ID: "section.compact-handoff", Name: "Compact Handoff Section", Layer: "section", Description: "Backend Session 压缩后的 Prompt 段落", Editable: true, Required: false, Version: 1},
 	{ID: "section.task-workspace", Name: "Task And Workspace Section", Layer: "section", Description: "Task 与 Workspace 摘要段落", Editable: true, Required: true, Version: 1},
 	{ID: "section.available-context", Name: "Available Context Section", Layer: "section", Description: "可用上下文入口列表段落", Editable: true, Required: true, Version: 2},
@@ -887,12 +905,28 @@ func attachmentResources(
 	resources := []ContextResource{}
 	for _, value := range input.Attachments {
 		item := value.Attachment
-		filePath := joinContextPath(input, directory, item.ID, item.Name)
-		relative := knowledgeRelativePath(indexPath, filePath)
-		data.AttachmentEntries = append(data.AttachmentEntries, attachmentIndexEntry{
-			ID: item.ID, Name: item.Name, RelativePath: relative, MediaType: item.MediaType, Size: item.Size,
-		})
-		resources = append(resources, detailResource(input, "attachment-"+item.ID, filePath, "Message attachment: "+item.Name, value.Content))
+		entry := attachmentIndexEntry{
+			ID: item.ID, Name: item.Name, MediaType: item.MediaType, Size: item.Size,
+			SHA256: item.SHA256, Inline: value.Inline,
+			DownloadPath: "/api/v1/tasks/" + input.Task.ID + "/attachments/" + item.ID,
+		}
+		if value.Inline {
+			filePath := joinContextPath(input, directory, item.ID, item.Name)
+			entry.RelativePath = knowledgeRelativePath(indexPath, filePath)
+			resources = append(resources, attachmentDetailResource(
+				input, "attachment-"+item.ID, filePath, "Message attachment: "+item.Name, value.Content))
+		} else {
+			// Keep the Context entry point useful without the bytes: the index
+			// links to a small metadata file instead of a file that was never
+			// written.
+			metadataPath := joinContextPath(input, directory, item.ID, "metadata.md")
+			entry.RelativePath = knowledgeRelativePath(indexPath, metadataPath)
+			resources = append(resources, attachmentDetailResource(
+				input, "attachment-"+item.ID+"-metadata", metadataPath,
+				"Attachment metadata; content not inlined: "+item.Name,
+				attachmentMetadata(item, input.Task.ID)))
+		}
+		data.AttachmentEntries = append(data.AttachmentEntries, entry)
 	}
 	indexContent, err := renderTemplateByID(templates, "context.attachments-index", data)
 	if err != nil {
@@ -935,6 +969,26 @@ func detailResource(input BuildInput, id, path, description, content string) Con
 	item := resource(input, id, path, description, content)
 	item.EntryPoint = false
 	return item
+}
+
+// attachmentDetailResource counts bytes rather than runes. Attachment content
+// is often binary, and len([]rune(content)) would allocate a second
+// representation of every inlined file for a value that is never rendered for
+// non-entry-point resources.
+func attachmentDetailResource(input BuildInput, id, path, description, content string) ContextResource {
+	return ContextResource{
+		ID: id, URI: fmt.Sprintf("aha://tasks/%s/agents/%s/context/%s", input.Task.ID, input.Agent.AgentID, id),
+		Path: path, Description: description, Chars: len(content), Content: content,
+	}
+}
+
+func attachmentMetadata(item domain.Attachment, taskID string) string {
+	inlineMiB := MaxInlineAttachmentBytes / (1 << 20)
+	return fmt.Sprintf(
+		"# %s\n\n- id: %s\n- media_type: %s\n- size: %d bytes\n- sha256: %s\n"+
+			"- content: not inlined; it exceeds the %d MiB per-Turn Context inline limit\n"+
+			"- download: GET /api/v1/tasks/%s/attachments/%s (an Owner session is required)\n",
+		item.Name, item.ID, item.MediaType, item.Size, item.SHA256, inlineMiB, taskID, item.ID)
 }
 
 // AvailableContextGroup is one directory to print once, followed by the entry

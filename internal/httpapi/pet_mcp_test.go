@@ -25,6 +25,15 @@ func TestPetMCPNotificationsAreAcceptedWithoutJSON(t *testing.T) {
 	}
 }
 
+func TestPetMCPRequestLimitCoversBase64Attachment(t *testing.T) {
+	t.Parallel()
+	// base64 expands 3 bytes to 4; the request limit must leave room for the
+	// encoded 200MiB storage cap plus JSON overhead.
+	if petMCPMaxRequestBytes < maxAttachmentBytes*4/3 {
+		t.Fatalf("petMCPMaxRequestBytes = %d, want at least %d", petMCPMaxRequestBytes, maxAttachmentBytes*4/3)
+	}
+}
+
 func TestPetMCPPingReturnsResult(t *testing.T) {
 	server := New(Config{})
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/pet/mcp",
