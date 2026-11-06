@@ -157,6 +157,68 @@ func TestAgentMailPreviewCreatesNoMessage(t *testing.T) {
 	}
 }
 
+func TestAgentMailDirectWithoutTemplate(t *testing.T) {
+	f := newAgentMailFixture(t)
+	account, _ := f.createScopedTemplate()
+
+	status, body := f.agent(http.MethodPost, "/api/v1/agent/mail/preview", map[string]any{
+		"account_id": account["id"], "subject": "直接预览",
+		"body_html": "<p>直接 HTML 正文</p>", "to": []string{"qa@example.com"},
+	})
+	if status != http.StatusOK {
+		t.Fatalf("direct preview status=%d body=%#v", status, body)
+	}
+	preview := body["preview"].(map[string]any)
+	if preview["subject"] != "直接预览" || !strings.Contains(preview["body_html"].(string), "直接 HTML 正文") ||
+		!strings.Contains(preview["body_text"].(string), "直接 HTML 正文") {
+		t.Fatalf("direct preview = %#v", preview)
+	}
+
+	for name, payload := range map[string]map[string]any{
+		"missing subject": {
+			"account_id": account["id"], "body_text": "x", "to": []string{"qa@example.com"},
+		},
+		"missing body": {
+			"account_id": account["id"], "subject": "x", "to": []string{"qa@example.com"},
+		},
+		"empty body": {
+			"account_id": account["id"], "subject": "x", "body_text": "", "body_html": "",
+			"to": []string{"qa@example.com"},
+		},
+		"unsafe html": {
+			"account_id": account["id"], "subject": "x", "body_html": `<p onclick="alert(1)">x</p>`,
+			"to": []string{"qa@example.com"},
+		},
+	} {
+		status, body = f.agent(http.MethodPost, "/api/v1/agent/mail/preview", payload)
+		if status != http.StatusUnprocessableEntity || mailErrorCode(t, body) != string(domain.MailErrTemplateInvalid) {
+			t.Fatalf("%s status=%d body=%#v", name, status, body)
+		}
+	}
+
+	status, body = f.agent(http.MethodPost, "/api/v1/agent/mail/messages", map[string]any{
+		"account_id": account["id"], "subject": "直接发送",
+		"body_text": "直接正文", "to": []string{"qa@example.com"},
+		"idempotency_key": "agent-direct-1",
+	})
+	if status != http.StatusCreated || body["status"] != string(domain.MailMessagePendingApproval) ||
+		body["approval_required"] != true {
+		t.Fatalf("direct send status=%d body=%#v", status, body)
+	}
+	messages, err := f.database.MailMessagesByTask(f.ctx, f.task.ID, "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 1 {
+		t.Fatalf("direct messages = %#v", messages)
+	}
+	stored := messages[0]
+	if stored.TemplateID != "" || stored.TemplateVersion != 0 ||
+		stored.Subject != "直接发送" || stored.BodyText != "直接正文" {
+		t.Fatalf("direct stored = %#v", stored)
+	}
+}
+
 func TestAgentMailSendIsAlwaysPendingAndIdempotent(t *testing.T) {
 	f := newAgentMailFixture(t)
 	account, template := f.createScopedTemplate()
@@ -392,6 +454,33 @@ func TestAgentMailMCPTools(t *testing.T) {
 	if len(names) != 5 {
 		t.Fatalf("tools = %#v", names)
 	}
+	for _, raw := range tools {
+		tool := raw.(map[string]any)
+		toolName := tool["name"].(string)
+		if toolName != "mail_preview" && toolName != "mail_send" {
+			continue
+		}
+		schema := tool["inputSchema"].(map[string]any)
+		properties := schema["properties"].(map[string]any)
+		for _, field := range []string{"subject", "body_text", "body_html"} {
+			if _, ok := properties[field]; !ok {
+				t.Fatalf("%s schema missing %s: %#v", toolName, field, properties)
+			}
+		}
+		required := schema["required"].([]any)
+		for _, field := range required {
+			if field == "template_id" {
+				t.Fatalf("%s schema still requires template_id: %#v", toolName, required)
+			}
+		}
+		if toolName == "mail_send" {
+			if len(required) != 2 {
+				t.Fatalf("mail_send required = %#v", required)
+			}
+		} else if len(required) != 1 {
+			t.Fatalf("mail_preview required = %#v", required)
+		}
+	}
 
 	status, body = mcp("tools/call", map[string]any{"name": "mail_list_accounts", "arguments": map[string]any{}})
 	if status != http.StatusOK {
@@ -417,6 +506,23 @@ func TestAgentMailMCPTools(t *testing.T) {
 	sendText := mcpText(t, body)
 	if !strings.Contains(sendText, `"status":"pending_approval"`) || !strings.Contains(sendText, `"deduplicated":false`) {
 		t.Fatalf("MCP send text = %q", sendText)
+	}
+
+	// Direct (no-template) send uses the same tool surface and stays pending.
+	status, body = mcp("tools/call", map[string]any{
+		"name": "mail_send",
+		"arguments": map[string]any{
+			"account_id": account["id"], "subject": "MCP 直发",
+			"body_html": `<p>MCP <strong>直发</strong></p>`, "to": []string{"qa@example.com"},
+			"idempotency_key": "mcp-send-direct-1",
+		},
+	})
+	if status != http.StatusOK {
+		t.Fatalf("MCP direct send status=%d body=%#v", status, body)
+	}
+	sendText = mcpText(t, body)
+	if !strings.Contains(sendText, `"status":"pending_approval"`) {
+		t.Fatalf("MCP direct send text = %q", sendText)
 	}
 
 	// BCC is not part of the tool schema; strict argument decoding rejects it

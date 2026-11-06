@@ -52,6 +52,75 @@ func TestMailContentFingerprintIncludesFromAndSortedBCC(t *testing.T) {
 	}
 }
 
+func TestMailDirectMessageWithoutTemplateValidatesAndSanitizes(t *testing.T) {
+	f := newMailAPIFixture(t)
+	account := f.createAccount("direct-code")
+
+	created := f.createMessage(map[string]any{
+		"task_id": f.task.ID, "account_id": account["id"], "template_id": "",
+		"to": []string{"qa@example.com"}, "subject": "直接邮件",
+		"body_text": "", "body_html": `<p>直接正文 <strong>OK</strong></p>`,
+		"submit": true, "idempotency_key": "direct-1",
+	})
+	if created["_status"].(float64) != http.StatusCreated {
+		t.Fatalf("direct create = %#v", created)
+	}
+	message := created["message"].(map[string]any)
+	if message["status"] != string(domain.MailMessagePendingApproval) {
+		t.Fatalf("direct status = %#v", message["status"])
+	}
+	if templateID, ok := message["template_id"]; ok && templateID != "" {
+		t.Fatalf("direct message kept template_id = %#v", templateID)
+	}
+	if !strings.Contains(message["body_html"].(string), "<strong>OK</strong>") {
+		t.Fatalf("direct body_html = %#v", message["body_html"])
+	}
+	// The server derives the text fallback from HTML when body_text is empty.
+	if !strings.Contains(message["body_text"].(string), "直接正文") {
+		t.Fatalf("direct body_text fallback = %#v", message["body_text"])
+	}
+
+	unsafe := f.createMessage(map[string]any{
+		"task_id": f.task.ID, "account_id": account["id"],
+		"to": []string{"qa@example.com"}, "subject": "危险 HTML",
+		"body_html": `<p onclick="alert(1)">x</p>`, "submit": true,
+		"idempotency_key": "direct-unsafe",
+	})
+	if unsafe["_status"].(float64) != http.StatusUnprocessableEntity ||
+		mailErrorCode(t, unsafe) != string(domain.MailErrTemplateInvalid) {
+		t.Fatalf("unsafe direct HTML = %#v", unsafe)
+	}
+
+	missingSubject := f.createMessage(map[string]any{
+		"task_id": f.task.ID, "account_id": account["id"],
+		"to": []string{"qa@example.com"}, "body_text": "x", "submit": true,
+		"idempotency_key": "direct-no-subject",
+	})
+	if missingSubject["_status"].(float64) != http.StatusUnprocessableEntity ||
+		mailErrorCode(t, missingSubject) != string(domain.MailErrTemplateInvalid) {
+		t.Fatalf("missing direct subject = %#v", missingSubject)
+	}
+	missingBody := f.createMessage(map[string]any{
+		"task_id": f.task.ID, "account_id": account["id"],
+		"to": []string{"qa@example.com"}, "subject": "只有主题", "submit": true,
+		"idempotency_key": "direct-no-body",
+	})
+	if missingBody["_status"].(float64) != http.StatusUnprocessableEntity ||
+		mailErrorCode(t, missingBody) != string(domain.MailErrTemplateInvalid) {
+		t.Fatalf("missing direct body = %#v", missingBody)
+	}
+	emptyBody := f.createMessage(map[string]any{
+		"task_id": f.task.ID, "account_id": account["id"],
+		"to": []string{"qa@example.com"}, "subject": "空正文",
+		"body_text": "", "body_html": "", "submit": true,
+		"idempotency_key": "direct-empty-body",
+	})
+	if emptyBody["_status"].(float64) != http.StatusUnprocessableEntity ||
+		mailErrorCode(t, emptyBody) != string(domain.MailErrTemplateInvalid) {
+		t.Fatalf("empty direct body = %#v", emptyBody)
+	}
+}
+
 func TestMailCreatePublishesApprovalRequestedEvent(t *testing.T) {
 	f := newMailAPIFixture(t)
 	account := f.createAccount("event-code")

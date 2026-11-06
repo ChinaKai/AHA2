@@ -23,6 +23,9 @@ import (
 type agentMailDraftInput struct {
 	AccountID        string            `json:"account_id"`
 	TemplateID       string            `json:"template_id"`
+	Subject          *string           `json:"subject"`
+	BodyText         *string           `json:"body_text"`
+	BodyHTML         *string           `json:"body_html"`
 	To               []string          `json:"to"`
 	CC               []string          `json:"cc"`
 	BCC              []string          `json:"bcc"`
@@ -34,6 +37,9 @@ type agentMailDraftInput struct {
 type agentMailSendInput struct {
 	AccountID        string            `json:"account_id"`
 	TemplateID       string            `json:"template_id"`
+	Subject          *string           `json:"subject"`
+	BodyText         *string           `json:"body_text"`
+	BodyHTML         *string           `json:"body_html"`
 	To               []string          `json:"to"`
 	CC               []string          `json:"cc"`
 	BCC              []string          `json:"bcc"`
@@ -185,6 +191,33 @@ func (s *Server) agentMailTemplate(ctx context.Context, call app.AgentCallContex
 	return item, content, nil
 }
 
+// agentMailDirectContent builds the same Template shape the owner direct-send
+// path uses. An empty template_id requires a subject and at least one
+// non-empty body; Render then applies the usual HTML sanitizer and text
+// fallback. Caller variables still work identically for both paths.
+func agentMailDirectContent(input agentMailDraftInput) (mailpkg.Template, error) {
+	if input.Subject == nil || strings.TrimSpace(*input.Subject) == "" {
+		return mailpkg.Template{}, newAgentMailFailure(http.StatusUnprocessableEntity, domain.MailErrTemplateInvalid,
+			"template_id 为空时 subject 必填")
+	}
+	if input.BodyText == nil && input.BodyHTML == nil {
+		return mailpkg.Template{}, newAgentMailFailure(http.StatusUnprocessableEntity, domain.MailErrTemplateInvalid,
+			"template_id 为空时至少需要 body_text 或 body_html")
+	}
+	content := mailpkg.Template{SubjectTemplate: *input.Subject}
+	if input.BodyText != nil {
+		content.BodyTextTemplate = *input.BodyText
+	}
+	if input.BodyHTML != nil {
+		content.BodyHTMLTemplate = *input.BodyHTML
+	}
+	if strings.TrimSpace(content.BodyTextTemplate) == "" && strings.TrimSpace(content.BodyHTMLTemplate) == "" {
+		return mailpkg.Template{}, newAgentMailFailure(http.StatusUnprocessableEntity, domain.MailErrTemplateInvalid,
+			"template_id 为空时正文不能为空")
+	}
+	return content, nil
+}
+
 func (s *Server) agentMailServerVariables(ctx context.Context, call app.AgentCallContext) map[string]string {
 	variables := s.mailServerVariables(ctx, call.Task)
 	if agent, err := s.store.TaskAgent(ctx, call.Task.ID, call.Turn.AgentID); err == nil {
@@ -216,9 +249,18 @@ func (s *Server) agentMailRender(ctx context.Context, call app.AgentCallContext,
 		return domain.MailAccount{}, domain.MailBinding{}, domain.MailTemplate{}, mailpkg.Preview{},
 			newAgentMailFailure(http.StatusUnprocessableEntity, domain.MailErrCredentialMissing, "邮箱账号未配置授权码")
 	}
-	template, content, err := s.agentMailTemplate(ctx, call, input.TemplateID)
-	if err != nil {
-		return domain.MailAccount{}, domain.MailBinding{}, domain.MailTemplate{}, mailpkg.Preview{}, err
+	template := domain.MailTemplate{}
+	var content mailpkg.Template
+	if strings.TrimSpace(input.TemplateID) == "" {
+		content, err = agentMailDirectContent(input)
+		if err != nil {
+			return domain.MailAccount{}, domain.MailBinding{}, domain.MailTemplate{}, mailpkg.Preview{}, err
+		}
+	} else {
+		template, content, err = s.agentMailTemplate(ctx, call, input.TemplateID)
+		if err != nil {
+			return domain.MailAccount{}, domain.MailBinding{}, domain.MailTemplate{}, mailpkg.Preview{}, err
+		}
 	}
 	attachments, packageVariables, err := s.mailPreviewAttachments(ctx, call.Task.ID, input.AttachmentIDs, input.BuildArtifactIDs)
 	if err != nil {
@@ -325,6 +367,7 @@ func (s *Server) agentMailSendData(ctx context.Context, request *http.Request, c
 
 	account, binding, template, preview, err := s.agentMailRender(ctx, call, agentMailDraftInput{
 		AccountID: input.AccountID, TemplateID: input.TemplateID,
+		Subject: input.Subject, BodyText: input.BodyText, BodyHTML: input.BodyHTML,
 		To: input.To, CC: input.CC, BCC: input.BCC, Variables: input.Variables,
 		AttachmentIDs: input.AttachmentIDs, BuildArtifactIDs: input.BuildArtifactIDs,
 	})
@@ -603,30 +646,36 @@ func mailMCPTools() []mcpTool {
 		},
 		{
 			Name:        "mail_preview",
-			Description: "Render and validate a mail draft without creating a message. Every send still requires Owner approval.",
+			Description: "Render and validate a mail draft without creating a message. Provide template_id, or omit it and provide subject plus body_text/body_html. Every send still requires Owner approval.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"account_id":         map[string]any{"type": "string"},
-					"template_id":        map[string]any{"type": "string"},
+					"template_id":        map[string]any{"type": "string", "description": "Optional. When empty, subject and at least one of body_text/body_html are required."},
+					"subject":            map[string]any{"type": "string", "description": "Direct subject; used only when template_id is empty."},
+					"body_text":          map[string]any{"type": "string", "description": "Direct plain-text body; used only when template_id is empty."},
+					"body_html":          map[string]any{"type": "string", "description": "Direct HTML body; sanitized by the same pipeline as templates. Used only when template_id is empty."},
 					"to":                 map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 					"cc":                 map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 					"variables":          map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}},
 					"attachment_ids":     map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 					"build_artifact_ids": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 				},
-				"required":             []string{"account_id", "template_id"},
+				"required":             []string{"account_id"},
 				"additionalProperties": false,
 			},
 		},
 		{
 			Name:        "mail_send",
-			Description: "Create a mail message that is always pending Owner approval. Reusing the idempotency key returns the original message.",
+			Description: "Create a mail message that is always pending Owner approval. Provide template_id, or omit it and provide subject plus body_text/body_html. Reusing the idempotency key returns the original message.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"account_id":         map[string]any{"type": "string"},
-					"template_id":        map[string]any{"type": "string"},
+					"template_id":        map[string]any{"type": "string", "description": "Optional. When empty, subject and at least one of body_text/body_html are required."},
+					"subject":            map[string]any{"type": "string", "description": "Direct subject; used only when template_id is empty."},
+					"body_text":          map[string]any{"type": "string", "description": "Direct plain-text body; used only when template_id is empty."},
+					"body_html":          map[string]any{"type": "string", "description": "Direct HTML body; sanitized by the same pipeline as templates. Used only when template_id is empty."},
 					"to":                 map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 					"cc":                 map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 					"variables":          map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}},
@@ -634,7 +683,7 @@ func mailMCPTools() []mcpTool {
 					"build_artifact_ids": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 					"idempotency_key":    map[string]any{"type": "string", "minLength": 1, "maxLength": 128},
 				},
-				"required":             []string{"account_id", "template_id", "idempotency_key"},
+				"required":             []string{"account_id", "idempotency_key"},
 				"additionalProperties": false,
 			},
 		},

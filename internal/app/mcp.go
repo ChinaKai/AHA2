@@ -87,8 +87,8 @@ func (s *Service) mailMCPDetail() domain.MCPServer {
 	descriptions := map[string]string{
 		"mail_list_accounts":  "列出当前 Task 可用的邮件账号（不含凭据）。",
 		"mail_list_templates": "列出当前 Task/Project 可见的活动模板。",
-		"mail_preview":        "按账号、模板、收件人与受控附件渲染预览并校验。",
-		"mail_send":           "创建待 Owner 审批的邮件；固定返回 pending_approval。",
+		"mail_preview":        "按账号、模板（或直接主题/正文）、收件人与受控附件渲染预览并校验。",
+		"mail_send":           "按模板或直接主题/正文创建待 Owner 审批的邮件；固定返回 pending_approval。",
 		"mail_get_status":     "查询当前 Task 邮件的审批与投递状态。",
 	}
 	for _, name := range mailMCPToolNames {

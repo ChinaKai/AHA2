@@ -307,9 +307,13 @@ available over HTTP:
 All routes are bound to the current Task capability and never return
 credentials, `credential_ref` or raw SMTP transcripts. Only accounts bound to
 the Task's Task/Workspace/Project scopes and templates visible to its Project
-are usable. `mail_send` always creates `pending_approval`; an Agent cannot
-approve, reject, retry or cancel mail. Attachments must be current Task
-attachments or registered build artifacts: local paths, external URLs, raw
-file bytes and executable/script files are rejected. BCC is Owner-only and is
-not accepted from Agent tools. Use one stable `idempotency_key` per logical
-mail; reusing it returns the original message with `deduplicated=true`.
+are usable. `template_id` is optional: omit it and provide `subject` plus
+`body_text` or `body_html` (at least one non-empty body) to send a direct
+message. Direct HTML goes through the same sanitize pipeline as templates and
+the text fallback is generated from it when absent. `mail_send` always creates
+`pending_approval`; an Agent cannot approve, reject, retry or cancel mail.
+Attachments must be current Task attachments or registered build artifacts:
+local paths, external URLs, raw file bytes and executable/script files are
+rejected. BCC is Owner-only and is not accepted from Agent tools. Use one
+stable `idempotency_key` per logical mail; reusing it returns the original
+message with `deduplicated=true`.

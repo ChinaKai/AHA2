@@ -879,11 +879,13 @@ GET  /api/v1/agent/mail/messages/{id}
 | --- | --- | --- |
 | `mail_list_accounts` | 列出当前 Task 可用账号 | `account_id`、from 地址、显示名、别名、`credential_configured`、状态 |
 | `mail_list_templates` | 列出当前 Task/Project 可见模板 | `template_id`、名称、版本、变量、作用域 |
-| `mail_preview` | 渲染预览并校验 | 主题、To/CC、附件元数据、警告、是否需审批 |
-| `mail_send` | 创建待审批邮件 | `message_id`、`status=pending_approval`、`deduplicated` |
+| `mail_preview` | 按模板或直接主题/正文渲染预览并校验 | 主题、To/CC、附件元数据、警告、是否需审批 |
+| `mail_send` | 按模板或直接主题/正文创建待审批邮件 | `message_id`、`status=pending_approval`、`deduplicated` |
 | `mail_get_status` | 查询审批与投递状态 | 状态、错误码、尝试次数、时间；不含原始 SMTP 会话 |
 
 工具响应只包含选择与校验所需的非敏感元数据：`account_id`、发件地址/别名、模板、收件人、附件元数据。任何工具都不得返回 `credential_ref`、授权码、Secret 值、SMTP AUTH 行或完整 SMTP 会话；`credential_configured` 是唯一与凭据相关的字段，且只是布尔值。
+
+`template_id` 可选。为空时 `mail_preview` / `mail_send` 必须提供 `subject` 与 `body_text`/`body_html` 中的至少一个非空正文；主题必填。无模板 HTML 与模板渲染走同一 sanitize 管线，纯文本留空时由服务端从 HTML 生成。附件、白名单、审批与 idempotency 规则对两条路径完全一致，`mail_send` 仍固定创建 `pending_approval`。
 
 `mail_list_accounts` 示例：
 
@@ -917,6 +919,18 @@ GET  /api/v1/agent/mail/messages/{id}
   },
   "attachment_ids": ["attachment_..."],
   "build_artifact_ids": ["build_artifact_..."]
+}
+```
+
+不使用模板时省略 `template_id`，直接提供主题与至少一个正文：
+
+```json
+{
+  "account_id": "mail_account_...",
+  "to": ["qa-team@example.com"],
+  "subject": "[AHA] 直发提测通知",
+  "body_html": "<p>构建已完成，请查收附件。</p>",
+  "attachment_ids": ["attachment_..."]
 }
 ```
 
@@ -958,6 +972,19 @@ GET  /api/v1/agent/mail/messages/{id}
   "attachment_ids": ["attachment_..."],
   "build_artifact_ids": [],
   "idempotency_key": "task-119-firmware-1.2.3-qa-1"
+}
+```
+
+无模板直发同样省略 `template_id`，提交 `subject` 与 `body_html`（或 `body_text`）：
+
+```json
+{
+  "account_id": "mail_account_...",
+  "to": ["qa-team@example.com"],
+  "subject": "[AHA] 直发提测通知",
+  "body_html": "<p>构建已完成，请查收附件。</p>",
+  "attachment_ids": ["attachment_..."],
+  "idempotency_key": "task-119-direct-qa-1"
 }
 ```
 

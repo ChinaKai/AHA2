@@ -119,6 +119,35 @@ test("template editor insert-table skeleton is sanitizer-safe and editable", () 
   assert.equal((mailResources.mailTemplateTableSkeleton(999, 99).match(/<td /g) || []).length, 500);
 });
 
+test("task compose offers no-template direct fields and builds a direct payload", async () => {
+  const source = await readFile(resolve(dist, "mail_task.js"), "utf8");
+  assert.match(source, /不使用模板/);
+  assert.match(source, /mail-compose-direct/);
+  assert.match(source, /正文（HTML 主编辑区）/);
+
+  const common = ["attachment_1"];
+  const artifacts = ["artifact_1"];
+  const direct = mailTask.mailComposePayload({
+    account_id: "mail_account_1", template_id: "  ", subject: "  直发主题  ",
+    body_html: "<p>直发正文</p>", to: "qa@example.com, lead@example.com", cc: "", bcc: "",
+  }, "task_1", {}, common, artifacts);
+  assert.equal(direct.template_id, "");
+  assert.equal(direct.subject, "直发主题");
+  assert.equal(direct.body_html, "<p>直发正文</p>");
+  assert.equal(direct.body_text, "");
+  assert.deepEqual(direct.to, ["qa@example.com", "lead@example.com"]);
+  assert.deepEqual(direct.attachment_ids, common);
+  assert.deepEqual(direct.build_artifact_ids, artifacts);
+
+  const templated = mailTask.mailComposePayload({
+    account_id: "mail_account_1", template_id: "mail_template_1",
+    subject: "ignored", body_html: "<p>ignored</p>", to: "qa@example.com",
+  }, "task_1", {build_version: "1"}, [], []);
+  assert.equal(templated.template_id, "mail_template_1");
+  assert.ok(!("subject" in templated), "template path never sends direct subject");
+  assert.ok(!("body_html" in templated), "template path never sends direct body");
+});
+
 test("template editor derives required variables and has no scope or project field", () => {
   const variables = cards.mailTemplateVariables(
     "{{build.version}} {{extra.build_no}}",

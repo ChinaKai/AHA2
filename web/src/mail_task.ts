@@ -87,6 +87,39 @@ function templateDefaults(templateID: string, templates: MailTemplate[]): MailTe
   return templates.find(template => template.id === templateID);
 }
 
+function csvValues(value: unknown): string[] {
+  return String(value || "").split(",").map(item => item.trim()).filter(Boolean);
+}
+
+// Direct mail keeps template_id empty and supplies subject + body_html. The
+// server derives body_text from HTML when it is empty. Template mail keeps the
+// existing payload shape; subject/body inputs are disabled and absent.
+export function mailComposePayload(
+  values: Record<string, unknown>,
+  taskID: string,
+  variableValues: Record<string, string>,
+  attachmentIDs: string[],
+  buildArtifactIDs: string[],
+): Record<string, any> {
+  const payload: Record<string, any> = {
+    task_id: taskID,
+    account_id: String(values.account_id || ""),
+    template_id: String(values.template_id || "").trim(),
+    to: csvValues(values.to),
+    cc: csvValues(values.cc),
+    bcc: csvValues(values.bcc),
+    variables: variableValues,
+    attachment_ids: attachmentIDs,
+    build_artifact_ids: buildArtifactIDs,
+  };
+  if (!payload.template_id) {
+    payload.subject = String(values.subject || "").trim();
+    payload.body_html = String(values.body_html || "");
+    payload.body_text = "";
+  }
+  return payload;
+}
+
 export async function openTaskMailCompose(
   detail: TaskDetail,
   options: TaskMailOptions,
@@ -100,7 +133,7 @@ export async function openTaskMailCompose(
   }
   document.querySelector<HTMLDialogElement>("#task-mail-compose-dialog")?.remove();
   const accountOptions = accounts.map(account => `<option value="${escapeHTML(account.account_id)}" data-default-template="${escapeHTML(account.default_template_id || "")}">${escapeHTML(account.display_name || account.from_address)} · ${escapeHTML(account.from_address)}</option>`).join("");
-  const templateOptions = templates.map(template => `<option value="${escapeHTML(template.id)}">${escapeHTML(template.name)} · v${Number(template.current_version)}</option>`).join("");
+  const templateOptions = templates.map(template => `<option value="${escapeHTML(template.id)}">${escapeHTML(template.name)} · v${Number(template.current_version)}</option>`).join("") + `<option value="">不使用模板</option>`;
   const attachmentOptions = (options.attachments || []).map(attachment => `<label class="mail-attachment-option"><input type="checkbox" name="attachment_ids" value="${escapeHTML(attachment.id)}"><span><strong>${escapeHTML(attachment.name)}</strong><small>${formatMailBytes(attachment.size)} · ${escapeHTML(attachment.media_type || "")}</small><small>SHA256 ${escapeHTML((attachment.sha256 || "").slice(0, 16))}…</small></span></label>`).join("");
   const artifactOptions = (options.build_artifacts || []).map(artifact => `<label class="mail-attachment-option"><input type="checkbox" name="build_artifact_ids" value="${escapeHTML(artifact.id)}"><span><strong>${escapeHTML(artifact.label)}</strong><small>${escapeHTML(artifact.package_name || "")}${artifact.version ? ` · ${escapeHTML(artifact.version)}` : ""} · ${formatMailBytes(artifact.size_bytes)}</small><small>SHA256 ${escapeHTML((artifact.sha256 || "").slice(0, 16))}…</small></span></label>`).join("");
   const dialog = document.createElement("dialog");
@@ -109,7 +142,12 @@ export async function openTaskMailCompose(
   dialog.innerHTML = `<form id="task-mail-compose-form">
     <div class="dialog-head"><h2>发送邮件</h2><button type="button" data-close class="icon-button" aria-label="关闭">${icon("close")}</button></div>
     <div class="dialog-body">
-      <div class="two"><label>账号<select name="account_id" required>${accountOptions}</select></label><label>模板<select name="template_id" required>${templateOptions}</select></label></div>
+      <div class="two"><label>账号<select name="account_id" required>${accountOptions}</select></label><label>模板<select name="template_id">${templateOptions}</select></label></div>
+      <div id="mail-compose-direct" class="mail-compose-direct" hidden>
+        <label>主题<input name="subject"></label>
+        <label>正文（HTML 主编辑区）<textarea name="body_html" rows="8" placeholder="<p>...</p>"></textarea></label>
+        <p class="field-help">不使用模板时主题必填，正文至少一个；纯文本留空由后端从 HTML 自动生成。</p>
+      </div>
       <div class="two"><label>收件人 To（逗号分隔）<input name="to" required></label><label>CC（逗号分隔）<input name="cc"></label></div>
       <label>BCC（仅 Owner，可选）<input name="bcc"></label>
       <div id="mail-compose-variables">${variableInputs(templateDefaults(templates[0]?.id, templates))}</div>
@@ -133,6 +171,15 @@ export async function openTaskMailCompose(
   const accountSelect = form.querySelector<HTMLSelectElement>('select[name="account_id"]')!;
   const variablesBox = form.querySelector<HTMLElement>("#mail-compose-variables")!;
   const previewBox = form.querySelector<HTMLElement>("#mail-compose-preview")!;
+  const directBox = form.querySelector<HTMLElement>("#mail-compose-direct")!;
+  const directFields = [...directBox.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>("input, textarea")];
+  const syncDirectFields = (enabled: boolean) => {
+    directBox.hidden = !enabled;
+    directFields.forEach(field => {
+      field.disabled = !enabled;
+      if (field.name === "subject" || field.name === "body_html") field.required = enabled;
+    });
+  };
   const syncSelectedCounts = () => {
     form.querySelectorAll<HTMLElement>("[data-mail-selected-count]").forEach(element => {
       const name = element.dataset.mailSelectedCount || "";
@@ -149,11 +196,17 @@ export async function openTaskMailCompose(
   syncSelectedCounts();
   const syncTemplate = () => {
     const template = templateDefaults(templateSelect.value, templates);
-    variablesBox.innerHTML = variableInputs(template);
+    const noTemplate = !templateSelect.value;
+    // The template variables and the direct subject/body are mutually
+    // exclusive. Disabling the hidden fields also keeps them out of FormData.
+    syncDirectFields(noTemplate);
+    variablesBox.innerHTML = noTemplate ? "" : variableInputs(template);
     const to = form.querySelector<HTMLInputElement>('input[name="to"]')!;
     const cc = form.querySelector<HTMLInputElement>('input[name="cc"]')!;
-    if (!to.value) to.value = (template?.default_to || []).join(", ");
-    if (!cc.value) cc.value = (template?.default_cc || []).join(", ");
+    if (!noTemplate) {
+      if (!to.value) to.value = (template?.default_to || []).join(", ");
+      if (!cc.value) cc.value = (template?.default_cc || []).join(", ");
+    }
     previewBox.hidden = true;
   };
   templateSelect.addEventListener("change", syncTemplate);
@@ -178,26 +231,33 @@ export async function openTaskMailCompose(
     const values = new FormData(form);
     const variables = Object.fromEntries([...form.querySelectorAll<HTMLInputElement>("[data-mail-variable-input]")].map(input => [input.dataset.mailVariableInput || "", input.value]));
     const variableValues = Object.fromEntries(Object.entries(variables).filter(([, value]) => String(value).trim() !== ""));
-    const csv = (value: FormDataEntryValue | null) => String(value || "").split(",").map(item => item.trim()).filter(Boolean);
-    const payload = {
-      task_id: detail.task.id,
-      account_id: String(values.get("account_id") || ""),
-      template_id: String(values.get("template_id") || ""),
-      to: csv(values.get("to")),
-      cc: csv(values.get("cc")),
-      bcc: csv(values.get("bcc")),
-      variables: variableValues,
-      attachment_ids: values.getAll("attachment_ids").map(String),
-      build_artifact_ids: values.getAll("build_artifact_ids").map(String),
-    };
-    return payload;
+    return mailComposePayload(
+      {
+        account_id: values.get("account_id"), template_id: values.get("template_id"),
+        to: values.get("to"), cc: values.get("cc"), bcc: values.get("bcc"),
+        subject: values.get("subject"), body_html: values.get("body_html"),
+      },
+      detail.task.id,
+      variableValues,
+      values.getAll("attachment_ids").map(String),
+      values.getAll("build_artifact_ids").map(String),
+    );
   };
   form.querySelector("#mail-compose-preview-button")?.addEventListener("click", () => {
     const payload = collect();
-    void api.previewMailTemplate(payload.template_id, {
-      task_id: payload.task_id, variables: payload.variables, to: payload.to, cc: payload.cc,
-      attachment_ids: payload.attachment_ids, build_artifact_ids: payload.build_artifact_ids,
-    }).then(result => {
+    const previewRequest = payload.template_id
+      ? api.previewMailTemplate(payload.template_id, {
+        task_id: payload.task_id, variables: payload.variables, to: payload.to, cc: payload.cc,
+        attachment_ids: payload.attachment_ids, build_artifact_ids: payload.build_artifact_ids,
+      })
+      : api.previewMailTemplateContent({
+        task_id: payload.task_id,
+        subject_template: payload.subject, body_text_template: payload.body_text,
+        body_html_template: payload.body_html,
+        variables: payload.variables, to: payload.to, cc: payload.cc,
+        attachment_ids: payload.attachment_ids, build_artifact_ids: payload.build_artifact_ids,
+      });
+    void previewRequest.then(result => {
       const preview = result.preview as Record<string, any>;
       const attachments = Array.isArray(preview.attachments) ? preview.attachments as Array<Record<string, any>> : [];
       previewBox.hidden = false;
