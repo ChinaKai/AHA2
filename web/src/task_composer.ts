@@ -8,6 +8,37 @@ function escapeHTML(value: unknown): string {
     .replaceAll('"', "&quot;").replaceAll("'", "&#039;");
 }
 
+// The server enforces these values; the client only surfaces the same limits
+// and refuses obviously oversized selections before starting an upload.
+export const TASK_ATTACHMENT_MAX_COUNT = 8;
+export const TASK_ATTACHMENT_MAX_BYTES = 200 * 1024 * 1024;
+
+export function taskAttachmentLimitHint(
+  maxCount = TASK_ATTACHMENT_MAX_COUNT,
+  maxBytes = TASK_ATTACHMENT_MAX_BYTES,
+): string {
+  return `每条消息最多 ${maxCount} 个，单文件 ≤${Math.round(maxBytes / (1024 * 1024))}MiB`;
+}
+
+export interface TaskAttachmentCandidate {
+  name?: string;
+  size: number;
+}
+
+export function taskAttachmentValidationError(
+  existingCount: number,
+  files: TaskAttachmentCandidate[],
+  maxCount = TASK_ATTACHMENT_MAX_COUNT,
+  maxBytes = TASK_ATTACHMENT_MAX_BYTES,
+): string {
+  if (existingCount + files.length > maxCount) return `每条消息最多发送 ${maxCount} 个附件`;
+  const oversized = files.filter(file => file.size > maxBytes).map(file => file.name || "未命名文件");
+  if (oversized.length) {
+    return `以下附件超过 ${Math.round(maxBytes / (1024 * 1024))}MiB，未上传：${oversized.join("、")}`;
+  }
+  return "";
+}
+
 function statusLabel(status: string): string {
   const labels: Record<string, string> = {
     idle: "空闲", active: "执行中", running: "执行中", starting: "启动中",

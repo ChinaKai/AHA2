@@ -17,6 +17,36 @@ function escapeHTML(value: unknown): string {
     .replaceAll('"', "&quot;").replaceAll("'", "&#039;");
 }
 
+// These values mirror internal/mail policy for the visible hint and the
+// pre-submit refusal only. The server remains the final authority.
+export const MAIL_ATTACHMENT_MAX_COUNT = 10;
+export const MAIL_ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024;
+export const MAIL_DIRECT_ATTACHMENT_THRESHOLD_BYTES = 20 * 1024 * 1024;
+export const MAIL_ATTACHMENT_LIMIT_HINT = "最多 10 个、单文件 ≤25MiB、合计 >20MiB 转受控链接、可执行/脚本附件不支持";
+
+const MAIL_DISALLOWED_EXTENSIONS = [".exe", ".bat", ".cmd", ".ps1", ".js", ".vbs", ".scr", ".msi"];
+
+export function mailAttachmentUnavailableReason(name: string): string {
+  const normalized = String(name ?? "").trim().toLowerCase();
+  return MAIL_DISALLOWED_EXTENSIONS.some(extension => normalized.endsWith(extension))
+    ? "可执行或脚本附件不支持"
+    : "";
+}
+
+export interface MailAttachmentCandidate {
+  name: string;
+  size: number;
+}
+
+export function mailAttachmentSelectionError(items: MailAttachmentCandidate[]): string {
+  if (items.length > MAIL_ATTACHMENT_MAX_COUNT) return `每封邮件最多 ${MAIL_ATTACHMENT_MAX_COUNT} 个附件`;
+  const blocked = items.find(item => mailAttachmentUnavailableReason(item.name));
+  if (blocked) return `附件“${blocked.name}”为可执行或脚本文件，不支持发送`;
+  const oversized = items.find(item => item.size > MAIL_ATTACHMENT_MAX_BYTES);
+  if (oversized) return `附件“${oversized.name}”超过 25MiB`;
+  return "";
+}
+
 function scopeLabel(scope: string): string {
   return {task: "Task 绑定", workspace: "Workspace 继承", project: "Project 继承"}[scope] || scope;
 }
@@ -190,8 +220,17 @@ export async function openTaskMailCompose(
   // "不使用模板" is first so an unset binding naturally falls back to it. A
   // valid binding default is still selected explicitly below.
   const templateOptions = `<option value="">不使用模板</option>` + templates.map(template => `<option value="${escapeHTML(template.id)}">${escapeHTML(template.name)} · v${Number(template.current_version)}</option>`).join("");
-  const attachmentOptions = (options.attachments || []).map(attachment => `<label class="mail-attachment-option" title="${escapeHTML(attachment.name)}"><input type="checkbox" name="attachment_ids" value="${escapeHTML(attachment.id)}"><span class="mail-attachment-option-name">${escapeHTML(attachment.name)}</span><small>${formatMailBytes(attachment.size)}${attachment.media_type ? ` · ${escapeHTML(attachment.media_type)}` : ""}</small></label>`).join("");
-  const artifactOptions = (options.build_artifacts || []).map(artifact => `<label class="mail-attachment-option" title="${escapeHTML(artifact.label)} · SHA256 ${escapeHTML(artifact.sha256 || "")}"><input type="checkbox" name="build_artifact_ids" value="${escapeHTML(artifact.id)}"><span class="mail-attachment-option-name">${escapeHTML(artifact.label)}</span><small>${escapeHTML(artifact.package_name || "")}${artifact.version ? ` · ${escapeHTML(artifact.version)}` : ""} · ${formatMailBytes(artifact.size_bytes)}</small></label>`).join("");
+  // Executable and script names are disabled in place with the reason visible
+  // instead of failing later in preview/send. The checkbox stays unchecked and
+  // the server still validates every submitted attachment.
+  const attachmentOptions = (options.attachments || []).map(attachment => {
+    const unavailable = mailAttachmentUnavailableReason(attachment.name);
+    return `<label class="mail-attachment-option${unavailable ? " unavailable" : ""}" title="${escapeHTML(unavailable ? `${attachment.name} · ${unavailable}` : attachment.name)}"><input type="checkbox" name="attachment_ids" value="${escapeHTML(attachment.id)}" data-mail-name="${escapeHTML(attachment.name)}" data-mail-size="${Number(attachment.size) || 0}"${unavailable ? " disabled" : ""}><span class="mail-attachment-option-name">${escapeHTML(attachment.name)}</span><small>${formatMailBytes(attachment.size)}${attachment.media_type ? ` · ${escapeHTML(attachment.media_type)}` : ""}${unavailable ? ` · <span class="mail-attachment-unavailable">不支持：${escapeHTML(unavailable)}</span>` : ""}</small></label>`;
+  }).join("");
+  const artifactOptions = (options.build_artifacts || []).map(artifact => {
+    const unavailable = mailAttachmentUnavailableReason(artifact.label);
+    return `<label class="mail-attachment-option${unavailable ? " unavailable" : ""}" title="${escapeHTML(`${artifact.label} · SHA256 ${artifact.sha256 || ""}${unavailable ? ` · ${unavailable}` : ""}`)}"><input type="checkbox" name="build_artifact_ids" value="${escapeHTML(artifact.id)}" data-mail-name="${escapeHTML(artifact.label)}" data-mail-size="${Number(artifact.size_bytes) || 0}"${unavailable ? " disabled" : ""}><span class="mail-attachment-option-name">${escapeHTML(artifact.label)}</span><small>${escapeHTML(artifact.package_name || "")}${artifact.version ? ` · ${escapeHTML(artifact.version)}` : ""} · ${formatMailBytes(artifact.size_bytes)}${unavailable ? ` · <span class="mail-attachment-unavailable">不支持：${escapeHTML(unavailable)}</span>` : ""}</small></label>`;
+  }).join("");
   const dialog = document.createElement("dialog");
   dialog.id = "task-mail-compose-dialog";
   dialog.className = "task-mail-compose-dialog";
@@ -213,6 +252,7 @@ export async function openTaskMailCompose(
           <div class="mail-compose-attachment-summary"><strong>附件</strong><span data-mail-selected-total aria-live="polite">已选 0 项</span></div>
           <button type="button" id="mail-compose-attachment-toggle" class="mail-compose-attachment-toggle" aria-expanded="false" aria-controls="mail-compose-attachment-picker">添加附件（已选 0）</button>
         </div>
+        <p class="field-help" data-mail-attachment-limit>${escapeHTML(MAIL_ATTACHMENT_LIMIT_HINT)}</p>
         <div class="mail-compose-chips" data-mail-attachment-chips aria-live="polite"><span class="field-help">尚未选择附件。</span></div>
         <div class="mail-compose-picker" id="mail-compose-attachment-picker" data-mail-attachment-picker hidden>
           <div class="mail-compose-picker-tabs" role="tablist" aria-label="附件来源">
@@ -287,6 +327,20 @@ export async function openTaskMailCompose(
       chip.append(name, remove);
       chipsBox.append(chip);
     }
+  };
+  // Disabled rows cannot be checked through the UI, but an already-checked
+  // entry must fail loudly rather than be silently dropped from the payload.
+  const selectedAttachmentItems = () => [...attachmentInputs(), ...artifactInputs()]
+    .filter(input => input.checked)
+    .map(input => ({
+      name: input.dataset.mailName || optionName(input),
+      size: Number(input.dataset.mailSize || 0),
+    }));
+  const attachmentSelectionValid = () => {
+    const error = mailAttachmentSelectionError(selectedAttachmentItems());
+    if (!error) return true;
+    actions.notify("error", error);
+    return false;
   };
   const setPickerTab = (tab: "task" | "build") => {
     form.querySelectorAll<HTMLElement>("[data-mail-picker-tab]").forEach(button => {
@@ -386,6 +440,7 @@ export async function openTaskMailCompose(
     );
   };
   form.querySelector("#mail-compose-preview-button")?.addEventListener("click", () => {
+    if (!attachmentSelectionValid()) return;
     const payload = collect();
     const previewRequest = payload.template_id
       ? api.previewMailTemplate(payload.template_id, {
@@ -408,6 +463,7 @@ export async function openTaskMailCompose(
   });
   form.addEventListener("submit", event => {
     event.preventDefault();
+    if (!attachmentSelectionValid()) return;
     const submit = form.querySelector<HTMLButtonElement>('button[type="submit"]')!;
     submit.disabled = true;
     const payload = collect();

@@ -5,6 +5,31 @@ import (
 	"testing"
 )
 
+func TestPetAttachmentLimitIs200MiB(t *testing.T) {
+	if petAttachmentLimit != 200<<20 {
+		t.Fatalf("petAttachmentLimit = %d, want %d", petAttachmentLimit, 200<<20)
+	}
+	const mib = 1 << 20
+	for _, testCase := range []struct {
+		name    string
+		size    int
+		wantErr bool
+	}{
+		{name: "empty", size: 0, wantErr: true},
+		{name: "one byte", size: 1},
+		{name: "exactly 200MiB", size: 200 * mib},
+		{name: "200MiB plus one", size: 200*mib + 1, wantErr: true},
+	} {
+		err := validatePetAttachmentSize(testCase.size)
+		if (err != nil) != testCase.wantErr {
+			t.Fatalf("%s: validatePetAttachmentSize(%d) error = %v, wantErr %v", testCase.name, testCase.size, err, testCase.wantErr)
+		}
+	}
+	if err := validatePetAttachmentSize(200*mib + 1); err == nil || err.Error() != "附件大小必须在 1 字节到 200MiB 之间" {
+		t.Fatalf("unexpected error message: %v", err)
+	}
+}
+
 func TestPetTaskAttachmentUploadListAndMessage(t *testing.T) {
 	fixture := newPetTaskFixture(t)
 	if _, err := fixture.service.OwnerAssistant(fixture.ctx); err != nil {

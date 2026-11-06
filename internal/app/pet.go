@@ -1202,7 +1202,7 @@ func ahaPetTools() []gateway.ChatTool {
 		{Name: "aha_list_task_attachments", Description: "列出 Task 附件元数据，不返回文件内容", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{"task_id": map[string]any{"type": "string"}}, "required": []string{"task_id"},
 		}},
-		{Name: "aha_upload_task_attachment", Description: "以 base64 上传 Task 附件（最大 10MB）", Parameters: map[string]any{
+		{Name: "aha_upload_task_attachment", Description: "以 base64 上传 Task 附件（最大 200MiB）", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{
 				"task_id":        map[string]any{"type": "string"},
 				"name":           map[string]any{"type": "string"},

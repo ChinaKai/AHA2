@@ -20,6 +20,28 @@ import (
 	"github.com/ChinaKai/AHA2/internal/store"
 )
 
+func TestTaskAttachmentLimitIs200MiB(t *testing.T) {
+	t.Parallel()
+	if maxAttachmentBytes != 200<<20 {
+		t.Fatalf("maxAttachmentBytes = %d, want %d", maxAttachmentBytes, int64(200<<20))
+	}
+	const mib = int64(1 << 20)
+	for _, testCase := range []struct {
+		name string
+		size int64
+		want bool
+	}{
+		{name: "empty", size: 0, want: false},
+		{name: "one byte", size: 1, want: true},
+		{name: "exactly 200MiB", size: 200 * mib, want: true},
+		{name: "200MiB plus one", size: 200*mib + 1, want: false},
+	} {
+		if got := taskAttachmentSizeValid(testCase.size); got != testCase.want {
+			t.Fatalf("%s: taskAttachmentSizeValid(%d) = %v, want %v", testCase.name, testCase.size, got, testCase.want)
+		}
+	}
+}
+
 func TestTaskAttachmentUploadDownloadAndDelete(t *testing.T) {
 	t.Parallel()
 	ctx, now := context.Background(), time.Now().UTC()

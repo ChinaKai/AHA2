@@ -11,7 +11,13 @@ import (
 	"time"
 )
 
-const maxAttachmentBytes int64 = 25 << 20
+const maxAttachmentBytes int64 = 200 << 20
+
+// taskAttachmentSizeValid keeps the boundary in one place so tests can assert
+// it without allocating a 200MiB buffer.
+func taskAttachmentSizeValid(size int64) bool {
+	return size >= 1 && size <= maxAttachmentBytes
+}
 
 func (s *Server) uploadTaskAttachment(writer http.ResponseWriter, request *http.Request) {
 	taskID := request.PathValue("id")
@@ -51,7 +57,7 @@ func (s *Server) createTaskAttachment(writer http.ResponseWriter, request *http.
 	}
 	defer file.Close()
 	content, err := io.ReadAll(io.LimitReader(file, maxAttachmentBytes+1))
-	if err != nil || len(content) == 0 || int64(len(content)) > maxAttachmentBytes {
+	if err != nil || !taskAttachmentSizeValid(int64(len(content))) {
 		writeError(writer, http.StatusBadRequest, "invalid_attachment_size")
 		return
 	}

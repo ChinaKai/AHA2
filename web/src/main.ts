@@ -21,7 +21,7 @@ import {bindProxySettings, renderProxySettings} from "./proxy_settings.js";
 import {bindSyncSettings, isSyncSettingsFormEditing, renderSyncSettings} from "./sync_settings.js";
 import {bindRuntimeFields, proxyEnabledFrom, proxyOptionsHTML, runtimeFieldsHTML, setClaudeOfficialCatalog, setClaudeOfficialLoading, setRuntimeBackends, syncRuntimeFields} from "./runtime_picker.js";
 import type {ClaudeOfficialCatalog} from "./runtime_picker.js";
-import {renderComposerAgentOptions, renderComposerTools} from "./task_composer.js";
+import {renderComposerAgentOptions, renderComposerTools, TASK_ATTACHMENT_MAX_COUNT, taskAttachmentLimitHint, taskAttachmentValidationError} from "./task_composer.js";
 import {DEFAULT_TASK_STATUS_FILTERS, LOCAL_TASK_DEVICE_FILTER, TASK_STATUS_GROUP_LABELS, hiddenTaskStatusGroups, hiddenTaskStatusText, taskDeviceFilterOptions, taskMatchesFilters, taskStatusGroupCounts} from "./task_filters.js";
 import type {TaskStatusGroup} from "./task_filters.js";
 import {TASK_TOOL_DEFAULT_WIDTH, normalizePinnedTaskTool, normalizeTaskToolMode, normalizeTaskToolWidth, renderTaskToolButtons, renderTaskToolContent, renderTaskToolPanel} from "./task_tools.js";
@@ -3789,9 +3789,13 @@ function attachmentTrayHTML(attachments: Attachment[]): string {
   return attachments.length ? `<div class="composer-attachment-tray">${attachments.map(item => `<article>${previewableAttachment(item.media_type) ? `<img src="${attachmentURL(item)}" alt="">` : icon("attachment")}<span><strong>${escapeHTML(item.name)}</strong><small>${attachmentSize(item.size)}</small></span><button type="button" class="icon-button" data-remove-attachment="${escapeHTML(item.id)}" title="移除附件">${icon("close")}</button></article>`).join("")}</div>` : "";
 }
 
+function attachmentButtonTitle(): string {
+  return `添加附件或直接粘贴图片（${taskAttachmentLimitHint()}）`;
+}
+
 function renderAttachmentComposer(disabled: boolean): string {
   const attachments = currentAttachmentDrafts();
-  return `${attachmentTrayHTML(attachments)}<input id="message-attachment-input" type="file" multiple hidden ${disabled ? "disabled" : ""}><button id="message-attachment-pick" class="composer-attachment-button" type="button" title="添加附件或直接粘贴图片" ${disabled || attachments.length >= 8 ? "disabled" : ""}>${icon("attachment")}${attachments.length ? `<small>${attachments.length}</small>` : ""}</button>`;
+  return `${attachmentTrayHTML(attachments)}<input id="message-attachment-input" type="file" multiple hidden ${disabled ? "disabled" : ""}><button id="message-attachment-pick" class="composer-attachment-button" type="button" title="${escapeHTML(attachmentButtonTitle())}" aria-label="${escapeHTML(`添加附件（${taskAttachmentLimitHint()}）`)}" ${disabled || attachments.length >= TASK_ATTACHMENT_MAX_COUNT ? "disabled" : ""}>${icon("attachment")}${attachments.length ? `<small>${attachments.length}</small>` : ""}</button>`;
 }
 
 let messageAttachmentUploadPending = false;
@@ -3818,8 +3822,8 @@ function refreshMessageAttachmentDOM(): void {
   document.querySelector(".composer-attachment-tray")?.remove();
   const attachments = currentAttachmentDrafts();
   input.insertAdjacentHTML("beforebegin", attachmentTrayHTML(attachments));
-  button.disabled = messageAttachmentUploadPending || attachments.length >= 8;
-  button.title = messageAttachmentUploadPending ? "正在上传附件" : "添加附件或直接粘贴图片";
+  button.disabled = messageAttachmentUploadPending || attachments.length >= TASK_ATTACHMENT_MAX_COUNT;
+  button.title = messageAttachmentUploadPending ? "正在上传附件" : attachmentButtonTitle();
   button.innerHTML = messageAttachmentUploadPending
     ? `${icon("spinner", true)}<small>${attachments.length}</small>`
     : `${icon("attachment")}${attachments.length ? `<small>${attachments.length}</small>` : ""}`;
@@ -3832,8 +3836,9 @@ async function uploadMessageAttachments(files: File[]): Promise<void> {
   const taskID = state.selectedTask.task.id;
   const agentID = state.selectedTaskAgent;
   const drafts = currentAttachmentDrafts();
-  if (drafts.length + files.length > 8) {
-    setMessage("error", "每条消息最多发送 8 个附件");
+  const validationError = taskAttachmentValidationError(drafts.length, files);
+  if (validationError) {
+    setMessage("error", validationError);
     return;
   }
   state.taskAttachmentDrafts[agentID] = drafts;

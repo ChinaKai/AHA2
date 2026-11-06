@@ -94,6 +94,9 @@
 .mail-attachment-option input { width: 15px; height: 15px; justify-self: start; margin: 0; }
 .mail-attachment-option-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; text-align: left; }
 .mail-attachment-option small { color: var(--muted); font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mail-attachment-option.unavailable { opacity: 0.62; cursor: not-allowed; }
+.mail-attachment-option .mail-attachment-unavailable { color: #a15c00; }
+.mail-compose-attachments > .field-help { margin: 0; }
 .mail-compose-direct { display: grid; gap: 8px; padding: 8px; border: 1px solid var(--line); border-radius: 5px; background: #fbfcfe; }
 .mail-compose-direct label { display: grid; gap: 4px; }
 .mail-compose-direct textarea { min-height: 180px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }

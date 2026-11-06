@@ -11,7 +11,16 @@ import (
 	"github.com/ChinaKai/AHA2/internal/domain"
 )
 
-const petAttachmentLimit = 10 << 20
+const petAttachmentLimit = 200 << 20
+
+// validatePetAttachmentSize is split out so boundary tests can cover the
+// 200MiB cap without constructing a 200MiB payload.
+func validatePetAttachmentSize(size int) error {
+	if size < 1 || size > petAttachmentLimit {
+		return fmt.Errorf("附件大小必须在 1 字节到 200MiB 之间")
+	}
+	return nil
+}
 
 type PetAttachmentBrief struct {
 	ID        string `json:"id"`
@@ -67,8 +76,8 @@ func (s *Service) PetUploadTaskAttachment(ctx context.Context, input PetUploadAt
 	if err != nil {
 		return PetAttachmentBrief{}, fmt.Errorf("附件内容不是合法 base64")
 	}
-	if len(content) == 0 || len(content) > petAttachmentLimit {
-		return PetAttachmentBrief{}, fmt.Errorf("附件大小必须在 1 字节到 10MB 之间")
+	if err := validatePetAttachmentSize(len(content)); err != nil {
+		return PetAttachmentBrief{}, err
 	}
 	mediaType := strings.TrimSpace(input.MediaType)
 	if mediaType == "" || mediaType == "application/octet-stream" {
