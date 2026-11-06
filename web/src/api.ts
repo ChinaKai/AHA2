@@ -70,6 +70,15 @@ import type {
 	SSHHostKeyInfo,
   Workspace,
   Skill,
+  MailAccount,
+  MailAttachment,
+  MailBinding,
+  MailDelivery,
+  MailDeliveryAttempt,
+  MailMessage,
+  MailTemplate,
+  MailTemplateVersion,
+  TaskMailOptions,
 } from "./types.js";
 
 class APIClient {
@@ -1041,6 +1050,128 @@ class APIClient {
     return this.request("/api/v1/assistant/hints/dismiss", {
       method: "POST", body: JSON.stringify({kind, target_id: targetID}),
     });
+  }
+
+  mailAccounts(): Promise<{ok: boolean; accounts: MailAccount[]}> {
+    return this.request("/api/v1/mail-accounts");
+  }
+
+  createMailAccount(payload: Record<string, unknown>): Promise<{ok: boolean; account: MailAccount}> {
+    return this.request("/api/v1/mail-accounts", {method: "POST", body: JSON.stringify(payload)});
+  }
+
+  updateMailAccount(id: string, payload: Record<string, unknown>): Promise<{ok: boolean; account: MailAccount}> {
+    return this.request(`/api/v1/mail-accounts/${encodeURIComponent(id)}`, {method: "PUT", body: JSON.stringify(payload)});
+  }
+
+  deleteMailAccount(id: string): Promise<{ok: boolean}> {
+    return this.request(`/api/v1/mail-accounts/${encodeURIComponent(id)}`, {method: "DELETE"});
+  }
+
+  testMailAccount(id: string): Promise<{ok: boolean; level?: string; error_code?: string; message?: string; duration_ms?: number}> {
+    return this.request(`/api/v1/mail-accounts/${encodeURIComponent(id)}/test`, {method: "POST", body: "{}"});
+  }
+
+  mailTemplates(params: {scope?: string; project_id?: string; limit?: number} = {}): Promise<{ok: boolean; templates: MailTemplate[]}> {
+    const query = new URLSearchParams();
+    if (params.scope) query.set("scope", params.scope);
+    if (params.project_id) query.set("project_id", params.project_id);
+    if (params.limit) query.set("limit", String(params.limit));
+    const suffix = query.toString() ? `?${query}` : "";
+    return this.request(`/api/v1/mail-templates${suffix}`);
+  }
+
+  createMailTemplate(payload: Record<string, unknown>): Promise<{ok: boolean; template: MailTemplate}> {
+    return this.request("/api/v1/mail-templates", {method: "POST", body: JSON.stringify(payload)});
+  }
+
+  updateMailTemplate(id: string, payload: Record<string, unknown>): Promise<{ok: boolean; template: MailTemplate}> {
+    return this.request(`/api/v1/mail-templates/${encodeURIComponent(id)}`, {method: "PUT", body: JSON.stringify(payload)});
+  }
+
+  archiveMailTemplate(id: string): Promise<{ok: boolean}> {
+    return this.request(`/api/v1/mail-templates/${encodeURIComponent(id)}`, {method: "DELETE"});
+  }
+
+  mailTemplateVersions(id: string): Promise<{ok: boolean; versions: MailTemplateVersion[]}> {
+    return this.request(`/api/v1/mail-templates/${encodeURIComponent(id)}/versions`);
+  }
+
+  previewMailTemplate(id: string, payload: Record<string, unknown>): Promise<{ok: boolean; preview: Record<string, unknown>}> {
+    return this.request(`/api/v1/mail-templates/${encodeURIComponent(id)}/preview`, {method: "POST", body: JSON.stringify(payload)});
+  }
+
+  mailBindings(scopeType: string, scopeID: string): Promise<{ok: boolean; bindings: MailBinding[]}> {
+    const query = new URLSearchParams({scope_type: scopeType, scope_id: scopeID});
+    return this.request(`/api/v1/mail-bindings?${query}`);
+  }
+
+  createMailBinding(payload: Record<string, unknown>): Promise<{ok: boolean; binding: MailBinding}> {
+    return this.request("/api/v1/mail-bindings", {method: "POST", body: JSON.stringify(payload)});
+  }
+
+  updateMailBinding(id: string, payload: Record<string, unknown>): Promise<{ok: boolean; binding: MailBinding}> {
+    return this.request(`/api/v1/mail-bindings/${encodeURIComponent(id)}`, {method: "PUT", body: JSON.stringify(payload)});
+  }
+
+  deleteMailBinding(id: string): Promise<{ok: boolean}> {
+    return this.request(`/api/v1/mail-bindings/${encodeURIComponent(id)}`, {method: "DELETE"});
+  }
+
+  mailMessages(params: {task_id?: string; status?: string; account_id?: string; limit?: number} = {}): Promise<{ok: boolean; messages: MailMessage[]}> {
+    const query = new URLSearchParams();
+    if (params.task_id) query.set("task_id", params.task_id);
+    if (params.status) query.set("status", params.status);
+    if (params.account_id) query.set("account_id", params.account_id);
+    if (params.limit) query.set("limit", String(params.limit));
+    const suffix = query.toString() ? `?${query}` : "";
+    return this.request(`/api/v1/mail-messages${suffix}`);
+  }
+
+  createMailMessage(payload: Record<string, unknown>): Promise<{ok: boolean; message: MailMessage; attachments: MailAttachment[]; deduplicated: boolean}> {
+    return this.request("/api/v1/mail-messages", {method: "POST", body: JSON.stringify(payload)});
+  }
+
+  mailMessage(id: string): Promise<{ok: boolean; message: MailMessage; attachments: MailAttachment[]; deliveries: MailDelivery[]}> {
+    return this.request(`/api/v1/mail-messages/${encodeURIComponent(id)}`);
+  }
+
+  approveMailMessage(id: string, expectedDigest: string, note = ""): Promise<{ok: boolean; message: MailMessage; delivery: MailDelivery}> {
+    return this.request(`/api/v1/mail-messages/${encodeURIComponent(id)}/approve`, {
+      method: "POST", body: JSON.stringify({expected_digest: expectedDigest, note}),
+    });
+  }
+
+  rejectMailMessage(id: string, reason: string): Promise<{ok: boolean}> {
+    return this.request(`/api/v1/mail-messages/${encodeURIComponent(id)}/reject`, {
+      method: "POST", body: JSON.stringify({reason}),
+    });
+  }
+
+  cancelMailMessage(id: string): Promise<{ok: boolean; message: MailMessage}> {
+    return this.request(`/api/v1/mail-messages/${encodeURIComponent(id)}/cancel`, {method: "POST", body: "{}"});
+  }
+
+  retryMailMessage(id: string, reason = ""): Promise<{ok: boolean; delivery: MailDelivery}> {
+    return this.request(`/api/v1/mail-messages/${encodeURIComponent(id)}/retry`, {
+      method: "POST", body: JSON.stringify({reason}),
+    });
+  }
+
+  mailMessageAttempts(id: string): Promise<{ok: boolean; deliveries: Array<{delivery: MailDelivery; attempts: MailDeliveryAttempt[]}>}> {
+    return this.request(`/api/v1/mail-messages/${encodeURIComponent(id)}/attempts`);
+  }
+
+  mailMessageDownloadLinks(id: string): Promise<{ok: boolean; links: MailAttachment[]}> {
+    return this.request(`/api/v1/mail-messages/${encodeURIComponent(id)}/download-links`);
+  }
+
+  revokeMailDownloadLink(messageID: string, attachmentID: string): Promise<{ok: boolean}> {
+    return this.request(`/api/v1/mail-messages/${encodeURIComponent(messageID)}/download-links/${encodeURIComponent(attachmentID)}/revoke`, {method: "POST", body: "{}"});
+  }
+
+  taskMail(taskID: string): Promise<TaskMailOptions> {
+    return this.request(`/api/v1/tasks/${encodeURIComponent(taskID)}/mail`);
   }
 
 }

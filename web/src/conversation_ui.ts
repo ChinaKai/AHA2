@@ -1,7 +1,13 @@
 import {icon} from "./icons.js";
+import {mailConversationCardHtml} from "./mail_cards.js";
 import {renderMarkdown} from "./markdown.js";
 import {renderConversationWithOrchestration, visibleAgentText} from "./task_agents.js";
-import type {ConversationItem, TaskDetail} from "./types.js";
+import type {ConversationItem, MailMessageCard, TaskDetail} from "./types.js";
+
+export interface MailConversationContext {
+  cards: Map<string, MailMessageCard>;
+  readOnly: boolean;
+}
 
 const messageCollapseChars = 900;
 const messagePreviewChars = 220;
@@ -51,7 +57,11 @@ export function readableConversationText(item: Pick<ConversationItem, "category"
   return text;
 }
 
-function renderConversationItem(item: ConversationItem): string {
+function renderConversationItem(item: ConversationItem, mail?: MailConversationContext): string {
+  if (item.category === "mail" || item.kind === "mail_message") {
+    const messageID = String((item.payload || {}).message_id || "");
+    return mailConversationCardHtml(messageID ? mail?.cards.get(messageID) : undefined, Boolean(mail?.readOnly));
+  }
   const time = messageTime(item.created_at);
   const routeKind = item.route_kind || "";
   const routed = ["assignment", "agent_result", "agent_error", "main_followup", "collaboration_fallback", "collaboration_result", "channel_reply", "session_control"].includes(routeKind) || ["agent_assignment", "agent_result_routed", "agent_error_routed", "agent_main_followup", "agent_collaboration_fallback", "collaboration_result_routed", "collaboration_error_routed", "agent_channel_reply", "backend_session_compacted", "backend_session_reset"].includes(item.kind);
@@ -126,7 +136,8 @@ export function renderConversationList(
   items: ConversationItem[],
   detail: TaskDetail | null,
   hasMore: boolean,
+  mail?: MailConversationContext,
 ): string {
-  const history = (renderConversationWithOrchestration(coalesceToolConversationItems(items), detail, renderConversationItem) || `<div class="empty">暂无符合筛选条件的记录。</div>`) + imagePreviewDialog();
+  const history = (renderConversationWithOrchestration(coalesceToolConversationItems(items), detail, item => renderConversationItem(item, mail)) || `<div class="empty">暂无符合筛选条件的记录。</div>`) + imagePreviewDialog();
   return `${hasMore ? `<button type="button" id="load-older-conversation" class="load-older">加载更早记录</button>` : ""}${history || `<div class="empty">暂无符合筛选条件的记录。</div>`}`;
 }

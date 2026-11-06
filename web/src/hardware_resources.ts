@@ -54,7 +54,7 @@ export function renderHardwareResources(resources: HardwareResource[]): string {
   </article>`;
   }).join("");
   return `<section class="hardware-resources-view">
-    <header class="page-head"><div><h1>硬件资源</h1><p>在这里维护系统级串口、网络设备和登录凭据。任务页只选择启用，不再重复创建硬件。</p></div><div class="actions"><button type="button" id="add-hardware-resource" class="primary">${icon("plus")}添加硬件资源</button></div></header>
+    <div class="resource-panel-toolbar"><div><strong>硬件</strong><p>维护系统级串口、网络设备和登录凭据。任务页只选择启用，不再重复创建硬件。</p></div><button type="button" id="add-hardware-resource" class="primary">${icon("plus")}添加硬件资源</button></div>
     ${resources.length ? `<div class="hardware-resource-list">${rows}</div>` : `<div class="empty-state hardware-resource-empty">${icon("hardware")}<strong>还没有硬件资源</strong><span>添加后可在任意任务中启用。</span><button type="button" class="primary" data-hardware-resource-add-empty>${icon("plus")}添加硬件资源</button></div>`}
   </section>`;
 }

@@ -8,7 +8,11 @@ import {petApprovalOptions, renderPetApprovalOptionPicker, selectedPetApprovalOp
 import {applyLocale, normalizeLanguagePreference, startUITranslationObserver, t, tr, translateUI} from "./i18n.js";
 import {bindKnowledgeWorkspace, knowledgeEntryListVisible, renderKnowledgeWorkspace} from "./knowledge_workspace.js";
 import {bindHardwarePanel, refreshHardwarePanel, stopHardwarePanel} from "./hardware_panel.js";
-import {bindHardwareResources, renderHardwareResources} from "./hardware_resources.js";
+import {bindResourcesPage, renderResourcesPage} from "./resources.js";
+import type {ResourcesTab} from "./resources.js";
+import {bindMailCardActions, bindTaskMailPanel, openTaskMailCompose, renderTaskMailPanel} from "./mail_task.js";
+import {mailConversationCardHtml} from "./mail_cards.js";
+import type {MailResourcesData} from "./mail_resources.js";
 import {bindDesktopPanel, desktopPanelInteracting, refreshDesktopPanel, stopDesktopPanel} from "./desktop_panel.js";
 import {renderMarkdown} from "./markdown.js";
 import {bindPromptAdmin, loadPromptCatalog, renderPromptAdmin} from "./prompt_admin.js";
@@ -59,6 +63,10 @@ import type {
   NetworkSettings,
   KnowledgeProposal,
   KnowledgeReviewSettings,
+  MailAccount,
+  MailMessage,
+  MailTemplate,
+  TaskMailOptions,
   Model,
   MCPServer,
   PetChannelHealth,
@@ -80,8 +88,8 @@ import type {
   TaskPermissionRequest,
   Workspace,
 } from "./types.js";
-type View = "projects" | "channels" | "models" | "hardware" | "tasks" | "knowledge" | "prompts" | "proxy" | "sync" | "advanced" | "data" | "other" | "mcp" | "pet-settings" | "pet-diary";
-type ResourceKey = "projects" | "workspaces" | "tasks" | "system" | "providers" | "models" | "env" | "accounts" | "skills" | "channels" | "hardware" | "knowledge" | "proxy" | "advanced" | "sync" | "prompts" | "mcp" | "data";
+type View = "projects" | "channels" | "models" | "resources" | "tasks" | "knowledge" | "prompts" | "proxy" | "sync" | "advanced" | "data" | "other" | "mcp" | "pet-settings" | "pet-diary";
+type ResourceKey = "projects" | "workspaces" | "tasks" | "system" | "providers" | "models" | "env" | "accounts" | "skills" | "channels" | "hardware" | "mail-accounts" | "mail-templates" | "mail-messages" | "knowledge" | "proxy" | "advanced" | "sync" | "prompts" | "mcp" | "data";
 type TaskFilterKind = "project" | "status" | "device";
 interface ResourceState {loading: boolean; loaded: boolean; error: string; updatedAt: number}
 interface TaskChannelState {
@@ -129,6 +137,18 @@ interface State {
   providerPage: number;
   codexAccountPage: number;
   hardwareResources: HardwareResource[];
+  resourcesTab: ResourcesTab;
+  mailSubTab: "accounts" | "templates" | "sent";
+  mailAccounts: MailAccount[];
+  mailTemplates: MailTemplate[];
+  mailMessages: MailMessage[];
+  mailFilterStatus: string;
+  mailFilterAccount: string;
+  mailResourcesLoading: boolean;
+  mailResourcesError: string;
+  taskMailOptions: TaskMailOptions | null;
+  taskMailLoading: boolean;
+  taskMailError: string;
   tasks: Task[];
   knowledge: Knowledge[];
   // Every project with a verified knowledge root, for scoping UI. Separate from
@@ -297,6 +317,18 @@ const state: State = {
   providerPage: 1,
   codexAccountPage: 1,
   hardwareResources: [],
+  resourcesTab: "hardware",
+  mailSubTab: "accounts",
+  mailAccounts: [],
+  mailTemplates: [],
+  mailMessages: [],
+  mailFilterStatus: "",
+  mailFilterAccount: "",
+  mailResourcesLoading: false,
+  mailResourcesError: "",
+  taskMailOptions: null,
+  taskMailLoading: false,
+  taskMailError: "",
   tasks: [],
   knowledge: [],
   knowledgeIndexes: [],
@@ -311,7 +343,7 @@ const state: State = {
   taskConversationBefore: 0,
   taskConversationLatest: 0,
   taskEventCursor: 0,
-  taskCategories: {chat: true, update: true, tool: false, error: true},
+  taskCategories: {chat: true, update: true, tool: false, error: true, mail: true},
   taskContext: null,
   taskRealtimeState: "connecting",
   taskDraft: "",
@@ -345,6 +377,9 @@ let petWorkbenchTab = "diary";
 let petApprovalFilter: "all" | "idea" | "decision" = "all";
 let petApprovalStatusFilter: "all" | "pending" | "approved" | "rejected" | "cancelled" = "all";
 let events: EventSource | null = null;
+// A direct #resources/#hardware link is an explicit navigation request; it must
+// not be overridden by a restored Task from the previous session.
+let initialHashRoute = false;
 let taskRefreshTimer: number | null = null;
 let taskClockFrame: number | null = null;
 let taskClockSecond = -1;
@@ -592,7 +627,7 @@ document.addEventListener("keydown", event => {
 
 const resourceStates = Object.fromEntries([
   "projects", "workspaces", "tasks", "system", "providers", "models", "env", "accounts", "skills",
-  "channels", "hardware", "knowledge", "proxy", "advanced", "sync", "prompts", "mcp", "data",
+  "channels", "hardware", "mail-accounts", "mail-templates", "mail-messages", "knowledge", "proxy", "advanced", "sync", "prompts", "mcp", "data",
 ].map(key => [key, {loading: false, loaded: false, error: "", updatedAt: 0}])) as Record<ResourceKey, ResourceState>;
 const resourceRequests = new Map<ResourceKey, Promise<void>>();
 const listPages: Record<"projects" | "tasks" | "knowledge", {cursor: string; hasMore: boolean; loadingMore: boolean}> = {
@@ -631,7 +666,7 @@ function resourcesForView(view: View): ResourceKey[] {
     case "tasks": return ["projects", "workspaces", "tasks", "models", "accounts", "skills"];
     case "channels": return ["channels", "projects", "workspaces", "models", "accounts", "knowledge"];
     case "models": return ["providers", "models", "env", "accounts"];
-    case "hardware": return ["hardware"];
+    case "resources": return ["hardware", "mail-accounts", "mail-templates", "mail-messages"];
     case "knowledge": return ["projects", "workspaces", "knowledge"];
     case "prompts": return ["prompts"];
     case "proxy": return ["proxy"];
@@ -1262,10 +1297,38 @@ async function runWithFeedback(
   }
 }
 
+function viewFromName(value: unknown): View | null {
+  if (value === "hardware") return "resources";
+  const views: View[] = ["projects", "channels", "models", "resources", "tasks", "knowledge", "prompts", "proxy", "sync", "advanced", "data", "other", "mcp", "pet-settings", "pet-diary"];
+  return views.includes(value as View) ? value as View : null;
+}
+
+// #hardware is the pre-resources bookmark. Rewrite it once at boot so old
+// links land on the resources page's hardware tab instead of disappearing.
+function applyLocationHash(): boolean {
+  const raw = window.location.hash.replace(/^#/, "");
+  if (!raw) return false;
+  const [name, query = ""] = raw.split("?");
+  const view = viewFromName(name);
+  if (!view) return false;
+  state.view = view;
+  if (view === "resources") {
+    const params = new URLSearchParams(query);
+    state.resourcesTab = params.get("tab") === "mail" ? "mail" : "hardware";
+    if (name === "hardware") {
+      window.history.replaceState(null, "", "#resources?tab=hardware");
+    }
+  }
+  return true;
+}
+
 async function bootstrap(): Promise<void> {
   const savedNavigation = loadNavigationSnapshot();
-  if (["projects", "channels", "models", "tasks", "knowledge", "prompts", "proxy", "sync", "advanced", "data", "mcp", "other", "pet-diary", "pet-settings"].includes(savedNavigation.view || "")) {
-    state.view = savedNavigation.view as View;
+  const hashRouted = applyLocationHash();
+  initialHashRoute = hashRouted;
+  if (!hashRouted) {
+    const savedView = viewFromName(savedNavigation.view);
+    if (savedView) state.view = savedView;
   }
   try {
     state.auth = await api.authStatus();
@@ -1787,9 +1850,20 @@ async function ensureViewData(view: View, force = false): Promise<void> {
     jobs.push(loadResource("accounts", force, async () => { state.codexAccounts = (await api.codexAccounts()).accounts || []; }));
   }
   if (view === "models") jobs.push(loadResource("env", force, async () => { state.envGroups = (await api.envGroups()).env_groups || []; }));
-  if (view === "hardware") jobs.push(loadResource("hardware", force, async () => {
-    state.hardwareResources = (await api.hardwareResources()).resources || [];
-  }));
+  if (view === "resources") {
+    jobs.push(loadResource("hardware", force, async () => {
+      state.hardwareResources = (await api.hardwareResources()).resources || [];
+    }));
+    jobs.push(loadResource("mail-accounts", force, async () => {
+      state.mailAccounts = (await api.mailAccounts()).accounts || [];
+    }));
+    jobs.push(loadResource("mail-templates", force, async () => {
+      state.mailTemplates = (await api.mailTemplates()).templates || [];
+    }));
+    jobs.push(loadResource("mail-messages", force, async () => {
+      state.mailMessages = (await api.mailMessages({status: state.mailFilterStatus, account_id: state.mailFilterAccount, limit: 100})).messages || [];
+    }));
+  }
   if (view === "tasks") jobs.push(loadResource("skills", force, async () => { state.skills = (await api.skills()).skills || []; }));
   if (view === "tasks" || view === "mcp") jobs.push(loadMCPServers(force));
   if (view === "channels") {
@@ -1827,6 +1901,56 @@ async function ensureViewData(view: View, force = false): Promise<void> {
   }));
   if (view === "prompts") jobs.push(loadResource("prompts", force, loadPromptCatalog));
   await Promise.all(jobs);
+}
+
+function mailResourcesData(): MailResourcesData {
+  const keys: ResourceKey[] = ["mail-accounts", "mail-templates", "mail-messages"];
+  const error = state.mailResourcesError || keys.map(key => resourceStates[key].error).find(Boolean) || "";
+  const loading = state.mailResourcesLoading || keys.some(key => resourceStates[key].loading)
+    || (keys.every(key => !resourceStates[key].loaded) && !error);
+  return {
+    subTab: state.mailSubTab,
+    accounts: state.mailAccounts,
+    templates: state.mailTemplates,
+    messages: state.mailMessages,
+    projects: state.projects,
+    filterStatus: state.mailFilterStatus,
+    filterAccount: state.mailFilterAccount,
+    loading,
+    error,
+  };
+}
+
+async function reloadMailResources(options: {status?: string; account?: string} = {}): Promise<void> {
+  if (options.status !== undefined) state.mailFilterStatus = options.status;
+  if (options.account !== undefined) state.mailFilterAccount = options.account;
+  state.mailResourcesLoading = true;
+  state.mailResourcesError = "";
+  render();
+  try {
+    await Promise.all([
+      loadResource("mail-accounts", true, async () => {
+        state.mailAccounts = (await api.mailAccounts()).accounts || [];
+      }),
+      loadResource("mail-templates", true, async () => {
+        state.mailTemplates = (await api.mailTemplates()).templates || [];
+      }),
+      loadResource("mail-messages", true, async () => {
+        state.mailMessages = (await api.mailMessages({status: state.mailFilterStatus, account_id: state.mailFilterAccount, limit: 100})).messages || [];
+      }),
+    ]);
+  } catch (error) {
+    state.mailResourcesError = error instanceof Error ? error.message : String(error);
+  } finally {
+    state.mailResourcesLoading = false;
+    render();
+  }
+}
+
+async function reloadHardwareResources(): Promise<void> {
+  await loadResource("hardware", true, async () => {
+    state.hardwareResources = (await api.hardwareResources()).resources || [];
+  });
 }
 
 function loadDataInventory(force = false): Promise<void> {
@@ -1910,11 +2034,16 @@ function persistNavigationState(): void {
   saveNavigationSnapshot({
     view: state.view, projectID: state.selectedProject?.id, taskID: state.selectedTask?.task.id,
     project: state.selectedProject || undefined, task: state.selectedTask?.task,
-    agentID: state.selectedTaskAgent, draft: state.taskDraft, drafts: state.taskDrafts,
+    agentID: state.selectedTaskAgent, resourcesTab: state.resourcesTab, mailSubTab: state.mailSubTab,
+    draft: state.taskDraft, drafts: state.taskDrafts,
   });
 }
 async function restoreNavigationState(saved = loadNavigationSnapshot()): Promise<void> {
-  if (["projects", "channels", "models", "hardware", "tasks", "knowledge", "prompts", "proxy", "sync", "advanced"].includes(saved.view || "")) state.view = saved.view as View;
+  const savedView = viewFromName(saved.view);
+  if (!initialHashRoute && savedView) state.view = savedView;
+  if (!initialHashRoute && saved.resourcesTab === "mail") state.resourcesTab = "mail";
+  if (!initialHashRoute && (saved.mailSubTab === "templates" || saved.mailSubTab === "sent")) state.mailSubTab = saved.mailSubTab;
+  if (initialHashRoute) return;
   const savedProject = state.projects.find(project => project.id === saved.projectID) || saved.project;
   state.selectedProject = savedProject || null;
   if (savedProject && !state.projects.some(project => project.id === savedProject.id)) {
@@ -2339,6 +2468,9 @@ function showTaskLoading(task: Task): void {
   state.taskConversationBefore = 0;
   state.taskConversationLatest = 0;
   state.taskContext = null;
+  state.taskMailOptions = null;
+  state.taskMailLoading = true;
+  state.taskMailError = "";
   state.taskTool = "";
   state.taskDraft = "";
   state.taskDrafts = {};
@@ -2362,7 +2494,7 @@ async function openTask(taskID: string): Promise<void> {
   const summary = state.tasks.find(task => task.id === taskID);
   if (summary) showTaskLoading(summary);
   try {
-    const categories: ConversationCategory[] = summary?.read_only ? ["chat", "update", "error"] : selectedConversationCategories();
+    const categories: ConversationCategory[] = summary?.read_only ? ["chat", "update", "error", "mail"] : selectedConversationCategories();
     if (summary?.read_only) state.taskCategories.tool = false;
     let pagePromise = summary?.status === "draft"
       ? Promise.resolve(null)
@@ -2393,6 +2525,7 @@ async function openTask(taskID: string): Promise<void> {
     if (detail.task.read_only || detail.task.status === "draft") closeEvents();
     else openEvents(taskID, state.taskEventCursor);
     render();
+    void loadTaskMail(taskID);
     void loadTaskChannelDestination(taskID, version);
     if (state.taskTool === "channel") {
       void reloadTaskChannelState().catch(error => {
@@ -2575,10 +2708,35 @@ function taskRuntimeSignature(detail: TaskDetail | null): string {
   });
 }
 
+let mailRefreshRequested = false;
+
+async function loadTaskMail(taskID: string): Promise<void> {
+  if (state.selectedTask?.task.id !== taskID && state.selectedTask) return;
+  state.taskMailLoading = true;
+  state.taskMailError = "";
+  try {
+    const [options, accounts] = await Promise.all([
+      api.taskMail(taskID),
+      api.mailAccounts().catch(() => null),
+    ]);
+    if (state.selectedTask?.task.id !== taskID) return;
+    state.taskMailOptions = options;
+    if (accounts) state.mailAccounts = accounts.accounts || [];
+  } catch (error) {
+    state.taskMailError = error instanceof Error ? error.message : String(error);
+  } finally {
+    state.taskMailLoading = false;
+    if (state.selectedTask?.task.id === taskID) render();
+  }
+}
+
 async function refreshTaskRuntime(taskID: string): Promise<boolean> {
   if (state.selectedTask?.task.id !== taskID) return false;
   const previousSignature = taskRuntimeSignature(state.selectedTask);
   const previousContext = state.taskContext ? JSON.stringify(state.taskContext) : "";
+  const previousMail = state.taskMailOptions ? JSON.stringify(state.taskMailOptions) : "";
+  const refreshMail = mailRefreshRequested
+    || Boolean(state.taskMailOptions?.accounts?.length || state.taskMailOptions?.messages?.length);
   const [detail, page] = await Promise.all([
     api.task(taskID),
     api.agentConversation(taskID, state.selectedTaskAgent, {
@@ -2619,6 +2777,18 @@ async function refreshTaskRuntime(taskID: string): Promise<boolean> {
   if (state.taskContext) {
     state.taskContext = await api.agentContext(taskID, state.selectedTaskAgent);
     changed ||= JSON.stringify(state.taskContext) !== previousContext;
+  }
+  if (refreshMail) {
+    const [options, accounts] = await Promise.all([
+      api.taskMail(taskID).catch(() => null),
+      api.mailAccounts().catch(() => null),
+    ]);
+    if (options) {
+      state.taskMailOptions = options;
+      changed ||= JSON.stringify(options) !== previousMail;
+    }
+    if (accounts) state.mailAccounts = accounts.accounts || [];
+    mailRefreshRequested = false;
   }
   return changed;
 }
@@ -2674,7 +2844,7 @@ function shell(content: string): string {
     ["channels", "bot", "nav.channels"],
     ["knowledge", "knowledge", "nav.knowledge"],
     ["models", "model", "nav.models"],
-    ["hardware", "hardware", "nav.hardware"],
+    ["resources", "hardware", "nav.resources"],
     ["pet-diary", "bot", "petWorkbench.title"],
   ] as const;
   const mobileNav = [...nav, ["advanced", "settings", "nav.advanced"] as const];
@@ -3620,7 +3790,11 @@ function startTaskClock(): void {
   taskClockFrame = window.requestAnimationFrame(runTaskClock);
 }
 function conversationListHtml(): string {
-  return renderConversationList(state.taskConversation, state.selectedTask, state.taskConversationHasMore);
+  const cards = new Map((state.taskMailOptions?.messages || []).map(card => [card.message.id, card]));
+  return renderConversationList(state.taskConversation, state.selectedTask, state.taskConversationHasMore, {
+    cards,
+    readOnly: Boolean(state.selectedTask?.task.read_only),
+  });
 }
 function taskFailureBannerHtml(detail: TaskDetail): string {
   if (!["failed", "blocked"].includes(detail.task.status)) return "";
@@ -3826,6 +4000,36 @@ function taskCtxHtml(): string {
   </div>`;
 }
 
+function taskMailActions(): {reload: () => Promise<void>; notify: (type: "error" | "notice", message: string) => void} {
+  return {
+    notify: setMessage,
+    reload: async () => {
+      const taskID = state.selectedTask?.task.id;
+      if (!taskID) return;
+      mailRefreshRequested = true;
+      await refreshTaskRuntime(taskID);
+      render();
+    },
+  };
+}
+
+function taskMailPanelHTML(detail: TaskDetail): string {
+  return renderTaskMailPanel(detail, state.taskMailOptions, state.mailAccounts, state.taskMailLoading, state.taskMailError);
+}
+
+function taskMailPendingCount(): number {
+  return (state.taskMailOptions?.messages || []).filter(card => card.message.status === "pending_approval").length;
+}
+
+function taskSendMailButton(detail: TaskDetail): string {
+  const terminal = ["completed", "failed", "cancelled", "archived"].includes(detail.task.status);
+  const usable = (state.taskMailOptions?.accounts || []).some(account => account.status !== "disabled" && account.credential_configured);
+  const pending = taskMailPendingCount();
+  const disabled = terminal || (state.taskMailOptions !== null && !usable);
+  const title = terminal ? "任务已结束，不能新建邮件" : state.taskMailOptions === null ? "发送邮件（正在加载绑定）" : usable ? "发送邮件" : "当前 Task 没有可用邮箱账号";
+  return `<button type="button" id="task-send-mail" class="icon-button task-tool-button ${pending ? "has-pending" : ""}" title="${escapeHTML(title)}" aria-label="${escapeHTML(title)}" ${disabled ? "disabled" : ""}>${icon("mail")}${pending ? `<span class="task-tool-badge">${pending > 99 ? "99+" : pending}</span>` : ""}</button>`;
+}
+
 function taskDetailView(detail: TaskDetail): string {
   const loadingDetail = state.taskDetailLoading;
   const {archivedReadOnly, remoteReadOnly, completed, readOnly} = taskComposerFlags(detail);
@@ -3849,10 +4053,10 @@ function taskDetailView(detail: TaskDetail): string {
   const toolLayout = state.taskTool ? ` task-tool-open task-tool-${state.taskToolMode}` : "";
   const channelVisible = !readOnly && !detail.task.channel_instance_id;
   return shell(`<section class="task-screen">
-    <header class="task-head"><button id="back-tasks">←</button><div class="task-title-block"><h1><span class="task-code">${escapeHTML(detail.task.code || "")}</span><span class="task-title-text">${escapeHTML(detail.task.title)}</span></h1><div class="task-head-subline"><span class="task-head-meta" title="${escapeHTML(taskMeta)}">${escapeHTML(taskMeta)}</span><span id="task-detail-status" class="status ${statusClass(detail.task.status)}">${statusLabel(detail.task.status)}</span><span class="task-branch">${escapeHTML(detail.task.task_branch || "")}</span></div></div><div class="actions task-tool-actions">${renderTaskToolButtons(state.taskTool, {includeChannel: channelVisible, channelConnected: Boolean(state.taskChannelDestination), channelLabel: taskChannelButtonLabel(state.taskChannelDestination), pendingPermissions: taskPermissionPendingCount(detail)})}</div></header>
+    <header class="task-head"><button id="back-tasks">←</button><div class="task-title-block"><h1><span class="task-code">${escapeHTML(detail.task.code || "")}</span><span class="task-title-text">${escapeHTML(detail.task.title)}</span></h1><div class="task-head-subline"><span class="task-head-meta" title="${escapeHTML(taskMeta)}">${escapeHTML(taskMeta)}</span><span id="task-detail-status" class="status ${statusClass(detail.task.status)}">${statusLabel(detail.task.status)}</span><span class="task-branch">${escapeHTML(detail.task.task_branch || "")}</span></div></div><div class="actions task-tool-actions">${taskSendMailButton(detail)}${renderTaskToolButtons(state.taskTool, {includeChannel: channelVisible, channelConnected: Boolean(state.taskChannelDestination), channelLabel: taskChannelButtonLabel(state.taskChannelDestination), pendingPermissions: taskPermissionPendingCount(detail)})}</div></header>
     <div class="task-grid${toolLayout}" style="--task-tool-width:${state.taskToolWidth}%">
       ${chat}
-      ${renderTaskToolPanel(state.taskTool, detail, state.selectedTaskAgent, taskCtxHtml(), state.taskToolMode, taskChannelPanelHTML(), state.taskToolPinned === state.taskTool, taskPermissionPanelHtml(detail))}
+      ${renderTaskToolPanel(state.taskTool, detail, state.selectedTaskAgent, taskCtxHtml(), state.taskToolMode, taskChannelPanelHTML(), state.taskToolPinned === state.taskTool, taskPermissionPanelHtml(detail), taskMailPanelHTML(detail))}
     </div>
     ${renderAgentConfigDialog(detail, state.selectedTaskAgent, state.models, state.codexAccounts, state.skills, state.mcpServers)}${taskTakeoverDialog(detail)}<div id="task-screen-dialogs">${completed ? reopenTaskDialog(detail) : ""}</div>
   </section>`);
@@ -4057,10 +4261,11 @@ function updateTaskLiveRegions(): void {
   } else if (toolBody && state.taskTool === "browser") {
     refreshDesktopPanel(detail, setMessage);
   } else if (toolBody && state.taskTool) {
-    replaceRegionHTML(toolBody, renderTaskToolContent(state.taskTool, detail, taskCtxHtml(), taskChannelPanelHTML(), taskPermissionPanelHtml(detail)));
+    replaceRegionHTML(toolBody, renderTaskToolContent(state.taskTool, detail, taskCtxHtml(), taskChannelPanelHTML(), taskPermissionPanelHtml(detail), taskMailPanelHTML(detail)));
     bindSessionActions();
     if (state.taskTool === "channel") bindTaskChannelPanel();
     if (state.taskTool === "permissions") bindTaskPermissionActions(toolBody);
+    if (state.taskTool === "mail") bindTaskMailPanel(detail, state.taskMailOptions, taskMailActions());
   }
   const count = document.querySelector<HTMLElement>("#conversation-filter-loaded");
   if (count) count.textContent = `${state.taskConversation.length} 条已加载`;
@@ -4149,7 +4354,11 @@ function render(): void {
       projects: projectsView,
 		channels: () => shell(renderChannels(state.channelProviders, state.channelInstances, {models: state.models, accounts: state.codexAccounts, projects: state.projects, workspaces: state.workspaces, knowledgeIndexes: state.knowledgeIndexes, libraries: state.knowledgeLibraries})),
       models: modelsView,
-      hardware: () => shell(renderHardwareResources(state.hardwareResources)),
+      resources: () => shell(renderResourcesPage({
+        tab: state.resourcesTab,
+        hardware: state.hardwareResources,
+        mail: mailResourcesData(),
+      })),
       tasks: tasksView,
       knowledge: () => shell(`${renderKnowledgeWorkspace({
         projects: state.projects,
@@ -5378,6 +5587,20 @@ function bindMessageComposer(): void {
 function bindTaskToolsAndPanels(): void {
   bindTaskToolLayout();
   bindTaskPermissionActions();
+  document.querySelector("#task-send-mail")?.addEventListener("click", () => {
+    const detail = state.selectedTask;
+    if (!detail) return;
+    void (async () => {
+      if (!state.taskMailOptions) await loadTaskMail(detail.task.id);
+      const options = state.taskMailOptions;
+      if (!options) {
+        setMessage("error", state.taskMailError || "邮件绑定尚未加载完成");
+        return;
+      }
+      await openTaskMailCompose(detail, options, taskMailActions());
+    })();
+  });
+  if (state.taskTool === "mail" && state.selectedTask) bindTaskMailPanel(state.selectedTask, state.taskMailOptions, taskMailActions());
   if (state.taskTool === "hardware" && state.selectedTask) bindHardwarePanel(state.selectedTask, setMessage);
   if (state.taskTool === "browser" && state.selectedTask) bindDesktopPanel(state.selectedTask, setMessage);
   if (state.taskTool === "channel" && state.selectedTask) bindTaskChannelPanel();
@@ -5396,16 +5619,15 @@ function bindTaskToolsAndPanels(): void {
   if (state.view === "data") bindDataManagementPage();
   if (state.view === "pet-diary") void bindPetDiaryPage();
   if (state.view === "prompts") bindPromptAdmin(render, setMessage);
-  if (state.view === "hardware") bindHardwareResources(
-    state.hardwareResources,
-    async () => {
-      await loadResource("hardware", true, async () => {
-        state.hardwareResources = (await api.hardwareResources()).resources || [];
-      });
-      render();
-    },
-    setMessage,
-  );
+  if (state.view === "resources") bindResourcesPage({
+    tab: state.resourcesTab,
+    hardware: state.hardwareResources,
+    mail: mailResourcesData(),
+  }, {
+    reloadHardware: reloadHardwareResources,
+    mail: {reload: reloadMailResources, notify: setMessage},
+    notify: setMessage,
+  });
 }
 
 function bindSessionActions(): void {
@@ -5419,9 +5641,10 @@ function bindSessionActions(): void {
       await refreshTaskRuntime(state.selectedTask!.task.id);
       const content = document.querySelector<HTMLElement>("#task-tool-panel-body");
       if (content) {
-        content.innerHTML = renderTaskToolContent(state.taskTool, state.selectedTask!, taskCtxHtml(), taskChannelPanelHTML(), taskPermissionPanelHtml(state.selectedTask!));
+        content.innerHTML = renderTaskToolContent(state.taskTool, state.selectedTask!, taskCtxHtml(), taskChannelPanelHTML(), taskPermissionPanelHtml(state.selectedTask!), taskMailPanelHTML(state.selectedTask!));
         bindSessionActions();
         if (state.taskTool === "permissions") bindTaskPermissionActions(content);
+        if (state.taskTool === "mail") bindTaskMailPanel(state.selectedTask!, state.taskMailOptions, taskMailActions());
       }
     });
   }));
@@ -5694,6 +5917,7 @@ async function loadOlderConversation(): Promise<void> {
 function bindConversationLiveControls(): void {
   const list = document.querySelector<HTMLElement>("#conversation-list");
   bindMessageBubbleControls(list || document);
+  if (list && state.selectedTask) bindMailCardActions(list, state.taskMailOptions, taskMailActions());
   document.querySelector("#load-older-conversation")?.addEventListener("click", () => {
     void loadOlderConversation();
   });
@@ -5762,8 +5986,9 @@ function openEvents(taskID: string, after = 0): void {
     if (state.selectedTask?.task.id !== taskID) return;
     noteTaskStreamSignal(taskID);
     try {
-      const payload = JSON.parse((event as MessageEvent).data) as {sequence?: number};
+      const payload = JSON.parse((event as MessageEvent).data) as {sequence?: number; type?: string};
       const sequence = Number(payload.sequence || 0);
+      if (String(payload.type || "").startsWith("mail_")) mailRefreshRequested = true;
       if (sequence && sequence <= state.taskEventCursor) return;
       state.taskEventCursor = Math.max(state.taskEventCursor, sequence);
     } catch {
@@ -5920,6 +6145,9 @@ function openGlobalEvents(): void {
     if (eventRefreshesTaskList(type)) {
       refreshListData();
     }
+    if (type.startsWith("mail_") && state.view === "resources" && state.resourcesTab === "mail") {
+      void reloadMailResources();
+    }
   });
   // The stream auto-reconnects; refresh on (re)open so events missed while
   // disconnected are caught up.
@@ -5931,6 +6159,22 @@ function closeGlobalEvents(): void {
   globalEvents = null;
 }
 
+window.addEventListener("aha-resources-tab", event => {
+  const tab = (event as CustomEvent).detail === "mail" ? "mail" : "hardware";
+  state.resourcesTab = tab;
+  window.history.replaceState(null, "", `#resources?tab=${tab}`);
+  persistNavigationState();
+  void ensureViewData("resources").then(() => render());
+});
+window.addEventListener("aha-mail-subtab", event => {
+  const tab = String((event as CustomEvent).detail || "accounts");
+  state.mailSubTab = tab === "templates" || tab === "sent" ? tab : "accounts";
+  persistNavigationState();
+});
+window.addEventListener("hashchange", () => {
+  if (!applyLocationHash()) return;
+  void ensureViewData(state.view).then(() => render());
+});
 syncVisualViewportHeight();
 window.addEventListener("resize", syncVisualViewportHeight);
 window.visualViewport?.addEventListener("resize", () => {

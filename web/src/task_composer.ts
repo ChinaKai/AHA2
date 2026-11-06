@@ -37,7 +37,7 @@ export function renderComposerTools(
 ): string {
   const options = renderComposerAgentOptions(detail, selectedAgentID);
   const labels: Record<ConversationCategory, string> = {
-    chat: "对话", update: "Agent Update", tool: "工具调用", error: "错误",
+    chat: "对话", update: "Agent Update", tool: "工具调用", error: "错误", mail: "邮件",
   };
   const enabled = Object.values(categories).filter(Boolean).length;
   const filters = (Object.keys(labels) as ConversationCategory[]).map(category =>
@@ -48,7 +48,7 @@ export function renderComposerTools(
     <button type="button" data-agent-config="${escapeHTML(selectedAgentID)}" class="icon-button composer-agent-config" title="编辑 ${escapeHTML(selectedAgentID)} 配置">${icon("edit")}</button>
   </div>
   <details class="conversation-filter-popover">
-    <summary class="conversation-filter-trigger" title="筛选消息">${icon("filter")}<small>${enabled}/4</small></summary>
+    <summary class="conversation-filter-trigger" title="筛选消息">${icon("filter")}<small>${enabled}/5</small></summary>
     <div class="conversation-filter-menu"><header><strong>消息筛选</strong><small id="conversation-filter-loaded">${loadedCount} 条已加载</small></header>${filters}</div>
   </details>`;
 }

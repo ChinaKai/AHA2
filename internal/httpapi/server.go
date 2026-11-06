@@ -417,6 +417,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/tasks/{id}/context", s.withAuth(http.HandlerFunc(s.taskContext)))
 	mux.Handle("POST /api/v1/tasks/{id}/messages", s.withAuth(http.HandlerFunc(s.submitMessage)))
 	mux.Handle("POST /api/v1/tasks/{id}/attachments", s.withAuth(http.HandlerFunc(s.uploadTaskAttachment)))
+	mux.Handle("GET /api/v1/tasks/{id}/mail", s.withAuth(http.HandlerFunc(s.taskMailOptions)))
 	mux.Handle("GET /api/v1/tasks/{id}/attachments/{attachment}", s.withAuth(http.HandlerFunc(s.taskAttachmentContent)))
 	mux.Handle("DELETE /api/v1/tasks/{id}/attachments/{attachment}", s.withAuth(http.HandlerFunc(s.deleteTaskAttachment)))
 	mux.Handle("GET /api/v1/tasks/{id}/agents", s.withAuth(http.HandlerFunc(s.taskAgents)))

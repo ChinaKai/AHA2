@@ -818,7 +818,7 @@ test("SSE list refresh is debounced and deferred while a task detail is open", a
 test("read-only task history opens on the latest page and lazily loads older rows", async () => {
   const root = resolve(import.meta.dirname, "..");
   const script = await readFile(resolve(root, "dist", "app.js"), "utf8");
-  assert.match(script, /summary\?\.read_only\s*\?\s*\[\s*"chat",\s*"update",\s*"error"\s*\]/);
+  assert.match(script, /summary\?\.read_only\s*\?\s*\[\s*"chat",\s*"update",\s*"error",\s*"mail"\s*\]/);
   assert.match(script, /agentConversation\(taskID,\s*"main",\s*\{\s*limit:\s*initialConversationPageSize,\s*categories\s*\}/);
   assert.match(script, /requestConversationBottom\(\)/);
   assert.match(script, /detail\.task\.read_only\s*\|\|\s*detail\.task\.status\s*===\s*"draft"\)\s*closeEvents\(\)/);
@@ -917,6 +917,10 @@ test("built web contains responsive application", async () => {
   const taskTools = await readFile(resolve(root, "dist", "task_tools.js"), "utf8");
   const hardwarePanel = await readFile(resolve(root, "dist", "hardware_panel.js"), "utf8");
   const hardwareResources = await readFile(resolve(root, "dist", "hardware_resources.js"), "utf8");
+  const resources = await readFile(resolve(root, "dist", "resources.js"), "utf8");
+  const mailResources = await readFile(resolve(root, "dist", "mail_resources.js"), "utf8");
+  const mailTask = await readFile(resolve(root, "dist", "mail_task.js"), "utf8");
+  const mailCards = await readFile(resolve(root, "dist", "mail_cards.js"), "utf8");
   const hardwareTerminal = await readFile(resolve(root, "dist", "hardware_terminal.js"), "utf8");
   const conversation = await readFile(resolve(root, "dist", "conversation_ui.js"), "utf8");
   const helpers = await readFile(resolve(root, "dist", "ui_helpers.js"), "utf8");
@@ -1436,7 +1440,15 @@ test("built web contains responsive application", async () => {
   assert.match(taskTools, /\.\/task_agents\.js\?v=[a-f0-9]{12}/);
   assert.match(taskTools, /\.\/hardware_panel\.js\?v=[a-f0-9]{12}/);
   assert.match(script, /\.\/hardware_panel\.js\?v=[a-f0-9]{12}/);
-  assert.match(script, /\.\/hardware_resources\.js\?v=[a-f0-9]{12}/);
+  assert.match(script, /\.\/resources\.js\?v=[a-f0-9]{12}/);
+  assert.match(script, /\.\/mail_task\.js\?v=[a-f0-9]{12}/);
+  assert.match(resources, /\.\/hardware_resources\.js\?v=[a-f0-9]{12}/);
+  assert.match(resources, /\.\/mail_resources\.js\?v=[a-f0-9]{12}/);
+  assert.match(mailResources, /\.\/api\.js\?v=[a-f0-9]{12}/);
+  assert.match(mailTask, /\.\/api\.js\?v=[a-f0-9]{12}/);
+  assert.match(mailCards, /\.\/icons\.js\?v=[a-f0-9]{12}/);
+  assert.match(mailResources, /credential_configured/);
+  assert.match(mailTask, /mailCanCancel/);
   assert.match(hardwarePanel, /\.\/api\.js\?v=[a-f0-9]{12}/);
   assert.match(hardwareResources, /\.\/api\.js\?v=[a-f0-9]{12}/);
   assert.match(hardwareResources, /["']adb["'],\s*["']ADB["']/);
@@ -2710,16 +2722,16 @@ test("sidebar pages are not duplicated as advanced settings entries", async () =
   const main = await readFile(resolve(root, "src", "main.ts"), "utf8");
   const cards = [...main.matchAll(/<article class="panel advanced-tool-card">[^\n]*?data-view="([^"]+)"/g)].map(match => match[1]);
   assert.deepEqual(cards.sort(), ["data", "mcp", "other", "prompts", "proxy", "sync"]);
-  assert.match(main, /hardware: \(\) => shell\(renderHardwareResources\(state\.hardwareResources\)\)/);
+  assert.match(main, /resources: \(\) => shell\(renderResourcesPage\(\{/);
   assert.match(main, /"pet-diary": \(\) => shell\(petDiaryView\(\)\)/);
   assert.doesNotMatch(main, /(?:hardware|"pet-diary"): \(\) => advancedSubview/);
 });
 
-test("sidebar and mobile navigation expose pet workbench and hardware", async () => {
+test("sidebar and mobile navigation expose pet workbench and resources", async () => {
   const root = resolve(import.meta.dirname, "..");
   const main = await readFile(resolve(root, "src", "main.ts"), "utf8");
   const i18n = await readFile(resolve(root, "src", "i18n.ts"), "utf8");
-  assert.match(main, /\["hardware", "hardware", "nav\.hardware"\]/);
+  assert.match(main, /\["resources", "hardware", "nav\.resources"\]/);
   assert.match(main, /\["pet-diary", "bot", "petWorkbench\.title"\]/);
   assert.match(main, /const mobileNav = \[\.\.\.nav, \["advanced", "settings", "nav\.advanced"\] as const\]/);
   assert.match(i18n, /"petWorkbench\.title": "宠物工作台"/);

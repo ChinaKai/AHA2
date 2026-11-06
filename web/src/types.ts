@@ -465,7 +465,7 @@ export interface TaskRound {
   elapsed_ms: number;
 }
 
-export type ConversationCategory = "chat" | "update" | "tool" | "error";
+export type ConversationCategory = "chat" | "update" | "tool" | "error" | "mail";
 
 export interface Attachment {
   id: string;
@@ -1293,4 +1293,199 @@ export interface PetWorkbench {
   channel_total?: number;
   channel_note?: string;
   updated_at: string;
+}
+
+// --- Mail resources -------------------------------------------------------
+
+export interface MailAccountAlias {
+  address: string;
+  display_name?: string;
+  position?: number;
+}
+
+export interface MailAccount {
+  id: string;
+  name: string;
+  address: string;
+  display_name: string;
+  provider: string;
+  smtp_host: string;
+  smtp_port: number;
+  smtp_security: string;
+  smtp_username: string;
+  credential_configured: boolean;
+  status: "unverified" | "ok" | "error" | "disabled" | string;
+  last_test_at?: string;
+  last_test_error_code?: string;
+  aliases?: MailAccountAlias[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MailTemplate {
+  id: string;
+  scope: "global" | "project";
+  project_id?: string;
+  name: string;
+  description?: string;
+  subject_template: string;
+  body_text_template: string;
+  body_html_template: string;
+  default_to: string[];
+  default_cc: string[];
+  required_variables: string[];
+  current_version: number;
+  status: "active" | "archived" | string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MailTemplateVersion {
+  template_id: string;
+  version: number;
+  subject_template: string;
+  body_text_template: string;
+  body_html_template: string;
+  required_variables: string[];
+  created_at: string;
+}
+
+export interface MailBinding {
+  id: string;
+  scope_type: "project" | "workspace" | "task";
+  scope_id: string;
+  account_id: string;
+  default_template_id?: string;
+  approval_mode: string;
+  allowed_recipients: string[];
+  auto_send_enabled: boolean;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MailMessage {
+  id: string;
+  task_id: string;
+  project_id?: string;
+  workspace_id?: string;
+  turn_id?: string;
+  agent_id?: string;
+  account_id: string;
+  binding_id?: string;
+  template_id?: string;
+  template_version: number;
+  source: "agent" | "owner";
+  idempotency_key: string;
+  from_address: string;
+  from_name?: string;
+  to: string[];
+  cc?: string[];
+  bcc?: string[];
+  reply_to?: string;
+  subject: string;
+  body_text?: string;
+  body_html?: string;
+  content_revision: number;
+  approval_digest?: string;
+  status: "draft" | "pending_approval" | "queued" | "sending" | "sent" | "failed" | "dead_letter" | "rejected" | "cancelled" | string;
+  approved_by?: string;
+  approved_at?: string;
+  rejected_reason?: string;
+  submitted_at?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MailAttachment {
+  id: string;
+  message_id: string;
+  position: number;
+  source_type: "task_attachment" | "build_artifact";
+  source_id: string;
+  file_name: string;
+  media_type: string;
+  size_bytes: number;
+  sha256: string;
+  delivery_mode: "direct" | "link";
+  disposition: "attachment" | "inline";
+  link_expires_at?: string;
+  link_max_downloads?: number;
+  link_download_count?: number;
+  link_revoked_at?: string;
+  created_at: string;
+}
+
+export interface MailDelivery {
+  id: string;
+  message_id: string;
+  generation: number;
+  account_id: string;
+  state: "queued" | "sending" | "sent" | "failed" | "dead_letter" | "cancelled" | string;
+  attempts: number;
+  available_at: string;
+  smtp_phase?: string;
+  message_id_header?: string;
+  last_error_code?: string;
+  outcome_certainty?: string;
+  sent_at?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MailDeliveryAttempt {
+  id: string;
+  delivery_id: string;
+  attempt_no: number;
+  outcome: string;
+  error_code?: string;
+  smtp_code?: number;
+  smtp_phase?: string;
+  backoff_ms?: number;
+  started_at: string;
+  finished_at?: string;
+}
+
+export interface BuildArtifact {
+  id: string;
+  task_id: string;
+  label: string;
+  package_name?: string;
+  version?: string;
+  size_bytes: number;
+  sha256: string;
+  storage_type: string;
+  attachment_id?: string;
+  registered_by?: string;
+  created_at: string;
+}
+
+export interface TaskMailAccount {
+  account_id: string;
+  binding_id: string;
+  binding_scope: "task" | "workspace" | "project" | string;
+  from_address: string;
+  display_name: string;
+  aliases: string[];
+  credential_configured: boolean;
+  status: string;
+  default_template_id?: string;
+  approval_mode?: string;
+  allowed_recipients?: string[];
+}
+
+export interface MailMessageCard {
+  message: MailMessage;
+  attachments: MailAttachment[];
+  deliveries: MailDelivery[];
+}
+
+export interface TaskMailOptions {
+  ok: boolean;
+  task_id: string;
+  accounts: TaskMailAccount[];
+  templates: MailTemplate[];
+  attachments: Attachment[];
+  build_artifacts: BuildArtifact[];
+  messages: MailMessageCard[];
 }
