@@ -1015,10 +1015,11 @@ test("mail phase two keeps navigation stable, one mail entry, and table tools", 
   // Template editor can insert a fixed table skeleton.
   assert.match(mailResources, /data-mail-insert-table/);
   assert.match(mailResources, /export function mailTemplateTableSkeleton/);
-  // Compose shell and attachment lists follow the requested layout.
+  // Compose shell and compact attachment picker follow the requested layout.
   assert.match(styles, /\.task-mail-compose-dialog > form \{ display: grid; grid-template-rows: auto minmax\(0,1fr\) auto;/);
-  assert.match(styles, /\.mail-attachment-option \{ display: grid; grid-template-columns: 18px minmax\(0,1fr\);/);
-  assert.match(styles, /\.mail-attachment-list-scroll \{[^}]*max-height: 160px;[^}]*overflow-y: auto;/);
+  assert.match(styles, /\.mail-attachment-option \{ display: grid; grid-template-columns: 18px minmax\(0,1fr\) auto;[^}]*min-height: 30px;/);
+  assert.match(styles, /\.mail-attachment-list-scroll \{[^}]*max-height: 180px;[^}]*overflow-y: auto;/);
+  assert.match(styles, /\.mail-compose-picker\[hidden\], \.mail-compose-picker \[data-mail-picker-pane\]\[hidden\] \{ display: none; \}/, "author display rules must not override hidden panes");
   assert.match(styles, /\.task-mail-compose-dialog \.dialog-actions \{[^}]*position: sticky;[^}]*bottom: 0;/);
 });
 

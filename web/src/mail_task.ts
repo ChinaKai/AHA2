@@ -34,10 +34,16 @@ export function renderTaskMailPanel(
 ): string {
   const terminal = ["completed", "failed", "cancelled", "archived"].includes(detail.task.status);
   const accounts = options?.accounts || [];
-  const accountsHTML = accounts.map(account => `<article class="task-mail-binding" data-task-mail-binding="${escapeHTML(account.binding_id)}">
-    <div><strong>${escapeHTML(account.display_name || account.from_address)}</strong><small>${escapeHTML(account.from_address)} · ${escapeHTML(scopeLabel(account.binding_scope))}${account.default_template_id ? ` · 默认模板 ${escapeHTML(account.default_template_id)}` : ""}</small><small>审批模式：每封审批 · 白名单：${escapeHTML((account.allowed_recipients || []).join(", ") || "不限")}</small>${!usableAccount(account) ? `<small class="mail-binding-warning">${account.status === "disabled" ? "账号已停用" : "未配置授权码"}，不能发送</small>` : ""}</div>
+  const accountsHTML = accounts.map(account => {
+    const templateName = account.default_template_id
+      ? (options?.templates || []).find(template => template.id === account.default_template_id)?.name || account.default_template_id
+      : "";
+    const identity = account.display_name || account.from_address;
+    return `<article class="task-mail-binding" data-task-mail-binding="${escapeHTML(account.binding_id)}">
+    <div><strong title="${escapeHTML(identity)}">${escapeHTML(identity)}</strong><small title="${escapeHTML(account.from_address)}">${escapeHTML(account.from_address)} · ${escapeHTML(scopeLabel(account.binding_scope))}${templateName ? ` · 默认模板 ${escapeHTML(templateName)}` : ""}</small><small>审批模式：每封审批 · 白名单：${escapeHTML((account.allowed_recipients || []).join(", ") || "不限")}</small>${!usableAccount(account) ? `<small class="mail-binding-warning">${account.status === "disabled" ? "账号已停用" : "未配置授权码"}，不能发送</small>` : ""}</div>
     ${account.binding_scope === "task" ? `<button type="button" class="icon-button danger" data-task-mail-unbind="${escapeHTML(account.binding_id)}" title="解除 Task 绑定" aria-label="解除 Task 绑定">${icon("close")}</button>` : ""}
-  </article>`).join("");
+  </article>`;
+  }).join("");
   const taskBinding = accounts.find(account => account.binding_scope === "task");
   const accountOptions = allAccounts.filter(account => account.status !== "deleted").map(account =>
     `<option value="${escapeHTML(account.id)}" ${taskBinding?.account_id === account.id ? "selected" : ""}>${escapeHTML(account.name || account.address)} · ${escapeHTML(account.address)}${account.status === "disabled" ? "（已停用）" : ""}</option>`).join("");
@@ -90,6 +96,26 @@ function templateDefaults(templateID: string, templates: MailTemplate[]): MailTe
 
 function csvValues(value: unknown): string[] {
   return String(value || "").split(",").map(item => item.trim()).filter(Boolean);
+}
+
+// The compose default is exactly the selected account's Task/Workspace/Project
+// binding template. A binding with no template must select "不使用模板", never
+// fall through to the first template in the list.
+export function mailComposeTemplateSelection(account: TaskMailAccount | undefined, templates: MailTemplate[]): string {
+  const requested = account?.default_template_id || "";
+  return requested && templates.some(template => template.id === requested) ? requested : "";
+}
+
+// Checkbox state is the single source for the submitted attachment ids. It is
+// exported so the picker, chips and payload path can be tested without a DOM.
+export function mailComposeAttachments(
+  attachments: Array<{value: string; checked: boolean}>,
+  artifacts: Array<{value: string; checked: boolean}>,
+): {attachment_ids: string[]; build_artifact_ids: string[]} {
+  return {
+    attachment_ids: attachments.filter(item => item.checked).map(item => item.value),
+    build_artifact_ids: artifacts.filter(item => item.checked).map(item => item.value),
+  };
 }
 
 // Builds the shared WYSIWYG preview model from the server render result and
@@ -157,10 +183,12 @@ export async function openTaskMailCompose(
     return;
   }
   document.querySelector<HTMLDialogElement>("#task-mail-compose-dialog")?.remove();
-  const accountOptions = accounts.map(account => `<option value="${escapeHTML(account.account_id)}" data-default-template="${escapeHTML(account.default_template_id || "")}">${escapeHTML(account.display_name || account.from_address)} · ${escapeHTML(account.from_address)}</option>`).join("");
-  const templateOptions = templates.map(template => `<option value="${escapeHTML(template.id)}">${escapeHTML(template.name)} · v${Number(template.current_version)}</option>`).join("") + `<option value="">不使用模板</option>`;
-  const attachmentOptions = (options.attachments || []).map(attachment => `<label class="mail-attachment-option"><input type="checkbox" name="attachment_ids" value="${escapeHTML(attachment.id)}"><span><strong>${escapeHTML(attachment.name)}</strong><small>${formatMailBytes(attachment.size)} · ${escapeHTML(attachment.media_type || "")}</small><small>SHA256 ${escapeHTML((attachment.sha256 || "").slice(0, 16))}…</small></span></label>`).join("");
-  const artifactOptions = (options.build_artifacts || []).map(artifact => `<label class="mail-attachment-option"><input type="checkbox" name="build_artifact_ids" value="${escapeHTML(artifact.id)}"><span><strong>${escapeHTML(artifact.label)}</strong><small>${escapeHTML(artifact.package_name || "")}${artifact.version ? ` · ${escapeHTML(artifact.version)}` : ""} · ${formatMailBytes(artifact.size_bytes)}</small><small>SHA256 ${escapeHTML((artifact.sha256 || "").slice(0, 16))}…</small></span></label>`).join("");
+  const accountOptions = accounts.map(account => `<option value="${escapeHTML(account.account_id)}" data-default-template="${escapeHTML(account.default_template_id || "")}" data-binding-scope="${escapeHTML(account.binding_scope)}">${escapeHTML(account.display_name || account.from_address)} · ${escapeHTML(account.from_address)}</option>`).join("");
+  // "不使用模板" is first so an unset binding naturally falls back to it. A
+  // valid binding default is still selected explicitly below.
+  const templateOptions = `<option value="">不使用模板</option>` + templates.map(template => `<option value="${escapeHTML(template.id)}">${escapeHTML(template.name)} · v${Number(template.current_version)}</option>`).join("");
+  const attachmentOptions = (options.attachments || []).map(attachment => `<label class="mail-attachment-option" title="${escapeHTML(attachment.name)}"><input type="checkbox" name="attachment_ids" value="${escapeHTML(attachment.id)}"><span class="mail-attachment-option-name">${escapeHTML(attachment.name)}</span><small>${formatMailBytes(attachment.size)}${attachment.media_type ? ` · ${escapeHTML(attachment.media_type)}` : ""}</small></label>`).join("");
+  const artifactOptions = (options.build_artifacts || []).map(artifact => `<label class="mail-attachment-option" title="${escapeHTML(artifact.label)} · SHA256 ${escapeHTML(artifact.sha256 || "")}"><input type="checkbox" name="build_artifact_ids" value="${escapeHTML(artifact.id)}"><span class="mail-attachment-option-name">${escapeHTML(artifact.label)}</span><small>${escapeHTML(artifact.package_name || "")}${artifact.version ? ` · ${escapeHTML(artifact.version)}` : ""} · ${formatMailBytes(artifact.size_bytes)}</small></label>`).join("");
   const dialog = document.createElement("dialog");
   dialog.id = "task-mail-compose-dialog";
   dialog.className = "task-mail-compose-dialog";
@@ -168,6 +196,7 @@ export async function openTaskMailCompose(
     <div class="dialog-head"><h2>发送邮件</h2><button type="button" data-close class="icon-button" aria-label="关闭">${icon("close")}</button></div>
     <div class="dialog-body">
       <div class="two"><label>账号<select name="account_id" required>${accountOptions}</select></label><label>模板<select name="template_id">${templateOptions}</select></label></div>
+      <p class="field-help" data-mail-template-hint></p>
       <div id="mail-compose-direct" class="mail-compose-direct" hidden>
         <label>主题<input name="subject"></label>
         <label>正文（HTML 主编辑区）<textarea name="body_html" rows="8" placeholder="<p>...</p>"></textarea></label>
@@ -175,16 +204,22 @@ export async function openTaskMailCompose(
       </div>
       <div class="two"><label>收件人 To（逗号分隔）<input name="to" required></label><label>CC（逗号分隔）<input name="cc"></label></div>
       <label>BCC（仅 Owner，可选）<input name="bcc"></label>
-      <div id="mail-compose-variables">${variableInputs(templateDefaults(templates[0]?.id, templates))}</div>
-      <div class="mail-compose-attachments">
-        <section class="mail-compose-attachment-section">
-          <header class="mail-compose-attachment-head"><strong>当前 Task 附件</strong><span data-mail-selected-count="attachment_ids">已选 0 项</span></header>
-          <div class="mail-attachment-list-scroll">${attachmentOptions || `<p class="field-help">没有可用附件。</p>`}</div>
-        </section>
-        <section class="mail-compose-attachment-section">
-          <header class="mail-compose-attachment-head"><strong>构建产物</strong><span data-mail-selected-count="build_artifact_ids">已选 0 项</span></header>
-          <div class="mail-attachment-list-scroll">${artifactOptions || `<p class="field-help">没有登记的构建产物。</p>`}</div>
-        </section>
+      <div id="mail-compose-variables">${variableInputs(templateDefaults(mailComposeTemplateSelection(accounts[0], templates), templates))}</div>
+      <div class="mail-compose-attachments" data-mail-attachments>
+        <div class="mail-compose-attachment-bar">
+          <div class="mail-compose-attachment-summary"><strong>附件</strong><span data-mail-selected-total aria-live="polite">已选 0 项</span></div>
+          <button type="button" id="mail-compose-attachment-toggle" class="mail-compose-attachment-toggle" aria-expanded="false" aria-controls="mail-compose-attachment-picker">添加附件（已选 0）</button>
+        </div>
+        <div class="mail-compose-chips" data-mail-attachment-chips aria-live="polite"><span class="field-help">尚未选择附件。</span></div>
+        <div class="mail-compose-picker" id="mail-compose-attachment-picker" data-mail-attachment-picker hidden>
+          <div class="mail-compose-picker-tabs" role="tablist" aria-label="附件来源">
+            <button type="button" data-mail-picker-tab="task" role="tab" aria-selected="true">当前 Task 附件（${(options.attachments || []).length}）</button>
+            <button type="button" data-mail-picker-tab="build" role="tab" aria-selected="false">构建产物（${(options.build_artifacts || []).length}）</button>
+          </div>
+          <p class="field-help">构建产物只来自当前 Task 已登记、存储类型为 AHA Task 附件的记录（TaskMailOptions.build_artifacts）；不支持外部 URL 或本地路径。</p>
+          <div class="mail-attachment-list-scroll" data-mail-picker-pane="task" role="tabpanel" aria-label="当前 Task 附件">${attachmentOptions || `<p class="field-help">没有可用附件。</p>`}</div>
+          <div class="mail-attachment-list-scroll" data-mail-picker-pane="build" role="tabpanel" aria-label="构建产物" hidden>${artifactOptions || `<p class="field-help">没有登记的构建产物。</p>`}</div>
+        </div>
       </div>
     </div>
     <div class="dialog-actions"><button type="button" data-close>取消</button><button type="button" id="mail-compose-preview-button">预览</button><button type="submit" class="primary">提交审批</button></div>
@@ -203,20 +238,88 @@ export async function openTaskMailCompose(
       if (field.name === "subject" || field.name === "body_html") field.required = enabled;
     });
   };
-  const syncSelectedCounts = () => {
-    form.querySelectorAll<HTMLElement>("[data-mail-selected-count]").forEach(element => {
-      const name = element.dataset.mailSelectedCount || "";
-      const count = form.querySelectorAll(`input[name="${name}"]:checked`).length;
-      element.textContent = `已选 ${count} 项`;
+
+  const picker = form.querySelector<HTMLElement>("[data-mail-attachment-picker]")!;
+  const pickerToggle = form.querySelector<HTMLButtonElement>("#mail-compose-attachment-toggle")!;
+  const chipsBox = form.querySelector<HTMLElement>("[data-mail-attachment-chips]")!;
+  const selectedTotal = form.querySelector<HTMLElement>("[data-mail-selected-total]")!;
+  const attachmentInputs = () => [...form.querySelectorAll<HTMLInputElement>('input[name="attachment_ids"]')];
+  const artifactInputs = () => [...form.querySelectorAll<HTMLInputElement>('input[name="build_artifact_ids"]')];
+  const optionName = (input: HTMLInputElement) =>
+    (input.closest("label")?.querySelector<HTMLElement>(".mail-attachment-option-name")?.textContent || input.value).trim();
+  const syncSelected = () => {
+    const selected = [...attachmentInputs(), ...artifactInputs()].filter(input => input.checked);
+    selectedTotal.textContent = `已选 ${selected.length} 项`;
+    pickerToggle.textContent = `添加附件（已选 ${selected.length}）`;
+    chipsBox.replaceChildren();
+    if (!selected.length) {
+      const empty = document.createElement("span");
+      empty.className = "field-help";
+      empty.textContent = "尚未选择附件。";
+      chipsBox.append(empty);
+      return;
+    }
+    for (const input of selected) {
+      const chip = document.createElement("span");
+      chip.className = "mail-attachment-chip";
+      const name = document.createElement("span");
+      name.className = "mail-attachment-chip-name";
+      name.textContent = optionName(input);
+      name.title = name.textContent;
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "mail-attachment-chip-remove";
+      remove.setAttribute("aria-label", `移除附件 ${name.textContent}`);
+      remove.innerHTML = icon("close");
+      remove.addEventListener("click", () => {
+        input.checked = false;
+        syncSelected();
+      });
+      chip.append(name, remove);
+      chipsBox.append(chip);
+    }
+  };
+  const setPickerTab = (tab: "task" | "build") => {
+    form.querySelectorAll<HTMLElement>("[data-mail-picker-tab]").forEach(button => {
+      const active = button.dataset.mailPickerTab === tab;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-selected", String(active));
+    });
+    form.querySelectorAll<HTMLElement>("[data-mail-picker-pane]").forEach(pane => {
+      pane.hidden = pane.dataset.mailPickerPane !== tab;
     });
   };
+  form.querySelectorAll<HTMLElement>("[data-mail-picker-tab]").forEach(button => button.addEventListener("click", () => {
+    setPickerTab(button.dataset.mailPickerTab === "build" ? "build" : "task");
+  }));
+  pickerToggle.addEventListener("click", () => {
+    const opening = picker.hidden;
+    picker.hidden = !opening;
+    pickerToggle.setAttribute("aria-expanded", String(opening));
+    if (opening) form.querySelector<HTMLButtonElement>('[data-mail-picker-tab][aria-selected="true"]')?.focus();
+  });
   form.addEventListener("change", event => {
     const target = event.target;
     if (target instanceof HTMLInputElement && (target.name === "attachment_ids" || target.name === "build_artifact_ids")) {
-      syncSelectedCounts();
+      syncSelected();
     }
   });
-  syncSelectedCounts();
+  syncSelected();
+
+  let autoTo = "";
+  let autoCc = "";
+  const applyTemplateDefaults = (template: MailTemplate | undefined) => {
+    const to = form.querySelector<HTMLInputElement>('input[name="to"]')!;
+    const cc = form.querySelector<HTMLInputElement>('input[name="cc"]')!;
+    const nextTo = (template?.default_to || []).join(", ");
+    const nextCc = (template?.default_cc || []).join(", ");
+    // Replace only values the Owner has not edited; keep manual recipients.
+    if (!to.value || to.value === autoTo) to.value = nextTo;
+    if (!cc.value || cc.value === autoCc) cc.value = nextCc;
+    autoTo = nextTo;
+    autoCc = nextCc;
+  };
+  const templateHint = form.querySelector<HTMLElement>("[data-mail-template-hint]")!;
   const syncTemplate = () => {
     const template = templateDefaults(templateSelect.value, templates);
     const noTemplate = !templateSelect.value;
@@ -224,35 +327,43 @@ export async function openTaskMailCompose(
     // exclusive. Disabling the hidden fields also keeps them out of FormData.
     syncDirectFields(noTemplate);
     variablesBox.innerHTML = noTemplate ? "" : variableInputs(template);
-    const to = form.querySelector<HTMLInputElement>('input[name="to"]')!;
-    const cc = form.querySelector<HTMLInputElement>('input[name="cc"]')!;
-    if (!noTemplate) {
-      if (!to.value) to.value = (template?.default_to || []).join(", ");
-      if (!cc.value) cc.value = (template?.default_cc || []).join(", ");
+    applyTemplateDefaults(noTemplate ? undefined : template);
+    const account = accounts.find(item => item.account_id === accountSelect.value);
+    const defaultID = account?.default_template_id || "";
+    const defaultAvailable = Boolean(defaultID) && templates.some(item => item.id === defaultID);
+    const scope = account ? scopeLabel(account.binding_scope) : "Task/Workspace/Project 绑定";
+    if (!defaultID) {
+      templateHint.textContent = noTemplate
+        ? "当前账号绑定未设置默认模板，默认不使用模板；可逐封选择模板。"
+        : "当前账号绑定未设置默认模板，本次逐封选择了模板。";
+    } else if (!defaultAvailable) {
+      templateHint.textContent = `绑定的默认模板不可用（可能已归档），请逐封选择；默认来自 ${scope}。`;
+    } else if (templateSelect.value === defaultID) {
+      templateHint.textContent = `默认来自 ${scope}，可逐封覆盖。`;
+    } else {
+      templateHint.textContent = `已逐封覆盖默认模板（默认来自 ${scope}）。`;
     }
   };
   templateSelect.addEventListener("change", syncTemplate);
   accountSelect.addEventListener("change", () => {
-    const selected = accountSelect.selectedOptions[0];
-    const defaultTemplate = selected?.dataset.defaultTemplate || "";
-    if (defaultTemplate && templates.some(template => template.id === defaultTemplate)) {
-      templateSelect.value = defaultTemplate;
-      syncTemplate();
-    }
+    const account = accounts.find(item => item.account_id === accountSelect.value);
+    // Switching account always switches to that account's binding default;
+    // an unset binding explicitly selects "不使用模板".
+    templateSelect.value = mailComposeTemplateSelection(account, templates);
+    syncTemplate();
   });
-  const close = () => { dialog.close(); dialog.remove(); };
-  dialog.querySelectorAll("[data-close]").forEach(button => button.addEventListener("click", close));
-  dialog.addEventListener("cancel", close);
-  const initialDefault = accountSelect.selectedOptions[0]?.dataset.defaultTemplate || "";
-  if (initialDefault && templates.some(template => template.id === initialDefault)) {
-    templateSelect.value = initialDefault;
-  }
+  const initialAccount = accounts.find(item => item.account_id === accountSelect.value);
+  templateSelect.value = mailComposeTemplateSelection(initialAccount, templates);
   syncTemplate();
 
   const collect = () => {
     const values = new FormData(form);
     const variables = Object.fromEntries([...form.querySelectorAll<HTMLInputElement>("[data-mail-variable-input]")].map(input => [input.dataset.mailVariableInput || "", input.value]));
     const variableValues = Object.fromEntries(Object.entries(variables).filter(([, value]) => String(value).trim() !== ""));
+    const selected = mailComposeAttachments(
+      attachmentInputs().map(input => ({value: input.value, checked: input.checked})),
+      artifactInputs().map(input => ({value: input.value, checked: input.checked})),
+    );
     return mailComposePayload(
       {
         account_id: values.get("account_id"), template_id: values.get("template_id"),
@@ -261,8 +372,8 @@ export async function openTaskMailCompose(
       },
       detail.task.id,
       variableValues,
-      values.getAll("attachment_ids").map(String),
-      values.getAll("build_artifact_ids").map(String),
+      selected.attachment_ids,
+      selected.build_artifact_ids,
     );
   };
   form.querySelector("#mail-compose-preview-button")?.addEventListener("click", () => {

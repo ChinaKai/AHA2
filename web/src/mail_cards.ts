@@ -264,10 +264,12 @@ function bindPreviewDialog(dialog: HTMLDialogElement, data: MailPreviewData): vo
     dialog.close();
     dialog.remove();
   }));
-  dialog.addEventListener("cancel", () => {
+  // `oncancel` replaces the handler instead of accumulating one more listener
+  // every time the sample values repaint the dialog.
+  dialog.oncancel = () => {
     dialog.close();
     dialog.remove();
-  });
+  };
   const stage = dialog.querySelector<HTMLElement>("[data-mail-preview-stage]");
   const setWidth = (width: 600 | 375) => {
     if (stage) stage.dataset.width = String(width);
@@ -337,10 +339,29 @@ function bindPreviewDialog(dialog: HTMLDialogElement, data: MailPreviewData): vo
 export function openMailPreviewDialog(data: MailPreviewData): HTMLDialogElement {
   const dialog = document.createElement("dialog");
   dialog.className = "wide mail-resource-dialog mail-preview-dialog";
+  // Mount the initial markup before showModal(): bindPreviewDialog only wires
+  // listeners to elements that already exist. Without this the dialog opened
+  // empty at every entry point (template list/edit, compose and approval).
+  dialog.innerHTML = mailPreviewDialogHtml(data);
   bindPreviewDialog(dialog, data);
   document.body.appendChild(dialog);
   dialog.showModal();
   return dialog;
+}
+
+// Live editor preview: replace known variables with the same built-in sample
+// values used by the server preview. Unknown placeholders stay visible so the
+// author can see what still needs a value. The document is mounted in a
+// sandboxed iframe, so scripts/forms never run; server sanitization and the
+// final preview remain the source of truth for what is actually sent.
+export function mailTemplateLivePreviewSrcdoc(bodyHtml: string): string {
+  const source = String(bodyHtml || "");
+  const rendered = source.replace(/\{\{([a-zA-Z0-9_.-]+)\}\}/g, (match, name: string) => {
+    const value = MAIL_SAMPLE_VARIABLES[name];
+    return value === undefined ? match : escapeHTML(value);
+  });
+  const body = rendered.trim() || `<p style="color:#69707d">在编辑器输入 HTML 后，这里会即时显示近似渲染效果。</p>`;
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><style>html,body{margin:0}body{padding:12px;background:#fff;color:#171a20;font:14px/1.6 Inter,"Segoe UI","Microsoft YaHei",sans-serif;overflow-wrap:anywhere}table{border-collapse:collapse;max-width:100%}img{max-width:100%}</style></head><body>${body}</body></html>`;
 }
 
 // One Mail Message always renders as one card, keyed by message id. Status

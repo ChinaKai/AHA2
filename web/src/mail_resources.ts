@@ -1,6 +1,6 @@
 import {api} from "./api.js";
 import {icon} from "./icons.js";
-import {formatMailBytes, formatMailTime, mailAttachmentsHtml, mailCanCancel, mailCanDecide, mailCanRetry, mailDigestShort, mailPreviewSamples, mailPreviewVariablePayload, mailStatusClass, mailStatusLabel, mailTemplatePlaceholders, mailTemplateVariables, openMailPreviewDialog} from "./mail_cards.js";
+import {formatMailBytes, formatMailTime, mailAttachmentsHtml, mailCanCancel, mailCanDecide, mailCanRetry, mailDigestShort, mailPreviewSamples, mailPreviewVariablePayload, mailStatusClass, mailStatusLabel, mailTemplateLivePreviewSrcdoc, mailTemplatePlaceholders, mailTemplateVariables, openMailPreviewDialog} from "./mail_cards.js";
 import type {MailPreviewData} from "./mail_cards.js";
 import type {MailAccount, MailAttachment, MailDelivery, MailDeliveryAttempt, MailMessage, MailTemplate, MailTemplateVersion, Project} from "./types.js";
 
@@ -175,17 +175,19 @@ function csvValues(value: unknown): string[] {
 // or manual-variable field to disagree with this payload.
 export function mailTemplateSubmitPayload(values: Record<string, unknown>, template?: MailTemplate): Record<string, unknown> {
   const subject = String(values.subject_template || "");
-  const text = String(values.body_text_template || "");
   const html = String(values.body_html_template || "");
   return {
     scope: "global",
     name: String(values.name || "").trim(),
     subject_template: subject,
-    body_text_template: text,
+    // The custom text field is gone. The server always derives body_text from
+    // the sanitized HTML, so sending an empty string also clears the legacy
+    // text of an old template when it is next saved.
+    body_text_template: "",
     body_html_template: html,
     default_to: csvValues(values.default_to),
     default_cc: csvValues(values.default_cc),
-    required_variables: mailTemplateVariables(subject, text, html),
+    required_variables: mailTemplateVariables(subject, "", html),
     ...(template ? {expected_version: template.current_version} : {}),
   };
 }
@@ -202,19 +204,27 @@ export function templateForm(template?: MailTemplate): string {
     ${legacy ? `<p class="mail-template-legacy-note">${icon("shield")}旧项目模板：保持原项目作用域，不能改为全局，也不会被伪装成全局模板；允许编辑内容与归档。</p>` : ""}
     <label>名称<input name="name" maxlength="200" required value="${escapeHTML(template?.name || "")}"></label>
     <label>主题<input name="subject_template" required value="${escapeHTML(template?.subject_template || "")}"></label>
-    <label>默认收件人（逗号分隔）<input name="default_to" value="${escapeHTML((template?.default_to || []).join(", "))}"></label>
-    <details class="mail-template-advanced">
-      <summary>高级：默认 CC 与自定义纯文本</summary>
+    <div class="mail-template-defaults">
+      <label>默认收件人（逗号分隔）<input name="default_to" value="${escapeHTML((template?.default_to || []).join(", "))}"></label>
       <label>默认 CC（逗号分隔）<input name="default_cc" value="${escapeHTML((template?.default_cc || []).join(", "))}"></label>
-      <label>自定义纯文本（留空时由后端从 HTML 自动生成）<textarea name="body_text_template" rows="4">${escapeHTML(template?.body_text_template || "")}</textarea></label>
-    </details>
-    <div class="mail-template-editor-head"><strong>HTML 正文</strong><small>主编辑区；可用下方按钮插入变量或安全表格。</small></div>
+    </div>
+    ${template?.body_text_template?.trim() ? `<p class="field-help">该模板仍有历史自定义纯文本；本次保存后将改为由 HTML 自动生成。</p>` : ""}
+    <div class="mail-template-editor-head"><strong>HTML 正文</strong><small>主编辑区；可用下方按钮插入变量或安全表格，实时预览会随输入更新。</small></div>
     <div class="mail-variable-bar" aria-label="插入变量">${variables.map(name => `<button type="button" data-mail-variable="${name}">{{${name}}}</button>`).join("")}</div>
     <div class="mail-template-html-tools"><button type="button" data-mail-insert-table>${icon("plus")}插入表格</button><small>生成固定安全样式；单元格内可继续使用模板变量。</small></div>
-    <textarea class="mail-template-html-editor" name="body_html_template" rows="12" aria-label="HTML 正文" placeholder="<p>构建 {{build.version}} 已完成</p>">${escapeHTML(template?.body_html_template || "")}</textarea>
-    <div class="field-help" data-mail-auto-variables>自动识别变量：${escapeHTML(autoVariablesText(template?.subject_template || "", template?.body_text_template || "", template?.body_html_template || ""))}</div>
-    <div class="mail-template-preview-actions"><button type="button" data-mail-template-preview-form>${icon("eye")}预览</button><small>使用内置示例值直接渲染，无需填写 JSON。</small></div>
-    <p class="field-help">变量只做字符串替换；HTML 只允许安全子集（含表格专用的安全 style），变量替换后会再次 sanitize。</p>
+    <div class="mail-template-editor-grid">
+      <div class="mail-template-editor-main">
+        <textarea class="mail-template-html-editor" name="body_html_template" rows="12" aria-label="HTML 正文" placeholder="<p>构建 {{build.version}} 已完成</p>">${escapeHTML(template?.body_html_template || "")}</textarea>
+        <div class="field-help" data-mail-auto-variables>自动识别变量：${escapeHTML(autoVariablesText(template?.subject_template || "", "", template?.body_html_template || ""))}</div>
+        <div class="mail-template-preview-actions"><button type="button" data-mail-template-preview-form>${icon("eye")}预览</button><small>使用内置示例值直接渲染，无需填写 JSON。</small></div>
+      </div>
+      <div class="mail-template-live">
+        <div class="mail-template-live-head"><strong>实时预览</strong><small>近似效果；变量按内置示例值显示</small></div>
+        <iframe class="mail-template-live-frame" data-mail-template-live sandbox="" title="HTML 实时预览"></iframe>
+        <p class="field-help">已知变量按示例值显示，未知变量保留 <code>{{占位符}}</code>。实时预览不执行脚本，也不替代发送前的服务端 sanitize 与最终预览。</p>
+      </div>
+    </div>
+    <p class="field-help">变量只做字符串替换；HTML 只允许安全子集（含表格专用的安全 style），变量替换后会再次 sanitize。纯文本正文由后端从 HTML 自动生成。</p>
   </div>`;
 }
 
@@ -402,12 +412,29 @@ export function bindMailResources(data: MailResourcesData, actions: MailResource
       if (target) {
         target.textContent = `自动识别变量：${autoVariablesText(
           String(values.get("subject_template") || ""),
-          String(values.get("body_text_template") || ""),
+          "",
           String(values.get("body_html_template") || ""),
         )}`;
       }
     };
-    form.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>('input[name="subject_template"], textarea[name="body_text_template"], textarea[name="body_html_template"]').forEach(input => input.addEventListener("input", syncAutoVariables));
+    form.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>('input[name="subject_template"], textarea[name="body_html_template"]').forEach(input => input.addEventListener("input", syncAutoVariables));
+
+    // Live preview is debounced so typing and the table/variable buttons never
+    // rebuild a document on every keystroke. The iframe is sandboxed without
+    // scripts; the server sanitizer remains the final authority.
+    const liveFrame = form.querySelector<HTMLIFrameElement>("[data-mail-template-live]");
+    const liveEditor = form.querySelector<HTMLTextAreaElement>('textarea[name="body_html_template"]');
+    let liveTimer = 0;
+    const renderLive = () => {
+      if (!liveFrame || !liveFrame.isConnected) return;
+      liveFrame.srcdoc = mailTemplateLivePreviewSrcdoc(liveEditor?.value || "");
+    };
+    const scheduleLive = () => {
+      window.clearTimeout(liveTimer);
+      liveTimer = window.setTimeout(renderLive, 120);
+    };
+    liveEditor?.addEventListener("input", scheduleLive);
+    renderLive();
     form.querySelectorAll<HTMLButtonElement>("[data-mail-variable]").forEach(button => button.addEventListener("click", () => {
       const target = lastField || form.querySelector<HTMLTextAreaElement>('textarea[name="body_html_template"]');
       if (!target) return;

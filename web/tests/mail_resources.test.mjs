@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import {readFileSync} from "node:fs";
 import {readFile} from "node:fs/promises";
 import {resolve} from "node:path";
 import {pathToFileURL} from "node:url";
@@ -215,7 +216,7 @@ test("template editor derives required variables and has no scope or project fie
   const payload = mailResources.mailTemplateSubmitPayload({
     name: "提测通知",
     subject_template: "{{task.title}}",
-    body_text_template: "",
+    body_text_template: "{{test.scope}} 旧的自定义纯文本",
     body_html_template: "<p>{{build.version}}</p>",
     default_to: "qa@example.com, lead@example.com",
     default_cc: "",
@@ -223,7 +224,8 @@ test("template editor derives required variables and has no scope or project fie
   });
   assert.equal(payload.scope, "global");
   assert.equal(payload.name, "提测通知");
-  assert.deepEqual(payload.required_variables, ["build.version"]);
+  assert.equal(payload.body_text_template, "", "saving always clears the legacy custom text; the backend derives it from HTML");
+  assert.deepEqual(payload.required_variables, ["build.version"], "variables in removed legacy text no longer count");
   assert.deepEqual(payload.default_to, ["qa@example.com", "lead@example.com"]);
   assert.ok(!("project_id" in payload), "the editor no longer submits a project");
   assert.ok(!("description" in payload));
@@ -233,9 +235,14 @@ test("template editor derives required variables and has no scope or project fie
   assert.doesNotMatch(form, /name="project_id"/, "project is not a user-editable field");
   assert.doesNotMatch(form, /name="required_variables"/, "required variables are scanned, not typed");
   assert.match(form, /name="body_html_template"/);
-  assert.match(form, /name="body_text_template"/);
-  assert.match(form, /高级：默认 CC 与自定义纯文本/);
+  assert.doesNotMatch(form, /name="body_text_template"/, "custom plain text field was removed");
+  assert.doesNotMatch(form, /高级：默认 CC 与自定义纯文本/, "advanced section is gone");
+  assert.doesNotMatch(form, /mail-template-advanced/, "no collapsed advanced container remains");
+  assert.match(form, /name="default_cc"/, "default CC lives in the main form");
   assert.match(form, /data-mail-template-preview-form/);
+  assert.match(form, /data-mail-template-live/, "HTML editor has a live preview iframe");
+  assert.match(form, /sandbox=""/, "live preview iframe blocks scripts");
+  assert.match(form, /实时预览/, "live preview is explained in the editor");
 
   const legacy = mailResources.templateForm({
     id: "mail_template_legacy", scope: "project", project_id: "project_1", name: "旧模板",
@@ -328,21 +335,35 @@ test("pending card opens an approval preview with the snapshot and decision butt
   assert.match(dialog, /sandbox=""/);
 });
 
-test("binding form grid prevents right-edge clipping and wraps below 560px", async () => {
+test("binding form grid keeps labels, selects and button on one baseline", async () => {
   const css = await readFile(resolve(dist, "styles.css"), "utf8");
   const formRule = css.match(/\.task-mail-binding-form\s*\{([^}]*)\}/);
   assert.ok(formRule, "binding form rule exists");
   assert.match(formRule[1], /grid-template-columns:\s*minmax\(0,\s*1fr\)\s+minmax\(0,\s*1fr\)\s+auto/);
+  assert.match(formRule[1], /min-width:\s*0/);
   const labelRule = css.match(/\.task-mail-binding-form label\s*\{([^}]*)\}/);
   assert.match(labelRule[1], /min-width:\s*0/);
+  // Regression for the screenshot: the global label rule has margin-bottom:
+  // 13px; without resetting it align-items:end pushed the button below the
+  // selects instead of keeping one baseline.
+  assert.match(labelRule[1], /margin:\s*0/);
+  assert.doesNotMatch(labelRule[1], /margin-bottom/);
   const selectRule = css.match(/\.task-mail-binding-form select\s*\{([^}]*)\}/);
   assert.match(selectRule[1], /min-width:\s*0/);
+  assert.match(selectRule[1], /height:\s*38px/, "select height is explicit");
   assert.match(selectRule[1], /text-overflow:\s*ellipsis/);
   const buttonRule = css.match(/\.task-mail-binding-form button\s*\{([^}]*)\}/);
   assert.match(buttonRule[1], /white-space:\s*nowrap/);
+  assert.match(buttonRule[1], /height:\s*38px/, "button matches select height");
+  assert.match(buttonRule[1], /min-height:\s*38px/);
+
+  const container = css.match(/@container \(max-width: 520px\) \{([\s\S]*?)\n\}/);
+  assert.ok(container, "narrow-container query exists (not only viewport media queries)");
+  assert.match(container[1], /\.task-mail-binding-form\s*\{\s*grid-template-columns:\s*minmax\(0,\s*1fr\)/);
+  assert.match(container[1], /\.task-mail-binding-form button\s*\{\s*width:\s*100%/);
 
   const narrow = css.match(/@media \(max-width: 560px\) \{([\s\S]*?)\n\}/);
-  assert.ok(narrow, "560px media query exists");
+  assert.ok(narrow, "560px viewport fallback exists");
   assert.match(narrow[1], /\.task-mail-binding-form\s*\{\s*grid-template-columns:\s*minmax\(0,\s*1fr\)/);
   assert.match(narrow[1], /\.task-mail-binding-form button\s*\{\s*width:\s*100%/);
 });
@@ -377,6 +398,121 @@ test("template list hides archived templates until the toggle and badges legacy 
   assert.ok(withArchived.indexOf("已归档模板（1）") > withArchived.indexOf("data-mail-template=\"mail_template_active\""), "archived section is separate and after active templates");
   assert.match(withArchived, /data-mail-template-purge="mail_template_active"/);
   assert.match(withArchived, /data-mail-template-purge="mail_template_archived"/);
+});
+
+test("opening the preview dialog mounts envelope markup before showModal", () => {
+  // Minimal DOM stub: the regression was that openMailPreviewDialog called
+  // bindPreviewDialog/showModal on an empty <dialog>. This asserts the initial
+  // markup is actually assigned first, instead of matching source strings.
+  const events = [];
+  class FakeDialog {
+    constructor() { this.className = ""; this._html = ""; this.open = false; }
+    set innerHTML(value) { this._html = value; events.push("innerHTML"); }
+    get innerHTML() { return this._html; }
+    addEventListener() {}
+    querySelectorAll() { return []; }
+    querySelector() { return null; }
+    close() {}
+    remove() {}
+    showModal() { events.push("showModal"); this.open = true; }
+  }
+  const appended = [];
+  globalThis.document = {
+    createElement(tag) { assert.equal(tag, "dialog"); return new FakeDialog(); },
+    body: { appendChild(element) { appended.push(element); events.push("appendChild"); } },
+  };
+  try {
+    const dialog = cards.openMailPreviewDialog({
+      title: "发送预览",
+      subject: "构建完成",
+      fromName: "AHA",
+      fromAddress: "noreply@example.com",
+      to: ["qa@example.com"],
+      bodyText: "纯文本回退",
+      bodyHtml: "<p>HTML 正文</p>",
+      attachments: [],
+    });
+    assert.equal(appended.length, 1, "dialog is attached to the body");
+    assert.deepEqual(events.slice(-3), ["innerHTML", "appendChild", "showModal"], "initial markup is mounted before the dialog is shown");
+    assert.equal(dialog.open, true);
+    assert.match(dialog.innerHTML, /mail-preview-envelope/);
+    assert.match(dialog.innerHTML, /构建完成/);
+    assert.match(dialog.innerHTML, /qa@example\.com/);
+    assert.match(dialog.innerHTML, /sandbox=""/);
+    assert.match(dialog.innerHTML, /data-mail-preview-width="600"/);
+    assert.match(dialog.innerHTML, /data-mail-preview-tab="text"/);
+    assert.match(dialog.innerHTML, /HTML 正文/);
+  } finally {
+    delete globalThis.document;
+  }
+});
+
+test("compose default template is exactly the account binding template", () => {
+  const templates = [
+    {id: "mail_template_first", name: "第一个模板"},
+    {id: "mail_template_bound", name: "绑定模板"},
+  ];
+  assert.equal(
+    mailTask.mailComposeTemplateSelection({account_id: "a1", default_template_id: "mail_template_bound"}, templates),
+    "mail_template_bound",
+    "uses the binding default even when it is not the first template",
+  );
+  assert.equal(
+    mailTask.mailComposeTemplateSelection({account_id: "a1", default_template_id: ""}, templates),
+    "",
+    "an unset binding selects 不使用模板 instead of the first template",
+  );
+  assert.equal(
+    mailTask.mailComposeTemplateSelection({account_id: "a1"}, templates),
+    "",
+    "a missing default_template_id also selects 不使用模板",
+  );
+  assert.equal(
+    mailTask.mailComposeTemplateSelection({account_id: "a1", default_template_id: "mail_template_missing"}, templates),
+    "",
+    "a stale binding id never selects an unrelated template",
+  );
+  assert.equal(
+    mailTask.mailComposeTemplateSelection(undefined, templates),
+    "",
+    "no selected account falls back to 不使用模板",
+  );
+});
+
+test("attachment picker selection maps to the submitted payload ids", () => {
+  const selected = mailTask.mailComposeAttachments(
+    [{value: "att_1", checked: true}, {value: "att_2", checked: false}, {value: "att_3", checked: true}],
+    [{value: "artifact_1", checked: false}, {value: "artifact_2", checked: true}],
+  );
+  assert.deepEqual(selected.attachment_ids, ["att_1", "att_3"], "unchecked Task attachments never enter the payload");
+  assert.deepEqual(selected.build_artifact_ids, ["artifact_2"], "build artifacts stay in their own payload field");
+
+  const payload = mailTask.mailComposePayload(
+    {account_id: "a1", template_id: "t1", to: "qa@example.com"},
+    "task_1", {}, selected.attachment_ids, selected.build_artifact_ids,
+  );
+  assert.deepEqual(payload.attachment_ids, ["att_1", "att_3"]);
+  assert.deepEqual(payload.build_artifact_ids, ["artifact_2"]);
+
+  const composeSource = readFileSync(resolve(dist, "mail_task.js"), "utf8");
+  assert.match(composeSource, /data-mail-attachment-chips/, "selected attachments render as chips");
+  assert.match(composeSource, /data-mail-attachment-picker/, "one compact picker replaces the two stacked lists");
+  assert.match(composeSource, /data-mail-picker-pane="task"/);
+  assert.match(composeSource, /data-mail-picker-pane="build"/);
+  assert.match(composeSource, /构建产物只来自当前 Task 已登记/, "the build-artifact source and selection rule is explained");
+  assert.match(composeSource, /data-mail-selected-total/, "selected count stays visible");
+});
+
+test("template live preview substitutes sample variables and keeps unknown placeholders", () => {
+  const srcdoc = cards.mailTemplateLivePreviewSrcdoc(
+    '<table><tr><td>{{build.version}}</td><td>{{task.title}}</td><td>{{unknown.variable}}</td></tr></table>',
+  );
+  assert.match(srcdoc, /<table><tr><td>1\.0\.0-rc\.1<\/td><td>示例任务：邮件预览<\/td><td>\{\{unknown\.variable\}\}<\/td><\/tr><\/table>/);
+  assert.match(srcdoc, /<meta charset="utf-8">/);
+  const empty = cards.mailTemplateLivePreviewSrcdoc("");
+  assert.match(empty, /输入 HTML 后/);
+  const escaped = cards.mailTemplateLivePreviewSrcdoc("<p>{{task.title}}</p>");
+  assert.doesNotMatch(escaped, /<script/i, "live preview never adds executable script");
 });
 
 test("resources page keeps hardware and mail in one eight-item navigation shell", () => {
