@@ -465,7 +465,7 @@ export interface TaskRound {
   elapsed_ms: number;
 }
 
-export type ConversationCategory = "chat" | "update" | "tool" | "error" | "mail";
+export type ConversationCategory = "chat" | "update" | "tool" | "error";
 
 export interface Attachment {
   id: string;

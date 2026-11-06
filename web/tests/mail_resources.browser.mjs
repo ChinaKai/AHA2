@@ -192,11 +192,9 @@ try {
   await page.waitForFunction(() => document.querySelector('[data-task-tool="mail"] .task-tool-badge')?.textContent === "1");
   await page.waitForSelector(".task-mail-panel [data-mail-card='mail_message_1']");
   assert.match(await page.locator(".task-mail-panel [data-mail-card='mail_message_1']").innerText(), /待审批/);
-  // The timeline notice shows the submitted state but exposes no decision controls.
-  const timelineCard = page.locator("#conversation-list [data-mail-card='mail_message_1']").first();
-  await page.waitForSelector("#conversation-list [data-mail-card='mail_message_1']");
-  assert.match(await timelineCard.innerText(), /已提交，等待 Owner 审批/);
-  assert.equal(await timelineCard.locator("[data-mail-action]").count(), 0);
+  // The conversation timeline no longer renders mail cards; the tool panel is
+  // the single place to inspect and decide.
+  assert.equal(await page.locator("#conversation-list [data-mail-card]").count(), 0);
   const approve = page.locator(".task-mail-panel [data-mail-action='approve']").first();
   assert.equal(await approve.isVisible(), true);
   await approve.click();

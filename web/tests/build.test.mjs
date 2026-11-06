@@ -1009,9 +1009,10 @@ test("mail phase two keeps navigation stable, one mail entry, and table tools", 
   assert.match(script, /pendingMail: taskMailPendingCount\(\)/);
   assert.match(script, /function syncTaskMailIndicator\(\)/);
   assert.match(script, /syncTaskMailIndicator\(\);/);
-  // The timeline is informational; approval actions live in the tool panel.
-  assert.match(mailCards, /已提交，等待 Owner 审批/);
-  assert.doesNotMatch(mailCards, /export function mailConversationCardHtml[\s\S]{0,1400}data-mail-action/);
+  // The timeline no longer renders mail cards at all; mail lives only in the
+  // task mail tool panel.
+  assert.doesNotMatch(mailCards, /mailConversationCardHtml|mail-message-card/);
+  assert.doesNotMatch(script, /mailConversationCardHtml|mail-message-card/);
   // Template editor can insert a fixed table skeleton.
   assert.match(mailResources, /data-mail-insert-table/);
   assert.match(mailResources, /export function mailTemplateTableSkeleton/);
@@ -1041,7 +1042,8 @@ test("SSE list refresh is debounced and deferred while a task detail is open", a
 test("read-only task history opens on the latest page and lazily loads older rows", async () => {
   const root = resolve(import.meta.dirname, "..");
   const script = await readFile(resolve(root, "dist", "app.js"), "utf8");
-  assert.match(script, /summary\?\.read_only\s*\?\s*\[\s*"chat",\s*"update",\s*"error",\s*"mail"\s*\]/);
+  assert.match(script, /summary\?\.read_only\s*\?\s*\[\s*"chat",\s*"update",\s*"error"\s*\]/);
+  assert.doesNotMatch(script, /summary\?\.read_only\s*\?\s*\[[^\]]*"mail"/);
   assert.match(script, /agentConversation\(taskID,\s*"main",\s*\{\s*limit:\s*initialConversationPageSize,\s*categories\s*\}/);
   assert.match(script, /requestConversationBottom\(\)/);
   assert.match(script, /detail\.task\.read_only\s*\|\|\s*detail\.task\.status\s*===\s*"draft"\)\s*closeEvents\(\)/);
@@ -1427,6 +1429,14 @@ test("built web contains responsive application", async () => {
   assert.match(taskComposer, /composer-target-wrap/);
   assert.match(taskComposer, /conversation-filter-popover/);
   assert.match(taskComposer, /data-conversation-category/);
+  // The message filter keeps exactly four categories; mail is not one of them.
+  assert.match(taskComposer, /chat: "对话",\s*update: "Agent Update",\s*tool: "工具调用",\s*error: "错误",?\s*\}/);
+  assert.doesNotMatch(taskComposer, /mail: "邮件"/);
+  assert.match(taskComposer, /enabled}\/4/);
+  assert.doesNotMatch(taskComposer, /enabled}\/5/);
+  assert.doesNotMatch(conversation, /mailConversationCardHtml|mail-message-card|data-message-category="mail"/);
+  assert.doesNotMatch(script, /taskCategories:\s*\{[\s\S]{0,200}mail/);
+  assert.doesNotMatch(script, /\["chat", "update", "error", "mail"\]/);
   assert.match(script, /taskCategories:\s*\{[\s\S]{0,200}tool:\s*false/);
   assert.match(script, /消息已排队/);
   assert.match(promptAdmin, /prompt-template-layout/);
