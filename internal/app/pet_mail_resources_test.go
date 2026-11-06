@@ -72,6 +72,20 @@ type petMailAuditRow struct {
 	Data   string
 }
 
+func petMailAuditCount(t *testing.T, databasePath string) int {
+	t.Helper()
+	db, err := sql.Open("sqlite", databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM audit_events WHERE action LIKE 'pet.mail%'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	return count
+}
+
 func petMailAuditRows(t *testing.T, databasePath string) []petMailAuditRow {
 	t.Helper()
 	db, err := sql.Open("sqlite", databasePath)
@@ -201,6 +215,21 @@ func TestPetMailResourcesAccountLifecycle(t *testing.T) {
 		`{"account_id":"mail-acc-test","smtp_host":"smtphz.qiye.163.com"}`))
 	if updated.SMTPHost != domain.MailBackupSMTPHost || updated.Status != string(domain.MailAccountUnverified) {
 		t.Fatalf("host update=%#v", updated)
+	}
+
+	// Aliases stay manageable while no Owner credential is configured.
+	aliased := decodePetMailAccountView(t, petMailToolCall(t, fixture,
+		"aha_update_mail_account",
+		`{"account_id":"mail-acc-test","aliases":["alias-test@example.com","alias-two@example.com"]}`))
+	if len(aliased.Aliases) != 2 || aliased.Aliases[0] != "alias-test@example.com" ||
+		aliased.Aliases[1] != "alias-two@example.com" {
+		t.Fatalf("credential-free alias add=%#v", aliased)
+	}
+	aliased = decodePetMailAccountView(t, petMailToolCall(t, fixture,
+		"aha_update_mail_account",
+		`{"account_id":"mail-acc-test","aliases":["alias-two@example.com"]}`))
+	if len(aliased.Aliases) != 1 || aliased.Aliases[0] != "alias-two@example.com" {
+		t.Fatalf("credential-free alias remove=%#v", aliased)
 	}
 
 	audits := petMailAuditRows(t, fixture.databasePath)
@@ -415,9 +444,23 @@ func TestPetMailResourcesLockedCredentialTarget(t *testing.T) {
 	enablePetHardwareTestSettings(t, fixture, true)
 
 	created := decodePetMailAccountView(t, petMailToolCall(t, fixture, "aha_create_mail_account",
-		`{"id":"mail-locked","name":"锁定邮箱","from_address":"locked@example.com"}`))
+		`{"id":"mail-locked","name":"锁定邮箱","from_address":"locked@example.com","aliases":["alias-a@example.com","alias-b@example.com"]}`))
 	if created.PasswordConfigured {
 		t.Fatalf("new account unexpectedly has a credential: %#v", created)
+	}
+	if len(created.Aliases) != 2 {
+		t.Fatalf("created aliases=%v", created.Aliases)
+	}
+	// Give the Owner-managed aliases display names so a same-set reorder can be
+	// checked for accidental metadata loss.
+	stored, err := fixture.database.MailAccount(fixture.ctx, "mail-locked")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored.Aliases[0].DisplayName = "别名 A"
+	stored.Aliases[1].DisplayName = "别名 B"
+	if _, err := fixture.database.UpdateMailAccount(fixture.ctx, stored); err != nil {
+		t.Fatal(err)
 	}
 	if err := fixture.database.SetMailAccountCredential(fixture.ctx, "mail-locked", time.Now().UTC()); err != nil {
 		t.Fatal(err)
@@ -433,31 +476,67 @@ func TestPetMailResourcesLockedCredentialTarget(t *testing.T) {
 	if !before.CredentialConfigured {
 		t.Fatalf("credential was not recorded: %#v", before)
 	}
+	auditCountBefore := petMailAuditCount(t, fixture.databasePath)
 
-	blocked := []string{
-		`{"account_id":"mail-locked","smtp_host":"smtphz.qiye.163.com"}`,
-		`{"account_id":"mail-locked","from_address":"other@example.com"}`,
-		`{"account_id":"mail-locked","smtp_username":"other@example.com"}`,
+	blocked := []struct {
+		name string
+		args string
+	}{
+		{"provider", `{"account_id":"mail-locked","provider":"other_provider"}`},
+		{"from_address", `{"account_id":"mail-locked","from_address":"other@example.com"}`},
+		{"smtp_host", `{"account_id":"mail-locked","smtp_host":"smtphz.qiye.163.com"}`},
+		{"smtp_port", `{"account_id":"mail-locked","smtp_port":587}`},
+		{"smtp_security", `{"account_id":"mail-locked","smtp_security":"starttls"}`},
+		{"smtp_username", `{"account_id":"mail-locked","smtp_username":"other@example.com"}`},
+		{"aliases-add", `{"account_id":"mail-locked","aliases":["alias-a@example.com","alias-b@example.com","alias-c@example.com"]}`},
+		{"aliases-remove", `{"account_id":"mail-locked","aliases":["alias-a@example.com"]}`},
 	}
-	for _, args := range blocked {
-		err := petMailToolError(t, fixture, "aha_update_mail_account", args)
+	for _, item := range blocked {
+		err := petMailToolError(t, fixture, "aha_update_mail_account", item.args)
 		if !strings.Contains(err.Error(), "mail_credential_owner_only") {
-			t.Fatalf("%s err=%v", args, err)
+			t.Fatalf("%s err=%v", item.name, err)
 		}
 		if strings.Contains(err.Error(), credentialRef) {
-			t.Fatalf("%s leaked credential_ref: %v", args, err)
+			t.Fatalf("%s leaked credential_ref: %v", item.name, err)
 		}
-		stored, err := fixture.database.MailAccount(fixture.ctx, "mail-locked")
+		after, err := fixture.database.MailAccount(fixture.ctx, "mail-locked")
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !reflect.DeepEqual(stored, before) {
-			t.Fatalf("%s changed the account: before=%#v after=%#v", args, before, stored)
+		if !reflect.DeepEqual(after, before) {
+			t.Fatalf("%s changed the account: before=%#v after=%#v", item.name, before, after)
 		}
 		storedRef, err := fixture.database.MailAccountCredentialRef(fixture.ctx, "mail-locked")
 		if err != nil || storedRef != credentialRef {
-			t.Fatalf("%s changed credential_ref to %q (err=%v)", args, storedRef, err)
+			t.Fatalf("%s changed credential_ref to %q (err=%v)", item.name, storedRef, err)
 		}
+		if got := petMailAuditCount(t, fixture.databasePath); got != auditCountBefore {
+			t.Fatalf("%s wrote %d audit rows, want %d", item.name, got, auditCountBefore)
+		}
+	}
+
+	// The same alias set in a different order is not an identity change, so it
+	// stays editable and must keep the Owner credential and alias metadata.
+	reordered := decodePetMailAccountView(t, petMailToolCall(t, fixture, "aha_update_mail_account",
+		`{"account_id":"mail-locked","aliases":["alias-b@example.com","alias-a@example.com"]}`))
+	if len(reordered.Aliases) != 2 || reordered.Aliases[0] != "alias-b@example.com" ||
+		reordered.Aliases[1] != "alias-a@example.com" || !reordered.PasswordConfigured {
+		t.Fatalf("reorder update=%#v", reordered)
+	}
+	stored, err = fixture.database.MailAccount(fixture.ctx, "mail-locked")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Aliases[0].DisplayName != "别名 B" || stored.Aliases[1].DisplayName != "别名 A" {
+		t.Fatalf("reorder dropped Owner alias display names: %#v", stored.Aliases)
+	}
+	storedRef, err := fixture.database.MailAccountCredentialRef(fixture.ctx, "mail-locked")
+	if err != nil || storedRef != credentialRef {
+		t.Fatalf("reorder lost credential_ref: %q err=%v", storedRef, err)
+	}
+	if !stored.CredentialConfigured || stored.Address != "locked@example.com" ||
+		stored.SMTPHost != domain.MailDefaultSMTPHost {
+		t.Fatalf("reorder changed credential target: %#v", stored)
 	}
 
 	// Non-target fields stay editable and the Owner credential survives.
@@ -467,7 +546,7 @@ func TestPetMailResourcesLockedCredentialTarget(t *testing.T) {
 		!updated.PasswordConfigured {
 		t.Fatalf("control update=%#v", updated)
 	}
-	stored, err := fixture.database.MailAccount(fixture.ctx, "mail-locked")
+	stored, err = fixture.database.MailAccount(fixture.ctx, "mail-locked")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -475,7 +554,7 @@ func TestPetMailResourcesLockedCredentialTarget(t *testing.T) {
 		stored.SMTPHost != domain.MailDefaultSMTPHost {
 		t.Fatalf("control update changed credential target: %#v", stored)
 	}
-	storedRef, err := fixture.database.MailAccountCredentialRef(fixture.ctx, "mail-locked")
+	storedRef, err = fixture.database.MailAccountCredentialRef(fixture.ctx, "mail-locked")
 	if err != nil || storedRef != credentialRef {
 		t.Fatalf("control update lost credential_ref: %q err=%v", storedRef, err)
 	}

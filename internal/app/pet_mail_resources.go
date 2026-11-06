@@ -215,9 +215,19 @@ func (input PetMailAccountInput) applyTo(base domain.MailAccount) domain.MailAcc
 		base.SMTPUsername = strings.TrimSpace(*input.SMTPUsername)
 	}
 	if input.Aliases != nil {
+		// The pet-facing alias list only carries addresses. Keep Owner-set
+		// display names for addresses that survive the edit so a same-set
+		// reorder never silently rewrites visible sender metadata.
+		displayNames := make(map[string]string, len(base.Aliases))
+		for _, alias := range base.Aliases {
+			displayNames[strings.ToLower(strings.TrimSpace(alias.Address))] = alias.DisplayName
+		}
 		aliases := make([]domain.MailAccountAlias, 0, len(*input.Aliases))
 		for _, raw := range *input.Aliases {
-			aliases = append(aliases, domain.MailAccountAlias{Address: strings.TrimSpace(raw)})
+			address := strings.TrimSpace(raw)
+			aliases = append(aliases, domain.MailAccountAlias{
+				Address: address, DisplayName: displayNames[strings.ToLower(address)],
+			})
 		}
 		base.Aliases = aliases
 	}
@@ -290,7 +300,9 @@ func validatePetMailAccount(item domain.MailAccount) (domain.MailAccount, error)
 			continue
 		}
 		seen[key] = true
-		aliases = append(aliases, domain.MailAccountAlias{Address: address})
+		aliases = append(aliases, domain.MailAccountAlias{
+			Address: address, DisplayName: strings.TrimSpace(alias.DisplayName),
+		})
 	}
 	item.Aliases = aliases
 	return item, nil
@@ -301,14 +313,39 @@ func petMailAccountHasOwnerCredential(item domain.MailAccount, credentialRef str
 }
 
 // petMailAccountTargetChanged reports whether an update would point the stored
-// Owner credential at a different SMTP endpoint or sender identity.
+// Owner credential at a different SMTP endpoint or sender identity. Aliases are
+// part of the allowed From identity, so adding/removing one on a credentialed
+// account is a target change too. The comparison is order-insensitive: the same
+// address set in a different order is not an identity change.
 func petMailAccountTargetChanged(before, after domain.MailAccount) bool {
 	return !strings.EqualFold(before.Provider, after.Provider) ||
 		!strings.EqualFold(before.Address, after.Address) ||
 		!strings.EqualFold(before.SMTPHost, after.SMTPHost) ||
 		before.SMTPPort != after.SMTPPort ||
 		!strings.EqualFold(before.SMTPSecurity, after.SMTPSecurity) ||
-		!strings.EqualFold(before.SMTPUsername, after.SMTPUsername)
+		!strings.EqualFold(before.SMTPUsername, after.SMTPUsername) ||
+		!sameMailAliasSet(before.Aliases, after.Aliases)
+}
+
+// sameMailAliasSet compares alias addresses case-insensitively, ignoring order
+// and multiplicity beyond the stored set. Store reads are already deduplicated,
+// but the pet input is compared before normalization, so check defensively.
+func sameMailAliasSet(left, right []domain.MailAccountAlias) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	counts := make(map[string]int, len(left))
+	for _, alias := range left {
+		counts[strings.ToLower(strings.TrimSpace(alias.Address))]++
+	}
+	for _, alias := range right {
+		key := strings.ToLower(strings.TrimSpace(alias.Address))
+		if counts[key] == 0 {
+			return false
+		}
+		counts[key]--
+	}
+	return true
 }
 
 func petMailAccountChangedFields(before, after domain.MailAccount) []string {
