@@ -1,4 +1,5 @@
-import {api} from "./api.js";
+import {api, setAPIRequestObserver} from "./api.js";
+import type {APIRequestSample} from "./api.js";
 import {handlePetStreamEvent, mountAssistant, showPetSettings, notifyPetTaskIdle, notifyPetTaskReply, notifyPetTaskThinking, setAssistantVisible} from "./assistant.js";
 import {renderConversationList} from "./conversation_ui.js";
 import {bindCodexAccounts, renderCodexAccounts} from "./codex_accounts.js";
@@ -424,6 +425,15 @@ let prefetchRequestTracking = 0;
 // Lightweight, UI-free metrics for real-browser checks. `?perf=1` adds sparse
 // console output; production stays silent and the counters are readable from
 // `window.__ahaPerf`.
+interface APISlowRequestGroup {
+  method: string;
+  path: string;
+  status: number;
+  count: number;
+  maxMs: number;
+  totalMs: number;
+}
+
 interface AhaPerfMetrics {
   firstScreenMs: number;
   prefetchRuns: number;
@@ -434,8 +444,13 @@ interface AhaPerfMetrics {
   taskOpenCount: number;
   taskOpenLastMs: number;
   taskOpenTotalMs: number;
+  apiRequestCount: number;
+  apiSlowest: APIRequestSample | null;
+  // Null unless `?perf=1`: a normal visit never allocates a sample buffer.
+  apiSamples: APIRequestSample[] | null;
 }
 const perfEnabled = new URLSearchParams(window.location.search).get("perf") === "1";
+const apiSampleLimit = 200;
 const perfMetrics: AhaPerfMetrics = {
   firstScreenMs: 0,
   prefetchRuns: 0,
@@ -446,9 +461,45 @@ const perfMetrics: AhaPerfMetrics = {
   taskOpenCount: 0,
   taskOpenLastMs: 0,
   taskOpenTotalMs: 0,
+  apiRequestCount: 0,
+  apiSlowest: null,
+  apiSamples: perfEnabled ? [] : null,
 };
 (window as unknown as {__ahaPerf: AhaPerfMetrics}).__ahaPerf = perfMetrics;
 const bootStartedAt = performance.now();
+
+function recordAPIRequest(sample: APIRequestSample): void {
+  perfMetrics.apiRequestCount++;
+  const recorded = {...sample, durationMs: Math.round(sample.durationMs)};
+  if (!perfMetrics.apiSlowest || recorded.durationMs > perfMetrics.apiSlowest.durationMs) {
+    perfMetrics.apiSlowest = recorded;
+  }
+  const samples = perfMetrics.apiSamples;
+  if (!samples) return;
+  samples.push(recorded);
+  // Keep only the most recent attempts bounded; the lifetime total and slowest
+  // request stay accurate even after older samples are evicted.
+  if (samples.length > apiSampleLimit) samples.splice(0, samples.length - apiSampleLimit);
+}
+if (perfEnabled) setAPIRequestObserver(recordAPIRequest);
+
+function topSlowAPIRequests(limit = 5): APISlowRequestGroup[] {
+  const samples = perfMetrics.apiSamples;
+  if (!samples || samples.length === 0) return [];
+  const groups = new Map<string, APISlowRequestGroup>();
+  for (const sample of samples) {
+    const key = `${sample.method} ${sample.path} ${sample.status}`;
+    const group = groups.get(key);
+    if (group) {
+      group.count++;
+      group.maxMs = Math.max(group.maxMs, sample.durationMs);
+      group.totalMs += sample.durationMs;
+    } else {
+      groups.set(key, {method: sample.method, path: sample.path, status: sample.status, count: 1, maxMs: sample.durationMs, totalMs: sample.durationMs});
+    }
+  }
+  return [...groups.values()].sort((left, right) => right.maxMs - left.maxMs || right.totalMs - left.totalMs).slice(0, limit);
+}
 
 // `?perf=1` opens a small, dismissible snapshot of `__ahaPerf`. This is opt-in:
 // a normal visit creates no panel DOM and schedules no refresh timer.
@@ -485,6 +536,20 @@ function startPerfPanel(): void {
   const prefetchValue = addRow("预取");
   const listRefreshValue = addRow("列表刷新");
   const taskOpenValue = addRow("任务打开");
+  const apiCountValue = addRow("API 请求");
+  const apiSlowestValue = addRow("最慢请求");
+
+  const slowSection = document.createElement("div");
+  slowSection.className = "perf-slow-requests";
+  const slowTitle = document.createElement("strong");
+  slowTitle.textContent = "慢请求 Top 5";
+  const slowTotal = document.createElement("div");
+  slowTotal.className = "perf-slow-total";
+  const slowSlowest = document.createElement("div");
+  slowSlowest.className = "perf-slow-slowest";
+  const slowTop = document.createElement("ol");
+  slowTop.className = "perf-slow-top";
+  slowSection.append(slowTitle, slowTotal, slowSlowest, slowTop);
 
   const copyButton = document.createElement("button");
   copyButton.type = "button";
@@ -498,16 +563,25 @@ function startPerfPanel(): void {
     // 0 means "not measured yet" in `perfMetrics`, so show a placeholder instead
     // of a 0ms that looks like a real measurement.
     const firstScreen = perfMetrics.firstScreenMs > 0 ? `${perfMetrics.firstScreenMs}ms` : "—";
+    const slowest = perfMetrics.apiSlowest;
+    const slowestText = slowest ? `${slowest.method} ${slowest.path} ${slowest.status} ${slowest.durationMs}ms` : "—";
+    const slowTopLines = topSlowAPIRequests().map(item => `${item.method} ${item.path} ${item.status} ${item.maxMs}ms ×${item.count}`);
     return {
       firstScreen,
       prefetch: `${perfMetrics.prefetchRuns} 次 / ${perfMetrics.prefetchRequests} 请求`,
       listRefresh: `${perfMetrics.listRefreshRequests} 次 / 最近 ${perfMetrics.listRefreshLastMs}ms / 平均 ${listRefreshAvgMs}ms`,
       taskOpen: `${perfMetrics.taskOpenCount} 次 / 最近 ${perfMetrics.taskOpenLastMs}ms / 平均 ${taskOpenAvgMs}ms`,
+      apiCount: `${perfMetrics.apiRequestCount} 次`,
+      slowest: slowestText,
+      slowTop: slowTopLines,
       text: [
         `首屏: ${firstScreen}`,
         `预取: ${perfMetrics.prefetchRuns} 次 / ${perfMetrics.prefetchRequests} 请求`,
         `列表刷新: ${perfMetrics.listRefreshRequests} 次 / 最近 ${perfMetrics.listRefreshLastMs}ms / 平均 ${listRefreshAvgMs}ms`,
         `任务打开: ${perfMetrics.taskOpenCount} 次 / 最近 ${perfMetrics.taskOpenLastMs}ms / 平均 ${taskOpenAvgMs}ms`,
+        `API 请求: ${perfMetrics.apiRequestCount} 次`,
+        `最慢请求: ${slowestText}`,
+        `慢请求 Top 5:${slowTopLines.length ? `\n${slowTopLines.map((line, index) => `${index + 1}. ${line}`).join("\n")}` : " —"}`,
       ].join("\n"),
     };
   };
@@ -518,6 +592,15 @@ function startPerfPanel(): void {
     prefetchValue.textContent = values.prefetch;
     listRefreshValue.textContent = values.listRefresh;
     taskOpenValue.textContent = values.taskOpen;
+    apiCountValue.textContent = values.apiCount;
+    apiSlowestValue.textContent = values.slowest;
+    slowTotal.textContent = `共 ${perfMetrics.apiRequestCount} 次`;
+    slowSlowest.textContent = `最慢: ${values.slowest}`;
+    slowTop.replaceChildren(...values.slowTop.map(line => {
+      const item = document.createElement("li");
+      item.textContent = line;
+      return item;
+    }));
     latestText = values.text;
   };
 
@@ -569,7 +652,7 @@ function startPerfPanel(): void {
     }
   });
 
-  panel.append(head, rows, copyButton);
+  panel.append(head, rows, slowSection, copyButton);
   document.body.append(panel);
   renderValues();
   const timer = window.setInterval(() => {

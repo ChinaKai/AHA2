@@ -800,6 +800,64 @@ test("opt-in perf panel reports timing metrics with copy and hide controls", asy
   assert.doesNotMatch(styles, /@media \(max-width: 640px\) \{ \.perf-panel \{[^}]*bottom: calc/);
 });
 
+test("API request timings are opt-in, query-free, and bounded in the perf panel", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const apiModule = await import(pathToFileURL(resolve(root, "dist", "api.js")));
+  const originalFetch = globalThis.fetch;
+  const samples = [];
+  const requested = [];
+  globalThis.fetch = async (path, options = {}) => {
+    requested.push({path, options});
+    return new Response(JSON.stringify({ok: true}), {status: 200, headers: {"content-type": "application/json"}});
+  };
+  try {
+    // Without an observer nothing is collected; this is the normal-page path.
+    apiModule.setAPIRequestObserver(null);
+    await apiModule.api.request("/api/v1/tasks?setup_token=secret-token");
+    assert.equal(samples.length, 0, "timing stays off until main installs the observer");
+
+    apiModule.setAPIRequestObserver(sample => samples.push(sample));
+    await apiModule.api.request("/api/v1/tasks?setup_token=secret-token&filename=private.pdf", {method: "POST", body: JSON.stringify({password: "secret"})});
+    await apiModule.api.login({username: "owner", password: "secret"});
+
+    assert.equal(samples.length, 2);
+    assert.deepEqual(
+      {method: samples[0].method, path: samples[0].path, status: samples[0].status, ok: samples[0].ok},
+      {method: "POST", path: "/api/v1/tasks", status: 200, ok: true},
+    );
+    // Auth endpoints keep only the path; the login body never enters a sample.
+    assert.equal(samples[1].method, "POST");
+    assert.equal(samples[1].path, "/api/v1/auth/login");
+    assert.ok(samples.every(sample => sample.durationMs >= 0));
+    const serialized = JSON.stringify(samples);
+    for (const secret of ["secret-token", "private.pdf", "password", "owner"]) {
+      assert.doesNotMatch(serialized, new RegExp(secret));
+    }
+  } finally {
+    apiModule.setAPIRequestObserver(null);
+    globalThis.fetch = originalFetch;
+  }
+
+  const script = await readFile(resolve(root, "dist", "app.js"), "utf8");
+  const styles = await readFile(resolve(root, "dist", "styles.css"), "utf8");
+  // `?perf=1` remains the only path that constructs the panel and the section.
+  assert.match(script, /if \(perfEnabled\) startPerfPanel\(\)/);
+  assert.match(script, /slowTitle\.textContent = "慢请求 Top 5"/);
+  assert.match(script, /panel\.append\(head, rows, slowSection, copyButton\)/);
+  // Only the opt-in path allocates the sample buffer and installs the observer.
+  assert.match(script, /apiSamples: perfEnabled \? \[\] : null/);
+  assert.match(script, /if \(perfEnabled\) setAPIRequestObserver\(recordAPIRequest\)/);
+  // The ring buffer is capped at 200 while total and slowest stay lifetime-wide.
+  assert.match(script, /samples\.length > apiSampleLimit/);
+  assert.match(script, /samples\.splice\(0, samples\.length - apiSampleLimit\)/);
+  assert.match(script, /apiRequestCount\+\+/);
+  assert.match(script, /`API 请求: \$\{perfMetrics\.apiRequestCount\} 次`/);
+  assert.match(script, /`最慢请求: \$\{slowestText\}`/);
+  assert.match(script, /`慢请求 Top 5:/);
+  assert.match(styles, /\.perf-slow-requests/);
+  assert.match(styles, /\.perf-slow-top/);
+});
+
 test("SSE list refresh is debounced and deferred while a task detail is open", async () => {
   const root = resolve(import.meta.dirname, "..");
   const script = await readFile(resolve(root, "dist", "app.js"), "utf8");

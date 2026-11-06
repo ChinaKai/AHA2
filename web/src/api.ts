@@ -81,6 +81,34 @@ import type {
   TaskMailOptions,
 } from "./types.js";
 
+export interface APIRequestSample {
+  method: string;
+  path: string;
+  status: number;
+  durationMs: number;
+  ok: boolean;
+}
+
+export type APIRequestObserver = (sample: APIRequestSample) => void;
+
+let requestObserver: APIRequestObserver | null = null;
+
+// Request timing is strictly opt-in. `?perf=1` installs an observer from main;
+// every other visit leaves this null so `request` allocates no sample and keeps
+// its original fetch behavior.
+export function setAPIRequestObserver(observer: APIRequestObserver | null): void {
+  requestObserver = observer;
+}
+
+// Only the pathname is recorded. Query strings carry setup tokens, file names,
+// and search terms; bodies and headers carry credentials and content. None of
+// those belong in performance metrics, and dropping the query also folds
+// requests for the same endpoint into one Top-5 entry.
+function requestPath(path: string): string {
+  const query = path.indexOf("?");
+  return query < 0 ? path : path.slice(0, query);
+}
+
 class APIClient {
   private csrf = "";
 
@@ -93,20 +121,40 @@ class APIClient {
   }
 
   async request<T>(path: string, options: RequestInit = {}): Promise<T> {
+    const observer = requestObserver;
+    const startedAt = observer ? performance.now() : 0;
     const headers = new Headers(options.headers || {});
     if (options.body && !(options.body instanceof FormData) && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
     if (this.csrf && options.method && !["GET", "HEAD"].includes(options.method)) {
       headers.set("X-CSRF-Token", this.csrf);
     }
-    const response = await fetch(path, {...options, headers, credentials: "same-origin", cache: "no-store"});
-    const body = await response.json().catch(() => ({})) as Record<string, unknown>;
-    if (!response.ok) {
-      const error = new Error(String(body.message || body.error || `HTTP ${response.status}`)) as Error & {code?: string; status?: number};
-      error.code = String(body.error || "");
-      error.status = response.status;
-      throw error;
+    let status = 0;
+    let ok = false;
+    try {
+      const response = await fetch(path, {...options, headers, credentials: "same-origin", cache: "no-store"});
+      status = response.status;
+      ok = response.ok;
+      const body = await response.json().catch(() => ({})) as Record<string, unknown>;
+      if (!response.ok) {
+        const error = new Error(String(body.message || body.error || `HTTP ${response.status}`)) as Error & {code?: string; status?: number};
+        error.code = String(body.error || "");
+        error.status = response.status;
+        throw error;
+      }
+      return body as T;
+    } finally {
+      // A failed fetch has no response; recording status 0 / ok false keeps the
+      // failure visible without inventing an HTTP status.
+      if (observer) {
+        observer({
+          method: (options.method || "GET").toUpperCase(),
+          path: requestPath(path),
+          status,
+          durationMs: performance.now() - startedAt,
+          ok,
+        });
+      }
     }
-    return body as T;
   }
 
   authStatus(): Promise<AuthStatus> {
