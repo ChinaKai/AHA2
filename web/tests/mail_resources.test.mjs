@@ -10,6 +10,12 @@ const cards = await import(pathToFileURL(resolve(dist, "mail_cards.js")));
 const resources = await import(pathToFileURL(resolve(dist, "resources.js")));
 const mailResources = await import(pathToFileURL(resolve(dist, "mail_resources.js")));
 const mailTask = await import(pathToFileURL(resolve(dist, "mail_task.js")));
+// The build rewrites shared imports to "./api.js?v=<build>"; importing the
+// unversioned URL would create a second APIClient singleton. Reuse the exact
+// specifier mail_task.js resolved so the stub lands on the same object.
+const mailTaskSource = await readFile(resolve(dist, "mail_task.js"), "utf8");
+const apiVersion = mailTaskSource.match(/from "\.\/api\.js(\?v=[^"]+)"/)?.[1] || "";
+const apiModule = await import(pathToFileURL(resolve(dist, "api.js")).href + apiVersion);
 
 function message(overrides = {}) {
   return {
@@ -513,6 +519,171 @@ test("template live preview substitutes sample variables and keeps unknown place
   assert.match(empty, /输入 HTML 后/);
   const escaped = cards.mailTemplateLivePreviewSrcdoc("<p>{{task.title}}</p>");
   assert.doesNotMatch(escaped, /<script/i, "live preview never adds executable script");
+});
+
+test("compose dialog close, cancel and successful submit all close the dialog", async () => {
+  // The compose rewrite once dropped its local close()/listener block, letting
+  // `close` resolve to window.close. This DOM stub drives the real dialog
+  // bindings: X/cancel must call dialog.close+remove, and a successful submit
+  // must close the dialog instead of leaving it open for a duplicate submit.
+  class FakeElement {
+    constructor() {
+      this.value = "";
+      this.textContent = "";
+      this.innerHTML = "";
+      this.hidden = false;
+      this.disabled = false;
+      this.required = false;
+      this.checked = false;
+      this.isConnected = true;
+      this.dataset = {};
+      this.selectedOptions = [{value: "mail_account_1", dataset: {}}];
+      this.classList = {toggle() {}};
+      this._listeners = {};
+      this._query = new Map();
+      this._queryAll = new Map();
+    }
+    addEventListener(type, handler) { (this._listeners[type] ||= []).push(handler); }
+    dispatch(type, event = {}) {
+      for (const handler of this._listeners[type] || []) {
+        handler({target: this, currentTarget: this, preventDefault() {}, ...event});
+      }
+    }
+    setAttribute() {}
+    removeAttribute() {}
+    replaceChildren() {}
+    append() {}
+    appendChild(child) { return child; }
+    querySelector(selector) { return this._query.get(selector) ?? new FakeElement(); }
+    querySelectorAll(selector) { return this._queryAll.get(selector) ?? []; }
+    closest() { return null; }
+    focus() {}
+    close() { this.closeCalls = (this.closeCalls || 0) + 1; this.open = false; }
+    remove() { this.removeCalls = (this.removeCalls || 0) + 1; this.isConnected = false; }
+    showModal() { this.open = true; }
+  }
+
+  const makeTree = () => {
+    const form = new FakeElement();
+    const elements = {
+      templateSelect: new FakeElement(), accountSelect: new FakeElement(),
+      variablesBox: new FakeElement(), directBox: new FakeElement(),
+      picker: new FakeElement(), pickerToggle: new FakeElement(),
+      chips: new FakeElement(), total: new FakeElement(), hint: new FakeElement(),
+      to: new FakeElement(), cc: new FakeElement(), submit: new FakeElement(),
+      preview: new FakeElement(),
+    };
+    form._query.set('select[name="template_id"]', elements.templateSelect);
+    form._query.set('select[name="account_id"]', elements.accountSelect);
+    form._query.set("#mail-compose-variables", elements.variablesBox);
+    form._query.set("#mail-compose-direct", elements.directBox);
+    form._query.set("[data-mail-attachment-picker]", elements.picker);
+    form._query.set("#mail-compose-attachment-toggle", elements.pickerToggle);
+    form._query.set("[data-mail-attachment-chips]", elements.chips);
+    form._query.set("[data-mail-selected-total]", elements.total);
+    form._query.set("[data-mail-template-hint]", elements.hint);
+    form._query.set('input[name="to"]', elements.to);
+    form._query.set('input[name="cc"]', elements.cc);
+    form._query.set('button[type="submit"]', elements.submit);
+    form._query.set("#mail-compose-preview-button", elements.preview);
+    form._queryAll.set('input[name="attachment_ids"]', []);
+    form._queryAll.set('input[name="build_artifact_ids"]', []);
+    form._queryAll.set("[data-mail-variable-input]", []);
+    form._queryAll.set("[data-mail-picker-tab]", []);
+    form._queryAll.set("[data-mail-picker-pane]", []);
+    const dialog = new FakeElement();
+    dialog.closeButtons = [new FakeElement(), new FakeElement()];
+    dialog._query.set("#task-mail-compose-form", form);
+    dialog._queryAll.set("[data-close]", dialog.closeButtons);
+    return {dialog, form, elements};
+  };
+
+  const dialogs = [];
+  let lastTree;
+  globalThis.document = {
+    querySelector(selector) {
+      if (selector !== "#task-mail-compose-dialog") return null;
+      const last = dialogs[dialogs.length - 1];
+      return last && last.isConnected ? last : null;
+    },
+    createElement(tag) {
+      if (tag === "dialog") {
+        lastTree = makeTree();
+        dialogs.push(lastTree.dialog);
+        return lastTree.dialog;
+      }
+      return new FakeElement();
+    },
+    body: {appendChild() {}},
+  };
+  const savedFormData = globalThis.FormData;
+  const savedInput = globalThis.HTMLInputElement;
+  const savedWindow = globalThis.window;
+  globalThis.FormData = class {
+    get(name) {
+      return {
+        account_id: "mail_account_1", template_id: "mail_template_1", to: "qa@example.com",
+        cc: "", bcc: "", subject: "", body_html: "",
+      }[name] ?? "";
+    }
+    getAll() { return []; }
+  };
+  globalThis.HTMLInputElement = class {};
+  globalThis.window = {confirm: () => true, prompt: () => null};
+  const api = apiModule.api;
+  const originalCreateMailMessage = api.createMailMessage;
+  const submitted = [];
+  api.createMailMessage = async payload => { submitted.push(payload); return {ok: true}; };
+  const detail = {task: {id: "task_1", status: "active"}};
+  const options = {
+    ok: true, task_id: "task_1",
+    accounts: [{
+      account_id: "mail_account_1", binding_id: "mail_binding_1", binding_scope: "task",
+      from_address: "noreply@example.com", display_name: "AHA", aliases: [],
+      credential_configured: true, status: "ok", default_template_id: "mail_template_1",
+    }],
+    templates: [{
+      id: "mail_template_1", name: "提测模板", scope: "global", subject_template: "提测",
+      body_text_template: "", body_html_template: "<p>正文</p>", default_to: ["qa@example.com"],
+      default_cc: [], required_variables: [], current_version: 1, status: "active",
+      created_at: "", updated_at: "",
+    }],
+    attachments: [], build_artifacts: [], messages: [],
+  };
+  const actions = {reload: async () => {}, notify: () => {}};
+  try {
+    // X / 取消 button.
+    await mailTask.openTaskMailCompose(detail, options, actions);
+    const first = lastTree;
+    assert.equal(first.dialog.open, true, "compose dialog is shown");
+    first.dialog.closeButtons[0].dispatch("click");
+    assert.equal(first.dialog.closeCalls, 1, "data-close click calls dialog.close");
+    assert.equal(first.dialog.removeCalls, 1, "data-close click removes the dialog");
+
+    // Escape / cancel event.
+    await mailTask.openTaskMailCompose(detail, options, actions);
+    const second = lastTree;
+    assert.equal(typeof second.dialog._listeners.cancel?.[0], "function", "cancel handler is bound");
+    second.dialog.dispatch("cancel");
+    assert.equal(second.dialog.closeCalls, 1, "cancel calls dialog.close");
+    assert.equal(second.dialog.removeCalls, 1, "cancel removes the dialog");
+
+    // Successful submit.
+    await mailTask.openTaskMailCompose(detail, options, actions);
+    const third = lastTree;
+    third.form.dispatch("submit");
+    await new Promise(resolvePromise => setImmediate(resolvePromise));
+    assert.equal(submitted.length, 1, "submit creates exactly one mail message");
+    assert.equal(submitted[0].submit, true);
+    assert.equal(third.dialog.closeCalls, 1, "successful submit closes the dialog");
+    assert.equal(third.dialog.removeCalls, 1, "successful submit removes the dialog");
+  } finally {
+    api.createMailMessage = originalCreateMailMessage;
+    globalThis.FormData = savedFormData;
+    globalThis.HTMLInputElement = savedInput;
+    globalThis.window = savedWindow;
+    delete globalThis.document;
+  }
 });
 
 test("resources page keeps hardware and mail in one eight-item navigation shell", () => {

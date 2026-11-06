@@ -225,6 +225,12 @@ export async function openTaskMailCompose(
     <div class="dialog-actions"><button type="button" data-close>取消</button><button type="button" id="mail-compose-preview-button">预览</button><button type="submit" class="primary">提交审批</button></div>
   </form>`;
   document.body.appendChild(dialog);
+  // This local close must stay in the compose scope: without it the submit
+  // success path would resolve `close` to window.close and cancel/X would do
+  // nothing, leaving the dialog (and a fresh idempotency key) reusable.
+  const close = () => { dialog.close(); dialog.remove(); };
+  dialog.querySelectorAll("[data-close]").forEach(button => button.addEventListener("click", close));
+  dialog.addEventListener("cancel", close);
   const form = dialog.querySelector<HTMLFormElement>("#task-mail-compose-form")!;
   const templateSelect = form.querySelector<HTMLSelectElement>('select[name="template_id"]')!;
   const accountSelect = form.querySelector<HTMLSelectElement>('select[name="account_id"]')!;
