@@ -492,6 +492,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/agent/channel/mcp", s.withAgentCapability(http.HandlerFunc(s.agentChannelMCP)))
 	mux.Handle("GET /api/v1/agent/mail/accounts", s.withAgentCapability(http.HandlerFunc(s.agentMailAccounts)))
 	mux.Handle("GET /api/v1/agent/mail/templates", s.withAgentCapability(http.HandlerFunc(s.agentMailTemplates)))
+	mux.Handle("GET /api/v1/agent/mail/templates/{id}", s.withAgentCapability(http.HandlerFunc(s.agentMailTemplateDetail)))
 	mux.Handle("POST /api/v1/agent/mail/preview", s.withAgentCapability(http.HandlerFunc(s.agentMailPreview)))
 	mux.Handle("POST /api/v1/agent/mail/messages", s.withAgentCapability(http.HandlerFunc(s.agentMailSend)))
 	mux.Handle("GET /api/v1/agent/mail/messages/{id}", s.withAgentCapability(http.HandlerFunc(s.agentMailMessageStatus)))

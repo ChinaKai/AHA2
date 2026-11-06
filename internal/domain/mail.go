@@ -144,12 +144,31 @@ const (
 	MailTemplateStatusArchived MailTemplateStatus = "archived"
 )
 
+// MailTemplateMode selects how template content is used.
+//
+//   - guide: the template is a reference sample. Callers must supply the final
+//     subject and body; no variable substitution happens. This is the default
+//     for newly created templates.
+//   - render: legacy behavior. The server substitutes allowed variables into
+//     the template. Existing templates keep this mode; there is no migration.
+type MailTemplateMode string
+
+const (
+	MailTemplateModeGuide  MailTemplateMode = "guide"
+	MailTemplateModeRender MailTemplateMode = "render"
+)
+
+func (mode MailTemplateMode) Valid() bool {
+	return mode == MailTemplateModeGuide || mode == MailTemplateModeRender
+}
+
 type MailTemplate struct {
 	ID                string             `json:"id"`
 	Scope             MailTemplateScope  `json:"scope"`
 	ProjectID         string             `json:"project_id,omitempty"`
 	Name              string             `json:"name"`
 	Description       string             `json:"description,omitempty"`
+	Mode              MailTemplateMode   `json:"mode"`
 	SubjectTemplate   string             `json:"subject_template"`
 	BodyTextTemplate  string             `json:"body_text_template"`
 	BodyHTMLTemplate  string             `json:"body_html_template"`
@@ -164,16 +183,19 @@ type MailTemplate struct {
 }
 
 // MailTemplateVersion is an immutable content snapshot. Creating or updating a
-// template writes the snapshot; later template edits never rewrite it.
+// template writes the snapshot; later template edits never rewrite it. Mode is
+// part of the snapshot so a template switched between modes keeps a readable
+// history.
 type MailTemplateVersion struct {
-	TemplateID        string    `json:"template_id"`
-	Version           int       `json:"version"`
-	SubjectTemplate   string    `json:"subject_template"`
-	BodyTextTemplate  string    `json:"body_text_template"`
-	BodyHTMLTemplate  string    `json:"body_html_template"`
-	RequiredVariables []string  `json:"required_variables"`
-	CreatedBy         string    `json:"created_by,omitempty"`
-	CreatedAt         time.Time `json:"created_at"`
+	TemplateID        string           `json:"template_id"`
+	Version           int              `json:"version"`
+	Mode              MailTemplateMode `json:"mode"`
+	SubjectTemplate   string           `json:"subject_template"`
+	BodyTextTemplate  string           `json:"body_text_template"`
+	BodyHTMLTemplate  string           `json:"body_html_template"`
+	RequiredVariables []string         `json:"required_variables"`
+	CreatedBy         string           `json:"created_by,omitempty"`
+	CreatedAt         time.Time        `json:"created_at"`
 }
 
 type MailBindingScopeType string
@@ -488,11 +510,18 @@ const (
 	MailErrTemplateVariableMissing MailErrorCode = "mail_template_variable_missing"
 	MailErrTemplateVariableUnknown MailErrorCode = "mail_template_variable_unknown"
 	MailErrTemplateInvalid         MailErrorCode = "mail_template_invalid"
-	MailErrDuplicateMessage        MailErrorCode = "mail_duplicate_message"
-	MailErrApprovalDigestMismatch  MailErrorCode = "mail_approval_digest_mismatch"
-	MailErrInvalidState            MailErrorCode = "mail_invalid_state"
-	MailErrRateLimited             MailErrorCode = "mail_rate_limited"
-	MailErrForbidden               MailErrorCode = "mail_forbidden"
+	// MailErrTemplateContentMissing means a guide template was used without the
+	// caller's final subject/body. The template example is never sent as a
+	// fallback.
+	MailErrTemplateContentMissing MailErrorCode = "mail_template_content_missing"
+	// MailErrTemplatePlaceholderUnresolved means guide-mode final content still
+	// contains {{...}} tokens. Guide mode never substitutes variables.
+	MailErrTemplatePlaceholderUnresolved MailErrorCode = "mail_template_placeholder_unresolved"
+	MailErrDuplicateMessage              MailErrorCode = "mail_duplicate_message"
+	MailErrApprovalDigestMismatch        MailErrorCode = "mail_approval_digest_mismatch"
+	MailErrInvalidState                  MailErrorCode = "mail_invalid_state"
+	MailErrRateLimited                   MailErrorCode = "mail_rate_limited"
+	MailErrForbidden                     MailErrorCode = "mail_forbidden"
 )
 
 // Stable SMTP error codes from the design's section 3.4. These are stored on

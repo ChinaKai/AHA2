@@ -551,8 +551,17 @@ test("task compose offers no-template direct fields and builds a direct payload"
     subject: "ignored", body_html: "<p>ignored</p>", to: "qa@example.com",
   }, "task_1", {build_version: "1"}, [], []);
   assert.equal(templated.template_id, "mail_template_1");
-  assert.ok(!("subject" in templated), "template path never sends direct subject");
-  assert.ok(!("body_html" in templated), "template path never sends direct body");
+  assert.ok(!("subject" in templated), "render template path never sends direct subject");
+  assert.ok(!("body_html" in templated), "render template path never sends direct body");
+
+  const guide = mailTask.mailComposePayload({
+    account_id: "mail_account_1", template_id: "mail_template_guide",
+    subject: "  最终主题  ", body_html: "<p>最终正文</p>", to: "qa@example.com",
+  }, "task_1", {build_version: "ignored"}, [], [], "guide");
+  assert.equal(guide.template_id, "mail_template_guide", "guide template id is recorded as reference");
+  assert.equal(guide.subject, "最终主题");
+  assert.equal(guide.body_html, "<p>最终正文</p>");
+  assert.deepEqual(guide.variables, {}, "guide mode ignores caller variables");
 });
 
 test("template editor derives required variables and has no scope or project field", () => {
@@ -565,6 +574,7 @@ test("template editor derives required variables and has no scope or project fie
 
   const payload = mailResources.mailTemplateSubmitPayload({
     name: "提测通知",
+    mode: "render",
     subject_template: "{{task.title}}",
     body_text_template: "{{test.scope}} 旧的自定义纯文本",
     body_html_template: "<p>{{build.version}}</p>",
@@ -574,11 +584,22 @@ test("template editor derives required variables and has no scope or project fie
   });
   assert.equal(payload.scope, "global");
   assert.equal(payload.name, "提测通知");
+  assert.equal(payload.mode, "render");
   assert.equal(payload.body_text_template, "", "saving always clears the legacy custom text; the backend derives it from HTML");
   assert.deepEqual(payload.required_variables, ["build.version"], "variables in removed legacy text no longer count");
   assert.deepEqual(payload.default_to, ["qa@example.com", "lead@example.com"]);
   assert.ok(!("project_id" in payload), "the editor no longer submits a project");
-  assert.ok(!("description" in payload));
+  assert.equal(payload.description, "", "the description is submitted for guide instructions");
+
+  const guidePayload = mailResources.mailTemplateSubmitPayload({
+    name: "Guide 提测",
+    subject_template: "[AHA] {{task.title}} 提测通知（示例）",
+    body_html_template: "<p>{{task.title}} 示例正文</p>",
+    description: "核对仓库列表与版本",
+  });
+  assert.equal(guidePayload.mode, "guide", "new templates default to guide");
+  assert.deepEqual(guidePayload.required_variables, [], "guide mode never requires variables");
+  assert.equal(guidePayload.description, "核对仓库列表与版本");
 
   const form = mailResources.templateForm();
   assert.doesNotMatch(form, /name="scope"/, "scope is not a user-editable field");
@@ -595,6 +616,12 @@ test("template editor derives required variables and has no scope or project fie
   assert.doesNotMatch(form, /data-mail-template-live/, "the iframe live preview was replaced");
   assert.doesNotMatch(form, /mail-template-html-editor/, "the HTML textarea is no longer the main editor");
   assert.match(form, /data-mail-template-source-toggle/, "source mode is optional");
+  assert.match(form, /name="mode"/, "guide/render mode is selectable");
+  assert.match(form, /<option value="guide" selected>/, "new templates default to guide");
+  assert.match(form, /<option value="render"/, "render remains available for legacy templates");
+  assert.match(form, /name="description"/, "guide mode exposes filling instructions");
+  assert.match(form, /data-mail-render-only[^>]*hidden/, "guide mode hides the variable bar");
+  assert.match(form, /data-mail-guide-only/, "guide instructions are mode-scoped");
   assert.match(form, /value="3"[^>]*data-mail-table-rows/);
   assert.match(form, /value="3"[^>]*data-mail-table-columns/);
   assert.match(form, /data-mail-template-source[^>]*hidden/, "source textarea starts hidden behind the WYSIWYG editor");
@@ -606,6 +633,13 @@ test("template editor derives required variables and has no scope or project fie
   });
   assert.match(legacy, /旧项目模板/);
   assert.doesNotMatch(legacy, /name="scope"/);
+});
+
+test("guide template preview shows the literal sample without variable substitution", async () => {
+  const source = await readFile(resolve(dist, "mail_resources.js"), "utf8");
+  assert.match(source, /template\.mode === "guide"/, "guide templates use the literal preview path");
+  assert.match(source, /preview_example: true/, "editor preview asks the server for the example");
+  assert.match(source, /不做变量替换/, "the preview help states there is no substitution");
 });
 
 test("preview samples cover documented variables and the dialog exposes width, tabs and envelope", () => {

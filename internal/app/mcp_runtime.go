@@ -26,7 +26,8 @@ const (
 )
 
 var mailMCPToolNames = []string{
-	"mail_list_accounts", "mail_list_templates", "mail_preview", "mail_send", "mail_get_status",
+	"mail_list_accounts", "mail_list_templates", "mail_template_detail",
+	"mail_preview", "mail_send", "mail_get_status",
 }
 
 // mcpRuntimeForTask returns the MCP servers a Turn should receive and the

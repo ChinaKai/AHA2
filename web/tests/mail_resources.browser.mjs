@@ -22,7 +22,7 @@ const task = {
   agent_api_mode: "auto", agent_api_status: "ready",
 };
 const template = {
-  id: "mail_template_1", scope: "global", project_id: "", name: "提测模板",
+  id: "mail_template_1", scope: "global", project_id: "", name: "提测模板", mode: "render",
   description: "", subject_template: "提测通知", body_text_template: "请测试。",
   body_html_template: "", default_to: ["qa@example.com"], default_cc: [],
   required_variables: [], current_version: 1, status: "active",
@@ -160,6 +160,16 @@ try {
   await page.waitForFunction(() => document.querySelectorAll(".mail-resource-row").length >= 2);
   assert.doesNotMatch(await page.locator("#app").innerText(), /write-only-secret/);
   assert.doesNotMatch(await page.locator("#app").innerText(), /credential_ref/);
+
+  // Template editor defaults to guide: mode selector, instructions visible,
+  // variable insertion UI hidden.
+  await page.click("#add-mail-template");
+  await page.waitForSelector(".mail-resource-dialog[open] .mail-template-form");
+  const templateForm = page.locator(".mail-resource-dialog[open] .mail-dialog-form");
+  assert.equal(await templateForm.locator('select[name="mode"]').inputValue(), "guide");
+  assert.equal(await templateForm.locator('textarea[name="description"]').isVisible(), true);
+  assert.equal(await templateForm.locator("[data-mail-render-only]").first().isHidden(), true);
+  await templateForm.locator("[data-close]").first().click();
   assert.deepEqual(errors, []);
 
   // Task view: the toolbar mail entry is the only entry point. Submitting

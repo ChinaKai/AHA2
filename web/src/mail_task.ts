@@ -197,33 +197,45 @@ export function taskMailPreviewData(
   };
 }
 
-// Direct mail keeps template_id empty and supplies subject + body_html. The
-// server derives body_text from HTML when it is empty. Template mail keeps the
-// existing payload shape; subject/body inputs are disabled and absent.
+// Direct mail keeps template_id empty and supplies subject + body_html. A
+// guide template uses the same caller content but records template_id as the
+// reference version. A render template keeps the legacy variable shape and
+// never sends caller subject/body. The server derives body_text from HTML when
+// it is empty.
 export function mailComposePayload(
   values: Record<string, unknown>,
   taskID: string,
   variableValues: Record<string, string>,
   attachmentIDs: string[],
   buildArtifactIDs: string[],
+  templateMode = "",
 ): Record<string, any> {
+  const templateID = String(values.template_id || "").trim();
+  const guide = !templateID || templateMode === "guide";
   const payload: Record<string, any> = {
     task_id: taskID,
     account_id: String(values.account_id || ""),
-    template_id: String(values.template_id || "").trim(),
+    template_id: templateID,
     to: csvValues(values.to),
     cc: csvValues(values.cc),
     bcc: csvValues(values.bcc),
-    variables: variableValues,
+    variables: guide ? {} : variableValues,
     attachment_ids: attachmentIDs,
     build_artifact_ids: buildArtifactIDs,
   };
-  if (!payload.template_id) {
+  if (guide) {
     payload.subject = String(values.subject || "").trim();
     payload.body_html = String(values.body_html || "");
     payload.body_text = "";
   }
   return payload;
+}
+
+function templateModeOf(templateID: string, templates: MailTemplate[]): string {
+  const template = templates.find(item => item.id === templateID);
+  // Unknown/absent mode is treated as legacy render so an older server never
+  // makes the UI submit caller subject/body for a variable template.
+  return template?.mode === "guide" ? "guide" : template ? "render" : "";
 }
 
 export async function openTaskMailCompose(
@@ -241,7 +253,7 @@ export async function openTaskMailCompose(
   const accountOptions = accounts.map(account => `<option value="${escapeHTML(account.account_id)}" data-default-template="${escapeHTML(account.default_template_id || "")}" data-binding-scope="${escapeHTML(account.binding_scope)}">${escapeHTML(account.display_name || account.from_address)} · ${escapeHTML(account.from_address)}</option>`).join("");
   // "不使用模板" is first so an unset binding naturally falls back to it. A
   // valid binding default is still selected explicitly below.
-  const templateOptions = `<option value="">不使用模板</option>` + templates.map(template => `<option value="${escapeHTML(template.id)}">${escapeHTML(template.name)} · v${Number(template.current_version)}</option>`).join("");
+  const templateOptions = `<option value="">不使用模板</option>` + templates.map(template => `<option value="${escapeHTML(template.id)}" data-mode="${template.mode === "guide" ? "guide" : "render"}">${escapeHTML(template.name)} · v${Number(template.current_version)} · ${template.mode === "guide" ? "guide" : "render"}</option>`).join("");
   // Executable and script names are disabled in place with the reason visible
   // instead of failing later in preview/send. The checkbox stays unchecked and
   // the server still validates every submitted attachment.
@@ -265,7 +277,7 @@ export async function openTaskMailCompose(
       <div id="mail-compose-direct" class="mail-compose-direct" hidden>
         <label>主题<input name="subject"></label>
         <label>正文（HTML 主编辑区）<textarea name="body_html" rows="8" placeholder="<p>...</p>"></textarea></label>
-        <p class="field-help">不使用模板时主题必填，正文至少一个；纯文本留空由后端从 HTML 自动生成。</p>
+        <p class="field-help" data-mail-direct-help>不使用模板时主题必填，正文至少一个；纯文本留空由后端从 HTML 自动生成。</p>
       </div>
       <div class="two"><label>收件人 To（逗号分隔）<input name="to" required></label><label>CC（逗号分隔）<input name="cc"></label></div>
       <label>BCC（仅 Owner，可选）<input name="bcc"></label>
@@ -406,19 +418,28 @@ export async function openTaskMailCompose(
     autoCc = nextCc;
   };
   const templateHint = form.querySelector<HTMLElement>("[data-mail-template-hint]")!;
+  const directHelp = form.querySelector<HTMLElement>("[data-mail-direct-help]")!;
   const syncTemplate = () => {
     const template = templateDefaults(templateSelect.value, templates);
     const noTemplate = !templateSelect.value;
-    // The template variables and the direct subject/body are mutually
-    // exclusive. Disabling the hidden fields also keeps them out of FormData.
-    syncDirectFields(noTemplate);
-    variablesBox.innerHTML = noTemplate ? "" : variableInputs(template);
+    const guide = template?.mode === "guide";
+    // Render-template variables and caller subject/body are mutually exclusive.
+    // Guide templates require caller subject/body just like direct mail; only
+    // the reference template id is recorded. Disabling hidden fields keeps them
+    // out of FormData.
+    syncDirectFields(noTemplate || guide);
+    variablesBox.innerHTML = noTemplate || guide ? "" : variableInputs(template);
     applyTemplateDefaults(noTemplate ? undefined : template);
+    directHelp.textContent = guide
+      ? "guide 模板只作参考：请填写最终主题与正文，模板示例不会自动发送；残留 {{...}} 会被拒绝。"
+      : "不使用模板时主题必填，正文至少一个；纯文本留空由后端从 HTML 自动生成。";
     const account = accounts.find(item => item.account_id === accountSelect.value);
     const defaultID = account?.default_template_id || "";
     const defaultAvailable = Boolean(defaultID) && templates.some(item => item.id === defaultID);
     const scope = account ? scopeLabel(account.binding_scope) : "Task/Workspace/Project 绑定";
-    if (!defaultID) {
+    if (guide) {
+      templateHint.textContent = `参考模板“${template?.name || templateSelect.value}”（guide）不会渲染变量；请自写主题与正文。`;
+    } else if (!defaultID) {
       templateHint.textContent = noTemplate
         ? "当前账号绑定未设置默认模板，默认不使用模板；可逐封选择模板。"
         : "当前账号绑定未设置默认模板，本次逐封选择了模板。";
@@ -460,14 +481,17 @@ export async function openTaskMailCompose(
       variableValues,
       selected.attachment_ids,
       selected.build_artifact_ids,
+      templateModeOf(String(values.get("template_id") || ""), templates),
     );
   };
   form.querySelector("#mail-compose-preview-button")?.addEventListener("click", () => {
     if (!attachmentSelectionValid()) return;
     const payload = collect();
+    const guideTemplate = Boolean(payload.template_id) && Object.prototype.hasOwnProperty.call(payload, "subject");
     const previewRequest = payload.template_id
       ? api.previewMailTemplate(payload.template_id, {
         task_id: payload.task_id, variables: payload.variables, to: payload.to, cc: payload.cc,
+        ...(guideTemplate ? {subject: payload.subject, body_text: payload.body_text, body_html: payload.body_html} : {}),
         attachment_ids: payload.attachment_ids, build_artifact_ids: payload.build_artifact_ids,
       })
       : api.previewMailTemplateContent({

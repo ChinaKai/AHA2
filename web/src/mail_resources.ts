@@ -62,9 +62,10 @@ function templateRows(data: MailResourcesData, templates: MailTemplate[]): strin
   return templates.map(template => {
     const legacy = template.scope === "project";
     const legacyName = data.projects.find(project => project.id === template.project_id)?.name || template.project_id || "";
+    const guide = template.mode === "guide";
     return `<article class="mail-resource-row" data-mail-template="${escapeHTML(template.id)}">
-    <div class="mail-resource-identity"><span class="mail-resource-glyph">${icon("mail")}</span><div><strong>${escapeHTML(template.name)}${legacy ? ` <span class="mail-template-badge legacy">旧项目模板</span>` : ""}</strong><small>${legacy ? `项目：${escapeHTML(legacyName)}` : "全局模板"} · v${Number(template.current_version)}</small><small>默认收件人：${escapeHTML((template.default_to || []).join(", ") || "无")}${(template.default_cc || []).length ? ` · 默认 CC：${escapeHTML(template.default_cc.join(", "))}` : ""}</small></div></div>
-    <div class="mail-resource-meta"><span class="mail-status ${template.status === "active" ? "sent" : "muted"}">${template.status === "active" ? "启用" : "已归档"}</span><span>更新 ${escapeHTML(formatMailTime(template.updated_at))}</span><span>${(template.required_variables || []).length} 个变量</span></div>
+    <div class="mail-resource-identity"><span class="mail-resource-glyph">${icon("mail")}</span><div><strong>${escapeHTML(template.name)}${legacy ? ` <span class="mail-template-badge legacy">旧项目模板</span>` : ""} <span class="mail-template-badge mode">${guide ? "guide 参考" : "render 变量"}</span></strong><small>${legacy ? `项目：${escapeHTML(legacyName)}` : "全局模板"} · v${Number(template.current_version)}</small><small>默认收件人：${escapeHTML((template.default_to || []).join(", ") || "无")}${(template.default_cc || []).length ? ` · 默认 CC：${escapeHTML(template.default_cc.join(", "))}` : ""}</small>${template.description ? `<small>${escapeHTML(template.description)}</small>` : ""}</div></div>
+    <div class="mail-resource-meta"><span class="mail-status ${template.status === "active" ? "sent" : "muted"}">${template.status === "active" ? "启用" : "已归档"}</span><span>更新 ${escapeHTML(formatMailTime(template.updated_at))}</span><span>${guide ? "参考样板，需自写主题/正文" : `${(template.required_variables || []).length} 个变量`}</span></div>
     <div class="mail-resource-actions">
       ${template.status === "active" ? `<button type="button" class="icon-button" data-mail-template-edit="${escapeHTML(template.id)}" title="编辑模板" aria-label="编辑模板">${icon("edit")}</button>
       <button type="button" class="icon-button" data-mail-template-preview="${escapeHTML(template.id)}" title="预览模板" aria-label="预览模板">${icon("eye")}</button>` : ""}
@@ -176,15 +177,18 @@ function csvValues(value: unknown): string[] {
   return String(value || "").split(",").map(item => item.trim()).filter(Boolean);
 }
 
-// The editor's single submit translation. Scope is always global and
-// required_variables is always derived from the content; there is no project
-// or manual-variable field to disagree with this payload.
+// The editor's single submit translation. Scope is always global. render mode
+// derives required_variables from the content; guide mode never persists them
+// because its subject/body are literal reference samples.
 export function mailTemplateSubmitPayload(values: Record<string, unknown>, template?: MailTemplate): Record<string, unknown> {
   const subject = String(values.subject_template || "");
   const html = String(values.body_html_template || "");
+  const mode = String(values.mode || "guide") === "render" ? "render" : "guide";
   return {
     scope: "global",
     name: String(values.name || "").trim(),
+    description: String(values.description || "").trim(),
+    mode,
     subject_template: subject,
     // The custom text field is gone. The server always derives body_text from
     // the sanitized HTML, so sending an empty string also clears the legacy
@@ -193,7 +197,7 @@ export function mailTemplateSubmitPayload(values: Record<string, unknown>, templ
     body_html_template: html,
     default_to: csvValues(values.default_to),
     default_cc: csvValues(values.default_cc),
-    required_variables: mailTemplateVariables(subject, "", html),
+    required_variables: mode === "render" ? mailTemplateVariables(subject, "", html) : [],
     ...(template ? {expected_version: template.current_version} : {}),
   };
 }
@@ -205,22 +209,29 @@ function autoVariablesText(subject: string, text: string, html: string): string 
 
 export function templateForm(template?: MailTemplate): string {
   const legacy = template?.scope === "project";
+  const mode = template?.mode === "render" ? "render" : "guide";
+  const guide = mode === "guide";
   const variables = ["task.id", "task.title", "task.url", "project.name", "workspace.name", "build.version", "build.commit", "build.branch", "build.time", "package.name", "package.size", "package.sha256", "test.scope", "test.notes", "test.environment", "release.version", "release.date", "release.owner", "agent.name"];
   return `<div class="mail-template-form">
     ${legacy ? `<p class="mail-template-legacy-note">${icon("shield")}旧项目模板：保持原项目作用域，不能改为全局，也不会被伪装成全局模板；允许编辑内容与归档。</p>` : ""}
     <label>名称<input name="name" maxlength="200" required value="${escapeHTML(template?.name || "")}"></label>
-    <label>主题<input name="subject_template" required value="${escapeHTML(template?.subject_template || "")}"></label>
+    <label>模式<select name="mode" data-mail-template-mode>
+      <option value="guide" ${guide ? "selected" : ""}>guide：模板作为参考样板，Agent 自写最终主题与正文</option>
+      <option value="render" ${guide ? "" : "selected"}>render：服务端变量替换（旧模板兼容）</option>
+    </select></label>
+    <label data-mail-guide-only ${guide ? "" : "hidden"}>填写说明 / 检查清单<textarea name="description" rows="3" placeholder="例如：核对包名、版本、仓库列表与每个修改点，缺失项不要编造。">${escapeHTML(template?.description || "")}</textarea></label>
+    <label><span data-mail-subject-label>${guide ? "示例主题（参考）" : "主题"}</span><input name="subject_template" required value="${escapeHTML(template?.subject_template || "")}"></label>
     <div class="mail-template-defaults">
       <label>默认收件人（逗号分隔）<input name="default_to" value="${escapeHTML((template?.default_to || []).join(", "))}"></label>
       <label>默认 CC（逗号分隔）<input name="default_cc" value="${escapeHTML((template?.default_cc || []).join(", "))}"></label>
     </div>
     ${template?.body_text_template?.trim() ? `<p class="field-help">该模板仍有历史自定义纯文本；本次保存后将改为由 HTML 自动生成。</p>` : ""}
     <div class="mail-template-editor-head">
-      <strong>正文</strong>
-      <small>直接编辑渲染效果；变量和表格会插入到光标处，保存时自动规范化为安全 HTML。</small>
+      <strong data-mail-body-label>${guide ? "示例正文（参考）" : "正文"}</strong>
+      <small data-mail-body-help>${guide ? "这是参考示例，不会被替换变量，也不会自动作为发送内容。" : "直接编辑渲染效果；变量和表格会插入到光标处，保存时自动规范化为安全 HTML。"}</small>
       <label class="mail-template-source-toggle"><input type="checkbox" data-mail-template-source-toggle>源码</label>
     </div>
-    <div class="mail-variable-bar" aria-label="插入变量">${variables.map(name => `<button type="button" data-mail-variable="${name}">{{${name}}}</button>`).join("")}</div>
+    <div class="mail-variable-bar" data-mail-render-only aria-label="插入变量" ${guide ? "hidden" : ""}>${variables.map(name => `<button type="button" data-mail-variable="${name}">{{${name}}}</button>`).join("")}</div>
     <div class="mail-template-html-tools">
       <button type="button" data-mail-insert-table>${icon("plus")}插入表格</button>
       <label class="mail-template-table-size">行<input type="number" inputmode="numeric" min="1" max="50" value="3" data-mail-table-rows></label>
@@ -231,9 +242,9 @@ export function templateForm(template?: MailTemplate): string {
       <div class="mail-template-wysiwyg" contenteditable="true" role="textbox" aria-multiline="true" aria-label="邮件正文" data-mail-template-editor data-placeholder="输入邮件正文，可直接看到渲染效果…" spellcheck="true"></div>
       <textarea class="mail-template-source-editor" name="body_html_template" rows="12" aria-label="HTML 源码" data-mail-template-source hidden>${escapeHTML(template?.body_html_template || "")}</textarea>
     </div>
-    <div class="field-help mail-template-auto-variables" data-mail-auto-variables>自动识别变量：${escapeHTML(autoVariablesText(template?.subject_template || "", "", template?.body_html_template || ""))}</div>
-    <div class="mail-template-preview-actions"><button type="button" data-mail-template-preview-form>${icon("eye")}预览</button><small>用服务端 draft preview 确认最终效果，无需填写 JSON。</small></div>
-    <p class="field-help">变量只做字符串替换；HTML 只允许安全子集（含表格专用的安全 style），变量替换后会再次 sanitize。纯文本正文由后端从 HTML 自动生成。</p>
+    <div class="field-help mail-template-auto-variables" data-mail-auto-variables data-mail-render-only ${guide ? "hidden" : ""}>自动识别变量：${escapeHTML(autoVariablesText(template?.subject_template || "", "", template?.body_html_template || ""))}</div>
+    <div class="mail-template-preview-actions"><button type="button" data-mail-template-preview-form>${icon("eye")}预览</button><small data-mail-preview-help>${guide ? "预览直接展示示例，不做变量替换；发送时由调用方提供最终主题与正文。" : "用服务端 draft preview 确认最终效果，无需填写 JSON。"}</small></div>
+    <p class="field-help" data-mail-mode-help>${guide ? "guide 模式：模板只是参考样板。最终主题与正文由 Agent/Owner 自写，服务端仍会 sanitize 并拒绝残留的 {{...}} 占位符。" : "render 模式（旧模板兼容）：变量只做字符串替换；HTML 只允许安全子集，变量替换后会再次 sanitize。纯文本正文由后端从 HTML 自动生成。"}</p>
   </div>`;
 }
 
@@ -261,6 +272,16 @@ function previewDataFromResult(
 }
 
 function openStoredTemplatePreview(template: MailTemplate, notify: Notice): void {
+  if (template.mode === "guide") {
+    // Guide templates show their literal reference sample; no variable
+    // substitution and no synthetic sample values are involved.
+    void api.previewMailTemplate(template.id, {
+      to: template.default_to, cc: template.default_cc,
+    }).then(result => {
+      openMailPreviewDialog(previewDataFromResult(result.preview, [], {}));
+    }).catch(error => notify("error", error instanceof Error ? error.message : String(error)));
+    return;
+  }
   const names = [...new Set([
     ...mailTemplatePlaceholders(template.subject_template, template.body_text_template, template.body_html_template),
     ...(template.required_variables || []),
@@ -285,8 +306,10 @@ function openDraftTemplatePreview(form: HTMLFormElement, template: MailTemplate 
     const subject = String(values.get("subject_template") || "");
     const text = String(values.get("body_text_template") || "");
     const html = String(values.get("body_html_template") || "");
+    const mode = String(values.get("mode") || "guide") === "render" ? "render" : "guide";
     return {
-      subject, text, html,
+      mode, subject, text, html,
+      description: String(values.get("description") || ""),
       to: csvValues(values.get("default_to")),
       cc: csvValues(values.get("default_cc")),
       names: mailTemplatePlaceholders(subject, text, html),
@@ -294,8 +317,22 @@ function openDraftTemplatePreview(form: HTMLFormElement, template: MailTemplate 
   };
   const request = async (samples: Record<string, string>): Promise<MailPreviewData> => {
     const current = collect();
+    if (current.mode === "guide") {
+      // The editor previews the unsaved reference sample literally.
+      const result = await api.previewMailTemplateContent({
+        mode: "guide", preview_example: true,
+        name: template?.name || "", description: current.description,
+        subject_template: current.subject,
+        body_text_template: current.text,
+        body_html_template: current.html,
+        default_to: current.to, default_cc: current.cc,
+        to: current.to, cc: current.cc,
+      });
+      return previewDataFromResult(result.preview, [], {});
+    }
     const payload = mailPreviewVariablePayload(current.names, samples);
     const result = await api.previewMailTemplateContent({
+      mode: "render",
       name: template?.name || "",
       subject_template: current.subject,
       body_text_template: current.text,
@@ -413,6 +450,7 @@ export function bindMailResources(data: MailResourcesData, actions: MailResource
     const sourceEditor = form.querySelector<HTMLTextAreaElement>("[data-mail-template-source]");
     const sourceToggle = form.querySelector<HTMLInputElement>("[data-mail-template-source-toggle]");
     const subjectInput = form.querySelector<HTMLInputElement>('input[name="subject_template"]');
+    const modeSelect = form.querySelector<HTMLSelectElement>('select[name="mode"]');
     let sourceMode = false;
     let lastField: HTMLInputElement | HTMLTextAreaElement | null = null;
 
@@ -437,6 +475,40 @@ export function bindMailResources(data: MailResourcesData, actions: MailResource
         target.textContent = `自动识别变量：${autoVariablesText(subjectInput?.value || "", "", currentHtml())}`;
       }
     };
+    // Mode-specific editor furniture. `hidden` is backed by explicit CSS so a
+    // global display rule cannot keep the variable bar visible in guide mode.
+    const syncMode = () => {
+      const guide = modeSelect?.value !== "render";
+      form.querySelectorAll<HTMLElement>("[data-mail-render-only]").forEach(element => {
+        element.hidden = guide;
+      });
+      form.querySelectorAll<HTMLElement>("[data-mail-guide-only]").forEach(element => {
+        element.hidden = !guide;
+      });
+      const subjectLabel = form.querySelector<HTMLElement>("[data-mail-subject-label]");
+      if (subjectLabel) subjectLabel.textContent = guide ? "示例主题（参考）" : "主题";
+      const bodyLabel = form.querySelector<HTMLElement>("[data-mail-body-label]");
+      if (bodyLabel) bodyLabel.textContent = guide ? "示例正文（参考）" : "正文";
+      const bodyHelp = form.querySelector<HTMLElement>("[data-mail-body-help]");
+      if (bodyHelp) {
+        bodyHelp.textContent = guide
+          ? "这是参考示例，不会被替换变量，也不会自动作为发送内容。"
+          : "直接编辑渲染效果；变量和表格会插入到光标处，保存时自动规范化为安全 HTML。";
+      }
+      const previewHelp = form.querySelector<HTMLElement>("[data-mail-preview-help]");
+      if (previewHelp) {
+        previewHelp.textContent = guide
+          ? "预览直接展示示例，不做变量替换；发送时由调用方提供最终主题与正文。"
+          : "用服务端 draft preview 确认最终效果，无需填写 JSON。";
+      }
+      const modeHelp = form.querySelector<HTMLElement>("[data-mail-mode-help]");
+      if (modeHelp) {
+        modeHelp.textContent = guide
+          ? "guide 模式：模板只是参考样板。最终主题与正文由 Agent/Owner 自写，服务端仍会 sanitize 并拒绝残留的 {{...}} 占位符。"
+          : "render 模式（旧模板兼容）：变量只做字符串替换；HTML 只允许安全子集，变量替换后会再次 sanitize。纯文本正文由后端从 HTML 自动生成。";
+      }
+      syncAutoVariables();
+    };
     const insertIntoTarget = (target: HTMLInputElement | HTMLTextAreaElement, token: string) => {
       const start = target.selectionStart ?? target.value.length;
       const end = target.selectionEnd ?? start;
@@ -459,7 +531,8 @@ export function bindMailResources(data: MailResourcesData, actions: MailResource
     editor?.addEventListener("input", syncAutoVariables);
     sourceEditor?.addEventListener("input", syncAutoVariables);
     subjectInput?.addEventListener("input", syncAutoVariables);
-    syncAutoVariables();
+    modeSelect?.addEventListener("change", syncMode);
+    syncMode();
     // Pasted rich text never reaches the editor as markup: plain text wins and
     // clipboard HTML is run through the normalizer as a fallback.
     editor?.addEventListener("paste", event => {
@@ -590,7 +663,7 @@ export function bindMailResources(data: MailResourcesData, actions: MailResource
       const versions = result.versions || [];
       const dialog = document.createElement("dialog");
       dialog.className = "wide mail-resource-dialog";
-      dialog.innerHTML = `<div class="dialog-head"><h2>${escapeHTML(template.name)} · 版本历史</h2><button type="button" data-close class="icon-button" aria-label="关闭">${icon("close")}</button></div><div class="dialog-body">${versions.length ? versions.map((version: MailTemplateVersion) => `<details class="mail-version"><summary>v${Number(version.version)} · ${escapeHTML(formatMailTime(version.created_at))}</summary><p><strong>主题：</strong>${escapeHTML(version.subject_template)}</p><pre>${escapeHTML(version.body_text_template || "")}</pre></details>`).join("") : `<p class="field-help">没有版本记录。</p>`}</div><div class="dialog-actions"><button type="button" data-close>关闭</button></div>`;
+      dialog.innerHTML = `<div class="dialog-head"><h2>${escapeHTML(template.name)} · 版本历史</h2><button type="button" data-close class="icon-button" aria-label="关闭">${icon("close")}</button></div><div class="dialog-body">${versions.length ? versions.map((version: MailTemplateVersion) => `<details class="mail-version"><summary>v${Number(version.version)} · ${version.mode === "render" ? "render" : "guide"} · ${escapeHTML(formatMailTime(version.created_at))}</summary><p><strong>主题：</strong>${escapeHTML(version.subject_template)}</p><pre>${escapeHTML(version.body_text_template || "")}</pre></details>`).join("") : `<p class="field-help">没有版本记录。</p>`}</div><div class="dialog-actions"><button type="button" data-close>关闭</button></div>`;
       document.body.appendChild(dialog);
       dialog.querySelectorAll("[data-close]").forEach(close => close.addEventListener("click", () => { dialog.close(); dialog.remove(); }));
       dialog.addEventListener("cancel", () => { dialog.close(); dialog.remove(); });

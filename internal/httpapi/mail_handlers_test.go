@@ -142,6 +142,16 @@ func (f *mailAPIFixture) createAccountWithAddress(code, address string) map[stri
 
 func (f *mailAPIFixture) createTemplate(payload map[string]any) map[string]any {
 	f.t.Helper()
+	// Existing fixtures exercise the legacy render/variable path. New templates
+	// default to guide, so tests that need render must ask for it explicitly.
+	if _, ok := payload["mode"]; !ok {
+		withMode := make(map[string]any, len(payload)+1)
+		for key, value := range payload {
+			withMode[key] = value
+		}
+		withMode["mode"] = string(domain.MailTemplateModeRender)
+		payload = withMode
+	}
 	body := f.request(http.MethodPost, "/api/v1/mail-templates", payload, f.csrf)
 	if body["_status"].(float64) != http.StatusCreated {
 		f.t.Fatalf("create template = %#v", body)
@@ -430,8 +440,8 @@ func TestMailTemplateVersioningAndValidation(t *testing.T) {
 	}
 
 	unknown := f.request(http.MethodPost, "/api/v1/mail-templates", map[string]any{
-		"scope": "global", "name": "坏模板", "subject_template": "{{secret.value}}",
-		"body_text_template": "x",
+		"scope": "global", "name": "坏模板", "mode": "render",
+		"subject_template": "{{secret.value}}", "body_text_template": "x",
 	}, f.csrf)
 	if unknown["_status"].(float64) != http.StatusUnprocessableEntity ||
 		mailErrorCode(t, unknown) != string(domain.MailErrTemplateVariableUnknown) {
@@ -835,5 +845,81 @@ func TestMailBindingsCRUDAndVisibility(t *testing.T) {
 	deleted := f.request(http.MethodDelete, "/api/v1/mail-bindings/"+binding["id"].(string), nil, f.csrf)
 	if deleted["_status"].(float64) != http.StatusOK {
 		t.Fatalf("delete binding = %#v", deleted)
+	}
+}
+
+func TestOwnerGuideTemplatePreviewAndSendUseCallerContent(t *testing.T) {
+	f := newMailAPIFixture(t)
+	account := f.createAccount("owner-guide-code")
+	template := f.createTemplate(map[string]any{
+		"scope": "global", "name": "Owner guide", "mode": "guide",
+		"description":        "核对版本与修改点。",
+		"subject_template":   "[AHA] {{task.title}} 示例主题",
+		"body_text_template": "示例正文 {{task.title}}",
+		"body_html_template": "<p>示例 HTML {{task.title}}</p>",
+	})
+	templateID := template["id"].(string)
+
+	// No caller content: the template preview shows the literal example. This is
+	// preview-only and never a send fallback.
+	example := f.request(http.MethodPost, "/api/v1/mail-templates/"+templateID+"/preview",
+		map[string]any{"task_id": f.task.ID}, f.csrf)
+	if example["_status"].(float64) != http.StatusOK {
+		t.Fatalf("example preview = %#v", example)
+	}
+	examplePreview := example["preview"].(map[string]any)
+	if !strings.Contains(examplePreview["subject"].(string), "{{task.title}}") ||
+		!strings.Contains(examplePreview["body_html"].(string), "{{task.title}}") {
+		t.Fatalf("example preview was substituted: %#v", examplePreview)
+	}
+
+	final := f.request(http.MethodPost, "/api/v1/mail-templates/"+templateID+"/preview", map[string]any{
+		"task_id": f.task.ID, "subject": "最终主题",
+		"body_html": "<p>最终 HTML 正文</p>", "body_text": "最终纯文本正文",
+	}, f.csrf)
+	if final["_status"].(float64) != http.StatusOK {
+		t.Fatalf("final preview = %#v", final)
+	}
+	finalPreview := final["preview"].(map[string]any)
+	if finalPreview["subject"] != "最终主题" || !strings.Contains(finalPreview["body_html"].(string), "最终 HTML 正文") ||
+		finalPreview["template_mode"] != "guide" {
+		t.Fatalf("final preview = %#v", finalPreview)
+	}
+
+	// Owner send: missing final content is rejected; variables are ignored.
+	missing := f.request(http.MethodPost, "/api/v1/mail-messages", map[string]any{
+		"task_id": f.task.ID, "account_id": account["id"], "template_id": templateID,
+		"to": []string{"qa@example.com"}, "submit": true,
+	}, f.csrf)
+	if missing["_status"].(float64) != http.StatusUnprocessableEntity ||
+		mailErrorCode(t, missing) != string(domain.MailErrTemplateContentMissing) {
+		t.Fatalf("missing content send = %#v", missing)
+	}
+
+	placeholder := f.request(http.MethodPost, "/api/v1/mail-messages", map[string]any{
+		"task_id": f.task.ID, "account_id": account["id"], "template_id": templateID,
+		"subject": "s", "body_text": "仍有 {{build.version}}", "to": []string{"qa@example.com"}, "submit": true,
+	}, f.csrf)
+	if placeholder["_status"].(float64) != http.StatusUnprocessableEntity ||
+		mailErrorCode(t, placeholder) != string(domain.MailErrTemplatePlaceholderUnresolved) {
+		t.Fatalf("placeholder send = %#v", placeholder)
+	}
+
+	sent := f.request(http.MethodPost, "/api/v1/mail-messages", map[string]any{
+		"task_id": f.task.ID, "account_id": account["id"], "template_id": templateID,
+		"subject": "最终发送主题", "body_text": "最终发送正文",
+		"variables": map[string]string{"build.version": "v1"},
+		"to":        []string{"qa@example.com"}, "submit": true,
+	}, f.csrf)
+	if sent["_status"].(float64) != http.StatusCreated {
+		t.Fatalf("guide owner send = %#v", sent)
+	}
+	message := sent["message"].(map[string]any)
+	if message["template_id"] != templateID || message["template_version"] != float64(1) ||
+		message["subject"] != "最终发送主题" {
+		t.Fatalf("guide owner message = %#v", message)
+	}
+	if variables, ok := message["variables"].(map[string]any); ok && len(variables) != 0 {
+		t.Fatalf("guide owner message kept variables: %#v", variables)
 	}
 }

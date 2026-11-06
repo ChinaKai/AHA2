@@ -352,9 +352,10 @@ func TestV119BusinessDataUpgradesToV120(t *testing.T) {
 			t.Fatalf("drop %s: %v", table, err)
 		}
 	}
-	// Roll back both mail migrations: v121 ALTERs the v120 tables, so leaving
-	// v121 recorded would skip the revision column after the tables are dropped.
-	if _, err := database.db.ExecContext(ctx, `DELETE FROM schema_migrations WHERE version IN (120,121,122)`); err != nil {
+	// Roll back all mail migrations: v121/v123 ALTER the v120 tables, so
+	// leaving them recorded would skip the revision/mode columns after the
+	// tables are dropped.
+	if _, err := database.db.ExecContext(ctx, `DELETE FROM schema_migrations WHERE version IN (120,121,122,123)`); err != nil {
 		t.Fatal(err)
 	}
 	if err := database.Close(); err != nil {
@@ -383,6 +384,14 @@ func TestV119BusinessDataUpgradesToV120(t *testing.T) {
 	account := createMailAccountFixture(t, upgraded, "Upgraded", "upgraded@example.com")
 	if _, err := upgraded.MailAccount(ctx, account.ID); err != nil {
 		t.Fatalf("mail tables were not recreated: %v", err)
+	}
+	var modeColumns int
+	if err := upgraded.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pragma_table_info('mail_templates') WHERE name='mode'`).Scan(&modeColumns); err != nil {
+		t.Fatal(err)
+	}
+	if modeColumns != 1 {
+		t.Fatalf("mail_templates.mode missing after upgrade")
 	}
 }
 

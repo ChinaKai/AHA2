@@ -1335,13 +1335,14 @@ func ahaPetTools() []gateway.ChatTool {
 				"aliases":       map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 			}, "required": []string{"account_id"},
 		}},
-		{Name: "aha_create_mail_template", Description: "新建邮件模板（正文允许，不是凭据）；模板版本不可变，创建即 version 1", Parameters: map[string]any{
+		{Name: "aha_create_mail_template", Description: "新建邮件模板（正文允许，不是凭据）；默认 guide 模式，模板内容仅作参考示例；模板版本不可变，创建即 version 1", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{
 				"id":                 map[string]any{"type": "string", "description": "可选；不传则由服务端生成"},
 				"scope":              map[string]any{"type": "string", "enum": []string{string(domain.MailTemplateScopeGlobal), string(domain.MailTemplateScopeProject)}},
 				"project_id":         map[string]any{"type": "string", "description": "scope=project 时必填"},
 				"name":               map[string]any{"type": "string"},
-				"description":        map[string]any{"type": "string"},
+				"description":        map[string]any{"type": "string", "description": "guide 模式下作为填写说明/检查清单"},
+				"mode":               map[string]any{"type": "string", "enum": []string{string(domain.MailTemplateModeGuide), string(domain.MailTemplateModeRender)}, "description": "默认 guide；render 保留旧的变量替换语义"},
 				"subject_template":   map[string]any{"type": "string"},
 				"body_text_template": map[string]any{"type": "string"},
 				"body_html_template": map[string]any{"type": "string", "description": "正文至少提供 text 或 html 之一"},
@@ -1356,6 +1357,7 @@ func ahaPetTools() []gateway.ChatTool {
 				"expected_version":   map[string]any{"type": "integer", "minimum": 1},
 				"name":               map[string]any{"type": "string"},
 				"description":        map[string]any{"type": "string"},
+				"mode":               map[string]any{"type": "string", "enum": []string{string(domain.MailTemplateModeGuide), string(domain.MailTemplateModeRender)}},
 				"subject_template":   map[string]any{"type": "string"},
 				"body_text_template": map[string]any{"type": "string"},
 				"body_html_template": map[string]any{"type": "string"},

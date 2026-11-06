@@ -174,9 +174,27 @@ type mailContextTemplate struct {
 	ID        string
 	Name      string
 	Version   int
+	Mode      string
 	Scope     string
 	ProjectID string
 	Variables string
+}
+
+// mailContextGuideTemplate carries the reference content of a template that is
+// bound as an account default and uses guide mode. It is injected so the Agent
+// can write the final subject/body without an extra tool call.
+type mailContextGuideTemplate struct {
+	ID                   string
+	Name                 string
+	Version              int
+	Scope                string
+	Description          string
+	Subject              string
+	BodyText             string
+	BodyHTML             string
+	BodyTextTruncated    bool
+	BodyHTMLTruncated    bool
+	DescriptionTruncated bool
 }
 
 type hardwareContextGroup struct {
@@ -197,11 +215,11 @@ type hardwareContextGroup struct {
 }
 
 type attachmentIndexEntry struct {
-	ID           string
-	Name         string
-	RelativePath string
-	MediaType    string
-	Size         int64
+	ID              string
+	Name            string
+	RelativePath    string
+	MediaType       string
+	Size            int64
 	SHA256          string
 	Inline          bool
 	BudgetExhausted bool
@@ -226,38 +244,39 @@ type InboxTemplateItem struct {
 }
 
 type templateData struct {
-	AgentID            string
-	AgentRole          string
-	Identity           string
-	Channel            string
-	Backend            string
-	Collaboration      string
-	MaxAgents          int
-	TaskID             string
-	TaskCode           string
-	TaskTitle          string
-	ContextRoot        string
-	TaskWorkspace      string
-	Workspace          string
-	WorkspaceTransport string
-	ProjectName        string
-	OriginalRequest    string
-	CurrentGoal        string
-	CurrentGoalSummary string
-	TaskBranch         string
-	InboxBatch         string
-	CompactHandoff     string
-	RecoveryHandoff    string
-	Recovery           *recoveryHandoffEvidence
-	AgentAPIURL        string
-	AvailableContext   []AvailableContextGroup
-	RecentExchanges    []recentContextExchange
-	TurnDiagnostics    []turnDiagnostic
-	HardwareGroups     []hardwareContextGroup
-	MailAccounts       []mailContextAccount
-	MailTemplates      []mailContextTemplate
-	AttachmentEntries  []attachmentIndexEntry
-	InboxItems         []InboxTemplateItem
+	AgentID               string
+	AgentRole             string
+	Identity              string
+	Channel               string
+	Backend               string
+	Collaboration         string
+	MaxAgents             int
+	TaskID                string
+	TaskCode              string
+	TaskTitle             string
+	ContextRoot           string
+	TaskWorkspace         string
+	Workspace             string
+	WorkspaceTransport    string
+	ProjectName           string
+	OriginalRequest       string
+	CurrentGoal           string
+	CurrentGoalSummary    string
+	TaskBranch            string
+	InboxBatch            string
+	CompactHandoff        string
+	RecoveryHandoff       string
+	Recovery              *recoveryHandoffEvidence
+	AgentAPIURL           string
+	AvailableContext      []AvailableContextGroup
+	RecentExchanges       []recentContextExchange
+	TurnDiagnostics       []turnDiagnostic
+	HardwareGroups        []hardwareContextGroup
+	MailAccounts          []mailContextAccount
+	MailTemplates         []mailContextTemplate
+	DefaultGuideTemplates []mailContextGuideTemplate
+	AttachmentEntries     []attachmentIndexEntry
+	InboxItems            []InboxTemplateItem
 }
 
 func NewEngine(repository Repository) *Engine {
@@ -791,6 +810,7 @@ func buildResources(
 		mailData := data
 		mailData.MailAccounts = mailContextAccounts(input.MailAccounts, input.MailDefaultTemplates)
 		mailData.MailTemplates = mailContextTemplates(input.MailTemplates)
+		mailData.DefaultGuideTemplates = mailContextGuideTemplates(input.MailTemplates, input.MailDefaultTemplates)
 		mailContent, renderErr := renderTemplateByID(templates, "context.mail", mailData)
 		if renderErr != nil {
 			return nil, renderErr
@@ -1882,13 +1902,75 @@ func mailContextAccounts(accounts []domain.MailAccount, defaultTemplates map[str
 func mailContextTemplates(templates []domain.MailTemplate) []mailContextTemplate {
 	result := make([]mailContextTemplate, 0, len(templates))
 	for _, template := range templates {
+		mode := template.Mode
+		if mode == "" {
+			mode = domain.MailTemplateModeRender
+		}
+		variables := ""
+		if mode == domain.MailTemplateModeRender {
+			variables = strings.Join(template.RequiredVariables, ", ")
+		}
 		result = append(result, mailContextTemplate{
 			ID: template.ID, Name: template.Name, Version: template.CurrentVersion,
-			Scope: string(template.Scope), ProjectID: template.ProjectID,
-			Variables: strings.Join(template.RequiredVariables, ", "),
+			Mode: string(mode), Scope: string(template.Scope), ProjectID: template.ProjectID,
+			Variables: variables,
 		})
 	}
 	return result
+}
+
+// Context is a small index, not a content dump. A guide template bound as the
+// account default is the one exception: the Agent needs its reference sample to
+// compose without an extra tool round-trip. Long samples are truncated here
+// with an explicit marker rendered by the mail template.
+const (
+	maxMailGuideDescriptionRunes = 2000
+	maxMailGuideBodyRunes        = 6000
+)
+
+func mailContextGuideTemplates(templates []domain.MailTemplate, defaultTemplates map[string]string) []mailContextGuideTemplate {
+	if len(defaultTemplates) == 0 {
+		return nil
+	}
+	defaultIDs := make(map[string]bool, len(defaultTemplates))
+	for _, id := range defaultTemplates {
+		if strings.TrimSpace(id) != "" {
+			defaultIDs[strings.TrimSpace(id)] = true
+		}
+	}
+	result := make([]mailContextGuideTemplate, 0, len(defaultIDs))
+	seen := make(map[string]bool, len(defaultIDs))
+	for _, template := range templates {
+		if !defaultIDs[template.ID] || seen[template.ID] {
+			continue
+		}
+		if template.Mode != domain.MailTemplateModeGuide {
+			continue
+		}
+		seen[template.ID] = true
+		description, descriptionTruncated := truncateContextText(template.Description, maxMailGuideDescriptionRunes)
+		bodyText, bodyTextTruncated := truncateContextText(template.BodyTextTemplate, maxMailGuideBodyRunes)
+		bodyHTML, bodyHTMLTruncated := truncateContextText(template.BodyHTMLTemplate, maxMailGuideBodyRunes)
+		result = append(result, mailContextGuideTemplate{
+			ID: template.ID, Name: template.Name, Version: template.CurrentVersion,
+			Scope: string(template.Scope), Description: description,
+			Subject: template.SubjectTemplate, BodyText: bodyText, BodyHTML: bodyHTML,
+			BodyTextTruncated: bodyTextTruncated, BodyHTMLTruncated: bodyHTMLTruncated,
+			DescriptionTruncated: descriptionTruncated,
+		})
+	}
+	return result
+}
+
+func truncateContextText(value string, limitRunes int) (string, bool) {
+	if limitRunes <= 0 {
+		return "", value != ""
+	}
+	runes := []rune(value)
+	if len(runes) <= limitRunes {
+		return value, false
+	}
+	return string(runes[:limitRunes]), true
 }
 
 func normalizeHardwareSSHAuth(value string) string {

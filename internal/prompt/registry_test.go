@@ -929,7 +929,7 @@ func TestBuildAddsMailContextWithoutCredentials(t *testing.T) {
 		MailAccounts: []domain.MailAccount{{
 			ID: "mail_account_1", Address: "noreply@example.com", DisplayName: "AHA",
 			Status: domain.MailAccountOK, CredentialConfigured: true,
-			Aliases: []domain.MailAccountAlias{{Address: "build-bot@example.com"}},
+			Aliases:       []domain.MailAccountAlias{{Address: "build-bot@example.com"}},
 			CredentialRef: "mail-account/mail_account_1/smtp/credential",
 		}},
 		MailTemplates: []domain.MailTemplate{{
@@ -966,5 +966,65 @@ func TestBuildAddsMailContextWithoutCredentials(t *testing.T) {
 	}
 	if !strings.Contains(result.EffectivePrompt, "mail.md") {
 		t.Fatalf("mail.md was not listed as available context: %s", result.EffectivePrompt)
+	}
+}
+
+func TestBuildInjectsDefaultGuideTemplateReference(t *testing.T) {
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	engine := NewEngine(database)
+	longBody := strings.Repeat("示例", maxMailGuideBodyRunes)
+	result, err := engine.Build(ctx, BuildInput{
+		Project:   domain.Project{Name: "Project"},
+		Workspace: domain.Workspace{Name: "Workspace", RootPath: "/repo", Transport: "native"},
+		Task: domain.Task{
+			ID: "task-mail-guide", Code: "task-mail-guide", Title: "Mail guide", TaskWorkspacePath: "/repo",
+			CollaborationMode: "single", MaxAgents: 1,
+		},
+		Agent:    domain.TaskAgent{AgentID: "main", Role: "main"},
+		Snapshot: domain.RuntimeConfigSnapshot{Backend: "codex"},
+		MailAccounts: []domain.MailAccount{{
+			ID: "mail_account_guide", Address: "noreply@example.com", DisplayName: "AHA",
+			Status: domain.MailAccountOK, CredentialConfigured: true,
+		}},
+		MailTemplates: []domain.MailTemplate{{
+			ID: "mail_template_guide", Name: "Guide 提测", Scope: domain.MailTemplateScopeGlobal,
+			Mode: domain.MailTemplateModeGuide, CurrentVersion: 3,
+			Description:      "核对仓库列表、包名与每个修改点。",
+			SubjectTemplate:  "[AHA] {{task.title}} 提测通知（示例）",
+			BodyTextTemplate: longBody,
+			BodyHTMLTemplate: "<p>示例 HTML {{task.title}}</p>",
+		}},
+		MailDefaultTemplates: map[string]string{"mail_account_guide": "mail_template_guide"},
+		UserMessage:          "send mail",
+		Language:             domain.LanguageSimplified,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var content string
+	for _, item := range result.ContextManifest {
+		if item.ID == "mail" {
+			content = item.Content
+		}
+	}
+	if content == "" {
+		t.Fatalf("mail.md was not materialized: %#v", result.ContextManifest)
+	}
+	for _, want := range []string{
+		"guide", "Guide 提测", "v3", "核对仓库列表、包名与每个修改点",
+		"{{task.title}} 提测通知（示例）", "示例 HTML {{task.title}}",
+		"已按上下文预算截断", "写最终主题和正文", "mail_send",
+	} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("mail.md missing %q: %s", want, content)
+		}
+	}
+	if strings.Contains(content, "变量：") {
+		t.Fatalf("guide context advertised variables: %s", content)
 	}
 }

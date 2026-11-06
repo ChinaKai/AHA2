@@ -78,6 +78,7 @@ type PetMailTemplateInput struct {
 	ProjectID         string    `json:"project_id"`
 	Name              *string   `json:"name"`
 	Description       *string   `json:"description"`
+	Mode              *string   `json:"mode"`
 	SubjectTemplate   *string   `json:"subject_template"`
 	BodyTextTemplate  *string   `json:"body_text_template"`
 	BodyHTMLTemplate  *string   `json:"body_html_template"`
@@ -404,6 +405,9 @@ func petMailTemplateChangedFields(before, after domain.MailTemplate) []string {
 	if before.Description != after.Description {
 		changed = append(changed, "description")
 	}
+	if before.Mode != after.Mode {
+		changed = append(changed, "mode")
+	}
 	if before.SubjectTemplate != after.SubjectTemplate {
 		changed = append(changed, "subject_template")
 	}
@@ -635,8 +639,12 @@ func (s *Service) PetCreateMailTemplate(ctx context.Context, input PetMailTempla
 	}
 	item := input.applyTo(domain.MailTemplate{
 		ID: strings.TrimSpace(input.ID), Scope: scope, ProjectID: projectID,
+		Mode:   domain.MailTemplateModeGuide,
 		Status: domain.MailTemplateStatusActive, CurrentVersion: 1, CreatedBy: "pet",
 	})
+	if !item.Mode.Valid() {
+		return domain.MailTemplate{}, fmt.Errorf("mail_template_invalid: 模板模式不正确")
+	}
 	if item.ID != "" {
 		if _, err := s.store.MailTemplate(ctx, item.ID); err == nil {
 			return domain.MailTemplate{}, fmt.Errorf("mail_template_exists: 邮件模板 %s 已存在", item.ID)
@@ -670,6 +678,11 @@ func (input PetMailTemplateInput) applyTo(base domain.MailTemplate) domain.MailT
 	if input.Description != nil {
 		base.Description = strings.TrimSpace(*input.Description)
 	}
+	if input.Mode != nil && strings.TrimSpace(*input.Mode) != "" {
+		// Empty mode means "leave unchanged"; the create path already defaults
+		// new templates to guide.
+		base.Mode = domain.MailTemplateMode(strings.TrimSpace(*input.Mode))
+	}
 	if input.SubjectTemplate != nil {
 		base.SubjectTemplate = *input.SubjectTemplate
 	}
@@ -693,7 +706,7 @@ func (input PetMailTemplateInput) applyTo(base domain.MailTemplate) domain.MailT
 
 func petMailTemplateContent(item domain.MailTemplate) mailpkg.Template {
 	return mailpkg.Template{
-		ID: item.ID, Version: item.CurrentVersion,
+		ID: item.ID, Version: item.CurrentVersion, Mode: item.Mode,
 		SubjectTemplate: item.SubjectTemplate, BodyTextTemplate: item.BodyTextTemplate,
 		BodyHTMLTemplate: item.BodyHTMLTemplate, RequiredVariables: item.RequiredVariables,
 		DefaultTo: item.DefaultTo, DefaultCC: item.DefaultCC,
@@ -719,6 +732,13 @@ func (s *Service) PetUpdateMailTemplate(ctx context.Context, input PetMailTempla
 	// Scope and project are immutable: moving a template would change history
 	// visibility. The pet can only edit content and defaults.
 	item := input.applyTo(existing)
+	if item.Mode == "" {
+		// Legacy rows predating the mode column keep render behavior.
+		item.Mode = domain.MailTemplateModeRender
+	}
+	if !item.Mode.Valid() {
+		return domain.MailTemplate{}, fmt.Errorf("mail_template_invalid: 模板模式不正确")
+	}
 	if strings.TrimSpace(item.Name) == "" {
 		return domain.MailTemplate{}, fmt.Errorf("mail_template_invalid: 模板名称必填")
 	}

@@ -19,6 +19,7 @@ type mailTemplatePayload struct {
 	ProjectID         string    `json:"project_id"`
 	Name              *string   `json:"name"`
 	Description       *string   `json:"description"`
+	Mode              *string   `json:"mode"`
 	SubjectTemplate   *string   `json:"subject_template"`
 	BodyTextTemplate  *string   `json:"body_text_template"`
 	BodyHTMLTemplate  *string   `json:"body_html_template"`
@@ -33,17 +34,28 @@ type mailPreviewPayload struct {
 	// SampleVariables are trusted preview-only sample values. Server-resolved
 	// namespaces (task/project/workspace/package) are accepted here so an editor
 	// can render without a real Task; they never reach message creation.
-	SampleVariables  map[string]string `json:"sample_variables"`
-	To               []string          `json:"to"`
-	CC               []string          `json:"cc"`
-	TaskID           string            `json:"task_id"`
-	AttachmentIDs    []string          `json:"attachment_ids"`
-	BuildArtifactIDs []string          `json:"build_artifact_ids"`
+	SampleVariables map[string]string `json:"sample_variables"`
+	// Subject, BodyText and BodyHTML are caller final content for a guide
+	// template. Previewing a guide template without them shows its literal
+	// example; a real send never uses that fallback.
+	Subject  *string `json:"subject"`
+	BodyText *string `json:"body_text"`
+	BodyHTML *string `json:"body_html"`
+	// ExampleOnly is preview-only. It shows a guide template's literal sample
+	// even when the caller supplies final content.
+	ExampleOnly      bool     `json:"preview_example"`
+	To               []string `json:"to"`
+	CC               []string `json:"cc"`
+	TaskID           string   `json:"task_id"`
+	AttachmentIDs    []string `json:"attachment_ids"`
+	BuildArtifactIDs []string `json:"build_artifact_ids"`
 }
 
 // mailDraftPreviewPayload renders editor content that has not been saved yet.
 // It deliberately reuses the same render pipeline as message creation.
 type mailDraftPreviewPayload struct {
+	Mode             string            `json:"mode"`
+	Description      string            `json:"description"`
 	SubjectTemplate  string            `json:"subject_template"`
 	BodyTextTemplate string            `json:"body_text_template"`
 	BodyHTMLTemplate string            `json:"body_html_template"`
@@ -51,11 +63,15 @@ type mailDraftPreviewPayload struct {
 	DefaultCC        []string          `json:"default_cc"`
 	Variables        map[string]string `json:"variables"`
 	SampleVariables  map[string]string `json:"sample_variables"`
-	To               []string          `json:"to"`
-	CC               []string          `json:"cc"`
-	TaskID           string            `json:"task_id"`
-	AttachmentIDs    []string          `json:"attachment_ids"`
-	BuildArtifactIDs []string          `json:"build_artifact_ids"`
+	// ExampleOnly previews a guide draft as its literal reference sample
+	// (the template editor path). Compose previews omit it and are validated
+	// like a real send.
+	ExampleOnly      bool     `json:"preview_example"`
+	To               []string `json:"to"`
+	CC               []string `json:"cc"`
+	TaskID           string   `json:"task_id"`
+	AttachmentIDs    []string `json:"attachment_ids"`
+	BuildArtifactIDs []string `json:"build_artifact_ids"`
 }
 
 var (
@@ -67,6 +83,7 @@ func mailTemplateContent(item domain.MailTemplate) mailpkg.Template {
 	return mailpkg.Template{
 		ID:                item.ID,
 		Version:           item.CurrentVersion,
+		Mode:              item.Mode,
 		SubjectTemplate:   item.SubjectTemplate,
 		BodyTextTemplate:  item.BodyTextTemplate,
 		BodyHTMLTemplate:  item.BodyHTMLTemplate,
@@ -120,6 +137,9 @@ func (s *Server) createMailTemplate(writer http.ResponseWriter, request *http.Re
 	}
 	item := domain.MailTemplate{
 		ID: domain.NewID("mail_template"), Scope: scope, ProjectID: projectID,
+		// New templates are guide mode by default. render remains available for
+		// explicitly requested legacy-style templates.
+		Mode:   domain.MailTemplateModeGuide,
 		Status: domain.MailTemplateStatusActive, CurrentVersion: 1,
 		CreatedBy: mailOwnerID(request),
 	}
@@ -128,14 +148,22 @@ func (s *Server) createMailTemplate(writer http.ResponseWriter, request *http.Re
 		writeMailError(writer, http.StatusUnprocessableEntity, domain.MailErrTemplateInvalid, "模板名称必填")
 		return
 	}
-	// required_variables is derived from the template text; a client can no
-	// longer persist a manual list that disagrees with the placeholders.
-	required, err := mailpkg.CallerVariables(mailTemplateContent(item))
-	if err != nil {
-		writeMailFailure(writer, err, "邮件模板校验失败")
+	if !item.Mode.Valid() {
+		writeMailError(writer, http.StatusUnprocessableEntity, domain.MailErrTemplateInvalid, "模板模式不正确")
 		return
 	}
-	item.RequiredVariables = required
+	if item.Mode == domain.MailTemplateModeRender {
+		// required_variables is derived from the template text; a client can no
+		// longer persist a manual list that disagrees with the placeholders.
+		required, err := mailpkg.CallerVariables(mailTemplateContent(item))
+		if err != nil {
+			writeMailFailure(writer, err, "邮件模板校验失败")
+			return
+		}
+		item.RequiredVariables = required
+	} else {
+		item.RequiredVariables = []string{}
+	}
 	if err := mailpkg.ValidateTemplate(mailTemplateContent(item)); err != nil {
 		writeMailFailure(writer, err, "邮件模板校验失败")
 		return
@@ -161,6 +189,11 @@ func applyMailTemplatePayload(item domain.MailTemplate, payload mailTemplatePayl
 	}
 	if payload.Description != nil {
 		item.Description = strings.TrimSpace(*payload.Description)
+	}
+	if payload.Mode != nil && strings.TrimSpace(*payload.Mode) != "" {
+		// An empty mode means "leave unchanged"; create paths already start at
+		// guide so an omitted mode still defaults correctly.
+		item.Mode = domain.MailTemplateMode(strings.TrimSpace(*payload.Mode))
 	}
 	if payload.SubjectTemplate != nil {
 		item.SubjectTemplate = *payload.SubjectTemplate
@@ -229,12 +262,24 @@ func (s *Server) updateMailTemplate(writer http.ResponseWriter, request *http.Re
 		writeMailError(writer, http.StatusUnprocessableEntity, domain.MailErrTemplateInvalid, "模板名称必填")
 		return
 	}
-	required, err := mailpkg.CallerVariables(mailTemplateContent(item))
-	if err != nil {
-		writeMailFailure(writer, err, "邮件模板校验失败")
+	if item.Mode == "" {
+		// A legacy row loaded before the mode column existed behaves as render.
+		item.Mode = domain.MailTemplateModeRender
+	}
+	if !item.Mode.Valid() {
+		writeMailError(writer, http.StatusUnprocessableEntity, domain.MailErrTemplateInvalid, "模板模式不正确")
 		return
 	}
-	item.RequiredVariables = required
+	if item.Mode == domain.MailTemplateModeRender {
+		required, err := mailpkg.CallerVariables(mailTemplateContent(item))
+		if err != nil {
+			writeMailFailure(writer, err, "邮件模板校验失败")
+			return
+		}
+		item.RequiredVariables = required
+	} else {
+		item.RequiredVariables = []string{}
+	}
 	if err := mailpkg.ValidateTemplate(mailTemplateContent(item)); err != nil {
 		writeMailFailure(writer, err, "邮件模板校验失败")
 		return
@@ -352,25 +397,36 @@ func (s *Server) previewMailTemplateContent(writer http.ResponseWriter, request 
 		writeMailError(writer, http.StatusBadRequest, "invalid_json", "请求格式不正确")
 		return
 	}
+	mode := domain.MailTemplateMode(strings.TrimSpace(payload.Mode))
+	if mode == "" {
+		// Older clients did not send a mode; keep the legacy render behavior for
+		// their unsaved draft preview.
+		mode = domain.MailTemplateModeRender
+	}
 	item := domain.MailTemplate{
 		Scope: domain.MailTemplateScopeGlobal, Status: domain.MailTemplateStatusActive,
-		CurrentVersion: 1, SubjectTemplate: payload.SubjectTemplate,
+		Mode: mode, CurrentVersion: 1, SubjectTemplate: payload.SubjectTemplate,
 		BodyTextTemplate: payload.BodyTextTemplate, BodyHTMLTemplate: payload.BodyHTMLTemplate,
-		DefaultTo: payload.DefaultTo, DefaultCC: payload.DefaultCC,
+		Description: payload.Description, DefaultTo: payload.DefaultTo, DefaultCC: payload.DefaultCC,
 	}
-	required, err := mailpkg.CallerVariables(mailTemplateContent(item))
-	if err != nil {
-		writeMailFailure(writer, err, "邮件模板校验失败")
-		return
+	if mode == domain.MailTemplateModeRender {
+		required, err := mailpkg.CallerVariables(mailTemplateContent(item))
+		if err != nil {
+			writeMailFailure(writer, err, "邮件模板校验失败")
+			return
+		}
+		item.RequiredVariables = required
 	}
-	item.RequiredVariables = required
 	s.previewMailTemplateWith(writer, request, item, payload.previewPayload())
 }
 
 func (p mailDraftPreviewPayload) previewPayload() mailPreviewPayload {
+	subject, bodyText, bodyHTML := p.SubjectTemplate, p.BodyTextTemplate, p.BodyHTMLTemplate
 	return mailPreviewPayload{
 		Variables: p.Variables, SampleVariables: p.SampleVariables,
-		To: p.To, CC: p.CC, TaskID: p.TaskID,
+		Subject: &subject, BodyText: &bodyText, BodyHTML: &bodyHTML,
+		ExampleOnly: p.ExampleOnly,
+		To:          p.To, CC: p.CC, TaskID: p.TaskID,
 		AttachmentIDs: p.AttachmentIDs, BuildArtifactIDs: p.BuildArtifactIDs,
 	}
 }
@@ -392,6 +448,9 @@ func (s *Server) previewMailTemplateWith(writer http.ResponseWriter, request *ht
 }
 
 func (s *Server) renderMailTemplatePreview(ctx context.Context, item domain.MailTemplate, payload mailPreviewPayload) (mailpkg.Preview, error) {
+	if item.Mode == domain.MailTemplateModeGuide {
+		return s.renderGuideMailTemplatePreview(ctx, item, payload)
+	}
 	variables := make(map[string]string, len(payload.Variables)+len(payload.SampleVariables))
 	serverVariables := make(map[string]string, 8)
 	// Samples are preview-only values. Explicit caller variables are applied
@@ -456,6 +515,46 @@ func (s *Server) renderMailTemplatePreview(ctx context.Context, item domain.Mail
 		Variables: variables, ServerVariables: serverVariables,
 		To: to, CC: cc, Attachments: attachments,
 	})
+}
+
+// renderGuideMailTemplatePreview previews a guide template. With caller final
+// content it behaves exactly like a real send; without it (or when the editor
+// explicitly asks for the example) it displays the template's literal sample.
+// The sample path exists only here and never in message creation.
+func (s *Server) renderGuideMailTemplatePreview(ctx context.Context, item domain.MailTemplate, payload mailPreviewPayload) (mailpkg.Preview, error) {
+	attachments, _, err := s.mailPreviewAttachments(ctx, strings.TrimSpace(payload.TaskID),
+		payload.AttachmentIDs, payload.BuildArtifactIDs)
+	if err != nil {
+		return mailpkg.Preview{}, err
+	}
+	to := payload.To
+	if len(to) == 0 {
+		to = item.DefaultTo
+	}
+	cc := payload.CC
+	if len(cc) == 0 {
+		cc = item.DefaultCC
+	}
+	input := mailpkg.Input{To: to, CC: cc, Attachments: attachments}
+	content := mailTemplateContent(item)
+	if payload.ExampleOnly {
+		return mailpkg.PreviewGuideExample(content, input)
+	}
+	input.Subject = stringValue(payload.Subject)
+	input.BodyText = stringValue(payload.BodyText)
+	input.BodyHTML = stringValue(payload.BodyHTML)
+	if strings.TrimSpace(input.Subject) == "" && strings.TrimSpace(input.BodyText) == "" &&
+		strings.TrimSpace(input.BodyHTML) == "" {
+		return mailpkg.PreviewGuideExample(content, input)
+	}
+	return mailpkg.Render(content, input)
+}
+
+func stringValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }
 
 // mailTaskURL builds an absolute external task link. Relative, non-https or

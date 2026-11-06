@@ -233,6 +233,7 @@ func TestMailBindingAddsNarrowMailMCP(t *testing.T) {
 	wantAllowed := []string{
 		"mcp__aha2_mail__mail_list_accounts",
 		"mcp__aha2_mail__mail_list_templates",
+		"mcp__aha2_mail__mail_template_detail",
 		"mcp__aha2_mail__mail_preview",
 		"mcp__aha2_mail__mail_send",
 		"mcp__aha2_mail__mail_get_status",

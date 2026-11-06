@@ -446,12 +446,12 @@ func TestAgentMailMCPTools(t *testing.T) {
 	for _, tool := range tools {
 		names = append(names, tool.(map[string]any)["name"].(string))
 	}
-	for _, want := range []string{"mail_list_accounts", "mail_list_templates", "mail_preview", "mail_send", "mail_get_status"} {
+	for _, want := range []string{"mail_list_accounts", "mail_list_templates", "mail_template_detail", "mail_preview", "mail_send", "mail_get_status"} {
 		if !agentMailContains(names, want) {
 			t.Fatalf("tool %q missing from %#v", want, names)
 		}
 	}
-	if len(names) != 5 {
+	if len(names) != 6 {
 		t.Fatalf("tools = %#v", names)
 	}
 	for _, raw := range tools {
@@ -573,4 +573,145 @@ func agentMailContains(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func TestAgentMailGuideTemplateDetailPreviewAndSend(t *testing.T) {
+	f := newAgentMailFixture(t)
+	account := f.createAccount("guide-secret-authorization-code")
+	template := f.createTemplate(map[string]any{
+		"scope": "global", "name": "Guide 提测", "mode": "guide",
+		"description":        "检查仓库列表、包名、版本和每个修改点；缺失项不要编造。",
+		"subject_template":   "[AHA] {{task.title}} 提测通知（示例）",
+		"body_text_template": "示例正文：{{task.title}}",
+		"body_html_template": "<p>示例 HTML：{{task.title}}</p>",
+	})
+	templateID := template["id"].(string)
+	f.bind(account["id"].(string), templateID)
+
+	// The list stays lightweight but exposes mode/description/version.
+	status, body := f.agent(http.MethodGet, "/api/v1/agent/mail/templates", nil)
+	if status != http.StatusOK {
+		t.Fatalf("templates status=%d body=%#v", status, body)
+	}
+	items := body["templates"].([]any)
+	if len(items) != 1 {
+		t.Fatalf("templates = %#v", items)
+	}
+	meta := items[0].(map[string]any)
+	if meta["mode"] != "guide" || meta["description"] == "" || meta["version"] != float64(1) {
+		t.Fatalf("guide metadata = %#v", meta)
+	}
+	if _, ok := meta["variables"]; ok {
+		t.Fatalf("guide metadata advertised variables: %#v", meta)
+	}
+	for _, forbidden := range []string{"subject_template", "body_text_template", "body_html_template"} {
+		if _, ok := meta[forbidden]; ok {
+			t.Fatalf("list exposed %q: %#v", forbidden, meta)
+		}
+	}
+
+	// HTTP detail returns the full reference content.
+	status, body = f.agent(http.MethodGet, "/api/v1/agent/mail/templates/"+templateID, nil)
+	if status != http.StatusOK {
+		t.Fatalf("detail status=%d body=%#v", status, body)
+	}
+	if body["subject"] != "[AHA] {{task.title}} 提测通知（示例）" ||
+		!strings.Contains(body["body_text"].(string), "示例正文") ||
+		!strings.Contains(body["body_html"].(string), "示例 HTML") ||
+		body["mode"] != "guide" || body["version"] != float64(1) || body["scope"] != "global" ||
+		!strings.Contains(body["description"].(string), "检查仓库列表") {
+		t.Fatalf("guide detail = %#v", body)
+	}
+
+	// MCP detail is equivalent and remains scoped to the Task.
+	status, body = f.agent(http.MethodPost, "/api/v1/agent/mail/mcp", map[string]any{
+		"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+		"params": map[string]any{"name": "mail_template_detail", "arguments": map[string]any{"template_id": templateID}},
+	})
+	if status != http.StatusOK {
+		t.Fatalf("mcp detail status=%d body=%#v", status, body)
+	}
+	if text := mcpText(t, body); !strings.Contains(text, "Guide 提测") || !strings.Contains(text, `"mode":"guide"`) {
+		t.Fatalf("mcp detail text = %q", text)
+	}
+
+	// Guide preview requires caller final content; the example is not a fallback.
+	status, body = f.agent(http.MethodPost, "/api/v1/agent/mail/preview", map[string]any{
+		"account_id": account["id"], "template_id": templateID,
+		"to": []string{"qa@example.com"},
+	})
+	if status != http.StatusUnprocessableEntity || mailErrorCode(t, body) != string(domain.MailErrTemplateContentMissing) {
+		t.Fatalf("missing guide content status=%d body=%#v", status, body)
+	}
+
+	status, body = f.agent(http.MethodPost, "/api/v1/agent/mail/preview", map[string]any{
+		"account_id": account["id"], "template_id": templateID,
+		"subject": "最终主题 v1.0.0", "body_html": "<p>最终正文 <strong>v1.0.0</strong></p>",
+		"variables": map[string]string{"task.title": "ignored"},
+		"to":        []string{"qa@example.com"},
+	})
+	if status != http.StatusOK {
+		t.Fatalf("guide preview status=%d body=%#v", status, body)
+	}
+	preview := body["preview"].(map[string]any)
+	if preview["subject"] != "最终主题 v1.0.0" || preview["template_mode"] != "guide" ||
+		preview["template_id"] != templateID || preview["template_version"] != float64(1) {
+		t.Fatalf("guide preview = %#v", preview)
+	}
+	if strings.Contains(preview["body_html"].(string), "{{") || !strings.Contains(preview["body_html"].(string), "<strong>v1.0.0</strong>") {
+		t.Fatalf("guide preview html = %#v", preview)
+	}
+
+	// Leftover placeholders and unsafe HTML are rejected by the same pipeline.
+	for name, payload := range map[string]map[string]any{
+		"placeholder": {
+			"account_id": account["id"], "template_id": templateID,
+			"subject": "{{task.title}}", "body_text": "x", "to": []string{"qa@example.com"},
+		},
+		"unsafe html": {
+			"account_id": account["id"], "template_id": templateID,
+			"subject": "s", "body_html": `<p onclick="alert(1)">x</p>`, "to": []string{"qa@example.com"},
+		},
+	} {
+		status, body = f.agent(http.MethodPost, "/api/v1/agent/mail/preview", payload)
+		if status != http.StatusUnprocessableEntity {
+			t.Fatalf("%s status=%d body=%#v", name, status, body)
+		}
+		wantCode := string(domain.MailErrTemplateInvalid)
+		if name == "placeholder" {
+			wantCode = string(domain.MailErrTemplatePlaceholderUnresolved)
+		}
+		if mailErrorCode(t, body) != wantCode {
+			t.Fatalf("%s code=%s body=%#v", name, mailErrorCode(t, body), body)
+		}
+	}
+
+	// Send records the reference template/version and ignores variables.
+	status, body = f.agent(http.MethodPost, "/api/v1/agent/mail/messages", map[string]any{
+		"account_id": account["id"], "template_id": templateID,
+		"subject": "最终发送主题", "body_text": "最终发送正文",
+		"variables":       map[string]string{"task.title": "ignored", "build.version": "v1"},
+		"to":              []string{"qa@example.com"},
+		"idempotency_key": "agent-guide-send-1",
+	})
+	if status != http.StatusCreated || body["status"] != string(domain.MailMessagePendingApproval) {
+		t.Fatalf("guide send status=%d body=%#v", status, body)
+	}
+	messages, err := f.database.MailMessagesByTask(f.ctx, f.task.ID, "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 1 {
+		t.Fatalf("messages = %#v", messages)
+	}
+	stored := messages[0]
+	if stored.TemplateID != templateID || stored.TemplateVersion != 1 {
+		t.Fatalf("reference template snapshot = %#v", stored)
+	}
+	if len(stored.Variables) != 0 {
+		t.Fatalf("guide message kept variables: %#v", stored.Variables)
+	}
+	if stored.Subject != "最终发送主题" || stored.BodyText != "最终发送正文" {
+		t.Fatalf("guide message content = %#v", stored)
+	}
 }

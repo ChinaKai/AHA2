@@ -582,3 +582,97 @@ func TestPlaceholderInHrefIsAllowedAndRendered(t *testing.T) {
 		t.Fatalf("html = %q", preview.BodyHTML)
 	}
 }
+
+func guideTemplate() Template {
+	return Template{
+		ID:      "mail_template_guide",
+		Version: 4,
+		Mode:    domain.MailTemplateModeGuide,
+		// The example deliberately contains placeholder-looking text: guide
+		// templates are literal samples and never substitute variables.
+		SubjectTemplate:   "[AHA] {{task.title}} 提测通知（参考）",
+		BodyTextTemplate:  "这是参考正文，保留 {{task.title}} 原样。",
+		BodyHTMLTemplate:  `<p>这是参考 HTML，保留 {{task.title}} 原样。</p>`,
+		RequiredVariables: []string{"task.title"},
+	}
+}
+
+func TestGuideRenderUsesCallerContentAndSanitizes(t *testing.T) {
+	template := guideTemplate()
+	if err := ValidateTemplate(template); err != nil {
+		t.Fatalf("guide template validation: %v", err)
+	}
+	preview, err := Render(template, Input{
+		Subject:  "最终主题：v1.0.0",
+		BodyText: "最终纯文本正文",
+		BodyHTML: `<p onclick="alert(1)">最终 HTML 正文</p>`,
+	})
+	if err == nil {
+		t.Fatalf("unsafe guide HTML was accepted: %#v", preview)
+	}
+	requireCode(t, err, domain.MailErrTemplateInvalid)
+
+	preview, err = Render(template, Input{
+		Subject:  "最终主题：v1.0.0",
+		BodyHTML: `<p>最终 <strong>HTML</strong> 正文</p>`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.TemplateID != template.ID || preview.TemplateVersion != template.Version ||
+		preview.TemplateMode != domain.MailTemplateModeGuide {
+		t.Fatalf("reference template metadata = %#v", preview)
+	}
+	if preview.Subject != "最终主题：v1.0.0" {
+		t.Fatalf("subject = %q", preview.Subject)
+	}
+	if strings.Contains(preview.BodyHTML, "{{") || !strings.Contains(preview.BodyHTML, "<strong>HTML</strong>") {
+		t.Fatalf("html = %q", preview.BodyHTML)
+	}
+	// The text fallback is derived from the caller's sanitized HTML, never the
+	// template example.
+	if !strings.Contains(preview.BodyText, "最终 HTML 正文") || strings.Contains(preview.BodyText, "参考正文") {
+		t.Fatalf("text = %q", preview.BodyText)
+	}
+}
+
+func TestGuideRenderRequiresCallerContent(t *testing.T) {
+	template := guideTemplate()
+	_, err := Render(template, Input{BodyHTML: "<p>x</p>"})
+	requireCode(t, err, domain.MailErrTemplateContentMissing)
+	_, err = Render(template, Input{Subject: "only subject"})
+	requireCode(t, err, domain.MailErrTemplateContentMissing)
+	_, err = Render(template, Input{Subject: "s", BodyHTML: "   "})
+	requireCode(t, err, domain.MailErrTemplateContentMissing)
+}
+
+func TestGuideRenderRejectsUnresolvedPlaceholders(t *testing.T) {
+	template := guideTemplate()
+	for name, input := range map[string]Input{
+		"subject":   {Subject: "{{task.title}}", BodyHTML: "<p>x</p>"},
+		"body_text": {Subject: "s", BodyText: "还有 {{build.version}}", BodyHTML: "<p>x</p>"},
+		"body_html": {Subject: "s", BodyHTML: "<p>{{package.name}}</p>"},
+		"closing":   {Subject: "s", BodyHTML: "<p>orphan }}</p>"},
+	} {
+		_, err := Render(template, input)
+		if err == nil {
+			t.Fatalf("%s: unresolved placeholder was accepted", name)
+		}
+		requireCode(t, err, domain.MailErrTemplatePlaceholderUnresolved)
+	}
+}
+
+func TestGuidePreviewExampleShowsLiteralSample(t *testing.T) {
+	template := guideTemplate()
+	preview, err := PreviewGuideExample(template, Input{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.TemplateMode != domain.MailTemplateModeGuide {
+		t.Fatalf("mode = %q", preview.TemplateMode)
+	}
+	if !strings.Contains(preview.Subject, "{{task.title}}") ||
+		!strings.Contains(preview.BodyHTML, "{{task.title}}") {
+		t.Fatalf("example was substituted: %#v", preview)
+	}
+}

@@ -231,16 +231,31 @@ func (s *Server) createMailMessage(writer http.ResponseWriter, request *http.Req
 			return
 		}
 		template = mailpkg.Template{
-			ID: item.ID, Version: item.CurrentVersion,
+			ID: item.ID, Version: item.CurrentVersion, Mode: item.Mode,
 			SubjectTemplate: item.SubjectTemplate, BodyTextTemplate: item.BodyTextTemplate,
 			BodyHTMLTemplate: item.BodyHTMLTemplate, RequiredVariables: item.RequiredVariables,
 			DefaultTo: item.DefaultTo, DefaultCC: item.DefaultCC,
 		}
 		if version, err := s.store.MailTemplateVersion(ctx, item.ID, item.CurrentVersion); err == nil {
+			template.Mode = version.Mode
 			template.SubjectTemplate = version.SubjectTemplate
 			template.BodyTextTemplate = version.BodyTextTemplate
 			template.BodyHTMLTemplate = version.BodyHTMLTemplate
 			template.RequiredVariables = version.RequiredVariables
+		}
+		if template.Mode == domain.MailTemplateModeGuide {
+			if payload.Subject == nil || strings.TrimSpace(*payload.Subject) == "" {
+				writeMailError(writer, http.StatusUnprocessableEntity, domain.MailErrTemplateContentMissing,
+					"guide 模板要求提供最终主题；不会发送模板示例内容")
+				return
+			}
+			if (payload.BodyText == nil && payload.BodyHTML == nil) ||
+				(strings.TrimSpace(stringValue(payload.BodyText)) == "" &&
+					strings.TrimSpace(stringValue(payload.BodyHTML)) == "") {
+				writeMailError(writer, http.StatusUnprocessableEntity, domain.MailErrTemplateContentMissing,
+					"guide 模板要求提供最终正文；不会发送模板示例内容")
+				return
+			}
 		}
 	} else {
 		if payload.Subject == nil || (payload.BodyText == nil && payload.BodyHTML == nil) {
@@ -282,10 +297,16 @@ func (s *Server) createMailMessage(writer http.ResponseWriter, request *http.Req
 	if len(cc) == 0 {
 		cc = template.DefaultCC
 	}
-	preview, err := mailpkg.Render(template, mailpkg.Input{
+	renderInput := mailpkg.Input{
 		Variables: callerVariables, ServerVariables: serverVariables,
 		To: to, CC: cc, Attachments: attachments,
-	})
+	}
+	if template.Mode == domain.MailTemplateModeGuide {
+		renderInput.Subject = stringValue(payload.Subject)
+		renderInput.BodyText = stringValue(payload.BodyText)
+		renderInput.BodyHTML = stringValue(payload.BodyHTML)
+	}
+	preview, err := mailpkg.Render(template, renderInput)
 	if err != nil {
 		writeMailFailure(writer, err, "邮件渲染失败")
 		return
@@ -359,13 +380,18 @@ func (s *Server) createMailMessage(writer http.ResponseWriter, request *http.Req
 		status = domain.MailMessagePendingApproval
 		submittedAt = now
 	}
+	messageVariables := callerVariables
+	if template.Mode == domain.MailTemplateModeGuide {
+		// Guide mode ignores caller variables; record an empty snapshot.
+		messageVariables = map[string]string{}
+	}
 	message := domain.MailMessage{
 		ID: messageID, TaskID: task.ID, ProjectID: task.ProjectID, WorkspaceID: task.WorkspaceID,
 		AccountID: account.ID, BindingID: bindingID, TemplateID: template.ID,
 		TemplateVersion: template.Version, Source: domain.MailMessageSourceOwner,
 		IdempotencyKey: key, FromAddress: fromAddress, FromName: fromName,
 		To: preview.To, CC: preview.CC, BCC: bcc, Subject: preview.Subject,
-		BodyText: bodyText, BodyHTML: bodyHTML, Variables: callerVariables,
+		BodyText: bodyText, BodyHTML: bodyHTML, Variables: messageVariables,
 		ContentRevision: 1, Status: status, SubmittedAt: submittedAt,
 		CreatedAt: now, UpdatedAt: now,
 	}

@@ -66,12 +66,17 @@ var cidValuePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.@-]{0,127}$`)
 type htmlMode int
 
 const (
-	// htmlTemplateMode validates an Owner-authored template. Placeholders in
-	// href and cid: src values are allowed and re-validated after substitution.
+	// htmlTemplateMode validates an Owner-authored render template. Placeholders
+	// in href and cid: src values are allowed and re-validated after
+	// substitution.
 	htmlTemplateMode htmlMode = iota
 	// htmlFinalMode validates the final substituted HTML and rejects anything
 	// that is not already safe.
 	htmlFinalMode
+	// htmlGuideTemplateMode validates a guide template's literal example. It
+	// enforces the same tag/attribute/style allowlist but treats {{...}} as
+	// literal example text, because guide templates are never substituted.
+	htmlGuideTemplateMode
 )
 
 type htmlState struct {
@@ -257,6 +262,15 @@ func validateTableStyle(tag, value string) error {
 
 func validateURLAttribute(value, attribute string, state *htmlState) error {
 	hasPlaceholder := strings.Contains(value, "{{")
+	if state.mode == htmlGuideTemplateMode {
+		// Guide examples may show placeholder-looking URLs. They are literal
+		// sample text, not substituted, so only the surrounding URL policy is
+		// enforced.
+		if hasPlaceholder {
+			return validateStrictURLWith(replacePlaceholders(value, "x"), attribute, nil, true)
+		}
+		return validateStrictURLWith(value, attribute, nil, false)
+	}
 	if state.mode == htmlTemplateMode {
 		if attribute == "href" {
 			if hasPlaceholder {

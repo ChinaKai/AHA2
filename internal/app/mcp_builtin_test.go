@@ -89,11 +89,11 @@ func TestMailMCPIsListedAsAutoInjectedBuiltin(t *testing.T) {
 	if !mail.Builtin || !mail.AutoInject || !mail.Enabled || mail.Health != "ok" {
 		t.Fatalf("unexpected mail MCP: %#v", mail)
 	}
-	if len(mail.Tools) != 5 {
+	if len(mail.Tools) != 6 {
 		t.Fatalf("mail MCP tools=%#v", mail.Tools)
 	}
 	detail, err := service.MCPServerDetail(ctx, "mcp_mail")
-	if err != nil || len(detail.Tools) != 5 {
+	if err != nil || len(detail.Tools) != 6 {
 		t.Fatalf("detail=%#v err=%v", detail, err)
 	}
 	if _, err := service.SaveMCPServer(ctx, domain.MCPServer{

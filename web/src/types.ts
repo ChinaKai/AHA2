@@ -1328,6 +1328,7 @@ export interface MailTemplate {
   project_id?: string;
   name: string;
   description?: string;
+  mode?: "guide" | "render" | string;
   subject_template: string;
   body_text_template: string;
   body_html_template: string;
@@ -1343,6 +1344,7 @@ export interface MailTemplate {
 export interface MailTemplateVersion {
   template_id: string;
   version: number;
+  mode?: "guide" | "render" | string;
   subject_template: string;
   body_text_template: string;
   body_html_template: string;

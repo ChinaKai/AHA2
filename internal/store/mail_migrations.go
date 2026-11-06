@@ -300,6 +300,31 @@ func (s *Store) applyMailSchemaV121(ctx context.Context) error {
 	return nil
 }
 
+// applyMailSchemaV123 adds the template mode to both the mutable template row
+// and its immutable version snapshots. Existing rows are deliberately backfilled
+// as "render": guide mode is only the default for templates created after this
+// migration, and historical templates keep their variable-substitution
+// behavior without a data migration.
+func (s *Store) applyMailSchemaV123(ctx context.Context) error {
+	var applied bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=123)`).Scan(&applied)
+	if !applied {
+		for _, statement := range []string{
+			`ALTER TABLE mail_templates ADD COLUMN mode TEXT NOT NULL DEFAULT 'render'`,
+			`ALTER TABLE mail_template_versions ADD COLUMN mode TEXT NOT NULL DEFAULT 'render'`,
+		} {
+			if _, err := s.db.ExecContext(ctx, statement); err != nil &&
+				!strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+				return fmt.Errorf("apply schema v123: %w", err)
+			}
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(123, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v123: %w", err)
+	}
+	return nil
+}
+
 // applyMailSchemaV122 records the SMTP phase on each delivery attempt. The
 // delivery row only holds the latest phase, while attempts need their own phase
 // for postmortem diagnosis (design sections 3.4 and 6.4).

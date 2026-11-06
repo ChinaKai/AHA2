@@ -200,6 +200,11 @@
 .mail-archived-section { display: grid; gap: 8px; padding-top: 10px; border-top: 1px dashed var(--line); }
 .mail-template-badge { display: inline-flex; align-items: center; padding: 2px 6px; border-radius: 999px; font-size: 9px; font-weight: 700; vertical-align: middle; }
 .mail-template-badge.legacy { background: #fff7e6; color: #a15c00; }
+.mail-template-badge.mode { background: #edf4ff; color: #1d4ed8; }
+/* The mode toggle relies on hidden; an explicit rule keeps global display
+   styles from overriding it (the editor is a grid child). */
+.mail-template-form [data-mail-render-only][hidden],
+.mail-template-form [data-mail-guide-only][hidden] { display: none !important; }
 .mail-template-form { display: grid; gap: 10px; min-width: 0; container-type: inline-size; }
 .mail-template-form > label, .mail-template-defaults label { display: grid; gap: 4px; min-width: 0; margin: 0; }
 .mail-template-form input, .mail-template-form select, .mail-template-form textarea { min-width: 0; }

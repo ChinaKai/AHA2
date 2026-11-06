@@ -1037,6 +1037,8 @@ GET  /api/v1/agent/mail/messages/{id}
 | `mail_template_variable_missing` | 缺少必填变量 |
 | `mail_template_variable_unknown` | 未知变量 |
 | `mail_template_invalid` | 模板语法/HTML 校验失败 |
+| `mail_template_content_missing` | guide 模板缺少调用方最终 subject/body；不回退模板示例 |
+| `mail_template_placeholder_unresolved` | guide 最终内容仍含 `{{` / `}}` 占位符 |
 | `mail_duplicate_message` | 重复内容窗口内重复提交 |
 | `mail_approval_digest_mismatch` | 审批内容摘要不一致 |
 | `mail_invalid_state` | 当前状态不允许该操作 |
@@ -1136,6 +1138,39 @@ SHA256：{{package.sha256}}
 ```
 
 HTML 模板只使用安全子集，变量值自动转义；示例中不包含真实地址、授权码或内部主机名。
+
+### 5.5 guide 模板模式（task-159）
+
+一期最初的模板是“固定变量 + 服务端渲染”。仓库数量、包数量、修改点数量变化时字段难以扩展，因此新增 guide 模式：模板只作为参考样板，最终主题与正文由 Agent/Owner 自己撰写。
+
+#### 5.5.1 模式与快照
+
+- `mail_templates.mode` 与 `mail_template_versions.mode` 取值 `guide` / `render`，随不可变版本快照保存（schema v123）。旧行通过列默认值 `render` 保持原语义，不迁移历史模板或历史消息。
+- 新建模板默认 `guide`；显式传 `mode=render` 才创建旧式变量模板。编辑可以在新版本中切换模式，旧版本仍按当时的 mode 可读。
+- `guide` 模式忽略 `required_variables`：不要求调用方提供 variables，模板正文中的 `{{...}}` 只是参考文本，不做替换。
+- `render` 模式完全保持原行为：占位符语法/白名单、必填变量、替换后二次 sanitize。
+
+#### 5.5.2 Agent / HTTP 暴露
+
+- `mail_list_templates` 只返回轻量元数据：`template_id`、`name`、`description`、`mode`、`version`、`scope`；`render` 模式额外返回 `variables`，不返回大段正文。
+- 新增 `mail_template_detail`（HTTP：`GET /api/v1/agent/mail/templates/{id}`），返回 `subject`、`body_text`、`body_html`、`description`、`mode`、`version`、`scope`。guide 模式下 `description` 是填写说明/检查清单，subject/body 是字面示例。
+- 任务绑定默认 guide 模板时，`mail.md` 注入该模板的主题/正文/说明；超长内容按上下文预算截断并注明，Agent 不需要额外工具调用即可看到参考样板。
+- `mail_preview` / `mail_send` 在 guide 模式接收调用方 `subject` + `body_text`/`body_html`，`template_id` 仅作为参考模板记录。缺少最终 subject/body 时返回 `mail_template_content_missing`，绝不回退发送模板示例。
+- 消息记录继续写入 `template_id` / `template_version`；guide 模式下 `variables` 为空或忽略，preview 结果返回 `template_mode`/`template_id`/`template_version` 便于确认参考版本。
+- 不带模板的直接正文发送保持可用。
+
+#### 5.5.3 安全边界
+
+- guide 模式的最终正文与 render 模式走同一套 HTML sanitizer、附件数量/大小策略、可执行附件拒绝、Owner 审批和 BCC 限制；guide 不能绕过任何一项。
+- 通用轻量校验：guide 最终主题/正文若仍包含 `{{` 或 `}}`，返回 `mail_template_placeholder_unresolved`；不硬编码任何项目专属字段。
+- 保留主题 ≤200 字符、文本 ≤256 KiB、HTML ≤512 KiB、收件人格式/去重、附件单文件 ≤50 MiB 与合计 ≤100 MiB、审批必须为 true 等既有约束。
+- 模板示例只在显式 preview（编辑器和模板预览）中展示；`mail_send`/Owner 发送路径没有示例回退。
+
+#### 5.5.4 Web
+
+- 模板编辑器新增模式选择，新建默认 guide；guide 显示示例主题、示例正文和填写说明，隐藏变量/required_variables UI；render 保留原变量编辑器。
+- 模板列表展示模式；guide 模板预览直接展示示例或调用方最终内容，不做变量替换。
+- Task 发送弹窗选择 guide 模板时显示主题/正文输入，提示“模板示例不会自动发送”；模板 id 仍随消息记录。
 
 ## 6. 审批与投递
 

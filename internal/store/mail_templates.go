@@ -11,7 +11,7 @@ import (
 	"github.com/ChinaKai/AHA2/internal/domain"
 )
 
-const mailTemplateColumns = `id,scope,project_id,name,description,subject_template,
+const mailTemplateColumns = `id,scope,project_id,name,description,mode,subject_template,
 	body_text_template,body_html_template,default_to_json,default_cc_json,
 	required_variables_json,current_version,status,created_by,created_at,updated_at`
 
@@ -19,7 +19,7 @@ func scanMailTemplate(scanner interface{ Scan(...any) error }) (domain.MailTempl
 	var item domain.MailTemplate
 	var defaultTo, defaultCC, requiredVariables, createdAt, updatedAt string
 	err := scanner.Scan(
-		&item.ID, &item.Scope, &item.ProjectID, &item.Name, &item.Description,
+		&item.ID, &item.Scope, &item.ProjectID, &item.Name, &item.Description, &item.Mode,
 		&item.SubjectTemplate, &item.BodyTextTemplate, &item.BodyHTMLTemplate,
 		&defaultTo, &defaultCC, &requiredVariables, &item.CurrentVersion,
 		&item.Status, &item.CreatedBy, &createdAt, &updatedAt,
@@ -59,6 +59,20 @@ func normalizeMailTemplate(item domain.MailTemplate, create bool) (domain.MailTe
 	} else if item.ID == "" {
 		return item, fmt.Errorf("mail template id is required")
 	}
+	// New templates default to guide; existing templates without an explicit
+	// mode are legacy render templates. Mode is part of the immutable version
+	// snapshot, so an edit can intentionally switch modes without rewriting
+	// history.
+	if item.Mode == "" {
+		if create {
+			item.Mode = domain.MailTemplateModeGuide
+		} else {
+			item.Mode = domain.MailTemplateModeRender
+		}
+	}
+	if !item.Mode.Valid() {
+		return item, fmt.Errorf("invalid mail template mode %q", item.Mode)
+	}
 	if item.DefaultTo == nil {
 		item.DefaultTo = []string{}
 	}
@@ -66,6 +80,11 @@ func normalizeMailTemplate(item domain.MailTemplate, create bool) (domain.MailTe
 		item.DefaultCC = []string{}
 	}
 	if item.RequiredVariables == nil {
+		item.RequiredVariables = []string{}
+	}
+	if item.Mode == domain.MailTemplateModeGuide {
+		// Guide templates are reference samples; caller variables are neither
+		// required nor substituted.
 		item.RequiredVariables = []string{}
 	}
 	now := time.Now().UTC()
@@ -95,11 +114,11 @@ func (s *Store) CreateMailTemplate(ctx context.Context, item domain.MailTemplate
 	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO mail_templates(
-			id,scope,project_id,name,description,subject_template,body_text_template,
+			id,scope,project_id,name,description,mode,subject_template,body_text_template,
 			body_html_template,default_to_json,default_cc_json,required_variables_json,
 			current_version,status,created_by,created_at,updated_at
-		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		item.ID, item.Scope, item.ProjectID, item.Name, item.Description,
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		item.ID, item.Scope, item.ProjectID, item.Name, item.Description, item.Mode,
 		item.SubjectTemplate, item.BodyTextTemplate, item.BodyHTMLTemplate,
 		encodeJSON(item.DefaultTo), encodeJSON(item.DefaultCC),
 		encodeJSON(item.RequiredVariables), item.CurrentVersion, item.Status,
@@ -110,6 +129,7 @@ func (s *Store) CreateMailTemplate(ctx context.Context, item domain.MailTemplate
 	if err := insertMailTemplateVersionTx(ctx, tx, domain.MailTemplateVersion{
 		TemplateID:        item.ID,
 		Version:           item.CurrentVersion,
+		Mode:              item.Mode,
 		SubjectTemplate:   item.SubjectTemplate,
 		BodyTextTemplate:  item.BodyTextTemplate,
 		BodyHTMLTemplate:  item.BodyHTMLTemplate,
@@ -128,10 +148,10 @@ func (s *Store) CreateMailTemplate(ctx context.Context, item domain.MailTemplate
 func insertMailTemplateVersionTx(ctx context.Context, tx *sql.Tx, version domain.MailTemplateVersion) error {
 	_, err := tx.ExecContext(ctx, `
 		INSERT INTO mail_template_versions(
-			template_id,version,subject_template,body_text_template,body_html_template,
+			template_id,version,mode,subject_template,body_text_template,body_html_template,
 			required_variables_json,created_by,created_at
-		) VALUES(?,?,?,?,?,?,?,?)`,
-		version.TemplateID, version.Version, version.SubjectTemplate,
+		) VALUES(?,?,?,?,?,?,?,?,?)`,
+		version.TemplateID, version.Version, version.Mode, version.SubjectTemplate,
 		version.BodyTextTemplate, version.BodyHTMLTemplate,
 		encodeJSON(version.RequiredVariables), version.CreatedBy,
 		mailTimeString(version.CreatedAt))
@@ -172,11 +192,11 @@ func (s *Store) UpdateMailTemplate(ctx context.Context, item domain.MailTemplate
 	// lock. A competing editor sees 0 rows and never reaches the version insert.
 	result, err := tx.ExecContext(ctx, `
 		UPDATE mail_templates SET
-			name=?,description=?,subject_template=?,body_text_template=?,body_html_template=?,
+			name=?,description=?,mode=?,subject_template=?,body_text_template=?,body_html_template=?,
 			default_to_json=?,default_cc_json=?,required_variables_json=?,
 			current_version=current_version+1,updated_at=?
 		WHERE id=? AND current_version=? AND status='active'`,
-		item.Name, item.Description, item.SubjectTemplate, item.BodyTextTemplate,
+		item.Name, item.Description, item.Mode, item.SubjectTemplate, item.BodyTextTemplate,
 		item.BodyHTMLTemplate, encodeJSON(item.DefaultTo), encodeJSON(item.DefaultCC),
 		encodeJSON(item.RequiredVariables), mailTimeString(now),
 		item.ID, expectedVersion)
@@ -207,6 +227,7 @@ func (s *Store) UpdateMailTemplate(ctx context.Context, item domain.MailTemplate
 	if err := insertMailTemplateVersionTx(ctx, tx, domain.MailTemplateVersion{
 		TemplateID:        item.ID,
 		Version:           nextVersion,
+		Mode:              item.Mode,
 		SubjectTemplate:   item.SubjectTemplate,
 		BodyTextTemplate:  item.BodyTextTemplate,
 		BodyHTMLTemplate:  item.BodyHTMLTemplate,
@@ -336,13 +357,13 @@ func (s *Store) PurgeMailTemplate(ctx context.Context, id string) error {
 	return tx.Commit()
 }
 
-const mailTemplateVersionColumns = `template_id,version,subject_template,body_text_template,
+const mailTemplateVersionColumns = `template_id,version,mode,subject_template,body_text_template,
 	body_html_template,required_variables_json,created_by,created_at`
 
 func scanMailTemplateVersion(scanner interface{ Scan(...any) error }) (domain.MailTemplateVersion, error) {
 	var item domain.MailTemplateVersion
 	var requiredVariables, createdAt string
-	err := scanner.Scan(&item.TemplateID, &item.Version, &item.SubjectTemplate,
+	err := scanner.Scan(&item.TemplateID, &item.Version, &item.Mode, &item.SubjectTemplate,
 		&item.BodyTextTemplate, &item.BodyHTMLTemplate, &requiredVariables,
 		&item.CreatedBy, &createdAt)
 	item.RequiredVariables = decodeJSON(requiredVariables, []string{})

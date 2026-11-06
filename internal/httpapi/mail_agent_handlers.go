@@ -183,6 +183,7 @@ func (s *Server) agentMailTemplate(ctx context.Context, call app.AgentCallContex
 	}
 	content := mailTemplateContent(item)
 	if version, err := s.store.MailTemplateVersion(ctx, item.ID, item.CurrentVersion); err == nil {
+		content.Mode = version.Mode
 		content.SubjectTemplate = version.SubjectTemplate
 		content.BodyTextTemplate = version.BodyTextTemplate
 		content.BodyHTMLTemplate = version.BodyHTMLTemplate
@@ -261,6 +262,22 @@ func (s *Server) agentMailRender(ctx context.Context, call app.AgentCallContext,
 		if err != nil {
 			return domain.MailAccount{}, domain.MailBinding{}, domain.MailTemplate{}, mailpkg.Preview{}, err
 		}
+		if template.Mode == domain.MailTemplateModeGuide {
+			// A guide template is a reference sample only. Never fall back to
+			// its example content for a real preview/send.
+			if input.Subject == nil || strings.TrimSpace(*input.Subject) == "" {
+				return domain.MailAccount{}, domain.MailBinding{}, domain.MailTemplate{}, mailpkg.Preview{},
+					newAgentMailFailure(http.StatusUnprocessableEntity, domain.MailErrTemplateContentMissing,
+						"guide 模板要求调用方提供最终 subject，模板示例不会作为回退内容发送")
+			}
+			if (input.BodyText == nil && input.BodyHTML == nil) ||
+				(strings.TrimSpace(stringValue(input.BodyText)) == "" &&
+					strings.TrimSpace(stringValue(input.BodyHTML)) == "") {
+				return domain.MailAccount{}, domain.MailBinding{}, domain.MailTemplate{}, mailpkg.Preview{},
+					newAgentMailFailure(http.StatusUnprocessableEntity, domain.MailErrTemplateContentMissing,
+						"guide 模板要求调用方提供最终 body_text 或 body_html，模板示例不会作为回退内容发送")
+			}
+		}
 	}
 	attachments, packageVariables, err := s.mailPreviewAttachments(ctx, call.Task.ID, input.AttachmentIDs, input.BuildArtifactIDs)
 	if err != nil {
@@ -288,10 +305,16 @@ func (s *Server) agentMailRender(ctx context.Context, call app.AgentCallContext,
 	if len(cc) == 0 {
 		cc = content.DefaultCC
 	}
-	preview, err := mailpkg.Render(content, mailpkg.Input{
+	renderInput := mailpkg.Input{
 		Variables: callerVariables, ServerVariables: serverVariables,
 		To: to, CC: cc, Attachments: attachments,
-	})
+	}
+	if template.Mode == domain.MailTemplateModeGuide {
+		renderInput.Subject = stringValue(input.Subject)
+		renderInput.BodyText = stringValue(input.BodyText)
+		renderInput.BodyHTML = stringValue(input.BodyHTML)
+	}
+	preview, err := mailpkg.Render(content, renderInput)
 	if err != nil {
 		return domain.MailAccount{}, domain.MailBinding{}, domain.MailTemplate{}, mailpkg.Preview{}, err
 	}
@@ -328,15 +351,59 @@ func (s *Server) agentMailTemplatesData(ctx context.Context, call app.AgentCallC
 	_, templates, _ := s.app.MailTaskResources(ctx, call.Task)
 	items := make([]map[string]any, 0, len(templates))
 	for _, template := range templates {
-		items = append(items, map[string]any{
+		mode := template.Mode
+		if mode == "" {
+			mode = domain.MailTemplateModeRender
+		}
+		item := map[string]any{
 			"template_id": template.ID,
 			"name":        template.Name,
+			"description": template.Description,
+			"mode":        string(mode),
 			"version":     template.CurrentVersion,
 			"scope":       string(template.Scope),
-			"variables":   template.RequiredVariables,
-		})
+		}
+		// A guide template never asks for variables; omit the field entirely so
+		// callers do not infer a substitution requirement.
+		if mode == domain.MailTemplateModeRender {
+			item["variables"] = template.RequiredVariables
+		}
+		items = append(items, item)
 	}
 	return map[string]any{"ok": true, "templates": items}
+}
+
+// agentMailTemplateDetailData returns the template's full reference content.
+// For guide mode Description is the filling instruction/checklist; the subject
+// and body are literal examples, not render inputs.
+func (s *Server) agentMailTemplateDetailData(ctx context.Context, call app.AgentCallContext, templateID string) (map[string]any, error) {
+	item, content, err := s.agentMailTemplate(ctx, call, templateID)
+	if err != nil {
+		return nil, err
+	}
+	mode := content.Mode
+	if mode == "" {
+		mode = item.Mode
+	}
+	if mode == "" {
+		mode = domain.MailTemplateModeRender
+	}
+	return map[string]any{
+		"ok":                 true,
+		"template_id":        item.ID,
+		"name":               item.Name,
+		"description":        item.Description,
+		"mode":               string(mode),
+		"version":            item.CurrentVersion,
+		"scope":              string(item.Scope),
+		"project_id":         item.ProjectID,
+		"subject":            content.SubjectTemplate,
+		"body_text":          content.BodyTextTemplate,
+		"body_html":          content.BodyHTMLTemplate,
+		"required_variables": content.RequiredVariables,
+		"default_to":         item.DefaultTo,
+		"default_cc":         item.DefaultCC,
+	}, nil
 }
 
 func (s *Server) agentMailPreviewData(ctx context.Context, call app.AgentCallContext, input agentMailDraftInput) (map[string]any, error) {
@@ -419,9 +486,13 @@ func (s *Server) agentMailSendData(ctx context.Context, request *http.Request, c
 		bodyText = strings.ReplaceAll(bodyText, placeholder, "%%MAIL_LINK:"+mailAttachmentID+"%%")
 		bodyHTML = strings.ReplaceAll(bodyHTML, placeholder, "%%MAIL_LINK:"+mailAttachmentID+"%%")
 	}
+	// Guide mode never substitutes variables, so the message snapshot records
+	// an empty map even if the caller sent one for compatibility.
 	variables := make(map[string]string, len(input.Variables))
-	for name, value := range input.Variables {
-		variables[name] = value
+	if template.Mode != domain.MailTemplateModeGuide {
+		for name, value := range input.Variables {
+			variables[name] = value
+		}
 	}
 	message := domain.MailMessage{
 		ID: messageID, TaskID: call.Task.ID, ProjectID: call.Task.ProjectID, WorkspaceID: call.Task.WorkspaceID,
@@ -574,6 +645,20 @@ func (s *Server) agentMailTemplates(writer http.ResponseWriter, request *http.Re
 	writeJSON(writer, http.StatusOK, s.agentMailTemplatesData(request.Context(), call))
 }
 
+func (s *Server) agentMailTemplateDetail(writer http.ResponseWriter, request *http.Request) {
+	call, err := s.agentMailCall(request)
+	if err != nil {
+		writeAgentMailFailure(writer, err)
+		return
+	}
+	result, err := s.agentMailTemplateDetailData(request.Context(), call, request.PathValue("id"))
+	if err != nil {
+		writeAgentMailFailure(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, result)
+}
+
 func (s *Server) agentMailPreview(writer http.ResponseWriter, request *http.Request) {
 	call, err := s.agentMailCall(request)
 	if err != nil {
@@ -641,20 +726,32 @@ func mailMCPTools() []mcpTool {
 		},
 		{
 			Name:        "mail_list_templates",
-			Description: "List active mail templates visible to the current Task (global plus its Project).",
+			Description: "List active mail templates visible to the current Task (global plus its Project). Returns lightweight metadata including mode, description and version; call mail_template_detail for content.",
 			InputSchema: map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false},
 		},
 		{
+			Name:        "mail_template_detail",
+			Description: "Return a visible template's subject, body_text, body_html, description, mode, version and scope. In guide mode the subject/body are literal reference examples and description is the filling instruction/checklist; the caller must write the final subject/body and must not substitute {{...}}.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"template_id": map[string]any{"type": "string"},
+				},
+				"required":             []string{"template_id"},
+				"additionalProperties": false,
+			},
+		},
+		{
 			Name:        "mail_preview",
-			Description: "Render and validate a mail draft without creating a message. Provide template_id, or omit it and provide subject plus body_text/body_html. Every send still requires Owner approval.",
+			Description: "Render and validate a mail draft without creating a message. Provide template_id, or omit it and provide subject plus body_text/body_html. A guide-mode template requires caller subject/body and treats its own content as reference only; its example is never used as a fallback. Every send still requires Owner approval.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"account_id":         map[string]any{"type": "string"},
-					"template_id":        map[string]any{"type": "string", "description": "Optional. When empty, subject and at least one of body_text/body_html are required."},
-					"subject":            map[string]any{"type": "string", "description": "Direct subject; used only when template_id is empty."},
-					"body_text":          map[string]any{"type": "string", "description": "Direct plain-text body; used only when template_id is empty."},
-					"body_html":          map[string]any{"type": "string", "description": "Direct HTML body; sanitized by the same pipeline as templates. Used only when template_id is empty."},
+					"template_id":        map[string]any{"type": "string", "description": "Optional reference template. A guide-mode template requires caller subject and at least one of body_text/body_html; a render-mode template substitutes variables as before."},
+					"subject":            map[string]any{"type": "string", "description": "Final subject. Required when template_id is empty or the referenced template is guide mode; never substituted."},
+					"body_text":          map[string]any{"type": "string", "description": "Final plain-text body. Used for direct send and guide mode; render mode derives text from HTML when empty."},
+					"body_html":          map[string]any{"type": "string", "description": "Final HTML body, sanitized by the same pipeline as templates. Used for direct send and guide mode."},
 					"to":                 map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 					"cc":                 map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 					"variables":          map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}},
@@ -667,15 +764,15 @@ func mailMCPTools() []mcpTool {
 		},
 		{
 			Name:        "mail_send",
-			Description: "Create a mail message that is always pending Owner approval. Provide template_id, or omit it and provide subject plus body_text/body_html. Reusing the idempotency key returns the original message.",
+			Description: "Create a mail message that is always pending Owner approval. Provide template_id, or omit it and provide subject plus body_text/body_html. A guide-mode template requires caller subject/body; its example is never sent as a fallback. Reusing the idempotency key returns the original message.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"account_id":         map[string]any{"type": "string"},
-					"template_id":        map[string]any{"type": "string", "description": "Optional. When empty, subject and at least one of body_text/body_html are required."},
-					"subject":            map[string]any{"type": "string", "description": "Direct subject; used only when template_id is empty."},
-					"body_text":          map[string]any{"type": "string", "description": "Direct plain-text body; used only when template_id is empty."},
-					"body_html":          map[string]any{"type": "string", "description": "Direct HTML body; sanitized by the same pipeline as templates. Used only when template_id is empty."},
+					"template_id":        map[string]any{"type": "string", "description": "Optional reference template recorded on the message. A guide-mode template requires caller subject and at least one of body_text/body_html; a render-mode template substitutes variables as before."},
+					"subject":            map[string]any{"type": "string", "description": "Final subject. Required when template_id is empty or the referenced template is guide mode; never substituted."},
+					"body_text":          map[string]any{"type": "string", "description": "Final plain-text body. Used for direct send and guide mode; render mode derives text from HTML when empty."},
+					"body_html":          map[string]any{"type": "string", "description": "Final HTML body, sanitized by the same pipeline as templates. Used for direct send and guide mode."},
 					"to":                 map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 					"cc":                 map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 					"variables":          map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}},
@@ -786,6 +883,20 @@ func (s *Server) callAgentMailMCPTool(writer http.ResponseWriter, request *http.
 		toolResult(s.agentMailAccountsData(request.Context(), call))
 	case "mail_list_templates":
 		toolResult(s.agentMailTemplatesData(request.Context(), call))
+	case "mail_template_detail":
+		var input struct {
+			TemplateID string `json:"template_id"`
+		}
+		if !decodeArguments(&input) {
+			toolError(newAgentMailFailure(http.StatusBadRequest, domain.MailErrForbidden, "invalid mail_template_detail arguments"))
+			return
+		}
+		result, err := s.agentMailTemplateDetailData(request.Context(), call, input.TemplateID)
+		if err != nil {
+			toolError(err)
+			return
+		}
+		toolResult(result)
 	case "mail_preview":
 		var input agentMailDraftInput
 		if !decodeArguments(&input) {

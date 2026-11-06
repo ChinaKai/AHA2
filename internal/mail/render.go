@@ -22,16 +22,24 @@ const (
 
 // Template is the content that must be rendered. It mirrors the immutable
 // Mail Template Version snapshot; callers should pass the version they intend
-// to use, not mutable template fields.
+// to use, not mutable template fields. An empty Mode means legacy render
+// behavior so older internal callers keep working unchanged.
 type Template struct {
 	ID                string
 	Version           int
+	Mode              domain.MailTemplateMode
 	SubjectTemplate   string
 	BodyTextTemplate  string
 	BodyHTMLTemplate  string
 	RequiredVariables []string
 	DefaultTo         []string
 	DefaultCC         []string
+}
+
+// IsGuide reports whether the template is a reference sample. An empty mode is
+// the legacy render path.
+func (template Template) IsGuide() bool {
+	return template.Mode == domain.MailTemplateModeGuide
 }
 
 // Attachment is preview metadata for a controlled attachment reference. It
@@ -60,29 +68,38 @@ type Input struct {
 	// ServerVariables are resolved by trusted server code (task/project/
 	// workspace/agent/owner/package). They take precedence over caller input.
 	ServerVariables map[string]string
-	To              []string
-	CC              []string
-	Attachments     []Attachment
+	// Subject, BodyText and BodyHTML are the caller's final content for a
+	// guide-mode template. They are ignored by render-mode templates.
+	Subject     string
+	BodyText    string
+	BodyHTML    string
+	To          []string
+	CC          []string
+	Attachments []Attachment
 }
 
 // Preview is the rendered, sanitized snapshot candidate. Creating a Mail
 // Message from it belongs to the approval task.
 type Preview struct {
-	TemplateID       string       `json:"template_id,omitempty"`
-	TemplateVersion  int          `json:"template_version,omitempty"`
-	Subject          string       `json:"subject"`
-	To               []string     `json:"to"`
-	CC               []string     `json:"cc"`
-	BodyText         string       `json:"body_text"`
-	BodyHTML         string       `json:"body_html"`
-	Attachments      []Attachment `json:"attachments"`
-	Warnings         []string     `json:"warnings"`
-	ApprovalRequired bool         `json:"approval_required"`
+	TemplateID       string                  `json:"template_id,omitempty"`
+	TemplateVersion  int                     `json:"template_version,omitempty"`
+	TemplateMode     domain.MailTemplateMode `json:"template_mode,omitempty"`
+	Subject          string                  `json:"subject"`
+	To               []string                `json:"to"`
+	CC               []string                `json:"cc"`
+	BodyText         string                  `json:"body_text"`
+	BodyHTML         string                  `json:"body_html"`
+	Attachments      []Attachment            `json:"attachments"`
+	Warnings         []string                `json:"warnings"`
+	ApprovalRequired bool                    `json:"approval_required"`
 }
 
 // ValidateTemplate checks syntax, the variable allowlist, size limits and the
 // HTML safety subset. It is called on save and again before every render.
 func ValidateTemplate(template Template) error {
+	if template.IsGuide() {
+		return validateGuideTemplate(template)
+	}
 	if strings.TrimSpace(template.SubjectTemplate) == "" {
 		return errorf(domain.MailErrTemplateInvalid, "subject template is required")
 	}
@@ -125,11 +142,45 @@ func ValidateTemplate(template Template) error {
 	return nil
 }
 
+// validateGuideTemplate checks the reference sample's shape and HTML safety.
+// Placeholders and required_variables are intentionally not interpreted: in
+// guide mode every template body is a literal example, never a render input.
+func validateGuideTemplate(template Template) error {
+	if strings.TrimSpace(template.SubjectTemplate) == "" {
+		return errorf(domain.MailErrTemplateInvalid, "subject example is required")
+	}
+	if utf8.RuneCountInString(template.SubjectTemplate) > MaxSubjectRunes {
+		return errorf(domain.MailErrTemplateInvalid, "subject example exceeds %d characters", MaxSubjectRunes)
+	}
+	if len(template.BodyTextTemplate) > MaxBodyTextBytes {
+		return errorf(domain.MailErrTemplateInvalid, "text body example exceeds %d bytes", MaxBodyTextBytes)
+	}
+	if len(template.BodyHTMLTemplate) > MaxBodyHTMLBytes {
+		return errorf(domain.MailErrTemplateInvalid, "HTML body example exceeds %d bytes", MaxBodyHTMLBytes)
+	}
+	if strings.TrimSpace(template.BodyTextTemplate) == "" && strings.TrimSpace(template.BodyHTMLTemplate) == "" {
+		return errorf(domain.MailErrTemplateInvalid, "guide template requires a text or HTML body example")
+	}
+	if _, _, _, err := processHTML(template.BodyHTMLTemplate, htmlGuideTemplateMode, nil); err != nil {
+		return err
+	}
+	if _, err := NormalizeRecipients(template.DefaultTo); err != nil {
+		return err
+	}
+	if _, err := NormalizeRecipients(template.DefaultCC); err != nil {
+		return err
+	}
+	return nil
+}
+
 // Render substitutes variables, escapes values for their context and runs the
 // final sanitizer. Any unsafe result is rejected; no snapshot is produced.
 func Render(template Template, input Input) (Preview, error) {
 	if err := ValidateTemplate(template); err != nil {
 		return Preview{}, err
+	}
+	if template.IsGuide() {
+		return renderGuide(template, input, false)
 	}
 	variables, err := normalizeVariables(input.Variables)
 	if err != nil {
@@ -236,6 +287,7 @@ func Render(template Template, input Input) (Preview, error) {
 	return Preview{
 		TemplateID:       template.ID,
 		TemplateVersion:  template.Version,
+		TemplateMode:     template.Mode,
 		Subject:          subject,
 		To:               to,
 		CC:               cc,
@@ -245,6 +297,169 @@ func Render(template Template, input Input) (Preview, error) {
 		Warnings:         warnings,
 		ApprovalRequired: true,
 	}, nil
+}
+
+// PreviewGuideExample renders a guide template's literal sample content. It is
+// preview-only: the example is shown to the Owner/editor but can never be sent
+// because message creation calls Render, which requires caller content.
+func PreviewGuideExample(template Template, input Input) (Preview, error) {
+	if err := ValidateTemplate(template); err != nil {
+		return Preview{}, err
+	}
+	if !template.IsGuide() {
+		return Render(template, input)
+	}
+	return renderGuide(template, input, true)
+}
+
+// renderGuide applies the caller's final subject/body through the same HTML
+// sanitizer and attachment policy as render mode. It never substitutes
+// variables and never falls back to the template example for a real send.
+func renderGuide(template Template, input Input, allowExample bool) (Preview, error) {
+	subject := input.Subject
+	bodyText := input.BodyText
+	bodyHTML := input.BodyHTML
+	usingExample := false
+	if allowExample && strings.TrimSpace(subject) == "" &&
+		strings.TrimSpace(bodyText) == "" && strings.TrimSpace(bodyHTML) == "" {
+		subject = template.SubjectTemplate
+		bodyText = template.BodyTextTemplate
+		bodyHTML = template.BodyHTMLTemplate
+		usingExample = true
+	}
+	if strings.TrimSpace(subject) == "" {
+		return Preview{}, errorf(domain.MailErrTemplateContentMissing,
+			"guide template requires the caller to provide the final subject")
+	}
+	if strings.TrimSpace(bodyText) == "" && strings.TrimSpace(bodyHTML) == "" {
+		return Preview{}, errorf(domain.MailErrTemplateContentMissing,
+			"guide template requires the caller to provide the final body")
+	}
+	if !usingExample {
+		if err := rejectGuidePlaceholders(subject, bodyText, bodyHTML); err != nil {
+			return Preview{}, err
+		}
+	}
+	for _, r := range subject {
+		if r < 0x20 || r == 0x7f {
+			return Preview{}, errorf(domain.MailErrTemplateInvalid, "subject must not contain control characters")
+		}
+	}
+	if utf8.RuneCountInString(subject) > MaxSubjectRunes {
+		return Preview{}, errorf(domain.MailErrTemplateInvalid, "subject exceeds %d characters", MaxSubjectRunes)
+	}
+	bodyText = normalizeNewlines(bodyText)
+	if len(bodyText) > MaxBodyTextBytes {
+		return Preview{}, errorf(domain.MailErrTemplateInvalid, "text body exceeds %d bytes", MaxBodyTextBytes)
+	}
+	if len(bodyHTML) > MaxBodyHTMLBytes {
+		return Preview{}, errorf(domain.MailErrTemplateInvalid, "HTML body exceeds %d bytes", MaxBodyHTMLBytes)
+	}
+
+	attachments, allowedCIDs, err := prepareGuideAttachments(input.Attachments)
+	if err != nil {
+		return Preview{}, err
+	}
+	finalHTML := ""
+	warnings := make([]string, 0)
+	if strings.TrimSpace(bodyHTML) != "" {
+		if usingExample {
+			// The example is preview-only and is shown in a sandboxed iframe.
+			// Validate the guide allowlist but keep its literal placeholder text
+			// (a final-mode URL check would reject example placeholders that are
+			// never substituted).
+			if _, _, _, err := processHTML(bodyHTML, htmlGuideTemplateMode, allowedCIDs); err != nil {
+				return Preview{}, err
+			}
+			finalHTML = bodyHTML
+		} else if finalHTML, _, warnings, err = processHTML(bodyHTML, htmlFinalMode, allowedCIDs); err != nil {
+			return Preview{}, err
+		}
+	}
+	if strings.TrimSpace(bodyText) == "" && finalHTML != "" {
+		bodyText = htmlToText(finalHTML)
+	}
+	if len(bodyText) > MaxBodyTextBytes {
+		return Preview{}, errorf(domain.MailErrTemplateInvalid, "text body exceeds %d bytes", MaxBodyTextBytes)
+	}
+	if len(finalHTML) > MaxBodyHTMLBytes {
+		return Preview{}, errorf(domain.MailErrTemplateInvalid, "HTML body exceeds %d bytes", MaxBodyHTMLBytes)
+	}
+	if !usingExample {
+		// Re-check the sanitized/derived output so braces introduced by the
+		// HTML-to-text fallback or canonical rendering cannot slip through.
+		if err := rejectGuidePlaceholders(subject, bodyText, finalHTML); err != nil {
+			return Preview{}, err
+		}
+	}
+
+	to, cc, err := normalizeRecipientSet(input.To, input.CC)
+	if err != nil {
+		return Preview{}, err
+	}
+	return Preview{
+		TemplateID:       template.ID,
+		TemplateVersion:  template.Version,
+		TemplateMode:     domain.MailTemplateModeGuide,
+		Subject:          subject,
+		To:               to,
+		CC:               cc,
+		BodyText:         bodyText,
+		BodyHTML:         finalHTML,
+		Attachments:      attachments,
+		Warnings:         warnings,
+		ApprovalRequired: true,
+	}, nil
+}
+
+func rejectGuidePlaceholders(subject, bodyText, bodyHTML string) error {
+	for _, part := range []struct {
+		name  string
+		value string
+	}{
+		{"subject", subject},
+		{"body_text", bodyText},
+		{"body_html", bodyHTML},
+	} {
+		if strings.Contains(part.value, "{{") || strings.Contains(part.value, "}}") {
+			return errorf(domain.MailErrTemplatePlaceholderUnresolved,
+				"guide-mode %s still contains a {{...}} placeholder; write the final text instead", part.name)
+		}
+	}
+	return nil
+}
+
+func prepareGuideAttachments(input []Attachment) ([]Attachment, map[string]bool, error) {
+	attachments, err := prepareAttachments(input)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(attachments) > MaxAttachments {
+		return nil, nil, errorf(domain.MailErrAttachmentTooLarge, "at most %d attachments are allowed", MaxAttachments)
+	}
+	total := int64(0)
+	for _, attachment := range attachments {
+		if attachment.SizeBytes > MaxAttachmentBytes {
+			return nil, nil, errorf(domain.MailErrAttachmentTooLarge,
+				"attachment %q exceeds the %d-byte per-file limit", attachment.FileName, MaxAttachmentBytes)
+		}
+		total += attachment.SizeBytes
+	}
+	if total > MaxTotalAttachmentBytes {
+		return nil, nil, errorf(domain.MailErrTotalTooLarge,
+			"attachments exceed the %d-byte total limit", MaxTotalAttachmentBytes)
+	}
+	allowedCIDs := make(map[string]bool, len(attachments))
+	for index := range attachments {
+		// Delivery mode stays server computed: guide mode cannot request a
+		// controlled link or smuggle a placeholder.
+		attachments[index].DeliveryMode = "direct"
+		attachments[index].LinkPlaceholder = ""
+		if attachments[index].ContentID != "" {
+			allowedCIDs[attachments[index].ContentID] = true
+		}
+	}
+	return attachments, allowedCIDs, nil
 }
 
 // CallerVariables returns the caller-supplied namespaces (build/test/release/

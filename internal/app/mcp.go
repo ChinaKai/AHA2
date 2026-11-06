@@ -85,11 +85,12 @@ func (s *Service) mailMCPDetail() domain.MCPServer {
 	now := s.now().UTC()
 	tools := make([]domain.MCPTool, 0, len(mailMCPToolNames))
 	descriptions := map[string]string{
-		"mail_list_accounts":  "列出当前 Task 可用的邮件账号（不含凭据）。",
-		"mail_list_templates": "列出当前 Task/Project 可见的活动模板。",
-		"mail_preview":        "按账号、模板（或直接主题/正文）、收件人与受控附件渲染预览并校验。",
-		"mail_send":           "按模板或直接主题/正文创建待 Owner 审批的邮件；固定返回 pending_approval。",
-		"mail_get_status":     "查询当前 Task 邮件的审批与投递状态。",
+		"mail_list_accounts":   "列出当前 Task 可用的邮件账号（不含凭据）。",
+		"mail_list_templates":  "列出当前 Task/Project 可见的活动模板及 mode/description/version 元数据。",
+		"mail_template_detail": "返回模板完整示例主题、正文、填写说明与模式；guide 模式由调用方自行撰写最终内容。",
+		"mail_preview":         "按账号、模板（或直接主题/正文）、收件人与受控附件渲染预览并校验。",
+		"mail_send":            "按模板或直接主题/正文创建待 Owner 审批的邮件；固定返回 pending_approval。",
+		"mail_get_status":      "查询当前 Task 邮件的审批与投递状态。",
 	}
 	for _, name := range mailMCPToolNames {
 		tools = append(tools, domain.MCPTool{Name: name, Description: descriptions[name]})

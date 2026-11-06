@@ -19,6 +19,7 @@ func TestMailTemplateVersionsAreImmutable(t *testing.T) {
 
 	created, err := database.CreateMailTemplate(ctx, domain.MailTemplate{
 		Scope: domain.MailTemplateScopeGlobal, Name: "Release notice",
+		Mode:              domain.MailTemplateModeRender,
 		Description:       "Initial",
 		SubjectTemplate:   "[AHA] v1",
 		BodyTextTemplate:  "text v1",
@@ -464,5 +465,102 @@ func TestMailTemplateUpdateStrictlyAdvancesFromFutureTimestamp(t *testing.T) {
 	}
 	if !version2.CreatedAt.Equal(updated.UpdatedAt) {
 		t.Fatalf("version 2 created_at = %v, want %v", version2.CreatedAt, updated.UpdatedAt)
+	}
+}
+
+func TestMailTemplateModeDefaultsAndSnapshots(t *testing.T) {
+	ctx := context.Background()
+	database := openMailTestStore(t)
+
+	// New templates default to guide and never persist required variables.
+	guide, err := database.CreateMailTemplate(ctx, domain.MailTemplate{
+		Scope: domain.MailTemplateScopeGlobal, Name: "Guide default",
+		SubjectTemplate: "示例 {{task.title}}", BodyTextTemplate: "示例正文",
+		RequiredVariables: []string{"build.version"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if guide.Mode != domain.MailTemplateModeGuide || len(guide.RequiredVariables) != 0 {
+		t.Fatalf("guide default = %+v", guide)
+	}
+	guideVersion, err := database.MailTemplateVersion(ctx, guide.ID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if guideVersion.Mode != domain.MailTemplateModeGuide || len(guideVersion.RequiredVariables) != 0 {
+		t.Fatalf("guide version = %+v", guideVersion)
+	}
+
+	// Explicit render mode keeps the legacy variable shape and is snapshotted.
+	render, err := database.CreateMailTemplate(ctx, domain.MailTemplate{
+		Scope: domain.MailTemplateScopeGlobal, Name: "Render explicit",
+		Mode: domain.MailTemplateModeRender, SubjectTemplate: "{{build.version}}",
+		BodyTextTemplate: "body", RequiredVariables: []string{"build.version"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	renderVersion, err := database.MailTemplateVersion(ctx, render.ID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if renderVersion.Mode != domain.MailTemplateModeRender ||
+		len(renderVersion.RequiredVariables) != 1 {
+		t.Fatalf("render version = %+v", renderVersion)
+	}
+
+	// Switching an existing template stores the new mode on the new version and
+	// leaves version 1 unchanged.
+	render.Mode = domain.MailTemplateModeGuide
+	render.SubjectTemplate = "示例主题"
+	render.RequiredVariables = []string{"build.version"}
+	updated, err := database.UpdateMailTemplate(ctx, render, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Mode != domain.MailTemplateModeGuide || len(updated.RequiredVariables) != 0 {
+		t.Fatalf("updated mode = %+v", updated)
+	}
+	version2, err := database.MailTemplateVersion(ctx, render.ID, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if version2.Mode != domain.MailTemplateModeGuide {
+		t.Fatalf("version 2 mode = %q", version2.Mode)
+	}
+	version1, err := database.MailTemplateVersion(ctx, render.ID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if version1.Mode != domain.MailTemplateModeRender {
+		t.Fatalf("version 1 was rewritten: %+v", version1)
+	}
+}
+
+func TestMailTemplateModeMigrationDefaultsExistingRowsToRender(t *testing.T) {
+	ctx := context.Background()
+	database := openMailTestStore(t)
+
+	// Simulate a row written before the mode column existed. The migration uses
+	// DEFAULT 'render', so an INSERT that omits mode must read back as render.
+	now := mailTimeString(time.Now().UTC())
+	if _, err := database.db.ExecContext(ctx, `
+		INSERT INTO mail_templates(
+			id,scope,project_id,name,description,subject_template,body_text_template,
+			body_html_template,default_to_json,default_cc_json,required_variables_json,
+			current_version,status,created_by,created_at,updated_at
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		"mail_template_legacy_row", "global", "", "Legacy", "",
+		"{{build.version}}", "body", "", "[]", "[]", `["build.version"]`,
+		1, "active", "", now, now); err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := database.MailTemplate(ctx, "mail_template_legacy_row")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacy.Mode != domain.MailTemplateModeRender {
+		t.Fatalf("legacy row mode = %q, want render", legacy.Mode)
 	}
 }
