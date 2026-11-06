@@ -3,6 +3,7 @@ package sync
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"testing"
@@ -437,5 +438,124 @@ func TestEnginePullQuarantinesUnappliedObjectAndKeepsGoing(t *testing.T) {
 	}
 	if got := remote.cursors[second:]; len(got) != 1 || got[0] != "page-3" {
 		t.Fatalf("a settled backlog was replayed: %v", got)
+	}
+}
+
+// SQLITE_BUSY is transient and belongs to the whole run. Quarantining it would
+// mark the object delivered and create a fake conflict, so the runner's
+// RetryBusy wrapper would never see the error and the object would be dropped.
+func TestEnginePullPropagatesSQLiteBusyWithoutQuarantine(t *testing.T) {
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	object := domain.SyncObject{
+		Type: "note", ID: "busy", Operation: "upsert", Payload: json.RawMessage(`{}`),
+		IdempotencyKey: "key-busy", EventID: "event-busy",
+	}
+	remote := &pagedRemote{
+		responses: map[string]PullResponse{
+			"": {Cursor: "page-1", Objects: []domain.SyncObject{object}},
+		},
+		errors: map[string]error{},
+	}
+	engine := Engine{Store: database, Remote: remote, Scope: "default", DeviceID: "device", BatchSize: 1}
+	engine.Register("note", func(context.Context, domain.SyncObject) error {
+		return errors.New("database is locked (5) (SQLITE_BUSY)")
+	})
+
+	attempts := 0
+	pullErr := store.RetryBusy(ctx, 3, time.Millisecond, nil, func(runCtx context.Context) error {
+		attempts++
+		return engine.Pull(runCtx)
+	})
+	if pullErr == nil {
+		t.Fatal("SQLITE_BUSY was swallowed instead of failing the pull")
+	}
+	if !store.IsSQLiteBusy(pullErr) {
+		t.Fatalf("Pull returned %v, want the original SQLITE_BUSY error", pullErr)
+	}
+	if attempts != 3 {
+		t.Fatalf("RetryBusy attempts = %d, want 3: the busy error must reach the retry wrapper", attempts)
+	}
+
+	// 1) The object must not be marked delivered under either identity.
+	for _, key := range []string{object.EventID, object.IdempotencyKey} {
+		applied, err := database.SyncWasApplied(ctx, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if applied {
+			t.Fatalf("object %q was marked delivered despite SQLITE_BUSY", key)
+		}
+	}
+	// 2) No fake conflict may be recorded.
+	conflicts, err := database.SyncConflicts(ctx, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(conflicts) != 0 {
+		t.Fatalf("SQLITE_BUSY created a fake conflict: %#v", conflicts)
+	}
+	// 3) The cursor must stay put so the next run retries the same object.
+	state, err := database.SyncState(ctx, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Cursor != "" {
+		t.Fatalf("cursor advanced past a retriable failure: %q", state.Cursor)
+	}
+}
+
+// A canceled run must stop instead of quarantining every remaining object as if
+// its payload were permanently unappliable.
+func TestEnginePullStopsOnCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	object := domain.SyncObject{
+		Type: "note", ID: "canceled", Operation: "upsert", Payload: json.RawMessage(`{}`),
+		IdempotencyKey: "key-canceled", EventID: "event-canceled",
+	}
+	remote := &pagedRemote{
+		responses: map[string]PullResponse{
+			"": {Cursor: "page-1", Objects: []domain.SyncObject{object}},
+		},
+		errors: map[string]error{},
+	}
+	engine := Engine{Store: database, Remote: remote, Scope: "default", DeviceID: "device", BatchSize: 1}
+	engine.Register("note", func(context.Context, domain.SyncObject) error {
+		cancel()
+		return errors.New("handler stopped after cancellation")
+	})
+
+	if err := engine.Pull(ctx); err == nil {
+		t.Fatal("a canceled pull returned nil")
+	}
+	// The canceled context must not be reused for the assertions below.
+	checkCtx := context.Background()
+	for _, key := range []string{object.EventID, object.IdempotencyKey} {
+		applied, err := database.SyncWasApplied(checkCtx, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if applied {
+			t.Fatalf("canceled object %q was marked delivered", key)
+		}
+	}
+	conflicts, err := database.SyncConflicts(checkCtx, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(conflicts) != 0 {
+		t.Fatalf("canceled run created a fake conflict: %#v", conflicts)
 	}
 }

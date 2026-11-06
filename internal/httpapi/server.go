@@ -28,7 +28,11 @@ import (
 const sessionCookieName = "aha2_session"
 
 type Config struct {
-	Store             *store.Store
+	Store *store.Store
+	// SyncStore is an optional independent SQLite pool used by scheduled and
+	// manual sync runs. When nil, sync shares Store (the historical behavior).
+	// main opens a dedicated Store so long sync phases cannot block Web reads.
+	SyncStore         *store.Store
 	Auth              *auth.Service
 	App               *app.Service
 	Web               fs.FS
@@ -66,6 +70,7 @@ type Config struct {
 
 type Server struct {
 	store                 *store.Store
+	syncStore             *store.Store
 	auth                  *auth.Service
 	app                   *app.Service
 	web                   fs.FS
@@ -170,8 +175,12 @@ func New(config Config) *Server {
 			accessScopeValue = settings.AccessScope
 		}
 	}
+	syncStore := config.SyncStore
+	if syncStore == nil {
+		syncStore = config.Store
+	}
 	server := &Server{
-		store: config.Store, auth: config.Auth, app: config.App, web: config.Web,
+		store: config.Store, syncStore: syncStore, auth: config.Auth, app: config.App, web: config.Web,
 		logger: logger, secureCookie: config.SecureCookie, validateOrigin: validateOrigin,
 		originStartupOverride: config.AllowCrossOrigin,
 		accessScope:           newAccessScopeGate(accessScopeValue),

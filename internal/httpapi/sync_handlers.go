@@ -9,10 +9,12 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
+	storepkg "github.com/ChinaKai/AHA2/internal/store"
 	syncer "github.com/ChinaKai/AHA2/internal/sync"
 )
 
@@ -156,10 +158,36 @@ func (s *Server) startSyncRun(appCtx context.Context, ownerID string) bool {
 	return true
 }
 
+// syncStoreOrWeb returns the pool used for sync work. The dedicated sync pool
+// keeps long export/pull phases off the Web API pool; older callers and tests
+// that do not configure one keep the historical single-pool behavior.
+func (s *Server) syncStoreOrWeb() *storepkg.Store {
+	if s.syncStore != nil {
+		return s.syncStore
+	}
+	return s.store
+}
+
 func (s *Server) executeSyncRun(appCtx context.Context, ownerID string) {
 	ctx, cancel := context.WithTimeout(appCtx, syncRunTimeout)
 	defer cancel()
+	database := s.syncStoreOrWeb()
+	started := time.Now()
+	phase := "starting"
+	phaseStarted := started
+	phaseDurations := map[string]time.Duration{}
+	enterPhase := func(next string) {
+		if next == phase {
+			return
+		}
+		now := time.Now()
+		phaseDurations[phase] += now.Sub(phaseStarted)
+		phase, phaseStarted = next, now
+		s.logger.Info("sync run phase", "phase", next, "elapsed", now.Sub(started).Round(time.Millisecond))
+	}
 	fail := func(err error) {
+		phaseDurations[phase] += time.Since(phaseStarted)
+		s.logger.Warn("sync run failed", "phase", phase, "duration", time.Since(started).Round(time.Millisecond), "error", err)
 		s.finishSyncRun(err)
 		state, stateErr := s.store.SyncState(context.Background(), localSyncScope)
 		if stateErr == nil {
@@ -168,7 +196,8 @@ func (s *Server) executeSyncRun(appCtx context.Context, ownerID string) {
 			_ = s.store.UpdateSyncState(context.Background(), state)
 		}
 	}
-	if _, err := s.store.SyncSettings(ctx, localSyncScope); err != nil {
+	s.logger.Info("sync run started", "scope", localSyncScope)
+	if _, err := database.SyncSettings(ctx, localSyncScope); err != nil {
 		fail(err)
 		return
 	}
@@ -181,19 +210,32 @@ func (s *Server) executeSyncRun(appCtx context.Context, ownerID string) {
 		fail(errors.New("sync token is not configured"))
 		return
 	}
-	runner := syncer.Runner{Store: s.store, Secrets: s.secrets, Scope: localSyncScope, TokenRef: localSyncTokenRef}
-	preview, err := runner.Preview(ctx)
-	if err != nil {
+	runner := syncer.Runner{Store: database, Secrets: s.secrets, Scope: localSyncScope, TokenRef: localSyncTokenRef}
+	retrySyncBusy := func(step string) func(int, error) {
+		return func(attempt int, err error) {
+			s.logger.Warn("sync run retrying after sqlite busy", "step", step, "attempt", attempt, "error", err)
+		}
+	}
+	enterPhase("preview")
+	var preview syncer.Preview
+	if err := storepkg.RetryBusy(ctx, 3, 200*time.Millisecond, retrySyncBusy("preview"), func(runCtx context.Context) (err error) {
+		preview, err = runner.Preview(runCtx)
+		return err
+	}); err != nil {
 		fail(err)
 		return
 	}
 	s.setSyncRunTotal(preview)
 	completed := 0
 	runner.Progress = func(phase, detail string, delta int) {
+		enterPhase(phase)
 		completed += delta
 		s.updateSyncRun(phase, detail, completed)
 	}
-	if err := runner.RunOnce(ctx); err != nil {
+	enterPhase("running")
+	if err := storepkg.RetryBusy(ctx, 3, 200*time.Millisecond, retrySyncBusy("run"), func(runCtx context.Context) error {
+		return runner.RunOnce(runCtx)
+	}); err != nil {
 		fail(err)
 		return
 	}
@@ -204,9 +246,38 @@ func (s *Server) executeSyncRun(appCtx context.Context, ownerID string) {
 		_ = s.store.UpdateSyncState(context.Background(), state)
 	}
 	s.finishSyncRun(nil)
+	phaseDurations[phase] += time.Since(phaseStarted)
+	stats := database.PoolStats()
+	s.logger.Info(
+		"sync run finished",
+		"duration", time.Since(started).Round(time.Millisecond),
+		"phases", syncPhaseDurations(phaseDurations),
+		"pool_wait_count", stats.WaitCount,
+		"pool_wait_duration", stats.WaitDuration.Round(time.Millisecond),
+	)
 	if ownerID != "" {
 		_ = s.store.AppendAudit(context.Background(), ownerID, "sync.run", "settings", "sync", nil, time.Now().UTC().Format(time.RFC3339Nano))
 	}
+}
+
+// syncPhaseDurations renders phase timings as a stable log-friendly string.
+// Only phase names and durations are included; no synced data is logged.
+func syncPhaseDurations(durations map[string]time.Duration) string {
+	names := make([]string, 0, len(durations))
+	for name := range durations {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var builder strings.Builder
+	for index, name := range names {
+		if index > 0 {
+			builder.WriteString(";")
+		}
+		builder.WriteString(name)
+		builder.WriteString("=")
+		builder.WriteString(durations[name].Round(time.Millisecond).String())
+	}
+	return builder.String()
 }
 
 type syncSettingsPayload struct {
@@ -383,7 +454,7 @@ func (s *Server) syncPreview(writer http.ResponseWriter, request *http.Request) 
 		writeError(writer, http.StatusBadRequest, "sync_not_configured")
 		return
 	}
-	preview, err := (syncer.Runner{Store: s.store, Secrets: s.secrets, Scope: localSyncScope, TokenRef: localSyncTokenRef}).Preview(request.Context())
+	preview, err := (syncer.Runner{Store: s.syncStoreOrWeb(), Secrets: s.secrets, Scope: localSyncScope, TokenRef: localSyncTokenRef}).Preview(request.Context())
 	if err != nil {
 		writeError(writer, http.StatusInternalServerError, "sync_preview_failed")
 		return
@@ -483,7 +554,8 @@ func (s *Server) resolveSyncConflict(writer http.ResponseWriter, request *http.R
 }
 
 func (s *Server) resolveConflictWithLocal(ctx context.Context, conflict domain.SyncConflict) error {
-	settings, err := s.store.SyncSettings(ctx, localSyncScope)
+	database := s.syncStoreOrWeb()
+	settings, err := database.SyncSettings(ctx, localSyncScope)
 	if err != nil {
 		return fmt.Errorf("同步尚未配置")
 	}
@@ -498,7 +570,7 @@ func (s *Server) resolveConflictWithLocal(ctx context.Context, conflict domain.S
 		Type: conflict.ObjectType, ID: conflict.ObjectID, Operation: "upsert", Payload: conflict.LocalPayload,
 		IdempotencyKey: domain.NewID("sync"),
 	}
-	if item, itemErr := s.store.SyncOutboxForObject(ctx, localSyncScope, conflict.ObjectType, conflict.ObjectID); itemErr == nil {
+	if item, itemErr := database.SyncOutboxForObject(ctx, localSyncScope, conflict.ObjectType, conflict.ObjectID); itemErr == nil {
 		// "Keep local" means force the remote to this payload. Leaving the base
 		// version empty makes the center skip the optimistic version check, so a
 		// stale remote version cannot turn this into another conflict (and does
@@ -527,7 +599,7 @@ func (s *Server) resolveConflictWithLocal(ctx context.Context, conflict domain.S
 			break
 		}
 		latest := response.Conflicts[0]
-		_ = s.store.AddSyncConflict(ctx, latest)
+		_ = database.AddSyncConflict(ctx, latest)
 		if attempt == 1 {
 			return errSyncConflictRemoteChanged
 		}
@@ -539,32 +611,33 @@ func (s *Server) resolveConflictWithLocal(ctx context.Context, conflict domain.S
 		return fmt.Errorf("中心没有确认本机变更")
 	}
 	now := time.Now().UTC()
-	_ = s.store.MarkSyncApplied(ctx, localSyncScope, object, now)
-	if err := s.store.DropSyncOutboxObject(ctx, localSyncScope, object.Type, object.ID); err != nil {
+	_ = database.MarkSyncApplied(ctx, localSyncScope, object, now)
+	if err := database.DropSyncOutboxObject(ctx, localSyncScope, object.Type, object.ID); err != nil {
 		return err
 	}
 	s.markLocalExportApplied(ctx, settings, object.Type, object.ID)
-	state, stateErr := s.store.SyncState(ctx, localSyncScope)
+	state, stateErr := database.SyncState(ctx, localSyncScope)
 	if stateErr == nil {
 		state.LastPushAt = now
 		state.LastError = ""
 		state.UpdatedAt = now
-		_ = s.store.UpdateSyncState(ctx, state)
+		_ = database.UpdateSyncState(ctx, state)
 	}
 	return nil
 }
 
 func (s *Server) resolveConflictWithRemote(ctx context.Context, conflict domain.SyncConflict) error {
-	settings, err := s.store.SyncSettings(ctx, localSyncScope)
+	database := s.syncStoreOrWeb()
+	settings, err := database.SyncSettings(ctx, localSyncScope)
 	if err != nil {
 		return fmt.Errorf("同步尚未配置")
 	}
-	engine := &syncer.Engine{Store: s.store, Scope: localSyncScope, DeviceID: settings.DeviceID, Now: time.Now}
-	syncer.RegisterBusinessHandlersForDevice(engine, s.store, settings.DeviceID)
+	engine := &syncer.Engine{Store: database, Scope: localSyncScope, DeviceID: settings.DeviceID, Now: time.Now}
+	syncer.RegisterBusinessHandlersForDevice(engine, database, settings.DeviceID)
 	if s.secrets != nil {
-		syncer.RegisterCodexAccountTombstoneHandler(engine, s.store, s.secrets)
+		syncer.RegisterCodexAccountTombstoneHandler(engine, database, s.secrets)
 		if passphrase, ok := s.secrets.Get(localSyncPassphraseRef); ok && passphrase != "" {
-			syncer.RegisterSecretBundleHandler(engine, s.store, s.secrets, passphrase)
+			syncer.RegisterSecretBundleHandler(engine, database, s.secrets, passphrase)
 		}
 	}
 	object := domain.SyncObject{
@@ -576,7 +649,7 @@ func (s *Server) resolveConflictWithRemote(ctx context.Context, conflict domain.
 	if err := engine.Apply(applyCtx, object); err != nil {
 		return err
 	}
-	if err := s.store.DropSyncOutboxObject(ctx, localSyncScope, conflict.ObjectType, conflict.ObjectID); err != nil {
+	if err := database.DropSyncOutboxObject(ctx, localSyncScope, conflict.ObjectType, conflict.ObjectID); err != nil {
 		return err
 	}
 	s.markLocalExportApplied(ctx, settings, conflict.ObjectType, conflict.ObjectID)
@@ -586,14 +659,15 @@ func (s *Server) resolveConflictWithRemote(ctx context.Context, conflict domain.
 // markLocalExportApplied records the object's export identity as applied so the
 // next run does not enqueue the same divergent object again.
 func (s *Server) markLocalExportApplied(ctx context.Context, settings domain.SyncSettings, objectType, objectID string) {
-	objects, err := syncer.ExportBusinessObjectsForDevice(ctx, s.store, settings.DeviceID)
+	database := s.syncStoreOrWeb()
+	objects, err := syncer.ExportBusinessObjectsForDevice(ctx, database, settings.DeviceID)
 	if err != nil {
 		return
 	}
 	now := time.Now().UTC()
 	for _, object := range objects {
 		if object.Type == objectType && object.ID == objectID {
-			_ = s.store.MarkSyncApplied(ctx, localSyncScope, object, now)
+			_ = database.MarkSyncApplied(ctx, localSyncScope, object, now)
 			return
 		}
 	}

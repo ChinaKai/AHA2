@@ -436,6 +436,36 @@ func TestRunSyncUsesStoredTokenAndAuthenticatedRoutes(t *testing.T) {
 	response.Body.Close()
 }
 
+// TestServerWiresDedicatedSyncStore covers the wiring that keeps scheduled and
+// manual sync off the Web pool: New must keep Config.SyncStore and fall back to
+// Config.Store when it is absent.
+func TestServerWiresDedicatedSyncStore(t *testing.T) {
+	ctx := context.Background()
+	primary, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = primary.Close() })
+	secondary, err := primary.OpenSecondary(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = secondary.Close() })
+
+	server := New(Config{Store: primary, SyncStore: secondary})
+	if server.store != primary || server.syncStore != secondary {
+		t.Fatalf("dedicated sync store not wired: store=%p syncStore=%p", server.store, server.syncStore)
+	}
+	if got := server.syncStoreOrWeb(); got != secondary {
+		t.Fatalf("syncStoreOrWeb() = %p, want the dedicated sync store", got)
+	}
+
+	fallback := New(Config{Store: primary})
+	if got := fallback.syncStoreOrWeb(); got != primary {
+		t.Fatalf("syncStoreOrWeb() fallback = %p, want the Web store", got)
+	}
+}
+
 func readBody(t *testing.T, response *http.Response) string {
 	t.Helper()
 	defer response.Body.Close()

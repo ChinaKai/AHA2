@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"bufio"
+	"database/sql"
 	"log/slog"
 	"net"
 	"net/http"
@@ -43,11 +44,22 @@ var longPollingRoutes = map[string]struct{}{
 // bodies and headers can carry credentials or user content and are never
 // logged. The response writer is wrapped only to observe the status code.
 func (s *Server) slowRequestLog(next http.Handler) http.Handler {
-	return slowRequestLogHandler(s.logger, slowRequestThreshold, next)
+	return slowRequestLogHandlerWithStats(s.logger, slowRequestThreshold, s.store.PoolStats, next)
 }
 
 func slowRequestLogHandler(logger *slog.Logger, threshold time.Duration, next http.Handler) http.Handler {
+	return slowRequestLogHandlerWithStats(logger, threshold, nil, next)
+}
+
+// slowRequestLogHandlerWithStats optionally samples pool counters around the
+// request. The delta separates time spent waiting for a database connection
+// (db_wait) from time spent executing the request and its queries.
+func slowRequestLogHandlerWithStats(logger *slog.Logger, threshold time.Duration, stats func() sql.DBStats, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var before sql.DBStats
+		if stats != nil {
+			before = stats()
+		}
 		started := time.Now()
 		recorder := &statusResponseWriter{ResponseWriter: writer}
 		next.ServeHTTP(recorder, request)
@@ -69,7 +81,20 @@ func slowRequestLogHandler(logger *slog.Logger, threshold time.Duration, next ht
 		if status == 0 {
 			status = http.StatusOK
 		}
-		logger.Warn("slow http request", "method", request.Method, "path", request.URL.Path, "status", status, "duration", elapsed)
+		if stats == nil {
+			logger.Warn("slow http request", "method", request.Method, "path", request.URL.Path, "status", status, "duration", elapsed)
+			return
+		}
+		after := stats()
+		logger.Warn(
+			"slow http request",
+			"method", request.Method,
+			"path", request.URL.Path,
+			"status", status,
+			"duration", elapsed,
+			"db_wait", (after.WaitDuration - before.WaitDuration).Round(time.Millisecond),
+			"db_wait_count", after.WaitCount-before.WaitCount,
+		)
 	})
 }
 

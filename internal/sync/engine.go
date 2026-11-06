@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
+	"github.com/ChinaKai/AHA2/internal/store"
 )
 
 var ErrConflict = errors.New("sync conflict")
@@ -279,6 +280,14 @@ func (e *Engine) applyPulledObjects(ctx context.Context, pending []domain.SyncOb
 				continue
 			}
 			if err != nil {
+				// SQLITE_BUSY is transient and belongs to the run, not to the
+				// object: quarantining would mark it delivered and fabricate a
+				// conflict, hiding the failure from the runner's RetryBusy
+				// wrapper and silently dropping the object. A canceled run must
+				// also stop instead of recording every remaining object as bad.
+				if store.IsSQLiteBusy(err) || ctx.Err() != nil {
+					return nil, nil, err
+				}
 				if quarantineErr := e.quarantineObject(ctx, object); quarantineErr != nil {
 					return nil, nil, err
 				}

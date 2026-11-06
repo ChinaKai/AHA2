@@ -192,6 +192,15 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 		return err
 	}
 	defer database.Close()
+	// The periodic sync worker gets its own pool over the same WAL file. Long
+	// export/pull phases no longer occupy the Web API connection; writes still
+	// serialize through SQLite with busy_timeout and an immediate transaction
+	// lock. Close order matters: this handle closes before the primary one.
+	syncDatabase, err := database.OpenSecondary(ctx)
+	if err != nil {
+		return fmt.Errorf("open sync database: %w", err)
+	}
+	defer syncDatabase.Close()
 	recovery, err := database.RecoverInterrupted(ctx, time.Now().UTC())
 	if err != nil {
 		return err
@@ -288,7 +297,7 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 		logger.Info("backfilled legacy providers", "providers", backfilled)
 	}
 	apiServer := httpapi.New(httpapi.Config{
-		Store: database, Auth: authService, App: appService, Web: webassets.FS(),
+		Store: database, SyncStore: syncDatabase, Auth: authService, App: appService, Web: webassets.FS(),
 		Logger: logger, SecureCookie: options.secureCookie, AllowCrossOrigin: options.allowCrossOrigin,
 		DetectWorkspace:     workspace.Detect,
 		Secrets:             secretStore,
