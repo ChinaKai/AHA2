@@ -11,6 +11,33 @@ import (
 
 const slowRequestThreshold = time.Second
 
+// Routes registered on the ServeMux for endpoints that intentionally block for
+// longer than slowRequestThreshold. Each value is the exact ServeMux pattern,
+// including the HTTP method.
+const (
+	waitAgentInboxRoute         = "POST /api/v1/agent/turn/inbox/wait"
+	waitAgentCollaborationRoute = "POST /api/v1/agent/collaboration/batches/{batch}/wait"
+	agentADBExecRoute           = "POST /api/v1/agent/hardware/{hardware}/adb/exec"
+	hardwareADBPairRoute        = "POST /api/v1/hardware-resources/{id}/adb/pair"
+)
+
+// longPollingRoutes are excluded from slow-request warnings: their duration is
+// chosen by the caller's wait window or by a device that answers on human time,
+// so they are long by design rather than slow by accident. Reporting them would
+// bury the real request under investigation (such as a slow first screen).
+//
+// Matching uses http.Request.Pattern, the exact registered pattern (method plus
+// path), so sibling routes (for example /api/v1/agent/turn/inbox/claim) and
+// longer lookalike paths are still reported. Do not replace this with a prefix
+// check. When a new long-polling or device-waiting endpoint is added, add its
+// registered pattern here.
+var longPollingRoutes = map[string]struct{}{
+	waitAgentInboxRoute:         {},
+	waitAgentCollaborationRoute: {},
+	agentADBExecRoute:           {},
+	hardwareADBPairRoute:        {},
+}
+
 // slowRequestLog reports requests that take longer than slowRequestThreshold.
 // Only the method, path, status and duration are recorded: query strings,
 // bodies and headers can carry credentials or user content and are never
@@ -25,6 +52,11 @@ func slowRequestLogHandler(logger *slog.Logger, threshold time.Duration, next ht
 		recorder := &statusResponseWriter{ResponseWriter: writer}
 		next.ServeHTTP(recorder, request)
 		elapsed := time.Since(started)
+		// The ServeMux fills in Pattern while serving the request. Skip the
+		// endpoints that are long by design instead of reporting them as slow.
+		if _, ok := longPollingRoutes[request.Pattern]; ok {
+			return
+		}
 		// A hijacked connection (WebSocket) or an event stream stays open for its
 		// own lifetime; that is streaming, not a slow request.
 		if recorder.hijacked || strings.HasPrefix(recorder.Header().Get("Content-Type"), "text/event-stream") {

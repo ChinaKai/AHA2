@@ -64,6 +64,87 @@ func TestSlowRequestLogRecordsImplicitOKStatus(t *testing.T) {
 	}
 }
 
+func TestSlowRequestLogSkipsLongPollingRoutes(t *testing.T) {
+	var logged bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logged, nil))
+	const threshold = 20 * time.Millisecond
+
+	mux := http.NewServeMux()
+	slow := http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusAccepted)
+		_, _ = writer.Write([]byte("ok"))
+		time.Sleep(2 * threshold)
+	})
+	for _, pattern := range []string{
+		waitAgentInboxRoute,
+		waitAgentCollaborationRoute,
+		agentADBExecRoute,
+		hardwareADBPairRoute,
+	} {
+		mux.Handle(pattern, slow)
+	}
+
+	handler := slowRequestLogHandler(logger, threshold, mux)
+	for _, tc := range []struct{ method, path string }{
+		{http.MethodPost, "/api/v1/agent/turn/inbox/wait"},
+		{http.MethodPost, "/api/v1/agent/collaboration/batches/batch-1/wait"},
+		{http.MethodPost, "/api/v1/agent/hardware/hw-1/adb/exec"},
+		{http.MethodPost, "/api/v1/hardware-resources/res-1/adb/pair"},
+	} {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(tc.method, tc.path, nil))
+		// The middleware must not change the response of skipped requests either.
+		if recorder.Code != http.StatusAccepted || recorder.Body.String() != "ok" {
+			t.Fatalf("response changed by middleware for %s: status %d body %q", tc.path, recorder.Code, recorder.Body.String())
+		}
+	}
+	if got := logged.String(); got != "" {
+		t.Fatalf("requests that are long by design must not be reported as slow, got %q", got)
+	}
+}
+
+func TestSlowRequestLogWarnsForLongPollingLookalikes(t *testing.T) {
+	var logged bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logged, nil))
+	const threshold = 20 * time.Millisecond
+
+	mux := http.NewServeMux()
+	slow := http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusAccepted)
+		time.Sleep(2 * threshold)
+	})
+	// Only the exact registered pattern is skipped: the sibling route, the same
+	// path under another method, and longer or similarly named paths must stay
+	// visible in the slow-request log.
+	mux.Handle(waitAgentInboxRoute, slow)
+	mux.Handle("GET /api/v1/agent/turn/inbox/wait", slow)
+	mux.Handle("POST /api/v1/agent/turn/inbox/claim", slow)
+	mux.Handle("POST /api/v1/agent/turn/inbox/wait/extra", slow)
+	mux.Handle("POST /api/v1/hardware-resources/{id}/adb/pairing", slow)
+	mux.Handle("/", slow)
+
+	handler := slowRequestLogHandler(logger, threshold, mux)
+	for _, tc := range []struct{ method, path string }{
+		{http.MethodGet, "/api/v1/agent/turn/inbox/wait"},
+		{http.MethodPost, "/api/v1/agent/turn/inbox/claim"},
+		{http.MethodPost, "/api/v1/agent/turn/inbox/wait/extra"},
+		{http.MethodPost, "/api/v1/hardware-resources/res-1/adb/pairing"},
+		{http.MethodPost, "/api/v1/agent/collaboration/batches/batch-1/wait/extra"},
+	} {
+		logged.Reset()
+		handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(tc.method, tc.path, nil))
+		output := logged.String()
+		for _, want := range []string{
+			"level=WARN", "slow http request", "method=" + tc.method,
+			"path=" + tc.path, "status=202", "duration=",
+		} {
+			if !strings.Contains(output, want) {
+				t.Errorf("lookalike %s %s must still be logged with %q, got %q", tc.method, tc.path, want, output)
+			}
+		}
+	}
+}
+
 func TestSlowRequestLogSkipsEventStreams(t *testing.T) {
 	var logged bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logged, nil))

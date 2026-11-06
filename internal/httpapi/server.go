@@ -366,7 +366,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/hardware-resources", s.withAuth(http.HandlerFunc(s.createHardwareResource)))
 	mux.Handle("PUT /api/v1/hardware-resources/{id}", s.withAuth(http.HandlerFunc(s.updateHardwareResource)))
 	mux.Handle("DELETE /api/v1/hardware-resources/{id}", s.withAuth(http.HandlerFunc(s.deleteHardwareResource)))
-	mux.Handle("POST /api/v1/hardware-resources/{id}/adb/pair", s.withAuth(http.HandlerFunc(s.pairHardwareADB)))
+	mux.Handle(hardwareADBPairRoute, s.withAuth(http.HandlerFunc(s.pairHardwareADB)))
 
 	// Mail resources phase one task B: Owner-only account/template/binding
 	// management, preview and connection test. Agent capability routes are
@@ -445,7 +445,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/agent/hardware/{hardware}/disconnect", s.withAgentCapability(http.HandlerFunc(s.agentDisconnectHardware)))
 	mux.Handle("POST /api/v1/agent/hardware/{hardware}/send", s.withAgentCapability(http.HandlerFunc(s.agentSendHardware)))
 	mux.Handle("POST /api/v1/agent/hardware/{hardware}/login", s.withAgentCapability(http.HandlerFunc(s.agentLoginHardware)))
-	mux.Handle("POST /api/v1/agent/hardware/{hardware}/adb/exec", s.withAgentCapability(http.HandlerFunc(s.agentADBExec)))
+	mux.Handle(agentADBExecRoute, s.withAgentCapability(http.HandlerFunc(s.agentADBExec)))
 	mux.Handle("GET /api/v1/agent/processes", s.withAgentCapability(http.HandlerFunc(s.agentProcesses)))
 	mux.Handle("POST /api/v1/agent/processes", s.withAgentCapability(http.HandlerFunc(s.startAgentProcess)))
 	mux.Handle("GET /api/v1/agent/processes/{name}", s.withAgentCapability(http.HandlerFunc(s.agentProcessStatus)))
@@ -453,7 +453,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/agent/capabilities", s.withAgentCapability(http.HandlerFunc(s.agentCapabilitiesInfo)))
 	mux.Handle("PATCH /api/v1/agent/turn/memory", s.withAgentCapability(http.HandlerFunc(s.updateAgentMemory)))
 	mux.Handle("POST /api/v1/agent/turn/messages", s.withAgentCapability(http.HandlerFunc(s.addAgentProgressMessage)))
-	mux.Handle("POST /api/v1/agent/turn/inbox/wait", s.withAgentCapability(http.HandlerFunc(s.waitAgentInbox)))
+	mux.Handle(waitAgentInboxRoute, s.withAgentCapability(http.HandlerFunc(s.waitAgentInbox)))
 	mux.Handle("POST /api/v1/agent/turn/inbox/claim", s.withAgentCapability(http.HandlerFunc(s.claimAgentInbox)))
 	mux.Handle("POST /api/v1/agent/turn/inbox/ack", s.withAgentCapability(http.HandlerFunc(s.ackAgentInbox)))
 	mux.Handle("POST /api/v1/agent/channel/reply-decision", s.withAgentCapability(http.HandlerFunc(s.setAgentChannelReplyDecision)))
@@ -463,7 +463,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/agent/knowledge/candidates", s.withAgentCapability(http.HandlerFunc(s.submitAgentKnowledge)))
 	mux.Handle("POST /api/v1/agent/knowledge/{knowledge}/feedback", s.withAgentCapability(http.HandlerFunc(s.submitAgentKnowledgeFeedback)))
 	mux.Handle("POST /api/v1/agent/collaboration/batches", s.withAgentCapability(http.HandlerFunc(s.submitAgentCollaboration)))
-	mux.Handle("POST /api/v1/agent/collaboration/batches/{batch}/wait", s.withAgentCapability(http.HandlerFunc(s.waitAgentCollaboration)))
+	mux.Handle(waitAgentCollaborationRoute, s.withAgentCapability(http.HandlerFunc(s.waitAgentCollaboration)))
 	mux.Handle("GET /api/v1/agent/skills", s.withAgentCapability(http.HandlerFunc(s.agentSkills)))
 	mux.Handle("POST /api/v1/agent/skills", s.withAgentCapability(http.HandlerFunc(s.createAgentSkill)))
 	mux.Handle("GET /api/v1/agent/skills/{skill}", s.withAgentCapability(http.HandlerFunc(s.agentSkill)))
