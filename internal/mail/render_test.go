@@ -1,6 +1,7 @@
 package mail
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -443,7 +444,68 @@ func TestExtraVariableLimits(t *testing.T) {
 	}
 }
 
-func TestLinkModeAttachmentCannotBeCIDReferenced(t *testing.T) {
+func testAttachment(index int, size int64) Attachment {
+	sourceID := fmt.Sprintf("attachment_%d", index)
+	return Attachment{
+		SourceType: "task_attachment", SourceID: sourceID, FileName: fmt.Sprintf("file_%d.bin", index),
+		MediaType: "application/octet-stream", SizeBytes: size,
+		SHA256: strings.Repeat("a", 64), ContentID: sourceID,
+	}
+}
+
+func TestAttachmentSizePolicy(t *testing.T) {
+	template := Template{SubjectTemplate: "s", BodyTextTemplate: "t"}
+
+	// Exactly 50 MiB for one file is allowed and stays direct.
+	exactFile, err := Render(template, Input{Attachments: []Attachment{testAttachment(1, MaxAttachmentBytes)}})
+	if err != nil {
+		t.Fatalf("exact per-file limit rejected: %v", err)
+	}
+	if exactFile.Attachments[0].DeliveryMode != "direct" || exactFile.Attachments[0].LinkPlaceholder != "" {
+		t.Fatalf("exact per-file attachment = %#v", exactFile.Attachments[0])
+	}
+
+	// Exactly 100 MiB in total (10 x 10 MiB) is allowed and stays direct.
+	exactTotal := make([]Attachment, 0, MaxAttachments)
+	for index := 0; index < MaxAttachments; index++ {
+		exactTotal = append(exactTotal, testAttachment(index, 10<<20))
+	}
+	preview, err := Render(template, Input{Attachments: exactTotal})
+	if err != nil {
+		t.Fatalf("exact total limit rejected: %v", err)
+	}
+	if len(preview.Attachments) != MaxAttachments {
+		t.Fatalf("attachments = %d", len(preview.Attachments))
+	}
+	for _, attachment := range preview.Attachments {
+		if attachment.DeliveryMode != "direct" || attachment.LinkPlaceholder != "" {
+			t.Fatalf("attachment inside limits = %#v", attachment)
+		}
+	}
+
+	// One byte over the per-file limit is rejected.
+	_, err = Render(template, Input{Attachments: []Attachment{testAttachment(1, MaxAttachmentBytes+1)}})
+	requireCode(t, err, domain.MailErrAttachmentTooLarge)
+
+	// One byte over the total limit is rejected even when every file fits.
+	overTotal := make([]Attachment, 0, 10)
+	for index := 0; index < 9; index++ {
+		overTotal = append(overTotal, testAttachment(index, 10<<20))
+	}
+	overTotal = append(overTotal, testAttachment(9, (10<<20)+1))
+	_, err = Render(template, Input{Attachments: overTotal})
+	requireCode(t, err, domain.MailErrTotalTooLarge)
+
+	// The attachment count limit is independent of size.
+	tooMany := make([]Attachment, 0, MaxAttachments+1)
+	for index := 0; index <= MaxAttachments; index++ {
+		tooMany = append(tooMany, testAttachment(index, 1))
+	}
+	_, err = Render(template, Input{Attachments: tooMany})
+	requireCode(t, err, domain.MailErrAttachmentTooLarge)
+}
+
+func TestDirectAttachmentCanBeCIDReferencedAtCurrentLimit(t *testing.T) {
 	template := Template{
 		SubjectTemplate:  "s",
 		BodyTextTemplate: "t",
@@ -451,11 +513,17 @@ func TestLinkModeAttachmentCannotBeCIDReferenced(t *testing.T) {
 	}
 	attachment := Attachment{
 		SourceType: "task_attachment", SourceID: "attachment_1", FileName: "big.zip",
-		MediaType: "application/zip", SizeBytes: MaxDirectAttachmentSize + 1,
+		MediaType: "application/zip", SizeBytes: MaxAttachmentBytes,
 		SHA256: strings.Repeat("c", 64), ContentID: "attachment_1",
 	}
-	_, err := Render(template, Input{Attachments: []Attachment{attachment}})
-	requireCode(t, err, domain.MailErrTemplateInvalid)
+	preview, err := Render(template, Input{Attachments: []Attachment{attachment}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.Attachments[0].DeliveryMode != "direct" ||
+		!strings.Contains(preview.BodyHTML, "cid:attachment_1") {
+		t.Fatalf("attachment = %#v html = %q", preview.Attachments[0], preview.BodyHTML)
+	}
 }
 
 func TestDuplicateAttachmentSourcesAreDeduped(t *testing.T) {
@@ -477,7 +545,7 @@ func TestDuplicateAttachmentSourcesAreDeduped(t *testing.T) {
 	}
 }
 
-func TestRenderControlledLinkPlaceholder(t *testing.T) {
+func TestRenderNeverChoosesLinkMode(t *testing.T) {
 	template := Template{
 		SubjectTemplate:  "s",
 		BodyTextTemplate: "下载：%%MAIL_LINK:attachment_1%%",
@@ -485,18 +553,14 @@ func TestRenderControlledLinkPlaceholder(t *testing.T) {
 	}
 	preview, err := Render(template, Input{Attachments: []Attachment{{
 		SourceType: "task_attachment", SourceID: "attachment_1", FileName: "big.zip",
-		MediaType: "application/zip", SizeBytes: MaxDirectAttachmentSize + 1,
+		MediaType: "application/zip", SizeBytes: MaxAttachmentBytes,
 		SHA256: strings.Repeat("b", 64), ContentID: "attachment_1",
 	}}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "%%MAIL_LINK:attachment_1%%"
-	if !strings.Contains(preview.BodyText, want) || !strings.Contains(preview.BodyHTML, want) {
-		t.Fatalf("link placeholder not preserved: %q / %q", preview.BodyText, preview.BodyHTML)
-	}
 	attachment := preview.Attachments[0]
-	if attachment.DeliveryMode != "link" || attachment.LinkPlaceholder != want {
+	if attachment.DeliveryMode != "direct" || attachment.LinkPlaceholder != "" {
 		t.Fatalf("attachment = %#v", attachment)
 	}
 }

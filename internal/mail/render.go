@@ -13,9 +13,11 @@ import (
 
 const (
 	// MaxAttachments and the size thresholds mirror design section 7.1.
+	// Attachments within the per-file and total limits are always sent direct;
+	// the renderer no longer downgrades an oversized set to a controlled link.
 	MaxAttachments          = 10
-	MaxAttachmentBytes      = 25 << 20
-	MaxDirectAttachmentSize = 20 << 20
+	MaxAttachmentBytes      = 50 << 20
+	MaxTotalAttachmentBytes = 100 << 20
 )
 
 // Template is the content that must be rendered. It mirrors the immutable
@@ -184,23 +186,21 @@ func Render(template Template, input Input) (Preview, error) {
 	total := int64(0)
 	for _, attachment := range attachments {
 		if attachment.SizeBytes > MaxAttachmentBytes {
-			return Preview{}, errorf(domain.MailErrAttachmentTooLarge, "attachment %q exceeds %d bytes", attachment.FileName, MaxAttachmentBytes)
+			return Preview{}, errorf(domain.MailErrAttachmentTooLarge,
+				"attachment %q exceeds the %d-byte per-file limit", attachment.FileName, MaxAttachmentBytes)
 		}
 		total += attachment.SizeBytes
 	}
-	mode := "direct"
-	if total > MaxDirectAttachmentSize {
-		mode = "link"
+	if total > MaxTotalAttachmentBytes {
+		return Preview{}, errorf(domain.MailErrTotalTooLarge,
+			"attachments exceed the %d-byte total limit", MaxTotalAttachmentBytes)
 	}
 	allowedCIDs := make(map[string]bool, len(attachments))
 	for index := range attachments {
-		// Delivery mode is server computed: an over-size set cannot keep a cid
-		// reference that the delivery worker would replace with a link.
-		attachments[index].DeliveryMode = mode
-		if attachments[index].DeliveryMode == "link" {
-			attachments[index].LinkPlaceholder = "%%MAIL_LINK:" + attachments[index].ContentID + "%%"
-			continue
-		}
+		// Delivery mode is server computed. Attachments inside both limits are
+		// always direct; callers cannot request a link or smuggle a placeholder.
+		attachments[index].DeliveryMode = "direct"
+		attachments[index].LinkPlaceholder = ""
 		if attachments[index].ContentID != "" {
 			allowedCIDs[attachments[index].ContentID] = true
 		}

@@ -20,9 +20,9 @@ function escapeHTML(value: unknown): string {
 // These values mirror internal/mail policy for the visible hint and the
 // pre-submit refusal only. The server remains the final authority.
 export const MAIL_ATTACHMENT_MAX_COUNT = 10;
-export const MAIL_ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024;
-export const MAIL_DIRECT_ATTACHMENT_THRESHOLD_BYTES = 20 * 1024 * 1024;
-export const MAIL_ATTACHMENT_LIMIT_HINT = "最多 10 个、单文件 ≤25MiB、合计 >20MiB 转受控链接、可执行/脚本附件不支持";
+export const MAIL_ATTACHMENT_MAX_BYTES = 50 * 1024 * 1024;
+export const MAIL_TOTAL_ATTACHMENT_MAX_BYTES = 100 * 1024 * 1024;
+export const MAIL_ATTACHMENT_LIMIT_HINT = "最多 10 个、单文件 ≤50MiB、合计 ≤100MiB、可执行/脚本附件不支持";
 
 const MAIL_DISALLOWED_EXTENSIONS = [".exe", ".bat", ".cmd", ".ps1", ".js", ".vbs", ".scr", ".msi"];
 
@@ -63,7 +63,9 @@ export function mailAttachmentSelectionError(items: MailAttachmentCandidate[]): 
   const blocked = items.find(item => mailAttachmentUnavailableReason(item.name));
   if (blocked) return `附件“${blocked.name}”为可执行或脚本文件，不支持发送`;
   const oversized = items.find(item => item.size > MAIL_ATTACHMENT_MAX_BYTES);
-  if (oversized) return `附件“${oversized.name}”超过 25MiB`;
+  if (oversized) return `附件“${oversized.name}”超过 50MiB`;
+  const total = items.reduce((sum, item) => sum + (Number(item.size) || 0), 0);
+  if (total > MAIL_TOTAL_ATTACHMENT_MAX_BYTES) return "附件合计超过 100MiB";
   return "";
 }
 

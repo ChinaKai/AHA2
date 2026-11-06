@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -383,81 +384,85 @@ func TestMailRejectsExecutableAndScriptAttachments(t *testing.T) {
 	}
 }
 
-func TestMailAttachmentThresholdsAndControlledLinks(t *testing.T) {
+func TestMailAttachmentLimits(t *testing.T) {
 	f := newMailAPIFixture(t)
 	account := f.createAccount("attachment-code")
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	tooLargeID := domain.NewID("attachment")
-	f.execRaw(`INSERT INTO attachments(id,task_id,message_id,name,media_type,size_bytes,sha256,created_at)
-		VALUES(?,?,?,?,?,?,?,?)`, tooLargeID, f.task.ID, "", "big.zip", "application/zip",
-		26<<20, strings.Repeat("1", 64), now)
-	tooLarge := f.createMessage(map[string]any{
-		"task_id": f.task.ID, "account_id": account["id"], "to": []string{"qa@example.com"},
-		"subject": "too large", "body_text": "x", "attachment_ids": []string{tooLargeID},
-		"submit": true, "idempotency_key": "attach-1",
-	})
-	if tooLarge["_status"].(float64) != http.StatusUnprocessableEntity ||
-		mailErrorCode(t, tooLarge) != string(domain.MailErrAttachmentTooLarge) {
-		t.Fatalf("too large = %#v", tooLarge)
+	insertAttachment := func(name string, size int64) string {
+		id := domain.NewID("attachment")
+		f.execRaw(`INSERT INTO attachments(id,task_id,message_id,name,media_type,size_bytes,sha256,created_at)
+			VALUES(?,?,?,?,?,?,?,?)`, id, f.task.ID, "", name, "application/octet-stream",
+			size, strings.Repeat("1", 64), now)
+		return id
+	}
+	send := func(subject, key string, attachmentIDs []string) map[string]any {
+		return f.createMessage(map[string]any{
+			"task_id": f.task.ID, "account_id": account["id"], "to": []string{"qa@example.com"},
+			"subject": subject, "body_text": "x", "attachment_ids": attachmentIDs,
+			"submit": true, "idempotency_key": key,
+		})
+	}
+	deliveryModes := func(body map[string]any) []string {
+		attachments := body["attachments"].([]any)
+		modes := make([]string, 0, len(attachments))
+		for _, item := range attachments {
+			modes = append(modes, item.(map[string]any)["delivery_mode"].(string))
+		}
+		return modes
 	}
 
-	linkID := domain.NewID("attachment")
-	f.execRaw(`INSERT INTO attachments(id,task_id,message_id,name,media_type,size_bytes,sha256,created_at)
-		VALUES(?,?,?,?,?,?,?,?)`, linkID, f.task.ID, "", "big.zip", "application/zip",
-		21<<20, strings.Repeat("2", 64), now)
-	link := f.createMessage(map[string]any{
-		"task_id": f.task.ID, "account_id": account["id"], "to": []string{"qa@example.com"},
-		"subject": "link mode", "body_text": "下载见附件", "attachment_ids": []string{linkID},
-		"submit": true, "idempotency_key": "attach-2",
+	// Exactly 50 MiB for a single file is accepted and sent direct.
+	exactFile := send("exact per-file", "attach-exact-file",
+		[]string{insertAttachment("exact-50.bin", 50<<20)})
+	if exactFile["_status"].(float64) != http.StatusCreated {
+		t.Fatalf("exact per-file create = %#v", exactFile)
+	}
+	if modes := deliveryModes(exactFile); len(modes) != 1 || modes[0] != string(domain.MailAttachmentDirect) {
+		t.Fatalf("exact per-file delivery modes = %#v", modes)
+	}
+
+	// One byte over the per-file limit is rejected explicitly.
+	overFile := send("over per-file", "attach-over-file",
+		[]string{insertAttachment("over-50.bin", (50<<20)+1)})
+	if overFile["_status"].(float64) != http.StatusUnprocessableEntity ||
+		mailErrorCode(t, overFile) != string(domain.MailErrAttachmentTooLarge) {
+		t.Fatalf("over per-file = %#v", overFile)
+	}
+
+	// Exactly 100 MiB in total is accepted and sent direct.
+	exactTotal := send("exact total", "attach-exact-total", []string{
+		insertAttachment("total-a.bin", 50<<20),
+		insertAttachment("total-b.bin", 50<<20),
 	})
-	if link["_status"].(float64) != http.StatusCreated {
-		t.Fatalf("link mode create = %#v", link)
+	if exactTotal["_status"].(float64) != http.StatusCreated {
+		t.Fatalf("exact total create = %#v", exactTotal)
 	}
-	attachments := link["attachments"].([]any)
-	if len(attachments) != 1 {
-		t.Fatalf("attachments = %#v", attachments)
+	for index, mode := range deliveryModes(exactTotal) {
+		if mode != string(domain.MailAttachmentDirect) {
+			t.Fatalf("exact total attachment %d delivery mode = %q", index, mode)
+		}
 	}
-	mailAttachment := attachments[0].(map[string]any)
-	if mailAttachment["delivery_mode"] != string(domain.MailAttachmentLink) {
-		t.Fatalf("delivery mode = %#v", mailAttachment["delivery_mode"])
+
+	// One byte over the total limit is rejected explicitly.
+	overTotal := send("over total", "attach-over-total", []string{
+		insertAttachment("total-c.bin", 50<<20),
+		insertAttachment("total-d.bin", 50<<20),
+		insertAttachment("total-e.bin", 1),
+	})
+	if overTotal["_status"].(float64) != http.StatusUnprocessableEntity ||
+		mailErrorCode(t, overTotal) != string(domain.MailErrTotalTooLarge) {
+		t.Fatalf("over total = %#v", overTotal)
 	}
-	encoded, _ := json.Marshal(link)
-	if strings.Contains(string(encoded), "link_token_ref") {
-		t.Fatalf("link token reference leaked: %s", encoded)
+
+	// The 10-attachment count limit still applies.
+	many := make([]string, 0, 11)
+	for index := 0; index < 11; index++ {
+		many = append(many, insertAttachment(fmt.Sprintf("many-%d.bin", index), 1))
 	}
-	attachmentsRows, err := f.database.MailAttachments(f.ctx, link["message"].(map[string]any)["id"].(string), 10)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(attachmentsRows) != 1 || attachmentsRows[0].LinkTokenHash == "" ||
-		attachmentsRows[0].LinkMaxDownloads != domain.MailLinkDefaultMaxDownloads ||
-		attachmentsRows[0].LinkExpiresAt.IsZero() {
-		t.Fatalf("link attachment = %+v", attachmentsRows[0])
-	}
-	ref, err := f.database.MailAttachmentLinkTokenRef(f.ctx, attachmentsRows[0].ID)
-	if err != nil || f.secrets.values[ref] == "" {
-		t.Fatalf("download token not stored: ref=%q err=%v", ref, err)
-	}
-	if f.auditCount("mail.link.generate", attachmentsRows[0].ID) != 1 {
-		t.Fatal("link generation was not audited")
-	}
-	token := f.secrets.values[ref]
-	response := f.downloadGET("/d/" + url.PathEscape(token))
-	response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		t.Fatalf("confirm page status = %d", response.StatusCode)
-	}
-	response = f.downloadHEAD("/d/" + url.PathEscape(token))
-	response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		t.Fatalf("HEAD status = %d", response.StatusCode)
-	}
-	stored, err := f.database.MailAttachment(f.ctx, attachmentsRows[0].ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if stored.LinkDownloadCount != 0 {
-		t.Fatalf("GET/HEAD consumed downloads: %d", stored.LinkDownloadCount)
+	tooMany := send("too many", "attach-too-many", many)
+	if tooMany["_status"].(float64) != http.StatusUnprocessableEntity ||
+		mailErrorCode(t, tooMany) != string(domain.MailErrAttachmentTooLarge) {
+		t.Fatalf("too many = %#v", tooMany)
 	}
 }
 

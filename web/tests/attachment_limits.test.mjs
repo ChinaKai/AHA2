@@ -41,13 +41,13 @@ test("Task attachment hint and pre-upload validation use the 8 / 200MiB limit", 
   assert.ok(uploadIndex > validationIndex, "oversized selections never reach the upload call");
 });
 
-test("mail attachment hint keeps 10 / 25MiB / 20MiB and marks executable rows unavailable", () => {
+test("mail attachment hint keeps 10 / 50MiB / 100MiB and marks executable rows unavailable", () => {
   assert.equal(mailTask.MAIL_ATTACHMENT_MAX_COUNT, 10);
-  assert.equal(mailTask.MAIL_ATTACHMENT_MAX_BYTES, 25 * MiB);
-  assert.equal(mailTask.MAIL_DIRECT_ATTACHMENT_THRESHOLD_BYTES, 20 * MiB);
+  assert.equal(mailTask.MAIL_ATTACHMENT_MAX_BYTES, 50 * MiB);
+  assert.equal(mailTask.MAIL_TOTAL_ATTACHMENT_MAX_BYTES, 100 * MiB);
   assert.equal(
     mailTask.MAIL_ATTACHMENT_LIMIT_HINT,
-    "最多 10 个、单文件 ≤25MiB、合计 >20MiB 转受控链接、可执行/脚本附件不支持",
+    "最多 10 个、单文件 ≤50MiB、合计 ≤100MiB、可执行/脚本附件不支持",
   );
 
   for (const name of ["setup.EXE", "run.Bat", "task.cmd", "tool.ps1", "app.JS", "v.vbs", "s.scr", "pkg.msi", "dir/sub/tool.ps1"]) {
@@ -57,14 +57,30 @@ test("mail attachment hint keeps 10 / 25MiB / 20MiB and marks executable rows un
     assert.equal(mailTask.mailAttachmentUnavailableReason(name), "", name);
   }
 
-  assert.equal(mailTask.mailAttachmentSelectionError([{name: "report.pdf", size: 25 * MiB}]), "");
+  assert.equal(mailTask.mailAttachmentSelectionError([{name: "report.pdf", size: 50 * MiB}]), "");
+  assert.equal(
+    mailTask.mailAttachmentSelectionError([
+      {name: "first.bin", size: 50 * MiB},
+      {name: "second.bin", size: 50 * MiB},
+    ]),
+    "",
+    "exactly 100MiB in total is accepted",
+  );
   assert.match(
     mailTask.mailAttachmentSelectionError(Array.from({length: 11}, (_, index) => ({name: `a${index}.txt`, size: 1}))),
     /最多 10 个附件/,
   );
   assert.match(
-    mailTask.mailAttachmentSelectionError([{name: "big.bin", size: 25 * MiB + 1}]),
-    /big\.bin.*超过 25MiB/,
+    mailTask.mailAttachmentSelectionError([{name: "big.bin", size: 50 * MiB + 1}]),
+    /big\.bin.*超过 50MiB/,
+  );
+  assert.match(
+    mailTask.mailAttachmentSelectionError([
+      {name: "first.bin", size: 50 * MiB},
+      {name: "second.bin", size: 50 * MiB},
+      {name: "third.bin", size: 1},
+    ]),
+    /合计超过 100MiB/,
   );
   assert.match(
     mailTask.mailAttachmentSelectionError([{name: "setup.exe", size: 1}]),

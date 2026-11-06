@@ -418,7 +418,7 @@ func (w *Worker) sendDelivery(ctx context.Context, delivery domain.MailDelivery,
 				return
 			}
 			directTotal += attachment.SizeBytes
-			if directTotal > mail.MaxDirectAttachmentSize {
+			if directTotal > mail.MaxTotalAttachmentBytes {
 				finish(localFailure(domain.MailErrTotalTooLarge))
 				return
 			}

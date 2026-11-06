@@ -46,7 +46,7 @@ func ErrAttachmentUnavailable() error {
 }
 
 func ErrAttachmentTooLarge() error {
-	return errorf(domain.MailErrAttachmentTooLarge, "attachment exceeds the direct attachment limit")
+	return errorf(domain.MailErrAttachmentTooLarge, "attachment exceeds the %d-byte per-file limit", MaxAttachmentBytes)
 }
 
 // ErrAttachmentTypeForbidden rejects executable files and scripts. The Owner

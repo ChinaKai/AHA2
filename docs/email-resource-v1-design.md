@@ -706,7 +706,7 @@ SMTP 错误不能只按三位码判断：同一个 550 在 MAIL FROM、RCPT TO�
 | mail_from | 4xx（421 除外） | `smtp_temporary_failure` | 是 | 整封退避 |
 | rcpt_to | 任一 5xx | `smtp_recipient_rejected` | 否 | RSET，整封 `failed`，不向部分收件人发送 |
 | rcpt_to | 任一 4xx 且无 5xx | `smtp_recipient_temporarily_unavailable` | 是 | RSET，整封重试，不向部分收件人发送 |
-| data | 552 | `smtp_message_too_large` | 否 | 提示改用受控链接 |
+| data | 552 | `smtp_message_too_large` | 否 | 提示压缩、拆分或减少附件 |
 | data | 554 | `smtp_content_rejected` | 否 | 内容/策略拒绝，整封 `failed` |
 | data | 其他 5xx | `smtp_permanent_failure` | 否 | 整封 `failed` |
 | data | 4xx | `smtp_temporary_failure` | 是 | 服务端明确拒收，整封重试安全 |
@@ -1031,8 +1031,8 @@ GET  /api/v1/agent/mail/messages/{id}
 | `mail_recipient_not_allowed` | 命中白名单/域名策略 |
 | `mail_from_not_allowed` | From 不在账号或别名集合 |
 | `mail_attachment_not_found` | 附件不属于当前 Task |
-| `mail_attachment_too_large` | 超过直接附件阈值 |
-| `mail_total_too_large` | 合计大小超限 |
+| `mail_attachment_too_large` | 单文件超过 50 MiB 或附件数量超限 |
+| `mail_total_too_large` | 附件合计超过 100 MiB |
 | `mail_attachment_unavailable` | 构建产物/附件被删除或哈希不符 |
 | `mail_template_variable_missing` | 缺少必填变量 |
 | `mail_template_variable_unknown` | 未知变量 |
@@ -1325,16 +1325,16 @@ WHERE id=:message_id AND status='sending';
 
 ### 7.1 阈值
 
-AHA Task 附件存储上限现为 **200 MiB**（`internal/httpapi/attachment_handlers.go` 中 `maxAttachmentBytes = 200 << 20`），但邮件发送策略独立，单文件仍保持 **25 MiB**。一期建议：
+AHA Task 附件存储上限现为 **200 MiB**（`internal/httpapi/attachment_handlers.go` 中 `maxAttachmentBytes = 200 << 20`），但邮件发送策略独立：单文件上限 **50 MiB**，单封合计上限 **100 MiB**，一封邮件最多 10 个附件。
 
 | 条件 | 处理 |
 | --- | --- |
-| 合计直接附件 ≤ 20 MiB | 直接作为 MIME 附件 |
-| 合计直接附件 > 20 MiB，且单个文件 ≤ 25 MiB | 不直接附件；生成受控下载链接 + SHA256，正文/附件区展示链接与哈希 |
-| 任一文件 > 25 MiB | 一期拒绝；提示压缩或拆分；外部构建产物链接留到二期单独设计 |
+| 任一文件 ≤ 50 MiB，且合计 ≤ 100 MiB | 直接作为 MIME 附件 |
+| 任一文件 > 50 MiB | 拒绝（`mail_attachment_too_large`）；提示压缩或拆分 |
+| 合计 > 100 MiB | 拒绝（`mail_total_too_large`）；提示拆分或减少附件 |
 | 单封附件数量 | 默认 ≤ 10 个；超出拒绝 |
 
-20 MiB 是预留 MIME/base64 膨胀（约 33%）与头部开销后的保守阈值；最终阈值需用网易企邮实际单封上限验证。
+一期不再按旧的 20 MiB 阈值自动把附件转为受控下载链接；50 MiB / 100 MiB 以内的附件一律 direct 直发，超过上限明确拒绝。受控下载链接机制仅保留给历史已审批消息与后续二期设计。100 MiB 是 Owner 确认的一期总上限，MIME/base64 膨胀（约 33%）与头部开销仍需在网易企邮实际套餐上验证。
 
 ### 7.2 直接附件
 
@@ -1344,6 +1344,8 @@ AHA Task 附件存储上限现为 **200 MiB**（`internal/httpapi/attachment_han
 - 附件内容只从 AHA 受控 blob 存储读取，不进入 JSON、Prompt、日志或审批摘要正文。
 
 ### 7.3 受控下载链接
+
+当前发送策略不再自动生成受控下载链接；本节机制保留用于历史已审批消息与后续二期设计。
 
 - 令牌：32 字节随机值；Secret Store 保存原值（`link_token_ref`），数据库保存 SHA-256 摘要（`link_token_hash`），下载端点只比较摘要。
 - 有效期默认 7 天；最大下载次数默认 20；**Owner 只能撤销链接，撤销立即生效且不改变审批摘要**；不能缩短有效期/减少下载上限后继续使用原审批，此类修改必须复制新草稿重新审批（见 6.1）。过期或达上限返回 404/410，不泄露文件是否存在。
@@ -1359,7 +1361,7 @@ AHA Task 附件存储上限现为 **200 MiB**（`internal/httpapi/attachment_han
 
 ### 7.4 构建产物与外部 URL
 
-- 一期优先把构建产物登记为 Task 附件，复用邮件 25 MiB 上限与哈希校验（Task 附件存储上限 200 MiB 不改变邮件发送阈值）。
+- 一期优先把构建产物登记为 Task 附件，复用邮件单文件 50 MiB、合计 100 MiB 上限与哈希校验（Task 附件存储上限 200 MiB 不改变邮件发送阈值）。
 - `build_artifacts.storage_type='external_url'` 为二期预留：只允许 Owner/CI 受控注册，校验 HTTPS、主机 allowlist、禁止重定向到私网、登记大小与 SHA256；Agent 不能提供 URL。默认关闭，避免 SSRF 与任意文件引用。
 - 任何构建产物被删除或哈希不符，发送前失败为 `mail_attachment_unavailable`，不允许「先发出去再说」。
 
@@ -1455,7 +1457,7 @@ AHA Task 附件存储上限现为 **200 MiB**（`internal/httpapi/attachment_han
 - 可选白名单：绑定可配置允许域名/地址；未命中时审批卡标红并需要 Owner 明确批准；一期不自动发送。
 - 拒绝 `localhost`、私网域名、明显恶意地址；不做开放转发/群发列表。
 - BCC 仅 Owner 可设置，Agent 工具不暴露 BCC；审批卡必须显示 BCC。
-- 一期不做全量文件类型白名单，但**直接附件一律拒收可执行文件/脚本**（`.exe/.bat/.cmd/.ps1/.js/.vbs/.scr/.msi`），不提供例外。构建产物如确需分发，走受控链接并在审批卡上提示风险；受控链接附件仍不得是可执行文件/脚本本身。
+- 一期不做全量文件类型白名单，但**直接附件一律拒收可执行文件/脚本**（`.exe/.bat/.cmd/.ps1/.js/.vbs/.scr/.msi`），不提供例外。构建产物同样受单文件 50 MiB、合计 100 MiB 上限约束；当前超限明确拒绝，受控下载链接仅保留给后续二期设计。
 
 ### 9.4 日志、审计与脱敏
 
@@ -1510,7 +1512,7 @@ AHA Task 附件存储上限现为 **200 MiB**（`internal/httpapi/attachment_han
   - 模板更新生成不可变版本；历史消息快照不随模板修改。
   - 账号创建/轮换不回显授权码；连接测试覆盖成功、认证失败、TLS 失败、超时。
   - Owner API 有 Session/CSRF 测试；Agent 路由无法调用。
-  - 渲染 golden tests 覆盖文本/HTML/受控链接占位符；变量替换后二次 sanitize 与 URL scheme 校验覆盖 `javascript:`、`data:`、属性逃逸、`onerror`、`srcdoc` 等 payload，未通过时拒绝生成快照。
+  - 渲染 golden tests 覆盖文本/HTML/附件 direct 模式及单文件 50 MiB、合计 100 MiB 边界；变量替换后二次 sanitize 与 URL scheme 校验覆盖 `javascript:`、`data:`、属性逃逸、`onerror`、`srcdoc` 等 payload，未通过时拒绝生成快照。
 
 ### 10.3 任务 C：审批与 SMTP worker
 
@@ -1522,7 +1524,7 @@ AHA Task 附件存储上限现为 **200 MiB**（`internal/httpapi/attachment_han
   - 多收件人：任一 RCPT 5xx 或 4xx 时 RSET 且不发送 DATA，不出现部分投递；只有全部 2xx 才进入 DATA。
   - 幂等键与内容指纹不产生双发；仅换新 key 仍命中指纹，Owner `duplicate_override` 才可绕过并写审计；限速与重试退避可观测，不解析 `Retry-After`。
   - 重试不改账号/From/收件人/链接策略；改账号/From/收件人或链接策略必须复制新草稿重新审批，已提交消息不能回 `pending_approval`；`queued`（含退避）可取消，`sending` 不可取消。
-  - 直接附件 ≤20 MiB、受控链接 >20 MiB、>25 MiB 拒绝；哈希不符时发送前失败。
+  - 单文件 ≤50 MiB 且合计 ≤100 MiB 的附件一律 direct 直发；单文件 >50 MiB 或合计 >100 MiB 明确拒绝；哈希不符时发送前失败。
   - 日志脱敏测试：授权码、AUTH 行、完整正文、下载令牌不出现在测试日志。
 
 ### 10.4 任务 D：Agent API / MCP 工具
@@ -1556,17 +1558,17 @@ AHA Task 附件存储上限现为 **200 MiB**（`internal/httpapi/attachment_han
 以下值已由 Owner 确认，实现与测试以本节为准；与早期草案冲突时以本节为准。
 
 1. **审批粒度**：一期逐封审批，不存在 Agent 直接发送路径。白名单自动发送仍按 6.6 预留，一期不启用。
-2. **大附件链接**：合计直接附件 > 20 MiB 时不直接附件，改为 AHA 受控下载链接；链接默认 7 天、最多 20 次、全程审计。任一文件 > 25 MiB 拒绝。受控下载入口部署时由 Owner 提供独立 HTTPS 域名与证书，只暴露 `/d/`，不暴露 `/api/v1/` 控制面。
+2. **附件上限**：单文件 ≤50 MiB 且合计 ≤100 MiB 的附件直接作为 MIME 附件；单文件 >50 MiB 或合计 >100 MiB 明确拒绝，不再自动转受控链接。受控下载链接机制保留给历史已审批消息与后续二期设计；如重新启用，入口部署时由 Owner 提供独立 HTTPS 域名与证书，只暴露 `/d/`，不暴露 `/api/v1/` 控制面。
 3. **默认 CC**：无默认 CC。模板 `default_cc` 默认为空，只有 Owner 在模板中显式配置时才预填。
 4. **模板字段**：沿用 `test.scope`、`test.notes`、`test.environment`、`release.*`、`build.*`、`package.*` 与受限 `extra.*`，一期不新增业务字段。
-5. **附件类型**：直接附件一律拒收可执行文件/脚本（`.exe/.bat/.cmd/.ps1/.js/.vbs/.scr/.msi`），不提供例外。构建产物如确需分发，只能走受控链接并在审批卡提示风险。
+5. **附件类型**：直接附件一律拒收可执行文件/脚本（`.exe/.bat/.cmd/.ps1/.js/.vbs/.scr/.msi`），不提供例外。构建产物同样受单文件 50 MiB、合计 100 MiB 上限约束，超限明确拒绝。
 6. **BCC**：仅 Owner 可设置；Agent API/MCP 不暴露 BCC 字段，提交 BCC 按越权拒绝。
 7. **保留期**：Mail Message、Delivery、Attempt 保留 90 天；模板版本长期保留；审计事件保留 1 年。清理任务不在本期静默执行。
 8. **账号同步**：一期邮件账号、模板、绑定、消息不参与 Profile Sync，只存在于当前 AHA 实例。
 9. **构建产物登记**：只允许登记为 Task 附件（`storage_type='aha_attachment'`）；外部 URL 构建产物一期不启用。
 10. **邮箱、配额与下载域名**：具体企业邮箱地址/别名由 Owner 在账号页录入，仓库与测试只用 `example.com` 占位；网易企邮配额仍以真实套餐实测为准，未实测前沿用 20 封/分钟、200 封/小时、并发 2、收件人上限 50 的默认值（可配置）。
 
-部署前仍需 Owner 提供：企业邮箱实际域名/主发件地址/别名；网易企邮套餐配额；受控下载的独立公网域名与证书。
+部署前仍需 Owner 提供：企业邮箱实际域名/主发件地址/别名；网易企邮套餐配额。受控下载入口当前不启用；如后续二期重新启用，再提供独立公网域名与证书。
 
 ## 12. 风险与未决
 
