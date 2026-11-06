@@ -26,7 +26,7 @@ import {DEFAULT_TASK_STATUS_FILTERS, LOCAL_TASK_DEVICE_FILTER, TASK_STATUS_GROUP
 import type {TaskStatusGroup} from "./task_filters.js";
 import {TASK_TOOL_DEFAULT_WIDTH, normalizePinnedTaskTool, normalizeTaskToolMode, normalizeTaskToolWidth, renderTaskToolButtons, renderTaskToolContent, renderTaskToolPanel} from "./task_tools.js";
 import type {TaskTool, TaskToolMode} from "./task_tools.js";
-import {TASK_SLASH_COMMANDS, bindMessageBubbleControls, captureInteractiveRegion, clearNavigationSnapshot, createListRefreshScheduler, createResourceLoader, eventRefreshesTaskList, exactSlashCommand, executeAgentSessionAction, loadNavigationSnapshot, matchingSlashCommands, paginateItems, paginationHTML, petWatchActionKeys, renderWorkspaceDetection, restoreInteractiveRegion, saveNavigationSnapshot, textMatchesQuery} from "./ui_helpers.js";
+import {TASK_SLASH_COMMANDS, bindMessageBubbleControls, captureInteractiveRegion, clearNavigationSnapshot, createListRefreshScheduler, createResourceLoader, eventRefreshesTaskList, exactSlashCommand, executeAgentSessionAction, loadNavigationSnapshot, matchingSlashCommands, paginateItems, paginationHTML, petWatchActionKeys, readPerfPanelPreference, renderWorkspaceDetection, restoreInteractiveRegion, saveNavigationSnapshot, textMatchesQuery, writePerfPanelPreference} from "./ui_helpers.js";
 import type {InteractiveRegionState} from "./ui_helpers.js";
 import {
   compactNumber,
@@ -422,8 +422,8 @@ let userInteracted = false;
 // be counted without treating the first-screen loads as prefetch.
 let prefetchRequestTracking = 0;
 
-// Lightweight, UI-free metrics for real-browser checks. `?perf=1` adds sparse
-// console output; production stays silent and the counters are readable from
+// Lightweight, UI-free metrics for real-browser checks. The performance panel is
+// opt-in; production stays silent and the counters are readable from
 // `window.__ahaPerf`.
 interface APISlowRequestGroup {
   method: string;
@@ -450,10 +450,14 @@ interface AhaPerfMetrics {
   apiSamples: APIRequestSample[] | null;
 }
 const initialSearchParams = new URLSearchParams(window.location.search);
-const perfEnabled = initialSearchParams.get("perf") === "1";
-// `?perf=1` is a one-load opt-in: keep the panel for this page, then drop only
-// the perf parameter so a refresh returns to a normal visit. Other query
-// parameters and the hash are preserved.
+const perfRequestedByURL = initialSearchParams.get("perf") === "1";
+// `?perf=1` is a shortcut that turns the persistent preference on, so a refresh
+// without the query parameter still shows the panel. The preference stays in
+// localStorage; it is never sent to the server.
+if (perfRequestedByURL) writePerfPanelPreference(true);
+const perfEnabled = perfRequestedByURL || readPerfPanelPreference();
+// Drop only the perf parameter so other query parameters and the hash navigate
+// exactly as before; the stored preference now carries the panel across loads.
 if (initialSearchParams.has("perf")) {
   const url = new URL(window.location.href);
   url.searchParams.delete("perf");
@@ -510,10 +514,54 @@ function topSlowAPIRequests(limit = 5): APISlowRequestGroup[] {
   return [...groups.values()].sort((left, right) => right.maxMs - left.maxMs || right.totalMs - left.totalMs).slice(0, limit);
 }
 
-// `?perf=1` opens a small, dismissible snapshot of `__ahaPerf`. This is opt-in:
-// a normal visit creates no panel DOM and schedules no refresh timer.
+// The panel owns one refresh timer and one copy-feedback timer. Keeping them at
+// module scope lets the close button and the advanced-settings switch stop them
+// through the same path.
+let perfPanelTimer: number | undefined;
+let perfPanelFeedbackTimer: number | undefined;
+
+// Keep the advanced-settings control truthful when the same preference changes
+// from somewhere else, such as the panel's own close button.
+function syncPerfPanelSettingsUI(enabled: boolean): void {
+  const toggle = document.querySelector<HTMLInputElement>("#perf-panel-setting");
+  if (toggle) toggle.checked = enabled;
+  const status = document.querySelector<HTMLElement>("#perf-panel-status");
+  if (status) status.textContent = enabled ? "已开启" : "已关闭";
+}
+
+// Enabling at runtime is cheap: the observer is one function reference and the
+// panel owns its timer. Reusing this path avoids a reload, so the Owner keeps the
+// page state they are diagnosing.
+function enablePerfPanel(): void {
+  writePerfPanelPreference(true);
+  if (!perfMetrics.apiSamples) perfMetrics.apiSamples = [];
+  setAPIRequestObserver(recordAPIRequest);
+  startPerfPanel();
+  syncPerfPanelSettingsUI(true);
+}
+
+// Closing the panel is also an opt-out. Clearing the preference, the observer,
+// and the sample buffer together keeps a disabled visit at zero overhead.
+function disablePerfPanel(): void {
+  writePerfPanelPreference(false);
+  setAPIRequestObserver(null);
+  perfMetrics.apiSamples = null;
+  if (perfPanelTimer !== undefined) {
+    window.clearInterval(perfPanelTimer);
+    perfPanelTimer = undefined;
+  }
+  if (perfPanelFeedbackTimer !== undefined) {
+    window.clearTimeout(perfPanelFeedbackTimer);
+    perfPanelFeedbackTimer = undefined;
+  }
+  document.getElementById("perf-panel")?.remove();
+  syncPerfPanelSettingsUI(false);
+}
+
+// A normal visit never reaches this function, so no panel DOM and no shared
+// sample buffer are allocated unless the preference or `?perf=1` turned it on.
 function startPerfPanel(): void {
-  if (!perfEnabled || document.getElementById("perf-panel")) return;
+  if (!perfMetrics.apiSamples || document.getElementById("perf-panel")) return;
 
   const panel = document.createElement("section");
   panel.id = "perf-panel";
@@ -529,7 +577,9 @@ function startPerfPanel(): void {
   hideButton.type = "button";
   hideButton.id = "perf-hide";
   hideButton.className = "perf-panel-action";
-  hideButton.textContent = "隐藏";
+  hideButton.textContent = "关闭性能面板";
+  hideButton.title = "关闭性能面板并清除偏好";
+  hideButton.setAttribute("aria-label", "关闭性能面板");
   head.append(title, hideButton);
 
   const rows = document.createElement("dl");
@@ -613,16 +663,15 @@ function startPerfPanel(): void {
     latestText = values.text;
   };
 
-  let feedbackTimer: number | undefined;
   const showCopyFeedback = (label: string) => {
     // An async clipboard result may arrive after the panel was hidden; touching
     // a detached button would only arm a timer nobody can see.
     if (!panel.isConnected) return;
     // Rapid clicks must replace the pending reset instead of stacking timers.
-    if (feedbackTimer !== undefined) window.clearTimeout(feedbackTimer);
+    if (perfPanelFeedbackTimer !== undefined) window.clearTimeout(perfPanelFeedbackTimer);
     copyButton.textContent = label;
-    feedbackTimer = window.setTimeout(() => {
-      feedbackTimer = undefined;
+    perfPanelFeedbackTimer = window.setTimeout(() => {
+      perfPanelFeedbackTimer = undefined;
       copyButton.textContent = "复制";
     }, 1200);
   };
@@ -664,19 +713,17 @@ function startPerfPanel(): void {
   panel.append(head, rows, slowSection, copyButton);
   document.body.append(panel);
   renderValues();
-  const timer = window.setInterval(() => {
+  perfPanelTimer = window.setInterval(() => {
     if (!panel.isConnected) {
-      window.clearInterval(timer);
+      if (perfPanelTimer !== undefined) window.clearInterval(perfPanelTimer);
+      perfPanelTimer = undefined;
       return;
     }
     renderValues();
   }, 1000);
-  hideButton.addEventListener("click", () => {
-    window.clearInterval(timer);
-    if (feedbackTimer !== undefined) window.clearTimeout(feedbackTimer);
-    feedbackTimer = undefined;
-    panel.remove();
-  });
+  // Closing is a real opt-out, not just a hidden panel: the same path clears the
+  // stored preference and the observer, so the next visit stays lean.
+  hideButton.addEventListener("click", () => disablePerfPanel());
 }
 
 const listRefreshScheduler = createListRefreshScheduler({
@@ -3247,6 +3294,22 @@ function bindLanguageSetting(): void {
   });
 }
 
+// The switch applies immediately: enabling installs the observer and starts the
+// panel in place, so the Owner can keep the page they are diagnosing.
+function bindOtherSettingsPage(): void {
+  const toggle = document.querySelector<HTMLInputElement>("#perf-panel-setting");
+  if (!toggle) return;
+  toggle.addEventListener("change", () => {
+    if (toggle.checked) enablePerfPanel();
+    else disablePerfPanel();
+    // Re-read the stored value so a storage failure leaves the control showing
+    // the truth instead of the optimistic click state.
+    toggle.checked = readPerfPanelPreference();
+    setMessage("notice", toggle.checked ? "性能面板已开启" : "性能面板已关闭");
+    render();
+  });
+}
+
 function bindDataManagementPage(): void {
   const refresh = document.querySelector<HTMLButtonElement>("[data-data-refresh]");
   refresh?.addEventListener("click", () => {
@@ -3296,7 +3359,13 @@ function otherSettingsView(): string {
   const agentAPI = state.agentAPISettings;
   const allowInsecureAgentAPI = Boolean(agentAPI.effective_allow_insecure);
   const forcedInsecureAgentAPI = Boolean(agentAPI.startup_allow_insecure) && !agentAPI.url;
+  const perfPanelOn = readPerfPanelPreference();
   return advancedSubview(`<section class="page advanced-settings-page"><header class="page-head"><div><h1>其他设置</h1><p>Backend、Owner 账号、访问范围与本机网络</p></div></header>
+    <section class="panel spaced account-security-panel perf-panel-settings-panel">
+      <div class="panel-head"><strong>性能面板</strong><span id="perf-panel-status">${perfPanelOn ? "已开启" : "已关闭"}</span></div>
+      <label class="security-setting-toggle"><input id="perf-panel-setting" name="perf_panel" type="checkbox" ${perfPanelOn ? "checked" : ""}><span><strong>显示性能面板</strong><small>开启后显示 API/首屏耗时面板；关闭后立即隐藏。</small></span></label>
+      <div class="field-help">偏好只保存在当前浏览器；带 <code>?perf=1</code> 打开页面也会自动开启，不会同步到服务端。</div>
+    </section>
     <section class="panel spaced account-security-panel backend-timeout-settings-panel">
       <div class="panel-head"><strong>Backend 超时</strong><span>Codex / Claude 统一生效</span></div>
       <form id="backend-settings-form">
@@ -5705,6 +5774,7 @@ function bindTaskToolsAndPanels(): void {
   if (state.view === "mcp") bindMCPPage();
   if (state.view === "advanced") bindLanguageSetting();
   if (state.view === "data") bindDataManagementPage();
+  if (state.view === "other") bindOtherSettingsPage();
   if (state.view === "pet-diary") void bindPetDiaryPage();
   if (state.view === "prompts") bindPromptAdmin(render, setMessage);
   if (state.view === "resources") bindResourcesPage({

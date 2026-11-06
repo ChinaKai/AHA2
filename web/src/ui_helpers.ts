@@ -252,6 +252,39 @@ export function exactSlashCommand(value: string, commands: readonly TaskSlashCom
   return commands.find(command => command.name === text);
 }
 
+// The performance panel is a local debugging preference. It lives only in this
+// browser's localStorage and is never sent to the server.
+export const PERF_PANEL_STORAGE_KEY = "aha.perfPanel";
+
+// localStorage access throws in some privacy modes. A missing or broken storage
+// means "off" rather than a boot failure.
+function defaultPerfPanelStorage(): Storage | null {
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+}
+
+export function readPerfPanelPreference(storage: Storage | null = defaultPerfPanelStorage()): boolean {
+  try {
+    return storage?.getItem(PERF_PANEL_STORAGE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+export function writePerfPanelPreference(enabled: boolean, storage: Storage | null = defaultPerfPanelStorage()): void {
+  try {
+    if (!storage) return;
+    if (enabled) storage.setItem(PERF_PANEL_STORAGE_KEY, "1");
+    else storage.removeItem(PERF_PANEL_STORAGE_KEY);
+  } catch {
+    // Quota/security failures must not break the page; the in-memory toggle
+    // still works for the current visit.
+  }
+}
+
 const navigationKey = "aha2.navigation";
 
 export function loadNavigationSnapshot(): NavigationSnapshot {

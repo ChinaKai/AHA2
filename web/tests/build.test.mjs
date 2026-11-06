@@ -719,18 +719,20 @@ test("startup prefetch is idle-only and never chains secondary views", async () 
   assert.match(script, /prefetchRequestTracking > 0\) perfMetrics\.prefetchRequests\+\+/);
 });
 
-test("opt-in perf panel reports timing metrics with copy and hide controls", async () => {
+test("opt-in perf panel reports timing metrics with copy and close controls", async () => {
   const root = resolve(import.meta.dirname, "..");
   const script = await readFile(resolve(root, "dist", "app.js"), "utf8");
   const styles = await readFile(resolve(root, "dist", "styles.css"), "utf8");
-  // `?perf=1` is the only path that creates the panel; a normal visit adds no DOM.
+  // Only the persistent preference (or `?perf=1`) reaches the panel; a normal
+  // visit leaves the sample buffer null and never creates DOM.
   assert.match(script, /if \(perfEnabled\) startPerfPanel\(\)/);
-  assert.match(script, /if \(!perfEnabled \|\| document\.getElementById\("perf-panel"\)\) return/);
+  assert.match(script, /if \(!perfMetrics\.apiSamples \|\| document\.getElementById\("perf-panel"\)\) return/);
   assert.match(script, /panel\.id = "perf-panel"/);
   assert.match(script, /panel\.setAttribute\("role", "status"\)/);
   assert.match(script, /panel\.setAttribute\("aria-live", "off"\)/);
   assert.match(script, /hideButton\.type = "button"/);
-  assert.match(script, /hideButton\.textContent = "隐藏"/);
+  assert.match(script, /hideButton\.textContent = "关闭性能面板"/);
+  assert.match(script, /hideButton\.setAttribute\("aria-label", "关闭性能面板"\)/);
   assert.match(script, /copyButton\.type = "button"/);
   assert.match(script, /copyButton\.textContent = "复制"/);
   // Averages come from TotalMs / count, falling back to 0 without samples.
@@ -758,9 +760,12 @@ test("opt-in perf panel reports timing metrics with copy and hide controls", asy
   // When the selection API is unavailable the fallback cannot highlight text,
   // but the button still reports failure instead of doing nothing.
   assert.match(script, /if \(!selection\) \{\s*showCopyFeedback\("复制失败"\);\s*return;\s*\}/);
-  assert.match(script, /if \(feedbackTimer !== undefined\) window\.clearTimeout\(feedbackTimer\);\s*copyButton\.textContent = label;/);
-  assert.match(script, /feedbackTimer = window\.setTimeout\(\(\)=>\{\s*feedbackTimer = undefined;\s*copyButton\.textContent = "复制";\s*\}, 1200\);/);
-  assert.match(script, /window\.clearInterval\(timer\);\s*if \(feedbackTimer !== undefined\) window\.clearTimeout\(feedbackTimer\);\s*feedbackTimer = undefined;\s*panel\.remove\(\);/);
+  assert.match(script, /if \(perfPanelFeedbackTimer !== undefined\) window\.clearTimeout\(perfPanelFeedbackTimer\);\s*copyButton\.textContent = label;/);
+  assert.match(script, /perfPanelFeedbackTimer = window\.setTimeout\(\(\)=>\{\s*perfPanelFeedbackTimer = undefined;\s*copyButton\.textContent = "复制";\s*\}, 1200\);/);
+  // Closing the panel stops both timers, removes the DOM, and disables the
+  // observer/buffer through the shared opt-out function.
+  assert.match(script, /hideButton\.addEventListener\("click", \(\)=>disablePerfPanel\(\)\)/);
+  assert.match(script, /function disablePerfPanel\(\) \{[\s\S]{0,400}writePerfPanelPreference\(false\);[\s\S]{0,200}setAPIRequestObserver\(null\);[\s\S]{0,200}perfMetrics\.apiSamples = null;[\s\S]{0,400}document\.getElementById\("perf-panel"\)\?\.remove\(\);/);
   // The panel must clear the assistant/banner layer (60) without covering the
   // native top-layer dialogs.
   assert.match(styles, /\.perf-panel \{[^}]*z-index: 70;/);
@@ -840,7 +845,8 @@ test("API request timings are opt-in, query-free, and bounded in the perf panel"
 
   const script = await readFile(resolve(root, "dist", "app.js"), "utf8");
   const styles = await readFile(resolve(root, "dist", "styles.css"), "utf8");
-  // `?perf=1` remains the only path that constructs the panel and the section.
+  // The startup decision (URL shortcut or stored preference) is the only path
+  // that constructs the panel and the section without going through the switch.
   assert.match(script, /if \(perfEnabled\) startPerfPanel\(\)/);
   assert.match(script, /slowTitle\.textContent = "慢请求 Top 5"/);
   assert.match(script, /panel\.append\(head, rows, slowSection, copyButton\)/);
@@ -858,6 +864,64 @@ test("API request timings are opt-in, query-free, and bounded in the perf panel"
   assert.match(styles, /\.perf-slow-top/);
 });
 
+test("perf panel preference persists across loads and degrades safely", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const perf = await import(pathToFileURL(resolve(root, "dist", "ui_helpers.js")));
+  const store = new Map();
+  const storage = {
+    getItem: key => store.has(key) ? store.get(key) : null,
+    setItem: (key, value) => store.set(key, String(value)),
+    removeItem: key => store.delete(key),
+  };
+  // A fresh browser starts off; the ?perf=1 shortcut writes the preference and
+  // the next load without the query parameter reads it back as on.
+  assert.equal(perf.readPerfPanelPreference(storage), false);
+  perf.writePerfPanelPreference(true, storage);
+  assert.equal(store.get(perf.PERF_PANEL_STORAGE_KEY), "1");
+  assert.equal(perf.readPerfPanelPreference(storage), true);
+  // Closing is a real opt-out: the key is removed, not just the DOM.
+  perf.writePerfPanelPreference(false, storage);
+  assert.equal(store.has(perf.PERF_PANEL_STORAGE_KEY), false);
+  assert.equal(perf.readPerfPanelPreference(storage), false);
+  // Privacy modes can throw on every storage operation; reads mean "off" and
+  // writes must not break boot or the in-page toggle.
+  const broken = {
+    getItem() { throw new Error("storage denied"); },
+    setItem() { throw new Error("storage denied"); },
+    removeItem() { throw new Error("storage denied"); },
+  };
+  assert.equal(perf.readPerfPanelPreference(broken), false);
+  assert.doesNotThrow(() => perf.writePerfPanelPreference(true, broken));
+  assert.equal(perf.readPerfPanelPreference(null), false);
+  assert.doesNotThrow(() => perf.writePerfPanelPreference(true, null));
+});
+
+test("perf panel starts, closes, and toggles through advanced settings", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const script = await readFile(resolve(root, "dist", "app.js"), "utf8");
+  // `?perf=1` writes the preference before the URL cleanup; startup then treats
+  // either the shortcut or the stored preference as enabled.
+  assert.match(script, /if \(perfRequestedByURL\) writePerfPanelPreference\(true\)/);
+  assert.match(script, /const perfEnabled = perfRequestedByURL \|\| readPerfPanelPreference\(\)/);
+  // Closing writes the preference off, drops the observer and sample buffer,
+  // stops the timers, and removes the panel DOM.
+  assert.match(script, /function disablePerfPanel\(\) \{[\s\S]{0,500}writePerfPanelPreference\(false\);[\s\S]{0,200}setAPIRequestObserver\(null\);[\s\S]{0,200}perfMetrics\.apiSamples = null;[\s\S]{0,300}window\.clearInterval\(perfPanelTimer\);[\s\S]{0,300}document\.getElementById\("perf-panel"\)\?\.remove\(\);/);
+  assert.match(script, /hideButton\.addEventListener\("click", \(\)=>disablePerfPanel\(\)\)/);
+  // The advanced → other settings switch applies immediately by reusing the
+  // same enable path instead of reloading and losing the page under diagnosis.
+  assert.match(script, /if \(state\.view === "other"\) bindOtherSettingsPage\(\)/);
+  assert.match(script, /id="perf-panel-setting" name="perf_panel" type="checkbox"/);
+  assert.match(script, /<strong>显示性能面板<\/strong><small>开启后显示 API\/首屏耗时面板；关闭后立即隐藏。<\/small>/);
+  assert.match(script, /function enablePerfPanel\(\) \{[\s\S]{0,400}writePerfPanelPreference\(true\);[\s\S]{0,200}setAPIRequestObserver\(recordAPIRequest\);[\s\S]{0,200}startPerfPanel\(\);/);
+  assert.match(script, /if \(toggle\.checked\) enablePerfPanel\(\);\s*else disablePerfPanel\(\);/);
+  assert.match(script, /<span id="perf-panel-status">/);
+  // A normal visit still allocates no samples, installs no observer, and builds
+  // no panel; only an enabled startup or the switch reaches these paths.
+  assert.match(script, /apiSamples: perfEnabled \? \[\] : null/);
+  assert.match(script, /if \(perfEnabled\) setAPIRequestObserver\(recordAPIRequest\)/);
+  assert.match(script, /if \(perfEnabled\) startPerfPanel\(\)/);
+});
+
 test("mail phase two keeps navigation stable, one mail entry, and table tools", async () => {
   const root = resolve(import.meta.dirname, "..");
   const script = await readFile(resolve(root, "dist", "app.js"), "utf8");
@@ -866,9 +930,12 @@ test("mail phase two keeps navigation stable, one mail entry, and table tools", 
   const mailResources = await readFile(resolve(root, "dist", "mail_resources.js"), "utf8");
   const styles = await readFile(resolve(root, "dist", "styles.css"), "utf8");
 
-  // perf=1 is read at boot, then only the perf parameter is removed while the
-  // hash and other parameters stay; the panel still opens for this load.
+  // perf=1 turns the persistent preference on at boot, then only the perf
+  // parameter is removed while the hash and other parameters stay; the stored
+  // preference keeps the panel open on later loads.
   assert.match(script, /const initialSearchParams = new URLSearchParams\(window\.location\.search\)/);
+  assert.match(script, /if \(perfRequestedByURL\) writePerfPanelPreference\(true\)/);
+  assert.match(script, /const perfEnabled = perfRequestedByURL \|\| readPerfPanelPreference\(\)/);
   assert.match(script, /if \(initialSearchParams\.has\("perf"\)\) \{[\s\S]{0,160}url\.searchParams\.delete\("perf"\)[\s\S]{0,160}window\.history\.replaceState/);
   assert.match(script, /`\$\{url\.pathname\}\$\{url\.search\}\$\{url\.hash\}`/);
   assert.match(script, /if \(perfEnabled\) startPerfPanel\(\)/);
