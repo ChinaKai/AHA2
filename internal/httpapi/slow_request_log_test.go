@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"bytes"
+	"database/sql"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -47,6 +48,30 @@ func TestSlowRequestLogOnlyWarnsForSlowRequests(t *testing.T) {
 	for _, leaked := range []string{"super-secret", "private.pdf", "top-secret", "Authorization", "token="} {
 		if strings.Contains(output, leaked) {
 			t.Errorf("slow request log leaked %q in %q", leaked, output)
+		}
+	}
+}
+
+func TestSlowRequestLogReportsConnectionWait(t *testing.T) {
+	var logged bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logged, nil))
+	var calls int
+	stats := func() sql.DBStats {
+		calls++
+		if calls == 1 {
+			return sql.DBStats{WaitCount: 2, WaitDuration: 100 * time.Millisecond}
+		}
+		return sql.DBStats{WaitCount: 3, WaitDuration: 450 * time.Millisecond}
+	}
+	handler := slowRequestLogHandlerWithStats(logger, time.Nanosecond, stats, http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusOK)
+		time.Sleep(time.Millisecond)
+	}))
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/v1/tasks", nil))
+	output := logged.String()
+	for _, want := range []string{"db_wait=350ms", "db_wait_count=1"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("slow request log missing %q in %q", want, output)
 		}
 	}
 }

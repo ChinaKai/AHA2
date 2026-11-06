@@ -24,6 +24,9 @@ func newConflictTestServer(t *testing.T, endpoint string) (*store.Store, *httpte
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Close before t.TempDir cleanup: on Windows an open SQLite handle keeps
+	// aha2.db locked and makes RemoveAll fail.
+	t.Cleanup(func() { _ = database.Close() })
 	if err := database.PutSyncSettings(ctx, domain.SyncSettings{
 		Scope: "default", Enabled: true, Endpoint: endpoint, DeviceID: "device-conflict",
 		DeviceName: "Conflict", IntervalSeconds: 300,
