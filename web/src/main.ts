@@ -520,6 +520,14 @@ function topSlowAPIRequests(limit = 5): APISlowRequestGroup[] {
 let perfPanelTimer: number | undefined;
 let perfPanelFeedbackTimer: number | undefined;
 
+// The stored preference is the normal source of truth, but storage can be
+// unavailable while `?perf=1` still shows the panel for this load. Fall back to
+// the rendered panel so the settings switch never claims "off" for a visible
+// panel.
+function isPerfPanelOn(): boolean {
+  return Boolean(document.getElementById("perf-panel")) || readPerfPanelPreference();
+}
+
 // Keep the advanced-settings control truthful when the same preference changes
 // from somewhere else, such as the panel's own close button.
 function syncPerfPanelSettingsUI(enabled: boolean): void {
@@ -3302,9 +3310,9 @@ function bindOtherSettingsPage(): void {
   toggle.addEventListener("change", () => {
     if (toggle.checked) enablePerfPanel();
     else disablePerfPanel();
-    // Re-read the stored value so a storage failure leaves the control showing
-    // the truth instead of the optimistic click state.
-    toggle.checked = readPerfPanelPreference();
+    // Re-read the effective state so a storage failure leaves the control
+    // showing the truth instead of the optimistic click state.
+    toggle.checked = isPerfPanelOn();
     setMessage("notice", toggle.checked ? "性能面板已开启" : "性能面板已关闭");
     render();
   });
@@ -3359,7 +3367,7 @@ function otherSettingsView(): string {
   const agentAPI = state.agentAPISettings;
   const allowInsecureAgentAPI = Boolean(agentAPI.effective_allow_insecure);
   const forcedInsecureAgentAPI = Boolean(agentAPI.startup_allow_insecure) && !agentAPI.url;
-  const perfPanelOn = readPerfPanelPreference();
+  const perfPanelOn = isPerfPanelOn();
   return advancedSubview(`<section class="page advanced-settings-page"><header class="page-head"><div><h1>其他设置</h1><p>Backend、Owner 账号、访问范围与本机网络</p></div></header>
     <section class="panel spaced account-security-panel perf-panel-settings-panel">
       <div class="panel-head"><strong>性能面板</strong><span id="perf-panel-status">${perfPanelOn ? "已开启" : "已关闭"}</span></div>

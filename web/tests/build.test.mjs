@@ -915,11 +915,63 @@ test("perf panel starts, closes, and toggles through advanced settings", async (
   assert.match(script, /function enablePerfPanel\(\) \{[\s\S]{0,400}writePerfPanelPreference\(true\);[\s\S]{0,200}setAPIRequestObserver\(recordAPIRequest\);[\s\S]{0,200}startPerfPanel\(\);/);
   assert.match(script, /if \(toggle\.checked\) enablePerfPanel\(\);\s*else disablePerfPanel\(\);/);
   assert.match(script, /<span id="perf-panel-status">/);
+  // When storage is unavailable but `?perf=1` still rendered the panel, the
+  // switch reflects the visible panel instead of the missing preference.
+  assert.match(script, /function isPerfPanelOn\(\) \{\s*return Boolean\(document\.getElementById\("perf-panel"\)\) \|\| readPerfPanelPreference\(\);/);
+  assert.match(script, /const perfPanelOn = isPerfPanelOn\(\)/);
   // A normal visit still allocates no samples, installs no observer, and builds
   // no panel; only an enabled startup or the switch reaches these paths.
   assert.match(script, /apiSamples: perfEnabled \? \[\] : null/);
   assert.match(script, /if \(perfEnabled\) setAPIRequestObserver\(recordAPIRequest\)/);
   assert.match(script, /if \(perfEnabled\) startPerfPanel\(\)/);
+});
+
+test("perf panel English copy matches split text nodes after trimming", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const i18n = await import(pathToFileURL(resolve(root, "dist", "i18n.js")));
+  const previous = {
+    document: globalThis.document,
+    NodeFilter: globalThis.NodeFilter,
+    Element: globalThis.Element,
+    DocumentFragment: globalThis.DocumentFragment,
+  };
+  // The settings help is rendered as two text nodes split by <code>?perf=1</code>.
+  // translateTextNode trims each node before lookup, so the legacy keys must not
+  // carry the surrounding whitespace. Walk the real translateUI path with a
+  // minimal text-only tree and confirm both nodes become English.
+  const first = {nodeValue: "偏好只保存在当前浏览器；带 ", parentElement: {closest: () => null}};
+  const second = {nodeValue: " 打开页面也会自动开启，不会同步到服务端。", parentElement: {closest: () => null}};
+  const nodes = [first, second];
+  let cursor = -1;
+  globalThis.NodeFilter = {SHOW_TEXT: 4};
+  globalThis.Element = class Element {};
+  globalThis.DocumentFragment = class DocumentFragment {};
+  globalThis.document = {
+    documentElement: {lang: "", dataset: {}},
+    body: null,
+    createTreeWalker: () => ({
+      get currentNode() { return nodes[cursor]; },
+      nextNode() { cursor++; return cursor < nodes.length; },
+    }),
+  };
+  try {
+    i18n.applyLocale("en-US");
+    i18n.translateUI({});
+    // Whitespace around each trimmed node is preserved, so the sentence still
+    // reads correctly around the inline code element.
+    assert.equal(first.nodeValue, "The preference stays in this browser only; opening the page with ");
+    assert.equal(second.nodeValue, " also turns it on. It is never synced to the server.");
+    assert.doesNotMatch(`${first.nodeValue}?perf=1${second.nodeValue}`, /\p{Script=Han}/u);
+    // tr() uses the same trimmed lookup, which pins the key format directly.
+    assert.equal(i18n.tr("偏好只保存在当前浏览器；带 "), "The preference stays in this browser only; opening the page with");
+    assert.equal(i18n.tr(" 打开页面也会自动开启，不会同步到服务端。"), "also turns it on. It is never synced to the server.");
+  } finally {
+    i18n.applyLocale("zh-CN");
+    globalThis.document = previous.document;
+    globalThis.NodeFilter = previous.NodeFilter;
+    globalThis.Element = previous.Element;
+    globalThis.DocumentFragment = previous.DocumentFragment;
+  }
 });
 
 test("mail phase two keeps navigation stable, one mail entry, and table tools", async () => {
