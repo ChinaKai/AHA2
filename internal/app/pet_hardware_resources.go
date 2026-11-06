@@ -61,6 +61,10 @@ var errPetHardwareCredentialOwnerOnly = fmt.Errorf(
 	"hardware_credential_owner_only: 宠物不能设置硬件凭据，请由 Owner 在 Web/Secret Store 配置",
 )
 
+var errPetHardwareCredentialTargetLocked = fmt.Errorf(
+	"hardware_credential_owner_only: 该资源已由 Owner 配置凭据，宠物不能修改连接目标；请由 Owner 在 Web/Secret Store 中调整",
+)
+
 func rejectPetHardwareCredentialFields(raw map[string]json.RawMessage) error {
 	// JSON field matching in Go is case-insensitive, so reject case variants too;
 	// otherwise a pet could pass "Password" and assume it was applied.
@@ -276,6 +280,21 @@ func (s *Service) disconnectPetHardwareResource(ctx context.Context, resource do
 	}
 }
 
+func petHardwareResourceHasOwnerCredential(item domain.HardwareResource) bool {
+	return item.PasswordConfigured || strings.TrimSpace(item.CredentialRef) != ""
+}
+
+// petHardwareResourceTargetChanged reports whether the update would redirect the
+// resource's stored Owner credential to a different endpoint or principal.
+func petHardwareResourceTargetChanged(before, after domain.HardwareResource) bool {
+	return before.Mode != after.Mode ||
+		before.Serial.Device != after.Serial.Device ||
+		before.Network.Host != after.Network.Host ||
+		before.Network.Port != after.Network.Port ||
+		before.Network.Protocol != after.Network.Protocol ||
+		before.Username != after.Username
+}
+
 func (s *Service) PetCreateHardwareResource(ctx context.Context, input PetHardwareResourceInput) (PetHardwareResourceView, error) {
 	if _, err := s.petManageSystemAssistant(ctx); err != nil {
 		return PetHardwareResourceView{}, err
@@ -346,6 +365,12 @@ func (s *Service) PetUpdateHardwareResource(ctx context.Context, input PetHardwa
 		resource.ADBPairedAt = ""
 	} else {
 		resource.ADBPairedAt = existing.ADBPairedAt
+	}
+	// The pet must not be able to point an Owner-configured credential at a new
+	// endpoint (for example its own host), where auto-login would send the
+	// stored password. Reject before any write so the old binding stays intact.
+	if petHardwareResourceHasOwnerCredential(existing) && petHardwareResourceTargetChanged(existing, resource) {
+		return PetHardwareResourceView{}, errPetHardwareCredentialTargetLocked
 	}
 	if err := s.store.UpsertHardwareResource(ctx, resource); err != nil {
 		return PetHardwareResourceView{}, fmt.Errorf("update_hardware_resource_failed: %w", err)

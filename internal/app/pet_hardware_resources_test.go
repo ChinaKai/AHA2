@@ -216,6 +216,10 @@ func TestPetHardwareResourcesRejectOwnerCredentials(t *testing.T) {
 			t.Fatalf("resource was created despite rejected %s", field)
 		}
 	}
+	// The update rejection must run against a real resource, otherwise the
+	// credential check is the only thing that could have failed.
+	petHardwareToolCall(t, fixture, "aha_create_hardware_resource",
+		`{"id":"hw-net-test","description":"凭据拒绝用例","mode":"network","network":{"host":"10.0.0.1","port":23,"protocol":"telnet"}}`)
 	for _, field := range []string{"password", "credential_ref", "clear_secret", "Password", "Clear_Secret"} {
 		args := fmt.Sprintf(`{"resource_id":"hw-net-test","%s":"%s"}`, field, secret)
 		_, err := fixture.service.PetMCPTool(fixture.ctx, "aha_update_hardware_resource", json.RawMessage(args))
@@ -246,6 +250,92 @@ func TestPetHardwareResourcesRejectOwnerCredentials(t *testing.T) {
 	for action, data := range audits {
 		if strings.Contains(data, secret) {
 			t.Fatalf("audit %s leaked the secret: %s", action, data)
+		}
+	}
+}
+
+func TestPetHardwareResourcesRejectTargetChangeWithOwnerCredential(t *testing.T) {
+	fixture := newPetTaskFixture(t)
+	enablePetHardwareTestSettings(t, fixture, true)
+
+	petHardwareToolCall(t, fixture, "aha_create_hardware_resource",
+		`{"id":"hw-locked-serial","description":"锁定串口","mode":"serial","serial":{"device":"/dev/ttyUSB0","baudrate":9600}}`)
+	petHardwareToolCall(t, fixture, "aha_create_hardware_resource",
+		`{"id":"hw-locked-net","description":"锁定网络","mode":"network","network":{"host":"10.0.0.10","port":22,"protocol":"ssh","ssh_auth":"password"},"username":"root"}`)
+
+	credentialRefs := map[string]string{
+		"hw-locked-serial": "hardware-resource/hw-locked-serial/credential",
+		"hw-locked-net":    "hardware-resource/hw-locked-net/credential",
+	}
+	before := map[string]domain.HardwareResource{}
+	for id, ref := range credentialRefs {
+		stored, err := fixture.database.HardwareResource(fixture.ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stored.CredentialRef = ref
+		stored.PasswordConfigured = true
+		if err := fixture.database.UpsertHardwareResource(fixture.ctx, stored); err != nil {
+			t.Fatal(err)
+		}
+		if before[id], err = fixture.database.HardwareResource(fixture.ctx, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	blocked := []struct {
+		name       string
+		resourceID string
+		args       string
+	}{
+		{"mode", "hw-locked-serial", `{"resource_id":"hw-locked-serial","mode":"network","network":{"host":"10.1.1.1","port":23,"protocol":"telnet"}}`},
+		{"serial-device", "hw-locked-serial", `{"resource_id":"hw-locked-serial","serial":{"device":"/dev/ttyUSB9"}}`},
+		{"network-host", "hw-locked-net", `{"resource_id":"hw-locked-net","network":{"host":"10.0.0.11"}}`},
+		{"network-port", "hw-locked-net", `{"resource_id":"hw-locked-net","network":{"port":2222}}`},
+		{"network-protocol", "hw-locked-net", `{"resource_id":"hw-locked-net","network":{"protocol":"telnet"}}`},
+		{"username", "hw-locked-net", `{"resource_id":"hw-locked-net","username":"admin"}`},
+	}
+	for _, item := range blocked {
+		_, err := fixture.service.PetMCPTool(fixture.ctx, "aha_update_hardware_resource", json.RawMessage(item.args))
+		if err == nil || !strings.Contains(err.Error(), "hardware_credential_owner_only") {
+			t.Fatalf("%s: err=%v, want hardware_credential_owner_only", item.name, err)
+		}
+		if strings.Contains(err.Error(), credentialRefs[item.resourceID]) {
+			t.Fatalf("%s leaked credential_ref: %v", item.name, err)
+		}
+		stored, err := fixture.database.HardwareResource(fixture.ctx, item.resourceID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if stored != before[item.resourceID] {
+			t.Fatalf("%s changed the resource: before=%#v after=%#v", item.name, before[item.resourceID], stored)
+		}
+	}
+
+	// Non-target updates stay allowed and must keep the Owner credential bound.
+	updated := decodePetHardwareView(t, petHardwareToolCall(t, fixture,
+		"aha_update_hardware_resource",
+		`{"resource_id":"hw-locked-net","description":"改名后的网络","access":"read_only"}`))
+	if updated.Description != "改名后的网络" || updated.Access != domain.HardwareAccessReadOnly {
+		t.Fatalf("control update=%#v", updated)
+	}
+	stored, err := fixture.database.HardwareResource(fixture.ctx, "hw-locked-net")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.CredentialRef != credentialRefs["hw-locked-net"] || !stored.PasswordConfigured {
+		t.Fatalf("control update dropped Owner credential: %#v", stored)
+	}
+	if stored.Network.Host != "10.0.0.10" || stored.Network.Port != 22 {
+		t.Fatalf("control update changed target: %#v", stored)
+	}
+
+	audits := auditDataByAction(t, fixture.databasePath)
+	for action, data := range audits {
+		for _, ref := range credentialRefs {
+			if strings.Contains(data, ref) {
+				t.Fatalf("audit %s leaked credential_ref: %s", action, data)
+			}
 		}
 	}
 }
