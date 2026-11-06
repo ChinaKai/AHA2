@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"regexp"
 	"strings"
@@ -368,6 +369,7 @@ func TestMailAttachmentThresholdsAndControlledLinks(t *testing.T) {
 
 var noncePattern = regexp.MustCompile(`name="nonce" value="([^"]+)"`)
 var expiresPattern = regexp.MustCompile(`name="expires" value="([^"]+)"`)
+var actionPattern = regexp.MustCompile(`<form method="post" action="([^"]+)"`)
 
 const testMailDownloadHost = "mail-downloads.example.com"
 
@@ -399,9 +401,13 @@ func (f *mailAPIFixture) downloadHEAD(path string) *http.Response {
 	return f.downloadDo(request)
 }
 
-func (f *mailAPIFixture) downloadNonce(token string) (string, string) {
+func (f *mailAPIFixture) downloadPage(pageURL string) (string, string, string) {
 	f.t.Helper()
-	response := f.downloadGET("/d/" + url.PathEscape(token))
+	request, err := http.NewRequest(http.MethodGet, pageURL, nil)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	response := f.downloadDo(request)
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		f.t.Fatalf("confirm page status = %d", response.StatusCode)
@@ -419,18 +425,30 @@ func (f *mailAPIFixture) downloadNonce(token string) (string, string) {
 	}
 	nonce := noncePattern.FindStringSubmatch(body.String())
 	expires := expiresPattern.FindStringSubmatch(body.String())
-	if len(nonce) != 2 || len(expires) != 2 {
-		f.t.Fatalf("confirmation page missing nonce: %s", body.String())
+	action := actionPattern.FindStringSubmatch(body.String())
+	if len(nonce) != 2 || len(expires) != 2 || len(action) != 2 {
+		f.t.Fatalf("confirmation page missing nonce/action: %s", body.String())
 	}
-	return nonce[1], expires[1]
+	base, err := url.Parse(pageURL)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	reference, err := url.Parse(action[1])
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	return nonce[1], expires[1], base.ResolveReference(reference).String()
 }
 
-func (f *mailAPIFixture) confirmDownloadWithOrigin(token, nonce, expires, origin string) *http.Response {
+func (f *mailAPIFixture) downloadNonce(token string) (string, string, string) {
+	return f.downloadPage(f.download.URL + "/d/" + url.PathEscape(token))
+}
+
+func (f *mailAPIFixture) confirmDownloadWithOrigin(actionURL, nonce, expires, origin string) *http.Response {
 	f.t.Helper()
 	form := url.Values{"nonce": {nonce}, "expires": {expires}}
 	request, err := http.NewRequest(http.MethodPost,
-		f.download.URL+"/d/"+url.PathEscape(token)+"/confirm",
-		strings.NewReader(form.Encode()))
+		actionURL, strings.NewReader(form.Encode()))
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -441,8 +459,8 @@ func (f *mailAPIFixture) confirmDownloadWithOrigin(token, nonce, expires, origin
 	return f.downloadDo(request)
 }
 
-func (f *mailAPIFixture) confirmDownload(token, nonce, expires string) *http.Response {
-	return f.confirmDownloadWithOrigin(token, nonce, expires, "")
+func (f *mailAPIFixture) confirmDownload(actionURL, nonce, expires string) *http.Response {
+	return f.confirmDownloadWithOrigin(actionURL, nonce, expires, "")
 }
 
 func TestMailDownloadConfirmCountsOnlyPost(t *testing.T) {
@@ -472,10 +490,24 @@ func TestMailDownloadConfirmCountsOnlyPost(t *testing.T) {
 		FileName: source.Name, MediaType: source.MediaType, SizeBytes: source.Size,
 		SHA256: source.SHA256, DeliveryMode: domain.MailAttachmentLink,
 		LinkTokenRef: ref, LinkTokenHash: mailLinkTokenHashForTest(token),
-		LinkExpiresAt: now.Add(7 * 24 * time.Hour), LinkMaxDownloads: 5,
+		LinkExpiresAt: now.Add(7 * 24 * time.Hour), LinkMaxDownloads: 6,
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+
+	// The relative form action must resolve under a path-prefixed proxy base.
+	prefixed := httptest.NewServer(http.StripPrefix("/downloads", f.api.MailDownloadHandler()))
+	defer prefixed.Close()
+	prefixedPage := prefixed.URL + "/downloads/d/" + url.PathEscape(token)
+	prefixedNonce, prefixedExpires, prefixedAction := f.downloadPage(prefixedPage)
+	if !strings.Contains(prefixedAction, "/downloads/d/"+url.PathEscape(token)+"/confirm") {
+		t.Fatalf("prefixed action resolved to %q", prefixedAction)
+	}
+	prefixedResponse := f.confirmDownload(prefixedAction, prefixedNonce, prefixedExpires)
+	prefixedResponse.Body.Close()
+	if prefixedResponse.StatusCode != http.StatusOK {
+		t.Fatalf("prefixed download status = %d", prefixedResponse.StatusCode)
 	}
 
 	// A Host outside the configured download domain is rejected before the
@@ -494,13 +526,13 @@ func TestMailDownloadConfirmCountsOnlyPost(t *testing.T) {
 		t.Fatalf("bad Host status = %d", hostResponse.StatusCode)
 	}
 
-	nonce, expires := f.downloadNonce(token)
-	nonce2, expires2 := f.downloadNonce(token)
-	nonce3, expires3 := f.downloadNonce(token)
-	nonce4, expires4 := f.downloadNonce(token)
-	nonce5, expires5 := f.downloadNonce(token)
-	nonce6, expires6 := f.downloadNonce(token)
-	response := f.confirmDownload(token, nonce, expires)
+	nonce, expires, action := f.downloadNonce(token)
+	nonce2, expires2, action2 := f.downloadNonce(token)
+	nonce3, expires3, action3 := f.downloadNonce(token)
+	nonce4, expires4, action4 := f.downloadNonce(token)
+	nonce5, expires5, action5 := f.downloadNonce(token)
+	nonce6, expires6, action6 := f.downloadNonce(token)
+	response := f.confirmDownload(action, nonce, expires)
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("confirm status = %d", response.StatusCode)
 	}
@@ -519,12 +551,12 @@ func TestMailDownloadConfirmCountsOnlyPost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stored.LinkDownloadCount != 1 {
+	if stored.LinkDownloadCount != 2 {
 		t.Fatalf("download count = %d", stored.LinkDownloadCount)
 	}
 
 	// The nonce is one-time: replay is rejected without consuming another slot.
-	replay := f.confirmDownload(token, nonce, expires)
+	replay := f.confirmDownload(action, nonce, expires)
 	replay.Body.Close()
 	if replay.StatusCode != http.StatusForbidden {
 		t.Fatalf("nonce replay status = %d", replay.StatusCode)
@@ -533,39 +565,39 @@ func TestMailDownloadConfirmCountsOnlyPost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stored.LinkDownloadCount != 1 {
+	if stored.LinkDownloadCount != 2 {
 		t.Fatalf("replay consumed a download: %d", stored.LinkDownloadCount)
 	}
 
 	// Origin: null is accepted for a same-origin confirmation.
-	nullOrigin := f.confirmDownloadWithOrigin(token, nonce2, expires2, "null")
+	nullOrigin := f.confirmDownloadWithOrigin(action2, nonce2, expires2, "null")
 	nullOrigin.Body.Close()
 	if nullOrigin.StatusCode != http.StatusOK {
 		t.Fatalf("Origin null status = %d", nullOrigin.StatusCode)
 	}
 	// A concrete same-origin Origin is accepted.
-	sameOrigin := f.confirmDownloadWithOrigin(token, nonce3, expires3, "https://"+testMailDownloadHost)
+	sameOrigin := f.confirmDownloadWithOrigin(action3, nonce3, expires3, "https://"+testMailDownloadHost)
 	sameOrigin.Body.Close()
 	if sameOrigin.StatusCode != http.StatusOK {
 		t.Fatalf("same-origin status = %d", sameOrigin.StatusCode)
 	}
 	// A cross-site Origin is always rejected and does not consume the nonce.
-	crossSite := f.confirmDownloadWithOrigin(token, nonce4, expires4, "https://evil.example.com")
+	crossSite := f.confirmDownloadWithOrigin(action4, nonce4, expires4, "https://evil.example.com")
 	crossSite.Body.Close()
 	if crossSite.StatusCode != http.StatusForbidden {
 		t.Fatalf("cross-site status = %d", crossSite.StatusCode)
 	}
-	fourth := f.confirmDownload(token, nonce4, expires4)
+	fourth := f.confirmDownload(action4, nonce4, expires4)
 	fourth.Body.Close()
 	if fourth.StatusCode != http.StatusOK {
 		t.Fatalf("fourth download status = %d", fourth.StatusCode)
 	}
-	fifth := f.confirmDownload(token, nonce5, expires5)
+	fifth := f.confirmDownload(action5, nonce5, expires5)
 	fifth.Body.Close()
 	if fifth.StatusCode != http.StatusOK {
 		t.Fatalf("fifth download status = %d", fifth.StatusCode)
 	}
-	sixth := f.confirmDownload(token, nonce6, expires6)
+	sixth := f.confirmDownload(action6, nonce6, expires6)
 	sixth.Body.Close()
 	if sixth.StatusCode != http.StatusGone && sixth.StatusCode != http.StatusNotFound {
 		t.Fatalf("exhausted link status = %d", sixth.StatusCode)

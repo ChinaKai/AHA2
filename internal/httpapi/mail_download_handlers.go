@@ -229,11 +229,12 @@ func (s *Server) mailDownloadConfirmPage(writer http.ResponseWriter, request *ht
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>下载附件</title><style>body{font-family:system-ui,sans-serif;max-width:36rem;margin:3rem auto;padding:0 1rem;color:#0f172a}dl{display:grid;grid-template-columns:6rem 1fr;gap:.4rem}dt{color:#475569}dd{margin:0;word-break:break-all}button{padding:.7rem 1.2rem;font-size:1rem}</style></head>
 <body><h1>下载确认</h1><dl><dt>文件名</dt><dd>%s</dd><dt>大小</dt><dd>%d 字节</dd><dt>SHA256</dt><dd>%s</dd><dt>有效期</dt><dd>%s</dd></dl>
-<form method="post" action="confirm"><input type="hidden" name="expires" value="%d"><input type="hidden" name="nonce" value="%s"><button type="submit">确认下载</button></form>
+<form method="post" action="%s/confirm"><input type="hidden" name="expires" value="%d"><input type="hidden" name="nonce" value="%s"><button type="submit">确认下载</button></form>
 <p>此页面不会消耗下载次数；点击确认后才会计数。</p></body></html>`,
 		html.EscapeString(attachment.FileName), attachment.SizeBytes,
 		html.EscapeString(attachment.SHA256),
 		html.EscapeString(attachment.LinkExpiresAt.Format("2006-01-02 15:04 MST")),
+		html.EscapeString(url.PathEscape(request.PathValue("token"))),
 		expires.Unix(), html.EscapeString(nonce))
 	_, _ = writer.Write([]byte(page))
 	s.audit(request, "mail.link.view", "mail_attachment", attachment.ID, map[string]any{
