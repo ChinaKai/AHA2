@@ -257,7 +257,8 @@ func (s *Service) executePetApproval(ctx context.Context, item domain.PetApprova
 		ModelID                string   `json:"model_id"`
 		ProviderID             string   `json:"provider_id"`
 		EnvGroupID             string   `json:"env_group_id"`
-		HardwareResourceID     string   `json:"resource_id"`
+		ResourceID             string   `json:"resource_id"`
+		Kind                   string   `json:"kind"`
 		TemplateID             string   `json:"template_id"`
 		Content                string   `json:"content"`
 		InstanceID             string   `json:"instance_id"`
@@ -304,10 +305,19 @@ func (s *Service) executePetApproval(ctx context.Context, item domain.PetApprova
 		s.recordPetWork(ctx, "env_group_deleted", payload.EnvGroupID, "approved")
 		return nil
 	case "delete_hardware_resource":
-		if err := s.deleteHardwareResourceNow(ctx, payload.HardwareResourceID); err != nil {
+		if err := s.deleteHardwareResourceNow(ctx, payload.ResourceID); err != nil {
 			return err
 		}
-		s.recordPetWork(ctx, "hardware_resource_deleted", payload.HardwareResourceID, "approved")
+		s.recordPetWork(ctx, "hardware_resource_deleted", payload.ResourceID, "approved")
+		return nil
+	case "delete_mail_resource":
+		if err := s.deleteMailResourceNow(ctx, payload.Kind, payload.ResourceID); err != nil {
+			return err
+		}
+		s.auditPetMailResource(ctx, "pet.mail_resource.delete", map[string]any{
+			"kind": strings.ToLower(strings.TrimSpace(payload.Kind)), "resource_id": payload.ResourceID,
+		})
+		s.recordPetWork(ctx, "mail_resource_deleted", payload.ResourceID, "approved")
 		return nil
 	case "delete_knowledge":
 		if err := s.store.DeleteKnowledgeAndPruneEmptyAHA1Parents(ctx, payload.KnowledgeID); err != nil {

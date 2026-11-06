@@ -147,6 +147,26 @@ func (s *Store) MailBindings(ctx context.Context, scopeType domain.MailBindingSc
 	return result, rows.Err()
 }
 
+// MailBindingsRecent lists bindings across every scope for the Owner/pet
+// management surface. It never joins or exposes account credentials.
+func (s *Store) MailBindingsRecent(ctx context.Context, limit int) ([]domain.MailBinding, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+mailBindingColumns+`
+		FROM mail_bindings ORDER BY updated_at DESC,id DESC LIMIT ?`, mailListLimit(limit))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]domain.MailBinding, 0)
+	for rows.Next() {
+		item, err := scanMailBinding(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
 // TaskMailBindings returns the enabled bindings visible to a Task: its own,
 // its Workspace's and its Project's, in Task -> Workspace -> Project order.
 // Empty scope IDs are skipped so an empty Task row cannot match stray data.
