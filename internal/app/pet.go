@@ -743,7 +743,11 @@ func petToolAllowed(assistant domain.OwnerAssistant, name string) bool {
 	case "aha_system_settings":
 		return assistant.PetAllowViewTasks || assistant.PetAllowManageSystem
 	case "aha_update_security_settings", "aha_delete_hardware_resource",
-		"aha_create_hardware_resource", "aha_update_hardware_resource":
+		"aha_create_hardware_resource", "aha_update_hardware_resource",
+		"aha_mail_resources", "aha_create_mail_account", "aha_update_mail_account",
+		"aha_create_mail_template", "aha_update_mail_template",
+		"aha_create_mail_binding", "aha_update_mail_binding",
+		"aha_delete_mail_resource", "aha_task_mail", "aha_update_task_mail":
 		return assistant.PetAllowManageSystem
 	case "aha_list_projects":
 		return assistant.PetAllowViewTasks || assistant.PetAllowCreateTasks || assistant.PetAllowCreateWorkspaces
@@ -1296,6 +1300,110 @@ func ahaPetTools() []gateway.ChatTool {
 			"type": "object", "properties": map[string]any{
 				"task_id":      map[string]any{"type": "string"},
 				"resource_ids": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+			}, "required": []string{"task_id"},
+		}},
+		{Name: "aha_mail_resources", Description: "只读列出邮箱账号、模板和绑定；账号只返回非敏感字段与 password_configured，绝不返回 password、授权码或 credential_ref。可选 task_id 同时返回该 Task 的有效绑定", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"task_id": map[string]any{"type": "string", "description": "可选；返回该 Task 的有效邮件绑定"},
+			},
+		}},
+		{Name: "aha_create_mail_account", Description: "新建邮箱账号；凭据只能由 Owner 在 Web/Secret Store 配置。本工具不接受 password、auth_code、credential_ref、clear_secret；新账号始终为未配置凭据、unverified", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"id":            map[string]any{"type": "string", "description": "可选；不传则由服务端生成"},
+				"name":          map[string]any{"type": "string"},
+				"from_address":  map[string]any{"type": "string"},
+				"display_name":  map[string]any{"type": "string"},
+				"provider":      map[string]any{"type": "string", "enum": []string{domain.MailProviderNeteaseQiye}},
+				"smtp_host":     map[string]any{"type": "string", "enum": []string{domain.MailDefaultSMTPHost, domain.MailBackupSMTPHost}},
+				"smtp_port":     map[string]any{"type": "integer", "enum": []int{domain.MailDefaultSMTPPort}},
+				"smtp_security": map[string]any{"type": "string", "enum": []string{domain.MailSMTPSecuritySSL}},
+				"smtp_username": map[string]any{"type": "string"},
+				"aliases":       map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+			}, "required": []string{"name", "from_address"},
+		}},
+		{Name: "aha_update_mail_account", Description: "修改邮箱账号非敏感字段；只更新传入字段。凭据只能由 Owner 配置。若账号已有凭据，禁止修改 SMTP 目标、TLS 或发件地址，否则返回 mail_credential_owner_only 且不写库", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"account_id":    map[string]any{"type": "string"},
+				"name":          map[string]any{"type": "string"},
+				"from_address":  map[string]any{"type": "string"},
+				"display_name":  map[string]any{"type": "string"},
+				"provider":      map[string]any{"type": "string", "enum": []string{domain.MailProviderNeteaseQiye}},
+				"smtp_host":     map[string]any{"type": "string", "enum": []string{domain.MailDefaultSMTPHost, domain.MailBackupSMTPHost}},
+				"smtp_port":     map[string]any{"type": "integer", "enum": []int{domain.MailDefaultSMTPPort}},
+				"smtp_security": map[string]any{"type": "string", "enum": []string{domain.MailSMTPSecuritySSL}},
+				"smtp_username": map[string]any{"type": "string"},
+				"aliases":       map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+			}, "required": []string{"account_id"},
+		}},
+		{Name: "aha_create_mail_template", Description: "新建邮件模板（正文允许，不是凭据）；模板版本不可变，创建即 version 1", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"id":                 map[string]any{"type": "string", "description": "可选；不传则由服务端生成"},
+				"scope":              map[string]any{"type": "string", "enum": []string{string(domain.MailTemplateScopeGlobal), string(domain.MailTemplateScopeProject)}},
+				"project_id":         map[string]any{"type": "string", "description": "scope=project 时必填"},
+				"name":               map[string]any{"type": "string"},
+				"description":        map[string]any{"type": "string"},
+				"subject_template":   map[string]any{"type": "string"},
+				"body_text_template": map[string]any{"type": "string"},
+				"body_html_template": map[string]any{"type": "string", "description": "正文至少提供 text 或 html 之一"},
+				"default_to":         map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"default_cc":         map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"required_variables": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+			}, "required": []string{"name", "subject_template"},
+		}},
+		{Name: "aha_update_mail_template", Description: "修改邮件模板；模板版本不可变，更新会生成新版本。scope/project_id 不可修改；expected_version 不传时使用当前版本", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"template_id":        map[string]any{"type": "string"},
+				"expected_version":   map[string]any{"type": "integer", "minimum": 1},
+				"name":               map[string]any{"type": "string"},
+				"description":        map[string]any{"type": "string"},
+				"subject_template":   map[string]any{"type": "string"},
+				"body_text_template": map[string]any{"type": "string"},
+				"body_html_template": map[string]any{"type": "string"},
+				"default_to":         map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"default_cc":         map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"required_variables": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+			}, "required": []string{"template_id"},
+		}},
+		{Name: "aha_create_mail_binding", Description: "创建 project/workspace/task 级邮件绑定；作用域和账号必须存在。一期只支持 approval_mode=always 且不允许自动发送", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"scope_type":          map[string]any{"type": "string", "enum": []string{string(domain.MailBindingScopeProject), string(domain.MailBindingScopeWorkspace), string(domain.MailBindingScopeTask)}},
+				"scope_id":            map[string]any{"type": "string"},
+				"account_id":          map[string]any{"type": "string"},
+				"default_template_id": map[string]any{"type": "string"},
+				"approval_mode":       map[string]any{"type": "string", "enum": []string{string(domain.MailApprovalAlways)}},
+				"allowed_recipients":  map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"enabled":             map[string]any{"type": "boolean"},
+			}, "required": []string{"scope_type", "scope_id", "account_id"},
+		}},
+		{Name: "aha_update_mail_binding", Description: "修改邮件绑定；绑定变更直接执行。删除绑定请使用 aha_delete_mail_resource 并等待审批", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"binding_id":          map[string]any{"type": "string"},
+				"account_id":          map[string]any{"type": "string"},
+				"default_template_id": map[string]any{"type": "string"},
+				"approval_mode":       map[string]any{"type": "string", "enum": []string{string(domain.MailApprovalAlways)}},
+				"allowed_recipients":  map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"enabled":             map[string]any{"type": "boolean"},
+			}, "required": []string{"binding_id"},
+		}},
+		{Name: "aha_delete_mail_resource", Description: "提交删除邮件账号/模板/绑定的审批；主人批准后才执行。模板按现有规则归档，历史版本保留", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"kind":        map[string]any{"type": "string", "enum": []string{"account", "template", "binding"}},
+				"resource_id": map[string]any{"type": "string"},
+				"reason":      map[string]any{"type": "string", "description": "为什么删除；至少 8 个字符"},
+			}, "required": []string{"kind", "resource_id", "reason"},
+		}},
+		{Name: "aha_task_mail", Description: "只读查看 Task 级邮件绑定及生效绑定（Task → Workspace → Project）", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{"task_id": map[string]any{"type": "string"}}, "required": []string{"task_id"},
+		}},
+		{Name: "aha_update_task_mail", Description: "更新或创建 Task 级邮件绑定；不删除其他绑定。删除绑定请走审批工具", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"task_id":             map[string]any{"type": "string"},
+				"account_id":          map[string]any{"type": "string", "description": "创建时必填；更新已有绑定时可省略"},
+				"binding_id":          map[string]any{"type": "string", "description": "可选；指定时更新该 Task 级绑定"},
+				"default_template_id": map[string]any{"type": "string"},
+				"approval_mode":       map[string]any{"type": "string", "enum": []string{string(domain.MailApprovalAlways)}},
+				"allowed_recipients":  map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"enabled":             map[string]any{"type": "boolean"},
 			}, "required": []string{"task_id"},
 		}},
 		{Name: "aha_task_channel_route", Description: "只读查看 Task 当前渠道路由", Parameters: map[string]any{
@@ -2158,6 +2266,118 @@ func (s *Service) PetMCPTool(ctx context.Context, name string, args json.RawMess
 			return "", fmt.Errorf("invalid update task hardware request")
 		}
 		view, err := s.PetUpdateTaskHardware(ctx, input)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(view)
+		return string(data), nil
+	case "aha_mail_resources":
+		var input PetMailResourcesInput
+		if err := decodePetMailArgs(args, &input); err != nil {
+			return "", err
+		}
+		view, err := s.PetMailResources(ctx, input)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(view)
+		return string(data), nil
+	case "aha_create_mail_account":
+		var input PetMailAccountInput
+		if err := decodePetMailArgs(args, &input); err != nil {
+			return "", err
+		}
+		view, err := s.PetCreateMailAccount(ctx, input)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(view)
+		return string(data), nil
+	case "aha_update_mail_account":
+		var input PetMailAccountInput
+		if err := decodePetMailArgs(args, &input); err != nil {
+			return "", err
+		}
+		view, err := s.PetUpdateMailAccount(ctx, input)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(view)
+		return string(data), nil
+	case "aha_create_mail_template":
+		var input PetMailTemplateInput
+		if err := decodePetMailArgs(args, &input); err != nil {
+			return "", err
+		}
+		item, err := s.PetCreateMailTemplate(ctx, input)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(item)
+		return string(data), nil
+	case "aha_update_mail_template":
+		var input PetMailTemplateInput
+		if err := decodePetMailArgs(args, &input); err != nil {
+			return "", err
+		}
+		item, err := s.PetUpdateMailTemplate(ctx, input)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(item)
+		return string(data), nil
+	case "aha_create_mail_binding":
+		var input PetMailBindingInput
+		if err := decodePetMailArgs(args, &input); err != nil {
+			return "", err
+		}
+		item, err := s.PetCreateMailBinding(ctx, input)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(item)
+		return string(data), nil
+	case "aha_update_mail_binding":
+		var input PetMailBindingInput
+		if err := decodePetMailArgs(args, &input); err != nil {
+			return "", err
+		}
+		item, err := s.PetUpdateMailBinding(ctx, input)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(item)
+		return string(data), nil
+	case "aha_delete_mail_resource":
+		var input PetDeleteMailResourceInput
+		if err := decodePetMailArgs(args, &input); err != nil {
+			return "", err
+		}
+		approval, err := s.PetRequestDeleteMailResource(ctx, input.Kind, input.ResourceID, input.Reason)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(approval)
+		return string(data), nil
+	case "aha_task_mail":
+		var input struct {
+			TaskID string `json:"task_id"`
+		}
+		if err := decodePetMailArgs(args, &input); err != nil {
+			return "", err
+		}
+		view, err := s.PetTaskMail(ctx, input.TaskID)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(view)
+		return string(data), nil
+	case "aha_update_task_mail":
+		var input PetUpdateTaskMailInput
+		if err := decodePetMailArgs(args, &input); err != nil {
+			return "", err
+		}
+		view, err := s.PetUpdateTaskMail(ctx, input)
 		if err != nil {
 			return "", err
 		}
