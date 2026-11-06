@@ -742,7 +742,8 @@ func petToolAllowed(assistant domain.OwnerAssistant, name string) bool {
 		return assistant.PetAllowManageChannels
 	case "aha_system_settings":
 		return assistant.PetAllowViewTasks || assistant.PetAllowManageSystem
-	case "aha_update_security_settings", "aha_delete_hardware_resource":
+	case "aha_update_security_settings", "aha_delete_hardware_resource",
+		"aha_create_hardware_resource", "aha_update_hardware_resource":
 		return assistant.PetAllowManageSystem
 	case "aha_list_projects":
 		return assistant.PetAllowViewTasks || assistant.PetAllowCreateTasks || assistant.PetAllowCreateWorkspaces
@@ -1219,6 +1220,74 @@ func ahaPetTools() []gateway.ChatTool {
 				"resource_id": map[string]any{"type": "string"},
 				"reason":      map[string]any{"type": "string", "description": "为什么删除；至少 8 个字符"},
 			}, "required": []string{"resource_id", "reason"},
+		}},
+		{Name: "aha_create_hardware_resource", Description: "新建硬件资源（mode 只支持 serial 或 network）。凭据只能由 Owner 在 Web/Secret Store 配置；本工具不接受 password、credential_ref 或 clear_secret", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"id":          map[string]any{"type": "string", "description": "可选；不传则由服务端生成"},
+				"description": map[string]any{"type": "string", "description": "可选；为空时使用资源 ID"},
+				"mode": map[string]any{"type": "string", "enum": []string{
+					domain.HardwareModeSerial, domain.HardwareModeNetwork,
+				}, "description": "必填；只支持串口或网络二选一"},
+				"access": map[string]any{"type": "string", "enum": []string{
+					domain.HardwareAccessReadOnly, domain.HardwareAccessReadWrite,
+				}, "description": "可选；默认 read_write"},
+				"serial": map[string]any{
+					"type": "object", "description": "mode=serial 时必需 device 非空且 baudrate>0",
+					"properties": map[string]any{
+						"device":   map[string]any{"type": "string"},
+						"baudrate": map[string]any{"type": "integer", "minimum": 1},
+					},
+				},
+				"network": map[string]any{
+					"type": "object", "description": "mode=network 时 host 必填；port 不传时按协议使用默认端口",
+					"properties": map[string]any{
+						"host": map[string]any{"type": "string"},
+						"port": map[string]any{"type": "integer", "minimum": 1, "maximum": 65535},
+						"protocol": map[string]any{"type": "string", "enum": []string{
+							domain.HardwareProtocolTelnet, domain.HardwareProtocolRaw,
+							domain.HardwareProtocolSSH, domain.HardwareProtocolADB,
+						}},
+						"ssh_auth": map[string]any{"type": "string", "enum": []string{
+							domain.HardwareSSHAuthAuto, domain.HardwareSSHAuthPassword, domain.HardwareSSHAuthKey,
+						}},
+					},
+				},
+				"username": map[string]any{"type": "string", "description": "SSH 用户名；ADB 资源会忽略"},
+			}, "required": []string{"mode"},
+		}},
+		{Name: "aha_update_hardware_resource", Description: "修改硬件资源；只更新传入字段，未提供字段保持原值。凭据只能由 Owner 在 Web/Secret Store 配置；本工具不接受 password、credential_ref 或 clear_secret", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"resource_id": map[string]any{"type": "string"},
+				"description": map[string]any{"type": "string"},
+				"mode": map[string]any{"type": "string", "enum": []string{
+					domain.HardwareModeSerial, domain.HardwareModeNetwork,
+				}},
+				"access": map[string]any{"type": "string", "enum": []string{
+					domain.HardwareAccessReadOnly, domain.HardwareAccessReadWrite,
+				}},
+				"serial": map[string]any{
+					"type": "object", "description": "未提供字段保持原值；mode=serial 时 device 非空且 baudrate>0",
+					"properties": map[string]any{
+						"device":   map[string]any{"type": "string"},
+						"baudrate": map[string]any{"type": "integer", "minimum": 1},
+					},
+				},
+				"network": map[string]any{
+					"type": "object", "description": "未提供字段保持原值；mode=network 时 host 必填",
+					"properties": map[string]any{
+						"host": map[string]any{"type": "string"},
+						"port": map[string]any{"type": "integer", "minimum": 1, "maximum": 65535},
+						"protocol": map[string]any{"type": "string", "enum": []string{
+							domain.HardwareProtocolTelnet, domain.HardwareProtocolRaw,
+							domain.HardwareProtocolSSH, domain.HardwareProtocolADB,
+						}},
+						"ssh_auth": map[string]any{"type": "string", "enum": []string{
+							domain.HardwareSSHAuthAuto, domain.HardwareSSHAuthPassword, domain.HardwareSSHAuthKey,
+						}},
+					},
+				},
+				"username": map[string]any{"type": "string", "description": "SSH 用户名；ADB 资源会忽略"},
+			}, "required": []string{"resource_id"},
 		}},
 		{Name: "aha_task_hardware", Description: "只读查看 Task 的硬件绑定和硬件组", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{"task_id": map[string]any{"type": "string"}}, "required": []string{"task_id"},
@@ -2040,6 +2109,28 @@ func (s *Service) PetMCPTool(ctx context.Context, name string, args json.RawMess
 			return "", err
 		}
 		data, _ := json.Marshal(approval)
+		return string(data), nil
+	case "aha_create_hardware_resource":
+		input, err := decodePetHardwareResourceInput(args)
+		if err != nil {
+			return "", err
+		}
+		view, err := s.PetCreateHardwareResource(ctx, input)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(view)
+		return string(data), nil
+	case "aha_update_hardware_resource":
+		input, err := decodePetHardwareResourceInput(args)
+		if err != nil {
+			return "", err
+		}
+		view, err := s.PetUpdateHardwareResource(ctx, input)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(view)
 		return string(data), nil
 	case "aha_hardware_resources":
 		items, err := s.PetHardwareResources(ctx)
