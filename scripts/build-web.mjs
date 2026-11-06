@@ -14,7 +14,7 @@ await copyFile(resolve(root, "assets", "aha-logo.svg"), resolve(output, "assets"
 await copyFile(resolve(root, "assets", "aha2-logo.png"), resolve(output, "assets", "aha2-logo.png"));
 await copyFile(resolve(root, "assets", "aha2.ico"), resolve(output, "favicon.ico"));
 
-for (const name of ["api", "i18n", "icons", "types", "pet_bubble", "pet_approvals", "runtime_picker", "task_agents", "task_composer", "task_filters", "hardware_terminal", "hardware_panel", "hardware_resources", "mail_cards", "mail_resources", "mail_task", "resources", "desktop_panel", "task_tools", "markdown", "conversation_ui", "ui_helpers", "prompt_admin", "proxy_settings", "sync_settings", "codex_accounts", "knowledge_workspace", "channels", "assistant", "main"]) {
+for (const name of ["api", "i18n", "icons", "types", "pet_bubble", "pet_approvals", "runtime_picker", "task_agents", "task_composer", "task_filters", "hardware_terminal", "hardware_panel", "hardware_resources", "mail_cards", "mail_editor", "mail_resources", "mail_task", "resources", "desktop_panel", "task_tools", "markdown", "conversation_ui", "ui_helpers", "prompt_admin", "proxy_settings", "sync_settings", "codex_accounts", "knowledge_workspace", "channels", "assistant", "main"]) {
   const input = await readFile(resolve(source, "src", `${name}.ts`), "utf8");
   const transformed = stripTypeScriptTypes(input, {mode: "transform", sourceMap: false});
   const outputName = name === "main" ? "app" : name;
@@ -42,6 +42,7 @@ const versionSource = await Promise.all([
   readFile(resolve(output, "hardware_panel.js")),
   readFile(resolve(output, "hardware_resources.js")),
   readFile(resolve(output, "mail_cards.js")),
+  readFile(resolve(output, "mail_editor.js")),
   readFile(resolve(output, "mail_resources.js")),
   readFile(resolve(output, "mail_task.js")),
   readFile(resolve(output, "resources.js")),

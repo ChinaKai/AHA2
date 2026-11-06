@@ -1,7 +1,8 @@
 import {api} from "./api.js";
 import {icon} from "./icons.js";
-import {formatMailBytes, formatMailTime, mailAttachmentsHtml, mailCanCancel, mailCanDecide, mailCanRetry, mailDigestShort, mailPreviewSamples, mailPreviewVariablePayload, mailStatusClass, mailStatusLabel, mailTemplateLivePreviewSrcdoc, mailTemplatePlaceholders, mailTemplateVariables, openMailPreviewDialog} from "./mail_cards.js";
+import {formatMailBytes, formatMailTime, mailAttachmentsHtml, mailCanCancel, mailCanDecide, mailCanRetry, mailDigestShort, mailPreviewSamples, mailPreviewVariablePayload, mailStatusClass, mailStatusLabel, mailTemplatePlaceholders, mailTemplateVariables, openMailPreviewDialog} from "./mail_cards.js";
 import type {MailPreviewData} from "./mail_cards.js";
+import {focusFirstMailEditorCell, insertMailEditorHtml, insertMailEditorText, normalizeMailTemplateHtml, plainTextToEditorHtml} from "./mail_editor.js";
 import type {MailAccount, MailAttachment, MailDelivery, MailDeliveryAttempt, MailMessage, MailTemplate, MailTemplateVersion, Project} from "./types.js";
 
 type Notice = (type: "error" | "notice", message: string) => void;
@@ -209,21 +210,24 @@ export function templateForm(template?: MailTemplate): string {
       <label>默认 CC（逗号分隔）<input name="default_cc" value="${escapeHTML((template?.default_cc || []).join(", "))}"></label>
     </div>
     ${template?.body_text_template?.trim() ? `<p class="field-help">该模板仍有历史自定义纯文本；本次保存后将改为由 HTML 自动生成。</p>` : ""}
-    <div class="mail-template-editor-head"><strong>HTML 正文</strong><small>主编辑区；可用下方按钮插入变量或安全表格，实时预览会随输入更新。</small></div>
-    <div class="mail-variable-bar" aria-label="插入变量">${variables.map(name => `<button type="button" data-mail-variable="${name}">{{${name}}}</button>`).join("")}</div>
-    <div class="mail-template-html-tools"><button type="button" data-mail-insert-table>${icon("plus")}插入表格</button><small>生成固定安全样式；单元格内可继续使用模板变量。</small></div>
-    <div class="mail-template-editor-grid">
-      <div class="mail-template-editor-main">
-        <textarea class="mail-template-html-editor" name="body_html_template" rows="12" aria-label="HTML 正文" placeholder="<p>构建 {{build.version}} 已完成</p>">${escapeHTML(template?.body_html_template || "")}</textarea>
-        <div class="field-help" data-mail-auto-variables>自动识别变量：${escapeHTML(autoVariablesText(template?.subject_template || "", "", template?.body_html_template || ""))}</div>
-        <div class="mail-template-preview-actions"><button type="button" data-mail-template-preview-form>${icon("eye")}预览</button><small>使用内置示例值直接渲染，无需填写 JSON。</small></div>
-      </div>
-      <div class="mail-template-live">
-        <div class="mail-template-live-head"><strong>实时预览</strong><small>近似效果；变量按内置示例值显示</small></div>
-        <iframe class="mail-template-live-frame" data-mail-template-live sandbox="" title="HTML 实时预览"></iframe>
-        <p class="field-help">已知变量按示例值显示，未知变量保留 <code>{{占位符}}</code>。实时预览不执行脚本，也不替代发送前的服务端 sanitize 与最终预览。</p>
-      </div>
+    <div class="mail-template-editor-head">
+      <strong>正文</strong>
+      <small>直接编辑渲染效果；变量和表格会插入到光标处，保存时自动规范化为安全 HTML。</small>
+      <label class="mail-template-source-toggle"><input type="checkbox" data-mail-template-source-toggle>源码</label>
     </div>
+    <div class="mail-variable-bar" aria-label="插入变量">${variables.map(name => `<button type="button" data-mail-variable="${name}">{{${name}}}</button>`).join("")}</div>
+    <div class="mail-template-html-tools">
+      <button type="button" data-mail-insert-table>${icon("plus")}插入表格</button>
+      <label class="mail-template-table-size">行<input type="number" inputmode="numeric" min="1" max="50" value="3" data-mail-table-rows></label>
+      <label class="mail-template-table-size">列<input type="number" inputmode="numeric" min="1" max="10" value="3" data-mail-table-columns></label>
+      <small>默认 3×3；固定安全样式，单元格内可继续使用模板变量。</small>
+    </div>
+    <div class="mail-template-editor-shell">
+      <div class="mail-template-wysiwyg" contenteditable="true" role="textbox" aria-multiline="true" aria-label="邮件正文" data-mail-template-editor data-placeholder="输入邮件正文，可直接看到渲染效果…" spellcheck="true"></div>
+      <textarea class="mail-template-source-editor" name="body_html_template" rows="12" aria-label="HTML 源码" data-mail-template-source hidden>${escapeHTML(template?.body_html_template || "")}</textarea>
+    </div>
+    <div class="field-help mail-template-auto-variables" data-mail-auto-variables>自动识别变量：${escapeHTML(autoVariablesText(template?.subject_template || "", "", template?.body_html_template || ""))}</div>
+    <div class="mail-template-preview-actions"><button type="button" data-mail-template-preview-form>${icon("eye")}预览</button><small>用服务端 draft preview 确认最终效果，无需填写 JSON。</small></div>
     <p class="field-help">变量只做字符串替换；HTML 只允许安全子集（含表格专用的安全 style），变量替换后会再次 sanitize。纯文本正文由后端从 HTML 自动生成。</p>
   </div>`;
 }
@@ -400,79 +404,128 @@ export function bindMailResources(data: MailResourcesData, actions: MailResource
     appendDialog(dialog);
     const form = dialog.querySelector<HTMLFormElement>(".mail-dialog-form");
     if (!form) return;
-    let lastField: HTMLTextAreaElement | HTMLInputElement | null =
-      form.querySelector<HTMLTextAreaElement>('textarea[name="body_html_template"]');
-    form.addEventListener("focusin", event => {
-      const target = event.target;
-      if (target instanceof HTMLTextAreaElement || target instanceof HTMLInputElement) lastField = target;
-    });
+    const editor = form.querySelector<HTMLElement>("[data-mail-template-editor]");
+    const sourceEditor = form.querySelector<HTMLTextAreaElement>("[data-mail-template-source]");
+    const sourceToggle = form.querySelector<HTMLInputElement>("[data-mail-template-source-toggle]");
+    const subjectInput = form.querySelector<HTMLInputElement>('input[name="subject_template"]');
+    let sourceMode = false;
+    let lastField: HTMLInputElement | HTMLTextAreaElement | null = null;
+
+    // The hidden textarea is the single FormData source. Mount the stored
+    // template through the same normalizer so legacy markup cannot inject
+    // wrappers or attributes the server would later reject.
+    if (editor && sourceEditor) {
+      editor.innerHTML = normalizeMailTemplateHtml(sourceEditor.value);
+      sourceEditor.value = editor.innerHTML;
+    }
+    const currentHtml = () => sourceMode ? (sourceEditor?.value || "") : (editor?.innerHTML || "");
+    const syncToField = () => {
+      if (!sourceEditor) return "";
+      const html = normalizeMailTemplateHtml(currentHtml());
+      sourceEditor.value = html;
+      if (editor) editor.innerHTML = html;
+      return html;
+    };
     const syncAutoVariables = () => {
-      const values = new FormData(form);
       const target = form.querySelector<HTMLElement>("[data-mail-auto-variables]");
       if (target) {
-        target.textContent = `自动识别变量：${autoVariablesText(
-          String(values.get("subject_template") || ""),
-          "",
-          String(values.get("body_html_template") || ""),
-        )}`;
+        target.textContent = `自动识别变量：${autoVariablesText(subjectInput?.value || "", "", currentHtml())}`;
       }
     };
-    form.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>('input[name="subject_template"], textarea[name="body_html_template"]').forEach(input => input.addEventListener("input", syncAutoVariables));
-
-    // Live preview is debounced so typing and the table/variable buttons never
-    // rebuild a document on every keystroke. The iframe is sandboxed without
-    // scripts; the server sanitizer remains the final authority.
-    const liveFrame = form.querySelector<HTMLIFrameElement>("[data-mail-template-live]");
-    const liveEditor = form.querySelector<HTMLTextAreaElement>('textarea[name="body_html_template"]');
-    let liveTimer = 0;
-    const renderLive = () => {
-      if (!liveFrame || !liveFrame.isConnected) return;
-      liveFrame.srcdoc = mailTemplateLivePreviewSrcdoc(liveEditor?.value || "");
-    };
-    const scheduleLive = () => {
-      window.clearTimeout(liveTimer);
-      liveTimer = window.setTimeout(renderLive, 120);
-    };
-    liveEditor?.addEventListener("input", scheduleLive);
-    renderLive();
-    form.querySelectorAll<HTMLButtonElement>("[data-mail-variable]").forEach(button => button.addEventListener("click", () => {
-      const target = lastField || form.querySelector<HTMLTextAreaElement>('textarea[name="body_html_template"]');
-      if (!target) return;
-      const token = `{{${button.dataset.mailVariable}}}`;
+    const insertIntoTarget = (target: HTMLInputElement | HTMLTextAreaElement, token: string) => {
       const start = target.selectionStart ?? target.value.length;
       const end = target.selectionEnd ?? start;
       target.value = `${target.value.slice(0, start)}${token}${target.value.slice(end)}`;
       target.focus();
       target.setSelectionRange(start + token.length, start + token.length);
       target.dispatchEvent(new Event("input", {bubbles: true}));
+    };
+    form.addEventListener("focusin", event => {
+      const target = event.target;
+      if (target instanceof HTMLTextAreaElement) {
+        lastField = target;
+      } else if (target instanceof HTMLInputElement) {
+        // Checkbox/number controls are toolbar furniture, not variable targets.
+        const textLike = ["text", "search", "url", "email", "tel", ""].includes(target.type);
+        if (textLike) lastField = target;
+      }
+    });
+    editor?.addEventListener("focus", () => { lastField = null; });
+    editor?.addEventListener("input", syncAutoVariables);
+    sourceEditor?.addEventListener("input", syncAutoVariables);
+    subjectInput?.addEventListener("input", syncAutoVariables);
+    syncAutoVariables();
+    // Pasted rich text never reaches the editor as markup: plain text wins and
+    // clipboard HTML is run through the normalizer as a fallback.
+    editor?.addEventListener("paste", event => {
+      const clipboard = (event as ClipboardEvent).clipboardData;
+      if (!clipboard) return;
+      event.preventDefault();
+      const plain = clipboard.getData("text/plain");
+      const html = plain ? plainTextToEditorHtml(plain) : normalizeMailTemplateHtml(clipboard.getData("text/html"));
+      if (html) insertMailEditorHtml(editor, html);
+      syncAutoVariables();
+    });
+    sourceToggle?.addEventListener("change", () => {
+      sourceMode = sourceToggle.checked;
+      if (sourceMode) {
+        if (editor && sourceEditor) {
+          sourceEditor.value = normalizeMailTemplateHtml(editor.innerHTML);
+          editor.hidden = true;
+          sourceEditor.hidden = false;
+          sourceEditor.focus();
+          lastField = sourceEditor;
+        }
+      } else if (editor && sourceEditor) {
+        editor.innerHTML = normalizeMailTemplateHtml(sourceEditor.value);
+        sourceEditor.value = editor.innerHTML;
+        sourceEditor.hidden = true;
+        editor.hidden = false;
+        editor.focus();
+        lastField = null;
+      }
+      syncAutoVariables();
+    });
+    form.querySelectorAll<HTMLButtonElement>("[data-mail-variable]").forEach(button => button.addEventListener("click", () => {
+      const token = `{{${button.dataset.mailVariable}}}`;
+      if (lastField) {
+        insertIntoTarget(lastField, token);
+      } else if (sourceMode && sourceEditor) {
+        insertIntoTarget(sourceEditor, token);
+      } else if (editor) {
+        insertMailEditorText(editor, token);
+      }
+      syncAutoVariables();
     }));
     form.querySelector<HTMLButtonElement>("[data-mail-insert-table]")?.addEventListener("click", () => {
-      const textarea = form.querySelector<HTMLTextAreaElement>('textarea[name="body_html_template"]');
-      if (!textarea) return;
-      const rowsInput = window.prompt("表格正文行数（1-50）", "3");
-      if (rowsInput === null) return;
-      const columnsInput = window.prompt("表格列数（1-10）", "3");
-      if (columnsInput === null) return;
-      const rows = Number(String(rowsInput).trim());
-      const columns = Number(String(columnsInput).trim());
+      const rows = Number(form.querySelector<HTMLInputElement>("[data-mail-table-rows]")?.value || 3);
+      const columns = Number(form.querySelector<HTMLInputElement>("[data-mail-table-columns]")?.value || 3);
       if (!Number.isInteger(rows) || rows < 1 || rows > 50 || !Number.isInteger(columns) || columns < 1 || columns > 10) {
         actions.notify("error", "表格行数需为 1-50、列数需为 1-10 的整数");
         return;
       }
-      const start = textarea.selectionStart ?? textarea.value.length;
-      const end = textarea.selectionEnd ?? start;
       const skeleton = mailTemplateTableSkeleton(rows, columns);
-      textarea.value = `${textarea.value.slice(0, start)}${skeleton}${textarea.value.slice(end)}`;
-      textarea.focus();
-      textarea.setSelectionRange(start + skeleton.length, start + skeleton.length);
-      textarea.dispatchEvent(new Event("input", {bubbles: true}));
+      if (sourceMode && sourceEditor) {
+        insertIntoTarget(sourceEditor, skeleton);
+      } else if (editor) {
+        if (!insertMailEditorHtml(editor, skeleton)) {
+          editor.insertAdjacentHTML("beforeend", skeleton);
+          editor.dispatchEvent(new Event("input", {bubbles: true}));
+        }
+        focusFirstMailEditorCell(editor);
+      }
+      syncAutoVariables();
     });
     form.querySelector<HTMLButtonElement>("[data-mail-template-preview-form]")?.addEventListener("click", () => {
       // The editor dialog stays open: the preview is a second modal layer.
+      syncToField();
+      syncAutoVariables();
       openDraftTemplatePreview(form, template, actions.notify);
     });
     form.addEventListener("submit", event => {
       event.preventDefault();
+      // Normalize the WYSIWYG/source output exactly before the payload is read.
+      syncToField();
       const values = Object.fromEntries(new FormData(form).entries()) as Record<string, unknown>;
       const payload = mailTemplateSubmitPayload(values, template);
       const submit = form.querySelector<HTMLButtonElement>('button[type="submit"]');

@@ -1,6 +1,6 @@
 import {api} from "./api.js";
 import {icon} from "./icons.js";
-import {formatMailBytes, mailCanCancel, mailCanRetry, mailCardHtml, openMailPreviewDialog} from "./mail_cards.js";
+import {formatMailBytes, mailCanCancel, mailCanRetry, mailCompactRowHtml, openMailPreviewDialog} from "./mail_cards.js";
 import type {MailPreviewData} from "./mail_cards.js";
 import type {MailAccount, MailAttachment, MailMessageCard, MailTemplate, TaskDetail, TaskMailAccount, TaskMailOptions} from "./types.js";
 
@@ -54,8 +54,11 @@ export function renderTaskMailPanel(
   const messages = options?.messages || [];
   const pending = messages.filter(card => card.message.status === "pending_approval");
   const recent = messages.filter(card => card.message.status !== "pending_approval").slice(0, 5);
-  const pendingHTML = pending.map(card => mailCardHtml(card, {readOnly: false, showBody: false}));
-  const recentHTML = recent.map(card => mailCardHtml(card, {readOnly: false, showBody: false}));
+  // Pending and recent share one compact row. The pending section must keep
+  // review/approve/reject visible, so the row renders state actions directly
+  // and bindMailCardActions binds by data-mail-action as before.
+  const pendingHTML = pending.map(card => mailCompactRowHtml(card));
+  const recentHTML = recent.map(card => mailCompactRowHtml(card));
   return `<section class="task-mail-panel">
     <div class="task-mail-panel-head"><div><strong>邮件绑定</strong><small>审批模式：每封审批（一期固定）</small></div><button type="button" id="task-mail-compose" class="primary" ${accounts.some(usableAccount) && !terminal ? "" : "disabled"}>${icon("mail")}发送邮件</button></div>
     ${terminal ? `<p class="field-help">Task 已结束：不能新建邮件，但已有待审批邮件仍可由 Owner 处理，队列中的邮件继续投递。</p>` : ""}

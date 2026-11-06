@@ -67,7 +67,9 @@ function recipientLine(label: string, values?: string[]): string {
 }
 
 export function mailAttachmentsHtml(attachments: MailAttachment[] = []): string {
-  if (!attachments.length) return `<p class="field-help">无附件</p>`;
+  // Inline empty state: a <p> here would inherit the global field-help
+  // paragraph margins and push the envelope's attachment row off its baseline.
+  if (!attachments.length) return `<span class="field-help">无附件</span>`;
   return `<ul class="mail-attachment-list">${attachments.map(attachment => {
     const link = attachment.delivery_mode === "link";
     return `<li><span class="mail-attachment-name">${icon("attachment")}${escapeHTML(attachment.file_name)}<small>${formatMailBytes(attachment.size_bytes)}${link ? " · 受控链接" : ""}</small></span><code title="SHA256">${escapeHTML(attachment.sha256)}</code>${link ? `<small>${attachment.link_max_downloads || 20} 次 / ${attachment.link_download_count || 0} 次已下载</small>` : ""}</li>`;
@@ -349,21 +351,6 @@ export function openMailPreviewDialog(data: MailPreviewData): HTMLDialogElement 
   return dialog;
 }
 
-// Live editor preview: replace known variables with the same built-in sample
-// values used by the server preview. Unknown placeholders stay visible so the
-// author can see what still needs a value. The document is mounted in a
-// sandboxed iframe, so scripts/forms never run; server sanitization and the
-// final preview remain the source of truth for what is actually sent.
-export function mailTemplateLivePreviewSrcdoc(bodyHtml: string): string {
-  const source = String(bodyHtml || "");
-  const rendered = source.replace(/\{\{([a-zA-Z0-9_.-]+)\}\}/g, (match, name: string) => {
-    const value = MAIL_SAMPLE_VARIABLES[name];
-    return value === undefined ? match : escapeHTML(value);
-  });
-  const body = rendered.trim() || `<p style="color:#69707d">在编辑器输入 HTML 后，这里会即时显示近似渲染效果。</p>`;
-  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><style>html,body{margin:0}body{padding:12px;background:#fff;color:#171a20;font:14px/1.6 Inter,"Segoe UI","Microsoft YaHei",sans-serif;overflow-wrap:anywhere}table{border-collapse:collapse;max-width:100%}img{max-width:100%}</style></head><body>${body}</body></html>`;
-}
-
 // One Mail Message always renders as one card, keyed by message id. Status
 // changes update that card instead of appending another one.
 export function mailCardHtml(card: MailMessageCard, options: MailCardOptions = {}): string {
@@ -405,6 +392,50 @@ export function mailCardHtml(card: MailMessageCard, options: MailCardOptions = {
       ${warnings.length ? `<p class="mail-card-warning"><strong>提示</strong><span>${escapeHTML(warnings.join(" · "))}</span></p>` : ""}
     </div>
     <details class="mail-card-details"><summary>附件与正文</summary>${mailAttachmentsHtml(attachments)}${body}</details>
+    ${actions}
+  </article>`;
+}
+
+export interface MailCompactRowOptions {
+  showActions?: boolean;
+}
+
+// Compact row shared by the Task panel's pending and recent sections. It keeps
+// the exact data-mail-action/data-mail-message contract of mailCardHtml, so the
+// existing bindMailCardActions approval flow is reused without a second copy.
+export function mailCompactRowHtml(card: MailMessageCard, options: MailCompactRowOptions = {}): string {
+  const message = card.message;
+  const attachments = card.attachments || [];
+  const canDecide = mailCanDecide(message.status);
+  const canCancel = mailCanCancel(message.status);
+  const canRetry = mailCanRetry(message.status);
+  // Every row keeps a view entry even when no state transition is available.
+  const showActions = options.showActions !== false;
+  const recipients = (message.to || []).filter(Boolean).join(", ") || "无收件人";
+  const sender = message.from_name || message.from_address || "";
+  const time = formatMailTime(message.created_at);
+  const meta = [
+    `<span class="mail-status ${mailStatusClass(message.status)}">${escapeHTML(mailStatusLabel(message.status))}</span>`,
+    `<span class="mail-compact-account" title="${escapeHTML(message.account_id)}">${escapeHTML(message.account_id)}</span>`,
+  ];
+  if (attachments.length) meta.push(`<span>附件 ${attachments.length}</span>`);
+  if ((message.cc || []).length) meta.push(`<span title="${escapeHTML(message.cc.join(", "))}">CC</span>`);
+  if ((message.bcc || []).length) meta.push(`<span title="含 BCC">BCC</span>`);
+  const actions = showActions
+    ? `<div class="mail-resource-actions mail-compact-actions">
+      <button type="button" data-mail-action="review" data-mail-message="${escapeHTML(message.id)}">${canDecide ? "查看并审批" : "查看"}</button>
+      ${canDecide ? `<button type="button" class="primary" data-mail-action="approve" data-mail-message="${escapeHTML(message.id)}">批准</button><button type="button" class="danger" data-mail-action="reject" data-mail-message="${escapeHTML(message.id)}">拒绝</button>` : ""}
+      ${canRetry ? `<button type="button" data-mail-action="retry" data-mail-message="${escapeHTML(message.id)}">重试</button>` : ""}
+      ${canCancel ? `<button type="button" data-mail-action="cancel" data-mail-message="${escapeHTML(message.id)}">取消</button>` : ""}
+    </div>`
+    : "";
+  return `<article class="mail-resource-row mail-compact-row ${mailStatusClass(message.status)}" data-mail-card="${escapeHTML(message.id)}">
+    <div class="mail-resource-identity"><span class="mail-resource-glyph">${icon("mail")}</span><div>
+      <strong title="${escapeHTML(message.subject || "（无主题）")}">${escapeHTML(message.subject || "（无主题）")}</strong>
+      <small title="${escapeHTML(recipients)}">${escapeHTML(recipients)}</small>
+      <small>${escapeHTML(sender)}${time ? ` · ${escapeHTML(time)}` : ""}</small>
+    </div></div>
+    <div class="mail-resource-meta">${meta.join("")}</div>
     ${actions}
   </article>`;
 }

@@ -10,6 +10,7 @@ const cards = await import(pathToFileURL(resolve(dist, "mail_cards.js")));
 const resources = await import(pathToFileURL(resolve(dist, "resources.js")));
 const mailResources = await import(pathToFileURL(resolve(dist, "mail_resources.js")));
 const mailTask = await import(pathToFileURL(resolve(dist, "mail_task.js")));
+const mailEditor = await import(pathToFileURL(resolve(dist, "mail_editor.js")));
 // The build rewrites shared imports to "./api.js?v=<build>"; importing the
 // unversioned URL would create a second APIClient singleton. Reuse the exact
 // specifier mail_task.js resolved so the stub lands on the same object.
@@ -105,6 +106,111 @@ test("older pending mail stays visible and actionable beyond the recent-five cut
   assert.ok(html.indexOf("待审批（1）") < html.indexOf("最近邮件"), "pending list is rendered before the recent list");
   assert.match(html, /data-mail-card="mail_message_5"/);
   assert.doesNotMatch(html, /data-mail-card="mail_message_6"/, "non-pending recent mail is still capped at five");
+});
+
+test("task mail pending and recent sections share compact rows with live actions", () => {
+  const pending = {
+    message: message({id: "mail_pending", subject: "待审批主题", status: "pending_approval"}),
+    attachments: [{id: "att", message_id: "mail_pending", position: 0, source_type: "task_attachment", source_id: "a", file_name: "log.txt", media_type: "text/plain", size_bytes: 3, sha256: "abc", delivery_mode: "direct", disposition: "attachment", created_at: ""}],
+    deliveries: [],
+  };
+  const sent = {
+    message: message({id: "mail_sent", subject: "已发送主题", status: "sent", to: ["a@example.com", "b@example.com"]}),
+    attachments: [],
+    deliveries: [],
+  };
+  const detail = {task: {id: "task_1", status: "active"}};
+  const html = mailTask.renderTaskMailPanel(detail, {
+    accounts: [], templates: [], messages: [pending, sent], attachments: [], build_artifacts: [],
+  }, [], false);
+
+  assert.equal((html.match(/class="mail-resource-row mail-compact-row/g) || []).length, 2, "both sections use the shared compact row");
+  assert.doesNotMatch(html, /class="mail-card /, "the full mail-card no longer renders in the Task panel");
+  assert.doesNotMatch(html, /mail-card-meta/, "approval digests and attachment details stay out of the compact list");
+  assert.match(html, /data-mail-card="mail_pending"/);
+  assert.match(html, /data-mail-card="mail_sent"/);
+  assert.match(html, /待审批/);
+  assert.match(html, /已发送/);
+  assert.match(html, /a@example\.com, b@example\.com/, "recipients stay visible");
+  assert.match(html, /附件 1/, "attachment count replaces the expanded details");
+
+  // The pending row keeps exactly the actions bindMailCardActions expects.
+  const pendingRow = html.slice(html.indexOf('data-mail-card="mail_pending"'), html.indexOf('data-mail-card="mail_sent"'));
+  assert.match(pendingRow, /data-mail-action="review"[^>]*data-mail-message="mail_pending"[^>]*>查看并审批</);
+  assert.match(pendingRow, /data-mail-action="approve"[^>]*data-mail-message="mail_pending"/);
+  assert.match(pendingRow, /data-mail-action="reject"[^>]*data-mail-message="mail_pending"/);
+  const sentRow = html.slice(html.indexOf('data-mail-card="mail_sent"'));
+  assert.match(sentRow, /data-mail-action="review"[^>]*data-mail-message="mail_sent"[^>]*>查看</);
+  assert.doesNotMatch(sentRow, /data-mail-action="approve"/, "sent rows expose no approval control");
+});
+
+test("template WYSIWYG normalizes contenteditable output into the sanitizer subset", () => {
+  const normalize = mailEditor.normalizeMailTemplateHtml;
+  assert.equal(
+    normalize("<div>第一行</div><div>第二行</div>"),
+    "<p>第一行</p><p>第二行</p>",
+    "Enter-created divs become paragraphs",
+  );
+  assert.equal(
+    normalize('<p><span style="color:red">红</span> <font color="x">字</font></p>'),
+    "<p>红 字</p>",
+    "span/font wrappers and non-table styles are removed",
+  );
+  assert.equal(normalize("<p>&nbsp;</p><p>正文</p>"), "<p>正文</p>", "edge blank paragraphs and nbsp are cleaned");
+  assert.equal(normalize("<p>前</p><p>&nbsp;</p><p>后</p>"), "<p>前</p><p><br></p><p>后</p>", "intentional internal blank lines survive");
+  assert.equal(normalize('<script>alert(1)</script><p onclick="x">安全</p>'), "<p>安全</p>", "scripts and event attributes never survive");
+  assert.equal(normalize("<strike>删除</strike><b>粗</b><i>斜</i><u>下划</u><s>删除线</s>"), "<p><s>删除</s><b>粗</b><i>斜</i><u>下划</u><s>删除线</s></p>");
+  assert.equal(normalize("版本 {{build.version}}"), "<p>版本 {{build.version}}</p>", "bare typed text is wrapped as a paragraph and keeps the variable literal");
+  assert.equal(normalize("<p>{{build.version}}</p>"), "<p>{{build.version}}</p>", "template variables remain literal text");
+  assert.equal(normalize("a &amp; b &lt; c"), "<p>a &amp; b &lt; c</p>", "entities are neither lost nor double-escaped");
+  assert.equal(normalize("<div><p>嵌套</p></div>"), "<p>嵌套</p>", "block wrappers are unwrapped without nesting p in p");
+  assert.equal(normalize('<a href="javascript:alert(1)">bad</a><a href="https://example.com/x?a=1&amp;b=2">ok</a>'), '<p><a>bad</a><a href="https://example.com/x?a=1&amp;b=2">ok</a></p>');
+  assert.equal(normalize('<img src="https://tracker.example/p.png" onerror="x"><img src="cid:att_1">'), '<p><img src="cid:att_1"></p>', "only cid images and safe attributes survive");
+  assert.equal(normalize('<a href="{{task.url}}">打开任务</a>'), '<p><a href="{{task.url}}">打开任务</a></p>', "server-validated URL variables stay in href");
+  assert.equal(normalize('<img src="cid:{{attachment.id}}">'), '<p><img src="cid:{{attachment.id}}"></p>', "cid placeholders stay in img src");
+  assert.equal(normalize('<img src="cid:att_1" alt="{{task.title}}">'), '<p><img src="cid:att_1"></p>', "placeholders are dropped from attributes the server rejects");
+
+  const filtered = normalize('<table style="border-collapse: collapse; position: absolute; width: 100%"><tbody><tr><td style="border: 1px solid #d0d7de; color: #333; display: block">&nbsp;</td></tr></tbody></table>');
+  assert.match(filtered, /<table style="border-collapse: collapse; width: 100%">/);
+  assert.match(filtered, /<td style="border: 1px solid #d0d7de; color: #333">&nbsp;<\/td>/);
+  assert.doesNotMatch(filtered, /position|display|span|font/, "unsafe table styles are filtered");
+
+  const skeleton = mailResources.mailTemplateTableSkeleton(3, 3);
+  const normalizedSkeleton = normalize(skeleton);
+  assert.match(normalizedSkeleton, /<table style="border-collapse: collapse; border-spacing: 0; width: 100%">/);
+  assert.equal((normalizedSkeleton.match(/<th /g) || []).length, 3);
+  assert.equal((normalizedSkeleton.match(/<td /g) || []).length, 9);
+  assert.equal((normalizedSkeleton.match(/<td style="[^"]*">&nbsp;<\/td>/g) || []).length, 9, "empty cells keep a visible placeholder");
+});
+
+test("plain-text paste is escaped and never interpreted as markup", () => {
+  const html = mailEditor.plainTextToEditorHtml("第一段\n第二行\n\n第三段 <script>alert(1)</script> & 结束");
+  assert.equal(html, "<p>第一段<br>第二行</p><p>第三段 &lt;script&gt;alert(1)&lt;/script&gt; &amp; 结束</p>");
+  assert.equal(mailEditor.plainTextToEditorHtml("   "), "", "blank paste is ignored");
+  assert.match(mailEditor.plainTextToEditorHtml("a b"), /<p>a b<\/p>/, "nbsp collapses to a normal space");
+});
+
+test("preview envelope uses an inline empty attachment state and compact baseline CSS", async () => {
+  const html = cards.mailPreviewDialogHtml({subject: "无附件", bodyHtml: "<p>x</p>"});
+  assert.match(html, /<dt>附件<\/dt><dd><span class="field-help">无附件<\/span><\/dd>/, "empty attachment state is inline");
+  assert.doesNotMatch(html, /<dd><p class="field-help">无附件<\/p><\/dd>/, "no paragraph margin can offset the attachment row");
+  assert.match(html, /<dl class="mail-preview-envelope">/);
+
+  const css = await readFile(resolve(dist, "styles.css"), "utf8");
+  const envelopeRule = css.match(/\.mail-preview-envelope\s*\{([^}]*)\}/);
+  assert.ok(envelopeRule, "envelope rule exists");
+  assert.match(envelopeRule[1], /align-items:\s*baseline/);
+  assert.match(envelopeRule[1], /gap:\s*4px 10px/);
+  assert.match(envelopeRule[1], /line-height:\s*1\.45/);
+  const resetRule = css.match(/\.mail-preview-envelope dd > p,\s*\.mail-preview-envelope dd \.field-help\s*\{([^}]*)\}/);
+  assert.ok(resetRule, "envelope paragraph margin reset exists");
+  assert.match(resetRule[1], /margin:\s*0/);
+  const toolbarRule = css.match(/\.mail-preview-toolbar\s*\{([^}]*)\}/);
+  assert.match(toolbarRule[1], /flex-wrap:\s*wrap/);
+  assert.match(toolbarRule[1], /min-width:\s*0/);
+  const stageRule = css.match(/\.mail-preview-stage\s*\{([^}]*)\}/);
+  assert.match(stageRule[1], /max-width:\s*100%/);
+  assert.match(stageRule[1], /min-width:\s*0/);
 });
 
 test("template editor insert-table skeleton is sanitizer-safe and editable", () => {
@@ -240,15 +346,20 @@ test("template editor derives required variables and has no scope or project fie
   assert.doesNotMatch(form, /name="scope"/, "scope is not a user-editable field");
   assert.doesNotMatch(form, /name="project_id"/, "project is not a user-editable field");
   assert.doesNotMatch(form, /name="required_variables"/, "required variables are scanned, not typed");
-  assert.match(form, /name="body_html_template"/);
+  assert.match(form, /name="body_html_template"/, "the form still submits body_html_template");
   assert.doesNotMatch(form, /name="body_text_template"/, "custom plain text field was removed");
   assert.doesNotMatch(form, /高级：默认 CC 与自定义纯文本/, "advanced section is gone");
   assert.doesNotMatch(form, /mail-template-advanced/, "no collapsed advanced container remains");
   assert.match(form, /name="default_cc"/, "default CC lives in the main form");
   assert.match(form, /data-mail-template-preview-form/);
-  assert.match(form, /data-mail-template-live/, "HTML editor has a live preview iframe");
-  assert.match(form, /sandbox=""/, "live preview iframe blocks scripts");
-  assert.match(form, /实时预览/, "live preview is explained in the editor");
+  assert.match(form, /contenteditable="true"/, "the primary editor is contenteditable");
+  assert.match(form, /data-mail-template-editor/, "WYSIWYG editor hook exists");
+  assert.doesNotMatch(form, /data-mail-template-live/, "the iframe live preview was replaced");
+  assert.doesNotMatch(form, /mail-template-html-editor/, "the HTML textarea is no longer the main editor");
+  assert.match(form, /data-mail-template-source-toggle/, "source mode is optional");
+  assert.match(form, /value="3"[^>]*data-mail-table-rows/);
+  assert.match(form, /value="3"[^>]*data-mail-table-columns/);
+  assert.match(form, /data-mail-template-source[^>]*hidden/, "source textarea starts hidden behind the WYSIWYG editor");
 
   const legacy = mailResources.templateForm({
     id: "mail_template_legacy", scope: "project", project_id: "project_1", name: "旧模板",
@@ -507,18 +618,6 @@ test("attachment picker selection maps to the submitted payload ids", () => {
   assert.match(composeSource, /data-mail-picker-pane="build"/);
   assert.match(composeSource, /构建产物只来自当前 Task 已登记/, "the build-artifact source and selection rule is explained");
   assert.match(composeSource, /data-mail-selected-total/, "selected count stays visible");
-});
-
-test("template live preview substitutes sample variables and keeps unknown placeholders", () => {
-  const srcdoc = cards.mailTemplateLivePreviewSrcdoc(
-    '<table><tr><td>{{build.version}}</td><td>{{task.title}}</td><td>{{unknown.variable}}</td></tr></table>',
-  );
-  assert.match(srcdoc, /<table><tr><td>1\.0\.0-rc\.1<\/td><td>示例任务：邮件预览<\/td><td>\{\{unknown\.variable\}\}<\/td><\/tr><\/table>/);
-  assert.match(srcdoc, /<meta charset="utf-8">/);
-  const empty = cards.mailTemplateLivePreviewSrcdoc("");
-  assert.match(empty, /输入 HTML 后/);
-  const escaped = cards.mailTemplateLivePreviewSrcdoc("<p>{{task.title}}</p>");
-  assert.doesNotMatch(escaped, /<script/i, "live preview never adds executable script");
 });
 
 test("compose dialog close, cancel and successful submit all close the dialog", async () => {
