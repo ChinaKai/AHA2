@@ -42,7 +42,13 @@ export function renderTaskMailPanel(
     `<option value="${escapeHTML(account.id)}" ${taskBinding?.account_id === account.id ? "selected" : ""}>${escapeHTML(account.name || account.address)} · ${escapeHTML(account.address)}${account.status === "disabled" ? "（已停用）" : ""}</option>`).join("");
   const templateOptions = (options?.templates || []).map(template =>
     `<option value="${escapeHTML(template.id)}" ${taskBinding?.default_template_id === template.id ? "selected" : ""}>${escapeHTML(template.name)} · v${Number(template.current_version)}</option>`).join("");
-  const recent = (options?.messages || []).slice(0, 5).map(card => mailCardHtml(card, {readOnly: false, showBody: false}));
+  // Every pending message stays actionable: the badge counts all pending
+  // approvals, so the panel must never hide one behind the recent-five cut.
+  const messages = options?.messages || [];
+  const pending = messages.filter(card => card.message.status === "pending_approval");
+  const recent = messages.filter(card => card.message.status !== "pending_approval").slice(0, 5);
+  const pendingHTML = pending.map(card => mailCardHtml(card, {readOnly: false, showBody: false}));
+  const recentHTML = recent.map(card => mailCardHtml(card, {readOnly: false, showBody: false}));
   return `<section class="task-mail-panel">
     <div class="task-mail-panel-head"><div><strong>邮件绑定</strong><small>审批模式：每封审批（一期固定）</small></div><button type="button" id="task-mail-compose" class="primary" ${accounts.some(usableAccount) && !terminal ? "" : "disabled"}>${icon("mail")}发送邮件</button></div>
     ${terminal ? `<p class="field-help">Task 已结束：不能新建邮件，但已有待审批邮件仍可由 Owner 处理，队列中的邮件继续投递。</p>` : ""}
@@ -52,7 +58,8 @@ export function renderTaskMailPanel(
       <label>默认模板<select name="default_template_id"><option value="">不设置</option>${templateOptions}</select></label>
       <button type="submit">${taskBinding ? "更新 Task 绑定" : "添加 Task 绑定"}</button>
     </form>` : `<p class="field-help">还没有系统邮箱账号。请先到「资源 → 邮件 → 账号」添加账号。</p>`}
-    <div class="task-mail-recent"><strong>最近邮件</strong>${recent.length ? recent.join("") : `<p class="field-help">当前 Task 还没有邮件记录。</p>`}</div>
+    ${pending.length ? `<div class="task-mail-recent task-mail-pending"><strong>待审批（${pending.length}）</strong>${pendingHTML.join("")}</div>` : ""}
+    <div class="task-mail-recent"><strong>最近邮件</strong>${recentHTML.length ? recentHTML.join("") : `<p class="field-help">${pending.length ? "没有其他最近邮件。" : "当前 Task 还没有邮件记录。"}</p>`}</div>
   </section>`;
 }
 

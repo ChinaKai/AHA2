@@ -348,7 +348,7 @@ func TestHTMLOnlyTemplateGeneratesTextFallback(t *testing.T) {
 func TestTableInlineStyleAllowlist(t *testing.T) {
 	template := Template{
 		SubjectTemplate: "s",
-		BodyHTMLTemplate: `<table style="border-collapse: collapse; border-spacing: 0; width: 100%;">` +
+		BodyHTMLTemplate: `<table style="border-collapse:collapse; border-spacing:0; width:100%;">` +
 			`<thead><tr style="background-color: #f6f8fa;">` +
 			`<th colspan="2" rowspan="1" style="border: 1px solid #d0d7de; padding: 6px 8px; text-align: left; vertical-align: middle;">列</th>` +
 			`</tr></thead><tbody><tr>` +
@@ -363,7 +363,7 @@ func TestTableInlineStyleAllowlist(t *testing.T) {
 		t.Fatalf("render: %v", err)
 	}
 	for _, want := range []string{
-		`border-collapse: collapse`, `border-spacing: 0`, `width: 100%`,
+		`border-collapse:collapse`, `border-spacing:0`, `width:100%`,
 		`background-color: #f6f8fa`, `text-align: left`, `vertical-align: middle`,
 		`font-weight: 700`, `colspan="2"`, `rowspan="1"`,
 	} {
@@ -379,6 +379,10 @@ func TestTableStyleRejectsDangerousDeclarations(t *testing.T) {
 		`<table style="display: block">x</table>`,
 		`<table style="width: expression(alert(1))">x</table>`,
 		`<table style="width: 100% !important">x</table>`,
+		`<table style="width: 100% ! important">x</table>`,
+		`<table style="width: 100% !IMPORTANT">x</table>`,
+		`<table style="width: 100% ! Important">x</table>`,
+		`<table style="border: 1px solid red ! important">x</table>`,
 		`<table style="@import url(https://evil.example/x.css)">x</table>`,
 		`<table style="background-color: url(https://evil.example/pixel)">x</table>`,
 		`<table style="background-color: javascript:alert(1)">x</table>`,

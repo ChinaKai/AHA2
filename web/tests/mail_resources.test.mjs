@@ -7,6 +7,7 @@ const dist = resolve(import.meta.dirname, "..", "dist");
 const cards = await import(pathToFileURL(resolve(dist, "mail_cards.js")));
 const resources = await import(pathToFileURL(resolve(dist, "resources.js")));
 const mailResources = await import(pathToFileURL(resolve(dist, "mail_resources.js")));
+const mailTask = await import(pathToFileURL(resolve(dist, "mail_task.js")));
 
 function message(overrides = {}) {
   return {
@@ -66,6 +67,36 @@ test("timeline mail card is a status notice without approval actions", () => {
   assert.match(html, /任务工具栏「邮件」面板/);
   assert.doesNotMatch(html, /data-mail-action/);
   assert.doesNotMatch(html, /mail-card-actions/);
+});
+
+test("older pending mail stays visible and actionable beyond the recent-five cut", () => {
+  // Six non-pending messages plus one older pending message: the recent list
+  // may cap at five, but the pending list must still expose the only approval.
+  const cards = Array.from({length: 7}, (_, index) => ({
+    message: message({id: `mail_message_${index + 1}`, subject: `邮件 ${index + 1}`, status: "sent"}),
+    attachments: [],
+    deliveries: [],
+  }));
+  cards[6] = {
+    message: message({id: "mail_pending_old", subject: "较早的待审批", status: "pending_approval"}),
+    attachments: [],
+    deliveries: [],
+  };
+  const detail = {task: {id: "task_1", status: "active"}};
+  const html = mailTask.renderTaskMailPanel(detail, {
+    accounts: [],
+    templates: [],
+    messages: cards,
+    attachments: [],
+    build_artifacts: [],
+  }, [], false);
+
+  assert.match(html, /待审批（1）/);
+  assert.match(html, /data-mail-card="mail_pending_old"/);
+  assert.equal((html.match(/data-mail-action="approve"/g) || []).length, 1, "badge count matches one actionable pending mail");
+  assert.ok(html.indexOf("待审批（1）") < html.indexOf("最近邮件"), "pending list is rendered before the recent list");
+  assert.match(html, /data-mail-card="mail_message_5"/);
+  assert.doesNotMatch(html, /data-mail-card="mail_message_6"/, "non-pending recent mail is still capped at five");
 });
 
 test("template editor insert-table skeleton is sanitizer-safe and editable", () => {

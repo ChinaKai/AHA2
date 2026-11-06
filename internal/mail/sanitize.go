@@ -245,7 +245,9 @@ func validateTableStyle(tag, value string) error {
 			}
 		}
 		for _, r := range rawValue {
-			if r < 0x20 || r == 0x7f || r > 0x7e || strings.ContainsRune("()\\\"'<>{};/:", r) {
+			// `!` is rejected as a bare character so `! important` with any
+			// spacing or casing can never smuggle CSS priority syntax through.
+			if r < 0x20 || r == 0x7f || r > 0x7e || strings.ContainsRune("!()\\\"'<>{};/:", r) {
 				return errorf(domain.MailErrTemplateInvalid, "style property %q contains an unsafe character", property)
 			}
 		}
