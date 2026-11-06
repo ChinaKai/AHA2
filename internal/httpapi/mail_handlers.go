@@ -81,6 +81,22 @@ func (s *Server) putMailCredential(accountID, credential string) error {
 	})
 }
 
+// publishMailEvents publishes already-committed mail timeline events to the
+// same Event Hub used by Task SSE. Store methods return their events only after
+// the transaction commits, so a rollback can never publish.
+func (s *Server) publishMailEvents(events []domain.Event) {
+	if s == nil || s.app == nil || len(events) == 0 {
+		return
+	}
+	hub := s.app.Hub()
+	if hub == nil {
+		return
+	}
+	for _, event := range events {
+		hub.Publish(event.AggregateID, event)
+	}
+}
+
 func (s *Server) deleteMailCredential(accountID string) {
 	if s.secrets == nil {
 		return

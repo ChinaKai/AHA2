@@ -313,6 +313,7 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 	mailWorker := mailworker.New(mailworker.Config{
 		Store: database, Secrets: secretStore, Sender: mailpkg.NewSMTPSender(),
 		Logger: logger, DownloadBaseURL: options.mailDownloadBaseURL,
+		Publisher: appService.Hub(),
 	})
 	// The worker's final writeback is detached from the run context, but the
 	// process still waits for the round to finish so a known SMTP 250 is not

@@ -88,14 +88,15 @@ func scanMailDeliveryRows(rows *sql.Rows) ([]domain.MailDelivery, error) {
 //  1. attempts-exhausted rows always become dead_letter;
 //  2. expired pre-DATA leases are safely requeued;
 //  3. expired DATA/finished leases are ambiguous and become dead_letter.
-func (s *Store) ReclaimExpiredMailDeliveries(ctx context.Context, now time.Time) (MailDeliveryReclaimResult, error) {
+func (s *Store) ReclaimExpiredMailDeliveries(ctx context.Context, now time.Time) (MailDeliveryReclaimResult, []domain.Event, error) {
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
 	result := MailDeliveryReclaimResult{DeadLettered: []string{}, Requeued: []string{}}
+	events := make([]domain.Event, 0, 8)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return result, err
+		return result, nil, err
 	}
 	defer tx.Rollback()
 
@@ -111,14 +112,14 @@ func (s *Store) ReclaimExpiredMailDeliveries(ctx context.Context, now time.Time)
 		    updated_at=?
 		WHERE ((state='sending' AND lease_until<=?) OR state='queued')
 		  AND attempts>=?
-		RETURNING id,message_id`,
+		RETURNING id,message_id,last_error_code`,
 		mailTimeString(now), mailTimeString(now), domain.MailDeliveryMaxAttempts)
 	if err != nil {
-		return result, err
+		return result, nil, err
 	}
 	exhausted, err := scanMailDeliveryIDs(rows)
 	if err != nil {
-		return result, err
+		return result, nil, err
 	}
 	for _, item := range exhausted {
 		if err := updateReclaimMessage(ctx, tx, item.messageID,
@@ -129,8 +130,21 @@ func (s *Store) ReclaimExpiredMailDeliveries(ctx context.Context, now time.Time)
 			"mail_delivery", item.id, map[string]any{
 				"message_id": item.messageID, "reason": string(domain.MailErrSMTPAttemptsExhausted),
 			}, now); err != nil {
-			return result, err
+			return result, nil, err
 		}
+		taskID, turnID, agentID, err := mailMessageRouting(ctx, tx, item.messageID)
+		if err != nil {
+			return s.failMailReclaim(ctx, tx, item, "exhausted_event", now, err)
+		}
+		event, err := AppendMailTransitionInTx(ctx, tx, MailTransition{
+			TaskID: taskID, MessageID: item.messageID, TurnID: turnID, AgentID: agentID,
+			EventType: MailEventDeadLetter, Status: domain.MailMessageDeadLetter,
+			ErrorCode: item.errorCode, OccurredAt: now,
+		})
+		if err != nil {
+			return s.failMailReclaim(ctx, tx, item, "exhausted_event", now, err)
+		}
+		events = append(events, event)
 		result.DeadLettered = append(result.DeadLettered, item.id)
 	}
 
@@ -141,15 +155,15 @@ func (s *Store) ReclaimExpiredMailDeliveries(ctx context.Context, now time.Time)
 		    available_at=?, last_error_code=?, updated_at=?
 		WHERE state='sending' AND lease_until<=? AND attempts<?
 		  AND smtp_phase IN ('','connect','tls','auth','mail_from','rcpt_to')
-		RETURNING id,message_id`,
+		RETURNING id,message_id,last_error_code`,
 		mailTimeString(now), string(domain.MailErrSMTPLeaseExpiredBeforeData),
 		mailTimeString(now), mailTimeString(now), domain.MailDeliveryMaxAttempts)
 	if err != nil {
-		return result, err
+		return result, nil, err
 	}
 	requeued, err := scanMailDeliveryIDs(rows)
 	if err != nil {
-		return result, err
+		return result, nil, err
 	}
 	for _, item := range requeued {
 		if err := updateReclaimMessage(ctx, tx, item.messageID,
@@ -160,8 +174,21 @@ func (s *Store) ReclaimExpiredMailDeliveries(ctx context.Context, now time.Time)
 			"mail_delivery", item.id, map[string]any{
 				"message_id": item.messageID, "reason": string(domain.MailErrSMTPLeaseExpiredBeforeData),
 			}, now); err != nil {
-			return result, err
+			return result, nil, err
 		}
+		taskID, turnID, agentID, err := mailMessageRouting(ctx, tx, item.messageID)
+		if err != nil {
+			return s.failMailReclaim(ctx, tx, item, "requeued_event", now, err)
+		}
+		event, err := AppendMailTransitionInTx(ctx, tx, MailTransition{
+			TaskID: taskID, MessageID: item.messageID, TurnID: turnID, AgentID: agentID,
+			EventType: MailEventQueued, Status: domain.MailMessageQueued,
+			ErrorCode: item.errorCode, OccurredAt: now,
+		})
+		if err != nil {
+			return s.failMailReclaim(ctx, tx, item, "requeued_event", now, err)
+		}
+		events = append(events, event)
 		result.Requeued = append(result.Requeued, item.id)
 	}
 
@@ -173,15 +200,15 @@ func (s *Store) ReclaimExpiredMailDeliveries(ctx context.Context, now time.Time)
 		    lease_id='', lease_until='', last_error_code=?, updated_at=?
 		WHERE state='sending' AND lease_until<=? AND attempts<?
 		  AND smtp_phase IN ('data','finished')
-		RETURNING id,message_id`,
+		RETURNING id,message_id,last_error_code`,
 		string(domain.MailErrSMTPAmbiguousAfterData), mailTimeString(now),
 		mailTimeString(now), domain.MailDeliveryMaxAttempts)
 	if err != nil {
-		return result, err
+		return result, nil, err
 	}
 	ambiguous, err := scanMailDeliveryIDs(rows)
 	if err != nil {
-		return result, err
+		return result, nil, err
 	}
 	for _, item := range ambiguous {
 		if err := updateReclaimMessage(ctx, tx, item.messageID,
@@ -192,15 +219,28 @@ func (s *Store) ReclaimExpiredMailDeliveries(ctx context.Context, now time.Time)
 			"mail_delivery", item.id, map[string]any{
 				"message_id": item.messageID, "reason": string(domain.MailErrSMTPAmbiguousAfterData),
 			}, now); err != nil {
-			return result, err
+			return result, nil, err
 		}
+		taskID, turnID, agentID, err := mailMessageRouting(ctx, tx, item.messageID)
+		if err != nil {
+			return s.failMailReclaim(ctx, tx, item, "ambiguous_event", now, err)
+		}
+		event, err := AppendMailTransitionInTx(ctx, tx, MailTransition{
+			TaskID: taskID, MessageID: item.messageID, TurnID: turnID, AgentID: agentID,
+			EventType: MailEventDeadLetter, Status: domain.MailMessageDeadLetter,
+			ErrorCode: item.errorCode, OccurredAt: now,
+		})
+		if err != nil {
+			return s.failMailReclaim(ctx, tx, item, "ambiguous_event", now, err)
+		}
+		events = append(events, event)
 		result.DeadLettered = append(result.DeadLettered, item.id)
 	}
 
 	if err := tx.Commit(); err != nil {
-		return result, err
+		return result, nil, err
 	}
-	return result, nil
+	return result, events, nil
 }
 
 func updateReclaimMessage(ctx context.Context, tx *sql.Tx, messageID string, to domain.MailMessageStatus, from []domain.MailMessageStatus, now time.Time) error {
@@ -229,18 +269,19 @@ func updateReclaimMessage(ctx context.Context, tx *sql.Tx, messageID string, to 
 
 // failMailReclaim rolls the whole sweep back when a Message cannot follow its
 // Delivery. A partial reclaim would leave Message and Delivery split.
-func (s *Store) failMailReclaim(ctx context.Context, tx *sql.Tx, item mailDeliveryIDPair, reason string, now time.Time, cause error) (MailDeliveryReclaimResult, error) {
+func (s *Store) failMailReclaim(ctx context.Context, tx *sql.Tx, item mailDeliveryIDPair, reason string, now time.Time, cause error) (MailDeliveryReclaimResult, []domain.Event, error) {
 	_ = tx.Rollback()
 	s.appendMailAuditDeduped(ctx, "mail_worker", "mail.delivery.reclaim_failed",
 		"mail_delivery", item.id, map[string]any{
 			"message_id": item.messageID, "reason": reason, "error": cause.Error(),
 		}, now)
-	return MailDeliveryReclaimResult{DeadLettered: []string{}, Requeued: []string{}}, fmt.Errorf("reclaim mail delivery %s: %w", item.id, cause)
+	return MailDeliveryReclaimResult{DeadLettered: []string{}, Requeued: []string{}}, nil, fmt.Errorf("reclaim mail delivery %s: %w", item.id, cause)
 }
 
 type mailDeliveryIDPair struct {
 	id        string
 	messageID string
+	errorCode string
 }
 
 func scanMailDeliveryIDs(rows *sql.Rows) ([]mailDeliveryIDPair, error) {
@@ -248,7 +289,7 @@ func scanMailDeliveryIDs(rows *sql.Rows) ([]mailDeliveryIDPair, error) {
 	result := make([]mailDeliveryIDPair, 0)
 	for rows.Next() {
 		var item mailDeliveryIDPair
-		if err := rows.Scan(&item.id, &item.messageID); err != nil {
+		if err := rows.Scan(&item.id, &item.messageID, &item.errorCode); err != nil {
 			return nil, err
 		}
 		result = append(result, item)
@@ -260,12 +301,12 @@ func scanMailDeliveryIDs(rows *sql.Rows) ([]mailDeliveryIDPair, error) {
 // Message queued -> sending in the same transaction. accountID optionally
 // restricts the claim to one account so the worker can enforce per-account
 // concurrency.
-func (s *Store) ClaimMailDelivery(ctx context.Context, accountID string, now time.Time, leaseDuration time.Duration) (domain.MailDelivery, bool, error) {
+func (s *Store) ClaimMailDelivery(ctx context.Context, accountID string, now time.Time, leaseDuration time.Duration) (domain.MailDelivery, bool, []domain.Event, error) {
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
 	if leaseDuration <= 0 {
-		return domain.MailDelivery{}, false, fmt.Errorf("mail delivery lease duration must be positive")
+		return domain.MailDelivery{}, false, nil, fmt.Errorf("mail delivery lease duration must be positive")
 	}
 	leaseID := domain.NewID("mail_lease")
 	leaseUntil := now.Add(leaseDuration)
@@ -273,7 +314,7 @@ func (s *Store) ClaimMailDelivery(ctx context.Context, accountID string, now tim
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return domain.MailDelivery{}, false, err
+		return domain.MailDelivery{}, false, nil, err
 	}
 	defer tx.Rollback()
 
@@ -294,15 +335,15 @@ func (s *Store) ClaimMailDelivery(ctx context.Context, accountID string, now tim
 		mailTimeString(now), domain.MailDeliveryMaxAttempts, accountID, accountID,
 		mailTimeString(now), domain.MailDeliveryMaxAttempts)
 	if err != nil {
-		return domain.MailDelivery{}, false, err
+		return domain.MailDelivery{}, false, nil, err
 	}
 	claimed, err := scanMailDeliveryRows(rows)
 	if err != nil {
-		return domain.MailDelivery{}, false, err
+		return domain.MailDelivery{}, false, nil, err
 	}
 	rows.Close()
 	if len(claimed) == 0 {
-		return domain.MailDelivery{}, false, nil
+		return domain.MailDelivery{}, false, nil, nil
 	}
 	item := claimed[0]
 
@@ -310,7 +351,7 @@ func (s *Store) ClaimMailDelivery(ctx context.Context, accountID string, now tim
 		UPDATE mail_messages SET status='sending',updated_at=?
 		WHERE id=? AND status='queued'`, mailTimeString(now), item.MessageID)
 	if err != nil {
-		return domain.MailDelivery{}, false, err
+		return domain.MailDelivery{}, false, nil, err
 	}
 	if affected, _ := messageResult.RowsAffected(); affected != 1 {
 		// The Message was not queued (for example it was cancelled). Roll the
@@ -321,18 +362,29 @@ func (s *Store) ClaimMailDelivery(ctx context.Context, accountID string, now tim
 			"mail_delivery", item.ID, map[string]any{
 				"message_id": item.MessageID, "reason": "message_not_queued",
 			}, now)
-		return domain.MailDelivery{}, false, nil
+		return domain.MailDelivery{}, false, nil, nil
+	}
+	taskID, turnID, agentID, err := mailMessageRouting(ctx, tx, item.MessageID)
+	if err != nil {
+		return domain.MailDelivery{}, false, nil, err
+	}
+	event, err := AppendMailTransitionInTx(ctx, tx, MailTransition{
+		TaskID: taskID, MessageID: item.MessageID, TurnID: turnID, AgentID: agentID,
+		EventType: MailEventSending, Status: domain.MailMessageSending, OccurredAt: now,
+	})
+	if err != nil {
+		return domain.MailDelivery{}, false, nil, err
 	}
 	if err := tx.Commit(); err != nil {
-		return domain.MailDelivery{}, false, err
+		return domain.MailDelivery{}, false, nil, err
 	}
-	return item, true, nil
+	return item, true, []domain.Event{event}, nil
 }
 
 // DeferMailDelivery returns a claimed delivery to queued without consuming an
 // SMTP attempt. It is used when local preflight rejects the send (disabled or
 // rotated account, missing credential, misconfigured download base).
-func (s *Store) DeferMailDelivery(ctx context.Context, deliveryID, leaseID, messageID string, errorCode domain.MailErrorCode, detail string, availableAt, now time.Time) (bool, error) {
+func (s *Store) DeferMailDelivery(ctx context.Context, deliveryID, leaseID, messageID string, errorCode domain.MailErrorCode, detail string, availableAt, now time.Time) (bool, []domain.Event, error) {
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
@@ -341,7 +393,7 @@ func (s *Store) DeferMailDelivery(ctx context.Context, deliveryID, leaseID, mess
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
 	defer tx.Rollback()
 	patch := MailDeliveryStatePatch{
@@ -355,7 +407,7 @@ func (s *Store) DeferMailDelivery(ctx context.Context, deliveryID, leaseID, mess
 		[]domain.MailDeliveryState{domain.MailDeliverySending},
 		domain.MailDeliveryQueued, patch, now)
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
 	if !ok {
 		_ = tx.Rollback()
@@ -363,44 +415,56 @@ func (s *Store) DeferMailDelivery(ctx context.Context, deliveryID, leaseID, mess
 			"mail_delivery", deliveryID, map[string]any{
 				"message_id": messageID, "error_code": string(errorCode),
 			}, now)
-		return false, nil
+		return false, nil, nil
 	}
 	result, err := tx.ExecContext(ctx, `
 		UPDATE mail_messages SET status='queued',updated_at=?
 		WHERE id=? AND status='sending'`, mailTimeString(now), messageID)
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
 	if affected, _ := result.RowsAffected(); affected != 1 {
-		return false, fmt.Errorf("mail message %s did not return to queued", messageID)
+		return false, nil, fmt.Errorf("mail message %s did not return to queued", messageID)
+	}
+	taskID, turnID, agentID, err := mailMessageRouting(ctx, tx, messageID)
+	if err != nil {
+		return false, nil, err
 	}
 	if err := appendMailAuditTx(ctx, tx, "mail_worker", "mail.delivery.deferred",
 		"mail_delivery", deliveryID, map[string]any{
 			"message_id": messageID, "error_code": string(errorCode),
 		}, now); err != nil {
-		return false, err
+		return false, nil, err
+	}
+	event, err := AppendMailTransitionInTx(ctx, tx, MailTransition{
+		TaskID: taskID, MessageID: messageID, TurnID: turnID, AgentID: agentID,
+		EventType: MailEventQueued, Status: domain.MailMessageQueued,
+		ErrorCode: string(errorCode), OccurredAt: now,
+	})
+	if err != nil {
+		return false, nil, err
 	}
 	if err := tx.Commit(); err != nil {
-		return false, err
+		return false, nil, err
 	}
-	return true, nil
+	return true, []domain.Event{event}, nil
 }
 
 // FinishMailDelivery writes one attempt and the resulting Delivery/Message
 // state under the worker's lease. A zero-row delivery update means another
 // writer owns the row; the result is discarded and never touches the Message.
-func (s *Store) FinishMailDelivery(ctx context.Context, delivery domain.MailDelivery, leaseID string, result MailDeliveryResultPatch, now time.Time) (bool, error) {
+func (s *Store) FinishMailDelivery(ctx context.Context, delivery domain.MailDelivery, leaseID string, result MailDeliveryResultPatch, now time.Time) (bool, []domain.Event, error) {
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
 	switch result.State {
 	case domain.MailDeliverySent, domain.MailDeliveryFailed, domain.MailDeliveryDeadLetter, domain.MailDeliveryQueued:
 	default:
-		return false, fmt.Errorf("invalid mail delivery result state %q", result.State)
+		return false, nil, fmt.Errorf("invalid mail delivery result state %q", result.State)
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
 	defer tx.Rollback()
 
@@ -434,7 +498,7 @@ func (s *Store) FinishMailDelivery(ctx context.Context, delivery domain.MailDeli
 		[]domain.MailDeliveryState{domain.MailDeliverySending},
 		result.State, patch, now)
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
 	if !ok {
 		// Stale worker: record the discarded result for audit, keep any newer
@@ -445,7 +509,7 @@ func (s *Store) FinishMailDelivery(ctx context.Context, delivery domain.MailDeli
 				"message_id": delivery.MessageID, "attempt": delivery.Attempts,
 				"result_state": string(result.State), "error_code": string(result.ErrorCode),
 			}, now)
-		return false, nil
+		return false, nil, nil
 	}
 	backoffMS := result.Backoff.Milliseconds()
 	startedAt := delivery.UpdatedAt
@@ -458,7 +522,7 @@ func (s *Store) FinishMailDelivery(ctx context.Context, delivery domain.MailDeli
 		SMTPCode: result.SMTPCode, SMTPPhase: result.Phase, BackoffMS: backoffMS,
 		StartedAt: startedAt, FinishedAt: now,
 	}); err != nil {
-		return false, err
+		return false, nil, err
 	}
 	messageStatus := domain.MailMessageStatus(string(result.State))
 	messageResult, err := tx.ExecContext(ctx, `
@@ -466,22 +530,43 @@ func (s *Store) FinishMailDelivery(ctx context.Context, delivery domain.MailDeli
 		WHERE id=? AND status='sending'`,
 		messageStatus, mailTimeString(now), delivery.MessageID)
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
 	if affected, _ := messageResult.RowsAffected(); affected != 1 {
-		return false, fmt.Errorf("mail message %s did not move to %s", delivery.MessageID, messageStatus)
+		return false, nil, fmt.Errorf("mail message %s did not move to %s", delivery.MessageID, messageStatus)
+	}
+	taskID, turnID, agentID, err := mailMessageRouting(ctx, tx, delivery.MessageID)
+	if err != nil {
+		return false, nil, err
+	}
+	eventType := MailEventQueued
+	switch result.State {
+	case domain.MailDeliverySent:
+		eventType = MailEventSent
+	case domain.MailDeliveryFailed:
+		eventType = MailEventFailed
+	case domain.MailDeliveryDeadLetter:
+		eventType = MailEventDeadLetter
 	}
 	if err := appendMailAuditTx(ctx, tx, "mail_worker", "mail.delivery."+string(result.State),
 		"mail_delivery", delivery.ID, map[string]any{
 			"message_id": delivery.MessageID, "attempt": delivery.Attempts,
 			"error_code": string(result.ErrorCode), "outcome_certainty": string(result.OutcomeCertainty),
 		}, now); err != nil {
-		return false, err
+		return false, nil, err
+	}
+	event, err := AppendMailTransitionInTx(ctx, tx, MailTransition{
+		TaskID: taskID, MessageID: delivery.MessageID, TurnID: turnID, AgentID: agentID,
+		EventType: eventType, Status: messageStatus,
+		ErrorCode: string(result.ErrorCode), OccurredAt: now,
+	})
+	if err != nil {
+		return false, nil, err
 	}
 	if err := tx.Commit(); err != nil {
-		return false, err
+		return false, nil, err
 	}
-	return true, nil
+	return true, []domain.Event{event}, nil
 }
 
 // SetMailDeliveryMessageIDHeader persists the RFC 5322 Message-ID before the
@@ -512,62 +597,76 @@ func sanitizeSMTPResponse(value string) string {
 func stringPtr(value string) *string { return &value }
 
 // SubmitMailMessage moves a draft to pending_approval and freezes its digest.
-func (s *Store) SubmitMailMessage(ctx context.Context, id, digest string, now time.Time) (domain.MailMessage, error) {
+func (s *Store) SubmitMailMessage(ctx context.Context, id, digest string, now time.Time) (domain.MailMessage, []domain.Event, error) {
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return domain.MailMessage{}, err
+		return domain.MailMessage{}, nil, err
 	}
 	defer tx.Rollback()
 	var status domain.MailMessageStatus
-	if err := tx.QueryRowContext(ctx, `SELECT status FROM mail_messages WHERE id=?`, id).Scan(&status); err != nil {
-		return domain.MailMessage{}, err
+	var taskID, turnID, agentID string
+	if err := tx.QueryRowContext(ctx, `
+		SELECT status,task_id,turn_id,agent_id FROM mail_messages WHERE id=?`, id).
+		Scan(&status, &taskID, &turnID, &agentID); err != nil {
+		return domain.MailMessage{}, nil, err
 	}
 	if status != domain.MailMessageDraft {
-		return domain.MailMessage{}, ErrMailInvalidState
+		return domain.MailMessage{}, nil, ErrMailInvalidState
 	}
 	if strings.TrimSpace(digest) == "" {
-		return domain.MailMessage{}, ErrMailDigestMismatch
+		return domain.MailMessage{}, nil, ErrMailDigestMismatch
 	}
 	result, err := tx.ExecContext(ctx, `
 		UPDATE mail_messages SET status='pending_approval',approval_digest=?,submitted_at=?,updated_at=?
 		WHERE id=? AND status='draft'`,
 		digest, mailTimeString(now), mailTimeString(now), id)
 	if err != nil {
-		return domain.MailMessage{}, err
+		return domain.MailMessage{}, nil, err
 	}
 	if affected, _ := result.RowsAffected(); affected != 1 {
-		return domain.MailMessage{}, ErrMailInvalidState
+		return domain.MailMessage{}, nil, ErrMailInvalidState
+	}
+	event, err := AppendMailTransitionInTx(ctx, tx, MailTransition{
+		TaskID: taskID, MessageID: id, TurnID: turnID, AgentID: agentID,
+		EventType: MailEventApprovalRequested, Status: domain.MailMessagePendingApproval, OccurredAt: now,
+	})
+	if err != nil {
+		return domain.MailMessage{}, nil, err
 	}
 	if err := tx.Commit(); err != nil {
-		return domain.MailMessage{}, err
+		return domain.MailMessage{}, nil, err
 	}
-	return s.MailMessage(ctx, id)
+	message, err := s.MailMessage(ctx, id)
+	if err != nil {
+		return domain.MailMessage{}, nil, err
+	}
+	return message, []domain.Event{event}, nil
 }
 
 // ApproveMailMessage verifies the digest, freezes approval and creates the
 // first queued delivery. A repeated approval with the same digest and owner is
 // idempotent and returns the existing active delivery.
-func (s *Store) ApproveMailMessage(ctx context.Context, id, digest, ownerID string, now time.Time) (domain.MailMessage, domain.MailDelivery, error) {
+func (s *Store) ApproveMailMessage(ctx context.Context, id, digest, ownerID, note string, now time.Time) (domain.MailMessage, domain.MailDelivery, []domain.Event, error) {
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
 	digest = strings.TrimSpace(digest)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return domain.MailMessage{}, domain.MailDelivery{}, err
+		return domain.MailMessage{}, domain.MailDelivery{}, nil, err
 	}
 	defer tx.Rollback()
 
 	message, err := scanMailMessage(tx.QueryRowContext(ctx,
 		`SELECT `+mailMessageColumns+` FROM mail_messages WHERE id=?`, id))
 	if err != nil {
-		return domain.MailMessage{}, domain.MailDelivery{}, err
+		return domain.MailMessage{}, domain.MailDelivery{}, nil, err
 	}
 	if digest == "" || message.ApprovalDigest != digest {
-		return domain.MailMessage{}, domain.MailDelivery{}, ErrMailDigestMismatch
+		return domain.MailMessage{}, domain.MailDelivery{}, nil, ErrMailDigestMismatch
 	}
 
 	switch message.Status {
@@ -577,90 +676,128 @@ func (s *Store) ApproveMailMessage(ctx context.Context, id, digest, ownerID stri
 			WHERE id=? AND status='pending_approval'`,
 			ownerID, mailTimeString(now), mailTimeString(now), id)
 		if err != nil {
-			return domain.MailMessage{}, domain.MailDelivery{}, err
+			return domain.MailMessage{}, domain.MailDelivery{}, nil, err
 		}
 		if affected, _ := result.RowsAffected(); affected != 1 {
-			return domain.MailMessage{}, domain.MailDelivery{}, ErrMailInvalidState
+			return domain.MailMessage{}, domain.MailDelivery{}, nil, ErrMailInvalidState
 		}
 		delivery, err := s.CreateMailDeliveryInTx(ctx, tx, domain.MailDelivery{
 			MessageID: message.ID, Generation: 0, AccountID: message.AccountID,
 			State: domain.MailDeliveryQueued, AvailableAt: now, ApprovedDigest: digest,
 		})
 		if err != nil {
-			return domain.MailMessage{}, domain.MailDelivery{}, err
+			return domain.MailMessage{}, domain.MailDelivery{}, nil, err
 		}
 		if err := appendMailAuditTx(ctx, tx, ownerID, "mail.message.approve",
 			"mail_message", message.ID, map[string]any{
 				"delivery_id": delivery.ID, "generation": delivery.Generation,
-				"digest": digest,
+				"digest": digest, "note": strings.TrimSpace(note),
 			}, now); err != nil {
-			return domain.MailMessage{}, domain.MailDelivery{}, err
+			return domain.MailMessage{}, domain.MailDelivery{}, nil, err
+		}
+		event, err := AppendMailTransitionInTx(ctx, tx, MailTransition{
+			TaskID: message.TaskID, MessageID: message.ID, TurnID: message.TurnID, AgentID: message.AgentID,
+			EventType: MailEventApproved, Status: domain.MailMessageQueued, OccurredAt: now,
+		})
+		if err != nil {
+			return domain.MailMessage{}, domain.MailDelivery{}, nil, err
 		}
 		if err := tx.Commit(); err != nil {
-			return domain.MailMessage{}, domain.MailDelivery{}, err
+			return domain.MailMessage{}, domain.MailDelivery{}, nil, err
 		}
 		updated, err := s.MailMessage(ctx, id)
-		return updated, delivery, err
+		if err != nil {
+			return domain.MailMessage{}, domain.MailDelivery{}, nil, err
+		}
+		return updated, delivery, []domain.Event{event}, nil
 	case domain.MailMessageQueued:
 		delivery, err := scanMailDelivery(tx.QueryRowContext(ctx,
 			`SELECT `+mailDeliveryColumns+` FROM mail_deliveries
 			 WHERE message_id=? ORDER BY generation DESC LIMIT 1`, id))
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
-				return domain.MailMessage{}, domain.MailDelivery{}, ErrMailInvalidState
+				return domain.MailMessage{}, domain.MailDelivery{}, nil, ErrMailInvalidState
 			}
-			return domain.MailMessage{}, domain.MailDelivery{}, err
+			return domain.MailMessage{}, domain.MailDelivery{}, nil, err
 		}
 		// Idempotent only while the delivery is still active. Approving an
 		// already sent/failed/dead-letter message is an invalid operation.
 		if delivery.ApprovedDigest == digest && message.ApprovedBy == ownerID &&
 			(delivery.State == domain.MailDeliveryQueued || delivery.State == domain.MailDeliverySending) {
 			if err := tx.Commit(); err != nil {
-				return domain.MailMessage{}, domain.MailDelivery{}, err
+				return domain.MailMessage{}, domain.MailDelivery{}, nil, err
 			}
-			return message, delivery, nil
+			return message, delivery, nil, nil
 		}
-		return domain.MailMessage{}, domain.MailDelivery{}, ErrMailInvalidState
+		return domain.MailMessage{}, domain.MailDelivery{}, nil, ErrMailInvalidState
 	default:
-		return domain.MailMessage{}, domain.MailDelivery{}, ErrMailInvalidState
+		return domain.MailMessage{}, domain.MailDelivery{}, nil, ErrMailInvalidState
 	}
 }
 
 // RejectMailMessage moves pending_approval to rejected.
-func (s *Store) RejectMailMessage(ctx context.Context, id, reason string, now time.Time) error {
-	if now.IsZero() {
-		now = time.Now().UTC()
-	}
-	// A rejection is a decision, not an approval: approved_by/approved_at
-	// remain empty so a rejected message can never look approved.
-	result, err := s.db.ExecContext(ctx, `
-		UPDATE mail_messages SET status='rejected',rejected_reason=?,updated_at=?
-		WHERE id=? AND status='pending_approval'`,
-		strings.TrimSpace(reason), mailTimeString(now), id)
-	if err != nil {
-		return err
-	}
-	if affected, _ := result.RowsAffected(); affected != 1 {
-		return ErrMailInvalidState
-	}
-	return nil
-}
-
-// CancelMailMessage cancels pending, queued (including backoff), failed and
-// dead-letter messages. A queued delivery must lose its conditional
-// queued -> cancelled update if a worker already claimed it.
-func (s *Store) CancelMailMessage(ctx context.Context, id, ownerID string, now time.Time) (domain.MailMessage, error) {
+func (s *Store) RejectMailMessage(ctx context.Context, id, reason string, now time.Time) ([]domain.Event, error) {
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return domain.MailMessage{}, err
+		return nil, err
 	}
 	defer tx.Rollback()
 	var status domain.MailMessageStatus
-	if err := tx.QueryRowContext(ctx, `SELECT status FROM mail_messages WHERE id=?`, id).Scan(&status); err != nil {
-		return domain.MailMessage{}, err
+	var taskID, turnID, agentID string
+	if err := tx.QueryRowContext(ctx, `
+		SELECT status,task_id,turn_id,agent_id FROM mail_messages WHERE id=?`, id).
+		Scan(&status, &taskID, &turnID, &agentID); err != nil {
+		return nil, err
+	}
+	if status != domain.MailMessagePendingApproval {
+		return nil, ErrMailInvalidState
+	}
+	// A rejection is a decision, not an approval: approved_by/approved_at
+	// remain empty so a rejected message can never look approved.
+	result, err := tx.ExecContext(ctx, `
+		UPDATE mail_messages SET status='rejected',rejected_reason=?,updated_at=?
+		WHERE id=? AND status='pending_approval'`,
+		strings.TrimSpace(reason), mailTimeString(now), id)
+	if err != nil {
+		return nil, err
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return nil, ErrMailInvalidState
+	}
+	event, err := AppendMailTransitionInTx(ctx, tx, MailTransition{
+		TaskID: taskID, MessageID: id, TurnID: turnID, AgentID: agentID,
+		EventType: MailEventRejected, Status: domain.MailMessageRejected, OccurredAt: now,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return []domain.Event{event}, nil
+}
+
+// CancelMailMessage cancels pending, queued (including backoff), failed and
+// dead-letter messages. A queued delivery must lose its conditional
+// queued -> cancelled update if a worker already claimed it.
+func (s *Store) CancelMailMessage(ctx context.Context, id, ownerID string, now time.Time) (domain.MailMessage, []domain.Event, error) {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return domain.MailMessage{}, nil, err
+	}
+	defer tx.Rollback()
+	var status domain.MailMessageStatus
+	var taskID, turnID, agentID string
+	if err := tx.QueryRowContext(ctx, `
+		SELECT status,task_id,turn_id,agent_id FROM mail_messages WHERE id=?`, id).
+		Scan(&status, &taskID, &turnID, &agentID); err != nil {
+		return domain.MailMessage{}, nil, err
 	}
 	switch status {
 	case domain.MailMessageDraft, domain.MailMessagePendingApproval,
@@ -672,75 +809,86 @@ func (s *Store) CancelMailMessage(ctx context.Context, id, ownerID string, now t
 				UPDATE mail_deliveries SET state='cancelled',lease_id='',lease_until='',updated_at=?
 				WHERE message_id=? AND state IN ('failed','dead_letter')`,
 				mailTimeString(now), id); err != nil {
-				return domain.MailMessage{}, err
+				return domain.MailMessage{}, nil, err
 			}
 		}
 		result, err := tx.ExecContext(ctx, `
 			UPDATE mail_messages SET status='cancelled',updated_at=?
 			WHERE id=? AND status=?`, mailTimeString(now), id, status)
 		if err != nil {
-			return domain.MailMessage{}, err
+			return domain.MailMessage{}, nil, err
 		}
 		if affected, _ := result.RowsAffected(); affected != 1 {
-			return domain.MailMessage{}, ErrMailInvalidState
+			return domain.MailMessage{}, nil, ErrMailInvalidState
 		}
 	case domain.MailMessageQueued:
 		deliveryResult, err := tx.ExecContext(ctx, `
 			UPDATE mail_deliveries SET state='cancelled',lease_id='',lease_until='',updated_at=?
 			WHERE message_id=? AND state='queued'`, mailTimeString(now), id)
 		if err != nil {
-			return domain.MailMessage{}, err
+			return domain.MailMessage{}, nil, err
 		}
 		if affected, _ := deliveryResult.RowsAffected(); affected != 1 {
 			// A worker claimed it; sending can no longer be cancelled safely.
-			return domain.MailMessage{}, ErrMailInvalidState
+			return domain.MailMessage{}, nil, ErrMailInvalidState
 		}
 		result, err := tx.ExecContext(ctx, `
 			UPDATE mail_messages SET status='cancelled',updated_at=?
 			WHERE id=? AND status='queued'`, mailTimeString(now), id)
 		if err != nil {
-			return domain.MailMessage{}, err
+			return domain.MailMessage{}, nil, err
 		}
 		if affected, _ := result.RowsAffected(); affected != 1 {
-			return domain.MailMessage{}, ErrMailInvalidState
+			return domain.MailMessage{}, nil, ErrMailInvalidState
 		}
 	case domain.MailMessageSending:
-		return domain.MailMessage{}, ErrMailInvalidState
+		return domain.MailMessage{}, nil, ErrMailInvalidState
 	default:
-		return domain.MailMessage{}, ErrMailInvalidState
+		return domain.MailMessage{}, nil, ErrMailInvalidState
 	}
 	if err := appendMailAuditTx(ctx, tx, ownerID, "mail.message.cancel",
 		"mail_message", id, map[string]any{"from_status": string(status)}, now); err != nil {
-		return domain.MailMessage{}, err
+		return domain.MailMessage{}, nil, err
+	}
+	event, err := AppendMailTransitionInTx(ctx, tx, MailTransition{
+		TaskID: taskID, MessageID: id, TurnID: turnID, AgentID: agentID,
+		EventType: MailEventCancelled, Status: domain.MailMessageCancelled, OccurredAt: now,
+	})
+	if err != nil {
+		return domain.MailMessage{}, nil, err
 	}
 	if err := tx.Commit(); err != nil {
-		return domain.MailMessage{}, err
+		return domain.MailMessage{}, nil, err
 	}
-	return s.MailMessage(ctx, id)
+	message, err := s.MailMessage(ctx, id)
+	if err != nil {
+		return domain.MailMessage{}, nil, err
+	}
+	return message, []domain.Event{event}, nil
 }
 
 // RetryMailMessage creates a new delivery generation for the same frozen
 // snapshot. Only failed/dead_letter messages are retryable, and the digest must
 // still match the submitted snapshot.
-func (s *Store) RetryMailMessage(ctx context.Context, id, digest, ownerID string, now time.Time) (domain.MailDelivery, error) {
+func (s *Store) RetryMailMessage(ctx context.Context, id, digest, ownerID, reason string, now time.Time) (domain.MailDelivery, []domain.Event, error) {
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return domain.MailDelivery{}, err
+		return domain.MailDelivery{}, nil, err
 	}
 	defer tx.Rollback()
 	message, err := scanMailMessage(tx.QueryRowContext(ctx,
 		`SELECT `+mailMessageColumns+` FROM mail_messages WHERE id=?`, id))
 	if err != nil {
-		return domain.MailDelivery{}, err
+		return domain.MailDelivery{}, nil, err
 	}
 	if message.Status != domain.MailMessageFailed && message.Status != domain.MailMessageDeadLetter {
-		return domain.MailDelivery{}, ErrMailInvalidState
+		return domain.MailDelivery{}, nil, ErrMailInvalidState
 	}
 	if digest == "" || message.ApprovalDigest != digest {
-		return domain.MailDelivery{}, ErrMailDigestMismatch
+		return domain.MailDelivery{}, nil, ErrMailDigestMismatch
 	}
 	generation := 0
 	replayOf := ""
@@ -751,17 +899,17 @@ func (s *Store) RetryMailMessage(ctx context.Context, id, digest, ownerID string
 		generation = latest.Generation + 1
 		replayOf = latest.ID
 	} else if !errors.Is(err, sql.ErrNoRows) {
-		return domain.MailDelivery{}, err
+		return domain.MailDelivery{}, nil, err
 	}
 	result, err := tx.ExecContext(ctx, `
 		UPDATE mail_messages SET status='queued',updated_at=?
 		WHERE id=? AND status IN ('failed','dead_letter')`,
 		mailTimeString(now), id)
 	if err != nil {
-		return domain.MailDelivery{}, err
+		return domain.MailDelivery{}, nil, err
 	}
 	if affected, _ := result.RowsAffected(); affected != 1 {
-		return domain.MailDelivery{}, ErrMailInvalidState
+		return domain.MailDelivery{}, nil, ErrMailInvalidState
 	}
 	delivery, err := s.CreateMailDeliveryInTx(ctx, tx, domain.MailDelivery{
 		MessageID: message.ID, Generation: generation, ReplayOfID: replayOf,
@@ -769,19 +917,26 @@ func (s *Store) RetryMailMessage(ctx context.Context, id, digest, ownerID string
 		AvailableAt: now, ApprovedDigest: digest,
 	})
 	if err != nil {
-		return domain.MailDelivery{}, err
+		return domain.MailDelivery{}, nil, err
 	}
 	if err := appendMailAuditTx(ctx, tx, ownerID, "mail.message.retry",
 		"mail_message", id, map[string]any{
 			"delivery_id": delivery.ID, "generation": delivery.Generation,
-			"replay_of_id": replayOf,
+			"replay_of_id": replayOf, "reason": strings.TrimSpace(reason),
 		}, now); err != nil {
-		return domain.MailDelivery{}, err
+		return domain.MailDelivery{}, nil, err
+	}
+	event, err := AppendMailTransitionInTx(ctx, tx, MailTransition{
+		TaskID: message.TaskID, MessageID: message.ID, TurnID: message.TurnID, AgentID: message.AgentID,
+		EventType: MailEventRetried, Status: domain.MailMessageQueued, OccurredAt: now,
+	})
+	if err != nil {
+		return domain.MailDelivery{}, nil, err
 	}
 	if err := tx.Commit(); err != nil {
-		return domain.MailDelivery{}, err
+		return domain.MailDelivery{}, nil, err
 	}
-	return delivery, nil
+	return delivery, []domain.Event{event}, nil
 }
 
 // MailMessageFilter bounds the Owner list query.

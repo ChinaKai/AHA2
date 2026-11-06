@@ -10,6 +10,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -80,14 +81,16 @@ func mailLinkTokenHash(token string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func mailContentFingerprint(taskID, accountID string, to, cc []string, subject, bodyText, bodyHTML string, attachments []domain.MailAttachment) string {
+func mailContentFingerprint(taskID, accountID, fromAddress, fromName string, to, cc, bcc []string, subject, bodyText, bodyHTML string, attachments []domain.MailAttachment) string {
 	hashes := make([]string, 0, len(attachments))
 	for _, attachment := range attachments {
 		hashes = append(hashes, attachment.SHA256)
 	}
+	sortedBCC := append([]string{}, bcc...)
+	sort.Strings(sortedBCC)
 	payload := strings.Join([]string{
-		taskID, accountID, strings.Join(to, "|"), strings.Join(cc, "|"),
-		subject, bodyText, bodyHTML, strings.Join(hashes, "|"),
+		taskID, accountID, fromAddress, fromName, strings.Join(to, "|"), strings.Join(cc, "|"),
+		strings.Join(sortedBCC, "|"), subject, bodyText, bodyHTML, strings.Join(hashes, "|"),
 	}, "|")
 	sum := sha256.Sum256([]byte(payload))
 	return hex.EncodeToString(sum[:])
@@ -367,7 +370,8 @@ func (s *Server) createMailMessage(writer http.ResponseWriter, request *http.Req
 		CreatedAt: now, UpdatedAt: now,
 	}
 	message.ContentFingerprint = mailContentFingerprint(message.TaskID, message.AccountID,
-		message.To, message.CC, message.Subject, message.BodyText, message.BodyHTML, attachmentsSnapshot)
+		message.FromAddress, message.FromName, message.To, message.CC, message.BCC,
+		message.Subject, message.BodyText, message.BodyHTML, attachmentsSnapshot)
 	message.ApprovalDigest = mailpkg.ApprovalDigest(message, attachmentsSnapshot)
 
 	if duplicate, err := s.store.MailMessageByFingerprintSince(ctx, task.ID, message.ContentFingerprint, now.Add(-10*time.Minute)); err == nil {
@@ -397,6 +401,7 @@ func (s *Server) createMailMessage(writer http.ResponseWriter, request *http.Req
 			return
 		}
 	}
+	var timelineEvents []domain.Event
 	if err := s.store.WithMailTx(ctx, func(tx *sql.Tx) error {
 		if _, err := s.store.CreateMailMessageInTx(ctx, tx, message); err != nil {
 			return err
@@ -405,6 +410,16 @@ func (s *Server) createMailMessage(writer http.ResponseWriter, request *http.Req
 			if _, err := s.store.CreateMailAttachmentInTx(ctx, tx, attachment); err != nil {
 				return err
 			}
+		}
+		if status == domain.MailMessagePendingApproval {
+			event, err := store.AppendMailTransitionInTx(ctx, tx, store.MailTransition{
+				TaskID: task.ID, MessageID: message.ID, TurnID: message.TurnID, AgentID: message.AgentID,
+				EventType: store.MailEventApprovalRequested, Status: status, OccurredAt: now,
+			})
+			if err != nil {
+				return err
+			}
+			timelineEvents = append(timelineEvents, event)
 		}
 		return nil
 	}); err != nil {
@@ -418,6 +433,7 @@ func (s *Server) createMailMessage(writer http.ResponseWriter, request *http.Req
 		writeMailStoreFailure(writer, err, "创建邮件消息失败")
 		return
 	}
+	s.publishMailEvents(timelineEvents)
 	action := "mail.message.create"
 	if payload.Submit {
 		action = "mail.message.submit"
@@ -516,11 +532,12 @@ func (s *Server) submitMailMessage(writer http.ResponseWriter, request *http.Req
 		return
 	}
 	digest := mailpkg.ApprovalDigest(message, attachments)
-	updated, err := s.store.SubmitMailMessage(ctx, message.ID, digest, nowUTC())
+	updated, events, err := s.store.SubmitMailMessage(ctx, message.ID, digest, nowUTC())
 	if err != nil {
 		writeMailStoreFailure(writer, err, "提交审批失败")
 		return
 	}
+	s.publishMailEvents(events)
 	s.audit(request, "mail.message.submit", "mail_message", message.ID, map[string]any{"digest": digest})
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "message": updated})
 }
@@ -553,14 +570,13 @@ func (s *Server) approveMailMessage(writer http.ResponseWriter, request *http.Re
 		writeMailError(writer, http.StatusConflict, domain.MailErrApprovalDigestMismatch, "审批摘要已变化，请刷新")
 		return
 	}
-	updated, delivery, err := s.store.ApproveMailMessage(ctx, message.ID, current, mailOwnerID(request), nowUTC())
+	updated, delivery, events, err := s.store.ApproveMailMessage(
+		ctx, message.ID, current, mailOwnerID(request), payload.Note, nowUTC())
 	if err != nil {
 		writeMailStoreFailure(writer, err, "批准邮件失败")
 		return
 	}
-	s.audit(request, "mail.message.approve", "mail_message", message.ID, map[string]any{
-		"delivery_id": delivery.ID, "note": strings.TrimSpace(payload.Note),
-	})
+	s.publishMailEvents(events)
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "message": updated, "delivery": delivery})
 }
 
@@ -580,20 +596,23 @@ func (s *Server) rejectMailMessage(writer http.ResponseWriter, request *http.Req
 		writeMailStoreFailure(writer, err, "读取邮件消息失败")
 		return
 	}
-	if err := s.store.RejectMailMessage(request.Context(), message.ID, reason, nowUTC()); err != nil {
+	events, err := s.store.RejectMailMessage(request.Context(), message.ID, reason, nowUTC())
+	if err != nil {
 		writeMailStoreFailure(writer, err, "拒绝邮件失败")
 		return
 	}
+	s.publishMailEvents(events)
 	s.audit(request, "mail.message.reject", "mail_message", message.ID, map[string]any{"reason": reason})
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true})
 }
 
 func (s *Server) cancelMailMessage(writer http.ResponseWriter, request *http.Request) {
-	message, err := s.store.CancelMailMessage(request.Context(), request.PathValue("id"), mailOwnerID(request), nowUTC())
+	message, events, err := s.store.CancelMailMessage(request.Context(), request.PathValue("id"), mailOwnerID(request), nowUTC())
 	if err != nil {
 		writeMailStoreFailure(writer, err, "取消邮件失败")
 		return
 	}
+	s.publishMailEvents(events)
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "message": message})
 }
 
@@ -616,14 +635,13 @@ func (s *Server) retryMailMessage(writer http.ResponseWriter, request *http.Requ
 		writeMailError(writer, http.StatusConflict, domain.MailErrApprovalDigestMismatch, "快照内容与审批摘要不一致")
 		return
 	}
-	delivery, err := s.store.RetryMailMessage(ctx, message.ID, digest, mailOwnerID(request), nowUTC())
+	delivery, events, err := s.store.RetryMailMessage(
+		ctx, message.ID, digest, mailOwnerID(request), payload.Reason, nowUTC())
 	if err != nil {
 		writeMailStoreFailure(writer, err, "重试邮件失败")
 		return
 	}
-	s.audit(request, "mail.message.retry", "mail_message", message.ID, map[string]any{
-		"delivery_id": delivery.ID, "reason": strings.TrimSpace(payload.Reason),
-	})
+	s.publishMailEvents(events)
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "delivery": delivery})
 }
 

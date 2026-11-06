@@ -34,6 +34,12 @@ type Sender interface {
 	Send(ctx context.Context, account domain.MailAccount, credential string, outgoing mail.Outgoing, hooks mail.DeliveryHooks) mail.DeliveryResult
 }
 
+// Publisher receives committed mail timeline events. Production injects the
+// app EventHub; tests use a recording fake.
+type Publisher interface {
+	Publish(taskID string, event domain.Event)
+}
+
 type Config struct {
 	Store   *store.Store
 	Secrets SecretStore
@@ -50,6 +56,7 @@ type Config struct {
 	// a time; the durable lease, not this value, is the cross-process mutex.
 	MaxConcurrent   int
 	DownloadBaseURL string
+	Publisher       Publisher
 	Jitter          func(time.Duration) time.Duration
 	Now             func() time.Time
 }
@@ -131,6 +138,15 @@ func (w *Worker) now() time.Time {
 	return w.config.Now()
 }
 
+func (w *Worker) publishMailEvents(events []domain.Event) {
+	if w.config.Publisher == nil {
+		return
+	}
+	for _, event := range events {
+		w.config.Publisher.Publish(event.AggregateID, event)
+	}
+}
+
 // Run polls the outbox until ctx is cancelled.
 func (w *Worker) Run(ctx context.Context) {
 	ticker := time.NewTicker(w.config.Interval)
@@ -156,10 +172,11 @@ func (w *Worker) ProcessOnce(ctx context.Context) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	now := w.now()
-	reclaimed, err := w.config.Store.ReclaimExpiredMailDeliveries(ctx, now)
+	reclaimed, events, err := w.config.Store.ReclaimExpiredMailDeliveries(ctx, now)
 	if err != nil {
 		return 0, err
 	}
+	w.publishMailEvents(events)
 	processed := 0
 	for _, deliveryID := range reclaimed.Requeued {
 		w.config.Logger.Info("mail delivery requeued after lease expiry", "delivery_id", deliveryID)
@@ -210,7 +227,7 @@ func (w *Worker) processAccount(ctx context.Context, accountID string) int {
 	}
 	processed := 0
 	for processed < w.config.MaxConcurrent {
-		delivery, ok, err := w.config.Store.ClaimMailDelivery(ctx, accountID, w.now(), w.config.LeaseDuration)
+		delivery, ok, events, err := w.config.Store.ClaimMailDelivery(ctx, accountID, w.now(), w.config.LeaseDuration)
 		if err != nil {
 			w.config.Logger.Warn("mail delivery claim failed", "account_id", accountID, "error", err)
 			return processed
@@ -218,6 +235,7 @@ func (w *Worker) processAccount(ctx context.Context, accountID string) int {
 		if !ok {
 			return processed
 		}
+		w.publishMailEvents(events)
 		w.sendDelivery(ctx, delivery, snapshot)
 		processed++
 	}
@@ -253,7 +271,7 @@ func (w *Worker) sendDelivery(ctx context.Context, delivery domain.MailDelivery,
 	finish := func(result store.MailDeliveryResultPatch) bool {
 		writeCtx, cancel := w.writebackContext(ctx)
 		defer cancel()
-		ok, err := w.config.Store.FinishMailDelivery(writeCtx, delivery, delivery.LeaseID, result, w.now())
+		ok, events, err := w.config.Store.FinishMailDelivery(writeCtx, delivery, delivery.LeaseID, result, w.now())
 		if err != nil {
 			logger.Warn("mail delivery result write failed", "error", err, "state", result.State, "error_code", string(result.ErrorCode))
 			return false
@@ -262,6 +280,7 @@ func (w *Worker) sendDelivery(ctx context.Context, delivery domain.MailDelivery,
 			logger.Warn("mail delivery result discarded: lease no longer owned", "state", result.State, "error_code", string(result.ErrorCode))
 			return false
 		}
+		w.publishMailEvents(events)
 		logger.Info("mail delivery attempt finished",
 			"state", string(result.State), "error_code", string(result.ErrorCode),
 			"certainty", string(result.OutcomeCertainty), "duration_ms", w.now().Sub(started).Milliseconds())
@@ -270,9 +289,12 @@ func (w *Worker) sendDelivery(ctx context.Context, delivery domain.MailDelivery,
 	deferMessage := func(code domain.MailErrorCode, detail string) {
 		writeCtx, cancel := w.writebackContext(ctx)
 		defer cancel()
-		if _, err := w.config.Store.DeferMailDelivery(writeCtx, delivery.ID, delivery.LeaseID,
-			delivery.MessageID, code, detail, w.now().Add(time.Minute), w.now()); err != nil {
+		ok, events, err := w.config.Store.DeferMailDelivery(writeCtx, delivery.ID, delivery.LeaseID,
+			delivery.MessageID, code, detail, w.now().Add(time.Minute), w.now())
+		if err != nil {
 			logger.Warn("mail delivery defer failed", "error", err, "error_code", string(code))
+		} else if ok {
+			w.publishMailEvents(events)
 		}
 		logger.Info("mail delivery deferred", "error_code", string(code))
 	}

@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -33,11 +34,22 @@ func newMailOutboxFixture(t *testing.T) (*Store, domain.MailAccount, domain.Mail
 		t.Fatal(err)
 	}
 	digest := mailpkg.ApprovalDigest(message, attachments)
-	message, err = database.SubmitMailMessage(ctx, message.ID, digest, time.Now().UTC())
+	message, _, err = database.SubmitMailMessage(ctx, message.ID, digest, time.Now().UTC())
 	if err != nil {
 		t.Fatal(err)
 	}
 	return database, account, message, attachments, digest
+}
+
+func countTimelineEvents(t *testing.T, database *Store, taskID, eventType string) int {
+	t.Helper()
+	var count int
+	if err := database.db.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM events WHERE aggregate_id=? AND type=?`,
+		taskID, eventType).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	return count
 }
 
 func TestMailApprovalLifecycle(t *testing.T) {
@@ -48,7 +60,7 @@ func TestMailApprovalLifecycle(t *testing.T) {
 	if message.Status != domain.MailMessagePendingApproval || message.ApprovalDigest != digest {
 		t.Fatalf("submitted message = %+v", message)
 	}
-	approved, delivery, err := database.ApproveMailMessage(ctx, message.ID, digest, "owner-1", now)
+	approved, delivery, _, err := database.ApproveMailMessage(ctx, message.ID, digest, "owner-1", "", now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +70,7 @@ func TestMailApprovalLifecycle(t *testing.T) {
 		t.Fatalf("approved = %+v delivery = %+v", approved, delivery)
 	}
 	// Repeated approval with the same digest and owner is idempotent.
-	_, repeated, err := database.ApproveMailMessage(ctx, message.ID, digest, "owner-1", now)
+	_, repeated, _, err := database.ApproveMailMessage(ctx, message.ID, digest, "owner-1", "", now)
 	if err != nil {
 		t.Fatalf("idempotent approval: %v", err)
 	}
@@ -66,11 +78,11 @@ func TestMailApprovalLifecycle(t *testing.T) {
 		t.Fatalf("repeated approval created a new delivery: %s vs %s", repeated.ID, delivery.ID)
 	}
 	// A different digest must not be accepted.
-	if _, _, err := database.ApproveMailMessage(ctx, message.ID, "sha256:wrong", "owner-1", now); !errors.Is(err, ErrMailDigestMismatch) {
+	if _, _, _, err := database.ApproveMailMessage(ctx, message.ID, "sha256:wrong", "owner-1", "", now); !errors.Is(err, ErrMailDigestMismatch) {
 		t.Fatalf("wrong digest error = %v", err)
 	}
 	// Cancel while queued cancels both Message and Delivery.
-	cancelled, err := database.CancelMailMessage(ctx, message.ID, "owner-1", now)
+	cancelled, _, err := database.CancelMailMessage(ctx, message.ID, "owner-1", now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,13 +93,16 @@ func TestMailApprovalLifecycle(t *testing.T) {
 	if cancelled.Status != domain.MailMessageCancelled || storedDelivery.State != domain.MailDeliveryCancelled {
 		t.Fatalf("cancel = %+v delivery = %+v", cancelled, storedDelivery)
 	}
+	if got := countTimelineEvents(t, database, message.TaskID, MailEventCancelled); got != 1 {
+		t.Fatalf("mail_cancelled events = %d, want 1", got)
+	}
 }
 
 func TestMailRejectAndRetry(t *testing.T) {
 	ctx := context.Background()
 	database, _, message, _, digest := newMailOutboxFixture(t)
 	now := time.Now().UTC()
-	if err := database.RejectMailMessage(ctx, message.ID, "recipient list wrong", now); err != nil {
+	if _, err := database.RejectMailMessage(ctx, message.ID, "recipient list wrong", now); err != nil {
 		t.Fatal(err)
 	}
 	stored, err := database.MailMessage(ctx, message.ID)
@@ -100,6 +115,9 @@ func TestMailRejectAndRetry(t *testing.T) {
 	if stored.ApprovedBy != "" || !stored.ApprovedAt.IsZero() {
 		t.Fatalf("rejection was recorded as an approval: %+v", stored)
 	}
+	if got := countTimelineEvents(t, database, message.TaskID, MailEventRejected); got != 1 {
+		t.Fatalf("mail_rejected events = %d, want 1", got)
+	}
 
 	// Build a failed generation, then retry it with the same snapshot.
 	message2, err := database.CreateMailMessage(ctx, domain.MailMessage{
@@ -111,7 +129,7 @@ func TestMailRejectAndRetry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	message2, err = database.SubmitMailMessage(ctx, message2.ID, mailpkg.ApprovalDigest(message2, nil), now)
+	message2, _, err = database.SubmitMailMessage(ctx, message2.ID, mailpkg.ApprovalDigest(message2, nil), now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,10 +152,10 @@ func TestMailRejectAndRetry(t *testing.T) {
 		domain.MailMessageFailed, now); err != nil || !ok {
 		t.Fatalf("mark failed: ok=%v err=%v", ok, err)
 	}
-	if _, err := database.RetryMailMessage(ctx, message2.ID, "sha256:wrong", "owner-1", now); !errors.Is(err, ErrMailDigestMismatch) {
+	if _, _, err := database.RetryMailMessage(ctx, message2.ID, "sha256:wrong", "owner-1", "", now); !errors.Is(err, ErrMailDigestMismatch) {
 		t.Fatalf("retry digest error = %v", err)
 	}
-	retried, err := database.RetryMailMessage(ctx, message2.ID, digest2, "owner-1", now)
+	retried, _, err := database.RetryMailMessage(ctx, message2.ID, digest2, "owner-1", "", now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,6 +173,18 @@ func TestMailRejectAndRetry(t *testing.T) {
 		retriedMessage.ApprovalDigest != digest2 {
 		t.Fatalf("retry changed the frozen snapshot: %+v", retriedMessage)
 	}
+	if got := countTimelineEvents(t, database, message2.TaskID, MailEventRetried); got != 1 {
+		t.Fatalf("mail_retried events = %d, want 1", got)
+	}
+	var retryAudits int
+	if err := database.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM audit_events WHERE action='mail.message.retry' AND resource_id=?`,
+		message2.ID).Scan(&retryAudits); err != nil {
+		t.Fatal(err)
+	}
+	if retryAudits != 1 {
+		t.Fatalf("retry audit count = %d, want 1", retryAudits)
+	}
 	_ = digest
 }
 
@@ -162,11 +192,11 @@ func TestMailClaimReclaimPreData(t *testing.T) {
 	ctx := context.Background()
 	database, _, message, _, digest := newMailOutboxFixture(t)
 	now := time.Now().UTC()
-	_, _, err := database.ApproveMailMessage(ctx, message.ID, digest, "owner-1", now)
+	_, _, _, err := database.ApproveMailMessage(ctx, message.ID, digest, "owner-1", "", now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	delivery, ok, err := database.ClaimMailDelivery(ctx, "", now, 5*time.Minute)
+	delivery, ok, _, err := database.ClaimMailDelivery(ctx, "", now, 5*time.Minute)
 	if err != nil || !ok {
 		t.Fatalf("claim: ok=%v err=%v", ok, err)
 	}
@@ -187,7 +217,7 @@ func TestMailClaimReclaimPreData(t *testing.T) {
 		`UPDATE mail_deliveries SET lease_until=? WHERE id=?`, mailTimeString(expired), delivery.ID); err != nil {
 		t.Fatal(err)
 	}
-	reclaimed, err := database.ReclaimExpiredMailDeliveries(ctx, now)
+	reclaimed, _, err := database.ReclaimExpiredMailDeliveries(ctx, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,16 +239,19 @@ func TestMailClaimReclaimPreData(t *testing.T) {
 	if storedMessage.Status != domain.MailMessageQueued {
 		t.Fatalf("message did not return to queued: %s", storedMessage.Status)
 	}
+	if got := countTimelineEvents(t, database, message.TaskID, MailEventQueued); got != 1 {
+		t.Fatalf("mail_queued events = %d, want 1", got)
+	}
 }
 
 func TestMailReclaimDataPhaseGoesDeadLetter(t *testing.T) {
 	ctx := context.Background()
 	database, _, message, _, digest := newMailOutboxFixture(t)
 	now := time.Now().UTC()
-	if _, _, err := database.ApproveMailMessage(ctx, message.ID, digest, "owner-1", now); err != nil {
+	if _, _, _, err := database.ApproveMailMessage(ctx, message.ID, digest, "owner-1", "", now); err != nil {
 		t.Fatal(err)
 	}
-	delivery, ok, err := database.ClaimMailDelivery(ctx, "", now, 5*time.Minute)
+	delivery, ok, _, err := database.ClaimMailDelivery(ctx, "", now, 5*time.Minute)
 	if err != nil || !ok {
 		t.Fatalf("claim: ok=%v err=%v", ok, err)
 	}
@@ -230,7 +263,7 @@ func TestMailReclaimDataPhaseGoesDeadLetter(t *testing.T) {
 		`UPDATE mail_deliveries SET lease_until=? WHERE id=?`, mailTimeString(expired), delivery.ID); err != nil {
 		t.Fatal(err)
 	}
-	reclaimed, err := database.ReclaimExpiredMailDeliveries(ctx, now)
+	reclaimed, _, err := database.ReclaimExpiredMailDeliveries(ctx, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -253,12 +286,15 @@ func TestMailReclaimDataPhaseGoesDeadLetter(t *testing.T) {
 	if storedMessage.Status != domain.MailMessageDeadLetter {
 		t.Fatalf("message status = %s", storedMessage.Status)
 	}
+	if got := countTimelineEvents(t, database, message.TaskID, MailEventDeadLetter); got != 1 {
+		t.Fatalf("mail_dead_letter events = %d, want 1", got)
+	}
 }
 
 func TestMailSubmittedMessageCannotReturnToPending(t *testing.T) {
 	ctx := context.Background()
 	database, _, message, _, digest := newMailOutboxFixture(t)
-	if _, err := database.SubmitMailMessage(ctx, message.ID, digest, time.Now().UTC()); !errors.Is(err, ErrMailInvalidState) {
+	if _, _, err := database.SubmitMailMessage(ctx, message.ID, digest, time.Now().UTC()); !errors.Is(err, ErrMailInvalidState) {
 		t.Fatalf("resubmit pending message error = %v", err)
 	}
 }
@@ -267,7 +303,7 @@ func TestMailCancelQueuedBackoff(t *testing.T) {
 	ctx := context.Background()
 	database, _, message, _, digest := newMailOutboxFixture(t)
 	now := time.Now().UTC()
-	_, delivery, err := database.ApproveMailMessage(ctx, message.ID, digest, "owner-1", now)
+	_, delivery, _, err := database.ApproveMailMessage(ctx, message.ID, digest, "owner-1", "", now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -276,7 +312,7 @@ func TestMailCancelQueuedBackoff(t *testing.T) {
 		mailTimeString(now.Add(time.Hour)), delivery.ID); err != nil {
 		t.Fatal(err)
 	}
-	cancelled, err := database.CancelMailMessage(ctx, message.ID, "owner-1", now)
+	cancelled, _, err := database.CancelMailMessage(ctx, message.ID, "owner-1", now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -304,7 +340,7 @@ func TestMailReclaimRollsBackWhenMessageCannotFollow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := database.ReclaimExpiredMailDeliveries(ctx, now); err == nil {
+	if _, _, err := database.ReclaimExpiredMailDeliveries(ctx, now); err == nil {
 		t.Fatal("reclaim accepted a Message that could not follow its Delivery")
 	}
 	stored, err := database.MailDelivery(ctx, delivery.ID)
@@ -334,7 +370,7 @@ func TestMailReclaimRollsBackWhenMessageCannotFollow(t *testing.T) {
 		t.Fatalf("reclaim failure audit count = %d, want 1", countAudit())
 	}
 	// A repeated failed round must not grow the audit table.
-	_, _ = database.ReclaimExpiredMailDeliveries(ctx, now)
+	_, _, _ = database.ReclaimExpiredMailDeliveries(ctx, now)
 	if countAudit() != 1 {
 		t.Fatalf("reclaim failure audit repeated: %d", countAudit())
 	}
@@ -355,7 +391,7 @@ func TestMailReclaimExhaustedAttempts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reclaimed, err := database.ReclaimExpiredMailDeliveries(ctx, now)
+	reclaimed, _, err := database.ReclaimExpiredMailDeliveries(ctx, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -388,10 +424,10 @@ func TestMailFinishRejectsStaleLease(t *testing.T) {
 	ctx := context.Background()
 	database, _, message, _, digest := newMailOutboxFixture(t)
 	now := time.Now().UTC()
-	if _, _, err := database.ApproveMailMessage(ctx, message.ID, digest, "owner-1", now); err != nil {
+	if _, _, _, err := database.ApproveMailMessage(ctx, message.ID, digest, "owner-1", "", now); err != nil {
 		t.Fatal(err)
 	}
-	delivery, ok, err := database.ClaimMailDelivery(ctx, "", now, 5*time.Minute)
+	delivery, ok, _, err := database.ClaimMailDelivery(ctx, "", now, 5*time.Minute)
 	if err != nil || !ok {
 		t.Fatalf("claim: ok=%v err=%v", ok, err)
 	}
@@ -400,7 +436,8 @@ func TestMailFinishRejectsStaleLease(t *testing.T) {
 		`UPDATE mail_deliveries SET lease_id='new-lease' WHERE id=?`, delivery.ID); err != nil {
 		t.Fatal(err)
 	}
-	ok, err = database.FinishMailDelivery(ctx, delivery, delivery.LeaseID, MailDeliveryResultPatch{
+	var events []domain.Event
+	ok, events, err = database.FinishMailDelivery(ctx, delivery, delivery.LeaseID, MailDeliveryResultPatch{
 		State: domain.MailDeliverySent, Outcome: domain.MailAttemptSent,
 		OutcomeCertainty: domain.MailOutcomeProviderAccepted,
 		Phase:            domain.MailSMTPPhaseFinished,
@@ -422,19 +459,138 @@ func TestMailFinishRejectsStaleLease(t *testing.T) {
 	if storedMessage.Status != domain.MailMessageSending {
 		t.Fatalf("stale worker overwrote message: %s", storedMessage.Status)
 	}
+	if len(events) != 0 {
+		t.Fatalf("stale worker produced timeline events: %+v", events)
+	}
+	var sentEvents int
+	if err := database.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM events WHERE aggregate_id=? AND type=?`,
+		message.TaskID, MailEventSent).Scan(&sentEvents); err != nil {
+		t.Fatal(err)
+	}
+	if sentEvents != 0 {
+		t.Fatalf("stale worker wrote %d mail_sent events", sentEvents)
+	}
+}
+
+func TestMailTimelineEventsAndCardUpsert(t *testing.T) {
+	ctx := context.Background()
+	database, _, message, _, digest := newMailOutboxFixture(t)
+	now := time.Now().UTC()
+
+	countEvents := func(eventType string) int {
+		var count int
+		if err := database.db.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM events WHERE aggregate_id=? AND type=?`,
+			message.TaskID, eventType).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		return count
+	}
+	countCards := func() int {
+		var count int
+		if err := database.db.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM conversation_items
+			 WHERE task_id=? AND category='mail' AND kind='mail_message'`,
+			message.TaskID).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		return count
+	}
+	card := func() (string, int64, string) {
+		var id, payload string
+		var sequence int64
+		if err := database.db.QueryRowContext(ctx,
+			`SELECT id,sequence,payload_json FROM conversation_items
+			 WHERE id=?`, MailCardID(message.ID)).Scan(&id, &sequence, &payload); err != nil {
+			t.Fatal(err)
+		}
+		return id, sequence, payload
+	}
+
+	if countEvents(MailEventApprovalRequested) != 1 || countCards() != 1 {
+		t.Fatalf("submit events/cards = %d/%d", countEvents(MailEventApprovalRequested), countCards())
+	}
+	cardID, sequence, payload := card()
+	if cardID != MailCardID(message.ID) {
+		t.Fatalf("card id = %q", cardID)
+	}
+	if strings.Contains(payload, "Build ready") || strings.Contains(strings.ToLower(payload), "credential") ||
+		strings.Contains(payload, "token") || strings.Contains(payload, "body_text") {
+		t.Fatalf("card payload leaked content: %s", payload)
+	}
+	decoded := map[string]any{}
+	if err := json.Unmarshal([]byte(payload), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	for key := range decoded {
+		switch key {
+		case "message_id", "status", "error_code", "created_at", "occurred_at":
+		default:
+			t.Fatalf("unexpected card payload key %q: %s", key, payload)
+		}
+	}
+
+	if _, _, _, err := database.ApproveMailMessage(ctx, message.ID, digest, "owner-1", "note", now); err != nil {
+		t.Fatal(err)
+	}
+	if countEvents(MailEventApproved) != 1 || countCards() != 1 {
+		t.Fatalf("approve events/cards = %d/%d", countEvents(MailEventApproved), countCards())
+	}
+	if _, _, replayEvents, err := database.ApproveMailMessage(ctx, message.ID, digest, "owner-1", "note", now); err != nil || len(replayEvents) != 0 {
+		t.Fatalf("idempotent approve events = %+v err=%v", replayEvents, err)
+	}
+	delivery, ok, events, err := database.ClaimMailDelivery(ctx, "", now, 5*time.Minute)
+	if err != nil || !ok {
+		t.Fatalf("claim: ok=%v err=%v", ok, err)
+	}
+	if len(events) != 1 || events[0].Type != MailEventSending {
+		t.Fatalf("claim events = %+v", events)
+	}
+	sentOK, events, err := database.FinishMailDelivery(ctx, delivery, delivery.LeaseID, MailDeliveryResultPatch{
+		State: domain.MailDeliverySent, Outcome: domain.MailAttemptSent,
+		OutcomeCertainty: domain.MailOutcomeProviderAccepted,
+		SMTPCode:         250, Phase: domain.MailSMTPPhaseFinished,
+	}, now)
+	if err != nil || !sentOK {
+		t.Fatalf("finish: ok=%v err=%v", sentOK, err)
+	}
+	if len(events) != 1 || events[0].Type != MailEventSent {
+		t.Fatalf("sent events = %+v", events)
+	}
+	cardID2, sequence2, _ := card()
+	if cardID2 != cardID || sequence2 != sequence {
+		t.Fatalf("mail card was reinserted: %q/%d -> %q/%d", cardID, sequence, cardID2, sequence2)
+	}
+	for _, eventType := range []string{MailEventApprovalRequested, MailEventApproved, MailEventSending, MailEventSent} {
+		if countEvents(eventType) != 1 {
+			t.Fatalf("%s event count = %d", eventType, countEvents(eventType))
+		}
+	}
+	// N11: approval audit is written once in the transaction, and idempotent
+	// replay does not add another row.
+	var approvals int
+	if err := database.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM audit_events WHERE action='mail.message.approve' AND resource_id=?`,
+		message.ID).Scan(&approvals); err != nil {
+		t.Fatal(err)
+	}
+	if approvals != 1 {
+		t.Fatalf("approval audit count = %d, want 1", approvals)
+	}
 }
 
 func TestMailCancelSendingIsRejected(t *testing.T) {
 	ctx := context.Background()
 	database, _, message, _, digest := newMailOutboxFixture(t)
 	now := time.Now().UTC()
-	if _, _, err := database.ApproveMailMessage(ctx, message.ID, digest, "owner-1", now); err != nil {
+	if _, _, _, err := database.ApproveMailMessage(ctx, message.ID, digest, "owner-1", "", now); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok, err := database.ClaimMailDelivery(ctx, "", now, 5*time.Minute); err != nil || !ok {
+	if _, ok, _, err := database.ClaimMailDelivery(ctx, "", now, 5*time.Minute); err != nil || !ok {
 		t.Fatalf("claim: ok=%v err=%v", ok, err)
 	}
-	if _, err := database.CancelMailMessage(ctx, message.ID, "owner-1", now); !errors.Is(err, ErrMailInvalidState) {
+	if _, _, err := database.CancelMailMessage(ctx, message.ID, "owner-1", now); !errors.Is(err, ErrMailInvalidState) {
 		t.Fatalf("cancel sending error = %v", err)
 	}
 }

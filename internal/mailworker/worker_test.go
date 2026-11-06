@@ -16,6 +16,7 @@ import (
 	"net/mail"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -152,12 +153,37 @@ func (f *workerFixture) newWorker(server *mailtest.Server, baseURL string) *Work
 }
 
 func (f *workerFixture) newWorkerWithSender(sender Sender, baseURL string) *Worker {
+	return f.newWorkerWithSenderAndPublisher(sender, nil, baseURL)
+}
+
+func (f *workerFixture) newWorkerWithSenderAndPublisher(sender Sender, publisher Publisher, baseURL string) *Worker {
 	return New(Config{
 		Store: f.db, Secrets: fakeSecrets(f.secrets), Sender: sender,
 		Logger: f.logger, Interval: time.Hour, LeaseDuration: 5 * time.Minute,
-		RenewInterval: time.Minute, DownloadBaseURL: baseURL,
+		RenewInterval: time.Minute, DownloadBaseURL: baseURL, Publisher: publisher,
 		Jitter: func(d time.Duration) time.Duration { return d },
 	})
+}
+
+type recordingPublisher struct {
+	mu     sync.Mutex
+	events []domain.Event
+}
+
+func (publisher *recordingPublisher) Publish(_ string, event domain.Event) {
+	publisher.mu.Lock()
+	defer publisher.mu.Unlock()
+	publisher.events = append(publisher.events, event)
+}
+
+func (publisher *recordingPublisher) types() []string {
+	publisher.mu.Lock()
+	defer publisher.mu.Unlock()
+	result := make([]string, 0, len(publisher.events))
+	for _, event := range publisher.events {
+		result = append(result, event.Type)
+	}
+	return result
 }
 
 type fakeSecrets map[string]string
@@ -223,11 +249,11 @@ func (f *workerFixture) createQueuedMessage(subject, body string, link bool, cor
 		f.t.Fatal(err)
 	}
 	digest := mailpkg.ApprovalDigest(message, []domain.MailAttachment{created})
-	message, err = f.db.SubmitMailMessage(ctx, message.ID, digest, now)
+	message, _, err = f.db.SubmitMailMessage(ctx, message.ID, digest, now)
 	if err != nil {
 		f.t.Fatal(err)
 	}
-	message, delivery, err := f.db.ApproveMailMessage(ctx, message.ID, digest, "owner-1", now)
+	message, delivery, _, err := f.db.ApproveMailMessage(ctx, message.ID, digest, "owner-1", "", now)
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -357,7 +383,8 @@ func TestWorkerSendsQueuedDelivery(t *testing.T) {
 	f := newWorkerFixture(t)
 	server := mailtest.Start(t, mailtest.Script{})
 	queued := f.createQueuedMessage("Build ready", "The build is ready", false, false)
-	worker := f.newWorker(server, "")
+	publisher := &recordingPublisher{}
+	worker := f.newWorkerWithSenderAndPublisher(workerTestSender(server), publisher, "")
 	processed, err := worker.ProcessOnce(f.ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -385,6 +412,10 @@ func TestWorkerSendsQueuedDelivery(t *testing.T) {
 	messages := server.Messages()
 	if len(messages) != 1 || !strings.Contains(messageText(t, messages[0]), "The build is ready") {
 		t.Fatalf("smtp message = %#v", messages)
+	}
+	types := publisher.types()
+	if len(types) != 2 || types[0] != store.MailEventSending || types[1] != store.MailEventSent {
+		t.Fatalf("worker published events = %v", types)
 	}
 }
 
@@ -527,7 +558,7 @@ func TestWorkerAccountRotationBetweenClaimAndSendDefers(t *testing.T) {
 		Revision: baselineAccount.Revision, CredentialRef: domain.MailAccountCredentialRef(f.account.ID),
 		SMTPHost: baselineAccount.SMTPHost, SMTPUsername: baselineAccount.SMTPUsername,
 	}
-	delivery, ok, err := f.db.ClaimMailDelivery(f.ctx, f.account.ID, now, 5*time.Minute)
+	delivery, ok, _, err := f.db.ClaimMailDelivery(f.ctx, f.account.ID, now, 5*time.Minute)
 	if err != nil || !ok {
 		t.Fatalf("claim: ok=%v err=%v", ok, err)
 	}
@@ -560,7 +591,7 @@ func TestWorkerLeaseLostBeforeDataDoesNotConnect(t *testing.T) {
 		Revision: baselineAccount.Revision, CredentialRef: domain.MailAccountCredentialRef(f.account.ID),
 		SMTPHost: baselineAccount.SMTPHost, SMTPUsername: baselineAccount.SMTPUsername,
 	}
-	delivery, ok, err := f.db.ClaimMailDelivery(f.ctx, f.account.ID, time.Now().UTC(), 5*time.Minute)
+	delivery, ok, _, err := f.db.ClaimMailDelivery(f.ctx, f.account.ID, time.Now().UTC(), 5*time.Minute)
 	if err != nil || !ok {
 		t.Fatalf("claim: ok=%v err=%v", ok, err)
 	}
@@ -568,9 +599,14 @@ func TestWorkerLeaseLostBeforeDataDoesNotConnect(t *testing.T) {
 	if err := f.exec(`UPDATE mail_deliveries SET lease_id='new-lease' WHERE id=?`, delivery.ID); err != nil {
 		t.Fatal(err)
 	}
+	publisher := &recordingPublisher{}
+	worker = f.newWorkerWithSenderAndPublisher(workerTestSender(server), publisher, "")
 	worker.sendDelivery(f.ctx, delivery, baseline)
 	if server.Connections() != 0 || server.DataSeen() != 0 {
 		t.Fatal("worker connected after losing the delivery lease")
+	}
+	if types := publisher.types(); len(types) != 0 {
+		t.Fatalf("stale worker published events: %v", types)
 	}
 	stored := findDelivery(t, f.db, queued.delivery.ID)
 	if stored.LeaseID != "new-lease" || stored.State != domain.MailDeliverySending {
@@ -740,7 +776,7 @@ func TestWorkerPersistsKnown250AfterShutdownSignal(t *testing.T) {
 	f := newWorkerFixture(t)
 	queued := f.createQueuedMessage("shutdown", "body", false, false)
 	now := time.Now().UTC()
-	delivery, ok, err := f.db.ClaimMailDelivery(f.ctx, f.account.ID, now, 5*time.Minute)
+	delivery, ok, _, err := f.db.ClaimMailDelivery(f.ctx, f.account.ID, now, 5*time.Minute)
 	if err != nil || !ok {
 		t.Fatalf("claim: ok=%v err=%v", ok, err)
 	}

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
+	"github.com/ChinaKai/AHA2/internal/store"
 )
 
 func (f *mailAPIFixture) createMessage(payload map[string]any) map[string]any {
@@ -26,6 +27,66 @@ func (f *mailAPIFixture) approve(id, digest string) map[string]any {
 	return f.request(http.MethodPost, "/api/v1/mail-messages/"+id+"/approve", map[string]any{
 		"expected_digest": digest,
 	}, f.csrf)
+}
+
+func TestMailContentFingerprintIncludesFromAndSortedBCC(t *testing.T) {
+	base := mailContentFingerprint("task-1", "account-1", "noreply@example.com", "AHA",
+		[]string{"qa@example.com"}, nil, []string{"b@example.com", "a@example.com"},
+		"subject", "text", "", nil)
+	same := mailContentFingerprint("task-1", "account-1", "noreply@example.com", "AHA",
+		[]string{"qa@example.com"}, nil, []string{"a@example.com", "b@example.com"},
+		"subject", "text", "", nil)
+	if base != same {
+		t.Fatal("BCC order changed the content fingerprint")
+	}
+	changes := map[string]string{
+		"from":      mailContentFingerprint("task-1", "account-1", "other@example.com", "AHA", []string{"qa@example.com"}, nil, []string{"a@example.com", "b@example.com"}, "subject", "text", "", nil),
+		"from name": mailContentFingerprint("task-1", "account-1", "noreply@example.com", "Other", []string{"qa@example.com"}, nil, []string{"a@example.com", "b@example.com"}, "subject", "text", "", nil),
+		"bcc":       mailContentFingerprint("task-1", "account-1", "noreply@example.com", "AHA", []string{"qa@example.com"}, nil, []string{"a@example.com"}, "subject", "text", "", nil),
+	}
+	for name, value := range changes {
+		if value == base {
+			t.Fatalf("%s change did not alter the fingerprint", name)
+		}
+	}
+}
+
+func TestMailCreatePublishesApprovalRequestedEvent(t *testing.T) {
+	f := newMailAPIFixture(t)
+	account := f.createAccount("event-code")
+	events, unsubscribe := f.api.app.Hub().Subscribe(f.task.ID)
+	defer unsubscribe()
+	created := f.createMessage(map[string]any{
+		"task_id": f.task.ID, "account_id": account["id"], "to": []string{"qa@example.com"},
+		"subject": "event", "body_text": "body-canary", "submit": true,
+		"idempotency_key": "event-1",
+	})
+	if created["_status"].(float64) != http.StatusCreated {
+		t.Fatalf("create = %#v", created)
+	}
+	select {
+	case event := <-events:
+		if event.Type != store.MailEventApprovalRequested {
+			t.Fatalf("event type = %s", event.Type)
+		}
+		encoded, _ := json.Marshal(event.Data)
+		if strings.Contains(string(encoded), "body-canary") ||
+			strings.Contains(strings.ToLower(string(encoded)), "token") {
+			t.Fatalf("event payload leaked content: %s", encoded)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("approval-requested event was not published")
+	}
+	var cards int
+	if err := f.rawDB().QueryRowContext(f.ctx,
+		`SELECT COUNT(*) FROM conversation_items
+		 WHERE task_id=? AND category='mail' AND kind='mail_message'`,
+		f.task.ID).Scan(&cards); err != nil {
+		t.Fatal(err)
+	}
+	if cards != 1 {
+		t.Fatalf("mail card count = %d, want 1", cards)
+	}
 }
 
 func TestMailApprovalIsOwnerOnlyAndRejectsChangedDigest(t *testing.T) {
@@ -126,11 +187,18 @@ func TestMailApprovalIsOwnerOnlyAndRejectsChangedDigest(t *testing.T) {
 	if delivery["state"] != string(domain.MailDeliveryQueued) || delivery["approved_digest"] != digest2 {
 		t.Fatalf("delivery = %#v", delivery)
 	}
-	// Repeated approval with the same digest is idempotent.
+	if f.auditCount("mail.message.approve", id2) != 1 {
+		t.Fatalf("approval audit count = %d, want 1", f.auditCount("mail.message.approve", id2))
+	}
+	// Repeated approval with the same digest is idempotent and must not add a
+	// second audit row.
 	repeated := f.approve(id2, digest2)
 	if repeated["_status"].(float64) != http.StatusOK ||
 		repeated["delivery"].(map[string]any)["id"] != delivery["id"] {
 		t.Fatalf("repeated approve = %#v", repeated)
+	}
+	if f.auditCount("mail.message.approve", id2) != 1 {
+		t.Fatalf("idempotent approval duplicated audit: %d", f.auditCount("mail.message.approve", id2))
 	}
 
 	// Terminal Task: an existing pending_approval may still be approved, but a
@@ -161,7 +229,7 @@ func TestMailApprovalIsOwnerOnlyAndRejectsChangedDigest(t *testing.T) {
 	}
 
 	// Once a worker owns the queued delivery, cancellation is refused.
-	claimed, ok, err := f.database.ClaimMailDelivery(f.ctx, "", time.Now().UTC(), 5*time.Minute)
+	claimed, ok, _, err := f.database.ClaimMailDelivery(f.ctx, "", time.Now().UTC(), 5*time.Minute)
 	if err != nil || !ok {
 		t.Fatalf("claim: ok=%v err=%v", ok, err)
 	}
