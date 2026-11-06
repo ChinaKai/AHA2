@@ -136,8 +136,11 @@ class APIClient {
       ok = response.ok;
       const body = await response.json().catch(() => ({})) as Record<string, unknown>;
       if (!response.ok) {
-        const error = new Error(String(body.message || body.error || `HTTP ${response.status}`)) as Error & {code?: string; status?: number};
-        error.code = String(body.error || "");
+        // Mail routes use {"ok":false,"error":{"code","message"}}; other routes
+        // use a string error code. Normalize both so callers can branch on code.
+        const nested = body.error && typeof body.error === "object" ? body.error as Record<string, unknown> : null;
+        const error = new Error(String(body.message || nested?.message || body.error || `HTTP ${response.status}`)) as Error & {code?: string; status?: number};
+        error.code = String(nested?.code || (typeof body.error === "string" ? body.error : ""));
         error.status = response.status;
         throw error;
       }
@@ -1141,12 +1144,20 @@ class APIClient {
     return this.request(`/api/v1/mail-templates/${encodeURIComponent(id)}`, {method: "DELETE"});
   }
 
+  purgeMailTemplate(id: string): Promise<{ok: boolean; purged: boolean}> {
+    return this.request(`/api/v1/mail-templates/${encodeURIComponent(id)}?purge=1`, {method: "DELETE"});
+  }
+
   mailTemplateVersions(id: string): Promise<{ok: boolean; versions: MailTemplateVersion[]}> {
     return this.request(`/api/v1/mail-templates/${encodeURIComponent(id)}/versions`);
   }
 
   previewMailTemplate(id: string, payload: Record<string, unknown>): Promise<{ok: boolean; preview: Record<string, unknown>}> {
     return this.request(`/api/v1/mail-templates/${encodeURIComponent(id)}/preview`, {method: "POST", body: JSON.stringify(payload)});
+  }
+
+  previewMailTemplateContent(payload: Record<string, unknown>): Promise<{ok: boolean; preview: Record<string, unknown>}> {
+    return this.request("/api/v1/mail-templates/preview", {method: "POST", body: JSON.stringify(payload)});
   }
 
   mailBindings(scopeType: string, scopeID: string): Promise<{ok: boolean; bindings: MailBinding[]}> {

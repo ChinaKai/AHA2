@@ -1,6 +1,7 @@
 import {api} from "./api.js";
 import {icon} from "./icons.js";
-import {formatMailBytes, formatMailTime, mailAttachmentsHtml, mailCanCancel, mailCanDecide, mailCanRetry, mailDigestShort, mailStatusClass, mailStatusLabel} from "./mail_cards.js";
+import {formatMailBytes, formatMailTime, mailAttachmentsHtml, mailCanCancel, mailCanDecide, mailCanRetry, mailDigestShort, mailPreviewSamples, mailPreviewVariablePayload, mailStatusClass, mailStatusLabel, mailTemplatePlaceholders, mailTemplateVariables, openMailPreviewDialog} from "./mail_cards.js";
+import type {MailPreviewData} from "./mail_cards.js";
 import type {MailAccount, MailAttachment, MailDelivery, MailDeliveryAttempt, MailMessage, MailTemplate, MailTemplateVersion, Project} from "./types.js";
 
 type Notice = (type: "error" | "notice", message: string) => void;
@@ -14,6 +15,7 @@ export interface MailResourcesData {
   projects: Project[];
   filterStatus: string;
   filterAccount: string;
+  showArchived: boolean;
   loading: boolean;
   error: string;
 }
@@ -55,24 +57,42 @@ function accountsPanel(data: MailResourcesData): string {
   </section>`;
 }
 
-function templateRows(data: MailResourcesData): string {
-  return data.templates.map(template => `<article class="mail-resource-row" data-mail-template="${escapeHTML(template.id)}">
-    <div class="mail-resource-identity"><span class="mail-resource-glyph">${icon("mail")}</span><div><strong>${escapeHTML(template.name)}</strong><small>${template.scope === "project" ? `项目模板 · ${escapeHTML(data.projects.find(project => project.id === template.project_id)?.name || template.project_id || "")}` : "全局模板"} · v${Number(template.current_version)}</small><small>默认收件人：${escapeHTML((template.default_to || []).join(", ") || "无")}${(template.default_cc || []).length ? ` · 默认 CC：${escapeHTML(template.default_cc.join(", "))}` : ""}</small></div></div>
-    <div class="mail-resource-meta"><span class="mail-status ${template.status === "active" ? "sent" : "muted"}">${template.status === "active" ? "启用" : "已归档"}</span><span>更新 ${escapeHTML(formatMailTime(template.updated_at))}</span><span>${(template.required_variables || []).length} 个必填变量</span></div>
+function templateRows(data: MailResourcesData, templates: MailTemplate[]): string {
+  return templates.map(template => {
+    const legacy = template.scope === "project";
+    const legacyName = data.projects.find(project => project.id === template.project_id)?.name || template.project_id || "";
+    return `<article class="mail-resource-row" data-mail-template="${escapeHTML(template.id)}">
+    <div class="mail-resource-identity"><span class="mail-resource-glyph">${icon("mail")}</span><div><strong>${escapeHTML(template.name)}${legacy ? ` <span class="mail-template-badge legacy">旧项目模板</span>` : ""}</strong><small>${legacy ? `项目：${escapeHTML(legacyName)}` : "全局模板"} · v${Number(template.current_version)}</small><small>默认收件人：${escapeHTML((template.default_to || []).join(", ") || "无")}${(template.default_cc || []).length ? ` · 默认 CC：${escapeHTML(template.default_cc.join(", "))}` : ""}</small></div></div>
+    <div class="mail-resource-meta"><span class="mail-status ${template.status === "active" ? "sent" : "muted"}">${template.status === "active" ? "启用" : "已归档"}</span><span>更新 ${escapeHTML(formatMailTime(template.updated_at))}</span><span>${(template.required_variables || []).length} 个变量</span></div>
     <div class="mail-resource-actions">
-      <button type="button" class="icon-button" data-mail-template-edit="${escapeHTML(template.id)}" title="编辑模板" aria-label="编辑模板">${icon("edit")}</button>
-      <button type="button" class="icon-button" data-mail-template-preview="${escapeHTML(template.id)}" title="预览模板" aria-label="预览模板">${icon("eye")}</button>
+      ${template.status === "active" ? `<button type="button" class="icon-button" data-mail-template-edit="${escapeHTML(template.id)}" title="编辑模板" aria-label="编辑模板">${icon("edit")}</button>
+      <button type="button" class="icon-button" data-mail-template-preview="${escapeHTML(template.id)}" title="预览模板" aria-label="预览模板">${icon("eye")}</button>` : ""}
       <button type="button" class="icon-button" data-mail-template-versions="${escapeHTML(template.id)}" title="版本历史" aria-label="版本历史">${icon("clock")}</button>
       ${template.status === "active" ? `<button type="button" class="icon-button danger" data-mail-template-archive="${escapeHTML(template.id)}" title="归档模板" aria-label="归档模板">${icon("close")}</button>` : ""}
+      <button type="button" class="link-danger" data-mail-template-purge="${escapeHTML(template.id)}" title="仅未被邮件或绑定引用时可彻底删除">彻底删除</button>
     </div>
-  </article>`).join("");
+  </article>`;
+  }).join("");
 }
 
 function templatesPanel(data: MailResourcesData): string {
-  const rows = templateRows(data);
+  const active = data.templates.filter(template => template.status === "active");
+  const archived = data.templates.filter(template => template.status !== "active");
+  const activeRows = templateRows(data, active);
+  const archivedRows = templateRows(data, archived);
+  const toggle = `<label class="mail-archive-toggle"><input type="checkbox" id="mail-show-archived" ${data.showArchived ? "checked" : ""}>显示归档模板</label>`;
+  let body: string;
+  if (data.loading) {
+    body = `<div class="mail-loading">${icon("spinner", true)}正在加载模板…</div>`;
+  } else if (!active.length && !(data.showArchived && archived.length)) {
+    body = `<div class="empty-state">${icon("mail")}<strong>${archived.length ? "没有启用的邮件模板" : "还没有邮件模板"}</strong><span>${archived.length ? "归档模板已单独存放；勾选「显示归档模板」查看。" : "创建模板后可在发送弹窗中选择并预览。"}</span><button type="button" class="primary" data-mail-template-add-empty>${icon("plus")}新建模板</button></div>`;
+  } else {
+    body = `${activeRows ? `<div class="mail-resource-list">${activeRows}</div>` : `<p class="field-help">没有启用的模板。</p>`}
+      ${data.showArchived && archived.length ? `<div class="mail-archived-section"><strong>已归档模板（${archived.length}）</strong><p class="field-help">归档模板不能编辑或预览，仅在未被邮件或绑定引用时可彻底删除。</p><div class="mail-resource-list">${archivedRows}</div></div>` : ""}`;
+  }
   return `<section class="mail-resources-panel">
-    <div class="resource-panel-toolbar"><div><strong>邮件模板</strong><p>模板版本不可变；已提交邮件保留自己的渲染快照。</p></div><button type="button" id="add-mail-template" class="primary">${icon("plus")}新建模板</button></div>
-    ${data.loading ? `<div class="mail-loading">${icon("spinner", true)}正在加载模板…</div>` : rows ? `<div class="mail-resource-list">${rows}</div>` : `<div class="empty-state">${icon("mail")}<strong>还没有邮件模板</strong><span>创建模板后可在发送弹窗中选择并预览。</span><button type="button" class="primary" data-mail-template-add-empty>${icon("plus")}新建模板</button></div>`}
+    <div class="resource-panel-toolbar"><div><strong>邮件模板</strong><p>模板版本不可变；已提交邮件保留自己的渲染快照。</p></div><div class="mail-template-toolbar-actions">${toggle}<button type="button" id="add-mail-template" class="primary">${icon("plus")}新建模板</button></div></div>
+    ${body}
   </section>`;
 }
 
@@ -146,45 +166,132 @@ export function mailTemplateTableSkeleton(rows: number, columns: number): string
 </table>`;
 }
 
-function templateForm(template: MailTemplate | undefined, projects: Project[]): string {
-  const scope = template?.scope || "global";
-  const projectOptions = projects.filter(project => !project.channel_retired).map(project =>
-    `<option value="${escapeHTML(project.id)}" ${template?.project_id === project.id ? "selected" : ""}>${escapeHTML(project.name)}</option>`).join("");
-  const variables = ["task.id", "task.title", "task.url", "project.name", "workspace.name", "build.version", "build.commit", "build.branch", "build.time", "package.name", "package.size", "package.sha256", "test.scope", "test.notes", "test.environment", "release.version", "release.date", "release.owner", "agent.name"];
-  return `<div class="mail-form-grid">
-    <label>名称<input name="name" maxlength="200" required value="${escapeHTML(template?.name || "")}"></label>
-    <label>作用域<select name="scope"><option value="global" ${scope === "global" ? "selected" : ""}>全局</option><option value="project" ${scope === "project" ? "selected" : ""}>项目</option></select></label>
-    <label data-mail-template-project>项目<select name="project_id">${projectOptions}</select></label>
-    <label>默认收件人（逗号分隔）<input name="default_to" value="${escapeHTML((template?.default_to || []).join(", "))}"></label>
-    <label>默认 CC（逗号分隔）<input name="default_cc" value="${escapeHTML((template?.default_cc || []).join(", "))}"></label>
-    <label class="mail-form-wide">必填变量（逗号分隔）<input name="required_variables" value="${escapeHTML((template?.required_variables || []).join(", "))}" placeholder="test.scope, test.notes"></label>
-  </div>
-  <div class="mail-variable-bar" aria-label="插入变量">${variables.map(name => `<button type="button" data-mail-variable="${name}">{{${name}}}</button>`).join("")}</div>
-  <label>主题<input name="subject_template" required value="${escapeHTML(template?.subject_template || "")}"></label>
-  <label>纯文本正文<textarea name="body_text_template" rows="7">${escapeHTML(template?.body_text_template || "")}</textarea></label>
-  <div class="mail-template-html-tools"><button type="button" data-mail-insert-table>${icon("plus")}插入表格</button><small>生成固定安全样式；单元格内可继续使用模板变量。</small></div>
-  <label>HTML 正文（可选，安全子集）<textarea name="body_html_template" rows="5">${escapeHTML(template?.body_html_template || "")}</textarea></label>
-  <p class="field-help">变量只做字符串替换；HTML 只允许安全子集（含表格专用的安全 style），变量替换后会再次 sanitize。</p>`;
+function csvValues(value: unknown): string[] {
+  return String(value || "").split(",").map(item => item.trim()).filter(Boolean);
 }
 
-function openPreviewDialog(preview: Record<string, any>, notify: Notice): void {
-  document.querySelectorAll<HTMLDialogElement>(".mail-resource-dialog[open]").forEach(open => {
-    open.close();
-    open.remove();
-  });
-  const previous = document.querySelector<HTMLDialogElement>("#mail-template-preview-dialog");
-  previous?.remove();
-  const dialog = document.createElement("dialog");
-  dialog.id = "mail-template-preview-dialog";
-  dialog.className = "wide mail-resource-dialog";
+// The editor's single submit translation. Scope is always global and
+// required_variables is always derived from the content; there is no project
+// or manual-variable field to disagree with this payload.
+export function mailTemplateSubmitPayload(values: Record<string, unknown>, template?: MailTemplate): Record<string, unknown> {
+  const subject = String(values.subject_template || "");
+  const text = String(values.body_text_template || "");
+  const html = String(values.body_html_template || "");
+  return {
+    scope: "global",
+    name: String(values.name || "").trim(),
+    subject_template: subject,
+    body_text_template: text,
+    body_html_template: html,
+    default_to: csvValues(values.default_to),
+    default_cc: csvValues(values.default_cc),
+    required_variables: mailTemplateVariables(subject, text, html),
+    ...(template ? {expected_version: template.current_version} : {}),
+  };
+}
+
+function autoVariablesText(subject: string, text: string, html: string): string {
+  const names = mailTemplateVariables(subject, text, html);
+  return names.length ? names.map(name => `{{${name}}}`).join("、") : "未发现 build/test/release/extra 变量";
+}
+
+export function templateForm(template?: MailTemplate): string {
+  const legacy = template?.scope === "project";
+  const variables = ["task.id", "task.title", "task.url", "project.name", "workspace.name", "build.version", "build.commit", "build.branch", "build.time", "package.name", "package.size", "package.sha256", "test.scope", "test.notes", "test.environment", "release.version", "release.date", "release.owner", "agent.name"];
+  return `<div class="mail-template-form">
+    ${legacy ? `<p class="mail-template-legacy-note">${icon("shield")}旧项目模板：保持原项目作用域，不能改为全局，也不会被伪装成全局模板；允许编辑内容与归档。</p>` : ""}
+    <label>名称<input name="name" maxlength="200" required value="${escapeHTML(template?.name || "")}"></label>
+    <label>主题<input name="subject_template" required value="${escapeHTML(template?.subject_template || "")}"></label>
+    <label>默认收件人（逗号分隔）<input name="default_to" value="${escapeHTML((template?.default_to || []).join(", "))}"></label>
+    <details class="mail-template-advanced">
+      <summary>高级：默认 CC 与自定义纯文本</summary>
+      <label>默认 CC（逗号分隔）<input name="default_cc" value="${escapeHTML((template?.default_cc || []).join(", "))}"></label>
+      <label>自定义纯文本（留空时由后端从 HTML 自动生成）<textarea name="body_text_template" rows="4">${escapeHTML(template?.body_text_template || "")}</textarea></label>
+    </details>
+    <div class="mail-template-editor-head"><strong>HTML 正文</strong><small>主编辑区；可用下方按钮插入变量或安全表格。</small></div>
+    <div class="mail-variable-bar" aria-label="插入变量">${variables.map(name => `<button type="button" data-mail-variable="${name}">{{${name}}}</button>`).join("")}</div>
+    <div class="mail-template-html-tools"><button type="button" data-mail-insert-table>${icon("plus")}插入表格</button><small>生成固定安全样式；单元格内可继续使用模板变量。</small></div>
+    <textarea class="mail-template-html-editor" name="body_html_template" rows="12" aria-label="HTML 正文" placeholder="<p>构建 {{build.version}} 已完成</p>">${escapeHTML(template?.body_html_template || "")}</textarea>
+    <div class="field-help" data-mail-auto-variables>自动识别变量：${escapeHTML(autoVariablesText(template?.subject_template || "", template?.body_text_template || "", template?.body_html_template || ""))}</div>
+    <div class="mail-template-preview-actions"><button type="button" data-mail-template-preview-form>${icon("eye")}预览</button><small>使用内置示例值直接渲染，无需填写 JSON。</small></div>
+    <p class="field-help">变量只做字符串替换；HTML 只允许安全子集（含表格专用的安全 style），变量替换后会再次 sanitize。</p>
+  </div>`;
+}
+
+function previewDataFromResult(
+  preview: Record<string, any>,
+  warnings: string[],
+  samples: Record<string, string>,
+  refresh?: (samples: Record<string, string>) => Promise<MailPreviewData>,
+): MailPreviewData {
   const attachments = Array.isArray(preview.attachments) ? preview.attachments as MailAttachment[] : [];
-  dialog.innerHTML = `<div class="dialog-head"><h2>模板预览</h2><button type="button" data-close class="icon-button" aria-label="关闭">${icon("close")}</button></div>
-    <div class="dialog-body"><p><strong>主题：</strong>${escapeHTML(preview.subject || "")}</p><p><strong>收件人：</strong>${escapeHTML((preview.to || []).join(", "))}</p><p><strong>CC：</strong>${escapeHTML((preview.cc || []).join(", "))}</p>${attachments.length ? mailAttachmentsHtml(attachments) : ""}${(preview.warnings || []).length ? `<ul class="mail-warnings">${(preview.warnings as string[]).map(warning => `<li>${escapeHTML(warning)}</li>`).join("")}</ul>` : ""}<h3>纯文本</h3><pre class="mail-preview-body">${escapeHTML(preview.body_text || "")}</pre><h3>HTML</h3><iframe class="mail-preview-frame" sandbox="" srcdoc="${escapeHTML(preview.body_html || "")}" title="HTML 预览"></iframe></div><div class="dialog-actions"><button type="button" data-close>关闭</button></div>`;
-  document.body.appendChild(dialog);
-  dialog.querySelectorAll("[data-close]").forEach(button => button.addEventListener("click", () => { dialog.close(); dialog.remove(); }));
-  dialog.addEventListener("cancel", () => { dialog.close(); dialog.remove(); });
-  dialog.showModal();
-  if (!preview.subject) notify("error", "预览未返回内容");
+  return {
+    title: "模板预览",
+    subject: String(preview.subject || ""),
+    fromName: "模板预览",
+    fromAddress: "",
+    to: (preview.to || []) as string[],
+    cc: (preview.cc || []) as string[],
+    bodyText: String(preview.body_text || ""),
+    bodyHtml: String(preview.body_html || ""),
+    attachments,
+    warnings: [...warnings, ...((preview.warnings as string[]) || [])],
+    samples,
+    onSampleRefresh: refresh,
+  };
+}
+
+function openStoredTemplatePreview(template: MailTemplate, notify: Notice): void {
+  const names = [...new Set([
+    ...mailTemplatePlaceholders(template.subject_template, template.body_text_template, template.body_html_template),
+    ...(template.required_variables || []),
+  ])].sort();
+  const initialSamples = mailPreviewSamples(names);
+  const request = async (samples: Record<string, string>): Promise<MailPreviewData> => {
+    const payload = mailPreviewVariablePayload(names, samples);
+    const result = await api.previewMailTemplate(template.id, {
+      variables: payload.variables,
+      sample_variables: payload.sample_variables,
+      to: template.default_to,
+      cc: template.default_cc,
+    });
+    return previewDataFromResult(result.preview, payload.warnings, samples, request);
+  };
+  void request(initialSamples).then(data => openMailPreviewDialog(data)).catch(error => notify("error", error instanceof Error ? error.message : String(error)));
+}
+
+function openDraftTemplatePreview(form: HTMLFormElement, template: MailTemplate | undefined, notify: Notice): void {
+  const collect = () => {
+    const values = new FormData(form);
+    const subject = String(values.get("subject_template") || "");
+    const text = String(values.get("body_text_template") || "");
+    const html = String(values.get("body_html_template") || "");
+    return {
+      subject, text, html,
+      to: csvValues(values.get("default_to")),
+      cc: csvValues(values.get("default_cc")),
+      names: mailTemplatePlaceholders(subject, text, html),
+    };
+  };
+  const request = async (samples: Record<string, string>): Promise<MailPreviewData> => {
+    const current = collect();
+    const payload = mailPreviewVariablePayload(current.names, samples);
+    const result = await api.previewMailTemplateContent({
+      name: template?.name || "",
+      subject_template: current.subject,
+      body_text_template: current.text,
+      body_html_template: current.html,
+      default_to: current.to,
+      default_cc: current.cc,
+      variables: payload.variables,
+      sample_variables: payload.sample_variables,
+      to: current.to,
+      cc: current.cc,
+    });
+    return previewDataFromResult(result.preview, payload.warnings, samples, request);
+  };
+  const initial = collect();
+  void request(mailPreviewSamples(initial.names)).then(data => openMailPreviewDialog(data)).catch(error => notify("error", error instanceof Error ? error.message : String(error)));
 }
 
 export function bindMailResources(data: MailResourcesData, actions: MailResourceActions): void {
@@ -279,19 +386,30 @@ export function bindMailResources(data: MailResourcesData, actions: MailResource
   }));
 
   const openTemplateDialog = (template?: MailTemplate) => {
-    const dialog = dialogShell(template ? "编辑邮件模板" : "新建邮件模板", templateForm(template, data.projects));
+    const dialog = dialogShell(template ? "编辑邮件模板" : "新建邮件模板", templateForm(template), template ? "保存" : "创建");
     appendDialog(dialog);
     const form = dialog.querySelector<HTMLFormElement>(".mail-dialog-form");
-    const syncScope = () => {
-      const scope = String(new FormData(form!).get("scope") || "global");
-      form?.querySelectorAll<HTMLElement>("[data-mail-template-project]").forEach(element => { element.hidden = scope !== "project"; });
+    if (!form) return;
+    let lastField: HTMLTextAreaElement | HTMLInputElement | null =
+      form.querySelector<HTMLTextAreaElement>('textarea[name="body_html_template"]');
+    form.addEventListener("focusin", event => {
+      const target = event.target;
+      if (target instanceof HTMLTextAreaElement || target instanceof HTMLInputElement) lastField = target;
+    });
+    const syncAutoVariables = () => {
+      const values = new FormData(form);
+      const target = form.querySelector<HTMLElement>("[data-mail-auto-variables]");
+      if (target) {
+        target.textContent = `自动识别变量：${autoVariablesText(
+          String(values.get("subject_template") || ""),
+          String(values.get("body_text_template") || ""),
+          String(values.get("body_html_template") || ""),
+        )}`;
+      }
     };
-    form?.querySelector('select[name="scope"]')?.addEventListener("change", syncScope);
-    syncScope();
-    form?.querySelectorAll<HTMLButtonElement>("[data-mail-variable]").forEach(button => button.addEventListener("click", () => {
-      const target = document.activeElement instanceof HTMLTextAreaElement || document.activeElement instanceof HTMLInputElement
-        ? document.activeElement as HTMLTextAreaElement | HTMLInputElement
-        : form.querySelector<HTMLTextAreaElement>('textarea[name="body_text_template"]');
+    form.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>('input[name="subject_template"], textarea[name="body_text_template"], textarea[name="body_html_template"]').forEach(input => input.addEventListener("input", syncAutoVariables));
+    form.querySelectorAll<HTMLButtonElement>("[data-mail-variable]").forEach(button => button.addEventListener("click", () => {
+      const target = lastField || form.querySelector<HTMLTextAreaElement>('textarea[name="body_html_template"]');
       if (!target) return;
       const token = `{{${button.dataset.mailVariable}}}`;
       const start = target.selectionStart ?? target.value.length;
@@ -299,8 +417,9 @@ export function bindMailResources(data: MailResourcesData, actions: MailResource
       target.value = `${target.value.slice(0, start)}${token}${target.value.slice(end)}`;
       target.focus();
       target.setSelectionRange(start + token.length, start + token.length);
+      target.dispatchEvent(new Event("input", {bubbles: true}));
     }));
-    form?.querySelector<HTMLButtonElement>("[data-mail-insert-table]")?.addEventListener("click", () => {
+    form.querySelector<HTMLButtonElement>("[data-mail-insert-table]")?.addEventListener("click", () => {
       const textarea = form.querySelector<HTMLTextAreaElement>('textarea[name="body_html_template"]');
       if (!textarea) return;
       const rowsInput = window.prompt("表格正文行数（1-50）", "3");
@@ -319,27 +438,25 @@ export function bindMailResources(data: MailResourcesData, actions: MailResource
       textarea.value = `${textarea.value.slice(0, start)}${skeleton}${textarea.value.slice(end)}`;
       textarea.focus();
       textarea.setSelectionRange(start + skeleton.length, start + skeleton.length);
+      textarea.dispatchEvent(new Event("input", {bubbles: true}));
     });
-    form?.addEventListener("submit", event => {
+    form.querySelector<HTMLButtonElement>("[data-mail-template-preview-form]")?.addEventListener("click", () => {
+      // The editor dialog stays open: the preview is a second modal layer.
+      openDraftTemplatePreview(form, template, actions.notify);
+    });
+    form.addEventListener("submit", event => {
       event.preventDefault();
-      const values = new FormData(form);
-      const payload: Record<string, unknown> = {
-        scope: String(values.get("scope") || "global"),
-        project_id: String(values.get("project_id") || ""),
-        name: String(values.get("name") || "").trim(),
-        subject_template: String(values.get("subject_template") || ""),
-        body_text_template: String(values.get("body_text_template") || ""),
-        body_html_template: String(values.get("body_html_template") || ""),
-        default_to: String(values.get("default_to") || "").split(",").map(value => value.trim()).filter(Boolean),
-        default_cc: String(values.get("default_cc") || "").split(",").map(value => value.trim()).filter(Boolean),
-        required_variables: String(values.get("required_variables") || "").split(",").map(value => value.trim()).filter(Boolean),
-      };
-      if (template) payload.expected_version = template.current_version;
+      const values = Object.fromEntries(new FormData(form).entries()) as Record<string, unknown>;
+      const payload = mailTemplateSubmitPayload(values, template);
+      const submit = form.querySelector<HTMLButtonElement>('button[type="submit"]');
+      if (submit) submit.disabled = true;
       const request = template ? api.updateMailTemplate(template.id, payload) : api.createMailTemplate(payload);
       void request.then(async () => {
         await reload();
         actions.notify("notice", template ? "邮件模板已保存" : "邮件模板已创建");
-      }).catch(error => actions.notify("error", error instanceof Error ? error.message : String(error)));
+      }).catch(error => actions.notify("error", error instanceof Error ? error.message : String(error))).finally(() => {
+        if (submit?.isConnected) submit.disabled = false;
+      });
     });
   };
   document.querySelector("#add-mail-template")?.addEventListener("click", () => openTemplateDialog());
@@ -353,22 +470,29 @@ export function bindMailResources(data: MailResourcesData, actions: MailResource
     if (!template || !window.confirm(`归档模板“${template.name}”？已提交邮件仍保留快照。`)) return;
     void api.archiveMailTemplate(template.id).then(() => reload()).then(() => actions.notify("notice", "模板已归档")).catch(error => actions.notify("error", error instanceof Error ? error.message : String(error)));
   }));
-  document.querySelectorAll<HTMLElement>("[data-mail-template-preview]").forEach(button => button.addEventListener("click", () => {
-    const template = data.templates.find(item => item.id === button.dataset.mailTemplatePreview);
-    if (!template) return;
-    const dialog = dialogShell(`预览：${template.name}`, `<label>变量（JSON）<textarea name="variables" rows="4">{}</textarea></label><label>收件人（逗号分隔）<input name="to" value="${escapeHTML((template.default_to || []).join(", "))}"></label><p class="field-help">预览不会创建邮件。</p>`, null);
-    appendDialog(dialog);
-    const form = dialog.querySelector<HTMLFormElement>(".mail-dialog-form");
-    form?.addEventListener("submit", event => event.preventDefault());
-    const actionsRow = dialog.querySelector<HTMLElement>(".dialog-actions");
-    if (actionsRow) actionsRow.insertAdjacentHTML("afterbegin", `<button type="button" id="run-mail-template-preview">生成预览</button>`);
-    dialog.querySelector("#run-mail-template-preview")?.addEventListener("click", () => {
-      let variables: Record<string, string> = {};
-      try { variables = JSON.parse(String(new FormData(form!).get("variables") || "{}")) as Record<string, string>; } catch { actions.notify("error", "变量 JSON 格式不正确"); return; }
-      const to = String(new FormData(form!).get("to") || "").split(",").map(value => value.trim()).filter(Boolean);
-      void api.previewMailTemplate(template.id, {variables, to}).then(result => openPreviewDialog(result.preview, actions.notify)).catch(error => actions.notify("error", error instanceof Error ? error.message : String(error)));
+  document.querySelectorAll<HTMLElement>("[data-mail-template-purge]").forEach(button => button.addEventListener("click", () => {
+    const template = data.templates.find(item => item.id === button.dataset.mailTemplatePurge);
+    if (!template || !window.confirm(`彻底删除模板“${template.name}”？仅未被邮件或绑定引用时可删除，删除后不可恢复。`)) return;
+    void api.purgeMailTemplate(template.id).then(() => reload()).then(() => actions.notify("notice", "模板已彻底删除")).catch(error => {
+      if ((error as {code?: string}).code === "mail_template_in_use") {
+        if (template.status === "active" && window.confirm("该模板已被邮件或绑定引用，只能归档。是否改为归档？")) {
+          void api.archiveMailTemplate(template.id).then(() => reload()).then(() => actions.notify("notice", "模板已归档")).catch(archiveError => actions.notify("error", archiveError instanceof Error ? archiveError.message : String(archiveError)));
+          return;
+        }
+        actions.notify("error", "该模板已被邮件或绑定引用。请改为归档；若仅被绑定引用，请先解除绑定。");
+        return;
+      }
+      actions.notify("error", error instanceof Error ? error.message : String(error));
     });
   }));
+  document.querySelectorAll<HTMLElement>("[data-mail-template-preview]").forEach(button => button.addEventListener("click", () => {
+    const template = data.templates.find(item => item.id === button.dataset.mailTemplatePreview);
+    if (template) openStoredTemplatePreview(template, actions.notify);
+  }));
+  document.querySelector<HTMLInputElement>("#mail-show-archived")?.addEventListener("change", event => {
+    window.dispatchEvent(new CustomEvent("aha-mail-show-archived", {detail: (event.currentTarget as HTMLInputElement).checked}));
+    void actions.reload().catch(error => actions.notify("error", error instanceof Error ? error.message : String(error)));
+  });
   document.querySelectorAll<HTMLElement>("[data-mail-template-versions]").forEach(button => button.addEventListener("click", () => {
     const template = data.templates.find(item => item.id === button.dataset.mailTemplateVersions);
     if (!template) return;

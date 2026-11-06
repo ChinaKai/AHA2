@@ -490,6 +490,117 @@ func TestMailTemplateVersioningAndValidation(t *testing.T) {
 	}
 }
 
+func TestMailTemplatePurgeOnlyWhenUnreferenced(t *testing.T) {
+	f := newMailAPIFixture(t)
+	account := f.createAccount("purge-code")
+	create := func(name, subject string) map[string]any {
+		t.Helper()
+		return f.createTemplate(map[string]any{
+			"scope": "global", "name": name,
+			"subject_template": subject, "body_text_template": "body",
+		})
+	}
+
+	unreferenced := create("未引用", "s")
+	unreferencedID := unreferenced["id"].(string)
+	purged := f.request(http.MethodDelete, "/api/v1/mail-templates/"+unreferencedID+"?purge=1", nil, f.csrf)
+	if purged["_status"].(float64) != http.StatusOK || purged["purged"] != true {
+		t.Fatalf("purge unreferenced = %#v", purged)
+	}
+	if detail := f.request(http.MethodGet, "/api/v1/mail-templates/"+unreferencedID, nil, ""); detail["_status"].(float64) != http.StatusNotFound {
+		t.Fatalf("purged detail = %#v", detail)
+	}
+
+	// A historical message pins the template even when the body is unchanged.
+	messageReferenced := create("被邮件引用", "s")
+	messageTemplateID := messageReferenced["id"].(string)
+	created := f.createMessage(map[string]any{
+		"task_id": f.task.ID, "account_id": account["id"], "template_id": messageTemplateID,
+		"to": []string{"qa@example.com"}, "variables": map[string]string{},
+		"submit": true, "idempotency_key": "purge-message-1",
+	})
+	if created["_status"].(float64) != http.StatusCreated {
+		t.Fatalf("create referenced message = %#v", created)
+	}
+	blocked := f.request(http.MethodDelete, "/api/v1/mail-templates/"+messageTemplateID+"?purge=1", nil, f.csrf)
+	if blocked["_status"].(float64) != http.StatusConflict ||
+		mailErrorCode(t, blocked) != string(domain.MailErrTemplateInUse) {
+		t.Fatalf("purge message-referenced = %#v", blocked)
+	}
+	if detail := f.request(http.MethodGet, "/api/v1/mail-templates/"+messageTemplateID, nil, ""); detail["_status"].(float64) != http.StatusOK {
+		t.Fatalf("message-referenced template removed: %#v", detail)
+	}
+	if versions := f.request(http.MethodGet, "/api/v1/mail-templates/"+messageTemplateID+"/versions", nil, ""); len(versions["versions"].([]any)) != 1 {
+		t.Fatalf("message-referenced versions = %#v", versions)
+	}
+
+	// A binding also blocks purge; unbinding is an explicit Owner action.
+	bindingReferenced := create("被绑定引用", "s")
+	bindingTemplateID := bindingReferenced["id"].(string)
+	binding := f.request(http.MethodPost, "/api/v1/mail-bindings", map[string]any{
+		"scope_type": "task", "scope_id": f.task.ID, "account_id": account["id"],
+		"default_template_id": bindingTemplateID,
+	}, f.csrf)
+	if binding["_status"].(float64) != http.StatusCreated {
+		t.Fatalf("binding = %#v", binding)
+	}
+	blocked = f.request(http.MethodDelete, "/api/v1/mail-templates/"+bindingTemplateID+"?purge=1", nil, f.csrf)
+	if blocked["_status"].(float64) != http.StatusConflict ||
+		mailErrorCode(t, blocked) != string(domain.MailErrTemplateInUse) {
+		t.Fatalf("purge binding-referenced = %#v", blocked)
+	}
+	if detail := f.request(http.MethodGet, "/api/v1/mail-templates/"+bindingTemplateID, nil, ""); detail["_status"].(float64) != http.StatusOK {
+		t.Fatalf("binding-referenced template removed: %#v", detail)
+	}
+	// A referenced template still archives, preserving the phase-one path.
+	archived := f.request(http.MethodDelete, "/api/v1/mail-templates/"+bindingTemplateID, nil, f.csrf)
+	if archived["_status"].(float64) != http.StatusOK {
+		t.Fatalf("archive referenced template = %#v", archived)
+	}
+}
+
+func TestMailTemplateDraftPreviewAndAutoRequiredVariables(t *testing.T) {
+	f := newMailAPIFixture(t)
+	preview := f.request(http.MethodPost, "/api/v1/mail-templates/preview", map[string]any{
+		"subject_template":   "{{task.title}} · {{build.version}}",
+		"body_text_template": "测试范围：{{test.scope}}",
+		"body_html_template": "<p>{{release.version}}</p>",
+		"sample_variables": map[string]string{
+			"task.title": "示例任务", "build.version": "1.2.3",
+			"test.scope": "冒烟", "release.version": "v1.0.0",
+		},
+	}, f.csrf)
+	if preview["_status"].(float64) != http.StatusOK {
+		t.Fatalf("draft preview = %#v", preview)
+	}
+	body := preview["preview"].(map[string]any)
+	if body["subject"] != "示例任务 · 1.2.3" ||
+		!strings.Contains(body["body_text"].(string), "冒烟") ||
+		!strings.Contains(body["body_html"].(string), "v1.0.0") {
+		t.Fatalf("draft preview content = %#v", body)
+	}
+
+	// required_variables comes from the content; a manual list that disagrees
+	// with the placeholders is ignored.
+	created := f.createTemplate(map[string]any{
+		"scope": "global", "name": "自动变量",
+		"subject_template":   "{{build.version}}",
+		"body_text_template": "{{test.scope}}",
+		"body_html_template": "<p>{{release.owner}}</p>",
+		"required_variables": []string{"release.date"},
+	})
+	required := created["required_variables"].([]any)
+	want := []string{"build.version", "release.owner", "test.scope"}
+	if len(required) != len(want) {
+		t.Fatalf("required_variables = %#v, want %#v", required, want)
+	}
+	for index, name := range want {
+		if required[index] != name {
+			t.Fatalf("required_variables = %#v, want %#v", required, want)
+		}
+	}
+}
+
 func TestMailTemplatePreviewXSSAndCIDMapping(t *testing.T) {
 	f := newMailAPIFixture(t)
 	attachment, err := f.database.CreateAttachment(f.ctx, f.task.ID, "screenshot.png", "image/png", []byte("png-bytes"), time.Now().UTC())

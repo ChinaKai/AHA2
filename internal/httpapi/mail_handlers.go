@@ -29,9 +29,9 @@ func mailErrorStatus(code domain.MailErrorCode) int {
 		return http.StatusForbidden
 	case domain.MailErrRateLimited:
 		return http.StatusTooManyRequests
-	case domain.MailErrTemplateVersionConflict, domain.MailErrInvalidState,
-		domain.MailErrDuplicateMessage, domain.MailErrApprovalDigestMismatch,
-		domain.MailErrAccountDisabled:
+	case domain.MailErrTemplateVersionConflict, domain.MailErrTemplateInUse,
+		domain.MailErrInvalidState, domain.MailErrDuplicateMessage,
+		domain.MailErrApprovalDigestMismatch, domain.MailErrAccountDisabled:
 		return http.StatusConflict
 	default:
 		return http.StatusUnprocessableEntity

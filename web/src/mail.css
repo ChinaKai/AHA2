@@ -83,8 +83,11 @@
 .task-mail-binding > div { display: grid; gap: 2px; min-width: 0; }
 .task-mail-binding small { color: var(--muted); font-size: 10px; }
 .task-mail-binding .mail-binding-warning { color: #a15c00; }
-.task-mail-binding-form { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr) auto; gap: 7px; align-items: end; }
-.task-mail-binding-form label { display: grid; gap: 3px; color: var(--muted); font-size: 10px; }
+.task-mail-panel, .task-mail-bindings { min-width: 0; }
+.task-mail-binding-form { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr) auto; gap: 7px; align-items: end; width: 100%; min-width: 0; }
+.task-mail-binding-form label { display: grid; gap: 3px; min-width: 0; color: var(--muted); font-size: 10px; }
+.task-mail-binding-form select { width: 100%; min-width: 0; text-overflow: ellipsis; }
+.task-mail-binding-form button { flex: 0 0 auto; white-space: nowrap; }
 .task-mail-recent { display: grid; gap: 7px; }
 .task-mail-recent > strong { font-size: 12px; }
 .mail-card { display: grid; gap: 8px; padding: 10px; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
@@ -122,4 +125,57 @@
   .mail-card-meta p { grid-template-columns: 64px minmax(0,1fr); }
   .mail-card-actions { position: sticky; bottom: 0; padding-top: 6px; background: #fff; }
   .mail-card-actions button { min-height: 40px; flex: 1 1 auto; }
+}
+
+/* --- Mail template editor and preview ------------------------------------ */
+.mail-template-toolbar-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 10px; }
+.mail-archive-toggle { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11px; white-space: nowrap; }
+.mail-archived-section { display: grid; gap: 8px; padding-top: 10px; border-top: 1px dashed var(--line); }
+.mail-template-badge { display: inline-flex; align-items: center; padding: 2px 6px; border-radius: 999px; font-size: 9px; font-weight: 700; vertical-align: middle; }
+.mail-template-badge.legacy { background: #fff7e6; color: #a15c00; }
+.mail-template-form { display: grid; gap: 10px; min-width: 0; }
+.mail-template-form > label, .mail-template-advanced label { display: grid; gap: 4px; min-width: 0; margin: 0; }
+.mail-template-form input, .mail-template-form select, .mail-template-form textarea { min-width: 0; }
+.mail-template-advanced { border: 1px solid var(--line); border-radius: 5px; padding: 7px 9px; background: #fbfcfe; }
+.mail-template-advanced summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+.mail-template-legacy-note { display: flex; align-items: flex-start; gap: 6px; margin: 0; padding: 8px; border: 1px solid #f1d9a8; border-radius: 5px; background: #fffaf0; color: #a15c00; font-size: 11px; }
+.mail-template-editor-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; }
+.mail-template-editor-head small { color: var(--muted); font-size: 10px; }
+.mail-template-html-editor { min-height: 220px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
+.mail-template-preview-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.mail-template-preview-actions small { color: var(--muted); font-size: 10px; }
+.link-danger { border: 0; padding: 0 4px; background: none; color: var(--red); font-size: 10px; cursor: pointer; }
+.link-danger:hover { text-decoration: underline; }
+.mail-preview-dialog { width: min(720px, calc(100vw - 32px)); max-height: calc(100vh - 48px); }
+.mail-preview-dialog-body { display: grid; gap: 10px; }
+.mail-preview-warning { padding: 8px 10px; border: 1px solid #f1d9a8; border-radius: 5px; background: #fffaf0; color: #a15c00; font-size: 11px; }
+.mail-preview-warning ul { margin: 4px 0 0; padding-left: 18px; }
+.mail-preview-envelope { display: grid; grid-template-columns: 64px minmax(0,1fr); gap: 5px 10px; margin: 0; padding: 10px; border: 1px solid var(--line); border-radius: 5px; background: #fff; font-size: 11px; }
+.mail-preview-envelope dt { color: var(--muted); font-weight: 600; }
+.mail-preview-envelope dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
+.mail-preview-envelope .mail-attachment-list { margin: 0; }
+.mail-preview-toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+.mail-preview-widths, .mail-preview-tabs { display: flex; gap: 4px; }
+.mail-preview-widths button, .mail-preview-tabs button { min-height: 28px; padding: 0 9px; border-radius: 5px; font-size: 11px; }
+.mail-preview-widths button.active, .mail-preview-tabs button.active { border-color: #bcd3f5; background: #edf4ff; color: #1d4ed8; font-weight: 700; }
+.mail-preview-stage { display: flex; justify-content: center; padding: 10px; border: 1px solid var(--line); border-radius: 6px; background: #eef1f5; overflow: auto; }
+.mail-preview-sheet { width: min(600px, 100%); min-width: 0; padding: 10px; border-radius: 4px; background: #fff; }
+.mail-preview-stage[data-width="375"] .mail-preview-sheet { width: min(375px, 100%); }
+.mail-preview-frame { width: 100%; min-height: 260px; border: 0; background: #fff; }
+.mail-preview-empty { padding: 24px; color: var(--muted); font-size: 11px; text-align: center; }
+.mail-preview-note { margin: 0; color: var(--muted); font-size: 10px; }
+.mail-preview-error { margin: 0; color: var(--red); font-size: 11px; }
+.mail-preview-samples { padding: 8px 10px; border: 1px solid var(--line); border-radius: 5px; }
+.mail-preview-samples summary { cursor: pointer; font-size: 12px; }
+.mail-preview-samples-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 8px; margin: 8px 0; }
+.mail-preview-samples-grid label { display: grid; gap: 3px; min-width: 0; color: var(--muted); font-size: 10px; }
+.mail-preview-samples-grid input { min-width: 0; }
+
+@media (max-width: 560px) {
+  .mail-template-toolbar-actions { justify-content: flex-start; }
+  .mail-template-toolbar-actions, .mail-template-toolbar-actions button { width: 100%; }
+  .task-mail-binding-form { grid-template-columns: minmax(0,1fr); }
+  .task-mail-binding-form button { width: 100%; white-space: normal; }
+  .mail-preview-samples-grid { grid-template-columns: minmax(0,1fr); }
+  .mail-preview-envelope { grid-template-columns: minmax(0,1fr); }
 }

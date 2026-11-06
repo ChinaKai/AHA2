@@ -145,6 +145,7 @@ interface State {
   mailMessages: MailMessage[];
   mailFilterStatus: string;
   mailFilterAccount: string;
+  mailShowArchived: boolean;
   mailResourcesLoading: boolean;
   mailResourcesError: string;
   taskMailOptions: TaskMailOptions | null;
@@ -325,6 +326,7 @@ const state: State = {
   mailMessages: [],
   mailFilterStatus: "",
   mailFilterAccount: "",
+  mailShowArchived: false,
   mailResourcesLoading: false,
   mailResourcesError: "",
   taskMailOptions: null,
@@ -2063,6 +2065,7 @@ function mailResourcesData(): MailResourcesData {
     projects: state.projects,
     filterStatus: state.mailFilterStatus,
     filterAccount: state.mailFilterAccount,
+    showArchived: state.mailShowArchived,
     loading,
     error,
   };
@@ -6334,6 +6337,9 @@ window.addEventListener("aha-resources-tab", event => {
 window.addEventListener("aha-mail-subtab", event => {
   const tab = String((event as CustomEvent).detail || "accounts");
   state.mailSubTab = tab === "templates" || tab === "sent" ? tab : "accounts";
+});
+window.addEventListener("aha-mail-show-archived", event => {
+  state.mailShowArchived = Boolean((event as CustomEvent).detail);
 });
 window.addEventListener("hashchange", () => {
   if (!applyLocationHash()) return;

@@ -476,6 +476,7 @@ const (
 	MailErrAccountChanged          MailErrorCode = "mail_account_changed"
 	MailErrCredentialMissing       MailErrorCode = "mail_credential_missing"
 	MailErrTemplateNotFound        MailErrorCode = "mail_template_not_found"
+	MailErrTemplateInUse           MailErrorCode = "mail_template_in_use"
 	MailErrTemplateVersionConflict MailErrorCode = "mail_template_version_conflict"
 	MailErrRecipientInvalid        MailErrorCode = "mail_recipient_invalid"
 	MailErrRecipientNotAllowed     MailErrorCode = "mail_recipient_not_allowed"

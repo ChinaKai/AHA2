@@ -1,6 +1,6 @@
 import {api} from "./api.js";
 import {icon} from "./icons.js";
-import {formatMailBytes, mailCanCancel, mailCanRetry, mailCardHtml} from "./mail_cards.js";
+import {formatMailBytes, mailCanCancel, mailCanRetry, mailCardHtml, openMailPreviewDialog} from "./mail_cards.js";
 import type {MailAccount, MailMessageCard, MailTemplate, TaskDetail, TaskMailAccount, TaskMailOptions} from "./types.js";
 
 type Notice = (type: "error" | "notice", message: string) => void;
@@ -278,7 +278,49 @@ export function bindMailCardActions(container: ParentNode, options: TaskMailOpti
     }
     const message = card.message;
     const action = button.dataset.mailAction;
-    if (action === "approve") {
+    if (action === "review") {
+      // Open the approval snapshot without closing the panel. The dialog owns
+      // only presentation; the existing approve/reject APIs remain the single
+      // decision path.
+      openMailPreviewDialog({
+        title: "查看并审批",
+        subject: message.subject,
+        fromName: message.from_name,
+        fromAddress: message.from_address,
+        to: message.to,
+        cc: message.cc,
+        bcc: message.bcc,
+        bodyText: message.body_text,
+        bodyHtml: message.body_html,
+        attachments: card.attachments || [],
+        width: 600,
+        onApprove: async () => {
+          if (!message.approval_digest || !window.confirm("批准这封邮件并进入投递队列？")) return false;
+          try {
+            await api.approveMailMessage(message.id, message.approval_digest);
+            await actions.reload();
+            actions.notify("notice", "邮件已批准");
+            return true;
+          } catch (error) {
+            actions.notify("error", error instanceof Error ? error.message : String(error));
+            return false;
+          }
+        },
+        onReject: async () => {
+          const reason = window.prompt("拒绝原因（必填）");
+          if (!reason || !window.confirm("拒绝这封邮件？")) return false;
+          try {
+            await api.rejectMailMessage(message.id, reason);
+            await actions.reload();
+            actions.notify("notice", "邮件已拒绝");
+            return true;
+          } catch (error) {
+            actions.notify("error", error instanceof Error ? error.message : String(error));
+            return false;
+          }
+        },
+      });
+    } else if (action === "approve") {
       if (!window.confirm("批准这封邮件并进入投递队列？")) return;
       void api.approveMailMessage(message.id, message.approval_digest || "").then(() => actions.reload()).then(() => actions.notify("notice", "邮件已批准")).catch(error => actions.notify("error", error instanceof Error ? error.message : String(error)));
     } else if (action === "reject") {

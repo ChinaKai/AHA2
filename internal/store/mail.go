@@ -22,6 +22,7 @@ var (
 	ErrMailAddressInUse            = errors.New("mail address already in use")
 	ErrMailTemplateVersionConflict = errors.New("mail template version conflict")
 	ErrMailTemplateArchived        = errors.New("mail template is archived")
+	ErrMailTemplateInUse           = errors.New("mail template has messages or bindings")
 	ErrAttachmentInUse             = errors.New("attachment is referenced by a build artifact")
 )
 

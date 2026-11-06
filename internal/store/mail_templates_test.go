@@ -332,6 +332,96 @@ func TestMailTemplateScopeAndListing(t *testing.T) {
 	}
 }
 
+func TestPurgeMailTemplateOnlyRemovesUnreferencedTemplates(t *testing.T) {
+	ctx := context.Background()
+	database := openMailTestStore(t)
+	create := func(name string) domain.MailTemplate {
+		t.Helper()
+		item, err := database.CreateMailTemplate(ctx, domain.MailTemplate{
+			Scope: domain.MailTemplateScopeGlobal, Name: name,
+			SubjectTemplate: "subject", BodyTextTemplate: "body",
+			RequiredVariables: []string{"build.version"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return item
+	}
+	versionCount := func(templateID string) int {
+		t.Helper()
+		var count int
+		if err := database.db.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM mail_template_versions WHERE template_id=?`, templateID).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		return count
+	}
+
+	unreferenced := create("未引用")
+	if err := database.PurgeMailTemplate(ctx, unreferenced.ID); err != nil {
+		t.Fatalf("purge unreferenced template: %v", err)
+	}
+	if _, err := database.MailTemplate(ctx, unreferenced.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("template after purge error = %v, want sql.ErrNoRows", err)
+	}
+	if count := versionCount(unreferenced.ID); count != 0 {
+		t.Fatalf("versions after purge = %d, want 0", count)
+	}
+	if err := database.PurgeMailTemplate(ctx, unreferenced.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("second purge error = %v, want sql.ErrNoRows", err)
+	}
+
+	taskID, _, _ := createMailTaskFixture(t, database)
+	account := createMailAccountFixture(t, database, "purge", "purge@example.com")
+
+	messageReferenced := create("被邮件引用")
+	message := createMailMessageFixture(t, database, taskID, account.ID, "purge-message")
+	if _, err := database.db.ExecContext(ctx,
+		`UPDATE mail_messages SET template_id=? WHERE id=?`, messageReferenced.ID, message.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.PurgeMailTemplate(ctx, messageReferenced.ID); !errors.Is(err, ErrMailTemplateInUse) {
+		t.Fatalf("purge message-referenced error = %v, want ErrMailTemplateInUse", err)
+	}
+	if stored, err := database.MailTemplate(ctx, messageReferenced.ID); err != nil || stored.ID != messageReferenced.ID {
+		t.Fatalf("message-referenced template changed: %+v, %v", stored, err)
+	}
+	if count := versionCount(messageReferenced.ID); count != 1 {
+		t.Fatalf("message-referenced versions = %d, want 1", count)
+	}
+	// The message still points at the same template; a failed purge must not
+	// trip SQLite's ON DELETE SET NULL.
+	var storedTemplateID string
+	if err := database.db.QueryRowContext(ctx,
+		`SELECT template_id FROM mail_messages WHERE id=?`, message.ID).Scan(&storedTemplateID); err != nil {
+		t.Fatal(err)
+	}
+	if storedTemplateID != messageReferenced.ID {
+		t.Fatalf("message template_id after failed purge = %q, want %q", storedTemplateID, messageReferenced.ID)
+	}
+
+	bindingReferenced := create("被绑定引用")
+	binding, err := database.CreateMailBinding(ctx, domain.MailBinding{
+		ScopeType: domain.MailBindingScopeTask, ScopeID: taskID, AccountID: account.ID,
+		DefaultTemplateID: bindingReferenced.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.PurgeMailTemplate(ctx, bindingReferenced.ID); !errors.Is(err, ErrMailTemplateInUse) {
+		t.Fatalf("purge binding-referenced error = %v, want ErrMailTemplateInUse", err)
+	}
+	if _, err := database.MailTemplate(ctx, bindingReferenced.ID); err != nil {
+		t.Fatalf("binding-referenced template changed: %v", err)
+	}
+	if err := database.DeleteMailBinding(ctx, binding.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.PurgeMailTemplate(ctx, bindingReferenced.ID); err != nil {
+		t.Fatalf("purge after unbind: %v", err)
+	}
+}
+
 func TestMailTemplateUpdateStrictlyAdvancesFromFutureTimestamp(t *testing.T) {
 	ctx := context.Background()
 	database := openMailTestStore(t)

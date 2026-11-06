@@ -266,8 +266,8 @@ func (s *Store) MailTemplates(ctx context.Context, scope domain.MailTemplateScop
 	return result, rows.Err()
 }
 
-// ArchiveMailTemplate keeps template history readable. Templates are never
-// physically deleted.
+// ArchiveMailTemplate keeps template history readable. Archived templates stay
+// resolvable for historical mail snapshots.
 func (s *Store) ArchiveMailTemplate(ctx context.Context, id string, now time.Time) error {
 	if now.IsZero() {
 		now = time.Now().UTC()
@@ -282,6 +282,58 @@ func (s *Store) ArchiveMailTemplate(ctx context.Context, id string, now time.Tim
 		return sql.ErrNoRows
 	}
 	return nil
+}
+
+// PurgeMailTemplate physically removes a template and all of its immutable
+// versions. Both reference checks and the deletes run in one transaction:
+// SQLite's ON DELETE SET NULL would otherwise silently detach a binding or
+// message instead of telling the caller why the template is still needed.
+// A template referenced by any mail message or by a Task/Workspace/Project
+// binding returns ErrMailTemplateInUse without changing any row.
+func (s *Store) PurgeMailTemplate(ctx context.Context, id string) error {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return sql.ErrNoRows
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	// This first write both takes the transaction's write lock and removes the
+	// version rows; it also means a concurrent binder/editor cannot slip a
+	// reference in between the count checks and the template delete. Any
+	// in-use result rolls the versions back.
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM mail_template_versions WHERE template_id=?`, id); err != nil {
+		return err
+	}
+	var messageCount int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM mail_messages WHERE template_id=?`, id).Scan(&messageCount); err != nil {
+		return err
+	}
+	if messageCount > 0 {
+		return ErrMailTemplateInUse
+	}
+	var bindingCount int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM mail_bindings WHERE default_template_id=?`, id).Scan(&bindingCount); err != nil {
+		return err
+	}
+	if bindingCount > 0 {
+		return ErrMailTemplateInUse
+	}
+
+	result, err := tx.ExecContext(ctx, `DELETE FROM mail_templates WHERE id=?`, id)
+	if err != nil {
+		return err
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return sql.ErrNoRows
+	}
+	return tx.Commit()
 }
 
 const mailTemplateVersionColumns = `template_id,version,subject_template,body_text_template,

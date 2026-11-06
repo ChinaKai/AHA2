@@ -87,6 +87,262 @@ export interface MailCardOptions {
   showActions?: boolean;
 }
 
+// Built-in preview samples. They cover every documented server-resolved name
+// plus the common build/test/release fields so "预览" never asks for JSON.
+export const MAIL_SAMPLE_VARIABLES: Record<string, string> = {
+  "task.id": "task_demo_20261106",
+  "task.title": "示例任务：邮件预览",
+  "task.url": "https://aha.example.com/tasks/task_demo_20261106",
+  "project.name": "AHA2",
+  "workspace.name": "WORK-AHA2",
+  "build.version": "1.0.0-rc.1",
+  "build.commit": "b5cd63f",
+  "build.branch": "main",
+  "build.time": "2026-11-06 15:00",
+  "package.name": "aha-web.tar.gz",
+  "package.size": "1048576",
+  "package.sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "test.scope": "整机回归",
+  "test.notes": "示例测试说明",
+  "test.environment": "Android 14 / Chrome",
+  "release.version": "v1.0.0",
+  "release.date": "2026-11-06",
+  "release.owner": "Owner",
+  "agent.name": "AHA Task Agent",
+  "owner.name": "Owner",
+};
+
+const SERVER_SAMPLE_NAMES = new Set([
+  "task.id", "task.title", "task.url", "project.name", "workspace.name",
+  "package.name", "package.size", "package.sha256", "agent.name", "owner.name",
+]);
+
+const CALLER_VARIABLE_PATTERN = /^(build|test|release|extra)\./;
+
+// Mirrors the backend placeholder parser closely enough for the editor: names
+// are exact, no whitespace, and braces must be balanced.
+export function mailTemplatePlaceholders(subject: string, text: string, html: string): string[] {
+  const names = new Set<string>();
+  for (const match of `${subject || ""}\n${text || ""}\n${html || ""}`.matchAll(/\{\{([a-zA-Z0-9_.-]+)\}\}/g)) {
+    names.add(match[1]);
+  }
+  return [...names].sort();
+}
+
+// required_variables only ever contains caller supplied namespaces; server
+// values are resolved from the Task at send time.
+export function mailTemplateVariables(subject: string, text: string, html: string): string[] {
+  return mailTemplatePlaceholders(subject, text, html).filter(name => CALLER_VARIABLE_PATTERN.test(name));
+}
+
+export function mailPreviewSamples(names: string[]): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const name of names) {
+    result[name] = MAIL_SAMPLE_VARIABLES[name] ?? `示例-${name}`;
+  }
+  return result;
+}
+
+// Splits preview values into the caller and trusted sample maps the preview
+// endpoints expect and reports names that had no built-in sample.
+export function mailPreviewVariablePayload(names: string[], samples: Record<string, string> = {}): {
+  variables: Record<string, string>;
+  sample_variables: Record<string, string>;
+  warnings: string[];
+} {
+  const variables: Record<string, string> = {};
+  const sampleVariables: Record<string, string> = {};
+  const warnings: string[] = [];
+  for (const name of names) {
+    let value = samples[name];
+    if (value === undefined || value === "") {
+      value = MAIL_SAMPLE_VARIABLES[name] ?? "";
+      if (!value) {
+        value = `示例-${name}`;
+        warnings.push(`缺少示例变量：${name}`);
+      }
+    }
+    if (SERVER_SAMPLE_NAMES.has(name)) sampleVariables[name] = value;
+    else variables[name] = value;
+  }
+  return {variables, sample_variables: sampleVariables, warnings};
+}
+
+export interface MailPreviewData {
+  title?: string;
+  subject: string;
+  fromName?: string;
+  fromAddress?: string;
+  to?: string[];
+  cc?: string[];
+  bcc?: string[];
+  bodyText?: string;
+  bodyHtml?: string;
+  attachments?: MailAttachment[];
+  warnings?: string[];
+  width?: 600 | 375;
+  tab?: "html" | "text";
+  samples?: Record<string, string>;
+  onSampleRefresh?: (samples: Record<string, string>) => Promise<MailPreviewData>;
+  onApprove?: () => Promise<boolean>;
+  onReject?: () => Promise<boolean>;
+}
+
+function previewWidth(width: number | undefined): 600 | 375 {
+  return width === 375 ? 375 : 600;
+}
+
+function previewTab(tab: string | undefined): "html" | "text" {
+  return tab === "text" ? "text" : "html";
+}
+
+export function mailPreviewDialogHtml(data: MailPreviewData): string {
+  const width = previewWidth(data.width);
+  const tab = previewTab(data.tab);
+  const attachments = data.attachments || [];
+  const warnings = data.warnings || [];
+  const recipient = (values?: string[]) => (values || []).filter(Boolean).join(", ") || "无";
+  const sender = data.fromAddress
+    ? `${data.fromName ? `${escapeHTML(data.fromName)} · ` : ""}${escapeHTML(data.fromAddress)}`
+    : `<span class="field-help">未指定（实际发送时使用 Task 绑定的邮箱账号）</span>`;
+  const samples = data.samples ? Object.entries(data.samples).sort(([left], [right]) => left.localeCompare(right)) : [];
+  const sampleBlock = samples.length ? `<details class="mail-preview-samples"><summary>示例变量（可编辑）</summary>
+    <div class="mail-preview-samples-grid">${samples.map(([name, value]) => `<label>${escapeHTML(name)}<input data-mail-sample-input="${escapeHTML(name)}" value="${escapeHTML(value)}"></label>`).join("")}</div>
+    ${data.onSampleRefresh ? `<button type="button" data-mail-preview-refresh>用这些示例值刷新预览</button>` : ""}
+    <p class="field-help">示例值只用于预览，不会写入模板或邮件。</p>
+  </details>` : "";
+  const htmlBody = String(data.bodyHtml || "").trim();
+  const textBody = String(data.bodyText || "").trim();
+  const htmlPane = htmlBody
+    ? `<iframe class="mail-preview-frame" sandbox="" srcdoc="${escapeHTML(data.bodyHtml || "")}" title="HTML 邮件预览"></iframe>`
+    : `<div class="mail-preview-empty" data-mail-preview-empty="html">邮件没有 HTML 正文。</div>`;
+  const textPane = textBody
+    ? `<pre class="mail-preview-body" data-mail-preview-empty="text">${escapeHTML(data.bodyText || "")}</pre>`
+    : `<div class="mail-preview-empty" data-mail-preview-empty="text">邮件没有纯文本正文。</div>`;
+  return `<div class="dialog-head"><h2>${escapeHTML(data.title || "邮件预览")}</h2><button type="button" data-close class="icon-button" aria-label="关闭">${icon("close")}</button></div>
+    <div class="dialog-body mail-preview-dialog-body">
+      ${warnings.length ? `<div class="mail-preview-warning" role="alert" data-mail-preview-warning><strong>预览提示</strong><ul>${warnings.map(warning => `<li>${escapeHTML(warning)}</li>`).join("")}</ul></div>` : ""}
+      <dl class="mail-preview-envelope">
+        <dt>发件人</dt><dd>${sender}</dd>
+        <dt>To</dt><dd>${escapeHTML(recipient(data.to))}</dd>
+        <dt>CC</dt><dd>${escapeHTML(recipient(data.cc))}</dd>
+        ${(data.bcc || []).length ? `<dt>BCC</dt><dd>${escapeHTML(recipient(data.bcc))}</dd>` : ""}
+        <dt>主题</dt><dd><strong>${escapeHTML(data.subject || "（无主题）")}</strong></dd>
+        <dt>附件</dt><dd>${mailAttachmentsHtml(attachments)}</dd>
+      </dl>
+      <div class="mail-preview-toolbar">
+        <div class="mail-preview-widths" role="group" aria-label="预览宽度">
+          <button type="button" data-mail-preview-width="600" class="${width === 600 ? "active" : ""}" aria-pressed="${width === 600}">600px</button>
+          <button type="button" data-mail-preview-width="375" class="${width === 375 ? "active" : ""}" aria-pressed="${width === 375}">375px</button>
+        </div>
+        <div class="mail-preview-tabs" role="tablist" aria-label="预览格式">
+          <button type="button" data-mail-preview-tab="html" class="${tab === "html" ? "active" : ""}" role="tab" aria-selected="${tab === "html"}">HTML</button>
+          <button type="button" data-mail-preview-tab="text" class="${tab === "text" ? "active" : ""}" role="tab" aria-selected="${tab === "text"}">纯文本</button>
+        </div>
+      </div>
+      <div class="mail-preview-stage" data-mail-preview-stage data-width="${width}">
+        <div class="mail-preview-sheet" data-mail-preview-pane="html" ${tab === "html" ? "" : "hidden"}>${htmlPane}</div>
+        <div class="mail-preview-sheet" data-mail-preview-pane="text" ${tab === "text" ? "" : "hidden"}>${textPane}</div>
+      </div>
+      <p class="mail-preview-note">典型邮件客户端效果；Outlook、Gmail 与深色模式下的显示可能不同。</p>
+      ${sampleBlock}
+      <p class="mail-preview-error" data-mail-preview-error hidden></p>
+    </div>
+    <div class="dialog-actions">
+      ${data.onApprove ? `<button type="button" class="primary" data-mail-preview-decision="approve">批准</button>` : ""}
+      ${data.onReject ? `<button type="button" class="danger" data-mail-preview-decision="reject">拒绝</button>` : ""}
+      <button type="button" data-close>关闭</button>
+    </div>`;
+}
+
+function bindPreviewDialog(dialog: HTMLDialogElement, data: MailPreviewData): void {
+  const paint = (next: MailPreviewData) => {
+    dialog.innerHTML = mailPreviewDialogHtml(next);
+    bindPreviewDialog(dialog, next);
+  };
+  dialog.querySelectorAll("[data-close]").forEach(button => button.addEventListener("click", () => {
+    dialog.close();
+    dialog.remove();
+  }));
+  dialog.addEventListener("cancel", () => {
+    dialog.close();
+    dialog.remove();
+  });
+  const stage = dialog.querySelector<HTMLElement>("[data-mail-preview-stage]");
+  const setWidth = (width: 600 | 375) => {
+    if (stage) stage.dataset.width = String(width);
+    dialog.querySelectorAll<HTMLElement>("[data-mail-preview-width]").forEach(button => {
+      const active = button.dataset.mailPreviewWidth === String(width);
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-pressed", String(active));
+    });
+  };
+  dialog.querySelectorAll<HTMLElement>("[data-mail-preview-width]").forEach(button => button.addEventListener("click", () => {
+    setWidth(button.dataset.mailPreviewWidth === "375" ? 375 : 600);
+  }));
+  const setTab = (tab: "html" | "text") => {
+    dialog.querySelectorAll<HTMLElement>("[data-mail-preview-tab]").forEach(button => {
+      const active = button.dataset.mailPreviewTab === tab;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-selected", String(active));
+    });
+    dialog.querySelectorAll<HTMLElement>("[data-mail-preview-pane]").forEach(pane => {
+      pane.hidden = pane.dataset.mailPreviewPane !== tab;
+    });
+  };
+  dialog.querySelectorAll<HTMLElement>("[data-mail-preview-tab]").forEach(button => button.addEventListener("click", () => {
+    setTab(button.dataset.mailPreviewTab === "text" ? "text" : "html");
+  }));
+  dialog.querySelector<HTMLButtonElement>("[data-mail-preview-refresh]")?.addEventListener("click", event => {
+    const button = event.currentTarget as HTMLButtonElement;
+    button.disabled = true;
+    const values: Record<string, string> = {};
+    dialog.querySelectorAll<HTMLInputElement>("[data-mail-sample-input]").forEach(input => {
+      values[input.dataset.mailSampleInput || ""] = input.value;
+    });
+    void (data.onSampleRefresh?.(values) || Promise.reject(new Error("预览刷新不可用"))).then(next => {
+      paint({...next, samples: values, onSampleRefresh: data.onSampleRefresh, onApprove: data.onApprove, onReject: data.onReject});
+    }).catch(error => {
+      const target = dialog.querySelector<HTMLElement>("[data-mail-preview-error]");
+      if (target) {
+        target.hidden = false;
+        target.textContent = error instanceof Error ? error.message : String(error);
+      }
+      button.disabled = false;
+    });
+  });
+  const decide = (handler: (() => Promise<boolean>) | undefined) => {
+    if (!handler) return;
+    dialog.querySelectorAll("[data-close]").forEach(button => (button as HTMLButtonElement).disabled = true);
+    void handler().then(ok => {
+      if (ok) {
+        dialog.close();
+        dialog.remove();
+      } else {
+        dialog.querySelectorAll("[data-close]").forEach(button => (button as HTMLButtonElement).disabled = false);
+      }
+    }).catch(() => {
+      dialog.querySelectorAll("[data-close]").forEach(button => (button as HTMLButtonElement).disabled = false);
+    }).finally(() => {
+      dialog.querySelectorAll<HTMLButtonElement>("[data-mail-preview-decision]").forEach(button => button.disabled = false);
+    });
+  };
+  dialog.querySelector<HTMLElement>('[data-mail-preview-decision="approve"]')?.addEventListener("click", () => decide(data.onApprove));
+  dialog.querySelector<HTMLElement>('[data-mail-preview-decision="reject"]')?.addEventListener("click", () => decide(data.onReject));
+  dialog.querySelectorAll<HTMLButtonElement>("[data-mail-preview-decision]").forEach(button => button.addEventListener("click", () => {
+    button.disabled = true;
+  }));
+}
+
+export function openMailPreviewDialog(data: MailPreviewData): HTMLDialogElement {
+  const dialog = document.createElement("dialog");
+  dialog.className = "wide mail-resource-dialog mail-preview-dialog";
+  bindPreviewDialog(dialog, data);
+  document.body.appendChild(dialog);
+  dialog.showModal();
+  return dialog;
+}
+
 // One Mail Message always renders as one card, keyed by message id. Status
 // changes update that card instead of appending another one.
 export function mailCardHtml(card: MailMessageCard, options: MailCardOptions = {}): string {
@@ -103,7 +359,7 @@ export function mailCardHtml(card: MailMessageCard, options: MailCardOptions = {
   if (message.status === "sending") warnings.push("发送中，不可取消");
   const actions = canDecide || canCancel || canRetry
     ? `<div class="mail-card-actions">
-      ${canDecide ? `<button type="button" class="primary" data-mail-action="approve" data-mail-message="${escapeHTML(message.id)}">批准</button><button type="button" class="danger" data-mail-action="reject" data-mail-message="${escapeHTML(message.id)}">拒绝</button>` : ""}
+      ${canDecide ? `<button type="button" data-mail-action="review" data-mail-message="${escapeHTML(message.id)}">查看并审批</button><button type="button" class="primary" data-mail-action="approve" data-mail-message="${escapeHTML(message.id)}">批准</button><button type="button" class="danger" data-mail-action="reject" data-mail-message="${escapeHTML(message.id)}">拒绝</button>` : ""}
       ${canRetry ? `<button type="button" data-mail-action="retry" data-mail-message="${escapeHTML(message.id)}">重试</button>` : ""}
       ${canCancel ? `<button type="button" data-mail-action="cancel" data-mail-message="${escapeHTML(message.id)}">取消</button>` : ""}
     </div>`

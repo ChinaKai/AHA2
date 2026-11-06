@@ -29,13 +29,39 @@ type mailTemplatePayload struct {
 }
 
 type mailPreviewPayload struct {
-	Variables        map[string]string `json:"variables"`
+	Variables map[string]string `json:"variables"`
+	// SampleVariables are trusted preview-only sample values. Server-resolved
+	// namespaces (task/project/workspace/package) are accepted here so an editor
+	// can render without a real Task; they never reach message creation.
+	SampleVariables  map[string]string `json:"sample_variables"`
 	To               []string          `json:"to"`
 	CC               []string          `json:"cc"`
 	TaskID           string            `json:"task_id"`
 	AttachmentIDs    []string          `json:"attachment_ids"`
 	BuildArtifactIDs []string          `json:"build_artifact_ids"`
 }
+
+// mailDraftPreviewPayload renders editor content that has not been saved yet.
+// It deliberately reuses the same render pipeline as message creation.
+type mailDraftPreviewPayload struct {
+	SubjectTemplate  string            `json:"subject_template"`
+	BodyTextTemplate string            `json:"body_text_template"`
+	BodyHTMLTemplate string            `json:"body_html_template"`
+	DefaultTo        []string          `json:"default_to"`
+	DefaultCC        []string          `json:"default_cc"`
+	Variables        map[string]string `json:"variables"`
+	SampleVariables  map[string]string `json:"sample_variables"`
+	To               []string          `json:"to"`
+	CC               []string          `json:"cc"`
+	TaskID           string            `json:"task_id"`
+	AttachmentIDs    []string          `json:"attachment_ids"`
+	BuildArtifactIDs []string          `json:"build_artifact_ids"`
+}
+
+var (
+	errMailPreviewTaskNotFound = errors.New("mail preview task not found")
+	errMailTaskURLUnconfigured = errors.New("mail task url is unconfigured")
+)
 
 func mailTemplateContent(item domain.MailTemplate) mailpkg.Template {
 	return mailpkg.Template{
@@ -102,6 +128,14 @@ func (s *Server) createMailTemplate(writer http.ResponseWriter, request *http.Re
 		writeMailError(writer, http.StatusUnprocessableEntity, domain.MailErrTemplateInvalid, "模板名称必填")
 		return
 	}
+	// required_variables is derived from the template text; a client can no
+	// longer persist a manual list that disagrees with the placeholders.
+	required, err := mailpkg.CallerVariables(mailTemplateContent(item))
+	if err != nil {
+		writeMailFailure(writer, err, "邮件模板校验失败")
+		return
+	}
+	item.RequiredVariables = required
 	if err := mailpkg.ValidateTemplate(mailTemplateContent(item)); err != nil {
 		writeMailFailure(writer, err, "邮件模板校验失败")
 		return
@@ -195,6 +229,12 @@ func (s *Server) updateMailTemplate(writer http.ResponseWriter, request *http.Re
 		writeMailError(writer, http.StatusUnprocessableEntity, domain.MailErrTemplateInvalid, "模板名称必填")
 		return
 	}
+	required, err := mailpkg.CallerVariables(mailTemplateContent(item))
+	if err != nil {
+		writeMailFailure(writer, err, "邮件模板校验失败")
+		return
+	}
+	item.RequiredVariables = required
 	if err := mailpkg.ValidateTemplate(mailTemplateContent(item)); err != nil {
 		writeMailFailure(writer, err, "邮件模板校验失败")
 		return
@@ -221,8 +261,26 @@ func (s *Server) updateMailTemplate(writer http.ResponseWriter, request *http.Re
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "template": updated})
 }
 
-func (s *Server) archiveMailTemplate(writer http.ResponseWriter, request *http.Request) {
+func (s *Server) deleteMailTemplate(writer http.ResponseWriter, request *http.Request) {
 	id := request.PathValue("id")
+	purge := request.URL.Query().Get("purge")
+	if purge == "1" || strings.EqualFold(purge, "true") {
+		if err := s.store.PurgeMailTemplate(request.Context(), id); err != nil {
+			switch {
+			case errors.Is(err, store.ErrMailTemplateInUse):
+				writeMailError(writer, http.StatusConflict, domain.MailErrTemplateInUse,
+					"模板已被邮件或绑定引用，只能归档；如仅被绑定引用，请先解除绑定")
+			case isNoRows(err):
+				writeMailNotFound(writer, domain.MailErrTemplateNotFound, "邮件模板不存在")
+			default:
+				writeMailError(writer, http.StatusInternalServerError, "mail_internal_error", "彻底删除邮件模板失败")
+			}
+			return
+		}
+		s.audit(request, "mail.template.purge", "mail_template", id, nil)
+		writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "purged": true})
+		return
+	}
 	existing, err := s.store.MailTemplate(request.Context(), id)
 	if err != nil {
 		if isNoRows(err) {
@@ -282,29 +340,87 @@ func (s *Server) previewMailTemplate(writer http.ResponseWriter, request *http.R
 		writeMailError(writer, http.StatusBadRequest, "invalid_json", "请求格式不正确")
 		return
 	}
-	variables := make(map[string]string, len(payload.Variables))
+	s.previewMailTemplateWith(writer, request, item, payload)
+}
+
+// previewMailTemplateContent renders an unsaved editor draft through the same
+// pipeline used for message creation, so the Owner sees sanitized HTML and the
+// real text fallback before saving.
+func (s *Server) previewMailTemplateContent(writer http.ResponseWriter, request *http.Request) {
+	var payload mailDraftPreviewPayload
+	if err := decodeJSON(request, &payload); err != nil {
+		writeMailError(writer, http.StatusBadRequest, "invalid_json", "请求格式不正确")
+		return
+	}
+	item := domain.MailTemplate{
+		Scope: domain.MailTemplateScopeGlobal, Status: domain.MailTemplateStatusActive,
+		CurrentVersion: 1, SubjectTemplate: payload.SubjectTemplate,
+		BodyTextTemplate: payload.BodyTextTemplate, BodyHTMLTemplate: payload.BodyHTMLTemplate,
+		DefaultTo: payload.DefaultTo, DefaultCC: payload.DefaultCC,
+	}
+	required, err := mailpkg.CallerVariables(mailTemplateContent(item))
+	if err != nil {
+		writeMailFailure(writer, err, "邮件模板校验失败")
+		return
+	}
+	item.RequiredVariables = required
+	s.previewMailTemplateWith(writer, request, item, payload.previewPayload())
+}
+
+func (p mailDraftPreviewPayload) previewPayload() mailPreviewPayload {
+	return mailPreviewPayload{
+		Variables: p.Variables, SampleVariables: p.SampleVariables,
+		To: p.To, CC: p.CC, TaskID: p.TaskID,
+		AttachmentIDs: p.AttachmentIDs, BuildArtifactIDs: p.BuildArtifactIDs,
+	}
+}
+
+func (s *Server) previewMailTemplateWith(writer http.ResponseWriter, request *http.Request, item domain.MailTemplate, payload mailPreviewPayload) {
+	preview, err := s.renderMailTemplatePreview(request.Context(), item, payload)
+	if err != nil {
+		switch {
+		case errors.Is(err, errMailPreviewTaskNotFound):
+			writeError(writer, http.StatusNotFound, "task_not_found")
+		case errors.Is(err, errMailTaskURLUnconfigured):
+			writeMailError(writer, http.StatusUnprocessableEntity, domain.MailErrTemplateInvalid, "task.url 未配置外部 https 基地址")
+		default:
+			writeMailFailure(writer, err, "邮件预览校验失败")
+		}
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "preview": preview})
+}
+
+func (s *Server) renderMailTemplatePreview(ctx context.Context, item domain.MailTemplate, payload mailPreviewPayload) (mailpkg.Preview, error) {
+	variables := make(map[string]string, len(payload.Variables)+len(payload.SampleVariables))
+	serverVariables := make(map[string]string, 8)
+	// Samples are preview-only values. Explicit caller variables are applied
+	// after them so an editor input wins over its prefilled sample.
+	for name, value := range payload.SampleVariables {
+		if mailpkg.ServerVariableAllowed(name) {
+			serverVariables[name] = value
+			continue
+		}
+		variables[name] = value
+	}
 	for name, value := range payload.Variables {
 		variables[name] = value
 	}
-	serverVariables := make(map[string]string, 8)
 	taskID := strings.TrimSpace(payload.TaskID)
 	if taskID != "" {
 		task, err := s.store.Task(ctx, taskID)
 		if err != nil {
 			if isNoRows(err) {
-				writeError(writer, http.StatusNotFound, "task_not_found")
-				return
+				return mailpkg.Preview{}, errMailPreviewTaskNotFound
 			}
-			writeMailError(writer, http.StatusInternalServerError, "mail_internal_error", "读取任务失败")
-			return
+			return mailpkg.Preview{}, err
 		}
 		serverVariables["task.id"] = task.ID
 		serverVariables["task.title"] = task.Title
 		if taskURL, ok := s.mailTaskURL(task.ID); ok {
 			serverVariables["task.url"] = taskURL
 		} else if templateReferencesVariable(item, "task.url") {
-			writeMailError(writer, http.StatusUnprocessableEntity, domain.MailErrTemplateInvalid, "task.url 未配置外部 https 基地址")
-			return
+			return mailpkg.Preview{}, errMailTaskURLUnconfigured
 		}
 		if project, err := s.store.Project(ctx, task.ProjectID); err == nil {
 			serverVariables["project.name"] = project.Name
@@ -315,8 +431,7 @@ func (s *Server) previewMailTemplate(writer http.ResponseWriter, request *http.R
 	}
 	attachments, packageVariables, err := s.mailPreviewAttachments(ctx, taskID, payload.AttachmentIDs, payload.BuildArtifactIDs)
 	if err != nil {
-		writeMailFailure(writer, err, "预览附件校验失败")
-		return
+		return mailpkg.Preview{}, err
 	}
 	for name, value := range packageVariables {
 		// package.* is server authoritative. build.version is a caller
@@ -337,15 +452,10 @@ func (s *Server) previewMailTemplate(writer http.ResponseWriter, request *http.R
 	if len(cc) == 0 {
 		cc = item.DefaultCC
 	}
-	preview, err := mailpkg.Render(mailTemplateContent(item), mailpkg.Input{
+	return mailpkg.Render(mailTemplateContent(item), mailpkg.Input{
 		Variables: variables, ServerVariables: serverVariables,
 		To: to, CC: cc, Attachments: attachments,
 	})
-	if err != nil {
-		writeMailFailure(writer, err, "邮件预览校验失败")
-		return
-	}
-	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "preview": preview})
 }
 
 // mailTaskURL builds an absolute external task link. Relative, non-https or

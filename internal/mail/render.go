@@ -247,6 +247,24 @@ func Render(template Template, input Input) (Preview, error) {
 	}, nil
 }
 
+// CallerVariables returns the caller-supplied namespaces (build/test/release/
+// extra) referenced by a template. Editor previews and template saves use the
+// same scan so required_variables never drifts from the placeholders that will
+// actually be substituted.
+func CallerVariables(template Template) ([]string, error) {
+	names, err := templatePlaceholders(template)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]string, 0, len(names))
+	for _, name := range names {
+		if CallerVariableAllowed(name) {
+			result = append(result, name)
+		}
+	}
+	return result, nil
+}
+
 func templatePlaceholders(template Template) ([]string, error) {
 	names := make([]string, 0)
 	subject, err := validatePlaceholders(template.SubjectTemplate)
