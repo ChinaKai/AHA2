@@ -1092,6 +1092,7 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 		}
 	}
 	hardwareGroups, _ := s.store.HardwareGroups(ctx, task.ID)
+	mailAccounts, mailTemplates, mailDefaultTemplates := s.MailTaskResources(ctx, task)
 	attachments := []prompt.AttachmentResource{}
 	seenAttachments := map[string]bool{}
 	for _, conversationItem := range conversation.Items {
@@ -1138,7 +1139,9 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 		Project: project, Workspace: workspace, Task: task, Agent: agent, Snapshot: snapshot,
 		GlobalKnowledge: globalKB, ProjectKnowledge: projectKB, StaleKnowledge: staleKB, Skills: skills,
 		ProductLine: productLine, KnowledgeEnabled: kbEnabled,
-		Conversation: promptConversation, Turns: allTurns, Hardware: hardwareGroups, Attachments: attachments, UserMessage: userMessage,
+		Conversation: promptConversation, Turns: allTurns, Hardware: hardwareGroups,
+		MailAccounts: mailAccounts, MailTemplates: mailTemplates, MailDefaultTemplates: mailDefaultTemplates,
+		Attachments: attachments, UserMessage: userMessage,
 		RecoveryConversation: conversation.Items,
 		Handoff:              handoff.Summary, AgentAPIURL: agentAPIURL, CurrentTurnID: turn.ID, CurrentRoundID: turn.RoundID,
 		IncludeRecentContext: includeRecentContext, IncludeRecoveryHandoff: includeRecoveryHandoff, IncludeTurnDiagnostics: includeTurnDiagnostics,

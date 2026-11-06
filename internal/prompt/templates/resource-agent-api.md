@@ -290,3 +290,26 @@ Terminal reads accept `transport=serial|network`, `after`, and `limit`. Sends us
 The API cannot change hardware configuration and enforces the Task hardware access mode. All requests require `Authorization: Bearer $AHA2_AGENT_API_TOKEN`.
 
 ADB exec accepts `{"args":["exec-out","screencap","-p"],"stdin_base64":"","timeout_seconds":30}`. It targets the hardware resource bound to the current Task, rejects host-level ADB commands such as `connect`, `pair`, `devices`, `kill-server`, and requires a read-write resource. AHA resolves the current wireless-debug port through `adb mdns services` when that host has one unique ADB service, so stale configured ports do not force a hardware edit. The response contains the resolved `endpoint`, `exit_code`, base64 `stdout_base64`/`stderr_base64`, and `duration_ms`; stdout/stderr are each limited to 16 MiB and stdin to 1 MiB. Use it for binary ADB operations such as `exec-out screencap -p`; local AHA-host paths remain host-side paths.
+
+## Mail
+
+A Task with at least one enabled mail binding also receives the built-in
+`aha2_mail` MCP with `mail_list_accounts`, `mail_list_templates`,
+`mail_preview`, `mail_send` and `mail_get_status`. The same surface is
+available over HTTP:
+
+- `GET /api/v1/agent/mail/accounts`
+- `GET /api/v1/agent/mail/templates`
+- `POST /api/v1/agent/mail/preview`
+- `POST /api/v1/agent/mail/messages`
+- `GET /api/v1/agent/mail/messages/{id}`
+
+All routes are bound to the current Task capability and never return
+credentials, `credential_ref` or raw SMTP transcripts. Only accounts bound to
+the Task's Task/Workspace/Project scopes and templates visible to its Project
+are usable. `mail_send` always creates `pending_approval`; an Agent cannot
+approve, reject, retry or cancel mail. Attachments must be current Task
+attachments or registered build artifacts: local paths, external URLs, raw
+file bytes and executable/script files are rejected. BCC is Owner-only and is
+not accepted from Agent tools. Use one stable `idempotency_key` per logical
+mail; reusing it returns the original message with `deduplicated=true`.

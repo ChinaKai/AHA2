@@ -54,6 +54,9 @@ type BuildInput struct {
 	RecoveryConversation   []domain.ConversationItem
 	Turns                  []domain.Turn
 	Hardware               []domain.HardwareGroup
+	MailAccounts           []domain.MailAccount
+	MailTemplates          []domain.MailTemplate
+	MailDefaultTemplates   map[string]string
 	Attachments            []AttachmentResource
 	AgentAPIURL            string
 	UserMessage            string
@@ -138,6 +141,25 @@ type turnDiagnostic struct {
 	Body       string
 }
 
+type mailContextAccount struct {
+	ID                   string
+	FromAddress          string
+	DisplayName          string
+	Aliases              []string
+	Status               string
+	CredentialConfigured bool
+	DefaultTemplateID    string
+}
+
+type mailContextTemplate struct {
+	ID        string
+	Name      string
+	Version   int
+	Scope     string
+	ProjectID string
+	Variables string
+}
+
 type hardwareContextGroup struct {
 	ID                 string
 	Description        string
@@ -209,6 +231,8 @@ type templateData struct {
 	RecentExchanges    []recentContextExchange
 	TurnDiagnostics    []turnDiagnostic
 	HardwareGroups     []hardwareContextGroup
+	MailAccounts       []mailContextAccount
+	MailTemplates      []mailContextTemplate
 	AttachmentEntries  []attachmentIndexEntry
 	InboxItems         []InboxTemplateItem
 }
@@ -237,13 +261,14 @@ var builtinTemplates = []domain.PromptTemplate{
 	{ID: "context.recovery-handoff", Name: "Recovery Handoff Inline", Layer: "context", Description: "Current Inbox Batch 开头的中断续接证据模板", Editable: true, Required: false, Version: 2},
 	{ID: "context.turn-diagnostics", Name: "Turn Diagnostics File", Layer: "context", Description: "diagnostics/turns.md 的内容模板", Editable: true, Required: false, Version: 1},
 	{ID: "context.hardware", Name: "Hardware Context File", Layer: "context", Description: "hardware.md 的非敏感硬件上下文模板", Editable: true, Required: false, Version: 1},
+	{ID: "context.mail", Name: "Mail Context File", Layer: "context", Description: "mail.md 的非敏感邮件上下文模板；不含凭据、正文或收件人历史", Editable: true, Required: false, Version: 1},
 	{ID: "context.attachments-index", Name: "Attachments Index File", Layer: "context", Description: "attachments/index.md 的内容模板", Editable: true, Required: false, Version: 1},
 	{ID: "section.compact-handoff", Name: "Compact Handoff Section", Layer: "section", Description: "Backend Session 压缩后的 Prompt 段落", Editable: true, Required: false, Version: 1},
 	{ID: "section.task-workspace", Name: "Task And Workspace Section", Layer: "section", Description: "Task 与 Workspace 摘要段落", Editable: true, Required: true, Version: 1},
 	{ID: "section.available-context", Name: "Available Context Section", Layer: "section", Description: "可用上下文入口列表段落", Editable: true, Required: true, Version: 2},
 	{ID: "section.current-inbox", Name: "Current Inbox Section", Layer: "section", Description: "当前 Inbox Batch 段落", Editable: true, Required: true, Version: 1},
 	{ID: "section.inbox-batch-content", Name: "Inbox Batch Content", Layer: "section", Description: "Inbox 消息、渠道来源、引用上下文和附件引用的内容模板", Editable: true, Required: true, Version: 2},
-	{ID: "resource.agent-api", Name: "Agent API Reference File", Layer: "resource", Description: "只读参考模板", Editable: false, Required: true, Version: 10},
+	{ID: "resource.agent-api", Name: "Agent API Reference File", Layer: "resource", Description: "只读参考模板", Editable: false, Required: true, Version: 11},
 	{ID: "resource.attachment-protocol", Name: "Attachment Protocol File", Layer: "resource", Description: "只读参考模板；附件上传、绑定与回执规程", Editable: false, Required: true, Version: 1},
 	{ID: "resource.group-permissions", Name: "Group Permission Rules File", Layer: "resource", Description: "只读参考模板；群聊 task_route 的 Owner 权限申请规则", Editable: false, Required: false, Version: 1},
 }
@@ -738,6 +763,16 @@ func buildResources(
 			return nil, renderErr
 		}
 		resources = append(resources, resource(input, "hardware", joinContextPath(input, root, "hardware.md"), templates["context.hardware"].Description, hardware))
+	}
+	if len(input.MailAccounts) > 0 {
+		mailData := data
+		mailData.MailAccounts = mailContextAccounts(input.MailAccounts, input.MailDefaultTemplates)
+		mailData.MailTemplates = mailContextTemplates(input.MailTemplates)
+		mailContent, renderErr := renderTemplateByID(templates, "context.mail", mailData)
+		if renderErr != nil {
+			return nil, renderErr
+		}
+		resources = append(resources, resource(input, "mail", joinContextPath(input, root, "mail.md"), templates["context.mail"].Description, mailContent))
 	}
 	if len(input.Attachments) > 0 {
 		attachments, renderErr := attachmentResources(input, root, templates, data)
@@ -1758,6 +1793,37 @@ func hardwareContextGroups(groups []domain.HardwareGroup) []hardwareContextGroup
 			item.SSHAuthentication = normalizeHardwareSSHAuth(group.Network.SSHAuth)
 		}
 		result = append(result, item)
+	}
+	return result
+}
+
+func mailContextAccounts(accounts []domain.MailAccount, defaultTemplates map[string]string) []mailContextAccount {
+	result := make([]mailContextAccount, 0, len(accounts))
+	for _, account := range accounts {
+		aliases := make([]string, 0, len(account.Aliases))
+		for _, alias := range account.Aliases {
+			if strings.TrimSpace(alias.Address) != "" {
+				aliases = append(aliases, strings.TrimSpace(alias.Address))
+			}
+		}
+		result = append(result, mailContextAccount{
+			ID: account.ID, FromAddress: account.Address, DisplayName: account.DisplayName,
+			Aliases: aliases, Status: string(account.Status),
+			CredentialConfigured: account.CredentialConfigured,
+			DefaultTemplateID:    defaultTemplates[account.ID],
+		})
+	}
+	return result
+}
+
+func mailContextTemplates(templates []domain.MailTemplate) []mailContextTemplate {
+	result := make([]mailContextTemplate, 0, len(templates))
+	for _, template := range templates {
+		result = append(result, mailContextTemplate{
+			ID: template.ID, Name: template.Name, Version: template.CurrentVersion,
+			Scope: string(template.Scope), ProjectID: template.ProjectID,
+			Variables: strings.Join(template.RequiredVariables, ", "),
+		})
 	}
 	return result
 }

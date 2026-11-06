@@ -25,7 +25,7 @@ func TestEngineRoutesTemplatesAndBuildsContextManifest(t *testing.T) {
 	defer database.Close()
 	engine := NewEngine(database)
 	templates, err := engine.Templates(ctx)
-	if err != nil || len(templates) != 28 {
+	if err != nil || len(templates) != 29 {
 		t.Fatalf("templates=%d err=%v", len(templates), err)
 	}
 	templateBodies := map[string]string{}
@@ -907,4 +907,64 @@ Do not request additional agents, communicate directly with other Sub Agents, br
 		}
 	}
 	t.Fatal("role.sub template missing")
+}
+
+func TestBuildAddsMailContextWithoutCredentials(t *testing.T) {
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	engine := NewEngine(database)
+	result, err := engine.Build(ctx, BuildInput{
+		Project:   domain.Project{Name: "Project"},
+		Workspace: domain.Workspace{Name: "Workspace", RootPath: "/repo", Transport: "native"},
+		Task: domain.Task{
+			ID: "task-mail", Code: "task-mail", Title: "Mail", TaskWorkspacePath: "/repo",
+			CollaborationMode: "single", MaxAgents: 1,
+		},
+		Agent:    domain.TaskAgent{AgentID: "main", Role: "main"},
+		Snapshot: domain.RuntimeConfigSnapshot{Backend: "codex"},
+		MailAccounts: []domain.MailAccount{{
+			ID: "mail_account_1", Address: "noreply@example.com", DisplayName: "AHA",
+			Status: domain.MailAccountOK, CredentialConfigured: true,
+			Aliases: []domain.MailAccountAlias{{Address: "build-bot@example.com"}},
+			CredentialRef: "mail-account/mail_account_1/smtp/credential",
+		}},
+		MailTemplates: []domain.MailTemplate{{
+			ID: "mail_template_1", Name: "提测", Scope: domain.MailTemplateScopeGlobal,
+			CurrentVersion: 2, RequiredVariables: []string{"test.scope"},
+		}},
+		MailDefaultTemplates: map[string]string{"mail_account_1": "mail_template_1"},
+		UserMessage:          "send mail",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mailResource *ContextResource
+	for index := range result.ContextManifest {
+		if result.ContextManifest[index].ID == "mail" {
+			mailResource = &result.ContextManifest[index]
+		}
+	}
+	if mailResource == nil {
+		t.Fatalf("mail.md was not materialized: %#v", result.ContextManifest)
+	}
+	if !strings.HasSuffix(mailResource.Path, "mail.md") {
+		t.Fatalf("mail resource path = %q", mailResource.Path)
+	}
+	for _, want := range []string{"mail_account_1", "noreply@example.com", "build-bot@example.com", "mail_template_1", "v2"} {
+		if !strings.Contains(mailResource.Content, want) {
+			t.Fatalf("mail.md missing %q: %s", want, mailResource.Content)
+		}
+	}
+	for _, forbidden := range []string{"mail-account/", "credential_ref", "smtp_username"} {
+		if strings.Contains(mailResource.Content, forbidden) {
+			t.Fatalf("mail.md leaked %q: %s", forbidden, mailResource.Content)
+		}
+	}
+	if !strings.Contains(result.EffectivePrompt, "mail.md") {
+		t.Fatalf("mail.md was not listed as available context: %s", result.EffectivePrompt)
+	}
 }

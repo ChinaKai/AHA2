@@ -122,12 +122,17 @@ func (f *mailAPIFixture) request(method, path string, payload any, csrf string) 
 
 func (f *mailAPIFixture) createAccount(code string) map[string]any {
 	f.t.Helper()
+	return f.createAccountWithAddress(code, "noreply@example.com")
+}
+
+func (f *mailAPIFixture) createAccountWithAddress(code, address string) map[string]any {
+	f.t.Helper()
 	body := f.request(http.MethodPost, "/api/v1/mail-accounts", map[string]any{
-		"name": "构建通知", "address": "noreply@example.com", "display_name": "AHA",
+		"name": "构建通知", "address": address, "display_name": "AHA",
 		"provider": "netease_qiye", "smtp_host": "smtp.qiye.163.com",
 		"smtp_port": 465, "smtp_security": "ssl",
-		"smtp_username": "noreply@example.com", "authorization_code": code,
-		"aliases": []string{"build-bot@example.com"},
+		"smtp_username": address, "authorization_code": code,
+		"aliases": []string{"build-bot-" + strings.ReplaceAll(address, "@", "-") + "@example.com"},
 	}, f.csrf)
 	if body["_status"].(float64) != http.StatusCreated {
 		f.t.Fatalf("create account = %#v", body)

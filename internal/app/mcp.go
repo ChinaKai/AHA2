@@ -35,7 +35,7 @@ func (s *Service) normalizeTaskMCPServers(ctx context.Context, project domain.Pr
 	}
 	for _, id := range requested {
 		id = strings.TrimSpace(id)
-		if id == "mcp_channel" || (id == "mcp_pet" && project.ID != petProjectID) {
+		if id == "mcp_channel" || id == "mcp_mail" || (id == "mcp_pet" && project.ID != petProjectID) {
 			continue
 		}
 		server, ok := allowed[id]
@@ -64,17 +64,42 @@ func (s *Service) MCPServers(ctx context.Context) ([]domain.MCPServer, error) {
 	// virtual instead of persisting a server whose address would be misleading,
 	// but still list it so the MCP page shows every built-in capability.
 	channel := s.channelMCPDetail()
+	mail := s.mailMCPDetail()
 	insertAt := 0
 	for index, item := range items {
 		if item.Builtin {
 			insertAt = index + 1
 		}
 	}
-	combined := make([]domain.MCPServer, 0, len(items)+1)
+	combined := make([]domain.MCPServer, 0, len(items)+2)
 	combined = append(combined, items[:insertAt]...)
-	combined = append(combined, channel)
+	combined = append(combined, channel, mail)
 	combined = append(combined, items[insertAt:]...)
 	return combined, nil
+}
+
+// mailMCPDetail describes the built-in mail MCP without claiming a static URL.
+// The endpoint is injected per Turn when the Task has at least one enabled mail
+// binding.
+func (s *Service) mailMCPDetail() domain.MCPServer {
+	now := s.now().UTC()
+	tools := make([]domain.MCPTool, 0, len(mailMCPToolNames))
+	descriptions := map[string]string{
+		"mail_list_accounts":  "列出当前 Task 可用的邮件账号（不含凭据）。",
+		"mail_list_templates": "列出当前 Task/Project 可见的活动模板。",
+		"mail_preview":        "按账号、模板、收件人与受控附件渲染预览并校验。",
+		"mail_send":           "创建待 Owner 审批的邮件；固定返回 pending_approval。",
+		"mail_get_status":     "查询当前 Task 邮件的审批与投递状态。",
+	}
+	for _, name := range mailMCPToolNames {
+		tools = append(tools, domain.MCPTool{Name: name, Description: descriptions[name]})
+	}
+	return domain.MCPServer{
+		ID: "mcp_mail", Name: "邮件（内置）",
+		Description: "Task 绑定邮件账号后自动注入；提供账号、模板、预览、发送与状态工具。",
+		Transport:   "builtin", Enabled: true, Builtin: true, AutoInject: true, Health: "ok",
+		Tools: tools, CreatedAt: now, UpdatedAt: now,
+	}
 }
 
 // channelMCPDetail describes the built-in channel MCP without claiming a
@@ -96,7 +121,7 @@ func (s *Service) channelMCPDetail() domain.MCPServer {
 
 func (s *Service) SaveMCPServer(ctx context.Context, item domain.MCPServer) (domain.MCPServer, error) {
 	item.ID = strings.TrimSpace(item.ID)
-	if item.ID == "mcp_pet" || item.ID == "mcp_channel" {
+	if item.ID == "mcp_pet" || item.ID == "mcp_channel" || item.ID == "mcp_mail" {
 		return domain.MCPServer{}, fmt.Errorf("builtin MCP cannot be modified")
 	}
 	item.Name = strings.TrimSpace(item.Name)
@@ -146,6 +171,9 @@ func (s *Service) MCPServerByID(ctx context.Context, id string) (domain.MCPServe
 	if strings.TrimSpace(id) == "mcp_channel" {
 		return s.channelMCPDetail(), nil
 	}
+	if strings.TrimSpace(id) == "mcp_mail" {
+		return s.mailMCPDetail(), nil
+	}
 	items, err := s.store.ListMCPServers(ctx)
 	if err != nil {
 		return domain.MCPServer{}, err
@@ -159,7 +187,7 @@ func (s *Service) MCPServerByID(ctx context.Context, id string) (domain.MCPServe
 }
 
 func (s *Service) DeleteMCPServer(ctx context.Context, id string) error {
-	if strings.TrimSpace(id) == "mcp_pet" || strings.TrimSpace(id) == "mcp_channel" {
+	if strings.TrimSpace(id) == "mcp_pet" || strings.TrimSpace(id) == "mcp_channel" || strings.TrimSpace(id) == "mcp_mail" {
 		return fmt.Errorf("builtin MCP cannot be deleted")
 	}
 	return s.store.DeleteMCPServer(ctx, id)

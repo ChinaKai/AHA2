@@ -18,7 +18,16 @@ const (
 	// channelMCPPath is mounted with the same turn-scoped Agent capability that
 	// protects every other agent endpoint.
 	channelMCPPath = "/api/v1/agent/channel/mcp"
+
+	// mailMCPName is the model-facing namespace of the built-in mail MCP. It is
+	// injected when the Task has at least one enabled mail binding.
+	mailMCPName = "aha2_mail"
+	mailMCPPath = "/api/v1/agent/mail/mcp"
 )
+
+var mailMCPToolNames = []string{
+	"mail_list_accounts", "mail_list_templates", "mail_preview", "mail_send", "mail_get_status",
+}
 
 // mcpRuntimeForTask returns the MCP servers a Turn should receive and the
 // Claude-style allowed-tool names for them. The returned list is neutral: the
@@ -100,6 +109,18 @@ func (s *Service) mcpRuntimeForTask(ctx context.Context, task domain.Task, agent
 				"mcp__"+channelMCPName+"__channel_reply_decision",
 				"mcp__"+channelMCPName+"__channel_request_permission",
 			)
+		}
+		if accounts, _, _ := s.MailTaskResources(ctx, task); len(accounts) > 0 {
+			servers = append(servers, backend.MCPServer{
+				Name: mailMCPName, Transport: "http",
+				URL:            strings.TrimRight(agentAPIURL, "/") + mailMCPPath,
+				URLFromEnv:     "AHA2_AGENT_API_URL",
+				URLPath:        mailMCPPath,
+				BearerTokenEnv: "AHA2_AGENT_API_TOKEN",
+			})
+			for _, tool := range mailMCPToolNames {
+				allowed = append(allowed, "mcp__"+mailMCPName+"__"+tool)
+			}
 		}
 	}
 	return servers, allowed

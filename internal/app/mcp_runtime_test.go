@@ -194,3 +194,65 @@ func TestFetchStdioMCPTools(t *testing.T) {
 		t.Fatalf("tools=%#v err=%v", tools, err)
 	}
 }
+
+func TestMailBindingAddsNarrowMailMCP(t *testing.T) {
+	fixture := newPetTaskFixture(t)
+	ctx := fixture.ctx
+	now := time.Now().UTC()
+	account, err := fixture.database.CreateMailAccount(ctx, domain.MailAccount{
+		ID: "mail_account_mcp", Name: "MCP", Address: "noreply@example.com",
+		DisplayName: "AHA", CredentialRef: "configured", CreatedAt: now, UpdatedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := domain.Task{ID: "task-mail-mcp", WorkspaceID: "workspace-mail-mcp", ProjectID: "project-mail-mcp"}
+	if _, err := fixture.database.CreateMailBinding(ctx, domain.MailBinding{
+		ID: "mail_binding_mcp", ScopeType: domain.MailBindingScopeTask, ScopeID: task.ID,
+		AccountID: account.ID, ApprovalMode: domain.MailApprovalAlways, Enabled: true,
+		CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	servers, allowed := fixture.service.mcpRuntimeForTask(ctx, task, "http://127.0.0.1:8766/")
+	found := backend.MCPServer{}
+	for _, server := range servers {
+		if server.Name == mailMCPName {
+			found = server
+		}
+	}
+	if found.Name == "" {
+		t.Fatalf("mail bound task gained no mail MCP: %#v", servers)
+	}
+	if found.URL != "http://127.0.0.1:8766/api/v1/agent/mail/mcp" ||
+		found.URLFromEnv != "AHA2_AGENT_API_URL" ||
+		found.URLPath != "/api/v1/agent/mail/mcp" ||
+		found.BearerTokenEnv != "AHA2_AGENT_API_TOKEN" {
+		t.Fatalf("mail MCP=%#v", found)
+	}
+	wantAllowed := []string{
+		"mcp__aha2_mail__mail_list_accounts",
+		"mcp__aha2_mail__mail_list_templates",
+		"mcp__aha2_mail__mail_preview",
+		"mcp__aha2_mail__mail_send",
+		"mcp__aha2_mail__mail_get_status",
+	}
+	if len(allowed) != len(wantAllowed) {
+		t.Fatalf("allowed=%#v", allowed)
+	}
+	for index, want := range wantAllowed {
+		if allowed[index] != want {
+			t.Fatalf("allowed[%d]=%q want %q", index, allowed[index], want)
+		}
+	}
+
+	accounts, _, _ := fixture.service.MailTaskResources(ctx, task)
+	if len(accounts) != 1 || accounts[0].CredentialRef != "" {
+		t.Fatalf("task mail resources=%#v", accounts)
+	}
+
+	// No binding means no account, so the mail MCP must not be injected.
+	if _, extra := fixture.service.mcpRuntimeForTask(ctx, domain.Task{ID: "task-no-mail"}, "http://127.0.0.1:8766/"); len(extra) != 0 {
+		t.Fatalf("unbound task gained mail tools: %#v", extra)
+	}
+}
