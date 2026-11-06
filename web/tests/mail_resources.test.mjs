@@ -18,6 +18,58 @@ const mailTaskSource = await readFile(resolve(dist, "mail_task.js"), "utf8");
 const apiVersion = mailTaskSource.match(/from "\.\/api\.js(\?v=[^"]+)"/)?.[1] || "";
 const apiModule = await import(pathToFileURL(resolve(dist, "api.js")).href + apiVersion);
 
+const SANITIZER_TAGS = new Set([
+  "h1", "h2", "h3", "h4", "h5", "h6", "p", "br", "hr",
+  "strong", "b", "em", "i", "u", "s", "ul", "ol", "li",
+  "blockquote", "code", "pre", "table", "thead", "tbody", "tfoot",
+  "tr", "th", "td", "caption", "a", "img",
+]);
+const SANITIZER_ATTRS = {
+  a: new Set(["href", "title"]),
+  img: new Set(["src", "alt", "width", "height"]),
+  table: new Set(["style"]),
+  tr: new Set(["style"]),
+  td: new Set(["colspan", "rowspan", "style"]),
+  th: new Set(["colspan", "rowspan", "style"]),
+};
+const SANITIZER_STYLE_PROPERTIES = new Set([
+  "border", "border-collapse", "border-spacing", "border-color", "border-style",
+  "border-width", "border-top", "border-right", "border-bottom", "border-left",
+  "padding", "padding-top", "padding-right", "padding-bottom", "padding-left",
+  "text-align", "vertical-align", "width", "min-width", "max-width",
+  "height", "min-height", "max-height", "background-color", "color",
+  "font-weight", "font-size", "line-height", "white-space",
+]);
+
+// Structural mirror of internal/mail/sanitize.go's allowlist. This is not a
+// replacement for the Go tests; it keeps the client normalizer from emitting
+// tags, attributes or styles the server would reject.
+function assertSanitizerSubset(html) {
+  for (const match of html.matchAll(/<([a-zA-Z0-9]+)(\s[^<>]*?)?\/?>/g)) {
+    const tag = match[1].toLowerCase();
+    assert.ok(SANITIZER_TAGS.has(tag), `tag <${tag}> is allowlisted`);
+    const allowed = SANITIZER_ATTRS[tag] || new Set();
+    for (const attribute of (match[2] || "").matchAll(/([a-zA-Z-]+)(?:="([^"]*)")?/g)) {
+      const name = attribute[1].toLowerCase();
+      assert.ok(allowed.has(name), `attribute ${name} is allowlisted on <${tag}>`);
+      if (name !== "style") continue;
+      assert.ok(["table", "tr", "td", "th"].includes(tag), `style is only allowed on table elements, not <${tag}>`);
+      for (const declaration of (attribute[2] || "").split(";")) {
+        const trimmed = declaration.trim();
+        if (!trimmed) continue;
+        const [property, ...valueParts] = trimmed.split(":");
+        assert.ok(SANITIZER_STYLE_PROPERTIES.has(property.trim().toLowerCase()), `style property ${property} is allowlisted`);
+        const value = valueParts.join(":").trim();
+        assert.ok(value, "style value is not empty");
+        assert.match(value, /^[\x20-\x7e]+$/, "style value is ASCII");
+        assert.doesNotMatch(value, /url\(|expression|@import|!important|javascript:|behavior|-moz-binding|position|display/i);
+        assert.doesNotMatch(value, /[!()\\"'<>{};/:]/, "style value has no unsafe punctuation");
+      }
+    }
+  }
+  assert.doesNotMatch(html, /<(?:div|span|font)\b/i, "contenteditable residue is removed");
+}
+
 function message(overrides = {}) {
   return {
     id: "mail_message_1",
@@ -181,6 +233,151 @@ test("template WYSIWYG normalizes contenteditable output into the sanitizer subs
   assert.equal((normalizedSkeleton.match(/<th /g) || []).length, 3);
   assert.equal((normalizedSkeleton.match(/<td /g) || []).length, 9);
   assert.equal((normalizedSkeleton.match(/<td style="[^"]*">&nbsp;<\/td>/g) || []).length, 9, "empty cells keep a visible placeholder");
+});
+
+test("character references round-trip without double escaping", () => {
+  const normalize = mailEditor.normalizeMailTemplateHtml;
+  assert.equal(normalize("<p>&copy; 2026</p>"), "<p>&copy; 2026</p>", "named entities are not escaped again");
+  assert.equal(normalize("<p>&amp;copy; 2026</p>"), "<p>&amp;copy; 2026</p>", "an escaped literal ampersand stays literal");
+  assert.equal(normalize("<p>&#169; &#xA9; &euro;</p>"), "<p>&#169; &#xA9; &euro;</p>", "numeric and other named references survive");
+  assert.equal(normalize("<p>a & b</p>"), "<p>a &amp; b</p>", "a bare ampersand is still escaped");
+  assert.equal(normalize('<img src="cid:att_1" alt="&copy;">'), '<p><img src="cid:att_1" alt="&copy;"></p>', "attributes keep references verbatim");
+  assert.equal(normalize('<a href="https://example.com/?a=1&amp;b=2">x</a>'), '<p><a href="https://example.com/?a=1&amp;b=2">x</a></p>');
+});
+
+test("pre/code keeps newlines and indentation through load and save", () => {
+  const normalize = mailEditor.normalizeMailTemplateHtml;
+  const pre = "<pre><code>line1\n    indented\n\nlast</code></pre>";
+  assert.equal(normalize(pre), pre, "code directly under pre is preformatted");
+  const nested = "<pre><code>if (a &lt; b) {\n\t  return  a;\n}</code></pre>";
+  assert.equal(normalize(nested), nested, "entities and tabs inside pre are preserved");
+  const withInline = "<pre>  <b>bold</b>\n    next</pre>";
+  assert.equal(normalize(withInline), withInline, "inline children inherit the preformatted context");
+  assert.equal(normalize("<code>a   b\nc</code>"), "<p><code>a b c</code></p>", "code outside pre still collapses ordinary whitespace");
+});
+
+test("normalization is idempotent after the first pass", () => {
+  const normalize = mailEditor.normalizeMailTemplateHtml;
+  const cases = [
+    "<p>&copy; 2026</p>",
+    "<p>&amp;copy; 2026</p>",
+    "<pre><code>  one\n\n    two</code></pre>",
+    "<p>a</p><p><br></p><p>b</p>",
+    "<p>a & b</p>",
+    "<div>first</div><div><span style=\"color:red\">second</span></div>",
+    mailResources.mailTemplateTableSkeleton(3, 3),
+    "<table><tbody><tr><td>outer<table><tbody><tr><td>inner</td></tr></tbody></table>tail</td></tr></tbody></table>",
+    "<table><thead><tr><th>head<table><tbody><tr><td>inner</td></tr></tbody></table>tail</th></tr></thead></table>",
+  ];
+  for (const input of cases) {
+    let current = normalize(input);
+    for (let pass = 0; pass < 5; pass++) {
+      const next = normalize(current);
+      assert.equal(next, current, `stable after the first pass for ${JSON.stringify(input)}`);
+      const blankBlocks = (current.match(/<p><br><\/p>/g) || []).length;
+      const nextBlankBlocks = (next.match(/<p><br><\/p>/g) || []).length;
+      assert.equal(nextBlankBlocks, blankBlocks, "blank paragraphs never accumulate");
+      current = next;
+    }
+    assertSanitizerSubset(current);
+  }
+});
+
+test("nested tables are hoisted after the outer table for td and th", () => {
+  const normalize = mailEditor.normalizeMailTemplateHtml;
+  const td = normalize("<table><tbody><tr><td>outer<table><tbody><tr><td>inner</td></tr></tbody></table>tail</td></tr></tbody></table>");
+  const th = normalize("<table><thead><tr><th>head<table><tbody><tr><td>inner</td></tr></tbody></table>tail</th></tr></thead></table>");
+  for (const [label, html, outerCell] of [["td", td, "outertail"], ["th", th, "headtail"]]) {
+    assert.equal((html.match(/<table\b/g) || []).length, 2, `${label}: both tables survive`);
+    const outerEnd = html.indexOf("</table>");
+    assert.ok(outerEnd >= 0, `${label}: outer table closes`);
+    assert.match(html.slice(outerEnd + "</table>".length), /^<table\b/, `${label}: the second table is a sibling after the outer table`);
+    assert.match(html.slice(0, outerEnd), new RegExp(`<${label}>${outerCell}</${label}>`), `${label}: the nested table is removed from the cell`);
+    assert.doesNotMatch(html, new RegExp(`<${label}[^>]*>[^<]*<table`), `${label}: no table remains inside a cell`);
+    assert.equal(normalize(html), html, `${label}: hoisting is idempotent`);
+    assertSanitizerSubset(html);
+  }
+});
+
+test("table insertion inside a td or th goes after the enclosing table and focuses the new cell", () => {
+  for (const cellTag of ["TD", "TH"]) {
+    const events = [];
+    class FakeNode {
+      constructor(tagName) {
+        this.tagName = tagName;
+        this.nodeType = 1;
+        this.parentNode = null;
+        this.children = [];
+        this.textContent = "";
+        this.innerHTML = "";
+        this.nextSibling = null;
+        this._query = new Map();
+      }
+      contains(node) {
+        for (let current = node; current; current = current.parentNode) if (current === this) return true;
+        return false;
+      }
+      focus() { events.push("focus"); }
+      dispatchEvent(event) { events.push(event.type); }
+      insertBefore(fragment, reference) { this.inserted = {fragment, reference}; events.push("insertBefore"); }
+      querySelector(selector) { return this._query.get(selector) ?? null; }
+    }
+    const editor = new FakeNode("DIV");
+    const outerTable = new FakeNode("TABLE");
+    const tbody = new FakeNode("TBODY");
+    const tr = new FakeNode("TR");
+    const cell = new FakeNode(cellTag);
+    const nextSibling = new FakeNode("P");
+    editor.appendChild = child => { child.parentNode = editor; editor.children.push(child); return child; };
+    editor.appendChild(outerTable);
+    tbody.parentNode = outerTable;
+    tr.parentNode = tbody;
+    cell.parentNode = tr;
+    outerTable.nextSibling = nextSibling;
+    const newTable = new FakeNode("TABLE");
+    const firstCell = new FakeNode("TD");
+    newTable._query.set("tbody td", firstCell);
+    newTable._query.set("td", firstCell);
+    const fragment = {
+      childNodes: [newTable], lastChild: newTable,
+      querySelector: selector => selector === "table" ? newTable : null,
+    };
+    const ranges = [];
+    globalThis.document = {
+      createElement(tag) { assert.equal(tag, "template"); return {content: {}}; },
+      importNode() { return fragment; },
+      createRange() {
+        const range = {
+          selected: null,
+          setStartAfter() {}, collapse() {}, deleteContents() {}, insertNode() {},
+          selectNodeContents(node) { range.selected = node; },
+        };
+        ranges.push(range);
+        return range;
+      },
+    };
+    const selection = {
+      rangeCount: 1,
+      start: null,
+      getRangeAt: () => ({startContainer: cell, commonAncestorContainer: cell}),
+      removeAllRanges() {},
+      addRange(range) { selection.added = range; },
+    };
+    globalThis.window = {getSelection: () => selection};
+    try {
+      const result = mailEditor.insertMailEditorTable(editor, "<table><tbody><tr><td>x</td></tr></tbody></table>");
+      assert.deepEqual(result, {inserted: true, afterTable: true}, `${cellTag}: insertion is hoisted`);
+      assert.equal(editor.inserted.fragment, fragment, `${cellTag}: inserted at the table's parent`);
+      assert.equal(editor.inserted.reference, nextSibling, `${cellTag}: inserted directly after the outer table`);
+      assert.equal(cell.children.length, 0, `${cellTag}: nothing is nested into the cell`);
+      assert.equal(selection.added?.selected, firstCell, `${cellTag}: focus moves to the new first data cell`);
+      assert.ok(events.includes("insertBefore"));
+      assert.ok(events.includes("input"), `${cellTag}: input event notifies the form`);
+    } finally {
+      delete globalThis.document;
+      delete globalThis.window;
+    }
+  }
 });
 
 test("plain-text paste is escaped and never interpreted as markup", () => {

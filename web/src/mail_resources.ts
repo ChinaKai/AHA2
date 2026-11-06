@@ -2,7 +2,7 @@ import {api} from "./api.js";
 import {icon} from "./icons.js";
 import {formatMailBytes, formatMailTime, mailAttachmentsHtml, mailCanCancel, mailCanDecide, mailCanRetry, mailDigestShort, mailPreviewSamples, mailPreviewVariablePayload, mailStatusClass, mailStatusLabel, mailTemplatePlaceholders, mailTemplateVariables, openMailPreviewDialog} from "./mail_cards.js";
 import type {MailPreviewData} from "./mail_cards.js";
-import {focusFirstMailEditorCell, insertMailEditorHtml, insertMailEditorText, normalizeMailTemplateHtml, plainTextToEditorHtml} from "./mail_editor.js";
+import {focusFirstMailEditorCell, insertMailEditorHtml, insertMailEditorTable, insertMailEditorText, normalizeMailTemplateHtml, plainTextToEditorHtml} from "./mail_editor.js";
 import type {MailAccount, MailAttachment, MailDelivery, MailDeliveryAttempt, MailMessage, MailTemplate, MailTemplateVersion, Project} from "./types.js";
 
 type Notice = (type: "error" | "notice", message: string) => void;
@@ -220,7 +220,7 @@ export function templateForm(template?: MailTemplate): string {
       <button type="button" data-mail-insert-table>${icon("plus")}插入表格</button>
       <label class="mail-template-table-size">行<input type="number" inputmode="numeric" min="1" max="50" value="3" data-mail-table-rows></label>
       <label class="mail-template-table-size">列<input type="number" inputmode="numeric" min="1" max="10" value="3" data-mail-table-columns></label>
-      <small>默认 3×3；固定安全样式，单元格内可继续使用模板变量。</small>
+      <small>默认 3×3；固定安全样式。表格内再次插入会放到当前表格之后，不嵌套。</small>
     </div>
     <div class="mail-template-editor-shell">
       <div class="mail-template-wysiwyg" contenteditable="true" role="textbox" aria-multiline="true" aria-label="邮件正文" data-mail-template-editor data-placeholder="输入邮件正文，可直接看到渲染效果…" spellcheck="true"></div>
@@ -508,11 +508,16 @@ export function bindMailResources(data: MailResourcesData, actions: MailResource
       if (sourceMode && sourceEditor) {
         insertIntoTarget(sourceEditor, skeleton);
       } else if (editor) {
-        if (!insertMailEditorHtml(editor, skeleton)) {
+        const result = insertMailEditorTable(editor, skeleton);
+        if (!result.inserted) {
           editor.insertAdjacentHTML("beforeend", skeleton);
+          const tables = editor.querySelectorAll("table");
+          const inserted = tables[tables.length - 1];
+          if (inserted) focusFirstMailEditorCell(editor, inserted);
           editor.dispatchEvent(new Event("input", {bubbles: true}));
+        } else if (result.afterTable) {
+          actions.notify("notice", "已在当前表格后插入新表格；模板不支持嵌套表格");
         }
-        focusFirstMailEditorCell(editor);
       }
       syncAutoVariables();
     });

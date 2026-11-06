@@ -92,42 +92,27 @@ function escapeHTML(value: unknown): string {
     .replaceAll('"', "&quot;").replaceAll("'", "&#039;");
 }
 
+// Escape a bare ampersand but keep existing character references intact.
+// Decoding named entities without a complete HTML5 table would make
+// `&copy;` become `&amp;copy;` on every save, so entity references are treated
+// as opaque text and round-trip unchanged. Only whitespace-relevant references
+// are interpreted by normalizeText.
+function escapeAmpersands(value: string): string {
+  return value.replace(/&(?!#[0-9]+;|#x[0-9a-f]+;|[a-z][a-z0-9]+;)/gi, "&amp;");
+}
+
 function escapeText(value: string): string {
-  return value
-    .replaceAll("&", "&amp;")
+  return escapeAmpersands(value)
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;")
     .replaceAll("\u00a0", "&nbsp;");
 }
 
 function escapeAttr(value: string): string {
-  return value
-    .replaceAll("&", "&amp;")
+  return escapeAmpersands(value)
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;");
-}
-
-function decodeEntities(value: string): string {
-  const named: Record<string, string> = {
-    amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: "\u00a0",
-  };
-  return value.replace(/&(#x[0-9a-f]+|#[0-9]+|[a-z][a-z0-9]*);/gi, (match, body: string) => {
-    const lower = body.toLowerCase();
-    if (lower.startsWith("#x")) {
-      const code = Number.parseInt(body.slice(2), 16);
-      return validCodePoint(code) ? String.fromCodePoint(code) : match;
-    }
-    if (lower.startsWith("#")) {
-      const code = Number.parseInt(body.slice(1), 10);
-      return validCodePoint(code) ? String.fromCodePoint(code) : match;
-    }
-    return named[lower] ?? match;
-  });
-}
-
-function validCodePoint(code: number): boolean {
-  return Number.isInteger(code) && code > 0 && code <= 0x10ffff && !(code >= 0xd800 && code <= 0xdfff);
 }
 
 function parseAttributes(raw: string): Array<[string, string]> {
@@ -135,7 +120,8 @@ function parseAttributes(raw: string): Array<[string, string]> {
   const pattern = /([:@a-zA-Z_][-:@a-zA-Z0-9_.]*)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g;
   let match: RegExpExecArray | null;
   while ((match = pattern.exec(raw))) {
-    attrs.push([match[1].toLowerCase(), decodeEntities(match[2] ?? match[3] ?? match[4] ?? "")]);
+    // Keep entity references verbatim for the same round-trip reason as text.
+    attrs.push([match[1].toLowerCase(), match[2] ?? match[3] ?? match[4] ?? ""]);
   }
   return attrs;
 }
@@ -223,7 +209,7 @@ function buildTree(tokens: EditorToken[]): EditorNode[] {
     }
     const parent = stack[stack.length - 1];
     if (token.kind === "text") {
-      parent.children.push({kind: "text", value: decodeEntities(token.value)});
+      parent.children.push({kind: "text", value: token.value});
     } else if (token.kind === "start") {
       const seen = new Set<string>();
       const attrs = token.attrs.filter(([name]) => !seen.has(name) && Boolean(seen.add(name)));
@@ -246,7 +232,11 @@ function buildTree(tokens: EditorToken[]): EditorNode[] {
 }
 
 function normalizeText(value: string, parentTag: string): string {
-  const decoded = value.replaceAll("\u00a0", " ");
+  // Entity references are opaque everywhere else, but these three mean
+  // whitespace and must participate in empty-line / blank-paragraph cleanup.
+  const decoded = value
+    .replace(/&nbsp;|&#0*160;|&#x0*a0;/gi, " ")
+    .replaceAll("\u00a0", " ");
   if (parentTag === "pre") return decoded.replace(/\r\n?/g, "\n");
   return decoded.replace(/[ \t\r\n\f]+/g, " ");
 }
@@ -343,28 +333,54 @@ function safeImageSrc(value: string): boolean {
   return CID_PATTERN.test(substituted);
 }
 
+// Nested tables are not supported. Move every table found inside another
+// table's subtree out as a sibling that follows the outer table; this mirrors
+// the insertion-time rule and catches pasted/source-mode nested markup too.
+function extractNestedTables(nodes: EditorNode[]): {nodes: EditorNode[]; tables: EditorNode[]} {
+  const kept: EditorNode[] = [];
+  const tables: EditorNode[] = [];
+  for (const node of nodes) {
+    if (node.kind === "text") {
+      kept.push(node);
+      continue;
+    }
+    if (node.tag === "table") {
+      tables.push(node);
+      continue;
+    }
+    const nested = extractNestedTables(node.children);
+    node.children = nested.nodes;
+    tables.push(...nested.tables);
+    kept.push(node);
+  }
+  return {nodes: mergeText(kept), tables};
+}
+
 function normalizeElement(node: EditorNode & {kind: "element"}, parentTag: string): EditorNode[] {
   const tag = node.tag;
+  // A preformatted ancestor (usually <pre><code>) keeps every newline and
+  // space, including inside nested inline elements.
+  const preformatted = parentTag === "pre" || tag === "pre";
+  const children = normalizeChildren(node.children, preformatted ? "pre" : tag);
+  const content = preformatted ? children : trimEdges(children);
   if (tag === "strike" || tag === "del" || tag === "st") {
-    return [elementNode("s", trimEdges(normalizeChildren(node.children, "s")))];
+    return [elementNode("s", content)];
   }
   if (tag === "div") {
-    const children = trimEdges(normalizeChildren(node.children, "div"));
-    if (!children.length || isEmptyContent(children)) return [elementNode("p", [elementNode("br")])];
-    if (children.some(isBlockNode)) return children;
-    return [elementNode("p", children)];
+    if (!content.length || isEmptyContent(content)) return [elementNode("p", [elementNode("br")])];
+    if (content.some(isBlockNode)) return content;
+    return [elementNode("p", content)];
   }
   if (tag === "p") {
-    const children = trimEdges(normalizeChildren(node.children, "p"));
-    if (!children.length || isEmptyContent(children)) return [elementNode("p", [elementNode("br")])];
-    if (children.some(isBlockNode)) return children;
-    return [elementNode("p", children)];
+    if (!content.length || isEmptyContent(content)) return [elementNode("p", [elementNode("br")])];
+    if (content.some(isBlockNode)) return content;
+    return [elementNode("p", content)];
   }
   if (UNWRAP_TAGS.has(tag)) {
-    return normalizeChildren(node.children, parentTag);
+    return normalizeChildren(node.children, preformatted ? "pre" : parentTag);
   }
   if (!ALLOWED_TAGS.has(tag)) {
-    return normalizeChildren(node.children, parentTag === "" ? "" : tag);
+    return normalizeChildren(node.children, preformatted ? "pre" : (parentTag === "" ? "" : tag));
   }
   if (VOID_TAGS.has(tag)) {
     if (tag === "img") {
@@ -382,10 +398,14 @@ function normalizeElement(node: EditorNode & {kind: "element"}, parentTag: strin
     }
     return [elementNode(tag)];
   }
-  const children = normalizeChildren(node.children, tag);
-  if (tag === "table" || tag === "tr") {
+  if (tag === "table") {
+    const {nodes: tableNodes, tables: hoisted} = extractNestedTables(content);
     const style = cleanStyle(attribute(node, "style"));
-    return [elementNode(tag, trimEdges(children), style ? [["style", style]] : [])];
+    return [elementNode("table", tableNodes, style ? [["style", style]] : []), ...hoisted];
+  }
+  if (tag === "tr") {
+    const style = cleanStyle(attribute(node, "style"));
+    return [elementNode(tag, content, style ? [["style", style]] : [])];
   }
   if (tag === "td" || tag === "th") {
     const attrs: Array<[string, string]> = [];
@@ -395,7 +415,6 @@ function normalizeElement(node: EditorNode & {kind: "element"}, parentTag: strin
     }
     const style = cleanStyle(attribute(node, "style"));
     if (style) attrs.push(["style", style]);
-    const content = trimEdges(children);
     if (!content.length || isEmptyContent(content)) {
       // Keep one non-breaking space so an empty cell keeps its visible box.
       return [elementNode(tag, [{kind: "text", value: "\u00a0"}], attrs)];
@@ -408,22 +427,20 @@ function normalizeElement(node: EditorNode & {kind: "element"}, parentTag: strin
     if (href) attrs.push(["href", href]);
     const title = attribute(node, "title");
     if (title && !title.includes("{{")) attrs.push(["title", title]);
-    return [elementNode("a", normalizeChildren(node.children, "a"), attrs)];
+    return [elementNode("a", normalizeChildren(node.children, preformatted ? "pre" : "a"), attrs)];
   }
   if (tag === "li" || tag === "blockquote") {
-    const content = trimEdges(children);
     if (!content.length || isEmptyContent(content)) return [elementNode(tag, [elementNode("br")])];
     return [elementNode(tag, content)];
   }
   if (tag === "pre") {
     // Preformatted text keeps its exact leading/trailing whitespace.
-    return [elementNode("pre", children)];
+    return [elementNode("pre", content)];
   }
   if (/^h[1-6]$/.test(tag)) {
-    const content = trimEdges(children);
     return content.length && !isEmptyContent(content) ? [elementNode(tag, content)] : [];
   }
-  return [elementNode(tag, trimEdges(children))];
+  return [elementNode(tag, content)];
 }
 
 function serializeNodes(nodes: EditorNode[]): string {
@@ -526,15 +543,20 @@ export function insertMailEditorText(editor: HTMLElement, text: string): boolean
   return insertAtSelection(editor, document.createTextNode(text));
 }
 
+function fragmentFromHTML(html: string): DocumentFragment | null {
+  const holder = document.createElement("template");
+  holder.innerHTML = html;
+  const fragment = document.importNode(holder.content, true);
+  return fragment.childNodes.length ? fragment : null;
+}
+
 // Inserts an HTML fragment at the caret. Callers pass already-normalized
 // skeletons; the save path normalizes again.
 export function insertMailEditorHtml(editor: HTMLElement, html: string): boolean {
   if (!editor) return false;
-  const holder = document.createElement("template");
-  holder.innerHTML = html;
-  const fragment = document.importNode(holder.content, true);
-  const last = fragment.lastChild;
-  if (!last) return false;
+  const fragment = fragmentFromHTML(html);
+  const last = fragment?.lastChild;
+  if (!fragment || !last) return false;
   const range = rangeInside(editor) || appendRange(editor);
   range.deleteContents();
   range.insertNode(fragment);
@@ -547,11 +569,64 @@ export function insertMailEditorHtml(editor: HTMLElement, html: string): boolean
   return true;
 }
 
-// Puts the caret in the first data cell after inserting a table skeleton and
-// clears its placeholder nbsp so the first typed character lands there.
-export function focusFirstMailEditorCell(editor: HTMLElement): boolean {
+// Inserts a table without ever nesting it. When the caret is inside a table
+// cell (header or data), the new table is placed after the enclosing table,
+// then focus moves to its first data cell.
+export function insertMailEditorTable(editor: HTMLElement, html: string): {inserted: boolean; afterTable: boolean} {
+  if (!editor) return {inserted: false, afterTable: false};
+  const range = rangeInside(editor) || appendRange(editor);
+  let cell: Element | null = null;
+  let node: Node | null = range.startContainer;
+  while (node && node !== editor) {
+    if (node.nodeType === 1) {
+      const element = node as Element;
+      if (element.tagName === "TD" || element.tagName === "TH") { cell = element; break; }
+    }
+    node = node.parentNode;
+  }
+  let enclosingTable: Element | null = null;
+  if (cell) {
+    let ancestor: Node | null = cell;
+    while (ancestor && ancestor !== editor) {
+      if (ancestor.nodeType === 1 && (ancestor as Element).tagName === "TABLE") {
+        enclosingTable = ancestor as Element;
+        break;
+      }
+      ancestor = ancestor.parentNode;
+    }
+  }
+  const fragment = fragmentFromHTML(html);
+  const insertedTable = fragment?.querySelector<HTMLElement>("table") ?? null;
+  if (!fragment || !insertedTable) return {inserted: false, afterTable: false};
+
+  if (enclosingTable?.parentNode) {
+    enclosingTable.parentNode.insertBefore(fragment, enclosingTable.nextSibling);
+    editor.focus();
+    focusFirstMailEditorCell(editor, insertedTable);
+    editor.dispatchEvent(new Event("input", {bubbles: true}));
+    return {inserted: true, afterTable: true};
+  }
+
+  const last = fragment.lastChild;
+  range.deleteContents();
+  range.insertNode(fragment);
+  const caret = document.createRange();
+  caret.setStartAfter(last);
+  caret.collapse(true);
+  placeCaret(caret);
+  editor.focus();
+  focusFirstMailEditorCell(editor, insertedTable);
+  editor.dispatchEvent(new Event("input", {bubbles: true}));
+  return {inserted: true, afterTable: false};
+}
+
+// Puts the caret in the first data cell of a table scope (the whole editor by
+// default) and clears its placeholder nbsp so typing lands in the cell.
+export function focusFirstMailEditorCell(editor: HTMLElement, scope: ParentNode = editor): boolean {
   if (!editor) return false;
-  const cell = editor.querySelector("tbody td") || editor.querySelector("td");
+  const cell = scope.querySelector<HTMLElement>("tbody td")
+    || scope.querySelector<HTMLElement>("td")
+    || scope.querySelector<HTMLElement>("th");
   if (!cell) return false;
   if (!(cell.textContent || "").trim()) cell.innerHTML = "";
   editor.focus();
