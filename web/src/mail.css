@@ -18,7 +18,17 @@
 .mail-resource-glyph { display: grid; flex: 0 0 34px; place-items: center; width: 34px; height: 34px; border-radius: 5px; background: #eef7f1; color: var(--green); }
 .mail-resource-meta { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 5px; }
 .mail-resource-meta > span { padding: 4px 7px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); font-size: 9px; white-space: nowrap; }
-.mail-resource-actions { display: flex; flex-wrap: wrap; gap: 5px; justify-content: flex-end; }
+.mail-resource-actions { display: flex; flex-wrap: wrap; gap: 5px; justify-content: flex-end; align-items: center; }
+/* Low-frequency row actions collapse into a small overflow menu so mobile
+   action bars stay horizontal instead of stacking vertically. */
+.mail-row-more { position: relative; display: inline-flex; }
+.mail-row-more > summary { display: inline-flex; align-items: center; justify-content: center; min-height: 28px; padding: 0 8px; border: 1px solid var(--line); border-radius: 5px; background: #fff; color: var(--muted); font-size: 10px; font-weight: 700; white-space: nowrap; list-style: none; cursor: pointer; }
+.mail-row-more > summary::-webkit-details-marker { display: none; }
+.mail-row-more[open] > summary { border-color: #bcd3f5; background: #edf4ff; color: #1d4ed8; }
+.mail-row-more-menu { position: absolute; right: 0; top: calc(100% + 4px); z-index: 6; display: grid; gap: 4px; min-width: 120px; padding: 6px; border: 1px solid var(--line); border-radius: 6px; background: #fff; box-shadow: 0 8px 24px rgba(15,23,42,.14); }
+.mail-row-more:not([open]) > .mail-row-more-menu { display: none; }
+.mail-row-more-menu button { justify-content: flex-start; min-height: 28px; padding: 0 8px; font-size: 10px; white-space: nowrap; }
+.mail-row-more-menu .link-danger { border: 0; padding: 0 8px; background: none; }
 .mail-status { display: inline-flex; align-items: center; padding: 3px 7px; border-radius: 999px; font-size: 10px; font-weight: 700; white-space: nowrap; }
 .mail-status.pending { background: #fff7e6; color: #a15c00; }
 .mail-status.queued { background: #eef2ff; color: #3730a3; }
@@ -164,7 +174,11 @@
   .resource-panel-toolbar button { justify-self: start; }
   .mail-resource-row { grid-template-columns: minmax(0,1fr) auto; gap: 9px; }
   .mail-resource-meta { grid-column: 1 / 2; justify-content: flex-start; }
-  .mail-resource-actions { grid-column: 2; grid-row: 1 / 3; flex-direction: column; }
+  /* Keep the action bar horizontal on <=760px; vertical stacks widened the
+     row and clipped the identity column on 360/375px screens. */
+  .mail-resource-actions { grid-column: 2; grid-row: 1 / 3; flex-direction: row; flex-wrap: nowrap; justify-content: flex-end; align-items: center; gap: 4px; }
+  .mail-resource-actions > button { min-height: 28px; padding: 0 7px; font-size: 10px; }
+  .mail-resource-actions .icon-button { width: 28px; min-width: 28px; padding: 0; }
   .mail-form-grid, .mail-compose-variables, .mail-template-defaults { grid-template-columns: minmax(0,1fr); }
   .task-mail-binding-form { grid-template-columns: minmax(0,1fr); }
   .task-mail-compose-dialog, .mail-message-detail-dialog { width: 100vw; max-width: 100vw; height: 100dvh; max-height: 100dvh; margin: 0; border-radius: 0; }

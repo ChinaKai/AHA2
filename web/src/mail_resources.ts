@@ -69,8 +69,13 @@ function templateRows(data: MailResourcesData, templates: MailTemplate[]): strin
       ${template.status === "active" ? `<button type="button" class="icon-button" data-mail-template-edit="${escapeHTML(template.id)}" title="编辑模板" aria-label="编辑模板">${icon("edit")}</button>
       <button type="button" class="icon-button" data-mail-template-preview="${escapeHTML(template.id)}" title="预览模板" aria-label="预览模板">${icon("eye")}</button>` : ""}
       <button type="button" class="icon-button" data-mail-template-versions="${escapeHTML(template.id)}" title="版本历史" aria-label="版本历史">${icon("clock")}</button>
-      ${template.status === "active" ? `<button type="button" class="icon-button danger" data-mail-template-archive="${escapeHTML(template.id)}" title="归档模板" aria-label="归档模板">${icon("close")}</button>` : ""}
-      <button type="button" class="link-danger" data-mail-template-purge="${escapeHTML(template.id)}" title="仅未被邮件或绑定引用时可彻底删除">彻底删除</button>
+      <details class="mail-row-more" data-mail-template-more="${escapeHTML(template.id)}">
+        <summary aria-label="更多模板操作">更多</summary>
+        <div class="mail-row-more-menu">
+          ${template.status === "active" ? `<button type="button" data-mail-template-archive="${escapeHTML(template.id)}" title="归档模板">归档</button>` : ""}
+          <button type="button" class="link-danger" data-mail-template-purge="${escapeHTML(template.id)}" title="仅未被邮件或绑定引用时可彻底删除">彻底删除</button>
+        </div>
+      </details>
     </div>
   </article>`;
   }).join("");

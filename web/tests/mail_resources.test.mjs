@@ -154,13 +154,15 @@ test("older pending mail stays visible and actionable beyond the recent-five cut
 
   assert.match(html, /待审批（1）/);
   assert.match(html, /data-mail-card="mail_pending_old"/);
-  assert.equal((html.match(/data-mail-action="approve"/g) || []).length, 1, "badge count matches one actionable pending mail");
+  const pendingArticle = html.match(/<article[^>]*data-mail-card="mail_pending_old"[\s\S]*?<\/article>/)?.[0] || "";
+  assert.equal((pendingArticle.match(/data-mail-action="review"/g) || []).length, 1, "the pending row keeps one approval entry");
+  assert.doesNotMatch(pendingArticle, /data-mail-action="approve"|data-mail-action="reject"/);
   assert.ok(html.indexOf("待审批（1）") < html.indexOf("最近邮件"), "pending list is rendered before the recent list");
   assert.match(html, /data-mail-card="mail_message_5"/);
   assert.doesNotMatch(html, /data-mail-card="mail_message_6"/, "non-pending recent mail is still capped at five");
 });
 
-test("task mail pending and recent sections share compact rows with live actions", () => {
+test("task mail compact rows expose one primary entry and hide rare actions behind more", () => {
   const pending = {
     message: message({id: "mail_pending", subject: "待审批主题", status: "pending_approval"}),
     attachments: [{id: "att", message_id: "mail_pending", position: 0, source_type: "task_attachment", source_id: "a", file_name: "log.txt", media_type: "text/plain", size_bytes: 3, sha256: "abc", delivery_mode: "direct", disposition: "attachment", created_at: ""}],
@@ -171,12 +173,17 @@ test("task mail pending and recent sections share compact rows with live actions
     attachments: [],
     deliveries: [],
   };
+  const failed = {
+    message: message({id: "mail_failed", subject: "发送失败主题", status: "failed"}),
+    attachments: [],
+    deliveries: [],
+  };
   const detail = {task: {id: "task_1", status: "active"}};
   const html = mailTask.renderTaskMailPanel(detail, {
-    accounts: [], templates: [], messages: [pending, sent], attachments: [], build_artifacts: [],
+    accounts: [], templates: [], messages: [pending, sent, failed], attachments: [], build_artifacts: [],
   }, [], false);
 
-  assert.equal((html.match(/class="mail-resource-row mail-compact-row/g) || []).length, 2, "both sections use the shared compact row");
+  assert.equal((html.match(/class="mail-resource-row mail-compact-row/g) || []).length, 3, "both sections use the shared compact row");
   assert.doesNotMatch(html, /class="mail-card /, "the full mail-card no longer renders in the Task panel");
   assert.doesNotMatch(html, /mail-card-meta/, "approval digests and attachment details stay out of the compact list");
   assert.match(html, /data-mail-card="mail_pending"/);
@@ -185,15 +192,53 @@ test("task mail pending and recent sections share compact rows with live actions
   assert.match(html, /已发送/);
   assert.match(html, /a@example\.com, b@example\.com/, "recipients stay visible");
   assert.match(html, /附件 1/, "attachment count replaces the expanded details");
+  assert.doesNotMatch(html, /data-mail-action="approve"|data-mail-action="reject"/, "decision buttons never sit in a row");
 
-  // The pending row keeps exactly the actions bindMailCardActions expects.
   const pendingRow = html.slice(html.indexOf('data-mail-card="mail_pending"'), html.indexOf('data-mail-card="mail_sent"'));
-  assert.match(pendingRow, /data-mail-action="review"[^>]*data-mail-message="mail_pending"[^>]*>查看并审批</);
-  assert.match(pendingRow, /data-mail-action="approve"[^>]*data-mail-message="mail_pending"/);
-  assert.match(pendingRow, /data-mail-action="reject"[^>]*data-mail-message="mail_pending"/);
-  const sentRow = html.slice(html.indexOf('data-mail-card="mail_sent"'));
-  assert.match(sentRow, /data-mail-action="review"[^>]*data-mail-message="mail_sent"[^>]*>查看</);
-  assert.doesNotMatch(sentRow, /data-mail-action="approve"/, "sent rows expose no approval control");
+  assert.equal((pendingRow.match(/data-mail-action="review"/g) || []).length, 1, "pending row has one primary entry");
+  assert.match(pendingRow, /data-mail-action="review"[^>]*data-mail-message="mail_pending"[^>]*>审批</, "pending primary label is 审批");
+  assert.match(pendingRow, /<details class="mail-row-more mail-compact-more">/, "rare actions live in 更多");
+  assert.match(pendingRow, /data-mail-action="cancel"[^>]*data-mail-message="mail_pending"[^>]*>取消</);
+
+  const sentRow = html.slice(html.indexOf('data-mail-card="mail_sent"'), html.indexOf('data-mail-card="mail_failed"'));
+  assert.equal((sentRow.match(/data-mail-action="review"/g) || []).length, 1, "terminal row has one primary entry");
+  assert.match(sentRow, /data-mail-action="review"[^>]*data-mail-message="mail_sent"[^>]*>查看</, "terminal primary label is 查看");
+  assert.doesNotMatch(sentRow, /mail-row-more/, "sent row has no rare actions");
+
+  const failedRow = html.slice(html.indexOf('data-mail-card="mail_failed"'));
+  assert.match(failedRow, /data-mail-action="review"[^>]*data-mail-message="mail_failed"[^>]*>查看</);
+  assert.match(failedRow, /mail-row-more/, "failed row keeps retry/cancel accessible");
+  assert.match(failedRow, /data-mail-action="retry"/);
+  assert.match(failedRow, /data-mail-action="cancel"/);
+});
+
+test("review preview keeps decision buttons only for pending messages", () => {
+  const actions = {reload: async () => {}, notify: () => {}};
+  const terminal = ["sent", "failed", "dead_letter", "rejected", "cancelled"];
+  for (const status of terminal) {
+    const data = mailTask.mailReviewPreviewData({
+      message: message({id: `mail_${status}`, status, body_text: "终态正文"}),
+      attachments: [],
+      deliveries: [],
+    }, actions);
+    assert.equal(data.onApprove, undefined, `${status}: no approve callback`);
+    assert.equal(data.onReject, undefined, `${status}: no reject callback`);
+    assert.equal(data.title, "邮件预览", `${status}: terminal preview is read-only`);
+    const html = cards.mailPreviewDialogHtml(data);
+    assert.doesNotMatch(html, /data-mail-preview-decision=/, `${status}: no approve/reject buttons`);
+    assert.match(html, /data-close>关闭</, `${status}: only the close footer remains`);
+  }
+
+  const pending = mailTask.mailReviewPreviewData({
+    message: message({id: "mail_pending", status: "pending_approval"}),
+    attachments: [],
+    deliveries: [],
+  }, actions);
+  assert.equal(typeof pending.onApprove, "function");
+  assert.equal(typeof pending.onReject, "function");
+  const html = cards.mailPreviewDialogHtml(pending);
+  assert.match(html, /data-mail-preview-decision="approve"/);
+  assert.match(html, /data-mail-preview-decision="reject"/);
 });
 
 test("template WYSIWYG normalizes contenteditable output into the sanitizer subset", () => {
@@ -712,6 +757,53 @@ test("template list hides archived templates until the toggle and badges legacy 
   assert.ok(withArchived.indexOf("已归档模板（1）") > withArchived.indexOf("data-mail-template=\"mail_template_active\""), "archived section is separate and after active templates");
   assert.match(withArchived, /data-mail-template-purge="mail_template_active"/);
   assert.match(withArchived, /data-mail-template-purge="mail_template_archived"/);
+});
+
+test("template row keeps edit/preview visible and moves archive/purge into more", () => {
+  const template = {
+    id: "mail_template_active", scope: "global", project_id: "", name: "启用模板",
+    subject_template: "s", body_text_template: "t", body_html_template: "", default_to: [], default_cc: [],
+    required_variables: [], current_version: 1, status: "active",
+    created_at: "2026-11-06T09:00:00Z", updated_at: "2026-11-06T09:00:00Z",
+  };
+  const html = mailResources.renderMailResources({
+    subTab: "templates", accounts: [], messages: [], projects: [], templates: [template],
+    filterStatus: "", filterAccount: "", showArchived: false, loading: false, error: "",
+  });
+  const rowStart = html.indexOf('data-mail-template="mail_template_active"');
+  const row = html.slice(rowStart);
+  const menuStart = row.indexOf('<details class="mail-row-more"');
+  assert.ok(menuStart > 0, "low-frequency actions are in a more menu");
+  const primary = row.slice(0, menuStart);
+  const menu = row.slice(menuStart);
+  for (const action of ["edit", "preview", "versions"]) {
+    assert.match(primary, new RegExp(`data-mail-template-${action}="mail_template_active"`), `${action} stays a primary action`);
+  }
+  assert.doesNotMatch(primary, /data-mail-template-(?:archive|purge)=/, "archive/purge leave the primary bar");
+  assert.match(menu, /data-mail-template-archive="mail_template_active"[^>]*>归档</);
+  assert.match(menu, /data-mail-template-purge="mail_template_active"/);
+  assert.match(menu, /mail-row-more-menu/);
+});
+
+test("mobile resource rows use a horizontal compact action bar", async () => {
+  const css = await readFile(resolve(dist, "styles.css"), "utf8");
+  assert.doesNotMatch(css, /\.mail-resource-actions[^{]*\{[^}]*flex-direction:\s*column/, "resource actions never stack vertically");
+  const mobile = [...css.matchAll(/@media \(max-width: 760px\) \{([\s\S]*?)\n\}/g)]
+    .map(match => match[1])
+    .filter(block => block.includes(".mail-resource-actions"))
+    .at(-1);
+  assert.ok(mobile, "a 760px media block owns the mail resource actions");
+  const actionsRule = mobile.match(/\.mail-resource-actions\s*\{([^}]*)\}/);
+  assert.ok(actionsRule, "mobile resource action rule exists");
+  assert.match(actionsRule[1], /flex-direction:\s*row/);
+  assert.match(actionsRule[1], /flex-wrap:\s*nowrap/);
+  assert.match(actionsRule[1], /justify-content:\s*flex-end/);
+  assert.match(actionsRule[1], /gap:\s*4px/);
+  const compactButton = mobile.match(/\.mail-resource-actions > button\s*\{([^}]*)\}/);
+  assert.match(compactButton[1], /min-height:\s*28px/);
+  const iconButton = mobile.match(/\.mail-resource-actions \.icon-button\s*\{([^}]*)\}/);
+  assert.match(iconButton[1], /width:\s*28px/);
+  assert.match(css, /\.mail-row-more-menu\s*\{[^}]*position:\s*absolute/, "more menu does not widen the row");
 });
 
 test("opening the preview dialog mounts envelope markup before showModal", () => {

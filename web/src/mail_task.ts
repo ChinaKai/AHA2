@@ -1,6 +1,6 @@
 import {api} from "./api.js";
 import {icon} from "./icons.js";
-import {formatMailBytes, mailCanCancel, mailCanRetry, mailCompactRowHtml, openMailPreviewDialog} from "./mail_cards.js";
+import {formatMailBytes, mailCanCancel, mailCanDecide, mailCanRetry, mailCompactRowHtml, openMailPreviewDialog} from "./mail_cards.js";
 import type {MailPreviewData} from "./mail_cards.js";
 import type {MailAccount, MailAttachment, MailMessageCard, MailTemplate, TaskDetail, TaskMailAccount, TaskMailOptions} from "./types.js";
 
@@ -470,6 +470,54 @@ export function mailCardByID(options: TaskMailOptions | null, messageID: string)
   return (options?.messages || []).find(card => card.message.id === messageID);
 }
 
+// The row's primary action opens this preview. Decision callbacks exist only
+// while the message is pending_approval; terminal messages must open read-only
+// so the dialog footer keeps a single "关闭" button.
+export function mailReviewPreviewData(card: MailMessageCard, actions: TaskMailActions): MailPreviewData {
+  const message = card.message;
+  const canDecide = mailCanDecide(message.status);
+  const data: MailPreviewData = {
+    title: canDecide ? "查看并审批" : "邮件预览",
+    subject: message.subject,
+    fromName: message.from_name,
+    fromAddress: message.from_address,
+    to: message.to,
+    cc: message.cc,
+    bcc: message.bcc,
+    bodyText: message.body_text,
+    bodyHtml: message.body_html,
+    attachments: card.attachments || [],
+    width: 600,
+  };
+  if (!canDecide) return data;
+  data.onApprove = async () => {
+    if (!message.approval_digest || !window.confirm("批准这封邮件并进入投递队列？")) return false;
+    try {
+      await api.approveMailMessage(message.id, message.approval_digest);
+      await actions.reload();
+      actions.notify("notice", "邮件已批准");
+      return true;
+    } catch (error) {
+      actions.notify("error", error instanceof Error ? error.message : String(error));
+      return false;
+    }
+  };
+  data.onReject = async () => {
+    const reason = window.prompt("拒绝原因（必填）");
+    if (!reason || !window.confirm("拒绝这封邮件？")) return false;
+    try {
+      await api.rejectMailMessage(message.id, reason);
+      await actions.reload();
+      actions.notify("notice", "邮件已拒绝");
+      return true;
+    } catch (error) {
+      actions.notify("error", error instanceof Error ? error.message : String(error));
+      return false;
+    }
+  };
+  return data;
+}
+
 export function bindMailCardActions(container: ParentNode, options: TaskMailOptions | null, actions: TaskMailActions): void {
   container.querySelectorAll<HTMLElement>("[data-mail-action]").forEach(button => button.addEventListener("click", () => {
     const messageID = button.dataset.mailMessage || "";
@@ -481,47 +529,10 @@ export function bindMailCardActions(container: ParentNode, options: TaskMailOpti
     const message = card.message;
     const action = button.dataset.mailAction;
     if (action === "review") {
-      // Open the approval snapshot without closing the panel. The dialog owns
-      // only presentation; the existing approve/reject APIs remain the single
-      // decision path.
-      openMailPreviewDialog({
-        title: "查看并审批",
-        subject: message.subject,
-        fromName: message.from_name,
-        fromAddress: message.from_address,
-        to: message.to,
-        cc: message.cc,
-        bcc: message.bcc,
-        bodyText: message.body_text,
-        bodyHtml: message.body_html,
-        attachments: card.attachments || [],
-        width: 600,
-        onApprove: async () => {
-          if (!message.approval_digest || !window.confirm("批准这封邮件并进入投递队列？")) return false;
-          try {
-            await api.approveMailMessage(message.id, message.approval_digest);
-            await actions.reload();
-            actions.notify("notice", "邮件已批准");
-            return true;
-          } catch (error) {
-            actions.notify("error", error instanceof Error ? error.message : String(error));
-            return false;
-          }
-        },
-        onReject: async () => {
-          const reason = window.prompt("拒绝原因（必填）");
-          if (!reason || !window.confirm("拒绝这封邮件？")) return false;
-          try {
-            await api.rejectMailMessage(message.id, reason);
-            await actions.reload();
-            actions.notify("notice", "邮件已拒绝");
-            return true;
-          } catch (error) {
-            actions.notify("error", error instanceof Error ? error.message : String(error));
-            return false;
-          }
-        },
-      });
+      // Open the snapshot without closing the panel. The dialog owns only
+      // presentation; the existing approve/reject APIs remain the single
+      // decision path and are attached only for pending messages.
+      openMailPreviewDialog(mailReviewPreviewData(card, actions));
     } else if (action === "approve") {
       if (!window.confirm("批准这封邮件并进入投递队列？")) return;
       void api.approveMailMessage(message.id, message.approval_digest || "").then(() => actions.reload()).then(() => actions.notify("notice", "邮件已批准")).catch(error => actions.notify("error", error instanceof Error ? error.message : String(error)));

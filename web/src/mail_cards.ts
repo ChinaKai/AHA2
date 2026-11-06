@@ -421,12 +421,20 @@ export function mailCompactRowHtml(card: MailMessageCard, options: MailCompactRo
   if (attachments.length) meta.push(`<span>附件 ${attachments.length}</span>`);
   if ((message.cc || []).length) meta.push(`<span title="${escapeHTML(message.cc.join(", "))}">CC</span>`);
   if ((message.bcc || []).length) meta.push(`<span title="含 BCC">BCC</span>`);
+  // Exactly one primary entry per row. Approval and rejection happen inside
+  // the preview dialog; retry/cancel are rare and live behind "更多" so a row
+  // never becomes a wall of decision buttons.
+  const secondaryActions = [
+    canRetry ? `<button type="button" data-mail-action="retry" data-mail-message="${escapeHTML(message.id)}">重试</button>` : "",
+    canCancel ? `<button type="button" data-mail-action="cancel" data-mail-message="${escapeHTML(message.id)}">取消</button>` : "",
+  ].filter(Boolean).join("");
   const actions = showActions
     ? `<div class="mail-resource-actions mail-compact-actions">
-      <button type="button" data-mail-action="review" data-mail-message="${escapeHTML(message.id)}">${canDecide ? "查看并审批" : "查看"}</button>
-      ${canDecide ? `<button type="button" class="primary" data-mail-action="approve" data-mail-message="${escapeHTML(message.id)}">批准</button><button type="button" class="danger" data-mail-action="reject" data-mail-message="${escapeHTML(message.id)}">拒绝</button>` : ""}
-      ${canRetry ? `<button type="button" data-mail-action="retry" data-mail-message="${escapeHTML(message.id)}">重试</button>` : ""}
-      ${canCancel ? `<button type="button" data-mail-action="cancel" data-mail-message="${escapeHTML(message.id)}">取消</button>` : ""}
+      <button type="button" data-mail-action="review" data-mail-message="${escapeHTML(message.id)}">${canDecide ? "审批" : "查看"}</button>
+      ${secondaryActions ? `<details class="mail-row-more mail-compact-more">
+        <summary aria-label="更多操作">更多</summary>
+        <div class="mail-row-more-menu">${secondaryActions}</div>
+      </details>` : ""}
     </div>`
     : "";
   return `<article class="mail-resource-row mail-compact-row ${mailStatusClass(message.status)}" data-mail-card="${escapeHTML(message.id)}">
