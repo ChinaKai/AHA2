@@ -289,6 +289,31 @@ func TestMailMessageDuplicateDetectionAndOwnerOverride(t *testing.T) {
 	}
 }
 
+func TestMailRejectsExecutableAndScriptAttachments(t *testing.T) {
+	f := newMailAPIFixture(t)
+	account := f.createAccount("attachment-type-code")
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	for index, name := range []string{"setup.exe", "update.PS1", "build.js", "installer.msi"} {
+		id := domain.NewID("attachment")
+		f.execRaw(`INSERT INTO attachments(id,task_id,message_id,name,media_type,size_bytes,sha256,created_at)
+			VALUES(?,?,?,?,?,?,?,?)`, id, f.task.ID, "", name, "application/octet-stream",
+			int64(1024+index), strings.Repeat("a", 64), now)
+		body := f.createMessage(map[string]any{
+			"task_id": f.task.ID, "account_id": account["id"], "to": []string{"qa@example.com"},
+			"subject": "blocked attachment", "body_text": "x",
+			"attachment_ids": []string{id}, "submit": true,
+			"idempotency_key": "executable-" + name,
+		})
+		if body["_status"].(float64) != http.StatusUnprocessableEntity ||
+			mailErrorCode(t, body) != string(domain.MailErrAttachmentUnavailable) {
+			t.Fatalf("attachment %q = %#v", name, body)
+		}
+		if f.auditCount("mail.message.create", "") != 0 {
+			t.Fatalf("attachment %q created a message", name)
+		}
+	}
+}
+
 func TestMailAttachmentThresholdsAndControlledLinks(t *testing.T) {
 	f := newMailAPIFixture(t)
 	account := f.createAccount("attachment-code")

@@ -49,6 +49,14 @@ func ErrAttachmentTooLarge() error {
 	return errorf(domain.MailErrAttachmentTooLarge, "attachment exceeds the direct attachment limit")
 }
 
+// ErrAttachmentTypeForbidden rejects executable files and scripts. The Owner
+// confirmed that phase one accepts no exception for direct attachments; build
+// artifacts that must be distributed have to use a controlled download link.
+func ErrAttachmentTypeForbidden(name string) error {
+	return errorf(domain.MailErrAttachmentUnavailable,
+		"executable or script attachment %q is not allowed", name)
+}
+
 // CodeOf extracts the stable code from an error returned by this package.
 func CodeOf(err error) (domain.MailErrorCode, bool) {
 	var mailErr *Error

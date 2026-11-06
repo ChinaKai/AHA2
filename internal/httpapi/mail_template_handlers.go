@@ -409,6 +409,9 @@ func (s *Server) mailPreviewAttachments(ctx context.Context, taskID string, atta
 		if item.Size > mailpkg.MaxAttachmentBytes {
 			return nil, nil, mailpkg.ErrAttachmentTooLarge()
 		}
+		if mailpkg.DisallowedAttachmentName(item.Name) {
+			return nil, nil, mailpkg.ErrAttachmentTypeForbidden(item.Name)
+		}
 		if seenSources[item.ID] {
 			continue
 		}
@@ -452,6 +455,9 @@ func (s *Server) mailPreviewAttachments(ctx context.Context, taskID string, atta
 		}
 		if artifact.SizeBytes > mailpkg.MaxAttachmentBytes {
 			return nil, nil, mailpkg.ErrAttachmentTooLarge()
+		}
+		if mailpkg.DisallowedAttachmentName(source.Name) {
+			return nil, nil, mailpkg.ErrAttachmentTypeForbidden(source.Name)
 		}
 		if !seenSources[source.ID] {
 			seenSources[source.ID] = true
