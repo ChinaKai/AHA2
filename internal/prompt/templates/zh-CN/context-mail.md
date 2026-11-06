@@ -18,7 +18,7 @@
 {{end}}{{if .DefaultGuideTemplates}}
 ## 默认 guide 模板（仅作参考）
 下面的模板是参考样板，不是要发送的内容。请自己写最终主题和正文，确保事实准确，
-并且不要留下 `{{` 或 `}}` 占位符。调用 `mail_send` 时同时传入 `template_id`
+并且不要留下 `{{"{{"}}` 或 `{{"}}"}}` 占位符。调用 `mail_send` 时同时传入 `template_id`
 和你的最终 `subject` 与 `body_text`/`body_html`；模板会作为参考版本记录。
 模板示例不会作为回退内容发送。
 {{range .DefaultGuideTemplates}}

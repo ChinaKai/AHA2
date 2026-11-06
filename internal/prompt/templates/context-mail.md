@@ -18,8 +18,8 @@ authorization code; `credential_configured` is the only credential state here.
 {{end}}{{if .DefaultGuideTemplates}}
 ## Default guide template (reference only)
 The template below is a reference sample, not content to send. Write the final
-subject and body yourself, keep all facts accurate, and do not leave `{{` or
-`}}` placeholders. Call `mail_send` with `template_id` plus your final
+subject and body yourself, keep all facts accurate, and do not leave `{{"{{"}}` or
+`{{"}}"}}` placeholders. Call `mail_send` with `template_id` plus your final
 `subject` and `body_text`/`body_html`; the template is recorded as the
 reference version. Its example is never sent as a fallback.
 {{range .DefaultGuideTemplates}}

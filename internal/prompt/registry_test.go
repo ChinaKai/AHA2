@@ -1024,6 +1024,28 @@ func TestBuildInjectsDefaultGuideTemplateReference(t *testing.T) {
 			t.Fatalf("mail.md missing %q: %s", want, content)
 		}
 	}
+	// Literal placeholder markers must survive text/template rendering. Writing
+	// a raw {{ in the template file makes text/template parse it as an action
+	// and the rendered guide rule silently loses the braces.
+	for _, want := range []string{"`{{`", "`}}`", "并且不要留下 `{{` 或 `}}` 占位符"} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("mail.md missing rendered literal %q: %s", want, content)
+		}
+	}
+	if strings.Contains(content, "不要留下 ` 或") {
+		t.Fatalf("literal placeholder escaped into an empty action: %s", content)
+	}
+	// Both language variants must use an escaped action rather than a raw
+	// brace pair; otherwise only the language exercised above would be covered.
+	for _, name := range []string{"templates/context-mail.md", "templates/zh-CN/context-mail.md"} {
+		raw, err := templateFiles.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(raw), `{{"{{"}}`) || !strings.Contains(string(raw), `{{"}}"}}`) {
+			t.Fatalf("%s does not escape the literal placeholder markers", name)
+		}
+	}
 	if strings.Contains(content, "变量：") {
 		t.Fatalf("guide context advertised variables: %s", content)
 	}
