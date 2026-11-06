@@ -414,20 +414,22 @@ func htmlToText(input string) string {
 			switch strings.ToLower(node.Data) {
 			case "br":
 				builder.WriteByte('\n')
-			case "p", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "pre", "table":
+			case "p", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "pre", "table", "caption":
 				builder.WriteString("\n\n")
 			case "li":
 				builder.WriteString("\n- ")
 			case "tr":
 				builder.WriteByte('\n')
 			case "td", "th":
+				// Cells become tab-separated columns; the line trimming below
+				// removes the leading/trailing tabs so each row stays readable.
 				builder.WriteString("\t")
 			}
 			for child := node.FirstChild; child != nil; child = child.NextSibling {
 				walk(child)
 			}
 			switch strings.ToLower(node.Data) {
-			case "p", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "pre", "table":
+			case "p", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "pre", "table", "caption":
 				builder.WriteString("\n\n")
 			}
 		}

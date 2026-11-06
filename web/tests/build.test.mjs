@@ -858,6 +858,51 @@ test("API request timings are opt-in, query-free, and bounded in the perf panel"
   assert.match(styles, /\.perf-slow-top/);
 });
 
+test("mail phase two keeps navigation stable, one mail entry, and table tools", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const script = await readFile(resolve(root, "dist", "app.js"), "utf8");
+  const taskTools = await readFile(resolve(root, "dist", "task_tools.js"), "utf8");
+  const mailCards = await readFile(resolve(root, "dist", "mail_cards.js"), "utf8");
+  const mailResources = await readFile(resolve(root, "dist", "mail_resources.js"), "utf8");
+  const styles = await readFile(resolve(root, "dist", "styles.css"), "utf8");
+
+  // perf=1 is read at boot, then only the perf parameter is removed while the
+  // hash and other parameters stay; the panel still opens for this load.
+  assert.match(script, /const initialSearchParams = new URLSearchParams\(window\.location\.search\)/);
+  assert.match(script, /if \(initialSearchParams\.has\("perf"\)\) \{[\s\S]{0,160}url\.searchParams\.delete\("perf"\)[\s\S]{0,160}window\.history\.replaceState/);
+  assert.match(script, /`\$\{url\.pathname\}\$\{url\.search\}\$\{url\.hash\}`/);
+  assert.match(script, /if \(perfEnabled\) startPerfPanel\(\)/);
+  // Resource tabs are display-only and are not part of navigation restore.
+  assert.doesNotMatch(script, /history\.replaceState\(null, "", `#resources\?tab=\$\{tab\}`\)/);
+  assert.doesNotMatch(script, /resourcesTab: state\.resourcesTab/);
+  assert.doesNotMatch(script, /mailSubTab: state\.mailSubTab/);
+  assert.doesNotMatch(script, /saved\.resourcesTab/);
+  assert.doesNotMatch(script, /saved\.mailSubTab/);
+  // Legacy #hardware redirect and the #resources?tab=mail deep-link read remain.
+  assert.match(script, /if \(name === "hardware"\) \{[\s\S]{0,120}replaceState\(null, "", "#resources\?tab=hardware"\)/);
+  assert.match(script, /params\.get\("tab"\) === "mail" \? "mail" : "hardware"/);
+  // The header mail icon and the timeline action binding are gone.
+  assert.doesNotMatch(script, /taskSendMailButton/);
+  assert.doesNotMatch(script, /id="task-send-mail"/);
+  assert.doesNotMatch(script, /bindMailCardActions\(list/);
+  // The mail tool is the single entry and owns the pending badge.
+  assert.match(taskTools, /tool\.id === "mail" \? Math\.max\(0, Number\(options\.pendingMail\) \|\| 0\)/);
+  assert.match(script, /pendingMail: taskMailPendingCount\(\)/);
+  assert.match(script, /function syncTaskMailIndicator\(\)/);
+  assert.match(script, /syncTaskMailIndicator\(\);/);
+  // The timeline is informational; approval actions live in the tool panel.
+  assert.match(mailCards, /已提交，等待 Owner 审批/);
+  assert.doesNotMatch(mailCards, /export function mailConversationCardHtml[\s\S]{0,1400}data-mail-action/);
+  // Template editor can insert a fixed table skeleton.
+  assert.match(mailResources, /data-mail-insert-table/);
+  assert.match(mailResources, /export function mailTemplateTableSkeleton/);
+  // Compose shell and attachment lists follow the requested layout.
+  assert.match(styles, /\.task-mail-compose-dialog > form \{ display: grid; grid-template-rows: auto minmax\(0,1fr\) auto;/);
+  assert.match(styles, /\.mail-attachment-option \{ display: grid; grid-template-columns: 18px minmax\(0,1fr\);/);
+  assert.match(styles, /\.mail-attachment-list-scroll \{[^}]*max-height: 160px;[^}]*overflow-y: auto;/);
+  assert.match(styles, /\.task-mail-compose-dialog \.dialog-actions \{[^}]*position: sticky;[^}]*bottom: 0;/);
+});
+
 test("SSE list refresh is debounced and deferred while a task detail is open", async () => {
   const root = resolve(import.meta.dirname, "..");
   const script = await readFile(resolve(root, "dist", "app.js"), "utf8");

@@ -6,6 +6,7 @@ import {pathToFileURL} from "node:url";
 const dist = resolve(import.meta.dirname, "..", "dist");
 const cards = await import(pathToFileURL(resolve(dist, "mail_cards.js")));
 const resources = await import(pathToFileURL(resolve(dist, "resources.js")));
+const mailResources = await import(pathToFileURL(resolve(dist, "mail_resources.js")));
 
 function message(overrides = {}) {
   return {
@@ -57,6 +58,33 @@ test("pending card exposes approve/reject and never renders sending cancel", () 
   });
   assert.doesNotMatch(sending, /data-mail-action="cancel"/);
   assert.match(sending, /发送中，不可取消/);
+});
+
+test("timeline mail card is a status notice without approval actions", () => {
+  const html = cards.mailConversationCardHtml({message: message(), attachments: [], deliveries: []}, false);
+  assert.match(html, /已提交，等待 Owner 审批/);
+  assert.match(html, /任务工具栏「邮件」面板/);
+  assert.doesNotMatch(html, /data-mail-action/);
+  assert.doesNotMatch(html, /mail-card-actions/);
+});
+
+test("template editor insert-table skeleton is sanitizer-safe and editable", () => {
+  const html = mailResources.mailTemplateTableSkeleton(2, 3);
+  assert.match(html, /<table style="border-collapse: collapse; border-spacing: 0; width: 100%;">/);
+  assert.match(html, /<thead>/);
+  assert.match(html, /<tbody>/);
+  assert.equal((html.match(/<th /g) || []).length, 3, "one th per column");
+  assert.equal((html.match(/<td /g) || []).length, 6, "rows x columns td cells");
+  for (const match of html.matchAll(/style="([^"]*)"/g)) {
+    for (const declaration of match[1].split(";").map(value => value.trim()).filter(Boolean)) {
+      const [property, ...value] = declaration.split(":");
+      assert.ok(["border", "border-collapse", "border-spacing", "padding", "text-align", "vertical-align", "width", "background-color", "font-weight"].includes(property.trim()), property);
+      assert.doesNotMatch(value.join(":"), /url\(|expression|@import|!important|position|display|calc\(/i);
+    }
+  }
+  // Skeleton clamps to the same limits the editor validates.
+  assert.equal((mailResources.mailTemplateTableSkeleton(0, 0).match(/<td /g) || []).length, 1);
+  assert.equal((mailResources.mailTemplateTableSkeleton(999, 99).match(/<td /g) || []).length, 500);
 });
 
 test("resources page keeps hardware and mail in one eight-item navigation shell", () => {

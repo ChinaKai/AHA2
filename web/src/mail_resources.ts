@@ -124,6 +124,28 @@ function accountForm(account?: MailAccount): string {
   </div><p class="field-help">授权码只写入现有 Secret Store；页面、日志和事件都不会保存或回显它。</p>`;
 }
 
+// Builds the fixed safe table skeleton offered by the template editor. The
+// sanitizer allows style only on table elements and only for a strict
+// presentational property set, so this markup round-trips unchanged. Cell text
+// remains editable and may contain template variables.
+export function mailTemplateTableSkeleton(rows: number, columns: number): string {
+  const safeRows = Math.min(50, Math.max(1, Math.floor(Number(rows)) || 1));
+  const safeColumns = Math.min(10, Math.max(1, Math.floor(Number(columns)) || 1));
+  const cellStyle = "border: 1px solid #d0d7de; padding: 6px 8px; text-align: left; vertical-align: top;";
+  const headStyle = `${cellStyle} background-color: #f6f8fa; font-weight: 700;`;
+  const headerCells = Array.from({length: safeColumns}, (_, index) => `<th style="${headStyle}">列 ${index + 1}</th>`).join("");
+  const bodyRows = Array.from({length: safeRows}, () =>
+    `<tr>${Array.from({length: safeColumns}, () => `<td style="${cellStyle}">&nbsp;</td>`).join("")}</tr>`).join("\n      ");
+  return `<table style="border-collapse: collapse; border-spacing: 0; width: 100%;">
+  <thead>
+    <tr>${headerCells}</tr>
+  </thead>
+  <tbody>
+      ${bodyRows}
+  </tbody>
+</table>`;
+}
+
 function templateForm(template: MailTemplate | undefined, projects: Project[]): string {
   const scope = template?.scope || "global";
   const projectOptions = projects.filter(project => !project.channel_retired).map(project =>
@@ -140,8 +162,9 @@ function templateForm(template: MailTemplate | undefined, projects: Project[]): 
   <div class="mail-variable-bar" aria-label="插入变量">${variables.map(name => `<button type="button" data-mail-variable="${name}">{{${name}}}</button>`).join("")}</div>
   <label>主题<input name="subject_template" required value="${escapeHTML(template?.subject_template || "")}"></label>
   <label>纯文本正文<textarea name="body_text_template" rows="7">${escapeHTML(template?.body_text_template || "")}</textarea></label>
+  <div class="mail-template-html-tools"><button type="button" data-mail-insert-table>${icon("plus")}插入表格</button><small>生成固定安全样式；单元格内可继续使用模板变量。</small></div>
   <label>HTML 正文（可选，安全子集）<textarea name="body_html_template" rows="5">${escapeHTML(template?.body_html_template || "")}</textarea></label>
-  <p class="field-help">变量只做字符串替换；HTML 只允许安全子集，变量替换后会再次 sanitize。</p>`;
+  <p class="field-help">变量只做字符串替换；HTML 只允许安全子集（含表格专用的安全 style），变量替换后会再次 sanitize。</p>`;
 }
 
 function openPreviewDialog(preview: Record<string, any>, notify: Notice): void {
@@ -277,6 +300,26 @@ export function bindMailResources(data: MailResourcesData, actions: MailResource
       target.focus();
       target.setSelectionRange(start + token.length, start + token.length);
     }));
+    form?.querySelector<HTMLButtonElement>("[data-mail-insert-table]")?.addEventListener("click", () => {
+      const textarea = form.querySelector<HTMLTextAreaElement>('textarea[name="body_html_template"]');
+      if (!textarea) return;
+      const rowsInput = window.prompt("表格正文行数（1-50）", "3");
+      if (rowsInput === null) return;
+      const columnsInput = window.prompt("表格列数（1-10）", "3");
+      if (columnsInput === null) return;
+      const rows = Number(String(rowsInput).trim());
+      const columns = Number(String(columnsInput).trim());
+      if (!Number.isInteger(rows) || rows < 1 || rows > 50 || !Number.isInteger(columns) || columns < 1 || columns > 10) {
+        actions.notify("error", "表格行数需为 1-50、列数需为 1-10 的整数");
+        return;
+      }
+      const start = textarea.selectionStart ?? textarea.value.length;
+      const end = textarea.selectionEnd ?? start;
+      const skeleton = mailTemplateTableSkeleton(rows, columns);
+      textarea.value = `${textarea.value.slice(0, start)}${skeleton}${textarea.value.slice(end)}`;
+      textarea.focus();
+      textarea.setSelectionRange(start + skeleton.length, start + skeleton.length);
+    });
     form?.addEventListener("submit", event => {
       event.preventDefault();
       const values = new FormData(form);

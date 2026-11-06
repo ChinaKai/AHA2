@@ -345,6 +345,88 @@ func TestHTMLOnlyTemplateGeneratesTextFallback(t *testing.T) {
 	}
 }
 
+func TestTableInlineStyleAllowlist(t *testing.T) {
+	template := Template{
+		SubjectTemplate: "s",
+		BodyHTMLTemplate: `<table style="border-collapse: collapse; border-spacing: 0; width: 100%;">` +
+			`<thead><tr style="background-color: #f6f8fa;">` +
+			`<th colspan="2" rowspan="1" style="border: 1px solid #d0d7de; padding: 6px 8px; text-align: left; vertical-align: middle;">列</th>` +
+			`</tr></thead><tbody><tr>` +
+			`<td style="border-bottom: 1px solid #d0d7de; background-color: #ffffff; color: #111111; font-weight: 700; white-space: nowrap;">值</td>` +
+			`</tr></tbody></table>`,
+	}
+	if err := ValidateTemplate(template); err != nil {
+		t.Fatalf("safe table style was rejected: %v", err)
+	}
+	preview, err := Render(template, Input{})
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	for _, want := range []string{
+		`border-collapse: collapse`, `border-spacing: 0`, `width: 100%`,
+		`background-color: #f6f8fa`, `text-align: left`, `vertical-align: middle`,
+		`font-weight: 700`, `colspan="2"`, `rowspan="1"`,
+	} {
+		if !strings.Contains(preview.BodyHTML, want) {
+			t.Fatalf("rendered HTML missing %q: %s", want, preview.BodyHTML)
+		}
+	}
+}
+
+func TestTableStyleRejectsDangerousDeclarations(t *testing.T) {
+	tests := []string{
+		`<table style="position: fixed">x</table>`,
+		`<table style="display: block">x</table>`,
+		`<table style="width: expression(alert(1))">x</table>`,
+		`<table style="width: 100% !important">x</table>`,
+		`<table style="@import url(https://evil.example/x.css)">x</table>`,
+		`<table style="background-color: url(https://evil.example/pixel)">x</table>`,
+		`<table style="background-color: javascript:alert(1)">x</table>`,
+		`<table style="width: calc(100% - 10px)">x</table>`,
+		`<table style="transform: rotate(1deg)">x</table>`,
+		`<table style="border: 1px solid red /* comment */">x</table>`,
+		`<table><tr><td style="border: 1px solid red; display: flex">x</td></tr></table>`,
+		`<p style="border: 1px solid red">x</p>`,
+		`<table><caption style="text-align: left">x</caption></table>`,
+	}
+	for _, html := range tests {
+		template := Template{SubjectTemplate: "s", BodyTextTemplate: "t", BodyHTMLTemplate: html}
+		err := ValidateTemplate(template)
+		if err == nil {
+			t.Fatalf("HTML %q was accepted", html)
+		}
+		requireCode(t, err, domain.MailErrTemplateInvalid)
+	}
+}
+
+func TestHTMLTableTextFallback(t *testing.T) {
+	template := Template{
+		SubjectTemplate: "s",
+		BodyHTMLTemplate: `<table><thead><tr><th>项目</th><th>状态</th></tr></thead>` +
+			`<tbody><tr><td>构建</td><td>通过</td></tr><tr><td>测试</td><td>通过</td></tr></tbody></table>`,
+	}
+	preview, err := Render(template, Input{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "项目\t状态\n构建\t通过\n测试\t通过"; preview.BodyText != want {
+		t.Fatalf("table text fallback = %q, want %q", preview.BodyText, want)
+	}
+	if strings.Contains(preview.BodyText, "<table") || strings.Contains(preview.BodyText, "<td") {
+		t.Fatalf("table fallback leaked HTML tags: %q", preview.BodyText)
+	}
+
+	explicit := template
+	explicit.BodyTextTemplate = "自定义纯文本"
+	preview, err = Render(explicit, Input{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.BodyText != "自定义纯文本" {
+		t.Fatalf("explicit text body was replaced: %q", preview.BodyText)
+	}
+}
+
 func TestExtraVariableLimits(t *testing.T) {
 	template := Template{SubjectTemplate: "{{extra.a}}", BodyTextTemplate: "t"}
 	_, err := Render(template, Input{Variables: map[string]string{"extra.a": strings.Repeat("x", MaxExtraBytes)}})

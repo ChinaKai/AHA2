@@ -106,7 +106,16 @@ export async function openTaskMailCompose(
       <div class="two"><label>收件人 To（逗号分隔）<input name="to" required></label><label>CC（逗号分隔）<input name="cc"></label></div>
       <label>BCC（仅 Owner，可选）<input name="bcc"></label>
       <div id="mail-compose-variables">${variableInputs(templateDefaults(templates[0]?.id, templates))}</div>
-      <div class="mail-compose-attachments"><strong>当前 Task 附件</strong>${attachmentOptions || `<p class="field-help">没有可用附件。</p>`}<strong>构建产物</strong>${artifactOptions || `<p class="field-help">没有登记的构建产物。</p>`}</div>
+      <div class="mail-compose-attachments">
+        <section class="mail-compose-attachment-section">
+          <header class="mail-compose-attachment-head"><strong>当前 Task 附件</strong><span data-mail-selected-count="attachment_ids">已选 0 项</span></header>
+          <div class="mail-attachment-list-scroll">${attachmentOptions || `<p class="field-help">没有可用附件。</p>`}</div>
+        </section>
+        <section class="mail-compose-attachment-section">
+          <header class="mail-compose-attachment-head"><strong>构建产物</strong><span data-mail-selected-count="build_artifact_ids">已选 0 项</span></header>
+          <div class="mail-attachment-list-scroll">${artifactOptions || `<p class="field-help">没有登记的构建产物。</p>`}</div>
+        </section>
+      </div>
       <div class="mail-compose-preview" id="mail-compose-preview" hidden></div>
     </div>
     <div class="dialog-actions"><button type="button" data-close>取消</button><button type="button" id="mail-compose-preview-button">预览</button><button type="submit" class="primary">提交审批</button></div>
@@ -117,6 +126,20 @@ export async function openTaskMailCompose(
   const accountSelect = form.querySelector<HTMLSelectElement>('select[name="account_id"]')!;
   const variablesBox = form.querySelector<HTMLElement>("#mail-compose-variables")!;
   const previewBox = form.querySelector<HTMLElement>("#mail-compose-preview")!;
+  const syncSelectedCounts = () => {
+    form.querySelectorAll<HTMLElement>("[data-mail-selected-count]").forEach(element => {
+      const name = element.dataset.mailSelectedCount || "";
+      const count = form.querySelectorAll(`input[name="${name}"]:checked`).length;
+      element.textContent = `已选 ${count} 项`;
+    });
+  };
+  form.addEventListener("change", event => {
+    const target = event.target;
+    if (target instanceof HTMLInputElement && (target.name === "attachment_ids" || target.name === "build_artifact_ids")) {
+      syncSelectedCounts();
+    }
+  });
+  syncSelectedCounts();
   const syncTemplate = () => {
     const template = templateDefaults(templateSelect.value, templates);
     variablesBox.innerHTML = variableInputs(template);

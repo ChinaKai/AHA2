@@ -132,12 +132,21 @@ export function mailCardHtml(card: MailMessageCard, options: MailCardOptions = {
   </article>`;
 }
 
-export function mailConversationCardHtml(card: MailMessageCard | undefined, readOnly: boolean): string {
+// The conversation timeline is informational only. Approval and delivery
+// actions live in the Task mail tool panel, so this card never renders
+// mailCardHtml or approve/reject/cancel/retry buttons.
+export function mailConversationCardHtml(card: MailMessageCard | undefined, _readOnly: boolean): string {
   if (!card) {
     return `<article class="message agent mail-message-card"><header><strong>邮件</strong><span>邮件</span></header><div class="message-bubble"><div class="mail-card-loading">${icon("spinner", true)}正在加载邮件状态…</div></div></article>`;
   }
-  return `<article class="message agent mail-message-card" data-message-category="mail" data-mail-card="${escapeHTML(card.message.id)}">
-    <header><strong>邮件</strong><span>${escapeHTML(mailStatusLabel(card.message.status))}</span><time>${escapeHTML(formatMailTime(card.message.created_at))}</time></header>
-    <div class="message-bubble">${mailCardHtml(card, {readOnly, showBody: true})}</div>
+  const message = card.message;
+  // The timeline never renders approval state or actions; both stay in the
+  // mail tool panel so there is exactly one place to inspect and decide.
+  const notice = message.status === "pending_approval"
+    ? "已提交，等待 Owner 审批。请在任务工具栏「邮件」面板中查看和处理。"
+    : "邮件状态已更新，请在任务工具栏「邮件」面板中查看和处理。";
+  return `<article class="message agent mail-message-card" data-message-category="mail" data-mail-card="${escapeHTML(message.id)}">
+    <header><strong>邮件</strong><span>通知</span><time>${escapeHTML(formatMailTime(message.created_at))}</time></header>
+    <div class="message-bubble"><div class="mail-timeline-notice"><strong>${escapeHTML(message.subject || "（无主题）")}</strong><span>${escapeHTML(notice)}</span></div></div>
   </article>`;
 }

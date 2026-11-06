@@ -11,7 +11,7 @@ import {bindKnowledgeWorkspace, knowledgeEntryListVisible, renderKnowledgeWorksp
 import {bindHardwarePanel, refreshHardwarePanel, stopHardwarePanel} from "./hardware_panel.js";
 import {bindResourcesPage, renderResourcesPage} from "./resources.js";
 import type {ResourcesTab} from "./resources.js";
-import {bindMailCardActions, bindTaskMailPanel, openTaskMailCompose, renderTaskMailPanel} from "./mail_task.js";
+import {bindTaskMailPanel, renderTaskMailPanel} from "./mail_task.js";
 import {mailConversationCardHtml} from "./mail_cards.js";
 import type {MailResourcesData} from "./mail_resources.js";
 import {bindDesktopPanel, desktopPanelInteracting, refreshDesktopPanel, stopDesktopPanel} from "./desktop_panel.js";
@@ -449,7 +449,16 @@ interface AhaPerfMetrics {
   // Null unless `?perf=1`: a normal visit never allocates a sample buffer.
   apiSamples: APIRequestSample[] | null;
 }
-const perfEnabled = new URLSearchParams(window.location.search).get("perf") === "1";
+const initialSearchParams = new URLSearchParams(window.location.search);
+const perfEnabled = initialSearchParams.get("perf") === "1";
+// `?perf=1` is a one-load opt-in: keep the panel for this page, then drop only
+// the perf parameter so a refresh returns to a normal visit. Other query
+// parameters and the hash are preserved.
+if (initialSearchParams.has("perf")) {
+  const url = new URL(window.location.href);
+  url.searchParams.delete("perf");
+  window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+}
 const apiSampleLimit = 200;
 const perfMetrics: AhaPerfMetrics = {
   firstScreenMs: 0,
@@ -2117,15 +2126,13 @@ function persistNavigationState(): void {
   saveNavigationSnapshot({
     view: state.view, projectID: state.selectedProject?.id, taskID: state.selectedTask?.task.id,
     project: state.selectedProject || undefined, task: state.selectedTask?.task,
-    agentID: state.selectedTaskAgent, resourcesTab: state.resourcesTab, mailSubTab: state.mailSubTab,
+    agentID: state.selectedTaskAgent,
     draft: state.taskDraft, drafts: state.taskDrafts,
   });
 }
 async function restoreNavigationState(saved = loadNavigationSnapshot()): Promise<void> {
   const savedView = viewFromName(saved.view);
   if (!initialHashRoute && savedView) state.view = savedView;
-  if (!initialHashRoute && saved.resourcesTab === "mail") state.resourcesTab = "mail";
-  if (!initialHashRoute && (saved.mailSubTab === "templates" || saved.mailSubTab === "sent")) state.mailSubTab = saved.mailSubTab;
   if (initialHashRoute) return;
   const savedProject = state.projects.find(project => project.id === saved.projectID) || saved.project;
   state.selectedProject = savedProject || null;
@@ -4068,6 +4075,25 @@ function syncTaskPermissionIndicators(detail: TaskDetail): void {
   }
 }
 
+// The mail tool is the only entry point; mirror the pending approval count on
+// its toolbar button so a mail_* SSE event is visible without a full render.
+function syncTaskMailIndicator(): void {
+  const button = document.querySelector<HTMLButtonElement>('[data-task-tool="mail"]');
+  if (!button) return;
+  const pending = taskMailPendingCount();
+  const badge = button.querySelector<HTMLElement>(".task-tool-badge");
+  const label = pending > 0 ? `邮件（${pending} 条待审批）` : "邮件";
+  button.classList.toggle("has-pending", pending > 0);
+  button.title = label;
+  button.setAttribute("aria-label", label);
+  if (pending > 0) {
+    if (badge) badge.textContent = pending > 99 ? "99+" : String(pending);
+    else button.insertAdjacentHTML("beforeend", `<span class="task-tool-badge">${pending > 99 ? "99+" : pending}</span>`);
+  } else {
+    badge?.remove();
+  }
+}
+
 function taskCtxHtml(): string {
   if (state.selectedTask?.task.status === "draft") {
     return `<div class="task-tool-placeholder">${icon("context")}<h3>尚无 Context</h3><p>启动任务后将生成 Agent Context。</p></div>`;
@@ -4104,15 +4130,6 @@ function taskMailPendingCount(): number {
   return (state.taskMailOptions?.messages || []).filter(card => card.message.status === "pending_approval").length;
 }
 
-function taskSendMailButton(detail: TaskDetail): string {
-  const terminal = ["completed", "failed", "cancelled", "archived"].includes(detail.task.status);
-  const usable = (state.taskMailOptions?.accounts || []).some(account => account.status !== "disabled" && account.credential_configured);
-  const pending = taskMailPendingCount();
-  const disabled = terminal || (state.taskMailOptions !== null && !usable);
-  const title = terminal ? "任务已结束，不能新建邮件" : state.taskMailOptions === null ? "发送邮件（正在加载绑定）" : usable ? "发送邮件" : "当前 Task 没有可用邮箱账号";
-  return `<button type="button" id="task-send-mail" class="icon-button task-tool-button ${pending ? "has-pending" : ""}" title="${escapeHTML(title)}" aria-label="${escapeHTML(title)}" ${disabled ? "disabled" : ""}>${icon("mail")}${pending ? `<span class="task-tool-badge">${pending > 99 ? "99+" : pending}</span>` : ""}</button>`;
-}
-
 function taskDetailView(detail: TaskDetail): string {
   const loadingDetail = state.taskDetailLoading;
   const {archivedReadOnly, remoteReadOnly, completed, readOnly} = taskComposerFlags(detail);
@@ -4136,7 +4153,7 @@ function taskDetailView(detail: TaskDetail): string {
   const toolLayout = state.taskTool ? ` task-tool-open task-tool-${state.taskToolMode}` : "";
   const channelVisible = !readOnly && !detail.task.channel_instance_id;
   return shell(`<section class="task-screen">
-    <header class="task-head"><button id="back-tasks">←</button><div class="task-title-block"><h1><span class="task-code">${escapeHTML(detail.task.code || "")}</span><span class="task-title-text">${escapeHTML(detail.task.title)}</span></h1><div class="task-head-subline"><span class="task-head-meta" title="${escapeHTML(taskMeta)}">${escapeHTML(taskMeta)}</span><span id="task-detail-status" class="status ${statusClass(detail.task.status)}">${statusLabel(detail.task.status)}</span><span class="task-branch">${escapeHTML(detail.task.task_branch || "")}</span></div></div><div class="actions task-tool-actions">${taskSendMailButton(detail)}${renderTaskToolButtons(state.taskTool, {includeChannel: channelVisible, channelConnected: Boolean(state.taskChannelDestination), channelLabel: taskChannelButtonLabel(state.taskChannelDestination), pendingPermissions: taskPermissionPendingCount(detail)})}</div></header>
+    <header class="task-head"><button id="back-tasks">←</button><div class="task-title-block"><h1><span class="task-code">${escapeHTML(detail.task.code || "")}</span><span class="task-title-text">${escapeHTML(detail.task.title)}</span></h1><div class="task-head-subline"><span class="task-head-meta" title="${escapeHTML(taskMeta)}">${escapeHTML(taskMeta)}</span><span id="task-detail-status" class="status ${statusClass(detail.task.status)}">${statusLabel(detail.task.status)}</span><span class="task-branch">${escapeHTML(detail.task.task_branch || "")}</span></div></div><div class="actions task-tool-actions">${renderTaskToolButtons(state.taskTool, {includeChannel: channelVisible, channelConnected: Boolean(state.taskChannelDestination), channelLabel: taskChannelButtonLabel(state.taskChannelDestination), pendingPermissions: taskPermissionPendingCount(detail), pendingMail: taskMailPendingCount()})}</div></header>
     <div class="task-grid${toolLayout}" style="--task-tool-width:${state.taskToolWidth}%">
       ${chat}
       ${renderTaskToolPanel(state.taskTool, detail, state.selectedTaskAgent, taskCtxHtml(), state.taskToolMode, taskChannelPanelHTML(), state.taskToolPinned === state.taskTool, taskPermissionPanelHtml(detail), taskMailPanelHTML(detail))}
@@ -4322,6 +4339,7 @@ function updateTaskLiveRegions(): void {
   const nextFailure = taskFailureBannerHtml(detail);
   if (failureSlot && failureSlot.innerHTML !== nextFailure) failureSlot.innerHTML = nextFailure;
   syncTaskPermissionIndicators(detail);
+  syncTaskMailIndicator();
   const agentSelect = document.querySelector<HTMLSelectElement>("#composer-agent");
   if (!detail.agents.some(agent => agent.agent_id === state.selectedTaskAgent)) {
     state.selectedTaskAgent = detail.agents.some(agent => agent.agent_id === "main")
@@ -5670,19 +5688,6 @@ function bindMessageComposer(): void {
 function bindTaskToolsAndPanels(): void {
   bindTaskToolLayout();
   bindTaskPermissionActions();
-  document.querySelector("#task-send-mail")?.addEventListener("click", () => {
-    const detail = state.selectedTask;
-    if (!detail) return;
-    void (async () => {
-      if (!state.taskMailOptions) await loadTaskMail(detail.task.id);
-      const options = state.taskMailOptions;
-      if (!options) {
-        setMessage("error", state.taskMailError || "邮件绑定尚未加载完成");
-        return;
-      }
-      await openTaskMailCompose(detail, options, taskMailActions());
-    })();
-  });
   if (state.taskTool === "mail" && state.selectedTask) bindTaskMailPanel(state.selectedTask, state.taskMailOptions, taskMailActions());
   if (state.taskTool === "hardware" && state.selectedTask) bindHardwarePanel(state.selectedTask, setMessage);
   if (state.taskTool === "browser" && state.selectedTask) bindDesktopPanel(state.selectedTask, setMessage);
@@ -6000,7 +6005,6 @@ async function loadOlderConversation(): Promise<void> {
 function bindConversationLiveControls(): void {
   const list = document.querySelector<HTMLElement>("#conversation-list");
   bindMessageBubbleControls(list || document);
-  if (list && state.selectedTask) bindMailCardActions(list, state.taskMailOptions, taskMailActions());
   document.querySelector("#load-older-conversation")?.addEventListener("click", () => {
     void loadOlderConversation();
   });
@@ -6245,14 +6249,13 @@ function closeGlobalEvents(): void {
 window.addEventListener("aha-resources-tab", event => {
   const tab = (event as CustomEvent).detail === "mail" ? "mail" : "hardware";
   state.resourcesTab = tab;
-  window.history.replaceState(null, "", `#resources?tab=${tab}`);
-  persistNavigationState();
+  // Tab switches are display-only; the address bar stays untouched. The tab is
+  // also not persisted, so a refresh starts at the default hardware tab.
   void ensureViewData("resources").then(() => render());
 });
 window.addEventListener("aha-mail-subtab", event => {
   const tab = String((event as CustomEvent).detail || "accounts");
   state.mailSubTab = tab === "templates" || tab === "sent" ? tab : "accounts";
-  persistNavigationState();
 });
 window.addEventListener("hashchange", () => {
   if (!applyLocationHash()) return;

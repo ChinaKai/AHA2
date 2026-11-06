@@ -36,6 +36,8 @@
 .mail-dialog-form textarea { min-height: 96px; }
 .mail-variable-bar { display: flex; flex-wrap: wrap; gap: 4px; max-height: 92px; overflow: auto; padding: 6px; border: 1px dashed var(--line); border-radius: 5px; }
 .mail-variable-bar button { min-height: 24px; padding: 0 6px; border-radius: 4px; background: #f4f7fb; color: #25517d; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.mail-template-html-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 4px; }
+.mail-template-html-tools small { color: var(--muted); font-size: 10px; }
 .mail-warnings { margin: 6px 0; padding-left: 18px; color: #a15c00; font-size: 11px; }
 .mail-preview-body { max-height: 220px; overflow: auto; padding: 8px; border: 1px solid var(--line); border-radius: 5px; background: #f8fafc; white-space: pre-wrap; font-size: 11px; }
 .mail-preview-frame { width: 100%; min-height: 220px; border: 1px solid var(--line); border-radius: 5px; background: #fff; }
@@ -50,13 +52,25 @@
 .mail-attachment-list code { flex: 1 1 220px; overflow: hidden; color: var(--muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 .mail-filters select { min-width: 120px; }
 .mail-compose-dialog, .task-mail-compose-dialog, .mail-message-detail-dialog { width: min(820px, calc(100vw - 32px)); max-height: calc(100vh - 48px); }
-.task-mail-compose-dialog .dialog-body, .mail-message-detail-dialog .dialog-body { max-height: min(68vh, 760px); overflow: auto; }
+/* Compose is a fixed header / scrollable body / always-visible footer shell. */
+.task-mail-compose-dialog[open] { display: flex; flex-direction: column; padding: 0; overflow: hidden; }
+.task-mail-compose-dialog > form { display: grid; grid-template-rows: auto minmax(0,1fr) auto; flex: 1 1 auto; min-height: 0; margin: 0; padding: 0; overflow: hidden; }
+.task-mail-compose-dialog .dialog-head { flex: 0 0 auto; margin: 0; padding: 16px 18px 12px; border-bottom: 1px solid var(--line); }
+.task-mail-compose-dialog .dialog-body { min-height: 0; max-height: none; overflow-y: auto; padding: 16px 18px; }
+.task-mail-compose-dialog .dialog-actions { flex: 0 0 auto; position: sticky; bottom: 0; z-index: 1; margin: 0; padding: 12px 18px; border-top: 1px solid var(--line); background: #fff; }
+.mail-message-detail-dialog .dialog-body { max-height: min(68vh, 760px); overflow: auto; }
 .mail-compose-variables { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 8px; }
 .mail-compose-variables label { display: grid; gap: 3px; font-size: 10px; color: var(--muted); }
-.mail-compose-attachments { display: grid; gap: 6px; padding: 8px; border: 1px solid var(--line); border-radius: 5px; background: #fbfcfe; }
-.mail-compose-attachments > strong { font-size: 11px; color: var(--muted); }
-.mail-attachment-option { display: flex; align-items: flex-start; gap: 7px; padding: 4px 6px; border-radius: 4px; background: #fff; font-size: 11px; }
-.mail-attachment-option span { display: grid; gap: 2px; }
+.mail-compose-attachments { display: grid; gap: 10px; padding: 8px; border: 1px solid var(--line); border-radius: 5px; background: #fbfcfe; }
+.mail-compose-attachment-section { display: grid; gap: 6px; min-width: 0; }
+.mail-compose-attachment-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.mail-compose-attachment-head strong { font-size: 11px; color: var(--muted); }
+.mail-compose-attachment-head span { flex: 0 0 auto; color: var(--muted); font-size: 10px; }
+.mail-attachment-list-scroll { display: grid; gap: 4px; max-height: 160px; overflow-y: auto; overscroll-behavior: contain; }
+.mail-attachment-option { display: grid; grid-template-columns: 18px minmax(0,1fr); align-items: start; gap: 7px; padding: 4px 6px; border-radius: 4px; background: #fff; font-size: 11px; text-align: left; }
+.mail-attachment-option input { justify-self: start; margin: 2px 0 0; }
+.mail-attachment-option span { display: grid; gap: 2px; min-width: 0; text-align: left; }
+.mail-attachment-option strong, .mail-attachment-option small { overflow-wrap: anywhere; text-align: left; }
 .mail-attachment-option small { color: var(--muted); }
 .mail-compose-preview { display: grid; gap: 5px; padding: 9px; border: 1px solid #bcd3f5; border-radius: 5px; background: #f7fbff; font-size: 11px; }
 .mail-compose-preview pre { max-height: 160px; overflow: auto; white-space: pre-wrap; }
@@ -88,6 +102,8 @@
 .mail-card-actions button { min-height: 30px; }
 .mail-message-card .message-bubble { width: 100%; }
 .mail-card-loading { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11px; }
+.mail-timeline-notice { display: grid; gap: 3px; font-size: 11px; }
+.mail-timeline-notice span { color: var(--muted); }
 .empty-state.compact { min-height: 96px; }
 @media (max-width: 760px) {
   .resource-tabs, .mail-subtabs { flex-wrap: nowrap; }
@@ -99,6 +115,9 @@
   .mail-form-grid, .mail-compose-variables { grid-template-columns: minmax(0,1fr); }
   .task-mail-binding-form { grid-template-columns: minmax(0,1fr); }
   .task-mail-compose-dialog, .mail-message-detail-dialog { width: 100vw; max-width: 100vw; height: 100dvh; max-height: 100dvh; margin: 0; border-radius: 0; }
+  .task-mail-compose-dialog[open] { display: flex; flex-direction: column; padding: 0; }
+  .task-mail-compose-dialog > form { display: grid; grid-template-rows: auto minmax(0,1fr) auto; height: 100%; min-height: 0; padding: 0; }
+  .task-mail-compose-dialog .dialog-body { max-height: none; overflow-y: auto; }
   .task-mail-compose-dialog .dialog-actions, .mail-message-detail-dialog .dialog-actions { position: sticky; bottom: 0; background: #fff; padding-bottom: calc(8px + env(safe-area-inset-bottom)); }
   .mail-card-meta p { grid-template-columns: 64px minmax(0,1fr); }
   .mail-card-actions { position: sticky; bottom: 0; padding-top: 6px; background: #fff; }

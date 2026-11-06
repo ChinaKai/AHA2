@@ -41,12 +41,14 @@ function escapeHTML(value: unknown): string {
 
 export function renderTaskToolButtons(
   active: TaskTool | "",
-  options: {includeChannel?: boolean; channelConnected?: boolean; channelLabel?: string; pendingPermissions?: number} = {},
+  options: {includeChannel?: boolean; channelConnected?: boolean; channelLabel?: string; pendingPermissions?: number; pendingMail?: number} = {},
 ): string {
   return tools.filter(tool => tool.id !== "channel" || options.includeChannel !== false).map(tool => {
     const connected = tool.id === "channel" && options.channelConnected;
     const label = tool.id === "channel" && options.channelLabel ? options.channelLabel : tool.label;
-    const pending = tool.id === "permissions" ? Math.max(0, Number(options.pendingPermissions) || 0) : 0;
+    const pending = tool.id === "permissions"
+      ? Math.max(0, Number(options.pendingPermissions) || 0)
+      : tool.id === "mail" ? Math.max(0, Number(options.pendingMail) || 0) : 0;
     const badge = pending > 0 ? `<span class="task-tool-badge">${pending > 99 ? "99+" : pending}</span>` : "";
     return `<button type="button" data-task-tool="${tool.id}" class="icon-button task-tool-button ${active === tool.id ? "active" : ""} ${connected ? "connected" : ""} ${pending > 0 ? "has-pending" : ""}" title="${escapeHTML(label)}${pending > 0 ? `（${pending} 条待审批）` : ""}" aria-label="${escapeHTML(label)}">${icon(tool.iconName)}${badge}</button>`;
   }).join("");

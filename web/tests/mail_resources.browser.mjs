@@ -144,6 +144,8 @@ try {
   // Mail tab: write-only authorization code, no credential ref rendered.
   await page.click('[data-resources-tab="mail"]');
   await page.waitForSelector(".mail-resources-view");
+  // Switching tabs must not rewrite the address bar.
+  assert.equal(await page.evaluate(() => location.hash), "#resources?tab=hardware");
   assert.match(await page.locator(".mail-resource-row").first().innerText(), /noreply@example.com/);
   await page.click("#add-mail-account");
   await page.waitForSelector(".mail-resource-dialog[open]");
@@ -160,19 +162,25 @@ try {
   assert.doesNotMatch(await page.locator("#app").innerText(), /credential_ref/);
   assert.deepEqual(errors, []);
 
-  // Task view: sending opens a mobile sheet; submitting produces a pending
-  // approval card; approving it is possible from the timeline card.
+  // Task view: the toolbar mail entry is the only entry point. Submitting
+  // produces a pending approval; the timeline stays informational while the
+  // mail tool panel owns approval actions.
   await page.goto(base, {waitUntil: "networkidle"});
   await page.evaluate(task => sessionStorage.setItem("aha2.navigation", JSON.stringify({view: "tasks", taskID: task.id, task})), task);
   await page.reload({waitUntil: "networkidle"});
   await page.waitForSelector(".task-screen", {timeout: 15000});
-  await page.waitForSelector("#task-send-mail:not([disabled])");
+  assert.equal(await page.locator("#task-send-mail").count(), 0, "header mail icon must be removed");
   await page.setViewportSize({width: 390, height: 844});
-  await page.click("#task-send-mail");
+  await page.click('[data-task-tool="mail"]');
+  await page.waitForSelector(".task-mail-panel");
+  await page.waitForSelector("#task-mail-compose:not([disabled])");
+  await page.click("#task-mail-compose");
   await page.waitForSelector("#task-mail-compose-dialog[open]");
   const compose = page.locator("#task-mail-compose-dialog");
   const box = await compose.boundingBox();
   assert.ok(box && box.width <= 390, `compose dialog width ${box?.width}`);
+  const submitBox = await compose.locator('button[type="submit"]').boundingBox();
+  assert.ok(submitBox && submitBox.y + submitBox.height <= 844, "compose footer must stay visible");
   await compose.locator('input[name="to"]').fill("qa@example.com");
   await compose.locator('input[name="bcc"]').fill("audit@example.com");
   await compose.locator('button[type="submit"]').click();
@@ -181,13 +189,20 @@ try {
   assert.deepEqual(sent.to, ["qa@example.com"]);
   assert.deepEqual(sent.bcc, ["audit@example.com"]);
   assert.equal(sent.submit, true);
-  await page.waitForSelector('[data-mail-card="mail_message_1"]');
-  assert.match(await page.locator('[data-mail-card="mail_message_1"]').innerText(), /待审批/);
-  const approve = page.locator('[data-mail-action="approve"]').first();
+  await page.waitForFunction(() => document.querySelector('[data-task-tool="mail"] .task-tool-badge')?.textContent === "1");
+  await page.waitForSelector(".task-mail-panel [data-mail-card='mail_message_1']");
+  assert.match(await page.locator(".task-mail-panel [data-mail-card='mail_message_1']").innerText(), /待审批/);
+  // The timeline notice shows the submitted state but exposes no decision controls.
+  const timelineCard = page.locator("#conversation-list [data-mail-card='mail_message_1']").first();
+  await page.waitForSelector("#conversation-list [data-mail-card='mail_message_1']");
+  assert.match(await timelineCard.innerText(), /已提交，等待 Owner 审批/);
+  assert.equal(await timelineCard.locator("[data-mail-action]").count(), 0);
+  const approve = page.locator(".task-mail-panel [data-mail-action='approve']").first();
   assert.equal(await approve.isVisible(), true);
   await approve.click();
   await page.waitForFunction(() => window.__approved === true);
-  await page.waitForFunction(() => document.querySelector('[data-mail-card="mail_message_1"]')?.textContent?.includes("排队中"));
+  await page.waitForFunction(() => document.querySelector('[data-task-tool="mail"] .task-tool-badge') === null);
+  await page.waitForFunction(() => document.querySelector(".task-mail-panel [data-mail-card='mail_message_1']")?.textContent?.includes("排队中"));
   await page.screenshot({path: resolve(output, "mail-task-mobile.png")});
   assert.deepEqual(errors, []);
   console.log("mail resources page verified");

@@ -18,8 +18,6 @@ export interface NavigationSnapshot {
   task?: Task;
   agentID?: string;
   taskTab?: string;
-  resourcesTab?: string;
-  mailSubTab?: string;
   draft?: string;
   drafts?: Record<string, string>;
 }

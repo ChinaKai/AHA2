@@ -27,13 +27,38 @@ var allowedTags = map[string]bool{
 	"a": true, "img": true,
 }
 
-// allowedAttrs is deliberately tag specific. Event handlers, style, srcdoc,
-// srcset and every other attribute are rejected by omission.
+// allowedAttrs is deliberately tag specific. Event handlers, srcdoc, srcset
+// and every other attribute are rejected by omission. `style` is only allowed
+// on table elements, and only declarations from tableStyleAllowedProperties
+// survive validation. Other tags still cannot carry a style attribute.
 var allowedAttrs = map[string]map[string]bool{
-	"a":   {"href": true, "title": true},
-	"img": {"src": true, "alt": true, "width": true, "height": true},
-	"td":  {"colspan": true, "rowspan": true},
-	"th":  {"colspan": true, "rowspan": true},
+	"a":     {"href": true, "title": true},
+	"img":   {"src": true, "alt": true, "width": true, "height": true},
+	"table": {"style": true},
+	"tr":    {"style": true},
+	"td":    {"colspan": true, "rowspan": true, "style": true},
+	"th":    {"colspan": true, "rowspan": true, "style": true},
+}
+
+// tableStyleAllowedProperties is the table-only CSS subset. Every property is
+// presentational: no URLs, no positioning, no layout takeover, no imports.
+var tableStyleAllowedProperties = map[string]bool{
+	"border": true, "border-collapse": true, "border-spacing": true,
+	"border-color": true, "border-style": true, "border-width": true,
+	"border-top": true, "border-right": true, "border-bottom": true, "border-left": true,
+	"padding": true, "padding-top": true, "padding-right": true, "padding-bottom": true, "padding-left": true,
+	"text-align": true, "vertical-align": true,
+	"width": true, "min-width": true, "max-width": true,
+	"height": true, "min-height": true, "max-height": true,
+	"background-color": true, "color": true,
+	"font-weight": true, "font-size": true, "line-height": true, "white-space": true,
+}
+
+// Forbidden anywhere in a table style value. url()/expression()/imports and
+// !important are rejected explicitly even though the character checks below
+// would also reject their punctuation, so the error stays understandable.
+var tableStyleForbiddenValueFragments = []string{
+	"url(", "expression", "@import", "!important", "javascript:", "behavior", "-moz-binding", "position", "display",
 }
 
 var cidValuePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.@-]{0,127}$`)
@@ -152,6 +177,12 @@ func validateHTMLElement(node *html.Node, state *htmlState) error {
 		if strings.Contains(attribute.Val, "{{") && name != "href" && name != "src" {
 			return errorf(domain.MailErrTemplateInvalid, "placeholders are not allowed in %s", name)
 		}
+		if name == "style" {
+			if err := validateTableStyle(tag, attribute.Val); err != nil {
+				return err
+			}
+			continue
+		}
 		if name == "href" || name == "src" {
 			if err := validateURLAttribute(attribute.Val, name, state); err != nil {
 				return err
@@ -171,6 +202,52 @@ func validateHTMLElement(node *html.Node, state *htmlState) error {
 	for child := node.FirstChild; child != nil; child = child.NextSibling {
 		if err := validateHTMLNode(child, state); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// validateTableStyle parses a table-only inline style strictly. Only known
+// presentational properties are accepted, values are limited to plain CSS
+// tokens (no functions, quotes, escapes, comments or other syntax), and
+// forbidden constructs such as url(), expression(), @import and !important are
+// rejected outright.
+func validateTableStyle(tag, value string) error {
+	switch tag {
+	case "table", "tr", "th", "td":
+	default:
+		return errorf(domain.MailErrTemplateInvalid, "style is not allowed on <%s>", tag)
+	}
+	if !utf8.ValidString(value) || strings.ContainsRune(value, 0) {
+		return errorf(domain.MailErrTemplateInvalid, "table style contains invalid characters")
+	}
+	for _, declaration := range strings.Split(value, ";") {
+		declaration = strings.TrimSpace(declaration)
+		if declaration == "" {
+			continue
+		}
+		property, rawValue, found := strings.Cut(declaration, ":")
+		if !found {
+			return errorf(domain.MailErrTemplateInvalid, "table style declaration is invalid")
+		}
+		property = strings.ToLower(strings.TrimSpace(property))
+		rawValue = strings.TrimSpace(rawValue)
+		if !tableStyleAllowedProperties[property] {
+			return errorf(domain.MailErrTemplateInvalid, "style property %q is not allowed", property)
+		}
+		if rawValue == "" {
+			return errorf(domain.MailErrTemplateInvalid, "style property %q has an empty value", property)
+		}
+		lowered := strings.ToLower(rawValue)
+		for _, forbidden := range tableStyleForbiddenValueFragments {
+			if strings.Contains(lowered, forbidden) {
+				return errorf(domain.MailErrTemplateInvalid, "style property %q contains a forbidden value", property)
+			}
+		}
+		for _, r := range rawValue {
+			if r < 0x20 || r == 0x7f || r > 0x7e || strings.ContainsRune("()\\\"'<>{};/:", r) {
+				return errorf(domain.MailErrTemplateInvalid, "style property %q contains an unsafe character", property)
+			}
 		}
 	}
 	return nil
