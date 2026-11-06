@@ -14,19 +14,21 @@ import (
 )
 
 type petTaskFixture struct {
-	ctx       context.Context
-	database  *store.Store
-	service   *Service
-	provider  domain.Provider
-	model     domain.Model
-	modelEnv  domain.EnvGroup
-	createdAt time.Time
+	ctx          context.Context
+	database     *store.Store
+	databasePath string
+	service      *Service
+	provider     domain.Provider
+	model        domain.Model
+	modelEnv     domain.EnvGroup
+	createdAt    time.Time
 }
 
 func newPetTaskFixture(t *testing.T) *petTaskFixture {
 	t.Helper()
 	ctx := context.Background()
-	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	databasePath := filepath.Join(t.TempDir(), "aha2.db")
+	database, err := store.Open(ctx, databasePath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +63,8 @@ func newPetTaskFixture(t *testing.T) *petTaskFixture {
 		}
 	}
 	fixture := &petTaskFixture{
-		ctx: ctx, database: database, service: NewService(database, secretStore, &stubExecutor{}),
+		ctx: ctx, database: database, databasePath: databasePath,
+		service:  NewService(database, secretStore, &stubExecutor{}),
 		provider: provider, model: model, modelEnv: envGroup, createdAt: now,
 	}
 	t.Cleanup(func() {

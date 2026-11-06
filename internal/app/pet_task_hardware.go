@@ -9,15 +9,6 @@ import (
 	"github.com/ChinaKai/AHA2/internal/domain"
 )
 
-type PetHardwareResourceBrief struct {
-	ID                 string `json:"id"`
-	Description        string `json:"description"`
-	Mode               string `json:"mode"`
-	Access             string `json:"access"`
-	BindingCount       int    `json:"binding_count"`
-	PasswordConfigured bool   `json:"password_configured"`
-}
-
 type PetTaskHardwareGroupBrief struct {
 	ID                 string `json:"id"`
 	ResourceID         string `json:"resource_id,omitempty"`
@@ -33,7 +24,7 @@ type PetTaskHardwareView struct {
 	Groups   []PetTaskHardwareGroupBrief  `json:"groups"`
 }
 
-func (s *Service) PetHardwareResources(ctx context.Context) ([]PetHardwareResourceBrief, error) {
+func (s *Service) PetHardwareResources(ctx context.Context) ([]PetHardwareResourceView, error) {
 	assistant, err := s.petAssistant(ctx)
 	if err != nil {
 		return nil, err
@@ -45,13 +36,9 @@ func (s *Service) PetHardwareResources(ctx context.Context) ([]PetHardwareResour
 	if err != nil {
 		return nil, err
 	}
-	result := make([]PetHardwareResourceBrief, 0, len(items))
+	result := make([]PetHardwareResourceView, 0, len(items))
 	for _, item := range items {
-		result = append(result, PetHardwareResourceBrief{
-			ID: item.ID, Description: item.Description, Mode: item.Mode,
-			Access: item.Access, BindingCount: item.BindingCount,
-			PasswordConfigured: item.PasswordConfigured,
-		})
+		result = append(result, petHardwareResourceView(item))
 	}
 	return result, nil
 }
