@@ -89,6 +89,10 @@ type AttachmentResource struct {
 	// keeps Content empty so binary bytes never enter the prompt.
 	Content string
 	Inline  bool
+	// BudgetExhausted distinguishes "this attachment fits the per-attachment
+	// cap, but newer attachments used the per-Turn budget" from "the file
+	// itself exceeds the inline cap". The metadata must report the real reason.
+	BudgetExhausted bool
 }
 
 type ContextResource struct {
@@ -198,9 +202,10 @@ type attachmentIndexEntry struct {
 	RelativePath string
 	MediaType    string
 	Size         int64
-	SHA256       string
-	Inline       bool
-	DownloadPath string
+	SHA256          string
+	Inline          bool
+	BudgetExhausted bool
+	DownloadPath    string
 }
 
 type InboxTemplateItem struct {
@@ -907,7 +912,7 @@ func attachmentResources(
 		item := value.Attachment
 		entry := attachmentIndexEntry{
 			ID: item.ID, Name: item.Name, MediaType: item.MediaType, Size: item.Size,
-			SHA256: item.SHA256, Inline: value.Inline,
+			SHA256: item.SHA256, Inline: value.Inline, BudgetExhausted: value.BudgetExhausted,
 			DownloadPath: "/api/v1/tasks/" + input.Task.ID + "/attachments/" + item.ID,
 		}
 		if value.Inline {
@@ -924,7 +929,7 @@ func attachmentResources(
 			resources = append(resources, attachmentDetailResource(
 				input, "attachment-"+item.ID+"-metadata", metadataPath,
 				"Attachment metadata; content not inlined: "+item.Name,
-				attachmentMetadata(item, input.Task.ID)))
+				attachmentMetadata(item, input.Task.ID, value.BudgetExhausted)))
 		}
 		data.AttachmentEntries = append(data.AttachmentEntries, entry)
 	}
@@ -982,13 +987,17 @@ func attachmentDetailResource(input BuildInput, id, path, description, content s
 	}
 }
 
-func attachmentMetadata(item domain.Attachment, taskID string) string {
+func attachmentMetadata(item domain.Attachment, taskID string, budgetExhausted bool) string {
 	inlineMiB := MaxInlineAttachmentBytes / (1 << 20)
+	reason := fmt.Sprintf("it exceeds the %d MiB per-Turn Context inline limit", inlineMiB)
+	if budgetExhausted {
+		reason = "the per-Turn Context inline budget was exhausted by newer attachments"
+	}
 	return fmt.Sprintf(
 		"# %s\n\n- id: %s\n- media_type: %s\n- size: %d bytes\n- sha256: %s\n"+
-			"- content: not inlined; it exceeds the %d MiB per-Turn Context inline limit\n"+
+			"- content: not inlined; %s\n"+
 			"- download: GET /api/v1/tasks/%s/attachments/%s (an Owner session is required)\n",
-		item.Name, item.ID, item.MediaType, item.Size, item.SHA256, inlineMiB, taskID, item.ID)
+		item.Name, item.ID, item.MediaType, item.Size, item.SHA256, reason, taskID, item.ID)
 }
 
 // AvailableContextGroup is one directory to print once, followed by the entry

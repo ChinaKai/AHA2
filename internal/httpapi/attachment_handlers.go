@@ -61,6 +61,9 @@ func (s *Server) createTaskAttachment(writer http.ResponseWriter, request *http.
 		return
 	}
 	defer file.Close()
+	// Known limitation: this still buffers the whole upload (up to the 200MiB
+	// cap) for hashing and storage. maxMultipartMemory only avoids a second
+	// in-memory multipart copy; true streaming-to-disk hashing is a follow-up.
 	content, err := io.ReadAll(io.LimitReader(file, maxAttachmentBytes+1))
 	if err != nil || !taskAttachmentSizeValid(int64(len(content))) {
 		writeError(writer, http.StatusBadRequest, "invalid_attachment_size")

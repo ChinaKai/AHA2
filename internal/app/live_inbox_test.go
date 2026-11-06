@@ -28,7 +28,7 @@ func TestLiveInboxInjectionTextCarriesSourceAndAttachments(t *testing.T) {
 		},
 		{ID: "inbox-2", Content: "second", Source: domain.LiveInboxSource{Kind: "owner", Authority: "owner"}},
 	}
-	text := liveInboxInjectionText(messages, map[string]string{"attachment-1": ".aha2-context/live-attachments/attachment-1/screen shot.png"})
+	text := liveInboxInjectionText(messages, map[string]string{"attachment-1": ".aha2-context/live-attachments/attachment-1/screen shot.png"}, nil)
 	for _, expected := range []string{
 		"[AHA live inbox] 2 new message(s)",
 		"蒋开开 (channel, role=owner, authority=task_channel_participant)",
@@ -60,7 +60,7 @@ func TestLiveInboxInjectionTextKeepsLargeAttachmentMetadataOnly(t *testing.T) {
 		},
 		Source: domain.LiveInboxSource{Kind: "owner", Authority: "owner"},
 	}}
-	text := liveInboxInjectionText(messages, nil)
+	text := liveInboxInjectionText(messages, nil, map[string]string{"attachment-big": liveAttachmentOmitTooLarge})
 	for _, expected := range []string{
 		"large.log (text/plain, 5242880 bytes, id attachment-big, sha256 " + hash + ")",
 		"content not inlined",
@@ -70,6 +70,28 @@ func TestLiveInboxInjectionTextKeepsLargeAttachmentMetadataOnly(t *testing.T) {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("injection text missing %q:\n%s", expected, text)
 		}
+	}
+}
+
+func TestLiveInboxInjectionTextReportsBudgetExhausted(t *testing.T) {
+	t.Parallel()
+	hash := strings.Repeat("b", 64)
+	messages := []domain.LiveInboxMessage{{
+		ID: "inbox-1", Content: "older attachment downgraded",
+		Payload: map[string]any{
+			"attachments": []any{map[string]any{
+				"id": "attachment-old", "task_id": "task-1", "name": "old.log",
+				"media_type": "text/plain", "size": float64(3 << 20), "sha256": hash,
+			}},
+		},
+		Source: domain.LiveInboxSource{Kind: "owner", Authority: "owner"},
+	}}
+	text := liveInboxInjectionText(messages, nil, map[string]string{"attachment-old": liveAttachmentOmitBudget})
+	if !strings.Contains(text, "per-Turn Context inline budget was exhausted by newer attachments") {
+		t.Fatalf("injection text missing budget reason:\n%s", text)
+	}
+	if strings.Contains(text, "exceeds the 4 MiB") {
+		t.Fatalf("budget-exhausted attachment reported the size reason:\n%s", text)
 	}
 }
 
@@ -107,7 +129,7 @@ func TestWriteLiveAttachmentNative(t *testing.T) {
 
 func TestLiveInboxInjectionTextEmptyMessages(t *testing.T) {
 	t.Parallel()
-	if got := liveInboxInjectionText(nil, nil); got != "" {
+	if got := liveInboxInjectionText(nil, nil, nil); got != "" {
 		t.Fatalf("empty injection text = %q", got)
 	}
 }

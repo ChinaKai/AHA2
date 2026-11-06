@@ -44,7 +44,7 @@ func (s *Service) ClaimAgentInbox(ctx context.Context, claims agentapi.Claims, l
 	if len(items) == 0 {
 		return result, nil
 	}
-	materialized := s.materializeLiveInboxAttachments(ctx, call.Task, items)
+	materialized, omittedAttachments := s.materializeLiveInboxAttachments(ctx, call.Task, items)
 	result.Messages = make([]domain.LiveInboxMessage, 0, len(items))
 	for _, item := range items {
 		result.Messages = append(result.Messages, liveInboxMessage(item))
@@ -52,7 +52,7 @@ func (s *Service) ClaimAgentInbox(ctx context.Context, claims agentapi.Claims, l
 			result.NextCursor = item.Sequence
 		}
 	}
-	result.InjectionText = liveInboxInjectionText(result.Messages, materialized)
+	result.InjectionText = liveInboxInjectionText(result.Messages, materialized, omittedAttachments)
 	for attachmentID := range materialized {
 		result.MaterializedAttachments = append(result.MaterializedAttachments, attachmentID)
 	}
@@ -111,21 +111,27 @@ func (s *Service) AckAgentInbox(ctx context.Context, claims agentapi.Claims, ids
 	return count, nil
 }
 
+const (
+	liveAttachmentOmitTooLarge = "too_large"
+	liveAttachmentOmitBudget   = "budget_exhausted"
+)
+
 func (s *Service) materializeLiveInboxAttachments(
 	ctx context.Context,
 	task domain.Task,
 	items []domain.AgentInboxItem,
-) map[string]string {
+) (map[string]string, map[string]string) {
 	paths := map[string]string{}
-	var inlineBytesUsed int64
+	omitted := map[string]string{}
 	workspace, err := s.store.Workspace(ctx, task.WorkspaceID)
 	if err != nil {
-		return paths
+		return paths, omitted
 	}
 	workDir := strings.TrimSpace(task.TaskWorkspacePath)
 	if workDir == "" {
 		workDir = workspace.RootPath
 	}
+	attachments := []domain.Attachment{}
 	for _, item := range items {
 		raw, ok := item.Payload["attachments"]
 		if !ok {
@@ -147,22 +153,38 @@ func (s *Service) materializeLiveInboxAttachments(
 			if err != nil {
 				continue
 			}
-			limit := inlineAttachmentLimit(promptpkg.MaxInlineAttachmentBytes, promptpkg.MaxInlineAttachmentBytesPerTurn, inlineBytesUsed)
-			content, inline, err := inlineAttachmentBytes(attachment, limit, func() ([]byte, error) {
-				return s.store.AttachmentContent(attachment)
-			})
-			if err != nil || !inline {
-				continue
-			}
-			inlineBytesUsed += int64(len(content))
-			relative := pathpkg.Join(".aha2-context", "live-attachments", attachment.ID, liveAttachmentName(attachment.Name))
-			if err := writeLiveAttachment(ctx, workspace, workDir, relative, content); err != nil {
-				continue
-			}
-			paths[attachment.ID] = relative
+			attachments = append(attachments, attachment)
 		}
 	}
-	return paths
+	// items are oldest-first; the allocator gives the newest message's
+	// attachments the budget first, matching the live inbox priority.
+	decisions := allocateInlineAttachments(
+		attachments,
+		promptpkg.MaxInlineAttachmentBytes,
+		promptpkg.MaxInlineAttachmentBytesPerTurn,
+		func(item domain.Attachment) ([]byte, error) { return s.store.AttachmentContent(item) },
+	)
+	for index, attachment := range attachments {
+		decision := decisions[index]
+		if decision.Err != nil {
+			continue
+		}
+		if !decision.Inline {
+			switch {
+			case attachment.Size > promptpkg.MaxInlineAttachmentBytes:
+				omitted[attachment.ID] = liveAttachmentOmitTooLarge
+			case decision.BudgetExhausted:
+				omitted[attachment.ID] = liveAttachmentOmitBudget
+			}
+			continue
+		}
+		relative := pathpkg.Join(".aha2-context", "live-attachments", attachment.ID, liveAttachmentName(attachment.Name))
+		if err := writeLiveAttachment(ctx, workspace, workDir, relative, decision.Content); err != nil {
+			continue
+		}
+		paths[attachment.ID] = relative
+	}
+	return paths, omitted
 }
 
 func writeLiveAttachment(ctx context.Context, workspace domain.Workspace, workDir, relative string, content []byte) error {
@@ -189,6 +211,7 @@ func liveAttachmentName(name string) string {
 func liveInboxInjectionText(
 	messages []domain.LiveInboxMessage,
 	materialized map[string]string,
+	omitted map[string]string,
 ) string {
 	if len(messages) == 0 {
 		return ""
@@ -210,7 +233,7 @@ func liveInboxInjectionText(
 		}
 		output.WriteString(content)
 		output.WriteString("\n")
-		output.WriteString(liveInboxAttachmentLines(message.Payload, materialized))
+		output.WriteString(liveInboxAttachmentLines(message.Payload, materialized, omitted))
 	}
 	return strings.TrimSpace(output.String())
 }
@@ -243,7 +266,7 @@ func liveInboxSourceLabel(message domain.LiveInboxMessage) string {
 	}
 }
 
-func liveInboxAttachmentLines(payload map[string]any, materialized map[string]string) string {
+func liveInboxAttachmentLines(payload map[string]any, materialized, omitted map[string]string) string {
 	raw, ok := payload["attachments"]
 	if !ok {
 		return ""
@@ -264,7 +287,12 @@ func liveInboxAttachmentLines(payload map[string]any, materialized map[string]st
 		switch {
 		case materialized[reference.ID] != "":
 			fmt.Fprintf(&output, ": %s", materialized[reference.ID])
-		case reference.Size > promptpkg.MaxInlineAttachmentBytes:
+		case omitted[reference.ID] == liveAttachmentOmitBudget:
+			fmt.Fprintf(&output,
+				"; content not inlined: the per-Turn Context inline budget was exhausted by newer attachments. "+
+					"Download: GET /api/v1/tasks/%s/attachments/%s (an Owner session is required)",
+				reference.TaskID, reference.ID)
+		case omitted[reference.ID] == liveAttachmentOmitTooLarge:
 			fmt.Fprintf(&output,
 				"; content not inlined: it exceeds the %d MiB per-Turn Context inline limit. "+
 					"Download: GET /api/v1/tasks/%s/attachments/%s (an Owner session is required)",

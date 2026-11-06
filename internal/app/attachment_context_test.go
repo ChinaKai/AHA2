@@ -46,23 +46,55 @@ func TestInlineAttachmentBytesPropagatesReadError(t *testing.T) {
 	}
 }
 
-func TestInlineAttachmentLimitHonorsPerTurnBudget(t *testing.T) {
+func TestAllocateInlineAttachmentsPrioritizesNewest(t *testing.T) {
 	t.Parallel()
-	for _, testCase := range []struct {
-		name          string
-		perAttachment int64
-		total         int64
-		used          int64
-		want          int64
-	}{
-		{name: "fresh turn", perAttachment: 4 << 20, total: 16 << 20, used: 0, want: 4 << 20},
-		{name: "remaining smaller", perAttachment: 4 << 20, total: 16 << 20, used: 14 << 20, want: 2 << 20},
-		{name: "exhausted", perAttachment: 4 << 20, total: 16 << 20, used: 16 << 20, want: 0},
-		{name: "over budget", perAttachment: 4 << 20, total: 16 << 20, used: 17 << 20, want: 0},
-	} {
-		if got := inlineAttachmentLimit(testCase.perAttachment, testCase.total, testCase.used); got != testCase.want {
-			t.Fatalf("%s: limit = %d, want %d", testCase.name, got, testCase.want)
-		}
+	const (
+		perAttachment = 4 << 20
+		total         = 6 << 20
+	)
+	items := []domain.Attachment{
+		{ID: "old-1", Size: 3 << 20},
+		{ID: "old-2", Size: 3 << 20},
+		{ID: "newest", Size: 3 << 20},
+	}
+	readIDs := []string{}
+	decisions := allocateInlineAttachments(items, perAttachment, total, func(item domain.Attachment) ([]byte, error) {
+		readIDs = append(readIDs, item.ID)
+		return make([]byte, item.Size), nil
+	})
+	if !decisions[2].Inline || decisions[2].BudgetExhausted {
+		t.Fatalf("newest attachment should be inlined: %#v", decisions[2])
+	}
+	if !decisions[1].Inline || decisions[1].BudgetExhausted {
+		t.Fatalf("second newest attachment should fill the remaining budget: %#v", decisions[1])
+	}
+	if decisions[0].Inline || !decisions[0].BudgetExhausted {
+		t.Fatalf("oldest attachment should be downgraded for budget: %#v", decisions[0])
+	}
+	if len(readIDs) != 2 || readIDs[0] != "newest" || readIDs[1] != "old-2" {
+		t.Fatalf("read order = %v, want newest then old-2", readIDs)
+	}
+}
+
+func TestAllocateInlineAttachmentsKeepsTooLargeSeparateFromBudget(t *testing.T) {
+	t.Parallel()
+	items := []domain.Attachment{
+		{ID: "too-large", Size: 5 << 20},
+		{ID: "newest", Size: 1 << 20},
+	}
+	opened := map[string]bool{}
+	decisions := allocateInlineAttachments(items, 4<<20, 16<<20, func(item domain.Attachment) ([]byte, error) {
+		opened[item.ID] = true
+		return make([]byte, item.Size), nil
+	})
+	if decisions[0].Inline || decisions[0].BudgetExhausted {
+		t.Fatalf("over-cap attachment must not be treated as budget-exhausted: %#v", decisions[0])
+	}
+	if opened["too-large"] {
+		t.Fatal("over-cap attachment content was read")
+	}
+	if !decisions[1].Inline {
+		t.Fatalf("newest attachment should still be inlined: %#v", decisions[1])
 	}
 }
 

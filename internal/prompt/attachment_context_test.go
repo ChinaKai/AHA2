@@ -26,10 +26,15 @@ func TestAttachmentResourcesKeepLargeAttachmentsMetadataOnly(t *testing.T) {
 		Workspace: domain.Workspace{Transport: "native", RootPath: "/repo"},
 	}
 	bigHash := strings.Repeat("a", 64)
+	budgetHash := strings.Repeat("c", 64)
 	smallHash := strings.Repeat("b", 64)
 	big := domain.Attachment{
 		ID: "attachment-big", TaskID: "task-1", Name: "big.bin", MediaType: "application/octet-stream",
 		Size: 8 << 20, SHA256: bigHash,
+	}
+	budget := domain.Attachment{
+		ID: "attachment-budget", TaskID: "task-1", Name: "old.bin", MediaType: "application/octet-stream",
+		Size: 5, SHA256: budgetHash,
 	}
 	small := domain.Attachment{
 		ID: "attachment-small", TaskID: "task-1", Name: "note.txt", MediaType: "text/plain",
@@ -37,46 +42,59 @@ func TestAttachmentResourcesKeepLargeAttachmentsMetadataOnly(t *testing.T) {
 	}
 	input.Attachments = []AttachmentResource{
 		{Attachment: big, Inline: false},
+		{Attachment: budget, Inline: false, BudgetExhausted: true},
 		{Attachment: small, Content: "hello", Inline: true},
 	}
 	resources, err := attachmentResources(input, contextRootFor(input, "/repo"), attachmentIndexTemplates(t), templateData{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(resources) != 3 {
-		t.Fatalf("resources = %d, want index + metadata + inline detail", len(resources))
+	if len(resources) != 4 {
+		t.Fatalf("resources = %d, want index + two metadata files + inline detail", len(resources))
 	}
 	index := resources[0]
-	if index.ID != "attachments-index" || !strings.Contains(index.Content, "big.bin") || !strings.Contains(index.Content, "note.txt") {
-		t.Fatalf("index does not list both attachments: %#v", index)
+	if index.ID != "attachments-index" || !strings.Contains(index.Content, "big.bin") ||
+		!strings.Contains(index.Content, "old.bin") || !strings.Contains(index.Content, "note.txt") {
+		t.Fatalf("index does not list every attachment: %#v", index)
 	}
 	for _, expected := range []string{bigHash, "metadata only", "/api/v1/tasks/task-1/attachments/attachment-big", "attachment-big/metadata.md"} {
 		if !strings.Contains(index.Content, expected) {
 			t.Fatalf("index missing %q:\n%s", expected, index.Content)
 		}
 	}
-	var metadata, inline *ContextResource
+	if !strings.Contains(index.Content, "per-Turn Context inline budget was exhausted by newer attachments") {
+		t.Fatalf("index missing budget reason:\n%s", index.Content)
+	}
+	var metadata, budgetMetadata, inline *ContextResource
 	for position := range resources {
 		switch resources[position].ID {
 		case "attachment-attachment-big-metadata":
 			metadata = &resources[position]
+		case "attachment-attachment-budget-metadata":
+			budgetMetadata = &resources[position]
 		case "attachment-attachment-small":
 			inline = &resources[position]
 		}
 	}
-	if metadata == nil {
-		t.Fatal("metadata-only resource was not created")
+	if metadata == nil || budgetMetadata == nil {
+		t.Fatal("metadata-only resources were not created")
 	}
-	if !strings.HasSuffix(metadata.Path, "metadata.md") {
-		t.Fatalf("metadata path = %q", metadata.Path)
+	if !strings.HasSuffix(metadata.Path, "metadata.md") || !strings.HasSuffix(budgetMetadata.Path, "metadata.md") {
+		t.Fatalf("metadata paths = %q, %q", metadata.Path, budgetMetadata.Path)
 	}
 	for _, expected := range []string{bigHash, "not inlined", "4 MiB", "/api/v1/tasks/task-1/attachments/attachment-big"} {
 		if !strings.Contains(metadata.Content, expected) {
 			t.Fatalf("metadata file missing %q:\n%s", expected, metadata.Content)
 		}
 	}
-	if len(metadata.Content) > 1024 {
-		t.Fatalf("metadata file is unexpectedly large: %d bytes", len(metadata.Content))
+	if !strings.Contains(budgetMetadata.Content, "per-Turn Context inline budget was exhausted by newer attachments") {
+		t.Fatalf("budget metadata missing budget reason:\n%s", budgetMetadata.Content)
+	}
+	if strings.Contains(budgetMetadata.Content, "4 MiB") {
+		t.Fatalf("budget metadata reported the size reason:\n%s", budgetMetadata.Content)
+	}
+	if len(metadata.Content) > 1024 || len(budgetMetadata.Content) > 1024 {
+		t.Fatalf("metadata files are unexpectedly large: %d, %d bytes", len(metadata.Content), len(budgetMetadata.Content))
 	}
 	if inline == nil || inline.Content != "hello" || inline.EntryPoint {
 		t.Fatalf("inline attachment resource = %#v", inline)
