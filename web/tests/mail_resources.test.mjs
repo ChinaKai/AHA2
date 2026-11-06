@@ -122,12 +122,8 @@ test("pending card exposes approve/reject and never renders sending cancel", () 
   assert.match(sending, /发送中，不可取消/);
 });
 
-test("timeline mail card is a status notice without approval actions", () => {
-  const html = cards.mailConversationCardHtml({message: message(), attachments: [], deliveries: []}, false);
-  assert.match(html, /已提交，等待 Owner 审批/);
-  assert.match(html, /任务工具栏「邮件」面板/);
-  assert.doesNotMatch(html, /data-mail-action/);
-  assert.doesNotMatch(html, /mail-card-actions/);
+test("conversation timeline exports no mail card renderer", () => {
+  assert.equal(cards.mailConversationCardHtml, undefined);
 });
 
 test("older pending mail stays visible and actionable beyond the recent-five cut", () => {

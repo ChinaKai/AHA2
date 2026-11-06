@@ -12,7 +12,6 @@ import {bindHardwarePanel, refreshHardwarePanel, stopHardwarePanel} from "./hard
 import {bindResourcesPage, renderResourcesPage} from "./resources.js";
 import type {ResourcesTab} from "./resources.js";
 import {bindTaskMailPanel, renderTaskMailPanel} from "./mail_task.js";
-import {mailConversationCardHtml} from "./mail_cards.js";
 import type {MailResourcesData} from "./mail_resources.js";
 import {bindDesktopPanel, desktopPanelInteracting, refreshDesktopPanel, stopDesktopPanel} from "./desktop_panel.js";
 import {renderMarkdown} from "./markdown.js";
@@ -346,7 +345,7 @@ const state: State = {
   taskConversationBefore: 0,
   taskConversationLatest: 0,
   taskEventCursor: 0,
-  taskCategories: {chat: true, update: true, tool: false, error: true, mail: true},
+  taskCategories: {chat: true, update: true, tool: false, error: true},
   taskContext: null,
   taskRealtimeState: "connecting",
   taskDraft: "",
@@ -2642,7 +2641,7 @@ async function openTask(taskID: string): Promise<void> {
   const summary = state.tasks.find(task => task.id === taskID);
   if (summary) showTaskLoading(summary);
   try {
-    const categories: ConversationCategory[] = summary?.read_only ? ["chat", "update", "error", "mail"] : selectedConversationCategories();
+    const categories: ConversationCategory[] = summary?.read_only ? ["chat", "update", "error"] : selectedConversationCategories();
     if (summary?.read_only) state.taskCategories.tool = false;
     let pagePromise = summary?.status === "draft"
       ? Promise.resolve(null)
@@ -3960,11 +3959,7 @@ function startTaskClock(): void {
   taskClockFrame = window.requestAnimationFrame(runTaskClock);
 }
 function conversationListHtml(): string {
-  const cards = new Map((state.taskMailOptions?.messages || []).map(card => [card.message.id, card]));
-  return renderConversationList(state.taskConversation, state.selectedTask, state.taskConversationHasMore, {
-    cards,
-    readOnly: Boolean(state.selectedTask?.task.read_only),
-  });
+  return renderConversationList(state.taskConversation, state.selectedTask, state.taskConversationHasMore);
 }
 function taskFailureBannerHtml(detail: TaskDetail): string {
   if (!["failed", "blocked"].includes(detail.task.status)) return "";
