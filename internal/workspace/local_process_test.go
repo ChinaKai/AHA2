@@ -124,6 +124,12 @@ func TestRunProcessHelperProcess(t *testing.T) {
 		_, _ = io.WriteString(os.Stdout, burst)
 		waitForHelperMarker(processHelperMarker2Env)
 		startOutputInheritingGrandchild()
+	case "stdin-orphan":
+		// Hand stdin to a grandchild that never reads it, give the parent's
+		// feeder time to block on a write larger than the pipe buffer, then
+		// exit while the grandchild still holds the pipe.
+		startStdinInheritingGrandchild()
+		time.Sleep(300 * time.Millisecond)
 	case "slow":
 		_, _ = io.WriteString(os.Stdout, "slow-start\n")
 		time.Sleep(5 * time.Second)
@@ -250,6 +256,29 @@ func startOutputInheritingGrandchild() {
 		_, _ = fmt.Fprintf(os.Stderr, "start grandchild: %v\n", err)
 		os.Exit(93)
 	}
+}
+
+// startStdinInheritingGrandchild launches a long-lived copy of this test
+// binary that inherits only the current stdin handle, so the output pipes
+// still reach EOF when this process exits. It prints the grandchild's pid so
+// the test can reap it.
+func startStdinInheritingGrandchild() {
+	executable, err := os.Executable()
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "locate grandchild executable: %v\n", err)
+		os.Exit(92)
+	}
+	command := exec.Command(executable, "-test.run=^TestRunProcessHelperProcess$")
+	command.Env = mergeEnvironment(os.Environ(), map[string]string{
+		processHelperModeEnv: "grandchild-sleep",
+		processHelperExitEnv: "0",
+	})
+	command.Stdin = os.Stdin
+	if err := command.Start(); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "start grandchild: %v\n", err)
+		os.Exit(93)
+	}
+	_, _ = fmt.Fprintf(os.Stdout, "grandchild-pid:%d\n", command.Process.Pid)
 }
 
 // executeProcessHelper runs this test binary as a child process through the
@@ -691,6 +720,95 @@ func TestRunProcessReturnsWhenChildExitsWithInputOpen(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("Run did not return after the child exited with Input open")
+	}
+}
+
+// A feeder that does not finish after the child exited must not keep Run
+// blocked: Run waits at most processInputFeederTimeout for it and still
+// returns the child's result.
+func TestRunProcessBoundsWaitForStuckInputFeeder(t *testing.T) {
+	release := make(chan struct{})
+	feederStarted := make(chan struct{})
+	original := processInputFeeder
+	processInputFeeder = func(stdin io.WriteCloser, _ string, _ <-chan string, _ <-chan struct{}, done chan<- struct{}) {
+		defer close(done)
+		close(feederStarted)
+		<-release
+	}
+	t.Cleanup(func() {
+		processInputFeeder = original
+		close(release)
+	})
+	input := make(chan string)
+	finished := make(chan struct{})
+	var result Result
+	var runErr error
+	started := time.Now()
+	go func() {
+		defer close(finished)
+		result, runErr = executeProcessHelper(t, "quick", 0, func(command *Command) { command.Input = input }, nil)
+	}()
+	select {
+	case <-finished:
+	case <-time.After(processInputFeederTimeout + 10*time.Second):
+		t.Fatal("Run stayed blocked on a stdin feeder that never finished")
+	}
+	select {
+	case <-feederStarted:
+	default:
+		t.Fatal("stub feeder was not used")
+	}
+	if runErr != nil || result.Stdout != processQuickStdout || result.ExitCode != 0 {
+		t.Fatalf("result=%#v err=%v", result, runErr)
+	}
+	if elapsed := time.Since(started); elapsed < processInputFeederTimeout {
+		t.Fatalf("Run returned after %s, before the feeder bound of %s", elapsed, processInputFeederTimeout)
+	}
+}
+
+// The scenario behind the feeder bound: the child exits while a grandchild
+// that inherited stdin keeps the pipe alive without reading, and the feeder is
+// in the middle of a write larger than the pipe buffer. Run must still return
+// promptly once the child exits.
+func TestRunProcessReturnsWhileStdinInheritingGrandchildBlocksWrite(t *testing.T) {
+	input := make(chan string, 1)
+	input <- strings.Repeat("x", 1<<20) + "\n"
+	pids := make(chan int, 1)
+	// The grandchild runs this test binary; reap it so it neither outlives
+	// the test nor keeps the binary locked.
+	t.Cleanup(func() {
+		select {
+		case pid := <-pids:
+			if process, err := os.FindProcess(pid); err == nil {
+				_ = process.Kill()
+				_, _ = process.Wait()
+			}
+		default:
+		}
+	})
+	onLine := func(line string) {
+		if value, ok := strings.CutPrefix(line, "grandchild-pid:"); ok {
+			if pid, err := strconv.Atoi(value); err == nil {
+				pids <- pid
+			}
+		}
+	}
+	started := time.Now()
+	done := make(chan error, 1)
+	go func() {
+		_, err := executeProcessHelper(t, "stdin-orphan", 0, func(command *Command) { command.Input = input }, onLine)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(processInputFeederTimeout + 10*time.Second):
+		t.Fatal("Run did not return while a grandchild held stdin")
+	}
+	if elapsed := time.Since(started); elapsed >= processGrandchildSleep {
+		t.Fatalf("Run waited %s, as long as the stdin-holding grandchild lived", elapsed)
 	}
 }
 

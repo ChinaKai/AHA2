@@ -167,6 +167,17 @@ func prependPathDirectories(value string, dirs []string) string {
 // while a drainer waiting on an empty pipe has already captured everything.
 const processPipeDrainTimeout = 3 * time.Second
 
+// processInputFeederTimeout bounds how long runProcess waits for the stdin
+// feeder after the direct child exits. Closing the parent's write end ends a
+// pending write, so the feeder normally returns at once; the bound keeps Run
+// from hanging if a write is still not released, for example while a
+// descendant that inherited stdin keeps the pipe alive without reading.
+const processInputFeederTimeout = processPipeDrainTimeout
+
+// processInputFeeder is the stdin feeder runProcess starts for Command.Input.
+// Tests replace it to simulate a feeder that cannot finish in time.
+var processInputFeeder = feedProcessInput
+
 // processOutputSpoolLimit caps how many unread bytes each stream may buffer
 // before its pipe drainer is backpressured. The spool decouples the drainer
 // from the line handler, so a busy handler does not discard the tail; beyond
@@ -196,15 +207,24 @@ func runProcess(parent context.Context, command Command, env []string, onLine Li
 	}
 	process.Dir = command.Dir
 	process.Env = env
-	var stdinPipe io.WriteCloser
+	// With Input the runner owns the stdin pipe instead of using StdinPipe:
+	// Wait would close that write end synchronously, and closing a pipe waits
+	// for a pending write, so a write nothing releases would hang Wait itself.
+	// awaitProcessInputFeeder closes it after the child exits, with a bound.
+	var stdinRead, stdinPipe *os.File
 	if command.Input == nil {
 		process.Stdin = strings.NewReader(command.Stdin)
 	} else {
-		// Wait closes this pipe once the child exits, which also unblocks a
-		// feeder stuck writing to a child that stopped reading.
 		var err error
-		if stdinPipe, err = process.StdinPipe(); err != nil {
+		if stdinRead, stdinPipe, err = os.Pipe(); err != nil {
 			return Result{}, err
+		}
+		process.Stdin = stdinRead
+	}
+	closeStdin := func() {
+		if stdinPipe != nil {
+			_ = stdinRead.Close()
+			_ = stdinPipe.Close()
 		}
 	}
 	// Own the stdout/stderr pipes instead of letting os/exec copy them. The
@@ -214,12 +234,14 @@ func runProcess(parent context.Context, command Command, env []string, onLine Li
 	// delay error when the process exits non-zero.
 	stdoutRead, stdoutWrite, err := os.Pipe()
 	if err != nil {
+		closeStdin()
 		return Result{}, err
 	}
 	stderrRead, stderrWrite, err := os.Pipe()
 	if err != nil {
 		_ = stdoutRead.Close()
 		_ = stdoutWrite.Close()
+		closeStdin()
 		return Result{}, err
 	}
 	process.Stdout = stdoutWrite
@@ -232,12 +254,18 @@ func runProcess(parent context.Context, command Command, env []string, onLine Li
 		_ = stdoutWrite.Close()
 		_ = stderrRead.Close()
 		_ = stderrWrite.Close()
+		closeStdin()
 		return Result{}, err
 	}
 	// The child inherited the write ends; keeping the parent's copies open
-	// would keep the drainers from ever seeing EOF.
+	// would keep the drainers from ever seeing EOF. Likewise the parent's copy
+	// of the stdin read end would keep a write to an exited child pending
+	// instead of failing.
 	_ = stdoutWrite.Close()
 	_ = stderrWrite.Close()
+	if stdinRead != nil {
+		_ = stdinRead.Close()
+	}
 	stdoutSpool := newProcessSpool(processOutputSpoolLimit)
 	stderrSpool := newProcessSpool(processOutputSpoolLimit)
 	stdoutDrainer := startProcessDrainer(stdoutRead, stdoutSpool)
@@ -250,13 +278,13 @@ func runProcess(parent context.Context, command Command, env []string, onLine Li
 	exited := make(chan struct{})
 	feederDone := make(chan struct{})
 	if stdinPipe != nil {
-		go feedProcessInput(stdinPipe, command.Stdin, command.Input, exited, feederDone)
+		go processInputFeeder(stdinPipe, command.Stdin, command.Input, exited, feederDone)
 	} else {
 		close(feederDone)
 	}
 	processErr := process.Wait()
 	close(exited)
-	<-feederDone
+	awaitProcessInputFeeder(processInputFeederTimeout, stdinPipe, feederDone)
 	// Wait returns as soon as the direct child exits. Give the drainers a
 	// bounded window to reach EOF; a descendant holding the pipes keeps them
 	// open, so close the read ends after the grace period. If a drainer was
@@ -315,6 +343,27 @@ func feedProcessInput(stdin io.WriteCloser, initial string, input <-chan string,
 				return
 			}
 		}
+	}
+}
+
+// awaitProcessInputFeeder closes the stdin write end after the direct child
+// exited and waits up to timeout for the feeder to return. The close runs on
+// its own goroutine because closing a pipe waits for a pending write; when that
+// write is released (by the close itself, or once whatever still holds the
+// read end reads or exits) both goroutines end on their own. Run does not wait
+// longer than timeout for that: values the feeder has not written are dropped,
+// which callers already treat as undelivered.
+func awaitProcessInputFeeder(timeout time.Duration, stdin *os.File, done <-chan struct{}) {
+	if stdin == nil {
+		<-done
+		return
+	}
+	go func() { _ = stdin.Close() }()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
 	}
 }
 

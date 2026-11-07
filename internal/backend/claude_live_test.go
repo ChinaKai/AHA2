@@ -43,6 +43,7 @@ type fakeClaudeInput struct {
 //     replay and answer the queued message in a further step.
 //   - drop: read the second message but never replay it.
 //   - hang: replay the prompt and wait for stdin to close.
+//   - answer: replay and answer the prompt, then wait for stdin to close.
 func runFakeClaude(mode string, args []string) int {
 	joined := strings.Join(args, " ")
 	if !strings.Contains(joined, "--input-format stream-json") || !strings.Contains(joined, "--replay-user-messages") {
@@ -117,6 +118,9 @@ func runFakeClaude(mode string, args []string) int {
 		result("first answer")
 	case "hang":
 		replay(first)
+	case "answer":
+		replay(first)
+		result("only answer")
 	default:
 		return 5
 	}
@@ -253,6 +257,39 @@ func TestClaudeStreamInputRollsBackUnreplayedMessage(t *testing.T) {
 		t.Fatalf("run waited %s for a replay that never came", elapsed)
 	}
 	if _, acks := inbox.snapshot(); strings.Join(acks, ";") != "inbox-d=false" {
+		t.Fatalf("acks = %v", acks)
+	}
+}
+
+// A result with nothing outstanding ends the Turn: stdin is closed at once,
+// so the CLI exits and Execute returns well before the replay grace, which
+// only applies while a written message still waits for its replay.
+func TestClaudeStreamInputClosesStdinRightAfterIdleResult(t *testing.T) {
+	adapter := fakeClaudeAdapter(t, "answer")
+	adapter.LiveReplayGrace = 15 * time.Second
+	inbox := newFakeLiveInbox()
+	var resultAt time.Time
+	result, err := adapter.Execute(context.Background(), Request{
+		Runner: workspace.LocalRunner{}, WorkDir: t.TempDir(), Prompt: "initial", LiveInbox: inbox,
+	}, func(event Event) {
+		if event.Type == "agent_message" && event.Data["final"] == true && resultAt.IsZero() {
+			resultAt = time.Now()
+		}
+	})
+	returnedAt := time.Now()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Reply != "only answer" {
+		t.Fatalf("reply = %q", result.Reply)
+	}
+	if resultAt.IsZero() {
+		t.Fatal("no result was observed")
+	}
+	if elapsed := returnedAt.Sub(resultAt); elapsed > 2*time.Second {
+		t.Fatalf("Execute returned %s after an idle result; stdin was kept open for the %s replay grace", elapsed, adapter.LiveReplayGrace)
+	}
+	if _, acks := inbox.snapshot(); len(acks) != 0 {
 		t.Fatalf("acks = %v", acks)
 	}
 }
