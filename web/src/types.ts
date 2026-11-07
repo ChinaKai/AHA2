@@ -79,12 +79,25 @@ export interface HardwareIORetentionSettings {
 // sampled average payload times rows and excludes index/page overhead.
 export interface DatabaseTableStat {
   name: string;
-  exists: boolean;
   rows: number;
   rows_exact: boolean;
   sample_rows: number;
   avg_row_bytes: number;
   estimated_bytes: number;
+  deletable: boolean;
+}
+
+export type DatabaseSafety = "keep" | "read_only" | "preview_purge" | "retire";
+
+// id is the catalog letter A-K, or "other" for uncategorized tables.
+export interface DatabaseCategory {
+  id: string;
+  key: string;
+  safety: DatabaseSafety;
+  rows: number;
+  rows_exact: boolean;
+  estimated_bytes: number;
+  tables: DatabaseTableStat[];
 }
 
 export interface DatabaseStats {
@@ -96,7 +109,9 @@ export interface DatabaseStats {
   freelist_count: number;
   used_bytes: number;
   free_bytes: number;
-  tables: DatabaseTableStat[];
+  table_count: number;
+  categories: DatabaseCategory[];
+  cached: boolean;
   hardware_io: {min_sequence: number; max_sequence: number; estimated_rows: number; oldest_at?: string; newest_at?: string};
   retention: HardwareIORetentionSettings;
   collected_at: string;

@@ -142,7 +142,7 @@ func TestDatabaseStatsEstimatesHardwareIOWithoutCounting(t *testing.T) {
 	if _, err := database.db.Exec(`DELETE FROM hardware_io WHERE sequence BETWEEN 10 AND 19`); err != nil {
 		t.Fatal(err)
 	}
-	stats, err := database.DatabaseStats(ctx)
+	stats, err := database.DatabaseStats(ctx, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,17 +150,24 @@ func TestDatabaseStatsEstimatesHardwareIOWithoutCounting(t *testing.T) {
 		t.Fatalf("page stats=%#v", stats)
 	}
 	byName := map[string]domain.DatabaseTableStat{}
-	for _, table := range stats.Tables {
-		byName[table.Name] = table
+	categoryOf := map[string]domain.DatabaseCategory{}
+	for _, category := range stats.Categories {
+		for _, table := range category.Tables {
+			byName[table.Name] = table
+			categoryOf[table.Name] = category
+		}
 	}
 	for _, name := range []string{"hardware_io", "conversation_items", "sync_remote_task_objects", "events", "audit_events", "messages", "agent_inbox", "sync_applied"} {
-		if !byName[name].Exists {
-			t.Fatalf("missing table stat %s: %#v", name, stats.Tables)
+		if _, ok := byName[name]; !ok {
+			t.Fatalf("missing table stat %s: %#v", name, stats.Categories)
 		}
 	}
 	hardware := byName["hardware_io"]
-	if hardware.Rows != 100 || hardware.RowsExact {
+	if hardware.Rows != 100 || hardware.RowsExact || !hardware.Deletable {
 		t.Fatalf("hardware_io must be the rowid span, never an exact count: %#v", hardware)
+	}
+	if category := categoryOf["hardware_io"]; category.ID != "C" || category.Safety != domain.DatabaseSafetyPreviewPurge {
+		t.Fatalf("hardware_io category=%#v", category)
 	}
 	if hardware.SampleRows != 90 || hardware.AvgRowBytes <= 0 || hardware.EstimatedBytes != hardware.AvgRowBytes*100 {
 		t.Fatalf("hardware_io sample=%#v", hardware)
@@ -177,6 +184,130 @@ func TestDatabaseStatsEstimatesHardwareIOWithoutCounting(t *testing.T) {
 	}
 	if stats.Retention.RetentionDays != 30 {
 		t.Fatalf("retention=%#v", stats.Retention)
+	}
+}
+
+// Every table of the real schema must land in one A-K category; a new table
+// that nobody categorized shows up under "other" and fails here.
+func TestDatabaseCatalogCoversSchemaOnce(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database := openDataRetentionTestStore(t)
+	seen := map[string]string{}
+	for _, def := range databaseCatalog {
+		for _, table := range def.tables {
+			if previous, ok := seen[table]; ok {
+				t.Fatalf("%s listed in %s and %s", table, previous, def.id)
+			}
+			seen[table] = def.id
+		}
+	}
+	stats, err := database.DatabaseStats(ctx, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := make([]string, 0, len(stats.Categories))
+	tables := 0
+	for _, category := range stats.Categories {
+		ids = append(ids, category.ID)
+		tables += len(category.Tables)
+		if category.ID == "other" {
+			t.Fatalf("uncategorized tables: %#v", category.Tables)
+		}
+		for _, table := range category.Tables {
+			if table.Deletable != (table.Name == "hardware_io") {
+				t.Fatalf("only hardware_io may be deletable: %#v", table)
+			}
+		}
+		wantSafety := map[string]string{"B": domain.DatabaseSafetyReadOnly, "C": domain.DatabaseSafetyPreviewPurge, "D": domain.DatabaseSafetyRetire}
+		if want, ok := wantSafety[category.ID]; ok && category.Safety != want {
+			t.Fatalf("category %s safety=%s", category.ID, category.Safety)
+		}
+		if category.ID != "C" && category.Safety == domain.DatabaseSafetyPreviewPurge {
+			t.Fatalf("category %s allows purge", category.ID)
+		}
+	}
+	if strings.Join(ids, "") != "ABCDEFGHIJK" || tables != stats.TableCount {
+		t.Fatalf("categories=%v tables=%d of %d", ids, tables, stats.TableCount)
+	}
+
+	// An unknown table is reported read-only under "other".
+	if _, err := database.db.Exec(`CREATE TABLE zz_extra(id INTEGER PRIMARY KEY, note TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	stats, err = database.DatabaseStats(ctx, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := stats.Categories[len(stats.Categories)-1]
+	if last.ID != "other" || last.Safety != domain.DatabaseSafetyReadOnly || len(last.Tables) != 1 || last.Tables[0].Name != "zz_extra" {
+		t.Fatalf("other=%#v", last)
+	}
+}
+
+// Large tables report the rowid span instead of COUNT(*), and the totals of a
+// category are the sum of its tables.
+func TestDatabaseStatsLargeTablesUseRowidSpanAndCache(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database := openDataRetentionTestStore(t)
+	// A rowid jump past exactCountLimit makes audit_events "large" without
+	// inserting that many rows.
+	for _, id := range []int64{1, exactCountLimit + 10} {
+		if _, err := database.db.Exec(`INSERT INTO audit_events(sequence,id,owner_id,action,resource_type,resource_id,data_json,occurred_at) VALUES(?,?,?,?,?,?,?,?)`,
+			id, domain.NewID("audit"), "owner", "seed", "test", "x", "{}", timeString(time.Now())); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stats, err := database.DatabaseStats(ctx, false)
+	if err != nil || stats.Cached {
+		t.Fatalf("first collection cached=%v err=%v", stats.Cached, err)
+	}
+	var audit domain.DatabaseTableStat
+	var conversation domain.DatabaseCategory
+	for _, category := range stats.Categories {
+		if category.ID == "B" {
+			conversation = category
+		}
+		for _, table := range category.Tables {
+			if table.Name == "audit_events" {
+				audit = table
+			}
+		}
+	}
+	if audit.RowsExact || audit.Rows != exactCountLimit+10 {
+		t.Fatalf("large table must use the rowid span: %#v", audit)
+	}
+	var sum int64
+	for _, table := range conversation.Tables {
+		sum += table.Rows
+	}
+	if conversation.RowsExact || conversation.Rows != sum {
+		t.Fatalf("category totals=%#v", conversation)
+	}
+
+	// A second load inside the TTL reuses the estimates but reads the
+	// retention settings fresh; refresh forces a new collection.
+	if _, err := database.UpdateHardwareIORetentionSettings(ctx, domain.HardwareIORetentionSettings{RetentionDays: 9, MaxDeleteRows: 2_000}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.db.Exec(`DELETE FROM audit_events`); err != nil {
+		t.Fatal(err)
+	}
+	cached, err := database.DatabaseStats(ctx, false)
+	if err != nil || !cached.Cached || !cached.CollectedAt.Equal(stats.CollectedAt) || cached.Retention.RetentionDays != 9 {
+		t.Fatalf("cached=%v collected=%s retention=%#v err=%v", cached.Cached, cached.CollectedAt, cached.Retention, err)
+	}
+	fresh, err := database.DatabaseStats(ctx, true)
+	if err != nil || fresh.Cached {
+		t.Fatalf("refresh cached=%v err=%v", fresh.Cached, err)
+	}
+	for _, category := range fresh.Categories {
+		for _, table := range category.Tables {
+			if table.Name == "audit_events" && (table.Rows != 0 || !table.RowsExact) {
+				t.Fatalf("refresh kept stale audit_events: %#v", table)
+			}
+		}
 	}
 }
 

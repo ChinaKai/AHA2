@@ -27,7 +27,8 @@ func (payload hardwareIORetentionPayload) apply(base domain.HardwareIORetentionS
 }
 
 func (s *Server) databaseStats(writer http.ResponseWriter, request *http.Request) {
-	stats, err := s.store.DatabaseStats(request.Context())
+	// Estimates are cached for a few minutes; ?refresh=1 recollects them.
+	stats, err := s.store.DatabaseStats(request.Context(), request.URL.Query().Get("refresh") == "1")
 	if err != nil {
 		writeJSON(writer, http.StatusInternalServerError, map[string]any{"ok": false, "error": "database_stats_failed", "message": err.Error()})
 		return
@@ -136,7 +137,7 @@ func (s *Server) purgeHardwareIO(writer http.ResponseWriter, request *http.Reque
 		return
 	}
 	response := map[string]any{"ok": true, "result": result, "audit": audit}
-	if stats, err := s.store.DatabaseStats(auditRequest.Context()); err == nil {
+	if stats, err := s.store.DatabaseStats(auditRequest.Context(), true); err == nil {
 		response["database"] = stats
 	}
 	writeJSON(writer, http.StatusOK, response)

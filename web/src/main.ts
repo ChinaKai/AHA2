@@ -2133,7 +2133,7 @@ function loadDatabaseStats(force = false): Promise<void> {
   if (databaseStatsRequest) return databaseStatsRequest;
   view.loading = true;
   view.error = "";
-  databaseStatsRequest = api.databaseStats().then(result => {
+  databaseStatsRequest = api.databaseStats(force).then(result => {
     view.database = result.database;
   }).catch((error: unknown) => {
     view.error = error instanceof Error ? error.message : String(error);

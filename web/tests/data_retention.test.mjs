@@ -16,10 +16,21 @@ function stats(overrides = {}) {
     file_bytes: 5_160_000_000, wal_bytes: 4_000_000, shm_bytes: 32_768,
     page_size: 4096, page_count: 1_260_000, freelist_count: 100,
     used_bytes: 5_159_000_000, free_bytes: 409_600,
-    tables: [
-      {name: "hardware_io", exists: true, rows: 12_380_996, rows_exact: false, sample_rows: 500, avg_row_bytes: 180, estimated_bytes: 2_228_579_280},
-      {name: "sync_applied", exists: true, rows: 12, rows_exact: true, sample_rows: 12, avg_row_bytes: 90, estimated_bytes: 1080},
-      {name: "agent_inbox", exists: false, rows: 0, rows_exact: false, sample_rows: 0, avg_row_bytes: 0, estimated_bytes: 0},
+    table_count: 4, cached: false,
+    categories: [
+      {id: "A", key: "tasks", safety: "keep", rows: 159, rows_exact: true, estimated_bytes: 1000, tables: [
+        {name: "tasks", rows: 159, rows_exact: true, sample_rows: 159, avg_row_bytes: 6, estimated_bytes: 1000, deletable: false},
+      ]},
+      {id: "C", key: "hardware", safety: "preview_purge", rows: 12_380_996, rows_exact: false, estimated_bytes: 2_228_579_280, tables: [
+        {name: "hardware_io", rows: 12_380_996, rows_exact: false, sample_rows: 500, avg_row_bytes: 180, estimated_bytes: 2_228_579_280, deletable: true},
+      ]},
+      {id: "D", key: "sync", safety: "retire", rows: 12, rows_exact: true, estimated_bytes: 1080, tables: [
+        {name: "sync_applied", rows: 12, rows_exact: true, sample_rows: 12, avg_row_bytes: 90, estimated_bytes: 1080, deletable: false},
+      ]},
+      {id: "J", key: "attachments", safety: "read_only", rows: 0, rows_exact: true, estimated_bytes: 0, tables: []},
+      {id: "other", key: "other", safety: "bogus", rows: 1, rows_exact: true, estimated_bytes: 0, tables: [
+        {name: "zz_extra", rows: 1, rows_exact: true, sample_rows: 0, avg_row_bytes: 0, estimated_bytes: 0, deletable: false},
+      ]},
     ],
     hardware_io: {min_sequence: 1, max_sequence: 12_380_996, estimated_rows: 12_380_996, oldest_at: "2026-09-05T00:00:00Z", newest_at: "2026-11-06T00:00:00Z"},
     retention: {retention_days: 30, max_delete_rows: 200000},
@@ -52,13 +63,40 @@ test("database panel renders table estimates, range and the VACUUM note", () => 
   assert.match(html, /data-db-table="hardware_io"/);
   assert.match(html, /≈ 12,380,996/, "hardware_io rows are labelled as an estimate");
   assert.match(html, /<td class="data-size">12<\/td>/, "exact small-table counts have no ≈");
-  assert.match(html, /表不存在/);
   assert.match(html, /data-db-range/);
   assert.match(html, /文件不一定变小/);
   assert.match(html, /VACUUM/);
   assert.match(html, /id="data-hardware-io-days"[^>]*min="1"[^>]*max="3650"[^>]*value="30"/);
   assert.match(html, /id="data-hardware-io-rows"[^>]*min="1000"[^>]*max="1000000"[^>]*value="200000"/);
   assert.match(purgeButton(html), /disabled/, "cleanup stays disabled until a preview exists");
+});
+
+test("tables are grouped into categories with safety labels and read-only notes", () => {
+  i18n.applyLocale("zh-CN");
+  const html = panel.renderDatabasePanel(viewState());
+  const category = id => html.match(new RegExp(`<details[^>]*data-db-category="${id}"[\\s\\S]*?</details>`))?.[0] ?? "";
+  assert.match(html, /共 4 张表，按用途分为 A–K 类/);
+  assert.match(category("A"), /A\. 任务与执行/);
+  assert.match(category("A"), /data-db-safety="keep"/);
+  assert.match(category("A"), />保留</);
+  assert.match(category("A"), /不会在此页删除/);
+  assert.match(category("C"), /C\. 硬件 I\/O/);
+  assert.match(category("C"), /data-db-safety="preview_purge"/);
+  assert.match(category("C"), /可预览清理/);
+  assert.match(category("C"), /≈ 12,380,996/);
+  assert.match(category("C"), /data-db-table="hardware_io"/);
+  assert.match(category("D"), /可 retire/);
+  assert.match(category("D"), /只读：此类数据不会在此页删除/);
+  assert.match(category("J"), /此类别在当前数据库中没有表/);
+  // An unknown safety value is shown as read-only, never as cleanable.
+  assert.match(category("other"), /未分类/);
+  assert.match(category("other"), /data-db-safety="read_only"/);
+  // The only cleanup controls on the panel belong to hardware_io.
+  assert.equal((html.match(/data-hardware-io-purge/g) || []).length, 1);
+  assert.match(html, /统计用时 3 ms/);
+
+  const cached = panel.renderDatabasePanel(viewState({database: stats({cached: true})}));
+  assert.match(cached, /统计缓存/);
 });
 
 test("cleanup is enabled only for a matching, non-empty preview", () => {
@@ -103,6 +141,10 @@ test("database panel strings are translated in English", () => {
     }));
     assert.match(html, /Database details/);
     assert.match(html, /hardware_io retention and cleanup/);
+    assert.match(html, /A\. Tasks and execution/);
+    assert.match(html, /Preview cleanup/);
+    assert.match(html, /Retire only/);
+    assert.match(html, /never deleted on this page/);
     assert.match(html, /does not necessarily shrink/);
     assert.match(html, /Confirm cleanup/);
     assert.match(html, /Deleted 200,000 rows in 20 batches/);

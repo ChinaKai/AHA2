@@ -2410,6 +2410,13 @@ dialog > .dialog-head { margin: 0; padding: 18px 18px 0; }
 .data-db-files > div { display: grid; gap: 4px; }
 .data-db-files strong { font-variant-numeric: tabular-nums; }
 .data-db-table td small { display: block; }
+.data-db-categories { display: grid; gap: 8px; padding: 0 16px 8px; }
+.data-db-category { border: 1px solid var(--line); border-radius: 8px; }
+.data-db-category > summary { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 12px; cursor: pointer; }
+.data-db-category-stats { margin-left: auto; font-variant-numeric: tabular-nums; }
+.data-db-badge { padding: 1px 8px; border-radius: 999px; font-size: 11px; border: 1px solid var(--line); color: var(--muted); }
+.data-db-badge-preview_purge { color: var(--danger, #c0392b); border-color: currentColor; }
+.data-db-badge-retire { color: var(--warning, #b7791f); border-color: currentColor; }
 .data-db-retention { border-top: 1px solid var(--line); }
 .data-db-form { padding: 0 16px; }
 .data-db-form #data-hardware-io-rows { width: 110px; }

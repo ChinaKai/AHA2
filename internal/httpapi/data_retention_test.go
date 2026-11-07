@@ -73,7 +73,7 @@ func TestHardwareIORetentionEndpoints(t *testing.T) {
 		Database domain.DatabaseStats `json:"database"`
 	}
 	decodeResponse(t, response, &stats)
-	if response.StatusCode != http.StatusOK || stats.Database.HardwareIO.EstimatedRows != 50 || len(stats.Database.Tables) < 8 {
+	if response.StatusCode != http.StatusOK || stats.Database.HardwareIO.EstimatedRows != 50 || len(stats.Database.Categories) != 11 {
 		t.Fatalf("stats status=%d body=%#v", response.StatusCode, stats.Database)
 	}
 

@@ -200,8 +200,8 @@ class APIClient {
     return this.request("/api/v1/system/data/cleanup", {method: "POST", body: JSON.stringify(payload)});
   }
 
-  databaseStats(): Promise<{ok: boolean; database: DatabaseStats}> {
-    return this.request("/api/v1/system/data/database");
+  databaseStats(refresh = false): Promise<{ok: boolean; database: DatabaseStats}> {
+    return this.request(`/api/v1/system/data/database${refresh ? "?refresh=1" : ""}`);
   }
 
   updateHardwareIORetention(payload: {retention_days: number; max_delete_rows: number}): Promise<{ok: boolean; retention: HardwareIORetentionSettings}> {

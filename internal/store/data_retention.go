@@ -13,23 +13,80 @@ import (
 	"github.com/ChinaKai/AHA2/internal/domain"
 )
 
-// databaseStatTables are the tables shown on the data management page. The list
-// is fixed so table names never come from a request.
-var databaseStatTables = []string{
-	"hardware_io",
-	"conversation_items",
-	"sync_remote_task_objects",
-	"events",
-	"audit_events",
-	"messages",
-	"agent_inbox",
-	"sync_applied",
+type databaseCategoryDef struct {
+	id, key, safety string
+	tables          []string
+}
+
+// databaseCatalog groups every table into the A-K categories of the data
+// management page (pet-lab/database-catalog.md, 2026-11-07). Each table is
+// listed once: channel_source_events belongs to channels, pet_events to the
+// pet and mail_attachments to mail, so category totals never double count.
+// Tables missing here are reported under "other" as read-only.
+var databaseCatalog = []databaseCategoryDef{
+	{"A", "tasks", domain.DatabaseSafetyKeep, []string{
+		"tasks", "task_agents", "task_rounds", "turns", "task_goal_events", "task_memory",
+		"task_permission_requests", "collaboration_batches", "collaboration_events",
+		"collaboration_members", "agent_session_handoffs", "runtime_config_snapshots", "backend_sessions",
+	}},
+	{"B", "conversation", domain.DatabaseSafetyReadOnly, []string{
+		"conversation_items", "messages", "events", "audit_events", "agent_inbox",
+	}},
+	{"C", "hardware", domain.DatabaseSafetyPreviewPurge, []string{
+		"hardware_io", "hardware_resources", "hardware_groups", "task_hardware_bindings",
+	}},
+	{"D", "sync", domain.DatabaseSafetyRetire, []string{
+		"sync_remote_task_objects", "sync_applied", "sync_tombstones", "sync_conflicts",
+		"sync_outbox", "sync_settings", "sync_state", "retired_workspace_mirrors",
+	}},
+	{"E", "channels", domain.DatabaseSafetyReadOnly, []string{
+		"channel_instances", "channel_conversations", "channel_conversation_members", "channel_endpoints",
+		"channel_identity_links", "channel_inbox_dedup", "channel_delivery_outbox", "channel_delivery_attempts",
+		"channel_source_events", "channel_plugins", "channel_plugin_commands", "channel_service_capabilities",
+		"channel_sessions", "channel_subscriptions", "channel_task_contacts", "channel_task_routes",
+		"channel_onboarding_sessions", "channel_pending_actions", "channel_knowledge_grants",
+		"channel_knowledge_policies", "channel_handoffs",
+	}},
+	{"F", "mail", domain.DatabaseSafetyKeep, []string{
+		"mail_accounts", "mail_account_aliases", "mail_templates", "mail_template_versions", "mail_bindings",
+		"mail_messages", "mail_attachments", "mail_deliveries", "mail_delivery_attempts",
+	}},
+	{"G", "knowledge", domain.DatabaseSafetyKeep, []string{
+		"knowledge_entries", "knowledge_libraries", "knowledge_proposals", "knowledge_review_settings",
+		"project_knowledge_bindings", "skills", "prompt_template_overrides",
+	}},
+	{"H", "settings", domain.DatabaseSafetyKeep, []string{
+		"models", "providers", "env_groups", "codex_accounts", "backend_settings", "agent_api_settings",
+		"general_settings", "security_settings", "network_settings", "proxy_settings", "mcp_servers",
+		"data_retention_settings",
+	}},
+	{"I", "pet", domain.DatabaseSafetyKeep, []string{
+		"owner_assistants", "pet_states", "pet_approvals", "pet_events", "pet_task_watches",
+	}},
+	{"J", "attachments", domain.DatabaseSafetyReadOnly, []string{
+		"attachments", "build_artifacts",
+	}},
+	{"K", "metadata", domain.DatabaseSafetyKeep, []string{
+		"projects", "workspaces", "product_lines", "owners", "sessions", "schema_migrations",
+		"sqlite_sequence", "assistant_messages", "assistant_hint_dismissals",
+	}},
 }
 
 // exactCountLimit is the largest rowid span for which DatabaseStats runs an
-// exact COUNT(*). hardware_io is never counted: on the production database a
-// full COUNT(*) over its ~12M rows takes minutes.
-const exactCountLimit = 200_000
+// exact COUNT(*); larger tables report the span. COUNT(*) reads every leaf
+// page, so the limit keeps tables with large rows (conversation_items, events)
+// off the page load path. hardware_io is never counted: on the production
+// database a full COUNT(*) over its ~12M rows takes minutes.
+const exactCountLimit = 50_000
+
+// databaseStatsTTL is how long collected table estimates are reused. The
+// page's refresh button and a cleanup both force a new collection.
+const databaseStatsTTL = 5 * time.Minute
+
+type databaseStatsCache struct {
+	mu    sync.Mutex
+	stats *domain.DatabaseStats
+}
 
 // statSampleRows is how many rows are read to estimate the average row size.
 const statSampleRows = 500
@@ -74,10 +131,35 @@ func (s *Store) UpdateHardwareIORetentionSettings(ctx context.Context, item doma
 	return item, err
 }
 
-// DatabaseStats reports database file and table usage using only bounded
-// queries: PRAGMA page counters, MIN/MAX(rowid) seeks, a sample of the newest
-// rows, and exact COUNT(*) only for small tables other than hardware_io.
-func (s *Store) DatabaseStats(ctx context.Context) (domain.DatabaseStats, error) {
+// DatabaseStats returns the cached statistics when they are younger than
+// databaseStatsTTL and refresh is false. The retention settings are always
+// read fresh so a saved change shows immediately.
+func (s *Store) DatabaseStats(ctx context.Context, refresh bool) (domain.DatabaseStats, error) {
+	cache := &s.databaseStats
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	if !refresh && cache.stats != nil && time.Since(cache.stats.CollectedAt) < databaseStatsTTL {
+		stats := *cache.stats
+		retention, err := s.HardwareIORetentionSettings(ctx)
+		if err != nil {
+			return domain.DatabaseStats{}, err
+		}
+		stats.Retention = retention
+		stats.Cached = true
+		return stats, nil
+	}
+	stats, err := s.collectDatabaseStats(ctx)
+	if err != nil {
+		return domain.DatabaseStats{}, err
+	}
+	cache.stats = &stats
+	return stats, nil
+}
+
+// collectDatabaseStats reports database file and table usage using only
+// bounded queries: PRAGMA page counters, MIN/MAX(rowid) seeks, a sample of the
+// newest rows, and exact COUNT(*) only for small tables other than hardware_io.
+func (s *Store) collectDatabaseStats(ctx context.Context) (domain.DatabaseStats, error) {
 	started := time.Now()
 	stats := domain.DatabaseStats{CollectedAt: started.UTC()}
 	if s.path != "" && !isMemoryDatabase(s.path) {
@@ -99,13 +181,11 @@ func (s *Store) DatabaseStats(ctx context.Context) (domain.DatabaseStats, error)
 	}
 	stats.FreeBytes = stats.FreelistCount * stats.PageSize
 	stats.UsedBytes = (stats.PageCount - stats.FreelistCount) * stats.PageSize
-	for _, table := range databaseStatTables {
-		item, err := s.tableStat(ctx, table)
-		if err != nil {
-			return domain.DatabaseStats{}, err
-		}
-		stats.Tables = append(stats.Tables, item)
+	categories, tableCount, err := s.databaseCategories(ctx)
+	if err != nil {
+		return domain.DatabaseStats{}, err
 	}
+	stats.Categories, stats.TableCount = categories, tableCount
 	hardwareRange, err := s.hardwareIORange(ctx)
 	if err != nil {
 		return domain.DatabaseStats{}, err
@@ -128,18 +208,82 @@ func fileSize(path string) int64 {
 	return info.Size()
 }
 
-func (s *Store) tableStat(ctx context.Context, table string) (domain.DatabaseTableStat, error) {
-	item := domain.DatabaseTableStat{Name: table}
-	var exists bool
-	if err := s.db.QueryRowContext(ctx,
-		`SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?)`, table,
-	).Scan(&exists); err != nil {
-		return item, err
+// databaseCategories reads the table list from sqlite_master once and fills
+// the catalog categories with the tables that exist. Catalog tables missing
+// from this database are left out; tables the catalog does not list go to a
+// trailing read-only "other" category.
+func (s *Store) databaseCategories(ctx context.Context) ([]domain.DatabaseCategory, int, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT name,IFNULL(sql,'') FROM sqlite_master WHERE type='table' ORDER BY name`)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list tables: %w", err)
 	}
-	if !exists {
+	existing := map[string]string{}
+	var names []string
+	for rows.Next() {
+		var name, definition string
+		if err := rows.Scan(&name, &definition); err != nil {
+			rows.Close()
+			return nil, 0, err
+		}
+		existing[name] = definition
+		names = append(names, name)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	listed := map[string]bool{}
+	categories := make([]domain.DatabaseCategory, 0, len(databaseCatalog)+1)
+	for _, def := range databaseCatalog {
+		category := domain.DatabaseCategory{ID: def.id, Key: def.key, Safety: def.safety, RowsExact: true}
+		for _, table := range def.tables {
+			listed[table] = true
+			definition, ok := existing[table]
+			if !ok {
+				continue
+			}
+			if err := s.addTableStat(ctx, &category, table, definition); err != nil {
+				return nil, 0, err
+			}
+		}
+		categories = append(categories, category)
+	}
+	other := domain.DatabaseCategory{ID: "other", Key: "other", Safety: domain.DatabaseSafetyReadOnly, RowsExact: true}
+	for _, name := range names {
+		if listed[name] {
+			continue
+		}
+		if err := s.addTableStat(ctx, &other, name, existing[name]); err != nil {
+			return nil, 0, err
+		}
+	}
+	if len(other.Tables) > 0 {
+		categories = append(categories, other)
+	}
+	return categories, len(names), nil
+}
+
+func (s *Store) addTableStat(ctx context.Context, category *domain.DatabaseCategory, table, definition string) error {
+	item, err := s.tableStat(ctx, table, definition)
+	if err != nil {
+		return err
+	}
+	category.Tables = append(category.Tables, item)
+	category.Rows += item.Rows
+	category.EstimatedBytes += item.EstimatedBytes
+	category.RowsExact = category.RowsExact && item.RowsExact
+	return nil
+}
+
+func (s *Store) tableStat(ctx context.Context, table, definition string) (domain.DatabaseTableStat, error) {
+	item := domain.DatabaseTableStat{Name: table, Deletable: table == "hardware_io"}
+	// Virtual and WITHOUT ROWID tables have no rowid to seek, and counting
+	// them could scan. None exist in the AHA schema; report them without
+	// estimates rather than risk a slow query.
+	upper := strings.ToUpper(definition)
+	if strings.HasPrefix(upper, "CREATE VIRTUAL") || strings.Contains(upper, "WITHOUT ROWID") {
 		return item, nil
 	}
-	item.Exists = true
 	columns, err := s.tableColumns(ctx, table)
 	if err != nil {
 		return item, err

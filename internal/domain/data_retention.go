@@ -44,15 +44,40 @@ func (s HardwareIORetentionSettings) Validate() error {
 // when RowsExact is true; otherwise it is MAX(rowid)-MIN(rowid)+1, an upper
 // bound that over-counts deleted gaps. EstimatedBytes is the average payload of
 // the newest SampleRows rows multiplied by Rows; it excludes B-tree and index
-// overhead.
+// overhead. Deletable is true only for hardware_io.
 type DatabaseTableStat struct {
 	Name           string `json:"name"`
-	Exists         bool   `json:"exists"`
 	Rows           int64  `json:"rows"`
 	RowsExact      bool   `json:"rows_exact"`
 	SampleRows     int    `json:"sample_rows"`
 	AvgRowBytes    int64  `json:"avg_row_bytes"`
 	EstimatedBytes int64  `json:"estimated_bytes"`
+	Deletable      bool   `json:"deletable"`
+}
+
+// Safety labels of a database category on the data management page. Only
+// DatabaseSafetyPreviewPurge allows deletion from the page, and only of
+// hardware_io; retire means the data is removed through the sync retire flow,
+// never from this page.
+const (
+	DatabaseSafetyKeep         = "keep"
+	DatabaseSafetyReadOnly     = "read_only"
+	DatabaseSafetyPreviewPurge = "preview_purge"
+	DatabaseSafetyRetire       = "retire"
+)
+
+// DatabaseCategory groups tables by what they hold. ID is the catalog letter
+// (A-K) or "other" for tables the catalog does not list. Rows and
+// EstimatedBytes are sums of the table estimates; RowsExact is true only when
+// every table count is exact.
+type DatabaseCategory struct {
+	ID             string              `json:"id"`
+	Key            string              `json:"key"`
+	Safety         string              `json:"safety"`
+	Rows           int64               `json:"rows"`
+	RowsExact      bool                `json:"rows_exact"`
+	EstimatedBytes int64               `json:"estimated_bytes"`
+	Tables         []DatabaseTableStat `json:"tables"`
 }
 
 type HardwareIORange struct {
@@ -72,11 +97,15 @@ type DatabaseStats struct {
 	FreelistCount int64                       `json:"freelist_count"`
 	UsedBytes     int64                       `json:"used_bytes"`
 	FreeBytes     int64                       `json:"free_bytes"`
-	Tables        []DatabaseTableStat         `json:"tables"`
+	TableCount    int                         `json:"table_count"`
+	Categories    []DatabaseCategory          `json:"categories"`
 	HardwareIO    HardwareIORange             `json:"hardware_io"`
 	Retention     HardwareIORetentionSettings `json:"retention"`
 	CollectedAt   time.Time                   `json:"collected_at"`
 	DurationMS    int64                       `json:"duration_ms"`
+	// Cached is true when the table estimates come from an earlier collection;
+	// Retention is always read fresh.
+	Cached bool `json:"cached"`
 }
 
 // HardwareIOPurgePlan is what one manual cleanup would delete. Rows with

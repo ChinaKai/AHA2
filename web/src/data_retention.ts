@@ -1,5 +1,5 @@
 import {formatLocaleDateTime, formatLocaleNumber, t} from "./i18n.js";
-import type {DatabaseStats, DatabaseTableStat, HardwareIOPurgePlan, HardwareIOPurgeResult, HardwareIORetentionSettings} from "./types.js";
+import type {DatabaseCategory, DatabaseSafety, DatabaseStats, DatabaseTableStat, HardwareIOPurgePlan, HardwareIOPurgeResult, HardwareIORetentionSettings} from "./types.js";
 
 // Limits mirror internal/domain/data_retention.go. The server re-validates;
 // these only drive the form state.
@@ -69,9 +69,6 @@ export function skipReasonText(reason: string): string {
 }
 
 function tableRow(table: DatabaseTableStat): string {
-  if (!table.exists) {
-    return `<tr><td><code>${escapeHTML(table.name)}</code></td><td colspan="2" class="field-help">${t("data.db.tableMissing")}</td></tr>`;
-  }
   const size = table.sample_rows > 0
     ? `≈ ${formatBytes(table.estimated_bytes)}<small class="field-help">${t("data.db.sampleNote", {rows: formatLocaleNumber(table.sample_rows), avg: formatBytes(table.avg_row_bytes)})}</small>`
     : "—";
@@ -80,6 +77,31 @@ function tableRow(table: DatabaseTableStat): string {
     <td class="data-size">${formatRows(table.rows, table.rows_exact)}</td>
     <td class="data-size data-db-bytes">${size}</td>
   </tr>`;
+}
+
+// safetyLabel and categoryNote come from the server's fixed safety value, so
+// an unknown value falls back to read-only rather than implying deletion.
+function safetyKey(safety: DatabaseSafety): DatabaseSafety {
+  return (["keep", "read_only", "preview_purge", "retire"] as const).includes(safety) ? safety : "read_only";
+}
+
+function categoryCard(category: DatabaseCategory): string {
+  const safety = safetyKey(category.safety);
+  const label = category.id === "other" ? t("data.db.cat.other") : `${escapeHTML(category.id)}. ${t(`data.db.cat.${category.key}`)}`;
+  const note = safety === "preview_purge" ? t("data.db.catNote.purge") : t("data.db.catNote.readOnly");
+  const tables = category.tables.length
+    ? `<div class="table-wrap"><table class="data-table data-db-table"><thead><tr><th>${t("data.db.table")}</th><th>${t("data.db.rows")}</th><th>${t("data.db.size")}</th></tr></thead>
+        <tbody>${category.tables.map(tableRow).join("")}</tbody></table></div>`
+    : `<p class="field-help data-cleanup-note">${t("data.db.categoryEmpty")}</p>`;
+  return `<details class="data-db-category" data-db-category="${escapeHTML(category.id)}" data-db-safety="${safety}">
+    <summary>
+      <strong>${label}</strong>
+      <span class="data-db-badge data-db-badge-${safety}">${t(`data.db.safety.${safety}`)}</span>
+      <span class="data-db-category-stats field-help">${t("data.db.categoryStats", {tables: category.tables.length, rows: formatRows(category.rows, category.rows_exact), size: formatBytes(category.estimated_bytes)})}</span>
+    </summary>
+    <p class="field-help data-cleanup-note" data-db-category-note>${note}</p>
+    ${tables}
+  </details>`;
 }
 
 function planSummary(plan: HardwareIOPurgePlan): string {
@@ -123,7 +145,7 @@ export function renderDatabasePanel(state: DataRetentionViewState): string {
   const rows = retention.max_delete_rows;
   const canPurge = purgeEnabled(state, days, rows);
   return `<section class="panel spaced data-db-panel">
-    <div class="panel-head"><strong>${t("data.db.title")}</strong><small class="field-help">${t("data.db.collected", {ms: stats.duration_ms})}</small></div>
+    <div class="panel-head"><strong>${t("data.db.title")}</strong><small class="field-help" data-db-collected>${t(stats.cached ? "data.db.collectedCached" : "data.db.collected", {ms: stats.duration_ms, time: escapeHTML(formatTime(stats.collected_at))})}</small></div>
     ${error}
     <div class="data-db-files">
       <div><span class="field-help">${t("data.db.file")}</span><strong>${formatBytes(stats.file_bytes)}</strong></div>
@@ -132,8 +154,8 @@ export function renderDatabasePanel(state: DataRetentionViewState): string {
       <div><span class="field-help">${t("data.db.used")}</span><strong>${formatBytes(stats.used_bytes)}</strong></div>
       <div><span class="field-help">${t("data.db.free")}</span><strong>${formatBytes(stats.free_bytes)}</strong></div>
     </div>
-    <div class="table-wrap"><table class="data-table data-db-table"><thead><tr><th>${t("data.db.table")}</th><th>${t("data.db.rows")}</th><th>${t("data.db.size")}</th></tr></thead>
-      <tbody>${stats.tables.map(tableRow).join("")}</tbody></table></div>
+    <p class="field-help data-cleanup-note">${t("data.db.categoriesIntro", {tables: stats.table_count})}</p>
+    <div class="data-db-categories">${stats.categories.map(categoryCard).join("")}</div>
     <p class="field-help data-cleanup-note">${t("data.db.estimateNote")}</p>
     <div class="data-db-retention">
       <div class="panel-head"><strong>${t("data.db.hardwareTitle")}</strong></div>
