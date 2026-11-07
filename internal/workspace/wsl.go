@@ -19,25 +19,61 @@ type WSLRunner struct {
 	Distro string
 }
 
+// StreamsInput reports that Command.Input reaches the backend through the
+// wsl.exe stdin channel.
+func (WSLRunner) StreamsInput() bool { return true }
+
+// wslProcessRunner runs the wsl.exe command. Tests replace it to inspect the
+// constructed invocation without requiring a usable distro.
+var wslProcessRunner = runProcess
+
 func (runner WSLRunner) Run(parent context.Context, command Command, onLine LineHandler) (Result, error) {
 	distro := strings.TrimSpace(runner.Distro)
 	if distro == "" {
 		return Result{}, fmt.Errorf("wsl distro is required")
 	}
-	if command.Input != nil {
-		return Result{}, errInputNotStreamed
-	}
-	script, err := remoteScript(command)
+	host, err := wslHostCommand(distro, command)
 	if err != nil {
 		return Result{}, err
 	}
-	return runProcess(parent, Command{
-		Executable: findWSLExecutable(),
-		Args:       []string{"-d", distro, "--", "bash", "-s"},
-		Stdin:      script,
-		Timeout:    command.Timeout,
-		KillTree:   command.KillTree,
-	}, wslHostEnvironment(), onLine)
+	return wslProcessRunner(parent, host, wslHostEnvironment(), onLine)
+}
+
+// wslHostCommand builds the wsl.exe invocation for a workspace command.
+//
+// A one-shot command keeps the historical shape: the script is the stdin of
+// "bash -s" and carries any backend input inline. A streaming command cannot do
+// that, because its stdin belongs to the backend; the script moves into a
+// -c argument, so the backend inherits wsl.exe's stdin and Command.Input is fed
+// to it while it runs.
+//
+// Streaming uses -e rather than "--": everything after "--" is handed to the
+// distro's default shell for re-parsing, which loses the script's argv and
+// exported environment (measured: $#=0, env empty). -e execs the argv directly.
+func wslHostCommand(distro string, command Command) (Command, error) {
+	host := Command{
+		Executable:  findWSLExecutable(),
+		Timeout:     command.Timeout,
+		OutputLimit: command.OutputLimit,
+		KillTree:    command.KillTree,
+	}
+	if command.Input != nil {
+		script, err := streamRemoteScript(command)
+		if err != nil {
+			return Command{}, err
+		}
+		host.Args = []string{"-d", distro, "-e", "bash", "-c", script}
+		host.Stdin = command.Stdin
+		host.Input = command.Input
+		return host, nil
+	}
+	script, err := remoteScript(command)
+	if err != nil {
+		return Command{}, err
+	}
+	host.Args = []string{"-d", distro, "--", "bash", "-s"}
+	host.Stdin = script
+	return host, nil
 }
 
 // wslHostEnvironment returns a minimal Windows environment for the wsl.exe hop.
