@@ -23,10 +23,14 @@ import (
 // when live delivery is enabled, and keeps the one-shot exec path otherwise.
 
 const (
-	defaultCodexLivePoll      = 500 * time.Millisecond
-	codexLiveHandshakeTimeout = 30 * time.Second
-	codexLiveSteerTimeout     = 30 * time.Second
-	codexLiveShutdownGrace    = 5 * time.Second
+	defaultCodexLivePoll = 500 * time.Millisecond
+	// The initialize round trip is the step that usually hangs on an
+	// unsupported app-server, so it gets a shorter bound before the Turn falls
+	// back to exec. Thread start/resume can legitimately load a long history.
+	codexLiveInitializeTimeout = 20 * time.Second
+	codexLiveHandshakeTimeout  = 30 * time.Second
+	codexLiveSteerTimeout      = 30 * time.Second
+	codexLiveShutdownGrace     = 5 * time.Second
 )
 
 type codexRPCError struct {
@@ -141,7 +145,7 @@ func (session *codexAppServerSession) run() error {
 	initializeParams := map[string]any{
 		"clientInfo": map[string]any{"name": "aha2", "version": "1"},
 	}
-	if _, err := session.requestWithTimeout("initialize", initializeParams, codexLiveHandshakeTimeout); err != nil {
+	if _, err := session.requestWithTimeout("initialize", initializeParams, codexLiveInitializeTimeout); err != nil {
 		return err
 	}
 	if err := session.sendNotification("initialized", map[string]any{}); err != nil {
@@ -603,9 +607,6 @@ func (adapter Codex) executeLiveInbox(
 	}
 	if errors.Is(cause, context.Canceled) && ctx.Err() != nil {
 		return Result{Reply: session.reply, ExitCode: runResult.ExitCode, ProviderSessionID: session.threadID}, context.Canceled, started
-	}
-	if errors.Is(runFailure, workspace.ErrInputNotStreamed) {
-		return Result{}, runFailure, false
 	}
 	if sessionErr != nil {
 		if session.providerError != "" && !strings.Contains(sessionErr.Error(), session.providerError) {

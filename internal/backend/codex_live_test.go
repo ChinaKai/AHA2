@@ -3,6 +3,7 @@ package backend
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -15,12 +16,13 @@ import (
 // handshake, starts one turn, and completes it only after a steer arrives, so a
 // passing test proves the adapter steered a running Turn rather than a new one.
 type liveFakeRunner struct {
-	mu       sync.Mutex
-	commands []workspace.Command
-	methods  []string
-	steers   []map[string]any
-	fail     bool
-	exitOn   string
+	mu             sync.Mutex
+	commands       []workspace.Command
+	methods        []string
+	steers         []map[string]any
+	fail           bool
+	exitOn         string
+	wrongTurnFirst bool
 }
 
 func (*liveFakeRunner) StreamsInput() bool { return true }
@@ -56,6 +58,13 @@ func (runner *liveFakeRunner) Run(ctx context.Context, command workspace.Command
 				onLine(`{"id":` + itoa(*message.ID) + `,"result":{"thread":{"id":"thread-live"}}}`)
 			case "turn/start":
 				onLine(`{"id":` + itoa(*message.ID) + `,"result":{"turn":{"id":"` + turnID + `"}}}`)
+				runner.mu.Lock()
+				wrongTurnFirst := runner.wrongTurnFirst
+				runner.mu.Unlock()
+				if wrongTurnFirst {
+					// A completion for another turn must not end this one early.
+					onLine(`{"method":"turn/completed","params":{"threadId":"thread-live","turn":{"id":"other-turn","status":"completed"}}}`)
+				}
 				onLine(`{"method":"item/started","params":{"threadId":"thread-live","turnId":"` + turnID + `","item":{"id":"cmd-1","type":"commandExecution","command":"long","status":"in_progress"}}}`)
 			case "turn/steer":
 				runner.mu.Lock()
@@ -290,6 +299,39 @@ func TestCodexAppServerArgumentsKeepProviderAndMCPConfig(t *testing.T) {
 	}
 }
 
+// streamingExecRunner can carry live input but records whether app-server was
+// attempted, so a broken live switch is observable even when the adapter would
+// fall back to exec after the attempt.
+type streamingExecRunner struct {
+	mu                sync.Mutex
+	appServerAttempts int
+	execCalls         int
+	command           workspace.Command
+}
+
+func (*streamingExecRunner) StreamsInput() bool { return true }
+
+func (runner *streamingExecRunner) Run(_ context.Context, command workspace.Command, onLine workspace.LineHandler) (workspace.Result, error) {
+	runner.mu.Lock()
+	if contains(command.Args, "app-server") {
+		runner.appServerAttempts++
+		runner.mu.Unlock()
+		return workspace.Result{ExitCode: 1}, errors.New("app-server unavailable")
+	}
+	runner.execCalls++
+	runner.command = command
+	runner.mu.Unlock()
+	onLine(`{"type":"thread.started","thread_id":"session-exec"}`)
+	onLine(`{"type":"item.completed","item":{"type":"agent_message","text":"done"}}`)
+	return workspace.Result{ExitCode: 0}, nil
+}
+
+func (runner *streamingExecRunner) counts() (int, int) {
+	runner.mu.Lock()
+	defer runner.mu.Unlock()
+	return runner.appServerAttempts, runner.execCalls
+}
+
 type recordingExecRunner struct {
 	command workspace.Command
 }
@@ -301,6 +343,83 @@ func (runner *recordingExecRunner) Run(_ context.Context, command workspace.Comm
 	onLine(`{"type":"thread.started","thread_id":"session-exec"}`)
 	onLine(`{"type":"item.completed","item":{"type":"agent_message","text":"done"}}`)
 	return workspace.Result{ExitCode: 0}, nil
+}
+
+// With both switches off, even a streaming-capable runner must use exec and
+// never touch the inbox. This exercises the effective-switch decision itself,
+// not merely the transport capability.
+func TestCodexLiveSwitchOffUsesExecWithoutClaiming(t *testing.T) {
+	inbox := newFakeLiveInbox(LiveBatch{IDs: []string{"m1"}, Text: "STEER"})
+	runner := &streamingExecRunner{}
+	request := newLiveCodexRequest(runner, inbox)
+	request.StreamInput = false
+	result, err := (Codex{}).Execute(context.Background(), request, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Reply != "done" {
+		t.Fatalf("reply = %q", result.Reply)
+	}
+	attempts, execs := runner.counts()
+	if attempts != 0 || execs != 1 {
+		t.Fatalf("app-server attempts=%d exec calls=%d, want 0/1", attempts, execs)
+	}
+	if claims, acks := inbox.snapshot(); claims != 0 || len(acks) != 0 {
+		t.Fatalf("inbox was used while the switch was off: claims=%d acks=%v", claims, acks)
+	}
+}
+
+// An app-server that cannot finish its handshake falls back to exec before the
+// turn starts, reports that fallback, and leaves the inbox untouched for the
+// next Turn.
+func TestCodexLiveAppServerFailureFallsBackToExec(t *testing.T) {
+	inbox := newFakeLiveInbox(LiveBatch{IDs: []string{"m1"}, Text: "STEER"})
+	runner := &streamingExecRunner{}
+	var events []Event
+	result, err := (Codex{}).Execute(context.Background(), newLiveCodexRequest(runner, inbox), func(event Event) {
+		events = append(events, event)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Reply != "done" {
+		t.Fatalf("reply = %q", result.Reply)
+	}
+	attempts, execs := runner.counts()
+	if attempts != 1 || execs != 1 {
+		t.Fatalf("app-server attempts=%d exec calls=%d, want 1/1", attempts, execs)
+	}
+	if claims, _ := inbox.snapshot(); claims != 0 {
+		t.Fatalf("failed app-server claimed messages: %d", claims)
+	}
+	notified := false
+	for _, event := range events {
+		if event.Type == "agent_progress" && event.Data["fallback"] == "codex_exec" {
+			notified = true
+		}
+	}
+	if !notified {
+		t.Fatalf("fallback was not observable: %#v", events)
+	}
+}
+
+// turn/completed is only trusted for the active turn; a notification for some
+// other turn must not end the live Turn early.
+func TestCodexLiveIgnoresOtherTurnCompletion(t *testing.T) {
+	inbox := newFakeLiveInbox(LiveBatch{IDs: []string{"m1"}, Text: "STEER"})
+	runner := &liveFakeRunner{wrongTurnFirst: true}
+	result, err := (Codex{LivePoll: time.Millisecond}).Execute(
+		context.Background(), newLiveCodexRequest(runner, inbox), nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Reply != "SAW:STEER" {
+		t.Fatalf("reply = %q", result.Reply)
+	}
+	if !runner.used("turn/steer") {
+		t.Fatal("the wrong-turn completion ended the Turn before steering")
+	}
 }
 
 func contains(values []string, want string) bool {

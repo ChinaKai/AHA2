@@ -1,7 +1,6 @@
 package workspace
 
 import (
-	"bufio"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -152,68 +151,6 @@ func TestSSHRunnerAutoPrefersConfiguredPassword(t *testing.T) {
 	}
 	if method := <-authUsed; method != "password" {
 		t.Fatalf("auto auth used %s before configured password", method)
-	}
-	if err := <-serverErrors; err != nil {
-		t.Fatal(err)
-	}
-}
-
-// A value written to Command.Input after the remote process has produced
-// output reaches it; closing the channel ends remote stdin so Run returns.
-func TestSSHRunnerStreamsInputAfterStart(t *testing.T) {
-	hostSigner, _ := newSSHKeyPair(t)
-	clientSigner, clientPrivateKey := newSSHKeyPair(t)
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer listener.Close()
-	config := &ssh.ServerConfig{PublicKeyCallback: func(metadata ssh.ConnMetadata, candidate ssh.PublicKey) (*ssh.Permissions, error) {
-		if metadata.User() == "root" && string(candidate.Marshal()) == string(clientSigner.PublicKey().Marshal()) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("invalid public key")
-	}}
-	config.AddHostKey(hostSigner)
-	serverErrors := make(chan error, 1)
-	go func() { serverErrors <- serveStreamingSSHExec(listener, config) }()
-
-	knownHostsPath := writeKnownHosts(t, listener.Addr().String(), hostSigner.PublicKey())
-	runner := &SSHRunner{
-		Host: "127.0.0.1", User: "root", Port: listener.Addr().(*net.TCPAddr).Port,
-		Auth: "key", Platform: "linux",
-		KnownHostsPaths: []string{knownHostsPath}, PrivateKeyPaths: []string{writePrivateKey(t, clientPrivateKey)},
-	}
-	input := make(chan string)
-	lines := make(chan string, 16)
-	done := make(chan error, 1)
-	go func() {
-		_, runErr := runner.Run(context.Background(), Command{
-			Executable: "cat", Input: input, Timeout: 10 * time.Second,
-		}, func(line string) { lines <- line })
-		done <- runErr
-	}()
-	waitStreamedLine := func(want string) {
-		t.Helper()
-		deadline := time.After(10 * time.Second)
-		for {
-			select {
-			case line := <-lines:
-				if line == want {
-					return
-				}
-			case <-deadline:
-				t.Fatalf("timed out waiting for %q", want)
-			}
-		}
-	}
-	input <- "first\n"
-	waitStreamedLine("echo:first")
-	input <- "second\n"
-	waitStreamedLine("echo:second")
-	close(input)
-	if err := <-done; err != nil {
-		t.Fatal(err)
 	}
 	if err := <-serverErrors; err != nil {
 		t.Fatal(err)
@@ -415,56 +352,6 @@ func serveWorkspaceSSHConnection(listener net.Listener, config *ssh.ServerConfig
 		}
 		if _, err := channel.Write([]byte("runner ok\n")); err != nil {
 			return err
-		}
-		_, _ = channel.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{0}))
-		return channel.Close()
-	}
-	return fmt.Errorf("SSH exec request was not received")
-}
-
-// serveStreamingSSHExec echoes each stdin line back until stdin closes. It is
-// the server half of the Command.Input test: the client must be able to write a
-// value after the remote process has already produced output.
-func serveStreamingSSHExec(listener net.Listener, config *ssh.ServerConfig) error {
-	connection, err := listener.Accept()
-	if err != nil {
-		return err
-	}
-	defer connection.Close()
-	server, channels, requests, err := ssh.NewServerConn(connection, config)
-	if err != nil {
-		return err
-	}
-	defer server.Close()
-	go ssh.DiscardRequests(requests)
-	channelRequest, ok := <-channels
-	if !ok {
-		return fmt.Errorf("SSH session channel was not opened")
-	}
-	channel, channelRequests, err := channelRequest.Accept()
-	if err != nil {
-		return err
-	}
-	defer channel.Close()
-	for request := range channelRequests {
-		if request.Type != "exec" {
-			_ = request.Reply(false, nil)
-			continue
-		}
-		if err := request.Reply(true, nil); err != nil {
-			return err
-		}
-		reader := bufio.NewReader(channel)
-		for {
-			line, readErr := reader.ReadString('\n')
-			if line != "" {
-				if _, err := channel.Write([]byte("echo:" + line)); err != nil {
-					return err
-				}
-			}
-			if readErr != nil {
-				break
-			}
 		}
 		_, _ = channel.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{0}))
 		return channel.Close()

@@ -54,6 +54,15 @@ func (adapter Codex) Execute(ctx context.Context, request Request, emit func(Eve
 		// transport that cannot carry a live stdin channel, such as a Windows
 		// SSH remote). No message was claimed, so the Turn still runs through
 		// the one-shot exec path and the next Turn receives the messages.
+		if emit != nil {
+			message := "Codex app-server 未能在 Turn 开始前启动，已回退到 codex exec；本 Turn 不会实时接收 live inbox 消息"
+			if liveErr != nil {
+				message += "：" + clipError(liveErr.Error(), 300)
+			}
+			emit(Event{Type: "agent_progress", Data: map[string]any{
+				"message": message, "fallback": "codex_exec",
+			}})
+		}
 	}
 	idleWarning, idleTimeout, heartbeat := backendWatchdogDurations(adapter.IdleWarning, adapter.IdleTimeout, adapter.Heartbeat)
 	catalogPath := adapter.ensureModelCatalog(ctx, request)
