@@ -243,6 +243,57 @@ func TestPetBrainReleaseReturnsFailedSubmissionBudget(t *testing.T) {
 	}
 }
 
+func TestAskOwnerPetBrainReleasesBudgetWhenSubmissionFails(t *testing.T) {
+	fixture := newPetTaskFixture(t)
+	enablePetBrainTestAssistant(t, fixture, 15, false, 0, 0, 1)
+	if _, err := fixture.service.OwnerAssistant(fixture.ctx); err != nil {
+		t.Fatal(err)
+	}
+	waitForTask(t, fixture.database, petTaskID, domain.TaskWaitingUser)
+
+	clock := time.Date(2026, 11, 7, 1, 0, 0, 0, time.UTC)
+	fixture.service.now = func() time.Time { return clock }
+	before := fixture.turnCount(t)
+
+	// Delete the model behind the Pet Task's frozen runtime snapshot. Every gate
+	// in AskOwnerPetBrain still passes, so the only failure is SubmitMessage
+	// rejecting the turn. This exercises the entry-point rollback instead of
+	// calling releasePetBrainRun directly.
+	if err := fixture.database.DeleteModel(fixture.ctx, fixture.model.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.service.AskOwnerPetBrain(fixture.ctx, PetBrainContext{
+		DeviceID: "entry-rollback", IdleSeconds: 900, Page: "test",
+	}); err == nil || !strings.Contains(err.Error(), "模型已删除") {
+		t.Fatalf("expected SubmitMessage runtime failure, got %v", err)
+	}
+	if got := petBrainRunCount(fixture.service, "entry-rollback"); got != 0 {
+		t.Fatalf("failed submission kept the reserved run: runs=%d", got)
+	}
+	if got := fixture.turnCount(t); got != before {
+		t.Fatalf("failed submission still queued a turn: count=%d, want %d", got, before)
+	}
+
+	// Restoring the runtime and stepping past the per-device throttle must let the
+	// next poll reserve and submit again.
+	if err := fixture.database.UpsertModel(fixture.ctx, fixture.model); err != nil {
+		t.Fatal(err)
+	}
+	clock = clock.Add(time.Minute)
+	if _, err := fixture.service.AskOwnerPetBrain(fixture.ctx, PetBrainContext{
+		DeviceID: "entry-rollback", IdleSeconds: 900, Page: "test",
+	}); err != nil {
+		t.Fatalf("next run should succeed: %v", err)
+	}
+	if got := petBrainRunCount(fixture.service, "entry-rollback"); got != 1 {
+		t.Fatalf("next run did not reserve a slot: runs=%d", got)
+	}
+	waitForTask(t, fixture.database, petTaskID, domain.TaskWaitingUser)
+	if got := fixture.turnCount(t); got != before+1 {
+		t.Fatalf("turn count=%d, want %d", got, before+1)
+	}
+}
+
 func TestPetBrainHourlyLimitRecoversAcrossWindows(t *testing.T) {
 	fixture := newPetTaskFixture(t)
 	assistant, err := fixture.database.EnsureOwnerAssistant(fixture.ctx, time.Now().UTC())
@@ -322,6 +373,32 @@ func petBrainRunCount(service *Service, deviceID string) int {
 	service.petBrainMu.Lock()
 	defer service.petBrainMu.Unlock()
 	return len(service.petBrainRuns[deviceID])
+}
+
+func TestPetAutonomyStatusCountsOnlyCurrentHour(t *testing.T) {
+	fixture := newPetTaskFixture(t)
+	enablePetBrainTestAssistant(t, fixture, 15, false, 0, 0, 1)
+	assistant, err := fixture.database.EnsureOwnerAssistant(fixture.ctx, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 11, 7, 1, 0, 0, 0, time.UTC)
+	fixture.service.now = func() time.Time { return now }
+	fixture.service.petBrainMu.Lock()
+	fixture.service.petBrainRuns = map[string][]time.Time{
+		"server_autonomy": {
+			now.Add(-2 * time.Hour),
+			// Exactly on the cutoff is already outside the rolling window,
+			// matching reservePetBrainRun's strictly-after comparison.
+			now.Add(-time.Hour),
+			now.Add(-30 * time.Minute),
+			now.Add(-time.Minute),
+		},
+	}
+	fixture.service.petBrainMu.Unlock()
+	if _, _, runs := fixture.service.petAutonomyStatus(assistant); runs != 2 {
+		t.Fatalf("status counted stale runs: runs=%d, want 2", runs)
+	}
 }
 
 func TestPetAutonomySkipOnlyHidesExpectedSkips(t *testing.T) {

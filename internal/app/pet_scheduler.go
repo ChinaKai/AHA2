@@ -129,10 +129,19 @@ func (s *Service) petAutonomyStatus(assistant domain.OwnerAssistant) (time.Time,
 	if !assistant.PetEnabled {
 		return time.Time{}, time.Time{}, 0
 	}
+	now := s.now().UTC()
+	cutoff := now.Add(-time.Hour)
 	s.petBrainMu.Lock()
 	last := s.petAutonomyLast
 	next := s.petAutonomyNext
-	runs := len(s.petBrainRuns["server_autonomy"])
+	runs := 0
+	for _, at := range s.petBrainRuns["server_autonomy"] {
+		// Match reservePetBrainRun's rolling window: only runs strictly newer than
+		// the cutoff still occupy a slot.
+		if at.After(cutoff) {
+			runs++
+		}
+	}
 	s.petBrainMu.Unlock()
 	if next.IsZero() {
 		next = s.now().UTC().Add(petAutonomyInterval(assistant))
