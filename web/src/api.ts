@@ -22,6 +22,7 @@ import type {
   ChannelTaskRoute,
   DataCleanupResult,
   DataInventory,
+  DatabaseStats,
   DetectedModel,
   EnvGroup,
   GeneralSettings,
@@ -64,6 +65,9 @@ import type {
   ConversationPage,
   HardwareGroup,
   HardwareIOPage,
+  HardwareIOPurgePlan,
+  HardwareIOPurgeResult,
+  HardwareIORetentionSettings,
   HardwareResource,
   HardwareTerminalStatus,
   SerialPort,
@@ -194,6 +198,22 @@ class APIClient {
 
   cleanupData(payload: {category: string; keep?: number; confirm: boolean}): Promise<{ok: boolean; result: DataCleanupResult}> {
     return this.request("/api/v1/system/data/cleanup", {method: "POST", body: JSON.stringify(payload)});
+  }
+
+  databaseStats(): Promise<{ok: boolean; database: DatabaseStats}> {
+    return this.request("/api/v1/system/data/database");
+  }
+
+  updateHardwareIORetention(payload: {retention_days: number; max_delete_rows: number}): Promise<{ok: boolean; retention: HardwareIORetentionSettings}> {
+    return this.request("/api/v1/system/data/hardware-io/retention", {method: "PUT", body: JSON.stringify(payload)});
+  }
+
+  previewHardwareIOPurge(payload: {retention_days: number; max_delete_rows: number}): Promise<{ok: boolean; plan: HardwareIOPurgePlan}> {
+    return this.request("/api/v1/system/data/hardware-io/preview", {method: "POST", body: JSON.stringify(payload)});
+  }
+
+  purgeHardwareIO(payload: {retention_days: number; max_delete_rows: number; confirm: boolean}): Promise<{ok: boolean; result: HardwareIOPurgeResult; database?: DatabaseStats}> {
+    return this.request("/api/v1/system/data/hardware-io/purge", {method: "POST", body: JSON.stringify(payload)});
   }
 
   proxySettings(): Promise<{proxy: ProxySettings; managed?: ManagedProxyView}> {

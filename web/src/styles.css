@@ -2406,6 +2406,16 @@ dialog > .dialog-head { margin: 0; padding: 18px 18px 0; }
 .data-cleanup-actions input { width: 64px; min-height: 32px; }
 .data-cleanup-note { padding: 12px 16px; }
 .data-cleanup-note p { line-height: 1.6; }
+.data-db-files { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; padding: 14px 16px; }
+.data-db-files > div { display: grid; gap: 4px; }
+.data-db-files strong { font-variant-numeric: tabular-nums; }
+.data-db-table td small { display: block; }
+.data-db-retention { border-top: 1px solid var(--line); }
+.data-db-form { padding: 0 16px; }
+.data-db-form #data-hardware-io-rows { width: 110px; }
+.data-db-retention .form-error { padding: 8px 16px 0; margin: 0; }
+.data-db-plan, .data-db-result { padding: 0 16px; }
+.data-db-plan p { margin: 4px 0; line-height: 1.6; }
 @media (max-width: 640px) {
   .language-settings-panel { grid-template-columns: 1fr; align-items: stretch; }
   .language-settings-control { justify-content: space-between; }
