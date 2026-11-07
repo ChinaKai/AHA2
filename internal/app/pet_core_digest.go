@@ -12,10 +12,15 @@ import (
 	"unicode/utf8"
 )
 
+// Principles get a larger budget than identity because they hold the rules the
+// pet must follow every Turn. At 80 runes per top-level line, 1500 runes keep
+// about 17 top-level rules even when every one is shortened, so a ~4 KB
+// principles file keeps all of its top-level rules and only drops nested
+// details. The cost is up to ~1.5k extra runes in every pet Turn prompt.
 const (
 	petDigestIdentityLimit     = 300
 	petDigestIdentityLineLimit = 120
-	petDigestPrinciplesLimit   = 500
+	petDigestPrinciplesLimit   = 1500
 	petDigestPrinciplesLine    = 80
 	petDigestLoopItems         = 3
 	petDigestAgendaItems       = 2
