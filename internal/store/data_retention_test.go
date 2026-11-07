@@ -427,9 +427,9 @@ func TestPurgeHardwareIODeletesOnlyOldRowsInBatches(t *testing.T) {
 	}
 }
 
-// A row whose clock jumped backwards sits after newer rows. The sequence range
-// may include it, but the created_at guard keeps every row inside the
-// retention window.
+// A recent row followed by rows whose clock jumped backwards. The binary search
+// probes the recent row and stops the sequence range before it, so this covers
+// the search, not the created_at guard in the DELETE (see the next test).
 func TestPurgeHardwareIONeverDeletesRecentRowsInsideRange(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -449,6 +449,69 @@ func TestPurgeHardwareIONeverDeletesRecentRowsInsideRange(t *testing.T) {
 	var recent int
 	if err := database.db.QueryRow(`SELECT COUNT(*) FROM hardware_io WHERE sequence=11`).Scan(&recent); err != nil || recent != 1 {
 		t.Fatalf("recent row deleted: %d %v", recent, err)
+	}
+}
+
+// The created_at guard in the DELETE must keep a recent row that the sequence
+// range includes. The fixture deliberately breaks the order of sequence and
+// created_at: one row at sequence 5 is an hour old (written with a clock that
+// was ahead, or before a backwards jump) among 19 rows from nine and ten days
+// ago. With 20 rows the binary search probes sequences 11, 16, 19 and 20, all
+// old, so it never sees sequence 5 and returns cutoff 21. The run [1,21) then
+// contains the recent row and only the guard stops it from being deleted.
+// Not parallel: hardwareIOPurgeMu is package-wide, and a concurrent purge test
+// would make this one skip with already_running instead of running the DELETE.
+func TestPurgeHardwareIOCreatedAtGuardKeepsRecentRowInsideRange(t *testing.T) {
+	ctx := context.Background()
+	database := openDataRetentionTestStore(t)
+	task := createStoreTestTask(t, database)
+	now := time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
+	seedHardwareIO(t, database, task.ID, 4, now.Add(-10*24*time.Hour), time.Hour)
+	seedHardwareIO(t, database, task.ID, 1, now.Add(-time.Hour), 0)
+	seedHardwareIO(t, database, task.ID, 15, now.Add(-9*24*time.Hour), time.Hour)
+	const recentSequence = 5
+	var recentCreatedAt string
+	if err := database.db.QueryRow(`SELECT created_at FROM hardware_io WHERE sequence=?`, recentSequence).Scan(&recentCreatedAt); err != nil {
+		t.Fatal(err)
+	}
+	if !parseTime(recentCreatedAt).Equal(now.Add(-time.Hour)) {
+		t.Fatalf("fixture: sequence %d created_at=%s", recentSequence, recentCreatedAt)
+	}
+
+	settings := domain.HardwareIORetentionSettings{RetentionDays: 2, MaxDeleteRows: 1_000}
+	result, err := database.PurgeHardwareIO(ctx, settings, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.SkipReason != "" {
+		t.Fatalf("purge skipped: %#v", result)
+	}
+	// The run must cover the recent row, otherwise the guard is not exercised.
+	plan := result.Plan
+	if plan.CutoffSequence != 21 || plan.RunStartSequence > recentSequence || plan.RunEndSequence <= recentSequence {
+		t.Fatalf("recent row is outside the purge range: %#v", plan)
+	}
+	if result.DeletedRows != 19 || result.Batches != 1 || result.Partial {
+		t.Fatalf("result=%#v", result)
+	}
+	var survivors []int64
+	rows, err := database.db.Query(`SELECT sequence FROM hardware_io ORDER BY sequence`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var sequence int64
+		if err := rows.Scan(&sequence); err != nil {
+			t.Fatal(err)
+		}
+		survivors = append(survivors, sequence)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if len(survivors) != 1 || survivors[0] != recentSequence {
+		t.Fatalf("survivors=%v, want only the recent row %d", survivors, recentSequence)
 	}
 }
 
