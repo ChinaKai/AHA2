@@ -19,7 +19,11 @@ type Request struct {
 	// images reads the resolved value instead of re-guessing the default.
 	SupportsImageInput bool
 	// FastMode selects the accelerated service tier where the backend has one.
-	FastMode            bool
+	FastMode bool
+	// StreamInput is the per-Turn Claude opt-in for stream-json live inbox
+	// input. The adapter's own StreamInput field is the deployment-wide force;
+	// the effective value is the logical OR of the two. Other backends ignore it.
+	StreamInput         bool
 	StreamIdleTimeoutMS int
 	StreamMaxRetries    int
 	Environment         map[string]string

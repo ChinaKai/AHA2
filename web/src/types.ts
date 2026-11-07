@@ -602,6 +602,7 @@ export interface TaskAgent {
   approval?: string;
   proxy_enabled: boolean;
   fast_mode: boolean;
+  stream_input: boolean;
   runtime_config_valid: boolean;
   runtime_config_error?: string;
   unread_count: number;

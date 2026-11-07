@@ -268,6 +268,7 @@ type CreateTaskInput struct {
 	CodexAccountID      string
 	ReasoningEffort     string
 	FastMode            bool
+	StreamInput         bool
 	StreamIdleTimeoutMS *int
 	StreamMaxRetries    *int
 	Filesystem          string
@@ -434,6 +435,7 @@ func (s *Service) CreateTask(ctx context.Context, input CreateTaskInput) (domain
 		ProxyEnabled:        input.ProxyEnabled,
 		ReasoningEffort:     input.ReasoningEffort,
 		FastMode:            input.FastMode,
+		StreamInput:         input.StreamInput,
 		StreamIdleTimeoutMS: streamIdleTimeoutMS,
 		StreamMaxRetries:    streamMaxRetries,
 		PermissionsJSON:     permissionsJSON(input.Filesystem, input.Approval),

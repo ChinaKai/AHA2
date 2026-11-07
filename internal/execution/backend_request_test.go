@@ -49,3 +49,32 @@ func TestBackendRequestCarriesTheAgentAPIForwardForEveryBackend(t *testing.T) {
 		t.Fatalf("environment was lost: %#v", built.Environment)
 	}
 }
+
+// Stream input is a Claude-only per-Task opt-in. A snapshot carrying it on
+// another Backend must stay inert; the deployment-wide force lives on the
+// Claude adapter and is ORed there.
+func TestBackendRequestCarriesPerTaskStreamInputOnlyForClaude(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		backend string
+		perTask bool
+		want    bool
+	}{
+		{name: "claude on", backend: "claude", perTask: true, want: true},
+		{name: "claude off", backend: "claude", perTask: false, want: false},
+		{name: "codex ignores", backend: "codex", perTask: true, want: false},
+		{name: "dsh ignores", backend: "dsh", perTask: true, want: false},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			request := app.ExecutionRequest{Snapshot: domain.RuntimeConfigSnapshot{
+				Backend: testCase.backend, StreamInput: testCase.perTask,
+			}}
+			built := newBackendRequest(request, "model", nil)
+			if built.StreamInput != testCase.want {
+				t.Fatalf("StreamInput = %t, want %t", built.StreamInput, testCase.want)
+			}
+		})
+	}
+}

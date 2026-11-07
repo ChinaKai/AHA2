@@ -18,16 +18,23 @@ type Claude struct {
 	IdleWarning time.Duration
 	IdleTimeout time.Duration
 	Heartbeat   time.Duration
-	// StreamInput runs Claude Code with --input-format stream-json and keeps
-	// stdin open, so Request.LiveInbox messages reach the running Turn at its
-	// next step. It only applies when the runner can stream stdin; otherwise
-	// the one-shot -p prompt is used unchanged.
+	// StreamInput force-enables stream-json input for every Claude Turn at this
+	// deployment. A per-Task opt-in (Request.StreamInput) enables it without
+	// this flag; the effective value is the logical OR of the two. It only
+	// applies when the runner can stream stdin; otherwise the one-shot -p
+	// prompt is used unchanged.
 	StreamInput bool
 	// LivePoll overrides how often a stream-input run claims live messages.
 	LivePoll time.Duration
 	// LiveReplayGrace overrides how long stdin stays open after a result for
 	// a written live message that has not been replayed yet.
 	LiveReplayGrace time.Duration
+}
+
+// streamInputEnabled is the effective per-Turn decision: the deployment-wide
+// flag forces it on, and the per-Task opt-in enables it without a restart.
+func (adapter Claude) streamInputEnabled(request Request) bool {
+	return adapter.StreamInput || request.StreamInput
 }
 
 func (adapter Claude) Execute(ctx context.Context, request Request, emit func(Event)) (Result, error) {
@@ -45,7 +52,7 @@ func (adapter Claude) Execute(ctx context.Context, request Request, emit func(Ev
 	}
 	var live *claudeLiveInput
 	stdin := request.Prompt
-	if adapter.StreamInput && request.LiveInbox != nil && workspace.StreamsInput(request.Runner) {
+	if adapter.streamInputEnabled(request) && request.LiveInbox != nil && workspace.StreamsInput(request.Runner) {
 		live = newClaudeLiveInput(request.LiveInbox, adapter.LivePoll, adapter.LiveReplayGrace)
 		args = append(args, "--input-format", "stream-json", "--replay-user-messages")
 		stdin = claudeUserMessage(newClaudeMessageUUID(), request.Prompt)

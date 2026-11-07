@@ -80,12 +80,20 @@ func newBackendRequest(request app.ExecutionRequest, model string, environment m
 		ReasoningEffort:    request.Snapshot.ReasoningEffort,
 		SupportsImageInput: modelSupportsImageInput(request.Model),
 		FastMode:           request.Snapshot.FastMode,
+		StreamInput:        claudeStreamInputRequested(request.Snapshot),
 		Environment:        environment,
 		Prompt:             request.Prompt, ProviderSessionID: request.ProviderSessionID,
 		Filesystem: request.Filesystem, Approval: request.Approval,
 		MCPServers: request.MCPServers, AllowedTools: request.AllowedTools, ReverseForward: request.AgentAPIForward,
 		LiveInbox: request.LiveInbox,
 	}
+}
+
+// claudeStreamInputRequested is the per-Task half of the effective stream-json
+// decision. Only Claude consumes it; returning false for every other Backend
+// keeps that setting inert there even if a snapshot carries it.
+func claudeStreamInputRequested(snapshot domain.RuntimeConfigSnapshot) bool {
+	return snapshot.Backend == "claude" && snapshot.StreamInput
 }
 
 // modelSupportsImageInput resolves the model's input capability. The editor

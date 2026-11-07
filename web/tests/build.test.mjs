@@ -1872,6 +1872,29 @@ test("agent config offers the Codex fast tier and follows the backend", async ()
   assert.doesNotMatch(claude, /name="fast_mode"[^>]*disabled/, "the switch is disabled instead of hidden");
 });
 
+// The Claude-only stream-json input switch is per Agent runtime state, so the
+// Agent dialog must seed it from the stored snapshot, offer it only for the
+// Backend selected right now, and keep the value in the form while hidden.
+test("agent config offers the Claude stream-json input switch", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const {renderAgentConfigDialog} = await import(pathToFileURL(resolve(root, "dist", "task_agents.js")));
+  const dialog = (backend, streamInput) => renderAgentConfigDialog({
+    task: {id: "task-1", project_id: "project-1", workspace_id: "workspace-1", title: "Task", original_request: "", current_goal: "", status: "active", isolation: "inplace", collaboration_mode: "auto", max_agents: 3, knowledge_policy: "inherit", skill_ids: [], total_tokens: 0, created_at: "", updated_at: ""},
+    agents: [{agent_id: "main", role: "main", title: "Main", backend, model_source: "env", model_id: "model-1", reasoning_effort: "high", filesystem: "workspace-write", approval: "never", proxy_enabled: false, fast_mode: false, stream_input: streamInput}],
+    turns: [], memory: {task_id: "task-1", current_goal: ""},
+  }, "main", [], [], []);
+  const on = dialog("claude", true);
+  assert.match(on, /id="agent-config-stream-input-row"[^>]*>\s*<input name="stream_input" type="checkbox" checked>/, "a stored switch is not rendered as on");
+  assert.match(on, /实验性：Turn 内 live inbox 投递（stream-json）/, "the switch does not name the experimental path");
+  const off = dialog("claude", false);
+  assert.doesNotMatch(off, /name="stream_input" type="checkbox" checked/, "an unset switch is rendered as on");
+  // Hidden, never disabled: a disabled checkbox drops out of the form, which
+  // would clear a stored value when another Backend is saved.
+  const codex = dialog("codex", true);
+  assert.match(codex, /id="agent-config-stream-input-row"[^>]* hidden>/, "the switch is not gated on the Backend");
+  assert.doesNotMatch(codex, /name="stream_input"[^>]*disabled/, "the switch is disabled instead of hidden");
+});
+
 test("round card reports uncached turn input and hides ambiguous cache usage", async () => {
   const root = resolve(import.meta.dirname, "..");
   const {renderAgentTurnCard} = await import(pathToFileURL(resolve(root, "dist", "task_agents.js")));

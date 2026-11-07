@@ -3493,5 +3493,18 @@ func (s *Store) migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(124, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
 		return fmt.Errorf("record schema v124: %w", err)
 	}
+	var hasV125 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=125)`).Scan(&hasV125)
+	if !hasV125 {
+		// Per-Task opt-in for Claude stream-json live inbox input. The default
+		// keeps every existing Task on the one-shot -p path; the deployment-wide
+		// AHA2_CLAUDE_STREAM_INPUT flag remains the separate force switch.
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE runtime_config_snapshots ADD COLUMN stream_input INTEGER NOT NULL DEFAULT 0`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("apply schema v125 stream input: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(125, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v125: %w", err)
+	}
 	return nil
 }
