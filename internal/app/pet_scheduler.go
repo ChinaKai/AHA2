@@ -43,6 +43,12 @@ func (s *Service) StartPetAutonomy() {
 // sub-five-minute loop from spamming repeated inspection turns.
 const petAutonomyMinimumReview = 5 * time.Minute
 
+// petAutonomyInterval is the scheduler's polling cadence. It may be shorter
+// than 60/pet_hourly_limit when the owner configures a 15-minute idle trigger
+// with an hourly limit of 1. That configuration is intentional in production:
+// the budget is enforced per submitted run, so polls rejected by the hourly
+// limit do not consume it and the first poll after the rolling window slides
+// runs again.
 func petAutonomyInterval(assistant domain.OwnerAssistant) time.Duration {
 	interval := time.Duration(assistant.PetIdleMinutes) * time.Minute
 	if interval < petAutonomyMinimumReview {

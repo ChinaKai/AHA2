@@ -188,22 +188,11 @@ func (s *Service) AskOwnerPetBrain(ctx context.Context, input PetBrainContext) (
 	if s.petBrainAt == nil {
 		s.petBrainAt = map[string]time.Time{}
 	}
-	if s.petBrainRuns == nil {
-		s.petBrainRuns = map[string][]time.Time{}
-	}
 	if last, ok := s.petBrainAt[deviceID]; ok && now.Sub(last) < 30*time.Second {
 		s.petBrainMu.Unlock()
 		return PetBrainResult{}, fmt.Errorf("宠物刚刚动过，稍后再试")
 	}
 	s.petBrainAt[deviceID] = now
-	cutoff := now.Add(-time.Hour)
-	runs := s.petBrainRuns[deviceID][:0]
-	for _, at := range s.petBrainRuns[deviceID] {
-		if at.After(cutoff) {
-			runs = append(runs, at)
-		}
-	}
-	s.petBrainRuns[deviceID] = append(runs, now)
 	s.petBrainMu.Unlock()
 
 	assistant, err := s.store.EnsureOwnerAssistant(ctx, now)
@@ -215,14 +204,6 @@ func (s *Service) AskOwnerPetBrain(ctx context.Context, input PetBrainContext) (
 	}
 	if petQuietNow(assistant, time.Now()) {
 		return PetBrainResult{}, fmt.Errorf("现在处于宠物安静时段")
-	}
-	if assistant.PetHourlyLimit > 0 {
-		s.petBrainMu.Lock()
-		count := len(s.petBrainRuns[deviceID])
-		s.petBrainMu.Unlock()
-		if count > assistant.PetHourlyLimit {
-			return PetBrainResult{}, fmt.Errorf("宠物这个小时已经够活跃了")
-		}
 	}
 	idleMinutes := input.IdleSeconds / 60
 	if idleMinutes < 1 {
@@ -248,11 +229,61 @@ func (s *Service) AskOwnerPetBrain(ctx context.Context, input PetBrainContext) (
 	if _, activeErr := s.store.ActiveTurn(ctx, petTaskID); activeErr == nil {
 		return PetBrainResult{}, fmt.Errorf("宠物 Task 正在执行，跳过本次自主行为")
 	}
+	// Every gate above can reject a poll without doing any work. Only a run that
+	// actually reaches SubmitMessage may consume the rolling-hour budget, and the
+	// check-and-record below must stay atomic so the HTTP entry and the server
+	// scheduler cannot both claim the last slot for a device.
+	if err := s.reservePetBrainRun(deviceID, now, assistant.PetHourlyLimit); err != nil {
+		return PetBrainResult{}, err
+	}
 	message := petAutonomousMessage(s.petUsesEnglish(ctx), idleMinutes, page, input.Layout)
 	if _, err := s.SubmitMessage(ctx, petTaskID, message); err != nil {
+		// The turn was never submitted, so give the reserved slot back.
+		s.releasePetBrainRun(deviceID, now)
 		return PetBrainResult{}, err
 	}
 	return PetBrainResult{}, nil
+}
+
+// reservePetBrainRun prunes the rolling-hour window, enforces the hourly limit
+// and records the new run in one critical section. Callers must run it only
+// after all other gates passed, immediately before submitting the autonomous
+// turn, so rejected polls neither consume the budget nor inflate the count that
+// used to starve every later poll.
+func (s *Service) reservePetBrainRun(deviceID string, now time.Time, limit int) error {
+	s.petBrainMu.Lock()
+	defer s.petBrainMu.Unlock()
+	if s.petBrainRuns == nil {
+		s.petBrainRuns = map[string][]time.Time{}
+	}
+	cutoff := now.Add(-time.Hour)
+	runs := s.petBrainRuns[deviceID][:0]
+	for _, at := range s.petBrainRuns[deviceID] {
+		if at.After(cutoff) {
+			runs = append(runs, at)
+		}
+	}
+	if limit > 0 && len(runs) >= limit {
+		s.petBrainRuns[deviceID] = runs
+		return fmt.Errorf("宠物这个小时已经够活跃了")
+	}
+	s.petBrainRuns[deviceID] = append(runs, now)
+	return nil
+}
+
+// releasePetBrainRun removes a reservation whose submission failed, so a real
+// error does not silently eat the device's hourly budget.
+func (s *Service) releasePetBrainRun(deviceID string, at time.Time) {
+	s.petBrainMu.Lock()
+	defer s.petBrainMu.Unlock()
+	runs := s.petBrainRuns[deviceID]
+	for i := len(runs) - 1; i >= 0; i-- {
+		if runs[i].Equal(at) {
+			runs = append(runs[:i], runs[i+1:]...)
+			break
+		}
+	}
+	s.petBrainRuns[deviceID] = runs
 }
 
 func petActionsFromToolCalls(calls []gateway.ChatToolCall, limit int) []PetBrainAction {
