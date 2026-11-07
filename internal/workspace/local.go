@@ -176,7 +176,7 @@ const processInputFeederTimeout = processPipeDrainTimeout
 
 // processInputFeeder is the stdin feeder runProcess starts for Command.Input.
 // Tests replace it to simulate a feeder that cannot finish in time.
-var processInputFeeder = feedProcessInput
+var processInputFeeder = feedInput
 
 // processOutputSpoolLimit caps how many unread bytes each stream may buffer
 // before its pipe drainer is backpressured. The spool decouples the drainer
@@ -284,7 +284,11 @@ func runProcess(parent context.Context, command Command, env []string, onLine Li
 	}
 	processErr := process.Wait()
 	close(exited)
-	awaitProcessInputFeeder(processInputFeederTimeout, stdinPipe, feederDone)
+	if stdinPipe != nil {
+		awaitInputFeeder(stdinPipe, feederDone)
+	} else {
+		<-feederDone
+	}
 	// Wait returns as soon as the direct child exits. Give the drainers a
 	// bounded window to reach EOF; a descendant holding the pipes keeps them
 	// open, so close the read ends after the grace period. If a drainer was
@@ -318,12 +322,12 @@ func runProcess(parent context.Context, command Command, env []string, onLine Li
 	return result, nil
 }
 
-// feedProcessInput writes initial and then every value from input to a
-// running child's stdin. It closes stdin when input is closed and stops when
-// the child has exited or stopped accepting writes; a value that could not be
-// written is dropped, so callers confirm delivery from the child's output
-// rather than from this write.
-func feedProcessInput(stdin io.WriteCloser, initial string, input <-chan string, exited <-chan struct{}, done chan<- struct{}) {
+// feedInput writes initial and then every value from input to a running
+// child's stdin. It closes stdin when input is closed and stops when the child
+// has exited or stopped accepting writes; a value that could not be written is
+// dropped, so callers confirm delivery from the child's output rather than from
+// this write. It is shared by the local and SSH runners.
+func feedInput(stdin io.WriteCloser, initial string, input <-chan string, exited <-chan struct{}, done chan<- struct{}) {
 	defer close(done)
 	defer func() { _ = stdin.Close() }()
 	if initial != "" {
@@ -346,20 +350,16 @@ func feedProcessInput(stdin io.WriteCloser, initial string, input <-chan string,
 	}
 }
 
-// awaitProcessInputFeeder closes the stdin write end after the direct child
-// exited and waits up to timeout for the feeder to return. The close runs on
-// its own goroutine because closing a pipe waits for a pending write; when that
-// write is released (by the close itself, or once whatever still holds the
-// read end reads or exits) both goroutines end on their own. Run does not wait
-// longer than timeout for that: values the feeder has not written are dropped,
-// which callers already treat as undelivered.
-func awaitProcessInputFeeder(timeout time.Duration, stdin *os.File, done <-chan struct{}) {
-	if stdin == nil {
-		<-done
-		return
-	}
+// awaitInputFeeder closes the stdin write end after the command exited and
+// waits at most processInputFeederTimeout for the feeder to return. The close
+// runs on its own goroutine because closing a pipe waits for a pending write;
+// when that write is released (by the close itself, or once whatever still
+// holds the read end reads or exits) both goroutines end on their own. The
+// runner does not wait longer than that: values the feeder has not written are
+// dropped, which callers already treat as undelivered.
+func awaitInputFeeder(stdin io.Closer, done <-chan struct{}) {
 	go func() { _ = stdin.Close() }()
-	timer := time.NewTimer(timeout)
+	timer := time.NewTimer(processInputFeederTimeout)
 	defer timer.Stop()
 	select {
 	case <-done:

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -38,15 +39,16 @@ type SSHRunner struct {
 	detectedPlatform string
 }
 
+// StreamsInput reports that Command.Input is written to the running remote
+// command over the SSH session's stdin channel.
+func (*SSHRunner) StreamsInput() bool { return true }
+
 func (runner *SSHRunner) Run(parent context.Context, command Command, onLine LineHandler) (Result, error) {
 	if runner.Host == "" {
 		return Result{}, fmt.Errorf("ssh host is required")
 	}
 	if runner.User == "" {
 		return Result{}, fmt.Errorf("ssh user is required")
-	}
-	if command.Input != nil {
-		return Result{}, errInputNotStreamed
 	}
 	ctx := parent
 	cancel := func() {}
@@ -217,17 +219,30 @@ printf '%s' "$body"`
 // established connection.
 func (runner *SSHRunner) execCommand(ctx context.Context, client *ssh.Client, command Command, platform string, onLine LineHandler) (Result, error) {
 	if isWindowsPlatform(platform) {
+		// The PowerShell bootstrap reads a length-prefixed metadata frame and
+		// then copies the rest of its stdin to the child, so a running command
+		// receives Command.Input through the same channel.
 		payload, err := windowsRemotePayload(command)
 		if err != nil {
 			return Result{}, err
 		}
-		return runner.execOnClient(ctx, client, windowsBootstrapCommand(), payload, command.OutputLimit, onLine)
+		return runner.execOnClient(ctx, client, windowsBootstrapCommand(), payload, command.Input, command.OutputLimit, onLine)
+	}
+	if command.Input != nil {
+		// "sh -s" would consume the session's stdin as the script, leaving the
+		// backend with nothing. Pass the script as an argument instead, so the
+		// exec'd backend inherits stdin and receives the live input.
+		script, err := streamRemoteScript(command)
+		if err != nil {
+			return Result{}, err
+		}
+		return runner.execOnClient(ctx, client, "sh -c "+shellQuote(script), command.Stdin, command.Input, command.OutputLimit, onLine)
 	}
 	script, err := remoteScript(command)
 	if err != nil {
 		return Result{}, err
 	}
-	return runner.execOnClient(ctx, client, "sh -s", script, command.OutputLimit, onLine)
+	return runner.execOnClient(ctx, client, "sh -s", script, nil, command.OutputLimit, onLine)
 }
 
 func (runner *SSHRunner) dial(ctx context.Context) (*ssh.Client, error) {
@@ -254,20 +269,29 @@ func (runner *SSHRunner) runRaw(parent context.Context, remoteCommand, stdin str
 		return Result{}, err
 	}
 	defer client.Close()
-	return runner.execOnClient(ctx, client, remoteCommand, stdin, outputLimit, onLine)
+	return runner.execOnClient(ctx, client, remoteCommand, stdin, nil, outputLimit, onLine)
 }
 
 // execOnClient runs one command over an already-established connection. Splitting
 // it out lets a caller reuse the same connection for a reverse forward, whose
 // lifetime must match the command's.
-func (runner *SSHRunner) execOnClient(ctx context.Context, client *ssh.Client, remoteCommand, stdin string, outputLimit int, onLine LineHandler) (Result, error) {
+func (runner *SSHRunner) execOnClient(ctx context.Context, client *ssh.Client, remoteCommand, stdin string, input <-chan string, outputLimit int, onLine LineHandler) (Result, error) {
 	start := time.Now()
 	session, err := client.NewSession()
 	if err != nil {
 		return Result{}, err
 	}
 	defer session.Close()
-	session.Stdin = strings.NewReader(stdin)
+	var stdinPipe io.WriteCloser
+	if input == nil {
+		session.Stdin = strings.NewReader(stdin)
+	} else {
+		// Keep the write end open after the initial payload so the backend can
+		// receive messages while it runs. Closing it ends the remote stdin.
+		if stdinPipe, err = session.StdinPipe(); err != nil {
+			return Result{}, err
+		}
+	}
 	stdoutPipe, err := session.StdoutPipe()
 	if err != nil {
 		return Result{}, err
@@ -283,12 +307,25 @@ func (runner *SSHRunner) execOnClient(ctx context.Context, client *ssh.Client, r
 	go scanOutput(stderrPipe, stderr, nil, &wait)
 	done := make(chan error, 1)
 	go func() { done <- session.Run(remoteCommand) }()
+	exited := make(chan struct{})
+	feederDone := make(chan struct{})
+	if stdinPipe != nil {
+		go feedInput(stdinPipe, stdin, input, exited, feederDone)
+	} else {
+		close(feederDone)
+	}
 	var runErr error
 	select {
 	case runErr = <-done:
 	case <-ctx.Done():
 		_ = client.Close()
 		runErr = <-done
+	}
+	close(exited)
+	if stdinPipe != nil {
+		waitInputFeeder(feederDone)
+	} else {
+		<-feederDone
 	}
 	wait.Wait()
 	result := Result{Stdout: stdout.String(), Stderr: stderr.String(), Duration: time.Since(start)}
@@ -304,6 +341,20 @@ func (runner *SSHRunner) execOnClient(ctx context.Context, client *ssh.Client, r
 		return result, nil
 	}
 	return result, runErr
+}
+
+// waitInputFeeder waits at most processInputFeederTimeout for the stdin feeder
+// after the session ended. The feeder is the only goroutine that closes the
+// SSH stdin pipe: closing it here would race with a pending write, and the
+// terminated transport already releases that write. The bound only guards
+// against a pathological transport.
+func waitInputFeeder(done <-chan struct{}) {
+	timer := time.NewTimer(processInputFeederTimeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+	}
 }
 
 func (runner *SSHRunner) connect(ctx context.Context, endpoint string) (*ssh.Client, error) {
@@ -496,7 +547,20 @@ func normalizeWorkspaceSSHAuth(value string) string {
 	}
 }
 
+// remoteScript builds the one-shot shell script. The command's Stdin, if any,
+// is embedded in the script because the script itself owns stdin.
 func remoteScript(command Command) (string, error) {
+	return buildRemoteScript(command, false)
+}
+
+// streamRemoteScript builds the script for a command whose stdin is a live
+// channel. It deliberately leaves stdin unread so the exec'd backend receives
+// the caller's stream directly.
+func streamRemoteScript(command Command) (string, error) {
+	return buildRemoteScript(command, true)
+}
+
+func buildRemoteScript(command Command, streamedStdin bool) (string, error) {
 	if command.Executable == "" {
 		return "", fmt.Errorf("remote executable is required")
 	}
@@ -520,7 +584,7 @@ func remoteScript(command Command) (string, error) {
 		script.WriteString(shellQuote(value))
 		script.WriteByte('\n')
 	}
-	if command.Stdin != "" {
+	if command.Stdin != "" && !streamedStdin {
 		encoded := base64.StdEncoding.EncodeToString([]byte(command.Stdin))
 		script.WriteString("printf %s ")
 		script.WriteString(shellQuote(encoded))

@@ -812,17 +812,25 @@ func TestRunProcessReturnsWhileStdinInheritingGrandchildBlocksWrite(t *testing.T
 	}
 }
 
-func TestOnlyLocalRunnerStreamsInput(t *testing.T) {
-	if !StreamsInput(LocalRunner{}) {
-		t.Fatal("LocalRunner should stream input")
-	}
-	input := make(chan string)
-	for _, runner := range []Runner{WSLRunner{Distro: "x"}, &SSHRunner{Host: "h", User: "u"}} {
-		if StreamsInput(runner) {
-			t.Fatalf("%T must not claim to stream input", runner)
-		}
-		if _, err := runner.Run(context.Background(), Command{Executable: "x", Input: input}, nil); !errors.Is(err, errInputNotStreamed) {
-			t.Fatalf("%T accepted Input: %v", runner, err)
+func TestBuiltInRunnersStreamInput(t *testing.T) {
+	for _, runner := range []Runner{LocalRunner{}, WSLRunner{Distro: "x"}, &SSHRunner{Host: "h", User: "u"}} {
+		if !StreamsInput(runner) {
+			t.Fatalf("%T should stream input", runner)
 		}
 	}
+}
+
+func TestRunnerWithoutStreamingRejectsInput(t *testing.T) {
+	if StreamsInput(unsupportedRunner{}) {
+		t.Fatal("unsupportedRunner must not claim to stream input")
+	}
+	if _, err := (unsupportedRunner{}).Run(context.Background(), Command{Input: make(chan string)}, nil); !errors.Is(err, errInputNotStreamed) {
+		t.Fatalf("unsupportedRunner accepted Input: %v", err)
+	}
+}
+
+type unsupportedRunner struct{}
+
+func (unsupportedRunner) Run(context.Context, Command, LineHandler) (Result, error) {
+	return Result{}, errInputNotStreamed
 }
