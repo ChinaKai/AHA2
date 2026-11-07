@@ -23,9 +23,7 @@ import (
 // caller cannot tell a real failure from a stray note, so the scan must be silent.
 func TestFindWriterPIDsScanWritesNothingToStderr(t *testing.T) {
 	t.Parallel()
-	if _, err := os.Stat("/proc/self/environ"); err != nil {
-		t.Skip("/proc is unavailable")
-	}
+	requirePOSIXProcessInspection(t)
 	if unreadableProcessCount(t) == 0 {
 		t.Skip("no uninspectable processes on this host, so this cannot trigger here")
 	}

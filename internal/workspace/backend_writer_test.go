@@ -15,6 +15,23 @@ import (
 	"github.com/ChinaKai/AHA2/internal/domain"
 )
 
+// requirePOSIXProcessInspection skips tests that inspect live processes through
+// the POSIX /proc scan.
+//
+// A Windows target has no /proc, and Git Bash still puts a usable sleep on PATH,
+// so the older "sleep is unavailable" guard let these tests run and fail there
+// even though FindWriterPIDs cannot see those processes. The Windows resume-id
+// path is covered by TestFindWriterPIDsOnWindows*.
+func requirePOSIXProcessInspection(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX process inspection is unavailable on Windows; covered by TestFindWriterPIDsOnWindows*")
+	}
+	if _, err := os.Stat("/proc/self/environ"); err != nil {
+		t.Skip("/proc is unavailable")
+	}
+}
+
 // startFakeWriter launches a long-lived process carrying the given CODEX_HOME,
 // mirroring how a leftover Codex backend keeps holding its provider session.
 func startFakeWriter(t *testing.T, codexHome string) *exec.Cmd {
@@ -161,6 +178,7 @@ func startFakeResumeWriter(t *testing.T, sessionID string) *exec.Cmd {
 
 func TestFindWriterPIDsMatchesResumeFlagForm(t *testing.T) {
 	t.Parallel()
+	requirePOSIXProcessInspection(t)
 	if _, err := exec.LookPath("sleep"); err != nil {
 		t.Skip("sleep is unavailable")
 	}
@@ -191,6 +209,7 @@ func TestFindWriterPIDsMatchesResumeFlagForm(t *testing.T) {
 
 func TestFindWriterPIDsMatchesDSHSessionFlagForm(t *testing.T) {
 	t.Parallel()
+	requirePOSIXProcessInspection(t)
 	if _, err := exec.LookPath("sleep"); err != nil {
 		t.Skip("sleep is unavailable")
 	}
@@ -230,6 +249,7 @@ func TestFindWriterPIDsMatchesDSHSessionFlagForm(t *testing.T) {
 
 func TestFindWriterPIDsCombinesEnvAndResumeQueries(t *testing.T) {
 	t.Parallel()
+	requirePOSIXProcessInspection(t)
 	if _, err := exec.LookPath("sleep"); err != nil {
 		t.Skip("sleep is unavailable")
 	}
