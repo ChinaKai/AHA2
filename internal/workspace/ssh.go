@@ -45,6 +45,9 @@ func (runner *SSHRunner) Run(parent context.Context, command Command, onLine Lin
 	if runner.User == "" {
 		return Result{}, fmt.Errorf("ssh user is required")
 	}
+	if command.Input != nil {
+		return Result{}, errInputNotStreamed
+	}
 	ctx := parent
 	cancel := func() {}
 	if command.Timeout > 0 {

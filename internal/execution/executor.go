@@ -84,6 +84,7 @@ func newBackendRequest(request app.ExecutionRequest, model string, environment m
 		Prompt:             request.Prompt, ProviderSessionID: request.ProviderSessionID,
 		Filesystem: request.Filesystem, Approval: request.Approval,
 		MCPServers: request.MCPServers, AllowedTools: request.AllowedTools, ReverseForward: request.AgentAPIForward,
+		LiveInbox: request.LiveInbox,
 	}
 }
 

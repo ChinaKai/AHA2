@@ -112,6 +112,7 @@ type serveOptions struct {
 	logLevel              string
 	codexBinary           string
 	claudeBinary          string
+	claudeStreamInput     bool
 	dshBinary             string
 }
 
@@ -142,6 +143,7 @@ func parseServeOptions(name string, args []string) (serveOptions, error) {
 	codexBinary := flags.String("codex-bin", envOr("AHA2_CODEX_BIN", "codex"), "Codex executable")
 	claudeBinary := flags.String("claude-bin", envOr("AHA2_CLAUDE_BIN", "claude"), "Claude Code executable")
 	dshBinary := flags.String("dsh-bin", envOr("AHA2_DSH_BIN", "dsh"), "DeepSeek Harness executable")
+	claudeStreamInput := flags.Bool("claude-stream-input", envBool("AHA2_CLAUDE_STREAM_INPUT"), "experimental: deliver live inbox messages into running native Claude Turns through stream-json stdin")
 	if err := flags.Parse(args); err != nil {
 		return serveOptions{}, err
 	}
@@ -154,7 +156,7 @@ func parseServeOptions(name string, args []string) (serveOptions, error) {
 		allowInsecureAgentAPI: *allowInsecureAgentAPI, mailTaskBaseURL: *mailTaskBaseURL,
 		mailDownloadBaseURL: *mailDownloadBaseURL, mailDownloadListen: *mailDownloadListen,
 		logLevel: *logLevel, codexBinary: *codexBinary,
-		claudeBinary: *claudeBinary, dshBinary: *dshBinary,
+		claudeBinary: *claudeBinary, claudeStreamInput: *claudeStreamInput, dshBinary: *dshBinary,
 	}, nil
 }
 
@@ -242,7 +244,7 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 	codexAccounts.SetProxyRuntime(proxyRuntime)
 	executor := execution.Executor{
 		Codex:    backend.Codex{Binary: options.codexBinary},
-		Claude:   backend.Claude{Binary: options.claudeBinary},
+		Claude:   backend.Claude{Binary: options.claudeBinary, StreamInput: options.claudeStreamInput},
 		DSH:      backend.DSH{Binary: options.dshBinary},
 		Settings: database,
 	}

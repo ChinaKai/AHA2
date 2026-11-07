@@ -127,6 +127,27 @@ func TestRunProcessHelperProcess(t *testing.T) {
 	case "slow":
 		_, _ = io.WriteString(os.Stdout, "slow-start\n")
 		time.Sleep(5 * time.Second)
+	case "echo-input":
+		// Echo stdin line by line until EOF, so a streamed write is visible
+		// on stdout while the process is still running.
+		buffer := make([]byte, 4096)
+		pending := ""
+		for {
+			read, err := os.Stdin.Read(buffer)
+			pending += string(buffer[:read])
+			for {
+				line, rest, found := strings.Cut(pending, "\n")
+				if !found {
+					break
+				}
+				_, _ = io.WriteString(os.Stdout, "echo:"+line+"\n")
+				pending = rest
+			}
+			if err != nil {
+				break
+			}
+		}
+		_, _ = io.WriteString(os.Stdout, "stdin-eof\n")
 	default:
 		_, _ = fmt.Fprintf(os.Stderr, "unknown helper mode %q\n", mode)
 		os.Exit(91)
@@ -603,5 +624,87 @@ func TestRunProcessTimeoutStillReturnsPartialOutput(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > 10*time.Second {
 		t.Fatalf("timeout took %s, command was not cancelled promptly", elapsed)
+	}
+}
+
+// Command.Input keeps stdin open after the initial Stdin: a value sent after
+// the child produced output still reaches it, and closing the channel ends
+// stdin so the child can exit on its own.
+func TestRunProcessStreamsInputAfterStart(t *testing.T) {
+	input := make(chan string)
+	lines := make(chan string, 8)
+	done := make(chan struct{})
+	var result Result
+	var runErr error
+	go func() {
+		defer close(done)
+		result, runErr = executeProcessHelper(t, "echo-input", 0, func(command *Command) {
+			command.Stdin = "first\n"
+			command.Input = input
+		}, func(line string) { lines <- line })
+	}()
+	waitLine := func(want string) {
+		t.Helper()
+		select {
+		case line := <-lines:
+			if line != want {
+				t.Fatalf("line = %q, want %q", line, want)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatalf("timed out waiting for %q", want)
+		}
+	}
+	waitLine("echo:first")
+	input <- "second\n"
+	waitLine("echo:second")
+	close(input)
+	waitLine("stdin-eof")
+	<-done
+	if runErr != nil || result.ExitCode != 0 {
+		t.Fatalf("result=%#v err=%v", result, runErr)
+	}
+}
+
+// Without Input the runner still sends Stdin as one payload and closes it.
+func TestRunProcessWithoutInputClosesStdinAfterPayload(t *testing.T) {
+	result, err := executeProcessHelper(t, "echo-input", 0, func(command *Command) {
+		command.Stdin = "only\n"
+	}, nil)
+	if err != nil || result.Stdout != "echo:only\nstdin-eof\n" {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+}
+
+// A child that exits while Input is still open must not leave Run (or the
+// feeder goroutine) blocked on the never-closed channel.
+func TestRunProcessReturnsWhenChildExitsWithInputOpen(t *testing.T) {
+	input := make(chan string)
+	done := make(chan error, 1)
+	go func() {
+		_, err := executeProcessHelper(t, "quick", 0, func(command *Command) { command.Input = input }, nil)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run did not return after the child exited with Input open")
+	}
+}
+
+func TestOnlyLocalRunnerStreamsInput(t *testing.T) {
+	if !StreamsInput(LocalRunner{}) {
+		t.Fatal("LocalRunner should stream input")
+	}
+	input := make(chan string)
+	for _, runner := range []Runner{WSLRunner{Distro: "x"}, &SSHRunner{Host: "h", User: "u"}} {
+		if StreamsInput(runner) {
+			t.Fatalf("%T must not claim to stream input", runner)
+		}
+		if _, err := runner.Run(context.Background(), Command{Executable: "x", Input: input}, nil); !errors.Is(err, errInputNotStreamed) {
+			t.Fatalf("%T accepted Input: %v", runner, err)
+		}
 	}
 }

@@ -41,6 +41,25 @@ type Request struct {
 	// --mcp-config.
 	MCPServers   []MCPServer
 	AllowedTools []string
+	// LiveInbox lets a backend that can take input while a Turn is running
+	// pull Owner and channel messages into it. Nil, or a backend that cannot
+	// stream input, leaves those messages to the Agent API and the next Turn.
+	LiveInbox LiveInbox
+}
+
+// LiveBatch is one claim of live inbox messages, rendered as the text the
+// model should read.
+type LiveBatch struct {
+	IDs  []string
+	Text string
+}
+
+// LiveInbox claims messages for the running Turn and settles each claim.
+// Claim returns an empty batch when nothing is pending. Ack with delivered
+// false returns the claim to the inbox so the next Turn still receives it.
+type LiveInbox interface {
+	Claim(context.Context) (LiveBatch, error)
+	Ack(ctx context.Context, batch LiveBatch, delivered bool) error
 }
 
 // MCPServer is one MCP registration for a Turn. Name is the model-facing

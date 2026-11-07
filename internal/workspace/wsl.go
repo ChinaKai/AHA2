@@ -24,6 +24,9 @@ func (runner WSLRunner) Run(parent context.Context, command Command, onLine Line
 	if distro == "" {
 		return Result{}, fmt.Errorf("wsl distro is required")
 	}
+	if command.Input != nil {
+		return Result{}, errInputNotStreamed
+	}
 	script, err := remoteScript(command)
 	if err != nil {
 		return Result{}, err

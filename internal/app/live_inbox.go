@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/ChinaKai/AHA2/internal/agentapi"
+	"github.com/ChinaKai/AHA2/internal/backend"
 	"github.com/ChinaKai/AHA2/internal/domain"
 	promptpkg "github.com/ChinaKai/AHA2/internal/prompt"
 	workspacepkg "github.com/ChinaKai/AHA2/internal/workspace"
@@ -34,8 +35,15 @@ func (s *Service) ClaimAgentInbox(ctx context.Context, claims agentapi.Claims, l
 	if err != nil {
 		return AgentInboxClaim{}, err
 	}
+	return s.claimLiveInbox(ctx, call.Task, call.Turn, limit)
+}
+
+// claimLiveInbox claims pending owner/channel messages for turn and renders
+// them as injection text. Both the DSH plugin endpoint and a stream-input
+// Claude Turn go through here, so they share one claim semantics.
+func (s *Service) claimLiveInbox(ctx context.Context, task domain.Task, turn domain.Turn, limit int) (AgentInboxClaim, error) {
 	items, err := s.store.ClaimOwnerInboxForLiveInjection(
-		ctx, call.Task.ID, call.Turn.AgentID, call.Turn.RoundID, call.Turn.ID, limit,
+		ctx, task.ID, turn.AgentID, turn.RoundID, turn.ID, limit,
 	)
 	if err != nil {
 		return AgentInboxClaim{}, err
@@ -44,6 +52,7 @@ func (s *Service) ClaimAgentInbox(ctx context.Context, claims agentapi.Claims, l
 	if len(items) == 0 {
 		return result, nil
 	}
+	call := AgentCallContext{Task: task, Turn: turn}
 	materialized, omittedAttachments := s.materializeLiveInboxAttachments(ctx, call.Task, items)
 	result.Messages = make([]domain.LiveInboxMessage, 0, len(items))
 	for _, item := range items {
@@ -94,8 +103,15 @@ func (s *Service) AckAgentInbox(ctx context.Context, claims agentapi.Claims, ids
 	if len(cleaned) == 0 || len(cleaned) > 50 {
 		return 0, fmt.Errorf("inbox acknowledgement needs 1-50 message ids")
 	}
+	return s.ackLiveInbox(ctx, call.Task, call.Turn, cleaned, delivered)
+}
+
+// ackLiveInbox settles a live-injection claim for turn: delivered moves it to
+// delivered_in_turn, otherwise it returns to Pending.
+func (s *Service) ackLiveInbox(ctx context.Context, task domain.Task, turn domain.Turn, ids []string, delivered bool) (int, error) {
+	call := AgentCallContext{Task: task, Turn: turn}
 	count, err := s.store.AckLiveInboxForTurn(
-		ctx, call.Task.ID, call.Turn.AgentID, call.Turn.ID, cleaned, delivered, s.now().UTC(),
+		ctx, call.Task.ID, call.Turn.AgentID, call.Turn.ID, ids, delivered, s.now().UTC(),
 	)
 	if err != nil {
 		return 0, err
@@ -109,6 +125,36 @@ func (s *Service) AckAgentInbox(ctx context.Context, claims agentapi.Claims, ids
 		"message_count": count,
 	})
 	return count, nil
+}
+
+// turnLiveInbox lets a backend that streams input into a running process
+// claim this Turn's live messages itself. It uses the same claim and ack as
+// the DSH plugin, so a message is claimed by at most one of them, and an
+// unacknowledged claim is still requeued when the Turn ends.
+type turnLiveInbox struct {
+	service *Service
+	task    domain.Task
+	turn    domain.Turn
+}
+
+func (inbox turnLiveInbox) Claim(ctx context.Context) (backend.LiveBatch, error) {
+	claim, err := inbox.service.claimLiveInbox(ctx, inbox.task, inbox.turn, 20)
+	if err != nil || len(claim.Messages) == 0 {
+		return backend.LiveBatch{}, err
+	}
+	batch := backend.LiveBatch{Text: claim.InjectionText}
+	for _, message := range claim.Messages {
+		batch.IDs = append(batch.IDs, message.ID)
+	}
+	return batch, nil
+}
+
+func (inbox turnLiveInbox) Ack(ctx context.Context, batch backend.LiveBatch, delivered bool) error {
+	if len(batch.IDs) == 0 {
+		return nil
+	}
+	_, err := inbox.service.ackLiveInbox(ctx, inbox.task, inbox.turn, batch.IDs, delivered)
+	return err
 }
 
 const (

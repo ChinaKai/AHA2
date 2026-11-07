@@ -24,6 +24,10 @@ type LocalRunner struct{}
 // sh/tail there; Claude transcript recovery then silently finds nothing.
 func (LocalRunner) DetectedPlatform() string { return runtime.GOOS + "/" + runtime.GOARCH }
 
+// StreamsInput reports that a local child's stdin stays open for
+// Command.Input.
+func (LocalRunner) StreamsInput() bool { return true }
+
 func (runner LocalRunner) Run(parent context.Context, command Command, onLine LineHandler) (Result, error) {
 	env := localEnvironment(os.Environ(), command.Env)
 	command.Executable = resolveExecutable(command.Executable, env)
@@ -192,7 +196,17 @@ func runProcess(parent context.Context, command Command, env []string, onLine Li
 	}
 	process.Dir = command.Dir
 	process.Env = env
-	process.Stdin = strings.NewReader(command.Stdin)
+	var stdinPipe io.WriteCloser
+	if command.Input == nil {
+		process.Stdin = strings.NewReader(command.Stdin)
+	} else {
+		// Wait closes this pipe once the child exits, which also unblocks a
+		// feeder stuck writing to a child that stopped reading.
+		var err error
+		if stdinPipe, err = process.StdinPipe(); err != nil {
+			return Result{}, err
+		}
+	}
 	// Own the stdout/stderr pipes instead of letting os/exec copy them. The
 	// runner has to decide when a pipe held open by a descendant may be closed
 	// and whether the drainer was idle or blocked on a full spool at that
@@ -233,7 +247,16 @@ func runProcess(parent context.Context, command Command, env []string, onLine Li
 	wait.Add(2)
 	go scanOutput(stdoutSpool, stdout, onLine, &wait)
 	go scanOutput(stderrSpool, stderr, nil, &wait)
+	exited := make(chan struct{})
+	feederDone := make(chan struct{})
+	if stdinPipe != nil {
+		go feedProcessInput(stdinPipe, command.Stdin, command.Input, exited, feederDone)
+	} else {
+		close(feederDone)
+	}
 	processErr := process.Wait()
+	close(exited)
+	<-feederDone
 	// Wait returns as soon as the direct child exits. Give the drainers a
 	// bounded window to reach EOF; a descendant holding the pipes keeps them
 	// open, so close the read ends after the grace period. If a drainer was
@@ -265,6 +288,34 @@ func runProcess(parent context.Context, command Command, env []string, onLine Li
 		return result, processErr
 	}
 	return result, nil
+}
+
+// feedProcessInput writes initial and then every value from input to a
+// running child's stdin. It closes stdin when input is closed and stops when
+// the child has exited or stopped accepting writes; a value that could not be
+// written is dropped, so callers confirm delivery from the child's output
+// rather than from this write.
+func feedProcessInput(stdin io.WriteCloser, initial string, input <-chan string, exited <-chan struct{}, done chan<- struct{}) {
+	defer close(done)
+	defer func() { _ = stdin.Close() }()
+	if initial != "" {
+		if _, err := io.WriteString(stdin, initial); err != nil {
+			return
+		}
+	}
+	for {
+		select {
+		case <-exited:
+			return
+		case value, ok := <-input:
+			if !ok {
+				return
+			}
+			if _, err := io.WriteString(stdin, value); err != nil {
+				return
+			}
+		}
+	}
 }
 
 func scanOutput(reader io.Reader, destination io.Writer, handler LineHandler, wait *sync.WaitGroup) {

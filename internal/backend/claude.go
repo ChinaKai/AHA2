@@ -18,6 +18,16 @@ type Claude struct {
 	IdleWarning time.Duration
 	IdleTimeout time.Duration
 	Heartbeat   time.Duration
+	// StreamInput runs Claude Code with --input-format stream-json and keeps
+	// stdin open, so Request.LiveInbox messages reach the running Turn at its
+	// next step. It only applies when the runner can stream stdin; otherwise
+	// the one-shot -p prompt is used unchanged.
+	StreamInput bool
+	// LivePoll overrides how often a stream-input run claims live messages.
+	LivePoll time.Duration
+	// LiveReplayGrace overrides how long stdin stays open after a result for
+	// a written live message that has not been replayed yet.
+	LiveReplayGrace time.Duration
 }
 
 func (adapter Claude) Execute(ctx context.Context, request Request, emit func(Event)) (Result, error) {
@@ -32,6 +42,13 @@ func (adapter Claude) Execute(ctx context.Context, request Request, emit func(Ev
 	idleWarning, idleTimeout, heartbeat := backendWatchdogDurations(adapter.IdleWarning, adapter.IdleTimeout, adapter.Heartbeat)
 	args := []string{
 		"-p", "--output-format", "stream-json", "--verbose",
+	}
+	var live *claudeLiveInput
+	stdin := request.Prompt
+	if adapter.StreamInput && request.LiveInbox != nil && workspace.StreamsInput(request.Runner) {
+		live = newClaudeLiveInput(request.LiveInbox, adapter.LivePoll, adapter.LiveReplayGrace)
+		args = append(args, "--input-format", "stream-json", "--replay-user-messages")
+		stdin = claudeUserMessage(newClaudeMessageUUID(), request.Prompt)
 	}
 	if request.Model != "" {
 		args = append(args, "--model", request.Model)
@@ -66,18 +83,32 @@ func (adapter Claude) Execute(ctx context.Context, request Request, emit func(Ev
 	activity := make(chan string, 1)
 	monitorDone := make(chan struct{})
 	go monitorBackendActivity(runContext, idleWarning, idleTimeout, heartbeat, activity, send, cancelRun, monitorDone)
-	result, err := request.Runner.Run(runContext, workspace.Command{
+	command := workspace.Command{
 		Executable:     binary,
 		Args:           args,
 		Dir:            request.WorkDir,
 		Env:            filterClaudeEnvironment(request.Environment),
-		Stdin:          request.Prompt,
+		Stdin:          stdin,
 		Timeout:        timeout,
 		KillTree:       true,
 		ReverseForward: request.ReverseForward,
-	}, func(line string) {
+	}
+	if live != nil {
+		command.Input = live.input
+		go live.run(runContext)
+	}
+	result, err := request.Runner.Run(runContext, command, func(line string) {
+		if live != nil {
+			live.observe(runContext, line)
+		}
 		events, parsedReply, parsedSession := parseClaudeLine(line)
 		if parsedReply != "" {
+			if reply != "" {
+				// A live message queued behind a result is answered by a
+				// further result in the same run. Only the last one becomes
+				// the Turn reply, so keep the earlier answer visible.
+				send(Event{Type: "agent_message", Data: map[string]any{"text": reply, "intermediate": true}})
+			}
 			reply = parsedReply
 		}
 		if parsedSession != "" {
@@ -100,6 +131,9 @@ func (adapter Claude) Execute(ctx context.Context, request Request, emit func(Ev
 			send(event)
 		}
 	})
+	if live != nil {
+		live.finish(ctx)
+	}
 	for _, event := range stream.Flush() {
 		send(event)
 	}

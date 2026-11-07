@@ -49,6 +49,9 @@ type ExecutionRequest struct {
 	Approval        string
 	MCPServers      []backend.MCPServer
 	AllowedTools    []string
+	// LiveInbox is set for Claude Turns. The Claude adapter only uses it when
+	// AHA2_CLAUDE_STREAM_INPUT is enabled and the runner can stream stdin.
+	LiveInbox backend.LiveInbox
 }
 
 type ExecutionEvent struct {
@@ -1361,6 +1364,10 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 	filesystem, approval := parsePermissionsJSON(snapshot.PermissionsJSON)
 	latestSessionUsage := cloneUsageMap(sessionUsageBaseline)
 	mcpServers, allowedTools := s.mcpRuntimeForTask(ctx, task, agentAPIURL)
+	var liveInbox backend.LiveInbox
+	if snapshot.Backend == "claude" {
+		liveInbox = turnLiveInbox{service: s, task: task, turn: turn}
+	}
 	result, executeErr := s.executor.Execute(ctx, ExecutionRequest{
 		Turn: turn, Task: task, Project: project, Workspace: workspace, Snapshot: snapshot,
 		Model: model, EnvGroup: envGroup, Environment: environment, Prompt: packedPrompt,
@@ -1368,6 +1375,7 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 		AgentAPIForward: agentAPIForward,
 		Filesystem:      filesystem, Approval: approval,
 		MCPServers: mcpServers, AllowedTools: allowedTools,
+		LiveInbox: liveInbox,
 	}, func(event ExecutionEvent) {
 		now := s.now().UTC()
 		watchdogEvent := event.Type == "agent_stalled" || event.Type == "agent_heartbeat" || event.Type == "agent_idle_timeout"
