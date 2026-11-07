@@ -36,6 +36,11 @@ type Codex struct {
 	LivePoll time.Duration
 }
 
+// codexAppServerRecoveryPrompt continues a thread whose app-server process
+// exited mid-turn. It must not restate the original task: the thread history
+// already holds it, and a resumed turn only needs the interruption context.
+const codexAppServerRecoveryPrompt = "The AHA backend process that was running this turn exited unexpectedly. The thread history, workspace changes and any completed tool results are preserved. Continue the original task from where it stopped. First inspect the current workspace state and the result of any interrupted command; do not repeat work that already completed. If a command's effect is uncertain, verify it before running it again. Do not reply with only a status report when there is remaining work."
+
 func (adapter Codex) Execute(ctx context.Context, request Request, emit func(Event)) (Result, error) {
 	binary := adapter.Binary
 	if binary == "" {
@@ -47,21 +52,62 @@ func (adapter Codex) Execute(ctx context.Context, request Request, emit func(Eve
 	}
 	if adapter.liveInputEnabled(request) && workspace.StreamsInput(request.Runner) {
 		liveResult, liveErr, started := adapter.executeLiveInbox(ctx, request, emit, binary, timeout)
-		if started || liveErr == nil || ctx.Err() != nil || errors.Is(liveErr, ErrBackendIdleTimeout) {
-			return liveResult, liveErr
-		}
-		// app-server could not start the turn (an unsupported CLI or a
-		// transport that cannot carry a live stdin channel, such as a Windows
-		// SSH remote). No message was claimed, so the Turn still runs through
-		// the one-shot exec path and the next Turn receives the messages.
-		if emit != nil {
-			message := "Codex app-server 未能在 Turn 开始前启动，已回退到 codex exec；本 Turn 不会实时接收 live inbox 消息"
-			if liveErr != nil {
-				message += "：" + clipError(liveErr.Error(), 300)
+		if started {
+			if liveErr == nil || ctx.Err() != nil || errors.Is(liveErr, ErrBackendIdleTimeout) {
+				return liveResult, liveErr
 			}
-			emit(Event{Type: "agent_progress", Data: map[string]any{
-				"message": message, "fallback": "codex_exec",
-			}})
+			if errors.Is(liveErr, errCodexAppServerExited) && liveResult.ProviderSessionID != "" {
+				// The app-server process exited on its own while the turn was still
+				// running. This is exactly the long-silent-tool case: the tool may
+				// run for minutes without producing a line, and a backend crash or
+				// an external kill then looks identical to a finished turn unless the
+				// thread is resumed. The thread, workspace changes and completed tool
+				// results live in the rollout, so resume that thread once instead of
+				// failing a Turn that was doing useful work.
+				recovery := request
+				recovery.ProviderSessionID = liveResult.ProviderSessionID
+				recovery.Prompt = codexAppServerRecoveryPrompt
+				if emit != nil {
+					emit(Event{Type: "agent_progress", Data: map[string]any{
+						"message":  "Codex app-server 在 Turn 中退出，正在用同一会话恢复；已投递的 live inbox 消息保留在会话历史中",
+						"recovery": "app_server_resume", "cause": clipError(liveErr.Error(), 500),
+					}})
+				}
+				recovered, recoveryErr, recoveryStarted := adapter.executeLiveInbox(ctx, recovery, emit, binary, timeout)
+				if recoveryStarted || recoveryErr == nil || ctx.Err() != nil || errors.Is(recoveryErr, ErrBackendIdleTimeout) {
+					return recovered, recoveryErr
+				}
+				// The resumed app-server could not start a new turn. Continue the
+				// same thread through the one-shot exec path instead.
+				request = recovery
+				if emit != nil {
+					message := "恢复用的 Codex app-server 未能启动，已回退 codex exec 继续同一会话；本 Turn 不会实时接收 live inbox 消息"
+					if recoveryErr != nil {
+						message += "：" + clipError(recoveryErr.Error(), 300)
+					}
+					emit(Event{Type: "agent_progress", Data: map[string]any{
+						"message": message, "fallback": "codex_exec",
+					}})
+				}
+			} else {
+				return liveResult, liveErr
+			}
+		} else if liveErr == nil || ctx.Err() != nil || errors.Is(liveErr, ErrBackendIdleTimeout) {
+			return liveResult, liveErr
+		} else {
+			// app-server could not start the turn (an unsupported CLI or a
+			// transport that cannot carry a live stdin channel, such as a Windows
+			// SSH remote). No message was claimed, so the Turn still runs through
+			// the one-shot exec path and the next Turn receives the messages.
+			if emit != nil {
+				message := "Codex app-server 未能在 Turn 开始前启动，已回退到 codex exec；本 Turn 不会实时接收 live inbox 消息"
+				if liveErr != nil {
+					message += "：" + clipError(liveErr.Error(), 300)
+				}
+				emit(Event{Type: "agent_progress", Data: map[string]any{
+					"message": message, "fallback": "codex_exec",
+				}})
+			}
 		}
 	}
 	idleWarning, idleTimeout, heartbeat := backendWatchdogDurations(adapter.IdleWarning, adapter.IdleTimeout, adapter.Heartbeat)

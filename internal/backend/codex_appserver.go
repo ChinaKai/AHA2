@@ -33,6 +33,46 @@ const (
 	codexLiveShutdownGrace     = 5 * time.Second
 )
 
+// errCodexAppServerExited marks the app-server process ending before it sent
+// turn/completed. It is deliberately distinct from a turn that failed inside
+// the app-server: the process is gone, so no protocol response is coming and
+// the caller may resume the same thread instead of failing the Turn.
+var errCodexAppServerExited = errors.New("codex app-server exited before the turn completed")
+
+// codexAppServerExitError keeps the process exit code and stderr tail. Without
+// them an abnormal exit during a long silent tool is indistinguishable from a
+// protocol failure, and the actual cause (a crash, an external kill or a disk
+// error) never reaches the Turn error.
+type codexAppServerExitError struct {
+	cause    error
+	exitCode int
+	stderr   string
+}
+
+func (exit *codexAppServerExitError) Error() string {
+	message := exit.cause.Error()
+	if exit.exitCode != 0 {
+		message += fmt.Sprintf(" (exit code %d)", exit.exitCode)
+	}
+	if detail := tailRunes(exit.stderr, 2000); detail != "" {
+		message += ": " + detail
+	}
+	return message
+}
+
+func (exit *codexAppServerExitError) Unwrap() error { return exit.cause }
+
+func tailRunes(value string, limit int) string {
+	runes := []rune(strings.TrimSpace(value))
+	if len(runes) == 0 {
+		return ""
+	}
+	if limit <= 0 || len(runes) <= limit {
+		return string(runes)
+	}
+	return "…" + string(runes[len(runes)-limit:])
+}
+
 type codexRPCError struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
@@ -229,7 +269,7 @@ func (session *codexAppServerSession) loop() error {
 						return nil
 					}
 				default:
-					return fmt.Errorf("codex app-server exited before the turn completed")
+					return errCodexAppServerExited
 				}
 			}
 		case <-session.ctx.Done():
@@ -601,6 +641,15 @@ func (adapter Codex) executeLiveInbox(
 	cancelRun(context.Canceled)
 	<-monitorDone
 	session.rollbackClaim()
+
+	// An unexpected process exit has no turn/completed response, so the runner
+	// result is the only place the exit code and stderr survive. Attach them to
+	// the adapter error instead of discarding the only diagnostic evidence.
+	if errors.Is(sessionErr, errCodexAppServerExited) {
+		sessionErr = &codexAppServerExitError{
+			cause: sessionErr, exitCode: runResult.ExitCode, stderr: runResult.Stderr,
+		}
+	}
 
 	if errors.Is(cause, ErrBackendIdleTimeout) {
 		return Result{Reply: session.reply, ExitCode: runResult.ExitCode, ProviderSessionID: session.threadID}, ErrBackendIdleTimeout, started
