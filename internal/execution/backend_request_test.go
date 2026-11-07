@@ -50,10 +50,11 @@ func TestBackendRequestCarriesTheAgentAPIForwardForEveryBackend(t *testing.T) {
 	}
 }
 
-// Stream input is a Claude-only per-Task opt-in. A snapshot carrying it on
-// another Backend must stay inert; the deployment-wide force lives on the
-// Claude adapter and is ORed there.
-func TestBackendRequestCarriesPerTaskStreamInputOnlyForClaude(t *testing.T) {
+// Stream input is a per-Task opt-in for the backends that can take live input:
+// Claude through stream-json, Codex through app-server turn/steer. A snapshot
+// carrying it on another Backend must stay inert; the deployment-wide force
+// lives on each adapter and is ORed there.
+func TestBackendRequestCarriesPerTaskStreamInputForLiveCapableBackends(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name    string
@@ -63,7 +64,8 @@ func TestBackendRequestCarriesPerTaskStreamInputOnlyForClaude(t *testing.T) {
 	}{
 		{name: "claude on", backend: "claude", perTask: true, want: true},
 		{name: "claude off", backend: "claude", perTask: false, want: false},
-		{name: "codex ignores", backend: "codex", perTask: true, want: false},
+		{name: "codex on", backend: "codex", perTask: true, want: true},
+		{name: "codex off", backend: "codex", perTask: false, want: false},
 		{name: "dsh ignores", backend: "dsh", perTask: true, want: false},
 	}
 	for _, testCase := range cases {

@@ -113,6 +113,7 @@ type serveOptions struct {
 	codexBinary           string
 	claudeBinary          string
 	claudeStreamInput     bool
+	codexStreamInput      bool
 	dshBinary             string
 }
 
@@ -144,6 +145,7 @@ func parseServeOptions(name string, args []string) (serveOptions, error) {
 	claudeBinary := flags.String("claude-bin", envOr("AHA2_CLAUDE_BIN", "claude"), "Claude Code executable")
 	dshBinary := flags.String("dsh-bin", envOr("AHA2_DSH_BIN", "dsh"), "DeepSeek Harness executable")
 	claudeStreamInput := flags.Bool("claude-stream-input", envBool("AHA2_CLAUDE_STREAM_INPUT"), "experimental: deliver live inbox messages into running native Claude Turns through stream-json stdin")
+	codexStreamInput := flags.Bool("codex-stream-input", envBool("AHA2_CODEX_STREAM_INPUT"), "experimental: deliver live inbox messages into running Codex Turns through app-server turn/steer")
 	if err := flags.Parse(args); err != nil {
 		return serveOptions{}, err
 	}
@@ -156,7 +158,8 @@ func parseServeOptions(name string, args []string) (serveOptions, error) {
 		allowInsecureAgentAPI: *allowInsecureAgentAPI, mailTaskBaseURL: *mailTaskBaseURL,
 		mailDownloadBaseURL: *mailDownloadBaseURL, mailDownloadListen: *mailDownloadListen,
 		logLevel: *logLevel, codexBinary: *codexBinary,
-		claudeBinary: *claudeBinary, claudeStreamInput: *claudeStreamInput, dshBinary: *dshBinary,
+		claudeBinary: *claudeBinary, claudeStreamInput: *claudeStreamInput,
+		codexStreamInput: *codexStreamInput, dshBinary: *dshBinary,
 	}, nil
 }
 
@@ -243,7 +246,7 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 	codexAccounts := codexaccount.New(ctx, database, secretStore, absoluteDataDir, options.codexBinary)
 	codexAccounts.SetProxyRuntime(proxyRuntime)
 	executor := execution.Executor{
-		Codex:    backend.Codex{Binary: options.codexBinary},
+		Codex:    backend.Codex{Binary: options.codexBinary, LiveInput: options.codexStreamInput},
 		Claude:   backend.Claude{Binary: options.claudeBinary, StreamInput: options.claudeStreamInput},
 		DSH:      backend.DSH{Binary: options.dshBinary},
 		Settings: database,

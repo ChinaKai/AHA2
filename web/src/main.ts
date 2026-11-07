@@ -2798,11 +2798,13 @@ function syncAgentConfigFields(): void {
     setClaudeOfficialCatalog("agent-config", claudeOfficialCatalog(workspace));
     syncRuntimeFields("agent-config", state.models, state.codexAccounts, false);
   }
-  // Stream-json input only exists for Claude. Like the Fast row it stays
-  // enabled while hidden, so editing another Backend cannot silently clear it.
+  // Live input exists for Claude (stream-json) and Codex (app-server
+  // turn/steer). Like the Fast row it stays enabled while hidden, so editing
+  // another Backend cannot silently clear it.
   const streamInputRow = document.querySelector<HTMLElement>("#agent-config-stream-input-row");
   if (streamInputRow) {
-    streamInputRow.hidden = (document.querySelector<HTMLSelectElement>("#agent-config-backend")?.value || "") !== "claude";
+    const backend = document.querySelector<HTMLSelectElement>("#agent-config-backend")?.value || "";
+    streamInputRow.hidden = backend !== "claude" && backend !== "codex";
   }
 }
 

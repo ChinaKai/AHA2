@@ -49,8 +49,9 @@ type ExecutionRequest struct {
 	Approval        string
 	MCPServers      []backend.MCPServer
 	AllowedTools    []string
-	// LiveInbox is set for Claude Turns. The Claude adapter only uses it when
-	// AHA2_CLAUDE_STREAM_INPUT is enabled and the runner can stream stdin.
+	// LiveInbox is set for Claude and Codex Turns. Each adapter only uses it
+	// when its live-input switch is enabled and the runner can stream stdin
+	// (Claude stream-json, Codex app-server turn/steer).
 	LiveInbox backend.LiveInbox
 }
 
@@ -1373,7 +1374,10 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 	latestSessionUsage := cloneUsageMap(sessionUsageBaseline)
 	mcpServers, allowedTools := s.mcpRuntimeForTask(ctx, task, agentAPIURL)
 	var liveInbox backend.LiveInbox
-	if snapshot.Backend == "claude" {
+	if snapshot.Backend == "claude" || snapshot.Backend == "codex" {
+		// Codex uses an app-server Turn only when the adapter's effective live
+		// switch is on; otherwise the inbox stays unclaimed and the next Turn
+		// receives the messages through the normal path.
 		liveInbox = turnLiveInbox{service: s, task: task, turn: turn}
 	}
 	result, executeErr := s.executor.Execute(ctx, ExecutionRequest{

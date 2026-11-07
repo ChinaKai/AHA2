@@ -26,6 +26,14 @@ type Codex struct {
 	IdleTimeout     time.Duration
 	Heartbeat       time.Duration
 	ModelsCachePath string
+	// LiveInput force-enables live inbox delivery through `codex app-server`
+	// and turn/steer for every Codex Turn at this deployment. Request.StreamInput
+	// is the per-Task opt-in; the effective value is the logical OR of the two.
+	// Off by default: app-server is a different execution surface from the
+	// one-shot exec path.
+	LiveInput bool
+	// LivePoll overrides how often a running Turn claims live inbox messages.
+	LivePoll time.Duration
 }
 
 func (adapter Codex) Execute(ctx context.Context, request Request, emit func(Event)) (Result, error) {
@@ -36,6 +44,16 @@ func (adapter Codex) Execute(ctx context.Context, request Request, emit func(Eve
 	timeout := adapter.Timeout
 	if timeout == 0 {
 		timeout = defaultBackendTurnTimeout
+	}
+	if adapter.liveInputEnabled(request) && workspace.StreamsInput(request.Runner) {
+		liveResult, liveErr, started := adapter.executeLiveInbox(ctx, request, emit, binary, timeout)
+		if started || liveErr == nil || ctx.Err() != nil || errors.Is(liveErr, ErrBackendIdleTimeout) {
+			return liveResult, liveErr
+		}
+		// app-server could not start the turn (an unsupported CLI or a
+		// transport that cannot carry a live stdin channel, such as a Windows
+		// SSH remote). No message was claimed, so the Turn still runs through
+		// the one-shot exec path and the next Turn receives the messages.
 	}
 	idleWarning, idleTimeout, heartbeat := backendWatchdogDurations(adapter.IdleWarning, adapter.IdleTimeout, adapter.Heartbeat)
 	catalogPath := adapter.ensureModelCatalog(ctx, request)
@@ -154,24 +172,39 @@ func (adapter Codex) Execute(ctx context.Context, request Request, emit func(Eve
 }
 
 func codexArguments(request Request, catalogPath string) []string {
+	args := codexConfigArguments(request, catalogPath)
+	if request.Model != "" {
+		args = append(args, "-m", request.Model)
+	}
+	args = append(args, "--disable", "multi_agent")
+	args = append(args, "exec", "--skip-git-repo-check", "--sandbox", codexSandbox(request.Filesystem), "-C", request.WorkDir)
+	if request.ProviderSessionID != "" {
+		args = append(args, "resume")
+	}
+	args = append(args, "--json")
+	if request.ProviderSessionID != "" {
+		args = append(args, request.ProviderSessionID, "-")
+	} else {
+		args = append(args, "-")
+	}
+	return args
+}
+
+// codexAppServerArguments builds the long-lived app-server invocation. Model
+// selection is passed per thread/turn, so the exec-only -m flag is omitted.
+func codexAppServerArguments(request Request, catalogPath string) []string {
+	args := codexConfigArguments(request, catalogPath)
+	return append(args, "--disable", "multi_agent", "app-server")
+}
+
+// codexConfigArguments is the part both surfaces share: provider overrides,
+// effort, catalog, stream recovery, and MCP registrations.
+func codexConfigArguments(request Request, catalogPath string) []string {
 	args := []string{}
-	providerID := request.Environment["AHA_PROVIDER_ID"]
+	providerID := codexProviderID(request)
 	baseURL := request.Environment["OPENAI_BASE_URL"]
 	wireAPI := request.Environment["CODEX_WIRE_API"]
 	envKey := request.Environment["CODEX_ENV_KEY"]
-	if providerID == "" {
-		if baseURL == "" {
-			providerID = "openai"
-		} else {
-			providerID = "aha2_provider"
-		}
-	}
-	if baseURL != "" && providerID == "openai" {
-		// New Codex versions reserve built-in provider IDs such as openai.
-		// Legacy AHA imports may still carry this provider ID, so use a
-		// deterministic custom alias rather than attempting to override it.
-		providerID = "openai-custom"
-	}
 	if wireAPI == "" {
 		wireAPI = "responses"
 	}
@@ -208,21 +241,26 @@ func codexArguments(request Request, catalogPath string) []string {
 		args = append(args, "-c", fmt.Sprintf("model_providers.%s.stream_max_retries=%d", providerID, request.StreamMaxRetries))
 	}
 	args = appendCodexMCPArguments(args, request.MCPServers)
-	if request.Model != "" {
-		args = append(args, "-m", request.Model)
-	}
-	args = append(args, "--disable", "multi_agent")
-	args = append(args, "exec", "--skip-git-repo-check", "--sandbox", codexSandbox(request.Filesystem), "-C", request.WorkDir)
-	if request.ProviderSessionID != "" {
-		args = append(args, "resume")
-	}
-	args = append(args, "--json")
-	if request.ProviderSessionID != "" {
-		args = append(args, request.ProviderSessionID, "-")
-	} else {
-		args = append(args, "-")
-	}
 	return args
+}
+
+// codexProviderID resolves the provider id both the exec and app-server
+// surfaces must use. New Codex versions reserve built-in ids such as openai,
+// so a legacy AHA import carrying that id is renamed deterministically.
+func codexProviderID(request Request) string {
+	providerID := request.Environment["AHA_PROVIDER_ID"]
+	baseURL := request.Environment["OPENAI_BASE_URL"]
+	if providerID == "" {
+		if baseURL == "" {
+			providerID = "openai"
+		} else {
+			providerID = "aha2_provider"
+		}
+	}
+	if baseURL != "" && providerID == "openai" {
+		providerID = "openai-custom"
+	}
+	return providerID
 }
 
 // appendCodexMCPArguments renders the neutral MCP registrations as Codex

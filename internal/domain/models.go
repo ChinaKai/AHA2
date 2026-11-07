@@ -370,9 +370,10 @@ type RuntimeConfigSnapshot struct {
 	// FastMode requests the provider's accelerated service tier. Codex calls it
 	// "Fast" (service_tier=priority): faster, and billed at a higher rate.
 	FastMode bool `json:"fast_mode"`
-	// StreamInput lets a Claude Turn take live inbox messages through
-	// stream-json stdin. It is a per-Task opt-in; the deployment-wide
-	// AHA2_CLAUDE_STREAM_INPUT flag still forces it on for every Claude Task.
+	// StreamInput lets a running Turn take live inbox messages: Claude through
+	// stream-json stdin, Codex through app-server turn/steer. It is a per-Task
+	// opt-in; the deployment-wide AHA2_CLAUDE_STREAM_INPUT or
+	// AHA2_CODEX_STREAM_INPUT flag still forces it on for every Task.
 	StreamInput         bool      `json:"stream_input"`
 	StreamIdleTimeoutMS int       `json:"stream_idle_timeout_ms"`
 	StreamMaxRetries    int       `json:"stream_max_retries"`

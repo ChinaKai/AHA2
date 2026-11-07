@@ -223,20 +223,45 @@ func TestClaudeTurnLiveInboxRollbackRequeues(t *testing.T) {
 	t.Fatal("rolled-back live message was neither requeued nor picked up by a follow-up Turn")
 }
 
-// Only Claude Turns receive a LiveInbox; other backends keep their existing
-// delivery paths untouched.
-func TestNonClaudeTurnHasNoLiveInbox(t *testing.T) {
-	executor := &streamInputExecutor{
-		started: make(chan struct{}), claimed: make(chan backend.LiveBatch, 1), hadInbox: make(chan bool, 4),
-	}
+// inboxProbeExecutor reports whether the Turn carried a LiveInbox and stops.
+type inboxProbeExecutor struct {
+	hadInbox chan bool
+}
+
+func (executor *inboxProbeExecutor) Execute(_ context.Context, request ExecutionRequest, _ func(ExecutionEvent)) (ExecutionResult, error) {
+	executor.hadInbox <- request.LiveInbox != nil
+	return ExecutionResult{Reply: "done"}, nil
+}
+
+// Codex Turns receive a LiveInbox too; the adapter decides whether to claim it
+// from its own effective live-input switch.
+func TestCodexTurnReceivesLiveInbox(t *testing.T) {
+	executor := &inboxProbeExecutor{hadInbox: make(chan bool, 4)}
 	service, _, task := newLiveInboxTask(t, "codex", executor)
 	if _, err := service.SubmitMessage(context.Background(), task.ID, "work"); err != nil {
 		t.Fatal(err)
 	}
 	select {
 	case had := <-executor.hadInbox:
+		if !had {
+			t.Fatal("Codex Turn did not receive a LiveInbox")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Turn did not start")
+	}
+}
+
+// Backends without a live input surface keep their existing delivery paths.
+func TestDSHTurnHasNoLiveInbox(t *testing.T) {
+	executor := &inboxProbeExecutor{hadInbox: make(chan bool, 4)}
+	service, _, task := newLiveInboxTask(t, "dsh", executor)
+	if _, err := service.SubmitMessage(context.Background(), task.ID, "work"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case had := <-executor.hadInbox:
 		if had {
-			t.Fatal("non-Claude Turn received a LiveInbox")
+			t.Fatal("DSH Turn received a LiveInbox")
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Turn did not start")
