@@ -118,6 +118,19 @@ func TestUpdateAgentConfigCarriesClaudeStreamInput(t *testing.T) {
 	if snapshot, err = database.RuntimeSnapshot(ctx, edited.RuntimeConfigSnapshotID); err != nil || snapshot.StreamInput {
 		t.Fatalf("stored snapshot kept stream input: %#v %v", snapshot, err)
 	}
+	// The off state is a real state, not the absence of an edit. An edit that
+	// does not mention the switch must keep it off instead of inheriting a
+	// hard-coded default.
+	edited, err = service.UpdateAgentConfig(ctx, task.ID, "main", UpdateAgentConfigInput{ReasoningEffort: "low"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if edited.StreamInput {
+		t.Fatalf("edit without stream_input turned an off switch on: %#v", edited)
+	}
+	if snapshot, err = database.RuntimeSnapshot(ctx, edited.RuntimeConfigSnapshotID); err != nil || snapshot.StreamInput {
+		t.Fatalf("stored snapshot turned the off switch on: %#v %v", snapshot, err)
+	}
 }
 
 // Creation may set the per-Task switch directly, which is what a pet does when

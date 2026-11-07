@@ -1889,10 +1889,33 @@ test("agent config offers the Claude stream-json input switch", async () => {
   const off = dialog("claude", false);
   assert.doesNotMatch(off, /name="stream_input" type="checkbox" checked/, "an unset switch is rendered as on");
   // Hidden, never disabled: a disabled checkbox drops out of the form, which
-  // would clear a stored value when another Backend is saved.
+  // would clear a stored value when another Backend is saved. The row must
+  // carry the class whose [hidden] rule beats the global display:grid rules;
+  // the browser visibility test exercises the computed result.
   const codex = dialog("codex", true);
+  assert.match(codex, /id="agent-config-stream-input-row"[^>]*class="[^"]*runtime-picker/, "the row lacks the class that makes [hidden] effective");
   assert.match(codex, /id="agent-config-stream-input-row"[^>]* hidden>/, "the switch is not gated on the Backend");
   assert.doesNotMatch(codex, /name="stream_input"[^>]*disabled/, "the switch is disabled instead of hidden");
+  const css = await readFile(resolve(root, "dist", "styles.css"), "utf8");
+  assert.match(css, /\.runtime-picker\[hidden\]\s*\{\s*display:\s*none\s*!important;?\s*\}/, "the class's [hidden] CSS rule is missing");
+});
+
+test("stream-json switch copy translates between Chinese and English", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const i18n = await import(pathToFileURL(resolve(root, "dist", "i18n.js")));
+  const title = "实验性：Turn 内 live inbox 投递（stream-json）";
+  const help = "仅对 Claude 生效；开启后当前 Turn 运行期间的新消息可经 stream-json 直接送达，下一 Turn 生效。";
+  i18n.applyLocale("en-US");
+  try {
+    assert.equal(i18n.tr(title), "Experimental: live inbox delivery within a Turn (stream-json)");
+    assert.match(i18n.tr(help), /^Claude only\. While a Turn is running/, "the Claude-only help copy is not translated");
+    assert.equal(i18n.tr("开启（实验性）"), "On (experimental)");
+    assert.equal(i18n.tr("Live inbox"), "Live inbox");
+  } finally {
+    i18n.applyLocale("zh-CN");
+  }
+  assert.equal(i18n.tr(title), title, "Chinese copy was replaced by the English entry");
+  assert.equal(i18n.tr(help), help, "Chinese help copy was replaced by the English entry");
 });
 
 test("round card reports uncached turn input and hides ambiguous cache usage", async () => {

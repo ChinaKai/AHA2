@@ -130,6 +130,7 @@ type PetTakeoverTaskInput struct {
 	Approval            string                        `json:"approval"`
 	ProxyEnabled        bool                          `json:"proxy_enabled"`
 	FastMode            bool                          `json:"fast_mode"`
+	StreamInput         bool                          `json:"stream_input"`
 	CollaborationMode   string                        `json:"collaboration_mode"`
 	MaxAgents           int                           `json:"max_agents"`
 	Groups              []hardwareconfig.GroupPayload `json:"groups"`
@@ -211,7 +212,7 @@ func (s *Service) PetTakeoverRemoteTask(ctx context.Context, input PetTakeoverTa
 		ReasoningEffort:     input.ReasoningEffort,
 		StreamIdleTimeoutMS: input.StreamIdleTimeoutMS, StreamMaxRetries: input.StreamMaxRetries,
 		Filesystem: filesystem, Approval: approval,
-		ProxyEnabled: input.ProxyEnabled, FastMode: input.FastMode,
+		ProxyEnabled: input.ProxyEnabled, FastMode: input.FastMode, StreamInput: input.StreamInput,
 		CollaborationMode: mode, MaxAgents: maxAgents,
 		KnowledgePolicy: source.Task.KnowledgePolicy,
 	})

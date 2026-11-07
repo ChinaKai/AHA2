@@ -82,6 +82,7 @@ type PetCreateTaskInput struct {
 	Filesystem      string `json:"filesystem"`
 	Approval        string `json:"approval"`
 	Isolation       string `json:"isolation"`
+	StreamInput     bool   `json:"stream_input"`
 	Start           *bool  `json:"start"`
 	// SkillIDs are requested on top of the project's auto-attach Skills, the
 	// same default CreateTask gives every internal caller. Each ID is validated
@@ -175,7 +176,7 @@ func (s *Service) PetCreateTask(ctx context.Context, input PetCreateTaskInput) (
 		ProjectID: projectID, WorkspaceID: workspaceID, Title: title, Request: request,
 		ModelID: modelID, ReasoningEffort: reasoningEffort, Filesystem: filesystem, Approval: approval,
 		Isolation: isolation, CollaborationMode: "single", MaxAgents: 1, KnowledgePolicy: project.KnowledgePolicy,
-		StartMode: "manual", SkillIDs: input.SkillIDs,
+		StreamInput: input.StreamInput, StartMode: "manual", SkillIDs: input.SkillIDs,
 	})
 	if err != nil {
 		return domain.Task{}, err

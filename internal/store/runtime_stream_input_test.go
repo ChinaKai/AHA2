@@ -108,3 +108,77 @@ func TestRuntimeSnapshotRoundTripsStreamInput(t *testing.T) {
 		t.Fatalf("bulk snapshots mis-mapped stream input: %#v", bulk)
 	}
 }
+
+// The migration must backfill existing snapshots as off. Rewind a live
+// database to the v124 shape (no stream_input column, no v125 marker), keep a
+// pre-existing snapshot row, then Open it again: the column is added with
+// DEFAULT 0 and that old row must read false, not inherit a default of 1.
+func TestStreamInputMigrationDefaultsExistingRowsOff(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "aha2.db")
+	database, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if err := database.CreateProject(ctx, domain.Project{
+		ID: "project-stream-v124", Name: "Stream", ProjectType: "folder", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CreateWorkspace(ctx, domain.Workspace{
+		ID: "workspace-stream-v124", ProjectID: "project-stream-v124", Name: "Local", Locality: "local",
+		Transport: "native", RootPath: t.TempDir(), SSHPort: 22, Health: "ready", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	env := domain.EnvGroup{
+		ID: "env-stream-v124", Name: "Claude", ProviderID: "stub", Backend: "claude", Revision: 1,
+		Environment: map[string]string{}, SecretNames: []string{}, CreatedAt: now, UpdatedAt: now,
+	}
+	model := domain.Model{
+		ID: "model-stream-v124", DisplayName: "Claude", ProviderID: "stub", Backend: "claude",
+		WireModel: "claude-sonnet", DefaultEnvGroupID: env.ID, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := database.UpsertEnvGroup(ctx, env); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpsertModel(ctx, model); err != nil {
+		t.Fatal(err)
+	}
+	stored := domain.RuntimeConfigSnapshot{
+		ID: "runtime-stream-v124", WorkspaceID: "workspace-stream-v124", Backend: "claude",
+		ModelID: "model-stream-v124", WireModel: "claude-sonnet", EnvGroupID: "env-stream-v124",
+		EnvGroupRevision: 1, ReasoningEffort: "high", StreamInput: true, PermissionsJSON: "{}", CreatedAt: now,
+	}
+	if err := database.CreateRuntimeSnapshot(ctx, stored); err != nil {
+		t.Fatal(err)
+	}
+	// Rewind to the v124 shape the migration actually runs against.
+	if _, err := database.db.ExecContext(ctx, `ALTER TABLE runtime_config_snapshots DROP COLUMN stream_input`); err != nil {
+		t.Fatalf("rewind v125 column: %v", err)
+	}
+	if _, err := database.db.ExecContext(ctx, `DELETE FROM schema_migrations WHERE version=125`); err != nil {
+		t.Fatalf("rewind v125 marker: %v", err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	read, err := reopened.RuntimeSnapshot(ctx, stored.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if read.StreamInput {
+		t.Fatalf("v124 snapshot was backfilled with stream input on: %#v", read)
+	}
+	if read.ReasoningEffort != "high" || read.Backend != "claude" {
+		t.Fatalf("rewind damaged neighbouring columns: %#v", read)
+	}
+}
