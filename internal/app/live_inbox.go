@@ -27,9 +27,10 @@ type AgentInboxClaim struct {
 	MaterializedAttachments []string                  `json:"materialized_attachments,omitempty"`
 }
 
-// ClaimAgentInbox claims pending owner/channel messages for the active turn
-// without blocking. It is deliberately separate from WaitAgentInbox: Wait is
-// the model-driven path, claim is the in-process DSH checkpoint.
+// ClaimAgentInbox claims pending owner/channel and pet-delegated messages for
+// the active turn without blocking. It is deliberately separate from
+// WaitAgentInbox: Wait is the model-driven path, claim is the in-process DSH
+// checkpoint.
 func (s *Service) ClaimAgentInbox(ctx context.Context, claims agentapi.Claims, limit int) (AgentInboxClaim, error) {
 	call, err := s.AgentCallContext(ctx, claims, false)
 	if err != nil {
@@ -38,9 +39,9 @@ func (s *Service) ClaimAgentInbox(ctx context.Context, claims agentapi.Claims, l
 	return s.claimLiveInbox(ctx, call.Task, call.Turn, limit)
 }
 
-// claimLiveInbox claims pending owner/channel messages for turn and renders
-// them as injection text. Both the DSH plugin endpoint and a stream-input
-// Claude Turn go through here, so they share one claim semantics.
+// claimLiveInbox claims pending owner/channel and pet-delegated messages for
+// turn and renders them as injection text. Both the DSH plugin endpoint and a
+// stream-input Claude Turn go through here, so they share one claim semantics.
 func (s *Service) claimLiveInbox(ctx context.Context, task domain.Task, turn domain.Turn, limit int) (AgentInboxClaim, error) {
 	items, err := s.store.ClaimOwnerInboxForLiveInjection(
 		ctx, task.ID, turn.AgentID, turn.RoundID, turn.ID, limit,
@@ -307,6 +308,10 @@ func liveInboxSourceLabel(message domain.LiveInboxMessage) string {
 		return fmt.Sprintf("%s (%s, role=%s, authority=%s)", name, kind, role, authority)
 	case "owner":
 		return "owner (authority=owner)"
+	case "pet":
+		// The pet may relay the owner's intent, but it is never the owner
+		// identity itself; keep the authority distinct in the injection text.
+		return "pet (authority=owner_delegate)"
 	default:
 		return fmt.Sprintf("%s (authority=%s)", source.Kind, source.Authority)
 	}

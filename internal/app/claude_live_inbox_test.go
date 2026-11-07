@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -99,6 +100,17 @@ func newLiveInboxTask(t *testing.T, backendName string, executor Executor) (*Ser
 
 func runClaudeLiveInboxTurn(t *testing.T, deliver bool) (*store.Store, domain.Task, backend.LiveBatch) {
 	t.Helper()
+	return runClaudeLiveInboxTurnWithSubmit(t, deliver, func(ctx context.Context, service *Service, taskID string) error {
+		_, err := service.SubmitMessage(ctx, taskID, "mid-turn correction")
+		return err
+	})
+}
+
+func runClaudeLiveInboxTurnWithSubmit(
+	t *testing.T, deliver bool,
+	submitMidTurn func(context.Context, *Service, string) error,
+) (*store.Store, domain.Task, backend.LiveBatch) {
+	t.Helper()
 	executor := &streamInputExecutor{
 		started: make(chan struct{}), claimed: make(chan backend.LiveBatch, 1), deliver: deliver,
 		hadInbox: make(chan bool, 4),
@@ -113,7 +125,7 @@ func runClaudeLiveInboxTurn(t *testing.T, deliver bool) (*store.Store, domain.Ta
 	case <-time.After(5 * time.Second):
 		t.Fatal("Claude Turn did not start")
 	}
-	if _, err := service.SubmitMessage(ctx, task.ID, "mid-turn correction"); err != nil {
+	if err := submitMidTurn(ctx, service, task.ID); err != nil {
 		t.Fatal(err)
 	}
 	var batch backend.LiveBatch
@@ -146,6 +158,44 @@ func TestClaudeTurnLiveInboxDeliversThroughClaimAck(t *testing.T) {
 	}
 	if turns, err := database.TurnsForRound(ctx, round.ID); err != nil || len(turns) != 1 {
 		t.Fatalf("delivered live message started another Turn: turns=%d err=%v", len(turns), err)
+	}
+}
+
+// A pet-delegated message follows the same in-Turn claim/ack path, but its
+// injection text keeps the pet authority distinct from the owner.
+func TestClaudeTurnLiveInboxDeliversPetDelegatedMessage(t *testing.T) {
+	database, task, batch := runClaudeLiveInboxTurnWithSubmit(t, true,
+		func(ctx context.Context, service *Service, taskID string) error {
+			_, err := service.SubmitPetDelegatedMessage(ctx, taskID, "pet delegation probe")
+			return err
+		})
+	if len(batch.IDs) != 1 {
+		t.Fatalf("batch = %#v", batch)
+	}
+	for _, expected := range []string{
+		"[AHA live inbox] 1 new message(s)",
+		"### Message 1",
+		"Source: pet (authority=owner_delegate)",
+		"pet delegation probe",
+	} {
+		if !strings.Contains(batch.Text, expected) {
+			t.Fatalf("pet injection text missing %q:\n%s", expected, batch.Text)
+		}
+	}
+	if strings.Contains(batch.Text, "owner (authority=owner)") {
+		t.Fatalf("pet message was rendered as the owner:\n%s", batch.Text)
+	}
+	waitForTask(t, database, task.ID, domain.TaskWaitingUser)
+	ctx := context.Background()
+	if pending, err := database.PendingInboxCount(ctx, task.ID); err != nil || pending != 0 {
+		t.Fatalf("pending=%d err=%v", pending, err)
+	}
+	round, err := database.LatestRound(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if turns, err := database.TurnsForRound(ctx, round.ID); err != nil || len(turns) != 1 {
+		t.Fatalf("delivered pet message started another Turn: turns=%d err=%v", len(turns), err)
 	}
 }
 

@@ -35,18 +35,59 @@ func liveInboxTestTurn(t *testing.T, database *Store) (domain.Task, domain.TaskR
 
 func insertLiveInboxItem(t *testing.T, database *Store, task domain.Task, round domain.TaskRound, content string) string {
 	t.Helper()
+	return insertLiveInboxItemWithSource(t, database, task, round.ID, "owner", "owner_message", "pending", content)
+}
+
+func insertLiveInboxItemWithSource(
+	t *testing.T, database *Store, task domain.Task, roundID, sourceAgent, sourceKind, status, content string,
+) string {
+	t.Helper()
 	id := domain.NewID("inbox")
 	if _, err := database.db.ExecContext(context.Background(), `
 		INSERT INTO agent_inbox(
 			id,task_id,round_id,target_agent_id,source_agent_id,source_kind,source_turn_id,message_id,
 			content,payload_json,status,batch_id,created_at,claimed_at,processed_at
 		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		id, task.ID, round.ID, "main", "owner", "owner_message", "", "",
-		content, "{}", "pending", "", timeString(time.Now().UTC()), "", "",
+		id, task.ID, roundID, "main", sourceAgent, sourceKind, "", "",
+		content, "{}", status, "", timeString(time.Now().UTC()), "", "",
 	); err != nil {
 		t.Fatal(err)
 	}
 	return id
+}
+
+// insertLiveInboxTestRound adds a second, terminal round so tests can prove the
+// live claim is still scoped to the running Turn's round.
+func insertLiveInboxTestRound(t *testing.T, database *Store, task domain.Task) domain.TaskRound {
+	t.Helper()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	messageID := domain.NewID("message")
+	if _, err := database.db.ExecContext(ctx, `
+		INSERT INTO messages(id,task_id,turn_id,role,sender,content,created_at)
+		VALUES(?,?,?,?,?,?,?)`,
+		messageID, task.ID, "", "user", "owner", "other round", timeString(now),
+	); err != nil {
+		t.Fatal(err)
+	}
+	round := domain.TaskRound{
+		ID: domain.NewID("round"), TaskID: task.ID, InputMessageID: messageID,
+		Status: domain.RoundCompleted, CreatedAt: now, FinishedAt: now,
+	}
+	if err := database.db.QueryRowContext(ctx,
+		`SELECT COALESCE(MAX(sequence),0)+1 FROM task_rounds WHERE task_id=?`, task.ID,
+	).Scan(&round.Sequence); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.db.ExecContext(ctx, `
+		INSERT INTO task_rounds(id,task_id,sequence,input_message_id,status,created_at,started_at,finished_at)
+		VALUES(?,?,?,?,?,?,?,?)`,
+		round.ID, round.TaskID, round.Sequence, round.InputMessageID, round.Status,
+		timeString(round.CreatedAt), "", timeString(round.FinishedAt),
+	); err != nil {
+		t.Fatal(err)
+	}
+	return round
 }
 
 func TestClaimAckLiveInbox(t *testing.T) {
@@ -110,6 +151,51 @@ func TestClaimAckLiveInbox(t *testing.T) {
 	}
 	if _, err := database.AckLiveInboxForTurn(ctx, task.ID, "main", turn.ID, []string{"missing"}, true, time.Now().UTC()); err == nil {
 		t.Fatal("acknowledging an unknown id succeeded")
+	}
+}
+
+func TestClaimLiveInboxAcceptsOwnerAndPetOnly(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database, err := Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	task, round, turn := liveInboxTestTurn(t, database)
+	otherRound := insertLiveInboxTestRound(t, database, task)
+	ownerID := insertLiveInboxItem(t, database, task, round, "owner note")
+	petID := insertLiveInboxItemWithSource(t, database, task, round.ID, "pet", "pet_delegate_message", "pending", "pet note")
+	assignmentID := insertLiveInboxItemWithSource(t, database, task, round.ID, "main", "assignment", "pending", "assignment")
+	otherRoundID := insertLiveInboxItemWithSource(t, database, task, otherRound.ID, "pet", "pet_delegate_message", "pending", "other round")
+	deliveredID := insertLiveInboxItemWithSource(t, database, task, round.ID, "pet", "pet_delegate_message", "delivered_in_turn", "already delivered")
+
+	items, err := database.ClaimOwnerInboxForLiveInjection(ctx, task.ID, "main", round.ID, turn.ID, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 || items[0].ID != ownerID || items[1].ID != petID {
+		t.Fatalf("claim = %#v, want owner then pet", items)
+	}
+	if items[1].SourceKind != "pet_delegate_message" || items[1].SourceAgentID != "pet" {
+		t.Fatalf("pet item provenance = %#v", items[1])
+	}
+	for id, want := range map[string]string{
+		ownerID:      "claimed_in_turn",
+		petID:        "claimed_in_turn",
+		assignmentID: "pending",
+		otherRoundID: "pending",
+		deliveredID:  "delivered_in_turn",
+	} {
+		var status string
+		if err := database.db.QueryRowContext(ctx,
+			`SELECT status FROM agent_inbox WHERE id=?`, id,
+		).Scan(&status); err != nil {
+			t.Fatal(err)
+		}
+		if status != want {
+			t.Fatalf("inbox %s status = %q, want %q", id, status, want)
+		}
 	}
 }
 

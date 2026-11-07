@@ -543,11 +543,12 @@ func (s *Store) RequeueClaimedInboxForTurn(ctx context.Context, turnID string) (
 	return int(affected), nil
 }
 
-// ClaimOwnerInboxForLiveInjection atomically claims pending owner/channel
-// messages for a running turn without waiting. A claim is not a delivery: it
-// stays claimed_in_turn until the backend confirms the steer (Ack) or fails to
-// inject it (Nack). Unlike the model-driven Wait endpoint, this is called by
-// the DSH control plugin at tool boundaries inside the current turn.
+// ClaimOwnerInboxForLiveInjection atomically claims pending owner/channel and
+// pet-delegated messages for a running turn without waiting. A claim is not a
+// delivery: it stays claimed_in_turn until the backend confirms the steer (Ack)
+// or fails to inject it (Nack). Unlike the model-driven Wait endpoint, this is
+// called by the DSH control plugin at tool boundaries inside the current turn.
+// Other routed source kinds stay on the Turn-boundary path.
 func (s *Store) ClaimOwnerInboxForLiveInjection(
 	ctx context.Context,
 	taskID, agentID, roundID, turnID string,
@@ -564,7 +565,7 @@ func (s *Store) ClaimOwnerInboxForLiveInjection(
 	rows, err := tx.QueryContext(ctx, `
 		SELECT `+inboxColumns+` FROM agent_inbox
 		WHERE task_id=? AND target_agent_id=? AND round_id=?
-		  AND source_kind='owner_message' AND status='pending'
+		  AND source_kind IN ('owner_message','pet_delegate_message') AND status='pending'
 		ORDER BY sequence LIMIT ?`,
 		taskID, agentID, roundID, limit,
 	)

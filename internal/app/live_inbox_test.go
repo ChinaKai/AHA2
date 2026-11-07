@@ -47,6 +47,31 @@ func TestLiveInboxInjectionTextCarriesSourceAndAttachments(t *testing.T) {
 	}
 }
 
+func TestLiveInboxInjectionTextLabelsPetDelegatedMessage(t *testing.T) {
+	t.Parallel()
+	message := liveInboxMessage(domain.AgentInboxItem{
+		ID: "inbox-pet", SourceKind: "pet_delegate_message", SourceAgentID: "pet",
+		Content: "please check the deployment",
+	})
+	if message.Source.Kind != "pet" || message.Source.Authority != "owner_delegate" {
+		t.Fatalf("pet source = %#v", message.Source)
+	}
+	text := liveInboxInjectionText([]domain.LiveInboxMessage{message}, nil, nil)
+	for _, expected := range []string{
+		"[AHA live inbox] 1 new message(s)",
+		"### Message 1",
+		"Source: pet (authority=owner_delegate)",
+		"please check the deployment",
+	} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("injection text missing %q:\n%s", expected, text)
+		}
+	}
+	if strings.Contains(text, "owner (authority=owner)") {
+		t.Fatalf("pet message must not be rendered as the owner:\n%s", text)
+	}
+}
+
 func TestLiveInboxInjectionTextKeepsLargeAttachmentMetadataOnly(t *testing.T) {
 	t.Parallel()
 	hash := strings.Repeat("a", 64)
