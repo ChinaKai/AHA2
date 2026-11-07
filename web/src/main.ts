@@ -17,6 +17,8 @@ import {bindDesktopPanel, desktopPanelInteracting, refreshDesktopPanel, stopDesk
 import {renderMarkdown} from "./markdown.js";
 import {bindPromptAdmin, loadPromptCatalog, renderPromptAdmin} from "./prompt_admin.js";
 import {bindProxySettings, renderProxySettings} from "./proxy_settings.js";
+import {formatBytes, purgeEnabled, renderDatabasePanel, retentionFormError, skipReasonText} from "./data_retention.js";
+import type {DataRetentionViewState} from "./data_retention.js";
 import {bindSyncSettings, isSyncSettingsFormEditing, renderSyncSettings} from "./sync_settings.js";
 import {bindRuntimeFields, proxyEnabledFrom, proxyOptionsHTML, runtimeFieldsHTML, setClaudeOfficialCatalog, setClaudeOfficialLoading, setRuntimeBackends, syncRuntimeFields} from "./runtime_picker.js";
 import type {ClaudeOfficialCatalog} from "./runtime_picker.js";
@@ -117,6 +119,7 @@ interface State {
   dataInventory: DataInventory | null;
   dataInventoryLoading: boolean;
   dataInventoryError: string;
+  dataRetention: DataRetentionViewState;
   syncSettings: SyncSettings;
   syncSettingsReady: boolean;
   syncState: SyncState;
@@ -298,6 +301,7 @@ const state: State = {
   dataInventory: null,
   dataInventoryLoading: false,
   dataInventoryError: "",
+  dataRetention: {database: null, loading: false, error: "", plan: null, result: null, busy: ""},
   syncSettings: {scope:"default",enabled:false,endpoint:"",device_id:"",device_name:"",interval_seconds:300,token_configured:false,passphrase_configured:false},
   syncSettingsReady: false,
   syncState: {scope:"default",cursor:"",last_error:""},
@@ -2035,7 +2039,7 @@ async function ensureViewData(view: View, force = false): Promise<void> {
     if (backend.backend) state.backendSettings = backend.backend;
     if (network.network) state.networkSettings = network.network;
   }));
-  if (view === "data") jobs.push(loadDataInventory(force));
+  if (view === "data") jobs.push(loadDataInventory(force), loadDatabaseStats(force));
   if (view === "sync") jobs.push(loadResource("sync", force, async () => {
     const [settings, status, conflicts] = await Promise.all([api.syncSettings(), api.syncStatus(), api.syncConflicts()]);
     state.syncSettings = settings.sync;
@@ -2118,6 +2122,26 @@ function loadDataInventory(force = false): Promise<void> {
       state.dataInventoryLoading = false;
     }
   });
+}
+
+// Database statistics load separately from the file inventory so a slow or
+// failing database read never hides the directory sizes.
+let databaseStatsRequest: Promise<void> | null = null;
+function loadDatabaseStats(force = false): Promise<void> {
+  const view = state.dataRetention;
+  if (!force && view.database) return Promise.resolve();
+  if (databaseStatsRequest) return databaseStatsRequest;
+  view.loading = true;
+  view.error = "";
+  databaseStatsRequest = api.databaseStats(force).then(result => {
+    view.database = result.database;
+  }).catch((error: unknown) => {
+    view.error = error instanceof Error ? error.message : String(error);
+  }).finally(() => {
+    view.loading = false;
+    databaseStatsRequest = null;
+  });
+  return databaseStatsRequest;
 }
 
 function cancelSecondaryPrefetch(): void {
@@ -3279,6 +3303,7 @@ function dataManagementView(): string {
       <div class="panel-head"><strong>${t("data.details")}</strong><small class="field-help">${t("data.detailsNote")}</small></div>
       <div class="table-wrap"><table class="data-table"><thead><tr><th>${t("data.category")}</th><th>${t("data.size")}</th><th>${t("data.safeAction")}</th></tr></thead><tbody>${rows || `<tr><td colspan="3" class="field-help">${t("data.reading")}</td></tr>`}</tbody></table></div>
     </section>
+    ${renderDatabasePanel(state.dataRetention)}
     <section class="panel spaced">
       <div class="panel-head"><strong>${t("data.cleanupScope")}</strong></div>
       <div class="data-cleanup-note"><p class="field-help">${t("data.cleanupScopeBody")}</p></div>
@@ -3321,10 +3346,11 @@ function bindOtherSettingsPage(): void {
 }
 
 function bindDataManagementPage(): void {
+  bindDataRetentionPanel();
   const refresh = document.querySelector<HTMLButtonElement>("[data-data-refresh]");
   refresh?.addEventListener("click", () => {
     void runWithFeedback(refresh, t("common.loading"), async () => {
-      await loadDataInventory(true);
+      await Promise.all([loadDataInventory(true), loadDatabaseStats(true)]);
       render();
     });
   });
@@ -3356,6 +3382,74 @@ function bindDataManagementPage(): void {
           render();
         });
       }
+    });
+  });
+}
+
+function bindDataRetentionPanel(): void {
+  const view = state.dataRetention;
+  const daysInput = document.querySelector<HTMLInputElement>("#data-hardware-io-days");
+  const rowsInput = document.querySelector<HTMLInputElement>("#data-hardware-io-rows");
+  const save = document.querySelector<HTMLButtonElement>("[data-hardware-io-save]");
+  const preview = document.querySelector<HTMLButtonElement>("[data-hardware-io-preview]");
+  const purge = document.querySelector<HTMLButtonElement>("[data-hardware-io-purge]");
+  const formError = document.querySelector<HTMLElement>("[data-hardware-io-form-error]");
+  if (!daysInput || !rowsInput || !save || !preview || !purge) return;
+  // Re-check the form on every edit: invalid values disable every action, and
+  // a preview only enables cleanup while the form still matches it.
+  const formValues = (): {retention_days: number; max_delete_rows: number} | null => {
+    const message = retentionFormError(daysInput.value, rowsInput.value);
+    if (formError) {
+      formError.textContent = message;
+      formError.hidden = !message;
+    }
+    if (message) return null;
+    return {retention_days: Number(daysInput.value), max_delete_rows: Number(rowsInput.value)};
+  };
+  const syncButtons = (): void => {
+    const values = formValues();
+    const busy = Boolean(view.busy);
+    save.disabled = busy || !values;
+    preview.disabled = busy || !values;
+    purge.disabled = !values || !purgeEnabled(view, values.retention_days, values.max_delete_rows);
+    const stale = Boolean(values && view.plan && (view.plan.retention_days !== values.retention_days || view.plan.max_delete_rows !== values.max_delete_rows));
+    purge.title = stale ? t("data.db.previewStale") : "";
+  };
+  daysInput.addEventListener("input", syncButtons);
+  rowsInput.addEventListener("input", syncButtons);
+  syncButtons();
+  const run = (kind: DataRetentionViewState["busy"], button: HTMLButtonElement, action: (values: {retention_days: number; max_delete_rows: number}) => Promise<void>): void => {
+    const values = formValues();
+    if (!values || view.busy) return;
+    view.busy = kind;
+    void runWithFeedback(button, t("common.loading"), () => action(values)).finally(() => {
+      view.busy = "";
+      render();
+    });
+  };
+  save.addEventListener("click", () => run("save", save, async values => {
+    const result = await api.updateHardwareIORetention(values);
+    if (view.database) view.database.retention = result.retention;
+    setMessage("notice", t("data.db.saved"));
+  }));
+  preview.addEventListener("click", () => run("preview", preview, async values => {
+    view.result = null;
+    view.plan = (await api.previewHardwareIOPurge(values)).plan;
+    // Keep the previewed values in the form after the re-render.
+    if (view.database) view.database.retention = {...view.database.retention, ...values};
+  }));
+  purge.addEventListener("click", () => {
+    const values = formValues();
+    const plan = view.plan;
+    if (!values || !plan || !purgeEnabled(view, values.retention_days, values.max_delete_rows)) return;
+    if (!window.confirm(t("data.db.confirmPurge", {rows: plan.run_rows, cutoff: new Date(plan.cutoff).toLocaleString(), size: formatBytes(plan.run_bytes_estimate)}))) return;
+    run("purge", purge, async confirmed => {
+      const response = await api.purgeHardwareIO({...confirmed, confirm: true});
+      view.result = response.result;
+      view.plan = null;
+      if (response.database) view.database = {...response.database, retention: {...response.database.retention, ...confirmed}};
+      const skip = response.result.skip_reason ? ` ${skipReasonText(response.result.skip_reason)}` : "";
+      setMessage("notice", `${t("data.db.resultDeleted", {rows: response.result.deleted_rows, batches: response.result.batches})}${skip}`);
     });
   });
 }

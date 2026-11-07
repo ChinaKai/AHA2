@@ -69,6 +69,83 @@ export interface DataCleanupResult {
   inventory: DataInventory;
 }
 
+export interface HardwareIORetentionSettings {
+  retention_days: number;
+  max_delete_rows: number;
+  updated_at?: string;
+}
+
+// rows is MAX(rowid)-MIN(rowid)+1 unless rows_exact; estimated_bytes is the
+// sampled average payload times rows and excludes index/page overhead.
+export interface DatabaseTableStat {
+  name: string;
+  rows: number;
+  rows_exact: boolean;
+  sample_rows: number;
+  avg_row_bytes: number;
+  estimated_bytes: number;
+  deletable: boolean;
+}
+
+export type DatabaseSafety = "keep" | "read_only" | "preview_purge" | "retire";
+
+// id is the catalog letter A-K, or "other" for uncategorized tables.
+export interface DatabaseCategory {
+  id: string;
+  key: string;
+  safety: DatabaseSafety;
+  rows: number;
+  rows_exact: boolean;
+  estimated_bytes: number;
+  tables: DatabaseTableStat[];
+}
+
+export interface DatabaseStats {
+  file_bytes: number;
+  wal_bytes: number;
+  shm_bytes: number;
+  page_size: number;
+  page_count: number;
+  freelist_count: number;
+  used_bytes: number;
+  free_bytes: number;
+  table_count: number;
+  categories: DatabaseCategory[];
+  cached: boolean;
+  hardware_io: {min_sequence: number; max_sequence: number; estimated_rows: number; oldest_at?: string; newest_at?: string};
+  retention: HardwareIORetentionSettings;
+  collected_at: string;
+  duration_ms: number;
+}
+
+export interface HardwareIOPurgePlan {
+  retention_days: number;
+  max_delete_rows: number;
+  cutoff: string;
+  min_sequence: number;
+  max_sequence: number;
+  cutoff_sequence: number;
+  eligible_rows_estimate: number;
+  run_start_sequence: number;
+  run_end_sequence: number;
+  run_rows: number;
+  avg_row_bytes: number;
+  run_bytes_estimate: number;
+  eligible_bytes_estimate: number;
+  remaining_eligible_estimate: number;
+  skip_reason?: string;
+}
+
+export interface HardwareIOPurgeResult {
+  plan: HardwareIOPurgePlan;
+  deleted_rows: number;
+  batches: number;
+  batch_size: number;
+  partial: boolean;
+  skip_reason?: string;
+  duration_ms: number;
+}
+
 export interface ProxySettings {
   mode: "off" | "external" | "managed_hysteria2";
   http_proxy: string;

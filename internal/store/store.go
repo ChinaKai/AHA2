@@ -55,6 +55,8 @@ type Store struct {
 
 	statusMu       sync.RWMutex
 	statusListener TaskStatusListener
+
+	databaseStats databaseStatsCache
 }
 
 func (s *Store) DataDir() string {

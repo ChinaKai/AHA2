@@ -3476,5 +3476,22 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := s.applyMailSchemaV123(ctx); err != nil {
 		return err
 	}
+	var hasV124 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=124)`).Scan(&hasV124)
+	if !hasV124 {
+		// Manual hardware_io retention on the data management page. One row;
+		// a missing row reads as the defaults.
+		if _, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS data_retention_settings(
+			id INTEGER PRIMARY KEY,
+			hardware_io_retention_days INTEGER NOT NULL DEFAULT 30,
+			hardware_io_max_delete_rows INTEGER NOT NULL DEFAULT 200000,
+			updated_at TEXT NOT NULL
+		)`); err != nil {
+			return fmt.Errorf("apply schema v124: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(124, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v124: %w", err)
+	}
 	return nil
 }
