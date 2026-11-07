@@ -166,6 +166,41 @@ func TestPetBrainIdle60KeepsHourlyBehavior(t *testing.T) {
 	}
 }
 
+func TestPetBrainZeroHourlyLimitIsUnlimited(t *testing.T) {
+	fixture := newPetTaskFixture(t)
+	base := time.Date(2026, 11, 7, 1, 0, 0, 0, time.UTC)
+	for _, minutes := range []int{0, 15, 30, 45, 55} {
+		if err := fixture.service.reservePetBrainRun("unlimited", base.Add(time.Duration(minutes)*time.Minute), 0); err != nil {
+			t.Fatalf("+%dmin: limit=0 should never reject: %v", minutes, err)
+		}
+	}
+	if got := petBrainRunCount(fixture.service, "unlimited"); got != 5 {
+		t.Fatalf("runs=%d, want 5", got)
+	}
+}
+
+func TestPetBrainBusyTaskSkipDoesNotConsumeHourlyBudget(t *testing.T) {
+	fixture := newPetTaskFixture(t)
+	assistant, err := fixture.database.EnsureOwnerAssistant(fixture.ctx, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.database.UpdateOwnerPetBudget(fixture.ctx, assistant.ID, 15, false, assistant.PetQuietStart, assistant.PetQuietEnd, 1, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	fixture.createOrphanTurn(t, domain.TurnRunning)
+	clock := time.Date(2026, 11, 7, 1, 0, 0, 0, time.UTC)
+	fixture.service.now = func() time.Time { return clock }
+	if _, err := fixture.service.AskOwnerPetBrain(fixture.ctx, PetBrainContext{
+		DeviceID: "busy-task", IdleSeconds: 900, Page: "test",
+	}); err == nil || !strings.Contains(err.Error(), "正在执行") {
+		t.Fatalf("expected busy-task skip, got %v", err)
+	}
+	if got := petBrainRunCount(fixture.service, "busy-task"); got != 0 {
+		t.Fatalf("busy-task skip consumed the hourly budget: runs=%d", got)
+	}
+}
+
 func TestPetBrainReserveIsAtomicAcrossConcurrentPolls(t *testing.T) {
 	fixture := newPetTaskFixture(t)
 	base := time.Date(2026, 11, 7, 1, 0, 0, 0, time.UTC)
