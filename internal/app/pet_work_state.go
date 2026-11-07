@@ -119,6 +119,7 @@ type PetWorkState struct {
 	Work             []PetWorkItem        `json:"work"`
 	OpenTasks        []PetOpenTask        `json:"open_tasks"`
 	Inspection       PetInspection        `json:"inspection"`
+	Core             PetCoreDigest        `json:"core"`
 	OpenLoops        string               `json:"open_loops,omitempty"`
 	OpenLoopsPath    string               `json:"open_loops_path,omitempty"`
 	OpenLoopsNote    string               `json:"open_loops_note,omitempty"`
@@ -153,7 +154,9 @@ func (s *Service) PetWorkState(ctx context.Context) (PetWorkState, error) {
 	}
 	loops := s.PetOpenLoops(ctx)
 	agenda := s.PetAgenda(ctx)
+	core := s.petCoreDigest(ctx, s.petUsesEnglish(ctx))
 	state := PetWorkState{
+		Core:      core,
 		Approvals: approvals, PendingApprovals: len(pendingApprovals),
 		OpenTasks: openTasks, Inspection: s.petInspection(ctx, tasks, pendingApprovals, openTaskTotal, attentionTasks),
 		Work:      make([]PetWorkItem, 0),
