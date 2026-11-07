@@ -768,8 +768,9 @@ func TestRunProcessBoundsWaitForStuckInputFeeder(t *testing.T) {
 
 // The scenario behind the feeder bound: the child exits while a grandchild
 // that inherited stdin keeps the pipe alive without reading, and the feeder is
-// in the middle of a write larger than the pipe buffer. Run must still return
-// promptly once the child exits.
+// in the middle of a write larger than the pipe buffer. Closing the parent's
+// write end when the child exits releases that pending write, so Run must
+// return right away rather than fall back to the feeder bound.
 func TestRunProcessReturnsWhileStdinInheritingGrandchildBlocksWrite(t *testing.T) {
 	input := make(chan string, 1)
 	input <- strings.Repeat("x", 1<<20) + "\n"
@@ -793,6 +794,26 @@ func TestRunProcessReturnsWhileStdinInheritingGrandchildBlocksWrite(t *testing.T
 			}
 		}
 	}
+	// Observe the feeder as well as the wall clock. The proxy done channel
+	// guarantees feederReturned is closed before awaitInputFeeder can observe
+	// the real done, so the check after Run returns cannot race with the
+	// feeder's final bookkeeping.
+	original := processInputFeeder
+	feederReturned := make(chan struct{})
+	processInputFeeder = func(stdin io.WriteCloser, initial string, input <-chan string, exited <-chan struct{}, done chan<- struct{}) {
+		proxy := make(chan struct{})
+		original(stdin, initial, input, exited, proxy)
+		close(feederReturned)
+		close(done)
+	}
+	t.Cleanup(func() { processInputFeeder = original })
+	// The direct child exits after ~300ms. A run that closes the write end at
+	// that point returns immediately; one that does not must wait out the whole
+	// processInputFeederTimeout (3s) before awaitInputFeeder gives up. Half the
+	// timeout is still far above the normal path (observed ~0.4s including
+	// process startup) and far below the timeout-fallback path (~3.3s), so it
+	// distinguishes the two without relying on the grandchild's 8s lifetime.
+	returnBound := processInputFeederTimeout / 2
 	started := time.Now()
 	done := make(chan error, 1)
 	go func() {
@@ -804,11 +825,16 @@ func TestRunProcessReturnsWhileStdinInheritingGrandchildBlocksWrite(t *testing.T
 		if err != nil {
 			t.Fatal(err)
 		}
-	case <-time.After(processInputFeederTimeout + 10*time.Second):
-		t.Fatal("Run did not return while a grandchild held stdin")
+	case <-time.After(returnBound):
+		t.Fatalf("Run did not return within %s; it must not wait for the %s feeder timeout", returnBound, processInputFeederTimeout)
 	}
-	if elapsed := time.Since(started); elapsed >= processGrandchildSleep {
-		t.Fatalf("Run waited %s, as long as the stdin-holding grandchild lived", elapsed)
+	if elapsed := time.Since(started); elapsed >= returnBound {
+		t.Fatalf("Run returned after %s (bound %s): the stdin write end was not released when the child exited", elapsed, returnBound)
+	}
+	select {
+	case <-feederReturned:
+	default:
+		t.Fatal("Run returned while the stdin feeder was still blocked on its pending write")
 	}
 }
 
