@@ -42,13 +42,23 @@ func insertLiveInboxItemWithSource(
 	t *testing.T, database *Store, task domain.Task, roundID, sourceAgent, sourceKind, status, content string,
 ) string {
 	t.Helper()
+	return insertLiveInboxItemForTargetAgent(t, database, task, roundID, "main", sourceAgent, sourceKind, status, content)
+}
+
+// insertLiveInboxItemForTargetAgent writes one inbox row addressed to
+// targetAgentID so tests can prove a claim only returns rows for the claiming
+// agent, not every agent in the task.
+func insertLiveInboxItemForTargetAgent(
+	t *testing.T, database *Store, task domain.Task, roundID, targetAgentID, sourceAgent, sourceKind, status, content string,
+) string {
+	t.Helper()
 	id := domain.NewID("inbox")
 	if _, err := database.db.ExecContext(context.Background(), `
 		INSERT INTO agent_inbox(
 			id,task_id,round_id,target_agent_id,source_agent_id,source_kind,source_turn_id,message_id,
 			content,payload_json,status,batch_id,created_at,claimed_at,processed_at
 		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		id, task.ID, roundID, "main", sourceAgent, sourceKind, "", "",
+		id, task.ID, roundID, targetAgentID, sourceAgent, sourceKind, "", "",
 		content, "{}", status, "", timeString(time.Now().UTC()), "", "",
 	); err != nil {
 		t.Fatal(err)
@@ -195,6 +205,62 @@ func TestClaimLiveInboxAcceptsOwnerAndPetOnly(t *testing.T) {
 		}
 		if status != want {
 			t.Fatalf("inbox %s status = %q, want %q", id, status, want)
+		}
+	}
+}
+
+// TestClaimLiveInboxScopesTargetAgent covers the M6 mutation: dropping the
+// target_agent_id constraint must not let one agent's turn claim another
+// agent's owner or pet messages.
+func TestClaimLiveInboxScopesTargetAgent(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database, err := Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	task, round, turn := liveInboxTestTurn(t, database)
+	now := time.Now().UTC()
+	if _, err := database.UpsertTaskAgent(ctx, domain.TaskAgent{
+		TaskID: task.ID, AgentID: "worker", Role: "worker", Status: "idle",
+		Title: "Worker agent", RuntimeConfigSnapshotID: task.RuntimeConfigSnapshotID,
+		CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	mainOwnerID := insertLiveInboxItemForTargetAgent(t, database, task, round.ID, "main", "owner", "owner_message", "pending", "main owner")
+	mainPetID := insertLiveInboxItemForTargetAgent(t, database, task, round.ID, "main", "pet", "pet_delegate_message", "pending", "main pet")
+	workerOwnerID := insertLiveInboxItemForTargetAgent(t, database, task, round.ID, "worker", "owner", "owner_message", "pending", "worker owner")
+	workerPetID := insertLiveInboxItemForTargetAgent(t, database, task, round.ID, "worker", "pet", "pet_delegate_message", "pending", "worker pet")
+
+	items, err := database.ClaimOwnerInboxForLiveInjection(ctx, task.ID, "main", round.ID, turn.ID, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 || items[0].ID != mainOwnerID || items[1].ID != mainPetID {
+		t.Fatalf("claim = %#v, want only main-targeted owner then pet", items)
+	}
+	for _, item := range items {
+		if item.TargetAgentID != "main" {
+			t.Fatalf("claim returned item for target agent %q: %#v", item.TargetAgentID, item)
+		}
+	}
+	for id, want := range map[string]struct{ status, deliveredTurn string }{
+		mainOwnerID:   {"claimed_in_turn", turn.ID},
+		mainPetID:     {"claimed_in_turn", turn.ID},
+		workerOwnerID: {"pending", ""},
+		workerPetID:   {"pending", ""},
+	} {
+		var status, deliveredTurn string
+		if err := database.db.QueryRowContext(ctx,
+			`SELECT status,delivered_turn_id FROM agent_inbox WHERE id=?`, id,
+		).Scan(&status, &deliveredTurn); err != nil {
+			t.Fatal(err)
+		}
+		if status != want.status || deliveredTurn != want.deliveredTurn {
+			t.Fatalf("inbox %s status=%q delivered_turn_id=%q, want status=%q delivered_turn_id=%q",
+				id, status, deliveredTurn, want.status, want.deliveredTurn)
 		}
 	}
 }
