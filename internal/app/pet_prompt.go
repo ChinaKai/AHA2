@@ -35,6 +35,18 @@ func (s *Service) renderPetAssistantPrompt(ctx context.Context, nickname, identi
 	if err != nil {
 		return "", err
 	}
+	// The template body stays protected and generic; identity and principles
+	// come from the pet's core files. The stored values are only a fallback for
+	// a core file that is missing or still empty.
+	english := s.petUsesEnglish(ctx)
+	digest := s.petCoreDigest(ctx, english)
+	if digest.Identity == "" {
+		digest.Identity, digest.IdentityTruncated = petDigestSection(identity, petDigestIdentityLimit, petDigestIdentityLineLimit, petCoreIdentityPath, english)
+	}
+	if digest.Principles == "" {
+		digest.Principles, digest.PrinciplesTruncated = petDigestSection(principles, petDigestPrinciplesLimit, petDigestPrinciplesLine, petCorePrinciplesPath, english)
+	}
+	rendered += "\n\n" + petCoreDigestPrompt(digest, english)
 	if strings.TrimSpace(snapshot) != "" {
 		rendered += "\n\n只读快照：\n" + snapshot
 	}

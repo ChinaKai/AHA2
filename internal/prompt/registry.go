@@ -68,7 +68,11 @@ type BuildInput struct {
 	IncludeTurnDiagnostics bool
 	ChannelContext         map[string]any
 	Identity               string
-	Language               string
+	// IdentitySupplement is runtime text appended right after the identity
+	// template, such as the pet core digest. It keeps per-Turn content out of
+	// the editable template body.
+	IdentitySupplement string
+	Language           string
 }
 
 // MaxInlineAttachmentBytes is the per-Turn Context inline cap. It is
@@ -603,6 +607,11 @@ func (engine *Engine) Build(ctx context.Context, input BuildInput) (BuildResult,
 		content, renderErr := renderTemplateByID(templateByID, id, data)
 		if renderErr != nil {
 			return BuildResult{}, renderErr
+		}
+		if id == identityTemplate {
+			if supplement := strings.TrimSpace(input.IdentitySupplement); supplement != "" {
+				content = strings.TrimRight(content, "\n") + "\n\n" + supplement
+			}
 		}
 		item := templateByID[id]
 		parts = append(parts, "## "+item.Name+"\n"+content)

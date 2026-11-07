@@ -1146,6 +1146,11 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 		}
 		attachments = append(attachments, resource)
 	}
+	responseLanguage := domain.LanguageAuto
+	if settings, settingsErr := s.store.GeneralSettings(ctx); settingsErr == nil {
+		responseLanguage = settings.Language
+	}
+	identitySupplement := ""
 	if task.ID == petTaskID {
 		// The assistant page normally seeds these, but a Turn can also run after a
 		// restart or a direct message. Filling missing files here keeps the prompt's
@@ -1153,10 +1158,10 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 		if err := s.ensurePetWorkspaceFiles(ctx, nil); err != nil {
 			log.Printf("prepare pet workspace for turn: %v", err)
 		}
-	}
-	responseLanguage := domain.LanguageAuto
-	if settings, settingsErr := s.store.GeneralSettings(ctx); settingsErr == nil {
-		responseLanguage = settings.Language
+		// Built once per Turn so identity and principles come back after every
+		// compaction without the pet having to re-read them.
+		english := responseLanguage == domain.LanguageEnglish
+		identitySupplement = petCoreDigestPrompt(s.petCoreDigest(ctx, english), english)
 	}
 	preview, err := s.prompts.Build(ctx, prompt.BuildInput{
 		Project: project, Workspace: workspace, Task: task, Agent: agent, Snapshot: snapshot,
@@ -1168,7 +1173,8 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 		RecoveryConversation: conversation.Items,
 		Handoff:              handoff.Summary, AgentAPIURL: agentAPIURL, CurrentTurnID: turn.ID, CurrentRoundID: turn.RoundID,
 		IncludeRecentContext: includeRecentContext, IncludeRecoveryHandoff: includeRecoveryHandoff, IncludeTurnDiagnostics: includeTurnDiagnostics,
-		ChannelContext: channelContext, Identity: petTaskIdentity(task), Language: responseLanguage,
+		ChannelContext: channelContext, Identity: petTaskIdentity(task), IdentitySupplement: identitySupplement,
+		Language: responseLanguage,
 	})
 	if err != nil {
 		s.failTurn(ctx, &turn, task, err)
