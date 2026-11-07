@@ -46,6 +46,10 @@ func (runner WSLRunner) Run(parent context.Context, command Command, onLine Line
 // that, because its stdin belongs to the backend; the script moves into a
 // -c argument, so the backend inherits wsl.exe's stdin and Command.Input is fed
 // to it while it runs.
+//
+// Streaming uses -e rather than "--": everything after "--" is handed to the
+// distro's default shell for re-parsing, which loses the script's argv and
+// exported environment (measured: $#=0, env empty). -e execs the argv directly.
 func wslHostCommand(distro string, command Command) (Command, error) {
 	host := Command{
 		Executable:  findWSLExecutable(),
@@ -58,7 +62,7 @@ func wslHostCommand(distro string, command Command) (Command, error) {
 		if err != nil {
 			return Command{}, err
 		}
-		host.Args = []string{"-d", distro, "--", "bash", "-c", script}
+		host.Args = []string{"-d", distro, "-e", "bash", "-c", script}
 		host.Stdin = command.Stdin
 		host.Input = command.Input
 		return host, nil

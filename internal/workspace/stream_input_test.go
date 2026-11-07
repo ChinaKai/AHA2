@@ -264,9 +264,9 @@ func TestWSLHostCommandStreamsScriptAsArgument(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(host.Args) != 6 || host.Args[0] != "-d" || host.Args[1] != "Ubuntu" || host.Args[2] != "--" ||
+	if len(host.Args) != 6 || host.Args[0] != "-d" || host.Args[1] != "Ubuntu" || host.Args[2] != "-e" ||
 		host.Args[3] != "bash" || host.Args[4] != "-c" {
-		t.Fatalf("host args = %#v, want wsl -d Ubuntu -- bash -c <script>", host.Args)
+		t.Fatalf("host args = %#v, want wsl -d Ubuntu -e bash -c <script>", host.Args)
 	}
 	script := host.Args[5]
 	if strings.Contains(script, "base64 -d") {
@@ -363,6 +363,17 @@ func TestWSLRunnerStreamsInputWithRealWSL(t *testing.T) {
 	if len(distros) == 0 {
 		t.Skip("no WSL distro is installed")
 	}
+	// Assert both the backend argv/environment and mid-turn stdin. With the
+	// broken "--" form the script was re-parsed by the default shell: $# was 0
+	// and the exported environment was gone, yet the command still exited 0.
+	backend := `printf 'N=%s\n' "$#"
+printf 'ARG1=%s\n' "$1"
+printf 'ARG2=%s\n' "$2"
+printf 'TOKEN=%s\n' "$AHA_X"
+IFS= read -r first
+printf 'FIRST=%s\n' "$first"
+IFS= read -r second
+printf 'SECOND=%s\n' "$second"`
 	input := make(chan string)
 	lines := make(chan string, 8)
 	done := make(chan struct{})
@@ -371,19 +382,29 @@ func TestWSLRunnerStreamsInputWithRealWSL(t *testing.T) {
 	go func() {
 		defer close(done)
 		result, runErr = (WSLRunner{Distro: distros[0]}).Run(context.Background(), Command{
-			Executable: "cat", Stdin: "first\n", Input: input, Timeout: 60 * time.Second,
+			Executable: "sh",
+			Args:       []string{"-c", backend, "x", "a", "b c"},
+			Env:        map[string]string{"AHA_X": "token value"},
+			Stdin:      "first\n",
+			Input:      input,
+			Timeout:    60 * time.Second,
 		}, func(line string) { lines <- line })
 	}()
-	waitTestLine(t, lines, "first")
+	waitTestLine(t, lines, "N=2")
+	waitTestLine(t, lines, "ARG1=a")
+	waitTestLine(t, lines, "ARG2=b c")
+	waitTestLine(t, lines, "TOKEN=token value")
+	waitTestLine(t, lines, "FIRST=first")
 	input <- "second\n"
-	waitTestLine(t, lines, "second")
+	waitTestLine(t, lines, "SECOND=second")
 	close(input)
 	<-done
 	if runErr != nil || result.ExitCode != 0 {
 		t.Fatalf("result=%#v err=%v", result, runErr)
 	}
-	if result.Stdout != "first\nsecond\n" {
-		t.Fatalf("stdout = %q, want streamed input", result.Stdout)
+	want := "N=2\nARG1=a\nARG2=b c\nTOKEN=token value\nFIRST=first\nSECOND=second\n"
+	if result.Stdout != want {
+		t.Fatalf("stdout = %q, want %q", result.Stdout, want)
 	}
 }
 
