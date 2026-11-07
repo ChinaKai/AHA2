@@ -515,7 +515,19 @@ func TestPurgeHardwareIOCreatedAtGuardKeepsRecentRowInsideRange(t *testing.T) {
 	}
 }
 
-func TestPurgeHardwareIOStopsWhenCanceledAndRejectsOverlap(t *testing.T) {
+// TestPurgeHardwareIORejectsOverlapAndCanceledBeforeStart covers the two
+// early-exit paths of PurgeHardwareIO. Neither may delete a row:
+//   - overlap: hardwareIOPurgeMu is a package-level lock, so the test holds it
+//     to stand in for a purge that is already running; the second call's
+//     TryLock fails and reports already_running.
+//   - canceled before start: the context is canceled before the call starts, so
+//     the run deletes nothing.
+//
+// Not parallel: hardwareIOPurgeMu is package-wide and the overlap case holds it
+// on purpose. A parallel purge test would race on that lock, either making this
+// test's TryLock succeed against a purge it did not expect or making another
+// purge test observe this held lock and skip with already_running.
+func TestPurgeHardwareIORejectsOverlapAndCanceledBeforeStart(t *testing.T) {
 	ctx := context.Background()
 	database := openDataRetentionTestStore(t)
 	task := createStoreTestTask(t, database)
@@ -523,17 +535,24 @@ func TestPurgeHardwareIOStopsWhenCanceledAndRejectsOverlap(t *testing.T) {
 	seedHardwareIO(t, database, task.ID, 100, now.Add(-100*24*time.Hour), time.Hour)
 	settings := domain.HardwareIORetentionSettings{RetentionDays: 1, MaxDeleteRows: 1_000}
 
-	hardwareIOPurgeMu.Lock()
-	result, err := database.PurgeHardwareIO(ctx, settings, now)
-	hardwareIOPurgeMu.Unlock()
-	if err != nil || result.SkipReason != domain.HardwareIOPurgeSkipAlreadyRunning || result.DeletedRows != 0 {
-		t.Fatalf("overlap=%#v err=%v", result, err)
-	}
+	t.Run("rejects overlap", func(t *testing.T) {
+		hardwareIOPurgeMu.Lock()
+		result, err := database.PurgeHardwareIO(ctx, settings, now)
+		hardwareIOPurgeMu.Unlock()
+		if err != nil || result.SkipReason != domain.HardwareIOPurgeSkipAlreadyRunning || result.DeletedRows != 0 {
+			t.Fatalf("overlap=%#v err=%v", result, err)
+		}
+		if hardwareIOCount(t, database) != 100 {
+			t.Fatalf("overlapping purge deleted rows: %d", hardwareIOCount(t, database))
+		}
+	})
 
-	canceled, cancel := context.WithCancel(ctx)
-	cancel()
-	result, _ = database.PurgeHardwareIO(canceled, settings, now)
-	if result.DeletedRows != 0 || hardwareIOCount(t, database) != 100 {
-		t.Fatalf("canceled purge deleted rows: %#v", result)
-	}
+	t.Run("canceled before start", func(t *testing.T) {
+		canceled, cancel := context.WithCancel(ctx)
+		cancel()
+		result, _ := database.PurgeHardwareIO(canceled, settings, now)
+		if result.DeletedRows != 0 || hardwareIOCount(t, database) != 100 {
+			t.Fatalf("canceled purge deleted rows: %#v", result)
+		}
+	})
 }
