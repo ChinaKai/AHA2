@@ -1,9 +1,10 @@
-// Optional real-browser verification for the Claude-only stream-json switch.
+// Optional real-browser verification for the live inbox switch, which applies
+// to the streaming Backends (Claude stream-json, Codex app-server turn/steer).
 // The row uses HTML `hidden`, but the global `label`/`.security-setting-toggle`
 // display:grid rules override the UA [hidden] rule. This drives the built
 // renderer and the full production stylesheet through Edge/Chromium and reads
 // the computed display, which is the only way to prove the row is really gone
-// for Codex/DSH and visible for Claude.
+// for DSH and visible for Claude and Codex.
 import assert from "node:assert/strict";
 import {execFile} from "node:child_process";
 import {existsSync} from "node:fs";
@@ -80,14 +81,14 @@ async function computedDisplay(backendName, index) {
 }
 
 try {
-  const claude = await computedDisplay("claude", 0);
-  assert.notEqual(claude.display, "none", "the stream-json switch is hidden for Claude");
-  assert.notEqual(claude.visibility, "hidden", "the stream-json switch is invisible for Claude");
-
-  for (const [index, backendName] of ["codex", "dsh"].entries()) {
-    const hidden = await computedDisplay(backendName, index + 1);
-    assert.equal(hidden.display, "none", `the stream-json switch is still displayed for ${backendName} (display=${hidden.display})`);
+  for (const [index, backendName] of ["claude", "codex"].entries()) {
+    const shown = await computedDisplay(backendName, index);
+    assert.notEqual(shown.display, "none", `the live inbox switch is hidden for ${backendName}`);
+    assert.notEqual(shown.visibility, "hidden", `the live inbox switch is invisible for ${backendName}`);
   }
+
+  const dsh = await computedDisplay("dsh", 2);
+  assert.equal(dsh.display, "none", `the live inbox switch is still displayed for dsh (display=${dsh.display})`);
   console.log("stream input visibility verified in a real browser");
 } finally {
   await rm(profile, {recursive: true, force: true});
