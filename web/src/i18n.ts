@@ -1184,6 +1184,8 @@ const legacyEnglish: Record<string, string> = {
   "Backend 代理": "Backend proxy",
   "实验性：Turn 内 live inbox 投递（stream-json）": "Experimental: live inbox delivery within a Turn (stream-json)",
   "仅对 Claude 生效；开启后当前 Turn 运行期间的新消息可经 stream-json 直接送达，下一 Turn 生效。": "Claude only. While a Turn is running, new messages can arrive directly through stream-json; takes effect on the next Turn.",
+  "实验性：Turn 内 live inbox 投递": "Experimental: live inbox delivery within a Turn",
+  "Claude 经 stream-json、Codex 经 app-server turn/steer 生效；开启后当前 Turn 运行期间的新消息可直接送达，下一 Turn 生效。": "Works for Claude through stream-json and Codex through app-server turn/steer. When enabled, new messages arriving while the current Turn runs are delivered directly; takes effect on the next Turn.",
   "Live inbox": "Live inbox",
   "开启（实验性）": "On (experimental)",
   "Agent 项目级授权": "Agent project-level authorization",
