@@ -123,8 +123,10 @@ type taskTakeoverPayload struct {
 	Approval            string                 `json:"approval"`
 	ProxyEnabled        bool                   `json:"proxy_enabled"`
 	FastMode            bool                   `json:"fast_mode"`
-	StreamInput         bool                   `json:"stream_input"`
-	CollaborationMode   string                 `json:"collaboration_mode"`
+	// StreamInput is accepted from older clients but ignored; live inbox
+	// delivery is always enabled when the runner can stream stdin.
+	StreamInput       bool   `json:"stream_input"`
+	CollaborationMode string `json:"collaboration_mode"`
 	MaxAgents           int                    `json:"max_agents"`
 	Groups              []hardwareGroupPayload `json:"groups"`
 }
@@ -209,7 +211,6 @@ func (s *Server) takeoverTask(writer http.ResponseWriter, request *http.Request)
 		StreamIdleTimeoutMS: payload.StreamIdleTimeoutMS, StreamMaxRetries: payload.StreamMaxRetries,
 		Filesystem: filesystem, Approval: approval,
 		ProxyEnabled: payload.ProxyEnabled, FastMode: payload.FastMode,
-		StreamInput:       payload.StreamInput,
 		CollaborationMode: mode, MaxAgents: maxAgents,
 		KnowledgePolicy: source.Task.KnowledgePolicy,
 	})

@@ -26,12 +26,6 @@ type Codex struct {
 	IdleTimeout     time.Duration
 	Heartbeat       time.Duration
 	ModelsCachePath string
-	// LiveInput force-enables live inbox delivery through `codex app-server`
-	// and turn/steer for every Codex Turn at this deployment. Request.StreamInput
-	// is the per-Task opt-in; the effective value is the logical OR of the two.
-	// Off by default: app-server is a different execution surface from the
-	// one-shot exec path.
-	LiveInput bool
 	// LivePoll overrides how often a running Turn claims live inbox messages.
 	LivePoll time.Duration
 }
@@ -50,7 +44,10 @@ func (adapter Codex) Execute(ctx context.Context, request Request, emit func(Eve
 	if timeout == 0 {
 		timeout = defaultBackendTurnTimeout
 	}
-	if adapter.liveInputEnabled(request) && workspace.StreamsInput(request.Runner) {
+	// Live inbox delivery is the default whenever the transport can carry it.
+	// A non-streaming runner, or a Turn with no inbox, keeps the one-shot exec
+	// path unchanged.
+	if request.LiveInbox != nil && workspace.StreamsInput(request.Runner) {
 		liveResult, liveErr, started := adapter.executeLiveInbox(ctx, request, emit, binary, timeout)
 		if started {
 			if liveErr == nil || ctx.Err() != nil || errors.Is(liveErr, ErrBackendIdleTimeout) {

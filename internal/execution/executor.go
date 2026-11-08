@@ -80,25 +80,11 @@ func newBackendRequest(request app.ExecutionRequest, model string, environment m
 		ReasoningEffort:    request.Snapshot.ReasoningEffort,
 		SupportsImageInput: modelSupportsImageInput(request.Model),
 		FastMode:           request.Snapshot.FastMode,
-		StreamInput:        streamInputRequested(request.Snapshot),
 		Environment:        environment,
 		Prompt:             request.Prompt, ProviderSessionID: request.ProviderSessionID,
 		Filesystem: request.Filesystem, Approval: request.Approval,
 		MCPServers: request.MCPServers, AllowedTools: request.AllowedTools, ReverseForward: request.AgentAPIForward,
 		LiveInbox: request.LiveInbox,
-	}
-}
-
-// streamInputRequested is the per-Task half of the effective live-input
-// decision. Claude consumes it as stream-json stdin, Codex as app-server
-// turn/steer. Returning false for every other Backend keeps the setting inert
-// there even if a snapshot carries it.
-func streamInputRequested(snapshot domain.RuntimeConfigSnapshot) bool {
-	switch snapshot.Backend {
-	case "claude", "codex":
-		return snapshot.StreamInput
-	default:
-		return false
 	}
 }
 

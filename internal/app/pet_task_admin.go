@@ -224,7 +224,6 @@ type PetUpdateTaskAgentInput struct {
 	Filesystem      string `json:"filesystem"`
 	Approval        string `json:"approval"`
 	FastMode        *bool  `json:"fast_mode"`
-	StreamInput     *bool  `json:"stream_input"`
 }
 
 func (s *Service) PetUpdateTaskAgent(ctx context.Context, input PetUpdateTaskAgentInput) (domain.TaskAgent, error) {
@@ -238,7 +237,7 @@ func (s *Service) PetUpdateTaskAgent(ctx context.Context, input PetUpdateTaskAge
 	return s.UpdateAgentConfig(ctx, task.ID, "main", UpdateAgentConfigInput{
 		ModelID: strings.TrimSpace(input.ModelID), ReasoningEffort: strings.TrimSpace(input.ReasoningEffort),
 		Filesystem: strings.TrimSpace(input.Filesystem), Approval: strings.TrimSpace(input.Approval),
-		FastMode: input.FastMode, StreamInput: input.StreamInput,
+		FastMode: input.FastMode,
 	})
 }
 

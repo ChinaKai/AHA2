@@ -178,43 +178,19 @@ func fakeClaudeAdapter(t *testing.T, mode string) Claude {
 	}
 	t.Setenv(fakeClaudeModeEnv, mode)
 	return Claude{
-		Binary: executable, StreamInput: true, Timeout: time.Minute,
+		Binary: executable, Timeout: time.Minute,
 		LivePoll: 10 * time.Millisecond, LiveReplayGrace: 300 * time.Millisecond,
 	}
 }
 
-// The effective switch is the deployment-wide flag OR the per-Task opt-in.
-func TestClaudeStreamInputEffectiveTruthTable(t *testing.T) {
-	cases := []struct {
-		name        string
-		globalForce bool
-		perTask     bool
-		want        bool
-	}{
-		{name: "per-task on, global off", perTask: true, want: true},
-		{name: "per-task off, global on", globalForce: true, want: true},
-		{name: "both off", want: false},
-		{name: "both on", globalForce: true, perTask: true, want: true},
-	}
-	for _, testCase := range cases {
-		t.Run(testCase.name, func(t *testing.T) {
-			adapter := Claude{StreamInput: testCase.globalForce}
-			if got := adapter.streamInputEnabled(Request{StreamInput: testCase.perTask}); got != testCase.want {
-				t.Fatalf("effective stream input = %t, want %t", got, testCase.want)
-			}
-		})
-	}
-}
-
-// A per-Task opt-in must start the stream-json path and claim this Turn's inbox
-// even when the deployment-wide AHA2_CLAUDE_STREAM_INPUT flag is absent.
-func TestClaudePerTaskStreamInputClaimsInbox(t *testing.T) {
+// With no per-Task or deployment switch, a streaming runner and a live inbox
+// are enough: the adapter starts the stream-json path and claims the inbox.
+func TestClaudeLiveInboxClaimsWithoutAnySwitch(t *testing.T) {
 	adapter := fakeClaudeAdapter(t, "live")
-	adapter.StreamInput = false
-	inbox := newFakeLiveInbox(LiveBatch{IDs: []string{"per-task-1"}, Text: "owner correction"})
+	inbox := newFakeLiveInbox(LiveBatch{IDs: []string{"always-on-1"}, Text: "owner correction"})
 	result, err := adapter.Execute(context.Background(), Request{
 		Runner: workspace.LocalRunner{}, WorkDir: t.TempDir(), Prompt: "initial prompt",
-		LiveInbox: inbox, StreamInput: true,
+		LiveInbox: inbox,
 	}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -222,8 +198,8 @@ func TestClaudePerTaskStreamInputClaimsInbox(t *testing.T) {
 	if result.Reply != "first=initial prompt live=owner correction" {
 		t.Fatalf("result = %#v", result)
 	}
-	if claims, acks := inbox.snapshot(); claims == 0 || strings.Join(acks, ";") != "per-task-1=true" {
-		t.Fatalf("per-Task stream input did not claim the inbox: claims=%d acks=%v", claims, acks)
+	if claims, acks := inbox.snapshot(); claims == 0 || strings.Join(acks, ";") != "always-on-1=true" {
+		t.Fatalf("live inbox was not claimed by default: claims=%d acks=%v", claims, acks)
 	}
 }
 
@@ -377,7 +353,10 @@ func TestClaudeStreamInputCancelRollsBackAndStopsClaiming(t *testing.T) {
 
 type claudeStdinRunner struct {
 	command workspace.Command
+	streams bool
 }
+
+func (runner *claudeStdinRunner) StreamsInput() bool { return runner.streams }
 
 func (runner *claudeStdinRunner) Run(_ context.Context, command workspace.Command, onLine workspace.LineHandler) (workspace.Result, error) {
 	runner.command = command
@@ -385,25 +364,23 @@ func (runner *claudeStdinRunner) Run(_ context.Context, command workspace.Comman
 	return workspace.Result{}, nil
 }
 
-// With the flag off, or on a runner that cannot stream stdin, the adapter
-// keeps the one-shot -p invocation: raw prompt on stdin, no stream flags, no
-// Input channel and no live claims.
-func TestClaudeOneShotWhenStreamInputUnavailable(t *testing.T) {
+// The one-shot -p invocation remains the fallback when there is no live inbox
+// to deliver into, or when the runner cannot stream stdin. In both cases no
+// stream flags, Input channel, or claims are used.
+func TestClaudeOneShotWithoutLiveDelivery(t *testing.T) {
 	cases := map[string]struct {
-		adapter Claude
-		perTask bool
+		streams bool
+		inbox   LiveInbox
 	}{
-		"both off":              {},
-		"global on, no stdin":   {adapter: Claude{StreamInput: true, LivePoll: time.Millisecond}},
-		"per-task on, no stdin": {adapter: Claude{LivePoll: time.Millisecond}, perTask: true},
+		"streaming runner without an inbox": {streams: true},
+		"runner cannot stream stdin":        {streams: false, inbox: newFakeLiveInbox(LiveBatch{IDs: []string{"x"}, Text: "x"})},
 	}
 	for name, testCase := range cases {
 		t.Run(name, func(t *testing.T) {
-			runner := &claudeStdinRunner{}
-			inbox := newFakeLiveInbox(LiveBatch{IDs: []string{"x"}, Text: "x"})
-			result, err := testCase.adapter.Execute(context.Background(), Request{
+			runner := &claudeStdinRunner{streams: testCase.streams}
+			inbox := testCase.inbox
+			result, err := (Claude{LivePoll: time.Millisecond}).Execute(context.Background(), Request{
 				Runner: runner, WorkDir: "/workspace", Prompt: "hello prompt", LiveInbox: inbox,
-				StreamInput: testCase.perTask,
 			}, nil)
 			if err != nil || result.Reply != "done" {
 				t.Fatalf("result=%#v err=%v", result, err)
@@ -416,8 +393,10 @@ func TestClaudeOneShotWhenStreamInputUnavailable(t *testing.T) {
 			if runner.command.Stdin != "hello prompt" || runner.command.Input != nil {
 				t.Fatalf("stdin=%q input=%v", runner.command.Stdin, runner.command.Input)
 			}
-			if claims, acks := inbox.snapshot(); claims != 0 || len(acks) != 0 {
-				t.Fatalf("one-shot run touched the live inbox: claims=%d acks=%v", claims, acks)
+			if inbox != nil {
+				if claims, acks := inbox.(*fakeLiveInbox).snapshot(); claims != 0 || len(acks) != 0 {
+					t.Fatalf("one-shot run touched the live inbox: claims=%d acks=%v", claims, acks)
+				}
 			}
 		})
 	}

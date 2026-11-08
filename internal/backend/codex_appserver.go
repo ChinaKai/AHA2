@@ -698,12 +698,3 @@ func (adapter Codex) executeLiveInbox(
 		Reply: strings.TrimSpace(session.reply), ExitCode: runResult.ExitCode, ProviderSessionID: session.threadID,
 	}, nil, started
 }
-
-// codexLiveInputEnabled is the effective live-inbox switch: the deployment
-// force, the per-Task opt-in, and an actual inbox all have to be present.
-func (adapter Codex) liveInputEnabled(request Request) bool {
-	if request.LiveInbox == nil {
-		return false
-	}
-	return adapter.LiveInput || request.StreamInput
-}

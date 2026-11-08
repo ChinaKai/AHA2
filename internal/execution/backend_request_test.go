@@ -1,9 +1,12 @@
 package execution
 
 import (
+	"context"
+	"reflect"
 	"testing"
 
 	"github.com/ChinaKai/AHA2/internal/app"
+	"github.com/ChinaKai/AHA2/internal/backend"
 	"github.com/ChinaKai/AHA2/internal/domain"
 	"github.com/ChinaKai/AHA2/internal/workspace"
 )
@@ -50,33 +53,45 @@ func TestBackendRequestCarriesTheAgentAPIForwardForEveryBackend(t *testing.T) {
 	}
 }
 
-// Stream input is a per-Task opt-in for the backends that can take live input:
-// Claude through stream-json, Codex through app-server turn/steer. A snapshot
-// carrying it on another Backend must stay inert; the deployment-wide force
-// lives on each adapter and is ORed there.
-func TestBackendRequestCarriesPerTaskStreamInputForLiveCapableBackends(t *testing.T) {
+// Live inbox is the only input to the always-on live-delivery decision, so the
+// builder must pass it through for every Backend. The adapters then gate on the
+// runner's stdin capability.
+func TestBackendRequestCarriesLiveInbox(t *testing.T) {
 	t.Parallel()
-	cases := []struct {
-		name    string
-		backend string
-		perTask bool
-		want    bool
-	}{
-		{name: "claude on", backend: "claude", perTask: true, want: true},
-		{name: "claude off", backend: "claude", perTask: false, want: false},
-		{name: "codex on", backend: "codex", perTask: true, want: true},
-		{name: "codex off", backend: "codex", perTask: false, want: false},
-		{name: "dsh ignores", backend: "dsh", perTask: true, want: false},
-	}
-	for _, testCase := range cases {
-		t.Run(testCase.name, func(t *testing.T) {
-			request := app.ExecutionRequest{Snapshot: domain.RuntimeConfigSnapshot{
-				Backend: testCase.backend, StreamInput: testCase.perTask,
-			}}
-			built := newBackendRequest(request, "model", nil)
-			if built.StreamInput != testCase.want {
-				t.Fatalf("StreamInput = %t, want %t", built.StreamInput, testCase.want)
-			}
-		})
+	inbox := stubLiveInbox{}
+	for _, backendName := range []string{"claude", "codex", "dsh"} {
+		request := app.ExecutionRequest{
+			Workspace: domain.Workspace{ID: "ws-1", Transport: "native"},
+			Snapshot:  domain.RuntimeConfigSnapshot{Backend: backendName},
+			LiveInbox: inbox,
+		}
+		built := newBackendRequest(request, "model", nil)
+		if built.LiveInbox == nil {
+			t.Fatalf("%s request dropped the live inbox", backendName)
+		}
 	}
 }
+
+// Historical snapshots may still carry stream_input=0/1. It is retained only
+// for database compatibility and must not change anything the backend sees.
+func TestDeprecatedStreamInputSnapshotFieldIsInert(t *testing.T) {
+	t.Parallel()
+	build := func(streamInput bool) backend.Request {
+		return newBackendRequest(app.ExecutionRequest{
+			Workspace: domain.Workspace{ID: "ws-1", Transport: "native"},
+			Snapshot:  domain.RuntimeConfigSnapshot{Backend: "claude", StreamInput: streamInput},
+			LiveInbox: stubLiveInbox{},
+		}, "model", nil)
+	}
+	if off, on := build(false), build(true); !reflect.DeepEqual(off, on) {
+		t.Fatalf("the deprecated stream_input snapshot field changed the backend request:\noff=%#v\non=%#v", off, on)
+	}
+}
+
+type stubLiveInbox struct{}
+
+func (stubLiveInbox) Claim(context.Context) (backend.LiveBatch, error) {
+	return backend.LiveBatch{}, nil
+}
+
+func (stubLiveInbox) Ack(context.Context, backend.LiveBatch, bool) error { return nil }

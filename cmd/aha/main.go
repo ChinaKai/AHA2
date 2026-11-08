@@ -112,9 +112,11 @@ type serveOptions struct {
 	logLevel              string
 	codexBinary           string
 	claudeBinary          string
-	claudeStreamInput     bool
-	codexStreamInput      bool
 	dshBinary             string
+	// deprecatedLiveInput records old live-inbox switches that were supplied.
+	// They are accepted so existing service definitions keep starting, but they
+	// no longer select any behavior.
+	deprecatedLiveInput []string
 }
 
 func serve(args []string) error {
@@ -144,23 +146,45 @@ func parseServeOptions(name string, args []string) (serveOptions, error) {
 	codexBinary := flags.String("codex-bin", envOr("AHA2_CODEX_BIN", "codex"), "Codex executable")
 	claudeBinary := flags.String("claude-bin", envOr("AHA2_CLAUDE_BIN", "claude"), "Claude Code executable")
 	dshBinary := flags.String("dsh-bin", envOr("AHA2_DSH_BIN", "dsh"), "DeepSeek Harness executable")
-	claudeStreamInput := flags.Bool("claude-stream-input", envBool("AHA2_CLAUDE_STREAM_INPUT"), "experimental: deliver live inbox messages into running native Claude Turns through stream-json stdin")
-	codexStreamInput := flags.Bool("codex-stream-input", envBool("AHA2_CODEX_STREAM_INPUT"), "experimental: deliver live inbox messages into running Codex Turns through app-server turn/steer")
+	// Live inbox delivery is always enabled when the runner can stream stdin.
+	// Keep the old switches as parse-only no-ops so existing service definitions
+	// and scripts still start; they cannot turn the behavior on or off.
+	flags.Bool("claude-stream-input", false, "deprecated no-op: live inbox delivery is always enabled when the runner can stream stdin")
+	flags.Bool("codex-stream-input", false, "deprecated no-op: live inbox delivery is always enabled when the runner can stream stdin")
 	if err := flags.Parse(args); err != nil {
 		return serveOptions{}, err
 	}
 	if flags.NArg() != 0 {
 		return serveOptions{}, fmt.Errorf("unexpected arguments: %s", strings.Join(flags.Args(), " "))
 	}
+	deprecatedLiveInput := deprecatedLiveInputSettings(flags)
 	return serveOptions{
 		listen: *listen, dataDir: *dataDir, setupToken: *setupToken, setupTokenFile: *setupTokenFile,
 		secureCookie: *secureCookie, allowCrossOrigin: *allowCrossOrigin, agentAPIURL: *agentAPIURL,
 		allowInsecureAgentAPI: *allowInsecureAgentAPI, mailTaskBaseURL: *mailTaskBaseURL,
 		mailDownloadBaseURL: *mailDownloadBaseURL, mailDownloadListen: *mailDownloadListen,
 		logLevel: *logLevel, codexBinary: *codexBinary,
-		claudeBinary: *claudeBinary, claudeStreamInput: *claudeStreamInput,
-		codexStreamInput: *codexStreamInput, dshBinary: *dshBinary,
+		claudeBinary: *claudeBinary, dshBinary: *dshBinary,
+		deprecatedLiveInput: deprecatedLiveInput,
 	}, nil
+}
+
+// deprecatedLiveInputSettings reports old live-inbox switches supplied through
+// flags or the environment. They are ignored, but logging them makes the
+// no-op explicit instead of leaving an operator to wonder why nothing changed.
+func deprecatedLiveInputSettings(flags *flag.FlagSet) []string {
+	var settings []string
+	flags.Visit(func(item *flag.Flag) {
+		if item.Name == "claude-stream-input" || item.Name == "codex-stream-input" {
+			settings = append(settings, "--"+item.Name)
+		}
+	})
+	for _, name := range []string{"AHA2_CLAUDE_STREAM_INPUT", "AHA2_CODEX_STREAM_INPUT"} {
+		if _, present := os.LookupEnv(name); present {
+			settings = append(settings, name)
+		}
+	}
+	return settings
 }
 
 func runControlPlane(ctx context.Context, options serveOptions, ready func()) error {
@@ -177,6 +201,9 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
 	slog.SetDefault(logger)
+	for _, setting := range options.deprecatedLiveInput {
+		logger.Warn("deprecated live input setting ignored; live inbox delivery is always enabled when the runner can stream stdin", "setting", setting)
+	}
 	absoluteDataDir, err := filepath.Abs(options.dataDir)
 	if err != nil {
 		return err
@@ -246,8 +273,8 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 	codexAccounts := codexaccount.New(ctx, database, secretStore, absoluteDataDir, options.codexBinary)
 	codexAccounts.SetProxyRuntime(proxyRuntime)
 	executor := execution.Executor{
-		Codex:    backend.Codex{Binary: options.codexBinary, LiveInput: options.codexStreamInput},
-		Claude:   backend.Claude{Binary: options.claudeBinary, StreamInput: options.claudeStreamInput},
+		Codex:    backend.Codex{Binary: options.codexBinary},
+		Claude:   backend.Claude{Binary: options.claudeBinary},
 		DSH:      backend.DSH{Binary: options.dshBinary},
 		Settings: database,
 	}

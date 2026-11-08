@@ -1872,60 +1872,50 @@ test("agent config offers the Codex fast tier and follows the backend", async ()
   assert.doesNotMatch(claude, /name="fast_mode"[^>]*disabled/, "the switch is disabled instead of hidden");
 });
 
-// The live inbox input switch is per Agent runtime state and applies to both
-// streaming Backends (Claude stream-json, Codex app-server turn/steer), so the
-// Agent dialog must seed it from the stored snapshot, offer it for the
-// streaming Backend selected right now, and keep the value in the form while
-// hidden.
-test("agent config offers the live inbox input switch for streaming backends", async () => {
+// Live inbox delivery is always on, so the Agent dialog and the configuration
+// update card must not expose a per-Agent switch or any "experimental" copy.
+// The server may still send the historical stream_input field; the Web client
+// must ignore it instead of rendering a hidden or disabled switch.
+test("agent config does not expose the live inbox switch", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const {renderAgentConfigDialog} = await import(pathToFileURL(resolve(root, "dist", "task_agents.js")));
-  const dialog = (backend, streamInput) => renderAgentConfigDialog({
+  const {renderAgentConfigDialog, renderConversationWithOrchestration} = await import(pathToFileURL(resolve(root, "dist", "task_agents.js")));
+  const dialog = backendName => renderAgentConfigDialog({
     task: {id: "task-1", project_id: "project-1", workspace_id: "workspace-1", title: "Task", original_request: "", current_goal: "", status: "active", isolation: "inplace", collaboration_mode: "auto", max_agents: 3, knowledge_policy: "inherit", skill_ids: [], total_tokens: 0, created_at: "", updated_at: ""},
-    agents: [{agent_id: "main", role: "main", title: "Main", backend, model_source: "env", model_id: "model-1", reasoning_effort: "high", filesystem: "workspace-write", approval: "never", proxy_enabled: false, fast_mode: false, stream_input: streamInput}],
+    agents: [{agent_id: "main", role: "main", title: "Main", backend: backendName, model_source: "env", model_id: "model-1", reasoning_effort: "high", filesystem: "workspace-write", approval: "never", proxy_enabled: false, fast_mode: false, stream_input: true}],
     turns: [], memory: {task_id: "task-1", current_goal: ""},
   }, "main", [], [], []);
-  const on = dialog("claude", true);
-  assert.match(on, /id="agent-config-stream-input-row"[^>]*>\s*<input name="stream_input" type="checkbox" checked>/, "a stored switch is not rendered as on");
-  assert.match(on, /实验性：Turn 内 live inbox 投递/, "the switch does not name the experimental path");
-  assert.match(on, /Claude 经 stream-json、Codex 经 app-server turn\/steer 生效/, "the switch help does not name both delivery paths");
-  const off = dialog("claude", false);
-  assert.doesNotMatch(off, /name="stream_input" type="checkbox" checked/, "an unset switch is rendered as on");
-  // Hidden, never disabled: a disabled checkbox drops out of the form, which
-  // would clear a stored value when another Backend is saved. The row must
-  // carry the class whose [hidden] rule beats the global display:grid rules;
-  // the browser visibility test exercises the computed result.
-  const codex = dialog("codex", true);
-  assert.match(codex, /id="agent-config-stream-input-row"[^>]*class="[^"]*runtime-picker/, "the row lacks the class that makes [hidden] effective");
-  assert.doesNotMatch(codex, /id="agent-config-stream-input-row"[^>]* hidden>/, "the switch is hidden for Codex even though it supports app-server turn/steer");
-  assert.doesNotMatch(codex, /name="stream_input"[^>]*disabled/, "the switch is disabled instead of hidden");
-  const dsh = dialog("dsh", true);
-  assert.match(dsh, /id="agent-config-stream-input-row"[^>]* hidden>/, "the switch is not gated on the Backend");
-  assert.doesNotMatch(dsh, /name="stream_input"[^>]*disabled/, "the switch is disabled instead of hidden");
-  const css = await readFile(resolve(root, "dist", "styles.css"), "utf8");
-  assert.match(css, /\.runtime-picker\[hidden\]\s*\{\s*display:\s*none\s*!important;?\s*\}/, "the class's [hidden] CSS rule is missing");
+  for (const backendName of ["claude", "codex", "dsh"]) {
+    const html = dialog(backendName);
+    assert.doesNotMatch(html, /stream_input/, `${backendName} still renders the live inbox switch`);
+    assert.doesNotMatch(html, /agent-config-stream-input-row/, `${backendName} still renders the switch row`);
+    assert.doesNotMatch(html, /实验性/, `${backendName} still renders experimental copy`);
+    assert.doesNotMatch(html, /Live inbox/, `${backendName} still reports live inbox configuration`);
+  }
+  const card = renderConversationWithOrchestration([{
+    kind: "agent_config_updated",
+    created_at: "2026-01-01T00:00:00Z",
+    payload: {
+      agent_id: "main", backend: "claude", stream_input: true, model_source: "env",
+      model_name: "Model", reasoning_effort: "high", filesystem: "workspace-write",
+      approval: "never", proxy_enabled: false, fast_mode: false,
+    },
+  }], null, () => "");
+  assert.doesNotMatch(card, /stream_input|Live inbox|实验性/, "the config card still reports the removed switch");
 });
 
-test("live inbox switch copy translates between Chinese and English", async () => {
+// The removed copy must not linger as dead i18n entries that revive the
+// "experimental" wording in English.
+test("removed live inbox switch copy has no translation", async () => {
   const root = resolve(import.meta.dirname, "..");
   const i18n = await import(pathToFileURL(resolve(root, "dist", "i18n.js")));
-  const title = "实验性：Turn 内 live inbox 投递";
-  const help = "Claude 经 stream-json、Codex 经 app-server turn/steer 生效；开启后当前 Turn 运行期间的新消息可直接送达，下一 Turn 生效。";
   i18n.applyLocale("en-US");
   try {
-    assert.equal(i18n.tr(title), "Experimental: live inbox delivery within a Turn");
-    assert.equal(
-      i18n.tr(help),
-      "Works for Claude through stream-json and Codex through app-server turn/steer. When enabled, new messages arriving while the current Turn runs are delivered directly; takes effect on the next Turn.",
-      "the Claude/Codex help copy is not translated",
-    );
-    assert.equal(i18n.tr("开启（实验性）"), "On (experimental)");
-    assert.equal(i18n.tr("Live inbox"), "Live inbox");
+    for (const legacy of ["实验性：Turn 内 live inbox 投递", "开启（实验性）"]) {
+      assert.equal(i18n.tr(legacy), legacy, `removed copy still has an English translation: ${legacy}`);
+    }
   } finally {
     i18n.applyLocale("zh-CN");
   }
-  assert.equal(i18n.tr(title), title, "Chinese copy was replaced by the English entry");
-  assert.equal(i18n.tr(help), help, "Chinese help copy was replaced by the English entry");
 });
 
 test("round card reports uncached turn input and hides ambiguous cache usage", async () => {

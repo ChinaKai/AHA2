@@ -1,10 +1,7 @@
-// Optional real-browser verification for the live inbox switch, which applies
-// to the streaming Backends (Claude stream-json, Codex app-server turn/steer).
-// The row uses HTML `hidden`, but the global `label`/`.security-setting-toggle`
-// display:grid rules override the UA [hidden] rule. This drives the built
-// renderer and the full production stylesheet through Edge/Chromium and reads
-// the computed display, which is the only way to prove the row is really gone
-// for DSH and visible for Claude and Codex.
+// Optional real-browser verification that the live inbox switch is gone.
+// Live inbox delivery is always on, so no Backend may render the old row, the
+// checkbox, or the "experimental" copy, even when the server response still
+// carries the historical stream_input field.
 import assert from "node:assert/strict";
 import {execFile} from "node:child_process";
 import {existsSync} from "node:fs";
@@ -30,13 +27,13 @@ function browserBinary() {
 
 const browser = browserBinary();
 if (!browser) {
-  console.log("stream input visibility skipped: no Edge/Chromium binary found");
+  console.log("live inbox switch removal skipped: no Edge/Chromium binary found");
   process.exit(0);
 }
 
 const {renderAgentConfigDialog} = await import(pathToFileURL(resolve(root, "dist", "task_agents.js")));
 const css = await readFile(resolve(root, "dist", "styles.css"), "utf8");
-const profile = await mkdtemp(resolve(tmpdir(), "aha2-stream-input-browser-"));
+const profile = await mkdtemp(resolve(tmpdir(), "aha2-live-inbox-browser-"));
 
 function dialog(backendName) {
   return renderAgentConfigDialog({
@@ -56,15 +53,11 @@ function dialog(backendName) {
   }, "main", [], [], []);
 }
 
-async function computedDisplay(backendName, index) {
+async function renderedDOM(backendName, index) {
   const html = `<!doctype html><html><head><meta charset="utf-8"><style>${css}</style></head><body>
     <div id="host"></div>
     <script>
       document.getElementById("host").innerHTML = ${JSON.stringify(dialog(backendName))};
-      const row = document.getElementById("agent-config-stream-input-row");
-      const style = getComputedStyle(row);
-      document.body.setAttribute("data-display", style.display);
-      document.body.setAttribute("data-visibility", style.visibility);
     </script>
   </body></html>`;
   const file = resolve(profile, `dialog-${index}.html`);
@@ -74,22 +67,17 @@ async function computedDisplay(backendName, index) {
     `--user-data-dir=${resolve(profile, `profile-${index}`)}`,
     "--allow-file-access-from-files", "--dump-dom", pathToFileURL(file).href,
   ], {timeout: 60000, maxBuffer: 20 * 1024 * 1024});
-  const display = /data-display="([^"]*)"/.exec(stdout)?.[1];
-  const visibility = /data-visibility="([^"]*)"/.exec(stdout)?.[1];
-  assert.ok(display, `the browser did not report a computed display for ${backendName}`);
-  return {display, visibility};
+  return stdout;
 }
 
 try {
-  for (const [index, backendName] of ["claude", "codex"].entries()) {
-    const shown = await computedDisplay(backendName, index);
-    assert.notEqual(shown.display, "none", `the live inbox switch is hidden for ${backendName}`);
-    assert.notEqual(shown.visibility, "hidden", `the live inbox switch is invisible for ${backendName}`);
+  for (const [index, backendName] of ["claude", "codex", "dsh"].entries()) {
+    const dom = await renderedDOM(backendName, index);
+    assert.doesNotMatch(dom, /agent-config-stream-input-row/, `${backendName} still renders the live inbox switch row`);
+    assert.doesNotMatch(dom, /name="stream_input"/, `${backendName} still renders the live inbox checkbox`);
+    assert.doesNotMatch(dom, /实验性/, `${backendName} still renders experimental live inbox copy`);
   }
-
-  const dsh = await computedDisplay("dsh", 2);
-  assert.equal(dsh.display, "none", `the live inbox switch is still displayed for dsh (display=${dsh.display})`);
-  console.log("stream input visibility verified in a real browser");
+  console.log("live inbox switch removal verified in a real browser");
 } finally {
   await rm(profile, {recursive: true, force: true});
 }

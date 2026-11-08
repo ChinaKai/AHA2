@@ -265,6 +265,8 @@ func (s *Server) createTask(writer http.ResponseWriter, request *http.Request) {
 		CodexAccountID      string           `json:"codex_account_id"`
 		ReasoningEffort     string           `json:"reasoning_effort"`
 		FastMode            bool             `json:"fast_mode"`
+		// StreamInput is accepted from older clients but ignored: live inbox
+		// delivery is always enabled when the runner can stream stdin.
 		StreamInput         bool             `json:"stream_input"`
 		StreamIdleTimeoutMS *int             `json:"stream_idle_timeout_ms"`
 		StreamMaxRetries    *int             `json:"stream_max_retries"`
@@ -366,7 +368,6 @@ func (s *Server) createTask(writer http.ResponseWriter, request *http.Request) {
 		ModelSource: payload.ModelSource, ModelID: payload.ModelID, WireModel: payload.WireModel,
 		CodexAccountID: payload.CodexAccountID, ReasoningEffort: payload.ReasoningEffort,
 		FastMode:            payload.FastMode,
-		StreamInput:         payload.StreamInput,
 		StreamIdleTimeoutMS: payload.StreamIdleTimeoutMS, StreamMaxRetries: payload.StreamMaxRetries,
 		Filesystem: filesystem, Approval: approval, CollaborationMode: payload.CollaborationMode,
 		MaxAgents: payload.MaxAgents, ProxyEnabled: payload.ProxyEnabled, KnowledgePolicy: payload.KnowledgePolicy,
@@ -1363,8 +1364,11 @@ func (s *Server) updateAgentConfig(writer http.ResponseWriter, request *http.Req
 		Approval            string `json:"approval"`
 		ProxyEnabled        *bool  `json:"proxy_enabled"`
 		FastMode            *bool  `json:"fast_mode"`
-		StreamInput         *bool  `json:"stream_input"`
-		InheritMain         *bool  `json:"inherit_main"`
+		// StreamInput is accepted from older clients and ignored. It is not part
+		// of UpdateAgentConfigInput anymore, so it cannot enable or disable live
+		// inbox delivery.
+		StreamInput *bool `json:"stream_input"`
+		InheritMain *bool `json:"inherit_main"`
 	}
 	if err := decodeJSON(request, &payload); err != nil {
 		writeError(writer, http.StatusBadRequest, "invalid_json")
@@ -1377,7 +1381,7 @@ func (s *Server) updateAgentConfig(writer http.ResponseWriter, request *http.Req
 			WireModel: payload.WireModel, CodexAccountID: payload.CodexAccountID, ReasoningEffort: payload.ReasoningEffort,
 			StreamIdleTimeoutMS: payload.StreamIdleTimeoutMS, StreamMaxRetries: payload.StreamMaxRetries,
 			Filesystem: payload.Filesystem, Approval: payload.Approval, ProxyEnabled: payload.ProxyEnabled,
-			FastMode: payload.FastMode, StreamInput: payload.StreamInput, InheritMain: payload.InheritMain,
+			FastMode: payload.FastMode, InheritMain: payload.InheritMain,
 		},
 	)
 	if err != nil {

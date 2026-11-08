@@ -316,7 +316,7 @@ func itoaBool(value bool) string {
 func recoveryRequest(runner workspace.Runner, inbox LiveInbox) Request {
 	return Request{
 		Runner: runner, WorkDir: "/workspace", Prompt: "do the long task",
-		Model: "gpt-live", StreamInput: true, LiveInbox: inbox,
+		Model: "gpt-live", LiveInbox: inbox,
 	}
 }
 

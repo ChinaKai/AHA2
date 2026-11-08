@@ -1087,7 +1087,6 @@ func ahaPetTools() []gateway.ChatTool {
 				"filesystem":       map[string]any{"type": "string", "enum": []string{"read-only", "workspace-write", "danger-full-access"}, "description": "可选；默认完全访问"},
 				"approval":         map[string]any{"type": "string", "enum": []string{"never", "auto"}, "description": "可选；默认 never"},
 				"isolation":        map[string]any{"type": "string", "enum": []string{"worktree", "inplace"}, "description": "可选；git 项目默认 worktree；只读或非代码任务可显式用 inplace；非 git 项目强制 inplace"},
-				"stream_input":     map[string]any{"type": "boolean", "description": "Claude（stream-json）或 Codex（app-server turn/steer）：实验性 Turn 内 live inbox 投递；默认关闭"},
 				"start":            map[string]any{"type": "boolean", "description": "默认 true"},
 				"skill_ids":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "可选；该项目或全局可用的已启用 Skill ID（可用 aha_list_skills 查询）；项目自动挂载的 Skill 仍会合并；任一 ID 不可用则创建失败"},
 			}, "required": []string{"project_id", "workspace_id", "title", "request"},
@@ -1113,7 +1112,6 @@ func ahaPetTools() []gateway.ChatTool {
 				"approval":           map[string]any{"type": "string", "enum": []string{"never", "auto"}},
 				"proxy_enabled":      map[string]any{"type": "boolean"},
 				"fast_mode":          map[string]any{"type": "boolean"},
-				"stream_input":       map[string]any{"type": "boolean", "description": "Claude（stream-json）或 Codex（app-server turn/steer）：实验性 Turn 内 live inbox 投递；默认关闭"},
 				"collaboration_mode": map[string]any{"type": "string", "enum": []string{"single", "auto"}},
 				"max_agents":         map[string]any{"type": "integer", "minimum": 1, "maximum": 3},
 				"groups": map[string]any{"type": "array", "items": map[string]any{
@@ -1497,7 +1495,7 @@ func ahaPetTools() []gateway.ChatTool {
 				"skill_ids":          map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "可选；整体替换 Task 的 Skill 选择（该项目或全局可用的已启用 Skill ID），空数组表示清空；不传则保持不变；任一 ID 不可用则报错且不做任何修改"},
 			}, "required": []string{"task_id"},
 		}},
-		{Name: "aha_update_task_agent", Description: "修改 Task main Agent 的模型、推理强度、文件权限、审批方式或 Claude stream-json 输入开关", Parameters: map[string]any{
+		{Name: "aha_update_task_agent", Description: "修改 Task main Agent 的模型、推理强度、文件权限、审批方式或 Fast 模式", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{
 				"task_id":          map[string]any{"type": "string"},
 				"model_id":         map[string]any{"type": "string"},
@@ -1505,7 +1503,6 @@ func ahaPetTools() []gateway.ChatTool {
 				"filesystem":       map[string]any{"type": "string", "enum": []string{"read-only", "workspace-write", "danger-full-access"}},
 				"approval":         map[string]any{"type": "string", "enum": []string{"never", "auto"}},
 				"fast_mode":        map[string]any{"type": "boolean"},
-				"stream_input":     map[string]any{"type": "boolean", "description": "Claude（stream-json）或 Codex（app-server turn/steer）：实验性 Turn 内 live inbox 投递；下一 Turn 生效；其他 Backend 忽略"},
 			}, "required": []string{"task_id"},
 		}},
 		{Name: "aha_compact_task_session", Description: "压缩并重置 Task main Agent 的 Backend Session", Parameters: map[string]any{

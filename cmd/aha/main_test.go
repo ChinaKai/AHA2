@@ -99,6 +99,27 @@ func TestParseServiceRunOptions(t *testing.T) {
 	}
 }
 
+// Live inbox delivery is always on. The old flags and environment variables are
+// still accepted so existing service definitions keep starting, but they are
+// reported as deprecated and cannot select any behavior.
+func TestDeprecatedLiveInputSettingsAreNoOps(t *testing.T) {
+	t.Setenv("AHA2_CLAUDE_STREAM_INPUT", "")
+	t.Setenv("AHA2_CODEX_STREAM_INPUT", "")
+	options, err := parseServeOptions("aha2 serve", []string{
+		"--claude-stream-input", "--codex-stream-input",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"--claude-stream-input", "--codex-stream-input",
+		"AHA2_CLAUDE_STREAM_INPUT", "AHA2_CODEX_STREAM_INPUT",
+	}
+	if strings.Join(options.deprecatedLiveInput, ",") != strings.Join(want, ",") {
+		t.Fatalf("deprecated live input settings = %#v, want %#v", options.deprecatedLiveInput, want)
+	}
+}
+
 func nextServiceStatus(t *testing.T, statuses <-chan serviceStatus) serviceStatus {
 	t.Helper()
 	select {

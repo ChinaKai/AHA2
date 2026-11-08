@@ -20,12 +20,6 @@ type Request struct {
 	SupportsImageInput bool
 	// FastMode selects the accelerated service tier where the backend has one.
 	FastMode bool
-	// StreamInput is the per-Turn opt-in for backends that can take input while
-	// a Turn is still running: Claude through stream-json stdin, Codex through
-	// app-server turn/steer. The adapter's own global switch is the
-	// deployment-wide force; the effective value is the logical OR of the two.
-	// DSH ignores it.
-	StreamInput         bool
 	StreamIdleTimeoutMS int
 	StreamMaxRetries    int
 	Environment         map[string]string

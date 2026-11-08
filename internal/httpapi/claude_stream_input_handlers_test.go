@@ -15,10 +15,10 @@ import (
 	"github.com/ChinaKai/AHA2/internal/store"
 )
 
-// The Agent config dialog saves the whole runtime selection through one PATCH,
-// so the Claude-only stream-json switch has to survive the handler hop. A
-// dropped field would look exactly like a checkbox that cannot persist.
-func TestAgentConfigPatchCarriesClaudeStreamInput(t *testing.T) {
+// The Agent config dialog used to save a per-Task stream_input switch. Live
+// inbox delivery is always on now, so an old client that still sends the field
+// must be accepted but ignored, and the response must not expose it again.
+func TestAgentConfigPatchIgnoresDeprecatedStreamInput(t *testing.T) {
 	ctx := context.Background()
 	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
 	if err != nil {
@@ -73,33 +73,38 @@ func TestAgentConfigPatchCarriesClaudeStreamInput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var edit struct {
-		Agent domain.TaskAgent `json:"agent"`
-	}
-	patch := func(payload map[string]any) domain.TaskAgent {
+	patch := func(payload map[string]any) map[string]any {
 		t.Helper()
 		response := requestJSON(t, client, http.MethodPatch, server.URL+"/api/v1/tasks/"+task.ID+"/agents/main", payload, csrf)
-		decodeResponse(t, response, &edit)
 		if response.StatusCode != http.StatusOK {
-			t.Fatalf("PATCH %v status=%d", payload, response.StatusCode)
+			var failure map[string]any
+			decodeResponse(t, response, &failure)
+			t.Fatalf("PATCH %v status=%d body=%#v", payload, response.StatusCode, failure)
 		}
-		snapshot, snapshotErr := database.RuntimeSnapshot(ctx, edit.Agent.RuntimeConfigSnapshotID)
+		var body map[string]any
+		decodeResponse(t, response, &body)
+		agent, ok := body["agent"].(map[string]any)
+		if !ok {
+			t.Fatalf("PATCH %v returned no agent: %#v", payload, body)
+		}
+		if _, exposed := agent["stream_input"]; exposed {
+			t.Fatalf("PATCH %v still exposes stream_input: %#v", payload, agent)
+		}
+		snapshotID, _ := agent["runtime_config_snapshot_id"].(string)
+		snapshot, snapshotErr := database.RuntimeSnapshot(ctx, snapshotID)
 		if snapshotErr != nil {
 			t.Fatal(snapshotErr)
 		}
-		if snapshot.StreamInput != edit.Agent.StreamInput {
-			t.Fatalf("PATCH %v reported stream_input=%t but stored %t", payload, edit.Agent.StreamInput, snapshot.StreamInput)
+		if snapshot.StreamInput {
+			t.Fatalf("PATCH %v stored the deprecated switch: %#v", payload, snapshot)
 		}
-		return edit.Agent
+		return agent
 	}
-	if agent := patch(map[string]any{"stream_input": true}); !agent.StreamInput || agent.Backend != "claude" {
-		t.Fatalf("stream_input=true was not applied: %#v", agent)
+	if agent := patch(map[string]any{"stream_input": true}); agent["backend"] != "claude" {
+		t.Fatalf("legacy stream_input broke the runtime edit: %#v", agent)
 	}
-	// An edit that does not mention the switch keeps it.
-	if agent := patch(map[string]any{"reasoning_effort": "high"}); !agent.StreamInput {
-		t.Fatalf("edit without stream_input cleared it: %#v", agent)
-	}
-	if agent := patch(map[string]any{"stream_input": false}); agent.StreamInput {
-		t.Fatalf("stream_input=false was not applied: %#v", agent)
+	// The same field must still be ignored on a later edit that omits it.
+	if agent := patch(map[string]any{"reasoning_effort": "high"}); agent["reasoning_effort"] != "high" {
+		t.Fatalf("runtime edit without stream_input failed: %#v", agent)
 	}
 }

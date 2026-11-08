@@ -31,7 +31,6 @@ type UpdateAgentConfigInput struct {
 	Approval            string
 	ProxyEnabled        *bool
 	FastMode            *bool
-	StreamInput         *bool
 	InheritMain         *bool
 }
 
@@ -154,7 +153,6 @@ func (s *Service) TaskAgents(ctx context.Context, taskID string) ([]domain.TaskA
 		agents[index].Filesystem, agents[index].Approval = parsePermissionsJSON(snapshot.PermissionsJSON)
 		agents[index].ProxyEnabled = snapshot.ProxyEnabled
 		agents[index].FastMode = snapshot.FastMode
-		agents[index].StreamInput = snapshot.StreamInput
 		model, unavailable := s.runtimeSnapshotAvailability(ctx, snapshot)
 		if unavailable != "" {
 			agents[index].RuntimeConfigError = unavailable + "，请修改模型配置"
@@ -368,7 +366,7 @@ func (s *Service) recordAgentConfigUpdate(ctx context.Context, agent domain.Task
 			"reasoning_effort": agent.ReasoningEffort, "filesystem": agent.Filesystem,
 			"stream_idle_timeout_ms": agent.StreamIdleTimeoutMS, "stream_max_retries": agent.StreamMaxRetries,
 			"approval": agent.Approval, "proxy_enabled": agent.ProxyEnabled, "inherit_main": agent.InheritMain,
-			"fast_mode": agent.FastMode, "stream_input": agent.StreamInput,
+			"fast_mode": agent.FastMode,
 		},
 		CreatedAt: now,
 	})
@@ -466,12 +464,6 @@ func (s *Service) deriveRuntimeSnapshot(
 	if input.FastMode != nil {
 		fastMode = *input.FastMode
 	}
-	// Stream input is a Claude-only per-Task opt-in. Like Fast it must survive
-	// edits that do not mention it, and an explicit value still wins.
-	streamInput := base.StreamInput
-	if input.StreamInput != nil {
-		streamInput = *input.StreamInput
-	}
 	streamIdleTimeoutMS := base.StreamIdleTimeoutMS
 	if input.StreamIdleTimeoutMS != nil {
 		streamIdleTimeoutMS = *input.StreamIdleTimeoutMS
@@ -490,7 +482,6 @@ func (s *Service) deriveRuntimeSnapshot(
 		StreamIdleTimeoutMS: streamIdleTimeoutMS, StreamMaxRetries: streamMaxRetries,
 		ProxyEnabled:    proxyEnabled,
 		FastMode:        fastMode,
-		StreamInput:     streamInput,
 		PermissionsJSON: permissionsJSON(filesystem, approval), CreatedAt: s.now().UTC(),
 	}, nil
 }

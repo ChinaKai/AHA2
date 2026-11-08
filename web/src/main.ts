@@ -2798,14 +2798,6 @@ function syncAgentConfigFields(): void {
     setClaudeOfficialCatalog("agent-config", claudeOfficialCatalog(workspace));
     syncRuntimeFields("agent-config", state.models, state.codexAccounts, false);
   }
-  // Live input exists for Claude (stream-json) and Codex (app-server
-  // turn/steer). Like the Fast row it stays enabled while hidden, so editing
-  // another Backend cannot silently clear it.
-  const streamInputRow = document.querySelector<HTMLElement>("#agent-config-stream-input-row");
-  if (streamInputRow) {
-    const backend = document.querySelector<HTMLSelectElement>("#agent-config-backend")?.value || "";
-    streamInputRow.hidden = backend !== "claude" && backend !== "codex";
-  }
 }
 
 function bindTaskAgentControls(): void {
@@ -5470,7 +5462,6 @@ function bindCommon(): void {
       approval: String(form.get("approval") || ""),
       proxy_enabled: proxyEnabledFrom(form.get("proxy_enabled")),
       fast_mode: form.get("fast_mode") === "on",
-      stream_input: form.get("stream_input") === "on",
     });
     await refreshTaskRuntime(state.selectedTask.task.id);
     setMessage("notice", `${agentID} 配置已更新，下一个 Turn 生效`);

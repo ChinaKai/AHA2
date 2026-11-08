@@ -49,9 +49,9 @@ type ExecutionRequest struct {
 	Approval        string
 	MCPServers      []backend.MCPServer
 	AllowedTools    []string
-	// LiveInbox is set for Claude and Codex Turns. Each adapter only uses it
-	// when its live-input switch is enabled and the runner can stream stdin
-	// (Claude stream-json, Codex app-server turn/steer).
+	// LiveInbox is set for Claude and Codex Turns. Each adapter uses it whenever
+	// the runner can stream stdin (Claude stream-json, Codex app-server
+	// turn/steer) and falls back to the one-shot path otherwise.
 	LiveInbox backend.LiveInbox
 }
 
@@ -269,7 +269,6 @@ type CreateTaskInput struct {
 	CodexAccountID      string
 	ReasoningEffort     string
 	FastMode            bool
-	StreamInput         bool
 	StreamIdleTimeoutMS *int
 	StreamMaxRetries    *int
 	Filesystem          string
@@ -436,7 +435,6 @@ func (s *Service) CreateTask(ctx context.Context, input CreateTaskInput) (domain
 		ProxyEnabled:        input.ProxyEnabled,
 		ReasoningEffort:     input.ReasoningEffort,
 		FastMode:            input.FastMode,
-		StreamInput:         input.StreamInput,
 		StreamIdleTimeoutMS: streamIdleTimeoutMS,
 		StreamMaxRetries:    streamMaxRetries,
 		PermissionsJSON:     permissionsJSON(input.Filesystem, input.Approval),
@@ -1375,8 +1373,8 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 	mcpServers, allowedTools := s.mcpRuntimeForTask(ctx, task, agentAPIURL)
 	var liveInbox backend.LiveInbox
 	if snapshot.Backend == "claude" || snapshot.Backend == "codex" {
-		// Codex uses an app-server Turn only when the adapter's effective live
-		// switch is on; otherwise the inbox stays unclaimed and the next Turn
+		// The adapter claims this inbox when the runner can stream stdin. On a
+		// transport that cannot, the inbox stays unclaimed and the next Turn
 		// receives the messages through the normal path.
 		liveInbox = turnLiveInbox{service: s, task: task, turn: turn}
 	}

@@ -123,7 +123,7 @@ func itoa(value int64) string {
 func newLiveCodexRequest(runner workspace.Runner, inbox LiveInbox) Request {
 	return Request{
 		Runner: runner, WorkDir: "/workspace", Prompt: "do the work",
-		Model: "gpt-live", StreamInput: true, LiveInbox: inbox,
+		Model: "gpt-live", LiveInbox: inbox,
 	}
 }
 
@@ -244,32 +244,34 @@ func TestCodexLiveInboxRollsBackWhenProcessExits(t *testing.T) {
 	}
 }
 
-// Without the per-Task or deployment switch, the one-shot exec path runs and
-// the inbox is never claimed.
-func TestCodexLiveInboxOffKeepsExecPath(t *testing.T) {
+// With no live inbox there is nothing to steer, so even a streaming-capable
+// runner uses the one-shot exec path.
+func TestCodexNoInboxKeepsExecPath(t *testing.T) {
 	inbox := newFakeLiveInbox(LiveBatch{IDs: []string{"m1"}, Text: "STEER"})
-	runner := &recordingExecRunner{}
-	request := newLiveCodexRequest(runner, inbox)
-	request.StreamInput = false
+	runner := &streamingExecRunner{}
+	request := newLiveCodexRequest(runner, nil)
 	if _, err := (Codex{}).Execute(context.Background(), request, nil); err != nil {
 		t.Fatal(err)
 	}
+	attempts, execs := runner.counts()
+	if attempts != 0 || execs != 1 {
+		t.Fatalf("app-server attempts=%d exec calls=%d, want 0/1", attempts, execs)
+	}
 	if !contains(runner.command.Args, "exec") || contains(runner.command.Args, "app-server") {
-		t.Fatalf("disabled live input must use exec: %v", runner.command.Args)
+		t.Fatalf("no-inbox Turn must use exec: %v", runner.command.Args)
 	}
 	if claims, _ := inbox.snapshot(); claims != 0 {
-		t.Fatalf("inbox was claimed without the switch: %d", claims)
+		t.Fatalf("inbox was claimed without being passed to the backend: %d", claims)
 	}
 }
 
-// A deployment-wide force still needs a runner that can stream stdin; otherwise
-// nothing is claimed and the Turn falls back to exec.
+// A live inbox still needs a runner that can stream stdin; otherwise nothing is
+// claimed and the Turn falls back to exec.
 func TestCodexLiveInboxFallsBackWhenRunnerCannotStream(t *testing.T) {
 	inbox := newFakeLiveInbox(LiveBatch{IDs: []string{"m1"}, Text: "STEER"})
 	runner := &recordingExecRunner{}
 	request := newLiveCodexRequest(runner, inbox)
-	request.StreamInput = false
-	if _, err := (Codex{LiveInput: true}).Execute(context.Background(), request, nil); err != nil {
+	if _, err := (Codex{}).Execute(context.Background(), request, nil); err != nil {
 		t.Fatal(err)
 	}
 	if !contains(runner.command.Args, "exec") {
@@ -363,30 +365,6 @@ func (runner *recordingExecRunner) Run(_ context.Context, command workspace.Comm
 	onLine(`{"type":"thread.started","thread_id":"session-exec"}`)
 	onLine(`{"type":"item.completed","item":{"type":"agent_message","text":"done"}}`)
 	return workspace.Result{ExitCode: 0}, nil
-}
-
-// With both switches off, even a streaming-capable runner must use exec and
-// never touch the inbox. This exercises the effective-switch decision itself,
-// not merely the transport capability.
-func TestCodexLiveSwitchOffUsesExecWithoutClaiming(t *testing.T) {
-	inbox := newFakeLiveInbox(LiveBatch{IDs: []string{"m1"}, Text: "STEER"})
-	runner := &streamingExecRunner{}
-	request := newLiveCodexRequest(runner, inbox)
-	request.StreamInput = false
-	result, err := (Codex{}).Execute(context.Background(), request, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Reply != "done" {
-		t.Fatalf("reply = %q", result.Reply)
-	}
-	attempts, execs := runner.counts()
-	if attempts != 0 || execs != 1 {
-		t.Fatalf("app-server attempts=%d exec calls=%d, want 0/1", attempts, execs)
-	}
-	if claims, acks := inbox.snapshot(); claims != 0 || len(acks) != 0 {
-		t.Fatalf("inbox was used while the switch was off: claims=%d acks=%v", claims, acks)
-	}
 }
 
 // An app-server that cannot finish its handshake falls back to exec before the

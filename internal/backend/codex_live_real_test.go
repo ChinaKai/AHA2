@@ -62,10 +62,10 @@ func TestCodexLiveInboxRealCLI(t *testing.T) {
 	var events []timedEvent
 	started := time.Now()
 	result, err := (Codex{
-		Binary: binary, LiveInput: true, LivePoll: 200 * time.Millisecond, Timeout: 3 * time.Minute,
+		Binary: binary, LivePoll: 200 * time.Millisecond, Timeout: 3 * time.Minute,
 	}).Execute(context.Background(), Request{
 		Runner: workspace.LocalRunner{}, WorkDir: t.TempDir(), Model: model,
-		Environment: environment, StreamInput: true, LiveInbox: inbox,
+		Environment: environment, LiveInbox: inbox,
 		// The Windows sandbox blocks process launches in workspace-write mode,
 		// so the long command this test needs could never start.
 		Filesystem: "danger-full-access",

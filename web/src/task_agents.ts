@@ -408,9 +408,6 @@ function renderAgentConfigCard(item: ConversationItem): string {
       ["SSE 超时", `${Math.round(Number(payload.stream_idle_timeout_ms || 300000) / 1000)} 秒`],
       ["流重试", String(Number(payload.stream_max_retries || 0) || 5)],
     ] : []),
-    ...(payload.backend === "claude" || payload.backend === "codex" ? [
-      ["Live inbox", payload.stream_input ? "开启（实验性）" : "关闭"],
-    ] : []),
     ["权限", `${String(payload.filesystem || "-")} · ${String(payload.approval || "-")}`],
     ["代理", payload.proxy_enabled ? "启用" : "关闭"],
   ];
@@ -499,7 +496,6 @@ export function renderAgentConfigDialog(detail: TaskDetail, agentID: string, mod
     </div>
     <label class="agent-runtime-fields">审批<select name="approval"><option value="never" ${agent.approval !== "auto" ? "selected" : ""}>无需确认</option><option value="auto" ${agent.approval === "auto" ? "selected" : ""}>自动批准</option></select></label>
     <label class="agent-runtime-fields">Backend 代理<select name="proxy_enabled">${proxyOptionsHTML(agent.proxy_enabled)}</select></label>
-    <label id="agent-config-stream-input-row" class="security-setting-toggle agent-runtime-fields runtime-picker" ${agent.backend === "claude" || agent.backend === "codex" ? "" : "hidden"}><input name="stream_input" type="checkbox" ${agent.stream_input ? "checked" : ""}><span><strong>实验性：Turn 内 live inbox 投递</strong><small>Claude 经 stream-json、Codex 经 app-server turn/steer 生效；开启后当前 Turn 运行期间的新消息可直接送达，下一 Turn 生效。</small></span></label>
     <div class="dialog-actions"><button type="button" data-close>取消</button><button class="primary" value="default">保存</button></div>
   </form></dialog>`;
 }

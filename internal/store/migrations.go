@@ -3496,9 +3496,9 @@ func (s *Store) migrate(ctx context.Context) error {
 	var hasV125 bool
 	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=125)`).Scan(&hasV125)
 	if !hasV125 {
-		// Per-Task opt-in for Claude stream-json live inbox input. The default
-		// keeps every existing Task on the one-shot -p path; the deployment-wide
-		// AHA2_CLAUDE_STREAM_INPUT flag remains the separate force switch.
+		// Historical per-Task opt-in for live inbox input. Live inbox delivery is
+		// now always enabled when the runner can stream stdin, so the column is
+		// kept only so existing rows keep loading; the runtime ignores it.
 		if _, err := s.db.ExecContext(ctx, `ALTER TABLE runtime_config_snapshots ADD COLUMN stream_input INTEGER NOT NULL DEFAULT 0`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
 			return fmt.Errorf("apply schema v125 stream input: %w", err)
 		}

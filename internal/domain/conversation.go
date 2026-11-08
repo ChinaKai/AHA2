@@ -77,7 +77,6 @@ type TaskAgent struct {
 	Approval                string    `json:"approval,omitempty"`
 	ProxyEnabled            bool      `json:"proxy_enabled"`
 	FastMode                bool      `json:"fast_mode"`
-	StreamInput             bool      `json:"stream_input"`
 	RuntimeConfigValid      bool      `json:"runtime_config_valid"`
 	RuntimeConfigError      string    `json:"runtime_config_error,omitempty"`
 	UnreadCount             int       `json:"unread_count"`
