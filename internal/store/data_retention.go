@@ -61,7 +61,7 @@ var databaseCatalog = []databaseCategoryDef{
 		"data_retention_settings",
 	}},
 	{"I", "pet", domain.DatabaseSafetyKeep, []string{
-		"owner_assistants", "pet_states", "pet_approvals", "pet_events", "pet_task_watches",
+		"owner_assistants", "pet_states", "pet_approvals", "pet_events", "pet_task_watches", "pet_code_reviews",
 	}},
 	{"J", "attachments", domain.DatabaseSafetyReadOnly, []string{
 		"attachments", "build_artifacts",

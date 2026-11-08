@@ -304,6 +304,7 @@ func TestPetCompleteTaskRequiresApprovedSeniorReview(t *testing.T) {
 	}{
 		{name: "default runtime", filesystem: "read-only", effort: "high"},
 		{name: "configured runtime", filesystem: "workspace-write", effort: "xhigh"},
+		{name: "full access", filesystem: "danger-full-access", effort: "max"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			completeTaskWithReview(t, tc.filesystem, tc.effort)
@@ -359,6 +360,9 @@ func TestPetCompleteTaskRejectsWeakOrSameModelReview(t *testing.T) {
 				KnowledgePolicy: project.KnowledgePolicy, Isolation: isolation, StartMode: "manual",
 			})
 			if err != nil {
+				t.Fatal(err)
+			}
+			if err := fixture.database.CreatePetCodeReviewLink(fixture.ctx, review.ID, source.ID); err != nil {
 				t.Fatal(err)
 			}
 			agents, err := fixture.service.TaskAgents(fixture.ctx, review.ID)
@@ -432,44 +436,20 @@ func completeTaskWithReview(t *testing.T, filesystem, effort string) {
 		t.Fatalf("write task completed without review: %v", err)
 	}
 
-	review, err := fixture.service.CreateTask(fixture.ctx, CreateTaskInput{
-		ProjectID: project.ID, WorkspaceID: workspace.ID, Title: "代码评审",
-		Request: "只读评审", ModelID: reviewModel.ID, ReasoningEffort: effort,
-		Filesystem: filesystem, Approval: "never", CollaborationMode: "single", MaxAgents: 1,
-		KnowledgePolicy: project.KnowledgePolicy, Isolation: "inplace", StartMode: "manual",
+	fixture.service.executor = &petReviewExecutor{reply: "Verdict: APPROVE\n\n检查通过。"}
+	review, err := fixture.service.PetRequestCodeReview(fixture.ctx, PetRequestCodeReviewInput{
+		TaskID: source.ID, ReviewModelID: reviewModel.ID, ReasoningEffort: effort, Filesystem: filesystem,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	agents, err := fixture.service.TaskAgents(fixture.ctx, review.ID)
-	if err != nil || len(agents) == 0 {
-		t.Fatalf("review agents err=%v", err)
+	waitForTask(t, fixture.database, review.ID, domain.TaskWaitingUser)
+	assertReviewFirstTurnRuntime(t, fixture, review.ID, filesystem, effort, "never")
+	if _, err := fixture.service.PetCompleteTaskWithReview(fixture.ctx, source.ID, review.ID); err == nil || !strings.Contains(err.Error(), "尚未完成") {
+		t.Fatalf("unfinished review accepted: %v", err)
 	}
-	now := fixture.service.now().UTC()
-	message := domain.Message{
-		ID: domain.NewID("message"), TaskID: review.ID, Role: "user", Sender: "pet",
-		Content: "完成评审", CreatedAt: now,
-	}
-	if err := fixture.database.AddMessage(fixture.ctx, message); err != nil {
-		t.Fatal(err)
-	}
-	if err := fixture.database.CreateTurn(fixture.ctx, domain.Turn{
-		ID: domain.NewID("turn"), TaskID: review.ID, AgentID: "main", Sequence: 1,
-		InputMessageID: message.ID, Status: domain.TurnSucceeded,
-		RuntimeConfigSnapshotID: agents[0].RuntimeConfigSnapshotID,
-		Result:                  "Verdict: APPROVE\n\n检查通过。", QueuedAt: now, FinishedAt: now,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	for _, transition := range [][2]domain.TaskStatus{
-		{domain.TaskDraft, domain.TaskPreparing},
-		{domain.TaskPreparing, domain.TaskActive},
-		{domain.TaskActive, domain.TaskWaitingUser},
-		{domain.TaskWaitingUser, domain.TaskCompleted},
-	} {
-		if err := fixture.database.UpdateTaskStatus(fixture.ctx, review.ID, transition[0], transition[1], timeString(now), ""); err != nil {
-			t.Fatal(err)
-		}
+	if completed, err := fixture.service.PetCompleteTask(fixture.ctx, review.ID); err != nil || completed.Status != domain.TaskCompleted {
+		t.Fatalf("review completion recursed: status=%s err=%v", completed.Status, err)
 	}
 	completed, err := fixture.service.PetCompleteTaskWithReview(fixture.ctx, source.ID, review.ID)
 	if err != nil {
