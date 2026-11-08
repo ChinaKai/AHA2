@@ -1468,11 +1468,14 @@ func ahaPetTools() []gateway.ChatTool {
 				"task_id": map[string]any{"type": "string"},
 			}, "required": []string{"task_id"},
 		}},
-		{Name: "aha_request_code_review", Description: "为源 Task 创建独立、只读、高推理的高级模型 Review Task；写权限任务完成前必须使用", Parameters: map[string]any{
+		{Name: "aha_request_code_review", Description: "为源 Task 创建独立的高级模型 Review Task，创建时一次性应用权限/推理/Skill（运行中的 Turn 不会热更新）；默认 read-only、high、approval=never、inplace；写权限任务完成前必须使用", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{
-				"task_id":         map[string]any{"type": "string"},
-				"review_model_id": map[string]any{"type": "string", "description": "评审模型，必须与源 Task 模型不同；用 aha_model_catalog 选择更强的模型"},
-				"focus":           map[string]any{"type": "string", "description": "可选：额外关注的审查重点"},
+				"task_id":          map[string]any{"type": "string"},
+				"review_model_id":  map[string]any{"type": "string", "description": "评审模型，必须与源 Task 模型不同；用 aha_model_catalog 选择更强的模型"},
+				"focus":            map[string]any{"type": "string", "description": "可选：额外关注的审查重点"},
+				"filesystem":       map[string]any{"type": "string", "enum": []string{"read-only", "workspace-write", "danger-full-access"}, "description": "可选；创建时生效，默认 read-only"},
+				"reasoning_effort": map[string]any{"type": "string", "enum": []string{"low", "medium", "high", "xhigh", "max"}, "description": "可选；创建时生效，默认 high"},
+				"skill_ids":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "可选；创建时生效。为空时自动附加项目或全局可用的 tiered-code-review Skill；找不到时 Review Task 照常创建并在 warnings 中说明"},
 			}, "required": []string{"task_id", "review_model_id"},
 		}},
 		{Name: "aha_delete_task", Description: "提交删除 Task 审批；主人批准后才会删除", Parameters: map[string]any{
