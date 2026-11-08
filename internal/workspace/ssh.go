@@ -722,7 +722,7 @@ try {
   $start = New-Object Diagnostics.ProcessStartInfo
   $start.UseShellExecute = $false
   $start.CreateNoWindow = $true
-  $start.RedirectStandardInput = $true
+  $start.RedirectStandardInput = $false
   $start.RedirectStandardOutput = $true
   $start.RedirectStandardError = $true
   if ($extension -eq '.cmd' -or $extension -eq '.bat') {
@@ -740,8 +740,6 @@ try {
   if (-not $child.Start()) { throw 'AHA2_COMMAND_START_FAILED' }
   $stdoutTask = $child.StandardOutput.BaseStream.CopyToAsync([Console]::OpenStandardOutput())
   $stderrTask = $child.StandardError.BaseStream.CopyToAsync([Console]::OpenStandardError())
-  $inputStream.CopyTo($child.StandardInput.BaseStream)
-  $child.StandardInput.Close()
   $child.WaitForExit()
   $null = $stdoutTask.GetAwaiter().GetResult()
   $null = $stderrTask.GetAwaiter().GetResult()

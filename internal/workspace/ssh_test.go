@@ -107,25 +107,34 @@ func TestWindowsSSHBootstrapPreservesRawStdin(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows PowerShell integration test")
 	}
-	raw := "中文\x00without-final-newline"
-	payload, err := windowsRemotePayload(Command{
-		Executable: "powershell.exe",
-		Args: []string{"-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
-			`[Console]::OpenStandardInput().CopyTo([Console]::OpenStandardOutput())`},
-		Stdin: raw,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	parts := strings.Fields(windowsBootstrapCommand())
-	command := exec.Command(parts[0], parts[1:]...)
-	command.Stdin = strings.NewReader(payload)
-	output, err := command.Output()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(output) != raw {
-		t.Fatalf("bootstrap changed raw stdin: %q", output)
+	for _, test := range []struct {
+		name string
+		raw  string
+	}{
+		{name: "without-bom", raw: "中文\x00without-final-newline"},
+		{name: "with-bom", raw: "\ufeff中文\x00without-final-newline"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			payload, err := windowsRemotePayload(Command{
+				Executable: "powershell.exe",
+				Args: []string{"-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+					`[Console]::OpenStandardInput().CopyTo([Console]::OpenStandardOutput())`},
+				Stdin: test.raw,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			parts := strings.Fields(windowsBootstrapCommand())
+			command := exec.Command(parts[0], parts[1:]...)
+			command.Stdin = strings.NewReader(payload)
+			output, err := command.Output()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(output) != test.raw {
+				t.Fatalf("bootstrap changed raw stdin: %q", output)
+			}
+		})
 	}
 }
 
