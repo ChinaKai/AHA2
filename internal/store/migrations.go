@@ -3506,5 +3506,15 @@ func (s *Store) migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(125, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
 		return fmt.Errorf("record schema v125: %w", err)
 	}
+	if _, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS pet_code_reviews (
+		review_task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+		source_task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+		CHECK(review_task_id<>source_task_id)
+	)`); err != nil {
+		return fmt.Errorf("apply schema v126 code review links: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(126, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v126: %w", err)
+	}
 	return nil
 }
