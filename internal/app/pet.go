@@ -1458,7 +1458,7 @@ func ahaPetTools() []gateway.ChatTool {
 		{Name: "aha_complete_task", Description: "把 Task 标记为完成；写权限任务必须提供高级模型 Review Task", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{
 				"task_id":        map[string]any{"type": "string"},
-				"review_task_id": map[string]any{"type": "string", "description": "写权限任务必填：已通过 Verdict: APPROVE 的只读高推理 Review Task ID"},
+				"review_task_id": map[string]any{"type": "string", "description": "写权限任务必填：已通过 Verdict: APPROVE 的独立 Review Task ID（high/xhigh/max 推理、不同模型、approval=never、inplace；评审不得修改源码）"},
 			}, "required": []string{"task_id"},
 		}},
 		{Name: "aha_finalize_task_worktree", Description: "仅用于已完成的 worktree Task：检查提交、合并回目标分支、删除临时 worktree 和分支；有未提交改动或冲突时保留并报错", Parameters: map[string]any{
@@ -1466,11 +1466,14 @@ func ahaPetTools() []gateway.ChatTool {
 				"task_id": map[string]any{"type": "string"},
 			}, "required": []string{"task_id"},
 		}},
-		{Name: "aha_request_code_review", Description: "为源 Task 创建独立、只读、高推理的高级模型 Review Task；写权限任务完成前必须使用", Parameters: map[string]any{
+		{Name: "aha_request_code_review", Description: "为源 Task 创建独立的不同模型 Review Task，创建时一次性应用权限/推理/Skill（运行中的 Turn 不会热更新）；默认 read-only、high、approval=never、inplace，推理至少 high；评审可运行 git diff、测试和构建但不得修改、提交、合并或部署源码；写权限任务完成前必须使用", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{
-				"task_id":         map[string]any{"type": "string"},
-				"review_model_id": map[string]any{"type": "string", "description": "评审模型，必须与源 Task 模型不同；用 aha_model_catalog 选择更强的模型"},
-				"focus":           map[string]any{"type": "string", "description": "可选：额外关注的审查重点"},
+				"task_id":          map[string]any{"type": "string"},
+				"review_model_id":  map[string]any{"type": "string", "description": "评审模型，必须与源 Task 模型不同；用 aha_model_catalog 选择更强的模型"},
+				"focus":            map[string]any{"type": "string", "description": "可选：额外关注的审查重点"},
+				"filesystem":       map[string]any{"type": "string", "enum": []string{"read-only", "workspace-write", "danger-full-access"}, "description": "可选；创建时生效，默认 read-only"},
+				"reasoning_effort": map[string]any{"type": "string", "enum": []string{"low", "medium", "high", "xhigh", "max"}, "description": "可选；创建时生效，默认 high"},
+				"skill_ids":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "可选；创建时生效。为空时自动附加项目或全局可用的 tiered-code-review Skill；找不到时 Review Task 照常创建并在 warnings 中说明"},
 			}, "required": []string{"task_id", "review_model_id"},
 		}},
 		{Name: "aha_delete_task", Description: "提交删除 Task 审批；主人批准后才会删除", Parameters: map[string]any{
