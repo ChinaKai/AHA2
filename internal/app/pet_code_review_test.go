@@ -209,6 +209,13 @@ func TestPetRequestCodeReviewAutoAttachesTieredSkill(t *testing.T) {
 func TestPetRequestCodeReviewWarnsWhenTieredSkillMissing(t *testing.T) {
 	fixture, project, workspace := petReviewFixture(t)
 	reviewModel := addReviewModel(t, fixture)
+	if err := fixture.database.CreateSkill(fixture.ctx, domain.Skill{
+		ID: "skill-review-bound-mirror", Scope: "project", ProjectID: "other-project", BoundProjectID: project.ID,
+		Name: petCodeReviewTieredSkillName, Instructions: "镜像", Version: 1, Status: "active", Enabled: true,
+		CreatedAt: fixture.createdAt, UpdatedAt: fixture.createdAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
 	source, err := fixture.service.PetCreateTask(fixture.ctx, PetCreateTaskInput{
 		ProjectID: project.ID, WorkspaceID: workspace.ID, Title: "缺少评审 Skill",
 		Request: "修改代码", ModelID: fixture.model.ID, Start: boolPointer(false),
@@ -266,7 +273,7 @@ func TestPetMCPRequestCodeReviewAcceptsRunConfig(t *testing.T) {
 	}
 	args, _ := json.Marshal(map[string]any{
 		"task_id": source.ID, "review_model_id": reviewModel.ID,
-		"filesystem": "workspace-write", "reasoning_effort": "medium",
+		"filesystem": "workspace-write", "reasoning_effort": "high",
 		"skill_ids": []string{"skill-review-extra"},
 	})
 	raw, err := fixture.service.PetMCPTool(fixture.ctx, "aha_request_code_review", args)
@@ -281,7 +288,7 @@ func TestPetMCPRequestCodeReviewAcceptsRunConfig(t *testing.T) {
 		t.Fatalf("mcp review=%#v", review)
 	}
 	agents, err := fixture.service.TaskAgents(fixture.ctx, review.ID)
-	if err != nil || len(agents) == 0 || agents[0].Filesystem != "workspace-write" || agents[0].ReasoningEffort != "medium" {
+	if err != nil || len(agents) == 0 || agents[0].Filesystem != "workspace-write" || agents[0].ReasoningEffort != "high" {
 		t.Fatalf("mcp review runtime=%#v err=%v", agents, err)
 	}
 }
@@ -304,9 +311,115 @@ func TestPetCompleteTaskRequiresApprovedSeniorReview(t *testing.T) {
 	}
 }
 
+func TestPetCompleteTaskRejectsWeakOrSameModelReview(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		effort    string
+		modelSame bool
+		approval  string
+		isolation string
+		want      string
+	}{
+		{name: "weak reasoning", effort: "low", want: "high"},
+		{name: "same model", effort: "high", modelSame: true, want: "不同的模型"},
+		{name: "approval", effort: "high", approval: "auto", want: "never"},
+		{name: "isolation", effort: "high", isolation: "worktree", want: "inplace"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture, project, workspace := petReviewFixture(t)
+			reviewModel := addReviewModel(t, fixture)
+			if tc.isolation != "" {
+				project.ProjectType = "git"
+				if err := fixture.database.UpdateProject(fixture.ctx, project); err != nil {
+					t.Fatal(err)
+				}
+			}
+			source, err := fixture.service.PetCreateTask(fixture.ctx, PetCreateTaskInput{
+				ProjectID: project.ID, WorkspaceID: workspace.ID, Title: "需要强评审的代码任务",
+				Request: "改动代码", Isolation: "inplace", Start: boolPointer(false),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			modelID := reviewModel.ID
+			if tc.modelSame {
+				modelID = fixture.model.ID
+			}
+			approval, isolation := tc.approval, tc.isolation
+			if approval == "" {
+				approval = "never"
+			}
+			if isolation == "" {
+				isolation = "inplace"
+			}
+			review, err := fixture.service.CreateTask(fixture.ctx, CreateTaskInput{
+				ProjectID: project.ID, WorkspaceID: workspace.ID, Title: "代码评审",
+				Request: "只读评审", ModelID: modelID, ReasoningEffort: tc.effort,
+				Filesystem: "read-only", Approval: approval, CollaborationMode: "single", MaxAgents: 1,
+				KnowledgePolicy: project.KnowledgePolicy, Isolation: isolation, StartMode: "manual",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			agents, err := fixture.service.TaskAgents(fixture.ctx, review.ID)
+			if err != nil || len(agents) == 0 {
+				t.Fatalf("review agents err=%v", err)
+			}
+			now := fixture.service.now().UTC()
+			message := domain.Message{ID: domain.NewID("message"), TaskID: review.ID, Role: "user", Sender: "pet", Content: "完成评审", CreatedAt: now}
+			if err := fixture.database.AddMessage(fixture.ctx, message); err != nil {
+				t.Fatal(err)
+			}
+			if err := fixture.database.CreateTurn(fixture.ctx, domain.Turn{
+				ID: domain.NewID("turn"), TaskID: review.ID, AgentID: "main", Sequence: 1,
+				InputMessageID: message.ID, Status: domain.TurnSucceeded, RuntimeConfigSnapshotID: agents[0].RuntimeConfigSnapshotID,
+				Result: "Verdict: APPROVE", QueuedAt: now, FinishedAt: now,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			for _, transition := range [][2]domain.TaskStatus{
+				{domain.TaskDraft, domain.TaskPreparing}, {domain.TaskPreparing, domain.TaskActive},
+				{domain.TaskActive, domain.TaskWaitingUser}, {domain.TaskWaitingUser, domain.TaskCompleted},
+			} {
+				if err := fixture.database.UpdateTaskStatus(fixture.ctx, review.ID, transition[0], transition[1], timeString(now), ""); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := fixture.service.requirePetCodeReview(fixture.ctx, source, review.ID); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("weak review accepted or wrong error: %v", err)
+			}
+		})
+	}
+}
+
+func TestPetRequestCodeReviewRejectsInvalidRunConfig(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		input PetRequestCodeReviewInput
+		want  string
+	}{
+		{name: "filesystem", input: PetRequestCodeReviewInput{Filesystem: "invalid"}, want: "filesystem"},
+		{name: "reasoning", input: PetRequestCodeReviewInput{ReasoningEffort: "low"}, want: "high"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture, project, workspace := petReviewFixture(t)
+			reviewModel := addReviewModel(t, fixture)
+			source, err := fixture.service.PetCreateTask(fixture.ctx, PetCreateTaskInput{ProjectID: project.ID, WorkspaceID: workspace.ID, Title: "参数校验", Request: "改动代码", Start: boolPointer(false)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			tc.input.TaskID, tc.input.ReviewModelID = source.ID, reviewModel.ID
+			if _, err := fixture.service.PetRequestCodeReview(fixture.ctx, tc.input); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("invalid config accepted or wrong error: %v", err)
+			}
+		})
+	}
+}
+
 func completeTaskWithReview(t *testing.T, filesystem, effort string) {
 	t.Helper()
 	fixture, project, workspace := petReviewFixture(t)
+	reviewModel := addReviewModel(t, fixture)
 	source, err := fixture.service.PetCreateTask(fixture.ctx, PetCreateTaskInput{
 		ProjectID: project.ID, WorkspaceID: workspace.ID, Title: "需要评审的代码任务",
 		Request: "改动代码", Start: boolPointer(true),
@@ -321,7 +434,7 @@ func completeTaskWithReview(t *testing.T, filesystem, effort string) {
 
 	review, err := fixture.service.CreateTask(fixture.ctx, CreateTaskInput{
 		ProjectID: project.ID, WorkspaceID: workspace.ID, Title: "代码评审",
-		Request: "只读评审", ModelID: fixture.model.ID, ReasoningEffort: effort,
+		Request: "只读评审", ModelID: reviewModel.ID, ReasoningEffort: effort,
 		Filesystem: filesystem, Approval: "never", CollaborationMode: "single", MaxAgents: 1,
 		KnowledgePolicy: project.KnowledgePolicy, Isolation: "inplace", StartMode: "manual",
 	})

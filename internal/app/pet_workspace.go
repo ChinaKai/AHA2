@@ -61,7 +61,7 @@ var (
 - 没有可推进项时，从最近 worklog/loops 选一个低风险、可验证的 AHA 使用体验改进并启动 Task；不要用 NOOP 逃避。
 - 小工具/原型写在 pet-lab/，可以直接读写和运行；需要改 AHA2 源码时创建普通 Task。
 - 创建任务默认 high 推理和完全访问；简单/只读任务可显式降级，复杂任务选择更强的模型。
-- 写权限任务完成前必须用 aha_request_code_review 创建独立、只读、高推理的 Review Task，等待 Verdict: APPROVE 后才能完成或合入。
+- 写权限任务完成前必须用 aha_request_code_review 创建独立、不同模型、high 及以上推理、approval=never、inplace 的 Review Task；可允许其运行 git diff、测试和构建，但不得修改、提交、合并或部署源码；等待 Verdict: APPROVE 后才能完成或合入。
 `
 	petLabReadmeSeed = `# 宠物实验室
 

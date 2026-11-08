@@ -89,9 +89,9 @@ func (s *Service) PetRequestCodeReview(ctx context.Context, input PetRequestCode
 		reasoningEffort = petCodeReviewReasoningEffort
 	}
 	switch reasoningEffort {
-	case "low", "medium", "high", "xhigh", "max":
+	case "high", "xhigh", "max":
 	default:
-		return PetCodeReviewResult{}, fmt.Errorf("reasoning_effort 必须是 low、medium、high、xhigh 或 max")
+		return PetCodeReviewResult{}, fmt.Errorf("评审 reasoning_effort 必须是 high、xhigh 或 max")
 	}
 	sourceAgent := "main"
 	sourceModelID := ""
@@ -99,7 +99,10 @@ func (s *Service) PetRequestCodeReview(ctx context.Context, input PetRequestCode
 		sourceAgent = agents[0].AgentID
 		sourceModelID = agents[0].ModelID
 	}
-	if sourceModelID != "" && sourceModelID == reviewModel.ID {
+	if sourceModelID == "" {
+		return PetCodeReviewResult{}, fmt.Errorf("无法读取源 Task 模型，不能创建独立评审")
+	}
+	if sourceModelID == reviewModel.ID {
 		return PetCodeReviewResult{}, fmt.Errorf("评审模型必须与源 Task 模型不同，避免同模型自审")
 	}
 	skillIDs, warning, err := s.petCodeReviewSkillIDs(ctx, project.ID, input.SkillIDs)
@@ -120,11 +123,19 @@ func (s *Service) PetRequestCodeReview(ctx context.Context, input PetRequestCode
 	s.watchPetTask(ctx, review.ID, "review")
 	started, err := s.StartTask(ctx, review.ID)
 	if err != nil {
-		return PetCodeReviewResult{Task: review}, fmt.Errorf("Review Task 已创建但启动失败：%w", err)
+		result := PetCodeReviewResult{Task: review}
+		if warning != "" {
+			result.Warnings = []string{warning}
+		}
+		return result, fmt.Errorf("Review Task 已创建但启动失败：%w", err)
 	}
 	review = started
 	if _, err := s.SubmitPetDelegatedMessage(ctx, review.ID, request); err != nil {
-		return PetCodeReviewResult{Task: review}, fmt.Errorf("Review Task 已启动但首条消息提交失败：%w", err)
+		result := PetCodeReviewResult{Task: review}
+		if warning != "" {
+			result.Warnings = []string{warning}
+		}
+		return result, fmt.Errorf("Review Task 已启动但首条消息提交失败：%w", err)
 	}
 	s.recordPetWork(ctx, "task_created", review.ID, string(review.Status))
 	result := PetCodeReviewResult{Task: review}
@@ -154,7 +165,8 @@ func (s *Service) petCodeReviewSkillIDs(ctx context.Context, projectID string, r
 	}
 	globalID := ""
 	for _, item := range items {
-		if !strings.EqualFold(strings.TrimSpace(item.Name), petCodeReviewTieredSkillName) || !skillAppliesToProject(item, projectID) {
+		if !strings.EqualFold(strings.TrimSpace(item.Name), petCodeReviewTieredSkillName) ||
+			(item.Scope != "global" && !(item.Scope == "project" && item.ProjectID == projectID)) {
 			continue
 		}
 		if item.Scope == "project" {
@@ -172,7 +184,7 @@ func (s *Service) petCodeReviewSkillIDs(ctx context.Context, projectID string, r
 
 func petCodeReviewRequest(source domain.Task, focus, sourceAgent string) string {
 	var b strings.Builder
-	b.WriteString("你是独立的高级代码评审 Agent。只做只读评审，不修改代码、不执行合并或部署。\n")
+	b.WriteString("你是独立的高级代码评审 Agent。可以运行 git diff、测试和构建，但不得修改、提交、合并或部署源码。\n")
 	fmt.Fprintf(&b, "源 Task：%s「%s」（%s，agent=%s）\n", source.Code, source.Title, source.ID, sourceAgent)
 	if strings.TrimSpace(source.TaskBranch) != "" {
 		fmt.Fprintf(&b, "源分支：%s\n", source.TaskBranch)
@@ -236,9 +248,25 @@ func (s *Service) requirePetCodeReview(ctx context.Context, source domain.Task, 
 	if err != nil || len(reviewAgents) == 0 {
 		return fmt.Errorf("无法读取 Review Task 的权限配置")
 	}
-	// Filesystem and reasoning effort are chosen when the Review Task is
-	// created, so they may be stricter or broader than the old fixed
-	// read-only/high pair. Approval and isolation stay fixed for independence.
+	// The review must remain an independent, strong review regardless of how
+	// the task was created or later edited.
+	if len(agents) == 0 {
+		return fmt.Errorf("无法读取源 Task 的模型配置")
+	}
+	sourceModelID := strings.TrimSpace(agents[0].ModelID)
+	if sourceModelID == "" || strings.TrimSpace(reviewAgents[0].ModelID) == "" || reviewAgents[0].ModelID == sourceModelID {
+		return fmt.Errorf("Review Task 必须使用与源 Task 不同的模型")
+	}
+	switch strings.TrimSpace(reviewAgents[0].Filesystem) {
+	case "read-only", "workspace-write", "danger-full-access":
+	default:
+		return fmt.Errorf("Review Task 的 filesystem 配置无效")
+	}
+	switch strings.ToLower(strings.TrimSpace(reviewAgents[0].ReasoningEffort)) {
+	case "high", "xhigh", "max":
+	default:
+		return fmt.Errorf("Review Task 必须使用 high、xhigh 或 max 推理")
+	}
 	if reviewAgents[0].Approval != "never" {
 		return fmt.Errorf("Review Task 必须使用 never 审批")
 	}
