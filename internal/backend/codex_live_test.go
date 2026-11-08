@@ -209,18 +209,38 @@ func TestCodexLiveInboxRollsBackRejectedSteer(t *testing.T) {
 }
 
 // If app-server exits with a steer still in flight, the claim is rolled back
-// rather than lost or marked delivered without acceptance.
+// rather than lost or marked delivered without acceptance. The Turn is then
+// resumed once on the same thread and finishes even though the recovered inbox
+// is already empty; the rolled-back message stays pending for the next Turn.
 func TestCodexLiveInboxRollsBackWhenProcessExits(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	inbox := newFakeLiveInbox(LiveBatch{IDs: []string{"m1"}, Text: "STEER"})
-	runner := &liveFakeRunner{exitOn: "steer"}
-	_, err := (Codex{LivePoll: time.Millisecond}).Execute(
-		context.Background(), newLiveCodexRequest(runner, inbox), nil,
+	runner := &appServerExitRunner{mode: "steer-empty"}
+	result, err := (Codex{LivePoll: time.Millisecond}).Execute(
+		ctx, newLiveCodexRequest(runner, inbox), nil,
 	)
-	if err == nil {
-		t.Fatal("a process that exited mid-turn must fail the Turn")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Reply != "RECOVERED" {
+		t.Fatalf("reply = %q, want the recovered Turn's answer", result.Reply)
 	}
 	if _, acks := inbox.snapshot(); len(acks) != 1 || acks[0] != "m1=false" {
 		t.Fatalf("in-flight steer was not rolled back: %#v", acks)
+	}
+	calls, threads, prompts, steers := runner.snapshot()
+	if calls != 2 {
+		t.Fatalf("app-server processes = %d, want exactly one recovery", calls)
+	}
+	if len(steers) != 1 {
+		t.Fatalf("steers = %d, want only the interrupted attempt", len(steers))
+	}
+	if len(threads) != 2 || threads[1] != "thread-exit-1" {
+		t.Fatalf("recovery did not resume the first thread: %#v", threads)
+	}
+	if len(prompts) != 2 || prompts[0] != "do the work" || prompts[1] != codexAppServerRecoveryPrompt {
+		t.Fatalf("turn prompts = %#v", prompts)
 	}
 }
 

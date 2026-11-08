@@ -15,10 +15,12 @@ import (
 // exit recovery path. The mode decides which call exits and how the following
 // process finishes:
 //
-//	recover  the first process exits after turn/start, the resumed one completes
-//	exhaust  every process exits after turn/start
-//	steer    the first process exits with a steer in flight, the resumed one
-//	         receives the re-claimed message and completes
+//	recover      the first process exits after turn/start, the resumed one completes
+//	exhaust      every process exits after turn/start
+//	steer        the first process exits with a steer in flight, the resumed one
+//	             receives the re-claimed message and completes
+//	steer-empty  the first process exits with a steer in flight, the resumed one
+//	             completes right after turn/start with an empty inbox
 type appServerExitRunner struct {
 	mu     sync.Mutex
 	mode   string
@@ -77,10 +79,10 @@ func (runner *appServerExitRunner) Run(ctx context.Context, command workspace.Co
 				runner.mu.Unlock()
 				response(`{"turn":{"id":"` + turnID + `"}}`)
 				onLine(`{"method":"item/started","params":{"threadId":"` + threadID + `","turnId":"` + turnID + `","item":{"id":"cmd-1","type":"commandExecution","command":"long silent tool","status":"inProgress"}}}`)
-				if runner.mode == "exhaust" || (runner.mode == "recover" && call == 1) {
+				switch {
+				case runner.mode == "exhaust", runner.mode == "recover" && call == 1:
 					return exit()
-				}
-				if runner.mode == "recover" {
+				case runner.mode == "recover", runner.mode == "steer-empty" && call > 1:
 					finish()
 					continue
 				}
@@ -88,7 +90,7 @@ func (runner *appServerExitRunner) Run(ctx context.Context, command workspace.Co
 				runner.mu.Lock()
 				runner.steers = append(runner.steers, message.Params)
 				runner.mu.Unlock()
-				if call == 1 && runner.mode == "steer" {
+				if call == 1 && (runner.mode == "steer" || runner.mode == "steer-empty") {
 					// The claim is in flight when the process dies; the adapter
 					// must roll it back so the resumed process can re-deliver it.
 					return exit()
@@ -129,6 +131,74 @@ func turnStartText(params map[string]any) string {
 		}
 	}
 	return ""
+}
+
+// recoveryFallbackRunner emulates the failure path where the first app-server
+// exits mid-turn, the resumed app-server cannot finish its handshake, and the
+// adapter continues the same thread through `codex exec` instead of retrying.
+type recoveryFallbackRunner struct {
+	mu             sync.Mutex
+	appServerCalls int
+	execCommands   []workspace.Command
+}
+
+func (*recoveryFallbackRunner) StreamsInput() bool { return true }
+
+func (runner *recoveryFallbackRunner) Run(ctx context.Context, command workspace.Command, onLine workspace.LineHandler) (workspace.Result, error) {
+	if !contains(command.Args, "app-server") {
+		runner.mu.Lock()
+		runner.execCommands = append(runner.execCommands, command)
+		runner.mu.Unlock()
+		onLine(`{"type":"thread.started","thread_id":"thread-exec-fallback"}`)
+		onLine(`{"type":"item.completed","item":{"type":"agent_message","text":"EXEC-FALLBACK"}}`)
+		return workspace.Result{ExitCode: 0}, nil
+	}
+	runner.mu.Lock()
+	runner.appServerCalls++
+	call := runner.appServerCalls
+	runner.mu.Unlock()
+	if call > 1 {
+		// Fail before turn/start, so started stays false and the adapter must
+		// fall back to exec rather than resuming a third time.
+		return workspace.Result{ExitCode: 2, Stderr: "recovery app-server unavailable"}, nil
+	}
+	threadID := "thread-fallback-1"
+	turnID := "turn-fallback-1"
+	for {
+		select {
+		case <-ctx.Done():
+			return workspace.Result{ExitCode: 1}, ctx.Err()
+		case line, ok := <-command.Input:
+			if !ok {
+				return workspace.Result{ExitCode: 0}, nil
+			}
+			var message struct {
+				ID     *int64         `json:"id"`
+				Method string         `json:"method"`
+				Params map[string]any `json:"params"`
+			}
+			if json.Unmarshal([]byte(line), &message) != nil {
+				continue
+			}
+			switch message.Method {
+			case "initialize":
+				onLine(`{"id":` + itoa(*message.ID) + `,"result":{"userAgent":"fake"}}`)
+			case "thread/start":
+				onLine(`{"id":` + itoa(*message.ID) + `,"result":{"thread":{"id":"` + threadID + `"}}}`)
+			case "turn/start":
+				onLine(`{"id":` + itoa(*message.ID) + `,"result":{"turn":{"id":"` + turnID + `"}}}`)
+				onLine(`{"method":"item/started","params":{"threadId":"` + threadID + `","turnId":"` + turnID + `","item":{"id":"cmd-1","type":"commandExecution","command":"long silent tool","status":"inProgress"}}}`)
+				// The long silent tool is still running when the process dies.
+				return workspace.Result{ExitCode: 1, Stderr: "first app-server crashed"}, nil
+			}
+		}
+	}
+}
+
+func (runner *recoveryFallbackRunner) snapshot() (int, []workspace.Command) {
+	runner.mu.Lock()
+	defer runner.mu.Unlock()
+	return runner.appServerCalls, append([]workspace.Command(nil), runner.execCommands...)
 }
 
 // requeueInbox keeps a batch pending until it is acknowledged as delivered, so
@@ -261,5 +331,52 @@ func TestCodexLiveRecoveryRedeliversInFlightSteer(t *testing.T) {
 	}
 	if acks := inbox.snapshot(); len(acks) != 2 || acks[0] != "m1=false" || acks[1] != "m1=true" {
 		t.Fatalf("inbox acks = %#v, want rollback then delivery", acks)
+	}
+}
+
+// When the resumed app-server cannot start, the adapter does not attempt a
+// second recovery: it continues the same thread through the one-shot exec path.
+func TestCodexLiveRecoveryFallsBackToExecWhenResumeCannotStart(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	runner := &recoveryFallbackRunner{}
+	var events []Event
+	result, err := (Codex{LivePoll: time.Millisecond}).Execute(
+		ctx, recoveryRequest(runner, newFakeLiveInbox()),
+		func(event Event) { events = append(events, event) },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Reply != "EXEC-FALLBACK" {
+		t.Fatalf("reply = %q", result.Reply)
+	}
+	appServerCalls, execs := runner.snapshot()
+	if appServerCalls != 2 {
+		t.Fatalf("app-server processes = %d, want exactly one recovery attempt", appServerCalls)
+	}
+	if len(execs) != 1 {
+		t.Fatalf("exec calls = %d, want 1", len(execs))
+	}
+	if !contains(execs[0].Args, "exec") || !contains(execs[0].Args, "resume") || !contains(execs[0].Args, "thread-fallback-1") {
+		t.Fatalf("fallback did not resume the thread through exec: %v", execs[0].Args)
+	}
+	if !strings.Contains(execs[0].Stdin, codexAppServerRecoveryPrompt) {
+		t.Fatalf("exec fallback lost the recovery prompt: %q", execs[0].Stdin)
+	}
+	resumed, fellBack := false, false
+	for _, event := range events {
+		if event.Type != "agent_progress" {
+			continue
+		}
+		if event.Data["recovery"] == "app_server_resume" {
+			resumed = true
+		}
+		if event.Data["fallback"] == "codex_exec" {
+			fellBack = true
+		}
+	}
+	if !resumed || !fellBack {
+		t.Fatalf("recovery/fallback progress was not observable: %#v", events)
 	}
 }
