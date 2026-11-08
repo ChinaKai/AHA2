@@ -638,25 +638,50 @@ func (adapter Codex) executeLiveInbox(
 	runResult := <-runnerResult
 	runFailure := <-runnerErr
 	cause := context.Cause(runContext)
-	cancelRun(context.Canceled)
+	// A runner command timeout kills the process inside the runner without
+	// canceling runContext. Give the turn a deadline cause and remember it, so
+	// the closed stream below cannot be mistaken for an app-server crash.
+	hardTimeout := errors.Is(runFailure, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded)
+	if hardTimeout {
+		cancelRun(context.DeadlineExceeded)
+	} else {
+		cancelRun(context.Canceled)
+	}
 	<-monitorDone
 	session.rollbackClaim()
 
+	if errors.Is(cause, ErrBackendIdleTimeout) {
+		return Result{Reply: session.reply, ExitCode: runResult.ExitCode, ProviderSessionID: session.threadID}, ErrBackendIdleTimeout, started
+	}
+	if ctx.Err() != nil {
+		// The caller cancelled or its deadline expired. The context is the
+		// authoritative cause; never start another app-server or exec.
+		return Result{Reply: session.reply, ExitCode: runResult.ExitCode, ProviderSessionID: session.threadID}, ctx.Err(), started
+	}
+	if hardTimeout {
+		// The runner's own timeout killed the process. This is a Turn timeout,
+		// not an unexpected exit, so it must not be resumed or retried. The
+		// caller's context is still live, so runFailure is the deadline here.
+		return Result{Reply: session.reply, ExitCode: runResult.ExitCode, ProviderSessionID: session.threadID}, fmt.Errorf("codex app-server turn timed out: %w", runFailure), started
+	}
+	if errors.Is(runFailure, context.Canceled) {
+		return Result{Reply: session.reply, ExitCode: runResult.ExitCode, ProviderSessionID: session.threadID}, context.Canceled, started
+	}
+
 	// An unexpected process exit has no turn/completed response, so the runner
 	// result is the only place the exit code and stderr survive. Attach them to
-	// the adapter error instead of discarding the only diagnostic evidence.
+	// the adapter error instead of discarding the only diagnostic evidence. A
+	// runner failure stays authoritative: the stream closed because the runner
+	// failed, not because the process exited on its own.
+	if errors.Is(sessionErr, errCodexAppServerExited) && runFailure != nil {
+		return Result{Reply: session.reply, ExitCode: runResult.ExitCode, ProviderSessionID: session.threadID}, runFailure, started
+	}
 	if errors.Is(sessionErr, errCodexAppServerExited) {
 		sessionErr = &codexAppServerExitError{
 			cause: sessionErr, exitCode: runResult.ExitCode, stderr: runResult.Stderr,
 		}
 	}
 
-	if errors.Is(cause, ErrBackendIdleTimeout) {
-		return Result{Reply: session.reply, ExitCode: runResult.ExitCode, ProviderSessionID: session.threadID}, ErrBackendIdleTimeout, started
-	}
-	if errors.Is(cause, context.Canceled) && ctx.Err() != nil {
-		return Result{Reply: session.reply, ExitCode: runResult.ExitCode, ProviderSessionID: session.threadID}, context.Canceled, started
-	}
 	if sessionErr != nil {
 		if session.providerError != "" && !strings.Contains(sessionErr.Error(), session.providerError) {
 			return Result{Reply: session.reply, ExitCode: runResult.ExitCode, ProviderSessionID: session.threadID}, fmt.Errorf("%v: %s", sessionErr, session.providerError), started

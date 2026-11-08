@@ -3,6 +3,7 @@ package backend
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -201,6 +202,75 @@ func (runner *recoveryFallbackRunner) snapshot() (int, []workspace.Command) {
 	return runner.appServerCalls, append([]workspace.Command(nil), runner.execCommands...)
 }
 
+// timeoutExitRunner kills its process with the runner's own command timeout
+// while a steer is in flight, so the adapter sees runDone close without having
+// lost the process on its own.
+type timeoutExitRunner struct {
+	mu             sync.Mutex
+	appServerCalls int
+	execCalls      int
+	prompts        []string
+}
+
+func (*timeoutExitRunner) StreamsInput() bool { return true }
+
+func (runner *timeoutExitRunner) Run(ctx context.Context, command workspace.Command, onLine workspace.LineHandler) (workspace.Result, error) {
+	if !contains(command.Args, "app-server") {
+		runner.mu.Lock()
+		runner.execCalls++
+		runner.mu.Unlock()
+		onLine(`{"type":"thread.started","thread_id":"thread-exec-timeout"}`)
+		onLine(`{"type":"item.completed","item":{"type":"agent_message","text":"EXEC-AFTER-TIMEOUT"}}`)
+		return workspace.Result{ExitCode: 0}, nil
+	}
+	runner.mu.Lock()
+	runner.appServerCalls++
+	call := runner.appServerCalls
+	runner.mu.Unlock()
+	threadID := "thread-timeout-" + itoa(int64(call))
+	turnID := "turn-timeout-" + itoa(int64(call))
+	for {
+		select {
+		case <-ctx.Done():
+			return workspace.Result{ExitCode: 1}, ctx.Err()
+		case line, ok := <-command.Input:
+			if !ok {
+				return workspace.Result{ExitCode: 0}, nil
+			}
+			var message struct {
+				ID     *int64         `json:"id"`
+				Method string         `json:"method"`
+				Params map[string]any `json:"params"`
+			}
+			if json.Unmarshal([]byte(line), &message) != nil {
+				continue
+			}
+			switch message.Method {
+			case "initialize":
+				onLine(`{"id":` + itoa(*message.ID) + `,"result":{"userAgent":"fake"}}`)
+			case "thread/start":
+				onLine(`{"id":` + itoa(*message.ID) + `,"result":{"thread":{"id":"` + threadID + `"}}}`)
+			case "turn/start":
+				runner.mu.Lock()
+				runner.prompts = append(runner.prompts, turnStartText(message.Params))
+				runner.mu.Unlock()
+				onLine(`{"id":` + itoa(*message.ID) + `,"result":{"turn":{"id":"` + turnID + `"}}}`)
+				onLine(`{"method":"item/started","params":{"threadId":"` + threadID + `","turnId":"` + turnID + `","item":{"id":"cmd-1","type":"commandExecution","command":"long silent tool","status":"inProgress"}}}`)
+			case "turn/steer":
+				// The harness killed the process for exceeding its own timeout;
+				// the steer is still unacknowledged.
+				return workspace.Result{ExitCode: 1}, context.DeadlineExceeded
+			}
+		}
+	}
+}
+
+func (runner *timeoutExitRunner) snapshot() (int, int, []string) {
+	runner.mu.Lock()
+	defer runner.mu.Unlock()
+	return runner.appServerCalls, runner.execCalls, append([]string(nil), runner.prompts...)
+}
+
 // requeueInbox keeps a batch pending until it is acknowledged as delivered, so
 // a rollback makes the same message claimable by the resumed process.
 type requeueInbox struct {
@@ -378,5 +448,40 @@ func TestCodexLiveRecoveryFallsBackToExecWhenResumeCannotStart(t *testing.T) {
 	}
 	if !resumed || !fellBack {
 		t.Fatalf("recovery/fallback progress was not observable: %#v", events)
+	}
+}
+
+// A hard Turn timeout is not an app-server crash. The runner returns
+// context.DeadlineExceeded after turn/start, so the adapter must neither resume
+// the thread nor retry through exec with a fresh timeout.
+func TestCodexLiveHardTimeoutDoesNotRecoverOrFallBack(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	inbox := newFakeLiveInbox(LiveBatch{IDs: []string{"m1"}, Text: "STEER"})
+	runner := &timeoutExitRunner{}
+	_, err := (Codex{LivePoll: time.Millisecond}).Execute(
+		ctx, recoveryRequest(runner, inbox), nil,
+	)
+	if err == nil {
+		t.Fatal("a hard Turn timeout must fail")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error %q is not a deadline error", err)
+	}
+	if strings.Contains(err.Error(), "app-server exited") {
+		t.Fatalf("hard timeout was reported as an app-server exit: %q", err)
+	}
+	appServerCalls, execCalls, prompts := runner.snapshot()
+	if appServerCalls != 1 {
+		t.Fatalf("app-server processes = %d, want exactly 1 (no recovery)", appServerCalls)
+	}
+	if execCalls != 0 {
+		t.Fatalf("exec calls = %d, want 0 (no fallback with a fresh timeout)", execCalls)
+	}
+	if len(prompts) != 1 || prompts[0] == codexAppServerRecoveryPrompt {
+		t.Fatalf("turn prompts = %#v, want no recovery turn", prompts)
+	}
+	if _, acks := inbox.snapshot(); len(acks) != 1 || acks[0] != "m1=false" {
+		t.Fatalf("in-flight steer was not rolled back: %#v", acks)
 	}
 }
