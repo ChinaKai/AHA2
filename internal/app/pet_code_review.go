@@ -227,6 +227,24 @@ func petCodeReviewRequired(agents []domain.TaskAgent) bool {
 	}
 }
 
+// petCodeReviewVerdict accepts only a complete verdict on the first non-empty
+// line, never a quoted example or a verdict-like prefix elsewhere in the result.
+func petCodeReviewVerdict(result string) string {
+	for _, line := range strings.Split(result, "\n") {
+		line = strings.ToUpper(strings.TrimSpace(line))
+		if line == "" {
+			continue
+		}
+		switch line {
+		case petCodeReviewApprove, petCodeReviewRequestChanges:
+			return line
+		default:
+			return ""
+		}
+	}
+	return ""
+}
+
 func (s *Service) requirePetCodeReview(ctx context.Context, source domain.Task, reviewTaskID string) error {
 	if _, err := s.store.PetCodeReviewSource(ctx, source.ID); err == nil {
 		// Finishing an actual review is not approval of its source. In particular,
@@ -237,6 +255,9 @@ func (s *Service) requirePetCodeReview(ctx context.Context, source domain.Task, 
 		turn, err := s.store.LatestTurnForAgent(ctx, source.ID, "main")
 		if err != nil || turn.Status != domain.TurnSucceeded {
 			return fmt.Errorf("Review Task 没有成功的评审结果")
+		}
+		if petCodeReviewVerdict(turn.Result) == "" {
+			return fmt.Errorf("Review Task 最新结果首个非空行必须是 Verdict: APPROVE 或 Verdict: REQUEST_CHANGES")
 		}
 		return nil
 	} else if !errors.Is(err, sql.ErrNoRows) {
@@ -304,7 +325,7 @@ func (s *Service) requirePetCodeReview(ctx context.Context, source domain.Task, 
 	if strings.Contains(result, petCodeReviewRequestChanges) {
 		return fmt.Errorf("Review Task 要求修改，不能完成源 Task")
 	}
-	if !strings.Contains(result, petCodeReviewApprove) {
+	if petCodeReviewVerdict(turn.Result) != petCodeReviewApprove {
 		return fmt.Errorf("Review Task 未给出 Verdict: APPROVE")
 	}
 	return nil

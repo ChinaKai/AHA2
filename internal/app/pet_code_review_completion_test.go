@@ -20,7 +20,7 @@ func (e *petReviewExecutor) Execute(ctx context.Context, request ExecutionReques
 }
 
 func TestPetReviewCompletionDoesNotApproveSource(t *testing.T) {
-	for _, verdict := range []string{"Verdict: REQUEST_CHANGES", "review without verdict"} {
+	for _, verdict := range []string{"Verdict: REQUEST_CHANGES"} {
 		t.Run(verdict, func(t *testing.T) {
 			fixture, project, workspace := petReviewFixture(t)
 			reviewModel := addReviewModel(t, fixture)
