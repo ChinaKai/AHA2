@@ -442,6 +442,10 @@ td small { margin-top: 3px; color: var(--muted); }
 .task-title-block { display: grid; align-content: center; gap: 4px; min-width: 0; }
 .task-title-block h1 { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .task-head-subline { display: flex; align-items: center; gap: 8px; min-width: 0; }
+#task-review-slot { min-width: 0; }
+.task-review-decision { display: inline-flex; align-items: center; gap: 4px; max-width: 100%; vertical-align: middle; }
+.task-review-decision .status { flex-shrink: 0; }
+.task-review-detail { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; }
 .task-head-meta { min-width: 0; overflow: hidden; color: var(--muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 .task-title-text, .task-branch { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .task-head .actions { display: flex; align-items: center; }

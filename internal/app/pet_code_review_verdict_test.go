@@ -67,7 +67,7 @@ func TestPetReviewCompletionRequiresFinalVerdict(t *testing.T) {
 			if err != nil || turn.Status != domain.TurnSucceeded || turn.Result != strings.TrimSpace(tc.result) {
 				t.Fatalf("unexpected executed review: %#v err=%v", turn, err)
 			}
-			completed, err := fixture.service.PetCompleteTask(fixture.ctx, review.ID)
+			completed, err := fixture.service.PetCompleteTaskWithDecision(fixture.ctx, review.ID, "skipped", "独立评审任务无需递归评审", "")
 			if !tc.valid {
 				if err == nil || !strings.Contains(err.Error(), "首个非空行") {
 					t.Fatalf("invalid verdict completed review: %v", err)
@@ -118,7 +118,7 @@ func TestPetReviewCompletionDoesNotReuseOlderVerdict(t *testing.T) {
 			if err != nil || first.Status != domain.TurnSucceeded || first.Result != verdict {
 				t.Fatalf("first verdict not executed: %#v err=%v", first, err)
 			}
-			if _, err := fixture.service.PetCompleteTask(fixture.ctx, review.ID); err != nil {
+			if _, err := fixture.service.PetCompleteTaskWithDecision(fixture.ctx, review.ID, "skipped", "独立评审任务无需递归评审", ""); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := fixture.service.PetReopenTask(fixture.ctx, review.ID); err != nil {
@@ -133,7 +133,7 @@ func TestPetReviewCompletionDoesNotReuseOlderVerdict(t *testing.T) {
 			if err != nil || latest.ID == first.ID || latest.Sequence <= first.Sequence || latest.Status != domain.TurnSucceeded || latest.Result != executor.reply {
 				t.Fatalf("new successful turn missing: %#v err=%v", latest, err)
 			}
-			if _, err := fixture.service.PetCompleteTask(fixture.ctx, review.ID); err == nil || !strings.Contains(err.Error(), "首个非空行") {
+			if _, err := fixture.service.PetCompleteTaskWithDecision(fixture.ctx, review.ID, "skipped", "独立评审任务无需递归评审", ""); err == nil || !strings.Contains(err.Error(), "首个非空行") {
 				t.Fatalf("older verdict reused: %v", err)
 			}
 		})

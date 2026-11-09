@@ -213,20 +213,6 @@ func petCodeReviewRequest(source domain.Task, focus, sourceAgent string) string 
 	return b.String()
 }
 
-// petCodeReviewRequired reports whether a task is write-capable and therefore
-// needs an independent review before the pet may mark it complete.
-func petCodeReviewRequired(agents []domain.TaskAgent) bool {
-	if len(agents) == 0 {
-		return true
-	}
-	switch strings.TrimSpace(agents[0].Filesystem) {
-	case "read-only":
-		return false
-	default:
-		return true
-	}
-}
-
 // petCodeReviewVerdict accepts only a complete verdict on the first non-empty
 // line, never a quoted example or a verdict-like prefix elsewhere in the result.
 func petCodeReviewVerdict(result string) string {
@@ -267,12 +253,9 @@ func (s *Service) requirePetCodeReview(ctx context.Context, source domain.Task, 
 	if err != nil {
 		return fmt.Errorf("无法读取源 Task 的权限配置：%w", err)
 	}
-	if !petCodeReviewRequired(agents) {
-		return nil
-	}
 	reviewTaskID = strings.TrimSpace(reviewTaskID)
 	if reviewTaskID == "" || reviewTaskID == source.ID {
-		return fmt.Errorf("代码任务完成前必须提供高级模型 Review Task 的 review_task_id")
+		return fmt.Errorf("review_decision=required 时必须提供独立 Review Task 的 review_task_id")
 	}
 	review, err := s.store.Task(ctx, reviewTaskID)
 	if err != nil {

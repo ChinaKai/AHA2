@@ -908,6 +908,10 @@ func (s *Service) InterruptRound(ctx context.Context, roundID string) error {
 }
 
 func (s *Service) CompleteTask(ctx context.Context, taskID string) error {
+	return s.completeTask(ctx, taskID, nil)
+}
+
+func (s *Service) completeTask(ctx context.Context, taskID string, decision *domain.TaskReviewDecision) error {
 	task, err := s.store.Task(ctx, taskID)
 	if err != nil {
 		return err
@@ -921,7 +925,7 @@ func (s *Service) CompleteTask(ctx context.Context, taskID string) error {
 		return activeErr
 	}
 	now := s.now().UTC()
-	if err := s.store.UpdateTaskStatus(ctx, task.ID, task.Status, domain.TaskCompleted, timeString(now), timeString(now)); err != nil {
+	if err := s.store.CompleteTaskWithReviewDecision(ctx, task.ID, task.Status, timeString(now), decision); err != nil {
 		return err
 	}
 	s.emit(ctx, task.ID, "task", task.ID, "task_completed", nil)

@@ -1455,18 +1455,20 @@ func ahaPetTools() []gateway.ChatTool {
 				"route_id": map[string]any{"type": "string"},
 			}, "required": []string{"task_id", "route_id"},
 		}},
-		{Name: "aha_complete_task", Description: "把 Task 标记为完成；写权限任务必须提供高级模型 Review Task", Parameters: map[string]any{
+		{Name: "aha_complete_task", Description: "把 Task 标记为完成；宠物自行判断是否需要评审，必须显式申报 review_decision；跳过评审必须说明理由。评审 Task 自身无需递归评审，但最新成功结果仍必须有最终 verdict", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{
-				"task_id":        map[string]any{"type": "string"},
-				"review_task_id": map[string]any{"type": "string", "description": "写权限任务必填：已通过 Verdict: APPROVE 的独立 Review Task ID（high/xhigh/max 推理、不同模型、approval=never、inplace；评审不得修改源码）"},
-			}, "required": []string{"task_id"},
+				"task_id":         map[string]any{"type": "string"},
+				"review_decision": map[string]any{"type": "string", "enum": []string{"required", "skipped"}, "description": "必填：required 需要独立评审；skipped 跳过评审并说明理由"},
+				"review_reason":   map[string]any{"type": "string", "description": "skipped 时必填且非空，建议至少 8 字符"},
+				"review_task_id":  map[string]any{"type": "string", "description": "required 时必填（评审 Task 自身豁免）：已关联源 Task、已完成且最新结果为 Verdict: APPROVE 的独立 Review Task ID（high/xhigh/max 推理、不同模型、approval=never、inplace；评审不得修改源码）"},
+			}, "required": []string{"task_id", "review_decision"},
 		}},
 		{Name: "aha_finalize_task_worktree", Description: "仅用于已完成的 worktree Task：检查提交、合并回目标分支、删除临时 worktree 和分支；有未提交改动或冲突时保留并报错", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{
 				"task_id": map[string]any{"type": "string"},
 			}, "required": []string{"task_id"},
 		}},
-		{Name: "aha_request_code_review", Description: "为源 Task 创建独立的不同模型 Review Task，创建时一次性应用权限/推理/Skill（运行中的 Turn 不会热更新）；默认 read-only、high、approval=never、inplace，推理至少 high；评审可运行 git diff、测试和构建但不得修改、提交、合并或部署源码；写权限任务完成前必须使用", Parameters: map[string]any{
+		{Name: "aha_request_code_review", Description: "为源 Task 创建独立的不同模型 Review Task，创建时一次性应用权限/推理/Skill（运行中的 Turn 不会热更新）；默认 read-only、high、approval=never、inplace，推理至少 high；评审可运行 git diff、测试和构建但不得修改、提交、合并或部署源码；由宠物自行判断是否需要评审，完成时必须申报决定", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{
 				"task_id":          map[string]any{"type": "string"},
 				"review_model_id":  map[string]any{"type": "string", "description": "评审模型，必须与源 Task 模型不同；用 aha_model_catalog 选择更强的模型"},
@@ -2457,13 +2459,15 @@ func (s *Service) PetMCPTool(ctx context.Context, name string, args json.RawMess
 		return `{"ok":true}`, nil
 	case "aha_complete_task":
 		var input struct {
-			TaskID       string `json:"task_id"`
-			ReviewTaskID string `json:"review_task_id"`
+			TaskID         string `json:"task_id"`
+			ReviewDecision string `json:"review_decision"`
+			ReviewReason   string `json:"review_reason"`
+			ReviewTaskID   string `json:"review_task_id"`
 		}
 		if err := json.Unmarshal(args, &input); err != nil {
 			return "", fmt.Errorf("invalid complete task request")
 		}
-		task, err := s.PetCompleteTaskWithReview(ctx, input.TaskID, input.ReviewTaskID)
+		task, err := s.PetCompleteTaskWithDecision(ctx, input.TaskID, input.ReviewDecision, input.ReviewReason, input.ReviewTaskID)
 		if err != nil {
 			return "", err
 		}

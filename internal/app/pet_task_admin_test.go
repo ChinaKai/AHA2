@@ -48,7 +48,7 @@ func TestPetTaskLifecycleAndRead(t *testing.T) {
 		t.Fatalf("turns=%#v err=%v", turns, err)
 	}
 
-	completed, err := fixture.service.PetCompleteTask(fixture.ctx, task.ID)
+	completed, err := fixture.service.PetCompleteTaskWithDecision(fixture.ctx, task.ID, "skipped", "只读任务未产生代码修改", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +82,7 @@ func TestPetTaskLifecycleAndRead(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.service.PetCompleteTask(fixture.ctx, task.ID); err == nil {
+	if _, err := fixture.service.PetCompleteTaskWithDecision(fixture.ctx, task.ID, "skipped", "只读任务未产生代码修改", ""); err == nil {
 		t.Fatal("complete task was allowed without the task management permission")
 	}
 

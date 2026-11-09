@@ -3516,5 +3516,5 @@ func (s *Store) migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(126, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
 		return fmt.Errorf("record schema v126: %w", err)
 	}
-	return nil
+	return s.migrateTaskReviewDecision(ctx)
 }

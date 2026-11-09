@@ -4,6 +4,15 @@ import type {CodexAccount, ConversationItem, MCPServer, Model, Skill, TaskAgent,
 
 export type TaskRealtimeState = "connecting" | "live" | "fallback";
 
+export function renderTaskReviewDecision(task: TaskDetail["task"], translate: (text: string) => string = text => text): string {
+  if (task.review_decision !== "required" && task.review_decision !== "skipped") return "";
+  const skipped = task.review_decision === "skipped";
+  const label = translate(skipped ? "已跳过评审" : "需要评审");
+  const detail = skipped ? task.review_reason : task.review_task_id;
+  const audit = [detail, task.review_decided_by, task.review_decided_at].filter(Boolean).join(" · ");
+  return `<span class="task-review-decision" title="${escapeHTML(audit)}"><span class="status ${skipped ? "warn" : "info"}">${escapeHTML(label)}</span>${detail ? ` <span class="task-review-detail" data-i18n-ignore>${escapeHTML(detail)}</span>` : ""}</span>`;
+}
+
 export function visibleAgentText(value: string): string {
 	return value.trim();
 }

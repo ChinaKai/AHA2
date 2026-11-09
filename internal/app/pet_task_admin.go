@@ -34,20 +34,42 @@ func (s *Service) petManageableTask(ctx context.Context, taskID string) (domain.
 }
 
 func (s *Service) PetCompleteTask(ctx context.Context, taskID string) (domain.Task, error) {
-	return s.PetCompleteTaskWithReview(ctx, taskID, "")
+	return s.PetCompleteTaskWithDecision(ctx, taskID, "", "", "")
 }
 
-// PetCompleteTaskWithReview keeps the existing pet tool compatible while making
-// write-capable Tasks pass through an independent, high-reasoning review Task.
+// PetCompleteTaskWithReview explicitly requests an independent review.
 func (s *Service) PetCompleteTaskWithReview(ctx context.Context, taskID, reviewTaskID string) (domain.Task, error) {
+	return s.PetCompleteTaskWithDecision(ctx, taskID, "required", "", reviewTaskID)
+}
+
+func (s *Service) PetCompleteTaskWithDecision(ctx context.Context, taskID, decision, reason, reviewTaskID string) (domain.Task, error) {
 	task, _, err := s.petManageableTask(ctx, taskID)
 	if err != nil {
 		return domain.Task{}, err
 	}
-	if err := s.requirePetCodeReview(ctx, task, reviewTaskID); err != nil {
-		return task, err
+	decision, reason, reviewTaskID = strings.TrimSpace(decision), strings.TrimSpace(reason), strings.TrimSpace(reviewTaskID)
+	if decision != "required" && decision != "skipped" {
+		return task, fmt.Errorf("review_decision 必填，必须是 required 或 skipped")
 	}
-	if err := s.CompleteTask(ctx, task.ID); err != nil {
+	if decision == "skipped" && reason == "" {
+		return task, fmt.Errorf("skipped 时 review_reason 必填且不能为空（建议至少 8 字符）")
+	}
+	if decision == "skipped" && reviewTaskID != "" {
+		return task, fmt.Errorf("skipped 时不能提供 review_task_id")
+	}
+	// Linked review Tasks still need a final verdict even when review is skipped.
+	if _, err := s.store.PetCodeReviewSource(ctx, task.ID); err == nil || decision == "required" {
+		if err := s.requirePetCodeReview(ctx, task, reviewTaskID); err != nil {
+			return task, err
+		}
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return task, fmt.Errorf("无法读取 Review Task 关联：%w", err)
+	}
+	audit := &domain.TaskReviewDecision{
+		ReviewDecision: decision, ReviewReason: reason, ReviewTaskID: reviewTaskID,
+		ReviewDecidedAt: s.now().UTC(), ReviewDecidedBy: "pet",
+	}
+	if err := s.completeTask(ctx, task.ID, audit); err != nil {
 		return task, err
 	}
 	return s.store.Task(ctx, task.ID)
