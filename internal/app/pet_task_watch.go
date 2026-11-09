@@ -226,11 +226,17 @@ func (s *Service) PetUnwatchTask(ctx context.Context, taskID string) error {
 // ordinary Task, plus any watched Task (including terminal or ignored ones) so
 // the Owner can manage existing follows.
 func (s *Service) PetTaskWatchList(ctx context.Context) ([]PetTaskWatchView, error) {
-	watches, err := s.store.PetTaskWatches(ctx)
+	tasks, err := s.store.ListTasks(ctx, "")
 	if err != nil {
 		return nil, err
 	}
-	tasks, err := s.store.ListTasks(ctx, "")
+	return s.petTaskWatchListWithTasks(ctx, tasks)
+}
+
+// petTaskWatchListWithTasks lets the workbench share one task list with its
+// inspection snapshot instead of re-reading the same rows.
+func (s *Service) petTaskWatchListWithTasks(ctx context.Context, tasks []domain.Task) ([]PetTaskWatchView, error) {
+	watches, err := s.store.PetTaskWatches(ctx)
 	if err != nil {
 		return nil, err
 	}

@@ -1,6 +1,8 @@
 import {api, setAPIRequestObserver} from "./api.js";
 import type {APIRequestSample} from "./api.js";
 import {handlePetStreamEvent, mountAssistant, showPetSettings, notifyPetTaskIdle, notifyPetTaskReply, notifyPetTaskThinking, setAssistantVisible} from "./assistant.js";
+import {createPetWorkbenchLoader, renderPetInspectionSummary} from "./pet_workbench.js";
+import type {PetWorkbenchLoader} from "./pet_workbench.js";
 import {renderConversationList} from "./conversation_ui.js";
 import {bindCodexAccounts, renderCodexAccounts} from "./codex_accounts.js";
 import {bindChannels, exportRetiredChannelInstance, purgeRetiredChannelInstance, renderChannels} from "./channels.js";
@@ -383,6 +385,10 @@ const app = document.querySelector<HTMLDivElement>("#app");
 const petApprovalCounter = createPetApprovalCounter(() => api.petPendingApprovalCount(), updatePetPendingApprovalIndicators);
 let petPendingApprovalTimer = 0;
 let petWorkbenchTab = "core";
+// The workbench binds against a node that render() replaces wholesale. Track
+// the live binding so a re-rendered page always starts a fresh load while a
+// superseded request cannot keep writing into the detached node.
+let activePetWorkbenchBinding: {body: HTMLElement; loader: PetWorkbenchLoader} | null = null;
 let petApprovalFilter: "all" | "idea" | "decision" = "all";
 let petApprovalStatusFilter: "all" | "pending" | "approved" | "rejected" | "cancelled" = "all";
 let events: EventSource | null = null;
@@ -4613,6 +4619,12 @@ function render(): void {
     bindAuth();
     return;
   }
+  // Leaving the workbench must abort its in-flight request; otherwise timed-out
+  // fetches keep occupying browser connections until a manual refresh.
+  if (state.view !== "pet-workbench" && activePetWorkbenchBinding) {
+    activePetWorkbenchBinding.loader.dispose();
+    activePetWorkbenchBinding = null;
+  }
   // Never tear down the DOM while a modal dialog is open, or the dialog would
   // close unexpectedly. Defer until the dialog closes (see close listener).
   if (document.querySelector("dialog[open]")) {
@@ -6673,12 +6685,14 @@ async function bindPetWorkbenchPage(): Promise<void> {
   const tabs = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-pet-workbench-tab]"));
   const channelCount = document.querySelector<HTMLElement>("#pet-channel-count");
   if (!body || tabs.length === 0) return;
-  if (body.dataset.petWorkbenchBound === "1") return;
-  body.dataset.petWorkbenchBound = "1";
+  // Only skip binding when this exact live node is already wired. A render
+  // always creates a new #pet-workbench-body, so a stale bound flag must never
+  // suppress the load that follows it.
+  if (activePetWorkbenchBinding?.body === body && body.isConnected) return;
+  activePetWorkbenchBinding?.loader.dispose();
   let active = petWorkbenchTab === "ideas" ? "approvals" : petWorkbenchTab;
   petWorkbenchTab = active;
   let view: Awaited<ReturnType<typeof api.petWorkbench>> | null = null;
-  let loading = false;
   let loadError = "";
   let approvalLimit = 50;
   let worklogLimit = 30;
@@ -6728,7 +6742,8 @@ async function bindPetWorkbenchPage(): Promise<void> {
       bindPetDocEditors("worklog", load);
       bindLoadMore();
     } else if (active === "inspection") {
-      body.innerHTML = renderPetChannelHealth(view.channels || [], view.channel_note || "", view.channel_total || (view.channels || []).length);
+      body.innerHTML = renderPetInspectionSummary(view.inspection, t, formatDateTime)
+        + renderPetChannelHealth(view.channels || [], view.channel_note || "", view.channel_total || (view.channels || []).length);
     } else if (active === "approvals") {
       const items = view.approvals.filter(item => {
         if (petApprovalFilter !== "all" && (petApprovalFilter === "idea" ? item.kind !== "idea" : item.kind === "idea")) return false;
@@ -6774,39 +6789,33 @@ async function bindPetWorkbenchPage(): Promise<void> {
     }
   };
 
-  const withTimeout = async <T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> => {
-    let timer = 0;
-    try {
-      return await Promise.race([
-        promise,
-        new Promise<T>((_, reject) => {
-          timer = window.setTimeout(() => reject(new Error(message)), timeoutMs);
-        }),
-      ]);
-    } finally {
-      window.clearTimeout(timer);
-    }
-  };
-
-  const load = async () => {
-    if (loading) return;
-    loading = true;
-    loadError = "";
-    if (!view) showLoadState();
-    try {
-      view = await withTimeout(api.petWorkbench({approvalLimit, worklogLimit}), 12000, t("petWorkbench.loadTimeout"));
+  let binding: {body: HTMLElement; loader: PetWorkbenchLoader} | null = null;
+  const loader = createPetWorkbenchLoader({
+    read: signal => api.petWorkbench({approvalLimit, worklogLimit}, signal),
+    // A render replaces the body; a superseded loader must not write its result
+    // or error into the detached node, and must not clear the new loader's state.
+    isCurrent: () => body.isConnected && activePetWorkbenchBinding === binding,
+    onLoading: () => {
+      loadError = "";
+      if (!view) showLoadState();
+    },
+    onData: value => {
+      view = value;
       void refreshPetPendingApprovalCount();
       const degradedChannels = (view.channels || []).filter(item => item.degraded).length;
       if (channelCount) channelCount.textContent = degradedChannels > 0 ? String(degradedChannels) : "";
       renderTab();
-    } catch (error) {
+    },
+    onError: message => {
       view = null;
-      loadError = error instanceof Error ? error.message : String(error);
+      loadError = message;
       showLoadState();
-    } finally {
-      loading = false;
-    }
-  };
+    },
+    timeoutMessage: t("petWorkbench.loadTimeout"),
+  });
+  binding = {body, loader};
+  activePetWorkbenchBinding = binding;
+  const load = () => loader.load();
 
   const bindApprovalActions = () => {
     body.querySelectorAll<HTMLButtonElement>("[data-pet-approval-decision]").forEach(button => {

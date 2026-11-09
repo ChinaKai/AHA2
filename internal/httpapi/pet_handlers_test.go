@@ -192,6 +192,15 @@ func TestOwnerPetSettingsAPI(t *testing.T) {
 			Date    string `json:"date"`
 			Content string `json:"content"`
 		} `json:"worklog"`
+		Inspection *struct {
+			CheckedAt            string `json:"checked_at"`
+			Health               string `json:"health"`
+			TasksTotal           int    `json:"tasks_total"`
+			OpenTasks            int    `json:"open_tasks"`
+			AttentionTasks       int    `json:"attention_tasks"`
+			PendingApprovals     int    `json:"pending_approvals"`
+			DegradedChannelCount int    `json:"degraded_channel_count"`
+		} `json:"inspection"`
 	}
 	decodeResponse(t, response, &workbench)
 	if response.StatusCode != http.StatusOK || len(workbench.Core) == 0 || !strings.Contains(workbench.Core[0].Content, "API 宠物") {
@@ -199,6 +208,9 @@ func TestOwnerPetSettingsAPI(t *testing.T) {
 	}
 	if len(workbench.Worklog) != 1 || workbench.Worklog[0].Date != "2026-11-09" || workbench.Worklog[0].Content != "preserved worklog" {
 		t.Fatalf("worklog not preserved: %#v", workbench.Worklog)
+	}
+	if workbench.Inspection == nil || workbench.Inspection.CheckedAt == "" || workbench.Inspection.Health == "" {
+		t.Fatalf("workbench inspection snapshot missing: %#v", workbench.Inspection)
 	}
 	response = requestJSON(t, client, http.MethodPut, server.URL+"/api/v1/pet/workbench/worklog/bad%20name.md", map[string]any{"content": "x"}, csrf)
 	if response.StatusCode != http.StatusBadRequest {
@@ -380,6 +392,19 @@ func TestPetPendingApprovalCountAndRetiredRoutes(t *testing.T) {
 	}
 	if _, ok := workbench["worklog"]; !ok {
 		t.Fatal("missing worklog")
+	}
+	inspection, ok := workbench["inspection"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing inspection snapshot: %#v", workbench["inspection"])
+	}
+	for _, field := range []string{
+		"checked_at", "health", "tasks_total", "active", "waiting_user", "failed",
+		"blocked", "completed", "pending_approvals", "degraded_channel_count",
+		"open_tasks", "attention_tasks",
+	} {
+		if _, exists := inspection[field]; !exists {
+			t.Fatalf("inspection field %q missing: %#v", field, inspection)
+		}
 	}
 	response = requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/pet/diary", nil, "")
 	if response.StatusCode != http.StatusNotFound {

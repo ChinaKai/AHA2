@@ -1361,6 +1361,29 @@ export interface PetChannelHealth {
   note?: string;
 }
 
+export interface PetInspection {
+  checked_at: string;
+  version?: string;
+  web_version?: string;
+  started_at?: string;
+  uptime_minutes?: number;
+  health: string;
+  tasks_total: number;
+  active: number;
+  waiting_user: number;
+  failed: number;
+  blocked: number;
+  completed: number;
+  pending_approvals: number;
+  degraded_channels?: string[];
+  degraded_channel_count: number;
+  channels?: PetChannelHealth[];
+  channels_total?: number;
+  open_tasks: number;
+  attention_tasks: number;
+  note?: string;
+}
+
 export interface PetWorkbench {
   core: PetWorkspaceDocument[];
   worklog: PetMarkdownEntry[];
@@ -1372,6 +1395,7 @@ export interface PetWorkbench {
   channels: PetChannelHealth[];
   channel_total?: number;
   channel_note?: string;
+  inspection?: PetInspection;
   updated_at: string;
 }
 

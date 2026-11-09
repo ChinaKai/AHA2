@@ -32,6 +32,7 @@ type PetWorkbenchView struct {
 	Channels      []PetChannelHealth     `json:"channels"`
 	ChannelTotal  int                    `json:"channel_total,omitempty"`
 	ChannelNote   string                 `json:"channel_note,omitempty"`
+	Inspection    *PetInspection         `json:"inspection,omitempty"`
 	UpdatedAt     time.Time              `json:"updated_at"`
 }
 
@@ -59,21 +60,53 @@ func (s *Service) PetWorkbenchWithOptions(ctx context.Context, options PetWorkbe
 	if err != nil {
 		return PetWorkbenchView{}, err
 	}
-	watches, err := s.PetTaskWatchList(ctx)
+	// The watch list and the inspection snapshot share one task read; the
+	// inspection also shares the channel snapshot with the channel cards so a
+	// busy database is not queried twice for the same rows.
+	tasks, err := s.store.ListTasks(ctx, "")
 	if err != nil {
 		return PetWorkbenchView{}, err
 	}
-	channels, channelNote, channelTotal := s.petChannelSnapshot(ctx)
+	watches, err := s.petTaskWatchListWithTasks(ctx, tasks)
+	if err != nil {
+		return PetWorkbenchView{}, err
+	}
+	now := s.now().UTC()
+	channels := s.petChannelSnapshotValues(ctx, now)
 	view := PetWorkbenchView{
 		Core: core, Worklog: worklog, WorklogTotal: worklogTotal,
 		Approvals: approvals, ApprovalTotal: approvalTotal, Watches: watches,
-		Channels: channels, ChannelTotal: channelTotal, ChannelNote: channelNote,
-		UpdatedAt: s.now().UTC(),
+		Channels: channels.Health, ChannelTotal: channels.Total, ChannelNote: channels.Note,
+		UpdatedAt: now,
+	}
+	// The summary is additive: a failed inspection read must not take the rest
+	// of the workbench down, and the client shows an explicit empty state.
+	if inspection, inspectErr := s.petWorkbenchInspection(ctx, tasks, now, channels); inspectErr == nil {
+		view.Inspection = &inspection
 	}
 	if task, taskErr := s.store.Task(ctx, petTaskID); taskErr == nil {
 		view.Task = &task
 	}
 	return view, nil
+}
+
+// petWorkbenchInspection reuses the petInspection field derivation without the
+// costly per-task enrichment PetWorkState performs for its open-task list.
+func (s *Service) petWorkbenchInspection(ctx context.Context, tasks []domain.Task, now time.Time, channels petChannelSnapshotValues) (PetInspection, error) {
+	pendingApprovals, err := s.store.ListPendingPetApprovals(ctx, 200)
+	if err != nil {
+		return PetInspection{}, err
+	}
+	ids, err := s.store.PetCreatedTaskIDs(ctx)
+	if err != nil {
+		return PetInspection{}, err
+	}
+	openTasks, attentionTasks := petOpenTaskCounts(ids, tasks, pendingApprovals)
+	inspection := s.petInspectionWithChannelSnapshot(now, tasks, pendingApprovals, openTasks, attentionTasks, channels)
+	// The workbench already renders the full channel cards, so keep the
+	// embedded snapshot compact; callers that need the rows use PetWorkState.
+	inspection.Channels = nil
+	return inspection, nil
 }
 
 func petWorkbenchLimit(value, fallback int) int {

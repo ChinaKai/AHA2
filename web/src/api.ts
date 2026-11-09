@@ -624,12 +624,12 @@ class APIClient {
     return this.request("/api/v1/pet/approvals/pending-count", {signal: AbortSignal.timeout(10_000)});
   }
 
-  petWorkbench(options: {approvalLimit?: number; worklogLimit?: number} = {}): Promise<import("./types").PetWorkbench & {ok: boolean}> {
+  petWorkbench(options: {approvalLimit?: number; worklogLimit?: number} = {}, signal?: AbortSignal): Promise<import("./types").PetWorkbench & {ok: boolean}> {
     const query = new URLSearchParams();
     if (options.approvalLimit) query.set("approval_limit", String(options.approvalLimit));
     if (options.worklogLimit) query.set("worklog_limit", String(options.worklogLimit));
     const suffix = query.toString();
-    return this.request(`/api/v1/pet/workbench${suffix ? `?${suffix}` : ""}`);
+    return this.request(`/api/v1/pet/workbench${suffix ? `?${suffix}` : ""}`, {signal});
   }
 
   savePetWorkbenchDocument(section: string, name: string, content: string): Promise<{ok: boolean}> {

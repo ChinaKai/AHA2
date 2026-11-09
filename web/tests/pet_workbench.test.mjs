@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {readFile} from "node:fs/promises";
 import {resolve} from "node:path";
 import {createPetApprovalCounter, petPendingApprovalBadge} from "../dist/pet_approvals.js";
+import {createPetWorkbenchLoader, renderPetInspectionSummary} from "../dist/pet_workbench.js";
 
 const root = resolve(import.meta.dirname, "../..");
 
@@ -56,6 +57,202 @@ test("failed count refresh retains the last count and allows the next poll", asy
   fail = false;
   await counter.refresh();
   assert.equal(counter.pending, 5);
+});
+
+const zh = (key, values = {}) => {
+  const catalog = {
+    "petWorkbench.inspectionSummary": "巡检快照",
+    "petWorkbench.inspectionUnavailable": "巡检快照暂不可用，稍后重试。",
+    "petWorkbench.inspectionHealthy": "正常",
+    "petWorkbench.inspectionDegraded": "降级",
+    "petWorkbench.inspectionUnknown": "未知",
+    "petWorkbench.inspectionVersion": "版本",
+    "petWorkbench.inspectionWebVersion": "Web 版本",
+    "petWorkbench.inspectionStartedAt": "启动时间",
+    "petWorkbench.inspectionUptime": "运行时长",
+    "petWorkbench.inspectionCheckedAt": "检查时间",
+    "petWorkbench.inspectionDegradedChannels": "降级渠道",
+    "petWorkbench.inspectionTasksTotal": "任务总数",
+    "petWorkbench.inspectionActive": "执行中",
+    "petWorkbench.inspectionWaitingUser": "等待主人",
+    "petWorkbench.inspectionFailed": "失败",
+    "petWorkbench.inspectionBlocked": "阻塞",
+    "petWorkbench.inspectionCompleted": "已完成",
+    "petWorkbench.inspectionOpenTasks": "未闭环",
+    "petWorkbench.inspectionAttentionTasks": "需关注",
+    "petWorkbench.inspectionPendingApprovals": "待审批",
+    "petWorkbench.uptimeMinutes": "{minutes} 分钟",
+    "petWorkbench.uptimeHours": "{hours} 小时 {minutes} 分钟",
+    "petWorkbench.uptimeDays": "{days} 天 {hours} 小时",
+  };
+  return (catalog[key] ?? key).replace(/\{(\w+)\}/g, (_, name) => String(values[name] ?? `{${name}}`));
+};
+const identityTime = value => value;
+
+test("inspection summary renders versions, health, uptime, task stats, loops and note", () => {
+  const html = renderPetInspectionSummary({
+    checked_at: "2026-11-09T13:01:00Z",
+    health: "degraded",
+    version: "0.6.0",
+    web_version: "abc123",
+    started_at: "2026-11-09T11:00:00Z",
+    uptime_minutes: 65,
+    tasks_total: 7,
+    active: 2,
+    waiting_user: 1,
+    failed: 1,
+    blocked: 1,
+    completed: 2,
+    pending_approvals: 3,
+    degraded_channels: ["飞书（degraded）"],
+    degraded_channel_count: 1,
+    open_tasks: 4,
+    attention_tasks: 2,
+    note: "有 2 个未闭环任务需要处理。",
+  }, zh, identityTime);
+  for (const expected of [
+    "巡检快照", "降级", "版本: 0.6.0", "Web 版本: abc123", "运行时长: 1 小时 5 分钟",
+    "检查时间: 2026-11-09T13:01:00Z", "降级渠道: 1",
+    "任务总数", "等待主人", "已完成", "未闭环: 4", "需关注: 2", "待审批: 3",
+    "有 2 个未闭环任务需要处理。",
+  ]) {
+    assert.ok(html.includes(expected), `missing ${expected}: ${html}`);
+  }
+});
+
+test("inspection summary shows an explicit empty state and never renders dirty values", () => {
+  const empty = renderPetInspectionSummary(null, zh, identityTime);
+  assert.match(empty, /巡检快照暂不可用/);
+  const dirty = renderPetInspectionSummary({
+    checked_at: "", health: "", version: undefined, web_version: "",
+    uptime_minutes: "not-a-number", tasks_total: undefined, active: -1,
+    waiting_user: Number.NaN, failed: null, blocked: "", completed: undefined,
+    pending_approvals: -2, degraded_channel_count: "x", open_tasks: undefined,
+    attention_tasks: null, note: "",
+  }, zh, identityTime);
+  assert.match(dirty, /巡检快照暂不可用/);
+  assert.doesNotMatch(dirty, /undefined|NaN|null|Infinity/);
+});
+
+test("a slow workbench response times out, auto-retries once, then exposes a retryable error", async () => {
+  let calls = 0;
+  let succeed = false;
+  const events = [];
+  const loader = createPetWorkbenchLoader({
+    read: () => {
+      calls++;
+      return succeed ? Promise.resolve({ok: true}) : new Promise(() => {});
+    },
+    isCurrent: () => true,
+    onLoading: () => events.push("loading"),
+    onData: () => events.push("data"),
+    onError: message => events.push(`error:${message}`),
+    timeoutMs: 20,
+    retryDelayMs: 5,
+    timeoutMessage: "加载超时，请重试",
+  });
+  await loader.load();
+  assert.equal(calls, 2, "one automatic retry, never more");
+  assert.deepEqual(events, ["loading", "error:加载超时，请重试"]);
+  assert.equal(loader.busy(), false, "loading must not stay stuck after the final failure");
+
+  succeed = true;
+  await loader.load();
+  assert.equal(calls, 3);
+  assert.deepEqual(events, ["loading", "error:加载超时，请重试", "loading", "data"]);
+  assert.equal(loader.busy(), false);
+});
+
+test("an in-flight request superseded by a render cannot write to the detached node", async () => {
+  let current = true;
+  let resolveRead = () => {};
+  const events = [];
+  const loader = createPetWorkbenchLoader({
+    read: () => new Promise(resolve => { resolveRead = resolve; }),
+    isCurrent: () => current,
+    onLoading: () => events.push("loading"),
+    onData: () => events.push("data"),
+    onError: message => events.push(`error:${message}`),
+    timeoutMs: 1000,
+  });
+  const pending = loader.load();
+  current = false; // render() replaced #pet-workbench-body while the request was in flight
+  resolveRead({ok: true});
+  await pending;
+  assert.deepEqual(events, ["loading"], "stale result must not be written");
+  assert.equal(loader.busy(), false, "superseded loader must still clear its loading flag");
+
+  let freshEvents = [];
+  const fresh = createPetWorkbenchLoader({
+    read: () => Promise.resolve({ok: true, fresh: true}),
+    isCurrent: () => true,
+    onLoading: () => freshEvents.push("loading"),
+    onData: () => freshEvents.push("data"),
+    onError: message => freshEvents.push(`error:${message}`),
+  });
+  await fresh.load();
+  assert.deepEqual(freshEvents, ["loading", "data"], "the re-rendered node loads its own data");
+});
+
+test("aborting a superseded load cancels its in-flight request", async () => {
+  let aborted = false;
+  const loader = createPetWorkbenchLoader({
+    read: signal => new Promise((_, reject) => {
+      signal.addEventListener("abort", () => {
+        aborted = true;
+        reject(new Error("aborted"));
+      });
+    }),
+    isCurrent: () => true,
+    onLoading: () => {},
+    onData: () => {},
+    onError: () => {},
+    timeoutMs: 1000,
+  });
+  const pending = loader.load();
+  loader.dispose();
+  await pending;
+  assert.equal(aborted, true);
+  assert.equal(loader.busy(), false);
+});
+
+test("non-retryable 4xx failures surface immediately without an automatic retry", async () => {
+  let calls = 0;
+  const events = [];
+  const loader = createPetWorkbenchLoader({
+    read: () => {
+      calls++;
+      const error = new Error("HTTP 404");
+      error.status = 404;
+      return Promise.reject(error);
+    },
+    isCurrent: () => true,
+    onLoading: () => events.push("loading"),
+    onData: () => events.push("data"),
+    onError: message => events.push(`error:${message}`),
+    timeoutMs: 50,
+    retryDelayMs: 1,
+  });
+  await loader.load();
+  assert.equal(calls, 1);
+  assert.deepEqual(events, ["loading", "error:HTTP 404"]);
+  assert.equal(loader.busy(), false);
+});
+
+test("workbench wiring uses the guarded loader and renders the inspection summary", async () => {
+  const main = await readFile(resolve(root, "web/src/main.ts"), "utf8");
+  const api = await readFile(resolve(root, "web/src/api.ts"), "utf8");
+  const loader = await readFile(resolve(root, "web/src/pet_workbench.ts"), "utf8");
+  assert.match(main, /createPetWorkbenchLoader\(/);
+  assert.match(main, /api\.petWorkbench\(\{approvalLimit, worklogLimit\}, signal\)/);
+  assert.match(main, /isCurrent: \(\) => body\.isConnected && activePetWorkbenchBinding === binding/);
+  assert.match(main, /renderPetInspectionSummary\(view\.inspection, t, formatDateTime\)/);
+  assert.doesNotMatch(main, /petWorkbenchBound/);
+  assert.doesNotMatch(main, /withTimeout\(api\.petWorkbench/);
+  assert.match(api, /petWorkbench\(options: \{[^}]*\}[^)]*signal\?: AbortSignal\)/);
+  assert.match(loader, /maxRetries \?\? 1/);
+  assert.match(loader, /request\.abort\(\)/);
+  assert.match(loader, /loading = false/);
 });
 
 test("workbench defaults to core and removes journal UI/API while retaining old bookmarks", async () => {

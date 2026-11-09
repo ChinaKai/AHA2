@@ -92,25 +92,26 @@ type PetChannelHealth struct {
 // PetInspection is the compact, server-derived snapshot the pet quotes at the
 // end of an inspection reply. It never replaces the detailed worklog evidence.
 type PetInspection struct {
-	CheckedAt        string             `json:"checked_at"`
-	Version          string             `json:"version,omitempty"`
-	WebVersion       string             `json:"web_version,omitempty"`
-	StartedAt        string             `json:"started_at,omitempty"`
-	UptimeMinutes    int                `json:"uptime_minutes,omitempty"`
-	Health           string             `json:"health"`
-	TasksTotal       int                `json:"tasks_total"`
-	Active           int                `json:"active"`
-	WaitingUser      int                `json:"waiting_user"`
-	Failed           int                `json:"failed"`
-	Blocked          int                `json:"blocked"`
-	Completed        int                `json:"completed"`
-	PendingApprovals int                `json:"pending_approvals"`
-	DegradedChannels []string           `json:"degraded_channels,omitempty"`
-	Channels         []PetChannelHealth `json:"channels,omitempty"`
-	ChannelsTotal    int                `json:"channels_total,omitempty"`
-	OpenTasks        int                `json:"open_tasks"`
-	AttentionTasks   int                `json:"attention_tasks"`
-	Note             string             `json:"note,omitempty"`
+	CheckedAt            string             `json:"checked_at"`
+	Version              string             `json:"version,omitempty"`
+	WebVersion           string             `json:"web_version,omitempty"`
+	StartedAt            string             `json:"started_at,omitempty"`
+	UptimeMinutes        int                `json:"uptime_minutes,omitempty"`
+	Health               string             `json:"health"`
+	TasksTotal           int                `json:"tasks_total"`
+	Active               int                `json:"active"`
+	WaitingUser          int                `json:"waiting_user"`
+	Failed               int                `json:"failed"`
+	Blocked              int                `json:"blocked"`
+	Completed            int                `json:"completed"`
+	PendingApprovals     int                `json:"pending_approvals"`
+	DegradedChannels     []string           `json:"degraded_channels,omitempty"`
+	DegradedChannelCount int                `json:"degraded_channel_count"`
+	Channels             []PetChannelHealth `json:"channels,omitempty"`
+	ChannelsTotal        int                `json:"channels_total,omitempty"`
+	OpenTasks            int                `json:"open_tasks"`
+	AttentionTasks       int                `json:"attention_tasks"`
+	Note                 string             `json:"note,omitempty"`
 }
 
 type PetWorkState struct {
@@ -245,14 +246,7 @@ func (s *Service) PetWorkState(ctx context.Context) (PetWorkState, error) {
 }
 
 func (s *Service) petOpenTasks(ctx context.Context, tasks []domain.Task, pendingApprovals []domain.PetApproval) ([]PetOpenTask, int, int, error) {
-	pendingByTask := make(map[string]string, len(pendingApprovals))
-	for _, approval := range pendingApprovals {
-		if taskID := petApprovalTargetTaskID(approval); taskID != "" {
-			if _, exists := pendingByTask[taskID]; !exists {
-				pendingByTask[taskID] = approval.ID
-			}
-		}
-	}
+	pendingByTask := petPendingApprovalTaskMap(pendingApprovals)
 	tasksByID := make(map[string]domain.Task, len(tasks))
 	for _, task := range tasks {
 		tasksByID[task.ID] = task
@@ -295,14 +289,7 @@ func (s *Service) petOpenTasks(ctx context.Context, tasks []domain.Task, pending
 		if approvalID := pendingByTask[task.ID]; approvalID != "" {
 			item.PendingApprovalID = approvalID
 		}
-		switch task.Status {
-		case domain.TaskWaitingUser:
-			item.AttentionReason = "waiting_user：等待主人决定或补充信息"
-		case domain.TaskBlocked:
-			item.AttentionReason = "blocked：需要解除阻塞条件"
-		case domain.TaskFailed:
-			item.AttentionReason = "failed：需要重试或决定是否继续"
-		}
+		item.AttentionReason = petOpenTaskAttentionReason(task.Status)
 		if item.AttentionReason != "" {
 			if item.PendingApprovalID != "" {
 				item.AttentionReason = "已提交待审批 " + item.PendingApprovalID
@@ -336,8 +323,65 @@ func petApprovalTargetTaskID(item domain.PetApproval) string {
 	return strings.TrimSpace(payload.TaskID)
 }
 
+func petPendingApprovalTaskMap(pendingApprovals []domain.PetApproval) map[string]string {
+	pendingByTask := make(map[string]string, len(pendingApprovals))
+	for _, approval := range pendingApprovals {
+		if taskID := petApprovalTargetTaskID(approval); taskID != "" {
+			if _, exists := pendingByTask[taskID]; !exists {
+				pendingByTask[taskID] = approval.ID
+			}
+		}
+	}
+	return pendingByTask
+}
+
+func petOpenTaskAttentionReason(status domain.TaskStatus) string {
+	switch status {
+	case domain.TaskWaitingUser:
+		return "waiting_user：等待主人决定或补充信息"
+	case domain.TaskBlocked:
+		return "blocked：需要解除阻塞条件"
+	case domain.TaskFailed:
+		return "failed：需要重试或决定是否继续"
+	default:
+		return ""
+	}
+}
+
+// petOpenTaskCounts is the cheap subset of petOpenTasks used by the workbench
+// inspection snapshot. It computes the same open/attention totals without the
+// per-task project, workspace and latest-turn lookups the full list needs.
+func petOpenTaskCounts(ids []string, tasks []domain.Task, pendingApprovals []domain.PetApproval) (open int, attention int) {
+	pendingByTask := petPendingApprovalTaskMap(pendingApprovals)
+	tasksByID := make(map[string]domain.Task, len(tasks))
+	for _, task := range tasks {
+		tasksByID[task.ID] = task
+	}
+	for _, taskID := range ids {
+		if taskID == petTaskID {
+			continue
+		}
+		task, ok := tasksByID[taskID]
+		if !ok || task.Status == domain.TaskCompleted || task.Status == domain.TaskCancelled {
+			continue
+		}
+		open++
+		if petOpenTaskAttentionReason(task.Status) != "" && pendingByTask[task.ID] == "" {
+			attention++
+		}
+	}
+	return open, attention
+}
+
 func (s *Service) petInspection(ctx context.Context, tasks []domain.Task, pendingApprovals []domain.PetApproval, openTasks int, attentionTasks int) PetInspection {
 	now := s.now().UTC()
+	return s.petInspectionWithChannelSnapshot(now, tasks, pendingApprovals, openTasks, attentionTasks, s.petChannelSnapshotValues(ctx, now))
+}
+
+// petInspectionWithChannelSnapshot builds the compact snapshot from an already
+// loaded channel snapshot, so the workbench can share one channel read between
+// the inspection summary and its channel cards.
+func (s *Service) petInspectionWithChannelSnapshot(now time.Time, tasks []domain.Task, pendingApprovals []domain.PetApproval, openTasks int, attentionTasks int, channels petChannelSnapshotValues) PetInspection {
 	inspection := PetInspection{
 		CheckedAt: now.Format(time.RFC3339), Health: "ok",
 		Version: s.buildVersion, WebVersion: s.webVersion,
@@ -377,39 +421,36 @@ func (s *Service) petInspection(ctx context.Context, tasks []domain.Task, pendin
 	default:
 		inspection.Note = "没有未闭环任务。"
 	}
-	s.applyPetChannelHealth(ctx, &inspection, now)
+	applyPetChannelHealthSnapshot(&inspection, channels)
+	inspection.DegradedChannelCount = len(inspection.DegradedChannels)
 	return inspection
 }
 
-// applyPetChannelHealth adds the sanitized channel/outbox snapshot to an
+// applyPetChannelHealthValues is the row-level variant kept for tests; the
+// snapshot helpers below carry the same classification one level up.
+func applyPetChannelHealthValues(inspection *PetInspection, channels []domain.ChannelInstance, outbox map[string]domain.ChannelOutboxHealth, now time.Time, outboxFailed bool) {
+	applyPetChannelHealthSnapshot(inspection, petChannelSnapshotFrom(channels, outbox, now, outboxFailed))
+}
+
+// applyPetChannelHealthSnapshot adds a sanitized channel/outbox snapshot to an
 // inspection. A lost outbox read is surfaced as degraded instead of silently
 // claiming the channels are healthy.
-func (s *Service) applyPetChannelHealth(ctx context.Context, inspection *PetInspection, now time.Time) {
-	channels, err := s.store.ChannelInstances(ctx, "")
-	if err != nil {
+func applyPetChannelHealthSnapshot(inspection *PetInspection, values petChannelSnapshotValues) {
+	if values.ReadFailed {
 		inspection.Health = "degraded"
 		inspection.DegradedChannels = append(inspection.DegradedChannels, "渠道状态读取失败")
 		inspection.Note = petChannelAppendNote(inspection.Note, inspection.DegradedChannels)
 		return
 	}
-	outbox, outboxErr := s.store.ChannelOutboxHealth(ctx, now)
-	if outboxErr != nil {
-		outbox = map[string]domain.ChannelOutboxHealth{}
-	}
-	applyPetChannelHealthValues(inspection, channels, outbox, now, outboxErr != nil)
-}
-
-func applyPetChannelHealthValues(inspection *PetInspection, channels []domain.ChannelInstance, outbox map[string]domain.ChannelOutboxHealth, now time.Time, outboxFailed bool) {
-	health, degraded, total := buildPetChannelHealth(channels, outbox, now)
-	inspection.Channels = health
-	inspection.ChannelsTotal = total
-	if outboxFailed {
+	inspection.Channels = values.Health
+	inspection.ChannelsTotal = values.Total
+	if values.OutboxFailed {
 		inspection.Health = "degraded"
 		inspection.DegradedChannels = append(inspection.DegradedChannels, "出站队列状态读取失败")
 	}
-	if len(degraded) > 0 {
+	if len(values.Degraded) > 0 {
 		inspection.Health = "degraded"
-		inspection.DegradedChannels = append(inspection.DegradedChannels, degraded...)
+		inspection.DegradedChannels = append(inspection.DegradedChannels, values.Degraded...)
 	}
 	if len(inspection.DegradedChannels) > 0 {
 		inspection.Note = petChannelAppendNote(inspection.Note, inspection.DegradedChannels)
@@ -424,27 +465,47 @@ func petChannelAppendNote(note string, degraded []string) string {
 	return note + " " + channelNote
 }
 
-// petChannelSnapshot is the read-only channel summary shared by the pet
+// petChannelSnapshotValues is the read-only channel summary shared by the pet
 // workbench and inspection. It never fails the page: a channel read error is
 // reported as text instead.
-func (s *Service) petChannelSnapshot(ctx context.Context) ([]PetChannelHealth, string, int) {
-	now := s.now().UTC()
+type petChannelSnapshotValues struct {
+	Health       []PetChannelHealth
+	Degraded     []string
+	Total        int
+	Note         string
+	ReadFailed   bool
+	OutboxFailed bool
+}
+
+func (s *Service) petChannelSnapshotValues(ctx context.Context, now time.Time) petChannelSnapshotValues {
 	channels, err := s.store.ChannelInstances(ctx, "")
 	if err != nil {
-		return nil, "渠道状态读取失败。", 0
+		return petChannelSnapshotValues{ReadFailed: true, Note: "渠道状态读取失败。"}
 	}
 	outbox, outboxErr := s.store.ChannelOutboxHealth(ctx, now)
 	if outboxErr != nil {
 		outbox = map[string]domain.ChannelOutboxHealth{}
 	}
+	return petChannelSnapshotFrom(channels, outbox, now, outboxErr != nil)
+}
+
+func petChannelSnapshotFrom(channels []domain.ChannelInstance, outbox map[string]domain.ChannelOutboxHealth, now time.Time, outboxFailed bool) petChannelSnapshotValues {
 	health, degraded, total := buildPetChannelHealth(channels, outbox, now)
-	if outboxErr != nil {
-		return health, "出站队列状态读取失败。", total
+	values := petChannelSnapshotValues{Health: health, Degraded: degraded, Total: total, OutboxFailed: outboxFailed}
+	switch {
+	case outboxFailed:
+		values.Note = "出站队列状态读取失败。"
+	case len(degraded) > 0:
+		values.Note = "渠道状态异常：" + strings.Join(degraded, "；") + "。"
 	}
-	if len(degraded) == 0 {
-		return health, "", total
-	}
-	return health, "渠道状态异常：" + strings.Join(degraded, "；") + "。", total
+	return values
+}
+
+// petChannelSnapshot keeps the previous call shape for callers that only need
+// the rendered cards.
+func (s *Service) petChannelSnapshot(ctx context.Context) ([]PetChannelHealth, string, int) {
+	values := s.petChannelSnapshotValues(ctx, s.now().UTC())
+	return values.Health, values.Note, values.Total
 }
 
 func petChannelAgeMinutes(at, now time.Time) int {
