@@ -492,6 +492,8 @@ const enUS: Record<string, string> = {
 // semantic keys yet. Values are exact Chinese text nodes or labels, so the
 // same table is used by tr() and the DOM translation safety net below.
 const legacyEnglish: Record<string, string> = {
+  "已跳过评审": "Review skipped",
+  "需要评审": "Review required",
   "取消": "Cancel",
   "关闭": "Close",
   "保存": "Save",

@@ -442,6 +442,11 @@ export interface EnvGroup {
 }
 
 export interface Task {
+  review_decision?: "required" | "skipped";
+  review_reason?: string;
+  review_task_id?: string;
+  review_decided_at?: string;
+  review_decided_by?: "main" | "pet";
   id: string;
   code?: string;
   project_id: string;

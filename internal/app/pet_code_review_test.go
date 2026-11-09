@@ -432,7 +432,7 @@ func completeTaskWithReview(t *testing.T, filesystem, effort string) {
 		t.Fatal(err)
 	}
 	waitForTask(t, fixture.database, source.ID, domain.TaskWaitingUser)
-	if _, err := fixture.service.PetCompleteTask(fixture.ctx, source.ID); err == nil || !strings.Contains(err.Error(), "review_task_id") {
+	if _, err := fixture.service.PetCompleteTaskWithReview(fixture.ctx, source.ID, ""); err == nil || !strings.Contains(err.Error(), "review_task_id") {
 		t.Fatalf("write task completed without review: %v", err)
 	}
 
@@ -448,14 +448,22 @@ func completeTaskWithReview(t *testing.T, filesystem, effort string) {
 	if _, err := fixture.service.PetCompleteTaskWithReview(fixture.ctx, source.ID, review.ID); err == nil || !strings.Contains(err.Error(), "尚未完成") {
 		t.Fatalf("unfinished review accepted: %v", err)
 	}
-	if completed, err := fixture.service.PetCompleteTask(fixture.ctx, review.ID); err != nil || completed.Status != domain.TaskCompleted {
+	if completed, err := fixture.service.PetCompleteTaskWithDecision(fixture.ctx, review.ID, "skipped", "独立评审任务无需递归评审", ""); err != nil || completed.Status != domain.TaskCompleted {
 		t.Fatalf("review completion recursed: status=%s err=%v", completed.Status, err)
 	}
-	completed, err := fixture.service.PetCompleteTaskWithReview(fixture.ctx, source.ID, review.ID)
+	args, _ := json.Marshal(map[string]string{"task_id": source.ID, "review_decision": "required", "review_task_id": review.ID})
+	raw, err := fixture.service.PetMCPTool(fixture.ctx, "aha_complete_task", args)
 	if err != nil {
+		t.Fatal(err)
+	}
+	var completed domain.Task
+	if err := json.Unmarshal([]byte(raw), &completed); err != nil {
 		t.Fatal(err)
 	}
 	if completed.Status != domain.TaskCompleted {
 		t.Fatalf("completed status=%s", completed.Status)
+	}
+	if completed.ReviewDecision != "required" || completed.ReviewTaskID != review.ID || completed.ReviewDecidedBy != "pet" || completed.ReviewDecidedAt.IsZero() {
+		t.Fatalf("required decision not persisted: %#v", completed.TaskReviewDecision)
 	}
 }

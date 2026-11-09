@@ -5,10 +5,87 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"slices"
 	"testing"
+	"time"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
 )
+
+func TestPetCodeReviewsForSourceChronologicalOrder(t *testing.T) {
+	ctx := context.Background()
+	database, err := Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	sourceID := attachmentTestTask(t, database)
+	source, err := database.Task(ctx, sourceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Insert out of order with IDs opposing creation time. Same-time reviews
+	// must retain insertion order, independently of their random IDs.
+	for _, tc := range []struct {
+		id     string
+		offset time.Duration
+	}{
+		{"a-newest", 2 * time.Hour}, {"z-oldest", 0}, {"c-middle", time.Hour}, {"b-middle", time.Hour},
+	} {
+		review := source
+		review.ID, review.Code, review.CreatedAt = tc.id, "", source.CreatedAt.Add(tc.offset)
+		if err := database.CreateTask(ctx, review); err != nil {
+			t.Fatal(err)
+		}
+		if err := database.CreatePetCodeReviewLink(ctx, review.ID, source.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ids, err := database.PetCodeReviewsForSource(ctx, source.ID)
+	if err != nil || !slices.Equal(ids, []string{"z-oldest", "c-middle", "b-middle", "a-newest"}) {
+		t.Fatalf("not ordered by creation time then insertion order: %v %v", ids, err)
+	}
+}
+
+func TestPetCodeReviewsForSourceSameSecondPrecision(t *testing.T) {
+	ctx := context.Background()
+	database, err := Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	sourceID := attachmentTestTask(t, database)
+	source, err := database.Task(ctx, sourceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := source.CreatedAt.Truncate(time.Second)
+	// Deliberately reverse insertion order: preserve full nanosecond precision,
+	// not SQLite's date-function precision or RFC3339Nano lexical order.
+	for _, tc := range []struct {
+		id string
+		ns time.Duration
+	}{
+		{"a-later", 123450}, {"z-earlier", 123400}, {"whole-second", 0},
+	} {
+		review := source
+		review.ID, review.Code, review.CreatedAt = tc.id, "", base.Add(tc.ns)
+		if err := database.CreateTask(ctx, review); err != nil {
+			t.Fatal(err)
+		}
+		if err := database.CreatePetCodeReviewLink(ctx, review.ID, source.ID); err != nil {
+			t.Fatal(err)
+		}
+		var raw string
+		if err := database.db.QueryRowContext(ctx, `SELECT created_at FROM tasks WHERE id=?`, review.ID).Scan(&raw); err != nil || raw != review.CreatedAt.Format(time.RFC3339Nano) {
+			t.Fatalf("timestamp precision changed: %q %v", raw, err)
+		}
+	}
+	ids, err := database.PetCodeReviewsForSource(ctx, source.ID)
+	if err != nil || !slices.Equal(ids, []string{"whole-second", "z-earlier", "a-later"}) {
+		t.Fatalf("same-second order incorrect: %v %v", ids, err)
+	}
+}
 
 func TestPetCodeReviewLinksMigrationAndPersistence(t *testing.T) {
 	ctx := context.Background()
@@ -39,7 +116,18 @@ func TestPetCodeReviewLinksMigrationAndPersistence(t *testing.T) {
 	if _, err := database.PetCodeReviewSource(ctx, review.ID); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("legacy task acquired link: %v", err)
 	}
+	if ids, err := database.PetCodeReviewsForSource(ctx, source.ID); err != nil || len(ids) != 0 {
+		t.Fatalf("unlinked source acquired reviews: %v %v", ids, err)
+	}
 	if err := database.CreatePetCodeReviewLink(ctx, review.ID, source.ID); err != nil {
+		t.Fatal(err)
+	}
+	second := review
+	second.ID = "task-review-second"
+	if err := database.CreateTask(ctx, second); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CreatePetCodeReviewLink(ctx, second.ID, source.ID); err != nil {
 		t.Fatal(err)
 	}
 	if err := database.Close(); err != nil {
@@ -51,6 +139,12 @@ func TestPetCodeReviewLinksMigrationAndPersistence(t *testing.T) {
 	}
 	if got, err := database.PetCodeReviewSource(ctx, review.ID); err != nil || got != source.ID {
 		t.Fatalf("link did not survive reopen/migration: %q %v", got, err)
+	}
+	if ids, err := database.PetCodeReviewsForSource(ctx, source.ID); err != nil || len(ids) != 2 || ids[0] != review.ID || ids[1] != second.ID {
+		t.Fatalf("source query lost reviews after reopen: %v %v", ids, err)
+	}
+	if ids, err := database.PetCodeReviewsForSource(ctx, review.ID); err != nil || len(ids) != 0 {
+		t.Fatalf("source query leaked unrelated reviews: %v %v", ids, err)
 	}
 	if err := database.CreatePetCodeReviewLink(ctx, review.ID, source.ID); err == nil {
 		t.Fatal("existing immutable link overwritten")

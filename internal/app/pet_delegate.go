@@ -522,6 +522,7 @@ type PetRemoteHardwareBrief struct {
 }
 
 type PetTaskDetail struct {
+	domain.TaskReviewDecision
 	ID            string                   `json:"id"`
 	Code          string                   `json:"code,omitempty"`
 	Title         string                   `json:"title"`
@@ -565,7 +566,8 @@ func (s *Service) PetTaskDetail(ctx context.Context, taskID string) (PetTaskDeta
 		task = remote.Task
 	}
 	detail := PetTaskDetail{
-		ID: task.ID, Code: task.Code, Title: task.Title, Status: string(task.Status),
+		TaskReviewDecision: task.TaskReviewDecision,
+		ID:                 task.ID, Code: task.Code, Title: task.Title, Status: string(task.Status),
 		CurrentGoal:  truncateAssistantText(task.CurrentGoal, 1200),
 		OriginalGoal: truncateAssistantText(task.OriginalRequest, 1200),
 		UpdatedAt:    task.UpdatedAt.Format(time.RFC3339),

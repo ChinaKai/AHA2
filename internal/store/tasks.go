@@ -165,12 +165,13 @@ func (s *Store) BackfillTaskCodes(ctx context.Context) (int, error) {
 
 func scanTask(scanner interface{ Scan(...any) error }) (domain.Task, error) {
 	var item domain.Task
-	var skillIDsJSON, agentCapabilitiesJSON, mcpServerIDsJSON, createdAt, updatedAt, completedAt string
+	var skillIDsJSON, agentCapabilitiesJSON, mcpServerIDsJSON, createdAt, updatedAt, completedAt, reviewDecisionJSON string
 	err := scanner.Scan(
 		&item.ID, &item.Code, &item.ProjectID, &item.WorkspaceID, &item.Title, &item.OriginalRequest, &item.CurrentGoal,
 		&item.Status, &item.TargetBranch, &item.BaseCommit, &item.TaskBranch, &item.Isolation, &item.WorktreeDir, &item.TaskWorkspacePath,
-		&item.RuntimeConfigSnapshotID, &item.CollaborationMode, &item.MaxAgents, &item.KnowledgePolicy, &skillIDsJSON, &agentCapabilitiesJSON, &mcpServerIDsJSON, &createdAt, &updatedAt, &completedAt,
+		&item.RuntimeConfigSnapshotID, &item.CollaborationMode, &item.MaxAgents, &item.KnowledgePolicy, &skillIDsJSON, &agentCapabilitiesJSON, &mcpServerIDsJSON, &createdAt, &updatedAt, &completedAt, &reviewDecisionJSON,
 	)
+	item.TaskReviewDecision = decodeJSON(reviewDecisionJSON, domain.TaskReviewDecision{})
 	item.SkillIDs = decodeJSON(skillIDsJSON, []string{})
 	item.AgentCapabilities = decodeJSON(agentCapabilitiesJSON, map[string]bool{})
 	item.MCPServerIDs = decodeJSON(mcpServerIDsJSON, []string{})
@@ -178,7 +179,7 @@ func scanTask(scanner interface{ Scan(...any) error }) (domain.Task, error) {
 	return item, err
 }
 
-const taskColumns = `id,code,project_id,workspace_id,title,original_request,current_goal,status,target_branch,base_commit,task_branch,isolation,worktree_dir,task_workspace_path,runtime_config_snapshot_id,collaboration_mode,max_agents,knowledge_policy,skill_ids_json,agent_capabilities_json,mcp_server_ids_json,created_at,updated_at,completed_at`
+const taskColumns = `id,code,project_id,workspace_id,title,original_request,current_goal,status,target_branch,base_commit,task_branch,isolation,worktree_dir,task_workspace_path,runtime_config_snapshot_id,collaboration_mode,max_agents,knowledge_policy,skill_ids_json,agent_capabilities_json,mcp_server_ids_json,created_at,updated_at,completed_at,review_decision_json`
 
 func (s *Store) Task(ctx context.Context, id string) (domain.Task, error) {
 	return scanTask(s.db.QueryRowContext(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=?`, id))
@@ -458,10 +459,24 @@ func (s *Store) SetTaskStatusListener(listener TaskStatusListener) {
 }
 
 func (s *Store) UpdateTaskStatus(ctx context.Context, id string, from, to domain.TaskStatus, updatedAt, completedAt string) error {
+	return s.updateTaskStatus(ctx, id, from, to, updatedAt, completedAt, nil)
+}
+
+func (s *Store) updateTaskStatus(ctx context.Context, id string, from, to domain.TaskStatus, updatedAt, completedAt string, decision *domain.TaskReviewDecision) error {
 	if err := domain.ValidateTaskTransition(from, to); err != nil {
 		return err
 	}
-	result, err := s.db.ExecContext(ctx, `UPDATE tasks SET status=?,updated_at=?,completed_at=? WHERE id=? AND status=?`, to, updatedAt, completedAt, id, from)
+	query := `UPDATE tasks SET status=?,updated_at=?,completed_at=?`
+	args := []any{to, updatedAt, completedAt}
+	if from == domain.TaskCompleted && to != domain.TaskCompleted || to == domain.TaskCompleted && decision == nil {
+		query += `,review_decision_json='{}'`
+	} else if decision != nil {
+		query += `,review_decision_json=?`
+		args = append(args, encodeJSON(*decision))
+	}
+	query += ` WHERE id=? AND status=?`
+	args = append(args, id, from)
+	result, err := s.db.ExecContext(ctx, query, args...)
 	if err != nil {
 		return err
 	}

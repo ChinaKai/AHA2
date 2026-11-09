@@ -381,7 +381,16 @@ type RuntimeConfigSnapshot struct {
 	CreatedAt           time.Time `json:"created_at"`
 }
 
+type TaskReviewDecision struct {
+	ReviewDecision  string    `json:"review_decision,omitempty"`
+	ReviewReason    string    `json:"review_reason,omitempty"`
+	ReviewTaskID    string    `json:"review_task_id,omitempty"`
+	ReviewDecidedAt time.Time `json:"review_decided_at,omitempty"`
+	ReviewDecidedBy string    `json:"review_decided_by,omitempty"`
+}
+
 type Task struct {
+	TaskReviewDecision
 	ID                      string          `json:"id"`
 	Code                    string          `json:"code,omitempty"`
 	ProjectID               string          `json:"project_id"`

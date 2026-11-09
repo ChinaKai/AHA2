@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"fmt"
+	"sort"
+	"time"
 )
 
 // CreatePetCodeReviewLink is only called by the server's review creation flow.
@@ -20,6 +22,44 @@ func (s *Store) CreatePetCodeReviewLink(ctx context.Context, reviewTaskID, sourc
 		return fmt.Errorf("invalid code review task link")
 	}
 	return nil
+}
+
+// PetCodeReviewsForSource returns reviews oldest first, with insertion order
+// breaking ties. Parse RFC3339Nano: variable fractional digits do not sort as text.
+// Cross-project links remain visible so approval checks can fail closed.
+func (s *Store) PetCodeReviewsForSource(ctx context.Context, sourceTaskID string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT review.id,review.created_at FROM pet_code_reviews link
+		JOIN tasks review ON review.id=link.review_task_id
+		WHERE link.source_task_id=? ORDER BY review.rowid`, sourceTaskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	type reviewTime struct {
+		id        string
+		createdAt time.Time
+	}
+	var reviews []reviewTime
+	for rows.Next() {
+		var id, createdAt string
+		if err := rows.Scan(&id, &createdAt); err != nil {
+			return nil, err
+		}
+		at, err := time.Parse(time.RFC3339Nano, createdAt)
+		if err != nil {
+			return nil, fmt.Errorf("invalid review creation time: %w", err)
+		}
+		reviews = append(reviews, reviewTime{id: id, createdAt: at})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	sort.SliceStable(reviews, func(i, j int) bool { return reviews[i].createdAt.Before(reviews[j].createdAt) })
+	ids := make([]string, len(reviews))
+	for i, review := range reviews {
+		ids[i] = review.id
+	}
+	return ids, nil
 }
 
 // PetCodeReviewSource revalidates the endpoints so a stale or invalid link never

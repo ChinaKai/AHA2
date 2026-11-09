@@ -37,6 +37,7 @@ import {
   latestAgentTurns,
   renderAgentConfigDialog,
   renderAgentTurnCard,
+  renderTaskReviewDecision,
   renderContextMetrics,
   usageNumber,
 } from "./task_agents.js";
@@ -4327,7 +4328,7 @@ function taskDetailView(detail: TaskDetail): string {
   const toolLayout = state.taskTool ? ` task-tool-open task-tool-${state.taskToolMode}` : "";
   const channelVisible = !readOnly && !detail.task.channel_instance_id;
   return shell(`<section class="task-screen">
-    <header class="task-head"><button id="back-tasks">←</button><div class="task-title-block"><h1><span class="task-code">${escapeHTML(detail.task.code || "")}</span><span class="task-title-text">${escapeHTML(detail.task.title)}</span></h1><div class="task-head-subline"><span class="task-head-meta" title="${escapeHTML(taskMeta)}">${escapeHTML(taskMeta)}</span><span id="task-detail-status" class="status ${statusClass(detail.task.status)}">${statusLabel(detail.task.status)}</span><span class="task-branch">${escapeHTML(detail.task.task_branch || "")}</span></div></div><div class="actions task-tool-actions">${renderTaskToolButtons(state.taskTool, {includeChannel: channelVisible, channelConnected: Boolean(state.taskChannelDestination), channelLabel: taskChannelButtonLabel(state.taskChannelDestination), pendingPermissions: taskPermissionPendingCount(detail), pendingMail: taskMailPendingCount()})}</div></header>
+    <header class="task-head"><button id="back-tasks">←</button><div class="task-title-block"><h1><span class="task-code">${escapeHTML(detail.task.code || "")}</span><span class="task-title-text">${escapeHTML(detail.task.title)}</span></h1><div class="task-head-subline"><span class="task-head-meta" title="${escapeHTML(taskMeta)}">${escapeHTML(taskMeta)}</span><span id="task-detail-status" class="status ${statusClass(detail.task.status)}">${statusLabel(detail.task.status)}</span><span class="task-branch">${escapeHTML(detail.task.task_branch || "")}</span><span id="task-review-slot">${renderTaskReviewDecision(detail.task, tr)}</span></div></div><div class="actions task-tool-actions">${renderTaskToolButtons(state.taskTool, {includeChannel: channelVisible, channelConnected: Boolean(state.taskChannelDestination), channelLabel: taskChannelButtonLabel(state.taskChannelDestination), pendingPermissions: taskPermissionPendingCount(detail), pendingMail: taskMailPendingCount()})}</div></header>
     <div class="task-grid${toolLayout}" style="--task-tool-width:${state.taskToolWidth}%">
       ${chat}
       ${renderTaskToolPanel(state.taskTool, detail, state.selectedTaskAgent, taskCtxHtml(), state.taskToolMode, taskChannelPanelHTML(), state.taskToolPinned === state.taskTool, taskPermissionPanelHtml(detail), taskMailPanelHTML(detail))}
@@ -4525,6 +4526,8 @@ function updateTaskLiveRegions(): void {
   if (agentSelect && (document.activeElement !== agentSelect || !agentSelect.options.length || !selectedOptionExists) && agentSelect.innerHTML !== nextAgentOptions) {
     agentSelect.innerHTML = nextAgentOptions;
   }
+  const reviewSlot = document.querySelector<HTMLElement>("#task-review-slot");
+  if (reviewSlot) replaceRegionHTML(reviewSlot, renderTaskReviewDecision(detail.task, tr));
   const taskStatus = document.querySelector<HTMLElement>("#task-detail-status");
   if (taskStatus) {
     taskStatus.className = `status ${statusClass(detail.task.status)}`;

@@ -39,7 +39,7 @@ func TestPetReviewCompletionDoesNotApproveSource(t *testing.T) {
 				t.Fatal(err)
 			}
 			waitForTask(t, fixture.database, review.ID, domain.TaskWaitingUser)
-			if completed, err := fixture.service.PetCompleteTask(fixture.ctx, review.ID); err != nil || completed.Status != domain.TaskCompleted {
+			if completed, err := fixture.service.PetCompleteTaskWithDecision(fixture.ctx, review.ID, "skipped", "独立评审任务无需递归评审", ""); err != nil || completed.Status != domain.TaskCompleted {
 				t.Fatalf("review cannot finish: status=%s err=%v", completed.Status, err)
 			}
 			if _, err := fixture.service.PetCompleteTaskWithReview(fixture.ctx, source.ID, review.ID); err == nil {
@@ -73,7 +73,7 @@ func TestPetCodeReviewRejectsSpoofedAndMismatchedLinks(t *testing.T) {
 	spoof := createTask(project.ID, workspace.ID)
 	// A user-editable watch reason is not a review association.
 	fixture.service.watchPetTask(fixture.ctx, spoof.ID, "review")
-	if _, err := fixture.service.PetCompleteTask(fixture.ctx, spoof.ID); err == nil || !strings.Contains(err.Error(), "review_task_id") {
+	if _, err := fixture.service.PetCompleteTaskWithReview(fixture.ctx, spoof.ID, ""); err == nil || !strings.Contains(err.Error(), "review_task_id") {
 		t.Fatalf("spoof received exemption: %v", err)
 	}
 	if _, err := fixture.service.PetCompleteTaskWithReview(fixture.ctx, source.ID, spoof.ID); err == nil || !strings.Contains(err.Error(), "未关联") {
@@ -84,7 +84,7 @@ func TestPetCodeReviewRejectsSpoofedAndMismatchedLinks(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitForTask(t, fixture.database, review.ID, domain.TaskWaitingUser)
-	if _, err := fixture.service.PetCompleteTask(fixture.ctx, review.ID); err != nil {
+	if _, err := fixture.service.PetCompleteTaskWithDecision(fixture.ctx, review.ID, "skipped", "独立评审任务无需递归评审", ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := fixture.service.PetCompleteTaskWithReview(fixture.ctx, spoof.ID, review.ID); err == nil || !strings.Contains(err.Error(), "未关联") {
@@ -138,7 +138,7 @@ func TestPetReviewCompletionRequiresSuccessfulTurn(t *testing.T) {
 			if err := fixture.database.CreateTurn(fixture.ctx, turn); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := fixture.service.PetCompleteTask(fixture.ctx, review.ID); err == nil {
+			if _, err := fixture.service.PetCompleteTaskWithDecision(fixture.ctx, review.ID, "skipped", "独立评审任务无需递归评审", ""); err == nil {
 				t.Fatal("unsuccessful review completed")
 			}
 		})
