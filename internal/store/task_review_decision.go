@@ -31,7 +31,7 @@ func (s *Store) migrateTaskReviewDecision(ctx context.Context) error {
 }
 
 // CompleteTaskWithReviewDecision writes the completion and its audit declaration
-// in the same status update. Owner completion (nil) preserves existing behavior.
+// in the same status update. Owner completion (nil) clears any old declaration.
 func (s *Store) CompleteTaskWithReviewDecision(ctx context.Context, id string, from domain.TaskStatus, at string, decision *domain.TaskReviewDecision) error {
 	return s.updateTaskStatus(ctx, id, from, domain.TaskCompleted, at, at, decision)
 }

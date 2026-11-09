@@ -58,12 +58,29 @@ func (s *Service) PetCompleteTaskWithDecision(ctx context.Context, taskID, decis
 		return task, fmt.Errorf("skipped 时不能提供 review_task_id")
 	}
 	// Linked review Tasks still need a final verdict even when review is skipped.
-	if _, err := s.store.PetCodeReviewSource(ctx, task.ID); err == nil || decision == "required" {
+	if _, err := s.store.PetCodeReviewSource(ctx, task.ID); err == nil {
+		if decision != "skipped" {
+			return task, fmt.Errorf("Review Task 自身只能申报 skipped 并提供理由，不能提供 review_task_id")
+		}
 		if err := s.requirePetCodeReview(ctx, task, reviewTaskID); err != nil {
 			return task, err
 		}
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return task, fmt.Errorf("无法读取 Review Task 关联：%w", err)
+	} else if decision == "required" {
+		if err := s.requirePetCodeReview(ctx, task, reviewTaskID); err != nil {
+			return task, err
+		}
+	} else {
+		reviews, err := s.store.PetCodeReviewsForSource(ctx, task.ID)
+		if err != nil {
+			return task, fmt.Errorf("无法读取源 Task 的评审关联：%w", err)
+		}
+		for _, reviewID := range reviews {
+			if err := s.requirePetCodeReview(ctx, task, reviewID); err != nil {
+				return task, fmt.Errorf("不能 skipped 绕过已有 Review Task %s：%w", reviewID, err)
+			}
+		}
 	}
 	audit := &domain.TaskReviewDecision{
 		ReviewDecision: decision, ReviewReason: reason, ReviewTaskID: reviewTaskID,

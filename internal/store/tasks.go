@@ -468,7 +468,9 @@ func (s *Store) updateTaskStatus(ctx context.Context, id string, from, to domain
 	}
 	query := `UPDATE tasks SET status=?,updated_at=?,completed_at=?`
 	args := []any{to, updatedAt, completedAt}
-	if decision != nil {
+	if from == domain.TaskCompleted && to != domain.TaskCompleted || to == domain.TaskCompleted && decision == nil {
+		query += `,review_decision_json='{}'`
+	} else if decision != nil {
 		query += `,review_decision_json=?`
 		args = append(args, encodeJSON(*decision))
 	}

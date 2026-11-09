@@ -39,7 +39,18 @@ func TestPetCodeReviewLinksMigrationAndPersistence(t *testing.T) {
 	if _, err := database.PetCodeReviewSource(ctx, review.ID); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("legacy task acquired link: %v", err)
 	}
+	if ids, err := database.PetCodeReviewsForSource(ctx, source.ID); err != nil || len(ids) != 0 {
+		t.Fatalf("unlinked source acquired reviews: %v %v", ids, err)
+	}
 	if err := database.CreatePetCodeReviewLink(ctx, review.ID, source.ID); err != nil {
+		t.Fatal(err)
+	}
+	second := review
+	second.ID = "task-review-second"
+	if err := database.CreateTask(ctx, second); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CreatePetCodeReviewLink(ctx, second.ID, source.ID); err != nil {
 		t.Fatal(err)
 	}
 	if err := database.Close(); err != nil {
@@ -51,6 +62,12 @@ func TestPetCodeReviewLinksMigrationAndPersistence(t *testing.T) {
 	}
 	if got, err := database.PetCodeReviewSource(ctx, review.ID); err != nil || got != source.ID {
 		t.Fatalf("link did not survive reopen/migration: %q %v", got, err)
+	}
+	if ids, err := database.PetCodeReviewsForSource(ctx, source.ID); err != nil || len(ids) != 2 || ids[0] != review.ID || ids[1] != second.ID {
+		t.Fatalf("source query lost reviews after reopen: %v %v", ids, err)
+	}
+	if ids, err := database.PetCodeReviewsForSource(ctx, review.ID); err != nil || len(ids) != 0 {
+		t.Fatalf("source query leaked unrelated reviews: %v %v", ids, err)
 	}
 	if err := database.CreatePetCodeReviewLink(ctx, review.ID, source.ID); err == nil {
 		t.Fatal("existing immutable link overwritten")

@@ -22,6 +22,25 @@ func (s *Store) CreatePetCodeReviewLink(ctx context.Context, reviewTaskID, sourc
 	return nil
 }
 
+// PetCodeReviewsForSource returns every recorded review, including links whose
+// endpoints no longer match, so callers can fail closed when checking approval.
+func (s *Store) PetCodeReviewsForSource(ctx context.Context, sourceTaskID string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT review_task_id FROM pet_code_reviews WHERE source_task_id=? ORDER BY review_task_id`, sourceTaskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 // PetCodeReviewSource revalidates the endpoints so a stale or invalid link never
 // grants the review-task completion exemption.
 func (s *Store) PetCodeReviewSource(ctx context.Context, reviewTaskID string) (string, error) {
