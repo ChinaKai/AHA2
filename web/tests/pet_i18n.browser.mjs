@@ -26,6 +26,7 @@ const json=(v,s=200)=>new Response(JSON.stringify(v),{status:s,headers:{"Content
 const assistant=${JSON.stringify(assistant)};
 const approvals=${JSON.stringify(approvals)};
 window.pendingCount=0;
+window.petPendingReads=0;
 const nativeSetInterval=window.setInterval.bind(window);
 window.setInterval=(callback,ms,...args)=>{
  if(ms===60000){window.pollPetPendingCount=callback;return 98765;}
@@ -39,7 +40,7 @@ window.fetch=async(input,init={})=>{
  if(path==="/api/v1/assistant/hints")return json({hints:[]});
  if(path==="/api/v1/pet")return json({state:{id:"pet",mood:"neutral",action:"idle",zone:"desk"}});
  if(path==="/api/v1/pet/activity")return json({events:[]});
- if(path==="/api/v1/pet/approvals/pending-count")return json({ok:true,pending:window.pendingCount});
+ if(path==="/api/v1/pet/approvals/pending-count"){window.petPendingReads++;return json({ok:true,pending:window.pendingCount});}
  if(path.startsWith("/api/v1/pet/approvals/")&&path.endsWith("/resolve")&&method==="POST"){
   const id=path.split("/")[5]; const item=approvals.find(a=>a.id===id);
   if(item?.status==="pending"){item.status=JSON.parse(init.body).decision;window.pendingCount--;}
@@ -56,7 +57,10 @@ window.fetch=async(input,init={})=>{
  if(path.startsWith("/api/v1/"))return json({});
  return json({});
 };
-window.EventSource=class{constructor(){}close(){}addEventListener(){}};
+window.EventSource=class extends EventTarget{
+ constructor(url){super();if(url==="/api/v1/events")window.petGlobalEvents=this;}
+ close(){}
+};
 window.confirm=()=>true;
 sessionStorage.setItem("aha2.navigation", JSON.stringify({view:"pet-diary"}));
 `;
@@ -108,6 +112,31 @@ try{
   }
   assert.equal(await page.locator("#pet-approval-count").innerText(),String(value));
  }
+ await setCount(3);
+ // Exercise the real global SSE listeners away from the workbench: neither
+ // a page reload nor the disabled interval can refresh the badge for this test.
+ await page.locator('.sidebar [data-view="projects"]').click();
+ await page.waitForSelector(".pet-workbench-page",{state:"detached"});
+ const eventCount=async(pending,eventType)=>{
+  const previousReads=await page.evaluate(()=>window.petPendingReads);
+  await page.evaluate(({pending,eventType})=>{
+   window.pendingCount=pending;
+   const event=eventType==="pet_approval"
+    ?new MessageEvent("update",{data:JSON.stringify({type:"pet_approval",data:{status:pending===4?"pending":"approved"}})})
+    :new Event("open");
+   window.petGlobalEvents.dispatchEvent(event);
+  },{pending,eventType});
+  await page.waitForFunction(({pending,previousReads})=>{
+   const buttons=[...document.querySelectorAll('button[data-view="pet-workbench"]')];
+   return window.petPendingReads>previousReads&&buttons.length===2&&buttons.every(button=>button.querySelector(".task-tool-badge")?.textContent===String(pending));
+  },{pending,previousReads},{timeout:3000});
+ };
+ await eventCount(4,"pet_approval"); // New approval: 3 -> 4.
+ await eventCount(3,"pet_approval"); // Resolved elsewhere: 4 -> 3.
+ await eventCount(5,"open"); // Reconnect catches up to missed approvals.
+ await page.locator('.sidebar [data-view="pet-workbench"]').click();
+ await page.waitForSelector('[data-pet-workbench-tab="core"].active');
+ assert.equal(await page.locator("#pet-approval-count").innerText(),"5");
  await setCount(3);
  await page.locator('[data-pet-workbench-tab="approvals"]').click();
  for(const [id,decision,want] of [["approval-1","approve",2],["approval-2","reject",1],["idea-1","cancel",0]]){

@@ -6443,6 +6443,7 @@ function openGlobalEvents(): void {
       handlePetStreamEvent(type, data);
       return;
     }
+    if (type === "pet_approval") void refreshPetPendingApprovalCount(true);
     if (eventRefreshesTaskList(type)) {
       refreshListData();
     }
@@ -6452,7 +6453,10 @@ function openGlobalEvents(): void {
   });
   // The stream auto-reconnects; refresh on (re)open so events missed while
   // disconnected are caught up.
-  globalEvents.addEventListener("open", () => refreshListData());
+  globalEvents.addEventListener("open", () => {
+    refreshListData();
+    void refreshPetPendingApprovalCount(true);
+  });
 }
 
 function closeGlobalEvents(): void {
