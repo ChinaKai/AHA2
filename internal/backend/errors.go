@@ -57,14 +57,22 @@ var credentialRedactions = []struct {
 }{
 	// URL userinfo: https://user:password@host/...
 	{regexp.MustCompile(`(?i)(https?://)[^/\s:@]+:[^/\s@]+@`), `${1}[redacted]@`},
-	// Authorization / Proxy-Authorization headers, including "Bearer sk-...".
-	{regexp.MustCompile(`(?i)\b(proxy-authorization|authorization)\b(\s*:\s*)[^\r\n]+`), `${1}${2}[redacted]`},
+	// Authorization / Proxy-Authorization with a standard scheme. Only the
+	// credential is replaced so diagnostics on the same line (request_id,
+	// status) survive.
+	{regexp.MustCompile(`(?i)\b(proxy-authorization|authorization)\b(\s*:\s*)(bearer|basic|token|digest)\s+[^\s;,]+`), `${1}${2}${3} [redacted]`},
+	// AWS SigV4 authorization carries several comma-separated credential
+	// components; none of them are diagnostic, so redact the whole value.
+	{regexp.MustCompile(`(?i)\b(proxy-authorization|authorization)\b(\s*:\s*)AWS4-HMAC-SHA256\b[^\r\n]*`), `${1}${2}[redacted]`},
+	// Other Authorization values are bounded at a separator or quote so a
+	// same-line request id/status is preserved.
+	{regexp.MustCompile(`(?i)\b(proxy-authorization|authorization)\b(\s*:\s*)("[^"]*"|'[^']*'|[^;,\s"']+)`), `${1}${2}[redacted]`},
 	// Cookie and Set-Cookie headers.
 	{regexp.MustCompile(`(?i)\b(set-cookie|cookie)\b(\s*:\s*)[^\r\n]+`), `${1}${2}[redacted]`},
 	// Bare bearer tokens that are not part of a header line.
 	{regexp.MustCompile(`(?i)\b(bearer)\s+[A-Za-z0-9._~+/=-]{8,}`), `${1} [redacted]`},
 	// Well-known token prefixes.
-	{regexp.MustCompile(`\b(sk-ant-[A-Za-z0-9._-]{8,}|sk-[A-Za-z0-9._-]{8,}|ghp_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,}|xox[abprs]-[A-Za-z0-9-]{8,})`), `[redacted]`},
+	{regexp.MustCompile(`\b(sk-ant-[A-Za-z0-9._-]{8,}|sk-[A-Za-z0-9._-]{8,}|ghp_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,}|xox[abprs]-[A-Za-z0-9-]{8,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35})`), `[redacted]`},
 	// key: value / key=value pairs. "tokens" (a count) does not match \btoken\b.
 	{regexp.MustCompile(`(?i)\b(api[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|token|client[_-]?secret|secret[_-]?key|password|passwd)\b(\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;&"}]{4,})`), `${1}${2}[redacted]`},
 	// JSON string values for generic secret keys.

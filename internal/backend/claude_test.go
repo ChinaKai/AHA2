@@ -328,6 +328,72 @@ func TestParseClaudeAssistantAPIErrorKeepsDetailsAndStatus(t *testing.T) {
 	}
 }
 
+type claudeRecoveringResultRunner struct{}
+
+func (claudeRecoveringResultRunner) Run(_ context.Context, _ workspace.Command, onLine workspace.LineHandler) (workspace.Result, error) {
+	onLine(`{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["boom"],"session_id":"sess-live"}`)
+	onLine(`{"type":"result","subtype":"success","result":"done","session_id":"sess-live"}`)
+	return workspace.Result{ExitCode: 0}, nil
+}
+
+// A live-inbox run keeps the same process across queued messages, so more than
+// one result can arrive. A failure followed by a success must end
+// successfully; the old code latched terminalError for the rest of the run.
+func TestClaudeLiveRunRecoversAfterFailedResult(t *testing.T) {
+	result, err := (Claude{}).Execute(context.Background(), Request{Runner: claudeRecoveringResultRunner{}, WorkDir: t.TempDir()}, nil)
+	if err != nil {
+		t.Fatalf("later success must clear the earlier terminal error: %v", err)
+	}
+	if result.Reply != "done" {
+		t.Fatalf("reply = %q, want done", result.Reply)
+	}
+}
+
+func TestParseClaudeAPIRetryIsProgressNotError(t *testing.T) {
+	t.Parallel()
+	line := `{"type":"system","subtype":"api_retry","attempt":2,"max_retries":5,"retry_delay_ms":1500,"error_status":529,"error":"overloaded","session_id":"sess-retry"}`
+	events, reply, _ := parseClaudeLine(line)
+	event := firstClaudeEvent(events)
+	if event.Type != "agent_progress" || reply != "" {
+		t.Fatalf("api_retry must be progress, got %#v reply=%q", event.Type, reply)
+	}
+	message := fmt.Sprint(event.Data["message"])
+	for _, want := range []string{"overloaded", "529", "2/5", "1500"} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("retry progress lost %q: %s", want, message)
+		}
+	}
+	if event.Data["status"] != float64(529) || event.Data["attempt"] != float64(2) {
+		t.Fatalf("retry diagnostics were dropped: %#v", event.Data)
+	}
+}
+
+type claudeRetryThenSuccessRunner struct{}
+
+func (claudeRetryThenSuccessRunner) Run(_ context.Context, _ workspace.Command, onLine workspace.LineHandler) (workspace.Result, error) {
+	onLine(`{"type":"system","subtype":"api_retry","attempt":1,"max_retries":5,"retry_delay_ms":900,"error_status":529,"error":"overloaded","session_id":"sess-retry"}`)
+	onLine(`{"type":"result","subtype":"success","result":"recovered","session_id":"sess-retry"}`)
+	return workspace.Result{ExitCode: 0}, nil
+}
+
+func TestClaudeExecuteRetryEventIsNotAnError(t *testing.T) {
+	var sawError bool
+	result, err := (Claude{}).Execute(context.Background(), Request{Runner: claudeRetryThenSuccessRunner{}, WorkDir: t.TempDir()}, func(event Event) {
+		if event.Type == "agent_error" {
+			sawError = true
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sawError {
+		t.Fatal("an automatic retry must not be projected as agent_error")
+	}
+	if result.Reply != "recovered" {
+		t.Fatalf("reply = %q", result.Reply)
+	}
+}
+
 type claudeTerminalErrorRunner struct{}
 
 func (claudeTerminalErrorRunner) Run(_ context.Context, _ workspace.Command, onLine workspace.LineHandler) (workspace.Result, error) {

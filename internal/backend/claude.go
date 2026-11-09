@@ -109,6 +109,12 @@ func (adapter Claude) Execute(ctx context.Context, request Request, emit func(Ev
 				send(Event{Type: "agent_message", Data: map[string]any{"text": reply, "intermediate": true}})
 			}
 			reply = parsedReply
+			// A live-inbox run can produce several results. A later success
+			// supersedes an earlier failed result; without this reset the first
+			// failure would fail a run that actually recovered (the same run
+			// keeps running while more input is queued).
+			terminalError = false
+			providerError = ""
 		}
 		if parsedSession != "" {
 			sessionID = parsedSession
@@ -312,6 +318,13 @@ func parseClaudeLine(line string) ([]Event, string, string) {
 			if sessionID, ok := payload["session_id"].(string); ok && sessionID != "" {
 				return []Event{{Type: "agent_session", Data: map[string]any{"provider_session_id": sessionID}}}, "", sessionID
 			}
+		}
+		// Claude emits api_retry (and some builds api_error) when a request is
+		// retried automatically. It is transient progress, not a Turn failure:
+		// projecting it as agent_error would paint every retry as an error and
+		// poison the final providerError.
+		if subtype == "api_retry" || subtype == "api_error" {
+			return []Event{{Type: "agent_progress", Data: claudeAPIRetryData(payload)}}, "", ""
 		}
 	case "result":
 		sessionID, _ := payload["session_id"].(string)
@@ -517,7 +530,64 @@ func claudeErrorMeta(payload map[string]any) []string {
 
 // claudeErrorStatus returns the HTTP/API status field for event Data.
 func claudeErrorStatus(payload map[string]any) (any, bool) {
-	for _, key := range []string{"apiErrorStatus", "api_error_status"} {
+	return claudeFirstValue(payload, "apiErrorStatus", "api_error_status")
+}
+
+// claudeAPIRetryData projects a transient retry notification as progress.
+// The real event (Claude 2.1.220) is
+// {"type":"system","subtype":"api_retry","attempt":N,"max_retries":N,
+// "retry_delay_ms":N,"error_status":529|null,"error":"overloaded"}.
+// It is not a Turn failure; each retry must not create an error row or set
+// the final providerError.
+func claudeAPIRetryData(payload map[string]any) map[string]any {
+	errorText := providerErrorText(errorValueText(payload["error"]))
+	status, hasStatus := claudeFirstValue(payload, "error_status", "errorStatus")
+	attempt, hasAttempt := claudeFirstValue(payload, "attempt")
+	maxRetries, hasMaxRetries := claudeFirstValue(payload, "max_retries", "maxRetries")
+	delay, hasDelay := claudeFirstValue(payload, "retry_delay_ms", "retryDelayMs")
+
+	data := map[string]any{"phase": "api_retry"}
+	if errorText != "" {
+		data["error"] = errorText
+	}
+	if hasStatus {
+		data["status"] = status
+	}
+	if hasAttempt {
+		data["attempt"] = attempt
+	}
+	if hasMaxRetries {
+		data["max_retries"] = maxRetries
+	}
+	if hasDelay {
+		data["retry_delay_ms"] = delay
+	}
+
+	detail := make([]string, 0, 2)
+	if errorText != "" {
+		detail = append(detail, errorText)
+	}
+	if hasStatus {
+		detail = append(detail, fmt.Sprintf("HTTP %v", status))
+	}
+	message := "Claude API 请求失败，正在自动重试"
+	if len(detail) > 0 {
+		message = "Claude API 请求失败（" + strings.Join(detail, ", ") + "），正在自动重试"
+	}
+	if hasAttempt && hasMaxRetries {
+		message += fmt.Sprintf("（第 %v/%v 次）", attempt, maxRetries)
+	} else if hasAttempt {
+		message += fmt.Sprintf("（第 %v 次）", attempt)
+	}
+	if hasDelay {
+		message += fmt.Sprintf("，等待 %vms", delay)
+	}
+	data["message"] = message
+	return data
+}
+
+func claudeFirstValue(payload map[string]any, keys ...string) (any, bool) {
+	for _, key := range keys {
 		if value, ok := payload[key]; ok && value != nil {
 			return value, true
 		}
