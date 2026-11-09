@@ -427,6 +427,62 @@ func TestClaimInboxAndCreateTurnRejectsNonLiveChanges(t *testing.T) {
 	}
 }
 
+// TestClaimInboxAndCreateTurnRejectsSchedulerProcessedItem covers a stale
+// snapshot whose item was claimed by another scheduler and then processed by
+// MarkInboxBatchProcessed. That row is 'processed' but has no delivered_turn_id:
+// it was not delivered by a live/wait path, so it must stay a conflict instead
+// of being treated as already delivered.
+func TestClaimInboxAndCreateTurnRejectsSchedulerProcessedItem(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database, err := Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	task, round, turn := liveInboxTestTurn(t, database)
+	finishLiveInboxTurnRow(t, database, turn.ID)
+	now := time.Now().UTC()
+	itemID := insertLiveInboxItem(t, database, task, round, "claimed by another scheduler")
+	items, err := database.PendingAgentInbox(ctx, task.ID, "main")
+	if err != nil || len(items) != 1 {
+		t.Fatalf("pending snapshot=%#v err=%v", items, err)
+	}
+	first := domain.Turn{
+		ID: domain.NewID("turn"), TaskID: task.ID, RoundID: round.ID, AgentID: "main",
+		InputMessageID: round.InputMessageID,
+		Status:         domain.TurnQueued, RuntimeConfigSnapshotID: task.RuntimeConfigSnapshotID,
+		InboxBatchID: "batch-first", Attempt: 1, Generation: 2, Required: true, QueuedAt: now,
+	}
+	created, _, err := database.ClaimInboxAndCreateTurn(ctx, first, items, nil)
+	if err != nil || created.ID == "" {
+		t.Fatalf("first scheduler claim turn=%#v err=%v", created, err)
+	}
+	if err := database.MarkInboxBatchProcessed(ctx, created.InboxBatchID, now); err != nil {
+		t.Fatal(err)
+	}
+	finishLiveInboxTurnRow(t, database, created.ID)
+	var status, deliveredTurnID string
+	if err := database.db.QueryRowContext(ctx,
+		`SELECT status,delivered_turn_id FROM agent_inbox WHERE id=?`, itemID,
+	).Scan(&status, &deliveredTurnID); err != nil {
+		t.Fatal(err)
+	}
+	if status != "processed" || deliveredTurnID != "" {
+		t.Fatalf("fixture state status=%q delivered_turn_id=%q, want processed with no delivery", status, deliveredTurnID)
+	}
+	second := domain.Turn{
+		ID: domain.NewID("turn"), TaskID: task.ID, RoundID: round.ID, AgentID: "main",
+		InputMessageID: round.InputMessageID,
+		Status:         domain.TurnQueued, RuntimeConfigSnapshotID: task.RuntimeConfigSnapshotID,
+		InboxBatchID: "batch-stale", Attempt: 1, Generation: 3, Required: true, QueuedAt: now,
+	}
+	if _, _, err := database.ClaimInboxAndCreateTurn(ctx, second, items, nil); err == nil ||
+		!strings.Contains(err.Error(), "inbox item changed concurrently") {
+		t.Fatalf("item processed without a live delivery was accepted: %v", err)
+	}
+}
+
 // TestClaimInboxAndCreateTurnRendersOnlyClaimedItems covers a mixed stale
 // snapshot: one item was delivered live, another is still pending. The new
 // Turn must contain only the pending item, so the delivered text is not

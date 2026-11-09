@@ -401,6 +401,82 @@ func TestSubmitMessageStillRejectsNonLiveInboxConflict(t *testing.T) {
 	}
 }
 
+// TestLiveInboxScheduleAgentRendersOnlyClaimedSnapshotItems covers the
+// production render closure with a mixed stale snapshot: one live-deliverable
+// owner message and one non-live pending assignment. Once the live inbox
+// steers the owner message, the follow-up Turn must contain only the
+// assignment and report inbox_count=1; repeating the owner text would deliver
+// it twice.
+func TestLiveInboxScheduleAgentRendersOnlyClaimedSnapshotItems(t *testing.T) {
+	ctx := context.Background()
+	service, database, task, executor, running := startGatedLiveInboxTurn(t)
+	const assignmentText = "pending assignment text"
+	if _, err := database.EnqueueAgentRoute(ctx, domain.AgentInboxItem{
+		ID: domain.NewID("inbox"), TaskID: task.ID, RoundID: running.RoundID,
+		TargetAgentID: "main", SourceAgentID: "main", SourceKind: "assignment",
+		SourceTurnID: running.ID, Content: assignmentText,
+		Payload: map[string]any{"parent_turn_id": running.ID},
+		Status:  "pending", CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	service.scheduleSnapshotHook = func() {
+		service.scheduleSnapshotHook = nil
+		pending, err := database.PendingAgentInbox(ctx, task.ID, "main")
+		if err != nil || len(pending) != 2 {
+			t.Errorf("schedule snapshot pending=%#v err=%v", pending, err)
+			executor.releaseTurn()
+			return
+		}
+		batch, err := service.claimLiveInbox(ctx, task, running, 20)
+		if err != nil || len(batch.Messages) != 1 || !strings.Contains(batch.InjectionText, "mid-turn owner text") {
+			t.Errorf("live claim messages=%#v err=%v", batch.Messages, err)
+			executor.releaseTurn()
+			return
+		}
+		if _, err := service.ackLiveInbox(ctx, task, running, []string{batch.Messages[0].ID}, true); err != nil {
+			t.Errorf("live ack: %v", err)
+			executor.releaseTurn()
+			return
+		}
+		if err := database.MarkLiveInboxProcessedForTurn(ctx, running.ID, time.Now().UTC()); err != nil {
+			t.Errorf("mark live inbox processed: %v", err)
+		}
+		executor.releaseTurn()
+		waitForTurn(t, database, running.ID, domain.TurnSucceeded)
+	}
+	submitted, err := service.SubmitMessage(ctx, task.ID, "mid-turn owner text")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if submitted.ID == "" {
+		t.Fatal("pending assignment did not start a follow-up Turn")
+	}
+	if strings.Contains(submitted.Instruction, "mid-turn owner text") {
+		t.Fatalf("follow-up Turn repeated live-delivered text: %q", submitted.Instruction)
+	}
+	if !strings.Contains(submitted.Instruction, assignmentText) {
+		t.Fatalf("follow-up Turn lost the pending assignment: %q", submitted.Instruction)
+	}
+	events, err := database.EventsAfter(ctx, "task", task.ID, 0, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	queued := false
+	for _, event := range events {
+		if event.Type != "turn_queued" || fmt.Sprint(event.Data["turn_id"]) != submitted.ID {
+			continue
+		}
+		queued = true
+		if count := fmt.Sprint(event.Data["inbox_count"]); count != "1" {
+			t.Fatalf("turn_queued inbox_count=%s, want 1", count)
+		}
+	}
+	if !queued {
+		t.Fatalf("no turn_queued event for the follow-up Turn %s", submitted.ID)
+	}
+}
+
 // Backends without a live input surface keep their existing delivery paths.
 func TestDSHTurnHasNoLiveInbox(t *testing.T) {
 	executor := &inboxProbeExecutor{hadInbox: make(chan bool, 4)}
