@@ -300,6 +300,7 @@ type multiAgentExecutor struct {
 	service                *Service
 	waitForBatch           bool
 	waitForBatchOnFallback bool
+	holdParentUntilFanIn   bool
 	fallbackExitGeneration int
 	blockAgentID           string
 	agentRelease           <-chan struct{}
@@ -491,6 +492,26 @@ func TestLiveInboxSourceAuthority(t *testing.T) {
 	}
 }
 
+// waitForCollaborationComplete waits on durable fan-in progress rather than a
+// fixed delay: the batch reports complete only after every member result was
+// recorded, so a later fallback wake necessarily carries both results.
+func waitForCollaborationComplete(service *Service, batchID string) error {
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		progress, err := service.store.CollaborationProgress(context.Background(), batchID, 0)
+		if err != nil {
+			return err
+		}
+		if progress.Complete {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("collaboration %s did not complete before the parent Turn ended", batchID)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func (s *multiAgentExecutor) Execute(_ context.Context, request ExecutionRequest, emit func(ExecutionEvent)) (ExecutionResult, error) {
 	s.mu.Lock()
 	s.turns = append(s.turns, request.Turn)
@@ -513,6 +534,16 @@ func (s *multiAgentExecutor) Execute(_ context.Context, request ExecutionRequest
 			s.mu.Lock()
 			s.collaborationID = batchID
 			s.mu.Unlock()
+			if s.holdParentUntilFanIn && batchID != "" {
+				// Both child results must be durable before this parent Turn
+				// ends. Otherwise the short fallback coalescing window may
+				// expire between two child completions and wake Main twice,
+				// which is valid product behavior but not what this test
+				// asserts.
+				if err := waitForCollaborationComplete(s.service, batchID); err != nil {
+					return ExecutionResult{}, err
+				}
+			}
 			if s.waitForBatch {
 				var progress domain.CollaborationProgress
 				var waitErr error
@@ -1187,7 +1218,7 @@ func TestMultiAgentRoundCreatesIntegrationTurn(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	executor := &multiAgentExecutor{}
+	executor := &multiAgentExecutor{holdParentUntilFanIn: true}
 	service := NewService(database, secretStore, executor)
 	executor.service = service
 	task, err := service.CreateTask(ctx, CreateTaskInput{

@@ -2,8 +2,10 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,10 +19,20 @@ import (
 // through ExecutionRequest.LiveInbox while the Turn is running and settles
 // the claim the way the adapter does after the CLI's replay.
 type streamInputExecutor struct {
-	started  chan struct{}
-	claimed  chan backend.LiveBatch
-	deliver  bool
-	hadInbox chan bool
+	started       chan struct{}
+	submitted     chan struct{}
+	submittedOnce sync.Once
+	claimed       chan backend.LiveBatch
+	deliver       bool
+	hadInbox      chan bool
+}
+
+// markSubmitted opens the claim gate once the test has durably enqueued the
+// mid-turn message. Reading it from the test goroutine keeps the claim
+// deterministic: without the gate the executor raced an arbitrary polling
+// deadline against the test process's own scheduling.
+func (executor *streamInputExecutor) markSubmitted() {
+	executor.submittedOnce.Do(func() { close(executor.submitted) })
 }
 
 func (executor *streamInputExecutor) Execute(ctx context.Context, request ExecutionRequest, _ func(ExecutionEvent)) (ExecutionResult, error) {
@@ -29,27 +41,29 @@ func (executor *streamInputExecutor) Execute(ctx context.Context, request Execut
 		return ExecutionResult{Reply: "follow-up", ProviderSessionID: "claude-live"}, nil
 	}
 	close(executor.started)
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		batch, err := request.LiveInbox.Claim(ctx)
-		if err != nil {
-			return ExecutionResult{}, err
-		}
-		if len(batch.IDs) > 0 {
-			// A second claim in the same Turn must not hand the batch out again.
-			again, err := request.LiveInbox.Claim(ctx)
-			if err != nil || len(again.IDs) != 0 {
-				return ExecutionResult{}, err
-			}
-			if err := request.LiveInbox.Ack(ctx, batch, executor.deliver); err != nil {
-				return ExecutionResult{}, err
-			}
-			executor.claimed <- batch
-			return ExecutionResult{Reply: "first", ProviderSessionID: "claude-live"}, nil
-		}
-		time.Sleep(20 * time.Millisecond)
+	select {
+	case <-executor.submitted:
+	case <-ctx.Done():
+		return ExecutionResult{}, ctx.Err()
 	}
-	return ExecutionResult{Reply: "no live message"}, nil
+	batch, err := request.LiveInbox.Claim(ctx)
+	if err != nil {
+		return ExecutionResult{}, err
+	}
+	if len(batch.IDs) == 0 {
+		return ExecutionResult{}, fmt.Errorf("live inbox claim was empty after the mid-turn message was submitted")
+	}
+	// A second claim in the same Turn must not hand the batch out again.
+	if again, err := request.LiveInbox.Claim(ctx); err != nil {
+		return ExecutionResult{}, err
+	} else if len(again.IDs) != 0 {
+		return ExecutionResult{}, fmt.Errorf("second live inbox claim repeated %d message(s)", len(again.IDs))
+	}
+	if err := request.LiveInbox.Ack(ctx, batch, executor.deliver); err != nil {
+		return ExecutionResult{}, err
+	}
+	executor.claimed <- batch
+	return ExecutionResult{Reply: "first", ProviderSessionID: "claude-live"}, nil
 }
 
 func newLiveInboxTask(t *testing.T, backendName string, executor Executor) (*Service, *store.Store, domain.Task) {
@@ -112,9 +126,13 @@ func runClaudeLiveInboxTurnWithSubmit(
 ) (*store.Store, domain.Task, backend.LiveBatch) {
 	t.Helper()
 	executor := &streamInputExecutor{
-		started: make(chan struct{}), claimed: make(chan backend.LiveBatch, 1), deliver: deliver,
+		started: make(chan struct{}), submitted: make(chan struct{}),
+		claimed: make(chan backend.LiveBatch, 1), deliver: deliver,
 		hadInbox: make(chan bool, 4),
 	}
+	// Unblock the executor even when the test fails before the mid-turn
+	// message is submitted, so a failed fixture cannot strand the goroutine.
+	t.Cleanup(executor.markSubmitted)
 	service, database, task := newLiveInboxTask(t, "claude", executor)
 	ctx := context.Background()
 	if _, err := service.SubmitMessage(ctx, task.ID, "work"); err != nil {
@@ -128,6 +146,7 @@ func runClaudeLiveInboxTurnWithSubmit(
 	if err := submitMidTurn(ctx, service, task.ID); err != nil {
 		t.Fatal(err)
 	}
+	executor.markSubmitted()
 	var batch backend.LiveBatch
 	select {
 	case batch = <-executor.claimed:
