@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"sort"
 	"time"
@@ -297,38 +298,71 @@ func knowledgeEntryDepth(entry domain.KnowledgeEntry, entries map[string]domain.
 	return depth
 }
 
+var (
+	ErrKnowledgeLibraryNotFound = errors.New("knowledge library not found")
+	ErrKnowledgeLibraryInUse    = errors.New("knowledge library container is in use")
+)
+
 func (s *Store) DeleteKnowledgeLibrary(ctx context.Context, libraryID string) (domain.KnowledgeLibraryDeletion, error) {
 	library, err := s.KnowledgeLibrary(ctx, libraryID)
+	if err == sql.ErrNoRows {
+		return domain.KnowledgeLibraryDeletion{}, fmt.Errorf("%w: %w", ErrKnowledgeLibraryNotFound, err)
+	}
 	if err != nil {
 		return domain.KnowledgeLibraryDeletion{}, err
+	}
+	_, projectErr := s.Project(ctx, library.ContainerProjectID)
+	if projectErr != nil && projectErr != sql.ErrNoRows {
+		return domain.KnowledgeLibraryDeletion{}, projectErr
 	}
 	if tasks, err := s.ListTasks(ctx, library.ContainerProjectID); err != nil {
 		return domain.KnowledgeLibraryDeletion{}, err
 	} else if len(tasks) > 0 {
-		return domain.KnowledgeLibraryDeletion{}, fmt.Errorf("knowledge library container has tasks")
+		return domain.KnowledgeLibraryDeletion{}, fmt.Errorf("%w: tasks", ErrKnowledgeLibraryInUse)
 	}
 	if workspaces, err := s.ListWorkspaces(ctx, library.ContainerProjectID); err != nil {
 		return domain.KnowledgeLibraryDeletion{}, err
 	} else if len(workspaces) > 0 {
-		return domain.KnowledgeLibraryDeletion{}, fmt.Errorf("knowledge library container has workspaces")
+		return domain.KnowledgeLibraryDeletion{}, fmt.Errorf("%w: workspaces", ErrKnowledgeLibraryInUse)
 	}
 	if library.BoundProjectID != "" {
 		if _, err := s.UnbindKnowledgeLibrary(ctx, library.ID); err != nil {
 			return domain.KnowledgeLibraryDeletion{}, err
 		}
 	}
+	if projectErr == sql.ErrNoRows {
+		return domain.KnowledgeLibraryDeletion{}, s.deleteKnowledgeLibraryRow(ctx, library.ID)
+	}
 	result, err := s.deleteProjectKnowledgeContents(ctx, library.ContainerProjectID)
 	if err != nil {
 		return result, err
 	}
 	if err := s.deleteKnowledgeLibraryRoot(ctx, library.ContainerProjectID); err != nil {
-		return result, err
+		if err != sql.ErrNoRows {
+			return result, err
+		}
+	} else {
+		result.Knowledge++
 	}
-	result.Knowledge++
 	if err := s.DeleteProject(ctx, library.ContainerProjectID); err != nil {
 		return result, err
 	}
 	return result, nil
+}
+
+func (s *Store) deleteKnowledgeLibraryRow(ctx context.Context, libraryID string) error {
+	result, err := s.db.ExecContext(ctx, `DELETE FROM knowledge_libraries WHERE id=?`, libraryID)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected != 1 {
+		return sql.ErrNoRows
+	}
+	return nil
 }
 
 func (s *Store) DeleteProjectKnowledge(ctx context.Context, projectID string) (domain.KnowledgeLibraryDeletion, error) {

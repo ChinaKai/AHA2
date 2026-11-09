@@ -2,9 +2,12 @@ package httpapi
 
 import (
 	"database/sql"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/ChinaKai/AHA2/internal/store"
 )
 
 func (s *Server) listKnowledgeLibraries(writer http.ResponseWriter, request *http.Request) {
@@ -55,10 +58,13 @@ func (s *Server) unbindKnowledgeLibrary(writer http.ResponseWriter, request *htt
 func (s *Server) deleteKnowledgeLibrary(writer http.ResponseWriter, request *http.Request) {
 	result, err := s.store.DeleteKnowledgeLibrary(request.Context(), request.PathValue("id"))
 	if err != nil {
-		if err == sql.ErrNoRows {
+		switch {
+		case errors.Is(err, store.ErrKnowledgeLibraryNotFound):
 			writeError(writer, http.StatusNotFound, "knowledge_library_not_found")
-		} else {
+		case errors.Is(err, store.ErrKnowledgeLibraryInUse):
 			writeJSON(writer, http.StatusConflict, map[string]any{"ok": false, "error": "delete_knowledge_library_failed", "message": err.Error()})
+		default:
+			writeJSON(writer, http.StatusInternalServerError, map[string]any{"ok": false, "error": "delete_knowledge_library_failed", "message": err.Error()})
 		}
 		return
 	}

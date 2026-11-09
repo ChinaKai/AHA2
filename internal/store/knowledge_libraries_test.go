@@ -104,6 +104,15 @@ func TestSchemaV39PrunesImportedAHA1WorklogsWithTombstones(t *testing.T) {
 	if _, err := database.Knowledge(ctx, root.ID); err != nil {
 		t.Fatalf("library root was removed: %v", err)
 	}
+	if _, err := database.Project(ctx, project.ID); err != nil {
+		t.Fatalf("library container was pruned: %v", err)
+	}
+	if _, err := database.KnowledgeLibrary(ctx, knowledgeLibraryID(project.ID)); err != nil {
+		t.Fatalf("library row was pruned: %v", err)
+	}
+	if deleted, err := database.DeleteKnowledgeLibrary(ctx, knowledgeLibraryID(project.ID)); err != nil || deleted.Knowledge != 1 {
+		t.Fatalf("pruned library cannot be deleted: %#v err=%v", deleted, err)
+	}
 }
 
 func TestKnowledgeLibraryBindUnbindAndProjectDeletePreserveContent(t *testing.T) {
