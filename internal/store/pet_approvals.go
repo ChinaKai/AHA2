@@ -120,6 +120,29 @@ func (s *Store) ListPetApprovalsWithTotal(ctx context.Context, limit int) ([]dom
 	return items, total, rows.Err()
 }
 
+// PetApprovalCounts groups the whole approval table by kind and status. The
+// workbench pages approvals in the database (pending first) but filters them in
+// the browser, so it needs the untruncated per-kind/status totals to decide
+// whether the current filter still has rows to load.
+func (s *Store) PetApprovalCounts(ctx context.Context) ([]domain.PetApprovalCount, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT kind,status,COUNT(*) FROM pet_approvals
+		GROUP BY kind,status ORDER BY kind,status`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	counts := []domain.PetApprovalCount{}
+	for rows.Next() {
+		var item domain.PetApprovalCount
+		if err := rows.Scan(&item.Kind, &item.Status, &item.Count); err != nil {
+			return nil, err
+		}
+		counts = append(counts, item)
+	}
+	return counts, rows.Err()
+}
+
 func (s *Store) ResolvePetApproval(ctx context.Context, id, status, resolution string, resolvedAt time.Time, decisionReason ...string) error {
 	reason := strings.TrimSpace(resolution)
 	if len(decisionReason) > 0 && strings.TrimSpace(decisionReason[0]) != "" {

@@ -1384,12 +1384,19 @@ export interface PetInspection {
   note?: string;
 }
 
+export interface PetApprovalCount {
+  kind: string;
+  status: string;
+  count: number;
+}
+
 export interface PetWorkbench {
   core: PetWorkspaceDocument[];
   worklog: PetMarkdownEntry[];
   worklog_total?: number;
   approvals: PetApproval[];
   approval_total?: number;
+  approval_counts?: PetApprovalCount[];
   watches: PetTaskWatch[];
   task?: Task;
   channels: PetChannelHealth[];

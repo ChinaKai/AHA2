@@ -1,5 +1,95 @@
 import type {PetInspection} from "./types.js";
 
+export type PetApprovalKindFilter = "all" | "idea" | "decision";
+export type PetApprovalStatusFilter = "all" | "pending" | "approved" | "rejected" | "cancelled";
+
+export interface PetApprovalPage {
+  shown: number;
+  total: number;
+  canLoadMore: boolean;
+}
+
+export interface PetApprovalPageOptions {
+  kind: PetApprovalKindFilter;
+  status: PetApprovalStatusFilter;
+  /** Untruncated kind/status totals from the workbench response. */
+  counts?: Array<{kind: string; status: string; count: number}> | null;
+  /** Total approval rows; only used when grouped counts are unavailable. */
+  total?: number | null;
+  /** Pending total from the inspection snapshot; fallback for old responses. */
+  pendingTotal?: number | null;
+}
+
+export function petApprovalKindMatches(kind: string, filter: PetApprovalKindFilter): boolean {
+  return filter === "all" || (filter === "idea" ? kind === "idea" : kind !== "idea");
+}
+
+export function petApprovalMatches(
+  item: {kind?: string; status?: string},
+  kindFilter: PetApprovalKindFilter,
+  statusFilter: PetApprovalStatusFilter,
+): boolean {
+  if (!petApprovalKindMatches(String(item.kind ?? ""), kindFilter)) return false;
+  return statusFilter === "all" || String(item.status ?? "") === statusFilter;
+}
+
+function nonNegativeCount(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.trunc(value) : 0;
+}
+
+// petApprovalPage reports how many loaded approvals match the active filter and
+// whether loading more can still reveal matches. The server pages the table
+// pending-first but the filter runs in the browser, so a slice-based "shown vs
+// approval_total" footer would keep offering "load more" after every pending
+// row was already visible. Prefer the untruncated kind/status totals and fall
+// back to the inspection pending count for responses without grouped counts.
+export function petApprovalPage(
+  items: Array<{kind?: string; status?: string}>,
+  options: PetApprovalPageOptions,
+): PetApprovalPage {
+  const shown = items.filter(item => petApprovalMatches(item, options.kind, options.status)).length;
+  const counts = options.counts;
+  if (Array.isArray(counts) && counts.length > 0) {
+    let total = 0;
+    for (const group of counts) {
+      if (!group || !petApprovalKindMatches(String(group.kind ?? ""), options.kind)) continue;
+      if (options.status !== "all" && String(group.status ?? "") !== options.status) continue;
+      total += nonNegativeCount(group.count);
+    }
+    return {shown, total, canLoadMore: shown < total};
+  }
+  const loaded = items.length;
+  const allTotal = typeof options.total === "number" && Number.isFinite(options.total) && options.total >= 0
+    ? Math.trunc(options.total)
+    : loaded;
+  const allLoaded = loaded >= allTotal;
+  if (options.status === "pending") {
+    const pendingTotal = typeof options.pendingTotal === "number" && Number.isFinite(options.pendingTotal) && options.pendingTotal >= 0
+      ? Math.trunc(options.pendingTotal)
+      : allTotal;
+    return {shown, total: pendingTotal, canLoadMore: shown < pendingTotal && !allLoaded};
+  }
+  return {shown, total: allTotal, canLoadMore: loaded < allTotal};
+}
+
+// renderPetApprovalLoadMore uses the same load-more component and loading
+// affordance as the task list (`list-load-more`, disabled + spinner while the
+// next page is in flight). The count always reflects the active filter.
+export function renderPetApprovalLoadMore(
+  page: PetApprovalPage,
+  loading: boolean,
+  translate: Translate,
+  spinnerHTML = "",
+): string {
+  if (page.total <= 0) return "";
+  const summary = `<span>${escapeHTML(translate("petWorkbench.loadedCount", {shown: String(page.shown), total: String(page.total)}))}</span>`;
+  if (!page.canLoadMore) return `<div class="list-load-more pet-approval-load-more">${summary}</div>`;
+  const label = loading
+    ? `${spinnerHTML}${escapeHTML(translate("petWorkbench.loadingMore"))}`
+    : escapeHTML(translate("petWorkbench.loadMore"));
+  return `<div class="list-load-more pet-approval-load-more">${summary}<button type="button" data-pet-load-more="approval" ${loading ? "disabled" : ""}>${label}</button></div>`;
+}
+
 // The workbench handler bounds the database work at 10s on the server. The
 // client waits slightly longer per attempt so a server-side timeout is reported
 // as a normal 5xx and retried once instead of racing the response.

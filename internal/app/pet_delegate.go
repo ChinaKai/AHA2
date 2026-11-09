@@ -27,6 +27,10 @@ type PetWorkbenchView struct {
 	WorklogTotal  int                    `json:"worklog_total"`
 	Approvals     []domain.PetApproval   `json:"approvals"`
 	ApprovalTotal int                    `json:"approval_total"`
+	// ApprovalCounts is the untruncated kind/status breakdown of the approval
+	// table. The page returns only a pending-first slice, so the browser needs
+	// these totals to page and label a client-side filter accurately.
+	ApprovalCounts []domain.PetApprovalCount `json:"approval_counts,omitempty"`
 	Watches       []PetTaskWatchView     `json:"watches"`
 	Task          *domain.Task           `json:"task,omitempty"`
 	Channels      []PetChannelHealth     `json:"channels"`
@@ -60,6 +64,10 @@ func (s *Service) PetWorkbenchWithOptions(ctx context.Context, options PetWorkbe
 	if err != nil {
 		return PetWorkbenchView{}, err
 	}
+	approvalCounts, err := s.store.PetApprovalCounts(ctx)
+	if err != nil {
+		return PetWorkbenchView{}, err
+	}
 	// The watch list and the inspection snapshot share one task read; the
 	// inspection also shares the channel snapshot with the channel cards so a
 	// busy database is not queried twice for the same rows.
@@ -75,7 +83,7 @@ func (s *Service) PetWorkbenchWithOptions(ctx context.Context, options PetWorkbe
 	channels := s.petChannelSnapshotValues(ctx, now)
 	view := PetWorkbenchView{
 		Core: core, Worklog: worklog, WorklogTotal: worklogTotal,
-		Approvals: approvals, ApprovalTotal: approvalTotal, Watches: watches,
+		Approvals: approvals, ApprovalTotal: approvalTotal, ApprovalCounts: approvalCounts, Watches: watches,
 		Channels: channels.Health, ChannelTotal: channels.Total, ChannelNote: channels.Note,
 		UpdatedAt: now,
 	}
