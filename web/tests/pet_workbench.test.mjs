@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {readFile} from "node:fs/promises";
 import {resolve} from "node:path";
 import {createPetApprovalCounter, petPendingApprovalBadge} from "../dist/pet_approvals.js";
-import {createPetWorkbenchLoader, renderPetInspectionSummary, renderPetWorkbenchLoadError} from "../dist/pet_workbench.js";
+import {bindPetDocEditorButtons, createPetWorkbenchLoader, PET_APPROVAL_MAX_LIMIT, petApprovalMatches, petApprovalPage, renderPetApprovalLoadMore, renderPetInspectionSummary, renderPetWorkbenchLoadError} from "../dist/pet_workbench.js";
 
 const root = resolve(import.meta.dirname, "../..");
 
@@ -411,4 +411,297 @@ test("workbench defaults to core and removes journal UI/API while retaining old 
   assert.match(main, /setInterval\(\(\) => void refreshPetPendingApprovalCount\(\), 60_000\)/);
   assert.match(main, /await api.resolvePetApproval[\s\S]*?await refreshPetPendingApprovalCount\(true\)/);
   assert.doesNotMatch(main, /view\.approvals\.filter\(item => item\.status === "pending"\)\.length/);
+});
+
+const approvalRow = (id, kind, status) => ({id, kind, status, title: id, summary: "", risk: "low"});
+const approvalCount = (kind, status, count) => ({kind, status, count});
+const approvalTranslations = {
+  "petWorkbench.loadMore": "加载更多",
+  "petWorkbench.loadingMore": "加载中…",
+  "petWorkbench.loadedCount": "已显示 {shown} / 共 {total} 条",
+  "petWorkbench.approvalLimitReached": "审批仅加载最近 {limit} 条。",
+};
+const approvalText = (key, values = {}) => (approvalTranslations[key] ?? key)
+  .replace(/\{(\w+)\}/g, (_, name) => String(values[name] ?? `{${name}}`));
+
+const pendingRows = count => Array.from({length: count}, (_, index) => approvalRow(`pending-${index}`, "idea", "pending"));
+const resolvedRows = count => Array.from({length: count}, (_, index) => approvalRow(`resolved-${index}`, "delete_task", "approved"));
+const countsFor = rows => {
+  const grouped = new Map();
+  for (const row of rows) {
+    const key = `${row.kind}/${row.status}`;
+    grouped.set(key, (grouped.get(key) ?? 0) + 1);
+  }
+  return [...grouped].map(([key, count]) => {
+    const [kind, status] = key.split("/");
+    return approvalCount(kind, status, count);
+  });
+};
+
+test("approval filters match the active kind and status buttons", () => {
+  const pendingIdea = approvalRow("a", "idea", "pending");
+  const approvedDecision = approvalRow("b", "owner_decision", "approved");
+  assert.equal(petApprovalMatches(pendingIdea, "all", "all"), true);
+  assert.equal(petApprovalMatches(pendingIdea, "all", "pending"), true);
+  assert.equal(petApprovalMatches(pendingIdea, "all", "approved"), false);
+  assert.equal(petApprovalMatches(pendingIdea, "idea", "pending"), true);
+  assert.equal(petApprovalMatches(pendingIdea, "decision", "pending"), false);
+  assert.equal(petApprovalMatches(approvedDecision, "decision", "approved"), true);
+  assert.equal(petApprovalMatches(approvedDecision, "idea", "all"), false);
+});
+
+test("pending pages cover every pending row before offering more", () => {
+  // 15 pending + 8 resolved; the server pages pending-first, so the first 10
+  // and next 10 rows contain the pending rows before any resolved row.
+  const all = [...pendingRows(15), ...resolvedRows(8)];
+  const counts = countsFor(all);
+  const secondPage = all.slice(0, 20);
+  const firstPage = all.slice(0, 10);
+
+  const first = petApprovalPage(firstPage, {kind: "all", status: "pending", counts, total: all.length});
+  assert.deepEqual(first, {shown: 10, total: 15, canLoadMore: true});
+  const expanded = petApprovalPage(secondPage, {kind: "all", status: "pending", counts, total: all.length});
+  assert.deepEqual(expanded, {shown: 15, total: 15, canLoadMore: false}, "button hides once every pending row is loaded");
+
+  // Boundaries: zero, fewer than a page, exactly one page.
+  const none = petApprovalPage(resolvedRows(10), {kind: "all", status: "pending", counts: countsFor(resolvedRows(10))});
+  assert.deepEqual(none, {shown: 0, total: 0, canLoadMore: false});
+  const few = petApprovalPage([...pendingRows(3), ...resolvedRows(7)], {kind: "all", status: "pending", counts: countsFor([...pendingRows(3), ...resolvedRows(12)])});
+  assert.deepEqual(few, {shown: 3, total: 3, canLoadMore: false});
+  const exact = petApprovalPage(pendingRows(10), {kind: "all", status: "pending", counts: countsFor(pendingRows(10))});
+  assert.deepEqual(exact, {shown: 10, total: 10, canLoadMore: false});
+});
+
+test("approval counts are exact for every kind and status filter", () => {
+  const all = [
+    ...pendingRows(2),
+    approvalRow("decision-pending", "owner_decision", "pending"),
+    approvalRow("idea-approved-1", "idea", "approved"),
+    approvalRow("idea-approved-2", "idea", "approved"),
+    approvalRow("idea-approved-3", "idea", "approved"),
+    ...Array.from({length: 4}, (_, index) => approvalRow(`decision-approved-${index}`, "delete_task", "approved")),
+  ];
+  const counts = countsFor(all);
+  const page = (kind, status, rows = all) => petApprovalPage(rows, {kind, status, counts});
+
+  assert.deepEqual(page("all", "all"), {shown: 10, total: 10, canLoadMore: false});
+  assert.deepEqual(page("all", "pending"), {shown: 3, total: 3, canLoadMore: false});
+  assert.deepEqual(page("all", "approved"), {shown: 7, total: 7, canLoadMore: false});
+  assert.deepEqual(page("all", "rejected"), {shown: 0, total: 0, canLoadMore: false});
+  assert.deepEqual(page("idea", "all"), {shown: 5, total: 5, canLoadMore: false});
+  assert.deepEqual(page("decision", "all"), {shown: 5, total: 5, canLoadMore: false});
+  assert.deepEqual(page("idea", "approved"), {shown: 3, total: 3, canLoadMore: false});
+  assert.deepEqual(page("decision", "pending"), {shown: 1, total: 1, canLoadMore: false});
+  // A truncated page only knows the rows it loaded; the grouped totals still
+  // say how many approved rows remain.
+  assert.deepEqual(page("all", "approved", all.slice(0, 4)), {shown: 1, total: 7, canLoadMore: true});
+});
+
+test("the inspection pending count is the fallback when grouped counts are absent", () => {
+  const full = [...pendingRows(15), ...resolvedRows(5)];
+  const first = petApprovalPage(full.slice(0, 10), {kind: "all", status: "pending", total: 53, pendingTotal: 15});
+  assert.deepEqual(first, {shown: 10, total: 15, canLoadMore: true});
+  const done = petApprovalPage(full, {kind: "all", status: "pending", total: 53, pendingTotal: 15});
+  assert.deepEqual(done, {shown: 15, total: 15, canLoadMore: false});
+  const none = petApprovalPage(resolvedRows(10), {kind: "all", status: "pending", total: 53, pendingTotal: 0});
+  assert.deepEqual(none, {shown: 0, total: 0, canLoadMore: false});
+});
+
+test("approval load-more markup matches the task list component and loading state", () => {
+  const more = renderPetApprovalLoadMore({shown: 10, total: 15, canLoadMore: true}, false, approvalText);
+  assert.match(more, /class="list-load-more pet-approval-load-more"/);
+  assert.match(more, /data-pet-load-more="approval"/);
+  assert.match(more, />加载更多</);
+  assert.match(more, /已显示 10 \/ 共 15 条/);
+  assert.doesNotMatch(more, /disabled/);
+
+  const loading = renderPetApprovalLoadMore({shown: 10, total: 15, canLoadMore: true}, true, approvalText, '<svg class="spin"></svg>');
+  assert.match(loading, /<button type="button" data-pet-load-more="approval" disabled>/);
+  assert.match(loading, /<svg class="spin"><\/svg>加载中…/);
+
+  const complete = renderPetApprovalLoadMore({shown: 3, total: 3, canLoadMore: false}, false, approvalText);
+  assert.doesNotMatch(complete, /<button/);
+  assert.match(complete, /已显示 3 \/ 共 3 条/);
+  assert.equal(renderPetApprovalLoadMore({shown: 0, total: 0, canLoadMore: false}, false, approvalText), "");
+});
+
+test("workbench collapses core documents and opens approvals on pending with ten-row pages", async () => {
+  const main = await readFile(resolve(root, "web/src/main.ts"), "utf8");
+  const loader = await readFile(resolve(root, "web/src/pet_workbench.ts"), "utf8");
+  assert.match(main, /view\.core\.map\(item => `<details class="pet-doc-entry"><summary>/);
+  assert.doesNotMatch(main, /<details class="pet-doc-entry" open>/);
+  assert.match(main, /let petApprovalStatusFilter[^=]*= "pending";/);
+  assert.match(main, /let petApprovalFilter: [^=]+= "all";/);
+  assert.match(main, /let approvalLimit = 10;/);
+  assert.match(main, /approvalLimit = Math\.min\(approvalLimit \+ 10, PET_APPROVAL_MAX_LIMIT\)/);
+  assert.match(main, /let worklogLimit = 30;/);
+  assert.match(main, /else worklogLimit \+= 30;/);
+  assert.match(main, /renderPetApprovalLoadMore\(page, loadingMore === "approval", t, icon\("spinner", true\), capped\)/);
+  assert.match(loader, /class="list-load-more pet-approval-load-more"/);
+});
+
+test("approval paging stops at the server page ceiling and explains why", () => {
+  const first = pendingRows(PET_APPROVAL_MAX_LIMIT);
+  const counts = [approvalCount("idea", "pending", 500)];
+  const capped = petApprovalPage(first, {kind: "all", status: "pending", counts, maxItems: PET_APPROVAL_MAX_LIMIT});
+  assert.deepEqual(capped, {shown: 200, total: 500, canLoadMore: false});
+  const before = petApprovalPage(first.slice(0, 190), {kind: "all", status: "pending", counts, maxItems: PET_APPROVAL_MAX_LIMIT});
+  assert.deepEqual(before, {shown: 190, total: 500, canLoadMore: true}, "under the ceiling still offers more");
+  const hint = renderPetApprovalLoadMore(capped, false, approvalText, "", true);
+  assert.match(hint, /已显示 200 \/ 共 500 条/);
+  assert.match(hint, /审批仅加载最近 200 条。/);
+  assert.doesNotMatch(hint, /data-pet-load-more/, "the unreachable button must be gone at the ceiling");
+  assert.doesNotMatch(renderPetApprovalLoadMore(before, false, approvalText, "", false), /审批仅加载最近/);
+});
+
+test("document edit buttons open collapsed entries, focus the editor and save both sections", async () => {
+  const previousDocument = globalThis.document;
+  const matches = (element, selector) => {
+    if (selector === "details") return element.tagName === "DETAILS";
+    if (selector === "pre") return element.tagName === "PRE";
+    if (selector === "[data-pet-doc-edit]") return Object.prototype.hasOwnProperty.call(element.dataset, "petDocEdit");
+    return false;
+  };
+  class FakeElement {
+    constructor(tagName, options = {}) {
+      this.tagName = tagName.toUpperCase();
+      this.dataset = {...(options.dataset || {})};
+      this.children = [];
+      this.parentElement = null;
+      this.className = options.className || "";
+      this.textContent = options.textContent || "";
+      this.value = options.value || "";
+      this.type = "";
+      this.rows = 0;
+      this.disabled = false;
+      this.open = Boolean(options.open);
+      this.listeners = new Map();
+      this.insertedHTML = "";
+    }
+    append(...children) {
+      for (const child of children) { child.parentElement = this; this.children.push(child); }
+    }
+    addEventListener(name, listener) { this.listeners.set(name, listener); }
+    fire(name) {
+      const event = {
+        defaultPrevented: false,
+        stopped: false,
+        preventDefault() { this.defaultPrevented = true; },
+        stopPropagation() { this.stopped = true; },
+      };
+      this.listeners.get(name)?.(event);
+      return event;
+    }
+    querySelector(selector) {
+      for (const child of this.children) {
+        if (matches(child, selector)) return child;
+        const nested = child.querySelector(selector);
+        if (nested) return nested;
+      }
+      return null;
+    }
+    querySelectorAll(selector) {
+      const result = [];
+      const visit = element => {
+        for (const child of element.children) {
+          if (matches(child, selector)) result.push(child);
+          visit(child);
+        }
+      };
+      visit(this);
+      return result;
+    }
+    closest(selector) {
+      let node = this;
+      while (node) {
+        if (matches(node, selector)) return node;
+        node = node.parentElement;
+      }
+      return null;
+    }
+    remove() {
+      if (!this.parentElement) return;
+      const index = this.parentElement.children.indexOf(this);
+      if (index >= 0) this.parentElement.children.splice(index, 1);
+      this.parentElement = null;
+    }
+    replaceWith(next) {
+      if (!this.parentElement) return;
+      const parent = this.parentElement;
+      const index = parent.children.indexOf(this);
+      if (index >= 0) {
+        parent.children[index] = next;
+        next.parentElement = parent;
+        this.parentElement = null;
+      }
+    }
+    insertAdjacentHTML(_position, html) { this.insertedHTML += html; }
+    focus() { globalThis.document.activeElement = this; }
+  }
+  const entry = (section, name) => {
+    const details = new FakeElement("details");
+    const summary = new FakeElement("summary");
+    const button = new FakeElement("button", {dataset: {petDocEdit: "", petDocSection: section, petDocName: name}});
+    summary.append(button);
+    details.append(summary, new FakeElement("pre", {textContent: `content-${section}`}));
+    const root = new FakeElement("div");
+    root.append(details);
+    return {root, details, button};
+  };
+  try {
+    globalThis.document = {
+      activeElement: null,
+      createElement(tagName) { return new FakeElement(tagName); },
+    };
+    for (const section of ["core", "worklog"]) {
+      const name = section === "core" ? "identity.md" : "2099-01-01.md";
+      const target = entry(section, name);
+      const saved = [];
+      let reloads = 0;
+      let cancels = 0;
+      bindPetDocEditorButtons(target.root, {
+        section,
+        translate: key => ({"common.save": "保存", "common.cancel": "取消"}[key] ?? key),
+        save: async (savedSection, savedName, content) => { saved.push({section: savedSection, name: savedName, content}); },
+        reload: async () => { reloads++; },
+        cancel: () => { cancels++; },
+      });
+      const click = target.button.fire("click");
+      assert.equal(click.defaultPrevented, true, section);
+      assert.equal(click.stopped, true, "the summary must not toggle a second time");
+      assert.equal(target.details.open, true, `${section} entry must open before rendering the editor`);
+      assert.equal(target.button.parentElement, null, "the edit button is replaced by the editor");
+      const editor = target.details.children.find(child => child.className === "pet-doc-editor");
+      assert.ok(editor, section);
+      const textarea = editor.children[0];
+      assert.equal(textarea.tagName, "TEXTAREA");
+      assert.equal(textarea.value, `content-${section}`);
+      assert.equal(globalThis.document.activeElement, textarea, "focus moves into the visible editor");
+      const [saveButton, cancelButton] = editor.children[1].children;
+      assert.equal(saveButton.textContent, "保存");
+      assert.equal(cancelButton.textContent, "取消");
+      saveButton.fire("click");
+      await new Promise(resolve => setTimeout(resolve, 0));
+      assert.deepEqual(saved, [{section, name, content: `content-${section}`}], section);
+      assert.equal(reloads, 1);
+      cancelButton.fire("click");
+      assert.equal(cancels, 1);
+    }
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  }
+});
+
+test("document editors share one attribute and the approval footer caps at 200", async () => {
+  const main = await readFile(resolve(root, "web/src/main.ts"), "utf8");
+  const loader = await readFile(resolve(root, "web/src/pet_workbench.ts"), "utf8");
+  assert.ok(main.includes('class="pet-doc-edit" data-pet-doc-edit data-pet-doc-section="core"'));
+  assert.ok(main.includes('class="pet-doc-edit" data-pet-doc-edit data-pet-doc-section="${escapeHTML(section)}"'));
+  assert.match(loader, /querySelectorAll<HTMLButtonElement>\("\[data-pet-doc-edit\]"\)/);
+  assert.match(loader, /details\.open = true/);
+  assert.match(loader, /textarea\.focus\(\)/);
+  assert.match(main, /approvalLimit = Math\.min\(approvalLimit \+ 10, PET_APPROVAL_MAX_LIMIT\)/);
+  assert.match(main, /if \(loadingMore !== kind\) return;/);
+  assert.match(main, /petWorkbench\.pendingFirstHint/);
 });

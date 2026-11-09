@@ -56,6 +56,15 @@ type PetApproval struct {
 	ResolvedAt     time.Time `json:"resolved_at,omitempty"`
 }
 
+// PetApprovalCount is one kind/status bucket of the approval table. The
+// workbench returns these groups so the browser can show an exact total for
+// the kind/status filter it is currently displaying.
+type PetApprovalCount struct {
+	Kind   string `json:"kind"`
+	Status string `json:"status"`
+	Count  int    `json:"count"`
+}
+
 const (
 	AssistantRoleUser      = "user"
 	AssistantRoleAssistant = "assistant"

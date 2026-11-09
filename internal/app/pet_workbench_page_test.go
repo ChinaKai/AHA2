@@ -64,6 +64,154 @@ func TestPetWorkbenchPageLimitsAndTotals(t *testing.T) {
 	}
 }
 
+// TestPetWorkbenchApprovalPendingPriorityCountsAndPaging pins the two
+// properties the approvals page relies on: the pending-first ordering covers
+// every pending row before any resolved row in the first page, and
+// approval_counts describes the untruncated table so the browser can page and
+// label a client-side filter without trusting the page length.
+func TestPetWorkbenchApprovalPendingPriorityCountsAndPaging(t *testing.T) {
+	for _, testCase := range []struct {
+		name     string
+		pending  int
+		resolved int
+	}{
+		{"no approvals", 0, 0},
+		{"fewer pending than a page", 3, 12},
+		{"exactly one pending page", 10, 5},
+		{"more pending than a page", 15, 8},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			fixture := newPetTaskFixture(t)
+			if _, err := fixture.service.OwnerAssistant(fixture.ctx); err != nil {
+				t.Fatal(err)
+			}
+			base := fixture.createdAt
+			for i := 0; i < testCase.pending; i++ {
+				kind := "idea"
+				if i%2 == 1 {
+					kind = "owner_decision"
+				}
+				if err := fixture.database.CreatePetApproval(fixture.ctx, domain.PetApproval{
+					ID: fmt.Sprintf("pending-%02d", i), Kind: kind, Title: fmt.Sprintf("pending %02d", i),
+					Summary: "summary", Risk: "low", Status: petApprovalPending,
+					CreatedAt: base.Add(time.Duration(i) * time.Second),
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			resolvedStatuses := []string{petApprovalApproved, petApprovalRejected, petApprovalCancelled}
+			for i := 0; i < testCase.resolved; i++ {
+				if err := fixture.database.CreatePetApproval(fixture.ctx, domain.PetApproval{
+					ID: fmt.Sprintf("resolved-%02d", i), Kind: "delete_task", Title: fmt.Sprintf("resolved %02d", i),
+					Summary: "summary", Risk: "low", Status: resolvedStatuses[i%len(resolvedStatuses)],
+					CreatedAt: base.Add(time.Duration(testCase.pending+i) * time.Second),
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			total := testCase.pending + testCase.resolved
+			view, err := fixture.service.PetWorkbenchWithOptions(fixture.ctx, PetWorkbenchOptions{
+				ApprovalLimit: 10, WorklogLimit: 30,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantPage := total
+			if wantPage > 10 {
+				wantPage = 10
+			}
+			if view.ApprovalTotal != total || len(view.Approvals) != wantPage {
+				t.Fatalf("total=%d page=%d want %d/%d", view.ApprovalTotal, len(view.Approvals), total, wantPage)
+			}
+			// The server pages pending-first: no resolved row may precede a
+			// pending row, and the newest pending rows come first.
+			pendingLoaded := 0
+			seenResolved := false
+			for index, item := range view.Approvals {
+				if item.Status == petApprovalPending {
+					if seenResolved {
+						t.Fatalf("pending row at %d follows a resolved row: %#v", index, view.Approvals)
+					}
+					pendingLoaded++
+					wantID := fmt.Sprintf("pending-%02d", testCase.pending-pendingLoaded)
+					if item.ID != wantID {
+						t.Fatalf("pending order at %d=%q want %q", index, item.ID, wantID)
+					}
+				} else {
+					seenResolved = true
+				}
+			}
+			wantPendingLoaded := testCase.pending
+			if wantPendingLoaded > wantPage {
+				wantPendingLoaded = wantPage
+			}
+			if pendingLoaded != wantPendingLoaded {
+				t.Fatalf("pending loaded=%d want %d (page %#v)", pendingLoaded, wantPendingLoaded, view.Approvals)
+			}
+			counts := map[string]int{}
+			sum := 0
+			for _, group := range view.ApprovalCounts {
+				counts[group.Kind+"/"+group.Status] = group.Count
+				sum += group.Count
+			}
+			if sum != total || view.ApprovalTotal != total {
+				t.Fatalf("approval counts sum=%d total=%d total field=%d", sum, total, view.ApprovalTotal)
+			}
+			wantIdeaPending := (testCase.pending + 1) / 2
+			wantDecisionPending := testCase.pending / 2
+			if counts["idea/pending"] != wantIdeaPending || counts["owner_decision/pending"] != wantDecisionPending {
+				t.Fatalf("pending kind counts=%#v want idea=%d owner_decision=%d", counts, wantIdeaPending, wantDecisionPending)
+			}
+			// The resolved rows cycle approved/rejected/cancelled under one
+			// kind; grouping by kind alone would hide these three buckets.
+			wantResolved := map[string]int{
+				petApprovalApproved:  (testCase.resolved + 2) / 3,
+				petApprovalRejected:  (testCase.resolved + 1) / 3,
+				petApprovalCancelled: testCase.resolved / 3,
+			}
+			for status, want := range wantResolved {
+				if counts["delete_task/"+status] != want {
+					t.Fatalf("resolved counts=%#v want delete_task/%s=%d", counts, status, want)
+				}
+			}
+
+			// Loading a second page extends the same pending-first prefix; the
+			// counts stay untruncated.
+			expanded, err := fixture.service.PetWorkbenchWithOptions(fixture.ctx, PetWorkbenchOptions{
+				ApprovalLimit: 20, WorklogLimit: 30,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantExpanded := total
+			if wantExpanded > 20 {
+				wantExpanded = 20
+			}
+			if len(expanded.Approvals) != wantExpanded {
+				t.Fatalf("expanded page=%d want %d", len(expanded.Approvals), wantExpanded)
+			}
+			for index, item := range expanded.Approvals {
+				if index >= wantPage {
+					break
+				}
+				if item.ID != view.Approvals[index].ID {
+					t.Fatalf("expanded page reordered row %d: %q != %q", index, item.ID, view.Approvals[index].ID)
+				}
+			}
+			if sum := func() int {
+				total := 0
+				for _, group := range expanded.ApprovalCounts {
+					total += group.Count
+				}
+				return total
+			}(); sum != total {
+				t.Fatalf("expanded counts sum=%d want %d", sum, total)
+			}
+		})
+	}
+}
+
 func TestPetWorkbenchInspectionSnapshot(t *testing.T) {
 	fixture := newPetTaskFixture(t)
 	if _, err := fixture.service.OwnerAssistant(fixture.ctx); err != nil {
@@ -291,7 +439,7 @@ func TestPetWorkbenchInspectionSnapshotDegradedChannelAndPayload(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, field := range []string{
-		"core", "worklog", "worklog_total", "approvals", "approval_total",
+		"core", "worklog", "worklog_total", "approvals", "approval_total", "approval_counts",
 		"watches", "channels", "channel_total", "channel_note", "updated_at", "inspection",
 	} {
 		if _, exists := payload[field]; !exists {

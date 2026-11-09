@@ -393,6 +393,9 @@ func TestPetPendingApprovalCountAndRetiredRoutes(t *testing.T) {
 	if _, ok := workbench["worklog"]; !ok {
 		t.Fatal("missing worklog")
 	}
+	if _, ok := workbench["approval_counts"]; !ok {
+		t.Fatal("missing approval_counts")
+	}
 	inspection, ok := workbench["inspection"].(map[string]any)
 	if !ok {
 		t.Fatalf("missing inspection snapshot: %#v", workbench["inspection"])
