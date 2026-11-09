@@ -1186,6 +1186,38 @@ func knowledgeEntryPresent(entries []domain.KnowledgeEntry, id string) bool {
 	return false
 }
 
+// gatedExecutor reports the Task of every Turn it starts and then holds that
+// Turn until the Service cancels it during shutdown. This removes the
+// asynchronous Turn completion that otherwise races the test's own Task status
+// updates.
+type gatedExecutor struct {
+	started chan string
+}
+
+func (e *gatedExecutor) Execute(ctx context.Context, request app.ExecutionRequest, _ func(app.ExecutionEvent)) (app.ExecutionResult, error) {
+	select {
+	case e.started <- request.Task.ID:
+	default:
+	}
+	<-ctx.Done()
+	return app.ExecutionResult{}, ctx.Err()
+}
+
+func waitForExecutorStart(t *testing.T, started <-chan string, taskID string) {
+	t.Helper()
+	deadline := time.After(15 * time.Second)
+	for {
+		select {
+		case got := <-started:
+			if got == taskID {
+				return
+			}
+		case <-deadline:
+			t.Fatalf("Turn for Task %s did not start", taskID)
+		}
+	}
+}
+
 // The continuation helper must keep a finished Task from swallowing a
 // redelivery, and it still serves a completed channel-host Task. Production
 // workers normally release a routed Task's channel as soon as it is terminal;
@@ -1197,7 +1229,9 @@ func TestCompletedChannelTaskContinuesInNewTask(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer database.Close()
+	// Cleanup is LIFO: the app Service shuts its Turn workers down first, then the
+	// database closes, and only then does t.TempDir() remove the directory.
+	t.Cleanup(func() { _ = database.Close() })
 	secretStore, err := secrets.Open(filepath.Join(dataDir, "secrets.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -1223,7 +1257,13 @@ func TestCompletedChannelTaskContinuesInNewTask(t *testing.T) {
 	if err := database.UpsertChannelPlugin(ctx, plugin); err != nil {
 		t.Fatal(err)
 	}
-	appService := app.NewService(database, secretStore, app.StubExecutor{})
+	// The channel helper starts real background Turns. Keep every Turn it starts
+	// alive for the duration of the test so the Task status changes below are not
+	// racing an asynchronous Turn completion; Shutdown cancels them during
+	// cleanup before the database and temp directory go away.
+	executor := &gatedExecutor{started: make(chan string, 16)}
+	appService := app.NewService(database, secretStore, executor)
+	t.Cleanup(func() { _ = appService.Shutdown(context.Background()) })
 	service := New(Config{Store: database, App: appService, Secrets: secretStore, DataDir: dataDir, RuntimeDevice: "device-local"})
 	instance, err := service.CreateInstance(ctx, owner.ID, plugin.ID, "Continue", "create-continue")
 	if err != nil {
@@ -1318,6 +1358,9 @@ func TestCompletedChannelTaskContinuesInNewTask(t *testing.T) {
 	if continuation.Status != domain.TaskActive {
 		t.Fatalf("continuation status=%s", continuation.Status)
 	}
+	// Let the continuation Turn reach the executor before the test deletes its
+	// model below, so model resolution cannot fail between these two steps.
+	waitForExecutorStart(t, executor.started, continuation.ID)
 	if legacyID := stableID("task", "channel-continuation", target.ID); continuation.ID == legacyID {
 		t.Fatalf("continuation reused the legacy per-finished-task slot: %s", continuation.ID)
 	}

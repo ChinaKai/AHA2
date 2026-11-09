@@ -234,7 +234,12 @@ func waitForCollaborationSettled(
 		if err != nil {
 			t.Fatal(err)
 		}
-		if batch.Status == domain.CollaborationBatchConsumed && round.Status.Terminal() {
+		// settleRound writes the Round before it compare-and-swaps the Task
+		// status. Waiting only for the Round can therefore observe a half-applied
+		// settlement where the Task is still active, so require the Task status
+		// write as well. The final assertions below stay strict.
+		if batch.Status == domain.CollaborationBatchConsumed && round.Status.Terminal() &&
+			(task.Status == domain.TaskWaitingUser || task.Status.Terminal()) {
 			return batch, round, task
 		}
 		if time.Now().After(deadline) {
