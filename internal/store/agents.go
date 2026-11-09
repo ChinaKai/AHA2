@@ -806,17 +806,27 @@ func (s *Store) LatestTurnForAgent(ctx context.Context, taskID, agentID string) 
 	))
 }
 
+// ClaimInboxAndCreateTurn claims the still-pending subset of items and creates
+// the Turn that processes them. Items are re-read inside the claim transaction:
+// one that the running Turn's live inbox (or the model-driven wait path)
+// delivered after the caller took its PendingAgentInbox snapshot is skipped
+// instead of failing the submit, while any other state change stays a
+// conflict. render rebuilds the Turn from the items actually claimed, so a
+// snapshot item that was already delivered is never repeated in the new Turn.
+// Returning no Turn and no error means every item in the snapshot was already
+// delivered and no follow-up Turn is owed.
 func (s *Store) ClaimInboxAndCreateTurn(
 	ctx context.Context,
 	turn domain.Turn,
 	items []domain.AgentInboxItem,
-) (domain.Turn, error) {
+	render func([]domain.AgentInboxItem) (domain.Turn, error),
+) (domain.Turn, []domain.AgentInboxItem, error) {
 	if len(items) == 0 || turn.InboxBatchID == "" {
-		return domain.Turn{}, fmt.Errorf("inbox batch is required")
+		return domain.Turn{}, nil, fmt.Errorf("inbox batch is required")
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return domain.Turn{}, err
+		return domain.Turn{}, nil, err
 	}
 	defer tx.Rollback()
 	var active int
@@ -825,21 +835,13 @@ func (s *Store) ClaimInboxAndCreateTurn(
 		WHERE task_id=? AND agent_id=? AND status IN ('queued','preparing','starting','running','waiting')`,
 		turn.TaskID, turn.AgentID,
 	).Scan(&active); err != nil {
-		return domain.Turn{}, err
+		return domain.Turn{}, nil, err
 	}
 	if active > 0 {
-		return domain.Turn{}, ErrActiveTurn
-	}
-	if err := tx.QueryRowContext(ctx, `
-		SELECT COALESCE(MAX(sequence),0)+1 FROM turns WHERE task_id=?`,
-		turn.TaskID,
-	).Scan(&turn.Sequence); err != nil {
-		return domain.Turn{}, err
-	}
-	if err := insertTurnTx(ctx, tx, turn); err != nil {
-		return domain.Turn{}, err
+		return domain.Turn{}, nil, ErrActiveTurn
 	}
 	claimedAt := timeString(turn.QueuedAt)
+	claimed := make([]domain.AgentInboxItem, 0, len(items))
 	for _, item := range items {
 		result, err := tx.ExecContext(ctx, `
 			UPDATE agent_inbox
@@ -848,33 +850,61 @@ func (s *Store) ClaimInboxAndCreateTurn(
 			turn.InboxBatchID, claimedAt, item.ID, turn.TaskID, turn.AgentID,
 		)
 		if err != nil {
-			return domain.Turn{}, err
+			return domain.Turn{}, nil, err
 		}
 		count, _ := result.RowsAffected()
-		if count != 1 {
-			return domain.Turn{}, fmt.Errorf("inbox item changed concurrently")
+		if count == 1 {
+			claimed = append(claimed, item)
+			continue
 		}
+		delivered, err := inboxItemDeliveredByLiveInboxTx(ctx, tx, turn.TaskID, turn.AgentID, item.ID)
+		if err != nil {
+			return domain.Turn{}, nil, err
+		}
+		if !delivered {
+			return domain.Turn{}, nil, fmt.Errorf("inbox item changed concurrently")
+		}
+	}
+	if len(claimed) == 0 {
+		return domain.Turn{}, nil, nil
+	}
+	if render != nil {
+		turn, err = render(claimed)
+		if err != nil {
+			return domain.Turn{}, nil, err
+		}
+	}
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COALESCE(MAX(sequence),0)+1 FROM turns WHERE task_id=?`,
+		turn.TaskID,
+	).Scan(&turn.Sequence); err != nil {
+		return domain.Turn{}, nil, err
+	}
+	if err := insertTurnTx(ctx, tx, turn); err != nil {
+		return domain.Turn{}, nil, err
+	}
+	for _, item := range claimed {
 		if item.MessageID != "" {
 			if _, err := tx.ExecContext(ctx, `UPDATE messages SET turn_id=? WHERE id=?`, turn.ID, item.MessageID); err != nil {
-				return domain.Turn{}, err
+				return domain.Turn{}, nil, err
 			}
 		}
 		batchID := strings.TrimSpace(fmt.Sprint(item.Payload["collaboration_batch_id"]))
 		if batchID == "" || batchID == "<nil>" {
 			continue
 		}
-		result, err = tx.ExecContext(ctx, `
+		result, err := tx.ExecContext(ctx, `
 			UPDATE collaboration_members
 			SET child_turn_id=?,status=?,updated_at=?
 			WHERE batch_id=? AND agent_id=? AND child_turn_id=''`,
 			turn.ID, domain.CollaborationMemberRunning, claimedAt, batchID, turn.AgentID,
 		)
 		if err != nil {
-			return domain.Turn{}, err
+			return domain.Turn{}, nil, err
 		}
 		linked, _ := result.RowsAffected()
 		if linked != 1 {
-			return domain.Turn{}, fmt.Errorf("collaboration member %s/%s is missing or already linked", batchID, turn.AgentID)
+			return domain.Turn{}, nil, fmt.Errorf("collaboration member %s/%s is missing or already linked", batchID, turn.AgentID)
 		}
 	}
 	if _, err := tx.ExecContext(ctx, `
@@ -882,9 +912,42 @@ func (s *Store) ClaimInboxAndCreateTurn(
 		WHERE task_id=? AND agent_id=?`,
 		claimedAt, turn.TaskID, turn.AgentID,
 	); err != nil {
-		return domain.Turn{}, err
+		return domain.Turn{}, nil, err
 	}
-	return turn, tx.Commit()
+	return turn, claimed, tx.Commit()
+}
+
+// inboxItemDeliveredByLiveInboxTx reports whether an item that was pending in
+// the caller's snapshot has since been delivered to a running Turn. Both the
+// live-injection claim (claimed_in_turn -> delivered_in_turn) and the
+// model-driven wait claim (delivered_in_turn) write delivered_turn_id; the
+// scheduler's own claim does not. A missing row or any other state is not a
+// delivery and must remain a conflict for the caller.
+func inboxItemDeliveredByLiveInboxTx(
+	ctx context.Context,
+	tx *sql.Tx,
+	taskID, agentID, id string,
+) (bool, error) {
+	var status, deliveredTurnID string
+	err := tx.QueryRowContext(ctx, `
+		SELECT status,delivered_turn_id FROM agent_inbox
+		WHERE id=? AND task_id=? AND target_agent_id=?`,
+		id, taskID, agentID,
+	).Scan(&status, &deliveredTurnID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if deliveredTurnID == "" {
+		return false, nil
+	}
+	switch status {
+	case "claimed_in_turn", "delivered_in_turn", "processed":
+		return true, nil
+	}
+	return false, nil
 }
 
 func (s *Store) MarkInboxBatchProcessed(ctx context.Context, batchID string, processedAt time.Time) error {

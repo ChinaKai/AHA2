@@ -270,6 +270,137 @@ func TestCodexTurnReceivesLiveInbox(t *testing.T) {
 	}
 }
 
+// gatedExecutor keeps a Turn running until the test releases it, so the test
+// decides exactly when the live inbox settles a mid-turn message relative to
+// the follow-up scheduler's pending snapshot.
+type gatedExecutor struct {
+	started     chan struct{}
+	release     chan struct{}
+	startOnce   sync.Once
+	releaseOnce sync.Once
+}
+
+func (executor *gatedExecutor) Execute(ctx context.Context, _ ExecutionRequest, _ func(ExecutionEvent)) (ExecutionResult, error) {
+	executor.startOnce.Do(func() { close(executor.started) })
+	select {
+	case <-executor.release:
+	case <-ctx.Done():
+		return ExecutionResult{}, ctx.Err()
+	}
+	return ExecutionResult{Reply: "first", ProviderSessionID: "claude-live"}, nil
+}
+
+func (executor *gatedExecutor) releaseTurn() {
+	executor.releaseOnce.Do(func() { close(executor.release) })
+}
+
+// startGatedLiveInboxTurn starts one running Claude Turn whose live inbox the
+// test will drive, and returns the Turn the scheduler must not duplicate.
+func startGatedLiveInboxTurn(t *testing.T) (*Service, *store.Store, domain.Task, *gatedExecutor, domain.Turn) {
+	t.Helper()
+	ctx := context.Background()
+	executor := &gatedExecutor{started: make(chan struct{}), release: make(chan struct{})}
+	service, database, task := newLiveInboxTask(t, "claude", executor)
+	t.Cleanup(executor.releaseTurn)
+	if _, err := service.SubmitMessage(ctx, task.ID, "work"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-executor.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Claude Turn did not start")
+	}
+	running, err := database.ActiveTurnForAgent(ctx, task.ID, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return service, database, task, executor, running
+}
+
+// TestSubmitMessageAcceptsLiveInboxDeliveryOfSnapshotItem reproduces the
+// Submit/Claim TOCTOU: scheduleAgent reads a pending snapshot, the running
+// Turn's live inbox claims, acknowledges and processes that message, and the
+// Turn ends before the scheduler reaches its claim. The submit must succeed,
+// because the message is already delivered, and it must not start a second
+// Turn that delivers the same text again.
+func TestSubmitMessageAcceptsLiveInboxDeliveryOfSnapshotItem(t *testing.T) {
+	ctx := context.Background()
+	service, database, task, executor, running := startGatedLiveInboxTurn(t)
+	service.scheduleSnapshotHook = func() {
+		service.scheduleSnapshotHook = nil
+		pending, err := database.PendingAgentInbox(ctx, task.ID, "main")
+		if err != nil || len(pending) != 1 {
+			t.Errorf("schedule snapshot pending=%#v err=%v", pending, err)
+			executor.releaseTurn()
+			return
+		}
+		batch, err := service.claimLiveInbox(ctx, task, running, 20)
+		if err != nil || len(batch.Messages) != 1 {
+			t.Errorf("live claim messages=%#v err=%v", batch.Messages, err)
+			executor.releaseTurn()
+			return
+		}
+		if _, err := service.ackLiveInbox(ctx, task, running, []string{batch.Messages[0].ID}, true); err != nil {
+			t.Errorf("live ack: %v", err)
+			executor.releaseTurn()
+			return
+		}
+		if err := database.MarkLiveInboxProcessedForTurn(ctx, running.ID, time.Now().UTC()); err != nil {
+			t.Errorf("mark live inbox processed: %v", err)
+		}
+		executor.releaseTurn()
+		waitForTurn(t, database, running.ID, domain.TurnSucceeded)
+	}
+	submitted, err := service.SubmitMessage(ctx, task.ID, "mid-turn correction")
+	if err != nil {
+		t.Fatalf("SubmitMessage rejected a message the live inbox already delivered: %v", err)
+	}
+	if submitted.ID != "" {
+		t.Fatalf("live-delivered message started a duplicate Turn %s", submitted.ID)
+	}
+	waitForTask(t, database, task.ID, domain.TaskWaitingUser)
+	turns, err := database.ListTurns(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(turns) != 1 {
+		t.Fatalf("turns=%d, want only the original Turn", len(turns))
+	}
+	if pending, err := database.PendingInboxCount(ctx, task.ID); err != nil || pending != 0 {
+		t.Fatalf("pending=%d err=%v, want 0", pending, err)
+	}
+}
+
+// TestSubmitMessageStillRejectsNonLiveInboxConflict proves the fix does not
+// swallow real conflicts: when the pending item is consumed by a non-live
+// path, SubmitMessage keeps reporting the concurrent change.
+func TestSubmitMessageStillRejectsNonLiveInboxConflict(t *testing.T) {
+	ctx := context.Background()
+	service, database, task, executor, running := startGatedLiveInboxTurn(t)
+	service.scheduleSnapshotHook = func() {
+		service.scheduleSnapshotHook = nil
+		if err := database.CancelPendingInboxForRound(ctx, running.RoundID, time.Now().UTC()); err != nil {
+			t.Errorf("cancel pending inbox: %v", err)
+			executor.releaseTurn()
+			return
+		}
+		executor.releaseTurn()
+		waitForTurn(t, database, running.ID, domain.TurnSucceeded)
+	}
+	submitted, err := service.SubmitMessage(ctx, task.ID, "conflicted correction")
+	if err == nil || !strings.Contains(err.Error(), "inbox item changed concurrently") {
+		t.Fatalf("non-live conflict was swallowed: turn=%#v err=%v", submitted, err)
+	}
+	waitForTask(t, database, task.ID, domain.TaskWaitingUser)
+	turns, listErr := database.ListTurns(ctx, task.ID)
+	if listErr != nil {
+		t.Fatal(listErr)
+	}
+	if len(turns) != 1 {
+		t.Fatalf("conflicted message started a Turn: turns=%d", len(turns))
+	}
+}
+
 // Backends without a live input surface keep their existing delivery paths.
 func TestDSHTurnHasNoLiveInbox(t *testing.T) {
 	executor := &inboxProbeExecutor{hadInbox: make(chan bool, 4)}

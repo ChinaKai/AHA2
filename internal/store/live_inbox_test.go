@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -291,6 +292,216 @@ func TestRequeueUnacknowledgedLiveInboxAtTurnEnd(t *testing.T) {
 	}
 	if status != "pending" || attempts != 1 {
 		t.Fatalf("turn-end requeue status=%q attempts=%d", status, attempts)
+	}
+}
+
+// finishLiveInboxTurnRow makes the fixture Turn terminal so
+// ClaimInboxAndCreateTurn's active-Turn guard lets the stale claim proceed.
+func finishLiveInboxTurnRow(t *testing.T, database *Store, turnID string) {
+	t.Helper()
+	if _, err := database.db.ExecContext(context.Background(),
+		`UPDATE turns SET status='succeeded' WHERE id=?`, turnID,
+	); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestClaimInboxAndCreateTurnSkipsLiveDeliveredSnapshot covers the product-side
+// Submit/Claim TOCTOU: the caller holds a PendingAgentInbox snapshot, the
+// running Turn's live inbox delivers and processes one of those items, and the
+// stale scheduler then claims. The delivered item must not fail the claim and
+// must not create a second Turn.
+func TestClaimInboxAndCreateTurnSkipsLiveDeliveredSnapshot(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database, err := Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	task, round, turn := liveInboxTestTurn(t, database)
+	finishLiveInboxTurnRow(t, database, turn.ID)
+	now := time.Now().UTC()
+	itemID := insertLiveInboxItem(t, database, task, round, "delivered while scheduling")
+	items, err := database.PendingAgentInbox(ctx, task.ID, "main")
+	if err != nil || len(items) != 1 {
+		t.Fatalf("pending snapshot=%#v err=%v", items, err)
+	}
+	claimed, err := database.ClaimOwnerInboxForLiveInjection(ctx, task.ID, "main", round.ID, turn.ID, 20)
+	if err != nil || len(claimed) != 1 || claimed[0].ID != itemID {
+		t.Fatalf("live claim=%#v err=%v", claimed, err)
+	}
+	if _, err := database.AckLiveInboxForTurn(ctx, task.ID, "main", turn.ID, []string{itemID}, true, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.MarkLiveInboxProcessedForTurn(ctx, turn.ID, now); err != nil {
+		t.Fatal(err)
+	}
+	candidate := domain.Turn{
+		ID: domain.NewID("turn"), TaskID: task.ID, RoundID: round.ID, AgentID: "main",
+		Status: domain.TurnQueued, RuntimeConfigSnapshotID: task.RuntimeConfigSnapshotID,
+		InboxBatchID: "batch-stale", Attempt: 1, Generation: 2, Required: true, QueuedAt: now,
+	}
+	got, gotItems, err := database.ClaimInboxAndCreateTurn(ctx, candidate, items,
+		func(claimed []domain.AgentInboxItem) (domain.Turn, error) {
+			t.Fatalf("render ran for %d item(s) even though all were live-delivered", len(claimed))
+			return domain.Turn{}, nil
+		})
+	if err != nil {
+		t.Fatalf("stale snapshot of a live-delivered message failed the claim: %v", err)
+	}
+	if got.ID != "" || len(gotItems) != 0 {
+		t.Fatalf("claim created turn=%#v items=%#v, want nothing", got, gotItems)
+	}
+	if turns, listErr := database.ListTurns(ctx, task.ID); listErr != nil || len(turns) != 1 {
+		t.Fatalf("turns=%d err=%v, want only the original Turn", len(turns), listErr)
+	}
+	if pending, countErr := database.PendingInboxCount(ctx, task.ID); countErr != nil || pending != 0 {
+		t.Fatalf("pending=%d err=%v, want 0", pending, countErr)
+	}
+	var status, deliveredTurnID string
+	if err := database.db.QueryRowContext(ctx,
+		`SELECT status,delivered_turn_id FROM agent_inbox WHERE id=?`, itemID,
+	).Scan(&status, &deliveredTurnID); err != nil {
+		t.Fatal(err)
+	}
+	if status != "processed" || deliveredTurnID != turn.ID {
+		t.Fatalf("delivered item status=%q delivered_turn_id=%q, want processed/%q", status, deliveredTurnID, turn.ID)
+	}
+}
+
+// TestClaimInboxAndCreateTurnRejectsNonLiveChanges proves the secondary check
+// only accepts delivery, not every concurrent state change.
+func TestClaimInboxAndCreateTurnRejectsNonLiveChanges(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name   string
+		change func(context.Context, *Store, domain.Task, domain.TaskRound, string) error
+	}{
+		{
+			name: "cancelled",
+			change: func(ctx context.Context, database *Store, task domain.Task, round domain.TaskRound, _ string) error {
+				return database.CancelPendingInboxForRound(ctx, round.ID, time.Now().UTC())
+			},
+		},
+		{
+			name: "missing",
+			change: func(_ context.Context, database *Store, _ domain.Task, _ domain.TaskRound, id string) error {
+				_, err := database.db.ExecContext(context.Background(), `DELETE FROM agent_inbox WHERE id=?`, id)
+				return err
+			},
+		},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			database, err := Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer database.Close()
+			task, round, turn := liveInboxTestTurn(t, database)
+			finishLiveInboxTurnRow(t, database, turn.ID)
+			itemID := insertLiveInboxItem(t, database, task, round, "conflicting change")
+			items, err := database.PendingAgentInbox(ctx, task.ID, "main")
+			if err != nil || len(items) != 1 {
+				t.Fatalf("pending snapshot=%#v err=%v", items, err)
+			}
+			if err := test.change(ctx, database, task, round, itemID); err != nil {
+				t.Fatal(err)
+			}
+			candidate := domain.Turn{
+				ID: domain.NewID("turn"), TaskID: task.ID, RoundID: round.ID, AgentID: "main",
+				Status: domain.TurnQueued, RuntimeConfigSnapshotID: task.RuntimeConfigSnapshotID,
+				InboxBatchID: "batch-conflict", Attempt: 1, Generation: 2, Required: true, QueuedAt: time.Now().UTC(),
+			}
+			if _, _, err := database.ClaimInboxAndCreateTurn(ctx, candidate, items, nil); err == nil ||
+				!strings.Contains(err.Error(), "inbox item changed concurrently") {
+				t.Fatalf("non-live change was not reported as a conflict: %v", err)
+			}
+			if turns, listErr := database.ListTurns(ctx, task.ID); listErr != nil || len(turns) != 1 {
+				t.Fatalf("conflict created a Turn: turns=%d err=%v", len(turns), listErr)
+			}
+		})
+	}
+}
+
+// TestClaimInboxAndCreateTurnRendersOnlyClaimedItems covers a mixed stale
+// snapshot: one item was delivered live, another is still pending. The new
+// Turn must contain only the pending item, so the delivered text is not
+// injected a second time.
+func TestClaimInboxAndCreateTurnRendersOnlyClaimedItems(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database, err := Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	task, round, turn := liveInboxTestTurn(t, database)
+	finishLiveInboxTurnRow(t, database, turn.ID)
+	now := time.Now().UTC()
+	liveID := insertLiveInboxItem(t, database, task, round, "already steered owner text")
+	assignmentID := insertLiveInboxItemWithSource(t, database, task, round.ID, "main", "assignment", "pending", "pending assignment text")
+	items, err := database.PendingAgentInbox(ctx, task.ID, "main")
+	if err != nil || len(items) != 2 {
+		t.Fatalf("pending snapshot=%#v err=%v", items, err)
+	}
+	claimed, err := database.ClaimOwnerInboxForLiveInjection(ctx, task.ID, "main", round.ID, turn.ID, 20)
+	if err != nil || len(claimed) != 1 || claimed[0].ID != liveID {
+		t.Fatalf("live claim=%#v err=%v", claimed, err)
+	}
+	if _, err := database.AckLiveInboxForTurn(ctx, task.ID, "main", turn.ID, []string{liveID}, true, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.MarkLiveInboxProcessedForTurn(ctx, turn.ID, now); err != nil {
+		t.Fatal(err)
+	}
+	candidate := domain.Turn{
+		ID: domain.NewID("turn"), TaskID: task.ID, RoundID: round.ID, AgentID: "main",
+		InputMessageID: round.InputMessageID,
+		Status:         domain.TurnQueued, RuntimeConfigSnapshotID: task.RuntimeConfigSnapshotID,
+		InboxBatchID: "batch-mixed", Attempt: 1, Generation: 2, Required: true, QueuedAt: now,
+	}
+	var rendered []string
+	got, gotItems, err := database.ClaimInboxAndCreateTurn(ctx, candidate, items,
+		func(claimed []domain.AgentInboxItem) (domain.Turn, error) {
+			for _, item := range claimed {
+				rendered = append(rendered, item.Content)
+			}
+			candidate.Instruction = strings.Join(rendered, "\n")
+			return candidate, nil
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ID == "" || len(gotItems) != 1 || gotItems[0].ID != assignmentID {
+		t.Fatalf("turn=%#v claimed=%#v, want only the pending assignment", got, gotItems)
+	}
+	if strings.Contains(got.Instruction, "already steered owner text") {
+		t.Fatalf("new Turn repeated live-delivered text: %q", got.Instruction)
+	}
+	if !strings.Contains(got.Instruction, "pending assignment text") {
+		t.Fatalf("new Turn lost the pending assignment: %q", got.Instruction)
+	}
+	var liveStatus, deliveredTurnID string
+	if err := database.db.QueryRowContext(ctx,
+		`SELECT status,delivered_turn_id FROM agent_inbox WHERE id=?`, liveID,
+	).Scan(&liveStatus, &deliveredTurnID); err != nil {
+		t.Fatal(err)
+	}
+	if liveStatus != "processed" || deliveredTurnID != turn.ID {
+		t.Fatalf("live-delivered item status=%q delivered_turn_id=%q", liveStatus, deliveredTurnID)
+	}
+	var assignmentStatus, batchID string
+	if err := database.db.QueryRowContext(ctx,
+		`SELECT status,batch_id FROM agent_inbox WHERE id=?`, assignmentID,
+	).Scan(&assignmentStatus, &batchID); err != nil {
+		t.Fatal(err)
+	}
+	if assignmentStatus != "claimed" || batchID != "batch-mixed" {
+		t.Fatalf("assignment status=%q batch=%q, want claimed/batch-mixed", assignmentStatus, batchID)
 	}
 }
 

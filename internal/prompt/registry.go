@@ -533,6 +533,14 @@ func (engine *Engine) RenderInboxBatch(ctx context.Context, language string, ite
 	if err != nil {
 		return "", err
 	}
+	return RenderInboxBatchContent(templates, items)
+}
+
+// RenderInboxBatchContent renders an inbox batch from templates already loaded
+// by TemplatesForLanguage. A caller that must render inside a database
+// transaction uses this so the render does not issue another database read
+// from that transaction's pool.
+func RenderInboxBatchContent(templates []domain.PromptTemplate, items []InboxTemplateItem) (string, error) {
 	templateByID := make(map[string]domain.PromptTemplate, len(templates))
 	for _, item := range templates {
 		templateByID[item.ID] = item

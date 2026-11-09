@@ -202,6 +202,10 @@ type Service struct {
 	sharedContextMu     sync.Mutex
 	sharedContexts      map[string]*sharedContextState
 	latestShared        map[string]string
+
+	// scheduleSnapshotHook is a test seam that runs after scheduleAgent has read
+	// the pending inbox snapshot and before it claims it. Production leaves it nil.
+	scheduleSnapshotHook func()
 }
 
 func (s *Service) SetProxyRuntime(runtime ProxyRuntime) {

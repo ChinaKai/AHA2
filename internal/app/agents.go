@@ -514,6 +514,9 @@ func (s *Service) scheduleAgent(ctx context.Context, taskID, agentID string) (do
 	if len(items) == 0 {
 		return domain.Turn{}, false, nil
 	}
+	if s.scheduleSnapshotHook != nil {
+		s.scheduleSnapshotHook()
+	}
 	if _, err := s.store.ActiveTurnForAgent(ctx, taskID, agentID); err == nil {
 		return domain.Turn{}, false, nil
 	} else if !errors.Is(err, sql.ErrNoRows) {
@@ -537,33 +540,49 @@ func (s *Service) scheduleAgent(ctx context.Context, taskID, agentID string) (do
 	} else if !errors.Is(latestErr, sql.ErrNoRows) {
 		return domain.Turn{}, false, latestErr
 	}
-	parentTurnID := ""
-	for _, item := range items {
-		if item.SourceTurnID != "" {
-			parentTurnID = item.SourceTurnID
-		}
-	}
-	instruction, err := s.prompts.RenderInboxBatch(ctx, s.promptLanguage(ctx), inboxTemplateItems(items))
+	// Load the inbox template outside the claim transaction so the batch can be
+	// re-rendered inside it from the items the scheduler actually claimed.
+	templates, err := s.prompts.TemplatesForLanguage(ctx, s.promptLanguage(ctx))
 	if err != nil {
 		return domain.Turn{}, false, err
 	}
 	now := s.now().UTC()
 	turn := domain.Turn{
 		ID: domain.NewID("turn"), TaskID: taskID, RoundID: round.ID, AgentID: agentID,
-		ParentTurnID: parentTurnID, Attempt: 1, Generation: generation, Required: true,
-		Title: agent.Title, Instruction: instruction, InputMessageID: round.InputMessageID,
+		Attempt: 1, Generation: generation, Required: true,
+		Title: agent.Title, InputMessageID: round.InputMessageID,
 		Status: domain.TurnQueued, RuntimeConfigSnapshotID: agent.RuntimeConfigSnapshotID,
 		InboxBatchID: domain.NewID("inbox_batch"), QueuedAt: now,
 	}
-	turn, err = s.store.ClaimInboxAndCreateTurn(ctx, turn, items)
+	render := func(claimed []domain.AgentInboxItem) (domain.Turn, error) {
+		for _, item := range claimed {
+			if item.SourceTurnID != "" {
+				turn.ParentTurnID = item.SourceTurnID
+			}
+		}
+		instruction, renderErr := prompt.RenderInboxBatchContent(templates, inboxTemplateItems(claimed))
+		if renderErr != nil {
+			return domain.Turn{}, renderErr
+		}
+		turn.Instruction = instruction
+		return turn, nil
+	}
+	var claimed []domain.AgentInboxItem
+	turn, claimed, err = s.store.ClaimInboxAndCreateTurn(ctx, turn, items, render)
 	if err != nil {
 		if errors.Is(err, store.ErrActiveTurn) {
 			return domain.Turn{}, false, nil
 		}
 		return domain.Turn{}, false, err
 	}
+	if len(claimed) == 0 {
+		// The running Turn's live inbox delivered every message in the
+		// snapshot before this scheduler claimed it. The submit has already
+		// succeeded and no follow-up Turn (or duplicate delivery) is owed.
+		return domain.Turn{}, false, nil
+	}
 	s.emitTurn(ctx, turn, "turn_queued", map[string]any{
-		"sequence": turn.Sequence, "inbox_batch_id": turn.InboxBatchID, "inbox_count": len(items),
+		"sequence": turn.Sequence, "inbox_batch_id": turn.InboxBatchID, "inbox_count": len(claimed),
 	})
 	s.startTurn(turn)
 	return turn, true, nil

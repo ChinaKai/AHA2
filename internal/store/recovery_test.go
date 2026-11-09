@@ -88,7 +88,7 @@ func TestRecoverInterruptedRequeuesClaimedInbox(t *testing.T) {
 		InputMessageID: message.ID, Status: domain.TurnRunning, RuntimeConfigSnapshotID: task.RuntimeConfigSnapshotID,
 		InboxBatchID: "batch-recovery", Attempt: 1, Generation: 1, Required: true, QueuedAt: now.Add(2 * time.Second),
 	}
-	recoveryTurn, err = database.ClaimInboxAndCreateTurn(ctx, recoveryTurn, pendingItems)
+	recoveryTurn, _, err = database.ClaimInboxAndCreateTurn(ctx, recoveryTurn, pendingItems, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
