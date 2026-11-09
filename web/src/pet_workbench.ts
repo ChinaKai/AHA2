@@ -3,6 +3,10 @@ import type {PetInspection} from "./types.js";
 export type PetApprovalKindFilter = "all" | "idea" | "decision";
 export type PetApprovalStatusFilter = "all" | "pending" | "approved" | "rejected" | "cancelled";
 
+// The server bounds approval_limit at 200 (app.petWorkbenchLimit); the page
+// must stop growing there instead of offering a button that cannot load more.
+export const PET_APPROVAL_MAX_LIMIT = 200;
+
 export interface PetApprovalPage {
   shown: number;
   total: number;
@@ -18,6 +22,8 @@ export interface PetApprovalPageOptions {
   total?: number | null;
   /** Pending total from the inspection snapshot; fallback for old responses. */
   pendingTotal?: number | null;
+  /** Server page ceiling; the button must not offer an unreachable next page. */
+  maxItems?: number | null;
 }
 
 export function petApprovalKindMatches(kind: string, filter: PetApprovalKindFilter): boolean {
@@ -48,6 +54,11 @@ export function petApprovalPage(
   options: PetApprovalPageOptions,
 ): PetApprovalPage {
   const shown = items.filter(item => petApprovalMatches(item, options.kind, options.status)).length;
+  const loaded = items.length;
+  const maxItems = typeof options.maxItems === "number" && Number.isFinite(options.maxItems) && options.maxItems > 0
+    ? Math.trunc(options.maxItems)
+    : Number.POSITIVE_INFINITY;
+  const capReached = loaded >= maxItems;
   const counts = options.counts;
   if (Array.isArray(counts) && counts.length > 0) {
     let total = 0;
@@ -56,9 +67,8 @@ export function petApprovalPage(
       if (options.status !== "all" && String(group.status ?? "") !== options.status) continue;
       total += nonNegativeCount(group.count);
     }
-    return {shown, total, canLoadMore: shown < total};
+    return {shown, total, canLoadMore: shown < total && !capReached};
   }
-  const loaded = items.length;
   const allTotal = typeof options.total === "number" && Number.isFinite(options.total) && options.total >= 0
     ? Math.trunc(options.total)
     : loaded;
@@ -67,9 +77,9 @@ export function petApprovalPage(
     const pendingTotal = typeof options.pendingTotal === "number" && Number.isFinite(options.pendingTotal) && options.pendingTotal >= 0
       ? Math.trunc(options.pendingTotal)
       : allTotal;
-    return {shown, total: pendingTotal, canLoadMore: shown < pendingTotal && !allLoaded};
+    return {shown, total: pendingTotal, canLoadMore: shown < pendingTotal && !allLoaded && !capReached};
   }
-  return {shown, total: allTotal, canLoadMore: loaded < allTotal};
+  return {shown, total: allTotal, canLoadMore: loaded < allTotal && !capReached};
 }
 
 // renderPetApprovalLoadMore uses the same load-more component and loading
@@ -80,14 +90,76 @@ export function renderPetApprovalLoadMore(
   loading: boolean,
   translate: Translate,
   spinnerHTML = "",
+  capped = false,
 ): string {
   if (page.total <= 0) return "";
   const summary = `<span>${escapeHTML(translate("petWorkbench.loadedCount", {shown: String(page.shown), total: String(page.total)}))}</span>`;
-  if (!page.canLoadMore) return `<div class="list-load-more pet-approval-load-more">${summary}</div>`;
+  const hint = capped
+    ? `<span class="pet-approval-limit-hint">${escapeHTML(translate("petWorkbench.approvalLimitReached", {limit: String(PET_APPROVAL_MAX_LIMIT)}))}</span>`
+    : "";
+  if (!page.canLoadMore) return `<div class="list-load-more pet-approval-load-more">${summary}${hint}</div>`;
   const label = loading
     ? `${spinnerHTML}${escapeHTML(translate("petWorkbench.loadingMore"))}`
     : escapeHTML(translate("petWorkbench.loadMore"));
   return `<div class="list-load-more pet-approval-load-more">${summary}<button type="button" data-pet-load-more="approval" ${loading ? "disabled" : ""}>${label}</button></div>`;
+}
+
+export interface PetDocEditorBinding {
+  section: string;
+  translate: Translate;
+  save: (section: string, name: string, content: string) => Promise<void>;
+  reload: () => Promise<void>;
+  /** Restore the read-only view, normally by re-selecting the section tab. */
+  cancel: () => void;
+}
+
+// bindPetDocEditorButtons wires every rendered `.pet-doc-entry` edit button.
+// The button is identified by `data-pet-doc-edit` (the reader and writer must
+// agree on that attribute), and the enclosing details is opened first: core
+// documents now start collapsed, so an editor inserted into a closed details
+// would be invisible and focus would land off screen.
+export function bindPetDocEditorButtons(root: ParentNode, binding: PetDocEditorBinding): void {
+  root.querySelectorAll<HTMLButtonElement>("[data-pet-doc-edit]").forEach(button => {
+    button.addEventListener("click", event => {
+      event.preventDefault();
+      event.stopPropagation();
+      const details = button.closest("details");
+      const pre = details?.querySelector<HTMLElement>("pre");
+      if (!details || !pre) return;
+      details.open = true;
+      const name = button.dataset.petDocName || "";
+      const editor = document.createElement("div");
+      editor.className = "pet-doc-editor";
+      const textarea = document.createElement("textarea");
+      textarea.value = pre.textContent || "";
+      textarea.rows = Math.max(8, Math.min(24, textarea.value.split("\n").length + 2));
+      const actions = document.createElement("div");
+      actions.className = "pet-doc-editor-actions";
+      const save = document.createElement("button");
+      save.type = "button";
+      save.className = "primary";
+      save.textContent = binding.translate("common.save");
+      const cancel = document.createElement("button");
+      cancel.type = "button";
+      cancel.textContent = binding.translate("common.cancel");
+      actions.append(save, cancel);
+      editor.append(textarea, actions);
+      pre.replaceWith(editor);
+      button.remove();
+      textarea.focus();
+      cancel.addEventListener("click", binding.cancel);
+      save.addEventListener("click", async () => {
+        save.disabled = true;
+        try {
+          await binding.save(binding.section, name, textarea.value);
+          await binding.reload();
+        } catch (error) {
+          save.disabled = false;
+          editor.insertAdjacentHTML("beforeend", `<div class="field-help">${escapeHTML(error instanceof Error ? error.message : String(error))}</div>`);
+        }
+      });
+    });
+  });
 }
 
 // The workbench handler bounds the database work at 10s on the server. The

@@ -163,6 +163,18 @@ func TestPetWorkbenchApprovalPendingPriorityCountsAndPaging(t *testing.T) {
 			if counts["idea/pending"] != wantIdeaPending || counts["owner_decision/pending"] != wantDecisionPending {
 				t.Fatalf("pending kind counts=%#v want idea=%d owner_decision=%d", counts, wantIdeaPending, wantDecisionPending)
 			}
+			// The resolved rows cycle approved/rejected/cancelled under one
+			// kind; grouping by kind alone would hide these three buckets.
+			wantResolved := map[string]int{
+				petApprovalApproved:  (testCase.resolved + 2) / 3,
+				petApprovalRejected:  (testCase.resolved + 1) / 3,
+				petApprovalCancelled: testCase.resolved / 3,
+			}
+			for status, want := range wantResolved {
+				if counts["delete_task/"+status] != want {
+					t.Fatalf("resolved counts=%#v want delete_task/%s=%d", counts, status, want)
+				}
+			}
 
 			// Loading a second page extends the same pending-first prefix; the
 			// counts stay untruncated.

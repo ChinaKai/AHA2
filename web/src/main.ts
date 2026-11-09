@@ -1,7 +1,7 @@
 import {api, setAPIRequestObserver} from "./api.js";
 import type {APIRequestSample} from "./api.js";
 import {handlePetStreamEvent, mountAssistant, showPetSettings, notifyPetTaskIdle, notifyPetTaskReply, notifyPetTaskThinking, setAssistantVisible} from "./assistant.js";
-import {createPetWorkbenchLoader, petApprovalMatches, petApprovalPage, renderPetApprovalLoadMore, renderPetInspectionSummary, renderPetWorkbenchLoadError} from "./pet_workbench.js";
+import {bindPetDocEditorButtons, createPetWorkbenchLoader, PET_APPROVAL_MAX_LIMIT, petApprovalMatches, petApprovalPage, renderPetApprovalLoadMore, renderPetInspectionSummary, renderPetWorkbenchLoadError} from "./pet_workbench.js";
 import type {PetWorkbenchLoader} from "./pet_workbench.js";
 import {renderConversationList} from "./conversation_ui.js";
 import {bindCodexAccounts, renderCodexAccounts} from "./codex_accounts.js";
@@ -6751,8 +6751,12 @@ async function bindPetWorkbenchPage(): Promise<void> {
       counts: view.approval_counts,
       total: view.approval_total ?? (view.approvals || []).length,
       pendingTotal: view.inspection?.pending_approvals,
+      maxItems: PET_APPROVAL_MAX_LIMIT,
     });
-    return renderPetApprovalLoadMore(page, loadingMore === "approval", t, icon("spinner", true));
+    // The server ignores approval_limit above 200, so stop offering a next
+    // page there and say why instead of leaving a dead button.
+    const capped = approvalLimit >= PET_APPROVAL_MAX_LIMIT && page.total > page.shown;
+    return renderPetApprovalLoadMore(page, loadingMore === "approval", t, icon("spinner", true), capped);
   };
 
   const bindLoadMore = () => {
@@ -6762,14 +6766,17 @@ async function bindPetWorkbenchPage(): Promise<void> {
       // A full load (document save, retry) may already be in flight; folding a
       // bigger limit into it is impossible, so wait for the next click.
       if (loadingMore || loader.busy()) return;
-      if (kind === "approval") approvalLimit += 10;
+      if (kind === "approval") approvalLimit = Math.min(approvalLimit + 10, PET_APPROVAL_MAX_LIMIT);
       else worklogLimit += 30;
       loadingMore = kind;
       // Repaint so the button shows the same disabled/spinner state as the
       // task list; the in-flight guard prevents a double request.
       renderTab();
       void load().finally(() => {
-        if (loadingMore === kind) loadingMore = null;
+        // onData/onError already repaint when the request finishes; only a
+        // superseded or disposed load reaches here with the flag still set.
+        if (loadingMore !== kind) return;
+        loadingMore = null;
         if (body.isConnected && activePetWorkbenchBinding === binding) renderTab();
       });
     }));
@@ -6796,7 +6803,7 @@ async function bindPetWorkbenchPage(): Promise<void> {
     }
     if (active === "core") {
       body.innerHTML = view.core.length
-        ? view.core.map(item => `<details class="pet-doc-entry"><summary>${escapeHTML(item.name)}<button type="button" class="pet-doc-edit" data-pet-doc-section="core" data-pet-doc-name="${escapeHTML(item.name)}">${t("common.edit")}</button></summary><pre>${escapeHTML(item.content)}</pre></details>`).join("")
+        ? view.core.map(item => `<details class="pet-doc-entry"><summary>${escapeHTML(item.name)}<button type="button" class="pet-doc-edit" data-pet-doc-edit data-pet-doc-section="core" data-pet-doc-name="${escapeHTML(item.name)}">${t("common.edit")}</button></summary><pre>${escapeHTML(item.content)}</pre></details>`).join("")
         : `<div class="field-help">${t("petWorkbench.emptyCore")}</div>`;
       bindPetDocEditors("core", load);
     } else if (active === "worklog") {
@@ -6822,7 +6829,12 @@ async function bindPetWorkbenchPage(): Promise<void> {
         ["rejected", t("petWorkbench.filterRejected")],
         ["cancelled", t("petWorkbench.filterCancelled")],
       ];
-      body.innerHTML = `<div class="pet-approval-filters">${kindFilters.map(([id, label]) => `<button type="button" class="${petApprovalFilter === id ? "active" : ""}" data-pet-approval-filter="${id}">${label}</button>`).join("")}</div><div class="pet-approval-filters">${statusFilters.map(([id, label]) => `<button type="button" class="${petApprovalStatusFilter === id ? "active" : ""}" data-pet-approval-status-filter="${id}">${label}</button>`).join("")}</div>${renderPetApprovals(items, empty)}${approvalLoadMoreFooter()}`;
+      // The fetch is always pending-first, so a resolved-only filter can need
+      // several "load more" clicks before matching rows appear.
+      const pendingFirstHint = petApprovalStatusFilter === "pending"
+        ? ""
+        : `<div class="field-help">${escapeHTML(t("petWorkbench.pendingFirstHint"))}</div>`;
+      body.innerHTML = `<div class="pet-approval-filters">${kindFilters.map(([id, label]) => `<button type="button" class="${petApprovalFilter === id ? "active" : ""}" data-pet-approval-filter="${id}">${label}</button>`).join("")}</div><div class="pet-approval-filters">${statusFilters.map(([id, label]) => `<button type="button" class="${petApprovalStatusFilter === id ? "active" : ""}" data-pet-approval-status-filter="${id}">${label}</button>`).join("")}</div>${pendingFirstHint}${renderPetApprovals(items, empty)}${approvalLoadMoreFooter()}`;
       body.querySelectorAll<HTMLButtonElement>("[data-pet-approval-filter]").forEach(button => button.addEventListener("click", () => {
         const next = button.dataset.petApprovalFilter;
         if (next === "all" || next === "idea" || next === "decision") {
@@ -6973,54 +6985,21 @@ async function bindPetWorkbenchPage(): Promise<void> {
 
 function renderPetMarkdownEntries(entries: Array<{date: string; content: string}>, empty: string, section: string): string {
   return entries.length
-    ? entries.map(entry => `<details class="pet-doc-entry"><summary>${escapeHTML(entry.date)}<button type="button" class="pet-doc-edit" data-pet-doc-section="${escapeHTML(section)}" data-pet-doc-name="${escapeHTML(entry.date)}.md">${t("common.edit")}</button></summary><pre>${escapeHTML(entry.content)}</pre></details>`).join("")
+    ? entries.map(entry => `<details class="pet-doc-entry"><summary>${escapeHTML(entry.date)}<button type="button" class="pet-doc-edit" data-pet-doc-edit data-pet-doc-section="${escapeHTML(section)}" data-pet-doc-name="${escapeHTML(entry.date)}.md">${t("common.edit")}</button></summary><pre>${escapeHTML(entry.content)}</pre></details>`).join("")
     : `<div class="field-help">${escapeHTML(empty)}</div>`;
 }
 
 function bindPetDocEditors(section: string, reload: () => Promise<void>): void {
   const body = document.querySelector<HTMLElement>("#pet-workbench-body");
   if (!body) return;
-  body.querySelectorAll<HTMLButtonElement>("[data-pet-doc-edit]").forEach(button => {
-    button.addEventListener("click", event => {
-      event.preventDefault();
-      event.stopPropagation();
-      const details = button.closest("details");
-      const pre = details?.querySelector<HTMLElement>("pre");
-      if (!details || !pre) return;
-      const name = button.dataset.petDocName || "";
-      const editor = document.createElement("div");
-      editor.className = "pet-doc-editor";
-      const textarea = document.createElement("textarea");
-      textarea.value = pre.textContent || "";
-      textarea.rows = Math.max(8, Math.min(24, textarea.value.split("\n").length + 2));
-      const actions = document.createElement("div");
-      actions.className = "pet-doc-editor-actions";
-      const save = document.createElement("button");
-      save.type = "button";
-      save.className = "primary";
-      save.textContent = t("common.save");
-      const cancel = document.createElement("button");
-      cancel.type = "button";
-      cancel.textContent = t("common.cancel");
-      actions.append(save, cancel);
-      editor.append(textarea, actions);
-      pre.replaceWith(editor);
-      button.remove();
-      cancel.addEventListener("click", () => {
-        const tab = document.querySelector<HTMLButtonElement>(`[data-pet-workbench-tab="${section}"]`);
-        tab?.click();
-      });
-      save.addEventListener("click", async () => {
-        save.disabled = true;
-        try {
-          await api.savePetWorkbenchDocument(section, name, textarea.value);
-          await reload();
-        } catch (error) {
-          save.disabled = false;
-          editor.insertAdjacentHTML("beforeend", `<div class="field-help">${escapeHTML(error instanceof Error ? error.message : String(error))}</div>`);
-        }
-      });
-    });
+  bindPetDocEditorButtons(body, {
+    section,
+    translate: t,
+    save: (target, name, content) => api.savePetWorkbenchDocument(target, name, content),
+    reload,
+    cancel: () => {
+      document.querySelector<HTMLButtonElement>(`[data-pet-workbench-tab="${section}"]`)?.click();
+    },
   });
 }
 

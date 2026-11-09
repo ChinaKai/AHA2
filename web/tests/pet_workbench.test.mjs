@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {readFile} from "node:fs/promises";
 import {resolve} from "node:path";
 import {createPetApprovalCounter, petPendingApprovalBadge} from "../dist/pet_approvals.js";
-import {createPetWorkbenchLoader, petApprovalMatches, petApprovalPage, renderPetApprovalLoadMore, renderPetInspectionSummary, renderPetWorkbenchLoadError} from "../dist/pet_workbench.js";
+import {bindPetDocEditorButtons, createPetWorkbenchLoader, PET_APPROVAL_MAX_LIMIT, petApprovalMatches, petApprovalPage, renderPetApprovalLoadMore, renderPetInspectionSummary, renderPetWorkbenchLoadError} from "../dist/pet_workbench.js";
 
 const root = resolve(import.meta.dirname, "../..");
 
@@ -419,6 +419,7 @@ const approvalTranslations = {
   "petWorkbench.loadMore": "加载更多",
   "petWorkbench.loadingMore": "加载中…",
   "petWorkbench.loadedCount": "已显示 {shown} / 共 {total} 条",
+  "petWorkbench.approvalLimitReached": "审批仅加载最近 {limit} 条。",
 };
 const approvalText = (key, values = {}) => (approvalTranslations[key] ?? key)
   .replace(/\{(\w+)\}/g, (_, name) => String(values[name] ?? `{${name}}`));
@@ -532,9 +533,175 @@ test("workbench collapses core documents and opens approvals on pending with ten
   assert.match(main, /let petApprovalStatusFilter[^=]*= "pending";/);
   assert.match(main, /let petApprovalFilter: [^=]+= "all";/);
   assert.match(main, /let approvalLimit = 10;/);
-  assert.match(main, /if \(kind === "approval"\) approvalLimit \+= 10;/);
+  assert.match(main, /approvalLimit = Math\.min\(approvalLimit \+ 10, PET_APPROVAL_MAX_LIMIT\)/);
   assert.match(main, /let worklogLimit = 30;/);
   assert.match(main, /else worklogLimit \+= 30;/);
-  assert.match(main, /renderPetApprovalLoadMore\(page, loadingMore === "approval", t, icon\("spinner", true\)\)/);
+  assert.match(main, /renderPetApprovalLoadMore\(page, loadingMore === "approval", t, icon\("spinner", true\), capped\)/);
   assert.match(loader, /class="list-load-more pet-approval-load-more"/);
+});
+
+test("approval paging stops at the server page ceiling and explains why", () => {
+  const first = pendingRows(PET_APPROVAL_MAX_LIMIT);
+  const counts = [approvalCount("idea", "pending", 500)];
+  const capped = petApprovalPage(first, {kind: "all", status: "pending", counts, maxItems: PET_APPROVAL_MAX_LIMIT});
+  assert.deepEqual(capped, {shown: 200, total: 500, canLoadMore: false});
+  const before = petApprovalPage(first.slice(0, 190), {kind: "all", status: "pending", counts, maxItems: PET_APPROVAL_MAX_LIMIT});
+  assert.deepEqual(before, {shown: 190, total: 500, canLoadMore: true}, "under the ceiling still offers more");
+  const hint = renderPetApprovalLoadMore(capped, false, approvalText, "", true);
+  assert.match(hint, /已显示 200 \/ 共 500 条/);
+  assert.match(hint, /审批仅加载最近 200 条。/);
+  assert.doesNotMatch(hint, /data-pet-load-more/, "the unreachable button must be gone at the ceiling");
+  assert.doesNotMatch(renderPetApprovalLoadMore(before, false, approvalText, "", false), /审批仅加载最近/);
+});
+
+test("document edit buttons open collapsed entries, focus the editor and save both sections", async () => {
+  const previousDocument = globalThis.document;
+  const matches = (element, selector) => {
+    if (selector === "details") return element.tagName === "DETAILS";
+    if (selector === "pre") return element.tagName === "PRE";
+    if (selector === "[data-pet-doc-edit]") return Object.prototype.hasOwnProperty.call(element.dataset, "petDocEdit");
+    return false;
+  };
+  class FakeElement {
+    constructor(tagName, options = {}) {
+      this.tagName = tagName.toUpperCase();
+      this.dataset = {...(options.dataset || {})};
+      this.children = [];
+      this.parentElement = null;
+      this.className = options.className || "";
+      this.textContent = options.textContent || "";
+      this.value = options.value || "";
+      this.type = "";
+      this.rows = 0;
+      this.disabled = false;
+      this.open = Boolean(options.open);
+      this.listeners = new Map();
+      this.insertedHTML = "";
+    }
+    append(...children) {
+      for (const child of children) { child.parentElement = this; this.children.push(child); }
+    }
+    addEventListener(name, listener) { this.listeners.set(name, listener); }
+    fire(name) {
+      const event = {
+        defaultPrevented: false,
+        stopped: false,
+        preventDefault() { this.defaultPrevented = true; },
+        stopPropagation() { this.stopped = true; },
+      };
+      this.listeners.get(name)?.(event);
+      return event;
+    }
+    querySelector(selector) {
+      for (const child of this.children) {
+        if (matches(child, selector)) return child;
+        const nested = child.querySelector(selector);
+        if (nested) return nested;
+      }
+      return null;
+    }
+    querySelectorAll(selector) {
+      const result = [];
+      const visit = element => {
+        for (const child of element.children) {
+          if (matches(child, selector)) result.push(child);
+          visit(child);
+        }
+      };
+      visit(this);
+      return result;
+    }
+    closest(selector) {
+      let node = this;
+      while (node) {
+        if (matches(node, selector)) return node;
+        node = node.parentElement;
+      }
+      return null;
+    }
+    remove() {
+      if (!this.parentElement) return;
+      const index = this.parentElement.children.indexOf(this);
+      if (index >= 0) this.parentElement.children.splice(index, 1);
+      this.parentElement = null;
+    }
+    replaceWith(next) {
+      if (!this.parentElement) return;
+      const parent = this.parentElement;
+      const index = parent.children.indexOf(this);
+      if (index >= 0) {
+        parent.children[index] = next;
+        next.parentElement = parent;
+        this.parentElement = null;
+      }
+    }
+    insertAdjacentHTML(_position, html) { this.insertedHTML += html; }
+    focus() { globalThis.document.activeElement = this; }
+  }
+  const entry = (section, name) => {
+    const details = new FakeElement("details");
+    const summary = new FakeElement("summary");
+    const button = new FakeElement("button", {dataset: {petDocEdit: "", petDocSection: section, petDocName: name}});
+    summary.append(button);
+    details.append(summary, new FakeElement("pre", {textContent: `content-${section}`}));
+    const root = new FakeElement("div");
+    root.append(details);
+    return {root, details, button};
+  };
+  try {
+    globalThis.document = {
+      activeElement: null,
+      createElement(tagName) { return new FakeElement(tagName); },
+    };
+    for (const section of ["core", "worklog"]) {
+      const name = section === "core" ? "identity.md" : "2099-01-01.md";
+      const target = entry(section, name);
+      const saved = [];
+      let reloads = 0;
+      let cancels = 0;
+      bindPetDocEditorButtons(target.root, {
+        section,
+        translate: key => ({"common.save": "保存", "common.cancel": "取消"}[key] ?? key),
+        save: async (savedSection, savedName, content) => { saved.push({section: savedSection, name: savedName, content}); },
+        reload: async () => { reloads++; },
+        cancel: () => { cancels++; },
+      });
+      const click = target.button.fire("click");
+      assert.equal(click.defaultPrevented, true, section);
+      assert.equal(click.stopped, true, "the summary must not toggle a second time");
+      assert.equal(target.details.open, true, `${section} entry must open before rendering the editor`);
+      assert.equal(target.button.parentElement, null, "the edit button is replaced by the editor");
+      const editor = target.details.children.find(child => child.className === "pet-doc-editor");
+      assert.ok(editor, section);
+      const textarea = editor.children[0];
+      assert.equal(textarea.tagName, "TEXTAREA");
+      assert.equal(textarea.value, `content-${section}`);
+      assert.equal(globalThis.document.activeElement, textarea, "focus moves into the visible editor");
+      const [saveButton, cancelButton] = editor.children[1].children;
+      assert.equal(saveButton.textContent, "保存");
+      assert.equal(cancelButton.textContent, "取消");
+      saveButton.fire("click");
+      await new Promise(resolve => setTimeout(resolve, 0));
+      assert.deepEqual(saved, [{section, name, content: `content-${section}`}], section);
+      assert.equal(reloads, 1);
+      cancelButton.fire("click");
+      assert.equal(cancels, 1);
+    }
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  }
+});
+
+test("document editors share one attribute and the approval footer caps at 200", async () => {
+  const main = await readFile(resolve(root, "web/src/main.ts"), "utf8");
+  const loader = await readFile(resolve(root, "web/src/pet_workbench.ts"), "utf8");
+  assert.ok(main.includes('class="pet-doc-edit" data-pet-doc-edit data-pet-doc-section="core"'));
+  assert.ok(main.includes('class="pet-doc-edit" data-pet-doc-edit data-pet-doc-section="${escapeHTML(section)}"'));
+  assert.match(loader, /querySelectorAll<HTMLButtonElement>\("\[data-pet-doc-edit\]"\)/);
+  assert.match(loader, /details\.open = true/);
+  assert.match(loader, /textarea\.focus\(\)/);
+  assert.match(main, /approvalLimit = Math\.min\(approvalLimit \+ 10, PET_APPROVAL_MAX_LIMIT\)/);
+  assert.match(main, /if \(loadingMore !== kind\) return;/);
+  assert.match(main, /petWorkbench\.pendingFirstHint/);
 });
