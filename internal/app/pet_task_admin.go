@@ -76,9 +76,12 @@ func (s *Service) PetCompleteTaskWithDecision(ctx context.Context, taskID, decis
 		if err != nil {
 			return task, fmt.Errorf("无法读取源 Task 的评审关联：%w", err)
 		}
-		for _, reviewID := range reviews {
+		// No review is required when none exists. Otherwise, as with required,
+		// only the latest associated review determines whether completion is safe.
+		if len(reviews) > 0 {
+			reviewID := reviews[len(reviews)-1]
 			if err := s.requirePetCodeReview(ctx, task, reviewID); err != nil {
-				return task, fmt.Errorf("不能 skipped 绕过已有 Review Task %s：%w", reviewID, err)
+				return task, fmt.Errorf("不能 skipped 绕过最新 Review Task %s：%w", reviewID, err)
 			}
 		}
 	}

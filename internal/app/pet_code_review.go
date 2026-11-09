@@ -268,6 +268,15 @@ func (s *Service) requirePetCodeReview(ctx context.Context, source domain.Task, 
 	if err != nil || linkedSourceID != source.ID {
 		return fmt.Errorf("Review Task 未关联到源 Task")
 	}
+	// Only the latest associated review can approve the source, even if an
+	// older review passed. A later review supersedes every earlier verdict.
+	reviews, err := s.store.PetCodeReviewsForSource(ctx, source.ID)
+	if err != nil {
+		return fmt.Errorf("无法读取源 Task 的评审关联：%w", err)
+	}
+	if len(reviews) == 0 || reviews[len(reviews)-1] != review.ID {
+		return fmt.Errorf("必须提供源 Task 最新关联 Review Task 的 review_task_id")
+	}
 	if review.Status != domain.TaskCompleted {
 		return fmt.Errorf("Review Task 尚未完成")
 	}

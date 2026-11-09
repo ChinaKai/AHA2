@@ -22,10 +22,12 @@ func (s *Store) CreatePetCodeReviewLink(ctx context.Context, reviewTaskID, sourc
 	return nil
 }
 
-// PetCodeReviewsForSource returns every recorded review, including links whose
-// endpoints no longer match, so callers can fail closed when checking approval.
+// PetCodeReviewsForSource returns reviews oldest first, with ID breaking ties.
+// Cross-project links remain visible so approval checks can fail closed.
 func (s *Store) PetCodeReviewsForSource(ctx context.Context, sourceTaskID string) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT review_task_id FROM pet_code_reviews WHERE source_task_id=? ORDER BY review_task_id`, sourceTaskID)
+	rows, err := s.db.QueryContext(ctx, `SELECT review.id FROM pet_code_reviews link
+		JOIN tasks review ON review.id=link.review_task_id
+		WHERE link.source_task_id=? ORDER BY review.created_at,review.id`, sourceTaskID)
 	if err != nil {
 		return nil, err
 	}

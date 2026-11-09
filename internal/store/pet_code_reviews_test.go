@@ -5,10 +5,47 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"slices"
 	"testing"
+	"time"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
 )
+
+func TestPetCodeReviewsForSourceChronologicalOrder(t *testing.T) {
+	ctx := context.Background()
+	database, err := Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	sourceID := attachmentTestTask(t, database)
+	source, err := database.Task(ctx, sourceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Insert out of order with IDs opposing creation time. Same-time reviews
+	// must be ordered by ID, independently of insertion order.
+	for _, tc := range []struct {
+		id     string
+		offset time.Duration
+	}{
+		{"a-newest", 2 * time.Hour}, {"z-oldest", 0}, {"c-middle", time.Hour}, {"b-middle", time.Hour},
+	} {
+		review := source
+		review.ID, review.Code, review.CreatedAt = tc.id, "", source.CreatedAt.Add(tc.offset)
+		if err := database.CreateTask(ctx, review); err != nil {
+			t.Fatal(err)
+		}
+		if err := database.CreatePetCodeReviewLink(ctx, review.ID, source.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ids, err := database.PetCodeReviewsForSource(ctx, source.ID)
+	if err != nil || !slices.Equal(ids, []string{"z-oldest", "b-middle", "c-middle", "a-newest"}) {
+		t.Fatalf("not ordered by created_at then id: %v %v", ids, err)
+	}
+}
 
 func TestPetCodeReviewLinksMigrationAndPersistence(t *testing.T) {
 	ctx := context.Background()
