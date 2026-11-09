@@ -67,7 +67,7 @@ func (adapter Codex) Execute(ctx context.Context, request Request, emit func(Eve
 				if emit != nil {
 					emit(Event{Type: "agent_progress", Data: map[string]any{
 						"message":  "Codex app-server 在 Turn 中退出，正在用同一会话恢复；已投递的 live inbox 消息保留在会话历史中",
-						"recovery": "app_server_resume", "cause": clipError(liveErr.Error(), 500),
+						"recovery": "app_server_resume", "cause": clipError(providerErrorText(liveErr.Error()), 500),
 					}})
 				}
 				recovered, recoveryErr, recoveryStarted := adapter.executeLiveInbox(ctx, recovery, emit, binary, timeout)
@@ -80,7 +80,7 @@ func (adapter Codex) Execute(ctx context.Context, request Request, emit func(Eve
 				if emit != nil {
 					message := "恢复用的 Codex app-server 未能启动，已回退 codex exec 继续同一会话；本 Turn 不会实时接收 live inbox 消息"
 					if recoveryErr != nil {
-						message += "：" + clipError(recoveryErr.Error(), 300)
+						message += "：" + clipError(providerErrorText(recoveryErr.Error()), 300)
 					}
 					emit(Event{Type: "agent_progress", Data: map[string]any{
 						"message": message, "fallback": "codex_exec",
@@ -99,7 +99,7 @@ func (adapter Codex) Execute(ctx context.Context, request Request, emit func(Eve
 			if emit != nil {
 				message := "Codex app-server 未能在 Turn 开始前启动，已回退到 codex exec；本 Turn 不会实时接收 live inbox 消息"
 				if liveErr != nil {
-					message += "：" + clipError(liveErr.Error(), 300)
+					message += "：" + clipError(providerErrorText(liveErr.Error()), 300)
 				}
 				emit(Event{Type: "agent_progress", Data: map[string]any{
 					"message": message, "fallback": "codex_exec",
@@ -207,7 +207,7 @@ func (adapter Codex) Execute(ctx context.Context, request Request, emit func(Eve
 		sessionID = request.ProviderSessionID
 	}
 	if result.ExitCode != 0 {
-		message := strings.TrimSpace(result.Stderr)
+		message := providerErrorText(result.Stderr)
 		if message == "" {
 			message = providerError
 		}
@@ -579,8 +579,23 @@ func parseCodexLine(line string) (Event, string, string) {
 		sessionID, _ := payload["thread_id"].(string)
 		return Event{Type: "agent_usage", Data: map[string]any{"usage": usage}}, "", sessionID
 	case "error":
-		message, _ := payload["message"].(string)
-		return Event{Type: "agent_error", Data: map[string]any{"message": message}}, "", ""
+		// codex exec reports provider failures as a top-level error event. Keep
+		// the full message and any nested error object instead of projecting an
+		// empty string when the CLI puts the cause outside "message".
+		message := ""
+		if text, ok := payload["message"].(string); ok {
+			message = strings.TrimSpace(text)
+		}
+		if message == "" {
+			message = errorValueText(payload["error"])
+		}
+		if message == "" {
+			message = compactJSONValue(json.RawMessage(line))
+		}
+		if message == "" {
+			message = "codex reported an error"
+		}
+		return Event{Type: "agent_error", Data: map[string]any{"message": providerErrorText(message)}}, "", ""
 	case "item.started", "item.completed":
 		item, _ := payload["item"].(map[string]any)
 		itemType, _ := item["type"].(string)

@@ -2,6 +2,7 @@ package backend
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -268,6 +269,112 @@ func TestParseClaudeLineError(t *testing.T) {
 	event := firstClaudeEvent(events)
 	if event.Type != "agent_error" {
 		t.Fatalf("expected agent_error, got %q", event.Type)
+	}
+}
+
+// Claude 2.1.x result failures carry errors[] of strings, not a singular
+// error field. The old parser only read error as a string, so these
+// explanations were dropped and the Turn ended with a generic exit message.
+func TestParseClaudeResultErrorKeepsErrorsArray(t *testing.T) {
+	t.Parallel()
+	events, reply, session := parseClaudeLine(`{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["API Error: 400 litellm.BadRequestError: prompt is too long"],"stop_reason":"end_turn","session_id":"sess-fail"}`)
+	event := firstClaudeEvent(events)
+	if event.Type != "agent_error" || reply != "" || session != "sess-fail" {
+		t.Fatalf("unexpected parse: %#v reply=%q session=%q", event.Type, reply, session)
+	}
+	message := fmt.Sprint(event.Data["message"])
+	for _, want := range []string{"prompt is too long", "subtype: error_during_execution", "stop_reason: end_turn"} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("result error lost %q: %s", want, message)
+		}
+	}
+	if event.Data["terminal"] != true {
+		t.Fatalf("result failure must be terminal: %#v", event.Data)
+	}
+}
+
+func TestParseClaudeResultErrorAcceptsObjectAndArray(t *testing.T) {
+	t.Parallel()
+	objectEvents, _, _ := parseClaudeLine(`{"type":"result","subtype":"error_max_turns","error":{"code":"rate_limit","message":"slow down","details":{"retry_after":5}}}`)
+	objectMessage := fmt.Sprint(firstClaudeEvent(objectEvents).Data["message"])
+	for _, want := range []string{"rate_limit", "slow down", "retry_after", "5"} {
+		if !strings.Contains(objectMessage, want) {
+			t.Fatalf("object error lost %q: %s", want, objectMessage)
+		}
+	}
+	arrayEvents, _, _ := parseClaudeLine(`{"type":"result","subtype":"error_during_execution","error":["first failure","second failure"]}`)
+	arrayMessage := fmt.Sprint(firstClaudeEvent(arrayEvents).Data["message"])
+	if !strings.Contains(arrayMessage, "first failure") || !strings.Contains(arrayMessage, "second failure") {
+		t.Fatalf("array error lost entries: %s", arrayMessage)
+	}
+}
+
+func TestParseClaudeAssistantAPIErrorKeepsDetailsAndStatus(t *testing.T) {
+	t.Parallel()
+	line := `{"type":"assistant","isApiErrorMessage":true,"apiErrorStatus":413,"apiError":"max_output_tokens","errorDetails":"requested 1055361 tokens but limit is 1048576","message":{"model":"<synthetic>","content":[{"type":"text","text":"API Error: 413 maximum output tokens exceeded"}]}}`
+	events, reply, _ := parseClaudeLine(line)
+	event := firstClaudeEvent(events)
+	if event.Type != "agent_error" || reply != "" {
+		t.Fatalf("unexpected parse: %#v reply=%q", event.Type, reply)
+	}
+	message := fmt.Sprint(event.Data["message"])
+	for _, want := range []string{"maximum output tokens exceeded", "requested 1055361 tokens", "status: 413", "code: max_output_tokens"} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("API error message lost %q: %s", want, message)
+		}
+	}
+	if event.Data["status"] != float64(413) || event.Data["code"] != "max_output_tokens" {
+		t.Fatalf("status/code were dropped: %#v", event.Data)
+	}
+}
+
+type claudeTerminalErrorRunner struct{}
+
+func (claudeTerminalErrorRunner) Run(_ context.Context, _ workspace.Command, onLine workspace.LineHandler) (workspace.Result, error) {
+	onLine(`{"type":"assistant","message":{"content":[{"type":"text","text":"正在处理"}]}}`)
+	onLine(`{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["provider exploded during execution"]}`)
+	return workspace.Result{ExitCode: 0}, nil
+}
+
+func TestClaudeTerminalResultErrorOverridesPartialReply(t *testing.T) {
+	var sawTerminal bool
+	_, err := (Claude{}).Execute(context.Background(), Request{Runner: claudeTerminalErrorRunner{}, WorkDir: t.TempDir()}, func(event Event) {
+		if event.Type == "agent_error" && event.Data["terminal"] == true {
+			sawTerminal = true
+		}
+	})
+	if err == nil || !strings.Contains(err.Error(), "provider exploded during execution") {
+		t.Fatalf("terminal result error was hidden: %v", err)
+	}
+	if strings.Contains(err.Error(), "no agent message") {
+		t.Fatalf("generic no-message error replaced the provider detail: %v", err)
+	}
+	if !sawTerminal {
+		t.Fatal("terminal agent_error event was not emitted")
+	}
+}
+
+func TestClaudeErrorRedactsCredentialsAndClips(t *testing.T) {
+	t.Parallel()
+	secret := "sk-ant-super-secret-token-123456"
+	long := strings.Repeat("y", 6000)
+	line, err := json.Marshal(map[string]any{
+		"type": "result", "subtype": "error_during_execution",
+		"errors": []string{"failed: Authorization: Bearer " + secret + " api_key=another-secret-value " + long},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, _, _ := parseClaudeLine(string(line))
+	message := fmt.Sprint(firstClaudeEvent(events).Data["message"])
+	if strings.Contains(message, secret) || strings.Contains(message, "another-secret-value") {
+		t.Fatalf("credential leaked into the error message: %s", message)
+	}
+	if !strings.Contains(message, "[redacted]") {
+		t.Fatalf("redaction marker missing: %s", message)
+	}
+	if length := len([]rune(message)); length > providerDetailLimit+1 {
+		t.Fatalf("error message is not bounded: %d", length)
 	}
 }
 
