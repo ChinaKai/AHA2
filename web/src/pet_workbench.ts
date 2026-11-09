@@ -315,6 +315,80 @@ export function createPetWorkbenchLoader<T>(options: PetWorkbenchLoaderOptions<T
   };
 }
 
+export interface PetWorkbenchPageBinding {
+  body: HTMLElement;
+  page: HTMLElement | null;
+  loader: {dispose: () => void};
+  /** The tab this binding last rendered; kept in sync by the caller. */
+  tab: string;
+}
+
+export interface PetWorkbenchPageKeeper {
+  readonly binding: PetWorkbenchPageBinding | null;
+  /** True when this exact live body is already owned by the keeper. */
+  owns: (body: HTMLElement | null) => boolean;
+  /**
+   * Called once per render before `#app` is replaced. Returns the mounted page
+   * to carry over while staying on the workbench, and releases the binding
+   * (aborting its in-flight request) when the render leaves the view.
+   */
+  beforeRender: (view: string) => HTMLElement | null;
+  adopt: (body: HTMLElement, page: HTMLElement | null, loader: {dispose: () => void}, tab: string) => PetWorkbenchPageBinding;
+  release: () => void;
+}
+
+// swapPetWorkbenchPage re-inserts a page carried across a render. The shell's
+// innerHTML assignment has already detached the old page, so the caller must not
+// test isConnected here; keeper.beforeRender() decided reuse while it was live.
+export function swapPetWorkbenchPage(app: ParentNode, preservedPage: HTMLElement | null): boolean {
+  if (!preservedPage) return false;
+  const freshPage = app.querySelector<HTMLElement>(".pet-workbench-page");
+  if (!freshPage) return false;
+  freshPage.replaceWith(preservedPage);
+  return true;
+}
+
+// render() replaces the whole app shell. Re-binding the workbench to a fresh
+// body on every render aborts the in-flight request and starts another; with a
+// slow response, unrelated renders (navigation, resource loads, messages) can
+// keep restarting it so the page never leaves "loading". This keeper makes the
+// mounted workbench page survive same-view renders: the caller re-inserts the
+// existing page, the body stays identical, and the loader keeps its request.
+// Only actually leaving the view releases (aborts) it.
+export function createPetWorkbenchPageKeeper(): PetWorkbenchPageKeeper {
+  let binding: PetWorkbenchPageBinding | null = null;
+  const release = (): void => {
+    const previous = binding;
+    binding = null;
+    previous?.loader.dispose();
+  };
+  return {
+    get binding() {
+      return binding;
+    },
+    owns(body) {
+      return Boolean(body && binding && binding.body === body && body.isConnected);
+    },
+    beforeRender(view) {
+      if (view !== "pet-workbench") {
+        release();
+        return null;
+      }
+      if (!binding || !binding.body.isConnected) return null;
+      return binding.page && binding.page.isConnected ? binding.page : null;
+    },
+    adopt(body, page, loader, tab) {
+      // A different body means the old page was not carried across a render
+      // (binding failure, or the view was rebuilt); abort its request. The same
+      // page keeps its loader because render() preserved the body node.
+      if (binding && binding.body !== body) release();
+      binding = {body, page, loader, tab};
+      return binding;
+    },
+    release,
+  };
+}
+
 function escapeHTML(value: unknown): string {
   return String(value ?? "")
     .replaceAll("&", "&amp;")

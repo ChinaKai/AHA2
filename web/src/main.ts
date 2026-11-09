@@ -1,8 +1,8 @@
 import {api, setAPIRequestObserver} from "./api.js";
 import type {APIRequestSample} from "./api.js";
 import {handlePetStreamEvent, mountAssistant, showPetSettings, notifyPetTaskIdle, notifyPetTaskReply, notifyPetTaskThinking, setAssistantVisible} from "./assistant.js";
-import {bindPetDocEditorButtons, createPetWorkbenchLoader, PET_APPROVAL_MAX_LIMIT, petApprovalMatches, petApprovalPage, renderPetApprovalLoadMore, renderPetInspectionSummary, renderPetWorkbenchLoadError} from "./pet_workbench.js";
-import type {PetWorkbenchLoader} from "./pet_workbench.js";
+import {bindPetDocEditorButtons, createPetWorkbenchLoader, createPetWorkbenchPageKeeper, PET_APPROVAL_MAX_LIMIT, petApprovalMatches, petApprovalPage, renderPetApprovalLoadMore, renderPetInspectionSummary, renderPetWorkbenchLoadError, swapPetWorkbenchPage} from "./pet_workbench.js";
+import type {PetWorkbenchPageBinding} from "./pet_workbench.js";
 import {renderConversationList} from "./conversation_ui.js";
 import {bindCodexAccounts, renderCodexAccounts} from "./codex_accounts.js";
 import {bindChannels, exportRetiredChannelInstance, purgeRetiredChannelInstance, renderChannels} from "./channels.js";
@@ -385,10 +385,10 @@ const app = document.querySelector<HTMLDivElement>("#app");
 const petApprovalCounter = createPetApprovalCounter(() => api.petPendingApprovalCount(), updatePetPendingApprovalIndicators);
 let petPendingApprovalTimer = 0;
 let petWorkbenchTab = "core";
-// The workbench binds against a node that render() replaces wholesale. Track
-// the live binding so a re-rendered page always starts a fresh load while a
-// superseded request cannot keep writing into the detached node.
-let activePetWorkbenchBinding: {body: HTMLElement; loader: PetWorkbenchLoader} | null = null;
+// The workbench binds against a node that render() replaces wholesale. The
+// keeper lets the mounted page survive same-view renders so an unrelated
+// render cannot abort and restart its request; leaving the view releases it.
+const petWorkbenchPageKeeper = createPetWorkbenchPageKeeper();
 let petApprovalFilter: "all" | "idea" | "decision" = "all";
 let petApprovalStatusFilter: "all" | "pending" | "approved" | "rejected" | "cancelled" = "pending";
 let events: EventSource | null = null;
@@ -4599,6 +4599,11 @@ function updateTaskLiveRegions(): void {
 function render(): void {
   if (!app) return;
   flushDeferredListRefresh();
+  // Keep the mounted workbench page across same-view renders: the body identity
+  // survives, so bindPetWorkbenchPage reuses its loader instead of aborting the
+  // request and starting another. Leaving the view (including logout) releases
+  // and aborts it before any other render path can return early.
+  const preservedWorkbenchPage = petWorkbenchPageKeeper.beforeRender(state.view);
   if (state.auth?.authenticated) {
     mountAssistant();
     setAssistantVisible(true);
@@ -4618,12 +4623,6 @@ function render(): void {
     app.innerHTML = loginView();
     bindAuth();
     return;
-  }
-  // Leaving the workbench must abort its in-flight request; otherwise timed-out
-  // fetches keep occupying browser connections until a manual refresh.
-  if (state.view !== "pet-workbench" && activePetWorkbenchBinding) {
-    activePetWorkbenchBinding.loader.dispose();
-    activePetWorkbenchBinding = null;
   }
   // Never tear down the DOM while a modal dialog is open, or the dialog would
   // close unexpectedly. Defer until the dialog closes (see close listener).
@@ -4717,6 +4716,24 @@ function render(): void {
   const preservedConversation = previousConversation && preservePageUI
     && conversationRenderedHTML.get(previousConversation) === nextConversationHTML ? previousConversation : null;
   app.innerHTML = content;
+  // Put the live workbench page back after the shell replacement. Its tab and
+  // body listeners stay attached, and bindPetWorkbenchPage sees the same body
+  // and returns without restarting the load.
+  if (preservedWorkbenchPage) {
+    // The shell replacement detached the old page; re-insert it as-is so its
+    // tab/body listeners and loader stay live. If the new shell has no
+    // workbench slot, the page really is gone: release its request now.
+    if (!swapPetWorkbenchPage(app, preservedWorkbenchPage)) petWorkbenchPageKeeper.release();
+    // A programmatic tab request (for example the pet panel's settings entry)
+    // changes petWorkbenchTab while the page is preserved; follow it.
+    const liveBinding = petWorkbenchPageKeeper.binding;
+    if (liveBinding) {
+      const wantedTab = normalizedPetWorkbenchTab();
+      if (liveBinding.tab !== wantedTab) {
+        preservedWorkbenchPage.querySelector<HTMLButtonElement>(`[data-pet-workbench-tab="${wantedTab}"]`)?.click();
+      }
+    }
+  }
   translateUI(app);
   if (preservedDesktop) document.querySelector("#desktop-tool")?.replaceWith(preservedDesktop);
   app.dataset.uiScope = nextUIScope;
@@ -4917,7 +4934,12 @@ function bindCommon(): void {
     state.dialogProjectID = "";
     closeEvents();
     render();
-    void ensureViewData(state.view, nextView === "proxy").then(() => render());
+    void ensureViewData(state.view, nextView === "proxy").then(() => {
+      // Entering the workbench already rendered its page and started exactly one
+      // load; a second full render here used to rebind and abort that request.
+      if (state.view === "pet-workbench" && petWorkbenchPageKeeper.binding) return;
+      render();
+    });
   }));
   document.querySelector<HTMLElement>("#retry-view-data")?.addEventListener("click", () => {
     void ensureViewData(state.view, true).then(() => render());
@@ -6696,8 +6718,7 @@ function petWorkbenchView(): string {
 // its loader attached. bindPetWorkbenchPage assigns the binding synchronously,
 // so a missing current binding right after bindCommon means binding failed.
 function petWorkbenchBindCurrent(): boolean {
-  const body = document.querySelector<HTMLElement>("#pet-workbench-body");
-  return Boolean(body && body.isConnected && activePetWorkbenchBinding?.body === body);
+  return petWorkbenchPageKeeper.owns(document.querySelector<HTMLElement>("#pet-workbench-body"));
 }
 
 // showPetWorkbenchBindFailure replaces the template's "loading" placeholder
@@ -6707,11 +6728,15 @@ function petWorkbenchBindCurrent(): boolean {
 function showPetWorkbenchBindFailure(error: unknown): void {
   const body = document.querySelector<HTMLElement>("#pet-workbench-body");
   if (!body) return;
-  activePetWorkbenchBinding?.loader.dispose();
-  activePetWorkbenchBinding = null;
+  petWorkbenchPageKeeper.release();
   const message = error instanceof Error ? error.message : String(error);
   body.innerHTML = renderPetWorkbenchLoadError(message, t);
   body.querySelector<HTMLButtonElement>("[data-pet-workbench-retry]")?.addEventListener("click", () => render());
+}
+
+// Legacy bookmarks and the pet panel use "ideas"; the tab is now "approvals".
+function normalizedPetWorkbenchTab(): string {
+  return petWorkbenchTab === "ideas" ? "approvals" : petWorkbenchTab;
 }
 
 async function bindPetWorkbenchPage(): Promise<void> {
@@ -6719,12 +6744,11 @@ async function bindPetWorkbenchPage(): Promise<void> {
   const tabs = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-pet-workbench-tab]"));
   const channelCount = document.querySelector<HTMLElement>("#pet-channel-count");
   if (!body || tabs.length === 0) return;
-  // Only skip binding when this exact live node is already wired. A render
-  // always creates a new #pet-workbench-body, so a stale bound flag must never
-  // suppress the load that follows it.
-  if (activePetWorkbenchBinding?.body === body && body.isConnected) return;
-  activePetWorkbenchBinding?.loader.dispose();
-  let active = petWorkbenchTab === "ideas" ? "approvals" : petWorkbenchTab;
+  // render() carries the live page across same-view renders, so this exact
+  // connected body is already wired and must keep its in-flight loader. Only a
+  // genuinely new body starts a new request.
+  if (petWorkbenchPageKeeper.owns(body)) return;
+  let active = normalizedPetWorkbenchTab();
   petWorkbenchTab = active;
   let view: Awaited<ReturnType<typeof api.petWorkbench>> | null = null;
   let loadError = "";
@@ -6777,7 +6801,7 @@ async function bindPetWorkbenchPage(): Promise<void> {
         // superseded or disposed load reaches here with the flag still set.
         if (loadingMore !== kind) return;
         loadingMore = null;
-        if (body.isConnected && activePetWorkbenchBinding === binding) renderTab();
+        if (body.isConnected && petWorkbenchPageKeeper.binding === binding) renderTab();
       });
     }));
   };
@@ -6860,12 +6884,12 @@ async function bindPetWorkbenchPage(): Promise<void> {
     }
   };
 
-  let binding: {body: HTMLElement; loader: PetWorkbenchLoader} | null = null;
+  let binding: PetWorkbenchPageBinding | null = null;
   const loader = createPetWorkbenchLoader({
     read: signal => api.petWorkbench({approvalLimit, worklogLimit}, signal),
     // A render replaces the body; a superseded loader must not write its result
     // or error into the detached node, and must not clear the new loader's state.
-    isCurrent: () => body.isConnected && activePetWorkbenchBinding === binding,
+    isCurrent: () => body.isConnected && petWorkbenchPageKeeper.binding === binding,
     onLoading: () => {
       loadError = "";
       if (!view) showLoadState();
@@ -6886,8 +6910,7 @@ async function bindPetWorkbenchPage(): Promise<void> {
     },
     timeoutMessage: t("petWorkbench.loadTimeout"),
   });
-  binding = {body, loader};
-  activePetWorkbenchBinding = binding;
+  binding = petWorkbenchPageKeeper.adopt(body, body.closest<HTMLElement>(".pet-workbench-page"), loader, active);
   const load = () => loader.load();
 
   const bindApprovalActions = () => {
@@ -6978,6 +7001,7 @@ async function bindPetWorkbenchPage(): Promise<void> {
   tabs.forEach(tab => tab.addEventListener("click", () => {
     active = tab.dataset.petWorkbenchTab || "core";
     petWorkbenchTab = active;
+    if (binding) binding.tab = active;
     renderTab();
   }));
   await load();

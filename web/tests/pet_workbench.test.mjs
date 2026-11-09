@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {readFile} from "node:fs/promises";
 import {resolve} from "node:path";
 import {createPetApprovalCounter, petPendingApprovalBadge} from "../dist/pet_approvals.js";
-import {bindPetDocEditorButtons, createPetWorkbenchLoader, PET_APPROVAL_MAX_LIMIT, petApprovalMatches, petApprovalPage, renderPetApprovalLoadMore, renderPetInspectionSummary, renderPetWorkbenchLoadError} from "../dist/pet_workbench.js";
+import {bindPetDocEditorButtons, createPetWorkbenchLoader, createPetWorkbenchPageKeeper, PET_APPROVAL_MAX_LIMIT, petApprovalMatches, petApprovalPage, renderPetApprovalLoadMore, renderPetInspectionSummary, renderPetWorkbenchLoadError, swapPetWorkbenchPage} from "../dist/pet_workbench.js";
 
 const root = resolve(import.meta.dirname, "../..");
 
@@ -231,6 +231,111 @@ test("dispose aborts the in-flight request immediately instead of waiting for th
   assert.equal(loader.busy(), false);
 });
 
+// The shell replaces #app wholesale on every render. These fakes model the two
+// nodes the keeper cares about: the body it binds and the page it preserves.
+function fakeWorkbenchPage({connected = true} = {}) {
+  return {page: {isConnected: connected}, body: {isConnected: connected}};
+}
+
+test("an entry issues one workbench request and unrelated renders never abort it", async () => {
+  const keeper = createPetWorkbenchPageKeeper();
+  const {page, body} = fakeWorkbenchPage();
+  const requests = [];
+  let binding = null;
+  const loader = createPetWorkbenchLoader({
+    read: signal => new Promise((_resolve, reject) => {
+      requests.push(signal);
+      signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+    }),
+    isCurrent: () => body.isConnected && keeper.binding === binding,
+    onLoading: () => {},
+    onData: () => {},
+    onError: () => {},
+    timeoutMs: 60_000,
+  });
+  binding = keeper.adopt(body, page, loader, "core");
+  const pending = loader.load();
+  assert.equal(requests.length, 1, "entering the view issues exactly one request");
+
+  // Navigation renders immediately and again after ensureViewData; background
+  // resource loads and messages render too. Every one of them must reuse the
+  // live page instead of rebinding the loader.
+  for (let render = 0; render < 6; render++) {
+    assert.equal(keeper.beforeRender("pet-workbench"), page, `render ${render} carries the page`);
+    assert.equal(keeper.owns(body), true, `render ${render} sees the live binding`);
+    assert.equal(requests.length, 1, `render ${render} must not issue another request`);
+    assert.equal(requests[0].aborted, false, `render ${render} must not abort the in-flight request`);
+  }
+
+  // Only actually leaving the view aborts the request.
+  assert.equal(keeper.beforeRender("tasks"), null);
+  assert.equal(requests[0].aborted, true, "leaving the view aborts the in-flight request");
+  assert.equal(keeper.binding, null);
+  assert.equal(keeper.owns(body), false);
+  await pending;
+  assert.equal(loader.busy(), false, "the released loader still clears its loading state");
+
+  // Re-entering is a new entry: exactly one new request, never a retry storm.
+  const next = fakeWorkbenchPage();
+  let nextBinding = null;
+  const nextLoader = createPetWorkbenchLoader({
+    read: signal => new Promise((_resolve, reject) => {
+      requests.push(signal);
+      signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+    }),
+    isCurrent: () => next.body.isConnected && keeper.binding === nextBinding,
+    onLoading: () => {},
+    onData: () => {},
+    onError: () => {},
+    timeoutMs: 60_000,
+  });
+  nextBinding = keeper.adopt(next.body, next.page, nextLoader, "core");
+  const reentered = nextLoader.load();
+  assert.equal(requests.length, 2, "a genuine re-entry starts exactly one new request");
+  nextLoader.dispose();
+  await reentered;
+});
+
+test("a new body supersedes and aborts the previous workbench loader", () => {
+  const keeper = createPetWorkbenchPageKeeper();
+  const first = fakeWorkbenchPage();
+  let firstDisposed = 0;
+  keeper.adopt(first.body, first.page, {dispose: () => { firstDisposed++; }}, "core");
+  assert.equal(keeper.beforeRender("pet-workbench"), first.page);
+
+  const second = fakeWorkbenchPage();
+  keeper.adopt(second.body, second.page, {dispose: () => {}}, "core");
+  assert.equal(firstDisposed, 1, "an unreused page must not keep its old request");
+  assert.equal(keeper.owns(first.body), false);
+  assert.equal(keeper.owns(second.body), true);
+  assert.equal(keeper.beforeRender("pet-workbench"), second.page);
+});
+
+test("the fresh shell swaps in the preserved page even though innerHTML detached it", () => {
+  const inserted = [];
+  const freshTemplate = {replaceWith: node => inserted.push(node)};
+  const app = {querySelector: selector => selector === ".pet-workbench-page" ? freshTemplate : null};
+  // The shell replacement detached the old page before this runs, so it is not
+  // connected anymore; only beforeRender is allowed to decide reuse.
+  const preserved = {isConnected: false};
+  assert.equal(swapPetWorkbenchPage(app, preserved), true);
+  assert.deepEqual(inserted, [preserved]);
+  assert.equal(swapPetWorkbenchPage(app, null), false, "no preserved page leaves the fresh template");
+  assert.equal(swapPetWorkbenchPage({querySelector: () => null}, preserved), false, "a missing slot must not throw");
+});
+
+test("a disconnected or missing page is not carried across a render", () => {
+  const keeper = createPetWorkbenchPageKeeper();
+  const {body} = fakeWorkbenchPage();
+  keeper.adopt(body, null, {dispose: () => {}}, "core");
+  assert.equal(keeper.beforeRender("pet-workbench"), null, "without a page the shell must be rebuilt");
+  keeper.release();
+
+  const detached = fakeWorkbenchPage({connected: false});
+  keeper.adopt(detached.body, detached.page, {dispose: () => {}}, "core");
+  assert.equal(keeper.beforeRender("pet-workbench"), null);
+});
+
 test("the timeout aborts the in-flight request before reporting the error", async () => {
   let signal;
   const events = [];
@@ -383,13 +488,20 @@ test("workbench wiring uses the guarded loader and renders the inspection summar
   const loader = await readFile(resolve(root, "web/src/pet_workbench.ts"), "utf8");
   assert.match(main, /createPetWorkbenchLoader\(/);
   assert.match(main, /api\.petWorkbench\(\{approvalLimit, worklogLimit\}, signal\)/);
-  assert.match(main, /isCurrent: \(\) => body\.isConnected && activePetWorkbenchBinding === binding/);
+  assert.match(main, /isCurrent: \(\) => body\.isConnected && petWorkbenchPageKeeper\.binding === binding/);
   assert.match(main, /renderPetInspectionSummary\(view\.inspection, t, formatDateTime\)/);
   assert.match(main, /bindPetWorkbenchPage\(\)\.catch\(showPetWorkbenchBindFailure\)/);
   assert.match(main, /function showPetWorkbenchBindFailure/);
   assert.match(main, /renderPetWorkbenchLoadError\(loadError, t\)/);
   assert.match(main, /workbenchBindFailed/);
   assert.doesNotMatch(main, /petWorkbenchBound/);
+  // A same-view render carries the mounted page instead of rebinding.
+  assert.match(main, /const preservedWorkbenchPage = petWorkbenchPageKeeper\.beforeRender\(state\.view\)/);
+  assert.match(main, /swapPetWorkbenchPage\(app, preservedWorkbenchPage\)/);
+  assert.match(main, /if \(petWorkbenchPageKeeper\.owns\(body\)\) return;/);
+  assert.match(main, /petWorkbenchPageKeeper\.release\(\)/);
+  // Navigation must not restart the load it just started.
+  assert.match(main, /state\.view === "pet-workbench" && petWorkbenchPageKeeper\.binding\) return;/);
   assert.doesNotMatch(main, /withTimeout\(api\.petWorkbench/);
   assert.match(api, /petWorkbench\(options: \{[^}]*\}[^)]*signal\?: AbortSignal\)/);
   assert.match(loader, /maxRetries \?\? 1/);
