@@ -894,6 +894,9 @@ func planSkills(source string, existing []domain.Skill, plan *Plan) error {
 		action := "create"
 		if exists {
 			skill.Version, skill.CreatedAt = current.Version, current.CreatedAt
+			// AHA1 archives carry no auto_attach setting; keep the local value
+			// instead of clearing it through the package update.
+			skill.AutoAttach = current.AutoAttach
 			action = "update"
 			if skillMetadataEqual(current, skill) && skillFilesEqual(current.PackageFiles, files) {
 				action = "unchanged"

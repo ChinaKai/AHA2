@@ -705,3 +705,53 @@ func TestKnowledgeCatalogV22(t *testing.T) {
 		t.Fatal("stale skill package version was accepted")
 	}
 }
+
+func TestUpdateSkillPackagePersistsAutoAttachWithVersionCAS(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database, err := Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	now := time.Now().UTC()
+	if err := database.CreateSkill(ctx, domain.Skill{ID: "skill-auto-package", Scope: "global", Name: "Auto", Description: "auto", Instructions: "body", Version: 1, Status: "active", Enabled: true, CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	files := []domain.SkillFile{{Path: "SKILL.md", Content: "---\nname: auto\ndescription: auto\n---\n\nupdated body"}}
+	skill, err := database.Skill(ctx, "skill-auto-package")
+	if err != nil {
+		t.Fatal(err)
+	}
+	skill.AutoAttach = true
+	skill.UpdatedAt = now.Add(time.Second)
+	updated, err := database.UpdateSkillPackage(ctx, skill, 1, files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Version != 2 || !updated.AutoAttach {
+		t.Fatalf("enabled package update = %#v", updated)
+	}
+	if stored, err := database.Skill(ctx, "skill-auto-package"); err != nil || !stored.AutoAttach || stored.Version != 2 {
+		t.Fatalf("stored enabled skill = %#v, %v", stored, err)
+	}
+	skill, err = database.Skill(ctx, "skill-auto-package")
+	if err != nil {
+		t.Fatal(err)
+	}
+	skill.AutoAttach = false
+	skill.UpdatedAt = now.Add(2 * time.Second)
+	updated, err = database.UpdateSkillPackage(ctx, skill, 2, files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Version != 3 || updated.AutoAttach {
+		t.Fatalf("disabled package update = %#v", updated)
+	}
+	if stored, err := database.Skill(ctx, "skill-auto-package"); err != nil || stored.AutoAttach || stored.Version != 3 {
+		t.Fatalf("stored disabled skill = %#v, %v", stored, err)
+	}
+	if _, err := database.UpdateSkillPackage(ctx, skill, 2, files); err == nil {
+		t.Fatal("stale skill package version was accepted after auto_attach update")
+	}
+}

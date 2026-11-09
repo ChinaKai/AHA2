@@ -534,6 +534,133 @@ func TestApplySkillFallsBackToGlobalWhenProjectIsMissing(t *testing.T) {
 	}
 }
 
+func skillSyncFiles(body string) []domain.SkillFile {
+	return []domain.SkillFile{{Path: "SKILL.md", Content: "---\nname: demo\ndescription: demo\n---\n\n" + body}}
+}
+
+func TestSkillPayloadAutoAttachPresence(t *testing.T) {
+	current, err := json.Marshal(skillPayload{Skill: domain.Skill{ID: "s1", Name: "demo"}, Files: skillSyncFiles("body")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !skillPayloadIncludesAutoAttach(current) {
+		t.Fatal("current payload lost explicit auto_attach")
+	}
+	legacy, err := json.Marshal(map[string]any{"skill": map[string]any{"id": "s1", "name": "demo"}, "files": []any{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if skillPayloadIncludesAutoAttach(legacy) {
+		t.Fatal("legacy payload without auto_attach was treated as explicit")
+	}
+}
+
+func TestApplySkillUpdatesAutoAttachForExistingSkill(t *testing.T) {
+	ctx, db, now := context.Background(), businessStore(t), time.Now().UTC()
+	if err := db.CreateSkill(ctx, domain.Skill{ID: "s-auto", Scope: "global", Name: "demo", Description: "demo", Instructions: "body", Version: 1, Status: "active", Enabled: true, CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	apply := func(autoAttach bool) {
+		t.Helper()
+		payload := skillPayload{Skill: domain.Skill{ID: "s-auto", Scope: "global", Name: "demo", Description: "demo", Instructions: "body", Version: 2, Status: "active", Enabled: true, AutoAttach: autoAttach, CreatedAt: now, UpdatedAt: now}, Files: skillSyncFiles("body")}
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := applyBusinessObject(ctx, db, domain.SyncObject{Type: TypeSkill, ID: "s-auto", Operation: "upsert", Payload: raw}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	apply(true)
+	got, err := db.Skill(ctx, "s-auto")
+	if err != nil || !got.AutoAttach || got.Version != 2 {
+		t.Fatalf("synced auto_attach=true skill=%#v err=%v", got, err)
+	}
+	apply(false)
+	got, err = db.Skill(ctx, "s-auto")
+	if err != nil || got.AutoAttach || got.Version != 3 {
+		t.Fatalf("synced auto_attach=false skill=%#v err=%v", got, err)
+	}
+}
+
+func TestApplySkillCreatesWithAutoAttach(t *testing.T) {
+	ctx, db, now := context.Background(), businessStore(t), time.Now().UTC()
+	payload := skillPayload{Skill: domain.Skill{ID: "s-new-auto", Scope: "global", Name: "demo", Description: "demo", Instructions: "body", Version: 1, Status: "active", Enabled: true, AutoAttach: true, CreatedAt: now, UpdatedAt: now}, Files: skillSyncFiles("body")}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := applyBusinessObject(ctx, db, domain.SyncObject{Type: TypeSkill, ID: "s-new-auto", Operation: "upsert", Payload: raw}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := db.Skill(ctx, "s-new-auto")
+	if err != nil || !got.AutoAttach || got.Version != 1 {
+		t.Fatalf("created auto-attach skill=%#v err=%v", got, err)
+	}
+}
+
+func TestApplySkillPackageOnlyUpdateKeepsAutoAttach(t *testing.T) {
+	ctx, db, now := context.Background(), businessStore(t), time.Now().UTC()
+	if err := db.CreateSkill(ctx, domain.Skill{ID: "s-package", Scope: "global", Name: "demo", Description: "demo", Instructions: "body", Version: 1, Status: "active", Enabled: true, AutoAttach: true, CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	payload := skillPayload{
+		Skill: domain.Skill{ID: "s-package", Scope: "global", Name: "demo", Description: "updated description", Instructions: "updated body", Version: 2, Status: "active", Enabled: true, AutoAttach: true, CreatedAt: now, UpdatedAt: now},
+		Files: []domain.SkillFile{{Path: "SKILL.md", Content: "---\nname: demo\ndescription: updated description\n---\n\nupdated body"}, {Path: "scripts/run.sh", Content: "echo updated\n"}},
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := applyBusinessObject(ctx, db, domain.SyncObject{Type: TypeSkill, ID: "s-package", Operation: "upsert", Payload: raw}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := db.Skill(ctx, "s-package")
+	if err != nil || !got.AutoAttach || got.Version != 2 || got.Description != "updated description" || len(got.PackageFiles) != 2 {
+		t.Fatalf("package-only sync skill=%#v err=%v", got, err)
+	}
+}
+
+func TestApplySkillLegacyPayloadWithoutAutoAttachPreservesLocalValue(t *testing.T) {
+	ctx, db, now := context.Background(), businessStore(t), time.Now().UTC()
+	if err := db.CreateSkill(ctx, domain.Skill{ID: "s-legacy", Scope: "global", Name: "demo", Description: "demo", Instructions: "body", Version: 1, Status: "active", Enabled: true, AutoAttach: true, CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	legacy := map[string]any{
+		"skill": map[string]any{
+			"id": "s-legacy", "scope": "global", "name": "demo", "description": "legacy", "instructions": "legacy body",
+			"version": 2, "status": "active", "enabled": true, "created_at": now, "updated_at": now,
+		},
+		"files": skillSyncFiles("legacy body"),
+	}
+	raw, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := applyBusinessObject(ctx, db, domain.SyncObject{Type: TypeSkill, ID: "s-legacy", Operation: "upsert", Payload: raw}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := db.Skill(ctx, "s-legacy")
+	if err != nil || !got.AutoAttach || got.Version != 2 || got.Description != "legacy" {
+		t.Fatalf("legacy payload update skill=%#v err=%v", got, err)
+	}
+
+	legacy["skill"].(map[string]any)["id"] = "s-legacy-new"
+	legacy["skill"].(map[string]any)["name"] = "demo new"
+	legacy["skill"].(map[string]any)["version"] = 1
+	raw, err = json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := applyBusinessObject(ctx, db, domain.SyncObject{Type: TypeSkill, ID: "s-legacy-new", Operation: "upsert", Payload: raw}); err != nil {
+		t.Fatal(err)
+	}
+	created, err := db.Skill(ctx, "s-legacy-new")
+	if err != nil || created.AutoAttach || created.Version != 1 {
+		t.Fatalf("legacy payload create skill=%#v err=%v", created, err)
+	}
+}
+
 func TestApplyPromptOverridePreservesVersion(t *testing.T) {
 	ctx, db := context.Background(), businessStore(t)
 	prompt := domain.PromptTemplate{ID: "core-default", Content: "remote", Version: 4}

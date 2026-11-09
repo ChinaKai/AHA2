@@ -46,6 +46,26 @@ type skillPayload struct {
 	Files []domain.SkillFile `json:"files"`
 }
 
+// skillPayloadIncludesAutoAttach reports whether the exported skill object
+// carries an explicit auto_attach value. Payloads produced before auto_attach
+// became portable (and payloads whose envelope cannot be inspected) omit the
+// field; their zero value must not be treated as an intentional disable on the
+// receiving peer.
+func skillPayloadIncludesAutoAttach(payload json.RawMessage) bool {
+	var envelope struct {
+		Skill json.RawMessage `json:"skill"`
+	}
+	if err := json.Unmarshal(payload, &envelope); err != nil || len(envelope.Skill) == 0 {
+		return false
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(envelope.Skill, &fields); err != nil {
+		return false
+	}
+	_, present := fields["auto_attach"]
+	return present
+}
+
 // modelPayload keeps the runtime-only default env association portable without
 // exposing it through the browser-facing domain.Model JSON representation.
 type modelPayload struct {
@@ -658,6 +678,12 @@ func upsertBusinessObject(ctx context.Context, database *store.Store, obj domain
 			}
 			p.Skill.Version = current.Version
 			p.Skill.PackageSlug = current.PackageSlug
+			// A peer predating portable auto_attach omits the field. Preserve
+			// the local value in that case instead of importing the zero value
+			// as an explicit disable.
+			if !skillPayloadIncludesAutoAttach(obj.Payload) {
+				p.Skill.AutoAttach = current.AutoAttach
+			}
 			_, err = database.UpdateSkillPackage(ctx, p.Skill, current.Version, p.Files)
 			return err
 		}
