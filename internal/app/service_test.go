@@ -1743,8 +1743,12 @@ func TestMultiAgentFallbackCanWakeAgainForNewUnreadResults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	firstFallback := waitForRoundMainTurn(t, database, round.ID, 1, domain.TurnRunning)
-	waitForRoundMainTurn(t, database, round.ID, 1, domain.TurnSucceeded)
+	// Do not poll for the transient Running status: the first fallback Turn only
+	// waits for the already-recorded sub-001 result, so it can complete between
+	// two 10ms polls. The durable terminal state is the deterministic
+	// observation point; the assertions below still prove Main was woken once
+	// for the first result and not again until the second child completes.
+	firstFallback := waitForRoundMainTurn(t, database, round.ID, 1, domain.TurnSucceeded)
 	waitForRoundAgentTurn(t, database, round.ID, "sub-002", domain.TurnRunning)
 	turns, err := database.TurnsForRound(ctx, round.ID)
 	if err != nil {
@@ -1776,6 +1780,155 @@ func TestMultiAgentFallbackCanWakeAgainForNewUnreadResults(t *testing.T) {
 	batches, err := database.CollaborationBatchesForParentTurn(ctx, firstFallback.ParentTurnID)
 	if err != nil || len(batches) != 0 {
 		t.Fatalf("repeat fallback was not consumed: batches=%#v err=%v", batches, err)
+	}
+}
+
+// TestMultiAgentFallbackCoalescesResultsWithinWakeWindow covers the timer.Reset
+// branch: the first child result arms the fallback wake, the second child result
+// lands before that wake fires and pushes it out, so Main is woken once with
+// every unread result instead of once per result.
+func TestMultiAgentFallbackCoalescesResultsWithinWakeWindow(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	secretStore, err := secrets.Open(filepath.Join(t.TempDir(), "secrets.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	project := domain.Project{ID: "project-coalesce-fallback", Name: "AHA2", CreatedAt: now, UpdatedAt: now}
+	workspace := domain.Workspace{
+		ID: "workspace-coalesce-fallback", ProjectID: project.ID, Name: "local", Locality: "local",
+		Transport: "native", RootPath: t.TempDir(), Health: "ready", CreatedAt: now, UpdatedAt: now,
+	}
+	envGroup := domain.EnvGroup{
+		ID: "env-coalesce-fallback", Name: "stub", ProviderID: "stub", Backend: "stub", Revision: 1,
+		Environment: map[string]string{}, SecretRefs: map[string]string{}, CreatedAt: now, UpdatedAt: now,
+	}
+	model := domain.Model{
+		ID: "model-coalesce-fallback", DisplayName: "Stub", ProviderID: "stub", Backend: "stub", WireModel: "stub",
+		ContextWindow: 1000, DefaultEnvGroupID: envGroup.ID, CreatedAt: now, UpdatedAt: now,
+	}
+	for _, operation := range []func() error{
+		func() error { return database.CreateProject(ctx, project) },
+		func() error { return database.CreateWorkspace(ctx, workspace) },
+		func() error { return database.UpsertModel(ctx, model) },
+		func() error { return database.UpsertEnvGroup(ctx, envGroup) },
+	} {
+		if err := operation(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	releaseSecondChild := make(chan struct{})
+	secondChildBlocked := make(chan struct{}, 1)
+	executor := &multiAgentExecutor{
+		blockAgentID:           "sub-002",
+		agentRelease:           releaseSecondChild,
+		agentBlocked:           secondChildBlocked,
+		waitForBatchOnFallback: true,
+	}
+	service := NewService(database, secretStore, executor)
+	executor.service = service
+	// Production coalesces fallback wakes for 350ms. Widen the configured
+	// window through the existing test hook so the second result deterministically
+	// lands after the first wake was armed and before it fires; the timer.Reset
+	// branch under test is unchanged.
+	service.collaborationDelay = 3 * time.Second
+	task, err := service.CreateTask(ctx, CreateTaskInput{
+		ProjectID: project.ID, WorkspaceID: workspace.ID, Title: "coalesce fallback",
+		Request: "coordinate coalesce fallback", ModelID: model.ID,
+		CollaborationMode: "auto", MaxAgents: 3,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.SubmitMessage(ctx, task.ID, task.OriginalRequest); err != nil {
+		t.Fatal(err)
+	}
+	<-secondChildBlocked
+	round, err := database.LatestRound(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := waitForRoundMainTurn(t, database, round.ID, 0, domain.TurnSucceeded)
+	timer := waitForCollaborationTimer(t, service, parent.ID)
+	turns, err := database.TurnsForRound(ctx, round.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, turn := range turns {
+		if turn.AgentID == "main" && turn.Generation > 0 {
+			t.Fatalf("Main woke before the coalescing window elapsed: %#v", turns)
+		}
+	}
+	executor.mu.Lock()
+	batchID := executor.collaborationID
+	executor.mu.Unlock()
+	if batchID == "" {
+		t.Fatal("collaboration batch was not submitted")
+	}
+	// sub-001's result is what armed the pending wake and must be unread.
+	progress := waitForCollaborationResults(t, database, batchID, 1)
+	if progress.Complete {
+		t.Fatalf("batch completed while sub-002 was still blocked: %#v", progress)
+	}
+
+	close(releaseSecondChild)
+	waitForRoundAgentTurn(t, database, round.ID, "sub-002", domain.TurnSucceeded)
+	progress = waitForCollaborationResults(t, database, batchID, 2)
+	if !progress.Complete || len(progress.PendingAgentIDs) != 0 {
+		t.Fatalf("batch did not complete with both child results: %#v", progress)
+	}
+	// The second result was recorded while the first wake timer was still armed.
+	// armCollaborationWake must have reset that same timer instead of scheduling
+	// a second wake.
+	service.collaborationMu.Lock()
+	armed := service.collaborationTimers[parent.ID]
+	service.collaborationMu.Unlock()
+	if armed == nil || armed != timer {
+		t.Fatalf("second result did not reset the pending wake timer: before=%p after=%p", timer, armed)
+	}
+
+	fallback := waitForRoundMainTurn(t, database, round.ID, 1, domain.TurnSucceeded)
+	if got := strings.Count(fallback.Instruction, "Sub-agent collaboration has unread results."); got != 1 {
+		t.Fatalf("expected exactly one coalesced fallback wake, got %d: %s", got, fallback.Instruction)
+	}
+	for _, want := range []string{
+		"### sub-001", "sub-001 result",
+		"### sub-002", "sub-002 result",
+		"All required sub-agents are complete.",
+	} {
+		if !strings.Contains(fallback.Instruction, want) {
+			t.Fatalf("coalesced wake missing %q: %s", want, fallback.Instruction)
+		}
+	}
+	waitForTask(t, database, task.ID, domain.TaskWaitingUser)
+	turns, err = database.TurnsForRound(ctx, round.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mainGenerations := map[int]string{}
+	for _, turn := range turns {
+		if turn.AgentID == "main" {
+			mainGenerations[turn.Generation] = turn.Result
+		}
+	}
+	if len(mainGenerations) != 2 || mainGenerations[0] != "delegating" || mainGenerations[1] != "integrated result" {
+		t.Fatalf("coalesced fallback created an extra Main Turn: %#v", turns)
+	}
+	batch, err := database.CollaborationBatch(ctx, batchID)
+	if err != nil || batch.DeliveredCursor < progress.NextCursor {
+		t.Fatalf("coalesced fallback exited with unread results: batch=%#v next=%d err=%v", batch, progress.NextCursor, err)
+	}
+	if batches, err := database.CollaborationBatchesForParentTurn(ctx, parent.ID); err != nil || len(batches) != 0 {
+		t.Fatalf("coalesced fallback was not consumed: batches=%#v err=%v", batches, err)
+	}
+	if pending, err := database.PendingInboxCount(ctx, task.ID); err != nil || pending != 0 {
+		t.Fatalf("coalesced fallback left pending inbox=%d err=%v", pending, err)
 	}
 }
 
@@ -2247,7 +2400,9 @@ func waitForRoundAgentTurn(
 	expected domain.TurnStatus,
 ) domain.Turn {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
+	// Aligned with waitForTask: the suite runs while builds and installers
+	// compete for CPU, so an async Turn transition can take well over 3s.
+	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		turns, err := database.TurnsForRound(context.Background(), roundID)
 		if err == nil {
@@ -2272,7 +2427,10 @@ func waitForRoundMainTurn(
 	expected domain.TurnStatus,
 ) domain.Turn {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
+	// Aligned with waitForTask. Callers must only wait for durable states:
+	// a wake Turn that has an immediate result can pass through Running
+	// between two polls, so waiting for Running is inherently racy.
+	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		turns, err := database.TurnsForRound(context.Background(), roundID)
 		if err == nil {
@@ -2287,6 +2445,48 @@ func waitForRoundMainTurn(
 	turns, _ := database.TurnsForRound(context.Background(), roundID)
 	t.Fatalf("Main generation %d did not reach %s: %#v", generation, expected, turns)
 	return domain.Turn{}
+}
+
+// waitForCollaborationTimer observes the armed fallback wake directly so a test
+// can add another result before the coalescing window elapses.
+func waitForCollaborationTimer(t *testing.T, service *Service, parentTurnID string) *time.Timer {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		service.collaborationMu.Lock()
+		timer := service.collaborationTimers[parentTurnID]
+		service.collaborationMu.Unlock()
+		if timer != nil {
+			return timer
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("collaboration wake timer was not armed for parent turn %s", parentTurnID)
+	return nil
+}
+
+// waitForCollaborationResults waits for durable result recording, not Turn
+// status: afterTurnTerminal records the collaboration result only after the
+// child Turn is already terminal, so a terminal Turn does not imply the result
+// row is visible yet.
+func waitForCollaborationResults(
+	t *testing.T,
+	database *store.Store,
+	batchID string,
+	want int,
+) domain.CollaborationProgress {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		progress, err := database.CollaborationProgress(context.Background(), batchID, 0)
+		if err == nil && len(progress.Results) >= want {
+			return progress
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	progress, err := database.CollaborationProgress(context.Background(), batchID, 0)
+	t.Fatalf("collaboration %s recorded %d/%d results: %#v err=%v", batchID, len(progress.Results), want, progress, err)
+	return domain.CollaborationProgress{}
 }
 
 func waitForNoPendingHandoff(t *testing.T, database *store.Store, taskID, agentID string) {
