@@ -1,7 +1,7 @@
 import {api, setAPIRequestObserver} from "./api.js";
 import type {APIRequestSample} from "./api.js";
 import {handlePetStreamEvent, mountAssistant, showPetSettings, notifyPetTaskIdle, notifyPetTaskReply, notifyPetTaskThinking, setAssistantVisible} from "./assistant.js";
-import {createPetWorkbenchLoader, renderPetInspectionSummary} from "./pet_workbench.js";
+import {createPetWorkbenchLoader, renderPetInspectionSummary, renderPetWorkbenchLoadError} from "./pet_workbench.js";
 import type {PetWorkbenchLoader} from "./pet_workbench.js";
 import {renderConversationList} from "./conversation_ui.js";
 import {bindCodexAccounts, renderCodexAccounts} from "./codex_accounts.js";
@@ -4722,7 +4722,19 @@ function render(): void {
   app.dataset.uiScope = nextUIScope;
   const renderedConversation = document.querySelector<HTMLElement>("#conversation-list");
   if (!preservedConversation && renderedConversation) restoreConversationImages(renderedConversation, previousConversationImages);
-  bindCommon();
+  let workbenchBindFailed = false;
+  try {
+    bindCommon();
+  } catch (error) {
+    // An earlier binding throwing must not leave the freshly rendered workbench
+    // template on its "loading" placeholder with no loader running.
+    if (state.view !== "pet-workbench") throw error;
+    workbenchBindFailed = true;
+    showPetWorkbenchBindFailure(error);
+  }
+  if (state.view === "pet-workbench" && !workbenchBindFailed && !petWorkbenchBindCurrent()) {
+    showPetWorkbenchBindFailure(new Error(t("petWorkbench.loadFailed")));
+  }
   if (preservedConversation) document.querySelector("#conversation-list")?.replaceWith(preservedConversation);
   if (state.view === "pet-settings") void showPetSettings();
   restoreRegionUI(app, previousAppUI, false);
@@ -5929,7 +5941,7 @@ function bindTaskToolsAndPanels(): void {
   if (state.view === "advanced") bindLanguageSetting();
   if (state.view === "data") bindDataManagementPage();
   if (state.view === "other") bindOtherSettingsPage();
-  if (state.view === "pet-workbench") void bindPetWorkbenchPage();
+  if (state.view === "pet-workbench") void bindPetWorkbenchPage().catch(showPetWorkbenchBindFailure);
   if (state.view === "prompts") bindPromptAdmin(render, setMessage);
   if (state.view === "resources") bindResourcesPage({
     tab: state.resourcesTab,
@@ -6680,6 +6692,28 @@ function petWorkbenchView(): string {
   </section>`;
 }
 
+// petWorkbenchBindCurrent reports whether the live workbench body already has
+// its loader attached. bindPetWorkbenchPage assigns the binding synchronously,
+// so a missing current binding right after bindCommon means binding failed.
+function petWorkbenchBindCurrent(): boolean {
+  const body = document.querySelector<HTMLElement>("#pet-workbench-body");
+  return Boolean(body && body.isConnected && activePetWorkbenchBinding?.body === body);
+}
+
+// showPetWorkbenchBindFailure replaces the template's "loading" placeholder
+// with a retryable error when binding itself throws, for example from an
+// earlier binding in bindCommon; the async loader never got to start there, so
+// without this fallback the body would sit on "loading" forever.
+function showPetWorkbenchBindFailure(error: unknown): void {
+  const body = document.querySelector<HTMLElement>("#pet-workbench-body");
+  if (!body) return;
+  activePetWorkbenchBinding?.loader.dispose();
+  activePetWorkbenchBinding = null;
+  const message = error instanceof Error ? error.message : String(error);
+  body.innerHTML = renderPetWorkbenchLoadError(message, t);
+  body.querySelector<HTMLButtonElement>("[data-pet-workbench-retry]")?.addEventListener("click", () => render());
+}
+
 async function bindPetWorkbenchPage(): Promise<void> {
   const body = document.querySelector<HTMLElement>("#pet-workbench-body");
   const tabs = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-pet-workbench-tab]"));
@@ -6715,7 +6749,7 @@ async function bindPetWorkbenchPage(): Promise<void> {
 
   const showLoadState = () => {
     if (loadError) {
-      body.innerHTML = `<div class="field-help">${escapeHTML(loadError)} <button type="button" data-pet-workbench-retry>${t("common.retry")}</button></div>`;
+      body.innerHTML = renderPetWorkbenchLoadError(loadError, t);
       body.querySelector<HTMLButtonElement>("[data-pet-workbench-retry]")?.addEventListener("click", () => {
         loadError = "";
         void load();

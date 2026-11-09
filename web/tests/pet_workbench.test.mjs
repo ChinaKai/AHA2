@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {readFile} from "node:fs/promises";
 import {resolve} from "node:path";
 import {createPetApprovalCounter, petPendingApprovalBadge} from "../dist/pet_approvals.js";
-import {createPetWorkbenchLoader, renderPetInspectionSummary} from "../dist/pet_workbench.js";
+import {createPetWorkbenchLoader, renderPetInspectionSummary, renderPetWorkbenchLoadError} from "../dist/pet_workbench.js";
 
 const root = resolve(import.meta.dirname, "../..");
 
@@ -88,6 +88,19 @@ const zh = (key, values = {}) => {
   return (catalog[key] ?? key).replace(/\{(\w+)\}/g, (_, name) => String(values[name] ?? `{${name}}`));
 };
 const identityTime = value => value;
+
+test("the retryable error state escapes messages and includes a retry button", () => {
+  const translate = key => ({
+    "common.retry": "重试",
+    "petWorkbench.loadFailed": "加载失败，请重试",
+  }[key] ?? key);
+  const html = renderPetWorkbenchLoadError("<img src=x onerror=alert(1)>", translate);
+  assert.ok(html.includes("&lt;img src=x onerror=alert(1)&gt;"), html);
+  assert.doesNotMatch(html, /<img/);
+  assert.match(html, /data-pet-workbench-retry/);
+  assert.match(html, />重试</);
+  assert.match(renderPetWorkbenchLoadError("", translate), /加载失败，请重试/);
+});
 
 test("inspection summary renders versions, health, uptime, task stats, loops and note", () => {
   const html = renderPetInspectionSummary({
@@ -194,25 +207,150 @@ test("an in-flight request superseded by a render cannot write to the detached n
   assert.deepEqual(freshEvents, ["loading", "data"], "the re-rendered node loads its own data");
 });
 
-test("aborting a superseded load cancels its in-flight request", async () => {
-  let aborted = false;
+test("dispose aborts the in-flight request immediately instead of waiting for the timeout", async () => {
+  let signal;
+  let resolveRead = () => {};
   const loader = createPetWorkbenchLoader({
-    read: signal => new Promise((_, reject) => {
-      signal.addEventListener("abort", () => {
-        aborted = true;
-        reject(new Error("aborted"));
-      });
-    }),
+    read: requestSignal => {
+      signal = requestSignal;
+      return new Promise(resolve => { resolveRead = resolve; });
+    },
+    isCurrent: () => true,
+    onLoading: () => {},
+    onData: () => {},
+    onError: () => {},
+    // Far longer than this test window: only dispose() can abort in time.
+    timeoutMs: 60_000,
+  });
+  const pending = loader.load();
+  assert.equal(signal.aborted, false);
+  loader.dispose();
+  assert.equal(signal.aborted, true, "dispose must abort synchronously");
+  resolveRead({ok: true});
+  await pending;
+  assert.equal(loader.busy(), false);
+});
+
+test("the timeout aborts the in-flight request before reporting the error", async () => {
+  let signal;
+  const events = [];
+  const loader = createPetWorkbenchLoader({
+    read: requestSignal => {
+      signal = requestSignal;
+      return new Promise(() => {});
+    },
+    isCurrent: () => true,
+    onLoading: () => events.push("loading"),
+    onData: () => events.push("data"),
+    onError: message => events.push(`error:${message}`),
+    timeoutMs: 20,
+    retryDelayMs: 1,
+    maxRetries: 0,
+    timeoutMessage: "超时",
+  });
+  await loader.load();
+  assert.equal(signal.aborted, true, "the timer must abort the request, not only reject the race");
+  assert.deepEqual(events, ["loading", "error:超时"]);
+  assert.equal(loader.busy(), false);
+});
+
+test("a 5xx response is retried once and then renders the data", async () => {
+  let calls = 0;
+  const events = [];
+  const loader = createPetWorkbenchLoader({
+    read: () => {
+      calls++;
+      if (calls === 1) {
+        const error = new Error("HTTP 503");
+        error.status = 503;
+        return Promise.reject(error);
+      }
+      return Promise.resolve({attempt: calls});
+    },
+    isCurrent: () => true,
+    onLoading: () => events.push("loading"),
+    onData: value => events.push(`data:${value.attempt}`),
+    onError: message => events.push(`error:${message}`),
+    timeoutMs: 1000,
+    retryDelayMs: 1,
+  });
+  await loader.load();
+  assert.equal(calls, 2, "5xx must be retried exactly once");
+  assert.deepEqual(events, ["loading", "data:2"]);
+  assert.equal(loader.busy(), false);
+});
+
+test("a network failure is retried once and then renders the data", async () => {
+  let calls = 0;
+  const events = [];
+  const loader = createPetWorkbenchLoader({
+    read: () => {
+      calls++;
+      if (calls === 1) return Promise.reject(new TypeError("Failed to fetch"));
+      return Promise.resolve({attempt: calls});
+    },
+    isCurrent: () => true,
+    onLoading: () => events.push("loading"),
+    onData: value => events.push(`data:${value.attempt}`),
+    onError: message => events.push(`error:${message}`),
+    timeoutMs: 1000,
+    retryDelayMs: 1,
+  });
+  await loader.load();
+  assert.equal(calls, 2, "a network failure must be retried exactly once");
+  assert.deepEqual(events, ["loading", "data:2"]);
+  assert.equal(loader.busy(), false);
+});
+
+test("a throwing renderer surfaces a retryable error instead of staying on loading", async () => {
+  let calls = 0;
+  let failRender = true;
+  const events = [];
+  const loader = createPetWorkbenchLoader({
+    read: () => {
+      calls++;
+      return Promise.resolve({ok: true});
+    },
+    isCurrent: () => true,
+    onLoading: () => events.push("loading"),
+    onData: () => {
+      if (failRender) throw new Error("render exploded");
+      events.push("data");
+    },
+    onError: message => events.push(`error:${message}`),
+    timeoutMs: 1000,
+  });
+  await loader.load();
+  assert.equal(calls, 1, "a rendering failure must not trigger another request");
+  assert.deepEqual(events, ["loading", "error:render exploded"]);
+  assert.equal(loader.busy(), false, "loading must clear after the render error");
+
+  failRender = false;
+  await loader.load();
+  assert.deepEqual(events, ["loading", "error:render exploded", "loading", "data"]);
+  assert.equal(loader.busy(), false);
+});
+
+test("loads requested while one is in flight share it instead of starting a second request", async () => {
+  let calls = 0;
+  let resolveRead = () => {};
+  const loader = createPetWorkbenchLoader({
+    read: () => {
+      calls++;
+      return new Promise(resolve => { resolveRead = resolve; });
+    },
     isCurrent: () => true,
     onLoading: () => {},
     onData: () => {},
     onError: () => {},
     timeoutMs: 1000,
   });
-  const pending = loader.load();
-  loader.dispose();
-  await pending;
-  assert.equal(aborted, true);
+  const first = loader.load();
+  const second = loader.load();
+  assert.equal(first, second);
+  assert.equal(calls, 1, "the in-flight request is reused");
+  resolveRead({ok: true});
+  await first;
   assert.equal(loader.busy(), false);
 });
 
@@ -247,6 +385,10 @@ test("workbench wiring uses the guarded loader and renders the inspection summar
   assert.match(main, /api\.petWorkbench\(\{approvalLimit, worklogLimit\}, signal\)/);
   assert.match(main, /isCurrent: \(\) => body\.isConnected && activePetWorkbenchBinding === binding/);
   assert.match(main, /renderPetInspectionSummary\(view\.inspection, t, formatDateTime\)/);
+  assert.match(main, /bindPetWorkbenchPage\(\)\.catch\(showPetWorkbenchBindFailure\)/);
+  assert.match(main, /function showPetWorkbenchBindFailure/);
+  assert.match(main, /renderPetWorkbenchLoadError\(loadError, t\)/);
+  assert.match(main, /workbenchBindFailed/);
   assert.doesNotMatch(main, /petWorkbenchBound/);
   assert.doesNotMatch(main, /withTimeout\(api\.petWorkbench/);
   assert.match(api, /petWorkbench\(options: \{[^}]*\}[^)]*signal\?: AbortSignal\)/);

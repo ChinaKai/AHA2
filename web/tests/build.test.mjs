@@ -1403,7 +1403,7 @@ test("built web contains responsive application", async () => {
   assert.match(script, /images\.get\(button\.dataset\.imagePreview \|\| ""\)\?\.shift\(\)/);
   assert.match(script, /const images = captureConversationImages\(list\)[\s\S]{0,260}list\.innerHTML = nextHTML[\s\S]{0,180}restoreConversationImages\(list, images\)/);
   assert.match(script, /if \(!preservedConversation && renderedConversation\) restoreConversationImages\(renderedConversation, previousConversationImages\)/);
-  assert.match(script, /bindCommon\(\);\s*if \(preservedConversation\) document\.querySelector\("#conversation-list"\)\?\.replaceWith\(preservedConversation\)/);
+  assert.match(script, /bindCommon\(\);[\s\S]{0,700}if \(preservedConversation\) document\.querySelector\("#conversation-list"\)\?\.replaceWith\(preservedConversation\)/);
   assert.match(script, /await restoreNavigationState\(savedNavigation\);[\s\S]{0,260}await ensureViewData\(state\.view\);[\s\S]{0,180}if \(state\.selectedTask\) requestConversationBottom\(\);[\s\S]{0,100}prefetchSecondaryData\(\)/);
   assert.match(css, /\.messages \{[^}]*overflow-anchor:\s*none/);
   assert.match(script, /startTaskFallback/);

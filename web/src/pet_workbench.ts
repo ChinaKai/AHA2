@@ -61,6 +61,18 @@ export function createPetWorkbenchLoader<T>(options: PetWorkbenchLoaderOptions<T
 
   const current = () => !disposed && options.isCurrent();
 
+  // A render callback is caller code: if it throws, the failure must still be
+  // visible instead of leaving the body on "loading" with an unhandled
+  // rejection. onError itself is also guarded so load() never rejects.
+  const reportError = (message: string): void => {
+    if (!current()) return;
+    try {
+      options.onError(message);
+    } catch {
+      // Nothing else can surface the error; keep loading state clearing in finally.
+    }
+  };
+
   const attempt = async (): Promise<{ok: true; value: T} | {ok: false; error: unknown; retryable: boolean}> => {
     const request = new AbortController();
     controller = request;
@@ -86,9 +98,16 @@ export function createPetWorkbenchLoader<T>(options: PetWorkbenchLoaderOptions<T
 
   const run = async (): Promise<void> => {
     loading = true;
-    if (current()) options.onLoading();
     let message = "";
     try {
+      if (current()) {
+        try {
+          options.onLoading();
+        } catch (error) {
+          reportError(errorText(error));
+          return;
+        }
+      }
       for (let index = 0; index <= maxRetries; index++) {
         if (!current()) return;
         if (index > 0) {
@@ -98,13 +117,19 @@ export function createPetWorkbenchLoader<T>(options: PetWorkbenchLoaderOptions<T
         const result = await attempt();
         if (!current()) return;
         if (result.ok) {
-          options.onData(result.value);
+          try {
+            options.onData(result.value);
+          } catch (error) {
+            // Rendering failed after the request succeeded; report it as the
+            // final error so the retry affordance is rendered.
+            reportError(errorText(error));
+          }
           return;
         }
         message = errorText(result.error);
         if (!result.retryable) break;
       }
-      options.onError(message);
+      reportError(message);
     } finally {
       loading = false;
     }
@@ -135,6 +160,14 @@ function escapeHTML(value: unknown): string {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
+}
+
+// renderPetWorkbenchLoadError is the single retryable failure state, shared by
+// the loader's onError and the outer binding fallback. Plain text only, so a
+// server/renderer error message cannot inject markup.
+export function renderPetWorkbenchLoadError(message: string, translate: Translate): string {
+  const text = textValue(message) || translate("petWorkbench.loadFailed");
+  return `<div class="field-help">${escapeHTML(text)} <button type="button" data-pet-workbench-retry>${escapeHTML(translate("common.retry"))}</button></div>`;
 }
 
 function textValue(value: unknown): string {
