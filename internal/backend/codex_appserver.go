@@ -54,7 +54,7 @@ func (exit *codexAppServerExitError) Error() string {
 	if exit.exitCode != 0 {
 		message += fmt.Sprintf(" (exit code %d)", exit.exitCode)
 	}
-	if detail := tailRunes(exit.stderr, 2000); detail != "" {
+	if detail := providerErrorText(tailRunes(exit.stderr, 2000)); detail != "" {
 		message += ": " + detail
 	}
 	return message
@@ -74,8 +74,27 @@ func tailRunes(value string, limit int) string {
 }
 
 type codexRPCError struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
+	Code    int             `json:"code"`
+	Message string          `json:"message"`
+	Data    json.RawMessage `json:"data"`
+}
+
+// text keeps the JSON-RPC code and data alongside the message. A bare message
+// such as "invalid request" leaves the caller unable to tell a transport
+// mismatch from a rejected turn parameter.
+func (rpcError *codexRPCError) text(method string) string {
+	message := strings.TrimSpace(rpcError.Message)
+	if message == "" {
+		message = "unknown JSON-RPC error"
+	}
+	detail := message
+	if rpcError.Code != 0 {
+		detail += fmt.Sprintf(" (JSON-RPC code %d)", rpcError.Code)
+	}
+	if data := compactJSONValue(rpcError.Data); data != "" {
+		detail += " data=" + data
+	}
+	return providerErrorText(method + ": " + detail)
 }
 
 type codexRPCMessage struct {
@@ -164,7 +183,7 @@ func (session *codexAppServerSession) requestWithTimeout(method string, params a
 			}
 			if message.ID != nil && *message.ID == id && message.Method == "" {
 				if message.Error != nil {
-					return nil, fmt.Errorf("%s: %s", method, message.Error.Message)
+					return nil, errors.New(message.Error.text(method))
 				}
 				return message.Result, nil
 			}
@@ -328,16 +347,66 @@ func (session *codexAppServerSession) handleResponse(message codexRPCMessage) er
 	return nil
 }
 
+// codexTurnError mirrors the app-server TurnError payload (codex 0.166.0
+// schema): the actionable text is in message, while codexErrorInfo,
+// additionalDetails and misalignment carry the provider classification and
+// retry/HTTP details. Every field is decoded so no part of the provider's
+// explanation is lost.
+type codexTurnError struct {
+	Message           string          `json:"message"`
+	CodexErrorInfo    json.RawMessage `json:"codexErrorInfo"`
+	AdditionalDetails string          `json:"additionalDetails"`
+	Misalignment      json.RawMessage `json:"misalignment"`
+}
+
+// codexErrorNotificationText renders a TurnError for the conversation. It
+// keeps the provider message first, then appends the machine-readable
+// classification and extra details; the caller falls back to the raw
+// notification params only when the known fields are empty.
+func codexTurnErrorText(turnError *codexTurnError, willRetry bool) string {
+	if turnError == nil {
+		return ""
+	}
+	message := strings.TrimSpace(turnError.Message)
+	parts := make([]string, 0, 2)
+	if message != "" {
+		parts = append(parts, message)
+	}
+	meta := make([]string, 0, 4)
+	if info := jsonValueText(turnError.CodexErrorInfo); info != "" && !strings.Contains(message, info) {
+		meta = append(meta, "codexErrorInfo="+info)
+	}
+	if details := strings.TrimSpace(turnError.AdditionalDetails); details != "" && !strings.Contains(message, details) {
+		meta = append(meta, "additionalDetails="+details)
+	}
+	if misalignment := jsonValueText(turnError.Misalignment); misalignment != "" && !strings.Contains(message, misalignment) {
+		meta = append(meta, "misalignment="+misalignment)
+	}
+	if willRetry {
+		meta = append(meta, "app-server will retry")
+	}
+	if len(meta) > 0 {
+		if len(parts) == 0 {
+			parts = append(parts, "codex app-server reported an error")
+		}
+		parts = append(parts, "("+strings.Join(meta, "; ")+")")
+	}
+	return providerErrorText(strings.Join(parts, " "))
+}
+
+// codexAppServerParams is the union of the notification payloads AHA consumes.
+// "error" carries a nested TurnError (plus willRetry) in current app-server
+// builds; older builds used a top-level message, which stays supported.
 type codexAppServerParams struct {
-	ThreadID string         `json:"threadId"`
-	TurnID   string         `json:"turnId"`
-	Item     map[string]any `json:"item"`
-	Turn     struct {
-		ID     string `json:"id"`
-		Status string `json:"status"`
-		Error  *struct {
-			Message string `json:"message"`
-		} `json:"error"`
+	ThreadID  string          `json:"threadId"`
+	TurnID    string          `json:"turnId"`
+	Item      map[string]any  `json:"item"`
+	Error     *codexTurnError `json:"error"`
+	WillRetry bool            `json:"willRetry"`
+	Turn      struct {
+		ID     string          `json:"id"`
+		Status string          `json:"status"`
+		Error  *codexTurnError `json:"error"`
 	} `json:"turn"`
 	TokenUsage struct {
 		Total map[string]any `json:"total"`
@@ -345,10 +414,44 @@ type codexAppServerParams struct {
 	Message string `json:"message"`
 }
 
+const codexAppServerGenericError = "codex app-server reported an error"
+
+// codexErrorNotificationText assembles the detailed text for one "error"
+// notification. The order is: nested TurnError (current protocol), legacy
+// top-level message, then the truncated raw params as a last diagnostic
+// resort. The fixed generic text is used only when the payload has no
+// information at all.
+func codexErrorNotificationText(params codexAppServerParams, rawParams json.RawMessage) string {
+	if text := codexTurnErrorText(params.Error, params.WillRetry); text != "" {
+		return text
+	}
+	if message := strings.TrimSpace(params.Message); message != "" {
+		if params.WillRetry {
+			message += " (app-server will retry)"
+		}
+		return providerErrorText(message)
+	}
+	if raw := compactJSONValue(rawParams); raw != "" && raw != "{}" && raw != "[]" {
+		return providerErrorText("codex app-server error params: " + raw)
+	}
+	return codexAppServerGenericError
+}
+
 func (session *codexAppServerSession) handleNotification(message codexRPCMessage) error {
 	var params codexAppServerParams
 	if len(message.Params) > 0 {
 		if err := json.Unmarshal(message.Params, &params); err != nil {
+			// An "error" notification is exactly the place where dropping an
+			// unparsable payload hides the provider's cause. Surface the raw
+			// params instead of silently returning.
+			if message.Method == "error" {
+				detail := codexAppServerGenericError
+				if raw := compactJSONValue(message.Params); raw != "" {
+					detail = providerErrorText("codex app-server error params: " + raw)
+				}
+				session.providerError = detail
+				session.emit(Event{Type: "agent_error", Data: map[string]any{"message": detail}})
+			}
 			return nil
 		}
 	}
@@ -374,22 +477,31 @@ func (session *codexAppServerSession) handleNotification(message codexRPCMessage
 		session.flushPending(true)
 		session.completed = true
 		if strings.EqualFold(params.Turn.Status, "failed") || strings.EqualFold(params.Turn.Status, "interrupted") {
-			message := "codex turn did not complete"
-			if params.Turn.Error != nil && strings.TrimSpace(params.Turn.Error.Message) != "" {
-				message = strings.TrimSpace(params.Turn.Error.Message)
-			} else if session.providerError != "" {
+			message := codexTurnErrorText(params.Turn.Error, false)
+			if message == "" {
 				message = session.providerError
+			}
+			if message == "" {
+				// The status and turn id are still diagnostic: an interrupted
+				// turn without an error object did complete its stream.
+				message = fmt.Sprintf("codex turn %s ended with status %s", params.Turn.ID, params.Turn.Status)
 			}
 			return errors.New(message)
 		}
 		return nil
 	case "error":
-		message := strings.TrimSpace(params.Message)
-		if message == "" {
-			message = "codex app-server reported an error"
-		}
+		message := codexErrorNotificationText(params, message.Params)
 		session.providerError = message
-		session.emit(Event{Type: "agent_error", Data: map[string]any{"message": message}})
+		data := map[string]any{"message": message}
+		if params.Error != nil {
+			if info := jsonValueText(params.Error.CodexErrorInfo); info != "" {
+				data["codex_error_info"] = info
+			}
+		}
+		if params.WillRetry {
+			data["will_retry"] = true
+		}
+		session.emit(Event{Type: "agent_error", Data: data})
 		return nil
 	default:
 		return nil

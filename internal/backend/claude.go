@@ -67,6 +67,7 @@ func (adapter Claude) Execute(ctx context.Context, request Request, emit func(Ev
 	}
 	startedAt := time.Now().UTC()
 	var reply, sessionID, providerError string
+	var terminalError bool
 	var stream claudeStream
 	var emitMu sync.Mutex
 	send := func(event Event) {
@@ -108,6 +109,12 @@ func (adapter Claude) Execute(ctx context.Context, request Request, emit func(Ev
 				send(Event{Type: "agent_message", Data: map[string]any{"text": reply, "intermediate": true}})
 			}
 			reply = parsedReply
+			// A live-inbox run can produce several results. A later success
+			// supersedes an earlier failed result; without this reset the first
+			// failure would fail a run that actually recovered (the same run
+			// keeps running while more input is queued).
+			terminalError = false
+			providerError = ""
 		}
 		if parsedSession != "" {
 			sessionID = parsedSession
@@ -121,6 +128,9 @@ func (adapter Claude) Execute(ctx context.Context, request Request, emit func(Ev
 				providerError = strings.TrimSpace(fmt.Sprint(event.Data["message"]))
 				if providerError == "<nil>" {
 					providerError = ""
+				}
+				if terminal, _ := event.Data["terminal"].(bool); terminal {
+					terminalError = true
 				}
 			}
 			if usage, ok := event.Data["usage"].(map[string]any); ok && len(usage) > 0 {
@@ -158,12 +168,12 @@ func (adapter Claude) Execute(ctx context.Context, request Request, emit func(Ev
 		transcriptError = workspace.ClaudeTranscriptLastErrorText(ctx, request.Runner, configDir, request.WorkDir, sessionID, since)
 	}
 	if result.ExitCode != 0 {
-		message := strings.TrimSpace(result.Stderr)
+		message := providerErrorText(result.Stderr)
 		if transcriptError != "" {
 			// The CLI can hide the provider's error in the transcript while
 			// exiting non-zero with an empty stderr. Prefer the transcript so
 			// every provider error is shown verbatim, not just the 400 case.
-			message = transcriptError
+			message = providerErrorText(transcriptError)
 		} else if message == "" {
 			message = providerError
 		}
@@ -176,11 +186,21 @@ func (adapter Claude) Execute(ctx context.Context, request Request, emit func(Ev
 		}
 		return Result{Reply: reply, ExitCode: result.ExitCode, ProviderSessionID: sessionID}, fmt.Errorf("%s", message)
 	}
+	// A result event with an error subtype is terminal even when commentary
+	// text arrived earlier. Returning that partial reply as success would hide
+	// the provider failure and drop the only diagnostic the CLI sent.
+	if terminalError && strings.TrimSpace(providerError) != "" {
+		message := clipError(providerError, 8000)
+		if claudeContextWindowExceeded(message) {
+			return Result{Reply: reply, ExitCode: result.ExitCode, ProviderSessionID: sessionID}, fmt.Errorf("%w: %s", ErrContextWindowExceeded, message)
+		}
+		return Result{Reply: reply, ExitCode: result.ExitCode, ProviderSessionID: sessionID}, fmt.Errorf("%s", message)
+	}
 	if providerError != "" && claudeContextWindowExceeded(providerError) {
 		return Result{Reply: reply, ExitCode: result.ExitCode, ProviderSessionID: sessionID}, fmt.Errorf("%w: %s", ErrContextWindowExceeded, clipError(providerError, 8000))
 	}
 	if strings.TrimSpace(reply) == "" && transcriptError != "" {
-		message := clipError(transcriptError, 8000)
+		message := providerErrorText(transcriptError)
 		if claudeContextWindowExceeded(message) {
 			return Result{Reply: reply, ExitCode: result.ExitCode, ProviderSessionID: sessionID}, fmt.Errorf("%w: %s", ErrContextWindowExceeded, message)
 		}
@@ -299,10 +319,18 @@ func parseClaudeLine(line string) ([]Event, string, string) {
 				return []Event{{Type: "agent_session", Data: map[string]any{"provider_session_id": sessionID}}}, "", sessionID
 			}
 		}
+		// Claude emits api_retry (and some builds api_error) when a request is
+		// retried automatically. It is transient progress, not a Turn failure:
+		// projecting it as agent_error would paint every retry as an error and
+		// poison the final providerError.
+		if subtype == "api_retry" || subtype == "api_error" {
+			return []Event{{Type: "agent_progress", Data: claudeAPIRetryData(payload)}}, "", ""
+		}
 	case "result":
 		sessionID, _ := payload["session_id"].(string)
 		subtype, _ := payload["subtype"].(string)
-		if subtype == "success" {
+		isError := boolValue(payload["is_error"]) || boolValue(payload["isError"])
+		if subtype == "success" && !isError {
 			if text, ok := payload["result"].(string); ok && text != "" {
 				data := map[string]any{"text": text, "final": true}
 				if usage, ok := payload["usage"].(map[string]any); ok {
@@ -310,22 +338,55 @@ func parseClaudeLine(line string) ([]Event, string, string) {
 				}
 				return []Event{{Type: "agent_message", Data: data}}, text, sessionID
 			}
-		} else if message, ok := payload["error"].(string); ok && message != "" {
-			return []Event{{Type: "agent_error", Data: map[string]any{"message": message}}}, "", sessionID
+			// A success result without text is not an error: Execute falls back
+			// to the transcript before reporting a missing agent message.
+			return nil, "", sessionID
 		}
+		// Claude 2.1.x puts result failures in errors[] (array of strings),
+		// while some builds/gateways use error with a string or object. Keep
+		// every form plus the subtype/status/stop reason; terminal marks a
+		// failed result that must not be reported as a successful Turn just
+		// because commentary arrived earlier.
+		data := map[string]any{"message": claudeResultErrorText(payload), "terminal": true}
+		if subtype != "" {
+			data["subtype"] = subtype
+		}
+		if status, ok := claudeErrorStatus(payload); ok {
+			data["status"] = status
+		}
+		return []Event{{Type: "agent_error", Data: data}}, "", sessionID
 	case "assistant":
 		// Claude Code reports provider failures (for example a context-window
 		// 400) as a synthetic assistant message instead of a result event. The
 		// text is the only place that carries the provider's explanation, so
 		// project it as an error and let Execute surface it verbatim.
-		if apiError, _ := payload["isApiErrorMessage"].(bool); apiError {
+		if boolValue(payload["isApiErrorMessage"]) || boolValue(payload["is_api_error_message"]) {
 			text := claudeAssistantText(payload)
+			// errorDetails carries the raw provider text (for example the exact
+			// prompt-too-long token counts) that the user-facing synthetic
+			// message may have replaced with a short summary.
+			if details := claudeString(payload, "errorDetails", "error_details"); details != "" && !strings.Contains(text, details) {
+				if text == "" {
+					text = details
+				} else {
+					text += " — " + details
+				}
+			}
+			if meta := claudeErrorMeta(payload); len(meta) > 0 {
+				if text == "" {
+					text = "Claude API error"
+				}
+				text += " [" + strings.Join(meta, "; ") + "]"
+			}
 			if text == "" {
 				text = "Claude API error"
 			}
-			data := map[string]any{"message": text}
-			if status, ok := payload["apiErrorStatus"]; ok {
+			data := map[string]any{"message": providerErrorText(text)}
+			if status, ok := claudeErrorStatus(payload); ok {
 				data["status"] = status
+			}
+			if code := claudeString(payload, "apiError", "api_error"); code != "" {
+				data["code"] = code
 			}
 			return []Event{{Type: "agent_error", Data: data}}, "", ""
 		}
@@ -376,7 +437,194 @@ func parseClaudeLine(line string) ([]Event, string, string) {
 			}}}, "", ""
 		}
 	}
+	// Any other stream event that marks itself as an error must not disappear:
+	// an unknown type, a system event or an explicit type:"error" line can
+	// still carry the provider's only explanation.
+	if boolValue(payload["is_error"]) || boolValue(payload["isError"]) || errorValueText(payload["error"]) != "" {
+		return []Event{{Type: "agent_error", Data: map[string]any{
+			"message": claudeEventErrorText(payload, rawType),
+		}}}, "", ""
+	}
 	return nil, "", ""
+}
+
+// claudeResultErrorText renders a failed result event. It accepts the forms
+// observed across Claude Code builds and gateways: errors[] of strings,
+// error as a string/object/array, and a result string that holds the error
+// text. Subtype, HTTP status, API error code and stop reasons are appended as
+// diagnostics instead of being dropped.
+func claudeResultErrorText(payload map[string]any) string {
+	parts := make([]string, 0, 3)
+	for _, key := range []string{"errors", "error"} {
+		if detail := errorValueText(payload[key]); detail != "" && !containsErrorPart(parts, detail) {
+			parts = append(parts, detail)
+		}
+	}
+	if result, ok := payload["result"].(string); ok {
+		if result = strings.TrimSpace(result); result != "" && !containsErrorPart(parts, result) {
+			parts = append(parts, result)
+		}
+	}
+	if len(parts) == 0 {
+		parts = append(parts, "claude result reported an error")
+	}
+	text := strings.Join(parts, "\n")
+	if meta := claudeErrorMeta(payload); len(meta) > 0 {
+		text += " [" + strings.Join(meta, "; ") + "]"
+	}
+	return providerErrorText(text)
+}
+
+// claudeEventErrorText renders an arbitrary stream event that carries an
+// error. It deliberately ignores non-string message objects (assistant
+// content), which are not error text.
+func claudeEventErrorText(payload map[string]any, rawType string) string {
+	parts := make([]string, 0, 3)
+	if detail := errorValueText(payload["errors"]); detail != "" {
+		parts = append(parts, detail)
+	}
+	if detail := errorValueText(payload["error"]); detail != "" && !containsErrorPart(parts, detail) {
+		parts = append(parts, detail)
+	}
+	if message, ok := payload["message"].(string); ok {
+		if message = strings.TrimSpace(message); message != "" && !containsErrorPart(parts, message) {
+			parts = append(parts, message)
+		}
+	}
+	if len(parts) == 0 {
+		kind := strings.TrimSpace(rawType)
+		if kind == "" {
+			kind = "stream"
+		}
+		parts = append(parts, fmt.Sprintf("claude %s event reported an error", kind))
+	}
+	text := strings.Join(parts, "\n")
+	if meta := claudeErrorMeta(payload); len(meta) > 0 {
+		text += " [" + strings.Join(meta, "; ") + "]"
+	}
+	return providerErrorText(text)
+}
+
+// claudeErrorMeta lists the diagnostic fields that accompany Claude error
+// payloads. Both camelCase (assistant events) and snake_case (result events)
+// spellings are accepted because Claude Code mixes them across event types.
+func claudeErrorMeta(payload map[string]any) []string {
+	meta := make([]string, 0, 5)
+	add := func(label string, keys ...string) {
+		for _, key := range keys {
+			text := objectValueText(payload[key])
+			if text == "" {
+				continue
+			}
+			meta = append(meta, label+": "+text)
+			return
+		}
+	}
+	add("subtype", "subtype")
+	add("status", "apiErrorStatus", "api_error_status")
+	add("code", "apiError", "api_error", "code")
+	add("stop_reason", "stop_reason", "stopReason")
+	add("terminal_reason", "terminal_reason", "terminalReason")
+	return meta
+}
+
+// claudeErrorStatus returns the HTTP/API status field for event Data.
+func claudeErrorStatus(payload map[string]any) (any, bool) {
+	return claudeFirstValue(payload, "apiErrorStatus", "api_error_status")
+}
+
+// claudeAPIRetryData projects a transient retry notification as progress.
+// The real event (Claude 2.1.220) is
+// {"type":"system","subtype":"api_retry","attempt":N,"max_retries":N,
+// "retry_delay_ms":N,"error_status":529|null,"error":"overloaded"}.
+// It is not a Turn failure; each retry must not create an error row or set
+// the final providerError.
+func claudeAPIRetryData(payload map[string]any) map[string]any {
+	errorText := providerErrorText(errorValueText(payload["error"]))
+	status, hasStatus := claudeFirstValue(payload, "error_status", "errorStatus")
+	attempt, hasAttempt := claudeFirstValue(payload, "attempt")
+	maxRetries, hasMaxRetries := claudeFirstValue(payload, "max_retries", "maxRetries")
+	delay, hasDelay := claudeFirstValue(payload, "retry_delay_ms", "retryDelayMs")
+
+	data := map[string]any{"phase": "api_retry"}
+	if errorText != "" {
+		data["error"] = errorText
+	}
+	if hasStatus {
+		data["status"] = status
+	}
+	if hasAttempt {
+		data["attempt"] = attempt
+	}
+	if hasMaxRetries {
+		data["max_retries"] = maxRetries
+	}
+	if hasDelay {
+		data["retry_delay_ms"] = delay
+	}
+
+	detail := make([]string, 0, 2)
+	if errorText != "" {
+		detail = append(detail, errorText)
+	}
+	if hasStatus {
+		detail = append(detail, fmt.Sprintf("HTTP %v", status))
+	}
+	message := "Claude API 请求失败，正在自动重试"
+	if len(detail) > 0 {
+		message = "Claude API 请求失败（" + strings.Join(detail, ", ") + "），正在自动重试"
+	}
+	if hasAttempt && hasMaxRetries {
+		message += fmt.Sprintf("（第 %v/%v 次）", attempt, maxRetries)
+	} else if hasAttempt {
+		message += fmt.Sprintf("（第 %v 次）", attempt)
+	}
+	if hasDelay {
+		message += fmt.Sprintf("，等待 %vms", delay)
+	}
+	data["message"] = message
+	return data
+}
+
+func claudeFirstValue(payload map[string]any, keys ...string) (any, bool) {
+	for _, key := range keys {
+		if value, ok := payload[key]; ok && value != nil {
+			return value, true
+		}
+	}
+	return nil, false
+}
+
+// claudeString returns the first non-empty string-valued field.
+func claudeString(payload map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if text, ok := payload[key].(string); ok && strings.TrimSpace(text) != "" {
+			return strings.TrimSpace(text)
+		}
+	}
+	return ""
+}
+
+func boolValue(value any) bool {
+	result, _ := value.(bool)
+	return result
+}
+
+// objectValueText renders a diagnostic field, dropping empty and null values.
+func objectValueText(value any) string {
+	if value == nil {
+		return ""
+	}
+	return errorValueText(value)
+}
+
+func containsErrorPart(parts []string, detail string) bool {
+	for _, part := range parts {
+		if part == detail {
+			return true
+		}
+	}
+	return false
 }
 
 // claudeAssistantText joins the text blocks of one assistant message. Claude
