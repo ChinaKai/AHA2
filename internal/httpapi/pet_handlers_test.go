@@ -12,6 +12,7 @@ import (
 
 	"github.com/ChinaKai/AHA2/internal/app"
 	"github.com/ChinaKai/AHA2/internal/auth"
+	"github.com/ChinaKai/AHA2/internal/domain"
 	"github.com/ChinaKai/AHA2/internal/secrets"
 	"github.com/ChinaKai/AHA2/internal/store"
 )
@@ -175,18 +176,31 @@ func TestOwnerPetSettingsAPI(t *testing.T) {
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("save pet document=%d", response.StatusCode)
 	}
+	response.Body.Close()
+	response = requestJSON(t, client, http.MethodPut, server.URL+"/api/v1/pet/workbench/worklog/2026-11-09.md", map[string]any{"content": "preserved worklog"}, csrf)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("save worklog=%d", response.StatusCode)
+	}
+	response.Body.Close()
 	response = requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/pet/workbench", nil, "")
 	var workbench struct {
 		Core []struct {
 			Name    string `json:"name"`
 			Content string `json:"content"`
 		} `json:"core"`
+		Worklog []struct {
+			Date    string `json:"date"`
+			Content string `json:"content"`
+		} `json:"worklog"`
 	}
 	decodeResponse(t, response, &workbench)
 	if response.StatusCode != http.StatusOK || len(workbench.Core) == 0 || !strings.Contains(workbench.Core[0].Content, "API 宠物") {
 		t.Fatalf("workbench=%d %#v", response.StatusCode, workbench)
 	}
-	response = requestJSON(t, client, http.MethodPut, server.URL+"/api/v1/pet/workbench/diary/bad%20name.md", map[string]any{"content": "x"}, csrf)
+	if len(workbench.Worklog) != 1 || workbench.Worklog[0].Date != "2026-11-09" || workbench.Worklog[0].Content != "preserved worklog" {
+		t.Fatalf("worklog not preserved: %#v", workbench.Worklog)
+	}
+	response = requestJSON(t, client, http.MethodPut, server.URL+"/api/v1/pet/workbench/worklog/bad%20name.md", map[string]any{"content": "x"}, csrf)
 	if response.StatusCode != http.StatusBadRequest {
 		t.Fatalf("invalid pet document path=%d", response.StatusCode)
 	}
@@ -290,6 +304,91 @@ func TestPetResetRequiresTypedConfirmation(t *testing.T) {
 	decodeResponse(t, response, &view)
 	if response.StatusCode != http.StatusOK || view.Assistant.PetEnabled || view.Assistant.PetTaskID != "" {
 		t.Fatalf("assistant after reset=%d %#v", response.StatusCode, view)
+	}
+	response.Body.Close()
+}
+
+func TestPetPendingApprovalCountAndRetiredRoutes(t *testing.T) {
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	secretStore, err := secrets.Open(filepath.Join(t.TempDir(), "secrets.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	appService := app.NewService(database, secretStore, app.StubExecutor{})
+	defer appService.Shutdown(ctx)
+	server := httptest.NewServer(New(Config{Store: database, Auth: auth.NewService(database, "setup-test", time.Hour), App: appService}).Handler())
+	defer server.Close()
+	endpoint := server.URL + "/api/v1/pet/approvals/pending-count"
+	response := requestJSON(t, &http.Client{}, http.MethodGet, endpoint, nil, "")
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("anonymous count=%d", response.StatusCode)
+	}
+	response.Body.Close()
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	csrf := registerOwner(t, client, server.URL)
+	assertCount := func(want int) {
+		t.Helper()
+		response := requestJSON(t, client, http.MethodGet, endpoint, nil, "")
+		var payload struct {
+			OK      bool `json:"ok"`
+			Pending int  `json:"pending"`
+		}
+		decodeResponse(t, response, &payload)
+		if response.StatusCode != http.StatusOK || !payload.OK || payload.Pending != want {
+			t.Fatalf("count=%d %#v, want %d", response.StatusCode, payload, want)
+		}
+	}
+	assertCount(0)
+	for _, status := range []string{"pending", "approved", "rejected", "cancelled"} {
+		if err := database.CreatePetApproval(ctx, domain.PetApproval{ID: status, Kind: "owner_decision", Title: status, Status: status, CreatedAt: time.Now()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	assertCount(1)
+	for _, decision := range []string{"approve", "reject", "cancel"} {
+		approval, err := appService.CreatePetApproval(ctx, app.PetApprovalInput{Kind: "owner_decision", Title: decision, Summary: decision, Risk: "low"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertCount(2)
+		response = requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/pet/approvals/"+approval.ID+"/resolve", map[string]any{"decision": decision, "decision_reason": "test reason"}, csrf)
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("resolve %s=%d", decision, response.StatusCode)
+		}
+		response.Body.Close()
+		assertCount(1)
+	}
+	response = requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/pet/workbench", nil, "")
+	var workbench map[string]any
+	decodeResponse(t, response, &workbench)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("workbench=%d %#v", response.StatusCode, workbench)
+	}
+	for key := range workbench {
+		if strings.Contains(strings.ToLower(key), "diary") {
+			t.Fatalf("retired field %q remains", key)
+		}
+	}
+	if _, ok := workbench["core"]; !ok {
+		t.Fatal("missing core")
+	}
+	if _, ok := workbench["worklog"]; !ok {
+		t.Fatal("missing worklog")
+	}
+	response = requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/pet/diary", nil, "")
+	if response.StatusCode != http.StatusNotFound {
+		t.Fatalf("retired read route=%d", response.StatusCode)
+	}
+	response.Body.Close()
+	response = requestJSON(t, client, http.MethodPut, server.URL+"/api/v1/pet/workbench/diary/2026-11-09.md", map[string]any{"content": "retired"}, csrf)
+	if response.StatusCode != http.StatusNotFound {
+		t.Fatalf("retired write route=%d", response.StatusCode)
 	}
 	response.Body.Close()
 }

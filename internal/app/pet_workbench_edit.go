@@ -11,7 +11,7 @@ import (
 
 var petWorkbenchFileName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,79}\.md$`)
 
-// PetSaveWorkbenchDocument lets the owner edit the pet's core documents, diary,
+// PetSaveWorkbenchDocument lets the owner edit the pet's core documents
 // or worklog from the Web workbench. The pet itself writes these files through
 // its Task; this path is for owner corrections.
 func (s *Service) PetSaveWorkbenchDocument(ctx context.Context, section, name, content string) error {
@@ -31,7 +31,7 @@ func (s *Service) PetSaveWorkbenchDocument(ctx context.Context, section, name, c
 			return fmt.Errorf("核心文档只能编辑 identity.md、principles.md、loops.md 或 agenda.md")
 		}
 		directory = filepath.Join(root, "core")
-	case "diary", "worklog":
+	case "worklog":
 		if !petWorkbenchFileName.MatchString(name) || strings.Contains(name, "..") {
 			return fmt.Errorf("文件名无效")
 		}

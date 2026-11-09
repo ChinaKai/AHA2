@@ -22,10 +22,8 @@ const (
 )
 
 type PetWorkbenchView struct {
-	Diary         []PetDiaryEntry        `json:"diary"`
-	DiaryTotal    int                    `json:"diary_total"`
 	Core          []PetWorkspaceDocument `json:"core"`
-	Worklog       []PetDiaryEntry        `json:"worklog"`
+	Worklog       []PetMarkdownEntry     `json:"worklog"`
 	WorklogTotal  int                    `json:"worklog_total"`
 	Approvals     []domain.PetApproval   `json:"approvals"`
 	ApprovalTotal int                    `json:"approval_total"`
@@ -39,21 +37,16 @@ type PetWorkbenchView struct {
 
 type PetWorkbenchOptions struct {
 	ApprovalLimit int
-	DiaryLimit    int
 	WorklogLimit  int
 }
 
 // PetWorkbench is the data behind the pet's workbench page. It is owner-only
-// and read-only; the pet writes diary/core/worklog files through its Task.
+// and read-only; the pet writes core/worklog files through its Task.
 func (s *Service) PetWorkbench(ctx context.Context) (PetWorkbenchView, error) {
 	return s.PetWorkbenchWithOptions(ctx, PetWorkbenchOptions{})
 }
 
 func (s *Service) PetWorkbenchWithOptions(ctx context.Context, options PetWorkbenchOptions) (PetWorkbenchView, error) {
-	diary, diaryTotal, err := s.PetDiaryPage(ctx, petWorkbenchLimit(options.DiaryLimit, 30))
-	if err != nil {
-		return PetWorkbenchView{}, err
-	}
 	core, err := s.PetCoreDocuments(ctx)
 	if err != nil {
 		return PetWorkbenchView{}, err
@@ -72,7 +65,7 @@ func (s *Service) PetWorkbenchWithOptions(ctx context.Context, options PetWorkbe
 	}
 	channels, channelNote, channelTotal := s.petChannelSnapshot(ctx)
 	view := PetWorkbenchView{
-		Diary: diary, DiaryTotal: diaryTotal, Core: core, Worklog: worklog, WorklogTotal: worklogTotal,
+		Core: core, Worklog: worklog, WorklogTotal: worklogTotal,
 		Approvals: approvals, ApprovalTotal: approvalTotal, Watches: watches,
 		Channels: channels, ChannelTotal: channelTotal, ChannelNote: channelNote,
 		UpdatedAt: s.now().UTC(),
@@ -595,4 +588,8 @@ func (s *Service) PetTaskDetail(ctx context.Context, taskID string) (PetTaskDeta
 		detail.LastResult = truncateAssistantText(last.Result, 2000)
 	}
 	return detail, nil
+}
+
+func (s *Service) PetPendingApprovalCount(ctx context.Context) (int, error) {
+	return s.store.CountPendingPetApprovals(ctx)
 }

@@ -3002,8 +3002,8 @@ test("sidebar pages are not duplicated as advanced settings entries", async () =
   const cards = [...main.matchAll(/<article class="panel advanced-tool-card">[^\n]*?data-view="([^"]+)"/g)].map(match => match[1]);
   assert.deepEqual(cards.sort(), ["data", "mcp", "other", "prompts", "proxy", "sync"]);
   assert.match(main, /resources: \(\) => shell\(renderResourcesPage\(\{/);
-  assert.match(main, /"pet-diary": \(\) => shell\(petDiaryView\(\)\)/);
-  assert.doesNotMatch(main, /(?:hardware|"pet-diary"): \(\) => advancedSubview/);
+  assert.match(main, /"pet-workbench": \(\) => shell\(petWorkbenchView\(\)\)/);
+  assert.doesNotMatch(main, /(?:hardware|"pet-workbench"): \(\) => advancedSubview/);
 });
 
 test("sidebar and mobile navigation expose pet workbench and resources", async () => {
@@ -3011,7 +3011,7 @@ test("sidebar and mobile navigation expose pet workbench and resources", async (
   const main = await readFile(resolve(root, "src", "main.ts"), "utf8");
   const i18n = await readFile(resolve(root, "src", "i18n.ts"), "utf8");
   assert.match(main, /\["resources", "hardware", "nav\.resources"\]/);
-  assert.match(main, /\["pet-diary", "bot", "petWorkbench\.title"\]/);
+  assert.match(main, /\["pet-workbench", "bot", "petWorkbench\.title"\]/);
   assert.match(main, /const mobileNav = \[\.\.\.nav, \["advanced", "settings", "nav\.advanced"\] as const\]/);
   assert.match(i18n, /"petWorkbench\.title": "宠物工作台"/);
   assert.match(i18n, /"petWorkbench\.title": "Pet workbench"/);

@@ -21,9 +21,9 @@
 - 有想法用 `pet_submit_idea`；批准只代表可以去做，不会自动授权或执行。
 
 工作区：
-- 核心文档 `core/identity.md`、`core/principles.md`、`core/loops.md`、`core/agenda.md` 用 `pet_update_core` 写入；`loops.md` 只保留未闭环事项，`agenda.md` 只保留可自主推进项，完成后删除并留痕 worklog；日记写 `diary/YYYY-MM-DD.md`，巡检发现写 `worklog/YYYY-MM-DD.md`，分别用 `pet_write_diary`、`pet_write_worklog`。
-- 审批/想法只在审批中心创建一次；agenda/loops 只写引用和状态，worklog 只写证据，diary 只写叙事。
-- 宠物工作区可写：`pet-lab/` 可直接读写运行；核心文档和 diary/worklog 仍用上述工具；其他项目只读诊断。
+- 核心文档 `core/identity.md`、`core/principles.md`、`core/loops.md`、`core/agenda.md` 用 `pet_update_core` 写入；`loops.md` 只保留未闭环事项，`agenda.md` 只保留可自主推进项，完成后删除并留痕 worklog；巡检发现写 `worklog/YYYY-MM-DD.md`，用 `pet_write_worklog`。
+- 审批/想法只在审批中心创建一次；agenda/loops 只写引用和状态，worklog 只写证据。
+- 宠物工作区可写：`pet-lab/` 可直接读写运行；核心文档和 worklog 仍用上述工具；其他项目只读诊断。
 - 需要打开 Task 时用 `pet_open_task`。
 
 本段高于下面的 Task Prompt；后者只提供运行环境、上下文和消息。

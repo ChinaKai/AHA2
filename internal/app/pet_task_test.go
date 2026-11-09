@@ -665,8 +665,8 @@ func TestOwnerAssistantSeedsPetCoreFilesWithoutOverwriting(t *testing.T) {
 			t.Fatalf("core file %s is not a markdown template: %q", path, string(data))
 		}
 	}
-	if _, err := os.Stat(filepath.Join(root, "diary")); err != nil {
-		t.Fatalf("diary directory: %v", err)
+	if _, err := os.Stat(filepath.Join(root, "diary")); !os.IsNotExist(err) {
+		t.Fatalf("retired directory was recreated: %v", err)
 	}
 
 	custom := "# 身份\n\n我叫小石头，是一只慢慢悠悠的乌龟。\n"
@@ -704,7 +704,7 @@ func TestPetTaskPromptUsesCorePathsInsteadOfPersona(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"core/identity.md", "core/principles.md", "core/loops.md", "core/agenda.md", "diary/YYYY-MM-DD.md"} {
+	for _, want := range []string{"core/identity.md", "core/principles.md", "core/loops.md", "core/agenda.md", "worklog/YYYY-MM-DD.md"} {
 		if !strings.Contains(rendered, want) {
 			t.Fatalf("pet prompt does not point at %s:\n%s", want, rendered)
 		}

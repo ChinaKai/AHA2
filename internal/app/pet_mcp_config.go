@@ -9,7 +9,6 @@ func petMCPAllowedTools(task domain.Task) []string {
 	return []string{
 		"mcp__aha2-pet__pet_say",
 		"mcp__aha2-pet__pet_update_core",
-		"mcp__aha2-pet__pet_write_diary",
 		"mcp__aha2-pet__pet_write_worklog",
 		"mcp__aha2-pet__pet_play",
 		"mcp__aha2-pet__pet_move_to",

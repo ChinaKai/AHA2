@@ -10,15 +10,6 @@ import (
 	"github.com/ChinaKai/AHA2/internal/app"
 )
 
-func (s *Server) listPetDiary(writer http.ResponseWriter, request *http.Request) {
-	items, err := s.app.PetDiary(request.Context())
-	if err != nil {
-		writeError(writer, http.StatusInternalServerError, "pet_diary_failed")
-		return
-	}
-	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "entries": items})
-}
-
 func (s *Server) petWorkbench(writer http.ResponseWriter, request *http.Request) {
 	// A workbench read can wait behind a busy database. Bound it so the page
 	// gets a retryable error instead of an indefinite "reading" state.
@@ -27,7 +18,6 @@ func (s *Server) petWorkbench(writer http.ResponseWriter, request *http.Request)
 	query := request.URL.Query()
 	view, err := s.app.PetWorkbenchWithOptions(ctx, app.PetWorkbenchOptions{
 		ApprovalLimit: petWorkbenchQueryLimit(query.Get("approval_limit"), 50),
-		DiaryLimit:    petWorkbenchQueryLimit(query.Get("diary_limit"), 30),
 		WorklogLimit:  petWorkbenchQueryLimit(query.Get("worklog_limit"), 30),
 	})
 	if err != nil {
@@ -35,7 +25,7 @@ func (s *Server) petWorkbench(writer http.ResponseWriter, request *http.Request)
 		return
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{
-		"ok": true, "diary": view.Diary, "diary_total": view.DiaryTotal,
+		"ok":   true,
 		"core": view.Core, "worklog": view.Worklog, "worklog_total": view.WorklogTotal,
 		"approvals": view.Approvals, "approval_total": view.ApprovalTotal,
 		"watches": view.Watches, "task": view.Task, "updated_at": view.UpdatedAt,
@@ -96,22 +86,23 @@ func (s *Server) updatePetWatch(writer http.ResponseWriter, request *http.Reques
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "watch": watch})
 }
 
-func (s *Server) savePetWorkbenchDocument(writer http.ResponseWriter, request *http.Request) {
-	var input struct {
-		Content string `json:"content"`
+func (s *Server) savePetWorkbenchDocument(section string) http.HandlerFunc {
+	return func(writer http.ResponseWriter, request *http.Request) {
+		var input struct {
+			Content string `json:"content"`
+		}
+		if err := decodeJSON(request, &input); err != nil {
+			writeError(writer, http.StatusBadRequest, "invalid_json")
+			return
+		}
+		name := request.PathValue("name")
+		if err := s.app.PetSaveWorkbenchDocument(request.Context(), section, name, input.Content); err != nil {
+			writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "save_pet_document_failed", "message": err.Error()})
+			return
+		}
+		s.audit(request, "pet.workbench.document.save", "pet_workspace", section+"/"+name, nil)
+		writeJSON(writer, http.StatusOK, map[string]any{"ok": true})
 	}
-	if err := decodeJSON(request, &input); err != nil {
-		writeError(writer, http.StatusBadRequest, "invalid_json")
-		return
-	}
-	section := request.PathValue("section")
-	name := request.PathValue("name")
-	if err := s.app.PetSaveWorkbenchDocument(request.Context(), section, name, input.Content); err != nil {
-		writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "save_pet_document_failed", "message": err.Error()})
-		return
-	}
-	s.audit(request, "pet.workbench.document.save", "pet_workspace", section+"/"+name, nil)
-	writeJSON(writer, http.StatusOK, map[string]any{"ok": true})
 }
 
 func (s *Server) resolvePetApproval(writer http.ResponseWriter, request *http.Request) {
@@ -139,4 +130,15 @@ func (s *Server) resolvePetApproval(writer http.ResponseWriter, request *http.Re
 	}
 	s.audit(request, "pet.approval.resolve", "pet_approval", item.ID, map[string]any{"status": item.Status})
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "approval": item})
+}
+
+func (s *Server) petPendingApprovalCount(writer http.ResponseWriter, request *http.Request) {
+	ctx, cancel := context.WithTimeout(request.Context(), 5*time.Second)
+	defer cancel()
+	pending, err := s.app.PetPendingApprovalCount(ctx)
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, "pet_pending_approval_count_failed")
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "pending": pending})
 }

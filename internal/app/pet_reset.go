@@ -154,6 +154,7 @@ func (s *Service) removePetWorkspaceState(roots []string) []string {
 			}
 			continue
 		}
+		// Retain the retired directory in explicit owner reset cleanup for old installations.
 		for _, name := range []string{"core", "diary", "worklog", "pet-lab"} {
 			if err := os.RemoveAll(filepath.Join(root, name)); err != nil {
 				warnings = append(warnings, fmt.Sprintf("清理 %s 失败：%v", filepath.Join(root, name), err))

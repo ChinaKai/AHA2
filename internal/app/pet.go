@@ -398,9 +398,9 @@ func petAutonomousMessage(english bool, idleMinutes int, page string, layout Pet
 // minutes.
 func petWakeActionContract(english bool) string {
 	if english {
-		return "\n\nThis is a work wake-up, not a status report. Call aha_pet_work_state, read inspection, open_tasks, core/agenda.md and pending approvals. Every wake must leave one verifiable result:\n0) close the oldest pet-created open Task before new work: verify and complete/cancel it, or file one kind=owner_decision approval (payload task_id) for a real blocker; waiting/blocked needs a decision, failed gets one retry then escalation; never leave it silent;\n1) handle an event or pending item;\n2) if the owner must decide, create a kind=owner_decision approval with pet_request_approval and write a waiting item to core/agenda.md or core/loops.md; never only state it in the final answer, and create each decision once;\n3) if nothing can be advanced, pick one low-risk, verifiable AHA experience improvement from recent worklog/loops and create+start a normal Task, or add it to the agenda and start it; do not escape with NOOP;\n4) reply NOOP only after completing an action this turn and when nothing else remains;\n5) final replies: add one compact inspection line from inspection (scope, result, changes, unclosed).\nDo not repeat the open-loop list or only summarize. Approvals/ideas are created once in the approval center; agenda/loops cite them, worklog keeps execution evidence, diary stays personal. Do not copy the same body across layers."
+		return "\n\nThis is a work wake-up, not a status report. Call aha_pet_work_state, read inspection, open_tasks, core/agenda.md and pending approvals. Every wake must leave one verifiable result:\n0) close the oldest pet-created open Task before new work: verify and complete/cancel it, or file one kind=owner_decision approval (payload task_id) for a real blocker; waiting/blocked needs a decision, failed gets one retry then escalation; never leave it silent;\n1) handle an event or pending item;\n2) if the owner must decide, create a kind=owner_decision approval with pet_request_approval and write a waiting item to core/agenda.md or core/loops.md; never only state it in the final answer, and create each decision once;\n3) if nothing can be advanced, pick one low-risk, verifiable AHA experience improvement from recent worklog/loops and create+start a normal Task, or add it to the agenda and start it; do not escape with NOOP;\n4) reply NOOP only after completing an action this turn and when nothing else remains;\n5) final replies: add one compact inspection line from inspection (scope, result, changes, unclosed).\nDo not repeat the open-loop list or only summarize. Approvals/ideas are created once in the approval center; agenda/loops cite them, worklog keeps execution evidence. Do not copy the same body across layers."
 	}
-	return "\n\n这是工作唤醒，不是状态汇报。先调用 aha_pet_work_state，读取 inspection、open_tasks、core/agenda.md 和待审批项。每次唤醒必须留下一个可验证结果：\n0) 先关闭最早的未闭环宠物任务：验证后完成/取消，或为真实阻塞提交一次 kind=owner_decision 审批（payload 带 task_id）；waiting/blocked 需要决定，failed 先重试一次再升级；不能静默停留；\n1) 有事件或待办：处理它；\n2) 需要主人决定：用 pet_request_approval 创建 kind=owner_decision 的待审批，并在 core/agenda.md 或 core/loops.md 写 waiting 项；不能只写在最终回复里，同一决策只创建一次；\n3) 没有可推进项：从最近 worklog/loops 选一个低风险、可验证的 AHA 使用体验改进，创建并启动普通 Task，或先写入议程再启动；不要只回 NOOP；\n4) 只有本轮已经完成一个动作且确实没有剩余事项时，才回复 NOOP；\n5) 最终回复附一行巡检摘要（范围、结果、变化、未闭环），数据来自 inspection。\n不要重复列出未闭环清单，不要只汇报。审批/想法只在审批中心创建一次；agenda/loops 只写引用和状态，worklog 只写执行证据，diary 只写个人叙事，不要跨层复制正文。"
+	return "\n\n这是工作唤醒，不是状态汇报。先调用 aha_pet_work_state，读取 inspection、open_tasks、core/agenda.md 和待审批项。每次唤醒必须留下一个可验证结果：\n0) 先关闭最早的未闭环宠物任务：验证后完成/取消，或为真实阻塞提交一次 kind=owner_decision 审批（payload 带 task_id）；waiting/blocked 需要决定，failed 先重试一次再升级；不能静默停留；\n1) 有事件或待办：处理它；\n2) 需要主人决定：用 pet_request_approval 创建 kind=owner_decision 的待审批，并在 core/agenda.md 或 core/loops.md 写 waiting 项；不能只写在最终回复里，同一决策只创建一次；\n3) 没有可推进项：从最近 worklog/loops 选一个低风险、可验证的 AHA 使用体验改进，创建并启动普通 Task，或先写入议程再启动；不要只回 NOOP；\n4) 只有本轮已经完成一个动作且确实没有剩余事项时，才回复 NOOP；\n5) 最终回复附一行巡检摘要（范围、结果、变化、未闭环），数据来自 inspection。\n不要重复列出未闭环清单，不要只汇报。审批/想法只在审批中心创建一次；agenda/loops 只写引用和状态，worklog 只写执行证据，不要跨层复制正文。"
 }
 
 func (s *Service) petUsesEnglish(ctx context.Context) bool {
@@ -754,7 +754,7 @@ func petToolAllowed(assistant domain.OwnerAssistant, name string) bool {
 	case "aha_overview", "aha_pet_work_state", "aha_pet_permissions", "aha_request_permission_change", "aha_capabilities", "pet_request_approval", "pet_list_approvals", "pet_submit_idea":
 		return true
 	case "pet_say", "pet_play", "pet_move_to", "pet_walk_path", "pet_mood", "pet_open_task", "pet_thinking", "pet_sleep", "pet_wake",
-		"pet_update_core", "pet_write_diary", "pet_write_worklog":
+		"pet_update_core", "pet_write_worklog":
 		return true
 	case "aha_task_detail", "aha_task_conversation", "aha_task_turns", "aha_model_catalog", "aha_list_task_attachments", "aha_hardware_resources", "aha_task_hardware", "aha_task_channel_route", "aha_list_remote_tasks", "pet_watch_task", "pet_unwatch_task":
 		return assistant.PetAllowViewTasks
@@ -2625,18 +2625,6 @@ func (s *Service) PetMCPTool(ctx context.Context, name string, args json.RawMess
 			return "", err
 		}
 		return `{"ok":true}`, nil
-	case "pet_write_diary":
-		var input struct {
-			Date    string `json:"date"`
-			Content string `json:"content"`
-		}
-		if err := json.Unmarshal(args, &input); err != nil {
-			return "", fmt.Errorf("invalid write diary request")
-		}
-		if err := s.PetWriteDiary(ctx, input.Date, input.Content); err != nil {
-			return "", err
-		}
-		return `{"ok":true}`, nil
 	case "pet_write_worklog":
 		var input struct {
 			Date    string `json:"date"`
@@ -2776,12 +2764,6 @@ func assistantPetTools() []gateway.ChatTool {
 				"document": map[string]any{"type": "string", "enum": []string{"identity", "principles", "loops", "agenda"}},
 				"content":  map[string]any{"type": "string"},
 			}, "required": []string{"document", "content"},
-		}},
-		{Name: "pet_write_diary", Description: "写入宠物日记 diary/YYYY-MM-DD.md", Parameters: map[string]any{
-			"type": "object", "properties": map[string]any{
-				"date":    map[string]any{"type": "string", "description": "可选，YYYY-MM-DD"},
-				"content": map[string]any{"type": "string"},
-			}, "required": []string{"content"},
 		}},
 		{Name: "pet_write_worklog", Description: "写入宠物工作记录 worklog/YYYY-MM-DD.md", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{

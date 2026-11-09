@@ -294,7 +294,7 @@ var builtinTemplates = []domain.PromptTemplate{
 	{ID: "identity.task-agent", Name: "Task Agent Identity", Layer: "identity", Description: "代码与项目任务场景身份", Editable: true, Required: false, Version: 1},
 	{ID: "identity.channel-assistant", Name: "Channel Assistant Identity", Layer: "identity", Description: "Owner 私聊渠道助手身份", Editable: true, Required: false, Version: 1},
 	{ID: "identity.channel-digital-human", Name: "Channel Digital Human Identity", Layer: "identity", Description: "受限群聊电子人身份", Editable: true, Required: false, Version: 2},
-	{ID: "identity.pet-task", Name: "Pet Task Identity", Layer: "identity", Description: "宠物 Task 的电子分身定位、owner-delegate 权限和 core/diary/worklog 路径", Editable: true, Required: false, Version: 11},
+	{ID: "identity.pet-task", Name: "Pet Task Identity", Layer: "identity", Description: "宠物 Task 的电子分身定位、owner-delegate 权限和 core/worklog 路径", Editable: true, Required: false, Version: 12},
 	{ID: "channel.web", Name: "AHA Web Channel", Layer: "channel", Description: "Web 渠道消息行为", Editable: true, Required: false, Version: 1},
 	{ID: "channel.external-channel", Name: "External Channel", Layer: "channel", Description: "外部渠道消息行为", Editable: true, Required: false, Version: 4},
 	{ID: "policy.auto", Name: "Auto Collaboration", Layer: "policy", Description: "AHA 自动协作策略", Editable: true, Required: false, Version: 1},
@@ -336,6 +336,10 @@ var supersededBuiltinOverrideHashes = map[string]map[string]bool{
 		"5fa0f46660226c7ccc0d18c91ae55a813230b3651194dee277e3fe180df2356d": true,
 	},
 	"identity.pet-task": {
+		"a5f90c9f238a5b97a04049c4cda2cc210aacb1a06174c845af8bc707704178bf": true,
+		"0d2e42d11759a7c1cbad9d7a802c2a4b4a00a527b194096e8dee61702ddfaa34": true,
+		"4be52f4650bb255ffb23ed5ab85da4daff075b7dced4f94867fbf27ab49b85ae": true,
+		"4774b2662357d0c48f61e1ff0fc8ffd9e6fcb72670784fa3a2599dbc97012faf": true,
 		// The v1 prompt described the pet's persona and duties inline. Those now
 		// live in core/identity.md and core/principles.md. The v2 prompt still
 		// scoped the pet to a chat/diary assistant; v3 makes it an owner-delegate
@@ -346,7 +350,8 @@ var supersededBuiltinOverrideHashes = map[string]map[string]bool{
 		// channel enable/disable and security settings via approval; v9 added
 		// permission-change requests and channel lifecycle approvals; v10
 		// replaced the command dump with aha_capabilities and pet_say/idea; v11
-		// makes the pet a coordinator with a read-only runtime.
+		// makes the pet a coordinator with a read-only runtime; v12 removes the
+		// retired personal journal tool and workspace path.
 		"9c13cd2859c558166db608c0195bc1809ace8c01d29425337fc87232700de19a": true,
 		"faa4cf84331e46273cbd52d9ec0cf0707864d8e0fd87a0f8b3e374f93f9d68f9": true,
 		"cfc4559e7cfcc119c3f7711255f4e8bf02be02f08ba2f958535545c8a338aa81": true,
@@ -419,7 +424,7 @@ var englishTemplateDescriptions = map[string]string{
 	"identity.task-agent":            "Identity for code and project Tasks",
 	"identity.channel-assistant":     "Identity for an Owner direct-channel assistant",
 	"identity.channel-digital-human": "Identity for a restricted group-chat digital human",
-	"identity.pet-task":              "Pet Task identity, owner-delegate permissions, and core/diary/worklog paths",
+	"identity.pet-task":              "Pet Task identity, owner-delegate permissions, and core/worklog paths",
 	"channel.web":                    "Web channel message behavior",
 	"channel.external-channel":       "External channel message behavior",
 	"policy.auto":                    "AHA auto-collaboration policy",

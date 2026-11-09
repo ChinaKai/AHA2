@@ -2325,10 +2325,9 @@ dialog > .dialog-head { margin: 0; padding: 18px 18px 0; }
 .assistant-pet.pet-typing .assistant-thinking { display: none !important; }
 @media (prefers-reduced-motion: reduce) { .assistant-pet.thinking .assistant-thinking b { animation: pet-question 1.15s ease-in-out infinite !important; } }
 
-.pet-diary-list { display: grid; gap: 8px; }
-.pet-diary-entry { border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; }
-.pet-diary-entry summary { cursor: pointer; font-weight: 800; }
-.pet-diary-entry pre { margin: 8px 0 0; white-space: pre-wrap; word-break: break-word; font: inherit; color: var(--muted); }
+.pet-doc-entry { border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; }
+.pet-doc-entry summary { cursor: pointer; font-weight: 800; }
+.pet-doc-entry pre { margin: 8px 0 0; white-space: pre-wrap; word-break: break-word; font: inherit; color: var(--muted); }
 
 .pet-workbench-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
 .pet-workbench-tabs button { border: 1px solid var(--line); background: transparent; color: var(--muted); border-radius: 999px; padding: 6px 12px; cursor: pointer; }
@@ -2485,3 +2484,9 @@ dialog > .dialog-head { margin: 0; padding: 18px 18px 0; }
 /* Login/loading screens render no `.bottom-nav`, so only lift the panel above
    the navigation when the shell actually provides one. */
 @media (max-width: 760px) { .perf-panel { right: 8px; bottom: 16px; width: min(220px, calc(100vw - 16px)); } body:has(.bottom-nav) .perf-panel { bottom: calc(var(--mobile-bottom-nav-height) + 8px); } }
+
+/* Position pending badges without changing navigation width or height. */
+.sidebar nav button[data-view="pet-workbench"], .bottom-nav button[data-view="pet-workbench"] { position: relative; }
+.sidebar nav button.has-pending, .bottom-nav button.has-pending { color: #d97706; }
+.sidebar nav button .task-tool-badge { top: 50%; transform: translateY(-50%); right: 6px; overflow: visible; }
+.sidebar nav button[data-view="pet-workbench"] > span:not(.task-tool-badge) { padding-right: 24px; }

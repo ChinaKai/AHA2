@@ -83,7 +83,7 @@ func buildDataInventory(root string) (DataInventory, error) {
 		"channels":      {ID: "channels", Label: "渠道运行时", Note: "渠道插件与实例文件"},
 		"plugins":       {ID: "plugins", Label: "插件", Note: "渠道插件二进制和清单"},
 		"node":          {ID: "node", Label: "Node 运行时", Note: "内置 Node，不是可清理缓存"},
-		"pet-workspace": {ID: "pet-workspace", Label: "宠物工作区", Note: "core、日记、工作记录"},
+		"pet-workspace": {ID: "pet-workspace", Label: "宠物工作区", Note: "core、工作记录"},
 		"knowledge":     {ID: "knowledge", Label: "知识库", Note: "共享知识文件"},
 	}
 	inventory := DataInventory{DataDir: root, Categories: make([]DataCategory, 0, len(known)+3)}
@@ -97,7 +97,7 @@ func buildDataInventory(root string) (DataInventory, error) {
 		{dir: "channels", label: "渠道运行时", note: "渠道插件与实例文件"},
 		{dir: "plugins", label: "插件", note: "渠道插件二进制和清单"},
 		{dir: "node", label: "Node 运行时", note: "内置 Node，不是可清理缓存"},
-		{dir: "pet-workspace", label: "宠物工作区", note: "core、日记、工作记录"},
+		{dir: "pet-workspace", label: "宠物工作区", note: "core、工作记录"},
 		{dir: "knowledge", label: "知识库", note: "共享知识文件"},
 	} {
 		size := directorySize(filepath.Join(root, category.dir))

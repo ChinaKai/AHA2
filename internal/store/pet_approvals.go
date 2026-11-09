@@ -141,3 +141,10 @@ func (s *Store) ResolvePetApproval(ctx context.Context, id, status, resolution s
 	}
 	return nil
 }
+
+// CountPendingPetApprovals counts pending rows without loading approval payloads.
+func (s *Store) CountPendingPetApprovals(ctx context.Context) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pet_approvals WHERE status='pending'`).Scan(&count)
+	return count, err
+}

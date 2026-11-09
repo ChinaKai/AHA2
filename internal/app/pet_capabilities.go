@@ -50,7 +50,7 @@ func petCapabilityCategory(name string) string {
 		name == "pet_request_approval", name == "pet_list_approvals", name == "pet_submit_idea",
 		name == "pet_watch_task", name == "pet_unwatch_task":
 		return "core"
-	case name == "pet_update_core", name == "pet_write_diary", name == "pet_write_worklog":
+	case name == "pet_update_core", name == "pet_write_worklog":
 		return "memory"
 	case strings.HasPrefix(name, "pet_"):
 		return "presence"

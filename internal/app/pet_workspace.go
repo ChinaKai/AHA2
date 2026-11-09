@@ -18,7 +18,7 @@ const (
 	petLabDir             = "pet-lab"
 
 	// The loops and agenda ledgers are injected into every wake-up, unlike the
-	// diary and worklog. Keep them bounded so a long-lived pet cannot silently
+	// worklog. Keep them bounded so a long-lived pet cannot silently
 	// crowd out the rest of its context; the pet compacts them by deleting
 	// resolved items.
 	petCoreLoopsMaxBytes  = 16 * 1024
@@ -66,7 +66,7 @@ var (
 	petLabReadmeSeed = `# 宠物实验室
 
 - 这里可以直接写脚本、原型和临时文件，也可以运行它们。
-- 只在此目录内直接写；core/、diary/、worklog/ 仍用宠物工具。
+- 只在此目录内直接写；core/、worklog/ 仍用宠物工具。
 - 不要写工作区之外；不要在这里保存凭据或秘密。
 `
 )
@@ -85,7 +85,7 @@ func (s *Service) petWorkspaceRoot(ctx context.Context) string {
 }
 
 // ensurePetWorkspaceFiles creates the pet's stable home and seeds any missing
-// core file. It never overwrites an existing file, because the pet is the only
+// core file. It never overwrites an existing core file, because the pet is the only
 // writer of its identity and principles after the first start.
 func (s *Service) ensurePetWorkspaceFiles(ctx context.Context, assistant *domain.OwnerAssistant) error {
 	root := strings.TrimSpace(s.petWorkspaceRoot(ctx))
@@ -93,9 +93,6 @@ func (s *Service) ensurePetWorkspaceFiles(ctx context.Context, assistant *domain
 		return nil
 	}
 	if err := os.MkdirAll(filepath.Join(root, "core"), 0o700); err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Join(root, "diary"), 0o700); err != nil {
 		return err
 	}
 	if err := os.MkdirAll(filepath.Join(root, "worklog"), 0o700); err != nil {
@@ -126,7 +123,14 @@ func (s *Service) ensurePetWorkspaceFiles(ctx context.Context, assistant *domain
 	if err := writePetCoreFile(filepath.Join(root, petCoreAgendaPath), petCoreAgendaSeed); err != nil {
 		return err
 	}
-	return writePetCoreFile(filepath.Join(root, petLabDir, "README.md"), petLabReadmeSeed)
+	readmePath := filepath.Join(root, petLabDir, "README.md")
+	// Migrate only the exact generated guide from before the journal removal.
+	// Customized guides remain owner/pet data and must be preserved.
+	legacy := strings.Replace(petLabReadmeSeed, "core/、worklog/", "core/、diary/、worklog/", 1)
+	if raw, err := os.ReadFile(readmePath); err == nil && strings.TrimSpace(strings.ReplaceAll(string(raw), "\r\n", "\n")) == strings.TrimSpace(legacy) {
+		return os.WriteFile(readmePath, []byte(petLabReadmeSeed), 0o600)
+	}
+	return writePetCoreFile(readmePath, petLabReadmeSeed)
 }
 
 type PetWorkspaceDocument struct {

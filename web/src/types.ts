@@ -1301,7 +1301,7 @@ export interface MCPServer {
   updated_at: string;
 }
 
-export interface PetDiaryEntry {
+export interface PetMarkdownEntry {
   date: string;
   content: string;
 }
@@ -1362,10 +1362,8 @@ export interface PetChannelHealth {
 }
 
 export interface PetWorkbench {
-  diary: PetDiaryEntry[];
-  diary_total?: number;
   core: PetWorkspaceDocument[];
-  worklog: PetDiaryEntry[];
+  worklog: PetMarkdownEntry[];
   worklog_total?: number;
   approvals: PetApproval[];
   approval_total?: number;

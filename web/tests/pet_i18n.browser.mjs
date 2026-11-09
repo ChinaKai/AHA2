@@ -5,8 +5,8 @@ import {resolve, extname} from "node:path";
 import {pathToFileURL} from "node:url";
 const root = resolve(import.meta.dirname, "../..");
 const tools = resolve(root, ".tools/web-validation");
-const {chromium} = await import(pathToFileURL(resolve(tools, "node_modules/playwright/index.mjs")));
-const {default: binary} = await import(pathToFileURL(resolve(tools, "node_modules/@sparticuz/chromium/build/index.js")));
+const {chromium} = await import(pathToFileURL(process.env.AHA_PLAYWRIGHT_MODULE || resolve(tools, "node_modules/playwright/index.mjs")));
+const binary = process.env.AHA_BROWSER_EXECUTABLE ? {executablePath: async () => process.env.AHA_BROWSER_EXECUTABLE, args: []} : (await import(pathToFileURL(resolve(tools, "node_modules/@sparticuz/chromium/build/index.js")))).default;
 const now = new Date().toISOString();
 const assistant = {
   id: "assistant-1", name: "AHA", model_id: "model-1", character: "gugugaga", pet_enabled: true,
@@ -25,16 +25,27 @@ const bootstrap = `
 const json=(v,s=200)=>new Response(JSON.stringify(v),{status:s,headers:{"Content-Type":"application/json"}});
 const assistant=${JSON.stringify(assistant)};
 const approvals=${JSON.stringify(approvals)};
+window.pendingCount=0;
+const nativeSetInterval=window.setInterval.bind(window);
+window.setInterval=(callback,ms,...args)=>{
+ if(ms===60000){window.pollPetPendingCount=callback;return 98765;}
+ return nativeSetInterval(callback,ms,...args);
+};
 window.fetch=async(input,init={})=>{
  const u=new URL(typeof input==="string"?input:input.url,location.origin); const path=u.pathname; const method=(init.method||"GET").toUpperCase();
  if(path==="/api/v1/auth/status")return json({authenticated:true,csrf_token:"csrf",owner:{id:"owner-1",username:"owner"}});
- if(path==="/api/v1/settings/general")return json({ok:true,general:{language:"en-US"}});
+ if(path==="/api/v1/settings/general")return json({ok:true,general:{language:new URLSearchParams(location.search).get("language")||"en-US"}});
  if(path==="/api/v1/assistant"&&method==="GET")return json({assistant,messages:[],models:[{id:"model-1",display_name:"Model",wire_api:"chat"}],model_name:"Model",brain_model_name:"Model",tools:[],pet_last_brain_at:new Date(Date.now()-600000).toISOString(),pet_next_brain_at:new Date(Date.now()+600000).toISOString(),pet_brain_runs:2});
  if(path==="/api/v1/assistant/hints")return json({hints:[]});
  if(path==="/api/v1/pet")return json({state:{id:"pet",mood:"neutral",action:"idle",zone:"desk"}});
  if(path==="/api/v1/pet/activity")return json({events:[]});
- if(path==="/api/v1/pet/diary")return json({entries:[]});
- if(path==="/api/v1/pet/workbench")return json({diary:[{date:"2026-10-31",content:"Diary content stays user-authored."}],core:[],worklog:[],approvals,updated_at:new Date().toISOString()});
+ if(path==="/api/v1/pet/approvals/pending-count")return json({ok:true,pending:window.pendingCount});
+ if(path.startsWith("/api/v1/pet/approvals/")&&path.endsWith("/resolve")&&method==="POST"){
+  const id=path.split("/")[5]; const item=approvals.find(a=>a.id===id);
+  if(item?.status==="pending"){item.status=JSON.parse(init.body).decision;window.pendingCount--;}
+  return json({ok:true,approval:item});
+ }
+ if(path==="/api/v1/pet/workbench")return json({core:[],worklog:[],approvals,updated_at:new Date().toISOString()});
  if(path==="/api/v1/tasks")return json({tasks:[],has_more:false});
  if(path==="/api/v1/projects")return json({projects:[],has_more:false});
  if(path==="/api/v1/workspaces")return json({workspaces:[]});
@@ -64,7 +75,7 @@ try{
  const scan=async(label)=>{
   const missing=await page.evaluate(()=>{
    const roots=[document.querySelector("#app"),document.querySelector("#assistant-layer")].filter(Boolean);
-   const skip=[".markdown-body",".message-text",".message-bubble","pre","code","textarea","input","[contenteditable='true']",".pet-diary-entry pre",".pet-approval-card strong",".pet-approval-card p",".pet-approval-card small","[data-i18n-ignore]"].join(",");
+   const skip=[".markdown-body",".message-text",".message-bubble","pre","code","textarea","input","[contenteditable='true']",".pet-doc-entry pre",".pet-approval-card strong",".pet-approval-card p",".pet-approval-card small","[data-i18n-ignore]"].join(",");
    const out=[];
    for(const root of roots){
     const walker=document.createTreeWalker(root,NodeFilter.SHOW_TEXT);
@@ -75,12 +86,58 @@ try{
   });
   assert.deepEqual(missing, [], label + " left untranslated Chinese");
  };
- await scan("pet workbench diary");
+ await scan("pet workbench core");
+ assert.equal(await page.locator('[data-pet-workbench-tab="core"]').getAttribute("class"), "active");
+ assert.equal(await page.locator('[data-pet-workbench-tab="diary"]').count(), 0);
+ assert.doesNotMatch(await page.locator("#app").innerText(), /日记|diary/i);
+ const nav = page.locator('button[data-view="pet-workbench"]');
+ assert.equal(await nav.count(), 2, "desktop sidebar and mobile bottom navigation");
+ const setCount=async value=>{
+  await page.evaluate(value=>{window.pendingCount=value;window.pollPetPendingCount();},value);
+  await page.waitForFunction(value=>{
+   const buttons=[...document.querySelectorAll('button[data-view="pet-workbench"]')];
+   return buttons.length===2&&buttons.every(b=>value===0?!b.classList.contains("has-pending")&&!b.querySelector(".task-tool-badge"):b.querySelector(".task-tool-badge")?.textContent===(value>99?"99+":String(value)));
+  },value);
+ };
+ await setCount(0);
+ for(const value of [7,105]){
+  await setCount(value);
+  for(const button of await nav.all()){
+   assert.match(await button.getAttribute("title"), new RegExp(value+" pending approvals"));
+   assert.match(await button.getAttribute("aria-label"), new RegExp(value+" pending approvals"));
+  }
+  assert.equal(await page.locator("#pet-approval-count").innerText(),String(value));
+ }
+ await setCount(3);
+ await page.locator('[data-pet-workbench-tab="approvals"]').click();
+ for(const [id,decision,want] of [["approval-1","approve",2],["approval-2","reject",1],["idea-1","cancel",0]]){
+  const handle=async dialog=>dialog.accept("test reason");
+  page.once("dialog",handle);
+  await page.locator('[data-pet-approval-id="'+id+'"][data-pet-approval-decision="'+decision+'"]').click();
+  await page.waitForFunction(want=>document.querySelector("#pet-approval-count")?.textContent===(want?String(want):""),want);
+  page.removeListener("dialog",handle);
+  assert.equal(await nav.locator(".task-tool-badge").count(),want?2:0);
+ }
+ await page.setViewportSize({width:390,height:844});
+ await setCount(105);
+ assert.equal(await page.locator('.bottom-nav [data-view="pet-workbench"] .task-tool-badge').isVisible(),true);
+ await page.setViewportSize({width:1400,height:1000});
+ await page.goto(url+"/?legacy=1#pet-diary",{waitUntil:"networkidle"});
+ assert.equal(new URL(page.url()).hash,"#pet-workbench");
+ await page.waitForSelector('[data-pet-workbench-tab="core"].active');
  await page.evaluate(()=>document.querySelector('[data-pet-workbench-tab="approvals"]')?.click());await page.waitForTimeout(300);await scan("pet approvals");
  await page.evaluate(()=>document.querySelector('[data-pet-approval-filter="idea"]')?.click());await page.waitForTimeout(200);await scan("pet ideas filter");
  await page.evaluate(()=>document.querySelector('[data-pet-approval-status-filter="pending"]')?.click());await page.waitForTimeout(200);await scan("pet approval status filter");
  await page.evaluate(()=>document.querySelector('[data-pet-workbench-tab="settings"]')?.click());await page.waitForTimeout(600);await scan("pet settings");
  await page.evaluate(()=>document.querySelector("#assistant-pet")?.click());await page.waitForTimeout(300);await scan("assistant panel");
+ await page.goto(url+"/?language=zh-CN#pet-workbench",{waitUntil:"networkidle"});
+ await page.waitForSelector('[data-pet-workbench-tab="core"].active');
+ await setCount(7);
+ for(const button of await nav.all()){
+  assert.match(await button.getAttribute("title"),/7 条待审批/);
+  assert.match(await button.getAttribute("aria-label"),/7 条待审批/);
+ }
+ assert.doesNotMatch(await page.locator("#app").innerText(), /日记|diary/i);
  assert.deepEqual(errors,[]);
 }finally{await browser?.close();await new Promise(r=>server.close(r));}
 console.log("pet i18n browser check passed");

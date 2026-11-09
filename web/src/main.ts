@@ -5,7 +5,7 @@ import {renderConversationList} from "./conversation_ui.js";
 import {bindCodexAccounts, renderCodexAccounts} from "./codex_accounts.js";
 import {bindChannels, exportRetiredChannelInstance, purgeRetiredChannelInstance, renderChannels} from "./channels.js";
 import {icon} from "./icons.js";
-import {petApprovalOptions, renderPetApprovalOptionPicker, selectedPetApprovalOption} from "./pet_approvals.js";
+import {createPetApprovalCounter, petPendingApprovalBadge, petApprovalOptions, renderPetApprovalOptionPicker, selectedPetApprovalOption} from "./pet_approvals.js";
 import {applyLocale, normalizeLanguagePreference, startUITranslationObserver, t, tr, translateUI} from "./i18n.js";
 import {bindKnowledgeWorkspace, knowledgeEntryListVisible, renderKnowledgeWorkspace} from "./knowledge_workspace.js";
 import {bindHardwarePanel, refreshHardwarePanel, stopHardwarePanel} from "./hardware_panel.js";
@@ -91,7 +91,7 @@ import type {
   TaskPermissionRequest,
   Workspace,
 } from "./types.js";
-type View = "projects" | "channels" | "models" | "resources" | "tasks" | "knowledge" | "prompts" | "proxy" | "sync" | "advanced" | "data" | "other" | "mcp" | "pet-settings" | "pet-diary";
+type View = "projects" | "channels" | "models" | "resources" | "tasks" | "knowledge" | "prompts" | "proxy" | "sync" | "advanced" | "data" | "other" | "mcp" | "pet-settings" | "pet-workbench";
 type ResourceKey = "projects" | "workspaces" | "tasks" | "system" | "providers" | "models" | "env" | "accounts" | "skills" | "channels" | "hardware" | "mail-accounts" | "mail-templates" | "mail-messages" | "knowledge" | "proxy" | "advanced" | "sync" | "prompts" | "mcp" | "data";
 type TaskFilterKind = "project" | "status" | "device";
 interface ResourceState {loading: boolean; loaded: boolean; error: string; updatedAt: number}
@@ -380,7 +380,9 @@ const state: State = {
 
 applyLocale("auto");
 const app = document.querySelector<HTMLDivElement>("#app");
-let petWorkbenchTab = "diary";
+const petApprovalCounter = createPetApprovalCounter(() => api.petPendingApprovalCount(), updatePetPendingApprovalIndicators);
+let petPendingApprovalTimer = 0;
+let petWorkbenchTab = "core";
 let petApprovalFilter: "all" | "idea" | "decision" = "all";
 let petApprovalStatusFilter: "all" | "pending" | "approved" | "rejected" | "cancelled" = "all";
 let events: EventSource | null = null;
@@ -829,7 +831,7 @@ function resourcesForView(view: View): ResourceKey[] {
     case "mcp": return [];
     case "other": return ["advanced"];
     case "pet-settings": return ["advanced"];
-    case "pet-diary": return ["advanced"];
+    case "pet-workbench": return ["advanced"];
   }
 }
 
@@ -1451,8 +1453,9 @@ async function runWithFeedback(
 }
 
 function viewFromName(value: unknown): View | null {
+  if (value === "pet-diary") return "pet-workbench"; // Legacy bookmarks and saved navigation.
   if (value === "hardware") return "resources";
-  const views: View[] = ["projects", "channels", "models", "resources", "tasks", "knowledge", "prompts", "proxy", "sync", "advanced", "data", "other", "mcp", "pet-settings", "pet-diary"];
+  const views: View[] = ["projects", "channels", "models", "resources", "tasks", "knowledge", "prompts", "proxy", "sync", "advanced", "data", "other", "mcp", "pet-settings", "pet-workbench"];
   return views.includes(value as View) ? value as View : null;
 }
 
@@ -1465,6 +1468,7 @@ function applyLocationHash(): boolean {
   const view = viewFromName(name);
   if (!view) return false;
   state.view = view;
+  if (name === "pet-diary") window.history.replaceState(null, "", "#pet-workbench");
   if (view === "resources") {
     const params = new URLSearchParams(query);
     state.resourcesTab = params.get("tab") === "mail" ? "mail" : "hardware";
@@ -3009,6 +3013,36 @@ function loginView(): string {
   </div>`;
 }
 
+function petPendingApprovalLabel(): string {
+  return `${t("petWorkbench.title")} · ${t("petWorkbench.pendingCount", {count: petApprovalCounter.pending})}`;
+}
+
+function updatePetPendingApprovalIndicators(): void {
+  const pending = petApprovalCounter.pending;
+  document.querySelectorAll<HTMLElement>('[data-view="pet-workbench"]').forEach(button => {
+    button.classList.toggle("has-pending", pending > 0);
+    const label = pending > 0 ? petPendingApprovalLabel() : t("petWorkbench.title");
+    button.title = label;
+    button.setAttribute("aria-label", label);
+    button.querySelector(".task-tool-badge")?.remove();
+    button.insertAdjacentHTML("beforeend", petPendingApprovalBadge(pending));
+  });
+  const count = document.querySelector<HTMLElement>("#pet-approval-count");
+  if (count) count.textContent = pending > 0 ? String(pending) : "";
+}
+
+async function refreshPetPendingApprovalCount(afterMutation = false): Promise<void> {
+  if (!state.auth?.authenticated) return;
+  try { await petApprovalCounter.refresh(afterMutation); }
+  catch { /* Retain the last successful count; the bounded poll retries. */ }
+}
+
+function navButton(view: View, glyph: string, label: Parameters<typeof t>[0]): string {
+  const pending = view === "pet-workbench" ? petApprovalCounter.pending : 0;
+  const description = pending > 0 ? petPendingApprovalLabel() : t(label);
+  return `<button data-view="${view}" class="${state.view === view ? "active" : ""}${pending > 0 ? " has-pending" : ""}" title="${escapeHTML(description)}" aria-label="${escapeHTML(description)}">${icon(glyph)}<span>${t(label)}</span>${petPendingApprovalBadge(pending)}</button>`;
+}
+
 function shell(content: string): string {
   const nav = [
     ["projects", "projects", "nav.projects"],
@@ -3017,13 +3051,13 @@ function shell(content: string): string {
     ["knowledge", "knowledge", "nav.knowledge"],
     ["models", "model", "nav.models"],
     ["resources", "hardware", "nav.resources"],
-    ["pet-diary", "bot", "petWorkbench.title"],
+    ["pet-workbench", "bot", "petWorkbench.title"],
   ] as const;
   const mobileNav = [...nav, ["advanced", "settings", "nav.advanced"] as const];
   return `<div class="app-shell">
     <aside class="sidebar">
       <div class="brand-lockup"><span class="brand-mark"><img src="/assets/aha-logo.svg" alt=""></span><div><strong>AHA</strong><small>${t("brand.tagline")}</small></div></div>
-      <nav>${nav.map(([view, glyph, label]) => `<button data-view="${view}" class="${state.view === view ? "active" : ""}">${icon(glyph)}<span>${t(label)}</span></button>`).join("")}</nav>
+      <nav>${nav.map(([view, glyph, label]) => navButton(view, glyph, label)).join("")}</nav>
       <section class="sidebar-memo ${state.sidebarMemoCollapsed ? "collapsed" : ""}">
         <header><strong>${icon("edit")}便签</strong><button id="toggle-sidebar-memo" class="icon-button" type="button" aria-label="${state.sidebarMemoCollapsed ? "展开便签" : "折叠便签"}" title="${state.sidebarMemoCollapsed ? "展开便签" : "折叠便签"}">${icon(state.sidebarMemoCollapsed ? "chevron-up" : "chevron-down")}</button></header>
         <div class="sidebar-memo-colors" role="group" aria-label="便签背景颜色">${Object.entries(SIDEBAR_MEMO_COLORS).map(([id, color]) => `<button type="button" class="sidebar-memo-swatch ${state.sidebarMemoColor === id ? "active" : ""}" data-sidebar-memo-color="${id}" aria-label="${color.label}" title="${color.label}" style="--swatch-color:${color.surface}"></button>`).join("")}</div>
@@ -3035,7 +3069,7 @@ function shell(content: string): string {
     <div id="sidebar-resizer" class="sidebar-resizer" role="separator" aria-label="调整侧栏宽度" aria-orientation="vertical" aria-valuemin="${SIDEBAR_MIN_WIDTH}" aria-valuemax="${SIDEBAR_MAX_WIDTH}" aria-valuenow="${state.sidebarWidth}" tabindex="0" title="拖动调整侧栏宽度，双击恢复默认"></div>
     <header class="mobile-header"><div class="brand-lockup"><span class="brand-mark"><img src="/assets/aha-logo.svg" alt=""></span><strong>AHA</strong></div><button id="mobile-context" class="icon-button">${icon("menu")}</button></header>
     <main class="workspace">${resourceStatusHTML()}${banner()}${content}</main>
-    <nav class="bottom-nav">${mobileNav.map(([view, glyph, label]) => `<button data-view="${view}" class="${state.view === view ? "active" : ""}">${icon(glyph)}<span>${t(label)}</span></button>`).join("")}</nav>
+    <nav class="bottom-nav">${mobileNav.map(([view, glyph, label]) => navButton(view, glyph, label)).join("")}</nav>
   </div>`;
 }
 
@@ -4661,7 +4695,7 @@ function render(): void {
       other: otherSettingsView,
       mcp: () => advancedSubview(mcpView()),
       "pet-settings": () => advancedSubview(`<section class="page pet-settings-page"><div id="pet-settings-host"><div class="field-help">正在打开宠物设置…</div></div></section>`),
-      "pet-diary": () => shell(petDiaryView()),
+      "pet-workbench": () => shell(petWorkbenchView()),
     };
     content = views[state.view]();
   }
@@ -5883,7 +5917,7 @@ function bindTaskToolsAndPanels(): void {
   if (state.view === "advanced") bindLanguageSetting();
   if (state.view === "data") bindDataManagementPage();
   if (state.view === "other") bindOtherSettingsPage();
-  if (state.view === "pet-diary") void bindPetDiaryPage();
+  if (state.view === "pet-workbench") void bindPetWorkbenchPage();
   if (state.view === "prompts") bindPromptAdmin(render, setMessage);
   if (state.view === "resources") bindResourcesPage({
     tab: state.resourcesTab,
@@ -6391,6 +6425,8 @@ window.addEventListener("pointercancel", () => {
 function openGlobalEvents(): void {
   if (globalEvents) return;
   globalEvents = new EventSource("/api/v1/events");
+  void refreshPetPendingApprovalCount();
+  petPendingApprovalTimer = window.setInterval(() => void refreshPetPendingApprovalCount(), 60_000);
   globalEvents.addEventListener("update", event => {
     let type = "";
     let data: unknown = null;
@@ -6422,6 +6458,8 @@ function openGlobalEvents(): void {
 function closeGlobalEvents(): void {
   globalEvents?.close();
   globalEvents = null;
+  window.clearInterval(petPendingApprovalTimer);
+  petPendingApprovalTimer = 0;
 }
 
 window.addEventListener("aha-resources-tab", event => {
@@ -6456,7 +6494,7 @@ window.setInterval(updateSystemUptime, 30_000);
 window.addEventListener("aha:open-pet-settings", () => {
   cancelTaskOpen();
   petWorkbenchTab = "settings";
-  state.view = "pet-diary";
+  state.view = "pet-workbench";
   state.selectedTask = null;
   state.selectedProject = null;
   closeEvents();
@@ -6611,15 +6649,14 @@ async function openMCPDetail(id: string): Promise<void> {
   catch (error) { body.innerHTML = `<p class="field-help">${escapeHTML(error instanceof Error ? error.message : String(error))}</p>`; }
 }
 
-function petDiaryView(): string {
+function petWorkbenchView(): string {
   return `<section class="page pet-workbench-page">
     <header class="page-head"><div><h1>${t("petWorkbench.title")}</h1><p>${t("petWorkbench.subtitle")}</p></div></header>
     <div class="pet-workbench-tabs" role="tablist">
-      <button type="button" class="active" data-pet-workbench-tab="diary">${t("petWorkbench.diary")}</button>
-      <button type="button" data-pet-workbench-tab="core">${t("petWorkbench.core")}</button>
+      <button type="button" class="active" data-pet-workbench-tab="core">${t("petWorkbench.core")}</button>
       <button type="button" data-pet-workbench-tab="worklog">${t("petWorkbench.worklog")}</button>
       <button type="button" data-pet-workbench-tab="inspection">${t("petWorkbench.inspection")} <span id="pet-channel-count"></span></button>
-      <button type="button" data-pet-workbench-tab="approvals">${t("petWorkbench.approvalsAndIdeas")} <span id="pet-approval-count"></span></button>
+      <button type="button" data-pet-workbench-tab="approvals">${t("petWorkbench.approvalsAndIdeas")} <span id="pet-approval-count">${petApprovalCounter.pending > 0 ? petApprovalCounter.pending : ""}</span></button>
       <button type="button" data-pet-workbench-tab="follows">${t("petWorkbench.follows")}</button>
       <button type="button" data-pet-workbench-tab="settings">${t("petWorkbench.settings")}</button>
     </div>
@@ -6627,10 +6664,9 @@ function petDiaryView(): string {
   </section>`;
 }
 
-async function bindPetDiaryPage(): Promise<void> {
+async function bindPetWorkbenchPage(): Promise<void> {
   const body = document.querySelector<HTMLElement>("#pet-workbench-body");
   const tabs = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-pet-workbench-tab]"));
-  const count = document.querySelector<HTMLElement>("#pet-approval-count");
   const channelCount = document.querySelector<HTMLElement>("#pet-channel-count");
   if (!body || tabs.length === 0) return;
   if (body.dataset.petWorkbenchBound === "1") return;
@@ -6641,10 +6677,9 @@ async function bindPetDiaryPage(): Promise<void> {
   let loading = false;
   let loadError = "";
   let approvalLimit = 50;
-  let diaryLimit = 30;
   let worklogLimit = 30;
 
-  const loadMoreFooter = (kind: "approval" | "diary" | "worklog", shown: number, total: number): string => {
+  const loadMoreFooter = (kind: "approval" | "worklog", shown: number, total: number): string => {
     if (!total || shown >= total) return "";
     return `<div class="knowledge-list-footer"><span>${t("petWorkbench.loadedCount", {shown: String(shown), total: String(total)})}</span><button type="button" class="knowledge-load-more" data-pet-load-more="${kind}">${t("petWorkbench.loadMore")}</button></div>`;
   };
@@ -6653,7 +6688,6 @@ async function bindPetDiaryPage(): Promise<void> {
     body.querySelectorAll<HTMLButtonElement>("[data-pet-load-more]").forEach(button => button.addEventListener("click", () => {
       const kind = button.dataset.petLoadMore;
       if (kind === "approval") approvalLimit += 30;
-      else if (kind === "diary") diaryLimit += 30;
       else if (kind === "worklog") worklogLimit += 30;
       else return;
       button.disabled = true;
@@ -6674,19 +6708,15 @@ async function bindPetDiaryPage(): Promise<void> {
   };
 
   const renderTab = () => {
-    if (!tabs.some(tab => tab.dataset.petWorkbenchTab === active)) active = "diary";
+    if (!tabs.some(tab => tab.dataset.petWorkbenchTab === active)) active = "core";
     tabs.forEach(tab => tab.classList.toggle("active", tab.dataset.petWorkbenchTab === active));
     if (!view) {
       showLoadState();
       return;
     }
-    if (active === "diary") {
-      body.innerHTML = renderPetMarkdownEntries(view.diary, t("petWorkbench.emptyDiary"), "diary") + loadMoreFooter("diary", view.diary.length, view.diary_total ?? view.diary.length);
-      bindPetDocEditors("diary", load);
-      bindLoadMore();
-    } else if (active === "core") {
+    if (active === "core") {
       body.innerHTML = view.core.length
-        ? view.core.map(item => `<details class="pet-diary-entry" open><summary>${escapeHTML(item.name)}<button type="button" class="pet-doc-edit" data-pet-doc-section="core" data-pet-doc-name="${escapeHTML(item.name)}">${t("common.edit")}</button></summary><pre>${escapeHTML(item.content)}</pre></details>`).join("")
+        ? view.core.map(item => `<details class="pet-doc-entry" open><summary>${escapeHTML(item.name)}<button type="button" class="pet-doc-edit" data-pet-doc-section="core" data-pet-doc-name="${escapeHTML(item.name)}">${t("common.edit")}</button></summary><pre>${escapeHTML(item.content)}</pre></details>`).join("")
         : `<div class="field-help">${t("petWorkbench.emptyCore")}</div>`;
       bindPetDocEditors("core", load);
     } else if (active === "worklog") {
@@ -6737,9 +6767,6 @@ async function bindPetDiaryPage(): Promise<void> {
     } else if (active === "settings") {
       body.innerHTML = `<div id="pet-settings-host" class="pet-workbench-settings"></div>`;
       void showPetSettings();
-    } else {
-      body.innerHTML = renderPetMarkdownEntries(view.diary, t("petWorkbench.emptyDiary"), "diary");
-      bindPetDocEditors("diary", load);
     }
   };
 
@@ -6763,9 +6790,8 @@ async function bindPetDiaryPage(): Promise<void> {
     loadError = "";
     if (!view) showLoadState();
     try {
-      view = await withTimeout(api.petWorkbench({approvalLimit, diaryLimit, worklogLimit}), 12000, t("petWorkbench.loadTimeout"));
-      const pending = view.approvals.filter(item => item.status === "pending").length;
-      if (count) count.textContent = pending > 0 ? String(pending) : "";
+      view = await withTimeout(api.petWorkbench({approvalLimit, worklogLimit}), 12000, t("petWorkbench.loadTimeout"));
+      void refreshPetPendingApprovalCount();
       const degradedChannels = (view.channels || []).filter(item => item.degraded).length;
       if (channelCount) channelCount.textContent = degradedChannels > 0 ? String(degradedChannels) : "";
       renderTab();
@@ -6807,6 +6833,7 @@ async function bindPetDiaryPage(): Promise<void> {
         button.disabled = true;
         try {
           await api.resolvePetApproval(id, decision, decisionReason);
+          await refreshPetPendingApprovalCount(true);
           await load();
         } catch (error) {
           button.disabled = false;
@@ -6863,7 +6890,7 @@ async function bindPetDiaryPage(): Promise<void> {
   };
 
   tabs.forEach(tab => tab.addEventListener("click", () => {
-    active = tab.dataset.petWorkbenchTab || "diary";
+    active = tab.dataset.petWorkbenchTab || "core";
     petWorkbenchTab = active;
     renderTab();
   }));
@@ -6872,7 +6899,7 @@ async function bindPetDiaryPage(): Promise<void> {
 
 function renderPetMarkdownEntries(entries: Array<{date: string; content: string}>, empty: string, section: string): string {
   return entries.length
-    ? entries.map(entry => `<details class="pet-diary-entry"><summary>${escapeHTML(entry.date)}<button type="button" class="pet-doc-edit" data-pet-doc-section="${escapeHTML(section)}" data-pet-doc-name="${escapeHTML(entry.date)}.md">${t("common.edit")}</button></summary><pre>${escapeHTML(entry.content)}</pre></details>`).join("")
+    ? entries.map(entry => `<details class="pet-doc-entry"><summary>${escapeHTML(entry.date)}<button type="button" class="pet-doc-edit" data-pet-doc-section="${escapeHTML(section)}" data-pet-doc-name="${escapeHTML(entry.date)}.md">${t("common.edit")}</button></summary><pre>${escapeHTML(entry.content)}</pre></details>`).join("")
     : `<div class="field-help">${escapeHTML(empty)}</div>`;
 }
 

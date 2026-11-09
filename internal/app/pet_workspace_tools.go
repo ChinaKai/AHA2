@@ -19,14 +19,6 @@ func normalizePetEntryDate(value string, now time.Time) (string, error) {
 	return value, nil
 }
 
-func (s *Service) PetWriteDiary(ctx context.Context, date, content string) error {
-	date, err := normalizePetEntryDate(date, s.now().UTC())
-	if err != nil {
-		return err
-	}
-	return s.PetSaveWorkbenchDocument(ctx, "diary", date+".md", content)
-}
-
 func (s *Service) PetWriteWorklog(ctx context.Context, date, content string) error {
 	date, err := normalizePetEntryDate(date, s.now().UTC())
 	if err != nil {

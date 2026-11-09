@@ -57,3 +57,33 @@ export function renderPetApprovalOptionPicker(approvalID: string, options: strin
 export function selectedPetApprovalOption(options: string[], selected: string | undefined): string {
   return selected && options.includes(selected) ? selected : "";
 }
+
+export function petPendingApprovalBadge(pending: number): string {
+  return pending > 0 ? `<span class="task-tool-badge" aria-hidden="true">${pending > 99 ? "99+" : pending}</span>` : "";
+}
+
+export function createPetApprovalCounter(read: () => Promise<{pending: number}>, changed: () => void) {
+  let pending = 0;
+  let inFlight: Promise<void> | null = null;
+  let rerun = false;
+  return {
+    get pending() { return pending; },
+    refresh(afterMutation = false): Promise<void> {
+      if (inFlight) {
+        if (afterMutation) rerun = true;
+        return inFlight;
+      }
+      inFlight = (async () => {
+        do {
+          rerun = false;
+          const result = await read();
+          if (!rerun) {
+            pending = Math.max(0, Math.trunc(Number(result.pending) || 0));
+            changed();
+          }
+        } while (rerun);
+      })().finally(() => { inFlight = null; });
+      return inFlight;
+    },
+  };
+}

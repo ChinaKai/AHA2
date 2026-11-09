@@ -233,7 +233,7 @@ export function mountAssistant(): void {
             <label class="assistant-settings-field">宠物模型（聊天 + 自主行为）<select id="pet-chat-model"></select></label>
           </section>
           <section><h3>恢复出厂设置</h3>
-            <p class="assistant-settings-note">只清理本机宠物 Workspace、Task、日记/工作记录/身份设定、审批与活动记录、聊天记录，并停用本机宠物。宠物项目、同步镜像和其他设备的宠物不受影响；模型、形象和权限设置会保留。</p>
+            <p class="assistant-settings-note">只清理本机宠物 Workspace、Task、工作记录/身份设定、审批与活动记录、聊天记录，并停用本机宠物。宠物项目、同步镜像和其他设备的宠物不受影响；模型、形象和权限设置会保留。</p>
             <button type="button" id="pet-reset-open" class="assistant-settings-trigger danger">恢复出厂设置…</button>
           </section>
           <p id="pet-settings-error" class="assistant-settings-error" hidden></p>
@@ -254,7 +254,7 @@ export function mountAssistant(): void {
         <p>此操作不可恢复，将清理本机：</p>
         <ul>
           <li>宠物 Workspace 和宠物 Task</li>
-          <li>日记、工作记录、身份/原则与开放闭环</li>
+          <li>工作记录、身份/原则与开放闭环</li>
           <li>审批、活动、任务关注和宠物聊天记录</li>
         </ul>
         <p class="assistant-settings-note">宠物项目、同步镜像和其他设备的宠物会保留；模型、形象和权限设置也会保留。本机宠物会被停用，重新启用后才会创建新的宠物 Task。</p>
@@ -1735,18 +1735,4 @@ function escapeHTML(value: unknown): string {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
-}
-
-async function renderPetDiary(): Promise<void> {
-  const list = document.querySelector<HTMLElement>("#pet-diary-list");
-  if (!list) return;
-  try {
-    const result = await api.petDiary();
-    const entries = result.entries || [];
-    list.innerHTML = entries.length
-      ? entries.slice(0, 7).map(entry => `<details class="pet-diary-entry"><summary>${escapeHTML(entry.date)}</summary><pre>${escapeHTML(entry.content)}</pre></details>`).join("")
-      : `<p class="assistant-settings-note">还没有日记。宠物在 Task 里会写到 diary/ 目录。</p>`;
-  } catch (error) {
-    list.innerHTML = `<p class="assistant-settings-note">${escapeHTML(error instanceof Error ? error.message : String(error))}</p>`;
-  }
 }

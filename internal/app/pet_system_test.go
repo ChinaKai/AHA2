@@ -74,13 +74,7 @@ func TestPetSystemSettingsAndWorkbenchEditing(t *testing.T) {
 	if err := fixture.service.PetSaveWorkbenchDocument(fixture.ctx, "core", "identity.md", "# 身份\n\n- 名字：小A\n"); err != nil {
 		t.Fatal(err)
 	}
-	if err := fixture.service.PetSaveWorkbenchDocument(fixture.ctx, "diary", "2026-10-30.md", "今天完成了系统设置。"); err != nil {
-		t.Fatal(err)
-	}
 	if err := fixture.service.PetSaveWorkbenchDocument(fixture.ctx, "worklog", "2026-10-30.md", "验证并部署。"); err != nil {
-		t.Fatal(err)
-	}
-	if err := fixture.service.PetWriteDiary(fixture.ctx, "2026-10-31", "通过 MCP 写日记。"); err != nil {
 		t.Fatal(err)
 	}
 	if err := fixture.service.PetWriteWorklog(fixture.ctx, "2026-10-31", "通过 MCP 写工作记录。"); err != nil {
@@ -92,17 +86,17 @@ func TestPetSystemSettingsAndWorkbenchEditing(t *testing.T) {
 	if err := fixture.service.PetUpdateCore(fixture.ctx, "loops", "# 开放闭环\n\n- [waiting] Task A | 下轮检查 | Task 完成\n"); err != nil {
 		t.Fatal(err)
 	}
-	if err := fixture.service.PetWriteDiary(fixture.ctx, "2026/10/31", "x"); err == nil {
-		t.Fatal("invalid diary date was accepted")
+	if err := fixture.service.PetWriteWorklog(fixture.ctx, "2026/10/31", "x"); err == nil {
+		t.Fatal("invalid worklog date was accepted")
 	}
 	if err := fixture.service.PetSaveWorkbenchDocument(fixture.ctx, "core", "../escape.md", "x"); err == nil {
 		t.Fatal("invalid core document name was accepted")
 	}
-	if err := fixture.service.PetSaveWorkbenchDocument(fixture.ctx, "diary", "../escape.md", "x"); err == nil {
+	if err := fixture.service.PetSaveWorkbenchDocument(fixture.ctx, "worklog", "../escape.md", "x"); err == nil {
 		t.Fatal("path traversal was accepted")
 	}
 	root := fixture.service.petWorkspaceRoot(fixture.ctx)
-	for _, relative := range []string{"core/identity.md", "core/loops.md", "diary/2026-10-30.md", "worklog/2026-10-30.md"} {
+	for _, relative := range []string{"core/identity.md", "core/loops.md", "worklog/2026-10-30.md"} {
 		raw, err := os.ReadFile(filepath.Join(root, relative))
 		if err != nil || len(raw) == 0 {
 			t.Fatalf("read %s: %v", relative, err)
