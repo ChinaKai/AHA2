@@ -25,7 +25,7 @@ func TestPetCodeReviewsForSourceChronologicalOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Insert out of order with IDs opposing creation time. Same-time reviews
-	// must be ordered by ID, independently of insertion order.
+	// must retain insertion order, independently of their random IDs.
 	for _, tc := range []struct {
 		id     string
 		offset time.Duration
@@ -42,8 +42,48 @@ func TestPetCodeReviewsForSourceChronologicalOrder(t *testing.T) {
 		}
 	}
 	ids, err := database.PetCodeReviewsForSource(ctx, source.ID)
-	if err != nil || !slices.Equal(ids, []string{"z-oldest", "b-middle", "c-middle", "a-newest"}) {
-		t.Fatalf("not ordered by created_at then id: %v %v", ids, err)
+	if err != nil || !slices.Equal(ids, []string{"z-oldest", "c-middle", "b-middle", "a-newest"}) {
+		t.Fatalf("not ordered by creation time then insertion order: %v %v", ids, err)
+	}
+}
+
+func TestPetCodeReviewsForSourceSameSecondPrecision(t *testing.T) {
+	ctx := context.Background()
+	database, err := Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	sourceID := attachmentTestTask(t, database)
+	source, err := database.Task(ctx, sourceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := source.CreatedAt.Truncate(time.Second)
+	// Deliberately reverse insertion order: preserve full nanosecond precision,
+	// not SQLite's date-function precision or RFC3339Nano lexical order.
+	for _, tc := range []struct {
+		id string
+		ns time.Duration
+	}{
+		{"a-later", 123450}, {"z-earlier", 123400}, {"whole-second", 0},
+	} {
+		review := source
+		review.ID, review.Code, review.CreatedAt = tc.id, "", base.Add(tc.ns)
+		if err := database.CreateTask(ctx, review); err != nil {
+			t.Fatal(err)
+		}
+		if err := database.CreatePetCodeReviewLink(ctx, review.ID, source.ID); err != nil {
+			t.Fatal(err)
+		}
+		var raw string
+		if err := database.db.QueryRowContext(ctx, `SELECT created_at FROM tasks WHERE id=?`, review.ID).Scan(&raw); err != nil || raw != review.CreatedAt.Format(time.RFC3339Nano) {
+			t.Fatalf("timestamp precision changed: %q %v", raw, err)
+		}
+	}
+	ids, err := database.PetCodeReviewsForSource(ctx, source.ID)
+	if err != nil || !slices.Equal(ids, []string{"whole-second", "z-earlier", "a-later"}) {
+		t.Fatalf("same-second order incorrect: %v %v", ids, err)
 	}
 }
 
