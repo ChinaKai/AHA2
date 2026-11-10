@@ -318,7 +318,11 @@ func (s *Service) PetWorkStateWithOptions(ctx context.Context, opts PetWorkState
 		}
 	}
 	if len(state.Work) == 0 && state.PendingApprovals == 0 && len(state.OpenTasks) == 0 {
-		state.Note = "没有待处理审批、未闭环任务或近期工作记录。"
+		if opts.HistoryLimit == 0 {
+			state.Note = "没有待处理审批或未闭环任务；历史列表未请求（history_limit=0）。"
+		} else {
+			state.Note = "没有待处理审批、未闭环任务或近期工作记录。"
+		}
 	}
 	if !opts.IncludeTurnResults && opts.HistoryLimit <= petWorkStateDefaultHistoryLimit {
 		state.fitDefaultBudget(petWorkStateDefaultBudgetBytes)
@@ -336,9 +340,17 @@ func (state *PetWorkState) fitDefaultBudget(limit int) {
 		return
 	}
 	fullApprovals, fullWork := len(state.Approvals), len(state.Work)
+	// The truncation marker is part of the payload. Set it before measuring so
+	// its bytes cannot push an otherwise-fitting result back over the budget.
+	state.HistoryTruncated = true
+	data, err = json.Marshal(state)
+	if err != nil {
+		return
+	}
 	for len(data) > limit && (len(state.Approvals) > 0 || len(state.Work) > 0) {
 		// Trim the longer list first so neither history disappears while the
-		// other keeps several large rows.
+		// other keeps several large rows. Slices are newest-first, so the tail
+		// is the oldest/processed history.
 		switch {
 		case len(state.Approvals) > 0 && len(state.Approvals) >= len(state.Work):
 			state.Approvals = state.Approvals[:len(state.Approvals)-1]
@@ -350,7 +362,10 @@ func (state *PetWorkState) fitDefaultBudget(limit int) {
 			return
 		}
 	}
-	state.HistoryTruncated = len(state.Approvals) < fullApprovals || len(state.Work) < fullWork
+	if len(state.Approvals) == fullApprovals && len(state.Work) == fullWork {
+		// Only fixed fields exceed the budget; no history row was dropped.
+		state.HistoryTruncated = false
+	}
 }
 
 func petWorkStateTurnResult(value string, chars int) string {
