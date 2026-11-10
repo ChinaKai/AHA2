@@ -28,6 +28,7 @@ Luckfox 语音桥在宿主本地完成 STT 后，通过这个接口把文字写�
 {
   "ok": true,
   "queued": true,
+  "persisted": true,
   "message_id": "message_...",
   "turn_id": "turn_...",
   "started": true,
@@ -36,6 +37,21 @@ Luckfox 语音桥在宿主本地完成 STT 后，通过这个接口把文字写�
 ```
 
 同一 `client_request_id` 重试时不会重复插入，返回 `duplicate: true` 和第一次真正入库的 `message_id`。并发请求也不会返回临时 ID；抢到幂等键的那个请求负责调度，其他请求不重复调度。响应不回显正文和 secret。
+
+如果消息已经入库，但调度时 Task 已经处于终态或 draft，返回 `409 Conflict`，并明确区分“已持久化但未调度”：
+
+```json
+{
+  "ok": false,
+  "error": "task_not_runnable",
+  "persisted": true,
+  "queued": false,
+  "message_id": "message_...",
+  "duplicate": true
+}
+```
+
+这条消息保留为 pending，不会创建 Turn；同一请求重试仍返回同样的 409。Task 重新打开后，重试会调度这条消息。审计同样记录这次持久化结果，`started` 为 `false`。
 
 ## Secret Store
 
@@ -61,7 +77,9 @@ secret 至少 32 字节，只接受可打印 ASCII，不能带空白。
 - `source` 写到 `messages.source` 和 inbox payload；`client_request_id` 写到 `messages.client_request_id`，并建唯一索引。
 - 重试时用 `task_id + 规范化 content + source` 作为请求指纹。应用层和 Store 事务内都会比较指纹；并发后到的请求如果正文或 source 不一致，返回 409，不会静默拿到别人的 `duplicate=true`。
 - 重试在调度前重新读取 Task 状态。draft、completed、cancelled、blocked 的 Task 返回 409 `task_not_runnable`，不会在终态 Task 上补起挂起消息的新 Turn。
-- 调度在 `ClaimInboxAndCreateTurn` 的写事务内再次读取 Task 状态。completed/cancelled/blocked 与调度并发时，要么终态先提交、claim 拒绝，要么 claim 先创建 Turn、`CompleteTask` 因存在活动 Turn 而拒绝；不会在终态之后新建 Turn。
+- 调度在 `ClaimInboxAndCreateTurn` 的写事务内再次读取 Task 状态。completed/cancelled/blocked 与调度并发时，要么终态先提交、claim 拒绝，要么 claim 先创建 Turn；不会在终态之后新建 Turn。
+- `CompleteTask` 的状态更新带 `NOT EXISTS(queued/preparing/starting/running/waiting Turn)` 条件，和活动 Turn 检查在同一条写 SQL 里。claim 先创建 Turn 时完成操作返回 `ErrActiveTurn`，不会留下 completed + 活动 Turn。
+- 当前契约选 B：消息已入库但调度遇到终态时，保留 pending 消息，返回 `persisted:true` + `message_id` + `queued:false`；409 只表示未调度，不表示未持久化。
 - `ListMessages` 会读取 `source` 和 `client_request_id`，标准消息读取不再丢 v129 元数据。
 - 接口不自动批准审批、不执行工具、不改变任何权限。高风险动作仍然走原有的 owner 审批。
 
@@ -78,11 +96,11 @@ secret 至少 32 字节，只接受可打印 ASCII，不能带空白。
 | source 不是 `voice` | 400 `source_invalid` |
 | client_request_id 超过 128 或含不可打印字符 | 400 `client_request_id_invalid` |
 | 同一 client_request_id 用于不同 Task、或正文/source 不一致 | 409 `client_request_id_conflict` |
-| 重试时 Task 已处于终态或 draft | 409 `task_not_runnable` |
+| Task 已处于终态或 draft，消息未调度 | 409 `task_not_runnable`，带 `persisted`/`message_id`/`queued:false` |
 | query 中出现敏感参数名 | 400 `query_secret_forbidden` |
 | 认证成功后每分钟超过 30 次 | 429 `rate_limited` |
 
-审计事件 `local.owner_message.ingest` 记录 `task_id`、`source`、`content_length`、`message_id`、`client_request_id`、`duplicate`、`started`。不记录正文，也不记录 secret。
+审计事件 `local.owner_message.ingest` 记录 `task_id`、`source`、`content_length`、`message_id`、`client_request_id`、`duplicate`、`persisted`、`started`。不记录正文，也不记录 secret。
 
 ## 威胁模型与已知限制
 
@@ -91,3 +109,4 @@ secret 至少 32 字节，只接受可打印 ASCII，不能带空白。
 - Secret Store 在启动时载入内存，修改 secret 需要重启 AHA。不要在 AHA 运行时并发修改 `secrets.json`。
 - 限流是单进程内存固定窗口，服务重启后清零。
 - 白名单写死在 `internal/app/local_ingest.go` 的 `localOwnerIngestTaskAllowed`，新增 Task 需要改代码。
+- 终态 Task 上的 pending 消息不会自动删除；它会在 Task 重新打开后由同一条 `client_request_id` 重试调度。如果 owner 希望彻底丢弃，需要在后续单独设计清理接口。

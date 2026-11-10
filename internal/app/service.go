@@ -864,7 +864,9 @@ func (s *Service) submitMessageWithSourceResult(ctx context.Context, taskID, age
 	}
 	turn, started, err := s.scheduleAgent(ctx, task.ID, agentID)
 	if err != nil {
-		return submittedMessage{}, err
+		// The message is already committed at this point, so keep its identity
+		// for callers that must report a persisted-but-unscheduled result.
+		return submittedMessage{MessageID: message.ID, Duplicate: duplicate}, err
 	}
 	if !started {
 		return submittedMessage{MessageID: message.ID, Duplicate: duplicate}, nil
@@ -962,11 +964,8 @@ func (s *Service) completeTask(ctx context.Context, taskID string, decision *dom
 	if task.Status == domain.TaskCompleted {
 		return nil
 	}
-	if _, activeErr := s.store.ActiveTurn(ctx, taskID); activeErr == nil {
-		return store.ErrActiveTurn
-	} else if !errors.Is(activeErr, sql.ErrNoRows) {
-		return activeErr
-	}
+	// The store update is guarded by NOT EXISTS(active turn); a scheduler that
+	// wins the race makes it return ErrActiveTurn instead of completing.
 	now := s.now().UTC()
 	if err := s.store.CompleteTaskWithReviewDecision(ctx, task.ID, task.Status, timeString(now), decision); err != nil {
 		return err

@@ -25,6 +25,10 @@ type petTaskFixture struct {
 }
 
 func newPetTaskFixture(t *testing.T) *petTaskFixture {
+	return newPetTaskFixtureWithExecutor(t, &stubExecutor{})
+}
+
+func newPetTaskFixtureWithExecutor(t *testing.T, executor Executor) *petTaskFixture {
 	t.Helper()
 	ctx := context.Background()
 	databasePath := filepath.Join(t.TempDir(), "aha2.db")
@@ -64,7 +68,7 @@ func newPetTaskFixture(t *testing.T) *petTaskFixture {
 	}
 	fixture := &petTaskFixture{
 		ctx: ctx, database: database, databasePath: databasePath,
-		service:  NewService(database, secretStore, &stubExecutor{}),
+		service:  NewService(database, secretStore, executor),
 		provider: provider, model: model, modelEnv: envGroup, createdAt: now,
 	}
 	t.Cleanup(func() {

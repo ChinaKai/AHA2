@@ -48,6 +48,16 @@ type LocalOwnerMessageResult struct {
 	Duplicate bool
 }
 
+// LocalIngestNotScheduledError means the message is durable but the Task was
+// already terminal when scheduling ran, so no Turn was created. The caller
+// must report persisted=true together with MessageID rather than pretending the
+// write was rolled back.
+type LocalIngestNotScheduledError struct{}
+
+func (*LocalIngestNotScheduledError) Error() string { return "task is not runnable" }
+
+func (*LocalIngestNotScheduledError) Unwrap() error { return ErrLocalIngestTaskNotRunnable }
+
 // SubmitLocalOwnerMessage writes a local bridge message as the owner into an
 // allowlisted Task and drives the normal Turn pipeline. It never approves
 // anything, executes tools, or changes permissions by itself.
@@ -91,7 +101,7 @@ func (s *Service) SubmitLocalOwnerMessage(ctx context.Context, input LocalOwnerM
 				return LocalOwnerMessageResult{}, taskErr
 			}
 			if !localOwnerIngestTaskRunnable(task.Status) {
-				return LocalOwnerMessageResult{}, ErrLocalIngestTaskNotRunnable
+				return LocalOwnerMessageResult{MessageID: existing.ID, Duplicate: true}, &LocalIngestNotScheduledError{}
 			}
 			turn, started, scheduleErr := s.scheduleAgent(ctx, taskID, "main")
 			if scheduleErr != nil {
@@ -111,6 +121,9 @@ func (s *Service) SubmitLocalOwnerMessage(ctx context.Context, input LocalOwnerM
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return LocalOwnerMessageResult{}, ErrLocalIngestTaskNotFound
+	}
+	if errors.Is(err, store.ErrTaskNotRunnable) {
+		return LocalOwnerMessageResult{MessageID: submitted.MessageID}, &LocalIngestNotScheduledError{}
 	}
 	if err != nil {
 		return LocalOwnerMessageResult{}, err

@@ -32,6 +32,8 @@ func (s *Store) migrateTaskReviewDecision(ctx context.Context) error {
 
 // CompleteTaskWithReviewDecision writes the completion and its audit declaration
 // in the same status update. Owner completion (nil) clears any old declaration.
+// The update is guarded by NOT EXISTS(active turn), so it cannot commit while a
+// scheduler is creating a Turn for the same Task.
 func (s *Store) CompleteTaskWithReviewDecision(ctx context.Context, id string, from domain.TaskStatus, at string, decision *domain.TaskReviewDecision) error {
-	return s.updateTaskStatus(ctx, id, from, domain.TaskCompleted, at, at, decision)
+	return s.updateTaskStatus(ctx, id, from, domain.TaskCompleted, at, at, decision, true)
 }

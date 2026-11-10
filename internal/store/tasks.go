@@ -459,10 +459,14 @@ func (s *Store) SetTaskStatusListener(listener TaskStatusListener) {
 }
 
 func (s *Store) UpdateTaskStatus(ctx context.Context, id string, from, to domain.TaskStatus, updatedAt, completedAt string) error {
-	return s.updateTaskStatus(ctx, id, from, to, updatedAt, completedAt, nil)
+	return s.updateTaskStatus(ctx, id, from, to, updatedAt, completedAt, nil, false)
 }
 
-func (s *Store) updateTaskStatus(ctx context.Context, id string, from, to domain.TaskStatus, updatedAt, completedAt string, decision *domain.TaskReviewDecision) error {
+// updateTaskStatus writes the status with a compare-and-set on the current
+// value. guardNoActiveTurn additionally makes the write conditional on there
+// being no queued/active Turn in the same statement, so task completion cannot
+// race a scheduler that just created a Turn.
+func (s *Store) updateTaskStatus(ctx context.Context, id string, from, to domain.TaskStatus, updatedAt, completedAt string, decision *domain.TaskReviewDecision, guardNoActiveTurn bool) error {
 	if err := domain.ValidateTaskTransition(from, to); err != nil {
 		return err
 	}
@@ -476,12 +480,24 @@ func (s *Store) updateTaskStatus(ctx context.Context, id string, from, to domain
 	}
 	query += ` WHERE id=? AND status=?`
 	args = append(args, id, from)
+	if guardNoActiveTurn {
+		query += ` AND NOT EXISTS (
+			SELECT 1 FROM turns
+			WHERE turns.task_id=? AND turns.status IN ('queued','preparing','starting','running','waiting')
+		)`
+		args = append(args, id)
+	}
 	result, err := s.db.ExecContext(ctx, query, args...)
 	if err != nil {
 		return err
 	}
 	count, _ := result.RowsAffected()
 	if count != 1 {
+		if guardNoActiveTurn {
+			if _, activeErr := s.ActiveTurn(ctx, id); activeErr == nil {
+				return ErrActiveTurn
+			}
+		}
 		return fmt.Errorf("task status changed concurrently")
 	}
 	s.statusMu.RLock()

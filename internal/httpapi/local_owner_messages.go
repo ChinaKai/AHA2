@@ -97,6 +97,22 @@ func (s *Server) localOwnerMessageIngest(writer http.ResponseWriter, request *ht
 		Source: payload.Source, ClientRequestID: payload.ClientRequestID,
 	})
 	if err != nil {
+		var notScheduled *app.LocalIngestNotScheduledError
+		if errors.As(err, &notScheduled) {
+			// Contract B: the message is durable but no Turn was created because
+			// the Task became terminal before the claim. Report that explicitly
+			// instead of hiding the persisted row behind a bare 409.
+			s.auditLocalOwnerMessage(request, payload, result)
+			writeJSON(writer, http.StatusConflict, map[string]any{
+				"ok":         false,
+				"error":      "task_not_runnable",
+				"persisted":  result.MessageID != "",
+				"message_id": result.MessageID,
+				"duplicate":  result.Duplicate,
+				"queued":     false,
+			})
+			return
+		}
 		status, code := localOwnerMessageErrorStatus(err)
 		writeError(writer, status, code)
 		return
@@ -105,6 +121,7 @@ func (s *Server) localOwnerMessageIngest(writer http.ResponseWriter, request *ht
 	response := map[string]any{
 		"ok":         true,
 		"queued":     true,
+		"persisted":  true,
 		"message_id": result.MessageID,
 		"started":    result.Turn.ID != "",
 		"duplicate":  result.Duplicate,
@@ -249,6 +266,7 @@ func (s *Server) auditLocalOwnerMessage(request *http.Request, payload localOwne
 		"message_id":        result.MessageID,
 		"client_request_id": strings.TrimSpace(payload.ClientRequestID),
 		"duplicate":         result.Duplicate,
+		"persisted":         result.MessageID != "",
 		"started":           result.Turn.ID != "",
 	}
 	_ = s.store.AppendAudit(

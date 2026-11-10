@@ -623,7 +623,9 @@ func TestLocalOwnerIngestRetryFingerprintAndTerminalTask(t *testing.T) {
 		t.Fatal(err)
 	}
 	terminalStatus, terminal := localIngestResult(t, fixture.post(t, localOwnerIngestTestSecret, firstBody))
-	if terminalStatus != http.StatusConflict || terminal["error"] != "task_not_runnable" {
+	if terminalStatus != http.StatusConflict || terminal["error"] != "task_not_runnable" ||
+		terminal["persisted"] != true || terminal["queued"] != false ||
+		terminal["duplicate"] != true || terminal["message_id"] != first["message_id"] {
 		t.Fatalf("terminal retry status=%d result=%#v", terminalStatus, terminal)
 	}
 
@@ -640,6 +642,53 @@ func TestLocalOwnerIngestRetryFingerprintAndTerminalTask(t *testing.T) {
 	if turns != 1 {
 		t.Fatalf("turn count=%d, want 1", turns)
 	}
+}
+
+func TestLocalOwnerIngestPersistedButNotScheduled(t *testing.T) {
+	fixture := newLocalIngestFixture(t, true, localOwnerIngestTestSecret)
+	now := time.Now().UTC()
+	requestID := "pending-terminal-1"
+	message := domain.Message{
+		ID: domain.NewID("message"), TaskID: fixture.petTaskID, Role: "user", Sender: "owner",
+		Content: "待调度", Source: "voice", ClientRequestID: requestID, CreatedAt: now,
+	}
+	if _, _, _, _, _, _, err := fixture.database.EnqueueLocalOwnerMessage(fixture.ctx, message, "main", nil); err != nil {
+		t.Fatal(err)
+	}
+	task, err := fixture.database.Task(fixture.ctx, fixture.petTaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.database.UpdateTaskStatus(fixture.ctx, fixture.petTaskID, task.Status, domain.TaskCompleted, time.Now().UTC().Format(time.RFC3339Nano), time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	body := localIngestBody(fixture.petTaskID, "待调度", "voice", requestID)
+	status, result := localIngestResult(t, fixture.post(t, localOwnerIngestTestSecret, body))
+	if status != http.StatusConflict || result["error"] != "task_not_runnable" ||
+		result["persisted"] != true || result["queued"] != false ||
+		result["duplicate"] != true || result["message_id"] != message.ID {
+		t.Fatalf("terminal persisted status=%d result=%#v", status, result)
+	}
+	turns, err := fixture.database.TaskTurnCount(fixture.ctx, fixture.petTaskID)
+	if err != nil || turns != 0 {
+		t.Fatalf("turns=%d err=%v, want 0", turns, err)
+	}
+	if count := countMessagesWithContent(t, fixture.database, fixture.petTaskID, "待调度"); count != 1 {
+		t.Fatalf("message count=%d", count)
+	}
+
+	if err := fixture.database.UpdateTaskStatus(fixture.ctx, fixture.petTaskID, domain.TaskCompleted, domain.TaskWaitingUser, time.Now().UTC().Format(time.RFC3339Nano), ""); err != nil {
+		t.Fatal(err)
+	}
+	status, result = localIngestResult(t, fixture.post(t, localOwnerIngestTestSecret, body))
+	if status != http.StatusAccepted || result["duplicate"] != true || result["started"] != true || result["persisted"] != true {
+		t.Fatalf("reopened retry status=%d result=%#v", status, result)
+	}
+	turns, err = fixture.database.TaskTurnCount(fixture.ctx, fixture.petTaskID)
+	if err != nil || turns != 1 {
+		t.Fatalf("turns=%d err=%v, want 1 after reopen", turns, err)
+	}
+	waitForTaskStatus(t, fixture.database, fixture.petTaskID, domain.TaskWaitingUser)
 }
 
 func TestLocalOwnerIngestFeatureOffIsNotRouted(t *testing.T) {
