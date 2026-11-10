@@ -778,7 +778,10 @@ func petToolAllowed(assistant domain.OwnerAssistant, name string) bool {
 		"aha_mail_resources", "aha_create_mail_account", "aha_update_mail_account",
 		"aha_create_mail_template", "aha_update_mail_template",
 		"aha_create_mail_binding", "aha_update_mail_binding",
-		"aha_delete_mail_resource", "aha_task_mail", "aha_update_task_mail":
+		"aha_delete_mail_resource", "aha_task_mail", "aha_update_task_mail",
+		"aha_list_mcp_servers", "aha_test_mcp_server", "aha_list_task_mcp_servers",
+		"aha_set_task_mcp_servers", "aha_request_mcp_server_create",
+		"aha_request_mcp_server_update", "aha_request_mcp_server_delete":
 		return assistant.PetAllowManageSystem
 	case "aha_list_projects":
 		return assistant.PetAllowViewTasks || assistant.PetAllowCreateTasks || assistant.PetAllowCreateWorkspaces
@@ -1541,6 +1544,62 @@ func ahaPetTools() []gateway.ChatTool {
 				"limit":   map[string]any{"type": "integer", "minimum": 1, "maximum": 50},
 			}, "required": []string{"task_id"},
 		}},
+		{Name: "aha_list_mcp_servers", Description: "只读列出 MCP server 的 id、name、transport、enabled、builtin、health 和工具数量；只返回 env/header 键名，绝不返回值。", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{},
+		}},
+		{Name: "aha_test_mcp_server", Description: "对指定 MCP 做只读连通与 tools/list 探测，返回 health、工具名和脱敏后的错误；不修改配置。", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"server_id": map[string]any{"type": "string"},
+			}, "required": []string{"server_id"},
+		}},
+		{Name: "aha_list_task_mcp_servers", Description: "只读查看某个 Task 绑定的 MCP server ID 与健康摘要；不返回值。", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"task_id": map[string]any{"type": "string"},
+			}, "required": []string{"task_id"},
+		}},
+		{Name: "aha_set_task_mcp_servers", Description: "设置 Task 绑定的 MCP server ID，只允许已存在且 enabled 的非自动注入 server。宠物可直接设置 task_pet；其他 Task 会创建 Owner 审批。", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"task_id":    map[string]any{"type": "string"},
+				"server_ids": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"reason":     map[string]any{"type": "string", "description": "设置其他 Task 时必填；至少 8 个字符"},
+			}, "required": []string{"task_id", "server_ids"},
+		}},
+		{Name: "aha_request_mcp_server_create", Description: "提交新增外部 MCP 的 Owner 审批；只创建审批，不保存。payload 只记录 env/header 键名，不接收 secret 值；stdio 禁止 shell 包装命令。外部 MCP 会以 AHA 服务账号权限执行，批准前务必核对来源。", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"name":        map[string]any{"type": "string"},
+				"server_id":   map[string]any{"type": "string", "description": "可选；缺省时自动生成"},
+				"description": map[string]any{"type": "string"},
+				"transport":   map[string]any{"type": "string", "enum": []string{"http", "stdio"}},
+				"command":     map[string]any{"type": "string", "description": "stdio 可执行文件；不能是 shell、cmd/.bat/.ps1 或脚本宿主"},
+				"args":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"url":         map[string]any{"type": "string", "description": "http(s) URL；不能内嵌凭据或查询参数"},
+				"env_keys":    map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "只填键名；值由主人在 Web 或 Secret Store 填写"},
+				"header_keys": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "只填键名；值由主人在 Web 或 Secret Store 填写"},
+				"enabled":     map[string]any{"type": "boolean"},
+				"reason":      map[string]any{"type": "string", "description": "为什么需要新增；至少 8 个字符"},
+			}, "required": []string{"name", "transport", "reason"},
+		}},
+		{Name: "aha_request_mcp_server_update", Description: "提交修改外部 MCP 的 Owner 审批；只创建审批，不改配置。secret 值不进入审批，由主人或 Secret Store 保留。内置 MCP 拒绝修改。", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"server_id":   map[string]any{"type": "string"},
+				"name":        map[string]any{"type": "string"},
+				"description": map[string]any{"type": "string"},
+				"transport":   map[string]any{"type": "string", "enum": []string{"http", "stdio"}},
+				"command":     map[string]any{"type": "string"},
+				"args":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"url":         map[string]any{"type": "string"},
+				"env_keys":    map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"header_keys": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"enabled":     map[string]any{"type": "boolean"},
+				"reason":      map[string]any{"type": "string", "description": "为什么修改；至少 8 个字符"},
+			}, "required": []string{"server_id", "reason"},
+		}},
+		{Name: "aha_request_mcp_server_delete", Description: "提交删除外部 MCP 的 Owner 审批；只创建审批，不改配置。内置 MCP 拒绝删除。", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"server_id": map[string]any{"type": "string"},
+				"reason":    map[string]any{"type": "string", "description": "为什么删除；至少 8 个字符"},
+			}, "required": []string{"server_id", "reason"},
+		}},
 		{Name: "pet_watch_task", Description: "关注一个 Task 的状态变化；完成/失败/阻塞/等待时会主动通知", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{"task_id": map[string]any{"type": "string"}}, "required": []string{"task_id"},
 		}},
@@ -1658,6 +1717,83 @@ func (s *Service) PetMCPTool(ctx context.Context, name string, args json.RawMess
 			return "", err
 		}
 		data, _ := json.Marshal(detail)
+		return string(data), nil
+	case "aha_list_mcp_servers":
+		view, err := s.PetListMCPServers(ctx)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(view)
+		return string(data), nil
+	case "aha_test_mcp_server":
+		var input struct {
+			ServerID string `json:"server_id"`
+		}
+		if err := decodePetMCPAdminJSON(args, &input); err != nil {
+			return "", err
+		}
+		result, err := s.PetTestMCPServer(ctx, input.ServerID)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(result)
+		return string(data), nil
+	case "aha_list_task_mcp_servers":
+		var input struct {
+			TaskID string `json:"task_id"`
+		}
+		if err := decodePetMCPAdminJSON(args, &input); err != nil {
+			return "", err
+		}
+		view, err := s.PetListTaskMCPServers(ctx, input.TaskID)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(view)
+		return string(data), nil
+	case "aha_set_task_mcp_servers":
+		var input PetSetTaskMCPServersInput
+		if err := decodePetMCPAdminJSON(args, &input); err != nil {
+			return "", err
+		}
+		view, err := s.PetSetTaskMCPServers(ctx, input)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(view)
+		return string(data), nil
+	case "aha_request_mcp_server_create":
+		var input PetMCPServerCreateInput
+		if err := decodePetMCPAdminJSON(args, &input); err != nil {
+			return "", err
+		}
+		approval, err := s.PetRequestMCPServerCreate(ctx, input)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(approval)
+		return string(data), nil
+	case "aha_request_mcp_server_update":
+		var input PetMCPServerUpdateInput
+		if err := decodePetMCPAdminJSON(args, &input); err != nil {
+			return "", err
+		}
+		approval, err := s.PetRequestMCPServerUpdate(ctx, input)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(approval)
+		return string(data), nil
+	case "aha_request_mcp_server_delete":
+		var input PetMCPServerDeleteInput
+		if err := decodePetMCPAdminJSON(args, &input); err != nil {
+			return "", err
+		}
+		approval, err := s.PetRequestMCPServerDelete(ctx, input)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(approval)
 		return string(data), nil
 	case "aha_list_projects":
 		projects, err := s.PetProjectCatalog(ctx)
@@ -2689,6 +2825,12 @@ func (s *Service) PetMCPTool(ctx context.Context, name string, args json.RawMess
 		if err := json.Unmarshal(args, &input); err != nil {
 			return "", fmt.Errorf("invalid approval request")
 		}
+		// MCP management kinds are reserved for the dedicated tools below. They
+		// create server-side titles/summaries/risk and enforce manage_system;
+		// letting the generic entry forge them would bypass both.
+		if isPetMCPApprovalKind(input.Kind) {
+			return "", fmt.Errorf("MCP 管理审批只允许通过专用工具 aha_request_mcp_server_* 或 aha_set_task_mcp_servers 提交")
+		}
 		if strings.EqualFold(strings.TrimSpace(input.Risk), "high") {
 			reason, reasonErr := requirePetApprovalReason(input.Reason)
 			if reasonErr != nil {
@@ -2717,6 +2859,15 @@ func (s *Service) PetMCPTool(ctx context.Context, name string, args json.RawMess
 		items, err := s.PetApprovals(ctx, input.Limit)
 		if err != nil {
 			return "", err
+		}
+		// Update approvals can contain command/args/URL fragments. The pet only
+		// needs the decision and the server-side summary, so do not echo the
+		// stored payload back. This also contains legacy approvals created
+		// before update payloads were reduced to a field diff.
+		for index := range items {
+			if strings.EqualFold(strings.TrimSpace(items[index].Kind), petMCPServerUpdateKind) {
+				items[index].Payload = "{}"
+			}
 		}
 		data, _ := json.Marshal(items)
 		return string(data), nil
