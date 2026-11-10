@@ -38,7 +38,11 @@ type workspaceMetadata struct {
 	UpdatedAt     time.Time `json:"updated_at"`
 }
 
-func exportTaskGraph(ctx context.Context, database *store.Store, deviceID string) ([]domain.SyncObject, error) {
+func conversationObjectKey(deviceID string, item domain.ConversationItem) string {
+	return TypeConversation + ":" + deviceID + ":" + item.ID + ":" + timeVersion(item.CreatedAt)
+}
+
+func exportTaskGraph(ctx context.Context, database *store.Store, deviceID string, applied appliedLookup, pendingConversations map[string][]domain.ConversationItem) ([]domain.SyncObject, error) {
 	var result []domain.SyncObject
 	add := func(kind, id, projectID, taskID string, value any, version string) error {
 		raw, err := json.Marshal(value)
@@ -148,9 +152,14 @@ func exportTaskGraph(ctx context.Context, database *store.Store, deviceID string
 					return nil, err
 				}
 			}
-			conversation, err := database.SyncConversation(ctx, task.ID)
-			if err != nil {
-				return nil, err
+			var conversation []domain.ConversationItem
+			if applied == nil {
+				conversation, err = database.SyncConversation(ctx, task.ID)
+				if err != nil {
+					return nil, err
+				}
+			} else {
+				conversation = pendingConversations[task.ID]
 			}
 			for _, item := range conversation {
 				item.Sequence = 0
@@ -181,6 +190,87 @@ func exportTaskGraph(ctx context.Context, database *store.Store, deviceID string
 				}
 			}
 		}
+	}
+	return result, nil
+}
+
+// conversationFullScanThreshold bounds the random row lookups used to load a
+// small set of new conversation items. A large first-sync backlog is cheaper
+// to read with one sequential table scan. It is a variable so tests can cover
+// both paths with a small history.
+var conversationFullScanThreshold = 2000
+
+// pendingConversationItems returns the conversation rows that still need an
+// export envelope, grouped by task. A large history is mostly immutable for
+// sync purposes: its idempotency key includes the creation time, not the
+// mutable payload. The covering task index provides the full (id, created_at)
+// identity list without touching row pages, and the applied-key range removes
+// exactly the identities already exported, so summaries are loaded only for
+// genuinely new rows.
+func pendingConversationItems(ctx context.Context, database *store.Store, deviceID string, taskIDs []string) (map[string][]domain.ConversationItem, error) {
+	prefix := TypeConversation + ":" + deviceID + ":"
+	// The idempotency key carries the row's created_at version, so the filter
+	// compares the full identity. A row can keep its id while its version
+	// changes: FinalizeTurnReply rewrites created_at when it replaces a
+	// placeholder with the durable reply.
+	appliedKeys := map[string]struct{}{}
+	if err := database.ForEachSyncAppliedKeyRange(ctx, prefix, func(key string) error {
+		appliedKeys[key] = struct{}{}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	var unappliedIDs []string
+	if err := database.ForEachConversationSyncIdentityForTasks(ctx, taskIDs, func(id string, createdAt time.Time) error {
+		identity := conversationObjectKey(deviceID, domain.ConversationItem{ID: id, CreatedAt: createdAt})
+		if _, ok := appliedKeys[identity]; !ok {
+			unappliedIDs = append(unappliedIDs, id)
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	if len(unappliedIDs) == 0 {
+		return nil, nil
+	}
+	var items []domain.ConversationItem
+	if len(unappliedIDs) <= conversationFullScanThreshold {
+		loaded, err := database.ConversationItemsByID(ctx, unappliedIDs)
+		if err != nil {
+			return nil, err
+		}
+		items = loaded
+	} else {
+		pendingIDs := make(map[string]struct{}, len(unappliedIDs))
+		for _, id := range unappliedIDs {
+			pendingIDs[id] = struct{}{}
+		}
+		if err := database.ForEachConversationMetadata(ctx, func(item domain.ConversationItem) error {
+			if _, ok := pendingIDs[item.ID]; ok {
+				items = append(items, item)
+			}
+			return nil
+		}); err != nil {
+			return nil, err
+		}
+		ids := make([]string, len(items))
+		for index := range items {
+			ids[index] = items[index].ID
+		}
+		summaries, err := database.SyncConversationSummaries(ctx, ids)
+		if err != nil {
+			return nil, err
+		}
+		for index := range items {
+			items[index].Summary = summaries[items[index].ID]
+		}
+	}
+	result := make(map[string][]domain.ConversationItem)
+	for _, item := range items {
+		result[item.TaskID] = append(result[item.TaskID], item)
+	}
+	if len(result) == 0 {
+		return nil, nil
 	}
 	return result, nil
 }

@@ -27,6 +27,10 @@ type Runner struct {
 	PassphraseRef   string
 	SecretSelection *SecretSelection
 	Progress        func(phase, detail string, completed int)
+	// OnPreview is called by RunOnce after it has computed the same summary
+	// Preview would report. Scheduled runs set it so the authoritative export
+	// is not repeated just to fill the progress summary.
+	OnPreview func(Preview)
 }
 
 type Preview struct {
@@ -44,19 +48,12 @@ func (r Runner) Preview(ctx context.Context) (Preview, error) {
 	if err != nil {
 		return Preview{}, err
 	}
-	objects, err := ExportBusinessObjectsForDevice(ctx, r.Store, settings.DeviceID)
+	objects, err := ExportPendingBusinessObjectsForDevice(ctx, r.Store, settings.DeviceID)
 	if err != nil {
 		return Preview{}, err
 	}
 	result := Preview{}
 	for _, object := range objects {
-		applied, err := r.Store.SyncWasApplied(ctx, object.IdempotencyKey)
-		if err != nil {
-			return Preview{}, err
-		}
-		if applied {
-			continue
-		}
 		if object.Operation == "delete" {
 			result.Deletes++
 		} else {
@@ -72,55 +69,71 @@ func (r Runner) Preview(ctx context.Context) (Preview, error) {
 		return Preview{}, err
 	}
 	result.Conflicts = len(conflicts)
-	if r.Secrets != nil && settings.Endpoint != "" && settings.DeviceID != "" {
-		tokenRef := r.TokenRef
-		if tokenRef == "" {
-			tokenRef = DefaultTokenRef
-		}
-		if token, ok := r.Secrets.Get(tokenRef); ok && token != "" {
-			state, stateErr := r.Store.SyncState(ctx, r.scope())
-			if stateErr != nil {
-				return Preview{}, stateErr
-			}
-			client := &Client{BaseURL: settings.Endpoint, DeviceID: settings.DeviceID, Credential: func(context.Context) (string, error) { return token, nil }}
-			cursor := state.Cursor
-			for page := 0; page < 40; page++ {
-				response, pullErr := client.Pull(ctx, r.scope(), cursor, settings.DeviceID, 500)
-				if pullErr != nil {
-					return Preview{}, pullErr
-				}
-				for _, object := range response.Objects {
-					deliveryKey := object.EventID
-					if deliveryKey == "" && object.RemoteVersion != "" {
-						deliveryKey = fmt.Sprintf("center-object:%s:%s:%s", object.Type, object.ID, object.RemoteVersion)
-					}
-					if deliveryKey == "" {
-						deliveryKey = object.IdempotencyKey
-					}
-					delivered, checkErr := r.Store.SyncWasApplied(ctx, deliveryKey)
-					if checkErr != nil {
-						return Preview{}, checkErr
-					}
-					if delivered {
-						continue
-					}
-					if object.Operation == "delete" {
-						result.RemoteDeletes++
-					} else {
-						result.RemoteUpserts++
-					}
-				}
-				cursor = response.Cursor
-				if !response.HasMore {
-					break
-				}
-				if page == 39 {
-					result.RemoteTruncated = true
-				}
-			}
-		}
+	if err := r.previewRemote(ctx, settings, &result); err != nil {
+		return Preview{}, err
 	}
 	return result, nil
+}
+
+// previewRemote fills the count of remote objects that are not yet applied.
+// It never writes sync state; the real pull happens later in RunOnce.
+func (r Runner) previewRemote(ctx context.Context, settings domain.SyncSettings, result *Preview) error {
+	if r.Secrets == nil || settings.Endpoint == "" || settings.DeviceID == "" {
+		return nil
+	}
+	tokenRef := r.TokenRef
+	if tokenRef == "" {
+		tokenRef = DefaultTokenRef
+	}
+	token, ok := r.Secrets.Get(tokenRef)
+	if !ok || token == "" {
+		return nil
+	}
+	state, err := r.Store.SyncState(ctx, r.scope())
+	if err != nil {
+		return err
+	}
+	client := &Client{BaseURL: settings.Endpoint, DeviceID: settings.DeviceID, Credential: func(context.Context) (string, error) { return token, nil }}
+	cursor := state.Cursor
+	for page := 0; page < 40; page++ {
+		response, pullErr := client.Pull(ctx, r.scope(), cursor, settings.DeviceID, 500)
+		if pullErr != nil {
+			return pullErr
+		}
+		deliveryKeys := make([]string, len(response.Objects))
+		for index, object := range response.Objects {
+			deliveryKey := object.EventID
+			if deliveryKey == "" && object.RemoteVersion != "" {
+				deliveryKey = fmt.Sprintf("center-object:%s:%s:%s", object.Type, object.ID, object.RemoteVersion)
+			}
+			if deliveryKey == "" {
+				deliveryKey = object.IdempotencyKey
+			}
+			deliveryKeys[index] = deliveryKey
+		}
+		deliveredKeys, checkErr := r.Store.SyncAppliedKeys(ctx, deliveryKeys)
+		if checkErr != nil {
+			return checkErr
+		}
+		for index, object := range response.Objects {
+			if _, delivered := deliveredKeys[deliveryKeys[index]]; delivered {
+				continue
+			}
+			if object.Operation == "delete" {
+				result.RemoteDeletes++
+			} else {
+				result.RemoteUpserts++
+			}
+		}
+		cursor = response.Cursor
+		if !response.HasMore {
+			break
+		}
+		if page == 39 {
+			result.RemoteTruncated = true
+		}
+	}
+	return nil
 }
 
 func (r Runner) RunOnce(ctx context.Context) error {
@@ -131,6 +144,13 @@ func (r Runner) RunOnce(ctx context.Context) error {
 	token, ok := r.Secrets.Get(r.TokenRef)
 	if !ok || token == "" {
 		return fmt.Errorf("sync token is not configured")
+	}
+	var preview Preview
+	if r.OnPreview != nil {
+		r.report("preview", "分析差异", 0)
+		if err := r.previewRemote(ctx, settings, &preview); err != nil {
+			return err
+		}
 	}
 	client := &Client{BaseURL: settings.Endpoint, DeviceID: settings.DeviceID, Credential: func(context.Context) (string, error) { return token, nil }}
 	engine := &Engine{Store: r.Store, Remote: client, Scope: r.scope(), DeviceID: settings.DeviceID, Report: r.Progress}
@@ -175,20 +195,39 @@ func (r Runner) RunOnce(ctx context.Context) error {
 			return err
 		}
 	}
+	// The remote preview scan (when scheduled) is the only work left in the
+	// preview phase; the authoritative export belongs to preparing.
 	r.report("preparing", "分析差异", 0)
-	objects, err := ExportBusinessObjectsForDevice(ctx, r.Store, settings.DeviceID)
+	// The export already excludes identities recorded as applied. EnqueueSync
+	// still deduplicates by idempotency key, so an object applied by a
+	// concurrent writer between the export and this loop is harmless.
+	objects, err := ExportPendingBusinessObjectsForDevice(ctx, r.Store, settings.DeviceID)
 	if err != nil {
 		return err
 	}
-	for _, object := range objects {
-		applied, err := r.Store.SyncWasApplied(ctx, object.IdempotencyKey)
+	if r.OnPreview != nil {
+		for _, object := range objects {
+			if object.Operation == "delete" {
+				preview.Deletes++
+			} else {
+				preview.Upserts++
+			}
+		}
+		preview.Pending, err = r.Store.SyncOutboxCount(ctx, r.scope())
 		if err != nil {
 			return err
 		}
-		if !applied {
-			if err := r.Store.EnqueueSync(ctx, domain.SyncOutboxItem{Scope: r.scope(), Object: object}); err != nil {
-				return err
-			}
+		conflicts, conflictErr := r.Store.SyncConflicts(ctx, r.scope())
+		if conflictErr != nil {
+			return conflictErr
+		}
+		preview.Conflicts = len(conflicts)
+		r.OnPreview(preview)
+		r.report("preparing", "写入待上传变更", 0)
+	}
+	for _, object := range objects {
+		if err := r.Store.EnqueueSync(ctx, domain.SyncOutboxItem{Scope: r.scope(), Object: object}); err != nil {
+			return err
 		}
 	}
 	selection := r.SecretSelection
@@ -210,7 +249,13 @@ func (r Runner) RunOnce(ctx context.Context) error {
 		}
 	}
 	r.report("pushing", "上传本机变更", 0)
-	if err := r.drainPending(ctx, engine); err != nil {
+	pending, err := r.Store.SyncOutboxCount(ctx, r.scope())
+	if err != nil {
+		return err
+	}
+	if pending == 0 {
+		r.report("pushing", "本机无待上传变更，跳过上传", 0)
+	} else if err := r.drainPending(ctx, engine); err != nil {
 		return err
 	}
 	r.report("pulling", "拉取远端变化", 0)

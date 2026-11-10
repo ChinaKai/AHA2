@@ -3516,5 +3516,23 @@ func (s *Store) migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(126, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
 		return fmt.Errorf("record schema v126: %w", err)
 	}
-	return s.migrateTaskReviewDecision(ctx)
+	if err := s.migrateTaskReviewDecision(ctx); err != nil {
+		return err
+	}
+	var hasV128 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=128)`).Scan(&hasV128)
+	if !hasV128 {
+		// Profile sync needs the (id, created_at) identity of every conversation
+		// item for exportable tasks on each run. created_at participates because
+		// it is the version in the sync idempotency key. Without this covering
+		// index SQLite reads the wide row pages just to recover id, which makes
+		// an unchanged history indistinguishable from a changed one in cost.
+		if _, err := s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_conversation_sync_meta ON conversation_items(task_id,id,created_at)`); err != nil {
+			return fmt.Errorf("apply schema v128 conversation sync index: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(128, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v128: %w", err)
+	}
+	return nil
 }

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -174,6 +175,114 @@ func (s *Store) SyncWasApplied(ctx context.Context, key string) (bool, error) {
 	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sync_applied WHERE idempotency_key=?)`, key).Scan(&found)
 	return found, err
 }
+
+// syncAppliedLookupBatch stays below SQLite's historical 999-variable limit so
+// the same statement works on every bundled SQLite version.
+const syncAppliedLookupBatch = 500
+
+// SyncAppliedKeys reports which of the given idempotency keys already exist.
+// Callers that filter an export used to issue one point query per object; on
+// large histories that is hundreds of thousands of round trips. This batches
+// the same primary-key lookups, and duplicate keys in the input are queried
+// once.
+func (s *Store) SyncAppliedKeys(ctx context.Context, keys []string) (map[string]struct{}, error) {
+	result := map[string]struct{}{}
+	if len(keys) == 0 {
+		return result, nil
+	}
+	unique := make([]string, 0, len(keys))
+	seen := make(map[string]struct{}, len(keys))
+	for _, key := range keys {
+		if key == "" {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		unique = append(unique, key)
+	}
+	// Sorted input turns the primary-key probes into a mostly sequential walk
+	// of the index, which matters when the applied history has many pages.
+	sort.Strings(unique)
+	for start := 0; start < len(unique); start += syncAppliedLookupBatch {
+		end := start + syncAppliedLookupBatch
+		if end > len(unique) {
+			end = len(unique)
+		}
+		chunk := unique[start:end]
+		placeholders := make([]byte, 0, len(chunk)*2)
+		args := make([]any, len(chunk))
+		for index, key := range chunk {
+			if index > 0 {
+				placeholders = append(placeholders, ',')
+			}
+			placeholders = append(placeholders, '?')
+			args[index] = key
+		}
+		rows, err := s.db.QueryContext(ctx, `SELECT idempotency_key FROM sync_applied WHERE idempotency_key IN (`+string(placeholders)+`)`, args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var key string
+			if err := rows.Scan(&key); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			result[key] = struct{}{}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+	}
+	return result, nil
+}
+
+// ForEachSyncAppliedKeyRange walks applied identities with the given prefix in
+// primary-key order without materializing the whole key set.
+func (s *Store) ForEachSyncAppliedKeyRange(ctx context.Context, prefix string, visit func(string) error) error {
+	if prefix == "" {
+		return nil
+	}
+	query := `SELECT idempotency_key FROM sync_applied WHERE idempotency_key >= ?`
+	args := []any{prefix}
+	if upper := prefixSuccessor(prefix); upper != "" {
+		query += ` AND idempotency_key < ?`
+		args = append(args, upper)
+	}
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			return err
+		}
+		if err := visit(key); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
+// prefixSuccessor returns the smallest string greater than every string with
+// the given prefix. An all-0xff prefix has no successor.
+func prefixSuccessor(prefix string) string {
+	bytes := []byte(prefix)
+	for index := len(bytes) - 1; index >= 0; index-- {
+		if bytes[index] < 0xff {
+			bytes[index]++
+			return string(bytes[:index+1])
+		}
+	}
+	return ""
+}
+
 func (s *Store) MarkSyncApplied(ctx context.Context, scope string, obj domain.SyncObject, at time.Time) error {
 	_, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO sync_applied(idempotency_key,scope,object_type,object_id,remote_version,applied_at) VALUES(?,?,?,?,?,?)`, obj.IdempotencyKey, scope, obj.Type, obj.ID, obj.RemoteVersion, timeString(at))
 	return err

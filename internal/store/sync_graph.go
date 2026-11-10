@@ -3,9 +3,11 @@ package store
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -370,15 +372,58 @@ func (s *Store) SyncRounds(ctx context.Context, taskID string) ([]domain.TaskRou
 	}
 	return result, rows.Err()
 }
+
+// syncTurnColumns omits the large runtime-only fields that the sync envelope
+// always clears: prompt snapshots and instructions are the bulk of a turn row.
+const syncTurnColumns = `id,task_id,agent_id,sequence,input_message_id,status,waiting_reason,queued_at,prepared_at,started_at,finished_at,exit_code,result,error,round_id,parent_turn_id,attempt,generation,required,title,context_window,prompt_chars,usage_json,channel_reply_decision,context_ready_at,session_ready_at,first_event_at,last_activity_at,stalled_at,backend_finished_at`
+
+func scanSyncTurn(scanner interface{ Scan(...any) error }) (domain.Turn, error) {
+	var item domain.Turn
+	var queuedAt, preparedAt, startedAt, finishedAt string
+	var contextReadyAt, sessionReadyAt, firstEventAt, lastActivityAt, stalledAt, backendFinishedAt string
+	var exitCode sql.NullInt64
+	var required int
+	var usage string
+	err := scanner.Scan(
+		&item.ID, &item.TaskID, &item.AgentID, &item.Sequence, &item.InputMessageID, &item.Status,
+		&item.WaitingReason, &queuedAt, &preparedAt, &startedAt, &finishedAt, &exitCode, &item.Result, &item.Error,
+		&item.RoundID, &item.ParentTurnID, &item.Attempt, &item.Generation, &required, &item.Title,
+		&item.ContextWindow, &item.PromptChars, &usage, &item.ChannelReplyDecision,
+		&contextReadyAt, &sessionReadyAt, &firstEventAt, &lastActivityAt, &stalledAt, &backendFinishedAt,
+	)
+	item.QueuedAt, item.PreparedAt = parseTime(queuedAt), parseTime(preparedAt)
+	item.StartedAt, item.FinishedAt = parseTime(startedAt), parseTime(finishedAt)
+	item.ContextReadyAt, item.SessionReadyAt = parseTime(contextReadyAt), parseTime(sessionReadyAt)
+	item.FirstEventAt, item.LastActivityAt = parseTime(firstEventAt), parseTime(lastActivityAt)
+	item.StalledAt, item.BackendFinishedAt = parseTime(stalledAt), parseTime(backendFinishedAt)
+	item.QueuedAtMS = unixMilli(item.QueuedAt)
+	item.PreparedAtMS = unixMilli(item.PreparedAt)
+	item.StartedAtMS = unixMilli(item.StartedAt)
+	item.FinishedAtMS = unixMilli(item.FinishedAt)
+	item.ContextReadyAtMS = unixMilli(item.ContextReadyAt)
+	item.SessionReadyAtMS = unixMilli(item.SessionReadyAt)
+	item.FirstEventAtMS = unixMilli(item.FirstEventAt)
+	item.LastActivityAtMS = unixMilli(item.LastActivityAt)
+	item.StalledAtMS = unixMilli(item.StalledAt)
+	item.BackendFinishedAtMS = unixMilli(item.BackendFinishedAt)
+	item.Required = required != 0
+	item.Usage = decodeJSON(usage, map[string]any{})
+	if exitCode.Valid {
+		value := int(exitCode.Int64)
+		item.ExitCode = &value
+	}
+	return item, err
+}
+
 func (s *Store) SyncTurns(ctx context.Context, taskID string) ([]domain.Turn, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT `+turnColumns+` FROM turns WHERE task_id=? ORDER BY sequence`, taskID)
+	rows, err := s.db.QueryContext(ctx, `SELECT `+syncTurnColumns+` FROM turns WHERE task_id=? ORDER BY sequence`, taskID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var result []domain.Turn
 	for rows.Next() {
-		item, err := scanTurn(rows)
+		item, err := scanSyncTurn(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -386,8 +431,13 @@ func (s *Store) SyncTurns(ctx context.Context, taskID string) ([]domain.Turn, er
 	}
 	return result, rows.Err()
 }
+
+// SyncConversation exports the conversation metadata that Profile Sync carries.
+// The per-item payload is deliberately not read: the sync envelope drops it,
+// and loading it parses hundreds of megabytes on large histories only to throw
+// the result away.
 func (s *Store) SyncConversation(ctx context.Context, taskID string) ([]domain.ConversationItem, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT sequence,id,task_id,round_id,turn_id,agent_id,stream_agent_id,from_agent_id,to_agent_id,route_kind,category,kind,summary,payload_json,created_at FROM conversation_items WHERE task_id=? ORDER BY sequence`, taskID)
+	rows, err := s.db.QueryContext(ctx, `SELECT sequence,id,task_id,round_id,turn_id,agent_id,stream_agent_id,from_agent_id,to_agent_id,route_kind,category,kind,summary,created_at FROM conversation_items WHERE task_id=? ORDER BY sequence`, taskID)
 	if err != nil {
 		return nil, err
 	}
@@ -395,13 +445,167 @@ func (s *Store) SyncConversation(ctx context.Context, taskID string) ([]domain.C
 	var result []domain.ConversationItem
 	for rows.Next() {
 		var item domain.ConversationItem
-		var payload, created string
-		if err := rows.Scan(&item.Sequence, &item.ID, &item.TaskID, &item.RoundID, &item.TurnID, &item.AgentID, &item.StreamAgentID, &item.FromAgentID, &item.ToAgentID, &item.RouteKind, &item.Category, &item.Kind, &item.Summary, &payload, &created); err != nil {
+		var created string
+		if err := rows.Scan(&item.Sequence, &item.ID, &item.TaskID, &item.RoundID, &item.TurnID, &item.AgentID, &item.StreamAgentID, &item.FromAgentID, &item.ToAgentID, &item.RouteKind, &item.Category, &item.Kind, &item.Summary, &created); err != nil {
 			return nil, err
 		}
-		item.Payload = decodeJSON(payload, map[string]any{})
 		item.CreatedAt = parseTime(created)
 		result = append(result, item)
 	}
 	return result, rows.Err()
+}
+
+// ForEachConversationSyncIdentityForTasks walks the (id, created_at) identity
+// of conversation items belonging to the given tasks. Those columns are part of
+// the covering task index, so exporting an unchanged history reads little more
+// than the index. created_at is included because the sync idempotency key
+// carries its version.
+func (s *Store) ForEachConversationSyncIdentityForTasks(ctx context.Context, taskIDs []string, visit func(id string, createdAt time.Time) error) error {
+	for start := 0; start < len(taskIDs); start += conversationSummaryBatch {
+		end := start + conversationSummaryBatch
+		if end > len(taskIDs) {
+			end = len(taskIDs)
+		}
+		chunk := taskIDs[start:end]
+		placeholders := make([]byte, 0, len(chunk)*2)
+		args := make([]any, len(chunk))
+		for index, id := range chunk {
+			if index > 0 {
+				placeholders = append(placeholders, ',')
+			}
+			placeholders = append(placeholders, '?')
+			args[index] = id
+		}
+		rows, err := s.db.QueryContext(ctx, `SELECT id,created_at FROM conversation_items WHERE task_id IN (`+string(placeholders)+`)`, args...)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var id, created string
+			if err := rows.Scan(&id, &created); err != nil {
+				rows.Close()
+				return err
+			}
+			if err := visit(id, parseTime(created)); err != nil {
+				rows.Close()
+				return err
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		rows.Close()
+	}
+	return nil
+}
+
+// ConversationItemsByID loads the exportable columns for a small set of
+// conversation identities. It is used after the index-only scan has already
+// identified the rows that are not applied yet.
+func (s *Store) ConversationItemsByID(ctx context.Context, ids []string) ([]domain.ConversationItem, error) {
+	result := make([]domain.ConversationItem, 0, len(ids))
+	for start := 0; start < len(ids); start += conversationSummaryBatch {
+		end := start + conversationSummaryBatch
+		if end > len(ids) {
+			end = len(ids)
+		}
+		chunk := ids[start:end]
+		placeholders := make([]byte, 0, len(chunk)*2)
+		args := make([]any, len(chunk))
+		for index, id := range chunk {
+			if index > 0 {
+				placeholders = append(placeholders, ',')
+			}
+			placeholders = append(placeholders, '?')
+			args[index] = id
+		}
+		rows, err := s.db.QueryContext(ctx, `SELECT sequence,id,task_id,round_id,turn_id,agent_id,stream_agent_id,from_agent_id,to_agent_id,route_kind,category,kind,summary,created_at FROM conversation_items WHERE id IN (`+string(placeholders)+`)`, args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var item domain.ConversationItem
+			var created string
+			if err := rows.Scan(&item.Sequence, &item.ID, &item.TaskID, &item.RoundID, &item.TurnID, &item.AgentID, &item.StreamAgentID, &item.FromAgentID, &item.ToAgentID, &item.RouteKind, &item.Category, &item.Kind, &item.Summary, &created); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			item.CreatedAt = parseTime(created)
+			result = append(result, item)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+	}
+	sort.SliceStable(result, func(i, j int) bool { return result[i].Sequence < result[j].Sequence })
+	return result, nil
+}
+
+// ForEachConversationMetadata walks the small conversation columns for every
+// task in rowid order. A single sequential table scan avoids the random table
+// lookups a per-task query would perform on a large history. The summary and
+// payload text are not read.
+func (s *Store) ForEachConversationMetadata(ctx context.Context, visit func(domain.ConversationItem) error) error {
+	rows, err := s.db.QueryContext(ctx, `SELECT sequence,id,task_id,round_id,turn_id,agent_id,stream_agent_id,from_agent_id,to_agent_id,route_kind,category,kind,created_at FROM conversation_items ORDER BY sequence`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var item domain.ConversationItem
+		var created string
+		if err := rows.Scan(&item.Sequence, &item.ID, &item.TaskID, &item.RoundID, &item.TurnID, &item.AgentID, &item.StreamAgentID, &item.FromAgentID, &item.ToAgentID, &item.RouteKind, &item.Category, &item.Kind, &created); err != nil {
+			return err
+		}
+		item.CreatedAt = parseTime(created)
+		if err := visit(item); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
+const conversationSummaryBatch = 500
+
+// SyncConversationSummaries loads summaries for the requested item IDs. The
+// caller has already filtered out items whose sync identity was applied.
+func (s *Store) SyncConversationSummaries(ctx context.Context, ids []string) (map[string]string, error) {
+	result := make(map[string]string, len(ids))
+	for start := 0; start < len(ids); start += conversationSummaryBatch {
+		end := start + conversationSummaryBatch
+		if end > len(ids) {
+			end = len(ids)
+		}
+		chunk := ids[start:end]
+		placeholders := make([]byte, 0, len(chunk)*2)
+		args := make([]any, len(chunk))
+		for index, id := range chunk {
+			if index > 0 {
+				placeholders = append(placeholders, ',')
+			}
+			placeholders = append(placeholders, '?')
+			args[index] = id
+		}
+		rows, err := s.db.QueryContext(ctx, `SELECT id,summary FROM conversation_items WHERE id IN (`+string(placeholders)+`)`, args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var id, summary string
+			if err := rows.Scan(&id, &summary); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			result[id] = summary
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+	}
+	return result, nil
 }
