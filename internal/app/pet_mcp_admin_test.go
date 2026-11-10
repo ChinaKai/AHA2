@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -253,6 +254,22 @@ func TestPetMCPAdminTestProbeSuccessAndFailure(t *testing.T) {
 	builtin := petMCPAdminToolCall(t, fixture, "aha_test_mcp_server", `{"server_id":"mcp_pet"}`)
 	if !strings.Contains(builtin, `"health":"ok"`) || !strings.Contains(builtin, `"probe":"builtin"`) {
 		t.Fatalf("builtin probe=%s", builtin)
+	}
+
+	// stdio probes start the configured process and read its tools/list reply.
+	insertPetMCPTestServer(t, fixture, domain.MCPServer{
+		ID: "mcp_stdio", Name: "Stdio Desk", Transport: "stdio",
+		Command: os.Args[0], Args: []string{"-test.run=TestStdioMCPServerHelper"},
+		Env: map[string]string{"GO_WANT_MCP_STDIO_HELPER": "1"}, Enabled: true,
+	})
+	stdioRaw := petMCPAdminToolCall(t, fixture, "aha_test_mcp_server", `{"server_id":"mcp_stdio"}`)
+	var stdioResult PetMCPServerTestResult
+	if err := json.Unmarshal([]byte(stdioRaw), &stdioResult); err != nil {
+		t.Fatal(err)
+	}
+	if stdioResult.Health != "ok" || stdioResult.Probe != "stdio" ||
+		len(stdioResult.Tools) != 1 || stdioResult.Tools[0] != "stdio_echo" {
+		t.Fatalf("stdio probe=%#v", stdioResult)
 	}
 
 	// A hostile server can name its own tools after the secret it was given;
