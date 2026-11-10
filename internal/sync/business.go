@@ -94,6 +94,10 @@ func knowledgeIdempotencyKey(item domain.KnowledgeEntry) string {
 	return fmt.Sprintf("knowledge:v4:%s:%x", item.ID, hash[:12])
 }
 
+// appliedLookup answers which export identities are already recorded as
+// applied. It is nil for callers that need the full portable snapshot.
+type appliedLookup func(context.Context, []string) (map[string]struct{}, error)
+
 // ExportBusinessObjects exports only portable configuration. Credential references,
 // secret values, project/task/workspace identities, and local account bindings are removed.
 func ExportBusinessObjects(ctx context.Context, database *store.Store) ([]domain.SyncObject, error) {
@@ -101,6 +105,34 @@ func ExportBusinessObjects(ctx context.Context, database *store.Store) ([]domain
 }
 
 func ExportBusinessObjectsForDevice(ctx context.Context, database *store.Store, ownerDeviceID string) ([]domain.SyncObject, error) {
+	return exportBusinessObjectsForDevice(ctx, database, ownerDeviceID, nil)
+}
+
+// ExportPendingBusinessObjectsForDevice returns only objects whose current
+// export identity has not been applied yet. Scheduled sync runs use it so an
+// unchanged history does not re-materialize every object, and so conversation
+// rows are filtered before their summary text is read.
+func ExportPendingBusinessObjectsForDevice(ctx context.Context, database *store.Store, ownerDeviceID string) ([]domain.SyncObject, error) {
+	return exportBusinessObjectsForDevice(ctx, database, ownerDeviceID, database.SyncAppliedKeys)
+}
+
+func exportBusinessObjectsForDevice(ctx context.Context, database *store.Store, ownerDeviceID string, applied appliedLookup) ([]domain.SyncObject, error) {
+	var pendingConversations map[string][]domain.ConversationItem
+	if applied != nil && ownerDeviceID != "" {
+		// Conversation rows dominate large histories. The task index tells us
+		// which identities exist for exportable tasks and the applied-key range
+		// tells us which were already exported, so an unchanged history never
+		// reads the wide row pages that hold summaries and payloads.
+		taskIDs, taskErr := exportableTaskIDs(ctx, database)
+		if taskErr != nil {
+			return nil, taskErr
+		}
+		pending, pendingErr := pendingConversationItems(ctx, database, ownerDeviceID, taskIDs)
+		if pendingErr != nil {
+			return nil, pendingErr
+		}
+		pendingConversations = pending
+	}
 	var result []domain.SyncObject
 	excludedProjects, err := database.ManagedChannelProjectIDs(ctx)
 	if err != nil {
@@ -124,7 +156,7 @@ func ExportBusinessObjectsForDevice(ctx context.Context, database *store.Store, 
 		return nil
 	}
 	if ownerDeviceID != "" {
-		graph, err := exportTaskGraph(ctx, database, ownerDeviceID)
+		graph, err := exportTaskGraph(ctx, database, ownerDeviceID, applied, pendingConversations)
 		if err != nil {
 			return nil, err
 		}
@@ -288,6 +320,55 @@ func ExportBusinessObjectsForDevice(ctx context.Context, database *store.Store, 
 	for _, v := range prompts {
 		if err := add(TypePromptOverride, v.ID, strconv.Itoa(v.Version), v); err != nil {
 			return nil, err
+		}
+	}
+	if applied == nil || len(result) == 0 {
+		return result, nil
+	}
+	keys := make([]string, len(result))
+	for index := range result {
+		keys[index] = result[index].IdempotencyKey
+	}
+	alreadyApplied, err := applied(ctx, keys)
+	if err != nil {
+		return nil, err
+	}
+	pending := result[:0]
+	for _, object := range result {
+		if _, ok := alreadyApplied[object.IdempotencyKey]; ok {
+			continue
+		}
+		pending = append(pending, object)
+	}
+	return pending, nil
+}
+
+// exportableTaskIDs mirrors the task filter used by exportTaskGraph. It is
+// used to keep conversation identity scans limited to tasks that can actually
+// produce sync objects.
+func exportableTaskIDs(ctx context.Context, database *store.Store) ([]string, error) {
+	excludedProjects, err := database.ManagedChannelProjectIDs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	projects, err := database.ListProjects(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var result []string
+	for _, project := range projects {
+		if excludedProjects[project.ID] || domain.IsSystemManagedProject(project) {
+			continue
+		}
+		tasks, err := database.ListTasks(ctx, project.ID)
+		if err != nil {
+			return nil, err
+		}
+		for _, task := range tasks {
+			if task.ReadOnly {
+				continue
+			}
+			result = append(result, task.ID)
 		}
 	}
 	return result, nil

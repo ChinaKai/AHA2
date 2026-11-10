@@ -217,22 +217,18 @@ func (s *Server) executeSyncRun(appCtx context.Context, ownerID string) {
 		}
 	}
 	enterPhase("preview")
-	var preview syncer.Preview
-	if err := storepkg.RetryBusy(ctx, 3, 200*time.Millisecond, retrySyncBusy("preview"), func(runCtx context.Context) (err error) {
-		preview, err = runner.Preview(runCtx)
-		return err
-	}); err != nil {
-		fail(err)
-		return
-	}
-	s.setSyncRunTotal(preview)
 	completed := 0
 	runner.Progress = func(phase, detail string, delta int) {
 		enterPhase(phase)
 		completed += delta
 		s.updateSyncRun(phase, detail, completed)
 	}
-	enterPhase("running")
+	// RunOnce computes the same summary Preview would report, but from the
+	// authoritative export it is about to enqueue. This keeps a scheduled run
+	// from exporting the whole history twice.
+	runner.OnPreview = func(preview syncer.Preview) {
+		s.setSyncRunTotal(preview)
+	}
 	if err := storepkg.RetryBusy(ctx, 3, 200*time.Millisecond, retrySyncBusy("run"), func(runCtx context.Context) error {
 		return runner.RunOnce(runCtx)
 	}); err != nil {
