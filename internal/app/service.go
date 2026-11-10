@@ -823,6 +823,7 @@ func (s *Service) submitMessageWithSourceResult(ctx context.Context, taskID, age
 	var round domain.TaskRound
 	var inbox domain.AgentInboxItem
 	var createdRound, inserted, duplicate bool
+	var enqueuedMessageID string
 	if channelReceiptID != "" {
 		if channelContinuation {
 			round, inbox, createdRound, err = s.store.EnqueueChannelContinuationMessage(ctx, channelReceiptID, channelConversationID, message, agentID, channelProvenance, attachmentIDs...)
@@ -834,13 +835,20 @@ func (s *Service) submitMessageWithSourceResult(ctx context.Context, taskID, age
 		round, inbox, createdRound, err = s.store.EnqueuePetDelegatedMessage(ctx, message, agentID, attachmentIDs)
 		inserted = err == nil
 	} else if local != nil {
-		round, inbox, createdRound, inserted, duplicate, err = s.store.EnqueueLocalOwnerMessage(ctx, message, agentID, attachmentIDs)
+		round, inbox, createdRound, inserted, duplicate, enqueuedMessageID, err = s.store.EnqueueLocalOwnerMessage(ctx, message, agentID, attachmentIDs)
 	} else {
 		round, inbox, createdRound, err = s.store.EnqueueOwnerMessage(ctx, message, agentID, attachmentIDs)
 		inserted = err == nil
 	}
 	if err != nil {
 		return submittedMessage{}, err
+	}
+	if duplicate {
+		// A concurrent request with the same idempotency key already committed
+		// this message. Report the committed identity and leave scheduling to
+		// that request; retries that need to repair delivery go through
+		// SubmitLocalOwnerMessage's explicit reschedule path after a status check.
+		return submittedMessage{MessageID: enqueuedMessageID, Duplicate: true}, nil
 	}
 	if createdRound && inserted {
 		s.emit(ctx, task.ID, "round", round.ID, "round_started", map[string]any{

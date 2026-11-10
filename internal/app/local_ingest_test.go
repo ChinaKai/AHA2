@@ -5,6 +5,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/ChinaKai/AHA2/internal/domain"
 )
 
 func TestNormalizeLocalIngestContent(t *testing.T) {
@@ -58,6 +60,20 @@ func TestNormalizeLocalIngestRequestID(t *testing.T) {
 	}
 	if _, err := normalizeLocalIngestRequestID(strings.Repeat("a", LocalOwnerIngestMaxClientRequestIDLength+1)); !errors.Is(err, ErrLocalIngestRequestIDInvalid) {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestLocalOwnerIngestTaskRunnable(t *testing.T) {
+	t.Parallel()
+	for _, status := range []domain.TaskStatus{domain.TaskPreparing, domain.TaskActive, domain.TaskWaitingUser, domain.TaskFailed} {
+		if !localOwnerIngestTaskRunnable(status) {
+			t.Fatalf("%s should be runnable", status)
+		}
+	}
+	for _, status := range []domain.TaskStatus{domain.TaskDraft, domain.TaskCompleted, domain.TaskCancelled, domain.TaskBlocked} {
+		if localOwnerIngestTaskRunnable(status) {
+			t.Fatalf("%s should not be runnable", status)
+		}
 	}
 }
 

@@ -685,7 +685,7 @@ func (s *Store) LinkMessageTurn(ctx context.Context, messageID, turnID string) e
 }
 
 func (s *Store) ListMessages(ctx context.Context, taskID string) ([]domain.Message, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,task_id,turn_id,role,sender,content,created_at FROM messages WHERE task_id=? ORDER BY created_at,id`, taskID)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,task_id,turn_id,role,sender,content,source,client_request_id,created_at FROM messages WHERE task_id=? ORDER BY created_at,id`, taskID)
 	if err != nil {
 		return nil, err
 	}
@@ -694,7 +694,7 @@ func (s *Store) ListMessages(ctx context.Context, taskID string) ([]domain.Messa
 	for rows.Next() {
 		var item domain.Message
 		var createdAt string
-		if err := rows.Scan(&item.ID, &item.TaskID, &item.TurnID, &item.Role, &item.Sender, &item.Content, &createdAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.TaskID, &item.TurnID, &item.Role, &item.Sender, &item.Content, &item.Source, &item.ClientRequestID, &createdAt); err != nil {
 			return nil, err
 		}
 		item.CreatedAt = parseTime(createdAt)

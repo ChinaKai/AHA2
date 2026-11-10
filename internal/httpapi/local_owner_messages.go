@@ -60,6 +60,10 @@ func (s *Server) localOwnerMessageIngest(writer http.ResponseWriter, request *ht
 		writeError(writer, http.StatusForbidden, "local_only")
 		return
 	}
+	if localOwnerIngestQueryHasSecret(request.URL.Query()) {
+		writeError(writer, http.StatusBadRequest, "query_secret_forbidden")
+		return
+	}
 	if s.secrets == nil {
 		writeError(writer, http.StatusServiceUnavailable, "local_ingest_unavailable")
 		return
@@ -69,12 +73,14 @@ func (s *Server) localOwnerMessageIngest(writer http.ResponseWriter, request *ht
 		writeError(writer, http.StatusServiceUnavailable, "local_ingest_unavailable")
 		return
 	}
-	if !s.localOwnerMessageLimiter.allow(time.Now()) {
-		writeError(writer, http.StatusTooManyRequests, "rate_limited")
-		return
-	}
 	if !localOwnerIngestAuthorized(request, expected) {
 		writeError(writer, http.StatusUnauthorized, "local_ingest_unauthorized")
+		return
+	}
+	// Count only authenticated callers. A misconfigured bridge or local brute
+	// force must not exhaust the quota that the real voice bridge depends on.
+	if !s.localOwnerMessageLimiter.allow(time.Now()) {
+		writeError(writer, http.StatusTooManyRequests, "rate_limited")
 		return
 	}
 	if !localOwnerIngestJSON(request.Header.Get("Content-Type")) {
@@ -140,6 +146,19 @@ func decodeLocalOwnerMessageRequest(request *http.Request) (localOwnerMessageReq
 	return payload, 0, ""
 }
 
+func localOwnerIngestQueryHasSecret(query map[string][]string) bool {
+	markers := []string{"secret", "token", "password", "passwd", "api_key", "apikey", "credential"}
+	for key := range query {
+		normalized := strings.ToLower(strings.TrimSpace(key))
+		for _, marker := range markers {
+			if strings.Contains(normalized, marker) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func localOwnerIngestJSON(contentType string) bool {
 	mediaType, _, err := mime.ParseMediaType(strings.TrimSpace(contentType))
 	if err != nil {
@@ -196,6 +215,8 @@ func localOwnerMessageErrorStatus(err error) (int, string) {
 		return http.StatusForbidden, "task_not_allowed"
 	case errors.Is(err, app.ErrLocalIngestTaskNotFound):
 		return http.StatusNotFound, "task_not_found"
+	case errors.Is(err, app.ErrLocalIngestTaskNotRunnable):
+		return http.StatusConflict, "task_not_runnable"
 	case errors.Is(err, app.ErrLocalIngestContentEmpty):
 		return http.StatusBadRequest, "content_required"
 	case errors.Is(err, app.ErrLocalIngestContentTooLong):

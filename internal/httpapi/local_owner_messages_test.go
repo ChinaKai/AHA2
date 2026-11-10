@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -99,7 +101,12 @@ func newLocalIngestFixture(t *testing.T, enabled bool, secret string) *localInge
 
 func (f *localIngestFixture) post(t *testing.T, secret, body string) *http.Response {
 	t.Helper()
-	request, err := http.NewRequest(http.MethodPost, f.server.URL+"/api/v1/local/owner-messages", strings.NewReader(body))
+	return f.postPath(t, "/api/v1/local/owner-messages", secret, body)
+}
+
+func (f *localIngestFixture) postPath(t *testing.T, path, secret, body string) *http.Response {
+	t.Helper()
+	request, err := http.NewRequest(http.MethodPost, f.server.URL+path, strings.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,6 +162,9 @@ func TestLocalOwnerIngestWritesOwnerMessageAndAuditsSource(t *testing.T) {
 	found := false
 	for _, message := range messages {
 		if message.Content == "你好，语音" && message.Role == "user" && message.Sender == "owner" {
+			if message.Source != "voice" || message.ClientRequestID != "voice-request-1" {
+				t.Fatalf("ListMessages lost v129 metadata: %#v", message)
+			}
 			found = true
 			break
 		}
@@ -190,6 +200,16 @@ func TestLocalOwnerIngestRequiredSecretAndWrongSecret(t *testing.T) {
 	})
 }
 
+func localIngestHTTPRequest(t *testing.T, body, remoteAddr, host string) *http.Request {
+	t.Helper()
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/local/owner-messages", bytes.NewBufferString(body))
+	request.RemoteAddr = remoteAddr
+	request.Host = host
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer "+localOwnerIngestTestSecret)
+	return request
+}
+
 func TestLocalOwnerIngestLoopbackOnly(t *testing.T) {
 	fixture := newLocalIngestFixture(t, true, localOwnerIngestTestSecret)
 	handler := New(Config{
@@ -203,21 +223,50 @@ func TestLocalOwnerIngestLoopbackOnly(t *testing.T) {
 		headers    map[string]string
 	}{
 		{name: "lan remote addr", remoteAddr: "192.168.1.20:5555", host: "127.0.0.1:8766"},
+		{name: "mapped lan remote addr", remoteAddr: "[::ffff:192.168.1.20]:5555", host: "127.0.0.1:8766"},
 		{name: "lan host", remoteAddr: "127.0.0.1:5555", host: "192.168.1.10:8766"},
 		{name: "forwarded header", remoteAddr: "127.0.0.1:5555", host: "127.0.0.1:8766", headers: map[string]string{"X-Forwarded-For": "192.168.1.20"}},
+		{name: "rfc forwarded header", remoteAddr: "127.0.0.1:5555", host: "127.0.0.1:8766", headers: map[string]string{"Forwarded": "for=192.168.1.20"}},
+		{name: "real ip header", remoteAddr: "127.0.0.1:5555", host: "127.0.0.1:8766", headers: map[string]string{"X-Real-IP": "192.168.1.20"}},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
-			request := httptest.NewRequest(http.MethodPost, "/api/v1/local/owner-messages", bytes.NewBufferString(body))
-			request.RemoteAddr = testCase.remoteAddr
-			request.Host = testCase.host
-			request.Header.Set("Content-Type", "application/json")
-			request.Header.Set("Authorization", "Bearer "+localOwnerIngestTestSecret)
+			request := localIngestHTTPRequest(t, body, testCase.remoteAddr, testCase.host)
 			for key, value := range testCase.headers {
 				request.Header.Set(key, value)
 			}
 			recorder := httptest.NewRecorder()
 			handler.ServeHTTP(recorder, request)
 			if recorder.Code != http.StatusForbidden {
+				t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+			}
+		})
+	}
+	t.Run("duplicate proxy headers", func(t *testing.T) {
+		request := localIngestHTTPRequest(t, body, "127.0.0.1:5555", "127.0.0.1:8766")
+		request.Header.Add("X-Forwarded-For", "10.0.0.2")
+		request.Header.Add("X-Forwarded-For", "192.168.1.20")
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusForbidden {
+			t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+		}
+	})
+	for index, testCase := range []struct {
+		name       string
+		remoteAddr string
+		host       string
+	}{
+		{name: "ipv4 loopback", remoteAddr: "127.0.0.1:5555", host: "127.0.0.1:8766"},
+		{name: "ipv6 loopback", remoteAddr: "[::1]:5555", host: "[::1]:8766"},
+		{name: "mapped loopback", remoteAddr: "[::ffff:127.0.0.1]:5555", host: "127.0.0.1:8766"},
+		{name: "localhost host", remoteAddr: "127.0.0.1:5555", host: "localhost:8766"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			requestBody := localIngestBody(fixture.petTaskID, "loopback", "voice", fmt.Sprintf("loopback-%d", index))
+			request := localIngestHTTPRequest(t, requestBody, testCase.remoteAddr, testCase.host)
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, request)
+			if recorder.Code != http.StatusAccepted {
 				t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
 			}
 		})
@@ -253,19 +302,38 @@ func TestLocalOwnerIngestValidatesPayload(t *testing.T) {
 }
 
 func TestLocalOwnerIngestRateLimit(t *testing.T) {
-	fixture := newLocalIngestFixture(t, true, localOwnerIngestTestSecret)
-	for attempt := 0; attempt < localOwnerMessageRateLimit; attempt++ {
-		response := fixture.post(t, "wrong-secret", localIngestBody(fixture.petTaskID, "hi", "voice", ""))
-		response.Body.Close()
-		if response.StatusCode != http.StatusUnauthorized {
-			t.Fatalf("attempt %d status=%d", attempt+1, response.StatusCode)
+	t.Run("authenticated requests are limited", func(t *testing.T) {
+		fixture := newLocalIngestFixture(t, true, localOwnerIngestTestSecret)
+		body := localIngestBody(fixture.petTaskID, "", "voice", "")
+		for attempt := 0; attempt < localOwnerMessageRateLimit; attempt++ {
+			response := fixture.post(t, localOwnerIngestTestSecret, body)
+			response.Body.Close()
+			if response.StatusCode != http.StatusBadRequest {
+				t.Fatalf("attempt %d status=%d", attempt+1, response.StatusCode)
+			}
 		}
-	}
-	response := fixture.post(t, "wrong-secret", localIngestBody(fixture.petTaskID, "hi", "voice", ""))
-	result := decodeLocalIngestResponse(t, response)
-	if response.StatusCode != http.StatusTooManyRequests || result["error"] != "rate_limited" {
-		t.Fatalf("status=%d result=%#v", response.StatusCode, result)
-	}
+		response := fixture.post(t, localOwnerIngestTestSecret, body)
+		result := decodeLocalIngestResponse(t, response)
+		if response.StatusCode != http.StatusTooManyRequests || result["error"] != "rate_limited" {
+			t.Fatalf("status=%d result=%#v", response.StatusCode, result)
+		}
+	})
+	t.Run("failed auth does not consume quota", func(t *testing.T) {
+		fixture := newLocalIngestFixture(t, true, localOwnerIngestTestSecret)
+		body := localIngestBody(fixture.petTaskID, "hi", "voice", "")
+		for attempt := 0; attempt < localOwnerMessageRateLimit+1; attempt++ {
+			response := fixture.post(t, "wrong-secret", body)
+			response.Body.Close()
+			if response.StatusCode != http.StatusUnauthorized {
+				t.Fatalf("attempt %d status=%d", attempt+1, response.StatusCode)
+			}
+		}
+		response := fixture.post(t, localOwnerIngestTestSecret, localIngestBody(fixture.petTaskID, "ok", "voice", "auth-does-not-count"))
+		result := decodeLocalIngestResponse(t, response)
+		if response.StatusCode != http.StatusAccepted {
+			t.Fatalf("valid request was locked out: status=%d result=%#v", response.StatusCode, result)
+		}
+	})
 }
 
 func TestLocalOwnerIngestIsIdempotent(t *testing.T) {
@@ -293,6 +361,189 @@ func TestLocalOwnerIngestIsIdempotent(t *testing.T) {
 		t.Fatalf("message inserted %d times", count)
 	}
 	turns, err := fixture.database.TaskTurnCount(fixture.ctx, fixture.petTaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if turns != 1 {
+		t.Fatalf("turn count=%d, want 1", turns)
+	}
+}
+
+func localIngestResult(t *testing.T, response *http.Response) (int, map[string]any) {
+	t.Helper()
+	defer response.Body.Close()
+	var payload map[string]any
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	return response.StatusCode, payload
+}
+
+func waitForTaskStatus(t *testing.T, database *store.Store, taskID string, want domain.TaskStatus) domain.Task {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		task, err := database.Task(context.Background(), taskID)
+		if err == nil && task.Status == want {
+			return task
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("task %s status=%v err=%v, want %v", taskID, task.Status, err, want)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func countMessagesWithContent(t *testing.T, database *store.Store, taskID, content string) int {
+	t.Helper()
+	messages, err := database.ListMessages(context.Background(), taskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, message := range messages {
+		if message.Content == content {
+			count++
+		}
+	}
+	return count
+}
+
+func TestLocalOwnerIngestRejectsQuerySecret(t *testing.T) {
+	fixture := newLocalIngestFixture(t, true, localOwnerIngestTestSecret)
+	for _, query := range []string{"secret=leak", "token=leak", "access_token=leak", "api_key=leak", "password=leak"} {
+		t.Run(query, func(t *testing.T) {
+			response := fixture.postPath(t, "/api/v1/local/owner-messages?"+query, localOwnerIngestTestSecret, localIngestBody(fixture.petTaskID, "hi", "voice", ""))
+			status, result := localIngestResult(t, response)
+			if status != http.StatusBadRequest || result["error"] != "query_secret_forbidden" {
+				t.Fatalf("status=%d result=%#v", status, result)
+			}
+		})
+	}
+	if count := countMessagesWithContent(t, fixture.database, fixture.petTaskID, "hi"); count != 0 {
+		t.Fatalf("query-secret request inserted %d messages", count)
+	}
+}
+
+func TestLocalOwnerIngestConcurrentIdempotency(t *testing.T) {
+	fixture := newLocalIngestFixture(t, true, localOwnerIngestTestSecret)
+	body := localIngestBody(fixture.petTaskID, "并发幂等", "voice", "concurrent-request-1")
+	const workers = 8
+	type concurrentResult struct {
+		status    int
+		messageID string
+		duplicate bool
+		err       error
+	}
+	start := make(chan struct{})
+	results := make(chan concurrentResult, workers)
+	var wait sync.WaitGroup
+	for index := 0; index < workers; index++ {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			<-start
+			request, err := http.NewRequest(http.MethodPost, fixture.server.URL+"/api/v1/local/owner-messages", strings.NewReader(body))
+			if err != nil {
+				results <- concurrentResult{err: err}
+				return
+			}
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("Authorization", "Bearer "+localOwnerIngestTestSecret)
+			response, err := http.DefaultClient.Do(request)
+			if err != nil {
+				results <- concurrentResult{err: err}
+				return
+			}
+			defer response.Body.Close()
+			var payload struct {
+				MessageID string `json:"message_id"`
+				Duplicate bool   `json:"duplicate"`
+			}
+			if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+				results <- concurrentResult{err: err}
+				return
+			}
+			results <- concurrentResult{status: response.StatusCode, messageID: payload.MessageID, duplicate: payload.Duplicate}
+		}()
+	}
+	close(start)
+	wait.Wait()
+	close(results)
+	firstID := ""
+	inserted := 0
+	for item := range results {
+		if item.err != nil {
+			t.Fatal(item.err)
+		}
+		if item.status != http.StatusAccepted {
+			t.Fatalf("status=%d", item.status)
+		}
+		if item.messageID == "" {
+			t.Fatal("duplicate response lost the committed message_id")
+		}
+		if firstID == "" {
+			firstID = item.messageID
+		}
+		if item.messageID != firstID {
+			t.Fatalf("responses reported different message ids: %s vs %s", item.messageID, firstID)
+		}
+		if !item.duplicate {
+			inserted++
+		}
+	}
+	if inserted != 1 {
+		t.Fatalf("inserted=%d, want exactly 1", inserted)
+	}
+	waitForTaskStatus(t, fixture.database, fixture.petTaskID, domain.TaskWaitingUser)
+	if count := countMessagesWithContent(t, fixture.database, fixture.petTaskID, "并发幂等"); count != 1 {
+		t.Fatalf("message inserted %d times", count)
+	}
+	turns, err := fixture.database.TaskTurnCount(context.Background(), fixture.petTaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if turns != 1 {
+		t.Fatalf("turn count=%d, want 1", turns)
+	}
+}
+
+func TestLocalOwnerIngestRetryFingerprintAndTerminalTask(t *testing.T) {
+	fixture := newLocalIngestFixture(t, true, localOwnerIngestTestSecret)
+	firstBody := localIngestBody(fixture.petTaskID, "第一次", "voice", "retry-request-1")
+	firstStatus, first := localIngestResult(t, fixture.post(t, localOwnerIngestTestSecret, firstBody))
+	if firstStatus != http.StatusAccepted || first["duplicate"] != false {
+		t.Fatalf("first status=%d result=%#v", firstStatus, first)
+	}
+	waitForTaskStatus(t, fixture.database, fixture.petTaskID, domain.TaskWaitingUser)
+
+	mismatchStatus, mismatch := localIngestResult(t, fixture.post(t, localOwnerIngestTestSecret, localIngestBody(fixture.petTaskID, "第二次", "voice", "retry-request-1")))
+	if mismatchStatus != http.StatusConflict || mismatch["error"] != "client_request_id_conflict" {
+		t.Fatalf("fingerprint mismatch status=%d result=%#v", mismatchStatus, mismatch)
+	}
+
+	retryStatus, retry := localIngestResult(t, fixture.post(t, localOwnerIngestTestSecret, firstBody))
+	if retryStatus != http.StatusAccepted || retry["duplicate"] != true || retry["message_id"] != first["message_id"] {
+		t.Fatalf("retry status=%d result=%#v first=%#v", retryStatus, retry, first)
+	}
+
+	task := waitForTaskStatus(t, fixture.database, fixture.petTaskID, domain.TaskWaitingUser)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if err := fixture.database.UpdateTaskStatus(context.Background(), fixture.petTaskID, task.Status, domain.TaskCompleted, now, now); err != nil {
+		t.Fatal(err)
+	}
+	terminalStatus, terminal := localIngestResult(t, fixture.post(t, localOwnerIngestTestSecret, firstBody))
+	if terminalStatus != http.StatusConflict || terminal["error"] != "task_not_runnable" {
+		t.Fatalf("terminal retry status=%d result=%#v", terminalStatus, terminal)
+	}
+
+	if count := countMessagesWithContent(t, fixture.database, fixture.petTaskID, "第一次"); count != 1 {
+		t.Fatalf("first message inserted %d times", count)
+	}
+	if count := countMessagesWithContent(t, fixture.database, fixture.petTaskID, "第二次"); count != 0 {
+		t.Fatalf("mismatched content inserted %d times", count)
+	}
+	turns, err := fixture.database.TaskTurnCount(context.Background(), fixture.petTaskID)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -27,6 +27,7 @@ var (
 	ErrLocalIngestTaskRequired       = errors.New("task_id is required")
 	ErrLocalIngestTaskNotAllowed     = errors.New("task is not allowed for local owner ingest")
 	ErrLocalIngestTaskNotFound       = errors.New("task not found")
+	ErrLocalIngestTaskNotRunnable    = errors.New("task is no longer runnable")
 	ErrLocalIngestContentEmpty       = errors.New("content is required")
 	ErrLocalIngestContentTooLong     = errors.New("content is too long")
 	ErrLocalIngestContentControlChar = errors.New("content contains control characters")
@@ -76,12 +77,22 @@ func (s *Service) SubmitLocalOwnerMessage(ctx context.Context, input LocalOwnerM
 			return LocalOwnerMessageResult{}, lookupErr
 		}
 		if found {
-			if existing.TaskID != taskID {
+			if existing.TaskID != taskID || existing.Content != content || existing.Source != source {
 				return LocalOwnerMessageResult{}, store.ErrLocalIngestRequestConflict
 			}
-			// Scheduling is idempotent: if the first attempt inserted the
-			// message but failed before starting its Turn, this retry repairs
-			// delivery without inserting a second message.
+			// A retry may repair delivery when the first call inserted the
+			// message but failed before scheduling it. Refuse to touch a Task
+			// that has since reached a terminal or draft state.
+			task, taskErr := s.store.Task(ctx, taskID)
+			if errors.Is(taskErr, sql.ErrNoRows) {
+				return LocalOwnerMessageResult{}, ErrLocalIngestTaskNotFound
+			}
+			if taskErr != nil {
+				return LocalOwnerMessageResult{}, taskErr
+			}
+			if !localOwnerIngestTaskRunnable(task.Status) {
+				return LocalOwnerMessageResult{}, ErrLocalIngestTaskNotRunnable
+			}
 			turn, started, scheduleErr := s.scheduleAgent(ctx, taskID, "main")
 			if scheduleErr != nil {
 				return LocalOwnerMessageResult{}, scheduleErr
@@ -111,6 +122,15 @@ func (s *Service) SubmitLocalOwnerMessage(ctx context.Context, input LocalOwnerM
 
 func localOwnerIngestTaskAllowed(taskID string) bool {
 	return taskID == petTaskID
+}
+
+func localOwnerIngestTaskRunnable(status domain.TaskStatus) bool {
+	switch status {
+	case domain.TaskDraft, domain.TaskCompleted, domain.TaskCancelled, domain.TaskBlocked:
+		return false
+	default:
+		return true
+	}
 }
 
 func normalizeLocalIngestContent(raw string) (string, error) {
