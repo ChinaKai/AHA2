@@ -2825,6 +2825,12 @@ func (s *Service) PetMCPTool(ctx context.Context, name string, args json.RawMess
 		if err := json.Unmarshal(args, &input); err != nil {
 			return "", fmt.Errorf("invalid approval request")
 		}
+		// MCP management kinds are reserved for the dedicated tools below. They
+		// create server-side titles/summaries/risk and enforce manage_system;
+		// letting the generic entry forge them would bypass both.
+		if isPetMCPApprovalKind(input.Kind) {
+			return "", fmt.Errorf("MCP 管理审批只允许通过专用工具 aha_request_mcp_server_* 或 aha_set_task_mcp_servers 提交")
+		}
 		if strings.EqualFold(strings.TrimSpace(input.Risk), "high") {
 			reason, reasonErr := requirePetApprovalReason(input.Reason)
 			if reasonErr != nil {
@@ -2853,6 +2859,15 @@ func (s *Service) PetMCPTool(ctx context.Context, name string, args json.RawMess
 		items, err := s.PetApprovals(ctx, input.Limit)
 		if err != nil {
 			return "", err
+		}
+		// Update approvals can contain command/args/URL fragments. The pet only
+		// needs the decision and the server-side summary, so do not echo the
+		// stored payload back. This also contains legacy approvals created
+		// before update payloads were reduced to a field diff.
+		for index := range items {
+			if strings.EqualFold(strings.TrimSpace(items[index].Kind), petMCPServerUpdateKind) {
+				items[index].Payload = "{}"
+			}
 		}
 		data, _ := json.Marshal(items)
 		return string(data), nil

@@ -308,23 +308,15 @@ type petApprovalPayload struct {
 	Message                string   `json:"message"`
 	MentionIdentityLinkIDs []string `json:"mention_identity_link_ids"`
 	AttachmentIDs          []string `json:"attachment_ids"`
-
-	// External MCP management. Secret values are never part of this payload;
-	// execution resolves env/header values from the Secret Store or the
-	// existing server row.
-	ServerID    string   `json:"server_id"`
-	ServerIDs   []string `json:"server_ids"`
-	Name        string   `json:"name"`
-	Description string   `json:"description"`
-	Transport   string   `json:"transport"`
-	Command     string   `json:"command"`
-	Args        []string `json:"args"`
-	URL         string   `json:"url"`
-	EnvKeys     []string `json:"env_keys"`
-	HeaderKeys  []string `json:"header_keys"`
 }
 
 func (s *Service) executePetApproval(ctx context.Context, item domain.PetApproval) error {
+	// MCP approvals carry their own payload shapes. Decoding them through the
+	// generic union would make unrelated owner_decision payloads fail whenever
+	// a same-named key has another type, so keep the paths separate.
+	if isPetMCPApprovalKind(item.Kind) {
+		return s.executePetMCPApproval(ctx, item)
+	}
 	var payload petApprovalPayload
 	if strings.TrimSpace(item.Payload) != "" {
 		if err := json.Unmarshal([]byte(item.Payload), &payload); err != nil {
@@ -455,14 +447,6 @@ func (s *Service) executePetApproval(ctx context.Context, item domain.PetApprova
 		return nil
 	case "permission_change":
 		return s.applyPetPermissionChange(ctx, payload.Permission, payload.Enabled)
-	case petMCPServerCreateKind:
-		return s.executePetMCPServerCreate(ctx, payload)
-	case petMCPServerUpdateKind:
-		return s.executePetMCPServerUpdate(ctx, payload)
-	case petMCPServerDeleteKind:
-		return s.executePetMCPServerDelete(ctx, payload)
-	case petSetTaskMCPKind:
-		return s.executePetSetTaskMCPServers(ctx, payload)
 	default:
 		return nil
 	}
