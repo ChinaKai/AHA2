@@ -228,6 +228,11 @@ func (s *Server) executeSyncRun(appCtx context.Context, ownerID string) {
 	// from exporting the whole history twice.
 	runner.OnPreview = func(preview syncer.Preview) {
 		s.setSyncRunTotal(preview)
+		// A truncated remote scan leaves pages unexamined, so it is not a
+		// reliable "no changes" signal even when the visible counts are zero.
+		if preview.Upserts == 0 && preview.Deletes == 0 && preview.RemoteUpserts == 0 && preview.RemoteDeletes == 0 && !preview.RemoteTruncated {
+			s.logger.Info("sync run found no new changes", "pending", preview.Pending, "conflicts", preview.Conflicts)
+		}
 	}
 	if err := storepkg.RetryBusy(ctx, 3, 200*time.Millisecond, retrySyncBusy("run"), func(runCtx context.Context) error {
 		return runner.RunOnce(runCtx)
