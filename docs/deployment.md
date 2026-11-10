@@ -57,6 +57,12 @@ aha2-tray.exe --server "<Program Files>\AHA2\aha2.exe" --listen "<IP>:<端口>" 
 `aha2.exe serve`。计划任务 action 直接指向 tray，不长期依赖 PowerShell、Windows Script Host
 或 VBS launcher。PowerShell 仅在安装期间用于注册任务和设置数据目录 ACL。
 
+tray 会把 `aha2.exe serve` 的 stdout/stderr 持久化到 `<数据目录>\logs\aha2-server.log`，
+并在其中记录每次启动的命令行、PID、退出码或启动错误；单个文件上限 10 MB，超出后把当前文件
+轮转为 `aha2-server.log.1`（最多保留两份）。Go panic、runtime fatal error 和崩溃退出信息因此
+不会随隐藏窗口消失。日志只包含进程输出和启动参数，凭据校验拒绝带用户信息、query 或 fragment
+的 Agent API URL，因此不会写入请求体或密码。
+
 仅使用本机 Workspace 时，Agent API 地址可留空，AHA2 会使用 loopback 地址。SSH 或其他远程
 Workspace 中运行的 Agent 需要填写其能够访问的 HTTPS 基址，安装器会追加：
 

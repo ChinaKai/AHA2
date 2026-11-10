@@ -13,13 +13,16 @@ func Run(config Config) error {
 	config.Listen = EffectiveListen(OSCommandRunner{}, config)
 	command, err := BuildServerCommand(config)
 	if err != nil {
+		logTrayFailure(config.DataDir, err)
 		return err
 	}
 	if info, err := os.Stat(command.Path); err != nil || info.IsDir() {
 		if err == nil {
 			err = fmt.Errorf("path is a directory")
 		}
-		return fmt.Errorf("AHA2 server executable is unavailable: %w", err)
+		err = fmt.Errorf("AHA2 server executable is unavailable: %w", err)
+		logTrayFailure(config.DataDir, err)
+		return err
 	}
 	lock, err := acquireSingleInstance()
 	if err != nil {
@@ -28,7 +31,7 @@ func Run(config Config) error {
 	defer lock.Close()
 	hideConsoleWindow()
 
-	supervisor := NewSupervisor(OSLauncher{}, command, DefaultRetryPolicy())
+	supervisor := NewSupervisor(OSLauncher{LogPath: ServerLogPath(config.DataDir)}, command, DefaultRetryPolicy())
 	supervisor.Run()
 	if err := supervisor.Start(); err != nil {
 		return err
@@ -45,4 +48,15 @@ func Run(config Config) error {
 		<-supervisor.Done()
 	}
 	return nil
+}
+
+// logTrayFailure persists startup failures that happen before the supervisor
+// exists. The tray runs without a console, so stderr alone would lose them.
+func logTrayFailure(dataDir string, err error) {
+	log, openErr := openServerLog(ServerLogPath(dataDir), 0)
+	if openErr != nil {
+		return
+	}
+	log.writeEntry("AHA2 tray failed to start server: %v", err)
+	_ = log.Close()
 }
