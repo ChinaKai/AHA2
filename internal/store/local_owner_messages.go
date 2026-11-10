@@ -46,6 +46,16 @@ func localOwnerMessageByRequestID(ctx context.Context, queryer rowQuerier, clien
 	return message, true, nil
 }
 
+// localOwnerMessageMatchesRequest compares the request fingerprint that the
+// idempotency key stands for: Task, normalized content, and source. A delayed
+// concurrent request with the same key but different text must conflict rather
+// than silently receive duplicate=true for someone else's message.
+func localOwnerMessageMatchesRequest(existing, incoming domain.Message) bool {
+	return existing.TaskID == incoming.TaskID &&
+		strings.TrimSpace(existing.Content) == strings.TrimSpace(incoming.Content) &&
+		strings.TrimSpace(existing.Source) == strings.TrimSpace(incoming.Source)
+}
+
 func isClientRequestIDConflict(err error) bool {
 	if err == nil {
 		return false

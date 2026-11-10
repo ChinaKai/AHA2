@@ -4,6 +4,11 @@ import "errors"
 
 var ErrActiveTurn = errors.New("task already has an active turn")
 
+// ErrTaskNotRunnable rejects scheduling against a Task that was completed,
+// cancelled, or blocked concurrently with the claim. It is checked inside the
+// claim transaction so a terminal transition cannot race a new Turn into life.
+var ErrTaskNotRunnable = errors.New("task is not runnable")
+
 var ErrChannelRevision = errors.New("channel resource revision conflict")
 var ErrChannelInboxDigest = errors.New("channel inbound event id has a different payload digest")
 var ErrChannelNotRetired = errors.New("channel instance is not retired")

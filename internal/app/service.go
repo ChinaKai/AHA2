@@ -794,9 +794,11 @@ func (s *Service) submitMessageWithSourceResult(ctx context.Context, taskID, age
 		}
 		task.Status = domain.TaskActive
 	}
-	// Re-read the status after the transition above so a Task completed by a
-	// concurrent CompleteTask cannot still take a new message.
-	if current, currentErr := s.store.Task(ctx, task.ID); currentErr == nil && current.Status == domain.TaskCompleted {
+	// Re-read the status after the transition above so a concurrent
+	// CompleteTask/Cancel/Block cannot still take a new message. The claim
+	// transaction repeats this check atomically before creating the Turn.
+	if current, currentErr := s.store.Task(ctx, task.ID); currentErr == nil &&
+		(current.Status == domain.TaskCompleted || current.Status == domain.TaskCancelled || current.Status == domain.TaskBlocked) {
 		return submittedMessage{}, fmt.Errorf("task is %s", current.Status)
 	}
 	now := s.now().UTC()

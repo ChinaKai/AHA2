@@ -508,6 +508,96 @@ func TestLocalOwnerIngestConcurrentIdempotency(t *testing.T) {
 	}
 }
 
+type localIngestAsyncResult struct {
+	status    int
+	messageID string
+	duplicate bool
+	code      string
+	err       error
+}
+
+func postLocalIngestAsync(fixture *localIngestFixture, body string, start <-chan struct{}) <-chan localIngestAsyncResult {
+	result := make(chan localIngestAsyncResult, 1)
+	go func() {
+		<-start
+		request, err := http.NewRequest(http.MethodPost, fixture.server.URL+"/api/v1/local/owner-messages", strings.NewReader(body))
+		if err != nil {
+			result <- localIngestAsyncResult{err: err}
+			return
+		}
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Authorization", "Bearer "+localOwnerIngestTestSecret)
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			result <- localIngestAsyncResult{err: err}
+			return
+		}
+		defer response.Body.Close()
+		var payload struct {
+			MessageID string `json:"message_id"`
+			Duplicate bool   `json:"duplicate"`
+			Error     string `json:"error"`
+		}
+		if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+			result <- localIngestAsyncResult{err: err}
+			return
+		}
+		result <- localIngestAsyncResult{
+			status: response.StatusCode, messageID: payload.MessageID,
+			duplicate: payload.Duplicate, code: payload.Error,
+		}
+	}()
+	return result
+}
+
+func TestLocalOwnerIngestConcurrentFingerprintConflict(t *testing.T) {
+	fixture := newLocalIngestFixture(t, true, localOwnerIngestTestSecret)
+	requestID := "concurrent-fingerprint-1"
+	firstBody := localIngestBody(fixture.petTaskID, "正文一", "voice", requestID)
+	secondBody := localIngestBody(fixture.petTaskID, "正文二", "voice", requestID)
+	start := make(chan struct{})
+	first := postLocalIngestAsync(fixture, firstBody, start)
+	second := postLocalIngestAsync(fixture, secondBody, start)
+	close(start)
+	firstResult, secondResult := <-first, <-second
+	accepted, conflicted := 0, 0
+	for _, item := range []localIngestAsyncResult{firstResult, secondResult} {
+		if item.err != nil {
+			t.Fatal(item.err)
+		}
+		switch item.status {
+		case http.StatusAccepted:
+			accepted++
+			if item.duplicate || item.messageID == "" {
+				t.Fatalf("accepted result=%#v", item)
+			}
+		case http.StatusConflict:
+			conflicted++
+			if item.code != "client_request_id_conflict" {
+				t.Fatalf("conflict result=%#v", item)
+			}
+		default:
+			t.Fatalf("unexpected result=%#v", item)
+		}
+	}
+	if accepted != 1 || conflicted != 1 {
+		t.Fatalf("accepted=%d conflicted=%d", accepted, conflicted)
+	}
+	waitForTaskStatus(t, fixture.database, fixture.petTaskID, domain.TaskWaitingUser)
+	total := countMessagesWithContent(t, fixture.database, fixture.petTaskID, "正文一") +
+		countMessagesWithContent(t, fixture.database, fixture.petTaskID, "正文二")
+	if total != 1 {
+		t.Fatalf("messages with either body=%d, want 1", total)
+	}
+	turns, err := fixture.database.TaskTurnCount(context.Background(), fixture.petTaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if turns != 1 {
+		t.Fatalf("turn count=%d, want 1", turns)
+	}
+}
+
 func TestLocalOwnerIngestRetryFingerprintAndTerminalTask(t *testing.T) {
 	fixture := newLocalIngestFixture(t, true, localOwnerIngestTestSecret)
 	firstBody := localIngestBody(fixture.petTaskID, "第一次", "voice", "retry-request-1")

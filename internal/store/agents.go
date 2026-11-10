@@ -282,7 +282,7 @@ func (s *Store) enqueueUserMessage(
 			return domain.TaskRound{}, domain.AgentInboxItem{}, false, false, false, "", lookupErr
 		}
 		if found {
-			if existing.TaskID != message.TaskID {
+			if !localOwnerMessageMatchesRequest(existing, message) {
 				return domain.TaskRound{}, domain.AgentInboxItem{}, false, false, false, "", ErrLocalIngestRequestConflict
 			}
 			// The first call already queued this message. Return the committed
@@ -328,7 +328,7 @@ func (s *Store) enqueueUserMessage(
 			if !found {
 				return domain.TaskRound{}, domain.AgentInboxItem{}, false, false, false, "", err
 			}
-			if existing.TaskID != message.TaskID {
+			if !localOwnerMessageMatchesRequest(existing, message) {
 				return domain.TaskRound{}, domain.AgentInboxItem{}, false, false, false, "", ErrLocalIngestRequestConflict
 			}
 			return domain.TaskRound{}, domain.AgentInboxItem{}, false, false, true, existing.ID, nil
@@ -881,6 +881,20 @@ func (s *Store) ClaimInboxAndCreateTurn(
 		return domain.Turn{}, nil, err
 	}
 	defer tx.Rollback()
+	// Status is read after BEGIN IMMEDIATE acquired the write lock. A concurrent
+	// CompleteTask/Cancel/Block therefore either commits before this check and
+	// refuses the Turn, or waits for this claim and sees the new active Turn.
+	var taskStatus string
+	if err := tx.QueryRowContext(ctx, `SELECT status FROM tasks WHERE id=?`, turn.TaskID).Scan(&taskStatus); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return domain.Turn{}, nil, ErrTaskNotRunnable
+		}
+		return domain.Turn{}, nil, err
+	}
+	switch domain.TaskStatus(taskStatus) {
+	case domain.TaskCompleted, domain.TaskCancelled, domain.TaskBlocked:
+		return domain.Turn{}, nil, ErrTaskNotRunnable
+	}
 	var active int
 	if err := tx.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM turns

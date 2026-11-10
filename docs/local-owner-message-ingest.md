@@ -59,8 +59,9 @@ secret 至少 32 字节，只接受可打印 ASCII，不能带空白。
 - Task 白名单目前只有 `task_pet`。其他 Task 返回 `403 task_not_allowed`。
 - 消息按 `role=user`、`sender=owner` 写入，走正常 Round/Turn 流程。
 - `source` 写到 `messages.source` 和 inbox payload；`client_request_id` 写到 `messages.client_request_id`，并建唯一索引。
-- 重试时用 `task_id + 规范化 content + source` 作为请求指纹。指纹不一致返回 409，不会把不同正文静默当成重复。
+- 重试时用 `task_id + 规范化 content + source` 作为请求指纹。应用层和 Store 事务内都会比较指纹；并发后到的请求如果正文或 source 不一致，返回 409，不会静默拿到别人的 `duplicate=true`。
 - 重试在调度前重新读取 Task 状态。draft、completed、cancelled、blocked 的 Task 返回 409 `task_not_runnable`，不会在终态 Task 上补起挂起消息的新 Turn。
+- 调度在 `ClaimInboxAndCreateTurn` 的写事务内再次读取 Task 状态。completed/cancelled/blocked 与调度并发时，要么终态先提交、claim 拒绝，要么 claim 先创建 Turn、`CompleteTask` 因存在活动 Turn 而拒绝；不会在终态之后新建 Turn。
 - `ListMessages` 会读取 `source` 和 `client_request_id`，标准消息读取不再丢 v129 元数据。
 - 接口不自动批准审批、不执行工具、不改变任何权限。高风险动作仍然走原有的 owner 审批。
 

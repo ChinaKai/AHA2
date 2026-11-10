@@ -215,7 +215,7 @@ func localOwnerMessageErrorStatus(err error) (int, string) {
 		return http.StatusForbidden, "task_not_allowed"
 	case errors.Is(err, app.ErrLocalIngestTaskNotFound):
 		return http.StatusNotFound, "task_not_found"
-	case errors.Is(err, app.ErrLocalIngestTaskNotRunnable):
+	case errors.Is(err, app.ErrLocalIngestTaskNotRunnable), errors.Is(err, store.ErrTaskNotRunnable):
 		return http.StatusConflict, "task_not_runnable"
 	case errors.Is(err, app.ErrLocalIngestContentEmpty):
 		return http.StatusBadRequest, "content_required"
