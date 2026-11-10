@@ -294,7 +294,7 @@ func (s *Service) PetSetTaskMCPServers(ctx context.Context, input PetSetTaskMCPS
 	if _, err := s.SetTaskMCPServers(ctx, task.ID, ids); err != nil {
 		return PetTaskMCPServersView{}, err
 	}
-	s.auditPetMCPServer(ctx, "pet.mcp_server.bind_task", map[string]any{
+	s.auditPetMCPServer(ctx, "pet.mcp_server.bind_task", "task", task.ID, map[string]any{
 		"task_id": task.ID, "server_ids": ids,
 	})
 	view, err := s.PetListTaskMCPServers(ctx, task.ID)
@@ -864,7 +864,7 @@ func (s *Service) executePetMCPServerCreate(ctx context.Context, payload petAppr
 	if err != nil {
 		return err
 	}
-	s.auditPetMCPServer(ctx, "pet.mcp_server.create", map[string]any{
+	s.auditPetMCPServer(ctx, "pet.mcp_server.create", "mcp_server", saved.ID, map[string]any{
 		"server_id": saved.ID, "transport": saved.Transport,
 		"env_keys": sortedStringKeys(saved.Env), "header_keys": sortedStringKeys(saved.Headers),
 	})
@@ -899,7 +899,7 @@ func (s *Service) executePetMCPServerUpdate(ctx context.Context, payload petAppr
 	if err != nil {
 		return err
 	}
-	s.auditPetMCPServer(ctx, "pet.mcp_server.update", map[string]any{
+	s.auditPetMCPServer(ctx, "pet.mcp_server.update", "mcp_server", saved.ID, map[string]any{
 		"server_id": saved.ID, "transport": saved.Transport,
 		"env_keys": sortedStringKeys(saved.Env), "header_keys": sortedStringKeys(saved.Headers),
 	})
@@ -923,7 +923,7 @@ func (s *Service) executePetMCPServerDelete(ctx context.Context, payload petAppr
 	if err := s.DeleteMCPServer(ctx, id); err != nil {
 		return err
 	}
-	s.auditPetMCPServer(ctx, "pet.mcp_server.delete", map[string]any{"server_id": id})
+	s.auditPetMCPServer(ctx, "pet.mcp_server.delete", "mcp_server", id, map[string]any{"server_id": id})
 	s.recordPetWork(ctx, "mcp_server_deleted", id, "approved")
 	return nil
 }
@@ -940,7 +940,7 @@ func (s *Service) executePetSetTaskMCPServers(ctx context.Context, payload petAp
 	if _, err := s.SetTaskMCPServers(ctx, task.ID, ids); err != nil {
 		return err
 	}
-	s.auditPetMCPServer(ctx, "pet.mcp_server.bind_task", map[string]any{
+	s.auditPetMCPServer(ctx, "pet.mcp_server.bind_task", "task", task.ID, map[string]any{
 		"task_id": task.ID, "server_ids": ids,
 	})
 	s.recordPetWork(ctx, "task_mcp_updated", task.ID, "approved")
@@ -982,6 +982,6 @@ func petMCPServerConfigMatches(existing domain.MCPServer, config petMCPServerApp
 	return sameStringSlices(sortedStringKeys(existing.Headers), config.HeaderKeys)
 }
 
-func (s *Service) auditPetMCPServer(ctx context.Context, action string, details map[string]any) {
-	_ = s.store.AppendAudit(ctx, "pet", action, "mcp_server", "", details, s.now().UTC().Format(time.RFC3339Nano))
+func (s *Service) auditPetMCPServer(ctx context.Context, action, resourceType, resourceID string, details map[string]any) {
+	_ = s.store.AppendAudit(ctx, "pet", action, resourceType, resourceID, details, s.now().UTC().Format(time.RFC3339Nano))
 }
