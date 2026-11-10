@@ -232,6 +232,21 @@ func (s *Store) EnqueueOwnerMessage(
 	targetAgentID string,
 	attachmentIDs []string,
 ) (domain.TaskRound, domain.AgentInboxItem, bool, error) {
+	round, inbox, createdRound, _, _, err := s.enqueueUserMessage(ctx, message, targetAgentID, "owner", "owner_message", "owner_message", attachmentIDs)
+	return round, inbox, createdRound, err
+}
+
+// EnqueueLocalOwnerMessage writes an owner-role message with provenance from
+// the local ingest bridge. A non-empty message.ClientRequestID makes the write
+// idempotent: retries return the message written by the first call instead of
+// inserting a second one. duplicate is reported so the caller can audit the
+// retry without scheduling extra work.
+func (s *Store) EnqueueLocalOwnerMessage(
+	ctx context.Context,
+	message domain.Message,
+	targetAgentID string,
+	attachmentIDs []string,
+) (domain.TaskRound, domain.AgentInboxItem, bool, bool, bool, error) {
 	return s.enqueueUserMessage(ctx, message, targetAgentID, "owner", "owner_message", "owner_message", attachmentIDs)
 }
 
@@ -245,7 +260,8 @@ func (s *Store) EnqueuePetDelegatedMessage(
 	targetAgentID string,
 	attachmentIDs []string,
 ) (domain.TaskRound, domain.AgentInboxItem, bool, error) {
-	return s.enqueueUserMessage(ctx, message, targetAgentID, "pet", "pet_delegate_message", "pet_delegate_message", attachmentIDs)
+	round, inbox, createdRound, _, _, err := s.enqueueUserMessage(ctx, message, targetAgentID, "pet", "pet_delegate_message", "pet_delegate_message", attachmentIDs)
+	return round, inbox, createdRound, err
 }
 
 func (s *Store) enqueueUserMessage(
@@ -253,21 +269,36 @@ func (s *Store) enqueueUserMessage(
 	message domain.Message,
 	targetAgentID, sourceAgentID, sourceKind, routeKind string,
 	attachmentIDs []string,
-) (domain.TaskRound, domain.AgentInboxItem, bool, error) {
+) (domain.TaskRound, domain.AgentInboxItem, bool, bool, bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return domain.TaskRound{}, domain.AgentInboxItem{}, false, err
+		return domain.TaskRound{}, domain.AgentInboxItem{}, false, false, false, err
 	}
 	defer tx.Rollback()
+	if message.ClientRequestID != "" {
+		existing, found, lookupErr := localOwnerMessageByRequestID(ctx, tx, message.ClientRequestID)
+		if lookupErr != nil {
+			return domain.TaskRound{}, domain.AgentInboxItem{}, false, false, false, lookupErr
+		}
+		if found {
+			if existing.TaskID != message.TaskID {
+				return domain.TaskRound{}, domain.AgentInboxItem{}, false, false, false, ErrLocalIngestRequestConflict
+			}
+			// The first call already queued this message. Return an empty round
+			// and inbox: the caller only needs the existing message identity and
+			// must not schedule a second Turn for it.
+			return domain.TaskRound{}, domain.AgentInboxItem{}, false, false, true, tx.Commit()
+		}
+	}
 	var exists bool
 	if err := tx.QueryRowContext(ctx, `
 		SELECT EXISTS(SELECT 1 FROM task_agents WHERE task_id=? AND agent_id=?)`,
 		message.TaskID, targetAgentID,
 	).Scan(&exists); err != nil {
-		return domain.TaskRound{}, domain.AgentInboxItem{}, false, err
+		return domain.TaskRound{}, domain.AgentInboxItem{}, false, false, false, err
 	}
 	if !exists {
-		return domain.TaskRound{}, domain.AgentInboxItem{}, false, sql.ErrNoRows
+		return domain.TaskRound{}, domain.AgentInboxItem{}, false, false, false, sql.ErrNoRows
 	}
 	round, err := scanRound(tx.QueryRowContext(ctx, `
 		SELECT `+roundColumns+` FROM task_rounds
@@ -277,22 +308,42 @@ func (s *Store) enqueueUserMessage(
 	))
 	createdRound := false
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return domain.TaskRound{}, domain.AgentInboxItem{}, false, err
+		return domain.TaskRound{}, domain.AgentInboxItem{}, false, false, false, err
 	}
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO messages(id,task_id,turn_id,role,sender,content,created_at)
-		VALUES(?,?,?,?,?,?,?)`,
-		message.ID, message.TaskID, "", message.Role, message.Sender, message.Content, timeString(message.CreatedAt),
+		INSERT INTO messages(id,task_id,turn_id,role,sender,content,source,client_request_id,created_at)
+		VALUES(?,?,?,?,?,?,?,?,?)`,
+		message.ID, message.TaskID, "", message.Role, message.Sender, message.Content,
+		message.Source, message.ClientRequestID, timeString(message.CreatedAt),
 	); err != nil {
-		return domain.TaskRound{}, domain.AgentInboxItem{}, false, err
+		if message.ClientRequestID != "" && isClientRequestIDConflict(err) {
+			// Another writer won the same idempotency key between our lookup and
+			// insert. Roll back and report the committed message as a duplicate.
+			_ = tx.Rollback()
+			existing, found, lookupErr := localOwnerMessageByRequestID(ctx, s.db, message.ClientRequestID)
+			if lookupErr != nil {
+				return domain.TaskRound{}, domain.AgentInboxItem{}, false, false, false, lookupErr
+			}
+			if !found {
+				return domain.TaskRound{}, domain.AgentInboxItem{}, false, false, false, err
+			}
+			if existing.TaskID != message.TaskID {
+				return domain.TaskRound{}, domain.AgentInboxItem{}, false, false, false, ErrLocalIngestRequestConflict
+			}
+			return domain.TaskRound{}, domain.AgentInboxItem{}, false, false, true, nil
+		}
+		return domain.TaskRound{}, domain.AgentInboxItem{}, false, false, false, err
 	}
 	attachments, err := bindAttachmentsTx(ctx, tx, message.TaskID, message.ID, attachmentIDs)
 	if err != nil {
-		return domain.TaskRound{}, domain.AgentInboxItem{}, false, err
+		return domain.TaskRound{}, domain.AgentInboxItem{}, false, false, false, err
 	}
 	payload := map[string]any{}
 	if len(attachments) > 0 {
 		payload["attachments"] = attachments
+	}
+	if message.Source != "" {
+		payload["source"] = message.Source
 	}
 	if errors.Is(err, sql.ErrNoRows) || round.ID == "" {
 		round = domain.TaskRound{
@@ -303,7 +354,7 @@ func (s *Store) enqueueUserMessage(
 			SELECT COALESCE(MAX(sequence),0)+1 FROM task_rounds WHERE task_id=?`,
 			message.TaskID,
 		).Scan(&round.Sequence); err != nil {
-			return domain.TaskRound{}, domain.AgentInboxItem{}, false, err
+			return domain.TaskRound{}, domain.AgentInboxItem{}, false, false, false, err
 		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO task_rounds(id,task_id,sequence,input_message_id,status,created_at,started_at,finished_at)
@@ -311,7 +362,7 @@ func (s *Store) enqueueUserMessage(
 			round.ID, round.TaskID, round.Sequence, round.InputMessageID, round.Status,
 			timeString(round.CreatedAt), timeString(round.StartedAt), "",
 		); err != nil {
-			return domain.TaskRound{}, domain.AgentInboxItem{}, false, err
+			return domain.TaskRound{}, domain.AgentInboxItem{}, false, false, false, err
 		}
 		createdRound = true
 	}
@@ -324,7 +375,7 @@ func (s *Store) enqueueUserMessage(
 		sourceAgentID, targetAgentID, routeKind, "chat", "user_message", message.Content, encodeJSON(payload),
 		timeString(message.CreatedAt),
 	); err != nil {
-		return domain.TaskRound{}, domain.AgentInboxItem{}, false, err
+		return domain.TaskRound{}, domain.AgentInboxItem{}, false, false, false, err
 	}
 	inbox := domain.AgentInboxItem{
 		ID: domain.NewID("inbox"), TaskID: message.TaskID, RoundID: round.ID,
@@ -340,16 +391,16 @@ func (s *Store) enqueueUserMessage(
 		"", inbox.MessageID, inbox.Content, encodeJSON(inbox.Payload), inbox.Status, "", timeString(inbox.CreatedAt), "", "",
 	)
 	if err != nil {
-		return domain.TaskRound{}, domain.AgentInboxItem{}, false, err
+		return domain.TaskRound{}, domain.AgentInboxItem{}, false, false, false, err
 	}
 	inbox.Sequence, err = result.LastInsertId()
 	if err != nil {
-		return domain.TaskRound{}, domain.AgentInboxItem{}, false, err
+		return domain.TaskRound{}, domain.AgentInboxItem{}, false, false, false, err
 	}
 	if err := tx.Commit(); err != nil {
-		return domain.TaskRound{}, domain.AgentInboxItem{}, false, err
+		return domain.TaskRound{}, domain.AgentInboxItem{}, false, false, false, err
 	}
-	return round, inbox, createdRound, nil
+	return round, inbox, createdRound, true, false, nil
 }
 
 func (s *Store) EnqueueAgentRoute(ctx context.Context, item domain.AgentInboxItem) (bool, error) {

@@ -57,6 +57,14 @@ func main() {
 		}
 		return
 	}
+	if command == "local-ingest-secret" {
+		err = storeLocalIngestSecret(args)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	switch command {
 	case "serve":
 		err = serve(args)
@@ -85,6 +93,8 @@ func parseCommand(args []string) (string, []string, error) {
 		return "version", nil, nil
 	case "listen":
 		return "listen", args[1:], nil
+	case "local-ingest-secret":
+		return "local-ingest-secret", args[1:], nil
 	case "import-aha1-knowledge":
 		return "import-aha1-knowledge", args[1:], nil
 	case "service":
@@ -113,6 +123,7 @@ type serveOptions struct {
 	codexBinary           string
 	claudeBinary          string
 	dshBinary             string
+	localOwnerIngest      bool
 	// deprecatedLiveInput records old live-inbox switches that were supplied.
 	// They are accepted so existing service definitions keep starting, but they
 	// no longer select any behavior.
@@ -146,6 +157,7 @@ func parseServeOptions(name string, args []string) (serveOptions, error) {
 	codexBinary := flags.String("codex-bin", envOr("AHA2_CODEX_BIN", "codex"), "Codex executable")
 	claudeBinary := flags.String("claude-bin", envOr("AHA2_CLAUDE_BIN", "claude"), "Claude Code executable")
 	dshBinary := flags.String("dsh-bin", envOr("AHA2_DSH_BIN", "dsh"), "DeepSeek Harness executable")
+	localOwnerIngest := flags.Bool("local-owner-ingest", envBool("AHA2_LOCAL_OWNER_INGEST"), "enable the loopback-only local owner message ingest endpoint")
 	// Live inbox delivery is always enabled when the runner can stream stdin.
 	// Keep the old switches as parse-only no-ops so existing service definitions
 	// and scripts still start; they cannot turn the behavior on or off.
@@ -165,6 +177,7 @@ func parseServeOptions(name string, args []string) (serveOptions, error) {
 		mailDownloadBaseURL: *mailDownloadBaseURL, mailDownloadListen: *mailDownloadListen,
 		logLevel: *logLevel, codexBinary: *codexBinary,
 		claudeBinary: *claudeBinary, dshBinary: *dshBinary,
+		localOwnerIngest:    *localOwnerIngest,
 		deprecatedLiveInput: deprecatedLiveInput,
 	}, nil
 }
@@ -344,6 +357,7 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 		Version:             version,
 		WebVersion:          webVersion,
 		ListenAddress:       options.listen,
+		LocalOwnerIngest:    options.localOwnerIngest,
 	})
 	if options.allowCrossOrigin {
 		logger.Warn("Origin host validation disabled")

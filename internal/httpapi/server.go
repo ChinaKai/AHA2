@@ -65,56 +65,61 @@ type Config struct {
 	// ListenAddress is what this process was launched with, reported so the UI can
 	// tell a saved-but-not-yet-applied address from an active one.
 	ListenAddress string
-	StartedAt     time.Time
+	// LocalOwnerIngest registers the loopback-only owner message ingest route.
+	// It is off by default; when off the path is not routed at all.
+	LocalOwnerIngest bool
+	StartedAt        time.Time
 }
 
 type Server struct {
-	store                 *store.Store
-	syncStore             *store.Store
-	auth                  *auth.Service
-	app                   *app.Service
-	web                   fs.FS
-	logger                *slog.Logger
-	secureCookie          bool
-	originPolicyMu        sync.RWMutex
-	validateOrigin        bool
-	originStartupOverride bool
-	accessScope           *accessScopeGate
-	startupListenAddress  string
-	detectWorkspace       func(context.Context, domain.Workspace) (domain.Workspace, error)
-	secrets               SecretStore
-	hardware              *hardware.Manager
-	desktop               *desktop.Manager
-	codexAccounts         *codexaccount.Manager
-	agentCapabilities     *agentapi.Capabilities
-	managedProcesses      *managedprocess.Manager
-	outboundProxy         *outboundproxy.Controller
-	channels              *channel.Service
-	mailTester            mailpkg.Tester
-	mailTaskBaseURL       string
-	mailDownloadBaseURL   string
-	mailDownloadKey       []byte
-	mailDownloadLimiter   *mailDownloadLimiter
-	mailDownloadHosts     map[string]bool
-	mailDownloadNonceMu   sync.Mutex
-	mailDownloadNonces    map[string]time.Time
-	probeSSHHostKey       func(context.Context, string) (hardware.SSHHostKeyInfo, error)
-	trustSSHHostKey       func(context.Context, string, string) (hardware.SSHHostKeyInfo, error)
-	pairADB               func(context.Context, string, string) (string, error)
-	executeADB            func(context.Context, string, []string, []byte, time.Duration) (hardware.ADBExecResult, error)
-	version               string
-	webVersion            string
-	startedAt             time.Time
-	syncRunMu             sync.RWMutex
-	syncRun               syncRunProgress
-	syncNextRunAt         time.Time
-	syncLoopStarted       bool
-	authLimiter           *authLimiter
-	modelDetectionJobs    *modelDetectionJobs
-	systemMu              sync.Mutex
-	systemCachedAt        time.Time
-	systemCache           map[string]any
-	runtimeContextCache   runtimeContextCache
+	store                    *store.Store
+	syncStore                *store.Store
+	auth                     *auth.Service
+	app                      *app.Service
+	web                      fs.FS
+	logger                   *slog.Logger
+	secureCookie             bool
+	originPolicyMu           sync.RWMutex
+	validateOrigin           bool
+	originStartupOverride    bool
+	accessScope              *accessScopeGate
+	startupListenAddress     string
+	detectWorkspace          func(context.Context, domain.Workspace) (domain.Workspace, error)
+	secrets                  SecretStore
+	hardware                 *hardware.Manager
+	desktop                  *desktop.Manager
+	codexAccounts            *codexaccount.Manager
+	agentCapabilities        *agentapi.Capabilities
+	managedProcesses         *managedprocess.Manager
+	outboundProxy            *outboundproxy.Controller
+	channels                 *channel.Service
+	mailTester               mailpkg.Tester
+	mailTaskBaseURL          string
+	mailDownloadBaseURL      string
+	mailDownloadKey          []byte
+	mailDownloadLimiter      *mailDownloadLimiter
+	mailDownloadHosts        map[string]bool
+	mailDownloadNonceMu      sync.Mutex
+	mailDownloadNonces       map[string]time.Time
+	probeSSHHostKey          func(context.Context, string) (hardware.SSHHostKeyInfo, error)
+	trustSSHHostKey          func(context.Context, string, string) (hardware.SSHHostKeyInfo, error)
+	pairADB                  func(context.Context, string, string) (string, error)
+	executeADB               func(context.Context, string, []string, []byte, time.Duration) (hardware.ADBExecResult, error)
+	version                  string
+	webVersion               string
+	startedAt                time.Time
+	localOwnerIngest         bool
+	localOwnerMessageLimiter *localOwnerMessageLimiter
+	syncRunMu                sync.RWMutex
+	syncRun                  syncRunProgress
+	syncNextRunAt            time.Time
+	syncLoopStarted          bool
+	authLimiter              *authLimiter
+	modelDetectionJobs       *modelDetectionJobs
+	systemMu                 sync.Mutex
+	systemCachedAt           time.Time
+	systemCache              map[string]any
+	runtimeContextCache      runtimeContextCache
 }
 
 func New(config Config) *Server {
@@ -182,34 +187,36 @@ func New(config Config) *Server {
 	server := &Server{
 		store: config.Store, syncStore: syncStore, auth: config.Auth, app: config.App, web: config.Web,
 		logger: logger, secureCookie: config.SecureCookie, validateOrigin: validateOrigin,
-		originStartupOverride: config.AllowCrossOrigin,
-		accessScope:           newAccessScopeGate(accessScopeValue),
-		startupListenAddress:  config.ListenAddress,
-		detectWorkspace:       config.DetectWorkspace,
-		secrets:               config.Secrets,
-		hardware:              config.Hardware,
-		desktop:               config.Desktop,
-		codexAccounts:         config.CodexAccounts,
-		agentCapabilities:     config.AgentCapabilities,
-		managedProcesses:      config.ManagedProcesses,
-		outboundProxy:         config.OutboundProxy,
-		channels:              config.Channels,
-		mailTester:            mailTester,
-		mailTaskBaseURL:       strings.TrimRight(strings.TrimSpace(config.MailTaskBaseURL), "/"),
-		mailDownloadBaseURL:   strings.TrimRight(strings.TrimSpace(config.MailDownloadBaseURL), "/"),
-		mailDownloadKey:       downloadKey,
-		mailDownloadLimiter:   newMailDownloadLimiter(),
-		mailDownloadHosts:     downloadHosts,
-		mailDownloadNonces:    map[string]time.Time{},
-		probeSSHHostKey:       probeSSHHostKey,
-		trustSSHHostKey:       trustSSHHostKey,
-		pairADB:               pairADB,
-		executeADB:            executeADB,
-		version:               config.Version,
-		webVersion:            config.WebVersion,
-		startedAt:             startedAt,
-		authLimiter:           newAuthLimiter(),
-		modelDetectionJobs:    newModelDetectionJobs(),
+		originStartupOverride:    config.AllowCrossOrigin,
+		accessScope:              newAccessScopeGate(accessScopeValue),
+		startupListenAddress:     config.ListenAddress,
+		detectWorkspace:          config.DetectWorkspace,
+		secrets:                  config.Secrets,
+		hardware:                 config.Hardware,
+		desktop:                  config.Desktop,
+		codexAccounts:            config.CodexAccounts,
+		agentCapabilities:        config.AgentCapabilities,
+		managedProcesses:         config.ManagedProcesses,
+		outboundProxy:            config.OutboundProxy,
+		channels:                 config.Channels,
+		mailTester:               mailTester,
+		mailTaskBaseURL:          strings.TrimRight(strings.TrimSpace(config.MailTaskBaseURL), "/"),
+		mailDownloadBaseURL:      strings.TrimRight(strings.TrimSpace(config.MailDownloadBaseURL), "/"),
+		mailDownloadKey:          downloadKey,
+		mailDownloadLimiter:      newMailDownloadLimiter(),
+		mailDownloadHosts:        downloadHosts,
+		mailDownloadNonces:       map[string]time.Time{},
+		probeSSHHostKey:          probeSSHHostKey,
+		trustSSHHostKey:          trustSSHHostKey,
+		pairADB:                  pairADB,
+		executeADB:               executeADB,
+		version:                  config.Version,
+		webVersion:               config.WebVersion,
+		startedAt:                startedAt,
+		localOwnerIngest:         config.LocalOwnerIngest,
+		localOwnerMessageLimiter: newLocalOwnerMessageLimiter(),
+		authLimiter:              newAuthLimiter(),
+		modelDetectionJobs:       newModelDetectionJobs(),
 	}
 	if server.webVersion == "" {
 		server.webVersion = server.version
@@ -225,6 +232,9 @@ func New(config Config) *Server {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.health)
+	if s.localOwnerIngest {
+		mux.HandleFunc("POST /api/v1/local/owner-messages", s.localOwnerMessageIngest)
+	}
 	mux.HandleFunc("GET /api/v1/auth/status", s.authStatus)
 	mux.HandleFunc("POST /api/v1/auth/register", s.authRegister)
 	mux.HandleFunc("POST /api/v1/auth/login", s.authLogin)

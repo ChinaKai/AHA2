@@ -3534,5 +3534,22 @@ func (s *Store) migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(128, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
 		return fmt.Errorf("record schema v128: %w", err)
 	}
+	var hasV129 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=129)`).Scan(&hasV129)
+	if !hasV129 {
+		for _, statement := range []string{
+			`ALTER TABLE messages ADD COLUMN source TEXT NOT NULL DEFAULT ''`,
+			`ALTER TABLE messages ADD COLUMN client_request_id TEXT NOT NULL DEFAULT ''`,
+			`CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_client_request_id
+			 ON messages(client_request_id) WHERE client_request_id<>''`,
+		} {
+			if _, err := s.db.ExecContext(ctx, statement); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+				return fmt.Errorf("apply schema v129: %w", err)
+			}
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(129, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v129: %w", err)
+	}
 	return nil
 }

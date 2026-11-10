@@ -726,9 +726,32 @@ func (s *Service) SubmitChannelMessageWithAttachments(ctx context.Context, recei
 // channelContinuation references an already-processed receipt instead of
 // consuming a fresh one, for decisions made outside the channel.
 func (s *Service) submitMessageWithSource(ctx context.Context, taskID, agentID, content string, attachmentIDs []string, channelReceiptID, channelReceiptLeaseID, channelConversationID string, channelProvenance map[string]any, sender, sourceKind string, channelContinuation bool) (domain.Turn, error) {
+	result, err := s.submitMessageWithSourceResult(
+		ctx, taskID, agentID, content, attachmentIDs,
+		channelReceiptID, channelReceiptLeaseID, channelConversationID,
+		channelProvenance, sender, sourceKind, channelContinuation, nil,
+	)
+	return result.Turn, err
+}
+
+type submittedMessage struct {
+	Turn      domain.Turn
+	MessageID string
+	Duplicate bool
+}
+
+// localOwnerMessageMeta carries the provenance of a message written by the
+// loopback owner-message ingest endpoint. A nil value keeps the existing Web,
+// pet-delegated, and channel write paths unchanged.
+type localOwnerMessageMeta struct {
+	Source          string
+	ClientRequestID string
+}
+
+func (s *Service) submitMessageWithSourceResult(ctx context.Context, taskID, agentID, content string, attachmentIDs []string, channelReceiptID, channelReceiptLeaseID, channelConversationID string, channelProvenance map[string]any, sender, sourceKind string, channelContinuation bool, local *localOwnerMessageMeta) (submittedMessage, error) {
 	content = strings.TrimSpace(content)
 	if content == "" && len(attachmentIDs) == 0 {
-		return domain.Turn{}, fmt.Errorf("message or attachment is required")
+		return submittedMessage{}, fmt.Errorf("message or attachment is required")
 	}
 	agentID = strings.TrimSpace(agentID)
 	if agentID == "" {
@@ -736,45 +759,45 @@ func (s *Service) submitMessageWithSource(ctx context.Context, taskID, agentID, 
 	}
 	task, err := s.store.Task(ctx, taskID)
 	if err != nil {
-		return domain.Turn{}, err
+		return submittedMessage{}, err
 	}
 	if task.ID == petTaskID {
 		task = s.migratePetTaskGoal(ctx, task)
 	}
 	if task.Status == domain.TaskDraft {
-		return domain.Turn{}, fmt.Errorf("task must be started before sending messages")
+		return submittedMessage{}, fmt.Errorf("task must be started before sending messages")
 	}
 	if err := s.store.ValidateDraftAttachments(ctx, task.ID, attachmentIDs); err != nil {
-		return domain.Turn{}, err
+		return submittedMessage{}, err
 	}
 	if task.CollaborationMode == "single" && agentID != "main" {
-		return domain.Turn{}, fmt.Errorf("task is in single-agent mode")
+		return submittedMessage{}, fmt.Errorf("task is in single-agent mode")
 	}
 	agent, err := s.store.TaskAgent(ctx, taskID, agentID)
 	if err != nil {
-		return domain.Turn{}, err
+		return submittedMessage{}, err
 	}
 	snapshot, err := s.store.RuntimeSnapshot(ctx, agent.RuntimeConfigSnapshotID)
 	if err != nil {
-		return domain.Turn{}, fmt.Errorf("运行配置不存在，请修改 %s 配置", agentID)
+		return submittedMessage{}, fmt.Errorf("运行配置不存在，请修改 %s 配置", agentID)
 	}
 	if _, unavailable := s.runtimeSnapshotAvailability(ctx, snapshot); unavailable != "" {
-		return domain.Turn{}, fmt.Errorf("%s，请修改 %s 模型配置", unavailable, agentID)
+		return submittedMessage{}, fmt.Errorf("%s，请修改 %s 模型配置", unavailable, agentID)
 	}
 	if task.Status == domain.TaskCompleted || task.Status == domain.TaskCancelled || task.Status == domain.TaskBlocked {
-		return domain.Turn{}, fmt.Errorf("task is %s", task.Status)
+		return submittedMessage{}, fmt.Errorf("task is %s", task.Status)
 	}
 	if task.Status == domain.TaskWaitingUser || task.Status == domain.TaskFailed {
 		now := s.now().UTC()
 		if err := s.store.UpdateTaskStatus(ctx, task.ID, task.Status, domain.TaskActive, timeString(now), ""); err != nil {
-			return domain.Turn{}, err
+			return submittedMessage{}, err
 		}
 		task.Status = domain.TaskActive
 	}
 	// Re-read the status after the transition above so a Task completed by a
 	// concurrent CompleteTask cannot still take a new message.
 	if current, currentErr := s.store.Task(ctx, task.ID); currentErr == nil && current.Status == domain.TaskCompleted {
-		return domain.Turn{}, fmt.Errorf("task is %s", current.Status)
+		return submittedMessage{}, fmt.Errorf("task is %s", current.Status)
 	}
 	now := s.now().UTC()
 	message := domain.Message{
@@ -784,6 +807,10 @@ func (s *Service) submitMessageWithSource(ctx context.Context, taskID, agentID, 
 		Sender:    sender,
 		Content:   content,
 		CreatedAt: now,
+	}
+	if local != nil {
+		message.Source = local.Source
+		message.ClientRequestID = local.ClientRequestID
 	}
 	if actor, ok := channelProvenance["actor"].(map[string]any); ok {
 		if displayName := strings.TrimSpace(fmt.Sprint(actor["display_name"])); displayName != "" && displayName != "<nil>" {
@@ -795,7 +822,7 @@ func (s *Service) submitMessageWithSource(ctx context.Context, taskID, agentID, 
 	}
 	var round domain.TaskRound
 	var inbox domain.AgentInboxItem
-	var createdRound, inserted bool
+	var createdRound, inserted, duplicate bool
 	if channelReceiptID != "" {
 		if channelContinuation {
 			round, inbox, createdRound, err = s.store.EnqueueChannelContinuationMessage(ctx, channelReceiptID, channelConversationID, message, agentID, channelProvenance, attachmentIDs...)
@@ -806,12 +833,14 @@ func (s *Service) submitMessageWithSource(ctx context.Context, taskID, agentID, 
 	} else if sourceKind == "pet_delegate_message" {
 		round, inbox, createdRound, err = s.store.EnqueuePetDelegatedMessage(ctx, message, agentID, attachmentIDs)
 		inserted = err == nil
+	} else if local != nil {
+		round, inbox, createdRound, inserted, duplicate, err = s.store.EnqueueLocalOwnerMessage(ctx, message, agentID, attachmentIDs)
 	} else {
 		round, inbox, createdRound, err = s.store.EnqueueOwnerMessage(ctx, message, agentID, attachmentIDs)
 		inserted = err == nil
 	}
 	if err != nil {
-		return domain.Turn{}, err
+		return submittedMessage{}, err
 	}
 	if createdRound && inserted {
 		s.emit(ctx, task.ID, "round", round.ID, "round_started", map[string]any{
@@ -825,12 +854,12 @@ func (s *Service) submitMessageWithSource(ctx context.Context, taskID, agentID, 
 	}
 	turn, started, err := s.scheduleAgent(ctx, task.ID, agentID)
 	if err != nil {
-		return domain.Turn{}, err
+		return submittedMessage{}, err
 	}
 	if !started {
-		return domain.Turn{}, nil
+		return submittedMessage{MessageID: message.ID, Duplicate: duplicate}, nil
 	}
-	return turn, nil
+	return submittedMessage{Turn: turn, MessageID: message.ID, Duplicate: duplicate}, nil
 }
 
 func (s *Service) InterruptTurn(ctx context.Context, turnID string) error {

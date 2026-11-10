@@ -24,6 +24,7 @@ func TestParseCommandRoutesServeAndWindowsService(t *testing.T) {
 		{args: []string{"serve", "--data-dir", "data"}, command: "serve", commandArgs: []string{"--data-dir", "data"}},
 		{args: []string{"service", "run", "--listen", "127.0.0.1:8766"}, command: "service-run", commandArgs: []string{"--listen", "127.0.0.1:8766"}},
 		{args: []string{"version"}, command: "version"},
+		{args: []string{"local-ingest-secret", "--data-dir", "data"}, command: "local-ingest-secret", commandArgs: []string{"--data-dir", "data"}},
 		{args: []string{"import-aha1-knowledge", "--source", "legacy"}, command: "import-aha1-knowledge", commandArgs: []string{"--source", "legacy"}},
 		{args: []string{"service"}, errorText: "aha2 service run"},
 		{args: []string{"service", "stop"}, errorText: "aha2 service run"},
@@ -84,14 +85,14 @@ func TestParseServiceRunOptions(t *testing.T) {
 	options, err := parseServeOptions("aha2 service run", []string{
 		"--listen", "127.0.0.1:8766", "--data-dir", `C:\AHA2\data`, "--secure-cookie",
 		"--agent-api-url", "https://aha.example.test", "--codex-bin", "codex.exe",
-		"--claude-bin", "claude.exe", "--dsh-bin", "dsh.cmd",
+		"--claude-bin", "claude.exe", "--dsh-bin", "dsh.cmd", "--local-owner-ingest",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if options.listen != "127.0.0.1:8766" || options.dataDir != `C:\AHA2\data` || !options.secureCookie ||
 		options.agentAPIURL != "https://aha.example.test" || options.codexBinary != "codex.exe" ||
-		options.claudeBinary != "claude.exe" || options.dshBinary != "dsh.cmd" {
+		options.claudeBinary != "claude.exe" || options.dshBinary != "dsh.cmd" || !options.localOwnerIngest {
 		t.Fatalf("service options=%#v", options)
 	}
 	if _, err := parseServeOptions("aha2 service run", []string{"--listen", "127.0.0.1:8766", "extra"}); err == nil || !strings.Contains(err.Error(), "unexpected arguments") {

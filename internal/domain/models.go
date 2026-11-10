@@ -481,13 +481,15 @@ type Turn struct {
 }
 
 type Message struct {
-	ID        string    `json:"id"`
-	TaskID    string    `json:"task_id"`
-	TurnID    string    `json:"turn_id,omitempty"`
-	Role      string    `json:"role"`
-	Sender    string    `json:"sender"`
-	Content   string    `json:"content"`
-	CreatedAt time.Time `json:"created_at"`
+	ID              string    `json:"id"`
+	TaskID          string    `json:"task_id"`
+	TurnID          string    `json:"turn_id,omitempty"`
+	Role            string    `json:"role"`
+	Sender          string    `json:"sender"`
+	Content         string    `json:"content"`
+	Source          string    `json:"source,omitempty"`
+	ClientRequestID string    `json:"client_request_id,omitempty"`
+	CreatedAt       time.Time `json:"created_at"`
 }
 
 type Attachment struct {
