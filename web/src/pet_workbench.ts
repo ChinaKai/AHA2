@@ -323,6 +323,19 @@ export interface PetWorkbenchPageBinding {
   tab: string;
 }
 
+export interface PetWorkbenchRenderContext {
+  /** The view the shell is about to render. */
+  view: string;
+  /**
+   * False once the session ended (logout or expiry). The page must not survive
+   * an unauthenticated render, or its in-flight request would keep the
+   * connection busy after the user is back on the login screen.
+   */
+  authenticated: boolean;
+  /** Latest programmatic tab request; a preserved page follows it. */
+  tab?: string;
+}
+
 export interface PetWorkbenchPageKeeper {
   readonly binding: PetWorkbenchPageBinding | null;
   /** True when this exact live body is already owned by the keeper. */
@@ -330,9 +343,11 @@ export interface PetWorkbenchPageKeeper {
   /**
    * Called once per render before `#app` is replaced. Returns the mounted page
    * to carry over while staying on the workbench, and releases the binding
-   * (aborting its in-flight request) when the render leaves the view.
+   * (aborting its in-flight request) when the render leaves the view or the
+   * session ends. A changed programmatic tab is selected on the preserved page
+   * so its listeners keep driving the live body.
    */
-  beforeRender: (view: string) => HTMLElement | null;
+  beforeRender: (context: PetWorkbenchRenderContext) => HTMLElement | null;
   adopt: (body: HTMLElement, page: HTMLElement | null, loader: {dispose: () => void}, tab: string) => PetWorkbenchPageBinding;
   release: () => void;
 }
@@ -369,13 +384,23 @@ export function createPetWorkbenchPageKeeper(): PetWorkbenchPageKeeper {
     owns(body) {
       return Boolean(body && binding && binding.body === body && body.isConnected);
     },
-    beforeRender(view) {
-      if (view !== "pet-workbench") {
+    beforeRender(context) {
+      // Logout renders the login view while state.view may still be
+      // "pet-workbench"; the session flag is what actually ends the page.
+      if (!context.authenticated || context.view !== "pet-workbench") {
         release();
         return null;
       }
       if (!binding || !binding.body.isConnected) return null;
-      return binding.page && binding.page.isConnected ? binding.page : null;
+      if (!binding.page || !binding.page.isConnected) return null;
+      // A programmatic tab change (for example the pet panel's settings entry)
+      // updates petWorkbenchTab without a click on the preserved page. Clicking
+      // here runs the same listener the user would, so the tab becomes active
+      // and its body renders while the loader keeps its request.
+      if (context.tab && binding.tab !== context.tab) {
+        binding.page.querySelector<HTMLButtonElement>(`[data-pet-workbench-tab="${context.tab}"]`)?.click();
+      }
+      return binding.page;
     },
     adopt(body, page, loader, tab) {
       // A different body means the old page was not carried across a render

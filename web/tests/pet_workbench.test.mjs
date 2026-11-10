@@ -261,14 +261,14 @@ test("an entry issues one workbench request and unrelated renders never abort it
   // resource loads and messages render too. Every one of them must reuse the
   // live page instead of rebinding the loader.
   for (let render = 0; render < 6; render++) {
-    assert.equal(keeper.beforeRender("pet-workbench"), page, `render ${render} carries the page`);
+    assert.equal(keeper.beforeRender({view: "pet-workbench", authenticated: true, tab: "core"}), page, `render ${render} carries the page`);
     assert.equal(keeper.owns(body), true, `render ${render} sees the live binding`);
     assert.equal(requests.length, 1, `render ${render} must not issue another request`);
     assert.equal(requests[0].aborted, false, `render ${render} must not abort the in-flight request`);
   }
 
   // Only actually leaving the view aborts the request.
-  assert.equal(keeper.beforeRender("tasks"), null);
+  assert.equal(keeper.beforeRender({view: "tasks", authenticated: true}), null);
   assert.equal(requests[0].aborted, true, "leaving the view aborts the in-flight request");
   assert.equal(keeper.binding, null);
   assert.equal(keeper.owns(body), false);
@@ -301,14 +301,14 @@ test("a new body supersedes and aborts the previous workbench loader", () => {
   const first = fakeWorkbenchPage();
   let firstDisposed = 0;
   keeper.adopt(first.body, first.page, {dispose: () => { firstDisposed++; }}, "core");
-  assert.equal(keeper.beforeRender("pet-workbench"), first.page);
+  assert.equal(keeper.beforeRender({view: "pet-workbench", authenticated: true, tab: "core"}), first.page);
 
   const second = fakeWorkbenchPage();
   keeper.adopt(second.body, second.page, {dispose: () => {}}, "core");
   assert.equal(firstDisposed, 1, "an unreused page must not keep its old request");
   assert.equal(keeper.owns(first.body), false);
   assert.equal(keeper.owns(second.body), true);
-  assert.equal(keeper.beforeRender("pet-workbench"), second.page);
+  assert.equal(keeper.beforeRender({view: "pet-workbench", authenticated: true, tab: "core"}), second.page);
 });
 
 test("the fresh shell swaps in the preserved page even though innerHTML detached it", () => {
@@ -328,12 +328,191 @@ test("a disconnected or missing page is not carried across a render", () => {
   const keeper = createPetWorkbenchPageKeeper();
   const {body} = fakeWorkbenchPage();
   keeper.adopt(body, null, {dispose: () => {}}, "core");
-  assert.equal(keeper.beforeRender("pet-workbench"), null, "without a page the shell must be rebuilt");
+  assert.equal(keeper.beforeRender({view: "pet-workbench", authenticated: true, tab: "core"}), null, "without a page the shell must be rebuilt");
   keeper.release();
 
   const detached = fakeWorkbenchPage({connected: false});
   keeper.adopt(detached.body, detached.page, {dispose: () => {}}, "core");
-  assert.equal(keeper.beforeRender("pet-workbench"), null);
+  assert.equal(keeper.beforeRender({view: "pet-workbench", authenticated: true, tab: "core"}), null);
+});
+
+test("logout releases the keeper and aborts the in-flight workbench request", async () => {
+  const keeper = createPetWorkbenchPageKeeper();
+  const {page, body} = fakeWorkbenchPage();
+  const requests = [];
+  let binding = null;
+  const loader = createPetWorkbenchLoader({
+    read: signal => new Promise((_resolve, reject) => {
+      requests.push(signal);
+      signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+    }),
+    isCurrent: () => body.isConnected && keeper.binding === binding,
+    onLoading: () => {},
+    onData: () => {},
+    onError: () => {},
+    timeoutMs: 60_000,
+  });
+  binding = keeper.adopt(body, page, loader, "core");
+  const pending = loader.load();
+  assert.equal(requests.length, 1);
+
+  // Logout renders the login view while state.view is still "pet-workbench".
+  // The unauthenticated render must release the page instead of preserving it.
+  assert.equal(keeper.beforeRender({view: "pet-workbench", authenticated: false, tab: "core"}), null);
+  assert.equal(requests[0].aborted, true, "logout must abort the in-flight request synchronously");
+  assert.equal(keeper.binding, null);
+  assert.equal(keeper.owns(body), false, "the kept page must be cleared");
+  await pending;
+  assert.equal(loader.busy(), false, "the released loader still clears its loading state");
+  assert.equal(requests.length, 1, "logout must not start a retry or a new request");
+});
+
+// Fake tabbed page: the buttons carry the same data attribute and click
+// listener shape main.ts uses, so the keeper drives the real follow path.
+function fakeTabbedWorkbench() {
+  const tabs = new Map();
+  const clickCounts = new Map();
+  const body = {isConnected: true, innerHTML: "core-body"};
+  const page = {
+    isConnected: true,
+    querySelector(selector) {
+      const match = /^\[data-pet-workbench-tab="(.+)"\]$/.exec(selector);
+      return match ? tabs.get(match[1]) ?? null : null;
+    },
+  };
+  for (const name of ["core", "worklog", "inspection", "approvals", "follows", "settings"]) {
+    const classes = new Set(name === "core" ? ["active"] : []);
+    tabs.set(name, {
+      dataset: {petWorkbenchTab: name},
+      classList: {toggle(token, force) { if (force) classes.add(token); else classes.delete(token); }},
+      listeners: [],
+      addEventListener(_event, listener) { this.listeners.push(listener); },
+      click() {
+        clickCounts.set(name, (clickCounts.get(name) ?? 0) + 1);
+        for (const listener of this.listeners) listener();
+      },
+      isActive: () => classes.has("active"),
+    });
+  }
+  return {page, body, tabs, clickCounts};
+}
+
+test("a programmatic tab change is followed on the preserved page without restarting the request", async () => {
+  const keeper = createPetWorkbenchPageKeeper();
+  const {page, body, tabs, clickCounts} = fakeTabbedWorkbench();
+  let binding = null;
+  let active = "core";
+  const requests = [];
+  const loader = createPetWorkbenchLoader({
+    read: signal => new Promise((_resolve, reject) => {
+      requests.push(signal);
+      signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+    }),
+    isCurrent: () => body.isConnected && keeper.binding === binding,
+    onLoading: () => {},
+    onData: () => {},
+    onError: () => {},
+    timeoutMs: 60_000,
+  });
+  // Same listener contract as bindPetWorkbenchPage: update the tab state and
+  // repaint the kept body.
+  for (const tab of tabs.values()) {
+    tab.addEventListener("click", () => {
+      active = tab.dataset.petWorkbenchTab;
+      if (binding) binding.tab = active;
+      for (const other of tabs.values()) other.classList.toggle("active", other === tab);
+      body.innerHTML = `${active}-body`;
+    });
+  }
+  binding = keeper.adopt(body, page, loader, "core");
+  const pending = loader.load();
+  assert.equal(requests.length, 1);
+
+  // The pet panel sets petWorkbenchTab = "settings" and triggers a render.
+  assert.equal(
+    keeper.beforeRender({view: "pet-workbench", authenticated: true, tab: "settings"}),
+    page,
+    "the mounted page is still carried across the render",
+  );
+  assert.equal(tabs.get("settings").isActive(), true, "the settings tab becomes selected");
+  assert.equal(tabs.get("core").isActive(), false);
+  assert.equal(active, "settings");
+  assert.equal(binding.tab, "settings");
+  assert.equal(body.innerHTML, "settings-body");
+  assert.equal(requests.length, 1, "following the tab must not restart the request");
+  assert.equal(requests[0].aborted, false, "following the tab must not abort the request");
+
+  // The kept page's listeners still work when the user moves back to core and
+  // approvals, and each click follows the normal path.
+  tabs.get("core").click();
+  assert.equal(active, "core");
+  assert.equal(tabs.get("core").isActive(), true);
+  assert.equal(binding.tab, "core");
+  tabs.get("approvals").click();
+  assert.equal(active, "approvals");
+  assert.equal(tabs.get("approvals").isActive(), true);
+  assert.equal(binding.tab, "approvals");
+  assert.equal(requests.length, 1, "tab switches must not issue another request");
+
+  // Already on the wanted tab: no extra click (otherwise renders could loop).
+  const approvalClicks = clickCounts.get("approvals");
+  assert.equal(keeper.beforeRender({view: "pet-workbench", authenticated: true, tab: "approvals"}), page);
+  assert.equal(clickCounts.get("approvals"), approvalClicks, "a matching tab is not clicked again");
+  assert.equal(requests.length, 1);
+
+  // Leaving the view still aborts exactly once.
+  assert.equal(keeper.beforeRender({view: "tasks", authenticated: true}), null);
+  assert.equal(requests[0].aborted, true);
+  await pending;
+  assert.equal(loader.busy(), false);
+});
+
+test("navigation's second render swaps the same page and does not rebind or re-request", async () => {
+  const keeper = createPetWorkbenchPageKeeper();
+  const {page, body} = fakeWorkbenchPage();
+  const requests = [];
+  let binding = null;
+  let bindCalls = 0;
+  const loader = createPetWorkbenchLoader({
+    read: signal => new Promise((_resolve, reject) => {
+      requests.push(signal);
+      signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+    }),
+    isCurrent: () => body.isConnected && keeper.binding === binding,
+    onLoading: () => {},
+    onData: () => {},
+    onError: () => {},
+    timeoutMs: 60_000,
+  });
+  binding = keeper.adopt(body, page, loader, "core");
+  bindCalls++;
+  const pending = loader.load();
+
+  // One render() pass: decide, replace the shell, re-insert the preserved page,
+  // then bindCommon -> bindPetWorkbenchPage.
+  const renderCycle = () => {
+    const preserved = keeper.beforeRender({view: "pet-workbench", authenticated: true, tab: "core"});
+    assert.equal(preserved, page);
+    let swapped = null;
+    const app = {
+      querySelector: selector => selector === ".pet-workbench-page" ? {replaceWith: node => { swapped = node; }} : null,
+    };
+    assert.equal(swapPetWorkbenchPage(app, preserved), true);
+    assert.equal(swapped, page, "the page is re-inserted unchanged");
+    if (keeper.owns(body)) return; // bindPetWorkbenchPage's early return
+    bindCalls++;
+    keeper.adopt(body, page, loader, "core");
+    void loader.load();
+  };
+
+  renderCycle(); // the navigation click's render()
+  renderCycle(); // ensureViewData(...).then(render)
+  assert.equal(bindCalls, 1, "the second navigation render must not rebind");
+  assert.equal(requests.length, 1, "one entry stays exactly one request");
+  assert.equal(requests[0].aborted, false);
+
+  keeper.release();
+  await pending;
 });
 
 test("the timeout aborts the in-flight request before reporting the error", async () => {
@@ -495,11 +674,17 @@ test("workbench wiring uses the guarded loader and renders the inspection summar
   assert.match(main, /renderPetWorkbenchLoadError\(loadError, t\)/);
   assert.match(main, /workbenchBindFailed/);
   assert.doesNotMatch(main, /petWorkbenchBound/);
-  // A same-view render carries the mounted page instead of rebinding.
-  assert.match(main, /const preservedWorkbenchPage = petWorkbenchPageKeeper\.beforeRender\(state\.view\)/);
+  // A same-view render carries the mounted page instead of rebinding, and the
+  // logout render (authenticated=false) releases it instead of preserving it.
+  assert.match(main, /const preservedWorkbenchPage = petWorkbenchPageKeeper\.beforeRender\(\{/);
+  assert.match(main, /view: state\.view,[\s\S]{0,80}?authenticated: Boolean\(state\.auth\?\.authenticated\),[\s\S]{0,80}?tab: normalizedPetWorkbenchTab\(\)/);
   assert.match(main, /swapPetWorkbenchPage\(app, preservedWorkbenchPage\)/);
   assert.match(main, /if \(petWorkbenchPageKeeper\.owns\(body\)\) return;/);
   assert.match(main, /petWorkbenchPageKeeper\.release\(\)/);
+  // The programmatic tab follow lives in the keeper so it is behavior-tested.
+  assert.match(loader, /context\.authenticated \|\| context\.view !== "pet-workbench"/);
+  assert.match(loader, /binding\.tab !== context\.tab/);
+  assert.match(loader, /querySelector<HTMLButtonElement>\(`\[data-pet-workbench-tab="\$\{context\.tab\}"\]`\)\?\.click\(\)/);
   // Navigation must not restart the load it just started.
   assert.match(main, /state\.view === "pet-workbench" && petWorkbenchPageKeeper\.binding\) return;/);
   assert.doesNotMatch(main, /withTimeout\(api\.petWorkbench/);

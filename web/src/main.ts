@@ -4601,9 +4601,14 @@ function render(): void {
   flushDeferredListRefresh();
   // Keep the mounted workbench page across same-view renders: the body identity
   // survives, so bindPetWorkbenchPage reuses its loader instead of aborting the
-  // request and starting another. Leaving the view (including logout) releases
-  // and aborts it before any other render path can return early.
-  const preservedWorkbenchPage = petWorkbenchPageKeeper.beforeRender(state.view);
+  // request and starting another. Leaving the view or ending the session
+  // (logout) releases and aborts it before any other render path can return
+  // early. A changed programmatic tab is followed on the preserved page.
+  const preservedWorkbenchPage = petWorkbenchPageKeeper.beforeRender({
+    view: state.view,
+    authenticated: Boolean(state.auth?.authenticated),
+    tab: normalizedPetWorkbenchTab(),
+  });
   if (state.auth?.authenticated) {
     mountAssistant();
     setAssistantVisible(true);
@@ -4724,15 +4729,6 @@ function render(): void {
     // tab/body listeners and loader stay live. If the new shell has no
     // workbench slot, the page really is gone: release its request now.
     if (!swapPetWorkbenchPage(app, preservedWorkbenchPage)) petWorkbenchPageKeeper.release();
-    // A programmatic tab request (for example the pet panel's settings entry)
-    // changes petWorkbenchTab while the page is preserved; follow it.
-    const liveBinding = petWorkbenchPageKeeper.binding;
-    if (liveBinding) {
-      const wantedTab = normalizedPetWorkbenchTab();
-      if (liveBinding.tab !== wantedTab) {
-        preservedWorkbenchPage.querySelector<HTMLButtonElement>(`[data-pet-workbench-tab="${wantedTab}"]`)?.click();
-      }
-    }
   }
   translateUI(app);
   if (preservedDesktop) document.querySelector("#desktop-tool")?.replaceWith(preservedDesktop);
