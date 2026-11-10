@@ -61,7 +61,7 @@ func petCapabilityCategory(name string) string {
 	case strings.Contains(name, "model"), strings.Contains(name, "provider"),
 		strings.Contains(name, "env_group"), name == "aha_detect_models":
 		return "model"
-	case strings.Contains(name, "system"), strings.Contains(name, "security"):
+	case strings.Contains(name, "system"), strings.Contains(name, "security"), strings.Contains(name, "mcp"):
 		return "system"
 	case strings.Contains(name, "hardware"):
 		return "hardware"

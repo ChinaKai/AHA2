@@ -31,13 +31,13 @@ type PetWorkbenchView struct {
 	// table. The page returns only a pending-first slice, so the browser needs
 	// these totals to page and label a client-side filter accurately.
 	ApprovalCounts []domain.PetApprovalCount `json:"approval_counts,omitempty"`
-	Watches       []PetTaskWatchView     `json:"watches"`
-	Task          *domain.Task           `json:"task,omitempty"`
-	Channels      []PetChannelHealth     `json:"channels"`
-	ChannelTotal  int                    `json:"channel_total,omitempty"`
-	ChannelNote   string                 `json:"channel_note,omitempty"`
-	Inspection    *PetInspection         `json:"inspection,omitempty"`
-	UpdatedAt     time.Time              `json:"updated_at"`
+	Watches        []PetTaskWatchView        `json:"watches"`
+	Task           *domain.Task              `json:"task,omitempty"`
+	Channels       []PetChannelHealth        `json:"channels"`
+	ChannelTotal   int                       `json:"channel_total,omitempty"`
+	ChannelNote    string                    `json:"channel_note,omitempty"`
+	Inspection     *PetInspection            `json:"inspection,omitempty"`
+	UpdatedAt      time.Time                 `json:"updated_at"`
 }
 
 type PetWorkbenchOptions struct {
@@ -281,33 +281,51 @@ func (s *Service) ResolvePetApproval(ctx context.Context, id, decision, note str
 	return item, nil
 }
 
+// petApprovalPayload is the union of fields used by the approval kinds the
+// pet can request. Keep new fields here so execution stays a single decode.
+type petApprovalPayload struct {
+	TaskID                 string   `json:"task_id"`
+	ProjectID              string   `json:"project_id"`
+	WorkspaceID            string   `json:"workspace_id"`
+	KnowledgeID            string   `json:"knowledge_id"`
+	SkillID                string   `json:"skill_id"`
+	ModelID                string   `json:"model_id"`
+	ProviderID             string   `json:"provider_id"`
+	EnvGroupID             string   `json:"env_group_id"`
+	ResourceID             string   `json:"resource_id"`
+	Kind                   string   `json:"kind"`
+	TemplateID             string   `json:"template_id"`
+	Content                string   `json:"content"`
+	InstanceID             string   `json:"instance_id"`
+	Enabled                bool     `json:"enabled"`
+	Revision               int      `json:"revision"`
+	ValidateOrigin         bool     `json:"validate_origin"`
+	AccessScope            string   `json:"access_scope"`
+	Permission             string   `json:"permission"`
+	RequestID              string   `json:"request_id"`
+	TurnID                 string   `json:"turn_id"`
+	Purpose                string   `json:"purpose"`
+	Message                string   `json:"message"`
+	MentionIdentityLinkIDs []string `json:"mention_identity_link_ids"`
+	AttachmentIDs          []string `json:"attachment_ids"`
+
+	// External MCP management. Secret values are never part of this payload;
+	// execution resolves env/header values from the Secret Store or the
+	// existing server row.
+	ServerID    string   `json:"server_id"`
+	ServerIDs   []string `json:"server_ids"`
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	Transport   string   `json:"transport"`
+	Command     string   `json:"command"`
+	Args        []string `json:"args"`
+	URL         string   `json:"url"`
+	EnvKeys     []string `json:"env_keys"`
+	HeaderKeys  []string `json:"header_keys"`
+}
+
 func (s *Service) executePetApproval(ctx context.Context, item domain.PetApproval) error {
-	var payload struct {
-		TaskID                 string   `json:"task_id"`
-		ProjectID              string   `json:"project_id"`
-		WorkspaceID            string   `json:"workspace_id"`
-		KnowledgeID            string   `json:"knowledge_id"`
-		SkillID                string   `json:"skill_id"`
-		ModelID                string   `json:"model_id"`
-		ProviderID             string   `json:"provider_id"`
-		EnvGroupID             string   `json:"env_group_id"`
-		ResourceID             string   `json:"resource_id"`
-		Kind                   string   `json:"kind"`
-		TemplateID             string   `json:"template_id"`
-		Content                string   `json:"content"`
-		InstanceID             string   `json:"instance_id"`
-		Enabled                bool     `json:"enabled"`
-		Revision               int      `json:"revision"`
-		ValidateOrigin         bool     `json:"validate_origin"`
-		AccessScope            string   `json:"access_scope"`
-		Permission             string   `json:"permission"`
-		RequestID              string   `json:"request_id"`
-		TurnID                 string   `json:"turn_id"`
-		Purpose                string   `json:"purpose"`
-		Message                string   `json:"message"`
-		MentionIdentityLinkIDs []string `json:"mention_identity_link_ids"`
-		AttachmentIDs          []string `json:"attachment_ids"`
-	}
+	var payload petApprovalPayload
 	if strings.TrimSpace(item.Payload) != "" {
 		if err := json.Unmarshal([]byte(item.Payload), &payload); err != nil {
 			return fmt.Errorf("审批参数无效")
@@ -437,6 +455,14 @@ func (s *Service) executePetApproval(ctx context.Context, item domain.PetApprova
 		return nil
 	case "permission_change":
 		return s.applyPetPermissionChange(ctx, payload.Permission, payload.Enabled)
+	case petMCPServerCreateKind:
+		return s.executePetMCPServerCreate(ctx, payload)
+	case petMCPServerUpdateKind:
+		return s.executePetMCPServerUpdate(ctx, payload)
+	case petMCPServerDeleteKind:
+		return s.executePetMCPServerDelete(ctx, payload)
+	case petSetTaskMCPKind:
+		return s.executePetSetTaskMCPServers(ctx, payload)
 	default:
 		return nil
 	}
