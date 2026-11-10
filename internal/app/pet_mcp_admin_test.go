@@ -315,6 +315,12 @@ func TestPetMCPAdminCreateApprovalLifecycle(t *testing.T) {
 	if !strings.Contains(approval.Payload, "env_keys") || !strings.Contains(approval.Summary, "Secret Store") {
 		t.Fatalf("approval payload/summary missing key metadata: %#v", approval)
 	}
+	if !strings.Contains(approval.Summary, "参数：server.js") {
+		t.Fatalf("create summary missing stdio args: %s", approval.Summary)
+	}
+	if strings.Contains(approval.Summary, "secret-from-store") {
+		t.Fatalf("create summary leaked the stored secret: %s", approval.Summary)
+	}
 	if _, err := fixture.service.MCPServerByID(fixture.ctx, "mcp_luckfox_desk"); err == nil {
 		t.Fatal("MCP was saved before approval")
 	}
