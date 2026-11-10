@@ -182,7 +182,10 @@ func (s *Store) AppendPetEvent(ctx context.Context, event domain.PetEvent) error
 }
 
 func (s *Store) ListPetEvents(ctx context.Context, limit int) ([]domain.PetEvent, error) {
-	if limit <= 0 || limit > 100 {
+	// The wake-up briefing asks for a wider window when the pet explicitly
+	// expands its work history (history_limit up to 50); unrelated control
+	// events share the table, so the caller's item count is not a row count.
+	if limit <= 0 || limit > 1000 {
 		limit = 20
 	}
 	rows, err := s.db.QueryContext(ctx, `

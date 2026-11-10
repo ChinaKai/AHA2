@@ -13,6 +13,21 @@ import (
 
 const (
 	petOpenTaskListLimit = 50
+	// The wake-up briefing is consumed by an MCP client that caps a single
+	// tool result. Keep the default response bounded and let the pet opt into
+	// more history explicitly instead of always paying for 20 full rows.
+	petWorkStateDefaultHistoryLimit = 8
+	petWorkStateMaxHistoryLimit     = 50
+	petWorkStateMaxTurnResultChars  = 20000
+	// petWorkStateDefaultBudgetBytes is a safety net for unusually large
+	// approvals: when the default view would exceed it, the oldest history
+	// rows are dropped (never inspection/open_tasks/core/loops/agenda).
+	petWorkStateDefaultBudgetBytes = 16 * 1024
+	// Pet events include control/approval rows that are not part of the work
+	// list, so read a wider window than the requested item count.
+	petWorkStateEventWindowMin     = 100
+	petWorkStateEventWindowPerItem = 10
+	petWorkStateEventWindowMax     = 1000
 	// petChannelStuckPendingThreshold applies only to rows that have never
 	// been attempted (attempts=0): a worker that never even claimed them is
 	// the strongest signal that outbound delivery is stuck.
@@ -129,17 +144,69 @@ type PetWorkState struct {
 	AgendaNote       string               `json:"agenda_note,omitempty"`
 	LabPath          string               `json:"lab_path,omitempty"`
 	Note             string               `json:"note,omitempty"`
+	// HistoryTruncated reports that the default 16 KB budget dropped older
+	// approvals/work rows. Callers can set history_limit=50 or
+	// include_turn_results=true to expand explicitly.
+	HistoryTruncated bool `json:"history_truncated,omitempty"`
+}
+
+// PetWorkStateOptions controls the size of the wake-up briefing. The zero value
+// is not the default: use defaultPetWorkStateOptions (PetWorkState does) so an
+// omitted history_limit means 8, not 0.
+type PetWorkStateOptions struct {
+	HistoryLimit       int
+	IncludeTurnResults bool
+	// TurnResultChars truncates last_turn_result when IncludeTurnResults is
+	// true. Zero keeps the full result; a positive value is a rune limit.
+	TurnResultChars int
+}
+
+func defaultPetWorkStateOptions() PetWorkStateOptions {
+	return PetWorkStateOptions{HistoryLimit: petWorkStateDefaultHistoryLimit}
+}
+
+func normalizePetWorkStateOptions(opts PetWorkStateOptions) PetWorkStateOptions {
+	if opts.HistoryLimit < 0 {
+		opts.HistoryLimit = 0
+	}
+	if opts.HistoryLimit > petWorkStateMaxHistoryLimit {
+		opts.HistoryLimit = petWorkStateMaxHistoryLimit
+	}
+	if opts.TurnResultChars < 0 {
+		opts.TurnResultChars = 0
+	}
+	if opts.TurnResultChars > petWorkStateMaxTurnResultChars {
+		opts.TurnResultChars = petWorkStateMaxTurnResultChars
+	}
+	if !opts.IncludeTurnResults {
+		opts.TurnResultChars = 0
+	}
+	return opts
 }
 
 // PetWorkState is the pet's own wake-up briefing: approval results, the
 // inspection snapshot, every still-open Task it created, and the
 // tasks/projects/workspaces it touched recently. It only reads state; the pet
 // decides whether to continue, remind the owner, or record the outcome in
-// worklog.
+// worklog. The default view is bounded; use PetWorkStateWithOptions to expand.
 func (s *Service) PetWorkState(ctx context.Context) (PetWorkState, error) {
-	approvals, err := s.store.ListPetApprovals(ctx, 20)
+	return s.PetWorkStateWithOptions(ctx, defaultPetWorkStateOptions())
+}
+
+func (s *Service) PetWorkStateWithOptions(ctx context.Context, opts PetWorkStateOptions) (PetWorkState, error) {
+	opts = normalizePetWorkStateOptions(opts)
+	// ListPetApprovals treats a non-positive limit as its own larger default,
+	// so fetch at least one row and slice to the requested count afterwards.
+	approvalFetchLimit := opts.HistoryLimit
+	if approvalFetchLimit < 1 {
+		approvalFetchLimit = 1
+	}
+	approvals, err := s.store.ListPetApprovals(ctx, approvalFetchLimit)
 	if err != nil {
 		return PetWorkState{}, err
+	}
+	if len(approvals) > opts.HistoryLimit {
+		approvals = approvals[:opts.HistoryLimit]
 	}
 	pendingApprovals, err := s.store.ListPendingPetApprovals(ctx, 200)
 	if err != nil {
@@ -149,7 +216,7 @@ func (s *Service) PetWorkState(ctx context.Context) (PetWorkState, error) {
 	if err != nil {
 		return PetWorkState{}, err
 	}
-	openTasks, openTaskTotal, attentionTasks, err := s.petOpenTasks(ctx, tasks, pendingApprovals)
+	openTasks, openTaskTotal, attentionTasks, err := s.petOpenTasks(ctx, tasks, pendingApprovals, opts)
 	if err != nil {
 		return PetWorkState{}, err
 	}
@@ -165,87 +232,135 @@ func (s *Service) PetWorkState(ctx context.Context) (PetWorkState, error) {
 		Agenda: agenda, AgendaPath: s.petAgendaPath(ctx), AgendaNote: petAgendaNote(agenda),
 		LabPath: s.petLabPath(ctx),
 	}
-	events, err := s.store.ListPetEvents(ctx, 100)
-	if err != nil {
-		return PetWorkState{}, err
-	}
-	workKinds := map[string]string{
-		"task_created": "task", "task_started": "task", "task_message_sent": "task",
-		"task_deleted": "task", "project_created": "project", "project_deleted": "project",
-		"workspace_created": "workspace", "workspace_deleted": "workspace",
-		"knowledge_submitted": "knowledge", "knowledge_deleted": "knowledge",
-		"skill_created": "skill", "skill_updated": "skill", "skill_deleted": "skill",
-		"prompt_updated": "prompt", "channel_message_sent": "channel",
-		"channel_enabled": "channel", "channel_disabled": "channel",
-		"channel_reset_binding": "channel", "channel_archive": "channel", "channel_purge": "channel",
-		"security_settings_updated": "system", "permission_changed": "permission", "idea_submitted": "idea",
-		"model_deleted": "model", "provider_deleted": "model", "env_group_deleted": "model",
-		"hardware_resource_deleted": "hardware",
-	}
-	seen := map[string]bool{}
-	for _, event := range events {
-		targetType, ok := workKinds[event.Kind]
-		if !ok {
-			continue
+	if opts.HistoryLimit > 0 {
+		eventWindow := opts.HistoryLimit * petWorkStateEventWindowPerItem
+		if eventWindow < petWorkStateEventWindowMin {
+			eventWindow = petWorkStateEventWindowMin
 		}
-		targetID := strings.TrimSpace(event.Detail)
-		if targetID == "" {
-			continue
+		if eventWindow > petWorkStateEventWindowMax {
+			eventWindow = petWorkStateEventWindowMax
 		}
-		// The event table has no separate target type; the kind prefix is enough
-		// to disambiguate and the ID is stable.
-		key := event.Kind + ":" + targetID
-		if seen[key] {
-			continue
+		events, err := s.store.ListPetEvents(ctx, eventWindow)
+		if err != nil {
+			return PetWorkState{}, err
 		}
-		seen[key] = true
-		item := PetWorkItem{
-			Kind: event.Kind, TargetType: targetType, TargetID: targetID,
-			CreatedAt: event.At.Format(time.RFC3339), Note: event.Status,
+		workKinds := map[string]string{
+			"task_created": "task", "task_started": "task", "task_message_sent": "task",
+			"task_deleted": "task", "project_created": "project", "project_deleted": "project",
+			"workspace_created": "workspace", "workspace_deleted": "workspace",
+			"knowledge_submitted": "knowledge", "knowledge_deleted": "knowledge",
+			"skill_created": "skill", "skill_updated": "skill", "skill_deleted": "skill",
+			"prompt_updated": "prompt", "channel_message_sent": "channel",
+			"channel_enabled": "channel", "channel_disabled": "channel",
+			"channel_reset_binding": "channel", "channel_archive": "channel", "channel_purge": "channel",
+			"security_settings_updated": "system", "permission_changed": "permission", "idea_submitted": "idea",
+			"model_deleted": "model", "provider_deleted": "model", "env_group_deleted": "model",
+			"hardware_resource_deleted": "hardware",
 		}
-		switch targetType {
-		case "task":
-			task, taskErr := s.store.Task(ctx, targetID)
-			if taskErr != nil {
-				item.CurrentStatus = "deleted"
-			} else {
-				item.Title = task.Title
-				item.CurrentStatus = string(task.Status)
-				turns, _ := s.store.ListTurns(ctx, task.ID)
-				if len(turns) > 0 {
-					last := turns[len(turns)-1]
-					item.LastTurnStatus = string(last.Status)
-					item.LastTurnError = truncateAssistantText(last.Error, 1200)
-					item.LastTurnResult = truncateAssistantText(last.Result, 1200)
+		seen := map[string]bool{}
+		for _, event := range events {
+			targetType, ok := workKinds[event.Kind]
+			if !ok {
+				continue
+			}
+			targetID := strings.TrimSpace(event.Detail)
+			if targetID == "" {
+				continue
+			}
+			// The event table has no separate target type; the kind prefix is enough
+			// to disambiguate and the ID is stable.
+			key := event.Kind + ":" + targetID
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			item := PetWorkItem{
+				Kind: event.Kind, TargetType: targetType, TargetID: targetID,
+				CreatedAt: event.At.Format(time.RFC3339), Note: event.Status,
+			}
+			switch targetType {
+			case "task":
+				task, taskErr := s.store.Task(ctx, targetID)
+				if taskErr != nil {
+					item.CurrentStatus = "deleted"
+				} else {
+					item.Title = task.Title
+					item.CurrentStatus = string(task.Status)
+					turns, _ := s.store.ListTurns(ctx, task.ID)
+					if len(turns) > 0 {
+						last := turns[len(turns)-1]
+						item.LastTurnStatus = string(last.Status)
+						item.LastTurnError = truncateAssistantText(last.Error, 1200)
+						if opts.IncludeTurnResults {
+							item.LastTurnResult = petWorkStateTurnResult(last.Result, opts.TurnResultChars)
+						}
+					}
+				}
+			case "project":
+				if project, projectErr := s.store.Project(ctx, targetID); projectErr == nil {
+					item.Title = project.Name
+					item.CurrentStatus = "exists"
+				} else {
+					item.CurrentStatus = "deleted"
+				}
+			case "workspace":
+				if workspace, workspaceErr := s.store.Workspace(ctx, targetID); workspaceErr == nil {
+					item.Title = workspace.Name
+					item.CurrentStatus = workspace.Health
+				} else {
+					item.CurrentStatus = "deleted"
 				}
 			}
-		case "project":
-			if project, projectErr := s.store.Project(ctx, targetID); projectErr == nil {
-				item.Title = project.Name
-				item.CurrentStatus = "exists"
-			} else {
-				item.CurrentStatus = "deleted"
+			state.Work = append(state.Work, item)
+			if len(state.Work) >= opts.HistoryLimit {
+				break
 			}
-		case "workspace":
-			if workspace, workspaceErr := s.store.Workspace(ctx, targetID); workspaceErr == nil {
-				item.Title = workspace.Name
-				item.CurrentStatus = workspace.Health
-			} else {
-				item.CurrentStatus = "deleted"
-			}
-		}
-		state.Work = append(state.Work, item)
-		if len(state.Work) >= 20 {
-			break
 		}
 	}
 	if len(state.Work) == 0 && state.PendingApprovals == 0 && len(state.OpenTasks) == 0 {
 		state.Note = "没有待处理审批、未闭环任务或近期工作记录。"
 	}
+	if !opts.IncludeTurnResults && opts.HistoryLimit <= petWorkStateDefaultHistoryLimit {
+		state.fitDefaultBudget(petWorkStateDefaultBudgetBytes)
+	}
 	return state, nil
 }
 
-func (s *Service) petOpenTasks(ctx context.Context, tasks []domain.Task, pendingApprovals []domain.PetApproval) ([]PetOpenTask, int, int, error) {
+// fitDefaultBudget drops the oldest approval/work rows until the marshaled
+// briefing fits the default MCP result budget. Fixed fields (inspection,
+// open_tasks, core, open_loops, agenda) are never trimmed because the pet
+// relies on them to make decisions.
+func (state *PetWorkState) fitDefaultBudget(limit int) {
+	data, err := json.Marshal(state)
+	if err != nil || len(data) <= limit {
+		return
+	}
+	fullApprovals, fullWork := len(state.Approvals), len(state.Work)
+	for len(data) > limit && (len(state.Approvals) > 0 || len(state.Work) > 0) {
+		// Trim the longer list first so neither history disappears while the
+		// other keeps several large rows.
+		switch {
+		case len(state.Approvals) > 0 && len(state.Approvals) >= len(state.Work):
+			state.Approvals = state.Approvals[:len(state.Approvals)-1]
+		case len(state.Work) > 0:
+			state.Work = state.Work[:len(state.Work)-1]
+		}
+		data, err = json.Marshal(state)
+		if err != nil {
+			return
+		}
+	}
+	state.HistoryTruncated = len(state.Approvals) < fullApprovals || len(state.Work) < fullWork
+}
+
+func petWorkStateTurnResult(value string, chars int) string {
+	if chars <= 0 {
+		return strings.TrimSpace(value)
+	}
+	return truncateAssistantText(value, chars)
+}
+
+func (s *Service) petOpenTasks(ctx context.Context, tasks []domain.Task, pendingApprovals []domain.PetApproval, opts PetWorkStateOptions) ([]PetOpenTask, int, int, error) {
 	pendingByTask := petPendingApprovalTaskMap(pendingApprovals)
 	tasksByID := make(map[string]domain.Task, len(tasks))
 	for _, task := range tasks {
@@ -284,7 +399,9 @@ func (s *Service) petOpenTasks(ctx context.Context, tasks []domain.Task, pending
 		if turn, turnErr := s.store.LatestTurnForAgent(ctx, task.ID, "main"); turnErr == nil {
 			item.LastTurnStatus = string(turn.Status)
 			item.LastTurnError = truncateAssistantText(turn.Error, 800)
-			item.LastTurnResult = truncateAssistantText(turn.Result, 800)
+			if opts.IncludeTurnResults {
+				item.LastTurnResult = petWorkStateTurnResult(turn.Result, opts.TurnResultChars)
+			}
 		}
 		if approvalID := pendingByTask[task.ID]; approvalID != "" {
 			item.PendingApprovalID = approvalID

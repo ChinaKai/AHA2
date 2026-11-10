@@ -811,8 +811,21 @@ func ahaPetTools() []gateway.ChatTool {
 		{Name: "aha_overview", Description: "只读查看 AHA2 项目、任务、渠道的汇总和需要关注的任务", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{},
 		}},
-		{Name: "aha_pet_work_state", Description: "开始工作前查看：巡检快照、所有未关闭的宠物任务、审批和最近 Task 进展", Parameters: map[string]any{
-			"type": "object", "properties": map[string]any{},
+		{Name: "aha_pet_work_state", Description: "开始工作前查看：巡检快照、所有未关闭的宠物任务、审批和最近 Task 进展。默认只返回最近 8 条审批/工作动态且不含 last_turn_result（响应控制在 16KB 内，history_truncated 表示默认预算压掉了历史）；需要完整历史时传 history_limit（最多 50）和 include_turn_results=true，单任务详情用 aha_task_detail/aha_task_turns", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"history_limit": map[string]any{
+					"type": "integer", "minimum": 0, "maximum": 50,
+					"description": "审批与工作动态各返回的最大条数，默认 8；0 表示不返回这两个历史列表",
+				},
+				"include_turn_results": map[string]any{
+					"type":        "boolean",
+					"description": "是否返回 last_turn_result，默认 false；true 时默认返回完整结果，可用 turn_result_chars 截断",
+				},
+				"turn_result_chars": map[string]any{
+					"type": "integer", "minimum": 0, "maximum": 20000,
+					"description": "include_turn_results=true 时 last_turn_result 的最大字符数；0 或缺省表示不截断",
+				},
+			},
 		}},
 		{Name: "aha_pet_permissions", Description: "只读查看当前宠物权限开关", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{},
@@ -1586,7 +1599,23 @@ func (s *Service) PetMCPTool(ctx context.Context, name string, args json.RawMess
 		data, _ := json.Marshal(overview)
 		return string(data), nil
 	case "aha_pet_work_state":
-		state, err := s.PetWorkState(ctx)
+		var input struct {
+			HistoryLimit       *int `json:"history_limit"`
+			IncludeTurnResults bool `json:"include_turn_results"`
+			TurnResultChars    int  `json:"turn_result_chars"`
+		}
+		if len(args) > 0 {
+			if err := json.Unmarshal(args, &input); err != nil {
+				return "", fmt.Errorf("invalid work state request")
+			}
+		}
+		opts := defaultPetWorkStateOptions()
+		if input.HistoryLimit != nil {
+			opts.HistoryLimit = *input.HistoryLimit
+		}
+		opts.IncludeTurnResults = input.IncludeTurnResults
+		opts.TurnResultChars = input.TurnResultChars
+		state, err := s.PetWorkStateWithOptions(ctx, opts)
 		if err != nil {
 			return "", err
 		}

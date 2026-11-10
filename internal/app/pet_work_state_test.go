@@ -1,6 +1,7 @@
 package app
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -346,6 +347,194 @@ func TestPetChannelHealthSortsDegradedFirstAndCapsRendering(t *testing.T) {
 	health, degraded, total = buildPetChannelHealth(channels, allDegraded, now)
 	if total != 25 || len(health) != petChannelHealthListLimit || len(degraded) != 25 {
 		t.Fatalf("all degraded total=%d shown=%d degraded=%d", total, len(health), len(degraded))
+	}
+}
+
+func TestPetWorkStateDefaultBudgetAndExpansion(t *testing.T) {
+	fixture := newPetTaskFixture(t)
+	ctx := fixture.ctx
+	if _, err := fixture.service.OwnerAssistant(ctx); err != nil {
+		t.Fatal(err)
+	}
+	now := fixture.service.now().UTC()
+
+	// The measured payload had 20 approvals and 20 work rows whose
+	// last_turn_result dominated the size. Reproduce both here.
+	for i := 0; i < 20; i++ {
+		if _, err := fixture.service.CreatePetApproval(ctx, PetApprovalInput{
+			Kind:    "external_channel_send",
+			Title:   fmt.Sprintf("审批 %02d", i),
+			Summary: fmt.Sprintf("%02d %s", i, strings.Repeat("审批说明", 30)),
+			Reason:  strings.Repeat("需要主人决定", 10),
+			Risk:    "high",
+			Payload: fmt.Sprintf(`{"task_id":"task-%02d","note":"%s"}`, i, strings.Repeat("x", 120)),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	project := domain.Project{
+		ID: "project-work-state-budget", Name: "预算项目", ProjectType: "user",
+		KnowledgePolicy: "none", CreatedAt: now, UpdatedAt: now,
+	}
+	if err := fixture.database.CreateProject(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	workspace := domain.Workspace{
+		ID: "workspace-work-state-budget", ProjectID: project.ID, Name: "预算 Workspace",
+		Locality: "local", Transport: "native", RootPath: t.TempDir(), Health: "ready",
+		AgentAPIMode: "embedded", CreatedAt: now, UpdatedAt: now,
+	}
+	if err := fixture.database.CreateWorkspace(ctx, workspace); err != nil {
+		t.Fatal(err)
+	}
+	longResult := strings.Repeat("长结果", 900)
+	for i := 0; i < 20; i++ {
+		task, err := fixture.service.CreateTask(ctx, CreateTaskInput{
+			ID:        fmt.Sprintf("task-work-state-%02d", i),
+			ProjectID: project.ID, WorkspaceID: workspace.ID,
+			Title: fmt.Sprintf("工作动态 %02d", i), Request: "只读核对",
+			ModelID: fixture.model.ID, Isolation: "inplace",
+			Filesystem: "workspace-write", Approval: "never",
+			CollaborationMode: "single", MaxAgents: 1, StartMode: "manual",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		message := domain.Message{
+			ID: domain.NewID("message"), TaskID: task.ID, Role: "user",
+			Sender: "owner", Content: "开始", CreatedAt: now,
+		}
+		if err := fixture.database.AddMessage(ctx, message); err != nil {
+			t.Fatal(err)
+		}
+		if err := fixture.database.CreateTurn(ctx, domain.Turn{
+			ID: domain.NewID("turn"), TaskID: task.ID, AgentID: "main", Sequence: 1,
+			InputMessageID: message.ID, Status: domain.TurnSucceeded,
+			RuntimeConfigSnapshotID: task.RuntimeConfigSnapshotID,
+			Result:                  longResult, QueuedAt: now, FinishedAt: now,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		// Use task_started rather than task_created so these rows exercise the
+		// work history without also becoming open_tasks.
+		if err := fixture.database.AppendPetEvent(ctx, domain.PetEvent{
+			ID: domain.NewID("pet_event"), At: now.Add(time.Duration(i+1) * time.Second),
+			Actor: "pet", Kind: "task_started", Detail: task.ID, Status: "started",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	raw, err := fixture.service.PetMCPTool(ctx, "aha_pet_work_state", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !json.Valid([]byte(raw)) {
+		t.Fatalf("default work_state is not valid JSON: %s", raw)
+	}
+	if len(raw) > petWorkStateDefaultBudgetBytes {
+		t.Fatalf("default work_state = %d bytes, want <= %d", len(raw), petWorkStateDefaultBudgetBytes)
+	}
+	var defaultState PetWorkState
+	if err := json.Unmarshal([]byte(raw), &defaultState); err != nil {
+		t.Fatal(err)
+	}
+	if defaultState.PendingApprovals != 20 {
+		t.Fatalf("pending approvals = %d", defaultState.PendingApprovals)
+	}
+	if len(defaultState.Approvals) != petWorkStateDefaultHistoryLimit {
+		t.Fatalf("default approvals = %d, want %d", len(defaultState.Approvals), petWorkStateDefaultHistoryLimit)
+	}
+	if len(defaultState.Work) != petWorkStateDefaultHistoryLimit {
+		t.Fatalf("default work rows = %d, want %d", len(defaultState.Work), petWorkStateDefaultHistoryLimit)
+	}
+	for _, item := range defaultState.Work {
+		if item.LastTurnResult != "" {
+			t.Fatalf("default work row leaked last_turn_result: %#v", item)
+		}
+	}
+	var defaultPayload map[string]any
+	if err := json.Unmarshal([]byte(raw), &defaultPayload); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"inspection", "open_tasks", "core", "open_loops", "agenda"} {
+		if _, ok := defaultPayload[key]; !ok {
+			t.Fatalf("default work_state missing %q: %s", key, raw)
+		}
+	}
+	if work, ok := defaultPayload["work"].([]any); !ok || len(work) == 0 {
+		t.Fatalf("default work payload = %#v", defaultPayload["work"])
+	} else if _, exists := work[0].(map[string]any)["last_turn_result"]; exists {
+		t.Fatalf("default work JSON still has last_turn_result: %#v", work[0])
+	}
+
+	raw, err = fixture.service.PetMCPTool(ctx, "aha_pet_work_state",
+		json.RawMessage(`{"history_limit":50,"include_turn_results":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var expanded PetWorkState
+	if err := json.Unmarshal([]byte(raw), &expanded); err != nil {
+		t.Fatal(err)
+	}
+	if len(expanded.Approvals) != 20 {
+		t.Fatalf("expanded approvals = %d, want 20", len(expanded.Approvals))
+	}
+	if len(expanded.Work) != 20 {
+		t.Fatalf("expanded work rows = %d, want 20", len(expanded.Work))
+	}
+	fullResults := 0
+	for _, item := range expanded.Work {
+		if item.LastTurnResult == longResult {
+			fullResults++
+		}
+	}
+	if fullResults != 20 {
+		t.Fatalf("expanded work rows with full result = %d, want 20", fullResults)
+	}
+
+	raw, err = fixture.service.PetMCPTool(ctx, "aha_pet_work_state",
+		json.RawMessage(`{"history_limit":50,"include_turn_results":true,"turn_result_chars":120}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var truncated PetWorkState
+	if err := json.Unmarshal([]byte(raw), &truncated); err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range truncated.Work {
+		if runes := []rune(item.LastTurnResult); len(runes) > 120 {
+			t.Fatalf("turn_result_chars kept %d runes", len(runes))
+		}
+	}
+
+	// Oversized approvals must still respect the default result budget.
+	for i := 0; i < 20; i++ {
+		if _, err := fixture.service.CreatePetApproval(ctx, PetApprovalInput{
+			Kind:    "owner_decision",
+			Title:   fmt.Sprintf("大审批 %02d", i),
+			Summary: strings.Repeat("巨额审批说明", 100),
+			Reason:  strings.Repeat("理由", 50),
+			Risk:    "high",
+			Payload: fmt.Sprintf(`{"note":"%s"}`, strings.Repeat("y", 200)),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	raw, err = fixture.service.PetMCPTool(ctx, "aha_pet_work_state", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) > petWorkStateDefaultBudgetBytes {
+		t.Fatalf("oversized default work_state = %d bytes, want <= %d", len(raw), petWorkStateDefaultBudgetBytes)
+	}
+	var budgeted PetWorkState
+	if err := json.Unmarshal([]byte(raw), &budgeted); err != nil {
+		t.Fatal(err)
+	}
+	if !budgeted.HistoryTruncated {
+		t.Fatalf("history_truncated not set for oversized approvals (approvals=%d work=%d)", len(budgeted.Approvals), len(budgeted.Work))
 	}
 }
 
