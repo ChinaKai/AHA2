@@ -14,7 +14,7 @@ await copyFile(resolve(root, "assets", "aha-logo.svg"), resolve(output, "assets"
 await copyFile(resolve(root, "assets", "aha2-logo.png"), resolve(output, "assets", "aha2-logo.png"));
 await copyFile(resolve(root, "assets", "aha2.ico"), resolve(output, "favicon.ico"));
 
-for (const name of ["api", "i18n", "icons", "types", "pet_bubble", "pet_approvals", "pet_workbench", "runtime_picker", "task_agents", "task_composer", "task_filters", "hardware_terminal", "hardware_panel", "hardware_resources", "mail_cards", "mail_editor", "mail_resources", "mail_task", "resources", "desktop_panel", "task_tools", "markdown", "conversation_ui", "ui_helpers", "prompt_admin", "proxy_settings", "data_retention", "sync_settings", "codex_accounts", "knowledge_workspace", "channels", "assistant", "main"]) {
+for (const name of ["api", "i18n", "icons", "types", "pet_bubble", "pet_navigation", "pet_approvals", "pet_workbench", "runtime_picker", "task_agents", "task_composer", "task_filters", "hardware_terminal", "hardware_panel", "hardware_resources", "mail_cards", "mail_editor", "mail_resources", "mail_task", "resources", "desktop_panel", "task_tools", "markdown", "conversation_ui", "ui_helpers", "prompt_admin", "proxy_settings", "data_retention", "sync_settings", "codex_accounts", "knowledge_workspace", "channels", "assistant", "main"]) {
   const input = await readFile(resolve(source, "src", `${name}.ts`), "utf8");
   const transformed = stripTypeScriptTypes(input, {mode: "transform", sourceMap: false});
   const outputName = name === "main" ? "app" : name;
@@ -34,6 +34,7 @@ const versionSource = await Promise.all([
   readFile(resolve(output, "i18n.js")),
   readFile(resolve(output, "icons.js")),
   readFile(resolve(output, "pet_bubble.js")),
+  readFile(resolve(output, "pet_navigation.js")),
   readFile(resolve(output, "pet_approvals.js")),
   readFile(resolve(output, "pet_workbench.js")),
   readFile(resolve(output, "runtime_picker.js")),
@@ -202,7 +203,8 @@ await writeFile(channelsPath, versionedChannels);
 const assistantPath = resolve(output, "assistant.js");
 const versionedAssistant = (await readFile(assistantPath, "utf8"))
   .replaceAll('"./api.js"', `"./api.js?v=${version}"`)
-  .replaceAll('"./pet_bubble.js"', `"./pet_bubble.js?v=${version}"`);
+  .replaceAll('"./pet_bubble.js"', `"./pet_bubble.js?v=${version}"`)
+  .replaceAll('"./pet_navigation.js"', `"./pet_navigation.js?v=${version}"`);
 await writeFile(assistantPath, versionedAssistant);
 const indexPath = resolve(output, "index.html");
 const versionedIndex = (await readFile(indexPath, "utf8"))

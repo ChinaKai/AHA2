@@ -1,6 +1,7 @@
 import {api} from "./api.js";
 import {icon} from "./icons.js";
 import {computeSpeechBubblePlacement} from "./pet_bubble.js";
+import {createPetNavigationClaimer} from "./pet_navigation.js";
 import type {AssistantHint, AssistantMessage, AssistantToolEvent, OwnerAssistantView, PetBrainAction, PetLayout, PetResetResult, PetState, PetStatePatch} from "./types.js";
 
 const PET_SIZE = 64;
@@ -328,6 +329,11 @@ export function mountAssistant(): void {
   renderCharacterMenu();
   renderMotionMenu();
   bindEvents();
+  // A BFCache restore keeps the page alive and must keep retrying claims; a
+  // real unload stops them so no timer outlives the page.
+  window.addEventListener("pagehide", event => {
+    if (!event.persisted) disposePetNavigation();
+  });
   void refreshPetState();
   // Pet events arrive on the page's single global event stream; see handlePetStreamEvent.
   // Autonomy is scheduled by the server; the UI only exposes a manual kick.
@@ -950,24 +956,26 @@ function petWebSessionID(): string {
 
 // open_task is persisted server-side and claimed here. The claim is atomic, so
 // several open tabs can receive the same live event while only one navigates.
-// A queued request that arrives before any tab connects is claimed on the next
-// SSE (re)connect or when the page becomes visible again.
-async function claimPetNavigation(ids?: string[]): Promise<void> {
-  try {
-    const payload: {session_id: string; ids?: string[]} = {session_id: petWebSessionID()};
-    if (ids && ids.length > 0) payload.ids = ids;
-    const result = await api.claimPetNavigation(payload);
-    for (const navigation of result.actions || []) {
-      if (!navigation.task_id) continue;
-      window.dispatchEvent(new CustomEvent("aha:assistant-open-task", {detail: navigation.task_id}));
-    }
-  } catch {
-    // Keep the pending row server-side; the next reconnect retries the claim.
-  }
+// The claimer retries transient failures with bounded backoff so a 5xx or
+// network blip does not strand the queued navigation until its TTL expires.
+const petNavigationClaimer = createPetNavigationClaimer({
+  claim: payload => api.claimPetNavigation(payload),
+  sessionID: () => petWebSessionID(),
+  onNavigate: taskID => {
+    if (taskID) window.dispatchEvent(new CustomEvent("aha:assistant-open-task", {detail: taskID}));
+  },
+});
+
+function claimPetNavigation(ids?: string[]): Promise<void> {
+  return petNavigationClaimer.claim(ids).then(() => undefined);
 }
 
 export function resumePetNavigation(): void {
   void claimPetNavigation();
+}
+
+function disposePetNavigation(): void {
+  petNavigationClaimer.dispose();
 }
 
 function applyPetControl(payload: {say?: string; actions?: PetBrainAction[]}): void {
