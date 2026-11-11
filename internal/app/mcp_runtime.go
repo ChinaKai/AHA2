@@ -3,15 +3,28 @@ package app
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/ChinaKai/AHA2/internal/backend"
 	"github.com/ChinaKai/AHA2/internal/domain"
 )
 
 const (
+	// mcpToolCacheTTL bounds how often a Turn re-reads tools/list from a bound
+	// server. The persisted tool list doubles as the runtime allowlist, so
+	// without a refresh a server-side tool change would never reach later Turns.
+	mcpToolCacheTTL = time.Minute
+
+	// mcpToolRefreshTimeout bounds the Turn-start refresh. A healthy local
+	// server answers in milliseconds; an unavailable one falls back to the
+	// cached list after this budget instead of stalling the Turn for the full
+	// stdio fetch timeout.
+	mcpToolRefreshTimeout = 10 * time.Second
+
 	// channelMCPName is the model-facing namespace of the built-in group-chat
 	// MCP. Keeping it stable preserves tool names across backends and sessions.
 	channelMCPName = "aha2_channel"
@@ -76,6 +89,7 @@ func (s *Service) mcpRuntimeForTask(ctx context.Context, task domain.Task, agent
 					allowed = append(allowed, petMCPAllowedTools(task)...)
 					continue
 				}
+				server = s.refreshMCPToolsIfStale(ctx, server)
 				if server.Transport == "stdio" && server.Command != "" {
 					command, args := mcpStdioCommand(server)
 					servers = append(servers, backend.MCPServer{
@@ -125,6 +139,54 @@ func (s *Service) mcpRuntimeForTask(ctx context.Context, task domain.Task, agent
 		}
 	}
 	return servers, allowed
+}
+
+// refreshMCPToolsIfStale re-probes a bound server whose persisted tool list is
+// older than mcpToolCacheTTL. The refresh is best effort: a failed probe keeps
+// the last known tools, and the TTL is measured from the attempt so an
+// unavailable server is retried at most once per cache window rather than on
+// every Turn.
+func (s *Service) refreshMCPToolsIfStale(ctx context.Context, server domain.MCPServer) domain.MCPServer {
+	if server.Builtin || !server.Enabled {
+		return server
+	}
+	transport := strings.ToLower(strings.TrimSpace(server.Transport))
+	switch transport {
+	case "stdio":
+		if strings.TrimSpace(server.Command) == "" {
+			return server
+		}
+	case "http":
+		if strings.TrimSpace(server.URL) == "" {
+			return server
+		}
+	default:
+		return server
+	}
+	now := s.now().UTC()
+	if !server.LastCheckedAt.IsZero() && now.Sub(server.LastCheckedAt) < mcpToolCacheTTL {
+		return server
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, mcpToolRefreshTimeout)
+	defer cancel()
+	var tools []domain.MCPTool
+	var probeErr error
+	switch transport {
+	case "stdio":
+		tools, probeErr = fetchStdioTools(probeCtx, server)
+	case "http":
+		tools, probeErr = fetchMCPTools(probeCtx, server)
+	}
+	// Persist with the Turn context, not probeCtx: a timed-out probe still has
+	// to record LastCheckedAt and keep the previous tool list.
+	refreshed := s.persistMCPProbe(ctx, server, tools, probeErr)
+	elapsed := s.now().UTC().Sub(now).Round(time.Millisecond)
+	if probeErr != nil {
+		log.Printf("mcp tools refresh failed: server=%s elapsed=%s cached_tools=%d", server.ID, elapsed, len(refreshed.Tools))
+	} else {
+		log.Printf("mcp tools refreshed: server=%s elapsed=%s tools=%d", server.ID, elapsed, len(refreshed.Tools))
+	}
+	return refreshed
 }
 
 // mcpAllowedToolNames mirrors the exact tool allowlist a stored MCP server

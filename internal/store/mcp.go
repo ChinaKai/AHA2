@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"strings"
+	"time"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
 )
@@ -50,6 +51,17 @@ func (s *Store) UpsertMCPServer(ctx context.Context, item domain.MCPServer) erro
 		item.ID, item.Name, item.Description, item.Transport, item.URL, item.Command, encodeJSON(item.Args), encodeJSON(item.Env), encodeJSON(item.Headers), encodeJSON(item.Tools), encodeJSON(item.DisabledTools),
 		boolInt(item.Enabled), boolInt(item.Builtin), item.Health, item.LastError,
 		timeString(item.LastCheckedAt), timeString(item.CreatedAt), timeString(item.UpdatedAt))
+	return err
+}
+
+// UpdateMCPServerProbe stores only the result of a tools/list probe. Keeping
+// the probe columns separate from the config columns means a runtime refresh
+// cannot overwrite an Owner edit (URL, env, headers, enabled) that raced it.
+func (s *Store) UpdateMCPServerProbe(ctx context.Context, id string, tools []domain.MCPTool, health, lastError string, checkedAt, updatedAt time.Time) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE mcp_servers SET tools_json=?, health=?, last_error=?, last_checked_at=?, updated_at=?
+		WHERE id=?`,
+		encodeJSON(tools), health, lastError, timeString(checkedAt), timeString(updatedAt), id)
 	return err
 }
 

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -39,35 +40,35 @@ func (s *Service) probeMCPServer(ctx context.Context, item domain.MCPServer) (do
 	}
 	if item.Transport == "stdio" && item.Command != "" {
 		tools, fetchErr := fetchStdioTools(ctx, item)
-		item.LastCheckedAt = s.now().UTC()
-		item.UpdatedAt = item.LastCheckedAt
-		if fetchErr == nil {
-			item.Tools = tools
-			item.Health = "ok"
-			item.LastError = ""
-		} else {
-			item.Health = "error"
-			item.LastError = fetchErr.Error()
-		}
-		_ = s.store.UpsertMCPServer(ctx, item)
-		return item, fetchErr
+		return s.persistMCPProbe(ctx, item, tools, fetchErr), fetchErr
 	}
 	if item.Transport == "http" && item.URL != "" {
 		tools, fetchErr := fetchMCPTools(ctx, item)
-		item.LastCheckedAt = s.now().UTC()
-		item.UpdatedAt = item.LastCheckedAt
-		if fetchErr == nil {
-			item.Tools = tools
-			item.Health = "ok"
-			item.LastError = ""
-		} else {
-			item.Health = "error"
-			item.LastError = fetchErr.Error()
-		}
-		_ = s.store.UpsertMCPServer(ctx, item)
-		return item, fetchErr
+		return s.persistMCPProbe(ctx, item, tools, fetchErr), fetchErr
 	}
 	return item, nil
+}
+
+// persistMCPProbe records one tools/list probe. A failed probe keeps the last
+// known tool list: an unavailable server must not silently empty the allowlist
+// a Turn still needs. The error is redacted with the server's own env/header
+// values before it can reach the database or a log line. Only the probe columns
+// are written, so an Owner config edit that raced the probe is not overwritten.
+func (s *Service) persistMCPProbe(ctx context.Context, item domain.MCPServer, tools []domain.MCPTool, fetchErr error) domain.MCPServer {
+	item.LastCheckedAt = s.now().UTC()
+	item.UpdatedAt = item.LastCheckedAt
+	if fetchErr == nil {
+		item.Tools = tools
+		item.Health = "ok"
+		item.LastError = ""
+	} else {
+		item.Health = "error"
+		item.LastError = redactPetMCPText(fetchErr.Error(), item)
+	}
+	if err := s.store.UpdateMCPServerProbe(ctx, item.ID, item.Tools, item.Health, item.LastError, item.LastCheckedAt, item.UpdatedAt); err != nil {
+		log.Printf("mcp probe cache write failed: server=%s", item.ID)
+	}
+	return item
 }
 
 func (s *Service) TestMCPServer(ctx context.Context, id string) (domain.MCPServer, error) {

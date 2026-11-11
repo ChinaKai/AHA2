@@ -277,10 +277,14 @@ func (s *Service) PetTestMCPServer(ctx context.Context, id string) (PetMCPServer
 		tools, probeErr := fetchStdioTools(ctx, item)
 		result.Probe = "stdio"
 		result = applyPetMCPProbe(result, tools, probeErr, item)
+		// The probe is also the explicit cache refresh: later Turns build
+		// --allowedTools from this stored list.
+		s.persistMCPProbe(ctx, item, tools, probeErr)
 	case item.Transport == "http" && strings.TrimSpace(item.URL) != "":
 		tools, probeErr := fetchMCPTools(ctx, item)
 		result.Probe = "http"
 		result = applyPetMCPProbe(result, tools, probeErr, item)
+		s.persistMCPProbe(ctx, item, tools, probeErr)
 	default:
 		result.Health = "error"
 		result.Error = "MCP 配置缺少可探测的 transport 或地址"

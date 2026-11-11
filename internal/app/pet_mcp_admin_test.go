@@ -292,6 +292,100 @@ func TestPetMCPAdminTestProbeSuccessAndFailure(t *testing.T) {
 	}
 }
 
+func TestPetMCPTestPersistsProbedToolsForLaterTurns(t *testing.T) {
+	fixture := newPetTaskFixture(t)
+	enablePetHardwareTestSettings(t, fixture, true)
+
+	probedToolNames := []string{
+		"board_status", "display_text", "display_clear", "display_screenshot",
+		"camera_snapshot", "audio_beep", "audio_play",
+	}
+	endpoint := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[` +
+			`{"name":"board_status"},{"name":"display_text"},{"name":"display_clear"},` +
+			`{"name":"display_screenshot"},{"name":"camera_snapshot"},` +
+			`{"name":"audio_beep"},{"name":"audio_play"}]}}`))
+	}))
+	defer endpoint.Close()
+	insertPetMCPTestServer(t, fixture, domain.MCPServer{
+		ID: "mcp_persist", Name: "Persist Desk", Transport: "http", URL: endpoint.URL, Enabled: true,
+		Tools: []domain.MCPTool{
+			{Name: "board_status"}, {Name: "display_text"}, {Name: "display_clear"},
+		}, Health: "ok",
+	})
+
+	result, err := fixture.service.PetTestMCPServer(fixture.ctx, "mcp_persist")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ToolCount != len(probedToolNames) {
+		t.Fatalf("probe result=%#v", result)
+	}
+	stored, err := fixture.service.MCPServerByID(fixture.ctx, "mcp_persist")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored.Tools) != len(probedToolNames) || stored.Health != "ok" || stored.LastCheckedAt.IsZero() {
+		t.Fatalf("probe was not cached: %#v", stored)
+	}
+	list, err := fixture.service.PetListMCPServers(fixture.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, server := range list.Servers {
+		if server.ID == "mcp_persist" {
+			found = true
+			if server.ToolCount != len(probedToolNames) {
+				t.Fatalf("listed tool_count=%d, want %d", server.ToolCount, len(probedToolNames))
+			}
+		}
+	}
+	if !found {
+		t.Fatal("mcp_persist missing from list")
+	}
+	// The next Turn builds --allowedTools from the freshly probed cache.
+	_, allowed := fixture.service.mcpRuntimeForTask(fixture.ctx, domain.Task{
+		ID: "task_after_mcp_probe", MCPServerIDs: []string{"mcp_persist"},
+	}, "")
+	want := make(map[string]bool, len(probedToolNames))
+	for _, tool := range probedToolNames {
+		want["mcp__mcp_persist__"+tool] = true
+	}
+	if len(allowed) != len(want) {
+		t.Fatalf("allowed=%#v", allowed)
+	}
+	for _, name := range allowed {
+		if !want[name] {
+			t.Fatalf("allowed=%#v contains unexpected or duplicate %q", allowed, name)
+		}
+		delete(want, name)
+	}
+	if len(want) != 0 {
+		t.Fatalf("allowed=%#v is missing %v", allowed, want)
+	}
+
+	failure := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		http.Error(writer, "boom", http.StatusInternalServerError)
+	}))
+	defer failure.Close()
+	insertPetMCPTestServer(t, fixture, domain.MCPServer{
+		ID: "mcp_keep_cache", Name: "Keep Cache", Transport: "http", URL: failure.URL, Enabled: true,
+		Tools: []domain.MCPTool{{Name: "board_status"}}, Health: "ok",
+	})
+	if _, err := fixture.service.PetTestMCPServer(fixture.ctx, "mcp_keep_cache"); err != nil {
+		t.Fatal(err)
+	}
+	kept, err := fixture.service.MCPServerByID(fixture.ctx, "mcp_keep_cache")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(kept.Tools) != 1 || kept.Tools[0].Name != "board_status" || kept.Health != "error" {
+		t.Fatalf("failed probe dropped cached tools: %#v", kept)
+	}
+}
+
 func TestPetMCPAdminCreateApprovalLifecycle(t *testing.T) {
 	fixture := newPetTaskFixture(t)
 	enablePetHardwareTestSettings(t, fixture, true)

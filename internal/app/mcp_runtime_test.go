@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -255,5 +256,186 @@ func TestMailBindingAddsNarrowMailMCP(t *testing.T) {
 	// No binding means no account, so the mail MCP must not be injected.
 	if _, extra := fixture.service.mcpRuntimeForTask(ctx, domain.Task{ID: "task-no-mail"}, "http://127.0.0.1:8766/"); len(extra) != 0 {
 		t.Fatalf("unbound task gained mail tools: %#v", extra)
+	}
+}
+
+func TestMCPRuntimeRefreshesStaleToolCache(t *testing.T) {
+	ctx := context.Background()
+	var listed atomic.Int32
+	tools := `{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"board_status"},{"name":"display_text"},{"name":"display_clear"},{"name":"camera_snapshot"}]}}`
+	endpoint := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var payload struct {
+			Method string `json:"method"`
+		}
+		_ = json.NewDecoder(request.Body).Decode(&payload)
+		writer.Header().Set("Content-Type", "application/json")
+		if payload.Method == "tools/list" {
+			listed.Add(1)
+			_, _ = writer.Write([]byte(tools))
+			return
+		}
+		_, _ = writer.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{}}`))
+	}))
+	defer endpoint.Close()
+
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	service := NewService(database, nil, nil)
+	now := time.Now().UTC()
+	item := domain.MCPServer{
+		ID: "mcp_luckfox_desk", Name: "Luckfox Desk", Transport: "http", URL: endpoint.URL,
+		Enabled: true, Health: "ok",
+		Tools: []domain.MCPTool{
+			{Name: "board_status"}, {Name: "display_text"}, {Name: "display_clear"},
+		},
+		LastCheckedAt: now.Add(-2 * mcpToolCacheTTL),
+		CreatedAt:     now, UpdatedAt: now,
+	}
+	if err := database.UpsertMCPServer(ctx, item); err != nil {
+		t.Fatal(err)
+	}
+
+	_, allowed := service.mcpRuntimeForTask(ctx, domain.Task{ID: "task-refresh", MCPServerIDs: []string{item.ID}}, "")
+	want := map[string]bool{
+		"mcp__mcp_luckfox_desk__board_status":    true,
+		"mcp__mcp_luckfox_desk__display_text":    true,
+		"mcp__mcp_luckfox_desk__display_clear":   true,
+		"mcp__mcp_luckfox_desk__camera_snapshot": true,
+	}
+	if len(allowed) != len(want) {
+		t.Fatalf("allowed=%#v", allowed)
+	}
+	for _, name := range allowed {
+		if !want[name] {
+			t.Fatalf("allowed=%#v, unexpected %q", allowed, name)
+		}
+	}
+	if listed.Load() != 1 {
+		t.Fatalf("tools/list calls=%d, want 1", listed.Load())
+	}
+	stored, err := service.MCPServerByID(ctx, item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored.Tools) != 4 || stored.Health != "ok" || stored.LastCheckedAt.Before(now) {
+		t.Fatalf("stored=%#v", stored)
+	}
+}
+
+func TestMCPRuntimeKeepsCachedToolsWhenRefreshFails(t *testing.T) {
+	ctx := context.Background()
+	endpoint := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		http.Error(writer, "boom", http.StatusInternalServerError)
+	}))
+	defer endpoint.Close()
+
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	service := NewService(database, nil, nil)
+	now := time.Now().UTC()
+	item := domain.MCPServer{
+		ID: "mcp_unreachable", Name: "Unreachable", Transport: "http", URL: endpoint.URL,
+		Enabled: true, Health: "ok",
+		Tools:         []domain.MCPTool{{Name: "board_status"}},
+		LastCheckedAt: now.Add(-2 * mcpToolCacheTTL),
+		CreatedAt:     now, UpdatedAt: now,
+	}
+	if err := database.UpsertMCPServer(ctx, item); err != nil {
+		t.Fatal(err)
+	}
+
+	_, allowed := service.mcpRuntimeForTask(ctx, domain.Task{ID: "task-fallback", MCPServerIDs: []string{item.ID}}, "")
+	if len(allowed) != 1 || allowed[0] != "mcp__mcp_unreachable__board_status" {
+		t.Fatalf("allowed=%#v", allowed)
+	}
+	stored, err := service.MCPServerByID(ctx, item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored.Tools) != 1 || stored.Tools[0].Name != "board_status" || stored.Health != "error" || stored.LastCheckedAt.IsZero() {
+		t.Fatalf("stored=%#v", stored)
+	}
+}
+
+func TestMCPRuntimeUsesFreshCacheWithoutProbing(t *testing.T) {
+	ctx := context.Background()
+	var requests atomic.Int32
+	endpoint := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		requests.Add(1)
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"new_tool"}]}}`))
+	}))
+	defer endpoint.Close()
+
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	service := NewService(database, nil, nil)
+	now := time.Now().UTC()
+	item := domain.MCPServer{
+		ID: "mcp_fresh", Name: "Fresh", Transport: "http", URL: endpoint.URL,
+		Enabled: true, Health: "ok",
+		Tools:         []domain.MCPTool{{Name: "cached_tool"}},
+		LastCheckedAt: now,
+		CreatedAt:     now, UpdatedAt: now,
+	}
+	if err := database.UpsertMCPServer(ctx, item); err != nil {
+		t.Fatal(err)
+	}
+
+	_, allowed := service.mcpRuntimeForTask(ctx, domain.Task{ID: "task-fresh", MCPServerIDs: []string{item.ID}}, "")
+	if len(allowed) != 1 || allowed[0] != "mcp__mcp_fresh__cached_tool" {
+		t.Fatalf("allowed=%#v", allowed)
+	}
+	if requests.Load() != 0 {
+		t.Fatalf("probed a fresh cache: requests=%d", requests.Load())
+	}
+}
+
+func TestMCPProbePersistKeepsConcurrentConfigEdit(t *testing.T) {
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	service := NewService(database, nil, nil)
+	now := time.Now().UTC()
+	item := domain.MCPServer{
+		ID: "mcp_race", Name: "Race", Transport: "http", URL: "http://old.test/mcp",
+		Enabled: true, Health: "ok", Env: map[string]string{"API_TOKEN": "old-secret"},
+		Tools: []domain.MCPTool{{Name: "old_tool"}}, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := database.UpsertMCPServer(ctx, item); err != nil {
+		t.Fatal(err)
+	}
+	// The Turn loaded item before an Owner edit landed; the probe must only
+	// touch probe columns, not write the stale config back.
+	edited := item
+	edited.URL = "http://new.test/mcp"
+	edited.Env = map[string]string{"API_TOKEN": "new-secret"}
+	edited.UpdatedAt = now.Add(time.Second)
+	if err := database.UpsertMCPServer(ctx, edited); err != nil {
+		t.Fatal(err)
+	}
+
+	service.persistMCPProbe(ctx, item, []domain.MCPTool{{Name: "new_tool"}, {Name: "second_tool"}}, nil)
+	stored, err := service.MCPServerByID(ctx, item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.URL != edited.URL || stored.Env["API_TOKEN"] != "new-secret" {
+		t.Fatalf("probe clobbered config: %#v", stored)
+	}
+	if len(stored.Tools) != 2 || stored.Health != "ok" || stored.LastCheckedAt.IsZero() {
+		t.Fatalf("probe result not stored: %#v", stored)
 	}
 }
