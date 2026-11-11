@@ -105,6 +105,34 @@ try { $inputStream.CopyTo($outputStream) } finally { $outputStream.Dispose() }`,
 	return nil
 }
 
+// RemoveRemoteFile deletes one file on the execution host. It is used for
+// short-lived generated configuration that may carry credentials, so removal
+// must happen on the host where the file was written rather than locally.
+func RemoveRemoteFile(ctx context.Context, runner Runner, target string) error {
+	var command Command
+	if IsWindowsRunner(runner) {
+		command = Command{
+			Executable: "powershell.exe",
+			Args: []string{"-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+				`param([string]$Target) Remove-Item -LiteralPath $Target -Force -ErrorAction SilentlyContinue`, target},
+			Timeout: 20 * time.Second,
+		}
+	} else {
+		command = Command{
+			Executable: "sh", Args: []string{"-c", `rm -f -- "$1"`, "aha-remove-file", target},
+			Timeout: 20 * time.Second,
+		}
+	}
+	result, err := runner.Run(ctx, command, nil)
+	if err != nil {
+		return err
+	}
+	if result.ExitCode != 0 {
+		return fmt.Errorf("remove remote file: %s", remoteCommandDetail(result))
+	}
+	return nil
+}
+
 func ReadRemoteTextFile(ctx context.Context, runner Runner, target string) (string, error) {
 	var command Command
 	if IsWindowsRunner(runner) {

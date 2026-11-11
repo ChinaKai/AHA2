@@ -23,6 +23,9 @@ func TestMain(m *testing.M) {
 	if mode := os.Getenv(fakeClaudeModeEnv); mode != "" {
 		os.Exit(runFakeClaude(mode, os.Args[1:]))
 	}
+	if mode := os.Getenv(fakeMCPBackendEnv); mode != "" {
+		os.Exit(runFakeMCPBackend(mode, os.Args[1:]))
+	}
 	os.Exit(m.Run())
 }
 

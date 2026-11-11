@@ -46,6 +46,10 @@ func (adapter DSH) Execute(ctx context.Context, request Request, emit func(Event
 	if err != nil {
 		return Result{}, err
 	}
+	// The generated patch holds MCP server env values. DSH reads it at startup,
+	// so remove it when the run ends instead of leaving credentials in the
+	// per-session home between turns.
+	defer removeDSHProfilePatch(ctx, request, patchPath)
 	idleWarning, idleTimeout, heartbeat := backendWatchdogDurations(adapter.IdleWarning, adapter.IdleTimeout, adapter.Heartbeat)
 	args := dshArguments(request, patchPath)
 	environment := filterDSHEnvironment(request.Environment)
@@ -128,6 +132,21 @@ func (adapter DSH) Execute(ctx context.Context, request Request, emit func(Event
 		return Result{ExitCode: result.ExitCode, ProviderSessionID: sessionID}, fmt.Errorf("dsh returned no agent message")
 	}
 	return Result{Reply: strings.TrimSpace(reply), ExitCode: result.ExitCode, ProviderSessionID: sessionID}, nil
+}
+
+// removeDSHProfilePatch deletes the generated patch on the host where DSH runs.
+// The next turn regenerates it from the neutral MCP registration.
+func removeDSHProfilePatch(ctx context.Context, request Request, path string) {
+	if path == "" {
+		return
+	}
+	if _, local := request.Runner.(workspace.LocalRunner); local {
+		_ = os.Remove(path)
+		return
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	_ = workspace.RemoveRemoteFile(cleanupCtx, request.Runner, path)
 }
 
 func dshArguments(request Request, patchPath string) []string {

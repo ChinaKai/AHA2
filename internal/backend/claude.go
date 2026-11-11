@@ -59,7 +59,15 @@ func (adapter Claude) Execute(ctx context.Context, request Request, emit func(Ev
 		args = append(args, "--resume", request.ProviderSessionID)
 	}
 	if config := claudeMCPConfig(request.MCPServers); config != "" {
-		args = append(args, "--mcp-config", config)
+		// The generated config carries MCP server env values and headers, so it
+		// must never be an argv value. Claude Code accepts a path for
+		// --mcp-config; the file is owner-only and removed when the run ends.
+		file, err := writeMCPSecretFile(ctx, request, "claude-mcp.json", config)
+		if err != nil {
+			return Result{}, err
+		}
+		defer file.cleanup(ctx)
+		args = append(args, "--mcp-config", file.path)
 	}
 	if len(request.AllowedTools) > 0 {
 		args = append(args, "--allowedTools")
@@ -230,8 +238,9 @@ func (adapter Claude) Execute(ctx context.Context, request Request, emit func(Ev
 
 // claudeMCPConfig renders the neutral MCP registrations as Claude Code's
 // --mcp-config JSON. A bearer-token server references its environment variable
-// instead of embedding the value, so the turn credential never appears in argv.
-// Claude Code expands ${VAR} in the config it loads.
+// instead of embedding the value. Execute writes this JSON to an owner-only
+// file and passes only the path to --mcp-config, so stdio server env values
+// never appear in argv. Claude Code expands ${VAR} in the config it loads.
 func claudeMCPConfig(servers []MCPServer) string {
 	configs := map[string]any{}
 	for _, server := range servers {

@@ -462,9 +462,9 @@ func TestCodexRolloutWaitsForCompleteLinesAndSkipsKnownText(t *testing.T) {
 	}
 }
 
-func TestCodexArgumentsRenderMCPServers(t *testing.T) {
+func TestCodexArgumentsKeepMCPOutOfArgv(t *testing.T) {
 	t.Parallel()
-	args := codexArguments(Request{
+	request := Request{
 		Model: "gpt-test",
 		MCPServers: []MCPServer{
 			{
@@ -482,28 +482,34 @@ func TestCodexArgumentsRenderMCPServers(t *testing.T) {
 				URL: "http://127.0.0.1:8766/api/v1/pet/mcp",
 			},
 		},
-	}, "")
-	joined := strings.Join(args, "\n")
+	}
+	joined := strings.Join(codexArguments(request, ""), "\n")
+	if strings.Contains(joined, "mcp_servers.") {
+		t.Fatalf("MCP configuration must not reach Codex argv:\n%s", joined)
+	}
+	config := codexMCPConfigTOML(request.MCPServers)
 	for _, want := range []string{
-		`mcp_servers.aha2_channel.default_tools_approval_mode="approve"`,
-		`mcp_servers.aha2_channel.url="http://127.0.0.1:8766/api/v1/agent/channel/mcp"`,
-		`mcp_servers.aha2_channel.bearer_token_env_var="AHA2_AGENT_API_TOKEN"`,
-		`mcp_servers.aha2_channel.http_headers={"X-Test" = "yes"}`,
-		`mcp_servers.mcp_local.default_tools_approval_mode="approve"`,
-		`mcp_servers.mcp_local.command="node"`,
-		`mcp_servers.mcp_local.args=["server.mjs"]`,
-		`mcp_servers.mcp_local.env={"MODE" = "test"}`,
-		`mcp_servers.aha2_pet.default_tools_approval_mode="approve"`,
-		`mcp_servers.aha2_pet.url="http://127.0.0.1:8766/api/v1/pet/mcp"`,
+		"[mcp_servers.aha2_channel]",
+		`url = "http://127.0.0.1:8766/api/v1/agent/channel/mcp"`,
+		`bearer_token_env_var = "AHA2_AGENT_API_TOKEN"`,
+		"[mcp_servers.aha2_channel.http_headers]",
+		`"X-Test" = "yes"`,
+		"[mcp_servers.mcp_local]",
+		`command = "node"`,
+		`args = ["server.mjs"]`,
+		"[mcp_servers.mcp_local.env]",
+		`"MODE" = "test"`,
+		"[mcp_servers.aha2_pet]",
+		`url = "http://127.0.0.1:8766/api/v1/pet/mcp"`,
 	} {
-		if !strings.Contains(joined, want) {
-			t.Fatalf("missing %q in:\n%s", want, joined)
+		if !strings.Contains(config, want) {
+			t.Fatalf("missing %q in Codex config:\n%s", want, config)
 		}
 	}
-	if strings.Contains(joined, "Bearer ${") {
-		t.Fatalf("codex must read the bearer token from the environment:\n%s", joined)
+	if strings.Contains(config, "Bearer ${") {
+		t.Fatalf("codex must read the bearer token from the environment:\n%s", config)
 	}
-	if strings.Contains(joined, "mcp_servers.aha2-pet") {
-		t.Fatalf("hyphenated MCP key must be normalized:\n%s", joined)
+	if strings.Contains(config, "mcp_servers.aha2-pet") {
+		t.Fatalf("hyphenated MCP key must be normalized:\n%s", config)
 	}
 }
