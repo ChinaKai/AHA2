@@ -711,6 +711,7 @@ func TestClaudeMCPConfigKeepsBearerTokenInEnvironment(t *testing.T) {
 			URLFromEnv:     "AHA2_AGENT_API_URL",
 			URLPath:        "/api/v1/agent/channel/mcp",
 			BearerTokenEnv: "AHA2_AGENT_API_TOKEN",
+			Headers:        map[string]string{"X-Test": "header-value"},
 		},
 		{
 			Name: "mcp_local", Transport: "stdio", Command: "node",
@@ -722,6 +723,9 @@ func TestClaudeMCPConfigKeepsBearerTokenInEnvironment(t *testing.T) {
 	}
 	if !strings.Contains(config, `"Authorization":"Bearer ${AHA2_AGENT_API_TOKEN}"`) {
 		t.Fatalf("bearer placeholder missing: %s", config)
+	}
+	if !strings.Contains(config, `"X-Test":"header-value"`) {
+		t.Fatalf("HTTP header missing from the delivered config: %s", config)
 	}
 	if !strings.Contains(config, `"command":"node"`) || !strings.Contains(config, `"MODE":"test"`) {
 		t.Fatalf("stdio server missing: %s", config)

@@ -2,12 +2,13 @@ package backend
 
 import (
 	"context"
-	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"os"
 	pathpkg "path"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -20,64 +21,78 @@ import (
 // any local process could read from the OS process list. These helpers keep
 // them in a generated file that only the execution host can read, so the
 // command line carries a path instead of the secret.
+//
+// Cleanup and restore failures are returned to the adapter, which fails the
+// Turn instead of reporting a success while a credential file may remain.
 
-// mcpSecretFile is a private file on the execution host that holds rendered MCP
-// configuration. It is removed when the backend run ends.
+// mcpSecretFile is a generated file on the execution host that holds rendered
+// MCP configuration. It is removed when the backend run ends.
 type mcpSecretFile struct {
 	request Request
 	path    string
-	// dir is the temporary directory owned by this process for a local run.
-	// Empty for a remote run, where the file lives under the workspace runtime
-	// directory.
-	dir string
+	local   bool
 }
 
-// writeMCPSecretFile renders content into owner-only storage and returns the
-// path the backend should read.
-//
-// A local run uses os.MkdirTemp, which creates a 0700 directory. On Windows that
-// directory is under %TEMP% inside the user profile, whose inherited ACL admits
-// only the user, SYSTEM and Administrators; on POSIX the file itself is 0600.
-// A remote run writes under the workspace runtime directory, where the POSIX
-// writer applies umask 077 and a Windows workspace inherits the owning user's
-// ACL.
-func writeMCPSecretFile(ctx context.Context, request Request, name, content string) (*mcpSecretFile, error) {
-	if _, local := request.Runner.(workspace.LocalRunner); local {
-		dir, err := os.MkdirTemp("", "aha2-mcp-")
-		if err != nil {
-			return nil, fmt.Errorf("create MCP config directory: %w", err)
+func isLocalRunner(runner workspace.Runner) bool {
+	_, local := runner.(workspace.LocalRunner)
+	return local
+}
+
+// claudeMCPConfigFileName is stable for one workspace/backend config directory,
+// so a file left by a killed process is overwritten by the next run instead of
+// accumulating under a new random name.
+func claudeMCPConfigFileName(request Request) string {
+	key := strings.TrimSpace(request.WorkDir) + "\x00" + strings.TrimSpace(request.ClaudeConfigDir)
+	sum := sha256.Sum256([]byte(key))
+	return "aha2-mcp-claude-" + hex.EncodeToString(sum[:12]) + ".json"
+}
+
+// claudeMCPConfigPath returns the deterministic, AHA-owned location of this
+// run's Claude MCP config. Local runs use a fixed directory under the user's
+// temp root (owner-private on Windows); remote runs use the workspace runtime
+// directory. Only files with this exact name are touched.
+func claudeMCPConfigPath(request Request) (string, bool) {
+	local := isLocalRunner(request.Runner)
+	name := claudeMCPConfigFileName(request)
+	if local {
+		return filepath.Join(os.TempDir(), "aha2-mcp-config", name), true
+	}
+	return joinRemotePath(request.WorkDir, ".aha2-context", "runtime", "mcp-config", name), false
+}
+
+// writeClaudeMCPConfig replaces any stale config from a killed run, then writes
+// the new content atomically and owner-only.
+func writeClaudeMCPConfig(ctx context.Context, request Request, content string) (*mcpSecretFile, error) {
+	path, local := claudeMCPConfigPath(request)
+	if local {
+		if err := removeLocalFile(path); err != nil {
+			return nil, fmt.Errorf("remove stale MCP config: %w", err)
 		}
-		path := filepath.Join(dir, name)
-		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-			_ = os.RemoveAll(dir)
+		if err := writeLocalFileAtomic(path, content); err != nil {
 			return nil, fmt.Errorf("write MCP config: %w", err)
 		}
-		return &mcpSecretFile{request: request, path: path, dir: dir}, nil
+	} else {
+		if err := workspace.RemoveRemoteFile(ctx, request.Runner, path); err != nil {
+			return nil, fmt.Errorf("remove stale MCP config: %w", err)
+		}
+		if err := workspace.WriteRemoteTextFileAtomic(ctx, request.Runner, path, content); err != nil {
+			return nil, fmt.Errorf("write MCP config: %w", err)
+		}
 	}
-	dir := pathpkg.Join(remoteSlashPath(request.WorkDir), ".aha2-context", "runtime", "mcp-config", randomName())
-	path := pathpkg.Join(dir, name)
-	if err := workspace.WriteRemoteTextFile(ctx, request.Runner, path, content); err != nil {
-		return nil, fmt.Errorf("write MCP config: %w", err)
-	}
-	return &mcpSecretFile{request: request, path: path}, nil
+	return &mcpSecretFile{request: request, path: path, local: local}, nil
 }
 
-// cleanup removes the file even when the run context was cancelled. The
-// workspace runtime directory keeps only the empty parent afterwards.
-func (file *mcpSecretFile) cleanup(ctx context.Context) {
+// cleanup removes the generated file even when the run context was cancelled.
+func (file *mcpSecretFile) cleanup(ctx context.Context) error {
 	if file == nil || file.path == "" {
-		return
+		return nil
 	}
-	if _, local := file.request.Runner.(workspace.LocalRunner); local {
-		_ = os.Remove(file.path)
-		if file.dir != "" {
-			_ = os.Remove(file.dir)
-		}
-		return
+	if file.local {
+		return removeLocalFile(file.path)
 	}
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
-	_ = workspace.RemoveRemoteFile(cleanupCtx, file.request.Runner, file.path)
+	return workspace.RemoveRemoteFile(cleanupCtx, file.request.Runner, file.path)
 }
 
 // codexMCPConfigFile is the per-session CODEX_HOME/config.toml with the MCP
@@ -85,10 +100,21 @@ func (file *mcpSecretFile) cleanup(ctx context.Context) {
 // its config file is the only place an MCP secret can live without appearing in
 // argv. The previous content is restored when the run ends.
 type codexMCPConfigFile struct {
-	request  Request
-	path     string
-	original string
-	existed  bool
+	request    Request
+	path       string
+	backupPath string
+	original   string
+	existed    bool
+	local      bool
+}
+
+const codexMCPConfigBackupSuffix = ".aha2-orig"
+
+func codexConfigPath(home string, local bool) string {
+	if local {
+		return filepath.Join(home, "config.toml")
+	}
+	return joinRemotePath(home, "config.toml")
 }
 
 func prepareCodexMCPConfig(ctx context.Context, request Request, content string) (*codexMCPConfigFile, error) {
@@ -96,15 +122,13 @@ func prepareCodexMCPConfig(ctx context.Context, request Request, content string)
 	if home == "" {
 		return nil, fmt.Errorf("prepare Codex MCP configuration: CODEX_HOME is not set")
 	}
-	local := false
-	if _, ok := request.Runner.(workspace.LocalRunner); ok {
-		local = true
+	local := isLocalRunner(request.Runner)
+	path := codexConfigPath(home, local)
+	backupPath := path + codexMCPConfigBackupSuffix
+	if err := recoverCodexConfigBackup(ctx, request, path, backupPath, local); err != nil {
+		return nil, err
 	}
-	path := pathpkg.Join(remoteSlashPath(home), "config.toml")
-	if local {
-		path = filepath.Join(home, "config.toml")
-	}
-	original, existed, err := readCodexConfig(ctx, request, path, local)
+	original, existed, err := readExecutionFile(ctx, request, path, local)
 	if err != nil {
 		return nil, fmt.Errorf("read Codex config: %w", err)
 	}
@@ -122,12 +146,46 @@ func prepareCodexMCPConfig(ctx context.Context, request Request, content string)
 		merged += "\n"
 	}
 	merged += content
-	if err := writeCodexConfig(ctx, request, path, merged, local); err != nil {
+	if existed {
+		if err := writeExecutionFileAtomic(ctx, request, backupPath, original, local); err != nil {
+			return nil, fmt.Errorf("back up Codex config: %w", err)
+		}
+	}
+	if err := writeExecutionFileAtomic(ctx, request, path, merged, local); err != nil {
 		return nil, fmt.Errorf("write Codex MCP configuration: %w", err)
 	}
 	return &codexMCPConfigFile{
-		request: request, path: path, original: original, existed: existed && strings.TrimSpace(original) != "",
+		request: request, path: path, backupPath: backupPath,
+		original: original, existed: existed && strings.TrimSpace(original) != "", local: local,
 	}, nil
+}
+
+// recoverCodexConfigBackup handles a backup left by a crashed run. The backup
+// is authoritative only when the live config is missing or still contains the
+// generated block; otherwise the live config was edited and must not be
+// overwritten.
+func recoverCodexConfigBackup(ctx context.Context, request Request, path, backupPath string, local bool) error {
+	backup, hasBackup, err := readExecutionFile(ctx, request, backupPath, local)
+	if err != nil {
+		return fmt.Errorf("read Codex config backup: %w", err)
+	}
+	if !hasBackup {
+		return nil
+	}
+	current, hasCurrent, err := readExecutionFile(ctx, request, path, local)
+	if err != nil {
+		return fmt.Errorf("read Codex config: %w", err)
+	}
+	if hasCurrent && markerLineIndex(current, codexMCPConfigBegin) < 0 {
+		if current == backup {
+			return removeExecutionFile(ctx, request, backupPath, local)
+		}
+		return fmt.Errorf("Codex config backup %s exists but the current config has no generated MCP block; refusing to overwrite it", backupPath)
+	}
+	if err := writeExecutionFileAtomic(ctx, request, path, backup, local); err != nil {
+		return fmt.Errorf("restore Codex config from backup: %w", err)
+	}
+	return removeExecutionFile(ctx, request, backupPath, local)
 }
 
 const (
@@ -174,28 +232,39 @@ func markerLineIndex(content, marker string) int {
 	return -1
 }
 
-func (file *codexMCPConfigFile) cleanup(ctx context.Context) {
+// cleanup restores the previous config. It only overwrites the live file when
+// the generated block is still present; if another writer removed it, the
+// backup is kept and the caller fails the Turn instead of losing their edit.
+func (file *codexMCPConfigFile) cleanup(ctx context.Context) error {
 	if file == nil || file.path == "" {
-		return
+		return nil
 	}
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
-	local := false
-	if _, ok := file.request.Runner.(workspace.LocalRunner); ok {
-		local = true
+	current, exists, err := readExecutionFile(cleanupCtx, file.request, file.path, file.local)
+	if err != nil {
+		return fmt.Errorf("read Codex config for restore: %w", err)
 	}
-	if !file.existed {
-		if local {
-			_ = os.Remove(file.path)
-		} else {
-			_ = workspace.RemoveRemoteFile(cleanupCtx, file.request.Runner, file.path)
+	if exists && markerLineIndex(current, codexMCPConfigBegin) < 0 {
+		return fmt.Errorf("Codex config was changed during the run; generated MCP block is missing and the original was left at %s", file.backupPath)
+	}
+	switch {
+	case file.existed:
+		if err := writeExecutionFileAtomic(cleanupCtx, file.request, file.path, file.original, file.local); err != nil {
+			return fmt.Errorf("restore Codex config: %w", err)
 		}
-		return
+	case exists:
+		if err := removeExecutionFile(cleanupCtx, file.request, file.path, file.local); err != nil {
+			return fmt.Errorf("remove generated Codex config: %w", err)
+		}
 	}
-	_ = writeCodexConfig(cleanupCtx, file.request, file.path, file.original, local)
+	if err := removeExecutionFile(cleanupCtx, file.request, file.backupPath, file.local); err != nil {
+		return fmt.Errorf("remove Codex config backup: %w", err)
+	}
+	return nil
 }
 
-func readCodexConfig(ctx context.Context, request Request, path string, local bool) (string, bool, error) {
+func readExecutionFile(ctx context.Context, request Request, path string, local bool) (string, bool, error) {
 	if local {
 		data, err := os.ReadFile(path)
 		if os.IsNotExist(err) {
@@ -206,20 +275,65 @@ func readCodexConfig(ctx context.Context, request Request, path string, local bo
 		}
 		return string(data), true, nil
 	}
-	data, err := workspace.ReadRemoteTextFile(ctx, request.Runner, path)
-	if err != nil {
-		// An empty CODEX_HOME has no config.toml yet. A missing file is not an
-		// error here; the generated content creates it.
-		return "", false, nil
-	}
-	return data, true, nil
+	return workspace.ReadRemoteTextFileIfExists(ctx, request.Runner, path)
 }
 
-func writeCodexConfig(ctx context.Context, request Request, path, content string, local bool) error {
+func writeExecutionFileAtomic(ctx context.Context, request Request, path, content string, local bool) error {
 	if local {
-		return os.WriteFile(path, []byte(content), 0o600)
+		return writeLocalFileAtomic(path, content)
 	}
-	return workspace.WriteRemoteTextFile(ctx, request.Runner, path, content)
+	return workspace.WriteRemoteTextFileAtomic(ctx, request.Runner, path, content)
+}
+
+func removeExecutionFile(ctx context.Context, request Request, path string, local bool) error {
+	if local {
+		return removeLocalFile(path)
+	}
+	return workspace.RemoveRemoteFile(ctx, request.Runner, path)
+}
+
+// writeLocalFileAtomic writes through a temporary file in the target directory
+// and renames it into place, so a crash cannot leave a truncated config.
+func writeLocalFileAtomic(path, content string) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	if runtime.GOOS != "windows" {
+		_ = os.Chmod(dir, 0o700)
+	}
+	file, err := os.CreateTemp(dir, ".aha2-tmp-*")
+	if err != nil {
+		return err
+	}
+	tmp := file.Name()
+	if err := file.Chmod(0o600); err != nil {
+		_ = file.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if _, err := file.WriteString(content); err != nil {
+		_ = file.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+func removeLocalFile(path string) error {
+	err := os.Remove(path)
+	if err == nil || os.IsNotExist(err) {
+		return nil
+	}
+	return err
 }
 
 // codexMCPConfigTOML renders all neutral MCP registrations as Codex config
@@ -289,14 +403,13 @@ func writeCodexMCPTable(output *strings.Builder, table string, values map[string
 	}
 }
 
-func remoteSlashPath(value string) string {
-	return strings.ReplaceAll(strings.TrimSpace(value), `\`, "/")
-}
-
-func randomName() string {
-	var buffer [8]byte
-	if _, err := rand.Read(buffer[:]); err != nil {
-		return fmt.Sprintf("run-%d", time.Now().UnixNano())
+// joinRemotePath joins an execution-host path without losing UNC semantics.
+// path.Join collapses a leading "//server/share" to "/server/share", which
+// silently changes the host; keep the double slash for UNC inputs.
+func joinRemotePath(root string, values ...string) string {
+	base := strings.ReplaceAll(strings.TrimSpace(root), `\`, "/")
+	if strings.HasPrefix(base, "//") {
+		return "//" + pathpkg.Join(append([]string{strings.TrimPrefix(base, "//")}, values...)...)
 	}
-	return hex.EncodeToString(buffer[:])
+	return pathpkg.Join(append([]string{base}, values...)...)
 }

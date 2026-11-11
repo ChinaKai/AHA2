@@ -35,7 +35,7 @@ type Codex struct {
 // already holds it, and a resumed turn only needs the interruption context.
 const codexAppServerRecoveryPrompt = "The AHA backend process that was running this turn exited unexpectedly. The thread history, workspace changes and any completed tool results are preserved. Continue the original task from where it stopped. First inspect the current workspace state and the result of any interrupted command; do not repeat work that already completed. If a command's effect is uncertain, verify it before running it again. Do not reply with only a status report when there is remaining work."
 
-func (adapter Codex) Execute(ctx context.Context, request Request, emit func(Event)) (Result, error) {
+func (adapter Codex) Execute(ctx context.Context, request Request, emit func(Event)) (turnResult Result, turnErr error) {
 	binary := adapter.Binary
 	if binary == "" {
 		binary = "codex"
@@ -52,7 +52,14 @@ func (adapter Codex) Execute(ctx context.Context, request Request, emit func(Eve
 		if err != nil {
 			return Result{}, err
 		}
-		defer config.cleanup(ctx)
+		defer func() {
+			if cleanupErr := config.cleanup(ctx); cleanupErr != nil {
+				// A failed restore can leave the original config replaced by the
+				// generated one (or a backup behind), so fail the Turn instead of
+				// reporting success.
+				turnErr = errors.Join(turnErr, fmt.Errorf("restore Codex MCP config: %w", cleanupErr))
+			}
+		}()
 	}
 	// Live inbox delivery is the default whenever the transport can carry it.
 	// A non-streaming runner, or a Turn with no inbox, keeps the one-shot exec

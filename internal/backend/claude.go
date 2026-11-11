@@ -25,7 +25,7 @@ type Claude struct {
 	LiveReplayGrace time.Duration
 }
 
-func (adapter Claude) Execute(ctx context.Context, request Request, emit func(Event)) (Result, error) {
+func (adapter Claude) Execute(ctx context.Context, request Request, emit func(Event)) (turnResult Result, turnErr error) {
 	binary := adapter.Binary
 	if binary == "" {
 		binary = "claude"
@@ -62,11 +62,17 @@ func (adapter Claude) Execute(ctx context.Context, request Request, emit func(Ev
 		// The generated config carries MCP server env values and headers, so it
 		// must never be an argv value. Claude Code accepts a path for
 		// --mcp-config; the file is owner-only and removed when the run ends.
-		file, err := writeMCPSecretFile(ctx, request, "claude-mcp.json", config)
+		file, err := writeClaudeMCPConfig(ctx, request, config)
 		if err != nil {
 			return Result{}, err
 		}
-		defer file.cleanup(ctx)
+		defer func() {
+			if cleanupErr := file.cleanup(ctx); cleanupErr != nil {
+				// A failed cleanup leaves a credential file behind, so the Turn
+				// must not be reported as a success.
+				turnErr = errors.Join(turnErr, fmt.Errorf("remove generated MCP config: %w", cleanupErr))
+			}
+		}()
 		args = append(args, "--mcp-config", file.path)
 	}
 	if len(request.AllowedTools) > 0 {

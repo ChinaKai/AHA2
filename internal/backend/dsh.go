@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	pathpkg "path"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -33,7 +32,7 @@ type DSH struct {
 	Heartbeat   time.Duration
 }
 
-func (adapter DSH) Execute(ctx context.Context, request Request, emit func(Event)) (Result, error) {
+func (adapter DSH) Execute(ctx context.Context, request Request, emit func(Event)) (turnResult Result, turnErr error) {
 	binary := strings.TrimSpace(adapter.Binary)
 	if binary == "" {
 		binary = "dsh"
@@ -49,7 +48,11 @@ func (adapter DSH) Execute(ctx context.Context, request Request, emit func(Event
 	// The generated patch holds MCP server env values. DSH reads it at startup,
 	// so remove it when the run ends instead of leaving credentials in the
 	// per-session home between turns.
-	defer removeDSHProfilePatch(ctx, request, patchPath)
+	defer func() {
+		if cleanupErr := removeDSHProfilePatch(ctx, request, patchPath); cleanupErr != nil {
+			turnErr = errors.Join(turnErr, fmt.Errorf("remove generated DSH profile patch: %w", cleanupErr))
+		}
+	}()
 	idleWarning, idleTimeout, heartbeat := backendWatchdogDurations(adapter.IdleWarning, adapter.IdleTimeout, adapter.Heartbeat)
 	args := dshArguments(request, patchPath)
 	environment := filterDSHEnvironment(request.Environment)
@@ -135,18 +138,22 @@ func (adapter DSH) Execute(ctx context.Context, request Request, emit func(Event
 }
 
 // removeDSHProfilePatch deletes the generated patch on the host where DSH runs.
-// The next turn regenerates it from the neutral MCP registration.
-func removeDSHProfilePatch(ctx context.Context, request Request, path string) {
+// The next turn regenerates it from the neutral MCP registration. A failed
+// removal is returned so the adapter can fail the Turn instead of reporting
+// success while the patch (which carries MCP env values) remains.
+func removeDSHProfilePatch(ctx context.Context, request Request, path string) error {
 	if path == "" {
-		return
+		return nil
 	}
 	if _, local := request.Runner.(workspace.LocalRunner); local {
-		_ = os.Remove(path)
-		return
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
 	}
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
-	_ = workspace.RemoveRemoteFile(cleanupCtx, request.Runner, path)
+	return workspace.RemoveRemoteFile(cleanupCtx, request.Runner, path)
 }
 
 func dshArguments(request Request, patchPath string) []string {
@@ -224,16 +231,15 @@ func (adapter DSH) ensureProfilePatch(ctx context.Context, request Request) (str
 	if err := workspace.EnsureRemoteDirectory(ctx, request.Runner, homeDir); err != nil {
 		return "", fmt.Errorf("prepare DSH home: %w", err)
 	}
-	remoteDir := strings.ReplaceAll(homeDir, `\`, "/")
-	remotePluginPath := pathpkg.Join(remoteDir, "aha-agent-api-env.mjs")
+	remotePluginPath := joinRemotePath(homeDir, "aha-agent-api-env.mjs")
 	if err := workspace.WriteRemoteTextFile(ctx, request.Runner, remotePluginPath, dshAgentAPIEnvPlugin()); err != nil {
 		return "", fmt.Errorf("write DSH Agent API environment plugin: %w", err)
 	}
-	remoteLiveInboxPath := pathpkg.Join(remoteDir, "aha-live-inbox.mjs")
+	remoteLiveInboxPath := joinRemotePath(homeDir, "aha-live-inbox.mjs")
 	if err := workspace.WriteRemoteTextFile(ctx, request.Runner, remoteLiveInboxPath, dshLiveInboxPluginSource); err != nil {
 		return "", fmt.Errorf("write DSH live inbox plugin: %w", err)
 	}
-	path := pathpkg.Join(remoteDir, name)
+	path := joinRemotePath(homeDir, name)
 	if err := workspace.WriteRemoteTextFile(ctx, request.Runner, path, payload); err != nil {
 		return "", fmt.Errorf("write DSH profile patch: %w", err)
 	}
