@@ -4,11 +4,13 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -437,5 +439,189 @@ func TestMCPProbePersistKeepsConcurrentConfigEdit(t *testing.T) {
 	}
 	if len(stored.Tools) != 2 || stored.Health != "ok" || stored.LastCheckedAt.IsZero() {
 		t.Fatalf("probe result not stored: %#v", stored)
+	}
+}
+
+func TestMCPRuntimeConcurrentTurnsProbeOncePerWindow(t *testing.T) {
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	service := NewService(database, nil, nil)
+
+	var calls atomic.Int32
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	service.mcpToolFetch = func(ctx context.Context, server domain.MCPServer) ([]domain.MCPTool, error) {
+		calls.Add(1)
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		select {
+		case <-release:
+			return []domain.MCPTool{{Name: "board_status"}, {Name: "camera_snapshot"}}, nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+
+	now := time.Now().UTC()
+	item := domain.MCPServer{
+		ID: "mcp_once", Name: "Once", Transport: "http", URL: "http://probe.test/mcp",
+		Enabled: true, Health: "ok",
+		Tools:         []domain.MCPTool{{Name: "board_status"}},
+		LastCheckedAt: now.Add(-2 * mcpToolCacheTTL),
+		CreatedAt:     now, UpdatedAt: now,
+	}
+	if err := database.UpsertMCPServer(ctx, item); err != nil {
+		t.Fatal(err)
+	}
+
+	const turns = 8
+	results := make([][]string, turns)
+	var group sync.WaitGroup
+	for i := 0; i < turns; i++ {
+		group.Add(1)
+		go func(slot int) {
+			defer group.Done()
+			_, allowed := service.mcpRuntimeForTask(ctx, domain.Task{
+				ID: "task-concurrent", MCPServerIDs: []string{item.ID},
+			}, "")
+			results[slot] = allowed
+		}(i)
+	}
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("no Turn entered the probe")
+	}
+	// Leave the slot held long enough for the losers to run into the taken
+	// claim before the winner returns.
+	time.Sleep(150 * time.Millisecond)
+	close(release)
+	group.Wait()
+
+	if count := calls.Load(); count != 1 {
+		t.Fatalf("probed %d times in one cache window, want 1", count)
+	}
+	for slot, allowed := range results {
+		found := false
+		for _, name := range allowed {
+			if name == "mcp__mcp_once__board_status" {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("turn %d allowed=%#v, missing the still-cached tool", slot, allowed)
+		}
+	}
+	stored, err := service.MCPServerByID(ctx, item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored.Tools) != 2 || stored.Health != "ok" {
+		t.Fatalf("winner result not stored: %#v", stored)
+	}
+}
+
+func TestMCPRuntimeFailedRefreshNotRetriedWithinTTL(t *testing.T) {
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	service := NewService(database, nil, nil)
+
+	var calls atomic.Int32
+	service.mcpToolFetch = func(ctx context.Context, server domain.MCPServer) ([]domain.MCPTool, error) {
+		calls.Add(1)
+		return nil, errors.New("probe down")
+	}
+
+	now := time.Now().UTC()
+	item := domain.MCPServer{
+		ID: "mcp_down", Name: "Down", Transport: "http", URL: "http://down.test/mcp",
+		Enabled: true, Health: "ok",
+		Tools:         []domain.MCPTool{{Name: "board_status"}},
+		LastCheckedAt: now.Add(-2 * mcpToolCacheTTL),
+		CreatedAt:     now, UpdatedAt: now,
+	}
+	if err := database.UpsertMCPServer(ctx, item); err != nil {
+		t.Fatal(err)
+	}
+	task := domain.Task{ID: "task-failed-refresh", MCPServerIDs: []string{item.ID}}
+
+	_, first := service.mcpRuntimeForTask(ctx, task, "")
+	if len(first) != 1 || first[0] != "mcp__mcp_down__board_status" {
+		t.Fatalf("first allowed=%#v", first)
+	}
+	_, second := service.mcpRuntimeForTask(ctx, task, "")
+	if count := calls.Load(); count != 1 {
+		t.Fatalf("probed %d times after a failed refresh, want 1", count)
+	}
+	if len(second) != 1 || second[0] != first[0] {
+		t.Fatalf("second allowed=%#v, want the cached tool kept", second)
+	}
+	stored, err := service.MCPServerByID(ctx, item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored.Tools) != 1 || stored.Tools[0].Name != "board_status" || stored.Health != "error" || stored.LastError == "" || stored.LastCheckedAt.IsZero() {
+		t.Fatalf("failed refresh not persisted as a window: %#v", stored)
+	}
+}
+
+func TestMCPRuntimeRefreshBudgetTimesOut(t *testing.T) {
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	service := NewService(database, nil, nil)
+	service.mcpToolRefreshBudget = 40 * time.Millisecond
+
+	var calls atomic.Int32
+	service.mcpToolFetch = func(ctx context.Context, server domain.MCPServer) ([]domain.MCPTool, error) {
+		calls.Add(1)
+		<-ctx.Done() // hold the slot until the budget expires
+		return nil, ctx.Err()
+	}
+
+	now := time.Now().UTC()
+	item := domain.MCPServer{
+		ID: "mcp_slow", Name: "Slow", Transport: "http", URL: "http://slow.test/mcp",
+		Enabled: true, Health: "ok",
+		Tools:         []domain.MCPTool{{Name: "board_status"}},
+		LastCheckedAt: now.Add(-2 * mcpToolCacheTTL),
+		CreatedAt:     now, UpdatedAt: now,
+	}
+	if err := database.UpsertMCPServer(ctx, item); err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Now()
+	_, allowed := service.mcpRuntimeForTask(ctx, domain.Task{
+		ID: "task-budget", MCPServerIDs: []string{item.ID},
+	}, "")
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("refresh stalled for %s, budget is 40ms", elapsed)
+	}
+	if count := calls.Load(); count != 1 {
+		t.Fatalf("probed %d times, want 1", count)
+	}
+	if len(allowed) != 1 || allowed[0] != "mcp__mcp_slow__board_status" {
+		t.Fatalf("timed-out refresh dropped cached tools: %#v", allowed)
+	}
+	stored, err := service.MCPServerByID(ctx, item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored.Tools) != 1 || stored.Health != "error" || stored.LastError == "" || stored.LastCheckedAt.IsZero() {
+		t.Fatalf("timed-out refresh not persisted as a window: %#v", stored)
 	}
 }

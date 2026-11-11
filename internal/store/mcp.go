@@ -65,6 +65,36 @@ func (s *Store) UpdateMCPServerProbe(ctx context.Context, id string, tools []dom
 	return err
 }
 
+// ClaimMCPServerProbe atomically takes the refresh slot for one cache window.
+// The conditional UPDATE is the coordination point, so it holds for concurrent
+// Turns in one process and for multiple Service instances sharing the same
+// database: SQLite serializes writers, so exactly one caller sees rows==1 and
+// owes the probe; every other caller gets false and must keep the cached tool
+// list instead of probing again. The claim advances last_checked_at up front,
+// acting as a lease: if the winner dies before persisting the probe result,
+// the cache keeps the last known tools and stays untouched until the window
+// expires.
+//
+// Timestamps are UTC RFC3339Nano strings and an empty last_checked_at sorts
+// before every real timestamp, so a plain string comparison matches the TTL
+// rule. RFC3339Nano drops trailing fraction zeros, so two timestamps that
+// differ only below the written precision can compare on the wrong side of
+// the boundary, which at worst skips one refresh at the exact TTL edge.
+func (s *Store) ClaimMCPServerProbe(ctx context.Context, id string, claimAt, expiresBefore time.Time) (bool, error) {
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE mcp_servers SET last_checked_at=?
+		WHERE id=? AND COALESCE(last_checked_at,'') < ?`,
+		timeString(claimAt), strings.TrimSpace(id), timeString(expiresBefore))
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected == 1, nil
+}
+
 func (s *Store) DeleteMCPServer(ctx context.Context, id string) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM mcp_servers WHERE id=? AND builtin=0`, strings.TrimSpace(id))
 	return err

@@ -142,10 +142,14 @@ func (s *Service) mcpRuntimeForTask(ctx context.Context, task domain.Task, agent
 }
 
 // refreshMCPToolsIfStale re-probes a bound server whose persisted tool list is
-// older than mcpToolCacheTTL. The refresh is best effort: a failed probe keeps
-// the last known tools, and the TTL is measured from the attempt so an
-// unavailable server is retried at most once per cache window rather than on
-// every Turn.
+// older than mcpToolCacheTTL. ClaimMCPServerProbe takes the refresh slot
+// atomically before any process talks to the server: when concurrent Turns —
+// or a second Service instance sharing the same database — load the same
+// stale row, exactly one of them probes and the others keep the cached list
+// for this Turn, so a server is probed at most once per cache window. The
+// refresh is best effort: a failed probe keeps the last known tools, and the
+// claim already advanced last_checked_at, so an unavailable server is also
+// not retried until the next window.
 func (s *Service) refreshMCPToolsIfStale(ctx context.Context, server domain.MCPServer) domain.MCPServer {
 	if server.Builtin || !server.Enabled {
 		return server
@@ -167,16 +171,24 @@ func (s *Service) refreshMCPToolsIfStale(ctx context.Context, server domain.MCPS
 	if !server.LastCheckedAt.IsZero() && now.Sub(server.LastCheckedAt) < mcpToolCacheTTL {
 		return server
 	}
-	probeCtx, cancel := context.WithTimeout(ctx, mcpToolRefreshTimeout)
-	defer cancel()
-	var tools []domain.MCPTool
-	var probeErr error
-	switch transport {
-	case "stdio":
-		tools, probeErr = fetchStdioTools(probeCtx, server)
-	case "http":
-		tools, probeErr = fetchMCPTools(probeCtx, server)
+	claimed, err := s.store.ClaimMCPServerProbe(ctx, server.ID, now, now.Add(-mcpToolCacheTTL))
+	if err != nil {
+		// A failed claim must not degrade into a probe stampede: keep the
+		// cached list and let the next Turn retry the claim. The error is a
+		// store failure, never server-controlled text.
+		log.Printf("mcp tools refresh claim failed: server=%s err=%v", server.ID, err)
+		return server
 	}
+	if !claimed {
+		return server
+	}
+	budget := s.mcpToolRefreshBudget
+	if budget <= 0 {
+		budget = mcpToolRefreshTimeout
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+	tools, probeErr := s.fetchServerTools(probeCtx, server)
 	// Persist with the Turn context, not probeCtx: a timed-out probe still has
 	// to record LastCheckedAt and keep the previous tool list.
 	refreshed := s.persistMCPProbe(ctx, server, tools, probeErr)
@@ -187,6 +199,22 @@ func (s *Service) refreshMCPToolsIfStale(ctx context.Context, server domain.MCPS
 		log.Printf("mcp tools refreshed: server=%s elapsed=%s tools=%d", server.ID, elapsed, len(refreshed.Tools))
 	}
 	return refreshed
+}
+
+// fetchServerTools runs one tools/list probe over the configured transport.
+// The mcpToolFetch seam lets tests substitute the transport without spawning
+// processes or HTTP endpoints.
+func (s *Service) fetchServerTools(ctx context.Context, server domain.MCPServer) ([]domain.MCPTool, error) {
+	if s.mcpToolFetch != nil {
+		return s.mcpToolFetch(ctx, server)
+	}
+	switch strings.ToLower(strings.TrimSpace(server.Transport)) {
+	case "stdio":
+		return fetchStdioTools(ctx, server)
+	case "http":
+		return fetchMCPTools(ctx, server)
+	}
+	return nil, fmt.Errorf("MCP transport 不支持: %q", server.Transport)
 }
 
 // mcpAllowedToolNames mirrors the exact tool allowlist a stored MCP server

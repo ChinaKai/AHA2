@@ -160,12 +160,18 @@ type PetHardwareDisconnector interface {
 }
 
 type Service struct {
-	store                 *store.Store
-	secrets               SecretResolver
-	executor              Executor
-	preparer              WorkspacePreparer
-	hub                   *EventHub
-	now                   func() time.Time
+	store    *store.Store
+	secrets  SecretResolver
+	executor Executor
+	preparer WorkspacePreparer
+	hub      *EventHub
+	now      func() time.Time
+	// mcpToolFetch and mcpToolRefreshBudget are the tool-refresh seams: tests
+	// substitute the fetch and shrink the probe budget so the timeout path
+	// runs in milliseconds. A nil fetch uses the real transports; a
+	// non-positive budget falls back to mcpToolRefreshTimeout.
+	mcpToolFetch          func(context.Context, domain.MCPServer) ([]domain.MCPTool, error)
+	mcpToolRefreshBudget  time.Duration
 	prompts               *prompt.Engine
 	codex                 *codexaccount.Manager
 	proxyRuntime          ProxyRuntime
@@ -297,20 +303,21 @@ type CreateTaskInput struct {
 
 func NewService(database *store.Store, secretStore *secrets.FileStore, executor Executor) *Service {
 	return &Service{
-		store:               database,
-		secrets:             secretStore,
-		executor:            executor,
-		hub:                 NewEventHub(),
-		now:                 time.Now,
-		prompts:             prompt.NewEngine(database),
-		cancels:             map[string]context.CancelFunc{},
-		runContext:          context.Background(),
-		mergeDelay:          time.Second,
-		mergeTimers:         map[string]*time.Timer{},
-		collaborationDelay:  350 * time.Millisecond,
-		collaborationTimers: map[string]*time.Timer{},
-		sharedContexts:      map[string]*sharedContextState{},
-		latestShared:        map[string]string{},
+		store:                database,
+		secrets:              secretStore,
+		executor:             executor,
+		hub:                  NewEventHub(),
+		now:                  time.Now,
+		mcpToolRefreshBudget: mcpToolRefreshTimeout,
+		prompts:              prompt.NewEngine(database),
+		cancels:              map[string]context.CancelFunc{},
+		runContext:           context.Background(),
+		mergeDelay:           time.Second,
+		mergeTimers:          map[string]*time.Timer{},
+		collaborationDelay:   350 * time.Millisecond,
+		collaborationTimers:  map[string]*time.Timer{},
+		sharedContexts:       map[string]*sharedContextState{},
+		latestShared:         map[string]string{},
 	}
 }
 
