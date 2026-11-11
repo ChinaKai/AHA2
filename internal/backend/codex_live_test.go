@@ -311,10 +311,16 @@ func TestCodexAppServerArgumentsKeepProviderAndMCPConfig(t *testing.T) {
 		},
 	}
 	joined := strings.Join(codexAppServerArguments(request, ""), " ")
-	for _, want := range []string{"app-server", "model_provider", "model_providers.internal.base_url", "mcp_servers.aha2.url", "--disable multi_agent"} {
+	for _, want := range []string{"app-server", "model_provider", "model_providers.internal.base_url", "--disable multi_agent"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("app-server arguments missing %q: %s", want, joined)
 		}
+	}
+	if strings.Contains(joined, "mcp_servers.") {
+		t.Fatalf("MCP configuration must come from CODEX_HOME, not argv: %s", joined)
+	}
+	if !strings.Contains(codexMCPConfigTOML(request.MCPServers), "[mcp_servers.aha2]") {
+		t.Fatal("MCP configuration was not rendered into the Codex config file")
 	}
 	if strings.Contains(joined, "exec") || strings.Contains(joined, "--json") {
 		t.Fatalf("app-server arguments carry exec-only flags: %s", joined)

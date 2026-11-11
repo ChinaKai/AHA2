@@ -429,6 +429,7 @@ func TestDSHProfilePatchRendersMCPClients(t *testing.T) {
 				URLFromEnv:     "AHA2_AGENT_API_URL",
 				URLPath:        "/api/v1/agent/channel/mcp",
 				BearerTokenEnv: "AHA2_AGENT_API_TOKEN",
+				Headers:        map[string]string{"X-Test": "header-value"},
 			},
 			{
 				Name: "mcp_local", Transport: "stdio", Command: "node",
@@ -445,6 +446,7 @@ func TestDSHProfilePatchRendersMCPClients(t *testing.T) {
 		"transport: streamable-http",
 		"url: !!js '`${process.env.AHA2_AGENT_API_URL}/api/v1/agent/channel/mcp`'",
 		"Authorization: !!js '`Bearer ${process.env.AHA2_AGENT_API_TOKEN}`'",
+		`"X-Test": "header-value"`,
 		"serverName: mcp_local",
 		"transport: stdio",
 		`command: "node"`,

@@ -66,7 +66,9 @@ type LiveInbox interface {
 // server namespace, so the tool name is mcp__<Name>__<tool> on every backend.
 // BearerTokenEnv names an environment variable that carries an HTTP bearer
 // token; adapters must reference the variable rather than copy its value into
-// argv or a generated file.
+// argv or a generated file. Env and Headers are credentials for the MCP server
+// itself: adapters must render them into an owner-only file (Claude, Codex) or
+// the DSH profile patch, never into a process command line.
 type MCPServer struct {
 	Name      string
 	Transport string

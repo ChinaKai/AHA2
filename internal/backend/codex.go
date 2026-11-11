@@ -35,7 +35,7 @@ type Codex struct {
 // already holds it, and a resumed turn only needs the interruption context.
 const codexAppServerRecoveryPrompt = "The AHA backend process that was running this turn exited unexpectedly. The thread history, workspace changes and any completed tool results are preserved. Continue the original task from where it stopped. First inspect the current workspace state and the result of any interrupted command; do not repeat work that already completed. If a command's effect is uncertain, verify it before running it again. Do not reply with only a status report when there is remaining work."
 
-func (adapter Codex) Execute(ctx context.Context, request Request, emit func(Event)) (Result, error) {
+func (adapter Codex) Execute(ctx context.Context, request Request, emit func(Event)) (turnResult Result, turnErr error) {
 	binary := adapter.Binary
 	if binary == "" {
 		binary = "codex"
@@ -43,6 +43,23 @@ func (adapter Codex) Execute(ctx context.Context, request Request, emit func(Eve
 	timeout := adapter.Timeout
 	if timeout == 0 {
 		timeout = defaultBackendTurnTimeout
+	}
+	// Codex reads MCP servers from $CODEX_HOME/config.toml. Rendering them there
+	// keeps server env and headers out of the -c argv overrides, which the OS
+	// exposes to every local process. The file is restored when the run ends.
+	if content := codexMCPConfigTOML(request.MCPServers); content != "" {
+		config, err := prepareCodexMCPConfig(ctx, request, content)
+		if err != nil {
+			return Result{}, err
+		}
+		defer func() {
+			if cleanupErr := config.cleanup(ctx); cleanupErr != nil {
+				// A failed restore can leave the original config replaced by the
+				// generated one (or a backup behind), so fail the Turn instead of
+				// reporting success.
+				turnErr = errors.Join(turnErr, fmt.Errorf("restore Codex MCP config: %w", cleanupErr))
+			}
+		}()
 	}
 	// Live inbox delivery is the default whenever the transport can carry it.
 	// A non-streaming runner, or a Turn with no inbox, keeps the one-shot exec
@@ -292,7 +309,6 @@ func codexConfigArguments(request Request, catalogPath string) []string {
 	if baseURL != "" && request.StreamMaxRetries > 0 {
 		args = append(args, "-c", fmt.Sprintf("model_providers.%s.stream_max_retries=%d", providerID, request.StreamMaxRetries))
 	}
-	args = appendCodexMCPArguments(args, request.MCPServers)
 	return args
 }
 
@@ -313,62 +329,6 @@ func codexProviderID(request Request) string {
 		providerID = "openai-custom"
 	}
 	return providerID
-}
-
-// appendCodexMCPArguments renders the neutral MCP registrations as Codex
-// config overrides. Codex has no --mcp-config file; every server field is a
-// dotted -c override instead. HTTP bearer auth uses bearer_token_env_var so the
-// turn credential stays in the environment.
-//
-// Codex treats MCP tool calls as separately approvable actions. With
-// approval_policy=never it refuses them outright ("MCP tool call requires
-// approval, but approval policy is never"), so a bound MCP server must declare
-// its tools auto-approved. This is the Codex equivalent of Claude's
-// --allowedTools pre-approval; it does not widen shell or network approval.
-func appendCodexMCPArguments(args []string, servers []MCPServer) []string {
-	for _, server := range servers {
-		name := codexMCPKey(server.Name)
-		if name == "" {
-			continue
-		}
-		prefix := "mcp_servers." + name
-		switch strings.ToLower(strings.TrimSpace(server.Transport)) {
-		case "stdio":
-			if strings.TrimSpace(server.Command) == "" {
-				continue
-			}
-			args = append(args, "-c", prefix+".default_tools_approval_mode="+tomlString("approve"))
-			args = append(args, "-c", prefix+".command="+tomlString(server.Command))
-			if len(server.Args) > 0 {
-				values := make([]string, 0, len(server.Args))
-				for _, value := range server.Args {
-					values = append(values, tomlString(value))
-				}
-				args = append(args, "-c", prefix+".args=["+strings.Join(values, ",")+"]")
-			}
-			if len(server.Env) > 0 {
-				args = append(args, "-c", prefix+".env="+tomlInlineTable(server.Env))
-			}
-		case "http":
-			if strings.TrimSpace(server.URL) == "" {
-				continue
-			}
-			args = append(args, "-c", prefix+".default_tools_approval_mode="+tomlString("approve"))
-			args = append(args, "-c", prefix+".url="+tomlString(server.URL))
-			bearerEnv := strings.TrimSpace(server.BearerTokenEnv)
-			if bearerEnv != "" {
-				args = append(args, "-c", prefix+".bearer_token_env_var="+tomlString(bearerEnv))
-			}
-			headers := server.Headers
-			if bearerEnv != "" {
-				headers = headersWithoutAuthorization(server.Headers)
-			}
-			if len(headers) > 0 {
-				args = append(args, "-c", prefix+".http_headers="+tomlInlineTable(headers))
-			}
-		}
-	}
-	return args
 }
 
 // codexMCPKey accepts only TOML bare-key characters and normalizes hyphens to
@@ -412,19 +372,6 @@ func headersWithoutAuthorization(values map[string]string) map[string]string {
 		result[key] = value
 	}
 	return result
-}
-
-func tomlInlineTable(values map[string]string) string {
-	keys := make([]string, 0, len(values))
-	for key := range values {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	parts := make([]string, 0, len(keys))
-	for _, key := range keys {
-		parts = append(parts, tomlString(key)+" = "+tomlString(values[key]))
-	}
-	return "{" + strings.Join(parts, ", ") + "}"
 }
 
 func (adapter Codex) ensureModelCatalog(ctx context.Context, request Request) string {
