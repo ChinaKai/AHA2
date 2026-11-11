@@ -262,6 +262,64 @@ func TestOwnerPetControlAPI(t *testing.T) {
 	response.Body.Close()
 }
 
+func TestPetNavigationClaimRequiresOwnerAndConsumesOnce(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	secretStore, err := secrets.Open(filepath.Join(t.TempDir(), "secrets.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	appService := app.NewService(database, secretStore, app.StubExecutor{})
+	server := httptest.NewServer(New(Config{Store: database, Auth: auth.NewService(database, "setup-test", time.Hour), App: appService}).Handler())
+	defer server.Close()
+	queued, err := appService.QueuePetNavigation(ctx, "task_external")
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoint := server.URL + "/api/v1/pet/navigation/claim"
+
+	anonymous := requestJSON(t, &http.Client{}, http.MethodPost, endpoint, map[string]any{"session_id": "anon"}, "")
+	if anonymous.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("anonymous claim=%d", anonymous.StatusCode)
+	}
+	anonymous.Body.Close()
+
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	csrf := registerOwner(t, client, server.URL)
+	claim := func(session string) (int, int) {
+		t.Helper()
+		response := requestJSON(t, client, http.MethodPost, endpoint, map[string]any{"session_id": session}, csrf)
+		var payload struct {
+			OK      bool `json:"ok"`
+			Actions []struct {
+				ID     string `json:"id"`
+				TaskID string `json:"task_id"`
+			} `json:"actions"`
+			Expired int `json:"expired"`
+		}
+		decodeResponse(t, response, &payload)
+		if response.StatusCode != http.StatusOK || !payload.OK {
+			t.Fatalf("claim %s=%d %#v", session, response.StatusCode, payload)
+		}
+		if len(payload.Actions) == 1 && payload.Actions[0].ID != queued.ID {
+			t.Fatalf("claimed id=%q, want %q", payload.Actions[0].ID, queued.ID)
+		}
+		return len(payload.Actions), payload.Expired
+	}
+	if actions, expired := claim("web-a"); actions != 1 || expired != 0 {
+		t.Fatalf("first claim actions=%d expired=%d", actions, expired)
+	}
+	if actions, expired := claim("web-b"); actions != 0 || expired != 0 {
+		t.Fatalf("second claim actions=%d expired=%d", actions, expired)
+	}
+}
+
 func TestPetResetRequiresTypedConfirmation(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

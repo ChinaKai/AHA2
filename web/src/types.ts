@@ -1197,6 +1197,17 @@ export interface PetBrainAction {
   points?: Array<{x: number; y: number} | [number, number]>;
   duration_ms?: number;
   active?: boolean;
+  navigation_id?: string;
+}
+
+export interface PetNavigationAction {
+  id: string;
+  task_id: string;
+  status?: string;
+  created_at?: string;
+  expires_at?: string;
+  consumed_at?: string;
+  consumed_by?: string;
 }
 
 export interface PetLayoutRect {

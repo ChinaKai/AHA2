@@ -185,6 +185,12 @@ func (s *Store) Task(ctx context.Context, id string) (domain.Task, error) {
 	return scanTask(s.db.QueryRowContext(ctx, `SELECT `+taskColumns+` FROM tasks WHERE id=?`, id))
 }
 
+// TaskByCode looks a Task up by its human-facing code (task-001). Pet tools
+// may carry either the internal id or the code the owner sees in the Web UI.
+func (s *Store) TaskByCode(ctx context.Context, code string) (domain.Task, error) {
+	return scanTask(s.db.QueryRowContext(ctx, `SELECT `+taskColumns+` FROM tasks WHERE code=?`, code))
+}
+
 func (s *Store) UpdateTaskAgentCapabilities(ctx context.Context, taskID string, capabilities map[string]bool, updatedAt string) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE tasks SET agent_capabilities_json=?,updated_at=? WHERE id=?`, encodeJSON(capabilities), updatedAt, taskID)
 	return err

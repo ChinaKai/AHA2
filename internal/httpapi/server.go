@@ -275,6 +275,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/pet/activity", s.withAuth(http.HandlerFunc(s.ownerPetActivity)))
 	mux.Handle("GET /api/v1/pet/prompts", s.withAuth(http.HandlerFunc(s.ownerPetPrompts)))
 	mux.Handle("POST /api/v1/pet/control", s.withAuth(http.HandlerFunc(s.controlOwnerPet)))
+	mux.Handle("POST /api/v1/pet/navigation/claim", s.withAuth(http.HandlerFunc(s.claimOwnerPetNavigation)))
 	mux.Handle("GET /api/v1/pet/approvals/pending-count", s.withAuth(http.HandlerFunc(s.petPendingApprovalCount)))
 	mux.Handle("GET /api/v1/pet/workbench", s.withAuth(http.HandlerFunc(s.petWorkbench)))
 	mux.Handle("PUT /api/v1/pet/workbench/core/{name}", s.withAuth(s.savePetWorkbenchDocument("core")))

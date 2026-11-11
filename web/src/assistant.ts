@@ -939,6 +939,37 @@ async function maybeRunPetBrain(force = false): Promise<void> {
   }
 }
 
+let webSessionID = "";
+
+function petWebSessionID(): string {
+  if (!webSessionID) {
+    webSessionID = "web_" + Math.random().toString(36).slice(2) + Date.now().toString(36);
+  }
+  return webSessionID;
+}
+
+// open_task is persisted server-side and claimed here. The claim is atomic, so
+// several open tabs can receive the same live event while only one navigates.
+// A queued request that arrives before any tab connects is claimed on the next
+// SSE (re)connect or when the page becomes visible again.
+async function claimPetNavigation(ids?: string[]): Promise<void> {
+  try {
+    const payload: {session_id: string; ids?: string[]} = {session_id: petWebSessionID()};
+    if (ids && ids.length > 0) payload.ids = ids;
+    const result = await api.claimPetNavigation(payload);
+    for (const navigation of result.actions || []) {
+      if (!navigation.task_id) continue;
+      window.dispatchEvent(new CustomEvent("aha:assistant-open-task", {detail: navigation.task_id}));
+    }
+  } catch {
+    // Keep the pending row server-side; the next reconnect retries the claim.
+  }
+}
+
+export function resumePetNavigation(): void {
+  void claimPetNavigation();
+}
+
 function applyPetControl(payload: {say?: string; actions?: PetBrainAction[]}): void {
   if (payload.say) showPetSpeech(payload.say);
   for (const action of (payload.actions || []).slice(0, 3)) applyPetBrainAction(action, true);
@@ -970,7 +1001,10 @@ function applyPetBrainAction(action: PetBrainAction, forceMove = false): void {
       if (action.points && action.points.length >= 2) walkPath(action.points, action.duration_ms || 6000);
       break;
     case "open_task":
-      if (action.task) window.dispatchEvent(new CustomEvent("aha:assistant-open-task", {detail: action.task}));
+      if (action.task) {
+        if (action.navigation_id) void claimPetNavigation([action.navigation_id]);
+        else window.dispatchEvent(new CustomEvent("aha:assistant-open-task", {detail: action.task}));
+      }
       break;
     case "mood":
       if (action.name) pet.dataset.mood = action.name;

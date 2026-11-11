@@ -141,6 +141,27 @@ func (s *Server) ownerPetBrain(writer http.ResponseWriter, request *http.Request
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "say": result.Say, "actions": result.Actions})
 }
 
+func (s *Server) claimOwnerPetNavigation(writer http.ResponseWriter, request *http.Request) {
+	var input struct {
+		SessionID string   `json:"session_id"`
+		IDs       []string `json:"ids"`
+	}
+	if err := decodeJSON(request, &input); err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_json")
+		return
+	}
+	sessionID := strings.TrimSpace(input.SessionID)
+	if len([]rune(sessionID)) > 100 {
+		sessionID = string([]rune(sessionID)[:100])
+	}
+	actions, expired, err := s.app.ClaimPetNavigation(request.Context(), sessionID, input.IDs)
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, "pet_navigation_claim_failed")
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "actions": actions, "expired": expired})
+}
+
 func (s *Server) ownerPetEvents(writer http.ResponseWriter, request *http.Request) {
 	flusher, ok := writer.(http.Flusher)
 	if !ok {

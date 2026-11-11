@@ -41,6 +41,7 @@ import type {
   PetBrainResult,
   PetLayout,
   PetEvent,
+  PetNavigationAction,
   PetPrompts,
   PetResetResult,
   Project,
@@ -1086,6 +1087,10 @@ class APIClient {
   }
   controlPet(payload: {say: string; actions: Array<{type: string; name?: string; zone?: string; task?: string}>}): Promise<{ok: boolean; say: string; actions: unknown[]}> {
     return this.request("/api/v1/pet/control", {method: "POST", body: JSON.stringify(payload)});
+  }
+
+  claimPetNavigation(payload: {session_id: string; ids?: string[]}): Promise<{ok: boolean; actions: PetNavigationAction[]; expired: number}> {
+    return this.request("/api/v1/pet/navigation/claim", {method: "POST", body: JSON.stringify(payload)});
   }
 
   petBrain(payload: {page: string; idle_seconds: number; device_id: string; layout?: PetLayout}): Promise<PetBrainResult> {

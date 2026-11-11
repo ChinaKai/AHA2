@@ -3551,5 +3551,31 @@ func (s *Store) migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(129, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
 		return fmt.Errorf("record schema v129: %w", err)
 	}
+	var hasV130 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=130)`).Scan(&hasV130)
+	if !hasV130 {
+		// Queued pet navigation from a background Turn. Timestamps are integer
+		// milliseconds so expiry comparisons stay correct without depending on
+		// variable-width RFC3339 strings.
+		for _, statement := range []string{
+			`CREATE TABLE IF NOT EXISTS pet_navigation_actions (
+				id TEXT PRIMARY KEY,
+				task_id TEXT NOT NULL,
+				status TEXT NOT NULL,
+				created_at_ms INTEGER NOT NULL,
+				expires_at_ms INTEGER NOT NULL,
+				consumed_at_ms INTEGER NOT NULL DEFAULT 0,
+				consumed_by TEXT NOT NULL DEFAULT ''
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_pet_navigation_queued ON pet_navigation_actions(status,expires_at_ms)`,
+		} {
+			if _, err := s.db.ExecContext(ctx, statement); err != nil {
+				return fmt.Errorf("apply schema v130: %w", err)
+			}
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(130, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v130: %w", err)
+	}
 	return nil
 }

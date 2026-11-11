@@ -56,11 +56,21 @@ type PetBrainAction struct {
 	Turns      float64    `json:"turns,omitempty"`
 	DurationMS int        `json:"duration_ms,omitempty"`
 	Active     bool       `json:"active,omitempty"`
+	// NavigationID identifies the persisted navigation request for open_task.
+	// Web clients must claim it before navigating, so one action reaches only
+	// one session even when several tabs receive the live event.
+	NavigationID string `json:"navigation_id,omitempty"`
 }
 
 type PetBrainResult struct {
 	Say     string           `json:"say"`
 	Actions []PetBrainAction `json:"actions"`
+	// Navigation* describe the persisted open_task request. They are set only
+	// when an action was queued, so callers can report the queued state instead
+	// of assuming a fire-and-forget broadcast succeeded.
+	NavigationID        string `json:"navigation_id,omitempty"`
+	NavigationStatus    string `json:"navigation_status,omitempty"`
+	NavigationExpiresAt string `json:"navigation_expires_at,omitempty"`
 }
 
 var petMoods = map[string]bool{"neutral": true, "happy": true, "worried": true, "angry": true, "sad": true, "sleepy": true}
@@ -349,8 +359,8 @@ func petActionsFromToolCalls(calls []gateway.ChatToolCall, limit int) []PetBrain
 			var args struct {
 				Task string `json:"task"`
 			}
-			if json.Unmarshal([]byte(call.Arguments), &args) == nil && strings.HasPrefix(args.Task, "task-") {
-				action = PetBrainAction{Type: "open_task", Task: args.Task}
+			if json.Unmarshal([]byte(call.Arguments), &args) == nil && isPetTaskReference(args.Task) {
+				action = PetBrainAction{Type: "open_task", Task: strings.TrimSpace(args.Task)}
 			}
 		case "pet_sleep":
 			action = PetBrainAction{Type: "sleep"}
@@ -495,7 +505,7 @@ func parsePetBrain(text string) PetBrainResult {
 				result.Actions = append(result.Actions, action)
 			}
 		case "open_task":
-			if strings.HasPrefix(action.Task, "task-") {
+			if isPetTaskReference(action.Task) {
 				result.Actions = append(result.Actions, action)
 			}
 		}
@@ -709,17 +719,37 @@ func (s *Service) ControlOwnerPet(ctx context.Context, input PetControlRequest) 
 				result.Actions = append(result.Actions, action)
 			}
 		case "open_task":
-			if strings.HasPrefix(action.Task, "task-") {
-				if _, err := s.store.Task(ctx, action.Task); err == nil {
-					result.Actions = append(result.Actions, action)
-				}
+			// Accept the internal id and the human-facing code; a background
+			// Turn usually sees the code in open_tasks while the Web UI routes
+			// by the internal id.
+			task, err := s.resolvePetOpenTask(ctx, action.Task)
+			if err != nil {
+				return PetBrainResult{}, err
 			}
+			action.Task = task.ID
+			result.Actions = append(result.Actions, action)
 		case "sleep", "wake", "thinking":
 			result.Actions = append(result.Actions, action)
 		}
 	}
 	if result.Say == "" && len(result.Actions) == 0 {
 		return PetBrainResult{}, fmt.Errorf("没有可执行的宠物动作")
+	}
+	// Persist open_task before publishing. A connected Web client still gets
+	// the live event, but a background Turn with no client attached now leaves
+	// a durable, single-use navigation request instead of losing the action.
+	for i := range result.Actions {
+		if result.Actions[i].Type != "open_task" {
+			continue
+		}
+		queued, err := s.QueuePetNavigation(ctx, result.Actions[i].Task)
+		if err != nil {
+			return PetBrainResult{}, fmt.Errorf("排队打开 Task 失败：%w", err)
+		}
+		result.Actions[i].NavigationID = queued.ID
+		result.NavigationID = queued.ID
+		result.NavigationStatus = queued.Status
+		result.NavigationExpiresAt = queued.ExpiresAt.Format(time.RFC3339)
 	}
 	s.hub.Publish("", domain.Event{
 		ID: domain.NewID("pet_event"), AggregateType: "pet", AggregateID: "owner_pet",
@@ -2900,6 +2930,24 @@ func (s *Service) PetMCPTool(ctx context.Context, name string, args json.RawMess
 	if err != nil {
 		return "", err
 	}
+	if result.NavigationID != "" {
+		taskID := ""
+		for _, action := range result.Actions {
+			if action.Type == "open_task" {
+				taskID = action.Task
+				break
+			}
+		}
+		data, _ := json.Marshal(map[string]any{
+			"ok":            true,
+			"status":        result.NavigationStatus,
+			"navigation_id": result.NavigationID,
+			"task_id":       taskID,
+			"expires_at":    result.NavigationExpiresAt,
+			"message":       "已排队：Web 前端连接后会打开一次，不要重复调用",
+		})
+		return string(data), nil
+	}
 	data, _ := json.Marshal(result.Actions)
 	return "ok " + string(data), nil
 }
@@ -2978,7 +3026,7 @@ func assistantPetTools() []gateway.ChatTool {
 			"type": "object", "properties": map[string]any{"mood": map[string]any{"type": "string", "enum": []string{"neutral", "happy", "worried", "angry", "sad", "sleepy"}}},
 			"required": []string{"mood"},
 		}},
-		{Name: "pet_open_task", Description: "在网页中打开一个 Task（只读导航）", Parameters: map[string]any{
+		{Name: "pet_open_task", Description: "在网页中打开一个 Task（只读导航）；task 可传 Task ID 或 task-编号，后台调用会排队到前端连接后只执行一次", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{"task": map[string]any{"type": "string"}}, "required": []string{"task"},
 		}},
 		{Name: "pet_thinking", Description: "控制宠物头顶的思考问号（true 显示 / false 隐藏）", Parameters: map[string]any{

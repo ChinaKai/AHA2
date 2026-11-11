@@ -338,11 +338,14 @@ func (s *Service) AskOwnerAssistantWithLayout(ctx context.Context, content strin
 				toolEvents = append(toolEvents, AssistantToolEvent{Name: call.Name, Status: "error", Message: "参数未通过校验", Arguments: call.Arguments})
 				continue
 			}
-			if _, err := s.ControlOwnerPet(ctx, PetControlRequest{Actions: []PetBrainAction{action}, Actor: "model"}); err != nil {
+			controlled, err := s.ControlOwnerPet(ctx, PetControlRequest{Actions: []PetBrainAction{action}, Actor: "model"})
+			if err != nil {
 				toolEvents = append(toolEvents, AssistantToolEvent{Name: call.Name, Status: "error", Message: err.Error(), Arguments: call.Arguments})
 				continue
 			}
-			replyActions = append(replyActions, action)
+			// Use the normalized actions: open_task carries its navigation id and
+			// a code may have been resolved to the internal Task id.
+			replyActions = append(replyActions, controlled.Actions...)
 			toolEvents = append(toolEvents, AssistantToolEvent{Name: call.Name, Status: "ok", Message: detail, Arguments: call.Arguments})
 		}
 		if strings.TrimSpace(replyText) == "" {

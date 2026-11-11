@@ -115,3 +115,23 @@ type PetEvent struct {
 	Detail   string    `json:"detail"`
 	Status   string    `json:"status"`
 }
+
+const (
+	PetNavigationQueued   = "queued"
+	PetNavigationConsumed = "consumed"
+	PetNavigationExpired  = "expired"
+)
+
+// PetNavigationAction is a persisted "open this Task in the Web UI" request.
+// Background Turns have no Web client to receive the live event, so the
+// request waits with a TTL until a Web session atomically claims it. A claim
+// consumes the row; the same action is never replayed to another session.
+type PetNavigationAction struct {
+	ID         string    `json:"id"`
+	TaskID     string    `json:"task_id"`
+	Status     string    `json:"status"`
+	CreatedAt  time.Time `json:"created_at"`
+	ExpiresAt  time.Time `json:"expires_at"`
+	ConsumedAt time.Time `json:"consumed_at,omitempty"`
+	ConsumedBy string    `json:"consumed_by,omitempty"`
+}

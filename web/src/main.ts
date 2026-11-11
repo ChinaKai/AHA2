@@ -1,6 +1,6 @@
 import {api, setAPIRequestObserver} from "./api.js";
 import type {APIRequestSample} from "./api.js";
-import {handlePetStreamEvent, mountAssistant, showPetSettings, notifyPetTaskIdle, notifyPetTaskReply, notifyPetTaskThinking, setAssistantVisible} from "./assistant.js";
+import {handlePetStreamEvent, mountAssistant, showPetSettings, notifyPetTaskIdle, notifyPetTaskReply, notifyPetTaskThinking, resumePetNavigation, setAssistantVisible} from "./assistant.js";
 import {bindPetDocEditorButtons, createPetWorkbenchLoader, createPetWorkbenchPageKeeper, PET_APPROVAL_MAX_LIMIT, petApprovalMatches, petApprovalPage, renderPetApprovalLoadMore, renderPetInspectionSummary, renderPetWorkbenchLoadError, swapPetWorkbenchPage} from "./pet_workbench.js";
 import type {PetWorkbenchPageBinding} from "./pet_workbench.js";
 import {renderConversationList} from "./conversation_ui.js";
@@ -6432,6 +6432,7 @@ async function performListRefresh(): Promise<void> {
 // A hidden page pauses refresh traffic; on return, one coalesced catch-up runs.
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) return;
+  resumePetNavigation();
   if (listRefreshScheduler.pending()) listRefreshScheduler.request();
   if (!secondaryPrefetchDone) prefetchSecondaryData();
 });
@@ -6498,6 +6499,9 @@ function openGlobalEvents(): void {
   globalEvents.addEventListener("open", () => {
     refreshListData();
     void refreshPetPendingApprovalCount(true);
+    // A background Turn may have queued an open_task while no tab was
+    // connected; claim it now that this session has a live event stream.
+    resumePetNavigation();
   });
 }
 
