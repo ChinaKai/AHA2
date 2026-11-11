@@ -32,9 +32,12 @@ func codexWindowFixture(t *testing.T, transcriptWindow int) windowFixture {
 	t.Cleanup(func() { database.Close() })
 	now := windowBaseTime
 	// A Codex session with no official account keeps its rollout under the
-	// operator's own ~/.codex, so the fixture has to own that home.
+	// operator's own ~/.codex, so the fixture has to own that home. The product
+	// resolves it with os.UserHomeDir, which reads HOME on Unix but USERPROFILE
+	// on Windows; redirect both so the transcript lands where the page looks.
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	project := domain.Project{ID: "project-codex", Name: "Codex", ProjectType: "folder"}
 	if err := database.CreateProject(ctx, project); err != nil {
 		t.Fatal(err)
