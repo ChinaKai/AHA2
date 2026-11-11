@@ -162,6 +162,11 @@ func TestLocalFileAtomicWriteReplacesAndCleansTemp(t *testing.T) {
 	if err := writeLocalFileAtomic(target, "first"); err != nil {
 		t.Fatal(err)
 	}
+	// Simulate a process killed before the rename: the next write must remove
+	// the deterministic temp instead of leaving the stale secret behind.
+	if err := os.WriteFile(target+".tmp", []byte("stale-temp-secret-4444"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := writeLocalFileAtomic(target, "second"); err != nil {
 		t.Fatal(err)
 	}
@@ -172,9 +177,8 @@ func TestLocalFileAtomicWriteReplacesAndCleansTemp(t *testing.T) {
 	if string(content) != "second" {
 		t.Fatalf("atomic replace produced %q", content)
 	}
-	matches, err := filepath.Glob(filepath.Join(dir, ".aha2-tmp-*"))
-	if err != nil || len(matches) != 0 {
-		t.Fatalf("temporary files were not cleaned up: %v %v", matches, err)
+	if _, err := os.Stat(target + ".tmp"); !os.IsNotExist(err) {
+		t.Fatalf("deterministic temp file still exists: %v", err)
 	}
 	if runtime.GOOS != "windows" {
 		info, err := os.Stat(target)
@@ -184,6 +188,96 @@ func TestLocalFileAtomicWriteReplacesAndCleansTemp(t *testing.T) {
 		if info.Mode().Perm() != 0o600 {
 			t.Fatalf("atomic file mode = %o, want 600", info.Mode().Perm())
 		}
+	}
+}
+
+func TestClaudeStaleTempRemovedOnNextRun(t *testing.T) {
+	request := Request{Runner: workspace.LocalRunner{}, WorkDir: t.TempDir()}
+	path, local := claudeMCPConfigPath(request)
+	if !local {
+		t.Fatal("LocalRunner was not treated as local")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	staleTemp := path + ".tmp"
+	if err := os.WriteFile(staleTemp, []byte(`{"mcpServers":{"x":{"env":{"BOARD_TOKEN":"stale-temp-secret-3333"}}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	file, err := writeClaudeMCPConfig(context.Background(), request, `{"mcpServers":{}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(staleTemp); !os.IsNotExist(err) {
+		t.Fatalf("stale temp survived the next write: %v", err)
+	}
+	// A temp created after the write (as if the process was killed while
+	// another writer was active) must also be removed by cleanup.
+	if err := os.WriteFile(staleTemp, []byte("post-write-secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.cleanup(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(staleTemp); !os.IsNotExist(err) {
+		t.Fatalf("cleanup left the temp file behind: %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("cleanup left the config behind: %v", err)
+	}
+}
+
+func TestCodexStaleTempRemovedOnNextPrepare(t *testing.T) {
+	home := t.TempDir()
+	configPath := filepath.Join(home, "config.toml")
+	const original = "cli_auth_credentials_store = \"file\"\n"
+	if err := os.WriteFile(configPath, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	backupPath := configPath + codexMCPConfigBackupSuffix
+	staleTemps := []string{configPath + ".tmp", backupPath + ".tmp"}
+	for _, temp := range staleTemps {
+		if err := os.WriteFile(temp, []byte("stale-temp-secret-5555"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	request := Request{
+		Runner:      workspace.LocalRunner{},
+		Environment: map[string]string{"CODEX_HOME": home},
+	}
+	file, err := prepareCodexMCPConfig(context.Background(), request, codexMCPConfigTOML([]MCPServer{{
+		Name: "mcp_test", Transport: "stdio", Command: "node",
+		Env: map[string]string{"BOARD_TOKEN": mcpTestSecret},
+	}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, temp := range staleTemps {
+		if _, err := os.Stat(temp); !os.IsNotExist(err) {
+			t.Fatalf("stale temp %s survived the next prepare: %v", temp, err)
+		}
+	}
+	// Simulate temps left by a crash during cleanup, then verify cleanup
+	// removes them too.
+	for _, temp := range staleTemps {
+		if err := os.WriteFile(temp, []byte("post-prepare-secret"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := file.cleanup(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, temp := range staleTemps {
+		if _, err := os.Stat(temp); !os.IsNotExist(err) {
+			t.Fatalf("cleanup left temp %s behind: %v", temp, err)
+		}
+	}
+	restored, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(restored) != original {
+		t.Fatalf("original config was not restored: %q", restored)
 	}
 }
 

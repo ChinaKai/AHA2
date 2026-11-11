@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	pathpkg "path"
@@ -82,17 +83,28 @@ func writeClaudeMCPConfig(ctx context.Context, request Request, content string) 
 	return &mcpSecretFile{request: request, path: path, local: local}, nil
 }
 
-// cleanup removes the generated file even when the run context was cancelled.
+// cleanup removes the generated file and its deterministic temporary file even
+// when the run context was cancelled. A partial failure is reported after both
+// paths have been attempted.
 func (file *mcpSecretFile) cleanup(ctx context.Context) error {
 	if file == nil || file.path == "" {
 		return nil
 	}
-	if file.local {
-		return removeLocalFile(file.path)
-	}
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
-	return workspace.RemoveRemoteFile(cleanupCtx, file.request.Runner, file.path)
+	var cleanupErrs []error
+	for _, path := range []string{file.path, file.path + ".tmp"} {
+		var err error
+		if file.local {
+			err = removeLocalFile(path)
+		} else {
+			err = workspace.RemoveRemoteFile(cleanupCtx, file.request.Runner, path)
+		}
+		if err != nil {
+			cleanupErrs = append(cleanupErrs, err)
+		}
+	}
+	return errors.Join(cleanupErrs...)
 }
 
 // codexMCPConfigFile is the per-session CODEX_HOME/config.toml with the MCP
@@ -125,6 +137,15 @@ func prepareCodexMCPConfig(ctx context.Context, request Request, content string)
 	local := isLocalRunner(request.Runner)
 	path := codexConfigPath(home, local)
 	backupPath := path + codexMCPConfigBackupSuffix
+	// A write killed between the deterministic temp creation and the rename
+	// leaves <target>.tmp with the generated config. Remove both stale temps
+	// before reading or restoring anything, and fail closed if that cleanup
+	// cannot be done.
+	for _, temp := range []string{path + ".tmp", backupPath + ".tmp"} {
+		if err := removeExecutionFile(ctx, request, temp, local); err != nil {
+			return nil, fmt.Errorf("remove stale Codex config temp %s: %w", temp, err)
+		}
+	}
 	if err := recoverCodexConfigBackup(ctx, request, path, backupPath, local); err != nil {
 		return nil, err
 	}
@@ -241,27 +262,44 @@ func (file *codexMCPConfigFile) cleanup(ctx context.Context) error {
 	}
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
+	var cleanupErrs []error
+	// Always remove the deterministic temp files, even when the restore below
+	// conflicts: a killed write may have left the generated config there.
+	for _, temp := range []string{file.path + ".tmp", file.backupPath + ".tmp"} {
+		if err := removeExecutionFile(cleanupCtx, file.request, temp, file.local); err != nil {
+			cleanupErrs = append(cleanupErrs, fmt.Errorf("remove Codex config temp: %w", err))
+		}
+	}
 	current, exists, err := readExecutionFile(cleanupCtx, file.request, file.path, file.local)
 	if err != nil {
-		return fmt.Errorf("read Codex config for restore: %w", err)
+		cleanupErrs = append(cleanupErrs, fmt.Errorf("read Codex config for restore: %w", err))
+		return errors.Join(cleanupErrs...)
 	}
 	if exists && markerLineIndex(current, codexMCPConfigBegin) < 0 {
-		return fmt.Errorf("Codex config was changed during the run; generated MCP block is missing and the original was left at %s", file.backupPath)
+		cleanupErrs = append(cleanupErrs, fmt.Errorf("Codex config was changed during the run; generated MCP block is missing and the original was left at %s", file.backupPath))
+		return errors.Join(cleanupErrs...)
 	}
+	restoreFailed := false
 	switch {
 	case file.existed:
 		if err := writeExecutionFileAtomic(cleanupCtx, file.request, file.path, file.original, file.local); err != nil {
-			return fmt.Errorf("restore Codex config: %w", err)
+			cleanupErrs = append(cleanupErrs, fmt.Errorf("restore Codex config: %w", err))
+			restoreFailed = true
 		}
 	case exists:
 		if err := removeExecutionFile(cleanupCtx, file.request, file.path, file.local); err != nil {
-			return fmt.Errorf("remove generated Codex config: %w", err)
+			cleanupErrs = append(cleanupErrs, fmt.Errorf("remove generated Codex config: %w", err))
+			restoreFailed = true
 		}
 	}
-	if err := removeExecutionFile(cleanupCtx, file.request, file.backupPath, file.local); err != nil {
-		return fmt.Errorf("remove Codex config backup: %w", err)
+	if restoreFailed {
+		// Keep the backup for the next run's recovery.
+		return errors.Join(cleanupErrs...)
 	}
-	return nil
+	if err := removeExecutionFile(cleanupCtx, file.request, file.backupPath, file.local); err != nil {
+		cleanupErrs = append(cleanupErrs, fmt.Errorf("remove Codex config backup: %w", err))
+	}
+	return errors.Join(cleanupErrs...)
 }
 
 func readExecutionFile(ctx context.Context, request Request, path string, local bool) (string, bool, error) {
@@ -292,8 +330,10 @@ func removeExecutionFile(ctx context.Context, request Request, path string, loca
 	return workspace.RemoveRemoteFile(ctx, request.Runner, path)
 }
 
-// writeLocalFileAtomic writes through a temporary file in the target directory
-// and renames it into place, so a crash cannot leave a truncated config.
+// writeLocalFileAtomic writes through a deterministic temporary file
+// (<target>.tmp) and renames it into place, so a crash cannot leave a
+// truncated config. A stale temp from a process killed before the rename is
+// removed first, which is what makes it recoverable by the next run.
 func writeLocalFileAtomic(path, content string) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -302,11 +342,14 @@ func writeLocalFileAtomic(path, content string) error {
 	if runtime.GOOS != "windows" {
 		_ = os.Chmod(dir, 0o700)
 	}
-	file, err := os.CreateTemp(dir, ".aha2-tmp-*")
+	tmp := path + ".tmp"
+	if err := removeLocalFile(tmp); err != nil {
+		return err
+	}
+	file, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
 	}
-	tmp := file.Name()
 	if err := file.Chmod(0o600); err != nil {
 		_ = file.Close()
 		_ = os.Remove(tmp)
