@@ -1,10 +1,68 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param([string]$RepoPath = (Split-Path -Parent $PSScriptRoot))
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
 $repo = [IO.Path]::GetFullPath($RepoPath)
+
+# Windows PowerShell 5.1 reads a script without a UTF-8 BOM using the system
+# ANSI code page. Every checked-in script that 5.1 may execute must therefore
+# start with EF BB BF, and the parser must accept it. (internal/desktop/*.ps1
+# are passed as -EncodedCommand strings, not read from disk by 5.1.)
+function Assert-ParsesCleanly([string]$Path) {
+  $tokens = $null
+  $errors = $null
+  [void][System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$tokens, [ref]$errors)
+  if ($errors.Count -gt 0) {
+    throw ("PowerShell parser rejected {0}: {1}" -f $Path, (($errors | ForEach-Object { $_.Message }) -join "; "))
+  }
+}
+$windowsScripts = @(
+  Get-ChildItem -Path (Join-Path $repo "scripts\*.ps1") -File
+  Get-ChildItem -Path (Join-Path $repo "installer\windows\*.ps1") -File
+)
+foreach ($scriptFile in $windowsScripts) {
+  $bytes = [IO.File]::ReadAllBytes($scriptFile.FullName)
+  if ($bytes.Length -lt 3 -or $bytes[0] -ne 0xEF -or $bytes[1] -ne 0xBB -or $bytes[2] -ne 0xBF) {
+    throw ("{0} must be saved as UTF-8 with a BOM; Windows PowerShell 5.1 reads a BOM-less file as ANSI." -f $scriptFile.FullName)
+  }
+  Assert-ParsesCleanly $scriptFile.FullName
+}
+
+# Regression for the 0.5.471 failure: the same text parses with a BOM and must
+# not parse when 5.1's ANSI decoding is applied. The negative half is skipped
+# only on a host whose ANSI code page is already UTF-8, where the BOM is moot.
+$bomlessRoot = Join-Path ([IO.Path]::GetTempPath()) ("aha2-bomless-selftest-" + [Guid]::NewGuid().ToString("N"))
+try {
+  New-Item -ItemType Directory -Path $bomlessRoot -Force | Out-Null
+  $utf8NoBom = [Text.UTF8Encoding]::new($false)
+  # First line breaks under a single-byte ANSI code page (0x93 becomes a smart
+  # quote); second line breaks under a DBCS code page (the trailing byte pairs
+  # with the closing brace and swallows it).
+  $fixtureText = "Write-Output 专`nif (`$true) { Write-Output 中}"
+  $fixtureBytes = $utf8NoBom.GetBytes($fixtureText)
+  $withBomPath = Join-Path $bomlessRoot "with-bom.ps1"
+  $withBomBytes = [byte[]]::new(3 + $fixtureBytes.Length)
+  $withBomBytes[0] = 0xEF; $withBomBytes[1] = 0xBB; $withBomBytes[2] = 0xBF
+  [Array]::Copy($fixtureBytes, 0, $withBomBytes, 3, $fixtureBytes.Length)
+  [IO.File]::WriteAllBytes($withBomPath, $withBomBytes)
+  Assert-ParsesCleanly $withBomPath
+  if ([Text.Encoding]::Default.CodePage -ne 65001) {
+    $ansiText = [Text.Encoding]::Default.GetString($fixtureBytes)
+    $tokens = $null
+    $errors = $null
+    [void][System.Management.Automation.Language.Parser]::ParseInput($ansiText, [ref]$tokens, [ref]$errors)
+    if ($errors.Count -eq 0) {
+      throw "A BOM-less UTF-8 script decoded with the ANSI code page unexpectedly parsed; the BOM regression test is ineffective."
+    }
+  } else {
+    Write-Host "Skipping the BOM-less negative parse check: the host ANSI code page is UTF-8."
+  }
+} finally {
+  Remove-Item -LiteralPath $bomlessRoot -Recurse -Force -ErrorAction SilentlyContinue
+}
+
 $localAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
 $tempRoot = if ([string]::IsNullOrWhiteSpace($env:TEMP)) { Join-Path $localAppData "Temp" } else { $env:TEMP }
 New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
@@ -121,7 +179,7 @@ try {
 
 $userDeployPath = Join-Path $repo "scripts\deploy-windows-user.ps1"
 $userDeploy = Get-Content -Raw -Encoding UTF8 -LiteralPath $userDeployPath
-foreach ($contract in @("ProviderPath", "GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)", "-WorkingDirectory `$install", "AllowCustomUserWritableInstallDir", "UpdateExistingInstallInPlace", "existing-install-in-place", "Custom install directory is not writable", "WriteAccessVerified", "-PerUser", "ElevationRequired=`$false", "AHA2-Setup-User-x64.exe", "Wait-AHA2Health", "Get-FileHash", "AHA2 User", "AHA2 User Update", "DetachedWorker", "New-ScheduledTaskAction", "RunLevel Limited", "Stop-AHA2ProcessTrees", "System32\taskkill.exe", "`$taskkillExecutable", "`$global:LASTEXITCODE = 0", "/T", "/SKIPUSERTASK=1", "user-deploy-result.json", "stagedInstaller", "Unblock-File", "Start-Process -FilePath `$stagedInstaller", "-SelfTest", "StopTimeoutSeconds", "Test-AHA2ExclusiveFileProbe", "Set-AHA2StagedFileAtomic", "Restore-AHA2DatabaseFromBackup", "PRAGMA quick_check", "winsqlite3.dll", "LockedFiles", "BackupSHA256", "RollbackVerified", "rollback_health", "BackupPresent", "Get-AHA2FileRollbackAction", "Get-AHA2ProcessList", "EnumerationError", "Set-AHA2InstalledFile", "Get-AHA2DeploymentPreflight", "Get-AHA2VolumeChecks", "Get-AHA2PreflightRequest", "Get-AHA2PreflightRequirementText", "Invoke-AHA2DeploymentPreflight", "Get-AHA2VolumeFreeBytes", "FreeBytes", "RequiredBytes", "Volumes", "aha2TempSpaceAllowanceBytes")) {
+foreach ($contract in @("ProviderPath", "GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)", "-WorkingDirectory `$install", "AllowCustomUserWritableInstallDir", "UpdateExistingInstallInPlace", "existing-install-in-place", "Custom install directory is not writable", "WriteAccessVerified", "-PerUser", "ElevationRequired=`$false", "AHA2-Setup-User-x64.exe", "Wait-AHA2Health", "Get-FileHash", "AHA2 User", "AHA2 User Update", "DetachedWorker", "New-ScheduledTaskAction", "RunLevel Limited", "Stop-AHA2ProcessTrees", "System32\taskkill.exe", "`$taskkillExecutable", "`$global:LASTEXITCODE = 0", "/T", "/SKIPUSERTASK=1", "user-deploy-result.json", "stagedInstaller", "Unblock-File", "Start-Process -FilePath `$stagedInstaller", "-SelfTest", "StopTimeoutSeconds", "Test-AHA2ExclusiveFileProbe", "Set-AHA2StagedFileAtomic", "Restore-AHA2DatabaseFromBackup", "PRAGMA quick_check", "winsqlite3.dll", "LockedFiles", "BackupSHA256", "RollbackVerified", "rollback_health", "BackupPresent", "Get-AHA2FileRollbackAction", "Get-AHA2ProcessList", "EnumerationError", "Set-AHA2InstalledFile", "Get-AHA2DeploymentPreflight", "Get-AHA2VolumeChecks", "Get-AHA2PreflightRequest", "Get-AHA2PreflightRequirementText", "Invoke-AHA2DeploymentPreflight", "Get-AHA2VolumeFreeBytes", "FreeBytes", "RequiredBytes", "Volumes", "aha2TempSpaceAllowanceBytes", "Copy-AHA2DatabaseBackup", "databaseBackupFileNames", "Get-AHA2ScriptEncodingState", "Assert-AHA2WindowsPowerShellScriptEncoding", "Resolve-AHA2DetachedHandoff", "Assert-AHA2DetachedWorkerAlive", "HandoffTimeoutSeconds")) {
     if (-not $userDeploy.Contains($contract)) {
         throw "Per-user deployment contract is missing: $contract"
     }
@@ -163,6 +221,43 @@ $stopBeforeBackupIndex = $userDeploy.IndexOf('Stop-AHA2ProcessTrees', $taskSnaps
 $databaseBackupIndex = $userDeploy.IndexOf('$state.Stage = "backup"', $taskSnapshotIndex)
 if ($stopBeforeBackupIndex -lt 0 -or $databaseBackupIndex -lt 0 -or $stopBeforeBackupIndex -gt $databaseBackupIndex) {
     throw "Per-user deployment must stop and verify the complete AHA2 process tree before copying SQLite backup files."
+}
+$backupListMarker = '$databaseBackupFileNames = @("aha2.db", "aha2.db-wal")'
+if (-not $userDeploy.Contains($backupListMarker)) {
+    throw "Per-user deployment must limit database backups to aha2.db and aha2.db-wal; aha2.db-shm is volatile."
+}
+if ($userDeploy.Contains('$databaseFileNames + @("secrets.json"')) {
+    throw "Per-user backup loop still iterates the full database trio, including the volatile shm file."
+}
+$backupFunctionStart = $userDeploy.IndexOf('function Test-AHA2BackupCopy')
+$backupFunctionEnd = $userDeploy.IndexOf('function Copy-AHA2DatabaseBackup', $backupFunctionStart)
+if ($backupFunctionStart -lt 0 -or $backupFunctionEnd -le $backupFunctionStart) {
+    throw "Per-user deployment is missing the backup verification helpers."
+}
+$backupFunction = $userDeploy.Substring($backupFunctionStart, $backupFunctionEnd - $backupFunctionStart)
+if (-not $backupFunction.Contains('Get-FileHash -LiteralPath $Source -Algorithm SHA256 -ErrorAction Stop') -or
+    -not $backupFunction.Contains('catch')) {
+    throw "Test-AHA2BackupCopy must stop on Get-FileHash errors and report the file with its reason."
+}
+$restoreFunctionStart = $userDeploy.IndexOf('function Restore-AHA2DatabaseFromBackup')
+$restoreFunctionEnd = $userDeploy.IndexOf('function Test-AHA2ExclusiveFileProbe', $restoreFunctionStart)
+if ($restoreFunctionStart -lt 0 -or $restoreFunctionEnd -le $restoreFunctionStart) {
+    throw "Per-user deployment is missing the database restore helper."
+}
+$restoreFunction = $userDeploy.Substring($restoreFunctionStart, $restoreFunctionEnd - $restoreFunctionStart)
+if (-not $restoreFunction.Contains('$databaseBackupFileNames') -or $restoreFunction.Contains('"aha2.db-shm"')) {
+    throw "Database restore must only consider durable backup files and must never copy shm back."
+}
+$handoffStart = $userDeploy.IndexOf('if (-not $DetachedWorker -and (Test-AHA2Ancestor))')
+$handoffEnd = $userDeploy.IndexOf('$stamp = [DateTime]::UtcNow.ToString', $handoffStart)
+if ($handoffStart -lt 0 -or $handoffEnd -le $handoffStart) {
+    throw "Per-user deployment is missing the detached worker handoff block."
+}
+$handoffSection = $userDeploy.Substring($handoffStart, $handoffEnd - $handoffStart)
+foreach ($marker in @('Assert-AHA2WindowsPowerShellScriptEncoding', 'Start-ScheduledTask', '$decision -eq "failed"', 'Assert-AHA2DetachedWorkerAlive')) {
+    if (-not $handoffSection.Contains($marker)) {
+        throw "Detached handoff must fail loudly when the worker exits without a result: missing $marker"
+    }
 }
 & $userDeployPath -SelfTest
 & $userDeployPath -RepoPath $repo -InputExe (Join-Path $repo "go.mod") -InputTrayExe (Join-Path $repo "go.mod") -InstallDir (Join-Path $localAppData "Programs\AHA2-validation") -DataDir (Join-Path ([IO.Path]::GetTempPath()) "AHA2 User Data") -ValidateOnly

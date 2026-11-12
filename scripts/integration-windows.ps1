@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$Executable = "$PSScriptRoot\..\dist\aha2-windows-amd64.exe",
     [int]$Port = 18766,
     [switch]$SkipCodex,

@@ -1,4 +1,4 @@
-param(
+﻿param(
   [Parameter(Mandatory = $true)][string]$Executable,
   [int]$Port = 18767,
   [switch]$KeepData
