@@ -22,6 +22,9 @@ func (s *Store) DeleteWorkspaceLocal(ctx context.Context, id string) error {
 	if readOnly {
 		return ErrReadOnlySyncMirror
 	}
+	if err := purgeWorkspaceDeleteResidueTx(ctx, tx, id); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM runtime_config_snapshots
 		WHERE workspace_id=?
 		  AND NOT EXISTS(SELECT 1 FROM tasks WHERE tasks.runtime_config_snapshot_id=runtime_config_snapshots.id)

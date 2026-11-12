@@ -34,6 +34,34 @@ func enqueueOwnedGraphDeleteTx(ctx context.Context, tx *sql.Tx, objectType, sour
 	return insertSyncTombstone(ctx, tx, domain.SyncTombstone{ObjectType: objectType, ObjectID: wireID, Version: version, SyncKey: syncKey, DeletedAt: deletedAt.UTC()})
 }
 
+// purgeWorkspaceDeleteResidueTx removes rows that still block deleting a
+// Workspace even though no Turn in it is executing. Backend Sessions retain the
+// Workspace they were opened in after their Task moves elsewhere, and legacy
+// rows can outlive a Task that was removed without cascading. Only rows owned by
+// this Workspace, or orphaned rows that reference one of its snapshots, are
+// removed: a live Task in another Workspace keeps its Turns and agents, so the
+// following existence check still refuses the delete instead of widening it.
+func purgeWorkspaceDeleteResidueTx(ctx context.Context, tx *sql.Tx, workspaceID string) error {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM backend_sessions WHERE workspace_id=?`, workspaceID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM turns
+		WHERE task_id IN (SELECT id FROM tasks WHERE workspace_id=?)
+		   OR (NOT EXISTS(SELECT 1 FROM tasks WHERE tasks.id=turns.task_id)
+		       AND runtime_config_snapshot_id IN (SELECT id FROM runtime_config_snapshots WHERE workspace_id=?))`,
+		workspaceID, workspaceID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM task_agents
+		WHERE task_id IN (SELECT id FROM tasks WHERE workspace_id=?)
+		   OR (NOT EXISTS(SELECT 1 FROM tasks WHERE tasks.id=task_agents.task_id)
+		       AND runtime_config_snapshot_id IN (SELECT id FROM runtime_config_snapshots WHERE workspace_id=?))`,
+		workspaceID, workspaceID); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (s *Store) DeleteWorkspaceWithSyncTombstone(ctx context.Context, id string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -50,6 +78,9 @@ func (s *Store) DeleteWorkspaceWithSyncTombstone(ctx context.Context, id string)
 	}
 	now := time.Now().UTC()
 	if err := enqueueOwnedGraphDeleteTx(ctx, tx, "workspace", id, ownerDeviceID, now); err != nil {
+		return err
+	}
+	if err := purgeWorkspaceDeleteResidueTx(ctx, tx, id); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM runtime_config_snapshots
