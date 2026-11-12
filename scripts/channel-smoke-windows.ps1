@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$CoreExecutable = "$PSScriptRoot\..\dist\aha2-channel-test-windows-amd64.exe",
     [string]$PluginExecutable = "$PSScriptRoot\..\dist\plugins\feishu\windows-amd64\aha2-channel-feishu.exe",
     [string]$PluginManifest = "$PSScriptRoot\..\dist\plugins\feishu\windows-amd64\plugin.json",

@@ -121,11 +121,21 @@ powershell.exe -ExecutionPolicy Bypass -File scripts\build-and-deploy-windows-us
 
 脚本只复用仓库现有的 WSL Go 工具链，自动读取真实发行版名称并预检磁盘空间；Web 与 Go 验证在同一轮各执行一次。已有已验证候选时传入 `-DeployOnly`，只执行安装、重启、健康和哈希校验。
 
+### PowerShell 脚本编码
+
+会被 Windows PowerShell 5.1 执行的仓库内脚本（`scripts/*.ps1` 与 `installer/windows/*.ps1`）必须保存为
+**UTF-8 with BOM**（文件头 `EF BB BF`）。5.1 会把无 BOM 的文件按系统 ANSI 代码页解析；中文字符串
+会变成乱码，并可能在第一条语句执行前就抛 ParserError。打包和下载链路（包括 `tar`）必须原样保留
+BOM，不得重新编码或裁剪文件头。`scripts/test-windows-installer.ps1` 会检查每个脚本的 BOM 并用
+PowerShell Parser 解析；`scripts/ps1_encoding_test.go` 在非 Windows CI 上检查 BOM 和 tar 往返；
+`deploy-windows-user.ps1` 在把自身交给计划任务 worker 前也会检查编码，缺少 BOM 时直接抛错而不是
+交给 5.1 后静默退出。
+
 ### 部署失败路径与结果字段
 
 `deploy-windows-user.ps1` 在停止 AHA2、复制备份之前先做磁盘空间预检，按每个涉及的卷分别检查：
 数据目录所在卷需要 `aha2.db`、`aha2.db-wal`、`aha2.db-shm` 当前大小的 2 倍（备份复制加 WAL 增长和
-临时文件余量）再加 1GiB 安全余量；安装目录所在卷预留 200MB；临时目录（安装包暂存）所在卷预留 300MB，
+临时文件余量）再加 1GiB 安全余量（shm 只参与空间估算，不会被复制）；安装目录所在卷预留 200MB；临时目录（安装包暂存）所在卷预留 300MB，
 但临时目录只在安装器分支检查，`-UpdateExistingInstallInPlace` 在目标目录旁暂存，不要求临时卷空间。
 同一卷上的需求合并计算，任何一卷不足都会直接失败；失败说明只列出本次实际检查的角色，installer 模式包含临时目录预留，in-place 模式不会出现临时目录/temp 字样。结果 JSON 记录 `Stage=preflight`、
 `Volume`/`FreeBytes`/`RequiredBytes`（数据卷）和 `Volumes`（每个卷的角色、可用与需求），
@@ -137,11 +147,15 @@ powershell.exe -ExecutionPolicy Bypass -File scripts\build-and-deploy-windows-us
 再以独占方式打开 `aha2.exe`、`aha2.db`、WAL/SHM 等文件做探测；失败会按 `-StopTimeoutSeconds`
 （默认 45 秒）重试，超时则拒绝继续修改，而不是边跑边复制。进程枚举或进程身份查询失败时按“未验证/
 仍存活”处理，绝不把 WMI/CIM 错误当成“没有进程”。备份只在这个验证通过后执行，
-并对每个复制结果校验大小与 SHA256。失败回滚同样先验证停止，再用“同目录临时文件 + 哈希校验 +
-`[IO.File]::Replace` 原子替换”恢复二进制、`aha2.db`/`aha2.db-wal` 以及备份中的
+**只复制并校验 `aha2.db` 与 `aha2.db-wal`**，每个复制结果校验大小与 SHA256。`aha2.db-shm` 是
+SQLite 的易失共享内存缓存，不复制、不哈希；它在 SQLite 运行期间被短暂占用时 `Get-FileHash` 会失败，
+曾经在 StrictMode 下把 `(null).Hash` 变成“找不到 Hash 属性”并中止整个备份阶段。哈希失败会带上
+源/目标文件名和原因，由调用方按备份校验失败处理。失败回滚同样先验证停止，再用“同目录临时文件 +
+哈希校验 + `[IO.File]::Replace` 原子替换”恢复二进制、`aha2.db`/`aha2.db-wal` 以及备份中的
 `secrets.json`/`setup-token`；部署前不存在的文件（例如首次安装的 Feishu 插件与清单）在回滚时删除。
 数据库恢复前**无条件**删除失败版本可能留下的 `aha2.db-wal` 和 `aha2.db-shm`（即使备份里没有 WAL），
 再按备份内容原子恢复，最后对数据库执行 `PRAGMA quick_check`；只有返回 `ok` 才会重新启动服务。
+恢复只考虑 `aha2.db`/`aha2.db-wal`：旧备份目录里残留的 shm 会被忽略，不会被复制回数据目录。
 回滚无法验证时保持 AHA2 停止、保留备份，并在结果中输出人工恢复步骤（同样要求先移走
 `aha2.db`/`aha2.db-wal`/`aha2.db-shm` 再复制备份）。
 
@@ -156,6 +170,15 @@ powershell.exe -ExecutionPolicy Bypass -File scripts\build-and-deploy-windows-us
 
 结果文件是诊断产物：写入是 best-effort，原子替换失败（目标被锁、文件系统不支持等）时会退回直接写入，
 仍失败则只记录告警，不会因为写结果失败而中断或回滚一次已经成功的部署。
+
+当部署从 AHA2 自己的进程树里启动时，脚本会注册计划任务 `AHA2 User Update` 并在
+`-DetachedWorker` 下继续。handoff 会在 `-HandoffTimeoutSeconds`（默认 8 秒）内确认 worker 已经启动：
+写入了新的结果文件则返回 `completed`；worker 已启动但退出且没有写结果则**抛错**，错误里带上
+`LastTaskResult` 和 `dist/user-deploy.log` 的末尾日志；worker 仍在运行则返回 `scheduled`，由外层
+继续轮询结果文件。这样 worker 解析失败、启动即崩溃或找不到依赖时不会再以退出码 0 假装交接成功。
+如果外部的远程部署包装脚本自己启动 worker（例如仓库外的 `deploy-aha2-remote.ps1`），也必须采用同样的判定：
+worker 已经启动但短时间内退出且没有写新的 result 时，以非 0 退出并打印 stderr/日志尾部，不能只打一条警告
+就返回 0。仓库内目前没有这个包装脚本；`deploy-windows-user.ps1` 的 handoff 是它应复用的参考实现。
 
 `-SelfTest` 只检查纯函数、恢复计划和临时目录中的原子替换，不读取或修改安装目录、进程、计划任务和数据库，
 可在任意 PowerShell 7 上运行；`scripts/test-windows-installer.ps1` 也会在 Windows 上执行它。

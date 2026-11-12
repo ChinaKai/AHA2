@@ -1,4 +1,4 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
 $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
 $targets = @()
 $integrationRoot = Join-Path $tempRoot 'AHA2-integration'

@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
   [string]$InputExe = "",
   [string]$InputTrayExe = "",
@@ -19,6 +19,10 @@ param(
   # How long the stop stage keeps retrying process exit and exclusive file
   # probes before it refuses to touch the installation.
   [int]$StopTimeoutSeconds = 45,
+  # How long the non-detached handoff watches the scheduled worker before it
+  # reports "scheduled". A worker that exits earlier without a result is a
+  # failure, not a successful handoff.
+  [int]$HandoffTimeoutSeconds = 8,
   [string]$ResultPath = "",
   [switch]$DetachedWorker,
   [switch]$AllowCustomUserWritableInstallDir,
@@ -38,7 +42,11 @@ $powershellExecutable = ""
 $taskkillExecutable = ""
 
 $aha2ProcessNames = @("aha2.exe", "aha2-tray.exe", "aha2-channel-feishu.exe")
-$databaseFileNames = @("aha2.db", "aha2.db-wal", "aha2.db-shm")
+# Only durable database files are backed up. aha2.db-shm is a volatile
+# shared-memory cache that SQLite recreates; it is sized during preflight and
+# deleted during restore, but never copied or hashed. Hashing it while SQLite
+# still touched it aborted the 0.5.471 backup stage.
+$databaseBackupFileNames = @("aha2.db", "aha2.db-wal")
 
 # Deployment preflight allowance: binaries and plugins need about 200 MB in the
 # install directory, the installer is staged in the temp directory (300 MB), and
@@ -62,6 +70,67 @@ function Get-AHA2StopAttemptDecision {
   if ($Satisfied) { return "verified" }
   if ($TimedOut) { return "timeout" }
   return "retry"
+}
+
+function Get-AHA2ScriptEncodingState {
+  param([string]$Path)
+  # Windows PowerShell 5.1 decodes a script without a UTF-8 BOM using the
+  # system ANSI code page. Non-ASCII text (for example the Chinese diagnostics
+  # added in task-308) then turns into mojibake and can break parsing before
+  # any statement runs. A download or tar step that drops the BOM is therefore
+  # fatal for the scheduled worker, so the handoff checks this before handing
+  # the same file to a different PowerShell host.
+  $bytes = [IO.File]::ReadAllBytes($Path)
+  $hasBom = $bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF
+  $hasNonAscii = $false
+  foreach ($byte in $bytes) {
+    if ($byte -gt 0x7F) { $hasNonAscii = $true; break }
+  }
+  return [pscustomobject]@{
+    HasBOM = $hasBom
+    HasNonAscii = $hasNonAscii
+    Ok = ($hasBom -or -not $hasNonAscii)
+  }
+}
+
+function Assert-AHA2WindowsPowerShellScriptEncoding {
+  param([string]$Path)
+  $state = Get-AHA2ScriptEncodingState -Path $Path
+  if (-not $state.Ok) {
+    throw ("Refusing to hand {0} to Windows PowerShell 5.1: it is UTF-8 without a BOM and contains non-ASCII bytes. PowerShell 5.1 reads such a file using the ANSI code page and can fail with a parser error before any statement runs. Save it as UTF-8 with BOM." -f $Path)
+  }
+  return $state
+}
+
+function Resolve-AHA2DetachedHandoff {
+  param([bool]$ResultWritten, [bool]$WorkerStarted, [bool]$WorkerRunning)
+  if ($ResultWritten) { return "completed" }
+  if ($WorkerStarted -and -not $WorkerRunning) { return "failed" }
+  return "scheduled"
+}
+
+function Get-AHA2LogTail {
+  param([string]$Path, [int]$LineCount = 20)
+  if ([string]::IsNullOrWhiteSpace($Path)) { return "" }
+  if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return "" }
+  try {
+    return (@(Get-Content -LiteralPath $Path -Tail $LineCount -ErrorAction Stop) -join [Environment]::NewLine)
+  } catch {
+    return ""
+  }
+}
+
+function Assert-AHA2DetachedWorkerAlive {
+  param($TaskInfo, [string]$LogPath)
+  $lastResult = if ($null -ne $TaskInfo) { [string]$TaskInfo.LastTaskResult } else { "unknown" }
+  $tail = Get-AHA2LogTail -Path $LogPath
+  $message = "Deployment worker exited before writing a result (LastTaskResult=$lastResult)."
+  if ([string]::IsNullOrWhiteSpace($tail)) {
+    $message += " No worker log was written, so the worker probably failed before running (for example a parser error)."
+  } else {
+    $message += " stderr/log tail:" + [Environment]::NewLine + $tail
+  }
+  throw $message
 }
 
 function Get-AHA2FileSetBytes {
@@ -371,12 +440,55 @@ function Test-AHA2BackupCopy {
   if ($sourceSize -ne $destinationSize) {
     return [pscustomobject]@{Ok=$false;Reason=("size mismatch: {0} != {1}" -f $sourceSize,$destinationSize);Size=$sourceSize;SHA256=""}
   }
-  $sourceHash = (Get-FileHash -LiteralPath $Source -Algorithm SHA256).Hash.ToLowerInvariant()
-  $destinationHash = (Get-FileHash -LiteralPath $Destination -Algorithm SHA256).Hash.ToLowerInvariant()
+  # Get-FileHash writes a non-terminating error when the file is briefly held
+  # by SQLite or antivirus. Under StrictMode the old code then read .Hash from
+  # $null and aborted the whole deployment with a property-not-found error.
+  # Stop on the cmdlet error and report the file and reason instead.
+  try {
+    $sourceHash = (Get-FileHash -LiteralPath $Source -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+    $destinationHash = (Get-FileHash -LiteralPath $Destination -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+  } catch {
+    return [pscustomobject]@{
+      Ok=$false
+      Reason=("could not hash backup file source={0} destination={1}: {2}" -f $Source,$Destination,$_.Exception.Message)
+      Size=$sourceSize
+      SHA256=""
+    }
+  }
   if ($sourceHash -ne $destinationHash) {
     return [pscustomobject]@{Ok=$false;Reason="SHA256 mismatch";Size=$sourceSize;SHA256=$sourceHash}
   }
   return [pscustomobject]@{Ok=$true;Reason="";Size=$sourceSize;SHA256=$sourceHash}
+}
+
+function Copy-AHA2DatabaseBackup {
+  param(
+    [string]$DataDirectory,
+    [string]$BackupDirectory,
+    # The caller may pass an explicit list for a self-test; production uses the
+    # two durable files. aha2.db-shm is deliberately not in that list.
+    [string[]]$FileNames = $null
+  )
+  if ($null -eq $FileNames) { $FileNames = $script:databaseBackupFileNames }
+  $results = New-Object System.Collections.ArrayList
+  foreach ($name in @($FileNames)) {
+    $sourcePath = Join-Path $DataDirectory $name
+    if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) { continue }
+    $destinationPath = Join-Path $BackupDirectory $name
+    Copy-Item -LiteralPath $sourcePath -Destination $destinationPath -Force
+    $check = Test-AHA2BackupCopy -Source $sourcePath -Destination $destinationPath
+    if (-not $check.Ok) {
+      throw ("Backup verification failed for {0}: {1}" -f $name,$check.Reason)
+    }
+    [void]$results.Add([pscustomobject]@{
+      Name = $name
+      SourcePath = $sourcePath
+      BackupPath = $destinationPath
+      SHA256 = $check.SHA256
+      Size = $check.Size
+    })
+  }
+  return @($results)
 }
 
 function Test-AHA2RollbackPrerequisite {
@@ -426,8 +538,16 @@ function New-AHA2StagedFileCopy {
   New-Item -ItemType Directory -Path $DestinationDirectory -Force | Out-Null
   $temporaryPath = Join-Path $DestinationDirectory (".aha2-{0}-{1}.tmp" -f $Label,[Guid]::NewGuid().ToString("N"))
   Copy-Item -LiteralPath $Source -Destination $temporaryPath -Force
-  $sourceHash = (Get-FileHash -LiteralPath $Source -Algorithm SHA256).Hash.ToLowerInvariant()
-  $temporaryHash = (Get-FileHash -LiteralPath $temporaryPath -Algorithm SHA256).Hash.ToLowerInvariant()
+  # Same failure mode as Test-AHA2BackupCopy: a transient lock must surface as a
+  # named error, not as a non-terminating Get-FileHash error followed by
+  # $null.Hash under StrictMode.
+  try {
+    $sourceHash = (Get-FileHash -LiteralPath $Source -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+    $temporaryHash = (Get-FileHash -LiteralPath $temporaryPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+  } catch {
+    Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
+    throw ("Could not hash staged file {0}: {1}" -f $Source,$_.Exception.Message)
+  }
   if ($sourceHash -ne $temporaryHash) {
     Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
     throw "Staged copy hash mismatch for $Source."
@@ -532,7 +652,10 @@ function Restore-AHA2DatabaseFromBackup {
     [string]$DataDirectory,
     $ExpectedSHA256 = $null
   )
-  $backupNames = @($databaseFileNames | Where-Object {
+  # Only durable database files are restorable. A shm left in an old backup
+  # directory is ignored: recreating it from stale bytes would be worse than
+  # deleting it and letting SQLite rebuild it on the next start.
+  $backupNames = @($databaseBackupFileNames | Where-Object {
     Test-Path -LiteralPath (Join-Path $BackupDirectory $_) -PathType Leaf
   })
   $plan = Get-AHA2DatabaseRestorePlan -BackupNames $backupNames
@@ -875,6 +998,40 @@ function Invoke-AHA2SelfTest {
     Remove-Item -LiteralPath $tempFile -Force -ErrorAction SilentlyContinue
   }
 
+  # Script encoding: Windows PowerShell 5.1 reads a BOM-less UTF-8 file as ANSI.
+  # The handoff must refuse to give it non-ASCII text without a BOM.
+  $encodingRoot = Join-Path ([IO.Path]::GetTempPath()) ("aha2-encoding-selftest-" + [Guid]::NewGuid().ToString("N"))
+  try {
+    New-Item -ItemType Directory -Path $encodingRoot -Force | Out-Null
+    $utf8NoBom = [Text.UTF8Encoding]::new($false)
+    $asciiPath = Join-Path $encodingRoot "ascii.ps1"
+    [IO.File]::WriteAllText($asciiPath, "Write-Output 1", $utf8NoBom)
+    $asciiState = Get-AHA2ScriptEncodingState -Path $asciiPath
+    Assert-AHA2SelfTest ($asciiState.Ok -and -not $asciiState.HasBOM -and -not $asciiState.HasNonAscii) "ASCII script without a BOM needs no encoding guard"
+    $chinesePath = Join-Path $encodingRoot "chinese-no-bom.ps1"
+    [IO.File]::WriteAllBytes($chinesePath, $utf8NoBom.GetBytes("Write-Output 中文"))
+    $chineseState = Get-AHA2ScriptEncodingState -Path $chinesePath
+    Assert-AHA2SelfTest ($chineseState.HasNonAscii -and -not $chineseState.HasBOM -and -not $chineseState.Ok) "non-ASCII script without a BOM is rejected"
+    $encodingThrew = $false
+    try {
+      [void](Assert-AHA2WindowsPowerShellScriptEncoding -Path $chinesePath)
+    } catch {
+      $encodingThrew = $_.Exception.Message -match "without a BOM"
+    }
+    Assert-AHA2SelfTest $encodingThrew "handoff refuses non-ASCII script without a BOM"
+    $bomPath = Join-Path $encodingRoot "chinese-with-bom.ps1"
+    $bodyBytes = $utf8NoBom.GetBytes("Write-Output 中文")
+    $bomBytes = [byte[]]::new(3 + $bodyBytes.Length)
+    $bomBytes[0] = 0xEF; $bomBytes[1] = 0xBB; $bomBytes[2] = 0xBF
+    [Array]::Copy($bodyBytes, 0, $bomBytes, 3, $bodyBytes.Length)
+    [IO.File]::WriteAllBytes($bomPath, $bomBytes)
+    $bomState = Get-AHA2ScriptEncodingState -Path $bomPath
+    [void](Assert-AHA2WindowsPowerShellScriptEncoding -Path $bomPath)
+    Assert-AHA2SelfTest ($bomState.Ok -and $bomState.HasBOM) "non-ASCII script with a BOM is accepted"
+  } finally {
+    Remove-Item -LiteralPath $encodingRoot -Recurse -Force -ErrorAction SilentlyContinue
+  }
+
   # Backup verification: size and SHA256 must both match.
   $source = [IO.Path]::GetTempFileName()
   $copy = [IO.Path]::GetTempFileName()
@@ -888,8 +1045,48 @@ function Invoke-AHA2SelfTest {
     Assert-AHA2SelfTest (-not $bad.Ok) "tampered backup copy is rejected"
     $missing = Test-AHA2BackupCopy -Source $source -Destination ($copy + ".missing")
     Assert-AHA2SelfTest (-not $missing.Ok) "missing backup copy is rejected"
+    if ($env:OS -eq "Windows_NT") {
+      # A transient lock makes Get-FileHash fail non-terminating. The helper
+      # must return a named failure instead of crashing on $null.Hash.
+      $heldSource = [IO.File]::Open($source, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+      try {
+        $locked = Test-AHA2BackupCopy -Source $source -Destination $copy
+      } finally {
+        $heldSource.Dispose()
+      }
+      Assert-AHA2SelfTest (-not $locked.Ok) "locked source is reported as a failed backup verification"
+      Assert-AHA2SelfTest ($locked.Reason -match [regex]::Escape([IO.Path]::GetFileName($source)) -and $locked.Reason -match "could not hash") "locked-file failure names the file and the reason"
+    }
   } finally {
     Remove-Item -LiteralPath $source,$copy -Force -ErrorAction SilentlyContinue
+  }
+
+  # Database backup: only the durable files are copied. A locked shm must not
+  # participate, and a stale shm in an old backup directory must never be
+  # restored over the live data directory.
+  Assert-AHA2SelfTest ($databaseBackupFileNames -contains "aha2.db" -and $databaseBackupFileNames -contains "aha2.db-wal" -and $databaseBackupFileNames -notcontains "aha2.db-shm") "database backup list keeps db and WAL and excludes volatile shm"
+  $databaseBackupRoot = Join-Path ([IO.Path]::GetTempPath()) ("aha2-db-backup-selftest-" + [Guid]::NewGuid().ToString("N"))
+  try {
+    $dbBackupData = Join-Path $databaseBackupRoot "data"
+    $dbBackupTarget = Join-Path $databaseBackupRoot "backup"
+    New-Item -ItemType Directory -Path $dbBackupData,$dbBackupTarget -Force | Out-Null
+    [IO.File]::WriteAllText((Join-Path $dbBackupData "aha2.db"), "db-bytes", [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $dbBackupData "aha2.db-wal"), "wal-bytes", [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $dbBackupData "aha2.db-shm"), "shm-bytes", [Text.UTF8Encoding]::new($false))
+    $heldShm = $null
+    if ($env:OS -eq "Windows_NT") {
+      $heldShm = [IO.File]::Open((Join-Path $dbBackupData "aha2.db-shm"), [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+    }
+    try {
+      $copied = @(Copy-AHA2DatabaseBackup -DataDirectory $dbBackupData -BackupDirectory $dbBackupTarget)
+    } finally {
+      if ($null -ne $heldShm) { $heldShm.Dispose() }
+    }
+    Assert-AHA2SelfTest ($copied.Count -eq 2 -and (($copied | ForEach-Object { $_.Name }) -join ",") -eq "aha2.db,aha2.db-wal") "database backup copies only db and WAL"
+    Assert-AHA2SelfTest (-not (Test-Path -LiteralPath (Join-Path $dbBackupTarget "aha2.db-shm"))) "database backup never copies shm"
+    Assert-AHA2SelfTest ([IO.File]::ReadAllText((Join-Path $dbBackupTarget "aha2.db")) -eq "db-bytes" -and [IO.File]::ReadAllText((Join-Path $dbBackupTarget "aha2.db-wal")) -eq "wal-bytes") "database backup preserves db and WAL bytes"
+  } finally {
+    Remove-Item -LiteralPath $databaseBackupRoot -Recurse -Force -ErrorAction SilentlyContinue
   }
 
   # Rollback prerequisites: an in-place update must have a verified backup of
@@ -921,6 +1118,9 @@ function Invoke-AHA2SelfTest {
     New-Item -ItemType Directory -Path $liveDir,$backupDir -Force | Out-Null
     [IO.File]::WriteAllText((Join-Path $backupDir "aha2.db"), "verified-backup-db", [Text.UTF8Encoding]::new($false))
     [IO.File]::WriteAllText((Join-Path $backupDir "aha2.db-wal"), "verified-backup-wal", [Text.UTF8Encoding]::new($false))
+    # An old backup directory may still contain a shm from before this fix.
+    # Restore must ignore it instead of copying volatile bytes back.
+    [IO.File]::WriteAllText((Join-Path $backupDir "aha2.db-shm"), "stale-backup-shm", [Text.UTF8Encoding]::new($false))
     [IO.File]::WriteAllText((Join-Path $liveDir "aha2.db"), "mutated-live-db", [Text.UTF8Encoding]::new($false))
     [IO.File]::WriteAllText((Join-Path $liveDir "aha2.db-wal"), "mutated-live-wal", [Text.UTF8Encoding]::new($false))
     [IO.File]::WriteAllText((Join-Path $liveDir "aha2.db-shm"), "stale-shm", [Text.UTF8Encoding]::new($false))
@@ -1077,6 +1277,38 @@ function Invoke-AHA2SelfTest {
   Add-AHA2LockedFile -Record $deduped -Paths @("C:\x\aha2.exe","C:\x\aha2.exe","C:\x\aha2.db")
   Add-AHA2LockedFile -Record $deduped -Paths @("C:\x\aha2.exe")
   Assert-AHA2SelfTest ($deduped.LockedFiles.Count -eq 2) "locked file list is de-duplicated"
+
+  # Detached handoff: a worker that exits before writing a result must be a
+  # failure with the log tail, not a successful "scheduled" return.
+  Assert-AHA2SelfTest ((Resolve-AHA2DetachedHandoff -ResultWritten $true -WorkerStarted $true -WorkerRunning $false) -eq "completed") "handoff completes when the worker wrote a result"
+  Assert-AHA2SelfTest ((Resolve-AHA2DetachedHandoff -ResultWritten $false -WorkerStarted $true -WorkerRunning $false) -eq "failed") "handoff fails when a started worker exits without a result"
+  Assert-AHA2SelfTest ((Resolve-AHA2DetachedHandoff -ResultWritten $false -WorkerStarted $false -WorkerRunning $false) -eq "scheduled") "handoff stays scheduled before the worker starts"
+  Assert-AHA2SelfTest ((Resolve-AHA2DetachedHandoff -ResultWritten $false -WorkerStarted $true -WorkerRunning $true) -eq "scheduled") "handoff stays scheduled while the worker runs"
+  $handoffLog = Join-Path ([IO.Path]::GetTempPath()) ("aha2-handoff-log-" + [Guid]::NewGuid().ToString("N"))
+  try {
+    [IO.File]::WriteAllText($handoffLog, "first line`nworker-stderr-tail-marker`nlast line", [Text.UTF8Encoding]::new($false))
+    $handoffThrew = $false
+    $handoffMessage = ""
+    try {
+      Assert-AHA2DetachedWorkerAlive -TaskInfo ([pscustomobject]@{LastTaskResult=1}) -LogPath $handoffLog
+    } catch {
+      $handoffThrew = $true
+      $handoffMessage = $_.Exception.Message
+    }
+    Assert-AHA2SelfTest $handoffThrew "early worker exit is thrown instead of returning 0"
+    Assert-AHA2SelfTest ($handoffMessage -match "worker-stderr-tail-marker" -and $handoffMessage -match "LastTaskResult=1") "early-exit error carries the log tail and task result"
+    $noLogThrew = $false
+    $noLogMessage = ""
+    try {
+      Assert-AHA2DetachedWorkerAlive -TaskInfo ([pscustomobject]@{LastTaskResult=0}) -LogPath ($handoffLog + ".missing")
+    } catch {
+      $noLogThrew = $true
+      $noLogMessage = $_.Exception.Message
+    }
+    Assert-AHA2SelfTest ($noLogThrew -and $noLogMessage -match "parser error") "early exit without a log explains the likely parser failure"
+  } finally {
+    Remove-Item -LiteralPath $handoffLog -Force -ErrorAction SilentlyContinue
+  }
 
   # A failed install replacement must name the destination in LockedFiles.
   $installRecord = New-AHA2ResultRecord
@@ -1349,6 +1581,11 @@ if ($ValidateOnly) {
 }
 
 if ($DetachedWorker) {
+  # A worker launched by another PowerShell host (for example pwsh, which
+  # reads UTF-8 without BOM) must not hand this file to Windows PowerShell 5.1
+  # with the BOM stripped. Fail before any deployment work instead of exiting
+  # silently; the outer handoff reports the failure with this message.
+  [void](Assert-AHA2WindowsPowerShellScriptEncoding -Path $PSCommandPath)
   Start-Transcript -LiteralPath (Join-Path $repo "dist\user-deploy.log") -Force | Out-Null
 }
 
@@ -1594,6 +1831,17 @@ if (-not $DetachedWorker -and (Test-AHA2Ancestor)) {
   if ([string]::IsNullOrWhiteSpace($ResultPath)) {
     $ResultPath = Join-Path $repo "dist\user-deploy-result.json"
   }
+  # The scheduled worker runs under Windows PowerShell 5.1. Refuse to hand it a
+  # copy whose BOM was stripped in packaging or download: 5.1 would read the
+  # non-ASCII diagnostics as ANSI and exit with a parser error before writing a
+  # result. This is the fail-loud counterpart to the silent handoff reported in
+  # the 0.5.471 deployment.
+  [void](Assert-AHA2WindowsPowerShellScriptEncoding -Path $PSCommandPath)
+  $workerLogPath = Join-Path $repo "dist\user-deploy.log"
+  # A result from an earlier deployment must not be mistaken for this worker's
+  # output, so only a file written after the handoff starts counts.
+  $resultWrittenBefore = if (Test-Path -LiteralPath $ResultPath -PathType Leaf) { (Get-Item -LiteralPath $ResultPath).LastWriteTimeUtc } else { [DateTime]::MinValue }
+  $handoffStartedUtc = [DateTime]::UtcNow
   $workerArguments = @(
     "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", $PSCommandPath,
     "-DetachedWorker", "-RepoPath", $repo, "-InputExe", $serverInput, "-InputTrayExe", $trayInput,
@@ -1614,7 +1862,42 @@ if (-not $DetachedWorker -and (Test-AHA2Ancestor)) {
   $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 20) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
   Register-ScheduledTask -TaskName $UpdateTaskName -Action $action -Principal $principal -Settings $settings -Force | Out-Null
   Start-ScheduledTask -TaskName $UpdateTaskName
-  [pscustomobject]@{Mode=$deploymentMode;State="scheduled";Result=$ResultPath;WriteAccessVerified=$true;ElevationRequired=$false}
+
+  # Wait briefly for evidence that the worker actually started and either
+  # wrote a result or is still running. A worker that exits without a result
+  # (parser error, missing file, immediate crash) must fail this call instead
+  # of looking like a successful handoff.
+  $workerStarted = $false
+  $handoffState = "scheduled"
+  $handoffDeadline = $handoffStartedUtc.AddSeconds([Math]::Max(1, $HandoffTimeoutSeconds))
+  while ([DateTime]::UtcNow -lt $handoffDeadline) {
+    $resultWritten = $false
+    if (Test-Path -LiteralPath $ResultPath -PathType Leaf) {
+      $resultWritten = (Get-Item -LiteralPath $ResultPath).LastWriteTimeUtc -gt $resultWrittenBefore
+    }
+    $task = Get-ScheduledTask -TaskName $UpdateTaskName -ErrorAction SilentlyContinue
+    $taskInfo = $null
+    try {
+      $taskInfo = Get-ScheduledTaskInfo -TaskName $UpdateTaskName -ErrorAction Stop
+    } catch {}
+    $workerRunning = ($null -ne $task) -and ([string]$task.State -eq "Running")
+    if ($workerRunning) { $workerStarted = $true }
+    if ($null -ne $taskInfo -and $null -ne $taskInfo.LastRunTime -and
+        $taskInfo.LastRunTime -ne [DateTime]::MinValue -and
+        $taskInfo.LastRunTime -ge $handoffStartedUtc.AddSeconds(-2)) {
+      $workerStarted = $true
+    }
+    $decision = Resolve-AHA2DetachedHandoff -ResultWritten $resultWritten -WorkerStarted $workerStarted -WorkerRunning $workerRunning
+    if ($decision -eq "completed") {
+      $handoffState = "completed"
+      break
+    }
+    if ($decision -eq "failed") {
+      Assert-AHA2DetachedWorkerAlive -TaskInfo $taskInfo -LogPath $workerLogPath
+    }
+    Start-Sleep -Milliseconds 250
+  }
+  [pscustomobject]@{Mode=$deploymentMode;State=$handoffState;Result=$ResultPath;WriteAccessVerified=$true;ElevationRequired=$false}
   return
 }
 
@@ -1692,8 +1975,15 @@ try {
 
   # --- backup: copy only after the exclusive probes passed, then verify size
   # and SHA256 of every copied file before any installed file is replaced.
+  # aha2.db-shm is intentionally absent: it is a volatile cache that SQLite
+  # rebuilds, and hashing it while SQLite still touches it was what aborted
+  # the 0.5.471 backup stage.
   $state.Stage = "backup"
-  foreach ($name in @($databaseFileNames + @("secrets.json","setup-token"))) {
+  foreach ($copy in @(Copy-AHA2DatabaseBackup -DataDirectory $data -BackupDirectory $backup)) {
+    $state.BackupSHA256[$copy.Name] = $copy.SHA256
+    $state.BackupSizes[$copy.Name] = $copy.Size
+  }
+  foreach ($name in @("secrets.json","setup-token")) {
     $sourcePath = Join-Path $data $name
     if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) { continue }
     $destinationPath = Join-Path $backup $name
@@ -1704,13 +1994,11 @@ try {
     }
     $state.BackupSHA256[$name] = $check.SHA256
     $state.BackupSizes[$name] = $check.Size
-    if ($name -in @("secrets.json","setup-token")) {
-      $runtimeFileBackups += [pscustomobject]@{
-        Name = $name
-        BackupPath = $destinationPath
-        TargetPath = $sourcePath
-        SHA256 = $check.SHA256
-      }
+    $runtimeFileBackups += [pscustomobject]@{
+      Name = $name
+      BackupPath = $destinationPath
+      TargetPath = $sourcePath
+      SHA256 = $check.SHA256
     }
   }
   if ($databaseExistedBefore -and -not $state.BackupSHA256.Contains("aha2.db")) {
