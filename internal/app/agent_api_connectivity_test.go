@@ -2,9 +2,12 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -28,6 +31,10 @@ func newAgentAPIConnectivityService(t *testing.T) (*Service, *store.Store) {
 	}
 	service := NewService(database, secretStore, StubExecutor{})
 	service.SetAgentAPI(agentapi.NewCapabilities(), "http://127.0.0.1:8766")
+	// Candidate selection consults this machine's interfaces and the workspace's
+	// view. Tests pin both to nothing by default so a case that cares opts in.
+	service.agentAPILocalHostsFn = func() []string { return nil }
+	service.agentAPIWorkspaceHostsFn = func(context.Context, domain.Workspace) []string { return nil }
 	return service, database
 }
 
@@ -90,6 +97,10 @@ func TestDetectNativeWorkspaceAgentAPI(t *testing.T) {
 		_, _ = writer.Write([]byte(`{"ok":true,"service":"aha2"}`))
 	}))
 	defer health.Close()
+	// Point the startup address at the test server too. Otherwise a real AHA2
+	// listening on the default 8766 on the developer's machine is a valid native
+	// candidate and wins before the override, making the test environment-dependent.
+	service.SetAgentAPI(agentapi.NewCapabilities(), health.URL)
 	if _, err := service.UpdateAgentAPISettings(ctx, domain.AgentAPISettings{URL: health.URL}); err != nil {
 		t.Fatal(err)
 	}
@@ -155,6 +166,14 @@ func TestAgentAPIProbeCandidatesFollowTheConnectionPolicy(t *testing.T) {
 	ctx := context.Background()
 	service, database := newAgentAPIConnectivityService(t)
 	defer database.Close()
+	// Two LAN sources: the workspace's view of AHA and this host's interfaces.
+	// Both must be deduplicated and filtered to private IPv4 addresses.
+	service.agentAPIWorkspaceHostsFn = func(context.Context, domain.Workspace) []string {
+		return []string{"192.168.7.40"}
+	}
+	service.agentAPILocalHostsFn = func() []string {
+		return []string{"192.168.7.44", "127.0.0.1", "not-an-ip"}
+	}
 	settings, err := service.AgentAPISettings(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -165,15 +184,30 @@ func TestAgentAPIProbeCandidatesFollowTheConnectionPolicy(t *testing.T) {
 		t.Fatalf("native candidates = %v", native)
 	}
 
+	// SSH tries the tunnel target first, then AHA's LAN addresses over plaintext.
 	ssh := service.agentAPIProbeCandidates(ctx, domain.Workspace{Transport: "ssh", AgentAPIMode: "auto"}, settings)
-	if len(ssh) != 1 || ssh[0] != "http://127.0.0.1:8766" {
-		t.Fatalf("ssh candidates = %v", ssh)
+	wantSSH := []string{"http://127.0.0.1:8766", "http://192.168.7.40:8766", "http://192.168.7.44:8766"}
+	if !reflect.DeepEqual(ssh, wantSSH) {
+		t.Fatalf("ssh candidates = %v, want %v", ssh, wantSSH)
 	}
 
 	wsl := service.agentAPIProbeCandidates(ctx, domain.Workspace{Transport: "wsl", AgentAPIMode: "auto"}, settings)
-	if len(wsl) < 2 || wsl[0] != "http://127.0.0.1:8766" || wsl[1] != "http://localhost:8766" {
+	if len(wsl) != 2 || wsl[0] != "http://127.0.0.1:8766" || wsl[1] != "http://localhost:8766" {
 		t.Fatalf("wsl candidates = %v", wsl)
 	}
+	// The plaintext LAN fallback is an SSH-only path: neither native nor WSL may
+	// ever gain a non-loopback plaintext candidate.
+	for transport, candidates := range map[string][]string{"native": native, "wsl": wsl} {
+		for _, candidate := range candidates {
+			if strings.HasPrefix(candidate, "http://") && !strings.Contains(candidate, "127.0.0.1") && !strings.Contains(candidate, "localhost") {
+				t.Fatalf("%s candidate %q is plaintext off loopback", transport, candidate)
+			}
+		}
+	}
+
+	// Reset the host sources for the exact override assertions below.
+	service.agentAPILocalHostsFn = func() []string { return nil }
+	service.agentAPIWorkspaceHostsFn = func(context.Context, domain.Workspace) []string { return nil }
 
 	// Legacy manual plaintext value is not a candidate; a safe override is last.
 	settings.URL = "https://override.example.test"
@@ -182,5 +216,152 @@ func TestAgentAPIProbeCandidatesFollowTheConnectionPolicy(t *testing.T) {
 	}, settings)
 	if len(candidates) != 2 || candidates[0] != "http://127.0.0.1:8766" || candidates[1] != "https://override.example.test" {
 		t.Fatalf("override candidates = %v", candidates)
+	}
+}
+
+// recordingAgentAPIProbe replaces the real workspace probe in detection tests
+// and records the order in which candidates were tried.
+type recordingAgentAPIProbe struct {
+	calls []string
+	ok    func(string) bool
+}
+
+func (probe *recordingAgentAPIProbe) probe(_ context.Context, _ domain.Workspace, candidate string) error {
+	probe.calls = append(probe.calls, candidate)
+	if probe.ok(candidate) {
+		return nil
+	}
+	return fmt.Errorf("healthz 请求失败: connect: connection refused")
+}
+
+// TestDetectSSHWorkspaceAgentAPIFallsBackToPlaintextLAN is the regression the
+// fallback exists for: the workspace's sshd refuses the reverse tunnel, but AHA
+// is reachable over the local network, so detection must select that address.
+func TestDetectSSHWorkspaceAgentAPIFallsBackToPlaintextLAN(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	service, database := newAgentAPIConnectivityService(t)
+	defer database.Close()
+	service.agentAPILocalHostsFn = func() []string { return []string{"192.168.7.44"} }
+	lanURL := "http://192.168.7.44:8766"
+	probe := &recordingAgentAPIProbe{ok: func(candidate string) bool { return candidate == lanURL }}
+	service.agentAPIProbeFn = probe.probe
+	item := service.DetectWorkspaceAgentAPI(ctx, domain.Workspace{
+		Transport: "ssh", RootPath: "/repo", Health: "ready", AgentAPIMode: "auto", Capabilities: map[string]any{},
+	})
+	if item.AgentAPIStatus != "ready" || item.AgentAPIResolvedURL != lanURL || item.AgentAPIError != "" {
+		t.Fatalf("detected=%#v", item)
+	}
+	wantCalls := []string{"http://127.0.0.1:8766", lanURL}
+	if !reflect.DeepEqual(probe.calls, wantCalls) {
+		t.Fatalf("probe order = %v, want tunnel then LAN %v", probe.calls, wantCalls)
+	}
+	capability, _ := item.Capabilities["agent_api"].(map[string]any)
+	if capability["status"] != "ready" || capability["url"] != lanURL || capability["via"] != "direct" {
+		t.Fatalf("capability=%#v", capability)
+	}
+	// The selected address must survive Turn resolution: the plaintext relaxation
+	// used for probing has to be honoured when the stored result is read back.
+	resolved, err := service.AgentAPIURLForWorkspace(ctx, item)
+	if err != nil || resolved != lanURL {
+		t.Fatalf("resolved=%q err=%v", resolved, err)
+	}
+}
+
+// TestDetectSSHWorkspaceAgentAPIKeepsTheTunnelWhenItWorks pins that a working
+// tunnel is never superseded by the LAN fallback.
+func TestDetectSSHWorkspaceAgentAPIKeepsTheTunnelWhenItWorks(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	service, database := newAgentAPIConnectivityService(t)
+	defer database.Close()
+	service.agentAPILocalHostsFn = func() []string { return []string{"192.168.7.44"} }
+	probe := &recordingAgentAPIProbe{ok: func(candidate string) bool { return candidate == "http://127.0.0.1:8766" }}
+	service.agentAPIProbeFn = probe.probe
+	item := service.DetectWorkspaceAgentAPI(ctx, domain.Workspace{
+		Transport: "ssh", RootPath: "/repo", Health: "ready", AgentAPIMode: "auto", Capabilities: map[string]any{},
+	})
+	if item.AgentAPIStatus != "ready" || item.AgentAPIResolvedURL != "http://127.0.0.1:8766" {
+		t.Fatalf("detected=%#v", item)
+	}
+	if len(probe.calls) != 1 || probe.calls[0] != "http://127.0.0.1:8766" {
+		t.Fatalf("probe calls = %v, want only the tunnel", probe.calls)
+	}
+	capability, _ := item.Capabilities["agent_api"].(map[string]any)
+	if capability["via"] != "tunnel" {
+		t.Fatalf("capability=%#v", capability)
+	}
+}
+
+// TestDetectFailureNamesEachStage checks that the error says which of tunnel,
+// plaintext LAN, and override was attempted, without exposing a token.
+func TestDetectFailureNamesEachStage(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	service, database := newAgentAPIConnectivityService(t)
+	defer database.Close()
+	if _, err := service.UpdateAgentAPISettings(ctx, domain.AgentAPISettings{URL: "https://override.example.test"}); err != nil {
+		t.Fatal(err)
+	}
+	service.agentAPILocalHostsFn = func() []string { return []string{"192.168.7.44"} }
+	probe := &recordingAgentAPIProbe{ok: func(string) bool { return false }}
+	service.agentAPIProbeFn = probe.probe
+	item := service.DetectWorkspaceAgentAPI(ctx, domain.Workspace{
+		Transport: "ssh", RootPath: "/repo", Health: "ready", AgentAPIMode: "auto", Capabilities: map[string]any{},
+	})
+	if item.AgentAPIStatus != "error" || item.AgentAPIError == "" {
+		t.Fatalf("detected=%#v", item)
+	}
+	for _, stage := range []string{"隧道", "LAN 明文", "覆盖地址"} {
+		if !strings.Contains(item.AgentAPIError, stage) {
+			t.Fatalf("error %q does not name stage %q", item.AgentAPIError, stage)
+		}
+	}
+	if strings.Contains(strings.ToLower(item.AgentAPIError), "token") || strings.Contains(item.AgentAPIError, "Bearer") {
+		t.Fatalf("error leaks credential material: %q", item.AgentAPIError)
+	}
+}
+
+// TestPlaintextProbeBoundaryIsSSHOnlyAndLANOnly pins the narrow relaxation: a
+// detected plaintext result is usable only for SSH, and only for a private IPv4
+// literal, while configured values keep the strict HTTPS-or-loopback rule.
+func TestPlaintextProbeBoundaryIsSSHOnlyAndLANOnly(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	service, database := newAgentAPIConnectivityService(t)
+	defer database.Close()
+
+	lanURL := "http://192.168.7.44:8766"
+	if got, err := normalizeAgentAPIProbeResult(domain.Workspace{Transport: "ssh"}, lanURL); err != nil || got != lanURL {
+		t.Fatalf("ssh probe result = %q, %v", got, err)
+	}
+	for _, transport := range []string{"native", "wsl", ""} {
+		if _, err := normalizeAgentAPIProbeResult(domain.Workspace{Transport: transport}, lanURL); err == nil {
+			t.Fatalf("transport %q accepted a plaintext probe result", transport)
+		}
+	}
+	for _, raw := range []string{"http://aha.example.test:8766", "http://[fd00::1]:8766", "http://169.254.1.2:8766", "http://203.0.113.10:8766", "https://192.168.7.44:8766"} {
+		if _, err := normalizeAgentAPIPlaintextCandidate(raw); err == nil {
+			t.Fatalf("%q was accepted as a plaintext LAN candidate", raw)
+		}
+	}
+
+	// A stored plaintext result is honoured only for the SSH workspace that
+	// detected it. The same row on another transport falls back to strict.
+	ready := domain.Workspace{Transport: "ssh", AgentAPIMode: "auto", AgentAPIStatus: "ready", AgentAPIResolvedURL: lanURL}
+	if got, err := service.AgentAPIURLForWorkspace(ctx, ready); err != nil || got != lanURL {
+		t.Fatalf("ssh resolved=%q err=%v", got, err)
+	}
+	ready.Transport = "native"
+	if _, err := service.AgentAPIURLForWorkspace(ctx, ready); err == nil {
+		t.Fatal("native workspace accepted a plaintext detected result")
+	}
+
+	// Configured values never gain the relaxation.
+	if _, err := service.UpdateAgentAPISettings(ctx, domain.AgentAPISettings{URL: lanURL}); err == nil {
+		t.Fatal("global settings accepted a plaintext LAN URL")
+	}
+	if _, _, err := service.ValidateWorkspaceAgentAPI(ctx, "manual", lanURL); err == nil {
+		t.Fatal("manual workspace URL accepted a plaintext LAN URL")
 	}
 }

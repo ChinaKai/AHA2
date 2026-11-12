@@ -184,6 +184,13 @@ type Service struct {
 	webVersion           string
 	startedAt            time.Time
 
+	// These three are detection seams. Production uses the workspace probe and
+	// the real host enumeration; tests substitute them so address selection can be
+	// exercised without an actual SSH host or the test machine's interfaces.
+	agentAPIProbeFn          func(context.Context, domain.Workspace, string) error
+	agentAPILocalHostsFn     func() []string
+	agentAPIWorkspaceHostsFn func(context.Context, domain.Workspace) []string
+
 	mu                  sync.Mutex
 	cancels             map[string]context.CancelFunc
 	runContext          context.Context
@@ -316,6 +323,10 @@ func NewService(database *store.Store, secretStore *secrets.FileStore, executor 
 		collaborationTimers:  map[string]*time.Timer{},
 		sharedContexts:       map[string]*sharedContextState{},
 		latestShared:         map[string]string{},
+
+		agentAPIProbeFn:          workspacepkg.ProbeAgentAPIThroughForward,
+		agentAPILocalHostsFn:     localAgentAPIHosts,
+		agentAPIWorkspaceHostsFn: workspacepkg.AgentAPIHostCandidates,
 	}
 }
 

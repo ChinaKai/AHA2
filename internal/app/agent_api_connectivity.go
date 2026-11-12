@@ -89,7 +89,10 @@ func (s *Service) AgentAPIURLForWorkspace(ctx context.Context, item domain.Works
 		return "", err
 	}
 	if item.AgentAPIStatus == "ready" && item.AgentAPIResolvedURL != "" {
-		return normalizeAgentAPIBaseURL(item.AgentAPIResolvedURL)
+		// Detection may have selected the controlled SSH fallback (AHA's own LAN
+		// address over plaintext after the tunnel failed), so the stored result is
+		// validated against the probe boundary rather than the config boundary.
+		return normalizeAgentAPIProbeResult(item, item.AgentAPIResolvedURL)
 	}
 	if normalizeAgentAPIMode(item.AgentAPIMode) == "manual" && item.AgentAPIURL != "" {
 		return normalizeAgentAPIBaseURL(item.AgentAPIURL)
@@ -111,13 +114,18 @@ func (s *Service) DetectWorkspaceAgentAPI(ctx context.Context, item domain.Works
 		return markAgentAPIProbeFailure(item, "读取 Agent API 设置失败")
 	}
 	candidates := s.agentAPIProbeCandidates(ctx, item, settings)
-	lastError := "没有可测试的 Agent API 地址"
+	if len(candidates) == 0 {
+		return markAgentAPIProbeFailure(item, "没有可测试的 Agent API 地址")
+	}
+	failures := make([]string, 0, len(candidates))
+	stages := make([]string, 0, len(candidates))
+	seenStages := map[string]bool{}
 	for _, candidate := range candidates {
 		// Probe the way a Turn will reach it, tunnel included. A bare probe of a
 		// remote workspace's configured loopback address always fails, because that
 		// address is the workspace itself; the tunnel is what makes it work. Testing
 		// without it reported a fault for workspaces that were fine.
-		err := workspacepkg.ProbeAgentAPIThroughForward(ctx, item, candidate)
+		err := s.probeAgentAPI(ctx, item, candidate)
 		if err == nil {
 			item.AgentAPIResolvedURL = candidate
 			item.AgentAPIStatus = "ready"
@@ -134,9 +142,51 @@ func (s *Service) DetectWorkspaceAgentAPI(ctx context.Context, item domain.Works
 			}
 			return item
 		}
-		lastError = err.Error()
+		// Name the step that failed (tunnel, LAN plaintext, override). Without this
+		// the operator sees only the last error and cannot tell which path was even
+		// attempted. The stage summary comes first so truncation cannot hide which
+		// paths were tried. Probe errors never carry the token.
+		label := agentAPIProbeCandidateLabel(item, settings, candidate)
+		if !seenStages[label] {
+			seenStages[label] = true
+			stages = append(stages, label)
+		}
+		failures = append(failures, fmt.Sprintf("%s（%s）：%s", label, candidate, err.Error()))
 	}
-	return markAgentAPIProbeFailure(item, truncateAgentAPIError(lastError))
+	summary := strings.Join(stages, " → ") + " 均不可达"
+	return markAgentAPIProbeFailure(item, truncateAgentAPIError(summary+"；"+strings.Join(failures, "；")))
+}
+
+// probeAgentAPI is the detection side of the tunnel path; tests substitute the
+// field so they can observe the order without a real SSH host.
+func (s *Service) probeAgentAPI(ctx context.Context, item domain.Workspace, candidate string) error {
+	if s.agentAPIProbeFn != nil {
+		return s.agentAPIProbeFn(ctx, item, candidate)
+	}
+	return workspacepkg.ProbeAgentAPIThroughForward(ctx, item, candidate)
+}
+
+// agentAPIProbeCandidateLabel names the step a candidate belongs to, so a
+// failure report distinguishes 隧道 → LAN 明文 → 覆盖地址.
+func agentAPIProbeCandidateLabel(item domain.Workspace, settings domain.AgentAPISettings, candidate string) string {
+	candidate = strings.TrimRight(strings.TrimSpace(candidate), "/")
+	if settings.URL != "" && strings.EqualFold(strings.TrimRight(strings.TrimSpace(settings.URL), "/"), candidate) {
+		return "覆盖地址"
+	}
+	parsed, err := url.Parse(candidate)
+	if err != nil || parsed.Hostname() == "" {
+		return "候选"
+	}
+	if item.Transport != "ssh" {
+		return "直连"
+	}
+	if agentAPIHostIsLoopback(parsed.Hostname()) {
+		return "隧道"
+	}
+	if parsed.Scheme == "http" {
+		return "LAN 明文"
+	}
+	return "直连"
 }
 
 // agentAPIReachability describes how the workspace reaches AHA, for display.
@@ -176,12 +226,23 @@ func markAgentAPIProbeFailure(item domain.Workspace, message string) domain.Work
 // loopback, an SSH reverse tunnel to AHA's loopback, WSL localhost forwarding),
 // then the hidden manual override as a troubleshooting fallback. Every candidate
 // goes through normalizeAgentAPIBaseURL, so a plaintext address off loopback can
-// never be selected automatically — that is the whole point of the convergence,
-// and filtering here means no future candidate source can bypass it.
+// never be selected automatically — with one controlled exception: an SSH
+// workspace whose tunnel probe failed may fall back to AHA's own LAN address
+// over plaintext, built only from this host's addresses in the SSH branch below.
+// No stored setting, startup value, native, or WSL path can reach that relaxation.
 func (s *Service) agentAPIProbeCandidates(ctx context.Context, item domain.Workspace, settings domain.AgentAPISettings) []string {
 	result := []string{}
 	appendCandidate := func(raw string) {
 		value, err := normalizeAgentAPIBaseURL(raw)
+		if err == nil && value != "" {
+			result = appendUniqueAgentAPIURL(result, value)
+		}
+	}
+	// appendPlaintextLANCandidate is reachable only from the SSH fallback: the
+	// relaxed validator accepts a private LAN plaintext address, and the caller
+	// only ever supplies AHA's own private IPv4 addresses.
+	appendPlaintextLANCandidate := func(raw string) {
+		value, err := normalizeAgentAPIPlaintextCandidate(raw)
 		if err == nil && value != "" {
 			result = appendUniqueAgentAPIURL(result, value)
 		}
@@ -205,12 +266,32 @@ func (s *Service) agentAPIProbeCandidates(ctx context.Context, item domain.Works
 			appendCandidate(base)
 		}
 		if parseErr == nil && parsed.Scheme == "https" {
-			for _, host := range workspacepkg.AgentAPIHostCandidates(ctx, item) {
+			for _, host := range s.agentAPIWorkspaceHostCandidates(ctx, item) {
 				appendCandidate(agentAPIURLWithHost(parsed, host))
 			}
 		}
 	case "ssh":
+		// 1. AHA's loopback is the first attempt; probing it opens the reverse
+		// tunnel, which is the preferred path when the workspace's sshd allows it.
 		appendCandidate(base)
+		// 2. Controlled plaintext fallback. Only an SSH workspace with a loopback
+		// HTTP base can need it: the tunnel just failed, so the remaining path is
+		// AHA's own LAN address. Both sources describe this host — its interface
+		// addresses, and the address the workspace's sshd sees AHA connect from.
+		// Native/WSL run on this host and have their own paths; a stored or startup
+		// plaintext address never reaches this branch.
+		if loopbackBase && parsed.Scheme == "http" {
+			hosts := append([]string{}, s.agentAPIWorkspaceHostCandidates(ctx, item)...)
+			hosts = append(hosts, s.agentAPILocalHosts()...)
+			for _, host := range hosts {
+				// Bound detection time on hosts with many interfaces; probing each
+				// candidate costs a workspace-side request.
+				if len(result) >= 8 {
+					break
+				}
+				appendPlaintextLANCandidate(agentAPIURLWithHost(parsed, host))
+			}
+		}
 	default:
 		appendCandidate(base)
 	}
@@ -263,6 +344,87 @@ func normalizeAgentAPIBaseURL(raw string) (string, error) {
 		return "", fmt.Errorf("非 loopback 的明文 HTTP Agent API 地址已禁用；请使用 https:// 或 loopback 地址")
 	}
 	return value, nil
+}
+
+// normalizeAgentAPIPlaintextCandidate is the probe-only relaxation of the Agent
+// API boundary. It accepts a plaintext address off loopback, but only a private
+// IPv4 literal: candidates are built from AHA's own interface enumeration or the
+// SSH peer's view, never from a hostname, a public address, or a user-supplied
+// URL. It must not be used for stored settings, startup configuration, or
+// native/WSL candidates.
+func normalizeAgentAPIPlaintextCandidate(raw string) (string, error) {
+	value := strings.TrimRight(strings.TrimSpace(raw), "/")
+	if value == "" {
+		return "", nil
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.Scheme != "http" {
+		return "", fmt.Errorf("Agent API 探测候选必须是无凭据的 http:// 基址")
+	}
+	if parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", fmt.Errorf("Agent API 探测候选不能包含路径、查询或片段")
+	}
+	address := net.ParseIP(parsed.Hostname())
+	if address == nil || address.To4() == nil || address.IsLoopback() || address.IsUnspecified() || address.IsLinkLocalUnicast() || !address.IsPrivate() {
+		return "", fmt.Errorf("Agent API 明文探测候选必须是本机私网 LAN IPv4 地址")
+	}
+	return value, nil
+}
+
+// normalizeAgentAPIProbeResult validates a stored automatic-detection result.
+//
+// Only SSH may carry the controlled plaintext LAN fallback; every other
+// transport and every configured value stays under the strict boundary.
+func normalizeAgentAPIProbeResult(item domain.Workspace, raw string) (string, error) {
+	value, err := normalizeAgentAPIBaseURL(raw)
+	if err == nil || item.Transport != "ssh" {
+		return value, err
+	}
+	return normalizeAgentAPIPlaintextCandidate(raw)
+}
+
+func (s *Service) agentAPILocalHosts() []string {
+	if s.agentAPILocalHostsFn != nil {
+		return s.agentAPILocalHostsFn()
+	}
+	return localAgentAPIHosts()
+}
+
+func (s *Service) agentAPIWorkspaceHostCandidates(ctx context.Context, item domain.Workspace) []string {
+	if s.agentAPIWorkspaceHostsFn != nil {
+		return s.agentAPIWorkspaceHostsFn(ctx, item)
+	}
+	return workspacepkg.AgentAPIHostCandidates(ctx, item)
+}
+
+// localAgentAPIHosts lists the IPv4 addresses this host can be reached at from
+// the LAN. Loopback and link-local addresses are excluded: the former is already
+// the tunnel candidate, and neither is what a remote workspace needs.
+func localAgentAPIHosts() []string {
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+	result := []string{}
+	seen := map[string]bool{}
+	for _, networkInterface := range interfaces {
+		if networkInterface.Flags&net.FlagUp == 0 || networkInterface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addresses, _ := networkInterface.Addrs()
+		for _, raw := range addresses {
+			address, _, err := net.ParseCIDR(raw.String())
+			if err != nil || address == nil || address.To4() == nil || address.IsLoopback() || address.IsLinkLocalUnicast() {
+				continue
+			}
+			host := address.String()
+			if !seen[host] {
+				seen[host] = true
+				result = append(result, host)
+			}
+		}
+	}
+	return result
 }
 
 func agentAPIHostIsLoopback(host string) bool {
