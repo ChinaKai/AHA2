@@ -471,9 +471,50 @@ func TestAgentProxyExplicitHelperSkipsTheArchitectureCheck(t *testing.T) {
 	}
 }
 
-// TestAgentProxyReplacesAnOversizedManifest checks that a manifest larger than
-// the limit is never parsed or buffered: the ensure uploads over it instead.
-func TestAgentProxyReplacesAnOversizedManifest(t *testing.T) {
+// TestAgentProxyManifestReadRejectsOversizedFile calls the reader directly with
+// a manifest that is valid JSON but larger than the limit.
+//
+// The end-to-end ensure path cannot pin this: an unreadable manifest makes it
+// upload over the file, so "the limit fired" and "the limit is gone" both end in
+// a successful ensure. Only asking the reader itself distinguishes them.
+func TestAgentProxyManifestReadRejectsOversizedFile(t *testing.T) {
+	host, port := startExecSSHServer(t)
+	workspace := agentProxyTestWorkspace(host, port)
+	directory := t.TempDir()
+	runner := RunnerFor(workspace)
+
+	// Control: a normal manifest reads back, so a failure below is about size.
+	small := `{"protocol":1,"version":"1.0.0","os":"linux","arch":"amd64","sha256":"abc","updated_at":"2026-01-01T00:00:00Z"}`
+	if err := os.WriteFile(filepath.Join(directory, agentProxyManifestName), []byte(small), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := readAgentProxyManifest(context.Background(), runner, directory)
+	if err != nil || parsed == nil || parsed.Version != "1.0.0" {
+		t.Fatalf("small manifest read = %#v err=%v", parsed, err)
+	}
+
+	oversized := `{"protocol":1,"version":"1.0.0","os":"linux","arch":"amd64","sha256":"` +
+		strings.Repeat("x", agentProxyManifestLimit) + `","updated_at":"2026-01-01T00:00:00Z"}`
+	if len(oversized) <= agentProxyManifestLimit {
+		t.Fatalf("fixture is only %d bytes", len(oversized))
+	}
+	if !json.Valid([]byte(oversized)) {
+		t.Fatal("fixture is not valid JSON")
+	}
+	if err := os.WriteFile(filepath.Join(directory, agentProxyManifestName), []byte(oversized), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readAgentProxyManifest(context.Background(), runner, directory); err == nil {
+		t.Fatal("an oversized manifest was accepted")
+	} else if !strings.Contains(err.Error(), "manifest too large") {
+		t.Fatalf("err = %v, want a size rejection", err)
+	}
+}
+
+// TestAgentProxyEnsureOverwritesACorruptManifest covers recovery, not the size
+// limit: whatever the manifest contains, ensure must still leave a usable helper
+// behind.
+func TestAgentProxyEnsureOverwritesACorruptManifest(t *testing.T) {
 	host, port := startExecSSHServer(t)
 	workspace := agentProxyTestWorkspace(host, port)
 	workDir := t.TempDir()
@@ -507,5 +548,48 @@ func TestAgentProxyReplacesAnOversizedManifest(t *testing.T) {
 	}
 	if filepath.Dir(helper.Path) != shareDir {
 		t.Fatalf("helper landed outside the shared directory: %s", helper.Path)
+	}
+}
+
+// TestAgentProxyFallbackDirectoryIsCleanedWithTaskScratch pins the fallback's
+// lifetime: it lives inside the Task scratch, so closing the Task removes it
+// instead of leaving one helper copy per Task behind.
+func TestAgentProxyFallbackDirectoryIsCleanedWithTaskScratch(t *testing.T) {
+	host, port := startExecSSHServer(t)
+	workspace := agentProxyTestWorkspace(host, port)
+	workDir := t.TempDir()
+	t.Setenv(agentProxyHelperOverride, writeAgentProxyWrapper(t, t.TempDir(), "v1"))
+
+	// A regular file where the shared directory's parent must be makes the
+	// shared candidate fail deterministically, even for a privileged user.
+	contextRoot := filepath.Join(workDir, ".aha2-context")
+	if err := os.MkdirAll(contextRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	shareSentinel := filepath.Join(contextRoot, "share")
+	if err := os.WriteFile(shareSentinel, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	helper, err := EnsureAgentProxyHelper(context.Background(), workspace, workDir, "task-1", "1.0.0")
+	if err != nil {
+		t.Fatalf("ensure with an unusable shared directory: %v", err)
+	}
+	fallbackDir := filepath.Join(contextRoot, "task-1", "scratch", "agent-proxy")
+	if filepath.Dir(helper.Path) != fallbackDir {
+		t.Fatalf("helper path = %s, want %s", helper.Path, fallbackDir)
+	}
+	if !strings.Contains(helper.Note, "scratch") {
+		t.Fatalf("note does not name the fallback: %q", helper.Note)
+	}
+
+	if err := RemoveTaskScratch(context.Background(), workspace, workDir, "task-1"); err != nil {
+		t.Fatalf("remove scratch: %v", err)
+	}
+	if _, err := os.Stat(fallbackDir); !os.IsNotExist(err) {
+		t.Fatalf("fallback helper survived Task cleanup: %v", err)
+	}
+	if _, err := os.Stat(shareSentinel); err != nil {
+		t.Fatalf("Task cleanup touched the shared path: %v", err)
 	}
 }

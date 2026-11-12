@@ -359,6 +359,12 @@ func (s *stream) sendData(payload []byte) bool {
 func (s *stream) addCredit(value int64) {
 	s.sendMu.Lock()
 	s.credit += value
+	// A correct peer grants exactly what it consumed, so credit never exceeds
+	// the initial window. Clamping keeps a bogus WINDOW from turning into
+	// permission to push an unbounded backlog.
+	if s.credit > InitialWindow {
+		s.credit = InitialWindow
+	}
 	s.sendMu.Unlock()
 	select {
 	case s.creditWake <- struct{}{}:

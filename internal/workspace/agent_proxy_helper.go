@@ -102,8 +102,11 @@ func EnsureAgentProxyHelper(ctx context.Context, item domain.Workspace, workDir,
 	}
 	candidates := []candidate{
 		{dir: JoinRemotePath(item, workDir, ahaContextDirectoryName, agentProxyShareDirectory, agentProxyDirectoryName)},
-		{dir: JoinRemotePath(item, workDir, ahaContextDirectoryName, taskID, agentProxyDirectoryName),
-			note: "共享目录不可用，改用本 Task 的上下文目录"},
+		// Inside the Task scratch on purpose: RemoveTaskScratch deletes that whole
+		// directory when the Task closes, so a degraded fallback does not leave
+		// one helper copy behind per Task.
+		{dir: JoinRemotePath(item, workDir, ahaContextDirectoryName, taskID, scratchDirectoryName, agentProxyDirectoryName),
+			note: "共享目录不可用，改用本 Task 的 scratch 目录（随 Task 收尾清理）"},
 	}
 	if tempDir, tempErr := agentProxyTempDirectory(ctx, runner); tempErr == nil {
 		candidates = append(candidates, candidate{dir: tempDir, note: "工作区目录不可用，改用工作区临时目录"})

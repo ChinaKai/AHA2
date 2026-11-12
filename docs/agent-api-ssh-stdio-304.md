@@ -91,7 +91,8 @@ manifest 读取在远端先查大小（>4 KiB 直接拒绝），不把工作区�
 读者不会看到「manifest 指向还不存在的文件」。旧一代保留一份给正在运行的 helper
 （POSIX inode 语义），更早的删除。
 
-回退顺序：共享目录 → 本 Task 上下文目录 → 工作区 `/tmp/aha2-agent-proxy-<uid>`。
+回退顺序：共享目录 → 本 Task 的 `scratch/agent-proxy` → 工作区 `/tmp/aha2-agent-proxy-<uid>`。
+放在 scratch 里是为了让 `RemoveTaskScratch` 收尾时把它一起删掉，不按 Task 留副本。
 每次物化后执行 `<helper> version` 探活，noexec 挂载会在这里失败并继续回退；
 回退原因写进日志。写目录前检查它不是符号链接、且属于当前用户，临时文件用 `mktemp` 创建。
 
@@ -100,7 +101,7 @@ manifest 读取在远端先查大小（>4 KiB 直接拒绝），不把工作区�
 探活仍会证明它能不能真的跑起来。Windows 宿主配 Linux 工作区就靠这条路径。
 
 共享目录不在 Task 清理范围内：`RemoveTaskScratch` 只删 `.aha2-context/<task>/scratch`，
-`share/` 随工作区一起删除。
+`share/` 随工作区一起删除；scratch 里的回退副本随 Task 收尾删除。
 
 ## 安全边界
 
@@ -113,7 +114,7 @@ manifest 读取在远端先查大小（>4 KiB 直接拒绝），不把工作区�
 
 - `go test ./internal/agentproxy`：帧往返、坏帧/超长帧、8 路并发、半关闭、2×窗口以上的
   数据、单流故障隔离、真实 HTTP 请求、READY 超时与协议不符、接收侧超窗 reset、
-  单通道 256 流上限、超长 READY 行拒绝、https scheme 保留。
+  单通道 64 流上限、超长 READY 行拒绝、https scheme 保留。
 - `go test ./internal/workspace`：物化复用、版本升级与保留、4 路并发 ensure 且文件与
   manifest 一致、清理不删 `share/`、SSH 会话上的真实 HTTP 端到端、helper 缺失时有限重试后回退、
   显式 helper 跳过架构比较、超大 manifest 被覆盖。

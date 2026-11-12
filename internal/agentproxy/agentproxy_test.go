@@ -543,3 +543,21 @@ func TestSessionKeepsTheConfiguredScheme(t *testing.T) {
 		t.Fatalf("url = %q, want the https scheme preserved", session.URL)
 	}
 }
+
+// TestStreamClampsCreditToTheInitialWindow pins the sender-side bound: a peer
+// that grants more than the window would otherwise buy permission to push an
+// unbounded backlog.
+func TestStreamClampsCreditToTheInitialWindow(t *testing.T) {
+	mux := newMultiplexer(nil, nil, nil)
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+	instance := newStream(mux, 1, client)
+	instance.addCredit(1 << 30)
+	instance.sendMu.Lock()
+	credit := instance.credit
+	instance.sendMu.Unlock()
+	if credit != InitialWindow {
+		t.Fatalf("credit = %d, want %d", credit, InitialWindow)
+	}
+}
