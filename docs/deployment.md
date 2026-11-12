@@ -127,7 +127,7 @@ powershell.exe -ExecutionPolicy Bypass -File scripts\build-and-deploy-windows-us
 数据目录所在卷需要 `aha2.db`、`aha2.db-wal`、`aha2.db-shm` 当前大小的 2 倍（备份复制加 WAL 增长和
 临时文件余量）再加 1GiB 安全余量；安装目录所在卷预留 200MB；临时目录（安装包暂存）所在卷预留 300MB，
 但临时目录只在安装器分支检查，`-UpdateExistingInstallInPlace` 在目标目录旁暂存，不要求临时卷空间。
-同一卷上的需求合并计算，任何一卷不足都会直接失败。结果 JSON 记录 `Stage=preflight`、
+同一卷上的需求合并计算，任何一卷不足都会直接失败；失败说明只列出本次实际检查的角色，installer 模式包含临时目录预留，in-place 模式不会出现临时目录/temp 字样。结果 JSON 记录 `Stage=preflight`、
 `Volume`/`FreeBytes`/`RequiredBytes`（数据卷）和 `Volumes`（每个卷的角色、可用与需求），
 **不会停止 AHA2，也不会复制或替换任何文件**；外层 `build-and-deploy-windows-user.ps1` 和
 `local_build.sh` 会按非 0 退出码原样报错。空间足够时逐卷记录 Free/Required 日志；后续流程与之前一致。

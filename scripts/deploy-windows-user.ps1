@@ -223,6 +223,25 @@ function Format-AHA2ByteSize {
   return ("{0} B" -f $Bytes)
 }
 
+function Get-AHA2PreflightRequirementText {
+  param($Check)
+  # The failure text must describe only the roles this preflight actually
+  # checked. An in-place update checks data and install; claiming a temp
+  # requirement there would mislead the operator about what failed.
+  $checkedRoles = @($Check.Volumes | ForEach-Object { @($_.Roles) } | Select-Object -Unique)
+  $parts = New-Object System.Collections.ArrayList
+  if ($checkedRoles -contains "data") {
+    [void]$parts.Add(("数据库三件套当前 {0} 字节 × 2 + 1GiB 数据卷余量" -f [long]$Check.DatabaseBytes))
+  }
+  if ($checkedRoles -contains "install") {
+    [void]$parts.Add(("安装目录预留 {0} 字节" -f $script:aha2InstallSpaceAllowanceBytes))
+  }
+  if ($checkedRoles -contains "temp") {
+    [void]$parts.Add(("临时目录预留 {0} 字节" -f $script:aha2TempSpaceAllowanceBytes))
+  }
+  return ("需求 = " + ($parts -join "；") + "；同一卷上的需求合并计算。")
+}
+
 function Set-AHA2PreflightFailure {
   param($Record, $Check)
   $Record.Status = "failed"
@@ -242,13 +261,11 @@ function Set-AHA2PreflightFailure {
       $_.RequiredBytes
     ))
   }) -join "；"
-  $message = ("部署前磁盘空间不足，已取消部署：{0}。需求 = 数据库三件套当前 {1} 字节 × 2 + 1GiB 数据卷余量；" +
-    "安装目录预留 {2} 字节；临时目录预留 {3} 字节；同一卷上的需求合并计算。" +
+  $requirementText = Get-AHA2PreflightRequirementText -Check $Check
+  $message = ("部署前磁盘空间不足，已取消部署：{0}。{1}" +
     "AHA2 未被停止，也没有复制或替换任何文件。") -f @(
       $details,
-      [long]$Check.DatabaseBytes,
-      $script:aha2InstallSpaceAllowanceBytes,
-      $script:aha2TempSpaceAllowanceBytes
+      $requirementText
     )
   $Record.Value = $message
   return $message
@@ -798,6 +815,25 @@ function Invoke-AHA2SelfTest {
     Assert-AHA2SelfTest $splitThrew "production preflight throws when the temp volume is short"
     Assert-AHA2SelfTest (@($splitRecord.Volumes).Count -eq 2) "split-volume failure records every checked volume"
     Assert-AHA2SelfTest ($splitRecord.Value -match "F:\\" -and $splitRecord.Value -match "temp") "split-volume failure names the short volume and role"
+    Assert-AHA2SelfTest ($splitRecord.Value -match "临时目录预留" -and $splitRecord.Value -match ([string]$script:aha2TempSpaceAllowanceBytes)) "installer preflight failure text explains the temp allowance"
+
+    # In-place failures must describe only the roles they checked; temp wording
+    # in the user-facing message would contradict the actual check.
+    $freeByVolume["D:\"] = [long]($dataRequired + $script:aha2InstallSpaceAllowanceBytes - 1)
+    $inPlaceShortRecord = New-AHA2ResultRecord
+    $inPlaceShortThrew = $false
+    $inPlaceShortMessage = ""
+    try {
+      [void](Invoke-AHA2DeploymentPreflight -Record $inPlaceShortRecord @inPlaceRequest -FreeSpaceProvider $freeSpaceProvider -VolumeResolver $volumeResolver)
+    } catch {
+      $inPlaceShortThrew = $true
+      $inPlaceShortMessage = $_.Exception.Message
+    }
+    Assert-AHA2SelfTest $inPlaceShortThrew "production in-place preflight aborts when its volumes are short"
+    Assert-AHA2SelfTest ($inPlaceShortMessage -match "磁盘空间不足") "in-place preflight failure gives the Chinese space error"
+    Assert-AHA2SelfTest ($inPlaceShortMessage -notmatch "临时目录|temp|300MB") "in-place preflight failure text never mentions temp space"
+    Assert-AHA2SelfTest ($inPlaceShortMessage -match "安装目录预留") "in-place preflight failure text describes the install allowance"
+    Assert-AHA2SelfTest ($inPlaceShortRecord.Value -eq $inPlaceShortMessage) "in-place failure result value matches the thrown message"
 
     # Missing sidecars count as zero bytes instead of failing the preflight.
     $databaseOnly = Get-AHA2DeploymentPreflight -DataDirectory $preflightRoot -DatabasePaths @($preflightDatabase) -FreeSpaceProvider { param($Volume) return [long]0 }
