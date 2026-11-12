@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/ChinaKai/AHA2/internal/app"
+	"github.com/ChinaKai/AHA2/internal/domain"
 )
 
 func (s *Server) petWorkbench(writer http.ResponseWriter, request *http.Request) {
@@ -29,7 +30,7 @@ func (s *Server) petWorkbench(writer http.ResponseWriter, request *http.Request)
 		"core": view.Core, "worklog": view.Worklog, "worklog_total": view.WorklogTotal,
 		"approvals": view.Approvals, "approval_total": view.ApprovalTotal,
 		"approval_counts": view.ApprovalCounts,
-		"watches": view.Watches, "task": view.Task, "updated_at": view.UpdatedAt,
+		"watches":         view.Watches, "task": view.Task, "updated_at": view.UpdatedAt,
 		"channels": view.Channels, "channel_total": view.ChannelTotal, "channel_note": view.ChannelNote,
 		"inspection": view.Inspection,
 	})
@@ -121,7 +122,11 @@ func (s *Server) resolvePetApproval(writer http.ResponseWriter, request *http.Re
 	if reason == "" {
 		reason = input.Note
 	}
-	item, err := s.app.ResolvePetApproval(request.Context(), request.PathValue("id"), input.Decision, reason)
+	audited := false
+	item, err := s.app.ResolvePetApprovalBeforeExecution(request.Context(), request.PathValue("id"), input.Decision, reason, func(item domain.PetApproval) {
+		audited = true
+		s.audit(request, "pet.approval.resolve", "pet_approval", item.ID, map[string]any{"status": item.Status})
+	})
 	if err != nil {
 		status := http.StatusBadRequest
 		if strings.Contains(err.Error(), "已经处理过") {
@@ -130,7 +135,15 @@ func (s *Server) resolvePetApproval(writer http.ResponseWriter, request *http.Re
 		writeJSON(writer, status, map[string]any{"ok": false, "error": "pet_approval_resolve_failed", "message": err.Error()})
 		return
 	}
-	s.audit(request, "pet.approval.resolve", "pet_approval", item.ID, map[string]any{"status": item.Status})
+	if !audited {
+		s.audit(request, "pet.approval.resolve", "pet_approval", item.ID, map[string]any{"status": item.Status})
+	}
+	// A heavy delete was claimed and is running in the background; report the
+	// acceptance instead of holding this connection open for the transaction.
+	if item.Status == "executing" {
+		writeJSON(writer, http.StatusAccepted, map[string]any{"ok": true, "status": "executing"})
+		return
+	}
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "approval": item})
 }
 

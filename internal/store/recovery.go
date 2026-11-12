@@ -12,7 +12,13 @@ type RecoveryResult struct {
 	Turns              int `json:"turns"`
 	Tasks              int `json:"tasks"`
 	RequeuedInboxItems int `json:"requeued_inbox_items"`
+	PetApprovals       int `json:"pet_approvals"`
 }
+
+// PetApprovalRestartInterrupted is written to an approval whose background
+// execution was cut off by a service restart. The delete transaction rolled
+// back with the process, so the row only needs to become retryable again.
+const PetApprovalRestartInterrupted = "服务重启导致执行中断，请重试"
 
 func (s *Store) RecoverInterrupted(ctx context.Context, now time.Time) (RecoveryResult, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -79,6 +85,17 @@ func (s *Store) RecoverInterrupted(ctx context.Context, now time.Time) (Recovery
 	); err != nil {
 		return RecoveryResult{}, fmt.Errorf("recover rounds: %w", err)
 	}
+	// A heavy approval executes in one transaction in a background goroutine.
+	// A restart kills that goroutine before it can finalize, so the transaction
+	// is rolled back and the approval may be retried by the owner.
+	approvalResult, err := tx.ExecContext(ctx, `
+		UPDATE pet_approvals SET status='pending',resolution=?,decision_reason=?,resolved_at=''
+		WHERE status='executing'`,
+		PetApprovalRestartInterrupted, PetApprovalRestartInterrupted,
+	)
+	if err != nil {
+		return RecoveryResult{}, fmt.Errorf("recover pet approvals: %w", err)
+	}
 	taskResult, err := tx.ExecContext(ctx, `
 		UPDATE tasks SET status=?,updated_at=?
 		WHERE status IN (?,?) AND EXISTS (
@@ -98,8 +115,10 @@ func (s *Store) RecoverInterrupted(ctx context.Context, now time.Time) (Recovery
 	tasks, _ := taskResult.RowsAffected()
 	requeued, _ := requeueResult.RowsAffected()
 	liveRequeued, _ := liveRequeueResult.RowsAffected()
+	approvals, _ := approvalResult.RowsAffected()
 	return RecoveryResult{
 		Turns: int(turns), Tasks: int(tasks),
 		RequeuedInboxItems: int(requeued + liveRequeued),
+		PetApprovals:       int(approvals),
 	}, nil
 }

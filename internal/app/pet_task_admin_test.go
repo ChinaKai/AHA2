@@ -108,6 +108,9 @@ func TestPetTaskLifecycleAndRead(t *testing.T) {
 	if _, err := fixture.service.ResolvePetApproval(fixture.ctx, approval.ID, "approve", ""); err != nil {
 		t.Fatal(err)
 	}
+	if final := waitPetApprovalFinal(t, fixture, approval.ID); final.Status != petApprovalApproved {
+		t.Fatalf("task delete approval did not finish: %#v", final)
+	}
 	if _, err := fixture.database.Task(fixture.ctx, task.ID); err == nil {
 		t.Fatal("task still exists after approval")
 	}

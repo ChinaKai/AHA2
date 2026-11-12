@@ -69,6 +69,9 @@ func TestPetProjectWorkspaceAdmin(t *testing.T) {
 	if _, err := fixture.service.ResolvePetApproval(fixture.ctx, workspaceApproval.ID, "approve", ""); err != nil {
 		t.Fatal(err)
 	}
+	if final := waitPetApprovalFinal(t, fixture, workspaceApproval.ID); final.Status != petApprovalApproved {
+		t.Fatalf("workspace approval did not finish: %#v", final)
+	}
 	if _, err := fixture.database.Workspace(fixture.ctx, workspace.ID); err == nil {
 		t.Fatal("workspace still exists after approval")
 	}
@@ -91,6 +94,9 @@ func TestPetProjectWorkspaceAdmin(t *testing.T) {
 	}
 	if _, err := fixture.service.ResolvePetApproval(fixture.ctx, projectApproval.ID, "approve", ""); err != nil {
 		t.Fatal(err)
+	}
+	if final := waitPetApprovalFinal(t, fixture, projectApproval.ID); final.Status != petApprovalApproved {
+		t.Fatalf("project approval did not finish: %#v", final)
 	}
 	if _, err := fixture.database.Project(fixture.ctx, project.ID); err == nil {
 		t.Fatal("project still exists after approval")
@@ -143,8 +149,12 @@ func TestPetDeleteWorkspaceRefusesActiveTurn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.service.ResolvePetApproval(fixture.ctx, approval.ID, "approve", ""); err == nil || !strings.Contains(err.Error(), "执行中") {
-		t.Fatalf("approving deletion with an active turn: err=%v", err)
+	if _, err := fixture.service.ResolvePetApproval(fixture.ctx, approval.ID, "approve", ""); err != nil {
+		t.Fatalf("approval claim should be accepted before the background check runs: %v", err)
+	}
+	final := waitPetApprovalFinal(t, fixture, approval.ID)
+	if final.Status != petApprovalPending || !strings.Contains(final.DecisionReason, "执行中") {
+		t.Fatalf("approving deletion with an active turn: %#v", final)
 	}
 	if _, err := fixture.database.Workspace(fixture.ctx, workspace.ID); err != nil {
 		t.Fatalf("workspace was deleted while a turn was running: %v", err)
@@ -204,8 +214,12 @@ func TestPetDeleteWorkspaceRollsBackTasksWhenSnapshotIsShared(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.service.ResolvePetApproval(fixture.ctx, approval.ID, "approve", ""); err == nil || !strings.Contains(err.Error(), "引用") {
-		t.Fatalf("approving a workspace whose snapshot is shared: err=%v", err)
+	if _, err := fixture.service.ResolvePetApproval(fixture.ctx, approval.ID, "approve", ""); err != nil {
+		t.Fatalf("approval claim should be accepted before the background check runs: %v", err)
+	}
+	final := waitPetApprovalFinal(t, fixture, approval.ID)
+	if final.Status != petApprovalPending || !strings.Contains(final.DecisionReason, "引用") {
+		t.Fatalf("approving a workspace whose snapshot is shared: %#v", final)
 	}
 	if _, err := fixture.database.Task(fixture.ctx, targetTask.ID); err != nil {
 		t.Fatalf("half-deleted: target task is gone: %v", err)
@@ -215,5 +229,110 @@ func TestPetDeleteWorkspaceRollsBackTasksWhenSnapshotIsShared(t *testing.T) {
 	}
 	if _, err := fixture.database.Task(fixture.ctx, sharingTask.ID); err != nil {
 		t.Fatalf("sharing task is gone: %v", err)
+	}
+	// The failed approval went back to pending, so the owner can retry after
+	// clearing the reference that blocked the transaction.
+	if err := fixture.database.DeleteTaskWithSyncTombstone(fixture.ctx, sharingTask.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.service.ResolvePetApproval(fixture.ctx, approval.ID, "approve", ""); err != nil {
+		t.Fatalf("retry claim should be accepted: %v", err)
+	}
+	if retried := waitPetApprovalFinal(t, fixture, approval.ID); retried.Status != petApprovalApproved {
+		t.Fatalf("retried approval did not finish approved: %#v", retried)
+	}
+	if _, err := fixture.database.Workspace(fixture.ctx, targetWorkspace.ID); err == nil {
+		t.Fatal("target workspace still exists after a successful retry")
+	}
+	if _, err := fixture.database.Task(fixture.ctx, targetTask.ID); err == nil {
+		t.Fatal("target task still exists after a successful retry")
+	}
+}
+
+func TestPetDeleteProjectRollsBackWholeGraph(t *testing.T) {
+	fixture := newPetTaskFixture(t)
+	if _, err := fixture.service.OwnerAssistant(fixture.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.service.UpdateOwnerPetSettings(fixture.ctx, PetSettingsInput{
+		Enabled: true, ChatModelID: fixture.model.ID, Actions: []string{"walk"},
+		IdleMinutes: 5, QuietStart: 22, QuietEnd: 8, HourlyLimit: 2,
+		AllowCreateTasks: boolPointer(true), AllowCreateWorkspaces: boolPointer(true),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	createGraph := func(name string) (domain.Project, domain.Workspace, domain.Task) {
+		t.Helper()
+		project, err := fixture.service.PetCreateProject(fixture.ctx, PetCreateProjectInput{Name: name})
+		if err != nil {
+			t.Fatal(err)
+		}
+		workspace, err := fixture.service.PetCreateWorkspace(fixture.ctx, PetCreateWorkspaceInput{
+			ProjectID: project.ID, Name: name, RootPath: t.TempDir(),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		task, err := fixture.service.CreateTask(fixture.ctx, CreateTaskInput{
+			ProjectID: project.ID, WorkspaceID: workspace.ID, Title: name, Request: name,
+			ModelID: fixture.model.ID, Isolation: "inplace", Filesystem: "workspace-write",
+			Approval: "never", CollaborationMode: "single", MaxAgents: 1, StartMode: "manual",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return project, workspace, task
+	}
+	targetProject, targetWorkspace, targetTask := createGraph("待删除项目图")
+	otherProject, otherWorkspace, sharingTask := createGraph("引用项目图")
+	if err := fixture.database.UpdateTaskRuntimeSnapshot(fixture.ctx, sharingTask.ID, targetTask.RuntimeConfigSnapshotID, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	approval, err := fixture.service.PetDeleteProject(fixture.ctx, targetProject.ID, "验证项目删除整体回滚")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.service.ResolvePetApproval(fixture.ctx, approval.ID, "approve", ""); err != nil {
+		t.Fatalf("approval claim should be accepted before the background check runs: %v", err)
+	}
+	final := waitPetApprovalFinal(t, fixture, approval.ID)
+	if final.Status != petApprovalPending || !strings.Contains(final.DecisionReason, "引用") {
+		t.Fatalf("approving a project whose workspace snapshot is shared: %#v", final)
+	}
+	for name, check := range map[string]func() error{
+		"project":   func() error { _, err := fixture.database.Project(fixture.ctx, targetProject.ID); return err },
+		"workspace": func() error { _, err := fixture.database.Workspace(fixture.ctx, targetWorkspace.ID); return err },
+		"task":      func() error { _, err := fixture.database.Task(fixture.ctx, targetTask.ID); return err },
+		"sharing":   func() error { _, err := fixture.database.Task(fixture.ctx, sharingTask.ID); return err },
+	} {
+		if err := check(); err != nil {
+			t.Fatalf("half-deleted project: %s is gone: %v", name, err)
+		}
+	}
+	// Retry after clearing the reference: the whole graph is removed now.
+	if err := fixture.database.DeleteTaskWithSyncTombstone(fixture.ctx, sharingTask.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.service.ResolvePetApproval(fixture.ctx, approval.ID, "approve", ""); err != nil {
+		t.Fatalf("retry claim should be accepted: %v", err)
+	}
+	if retried := waitPetApprovalFinal(t, fixture, approval.ID); retried.Status != petApprovalApproved {
+		t.Fatalf("retried project approval did not finish approved: %#v", retried)
+	}
+	if _, err := fixture.database.Project(fixture.ctx, targetProject.ID); err == nil {
+		t.Fatal("target project still exists after a successful retry")
+	}
+	if _, err := fixture.database.Workspace(fixture.ctx, targetWorkspace.ID); err == nil {
+		t.Fatal("target workspace still exists after a successful retry")
+	}
+	if _, err := fixture.database.Task(fixture.ctx, targetTask.ID); err == nil {
+		t.Fatal("target task still exists after a successful retry")
+	}
+	if _, err := fixture.database.Project(fixture.ctx, otherProject.ID); err != nil {
+		t.Fatalf("other project was deleted: %v", err)
+	}
+	if _, err := fixture.database.Workspace(fixture.ctx, otherWorkspace.ID); err != nil {
+		t.Fatalf("other workspace was deleted: %v", err)
 	}
 }

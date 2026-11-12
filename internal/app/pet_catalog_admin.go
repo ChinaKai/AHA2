@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -118,48 +117,36 @@ func (s *Service) deleteProjectNow(ctx context.Context, projectID string) error 
 	if err != nil {
 		return err
 	}
+	// Snapshot the Tasks and Workspaces before the transaction commits so their
+	// scratch directories and SSH credentials can be removed afterwards. The
+	// store deletes the whole graph in one transaction, so a refusal leaves the
+	// project, its Tasks and its Workspaces intact.
 	tasks, err := s.store.ListTasks(ctx, "")
 	if err != nil {
 		return err
 	}
-	for _, task := range tasks {
-		if task.ProjectID != project.ID {
-			continue
+	workspaces, _ := s.store.ListWorkspaces(ctx, "")
+	if err := s.store.DeleteProjectWithSyncTombstone(ctx, project.ID); err != nil {
+		switch {
+		case errors.Is(err, store.ErrProjectHasActiveTurn):
+			return fmt.Errorf("项目下有执行中的任务，请先中断或等待完成")
+		case errors.Is(err, store.ErrWorkspaceInUse):
+			return fmt.Errorf("项目的 Workspace 仍被其他任务或运行记录引用")
 		}
-		if _, activeErr := s.store.ActiveTurn(ctx, task.ID); activeErr == nil {
-			return fmt.Errorf("项目下有执行中的任务 %s，请先中断或等待完成", task.ID)
-		} else if !errors.Is(activeErr, sql.ErrNoRows) {
-			return activeErr
-		}
+		return err
 	}
 	for _, task := range tasks {
 		if task.ProjectID != project.ID {
 			continue
-		}
-		if err := s.store.DeleteTaskWithSyncTombstone(ctx, task.ID); err != nil {
-			return err
 		}
 		if cleanupErr := s.CleanupTaskScratch(ctx, task); cleanupErr != nil {
 			log.Printf("cleanup task scratch %s: %v", task.ID, cleanupErr)
 		}
-		if task.RuntimeConfigSnapshotID != "" {
-			_ = s.store.DeleteRuntimeSnapshot(ctx, task.RuntimeConfigSnapshotID)
-		}
 	}
-	workspaces, _ := s.store.ListWorkspaces(ctx, "")
 	for _, workspace := range workspaces {
-		if workspace.ProjectID != project.ID {
-			continue
+		if workspace.ProjectID == project.ID {
+			s.deleteWorkspaceSecret(workspace)
 		}
-		if workspace.ReadOnly {
-			_ = s.store.DeleteWorkspace(ctx, workspace.ID)
-		} else if err := s.store.DeleteWorkspaceWithSyncTombstone(ctx, workspace.ID); err != nil {
-			return err
-		}
-		s.deleteWorkspaceSecret(workspace)
-	}
-	if err := s.store.DeleteProject(ctx, project.ID); err != nil {
-		return err
 	}
 	_ = s.store.AppendPetEvent(ctx, domain.PetEvent{
 		ID: domain.NewID("pet_event"), At: s.now().UTC(), Actor: "pet", Kind: "project_deleted",

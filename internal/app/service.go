@@ -178,11 +178,15 @@ type Service struct {
 	petChannels          PetChannelSender
 	petSecurity          PetSecurityApplier
 	petHardware          PetHardwareDisconnector
-	agentAPI             *agentapi.Capabilities
-	agentAPIURL          string
-	buildVersion         string
-	webVersion           string
-	startedAt            time.Time
+	// Heavy approvals run outside the HTTP request. The hook and timeout are
+	// test seams: production leaves the hook nil and uses the default budget.
+	petApprovalExecutionHook    func(context.Context, domain.PetApproval) error
+	petApprovalExecutionTimeout time.Duration
+	agentAPI                    *agentapi.Capabilities
+	agentAPIURL                 string
+	buildVersion                string
+	webVersion                  string
+	startedAt                   time.Time
 
 	// These three are detection seams. Production uses the workspace probe and
 	// the real host enumeration; tests substitute them so address selection can be
@@ -234,6 +238,14 @@ func (s *Service) SetPetSecurityApplier(applier PetSecurityApplier) {
 
 func (s *Service) SetPetHardwareDisconnector(disconnector PetHardwareDisconnector) {
 	s.petHardware = disconnector
+}
+
+// SetPetApprovalExecutionHook replaces the executor for heavy owner approvals.
+// It exists for integration tests that need a slow or failing execution to
+// prove the HTTP request is accepted before the work finishes. Production
+// leaves it nil so executePetApproval runs.
+func (s *Service) SetPetApprovalExecutionHook(hook func(context.Context, domain.PetApproval) error) {
+	s.petApprovalExecutionHook = hook
 }
 
 type sharedContextState struct {

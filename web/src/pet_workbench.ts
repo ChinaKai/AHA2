@@ -30,13 +30,21 @@ export function petApprovalKindMatches(kind: string, filter: PetApprovalKindFilt
   return filter === "all" || (filter === "idea" ? kind === "idea" : kind !== "idea");
 }
 
+function petApprovalStatusMatches(status: string, filter: PetApprovalStatusFilter): boolean {
+  if (filter === "all") return true;
+  // A heavy approval being executed in the background is still awaiting the
+  // owner's final state, so the pending filter keeps its card visible.
+  if (filter === "pending") return status === "pending" || status === "executing";
+  return status === filter;
+}
+
 export function petApprovalMatches(
   item: {kind?: string; status?: string},
   kindFilter: PetApprovalKindFilter,
   statusFilter: PetApprovalStatusFilter,
 ): boolean {
   if (!petApprovalKindMatches(String(item.kind ?? ""), kindFilter)) return false;
-  return statusFilter === "all" || String(item.status ?? "") === statusFilter;
+  return petApprovalStatusMatches(String(item.status ?? ""), statusFilter);
 }
 
 function nonNegativeCount(value: unknown): number {
@@ -64,7 +72,7 @@ export function petApprovalPage(
     let total = 0;
     for (const group of counts) {
       if (!group || !petApprovalKindMatches(String(group.kind ?? ""), options.kind)) continue;
-      if (options.status !== "all" && String(group.status ?? "") !== options.status) continue;
+      if (!petApprovalStatusMatches(String(group.status ?? ""), options.status)) continue;
       total += nonNegativeCount(group.count);
     }
     return {shown, total, canLoadMore: shown < total && !capReached};

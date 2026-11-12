@@ -53,6 +53,16 @@ test("picker escapes values and approve note must be an offered option", () => {
   assert.equal(selectedPetApprovalOption(["replay", "skip"], undefined), "");
 });
 
+test("heavy approval cards show the executing state and refresh until it finishes", async () => {
+  const main = await readFile(resolve(root, "src", "main.ts"), "utf8");
+  assert.match(main, /const status = executing \? tr\("执行中"\)/);
+  assert.match(main, /petWorkbench\.approvalExecutingHint/);
+  assert.match(main, /const cardButtons = card[\s\S]{0,200}\.disabled = true/);
+  assert.match(main, /if \(result\.status === "executing"\) scheduleApprovalExecutionPoll\(\)/);
+  assert.match(main, /function scheduleApprovalExecutionPoll\(\): void/);
+  assert.match(main, /some\(item => item\.status === "executing"\)/);
+});
+
 test("approval cards wire the picker into approve and keep reject/cancel paths", async () => {
   const main = await readFile(resolve(root, "src", "main.ts"), "utf8");
   assert.match(main, /renderPetApprovalOptionPicker\(item\.id, petApprovalOptions\(item\), tr\)/);

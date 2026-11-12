@@ -6902,6 +6902,7 @@ async function bindPetWorkbenchPage(): Promise<void> {
       const degradedChannels = (view.channels || []).filter(item => item.degraded).length;
       if (channelCount) channelCount.textContent = degradedChannels > 0 ? String(degradedChannels) : "";
       renderTab();
+      if ((view.approvals || []).some(item => item.status === "executing")) scheduleApprovalExecutionPoll();
     },
     onError: message => {
       view = null;
@@ -6913,6 +6914,24 @@ async function bindPetWorkbenchPage(): Promise<void> {
   });
   binding = petWorkbenchPageKeeper.adopt(body, body.closest<HTMLElement>(".pet-workbench-page"), loader, active);
   const load = () => loader.load();
+
+  // A heavy delete is executed in the background after the resolve returns
+  // 202, so the card is refreshed until the approval leaves "executing".
+  // Polling stops as soon as the page is detached or no execution remains.
+  let approvalPollTimer: ReturnType<typeof setTimeout> | null = null;
+  function scheduleApprovalExecutionPoll(): void {
+    if (approvalPollTimer !== null) return;
+    approvalPollTimer = setTimeout(async () => {
+      approvalPollTimer = null;
+      if (!body.isConnected || !binding || petWorkbenchPageKeeper.binding !== binding) return;
+      if (!(view?.approvals || []).some(item => item.status === "executing")) return;
+      await load();
+      if (body.isConnected && binding && petWorkbenchPageKeeper.binding === binding &&
+          (view?.approvals || []).some(item => item.status === "executing")) {
+        scheduleApprovalExecutionPoll();
+      }
+    }, 3000);
+  }
 
   // A failed resolve must not look like a dead button. The API client already
   // puts the server's `message` in error.message; show it on the card that was
@@ -6956,13 +6975,18 @@ async function bindPetWorkbenchPage(): Promise<void> {
           decisionReason = (window.prompt(t("petApproval.rejectReasonPrompt")) || "").trim();
           if (!decisionReason) return;
         }
-        button.disabled = true;
+        const card = button.closest<HTMLElement>(".pet-approval-card");
+        const cardButtons = card
+          ? [...card.querySelectorAll<HTMLButtonElement>("[data-pet-approval-decision]")]
+          : [button];
+        cardButtons.forEach(item => { item.disabled = true; });
         try {
-          await api.resolvePetApproval(id, decision, decisionReason);
+          const result = await api.resolvePetApproval(id, decision, decisionReason);
           await refreshPetPendingApprovalCount(true);
           await load();
+          if (result.status === "executing") scheduleApprovalExecutionPoll();
         } catch (error) {
-          button.disabled = false;
+          cardButtons.forEach(item => { item.disabled = false; });
           showApprovalError(button, error instanceof Error ? error.message : String(error));
         }
       });
@@ -7119,17 +7143,19 @@ function renderPetChannelHealth(items: PetChannelHealth[], note: string, total =
 function renderPetApprovals(items: Array<{id: string; title: string; summary: string; reason?: string; status: string; risk: string; kind: string; payload?: string; resolution?: string; decision_reason?: string}>, empty = t("petWorkbench.emptyApprovals")): string {
   if (items.length === 0) return `<div class="field-help">${escapeHTML(empty)}</div>`;
   return items.map(item => {
+    const executing = item.status === "executing";
     const pending = item.status === "pending";
-    const status = item.status === "approved" ? tr("已批准") : item.status === "rejected" ? tr("已拒绝") : item.status === "cancelled" ? tr("已取消") : tr("待审批");
+    const status = executing ? tr("执行中") : item.status === "approved" ? tr("已批准") : item.status === "rejected" ? tr("已拒绝") : item.status === "cancelled" ? tr("已取消") : tr("待审批");
     const kind = item.kind === "idea" ? t("petWorkbench.ideas") : t("petWorkbench.approvals");
     const picker = pending ? renderPetApprovalOptionPicker(item.id, petApprovalOptions(item), tr) : "";
     const actions = pending
       ? `${picker}<div class="pet-approval-actions"><button type="button" class="primary" data-pet-approval-decision="approve" data-pet-approval-id="${escapeHTML(item.id)}">${tr("批准")}</button><button type="button" data-pet-approval-decision="reject" data-pet-approval-id="${escapeHTML(item.id)}">${tr("拒绝")}</button><button type="button" data-pet-approval-decision="cancel" data-pet-approval-id="${escapeHTML(item.id)}">${tr("取消")}</button></div>`
       : "";
-    return `<article class="pet-approval-card ${pending ? "pending" : ""}">
+    return `<article class="pet-approval-card ${pending ? "pending" : ""} ${executing ? "executing" : ""}">
       <header><strong>${escapeHTML(item.title)}</strong><span class="pet-approval-status">${kind} · ${escapeHTML(status)} · ${escapeHTML(item.risk)}</span></header>
       ${item.reason ? `<p class="pet-approval-reason"><strong>${t("petApproval.reason")}:</strong> ${escapeHTML(item.reason)}</p>` : ""}
       <p>${escapeHTML(item.summary)}</p>
+      ${executing ? `<p class="field-help">${escapeHTML(t("petWorkbench.approvalExecutingHint"))}</p>` : ""}
       <small>${escapeHTML(item.kind)}${item.decision_reason ? ` · ${t("petApproval.decisionReason")}: ${escapeHTML(item.decision_reason)}` : item.resolution ? ` · ${escapeHTML(item.resolution)}` : ""}</small>
       ${actions}
     </article>`;

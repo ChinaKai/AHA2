@@ -287,12 +287,13 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 	if err != nil {
 		return err
 	}
-	if recovery.Turns > 0 {
+	if recovery.Turns > 0 || recovery.PetApprovals > 0 {
 		logger.Warn(
 			"recovered interrupted runtime",
 			"turns", recovery.Turns,
 			"tasks", recovery.Tasks,
 			"requeued_inbox_items", recovery.RequeuedInboxItems,
+			"pet_approvals", recovery.PetApprovals,
 		)
 	}
 	secretStore, err := secrets.Open(filepath.Join(absoluteDataDir, "secrets.json"))

@@ -40,7 +40,7 @@ func (s *Store) ListPetApprovals(ctx context.Context, limit int) ([]domain.PetAp
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id,task_id,kind,title,summary,risk,reason,payload_json,status,resolution,decision_reason,created_at,resolved_at
 		FROM pet_approvals
-		ORDER BY CASE status WHEN 'pending' THEN 0 ELSE 1 END, created_at DESC
+		ORDER BY CASE status WHEN 'pending' THEN 0 WHEN 'executing' THEN 0 ELSE 1 END, created_at DESC
 		LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
@@ -100,7 +100,7 @@ func (s *Store) ListPetApprovalsWithTotal(ctx context.Context, limit int) ([]dom
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id,task_id,kind,title,summary,risk,reason,payload_json,status,resolution,decision_reason,created_at,resolved_at
 		FROM pet_approvals
-		ORDER BY CASE status WHEN 'pending' THEN 0 ELSE 1 END, created_at DESC
+		ORDER BY CASE status WHEN 'pending' THEN 0 WHEN 'executing' THEN 0 ELSE 1 END, created_at DESC
 		LIMIT ?`, limit)
 	if err != nil {
 		return nil, 0, err
@@ -152,6 +152,65 @@ func (s *Store) ResolvePetApproval(ctx context.Context, id, status, resolution s
 		UPDATE pet_approvals SET status=?,resolution=?,decision_reason=?,resolved_at=?
 		WHERE id=? AND status='pending'`,
 		status, resolution, reason, timeString(resolvedAt), id)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+// ClaimPetApprovalExecution atomically moves one pending approval to
+// 'executing'. The conditional update is the concurrency guard: two owner
+// clicks racing on the same approval produce exactly one claim, and the loser
+// must be reported as already processed rather than running the action twice.
+func (s *Store) ClaimPetApprovalExecution(ctx context.Context, id string) (bool, error) {
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE pet_approvals SET status='executing',resolution='',decision_reason='',resolved_at=''
+		WHERE id=? AND status='pending'`, id)
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected == 1, nil
+}
+
+// CompletePetApprovalExecution records the successful end of a heavy approval.
+// Only a row still in 'executing' can be completed, so a stale recovery or a
+// duplicate worker cannot overwrite an owner decision.
+func (s *Store) CompletePetApprovalExecution(ctx context.Context, id, resolution string, resolvedAt time.Time) error {
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE pet_approvals SET status='approved',resolution=?,decision_reason=?,resolved_at=?
+		WHERE id=? AND status='executing'`,
+		resolution, resolution, timeString(resolvedAt), id)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+// FailPetApprovalExecution returns an executing approval to the pending queue
+// after its transaction rolled back. The failure is stored in both reason
+// columns so the owner sees why, and the row is retryable without a restart.
+func (s *Store) FailPetApprovalExecution(ctx context.Context, id, failure string) error {
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE pet_approvals SET status='pending',resolution=?,decision_reason=?,resolved_at=''
+		WHERE id=? AND status='executing'`, failure, failure, id)
 	if err != nil {
 		return err
 	}

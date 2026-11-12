@@ -16,10 +16,31 @@ import (
 
 const (
 	petApprovalPending   = "pending"
+	petApprovalExecuting = "executing"
 	petApprovalApproved  = "approved"
 	petApprovalRejected  = "rejected"
 	petApprovalCancelled = "cancelled"
 )
+
+const (
+	// Heavy deletes can take minutes on a multi-gigabyte database. They run in
+	// the background with the service lifetime as parent so a dropped browser
+	// connection cannot cancel a transaction that is already committing.
+	petApprovalExecutionBudgetDefault = 15 * time.Minute
+	// Finalizing and notifying get a fresh context: the execution context may
+	// already be canceled by shutdown or by its own deadline when they run.
+	petApprovalFinalizeTimeoutDefault = 30 * time.Second
+)
+
+// petApprovalRunsInBackground reports whether approving this kind performs a
+// long delete transaction. Light approvals keep the synchronous resolve path.
+func petApprovalRunsInBackground(kind string) bool {
+	switch strings.TrimSpace(kind) {
+	case "delete_task", "delete_project", "delete_workspace":
+		return true
+	}
+	return false
+}
 
 type PetWorkbenchView struct {
 	Core          []PetWorkspaceDocument `json:"core"`
@@ -198,8 +219,21 @@ func (s *Service) CreatePetApproval(ctx context.Context, input PetApprovalInput)
 }
 
 // ResolvePetApproval records the owner's decision and, when possible, wakes the
-// pet Task with the result so the next Turn can continue the work.
+// pet Task with the result so the next Turn can continue the work. Approving a
+// heavy delete claims the approval and returns immediately with status
+// "executing"; the caller serves 202 while the delete runs in the background.
 func (s *Service) ResolvePetApproval(ctx context.Context, id, decision, note string) (domain.PetApproval, error) {
+	return s.resolvePetApproval(ctx, id, decision, note, nil)
+}
+
+// ResolvePetApprovalBeforeExecution is the HTTP path for a heavy delete: the
+// callback runs after the claim commits but before the background transaction
+// starts, so the handler's audit insert does not queue behind the long delete.
+func (s *Service) ResolvePetApprovalBeforeExecution(ctx context.Context, id, decision, note string, beforeStart func(domain.PetApproval)) (domain.PetApproval, error) {
+	return s.resolvePetApproval(ctx, id, decision, note, beforeStart)
+}
+
+func (s *Service) resolvePetApproval(ctx context.Context, id, decision, note string, beforeStart func(domain.PetApproval)) (domain.PetApproval, error) {
 	id = strings.TrimSpace(id)
 	decision = strings.ToLower(strings.TrimSpace(decision))
 	var status string
@@ -229,6 +263,9 @@ func (s *Service) ResolvePetApproval(ctx context.Context, id, decision, note str
 		return domain.PetApproval{}, fmt.Errorf("decision_reason 不能为空")
 	}
 	if status == petApprovalApproved {
+		if petApprovalRunsInBackground(item.Kind) {
+			return s.claimPetApprovalExecution(ctx, item, strings.TrimSpace(note), beforeStart)
+		}
 		if err := s.executePetApproval(ctx, item); err != nil {
 			return domain.PetApproval{}, fmt.Errorf("审批已批准但执行失败：%w", err)
 		}
@@ -244,15 +281,150 @@ func (s *Service) ResolvePetApproval(ctx context.Context, id, decision, note str
 	item.Resolution = strings.TrimSpace(note)
 	item.DecisionReason = strings.TrimSpace(note)
 	item.ResolvedAt = now
+	s.finishPetApprovalResolution(ctx, item)
+	return item, nil
+}
+
+// claimPetApprovalExecution atomically takes ownership of a heavy approval and
+// starts its background execution. Only the claim uses the request context;
+// the execution itself is detached from it below.
+func (s *Service) claimPetApprovalExecution(ctx context.Context, item domain.PetApproval, note string, beforeStart func(domain.PetApproval)) (domain.PetApproval, error) {
+	started := time.Now()
+	claimed, err := s.store.ClaimPetApprovalExecution(ctx, item.ID)
+	if err != nil {
+		return domain.PetApproval{}, err
+	}
+	claimDuration := time.Since(started)
+	if !claimed {
+		return domain.PetApproval{}, fmt.Errorf("审批已经处理过")
+	}
+	item.Status = petApprovalExecuting
+	item.Resolution = ""
+	item.DecisionReason = ""
+	item.ResolvedAt = time.Time{}
+	// Publish the claimed state before the worker starts so a fast execution
+	// cannot publish "approved" first and then be overwritten by "executing".
+	s.publishPetApproval(item)
+	if beforeStart != nil {
+		// Runs while no background transaction is open yet; handlers use it to
+		// record their own writes without waiting on the long delete lock.
+		beforeStart(item)
+	}
+	if err := s.startPetApprovalExecution(item, note, claimDuration); err != nil {
+		// The claim must never outlive a service that is no longer willing to
+		// run it: put the row back so the owner can retry after restart.
+		_ = s.failPetApprovalExecution(item, "服务正在关闭，审批未执行，请重试")
+		return domain.PetApproval{}, err
+	}
+	log.Printf("pet approval %s (%s): claimed in %s", item.ID, item.Kind, claimDuration)
+	return item, nil
+}
+
+func (s *Service) startPetApprovalExecution(item domain.PetApproval, note string, claimDuration time.Duration) error {
+	s.mu.Lock()
+	if s.closing {
+		s.mu.Unlock()
+		return fmt.Errorf("服务正在关闭，请稍后重试")
+	}
+	parent := s.runContext
+	// Registering under the same lock Shutdown uses keeps Add from racing a
+	// Wait that already saw a zero counter.
+	s.runWG.Add(1)
+	s.mu.Unlock()
+	if parent == nil {
+		parent = context.Background()
+	}
+	budget := s.petApprovalExecutionTimeout
+	if budget <= 0 {
+		budget = petApprovalExecutionBudgetDefault
+	}
+	go func() {
+		defer s.runWG.Done()
+		// Rooted in the service lifetime, not the HTTP request, plus an
+		// explicit budget: a client disconnect cannot cancel a claimed delete.
+		ctx, cancel := context.WithTimeout(parent, budget)
+		defer cancel()
+		s.runPetApprovalExecution(ctx, item, note, claimDuration)
+	}()
+	return nil
+}
+
+func (s *Service) runPetApprovalExecution(ctx context.Context, item domain.PetApproval, note string, claimDuration time.Duration) {
+	executionStarted := time.Now()
+	var execErr error
+	if hook := s.petApprovalExecutionHook; hook != nil {
+		execErr = hook(ctx, item)
+	} else {
+		execErr = s.executePetApproval(ctx, item)
+	}
+	executionDuration := time.Since(executionStarted)
+	if execErr != nil {
+		failure := "执行失败：" + execErr.Error()
+		commitStarted := time.Now()
+		finalizeErr := s.failPetApprovalExecution(item, failure)
+		commitDuration := time.Since(commitStarted)
+		// The full error stays in the log; the owner sees the same text on the
+		// approval card because the row went back to pending.
+		log.Printf("pet approval %s (%s) execution failed: claim=%s execute=%s commit=%s error=%v finalize_error=%v",
+			item.ID, item.Kind, claimDuration, executionDuration, commitDuration, execErr, finalizeErr)
+		return
+	}
+	commitStarted := time.Now()
+	now := s.now().UTC()
+	finalizeCtx, cancel := context.WithTimeout(context.Background(), petApprovalFinalizeTimeoutDefault)
+	err := s.store.CompletePetApprovalExecution(finalizeCtx, item.ID, note, now)
+	commitDuration := time.Since(commitStarted)
+	if err != nil {
+		cancel()
+		// The row stays executing and the next service start restores it to
+		// pending, so the delete is never reported as approved without its
+		// transaction having committed.
+		log.Printf("pet approval %s (%s): execution succeeded but status update failed: claim=%s execute=%s commit=%s error=%v",
+			item.ID, item.Kind, claimDuration, executionDuration, commitDuration, err)
+		return
+	}
+	item.Status = petApprovalApproved
+	item.Resolution = note
+	item.DecisionReason = note
+	item.ResolvedAt = now
+	cleanupStarted := time.Now()
+	s.finishPetApprovalResolution(finalizeCtx, item)
+	cleanupDuration := time.Since(cleanupStarted)
+	cancel()
+	log.Printf("pet approval %s (%s): claim=%s execute=%s commit=%s cleanup=%s",
+		item.ID, item.Kind, claimDuration, executionDuration, commitDuration, cleanupDuration)
+}
+
+// failPetApprovalExecution returns the approval to pending with the error text.
+// It uses a fresh context because the execution context may already be
+// canceled (shutdown or timeout) when the transaction rolled back.
+func (s *Service) failPetApprovalExecution(item domain.PetApproval, failure string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), petApprovalFinalizeTimeoutDefault)
+	defer cancel()
+	if err := s.store.FailPetApprovalExecution(ctx, item.ID, failure); err != nil {
+		return err
+	}
+	item.Status = petApprovalPending
+	item.Resolution = failure
+	item.DecisionReason = failure
+	item.ResolvedAt = time.Time{}
+	s.publishPetApproval(item)
+	return nil
+}
+
+// finishPetApprovalResolution publishes the resolved approval and wakes the pet
+// Task. Both the synchronous and the background path share it so the pet keeps
+// receiving the same approval-result message.
+func (s *Service) finishPetApprovalResolution(ctx context.Context, item domain.PetApproval) {
 	s.publishPetApproval(item)
 	_ = s.store.AppendPetEvent(ctx, domain.PetEvent{
-		ID: domain.NewID("pet_event"), At: now, Actor: "owner", Kind: "approval_resolved",
-		Detail: item.Title, Status: status,
+		ID: domain.NewID("pet_event"), At: item.ResolvedAt, Actor: "owner", Kind: "approval_resolved",
+		Detail: item.Title, Status: item.Status,
 	})
 	message := ""
 	if s.petUsesEnglish(ctx) {
 		decisionText := "approved"
-		switch status {
+		switch item.Status {
 		case petApprovalRejected:
 			decisionText = "rejected"
 		case petApprovalCancelled:
@@ -264,7 +436,7 @@ func (s *Service) ResolvePetApproval(ctx context.Context, id, decision, note str
 		}
 	} else {
 		decisionText := "批准"
-		switch status {
+		switch item.Status {
 		case petApprovalRejected:
 			decisionText = "拒绝"
 		case petApprovalCancelled:
@@ -278,7 +450,6 @@ func (s *Service) ResolvePetApproval(ctx context.Context, id, decision, note str
 	if _, err := s.SubmitMessage(ctx, petTaskID, message); err != nil {
 		log.Printf("notify pet task about approval %s: %v", item.ID, err)
 	}
-	return item, nil
 }
 
 // petApprovalPayload is the union of fields used by the approval kinds the

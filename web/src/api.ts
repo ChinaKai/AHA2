@@ -653,7 +653,9 @@ class APIClient {
     });
   }
 
-  resolvePetApproval(id: string, decision: "approve" | "reject" | "cancel", note = ""): Promise<{ok: boolean; approval: import("./types").PetApproval}> {
+  // Heavy deletes answer 202 with status "executing"; the approval is absent
+  // from that response because the background execution has not finished yet.
+  resolvePetApproval(id: string, decision: "approve" | "reject" | "cancel", note = ""): Promise<{ok: boolean; status?: string; approval?: import("./types").PetApproval}> {
     return this.request(`/api/v1/pet/approvals/${encodeURIComponent(id)}/resolve`, {
       method: "POST", body: JSON.stringify({decision, note}),
     });

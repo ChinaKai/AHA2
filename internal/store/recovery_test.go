@@ -117,6 +117,51 @@ func TestRecoverInterruptedRequeuesClaimedInbox(t *testing.T) {
 	}
 }
 
+func TestRecoverInterruptedRestoresExecutingPetApprovals(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database, err := Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	now := time.Now().UTC()
+	interrupted := domain.PetApproval{
+		ID: "pet_approval_interrupted", TaskID: "task_pet", Kind: "delete_workspace",
+		Title: "删除 Workspace", Summary: "重启时仍在执行", Risk: "high", Payload: "{}",
+		Status: "executing", CreatedAt: now,
+	}
+	resolved := domain.PetApproval{
+		ID: "pet_approval_resolved", TaskID: "task_pet", Kind: "delete_task",
+		Title: "已批准", Summary: "已经完成", Risk: "high", Payload: "{}",
+		Status: "approved", Resolution: "确认删除", DecisionReason: "确认删除", CreatedAt: now, ResolvedAt: now,
+	}
+	for _, item := range []domain.PetApproval{interrupted, resolved} {
+		if err := database.CreatePetApproval(ctx, item); err != nil {
+			t.Fatal(err)
+		}
+	}
+	recovered, err := database.RecoverInterrupted(ctx, now.Add(time.Second))
+	if err != nil || recovered.PetApprovals != 1 {
+		t.Fatalf("recovery=%#v err=%v, want one restored approval", recovered, err)
+	}
+	restored, err := database.PetApproval(ctx, interrupted.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored.Status != "pending" || restored.Resolution != PetApprovalRestartInterrupted ||
+		restored.DecisionReason != PetApprovalRestartInterrupted || !restored.ResolvedAt.IsZero() {
+		t.Fatalf("restored approval=%#v, want a retryable pending row with the restart note", restored)
+	}
+	untouched, err := database.PetApproval(ctx, resolved.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if untouched.Status != "approved" || untouched.Resolution != "确认删除" {
+		t.Fatalf("resolved approval was modified: %#v", untouched)
+	}
+}
+
 func TestRecoverInterruptedRequeuesLiveInTurnInbox(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

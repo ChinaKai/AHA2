@@ -1334,7 +1334,7 @@ export interface PetApproval {
   reason?: string;
   risk: string;
   payload?: string;
-  status: "pending" | "approved" | "rejected" | string;
+  status: "pending" | "executing" | "approved" | "rejected" | "cancelled" | string;
   resolution?: string;
   decision_reason?: string;
   created_at: string;

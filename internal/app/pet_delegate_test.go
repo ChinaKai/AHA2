@@ -1,16 +1,38 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
 )
 
 func boolPointer(value bool) *bool { return &value }
+
+// waitPetApprovalFinal blocks until a claimed heavy approval leaves the
+// executing state. The execution itself is deliberately detached from the
+// caller, so tests must observe the database instead of the resolve return.
+func waitPetApprovalFinal(t *testing.T, fixture *petTaskFixture, id string) domain.PetApproval {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		item, err := fixture.database.PetApproval(context.Background(), id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if item.Status != petApprovalExecuting {
+			return item
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("approval %s did not finish executing", id)
+	return domain.PetApproval{}
+}
 
 func TestPetPermissionsAndWorkbench(t *testing.T) {
 	fixture := newPetTaskFixture(t)

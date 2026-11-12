@@ -747,6 +747,21 @@ test("approval filters match the active kind and status buttons", () => {
   assert.equal(petApprovalMatches(approvedDecision, "idea", "all"), false);
 });
 
+test("an executing heavy approval stays visible under the pending filter", () => {
+  const running = approvalRow("c", "delete_workspace", "executing");
+  assert.equal(petApprovalMatches(running, "all", "pending"), true);
+  assert.equal(petApprovalMatches(running, "decision", "all"), true);
+  assert.equal(petApprovalMatches(running, "all", "approved"), false);
+  const counts = [
+    approvalCount("delete_workspace", "executing", 1),
+    approvalCount("delete_workspace", "pending", 2),
+  ];
+  assert.deepEqual(
+    petApprovalPage([running], {kind: "all", status: "pending", counts}),
+    {shown: 1, total: 3, canLoadMore: true},
+  );
+});
+
 test("pending pages cover every pending row before offering more", () => {
   // 15 pending + 8 resolved; the server pages pending-first, so the first 10
   // and next 10 rows contain the pending rows before any resolved row.

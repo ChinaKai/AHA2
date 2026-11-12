@@ -16,6 +16,7 @@ var (
 	ErrWorkspaceInUse          = errors.New("workspace is still referenced")
 	ErrWorkspaceHasActiveTurn  = errors.New("workspace still has an active turn")
 	ErrWorkspaceMirrorHasTasks = errors.New("remote workspace mirror still has tasks")
+	ErrProjectHasActiveTurn    = errors.New("project still has an active turn")
 )
 
 func ownedGraphObjectID(ownerDeviceID, sourceID string) string {
@@ -150,6 +151,203 @@ func (s *Store) DeleteWorkspaceWithSyncTombstone(ctx context.Context, id string)
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM workspaces WHERE id=? AND read_only=0`, id); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.removeOrphanedAttachmentBlobs(ctx, attachmentHashes)
+	return nil
+}
+
+// DeleteProjectWithSyncTombstone removes a Project together with its Tasks, its
+// Workspaces and its knowledge-library bindings in one transaction. The pet's
+// project deletion used to run one transaction per object, so a workspace that
+// failed late left the Project half-deleted. Keeping every step in one
+// transaction makes a refusal roll the whole graph back.
+func (s *Store) DeleteProjectWithSyncTombstone(ctx context.Context, id string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var updatedAt string
+	if err := tx.QueryRowContext(ctx, `SELECT updated_at FROM projects WHERE id=?`, id).Scan(&updatedAt); err != nil {
+		return err
+	}
+	// Checked inside the transaction so a Turn cannot start between the check
+	// and the deletes.
+	var activeTurn bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(
+		SELECT 1 FROM turns JOIN tasks ON tasks.id=turns.task_id
+		WHERE tasks.project_id=? AND turns.status IN ('queued','preparing','starting','running','waiting'))`, id).Scan(&activeTurn); err != nil {
+		return err
+	}
+	if activeTurn {
+		return ErrProjectHasActiveTurn
+	}
+	now := time.Now().UTC()
+	rows, err := tx.QueryContext(ctx, `SELECT id,runtime_config_snapshot_id FROM tasks WHERE project_id=? ORDER BY created_at,id`, id)
+	if err != nil {
+		return err
+	}
+	type projectTask struct{ id, snapshotID string }
+	var tasks []projectTask
+	for rows.Next() {
+		var task projectTask
+		if err := rows.Scan(&task.id, &task.snapshotID); err != nil {
+			rows.Close()
+			return err
+		}
+		tasks = append(tasks, task)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	var attachmentHashes []string
+	for _, task := range tasks {
+		hashes, err := s.deleteTaskTx(ctx, tx, task.id, true)
+		if err != nil {
+			return err
+		}
+		attachmentHashes = append(attachmentHashes, hashes...)
+		// The task's snapshot may be shared with another Project; only drop it
+		// when nothing references it anymore, matching the old per-task delete.
+		if task.snapshotID != "" {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM runtime_config_snapshots
+				WHERE id=?
+				  AND NOT EXISTS(SELECT 1 FROM tasks WHERE tasks.runtime_config_snapshot_id=runtime_config_snapshots.id)
+				  AND NOT EXISTS(SELECT 1 FROM task_agents WHERE task_agents.runtime_config_snapshot_id=runtime_config_snapshots.id)
+				  AND NOT EXISTS(SELECT 1 FROM turns WHERE turns.runtime_config_snapshot_id=runtime_config_snapshots.id)`,
+				task.snapshotID); err != nil {
+				return err
+			}
+		}
+	}
+	workspaceRows, err := tx.QueryContext(ctx, `SELECT id,owner_device_id,read_only FROM workspaces WHERE project_id=? ORDER BY id`, id)
+	if err != nil {
+		return err
+	}
+	type projectWorkspace struct {
+		id            string
+		ownerDeviceID string
+		readOnly      bool
+	}
+	var workspaces []projectWorkspace
+	for workspaceRows.Next() {
+		var workspace projectWorkspace
+		if err := workspaceRows.Scan(&workspace.id, &workspace.ownerDeviceID, &workspace.readOnly); err != nil {
+			workspaceRows.Close()
+			return err
+		}
+		workspaces = append(workspaces, workspace)
+	}
+	if err := workspaceRows.Err(); err != nil {
+		workspaceRows.Close()
+		return err
+	}
+	workspaceRows.Close()
+	for _, workspace := range workspaces {
+		if !workspace.readOnly {
+			if err := enqueueOwnedGraphDeleteTx(ctx, tx, "workspace", workspace.id, workspace.ownerDeviceID, now); err != nil {
+				return err
+			}
+			if err := purgeWorkspaceDeleteResidueTx(ctx, tx, workspace.id); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `DELETE FROM runtime_config_snapshots
+				WHERE workspace_id=?
+				  AND NOT EXISTS(SELECT 1 FROM tasks WHERE tasks.runtime_config_snapshot_id=runtime_config_snapshots.id)
+				  AND NOT EXISTS(SELECT 1 FROM task_agents WHERE task_agents.runtime_config_snapshot_id=runtime_config_snapshots.id)
+				  AND NOT EXISTS(SELECT 1 FROM turns WHERE turns.runtime_config_snapshot_id=runtime_config_snapshots.id)`, workspace.id); err != nil {
+				return err
+			}
+			var inUse bool
+			if err := tx.QueryRowContext(ctx, `SELECT EXISTS(
+				SELECT 1 FROM tasks WHERE workspace_id=?
+				UNION ALL SELECT 1 FROM backend_sessions WHERE workspace_id=?
+				UNION ALL SELECT 1 FROM runtime_config_snapshots WHERE workspace_id=?)`,
+				workspace.id, workspace.id, workspace.id).Scan(&inUse); err != nil {
+				return err
+			}
+			if inUse {
+				return ErrWorkspaceInUse
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE projects SET default_workspace_id='' WHERE default_workspace_id=?`, workspace.id); err != nil {
+			return err
+		}
+		if _, err := s.DeleteMailBindingsForScopeInTx(ctx, tx, domain.MailBindingScopeWorkspace, workspace.id); err != nil {
+			return err
+		}
+		if workspace.readOnly {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM workspaces WHERE id=?`, workspace.id); err != nil {
+				return err
+			}
+		} else if _, err := tx.ExecContext(ctx, `DELETE FROM workspaces WHERE id=? AND read_only=0`, workspace.id); err != nil {
+			return err
+		}
+	}
+	bindingRows, err := tx.QueryContext(ctx, `SELECT library_id,updated_at FROM project_knowledge_bindings WHERE project_id=? ORDER BY library_id`, id)
+	if err != nil {
+		return err
+	}
+	type projectBinding struct{ libraryID, updatedAt string }
+	var bindings []projectBinding
+	for bindingRows.Next() {
+		var binding projectBinding
+		if err := bindingRows.Scan(&binding.libraryID, &binding.updatedAt); err != nil {
+			bindingRows.Close()
+			return err
+		}
+		bindings = append(bindings, binding)
+	}
+	if err := bindingRows.Err(); err != nil {
+		bindingRows.Close()
+		return err
+	}
+	bindingRows.Close()
+	for _, binding := range bindings {
+		affected, err := deleteSharedRow(ctx, tx, "knowledge_binding", binding.libraryID, now)
+		if err != nil {
+			return err
+		}
+		if affected != 1 {
+			return sql.ErrNoRows
+		}
+		version := binding.updatedAt
+		if version == "" {
+			version = timeString(now)
+		}
+		if err := insertSyncTombstone(ctx, tx, domain.SyncTombstone{
+			ObjectType: "knowledge_binding", ObjectID: binding.libraryID, Version: version,
+			SyncKey:   fmt.Sprintf("tombstone:v1:knowledge_binding:%s:%d", binding.libraryID, now.UTC().UnixNano()),
+			DeletedAt: now,
+		}); err != nil {
+			return err
+		}
+	}
+	productLines, err := projectProductLines(ctx, tx, id)
+	if err != nil {
+		return err
+	}
+	projectTombstone := domain.SyncTombstone{
+		ObjectType: "project", ObjectID: id, Version: updatedAt,
+		SyncKey: fmt.Sprintf("tombstone:v1:project:%s:%d", id, now.UTC().UnixNano()), DeletedAt: now,
+	}
+	affected, err := deleteSharedRow(ctx, tx, "project", id, now)
+	if err != nil {
+		return err
+	}
+	if affected != 1 {
+		return sql.ErrNoRows
+	}
+	if err := insertSyncTombstone(ctx, tx, projectTombstone); err != nil {
+		return err
+	}
+	if err := insertProjectProductLineTombstones(ctx, tx, productLines, projectTombstone.SyncKey, now); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
