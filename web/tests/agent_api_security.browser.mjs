@@ -118,10 +118,20 @@ try {
   await page.locator("#agent-api-override-form button[type=submit]").click();
   await page.waitForFunction(() => window.__puts.length > 0, null, {timeout: 10000});
 
-  const puts = await page.evaluate(() => window.__puts);
+  let puts = await page.evaluate(() => window.__puts);
   assert.equal(puts.length, 1, `expected one settings write, got ${puts.length}: ${JSON.stringify(puts)}`);
   assert.equal(puts[0].url, "https://troubleshoot.example.test", `the write did not carry the override: ${JSON.stringify(puts[0])}`);
-  assert.deepEqual(Object.keys(puts[0]), ["url"], `the write carried removed fields: ${JSON.stringify(puts[0])}`);
+  assert.deepEqual(Object.keys(puts[0]).sort(), ["stdio_proxy", "url"], `the write carried removed fields: ${JSON.stringify(puts[0])}`);
+  assert.equal(puts[0].stdio_proxy, false, `an unticked box sent true: ${JSON.stringify(puts[0])}`);
+
+  // Saving used to throw before the request because the checkbox was read off
+  // the FormData as if it were the form element. Submitting twice, with the box
+  // ticked, proves both the read and the request.
+  await page.locator('#agent-api-override-form input[name="stdio_proxy"]').check();
+  await page.locator("#agent-api-override-form button[type=submit]").click();
+  await page.waitForFunction(() => window.__puts.length > 1, null, {timeout: 10000});
+  puts = await page.evaluate(() => window.__puts);
+  assert.equal(puts[1].stdio_proxy, true, `a ticked box did not send true: ${JSON.stringify(puts[1])}`);
   assert.deepEqual(errors, [], "the settings page threw while saving");
 
   await page.screenshot({path: resolve(output, "agent-api-override.png")});

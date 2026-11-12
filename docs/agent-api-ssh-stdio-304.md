@@ -39,11 +39,17 @@ type(1) | stream_id(4) | payload_length(4) | payload
 已打开的流全部 reset。帧长度是位置性的，出错后没有可靠的重同步点，硬撑只会把错误数据
 写进别的流。
 
+两处远端输入的上限同样重要：READY 行最多 256 字节，超出按握手失败处理；每条通道最多
+64 条并发流，超出的 OPEN 只回 RESET，不拨号也不建 goroutine。
+
 ## 背压与半关闭
 
 每条流两个方向独立。发送方初始有 256 KiB 信用，每发一个 DATA 帧扣减；接收方把字节写进
 自己的 TCP socket 后回 `WINDOW`。因此慢消费者最多让对端在内存里压住 256 KiB/流，
 不会拖住同一通道上的其他流；单个流的写入阻塞只阻塞它自己。
+
+接收侧按「已收未确认字节」计数：超过 256 KiB 直接 reset 该流。只靠发送方自觉是不够的，
+一个不守约的对端可以让队列无限增长；超窗说明双方记账已经对不上，这条流不能再信。
 
 `CLOSE` 只关一个方向。HTTP 请求体先结束时，Agent 侧读到 EOF 后仍能继续收响应；
 响应结束后反向再发一次 `CLOSE`。两个方向都结束才释放 socket 和流号。
@@ -63,8 +69,10 @@ stdin 收到 EOF 即退出，不会留下孤儿进程。AHA 本身崩溃时 SSH 
 开关判定（`prepareAgentAPIForTurn`）：
 
 - 开关关闭，或不是 SSH 工作区 → 完全走旧逻辑。
-- 生效地址不是 loopback（LAN 或 https）→ 不启动代理：工作区本来就能直连。
-- 生效地址是 loopback → 物化 helper、起隧道，Turn 使用 `http://127.0.0.1:<远端端口>`。
+- 生效地址不是 loopback（局域网地址或外部 https）→ 不启动代理：工作区本来就能直连。
+- 生效地址是 loopback → 物化 helper、起隧道，Turn 使用 `<scheme>://127.0.0.1:<远端端口>`。
+  scheme 沿用生效地址：隧道只搬字节，`https://127.0.0.1` 的 TLS 会端到端透传，
+  不会被悄悄降级成明文。
 - 代理成功时不再计算 `ReverseForward`：否则反向隧道会指向代理自己的远端端口。
 
 ## helper 物化
@@ -76,6 +84,7 @@ stdin 收到 EOF 即退出，不会留下孤儿进程。AHA 本身崩溃时 SSH 
 
 复用条件：manifest 的 protocol/version/os/arch/sha256 全部一致，且远端文件重新算出的
 sha256 也一致。只信 manifest 不信文件是不够的——半写入或被替换的文件不能被当成合法 helper 执行。
+manifest 读取在远端先查大小（>4 KiB 直接拒绝），不把工作区给的任意长度内容拉回内存。
 
 上传顺序：临时文件 → `chmod 700` → 远端 sha256 校验 → 原子 `mv` → 保留当前与上一代 →
 最后原子写 manifest。并发 ensure 允许重复上传：rename 是原子的，manifest 最后写，
@@ -84,8 +93,11 @@ sha256 也一致。只信 manifest 不信文件是不够的——半写入或被
 
 回退顺序：共享目录 → 本 Task 上下文目录 → 工作区 `/tmp/aha2-agent-proxy-<uid>`。
 每次物化后执行 `<helper> version` 探活，noexec 挂载会在这里失败并继续回退；
-回退原因写进日志。工作区与 AHA 架构不一致时直接报错并回退，可用
-`AHA2_AGENT_PROXY_HELPER` 指定预编译的 Linux helper。
+回退原因写进日志。写目录前检查它不是符号链接、且属于当前用户，临时文件用 `mktemp` 创建。
+
+工作区与 AHA 架构不一致时直接报错并回退。`AHA2_AGENT_PROXY_HELPER` 指定的预编译 helper
+不参与这个比较：它的平台由提供者决定，manifest 记为工作区平台，`<helper> version`
+探活仍会证明它能不能真的跑起来。Windows 宿主配 Linux 工作区就靠这条路径。
 
 共享目录不在 Task 清理范围内：`RemoveTaskScratch` 只删 `.aha2-context/<task>/scratch`，
 `share/` 随工作区一起删除。
@@ -100,11 +112,15 @@ sha256 也一致。只信 manifest 不信文件是不够的——半写入或被
 ## 验证
 
 - `go test ./internal/agentproxy`：帧往返、坏帧/超长帧、8 路并发、半关闭、2×窗口以上的
-  数据、单流故障隔离、真实 HTTP 请求、READY 超时与协议不符。
+  数据、单流故障隔离、真实 HTTP 请求、READY 超时与协议不符、接收侧超窗 reset、
+  单通道 256 流上限、超长 READY 行拒绝、https scheme 保留。
 - `go test ./internal/workspace`：物化复用、版本升级与保留、4 路并发 ensure 且文件与
-  manifest 一致、清理不删 `share/`、SSH 会话上的真实 HTTP 端到端、helper 缺失时有限重试后回退。
+  manifest 一致、清理不删 `share/`、SSH 会话上的真实 HTTP 端到端、helper 缺失时有限重试后回退、
+  显式 helper 跳过架构比较、超大 manifest 被覆盖。
 - `go test ./internal/app`：开关关闭行为不变、开启但不可达时回退并记录原因、非 loopback 地址不建隧道。
 - `go test ./internal/store ./internal/httpapi`：schema v133、设置持久化与 API 解析。
 - `go test -race ./internal/agentproxy` 通过。
+- `node --test web/tests/agent_api_stdio_proxy.test.mjs`：勾选框从 FormData 读取，
+  以及设置保存确实发送 `stdio_proxy`。
 
 不部署、不重启本机 AHA2、不改生产库、不改远端 sshd。

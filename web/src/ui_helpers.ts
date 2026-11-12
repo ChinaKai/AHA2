@@ -601,3 +601,10 @@ export function paginationHTML(kind: string, slice: PageSlice<unknown>, totalLab
     : "";
   return `<div class="list-footer list-footer-${kind}"><span>${label}</span>${controls}</div>`;
 }
+
+// Form checkbox state as bindForm sees it. Its callback receives a FormData,
+// not the form element, and a checkbox appears in FormData only when it is
+// checked; calling querySelector on FormData throws before any request is made.
+export function formCheckbox(form: FormData, name: string): boolean {
+  return form.get(name) !== null;
+}

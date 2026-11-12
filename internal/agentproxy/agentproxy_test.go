@@ -314,7 +314,7 @@ func TestHelperCarriesRealHTTPRequest(t *testing.T) {
 		Stdout: stdoutReader,
 		Wait:   func() error { return <-helperDone },
 		Close:  func() error { return nil },
-	}, listener.Addr().String(), 5*time.Second)
+	}, listener.Addr().String(), "http", 5*time.Second)
 	if err != nil {
 		t.Fatalf("start session: %v", err)
 	}
@@ -378,11 +378,168 @@ func TestStartSessionTimesOutWithoutReady(t *testing.T) {
 		Stdout: stdoutReader,
 		Wait:   func() error { return nil },
 		Close:  func() error { return nil },
-	}, "127.0.0.1:1", 150*time.Millisecond)
+	}, "127.0.0.1:1", "http", 150*time.Millisecond)
 	if !errors.Is(err, ErrReadyTimeout) {
 		t.Fatalf("err = %v, want ErrReadyTimeout", err)
 	}
 	if elapsed := time.Since(start); elapsed > 3*time.Second {
 		t.Fatalf("READY timeout took %s", elapsed)
+	}
+}
+
+// TestStreamRejectsDataBeyondItsWindow checks the receive-side bound directly:
+// the peer may only run InitialWindow bytes ahead of the last WINDOW. Anything
+// more is a protocol violation and must not be buffered.
+func TestStreamRejectsDataBeyondItsWindow(t *testing.T) {
+	client, _ := tcpPair(t)
+	mux := newMultiplexer(client, client, nil)
+	defer mux.Close()
+	agent, helper := tcpPair(t)
+	defer agent.Close()
+
+	// Register a stream without starting its pumps, so the queue cannot drain
+	// and the accounting under test is deterministic.
+	instance := newStream(mux, 1, helper)
+	mux.mu.Lock()
+	mux.streams[1] = instance
+	mux.mu.Unlock()
+
+	// Exactly the window is accepted: eight full frames.
+	for index := 0; index < InitialWindow/MaxFramePayload; index++ {
+		if err := mux.handle(frame{kind: frameData, id: 1, payload: make([]byte, MaxFramePayload)}); err != nil {
+			t.Fatalf("frame %d: %v", index, err)
+		}
+	}
+	if mux.lookup(1) == nil {
+		t.Fatal("the stream was reset before the window was exceeded")
+	}
+	// One byte more is not.
+	if err := mux.handle(frame{kind: frameData, id: 1, payload: make([]byte, 1)}); err != nil {
+		t.Fatalf("over-window frame: %v", err)
+	}
+	if mux.lookup(1) != nil {
+		t.Fatal("over-window data did not reset the stream")
+	}
+	reset := waitForFrameKind(t, mux, frameReset)
+	if reset.id != 1 {
+		t.Fatalf("reset id = %d, want 1", reset.id)
+	}
+}
+
+// fillerStream occupies a stream slot without a live connection. Its conn is a
+// pipe that nothing reads, so nothing in the test depends on its behaviour.
+func fillerStream(t *testing.T, mux *multiplexer, id uint32) *stream {
+	t.Helper()
+	client, server := net.Pipe()
+	t.Cleanup(func() {
+		_ = client.Close()
+		_ = server.Close()
+	})
+	return newStream(mux, id, client)
+}
+
+func waitForFrameKind(t *testing.T, mux *multiplexer, kind frameType) frame {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case value := <-mux.outgoing:
+			if value.kind == kind {
+				return value
+			}
+		case <-deadline:
+			t.Fatalf("no %v frame was produced", kind)
+		}
+	}
+}
+
+// TestChannelRefusesMoreThanMaxStreams pins the per-channel stream ceiling: a
+// peer that keeps opening connections must be refused, not allowed to spawn
+// goroutines and sockets without limit.
+func TestChannelRefusesMoreThanMaxStreams(t *testing.T) {
+	client, _ := tcpPair(t)
+	mux := newMultiplexer(client, client, nil)
+	defer mux.Close()
+	for index := 1; index <= MaxStreamsPerChannel; index++ {
+		mux.mu.Lock()
+		mux.streams[uint32(index)] = fillerStream(t, mux, uint32(index))
+		mux.mu.Unlock()
+	}
+	agent, helper := tcpPair(t)
+	defer agent.Close()
+	defer helper.Close()
+	if _, err := mux.attach(helper); !errors.Is(err, errTooManyStreams) {
+		t.Fatalf("attach err = %v, want errTooManyStreams", err)
+	}
+
+	// The dial side refuses too, without calling the dialer.
+	dials := 0
+	dialMux := newMultiplexer(client, client, func() (net.Conn, error) {
+		dials++
+		return nil, errors.New("unexpected dial")
+	})
+	defer dialMux.Close()
+	for index := 1; index <= MaxStreamsPerChannel; index++ {
+		dialMux.mu.Lock()
+		dialMux.streams[uint32(index)] = fillerStream(t, dialMux, uint32(index))
+		dialMux.mu.Unlock()
+	}
+	if err := dialMux.handle(frame{kind: frameOpen, id: 9000}); err != nil {
+		t.Fatalf("open over cap: %v", err)
+	}
+	if dials != 0 {
+		t.Fatalf("dial side opened %d connections past the cap", dials)
+	}
+	if reset := waitForFrameKind(t, dialMux, frameReset); reset.id != 9000 {
+		t.Fatalf("reset id = %d, want 9000", reset.id)
+	}
+}
+
+func TestStartSessionRejectsOversizedReadyLine(t *testing.T) {
+	stdinReader, stdinWriter := io.Pipe()
+	stdoutReader, stdoutWriter := io.Pipe()
+	defer stdinWriter.Close()
+	defer stdinReader.Close()
+	go func() {
+		_, _ = stdoutWriter.Write([]byte(strings.Repeat("x", maxReadyLine+1)))
+		_, _ = stdoutWriter.Write([]byte("\n"))
+	}()
+	defer stdoutWriter.Close()
+	_, err := StartSession(Stdio{
+		Stdin:  stdinWriter,
+		Stdout: stdoutReader,
+		Wait:   func() error { return nil },
+		Close:  func() error { return nil },
+	}, "127.0.0.1:1", "http", 2*time.Second)
+	if !errors.Is(err, ErrBadHandshake) {
+		t.Fatalf("err = %v, want ErrBadHandshake", err)
+	}
+}
+
+// TestSessionKeepsTheConfiguredScheme matters for an https loopback listener:
+// the tunnel carries bytes, so dropping the scheme would silently send
+// plaintext at a TLS port.
+func TestSessionKeepsTheConfiguredScheme(t *testing.T) {
+	stdinReader, stdinWriter := io.Pipe()
+	stdoutReader, stdoutWriter := io.Pipe()
+	helperDone := make(chan error, 1)
+	target, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer target.Close()
+	go func() { helperDone <- RunHelper(stdinReader, stdoutWriter, Protocol) }()
+	session, err := StartSession(Stdio{
+		Stdin:  stdinWriter,
+		Stdout: stdoutReader,
+		Wait:   func() error { return <-helperDone },
+		Close:  func() error { return nil },
+	}, target.Addr().String(), "https", 5*time.Second)
+	if err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+	defer session.Close()
+	if !strings.HasPrefix(session.URL, "https://127.0.0.1:") {
+		t.Fatalf("url = %q, want the https scheme preserved", session.URL)
 	}
 }

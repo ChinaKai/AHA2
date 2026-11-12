@@ -46,14 +46,14 @@ func (s *Service) prepareAgentAPIForTurn(ctx context.Context, item domain.Worksp
 	if normalizeAgentAPIMode(item.AgentAPIMode) == "manual" && item.AgentAPIURL != "" {
 		base = item.AgentAPIURL
 	}
-	target, ok := workspacepkg.AgentAPIProxyTarget(base)
+	target, scheme, ok := workspacepkg.AgentAPIProxyTarget(base)
 	if !ok {
 		// Not loopback: the workspace can dial this address itself, so the
 		// tunnel would add a hop and a failure mode without removing one.
 		url, err := s.AgentAPIURLForWorkspace(ctx, item)
 		return agentAPITurnSetup{URL: url}, err
 	}
-	project, err := s.startAgentAPIProxy(ctx, item, task, workDir, target)
+	project, err := s.startAgentAPIProxy(ctx, item, task, workDir, target, scheme)
 	if err != nil {
 		log.Printf("Agent API stdio 代理不可用，回退到反向隧道/LAN 流程 task=%s workspace=%s target=%s: %v",
 			task.ID, item.ID, target, err)
@@ -66,7 +66,7 @@ func (s *Service) prepareAgentAPIForTurn(ctx context.Context, item domain.Worksp
 // startAgentAPIProxy materialises the helper and opens the tunnel. The helper
 // path is cached on the workspace, so only the first Turn of a version pays for
 // the upload.
-func (s *Service) startAgentAPIProxy(ctx context.Context, item domain.Workspace, task domain.Task, workDir, target string) (*workspacepkg.AgentAPIProxy, error) {
+func (s *Service) startAgentAPIProxy(ctx context.Context, item domain.Workspace, task domain.Task, workDir, target, scheme string) (*workspacepkg.AgentAPIProxy, error) {
 	helper, err := workspacepkg.EnsureAgentProxyHelper(ctx, item, workDir, task.ID, s.buildVersion)
 	if err != nil {
 		return nil, fmt.Errorf("准备 helper：%w", err)
@@ -74,7 +74,7 @@ func (s *Service) startAgentAPIProxy(ctx context.Context, item domain.Workspace,
 	if helper.Note != "" {
 		log.Printf("Agent API helper 使用回退位置 task=%s path=%s：%s", task.ID, helper.Path, helper.Note)
 	}
-	proxy, err := workspacepkg.StartAgentAPIProxy(ctx, item, helper.Path, target)
+	proxy, err := workspacepkg.StartAgentAPIProxy(ctx, item, helper.Path, target, scheme)
 	if err != nil {
 		return nil, err
 	}

@@ -2,6 +2,7 @@ package agentproxy
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -49,8 +50,14 @@ func RunHelper(stdin io.Reader, stdout io.Writer, protocol int) error {
 				return
 			}
 			if _, err := channel.attach(connection); err != nil {
+				// One refused connection (over the stream ceiling, or racing the
+				// channel's shutdown) must not stop the listener: the agent can
+				// open another. Only a dead channel ends the loop.
 				_ = connection.Close()
-				return
+				if errors.Is(err, errMuxClosed) {
+					return
+				}
+				continue
 			}
 		}
 	}()

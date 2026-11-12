@@ -371,7 +371,7 @@ func TestAgentProxyEndToEndCarriesHTTP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ensure helper: %v", err)
 	}
-	proxy, err := StartAgentAPIProxy(context.Background(), workspace, helper.Path, listener.Addr().String())
+	proxy, err := StartAgentAPIProxy(context.Background(), workspace, helper.Path, listener.Addr().String(), "http")
 	if err != nil {
 		t.Fatalf("start proxy: %v", err)
 	}
@@ -408,7 +408,7 @@ func TestAgentProxyStartFailsWithoutHelper(t *testing.T) {
 	host, port := startExecSSHServer(t)
 	workspace := agentProxyTestWorkspace(host, port)
 	start := time.Now()
-	_, err := StartAgentAPIProxy(context.Background(), workspace, "/nonexistent/aha2-agent-proxy", "127.0.0.1:1")
+	_, err := StartAgentAPIProxy(context.Background(), workspace, "/nonexistent/aha2-agent-proxy", "127.0.0.1:1", "http")
 	if err == nil {
 		t.Fatal("starting a missing helper succeeded")
 	}
@@ -443,5 +443,69 @@ func TestAgentProxyCleanupKeepsSharedDirectory(t *testing.T) {
 	}
 	if _, err := os.Stat(helper.Path); err != nil {
 		t.Fatalf("task cleanup removed the shared helper: %v", err)
+	}
+}
+
+// TestAgentProxyExplicitHelperSkipsTheArchitectureCheck covers the Windows-host
+// case: the AHA process platform says nothing about a helper the operator built
+// for the workspace, so an explicit helper must not be rejected for "mismatch".
+func TestAgentProxyExplicitHelperSkipsTheArchitectureCheck(t *testing.T) {
+	host, port := startExecSSHServer(t)
+	workspace := agentProxyTestWorkspace(host, port)
+	// A platform this process is definitely not running on.
+	remoteArch := "arm64"
+	if runtime.GOARCH == "arm64" {
+		remoteArch = "amd64"
+	}
+	workspace.Platform = "linux/" + remoteArch
+	workDir := t.TempDir()
+	t.Setenv(agentProxyHelperOverride, writeAgentProxyWrapper(t, t.TempDir(), "v1"))
+
+	helper, err := EnsureAgentProxyHelper(context.Background(), workspace, workDir, "task-1", "1.0.0")
+	if err != nil {
+		t.Fatalf("explicit helper was rejected: %v", err)
+	}
+	manifest := readTestManifest(t, filepath.Join(filepath.Dir(helper.Path), "manifest.json"))
+	if manifest.Arch != remoteArch || manifest.OS != "linux" {
+		t.Fatalf("manifest platform = %s/%s, want linux/%s", manifest.OS, manifest.Arch, remoteArch)
+	}
+}
+
+// TestAgentProxyReplacesAnOversizedManifest checks that a manifest larger than
+// the limit is never parsed or buffered: the ensure uploads over it instead.
+func TestAgentProxyReplacesAnOversizedManifest(t *testing.T) {
+	host, port := startExecSSHServer(t)
+	workspace := agentProxyTestWorkspace(host, port)
+	workDir := t.TempDir()
+	t.Setenv(agentProxyHelperOverride, writeAgentProxyWrapper(t, t.TempDir(), "v1"))
+
+	shareDir := filepath.Join(workDir, ".aha2-context", "share", "agent-proxy")
+	if err := os.MkdirAll(shareDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	oversized := make([]byte, agentProxyManifestLimit+1)
+	for index := range oversized {
+		oversized[index] = 'x'
+	}
+	if err := os.WriteFile(filepath.Join(shareDir, "manifest.json"), oversized, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	helper, err := EnsureAgentProxyHelper(context.Background(), workspace, workDir, "task-1", "1.0.0")
+	if err != nil {
+		t.Fatalf("ensure over an oversized manifest: %v", err)
+	}
+	content, err := os.ReadFile(filepath.Join(shareDir, "manifest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(content) > agentProxyManifestLimit {
+		t.Fatalf("manifest was not replaced: %d bytes", len(content))
+	}
+	if manifest := readTestManifest(t, filepath.Join(shareDir, "manifest.json")); manifest.Version != "1.0.0" {
+		t.Fatalf("manifest version = %q", manifest.Version)
+	}
+	if filepath.Dir(helper.Path) != shareDir {
+		t.Fatalf("helper landed outside the shared directory: %s", helper.Path)
 	}
 }

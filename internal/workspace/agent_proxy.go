@@ -75,7 +75,7 @@ func (proxy *AgentAPIProxy) Close() error {
 // Each attempt uses its own SSH connection. A fresh connection is what makes a
 // retry meaningful: a helper that failed to start leaves its session dead, and
 // reusing it would only replay the same failure.
-func StartAgentAPIProxy(ctx context.Context, item domain.Workspace, helperPath, target string) (*AgentAPIProxy, error) {
+func StartAgentAPIProxy(ctx context.Context, item domain.Workspace, helperPath, target, scheme string) (*AgentAPIProxy, error) {
 	runner, ok := RunnerFor(item).(*SSHRunner)
 	if !ok || item.Transport != "ssh" {
 		return nil, fmt.Errorf("Agent API stdio 代理仅支持 SSH 工作区")
@@ -84,7 +84,7 @@ func StartAgentAPIProxy(ctx context.Context, item domain.Workspace, helperPath, 
 	backoff := 200 * time.Millisecond
 	var lastErr error
 	for attempt := 1; attempt <= AgentProxyAttempts; attempt++ {
-		proxy, err := startAgentAPIProxyOnce(ctx, runner, command, helperPath, target, attempt)
+		proxy, err := startAgentAPIProxyOnce(ctx, runner, command, helperPath, target, scheme, attempt)
 		if err == nil {
 			return proxy, nil
 		}
@@ -102,7 +102,7 @@ func StartAgentAPIProxy(ctx context.Context, item domain.Workspace, helperPath, 
 	return nil, fmt.Errorf("Agent API stdio 代理启动失败，已尝试 %d 次：%w", AgentProxyAttempts, lastErr)
 }
 
-func startAgentAPIProxyOnce(ctx context.Context, runner *SSHRunner, command, helperPath, target string, attempt int) (*AgentAPIProxy, error) {
+func startAgentAPIProxyOnce(ctx context.Context, runner *SSHRunner, command, helperPath, target, scheme string, attempt int) (*AgentAPIProxy, error) {
 	connection, err := runner.dial(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("SSH 连接失败：%w", err)
@@ -145,7 +145,7 @@ func startAgentAPIProxyOnce(ctx context.Context, runner *SSHRunner, command, hel
 		Stdout: stdout,
 		Wait:   session.Wait,
 		Close:  func() error { return connection.Close() },
-	}, target, AgentProxyReadyTimeout)
+	}, target, scheme, AgentProxyReadyTimeout)
 	if err != nil {
 		_ = session.Close()
 		_ = connection.Close()
@@ -191,25 +191,33 @@ func truncateForLog(value string, limit int) string {
 	return string(runes[:limit]) + "…"
 }
 
-// AgentAPIProxyTarget derives the AHA-side dial target from the Agent API base
-// URL the workspace is configured with. Only loopback addresses qualify: any
-// other address is already reachable from the workspace, so a tunnel would add
-// a failure mode without removing one.
-func AgentAPIProxyTarget(baseURL string) (string, bool) {
+// AgentAPIProxyTarget derives the AHA-side dial target and scheme from the Agent
+// API base URL the workspace is configured with.
+//
+// Only loopback addresses qualify: any other address is already reachable from
+// the workspace, so a tunnel would add a failure mode without removing one. The
+// scheme comes back with the target because the tunnel carries bytes, not HTTP:
+// an https base URL keeps TLS between the agent and AHA instead of silently
+// downgrading to plaintext on the same port.
+func AgentAPIProxyTarget(baseURL string) (string, string, bool) {
 	parsed, err := url.Parse(strings.TrimSpace(baseURL))
 	if err != nil || parsed.Hostname() == "" {
-		return "", false
+		return "", "", false
 	}
 	if !agentAPIHostIsLoopback(parsed.Hostname()) {
-		return "", false
+		return "", "", false
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return "", "", false
 	}
 	port := parsed.Port()
 	if port == "" {
-		if strings.EqualFold(parsed.Scheme, "https") {
+		if scheme == "https" {
 			port = "443"
 		} else {
 			port = "80"
 		}
 	}
-	return net.JoinHostPort(parsed.Hostname(), port), true
+	return net.JoinHostPort(parsed.Hostname(), port), scheme, true
 }

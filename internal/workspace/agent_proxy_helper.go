@@ -10,6 +10,7 @@ import (
 	"os"
 	"path"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -28,6 +29,10 @@ const (
 	agentProxyDirectoryName  = "agent-proxy"
 	agentProxyManifestName   = "manifest.json"
 	agentProxyBinaryPrefix   = "aha2-agent-proxy"
+	// agentProxyManifestLimit bounds the manifest read. A real manifest is a
+	// few hundred bytes; anything larger is not one, and must be refused before
+	// it is buffered rather than parsed.
+	agentProxyManifestLimit = 4096
 	// agentProxyHelperOverride points at a prebuilt Linux helper. It exists for
 	// cross-architecture hosts (a Windows AHA cannot copy its own aha2.exe to a
 	// Linux workspace) and for tests.
@@ -71,7 +76,11 @@ func EnsureAgentProxyHelper(ctx context.Context, item domain.Workspace, workDir,
 	if err != nil {
 		return AgentProxyHelper{}, err
 	}
-	if remoteOS != source.os || remoteArch != source.arch {
+	// An explicit helper is taken at its word: the operator is the only one who
+	// knows what they built, and the `version` probe below still proves it runs
+	// on this workspace. Comparing it to the AHA process platform is what made
+	// the override useless for a Windows host and a Linux workspace.
+	if !source.explicit && (remoteOS != source.os || remoteArch != source.arch) {
 		return AgentProxyHelper{}, fmt.Errorf(
 			"helper 架构不匹配：本机 %s/%s，工作区 %s/%s；可通过 %s 指定预编译的 Linux helper",
 			source.os, source.arch, remoteOS, remoteArch, agentProxyHelperOverride,
@@ -134,6 +143,10 @@ type agentProxySource struct {
 	os     string
 	arch   string
 	size   int64
+	// explicit marks a binary supplied through AHA2_AGENT_PROXY_HELPER. Its
+	// platform is whatever the operator built, so it is recorded as the
+	// workspace's platform instead of being compared with this process.
+	explicit bool
 }
 
 var agentProxySourceCache struct {
@@ -147,6 +160,7 @@ var agentProxySourceCache struct {
 // recomputed for every Turn of every Task.
 func agentProxySourceBinary() (agentProxySource, error) {
 	path := strings.TrimSpace(os.Getenv(agentProxyHelperOverride))
+	explicit := path != ""
 	if path == "" {
 		executable, err := os.Executable()
 		if err != nil {
@@ -158,7 +172,10 @@ func agentProxySourceBinary() (agentProxySource, error) {
 	if err != nil {
 		return agentProxySource{}, fmt.Errorf("读取 helper 源文件：%w", err)
 	}
-	key := fmt.Sprintf("%s|%d|%d", path, info.Size(), info.ModTime().UnixNano())
+	// The key includes whether the binary was supplied explicitly: the same path
+	// read through the override and as the running executable carries different
+	// platform rules.
+	key := fmt.Sprintf("%s|%d|%d|%t", path, info.Size(), info.ModTime().UnixNano(), explicit)
 	agentProxySourceCache.Lock()
 	cached, cachedKey := agentProxySourceCache.source, agentProxySourceCache.key
 	agentProxySourceCache.Unlock()
@@ -176,7 +193,7 @@ func agentProxySourceBinary() (agentProxySource, error) {
 	}
 	source := agentProxySource{
 		path: path, sha256: hex.EncodeToString(digest.Sum(nil)),
-		os: runtime.GOOS, arch: runtime.GOARCH, size: info.Size(),
+		os: runtime.GOOS, arch: runtime.GOARCH, size: info.Size(), explicit: explicit,
 	}
 	agentProxySourceCache.Lock()
 	agentProxySourceCache.key, agentProxySourceCache.source = key, source
@@ -231,40 +248,54 @@ func agentProxyRemotePlatform(ctx context.Context, runner Runner) (string, strin
 	return osName, arch, nil
 }
 
-// parseAgentProxyPlatform accepts both the detected "Linux 6.8.0 x86_64" form
-// and the plain "Linux x86_64" probe output.
+// parseAgentProxyPlatform accepts the detected "Linux 6.8.0 x86_64" form, the
+// plain "Linux x86_64" probe output, and the stored "linux/arm64" form.
 func parseAgentProxyPlatform(value string) (string, string, bool) {
 	fields := strings.Fields(strings.ToLower(value))
 	if len(fields) == 0 {
 		return "", "", false
 	}
-	osName := fields[0]
-	switch {
-	case strings.HasPrefix(osName, "windows"):
-		return "", "", false
-	case strings.HasPrefix(osName, "linux"):
-		osName = "linux"
-	case strings.HasPrefix(osName, "darwin"):
-		osName = "darwin"
-	default:
+	osName, arch := normalizeAgentProxyOS(fields[0]), ""
+	if osName == "" {
 		return "", "", false
 	}
-	arch := ""
-	for _, field := range fields[1:] {
-		switch field {
-		case "x86_64", "amd64", "x64":
-			arch = "amd64"
-		case "aarch64", "arm64":
-			arch = "arm64"
-		}
-		if arch != "" {
-			break
+	// Stored platform strings are "os/arch"; uname output never has a slash.
+	if _, rest, found := strings.Cut(fields[0], "/"); found {
+		arch = normalizeAgentProxyArch(rest)
+	}
+	if arch == "" {
+		for _, field := range fields[1:] {
+			if arch = normalizeAgentProxyArch(field); arch != "" {
+				break
+			}
 		}
 	}
 	if arch == "" {
 		return "", "", false
 	}
 	return osName, arch, true
+}
+
+func normalizeAgentProxyOS(value string) string {
+	switch {
+	case strings.HasPrefix(value, "linux"):
+		return "linux"
+	case strings.HasPrefix(value, "darwin"):
+		return "darwin"
+	default:
+		return ""
+	}
+}
+
+func normalizeAgentProxyArch(value string) string {
+	switch value {
+	case "x86_64", "amd64", "x64":
+		return "amd64"
+	case "aarch64", "arm64":
+		return "arm64"
+	default:
+		return ""
+	}
 }
 
 func agentProxyTempDirectory(ctx context.Context, runner Runner) (string, error) {
@@ -352,8 +383,16 @@ want=$3
 manifest=$4
 previous=$5
 umask 077
+if [ -L "$dir" ]; then
+  echo "AHA2_AGENT_PROXY_DIR_SYMLINK: $dir" >&2
+  exit 6
+fi
 mkdir -p "$dir"
-tmp="$dir/.upload.$$"
+if [ ! -O "$dir" ]; then
+  echo "AHA2_AGENT_PROXY_DIR_NOT_OWNED: $dir" >&2
+  exit 6
+fi
+tmp=$(mktemp "$dir/.upload.XXXXXX" 2>/dev/null) || tmp="$dir/.upload.$$"
 trap 'rm -f "$tmp"' EXIT
 cat > "$tmp"
 chmod 700 "$tmp"
@@ -375,19 +414,40 @@ for candidate in "$dir"/aha2-agent-proxy-*; do
   [ -n "$previous" ] && [ "$candidate" = "$previous" ] && continue
   rm -f "$candidate"
 done
-manifest_tmp="$dir/.manifest.$$"
+manifest_tmp=$(mktemp "$dir/.manifest.XXXXXX" 2>/dev/null) || manifest_tmp="$dir/.manifest.$$"
 printf '%s' "$manifest" > "$manifest_tmp"
 mv -f "$manifest_tmp" "$dir/manifest.json"
 `
 
+// readAgentProxyManifest reads the manifest with a size check on the workspace
+// side. Reading it unbounded would let a workspace hand the control plane a
+// buffer of its choosing at the cost of one large file.
 func readAgentProxyManifest(ctx context.Context, runner Runner, directory string) (*agentProxyManifest, error) {
-	content, ok, err := ReadRemoteTextFileIfExists(ctx, runner, path.Join(directory, agentProxyManifestName))
-	if err != nil || !ok {
+	result, err := runner.Run(ctx, Command{
+		Executable: "sh",
+		Args: []string{"-c", `set -eu
+target=$1
+if [ ! -e "$target" ]; then exit 3; fi
+bytes=$(wc -c < "$target") || exit 1
+if [ "$bytes" -gt ` + strconv.Itoa(agentProxyManifestLimit) + ` ]; then
+  printf 'manifest too large: %s bytes\n' "$bytes" >&2
+  exit 4
+fi
+cat "$target"`, "aha-agent-proxy-manifest", path.Join(directory, agentProxyManifestName)},
+		Timeout: 20 * time.Second, OutputLimit: agentProxyManifestLimit,
+	}, nil)
+	if err != nil {
 		return nil, err
 	}
+	if result.ExitCode == 3 {
+		return nil, nil
+	}
+	if result.ExitCode != 0 {
+		return nil, fmt.Errorf("%s", remoteCommandDetail(result))
+	}
 	var manifest agentProxyManifest
-	if err := json.Unmarshal([]byte(content), &manifest); err != nil {
-		return nil, err
+	if err := json.Unmarshal([]byte(result.Stdout), &manifest); err != nil {
+		return nil, fmt.Errorf("解析 manifest：%w", err)
 	}
 	return &manifest, nil
 }

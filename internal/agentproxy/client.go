@@ -17,6 +17,16 @@ import (
 // falls back to its previous transport and says why.
 var ErrReadyTimeout = errors.New("agent-proxy: helper did not report a port in time")
 
+// ErrBadHandshake reports a READY line that is not one, including one longer
+// than any legitimate handshake. The line is read before framing starts, so an
+// unbounded read there would let a broken helper hand us a buffer of its
+// choosing before any protocol check runs.
+var ErrBadHandshake = errors.New("agent-proxy: invalid handshake")
+
+// maxReadyLine is generous for "READY proto=1 port=65535" and far below any
+// value that could be confused with payload.
+const maxReadyLine = 256
+
 // Stdio is one helper process reachable over a byte stream. The SSH transport
 // supplies it from a session channel; tests supply it from a local process.
 type Stdio struct {
@@ -38,10 +48,11 @@ type Session struct {
 	// Target is the AHA-side address each stream is bridged to.
 	Target string
 
-	stdio     Stdio
-	channel   *multiplexer
-	closeOnce sync.Once
-	closeErr  error
+	stdio         Stdio
+	channel       *multiplexer
+	closeOnce     sync.Once
+	transportOnce sync.Once
+	closeErr      error
 }
 
 // StartSession reads the helper's READY line and then serves streams until the
@@ -50,14 +61,20 @@ type Session struct {
 // readyTimeout bounds only the handshake. A helper that starts but never
 // announces is indistinguishable from one that failed to start, and both must
 // fall back rather than hang the Turn.
-func StartSession(stdio Stdio, target string, readyTimeout time.Duration) (*Session, error) {
+func StartSession(stdio Stdio, target, scheme string, readyTimeout time.Duration) (*Session, error) {
+	if scheme == "" {
+		scheme = "http"
+	}
 	reader := bufio.NewReaderSize(stdio.Stdout, MaxFramePayload+frameHeaderSize)
 	port, err := readReady(reader, readyTimeout)
 	if err != nil {
 		return nil, err
 	}
 	session := &Session{
-		URL:    "http://" + net.JoinHostPort("127.0.0.1", strconv.Itoa(port)),
+		// The helper only carries bytes; the scheme belongs to the AHA listener
+		// the stream ends at. Keeping it means an https base URL still works,
+		// with TLS running end to end through the tunnel.
+		URL:    scheme + "://" + net.JoinHostPort("127.0.0.1", strconv.Itoa(port)),
 		Target: target,
 		stdio:  stdio,
 	}
@@ -70,11 +87,19 @@ func StartSession(stdio Stdio, target string, readyTimeout time.Duration) (*Sess
 			waitErr := stdio.Wait()
 			if waitErr != nil {
 				session.channel.fail(fmt.Errorf("agent-proxy: helper exited: %w", waitErr))
-				return
+			} else {
+				session.channel.fail(errMuxClosed)
 			}
-			session.channel.fail(errMuxClosed)
+			session.closeTransport()
 		}()
 	}
+	// Whatever ended the channel — a broken frame, a dead helper — closes the
+	// transport too. Without this, a request issued after the failure would sit
+	// on a half-open SSH session until its own timeout instead of failing now.
+	go func() {
+		<-session.channel.Done()
+		session.closeTransport()
+	}()
 	return session, nil
 }
 
@@ -85,8 +110,23 @@ func readReady(reader *bufio.Reader, timeout time.Duration) (int, error) {
 	}
 	ready := make(chan result, 1)
 	go func() {
-		line, err := reader.ReadString('\n')
-		ready <- result{line: line, err: err}
+		line := make([]byte, 0, 32)
+		for {
+			value, err := reader.ReadByte()
+			if err != nil {
+				ready <- result{err: err}
+				return
+			}
+			if value == '\n' {
+				ready <- result{line: string(line)}
+				return
+			}
+			line = append(line, value)
+			if len(line) > maxReadyLine {
+				ready <- result{err: fmt.Errorf("%w: READY line longer than %d bytes", ErrBadHandshake, maxReadyLine)}
+				return
+			}
+		}
 	}()
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
@@ -147,9 +187,17 @@ func (s *Session) Close() error {
 		case <-time.After(3 * time.Second):
 		}
 		s.channel.Close()
+		s.closeTransport()
+	})
+	return s.closeErr
+}
+
+// closeTransport tears the host-side transport down exactly once. The helper is
+// a child of that transport, so this is also what bounds its lifetime.
+func (s *Session) closeTransport() {
+	s.transportOnce.Do(func() {
 		if s.stdio.Close != nil {
 			s.closeErr = s.stdio.Close()
 		}
 	})
-	return s.closeErr
 }

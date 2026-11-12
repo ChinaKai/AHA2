@@ -29,7 +29,7 @@ import {DEFAULT_TASK_STATUS_FILTERS, LOCAL_TASK_DEVICE_FILTER, TASK_STATUS_GROUP
 import type {TaskStatusGroup} from "./task_filters.js";
 import {TASK_TOOL_DEFAULT_WIDTH, normalizePinnedTaskTool, normalizeTaskToolMode, normalizeTaskToolWidth, renderTaskToolButtons, renderTaskToolContent, renderTaskToolPanel} from "./task_tools.js";
 import type {TaskTool, TaskToolMode} from "./task_tools.js";
-import {TASK_SLASH_COMMANDS, bindMessageBubbleControls, captureInteractiveRegion, clearNavigationSnapshot, createListRefreshScheduler, createResourceLoader, eventRefreshesTaskList, exactSlashCommand, executeAgentSessionAction, loadNavigationSnapshot, matchingSlashCommands, paginateItems, paginationHTML, petWatchActionKeys, readPerfPanelPreference, renderWorkspaceDetection, restoreInteractiveRegion, saveNavigationSnapshot, textMatchesQuery, writePerfPanelPreference} from "./ui_helpers.js";
+import {TASK_SLASH_COMMANDS, bindMessageBubbleControls, captureInteractiveRegion, clearNavigationSnapshot, createListRefreshScheduler, createResourceLoader, eventRefreshesTaskList, exactSlashCommand, executeAgentSessionAction, formCheckbox, loadNavigationSnapshot, matchingSlashCommands, paginateItems, paginationHTML, petWatchActionKeys, readPerfPanelPreference, renderWorkspaceDetection, restoreInteractiveRegion, saveNavigationSnapshot, textMatchesQuery, writePerfPanelPreference} from "./ui_helpers.js";
 import type {InteractiveRegionState} from "./ui_helpers.js";
 import {
   compactNumber,
@@ -5640,7 +5640,7 @@ function bindCommon(): void {
   }, "保存中");
   bindForm("#agent-api-override-form", async form => {
     const url = String(form.get("url") || "").trim();
-    const stdioProxy = Boolean(form.querySelector<HTMLInputElement>('[name="stdio_proxy"]')?.checked);
+    const stdioProxy = formCheckbox(form, "stdio_proxy");
     const response = await api.updateAgentAPISettings({url, stdio_proxy: stdioProxy});
     state.agentAPISettings = response.agent_api;
     setMessage("notice", stdioProxy ? "Agent API 设置已保存，SSH stdio 代理已开启" : (url ? "Agent API 手动覆盖已保存" : "Agent API 手动覆盖已清除"));

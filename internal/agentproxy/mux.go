@@ -14,6 +14,17 @@ import (
 // not a protocol violation: the SSH channel simply ended.
 var errMuxClosed = errors.New("agent-proxy: channel closed")
 
+// errTooManyStreams refuses a new connection once one channel carries
+// MaxStreamsPerChannel. The peer is a single agent process; a channel that
+// keeps opening streams is either broken or trying to exhaust this side, and
+// either way more goroutines will not help it.
+var errTooManyStreams = errors.New("agent-proxy: too many concurrent streams")
+
+// MaxStreamsPerChannel bounds concurrent connections carried by one channel.
+// A well-behaved HTTP client uses a handful; with the 256 KiB per-stream window
+// this caps the worst-case buffering of one channel at 16 MiB.
+const MaxStreamsPerChannel = 64
+
 // multiplexer carries many TCP streams over one byte stream.
 //
 // The accept side (the workspace helper) attaches sockets it accepted; the dial
@@ -112,6 +123,10 @@ func (m *multiplexer) handle(f frame) error {
 		if existing := m.lookup(f.id); existing != nil {
 			return fmt.Errorf("%w: duplicate open for stream %d", ErrBadFrame, f.id)
 		}
+		if m.streamCount() >= MaxStreamsPerChannel {
+			m.send(frame{kind: frameReset, id: f.id})
+			return nil
+		}
 		conn, err := m.dial()
 		if err != nil {
 			// Tell the peer its connection was refused, so the agent sees a
@@ -154,6 +169,12 @@ func (m *multiplexer) lookup(id uint32) *stream {
 	return m.streams[id]
 }
 
+func (m *multiplexer) streamCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.streams)
+}
+
 // register installs a stream and starts its pumps.
 func (m *multiplexer) register(id uint32, conn net.Conn) *stream {
 	s := newStream(m, id, conn)
@@ -181,15 +202,23 @@ func (m *multiplexer) attach(conn net.Conn) (uint32, error) {
 		m.mu.Unlock()
 		return 0, errMuxClosed
 	}
+	if len(m.streams) >= MaxStreamsPerChannel {
+		m.mu.Unlock()
+		return 0, errTooManyStreams
+	}
 	m.nextID++
 	id := m.nextID
+	// Register before OPEN goes out: the peer may answer (RESET after a failed
+	// dial, or DATA) before this goroutine resumes, and a frame for an unknown
+	// stream would be dropped.
+	s := newStream(m, id, conn)
+	m.streams[id] = s
 	m.mu.Unlock()
 	if !m.send(frame{kind: frameOpen, id: id}) {
+		s.abort()
 		return 0, errMuxClosed
 	}
-	if m.register(id, conn) == nil {
-		return 0, errMuxClosed
-	}
+	s.start()
 	return id, nil
 }
 
@@ -255,6 +284,10 @@ type stream struct {
 	recvCond   *sync.Cond
 	queue      [][]byte
 	recvClosed bool
+	// received counts bytes queued but not yet granted back. The peer may only
+	// send InitialWindow bytes ahead of the last WINDOW, so exceeding it is a
+	// protocol violation, not normal buffering.
+	received int
 
 	stateMu   sync.Mutex
 	writeDone bool
@@ -338,10 +371,22 @@ func (s *stream) receive(payload []byte) {
 		return
 	}
 	s.recvMu.Lock()
+	// recvClosed is also set by abort, so this one check covers both a peer
+	// close and a local teardown without reading state guarded by another lock.
 	if s.recvClosed {
 		s.recvMu.Unlock()
 		return
 	}
+	if s.received+len(payload) > InitialWindow {
+		s.recvMu.Unlock()
+		// The peer sent beyond its credit. Resetting this stream is the only
+		// safe answer: its accounting no longer matches ours, and trusting the
+		// rest of the stream would mean buffering without a bound.
+		s.mux.send(frame{kind: frameReset, id: s.id})
+		s.abort()
+		return
+	}
+	s.received += len(payload)
 	s.queue = append(s.queue, payload)
 	s.recvCond.Signal()
 	s.recvMu.Unlock()
@@ -383,6 +428,12 @@ func (s *stream) pumpIn() {
 }
 
 func (s *stream) grant(n int) {
+	s.recvMu.Lock()
+	s.received -= n
+	if s.received < 0 {
+		s.received = 0
+	}
+	s.recvMu.Unlock()
 	var payload [4]byte
 	binary.BigEndian.PutUint32(payload[:], uint32(n))
 	s.mux.send(frame{kind: frameWindow, id: s.id, payload: payload[:]})
@@ -422,7 +473,12 @@ func (s *stream) abort() {
 		s.deadOnce.Do(func() { close(s.dead) })
 		s.mux.remove(s.id)
 	})
+	// Mark the read side finished as well: a pump that starts after the abort
+	// (OPEN registered before its pumps) must not wait for data that will never
+	// be delivered.
 	s.recvMu.Lock()
+	s.recvClosed = true
+	s.queue = nil
 	s.recvCond.Broadcast()
 	s.recvMu.Unlock()
 }
