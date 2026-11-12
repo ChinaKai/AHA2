@@ -129,9 +129,11 @@ powershell.exe -ExecutionPolicy Bypass -File scripts\build-and-deploy-windows-us
 （默认 45 秒）重试，超时则拒绝继续修改，而不是边跑边复制。备份只在这个验证通过后执行，
 并对每个复制结果校验大小与 SHA256。失败回滚同样先验证停止，再用“同目录临时文件 + 哈希校验 +
 `[IO.File]::Replace` 原子替换”恢复二进制、`aha2.db`/`aha2.db-wal` 以及备份中的
-`secrets.json`/`setup-token`；恢复前删除可能属于失败版本的 WAL/SHM，恢复后对数据库执行
-`PRAGMA quick_check`，只有返回 `ok` 才会重新启动服务。回滚无法验证时保持 AHA2 停止、保留备份，
-并在结果中输出人工恢复步骤。
+`secrets.json`/`setup-token`；部署前不存在的文件（例如首次安装的 Feishu 插件与清单）在回滚时删除。
+数据库恢复前**无条件**删除失败版本可能留下的 `aha2.db-wal` 和 `aha2.db-shm`（即使备份里没有 WAL），
+再按备份内容原子恢复，最后对数据库执行 `PRAGMA quick_check`；只有返回 `ok` 才会重新启动服务。
+回滚无法验证时保持 AHA2 停止、保留备份，并在结果中输出人工恢复步骤（同样要求先移走
+`aha2.db`/`aha2.db-wal`/`aha2.db-shm` 再复制备份）。
 
 结果 JSON 中的诊断字段：
 

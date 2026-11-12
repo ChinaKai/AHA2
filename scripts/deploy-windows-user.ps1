@@ -133,8 +133,15 @@ function Test-AHA2RollbackPrerequisite {
   return ((-not $ExistedBefore) -or $BackupPresent)
 }
 
+function Get-AHA2FileRollbackAction {
+  param([bool]$ExistedBefore, [bool]$BackupPresent)
+  if ($BackupPresent) { return "restore" }
+  if (-not $ExistedBefore) { return "delete" }
+  return "blocked"
+}
+
 function Get-AHA2DatabaseRestorePlan {
-  param([string[]]$BackupNames, [string[]]$LiveNames)
+  param([string[]]$BackupNames)
   $actions = New-Object System.Collections.ArrayList
   if ($BackupNames -notcontains "aha2.db") {
     return [pscustomobject]@{
@@ -143,15 +150,12 @@ function Get-AHA2DatabaseRestorePlan {
       Actions = @()
     }
   }
-  # The shared-memory file is rebuilt by SQLite; restoring a stale one is worse
-  # than deleting it. The WAL must be removed before the main database is
-  # swapped so an old WAL can never be applied to a restored database image.
-  if ($LiveNames -contains "aha2.db-shm") {
-    [void]$actions.Add([pscustomobject]@{Action="delete";Name="aha2.db-shm"})
-  }
-  if ($LiveNames -contains "aha2.db-wal") {
-    [void]$actions.Add([pscustomobject]@{Action="delete";Name="aha2.db-wal"})
-  }
+  # A slightly stale shared-memory file is worse than none, and a WAL from the
+  # failed version must never be replayed onto the restored image. Delete both
+  # sidecars unconditionally before swapping the database: relying on the files
+  # seen at inspection time leaves a window for a late writer to recreate one.
+  [void]$actions.Add([pscustomobject]@{Action="delete";Name="aha2.db-shm"})
+  [void]$actions.Add([pscustomobject]@{Action="delete";Name="aha2.db-wal"})
   [void]$actions.Add([pscustomobject]@{Action="replace";Name="aha2.db"})
   if ($BackupNames -contains "aha2.db-wal") {
     [void]$actions.Add([pscustomobject]@{Action="replace";Name="aha2.db-wal"})
@@ -238,6 +242,25 @@ function Remove-AHA2FileIfPresent {
   }
 }
 
+function Invoke-AHA2FileRollbackEntry {
+  param($Entry)
+  $action = Get-AHA2FileRollbackAction -ExistedBefore ([bool]$Entry.ExistedBefore) -BackupPresent ([bool]$Entry.BackupPresent)
+  switch ($action) {
+    "restore" {
+      [void](Set-AHA2FileFromSource -Source $Entry.BackupPath -Destination $Entry.TargetPath -ExpectedSHA256 $Entry.SHA256)
+    }
+    "delete" {
+      # The file did not exist before this deployment. Remove whatever the
+      # failed install created so the previous version cannot load it.
+      Remove-AHA2FileIfPresent -Path $Entry.TargetPath
+    }
+    default {
+      return ("blocked: {0} existed before the deployment but has no verified backup" -f $Entry.TargetPath)
+    }
+  }
+  return ""
+}
+
 function Restore-AHA2DatabaseFromBackup {
   param(
     [string]$BackupDirectory,
@@ -247,10 +270,7 @@ function Restore-AHA2DatabaseFromBackup {
   $backupNames = @($databaseFileNames | Where-Object {
     Test-Path -LiteralPath (Join-Path $BackupDirectory $_) -PathType Leaf
   })
-  $liveNames = @($databaseFileNames | Where-Object {
-    Test-Path -LiteralPath (Join-Path $DataDirectory $_) -PathType Leaf
-  })
-  $plan = Get-AHA2DatabaseRestorePlan -BackupNames $backupNames -LiveNames $liveNames
+  $plan = Get-AHA2DatabaseRestorePlan -BackupNames $backupNames
   if ($plan.Blocked) { throw $plan.Reason }
 
   # Stage the database (and WAL when present) before deleting anything, so the
@@ -447,16 +467,17 @@ function Invoke-AHA2SelfTest {
   Assert-AHA2SelfTest (-not (Test-AHA2RollbackPrerequisite -ExistedBefore $true -BackupPresent $false)) "existing binary without a backup blocks the deployment"
   Assert-AHA2SelfTest (Test-AHA2RollbackPrerequisite -ExistedBefore $false -BackupPresent $false) "first-time install needs no rollback binary"
 
-  # Database restore ordering: shm/wal are deleted before the main database is
-  # replaced; a WAL absent from the backup must not survive.
-  $plan = Get-AHA2DatabaseRestorePlan -BackupNames @("aha2.db","aha2.db-wal") -LiveNames @("aha2.db","aha2.db-wal","aha2.db-shm")
+  # Database restore ordering: the failed version's shm/wal are deleted
+  # unconditionally before the main database is replaced, and a WAL absent
+  # from the backup must never survive.
+  $plan = Get-AHA2DatabaseRestorePlan -BackupNames @("aha2.db","aha2.db-wal")
   Assert-AHA2SelfTest (-not $plan.Blocked) "restore plan accepts a backup containing aha2.db"
   $planText = (@($plan.Actions | ForEach-Object { $_.Action + ":" + $_.Name }) -join ",")
   Assert-AHA2SelfTest ($planText -eq "delete:aha2.db-shm,delete:aha2.db-wal,replace:aha2.db,replace:aha2.db-wal") "restore removes stale sidecars before replacing the database"
-  $planNoWal = Get-AHA2DatabaseRestorePlan -BackupNames @("aha2.db") -LiveNames @("aha2.db","aha2.db-wal","aha2.db-shm")
+  $planNoWal = Get-AHA2DatabaseRestorePlan -BackupNames @("aha2.db")
   $planNoWalText = (@($planNoWal.Actions | ForEach-Object { $_.Action + ":" + $_.Name }) -join ",")
-  Assert-AHA2SelfTest ($planNoWalText -eq "delete:aha2.db-shm,delete:aha2.db-wal,replace:aha2.db") "restore deletes a live WAL that the backup does not contain"
-  $blocked = Get-AHA2DatabaseRestorePlan -BackupNames @("aha2.db-wal") -LiveNames @("aha2.db")
+  Assert-AHA2SelfTest ($planNoWalText -eq "delete:aha2.db-shm,delete:aha2.db-wal,replace:aha2.db") "restore deletes the live WAL even when the backup has no WAL"
+  $blocked = Get-AHA2DatabaseRestorePlan -BackupNames @("aha2.db-wal")
   Assert-AHA2SelfTest ($blocked.Blocked) "restore is blocked without a database backup"
 
   # End-to-end restore in a throw-away directory: the live database must be
@@ -510,6 +531,20 @@ function Invoke-AHA2SelfTest {
     Assert-AHA2SelfTest $hashMismatchThrew "restore rejects a backup that no longer matches its recorded SHA256"
     Assert-AHA2SelfTest ([IO.File]::ReadAllText((Join-Path $liveDir "aha2.db")) -eq "hash-live-db") "hash-mismatched restore leaves the live database byte-identical"
     Assert-AHA2SelfTest (@(Get-ChildItem -LiteralPath $liveDir -Force -Filter "*.tmp").Count -eq 0) "hash-mismatched restore leaves no staging file behind"
+
+    # Reviewer scenario: the backup has no WAL but the failed version left one
+    # behind. Restoring the database without deleting that WAL would let SQLite
+    # replay the failed version's changes on top of the restored image.
+    $noWalBackup = Join-Path $restoreRoot "no-wal-backup"
+    New-Item -ItemType Directory -Path $noWalBackup -Force | Out-Null
+    [IO.File]::WriteAllText((Join-Path $noWalBackup "aha2.db"), "backup-without-wal", [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $liveDir "aha2.db"), "failed-version-db", [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $liveDir "aha2.db-wal"), "failed-version-wal", [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $liveDir "aha2.db-shm"), "failed-version-shm", [Text.UTF8Encoding]::new($false))
+    Restore-AHA2DatabaseFromBackup -BackupDirectory $noWalBackup -DataDirectory $liveDir
+    Assert-AHA2SelfTest ([IO.File]::ReadAllText((Join-Path $liveDir "aha2.db")) -eq "backup-without-wal") "restore without a backup WAL still replaces the database"
+    Assert-AHA2SelfTest (-not (Test-Path -LiteralPath (Join-Path $liveDir "aha2.db-wal"))) "restore removes the failed version WAL when the backup has none"
+    Assert-AHA2SelfTest (-not (Test-Path -LiteralPath (Join-Path $liveDir "aha2.db-shm"))) "restore removes the failed version SHM when the backup has none"
   } finally {
     Remove-Item -LiteralPath $restoreRoot -Recurse -Force -ErrorAction SilentlyContinue
   }
@@ -546,6 +581,50 @@ function Invoke-AHA2SelfTest {
     }
   } finally {
     Remove-Item -LiteralPath $atomicRoot -Recurse -Force -ErrorAction SilentlyContinue
+  }
+
+  # First-time Feishu plugin install followed by a failed deployment: the
+  # plugin and manifest did not exist before, so rollback must delete both
+  # instead of restarting the old server with an incompatible plugin. Files
+  # that did exist before are restored from their verified backup.
+  $rollbackRoot = Join-Path ([IO.Path]::GetTempPath()) ("aha2-file-rollback-selftest-" + [Guid]::NewGuid().ToString("N"))
+  try {
+    $pluginDir = Join-Path $rollbackRoot "plugins"
+    $backupDir = Join-Path $rollbackRoot "backup"
+    New-Item -ItemType Directory -Path $pluginDir,$backupDir -Force | Out-Null
+    $newPlugin = Join-Path $pluginDir "aha2-channel-feishu.exe"
+    $newManifest = Join-Path $pluginDir "plugin.json"
+    [IO.File]::WriteAllText($newPlugin, "new-plugin", [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText($newManifest, "new-manifest", [Text.UTF8Encoding]::new($false))
+    $newEntries = @(
+      [pscustomobject]@{Name="aha2-channel-feishu.exe";BackupPath=(Join-Path $backupDir "aha2-channel-feishu.exe");TargetPath=$newPlugin;ExistedBefore=$false;BackupPresent=$false;SHA256=""},
+      [pscustomobject]@{Name="feishu-plugin.json";BackupPath=(Join-Path $backupDir "feishu-plugin.json");TargetPath=$newManifest;ExistedBefore=$false;BackupPresent=$false;SHA256=""}
+    )
+    foreach ($entry in $newEntries) {
+      Assert-AHA2SelfTest ((Get-AHA2FileRollbackAction -ExistedBefore $entry.ExistedBefore -BackupPresent $entry.BackupPresent) -eq "delete") ("new file {0} is scheduled for deletion" -f $entry.Name)
+      Assert-AHA2SelfTest ((Invoke-AHA2FileRollbackEntry -Entry $entry) -eq "") ("new file {0} rollback succeeds" -f $entry.Name)
+    }
+    Assert-AHA2SelfTest (-not (Test-Path -LiteralPath $newPlugin)) "rollback deletes a first-time plugin install"
+    Assert-AHA2SelfTest (-not (Test-Path -LiteralPath $newManifest)) "rollback deletes a first-time plugin manifest"
+
+    $existingBackup = Join-Path $backupDir "aha2.exe"
+    $existingTarget = Join-Path $rollbackRoot "aha2.exe"
+    [IO.File]::WriteAllText($existingBackup, "old-binary", [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText($existingTarget, "new-binary", [Text.UTF8Encoding]::new($false))
+    $existingEntry = [pscustomobject]@{
+      Name = "aha2.exe"
+      BackupPath = $existingBackup
+      TargetPath = $existingTarget
+      ExistedBefore = $true
+      BackupPresent = $true
+      SHA256 = (Get-FileHash -LiteralPath $existingBackup -Algorithm SHA256).Hash.ToLowerInvariant()
+    }
+    Assert-AHA2SelfTest ((Get-AHA2FileRollbackAction -ExistedBefore $true -BackupPresent $true) -eq "restore") "existing binary with a backup is scheduled for restore"
+    Assert-AHA2SelfTest ((Invoke-AHA2FileRollbackEntry -Entry $existingEntry) -eq "") "existing binary rollback succeeds"
+    Assert-AHA2SelfTest ([IO.File]::ReadAllText($existingTarget) -eq "old-binary") "existing binary is restored from the verified backup"
+    Assert-AHA2SelfTest ((Get-AHA2FileRollbackAction -ExistedBefore $true -BackupPresent $false) -eq "blocked") "existing file without a backup blocks rollback"
+  } finally {
+    Remove-Item -LiteralPath $rollbackRoot -Recurse -Force -ErrorAction SilentlyContinue
   }
 
   $okOutput = Test-AHA2QuickCheckOutput -Lines @("ok")
@@ -983,8 +1062,9 @@ function Get-AHA2ManualRecoveryText {
   param($Record, [string]$BackupDirectory)
   $hashText = @($Record.BackupSHA256.Keys | ForEach-Object { "$_=$($Record.BackupSHA256[$_])" }) -join ", "
   $message = "AHA2 was left stopped because rollback could not be verified. Backup: {0}. Verified backup SHA256: {1}. " +
-    "Manual recovery: stop aha2.exe, aha2-tray.exe and aha2-channel-feishu.exe, delete aha2.db-shm, copy the backup aha2.db and aha2.db-wal " +
-    "to {2} with AHA2 stopped, run PRAGMA quick_check, and only start AHA2 when it returns ok."
+    "Manual recovery: stop aha2.exe, aha2-tray.exe and aha2-channel-feishu.exe; move aha2.db, aha2.db-wal and aha2.db-shm out of {2}; " +
+    "copy the backup aha2.db into {2} (and aha2.db-wal only when the backup contains it); run PRAGMA quick_check; " +
+    "start AHA2 only when it returns ok."
   return ($message -f $BackupDirectory,$hashText,$data)
 }
 
@@ -1099,32 +1179,36 @@ try {
     @{Source=$plugin;Name="aha2-channel-feishu.exe";Target=$plugin;ExistedBefore=$pluginExisted},
     @{Source=$pluginManifest;Name="feishu-plugin.json";Target=$pluginManifest;ExistedBefore=$pluginManifestExisted}
   )) {
-    if (-not (Test-Path -LiteralPath $entry.Source -PathType Leaf)) { continue }
     $destinationPath = Join-Path $backup $entry.Name
-    Copy-Item -LiteralPath $entry.Source -Destination $destinationPath -Force
-    $check = Test-AHA2BackupCopy -Source $entry.Source -Destination $destinationPath
-    if (-not $check.Ok) {
-      throw ("Backup verification failed for {0}: {1}" -f $entry.Name,$check.Reason)
+    $backupPresent = $false
+    $entryHash = ""
+    if (Test-Path -LiteralPath $entry.Source -PathType Leaf) {
+      Copy-Item -LiteralPath $entry.Source -Destination $destinationPath -Force
+      $check = Test-AHA2BackupCopy -Source $entry.Source -Destination $destinationPath
+      if (-not $check.Ok) {
+        throw ("Backup verification failed for {0}: {1}" -f $entry.Name,$check.Reason)
+      }
+      $state.BackupSHA256[$entry.Name] = $check.SHA256
+      $state.BackupSizes[$entry.Name] = $check.Size
+      $backupPresent = $true
+      $entryHash = $check.SHA256
     }
-    $state.BackupSHA256[$entry.Name] = $check.SHA256
-    $state.BackupSizes[$entry.Name] = $check.Size
+    # Record every target, including files that did not exist before this
+    # deployment: rollback must delete the ones a failed install created.
     $binaryBackups += [pscustomobject]@{
       Name = $entry.Name
       BackupPath = $destinationPath
       TargetPath = $entry.Target
       ExistedBefore = [bool]$entry.ExistedBefore
-      SHA256 = $check.SHA256
+      BackupPresent = $backupPresent
+      SHA256 = $entryHash
     }
   }
-  # An in-place update always replaces binaries that existed before, so their
-  # verified backups are mandatory. A first-time install has nothing to back up.
-  foreach ($requiredBinary in @(
-    @{Name="aha2.exe";ExistedBefore=$serverExisted},
-    @{Name="aha2-tray.exe";ExistedBefore=$trayExisted}
-  )) {
-    $backupPresent = Test-Path -LiteralPath (Join-Path $backup $requiredBinary.Name) -PathType Leaf
-    if (-not (Test-AHA2RollbackPrerequisite -ExistedBefore ([bool]$requiredBinary.ExistedBefore) -BackupPresent $backupPresent)) {
-      throw ("Required rollback binary {0} is missing from the backup." -f $requiredBinary.Name)
+  # A file that existed before the deployment must have a verified backup
+  # before any installed file is replaced; otherwise rollback cannot restore it.
+  foreach ($requiredFile in $binaryBackups) {
+    if (-not (Test-AHA2RollbackPrerequisite -ExistedBefore ([bool]$requiredFile.ExistedBefore) -BackupPresent ([bool]$requiredFile.BackupPresent))) {
+      throw ("Required rollback file {0} is missing from the backup." -f $requiredFile.Name)
     }
   }
   $backupVerified = $true
@@ -1283,14 +1367,13 @@ try {
   foreach ($binary in $binaryBackups) {
     if ($rollbackHealth) { break }
     try {
-      if (Test-Path -LiteralPath $binary.BackupPath -PathType Leaf) {
-        [void](Set-AHA2FileFromSource -Source $binary.BackupPath -Destination $binary.TargetPath -ExpectedSHA256 $binary.SHA256)
-      } elseif (-not $binary.ExistedBefore) {
-        Remove-AHA2FileIfPresent -Path $binary.TargetPath
-      }
+      $failure = Invoke-AHA2FileRollbackEntry -Entry $binary
     } catch {
       Add-AHA2LockedFile -Record $state -Paths @($binary.TargetPath)
-      $rollbackHealth = ("failed: binary restore failed for {0}: {1}" -f $binary.TargetPath,$_.Exception.Message)
+      $failure = ("file rollback failed for {0}: {1}" -f $binary.TargetPath,$_.Exception.Message)
+    }
+    if ($failure) {
+      $rollbackHealth = ("failed: " + $failure)
       break
     }
   }
