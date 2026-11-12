@@ -331,36 +331,27 @@ func (s *Service) deleteWorkspaceNow(ctx context.Context, workspaceID string) er
 	if err != nil {
 		return err
 	}
+	// Snapshot the Tasks before the transaction so their scratch directories can
+	// be removed after the rows are gone. The store deletes the Tasks, their sync
+	// tombstones and the Workspace in one transaction, so a refusal leaves both
+	// sides intact.
 	tasks, _ := s.store.ListTasks(ctx, "")
-	for _, task := range tasks {
-		if task.WorkspaceID != workspace.ID {
-			continue
-		}
-		if _, activeErr := s.store.ActiveTurn(ctx, task.ID); activeErr == nil {
-			return fmt.Errorf("Workspace 下有执行中的任务 %s，请先中断或等待完成", task.ID)
-		} else if !errors.Is(activeErr, sql.ErrNoRows) {
-			return activeErr
-		}
-	}
-	for _, task := range tasks {
-		if task.WorkspaceID != workspace.ID {
-			continue
-		}
-		if err := s.store.DeleteTaskWithSyncTombstone(ctx, task.ID); err != nil {
-			return err
-		}
-		if cleanupErr := s.CleanupTaskScratch(ctx, task); cleanupErr != nil {
-			log.Printf("cleanup task scratch %s: %v", task.ID, cleanupErr)
-		}
-		if task.RuntimeConfigSnapshotID != "" {
-			_ = s.store.DeleteRuntimeSnapshot(ctx, task.RuntimeConfigSnapshotID)
-		}
-	}
 	if err := s.store.DeleteWorkspaceWithSyncTombstone(ctx, workspace.ID); err != nil {
-		if errors.Is(err, store.ErrWorkspaceInUse) {
-			return fmt.Errorf("Workspace 仍被任务、运行记录或 Backend Session 引用")
+		switch {
+		case errors.Is(err, store.ErrWorkspaceHasActiveTurn):
+			return fmt.Errorf("Workspace 下有执行中的任务，请先中断或等待完成")
+		case errors.Is(err, store.ErrWorkspaceInUse):
+			return fmt.Errorf("Workspace 仍被其他 Workspace 的任务或运行记录引用")
 		}
 		return err
+	}
+	for _, task := range tasks {
+		if task.WorkspaceID != workspace.ID {
+			continue
+		}
+		if cleanupErr := s.CleanupTaskScratchIn(ctx, workspace, task); cleanupErr != nil {
+			log.Printf("cleanup task scratch %s: %v", task.ID, cleanupErr)
+		}
 	}
 	s.deleteWorkspaceSecret(workspace)
 	_ = s.store.AppendPetEvent(ctx, domain.PetEvent{

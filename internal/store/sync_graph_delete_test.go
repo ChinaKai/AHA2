@@ -367,3 +367,130 @@ func TestDeleteWorkspaceWithSyncTombstoneClearsResidualReferences(t *testing.T) 
 		t.Fatalf("other workspace snapshots=%d err=%v", otherSnapshots, err)
 	}
 }
+
+// A reference held by a live Task in another Workspace must refuse the delete
+// and roll back the Tasks that were about to be removed with it.
+func TestDeleteWorkspaceWithSyncTombstoneRollsBackSharedSnapshotReference(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database, err := Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	target := createStoreTestTask(t, database)
+	sharing := createStoreTestTask(t, database)
+	if err := database.ClaimLocalWorkspaces(ctx, "device-owner"); err != nil {
+		t.Fatal(err)
+	}
+	targetWorkspace, err := database.Workspace(ctx, target.WorkspaceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetSnapshot, err := database.RuntimeSnapshot(ctx, target.RuntimeConfigSnapshotID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.db.ExecContext(ctx, `UPDATE tasks SET runtime_config_snapshot_id=? WHERE id=?`, targetSnapshot.ID, sharing.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := database.DeleteWorkspaceWithSyncTombstone(ctx, targetWorkspace.ID); !errors.Is(err, ErrWorkspaceInUse) {
+		t.Fatalf("delete with a shared snapshot error=%v, want ErrWorkspaceInUse", err)
+	}
+	if _, err := database.Task(ctx, target.ID); err != nil {
+		t.Fatalf("half-deleted: target task is gone: %v", err)
+	}
+	if _, err := database.Workspace(ctx, targetWorkspace.ID); err != nil {
+		t.Fatalf("target workspace is gone: %v", err)
+	}
+	if _, err := database.Task(ctx, sharing.ID); err != nil {
+		t.Fatalf("sharing task is gone: %v", err)
+	}
+	if _, err := database.RuntimeSnapshot(ctx, targetSnapshot.ID); err != nil {
+		t.Fatalf("shared snapshot is gone: %v", err)
+	}
+	for _, wire := range []struct{ objectType, id string }{
+		{"task", target.ID},
+		{"workspace", targetWorkspace.ID},
+	} {
+		if _, err := database.SyncTombstone(ctx, wire.objectType, ownedGraphObjectID("device-owner", wire.id)); err == nil {
+			t.Fatalf("rolled-back %s tombstone survived", wire.objectType)
+		}
+	}
+}
+
+func TestDeleteWorkspaceWithSyncTombstoneRefusesActiveTurnAndKeepsRows(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database, err := Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	task := createStoreTestTask(t, database)
+	if err := database.ClaimLocalWorkspaces(ctx, "device-owner"); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	message := domain.Message{ID: "active-message", TaskID: task.ID, Role: "user", Sender: "owner", Content: "run", CreatedAt: now}
+	if err := database.AddMessage(ctx, message); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CreateTurn(ctx, domain.Turn{
+		ID: "active-turn", TaskID: task.ID, AgentID: "main", Sequence: 1,
+		InputMessageID: message.ID, Status: domain.TurnRunning,
+		RuntimeConfigSnapshotID: task.RuntimeConfigSnapshotID, QueuedAt: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := database.DeleteWorkspaceWithSyncTombstone(ctx, task.WorkspaceID); !errors.Is(err, ErrWorkspaceHasActiveTurn) {
+		t.Fatalf("delete with an active turn error=%v, want ErrWorkspaceHasActiveTurn", err)
+	}
+	if _, err := database.Task(ctx, task.ID); err != nil {
+		t.Fatalf("task was deleted despite the active turn: %v", err)
+	}
+	if _, err := database.Workspace(ctx, task.WorkspaceID); err != nil {
+		t.Fatalf("workspace was deleted despite the active turn: %v", err)
+	}
+}
+
+func TestDeleteWorkspaceWithSyncTombstoneDeletesTasksAtomically(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database, err := Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	first := createStoreTestTask(t, database)
+	second := createStoreTestTask(t, database)
+	if _, err := database.db.ExecContext(ctx, `UPDATE tasks SET workspace_id=?, runtime_config_snapshot_id=? WHERE id=?`,
+		first.WorkspaceID, first.RuntimeConfigSnapshotID, second.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.ClaimLocalWorkspaces(ctx, "device-owner"); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.DeleteWorkspaceWithSyncTombstone(ctx, first.WorkspaceID); err != nil {
+		t.Fatal(err)
+	}
+	for _, taskID := range []string{first.ID, second.ID} {
+		if _, err := database.Task(ctx, taskID); !errors.Is(err, sql.ErrNoRows) {
+			t.Fatalf("task %s survived: %v", taskID, err)
+		}
+		if _, err := database.SyncTombstone(ctx, "task", ownedGraphObjectID("device-owner", taskID)); err != nil {
+			t.Fatalf("task %s tombstone missing: %v", taskID, err)
+		}
+	}
+	if _, err := database.Workspace(ctx, first.WorkspaceID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("workspace survived: %v", err)
+	}
+	if _, err := database.SyncTombstone(ctx, "workspace", ownedGraphObjectID("device-owner", first.WorkspaceID)); err != nil {
+		t.Fatalf("workspace tombstone missing: %v", err)
+	}
+}

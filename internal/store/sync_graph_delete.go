@@ -14,6 +14,7 @@ import (
 var (
 	ErrReadOnlySyncMirror      = errors.New("synchronized read-only mirror cannot delete owner data")
 	ErrWorkspaceInUse          = errors.New("workspace is still referenced")
+	ErrWorkspaceHasActiveTurn  = errors.New("workspace still has an active turn")
 	ErrWorkspaceMirrorHasTasks = errors.New("remote workspace mirror still has tasks")
 )
 
@@ -62,6 +63,11 @@ func purgeWorkspaceDeleteResidueTx(ctx context.Context, tx *sql.Tx, workspaceID 
 	return nil
 }
 
+// DeleteWorkspaceWithSyncTombstone deletes a writable Workspace together with
+// its Tasks, their sync tombstones and the residual references that would
+// otherwise block it, all in one transaction. Refusing on an active Turn or on
+// a reference owned by another Workspace rolls the whole change back, so the
+// Owner never gets a half-deleted Workspace with Tasks already gone.
 func (s *Store) DeleteWorkspaceWithSyncTombstone(ctx context.Context, id string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -76,9 +82,46 @@ func (s *Store) DeleteWorkspaceWithSyncTombstone(ctx context.Context, id string)
 	if readOnly {
 		return ErrReadOnlySyncMirror
 	}
+	// Checked in the same transaction as the delete so a Turn cannot start
+	// between the check and the row removal.
+	var activeTurn bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(
+		SELECT 1 FROM turns JOIN tasks ON tasks.id=turns.task_id
+		WHERE tasks.workspace_id=? AND turns.status IN ('queued','preparing','starting','running','waiting'))`, id).Scan(&activeTurn); err != nil {
+		return err
+	}
+	if activeTurn {
+		return ErrWorkspaceHasActiveTurn
+	}
 	now := time.Now().UTC()
 	if err := enqueueOwnedGraphDeleteTx(ctx, tx, "workspace", id, ownerDeviceID, now); err != nil {
 		return err
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT id FROM tasks WHERE workspace_id=? ORDER BY created_at,id`, id)
+	if err != nil {
+		return err
+	}
+	var taskIDs []string
+	for rows.Next() {
+		var taskID string
+		if err := rows.Scan(&taskID); err != nil {
+			rows.Close()
+			return err
+		}
+		taskIDs = append(taskIDs, taskID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	var attachmentHashes []string
+	for _, taskID := range taskIDs {
+		hashes, err := s.deleteTaskTx(ctx, tx, taskID, true)
+		if err != nil {
+			return err
+		}
+		attachmentHashes = append(attachmentHashes, hashes...)
 	}
 	if err := purgeWorkspaceDeleteResidueTx(ctx, tx, id); err != nil {
 		return err
@@ -109,7 +152,11 @@ func (s *Store) DeleteWorkspaceWithSyncTombstone(ctx context.Context, id string)
 	if _, err := tx.ExecContext(ctx, `DELETE FROM workspaces WHERE id=? AND read_only=0`, id); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.removeOrphanedAttachmentBlobs(ctx, attachmentHashes)
+	return nil
 }
 
 // RetireRemoteWorkspaceMirror removes a read-only Workspace mirror without

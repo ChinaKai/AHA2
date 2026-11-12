@@ -635,6 +635,21 @@ func (s *Store) deleteTask(ctx context.Context, id string, tombstone bool) error
 		return err
 	}
 	defer tx.Rollback()
+	hashes, err := s.deleteTaskTx(ctx, tx, id, tombstone)
+	if err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.removeOrphanedAttachmentBlobs(ctx, hashes)
+	return nil
+}
+
+// deleteTaskTx removes one Task and its restricting dependents inside the
+// caller's transaction. It returns the attachment hashes to prune after the
+// transaction commits, because blob removal must not happen on a rollback.
+func (s *Store) deleteTaskTx(ctx context.Context, tx *sql.Tx, id string, tombstone bool) ([]string, error) {
 	rows, _ := tx.QueryContext(ctx, `SELECT DISTINCT sha256 FROM attachments WHERE task_id=?`, id)
 	var hashes []string
 	if rows != nil {
@@ -649,37 +664,42 @@ func (s *Store) deleteTask(ctx context.Context, id string, tombstone bool) error
 	if tombstone {
 		var ownerDeviceID string
 		if err := tx.QueryRowContext(ctx, `SELECT workspace.owner_device_id FROM tasks task JOIN workspaces workspace ON workspace.id=task.workspace_id WHERE task.id=?`, id).Scan(&ownerDeviceID); err != nil {
-			return err
+			return nil, err
 		}
 		if err := enqueueOwnedGraphDeleteTx(ctx, tx, "task", id, ownerDeviceID, time.Now().UTC()); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	if _, err := s.DeleteMailBindingsForScopeInTx(ctx, tx, domain.MailBindingScopeTask, id); err != nil {
-		return err
+		return nil, err
 	}
 	// Delete build artifacts before the task cascade removes their attachment
 	// rows; build_artifacts.attachment_id is ON DELETE RESTRICT.
 	if _, err := tx.ExecContext(ctx, `DELETE FROM build_artifacts WHERE task_id=?`, id); err != nil {
-		return err
+		return nil, err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM task_permission_requests WHERE task_id=?`, id); err != nil {
-		return err
+		return nil, err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM tasks WHERE id=?`, id); err != nil {
-		return err
+		return nil, err
 	}
-	if err := tx.Commit(); err != nil {
-		return err
-	}
+	return hashes, nil
+}
+
+func (s *Store) removeOrphanedAttachmentBlobs(ctx context.Context, hashes []string) {
+	seen := make(map[string]bool, len(hashes))
 	for _, hash := range hashes {
+		if seen[hash] {
+			continue
+		}
+		seen[hash] = true
 		var references int
 		_ = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM attachments WHERE sha256=?`, hash).Scan(&references)
 		if references == 0 && len(hash) == 64 {
 			_ = os.Remove(filepath.Join(s.dataDir, "attachments", "blobs", hash[:2], hash))
 		}
 	}
-	return nil
 }
 
 func (s *Store) DeleteRuntimeSnapshot(ctx context.Context, id string) error {

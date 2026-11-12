@@ -153,3 +153,67 @@ func TestPetDeleteWorkspaceRefusesActiveTurn(t *testing.T) {
 		t.Fatalf("task was deleted while its turn was running: %v", err)
 	}
 }
+
+func TestPetDeleteWorkspaceRollsBackTasksWhenSnapshotIsShared(t *testing.T) {
+	fixture := newPetTaskFixture(t)
+	if _, err := fixture.service.OwnerAssistant(fixture.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.service.UpdateOwnerPetSettings(fixture.ctx, PetSettingsInput{
+		Enabled: true, ChatModelID: fixture.model.ID, Actions: []string{"walk"},
+		IdleMinutes: 5, QuietStart: 22, QuietEnd: 8, HourlyLimit: 2,
+		AllowCreateTasks: boolPointer(true), AllowCreateWorkspaces: boolPointer(true),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	createTask := func(project domain.Project, workspace domain.Workspace, title string) domain.Task {
+		t.Helper()
+		task, err := fixture.service.CreateTask(fixture.ctx, CreateTaskInput{
+			ProjectID: project.ID, WorkspaceID: workspace.ID, Title: title, Request: title,
+			ModelID: fixture.model.ID, Isolation: "inplace", Filesystem: "workspace-write",
+			Approval: "never", CollaborationMode: "single", MaxAgents: 1, StartMode: "manual",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return task
+	}
+	createWorkspace := func(name string) (domain.Project, domain.Workspace) {
+		t.Helper()
+		project, err := fixture.service.PetCreateProject(fixture.ctx, PetCreateProjectInput{Name: name})
+		if err != nil {
+			t.Fatal(err)
+		}
+		workspace, err := fixture.service.PetCreateWorkspace(fixture.ctx, PetCreateWorkspaceInput{
+			ProjectID: project.ID, Name: name, RootPath: t.TempDir(),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return project, workspace
+	}
+	targetProject, targetWorkspace := createWorkspace("待删除项目")
+	targetTask := createTask(targetProject, targetWorkspace, "待删除任务")
+	otherProject, otherWorkspace := createWorkspace("其他项目")
+	sharingTask := createTask(otherProject, otherWorkspace, "共享快照任务")
+	if err := fixture.database.UpdateTaskRuntimeSnapshot(fixture.ctx, sharingTask.ID, targetTask.RuntimeConfigSnapshotID, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	approval, err := fixture.service.PetDeleteWorkspace(fixture.ctx, targetWorkspace.ID, "清理被共享快照的测试工作区")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.service.ResolvePetApproval(fixture.ctx, approval.ID, "approve", ""); err == nil || !strings.Contains(err.Error(), "引用") {
+		t.Fatalf("approving a workspace whose snapshot is shared: err=%v", err)
+	}
+	if _, err := fixture.database.Task(fixture.ctx, targetTask.ID); err != nil {
+		t.Fatalf("half-deleted: target task is gone: %v", err)
+	}
+	if _, err := fixture.database.Workspace(fixture.ctx, targetWorkspace.ID); err != nil {
+		t.Fatalf("target workspace is gone: %v", err)
+	}
+	if _, err := fixture.database.Task(fixture.ctx, sharingTask.ID); err != nil {
+		t.Fatalf("sharing task is gone: %v", err)
+	}
+}
