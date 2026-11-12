@@ -473,3 +473,87 @@ func TestDeleteWorkspaceDetachesConversationAfterRoutedTasksAreGone(t *testing.T
 		t.Fatalf("routes left=%d err=%v", remaining, err)
 	}
 }
+
+// createReplayChain enqueues a delivery for the conversation's host Task,
+// marks it dead_letter, and replays it. The replay row keeps the same source
+// event and points at the original through replay_of_id, which is a
+// ON DELETE RESTRICT self reference.
+func createReplayChain(t *testing.T, database *Store, fixture channelHistoryFixture) (string, string) {
+	t.Helper()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	delivery := enqueueTestDelivery(t, database, fixture.instance, fixture.conversation, 1, now)
+	if _, err := database.db.ExecContext(ctx,
+		`UPDATE channel_delivery_outbox SET state='dead_letter',last_error_code='test',updated_at=? WHERE id=?`,
+		timeString(now), delivery.ID); err != nil {
+		t.Fatal(err)
+	}
+	replay, err := database.ReplayChannelDelivery(ctx, delivery.ID, fixture.instance.ID, now.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("replay dead letter: %v", err)
+	}
+	if replay.ReplayOfID != delivery.ID {
+		t.Fatalf("replay chain not created: %#v", replay)
+	}
+	return delivery.ID, replay.ID
+}
+
+func assertDeliveriesGone(t *testing.T, database *Store, deliveryIDs ...string) {
+	t.Helper()
+	ctx := context.Background()
+	for _, deliveryID := range deliveryIDs {
+		var count int
+		if err := database.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM channel_delivery_outbox WHERE id=?`, deliveryID).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("delivery %s survived: count=%d err=%v", deliveryID, count, err)
+		}
+	}
+}
+
+func TestDeleteTaskWithReplayChainSucceeds(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database, err := Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	task := createStoreTestTask(t, database)
+	fixture := createChannelHistoryFixture(t, database, task.ID, task.ID)
+	originalID, replayID := createReplayChain(t, database, fixture)
+	var linked int
+	if err := database.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM channel_delivery_outbox WHERE replay_of_id=?`, originalID).Scan(&linked); err != nil || linked != 1 {
+		t.Fatalf("replay chain missing before delete: count=%d err=%v", linked, err)
+	}
+	if err := database.DeleteTaskWithSyncTombstone(ctx, task.ID); err != nil {
+		t.Fatalf("delete task with replay chain: %v", err)
+	}
+	if _, err := database.Task(ctx, task.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("task survived: %v", err)
+	}
+	assertDeliveriesGone(t, database, originalID, replayID)
+}
+
+func TestDeleteWorkspaceWithReplayChainSucceeds(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	database, err := Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	task := createStoreTestTask(t, database)
+	fixture := createChannelHistoryFixture(t, database, task.ID, task.ID)
+	originalID, replayID := createReplayChain(t, database, fixture)
+	if err := database.ClaimLocalWorkspaces(ctx, "device-owner"); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.DeleteWorkspaceWithSyncTombstone(ctx, task.WorkspaceID); err != nil {
+		t.Fatalf("delete workspace with replay chain: %v", err)
+	}
+	if _, err := database.Workspace(ctx, task.WorkspaceID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("workspace survived: %v", err)
+	}
+	assertDeliveriesGone(t, database, originalID, replayID)
+}

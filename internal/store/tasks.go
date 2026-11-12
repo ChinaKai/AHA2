@@ -710,6 +710,19 @@ func (s *Store) purgeTaskChannelReferencesTx(ctx context.Context, tx *sql.Tx, ta
 	if _, err := tx.ExecContext(ctx, `UPDATE channel_handoffs SET created_task_id=NULL,updated_at=? WHERE created_task_id=?`, timeString(at), taskID); err != nil {
 		return err
 	}
+	// Deliveries replay through channel_delivery_outbox.replay_of_id, which is
+	// ON DELETE RESTRICT. Deleting the Task cascades its channel_source_events
+	// and then their deliveries; a replay row still pointing at an earlier
+	// delivery makes SQLite refuse to delete that delivery, even though it is
+	// cascading in the same statement. ReplayChannelDelivery copies the source
+	// event, so both rows belong to this Task and clearing the link here covers
+	// every replay generation.
+	if _, err := tx.ExecContext(ctx, `UPDATE channel_delivery_outbox SET replay_of_id=NULL,updated_at=?
+		WHERE replay_of_id IS NOT NULL
+		  AND source_event_sequence IN (SELECT sequence FROM channel_source_events WHERE task_id=?)`,
+		timeString(at), taskID); err != nil {
+		return err
+	}
 	_, err := tx.ExecContext(ctx, `UPDATE channel_conversations SET host_task_id=NULL,updated_at=? WHERE host_task_id=?`, timeString(at), taskID)
 	return err
 }
