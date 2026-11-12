@@ -180,7 +180,7 @@ try {
 
 $userDeployPath = Join-Path $repo "scripts\deploy-windows-user.ps1"
 $userDeploy = Get-Content -Raw -Encoding UTF8 -LiteralPath $userDeployPath
-foreach ($contract in @("ProviderPath", "GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)", "-WorkingDirectory `$install", "AllowCustomUserWritableInstallDir", "UpdateExistingInstallInPlace", "existing-install-in-place", "Custom install directory is not writable", "WriteAccessVerified", "-PerUser", "ElevationRequired=`$false", "AHA2-Setup-User-x64.exe", "Wait-AHA2Health", "Get-FileHash", "AHA2 User", "AHA2 User Update", "DetachedWorker", "New-ScheduledTaskAction", "RunLevel Limited", "Stop-AHA2ProcessTrees", "System32\taskkill.exe", "`$taskkillExecutable", "`$global:LASTEXITCODE = 0", "/T", "/SKIPUSERTASK=1", "user-deploy-result.json", "stagedInstaller", "Unblock-File", "Start-Process -FilePath `$stagedInstaller", "-SelfTest", "StopTimeoutSeconds", "Test-AHA2ExclusiveFileProbe", "Set-AHA2StagedFileAtomic", "Restore-AHA2DatabaseFromBackup", "PRAGMA quick_check", "winsqlite3.dll", "LockedFiles", "BackupSHA256", "RollbackVerified", "rollback_health", "BackupPresent", "Get-AHA2FileRollbackAction", "Get-AHA2ProcessList", "EnumerationError", "Set-AHA2InstalledFile", "Get-AHA2DeploymentPreflight", "Get-AHA2VolumeChecks", "Get-AHA2PreflightRequest", "Get-AHA2PreflightRequirementText", "Invoke-AHA2DeploymentPreflight", "Get-AHA2VolumeFreeBytes", "FreeBytes", "RequiredBytes", "Volumes", "aha2TempSpaceAllowanceBytes", "Copy-AHA2DatabaseBackup", "databaseBackupFileNames", "Get-AHA2ScriptEncodingState", "Assert-AHA2WindowsPowerShellScriptEncoding", "Resolve-AHA2DetachedHandoff", "Assert-AHA2DetachedWorkerAlive", "HandoffTimeoutSeconds")) {
+foreach ($contract in @("ProviderPath", "GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)", "-WorkingDirectory `$install", "AllowCustomUserWritableInstallDir", "UpdateExistingInstallInPlace", "existing-install-in-place", "Custom install directory is not writable", "WriteAccessVerified", "-PerUser", "ElevationRequired=`$false", "AHA2-Setup-User-x64.exe", "Wait-AHA2Health", "Get-FileHash", "AHA2 User", "AHA2 User Update", "DetachedWorker", "New-ScheduledTaskAction", "RunLevel Limited", "Stop-AHA2ProcessTrees", "System32\taskkill.exe", "`$taskkillExecutable", "`$global:LASTEXITCODE = 0", "/T", "/SKIPUSERTASK=1", "user-deploy-result.json", "stagedInstaller", "Unblock-File", "Start-Process -FilePath `$stagedInstaller", "-SelfTest", "StopTimeoutSeconds", "Test-AHA2ExclusiveFileProbe", "Set-AHA2StagedFileAtomic", "Restore-AHA2DatabaseFromBackup", "PRAGMA quick_check", "winsqlite3.dll", "LockedFiles", "BackupSHA256", "RollbackVerified", "rollback_health", "BackupPresent", "Get-AHA2FileRollbackAction", "Get-AHA2ProcessList", "EnumerationError", "Set-AHA2InstalledFile", "Get-AHA2DeploymentPreflight", "Get-AHA2VolumeChecks", "Get-AHA2PreflightRequest", "Get-AHA2PreflightRequirementText", "Invoke-AHA2DeploymentPreflight", "Get-AHA2VolumeFreeBytes", "FreeBytes", "RequiredBytes", "Volumes", "aha2TempSpaceAllowanceBytes", "Copy-AHA2DatabaseBackup", "databaseBackupFileNames", "Get-AHA2ScriptEncodingState", "Assert-AHA2WindowsPowerShellScriptEncoding", "Resolve-AHA2DetachedHandoff", "Assert-AHA2DetachedWorkerAlive", "HandoffTimeoutSeconds", "Test-AHA2WorkerStartedSince", "Get-AHA2UtcTimestamp")) {
     if (-not $userDeploy.Contains($contract)) {
         throw "Per-user deployment contract is missing: $contract"
     }
@@ -259,6 +259,13 @@ foreach ($marker in @('Assert-AHA2WindowsPowerShellScriptEncoding', 'Start-Sched
     if (-not $handoffSection.Contains($marker)) {
         throw "Detached handoff must fail loudly when the worker exits without a result: missing $marker"
     }
+}
+$legacyDeploy = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $repo "scripts\deploy-windows.ps1")
+if ($legacyDeploy -match 'runtimeFiles\s*=\s*@\([^)]*aha2\.db-shm') {
+    throw "Legacy deploy-windows.ps1 must not back up the volatile aha2.db-shm."
+}
+if (-not $legacyDeploy.Contains('foreach ($staleName in @("aha2.db-shm", "aha2.db-wal"))')) {
+    throw "Legacy deploy-windows.ps1 rollback must delete stale shm and WAL before restoring the database."
 }
 & $userDeployPath -SelfTest
 & $userDeployPath -RepoPath $repo -InputExe (Join-Path $repo "go.mod") -InputTrayExe (Join-Path $repo "go.mod") -InstallDir (Join-Path $localAppData "Programs\AHA2-validation") -DataDir (Join-Path ([IO.Path]::GetTempPath()) "AHA2 User Data") -ValidateOnly
