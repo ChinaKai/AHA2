@@ -914,6 +914,19 @@ func TestTaskMultiTurnFlow(t *testing.T) {
 		environments[0]["AHA2_AGENT_API_TOKEN"] == environments[1]["AHA2_AGENT_API_TOKEN"] {
 		t.Fatalf("per-turn Agent API capability was not injected: %#v", environments)
 	}
+	scratchDir := filepath.Join(workspace.RootPath, ".aha2-context", task.ID, "scratch", "main")
+	if environments[0]["AHA2_SCRATCH_DIR"] != scratchDir {
+		t.Fatalf("scratch path was not injected: %#v", environments[0])
+	}
+	if info, err := os.Stat(scratchDir); err != nil || !info.IsDir() {
+		t.Fatalf("scratch directory was not created: %v %v", info, err)
+	}
+	if !strings.Contains(prompts[0], "scratch dir: "+scratchDir) {
+		t.Fatalf("prompt did not expose the scratch path: %s", prompts[0])
+	}
+	if err := os.WriteFile(filepath.Join(scratchDir, "probe.log"), []byte("temporary"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := capabilities.Authenticate(environments[0]["AHA2_AGENT_API_TOKEN"]); err == nil {
 		t.Fatal("finished Turn capability was not revoked")
 	}
@@ -972,6 +985,10 @@ func TestTaskMultiTurnFlow(t *testing.T) {
 	if err := database.UpdateTaskStatus(ctx, task.ID, domain.TaskActive, domain.TaskFailed, time.Now().UTC().Format(time.RFC3339Nano), time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		t.Fatal(err)
 	}
+	// A failed Task can be reopened, so its scratch stays until the Task closes.
+	if _, err := os.Stat(scratchDir); err != nil {
+		t.Fatalf("failed task lost its scratch directory: %v", err)
+	}
 	retry, err := service.SubmitMessage(ctx, task.ID, "retry failed task")
 	if err != nil {
 		t.Fatalf("failed task did not resume: %v", err)
@@ -982,6 +999,9 @@ func TestTaskMultiTurnFlow(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitForTask(t, database, task.ID, domain.TaskCompleted)
+	if _, err := os.Stat(filepath.Join(workspace.RootPath, ".aha2-context", task.ID, "scratch")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("scratch survived task completion: %v", err)
+	}
 	if err := service.ReopenTask(ctx, task.ID); err != nil {
 		t.Fatal(err)
 	}

@@ -622,11 +622,15 @@ func TestFilterClaudeEnvironment(t *testing.T) {
 	values := map[string]string{
 		"ANTHROPIC_BASE_URL": "https://api.example.com",
 		"ANTHROPIC_API_KEY":  "sk-123",
+		"AHA2_SCRATCH_DIR":   "/repo/.aha2-context/task-1/scratch/main",
 		"OPENAI_API_KEY":     "should-drop",
 	}
 	filtered := filterClaudeEnvironment(values)
 	if filtered["ANTHROPIC_BASE_URL"] != "https://api.example.com" || filtered["ANTHROPIC_API_KEY"] != "sk-123" {
 		t.Fatalf("claude env not filtered correctly: %#v", filtered)
+	}
+	if filtered["AHA2_SCRATCH_DIR"] != "/repo/.aha2-context/task-1/scratch/main" {
+		t.Fatalf("scratch path was filtered from claude env: %#v", filtered)
 	}
 	if _, present := filtered["OPENAI_API_KEY"]; present {
 		t.Fatalf("OPENAI_API_KEY should not leak into claude env: %#v", filtered)

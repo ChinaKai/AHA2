@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path"
 	"path/filepath"
@@ -137,6 +138,9 @@ func (s *Service) deleteProjectNow(ctx context.Context, projectID string) error 
 		}
 		if err := s.store.DeleteTaskWithSyncTombstone(ctx, task.ID); err != nil {
 			return err
+		}
+		if cleanupErr := s.CleanupTaskScratch(ctx, task); cleanupErr != nil {
+			log.Printf("cleanup task scratch %s: %v", task.ID, cleanupErr)
 		}
 		if task.RuntimeConfigSnapshotID != "" {
 			_ = s.store.DeleteRuntimeSnapshot(ctx, task.RuntimeConfigSnapshotID)
@@ -344,6 +348,9 @@ func (s *Service) deleteWorkspaceNow(ctx context.Context, workspaceID string) er
 		}
 		if err := s.store.DeleteTaskWithSyncTombstone(ctx, task.ID); err != nil {
 			return err
+		}
+		if cleanupErr := s.CleanupTaskScratch(ctx, task); cleanupErr != nil {
+			log.Printf("cleanup task scratch %s: %v", task.ID, cleanupErr)
 		}
 		if task.RuntimeConfigSnapshotID != "" {
 			_ = s.store.DeleteRuntimeSnapshot(ctx, task.RuntimeConfigSnapshotID)

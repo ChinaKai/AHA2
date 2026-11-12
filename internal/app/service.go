@@ -978,7 +978,30 @@ func (s *Service) completeTask(ctx context.Context, taskID string, decision *dom
 		return err
 	}
 	s.emit(ctx, task.ID, "task", task.ID, "task_completed", nil)
+	// Scratch is temporary by contract. A failure here leaves only disposable
+	// files behind, so it must not turn a committed completion into an error.
+	if cleanupErr := s.CleanupTaskScratch(ctx, task); cleanupErr != nil {
+		log.Printf("cleanup task scratch %s: %v", task.ID, cleanupErr)
+	}
 	return nil
+}
+
+// CleanupTaskScratch removes the Task-level scratch directory on the host that
+// owns the Task workdir. Callers use it when a Task is closed; failed Tasks
+// keep their scratch until they are completed, cancelled, or deleted.
+func (s *Service) CleanupTaskScratch(ctx context.Context, task domain.Task) error {
+	item, err := s.store.Workspace(ctx, task.WorkspaceID)
+	if err != nil {
+		return err
+	}
+	if item.SSHCredentialRef != "" && s.secrets != nil {
+		item.SSHPassword, _ = s.secrets.Get(item.SSHCredentialRef)
+	}
+	workDir := task.TaskWorkspacePath
+	if strings.TrimSpace(workDir) == "" {
+		workDir = item.RootPath
+	}
+	return workspacepkg.RemoveTaskScratch(ctx, item, workDir, task.ID)
 }
 
 func (s *Service) ReopenTask(ctx context.Context, taskID string) error {
@@ -1246,6 +1269,11 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 	if workDir == "" {
 		workDir = workspace.RootPath
 	}
+	scratchDir, err := workspacepkg.EnsureScratchDir(ctx, workspace, workDir, task.ID, turn.AgentID)
+	if err != nil {
+		s.failTurn(ctx, &turn, task, fmt.Errorf("prepare task scratch: %w", err))
+		return
+	}
 	releaseSharedContext, err := s.materializeSharedContext(ctx, workspace, workDir, preview.SharedRoot, sharedFiles)
 	if err != nil {
 		s.failTurn(ctx, &turn, task, fmt.Errorf("materialize prompt context: shared snapshot: %w", err))
@@ -1325,6 +1353,9 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 			environment[environmentName] = value
 		}
 	}
+	// The scratch path is per Agent and per Turn, so it wins over any static
+	// env-group value with the same name.
+	environment["AHA2_SCRATCH_DIR"] = scratchDir
 	capabilityToken := ""
 	agentAPIForward := (*workspacepkg.ReverseForward)(nil)
 	if s.agentAPI != nil && agentAPIURL != "" {

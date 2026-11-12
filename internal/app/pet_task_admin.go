@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -244,6 +245,9 @@ func (s *Service) deleteTaskNow(ctx context.Context, taskID string) error {
 		return fmt.Errorf("Task 正在执行，请先中断或等待完成")
 	} else if !errors.Is(activeErr, sql.ErrNoRows) {
 		return activeErr
+	}
+	if cleanupErr := s.CleanupTaskScratch(ctx, task); cleanupErr != nil {
+		log.Printf("cleanup task scratch %s: %v", task.ID, cleanupErr)
 	}
 	if err := s.store.DeleteTaskWithSyncTombstone(ctx, task.ID); err != nil {
 		return err

@@ -38,6 +38,7 @@ func (s *Server) deleteTask(writer http.ResponseWriter, request *http.Request) {
 		writeError(writer, http.StatusInternalServerError, "delete_task_failed")
 		return
 	}
+	s.cleanupTaskScratch(request.Context(), task)
 	if task.RuntimeConfigSnapshotID != "" {
 		_ = s.store.DeleteRuntimeSnapshot(request.Context(), task.RuntimeConfigSnapshotID)
 	}
@@ -155,6 +156,7 @@ func (s *Server) deleteWorkspace(writer http.ResponseWriter, request *http.Reque
 			writeError(writer, http.StatusInternalServerError, "delete_workspace_task_failed")
 			return
 		}
+		s.cleanupTaskScratch(request.Context(), task)
 		if task.RuntimeConfigSnapshotID != "" {
 			if err := s.store.DeleteRuntimeSnapshot(request.Context(), task.RuntimeConfigSnapshotID); err != nil {
 				writeError(writer, http.StatusInternalServerError, "delete_workspace_snapshot_failed")
@@ -220,6 +222,7 @@ func (s *Server) deleteProject(writer http.ResponseWriter, request *http.Request
 		}
 		s.cleanupTaskHardware(request.Context(), task.ID)
 		_ = s.store.DeleteTaskWithSyncTombstone(request.Context(), task.ID)
+		s.cleanupTaskScratch(request.Context(), task)
 		if task.RuntimeConfigSnapshotID != "" {
 			_ = s.store.DeleteRuntimeSnapshot(request.Context(), task.RuntimeConfigSnapshotID)
 		}
@@ -246,6 +249,15 @@ func (s *Server) deleteProject(writer http.ResponseWriter, request *http.Request
 func (s *Server) cleanupWorkspaceSecret(workspace domain.Workspace) {
 	if s.secrets != nil && workspace.SSHCredentialRef != "" {
 		_ = s.secrets.DeleteMany([]string{workspace.SSHCredentialRef})
+	}
+}
+
+func (s *Server) cleanupTaskScratch(ctx context.Context, task domain.Task) {
+	if s.app == nil {
+		return
+	}
+	if err := s.app.CleanupTaskScratch(ctx, task); err != nil && s.logger != nil {
+		s.logger.Warn("cleanup task scratch failed", "task", task.ID, "error", err)
 	}
 }
 

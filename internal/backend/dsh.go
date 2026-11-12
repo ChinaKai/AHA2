@@ -182,7 +182,8 @@ func filterDSHEnvironment(values map[string]string) map[string]string {
 		"ANTHROPIC_BASE_URL": true, "ANTHROPIC_MODEL": true,
 		"CODEX_WIRE_API": true, "CODEX_ENV_KEY": true, "AHA_PROVIDER_ID": true,
 		"AHA2_AGENT_API_URL": true, "AHA2_AGENT_API_TOKEN": true,
-		"AHA2_LIVE_INBOX": true, "AHA2_LIVE_INBOX_DEBUG": true,
+		"AHA2_SCRATCH_DIR": true,
+		"AHA2_LIVE_INBOX":  true, "AHA2_LIVE_INBOX_DEBUG": true,
 		"HTTP_PROXY": true, "HTTPS_PROXY": true, "NO_PROXY": true,
 	}
 	result := map[string]string{}

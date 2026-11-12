@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -96,6 +97,11 @@ func (s *Service) ResetOwnerPet(ctx context.Context, confirmation string) (PetRe
 		// cancellation is best-effort; the pet is already disabled above.
 		if turn, activeErr := s.store.ActiveTurn(ctx, taskID); activeErr == nil {
 			_ = s.InterruptTurn(ctx, turn.ID)
+		}
+		if task, taskErr := s.store.Task(ctx, taskID); taskErr == nil {
+			if cleanupErr := s.CleanupTaskScratch(ctx, task); cleanupErr != nil {
+				log.Printf("cleanup task scratch %s: %v", task.ID, cleanupErr)
+			}
 		}
 		if err := s.store.DeleteTask(ctx, taskID); err != nil {
 			return result, fmt.Errorf("删除宠物 Task 失败：%w", err)

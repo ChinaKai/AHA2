@@ -333,9 +333,16 @@ func TestParseCodexLine(t *testing.T) {
 
 func TestFilterEnvironmentDropsUnknownSecrets(t *testing.T) {
 	t.Parallel()
-	filtered := filterEnvironment(map[string]string{"OPENAI_API_KEY": "ok", "UNRELATED_SECRET": "drop"})
+	filtered := filterEnvironment(map[string]string{
+		"OPENAI_API_KEY":   "ok",
+		"AHA2_SCRATCH_DIR": "/repo/.aha2-context/task-1/scratch/main",
+		"UNRELATED_SECRET": "drop",
+	})
 	if filtered["OPENAI_API_KEY"] != "ok" {
 		t.Fatal("allowed key dropped")
+	}
+	if filtered["AHA2_SCRATCH_DIR"] != "/repo/.aha2-context/task-1/scratch/main" {
+		t.Fatalf("scratch path was filtered from codex env: %#v", filtered)
 	}
 	if _, ok := filtered["UNRELATED_SECRET"]; ok {
 		t.Fatal("unknown secret was forwarded")

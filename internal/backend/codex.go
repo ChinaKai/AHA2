@@ -594,7 +594,8 @@ func filterEnvironment(values map[string]string) map[string]string {
 		"CODEX_WIRE_API": true, "CODEX_ENV_KEY": true, "AHA_PROVIDER_ID": true,
 		"CODEX_HOME":         true,
 		"AHA2_AGENT_API_URL": true, "AHA2_AGENT_API_TOKEN": true,
-		"HTTP_PROXY": true, "HTTPS_PROXY": true, "NO_PROXY": true,
+		"AHA2_SCRATCH_DIR": true,
+		"HTTP_PROXY":       true, "HTTPS_PROXY": true, "NO_PROXY": true,
 	}
 	result := map[string]string{}
 	credentialEnv := values["CODEX_ENV_KEY"]

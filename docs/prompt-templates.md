@@ -46,9 +46,19 @@ Main/Sub、Auto/Single 等模板的运行时选择由 Prompt Engine 按当前 Ag
 每个 Turn 开始前，AHA2 会从数据库读取当前 Task 和 Agent 的持久化数据，生成 Agent 私有上下文，并引用同一 Task 的不可变共享快照：
 
 ```text
-<task-workdir>/.aha2-context/<task-id>/<agent-id>/       # Agent 私有
-<task-workdir>/.aha2-context/<task-id>/shared-<sha256>/ # Task 共享
+<task-workdir>/.aha2-context/<task-id>/<agent-id>/       # Agent 私有（只读）
+<task-workdir>/.aha2-context/<task-id>/shared-<sha256>/ # Task 共享（只读）
+<task-workdir>/.aha2-context/<task-id>/scratch/<agent-id>/ # Agent 可写 scratch
 ```
+
+`scratch/<agent-id>/` 是 Agent 唯一可写的上下文目录，以 0700 创建，路径同时通过
+`AHA2_SCRATCH_DIR` 环境变量提供，并写在 Prompt 的 Task 与工作区段落中。测试程序、
+临时日志、临时截图和一次性脚本只能写在这里；不要写入 workspace 根、用户目录、
+AHA 数据目录或 `attachments/`。scratch 不是交付位置，正式附件走附件协议。
+Task 完成或删除时清理该 Task 的 scratch；失败的 Task 保留到完成、取消或删除；
+git worktree Task 由 worktree finalize 一并删除。cleanup 只接受
+`<task-workdir>/.aha2-context/<task-id>/scratch` 这一精确路径，并校验解析后的真实路径，
+不会跟随符号链接删除 workdir 之外的数据。
 
 Agent 私有内容包括：
 
@@ -71,7 +81,7 @@ Prompt 中的 `Available context` 只注入实际生成的入口文件路径、�
 
 Agent 私有文件在每个 Turn 开始前重新生成并覆盖；共享内容按文件路径和正文计算哈希，
 同一内容只物化一次，Knowledge revision、Skill version 或 Agent API 地址变化时生成新快照。
-两者都是只读快照而非回写入口。Agent 通过 Knowledge/Skill API 提交带 revision/version
-校验的修改。Main 和每个 Sub Agent 的私有目录仍相互隔离，不会读取其他 Agent 的
-Conversation、Turn 诊断或附件。Git Workspace 会把 `.aha2-context/` 写入仓库本地
-`info/exclude`，不会进入提交。
+两者除 `scratch/<agent-id>/` 外都是只读快照而非回写入口。Agent 通过 Knowledge/Skill API
+提交带 revision/version 校验的修改。Main 和每个 Sub Agent 的私有目录仍相互隔离，不会读取
+其他 Agent 的 Conversation、Turn 诊断或附件。Git Workspace 会把 `.aha2-context/` 写入仓库
+本地 `info/exclude`，scratch 同样不会进入提交。

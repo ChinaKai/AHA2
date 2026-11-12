@@ -141,10 +141,14 @@ func TestDSHEnvironmentAllowsLiveInboxSwitch(t *testing.T) {
 	filtered := filterDSHEnvironment(map[string]string{
 		"AHA2_LIVE_INBOX":       "0",
 		"AHA2_LIVE_INBOX_DEBUG": "1",
+		"AHA2_SCRATCH_DIR":      "/repo/.aha2-context/task-1/scratch/main",
 		"UNRELATED_SECRET":      "must-not-pass",
 	})
 	if filtered["AHA2_LIVE_INBOX"] != "0" || filtered["AHA2_LIVE_INBOX_DEBUG"] != "1" {
 		t.Fatalf("live inbox switches were filtered: %#v", filtered)
+	}
+	if filtered["AHA2_SCRATCH_DIR"] != "/repo/.aha2-context/task-1/scratch/main" {
+		t.Fatalf("scratch path was filtered from DSH env: %#v", filtered)
 	}
 	if _, ok := filtered["UNRELATED_SECRET"]; ok {
 		t.Fatalf("unrelated environment leaked into DSH: %#v", filtered)

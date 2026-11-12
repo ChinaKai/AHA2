@@ -702,7 +702,8 @@ func filterClaudeEnvironment(values map[string]string) map[string]string {
 		"CLAUDE_CODE_OAUTH_TOKEN": true,
 		"CLAUDE_CONFIG_DIR":       true,
 		"AHA2_AGENT_API_URL":      true, "AHA2_AGENT_API_TOKEN": true,
-		"HTTP_PROXY": true, "HTTPS_PROXY": true, "NO_PROXY": true,
+		"AHA2_SCRATCH_DIR": true,
+		"HTTP_PROXY":       true, "HTTPS_PROXY": true, "NO_PROXY": true,
 	}
 	result := map[string]string{}
 	for key, value := range values {

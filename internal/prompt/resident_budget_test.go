@@ -22,9 +22,11 @@ import (
 // largest layer in the system was unlisted until it was added here. Adding a
 // template should mean adding it to this map in the same change.
 var residentPromptBudget = map[string]int{
-	"core-default":                 750,
+	// The scratch-path rule is a boundary rule: without it Agents write test
+	// programs and logs into the repository root and user directories.
+	"core-default":                 1100,
 	"identity-task-agent":          220,
-	"role-main":                    800,
+	"role-main":                    950,
 	"channel-web":                  250,
 	"protocol-agent-api":           850,
 	"protocol-attachment-delivery": 500,

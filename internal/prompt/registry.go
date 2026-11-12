@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
+	"github.com/ChinaKai/AHA2/internal/workspace"
 )
 
 //go:embed templates/*.md templates/zh-CN/*.md
@@ -259,6 +260,7 @@ type templateData struct {
 	TaskCode              string
 	TaskTitle             string
 	ContextRoot           string
+	ScratchRoot           string
 	TaskWorkspace         string
 	Workspace             string
 	WorkspaceTransport    string
@@ -288,8 +290,8 @@ func NewEngine(repository Repository) *Engine {
 }
 
 var builtinTemplates = []domain.PromptTemplate{
-	{ID: "core.default", Name: "AHA Core", Layer: "core", Description: "所有 Agent 共用的安全、Workspace 与 AHA 编排边界", Editable: true, Required: true, Version: 1},
-	{ID: "role.main", Name: "Main Agent", Layer: "role", Description: "Main 的规划、整合和最终交付职责", Editable: true, Required: true, Version: 2},
+	{ID: "core.default", Name: "AHA Core", Layer: "core", Description: "所有 Agent 共用的安全、Workspace 与 AHA 编排边界", Editable: true, Required: true, Version: 2},
+	{ID: "role.main", Name: "Main Agent", Layer: "role", Description: "Main 的规划、整合和最终交付职责", Editable: true, Required: true, Version: 3},
 	{ID: "role.sub", Name: "Sub Agent", Layer: "role", Description: "Sub 的聚焦执行和隔离职责", Editable: true, Required: true, Version: 1},
 	{ID: "identity.task-agent", Name: "Task Agent Identity", Layer: "identity", Description: "代码与项目任务场景身份", Editable: true, Required: false, Version: 1},
 	{ID: "identity.channel-assistant", Name: "Channel Assistant Identity", Layer: "identity", Description: "Owner 私聊渠道助手身份", Editable: true, Required: false, Version: 1},
@@ -310,7 +312,7 @@ var builtinTemplates = []domain.PromptTemplate{
 	{ID: "context.mail", Name: "Mail Context File", Layer: "context", Description: "mail.md 的非敏感邮件上下文模板；不含凭据、正文或收件人历史", Editable: true, Required: false, Version: 1},
 	{ID: "context.attachments-index", Name: "Attachments Index File", Layer: "context", Description: "attachments/index.md 的内容模板", Editable: true, Required: false, Version: 2},
 	{ID: "section.compact-handoff", Name: "Compact Handoff Section", Layer: "section", Description: "Backend Session 压缩后的 Prompt 段落", Editable: true, Required: false, Version: 1},
-	{ID: "section.task-workspace", Name: "Task And Workspace Section", Layer: "section", Description: "Task 与 Workspace 摘要段落", Editable: true, Required: true, Version: 1},
+	{ID: "section.task-workspace", Name: "Task And Workspace Section", Layer: "section", Description: "Task 与 Workspace 摘要段落", Editable: true, Required: true, Version: 2},
 	{ID: "section.available-context", Name: "Available Context Section", Layer: "section", Description: "可用上下文入口列表段落", Editable: true, Required: true, Version: 2},
 	{ID: "section.current-inbox", Name: "Current Inbox Section", Layer: "section", Description: "当前 Inbox Batch 段落", Editable: true, Required: true, Version: 1},
 	{ID: "section.inbox-batch-content", Name: "Inbox Batch Content", Layer: "section", Description: "Inbox 消息、渠道来源、引用上下文和附件引用的内容模板", Editable: true, Required: true, Version: 2},
@@ -323,10 +325,19 @@ var supersededBuiltinOverrideHashes = map[string]map[string]bool{
 	"core.default": {
 		"920d894f754ef5fee568b02244dce076e63c79323f5c04c03b3524e44f399c3b": true,
 		"a347ba83ec16dd0e946bbd8ad3350841d56187fd01251d61fe8bc0c848bdfadd": true,
+		// v1 before the scratch boundary rule; an unmodified override must not
+		// hide the rule from existing installations.
+		"7053edc7d33e461aba5a061c6e6b76099d3e5f345342e3c3eeca5ec857608c69": true,
 	},
 	"role.main": {
 		"497fffe9552e6978f283985916e9563ec59b8a3a080f2759ef5da56731a489a0": true,
 		"d4cc743eaf8270e21634508f17e47ee240924c3bb57426a7c8a126b7af64cd3d": true,
+		// Adds the pre-final scratch cleanup reminder.
+		"1ee35434ece95016d4b804a7e9a0d7268cc79eef31fd2dad4e89825f40136cc9": true,
+	},
+	"section.task-workspace": {
+		// Adds the runtime scratch path and read-only Context boundary.
+		"99ed10ce10700b61f8d8e2800382c2a8343d8959007cb5237d4f2ae31022c197": true,
 	},
 	"role.sub": {
 		"388229947d72bbd80f97bd93a316e88bf8425b13a0d1845b66089c54d20a0d5f": true,
@@ -576,6 +587,13 @@ func (engine *Engine) Build(ctx context.Context, input BuildInput) (BuildResult,
 		workDir = input.Workspace.RootPath
 	}
 	contextRoot := contextRootFor(input, workDir)
+	scratchRoot := ""
+	if strings.TrimSpace(workDir) != "" {
+		scratchRoot, err = workspace.AgentScratchDir(input.Workspace, workDir, input.Task.ID, safeAgentID(input.Agent.AgentID))
+		if err != nil {
+			return BuildResult{}, err
+		}
+	}
 	identityName, channelName := identityAndChannel(input.ChannelContext)
 	if strings.TrimSpace(input.Identity) != "" {
 		identityName = strings.TrimSpace(input.Identity)
@@ -586,7 +604,7 @@ func (engine *Engine) Build(ctx context.Context, input BuildInput) (BuildResult,
 		AgentID: input.Agent.AgentID, AgentRole: input.Agent.Role, Identity: identityName,
 		Channel: channelName, Backend: input.Snapshot.Backend, Collaboration: input.Task.CollaborationMode,
 		MaxAgents: input.Task.MaxAgents, TaskID: input.Task.ID, TaskCode: input.Task.Code,
-		TaskTitle: input.Task.Title, ContextRoot: contextRoot, TaskWorkspace: workDir,
+		TaskTitle: input.Task.Title, ContextRoot: contextRoot, ScratchRoot: scratchRoot, TaskWorkspace: workDir,
 		Workspace: input.Workspace.Name, WorkspaceTransport: input.Workspace.Transport,
 		ProjectName: input.Project.Name, OriginalRequest: input.Task.OriginalRequest,
 		CurrentGoal: input.Task.CurrentGoal, CurrentGoalSummary: truncate(input.Task.CurrentGoal, 800),
