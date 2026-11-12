@@ -359,8 +359,9 @@ func TestAgentAPIURLForWorkspaceDoesNotDetectOutsideAutoSSH(t *testing.T) {
 }
 
 // TestAgentAPIURLForWorkspaceDetectionFailureFallsBack pins that a failed probe
-// is not an error and does not record a result: the Turn keeps the previous
-// fallback behaviour.
+// is not an error and leaves the stored workspace byte-for-byte unchanged: the
+// Turn keeps the previous fallback behaviour, and the failure does not leak into
+// status, error text, timestamps, health, or capabilities.
 func TestAgentAPIURLForWorkspaceDetectionFailureFallsBack(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -373,6 +374,10 @@ func TestAgentAPIURLForWorkspaceDetectionFailureFallsBack(t *testing.T) {
 	item := createAgentAPITestSSHWorkspace(t, database, domain.Workspace{
 		ID: "ws-turn-fallback", Transport: "ssh", RootPath: "/repo", AgentAPIMode: "auto",
 	})
+	baseline, err := database.Workspace(ctx, item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	got, err := service.AgentAPIURLForWorkspace(ctx, item)
 	if err != nil || got != "http://127.0.0.1:8766" {
@@ -382,8 +387,55 @@ func TestAgentAPIURLForWorkspaceDetectionFailureFallsBack(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stored.AgentAPIStatus == "ready" || stored.AgentAPIResolvedURL != "" {
-		t.Fatalf("failed detection was recorded: %#v", stored)
+	if !reflect.DeepEqual(stored, baseline) {
+		t.Fatalf("failed detection wrote back:\nbefore=%#v\nafter =%#v", baseline, stored)
+	}
+}
+
+// TestAgentAPIURLForWorkspaceDetectionKeepsConcurrentCapabilities pins that the
+// write-back merges only $.agent_api. The capabilities map in the resolved item
+// was loaded before the probe ran; another detection may have updated the other
+// keys in the meantime, and writing the stale map back would lose those results.
+func TestAgentAPIURLForWorkspaceDetectionKeepsConcurrentCapabilities(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	service, database := newAgentAPIConnectivityService(t)
+	defer database.Close()
+	service.agentAPILocalHostsFn = func() []string { return []string{"192.168.7.44"} }
+	lanURL := "http://192.168.7.44:8766"
+	service.agentAPIProbeFn = (&recordingAgentAPIProbe{
+		ok: func(candidate string) bool { return candidate == lanURL },
+	}).probe
+	stale := createAgentAPITestSSHWorkspace(t, database, domain.Workspace{
+		ID: "ws-turn-concurrent-capabilities", Transport: "ssh", RootPath: "/repo", AgentAPIMode: "auto",
+		Capabilities: map[string]any{"backend_probe": map[string]any{"status": "stale"}},
+	})
+	// Simulate another detection updating the row while this Turn's probe runs.
+	concurrent, err := database.Workspace(ctx, stale.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	concurrent.Capabilities["backend_probe"] = map[string]any{"status": "ready", "sentinel": true}
+	concurrent.UpdatedAt = time.Now().UTC()
+	if err := database.UpdateWorkspaceDetection(ctx, concurrent); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := service.AgentAPIURLForWorkspace(ctx, stale)
+	if err != nil || got != lanURL {
+		t.Fatalf("resolved=%q err=%v", got, err)
+	}
+	stored, err := database.Workspace(ctx, stale.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sentinel, _ := stored.Capabilities["backend_probe"].(map[string]any)
+	if sentinel["status"] != "ready" || sentinel["sentinel"] != true {
+		t.Fatalf("concurrent capability was overwritten: %#v", stored.Capabilities)
+	}
+	agentAPI, _ := stored.Capabilities["agent_api"].(map[string]any)
+	if agentAPI["status"] != "ready" || agentAPI["url"] != lanURL {
+		t.Fatalf("agent_api capability was not updated: %#v", stored.Capabilities)
 	}
 }
 
