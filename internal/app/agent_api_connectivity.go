@@ -83,6 +83,13 @@ func (s *Service) ValidateWorkspaceAgentAPI(ctx context.Context, mode, rawURL st
 // value, then the global override. Detection is what records the automatic
 // choice; when it has not run the fallbacks keep the Turn working rather than
 // guessing at a path that was never verified.
+//
+// An SSH workspace whose automatic choice has never been verified is detected
+// here, before the Turn starts. The loopback fallback only works when sshd
+// allows a reverse tunnel; when it does not, the Turn would otherwise fail on a
+// path detection could have replaced with the controlled LAN fallback. A
+// successful result is stored so later Turns reuse it; a failed probe leaves
+// the stored state and the normal fallback untouched.
 func (s *Service) AgentAPIURLForWorkspace(ctx context.Context, item domain.Workspace) (string, error) {
 	settings, err := s.AgentAPISettings(ctx)
 	if err != nil {
@@ -97,7 +104,38 @@ func (s *Service) AgentAPIURLForWorkspace(ctx context.Context, item domain.Works
 	if normalizeAgentAPIMode(item.AgentAPIMode) == "manual" && item.AgentAPIURL != "" {
 		return normalizeAgentAPIBaseURL(item.AgentAPIURL)
 	}
+	if value, ok := s.detectAgentAPIForTurn(ctx, item); ok {
+		return value, nil
+	}
 	return settings.EffectiveURL, nil
+}
+
+// detectAgentAPIForTurn probes an SSH workspace whose automatic address has not
+// been verified, and reports the address when detection found one.
+//
+// Detection is deliberately limited to "auto" on SSH: manual and native/WSL
+// workspaces already have a working path, and probing them here would add a
+// workspace round trip without changing the outcome. On success the verified
+// result is cached on the workspace, because the probe costs a workspace
+// connection and every Turn would otherwise repeat it. A write failure is
+// ignored: the probe already proved this address works.
+func (s *Service) detectAgentAPIForTurn(ctx context.Context, item domain.Workspace) (string, bool) {
+	if normalizeAgentAPIMode(item.AgentAPIMode) != "auto" || item.Transport != "ssh" {
+		return "", false
+	}
+	detected := s.DetectWorkspaceAgentAPI(ctx, item)
+	if detected.AgentAPIStatus != "ready" || detected.AgentAPIResolvedURL == "" {
+		return "", false
+	}
+	// Validate before caching: a result outside the probe boundary is not usable,
+	// and the caller must keep its normal fallback rather than fail on it.
+	value, err := normalizeAgentAPIProbeResult(detected, detected.AgentAPIResolvedURL)
+	if err != nil {
+		return "", false
+	}
+	detected.UpdatedAt = time.Now().UTC()
+	_ = s.store.UpdateWorkspaceAgentAPIDetection(ctx, detected)
+	return value, true
 }
 
 func (s *Service) DetectWorkspaceAgentAPI(ctx context.Context, item domain.Workspace) domain.Workspace {

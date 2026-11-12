@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -232,6 +233,158 @@ func (probe *recordingAgentAPIProbe) probe(_ context.Context, _ domain.Workspace
 		return nil
 	}
 	return fmt.Errorf("healthz 请求失败: connect: connection refused")
+}
+
+// createAgentAPITestSSHWorkspace persists a workspace so a test can observe what
+// Turn-time detection wrote back.
+func createAgentAPITestSSHWorkspace(t *testing.T, database *store.Store, item domain.Workspace) domain.Workspace {
+	t.Helper()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	project := domain.Project{ID: "project-" + item.ID, Name: "project", ProjectType: "code", CreatedAt: now, UpdatedAt: now}
+	if err := database.CreateProject(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	item.ProjectID = project.ID
+	item.Name = "ssh"
+	item.Locality = "remote"
+	if item.Health == "" {
+		item.Health = "ready"
+	}
+	if item.Capabilities == nil {
+		item.Capabilities = map[string]any{}
+	}
+	item.CreatedAt, item.UpdatedAt = now, now
+	if err := database.CreateWorkspace(ctx, item); err != nil {
+		t.Fatal(err)
+	}
+	return item
+}
+
+// TestAgentAPIURLForWorkspaceDetectsUnknownSSHWorkspace is the regression this
+// change fixes: an SSH workspace with no verified result used to go straight to
+// the loopback fallback, which cannot work when sshd refuses the tunnel. The
+// Turn must probe first and use the LAN address detection proved reachable.
+func TestAgentAPIURLForWorkspaceDetectsUnknownSSHWorkspace(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	service, database := newAgentAPIConnectivityService(t)
+	defer database.Close()
+	service.agentAPILocalHostsFn = func() []string { return []string{"192.168.7.44"} }
+	lanURL := "http://192.168.7.44:8766"
+	probe := &recordingAgentAPIProbe{ok: func(candidate string) bool { return candidate == lanURL }}
+	service.agentAPIProbeFn = probe.probe
+	item := createAgentAPITestSSHWorkspace(t, database, domain.Workspace{
+		ID: "ws-turn-detect", Transport: "ssh", RootPath: "/repo", AgentAPIMode: "auto",
+	})
+
+	got, err := service.AgentAPIURLForWorkspace(ctx, item)
+	if err != nil || got != lanURL {
+		t.Fatalf("resolved=%q err=%v", got, err)
+	}
+	wantCalls := []string{"http://127.0.0.1:8766", lanURL}
+	if !reflect.DeepEqual(probe.calls, wantCalls) {
+		t.Fatalf("probe order = %v, want tunnel then LAN %v", probe.calls, wantCalls)
+	}
+
+	// The verified address is cached so the next Turn does not probe again.
+	stored, err := database.Workspace(ctx, item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.AgentAPIStatus != "ready" || stored.AgentAPIResolvedURL != lanURL {
+		t.Fatalf("stored=%#v", stored)
+	}
+	capability, _ := stored.Capabilities["agent_api"].(map[string]any)
+	if capability["status"] != "ready" || capability["url"] != lanURL || capability["via"] != "direct" {
+		t.Fatalf("capability=%#v", capability)
+	}
+}
+
+// TestAgentAPIURLForWorkspaceReusesReadyCache pins that an already verified
+// result is respected without another workspace round trip.
+func TestAgentAPIURLForWorkspaceReusesReadyCache(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	service, database := newAgentAPIConnectivityService(t)
+	defer database.Close()
+	calls := 0
+	service.agentAPIProbeFn = func(context.Context, domain.Workspace, string) error {
+		calls++
+		return nil
+	}
+	item := domain.Workspace{
+		Transport: "ssh", AgentAPIMode: "auto",
+		AgentAPIStatus: "ready", AgentAPIResolvedURL: "http://192.168.7.44:8766",
+	}
+	got, err := service.AgentAPIURLForWorkspace(ctx, item)
+	if err != nil || got != "http://192.168.7.44:8766" {
+		t.Fatalf("resolved=%q err=%v", got, err)
+	}
+	if calls != 0 {
+		t.Fatalf("ready cache probed %d time(s)", calls)
+	}
+}
+
+// TestAgentAPIURLForWorkspaceDoesNotDetectOutsideAutoSSH pins the scope: only
+// SSH in automatic mode runs Turn-time detection. Native, WSL, and manual
+// workspaces already have a path and must keep their existing behaviour.
+func TestAgentAPIURLForWorkspaceDoesNotDetectOutsideAutoSSH(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	service, database := newAgentAPIConnectivityService(t)
+	defer database.Close()
+	calls := 0
+	service.agentAPIProbeFn = func(context.Context, domain.Workspace, string) error {
+		calls++
+		return nil
+	}
+	for _, test := range []struct {
+		item domain.Workspace
+		want string
+	}{
+		{item: domain.Workspace{Transport: "native", AgentAPIMode: "auto"}, want: "http://127.0.0.1:8766"},
+		{item: domain.Workspace{Transport: "wsl", AgentAPIMode: "auto"}, want: "http://127.0.0.1:8766"},
+		{item: domain.Workspace{Transport: "ssh", AgentAPIMode: "manual", AgentAPIURL: "https://manual.example.test"}, want: "https://manual.example.test"},
+		{item: domain.Workspace{AgentAPIMode: "auto"}, want: "http://127.0.0.1:8766"},
+	} {
+		got, err := service.AgentAPIURLForWorkspace(ctx, test.item)
+		if err != nil || got != test.want {
+			t.Fatalf("item=%#v resolved=%q err=%v", test.item, got, err)
+		}
+	}
+	if calls != 0 {
+		t.Fatalf("non-SSH/non-auto resolution probed %d time(s)", calls)
+	}
+}
+
+// TestAgentAPIURLForWorkspaceDetectionFailureFallsBack pins that a failed probe
+// is not an error and does not record a result: the Turn keeps the previous
+// fallback behaviour.
+func TestAgentAPIURLForWorkspaceDetectionFailureFallsBack(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	service, database := newAgentAPIConnectivityService(t)
+	defer database.Close()
+	service.agentAPILocalHostsFn = func() []string { return []string{"192.168.7.44"} }
+	service.agentAPIProbeFn = func(context.Context, domain.Workspace, string) error {
+		return errors.New("healthz 请求失败: connection refused")
+	}
+	item := createAgentAPITestSSHWorkspace(t, database, domain.Workspace{
+		ID: "ws-turn-fallback", Transport: "ssh", RootPath: "/repo", AgentAPIMode: "auto",
+	})
+
+	got, err := service.AgentAPIURLForWorkspace(ctx, item)
+	if err != nil || got != "http://127.0.0.1:8766" {
+		t.Fatalf("resolved=%q err=%v", got, err)
+	}
+	stored, err := database.Workspace(ctx, item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.AgentAPIStatus == "ready" || stored.AgentAPIResolvedURL != "" {
+		t.Fatalf("failed detection was recorded: %#v", stored)
+	}
 }
 
 // TestDetectSSHWorkspaceAgentAPIFallsBackToPlaintextLAN is the regression the

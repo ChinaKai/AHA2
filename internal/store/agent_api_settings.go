@@ -43,3 +43,22 @@ func (s *Store) ResetWorkspaceAgentAPIDetection(ctx context.Context, now time.Ti
 		WHERE read_only=0`, timeString(now))
 	return err
 }
+
+// UpdateWorkspaceAgentAPIDetection records an Agent API detection result.
+//
+// Turn-time detection runs between loading the workspace and starting the Turn,
+// so it writes only the Agent API fields and the capabilities map; it must not
+// replace the platform, repository, health, or full-detection timestamp with the
+// older copy the Turn loaded.
+func (s *Store) UpdateWorkspaceAgentAPIDetection(ctx context.Context, item domain.Workspace) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE workspaces
+		SET agent_api_resolved_url=?,agent_api_status=?,agent_api_error=?,agent_api_migration_note=?,
+			agent_api_last_checked_at=?,capabilities_json=?,updated_at=?
+		WHERE id=?`,
+		item.AgentAPIResolvedURL, workspaceAgentAPIStatus(item.AgentAPIStatus), item.AgentAPIError,
+		item.AgentAPIMigrationNote, timeString(item.AgentAPILastCheckedAt), encodeJSON(item.Capabilities),
+		timeString(item.UpdatedAt), item.ID,
+	)
+	return err
+}
