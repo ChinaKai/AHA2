@@ -121,6 +121,35 @@ powershell.exe -ExecutionPolicy Bypass -File scripts\build-and-deploy-windows-us
 
 脚本只复用仓库现有的 WSL Go 工具链，自动读取真实发行版名称并预检磁盘空间；Web 与 Go 验证在同一轮各执行一次。已有已验证候选时传入 `-DeployOnly`，只执行安装、重启、健康和哈希校验。
 
+### 部署失败路径与结果字段
+
+`deploy-windows-user.ps1` 在替换任何已安装文件或数据库前，必须先“验证已停”：重新枚举
+`aha2.exe`、`aha2-tray.exe`、`aha2-channel-feishu.exe` 及其全部后端子进程，确认进程消失后
+再以独占方式打开 `aha2.exe`、`aha2.db`、WAL/SHM 等文件做探测；失败会按 `-StopTimeoutSeconds`
+（默认 45 秒）重试，超时则拒绝继续修改，而不是边跑边复制。进程枚举或进程身份查询失败时按“未验证/
+仍存活”处理，绝不把 WMI/CIM 错误当成“没有进程”。备份只在这个验证通过后执行，
+并对每个复制结果校验大小与 SHA256。失败回滚同样先验证停止，再用“同目录临时文件 + 哈希校验 +
+`[IO.File]::Replace` 原子替换”恢复二进制、`aha2.db`/`aha2.db-wal` 以及备份中的
+`secrets.json`/`setup-token`；部署前不存在的文件（例如首次安装的 Feishu 插件与清单）在回滚时删除。
+数据库恢复前**无条件**删除失败版本可能留下的 `aha2.db-wal` 和 `aha2.db-shm`（即使备份里没有 WAL），
+再按备份内容原子恢复，最后对数据库执行 `PRAGMA quick_check`；只有返回 `ok` 才会重新启动服务。
+回滚无法验证时保持 AHA2 停止、保留备份，并在结果中输出人工恢复步骤（同样要求先移走
+`aha2.db`/`aha2.db-wal`/`aha2.db-shm` 再复制备份）。
+
+结果 JSON 中的诊断字段：
+
+- `Stage`：失败时最后执行的阶段（`stop`/`backup`/`install`/`health`/`rollback`）；成功时为 `health`。
+- `FailedStage`：最初触发失败的阶段；`LockedFiles`：无法独占、无法原子替换或恢复后校验不通过的文件。
+- `BackupSHA256`/`BackupSizes`/`BackupVerified`：备份校验结果；`StopVerified`/`StopAttempts`：停止验证结果与重试次数。
+- `RollbackVerified`：回滚的二进制与数据库是否已原子恢复且 `quick_check` 通过。
+- `rollback_health`：回滚与恢复后启动的完整结论；`ManualRecovery`：需要人工恢复时的步骤与备份校验值。
+
+结果文件是诊断产物：写入是 best-effort，原子替换失败（目标被锁、文件系统不支持等）时会退回直接写入，
+仍失败则只记录告警，不会因为写结果失败而中断或回滚一次已经成功的部署。
+
+`-SelfTest` 只检查纯函数、恢复计划和临时目录中的原子替换，不读取或修改安装目录、进程、计划任务和数据库，
+可在任意 PowerShell 7 上运行；`scripts/test-windows-installer.ps1` 也会在 Windows 上执行它。
+
 ## macOS 机器级安装
 
 macOS 标准安装包按架构提供：

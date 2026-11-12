@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
-  [Parameter(Mandatory = $true)][string]$InputExe,
-  [Parameter(Mandatory = $true)][string]$InputTrayExe,
+  [string]$InputExe = "",
+  [string]$InputTrayExe = "",
   [string]$InputFeishuPlugin = "",
   [string]$InputFeishuManifest = "",
   [string]$RepoPath = (Split-Path -Parent $PSScriptRoot),
@@ -16,11 +16,17 @@ param(
 	[switch]$AllowInsecureAgentAPI,
   [string]$HealthURL = "http://127.0.0.1:8766/healthz",
   [int]$HealthTimeoutSeconds = 60,
+  # How long the stop stage keeps retrying process exit and exclusive file
+  # probes before it refuses to touch the installation.
+  [int]$StopTimeoutSeconds = 45,
   [string]$ResultPath = "",
   [switch]$DetachedWorker,
   [switch]$AllowCustomUserWritableInstallDir,
   [switch]$UpdateExistingInstallInPlace,
-  [switch]$ValidateOnly
+  [switch]$ValidateOnly,
+  # Runs platform-independent checks for the stop/backup/rollback helpers and
+  # exits without touching any installed file, process, task, or database.
+  [switch]$SelfTest
 )
 
 $ErrorActionPreference = "Stop"
@@ -28,12 +34,825 @@ Set-StrictMode -Version Latest
 $global:LASTEXITCODE = 0
 
 $systemRoot = if ([string]::IsNullOrWhiteSpace($env:SystemRoot)) { "C:\Windows" } else { $env:SystemRoot }
+$powershellExecutable = ""
+$taskkillExecutable = ""
+
+$aha2ProcessNames = @("aha2.exe", "aha2-tray.exe", "aha2-channel-feishu.exe")
+$databaseFileNames = @("aha2.db", "aha2.db-wal", "aha2.db-shm")
+
+# ---------------------------------------------------------------------------
+# Pure helpers. These do not call Windows-only cmdlets and are exercised by
+# -SelfTest, so the stop/backup/rollback policy can be checked on any host.
+# ---------------------------------------------------------------------------
+
+function Test-AHA2StopSatisfied {
+  param($RemainingProcesses, $LockedFiles)
+  return (@($RemainingProcesses).Count -eq 0) -and (@($LockedFiles).Count -eq 0)
+}
+
+function Get-AHA2StopAttemptDecision {
+  param([bool]$Satisfied, [bool]$TimedOut)
+  if ($Satisfied) { return "verified" }
+  if ($TimedOut) { return "timeout" }
+  return "retry"
+}
+
+function Get-AHA2TargetProcessIdentities {
+  param(
+    [object[]]$Processes,
+    [string[]]$RootNames = @("aha2.exe", "aha2-tray.exe", "aha2-channel-feishu.exe")
+  )
+  $childrenByParent = @{}
+  foreach ($process in @($Processes)) {
+    $parentId = [int]$process.ParentProcessId
+    if (-not $childrenByParent.ContainsKey($parentId)) {
+      $childrenByParent[$parentId] = New-Object System.Collections.ArrayList
+    }
+    [void]$childrenByParent[$parentId].Add($process)
+  }
+
+  # A plain hashtable is required here: OrderedDictionary binds integer keys to
+  # its positional indexer in PowerShell, which fails for sparse PID keys.
+  $targets = @{}
+  foreach ($process in @($Processes)) {
+    if ($RootNames -contains [string]$process.Name) {
+      $targets[[int]$process.ProcessId] = [pscustomobject]@{
+        Id = [int]$process.ProcessId
+        Name = [string]$process.Name
+        CreationDate = [string]$process.CreationDate
+        Depth = 0
+      }
+    }
+  }
+
+  $queue = New-Object System.Collections.Queue
+  foreach ($target in $targets.Values) { $queue.Enqueue($target.Id) }
+  while ($queue.Count -gt 0) {
+    $parentId = [int]$queue.Dequeue()
+    if (-not $childrenByParent.ContainsKey($parentId)) { continue }
+    foreach ($child in $childrenByParent[$parentId]) {
+      $childId = [int]$child.ProcessId
+      if ($targets.Contains($childId)) { continue }
+      $targets[$childId] = [pscustomobject]@{
+        Id = $childId
+        Name = [string]$child.Name
+        CreationDate = [string]$child.CreationDate
+        Depth = [int]$targets[$parentId].Depth + 1
+      }
+      $queue.Enqueue($childId)
+    }
+  }
+  return @($targets.Values)
+}
+
+function Test-AHA2BackupCopy {
+  param([string]$Source, [string]$Destination)
+  if (-not (Test-Path -LiteralPath $Source -PathType Leaf)) {
+    return [pscustomobject]@{Ok=$false;Reason="source is missing";Size=0;SHA256=""}
+  }
+  if (-not (Test-Path -LiteralPath $Destination -PathType Leaf)) {
+    return [pscustomobject]@{Ok=$false;Reason="backup copy is missing";Size=0;SHA256=""}
+  }
+  $sourceSize = (Get-Item -LiteralPath $Source).Length
+  $destinationSize = (Get-Item -LiteralPath $Destination).Length
+  if ($sourceSize -ne $destinationSize) {
+    return [pscustomobject]@{Ok=$false;Reason=("size mismatch: {0} != {1}" -f $sourceSize,$destinationSize);Size=$sourceSize;SHA256=""}
+  }
+  $sourceHash = (Get-FileHash -LiteralPath $Source -Algorithm SHA256).Hash.ToLowerInvariant()
+  $destinationHash = (Get-FileHash -LiteralPath $Destination -Algorithm SHA256).Hash.ToLowerInvariant()
+  if ($sourceHash -ne $destinationHash) {
+    return [pscustomobject]@{Ok=$false;Reason="SHA256 mismatch";Size=$sourceSize;SHA256=$sourceHash}
+  }
+  return [pscustomobject]@{Ok=$true;Reason="";Size=$sourceSize;SHA256=$sourceHash}
+}
+
+function Test-AHA2RollbackPrerequisite {
+  param([bool]$ExistedBefore, [bool]$BackupPresent)
+  # Only files the deployment replaces need a rollback copy. A first-time
+  # install has no previous binary to back up, so its absence is not an error.
+  return ((-not $ExistedBefore) -or $BackupPresent)
+}
+
+function Get-AHA2FileRollbackAction {
+  param([bool]$ExistedBefore, [bool]$BackupPresent)
+  if ($BackupPresent) { return "restore" }
+  if (-not $ExistedBefore) { return "delete" }
+  return "blocked"
+}
+
+function Get-AHA2DatabaseRestorePlan {
+  param([string[]]$BackupNames)
+  $actions = New-Object System.Collections.ArrayList
+  if ($BackupNames -notcontains "aha2.db") {
+    return [pscustomobject]@{
+      Blocked = $true
+      Reason = "the verified backup does not contain aha2.db"
+      Actions = @()
+    }
+  }
+  # A slightly stale shared-memory file is worse than none, and a WAL from the
+  # failed version must never be replayed onto the restored image. Delete both
+  # sidecars unconditionally before swapping the database: relying on the files
+  # seen at inspection time leaves a window for a late writer to recreate one.
+  [void]$actions.Add([pscustomobject]@{Action="delete";Name="aha2.db-shm"})
+  [void]$actions.Add([pscustomobject]@{Action="delete";Name="aha2.db-wal"})
+  [void]$actions.Add([pscustomobject]@{Action="replace";Name="aha2.db"})
+  if ($BackupNames -contains "aha2.db-wal") {
+    [void]$actions.Add([pscustomobject]@{Action="replace";Name="aha2.db-wal"})
+  }
+  return [pscustomobject]@{Blocked=$false;Reason="";Actions=@($actions)}
+}
+
+function New-AHA2StagedFileCopy {
+  param(
+    [string]$Source,
+    [string]$DestinationDirectory,
+    [string]$Label = "restore",
+    [string]$ExpectedSHA256 = ""
+  )
+  New-Item -ItemType Directory -Path $DestinationDirectory -Force | Out-Null
+  $temporaryPath = Join-Path $DestinationDirectory (".aha2-{0}-{1}.tmp" -f $Label,[Guid]::NewGuid().ToString("N"))
+  Copy-Item -LiteralPath $Source -Destination $temporaryPath -Force
+  $sourceHash = (Get-FileHash -LiteralPath $Source -Algorithm SHA256).Hash.ToLowerInvariant()
+  $temporaryHash = (Get-FileHash -LiteralPath $temporaryPath -Algorithm SHA256).Hash.ToLowerInvariant()
+  if ($sourceHash -ne $temporaryHash) {
+    Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
+    throw "Staged copy hash mismatch for $Source."
+  }
+  if (-not [string]::IsNullOrWhiteSpace($ExpectedSHA256) -and $sourceHash -ne $ExpectedSHA256.ToLowerInvariant()) {
+    Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
+    throw ("Backup file {0} no longer matches the SHA256 recorded when it was captured." -f $Source)
+  }
+  return [pscustomobject]@{TemporaryPath=$temporaryPath;SHA256=$sourceHash;Size=([IO.FileInfo]::new($temporaryPath)).Length}
+}
+
+function Set-AHA2StagedFileAtomic {
+  param(
+    [string]$TemporaryPath,
+    [string]$Destination,
+    [int]$RetryMilliseconds = 2000
+  )
+  $deadline = [DateTime]::UtcNow.AddMilliseconds($RetryMilliseconds)
+  while ($true) {
+    try {
+      if (Test-Path -LiteralPath $Destination -PathType Leaf) {
+        # ReplaceFile is atomic: a locked destination fails instead of being
+        # truncated and partially rewritten, which is what corrupted aha2.db
+        # during the 2026-11-12 incident. [NullString]::Value passes a real null
+        # backup name; a plain $null is converted to an empty string and makes
+        # every replacement fail with "The value cannot be an empty string".
+        [IO.File]::Replace($TemporaryPath, $Destination, [NullString]::Value)
+      } else {
+        [IO.File]::Move($TemporaryPath, $Destination)
+      }
+      return
+    } catch {
+      if ([DateTime]::UtcNow -ge $deadline) {
+        throw ("Could not atomically replace {0}; a process still holds it: {1}" -f $Destination,$_.Exception.Message)
+      }
+      Start-Sleep -Milliseconds 200
+    }
+  }
+}
+
+function Set-AHA2FileFromSource {
+  param(
+    [string]$Source,
+    [string]$Destination,
+    [int]$RetryMilliseconds = 2000,
+    [string]$ExpectedSHA256 = ""
+  )
+  $directory = Split-Path -Parent $Destination
+  $staged = New-AHA2StagedFileCopy -Source $Source -DestinationDirectory $directory -Label "atomic" -ExpectedSHA256 $ExpectedSHA256
+  try {
+    Set-AHA2StagedFileAtomic -TemporaryPath $staged.TemporaryPath -Destination $Destination -RetryMilliseconds $RetryMilliseconds
+    $staged.TemporaryPath = ""
+  } finally {
+    if ($staged.TemporaryPath -and (Test-Path -LiteralPath $staged.TemporaryPath -PathType Leaf)) {
+      Remove-Item -LiteralPath $staged.TemporaryPath -Force -ErrorAction SilentlyContinue
+    }
+  }
+  return $staged.SHA256
+}
+
+function Set-AHA2InstalledFile {
+  param($Record, [string]$Source, [string]$Destination)
+  try {
+    [void](Set-AHA2FileFromSource -Source $Source -Destination $Destination)
+  } catch {
+    # Record the path that could not be atomically replaced so the failure
+    # result names it instead of leaving LockedFiles empty.
+    Add-AHA2LockedFile -Record $Record -Paths @($Destination)
+    throw
+  }
+}
+
+function Remove-AHA2FileIfPresent {
+  param([string]$Path)
+  if (Test-Path -LiteralPath $Path -PathType Leaf) {
+    [IO.File]::Delete($Path)
+  }
+}
+
+function Invoke-AHA2FileRollbackEntry {
+  param($Entry)
+  $action = Get-AHA2FileRollbackAction -ExistedBefore ([bool]$Entry.ExistedBefore) -BackupPresent ([bool]$Entry.BackupPresent)
+  switch ($action) {
+    "restore" {
+      [void](Set-AHA2FileFromSource -Source $Entry.BackupPath -Destination $Entry.TargetPath -ExpectedSHA256 $Entry.SHA256)
+    }
+    "delete" {
+      # The file did not exist before this deployment. Remove whatever the
+      # failed install created so the previous version cannot load it.
+      Remove-AHA2FileIfPresent -Path $Entry.TargetPath
+    }
+    default {
+      return ("blocked: {0} existed before the deployment but has no verified backup" -f $Entry.TargetPath)
+    }
+  }
+  return ""
+}
+
+function Restore-AHA2DatabaseFromBackup {
+  param(
+    [string]$BackupDirectory,
+    [string]$DataDirectory,
+    $ExpectedSHA256 = $null
+  )
+  $backupNames = @($databaseFileNames | Where-Object {
+    Test-Path -LiteralPath (Join-Path $BackupDirectory $_) -PathType Leaf
+  })
+  $plan = Get-AHA2DatabaseRestorePlan -BackupNames $backupNames
+  if ($plan.Blocked) { throw $plan.Reason }
+
+  # Stage the database (and WAL when present) before deleting anything, so the
+  # delete-and-swap window only covers metadata operations, not a multi-GB copy.
+  $stagedFiles = @{}
+  try {
+    $expectedDatabaseHash = if ($ExpectedSHA256 -and $ExpectedSHA256.Contains("aha2.db")) { [string]$ExpectedSHA256["aha2.db"] } else { "" }
+    $stagedFiles["aha2.db"] = New-AHA2StagedFileCopy -Source (Join-Path $BackupDirectory "aha2.db") -DestinationDirectory $DataDirectory -Label "db" -ExpectedSHA256 $expectedDatabaseHash
+    if ($backupNames -contains "aha2.db-wal") {
+      $expectedWalHash = if ($ExpectedSHA256 -and $ExpectedSHA256.Contains("aha2.db-wal")) { [string]$ExpectedSHA256["aha2.db-wal"] } else { "" }
+      $stagedFiles["aha2.db-wal"] = New-AHA2StagedFileCopy -Source (Join-Path $BackupDirectory "aha2.db-wal") -DestinationDirectory $DataDirectory -Label "wal" -ExpectedSHA256 $expectedWalHash
+    }
+    foreach ($action in @($plan.Actions)) {
+      if ($action.Action -eq "delete") {
+        Remove-AHA2FileIfPresent -Path (Join-Path $DataDirectory $action.Name)
+        continue
+      }
+      $staged = $stagedFiles[$action.Name]
+      Set-AHA2StagedFileAtomic -TemporaryPath $staged.TemporaryPath -Destination (Join-Path $DataDirectory $action.Name)
+      $staged.TemporaryPath = ""
+    }
+  } finally {
+    foreach ($staged in @($stagedFiles.Values)) {
+      if ($staged -and $staged.TemporaryPath -and (Test-Path -LiteralPath $staged.TemporaryPath -PathType Leaf)) {
+        Remove-Item -LiteralPath $staged.TemporaryPath -Force -ErrorAction SilentlyContinue
+      }
+    }
+  }
+}
+
+function Test-AHA2ExclusiveFileProbe {
+  param([string]$Path)
+  if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
+  try {
+    $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+    $stream.Dispose()
+    return $true
+  } catch [UnauthorizedAccessException] {
+    # A read-only attribute is not a lock. Retry without write access so the
+    # probe reports locks, not file attributes.
+    try {
+      $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
+      $stream.Dispose()
+      return $true
+    } catch {
+      return $false
+    }
+  } catch {
+    return $false
+  }
+}
+
+function Test-AHA2QuickCheckOutput {
+  param([object[]]$Lines)
+  $clean = @($Lines |
+    ForEach-Object { ([string]$_).Trim() } |
+    Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+  return ($clean.Count -eq 1 -and $clean[0] -ieq "ok")
+}
+
+function New-AHA2ResultRecord {
+  param(
+    [string]$Status = "running",
+    [string]$Value = "",
+    [string]$Stage = "init",
+    [object[]]$LockedFiles = @(),
+    $BackupSHA256 = $null,
+    [bool]$RollbackVerified = $false,
+    [string]$RollbackHealth = "not-run"
+  )
+  if ($null -eq $BackupSHA256) { $BackupSHA256 = [ordered]@{} }
+  return [ordered]@{
+    Status = $Status
+    Value = $Value
+    Stage = $Stage
+    FailedStage = ""
+    LockedFiles = @($LockedFiles)
+    Backup = ""
+    BackupSHA256 = $BackupSHA256
+    BackupSizes = [ordered]@{}
+    BackupVerified = $false
+    StopVerified = $false
+    StopAttempts = 0
+    RollbackVerified = $RollbackVerified
+    rollback_health = $RollbackHealth
+    ManualRecovery = ""
+    Mode = ""
+    UpdateType = ""
+    Health = ""
+    URL = ""
+    Installer = ""
+    ServerSHA256 = ""
+    TraySHA256 = ""
+    PluginSHA256 = ""
+    WriteAccessVerified = $true
+    ElevationRequired = $false
+    FinishedAt = ""
+  }
+}
+
+function Add-AHA2LockedFile {
+  param($Record, [string[]]$Paths)
+  foreach ($path in @($Paths)) {
+    if ([string]::IsNullOrWhiteSpace($path)) { continue }
+    if (@($Record.LockedFiles) -notcontains $path) {
+      $Record.LockedFiles = @(@($Record.LockedFiles) + $path)
+    }
+  }
+}
+
+function Invoke-AHA2SelfTest {
+  $script:selfTestChecks = 0
+  $script:selfTestFailures = New-Object System.Collections.ArrayList
+  function Assert-AHA2SelfTest([bool]$Condition, [string]$Name) {
+    $script:selfTestChecks++
+    if ($Condition) {
+      Write-Host ("PASS  " + $Name)
+    } else {
+      Write-Host ("FAIL  " + $Name)
+      [void]$script:selfTestFailures.Add($Name)
+    }
+  }
+
+  Write-Host "AHA2 deployment self-test (no installed file, process, task, or database is touched)"
+
+  # Process targeting: named roots plus every descendant, including the Feishu
+  # channel plugin when it is not a child of aha2.exe.
+  $fixture = @(
+    [pscustomobject]@{ProcessId=10;ParentProcessId=1;Name="aha2.exe";CreationDate="t10"},
+    [pscustomobject]@{ProcessId=11;ParentProcessId=10;Name="conhost.exe";CreationDate="t11"},
+    [pscustomobject]@{ProcessId=14;ParentProcessId=11;Name="plugin-supervisor.exe";CreationDate="t14"},
+    [pscustomobject]@{ProcessId=12;ParentProcessId=10;Name="aha2-channel-feishu.exe";CreationDate="t12"},
+    [pscustomobject]@{ProcessId=13;ParentProcessId=12;Name="plugin-worker.exe";CreationDate="t13"},
+    [pscustomobject]@{ProcessId=20;ParentProcessId=1;Name="aha2-channel-feishu.exe";CreationDate="t20"},
+    [pscustomobject]@{ProcessId=21;ParentProcessId=20;Name="plugin-helper.exe";CreationDate="t21"},
+    [pscustomobject]@{ProcessId=22;ParentProcessId=1;Name="aha2-tray.exe";CreationDate="t22"},
+    [pscustomobject]@{ProcessId=99;ParentProcessId=1;Name="notepad.exe";CreationDate="t99"}
+  )
+  $targets = @(Get-AHA2TargetProcessIdentities -Processes $fixture)
+  $targetIds = @($targets | ForEach-Object { $_.Id } | Sort-Object)
+  Assert-AHA2SelfTest (($targetIds -join ",") -eq "10,11,12,13,14,20,21,22") "targets only AHA2 roots and their descendants"
+  Assert-AHA2SelfTest (@($targets | Where-Object { $_.Id -eq 14 })[0].Depth -eq 2) "descendant depth is recorded for ordered termination"
+  Assert-AHA2SelfTest (-not ($targetIds -contains 99)) "unrelated processes are never targeted"
+  $emptyTree = @(Get-AHA2TargetProcessIdentities -Processes @())
+  Assert-AHA2SelfTest ($emptyTree.Count -eq 0) "empty process table produces no targets"
+
+  Assert-AHA2SelfTest (Test-AHA2StopSatisfied -RemainingProcesses @() -LockedFiles @()) "stop is satisfied only when processes and locks are both gone"
+  Assert-AHA2SelfTest (-not (Test-AHA2StopSatisfied -RemainingProcesses @([pscustomobject]@{Id=1}) -LockedFiles @())) "remaining process blocks stop"
+  Assert-AHA2SelfTest (-not (Test-AHA2StopSatisfied -RemainingProcesses @() -LockedFiles @("aha2.db"))) "locked file blocks stop"
+  Assert-AHA2SelfTest ((Get-AHA2StopAttemptDecision -Satisfied $true -TimedOut $false) -eq "verified") "stop retry decision verifies a satisfied stop"
+  Assert-AHA2SelfTest ((Get-AHA2StopAttemptDecision -Satisfied $false -TimedOut $false) -eq "retry") "stop retry decision retries while time remains"
+  Assert-AHA2SelfTest ((Get-AHA2StopAttemptDecision -Satisfied $false -TimedOut $true) -eq "timeout") "stop retry decision reports a clear timeout"
+  Assert-AHA2SelfTest ((Get-AHA2StopAttemptDecision -Satisfied $true -TimedOut $true) -eq "verified") "a satisfied stop wins over a simultaneous timeout"
+
+  # WMI/CIM failure must fail closed: an enumeration error can never count as
+  # "no processes", so the stop stage exhausts its timeout and reports failure.
+  $stopFailureEnumerator = { throw "CIM unavailable (self-test stub)" }
+  $missingProbe = Join-Path ([IO.Path]::GetTempPath()) ("aha2-missing-probe-" + [Guid]::NewGuid().ToString("N"))
+  $failedStop = Stop-AHA2ProcessTrees -TimeoutSeconds 0 -ProbePaths @($missingProbe) -ProcessEnumerator $stopFailureEnumerator -AncestorIds @{}
+  Assert-AHA2SelfTest (-not $failedStop.Verified) "process enumeration failure never verifies a stop"
+  Assert-AHA2SelfTest ($failedStop.EnumerationError -like "*CIM unavailable*") "process enumeration failure is reported in the stop result"
+
+  # An identity lookup that fails cannot prove the process is gone; it must be
+  # treated as alive so the stop stage keeps trying.
+  $identityTarget = [pscustomobject]@{Id=4242;Name="aha2.exe";CreationDate="t42"}
+  Assert-AHA2SelfTest (Test-AHA2ProcessIdentity -Target $identityTarget -ProcessLookup { throw "CIM unavailable (self-test stub)" }) "identity lookup failure is treated as a live process"
+  Assert-AHA2SelfTest (-not (Test-AHA2ProcessIdentity -Target $identityTarget -ProcessLookup { $null })) "identity lookup of a vanished process is not alive"
+
+  # Exclusive probe: an unheld file opens, a file already held by this process
+  # cannot be opened with FileShare.None (checked on Windows, where the lock
+  # semantics match production).
+  $tempFile = [IO.Path]::GetTempFileName()
+  try {
+    Assert-AHA2SelfTest ((Test-AHA2ExclusiveFileProbe -Path $tempFile) -eq $true) "exclusive probe opens an unheld file"
+    Assert-AHA2SelfTest ($null -eq (Test-AHA2ExclusiveFileProbe -Path ($tempFile + ".missing"))) "missing probe path is skipped instead of reported locked"
+    if ($env:OS -eq "Windows_NT") {
+      $held = [IO.File]::Open($tempFile, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+      try {
+        Assert-AHA2SelfTest ((Test-AHA2ExclusiveFileProbe -Path $tempFile) -eq $false) "exclusive probe detects a held file"
+      } finally {
+        $held.Dispose()
+      }
+    }
+  } finally {
+    Remove-Item -LiteralPath $tempFile -Force -ErrorAction SilentlyContinue
+  }
+
+  # Backup verification: size and SHA256 must both match.
+  $source = [IO.Path]::GetTempFileName()
+  $copy = [IO.Path]::GetTempFileName()
+  try {
+    [IO.File]::WriteAllText($source, "aha2-backup-self-test", [Text.UTF8Encoding]::new($false))
+    Copy-Item -LiteralPath $source -Destination $copy -Force
+    $good = Test-AHA2BackupCopy -Source $source -Destination $copy
+    Assert-AHA2SelfTest ($good.Ok -and $good.SHA256.Length -eq 64) "backup copy with matching size and SHA256 is accepted"
+    [IO.File]::WriteAllText($copy, "tampered", [Text.UTF8Encoding]::new($false))
+    $bad = Test-AHA2BackupCopy -Source $source -Destination $copy
+    Assert-AHA2SelfTest (-not $bad.Ok) "tampered backup copy is rejected"
+    $missing = Test-AHA2BackupCopy -Source $source -Destination ($copy + ".missing")
+    Assert-AHA2SelfTest (-not $missing.Ok) "missing backup copy is rejected"
+  } finally {
+    Remove-Item -LiteralPath $source,$copy -Force -ErrorAction SilentlyContinue
+  }
+
+  # Rollback prerequisites: an in-place update must have a verified backup of
+  # every binary it replaces, while a first-time install has nothing to restore.
+  Assert-AHA2SelfTest (Test-AHA2RollbackPrerequisite -ExistedBefore $true -BackupPresent $true) "existing binary with a verified backup passes the rollback prerequisite"
+  Assert-AHA2SelfTest (-not (Test-AHA2RollbackPrerequisite -ExistedBefore $true -BackupPresent $false)) "existing binary without a backup blocks the deployment"
+  Assert-AHA2SelfTest (Test-AHA2RollbackPrerequisite -ExistedBefore $false -BackupPresent $false) "first-time install needs no rollback binary"
+
+  # Database restore ordering: the failed version's shm/wal are deleted
+  # unconditionally before the main database is replaced, and a WAL absent
+  # from the backup must never survive.
+  $plan = Get-AHA2DatabaseRestorePlan -BackupNames @("aha2.db","aha2.db-wal")
+  Assert-AHA2SelfTest (-not $plan.Blocked) "restore plan accepts a backup containing aha2.db"
+  $planText = (@($plan.Actions | ForEach-Object { $_.Action + ":" + $_.Name }) -join ",")
+  Assert-AHA2SelfTest ($planText -eq "delete:aha2.db-shm,delete:aha2.db-wal,replace:aha2.db,replace:aha2.db-wal") "restore removes stale sidecars before replacing the database"
+  $planNoWal = Get-AHA2DatabaseRestorePlan -BackupNames @("aha2.db")
+  $planNoWalText = (@($planNoWal.Actions | ForEach-Object { $_.Action + ":" + $_.Name }) -join ",")
+  Assert-AHA2SelfTest ($planNoWalText -eq "delete:aha2.db-shm,delete:aha2.db-wal,replace:aha2.db") "restore deletes the live WAL even when the backup has no WAL"
+  $blocked = Get-AHA2DatabaseRestorePlan -BackupNames @("aha2.db-wal")
+  Assert-AHA2SelfTest ($blocked.Blocked) "restore is blocked without a database backup"
+
+  # End-to-end restore in a throw-away directory: the live database must be
+  # replaced by the verified backup, the stale sidecars must disappear, and no
+  # staging file may survive.
+  $restoreRoot = Join-Path ([IO.Path]::GetTempPath()) ("aha2-restore-selftest-" + [Guid]::NewGuid().ToString("N"))
+  try {
+    $liveDir = Join-Path $restoreRoot "data"
+    $backupDir = Join-Path $restoreRoot "backup"
+    New-Item -ItemType Directory -Path $liveDir,$backupDir -Force | Out-Null
+    [IO.File]::WriteAllText((Join-Path $backupDir "aha2.db"), "verified-backup-db", [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $backupDir "aha2.db-wal"), "verified-backup-wal", [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $liveDir "aha2.db"), "mutated-live-db", [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $liveDir "aha2.db-wal"), "mutated-live-wal", [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $liveDir "aha2.db-shm"), "stale-shm", [Text.UTF8Encoding]::new($false))
+    Restore-AHA2DatabaseFromBackup -BackupDirectory $backupDir -DataDirectory $liveDir
+    Assert-AHA2SelfTest ([IO.File]::ReadAllText((Join-Path $liveDir "aha2.db")) -eq "verified-backup-db") "restore replaces the live database with the verified backup"
+    Assert-AHA2SelfTest ([IO.File]::ReadAllText((Join-Path $liveDir "aha2.db-wal")) -eq "verified-backup-wal") "restore replaces the live WAL with the verified backup WAL"
+    Assert-AHA2SelfTest (-not (Test-Path -LiteralPath (Join-Path $liveDir "aha2.db-shm"))) "restore removes the stale shared-memory file"
+    Assert-AHA2SelfTest (@(Get-ChildItem -LiteralPath $liveDir -Force -Filter "*.tmp").Count -eq 0) "restore leaves no staging files behind"
+
+    # Negative path: a backup without aha2.db must fail without touching any
+    # live database byte.
+    $blockedBackup = Join-Path $restoreRoot "blocked-backup"
+    New-Item -ItemType Directory -Path $blockedBackup -Force | Out-Null
+    [IO.File]::WriteAllText((Join-Path $blockedBackup "aha2.db-wal"), "only-wal", [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $liveDir "aha2.db"), "must-stay", [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $liveDir "aha2.db-wal"), "must-stay-wal", [Text.UTF8Encoding]::new($false))
+    $blockedThrew = $false
+    try {
+      Restore-AHA2DatabaseFromBackup -BackupDirectory $blockedBackup -DataDirectory $liveDir
+    } catch {
+      $blockedThrew = $true
+    }
+    Assert-AHA2SelfTest $blockedThrew "restore without a database backup refuses to run"
+    Assert-AHA2SelfTest ([IO.File]::ReadAllText((Join-Path $liveDir "aha2.db")) -eq "must-stay") "blocked restore leaves the live database byte-identical"
+    Assert-AHA2SelfTest ([IO.File]::ReadAllText((Join-Path $liveDir "aha2.db-wal")) -eq "must-stay-wal") "blocked restore leaves the live WAL byte-identical"
+
+    # A backup whose bytes no longer match the SHA256 recorded at capture time
+    # must be rejected before the live database is touched.
+    $hashMismatchBackup = Join-Path $restoreRoot "hash-mismatch-backup"
+    New-Item -ItemType Directory -Path $hashMismatchBackup -Force | Out-Null
+    [IO.File]::WriteAllText((Join-Path $hashMismatchBackup "aha2.db"), "tampered-after-backup", [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $liveDir "aha2.db"), "hash-live-db", [Text.UTF8Encoding]::new($false))
+    $hashMismatchThrew = $false
+    try {
+      Restore-AHA2DatabaseFromBackup -BackupDirectory $hashMismatchBackup -DataDirectory $liveDir -ExpectedSHA256 @{"aha2.db"="0000000000000000000000000000000000000000000000000000000000000000"}
+    } catch {
+      $hashMismatchThrew = $true
+    }
+    Assert-AHA2SelfTest $hashMismatchThrew "restore rejects a backup that no longer matches its recorded SHA256"
+    Assert-AHA2SelfTest ([IO.File]::ReadAllText((Join-Path $liveDir "aha2.db")) -eq "hash-live-db") "hash-mismatched restore leaves the live database byte-identical"
+    Assert-AHA2SelfTest (@(Get-ChildItem -LiteralPath $liveDir -Force -Filter "*.tmp").Count -eq 0) "hash-mismatched restore leaves no staging file behind"
+
+    # Reviewer scenario: the backup has no WAL but the failed version left one
+    # behind. Restoring the database without deleting that WAL would let SQLite
+    # replay the failed version's changes on top of the restored image.
+    $noWalBackup = Join-Path $restoreRoot "no-wal-backup"
+    New-Item -ItemType Directory -Path $noWalBackup -Force | Out-Null
+    [IO.File]::WriteAllText((Join-Path $noWalBackup "aha2.db"), "backup-without-wal", [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $liveDir "aha2.db"), "failed-version-db", [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $liveDir "aha2.db-wal"), "failed-version-wal", [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $liveDir "aha2.db-shm"), "failed-version-shm", [Text.UTF8Encoding]::new($false))
+    Restore-AHA2DatabaseFromBackup -BackupDirectory $noWalBackup -DataDirectory $liveDir
+    Assert-AHA2SelfTest ([IO.File]::ReadAllText((Join-Path $liveDir "aha2.db")) -eq "backup-without-wal") "restore without a backup WAL still replaces the database"
+    Assert-AHA2SelfTest (-not (Test-Path -LiteralPath (Join-Path $liveDir "aha2.db-wal"))) "restore removes the failed version WAL when the backup has none"
+    Assert-AHA2SelfTest (-not (Test-Path -LiteralPath (Join-Path $liveDir "aha2.db-shm"))) "restore removes the failed version SHM when the backup has none"
+  } finally {
+    Remove-Item -LiteralPath $restoreRoot -Recurse -Force -ErrorAction SilentlyContinue
+  }
+
+  # Atomic replacement: an unheld destination takes the new bytes; a held
+  # destination must fail without being truncated. The locked-file variant runs
+  # only on Windows, where the production sharing semantics apply.
+  $atomicRoot = Join-Path ([IO.Path]::GetTempPath()) ("aha2-atomic-selftest-" + [Guid]::NewGuid().ToString("N"))
+  try {
+    New-Item -ItemType Directory -Path $atomicRoot -Force | Out-Null
+    $atomicSource = Join-Path $atomicRoot "source"
+    $atomicDestination = Join-Path $atomicRoot "destination"
+    [IO.File]::WriteAllText($atomicSource, "replacement", [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText($atomicDestination, "original", [Text.UTF8Encoding]::new($false))
+    [void](Set-AHA2FileFromSource -Source $atomicSource -Destination $atomicDestination)
+    Assert-AHA2SelfTest ([IO.File]::ReadAllText($atomicDestination) -eq "replacement") "atomic replacement writes the new file when unheld"
+    Assert-AHA2SelfTest (@(Get-ChildItem -LiteralPath $atomicRoot -Force -Filter "*.tmp").Count -eq 0) "atomic replacement leaves no staging file behind"
+
+    if ($env:OS -eq "Windows_NT") {
+      [IO.File]::WriteAllText($atomicSource, "must-not-land", [Text.UTF8Encoding]::new($false))
+      [IO.File]::WriteAllText($atomicDestination, "protected", [Text.UTF8Encoding]::new($false))
+      $held = [IO.File]::Open($atomicDestination, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
+      $lockThrew = $false
+      try {
+        [void](Set-AHA2FileFromSource -Source $atomicSource -Destination $atomicDestination -RetryMilliseconds 300)
+      } catch {
+        $lockThrew = $true
+      } finally {
+        $held.Dispose()
+      }
+      Assert-AHA2SelfTest $lockThrew "atomic replacement refuses a destination held by a process"
+      Assert-AHA2SelfTest ([IO.File]::ReadAllText($atomicDestination) -eq "protected") "refused replacement leaves the destination byte-identical"
+      Assert-AHA2SelfTest (@(Get-ChildItem -LiteralPath $atomicRoot -Force -Filter "*.tmp").Count -eq 0) "refused replacement cleans up its staging file"
+    }
+  } finally {
+    Remove-Item -LiteralPath $atomicRoot -Recurse -Force -ErrorAction SilentlyContinue
+  }
+
+  # First-time Feishu plugin install followed by a failed deployment: the
+  # plugin and manifest did not exist before, so rollback must delete both
+  # instead of restarting the old server with an incompatible plugin. Files
+  # that did exist before are restored from their verified backup.
+  $rollbackRoot = Join-Path ([IO.Path]::GetTempPath()) ("aha2-file-rollback-selftest-" + [Guid]::NewGuid().ToString("N"))
+  try {
+    $pluginDir = Join-Path $rollbackRoot "plugins"
+    $backupDir = Join-Path $rollbackRoot "backup"
+    New-Item -ItemType Directory -Path $pluginDir,$backupDir -Force | Out-Null
+    $newPlugin = Join-Path $pluginDir "aha2-channel-feishu.exe"
+    $newManifest = Join-Path $pluginDir "plugin.json"
+    [IO.File]::WriteAllText($newPlugin, "new-plugin", [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText($newManifest, "new-manifest", [Text.UTF8Encoding]::new($false))
+    $newEntries = @(
+      [pscustomobject]@{Name="aha2-channel-feishu.exe";BackupPath=(Join-Path $backupDir "aha2-channel-feishu.exe");TargetPath=$newPlugin;ExistedBefore=$false;BackupPresent=$false;SHA256=""},
+      [pscustomobject]@{Name="feishu-plugin.json";BackupPath=(Join-Path $backupDir "feishu-plugin.json");TargetPath=$newManifest;ExistedBefore=$false;BackupPresent=$false;SHA256=""}
+    )
+    foreach ($entry in $newEntries) {
+      Assert-AHA2SelfTest ((Get-AHA2FileRollbackAction -ExistedBefore $entry.ExistedBefore -BackupPresent $entry.BackupPresent) -eq "delete") ("new file {0} is scheduled for deletion" -f $entry.Name)
+      Assert-AHA2SelfTest ((Invoke-AHA2FileRollbackEntry -Entry $entry) -eq "") ("new file {0} rollback succeeds" -f $entry.Name)
+    }
+    Assert-AHA2SelfTest (-not (Test-Path -LiteralPath $newPlugin)) "rollback deletes a first-time plugin install"
+    Assert-AHA2SelfTest (-not (Test-Path -LiteralPath $newManifest)) "rollback deletes a first-time plugin manifest"
+
+    $existingBackup = Join-Path $backupDir "aha2.exe"
+    $existingTarget = Join-Path $rollbackRoot "aha2.exe"
+    [IO.File]::WriteAllText($existingBackup, "old-binary", [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText($existingTarget, "new-binary", [Text.UTF8Encoding]::new($false))
+    $existingEntry = [pscustomobject]@{
+      Name = "aha2.exe"
+      BackupPath = $existingBackup
+      TargetPath = $existingTarget
+      ExistedBefore = $true
+      BackupPresent = $true
+      SHA256 = (Get-FileHash -LiteralPath $existingBackup -Algorithm SHA256).Hash.ToLowerInvariant()
+    }
+    Assert-AHA2SelfTest ((Get-AHA2FileRollbackAction -ExistedBefore $true -BackupPresent $true) -eq "restore") "existing binary with a backup is scheduled for restore"
+    Assert-AHA2SelfTest ((Invoke-AHA2FileRollbackEntry -Entry $existingEntry) -eq "") "existing binary rollback succeeds"
+    Assert-AHA2SelfTest ([IO.File]::ReadAllText($existingTarget) -eq "old-binary") "existing binary is restored from the verified backup"
+    Assert-AHA2SelfTest ((Get-AHA2FileRollbackAction -ExistedBefore $true -BackupPresent $false) -eq "blocked") "existing file without a backup blocks rollback"
+  } finally {
+    Remove-Item -LiteralPath $rollbackRoot -Recurse -Force -ErrorAction SilentlyContinue
+  }
+
+  $okOutput = Test-AHA2QuickCheckOutput -Lines @("ok")
+  Assert-AHA2SelfTest $okOutput "quick_check output 'ok' is healthy"
+  Assert-AHA2SelfTest (-not (Test-AHA2QuickCheckOutput -Lines @("ok","extra"))) "multiple quick_check rows are not treated as healthy"
+  Assert-AHA2SelfTest (-not (Test-AHA2QuickCheckOutput -Lines @("*** in database main ***"))) "quick_check corruption output is rejected"
+  Assert-AHA2SelfTest (-not (Test-AHA2QuickCheckOutput -Lines @())) "empty quick_check output is rejected"
+
+  # Result JSON contract: the fields an operator needs to locate the failed
+  # stage and decide whether a rollback is trustworthy are always present.
+  $record = New-AHA2ResultRecord -Status "failed" -Value "boom" -Stage "install" -LockedFiles @("C:\AHA2\aha2.exe") -RollbackHealth "pending"
+  foreach ($field in @("Status","Value","Stage","LockedFiles","BackupSHA256","RollbackVerified","rollback_health","BackupVerified","StopVerified","StopAttempts","ManualRecovery")) {
+    Assert-AHA2SelfTest ($record.Contains($field)) ("result record always contains " + $field)
+  }
+  Assert-AHA2SelfTest ($record.LockedFiles.Count -eq 1 -and $record.RollbackVerified -eq $false) "result record keeps locked files and defaults rollback to false"
+  $json = $record | ConvertTo-Json -Depth 8
+  Assert-AHA2SelfTest ($json.Contains('"LockedFiles"') -and $json.Contains('"BackupSHA256"') -and $json.Contains('"rollback_health"')) "result record serializes the diagnostic fields"
+  $deduped = New-AHA2ResultRecord
+  Add-AHA2LockedFile -Record $deduped -Paths @("C:\x\aha2.exe","C:\x\aha2.exe","C:\x\aha2.db")
+  Add-AHA2LockedFile -Record $deduped -Paths @("C:\x\aha2.exe")
+  Assert-AHA2SelfTest ($deduped.LockedFiles.Count -eq 2) "locked file list is de-duplicated"
+
+  # A failed install replacement must name the destination in LockedFiles.
+  $installRecord = New-AHA2ResultRecord
+  $missingSource = Join-Path ([IO.Path]::GetTempPath()) ("aha2-missing-source-" + [Guid]::NewGuid().ToString("N"))
+  $installDestination = Join-Path ([IO.Path]::GetTempPath()) ("aha2-install-target-" + [Guid]::NewGuid().ToString("N"))
+  $installThrew = $false
+  try {
+    Set-AHA2InstalledFile -Record $installRecord -Source $missingSource -Destination $installDestination
+  } catch {
+    $installThrew = $true
+  }
+  Assert-AHA2SelfTest $installThrew "failed install replacement throws"
+  Assert-AHA2SelfTest (@($installRecord.LockedFiles) -contains $installDestination) "failed install replacement records the destination in LockedFiles"
+
+  if ($script:selfTestFailures.Count -gt 0) {
+    throw ("AHA2 deployment self-test failed ({0} of {1} checks): {2}" -f $script:selfTestFailures.Count,$script:selfTestChecks,($script:selfTestFailures -join "; "))
+  }
+  Write-Host ("AHA2 deployment self-test passed: {0} checks." -f $script:selfTestChecks)
+}
+
+function Get-AHA2ProcessList {
+  # Win32_Process enumeration must fail loudly: swallowing the error would let
+  # the stop stage verify a stop against a process table it never actually read.
+  $processes = @(Get-CimInstance Win32_Process -ErrorAction Stop)
+  if ($processes.Count -eq 0) {
+    # Windows always has system processes; an empty table means the provider
+    # returned nonsense, which is not evidence that AHA2 is stopped.
+    throw "Win32_Process enumeration returned an empty process table."
+  }
+  return $processes
+}
+
+function Get-AHA2ProcessTree {
+  param([scriptblock]$ProcessEnumerator = $null)
+  if ($null -eq $ProcessEnumerator) { $ProcessEnumerator = { Get-AHA2ProcessList } }
+  $processes = @(& $ProcessEnumerator)
+  return @(Get-AHA2TargetProcessIdentities -Processes $processes -RootNames $aha2ProcessNames)
+}
+
+function Test-AHA2ProcessIdentity($Target, [scriptblock]$ProcessLookup = $null) {
+  try {
+    if ($null -ne $ProcessLookup) {
+      $current = & $ProcessLookup $Target.Id
+    } else {
+      $current = Get-CimInstance Win32_Process -Filter "ProcessId=$($Target.Id)" -ErrorAction Stop
+    }
+  } catch {
+    # A failed lookup cannot prove the process is gone. Treat it as still
+    # alive so the caller keeps trying to stop it instead of skipping the kill.
+    return $true
+  }
+  if (-not $current) { return $false }
+  return $current.Name -ieq $Target.Name -and
+    [string]$current.CreationDate -eq $Target.CreationDate
+}
+
+function Invoke-TaskKillNoThrow([int]$ProcessId) {
+  $previousPreference = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = "Continue"
+    $output = @(& $taskkillExecutable /PID $ProcessId /T /F 2>&1)
+    $exitCode = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $previousPreference
+  }
+  if ($exitCode -ne 0) {
+    Write-Warning ("taskkill failed for PID {0} with code {1}: {2}" -f $ProcessId,$exitCode,($output -join " "))
+  }
+}
+
+function Get-AHA2StopProbePaths {
+  return @($server, $tray, $plugin, $databasePath, $databaseWalPath, $databaseShmPath) |
+    Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+}
+
+function Stop-AHA2ProcessTrees {
+  param(
+    [int]$TimeoutSeconds = $StopTimeoutSeconds,
+    [string[]]$ProbePaths = @(),
+    # Injection points for the self-test. Production always uses the real CIM
+    # enumeration and ancestor lookup.
+    [scriptblock]$ProcessEnumerator = $null,
+    [hashtable]$AncestorIds = $null
+  )
+  if ($ProbePaths.Count -eq 0) { $ProbePaths = @(Get-AHA2StopProbePaths) }
+  $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+  $attempts = 0
+  $lockedFiles = @()
+  $remainingProcesses = @()
+  $enumerationError = ""
+
+  while ($true) {
+    $attempts++
+    $targets = @()
+    $enumerationError = ""
+    try {
+      # The ancestor lookup reads CIM too, so it belongs to the same fail-closed
+      # attempt: if either query is unavailable, this attempt cannot verify.
+      $ancestorIdsForAttempt = if ($null -ne $AncestorIds) { $AncestorIds } else { Get-AHA2AncestorIds }
+      $targets = @(Get-AHA2ProcessTree -ProcessEnumerator $ProcessEnumerator |
+        Where-Object { -not $ancestorIdsForAttempt.ContainsKey([int]$_.Id) })
+    } catch {
+      # Fail closed: an unavailable WMI/CIM service means we cannot prove the
+      # old processes are gone, so this attempt can never verify a stop.
+      $enumerationError = $_.Exception.Message
+    }
+    $remainingProcesses = $targets
+    if (-not $enumerationError -and $targets.Count -gt 0) {
+      foreach ($root in @($targets | Where-Object { $_.Depth -eq 0 })) {
+        Invoke-TaskKillNoThrow $root.Id
+      }
+      foreach ($target in @($targets | Sort-Object Depth -Descending)) {
+        if (Test-AHA2ProcessIdentity $target) {
+          Stop-Process -Id $target.Id -Force -ErrorAction SilentlyContinue
+        }
+      }
+      Start-Sleep -Milliseconds 200
+      try {
+        $targets = @(Get-AHA2ProcessTree -ProcessEnumerator $ProcessEnumerator |
+          Where-Object { -not $ancestorIdsForAttempt.ContainsKey([int]$_.Id) })
+        $remainingProcesses = $targets
+      } catch {
+        $enumerationError = $_.Exception.Message
+      }
+    }
+
+    $lockedFiles = @()
+    foreach ($probePath in @($ProbePaths)) {
+      if ((Test-AHA2ExclusiveFileProbe -Path $probePath) -eq $false) {
+        $lockedFiles += $probePath
+      }
+    }
+
+    $satisfied = (-not $enumerationError) -and (Test-AHA2StopSatisfied -RemainingProcesses $targets -LockedFiles $lockedFiles)
+    $decision = Get-AHA2StopAttemptDecision -Satisfied $satisfied -TimedOut ([DateTime]::UtcNow -ge $deadline)
+    if ($decision -eq "verified") {
+      return [pscustomobject]@{
+        Verified = $true
+        Attempts = $attempts
+        LockedFiles = @()
+        Processes = @()
+        EnumerationError = ""
+      }
+    }
+    if ($decision -eq "timeout") { break }
+    Start-Sleep -Milliseconds 300
+  }
+
+  $remainingDescription = @($remainingProcesses | ForEach-Object { "$($_.Name) PID $($_.Id)" })
+  return [pscustomobject]@{
+    Verified = $false
+    Attempts = $attempts
+    LockedFiles = @($lockedFiles)
+    Processes = $remainingDescription
+    EnumerationError = $enumerationError
+  }
+}
+
+if ($SelfTest) {
+  Invoke-AHA2SelfTest
+  return
+}
+
+# ---------------------------------------------------------------------------
+# Windows prerequisites and path validation.
+# ---------------------------------------------------------------------------
+
 $powershellExecutable = Join-Path $systemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
 $taskkillExecutable = Join-Path $systemRoot "System32\taskkill.exe"
 foreach ($requiredSystemExecutable in @($powershellExecutable, $taskkillExecutable)) {
   if (-not (Test-Path -LiteralPath $requiredSystemExecutable -PathType Leaf)) {
     throw "Required Windows system executable was not found: $requiredSystemExecutable"
   }
+}
+if ([string]::IsNullOrWhiteSpace($InputExe)) { throw "-InputExe is required." }
+if ([string]::IsNullOrWhiteSpace($InputTrayExe)) { throw "-InputTrayExe is required." }
+if ($StopTimeoutSeconds -lt 5 -or $StopTimeoutSeconds -gt 600) {
+  throw "StopTimeoutSeconds must be between 5 and 600."
+}
+if ($HealthTimeoutSeconds -lt 5 -or $HealthTimeoutSeconds -gt 300) {
+  throw "HealthTimeoutSeconds must be between 5 and 300."
 }
 
 $localAppData = $env:LOCALAPPDATA
@@ -85,9 +904,6 @@ if (-not $isLocalInstall) {
   }
 }
 $deploymentMode = if ($isLocalInstall) { "per-user" } else { "per-user-custom" }
-if ($HealthTimeoutSeconds -lt 5 -or $HealthTimeoutSeconds -gt 300) {
-  throw "HealthTimeoutSeconds must be between 5 and 300."
-}
 $listenAddress = $null
 $listenPort = 0
 $listenParts = $Listen.Split(':')
@@ -106,6 +922,11 @@ $server = Join-Path $install "aha2.exe"
 $tray = Join-Path $install "aha2-tray.exe"
 $plugin = Join-Path $data "plugins\channels\feishu\aha2-channel-feishu.exe"
 $pluginManifest = Join-Path $data "plugins\channels\feishu\plugin.json"
+$databasePath = Join-Path $data "aha2.db"
+$databaseWalPath = Join-Path $data "aha2.db-wal"
+$databaseShmPath = Join-Path $data "aha2.db-shm"
+$serverExisted = Test-Path -LiteralPath $server -PathType Leaf
+$trayExisted = Test-Path -LiteralPath $tray -PathType Leaf
 $pluginExisted = Test-Path -LiteralPath $plugin -PathType Leaf
 $pluginManifestExisted = Test-Path -LiteralPath $pluginManifest -PathType Leaf
 $registerTask = Join-Path $install "Register-AHA2UserTask.ps1"
@@ -118,7 +939,7 @@ if ($UpdateExistingInstallInPlace) {
 }
 
 if ($ValidateOnly) {
-  [pscustomobject]@{Mode=$deploymentMode;Repository=$repo;InstallDir=$install;DataDir=$data;Listen=$Listen;HealthURL=$HealthURL;WriteAccessVerified=$true;ElevationRequired=$false}
+  [pscustomobject]@{Mode=$deploymentMode;Repository=$repo;InstallDir=$install;DataDir=$data;Listen=$Listen;HealthURL=$HealthURL;WriteAccessVerified=$true;ElevationRequired=$false;StopTimeoutSeconds=$StopTimeoutSeconds}
   return
 }
 
@@ -126,10 +947,22 @@ if ($DetachedWorker) {
   Start-Transcript -LiteralPath (Join-Path $repo "dist\user-deploy.log") -Force | Out-Null
 }
 
+# ---------------------------------------------------------------------------
+# Windows helpers: process stop verification, exclusive probes, atomic file
+# replacement, and SQLite quick_check.
+# ---------------------------------------------------------------------------
+
 function Test-AHA2Ancestor {
   $current = $PID
   for ($depth = 0; $depth -lt 32 -and $current -gt 0; $depth++) {
-    $process = Get-CimInstance Win32_Process -Filter "ProcessId=$current" -ErrorAction SilentlyContinue
+    try {
+      $process = Get-CimInstance Win32_Process -Filter "ProcessId=$current" -ErrorAction Stop
+    } catch {
+      # The ancestry cannot be inspected. Detaching is the safe choice: it
+      # keeps the deployment out of the AHA2 process tree it is about to stop,
+      # and the detached worker's stop stage still fails closed on CIM errors.
+      return $true
+    }
     if (-not $process) { return $false }
     if ($process.Name -ieq "aha2.exe") { return $true }
     $current = [int]$process.ParentProcessId
@@ -137,21 +970,220 @@ function Test-AHA2Ancestor {
   return $false
 }
 
+function Get-AHA2AncestorIds {
+  $ids = @{}
+  $current = $PID
+  for ($depth = 0; $depth -lt 32 -and $current -gt 0; $depth++) {
+    $ids[[int]$current] = $true
+    # Failure here is not "no ancestors": the stop stage must not kill blindly,
+    # so let the CIM error propagate to its fail-closed retry loop.
+    $process = Get-CimInstance Win32_Process -Filter "ProcessId=$current" -ErrorAction Stop
+    if (-not $process) { break }
+    $current = [int]$process.ParentProcessId
+  }
+  return $ids
+}
+
 function ConvertTo-CommandLineArgument([string]$Value) {
   if ($Value.Contains('"')) { throw "Scheduled deployment argument contains an unsupported quote." }
   return '"' + $Value + '"'
 }
 
-function Write-DeploymentResult([string]$Status, $Value) {
+function Write-DeploymentResult($Record) {
   if ([string]::IsNullOrWhiteSpace($ResultPath)) { return }
-  $target = [IO.Path]::GetFullPath($ResultPath)
-  $repoPrefix = $repo.TrimEnd('\') + '\'
-  if (-not $target.StartsWith($repoPrefix, [StringComparison]::OrdinalIgnoreCase)) {
-    throw "Deployment result path must stay inside the repository."
+  $temporaryTarget = ""
+  try {
+    $target = [IO.Path]::GetFullPath($ResultPath)
+    $repoPrefix = $repo.TrimEnd('\') + '\'
+    if (-not $target.StartsWith($repoPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+      Write-Warning "Deployment result path must stay inside the repository: $target"
+      return
+    }
+    New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force | Out-Null
+    $Record.FinishedAt = [DateTime]::UtcNow.ToString("o")
+    $json = $Record | ConvertTo-Json -Depth 8
+    $temporaryTarget = Join-Path (Split-Path -Parent $target) (".{0}.{1}.tmp" -f [IO.Path]::GetFileName($target),[Guid]::NewGuid().ToString("N"))
+    try {
+      [IO.File]::WriteAllText($temporaryTarget, $json, [Text.UTF8Encoding]::new($false))
+      if (Test-Path -LiteralPath $target -PathType Leaf) {
+        # See Set-AHA2StagedFileAtomic: $null would become an empty backup name.
+        [IO.File]::Replace($temporaryTarget, $target, [NullString]::Value)
+      } else {
+        [IO.File]::Move($temporaryTarget, $target)
+      }
+      $temporaryTarget = ""
+      return
+    } catch {
+      $atomicError = $_.Exception.Message
+    }
+    # The result file is diagnostic. A locked target or a filesystem without
+    # atomic replace support (e.g. some UNC shares) must never turn a
+    # deployment that already succeeded into a rollback, so fall back to a
+    # direct write and otherwise only warn.
+    try {
+      [IO.File]::WriteAllText($target, $json, [Text.UTF8Encoding]::new($false))
+    } catch {
+      Write-Warning ("Could not write deployment result {0}: atomic error: {1}; direct write error: {2}" -f $target,$atomicError,$_.Exception.Message)
+    }
+  } catch {
+    Write-Warning ("Could not prepare deployment result {0}: {1}" -f $ResultPath,$_.Exception.Message)
+  } finally {
+    if ($temporaryTarget -and (Test-Path -LiteralPath $temporaryTarget -PathType Leaf)) {
+      Remove-Item -LiteralPath $temporaryTarget -Force -ErrorAction SilentlyContinue
+    }
   }
-  New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force | Out-Null
-  @{Status=$Status;Value=$Value;FinishedAt=[DateTime]::UtcNow.ToString("o")} | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $target -Encoding UTF8
 }
+
+function Wait-AHA2Health {
+  $deadline = [DateTime]::UtcNow.AddSeconds($HealthTimeoutSeconds)
+  do {
+    try {
+      $response = Invoke-WebRequest -UseBasicParsing -Uri $HealthURL -TimeoutSec 3
+      if ($response.StatusCode -eq 200) { return }
+    } catch {}
+    Start-Sleep -Milliseconds 500
+  } while ([DateTime]::UtcNow -lt $deadline)
+  throw "AHA2 health check did not pass."
+}
+
+$script:sqliteQuickCheckSource = @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public static class Aha2SqliteQuickCheck
+{
+    private const int SQLITE_OK = 0;
+    private const int SQLITE_ROW = 100;
+    private const int SQLITE_DONE = 101;
+
+    [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int sqlite3_open_v2(byte[] filename, out IntPtr db, int flags, IntPtr vfs);
+
+    [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int sqlite3_prepare_v2(IntPtr db, byte[] sql, int nByte, out IntPtr statement, IntPtr tail);
+
+    [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int sqlite3_step(IntPtr statement);
+
+    [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
+    private static extern IntPtr sqlite3_column_text(IntPtr statement, int column);
+
+    [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int sqlite3_finalize(IntPtr statement);
+
+    [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int sqlite3_close(IntPtr db);
+
+    [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
+    private static extern IntPtr sqlite3_errmsg(IntPtr db);
+
+    public static string Run(string path)
+    {
+        byte[] fileName = Encoding.UTF8.GetBytes(path + "\0");
+        IntPtr db;
+        // SQLITE_OPEN_READWRITE (2) lets SQLite recover a restored WAL; no
+        // process holds the file at this point because the stop stage verified it.
+        int flags = 2 | 0x8000;
+        int rc = sqlite3_open_v2(fileName, out db, flags, IntPtr.Zero);
+        if (rc != SQLITE_OK)
+        {
+            string openError = db != IntPtr.Zero ? Marshal.PtrToStringAnsi(sqlite3_errmsg(db)) : "";
+            if (db != IntPtr.Zero) { sqlite3_close(db); }
+            return "ERROR " + rc + ": " + openError;
+        }
+        IntPtr statement = IntPtr.Zero;
+        StringBuilder rows = new StringBuilder();
+        try
+        {
+            byte[] sql = Encoding.UTF8.GetBytes("PRAGMA quick_check;\0");
+            rc = sqlite3_prepare_v2(db, sql, -1, out statement, IntPtr.Zero);
+            if (rc != SQLITE_OK)
+            {
+                return "ERROR " + rc + ": " + Marshal.PtrToStringAnsi(sqlite3_errmsg(db));
+            }
+            while (true)
+            {
+                rc = sqlite3_step(statement);
+                if (rc == SQLITE_ROW)
+                {
+                    IntPtr text = sqlite3_column_text(statement, 0);
+                    if (text != IntPtr.Zero)
+                    {
+                        if (rows.Length > 0) { rows.Append('\n'); }
+                        rows.Append(Marshal.PtrToStringAnsi(text));
+                    }
+                    continue;
+                }
+                if (rc == SQLITE_DONE) { break; }
+                return "ERROR " + rc + ": " + Marshal.PtrToStringAnsi(sqlite3_errmsg(db));
+            }
+            return rows.ToString();
+        }
+        finally
+        {
+            if (statement != IntPtr.Zero) { sqlite3_finalize(statement); }
+            sqlite3_close(db);
+        }
+    }
+}
+'@
+
+function Invoke-AHA2SqliteQuickCheck {
+  param([string]$DatabasePath)
+  if (-not (Test-Path -LiteralPath $DatabasePath -PathType Leaf)) {
+    return [pscustomobject]@{Ok=$false;Health="failed: restored database file is missing";Output=""}
+  }
+
+  $output = $null
+  $checkerError = ""
+  try {
+    if (-not ("Aha2SqliteQuickCheck" -as [type])) {
+      Add-Type -TypeDefinition $script:sqliteQuickCheckSource -Language CSharp -ErrorAction Stop
+    }
+    $output = [Aha2SqliteQuickCheck]::Run($DatabasePath)
+  } catch {
+    $checkerError = $_.Exception.Message
+  }
+
+  if ($null -eq $output -and $checkerError) {
+    # Older images without winsqlite3.dll: use the sqlite3 shell when present.
+    $sqliteCommand = Get-Command sqlite3.exe -ErrorAction SilentlyContinue
+    if ($sqliteCommand) {
+      try {
+        $output = @(& $sqliteCommand.Source $DatabasePath "PRAGMA quick_check;" 2>&1) -join "`n"
+      } catch {
+        $checkerError = $_.Exception.Message
+      }
+    }
+  }
+
+  if ($null -eq $output) {
+    return [pscustomobject]@{Ok=$false;Health=("unavailable: " + $checkerError);Output=""}
+  }
+  if ($output -like "ERROR *") {
+    return [pscustomobject]@{Ok=$false;Health=$output;Output=$output}
+  }
+  $lines = @($output -split "`r?`n")
+  if (Test-AHA2QuickCheckOutput -Lines $lines) {
+    return [pscustomobject]@{Ok=$true;Health="ok";Output=$output}
+  }
+  return [pscustomobject]@{Ok=$false;Health=("failed: PRAGMA quick_check returned: " + ($lines -join " | "));Output=$output}
+}
+
+function Get-AHA2ManualRecoveryText {
+  param($Record, [string]$BackupDirectory)
+  $hashText = @($Record.BackupSHA256.Keys | ForEach-Object { "$_=$($Record.BackupSHA256[$_])" }) -join ", "
+  $message = "AHA2 was left stopped because rollback could not be verified. Backup: {0}. Verified backup SHA256: {1}. " +
+    "Manual recovery: stop aha2.exe, aha2-tray.exe and aha2-channel-feishu.exe; move aha2.db, aha2.db-wal and aha2.db-shm out of {2}; " +
+    "copy the backup aha2.db into {2} (and aha2.db-wal only when the backup contains it); run PRAGMA quick_check; " +
+    "start AHA2 only when it returns ok."
+  return ($message -f $BackupDirectory,$hashText,$data)
+}
+
+# ---------------------------------------------------------------------------
+# Deployment.
+# ---------------------------------------------------------------------------
 
 if (-not $DetachedWorker -and (Test-AHA2Ancestor)) {
   if ([string]::IsNullOrWhiteSpace($ResultPath)) {
@@ -162,7 +1194,8 @@ if (-not $DetachedWorker -and (Test-AHA2Ancestor)) {
     "-DetachedWorker", "-RepoPath", $repo, "-InputExe", $serverInput, "-InputTrayExe", $trayInput,
     "-InstallDir", $install, "-DataDir", $data, "-Version", $Version, "-TaskName", $TaskName,
     "-UpdateTaskName", $UpdateTaskName, "-Listen", $Listen, "-HealthURL", $HealthURL,
-    "-HealthTimeoutSeconds", [string]$HealthTimeoutSeconds, "-ResultPath", $ResultPath
+    "-HealthTimeoutSeconds", [string]$HealthTimeoutSeconds, "-StopTimeoutSeconds", [string]$StopTimeoutSeconds,
+    "-ResultPath", $ResultPath
   )
   if ($AgentAPIURL) { $workerArguments += @("-AgentAPIURL", $AgentAPIURL) }
   if ($AllowCustomUserWritableInstallDir) { $workerArguments += "-AllowCustomUserWritableInstallDir" }
@@ -178,92 +1211,6 @@ if (-not $DetachedWorker -and (Test-AHA2Ancestor)) {
   Start-ScheduledTask -TaskName $UpdateTaskName
   [pscustomobject]@{Mode=$deploymentMode;State="scheduled";Result=$ResultPath;WriteAccessVerified=$true;ElevationRequired=$false}
   return
-}
-
-function Wait-AHA2Health {
-  $deadline = [DateTime]::UtcNow.AddSeconds($HealthTimeoutSeconds)
-  do {
-    try {
-      $response = Invoke-WebRequest -UseBasicParsing -Uri $HealthURL -TimeoutSec 3
-      if ($response.StatusCode -eq 200) { return }
-    } catch {}
-    Start-Sleep -Milliseconds 500
-  } while ([DateTime]::UtcNow -lt $deadline)
-  throw "AHA2 health check did not pass."
-}
-
-function Get-AHA2ProcessTree {
-  $processes = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
-  $targets = @{}
-  foreach ($process in $processes) {
-    if ($process.Name -ieq "aha2.exe" -or $process.Name -ieq "aha2-tray.exe") {
-      $targets[[int]$process.ProcessId] = [pscustomobject]@{Process=$process;Depth=0}
-    }
-  }
-  do {
-    $added = $false
-    foreach ($process in $processes) {
-      $processId = [int]$process.ProcessId
-      $parentId = [int]$process.ParentProcessId
-      if (-not $targets.ContainsKey($processId) -and $targets.ContainsKey($parentId)) {
-        $targets[$processId] = [pscustomobject]@{Process=$process;Depth=([int]$targets[$parentId].Depth + 1)}
-        $added = $true
-      }
-    }
-  } while ($added)
-  @($targets.Values | ForEach-Object {
-    [pscustomobject]@{
-      Id = [int]$_.Process.ProcessId
-      Name = [string]$_.Process.Name
-      CreationDate = [string]$_.Process.CreationDate
-      Depth = [int]$_.Depth
-    }
-  })
-}
-
-function Test-AHA2ProcessIdentity($Target) {
-  $current = Get-CimInstance Win32_Process -Filter "ProcessId=$($Target.Id)" -ErrorAction SilentlyContinue
-  return $current -and
-    $current.Name -ieq $Target.Name -and
-    [string]$current.CreationDate -eq $Target.CreationDate
-}
-
-function Invoke-TaskKillNoThrow([int]$ProcessId) {
-  $previousPreference = $ErrorActionPreference
-  try {
-    $ErrorActionPreference = "Continue"
-    $output = @(& $taskkillExecutable /PID $ProcessId /T /F 2>&1)
-    $exitCode = $LASTEXITCODE
-  } finally {
-    $ErrorActionPreference = $previousPreference
-  }
-  if ($exitCode -ne 0) {
-    Write-Warning ("taskkill failed for PID {0} with code {1}: {2}" -f $ProcessId,$exitCode,($output -join " "))
-  }
-}
-
-function Stop-AHA2ProcessTrees {
-  $targets = @(Get-AHA2ProcessTree)
-  foreach ($root in @($targets | Where-Object Depth -eq 0)) {
-    Invoke-TaskKillNoThrow $root.Id
-  }
-
-  $deadline = [DateTime]::UtcNow.AddSeconds(10)
-  do {
-    $remaining = @($targets | Where-Object { Test-AHA2ProcessIdentity $_ })
-    if ($remaining.Count -eq 0) { break }
-    foreach ($target in @($remaining | Sort-Object Depth -Descending)) {
-      Stop-Process -Id $target.Id -Force -ErrorAction SilentlyContinue
-    }
-    Start-Sleep -Milliseconds 250
-  } while ([DateTime]::UtcNow -lt $deadline)
-
-  $remaining = @($targets | Where-Object { Test-AHA2ProcessIdentity $_ })
-  if ($remaining.Count -gt 0) {
-    $description = ($remaining | ForEach-Object { "$($_.Name) PID $($_.Id)" }) -join ", "
-    throw "AHA2 processes could not be stopped within 10 seconds: $description"
-  }
-  Start-Sleep -Milliseconds 500
 }
 
 if (-not $UpdateExistingInstallInPlace) {
@@ -284,24 +1231,115 @@ if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
   [IO.File]::WriteAllText((Join-Path $backup "AHA2-User-Task.xml"), $previousTaskXML, [Text.UTF8Encoding]::new($false))
 }
 
+$state = New-AHA2ResultRecord
+$state.Backup = $backup
+$state.Mode = $deploymentMode
+$state.UpdateType = if ($UpdateExistingInstallInPlace) { "existing-install-in-place" } else { "installer" }
+$databaseExistedBefore = Test-Path -LiteralPath $databasePath -PathType Leaf
+$binaryBackups = @()
+$runtimeFileBackups = @()
+$backupVerified = $false
+$mutationStageReached = $false
+
 try {
   New-Item -ItemType Directory -Path $data -Force | Out-Null
+
+  # --- stop: refuse to touch anything until every process has exited and the
+  # binary/database handles can be opened exclusively.
+  $state.Stage = "stop"
   Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-  Stop-AHA2ProcessTrees
-  foreach ($name in @("aha2.db","aha2.db-wal","aha2.db-shm","secrets.json","setup-token")) {
-    $source = Join-Path $data $name
-    if (Test-Path -LiteralPath $source -PathType Leaf) { Copy-Item -LiteralPath $source -Destination (Join-Path $backup $name) -Force }
+  $stop = Stop-AHA2ProcessTrees
+  $state.StopAttempts = $stop.Attempts
+  if (-not $stop.Verified) {
+    Add-AHA2LockedFile -Record $state -Paths $stop.LockedFiles
+    $state.StopVerified = $false
+    $detail = @()
+    if ($stop.LockedFiles.Count -gt 0) { $detail += ("locked files: " + ($stop.LockedFiles -join ", ")) }
+    if ($stop.Processes.Count -gt 0) { $detail += ("remaining processes: " + ($stop.Processes -join ", ")) }
+    if ($stop.EnumerationError) { $detail += ("process enumeration failed: " + $stop.EnumerationError) }
+    throw ("AHA2 processes or file handles did not stop within {0}s; refusing to modify the installation. {1}" -f $StopTimeoutSeconds,($detail -join "; "))
   }
-  foreach ($entry in @(@{Path=$server;Name="aha2.exe"},@{Path=$tray;Name="aha2-tray.exe"},@{Path=$plugin;Name="aha2-channel-feishu.exe"},@{Path=$pluginManifest;Name="feishu-plugin.json"})) {
-    if (Test-Path -LiteralPath $entry.Path -PathType Leaf) { Copy-Item -LiteralPath $entry.Path -Destination (Join-Path $backup $entry.Name) -Force }
+  $state.StopVerified = $true
+
+  # --- backup: copy only after the exclusive probes passed, then verify size
+  # and SHA256 of every copied file before any installed file is replaced.
+  $state.Stage = "backup"
+  foreach ($name in @($databaseFileNames + @("secrets.json","setup-token"))) {
+    $sourcePath = Join-Path $data $name
+    if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) { continue }
+    $destinationPath = Join-Path $backup $name
+    Copy-Item -LiteralPath $sourcePath -Destination $destinationPath -Force
+    $check = Test-AHA2BackupCopy -Source $sourcePath -Destination $destinationPath
+    if (-not $check.Ok) {
+      throw ("Backup verification failed for {0}: {1}" -f $name,$check.Reason)
+    }
+    $state.BackupSHA256[$name] = $check.SHA256
+    $state.BackupSizes[$name] = $check.Size
+    if ($name -in @("secrets.json","setup-token")) {
+      $runtimeFileBackups += [pscustomobject]@{
+        Name = $name
+        BackupPath = $destinationPath
+        TargetPath = $sourcePath
+        SHA256 = $check.SHA256
+      }
+    }
   }
+  if ($databaseExistedBefore -and -not $state.BackupSHA256.Contains("aha2.db")) {
+    throw "The requested aha2.db backup was not captured and verified."
+  }
+  foreach ($entry in @(
+    @{Source=$server;Name="aha2.exe";Target=$server;ExistedBefore=$serverExisted},
+    @{Source=$tray;Name="aha2-tray.exe";Target=$tray;ExistedBefore=$trayExisted},
+    @{Source=$plugin;Name="aha2-channel-feishu.exe";Target=$plugin;ExistedBefore=$pluginExisted},
+    @{Source=$pluginManifest;Name="feishu-plugin.json";Target=$pluginManifest;ExistedBefore=$pluginManifestExisted}
+  )) {
+    $destinationPath = Join-Path $backup $entry.Name
+    $backupPresent = $false
+    $entryHash = ""
+    if (Test-Path -LiteralPath $entry.Source -PathType Leaf) {
+      Copy-Item -LiteralPath $entry.Source -Destination $destinationPath -Force
+      $check = Test-AHA2BackupCopy -Source $entry.Source -Destination $destinationPath
+      if (-not $check.Ok) {
+        throw ("Backup verification failed for {0}: {1}" -f $entry.Name,$check.Reason)
+      }
+      $state.BackupSHA256[$entry.Name] = $check.SHA256
+      $state.BackupSizes[$entry.Name] = $check.Size
+      $backupPresent = $true
+      $entryHash = $check.SHA256
+    }
+    # Record every target, including files that did not exist before this
+    # deployment: rollback must delete the ones a failed install created.
+    $binaryBackups += [pscustomobject]@{
+      Name = $entry.Name
+      BackupPath = $destinationPath
+      TargetPath = $entry.Target
+      ExistedBefore = [bool]$entry.ExistedBefore
+      BackupPresent = $backupPresent
+      SHA256 = $entryHash
+    }
+  }
+  # A file that existed before the deployment must have a verified backup
+  # before any installed file is replaced; otherwise rollback cannot restore it.
+  foreach ($requiredFile in $binaryBackups) {
+    if (-not (Test-AHA2RollbackPrerequisite -ExistedBefore ([bool]$requiredFile.ExistedBefore) -BackupPresent ([bool]$requiredFile.BackupPresent))) {
+      throw ("Required rollback file {0} is missing from the backup." -f $requiredFile.Name)
+    }
+  }
+  $backupVerified = $true
+  $state.BackupVerified = $true
+
+  # --- install: every installed file is staged beside its destination, hash
+  # checked, and atomically replaced. A locked destination throws instead of
+  # being truncated.
+  $state.Stage = "install"
+  $mutationStageReached = $true
   if ($UpdateExistingInstallInPlace) {
-    Copy-Item -LiteralPath $serverInput -Destination $server -Force
-    Copy-Item -LiteralPath $trayInput -Destination $tray -Force
+    Set-AHA2InstalledFile -Record $state -Source $serverInput -Destination $server
+    Set-AHA2InstalledFile -Record $state -Source $trayInput -Destination $tray
     if ($pluginInput -and $pluginManifestInput) {
       New-Item -ItemType Directory -Path (Split-Path -Parent $plugin) -Force | Out-Null
-      Copy-Item -LiteralPath $pluginInput -Destination $plugin -Force
-      Copy-Item -LiteralPath $pluginManifestInput -Destination $pluginManifest -Force
+      Set-AHA2InstalledFile -Record $state -Source $pluginInput -Destination $plugin
+      Set-AHA2InstalledFile -Record $state -Source $pluginManifestInput -Destination $pluginManifest
     }
   } else {
     # The repo lives on the WSL filesystem, so $installer is a UNC path. Windows
@@ -320,8 +1358,23 @@ try {
     }
   }
   if (-not (Test-Path -LiteralPath $registerTask -PathType Leaf)) { throw "Installed task registration script is missing." }
+
+  # --- health: start only after another verified stop; a health failure goes
+  # through the verified rollback instead of restarting the restored service
+  # immediately.
+  $state.Stage = "health"
   Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-  Stop-AHA2ProcessTrees
+  $stopBeforeStart = Stop-AHA2ProcessTrees
+  $state.StopAttempts = [Math]::Max([int]$state.StopAttempts, [int]$stopBeforeStart.Attempts)
+  if (-not $stopBeforeStart.Verified) {
+    Add-AHA2LockedFile -Record $state -Paths $stopBeforeStart.LockedFiles
+    $stopDetail = @()
+    if ($stopBeforeStart.LockedFiles.Count -gt 0) { $stopDetail += ("locked files: " + ($stopBeforeStart.LockedFiles -join ", ")) }
+    if ($stopBeforeStart.Processes.Count -gt 0) { $stopDetail += ("remaining processes: " + ($stopBeforeStart.Processes -join ", ")) }
+    if ($stopBeforeStart.EnumerationError) { $stopDetail += ("process enumeration failed: " + $stopBeforeStart.EnumerationError) }
+    throw ("AHA2 processes or file handles could not be verified stopped before startup. " + ($stopDetail -join "; "))
+  }
+  $state.StopVerified = $true
   $registerArguments = @{
     TrayExecutable = $tray
     ServerExecutable = $server
@@ -352,31 +1405,162 @@ try {
       throw "Installed Feishu plugin hash does not match the candidate."
     }
   }
-  $deploymentResult = [pscustomobject]@{Mode=$deploymentMode;UpdateType=$(if ($UpdateExistingInstallInPlace) { "existing-install-in-place" } else { "installer" });Health="ok";URL=$HealthURL;Installer=$(if ($UpdateExistingInstallInPlace) { "" } else { $installer });Backup=$backup;ServerSHA256=$serverHash;TraySHA256=$trayHash;PluginSHA256=$installedPluginHash;WriteAccessVerified=$true;ElevationRequired=$false}
-  Write-DeploymentResult "succeeded" $deploymentResult
+  $deploymentResult = [pscustomobject]@{Mode=$deploymentMode;UpdateType=$state.UpdateType;Health="ok";URL=$HealthURL;Installer=$(if ($UpdateExistingInstallInPlace) { "" } else { $installer });Backup=$backup;ServerSHA256=$serverHash;TraySHA256=$trayHash;PluginSHA256=$installedPluginHash;WriteAccessVerified=$true;ElevationRequired=$false;Stage="health";BackupSHA256=$state.BackupSHA256;LockedFiles=$state.LockedFiles;RollbackVerified=$false;rollback_health="not-required"}
+  $state.Status = "succeeded"
+  $state.Stage = "health"
+  $state.Health = "ok"
+  $state.URL = $HealthURL
+  $state.Installer = if ($UpdateExistingInstallInPlace) { "" } else { $installer }
+  $state.ServerSHA256 = $serverHash
+  $state.TraySHA256 = $trayHash
+  $state.PluginSHA256 = $installedPluginHash
+  $state.RollbackVerified = $false
+  $state.rollback_health = "not-required"
+  $state.Value = $deploymentResult
+  Write-DeploymentResult $state
   if ($DetachedWorker) { Unregister-ScheduledTask -TaskName $UpdateTaskName -Confirm:$false -ErrorAction SilentlyContinue }
   $deploymentResult
 } catch {
   $deploymentError = $_
-  Write-DeploymentResult "failed" $deploymentError.Exception.Message
+  $failedStage = $state.Stage
+  $state.Status = "failed"
+  $state.Value = $deploymentError.Exception.Message
+  $state.FailedStage = $failedStage
+  $state.rollback_health = "pending"
+  Write-DeploymentResult $state
+
   Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-  Stop-AHA2ProcessTrees
-  foreach ($entry in @(@{Path=$server;Name="aha2.exe"},@{Path=$tray;Name="aha2-tray.exe"},@{Path=$plugin;Name="aha2-channel-feishu.exe"},@{Path=$pluginManifest;Name="feishu-plugin.json"})) {
-    $backupFile = Join-Path $backup $entry.Name
-    if (Test-Path -LiteralPath $backupFile -PathType Leaf) { Copy-Item -LiteralPath $backupFile -Destination $entry.Path -Force }
-  }
-  if ($pluginInput -and -not $pluginExisted) { Remove-Item -LiteralPath $plugin -Force -ErrorAction SilentlyContinue }
-  if ($pluginManifestInput -and -not $pluginManifestExisted) { Remove-Item -LiteralPath $pluginManifest -Force -ErrorAction SilentlyContinue }
-  foreach ($name in @("aha2.db","aha2.db-wal","aha2.db-shm","secrets.json","setup-token")) {
-    $backupFile = Join-Path $backup $name
-    if (Test-Path -LiteralPath $backupFile -PathType Leaf) { Copy-Item -LiteralPath $backupFile -Destination (Join-Path $data $name) -Force }
-  }
-  if ($previousTaskXML) {
-    if (-not (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue)) {
-      Register-ScheduledTask -TaskName $TaskName -Xml $previousTaskXML -Force | Out-Null
+  $stopAfterFailure = Stop-AHA2ProcessTrees
+  $state.StopAttempts = [Math]::Max([int]$state.StopAttempts, [int]$stopAfterFailure.Attempts)
+  Add-AHA2LockedFile -Record $state -Paths $stopAfterFailure.LockedFiles
+  if (-not $stopAfterFailure.Verified) {
+    $state.StopVerified = $false
+    $state.RollbackVerified = $false
+    $detailParts = @($stopAfterFailure.LockedFiles) + @($stopAfterFailure.Processes)
+    if ($stopAfterFailure.EnumerationError) { $detailParts += ("process enumeration failed: " + $stopAfterFailure.EnumerationError) }
+    $detail = ($detailParts -join ", ")
+    if ($mutationStageReached) {
+      $state.Stage = "rollback"
+      $state.rollback_health = ("blocked: AHA2 processes or file handles did not stop; nothing was restored. Details: " + $detail)
+      $state.ManualRecovery = Get-AHA2ManualRecoveryText -Record $state -BackupDirectory $backup
+      Write-DeploymentResult $state
+      if ($DetachedWorker) { Unregister-ScheduledTask -TaskName $UpdateTaskName -Confirm:$false -ErrorAction SilentlyContinue }
+      throw ("$($deploymentError.Exception.Message) Rollback blocked; AHA2 was left stopped. Backup: $backup. $($state.ManualRecovery)")
     }
-    Start-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    # No file was modified yet, so this is not a rollback failure; AHA2 simply
+    # could not be confirmed stopped and must not be restarted blindly.
+    $state.Stage = $failedStage
+    $state.rollback_health = ("not-required: deployment failed during {0} before any file was modified; AHA2 could not be confirmed stopped ({1}) and was not restarted" -f $failedStage,$detail)
+    Write-DeploymentResult $state
+    if ($DetachedWorker) { Unregister-ScheduledTask -TaskName $UpdateTaskName -Confirm:$false -ErrorAction SilentlyContinue }
+    throw "$($deploymentError.Exception.Message) Backup: $backup"
   }
+  $state.StopVerified = $true
+
+  if (-not $mutationStageReached) {
+    # The failure happened before any binary or database file was replaced
+    # (stop/backup). There is nothing to roll back; only restart the previous
+    # service if the stop was verified so no mixed state can be created.
+    $state.RollbackVerified = $false
+    $state.rollback_health = ("not-required: deployment failed during {0} before any binary or database file was modified" -f $failedStage)
+    if ($previousTaskXML) {
+      if (-not (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue)) {
+        Register-ScheduledTask -TaskName $TaskName -Xml $previousTaskXML -Force | Out-Null
+      }
+      Start-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+      $state.rollback_health += "; previous service restarted"
+    }
+    Write-DeploymentResult $state
+    if ($DetachedWorker) { Unregister-ScheduledTask -TaskName $UpdateTaskName -Confirm:$false -ErrorAction SilentlyContinue }
+    throw "$($deploymentError.Exception.Message) Backup: $backup"
+  }
+
+  # --- rollback: restore binaries and database only after another verified
+  # stop, use atomic replacement for every file, and gate any service start on
+  # PRAGMA quick_check against the restored database.
+  $state.Stage = "rollback"
+  $rollbackHealth = ""
+  $rollbackVerified = $false
+  if (-not $backupVerified) {
+    $rollbackHealth = "failed: rollback is not allowed without a verified backup"
+  }
+  foreach ($binary in $binaryBackups) {
+    if ($rollbackHealth) { break }
+    try {
+      $failure = Invoke-AHA2FileRollbackEntry -Entry $binary
+    } catch {
+      Add-AHA2LockedFile -Record $state -Paths @($binary.TargetPath)
+      $failure = ("file rollback failed for {0}: {1}" -f $binary.TargetPath,$_.Exception.Message)
+    }
+    if ($failure) {
+      $rollbackHealth = ("failed: " + $failure)
+      break
+    }
+  }
+  # secrets.json/setup-token were part of the pre-deployment snapshot under the
+  # previous implementation; restore them atomically too, but never delete a
+  # file that did not exist before (a first run may legitimately create it).
+  foreach ($runtimeFile in $runtimeFileBackups) {
+    if ($rollbackHealth) { break }
+    try {
+      if (Test-Path -LiteralPath $runtimeFile.BackupPath -PathType Leaf) {
+        [void](Set-AHA2FileFromSource -Source $runtimeFile.BackupPath -Destination $runtimeFile.TargetPath -ExpectedSHA256 $runtimeFile.SHA256)
+      }
+    } catch {
+      Add-AHA2LockedFile -Record $state -Paths @($runtimeFile.TargetPath)
+      $rollbackHealth = ("failed: runtime file restore failed for {0}: {1}" -f $runtimeFile.TargetPath,$_.Exception.Message)
+      break
+    }
+  }
+  if (-not $rollbackHealth) {
+    if ($databaseExistedBefore) {
+      try {
+        Restore-AHA2DatabaseFromBackup -BackupDirectory $backup -DataDirectory $data -ExpectedSHA256 $state.BackupSHA256
+        $quickCheck = Invoke-AHA2SqliteQuickCheck -DatabasePath $databasePath
+        $state.rollback_health = $quickCheck.Health
+        if ($quickCheck.Ok) {
+          $rollbackVerified = $true
+        } else {
+          Add-AHA2LockedFile -Record $state -Paths @($databasePath)
+          $rollbackHealth = ("failed: restored database did not pass PRAGMA quick_check: {0}" -f $quickCheck.Health)
+        }
+      } catch {
+        Add-AHA2LockedFile -Record $state -Paths @($databasePath,$databaseWalPath,$databaseShmPath)
+        $rollbackHealth = ("failed: database restore failed: {0}" -f $_.Exception.Message)
+      }
+    } elseif (Test-Path -LiteralPath $databasePath -PathType Leaf) {
+      $rollbackHealth = "manual: no database existed before deployment; the newly created database was left untouched and AHA2 was not started"
+    } else {
+      $rollbackVerified = $true
+      $state.rollback_health = "not-required: no database existed before deployment"
+    }
+  }
+
+  $state.RollbackVerified = $rollbackVerified
+  if ($rollbackVerified) {
+    if ($previousTaskXML) {
+      if (-not (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue)) {
+        Register-ScheduledTask -TaskName $TaskName -Xml $previousTaskXML -Force | Out-Null
+      }
+      Start-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+      try {
+        Wait-AHA2Health
+        $state.rollback_health = "ok: PRAGMA quick_check ok after atomic restore; previous service healthy"
+      } catch {
+        $state.rollback_health = ("quick_check ok after atomic restore; previous service started but health check failed: {0}" -f $_.Exception.Message)
+      }
+    } else {
+      $state.rollback_health = "ok: PRAGMA quick_check ok after atomic restore; no previous login task to start"
+    }
+  } else {
+    $state.rollback_health = $rollbackHealth
+    $state.ManualRecovery = Get-AHA2ManualRecoveryText -Record $state -BackupDirectory $backup
+  }
+
+  Write-DeploymentResult $state
   if ($DetachedWorker) { Unregister-ScheduledTask -TaskName $UpdateTaskName -Confirm:$false -ErrorAction SilentlyContinue }
-  throw "$($deploymentError.Exception.Message) Backup: $backup"
+  if ($rollbackVerified) {
+    throw "$($deploymentError.Exception.Message) Rollback verified from backup: $backup"
+  }
+  throw ("$($deploymentError.Exception.Message) Rollback failed: $($state.rollback_health). Backup: $backup. $($state.ManualRecovery)")
 }
