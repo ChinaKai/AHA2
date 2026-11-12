@@ -17,22 +17,19 @@ func (s *Server) agentAPISettings(writer http.ResponseWriter, request *http.Requ
 
 func (s *Server) updateAgentAPISettings(writer http.ResponseWriter, request *http.Request) {
 	var payload struct {
-		URL           string `json:"url"`
-		AllowInsecure bool   `json:"allow_insecure"`
+		URL string `json:"url"`
 	}
 	if decodeJSON(request, &payload) != nil {
 		writeError(writer, http.StatusBadRequest, "invalid_json")
 		return
 	}
-	item, err := s.app.UpdateAgentAPISettings(request.Context(), domain.AgentAPISettings{
-		URL: payload.URL, AllowInsecure: payload.AllowInsecure,
-	})
+	item, err := s.app.UpdateAgentAPISettings(request.Context(), domain.AgentAPISettings{URL: payload.URL})
 	if err != nil {
 		writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "agent_api_settings_invalid", "message": err.Error()})
 		return
 	}
 	s.audit(request, "settings.agent_api.update", "settings", "agent_api", map[string]any{
-		"url_configured": item.URL != "", "allow_insecure": item.AllowInsecure,
+		"url_configured": item.URL != "",
 	})
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "agent_api": item})
 }

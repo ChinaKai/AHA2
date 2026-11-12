@@ -108,26 +108,29 @@ func parseCommand(args []string) (string, []string, error) {
 }
 
 type serveOptions struct {
-	listen                string
-	dataDir               string
-	setupToken            string
-	setupTokenFile        string
-	secureCookie          bool
-	allowCrossOrigin      bool
-	agentAPIURL           string
-	allowInsecureAgentAPI bool
-	mailTaskBaseURL       string
-	mailDownloadBaseURL   string
-	mailDownloadListen    string
-	logLevel              string
-	codexBinary           string
-	claudeBinary          string
-	dshBinary             string
-	localOwnerIngest      bool
+	listen              string
+	dataDir             string
+	setupToken          string
+	setupTokenFile      string
+	secureCookie        bool
+	allowCrossOrigin    bool
+	agentAPIURL         string
+	mailTaskBaseURL     string
+	mailDownloadBaseURL string
+	mailDownloadListen  string
+	logLevel            string
+	codexBinary         string
+	claudeBinary        string
+	dshBinary           string
+	localOwnerIngest    bool
 	// deprecatedLiveInput records old live-inbox switches that were supplied.
 	// They are accepted so existing service definitions keep starting, but they
 	// no longer select any behavior.
 	deprecatedLiveInput []string
+	// deprecatedAgentAPIInsecure records the removed plaintext-HTTP switch. Old
+	// scheduled tasks still pass it; accepting it as a no-op is what keeps them
+	// starting after the security convergence.
+	deprecatedAgentAPIInsecure []string
 }
 
 func serve(args []string) error {
@@ -148,8 +151,10 @@ func parseServeOptions(name string, args []string) (serveOptions, error) {
 	setupTokenFile := flags.String("setup-token-file", os.Getenv("AHA2_SETUP_TOKEN_FILE"), "file containing the owner setup and recovery token")
 	secureCookie := flags.Bool("secure-cookie", envBool("AHA2_SECURE_COOKIE"), "mark session cookie Secure")
 	allowCrossOrigin := flags.Bool("allow-cross-origin", envBool("AHA2_ALLOW_CROSS_ORIGIN"), "disable Origin host validation for reverse proxies and embedded WebViews")
-	agentAPIURL := flags.String("agent-api-url", os.Getenv("AHA2_AGENT_API_URL"), "Agent-reachable AHA2 base URL (required for remote workspaces)")
-	allowInsecureAgentAPI := flags.Bool("allow-insecure-agent-api", envBool("AHA2_ALLOW_INSECURE_AGENT_API"), "allow a non-loopback http:// Agent API URL for trusted development networks")
+	agentAPIURL := flags.String("agent-api-url", os.Getenv("AHA2_AGENT_API_URL"), "Agent-reachable AHA2 base URL (https or loopback; optional)")
+	// Removed switch. Kept as a parse-only no-op so service definitions written
+	// by an older installer still start; it cannot re-enable plaintext HTTP.
+	flags.Bool("allow-insecure-agent-api", false, "deprecated no-op: non-loopback http Agent API addresses are not supported")
 	mailTaskBaseURL := flags.String("mail-task-base-url", os.Getenv("AHA2_MAIL_TASK_BASE_URL"), "external https base URL used for task.url mail template variables")
 	mailDownloadBaseURL := flags.String("mail-download-base-url", os.Getenv("AHA2_MAIL_DOWNLOAD_BASE_URL"), "external https base URL of the independent controlled-download entry")
 	mailDownloadListen := flags.String("mail-download-listen", os.Getenv("AHA2_MAIL_DOWNLOAD_LISTEN"), "optional separate listen address for the controlled-download entry (for example 127.0.0.1:8767)")
@@ -170,16 +175,34 @@ func parseServeOptions(name string, args []string) (serveOptions, error) {
 		return serveOptions{}, fmt.Errorf("unexpected arguments: %s", strings.Join(flags.Args(), " "))
 	}
 	deprecatedLiveInput := deprecatedLiveInputSettings(flags)
+	deprecatedAgentAPIInsecure := deprecatedAgentAPIInsecureSettings(flags)
 	return serveOptions{
 		listen: *listen, dataDir: *dataDir, setupToken: *setupToken, setupTokenFile: *setupTokenFile,
 		secureCookie: *secureCookie, allowCrossOrigin: *allowCrossOrigin, agentAPIURL: *agentAPIURL,
-		allowInsecureAgentAPI: *allowInsecureAgentAPI, mailTaskBaseURL: *mailTaskBaseURL,
+		mailTaskBaseURL:     *mailTaskBaseURL,
 		mailDownloadBaseURL: *mailDownloadBaseURL, mailDownloadListen: *mailDownloadListen,
 		logLevel: *logLevel, codexBinary: *codexBinary,
 		claudeBinary: *claudeBinary, dshBinary: *dshBinary,
-		localOwnerIngest:    *localOwnerIngest,
-		deprecatedLiveInput: deprecatedLiveInput,
+		localOwnerIngest:           *localOwnerIngest,
+		deprecatedLiveInput:        deprecatedLiveInput,
+		deprecatedAgentAPIInsecure: deprecatedAgentAPIInsecure,
 	}, nil
+}
+
+// deprecatedAgentAPIInsecureSettings reports the removed plaintext-HTTP switch.
+func deprecatedAgentAPIInsecureSettings(flags *flag.FlagSet) []string {
+	var settings []string
+	flags.Visit(func(item *flag.Flag) {
+		if item.Name == "allow-insecure-agent-api" {
+			settings = append(settings, "--"+item.Name)
+		}
+	})
+	for _, name := range []string{"AHA2_ALLOW_INSECURE_AGENT_API"} {
+		if os.Getenv(name) != "" {
+			settings = append(settings, name)
+		}
+	}
+	return settings
 }
 
 // deprecatedLiveInputSettings reports old live-inbox switches supplied through
@@ -216,6 +239,9 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 	slog.SetDefault(logger)
 	for _, setting := range options.deprecatedLiveInput {
 		logger.Warn("deprecated live input setting ignored; live inbox delivery is always enabled when the runner can stream stdin", "setting", setting)
+	}
+	for _, setting := range options.deprecatedAgentAPIInsecure {
+		logger.Warn("deprecated Agent API insecure switch ignored; only https:// or loopback http:// addresses are supported", "setting", setting)
 	}
 	absoluteDataDir, err := filepath.Abs(options.dataDir)
 	if err != nil {
@@ -311,13 +337,17 @@ func runControlPlane(ctx context.Context, options serveOptions, ready func()) er
 	managedProcesses := managedprocess.NewManager()
 	defer managedProcesses.Close()
 	resolvedAgentAPIURL := resolveAgentAPIURL(options.listen, options.agentAPIURL)
-	if err := validateAgentAPIURL(resolvedAgentAPIURL, options.allowInsecureAgentAPI); err != nil {
-		return err
+	if err := validateAgentAPIURL(resolvedAgentAPIURL); err != nil {
+		// An older service definition may still carry a plaintext LAN address.
+		// Refusing to start would take every task down to enforce a boundary the
+		// automatic selection path can satisfy; drop the value instead and say so.
+		logger.Warn("ignoring Agent API address outside the https/loopback boundary; using the listen-derived address", "error", err)
+		resolvedAgentAPIURL = resolveAgentAPIURL(options.listen, "")
+		if err := validateAgentAPIURL(resolvedAgentAPIURL); err != nil {
+			return err
+		}
 	}
-	if options.allowInsecureAgentAPI && strings.HasPrefix(strings.ToLower(resolvedAgentAPIURL), "http://") {
-		logger.Warn("insecure Agent API URL enabled", "host", mustAgentAPIHost(resolvedAgentAPIURL))
-	}
-	appService.SetAgentAPI(agentCapabilities, resolvedAgentAPIURL, options.allowInsecureAgentAPI)
+	appService.SetAgentAPI(agentCapabilities, resolvedAgentAPIURL)
 	channelService := channel.New(channel.Config{Store: database, App: appService, Secrets: secretStore, DataDir: absoluteDataDir, Logger: logger})
 	appService.SetPetChannelSender(channelService)
 	if err := channelService.RefreshPlugins(ctx); err != nil {
@@ -465,7 +495,7 @@ func resolveAgentAPIURL(listen, configured string) string {
 	return "http://" + net.JoinHostPort(host, port)
 }
 
-func validateAgentAPIURL(rawURL string, allowInsecure bool) error {
+func validateAgentAPIURL(rawURL string) error {
 	parsed, err := url.Parse(strings.TrimSpace(rawURL))
 	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.User != nil {
 		return fmt.Errorf("agent-api-url must be an http:// or https:// base URL without credentials")
@@ -473,10 +503,10 @@ func validateAgentAPIURL(rawURL string, allowInsecure bool) error {
 	if parsed.Path != "" && parsed.Path != "/" || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return fmt.Errorf("agent-api-url must not contain a path, query, or fragment")
 	}
-	if parsed.Scheme == "https" || allowInsecure || agentAPIHostIsLoopback(parsed.Hostname()) {
+	if parsed.Scheme == "https" || agentAPIHostIsLoopback(parsed.Hostname()) {
 		return nil
 	}
-	return fmt.Errorf("non-loopback agent-api-url requires https://; use --allow-insecure-agent-api only on a trusted development network")
+	return fmt.Errorf("non-loopback agent-api-url requires https://")
 }
 
 func agentAPIHostIsLoopback(host string) bool {
@@ -485,11 +515,6 @@ func agentAPIHostIsLoopback(host string) bool {
 	}
 	address := net.ParseIP(strings.TrimSpace(host))
 	return address != nil && address.IsLoopback()
-}
-
-func mustAgentAPIHost(rawURL string) string {
-	parsed, _ := url.Parse(rawURL)
-	return parsed.Host
 }
 
 // removeLegacyStubConfiguration drops the auto-created stub backend model and

@@ -7,11 +7,16 @@ import (
 	"github.com/ChinaKai/AHA2/internal/domain"
 )
 
+// AgentAPISettings reads the hidden manual override.
+//
+// The allow_insecure column is deliberately not read: plaintext addresses off
+// loopback are no longer a state this program can be in. It is still written as 0
+// so databases created by an older build keep satisfying the NOT NULL default.
 func (s *Store) AgentAPISettings(ctx context.Context) (domain.AgentAPISettings, error) {
 	var item domain.AgentAPISettings
 	var updatedAt string
-	err := s.db.QueryRowContext(ctx, `SELECT url,allow_insecure,updated_at FROM agent_api_settings WHERE id=1`).
-		Scan(&item.URL, &item.AllowInsecure, &updatedAt)
+	err := s.db.QueryRowContext(ctx, `SELECT url,migration_note,updated_at FROM agent_api_settings WHERE id=1`).
+		Scan(&item.URL, &item.MigrationNote, &updatedAt)
 	item.UpdatedAt = parseTime(updatedAt)
 	return item, err
 }
@@ -21,9 +26,10 @@ func (s *Store) UpdateAgentAPISettings(ctx context.Context, item domain.AgentAPI
 		item.UpdatedAt = time.Now().UTC()
 	}
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO agent_api_settings(id,url,allow_insecure,updated_at) VALUES(1,?,?,?)
-		ON CONFLICT(id) DO UPDATE SET url=excluded.url,allow_insecure=excluded.allow_insecure,updated_at=excluded.updated_at`,
-		item.URL, boolInt(item.AllowInsecure), timeString(item.UpdatedAt),
+		INSERT INTO agent_api_settings(id,url,allow_insecure,migration_note,updated_at) VALUES(1,?,0,?,?)
+		ON CONFLICT(id) DO UPDATE SET url=excluded.url,allow_insecure=0,
+			migration_note=excluded.migration_note,updated_at=excluded.updated_at`,
+		item.URL, item.MigrationNote, timeString(item.UpdatedAt),
 	)
 	return item, err
 }

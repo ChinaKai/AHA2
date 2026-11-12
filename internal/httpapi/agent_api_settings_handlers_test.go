@@ -53,13 +53,13 @@ func TestAgentAPISettingsAndWorkspaceReverseProbe(t *testing.T) {
 		t.Fatalf("settings status=%d body=%#v", response.StatusCode, settings)
 	}
 
-	response = requestJSON(t, client, http.MethodPut, server.URL+"/api/v1/settings/agent-api", map[string]any{"url": "http://192.0.2.10:8766", "allow_insecure": false}, csrf)
+	response = requestJSON(t, client, http.MethodPut, server.URL+"/api/v1/settings/agent-api", map[string]any{"url": "http://192.0.2.10:8766"}, csrf)
 	if response.StatusCode != http.StatusBadRequest {
 		t.Fatalf("unsafe setting status=%d", response.StatusCode)
 	}
 	response.Body.Close()
 
-	response = requestJSON(t, client, http.MethodPut, server.URL+"/api/v1/settings/agent-api", map[string]any{"url": server.URL, "allow_insecure": false}, csrf)
+	response = requestJSON(t, client, http.MethodPut, server.URL+"/api/v1/settings/agent-api", map[string]any{"url": server.URL}, csrf)
 	decodeResponse(t, response, &settings)
 	if response.StatusCode != http.StatusOK || settings.AgentAPI.EffectiveURL != server.URL {
 		t.Fatalf("update status=%d body=%#v", response.StatusCode, settings)

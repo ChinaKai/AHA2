@@ -18,12 +18,11 @@ var ErrAlreadyRunning = errors.New("AHA2 tray is already running")
 const SingleInstanceName = `Local\AHA2Tray`
 
 type Config struct {
-	Server                string
-	Listen                string
-	DataDir               string
-	AgentAPIURL           string
-	AllowInsecureAgentAPI bool
-	Version               string
+	Server      string
+	Listen      string
+	DataDir     string
+	AgentAPIURL string
+	Version     string
 }
 
 type Command struct {
@@ -38,8 +37,10 @@ func ParseArgs(args []string, version string) (Config, error) {
 	server := flags.String("server", "", "path to aha2.exe")
 	listen := flags.String("listen", "", "HTTP listen IP and port")
 	dataDir := flags.String("data-dir", "", "AHA2 data directory")
-	agentAPIURL := flags.String("agent-api-url", "", "Agent-reachable AHA2 base URL")
-	allowInsecure := flags.Bool("allow-insecure-agent-api", false, "allow a non-loopback http Agent API URL")
+	agentAPIURL := flags.String("agent-api-url", "", "Agent-reachable AHA2 base URL (https or loopback)")
+	// Removed switch. Scheduled tasks installed by an older build still pass it;
+	// accepting it as a no-op keeps those installations starting.
+	flags.Bool("allow-insecure-agent-api", false, "deprecated no-op: non-loopback http Agent API addresses are not supported")
 	if err := flags.Parse(args); err != nil {
 		return Config{}, err
 	}
@@ -48,38 +49,44 @@ func ParseArgs(args []string, version string) (Config, error) {
 	}
 	config := Config{
 		Server: strings.TrimSpace(*server), Listen: strings.TrimSpace(*listen), DataDir: strings.TrimSpace(*dataDir),
-		AgentAPIURL: strings.TrimSpace(*agentAPIURL), AllowInsecureAgentAPI: *allowInsecure, Version: version,
+		AgentAPIURL: strings.TrimSpace(*agentAPIURL), Version: version,
 	}
 	return normalizeConfig(config)
 }
 
 func normalizeConfig(config Config) (Config, error) {
 	if config.Server == "" || config.Listen == "" || config.DataDir == "" {
-		return Config{}, errors.New("usage: aha-tray --server <aha2.exe> --listen <ip:port> --data-dir <path> [--agent-api-url <url>] [--allow-insecure-agent-api]")
+		return Config{}, errors.New("usage: aha-tray --server <aha2.exe> --listen <ip:port> --data-dir <path> [--agent-api-url <https-or-loopback-url>]")
 	}
 	if _, err := normalizeListen(config.Listen); err != nil {
 		return Config{}, err
 	}
-	var err error
-	if config.AgentAPIURL != "" {
-		parsed, err := url.Parse(config.AgentAPIURL)
-		if err != nil || parsed.Host == "" || parsed.User != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") ||
-			(parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" || parsed.Fragment != "" {
-			return Config{}, errors.New("agent-api-url must be an http or https base URL without credentials, path, query, or fragment")
-		}
-		if parsed.Scheme == "http" && !config.AllowInsecureAgentAPI && !isLoopbackHost(parsed.Hostname()) {
-			return Config{}, errors.New("non-loopback http agent-api-url requires --allow-insecure-agent-api")
-		}
+	// An address outside the boundary is dropped rather than rejected. The tray
+	// starts from a scheduled task pinned at install time; a stale plaintext LAN
+	// value must not keep AHA2 from starting, and the server already derives the
+	// loopback address that automatic selection needs.
+	if config.AgentAPIURL != "" && !agentAPIURLAllowed(config.AgentAPIURL) {
+		config.AgentAPIURL = ""
 	}
-	config.Server, err = filepath.Abs(config.Server)
+	serverPath, err := filepath.Abs(config.Server)
 	if err != nil {
 		return Config{}, fmt.Errorf("resolve server path: %w", err)
 	}
+	config.Server = serverPath
 	config.DataDir, err = filepath.Abs(config.DataDir)
 	if err != nil {
 		return Config{}, fmt.Errorf("resolve data directory: %w", err)
 	}
 	return config, nil
+}
+
+func agentAPIURLAllowed(raw string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Host == "" || parsed.User != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") ||
+		(parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return false
+	}
+	return parsed.Scheme == "https" || isLoopbackHost(parsed.Hostname())
 }
 
 func isLoopbackHost(host string) bool {
@@ -131,9 +138,6 @@ func BuildServerCommand(config Config) (Command, error) {
 	args := []string{"serve", "--listen", config.Listen, "--data-dir", config.DataDir}
 	if config.AgentAPIURL != "" {
 		args = append(args, "--agent-api-url", config.AgentAPIURL)
-	}
-	if config.AllowInsecureAgentAPI {
-		args = append(args, "--allow-insecure-agent-api")
 	}
 	return Command{Path: config.Server, Args: args, Dir: filepath.Dir(config.Server)}, nil
 }

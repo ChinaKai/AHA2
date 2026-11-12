@@ -170,20 +170,19 @@ type Service struct {
 	// substitute the fetch and shrink the probe budget so the timeout path
 	// runs in milliseconds. A nil fetch uses the real transports; a
 	// non-positive budget falls back to mcpToolRefreshTimeout.
-	mcpToolFetch          func(context.Context, domain.MCPServer) ([]domain.MCPTool, error)
-	mcpToolRefreshBudget  time.Duration
-	prompts               *prompt.Engine
-	codex                 *codexaccount.Manager
-	proxyRuntime          ProxyRuntime
-	petChannels           PetChannelSender
-	petSecurity           PetSecurityApplier
-	petHardware           PetHardwareDisconnector
-	agentAPI              *agentapi.Capabilities
-	agentAPIURL           string
-	agentAPIAllowInsecure bool
-	buildVersion          string
-	webVersion            string
-	startedAt             time.Time
+	mcpToolFetch         func(context.Context, domain.MCPServer) ([]domain.MCPTool, error)
+	mcpToolRefreshBudget time.Duration
+	prompts              *prompt.Engine
+	codex                *codexaccount.Manager
+	proxyRuntime         ProxyRuntime
+	petChannels          PetChannelSender
+	petSecurity          PetSecurityApplier
+	petHardware          PetHardwareDisconnector
+	agentAPI             *agentapi.Capabilities
+	agentAPIURL          string
+	buildVersion         string
+	webVersion           string
+	startedAt            time.Time
 
 	mu                  sync.Mutex
 	cancels             map[string]context.CancelFunc
@@ -243,10 +242,9 @@ func (s *Service) SetCodexAccountManager(manager *codexaccount.Manager) {
 	s.codex = manager
 }
 
-func (s *Service) SetAgentAPI(capabilities *agentapi.Capabilities, baseURL string, allowInsecure ...bool) {
+func (s *Service) SetAgentAPI(capabilities *agentapi.Capabilities, baseURL string) {
 	s.agentAPI = capabilities
 	s.agentAPIURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
-	s.agentAPIAllowInsecure = len(allowInsecure) > 0 && allowInsecure[0]
 }
 
 // SetBuildInfo lets the pet's read-only inspection snapshot report the same

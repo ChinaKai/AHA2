@@ -116,15 +116,15 @@ func (s *Store) CreateWorkspace(ctx context.Context, item domain.Workspace) erro
 			ssh_credential_ref,ssh_password_configured,distro,platform,health,
 			capabilities_json,repository_json,last_detected_at,created_at,updated_at
 			,owner_device_id,read_only,source_workspace_id,agent_api_mode,agent_api_url,
-			agent_api_resolved_url,agent_api_status,agent_api_error,agent_api_last_checked_at
-		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			agent_api_resolved_url,agent_api_status,agent_api_error,agent_api_migration_note,agent_api_last_checked_at
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		item.ID, item.ProjectID, item.Name, item.Locality, item.Transport, item.RootPath,
 		item.SSHHost, item.SSHUser, item.SSHPort, item.SSHAuth, item.SSHCredentialRef,
 		boolInt(item.SSHPasswordConfigured), item.Distro, item.Platform, item.Health,
 		encodeJSON(item.Capabilities), encodeJSON(item.Repository), timeString(item.LastDetectedAt),
 		timeString(item.CreatedAt), timeString(item.UpdatedAt), item.OwnerDeviceID, boolInt(item.ReadOnly), item.SourceWorkspaceID,
 		normalizeWorkspaceAgentAPIMode(item.AgentAPIMode), item.AgentAPIURL, item.AgentAPIResolvedURL,
-		workspaceAgentAPIStatus(item.AgentAPIStatus), item.AgentAPIError, timeString(item.AgentAPILastCheckedAt),
+		workspaceAgentAPIStatus(item.AgentAPIStatus), item.AgentAPIError, item.AgentAPIMigrationNote, timeString(item.AgentAPILastCheckedAt),
 	)
 	return err
 }
@@ -137,7 +137,8 @@ func scanWorkspace(scanner interface{ Scan(...any) error }) (domain.Workspace, e
 		&item.SSHHost, &item.SSHUser, &item.SSHPort, &item.SSHAuth, &item.SSHCredentialRef,
 		&item.SSHPasswordConfigured, &item.Distro, &item.Platform, &item.Health,
 		&capabilities, &repository, &detectedAt, &createdAt, &updatedAt, &item.OwnerDeviceID, &item.ReadOnly, &item.SourceWorkspaceID,
-		&item.AgentAPIMode, &item.AgentAPIURL, &item.AgentAPIResolvedURL, &item.AgentAPIStatus, &item.AgentAPIError, &agentAPICheckedAt,
+		&item.AgentAPIMode, &item.AgentAPIURL, &item.AgentAPIResolvedURL, &item.AgentAPIStatus, &item.AgentAPIError,
+		&item.AgentAPIMigrationNote, &agentAPICheckedAt,
 	)
 	item.Capabilities = decodeJSON(capabilities, map[string]any{})
 	item.Repository = decodeJSON(repository, map[string]any{})
@@ -147,7 +148,7 @@ func scanWorkspace(scanner interface{ Scan(...any) error }) (domain.Workspace, e
 	return item, err
 }
 
-const workspaceColumns = `id,project_id,name,locality,transport,root_path,ssh_host,ssh_user,ssh_port,ssh_auth,ssh_credential_ref,ssh_password_configured,distro,platform,health,capabilities_json,repository_json,last_detected_at,created_at,updated_at,owner_device_id,read_only,source_workspace_id,agent_api_mode,agent_api_url,agent_api_resolved_url,agent_api_status,agent_api_error,agent_api_last_checked_at`
+const workspaceColumns = `id,project_id,name,locality,transport,root_path,ssh_host,ssh_user,ssh_port,ssh_auth,ssh_credential_ref,ssh_password_configured,distro,platform,health,capabilities_json,repository_json,last_detected_at,created_at,updated_at,owner_device_id,read_only,source_workspace_id,agent_api_mode,agent_api_url,agent_api_resolved_url,agent_api_status,agent_api_error,agent_api_migration_note,agent_api_last_checked_at`
 
 func (s *Store) Workspace(ctx context.Context, id string) (domain.Workspace, error) {
 	return scanWorkspace(s.db.QueryRowContext(ctx, `SELECT `+workspaceColumns+` FROM workspaces WHERE id=?`, id))
@@ -180,11 +181,12 @@ func (s *Store) ListWorkspaces(ctx context.Context, projectID string) ([]domain.
 func (s *Store) UpdateWorkspaceDetection(ctx context.Context, item domain.Workspace) error {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE workspaces SET platform=?,health=?,capabilities_json=?,repository_json=?,last_detected_at=?,updated_at=?,
-			agent_api_resolved_url=?,agent_api_status=?,agent_api_error=?,agent_api_last_checked_at=?
+			agent_api_resolved_url=?,agent_api_status=?,agent_api_error=?,agent_api_migration_note=?,agent_api_last_checked_at=?
 		WHERE id=?`,
 		item.Platform, item.Health, encodeJSON(item.Capabilities), encodeJSON(item.Repository),
 		timeString(item.LastDetectedAt), timeString(item.UpdatedAt), item.AgentAPIResolvedURL,
-		workspaceAgentAPIStatus(item.AgentAPIStatus), item.AgentAPIError, timeString(item.AgentAPILastCheckedAt), item.ID,
+		workspaceAgentAPIStatus(item.AgentAPIStatus), item.AgentAPIError, item.AgentAPIMigrationNote,
+		timeString(item.AgentAPILastCheckedAt), item.ID,
 	)
 	return err
 }
@@ -418,12 +420,13 @@ func (s *Store) UpdateWorkspaceConfig(ctx context.Context, item domain.Workspace
 		UPDATE workspaces SET
 			name=?,locality=?,transport=?,root_path=?,ssh_host=?,ssh_user=?,ssh_port=?,ssh_auth=?,
 			ssh_credential_ref=?,ssh_password_configured=?,distro=?,agent_api_mode=?,agent_api_url=?,
+			agent_api_migration_note=?,
 			platform='',health='unknown',capabilities_json='{}',repository_json='{}',last_detected_at='',
 			agent_api_resolved_url='',agent_api_status='unknown',agent_api_error='',agent_api_last_checked_at='',updated_at=?
 		WHERE id=?`,
 		item.Name, item.Locality, item.Transport, item.RootPath, item.SSHHost, item.SSHUser, item.SSHPort,
 		item.SSHAuth, item.SSHCredentialRef, boolInt(item.SSHPasswordConfigured), item.Distro,
-		normalizeWorkspaceAgentAPIMode(item.AgentAPIMode), item.AgentAPIURL,
+		normalizeWorkspaceAgentAPIMode(item.AgentAPIMode), item.AgentAPIURL, item.AgentAPIMigrationNote,
 		timeString(item.UpdatedAt), item.ID,
 	)
 	return err
@@ -431,9 +434,11 @@ func (s *Store) UpdateWorkspaceConfig(ctx context.Context, item domain.Workspace
 
 func normalizeWorkspaceAgentAPIMode(value string) string {
 	switch strings.TrimSpace(value) {
-	case "global", "manual":
-		return strings.TrimSpace(value)
+	case "manual":
+		return "manual"
 	default:
+		// "global" was a third way to say "inherit"; automatic selection already
+		// covers it, and leaving it in new rows would keep a dead value alive.
 		return "auto"
 	}
 }

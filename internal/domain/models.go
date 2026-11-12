@@ -59,14 +59,19 @@ type SecuritySettings struct {
 	UpdatedAt       time.Time `json:"updated_at,omitempty"`
 }
 
+// AgentAPISettings holds the one Agent API value a human may still set by hand.
+//
+// URL is a troubleshooting override, not the normal configuration: AHA selects
+// the connection path itself (native loopback, SSH reverse tunnel, WSL localhost)
+// and only falls back to this value when every automatic path fails. The address
+// is held to the same boundary as every automatic candidate — https:// or
+// loopback http:// — so the override cannot reintroduce plaintext LAN traffic.
 type AgentAPISettings struct {
-	URL                    string    `json:"url"`
-	AllowInsecure          bool      `json:"allow_insecure"`
-	StartupURL             string    `json:"startup_url,omitempty"`
-	StartupAllowInsecure   bool      `json:"startup_allow_insecure,omitempty"`
-	EffectiveURL           string    `json:"effective_url"`
-	EffectiveAllowInsecure bool      `json:"effective_allow_insecure"`
-	UpdatedAt              time.Time `json:"updated_at,omitempty"`
+	URL           string    `json:"url"`
+	StartupURL    string    `json:"startup_url,omitempty"`
+	EffectiveURL  string    `json:"effective_url"`
+	MigrationNote string    `json:"migration_note,omitempty"`
+	UpdatedAt     time.Time `json:"updated_at,omitempty"`
 }
 
 const (
@@ -223,6 +228,7 @@ type Workspace struct {
 	AgentAPIResolvedURL   string         `json:"agent_api_resolved_url,omitempty"`
 	AgentAPIStatus        string         `json:"agent_api_status"`
 	AgentAPIError         string         `json:"agent_api_error,omitempty"`
+	AgentAPIMigrationNote string         `json:"agent_api_migration_note,omitempty"`
 	AgentAPILastCheckedAt time.Time      `json:"agent_api_last_checked_at,omitempty"`
 }
 

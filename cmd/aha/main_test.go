@@ -239,18 +239,36 @@ func TestResolveAgentAPIURL(t *testing.T) {
 }
 
 func TestValidateAgentAPIURLRequiresHTTPSOffLoopback(t *testing.T) {
-	for _, value := range []string{"http://127.0.0.1:8766", "http://localhost:8766", "https://192.0.2.10"} {
-		if err := validateAgentAPIURL(value, false); err != nil {
+	for _, value := range []string{"http://127.0.0.1:8766", "http://localhost:8766", "http://[::1]:8766", "https://192.0.2.10"} {
+		if err := validateAgentAPIURL(value); err != nil {
 			t.Errorf("%s: %v", value, err)
 		}
 	}
-	if err := validateAgentAPIURL("http://192.0.2.10:8766", false); err == nil || !strings.Contains(err.Error(), "requires https") {
+	if err := validateAgentAPIURL("http://192.0.2.10:8766"); err == nil || !strings.Contains(err.Error(), "requires https") {
 		t.Fatalf("insecure remote URL error = %v", err)
 	}
-	if err := validateAgentAPIURL("http://192.0.2.10:8766", true); err != nil {
+	if err := validateAgentAPIURL("https://user:secret@example.test"); err == nil {
+		t.Fatal("URL credentials were accepted")
+	}
+}
+
+// TestDeprecatedAgentAPIInsecureSwitchIsNoOp pins that the removed switch is
+// still accepted. Existing scheduled tasks pass it; failing to parse would stop
+// AHA2 from starting and take every task down with it.
+func TestDeprecatedAgentAPIInsecureSwitchIsNoOp(t *testing.T) {
+	t.Setenv("AHA2_ALLOW_INSECURE_AGENT_API", "")
+	t.Setenv("AHA2_LISTEN", "")
+	t.Setenv("AHA2_DATA_DIR", "")
+	options, err := parseServeOptions("aha2 serve", []string{
+		"--allow-insecure-agent-api", "--agent-api-url", "http://127.0.0.1:8766",
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := validateAgentAPIURL("https://user:secret@example.test", false); err == nil {
-		t.Fatal("URL credentials were accepted")
+	if len(options.deprecatedAgentAPIInsecure) != 1 || options.deprecatedAgentAPIInsecure[0] != "--allow-insecure-agent-api" {
+		t.Fatalf("deprecated settings=%v", options.deprecatedAgentAPIInsecure)
+	}
+	if options.agentAPIURL != "http://127.0.0.1:8766" {
+		t.Fatalf("agent api url=%q", options.agentAPIURL)
 	}
 }

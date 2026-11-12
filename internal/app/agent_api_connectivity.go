@@ -17,22 +17,41 @@ func (s *Service) AgentAPISettings(ctx context.Context) (domain.AgentAPISettings
 	if err != nil {
 		return domain.AgentAPISettings{}, err
 	}
+	// StartupURL is the address derived from the listen address: HTTPS when AHA
+	// is configured behind a reverse proxy, loopback otherwise. It is the address
+	// the automatic paths target; the stored URL is only the troubleshooting
+	// override and must never displace it silently.
 	settings.StartupURL = s.agentAPIURL
-	settings.StartupAllowInsecure = s.agentAPIAllowInsecure
+	// Defensive: a value could arrive from sync or a database written by an older
+	// build between migrations. An address outside the boundary is dropped here
+	// too, so resolution can never inject one just because it was stored.
+	if settings.URL != "" {
+		if value, err := normalizeAgentAPIBaseURL(settings.URL); err == nil {
+			settings.URL = value
+		} else {
+			settings.URL = ""
+		}
+	}
 	settings.EffectiveURL = settings.URL
 	if settings.EffectiveURL == "" {
 		settings.EffectiveURL = settings.StartupURL
 	}
-	settings.EffectiveAllowInsecure = settings.AllowInsecure || settings.URL == "" && settings.StartupAllowInsecure
 	return settings, nil
 }
 
+// UpdateAgentAPISettings writes the hidden manual override.
+//
+// Only https:// and loopback http:// survive normalization, so the override can
+// not become a second way to reach AHA over plaintext LAN. Saving a value also
+// retires the migration note: the operator has made a deliberate choice, and a
+// stale notice about an address they replaced would be noise.
 func (s *Service) UpdateAgentAPISettings(ctx context.Context, input domain.AgentAPISettings) (domain.AgentAPISettings, error) {
-	value, err := normalizeAgentAPIBaseURL(input.URL, input.AllowInsecure)
+	value, err := normalizeAgentAPIBaseURL(input.URL)
 	if err != nil {
 		return domain.AgentAPISettings{}, err
 	}
 	input.URL = value
+	input.MigrationNote = ""
 	input.UpdatedAt = time.Now().UTC()
 	if _, err := s.store.UpdateAgentAPISettings(ctx, input); err != nil {
 		return domain.AgentAPISettings{}, err
@@ -48,11 +67,7 @@ func (s *Service) ValidateWorkspaceAgentAPI(ctx context.Context, mode, rawURL st
 	if mode != "manual" {
 		return mode, "", nil
 	}
-	settings, err := s.AgentAPISettings(ctx)
-	if err != nil {
-		return "", "", err
-	}
-	value, err := normalizeAgentAPIBaseURL(rawURL, settings.EffectiveAllowInsecure)
+	value, err := normalizeAgentAPIBaseURL(rawURL)
 	if err != nil {
 		return "", "", err
 	}
@@ -62,20 +77,22 @@ func (s *Service) ValidateWorkspaceAgentAPI(ctx context.Context, mode, rawURL st
 	return mode, value, nil
 }
 
+// AgentAPIURLForWorkspace resolves the address a Turn injects into the workspace.
+//
+// A successful automatic detection wins, then the workspace's legacy manual
+// value, then the global override. Detection is what records the automatic
+// choice; when it has not run the fallbacks keep the Turn working rather than
+// guessing at a path that was never verified.
 func (s *Service) AgentAPIURLForWorkspace(ctx context.Context, item domain.Workspace) (string, error) {
 	settings, err := s.AgentAPISettings(ctx)
 	if err != nil {
 		return "", err
 	}
-	switch normalizeAgentAPIMode(item.AgentAPIMode) {
-	case "manual":
-		if item.AgentAPIURL != "" {
-			return normalizeAgentAPIBaseURL(item.AgentAPIURL, settings.EffectiveAllowInsecure)
-		}
-	case "auto":
-		if item.AgentAPIStatus == "ready" && item.AgentAPIResolvedURL != "" {
-			return item.AgentAPIResolvedURL, nil
-		}
+	if item.AgentAPIStatus == "ready" && item.AgentAPIResolvedURL != "" {
+		return normalizeAgentAPIBaseURL(item.AgentAPIResolvedURL)
+	}
+	if normalizeAgentAPIMode(item.AgentAPIMode) == "manual" && item.AgentAPIURL != "" {
+		return normalizeAgentAPIBaseURL(item.AgentAPIURL)
 	}
 	return settings.EffectiveURL, nil
 }
@@ -105,6 +122,8 @@ func (s *Service) DetectWorkspaceAgentAPI(ctx context.Context, item domain.Works
 			item.AgentAPIResolvedURL = candidate
 			item.AgentAPIStatus = "ready"
 			item.AgentAPIError = ""
+			// A working automatic path supersedes the migration warning.
+			item.AgentAPIMigrationNote = ""
 			// Record how it was reached, not just that it was. For a remote workspace
 			// the stored address is AHA's own loopback — the value that *triggers* the
 			// tunnel — so presenting it as an address the workspace dials would claim
@@ -151,28 +170,56 @@ func markAgentAPIProbeFailure(item domain.Workspace, message string) domain.Work
 	return item
 }
 
+// agentAPIProbeCandidates lists the addresses detection will try, in order.
+//
+// The order is the connection policy: the transport's own path first (native
+// loopback, an SSH reverse tunnel to AHA's loopback, WSL localhost forwarding),
+// then the hidden manual override as a troubleshooting fallback. Every candidate
+// goes through normalizeAgentAPIBaseURL, so a plaintext address off loopback can
+// never be selected automatically — that is the whole point of the convergence,
+// and filtering here means no future candidate source can bypass it.
 func (s *Service) agentAPIProbeCandidates(ctx context.Context, item domain.Workspace, settings domain.AgentAPISettings) []string {
-	mode := normalizeAgentAPIMode(item.AgentAPIMode)
-	if mode == "manual" {
-		return uniqueAgentAPIURLs(item.AgentAPIURL)
-	}
-	result := uniqueAgentAPIURLs(settings.EffectiveURL)
-	parsed, err := url.Parse(settings.EffectiveURL)
-	if err != nil || parsed.Hostname() == "" {
-		return result
-	}
-	if parsed.Scheme == "http" && (item.Transport == "native" || item.Transport == "wsl") {
-		result = appendUniqueAgentAPIURL(result, agentAPIURLWithHost(parsed, "127.0.0.1"))
-	}
-	if parsed.Scheme != "http" || !settings.EffectiveAllowInsecure || item.Transport == "native" {
-		return result
-	}
-	for _, host := range append(workspacepkg.AgentAPIHostCandidates(ctx, item), localAgentAPIHosts()...) {
-		result = appendUniqueAgentAPIURL(result, agentAPIURLWithHost(parsed, host))
-		if len(result) >= 8 {
-			break
+	result := []string{}
+	appendCandidate := func(raw string) {
+		value, err := normalizeAgentAPIBaseURL(raw)
+		if err == nil && value != "" {
+			result = appendUniqueAgentAPIURL(result, value)
 		}
 	}
+
+	base := strings.TrimSpace(s.agentAPIURL)
+	parsed, parseErr := url.Parse(base)
+	loopbackBase := parseErr == nil && parsed.Hostname() != "" && agentAPIHostIsLoopback(parsed.Hostname())
+	switch item.Transport {
+	case "native":
+		appendCandidate(base)
+	case "wsl":
+		// AHA runs on the Windows host. WSL2 forwards loopback to the host, so
+		// 127.0.0.1 and localhost are the paths that work without exposing AHA to
+		// the network. The host gateway is only usable when the base is HTTPS:
+		// plaintext on a non-loopback address is not a permitted state.
+		if loopbackBase && parsed.Scheme == "http" {
+			appendCandidate(agentAPIURLWithHost(parsed, "127.0.0.1"))
+			appendCandidate(agentAPIURLWithHost(parsed, "localhost"))
+		} else {
+			appendCandidate(base)
+		}
+		if parseErr == nil && parsed.Scheme == "https" {
+			for _, host := range workspacepkg.AgentAPIHostCandidates(ctx, item) {
+				appendCandidate(agentAPIURLWithHost(parsed, host))
+			}
+		}
+	case "ssh":
+		appendCandidate(base)
+	default:
+		appendCandidate(base)
+	}
+
+	// Hidden manual override, tried only after the automatic paths.
+	if normalizeAgentAPIMode(item.AgentAPIMode) == "manual" {
+		appendCandidate(item.AgentAPIURL)
+	}
+	appendCandidate(settings.URL)
 	return result
 }
 
@@ -193,7 +240,14 @@ func normalizeAgentAPIMode(value string) string {
 	}
 }
 
-func normalizeAgentAPIBaseURL(raw string, allowInsecure bool) (string, error) {
+// normalizeAgentAPIBaseURL enforces the Agent API address boundary: https://
+// anywhere, plaintext http:// only on loopback.
+//
+// There is deliberately no "allow insecure" escape hatch. A plaintext token on a
+// shared network is interceptable even when the network is believed to be
+// trusted, and the reverse tunnel already removes the need for a LAN address on
+// remote workspaces.
+func normalizeAgentAPIBaseURL(raw string) (string, error) {
 	value := strings.TrimRight(strings.TrimSpace(raw), "/")
 	if value == "" {
 		return "", nil
@@ -205,8 +259,8 @@ func normalizeAgentAPIBaseURL(raw string, allowInsecure bool) (string, error) {
 	if parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return "", fmt.Errorf("Agent API URL 不能包含路径、查询或片段")
 	}
-	if parsed.Scheme == "http" && !agentAPIHostIsLoopback(parsed.Hostname()) && !allowInsecure {
-		return "", fmt.Errorf("非 loopback HTTP Agent API 仅允许用于明确受信的开发网络")
+	if parsed.Scheme == "http" && !agentAPIHostIsLoopback(parsed.Hostname()) {
+		return "", fmt.Errorf("非 loopback 的明文 HTTP Agent API 地址已禁用；请使用 https:// 或 loopback 地址")
 	}
 	return value, nil
 }
@@ -219,33 +273,6 @@ func agentAPIHostIsLoopback(host string) bool {
 	return address != nil && address.IsLoopback()
 }
 
-func localAgentAPIHosts() []string {
-	interfaces, err := net.Interfaces()
-	if err != nil {
-		return nil
-	}
-	result := []string{}
-	seen := map[string]bool{}
-	for _, networkInterface := range interfaces {
-		if networkInterface.Flags&net.FlagUp == 0 || networkInterface.Flags&net.FlagLoopback != 0 {
-			continue
-		}
-		addresses, _ := networkInterface.Addrs()
-		for _, raw := range addresses {
-			address, _, err := net.ParseCIDR(raw.String())
-			if err != nil || address == nil || address.To4() == nil || address.IsLoopback() || address.IsLinkLocalUnicast() {
-				continue
-			}
-			host := address.String()
-			if !seen[host] {
-				seen[host] = true
-				result = append(result, host)
-			}
-		}
-	}
-	return result
-}
-
 func agentAPIURLWithHost(base *url.URL, host string) string {
 	port := base.Port()
 	hostPort := host
@@ -255,14 +282,6 @@ func agentAPIURLWithHost(base *url.URL, host string) string {
 		hostPort = "[" + host + "]"
 	}
 	return base.Scheme + "://" + hostPort
-}
-
-func uniqueAgentAPIURLs(values ...string) []string {
-	result := []string{}
-	for _, value := range values {
-		result = appendUniqueAgentAPIURL(result, value)
-	}
-	return result
 }
 
 func appendUniqueAgentAPIURL(values []string, value string) []string {

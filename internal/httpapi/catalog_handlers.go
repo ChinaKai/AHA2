@@ -341,10 +341,16 @@ func (s *Server) updateWorkspace(writer http.ResponseWriter, request *http.Reque
 	existing.SSHUser = strings.TrimSpace(payload.SSHUser)
 	existing.SSHPort = payload.SSHPort
 	existing.Distro = strings.TrimSpace(payload.Distro)
-	existing.AgentAPIMode, existing.AgentAPIURL, err = s.app.ValidateWorkspaceAgentAPI(request.Context(), payload.AgentAPIMode, payload.AgentAPIURL)
-	if err != nil {
-		writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "workspace_agent_api_invalid", "message": err.Error()})
-		return
+	// The normal Workspace dialog no longer carries these fields, so an update
+	// that omits them must not erase a hidden override a migration or an older
+	// client left in place. A caller that sends a value still goes through the
+	// same boundary check as creation.
+	if strings.TrimSpace(payload.AgentAPIMode) != "" || strings.TrimSpace(payload.AgentAPIURL) != "" {
+		existing.AgentAPIMode, existing.AgentAPIURL, err = s.app.ValidateWorkspaceAgentAPI(request.Context(), payload.AgentAPIMode, payload.AgentAPIURL)
+		if err != nil {
+			writeJSON(writer, http.StatusBadRequest, map[string]any{"ok": false, "error": "workspace_agent_api_invalid", "message": err.Error()})
+			return
+		}
 	}
 	oldCredentialRef := existing.SSHCredentialRef
 	oldPassword, hadOldPassword := "", false

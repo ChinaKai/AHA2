@@ -15,8 +15,7 @@ func TestParseArgsAndBuildServerCommand(t *testing.T) {
 		"--server", server,
 		"--listen", "0.0.0.0:8766",
 		"--data-dir", dataDir,
-		"--agent-api-url", "http://192.0.2.10:8766",
-		"--allow-insecure-agent-api",
+		"--agent-api-url", "https://aha.example.test",
 	}, "v1.2.3")
 	if err != nil {
 		t.Fatal(err)
@@ -27,7 +26,7 @@ func TestParseArgsAndBuildServerCommand(t *testing.T) {
 	}
 	wantArgs := []string{
 		"serve", "--listen", "0.0.0.0:8766", "--data-dir", config.DataDir,
-		"--agent-api-url", "http://192.0.2.10:8766", "--allow-insecure-agent-api",
+		"--agent-api-url", "https://aha.example.test",
 	}
 	if command.Path != config.Server || command.Dir != filepath.Dir(config.Server) || !reflect.DeepEqual(command.Args, wantArgs) {
 		t.Fatalf("command=%#v config=%#v", command, config)
@@ -37,13 +36,42 @@ func TestParseArgsAndBuildServerCommand(t *testing.T) {
 	}
 }
 
+// TestParseArgsDropsLegacyPlaintextAddress pins that a scheduled task written by
+// an older installer still starts. It passes the removed switch and a LAN
+// plaintext address; both must be tolerated, and the address must not survive
+// into the server command.
+func TestParseArgsDropsLegacyPlaintextAddress(t *testing.T) {
+	server := filepath.Join(t.TempDir(), "aha2.exe")
+	dataDir := filepath.Join(t.TempDir(), "data")
+	config, err := ParseArgs([]string{
+		"--server", server,
+		"--listen", "0.0.0.0:8766",
+		"--data-dir", dataDir,
+		"--agent-api-url", "http://192.0.2.10:8766",
+		"--allow-insecure-agent-api",
+	}, "dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.AgentAPIURL != "" {
+		t.Fatalf("plaintext LAN address survived: %q", config.AgentAPIURL)
+	}
+	command, err := BuildServerCommand(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, arg := range command.Args {
+		if arg == "--agent-api-url" || arg == "--allow-insecure-agent-api" {
+			t.Fatalf("command carries removed setting: %v", command.Args)
+		}
+	}
+}
+
 func TestParseArgsRejectsIncompleteOrInvalidContract(t *testing.T) {
 	tests := [][]string{
 		{"--server", "aha2.exe", "--listen", "127.0.0.1:8766"},
 		{"--server", "aha2.exe", "--listen", "localhost:8766", "--data-dir", "data"},
 		{"--server", "aha2.exe", "--listen", "127.0.0.1:70000", "--data-dir", "data"},
-		{"--server", "aha2.exe", "--listen", "127.0.0.1:8766", "--data-dir", "data", "--agent-api-url", "https://user@example.test"},
-		{"--server", "aha2.exe", "--listen", "127.0.0.1:8766", "--data-dir", "data", "--agent-api-url", "http://192.0.2.10:8766"},
 	}
 	for _, args := range tests {
 		if _, err := ParseArgs(args, "dev"); err == nil {

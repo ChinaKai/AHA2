@@ -181,15 +181,15 @@ func (s *Store) CreateChannelInstanceWithHost(ctx context.Context, project domai
 			ssh_credential_ref,ssh_password_configured,distro,platform,health,
 			capabilities_json,repository_json,last_detected_at,created_at,updated_at,
 			owner_device_id,read_only,source_workspace_id,agent_api_mode,agent_api_url,
-			agent_api_resolved_url,agent_api_status,agent_api_error,agent_api_last_checked_at
-		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			agent_api_resolved_url,agent_api_status,agent_api_error,agent_api_migration_note,agent_api_last_checked_at
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		workspace.ID, workspace.ProjectID, workspace.Name, workspace.Locality, workspace.Transport, workspace.RootPath,
 		workspace.SSHHost, workspace.SSHUser, workspace.SSHPort, workspace.SSHAuth, workspace.SSHCredentialRef,
 		boolInt(workspace.SSHPasswordConfigured), workspace.Distro, workspace.Platform, workspace.Health,
 		encodeJSON(workspace.Capabilities), encodeJSON(workspace.Repository), timeString(workspace.LastDetectedAt),
 		timeString(workspace.CreatedAt), timeString(workspace.UpdatedAt), workspace.OwnerDeviceID, boolInt(workspace.ReadOnly), workspace.SourceWorkspaceID,
 		normalizeWorkspaceAgentAPIMode(workspace.AgentAPIMode), workspace.AgentAPIURL, workspace.AgentAPIResolvedURL,
-		workspaceAgentAPIStatus(workspace.AgentAPIStatus), workspace.AgentAPIError, timeString(workspace.AgentAPILastCheckedAt)); err != nil {
+		workspaceAgentAPIStatus(workspace.AgentAPIStatus), workspace.AgentAPIError, workspace.AgentAPIMigrationNote, timeString(workspace.AgentAPILastCheckedAt)); err != nil {
 		return err
 	}
 	if _, err = tx.ExecContext(ctx, `

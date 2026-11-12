@@ -18,12 +18,12 @@ func TestAgentAPISettingsAndWorkspaceDetectionPersist(t *testing.T) {
 	}
 	defer database.Close()
 	settings, err := database.AgentAPISettings(ctx)
-	if err != nil || settings.URL != "" || settings.AllowInsecure {
+	if err != nil || settings.URL != "" || settings.MigrationNote != "" {
 		t.Fatalf("default settings=%#v err=%v", settings, err)
 	}
 	now := time.Now().UTC()
-	settings, err = database.UpdateAgentAPISettings(ctx, domain.AgentAPISettings{URL: "https://aha.example.test", AllowInsecure: true, UpdatedAt: now})
-	if err != nil || settings.URL != "https://aha.example.test" || !settings.AllowInsecure {
+	settings, err = database.UpdateAgentAPISettings(ctx, domain.AgentAPISettings{URL: "https://aha.example.test", UpdatedAt: now})
+	if err != nil || settings.URL != "https://aha.example.test" {
 		t.Fatalf("updated settings=%#v err=%v", settings, err)
 	}
 	project := domain.Project{ID: "project-agent-api", Name: "Project", CreatedAt: now, UpdatedAt: now}
@@ -33,13 +33,13 @@ func TestAgentAPISettingsAndWorkspaceDetectionPersist(t *testing.T) {
 	workspace := domain.Workspace{
 		ID: "workspace-agent-api", ProjectID: project.ID, Name: "WSL", Locality: "local", Transport: "wsl", RootPath: "/repo",
 		AgentAPIMode: "manual", AgentAPIURL: "https://manual.example.test", AgentAPIResolvedURL: "https://manual.example.test",
-		AgentAPIStatus: "ready", AgentAPILastCheckedAt: now, Health: "ready", Capabilities: map[string]any{"agent_api": map[string]any{"status": "ready"}}, CreatedAt: now, UpdatedAt: now,
+		AgentAPIStatus: "ready", AgentAPIMigrationNote: "旧版地址已迁移", AgentAPILastCheckedAt: now, Health: "ready", Capabilities: map[string]any{"agent_api": map[string]any{"status": "ready"}}, CreatedAt: now, UpdatedAt: now,
 	}
 	if err := database.CreateWorkspace(ctx, workspace); err != nil {
 		t.Fatal(err)
 	}
 	stored, err := database.Workspace(ctx, workspace.ID)
-	if err != nil || stored.AgentAPIMode != "manual" || stored.AgentAPIURL != workspace.AgentAPIURL || stored.AgentAPIResolvedURL != workspace.AgentAPIResolvedURL || stored.AgentAPIStatus != "ready" || stored.AgentAPILastCheckedAt.IsZero() {
+	if err != nil || stored.AgentAPIMode != "manual" || stored.AgentAPIURL != workspace.AgentAPIURL || stored.AgentAPIResolvedURL != workspace.AgentAPIResolvedURL || stored.AgentAPIStatus != "ready" || stored.AgentAPIMigrationNote != workspace.AgentAPIMigrationNote || stored.AgentAPILastCheckedAt.IsZero() {
 		t.Fatalf("stored workspace=%#v err=%v", stored, err)
 	}
 	if err := database.ResetWorkspaceAgentAPIDetection(ctx, now.Add(time.Second)); err != nil {

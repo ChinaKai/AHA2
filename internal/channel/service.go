@@ -475,7 +475,7 @@ func (s *Service) CreateInstance(ctx context.Context, ownerID, pluginID, name, i
 	workspace := domain.Workspace{
 		ID: workspaceID, ProjectID: projectID, Name: "Channel Runtime", Locality: "local", Transport: "native",
 		RootPath: root, Platform: runtime.GOOS, Health: "ready", Capabilities: map[string]any{"channel_managed": true},
-		CreatedAt: now, UpdatedAt: now, AgentAPIMode: "global", AgentAPIStatus: "unknown",
+		CreatedAt: now, UpdatedAt: now, AgentAPIMode: "auto", AgentAPIStatus: "unknown",
 	}
 	item := domain.ChannelInstance{
 		ID: instanceID, PluginID: plugin.ID, ProviderKey: plugin.ProviderKey, OwnerID: ownerID,

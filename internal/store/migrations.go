@@ -3577,5 +3577,27 @@ func (s *Store) migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(130, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
 		return fmt.Errorf("record schema v130: %w", err)
 	}
+	var hasV131 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=131)`).Scan(&hasV131)
+	if !hasV131 {
+		// Agent API addresses are https:// or loopback http:// only. Two columns
+		// carry the one-time migration outcome so an operator can see why a value
+		// they had configured stopped being used, instead of discovering it when a
+		// Turn's API calls fail.
+		for _, statement := range []string{
+			`ALTER TABLE agent_api_settings ADD COLUMN migration_note TEXT NOT NULL DEFAULT ''`,
+			`ALTER TABLE workspaces ADD COLUMN agent_api_migration_note TEXT NOT NULL DEFAULT ''`,
+		} {
+			if _, err := s.db.ExecContext(ctx, statement); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+				return fmt.Errorf("apply schema v131: %w", err)
+			}
+		}
+		if err := s.migrateAgentAPISecurityConvergence(ctx); err != nil {
+			return fmt.Errorf("apply schema v131 convergence: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(131, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v131: %w", err)
+	}
 	return nil
 }
