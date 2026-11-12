@@ -43,6 +43,14 @@ func probeAgentAPIThroughForwardWithRunner(ctx context.Context, item domain.Work
 	if item.Transport != "ssh" {
 		return probeAgentAPIWithRunner(ctx, item, baseURL, runner)
 	}
+	// Mirror the Turn path's gate: a forward is only meaningful when the address
+	// is AHA's own loopback, which the workspace cannot dial itself. For any other
+	// address the Turn sends no forward, so a probe that opened one could report
+	// "ready" for a path the Turn will never use — and then the Turn fails while
+	// detection said it was healthy.
+	if !agentAPIHostIsLoopback(parsed.Hostname()) {
+		return probeAgentAPIWithRunner(ctx, item, baseURL, runner)
+	}
 	// The address comes from the injected variable, exactly as the Agent will read
 	// it, so a pass here means the Turn path works rather than that some address
 	// happens to answer.
@@ -181,6 +189,17 @@ func verifyAHA2HealthPayload(body string) error {
 		return fmt.Errorf("healthz 响应不是 AHA2")
 	}
 	return nil
+}
+
+// agentAPIHostIsLoopback matches the Turn-side predicate in internal/app. The two
+// must agree: detection chooses the path a Turn will use, so a difference turns a
+// probe result into a promise the Turn cannot keep.
+func agentAPIHostIsLoopback(host string) bool {
+	if strings.EqualFold(strings.TrimSpace(host), "localhost") {
+		return true
+	}
+	address := net.ParseIP(strings.TrimSpace(host))
+	return address != nil && address.IsLoopback()
 }
 
 func AgentAPIHostCandidates(ctx context.Context, item domain.Workspace) []string {

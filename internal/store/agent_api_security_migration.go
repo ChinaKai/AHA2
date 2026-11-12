@@ -72,18 +72,18 @@ func (s *Store) migrateAgentAPISecurityConvergence(ctx context.Context) error {
 	}
 
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id,agent_api_url FROM workspaces
-		WHERE agent_api_url<>'' AND read_only=0`)
+		SELECT id,agent_api_mode,agent_api_url,agent_api_resolved_url FROM workspaces
+		WHERE read_only=0 AND (agent_api_url<>'' OR agent_api_resolved_url<>'')`)
 	if err != nil {
 		return fmt.Errorf("load legacy workspace agent api addresses: %w", err)
 	}
 	type legacyWorkspace struct {
-		id, address string
+		id, mode, url, resolved string
 	}
 	var legacy []legacyWorkspace
 	for rows.Next() {
 		var item legacyWorkspace
-		if err := rows.Scan(&item.id, &item.address); err != nil {
+		if err := rows.Scan(&item.id, &item.mode, &item.url, &item.resolved); err != nil {
 			rows.Close()
 			return fmt.Errorf("scan legacy workspace agent api address: %w", err)
 		}
@@ -94,26 +94,45 @@ func (s *Store) migrateAgentAPISecurityConvergence(ctx context.Context) error {
 	}
 
 	for _, item := range legacy {
-		if agentAPIAddressAllowed(item.address) {
+		urlUnsafe := item.url != "" && !agentAPIAddressAllowed(item.url)
+		// Detection used to write the probed address here, so a suspicious value
+		// can exist even when the manual field is empty. The Turn reads this field
+		// first when the status says ready; leaving it would fail the next Turn
+		// with no indication that migration was the cause.
+		resolvedUnsafe := item.resolved != "" && !agentAPIAddressAllowed(item.resolved)
+		if !urlUnsafe && !resolvedUnsafe {
 			// Still allowed. A manual row keeps working as the hidden override; an
 			// automatic row keeps ignoring its unused value, as it already did.
 			continue
 		}
-		note := fmt.Sprintf("旧版局域网明文 Agent API 地址 %q 已禁用；AHA 将自动选择连接方式。", item.address)
+		notes := []string{}
+		if urlUnsafe {
+			notes = append(notes, fmt.Sprintf("旧版局域网明文手动 Agent API 地址 %q 已禁用", item.url))
+		}
+		if resolvedUnsafe {
+			notes = append(notes, fmt.Sprintf("旧版自动探测保存的局域网明文 Agent API 地址 %q 已清除", item.resolved))
+		}
+		note := strings.Join(notes, "；") + "；AHA 将自动选择连接方式。"
+
+		mode, address := item.mode, item.url
+		if urlUnsafe {
+			mode, address = "auto", ""
+		}
 		if _, err := s.db.ExecContext(ctx, `
 			UPDATE workspaces
-			SET agent_api_mode='auto',agent_api_url='',agent_api_migration_note=?,
+			SET agent_api_mode=?,agent_api_url=?,agent_api_migration_note=?,
 				agent_api_resolved_url='',agent_api_status='unknown',agent_api_error='',
 				agent_api_last_checked_at='',updated_at=?
-			WHERE id=?`,
-			note, now, item.id); err != nil {
-			return fmt.Errorf("disable legacy workspace %s override: %w", item.id, err)
+			WHERE id=? AND read_only=0`,
+			mode, address, note, now, item.id); err != nil {
+			return fmt.Errorf("disable legacy workspace %s agent api address: %w", item.id, err)
 		}
 	}
 
 	// "global" duplicated what automatic selection already does. Earlier builds
 	// folded stored rows, but channel-created workspaces could still write it.
-	if _, err := s.db.ExecContext(ctx, `UPDATE workspaces SET agent_api_mode='auto' WHERE agent_api_mode='global'`); err != nil {
+	if _, err := s.db.ExecContext(ctx, `
+		UPDATE workspaces SET agent_api_mode='auto' WHERE agent_api_mode='global' AND read_only=0`); err != nil {
 		return fmt.Errorf("fold global agent api mode: %w", err)
 	}
 	return nil

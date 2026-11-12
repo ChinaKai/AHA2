@@ -31,20 +31,24 @@ func TestAgentAPISecurityMigrationDisablesLegacyPlaintextAddresses(t *testing.T)
 		t.Fatal(err)
 	}
 	rows := []struct {
-		id, mode, url string
-		readOnly      int
+		id, mode, url, resolved, status string
+		readOnly                        int
 	}{
-		{"ws-http", "manual", "http://192.168.1.10:8766", 0},
-		{"ws-https", "manual", "https://aha.example.test", 0},
-		{"ws-loopback", "manual", "http://127.0.0.1:8766", 0},
-		{"ws-global", "global", "", 0},
-		{"ws-mirror", "manual", "http://192.168.1.11:8766", 1},
+		{"ws-http", "manual", "http://192.168.1.10:8766", "", "ready", 0},
+		{"ws-https", "manual", "https://aha.example.test", "https://aha.example.test", "ready", 0},
+		{"ws-loopback", "manual", "http://127.0.0.1:8766", "http://127.0.0.1:8766", "ready", 0},
+		// Detection used to persist whatever it probed. An automatic row has no
+		// manual address, so only this column can reveal the old plaintext value.
+		{"ws-resolved-plaintext", "auto", "", "http://192.168.1.30:8766", "ready", 0},
+		{"ws-global", "global", "", "", "ready", 0},
+		{"ws-mirror", "manual", "http://192.168.1.11:8766", "", "ready", 1},
+		{"ws-mirror-global", "global", "", "", "ready", 1},
 	}
 	for _, row := range rows {
 		if _, err := database.db.ExecContext(ctx,
-			`INSERT INTO workspaces(id,project_id,name,locality,transport,root_path,created_at,updated_at,agent_api_mode,agent_api_url,agent_api_status,read_only)
-			 VALUES(?, 'p1', 'W', 'remote', 'ssh', '/tmp', ?, ?, ?, ?, 'ready', ?)`,
-			row.id, now, now, row.mode, row.url, row.readOnly); err != nil {
+			`INSERT INTO workspaces(id,project_id,name,locality,transport,root_path,created_at,updated_at,agent_api_mode,agent_api_url,agent_api_resolved_url,agent_api_status,read_only)
+			 VALUES(?, 'p1', 'W', 'remote', 'ssh', '/tmp', ?, ?, ?, ?, ?, ?, ?)`,
+			row.id, now, now, row.mode, row.url, row.resolved, row.status, row.readOnly); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -71,33 +75,33 @@ func TestAgentAPISecurityMigrationDisablesLegacyPlaintextAddresses(t *testing.T)
 		t.Fatalf("migration note does not explain the change: %q", note)
 	}
 
-	assertWorkspace := func(id, wantMode, wantURL string, wantNote bool) {
+	assertWorkspace := func(id, wantMode, wantURL, wantResolved, wantStatus, wantNote string) {
 		t.Helper()
-		var mode, url, note, status string
+		var mode, url, resolved, note, status string
 		if err := database.db.QueryRowContext(ctx,
-			`SELECT agent_api_mode,agent_api_url,agent_api_migration_note,agent_api_status FROM workspaces WHERE id=?`, id).
-			Scan(&mode, &url, &note, &status); err != nil {
+			`SELECT agent_api_mode,agent_api_url,agent_api_resolved_url,agent_api_migration_note,agent_api_status FROM workspaces WHERE id=?`, id).
+			Scan(&mode, &url, &resolved, &note, &status); err != nil {
 			t.Fatal(err)
 		}
-		if mode != wantMode || url != wantURL {
-			t.Errorf("%s: mode=%q url=%q, want mode=%q url=%q", id, mode, url, wantMode, wantURL)
+		if mode != wantMode || url != wantURL || resolved != wantResolved || status != wantStatus {
+			t.Errorf("%s: mode=%q url=%q resolved=%q status=%q, want mode=%q url=%q resolved=%q status=%q",
+				id, mode, url, resolved, status, wantMode, wantURL, wantResolved, wantStatus)
 		}
-		if wantNote && !strings.Contains(note, "已禁用") {
-			t.Errorf("%s: note=%q, want a diagnosis", id, note)
-		}
-		if !wantNote && note != "" {
+		if wantNote == "" && note != "" {
 			t.Errorf("%s: unexpected note %q", id, note)
 		}
-		if wantNote && status != "unknown" {
-			t.Errorf("%s: status=%q, want unknown after the address was dropped", id, status)
+		if wantNote != "" && !strings.Contains(note, wantNote) {
+			t.Errorf("%s: note=%q, want it to mention %q", id, note, wantNote)
 		}
 	}
-	assertWorkspace("ws-http", "auto", "", true)
-	assertWorkspace("ws-https", "manual", "https://aha.example.test", false)
-	assertWorkspace("ws-loopback", "manual", "http://127.0.0.1:8766", false)
-	assertWorkspace("ws-global", "auto", "", false)
+	assertWorkspace("ws-http", "auto", "", "", "unknown", "已禁用")
+	assertWorkspace("ws-https", "manual", "https://aha.example.test", "https://aha.example.test", "ready", "")
+	assertWorkspace("ws-loopback", "manual", "http://127.0.0.1:8766", "http://127.0.0.1:8766", "ready", "")
+	assertWorkspace("ws-resolved-plaintext", "auto", "", "", "unknown", "已清除")
+	assertWorkspace("ws-global", "auto", "", "", "ready", "")
 	// Read-only mirrors belong to another device; leave them alone.
-	assertWorkspace("ws-mirror", "manual", "http://192.168.1.11:8766", false)
+	assertWorkspace("ws-mirror", "manual", "http://192.168.1.11:8766", "", "ready", "")
+	assertWorkspace("ws-mirror-global", "global", "", "", "ready", "")
 }
 
 // TestAgentAPISecurityMigrationKeepsAllowedOverride pins the other half: a safe

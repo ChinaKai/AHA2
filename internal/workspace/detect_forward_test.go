@@ -64,6 +64,32 @@ func TestProbeAgentAPIThroughForwardRequestsTheTunnel(t *testing.T) {
 	}
 }
 
+// TestReviewProbeNonLoopbackSSHDoesNotRequestTunnel pins that detection and the
+// Turn use the same tunnel gate.
+//
+// A forward for a non-loopback address would let detection succeed over a path the
+// Turn never takes (the Turn only forwards loopback), so a tunnel-capable host with
+// an unreachable direct address reported "ready" and then failed mid-Turn. The
+// probe must ask for the direct check instead, exactly as the Turn runs.
+func TestReviewProbeNonLoopbackSSHDoesNotRequestTunnel(t *testing.T) {
+	item := domain.Workspace{ID: "ws", Name: "remote", Locality: "remote", Transport: "ssh", RootPath: "/repo"}
+	for _, base := range []string{"https://aha.example.test", "http://192.0.2.10:8766"} {
+		runner := &capturingProbeRunner{}
+		if err := probeAgentAPIThroughForwardWithRunner(context.Background(), item, base, runner); err != nil {
+			t.Fatalf("%s: probe: %v", base, err)
+		}
+		if runner.command.ReverseForward != nil {
+			t.Fatalf("%s: detection requested a tunnel the Turn would not build", base)
+		}
+		if got := runner.command.Args[len(runner.command.Args)-1]; got != base {
+			t.Fatalf("%s: probe did not dial the address directly (arg=%q)", base, got)
+		}
+		if got := runner.command.Env["AHA2_AGENT_API_URL"]; got != "" {
+			t.Fatalf("%s: probe seeded a tunnel address %q", base, got)
+		}
+	}
+}
+
 // TestProbeAgentAPIThroughForwardFallsBackForOtherTransports pins that only ssh
 // gets the tunnel treatment.
 //
