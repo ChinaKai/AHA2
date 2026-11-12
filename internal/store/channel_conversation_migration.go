@@ -37,7 +37,14 @@ INSERT INTO channel_conversations_v132(
     id,instance_id,endpoint_id,scope_key_version,scope_key,external_chat_id,external_sender_id,
     owner_identity_link_id,host_task_id,status,created_at,updated_at,display_name,members_synced_at)
 SELECT id,instance_id,endpoint_id,scope_key_version,scope_key,external_chat_id,external_sender_id,
-    owner_identity_link_id,host_task_id,status,created_at,updated_at,display_name,members_synced_at
+    owner_identity_link_id,
+    -- Legacy rows may point at a Task deleted before foreign keys were
+    -- enforced. Detach them instead of copying a reference that the rebuilt
+    -- table's own foreign key check would reject. The old column was NOT NULL,
+    -- so '' was its "no host" value and is kept as-is; NULL stays NULL.
+    CASE WHEN host_task_id='' OR EXISTS(SELECT 1 FROM tasks WHERE id=host_task_id)
+         THEN host_task_id ELSE NULL END,
+    status,created_at,updated_at,display_name,members_synced_at
 FROM channel_conversations;
 DROP TABLE channel_conversations;
 ALTER TABLE channel_conversations_v132 RENAME TO channel_conversations;
@@ -73,23 +80,22 @@ func (s *Store) migrateChannelConversationNullableHost(ctx context.Context) erro
 			return err
 		}
 	}
-	// The rebuilt table must reference rows that exist. Check only the table
-	// itself so a legacy violation elsewhere in the database cannot block
-	// startup.
-	rows, err := tx.QueryContext(ctx, `PRAGMA foreign_key_check(channel_conversations)`)
-	if err != nil {
+	// The rebuild only transforms host_task_id (dangling -> NULL). Check that
+	// exact invariant instead of running a table-wide foreign_key_check: a
+	// production database already carries legacy violations in other tables
+	// and in other columns of this table, and the legacy '' sentinel would
+	// itself show up as one. None of that is introduced by this migration, and
+	// none of it may block startup.
+	var danglingHosts int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM channel_conversations conversation
+		WHERE conversation.host_task_id IS NOT NULL
+		  AND conversation.host_task_id <> ''
+		  AND NOT EXISTS(SELECT 1 FROM tasks WHERE id=conversation.host_task_id)`).Scan(&danglingHosts); err != nil {
 		return err
 	}
-	violations := 0
-	for rows.Next() {
-		violations++
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	if violations != 0 {
-		return fmt.Errorf("channel conversation rebuild left %d foreign key violations", violations)
+	if danglingHosts != 0 {
+		return fmt.Errorf("channel conversation rebuild left %d dangling host references", danglingHosts)
 	}
 	return tx.Commit()
 }
