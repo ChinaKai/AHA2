@@ -102,6 +102,26 @@ function Assert-AHA2WindowsPowerShellScriptEncoding {
   return $state
 }
 
+function Get-AHA2UtcTimestamp {
+  param($Value)
+  # Get-ScheduledTaskInfo.LastRunTime is a local DateTime while the handoff
+  # starts from [DateTime]::UtcNow. Comparing their ticks directly shifts the
+  # result by the local UTC offset, so normalize every input first.
+  if ($null -eq $Value) { return [DateTime]::MinValue }
+  if ($Value -is [DateTimeOffset]) { return $Value.UtcDateTime }
+  $timestamp = [DateTime]$Value
+  if ($timestamp -eq [DateTime]::MinValue) { return $timestamp }
+  if ($timestamp.Kind -eq [DateTimeKind]::Utc) { return $timestamp }
+  return $timestamp.ToUniversalTime()
+}
+
+function Test-AHA2WorkerStartedSince {
+  param($LastRunTime, [DateTime]$StartUtc, [int]$SlackSeconds = 2)
+  $lastRunUtc = Get-AHA2UtcTimestamp -Value $LastRunTime
+  if ($lastRunUtc -eq [DateTime]::MinValue) { return $false }
+  return ($lastRunUtc -ge $StartUtc.AddSeconds(-$SlackSeconds))
+}
+
 function Resolve-AHA2DetachedHandoff {
   param([bool]$ResultWritten, [bool]$WorkerStarted, [bool]$WorkerRunning)
   if ($ResultWritten) { return "completed" }
@@ -1047,7 +1067,10 @@ function Invoke-AHA2SelfTest {
     Assert-AHA2SelfTest (-not $missing.Ok) "missing backup copy is rejected"
     if ($env:OS -eq "Windows_NT") {
       # A transient lock makes Get-FileHash fail non-terminating. The helper
-      # must return a named failure instead of crashing on $null.Hash.
+      # must return a named failure instead of crashing on $null.Hash. Restore
+      # the matching destination first; the tampered 8-byte copy above would
+      # otherwise fail on size and never reach the hash.
+      Copy-Item -LiteralPath $source -Destination $copy -Force
       $heldSource = [IO.File]::Open($source, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
       try {
         $locked = Test-AHA2BackupCopy -Source $source -Destination $copy
@@ -1284,6 +1307,21 @@ function Invoke-AHA2SelfTest {
   Assert-AHA2SelfTest ((Resolve-AHA2DetachedHandoff -ResultWritten $false -WorkerStarted $true -WorkerRunning $false) -eq "failed") "handoff fails when a started worker exits without a result"
   Assert-AHA2SelfTest ((Resolve-AHA2DetachedHandoff -ResultWritten $false -WorkerStarted $false -WorkerRunning $false) -eq "scheduled") "handoff stays scheduled before the worker starts"
   Assert-AHA2SelfTest ((Resolve-AHA2DetachedHandoff -ResultWritten $false -WorkerStarted $true -WorkerRunning $true) -eq "scheduled") "handoff stays scheduled while the worker runs"
+  $handoffStartUtc = [DateTime]::new(2026, 1, 1, 0, 0, 0, [DateTimeKind]::Utc)
+  Assert-AHA2SelfTest (Test-AHA2WorkerStartedSince -LastRunTime $handoffStartUtc.AddSeconds(5) -StartUtc $handoffStartUtc) "a recent UTC task start counts as started"
+  Assert-AHA2SelfTest (-not (Test-AHA2WorkerStartedSince -LastRunTime $handoffStartUtc.AddSeconds(-30) -StartUtc $handoffStartUtc)) "an old UTC task start is not mistaken for this worker"
+  # Non-UTC case: 07:00+08:00 is 23:00Z the previous day, before the 00:00Z
+  # handoff. Comparing wall-clock ticks would wrongly report "started".
+  $plus8Stale = [DateTimeOffset]::new(2026, 1, 1, 7, 0, 0, [TimeSpan]::FromHours(8))
+  $plus8Started = [DateTimeOffset]::new(2026, 1, 1, 8, 0, 30, [TimeSpan]::FromHours(8))
+  $plus8StaleUtc = Get-AHA2UtcTimestamp -Value $plus8Stale
+  Assert-AHA2SelfTest ($plus8StaleUtc.Kind -eq [DateTimeKind]::Utc -and $plus8StaleUtc.Hour -eq 23 -and $plus8StaleUtc.Day -eq 31) "a +08 task start is normalized to UTC"
+  Assert-AHA2SelfTest (-not (Test-AHA2WorkerStartedSince -LastRunTime $plus8Stale -StartUtc $handoffStartUtc)) "a stale run from a +08 timezone is not treated as started"
+  Assert-AHA2SelfTest (Test-AHA2WorkerStartedSince -LastRunTime $plus8Started -StartUtc $handoffStartUtc) "a fresh run from a +08 timezone counts as started"
+  $localStale = $handoffStartUtc.AddHours(-1).ToLocalTime()
+  $localStarted = $handoffStartUtc.AddHours(1).ToLocalTime()
+  Assert-AHA2SelfTest (-not (Test-AHA2WorkerStartedSince -LastRunTime $localStale -StartUtc $handoffStartUtc)) "a stale local task start is not mistaken for this worker"
+  Assert-AHA2SelfTest (Test-AHA2WorkerStartedSince -LastRunTime $localStarted -StartUtc $handoffStartUtc) "a fresh local task start counts as started"
   $handoffLog = Join-Path ([IO.Path]::GetTempPath()) ("aha2-handoff-log-" + [Guid]::NewGuid().ToString("N"))
   try {
     [IO.File]::WriteAllText($handoffLog, "first line`nworker-stderr-tail-marker`nlast line", [Text.UTF8Encoding]::new($false))
@@ -1882,9 +1920,7 @@ if (-not $DetachedWorker -and (Test-AHA2Ancestor)) {
     } catch {}
     $workerRunning = ($null -ne $task) -and ([string]$task.State -eq "Running")
     if ($workerRunning) { $workerStarted = $true }
-    if ($null -ne $taskInfo -and $null -ne $taskInfo.LastRunTime -and
-        $taskInfo.LastRunTime -ne [DateTime]::MinValue -and
-        $taskInfo.LastRunTime -ge $handoffStartedUtc.AddSeconds(-2)) {
+    if ($null -ne $taskInfo -and (Test-AHA2WorkerStartedSince -LastRunTime $taskInfo.LastRunTime -StartUtc $handoffStartedUtc)) {
       $workerStarted = $true
     }
     $decision = Resolve-AHA2DetachedHandoff -ResultWritten $resultWritten -WorkerStarted $workerStarted -WorkerRunning $workerRunning

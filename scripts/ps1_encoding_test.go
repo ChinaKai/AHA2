@@ -69,35 +69,45 @@ func TestTarPackagingPreservesUTF8BOM(t *testing.T) {
 		t.Skip("tar is not available")
 	}
 	root := repoRoot(t)
-	rel, err := filepath.Rel(root, filepath.Join(root, "scripts", "deploy-windows-user.ps1"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	original, err := os.ReadFile(filepath.Join(root, rel))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.HasPrefix(original, []byte{0xEF, 0xBB, 0xBF}) {
-		t.Fatalf("%s is missing its UTF-8 BOM", rel)
+	scripts := windowsPowerShellScripts(t, root)
+	original := make(map[string][]byte, len(scripts))
+	var rels []string
+	for _, path := range scripts {
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.HasPrefix(data, []byte{0xEF, 0xBB, 0xBF}) {
+			t.Fatalf("%s is missing its UTF-8 BOM", rel)
+		}
+		original[rel] = data
+		rels = append(rels, rel)
 	}
 
 	archive := filepath.Join(t.TempDir(), "scripts.tar")
-	if out, err := exec.Command(tarBin, "-cf", archive, "-C", root, rel).CombinedOutput(); err != nil {
+	tarArgs := append([]string{"-cf", archive, "-C", root}, rels...)
+	if out, err := exec.Command(tarBin, tarArgs...).CombinedOutput(); err != nil {
 		t.Fatalf("tar create: %v\n%s", err, out)
 	}
 	extract := t.TempDir()
 	if out, err := exec.Command(tarBin, "-xf", archive, "-C", extract).CombinedOutput(); err != nil {
 		t.Fatalf("tar extract: %v\n%s", err, out)
 	}
-	roundTripped, err := os.ReadFile(filepath.Join(extract, rel))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.HasPrefix(roundTripped, []byte{0xEF, 0xBB, 0xBF}) {
-		t.Fatal("tar round-trip dropped the UTF-8 BOM")
-	}
-	if sha256.Sum256(original) != sha256.Sum256(roundTripped) {
-		t.Fatal("tar round-trip changed the script bytes")
+	for _, rel := range rels {
+		roundTripped, err := os.ReadFile(filepath.Join(extract, rel))
+		if err != nil {
+			t.Fatalf("%s after tar extract: %v", rel, err)
+		}
+		if !bytes.HasPrefix(roundTripped, []byte{0xEF, 0xBB, 0xBF}) {
+			t.Errorf("tar round-trip dropped the UTF-8 BOM from %s", rel)
+		}
+		if sha256.Sum256(original[rel]) != sha256.Sum256(roundTripped) {
+			t.Errorf("tar round-trip changed the script bytes of %s", rel)
+		}
 	}
 }
 
@@ -120,6 +130,8 @@ func TestDeployScriptBackupAndHandoffContract(t *testing.T) {
 		`Resolve-AHA2DetachedHandoff`,
 		`Assert-AHA2DetachedWorkerAlive`,
 		`Assert-AHA2WindowsPowerShellScriptEncoding`,
+		`Test-AHA2WorkerStartedSince`,
+		`Get-AHA2UtcTimestamp`,
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("deploy-windows-user.ps1 no longer contains %q", want)
@@ -146,5 +158,17 @@ func TestDeployScriptBackupAndHandoffContract(t *testing.T) {
 		if !strings.Contains(handoff, want) {
 			t.Errorf("detached handoff no longer fails loudly: missing %q", want)
 		}
+	}
+
+	legacy, err := os.ReadFile(filepath.Join(root, "scripts", "deploy-windows.ps1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyText := string(legacy)
+	if !strings.Contains(legacyText, `$runtimeFiles = @("aha2.db", "aha2.db-wal", "secrets.json", "setup-token")`) {
+		t.Error("legacy deploy-windows.ps1 still backs up aha2.db-shm")
+	}
+	if !strings.Contains(legacyText, `foreach ($staleName in @("aha2.db-shm", "aha2.db-wal"))`) {
+		t.Error("legacy deploy-windows.ps1 rollback must delete stale shm and WAL before restoring")
 	}
 }

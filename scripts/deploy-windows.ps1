@@ -1,4 +1,8 @@
-﻿[CmdletBinding()]
+﻿# Legacy managed-process deployment entry (still referenced by the Managed
+# Process workflow in docs/deployment.md). It follows the same database backup
+# policy as deploy-windows-user.ps1: aha2.db-shm is a volatile cache and is
+# never backed up or restored; rollback deletes the stale sidecars first.
+[CmdletBinding()]
 param(
   [Parameter(Mandatory = $true)][string]$BinaryPath,
   [string]$RepoPath = (Get-Location).Path,
@@ -98,7 +102,9 @@ Invoke-ManagedProcess $stopArguments -AllowFailure | Out-Null
 $timestamp = [DateTime]::UtcNow.ToString("yyyyMMdd-HHmmss")
 $backupDir = Join-Path $data "backups\$timestamp"
 New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
-$runtimeFiles = @("aha2.db", "aha2.db-wal", "aha2.db-shm", "secrets.json", "setup-token")
+# aha2.db-shm is intentionally absent: SQLite recreates it, and hashing or
+# copying it while SQLite still holds it was what aborted the 0.5.471 backup.
+$runtimeFiles = @("aha2.db", "aha2.db-wal", "secrets.json", "setup-token")
 foreach ($name in $runtimeFiles) {
   $source = Join-Path $data $name
   if (Test-Path -LiteralPath $source -PathType Leaf) { Copy-Item -LiteralPath $source -Destination (Join-Path $backupDir $name) -Force }
@@ -120,6 +126,12 @@ try {
   Invoke-ManagedProcess $stopArguments -AllowFailure | Out-Null
   if ($binaryBackup -and (Test-Path -LiteralPath $binaryBackup -PathType Leaf)) {
     Copy-Item -LiteralPath $binaryBackup -Destination $stable -Force
+    # A failed version may have left a shm or a WAL that does not belong to the
+    # restored image. Delete both before copying the verified backup files.
+    foreach ($staleName in @("aha2.db-shm", "aha2.db-wal")) {
+      $stalePath = Join-Path $data $staleName
+      if (Test-Path -LiteralPath $stalePath -PathType Leaf) { Remove-Item -LiteralPath $stalePath -Force }
+    }
     foreach ($name in $runtimeFiles) {
       $backupFile = Join-Path $backupDir $name
       if (Test-Path -LiteralPath $backupFile -PathType Leaf) { Copy-Item -LiteralPath $backupFile -Destination (Join-Path $data $name) -Force }
