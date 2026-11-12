@@ -13,3 +13,6 @@ internal/webassets/dist/*
 *.test
 *.db
 *.db-*
+
+# AHA runtime context (prompts, scratch, shared agent proxy helper).
+.aha2-context/

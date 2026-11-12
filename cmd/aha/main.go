@@ -65,6 +65,15 @@ func main() {
 		}
 		return
 	}
+	if command == "agent-proxy" {
+		// Hidden by design: this runs on the workspace inside an SSH session,
+		// with the tunnel on stdin/stdout. It is not an operator command.
+		if err := runAgentProxy(args, os.Stdin, os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	switch command {
 	case "serve":
 		err = serve(args)
@@ -95,6 +104,8 @@ func parseCommand(args []string) (string, []string, error) {
 		return "listen", args[1:], nil
 	case "local-ingest-secret":
 		return "local-ingest-secret", args[1:], nil
+	case "agent-proxy":
+		return "agent-proxy", args[1:], nil
 	case "import-aha1-knowledge":
 		return "import-aha1-knowledge", args[1:], nil
 	case "service":

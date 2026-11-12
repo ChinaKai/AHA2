@@ -277,7 +277,7 @@ class APIClient {
     return this.request("/api/v1/settings/agent-api");
   }
 
-  updateAgentAPISettings(payload: {url: string}): Promise<{agent_api: AgentAPISettings}> {
+  updateAgentAPISettings(payload: {url: string; stdio_proxy?: boolean}): Promise<{agent_api: AgentAPISettings}> {
     return this.request("/api/v1/settings/agent-api", {method: "PUT", body: JSON.stringify(payload)});
   }
 

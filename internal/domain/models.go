@@ -67,11 +67,15 @@ type SecuritySettings struct {
 // is held to the same boundary as every automatic candidate — https:// or
 // loopback http:// — so the override cannot reintroduce plaintext LAN traffic.
 type AgentAPISettings struct {
-	URL           string    `json:"url"`
-	StartupURL    string    `json:"startup_url,omitempty"`
-	EffectiveURL  string    `json:"effective_url"`
-	MigrationNote string    `json:"migration_note,omitempty"`
-	UpdatedAt     time.Time `json:"updated_at,omitempty"`
+	URL           string `json:"url"`
+	StartupURL    string `json:"startup_url,omitempty"`
+	EffectiveURL  string `json:"effective_url"`
+	MigrationNote string `json:"migration_note,omitempty"`
+	// StdioProxy carries the Agent API over the SSH session's stdin/stdout
+	// instead of a reverse tunnel. Opt-in: leaving it off keeps the tunnel and
+	// LAN fallback exactly as before.
+	StdioProxy bool      `json:"stdio_proxy"`
+	UpdatedAt  time.Time `json:"updated_at,omitempty"`
 }
 
 const (

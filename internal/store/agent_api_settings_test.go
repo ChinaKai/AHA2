@@ -26,6 +26,25 @@ func TestAgentAPISettingsAndWorkspaceDetectionPersist(t *testing.T) {
 	if err != nil || settings.URL != "https://aha.example.test" {
 		t.Fatalf("updated settings=%#v err=%v", settings, err)
 	}
+	if settings.StdioProxy {
+		t.Fatal("the SSH stdio proxy must default to off")
+	}
+	settings, err = database.UpdateAgentAPISettings(ctx, domain.AgentAPISettings{
+		URL: "https://aha.example.test", StdioProxy: true, UpdatedAt: now,
+	})
+	if err != nil || !settings.StdioProxy {
+		t.Fatalf("stdio proxy was not persisted: %#v err=%v", settings, err)
+	}
+	settings, err = database.AgentAPISettings(ctx)
+	if err != nil || !settings.StdioProxy {
+		t.Fatalf("stdio proxy did not survive a reload: %#v err=%v", settings, err)
+	}
+	settings, err = database.UpdateAgentAPISettings(ctx, domain.AgentAPISettings{
+		URL: "https://aha.example.test", UpdatedAt: now,
+	})
+	if err != nil || settings.StdioProxy {
+		t.Fatalf("stdio proxy did not turn off: %#v err=%v", settings, err)
+	}
 	project := domain.Project{ID: "project-agent-api", Name: "Project", CreatedAt: now, UpdatedAt: now}
 	if err := database.CreateProject(ctx, project); err != nil {
 		t.Fatal(err)

@@ -3608,5 +3608,20 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("apply schema v132: %w", err)
 		}
 	}
+	var hasV133 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=133)`).Scan(&hasV133)
+	if !hasV133 {
+		// Agent API over SSH stdio is opt-in. Existing workspaces keep the
+		// reverse-tunnel-then-LAN behaviour until an operator turns it on.
+		if _, err := s.db.ExecContext(ctx,
+			`ALTER TABLE agent_api_settings ADD COLUMN stdio_proxy INTEGER NOT NULL DEFAULT 0`); err != nil &&
+			!strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("apply schema v133: %w", err)
+		}
+		if _, err := s.db.ExecContext(ctx,
+			`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(133, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+			return fmt.Errorf("record schema v133: %w", err)
+		}
+	}
 	return nil
 }

@@ -1090,10 +1090,20 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 	if workspace.SSHCredentialRef != "" && s.secrets != nil {
 		workspace.SSHPassword, _ = s.secrets.Get(workspace.SSHCredentialRef)
 	}
-	agentAPIURL, err := s.AgentAPIURLForWorkspace(ctx, workspace)
+	workDir := task.TaskWorkspacePath
+	if workDir == "" {
+		workDir = workspace.RootPath
+	}
+	agentAPISetup, err := s.prepareAgentAPIForTurn(ctx, workspace, task, workDir)
 	if err != nil {
 		s.failTurn(ctx, &turn, task, fmt.Errorf("resolve Agent API URL: %w", err))
 		return
+	}
+	agentAPIURL := agentAPISetup.URL
+	if agentAPISetup.Proxy != nil {
+		// The helper is a child of this SSH session; closing it here is what
+		// keeps a finished or failed Turn from leaving a process behind.
+		defer func() { _ = agentAPISetup.Proxy.Close() }()
 	}
 	snapshot, err := s.store.RuntimeSnapshot(ctx, turn.RuntimeConfigSnapshotID)
 	if err != nil {
@@ -1281,10 +1291,6 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 	for _, item := range preview.SharedManifest {
 		sharedFiles[item.Path] = item.Content
 	}
-	workDir := task.TaskWorkspacePath
-	if workDir == "" {
-		workDir = workspace.RootPath
-	}
 	scratchDir, err := workspacepkg.EnsureScratchDir(ctx, workspace, workDir, task.ID, turn.AgentID)
 	if err != nil {
 		s.failTurn(ctx, &turn, task, fmt.Errorf("prepare task scratch: %w", err))
@@ -1383,7 +1389,11 @@ func (s *Service) runTurn(ctx context.Context, turnID string) {
 		defer s.agentAPI.Revoke(capabilityToken)
 		environment["AHA2_AGENT_API_URL"] = agentAPIURL
 		environment["AHA2_AGENT_API_TOKEN"] = capabilityToken
-		agentAPIForward = agentAPIReverseForward(workspace, agentAPIURL)
+		if agentAPISetup.Proxy == nil {
+			// A reverse tunnel would target the proxy's own remote port when the
+			// stdio path is already carrying the Agent API.
+			agentAPIForward = agentAPIReverseForward(workspace, agentAPIURL)
+		}
 	}
 	if snapshot.ProxyEnabled && s.proxyRuntime != nil {
 		if settingsErr := s.proxyRuntime.ApplyEnvironment(ctx, environment); settingsErr != nil {

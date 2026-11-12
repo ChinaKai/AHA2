@@ -15,8 +15,10 @@ import (
 func (s *Store) AgentAPISettings(ctx context.Context) (domain.AgentAPISettings, error) {
 	var item domain.AgentAPISettings
 	var updatedAt string
-	err := s.db.QueryRowContext(ctx, `SELECT url,migration_note,updated_at FROM agent_api_settings WHERE id=1`).
-		Scan(&item.URL, &item.MigrationNote, &updatedAt)
+	var stdioProxy int
+	err := s.db.QueryRowContext(ctx, `SELECT url,migration_note,stdio_proxy,updated_at FROM agent_api_settings WHERE id=1`).
+		Scan(&item.URL, &item.MigrationNote, &stdioProxy, &updatedAt)
+	item.StdioProxy = stdioProxy != 0
 	item.UpdatedAt = parseTime(updatedAt)
 	return item, err
 }
@@ -25,11 +27,16 @@ func (s *Store) UpdateAgentAPISettings(ctx context.Context, item domain.AgentAPI
 	if item.UpdatedAt.IsZero() {
 		item.UpdatedAt = time.Now().UTC()
 	}
+	stdioproxy := 0
+	if item.StdioProxy {
+		stdioproxy = 1
+	}
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO agent_api_settings(id,url,allow_insecure,migration_note,updated_at) VALUES(1,?,0,?,?)
+		INSERT INTO agent_api_settings(id,url,allow_insecure,migration_note,stdio_proxy,updated_at) VALUES(1,?,0,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET url=excluded.url,allow_insecure=0,
-			migration_note=excluded.migration_note,updated_at=excluded.updated_at`,
-		item.URL, item.MigrationNote, timeString(item.UpdatedAt),
+			migration_note=excluded.migration_note,stdio_proxy=excluded.stdio_proxy,
+			updated_at=excluded.updated_at`,
+		item.URL, item.MigrationNote, stdioproxy, timeString(item.UpdatedAt),
 	)
 	return item, err
 }

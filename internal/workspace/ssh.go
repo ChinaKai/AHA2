@@ -272,6 +272,69 @@ func (runner *SSHRunner) runRaw(parent context.Context, remoteCommand, stdin str
 	return runner.execOnClient(ctx, client, remoteCommand, stdin, nil, outputLimit, onLine)
 }
 
+// runScriptWithStdin runs script through `sh -c` with arguments, feeding the
+// command's stdin from input.
+//
+// It exists for transfers that must stay out of the command line: the helper
+// binary is tens of megabytes, and embedding it in the script (the ordinary
+// command path) would base64 it into an argument list.
+func (runner *SSHRunner) runScriptWithStdin(ctx context.Context, script string, args []string, input io.Reader, timeout time.Duration, outputLimit int) (Result, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	client, err := runner.dial(ctx)
+	if err != nil {
+		return Result{}, err
+	}
+	defer client.Close()
+	session, err := client.NewSession()
+	if err != nil {
+		return Result{}, err
+	}
+	defer session.Close()
+	session.Stdin = input
+	stdoutPipe, err := session.StdoutPipe()
+	if err != nil {
+		return Result{}, err
+	}
+	stderrPipe, err := session.StderrPipe()
+	if err != nil {
+		return Result{}, err
+	}
+	start := time.Now()
+	stdout, stderr := newOutputBuffer(outputLimit), newOutputBuffer(outputLimit)
+	var wait sync.WaitGroup
+	wait.Add(2)
+	go func() { defer wait.Done(); _, _ = io.Copy(stdout, stdoutPipe) }()
+	go func() { defer wait.Done(); _, _ = io.Copy(stderr, stderrPipe) }()
+	remoteCommand := "sh -c " + shellQuote(script)
+	for _, argument := range args {
+		remoteCommand += " " + shellQuote(argument)
+	}
+	done := make(chan error, 1)
+	go func() { done <- session.Run(remoteCommand) }()
+	var runErr error
+	select {
+	case runErr = <-done:
+	case <-ctx.Done():
+		_ = client.Close()
+		runErr = <-done
+	}
+	wait.Wait()
+	result := Result{Stdout: stdout.String(), Stderr: stderr.String(), Duration: time.Since(start)}
+	if ctx.Err() != nil {
+		return result, ctx.Err()
+	}
+	if runErr == nil {
+		return result, nil
+	}
+	var exitErr *ssh.ExitError
+	if errors.As(runErr, &exitErr) {
+		result.ExitCode = exitErr.ExitStatus()
+		return result, nil
+	}
+	return result, runErr
+}
+
 // execOnClient runs one command over an already-established connection. Splitting
 // it out lets a caller reuse the same connection for a reverse forward, whose
 // lifetime must match the command's.

@@ -26,6 +26,9 @@ export interface AgentAPISettings {
   startup_url?: string;
   effective_url: string;
   migration_note?: string;
+  // Carries the Agent API over the SSH session's stdin/stdout. Off by default:
+  // existing deployments keep the reverse-tunnel-then-LAN path.
+  stdio_proxy?: boolean;
   updated_at?: string;
 }
 export interface BackendSettings {

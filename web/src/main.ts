@@ -3549,6 +3549,7 @@ function otherSettingsView(): string {
         <label>手动覆盖地址<input name="url" type="url" value="${escapeHTML(agentAPI.url)}" placeholder="https://aha.example.com"></label>
         <div class="field-help">默认不需要填写。AHA 会自动选择：本机直连 → SSH 反向隧道 → WSL localhost。只有这些路径都不可用时，才在这里指定地址；只接受 <code>https://</code> 或 loopback <code>http://</code>，非 loopback 明文地址不会被接受。</div>
         <div class="field-help">当前自动地址：<code>${escapeHTML(agentAPI.effective_url || "-")}</code>${agentAPI.startup_url ? ` · 启动推导：<code>${escapeHTML(agentAPI.startup_url)}</code>` : ""}</div>
+        <label class="security-setting-toggle"><input name="stdio_proxy" type="checkbox" ${agentAPI.stdio_proxy ? "checked" : ""}><span><strong>通过 SSH 会话承载 Agent API（stdio 代理）</strong><small>仅对 SSH 工作区生效。开启后不再依赖 sshd 端口转发，也不需要工作区能访问本机局域网地址；helper 会放在工作区的 <code>.aha2-context/share/agent-proxy</code>。关闭时保持现有的反向隧道 → 局域网回退。</small></span></label>
         ${agentAPIMigrationNote ? `<div class="security-warning active">配置迁移：${escapeHTML(agentAPIMigrationNote)}</div>` : ""}
         <div class="dialog-actions"><button class="primary" type="submit">保存覆盖</button><button type="button" id="clear-agent-api-override">清除覆盖</button></div>
       </form>
@@ -5639,9 +5640,10 @@ function bindCommon(): void {
   }, "保存中");
   bindForm("#agent-api-override-form", async form => {
     const url = String(form.get("url") || "").trim();
-    const response = await api.updateAgentAPISettings({url});
+    const stdioProxy = Boolean(form.querySelector<HTMLInputElement>('[name="stdio_proxy"]')?.checked);
+    const response = await api.updateAgentAPISettings({url, stdio_proxy: stdioProxy});
     state.agentAPISettings = response.agent_api;
-    setMessage("notice", url ? "Agent API 手动覆盖已保存" : "Agent API 手动覆盖已清除");
+    setMessage("notice", stdioProxy ? "Agent API 设置已保存，SSH stdio 代理已开启" : (url ? "Agent API 手动覆盖已保存" : "Agent API 手动覆盖已清除"));
   }, "保存中");
   document.querySelector("#clear-agent-api-override")?.addEventListener("click", () => {
     const form = document.querySelector<HTMLFormElement>("#agent-api-override-form");

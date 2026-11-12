@@ -26,6 +26,7 @@ func TestParseCommandRoutesServeAndWindowsService(t *testing.T) {
 		{args: []string{"version"}, command: "version"},
 		{args: []string{"local-ingest-secret", "--data-dir", "data"}, command: "local-ingest-secret", commandArgs: []string{"--data-dir", "data"}},
 		{args: []string{"import-aha1-knowledge", "--source", "legacy"}, command: "import-aha1-knowledge", commandArgs: []string{"--source", "legacy"}},
+		{args: []string{"agent-proxy", "--stdio", "--protocol", "1"}, command: "agent-proxy", commandArgs: []string{"--stdio", "--protocol", "1"}},
 		{args: []string{"service"}, errorText: "aha2 service run"},
 		{args: []string{"service", "stop"}, errorText: "aha2 service run"},
 		{args: []string{"unknown"}, errorText: "unknown command"},
