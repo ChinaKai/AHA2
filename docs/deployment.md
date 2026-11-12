@@ -175,7 +175,8 @@ SQLite 的易失共享内存缓存，不复制、不哈希；它在 SQLite 运�
 `-DetachedWorker` 下继续。handoff 会在 `-HandoffTimeoutSeconds`（默认 8 秒）内确认 worker 已经启动：
 写入了新的结果文件则返回 `completed`；worker 已启动但退出且没有写结果则**抛错**，错误里带上
 `LastTaskResult` 和 `dist/user-deploy.log` 的末尾日志；worker 仍在运行则返回 `scheduled`，由外层
-继续轮询结果文件。这样 worker 解析失败、启动即崩溃或找不到依赖时不会再以退出码 0 假装交接成功。
+继续轮询结果文件。worker 是否已启动按 UTC 归一后比较 `LastRunTime`，避免非 UTC 时区把旧运行误判成本次启动。
+这样 worker 解析失败、启动即崩溃或找不到依赖时不会再以退出码 0 假装交接成功。
 如果外部的远程部署包装脚本自己启动 worker（例如仓库外的 `deploy-aha2-remote.ps1`），也必须采用同样的判定：
 worker 已经启动但短时间内退出且没有写新的 result 时，以非 0 退出并打印 stderr/日志尾部，不能只打一条警告
 就返回 0。仓库内目前没有这个包装脚本；`deploy-windows-user.ps1` 的 handoff 是它应复用的参考实现。
@@ -311,7 +312,9 @@ python C:\Users\toope\AppData\Local\AHA\aha managed-process stop aha2-v1
 
 本地 Agent 构建并部署时使用选中的 `aha2-local-build` Skill：先构建 staging 二进制，
 再由宿主 AHA `managed-process` 启动独立部署 Worker；Worker 停止服务、备份运行数据与旧二进制、替换并重启，最后
-检查 `http://127.0.0.1:8766/healthz`；失败时恢复旧二进制。AHA2 自身的 Agent API
+检查 `http://127.0.0.1:8766/healthz`；失败时恢复旧二进制。这条入口（`scripts/deploy-windows.ps1`，仍受支持）
+与 `deploy-windows-user.ps1` 使用同一条数据库备份规则：只备份 `aha2.db`/`aha2.db-wal`，回滚前删除 stale
+`aha2.db-shm`/`aha2.db-wal`，绝不把 shm 写回数据目录。AHA2 自身的 Agent API
 只适合托管普通 Task 进程，不能用于安全地重启 AHA2 自身。
 
 远程 Workspace 的 Agent API 地址由 AHA 自动选择（SSH 优先走反向隧道），通常无需配置。
