@@ -235,6 +235,18 @@ function Set-AHA2FileFromSource {
   return $staged.SHA256
 }
 
+function Set-AHA2InstalledFile {
+  param($Record, [string]$Source, [string]$Destination)
+  try {
+    [void](Set-AHA2FileFromSource -Source $Source -Destination $Destination)
+  } catch {
+    # Record the path that could not be atomically replaced so the failure
+    # result names it instead of leaving LockedFiles empty.
+    Add-AHA2LockedFile -Record $Record -Paths @($Destination)
+    throw
+  }
+}
+
 function Remove-AHA2FileIfPresent {
   param([string]$Path)
   if (Test-Path -LiteralPath $Path -PathType Leaf) {
@@ -424,6 +436,20 @@ function Invoke-AHA2SelfTest {
   Assert-AHA2SelfTest ((Get-AHA2StopAttemptDecision -Satisfied $false -TimedOut $false) -eq "retry") "stop retry decision retries while time remains"
   Assert-AHA2SelfTest ((Get-AHA2StopAttemptDecision -Satisfied $false -TimedOut $true) -eq "timeout") "stop retry decision reports a clear timeout"
   Assert-AHA2SelfTest ((Get-AHA2StopAttemptDecision -Satisfied $true -TimedOut $true) -eq "verified") "a satisfied stop wins over a simultaneous timeout"
+
+  # WMI/CIM failure must fail closed: an enumeration error can never count as
+  # "no processes", so the stop stage exhausts its timeout and reports failure.
+  $stopFailureEnumerator = { throw "CIM unavailable (self-test stub)" }
+  $missingProbe = Join-Path ([IO.Path]::GetTempPath()) ("aha2-missing-probe-" + [Guid]::NewGuid().ToString("N"))
+  $failedStop = Stop-AHA2ProcessTrees -TimeoutSeconds 0 -ProbePaths @($missingProbe) -ProcessEnumerator $stopFailureEnumerator -AncestorIds @{}
+  Assert-AHA2SelfTest (-not $failedStop.Verified) "process enumeration failure never verifies a stop"
+  Assert-AHA2SelfTest ($failedStop.EnumerationError -like "*CIM unavailable*") "process enumeration failure is reported in the stop result"
+
+  # An identity lookup that fails cannot prove the process is gone; it must be
+  # treated as alive so the stop stage keeps trying.
+  $identityTarget = [pscustomobject]@{Id=4242;Name="aha2.exe";CreationDate="t42"}
+  Assert-AHA2SelfTest (Test-AHA2ProcessIdentity -Target $identityTarget -ProcessLookup { throw "CIM unavailable (self-test stub)" }) "identity lookup failure is treated as a live process"
+  Assert-AHA2SelfTest (-not (Test-AHA2ProcessIdentity -Target $identityTarget -ProcessLookup { $null })) "identity lookup of a vanished process is not alive"
 
   # Exclusive probe: an unheld file opens, a file already held by this process
   # cannot be opened with FileShare.None (checked on Windows, where the lock
@@ -647,10 +673,161 @@ function Invoke-AHA2SelfTest {
   Add-AHA2LockedFile -Record $deduped -Paths @("C:\x\aha2.exe")
   Assert-AHA2SelfTest ($deduped.LockedFiles.Count -eq 2) "locked file list is de-duplicated"
 
+  # A failed install replacement must name the destination in LockedFiles.
+  $installRecord = New-AHA2ResultRecord
+  $missingSource = Join-Path ([IO.Path]::GetTempPath()) ("aha2-missing-source-" + [Guid]::NewGuid().ToString("N"))
+  $installDestination = Join-Path ([IO.Path]::GetTempPath()) ("aha2-install-target-" + [Guid]::NewGuid().ToString("N"))
+  $installThrew = $false
+  try {
+    Set-AHA2InstalledFile -Record $installRecord -Source $missingSource -Destination $installDestination
+  } catch {
+    $installThrew = $true
+  }
+  Assert-AHA2SelfTest $installThrew "failed install replacement throws"
+  Assert-AHA2SelfTest (@($installRecord.LockedFiles) -contains $installDestination) "failed install replacement records the destination in LockedFiles"
+
   if ($script:selfTestFailures.Count -gt 0) {
     throw ("AHA2 deployment self-test failed ({0} of {1} checks): {2}" -f $script:selfTestFailures.Count,$script:selfTestChecks,($script:selfTestFailures -join "; "))
   }
   Write-Host ("AHA2 deployment self-test passed: {0} checks." -f $script:selfTestChecks)
+}
+
+function Get-AHA2ProcessList {
+  # Win32_Process enumeration must fail loudly: swallowing the error would let
+  # the stop stage verify a stop against a process table it never actually read.
+  $processes = @(Get-CimInstance Win32_Process -ErrorAction Stop)
+  if ($processes.Count -eq 0) {
+    # Windows always has system processes; an empty table means the provider
+    # returned nonsense, which is not evidence that AHA2 is stopped.
+    throw "Win32_Process enumeration returned an empty process table."
+  }
+  return $processes
+}
+
+function Get-AHA2ProcessTree {
+  param([scriptblock]$ProcessEnumerator = $null)
+  if ($null -eq $ProcessEnumerator) { $ProcessEnumerator = { Get-AHA2ProcessList } }
+  $processes = @(& $ProcessEnumerator)
+  return @(Get-AHA2TargetProcessIdentities -Processes $processes -RootNames $aha2ProcessNames)
+}
+
+function Test-AHA2ProcessIdentity($Target, [scriptblock]$ProcessLookup = $null) {
+  try {
+    if ($null -ne $ProcessLookup) {
+      $current = & $ProcessLookup $Target.Id
+    } else {
+      $current = Get-CimInstance Win32_Process -Filter "ProcessId=$($Target.Id)" -ErrorAction Stop
+    }
+  } catch {
+    # A failed lookup cannot prove the process is gone. Treat it as still
+    # alive so the caller keeps trying to stop it instead of skipping the kill.
+    return $true
+  }
+  if (-not $current) { return $false }
+  return $current.Name -ieq $Target.Name -and
+    [string]$current.CreationDate -eq $Target.CreationDate
+}
+
+function Invoke-TaskKillNoThrow([int]$ProcessId) {
+  $previousPreference = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = "Continue"
+    $output = @(& $taskkillExecutable /PID $ProcessId /T /F 2>&1)
+    $exitCode = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $previousPreference
+  }
+  if ($exitCode -ne 0) {
+    Write-Warning ("taskkill failed for PID {0} with code {1}: {2}" -f $ProcessId,$exitCode,($output -join " "))
+  }
+}
+
+function Get-AHA2StopProbePaths {
+  return @($server, $tray, $plugin, $databasePath, $databaseWalPath, $databaseShmPath) |
+    Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+}
+
+function Stop-AHA2ProcessTrees {
+  param(
+    [int]$TimeoutSeconds = $StopTimeoutSeconds,
+    [string[]]$ProbePaths = @(),
+    # Injection points for the self-test. Production always uses the real CIM
+    # enumeration and ancestor lookup.
+    [scriptblock]$ProcessEnumerator = $null,
+    [hashtable]$AncestorIds = $null
+  )
+  if ($ProbePaths.Count -eq 0) { $ProbePaths = @(Get-AHA2StopProbePaths) }
+  $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+  $attempts = 0
+  $lockedFiles = @()
+  $remainingProcesses = @()
+  $enumerationError = ""
+
+  while ($true) {
+    $attempts++
+    $targets = @()
+    $enumerationError = ""
+    try {
+      # The ancestor lookup reads CIM too, so it belongs to the same fail-closed
+      # attempt: if either query is unavailable, this attempt cannot verify.
+      $ancestorIdsForAttempt = if ($null -ne $AncestorIds) { $AncestorIds } else { Get-AHA2AncestorIds }
+      $targets = @(Get-AHA2ProcessTree -ProcessEnumerator $ProcessEnumerator |
+        Where-Object { -not $ancestorIdsForAttempt.ContainsKey([int]$_.Id) })
+    } catch {
+      # Fail closed: an unavailable WMI/CIM service means we cannot prove the
+      # old processes are gone, so this attempt can never verify a stop.
+      $enumerationError = $_.Exception.Message
+    }
+    $remainingProcesses = $targets
+    if (-not $enumerationError -and $targets.Count -gt 0) {
+      foreach ($root in @($targets | Where-Object { $_.Depth -eq 0 })) {
+        Invoke-TaskKillNoThrow $root.Id
+      }
+      foreach ($target in @($targets | Sort-Object Depth -Descending)) {
+        if (Test-AHA2ProcessIdentity $target) {
+          Stop-Process -Id $target.Id -Force -ErrorAction SilentlyContinue
+        }
+      }
+      Start-Sleep -Milliseconds 200
+      try {
+        $targets = @(Get-AHA2ProcessTree -ProcessEnumerator $ProcessEnumerator |
+          Where-Object { -not $ancestorIdsForAttempt.ContainsKey([int]$_.Id) })
+        $remainingProcesses = $targets
+      } catch {
+        $enumerationError = $_.Exception.Message
+      }
+    }
+
+    $lockedFiles = @()
+    foreach ($probePath in @($ProbePaths)) {
+      if ((Test-AHA2ExclusiveFileProbe -Path $probePath) -eq $false) {
+        $lockedFiles += $probePath
+      }
+    }
+
+    $satisfied = (-not $enumerationError) -and (Test-AHA2StopSatisfied -RemainingProcesses $targets -LockedFiles $lockedFiles)
+    $decision = Get-AHA2StopAttemptDecision -Satisfied $satisfied -TimedOut ([DateTime]::UtcNow -ge $deadline)
+    if ($decision -eq "verified") {
+      return [pscustomobject]@{
+        Verified = $true
+        Attempts = $attempts
+        LockedFiles = @()
+        Processes = @()
+        EnumerationError = ""
+      }
+    }
+    if ($decision -eq "timeout") { break }
+    Start-Sleep -Milliseconds 300
+  }
+
+  $remainingDescription = @($remainingProcesses | ForEach-Object { "$($_.Name) PID $($_.Id)" })
+  return [pscustomobject]@{
+    Verified = $false
+    Attempts = $attempts
+    LockedFiles = @($lockedFiles)
+    Processes = $remainingDescription
+    EnumerationError = $enumerationError
+  }
 }
 
 if ($SelfTest) {
@@ -778,7 +955,14 @@ if ($DetachedWorker) {
 function Test-AHA2Ancestor {
   $current = $PID
   for ($depth = 0; $depth -lt 32 -and $current -gt 0; $depth++) {
-    $process = Get-CimInstance Win32_Process -Filter "ProcessId=$current" -ErrorAction SilentlyContinue
+    try {
+      $process = Get-CimInstance Win32_Process -Filter "ProcessId=$current" -ErrorAction Stop
+    } catch {
+      # The ancestry cannot be inspected. Detaching is the safe choice: it
+      # keeps the deployment out of the AHA2 process tree it is about to stop,
+      # and the detached worker's stop stage still fails closed on CIM errors.
+      return $true
+    }
     if (-not $process) { return $false }
     if ($process.Name -ieq "aha2.exe") { return $true }
     $current = [int]$process.ParentProcessId
@@ -791,7 +975,9 @@ function Get-AHA2AncestorIds {
   $current = $PID
   for ($depth = 0; $depth -lt 32 -and $current -gt 0; $depth++) {
     $ids[[int]$current] = $true
-    $process = Get-CimInstance Win32_Process -Filter "ProcessId=$current" -ErrorAction SilentlyContinue
+    # Failure here is not "no ancestors": the stop stage must not kill blindly,
+    # so let the CIM error propagate to its fail-closed retry loop.
+    $process = Get-CimInstance Win32_Process -Filter "ProcessId=$current" -ErrorAction Stop
     if (-not $process) { break }
     $current = [int]$process.ParentProcessId
   }
@@ -805,24 +991,42 @@ function ConvertTo-CommandLineArgument([string]$Value) {
 
 function Write-DeploymentResult($Record) {
   if ([string]::IsNullOrWhiteSpace($ResultPath)) { return }
-  $target = [IO.Path]::GetFullPath($ResultPath)
-  $repoPrefix = $repo.TrimEnd('\') + '\'
-  if (-not $target.StartsWith($repoPrefix, [StringComparison]::OrdinalIgnoreCase)) {
-    throw "Deployment result path must stay inside the repository."
-  }
-  New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force | Out-Null
-  $Record.FinishedAt = [DateTime]::UtcNow.ToString("o")
-  $temporaryTarget = Join-Path (Split-Path -Parent $target) (".{0}.{1}.tmp" -f [IO.Path]::GetFileName($target),[Guid]::NewGuid().ToString("N"))
+  $temporaryTarget = ""
   try {
-    $json = $Record | ConvertTo-Json -Depth 8
-    [IO.File]::WriteAllText($temporaryTarget, $json, [Text.UTF8Encoding]::new($false))
-    if (Test-Path -LiteralPath $target -PathType Leaf) {
-      # See Set-AHA2StagedFileAtomic: $null would become an empty backup name.
-      [IO.File]::Replace($temporaryTarget, $target, [NullString]::Value)
-    } else {
-      [IO.File]::Move($temporaryTarget, $target)
+    $target = [IO.Path]::GetFullPath($ResultPath)
+    $repoPrefix = $repo.TrimEnd('\') + '\'
+    if (-not $target.StartsWith($repoPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+      Write-Warning "Deployment result path must stay inside the repository: $target"
+      return
     }
-    $temporaryTarget = ""
+    New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force | Out-Null
+    $Record.FinishedAt = [DateTime]::UtcNow.ToString("o")
+    $json = $Record | ConvertTo-Json -Depth 8
+    $temporaryTarget = Join-Path (Split-Path -Parent $target) (".{0}.{1}.tmp" -f [IO.Path]::GetFileName($target),[Guid]::NewGuid().ToString("N"))
+    try {
+      [IO.File]::WriteAllText($temporaryTarget, $json, [Text.UTF8Encoding]::new($false))
+      if (Test-Path -LiteralPath $target -PathType Leaf) {
+        # See Set-AHA2StagedFileAtomic: $null would become an empty backup name.
+        [IO.File]::Replace($temporaryTarget, $target, [NullString]::Value)
+      } else {
+        [IO.File]::Move($temporaryTarget, $target)
+      }
+      $temporaryTarget = ""
+      return
+    } catch {
+      $atomicError = $_.Exception.Message
+    }
+    # The result file is diagnostic. A locked target or a filesystem without
+    # atomic replace support (e.g. some UNC shares) must never turn a
+    # deployment that already succeeded into a rollback, so fall back to a
+    # direct write and otherwise only warn.
+    try {
+      [IO.File]::WriteAllText($target, $json, [Text.UTF8Encoding]::new($false))
+    } catch {
+      Write-Warning ("Could not write deployment result {0}: atomic error: {1}; direct write error: {2}" -f $target,$atomicError,$_.Exception.Message)
+    }
+  } catch {
+    Write-Warning ("Could not prepare deployment result {0}: {1}" -f $ResultPath,$_.Exception.Message)
   } finally {
     if ($temporaryTarget -and (Test-Path -LiteralPath $temporaryTarget -PathType Leaf)) {
       Remove-Item -LiteralPath $temporaryTarget -Force -ErrorAction SilentlyContinue
@@ -840,97 +1044,6 @@ function Wait-AHA2Health {
     Start-Sleep -Milliseconds 500
   } while ([DateTime]::UtcNow -lt $deadline)
   throw "AHA2 health check did not pass."
-}
-
-function Get-AHA2ProcessTree {
-  $processes = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
-  return @(Get-AHA2TargetProcessIdentities -Processes $processes -RootNames $aha2ProcessNames)
-}
-
-function Test-AHA2ProcessIdentity($Target) {
-  $current = Get-CimInstance Win32_Process -Filter "ProcessId=$($Target.Id)" -ErrorAction SilentlyContinue
-  return $current -and
-    $current.Name -ieq $Target.Name -and
-    [string]$current.CreationDate -eq $Target.CreationDate
-}
-
-function Invoke-TaskKillNoThrow([int]$ProcessId) {
-  $previousPreference = $ErrorActionPreference
-  try {
-    $ErrorActionPreference = "Continue"
-    $output = @(& $taskkillExecutable /PID $ProcessId /T /F 2>&1)
-    $exitCode = $LASTEXITCODE
-  } finally {
-    $ErrorActionPreference = $previousPreference
-  }
-  if ($exitCode -ne 0) {
-    Write-Warning ("taskkill failed for PID {0} with code {1}: {2}" -f $ProcessId,$exitCode,($output -join " "))
-  }
-}
-
-function Get-AHA2StopProbePaths {
-  return @($server, $tray, $plugin, $databasePath, $databaseWalPath, $databaseShmPath) |
-    Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
-}
-
-function Stop-AHA2ProcessTrees {
-  param(
-    [int]$TimeoutSeconds = $StopTimeoutSeconds,
-    [string[]]$ProbePaths = @()
-  )
-  if ($ProbePaths.Count -eq 0) { $ProbePaths = @(Get-AHA2StopProbePaths) }
-  $ancestorIds = Get-AHA2AncestorIds
-  $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
-  $attempts = 0
-  $lockedFiles = @()
-  $remainingProcesses = @()
-
-  while ($true) {
-    $attempts++
-    $targets = @(Get-AHA2ProcessTree | Where-Object { -not $ancestorIds.ContainsKey([int]$_.Id) })
-    $remainingProcesses = $targets
-    if ($targets.Count -gt 0) {
-      foreach ($root in @($targets | Where-Object { $_.Depth -eq 0 })) {
-        Invoke-TaskKillNoThrow $root.Id
-      }
-      foreach ($target in @($targets | Sort-Object Depth -Descending)) {
-        if (Test-AHA2ProcessIdentity $target) {
-          Stop-Process -Id $target.Id -Force -ErrorAction SilentlyContinue
-        }
-      }
-      Start-Sleep -Milliseconds 200
-      $targets = @(Get-AHA2ProcessTree | Where-Object { -not $ancestorIds.ContainsKey([int]$_.Id) })
-      $remainingProcesses = $targets
-    }
-
-    $lockedFiles = @()
-    foreach ($probePath in @($ProbePaths)) {
-      if ((Test-AHA2ExclusiveFileProbe -Path $probePath) -eq $false) {
-        $lockedFiles += $probePath
-      }
-    }
-
-    $satisfied = Test-AHA2StopSatisfied -RemainingProcesses $targets -LockedFiles $lockedFiles
-    $decision = Get-AHA2StopAttemptDecision -Satisfied $satisfied -TimedOut ([DateTime]::UtcNow -ge $deadline)
-    if ($decision -eq "verified") {
-      return [pscustomobject]@{
-        Verified = $true
-        Attempts = $attempts
-        LockedFiles = @()
-        Processes = @()
-      }
-    }
-    if ($decision -eq "timeout") { break }
-    Start-Sleep -Milliseconds 300
-  }
-
-  $remainingDescription = @($remainingProcesses | ForEach-Object { "$($_.Name) PID $($_.Id)" })
-  return [pscustomobject]@{
-    Verified = $false
-    Attempts = $attempts
-    LockedFiles = @($lockedFiles)
-    Processes = $remainingDescription
-  }
 }
 
 $script:sqliteQuickCheckSource = @'
@@ -1143,6 +1256,7 @@ try {
     $detail = @()
     if ($stop.LockedFiles.Count -gt 0) { $detail += ("locked files: " + ($stop.LockedFiles -join ", ")) }
     if ($stop.Processes.Count -gt 0) { $detail += ("remaining processes: " + ($stop.Processes -join ", ")) }
+    if ($stop.EnumerationError) { $detail += ("process enumeration failed: " + $stop.EnumerationError) }
     throw ("AHA2 processes or file handles did not stop within {0}s; refusing to modify the installation. {1}" -f $StopTimeoutSeconds,($detail -join "; "))
   }
   $state.StopVerified = $true
@@ -1220,12 +1334,12 @@ try {
   $state.Stage = "install"
   $mutationStageReached = $true
   if ($UpdateExistingInstallInPlace) {
-    [void](Set-AHA2FileFromSource -Source $serverInput -Destination $server)
-    [void](Set-AHA2FileFromSource -Source $trayInput -Destination $tray)
+    Set-AHA2InstalledFile -Record $state -Source $serverInput -Destination $server
+    Set-AHA2InstalledFile -Record $state -Source $trayInput -Destination $tray
     if ($pluginInput -and $pluginManifestInput) {
       New-Item -ItemType Directory -Path (Split-Path -Parent $plugin) -Force | Out-Null
-      [void](Set-AHA2FileFromSource -Source $pluginInput -Destination $plugin)
-      [void](Set-AHA2FileFromSource -Source $pluginManifestInput -Destination $pluginManifest)
+      Set-AHA2InstalledFile -Record $state -Source $pluginInput -Destination $plugin
+      Set-AHA2InstalledFile -Record $state -Source $pluginManifestInput -Destination $pluginManifest
     }
   } else {
     # The repo lives on the WSL filesystem, so $installer is a UNC path. Windows
@@ -1254,7 +1368,11 @@ try {
   $state.StopAttempts = [Math]::Max([int]$state.StopAttempts, [int]$stopBeforeStart.Attempts)
   if (-not $stopBeforeStart.Verified) {
     Add-AHA2LockedFile -Record $state -Paths $stopBeforeStart.LockedFiles
-    throw ("AHA2 processes or file handles remained locked before startup. Locked files: {0}" -f ($stopBeforeStart.LockedFiles -join ", "))
+    $stopDetail = @()
+    if ($stopBeforeStart.LockedFiles.Count -gt 0) { $stopDetail += ("locked files: " + ($stopBeforeStart.LockedFiles -join ", ")) }
+    if ($stopBeforeStart.Processes.Count -gt 0) { $stopDetail += ("remaining processes: " + ($stopBeforeStart.Processes -join ", ")) }
+    if ($stopBeforeStart.EnumerationError) { $stopDetail += ("process enumeration failed: " + $stopBeforeStart.EnumerationError) }
+    throw ("AHA2 processes or file handles could not be verified stopped before startup. " + ($stopDetail -join "; "))
   }
   $state.StopVerified = $true
   $registerArguments = @{
@@ -1318,7 +1436,9 @@ try {
   if (-not $stopAfterFailure.Verified) {
     $state.StopVerified = $false
     $state.RollbackVerified = $false
-    $detail = (($stopAfterFailure.LockedFiles + $stopAfterFailure.Processes) -join ", ")
+    $detailParts = @($stopAfterFailure.LockedFiles) + @($stopAfterFailure.Processes)
+    if ($stopAfterFailure.EnumerationError) { $detailParts += ("process enumeration failed: " + $stopAfterFailure.EnumerationError) }
+    $detail = ($detailParts -join ", ")
     if ($mutationStageReached) {
       $state.Stage = "rollback"
       $state.rollback_health = ("blocked: AHA2 processes or file handles did not stop; nothing was restored. Details: " + $detail)
@@ -1401,9 +1521,11 @@ try {
         if ($quickCheck.Ok) {
           $rollbackVerified = $true
         } else {
+          Add-AHA2LockedFile -Record $state -Paths @($databasePath)
           $rollbackHealth = ("failed: restored database did not pass PRAGMA quick_check: {0}" -f $quickCheck.Health)
         }
       } catch {
+        Add-AHA2LockedFile -Record $state -Paths @($databasePath,$databaseWalPath,$databaseShmPath)
         $rollbackHealth = ("failed: database restore failed: {0}" -f $_.Exception.Message)
       }
     } elseif (Test-Path -LiteralPath $databasePath -PathType Leaf) {

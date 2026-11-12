@@ -126,7 +126,8 @@ powershell.exe -ExecutionPolicy Bypass -File scripts\build-and-deploy-windows-us
 `deploy-windows-user.ps1` 在替换任何已安装文件或数据库前，必须先“验证已停”：重新枚举
 `aha2.exe`、`aha2-tray.exe`、`aha2-channel-feishu.exe` 及其全部后端子进程，确认进程消失后
 再以独占方式打开 `aha2.exe`、`aha2.db`、WAL/SHM 等文件做探测；失败会按 `-StopTimeoutSeconds`
-（默认 45 秒）重试，超时则拒绝继续修改，而不是边跑边复制。备份只在这个验证通过后执行，
+（默认 45 秒）重试，超时则拒绝继续修改，而不是边跑边复制。进程枚举或进程身份查询失败时按“未验证/
+仍存活”处理，绝不把 WMI/CIM 错误当成“没有进程”。备份只在这个验证通过后执行，
 并对每个复制结果校验大小与 SHA256。失败回滚同样先验证停止，再用“同目录临时文件 + 哈希校验 +
 `[IO.File]::Replace` 原子替换”恢复二进制、`aha2.db`/`aha2.db-wal` 以及备份中的
 `secrets.json`/`setup-token`；部署前不存在的文件（例如首次安装的 Feishu 插件与清单）在回滚时删除。
@@ -138,10 +139,13 @@ powershell.exe -ExecutionPolicy Bypass -File scripts\build-and-deploy-windows-us
 结果 JSON 中的诊断字段：
 
 - `Stage`：失败时最后执行的阶段（`stop`/`backup`/`install`/`health`/`rollback`）；成功时为 `health`。
-- `FailedStage`：最初触发失败的阶段；`LockedFiles`：无法独占或无法原子替换的文件。
+- `FailedStage`：最初触发失败的阶段；`LockedFiles`：无法独占、无法原子替换或恢复后校验不通过的文件。
 - `BackupSHA256`/`BackupSizes`/`BackupVerified`：备份校验结果；`StopVerified`/`StopAttempts`：停止验证结果与重试次数。
 - `RollbackVerified`：回滚的二进制与数据库是否已原子恢复且 `quick_check` 通过。
 - `rollback_health`：回滚与恢复后启动的完整结论；`ManualRecovery`：需要人工恢复时的步骤与备份校验值。
+
+结果文件是诊断产物：写入是 best-effort，原子替换失败（目标被锁、文件系统不支持等）时会退回直接写入，
+仍失败则只记录告警，不会因为写结果失败而中断或回滚一次已经成功的部署。
 
 `-SelfTest` 只检查纯函数、恢复计划和临时目录中的原子替换，不读取或修改安装目录、进程、计划任务和数据库，
 可在任意 PowerShell 7 上运行；`scripts/test-windows-installer.ps1` 也会在 Windows 上执行它。
