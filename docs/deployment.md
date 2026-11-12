@@ -123,7 +123,14 @@ powershell.exe -ExecutionPolicy Bypass -File scripts\build-and-deploy-windows-us
 
 ### 部署失败路径与结果字段
 
-`deploy-windows-user.ps1` 在替换任何已安装文件或数据库前，必须先“验证已停”：重新枚举
+`deploy-windows-user.ps1` 在停止 AHA2、复制备份之前先做磁盘空间预检：统计数据目录所在卷上
+`aha2.db`、`aha2.db-wal`、`aha2.db-shm` 的当前大小，需求为三件套大小 × 2（备份复制加 WAL 增长和
+临时文件余量）+ 安装目录预留 200MB + 1GiB 安全余量。可用空间不足时脚本直接失败，结果 JSON 记录
+`Stage=preflight`、`Volume`、`FreeBytes`、`RequiredBytes`，**不会停止 AHA2，也不会复制或替换任何文件**；
+外层 `build-and-deploy-windows-user.ps1` 和 `local_build.sh` 会按非 0 退出码原样报错。空间足够时
+多打一行 Free/Required 日志，结果 JSON 同样带上这三个诊断字段；后续流程与之前一致。
+
+在替换任何已安装文件或数据库前，还必须先“验证已停”：重新枚举
 `aha2.exe`、`aha2-tray.exe`、`aha2-channel-feishu.exe` 及其全部后端子进程，确认进程消失后
 再以独占方式打开 `aha2.exe`、`aha2.db`、WAL/SHM 等文件做探测；失败会按 `-StopTimeoutSeconds`
 （默认 45 秒）重试，超时则拒绝继续修改，而不是边跑边复制。进程枚举或进程身份查询失败时按“未验证/
@@ -138,7 +145,8 @@ powershell.exe -ExecutionPolicy Bypass -File scripts\build-and-deploy-windows-us
 
 结果 JSON 中的诊断字段：
 
-- `Stage`：失败时最后执行的阶段（`stop`/`backup`/`install`/`health`/`rollback`）；成功时为 `health`。
+- `Stage`：失败时最后执行的阶段（`preflight`/`stop`/`backup`/`install`/`health`/`rollback`）；成功时为 `health`。
+- `Volume`/`FreeBytes`/`RequiredBytes`：磁盘预检检查的卷、可用字节和需求字节；预检失败时同时写入结果 JSON。
 - `FailedStage`：最初触发失败的阶段；`LockedFiles`：无法独占、无法原子替换或恢复后校验不通过的文件。
 - `BackupSHA256`/`BackupSizes`/`BackupVerified`：备份校验结果；`StopVerified`/`StopAttempts`：停止验证结果与重试次数。
 - `RollbackVerified`：回滚的二进制与数据库是否已原子恢复且 `quick_check` 通过。
