@@ -121,7 +121,7 @@ try {
 
 $userDeployPath = Join-Path $repo "scripts\deploy-windows-user.ps1"
 $userDeploy = Get-Content -Raw -Encoding UTF8 -LiteralPath $userDeployPath
-foreach ($contract in @("ProviderPath", "GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)", "-WorkingDirectory `$install", "AllowCustomUserWritableInstallDir", "UpdateExistingInstallInPlace", "existing-install-in-place", "Custom install directory is not writable", "WriteAccessVerified", "-PerUser", "ElevationRequired=`$false", "AHA2-Setup-User-x64.exe", "Wait-AHA2Health", "Get-FileHash", "AHA2 User", "AHA2 User Update", "DetachedWorker", "New-ScheduledTaskAction", "RunLevel Limited", "Stop-AHA2ProcessTrees", "System32\taskkill.exe", "`$taskkillExecutable", "`$global:LASTEXITCODE = 0", "/T", "/SKIPUSERTASK=1", "user-deploy-result.json", "stagedInstaller", "Unblock-File", "Start-Process -FilePath `$stagedInstaller")) {
+foreach ($contract in @("ProviderPath", "GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)", "-WorkingDirectory `$install", "AllowCustomUserWritableInstallDir", "UpdateExistingInstallInPlace", "existing-install-in-place", "Custom install directory is not writable", "WriteAccessVerified", "-PerUser", "ElevationRequired=`$false", "AHA2-Setup-User-x64.exe", "Wait-AHA2Health", "Get-FileHash", "AHA2 User", "AHA2 User Update", "DetachedWorker", "New-ScheduledTaskAction", "RunLevel Limited", "Stop-AHA2ProcessTrees", "System32\taskkill.exe", "`$taskkillExecutable", "`$global:LASTEXITCODE = 0", "/T", "/SKIPUSERTASK=1", "user-deploy-result.json", "stagedInstaller", "Unblock-File", "Start-Process -FilePath `$stagedInstaller", "-SelfTest", "StopTimeoutSeconds", "Test-AHA2ExclusiveFileProbe", "Set-AHA2StagedFileAtomic", "Restore-AHA2DatabaseFromBackup", "PRAGMA quick_check", "winsqlite3.dll", "LockedFiles", "BackupSHA256", "RollbackVerified", "rollback_health")) {
     if (-not $userDeploy.Contains($contract)) {
         throw "Per-user deployment contract is missing: $contract"
     }
@@ -129,12 +129,26 @@ foreach ($contract in @("ProviderPath", "GetFolderPath([Environment+SpecialFolde
 if ($userDeploy.Contains("Start-Process -FilePath `$installer")) {
     throw "Per-user deployment must not launch the installer directly from the WSL UNC path; stage a local copy first."
 }
+if ($userDeploy.Contains('Copy-Item -LiteralPath $backupFile -Destination')) {
+    throw "Per-user rollback must not copy a backup over a live file; stage and atomically replace it."
+}
+if (-not $userDeploy.Contains("[IO.File]::Replace")) {
+    throw "Per-user rollback must use an atomic file replacement for binaries and the database."
+}
+if ($userDeploy.Contains("[IO.File]::Replace(`$TemporaryPath, `$Destination, `$null)") -or
+    $userDeploy.Contains("[IO.File]::Replace(`$temporaryTarget, `$target, `$null)")) {
+    throw "Atomic replacement must pass [NullString]::Value, not `$null, as the backup name."
+}
+if (-not $userDeploy.Contains("[NullString]::Value")) {
+    throw "Atomic replacement must pass [NullString]::Value as the null backup name."
+}
 $taskSnapshotIndex = $userDeploy.IndexOf('$previousTaskXML')
 $stopBeforeBackupIndex = $userDeploy.IndexOf('Stop-AHA2ProcessTrees', $taskSnapshotIndex)
-$databaseBackupIndex = $userDeploy.IndexOf('foreach ($name in @("aha2.db"', $taskSnapshotIndex)
+$databaseBackupIndex = $userDeploy.IndexOf('$state.Stage = "backup"', $taskSnapshotIndex)
 if ($stopBeforeBackupIndex -lt 0 -or $databaseBackupIndex -lt 0 -or $stopBeforeBackupIndex -gt $databaseBackupIndex) {
-    throw "Per-user deployment must stop the complete AHA2 process tree before copying SQLite backup files."
+    throw "Per-user deployment must stop and verify the complete AHA2 process tree before copying SQLite backup files."
 }
+& $userDeployPath -SelfTest
 & $userDeployPath -RepoPath $repo -InputExe (Join-Path $repo "go.mod") -InputTrayExe (Join-Path $repo "go.mod") -InstallDir (Join-Path $localAppData "Programs\AHA2-validation") -DataDir (Join-Path ([IO.Path]::GetTempPath()) "AHA2 User Data") -ValidateOnly
 $customInstallValidation = Join-Path $repo ".tools\AHA2 Custom Install Validation"
 New-Item -ItemType Directory -Path $customInstallValidation -Force | Out-Null
