@@ -74,6 +74,12 @@ jobs:
           go build -trimpath -ldflags "-s -w -X main.version=$version -X main.webVersion=$webVersion" -o dist\package-input\aha2.exe .\cmd\aha
           go build -trimpath -ldflags "-s -w -H windowsgui -X main.version=$version" -o dist\package-input\aha2-tray.exe .\cmd\aha-tray
 
+      - name: Build Agent API stdio helpers
+        shell: powershell
+        run: |
+          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          bash -lc "GO_BIN=go VERSION=$version bash scripts/build-agent-proxy-helpers.sh dist/agent-proxy"
+
       - name: Install Inno Setup 6
         shell: powershell
         run: choco install innosetup --no-progress -y

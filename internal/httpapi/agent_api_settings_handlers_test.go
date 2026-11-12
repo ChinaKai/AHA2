@@ -65,6 +65,30 @@ func TestAgentAPISettingsAndWorkspaceReverseProbe(t *testing.T) {
 		t.Fatalf("update status=%d body=%#v", response.StatusCode, settings)
 	}
 
+	// stdio_proxy is the one switch the settings page renders. Saving it must
+	// survive a fresh GET (the page reload path) and a later URL-only save must
+	// not silently turn it off.
+	response = requestJSON(t, client, http.MethodPut, server.URL+"/api/v1/settings/agent-api", map[string]any{"url": server.URL, "stdio_proxy": true}, csrf)
+	decodeResponse(t, response, &settings)
+	if response.StatusCode != http.StatusOK || !settings.AgentAPI.StdioProxy {
+		t.Fatalf("enable stdio status=%d body=%#v", response.StatusCode, settings)
+	}
+	response = requestJSON(t, client, http.MethodGet, server.URL+"/api/v1/settings/agent-api", nil, "")
+	decodeResponse(t, response, &settings)
+	if response.StatusCode != http.StatusOK || !settings.AgentAPI.StdioProxy {
+		t.Fatalf("stdio did not survive reload status=%d body=%#v", response.StatusCode, settings)
+	}
+	response = requestJSON(t, client, http.MethodPut, server.URL+"/api/v1/settings/agent-api", map[string]any{"url": server.URL}, csrf)
+	decodeResponse(t, response, &settings)
+	if response.StatusCode != http.StatusOK || !settings.AgentAPI.StdioProxy {
+		t.Fatalf("url-only save cleared stdio status=%d body=%#v", response.StatusCode, settings)
+	}
+	response = requestJSON(t, client, http.MethodPut, server.URL+"/api/v1/settings/agent-api", map[string]any{"url": server.URL, "stdio_proxy": false}, csrf)
+	decodeResponse(t, response, &settings)
+	if response.StatusCode != http.StatusOK || settings.AgentAPI.StdioProxy {
+		t.Fatalf("disable stdio status=%d body=%#v", response.StatusCode, settings)
+	}
+
 	response = requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/workspaces/"+workspace.ID+"/detect", nil, csrf)
 	var detected struct {
 		Workspace domain.Workspace `json:"workspace"`

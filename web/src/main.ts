@@ -2047,7 +2047,11 @@ async function ensureViewData(view: View, force = false): Promise<void> {
     if (result.proxy) state.proxySettings = result.proxy;
     if (result.managed) state.managedProxy = result.managed;
   }));
-  if (view === "advanced") jobs.push(loadResource("advanced", force, async () => {
+  // Agent API settings are rendered by the "other" settings page as well as
+  // the advanced page. Keying the load off resourcesForView keeps a direct
+  // refresh of #other from rendering the default (off) state before the real
+  // stored value is fetched.
+  if (resourcesForView(view).includes("advanced")) jobs.push(loadResource("advanced", force, async () => {
     const [security, agentAPI, backend, network] = await Promise.all([api.securitySettings(), api.agentAPISettings(), api.backendSettings(), api.networkSettings()]);
     if (security.security) state.securitySettings = security.security;
     if (agentAPI.agent_api) state.agentAPISettings = agentAPI.agent_api;

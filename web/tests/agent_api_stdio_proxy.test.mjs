@@ -33,3 +33,18 @@ test("the agent api settings save reads the checkbox from the form data", async 
   assert.match(app, /updateAgentAPISettings\(\{\s*url,\s*stdio_proxy: stdioProxy\s*\}\)/,
     "the settings save does not send stdio_proxy");
 });
+
+test("a direct load of the other settings view fetches the agent api settings", async () => {
+  const app = await readFile(resolve(root, "dist", "app.js"), "utf8");
+  // The Agent API panel lives on "other", but only the "advanced" view used to
+  // load its data. A refresh straight into #other therefore rendered the
+  // default (stdio_proxy off) state and never asked the server.
+  assert.match(app, /case "other":\s*return \[\s*"advanced"\s*\];/,
+    "the other settings view no longer maps to the advanced resource");
+  assert.match(app, /if \(resourcesForView\(view\)\.includes\("advanced"\)\) jobs\.push\(loadResource\("advanced"/,
+    "ensureViewData no longer loads advanced settings for every view that renders them");
+  assert.match(app, /state\.agentAPISettings = agentAPI\.agent_api/,
+    "the agent api response is no longer stored");
+  assert.match(app, /agentAPI\.stdio_proxy \? "checked" : ""/,
+    "the stdio switch is no longer rendered from the loaded settings");
+});
