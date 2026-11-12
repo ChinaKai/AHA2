@@ -126,25 +126,22 @@ func (s *Server) deleteWorkspace(writer http.ResponseWriter, request *http.Reque
 		})
 		return
 	}
+	// Snapshot the Tasks before the transaction so hardware sessions and scratch
+	// directories can be cleaned after their rows are gone. The store deletes the
+	// Tasks, their sync tombstones and the Workspace in one transaction, so a
+	// refusal leaves both sides intact.
 	tasks, _ := s.store.ListTasks(request.Context(), "")
-	var active []string
-	for _, task := range tasks {
-		if task.WorkspaceID != id {
-			continue
-		}
-		ok, err := s.taskHasActiveTurn(request.Context(), task.ID)
-		if err != nil {
+	if err := s.store.DeleteWorkspaceWithSyncTombstone(request.Context(), id); err != nil {
+		switch {
+		case errors.Is(err, store.ErrWorkspaceHasActiveTurn):
+			writeJSON(writer, http.StatusConflict, map[string]any{
+				"ok": false, "error": "active_turn_exists", "message": "Workspace 下有执行中的任务，请先中断或等待完成后再删除",
+			})
+		case errors.Is(err, store.ErrWorkspaceInUse):
+			writeJSON(writer, http.StatusConflict, map[string]any{"ok": false, "error": "workspace_in_use", "message": "Workspace 仍被其他 Workspace 的任务或运行记录引用"})
+		default:
 			writeError(writer, http.StatusInternalServerError, "delete_workspace_failed")
-			return
 		}
-		if ok {
-			active = append(active, task.ID)
-		}
-	}
-	if len(active) > 0 {
-		writeJSON(writer, http.StatusConflict, map[string]any{
-			"ok": false, "error": "active_turn_exists", "message": "Workspace 下有执行中的任务，请先中断或等待完成后再删除",
-		})
 		return
 	}
 	for _, task := range tasks {
@@ -152,25 +149,7 @@ func (s *Server) deleteWorkspace(writer http.ResponseWriter, request *http.Reque
 			continue
 		}
 		s.cleanupTaskHardware(request.Context(), task.ID)
-		if err := s.store.DeleteTaskWithSyncTombstone(request.Context(), task.ID); err != nil {
-			writeError(writer, http.StatusInternalServerError, "delete_workspace_task_failed")
-			return
-		}
-		s.cleanupTaskScratch(request.Context(), task)
-		if task.RuntimeConfigSnapshotID != "" {
-			if err := s.store.DeleteRuntimeSnapshot(request.Context(), task.RuntimeConfigSnapshotID); err != nil {
-				writeError(writer, http.StatusInternalServerError, "delete_workspace_snapshot_failed")
-				return
-			}
-		}
-	}
-	if err := s.store.DeleteWorkspaceWithSyncTombstone(request.Context(), id); err != nil {
-		if errors.Is(err, store.ErrWorkspaceInUse) {
-			writeJSON(writer, http.StatusConflict, map[string]any{"ok": false, "error": "workspace_in_use", "message": "Workspace 仍被任务、运行记录或 Backend Session 引用"})
-			return
-		}
-		writeError(writer, http.StatusInternalServerError, "delete_workspace_failed")
-		return
+		s.cleanupTaskScratchIn(request.Context(), item, task)
 	}
 	s.cleanupWorkspaceSecret(item)
 	s.audit(request, "workspace.delete", "workspace", id, nil)
@@ -257,6 +236,15 @@ func (s *Server) cleanupTaskScratch(ctx context.Context, task domain.Task) {
 		return
 	}
 	if err := s.app.CleanupTaskScratch(ctx, task); err != nil && s.logger != nil {
+		s.logger.Warn("cleanup task scratch failed", "task", task.ID, "error", err)
+	}
+}
+
+func (s *Server) cleanupTaskScratchIn(ctx context.Context, workspace domain.Workspace, task domain.Task) {
+	if s.app == nil {
+		return
+	}
+	if err := s.app.CleanupTaskScratchIn(ctx, workspace, task); err != nil && s.logger != nil {
 		s.logger.Warn("cleanup task scratch failed", "task", task.ID, "error", err)
 	}
 }

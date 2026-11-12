@@ -1003,6 +1003,13 @@ func (s *Service) CleanupTaskScratch(ctx context.Context, task domain.Task) erro
 	if err != nil {
 		return err
 	}
+	return s.CleanupTaskScratchIn(ctx, item, task)
+}
+
+// CleanupTaskScratchIn removes a Task's scratch directory using an already
+// loaded Workspace. Callers that deleted the Workspace row first still need the
+// root path and transport that lived on that row.
+func (s *Service) CleanupTaskScratchIn(ctx context.Context, item domain.Workspace, task domain.Task) error {
 	if item.SSHCredentialRef != "" && s.secrets != nil {
 		item.SSHPassword, _ = s.secrets.Get(item.SSHCredentialRef)
 	}
