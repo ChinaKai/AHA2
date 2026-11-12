@@ -428,7 +428,6 @@ begin
     read by the page initialisation that no longer exists, so make sure it is
     cleared rather than inherited. }
   SetPreviousData(PreviousDataKey, 'AgentAPIURL', '');
-  SetPreviousData(PreviousDataKey, 'AllowInsecureAgentAPI', '0');
 end;
 
 function RunSC(const Arguments: String): Boolean;

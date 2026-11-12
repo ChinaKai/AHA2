@@ -110,7 +110,7 @@ foreach ($contract in $requiredContracts) {
     }
 }
 $userTaskSource = Get-Content -Raw -Encoding UTF8 -LiteralPath $userTaskScript
-foreach ($contract in @("TrayExecutable", "ServerExecutable", "New-ScheduledTaskAction -Execute `$trayPath", "--server", "--listen", "--data-dir", "New-ScheduledTaskTrigger -AtLogOn", "WindowsIdentity]::GetCurrent().Name", "Win32_ComputerSystem", "OrdinalIgnoreCase", "-LogonType Interactive", "-RunLevel Limited", "-RestartCount 3", "-RestartInterval", "Register-ScheduledTask", "Start-ScheduledTask", "AllowInsecureAgentAPI")) {
+foreach ($contract in @("TrayExecutable", "ServerExecutable", "New-ScheduledTaskAction -Execute `$trayPath", "--server", "--listen", "--data-dir", "New-ScheduledTaskTrigger -AtLogOn", "WindowsIdentity]::GetCurrent().Name", "Win32_ComputerSystem", "OrdinalIgnoreCase", "-LogonType Interactive", "-RunLevel Limited", "-RestartCount 3", "-RestartInterval", "Register-ScheduledTask", "Start-ScheduledTask", "--agent-api-url")) {
     if (-not $userTaskSource.Contains($contract)) {
         throw "Windows tray login task contract is missing: $contract"
     }

@@ -16,6 +16,7 @@ param(
   [string]$AgentID = $env:AHA_AGENT_ID,
   [int]$HealthTimeoutSeconds = 45,
   [bool]$AllowCrossOrigin = $true,
+  # Deprecated no-op, kept for callers written before the security convergence.
   [switch]$AllowInsecureAgentAPI,
   [switch]$Worker,
   [switch]$ValidateOnly
@@ -57,7 +58,6 @@ function Start-AHA2([string]$Executable) {
   $arguments = @("start") + $scopeArgs + @("--cwd", $managedDirectory, $ServiceName, "--", $Executable, "serve", "--listen", $Listen, "--data-dir", $data)
   if ($AllowCrossOrigin) { $arguments += "--allow-cross-origin" }
   if ($AgentAPIURL) { $arguments += @("--agent-api-url", $AgentAPIURL) }
-  if ($AllowInsecureAgentAPI) { $arguments += "--allow-insecure-agent-api" }
   Invoke-ManagedProcess $arguments | Out-Null
 }
 
@@ -83,7 +83,6 @@ if (-not $Worker) {
     "-Listen", $Listen, "-HealthURL", $HealthURL, "-HealthTimeoutSeconds", [string]$HealthTimeoutSeconds
   )
   if ($AgentAPIURL) { $workerCommand += @("-AgentAPIURL", $AgentAPIURL) }
-  if ($AllowInsecureAgentAPI) { $workerCommand += "-AllowInsecureAgentAPI" }
   if ($RunID) { $workerCommand += @("-RunID", $RunID) }
   if ($TaskID) { $workerCommand += @("-TaskID", $TaskID) }
   if ($AgentID) { $workerCommand += @("-AgentID", $AgentID) }

@@ -298,7 +298,7 @@ const state: State = {
   managedProxy: {configured: false, profiles: [], url_configured: false, nodes: [], unsupported_count: 0, unsupported_types: [], status: "idle"},
   securitySettings: {validate_origin: true, access_scope: "lan", startup_override: false},
   networkSettings: {listen_address: "", startup_listen_address: "", restart_required: false},
-  agentAPISettings: {url: "", allow_insecure: false, effective_url: "http://127.0.0.1:8766", effective_allow_insecure: false},
+  agentAPISettings: {url: "", effective_url: "http://127.0.0.1:8766"},
 	backendSettings: {idle_timeout_seconds: 10 * 60, turn_timeout_seconds: 10 * 60 * 60},
   generalSettings: {language: "auto"},
   dataInventory: null,
@@ -967,9 +967,7 @@ function openWorkspaceDialog(ws: Workspace | null): void {
   const sshAuth = dialog.querySelector<HTMLSelectElement>('[name="ssh_auth"]');
   const sshPassword = dialog.querySelector<HTMLInputElement>('[name="ssh_password"]');
   const clearSSHPassword = dialog.querySelector<HTMLInputElement>('[name="clear_ssh_password"]');
-  const agentAPIMode = dialog.querySelector<HTMLSelectElement>('[name="agent_api_mode"]');
-  const agentAPIURL = dialog.querySelector<HTMLInputElement>('[name="agent_api_url"]');
-  const agentAPIResult = dialog.querySelector<HTMLElement>(".workspace-agent-api-result");
+  const agentAPIStatus = dialog.querySelector<HTMLElement>(".workspace-agent-api-status");
   if (editId) editId.value = ws ? ws.id : "";
   if (projectSelect && ws) projectSelect.value = ws.project_id;
   if (nameInput) nameInput.value = ws ? ws.name : "本地开发";
@@ -995,12 +993,8 @@ function openWorkspaceDialog(ws: Workspace | null): void {
     clearSSHPassword.checked = false;
     clearSSHPassword.disabled = !ws?.ssh_password_configured;
   }
-  if (agentAPIMode) agentAPIMode.value = ws?.agent_api_mode || "auto";
-  if (agentAPIURL) agentAPIURL.value = ws?.agent_api_url || "";
-  if (agentAPIResult) {
-    agentAPIResult.textContent = ws?.agent_api_status === "ready" && ws.agent_api_resolved_url
-      ? `当前已验证：${ws.agent_api_resolved_url}`
-      : ws?.agent_api_error || "保存后点击 Workspace 的“测试连接”，AHA2 会从该 Workspace 反向验证并保存有效地址。";
+  if (agentAPIStatus) {
+    agentAPIStatus.textContent = workspaceAgentAPIStatusText(ws);
   }
   syncWorkspaceFields();
   const title = dialog.querySelector(".dialog-head h2");
@@ -1329,9 +1323,6 @@ function syncWorkspaceFields(): void {
   const sshAuth = document.querySelector<HTMLSelectElement>('[name="ssh_auth"]');
   const sshPassword = document.querySelector<HTMLInputElement>('[name="ssh_password"]');
   const clearSSHPassword = document.querySelector<HTMLInputElement>('[name="clear_ssh_password"]');
-  const agentAPIMode = document.querySelector<HTMLSelectElement>("#ws-agent-api-mode");
-  const agentAPIURL = document.querySelector<HTMLInputElement>("#ws-agent-api-url");
-  const agentAPIManual = document.querySelector<HTMLElement>(".workspace-agent-api-manual");
   if (!localitySelect || !transportSelect) return;
   const locality = localitySelect.value;
   const allowed = workspaceTransportOptions(locality);
@@ -1359,13 +1350,26 @@ function syncWorkspaceFields(): void {
     );
   }
   if (transport === "wsl") populateWSLDistros();
-  const manualAgentAPI = agentAPIMode?.value === "manual";
-  if (agentAPIManual) agentAPIManual.style.display = manualAgentAPI ? "" : "none";
-  if (agentAPIURL) {
-    agentAPIURL.disabled = !manualAgentAPI;
-    agentAPIURL.required = manualAgentAPI;
-  }
   if (rootInput) rootInput.placeholder = transport === "wsl" ? "/home/user/project（WSL 内路径）" : transport === "ssh" ? "/workspace 或远程路径" : "E:\\project 或本机路径";
+}
+
+// workspaceAgentAPIStatusText describes the connection AHA selected. It is
+// deliberately read-only: the normal Workspace dialog no longer offers a mode or
+// address, because choosing either by hand is what made remote workspaces break
+// when they left the LAN.
+function workspaceAgentAPIStatusText(workspace: Workspace | null): string {
+  if (!workspace) return "保存后由 AHA 自动选择连接方式。";
+  const probe = (workspace.capabilities?.agent_api || {}) as {via?: string; url?: string; error?: string};
+  const migration = workspace.agent_api_migration_note ? `配置迁移：${workspace.agent_api_migration_note}` : "";
+  if ((workspace.agent_api_status === "ready" || probe.status === "ready") && (workspace.agent_api_resolved_url || probe.url)) {
+    const via = probe.via === "tunnel" ? "SSH 反向隧道" : "直连";
+    return `${via}（自动选择）${migration ? ` · ${migration}` : ""}`;
+  }
+  if (workspace.agent_api_status === "error" || probe.status === "unavailable") {
+    const reason = workspace.agent_api_error || probe.error || "自动连接失败";
+    return `不可用：${reason}${migration ? ` · ${migration}` : ""}`;
+  }
+  return `自动选择（尚未检测）${migration ? ` · ${migration}` : ""}`;
 }
 
 const PROVIDER_PRESETS: Record<string, {name: string; base_url: string; anthropic_base_url?: string}> = {
@@ -3141,12 +3145,12 @@ function projectDetailView(project: Project): string {
     <div class="item-title">${item.locality === "remote" ? icon("server") : icon("monitor")}<div><strong>${escapeHTML(item.name)}</strong><small>${escapeHTML(item.root_path)}</small></div></div>
     <div class="ws-meta"><small>${escapeHTML(item.transport)}${item.distro ? ` · ${escapeHTML(item.distro)}` : ""}</small><strong>${item.channel_retired ? "渠道归档只读" : item.read_only ? `只读 · ${escapeHTML(item.owner_device_id || "其他设备")}` : `本机 · ${escapeHTML(item.owner_device_id || "待首次同步绑定")}`}</strong></div>
     ${system ? "" : renderWorkspaceDetection(item)}
-    ${archived ? `<span class="status warn">归档只读</span>` : system ? `<span class="status warn">系统托管 · 只读</span>` : item.read_only ? `<span class="row-actions workspace-remote-actions"><button type="button" data-takeover-workspace="${item.id}">${icon("copy")}接管到本机</button><button type="button" data-retire-remote-workspace="${item.id}" class="icon-button danger" title="移除孤立 Workspace">${icon("close")}</button></span><span class="status warn">远端只读</span>` : `<button data-detect="${item.id}">${icon("refresh")}测试连接</button><span class="row-actions"><button type="button" data-edit-workspace="${item.id}" class="icon-button" title="编辑 Workspace">${icon("edit")}</button><button type="button" data-delete-workspace="${item.id}" class="icon-button" title="删除 Workspace">${icon("close")}</button></span>`}
+    ${archived ? `<span class="status warn">归档只读</span>` : system ? `<span class="status warn">系统托管 · 只读</span>` : item.read_only ? `<span class="row-actions workspace-remote-actions"><button type="button" data-takeover-workspace="${item.id}">${icon("copy")}接管到本机</button><button type="button" data-retire-remote-workspace="${item.id}" class="icon-button danger" title="移除孤立 Workspace">${icon("close")}</button></span><span class="status warn">远端只读</span>` : `<button data-detect="${item.id}">${icon("refresh")}刷新状态</button><span class="row-actions"><button type="button" data-edit-workspace="${item.id}" class="icon-button" title="编辑 Workspace">${icon("edit")}</button><button type="button" data-delete-workspace="${item.id}" class="icon-button" title="删除 Workspace">${icon("close")}</button></span>`}
   </article>`).join("");
   return shell(`<section class="page">
     <header class="page-head"><div><button id="back-projects" class="back-link">← 返回项目列表</button><h1>${escapeHTML(project.name)}${archived ? ` <span class="status warn">已归档</span>` : system ? ` <span class="status warn">系统托管</span>` : ""}</h1><p>${projectTypeLabel(project.project_type)}${project.repository_identity ? ` · ${escapeHTML(project.repository_identity)}` : ""}${project.default_branch ? ` · 默认分支 ${escapeHTML(project.default_branch)}` : ""}${archived ? " · 渠道宿主历史只读" : system ? " · 系统托管，只读" : ""}</p></div><div class="actions">${archived ? `<button type="button" data-channel-project-export="${escapeHTML(project.channel_instance_id || "")}">导出归档</button><button id="delete-project" class="danger">${icon("close")}永久删除</button>` : system ? `<span class="status warn">系统托管 · 只读</span>` : `<button data-dialog="workspace">${icon("plus")}添加 Workspace</button><button type="button" data-edit-project-detail="${project.id}" class="icon-button" title="编辑项目">${icon("edit")}</button><button id="delete-project" class="danger">${icon("close")}删除项目</button>`}</div></header>
     <div class="metrics"><div><small>Workspace</small><strong>${workspaces.length}</strong></div><div><small>任务</small><strong>${tasks.length}</strong></div><div><small>Ready</small><strong>${workspaces.filter(item => item.health === "ready").length}</strong></div></div>
-    <div class="panel"><div class="panel-head"><strong>Workspaces</strong><span>“测试连接”会刷新 Backend 能力并验证 Workspace → AHA2 Agent API</span></div>${rows || `<div class="empty">尚无 Workspace，点击右上角添加。</div>`}</div>
+    <div class="panel"><div class="panel-head"><strong>Workspaces</strong><span>状态由 AHA 自动检测；Agent API 连接方式自动选择</span></div>${rows || `<div class="empty">尚无 Workspace，点击右上角添加。</div>`}</div>
     ${workspaceDialog()}${workspaceTakeoverDialog()}
   </section>`);
 }
@@ -3165,7 +3169,7 @@ function workspaceDialog(): string {
     <label>Root Path<input name="root_path" id="ws-root-path" placeholder="E:\project 或 /home/user/project" required></label>
     <div class="wsl-fields" style="display:none"><label>WSL Distro<select name="distro" id="ws-distro"></select></label><div class="field-help">Root Path 填 WSL 内的路径，如 /home/user/project</div></div>
     <div class="ssh-fields" style="display:none"><div class="two"><label>SSH Host<input name="ssh_host" placeholder="192.168.1.10"></label><label>SSH User<input name="ssh_user" placeholder="root"></label></div><div class="two"><label>SSH Port<input name="ssh_port" type="number" min="1" max="65535" value="22"></label><label>SSH 登录方式<select name="ssh_auth"><option value="auto">自动（有密码时优先密码）</option><option value="password">密码</option><option value="key">Key (~/.ssh)</option></select></label></div><label>登录密码<input name="ssh_password" type="password" autocomplete="new-password" placeholder="可选"></label><label class="workspace-clear-secret"><input name="clear_ssh_password" type="checkbox">清除已保存密码</label><div class="field-help">密码保存在 Secret Store；编辑时留空会保留原密码。</div></div>
-    <fieldset class="workspace-agent-api-fields"><legend>Agent API 反向连接</legend><label>地址策略<select name="agent_api_mode" id="ws-agent-api-mode"><option value="auto">自动探测（推荐）</option><option value="manual">手动覆盖</option></select></label><label class="workspace-agent-api-manual">Agent API URL<input name="agent_api_url" id="ws-agent-api-url" type="url" placeholder="https://aha.example.com"></label><div class="field-help workspace-agent-api-result">保存后点击 Workspace 的“测试连接”，AHA2 会从该 Workspace 反向验证并保存有效地址。</div></fieldset>
+    <div class="workspace-agent-api-status-block"><strong>Agent API</strong><span class="workspace-agent-api-status">保存后由 AHA 自动选择连接方式。</span><div class="field-help">AHA 按本机直连 → SSH 反向隧道 → WSL localhost 的顺序自动选择；排障用的手动覆盖在“高级设置 → 其他设置”中。</div></div>
     <div class="dialog-actions"><button type="button" data-close>取消</button><button class="primary" value="default">添加 Workspace</button></div>
   </form></dialog>`;
 }
@@ -3502,8 +3506,7 @@ function otherSettingsView(): string {
   const accessScope = origin.access_scope === "local" ? "local" : "lan";
   const restartRequired = Boolean(network.restart_required);
   const agentAPI = state.agentAPISettings;
-  const allowInsecureAgentAPI = Boolean(agentAPI.effective_allow_insecure);
-  const forcedInsecureAgentAPI = Boolean(agentAPI.startup_allow_insecure) && !agentAPI.url;
+  const agentAPIMigrationNote = String(agentAPI.migration_note || "");
   const perfPanelOn = isPerfPanelOn();
   return advancedSubview(`<section class="page advanced-settings-page"><header class="page-head"><div><h1>其他设置</h1><p>Backend、Owner 账号、访问范围与本机网络</p></div></header>
     <section class="panel spaced account-security-panel perf-panel-settings-panel">
@@ -3540,13 +3543,14 @@ function otherSettingsView(): string {
         <div class="dialog-actions"><button class="primary" type="submit">保存访问范围</button></div>
       </form>
     </section>
-    <section class="panel spaced account-security-panel agent-api-security-panel">
-      <div class="panel-head"><strong>Agent API 地址安全</strong><span>${allowInsecureAgentAPI ? "允许明文 HTTP" : "仅 HTTPS"}</span></div>
-      <form id="agent-api-security-form">
-        <label class="security-setting-toggle"><input name="allow_insecure" type="checkbox" ${allowInsecureAgentAPI ? "checked" : ""} ${forcedInsecureAgentAPI ? "disabled" : ""}><span><strong>允许非 loopback 的明文 HTTP Agent API 地址</strong><small>远程工作区通过隧道回连时用 127.0.0.1，不需要这一项；只有让工作区用局域网明文地址直连 AHA2（如 http://192.168.1.10:8766）才需要。</small></span></label>
-        <div class="field-help">这一项与上面的“访问范围”是两件事：<strong>访问范围决定谁可以访问 AHA2</strong>（请求进来的方向）；<strong>这一项决定 AHA2 是否接受一个明文、非 loopback 的 Agent API 地址</strong>（AHA2 被回连的方向）。两者都要放行，局域网直连才走得通。</div>
-        <div class="security-warning ${allowInsecureAgentAPI ? "active" : ""}">${forcedInsecureAgentAPI ? `启动参数 <code>--allow-insecure-agent-api</code> 已强制允许明文地址；此时界面开关不再生效。` : allowInsecureAgentAPI ? `Agent API 令牌会以明文经过这段网络，局域网内的其他设备可以截获它。仅在本机可信的网络中开启。` : ""}</div>
-        <div class="dialog-actions"><button class="primary" type="submit" ${forcedInsecureAgentAPI ? "disabled" : ""}>保存 Agent API 安全设置</button></div>
+    <section class="panel spaced account-security-panel agent-api-override-panel">
+      <div class="panel-head"><strong>Agent API 高级覆盖</strong><span>仅用于排障</span></div>
+      <form id="agent-api-override-form">
+        <label>手动覆盖地址<input name="url" type="url" value="${escapeHTML(agentAPI.url)}" placeholder="https://aha.example.com"></label>
+        <div class="field-help">默认不需要填写。AHA 会自动选择：本机直连 → SSH 反向隧道 → WSL localhost。只有这些路径都不可用时，才在这里指定地址；只接受 <code>https://</code> 或 loopback <code>http://</code>，非 loopback 明文地址不会被接受。</div>
+        <div class="field-help">当前自动地址：<code>${escapeHTML(agentAPI.effective_url || "-")}</code>${agentAPI.startup_url ? ` · 启动推导：<code>${escapeHTML(agentAPI.startup_url)}</code>` : ""}</div>
+        ${agentAPIMigrationNote ? `<div class="security-warning active">配置迁移：${escapeHTML(agentAPIMigrationNote)}</div>` : ""}
+        <div class="dialog-actions"><button class="primary" type="submit">保存覆盖</button><button type="button" id="clear-agent-api-override">清除覆盖</button></div>
       </form>
     </section>
     <section class="panel spaced account-security-panel listen-address-panel">
@@ -5101,7 +5105,6 @@ function bindCommon(): void {
   document.querySelector<HTMLSelectElement>("#project-type")?.addEventListener("change", syncProjectTypeFields);
   document.querySelector<HTMLSelectElement>("#ws-locality")?.addEventListener("change", syncWorkspaceFields);
   document.querySelector<HTMLSelectElement>("#ws-transport")?.addEventListener("change", syncWorkspaceFields);
-  document.querySelector<HTMLSelectElement>("#ws-agent-api-mode")?.addEventListener("change", syncWorkspaceFields);
   document.querySelector<HTMLSelectElement>('[name="ssh_auth"]')?.addEventListener("change", syncWorkspaceFields);
   document.querySelector<HTMLSelectElement>('#workspace-takeover-dialog [name="transport"]')?.addEventListener("change", syncWorkspaceTakeoverFields);
   document.querySelector<HTMLInputElement>('[name="clear_ssh_password"]')?.addEventListener("change", syncWorkspaceFields);
@@ -5468,10 +5471,7 @@ function bindCommon(): void {
       try {
         const result = await detectWorkspaceWithHostKeyTrust(id);
         if (!result) return;
-        const agentAPI = result.workspace.agent_api_status === "ready" && result.workspace.agent_api_resolved_url
-          ? ` · Agent API ${result.workspace.agent_api_resolved_url}`
-          : result.workspace.agent_api_error ? ` · Agent API 不可达：${result.workspace.agent_api_error}` : "";
-        setMessage("notice", `连接测试完成：${statusLabel(result.workspace.health)}${agentAPI}`);
+        setMessage("notice", `状态已刷新：${statusLabel(result.workspace.health)}`);
       } finally {
         await loadAll();
         render();
@@ -5637,20 +5637,19 @@ function bindCommon(): void {
     state.securitySettings = response.security;
     setMessage("notice", accessScope === "local" ? "访问范围已改为仅本机" : "访问范围已改为本机与局域网");
   }, "保存中");
-  bindForm("#agent-api-security-form", async form => {
-    const allowInsecure = form.get("allow_insecure") === "on";
-    // Loosening is the direction that needs a deliberate confirmation; turning it
-    // back off restores the safer default and should not be obstructed.
-    if (allowInsecure && !state.agentAPISettings.effective_allow_insecure &&
-      !window.confirm("开启后，Agent API 令牌会以明文经过局域网，同网段设备可截获。确定开启？")) return;
-    // Only the switch is being changed here; the global address is left as it is.
-    const response = await api.updateAgentAPISettings({
-      url: state.agentAPISettings.url,
-      allow_insecure: allowInsecure,
-    });
+  bindForm("#agent-api-override-form", async form => {
+    const url = String(form.get("url") || "").trim();
+    const response = await api.updateAgentAPISettings({url});
     state.agentAPISettings = response.agent_api;
-    setMessage("notice", allowInsecure ? "已允许明文 HTTP Agent API 地址" : "Agent API 地址已恢复为仅允许 HTTPS 或 loopback");
+    setMessage("notice", url ? "Agent API 手动覆盖已保存" : "Agent API 手动覆盖已清除");
   }, "保存中");
+  document.querySelector("#clear-agent-api-override")?.addEventListener("click", () => {
+    const form = document.querySelector<HTMLFormElement>("#agent-api-override-form");
+    const input = form?.querySelector<HTMLInputElement>('[name="url"]');
+    if (!form || !input) return;
+    input.value = "";
+    form.requestSubmit();
+  });
   bindForm("#listen-address-form", async form => {
     const listenAddress = String(form.get("listen_address") || "").trim();
     if (listenAddress && state.networkSettings.startup_listen_address &&

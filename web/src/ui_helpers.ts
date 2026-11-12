@@ -210,15 +210,18 @@ export function renderWorkspaceDetection(workspace: Workspace): string {
       const address = agentAPIProbe?.url || workspace.agent_api_resolved_url || "";
       details.push({
         kind: "muted",
-        text: via === "tunnel" ? "Agent API · 隧道已连通" : `Agent API · ${address || "已连接"}`,
+        text: via === "tunnel" ? "Agent API · SSH 反向隧道已连通" : `Agent API · 直连 ${address || "已连接"}`,
       });
     } else if (agentAPIProbe?.status === "unavailable" || workspace.agent_api_status === "error") {
-      details.push({kind: "bad", text: agentAPIProbe?.error || workspace.agent_api_error || "Agent API 反向连接失败"});
+      details.push({kind: "bad", text: `Agent API · 不可用：${agentAPIProbe?.error || workspace.agent_api_error || "反向连接失败"}`});
     } else {
       // Never probed. Naming that state is the point: it previously rendered
       // nothing, so a workspace whose address could not work looked identical to
       // a healthy one until an Agent Turn started failing part-way through.
-      details.push({kind: "muted", text: "Agent API · 未检测"});
+      details.push({kind: "muted", text: "Agent API · 自动选择（未检测）"});
+    }
+    if (workspace.agent_api_migration_note) {
+      details.push({kind: "muted", text: `Agent API 配置迁移：${workspace.agent_api_migration_note}`});
     }
   }
   const summary = badges.length

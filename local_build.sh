@@ -189,7 +189,6 @@ deploy_common=(
   -Listen "$listen"
   -HealthURL "$health_url"
   -AgentAPIURL "$agent_api_url"
-  -AllowInsecureAgentAPI
   -AllowCustomUserWritableInstallDir
   -UpdateExistingInstallInPlace
 )
@@ -320,7 +319,6 @@ deploy_candidates() {
     -AgentAPIURL "$agent_api_url" \
     -ResultPath "$result_win" \
     -MinimumFreeGB "$minimum_free_gb" \
-    -AllowInsecureAgentAPI \
     -AllowCustomUserWritableInstallDir \
     -UpdateExistingInstallInPlace \
     -DeployOnly

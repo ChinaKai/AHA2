@@ -755,7 +755,6 @@ const legacyEnglish: Record<string, string> = {
   "个可用节点": "available nodes",
   "更新时间未知": "Update time unknown",
   "当前节点已从最新订阅中移除；现有线路不会自动切换，请重新选择并应用节点。": "The current node was removed from the latest subscription. The route will not switch automatically; select and apply a node again.",
-  "测试连接": "Test connection",
   "测试节点": "Test node",
   "发起测试": "Run test",
   "正在测试…": "Testing…",

@@ -10,6 +10,8 @@ param(
     [string]$DataDir,
     [string]$TaskName = "AHA2 User",
     [string]$AgentAPIURL = "",
+    # Deprecated: kept so deployment scripts written before the security
+    # convergence still run. It cannot enable plaintext off loopback.
     [switch]$AllowInsecureAgentAPI,
     [switch]$Start,
     [switch]$ValidateOnly
@@ -67,8 +69,8 @@ if ($agentURL) {
     if ([Net.IPAddress]::TryParse($parsedURL.Host, [ref]$address)) {
         $isLoopback = [Net.IPAddress]::IsLoopback($address)
     }
-    if ($parsedURL.Scheme -eq 'http' -and -not $isLoopback -and -not $AllowInsecureAgentAPI) {
-        throw "A non-loopback HTTP Agent API URL requires AllowInsecureAgentAPI."
+    if ($parsedURL.Scheme -eq 'http' -and -not $isLoopback) {
+        throw "A non-loopback HTTP Agent API URL is not supported; use https:// or a loopback address."
     }
 }
 
@@ -87,9 +89,6 @@ if (-not [string]::IsNullOrWhiteSpace($interactiveIdentity) -and
 $taskArguments = '--server "{0}" --listen "{1}" --data-dir "{2}"' -f $serverPath, $Listen, $dataPath
 if ($agentURL) {
     $taskArguments += ' --agent-api-url "{0}"' -f $agentURL
-}
-if ($agentURL -and $AllowInsecureAgentAPI) {
-    $taskArguments += ' --allow-insecure-agent-api'
 }
 $action = New-ScheduledTaskAction -Execute $trayPath -Argument $taskArguments -WorkingDirectory (Split-Path -Parent $trayPath)
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $identity

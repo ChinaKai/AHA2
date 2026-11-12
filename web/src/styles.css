@@ -173,8 +173,9 @@ body.task-view-active .banner { border: 1px solid rgba(100,116,139,.18); border-
 .advanced-subview-back { padding: 18px 30px 0; }
 .account-security-panel form { padding: 18px; }
 .agent-api-settings-panel code { overflow-wrap: anywhere; }
-.workspace-agent-api-fields { display: grid; gap: 10px; margin: 4px 0 14px; padding: 12px; border: 1px solid var(--line); border-radius: 5px; }
-.workspace-agent-api-fields legend { padding: 0 6px; color: var(--muted); font-size: 10px; font-weight: 700; }
+.workspace-agent-api-status-block { display: grid; gap: 6px; margin: 4px 0 14px; padding: 12px; border: 1px solid var(--line); border-radius: 5px; }
+.workspace-agent-api-status-block strong { color: var(--muted); font-size: 10px; font-weight: 700; }
+.workspace-agent-api-status { font-size: 12px; }
 .security-setting-toggle { display: grid; grid-template-columns: 18px minmax(0,1fr); align-items: start; gap: 10px; margin: 0; padding: 12px; border: 1px solid var(--line); border-radius: 6px; background: #f8fafc; cursor: pointer; }
 .security-setting-toggle input { width: 16px; height: 16px; margin: 2px 0 0; }
 .security-setting-toggle span, .security-setting-toggle strong, .security-setting-toggle small { display: block; }

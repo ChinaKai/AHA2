@@ -107,7 +107,7 @@ window.fetch = async (input, init = {}) => {
   if (path === "/api/v1/settings/security") return json({security: {validate_origin: true, access_scope: "lan", startup_override: false}});
   if (path === "/api/v1/settings/network") return json({network: {listen_address: "", startup_listen_address: "0.0.0.0:8766", restart_required: false}});
   if (path === "/api/v1/settings/backend") return json({backend: {idle_timeout_seconds: 300, turn_timeout_seconds: 3600}});
-  if (path === "/api/v1/settings/agent-api") return json({agent_api: {url: "", allow_insecure: false, effective_url: "http://127.0.0.1:8766", effective_allow_insecure: false}});
+  if (path === "/api/v1/settings/agent-api") return json({agent_api: {url: "", startup_url: "http://127.0.0.1:8766", effective_url: "http://127.0.0.1:8766"}});
   if (path === "/api/v1/system") return json({system: {web_version: "v0.0.0.test", version: "v0.0.0.test", started_at: new Date().toISOString()}});
   if (path === "/api/v1/projects") return json({projects: data.projects, has_more: false});
   if (path.startsWith("/api/v1/projects/") && path.endsWith("/product-lines")) return json({product_lines: []});

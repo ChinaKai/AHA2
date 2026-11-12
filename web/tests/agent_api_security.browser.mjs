@@ -1,11 +1,10 @@
 // Optional browser verification; dependencies and browser files stay in .tools.
 //
-// The Agent API insecure switch had no UI at all, so it could only be set by
-// calling the API by hand. This drives the real built bundle: it renders the
-// advanced settings page, flips the new toggle, and checks the request that goes
-// out and the state that comes back. A source-text assertion would not catch a
-// form that renders but posts the wrong field, which is the failure that matters
-// for a security switch.
+// The Agent API address is no longer configurable from the normal Workspace UI:
+// AHA picks the path itself. This drives the real built bundle to verify the two
+// things that remain: the read-only result, and the hidden manual override in
+// Advanced Settings. A source-text assertion would not catch a form that renders
+// but posts the wrong field, which is the failure that matters here.
 import assert from "node:assert/strict";
 import {createServer} from "node:http";
 import {readFile, mkdir} from "node:fs/promises";
@@ -20,17 +19,16 @@ const output = resolve(tools, "screenshots");
 await mkdir(output, {recursive: true});
 const csp = (await readFile(resolve(root, "internal/httpapi/server.go"), "utf8")).match(/Set\("Content-Security-Policy", "([^"]+)"\)/)[1];
 
-// The four settings the advanced page reads. allow_insecure starts off, which is
-// the state the Owner's machine is actually in.
+// The settings the advanced page reads. A stored override is present so the
+// panel has a value to render, and there is no insecure switch to flip.
 const bootstrap = `
 const json = (value, status = 200) => new Response(JSON.stringify(value), {status, headers: {"Content-Type": "application/json"}});
 window.__puts = [];
-let allowInsecure = false;
 const agentAPI = () => ({
-  url: "", allow_insecure: allowInsecure,
-  startup_allow_insecure: false,
-  effective_url: "http://127.0.0.1:8766",
-  effective_allow_insecure: allowInsecure,
+  url: "https://override.example.test",
+  startup_url: "http://127.0.0.1:8766",
+  effective_url: "https://override.example.test",
+  migration_note: "旧版局域网明文地址已禁用",
 });
 window.fetch = async (input, init = {}) => {
   const url = new URL(typeof input === "string" ? input : input.url, location.origin);
@@ -44,8 +42,7 @@ window.fetch = async (input, init = {}) => {
   if (path === "/api/v1/settings/agent-api" && method === "PUT") {
     const body = JSON.parse(init.body || "{}");
     window.__puts.push(body);
-    allowInsecure = Boolean(body.allow_insecure);
-    return json({ok: true, agent_api: agentAPI()});
+    return json({ok: true, agent_api: {...agentAPI(), url: body.url, effective_url: body.url || "http://127.0.0.1:8766", migration_note: ""}});
   }
   if (path === "/api/v1/tasks") return json({tasks: [], has_more: false});
   if (path === "/api/v1/projects") return json({projects: [], has_more: false});
@@ -94,8 +91,6 @@ try {
   // Attached, not visible: the nav entry can be inside a collapsed group at this
   // viewport, and the click below is dispatched rather than performed by a user.
   await page.waitForSelector('[data-view="advanced"]', {state: "attached", timeout: 15000});
-  // The one-click gear in the owner block opens Advanced Settings; the Agent API
-  // form itself lives one level deeper in "其他设置".
   await page.evaluate(() => {
     const entry = document.querySelector('[data-view="advanced"]');
     if (!entry) throw new Error("advanced settings entry not found");
@@ -107,30 +102,30 @@ try {
     if (!entry) throw new Error("other settings entry not found");
     entry.click();
   });
-  await page.waitForSelector("#agent-api-security-form", {timeout: 15000});
+  await page.waitForSelector("#agent-api-override-form", {timeout: 15000});
 
-  const box = page.locator('#agent-api-security-form input[name="allow_insecure"]');
-  assert.equal(await box.count(), 1, "the Agent API insecure switch is not rendered");
-  assert.equal(await box.isChecked(), false, "the switch should start off in this fixture");
-  assert.equal(await box.isDisabled(), false, "the switch should be editable when no startup flag forces it");
+  // The insecure switch is gone; a checkbox that still rendered would be dead
+  // weight that suggests plaintext is a supported choice.
+  assert.equal(await page.locator('#agent-api-override-form input[name="allow_insecure"]').count(), 0,
+    "the removed insecure switch is still rendered");
+  const panelText = await page.locator(".agent-api-override-panel").innerText();
+  assert.match(panelText, /仅用于排障/, "the override no longer says it is a troubleshooting path");
+  assert.match(panelText, /旧版局域网明文地址已禁用/, "the migration diagnosis is not shown");
 
-  // The point of the panel is that the two settings are distinguishable, so make
-  // sure the page says so rather than relying on the Owner remembering.
-  const panelText = await page.locator(".agent-api-security-panel").innerText();
-  assert.match(panelText, /Access scope decides who can reach AHA2/, "the panel no longer explains how it differs from access scope");
-
-  await box.check();
-  await page.locator("#agent-api-security-form button[type=submit]").click();
+  const input = page.locator('#agent-api-override-form input[name="url"]');
+  assert.equal((await input.inputValue()), "https://override.example.test");
+  await input.fill("https://troubleshoot.example.test");
+  await page.locator("#agent-api-override-form button[type=submit]").click();
   await page.waitForFunction(() => window.__puts.length > 0, null, {timeout: 10000});
 
   const puts = await page.evaluate(() => window.__puts);
   assert.equal(puts.length, 1, `expected one settings write, got ${puts.length}: ${JSON.stringify(puts)}`);
-  assert.equal(puts[0].allow_insecure, true, `the write did not enable insecure: ${JSON.stringify(puts[0])}`);
-  assert.equal(puts[0].url, "", `the write must not invent an address: ${JSON.stringify(puts[0])}`);
+  assert.equal(puts[0].url, "https://troubleshoot.example.test", `the write did not carry the override: ${JSON.stringify(puts[0])}`);
+  assert.deepEqual(Object.keys(puts[0]), ["url"], `the write carried removed fields: ${JSON.stringify(puts[0])}`);
   assert.deepEqual(errors, [], "the settings page threw while saving");
 
-  await page.screenshot({path: resolve(output, "agent-api-security.png")});
-  console.log("agent api security PUT:", JSON.stringify(puts[0]));
+  await page.screenshot({path: resolve(output, "agent-api-override.png")});
+  console.log("agent api override PUT:", JSON.stringify(puts[0]));
 } finally {
   if (browser) await browser.close();
   server.close();

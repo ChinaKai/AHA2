@@ -424,7 +424,16 @@ test("workspace detection renders inaccessible, Git, and backend probe states", 
     capabilities: {workspace: {status: "ready"}, agent_api: {status: "ready", url: "http://172.28.0.1:8766"}},
     repository: {status: "ready", is_git: true},
   });
-  assert.match(agentAPI, /Agent API · http:\/\/172\.28\.0\.1:8766/);
+  assert.match(agentAPI, /Agent API · 直连 http:\/\/172\.28\.0\.1:8766/);
+
+  const agentAPITunnel = renderWorkspaceDetection({
+    ...base,
+    agent_api_status: "ready",
+    agent_api_resolved_url: "http://127.0.0.1:8766",
+    capabilities: {workspace: {status: "ready"}, agent_api: {status: "ready", url: "http://127.0.0.1:8766", via: "tunnel"}},
+    repository: {status: "ready", is_git: true},
+  });
+  assert.match(agentAPITunnel, /Agent API · SSH 反向隧道已连通/);
 
   const agentAPIFailed = renderWorkspaceDetection({
     ...base,
@@ -436,32 +445,31 @@ test("workspace detection renders inaccessible, Git, and backend probe states", 
   assert.match(agentAPIFailed, /反向连接超时/);
 });
 
-test("Agent API is automatic by default with a manual Workspace exception", async () => {
+test("Agent API is automatic and read-only in the normal Workspace UI", async () => {
   const root = resolve(import.meta.dirname, "..");
   const script = await readFile(resolve(root, "dist", "app.js"), "utf8");
   const api = await readFile(resolve(root, "dist", "api.js"), "utf8");
   const styles = await readFile(resolve(root, "dist", "styles.css"), "utf8");
 
-  // The Workspace-level exception stays: a workspace reachable only through a
-  // reverse proxy still needs a human to name its address, and the mode picker is
-  // the only place that can express it.
-  for (const marker of ["ws-agent-api-mode", "ws-agent-api-url", "测试连接", "Agent API 反向连接"]) {
-    assert.match(script, new RegExp(marker));
-  }
-  assert.match(styles, /\.workspace-agent-api-fields/);
+  // The normal Workspace dialog shows only the selected result. Mode and URL
+  // controls are gone because choosing either by hand is what broke remote
+  // workspaces once they left the LAN.
+  assert.doesNotMatch(script, /ws-agent-api-mode/);
+  assert.doesNotMatch(script, /ws-agent-api-url/);
+  assert.doesNotMatch(script, /测试连接/);
+  assert.doesNotMatch(script, /Agent API 反向连接/);
+  assert.match(script, /workspace-agent-api-status/);
+  assert.match(styles, /\.workspace-agent-api-status-block/);
 
-  // The global Agent API panel is gone. Keeping it implied the address needed
-  // configuring, and a value set there overrode the loopback address that the
-  // reverse tunnel depends on. Only the insecure-address switch is exposed, and
-  // deliberately without an address field: it carries the stored address through
-  // untouched, so it cannot reintroduce that override.
-  assert.doesNotMatch(script, /agent-api-settings-form/);
-  assert.match(script, /agent-api-security-form/);
+  // The hidden manual override lives in advanced settings and is explicitly a
+  // troubleshooting path. It accepts only https/loopback (enforced server-side).
+  assert.match(script, /agent-api-override-form/);
+  assert.match(script, /Agent API 高级覆盖/);
   assert.match(script, /api\.updateAgentAPISettings/);
-  assert.match(script, /url:\s*state\.agentAPISettings\.url,/);
-  // Only auto and manual remain; "global" duplicated the same decision one level up.
-  assert.doesNotMatch(script, /value="global"/);
+  assert.doesNotMatch(script, /allow_insecure/);
+  assert.doesNotMatch(script, /agent-api-security-form/);
 
+  // Automatic detection still exists; it is what produces the read-only status.
   assert.match(script, /detectWorkspaceWithHostKeyTrust/);
   assert.match(script, /首次连接 SSH Workspace/);
   assert.match(api, /workspaces\/.*\/host-key\/trust/);

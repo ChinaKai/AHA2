@@ -12,6 +12,7 @@ param(
 	[string]$UpdateTaskName = "AHA2 User Update",
   [string]$Listen = "127.0.0.1:8766",
   [string]$AgentAPIURL = "",
+	# Deprecated no-op, kept for callers written before the security convergence.
 	[switch]$AllowInsecureAgentAPI,
   [string]$HealthURL = "http://127.0.0.1:8766/healthz",
   [int]$HealthTimeoutSeconds = 60,
@@ -164,7 +165,6 @@ if (-not $DetachedWorker -and (Test-AHA2Ancestor)) {
     "-HealthTimeoutSeconds", [string]$HealthTimeoutSeconds, "-ResultPath", $ResultPath
   )
   if ($AgentAPIURL) { $workerArguments += @("-AgentAPIURL", $AgentAPIURL) }
-  if ($AllowInsecureAgentAPI) { $workerArguments += "-AllowInsecureAgentAPI" }
   if ($AllowCustomUserWritableInstallDir) { $workerArguments += "-AllowCustomUserWritableInstallDir" }
   if ($UpdateExistingInstallInPlace) { $workerArguments += "-UpdateExistingInstallInPlace" }
   if ($pluginInput -and $pluginManifestInput) {
@@ -331,7 +331,6 @@ try {
     Start = $true
   }
   if ($AgentAPIURL) { $registerArguments.AgentAPIURL = $AgentAPIURL }
-  if ($AllowInsecureAgentAPI) { $registerArguments.AllowInsecureAgentAPI = $true }
   & $registerTask @registerArguments
   Wait-AHA2Health
 

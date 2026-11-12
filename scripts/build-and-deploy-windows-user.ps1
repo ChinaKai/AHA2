@@ -10,6 +10,7 @@ param(
     [string]$Listen = "127.0.0.1:8766",
     [string]$HealthURL = "http://127.0.0.1:8766/healthz",
     [string]$AgentAPIURL = "",
+    # Deprecated no-op, kept for callers written before the security convergence.
     [switch]$AllowInsecureAgentAPI,
     [int]$MinimumFreeGB = 3,
     [string]$ResultPath = "",
@@ -379,7 +380,6 @@ $deployArguments = @(
 if (-not [string]::IsNullOrWhiteSpace($AgentAPIURL)) {
     $deployArguments += @("-AgentAPIURL", $AgentAPIURL)
 }
-if ($AllowInsecureAgentAPI) { $deployArguments += "-AllowInsecureAgentAPI" }
 if ($AllowCustomUserWritableInstallDir) { $deployArguments += "-AllowCustomUserWritableInstallDir" }
 if ($UpdateExistingInstallInPlace) { $deployArguments += "-UpdateExistingInstallInPlace" }
 if ((Test-Path -LiteralPath $pluginOutput -PathType Leaf) -and (Test-Path -LiteralPath $pluginManifestOutput -PathType Leaf)) {

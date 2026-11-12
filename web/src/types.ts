@@ -21,12 +21,11 @@ export interface NetworkSettings {
   restart_required: boolean;
 }
 export interface AgentAPISettings {
+  // Hidden troubleshooting override; empty means AHA selects the path itself.
   url: string;
-  allow_insecure: boolean;
   startup_url?: string;
-  startup_allow_insecure?: boolean;
   effective_url: string;
-  effective_allow_insecure: boolean;
+  migration_note?: string;
   updated_at?: string;
 }
 export interface BackendSettings {
@@ -479,6 +478,7 @@ export interface Task {
   agent_api_resolved_url?: string;
   agent_api_status: "unknown" | "ready" | "error" | string;
   agent_api_error?: string;
+  agent_api_migration_note?: string;
   agent_api_last_checked_at?: string;
 }
 

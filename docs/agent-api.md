@@ -5,16 +5,25 @@ Agent API 让本地、WSL 和 SSH Workspace 中的 Agent 通过 HTTP 使用 AHA2
 
 ## 配置与认证
 
-`aha2 serve --agent-api-url <url>`（或 `AHA2_AGENT_API_URL`）配置 Agent 可访问的
-控制面基址。未配置时，AHA2 从监听端口生成本机 `127.0.0.1` URL。非 loopback URL
-强制使用 HTTPS；仅受信开发网络可显式传 `--allow-insecure-agent-api` 临时允许 HTTP。
+Agent API 地址由 AHA 自动选择，普通 Workspace UI 不提供模式、地址或“测试连接”控件。
+`aha2 serve --agent-api-url <url>`（或 `AHA2_AGENT_API_URL`）只配置可选的控制面基址：
+地址必须是 `https://`，或 loopback 的 `http://127.0.0.1` / `http://[::1]` / `http://localhost`。
+非 loopback 明文 HTTP 无法配置、也不会被自动探测选中；`--allow-insecure-agent-api`
+和 `AHA2_ALLOW_INSECURE_AGENT_API` 已被移除，仅为旧服务定义保留为无效果的兼容参数。
 
-启动参数只提供初始默认值。Owner 可在高级设置中持久化全局默认，也可为 Workspace
-选择自动探测、继承全局或手动覆盖。Workspace“测试连接”先检测执行环境，再从该
-Workspace 反向请求 AHA2 `/healthz`；成功地址写入 Workspace，后续 Turn 直接使用。
-Native 优先 loopback；WSL 会尝试 localhost、Windows Host/Gateway 与允许的本机网卡地址；
-SSH 会结合当前 SSH 会话看到的客户端地址。NAT、跳板机、HTTPS 证书或反向代理无法
-自动推断时仍需手动 URL。
+未配置基址时，AHA2 从监听端口生成 loopback URL。自动选择顺序为：
+
+1. Native Workspace：本机 loopback 直连；
+2. SSH Workspace：复用已有 SSH 连接建立反向隧道，把 AHA 的 loopback 地址送到工作区；
+3. WSL Workspace：WSL2 的 localhost 转发到 Windows 宿主；宿主网关地址只在基址为 HTTPS 时使用；
+4. 隐藏的手动 HTTPS 覆盖：仅在高级设置中配置，作为前三者都失败时的排障出口。
+
+旧版本保存的局域网明文地址在升级时会被禁用，并在 Workspace/高级设置中留下迁移说明；
+仍被允许的旧地址（HTTPS 或 loopback）保留为隐藏覆盖。迁移不会阻止已有任务启动。
+
+启动参数只提供初始默认值。Owner 可在“高级设置 → 其他设置 → Agent API 高级覆盖”中
+持久化一个排障用基址；普通 Workspace 只显示自动选择结果（直连 / SSH 反向隧道 /
+不可用及原因）。手工覆盖不会取代自动路径，只有自动探测全部失败时才使用。
 
 每个 Turn 获得独立的 `AHA2_AGENT_API_TOKEN`。它是仅内存保存的 Bearer capability，
 绑定 Task、Agent 和 Turn，Turn 结束立即撤销，且不进入 Prompt、Context、数据库或日志。

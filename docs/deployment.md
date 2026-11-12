@@ -63,18 +63,19 @@ tray 会把 `aha2.exe serve` 的 stdout/stderr 持久化到 `<数据目录>\logs
 不会随隐藏窗口消失。日志只包含进程输出和启动参数，凭据校验拒绝带用户信息、query 或 fragment
 的 Agent API URL，因此不会写入请求体或密码。
 
-仅使用本机 Workspace 时，Agent API 地址可留空，AHA2 会使用 loopback 地址。SSH 或其他远程
-Workspace 中运行的 Agent 需要填写其能够访问的 HTTPS 基址，安装器会追加：
+仅使用本机 Workspace 时，Agent API 地址可留空，AHA2 会使用 loopback 地址。SSH 远程
+Workspace 默认通过既有 SSH 连接建立反向隧道，不需要在安装器中填写地址。只有 AHA2 位于
+无法建立隧道的反向代理之后时，才需要提供 HTTPS 基址：
 
 ```text
 --agent-api-url https://<AHA2-host>
 ```
 
-受信开发网络确需使用非 loopback HTTP 时，必须在向导中单独确认，启动参数才会追加
-`--allow-insecure-agent-api`。这不会启用 `--allow-cross-origin`；浏览器 Origin 校验仍保持开启。
-该启动参数是 Agent API 地址的初始默认值；安装后可在高级设置中修改全局默认，并通过
-Workspace“测试连接”自动保存从目标执行环境验证成功的地址。特殊 NAT、跳板机、HTTPS
-反向代理环境可在 Workspace 中手动覆盖。
+非 loopback 明文 HTTP 地址无法配置，也不再提供 `--allow-insecure-agent-api`。这不会启用
+`--allow-cross-origin`；浏览器 Origin 校验仍保持开启。
+该启动参数是 Agent API 地址的初始默认值；安装后可在“高级设置 → 其他设置”中修改排障用的
+手动覆盖，普通 Workspace 会显示自动选择结果。特殊 NAT、跳板机、HTTPS 反向代理环境仍可
+用该隐藏覆盖排除故障。
 
 此登录用户模式是 Windows 安装器的短期正式默认方案。安装器会停止、禁用并尝试删除旧版本
 遗留的 `AHA2` LocalSystem 服务；若 Windows 暂时不能删除服务，保留 Stopped/Disabled 状态也
@@ -251,17 +252,15 @@ python C:\Users\toope\AppData\Local\AHA\aha managed-process stop aha2-v1
 检查 `http://127.0.0.1:8766/healthz`；失败时恢复旧二进制。AHA2 自身的 Agent API
 只适合托管普通 Task 进程，不能用于安全地重启 AHA2 自身。
 
-远程 Workspace 使用 Agent API 时还需在启动参数中配置可达基址：
+远程 Workspace 的 Agent API 地址由 AHA 自动选择（SSH 优先走反向隧道），通常无需配置。
+仅有反向代理等无法自动推断的场景需要给出 HTTPS 基址：
 
 ```text
 --agent-api-url https://<AHA2-host>
 ```
 
-非 loopback 的 `http://` URL 默认拒绝启动。只允许在受信开发网络中临时追加：
-
-```text
---allow-insecure-agent-api
-```
+非 loopback 的 `http://` URL 不再支持，`--allow-insecure-agent-api` 已移除；旧服务定义中
+残留的该参数会被忽略，不会阻止启动。
 
 ## 构建产物
 

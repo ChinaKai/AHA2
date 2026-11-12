@@ -86,7 +86,7 @@ foreach ($contract in @(
     "TrayExecutable", "ServerExecutable", "New-ScheduledTaskAction -Execute `$trayPath", "--server", "--listen", "--data-dir",
     "New-ScheduledTaskTrigger -AtLogOn", "WindowsIdentity]::GetCurrent().Name", "Win32_ComputerSystem", "OrdinalIgnoreCase",
     "-LogonType Interactive", "-RunLevel Limited", "-RestartCount 3", "-RestartInterval", "Register-ScheduledTask",
-    "-Force", "Start-ScheduledTask", "AllowInsecureAgentAPI", "Test-ExistingAHA2UserTask", "Resolve-IdentitySid",
+    "-Force", "Start-ScheduledTask", "Test-ExistingAHA2UserTask", "Resolve-IdentitySid",
     "existingAction.Arguments", "existingAction.WorkingDirectory", "reusing it"
 )) {
     if (-not $taskScript.Contains($contract)) {
@@ -166,10 +166,8 @@ try {
     $insecureAgentURLRejected = $true
 }
 if (-not $insecureAgentURLRejected) {
-    throw "Windows tray task accepted a non-loopback HTTP Agent API URL without confirmation."
+    throw "Windows tray task accepted a non-loopback HTTP Agent API URL."
 }
-& $taskScriptPath -TrayExecutable (Join-Path $repo "go.mod") -ServerExecutable (Join-Path $repo "go.mod") -Listen "127.0.0.1:8766" -DataDir $repo -AgentAPIURL "http://192.0.2.10:8766" -AllowInsecureAgentAPI -ValidateOnly
-
 $uncDataRejected = $false
 try {
     & (Join-Path $repo "installer\windows\Prepare-AHA2DataDir.ps1") -DataDir "\\server\share\AHA2" -ValidateOnly
@@ -181,7 +179,7 @@ if (-not $uncDataRejected) {
 }
 
 $deployment = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $repo "docs\deployment.md")
-foreach ($contract in @("AHA2 User", "aha2-tray.exe", "--server", "aha2.exe", '`LocalSystem`', "Program Files", "ProgramData\AHA2", "Agent API", "--agent-api-url", "--allow-insecure-agent-api")) {
+foreach ($contract in @("AHA2 User", "aha2-tray.exe", "--server", "aha2.exe", '`LocalSystem`', "Program Files", "ProgramData\AHA2", "Agent API", "--agent-api-url")) {
     if (-not $deployment.Contains($contract)) {
         throw "Windows deployment documentation is missing: $contract"
     }
