@@ -3599,5 +3599,14 @@ func (s *Store) migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(131, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
 		return fmt.Errorf("record schema v131: %w", err)
 	}
+	var hasV132 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=132)`).Scan(&hasV132)
+	if !hasV132 {
+		// A Task delete detaches the channel conversation it hosts instead of
+		// deleting it, so the host reference must be nullable.
+		if err := s.migrateChannelConversationNullableHost(ctx); err != nil {
+			return fmt.Errorf("apply schema v132: %w", err)
+		}
+	}
 	return nil
 }

@@ -6912,6 +6912,22 @@ async function bindPetWorkbenchPage(): Promise<void> {
   binding = petWorkbenchPageKeeper.adopt(body, body.closest<HTMLElement>(".pet-workbench-page"), loader, active);
   const load = () => loader.load();
 
+  // A failed resolve must not look like a dead button. The API client already
+  // puts the server's `message` in error.message; show it on the card that was
+  // clicked (the approvals list can be scrolled far below the panel top) and
+  // bring it into view.
+  const showApprovalError = (button: HTMLButtonElement, message: string) => {
+    const card = button.closest<HTMLElement>(".pet-approval-card") || body;
+    card.querySelector("[data-pet-approval-error]")?.remove();
+    const notice = document.createElement("div");
+    notice.className = "field-help pet-approval-error";
+    notice.dataset.petApprovalError = "";
+    notice.setAttribute("role", "alert");
+    notice.textContent = message;
+    card.appendChild(notice);
+    notice.scrollIntoView({block: "nearest"});
+  };
+
   const bindApprovalActions = () => {
     body.querySelectorAll<HTMLButtonElement>("[data-pet-approval-decision]").forEach(button => {
       button.addEventListener("click", async () => {
@@ -6928,7 +6944,7 @@ async function bindPetWorkbenchPage(): Promise<void> {
             const select = [...body.querySelectorAll<HTMLSelectElement>("[data-pet-approval-option]")].find(item => item.dataset.petApprovalOption === id);
             decisionReason = selectedPetApprovalOption(options, select?.value);
             if (!decisionReason) {
-              body.insertAdjacentHTML("afterbegin", `<div class="field-help">${escapeHTML(tr("请先选择一个方案再批准。"))}</div>`);
+              showApprovalError(button, tr("请先选择一个方案再批准。"));
               select?.focus();
               return;
             }
@@ -6945,7 +6961,7 @@ async function bindPetWorkbenchPage(): Promise<void> {
           await load();
         } catch (error) {
           button.disabled = false;
-          body.insertAdjacentHTML("afterbegin", `<div class="field-help">${escapeHTML(error instanceof Error ? error.message : String(error))}</div>`);
+          showApprovalError(button, error instanceof Error ? error.message : String(error));
         }
       });
     });

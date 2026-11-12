@@ -301,11 +301,14 @@ func (s *Store) ChannelEndpoint(ctx context.Context, instanceID, kind string) (d
 
 func scanChannelConversation(scanner interface{ Scan(...any) error }) (domain.ChannelConversation, error) {
 	var item domain.ChannelConversation
-	var ownerIdentity sql.NullString
+	var ownerIdentity, hostTask sql.NullString
 	var created, updated string
-	err := scanner.Scan(&item.ID, &item.InstanceID, &item.EndpointID, &item.ScopeKeyVersion, &item.ScopeKey, &item.ExternalChatID, &item.ExternalSenderID, &item.DisplayName, &ownerIdentity, &item.HostTaskID, &item.Status, &created, &updated)
+	err := scanner.Scan(&item.ID, &item.InstanceID, &item.EndpointID, &item.ScopeKeyVersion, &item.ScopeKey, &item.ExternalChatID, &item.ExternalSenderID, &item.DisplayName, &ownerIdentity, &hostTask, &item.Status, &created, &updated)
 	if ownerIdentity.Valid {
 		item.OwnerIdentityLinkID = ownerIdentity.String
+	}
+	if hostTask.Valid {
+		item.HostTaskID = hostTask.String
 	}
 	item.CreatedAt, item.UpdatedAt = parseTime(created), parseTime(updated)
 	return item, err

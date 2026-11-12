@@ -59,6 +59,11 @@ test("approval cards wire the picker into approve and keep reject/cancel paths",
   assert.match(main, /if \(decision === "approve"\) \{[\s\S]{0,700}selectedPetApprovalOption\(options, select\?\.value\)[\s\S]{0,200}if \(!decisionReason\) \{[\s\S]{0,300}return;/);
   assert.match(main, /if \(decision === "reject"\) \{\s*decisionReason = \(window\.prompt\(t\("petApproval\.rejectReasonPrompt"\)\)/);
   assert.match(main, /api\.resolvePetApproval\(id, decision, decisionReason\)/);
+  // A failed resolve must show the server message on the clicked card instead
+  // of silently re-enabling the button.
+  assert.match(main, /const showApprovalError = \(button: HTMLButtonElement, message: string\) => \{/);
+  assert.match(main, /data-pet-approval-error/);
+  assert.match(main, /showApprovalError\(button, error instanceof Error \? error\.message : String\(error\)\)/);
   const app = await readFile(resolve(root, "dist", "app.js"), "utf8");
   assert.match(app, /\.\/pet_approvals\.js\?v=[a-f0-9]{12}/);
 });

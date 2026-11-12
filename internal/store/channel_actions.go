@@ -60,13 +60,27 @@ func enqueueChannelActionDeliveryTx(ctx context.Context, tx *sql.Tx, instanceID,
 			return err
 		}
 	}
-	var taskID string
-	if err := tx.QueryRowContext(ctx, `SELECT host_task_id FROM channel_conversations WHERE id=? AND instance_id=?`, conversationID, instanceID).Scan(&taskID); err != nil {
+	// A conversation can outlive the Task that hosted it: deleting that Task
+	// detaches the host instead of deleting the channel history. Fall back to
+	// the Task an active route points at, the same way media delivery does, and
+	// refuse the delivery when nothing is left to deliver to.
+	var taskID sql.NullString
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COALESCE(
+			(SELECT route.target_task_id FROM channel_task_routes route
+			 WHERE route.conversation_id=? AND route.state='active' LIMIT 1),
+			conversation.host_task_id)
+		FROM channel_conversations conversation
+		WHERE conversation.id=? AND conversation.instance_id=?`,
+		conversationID, conversationID, instanceID).Scan(&taskID); err != nil {
 		return err
+	}
+	if !taskID.Valid || taskID.String == "" {
+		return errors.New("channel conversation has no task to deliver to")
 	}
 	sourceID := domain.NewID("channel_source_event")
 	result, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO channel_source_events(id,source_key,source_revision,task_id,round_id,turn_id,conversation_item_id,event_class,event_type,semantic_payload_json,occurred_at) VALUES(?,?,1,?,'','','','channel_control',?,?,?)`,
-		sourceID, sourceKey, taskID, eventType, encodeJSON(payload), timeString(at))
+		sourceID, sourceKey, taskID.String, eventType, encodeJSON(payload), timeString(at))
 	if err != nil {
 		return err
 	}

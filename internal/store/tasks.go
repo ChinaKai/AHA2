@@ -681,10 +681,37 @@ func (s *Store) deleteTaskTx(ctx context.Context, tx *sql.Tx, id string, tombsto
 	if _, err := tx.ExecContext(ctx, `DELETE FROM task_permission_requests WHERE task_id=?`, id); err != nil {
 		return nil, err
 	}
+	if err := s.purgeTaskChannelReferencesTx(ctx, tx, id, time.Now().UTC()); err != nil {
+		return nil, err
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM tasks WHERE id=?`, id); err != nil {
 		return nil, err
 	}
 	return hashes, nil
+}
+
+// purgeTaskChannelReferencesTx clears the channel rows that point at a Task
+// with ON DELETE RESTRICT. Routes and subscriptions belong to this Task's own
+// channel binding, so they are removed with it. A handoff keeps its record and
+// only forgets which Task it created. A conversation that the Task hosts is
+// kept and only loses its host pointer: the channel instance still owns its
+// inbox and handoff history (both reference conversations with RESTRICT),
+// another Task may still be routed into it, and the Owner can bind a new Task
+// to it from the channel destination list. Deleting the conversation instead
+// would make the chat unrecoverable, because inbound lookup by scope keeps
+// returning the row.
+func (s *Store) purgeTaskChannelReferencesTx(ctx context.Context, tx *sql.Tx, taskID string, at time.Time) error {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM channel_subscriptions WHERE source_task_id=?`, taskID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM channel_task_routes WHERE target_task_id=?`, taskID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE channel_handoffs SET created_task_id=NULL,updated_at=? WHERE created_task_id=?`, timeString(at), taskID); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, `UPDATE channel_conversations SET host_task_id=NULL,updated_at=? WHERE host_task_id=?`, timeString(at), taskID)
+	return err
 }
 
 func (s *Store) removeOrphanedAttachmentBlobs(ctx context.Context, hashes []string) {

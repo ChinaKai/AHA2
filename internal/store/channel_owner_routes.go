@@ -313,7 +313,8 @@ func (s *Store) AdoptChannelConversationHost(ctx context.Context, conversationID
 		return err
 	}
 	defer tx.Rollback()
-	var instanceID, currentHost, endpointKind string
+	var instanceID, endpointKind string
+	var currentHost sql.NullString
 	if err := tx.QueryRowContext(ctx, `
 		SELECT conversation.instance_id,conversation.host_task_id,endpoint.kind
 		FROM channel_conversations conversation
@@ -322,7 +323,7 @@ func (s *Store) AdoptChannelConversationHost(ctx context.Context, conversationID
 	).Scan(&instanceID, &currentHost, &endpointKind); err != nil {
 		return err
 	}
-	if currentHost == taskID {
+	if currentHost.Valid && currentHost.String == taskID {
 		return tx.Commit()
 	}
 	var reusable bool
