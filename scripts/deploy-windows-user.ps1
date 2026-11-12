@@ -195,6 +195,26 @@ function Get-AHA2DeploymentPreflight {
   }
 }
 
+function Get-AHA2PreflightRequest {
+  param(
+    [string]$DataDirectory,
+    [string[]]$DatabasePaths,
+    [string]$InstallDirectory,
+    [string]$TempDirectory,
+    [bool]$UseInstaller
+  )
+  # Only the installer branch copies the setup executable into the OS temp
+  # directory. In-place updates stage every file beside its destination, so
+  # requiring temp space there would reject otherwise valid upgrades.
+  $effectiveTemp = if ($UseInstaller) { $TempDirectory } else { "" }
+  return @{
+    DataDirectory = $DataDirectory
+    DatabasePaths = @($DatabasePaths)
+    InstallDirectory = $InstallDirectory
+    TempDirectory = $effectiveTemp
+  }
+}
+
 function Format-AHA2ByteSize {
   param([long]$Bytes)
   if ($Bytes -ge 1GB) { return ("{0:n2} GiB" -f ($Bytes / 1GB)) }
@@ -661,7 +681,9 @@ function Invoke-AHA2SelfTest {
   # different volumes. Each volume gets its own requirement (database trio x2 +
   # 1 GiB on the data volume, 200 MB for the install directory, 300 MB for the
   # installer staged in temp); requirements on the same volume are summed, and
-  # any shortfall must fail before the stop stage is ever reached.
+  # any shortfall must fail before the stop stage is ever reached. Requests are
+  # built by the same pure function the main flow calls, so the parameters
+  # production passes are what these cases exercise.
   $preflightRoot = Join-Path ([IO.Path]::GetTempPath()) ("aha2-preflight-selftest-" + [Guid]::NewGuid().ToString("N"))
   try {
     New-Item -ItemType Directory -Path $preflightRoot -Force | Out-Null
@@ -678,13 +700,22 @@ function Invoke-AHA2SelfTest {
     $dataRequired = ($databaseBytes * 2) + $script:aha2DiskSafetyMarginBytes
     $preflightPaths = @($preflightDatabase, $preflightWal, $preflightShm)
 
+    # The production request assembly decides which roles are checked.
+    $installerRequest = Get-AHA2PreflightRequest -DataDirectory $preflightRoot -DatabasePaths $preflightPaths -InstallDirectory $preflightInstall -TempDirectory $preflightTemp -UseInstaller $true
+    $inPlaceRequest = Get-AHA2PreflightRequest -DataDirectory $preflightRoot -DatabasePaths $preflightPaths -InstallDirectory $preflightInstall -TempDirectory $preflightTemp -UseInstaller $false
+    Assert-AHA2SelfTest ($installerRequest.DataDirectory -eq $preflightRoot -and $installerRequest.InstallDirectory -eq $preflightInstall -and $installerRequest.TempDirectory -eq $preflightTemp) "installer preflight request carries the data, install, and temp directories"
+    Assert-AHA2SelfTest ($inPlaceRequest.DataDirectory -eq $preflightRoot -and $inPlaceRequest.InstallDirectory -eq $preflightInstall -and $inPlaceRequest.TempDirectory -eq "") "in-place preflight request omits the temp directory"
+    Assert-AHA2SelfTest ((@($installerRequest.DatabasePaths) -join ",") -eq ($preflightPaths -join ",")) "preflight request carries the database trio"
+
     # This fixture keeps all three directories on one volume: the check must use
     # their sum instead of only the data requirement.
     $sameVolumeRequired = $dataRequired + $script:aha2InstallSpaceAllowanceBytes + $script:aha2TempSpaceAllowanceBytes
-    $sameVolumeCheck = Get-AHA2DeploymentPreflight -DataDirectory $preflightRoot -DatabasePaths $preflightPaths -InstallDirectory $preflightInstall -TempDirectory $preflightTemp -FreeSpaceProvider { param($Volume) return $sameVolumeRequired - 1 }
+    $sameVolumeCheck = Get-AHA2DeploymentPreflight @installerRequest -FreeSpaceProvider { param($Volume) return $sameVolumeRequired - 1 }
     Assert-AHA2SelfTest (-not $sameVolumeCheck.Ok) "preflight rejects a volume below the summed data/install/temp requirement"
     Assert-AHA2SelfTest ($sameVolumeCheck.RequiredBytes -eq $sameVolumeRequired) "same-volume requirements are summed into one threshold"
     Assert-AHA2SelfTest ($sameVolumeCheck.Volumes.Count -eq 1 -and @($sameVolumeCheck.Volumes[0].Roles).Count -eq 3) "same-volume roles share one volume check"
+    $sameVolumeRoles = @($sameVolumeCheck.Volumes[0].Roles)
+    Assert-AHA2SelfTest (($sameVolumeRoles -contains "data") -and ($sameVolumeRoles -contains "install") -and ($sameVolumeRoles -contains "temp")) "installer preflight checks the data, install, and temp roles"
     Assert-AHA2SelfTest ($sameVolumeCheck.FreeBytes -eq ($sameVolumeRequired - 1)) "preflight reports the injected free-space value"
 
     # The production preflight path is invoked directly: a shortfall must throw
@@ -696,7 +727,7 @@ function Invoke-AHA2SelfTest {
     $preflightThrew = $false
     $preflightMessage = ""
     try {
-      [void](Invoke-AHA2DeploymentPreflight -Record $failedRecord -DataDirectory $preflightRoot -DatabasePaths $preflightPaths -InstallDirectory $preflightInstall -TempDirectory $preflightTemp -FreeSpaceProvider { param($Volume) return $sameVolumeRequired - 1 })
+      [void](Invoke-AHA2DeploymentPreflight -Record $failedRecord @installerRequest -FreeSpaceProvider { param($Volume) return $sameVolumeRequired - 1 })
       [void](& $stopStub)
     } catch {
       $preflightThrew = $true
@@ -712,7 +743,7 @@ function Invoke-AHA2SelfTest {
     # Enough space on the same volume returns normally, so the stop stage runs.
     $continued = $false
     try {
-      [void](Invoke-AHA2DeploymentPreflight -Record (New-AHA2ResultRecord) -DataDirectory $preflightRoot -DatabasePaths $preflightPaths -InstallDirectory $preflightInstall -TempDirectory $preflightTemp -FreeSpaceProvider { param($Volume) return $sameVolumeRequired })
+      [void](Invoke-AHA2DeploymentPreflight -Record (New-AHA2ResultRecord) @installerRequest -FreeSpaceProvider { param($Volume) return $sameVolumeRequired })
       [void](& $stopStub)
       $continued = $true
     } catch {}
@@ -730,7 +761,7 @@ function Invoke-AHA2SelfTest {
     $freeByVolume["D:\"] = [long]($dataRequired + $script:aha2InstallSpaceAllowanceBytes)
     $freeByVolume["F:\"] = [long]$script:aha2TempSpaceAllowanceBytes
     $freeSpaceProvider = { param($Volume) return $freeByVolume[[string]$Volume] }
-    $splitCheck = Get-AHA2DeploymentPreflight -DataDirectory $preflightRoot -DatabasePaths $preflightPaths -InstallDirectory $preflightInstall -TempDirectory $preflightTemp -FreeSpaceProvider $freeSpaceProvider -VolumeResolver $volumeResolver
+    $splitCheck = Get-AHA2DeploymentPreflight @installerRequest -FreeSpaceProvider $freeSpaceProvider -VolumeResolver $volumeResolver
     Assert-AHA2SelfTest $splitCheck.Ok "preflight accepts split volumes when every volume has enough space"
     Assert-AHA2SelfTest (@($splitCheck.Volumes).Count -eq 2) "split-volume preflight checks each volume separately"
     $splitDataCheck = @($splitCheck.Volumes | Where-Object { $_.Volume -eq "D:\" })[0]
@@ -738,15 +769,29 @@ function Invoke-AHA2SelfTest {
     Assert-AHA2SelfTest ($splitDataCheck.RequiredBytes -eq ($dataRequired + $script:aha2InstallSpaceAllowanceBytes)) "data and install requirements are summed per volume"
     Assert-AHA2SelfTest ($splitTempCheck.RequiredBytes -eq $script:aha2TempSpaceAllowanceBytes) "temp volume requires its own allowance"
 
+    # An in-place update stages files beside their destinations and never uses
+    # the OS temp directory, so a short temp volume must not block it.
+    $freeByVolume["F:\"] = [long]0
+    $inPlaceCheck = Get-AHA2DeploymentPreflight @inPlaceRequest -FreeSpaceProvider $freeSpaceProvider -VolumeResolver $volumeResolver
+    Assert-AHA2SelfTest $inPlaceCheck.Ok "in-place preflight passes when the temp volume is short"
+    $inPlaceRoles = @($inPlaceCheck.Volumes[0].Roles)
+    Assert-AHA2SelfTest (@($inPlaceCheck.Volumes).Count -eq 1 -and ($inPlaceRoles -contains "data") -and ($inPlaceRoles -contains "install") -and -not ($inPlaceRoles -contains "temp")) "in-place preflight checks only the data and install roles"
+    $inPlaceContinued = $false
+    try {
+      [void](Invoke-AHA2DeploymentPreflight -Record (New-AHA2ResultRecord) @inPlaceRequest -FreeSpaceProvider $freeSpaceProvider -VolumeResolver $volumeResolver)
+      $inPlaceContinued = $true
+    } catch {}
+    Assert-AHA2SelfTest $inPlaceContinued "production preflight accepts an in-place update with a short temp volume"
+
     $freeByVolume["F:\"] = [long]($script:aha2TempSpaceAllowanceBytes - 1)
-    $splitShort = Get-AHA2DeploymentPreflight -DataDirectory $preflightRoot -DatabasePaths $preflightPaths -InstallDirectory $preflightInstall -TempDirectory $preflightTemp -FreeSpaceProvider $freeSpaceProvider -VolumeResolver $volumeResolver
+    $splitShort = Get-AHA2DeploymentPreflight @installerRequest -FreeSpaceProvider $freeSpaceProvider -VolumeResolver $volumeResolver
     Assert-AHA2SelfTest (-not $splitShort.Ok) "preflight fails when only the temp volume is short"
     Assert-AHA2SelfTest (@($splitShort.InsufficientVolumes).Count -eq 1 -and $splitShort.InsufficientVolumes[0].Volume -eq "F:\" -and (@($splitShort.InsufficientVolumes[0].Roles) -contains "temp")) "preflight names the insufficient temp volume and role"
 
     $splitRecord = New-AHA2ResultRecord
     $splitThrew = $false
     try {
-      [void](Invoke-AHA2DeploymentPreflight -Record $splitRecord -DataDirectory $preflightRoot -DatabasePaths $preflightPaths -InstallDirectory $preflightInstall -TempDirectory $preflightTemp -FreeSpaceProvider $freeSpaceProvider -VolumeResolver $volumeResolver)
+      [void](Invoke-AHA2DeploymentPreflight -Record $splitRecord @installerRequest -FreeSpaceProvider $freeSpaceProvider -VolumeResolver $volumeResolver)
     } catch {
       $splitThrew = $true
     }
@@ -1549,8 +1594,9 @@ $state.UpdateType = if ($UpdateExistingInstallInPlace) { "existing-install-in-pl
 # or temp volume cannot hold its share of the deployment. This runs before the
 # stop/backup stages and outside the deployment try block, so a failure never
 # reaches the stop, rollback, or file-replacement paths.
+$preflightRequest = Get-AHA2PreflightRequest -DataDirectory $data -DatabasePaths @($databasePath,$databaseWalPath,$databaseShmPath) -InstallDirectory $install -TempDirectory ([IO.Path]::GetTempPath()) -UseInstaller (-not $UpdateExistingInstallInPlace)
 try {
-  $preflight = Invoke-AHA2DeploymentPreflight -Record $state -DataDirectory $data -DatabasePaths @($databasePath,$databaseWalPath,$databaseShmPath) -InstallDirectory $install -TempDirectory ([IO.Path]::GetTempPath())
+  $preflight = Invoke-AHA2DeploymentPreflight -Record $state @preflightRequest
 } catch {
   Write-DeploymentResult $state
   throw

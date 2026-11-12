@@ -121,7 +121,7 @@ try {
 
 $userDeployPath = Join-Path $repo "scripts\deploy-windows-user.ps1"
 $userDeploy = Get-Content -Raw -Encoding UTF8 -LiteralPath $userDeployPath
-foreach ($contract in @("ProviderPath", "GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)", "-WorkingDirectory `$install", "AllowCustomUserWritableInstallDir", "UpdateExistingInstallInPlace", "existing-install-in-place", "Custom install directory is not writable", "WriteAccessVerified", "-PerUser", "ElevationRequired=`$false", "AHA2-Setup-User-x64.exe", "Wait-AHA2Health", "Get-FileHash", "AHA2 User", "AHA2 User Update", "DetachedWorker", "New-ScheduledTaskAction", "RunLevel Limited", "Stop-AHA2ProcessTrees", "System32\taskkill.exe", "`$taskkillExecutable", "`$global:LASTEXITCODE = 0", "/T", "/SKIPUSERTASK=1", "user-deploy-result.json", "stagedInstaller", "Unblock-File", "Start-Process -FilePath `$stagedInstaller", "-SelfTest", "StopTimeoutSeconds", "Test-AHA2ExclusiveFileProbe", "Set-AHA2StagedFileAtomic", "Restore-AHA2DatabaseFromBackup", "PRAGMA quick_check", "winsqlite3.dll", "LockedFiles", "BackupSHA256", "RollbackVerified", "rollback_health", "BackupPresent", "Get-AHA2FileRollbackAction", "Get-AHA2ProcessList", "EnumerationError", "Set-AHA2InstalledFile", "Get-AHA2DeploymentPreflight", "Get-AHA2VolumeChecks", "Invoke-AHA2DeploymentPreflight", "Get-AHA2VolumeFreeBytes", "FreeBytes", "RequiredBytes", "Volumes", "aha2TempSpaceAllowanceBytes")) {
+foreach ($contract in @("ProviderPath", "GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)", "-WorkingDirectory `$install", "AllowCustomUserWritableInstallDir", "UpdateExistingInstallInPlace", "existing-install-in-place", "Custom install directory is not writable", "WriteAccessVerified", "-PerUser", "ElevationRequired=`$false", "AHA2-Setup-User-x64.exe", "Wait-AHA2Health", "Get-FileHash", "AHA2 User", "AHA2 User Update", "DetachedWorker", "New-ScheduledTaskAction", "RunLevel Limited", "Stop-AHA2ProcessTrees", "System32\taskkill.exe", "`$taskkillExecutable", "`$global:LASTEXITCODE = 0", "/T", "/SKIPUSERTASK=1", "user-deploy-result.json", "stagedInstaller", "Unblock-File", "Start-Process -FilePath `$stagedInstaller", "-SelfTest", "StopTimeoutSeconds", "Test-AHA2ExclusiveFileProbe", "Set-AHA2StagedFileAtomic", "Restore-AHA2DatabaseFromBackup", "PRAGMA quick_check", "winsqlite3.dll", "LockedFiles", "BackupSHA256", "RollbackVerified", "rollback_health", "BackupPresent", "Get-AHA2FileRollbackAction", "Get-AHA2ProcessList", "EnumerationError", "Set-AHA2InstalledFile", "Get-AHA2DeploymentPreflight", "Get-AHA2VolumeChecks", "Get-AHA2PreflightRequest", "Invoke-AHA2DeploymentPreflight", "Get-AHA2VolumeFreeBytes", "FreeBytes", "RequiredBytes", "Volumes", "aha2TempSpaceAllowanceBytes")) {
     if (-not $userDeploy.Contains($contract)) {
         throw "Per-user deployment contract is missing: $contract"
     }
@@ -153,6 +153,10 @@ $backupDirectoryIndex = $userDeploy.IndexOf('New-Item -ItemType Directory -Path 
 if ($preflightIndex -lt 0 -or $stopStageIndex -lt 0 -or $backupDirectoryIndex -lt 0 -or
     $preflightIndex -gt $stopStageIndex -or $preflightIndex -gt $backupDirectoryIndex) {
     throw "Per-user deployment must complete the disk-space preflight before creating the backup directory or stopping AHA2."
+}
+$preflightRequestMarker = 'Get-AHA2PreflightRequest -DataDirectory $data -DatabasePaths @($databasePath,$databaseWalPath,$databaseShmPath) -InstallDirectory $install -TempDirectory ([IO.Path]::GetTempPath()) -UseInstaller (-not $UpdateExistingInstallInPlace)'
+if (-not $userDeploy.Contains($preflightRequestMarker)) {
+    throw "Per-user deployment must build the preflight request from the data, install, and temp directories, and skip temp for in-place updates."
 }
 $taskSnapshotIndex = $userDeploy.IndexOf('$previousTaskXML')
 $stopBeforeBackupIndex = $userDeploy.IndexOf('Stop-AHA2ProcessTrees', $taskSnapshotIndex)
