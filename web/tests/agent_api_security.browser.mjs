@@ -24,10 +24,14 @@ const csp = (await readFile(resolve(root, "internal/httpapi/server.go"), "utf8")
 const bootstrap = `
 const json = (value, status = 200) => new Response(JSON.stringify(value), {status, headers: {"Content-Type": "application/json"}});
 window.__puts = [];
+// localStorage stands in for the server's store so a page reload (a fresh
+// fetch of the same origin) sees the value the PUT saved.
+const storedStdio = () => localStorage.getItem("__aha_stdio") === "1";
 const agentAPI = () => ({
   url: "https://override.example.test",
   startup_url: "http://127.0.0.1:8766",
   effective_url: "https://override.example.test",
+  stdio_proxy: storedStdio(),
   migration_note: "旧版局域网明文地址已禁用",
 });
 window.fetch = async (input, init = {}) => {
@@ -42,7 +46,8 @@ window.fetch = async (input, init = {}) => {
   if (path === "/api/v1/settings/agent-api" && method === "PUT") {
     const body = JSON.parse(init.body || "{}");
     window.__puts.push(body);
-    return json({ok: true, agent_api: {...agentAPI(), url: body.url, effective_url: body.url || "http://127.0.0.1:8766", migration_note: ""}});
+    localStorage.setItem("__aha_stdio", body.stdio_proxy ? "1" : "0");
+    return json({ok: true, agent_api: {...agentAPI(), url: body.url, effective_url: body.url || "http://127.0.0.1:8766", stdio_proxy: Boolean(body.stdio_proxy), migration_note: ""}});
   }
   if (path === "/api/v1/tasks") return json({tasks: [], has_more: false});
   if (path === "/api/v1/projects") return json({projects: [], has_more: false});
@@ -133,6 +138,16 @@ try {
   puts = await page.evaluate(() => window.__puts);
   assert.equal(puts[1].stdio_proxy, true, `a ticked box did not send true: ${JSON.stringify(puts[1])}`);
   assert.deepEqual(errors, [], "the settings page threw while saving");
+
+  // Reload at the same view: the fresh page must fetch the saved switch and
+  // render it checked. This is the regression where a direct load of #other
+  // never fetched the advanced settings resource, so the default (off) state
+  // was rendered even though the store held true.
+  await page.evaluate(() => { window.location.hash = "#other"; });
+  await page.reload({waitUntil: "networkidle"});
+  await page.waitForSelector("#agent-api-override-form", {timeout: 15000});
+  assert.equal(await page.locator('#agent-api-override-form input[name="stdio_proxy"]').isChecked(), true,
+    "the saved stdio switch was not echoed after a reload");
 
   await page.screenshot({path: resolve(output, "agent-api-override.png")});
   console.log("agent api override PUT:", JSON.stringify(puts[0]));

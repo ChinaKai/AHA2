@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -29,13 +30,21 @@ const (
 	agentProxyDirectoryName  = "agent-proxy"
 	agentProxyManifestName   = "manifest.json"
 	agentProxyBinaryPrefix   = "aha2-agent-proxy"
+	// agentProxyBundleDirectoryName is the directory next to the installed
+	// aha2 executable that carries helpers for workspaces whose platform is not
+	// the host's. The release packages it, so a Windows installation can serve
+	// a Linux workspace without an operator-supplied binary.
+	agentProxyBundleDirectoryName = "agent-proxy"
+	// The bundle manifest lists one entry per platform. It is local to the
+	// installation, but its size is still bounded: a malformed file must be
+	// rejected before it is buffered.
+	agentProxyBundleManifestLimit = 16 * 1024
 	// agentProxyManifestLimit bounds the manifest read. A real manifest is a
 	// few hundred bytes; anything larger is not one, and must be refused before
 	// it is buffered rather than parsed.
 	agentProxyManifestLimit = 4096
-	// agentProxyHelperOverride points at a prebuilt Linux helper. It exists for
-	// cross-architecture hosts (a Windows AHA cannot copy its own aha2.exe to a
-	// Linux workspace) and for tests.
+	// agentProxyHelperOverride points at a prebuilt helper. It still wins over
+	// everything else for cross-architecture hosts and tests.
 	agentProxyHelperOverride = "AHA2_AGENT_PROXY_HELPER"
 )
 
@@ -67,20 +76,20 @@ func EnsureAgentProxyHelper(ctx context.Context, item domain.Workspace, workDir,
 	if IsWindowsWorkspace(item) {
 		return AgentProxyHelper{}, fmt.Errorf("Agent API stdio 代理暂不支持 Windows 工作区")
 	}
-	source, err := agentProxySourceBinary()
-	if err != nil {
-		return AgentProxyHelper{}, err
-	}
 	runner := RunnerFor(item)
 	remoteOS, remoteArch, err := agentProxyRemotePlatform(ctx, runner)
 	if err != nil {
 		return AgentProxyHelper{}, err
 	}
-	// An explicit helper is taken at its word: the operator is the only one who
-	// knows what they built, and the `version` probe below still proves it runs
-	// on this workspace. Comparing it to the AHA process platform is what made
-	// the override useless for a Windows host and a Linux workspace.
-	if !source.explicit && (remoteOS != source.os || remoteArch != source.arch) {
+	source, err := agentProxySourceBinary(remoteOS, remoteArch)
+	if err != nil {
+		return AgentProxyHelper{}, err
+	}
+	// An explicit or bundled helper was chosen for this workspace's platform
+	// already, so it is not compared with the AHA process. Only the running aha2
+	// executable inherits its platform from this process; the `version` probe
+	// below still proves the chosen binary runs on this workspace.
+	if !source.explicit && !source.bundled && (remoteOS != source.os || remoteArch != source.arch) {
 		return AgentProxyHelper{}, fmt.Errorf(
 			"helper 架构不匹配：本机 %s/%s，工作区 %s/%s；可通过 %s 指定预编译的 Linux helper",
 			source.os, source.arch, remoteOS, remoteArch, agentProxyHelperOverride,
@@ -150,6 +159,10 @@ type agentProxySource struct {
 	// platform is whatever the operator built, so it is recorded as the
 	// workspace's platform instead of being compared with this process.
 	explicit bool
+	// bundled marks a helper shipped in the installation's agent-proxy
+	// directory. Its platform comes from the bundle manifest entry that matched
+	// the workspace, so it is also not compared with this process.
+	bundled bool
 }
 
 var agentProxySourceCache struct {
@@ -158,27 +171,147 @@ var agentProxySourceCache struct {
 	source agentProxySource
 }
 
-// agentProxySourceBinary hashes the helper binary once per process. The upload
-// itself re-reads the file; only the digest is worth caching, and it must not be
-// recomputed for every Turn of every Task.
-func agentProxySourceBinary() (agentProxySource, error) {
-	path := strings.TrimSpace(os.Getenv(agentProxyHelperOverride))
-	explicit := path != ""
-	if path == "" {
-		executable, err := os.Executable()
+// Indirections for tests: production always asks the running process and the
+// host it is on, but the Windows-host/Linux-workspace combination cannot be
+// produced on a Linux test runner without substituting both.
+var (
+	agentProxyExecutablePath = os.Executable
+	agentProxyHostPlatform   = func() (string, string) { return runtime.GOOS, runtime.GOARCH }
+)
+
+// agentProxyBundleManifest is the installation-side manifest listing helpers
+// built for other platforms. It is written by scripts/build-agent-proxy-helpers.sh.
+type agentProxyBundleManifest struct {
+	Protocol int                      `json:"protocol"`
+	Version  string                   `json:"version"`
+	Helpers  []agentProxyBundleHelper `json:"helpers"`
+}
+
+type agentProxyBundleHelper struct {
+	OS     string `json:"os"`
+	Arch   string `json:"arch"`
+	File   string `json:"file"`
+	SHA256 string `json:"sha256"`
+}
+
+// agentProxySourceBinary picks the binary to upload for one workspace platform.
+//
+// The running executable is the normal source only when the workspace runs on
+// the same OS and architecture. A Windows installation serving a Linux workspace
+// cannot copy aha2.exe there, so it falls back to the packaged helper for that
+// platform. The environment override stays first for operators who need it.
+func agentProxySourceBinary(remoteOS, remoteArch string) (agentProxySource, error) {
+	hostOS, hostArch := agentProxyHostPlatform()
+	executable := ""
+	if strings.TrimSpace(os.Getenv(agentProxyHelperOverride)) == "" {
+		resolved, err := agentProxyExecutablePath()
 		if err != nil {
 			return agentProxySource{}, fmt.Errorf("定位当前 aha2 可执行文件：%w", err)
 		}
-		path = executable
+		executable = resolved
 	}
+	return agentProxyResolveSource(hostOS, hostArch, executable, remoteOS, remoteArch)
+}
+
+func agentProxyResolveSource(hostOS, hostArch, executable, remoteOS, remoteArch string) (agentProxySource, error) {
+	if override := strings.TrimSpace(os.Getenv(agentProxyHelperOverride)); override != "" {
+		// Taken at the operator's word: its platform is recorded as the
+		// workspace's platform rather than compared with this process.
+		return agentProxySourceAt(override, remoteOS, remoteArch, true, false)
+	}
+	if hostOS == remoteOS && hostArch == remoteArch {
+		return agentProxySourceAt(executable, hostOS, hostArch, false, false)
+	}
+	return agentProxyBundleSource(filepath.Dir(executable), hostOS, hostArch, remoteOS, remoteArch)
+}
+
+// agentProxyBundleSource finds the packaged helper for remoteOS/remoteArch and
+// verifies it against the bundle manifest before it is used.
+//
+// Every failure names the platform, what was looked at, and why it was
+// rejected. The caller falls back to the reverse tunnel/LAN path and logs this
+// error, so it is the only recovery hint an operator gets.
+func agentProxyBundleSource(installDir, hostOS, hostArch, remoteOS, remoteArch string) (agentProxySource, error) {
+	directory := filepath.Join(installDir, agentProxyBundleDirectoryName)
+	manifestPath := filepath.Join(directory, agentProxyManifestName)
+	fail := func(detail string) (agentProxySource, error) {
+		return agentProxySource{}, fmt.Errorf(
+			"缺少 %s/%s 的 helper（本机 %s/%s）：已查找 %s，%s；请重新安装或构建包含该平台的 AHA2 发行包（安装目录下的 %s/ 需带 %s），或通过 %s 指定预编译 helper",
+			remoteOS, remoteArch, hostOS, hostArch, manifestPath, detail,
+			agentProxyBundleDirectoryName, agentProxyManifestName, agentProxyHelperOverride,
+		)
+	}
+	manifest, err := readAgentProxyBundleManifest(manifestPath)
+	if err != nil {
+		return fail(fmt.Sprintf("读取 manifest 失败：%v", err))
+	}
+	if manifest.Protocol != agentproxy.Protocol {
+		return fail(fmt.Sprintf("manifest protocol=%d，本程序要求 %d", manifest.Protocol, agentproxy.Protocol))
+	}
+	declared := make([]string, 0, len(manifest.Helpers))
+	var entry *agentProxyBundleHelper
+	for index := range manifest.Helpers {
+		candidate := &manifest.Helpers[index]
+		declared = append(declared, candidate.OS+"/"+candidate.Arch)
+		if candidate.OS == remoteOS && candidate.Arch == remoteArch && entry == nil {
+			entry = candidate
+		}
+	}
+	if len(declared) == 0 {
+		return fail("manifest 未声明任何平台")
+	}
+	if entry == nil {
+		return fail("manifest 只声明了 " + strings.Join(declared, "、"))
+	}
+	name := filepath.Base(entry.File)
+	if name == "" || name == "." || name != entry.File {
+		return fail(fmt.Sprintf("manifest 的 helper 文件名 %q 不合法", entry.File))
+	}
+	helperPath := filepath.Join(directory, name)
+	source, err := agentProxySourceAt(helperPath, entry.OS, entry.Arch, false, true)
+	if err != nil {
+		return fail(fmt.Sprintf("%s（%v）", helperPath, err))
+	}
+	if entry.SHA256 == "" || source.sha256 != strings.ToLower(strings.TrimSpace(entry.SHA256)) {
+		return agentProxySource{}, fmt.Errorf(
+			"缺少可用的 %s/%s helper：%s 的 sha256=%s，manifest 期望 %q；请重新安装或构建包含该平台的 AHA2 发行包，或通过 %s 指定预编译 helper",
+			remoteOS, remoteArch, helperPath, source.sha256, entry.SHA256, agentProxyHelperOverride,
+		)
+	}
+	return source, nil
+}
+
+func readAgentProxyBundleManifest(path string) (agentProxyBundleManifest, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return agentProxyBundleManifest{}, err
+	}
+	if info.Size() > agentProxyBundleManifestLimit {
+		return agentProxyBundleManifest{}, fmt.Errorf("manifest 过大：%d 字节", info.Size())
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return agentProxyBundleManifest{}, err
+	}
+	var manifest agentProxyBundleManifest
+	if err := json.Unmarshal(content, &manifest); err != nil {
+		return agentProxyBundleManifest{}, fmt.Errorf("解析 manifest：%w", err)
+	}
+	return manifest, nil
+}
+
+// agentProxySourceAt hashes the helper binary once per process. The upload
+// itself re-reads the file; only the digest is worth caching, and it must not be
+// recomputed for every Turn of every Task.
+func agentProxySourceAt(path, osName, arch string, explicit, bundled bool) (agentProxySource, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return agentProxySource{}, fmt.Errorf("读取 helper 源文件：%w", err)
 	}
-	// The key includes whether the binary was supplied explicitly: the same path
-	// read through the override and as the running executable carries different
+	// The key includes how the binary was chosen: the same path read through the
+	// override, as the running executable, or from the bundle carries different
 	// platform rules.
-	key := fmt.Sprintf("%s|%d|%d|%t", path, info.Size(), info.ModTime().UnixNano(), explicit)
+	key := fmt.Sprintf("%s|%d|%d|%t|%t|%s/%s", path, info.Size(), info.ModTime().UnixNano(), explicit, bundled, osName, arch)
 	agentProxySourceCache.Lock()
 	cached, cachedKey := agentProxySourceCache.source, agentProxySourceCache.key
 	agentProxySourceCache.Unlock()
@@ -196,7 +329,7 @@ func agentProxySourceBinary() (agentProxySource, error) {
 	}
 	source := agentProxySource{
 		path: path, sha256: hex.EncodeToString(digest.Sum(nil)),
-		os: runtime.GOOS, arch: runtime.GOARCH, size: info.Size(), explicit: explicit,
+		os: osName, arch: arch, size: info.Size(), explicit: explicit, bundled: bundled,
 	}
 	agentProxySourceCache.Lock()
 	agentProxySourceCache.key, agentProxySourceCache.source = key, source

@@ -81,6 +81,7 @@ foreach ($contract in @(
     'RegisterPreviousData', 'remoteip=localsubnet profile=private', '{code:LocalManagementURL}', '{commonappdata}\AHA2',
     'DestName: "aha2.exe"', 'DestName: "aha2-tray.exe"', 'TrayParameters', '--server', '--listen', '--data-dir',
 	'DestName: "Xray-core-MPL-2.0.txt"', 'DestName: "Xray-core-SOURCE.txt"',
+	'SourceHelperDir', 'DestDir: "{app}\agent-proxy"',
     'runasoriginaluser', 'StopInstalledUserProcesses', "Get-Process -Name ''aha2-tray'',''aha2''",
     'DisableAndStopLegacyAHA2Service(True)', 'RemoveLegacyAHA2Service()', 'Register-AHA2UserTask.ps1',
     'Prepare-AHA2DataDir.ps1', 'ConfigureAHA2UserTask', 'AHA2UserTaskName', 'RemoveAHA2UserTask',

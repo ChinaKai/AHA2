@@ -10,6 +10,9 @@
 #ifndef OutputDir
   #define OutputDir "..\..\dist\installer"
 #endif
+#ifndef SourceHelperDir
+  #define SourceHelperDir "..\..\dist\agent-proxy"
+#endif
 
 #define AppName "AHA2"
 #define ServiceName "AHA2"
@@ -56,6 +59,10 @@ RestartApplications=no
 [Files]
 Source: "{#SourceExe}"; DestDir: "{app}"; DestName: "aha2.exe"; Flags: ignoreversion
 Source: "{#SourceTrayExe}"; DestDir: "{app}"; DestName: "aha2-tray.exe"; Flags: ignoreversion
+; Prebuilt Agent API stdio helpers for workspaces whose platform is not the
+; host's (a Windows AHA serving a Linux workspace). The runtime verifies the
+; manifest's os/arch/sha256 before using one.
+Source: "{#SourceHelperDir}\*"; DestDir: "{app}\agent-proxy"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "Register-AHA2UserTask.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "Prepare-AHA2DataDir.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\third_party\hysteria\LICENSE.md"; DestDir: "{app}\licenses"; DestName: "Hysteria-LICENSE.txt"; Flags: ignoreversion

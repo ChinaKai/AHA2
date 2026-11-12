@@ -96,9 +96,19 @@ manifest 读取在远端先查大小（>4 KiB 直接拒绝），不把工作区�
 每次物化后执行 `<helper> version` 探活，noexec 挂载会在这里失败并继续回退；
 回退原因写进日志。写目录前检查它不是符号链接、且属于当前用户，临时文件用 `mktemp` 创建。
 
-工作区与 AHA 架构不一致时直接报错并回退。`AHA2_AGENT_PROXY_HELPER` 指定的预编译 helper
-不参与这个比较：它的平台由提供者决定，manifest 记为工作区平台，`<helper> version`
-探活仍会证明它能不能真的跑起来。Windows 宿主配 Linux 工作区就靠这条路径。
+helper 的来源按以下顺序选择：
+
+1. `AHA2_AGENT_PROXY_HELPER` 指定的预编译 helper。它的平台由提供者决定，manifest 记为
+   工作区平台，`<helper> version` 探活仍会证明它能不能真的跑起来。
+2. 工作区平台与本机相同时，直接使用当前 aha2 可执行文件。
+3. 平台不同时，使用安装目录旁 `agent-proxy/` 里对应平台的发包 helper。发行包在构建时
+   交叉编译 `linux/amd64` 与 `linux/arm64`，`manifest.json` 记录每个文件的
+   `os/arch/sha256`；运行时先校验 manifest 的 protocol、平台与文件哈希，再上传。
+   Windows 宿主配 Linux 工作区默认走这条路径，不再需要用户手工准备 helper。
+
+三条路径都不可用时，错误信息写明缺失的平台、查找过的 manifest/文件路径和恢复办法
+（重新安装或构建包含该平台的发行包，或显式设置 `AHA2_AGENT_PROXY_HELPER`），随后照常
+回退到反向隧道/LAN 并写日志。
 
 共享目录不在 Task 清理范围内：`RemoveTaskScratch` 只删 `.aha2-context/<task>/scratch`，
 `share/` 随工作区一起删除；scratch 里的回退副本随 Task 收尾删除。
@@ -117,7 +127,9 @@ manifest 读取在远端先查大小（>4 KiB 直接拒绝），不把工作区�
   单通道 64 流上限、超长 READY 行拒绝、https scheme 保留。
 - `go test ./internal/workspace`：物化复用、版本升级与保留、4 路并发 ensure 且文件与
   manifest 一致、清理不删 `share/`、SSH 会话上的真实 HTTP 端到端、helper 缺失时有限重试后回退、
-  显式 helper 跳过架构比较、超大 manifest 被覆盖。
+  显式 helper 跳过架构比较、超大 manifest 被覆盖；以及 Windows 宿主 + linux/amd64 工作区
+  选中内置 helper、manifest 平台与远端一致、tar 往返后 helper 仍可执行、缺平台与
+  sha256 不符时的报错文案。
 - `go test ./internal/app`：开关关闭行为不变、开启但不可达时回退并记录原因、非 loopback 地址不建隧道。
 - `go test ./internal/store ./internal/httpapi`：schema v133、设置持久化与 API 解析。
 - `go test -race ./internal/agentproxy` 通过。

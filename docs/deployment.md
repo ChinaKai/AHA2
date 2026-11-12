@@ -359,6 +359,10 @@ SHA256SUMS
 bash scripts/build-all.sh
 ```
 
+该脚本还会交叉编译 `linux/amd64` 与 `linux/arm64` 的 Agent API stdio helper，输出到
+`dist/agent-proxy/`（含 `manifest.json`）。Windows 安装包会把它安装到 `{app}\agent-proxy`，
+因此 Windows 上的 AHA2 可以直接服务 Linux 工作区，不需要手工提供 helper。
+
 已有 Windows amd64 控制面和 tray 程序且安装了 Inno Setup 6 时，可构建安装包：
 
 ```powershell
