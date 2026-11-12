@@ -121,7 +121,7 @@ try {
 
 $userDeployPath = Join-Path $repo "scripts\deploy-windows-user.ps1"
 $userDeploy = Get-Content -Raw -Encoding UTF8 -LiteralPath $userDeployPath
-foreach ($contract in @("ProviderPath", "GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)", "-WorkingDirectory `$install", "AllowCustomUserWritableInstallDir", "UpdateExistingInstallInPlace", "existing-install-in-place", "Custom install directory is not writable", "WriteAccessVerified", "-PerUser", "ElevationRequired=`$false", "AHA2-Setup-User-x64.exe", "Wait-AHA2Health", "Get-FileHash", "AHA2 User", "AHA2 User Update", "DetachedWorker", "New-ScheduledTaskAction", "RunLevel Limited", "Stop-AHA2ProcessTrees", "System32\taskkill.exe", "`$taskkillExecutable", "`$global:LASTEXITCODE = 0", "/T", "/SKIPUSERTASK=1", "user-deploy-result.json", "stagedInstaller", "Unblock-File", "Start-Process -FilePath `$stagedInstaller", "-SelfTest", "StopTimeoutSeconds", "Test-AHA2ExclusiveFileProbe", "Set-AHA2StagedFileAtomic", "Restore-AHA2DatabaseFromBackup", "PRAGMA quick_check", "winsqlite3.dll", "LockedFiles", "BackupSHA256", "RollbackVerified", "rollback_health", "BackupPresent", "Get-AHA2FileRollbackAction", "Get-AHA2ProcessList", "EnumerationError", "Set-AHA2InstalledFile", "Get-AHA2DeploymentPreflight", "Get-AHA2VolumeFreeBytes", "FreeBytes", "RequiredBytes")) {
+foreach ($contract in @("ProviderPath", "GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)", "-WorkingDirectory `$install", "AllowCustomUserWritableInstallDir", "UpdateExistingInstallInPlace", "existing-install-in-place", "Custom install directory is not writable", "WriteAccessVerified", "-PerUser", "ElevationRequired=`$false", "AHA2-Setup-User-x64.exe", "Wait-AHA2Health", "Get-FileHash", "AHA2 User", "AHA2 User Update", "DetachedWorker", "New-ScheduledTaskAction", "RunLevel Limited", "Stop-AHA2ProcessTrees", "System32\taskkill.exe", "`$taskkillExecutable", "`$global:LASTEXITCODE = 0", "/T", "/SKIPUSERTASK=1", "user-deploy-result.json", "stagedInstaller", "Unblock-File", "Start-Process -FilePath `$stagedInstaller", "-SelfTest", "StopTimeoutSeconds", "Test-AHA2ExclusiveFileProbe", "Set-AHA2StagedFileAtomic", "Restore-AHA2DatabaseFromBackup", "PRAGMA quick_check", "winsqlite3.dll", "LockedFiles", "BackupSHA256", "RollbackVerified", "rollback_health", "BackupPresent", "Get-AHA2FileRollbackAction", "Get-AHA2ProcessList", "EnumerationError", "Set-AHA2InstalledFile", "Get-AHA2DeploymentPreflight", "Get-AHA2VolumeChecks", "Invoke-AHA2DeploymentPreflight", "Get-AHA2VolumeFreeBytes", "FreeBytes", "RequiredBytes", "Volumes", "aha2TempSpaceAllowanceBytes")) {
     if (-not $userDeploy.Contains($contract)) {
         throw "Per-user deployment contract is missing: $contract"
     }
@@ -147,7 +147,7 @@ if ($userDeploy.Contains("[IO.File]::Replace(`$TemporaryPath, `$Destination, `$n
 if (-not $userDeploy.Contains("[NullString]::Value")) {
     throw "Atomic replacement must pass [NullString]::Value as the null backup name."
 }
-$preflightIndex = $userDeploy.IndexOf('$preflight = Get-AHA2DeploymentPreflight')
+$preflightIndex = $userDeploy.IndexOf('$preflight = Invoke-AHA2DeploymentPreflight')
 $stopStageIndex = $userDeploy.IndexOf('$stop = Stop-AHA2ProcessTrees')
 $backupDirectoryIndex = $userDeploy.IndexOf('New-Item -ItemType Directory -Path $backup')
 if ($preflightIndex -lt 0 -or $stopStageIndex -lt 0 -or $backupDirectoryIndex -lt 0 -or
