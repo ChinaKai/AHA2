@@ -395,6 +395,10 @@ const app = document.querySelector<HTMLDivElement>("#app");
 const petApprovalCounter = createPetApprovalCounter(() => api.petPendingApprovalCount(), updatePetPendingApprovalIndicators);
 let petPendingApprovalTimer = 0;
 let petWorkbenchTab = "overview";
+// Records table of contents: wide screens start open, phones start folded. The
+// choice lives here, not in the rendered node, so switching tabs (which
+// replaces the body) keeps it for the rest of the session.
+let petRecordsTocOpen: boolean | null = null;
 // The workbench binds against a node that render() replaces wholesale. The
 // keeper lets the mounted page survive same-view renders so an unrelated
 // render cannot abort and restart its request; leaving the view releases it.
@@ -7335,10 +7339,15 @@ async function bindPetWorkbenchPage(): Promise<void> {
       body.querySelector<HTMLButtonElement>("[data-pet-approval-filters-open]")?.addEventListener("click", openApprovalFilters);
       renderApprovalRows();
     } else if (active === "records") {
+      if (petRecordsTocOpen === null) {
+        // Phones open the records tab on the body, not on a full-height index.
+        petRecordsTocOpen = !window.matchMedia("(max-width: 640px)").matches;
+      }
       body.innerHTML = renderPetRecords(view.core, view.worklog, {
         translate: t,
         emptyCore: t("petWorkbench.emptyCore"),
         emptyWorklog: t("petWorkbench.emptyWorklog"),
+        tocOpen: petRecordsTocOpen,
       }) + loadMoreFooter("worklog", view.worklog.length, view.worklog_total ?? view.worklog.length);
       bindPetDocEditorButtons(body, {
         translate: t,
@@ -7347,6 +7356,7 @@ async function bindPetWorkbenchPage(): Promise<void> {
         cancel: renderTab,
       });
       bindRecordToc();
+      bindRecordTocToggle();
       bindLoadMore();
     } else if (active === "settings") {
       body.innerHTML = `<div id="pet-settings-host" class="pet-workbench-settings"></div>`;
@@ -7566,7 +7576,11 @@ async function bindPetWorkbenchPage(): Promise<void> {
         } else if (jump === "channels") {
           switchView("channels");
         } else {
-          document.getElementById("pet-overview-follows")?.scrollIntoView({block: "start", behavior: "smooth"});
+          // The watch list starts collapsed like the other overview sections,
+          // so the jump has to reveal it before scrolling.
+          const follows = document.getElementById("pet-overview-follows");
+          if (follows instanceof HTMLDetailsElement) follows.open = true;
+          follows?.scrollIntoView({block: "start", behavior: "smooth"});
         }
       });
     });
@@ -7583,6 +7597,22 @@ async function bindPetWorkbenchPage(): Promise<void> {
         if (!target) return;
         if (target instanceof HTMLDetailsElement) target.open = true;
         target.scrollIntoView({block: "start", behavior: "smooth"});
+      });
+    });
+  };
+
+  // Collapse/expand without a repaint, so open document entries stay open and
+  // the state stays in petRecordsTocOpen for the next render.
+  const bindRecordTocToggle = (): void => {
+    body.querySelectorAll<HTMLButtonElement>("[data-pet-record-toc-toggle]").forEach(button => {
+      button.addEventListener("click", () => {
+        const open = !(petRecordsTocOpen ?? true);
+        petRecordsTocOpen = open;
+        body.querySelector<HTMLElement>(".pet-records")?.classList.toggle("toc-collapsed", !open);
+        body.querySelectorAll<HTMLButtonElement>("[data-pet-record-toc-toggle]").forEach(toggle => {
+          toggle.setAttribute("aria-expanded", String(open));
+          toggle.textContent = t(open ? "petWorkbench.recordsTocCollapse" : "petWorkbench.recordsTocExpand");
+        });
       });
     });
   };

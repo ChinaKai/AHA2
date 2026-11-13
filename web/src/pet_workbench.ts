@@ -675,9 +675,16 @@ export function renderPetOverview(options: PetOverviewOptions): string {
   const followRows = watched.length
     ? watched.map(item => renderWatchRow(item, options)).join("")
     : `<div class="field-help">${escapeHTML(translate("petWorkbench.emptyFollows"))}</div>`;
-  const otherRows = others.length
-    ? `<details class="pet-overview-other"><summary>${escapeHTML(translate("petWorkbench.otherFollows", {count: String(others.length)}))}</summary>${others.map(item => renderWatchRow(item, options)).join("")}</details>`
-    : "";
+  // Both watch lists are ordinary collapsed sections, consistent with the
+  // inspection/channel details below. The count comes from the rows the
+  // overview actually renders, not the untruncated server total.
+  const followTitle = translate("petWorkbench.overviewFollows", {count: String(watched.length)});
+  const ignoredTitle = translate("petWorkbench.otherFollows", {count: String(others.length)});
+  const followDetails = `<details class="pet-overview-follows" id="pet-overview-follows" aria-label="${escapeHTML(followTitle)}"><summary>${escapeHTML(followTitle)}</summary><div class="pet-overview-follows-body"><div class="field-help">${escapeHTML(translate("petWorkbench.followHint"))}</div>${followRows}</div></details>`;
+  const ignoredRows = others.length
+    ? others.map(item => renderWatchRow(item, options)).join("")
+    : `<div class="field-help">${escapeHTML(translate("petWorkbench.emptyIgnored"))}</div>`;
+  const otherRows = `<details class="pet-overview-other" aria-label="${escapeHTML(ignoredTitle)}"><summary>${escapeHTML(ignoredTitle)}</summary><div class="pet-overview-other-body">${ignoredRows}</div></details>`;
 
   const activities: Array<{time: string; html: string}> = [];
   for (const item of approvals) {
@@ -711,11 +718,8 @@ export function renderPetOverview(options: PetOverviewOptions): string {
       ${overviewCard("follows", anomalies, translate("petWorkbench.overviewAnomalies"), translate("petWorkbench.overviewAnomaliesHint"), anomalies ? "attention" : "")}
       ${overviewCard("channels", degraded, translate("petWorkbench.overviewChannels"), translate("petWorkbench.overviewChannelsHint", {total: String(channelTotal)}), degraded ? "attention" : "")}
     </div>
-    <section class="pet-overview-follows" id="pet-overview-follows">
-      <header><h3>${escapeHTML(translate("petWorkbench.overviewFollows"))}</h3><small>${escapeHTML(translate("petWorkbench.followHint"))}</small></header>
-      ${followRows}
-      ${otherRows}
-    </section>
+    ${followDetails}
+    ${otherRows}
     <section class="pet-overview-recent">
       <h3>${escapeHTML(translate("petWorkbench.overviewRecent"))}</h3>
       <div class="pet-overview-activity-list">${recent}</div>
@@ -740,6 +744,8 @@ export interface PetRecordsOptions {
   translate: Translate;
   emptyCore: string;
   emptyWorklog: string;
+  /** Desktop starts open, phones start collapsed; the caller keeps the choice. */
+  tocOpen?: boolean;
 }
 
 // Worklog entries are dated filenames, so newest-first is a plain string sort.
@@ -752,13 +758,14 @@ function renderCoreEntry(entry: {name: string; content: string}, index: number, 
   return `<details class="pet-doc-entry" id="pet-record-core-${index}"><summary><span>${escapeHTML(entry.name)}</span><button type="button" class="pet-doc-edit" data-pet-doc-edit data-pet-doc-section="core" data-pet-doc-name="${escapeHTML(entry.name)}">${escapeHTML(translate("common.edit"))}</button></summary><pre>${escapeHTML(entry.content)}</pre></details>`;
 }
 
-function renderWorklogEntry(entry: PetRecordEntry, translate: Translate): string {
-  return `<details class="pet-doc-entry"><summary><span>${escapeHTML(entry.date)}</span><button type="button" class="pet-doc-edit" data-pet-doc-edit data-pet-doc-section="worklog" data-pet-doc-name="${escapeHTML(entry.date)}.md">${escapeHTML(translate("common.edit"))}</button></summary><pre>${escapeHTML(entry.content)}</pre></details>`;
+function renderWorklogEntry(entry: PetRecordEntry, index: number, translate: Translate): string {
+  return `<details class="pet-doc-entry" id="pet-record-worklog-${index}"><summary><span>${escapeHTML(entry.date)}</span><button type="button" class="pet-doc-edit" data-pet-doc-edit data-pet-doc-section="worklog" data-pet-doc-name="${escapeHTML(entry.date)}.md">${escapeHTML(translate("common.edit"))}</button></summary><pre>${escapeHTML(entry.content)}</pre></details>`;
 }
 
 // renderPetRecords merges the old core and worklog tabs into one body. Core
-// documents stay pinned above the dated log; the table of contents is a
-// collapsible details that jumps to (and opens) one record.
+// documents stay pinned above the dated log. On wide screens the table of
+// contents sits in a left column and can collapse so the body takes the full
+// width; on phones it starts folded and expands above the body.
 export function renderPetRecords(
   core: Array<{name: string; content: string}>,
   worklog: PetRecordEntry[],
@@ -766,27 +773,38 @@ export function renderPetRecords(
 ): string {
   const translate = options.translate;
   const sorted = sortPetWorklog(worklog);
+  const tocOpen = options.tocOpen !== false;
   const toc = [
     `<button type="button" data-pet-record-goto="pet-record-core">${escapeHTML(translate("petWorkbench.core"))} (${core.length})</button>`,
     ...core.map((entry, index) => `<button type="button" class="pet-record-toc-sub" data-pet-record-goto="pet-record-core-${index}">${escapeHTML(entry.name)}</button>`),
     `<button type="button" data-pet-record-goto="pet-record-worklog">${escapeHTML(translate("petWorkbench.worklog"))} (${sorted.length})</button>`,
+    ...sorted.map((entry, index) => `<button type="button" class="pet-record-toc-sub" data-pet-record-goto="pet-record-worklog-${index}">${escapeHTML(entry.date)}</button>`),
   ].join("");
+  const toggleLabel = tocOpen
+    ? translate("petWorkbench.recordsTocCollapse")
+    : translate("petWorkbench.recordsTocExpand");
   const coreBody = core.length
     ? core.map((entry, index) => renderCoreEntry(entry, index, translate)).join("")
     : `<div class="field-help">${escapeHTML(options.emptyCore)}</div>`;
   const worklogBody = sorted.length
-    ? sorted.map(entry => renderWorklogEntry(entry, translate)).join("")
+    ? sorted.map((entry, index) => renderWorklogEntry(entry, index, translate)).join("")
     : `<div class="field-help">${escapeHTML(options.emptyWorklog)}</div>`;
-  return `<div class="pet-records">
-    <details class="pet-record-toc"><summary>${escapeHTML(translate("petWorkbench.recordsToc"))}</summary><nav>${toc}</nav></details>
-    <section class="pet-record-section" id="pet-record-core">
-      <h3>${escapeHTML(translate("petWorkbench.core"))}</h3>
-      ${coreBody}
-    </section>
-    <section class="pet-record-section" id="pet-record-worklog">
-      <h3>${escapeHTML(translate("petWorkbench.worklog"))}</h3>
-      ${worklogBody}
-    </section>
+  return `<div class="pet-records${tocOpen ? "" : " toc-collapsed"}">
+    <aside class="pet-record-toc" id="pet-record-toc">
+      <strong>${escapeHTML(translate("petWorkbench.recordsToc"))}</strong>
+      <nav id="pet-record-toc-nav">${toc}</nav>
+    </aside>
+    <div class="pet-record-content">
+      <div class="pet-record-toolbar"><button type="button" class="pet-record-toc-toggle" data-pet-record-toc-toggle aria-expanded="${tocOpen}" aria-controls="pet-record-toc-nav">${escapeHTML(toggleLabel)}</button></div>
+      <section class="pet-record-section" id="pet-record-core">
+        <h3>${escapeHTML(translate("petWorkbench.core"))}</h3>
+        ${coreBody}
+      </section>
+      <section class="pet-record-section" id="pet-record-worklog">
+        <h3>${escapeHTML(translate("petWorkbench.worklog"))}</h3>
+        ${worklogBody}
+      </section>
+    </div>
   </div>`;
 }
 
