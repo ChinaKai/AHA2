@@ -93,9 +93,11 @@ func (s *Service) ValidateWorkspaceAgentAPI(ctx context.Context, mode, rawURL st
 // An SSH workspace whose automatic choice has never been verified is detected
 // here, before the Turn starts. The loopback fallback only works when sshd
 // allows a reverse tunnel; when it does not, the Turn would otherwise fail on a
-// path detection could have replaced with the controlled LAN fallback. A
-// successful result is stored so later Turns reuse it; a failed probe leaves
-// the stored state and the normal fallback untouched.
+// path detection could have replaced with the controlled LAN fallback. The
+// detection re-run here never repeats the stdio stage: the caller just tried
+// it, and a second helper/SSH session could only hand the Turn a tunnel address
+// that was never probed. A successful result is stored so later Turns reuse it;
+// a failed probe leaves the stored state and the normal fallback untouched.
 func (s *Service) AgentAPIURLForWorkspace(ctx context.Context, item domain.Workspace) (string, error) {
 	settings, err := s.AgentAPISettings(ctx)
 	if err != nil {
@@ -131,12 +133,25 @@ func (s *Service) AgentAPIURLForWorkspace(ctx context.Context, item domain.Works
 // result is cached on the workspace, because the probe costs a workspace
 // connection and every Turn would otherwise repeat it. A write failure is
 // ignored: the probe already proved this address works.
+//
+// The stdio stage is skipped here on purpose. The only caller,
+// AgentAPIURLForWorkspace, reaches this function either after a Turn already
+// attempted stdio or on a base address stdio cannot proxy (non-loopback).
+// Repeating the stage would open another helper/SSH session, and if it happened
+// to succeed it would return AHA's loopback as if the reverse tunnel had been
+// verified. The result must therefore be a tunnel or LAN address, which is
+// exactly what the remaining stages probe.
 func (s *Service) detectAgentAPIForTurn(ctx context.Context, item domain.Workspace) (string, bool) {
 	if normalizeAgentAPIMode(item.AgentAPIMode) != "auto" || item.Transport != "ssh" {
 		return "", false
 	}
-	detected := s.DetectWorkspaceAgentAPI(ctx, item)
+	detected := s.detectWorkspaceAgentAPI(ctx, item, false)
 	if detected.AgentAPIStatus != "ready" || detected.AgentAPIResolvedURL == "" {
+		return "", false
+	}
+	// Defensive: a stdio result must never become a Turn fallback address. Its
+	// loopback is only reachable through the helper that just failed.
+	if agentAPIDetectionUsedStdio(detected) {
 		return "", false
 	}
 	// Validate before caching: a result outside the probe boundary is not usable,
@@ -151,6 +166,13 @@ func (s *Service) detectAgentAPIForTurn(ctx context.Context, item domain.Workspa
 }
 
 func (s *Service) DetectWorkspaceAgentAPI(ctx context.Context, item domain.Workspace) domain.Workspace {
+	return s.detectWorkspaceAgentAPI(ctx, item, true)
+}
+
+// detectWorkspaceAgentAPI is the detection implementation. tryStdio is false
+// only for the Turn fallback, where stdio was already attempted in this same
+// resolution (see detectAgentAPIForTurn).
+func (s *Service) detectWorkspaceAgentAPI(ctx context.Context, item domain.Workspace, tryStdio bool) domain.Workspace {
 	now := time.Now().UTC()
 	item.AgentAPILastCheckedAt = now
 	item.AgentAPIResolvedURL = ""
@@ -174,35 +196,40 @@ func (s *Service) DetectWorkspaceAgentAPI(ctx context.Context, item domain.Works
 	// SSH itself, not sshd port forwarding or a reachable LAN address. A failure
 	// here is recorded and the tunnel/LAN candidates run exactly as before.
 	stdioFailure := ""
-	if base, ok := agentAPIStdioDetectionBase(item, settings); ok {
-		budget := agentAPIStdioDetectTimeout
-		if s.agentAPIStdioProbeBudget > 0 {
-			budget = s.agentAPIStdioProbeBudget
-		}
-		stdioCtx, cancel := context.WithTimeout(ctx, budget)
-		result, stdioErr := s.probeAgentAPIOverStdioForDetection(stdioCtx, item, base)
-		cancel()
-		if stdioErr == nil {
-			item.AgentAPIResolvedURL = base
-			item.AgentAPIStatus = "ready"
-			item.AgentAPIError = ""
-			// A working automatic path supersedes the migration warning.
-			item.AgentAPIMigrationNote = ""
-			reachability := map[string]any{
-				"status": "ready", "url": base, "via": "stdio", "runtime": result.Runtime,
+	if tryStdio {
+		if base, ok := agentAPIStdioDetectionBase(item, settings); ok {
+			budget := agentAPIStdioDetectTimeout
+			if s.agentAPIStdioProbeBudget > 0 {
+				budget = s.agentAPIStdioProbeBudget
 			}
-			// The proxy URL is the address that actually answered during this
-			// detection. It is an observation, not a stored endpoint: every Turn
-			// starts a new helper on a new port.
-			if result.URL != "" {
-				reachability["proxy_url"] = result.URL
+			stdioCtx, cancel := context.WithTimeout(ctx, budget)
+			result, stdioErr := s.probeAgentAPIOverStdioForDetection(stdioCtx, item, base)
+			cancel()
+			if stdioErr == nil {
+				item.AgentAPIResolvedURL = base
+				item.AgentAPIStatus = "ready"
+				item.AgentAPIError = ""
+				// A working automatic path supersedes the migration warning.
+				item.AgentAPIMigrationNote = ""
+				reachability := map[string]any{
+					"status": "ready", "url": base, "via": "stdio", "runtime": result.Runtime,
+				}
+				// The proxy URL is the address that actually answered during this
+				// detection. It is an observation, not a stored endpoint: every Turn
+				// starts a new helper on a new port.
+				if result.URL != "" {
+					reachability["proxy_url"] = result.URL
+				}
+				item.Capabilities["agent_api"] = reachability
+				return item
 			}
-			item.Capabilities["agent_api"] = reachability
-			return item
+			// Probe errors can quote credentials back at us, and this string is
+			// stored in capabilities and shown in the UI.
+			stdioReason := workspacepkg.SafeDisplayText(item, stdioErr.Error())
+			stdioFailure = stdioReason
+			stages = append(stages, "SSH stdio")
+			failures = append(failures, "SSH stdio："+stdioReason)
 		}
-		stdioFailure = truncateAgentAPIError(stdioErr.Error())
-		stages = append(stages, "SSH stdio")
-		failures = append(failures, "SSH stdio："+stdioErr.Error())
 	}
 	// tunnelFailure makes the rejected tunnel visible even when a later LAN
 	// candidate wins: the fallback log names why the preferred path was not used

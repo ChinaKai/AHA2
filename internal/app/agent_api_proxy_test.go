@@ -294,3 +294,55 @@ func (backendBinaryExecutor) Execute(context.Context, ExecutionRequest, func(Exe
 func (executor backendBinaryExecutor) BackendBinary(string) string {
 	return executor.binary
 }
+
+// TestPrepareAgentAPIForTurnFallbackSkipsStdioStage is the review regression:
+// the Turn attempted stdio and it failed. Re-resolving the address must not
+// repeat the whole stdio detection (another helper and SSH session), and the
+// stdio detection succeeding must not hand the Turn AHA's loopback as if the
+// reverse tunnel had been verified. The fallback must land on the probed LAN
+// address instead.
+func TestPrepareAgentAPIForTurnFallbackSkipsStdioStage(t *testing.T) {
+	service, _ := newAgentAPIProxyTestService(t)
+	item := agentProxyTestWorkspaceItem()
+	item.AgentAPIStatus = "ready"
+	item.AgentAPIResolvedURL = "http://127.0.0.1:8766"
+	item.Capabilities = map[string]any{"agent_api": map[string]any{
+		"status": "ready", "url": "http://127.0.0.1:8766", "via": "stdio", "runtime": "node",
+	}}
+	starts := 0
+	service.agentAPIProxyStartFn = func(context.Context, domain.Workspace, domain.Task, string, string, string, string) (*workspacepkg.AgentAPIProxy, error) {
+		starts++
+		return nil, fmt.Errorf("Agent API stdio 代理启动失败")
+	}
+	stdioDetections := 0
+	service.agentAPIStdioProbeFn = func(context.Context, domain.Workspace, string) (workspacepkg.AgentAPIStdioResult, error) {
+		stdioDetections++
+		return workspacepkg.AgentAPIStdioResult{URL: "http://127.0.0.1:42000", Runtime: "node"}, nil
+	}
+	lanURL := "http://192.168.7.187:8766"
+	service.agentAPIWorkspaceHostsFn = func(context.Context, domain.Workspace) []string { return nil }
+	service.agentAPILocalHostsFn = func() []string { return []string{"192.168.7.187"} }
+	service.agentAPIProbeFn = func(_ context.Context, _ domain.Workspace, candidate string) error {
+		if candidate == lanURL {
+			return nil
+		}
+		return fmt.Errorf("服务端拒绝端口转发：administratively prohibited")
+	}
+
+	setup, err := service.prepareAgentAPIForTurn(context.Background(), item, domain.Task{ID: "task-1"}, t.TempDir(), "codex")
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if starts != 1 {
+		t.Fatalf("proxy start calls = %d, want exactly the Turn's one attempt", starts)
+	}
+	if stdioDetections != 0 {
+		t.Fatalf("the fallback repeated stdio detection %d time(s)", stdioDetections)
+	}
+	if setup.Path != agentAPIPathLAN || setup.URL != lanURL || setup.Proxy != nil {
+		t.Fatalf("setup = %#v, want the probed LAN address", setup)
+	}
+	if forward := agentAPIReverseForward(item, setup.URL); forward != nil {
+		t.Fatalf("the fallback address still gets an unverified reverse tunnel: %#v", forward)
+	}
+}

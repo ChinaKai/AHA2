@@ -32,6 +32,11 @@ func ProbeAgentAPIOverStdio(ctx context.Context, item domain.Workspace, baseURL,
 	if !ok {
 		return AgentAPIStdioResult{}, fmt.Errorf("Agent API 地址 %q 不是可代理的 loopback 地址", baseURL)
 	}
+	// The helper lands under <workDir>/.aha2-context/share/agent-proxy. A Turn
+	// gets the ignore rule from context materialisation; detection creates the
+	// directory on its own, so it applies the same rule first. Failure is not
+	// fatal: the ignore is cosmetic and the helper can still run.
+	_ = ensureContextIgnored(ctx, item, workDir)
 	helper, err := EnsureAgentProxyHelper(ctx, item, workDir, taskID, version, backend)
 	if err != nil {
 		return AgentAPIStdioResult{}, fmt.Errorf("准备 helper：%w", err)

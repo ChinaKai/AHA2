@@ -7,8 +7,8 @@ AHA 的局域网明文地址。本改动把 Agent API 放进 SSH 会话自带的
 也不需要 sudo。工作区里只落一个几十 KB 的 Node 脚本，不再出现完整服务端二进制。
 
 SSH 工作区默认且无条件优先走 stdio；只有这一层失败时才回到「反向隧道 → LAN」。高级设置里不再有
-stdio 开关，只保留排障用的手动覆盖地址；旧版本存下的 `stdio_proxy=0` 由 schema v134 统一改写为
-1，当前版本也不再读取该列。
+stdio 开关，只保留排障用的手动覆盖地址。旧版本存下的 `stdio_proxy` 列保留原值、当前版本不再读取：
+升级后一定走 stdio，降级回旧版本则恢复旧版本当时的行为（不会把操作员关闭过的开关重新打开）。
 
 ## 运行时选择顺序
 
@@ -105,7 +105,8 @@ stdin 收到 EOF 即退出，不会留下孤儿进程。AHA 本身崩溃时 SSH 
 - 不是 SSH 工作区 → 完全走旧逻辑（本机直连 / WSL localhost）。
 - 生效地址不是 loopback（局域网地址或外部 https）→ 不启动代理：工作区本来就能直连。
 - 生效地址是 loopback → 无条件先按上面的顺序尝试 stdio（显式覆盖 → Node helper），
-  失败后再走反向隧道 → LAN。
+  失败后再走反向隧道 → LAN。回退解析只探测隧道/LAN，不会重复整套 stdio 检测：那会再开一次
+  helper/SSH 会话，而且若 stdio 又成功，只会把未验证的反向隧道地址交给 Agent。
   stdio 成功时 Turn 使用 `<scheme>://127.0.0.1:<远端端口>`；scheme 沿用生效地址，
   `https://127.0.0.1` 的 TLS 会端到端透传，不会被悄悄降级成明文。
 - stdio 成功时不再计算 `ReverseForward`：否则反向隧道会指向代理自己的远端端口。
@@ -120,15 +121,18 @@ backend 命令从 runtime snapshot 的 backend 名解析（`BackendBinaryResolve
 
 1. 用与 Turn 相同的 `EnsureAgentProxyHelper` 物化 helper。工作目录取 Workspace 的 `root_path`，
    没有 Task，所以不走「本 Task 的 scratch」这一层回退；共享目录里已有版本与 sha256 都一致的
-   helper 时直接复用，不会重复上传。
+   helper 时直接复用，不会重复上传。物化前先调用 `ensureContextIgnored`，避免 `.aha2-context/`
+   在仓库里显示为未跟踪目录（该步骤失败不阻断检测）。
 2. `StartAgentAPIProxy` 起 SSH stdio 会话，然后从工作区内部通过代理 URL 请求 `/healthz`，并校验
    响应确实是 AHA2。上传 helper 本身不算通过，必须真正拿到健康响应。
 3. 成功时记录 `agent_api_status=ready`、`agent_api_resolved_url=<生效 loopback 地址>`，并在
    `capabilities.agent_api` 写入 `via=stdio`、`runtime=node|exec` 与实际探测到的
    `proxy_url`。`resolved_url` 不写代理端口：每次 Turn 都会启动新 helper、端口会变。
    Turn 解析也不会把 `via=stdio` 的缓存地址当作用户可用地址：它只证明 helper 当时能到 loopback，
-   反向隧道并未验证；stdio 后来失败时重新检测，再选已验证的隧道或 LAN。
-4. 无论成功还是失败都会关闭 proxy/SSH 会话，helper 是会话子进程，不会留在远端；失败原因以
+   反向隧道并未验证；stdio 后来失败时重新检测，而这次检测显式跳过 stdio 阶段，只选已验证的
+   隧道或 LAN（同时避免重复 helper/SSH 会话）。
+4. 无论成功还是失败都会关闭 proxy/SSH 会话，helper 是会话子进程，不会留在远端；失败原因经
+   `SafeDisplayText` 脱敏（`sk-ant-` 形状的 token 与 Workspace SSH 密码）后以
    `SSH stdio：<原因>` 进入阶段摘要，继续探测隧道与 LAN，成功的回退结果会保留
    `capabilities.agent_api.stdio_error`。
 5. 整个 stdio 阶段有 90 秒上限（`agentAPIStdioDetectTimeout`），不会让检测请求一直卡住。
@@ -187,10 +191,13 @@ manifest 读取在远端先查大小（>4 KiB 直接拒绝），不把工作区�
 - `go test ./internal/app`：旧配置 `stdio_proxy=0` 仍走 stdio、stdio 成功路径、显式覆盖路径、
   node 失败 → 隧道 → LAN 的选择顺序与原因、非 loopback 地址不建隧道；loopback 全局覆盖
   被标成「覆盖地址」时，隧道拒绝原因仍然保留；检测优先 stdio、stdio 失败回退并把
-  `SSH stdio` 与原因写进摘要、非 SSH 不尝试 stdio、阶段超时会取消。
+  `SSH stdio` 与原因写进摘要、非 SSH 不尝试 stdio、阶段超时会取消；
+  `TestPrepareAgentAPIForTurnFallbackSkipsStdioStage` 锁住回退不重跑 stdio、也不会拿到
+  未验证的 loopback+tunnel；stdio 失败摘要中的 token/SSH 密码会被脱敏。
 - `go test ./scripts`：安装器 `[InstallDelete]` 只允许 `{app}`/`{group}` 内的路径，
   并且保留删除旧 `{app}\agent-proxy` 的条目。
-- 变异验证：检测跳过 stdio、Turn 跳过 stdio、检测结束不关闭 proxy、状态文案去掉 stdio
-  分支，对应测试都会变红（不关闭 proxy 的变异还会因泄漏的 SSH 会话在清理阶段超时）。
+- 变异验证：检测跳过 stdio、Turn 跳过 stdio、检测结束不关闭 proxy、回退重新跑 stdio 或
+  返回 via=stdio 的 loopback、状态文案去掉 stdio 分支，对应测试都会变红（不关闭 proxy 的
+  变异还会因泄漏的 SSH 会话在清理阶段超时）。
 
 不部署、不重启本机 AHA2、不改生产库、不改远端 sshd。

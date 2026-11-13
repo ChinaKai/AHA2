@@ -757,3 +757,43 @@ func TestAgentAPIURLForWorkspaceRetriesDetectionAfterStdioCache(t *testing.T) {
 		t.Fatalf("probe calls = %v, want a fresh tunnel/LAN detection %v", probe.calls, wantCalls)
 	}
 }
+
+// TestDetectStdioFailureRedactsCredentials covers the stored/shown failure
+// summary: helper stderr can quote a token or the SSH password, and the stdio
+// stage is the one that leaks it into capabilities.agent_api.stdio_error.
+func TestDetectStdioFailureRedactsCredentials(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	service, database := newAgentAPIConnectivityService(t)
+	defer database.Close()
+	const token = "sk-ant-abcdefghijklmnop0123"
+	const password = "hunter2-secret"
+	service.agentAPIStdioProbeFn = func(context.Context, domain.Workspace, string) (workspacepkg.AgentAPIStdioResult, error) {
+		return workspacepkg.AgentAPIStdioResult{}, fmt.Errorf("helper 拒绝：token=%s password=%s", token, password)
+	}
+	service.agentAPILocalHostsFn = func() []string { return nil }
+	service.agentAPIProbeFn = func(context.Context, domain.Workspace, string) error {
+		return errors.New("connection refused")
+	}
+	item := service.DetectWorkspaceAgentAPI(ctx, domain.Workspace{
+		Transport: "ssh", RootPath: "/repo", Health: "ready", AgentAPIMode: "auto",
+		SSHPassword: password, Capabilities: map[string]any{},
+	})
+	capability, _ := item.Capabilities["agent_api"].(map[string]any)
+	stdioError, _ := capability["stdio_error"].(string)
+	if stdioError == "" {
+		// A later candidate cannot succeed here, so the stage summary owns the text.
+		stdioError = item.AgentAPIError
+	}
+	for _, leaked := range []string{token, password} {
+		if strings.Contains(item.AgentAPIError, leaked) {
+			t.Fatalf("AgentAPIError leaked %q: %s", leaked, item.AgentAPIError)
+		}
+		if strings.Contains(fmt.Sprint(item.Capabilities), leaked) {
+			t.Fatalf("capabilities leaked %q: %#v", leaked, item.Capabilities)
+		}
+	}
+	if !strings.Contains(stdioError, "[已隐藏]") {
+		t.Fatalf("stdio failure was not redacted: %q", stdioError)
+	}
+}

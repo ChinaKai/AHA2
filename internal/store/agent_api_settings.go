@@ -27,13 +27,15 @@ func (s *Store) UpdateAgentAPISettings(ctx context.Context, item domain.AgentAPI
 	if item.UpdatedAt.IsZero() {
 		item.UpdatedAt = time.Now().UTC()
 	}
-	// stdio_proxy is no longer read by this build, but it is written as 1 so a
-	// database shared with an older binary does not advertise the removed
-	// opt-in state either.
+	// stdio_proxy is no longer read by this build, and it is deliberately not
+	// written either: the column keeps whatever an older build stored. That
+	// makes a downgrade behave exactly as before the upgrade instead of
+	// re-enabling a transport the operator had switched off. A fresh row takes
+	// the schema default, which no current reader consults.
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO agent_api_settings(id,url,allow_insecure,migration_note,stdio_proxy,updated_at) VALUES(1,?,0,?,1,?)
+		INSERT INTO agent_api_settings(id,url,allow_insecure,migration_note,updated_at) VALUES(1,?,0,?,?)
 		ON CONFLICT(id) DO UPDATE SET url=excluded.url,allow_insecure=0,
-			migration_note=excluded.migration_note,stdio_proxy=1,
+			migration_note=excluded.migration_note,
 			updated_at=excluded.updated_at`,
 		item.URL, item.MigrationNote, timeString(item.UpdatedAt),
 	)
