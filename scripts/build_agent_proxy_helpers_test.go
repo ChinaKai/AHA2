@@ -96,11 +96,12 @@ func TestBuildAgentProxyHelpersScriptProducesVerifiedBundle(t *testing.T) {
 	}
 }
 
-// TestLocalBuildAndDeployBuildTheHelperBundle is a wiring regression for the
-// review finding that a clean local build failed the installer's helper check:
-// both build entry points must produce dist/agent-proxy before packaging.
-// Copying the bundle into an existing installation is deliberately not tested
-// here; deployment has moved to the local installer and is out of this task.
+// TestLocalBuildAndDeployBuildTheHelperBundle checks the local_build.sh entry
+// point: a clean build failed the installer's helper check because the helper
+// was never built. The build-and-deploy execution is pinned separately by
+// TestBuildAndDeployActuallyRunsTheHelperBuild. Copying the bundle into an
+// existing installation is deliberately not tested here; deployment has moved
+// to the local installer and is out of this task.
 func TestLocalBuildAndDeployBuildTheHelperBundle(t *testing.T) {
 	repo := repoRoot(t)
 	read := func(name string) string {
@@ -118,13 +119,65 @@ func TestLocalBuildAndDeployBuildTheHelperBundle(t *testing.T) {
 		{"local_build.sh", "build-agent-proxy-helpers.sh"},
 		{"local_build.sh", "-InputHelperDir"},
 		{"local_build.sh", "dist/agent-proxy"},
-		{"scripts/build-and-deploy-windows-user.ps1", "Build Agent API stdio helpers"},
-		{"scripts/build-and-deploy-windows-user.ps1", "scripts/build-agent-proxy-helpers.sh"},
-		{"scripts/build-and-deploy-windows-user.ps1", "dist/agent-proxy"},
 	} {
 		content := read(contract.file)
 		if !strings.Contains(content, contract.want) {
 			t.Fatalf("%s no longer contains %q", contract.file, contract.want)
 		}
+	}
+}
+
+// powerShellBlockAfter returns the body of the braced block whose opening brace
+// ends at start. It is deliberately small: the scripts it reads are checked in
+// data, and counting braces is enough to keep the assertions inside the step
+// they name without embedding a PowerShell parser.
+func powerShellBlockAfter(t *testing.T, content, marker string) string {
+	t.Helper()
+	start := strings.Index(content, marker)
+	if start < 0 {
+		t.Fatalf("marker not found: %q", marker)
+	}
+	open := start + len(marker)
+	depth := 1
+	for index := open; index < len(content); index++ {
+		switch content[index] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return content[open:index]
+			}
+		}
+	}
+	t.Fatalf("unterminated block after %q", marker)
+	return ""
+}
+
+// TestBuildAndDeployActuallyRunsTheHelperBuild pins the execution itself, not
+// the step name or the arguments: deleting the Invoke-Native line used to leave
+// a string-only test green because the script name and output directory were
+// still present in the argument array.
+func TestBuildAndDeployActuallyRunsTheHelperBuild(t *testing.T) {
+	content, err := os.ReadFile(filepath.Join(repoRoot(t), "scripts", "build-and-deploy-windows-user.ps1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	block := powerShellBlockAfter(t, string(content), `Invoke-Step "Build Agent API stdio helpers" {`)
+	argumentsLine := `$helperArguments += @("bash", "scripts/build-agent-proxy-helpers.sh", "dist/agent-proxy")`
+	callLine := "Invoke-Native $wslExecutable $helperArguments"
+	argumentsAt := strings.Index(block, argumentsLine)
+	if argumentsAt < 0 {
+		t.Fatalf("helper step does not assemble the build command: %s", argumentsLine)
+	}
+	callAt := strings.Index(block, callLine)
+	if callAt < 0 {
+		t.Fatalf("helper step assembles the build command but never runs it: missing %q", callLine)
+	}
+	if callAt < argumentsAt {
+		t.Fatalf("%q runs before the command it is given is assembled", callLine)
+	}
+	if between := block[argumentsAt+len(argumentsLine) : callAt]; strings.TrimSpace(between) != "" {
+		t.Fatalf("helper command is not followed directly by its execution: %q", between)
 	}
 }
