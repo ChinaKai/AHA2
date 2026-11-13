@@ -497,3 +497,62 @@ func TestProbeModelCapabilitiesReportsFallbackServerErrors(t *testing.T) {
 		t.Fatalf("protocol_errors leaked the API key: %q", evidence)
 	}
 }
+
+func TestProbeStatusForCodeClassifiesProtocolRejections(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		code int
+		want string
+	}{
+		{http.StatusOK, "supported"},
+		{http.StatusUnauthorized, "unauthorized"},
+		{http.StatusForbidden, "unauthorized"},
+		{http.StatusTooManyRequests, "rate_limited"},
+		// A gateway that rejects the wire-protocol request shape does not
+		// support that protocol; none of these are network faults.
+		{http.StatusBadRequest, "unsupported"},
+		{http.StatusNotFound, "unsupported"},
+		{http.StatusMethodNotAllowed, "unsupported"},
+		{http.StatusNotImplemented, "unsupported"},
+		{http.StatusInternalServerError, "unavailable"},
+		{http.StatusServiceUnavailable, "unavailable"},
+		{http.StatusUnprocessableEntity, "inconclusive"},
+	}
+	for _, tc := range cases {
+		if got := probeStatusForCode(tc.code); got != tc.want {
+			t.Errorf("probeStatusForCode(%d)=%q, want %q", tc.code, got, tc.want)
+		}
+	}
+}
+
+func TestProbeModelCapabilitiesTreatsHTTP400AsProtocolUnavailable(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/responses":
+			// This gateway implements Chat and Messages but not Responses.
+			w.WriteHeader(http.StatusBadRequest)
+		case "/chat/completions", "/v1/messages":
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	caps, _, errs := ProbeModelCapabilitiesContextWithClientDetailed(
+		context.Background(), server.URL, "secret", "auto", "ali-model", 5*time.Second, nil)
+	if caps["responses"] != "unsupported" {
+		t.Fatalf("responses=%q errs=%v, want unsupported for HTTP 400", caps["responses"], errs)
+	}
+	if caps["chat_completions"] != "supported" || caps["anthropic_messages"] != "supported" {
+		t.Fatalf("caps=%v, want chat and anthropic supported", caps)
+	}
+	evidence := errs["responses"]
+	if !strings.Contains(evidence, server.URL+"/responses: HTTP 400") {
+		t.Fatalf("protocol_errors missing the HTTP 400 candidate: %q", evidence)
+	}
+	if strings.Contains(evidence, "secret") {
+		t.Fatalf("protocol_errors leaked the API key: %q", evidence)
+	}
+}

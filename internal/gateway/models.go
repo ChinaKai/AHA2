@@ -196,7 +196,10 @@ func int64Value(value any) int64 {
 // ProbeModelCapabilities sends a minimal request for each supported wire
 // protocol and reports which ones the gateway accepts for the given model.
 // Status values mirror the legacy AHA probe: supported / unsupported /
-// unauthorized / rate_limited / unavailable / inconclusive.
+// unauthorized / rate_limited / unavailable / inconclusive. "unsupported"
+// means the gateway rejected the protocol shape itself (HTTP 400/404/405/501),
+// so callers can say the protocol is unavailable instead of implying a
+// network fault.
 //
 // For anthropic_messages it also tries the gateway's /anthropic suffix (some
 // gateways like DeepSeek/MiniMax/Kimi serve the Anthropic protocol there) and
@@ -461,13 +464,36 @@ func probeWireAPI(ctx context.Context, client *http.Client, base, apiKey, authSt
 // so a failed protocol probe names what it actually tried. The API key is
 // never part of an endpoint URL.
 func probeEndpointError(endpoint, status string, code int, err error) string {
-	if err != nil {
-		return err.Error()
-	}
 	if code != 0 {
 		return fmt.Sprintf("%s: HTTP %d", endpoint, code)
 	}
+	if err != nil {
+		return err.Error()
+	}
 	return ""
+}
+
+// probeStatusForCode classifies one probe response. 400/404/405/501 mean the
+// gateway does not expose this wire protocol at that endpoint: the request
+// shape (Responses vs Chat vs Messages) is rejected, which is a protocol
+// mismatch, not a transport fault. 401/403 stay auth failures, 429 stays rate
+// limited, and 5xx stays a transient service/transport failure. The remaining
+// codes are inconclusive and keep their HTTP status as evidence.
+func probeStatusForCode(code int) string {
+	switch {
+	case code >= 200 && code < 300:
+		return "supported"
+	case code == 401 || code == 403:
+		return "unauthorized"
+	case code == 429:
+		return "rate_limited"
+	case code == 400 || code == 404 || code == 405 || code == 501:
+		return "unsupported"
+	case code >= 500:
+		return "unavailable"
+	default:
+		return "inconclusive"
+	}
 }
 
 func probeOneEndpoint(ctx context.Context, client *http.Client, endpoint string, headers map[string]string, body []byte) (string, int, error) {
@@ -484,20 +510,7 @@ func probeOneEndpoint(ctx context.Context, client *http.Client, endpoint string,
 	}
 	defer response.Body.Close()
 	code := response.StatusCode
-	switch {
-	case code >= 200 && code < 300:
-		return "supported", code, nil
-	case code == 401 || code == 403:
-		return "unauthorized", code, nil
-	case code == 429:
-		return "rate_limited", code, nil
-	case code == 404 || code == 405 || code == 501:
-		return "unsupported", code, nil
-	case code >= 500:
-		return "unavailable", code, fmt.Errorf("HTTP %d", code)
-	default:
-		return "inconclusive", code, nil
-	}
+	return probeStatusForCode(code), code, nil
 }
 
 func statusRank(status string) int {

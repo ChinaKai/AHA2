@@ -1123,8 +1123,15 @@ dialog > .dialog-head { margin: 0; padding: 18px 18px 0; }
 .detected-item { display: flex; align-items: center; gap: 9px; margin: 0; padding: 8px 10px; border-radius: 4px; background: #fff; font-weight: 600; cursor: pointer; }
 .detected-item.selected { outline: 1px solid #6f8cff; background: #f4f7ff; }
 .detected-item input { width: auto; height: auto; }
-.detected-item > span { display: grid; gap: 2px; }
+.detected-item > .detected-model-body { display: grid; gap: 2px; min-width: 0; }
 .detected-item small { color: var(--muted); font-weight: 400; }
+.detected-item .proto-failures { display: grid; gap: 2px; margin-top: 2px; }
+.detected-item .proto-result { font-size: 11px; font-weight: 600; }
+.detected-item .proto-result.muted { color: var(--muted); }
+.detected-item .proto-result.bad { color: var(--red); }
+.detected-item .proto-hint { font-size: 11px; }
+.detected-item .proto-detail summary { color: var(--muted); font-size: 11px; cursor: pointer; }
+.detected-item .proto-detail small { display: block; margin-top: 2px; word-break: break-all; }
 .detected-item > button { margin-left: auto; min-height: 30px; padding: 0 9px; font-size: 11px; white-space: nowrap; }
 .detected-item > button.good { border-color: #8bc49a; color: #166534; }
 .detected-item > button.bad { border-color: #e9a4a4; color: #b42318; }
