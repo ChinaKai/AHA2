@@ -138,6 +138,24 @@ try {
   await scan("knowledge project settings");
   await page.evaluate(() => document.querySelector("[data-knowledge-settings-close]")?.click());
   await page.waitForSelector(".knowledge-read-layout", {timeout: 10000});
+
+  // English labels are widest: sample the band where the sidebar still leaves
+  // the topbar narrow and the one-line nav used to force a page-wide overflow.
+  for (const width of [761, 800, 900, 960, 1040]) {
+    await page.setViewportSize({width, height: 1000});
+    await page.waitForTimeout(100);
+    const overflow = await page.evaluate(() => {
+      const viewport = document.documentElement.clientWidth;
+      const offenders = [...document.querySelectorAll(".knowledge-section-nav, .knowledge-section-nav button")].filter(element => {
+        const rect = element.getBoundingClientRect();
+        return rect.left < -0.5 || rect.right > viewport + 0.5 || element.scrollWidth > element.clientWidth + 1;
+      }).map(element => element.textContent.trim().replace(/\s+/g, " "));
+      return {scrollWidth: document.documentElement.scrollWidth, viewport, offenders};
+    });
+    assert.ok(overflow.scrollWidth <= overflow.viewport + 1, `knowledge page overflows at ${width}px: ${JSON.stringify(overflow)}`);
+    assert.deepEqual(overflow.offenders, [], `knowledge section nav overflows at ${width}px`);
+  }
+  await page.setViewportSize({width: 1440, height: 1000});
   assert.deepEqual(errors, []);
 } finally {
   await browser?.close();

@@ -3481,9 +3481,26 @@ test("knowledge navigation hierarchy, mode switching, unsaved guard, and mobile 
   assert.match(source, /data-knowledge-edit/);
   assert.match(source, /data-knowledge-unsaved/);
   assert.match(source, /markEditorDirty/);
-  assert.match(styles, /@media \(max-width: 640px\)[\s\S]*?\.knowledge-section-nav \{ order: 2; display: grid;[^}]*grid-template-columns: repeat\(4,minmax\(0,1fr\)\)/);
+  assert.match(styles, /@media \(max-width: 1040px\)[\s\S]*?\.knowledge-section-nav \{ order: 2; display: grid;[^}]*grid-template-columns: repeat\(4,minmax\(0,1fr\)\)/);
   assert.match(styles, /@media \(max-width: 640px\)[\s\S]*?\.knowledge-settings \{ position: fixed; inset: 0;/);
   assert.doesNotMatch(styles, /\.knowledge-secondary/);
+});
+
+test("knowledge section nav cannot overflow between 641 and 1040px in either locale", async () => {
+  // The app sidebar leaves ~500px for the topbar at 761px. English labels held
+  // on one line are wider than that, so the nav must shrink and its buttons
+  // must wrap inside a four-column grid throughout the sidebar-present band.
+  // This is the deterministic stand-in for viewport samples at 761/800/900/960.
+  const styles = await readFile(resolve(import.meta.dirname, "..", "src", "styles.css"), "utf8");
+  assert.doesNotMatch(styles, /\.knowledge-section-nav \{[^}]*flex: 0 0 auto/);
+  assert.match(styles, /\.knowledge-section-nav \{[^}]*flex: 0 1 auto;[^}]*min-width: 0/);
+  const band = styles.match(/@media \(max-width: 1040px\) \{\n  \.knowledge-section-nav \{[\s\S]*?\n\}/);
+  assert.ok(band, "the 641-1040px band must own the folded nav rule");
+  assert.match(band[0], /\.knowledge-section-nav \{ order: 2; display: grid; flex: 1 1 100%;[^}]*grid-template-columns: repeat\(4,minmax\(0,1fr\)\); width: 100%/);
+  assert.match(band[0], /\.knowledge-section-nav button \{[^}]*min-width: 0;[^}]*white-space: normal/);
+  // Search and refresh follow the folded nav instead of squeezing it.
+  assert.match(band[0], /\.knowledge-search-box \{ order: 5; \}/);
+  assert.match(band[0], /#knowledge-refresh \{ order: 5; flex: 0 0 auto; \}/);
 });
 
 test("boot starts auth and general settings in parallel", async () => {

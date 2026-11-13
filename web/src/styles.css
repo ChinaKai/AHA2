@@ -1775,7 +1775,7 @@ dialog.agent-config-dialog { width: min(760px,calc(100vw - 32px)); }
 .knowledge-heading { flex: 1 1 240px; min-width: 0; }
 .knowledge-heading h1 { margin: 0; }
 .knowledge-heading p { margin: 4px 0 0; color: var(--muted); font-size: 10px; }
-.knowledge-section-nav { display: flex; flex: 0 0 auto; align-items: stretch; gap: 3px; padding: 3px; border: 1px solid var(--line); border-radius: 7px; background: #fff; }
+.knowledge-section-nav { display: flex; flex: 0 1 auto; flex-wrap: wrap; min-width: 0; align-items: stretch; gap: 3px; padding: 3px; border: 1px solid var(--line); border-radius: 7px; background: #fff; }
 .knowledge-section-nav button { flex: 1 1 auto; min-width: 0; min-height: 30px; border-color: transparent; background: transparent; color: var(--muted); white-space: nowrap; }
 .knowledge-section-nav button.active { border-color: #bfdbfe; background: #eff6ff; color: #1d4ed8; }
 .knowledge-search-box { display: flex; flex: 1 1 220px; align-items: center; gap: 7px; min-width: 0; max-width: 320px; margin: 0; padding: 0 10px; border: 1px solid var(--line); border-radius: 6px; background: #fff; color: var(--muted); }
@@ -3092,14 +3092,24 @@ dialog.pet-approval-detail-dialog::backdrop, dialog.pet-approval-filter-dialog::
 
 /* Mobile knowledge hierarchy: directory page -> document page, with secondary
    entries folded into "更多". Keeps 360/400/640 within the viewport. */
+/* The app sidebar stays visible above the mobile breakpoint, so from 761 to
+   1040px the topbar has only ~500px at its narrow end. English section labels
+   kept on one line are wider than that and made the whole page scroll
+   sideways. Fold the four equal entries into their own grid row across this
+   band (and 641-760 where the sidebar is already gone) instead of only at
+   640px. */
+@media (max-width: 1040px) {
+  .knowledge-section-nav { order: 2; display: grid; flex: 1 1 100%; grid-template-columns: repeat(4,minmax(0,1fr)); width: 100%; }
+  .knowledge-section-nav button { min-width: 0; padding: 5px 2px; white-space: normal; line-height: 1.2; }
+  .knowledge-search-box { order: 5; }
+  .knowledge-topbar > #knowledge-refresh { order: 5; flex: 0 0 auto; }
+}
+
 @media (max-width: 640px) {
   .knowledge-topbar { align-items: stretch; }
   .knowledge-heading { flex: 1 1 100%; }
   .knowledge-heading p { display: none; }
-  .knowledge-section-nav { order: 2; display: grid; flex: 1 1 100%; grid-template-columns: repeat(4,minmax(0,1fr)); width: 100%; }
-  .knowledge-section-nav button { min-width: 0; padding: 5px 2px; white-space: normal; line-height: 1.2; }
-  .knowledge-search-box { order: 5; flex: 1 1 180px; max-width: none; }
-  .knowledge-topbar > #knowledge-refresh { order: 5; flex: 0 0 auto; }
+  .knowledge-search-box { flex: 1 1 180px; max-width: none; }
   .knowledge-read-layout, .knowledge-edit-layout { gap: 8px; }
   .knowledge-directory-head { padding: 9px 8px; }
   .knowledge-document-head { align-items: stretch; flex-direction: column; }
