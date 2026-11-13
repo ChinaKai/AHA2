@@ -2704,9 +2704,9 @@ dialog.agent-config-dialog { width: min(760px,calc(100vw - 32px)); }
 .assistant-pet.pet-typing .assistant-thinking { display: none !important; }
 @media (prefers-reduced-motion: reduce) { .assistant-pet.thinking .assistant-thinking b { animation: pet-question 1.15s ease-in-out infinite !important; } }
 
-.pet-doc-entry { border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; }
+.pet-doc-entry { border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; min-width: 0; }
 .pet-doc-entry summary { cursor: pointer; font-weight: 800; }
-.pet-doc-entry pre { margin: 8px 0 0; white-space: pre-wrap; word-break: break-word; font: inherit; color: var(--muted); }
+.pet-doc-entry pre { margin: 8px 0 0; white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere; font: inherit; color: var(--muted); }
 
 .pet-workbench-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
 .pet-workbench-tabs button { border: 1px solid var(--line); background: transparent; color: var(--muted); border-radius: 999px; padding: 6px 12px; cursor: pointer; }
@@ -2766,40 +2766,50 @@ dialog.agent-config-dialog { width: min(760px,calc(100vw - 32px)); }
 .pet-overview-status { border: 1px solid var(--color-border); border-radius: var(--radius-card); padding: 10px 12px; display: grid; gap: 8px; }
 .pet-overview-status header { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
 .pet-overview-cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
-.pet-overview-card { border: 1px solid var(--color-border); border-radius: var(--radius-card); background: var(--color-surface); color: var(--text); padding: 12px; display: grid; gap: 2px; text-align: left; cursor: pointer; min-width: 0; }
+.pet-overview-card { border: 1px solid var(--color-border); border-radius: var(--radius-card); background: var(--color-surface); color: var(--text); padding: 12px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; justify-content: start; text-align: left; cursor: pointer; min-width: 0; overflow: hidden; }
 .pet-overview-card:hover { border-color: var(--accent); }
 .pet-overview-card.attention { border-color: color-mix(in srgb, var(--red) 45%, var(--line)); }
 .pet-overview-card strong { font-size: 26px; line-height: 1.1; }
-.pet-overview-card-label { font-weight: 700; }
-.pet-overview-card small { color: var(--muted); font-size: 11px; }
-.pet-overview-follows, .pet-overview-recent { display: grid; gap: 8px; }
-.pet-overview-follows header { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
+.pet-overview-card-label { font-weight: 700; min-width: 0; overflow-wrap: anywhere; }
+.pet-overview-card small { color: var(--muted); font-size: 11px; min-width: 0; overflow-wrap: anywhere; }
+.pet-overview-recent { display: grid; gap: 8px; }
+.pet-overview-follows, .pet-overview-other { text-align: left; }
+.pet-overview-follows-body, .pet-overview-other-body { display: grid; gap: 8px; margin-top: 8px; }
+.pet-overview-follows summary, .pet-overview-other summary { text-align: left; }
 .pet-overview-follows h3, .pet-overview-recent h3 { margin: 0; font-size: 14px; }
-.pet-watch-row { display: flex; gap: 8px; align-items: center; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+.pet-watch-row { display: flex; gap: 8px; align-items: center; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; text-align: left; }
 .pet-watch-row.anomaly { border-color: #fecaca; background: #fef2f2; }
-.pet-watch-row-main { flex: 1 1 auto; min-width: 0; display: grid; gap: 2px; text-align: left; border: 0; background: transparent; color: var(--text); padding: 0; cursor: pointer; }
-.pet-watch-row-main strong, .pet-watch-row-main small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The global button rule centers inline content; the grid needs an explicit
+   start so the title and status sit against the left edge. */
+.pet-watch-row-main { flex: 1 1 auto; min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; text-align: left; justify-content: start; justify-items: start; border: 0; background: transparent; color: var(--text); padding: 0; cursor: pointer; }
+.pet-watch-row-main strong, .pet-watch-row-main small { max-width: 100%; overflow: hidden; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
 .pet-watch-row-main small { color: var(--muted); }
-.pet-watch-row-actions { display: flex; gap: 6px; flex: 0 0 auto; }
-.pet-watch-row-actions button { border: 1px solid var(--line); background: transparent; color: var(--muted); border-radius: 6px; padding: 4px 8px; font: inherit; font-size: 12px; cursor: pointer; }
+.pet-watch-row-actions { display: flex; gap: 6px; flex: 0 0 auto; justify-content: flex-start; }
+.pet-watch-row-actions button { border: 1px solid var(--line); background: transparent; color: var(--muted); border-radius: 6px; padding: 4px 8px; font: inherit; font-size: 12px; text-align: left; cursor: pointer; }
 .pet-overview-activity-list { display: grid; gap: 4px; }
 .pet-overview-activity { display: flex; gap: 8px; align-items: baseline; border: 0; border-bottom: 1px solid var(--line); background: transparent; color: var(--text); padding: 6px 2px; text-align: left; cursor: pointer; min-width: 0; }
 .pet-overview-activity-kind { flex: 0 0 auto; color: var(--muted); font-size: 11px; }
 .pet-overview-activity strong { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pet-overview-activity small { flex: 0 0 auto; color: var(--muted); font-size: 11px; }
-.pet-overview-inspection, .pet-overview-channels, .pet-overview-other { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
-.pet-overview-inspection summary, .pet-overview-channels summary, .pet-overview-other summary { cursor: pointer; font-weight: 700; }
+.pet-overview-inspection, .pet-overview-channels, .pet-overview-other, .pet-overview-follows { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+.pet-overview-inspection summary, .pet-overview-channels summary, .pet-overview-other summary, .pet-overview-follows summary { cursor: pointer; font-weight: 700; }
 .pet-overview-inspection .pet-inspection-summary { margin-top: 8px; border: 0; padding: 0; }
 .pet-overview-channels .pet-channel-note { margin-top: 8px; }
 
-.pet-records { display: grid; gap: 12px; }
-.pet-record-toc { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
-.pet-record-toc summary { cursor: pointer; font-weight: 700; }
-.pet-record-toc nav { display: grid; gap: 2px; margin-top: 8px; }
-.pet-record-toc button { border: 0; background: transparent; color: var(--text); text-align: left; padding: 4px 0; cursor: pointer; font: inherit; }
+.pet-records { display: grid; grid-template-columns: minmax(180px, 220px) minmax(0, 1fr); gap: 12px; align-items: start; }
+.pet-records.toc-collapsed { grid-template-columns: minmax(0, 1fr); }
+.pet-records.toc-collapsed .pet-record-toc { display: none; }
+.pet-record-toc { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; position: sticky; top: 12px; max-height: calc(100vh - 96px); overflow: auto; min-width: 0; }
+.pet-record-toc strong { display: block; margin-bottom: 6px; color: var(--muted); font-size: 12px; }
+.pet-record-toc nav { display: grid; gap: 2px; }
+.pet-record-toc button { width: 100%; border: 0; background: transparent; color: var(--text); text-align: left; justify-content: flex-start; padding: 4px 0; cursor: pointer; font: inherit; overflow-wrap: anywhere; }
 .pet-record-toc button:hover { color: var(--accent); }
 .pet-record-toc .pet-record-toc-sub { padding-left: 14px; color: var(--muted); font-size: 12px; }
-.pet-record-section { display: grid; gap: 8px; }
+.pet-record-content { display: grid; gap: 12px; min-width: 0; }
+.pet-record-toolbar { display: flex; justify-content: flex-start; }
+.pet-record-toc-toggle { justify-content: flex-start; border: 1px solid var(--line); background: transparent; color: var(--muted); border-radius: 6px; padding: 4px 10px; font: inherit; font-size: 12px; cursor: pointer; }
+.pet-record-toc-toggle:hover { border-color: var(--accent); color: var(--text); }
+.pet-record-section { display: grid; gap: 8px; min-width: 0; }
 .pet-record-section h3 { margin: 0; font-size: 14px; }
 
 .pet-approvals-toolbar { display: flex; justify-content: flex-end; margin-bottom: 8px; }
@@ -3137,9 +3147,18 @@ dialog.pet-approval-detail-dialog::backdrop, dialog.pet-approval-filter-dialog::
 @media (max-width: 640px) {
   .pet-workbench-tabs { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; }
   .pet-workbench-tabs button { padding: 8px 4px; border-radius: 8px; font-size: 12px; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .pet-overview-cards { grid-template-columns: minmax(0, 1fr); }
+  /* Three status numerals stay on one compact row; the hint text is redundant
+     on a phone and would force each card taller or wider. */
+  .pet-overview-cards { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; }
+  .pet-overview-card { padding: 6px 8px; gap: 1px; border-radius: 8px; }
+  .pet-overview-card strong { font-size: 18px; }
+  .pet-overview-card-label { font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .pet-overview-card small { display: none; }
   .pet-watch-row { align-items: flex-start; flex-wrap: wrap; }
-  .pet-watch-row-actions { width: 100%; justify-content: flex-end; }
+  .pet-watch-row-actions { width: 100%; justify-content: flex-start; }
+  .pet-records { grid-template-columns: minmax(0, 1fr); }
+  .pet-record-toc { position: static; max-height: none; }
+  .pet-record-toc-toggle { width: 100%; justify-content: flex-start; }
   .pet-approval-row { grid-template-columns: 28px minmax(0, 1fr) auto; }
   .pet-approval-wait { grid-column: 2 / -1; }
   dialog.pet-approval-detail-dialog, dialog.pet-approval-filter-dialog { width: 100vw; max-width: 100vw; height: 100dvh; max-height: 100dvh; margin: 0; border: 0; border-radius: 0; padding: 16px; }

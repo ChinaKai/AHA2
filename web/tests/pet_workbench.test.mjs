@@ -1044,7 +1044,20 @@ test("the four workbench tabs default to overview and absorb legacy names", asyn
   assert.equal(mapPetWorkbenchTab("unknown-tab"), "overview");
 });
 
-const overviewText = (key, values = {}) => ({"petWorkbench.overviewChannelsHint": "{total} channels"}[key] ?? key)
+const overviewTranslations = {
+  "petWorkbench.overviewChannelsHint": "{total} channels",
+  "petWorkbench.overviewFollows": "关注任务（{count}）",
+  "petWorkbench.otherFollows": "忽略的任务（{count}）",
+  "petWorkbench.emptyIgnored": "没有忽略的任务。",
+  "petWorkbench.followHint": "关注提示",
+  "petWorkbench.recordsToc": "目录",
+  "petWorkbench.recordsTocCollapse": "收起目录",
+  "petWorkbench.recordsTocExpand": "展开目录",
+  "petWorkbench.core": "核心文档",
+  "petWorkbench.worklog": "工作记录",
+  "petWorkbench.emptyFollows": "暂无未结束的普通任务。",
+};
+const overviewText = (key, values = {}) => (overviewTranslations[key] ?? key)
   .replace(/\{(\w+)\}/g, (_, name) => String(values[name] ?? `{${name}}`));
 
 const overviewChannel = {
@@ -1077,6 +1090,11 @@ test("overview counts pending approvals, watched anomalies and degraded channels
   assert.match(html, /data-pet-overview-jump="channels"[^>]*>\s*<strong>1<\/strong>/);
   assert.match(html, /2 channels/);
   assert.match(html, /id="pet-overview-follows"/);
+  // Both watch lists are collapsed details whose titles carry the live counts.
+  assert.match(html, /<details class="pet-overview-follows" id="pet-overview-follows"[^>]*><summary>关注任务（2）<\/summary>/);
+  assert.doesNotMatch(html, /class="pet-overview-follows"[^>]*\sopen/);
+  assert.match(html, /<details class="pet-overview-other"[^>]*><summary>忽略的任务（1）<\/summary>/);
+  assert.doesNotMatch(html, /class="pet-overview-other"[^>]*\sopen/);
   assert.match(html, /data-pet-overview-task="t-failed"/);
   assert.match(html, /data-pet-watch-unfollow data-pet-watch-task="t-failed"/, "unfollow is available from the overview");
   assert.match(html, /pet-watch-row anomaly/);
@@ -1093,6 +1111,20 @@ test("overview counts pending approvals, watched anomalies and degraded channels
     ])],
     [2],
   );
+});
+
+test("empty watch lists render as collapsed sections with zero counts", () => {
+  const html = renderPetOverview({
+    watches: [],
+    channels: [],
+    translate: overviewText,
+    formatTime: identityTime,
+  });
+  assert.match(html, /class="pet-overview-follows"[^>]*><summary>关注任务（0）<\/summary>/);
+  assert.match(html, /class="pet-overview-other"[^>]*><summary>忽略的任务（0）<\/summary>/);
+  assert.match(html, /没有忽略的任务。/);
+  assert.doesNotMatch(html, /class="pet-overview-follows"[^>]*\sopen/);
+  assert.doesNotMatch(html, /class="pet-overview-other"[^>]*\sopen/);
 });
 
 test("approvals open on pending, sorted by the longest wait", () => {
@@ -1142,16 +1174,30 @@ test("records pin core documents above a newest-first worklog with a collapsible
   const html = renderPetRecords(
     [{name: "identity.md", content: "identity"}, {name: "principles.md", content: "principles"}],
     worklog,
-    {translate: overviewText, emptyCore: "no core", emptyWorklog: "no worklog"},
+    {translate: overviewText, emptyCore: "no core", emptyWorklog: "no worklog", tocOpen: true},
   );
-  assert.match(html, /<details class="pet-record-toc"><summary>petWorkbench\.recordsToc<\/summary>/);
+  assert.match(html, /<div class="pet-records">/);
+  assert.match(html, /<aside class="pet-record-toc" id="pet-record-toc">/);
+  assert.match(html, /<nav id="pet-record-toc-nav">/);
+  assert.match(html, /data-pet-record-toc-toggle aria-expanded="true" aria-controls="pet-record-toc-nav">收起目录</);
   assert.match(html, /data-pet-record-goto="pet-record-core"/);
   assert.match(html, /data-pet-record-goto="pet-record-core-0"/);
   assert.match(html, /data-pet-record-goto="pet-record-worklog"/);
+  // The index lists each dated worklog entry, not only the section heading.
+  assert.match(html, /data-pet-record-goto="pet-record-worklog-0">2026-01-03</);
+  assert.match(html, /data-pet-record-goto="pet-record-worklog-1">2026-01-02</);
+  assert.match(html, /data-pet-record-goto="pet-record-worklog-2">2026-01-01</);
+  assert.match(html, /id="pet-record-worklog-0"/);
   assert.ok(html.indexOf('id="pet-record-core"') < html.indexOf('id="pet-record-worklog"'), "core stays pinned on top");
   assert.ok(html.indexOf("newest") < html.indexOf("middle") && html.indexOf("middle") < html.indexOf("oldest"));
   assert.match(html, /data-pet-doc-section="core" data-pet-doc-name="identity\.md"/);
   assert.match(html, /data-pet-doc-section="worklog" data-pet-doc-name="2026-01-03\.md"/);
+
+  const collapsed = renderPetRecords([], [], {
+    translate: overviewText, emptyCore: "no core", emptyWorklog: "no worklog", tocOpen: false,
+  });
+  assert.match(collapsed, /<div class="pet-records toc-collapsed">/);
+  assert.match(collapsed, /data-pet-record-toc-toggle aria-expanded="false"[^>]*>展开目录</);
 });
 
 test("phones fit four tabs and turn approval dialogs into full-screen sheets", async () => {
@@ -1160,7 +1206,64 @@ test("phones fit four tabs and turn approval dialogs into full-screen sheets", a
   assert.notEqual(mobile, css, "a phone breakpoint must exist");
   assert.match(mobile, /\.pet-workbench-tabs \{ display: grid; grid-template-columns: repeat\(4, minmax\(0, 1fr\)\); gap: 4px; \}/);
   assert.match(mobile, /\.pet-workbench-tabs button \{[^}]*min-width: 0;[^}]*overflow: hidden;/);
-  assert.match(mobile, /\.pet-overview-cards \{ grid-template-columns: minmax\(0, 1fr\); \}/);
+  assert.match(mobile, /\.pet-overview-cards \{ grid-template-columns: repeat\(3, minmax\(0, 1fr\)\); gap: 4px; \}/);
+  assert.match(mobile, /\.pet-overview-card \{ padding: 6px 8px;/);
+  assert.match(mobile, /\.pet-overview-card-label \{[^}]*white-space: nowrap;[^}]*text-overflow: ellipsis;/);
+  assert.match(mobile, /\.pet-overview-card small \{ display: none; \}/);
+  assert.match(mobile, /\.pet-watch-row-actions \{ width: 100%; justify-content: flex-start; \}/);
+  assert.match(mobile, /\.pet-records \{ grid-template-columns: minmax\(0, 1fr\); \}/);
+  assert.match(mobile, /\.pet-record-toc-toggle \{ width: 100%; justify-content: flex-start; \}/);
   assert.match(mobile, /dialog\.pet-approval-detail-dialog, dialog\.pet-approval-filter-dialog \{[^}]*width: 100vw;[^}]*height: 100dvh;/);
   assert.match(css, /\.pet-approval-row \{[^}]*grid-template-columns: 32px minmax\(0, 1fr\) auto auto;/);
+});
+
+test("watch lists align titles, status and actions to the left", async () => {
+  const css = await readFile(resolve(root, "web/src/styles.css"), "utf8");
+  assert.match(css, /\.pet-watch-row \{[^}]*text-align: left;/);
+  assert.match(css, /\.pet-watch-row-main \{[^}]*justify-content: start;[^}]*justify-items: start;/);
+  assert.match(css, /\.pet-watch-row-main strong, \.pet-watch-row-main small \{[^}]*text-align: left;/);
+  assert.match(css, /\.pet-watch-row-actions \{[^}]*justify-content: flex-start;/);
+  assert.match(css, /\.pet-overview-follows, \.pet-overview-other \{ text-align: left; \}/);
+  assert.match(css, /\.pet-record-toc button \{[^}]*text-align: left;[^}]*justify-content: flex-start;/);
+  const mobile = css.slice(css.lastIndexOf("@media (max-width: 640px)"));
+  assert.match(mobile, /\.pet-watch-row-actions \{ width: 100%; justify-content: flex-start; \}/);
+  assert.doesNotMatch(mobile, /\.pet-watch-row-actions \{[^}]*justify-content: flex-end/);
+});
+
+test("the ignored list is renamed in both locales without touching behavior", async () => {
+  const i18n = await readFile(resolve(root, "web/src/i18n.ts"), "utf8");
+  assert.match(i18n, /"petWorkbench\.otherFollows": "忽略的任务（\{count\}）"/);
+  assert.match(i18n, /"petWorkbench\.otherFollows": "Ignored tasks \(\{count\}\)"/);
+  assert.match(i18n, /"petWorkbench\.emptyIgnored": "没有忽略的任务。"/);
+  assert.match(i18n, /"petWorkbench\.emptyIgnored": "No ignored tasks\."/);
+  assert.doesNotMatch(i18n, /其他关注|Other watches/);
+  // Followed tasks expose the count in the same title; legacy ignore/follow
+  // data attributes and API calls are unchanged.
+  assert.match(i18n, /"petWorkbench\.overviewFollows": "关注任务（\{count\}）"/);
+  assert.match(i18n, /"petWorkbench\.overviewFollows": "Watched tasks \(\{count\}\)"/);
+});
+
+test("records use a collapsible left contents column that survives tab switches", async () => {
+  const css = await readFile(resolve(root, "web/src/styles.css"), "utf8");
+  const main = await readFile(resolve(root, "web/src/main.ts"), "utf8");
+  const loader = await readFile(resolve(root, "web/src/pet_workbench.ts"), "utf8");
+  assert.match(css, /\.pet-records \{ display: grid; grid-template-columns: minmax\(180px, 220px\) minmax\(0, 1fr\); gap: 12px; align-items: start; \}/);
+  assert.match(css, /\.pet-records\.toc-collapsed \{ grid-template-columns: minmax\(0, 1fr\); \}/);
+  assert.match(css, /\.pet-records\.toc-collapsed \.pet-record-toc \{ display: none; \}/);
+  assert.match(css, /\.pet-record-toc \{[^}]*position: sticky;/);
+  assert.match(css, /\.pet-record-content \{[^}]*min-width: 0;/);
+  const mobile = css.slice(css.lastIndexOf("@media (max-width: 640px)"));
+  assert.match(mobile, /\.pet-records \{ grid-template-columns: minmax\(0, 1fr\); \}/);
+  assert.match(mobile, /\.pet-record-toc \{ position: static; max-height: none; \}/);
+
+  // Phones default to folded; the module-level flag is read on every records
+  // render, so switching tabs does not reset an owner's choice.
+  assert.match(main, /let petRecordsTocOpen: boolean \| null = null;/);
+  assert.match(main, /petRecordsTocOpen = !window\.matchMedia\("\(max-width: 640px\)"\)\.matches;/);
+  assert.match(main, /tocOpen: petRecordsTocOpen,/);
+  assert.match(main, /petRecordsTocOpen = open;/);
+  assert.match(main, /classList\.toggle\("toc-collapsed", !open\)/);
+  assert.match(main, /bindRecordTocToggle\(\);/);
+  assert.match(loader, /tocOpen \? "" : " toc-collapsed"/);
+  assert.match(loader, /aria-expanded="\$\{tocOpen\}"/);
 });
