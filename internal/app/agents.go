@@ -130,10 +130,30 @@ func (s *Service) TaskAgents(ctx context.Context, taskID string) ([]domain.TaskA
 	if err != nil {
 		return nil, err
 	}
+	// The detail page resolves this list on every load and every fallback
+	// refresh. Load the snapshots once for the whole list instead of once per
+	// Agent; a Task with sub-Agents used to issue one query per Agent.
+	snapshotIDs := make([]string, 0, len(agents))
+	seenSnapshot := map[string]bool{}
+	for _, agent := range agents {
+		if agent.RuntimeConfigSnapshotID != "" && !seenSnapshot[agent.RuntimeConfigSnapshotID] {
+			seenSnapshot[agent.RuntimeConfigSnapshotID] = true
+			snapshotIDs = append(snapshotIDs, agent.RuntimeConfigSnapshotID)
+		}
+	}
+	snapshots, err := s.store.RuntimeSnapshotsByIDs(ctx, snapshotIDs)
+	if err != nil {
+		// The previous per-Agent lookup treated an unreadable snapshot as that
+		// Agent having none; keep the list usable instead of failing the detail.
+		snapshots = map[string]domain.RuntimeConfigSnapshot{}
+	}
+	models := map[string]domain.Model{}
+	unavailableModels := map[string]string{}
+	codexAccounts := map[string]string{}
 	for index := range agents {
 		agents[index].RuntimeConfigValid = false
-		snapshot, snapshotErr := s.store.RuntimeSnapshot(ctx, agents[index].RuntimeConfigSnapshotID)
-		if snapshotErr != nil {
+		snapshot, ok := snapshots[agents[index].RuntimeConfigSnapshotID]
+		if !ok {
 			agents[index].RuntimeConfigError = "运行配置不存在，请重新配置 Agent"
 			continue
 		}
@@ -153,7 +173,7 @@ func (s *Service) TaskAgents(ctx context.Context, taskID string) ([]domain.TaskA
 		agents[index].Filesystem, agents[index].Approval = parsePermissionsJSON(snapshot.PermissionsJSON)
 		agents[index].ProxyEnabled = snapshot.ProxyEnabled
 		agents[index].FastMode = snapshot.FastMode
-		model, unavailable := s.runtimeSnapshotAvailability(ctx, snapshot)
+		model, unavailable := s.cachedRuntimeSnapshotAvailability(ctx, snapshot, models, unavailableModels, codexAccounts)
 		if unavailable != "" {
 			agents[index].RuntimeConfigError = unavailable + "，请修改模型配置"
 			continue
@@ -162,6 +182,46 @@ func (s *Service) TaskAgents(ctx context.Context, taskID string) ([]domain.TaskA
 		agents[index].RuntimeConfigValid = true
 	}
 	return agents, nil
+}
+
+// cachedRuntimeSnapshotAvailability is runtimeSnapshotAvailability with the
+// lookups memoized across one TaskAgents response. Child Agents that inherit
+// the main Agent share both snapshot and model, so the same rows were being
+// fetched once per Agent.
+func (s *Service) cachedRuntimeSnapshotAvailability(
+	ctx context.Context,
+	snapshot domain.RuntimeConfigSnapshot,
+	models map[string]domain.Model,
+	unavailableModels map[string]string,
+	codexAccounts map[string]string,
+) (domain.Model, string) {
+	if unavailable, ok := unavailableModels[snapshot.ModelID]; ok {
+		return domain.Model{}, unavailable
+	}
+	model, ok := models[snapshot.ModelID]
+	if !ok {
+		loaded, err := s.store.Model(ctx, snapshot.ModelID)
+		if err != nil {
+			unavailableModels[snapshot.ModelID] = "模型已删除"
+			return domain.Model{}, "模型已删除"
+		}
+		models[snapshot.ModelID] = loaded
+		model = loaded
+	}
+	if snapshot.CodexAccountID != "" {
+		if unavailable, ok := codexAccounts[snapshot.CodexAccountID]; ok {
+			if unavailable != "" {
+				return domain.Model{}, unavailable
+			}
+			return model, ""
+		}
+		if _, err := s.store.CodexAccount(ctx, snapshot.CodexAccountID); err != nil {
+			codexAccounts[snapshot.CodexAccountID] = "Codex 账号已删除"
+			return domain.Model{}, "Codex 账号已删除"
+		}
+		codexAccounts[snapshot.CodexAccountID] = ""
+	}
+	return model, ""
 }
 
 // runtimeSnapshotAvailability identifies the two resources that can be removed

@@ -52,10 +52,21 @@ func (s *Store) ListTaskPermissionRequests(ctx context.Context, taskID string, l
 		limit = 50
 	}
 	now := time.Now().UTC()
-	_, _ = s.db.ExecContext(ctx, `
-		UPDATE task_permission_requests SET status='expired',updated_at=?
-		WHERE task_id=? AND status='pending' AND expires_at<=?`,
-		timeString(now), taskID, timeString(now))
+	// Expiring is a write, and the detail page reads this list on every load.
+	// Probe first so the common page (nothing expired) does not take the write
+	// lock just to update zero rows.
+	var hasExpired bool
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM task_permission_requests
+			WHERE task_id=? AND status='pending' AND expires_at<=?
+		)`, taskID, timeString(now),
+	).Scan(&hasExpired); err != nil || hasExpired {
+		_, _ = s.db.ExecContext(ctx, `
+			UPDATE task_permission_requests SET status='expired',updated_at=?
+			WHERE task_id=? AND status='pending' AND expires_at<=?`,
+			timeString(now), taskID, timeString(now))
+	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT `+taskPermissionRequestColumns+` FROM task_permission_requests
 		WHERE task_id=?

@@ -6336,7 +6336,7 @@ function stopTaskFallback(): void {
   taskFallbackTimer = null;
 }
 
-function startTaskFallback(taskID: string, announce = true): void {
+function startTaskFallback(taskID: string, announce = true, immediate = true): void {
   if (state.selectedTask?.task.id !== taskID) return;
   if (announce) updateRealtimeState("fallback");
   if (taskFallbackTimer !== null) return;
@@ -6348,7 +6348,10 @@ function startTaskFallback(taskID: string, announce = true): void {
       // Keep the existing UI and retry while the task remains open.
     }
   };
-  void refresh();
+  // A connection attempt starts the timer as a safety net, but refreshing right
+  // away would repeat the Task detail and conversation requests the open just
+  // issued. The 2s tick still covers a stream that never connects.
+  if (immediate) void refresh();
   taskFallbackTimer = window.setInterval(() => void refresh(), 2000);
 }
 
@@ -6452,10 +6455,12 @@ function openEvents(taskID: string, after = 0): void {
     }
   }, 5000);
   events = new EventSource(`/api/v1/tasks/${taskID}/events?after=${after}`);
-  startTaskFallback(taskID, false);
+  startTaskFallback(taskID, false, false);
   events.addEventListener("open", () => {
-    taskLastSignalAt = Date.now();
-    updateRealtimeState("connecting");
+    // The stream is connected: polling now would only repeat the requests the
+    // open already made. A stream that goes quiet is caught by the monitor
+    // below, which restarts the fallback after 15s without a signal.
+    noteTaskStreamSignal(taskID);
   });
   events.addEventListener("heartbeat", () => {
     noteTaskStreamSignal(taskID);

@@ -117,6 +117,17 @@ function requestPath(path: string): string {
 
 class APIClient {
   private csrf = "";
+  // One page load used to issue the same Task detail and conversation request
+  // several times: the initial open, an SSE fallback tick and an event refresh
+  // overlap. Callers that ask for the exact same read while it is still in
+  // flight share that promise; a later call after it settles fetches again, so
+  // this never serves data older than one request.
+  private inFlightReads = new Map<string, Promise<unknown>>();
+  // A read started before a write may be about to return pre-write data.
+  // Bumping the generation on every write keeps that read out of the coalescing
+  // map for calls made afterwards, so a refresh triggered by a successful
+  // submit never joins the stale pre-submit request.
+  private readGeneration = 0;
 
   setCSRF(value?: string): void {
     this.csrf = value || "";
@@ -126,7 +137,20 @@ class APIClient {
     return this.csrf;
   }
 
+  private readOnce<T>(path: string): Promise<T> {
+    const key = `${this.readGeneration}\n${path}`;
+    const existing = this.inFlightReads.get(key) as Promise<T> | undefined;
+    if (existing) return existing;
+    const tracked = this.request<T>(path).finally(() => {
+      if (this.inFlightReads.get(key) === tracked) this.inFlightReads.delete(key);
+    });
+    this.inFlightReads.set(key, tracked);
+    return tracked;
+  }
+
   async request<T>(path: string, options: RequestInit = {}): Promise<T> {
+    const method = (options.method || "GET").toUpperCase();
+    if (method !== "GET" && method !== "HEAD") this.readGeneration++;
     const observer = requestObserver;
     const startedAt = observer ? performance.now() : 0;
     const headers = new Headers(options.headers || {});
@@ -156,7 +180,7 @@ class APIClient {
       // failure visible without inventing an HTTP status.
       if (observer) {
         observer({
-          method: (options.method || "GET").toUpperCase(),
+          method,
           path: requestPath(path),
           status,
           durationMs: performance.now() - startedAt,
@@ -703,7 +727,7 @@ class APIClient {
   }
 
   task(id: string): Promise<TaskDetail> {
-    return this.request(`/api/v1/tasks/${id}`);
+    return this.readOnce(`/api/v1/tasks/${id}`);
   }
 
   resolveTaskPermissionRequest(taskID: string, requestID: string, decision: "approve" | "reject", reason = ""): Promise<{ok: boolean; request: import("./types").TaskPermissionRequest}> {
@@ -721,7 +745,7 @@ class APIClient {
     if (options.after) query.set("after", String(options.after));
     if (options.limit) query.set("limit", String(options.limit));
     if (options.categories?.length) query.set("categories", options.categories.join(","));
-    return this.request(`/api/v1/tasks/${id}/conversation?${query}`);
+    return this.readOnce(`/api/v1/tasks/${id}/conversation?${query}`);
   }
 
   agentConversation(
@@ -734,7 +758,7 @@ class APIClient {
     if (options.after) query.set("after", String(options.after));
     if (options.limit) query.set("limit", String(options.limit));
     if (options.categories?.length) query.set("categories", options.categories.join(","));
-    return this.request(`/api/v1/tasks/${id}/agents/${encodeURIComponent(agentID)}/conversation?${query}`);
+    return this.readOnce(`/api/v1/tasks/${id}/agents/${encodeURIComponent(agentID)}/conversation?${query}`);
   }
 
   taskContext(id: string): Promise<TaskContextDetail> {

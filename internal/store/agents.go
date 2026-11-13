@@ -128,14 +128,37 @@ func (s *Store) UpdateInheritedTaskAgentSnapshots(ctx context.Context, taskID, s
 }
 
 func (s *Store) MarkAgentConversationRead(ctx context.Context, taskID, agentID string) error {
+	// Viewing the same conversation page again must not write: every open and
+	// every incremental refresh used to commit an UPDATE of the same value.
+	// This read decides the common no-op case; the UPDATE below re-reads
+	// MAX(sequence) and keeps its own guard, so an item appended between the
+	// two statements still advances the position and a concurrent request can
+	// never move it backwards.
+	var latest, lastRead int64
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT COALESCE((SELECT MAX(sequence) FROM conversation_items
+			WHERE task_id=? AND stream_agent_id=?),0),
+		       COALESCE((SELECT last_read_sequence FROM task_agents
+			WHERE task_id=? AND agent_id=?),0)`,
+		taskID, agentID, taskID, agentID,
+	).Scan(&latest, &lastRead); err != nil {
+		return err
+	}
+	if latest <= lastRead {
+		return nil
+	}
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE task_agents
 		SET last_read_sequence=COALESCE((
 			SELECT MAX(sequence) FROM conversation_items
 			WHERE task_id=? AND stream_agent_id=?
 		),last_read_sequence)
-		WHERE task_id=? AND agent_id=?`,
-		taskID, agentID, taskID, agentID,
+		WHERE task_id=? AND agent_id=?
+		  AND last_read_sequence<COALESCE((
+			SELECT MAX(sequence) FROM conversation_items
+			WHERE task_id=? AND stream_agent_id=?
+		),last_read_sequence)`,
+		taskID, agentID, taskID, agentID, taskID, agentID,
 	)
 	return err
 }

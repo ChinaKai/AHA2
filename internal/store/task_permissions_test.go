@@ -46,3 +46,29 @@ func TestTaskPermissionRequestResolvesOnce(t *testing.T) {
 		t.Fatalf("second resolve=%#v changed=%v err=%v", again, changed, err)
 	}
 }
+
+// Listing expires stale pending rows as a side effect. The read path now
+// probes before writing, so this pins that the expiry still happens when there
+// is something to expire.
+func TestListTaskPermissionRequestsExpiresStalePending(t *testing.T) {
+	ctx := context.Background()
+	database, err := Open(ctx, t.TempDir()+"/aha2.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	task := createStoreTestTask(t, database)
+	now := time.Now().UTC()
+	request := domain.TaskPermissionRequest{
+		ID: "task_permission_stale", TaskID: task.ID, Action: "push", Scope: "origin/main",
+		Reason: "stale", Risk: "low", Status: "pending", CreatedAt: now.Add(-time.Hour),
+		UpdatedAt: now.Add(-time.Hour), ExpiresAt: now.Add(-time.Minute),
+	}
+	if err := database.CreateTaskPermissionRequest(ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	listed, err := database.ListTaskPermissionRequests(ctx, task.ID, 10)
+	if err != nil || len(listed) != 1 || listed[0].Status != "expired" {
+		t.Fatalf("listed=%#v err=%v", listed, err)
+	}
+}
