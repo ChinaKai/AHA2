@@ -73,6 +73,7 @@ window.fetch = async (input, init = {}) => {
     agents: [{task_id: TASK.id, agent_id: "main", role: "main", status: "idle", title: "Main", runtime_config_snapshot_id: "snapshot", inherit_main: false, proxy_enabled: false, fast_mode: false, runtime_config_valid: true, unread_count: 0, created_at: NOW, updated_at: NOW}],
     hardware: [], hardware_resources: [], permission_requests: [],
   });
+  if (path === "/api/v1/tasks/task-mail/channel-routes") return json({destinations: [], contacts: [], members: []});
   if (path === "/api/v1/tasks/task-mail/agents/main/conversation") return json({ok: true, conversation: {items: MESSAGES.map((card, index) => ({sequence: index + 1, id: "conversation-mail-" + card.message.id, task_id: TASK.id, agent_id: "main", category: "mail", kind: "mail_message", summary: "邮件状态", payload: {message_id: card.message.id, status: card.message.status}, created_at: NOW})), has_more: false, next_before: 0, latest_sequence: MESSAGES.length}});
   if (path === "/api/v1/tasks/task-mail/mail" && method === "GET") return json({
     ok: true, task_id: TASK.id,
@@ -161,6 +162,13 @@ try {
   assert.doesNotMatch(await page.locator("#app").innerText(), /write-only-secret/);
   assert.doesNotMatch(await page.locator("#app").innerText(), /credential_ref/);
 
+  // Templates live in their own sub-tab; the accounts panel never renders the
+  // template toolbar entry. Switch tabs first, then verify the panel lists the
+  // existing template before opening the editor.
+  await page.click('[data-mail-subtab="templates"]');
+  await page.waitForSelector('.mail-resources-panel [data-mail-template="mail_template_1"]');
+  assert.equal(await page.locator(".mail-resources-view").getAttribute("data-mail-subtab-active"), "templates");
+
   // Template editor defaults to guide: mode selector, instructions visible,
   // variable insertion UI hidden.
   await page.click("#add-mail-template");
@@ -205,9 +213,13 @@ try {
   // The conversation timeline no longer renders mail cards; the tool panel is
   // the single place to inspect and decide.
   assert.equal(await page.locator("#conversation-list [data-mail-card]").count(), 0);
-  const approve = page.locator(".task-mail-panel [data-mail-action='approve']").first();
-  assert.equal(await approve.isVisible(), true);
-  await approve.click();
+  // Approval now lives inside the row's preview dialog; the compact row itself
+  // only exposes the "审批" entry.
+  const review = page.locator(".task-mail-panel [data-mail-action='review']").first();
+  assert.equal(await review.isVisible(), true);
+  await review.click();
+  await page.waitForSelector(".mail-preview-dialog[open] [data-mail-preview-decision='approve']");
+  await page.click(".mail-preview-dialog[open] [data-mail-preview-decision='approve']");
   await page.waitForFunction(() => window.__approved === true);
   await page.waitForFunction(() => document.querySelector('[data-task-tool="mail"] .task-tool-badge') === null);
   await page.waitForFunction(() => document.querySelector(".task-mail-panel [data-mail-card='mail_message_1']")?.textContent?.includes("排队中"));
