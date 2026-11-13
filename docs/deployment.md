@@ -121,6 +121,13 @@ powershell.exe -ExecutionPolicy Bypass -File scripts\build-and-deploy-windows-us
 
 脚本只复用仓库现有的 WSL Go 工具链，自动读取真实发行版名称并预检磁盘空间；Web 与 Go 验证在同一轮各执行一次。已有已验证候选时传入 `-DeployOnly`，只执行安装、重启、健康和哈希校验。
 
+构建阶段还会调用 `scripts/build-agent-proxy-helpers.sh` 生成 `dist/agent-proxy`（Linux
+`linux/amd64`、`linux/arm64` helper 与 manifest）；`local_build.sh` 走同一入口。安装包会内置该目录，
+`build-windows-installer.ps1` 在打包前校验 manifest、平台与文件哈希。
+
+本机部署（原地升级）时的 helper 复制、备份与回滚由本机安装器负责，不在仓库脚本内；本仓库只负责
+编译并产出 helper 包。
+
 ### PowerShell 脚本编码
 
 会被 Windows PowerShell 5.1 执行的仓库内脚本（`scripts/*.ps1` 与 `installer/windows/*.ps1`）必须保存为

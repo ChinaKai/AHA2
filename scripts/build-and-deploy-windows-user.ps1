@@ -56,6 +56,8 @@ $trayOutput = Join-Path $repo "dist\aha2-tray-windows-amd64.exe"
 $pluginOutputDir = Join-Path $repo "dist\plugins\feishu\windows-amd64"
 $pluginOutput = Join-Path $pluginOutputDir "aha2-channel-feishu.exe"
 $pluginManifestOutput = Join-Path $pluginOutputDir "plugin.json"
+$helperOutputDir = Join-Path $repo "dist\agent-proxy"
+$helperManifestOutput = Join-Path $helperOutputDir "manifest.json"
 $deployScript = Join-Path $repo "scripts\deploy-windows-user.ps1"
 $normalizedVersion = $Version.Trim()
 if ($normalizedVersion.StartsWith("v", [StringComparison]::OrdinalIgnoreCase)) {
@@ -241,6 +243,7 @@ $summary = [ordered]@{
     NodeRuntime = if ($DeployOnly) { "" } elseif ($windowsNode) { $windowsNode } else { "WSL:${resolvedDistro}:${wslNode}" }
     InstallDir = [IO.Path]::GetFullPath($InstallDir)
     DataDir = [IO.Path]::GetFullPath($DataDir)
+    HelperBundle = $helperOutputDir
     Listen = $Listen
     HealthURL = $HealthURL
 }
@@ -291,6 +294,23 @@ if (-not $DeployOnly) {
             "-o", "dist/aha2-tray-windows-amd64.exe", "./cmd/aha-tray"
         )
     }
+    # A Windows AHA serving a Linux workspace uploads this helper instead of
+    # its own aha2.exe. The installer embeds it, so a clean tree must build it
+    # in the same stage as the server and tray.
+    Invoke-Step "Build Agent API stdio helpers" {
+        $helperEnvironment = @(
+            "GOCACHE=$linuxGoCache", "GOPATH=$linuxGoPath",
+            "GO_BIN=$linuxRepo/.tools/go/bin/go",
+            "VERSION=$normalizedVersion", "WEB_VERSION=$resolvedWebVersion"
+        )
+        if (-not [string]::IsNullOrWhiteSpace($ProxyURL)) {
+            $helperEnvironment += @("HTTP_PROXY=$ProxyURL", "HTTPS_PROXY=$ProxyURL")
+        }
+        $helperArguments = @("-d", $resolvedDistro, "--cd", $linuxRepo, "--", "env")
+        $helperArguments += $helperEnvironment
+        $helperArguments += @("bash", "scripts/build-agent-proxy-helpers.sh", "dist/agent-proxy")
+        Invoke-Native $wslExecutable $helperArguments
+    }
     if (Test-Path -LiteralPath (Join-Path $repo "plugins\feishu\go.mod") -PathType Leaf) {
         $linuxPluginDir = "$linuxRepo/plugins/feishu"
         Invoke-Step "Test Feishu plugin" {
@@ -318,6 +338,9 @@ foreach ($candidate in @($serverOutput, $trayOutput)) {
 }
 if (Test-Path -LiteralPath $pluginOutput -PathType Leaf) {
     Assert-WindowsPortableExecutable $pluginOutput
+}
+if (-not (Test-Path -LiteralPath $helperManifestOutput -PathType Leaf)) {
+    throw "Agent proxy helper bundle is missing: $helperManifestOutput (build it with scripts/build-agent-proxy-helpers.sh)"
 }
 $serverVersion = ""
 $candidateExitCode = 0
