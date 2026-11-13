@@ -1232,29 +1232,33 @@ test("viewport-scoped overrides are evaluated at 360/375/768/1280/1440", () => {
   assert.throws(() => assertPendingHealthy(pending360), Error, "pending override must fail at 360px");
 
   const pending = `${css}\n@media (max-width:760px){ .bottom-nav button.has-pending{color:#fff} }\n`;
-  assert.equal(style(pending, BOTTOM_PENDING, "color", 375), "#fff");
+  for (const viewport of [360, 375]) {
+    assert.equal(style(pending, BOTTOM_PENDING, "color", viewport), "#fff", `pending mutation at ${viewport}px`);
+  }
   for (const viewport of [768, 1280, 1440]) {
     assert.equal(style(pending, BOTTOM_PENDING, "color", viewport), "var(--color-warning-ink)", `pending at ${viewport}px`);
   }
-  assert.throws(() => assertPendingHealthy(pending), Error, "pending override must fail at 375px");
+  assert.throws(() => assertPendingHealthy(pending), Error, "pending override must fail at 360/375px");
 
   const primary = `${css}\n@media (min-width:1281px){ button.primary{background:#fff;color:#fff} }\n`;
   assert.equal(style(primary, PRIMARY, "background", 1440), "#fff");
-  for (const viewport of [375, 768, 1280]) {
+  for (const viewport of [360, 375, 768, 1280]) {
     assert.equal(style(primary, PRIMARY, "background", viewport), "var(--color-accent)", `primary at ${viewport}px`);
   }
   assert.throws(() => assertPrimaryHealthy(primary), Error, "primary override must fail at 1440px");
 
   const focus = `${css}\n@media (max-width:760px){ .bottom-nav button:focus-visible{outline-color:#fff} }\n`;
-  assert.equal(style(focus, BOTTOM_NAV_FOCUS, "outline-color", 375), "#fff");
+  for (const viewport of [360, 375]) {
+    assert.equal(style(focus, BOTTOM_NAV_FOCUS, "outline-color", viewport), "#fff", `focus mutation at ${viewport}px`);
+  }
   for (const viewport of [768, 1280, 1440]) {
     assert.equal(style(focus, BOTTOM_NAV_FOCUS, "outline-color", viewport), "var(--focus-ring-color)", `focus at ${viewport}px`);
   }
-  assert.throws(() => assertNavFocusHealthy(focus), Error, "focus override must fail at 375px");
+  assert.throws(() => assertNavFocusHealthy(focus), Error, "focus override must fail at 360/375px");
 
   const badge = `${css}\n@media (min-width:1281px){ .task-tool-badge{background:#fff;color:#fff} }\n`;
   assert.equal(style(badge, BOTTOM_BADGE, "background", 1440), "#fff");
-  for (const viewport of [375, 768, 1280]) {
+  for (const viewport of [360, 375, 768, 1280]) {
     assert.equal(style(badge, BOTTOM_BADGE, "background", viewport), "var(--color-warning)", `badge at ${viewport}px`);
   }
   assert.throws(() => assertPendingHealthy(badge), Error, "badge override must fail at 1440px");
