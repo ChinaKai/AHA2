@@ -874,6 +874,64 @@ func (s *Store) ListTurns(ctx context.Context, taskID string) ([]domain.Turn, er
 	return result, rows.Err()
 }
 
+// The task list totals tokens per Turn, and those totals only read the
+// session, snapshot, sequence and usage fields. A full Turn also carries
+// result, prompt_snapshot and instruction; across one list page those reach
+// tens of megabytes (task-341 measured ~34MB for 50 Tasks), so the list
+// projection below deliberately leaves the wide text columns in SQLite and
+// returns partial Turns. Callers must not read other fields of these Turns.
+const turnTokenUsageColumns = `id,task_id,sequence,backend_session_id,runtime_config_snapshot_id,usage_json`
+
+// turnTokenUsageQuery returns both forms of the projection query. The hinted
+// one pins the schema v134 covering index: left to itself SQLite prefers the
+// narrower idx_turns_task and then visits every wide row page for the usage
+// column, which is exactly the I/O this query exists to avoid. The fallback
+// keeps a hand-edited or partially migrated database working, like
+// TaskFacetCounts does for its index hint. Kept apart from
+// ListTurnTokenUsageForTasks so tests can assert the exact column list: adding
+// a wide column such as prompt_snapshot back here silently undoes the list
+// optimization.
+func turnTokenUsageQuery(taskIDs []string) (hinted, fallback string, args []any) {
+	args = make([]any, 0, len(taskIDs))
+	for _, id := range taskIDs {
+		args = append(args, id)
+	}
+	tail := ` WHERE task_id IN (` + placeholders(len(taskIDs)) + `) ORDER BY task_id,sequence`
+	fallback = `SELECT ` + turnTokenUsageColumns + ` FROM turns` + tail
+	hinted = `SELECT ` + turnTokenUsageColumns + ` FROM turns INDEXED BY idx_turns_token_usage` + tail
+	return hinted, fallback, args
+}
+
+// ListTurnTokenUsageForTasks loads only the Turn fields taskTotalTokens needs
+// for a list page. The returned Turns are partial: ID, TaskID, Sequence,
+// BackendSessionID, RuntimeConfigSnapshotID and Usage are populated; every
+// other field is zero.
+func (s *Store) ListTurnTokenUsageForTasks(ctx context.Context, taskIDs []string) (map[string][]domain.Turn, error) {
+	result := make(map[string][]domain.Turn, len(taskIDs))
+	if len(taskIDs) == 0 {
+		return result, nil
+	}
+	for _, id := range taskIDs {
+		result[id] = []domain.Turn{}
+	}
+	hinted, fallback, args := turnTokenUsageQuery(taskIDs)
+	rows, err := s.queryWithIndexFallback(ctx, hinted, fallback, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var item domain.Turn
+		var usage string
+		if err := rows.Scan(&item.ID, &item.TaskID, &item.Sequence, &item.BackendSessionID, &item.RuntimeConfigSnapshotID, &usage); err != nil {
+			return nil, err
+		}
+		item.Usage = decodeJSON(usage, map[string]any{})
+		result[item.TaskID] = append(result[item.TaskID], item)
+	}
+	return result, rows.Err()
+}
+
 // ListTurnsForTasks loads turn histories for a task list in one query. It is
 // intended for list-level aggregation where calling ListTurns per task would
 // amplify database work linearly.

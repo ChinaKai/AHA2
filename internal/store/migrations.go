@@ -3623,5 +3623,21 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("record schema v133: %w", err)
 		}
 	}
+	var hasV134 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=134)`).Scan(&hasV134)
+	if !hasV134 {
+		// The Task list totals tokens from Turns without loading prompt_snapshot
+		// or result, but a plain SELECT still visits each Turn's row page and the
+		// wide text shares that storage. This covering index matches
+		// ListTurnTokenUsageForTasks (filter and ORDER BY first, then exactly the
+		// projected columns) so the per-Task range walk reads only the index.
+		if _, err := s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_turns_token_usage
+			ON turns(task_id,sequence,id,backend_session_id,runtime_config_snapshot_id,usage_json)`); err != nil {
+			return fmt.Errorf("apply schema v134 turn token usage index: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(134, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+		return fmt.Errorf("record schema v134: %w", err)
+	}
 	return nil
 }

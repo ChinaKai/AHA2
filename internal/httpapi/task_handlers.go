@@ -124,7 +124,7 @@ func (s *Server) applyTaskTokenTotals(ctx context.Context, tasks []domain.Task) 
 			ids = append(ids, task.ID)
 		}
 	}
-	turnsByTask, err := s.store.ListTurnsForTasks(ctx, ids)
+	turnsByTask, err := s.store.ListTurnTokenUsageForTasks(ctx, ids)
 	if err != nil {
 		return
 	}
