@@ -20,7 +20,7 @@ import {bindDesktopPanel, desktopPanelInteracting, refreshDesktopPanel, stopDesk
 import {renderMarkdown} from "./markdown.js";
 import {forgetAllModelHealth as clearAllModelHealth, forgetModelHealth as clearModelHealth, runModelHealthCheck, runModelHealthChecks} from "./model_health.js";
 import type {ModelHealthState} from "./model_health.js";
-import {MODEL_PAGE_SIZE, buildModelPage, modelBatchBarHTML, modelSelectionState, pruneModelSelection, selectModelIDs, toggleModelSelection} from "./model_selection.js";
+import {MODEL_PAGE_SIZE, buildModelPage, modelBatchBarHTML, modelSelectionIndicator, modelSelectionState, pruneModelSelection, selectModelIDs, toggleModelSelection} from "./model_selection.js";
 import {bindPromptAdmin, loadPromptCatalog, renderPromptAdmin} from "./prompt_admin.js";
 import {bindProxySettings, renderProxySettings} from "./proxy_settings.js";
 import {formatBytes, purgeEnabled, renderDatabasePanel, retentionFormError, skipReasonText} from "./data_retention.js";
@@ -3210,7 +3210,7 @@ function modelGroupRowsHTML(group: ReturnType<typeof buildModelPage>["groups"][n
   const count = group.total > group.items.length
     ? `共 ${group.total} 个 · 本页 ${group.items.length} 个`
     : `共 ${group.total} 个`;
-  return `<tr class="model-group-row"><td class="model-select-cell"><input type="checkbox" data-select-model-group="${escapeHTML(group.providerId)}" ${groupAllSelected ? "checked" : ""} aria-label="全选分组 ${escapeHTML(group.providerName)}"></td><td colspan="6"><strong>${escapeHTML(group.providerName)}</strong><span class="model-group-count">${count}</span></td></tr>${group.items.map(modelRowHTML).join("")}`;
+  return `<tr class="model-group-row"><td class="model-select-cell"><input type="checkbox" data-select-model-group="${escapeHTML(group.providerId)}" ${groupAllSelected ? "checked" : ""} aria-label="全选本页分组 ${escapeHTML(group.providerName)}"></td><td colspan="6"><strong>${escapeHTML(group.providerName)}</strong><span class="model-group-count">${count}</span></td></tr>${group.items.map(modelRowHTML).join("")}`;
 }
 
 function modelResultsHTML(): string {
@@ -3222,7 +3222,7 @@ function modelResultsHTML(): string {
   const modelTotal = state.modelSearch.trim()
     ? `匹配 ${visibleModels.length} / 共 ${state.models.length} 个`
     : `共 ${state.models.length} 个`;
-  return `${modelBatchBarHTML(state.modelSelected.size)}<div class="table-wrap"><table class="models-table"><thead><tr><th class="model-select-cell"><input type="checkbox" data-select-models-page ${pageAllSelected ? "checked" : ""} aria-label="全选本页模型"></th><th>模型</th><th>Provider</th><th>Backend</th><th>Context</th><th>可用性</th><th></th></tr></thead><tbody>${groups || `<tr><td colspan="7">${modelEmpty}</td></tr>`}</tbody></table></div>${paginationHTML("models", modelPage.slice, modelTotal)}`;
+  return `${modelBatchBarHTML(selectedModelIDs().length)}<div class="table-wrap"><table class="models-table"><thead><tr><th class="model-select-cell"><input type="checkbox" data-select-models-page ${pageAllSelected ? "checked" : ""} aria-label="全选本页模型"></th><th>模型</th><th>Provider</th><th>Backend</th><th>Context</th><th>可用性</th><th></th></tr></thead><tbody>${groups || `<tr><td colspan="7">${modelEmpty}</td></tr>`}</tbody></table></div>${paginationHTML("models", modelPage.slice, modelTotal)}`;
 }
 
 function batchCheckSelectedModels(): void {
@@ -3255,7 +3255,28 @@ function batchDeleteSelectedModels(button: HTMLElement | null): void {
 // and its focus (and caret) stay intact while typing.
 function refreshModelResults(): void {
   const container = document.querySelector<HTMLElement>("#model-results");
-  if (container) container.innerHTML = modelResultsHTML();
+  if (container) {
+    container.innerHTML = modelResultsHTML();
+    syncModelSelectionIndicators(container);
+  }
+}
+
+// The rendered checked attributes only cover "all"; a partial selection is the
+// browser's indeterminate state, which markup cannot express.
+function syncModelSelectionIndicators(container: HTMLElement): void {
+  const page = currentModelPage();
+  const pageBox = container.querySelector<HTMLInputElement>("[data-select-models-page]");
+  if (pageBox) {
+    const indicator = modelSelectionIndicator(state.modelSelected, page.pageIDs);
+    pageBox.checked = indicator.checked;
+    pageBox.indeterminate = indicator.indeterminate;
+  }
+  container.querySelectorAll<HTMLInputElement>("[data-select-model-group]").forEach(box => {
+    const group = page.groups.find(item => item.providerId === box.dataset.selectModelGroup);
+    const indicator = modelSelectionIndicator(state.modelSelected, group ? group.items.map(item => item.id) : []);
+    box.checked = indicator.checked;
+    box.indeterminate = indicator.indeterminate;
+  });
 }
 
 function openEditModelDialog(id: string): void {

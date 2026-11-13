@@ -184,6 +184,23 @@ try {
   await page.waitForFunction(() => document.querySelector("#model-search")?.value === "" && document.querySelectorAll(".models-table tbody tr.model-row").length === 20, null, {timeout: 15000});
   assert.match(await page.locator(".list-footer-models").textContent(), /第 1\/2 页/);
 
+  // A partial selection shows the browser's indeterminate state on the
+  // page-level checkbox; only a full selection renders as checked.
+  await page.evaluate(() => {
+    const input = document.querySelector("[data-select-model]");
+    if (!(input instanceof HTMLInputElement)) return;
+    input.checked = true;
+    input.dispatchEvent(new Event("change", {bubbles: true}));
+  });
+  await page.waitForFunction(() => document.querySelector("[data-select-models-page]")?.indeterminate === true, null, {timeout: 15000});
+  await page.evaluate(() => {
+    const input = document.querySelector("[data-select-model]");
+    if (!(input instanceof HTMLInputElement)) return;
+    input.checked = false;
+    input.dispatchEvent(new Event("change", {bubbles: true}));
+  });
+  await page.waitForFunction(() => document.querySelector("[data-select-models-page]")?.indeterminate === false, null, {timeout: 15000});
+
   // Select all on the page, then submit one batch delete approval. The row
   // checkboxes drive a bar that submits a single request with every id.
   await page.evaluate(() => {

@@ -12,6 +12,7 @@ const {
   buildModelPage,
   groupModelsByProvider,
   modelBatchBarHTML,
+  modelSelectionIndicator,
   modelSelectionState,
   pruneModelSelection,
   selectModelIDs,
@@ -81,6 +82,15 @@ test("selection state distinguishes none, some, and all", () => {
   assert.equal(modelSelectionState(new Set(["a"]), ids), "some");
   assert.equal(modelSelectionState(new Set(["a", "b", "c"]), ids), "all");
   assert.equal(modelSelectionState(new Set(["a"]), []), "none");
+});
+
+test("checkbox indicators distinguish unchecked, indeterminate, and checked", () => {
+  const ids = ["a", "b", "c"];
+  assert.deepEqual(modelSelectionIndicator(new Set(), ids), {checked: false, indeterminate: false});
+  assert.deepEqual(modelSelectionIndicator(new Set(["a"]), ids), {checked: false, indeterminate: true});
+  assert.deepEqual(modelSelectionIndicator(new Set(["a", "b", "c"]), ids), {checked: true, indeterminate: false});
+  // An empty group cannot be indeterminate.
+  assert.deepEqual(modelSelectionIndicator(new Set(["a"]), []), {checked: false, indeterminate: false});
 });
 
 test("select all page and select all group add or remove only their own ids", () => {

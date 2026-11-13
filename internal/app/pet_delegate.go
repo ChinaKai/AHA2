@@ -170,6 +170,37 @@ type PetApprovalInput struct {
 // execute the requested action; phase-two owner-delegate write tools will check
 // for an approved record before acting.
 func (s *Service) CreatePetApproval(ctx context.Context, input PetApprovalInput) (domain.PetApproval, error) {
+	item, err := s.buildPetApproval(input)
+	if err != nil {
+		return domain.PetApproval{}, err
+	}
+	if err := s.store.CreatePetApproval(ctx, item); err != nil {
+		return domain.PetApproval{}, err
+	}
+	s.afterPetApprovalCreated(ctx, item)
+	return item, nil
+}
+
+// CreatePetApprovalDeduped is CreatePetApproval with an atomic store-level
+// dedupe key. Concurrent submissions of the same request return the winning
+// pending approval instead of creating another card; only the winner publishes
+// the realtime event.
+func (s *Service) CreatePetApprovalDeduped(ctx context.Context, input PetApprovalInput, dedupeKey string) (domain.PetApproval, error) {
+	item, err := s.buildPetApproval(input)
+	if err != nil {
+		return domain.PetApproval{}, err
+	}
+	stored, err := s.store.CreatePetApprovalDeduped(ctx, item, dedupeKey)
+	if err != nil {
+		return domain.PetApproval{}, err
+	}
+	if stored.ID == item.ID {
+		s.afterPetApprovalCreated(ctx, stored)
+	}
+	return stored, nil
+}
+
+func (s *Service) buildPetApproval(input PetApprovalInput) (domain.PetApproval, error) {
 	kind := strings.TrimSpace(input.Kind)
 	title := strings.TrimSpace(input.Title)
 	summary := strings.TrimSpace(input.Summary)
@@ -202,20 +233,18 @@ func (s *Service) CreatePetApproval(ctx context.Context, input PetApprovalInput)
 	if risk == "high" && reason == "" {
 		reason = summary
 	}
-	now := s.now().UTC()
-	item := domain.PetApproval{
+	return domain.PetApproval{
 		ID: domain.NewID("pet_approval"), TaskID: petTaskID, Kind: kind, Title: title,
-		Summary: summary, Reason: reason, Risk: risk, Payload: payload, Status: petApprovalPending, CreatedAt: now,
-	}
-	if err := s.store.CreatePetApproval(ctx, item); err != nil {
-		return domain.PetApproval{}, err
-	}
+		Summary: summary, Reason: reason, Risk: risk, Payload: payload, Status: petApprovalPending, CreatedAt: s.now().UTC(),
+	}, nil
+}
+
+func (s *Service) afterPetApprovalCreated(ctx context.Context, item domain.PetApproval) {
 	s.publishPetApproval(item)
 	_ = s.store.AppendPetEvent(ctx, domain.PetEvent{
-		ID: domain.NewID("pet_event"), At: now, Actor: "pet", Kind: "approval_request",
-		Detail: summary, Status: petApprovalPending,
+		ID: domain.NewID("pet_event"), At: item.CreatedAt, Actor: "pet", Kind: "approval_request",
+		Detail: item.Summary, Status: petApprovalPending,
 	})
-	return item, nil
 }
 
 // ResolvePetApproval records the owner's decision and, when possible, wakes the
@@ -503,18 +532,24 @@ func (s *Service) executePetApproval(ctx context.Context, item domain.PetApprova
 	case "delete_workspace":
 		return s.deleteWorkspaceNow(ctx, payload.WorkspaceID)
 	case "delete_model":
-		if err := s.deleteModelNow(ctx, payload.ModelID); err != nil {
+		modelID := strings.TrimSpace(payload.ModelID)
+		cleanup, err := s.deleteModelNow(ctx, modelID)
+		if err != nil {
 			return err
 		}
-		s.recordPetWork(ctx, "model_deleted", payload.ModelID, "approved")
+		s.recordPetWork(ctx, "model_deleted", modelID, "approved")
+		s.auditModelDeleteApproval(ctx, "model.delete", "model", modelID, item.ID, []string{modelID}, cleanup)
 		return nil
 	case "delete_models":
-		if err := s.deleteModelsNow(ctx, payload.ModelIDs); err != nil {
+		modelIDs := normalizeModelIDs(payload.ModelIDs)
+		cleanup, err := s.deleteModelsNow(ctx, modelIDs)
+		if err != nil {
 			return err
 		}
-		for _, modelID := range normalizeModelIDs(payload.ModelIDs) {
+		for _, modelID := range modelIDs {
 			s.recordPetWork(ctx, "model_deleted", modelID, "approved")
 		}
+		s.auditModelDeleteApproval(ctx, "model.batch_delete", "model_batch", item.ID, item.ID, modelIDs, cleanup)
 		return nil
 	case "delete_provider":
 		if err := s.deleteProviderNow(ctx, payload.ProviderID); err != nil {

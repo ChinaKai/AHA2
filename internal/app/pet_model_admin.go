@@ -2,13 +2,17 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
 	"github.com/ChinaKai/AHA2/internal/gateway"
+	"github.com/ChinaKai/AHA2/internal/store"
 )
 
 func (s *Service) petManageModels(ctx context.Context) (domain.OwnerAssistant, error) {
@@ -315,12 +319,8 @@ func (s *Service) PetRequestDeleteModel(ctx context.Context, modelID string, rea
 	})
 }
 
-func (s *Service) deleteModelNow(ctx context.Context, modelID string) error {
-	model, err := s.store.Model(ctx, strings.TrimSpace(modelID))
-	if err != nil {
-		return fmt.Errorf("模型不存在")
-	}
-	return s.store.DeleteModel(ctx, model.ID)
+func (s *Service) deleteModelNow(ctx context.Context, modelID string) (store.ModelDeleteCleanup, error) {
+	return s.deleteModelsNow(ctx, []string{modelID})
 }
 
 // petModelDeleteBatchPayload is the approval payload for one batch delete. The
@@ -371,26 +371,25 @@ func (s *Service) requestModelBatchDelete(ctx context.Context, modelIDs []string
 	if len(missing) > 0 {
 		return domain.PetApproval{}, fmt.Errorf("模型不存在或已被删除：%s", strings.Join(missing, "、"))
 	}
-	// Reuse an identical pending request instead of stacking duplicates when the
-	// owner clicks the batch action twice.
-	pending, err := s.store.ListPendingPetApprovalsByKind(ctx, "delete_models")
-	if err != nil {
-		return domain.PetApproval{}, err
-	}
-	for _, approval := range pending {
-		var existing petModelDeleteBatchPayload
-		if json.Unmarshal([]byte(approval.Payload), &existing) == nil && sameModelIDSet(existing.ModelIDs, ids) {
-			return approval, nil
-		}
-	}
 	payload, _ := json.Marshal(petModelDeleteBatchPayload{ModelIDs: ids, ModelNames: names, Count: len(ids)})
-	return s.CreatePetApproval(ctx, PetApprovalInput{
+	// A stable key over the sorted id set lets the store collapse concurrent
+	// submissions atomically; a list-then-create check would race.
+	return s.CreatePetApprovalDeduped(ctx, PetApprovalInput{
 		Kind:  "delete_models",
 		Title: fmt.Sprintf("批量删除 %d 个模型", len(ids)),
 		Summary: fmt.Sprintf("申请删除 %d 个模型：%s。批准后在同一事务中全部删除；任一模型已不存在时整批不删除。",
 			len(ids), summarizeModelDeleteNames(names, 800)),
 		Reason: reason, Risk: "high", Payload: string(payload),
-	})
+	}, modelBatchDedupeKey(ids))
+}
+
+// modelBatchDedupeKey hashes the normalized, sorted model ids so the same set
+// in any order maps to one pending approval.
+func modelBatchDedupeKey(ids []string) string {
+	sorted := append([]string(nil), ids...)
+	sort.Strings(sorted)
+	sum := sha256.Sum256([]byte(strings.Join(sorted, "\x00")))
+	return "delete_models:" + hex.EncodeToString(sum[:])
 }
 
 func normalizeModelIDs(modelIDs []string) []string {
@@ -405,22 +404,6 @@ func normalizeModelIDs(modelIDs []string) []string {
 		result = append(result, id)
 	}
 	return result
-}
-
-func sameModelIDSet(left, right []string) bool {
-	if len(left) != len(right) || len(left) == 0 {
-		return false
-	}
-	set := make(map[string]bool, len(left))
-	for _, id := range left {
-		set[strings.TrimSpace(id)] = true
-	}
-	for _, id := range right {
-		if !set[strings.TrimSpace(id)] {
-			return false
-		}
-	}
-	return true
 }
 
 // summarizeModelDeleteNames keeps the approval summary readable while still
@@ -443,12 +426,41 @@ func summarizeModelDeleteNames(names []string, limit int) string {
 	return builder.String()
 }
 
-func (s *Service) deleteModelsNow(ctx context.Context, modelIDs []string) error {
+func (s *Service) deleteModelsNow(ctx context.Context, modelIDs []string) (store.ModelDeleteCleanup, error) {
 	ids := normalizeModelIDs(modelIDs)
 	if len(ids) == 0 {
-		return fmt.Errorf("model_ids 不能为空")
+		return store.ModelDeleteCleanup{}, fmt.Errorf("model_ids 不能为空")
 	}
-	return s.store.DeleteModels(ctx, ids)
+	cleanup, err := s.store.DeleteModels(ctx, ids)
+	if err != nil {
+		return store.ModelDeleteCleanup{}, err
+	}
+	// Env group rows are gone in the same transaction; their per-env secrets
+	// live in the secret store, so they are dropped here once the DB commit
+	// proves the groups are no longer referenced.
+	if s.secrets != nil && len(cleanup.SecretRefs) > 0 {
+		_ = s.secrets.DeleteMany(cleanup.SecretRefs)
+	}
+	return cleanup, nil
+}
+
+// auditModelDeleteApproval records an executed model-delete approval in
+// audit_events. pet_events already tracks the work item; the audit row keeps
+// the normalized ids the owner approved plus what cleanup actually removed.
+func (s *Service) auditModelDeleteApproval(ctx context.Context, action, resourceType, resourceID, approvalID string, modelIDs []string, cleanup store.ModelDeleteCleanup) {
+	ownerID, _ := s.store.PrimaryOwnerID(ctx)
+	details := map[string]any{
+		"approval_id": approvalID,
+		"model_ids":   modelIDs,
+		"count":       len(modelIDs),
+	}
+	if len(cleanup.DeletedEnvGroupIDs) > 0 {
+		details["deleted_env_group_ids"] = cleanup.DeletedEnvGroupIDs
+	}
+	if len(cleanup.SecretRefs) > 0 {
+		details["deleted_secret_count"] = len(cleanup.SecretRefs)
+	}
+	_ = s.store.AppendAudit(ctx, ownerID, action, resourceType, resourceID, details, s.now().UTC().Format(time.RFC3339Nano))
 }
 
 type PetEnvGroupInput struct {

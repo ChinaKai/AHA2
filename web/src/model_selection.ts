@@ -65,6 +65,18 @@ export function modelSelectionState(selected: Set<string>, ids: string[]): Model
   return picked === ids.length ? "all" : "some";
 }
 
+// A checkbox can only render checked/unchecked in markup; "some" is the
+// browser's indeterminate state, set on the live element after render.
+export interface ModelSelectionIndicator {
+  checked: boolean;
+  indeterminate: boolean;
+}
+
+export function modelSelectionIndicator(selected: Set<string>, ids: string[]): ModelSelectionIndicator {
+  const state = modelSelectionState(selected, ids);
+  return {checked: state === "all", indeterminate: state === "some"};
+}
+
 export function toggleModelSelection(selected: Set<string>, id: string, checked: boolean): void {
   if (!id) return;
   if (checked) selected.add(id);

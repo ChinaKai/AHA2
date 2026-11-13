@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -232,50 +233,23 @@ func (s *Server) deleteProvider(writer http.ResponseWriter, request *http.Reques
 
 func (s *Server) deleteModel(writer http.ResponseWriter, request *http.Request) {
 	id := request.PathValue("id")
-	model, err := s.store.Model(request.Context(), id)
-	if err != nil {
+	if _, err := s.store.Model(request.Context(), id); err != nil {
 		writeError(writer, http.StatusNotFound, "model_not_found")
 		return
 	}
-	var envGroupsToDelete []string
-	if model.DefaultEnvGroupID != "" {
-		models, _ := s.store.ListModels(request.Context())
-		referenced := false
-		for _, other := range models {
-			if other.ID != id && other.DefaultEnvGroupID == model.DefaultEnvGroupID {
-				referenced = true
-				break
-			}
-		}
-		if !referenced {
-			envGroupsToDelete = append(envGroupsToDelete, model.DefaultEnvGroupID)
-		}
-	}
-	if err := s.store.DeleteModel(request.Context(), id); err != nil {
+	// DeleteModels owns the whole delete flow so the single-model HTTP entry and
+	// the approved batch path clean Env Groups and per-env secrets identically.
+	cleanup, err := s.store.DeleteModels(request.Context(), []string{id})
+	if err != nil {
 		writeError(writer, http.StatusInternalServerError, "delete_model_failed")
 		return
 	}
-	var secretKeys []string
-	for _, envID := range envGroupsToDelete {
-		envInUse, err := s.store.EnvGroupInUse(request.Context(), envID)
-		if err == nil && envInUse {
-			continue
-		}
-		if group, err := s.store.EnvGroup(request.Context(), envID); err == nil {
-			for _, ref := range group.SecretRefs {
-				// Only per-env secrets belong to this model; the provider
-				// credential is shared and must survive a single model delete.
-				if strings.HasPrefix(ref, "env/") {
-					secretKeys = append(secretKeys, ref)
-				}
-			}
-		}
-		_ = s.store.DeleteEnvGroup(request.Context(), envID)
+	if s.secrets != nil && len(cleanup.SecretRefs) > 0 {
+		_ = s.secrets.DeleteMany(cleanup.SecretRefs)
 	}
-	if s.secrets != nil {
-		_ = s.secrets.DeleteMany(secretKeys)
-	}
-	s.audit(request, "model.delete", "model", id, nil)
+	s.audit(request, "model.delete", "model", id, map[string]any{
+		"deleted_env_group_ids": cleanup.DeletedEnvGroupIDs, "deleted_secret_count": len(cleanup.SecretRefs),
+	})
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -303,8 +277,14 @@ func (s *Server) requestBatchDeleteModels(writer http.ResponseWriter, request *h
 		writeErrorDetail(writer, http.StatusBadRequest, "batch_delete_models_failed", err.Error())
 		return
 	}
+	// Audit the normalized ids the approval actually carries, not the raw
+	// request: duplicates or blank entries would otherwise inflate the count.
+	var normalized struct {
+		ModelIDs []string `json:"model_ids"`
+	}
+	_ = json.Unmarshal([]byte(approval.Payload), &normalized)
 	s.audit(request, "model.batch_delete_request", "model_batch", approval.ID, map[string]any{
-		"count": len(payload.ModelIDs), "approval_id": approval.ID,
+		"model_ids": normalized.ModelIDs, "count": len(normalized.ModelIDs), "approval_id": approval.ID,
 	})
 	writeJSON(writer, http.StatusAccepted, map[string]any{"ok": true, "approval": approval})
 }

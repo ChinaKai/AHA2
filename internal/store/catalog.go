@@ -461,10 +461,27 @@ func (s *Store) DeleteModel(ctx context.Context, id string) error {
 	return err
 }
 
-// DeleteModels removes every requested model in one transaction. It validates
+// ModelDeleteCleanup reports side effects a model delete produced so the caller
+// can drop per-env secrets (the secret store is outside SQLite) and audit the
+// change. Provider credentials are deliberately not included: they are shared
+// by every model of the provider and survive a model delete.
+type ModelDeleteCleanup struct {
+	DeletedModelIDs    []string
+	DeletedEnvGroupIDs []string
+	SecretRefs         []string
+}
+
+// DeleteModels removes every requested model in one transaction and then
+// removes the Env Groups/secret refs that no remaining model uses. It validates
 // the whole set first: if any ID is unknown or already deleted, nothing is
 // changed, so an approved batch delete can never partially succeed.
-func (s *Store) DeleteModels(ctx context.Context, ids []string) error {
+//
+// The env group decision is a set operation after the whole batch is gone: a
+// group shared by several models in the batch is deleted only when the last of
+// them was deleted. Groups still referenced by another model or by a historical
+// runtime snapshot stay, matching the single-model DELETE path.
+func (s *Store) DeleteModels(ctx context.Context, ids []string) (ModelDeleteCleanup, error) {
+	cleanup := ModelDeleteCleanup{}
 	normalized := make([]string, 0, len(ids))
 	seen := map[string]bool{}
 	for _, raw := range ids {
@@ -476,51 +493,130 @@ func (s *Store) DeleteModels(ctx context.Context, ids []string) error {
 		normalized = append(normalized, id)
 	}
 	if len(normalized) == 0 {
-		return fmt.Errorf("至少选择一个模型")
+		return cleanup, fmt.Errorf("至少选择一个模型")
 	}
 	now := time.Now().UTC()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return cleanup, err
 	}
 	defer tx.Rollback()
-	versions := make(map[string]string, len(normalized))
+	type modelRow struct {
+		id         string
+		updatedAt  string
+		envGroupID string
+	}
+	rows := make([]modelRow, 0, len(normalized))
 	missing := []string{}
 	for _, id := range normalized {
-		var updatedAt string
-		err := tx.QueryRowContext(ctx, `SELECT updated_at FROM models WHERE id=? AND deleted_at=''`, id).Scan(&updatedAt)
+		var item modelRow
+		err := tx.QueryRowContext(ctx, `SELECT updated_at, default_env_group_id FROM models WHERE id=? AND deleted_at=''`, id).
+			Scan(&item.updatedAt, &item.envGroupID)
 		if err == sql.ErrNoRows {
 			missing = append(missing, id)
 			continue
 		}
 		if err != nil {
-			return err
+			return cleanup, err
 		}
-		versions[id] = updatedAt
+		item.id = id
+		rows = append(rows, item)
 	}
 	if len(missing) > 0 {
-		return fmt.Errorf("模型不存在或已被删除：%s", strings.Join(missing, "、"))
+		return cleanup, fmt.Errorf("模型不存在或已被删除：%s", strings.Join(missing, "、"))
 	}
-	for _, id := range normalized {
-		affected, err := deleteSharedRow(ctx, tx, "model", id, now)
+	envCandidates := make([]string, 0, len(rows))
+	seenEnv := map[string]bool{}
+	for _, row := range rows {
+		if row.envGroupID == "" || seenEnv[row.envGroupID] {
+			continue
+		}
+		seenEnv[row.envGroupID] = true
+		envCandidates = append(envCandidates, row.envGroupID)
+	}
+	for _, row := range rows {
+		affected, err := deleteSharedRow(ctx, tx, "model", row.id, now)
 		if err != nil {
-			return err
+			return cleanup, err
 		}
 		if affected != 1 {
-			return fmt.Errorf("模型不存在或已被删除：%s", id)
+			return cleanup, fmt.Errorf("模型不存在或已被删除：%s", row.id)
 		}
-		version := versions[id]
+		version := row.updatedAt
 		if version == "" {
 			version = timeString(now)
 		}
 		if err := insertSyncTombstone(ctx, tx, domain.SyncTombstone{
-			ObjectType: "model", ObjectID: id, Version: version, DeletedAt: now,
-			SyncKey: fmt.Sprintf("tombstone:v1:model:%s:%d", id, now.UnixNano()),
+			ObjectType: "model", ObjectID: row.id, Version: version, DeletedAt: now,
+			SyncKey: fmt.Sprintf("tombstone:v1:model:%s:%d", row.id, now.UnixNano()),
 		}); err != nil {
-			return err
+			return cleanup, err
+		}
+		cleanup.DeletedModelIDs = append(cleanup.DeletedModelIDs, row.id)
+	}
+	secretSeen := map[string]bool{}
+	for _, envID := range envCandidates {
+		referenced, err := txQueryExists(ctx, tx, `SELECT EXISTS(SELECT 1 FROM models WHERE default_env_group_id=? AND deleted_at='')`, envID)
+		if err != nil {
+			return cleanup, err
+		}
+		if referenced {
+			continue
+		}
+		inUse, err := txQueryExists(ctx, tx, `SELECT EXISTS(
+			SELECT 1 FROM runtime_config_snapshots snapshot
+			WHERE snapshot.env_group_id=? AND (
+				EXISTS(SELECT 1 FROM tasks WHERE runtime_config_snapshot_id=snapshot.id) OR
+				EXISTS(SELECT 1 FROM task_agents WHERE runtime_config_snapshot_id=snapshot.id) OR
+				EXISTS(SELECT 1 FROM turns WHERE runtime_config_snapshot_id=snapshot.id)
+			))`, envID)
+		if err != nil {
+			return cleanup, err
+		}
+		if inUse {
+			continue
+		}
+		var revision int
+		var secretNames string
+		err = tx.QueryRowContext(ctx, `SELECT revision, secret_names_json FROM env_groups WHERE id=? AND deleted_at=''`, envID).
+			Scan(&revision, &secretNames)
+		if err == sql.ErrNoRows {
+			continue
+		}
+		if err != nil {
+			return cleanup, err
+		}
+		affected, err := deleteSharedRow(ctx, tx, "env_group", envID, now)
+		if err != nil {
+			return cleanup, err
+		}
+		if affected != 1 {
+			continue
+		}
+		if err := insertSyncTombstone(ctx, tx, domain.SyncTombstone{
+			ObjectType: "env_group", ObjectID: envID, Version: strconv.Itoa(revision), DeletedAt: now,
+			SyncKey: fmt.Sprintf("tombstone:v1:env_group:%s:%d", envID, now.UnixNano()),
+		}); err != nil {
+			return cleanup, err
+		}
+		cleanup.DeletedEnvGroupIDs = append(cleanup.DeletedEnvGroupIDs, envID)
+		for _, ref := range decodeJSON(secretNames, map[string]string{}) {
+			if strings.HasPrefix(ref, "env/") && !secretSeen[ref] {
+				secretSeen[ref] = true
+				cleanup.SecretRefs = append(cleanup.SecretRefs, ref)
+			}
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return ModelDeleteCleanup{}, err
+	}
+	return cleanup, nil
+}
+
+func txQueryExists(ctx context.Context, tx *sql.Tx, query string, args ...any) (bool, error) {
+	var exists bool
+	err := tx.QueryRowContext(ctx, query, args...).Scan(&exists)
+	return exists, err
 }
 
 func (s *Store) DeleteEnvGroup(ctx context.Context, id string) error {

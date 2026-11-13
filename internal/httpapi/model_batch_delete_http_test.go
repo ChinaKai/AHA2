@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/cookiejar"
@@ -17,10 +18,11 @@ import (
 	"github.com/ChinaKai/AHA2/internal/store"
 )
 
-func newModelBatchDeleteTestServer(t *testing.T) (*store.Store, *httptest.Server, *http.Client, string) {
+func newModelBatchDeleteTestServer(t *testing.T) (*store.Store, *httptest.Server, *http.Client, string, string) {
 	t.Helper()
 	ctx := context.Background()
-	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "aha2.db"))
+	databasePath := filepath.Join(t.TempDir(), "aha2.db")
+	database, err := store.Open(ctx, databasePath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,15 +53,43 @@ func newModelBatchDeleteTestServer(t *testing.T) (*store.Store, *httptest.Server
 	jar, _ := cookiejar.New(nil)
 	client := &http.Client{Jar: jar}
 	csrf := registerOwner(t, client, server.URL)
-	return database, server, client, csrf
+	return database, server, client, csrf, databasePath
+}
+
+func batchDeleteAuditRows(t *testing.T, databasePath, action string) []map[string]any {
+	t.Helper()
+	db, err := sql.Open("sqlite", databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	rows, err := db.Query(`SELECT data_json FROM audit_events WHERE action=? ORDER BY sequence`, action)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	result := []map[string]any{}
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			t.Fatal(err)
+		}
+		var data map[string]any
+		if err := json.Unmarshal([]byte(raw), &data); err != nil {
+			t.Fatalf("audit data %q: %v", raw, err)
+		}
+		result = append(result, data)
+	}
+	return result
 }
 
 func TestBatchDeleteModelsEndpointCreatesOneApproval(t *testing.T) {
-	database, server, client, csrf := newModelBatchDeleteTestServer(t)
+	database, server, client, csrf, databasePath := newModelBatchDeleteTestServer(t)
 	modelIDs := []string{"model-batch-http-a", "model-batch-http-b"}
 
+	// Blank and duplicate ids must not inflate the audit or the approval count.
 	response := requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/models/batch-delete", map[string]any{
-		"model_ids": modelIDs,
+		"model_ids": []string{modelIDs[0], "", modelIDs[1], modelIDs[0]},
 	}, csrf)
 	var body struct {
 		OK       bool               `json:"ok"`
@@ -83,6 +113,20 @@ func TestBatchDeleteModelsEndpointCreatesOneApproval(t *testing.T) {
 	if payload.Count != 2 || len(payload.ModelIDs) != 2 || len(payload.ModelNames) != 2 {
 		t.Fatalf("payload=%#v", payload)
 	}
+	audits := batchDeleteAuditRows(t, databasePath, "model.batch_delete_request")
+	if len(audits) != 1 {
+		t.Fatalf("submit audit rows = %d, want 1", len(audits))
+	}
+	auditIDs, _ := audits[0]["model_ids"].([]any)
+	if len(auditIDs) != 2 || auditIDs[0] != modelIDs[0] || auditIDs[1] != modelIDs[1] {
+		t.Fatalf("submit audit model_ids = %#v", audits[0]["model_ids"])
+	}
+	if count, _ := audits[0]["count"].(float64); int(count) != 2 {
+		t.Fatalf("submit audit count = %#v", audits[0]["count"])
+	}
+	if audits[0]["approval_id"] != body.Approval.ID {
+		t.Fatalf("submit audit approval_id = %#v", audits[0]["approval_id"])
+	}
 	// Requesting again before approval must reuse the pending card.
 	response = requestJSON(t, client, http.MethodPost, server.URL+"/api/v1/models/batch-delete", map[string]any{
 		"model_ids": []string{modelIDs[1], modelIDs[0]},
@@ -104,7 +148,7 @@ func TestBatchDeleteModelsEndpointCreatesOneApproval(t *testing.T) {
 }
 
 func TestBatchDeleteModelsEndpointRejectsInvalidInput(t *testing.T) {
-	_, server, client, csrf := newModelBatchDeleteTestServer(t)
+	_, server, client, csrf, _ := newModelBatchDeleteTestServer(t)
 	for _, test := range []struct {
 		name    string
 		payload map[string]any

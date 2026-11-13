@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"strings"
 	"time"
 
@@ -16,6 +17,56 @@ func (s *Store) CreatePetApproval(ctx context.Context, item domain.PetApproval) 
 		item.ID, item.TaskID, item.Kind, item.Title, item.Summary, item.Risk, item.Reason, item.Payload,
 		item.Status, item.Resolution, item.DecisionReason, timeString(item.CreatedAt), timeString(item.ResolvedAt))
 	return err
+}
+
+// CreatePetApprovalDeduped inserts item unless a pending approval already holds
+// dedupeKey, and returns whichever row won. The partial unique index makes the
+// check and insert one statement, so N concurrent submissions produce exactly
+// one pending approval instead of a list-then-create race.
+func (s *Store) CreatePetApprovalDeduped(ctx context.Context, item domain.PetApproval, dedupeKey string) (domain.PetApproval, error) {
+	dedupeKey = strings.TrimSpace(dedupeKey)
+	if dedupeKey == "" {
+		return domain.PetApproval{}, fmt.Errorf("dedupe key is required")
+	}
+	// The loser of the race reads the winner. Retry only if the winning row was
+	// resolved between the insert and the read, which is rare but possible.
+	for attempt := 0; attempt < 3; attempt++ {
+		result, err := s.db.ExecContext(ctx, `
+			INSERT OR IGNORE INTO pet_approvals(id,task_id,kind,title,summary,risk,reason,payload_json,status,resolution,decision_reason,created_at,resolved_at,dedupe_key)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			item.ID, item.TaskID, item.Kind, item.Title, item.Summary, item.Risk, item.Reason, item.Payload,
+			item.Status, item.Resolution, item.DecisionReason, timeString(item.CreatedAt), timeString(item.ResolvedAt), dedupeKey)
+		if err != nil {
+			return domain.PetApproval{}, err
+		}
+		if affected, err := result.RowsAffected(); err == nil && affected == 1 {
+			return item, nil
+		}
+		existing, err := s.petApprovalByDedupeKey(ctx, dedupeKey)
+		if err == nil {
+			return existing, nil
+		}
+		if err != sql.ErrNoRows {
+			return domain.PetApproval{}, err
+		}
+	}
+	return domain.PetApproval{}, fmt.Errorf("批量删除审批提交冲突，请重试")
+}
+
+func (s *Store) petApprovalByDedupeKey(ctx context.Context, dedupeKey string) (domain.PetApproval, error) {
+	var item domain.PetApproval
+	var created, resolved string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id,task_id,kind,title,summary,risk,reason,payload_json,status,resolution,decision_reason,created_at,resolved_at
+		FROM pet_approvals WHERE dedupe_key=? AND status='pending'
+		ORDER BY created_at DESC LIMIT 1`, dedupeKey).
+		Scan(&item.ID, &item.TaskID, &item.Kind, &item.Title, &item.Summary, &item.Risk, &item.Reason, &item.Payload,
+			&item.Status, &item.Resolution, &item.DecisionReason, &created, &resolved)
+	if err != nil {
+		return domain.PetApproval{}, err
+	}
+	item.CreatedAt, item.ResolvedAt = parseTime(created), parseTime(resolved)
+	return item, nil
 }
 
 func (s *Store) PetApproval(ctx context.Context, id string) (domain.PetApproval, error) {

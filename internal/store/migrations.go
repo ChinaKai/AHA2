@@ -3639,5 +3639,26 @@ func (s *Store) migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(134, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
 		return fmt.Errorf("record schema v134: %w", err)
 	}
+	var hasV135 bool
+	_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=135)`).Scan(&hasV135)
+	if !hasV135 {
+		// A batch delete request dedupes on a stable key so concurrent owner or
+		// pet submissions collapse into one pending approval. The index is
+		// partial: once the row leaves pending, a later request may create a new
+		// approval (the models are usually gone by then, so validation rejects it).
+		if _, err := s.db.ExecContext(ctx,
+			`ALTER TABLE pet_approvals ADD COLUMN dedupe_key TEXT NOT NULL DEFAULT ''`); err != nil &&
+			!strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("apply schema v135: %w", err)
+		}
+		if _, err := s.db.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS idx_pet_approvals_pending_dedupe
+			ON pet_approvals(dedupe_key) WHERE status='pending' AND dedupe_key<>''`); err != nil {
+			return fmt.Errorf("apply schema v135 dedupe index: %w", err)
+		}
+		if _, err := s.db.ExecContext(ctx,
+			`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(135, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`); err != nil {
+			return fmt.Errorf("record schema v135: %w", err)
+		}
+	}
 	return nil
 }
