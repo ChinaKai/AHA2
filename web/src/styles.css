@@ -2501,22 +2501,63 @@ dialog > .dialog-head { margin: 0; padding: 18px 18px 0; }
 /* The pet now opens the visible Pet Task; the old in-page chat panel is retired. */
 #assistant-panel { display: none !important; }
 
-.mcp-form { display: grid; gap: 10px; max-width: 620px; }
-.mcp-form label { display: grid; gap: 6px; }
-.mcp-form button { justify-self: start; }
+/* MCP page: one list at every width. >=1041px is a compact four-column line;
+   <=640px turns the same .mcp-row article into a three-line card. Nothing here
+   reuses .models-table, so the model page responsive contract stays intact. */
+.mcp-page { min-width: 0; }
+.mcp-page .page-head .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.mcp-page .page-head .actions .primary { display: inline-flex; align-items: center; gap: 5px; }
+.mcp-list { display: grid; min-width: 0; }
+.mcp-list-head, .mcp-row { display: grid; grid-template-columns: minmax(0, 1fr) 112px 190px 208px; align-items: center; gap: 0 12px; padding: 0 12px; }
+.mcp-list-head { padding-top: 8px; padding-bottom: 8px; border-bottom: 1px solid var(--color-border-subtle); background: var(--color-surface-muted); color: var(--color-text-muted); font-size: var(--font-size-11); font-weight: 600; }
+.mcp-list-head span { white-space: nowrap; }
+.mcp-list-head span:last-child { text-align: right; }
+.mcp-row { min-height: 48px; border-bottom: 1px solid var(--color-border-subtle); }
+.mcp-row:last-child { border-bottom: 0; }
+.mcp-name { display: flex; align-items: center; gap: 5px; min-width: 0; overflow: hidden; white-space: nowrap; }
+.mcp-name strong { min-width: 0; overflow: hidden; font-size: 13px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.mcp-badges { display: inline-flex; flex: 0 0 auto; gap: 4px; }
+.mcp-name .capability-badge { flex: 0 0 auto; margin-left: 0; }
+.mcp-conn { min-width: 0; }
+.mcp-conn-value { display: block; overflow: hidden; color: var(--color-text-muted); font-size: var(--font-size-12); text-overflow: ellipsis; white-space: nowrap; }
+.mcp-mobile-label { display: none; }
+.mcp-status { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: var(--font-size-12); white-space: nowrap; }
+.mcp-status-dot { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; background: #b6bec7; }
+.mcp-status-dot-ok { background: #1f9d63; }
+.mcp-status-dot-bad { background: var(--color-danger); }
+.mcp-status-dot-warn { background: #d9a021; }
+.mcp-status-dot-off { background: #b6bec7; }
+.mcp-status-text { overflow: hidden; text-overflow: ellipsis; }
+.mcp-tool-count { color: var(--color-text-muted); }
+.mcp-tool-count::before { content: "· "; }
+.mcp-actions { display: flex; align-items: center; justify-content: flex-end; gap: 6px; white-space: nowrap; }
+.mcp-actions button { flex: 0 0 auto; min-height: 34px; padding: 0 10px; font-size: var(--font-size-12); }
+.mcp-actions .mcp-action-danger { color: var(--color-danger); }
+.mcp-actions .mcp-action-danger:hover:not(:disabled) { border-color: var(--color-danger); background: var(--color-danger-soft); }
+.mcp-empty { padding: 22px 12px; color: var(--color-text-muted); font-size: var(--font-size-12); text-align: center; }
 
-.mcp-form + .field-help { margin-top: 12px; }
-
-.mcp-detail-meta { display: grid; grid-template-columns: 70px 1fr; gap: 6px 12px; margin: 12px 0; }
+.mcp-dialog { width: min(560px, calc(100vw - 24px)); }
+#mcp-detail-dialog { width: min(520px, calc(100vw - 24px)); max-height: min(80vh, 680px); margin: auto; }
+#mcp-detail-dialog .dialog-body { max-height: 58vh; overflow: auto; }
+#mcp-detail-dialog .mcp-tool-list { max-height: 220px; overflow: auto; }
+.mcp-confirm-dialog { width: min(430px, calc(100vw - 24px)); }
+.mcp-fields { display: grid; gap: 10px; }
+.mcp-fields[hidden] { display: none !important; }
+#mcp-edit-form label { display: grid; gap: 5px; }
+#mcp-edit-form textarea { min-height: 60px; resize: vertical; }
+#mcp-edit-form .field-help { margin: 0; }
+.mcp-form-error { margin-top: 0; }
+.mcp-enabled-toggle { display: flex !important; align-items: center; gap: 8px; }
+.mcp-enabled-toggle input { width: auto; }
+.mcp-detail-description { margin: 0 0 10px; color: var(--color-text-muted); line-height: 1.55; overflow-wrap: anywhere; }
+.mcp-detail-meta { display: grid; gap: 6px; margin: 12px 0; }
+.mcp-detail-meta > div { display: grid; grid-template-columns: 76px minmax(0, 1fr); align-items: center; gap: 10px; }
 .mcp-detail-meta dt { color: var(--muted); }
-.mcp-detail-meta dd { margin: 0; word-break: break-all; }
+.mcp-detail-meta dd { display: flex; align-items: center; gap: 6px; min-width: 0; margin: 0; word-break: break-all; }
+.mcp-detail-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 .mcp-tool-list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
 .mcp-tool-list li { padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; }
 .mcp-tool-list small { display: block; margin-top: 3px; color: var(--muted); }
-
-#mcp-detail-dialog { width: min(430px, calc(100vw - 32px)); max-height: min(72vh, 620px); margin: auto; }
-#mcp-detail-dialog .dialog-body { max-height: 46vh; overflow: auto; }
-#mcp-detail-dialog .mcp-tool-list { max-height: 220px; overflow: auto; }
 
 /* Pet thinking is a reply-progress signal, not decoration: keep it alive under
    reduced-motion so the owner can still see that the task is working. */
@@ -2873,6 +2914,39 @@ dialog.pet-approval-detail-dialog::backdrop, dialog.pet-approval-filter-dialog::
   #command-palette-input { font-size: 16px; }
   .command-palette-results { padding-bottom: calc(10px + env(safe-area-inset-bottom)); }
   .command-palette-help { display: none; }
+}
+
+/* MCP page: the four-column line needs the full 1041px desktop width. Between
+   641 and 1040px the 228px sidebar is still visible and leaves the fixed
+   112+190+208px columns no room for the name (or pushes actions past the
+   viewport), so the same row DOM folds into a three-line card there too.
+   These blocks stay last so the model-page media queries keep their order. */
+@media (max-width: 1040px) {
+  .mcp-list-head { display: none; }
+  .mcp-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "name name" "conn status" "actions actions"; align-items: center; gap: 4px 10px; min-height: 0; padding: 10px 12px; }
+  .mcp-row .mcp-name { grid-area: name; width: 100%; }
+  .mcp-row .mcp-conn { grid-area: conn; display: flex; align-items: center; gap: 4px; min-width: 0; }
+  .mcp-mobile-label { display: inline; color: var(--color-text-muted); font-size: var(--font-size-11); }
+  .mcp-row .mcp-status { grid-area: status; justify-self: end; }
+  .mcp-row .mcp-actions { grid-area: actions; justify-content: flex-end; }
+  .mcp-actions button { min-height: 36px; }
+}
+
+@media (max-width: 640px) {
+  .mcp-page { padding-bottom: calc(96px + env(safe-area-inset-bottom)); }
+  .mcp-dialog { width: calc(100vw - 20px); }
+  .mcp-detail-meta > div { grid-template-columns: 68px minmax(0, 1fr); }
+}
+
+@media (max-width: 400px) {
+  .mcp-row { padding: 9px 10px; }
+  .mcp-actions button { padding: 0 9px; }
+  .mcp-mobile-label { display: none; }
+}
+
+@media (max-width: 360px) {
+  .mcp-row { gap: 4px 8px; padding: 8px 9px; }
+  .mcp-actions { gap: 4px; }
 }
 
 @media (max-width: 640px) {

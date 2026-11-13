@@ -99,21 +99,21 @@ try {
   await page.evaluate(() => document.querySelector("[data-view=advanced]")?.click());
   await page.waitForSelector('[data-view=mcp]', {timeout: 15000});
   await page.evaluate(() => document.querySelector("[data-view=mcp]")?.click());
-  await page.waitForSelector("#mcp-form", {timeout: 15000});
+  await page.waitForSelector("#mcp-add", {timeout: 15000});
 
-  const channelRow = page.locator("tr", {hasText: "渠道（内置）"});
+  const channelRow = page.locator("article.mcp-row", {hasText: "渠道（内置）"});
   await channelRow.waitFor({timeout: 15000});
   assert.match(await channelRow.textContent(), /内置/);
   assert.match(await channelRow.textContent(), /自动注入/);
-  assert.equal(await channelRow.locator("[data-detail-mcp]").count(), 1);
-  assert.equal(await channelRow.locator("[data-toggle-mcp]").count(), 0);
-  assert.equal(await channelRow.locator("[data-delete-mcp]").count(), 0);
+  assert.equal(await channelRow.locator("[data-mcp-detail]").count(), 1);
+  assert.equal(await channelRow.locator("[data-mcp-edit]").count(), 0);
+  assert.equal(await channelRow.locator("[data-mcp-delete]").count(), 0);
 
-  const userRow = page.locator("tr", {hasText: "Filesystem"});
-  assert.equal(await userRow.locator("[data-toggle-mcp]").count(), 1);
-  assert.equal(await userRow.locator("[data-delete-mcp]").count(), 1);
+  const userRow = page.locator("article.mcp-row", {hasText: "Filesystem"});
+  assert.equal(await userRow.locator("[data-mcp-edit]").count(), 1);
+  assert.equal(await userRow.locator("[data-mcp-delete]").count(), 1);
 
-  await channelRow.locator("[data-detail-mcp]").click();
+  await channelRow.locator("[data-mcp-detail]").click();
   await page.waitForSelector("#mcp-detail-dialog[open]", {timeout: 5000});
   const detail = await page.locator("#mcp-detail-body").textContent();
   assert.match(detail, /由当前 Turn 动态注入/);

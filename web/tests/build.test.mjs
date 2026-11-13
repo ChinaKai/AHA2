@@ -3344,12 +3344,17 @@ test("models page paginates accounts, providers and models", async () => {
 test("built-in channel MCP is read-only and auto-injected in the MCP page", async () => {
   const root = resolve(import.meta.dirname, "..");
   const main = await readFile(resolve(root, "src", "main.ts"), "utf8");
+  const mcpPage = await readFile(resolve(root, "src", "mcp_page.ts"), "utf8");
+  const i18n = await readFile(resolve(root, "src", "i18n.ts"), "utf8");
   const types = await readFile(resolve(root, "src", "types.ts"), "utf8");
   const agents = await readFile(resolve(root, "src", "task_agents.ts"), "utf8");
   assert.match(types, /auto_inject\?: boolean/);
-  assert.match(main, /item\.auto_inject/);
-  assert.match(main, /自动注入/);
-  assert.match(main, /由当前 Turn 动态注入/);
+  assert.match(mcpPage, /server\.auto_inject/);
+  assert.match(mcpPage, /t\("mcp\.badge\.autoInject"\)/);
+  assert.match(mcpPage, /t\("mcp\.detail\.dynamic"\)/);
+  assert.match(i18n, /"mcp\.badge\.autoInject": "自动注入"/);
+  assert.match(i18n, /"mcp\.detail\.dynamic": "由当前 Turn 动态注入"/);
+  assert.match(main, /bindMCPPage/);
   assert.match(main, /state\.mcpServers\.filter\(item => item\.enabled && !item\.builtin\)/);
   assert.match(agents, /!item\.auto_inject/);
 });

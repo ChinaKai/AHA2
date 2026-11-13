@@ -19,6 +19,7 @@ import type {ResourcesTab} from "./resources.js";
 import {bindTaskMailPanel, renderTaskMailPanel} from "./mail_task.js";
 import type {MailResourcesData} from "./mail_resources.js";
 import {bindDesktopPanel, desktopPanelInteracting, refreshDesktopPanel, stopDesktopPanel} from "./desktop_panel.js";
+import {bindMCPPage, renderMCPPage} from "./mcp_page.js";
 import {renderMarkdown} from "./markdown.js";
 import {forgetAllModelHealth as clearAllModelHealth, forgetModelHealth as clearModelHealth, runModelHealthCheck, runModelHealthChecks} from "./model_health.js";
 import type {ModelHealthState} from "./model_health.js";
@@ -5233,7 +5234,7 @@ function render(): void {
       advanced: advancedSettingsView,
       data: dataManagementView,
       other: otherSettingsView,
-      mcp: () => advancedSubview(mcpView()),
+      mcp: mcpView,
       "pet-settings": () => advancedSubview(`<section class="page pet-settings-page"><div id="pet-settings-host"><div class="field-help">正在打开宠物设置…</div></div></section>`),
       "pet-workbench": () => shell(petWorkbenchView()),
     };
@@ -6504,7 +6505,7 @@ function bindTaskToolsAndPanels(): void {
     render,
     setMessage,
   });
-  if (state.view === "mcp") bindMCPPage();
+  if (state.view === "mcp") bindMCPView();
   if (state.view === "advanced") bindLanguageSetting();
   if (state.view === "data") bindDataManagementPage();
   if (state.view === "other") bindOtherSettingsPage();
@@ -7149,109 +7150,18 @@ function loadMCPServers(force = false): Promise<void> {
 }
 
 function mcpView(): string {
-  const rows = state.mcpServers.map(item => `<tr>
-    <td><strong>${escapeHTML(item.name)}${item.builtin ? ' <span class="capability-badge">内置</span>' : ""}${item.auto_inject ? ' <span class="capability-badge">自动注入</span>' : ""}</strong><small>${escapeHTML(item.description || item.transport)}</small></td>
-    <td>${item.auto_inject ? "自动注入" : escapeHTML(item.transport)}${item.url ? `<small>${escapeHTML(item.url)}</small>` : item.command ? `<small>${escapeHTML([item.command, ...(item.args || [])].join(" "))}</small>` : ""}</td>
-    <td>${item.enabled ? "已启用" : "已停用"} · ${escapeHTML(item.health || "unknown")}</td>
-    <td class="row-actions"><button type="button" data-detail-mcp="${escapeHTML(item.id)}">详情</button>${item.builtin ? "" : `<button type="button" data-toggle-mcp="${escapeHTML(item.id)}">${item.enabled ? "停用" : "启用"}</button><button type="button" class="icon-button" data-delete-mcp="${escapeHTML(item.id)}" title="删除">${icon("close")}</button>`}</td>
-  </tr>`).join("");
-  return `${pageHead("MCP", "管理 MCP 能力提供方；在创建 Task 时选择该任务启用哪些 MCP。")}
-    <section class="panel"><div class="panel-head"><strong>MCP Servers</strong><button type="button" id="mcp-refresh">刷新</button></div>
-      <div class="table-wrap"><table class="models-table"><thead><tr><th>名称</th><th>连接</th><th>状态</th><th></th></tr></thead><tbody>${rows || `<tr><td colspan="4">还没有 MCP。内置 MCP 会在首次启动时出现。</td></tr>`}</tbody></table></div>
-    </section>
-    <section class="panel"><div class="panel-head"><strong>添加 HTTP MCP</strong></div>
-      <form id="mcp-form" class="mcp-form">
-        <label>名称<input name="name" required placeholder="例如：filesystem"></label>
-        <label>传输<select name="transport" id="mcp-form-transport"><option value="http">HTTP</option><option value="stdio">stdio 命令</option></select></label>
-        <label id="mcp-form-url-label">URL<input name="url" placeholder="https://example.com/mcp"></label>
-        <label id="mcp-form-command-label" hidden>命令<input name="command" placeholder="npx"></label>
-        <label id="mcp-form-args-label" hidden>参数<input name="args" placeholder="-y @modelcontextprotocol/server-filesystem /path"></label>
-        <label>描述<input name="description" placeholder="可选"></label>
-        <button class="primary" type="submit">添加 MCP</button>
-      </form>
-      <div class="field-help">HTTP 只填 URL；stdio 会由 backend 在本机启动命令，请只安装可信 MCP。内置 MCP（宠物、渠道）不可删除或修改；渠道 MCP 仅在群聊路由的 Turn 自动注入。</div>
-    </section>
-    <dialog id="mcp-detail-dialog"><div class="dialog-head"><h2 id="mcp-detail-name">MCP 详情</h2><button type="button" data-close class="icon-button">${icon("close")}</button></div><div class="dialog-body" id="mcp-detail-body"></div><div class="dialog-actions"><button type="button" id="mcp-detail-test">测试并读取工具</button><button type="button" class="primary" data-close>关闭</button></div></dialog>`;
+  return advancedSubview(renderMCPPage(state.mcpServers));
 }
 
-function bindMCPPage(): void {
-  document.querySelector("#mcp-refresh")?.addEventListener("click", () => { void loadMCPServers(true).then(render); });
-  document.querySelector<HTMLSelectElement>("#mcp-form-transport")?.addEventListener("change", event => {
-    const stdio = (event.currentTarget as HTMLSelectElement).value === "stdio";
-    const urlLabel = document.querySelector<HTMLElement>("#mcp-form-url-label");
-    const commandLabel = document.querySelector<HTMLElement>("#mcp-form-command-label");
-    const argsLabel = document.querySelector<HTMLElement>("#mcp-form-args-label");
-    if (urlLabel) urlLabel.hidden = stdio;
-    if (commandLabel) commandLabel.hidden = !stdio;
-    if (argsLabel) argsLabel.hidden = !stdio;
+function bindMCPView(): void {
+  const mcpPage = document.querySelector<HTMLElement>(".mcp-page");
+  if (!mcpPage) return;
+  bindMCPPage({
+    servers: state.mcpServers,
+    reload: () => loadMCPServers(true),
+    render,
+    setMessage,
   });
-  document.querySelector("#mcp-form")?.addEventListener("submit", event => {
-    event.preventDefault();
-    const form = event.currentTarget as HTMLFormElement;
-    const data = new FormData(form);
-    const transport = String(data.get("transport") || "http");
-    const args = String(data.get("args") || "").trim();
-    void api.saveMCPServer({
-      name: String(data.get("name") || ""), url: String(data.get("url") || ""),
-      command: String(data.get("command") || ""),
-      args: args ? args.split(/\s+/) : [],
-      description: String(data.get("description") || ""), transport, enabled: true,
-    }).then(() => loadMCPServers(true)).then(() => { setMessage("notice", "MCP 已添加"); render(); })
-      .catch((error: unknown) => setMessage("error", error instanceof Error ? error.message : String(error)));
-  });
-  document.querySelectorAll<HTMLButtonElement>("[data-detail-mcp]").forEach(button => button.addEventListener("click", () => {
-    const id = button.dataset.detailMcp || "";
-    void openMCPDetail(id);
-  }));
-  document.querySelectorAll<HTMLButtonElement>("[data-toggle-mcp]").forEach(button => button.addEventListener("click", () => {
-    const item = state.mcpServers.find(server => server.id === button.dataset.toggleMcp);
-    if (!item) return;
-    void api.saveMCPServer({...item, enabled: !item.enabled}).then(() => loadMCPServers(true)).then(() => { setMessage("notice", item.enabled ? "MCP 已停用" : "MCP 已启用"); render(); })
-      .catch((error: unknown) => setMessage("error", error instanceof Error ? error.message : String(error)));
-  }));
-  document.querySelectorAll<HTMLButtonElement>("[data-delete-mcp]").forEach(button => button.addEventListener("click", () => {
-    const id = button.dataset.deleteMcp || "";
-    if (!id || !window.confirm("删除这个 MCP？")) return;
-    void api.deleteMCPServer(id).then(() => loadMCPServers(true)).then(() => { setMessage("notice", "MCP 已删除"); render(); })
-      .catch((error: unknown) => setMessage("error", error instanceof Error ? error.message : String(error)));
-  }));
-}
-
-async function openMCPDetail(id: string): Promise<void> {
-  const dialog = document.querySelector<HTMLDialogElement>("#mcp-detail-dialog");
-  if (!dialog) return;
-  const body = dialog.querySelector<HTMLElement>("#mcp-detail-body");
-  const name = dialog.querySelector<HTMLElement>("#mcp-detail-name");
-  const test = dialog.querySelector<HTMLButtonElement>("#mcp-detail-test");
-  if (!body || !name || !test) return;
-  const renderServer = (server: MCPServer) => {
-    name.textContent = server.name;
-    const disabled = new Set(server.disabled_tools || []);
-    const tools = (server.tools || []).map(tool => server.builtin
-      ? `<li><div class="mcp-tool-row"><span><strong>${escapeHTML(tool.name)}</strong><small>${escapeHTML(tool.description || "")}</small></span></div></li>`
-      : `<li><label class="mcp-tool-row"><input type="checkbox" data-tool-name="${escapeHTML(tool.name)}" ${disabled.has(tool.name) ? "" : "checked"}><span><strong>${escapeHTML(tool.name)}</strong><small>${escapeHTML(tool.description || "")}</small></span></label></li>`).join("");
-    body.innerHTML = `<p>${escapeHTML(server.description || "暂无描述")}</p><dl class="mcp-detail-meta"><dt>传输</dt><dd>${escapeHTML(server.transport)}</dd><dt>地址</dt><dd>${server.auto_inject ? "由当前 Turn 动态注入" : escapeHTML(server.url || "内置")}</dd><dt>状态</dt><dd>${server.enabled ? "已启用" : "已停用"} · ${escapeHTML(server.health || "unknown")}</dd></dl>${server.builtin ? "" : `<div class="mcp-edit-fields"><label>名称<input id="mcp-edit-name" value="${escapeHTML(server.name)}"></label>${server.transport === "stdio" ? "" : `<label>URL<input id="mcp-edit-url" value="${escapeHTML(server.url || "")}"></label>`}<label>描述<input id="mcp-edit-desc" value="${escapeHTML(server.description || "")}"></label>${server.transport === "stdio" ? `<label>命令<input id="mcp-edit-command" value="${escapeHTML(server.command || "")}"></label><label>参数<input id="mcp-edit-args" value="${escapeHTML((server.args || []).join(" "))}"></label>` : ""}<button type="button" id="mcp-edit-save">保存修改</button></div>`}<h3>支持的工具（${(server.tools || []).length}）</h3><ul class="mcp-tool-list">${tools || "<li>暂无工具信息，点“测试并读取工具”尝试读取。</li>"}</ul>${server.last_error ? `<p class="field-help">${escapeHTML(server.last_error)}</p>` : ""}`;
-    body.querySelector<HTMLButtonElement>("#mcp-edit-save")?.addEventListener("click", () => {
-      const name = body.querySelector<HTMLInputElement>("#mcp-edit-name")?.value || "";
-      const url = body.querySelector<HTMLInputElement>("#mcp-edit-url")?.value || "";
-      const description = body.querySelector<HTMLInputElement>("#mcp-edit-desc")?.value || "";
-      const disabledTools = [...body.querySelectorAll<HTMLInputElement>("[data-tool-name]")].filter(input => !input.checked).map(input => input.dataset.toolName || "");
-      const command = body.querySelector<HTMLInputElement>("#mcp-edit-command")?.value || server.command || "";
-      const argsText = body.querySelector<HTMLInputElement>("#mcp-edit-args")?.value || "";
-      void api.saveMCPServer({...server, name, url, description, command, args: argsText.trim() ? argsText.trim().split(/\s+/) : [], disabled_tools: disabledTools}).then(result => { renderServer(result.server); setMessage("notice", "MCP 已保存"); })
-        .catch((error: unknown) => setMessage("error", error instanceof Error ? error.message : String(error)));
-    });
-    test.onclick = () => {
-      test.disabled = true;
-      void api.testMCPServer(server.id).then(result => { renderServer(result.server); setMessage("notice", "MCP 工具已刷新"); })
-        .catch((error: unknown) => setMessage("error", error instanceof Error ? error.message : String(error)))
-        .finally(() => { test.disabled = false; });
-    };
-  };
-  body.innerHTML = `<p>正在读取…</p>`;
-  dialog.showModal();
-  try { const result = await api.mcpServer(id); renderServer(result.server); }
-  catch (error) { body.innerHTML = `<p class="field-help">${escapeHTML(error instanceof Error ? error.message : String(error))}</p>`; }
 }
 
 function petWorkbenchView(): string {
