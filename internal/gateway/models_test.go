@@ -103,6 +103,99 @@ func TestDetectModelsRejectsEmptyBaseURL(t *testing.T) {
 	}
 }
 
+func TestDetectModelsErrorAggregatesUpstreamMessage(t *testing.T) {
+	t.Parallel()
+	const apiKey = "secret-key-should-not-leak"
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		writer.WriteHeader(http.StatusUnauthorized)
+		// Echo the presented credential to prove the aggregate error redacts it.
+		_, _ = fmt.Fprintf(writer, `{"error":{"message":"Invalid Authentication for %q"}}`, request.Header.Get("Authorization"))
+	}))
+	defer server.Close()
+
+	_, err := DetectModels(server.URL+"/v1", apiKey, "auto", 5*time.Second)
+	if err == nil {
+		t.Fatal("expected detection to fail")
+	}
+	text := err.Error()
+	if !strings.Contains(text, "Invalid Authentication") {
+		t.Fatalf("error lost the upstream message: %q", text)
+	}
+	for _, want := range []string{"HTTP 401", "bearer", "x-api-key"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("error %q is missing %q", text, want)
+		}
+	}
+	if strings.Contains(text, apiKey) {
+		t.Fatalf("error leaked the API key: %q", text)
+	}
+	// The unauthenticated attempt must not mask the authenticated failures.
+	if strings.Contains(text, "[none]") {
+		t.Fatalf("error reported the unauthenticated attempt: %q", text)
+	}
+}
+
+func TestDetectModelsToleratesEmptyAndNonJSONErrorBodies(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{name: "empty", body: "", want: "HTTP 401"},
+		{name: "non-json", body: "<html>gateway exploded</html>", want: "gateway exploded"},
+	}
+	for _, testCase := range cases {
+		testCase := testCase
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+				writer.WriteHeader(http.StatusUnauthorized)
+				_, _ = io.WriteString(writer, testCase.body)
+			}))
+			defer server.Close()
+
+			_, err := DetectModels(server.URL+"/v1", "secret", "bearer", 5*time.Second)
+			if err == nil {
+				t.Fatal("expected detection to fail")
+			}
+			if !strings.Contains(err.Error(), testCase.want) {
+				t.Fatalf("error %q is missing %q", err.Error(), testCase.want)
+			}
+			if strings.Contains(err.Error(), "secret") {
+				t.Fatalf("error leaked the API key: %q", err.Error())
+			}
+		})
+	}
+}
+
+func TestModelDetectFailureSummaryDeduplicatesAndRedacts(t *testing.T) {
+	t.Parallel()
+	failures := []modelDetectFailure{
+		{endpoint: "https://gateway.example/v1/models", authStyle: "bearer", authenticated: true, detail: "HTTP 401: nope"},
+		{endpoint: "https://gateway.example/v1/models", authStyle: "bearer", authenticated: true, detail: "HTTP 401: nope"},
+		{endpoint: "https://gateway.example/models", authStyle: "none", authenticated: false, detail: "HTTP 401: nope"},
+	}
+	got := summarizeModelDetectFailures(failures, "secret-key")
+	if strings.Count(got, "https://gateway.example/v1/models") != 1 {
+		t.Fatalf("duplicate attempts were not deduplicated: %q", got)
+	}
+	if strings.Contains(got, "https://gateway.example/models") {
+		t.Fatalf("unauthenticated attempt masked the auth errors: %q", got)
+	}
+
+	redacted := summarizeModelDetectFailures([]modelDetectFailure{
+		{endpoint: "https://user:pass@gateway.example/v1/models?api_key=secret-key", authStyle: "bearer", authenticated: true, detail: "HTTP 401: Bearer secret-key"},
+	}, "secret-key")
+	if strings.Contains(redacted, "secret-key") || strings.Contains(redacted, "user:pass") {
+		t.Fatalf("summary leaked credentials: %q", redacted)
+	}
+	if !strings.Contains(redacted, "[redacted]@") || !strings.Contains(redacted, "api_key=[redacted]") {
+		t.Fatalf("summary did not redact URL userinfo/query: %q", redacted)
+	}
+}
+
 func TestProbeModelCapabilitiesRunsProtocolsConcurrentlyAndReportsTimeout(t *testing.T) {
 	t.Parallel()
 	var active, peak int32

@@ -3163,7 +3163,7 @@ function workspaceDialog(): string {
     <label>Root Path<input name="root_path" id="ws-root-path" placeholder="E:\project 或 /home/user/project" required></label>
     <div class="wsl-fields" style="display:none"><label>WSL Distro<select name="distro" id="ws-distro"></select></label><div class="field-help">Root Path 填 WSL 内的路径，如 /home/user/project</div></div>
     <div class="ssh-fields" style="display:none"><div class="two"><label>SSH Host<input name="ssh_host" placeholder="192.168.1.10"></label><label>SSH User<input name="ssh_user" placeholder="root"></label></div><div class="two"><label>SSH Port<input name="ssh_port" type="number" min="1" max="65535" value="22"></label><label>SSH 登录方式<select name="ssh_auth"><option value="auto">自动（有密码时优先密码）</option><option value="password">密码</option><option value="key">Key (~/.ssh)</option></select></label></div><label>登录密码<input name="ssh_password" type="password" autocomplete="new-password" placeholder="可选"></label><label class="workspace-clear-secret"><input name="clear_ssh_password" type="checkbox">清除已保存密码</label><div class="field-help">密码保存在 Secret Store；编辑时留空会保留原密码。</div></div>
-    <div class="workspace-agent-api-status-block"><strong>Agent API</strong><span class="workspace-agent-api-status">保存后由 AHA 自动选择连接方式。</span><div class="field-help">AHA 按本机直连 → SSH 反向隧道 → WSL localhost 的顺序自动选择；排障用的手动覆盖在“高级设置 → 其他设置”中。</div></div>
+    <div class="workspace-agent-api-status-block"><strong>Agent API</strong><span class="workspace-agent-api-status">保存后由 AHA 自动选择连接方式。</span><div class="field-help">AHA 自动选择：SSH 工作区优先走 SSH stdio（自动准备并复用 helper），失败后回退 SSH 反向隧道，再回退局域网；WSL 工作区使用 localhost。排障用的手动覆盖在“高级设置 → 其他设置”中。</div></div>
     <div class="dialog-actions"><button type="button" data-close>取消</button><button class="primary" value="default">添加 Workspace</button></div>
   </form></dialog>`;
 }
@@ -3563,7 +3563,7 @@ function otherSettingsView(): string {
       <div class="panel-head"><strong>Agent API 高级覆盖</strong><span>仅用于排障</span></div>
       <form id="agent-api-override-form">
         <label>手动覆盖地址<input name="url" type="url" value="${escapeHTML(agentAPI.url)}" placeholder="https://aha.example.com"></label>
-        <div class="field-help">默认不需要填写。AHA 会自动选择：本机直连 → SSH stdio → SSH 反向隧道 → WSL localhost。只有这些路径都不可用时，才在这里指定地址；只接受 <code>https://</code> 或 loopback <code>http://</code>，非 loopback 明文地址不会被接受。</div>
+        <div class="field-help">默认不需要填写。AHA 会自动选择：SSH 工作区优先 SSH stdio，失败后回退 SSH 反向隧道 → 局域网；WSL 工作区使用 localhost。只有这些都不可用时，才在这里指定地址；只接受 <code>https://</code> 或 loopback <code>http://</code>，非 loopback 明文地址不会被接受。</div>
         <div class="field-help">当前自动地址：<code>${escapeHTML(agentAPI.effective_url || "-")}</code>${agentAPI.startup_url ? ` · 启动推导：<code>${escapeHTML(agentAPI.startup_url)}</code>` : ""}</div>
         <div class="field-help">SSH 工作区默认通过会话自带的 stdio 承载 Agent API，不需要 sshd 端口转发；helper 放在工作区的 <code>.aha2-context/share/agent-proxy</code>。这里只保留排障用的手动覆盖。</div>
         ${agentAPIMigrationNote ? `<div class="security-warning active">配置迁移：${escapeHTML(agentAPIMigrationNote)}</div>` : ""}
