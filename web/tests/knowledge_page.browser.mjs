@@ -65,6 +65,10 @@ const model = {
   backend: "codex", wire_model: "stub", wire_api: "responses", default_env_group_id: "env-1",
 };
 const envGroup = {id: "env-1", name: "Stub", provider_id: "provider-1", backend: "codex", revision: 1, environment: {}};
+const knowledge = [
+  {id: "knowledge-index", scope: "project", project_id: "project-1", parent_id: "", is_index: true, type: "navigation", title: "Project index", slug: "index", body: "Project knowledge home.", status: "verified", confidence: 0.9, revision: 1, sort_order: 0, helped_count: 0, stale_count: 0, created_at: now, updated_at: now},
+  {id: "knowledge-doc", scope: "project", project_id: "project-1", parent_id: "knowledge-index", type: "practice", title: "Build guide", slug: "build-guide", body: "Run the build.", status: "verified", confidence: 0.9, revision: 2, sort_order: 1, helped_count: 1, stale_count: 0, created_at: now, updated_at: now},
+];
 const proposals = [
   ...Array.from({length: 2}, (_, index) => ({
     id: `proposal-pending-${index + 1}`,
@@ -72,7 +76,7 @@ const proposals = [
     base_revision: 0,
     proposed: {
       id: `knowledge-pending-${index + 1}`, scope: "project", project_id: "project-1",
-      title: `Pending Proposal ${index + 1}`, body: "pending body",
+      title: `Pending Proposal ${index + 1}`, body: "pending body", confidence: 0.9,
     },
     status: "pending",
     created_at: new Date(Date.now() - index * 60000).toISOString(),
@@ -97,7 +101,7 @@ const proposals = [
 ];
 
 const bootstrap = `
-const data = ${JSON.stringify({projects, skills, workspace, model, envGroup, proposals})};
+const data = ${JSON.stringify({projects, skills, workspace, model, envGroup, proposals, knowledge})};
 const json = (value, status = 200) => new Response(JSON.stringify(value), {status, headers: {"Content-Type": "application/json"}});
 window.fetch = async (input, init = {}) => {
   const url = new URL(typeof input === "string" ? input : input.url, location.origin);
@@ -119,7 +123,8 @@ window.fetch = async (input, init = {}) => {
   if (path === "/api/v1/env-groups") return json({env_groups: [data.envGroup]});
   if (path === "/api/v1/codex-accounts") return json({accounts: []});
   if (path === "/api/v1/mcp-servers") return json({servers: []});
-  if (path === "/api/v1/knowledge") return json({knowledge: [], proposals: [], review_settings: {auto_approve: false}, has_more: true, next_cursor: "next"});
+  if (path === "/api/v1/knowledge") return json({knowledge: data.knowledge, proposals: [], review_settings: {auto_approve: false}, has_more: true, next_cursor: "next"});
+  if (path === "/api/v1/knowledge/knowledge-doc") return json({knowledge: data.knowledge.find(item => item.id === "knowledge-doc")});
   if (path === "/api/v1/knowledge/proposals") {
     const status = url.searchParams.get("status") || "all";
     const pageNo = Math.max(1, Number(url.searchParams.get("page") || 1));
@@ -177,45 +182,54 @@ try {
   page.on("pageerror", error => errors.push(error.message));
   await page.goto(url, {waitUntil: "networkidle"});
   await page.evaluate(() => document.querySelector("[data-view=knowledge]")?.click());
-  await page.waitForSelector("#knowledge-project-search", {timeout: 15000});
-  await page.waitForFunction(() => document.querySelectorAll("[data-knowledge-project]").length === 10, null, {timeout: 15000});
+  await page.waitForSelector("[data-knowledge-scope=project]", {timeout: 15000});
+  await page.waitForSelector("#knowledge-project-select", {timeout: 15000});
+  assert.equal(await page.locator("#knowledge-project-select").inputValue(), "project-1");
+  // Reading is the default mode and keeps review/management out of the reader.
+  assert.equal(await page.locator(".knowledge-page.knowledge-mode-read").count(), 1);
+  assert.equal(await page.locator(".knowledge-read-layout.directory-open").count(), 1);
+  assert.equal(await page.locator("[data-skill-new]").count(), 0);
+  assert.equal(await page.locator("[data-knowledge-proposal-approve]").count(), 0);
+  await page.locator("#knowledge-search").fill("nothing-matches");
+  await page.waitForFunction(() => document.querySelector(".knowledge-directory-search-hint")?.textContent?.includes("nothing-matches"), null, {timeout: 5000});
+  await page.locator("#knowledge-search").fill("");
 
-  // Knowledge update proposals: pending stays complete, "all" is server-paged.
-  await page.waitForSelector("[data-knowledge-update-filter=all]", {timeout: 15000});
-  await page.waitForFunction(() => document.querySelectorAll(".knowledge-proposal-card").length === 2, null, {timeout: 15000});
-  assert.equal(await page.locator(".knowledge-proposal-card").count(), 2);
-  await page.evaluate(() => document.querySelector("[data-knowledge-update-filter=all]")?.click());
-  await page.waitForFunction(() => document.querySelectorAll(".knowledge-proposal-card").length === 10, null, {timeout: 15000});
-  assert.match(await page.locator("[data-knowledge-update-filter=all]").textContent(), /23/);
-  const proposalPager = page.locator(".knowledge-list-footer").filter({has: page.locator("[data-knowledge-proposal-page]")});
-  assert.match(await proposalPager.textContent(), /第 1\/3 页/);
-  await page.evaluate(() => document.querySelector('[data-knowledge-proposal-page="1"]')?.click());
-  await page.waitForFunction(() => {
-    const button = document.querySelector("[data-knowledge-proposal-page]");
-    return button?.closest(".knowledge-list-footer")?.textContent?.includes("第 2/3 页");
-  }, null, {timeout: 15000});
-  assert.equal(await page.locator(".knowledge-proposal-card").count(), 10);
-  await page.evaluate(() => document.querySelector("[data-knowledge-update-filter=pending]")?.click());
-  await page.waitForFunction(() => document.querySelectorAll(".knowledge-proposal-card").length === 2, null, {timeout: 5000});
+  // A rejected unsaved switch must snap the controls back to the module state.
+  // Region restore would otherwise keep replaying the rejected value into every
+  // later render, leaving the select on a project the page never switched to.
+  await page.evaluate(() => document.querySelector('[data-knowledge-open="knowledge-doc"]')?.click());
+  await page.waitForSelector('[data-knowledge-edit="knowledge-doc"]', {timeout: 10000});
+  await page.evaluate(() => document.querySelector('[data-knowledge-edit="knowledge-doc"]')?.click());
+  await page.waitForSelector("#knowledge-inline-editor", {timeout: 10000});
+  await page.locator("#knowledge-inline-editor [name=title]").fill("Build guide changed");
+  await page.waitForSelector(".knowledge-unsaved.visible", {timeout: 5000});
+  await page.evaluate(() => { window.confirm = () => false; });
+  await page.selectOption("#knowledge-project-select", "project-2");
+  assert.equal(await page.locator("#knowledge-project-select").inputValue(), "project-1");
+  await page.selectOption("[data-knowledge-source-filter]", "project-1");
+  assert.equal(await page.locator("[data-knowledge-source-filter]").inputValue(), "all");
+  await page.evaluate(() => { window.confirm = () => true; });
+  await page.evaluate(() => document.querySelector("[data-knowledge-edit-cancel]")?.click());
+  await page.waitForFunction(() => document.querySelector(".knowledge-page")?.classList.contains("knowledge-mode-read"), null, {timeout: 10000});
 
-  // The entry-list load-more belongs to global/project documents only.
-  await page.evaluate(() => document.querySelector("[data-knowledge-area=global]")?.click());
-  await page.waitForSelector('[data-load-more="knowledge"]', {timeout: 5000});
+  // Review shows one pending proposal at a time with source, confidence, and body.
+  await page.evaluate(() => document.querySelector("[data-knowledge-mode=review]")?.click());
+  await page.waitForSelector(".knowledge-review-card", {timeout: 15000});
+  assert.equal(await page.locator(".knowledge-review-card").count(), 1);
+  assert.match(await page.locator(".knowledge-review-card").textContent(), /Pending Proposal 1/);
+  assert.match(await page.locator(".knowledge-review-card").textContent(), /90%/);
+  assert.match(await page.locator(".knowledge-review-card").textContent(), /task-pending-1/);
+  assert.match(await page.locator(".knowledge-review-card").textContent(), /pending body/);
+  assert.equal(await page.locator("[data-knowledge-proposal-approve]").count(), 1);
+  assert.equal(await page.locator("[data-knowledge-proposal-reject]").count(), 1);
+  assert.match(await page.locator(".knowledge-review-nav").textContent(), /第 1 \/ 2 条/);
+  await page.evaluate(() => document.querySelector("[data-knowledge-review-next]")?.click());
+  await page.waitForFunction(() => document.querySelector(".knowledge-review-card")?.textContent?.includes("Pending Proposal 2"), null, {timeout: 5000});
+  assert.match(await page.locator(".knowledge-review-nav").textContent(), /第 2 \/ 2 条/);
+  await page.evaluate(() => document.querySelector("[data-knowledge-mode=read]")?.click());
 
-  // Project search and load-more.
-  assert.equal(await page.locator("[data-knowledge-project]").count(), 10);
-  await page.locator("#knowledge-project-search").fill("CW500");
-  await page.waitForFunction(() => document.querySelectorAll("[data-knowledge-project]").length === 1, null, {timeout: 5000});
-  assert.match(await page.locator("[data-knowledge-project]").first().textContent(), /CW500/);
-  await page.locator("#knowledge-project-search").fill("");
-  await page.waitForFunction(() => document.querySelectorAll("[data-knowledge-project]").length === 10, null, {timeout: 5000});
-  assert.equal(await page.locator("[data-knowledge-project-more]").count(), 1);
-  await page.evaluate(() => document.querySelector("[data-knowledge-project-more]")?.click());
-  await page.waitForFunction(() => document.querySelectorAll("[data-knowledge-project]").length === 13, null, {timeout: 5000});
-  assert.equal(await page.locator("[data-knowledge-project-more]").count(), 0);
-
-  // Skills search/filter and detail.
-  await page.evaluate(() => document.querySelector("[data-knowledge-area=skills]")?.click());
+  // Skills live under management and keep search, scope filter, detail, and paging.
+  await page.evaluate(() => document.querySelector("[data-knowledge-mode=manage][data-knowledge-manage-tab=skills]")?.click());
   await page.waitForSelector("#knowledge-skill-search", {timeout: 15000});
   await page.waitForFunction(() => document.querySelectorAll(".skill-card").length === 6, null, {timeout: 15000});
   assert.equal(await page.locator('[data-load-more="knowledge"]').count(), 0);
@@ -256,6 +270,29 @@ try {
   await page.selectOption("#skill-editor-dialog [name=scope]", "global");
   assert.equal(await skillProjectField.isVisible(), false);
   await page.evaluate(() => document.querySelector("#skill-editor-dialog")?.close());
+
+  // Deep links by document ID select the document instead of dropping to the home page.
+  await page.evaluate(() => { window.location.hash = "#knowledge?doc=knowledge-doc&scope=project&project=project-1"; });
+  await page.waitForFunction(() => document.querySelector(".knowledge-tree-document.active")?.textContent === "Build guide", null, {timeout: 15000});
+  assert.match(await page.locator(".knowledge-document h2").first().textContent(), /Build guide/);
+
+  // Mobile: the directory and the reader are two levels and can return to each other.
+  await page.setViewportSize({width: 360, height: 720});
+  await page.waitForTimeout(200);
+  assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= 360), "knowledge page overflows a 360px viewport");
+  await page.evaluate(() => document.querySelector("[data-knowledge-mode=read]")?.click());
+  await page.evaluate(() => document.querySelector("[data-knowledge-scope=project]")?.click());
+  await page.waitForSelector(".knowledge-read-layout.directory-open", {timeout: 10000});
+  assert.equal(await page.locator(".knowledge-directory").isVisible(), true);
+  assert.equal(await page.locator(".knowledge-reader").isVisible(), false);
+  await page.evaluate(() => document.querySelector('[data-knowledge-open="knowledge-doc"]')?.click());
+  await page.waitForSelector(".knowledge-read-layout.reader-open", {timeout: 10000});
+  assert.equal(await page.locator(".knowledge-reader").isVisible(), true);
+  assert.equal(await page.locator(".knowledge-directory").isVisible(), false);
+  await page.evaluate(() => document.querySelector("[data-knowledge-mobile-back]")?.click());
+  await page.waitForSelector(".knowledge-read-layout.directory-open", {timeout: 10000});
+  assert.equal(await page.locator(".knowledge-directory").isVisible(), true);
+  await page.setViewportSize({width: 1440, height: 900});
 
   // Task creation pre-checks auto-attach skills and allows unchecking them.
   await page.evaluate(() => document.querySelector("[data-view=tasks]")?.click());
