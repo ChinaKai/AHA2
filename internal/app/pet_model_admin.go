@@ -323,6 +323,134 @@ func (s *Service) deleteModelNow(ctx context.Context, modelID string) error {
 	return s.store.DeleteModel(ctx, model.ID)
 }
 
+// petModelDeleteBatchPayload is the approval payload for one batch delete. The
+// names are snapshotted so the approval center can show what was approved even
+// after the models are gone.
+type petModelDeleteBatchPayload struct {
+	ModelIDs   []string `json:"model_ids"`
+	ModelNames []string `json:"model_names"`
+	Count      int      `json:"count"`
+}
+
+// RequestModelBatchDelete is the owner-facing entry point used by the model
+// page. It creates the same approval as the pet tool, so removing several
+// models from the web UI still goes through the owner approval flow.
+func (s *Service) RequestModelBatchDelete(ctx context.Context, modelIDs []string) (domain.PetApproval, error) {
+	return s.requestModelBatchDelete(ctx, modelIDs, "")
+}
+
+func (s *Service) PetRequestDeleteModels(ctx context.Context, modelIDs []string, reason ...string) (domain.PetApproval, error) {
+	reasonText, reasonErr := requiredPetApprovalReason(reason...)
+	if reasonErr != nil {
+		return domain.PetApproval{}, reasonErr
+	}
+	if _, err := s.petManageModels(ctx); err != nil {
+		return domain.PetApproval{}, err
+	}
+	return s.requestModelBatchDelete(ctx, modelIDs, reasonText)
+}
+
+func (s *Service) requestModelBatchDelete(ctx context.Context, modelIDs []string, reason string) (domain.PetApproval, error) {
+	ids := normalizeModelIDs(modelIDs)
+	if len(ids) == 0 {
+		return domain.PetApproval{}, fmt.Errorf("model_ids 不能为空")
+	}
+	if len(ids) > 100 {
+		return domain.PetApproval{}, fmt.Errorf("一次最多删除 100 个模型")
+	}
+	names := make([]string, 0, len(ids))
+	missing := []string{}
+	for _, id := range ids {
+		model, err := s.store.Model(ctx, id)
+		if err != nil {
+			missing = append(missing, id)
+			continue
+		}
+		names = append(names, model.DisplayName)
+	}
+	if len(missing) > 0 {
+		return domain.PetApproval{}, fmt.Errorf("模型不存在或已被删除：%s", strings.Join(missing, "、"))
+	}
+	// Reuse an identical pending request instead of stacking duplicates when the
+	// owner clicks the batch action twice.
+	pending, err := s.store.ListPendingPetApprovalsByKind(ctx, "delete_models")
+	if err != nil {
+		return domain.PetApproval{}, err
+	}
+	for _, approval := range pending {
+		var existing petModelDeleteBatchPayload
+		if json.Unmarshal([]byte(approval.Payload), &existing) == nil && sameModelIDSet(existing.ModelIDs, ids) {
+			return approval, nil
+		}
+	}
+	payload, _ := json.Marshal(petModelDeleteBatchPayload{ModelIDs: ids, ModelNames: names, Count: len(ids)})
+	return s.CreatePetApproval(ctx, PetApprovalInput{
+		Kind:  "delete_models",
+		Title: fmt.Sprintf("批量删除 %d 个模型", len(ids)),
+		Summary: fmt.Sprintf("申请删除 %d 个模型：%s。批准后在同一事务中全部删除；任一模型已不存在时整批不删除。",
+			len(ids), summarizeModelDeleteNames(names, 800)),
+		Reason: reason, Risk: "high", Payload: string(payload),
+	})
+}
+
+func normalizeModelIDs(modelIDs []string) []string {
+	result := make([]string, 0, len(modelIDs))
+	seen := map[string]bool{}
+	for _, raw := range modelIDs {
+		id := strings.TrimSpace(raw)
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		result = append(result, id)
+	}
+	return result
+}
+
+func sameModelIDSet(left, right []string) bool {
+	if len(left) != len(right) || len(left) == 0 {
+		return false
+	}
+	set := make(map[string]bool, len(left))
+	for _, id := range left {
+		set[strings.TrimSpace(id)] = true
+	}
+	for _, id := range right {
+		if !set[strings.TrimSpace(id)] {
+			return false
+		}
+	}
+	return true
+}
+
+// summarizeModelDeleteNames keeps the approval summary readable while still
+// naming every model when the list fits the budget.
+func summarizeModelDeleteNames(names []string, limit int) string {
+	if limit <= 0 {
+		limit = 800
+	}
+	var builder strings.Builder
+	for index, name := range names {
+		part := name
+		if index > 0 {
+			part = "、" + name
+		}
+		if len([]rune(builder.String()+part)) > limit {
+			return builder.String() + fmt.Sprintf(" 等 %d 个", len(names))
+		}
+		builder.WriteString(part)
+	}
+	return builder.String()
+}
+
+func (s *Service) deleteModelsNow(ctx context.Context, modelIDs []string) error {
+	ids := normalizeModelIDs(modelIDs)
+	if len(ids) == 0 {
+		return fmt.Errorf("model_ids 不能为空")
+	}
+	return s.store.DeleteModels(ctx, ids)
+}
+
 type PetEnvGroupInput struct {
 	EnvGroupID  string            `json:"env_group_id"`
 	Reason      string            `json:"reason"`

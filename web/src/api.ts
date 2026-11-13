@@ -564,6 +564,10 @@ class APIClient {
     return this.request(`/api/v1/models/${encodeURIComponent(id)}`, {method: "DELETE"});
   }
 
+  requestBatchDeleteModels(modelIDs: string[]): Promise<{ok: boolean; approval: {id: string; kind: string; title: string; status: string}}> {
+    return this.request("/api/v1/models/batch-delete", {method: "POST", body: JSON.stringify({model_ids: modelIDs})});
+  }
+
   updateModel(id: string, payload: Record<string, unknown>): Promise<{model: Model}> {
     return this.request(`/api/v1/models/${encodeURIComponent(id)}`, {method: "PUT", body: JSON.stringify(payload)});
   }

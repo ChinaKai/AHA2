@@ -51,6 +51,8 @@ const data = {providers, models, accounts};
 const bootstrap = `
 const data = ${JSON.stringify(data)};
 window.__deletedModels = [];
+window.__batchDeleteRequests = [];
+window.__batchDeleteIDs = [];
 const json = (value, status = 200) => new Response(JSON.stringify(value), {status, headers: {"Content-Type": "application/json"}});
 window.fetch = async (input, init = {}) => {
   const url = new URL(typeof input === "string" ? input : input.url, location.origin);
@@ -68,6 +70,11 @@ window.fetch = async (input, init = {}) => {
   if (path === "/api/v1/workspaces") return json({workspaces: []});
   if (path === "/api/v1/providers") return json({providers: data.providers});
   if (path === "/api/v1/models") return json({models: data.models});
+  if (path === "/api/v1/models/batch-delete" && method === "POST") {
+    window.__batchDeleteRequests.push(path);
+    window.__batchDeleteIDs.push(JSON.parse(init.body || "{}").model_ids || []);
+    return json({ok: true, approval: {id: "approval-batch", kind: "delete_models", title: "批量删除 20 个模型", status: "pending"}}, 202);
+  }
   if (path.startsWith("/api/v1/models/") && method === "DELETE") { window.__deletedModels.push(path); return json({ok: true}); }
   if (path === "/api/v1/codex-accounts") return json({accounts: data.accounts});
   if (path === "/api/v1/env-groups") return json({env_groups: []});
@@ -115,12 +122,17 @@ try {
   await page.goto(url, {waitUntil: "networkidle"});
   await page.evaluate(() => document.querySelector("[data-view=models]")?.click());
   await page.waitForSelector("#model-search", {timeout: 15000});
-  await page.waitForFunction(() => document.querySelectorAll(".models-table tbody tr").length === 8, null, {timeout: 15000});
+  await page.waitForFunction(() => document.querySelectorAll(".models-table tbody tr.model-row").length === 20, null, {timeout: 15000});
 
-  assert.equal(await page.locator(".models-table tbody tr").count(), 8);
+  assert.equal(await page.locator(".models-table tbody tr.model-row").count(), 20);
   assert.equal(await page.locator("#model-search").getAttribute("readonly"), "");
   assert.match(await page.locator(".list-footer-models").textContent(), /共 25 个/);
-  assert.match(await page.locator(".list-footer-models").textContent(), /第 1\/4 页/);
+  assert.match(await page.locator(".list-footer-models").textContent(), /第 1\/2 页/);
+  // The visible page is grouped by Provider; every group header names the
+  // provider and carries its model count.
+  assert.ok(await page.locator(".model-group-row").count() > 0);
+  assert.match(await page.locator(".model-group-row").first().textContent(), /Provider 01/);
+  assert.match(await page.locator(".model-group-row").first().textContent(), /共 1 个/);
   assert.equal(await page.locator(".provider-row").count(), 5);
   assert.match(await page.locator(".list-footer-providers").textContent(), /第 1\/4 页/);
   assert.equal(await page.locator(".codex-account-card").count(), 3);
@@ -129,9 +141,9 @@ try {
   // Click through evaluate: the app re-renders on its polling cadence, which
   // makes Playwright's stability wait unreliable for replaced buttons.
   await page.evaluate(() => document.querySelector('[data-page-kind="models"][data-page-delta="1"]')?.click());
-  await page.waitForFunction(() => document.querySelector(".list-footer-models")?.textContent?.includes("第 2/4 页"), null, {timeout: 15000});
-  assert.equal(await page.locator(".models-table tbody tr").count(), 8);
-  assert.match(await page.locator(".models-table tbody tr").first().textContent(), /Model 9/);
+  await page.waitForFunction(() => document.querySelector(".list-footer-models")?.textContent?.includes("第 2/2 页"), null, {timeout: 15000});
+  assert.equal(await page.locator(".models-table tbody tr.model-row").count(), 5);
+  assert.match(await page.locator(".models-table tbody tr.model-row").first().textContent(), /Model 21/);
 
   // A browser autofill can write the saved username into the first text input
   // before the user touches it. That must be ignored, not treated as a filter.
@@ -143,8 +155,8 @@ try {
   });
   await page.waitForTimeout(100);
   assert.equal(await page.locator("#model-search").inputValue(), "");
-  assert.equal(await page.locator(".models-table tbody tr").count(), 8);
-  assert.match(await page.locator(".list-footer-models").textContent(), /第 2\/4 页/);
+  assert.equal(await page.locator(".models-table tbody tr.model-row").count(), 5);
+  assert.match(await page.locator(".list-footer-models").textContent(), /第 2\/2 页/);
 
   // A real edit (focus + keydown + input) applies the filter and resets paging.
   await page.evaluate(() => {
@@ -155,7 +167,7 @@ try {
     input.dispatchEvent(new InputEvent("input", {bubbles: true, inputType: "insertText", data: "claude"}));
   });
   await page.waitForFunction(() => document.querySelector(".list-footer-models")?.textContent?.includes("匹配 5 / 共 25 个"), null, {timeout: 15000});
-  assert.equal(await page.locator(".models-table tbody tr").count(), 5);
+  assert.equal(await page.locator(".models-table tbody tr.model-row").count(), 5);
   assert.doesNotMatch(await page.locator(".list-footer-models").textContent(), /第 \d+\/\d+ 页/);
 
   // Entering the Models view again starts from a clean search and page 1.
@@ -167,17 +179,31 @@ try {
   });
   await page.waitForTimeout(300);
   await page.evaluate(() => document.querySelector("[data-view=models]")?.click());
-  await page.waitForFunction(() => document.querySelector("#model-search")?.value === "" && document.querySelectorAll(".models-table tbody tr").length === 8, null, {timeout: 15000});
-  assert.match(await page.locator(".list-footer-models").textContent(), /第 1\/4 页/);
+  await page.waitForFunction(() => document.querySelector("#model-search")?.value === "" && document.querySelectorAll(".models-table tbody tr.model-row").length === 20, null, {timeout: 15000});
+  assert.match(await page.locator(".list-footer-models").textContent(), /第 1\/2 页/);
+
+  // Select all on the page, then submit one batch delete approval. The row
+  // checkboxes drive a bar that submits a single request with every id.
+  await page.evaluate(() => {
+    const input = document.querySelector("[data-select-models-page]");
+    if (!(input instanceof HTMLInputElement)) return;
+    input.checked = true;
+    input.dispatchEvent(new Event("change", {bubbles: true}));
+  });
+  await page.waitForFunction(() => document.querySelector(".model-batch-bar")?.textContent?.includes("已选 20 个模型"), null, {timeout: 15000});
+  await page.evaluate(() => document.querySelector("[data-batch-delete-models]")?.click());
+  await page.waitForFunction(() => window.__batchDeleteRequests?.length === 1, null, {timeout: 15000});
+  assert.equal(await page.evaluate(() => window.__batchDeleteIDs[0].length), 20);
+  await page.waitForFunction(() => !document.querySelector(".model-batch-bar"), null, {timeout: 15000});
 
   // Row actions are delegated through #model-results so they keep working after
   // a search refresh replaces the table body.
-  await page.evaluate(() => document.querySelector(".models-table tbody tr [data-edit-model]")?.click());
+  await page.evaluate(() => document.querySelector(".models-table tbody tr.model-row [data-edit-model]")?.click());
   await page.waitForSelector("#model-edit-dialog[open]", {timeout: 5000});
   assert.equal(await page.locator("#model-edit-name").inputValue(), "Claude Model 1");
   await page.evaluate(() => document.querySelector("#model-edit-dialog")?.close());
 
-  await page.evaluate(() => document.querySelector(".models-table tbody tr [data-delete-model]")?.click());
+  await page.evaluate(() => document.querySelector(".models-table tbody tr.model-row [data-delete-model]")?.click());
   await page.waitForFunction(() => window.__deletedModels?.length === 1, null, {timeout: 5000});
   assert.equal(await page.evaluate(() => window.__deletedModels[0]), "/api/v1/models/model-1");
 

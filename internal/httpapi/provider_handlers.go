@@ -279,6 +279,36 @@ func (s *Server) deleteModel(writer http.ResponseWriter, request *http.Request) 
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true})
 }
 
+// requestBatchDeleteModels creates one approval for deleting several models.
+// The models are not deleted here: the owner still approves the batch in the
+// approval center, where the snapshotted names and count are shown.
+func (s *Server) requestBatchDeleteModels(writer http.ResponseWriter, request *http.Request) {
+	if s.app == nil {
+		writeError(writer, http.StatusServiceUnavailable, "app_unavailable")
+		return
+	}
+	var payload struct {
+		ModelIDs []string `json:"model_ids"`
+	}
+	if err := decodeJSON(request, &payload); err != nil {
+		writeError(writer, http.StatusBadRequest, "invalid_json")
+		return
+	}
+	if len(payload.ModelIDs) == 0 {
+		writeErrorDetail(writer, http.StatusBadRequest, "model_ids_required", "请至少选择一个模型")
+		return
+	}
+	approval, err := s.app.RequestModelBatchDelete(request.Context(), payload.ModelIDs)
+	if err != nil {
+		writeErrorDetail(writer, http.StatusBadRequest, "batch_delete_models_failed", err.Error())
+		return
+	}
+	s.audit(request, "model.batch_delete_request", "model_batch", approval.ID, map[string]any{
+		"count": len(payload.ModelIDs), "approval_id": approval.ID,
+	})
+	writeJSON(writer, http.StatusAccepted, map[string]any{"ok": true, "approval": approval})
+}
+
 func (s *Server) detectModelsHandler(writer http.ResponseWriter, request *http.Request) {
 	var payload struct {
 		ProviderID string `json:"provider_id"`

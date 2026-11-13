@@ -8,7 +8,7 @@ import {renderConversationList} from "./conversation_ui.js";
 import {bindCodexAccounts, renderCodexAccounts} from "./codex_accounts.js";
 import {bindChannels, exportRetiredChannelInstance, purgeRetiredChannelInstance, renderChannels} from "./channels.js";
 import {icon} from "./icons.js";
-import {createPetApprovalCounter, petPendingApprovalBadge, petApprovalOptions, renderPetApprovalOptionPicker, selectedPetApprovalOption} from "./pet_approvals.js";
+import {createPetApprovalCounter, petPendingApprovalBadge, petApprovalOptions, renderPetApprovalModelBatch, renderPetApprovalOptionPicker, selectedPetApprovalOption} from "./pet_approvals.js";
 import {applyLocale, normalizeLanguagePreference, startUITranslationObserver, t, tr, translateUI} from "./i18n.js";
 import {bindKnowledgeWorkspace, knowledgeEntryListVisible, renderKnowledgeWorkspace} from "./knowledge_workspace.js";
 import {bindHardwarePanel, refreshHardwarePanel, stopHardwarePanel} from "./hardware_panel.js";
@@ -18,8 +18,9 @@ import {bindTaskMailPanel, renderTaskMailPanel} from "./mail_task.js";
 import type {MailResourcesData} from "./mail_resources.js";
 import {bindDesktopPanel, desktopPanelInteracting, refreshDesktopPanel, stopDesktopPanel} from "./desktop_panel.js";
 import {renderMarkdown} from "./markdown.js";
-import {forgetAllModelHealth as clearAllModelHealth, forgetModelHealth as clearModelHealth, runModelHealthCheck} from "./model_health.js";
+import {forgetAllModelHealth as clearAllModelHealth, forgetModelHealth as clearModelHealth, runModelHealthCheck, runModelHealthChecks} from "./model_health.js";
 import type {ModelHealthState} from "./model_health.js";
+import {MODEL_PAGE_SIZE, buildModelPage, modelBatchBarHTML, modelSelectionState, pruneModelSelection, selectModelIDs, toggleModelSelection} from "./model_selection.js";
 import {bindPromptAdmin, loadPromptCatalog, renderPromptAdmin} from "./prompt_admin.js";
 import {bindProxySettings, renderProxySettings} from "./proxy_settings.js";
 import {formatBytes, purgeEnabled, renderDatabasePanel, retentionFormError, skipReasonText} from "./data_retention.js";
@@ -143,6 +144,7 @@ interface State extends ModelHealthState {
   models: Model[];
   modelPage: number;
   modelSearch: string;
+  modelSelected: Set<string>;
   providerPage: number;
   codexAccountPage: number;
   hardwareResources: HardwareResource[];
@@ -325,6 +327,7 @@ const state: State = {
   models: [],
   modelPage: 1,
   modelSearch: "",
+  modelSelected: new Set<string>(),
   modelHealth: {} as Record<string, ModelHealthView>,
   modelHealthSeq: {} as Record<string, number>,
   providerPage: 1,
@@ -1992,12 +1995,13 @@ async function ensureViewData(view: View, force = false): Promise<void> {
     jobs.push(loadResource("models", force, async () => {
       if (force) forgetAllModelHealth();
       state.models = (await api.models()).models || [];
-      // Drop health results for models that no longer exist so a stale badge
-      // cannot outlive its model record.
+      // Drop health results and selections for models that no longer exist so a
+      // stale badge or batch action cannot outlive its model record.
       const ids = new Set(state.models.map(item => item.id));
       for (const id of Object.keys(state.modelHealth)) {
         if (!ids.has(id)) forgetModelHealth(id);
       }
+      pruneModelSelection(state.modelSelected, state.models);
     }));
     jobs.push(loadResource("accounts", force, async () => { state.codexAccounts = (await api.codexAccounts()).accounts || []; }));
   }
@@ -3163,7 +3167,6 @@ function workspaceDialog(): string {
   </form></dialog>`;
 }
 
-const MODEL_PAGE_SIZE = 8;
 const PROVIDER_PAGE_SIZE = 5;
 const CODEX_ACCOUNT_PAGE_SIZE = 3;
 let modelSearchRenderTimer: number | null = null;
@@ -3187,15 +3190,64 @@ function scheduleModelPageRender(): void {
   }, 120);
 }
 
+function selectedModelIDs(): string[] {
+  const live = new Set(state.models.map(item => item.id));
+  return [...state.modelSelected].filter(id => live.has(id));
+}
+
+function currentModelPage(): ReturnType<typeof buildModelPage> {
+  return buildModelPage(filteredModels(), state.modelPage, MODEL_PAGE_SIZE);
+}
+
+function modelRowHTML(item: Model): string {
+  const selected = state.modelSelected.has(item.id);
+  return `<tr class="model-row"><td class="model-select-cell"><input type="checkbox" data-select-model="${escapeHTML(item.id)}" ${selected ? "checked" : ""} aria-label="选择 ${escapeHTML(item.display_name)}"></td><td><strong>${escapeHTML(item.display_name)}${modelSupportsImage(item) ? '<span class="capability-badge">图片</span>' : ''}</strong><small>${escapeHTML(item.wire_model)}</small></td><td><strong>${escapeHTML(item.provider_name || item.provider_id)}</strong><small>${escapeHTML(item.provider_id)}</small></td><td>${escapeHTML(backendProtocolLabel(item))}</td><td>${item.context_window ? Math.round(item.context_window / 1000) + "K" : "-"}${item.max_output_tokens ? `<small>输出 ${Math.round(item.max_output_tokens / 1000)}K</small>` : ""}${item.auto_compact_window ? `<small>自动压缩 ${Math.round(item.auto_compact_window / 1000)}K</small>` : ""}</td><td class="model-health-cell">${renderModelHealthCell(item.id, state.modelHealth[item.id])}</td><td class="row-actions"><button type="button" data-edit-model="${item.id}" class="icon-button" title="编辑模型">${icon("edit")}</button><button type="button" data-delete-model="${item.id}" class="icon-button" title="删除模型">${icon("close")}</button></td></tr>`;
+}
+
+function modelGroupRowsHTML(group: ReturnType<typeof buildModelPage>["groups"][number]): string {
+  const groupIDs = group.items.map(item => item.id);
+  const groupAllSelected = modelSelectionState(state.modelSelected, groupIDs) === "all";
+  const count = group.total > group.items.length
+    ? `共 ${group.total} 个 · 本页 ${group.items.length} 个`
+    : `共 ${group.total} 个`;
+  return `<tr class="model-group-row"><td class="model-select-cell"><input type="checkbox" data-select-model-group="${escapeHTML(group.providerId)}" ${groupAllSelected ? "checked" : ""} aria-label="全选分组 ${escapeHTML(group.providerName)}"></td><td colspan="6"><strong>${escapeHTML(group.providerName)}</strong><span class="model-group-count">${count}</span></td></tr>${group.items.map(modelRowHTML).join("")}`;
+}
+
 function modelResultsHTML(): string {
   const visibleModels = filteredModels();
-  const modelPage = paginateItems(visibleModels, state.modelPage, MODEL_PAGE_SIZE);
-  const models = modelPage.items.map(item => `<tr><td><strong>${escapeHTML(item.display_name)}${modelSupportsImage(item) ? '<span class="capability-badge">图片</span>' : ''}</strong><small>${escapeHTML(item.wire_model)}</small></td><td><strong>${escapeHTML(item.provider_name || item.provider_id)}</strong><small>${escapeHTML(item.provider_id)}</small></td><td>${escapeHTML(backendProtocolLabel(item))}</td><td>${item.context_window ? Math.round(item.context_window / 1000) + "K" : "-"}${item.max_output_tokens ? `<small>输出 ${Math.round(item.max_output_tokens / 1000)}K</small>` : ""}${item.auto_compact_window ? `<small>自动压缩 ${Math.round(item.auto_compact_window / 1000)}K</small>` : ""}</td><td class="model-health-cell">${renderModelHealthCell(item.id, state.modelHealth[item.id])}</td><td class="row-actions"><button type="button" data-edit-model="${item.id}" class="icon-button" title="编辑模型">${icon("edit")}</button><button type="button" data-delete-model="${item.id}" class="icon-button" title="删除模型">${icon("close")}</button></td></tr>`).join("");
+  const modelPage = buildModelPage(visibleModels, state.modelPage, MODEL_PAGE_SIZE);
+  const pageAllSelected = modelSelectionState(state.modelSelected, modelPage.pageIDs) === "all";
+  const groups = modelPage.groups.map(modelGroupRowsHTML).join("");
   const modelEmpty = state.models.length === 0 ? "选择 Provider 后添加模型。" : "没有匹配的模型。";
   const modelTotal = state.modelSearch.trim()
     ? `匹配 ${visibleModels.length} / 共 ${state.models.length} 个`
     : `共 ${state.models.length} 个`;
-  return `<div class="table-wrap"><table class="models-table"><thead><tr><th>模型</th><th>Provider</th><th>Backend</th><th>Context</th><th>可用性</th><th></th></tr></thead><tbody>${models || `<tr><td colspan="6">${modelEmpty}</td></tr>`}</tbody></table></div>${paginationHTML("models", modelPage, modelTotal)}`;
+  return `${modelBatchBarHTML(state.modelSelected.size)}<div class="table-wrap"><table class="models-table"><thead><tr><th class="model-select-cell"><input type="checkbox" data-select-models-page ${pageAllSelected ? "checked" : ""} aria-label="全选本页模型"></th><th>模型</th><th>Provider</th><th>Backend</th><th>Context</th><th>可用性</th><th></th></tr></thead><tbody>${groups || `<tr><td colspan="7">${modelEmpty}</td></tr>`}</tbody></table></div>${paginationHTML("models", modelPage.slice, modelTotal)}`;
+}
+
+function batchCheckSelectedModels(): void {
+  const ids = selectedModelIDs();
+  if (!ids.length) return;
+  // Each model keeps its own row state; a rejection is recorded on that row and
+  // the bounded worker pool continues with the remaining models.
+  void runModelHealthChecks(state, ids, async modelID => (await api.checkModelHealth(modelID)).health, refreshModelResults);
+}
+
+function batchDeleteSelectedModels(button: HTMLElement | null): void {
+  const ids = selectedModelIDs();
+  if (!ids.length) {
+    state.modelSelected.clear();
+    refreshModelResults();
+    return;
+  }
+  if (!window.confirm(`提交批量删除 ${ids.length} 个模型的审批？批准后才会全部删除。`)) return;
+  void runWithFeedback(button, "提交中", async () => {
+    await api.requestBatchDeleteModels(ids);
+    state.modelSelected.clear();
+    setMessage("notice", `已创建 1 张批量删除审批（${ids.length} 个模型）。请在「宠物工作台 → 审批」批准后执行。`);
+    await loadAll();
+    render();
+  });
 }
 
 // Search results must not go through render(): the global render defers while
@@ -3260,6 +3312,7 @@ function deleteModelByID(id: string, button: HTMLElement | null): void {
   void runWithFeedback(button, "删除中", async () => {
     await api.deleteModel(id);
     forgetModelHealth(id);
+    state.modelSelected.delete(id);
     setMessage("notice", "模型已删除");
     await loadAll();
     render();
@@ -4937,6 +4990,7 @@ function bindCommon(): void {
     if (nextView === "models") {
       state.modelSearch = "";
       state.modelPage = 1;
+      state.modelSelected.clear();
       state.providerPage = 1;
       state.codexAccountPage = 1;
     }
@@ -5076,6 +5130,9 @@ function bindCommon(): void {
       }
       state.modelSearch = modelSearch.value;
       state.modelPage = 1;
+      // A filter change hides rows; keeping the old selection would let a
+      // batch action delete models the owner can no longer see.
+      state.modelSelected.clear();
       scheduleModelPageRender();
     });
   }
@@ -5097,13 +5154,49 @@ function bindCommon(): void {
       void checkModelHealthByID(check.dataset.checkModel || "");
       return;
     }
+    const batchCheck = target.closest<HTMLElement>("[data-batch-check-models]");
+    if (batchCheck) {
+      batchCheckSelectedModels();
+      return;
+    }
+    const batchDelete = target.closest<HTMLElement>("[data-batch-delete-models]");
+    if (batchDelete) {
+      batchDeleteSelectedModels(batchDelete);
+      return;
+    }
+    const clearSelection = target.closest<HTMLElement>("[data-clear-model-selection]");
+    if (clearSelection) {
+      state.modelSelected.clear();
+      refreshModelResults();
+      return;
+    }
     const pager = target.closest<HTMLElement>('[data-page-kind="models"]');
     if (!pager) return;
     const delta = Number(pager.dataset.pageDelta || 0);
     if (!delta) return;
-    const pages = paginateItems(filteredModels(), state.modelPage, MODEL_PAGE_SIZE).pages;
+    const pages = currentModelPage().slice.pages;
     state.modelPage = Math.min(pages, Math.max(1, state.modelPage + delta));
     refreshModelResults();
+  });
+  modelResults?.addEventListener("change", event => {
+    if (!(event.target instanceof HTMLInputElement)) return;
+    const input = event.target;
+    if (input.dataset.selectModel) {
+      toggleModelSelection(state.modelSelected, input.dataset.selectModel, input.checked);
+      refreshModelResults();
+      return;
+    }
+    if (input.hasAttribute("data-select-models-page")) {
+      selectModelIDs(state.modelSelected, currentModelPage().pageIDs, input.checked);
+      refreshModelResults();
+      return;
+    }
+    const providerID = input.dataset.selectModelGroup;
+    if (providerID !== undefined) {
+      const group = currentModelPage().groups.find(item => item.providerId === providerID);
+      selectModelIDs(state.modelSelected, group ? group.items.map(item => item.id) : [], input.checked);
+      refreshModelResults();
+    }
   });
   document.querySelectorAll<HTMLElement>("[data-page-kind]").forEach(button => button.addEventListener("click", () => {
     const kind = button.dataset.pageKind || "";
@@ -7175,6 +7268,7 @@ function renderPetApprovals(items: Array<{id: string; title: string; summary: st
       <header><strong>${escapeHTML(item.title)}</strong><span class="pet-approval-status">${kind} · ${escapeHTML(status)} · ${escapeHTML(item.risk)}</span></header>
       ${item.reason ? `<p class="pet-approval-reason"><strong>${t("petApproval.reason")}:</strong> ${escapeHTML(item.reason)}</p>` : ""}
       <p>${escapeHTML(item.summary)}</p>
+      ${renderPetApprovalModelBatch(item, tr)}
       ${executing ? `<p class="field-help">${escapeHTML(t("petWorkbench.approvalExecutingHint"))}</p>` : ""}
       <small>${escapeHTML(item.kind)}${item.decision_reason ? ` · ${t("petApproval.decisionReason")}: ${escapeHTML(item.decision_reason)}` : item.resolution ? ` · ${escapeHTML(item.resolution)}` : ""}</small>
       ${actions}

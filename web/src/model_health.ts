@@ -39,6 +39,29 @@ export async function runModelHealthCheck(
   onChange?.();
 }
 
+// runModelHealthChecks checks several models with a bounded number of
+// concurrent requests. Each model owns its result, so one rejection does not
+// stop the rest of the batch.
+export async function runModelHealthChecks(
+  state: ModelHealthState,
+  modelIDs: string[],
+  fetchHealth: (modelID: string) => Promise<ModelHealthView>,
+  onChange?: () => void,
+  concurrency = 3,
+): Promise<void> {
+  const ids = [...new Set(modelIDs.filter(id => id))];
+  if (!ids.length) return;
+  const limit = Math.max(1, Math.min(Math.floor(concurrency) || 1, ids.length));
+  let next = 0;
+  const worker = async () => {
+    while (next < ids.length) {
+      const modelID = ids[next++];
+      await runModelHealthCheck(state, modelID, fetchHealth, onChange);
+    }
+  };
+  await Promise.all(Array.from({length: limit}, worker));
+}
+
 export function forgetModelHealth(state: ModelHealthState, modelID: string): void {
   delete state.modelHealth[modelID];
   state.modelHealthSeq[modelID] = (state.modelHealthSeq[modelID] || 0) + 1;

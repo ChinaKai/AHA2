@@ -461,6 +461,68 @@ func (s *Store) DeleteModel(ctx context.Context, id string) error {
 	return err
 }
 
+// DeleteModels removes every requested model in one transaction. It validates
+// the whole set first: if any ID is unknown or already deleted, nothing is
+// changed, so an approved batch delete can never partially succeed.
+func (s *Store) DeleteModels(ctx context.Context, ids []string) error {
+	normalized := make([]string, 0, len(ids))
+	seen := map[string]bool{}
+	for _, raw := range ids {
+		id := strings.TrimSpace(raw)
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		normalized = append(normalized, id)
+	}
+	if len(normalized) == 0 {
+		return fmt.Errorf("至少选择一个模型")
+	}
+	now := time.Now().UTC()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	versions := make(map[string]string, len(normalized))
+	missing := []string{}
+	for _, id := range normalized {
+		var updatedAt string
+		err := tx.QueryRowContext(ctx, `SELECT updated_at FROM models WHERE id=? AND deleted_at=''`, id).Scan(&updatedAt)
+		if err == sql.ErrNoRows {
+			missing = append(missing, id)
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		versions[id] = updatedAt
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("模型不存在或已被删除：%s", strings.Join(missing, "、"))
+	}
+	for _, id := range normalized {
+		affected, err := deleteSharedRow(ctx, tx, "model", id, now)
+		if err != nil {
+			return err
+		}
+		if affected != 1 {
+			return fmt.Errorf("模型不存在或已被删除：%s", id)
+		}
+		version := versions[id]
+		if version == "" {
+			version = timeString(now)
+		}
+		if err := insertSyncTombstone(ctx, tx, domain.SyncTombstone{
+			ObjectType: "model", ObjectID: id, Version: version, DeletedAt: now,
+			SyncKey: fmt.Sprintf("tombstone:v1:model:%s:%d", id, now.UnixNano()),
+		}); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 func (s *Store) DeleteEnvGroup(ctx context.Context, id string) error {
 	item, err := s.EnvGroup(ctx, id)
 	if err != nil {

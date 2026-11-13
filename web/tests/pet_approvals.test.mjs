@@ -5,7 +5,7 @@ import {resolve} from "node:path";
 import {pathToFileURL} from "node:url";
 
 const root = resolve(import.meta.dirname, "..");
-const {parsePetApprovalPayload, petApprovalOptions, petApprovalOptionLabel, renderPetApprovalOptionPicker, selectedPetApprovalOption} = await import(
+const {parsePetApprovalPayload, petApprovalOptions, petApprovalOptionLabel, petApprovalModelBatch, renderPetApprovalModelBatch, renderPetApprovalOptionPicker, selectedPetApprovalOption} = await import(
   pathToFileURL(resolve(root, "build", "pet_approvals.js")).href
 );
 
@@ -51,6 +51,24 @@ test("picker escapes values and approve note must be an offered option", () => {
   assert.equal(selectedPetApprovalOption(["replay", "skip"], ""), "");
   assert.equal(selectedPetApprovalOption(["replay", "skip"], "other"), "");
   assert.equal(selectedPetApprovalOption(["replay", "skip"], undefined), "");
+});
+
+test("batch model delete approvals show the snapshotted count and names", () => {
+  const approval = {
+    kind: "delete_models",
+    status: "pending",
+    payload: JSON.stringify({model_ids: ["m-1", "m-2"], model_names: ["Kimi A", "Kimi B"], count: 2}),
+  };
+  assert.deepEqual(petApprovalModelBatch(approval), {count: 2, names: ["Kimi A", "Kimi B"]});
+  const html = renderPetApprovalModelBatch(approval);
+  assert.match(html, /2 个/);
+  assert.match(html, /Kimi A、Kimi B/);
+  assert.equal(petApprovalModelBatch({kind: "delete_model", payload: approval.payload}), null);
+  assert.equal(renderPetApprovalModelBatch({kind: "delete_model", payload: approval.payload}), "");
+  // A malformed payload falls back to whatever is still readable instead of
+  // throwing inside the approval list.
+  assert.deepEqual(petApprovalModelBatch({kind: "delete_models", payload: "{not json"}), null);
+  assert.deepEqual(petApprovalModelBatch({kind: "delete_models", payload: {model_names: ["Only"]}}), {count: 1, names: ["Only"]});
 });
 
 test("heavy approval cards show the executing state and refresh until it finishes", async () => {

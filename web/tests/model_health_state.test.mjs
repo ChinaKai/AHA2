@@ -7,7 +7,7 @@ import {resolve} from "node:path";
 import {pathToFileURL} from "node:url";
 
 const root = resolve(import.meta.dirname, "..");
-const {createModelHealthState, forgetAllModelHealth, forgetModelHealth, runModelHealthCheck} = await import(
+const {createModelHealthState, forgetAllModelHealth, forgetModelHealth, runModelHealthCheck, runModelHealthChecks} = await import(
   pathToFileURL(resolve(root, "build", "model_health.js"))
 );
 
@@ -97,6 +97,30 @@ test("onChange fires for the progress state and the final state", async () => {
     changes.push(state.modelHealth["model-1"]?.status);
   });
   assert.deepEqual(changes, ["checking", "rate_limited"]);
+});
+
+test("batch checks are bounded and one failure does not block the others", async () => {
+  const state = createModelHealthState();
+  const started = [];
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const fetchHealth = async modelID => {
+    started.push(modelID);
+    inFlight += 1;
+    maxInFlight = Math.max(maxInFlight, inFlight);
+    await new Promise(resolve => setTimeout(resolve, 5));
+    inFlight -= 1;
+    if (modelID === "model-b") throw new Error("network down");
+    return {status: "ok"};
+  };
+  await runModelHealthChecks(state, ["model-a", "model-b", "model-c", "model-d", "model-a"], fetchHealth, undefined, 2);
+  assert.ok(maxInFlight <= 2, `ran ${maxInFlight} checks at once`);
+  assert.deepEqual(started.sort(), ["model-a", "model-b", "model-c", "model-d"]);
+  assert.equal(state.modelHealth["model-b"].status, "error");
+  assert.equal(state.modelHealth["model-b"].detail, "network down");
+  for (const id of ["model-a", "model-c", "model-d"]) {
+    assert.equal(state.modelHealth[id].status, "ok", `${id} was blocked by another failure`);
+  }
 });
 
 // The web build only strips types and never runs tsc, so a state property that

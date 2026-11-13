@@ -57,6 +57,7 @@ func petMCPAllowedTools(task domain.Task) []string {
 		"mcp__aha2-pet__aha_create_model",
 		"mcp__aha2-pet__aha_update_model",
 		"mcp__aha2-pet__aha_delete_model",
+		"mcp__aha2-pet__aha_delete_models",
 		"mcp__aha2-pet__aha_create_env_group",
 		"mcp__aha2-pet__aha_update_env_group",
 		"mcp__aha2-pet__aha_delete_env_group",

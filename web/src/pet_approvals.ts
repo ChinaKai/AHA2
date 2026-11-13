@@ -58,6 +58,30 @@ export function selectedPetApprovalOption(options: string[], selected: string | 
   return selected && options.includes(selected) ? selected : "";
 }
 
+// Batch model deletes snapshot the affected names and count in the approval
+// payload so the approval center can show them even after the models are gone.
+export function petApprovalModelBatch(approval: {kind?: string; payload?: unknown}): {count: number; names: string[]} | null {
+  if (approval.kind !== "delete_models") return null;
+  const payload = parsePetApprovalPayload(approval.payload);
+  const names = Array.isArray(payload.model_names)
+    ? payload.model_names.filter((name): name is string => typeof name === "string" && name.trim() !== "")
+    : [];
+  const rawCount = Number(payload.count);
+  const count = Number.isFinite(rawCount) && rawCount > 0 ? Math.trunc(rawCount) : names.length;
+  if (count <= 0 && !names.length) return null;
+  return {count, names};
+}
+
+export function renderPetApprovalModelBatch(
+  approval: {kind?: string; payload?: unknown},
+  translate: (text: string) => string = text => text,
+): string {
+  const batch = petApprovalModelBatch(approval);
+  if (!batch) return "";
+  const names = batch.names.length ? ` · ${batch.names.join("、")}` : "";
+  return `<p class="pet-approval-models"><strong>${escapeHTML(translate("模型"))}:</strong> ${escapeHTML(String(batch.count))} 个${escapeHTML(names)}</p>`;
+}
+
 export function petPendingApprovalBadge(pending: number): string {
   return pending > 0 ? `<span class="task-tool-badge" aria-hidden="true">${pending > 99 ? "99+" : pending}</span>` : "";
 }

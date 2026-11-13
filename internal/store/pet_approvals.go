@@ -89,6 +89,31 @@ func (s *Store) ListPendingPetApprovals(ctx context.Context, limit int) ([]domai
 	return items, rows.Err()
 }
 
+// ListPendingPetApprovalsByKind returns the pending rows of one kind. Batch
+// requests use it to reuse an identical approval instead of creating another.
+func (s *Store) ListPendingPetApprovalsByKind(ctx context.Context, kind string) ([]domain.PetApproval, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id,task_id,kind,title,summary,risk,reason,payload_json,status,resolution,decision_reason,created_at,resolved_at
+		FROM pet_approvals WHERE kind=? AND status='pending'
+		ORDER BY created_at DESC`, kind)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []domain.PetApproval{}
+	for rows.Next() {
+		var item domain.PetApproval
+		var created, resolved string
+		if err := rows.Scan(&item.ID, &item.TaskID, &item.Kind, &item.Title, &item.Summary, &item.Risk, &item.Reason, &item.Payload,
+			&item.Status, &item.Resolution, &item.DecisionReason, &created, &resolved); err != nil {
+			return nil, err
+		}
+		item.CreatedAt, item.ResolvedAt = parseTime(created), parseTime(resolved)
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
 func (s *Store) ListPetApprovalsWithTotal(ctx context.Context, limit int) ([]domain.PetApproval, int, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 30

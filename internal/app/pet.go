@@ -822,7 +822,7 @@ func petToolAllowed(assistant domain.OwnerAssistant, name string) bool {
 	case "aha_send_task_message":
 		return assistant.PetAllowMessageTasks
 	case "aha_create_provider", "aha_update_provider", "aha_delete_provider", "aha_detect_models",
-		"aha_create_model", "aha_update_model", "aha_delete_model",
+		"aha_create_model", "aha_update_model", "aha_delete_model", "aha_delete_models",
 		"aha_create_env_group", "aha_update_env_group", "aha_delete_env_group":
 		return assistant.PetAllowManageModels
 	default:
@@ -1097,6 +1097,15 @@ func ahaPetTools() []gateway.ChatTool {
 				"model_id": map[string]any{"type": "string"},
 				"reason":   map[string]any{"type": "string", "description": "为什么删除；至少 8 个字符"},
 			}, "required": []string{"model_id", "reason"},
+		}},
+		{Name: "aha_delete_models", Description: "提交批量删除模型审批：只生成一张审批，主人批准后在同一个事务里删除全部；任一模型已不存在时整批不删除", Parameters: map[string]any{
+			"type": "object", "properties": map[string]any{
+				"model_ids": map[string]any{
+					"type": "array", "items": map[string]any{"type": "string"}, "minItems": 1, "maxItems": 100,
+					"description": "要删除的模型 ID 列表",
+				},
+				"reason": map[string]any{"type": "string", "description": "为什么删除；至少 8 个字符"},
+			}, "required": []string{"model_ids", "reason"},
 		}},
 		{Name: "aha_create_env_group", Description: "创建 Env Group；environment 值不会在结果中返回", Parameters: map[string]any{
 			"type": "object", "properties": map[string]any{
@@ -2192,6 +2201,20 @@ func (s *Service) PetMCPTool(ctx context.Context, name string, args json.RawMess
 			return "", fmt.Errorf("invalid delete model request")
 		}
 		approval, err := s.PetRequestDeleteModel(ctx, input.ModelID, input.Reason)
+		if err != nil {
+			return "", err
+		}
+		data, _ := json.Marshal(approval)
+		return string(data), nil
+	case "aha_delete_models":
+		var input struct {
+			ModelIDs []string `json:"model_ids"`
+			Reason   string   `json:"reason"`
+		}
+		if err := json.Unmarshal(args, &input); err != nil {
+			return "", fmt.Errorf("invalid delete models request")
+		}
+		approval, err := s.PetRequestDeleteModels(ctx, input.ModelIDs, input.Reason)
 		if err != nil {
 			return "", err
 		}

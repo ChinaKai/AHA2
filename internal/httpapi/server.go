@@ -366,6 +366,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/models", s.withAuth(http.HandlerFunc(s.createModel)))
 	mux.Handle("PUT /api/v1/models/{id}", s.withAuth(http.HandlerFunc(s.updateModel)))
 	mux.Handle("DELETE /api/v1/models/{id}", s.withAuth(http.HandlerFunc(s.deleteModel)))
+	mux.Handle("POST /api/v1/models/batch-delete", s.withAuth(http.HandlerFunc(s.requestBatchDeleteModels)))
 	mux.Handle("POST /api/v1/models/{id}/health-check", s.withAuth(http.HandlerFunc(s.checkModelHealth)))
 	mux.Handle("GET /api/v1/env-groups", s.withAuth(http.HandlerFunc(s.listEnvGroups)))
 	mux.Handle("POST /api/v1/env-groups", s.withAuth(http.HandlerFunc(s.createEnvGroup)))

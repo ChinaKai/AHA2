@@ -461,6 +461,7 @@ type petApprovalPayload struct {
 	KnowledgeID            string   `json:"knowledge_id"`
 	SkillID                string   `json:"skill_id"`
 	ModelID                string   `json:"model_id"`
+	ModelIDs               []string `json:"model_ids"`
 	ProviderID             string   `json:"provider_id"`
 	EnvGroupID             string   `json:"env_group_id"`
 	ResourceID             string   `json:"resource_id"`
@@ -506,6 +507,14 @@ func (s *Service) executePetApproval(ctx context.Context, item domain.PetApprova
 			return err
 		}
 		s.recordPetWork(ctx, "model_deleted", payload.ModelID, "approved")
+		return nil
+	case "delete_models":
+		if err := s.deleteModelsNow(ctx, payload.ModelIDs); err != nil {
+			return err
+		}
+		for _, modelID := range normalizeModelIDs(payload.ModelIDs) {
+			s.recordPetWork(ctx, "model_deleted", modelID, "approved")
+		}
 		return nil
 	case "delete_provider":
 		if err := s.deleteProviderNow(ctx, payload.ProviderID); err != nil {

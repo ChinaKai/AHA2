@@ -1286,6 +1286,14 @@ dialog > .dialog-head { margin: 0; padding: 18px 18px 0; }
 .proto.none { background: #eef1f4; color: var(--muted); }
 .capability-badge { display: inline-block; margin-left: 6px; padding: 1px 5px; border-radius: 999px; background: #e8f7f1; color: #087f5b; font-size: 9px; font-weight: 800; vertical-align: 1px; }
 .model-health-cell { min-width: 128px; }
+.model-select-cell { width: 34px; padding-right: 6px; }
+.models-table input[type="checkbox"] { width: 15px; height: 15px; min-width: 15px; margin: 0; padding: 0; accent-color: var(--color-accent); }
+.model-group-row td { background: var(--color-surface-muted); border-bottom-color: var(--color-border-subtle); }
+.model-group-row strong { display: inline; font-size: var(--font-size-11); }
+.model-group-count { margin-left: 8px; color: var(--color-text-muted); font-size: 10px; font-weight: 500; }
+.model-batch-bar { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 15px; border-bottom: 1px solid var(--color-border); background: var(--color-accent-soft); color: var(--color-accent-ink); font-size: var(--font-size-11); }
+.model-batch-bar > strong { white-space: nowrap; }
+.model-batch-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 .model-health { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .model-health .status { white-space: nowrap; }
 .model-health .health-check-button { padding: 3px 8px; font-size: 10px; }
@@ -1856,7 +1864,9 @@ dialog > .dialog-head { margin: 0; padding: 18px 18px 0; }
   .prompt-template-list { display: flex; max-width: 100%; overflow-x: auto; overflow-y: hidden; border-right: 0; border-bottom: 1px solid var(--line); }
   .prompt-template-item { flex: 0 0 210px; border-right: 1px solid var(--line); }
   .prompt-editor { padding: 12px; }
-  .models-table th:nth-child(2), .models-table td:nth-child(2), .models-table th:nth-child(4), .models-table td:nth-child(4) { display: none; }
+  .models-table th:nth-child(3), .models-table td:nth-child(3), .models-table th:nth-child(5), .models-table td:nth-child(5) { display: none; }
+  .model-batch-bar { flex-wrap: wrap; }
+  .model-batch-actions { justify-content: flex-start; }
   .task-screen { width: 100%; max-width: 100vw; min-width: 0; height: calc(var(--visual-viewport-height) - var(--mobile-bottom-nav-height)); padding: 0; overflow: hidden; }
   .task-head { grid-template-columns: 38px minmax(0,1fr) auto; width: 100%; min-width: 0; height: 60px; padding: 6px 10px; border-right: 0; border-left: 0; border-radius: 0; }
   .task-head .task-title-block { display: grid; align-content: center; gap: 3px; min-width: 0; }

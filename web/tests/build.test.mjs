@@ -202,7 +202,7 @@ test("forms and action groups stay aligned without narrow-window button distorti
   assert.match(styles, /dialog > \.dialog-head \{[^}]*padding:\s*18px 18px 0/);
   assert.match(styles, /@media \(max-width:\s*760px\)[\s\S]*?\.provider-layout \.provider-row \{[^}]*grid-template-columns:\s*minmax\(0,1fr\) auto/);
   assert.match(styles, /@media \(max-width:\s*400px\)[\s\S]*?\.dialog-actions \{[^}]*grid-template-columns:\s*minmax\(0,1fr\)/);
-  assert.match(styles, /\.models-table th:nth-child\(2\)/);
+  assert.match(styles, /\.models-table th:nth-child\(3\)/);
   assert.doesNotMatch(styles, /\n\s*th:nth-child\(2\),\s*td:nth-child\(2\)/);
   assert.match(styles, /@media \(max-width:\s*760px\)[\s\S]*?\.task-draft-banner button \{[^}]*grid-column:\s*1 \/ -1/);
   assert.match(styles, /@media \(max-width:\s*760px\)[\s\S]*?\.remote-readonly-actions \{[^}]*grid-column:\s*1 \/ -1/);
@@ -3320,10 +3320,11 @@ test("models page paginates accounts, providers and models", async () => {
   const root = resolve(import.meta.dirname, "..");
   const main = await readFile(resolve(root, "src", "main.ts"), "utf8");
   const codex = await readFile(resolve(root, "src", "codex_accounts.ts"), "utf8");
-  assert.match(main, /const MODEL_PAGE_SIZE = 8/);
+  const selection = await readFile(resolve(root, "src", "model_selection.ts"), "utf8");
+  assert.match(selection, /export const MODEL_PAGE_SIZE = 20/);
+  assert.match(main, /buildModelPage\(visibleModels, state\.modelPage, MODEL_PAGE_SIZE\)/);
   assert.match(main, /const PROVIDER_PAGE_SIZE = 5/);
   assert.match(main, /const CODEX_ACCOUNT_PAGE_SIZE = 3/);
-  assert.match(main, /paginateItems\(visibleModels, state\.modelPage, MODEL_PAGE_SIZE\)/);
   assert.match(main, /paginateItems\(state\.providers, state\.providerPage, PROVIDER_PAGE_SIZE\)/);
   assert.match(main, /paginateItems\(state\.codexAccounts, state\.codexAccountPage, CODEX_ACCOUNT_PAGE_SIZE\)/);
   assert.match(main, /id="model-search"/);
