@@ -4,12 +4,12 @@ import {readFile} from "node:fs/promises";
 import {resolve} from "node:path";
 import {pathToFileURL} from "node:url";
 
-const dist = resolve(import.meta.dirname, "..", "dist");
-const moduleSource = await readFile(resolve(dist, "data_retention.js"), "utf8");
+const modulesDir = resolve(import.meta.dirname, "..", "build");
+const moduleSource = await readFile(resolve(modulesDir, "data_retention.js"), "utf8");
 // Load i18n through the exact URL the panel imports so both share one locale.
 const i18nSpecifier = moduleSource.match(/from "(\.\/i18n\.js[^"]*)"/)?.[1];
-const i18n = await import(new URL(i18nSpecifier, pathToFileURL(resolve(dist, "data_retention.js"))).href);
-const panel = await import(pathToFileURL(resolve(dist, "data_retention.js")).href);
+const i18n = await import(new URL(i18nSpecifier, pathToFileURL(resolve(modulesDir, "data_retention.js"))).href);
+const panel = await import(pathToFileURL(resolve(modulesDir, "data_retention.js")).href);
 
 function stats(overrides = {}) {
   return {
@@ -174,7 +174,7 @@ test("data page wires the database panel without touching file cleanup", async (
   const main = await readFile(resolve(root, "src", "main.ts"), "utf8");
   const api = await readFile(resolve(root, "src", "api.ts"), "utf8");
   const build = await readFile(resolve(root, "..", "scripts", "build-web.mjs"), "utf8");
-  const app = await readFile(resolve(dist, "app.js"), "utf8");
+  const app = await readFile(resolve(modulesDir, "app.js"), "utf8");
   assert.match(main, /renderDatabasePanel\(state\.dataRetention\)/);
   assert.match(main, /loadDataInventory\(force\), loadDatabaseStats\(force\)/);
   assert.match(main, /api\.purgeHardwareIO\(\{\.\.\.confirmed, confirm: true\}\)/);

@@ -943,6 +943,35 @@ func TestVersionedStaticAssetIsCompressedImmutableAndRevalidated(t *testing.T) {
 	}
 }
 
+func TestHashedStaticAssetIsImmutableWithoutVersionQuery(t *testing.T) {
+	t.Parallel()
+	server := New(Config{Web: fstest.MapFS{
+		"index.html":              &fstest.MapFile{Data: []byte("<html>app</html>")},
+		"app.10a0e87f92c5.js":     &fstest.MapFile{Data: []byte("console.log('app')")},
+		"styles.f5b3ae2b7ccb.css": &fstest.MapFile{Data: []byte("body{margin:0}")},
+		"app.js":                  &fstest.MapFile{Data: []byte("console.log('dev')")},
+	}})
+	for _, name := range []string{"app.10a0e87f92c5.js", "styles.f5b3ae2b7ccb.css"} {
+		request := httptest.NewRequest(http.MethodGet, "http://example.test/"+name, nil)
+		response := httptest.NewRecorder()
+		server.Handler().ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("%s status = %d", name, response.Code)
+		}
+		if cache := response.Header().Get("Cache-Control"); !strings.Contains(cache, "immutable") {
+			t.Fatalf("hashed asset %s cache policy = %q", name, cache)
+		}
+	}
+	// An unhashed name stays revalidated even though other build outputs carry
+	// content hashes.
+	request := httptest.NewRequest(http.MethodGet, "http://example.test/app.js", nil)
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if cache := response.Header().Get("Cache-Control"); cache != "no-cache" {
+		t.Fatalf("unhashed asset cache policy = %q", cache)
+	}
+}
+
 func TestTaskHTTPManualCreateAndStart(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

@@ -85,7 +85,7 @@ const server = createServer(async (request, response) => {
       response.end(bootstrap);
       return;
     }
-    const data = await readFile(resolve(root, "web/dist", name.slice(1)));
+    const data = await readFile(resolve(root, "web/build", name.slice(1)));
     response.setHeader("Content-Type", mime[extname(name)] || "application/octet-stream");
     response.end(data);
   } catch {

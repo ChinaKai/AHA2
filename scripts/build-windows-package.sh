@@ -172,6 +172,7 @@ tar -C "$repo_dir" -cf - \
   --exclude=tmp \
   --exclude=dist \
   --exclude=node_modules \
+  --exclude=web/build \
   . | tar -C "$build_dir" -xf -
 
 built_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -201,6 +202,13 @@ printf 'Go: %s (%s)\n' "$go_bin" "$go_version"
 rm -f -- "$server_exe" "$tray_exe" "$feishu_exe" "$manifest_path"
 
 printf '==> Build Web assets\n'
+# The staged tree omits node_modules, and the Web build needs the esbuild
+# version pinned in web/package-lock.json. Install it on the build host first.
+if ! command -v npm >/dev/null 2>&1; then
+  printf 'npm was not found; install it next to Node and run `npm ci --prefix web`.\n' >&2
+  exit 1
+fi
+(cd "$build_dir/web" && npm ci --no-audit --no-fund)
 "$node_bin" "$build_dir/scripts/build-web.mjs"
 if ((run_web_test)); then
   printf '==> Test Web build\n'

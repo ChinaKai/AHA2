@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {resolve} from "node:path";
 import {pathToFileURL} from "node:url";
 
-const helpers = await import(pathToFileURL(resolve(import.meta.dirname, "..", "dist", "ui_helpers.js")));
+const helpers = await import(pathToFileURL(resolve(import.meta.dirname, "..", "build", "ui_helpers.js")));
 
 test("HTTP 400 is an ambiguous rejection, not a missing protocol endpoint", () => {
   // An unknown model or bad parameter also returns 400. The row must not

@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {readFile} from "node:fs/promises";
-import {renderTaskReviewDecision} from "../dist/task_agents.js";
-import {applyLocale, tr} from "../dist/i18n.js";
+import {renderTaskReviewDecision} from "../build/task_agents.js";
+import {applyLocale, tr} from "../build/i18n.js";
 
 test("historical Tasks have no fabricated review decision", () => {
   assert.equal(renderTaskReviewDecision({}), "");

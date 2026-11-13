@@ -5,18 +5,18 @@ import {readFile} from "node:fs/promises";
 import {resolve} from "node:path";
 import {pathToFileURL} from "node:url";
 
-const dist = resolve(import.meta.dirname, "..", "dist");
-const cards = await import(pathToFileURL(resolve(dist, "mail_cards.js")));
-const resources = await import(pathToFileURL(resolve(dist, "resources.js")));
-const mailResources = await import(pathToFileURL(resolve(dist, "mail_resources.js")));
-const mailTask = await import(pathToFileURL(resolve(dist, "mail_task.js")));
-const mailEditor = await import(pathToFileURL(resolve(dist, "mail_editor.js")));
+const modulesDir = resolve(import.meta.dirname, "..", "build");
+const cards = await import(pathToFileURL(resolve(modulesDir, "mail_cards.js")));
+const resources = await import(pathToFileURL(resolve(modulesDir, "resources.js")));
+const mailResources = await import(pathToFileURL(resolve(modulesDir, "mail_resources.js")));
+const mailTask = await import(pathToFileURL(resolve(modulesDir, "mail_task.js")));
+const mailEditor = await import(pathToFileURL(resolve(modulesDir, "mail_editor.js")));
 // The build rewrites shared imports to "./api.js?v=<build>"; importing the
 // unversioned URL would create a second APIClient singleton. Reuse the exact
 // specifier mail_task.js resolved so the stub lands on the same object.
-const mailTaskSource = await readFile(resolve(dist, "mail_task.js"), "utf8");
+const mailTaskSource = await readFile(resolve(modulesDir, "mail_task.js"), "utf8");
 const apiVersion = mailTaskSource.match(/from "\.\/api\.js(\?v=[^"]+)"/)?.[1] || "";
-const apiModule = await import(pathToFileURL(resolve(dist, "api.js")).href + apiVersion);
+const apiModule = await import(pathToFileURL(resolve(modulesDir, "api.js")).href + apiVersion);
 
 const SANITIZER_TAGS = new Set([
   "h1", "h2", "h3", "h4", "h5", "h6", "p", "br", "hr",
@@ -434,7 +434,7 @@ test("preview envelope uses an inline empty attachment state and compact baselin
   assert.doesNotMatch(html, /<dd><p class="field-help">无附件<\/p><\/dd>/, "no paragraph margin can offset the attachment row");
   assert.match(html, /<dl class="mail-preview-envelope">/);
 
-  const css = await readFile(resolve(dist, "styles.css"), "utf8");
+  const css = await readFile(resolve(modulesDir, "styles.css"), "utf8");
   const envelopeRule = css.match(/\.mail-preview-envelope\s*\{([^}]*)\}/);
   assert.ok(envelopeRule, "envelope rule exists");
   assert.match(envelopeRule[1], /align-items:\s*baseline/);
@@ -527,7 +527,7 @@ test("message detail preview renders the stored HTML snapshot in a sandbox", () 
 });
 
 test("task compose offers no-template direct fields and builds a direct payload", async () => {
-  const source = await readFile(resolve(dist, "mail_task.js"), "utf8");
+  const source = await readFile(resolve(modulesDir, "mail_task.js"), "utf8");
   assert.match(source, /不使用模板/);
   assert.match(source, /mail-compose-direct/);
   assert.match(source, /正文（HTML 主编辑区）/);
@@ -636,7 +636,7 @@ test("template editor derives required variables and has no scope or project fie
 });
 
 test("guide template preview shows the literal sample without variable substitution", async () => {
-  const source = await readFile(resolve(dist, "mail_resources.js"), "utf8");
+  const source = await readFile(resolve(modulesDir, "mail_resources.js"), "utf8");
   assert.match(source, /template\.mode === "guide"/, "guide templates use the literal preview path");
   assert.match(source, /preview_example: true/, "editor preview asks the server for the example");
   assert.match(source, /不做变量替换/, "the preview help states there is no substitution");
@@ -725,7 +725,7 @@ test("pending card opens an approval preview with the snapshot and decision butt
 });
 
 test("binding form grid keeps labels, selects and button on one baseline", async () => {
-  const css = await readFile(resolve(dist, "styles.css"), "utf8");
+  const css = await readFile(resolve(modulesDir, "styles.css"), "utf8");
   const formRule = css.match(/\.task-mail-binding-form\s*\{([^}]*)\}/);
   assert.ok(formRule, "binding form rule exists");
   assert.match(formRule[1], /grid-template-columns:\s*minmax\(0,\s*1fr\)\s+minmax\(0,\s*1fr\)\s+auto/);
@@ -816,7 +816,7 @@ test("template row keeps edit/preview visible and moves archive/purge into more"
 });
 
 test("mobile resource rows use a horizontal compact action bar", async () => {
-  const css = await readFile(resolve(dist, "styles.css"), "utf8");
+  const css = await readFile(resolve(modulesDir, "styles.css"), "utf8");
   assert.doesNotMatch(css, /\.mail-resource-actions[^{]*\{[^}]*flex-direction:\s*column/, "resource actions never stack vertically");
   const mobile = [...css.matchAll(/@media \(max-width: 760px\) \{([\s\S]*?)\n\}/g)]
     .map(match => match[1])
@@ -930,7 +930,7 @@ test("attachment picker selection maps to the submitted payload ids", () => {
   assert.deepEqual(payload.attachment_ids, ["att_1", "att_3"]);
   assert.deepEqual(payload.build_artifact_ids, ["artifact_2"]);
 
-  const composeSource = readFileSync(resolve(dist, "mail_task.js"), "utf8");
+  const composeSource = readFileSync(resolve(modulesDir, "mail_task.js"), "utf8");
   assert.match(composeSource, /data-mail-attachment-chips/, "selected attachments render as chips");
   assert.match(composeSource, /data-mail-attachment-picker/, "one compact picker replaces the two stacked lists");
   assert.match(composeSource, /data-mail-picker-pane="task"/);

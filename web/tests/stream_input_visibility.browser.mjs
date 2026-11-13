@@ -31,8 +31,8 @@ if (!browser) {
   process.exit(0);
 }
 
-const {renderAgentConfigDialog} = await import(pathToFileURL(resolve(root, "dist", "task_agents.js")));
-const css = await readFile(resolve(root, "dist", "styles.css"), "utf8");
+const {renderAgentConfigDialog} = await import(pathToFileURL(resolve(root, "build", "task_agents.js")));
+const css = await readFile(resolve(root, "build", "styles.css"), "utf8");
 const profile = await mkdtemp(resolve(tmpdir(), "aha2-live-inbox-browser-"));
 
 function dialog(backendName) {

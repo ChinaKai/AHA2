@@ -9,6 +9,7 @@ import (
 	"mime"
 	"net/http"
 	"path"
+	"regexp"
 	"strings"
 
 	"github.com/ChinaKai/AHA2/internal/domain"
@@ -40,7 +41,7 @@ func (s *Server) serveWeb(writer http.ResponseWriter, request *http.Request) {
 	}
 	if requestPath == "index.html" {
 		writer.Header().Set("Cache-Control", "no-cache")
-	} else if request.URL.Query().Get("v") != "" {
+	} else if request.URL.Query().Get("v") != "" || hashedAssetName(requestPath) {
 		writer.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 	} else {
 		writer.Header().Set("Cache-Control", "no-cache")
@@ -52,7 +53,11 @@ func (s *Server) serveWeb(writer http.ResponseWriter, request *http.Request) {
 	}
 	if acceptsGzip(request) && compressible {
 		var compressed bytes.Buffer
-		zipper, zipErr := gzip.NewWriterLevel(&compressed, gzip.BestSpeed)
+		// The Web build now serves one large bundle instead of three dozen
+		// small modules. BestSpeed leaves it around 280 KiB on the wire; the
+		// default level costs CPU only on the first, cache-filling request and
+		// keeps the first-screen transfer within budget.
+		zipper, zipErr := gzip.NewWriterLevel(&compressed, gzip.DefaultCompression)
 		if zipErr == nil {
 			_, zipErr = zipper.Write(data)
 			if closeErr := zipper.Close(); zipErr == nil {
@@ -99,6 +104,15 @@ func (s *Server) localizeIndex(data []byte, request *http.Request) []byte {
 	}
 	return bytes.ReplaceAll(data, []byte(`<html lang="zh-CN">`), []byte(`<html lang="en-US">`))
 }
+
+// hashedAssetName reports whether the build stamped a content hash into the
+// file name (app.10a0e87f92c5.js). Those files can never change at the same
+// URL, so the browser may keep them forever without revalidation.
+func hashedAssetName(name string) bool {
+	return hashedAssetSuffix.MatchString(name)
+}
+
+var hashedAssetSuffix = regexp.MustCompile(`^[^/]+[.-][0-9a-f]{12}\.(?:js|css)$`)
 
 func acceptsGzip(request *http.Request) bool {
 	for _, encoding := range strings.Split(request.Header.Get("Accept-Encoding"), ",") {

@@ -5,7 +5,7 @@ import {resolve} from "node:path";
 import {pathToFileURL} from "node:url";
 
 const root = resolve(import.meta.dirname, "..");
-const backends = await import(pathToFileURL(resolve(root, "dist", "backends.js")));
+const backends = await import(pathToFileURL(resolve(root, "build", "backends.js")));
 
 test("supported backend catalog covers claude, codex and dsh", () => {
   const catalog = backends.SUPPORTED_BACKENDS;
@@ -140,7 +140,7 @@ test("runtime wire matrix and backend dropdowns derive from the catalog", async 
   assert.doesNotMatch(main, /<option value="codex">/);
 
   // Runtime pickers use the same full display names instead of a second table.
-  const picker = await import(pathToFileURL(resolve(root, "dist", "runtime_picker.js")));
+  const picker = await import(pathToFileURL(resolve(root, "build", "runtime_picker.js")));
   assert.equal(picker.backendLabel("claude"), "Claude Code");
   assert.equal(picker.backendLabel("codex"), "Codex CLI");
   assert.equal(picker.backendLabel("dsh"), "DeepSeek Harness");
@@ -209,7 +209,7 @@ test("edit protocol dropdown derives from catalog and maps chat to persisted val
 });
 
 test("models page mounts the supported backends panel before the Models panel", async () => {
-  const app = await readFile(resolve(root, "dist", "app.js"), "utf8");
+  const app = await readFile(resolve(root, "build", "app.js"), "utf8");
   assert.match(app, /import \{[^}]*MODEL_WIRE_OPTIONS[^}]*backendsPanelHTML[^}]*\} from "\.\/backends\.js\?v=/);
 
   // Compare positions in the rendered models page markup, not just string

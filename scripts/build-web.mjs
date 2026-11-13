@@ -1,226 +1,166 @@
 import {readFile, mkdir, writeFile, copyFile, rm, cp} from "node:fs/promises";
 import {createHash} from "node:crypto";
+import {createRequire, stripTypeScriptTypes} from "node:module";
 import {resolve} from "node:path";
-import {stripTypeScriptTypes} from "node:module";
 
+// Two outputs come out of one build:
+//   web/build/  readable ES modules, one file per source module. Tests and the
+//               optional browser checks read it, so identifiers and strings
+//               stay intact; it is never embedded into the Go binary.
+//   web/dist/   production assets: one minified ESM bundle, one minified
+//               stylesheet, both with content-hashed names, plus assets and
+//               vendor files. This is what Go embeds and serves.
 const root = resolve(import.meta.dirname, "..");
 const source = resolve(root, "web");
+const modulesOutput = resolve(source, "build");
 const output = resolve(source, "dist");
-await rm(output, {recursive: true, force: true});
-await mkdir(output, {recursive: true});
-await mkdir(resolve(output, "vendor"), {recursive: true});
-await cp(resolve(source, "src", "assets", "assistant"), resolve(output, "assets", "assistant"), {recursive: true});
-await copyFile(resolve(root, "assets", "aha-logo.svg"), resolve(output, "assets", "aha-logo.svg"));
-await copyFile(resolve(root, "assets", "aha2-logo.png"), resolve(output, "assets", "aha2-logo.png"));
-await copyFile(resolve(root, "assets", "aha2.ico"), resolve(output, "favicon.ico"));
 
-for (const name of ["api", "i18n", "icons", "types", "pet_bubble", "pet_navigation", "pet_approvals", "pet_workbench", "runtime_picker", "task_agents", "task_composer", "task_filters", "hardware_terminal", "hardware_panel", "hardware_resources", "mail_cards", "mail_editor", "mail_resources", "mail_task", "resources", "desktop_panel", "task_tools", "markdown", "conversation_ui", "ui_helpers", "model_health", "prompt_admin", "proxy_settings", "data_retention", "sync_settings", "codex_accounts", "knowledge_workspace", "channels", "assistant", "backends", "main"]) {
-  const input = await readFile(resolve(source, "src", `${name}.ts`), "utf8");
-  const transformed = stripTypeScriptTypes(input, {mode: "transform", sourceMap: false});
-  const outputName = name === "main" ? "app" : name;
-  await writeFile(resolve(output, `${outputName}.js`), transformed);
-}
-await copyFile(resolve(source, "index.html"), resolve(output, "index.html"));
-await copyFile(resolve(source, "src", "styles.css"), resolve(output, "styles.css"));
-const mailStyles = await readFile(resolve(source, "src", "mail.css"), "utf8");
-await writeFile(resolve(output, "styles.css"), `${await readFile(resolve(output, "styles.css"), "utf8")}\n${mailStyles}`);
-for (const name of ["xterm.js", "xterm.css", "xterm.LICENSE"]) {
-  await copyFile(resolve(source, "vendor", name), resolve(output, "vendor", name));
+// esbuild is pinned in web/package.json. Resolve it from there so a plain
+// `node scripts/build-web.mjs` works from the repository root.
+let esbuild;
+try {
+  esbuild = createRequire(resolve(source, "package.json"))("esbuild");
+} catch {
+  throw new Error("esbuild is not installed; run `npm ci` in web/ before building");
 }
 
-const versionSource = await Promise.all([
-  readFile(resolve(output, "app.js")),
-  readFile(resolve(output, "api.js")),
-  readFile(resolve(output, "i18n.js")),
-  readFile(resolve(output, "icons.js")),
-  readFile(resolve(output, "pet_bubble.js")),
-  readFile(resolve(output, "pet_navigation.js")),
-  readFile(resolve(output, "pet_approvals.js")),
-  readFile(resolve(output, "pet_workbench.js")),
-  readFile(resolve(output, "runtime_picker.js")),
-  readFile(resolve(output, "task_agents.js")),
-  readFile(resolve(output, "task_composer.js")),
-  readFile(resolve(output, "task_filters.js")),
-  readFile(resolve(output, "hardware_panel.js")),
-  readFile(resolve(output, "hardware_resources.js")),
-  readFile(resolve(output, "mail_cards.js")),
-  readFile(resolve(output, "mail_editor.js")),
-  readFile(resolve(output, "mail_resources.js")),
-  readFile(resolve(output, "mail_task.js")),
-  readFile(resolve(output, "resources.js")),
-  readFile(resolve(output, "desktop_panel.js")),
-  readFile(resolve(output, "hardware_terminal.js")),
-  readFile(resolve(output, "task_tools.js")),
-  readFile(resolve(output, "markdown.js")),
-  readFile(resolve(output, "conversation_ui.js")),
-  readFile(resolve(output, "ui_helpers.js")),
-  readFile(resolve(output, "model_health.js")),
-  readFile(resolve(output, "prompt_admin.js")),
-  readFile(resolve(output, "proxy_settings.js")),
-  readFile(resolve(output, "data_retention.js")),
-  readFile(resolve(output, "sync_settings.js")),
-  readFile(resolve(output, "codex_accounts.js")),
-  readFile(resolve(output, "knowledge_workspace.js")),
-  readFile(resolve(output, "channels.js")),
-  readFile(resolve(output, "assistant.js")),
-  readFile(resolve(output, "backends.js")),
-  readFile(resolve(output, "styles.css")),
-  readFile(resolve(output, "vendor", "xterm.js")),
-  readFile(resolve(output, "vendor", "xterm.css")),
-]);
-const version = createHash("sha256").update(Buffer.concat(versionSource)).digest("hex").slice(0, 12);
-const appPath = resolve(output, "app.js");
-const versionedApp = (await readFile(appPath, "utf8"))
-  .replaceAll('"./api.js"', `"./api.js?v=${version}"`)
-  .replaceAll('"./i18n.js"', `"./i18n.js?v=${version}"`)
-  .replaceAll('"./icons.js"', `"./icons.js?v=${version}"`)
-  .replaceAll('"./pet_approvals.js"', `"./pet_approvals.js?v=${version}"`)
-  .replaceAll('"./pet_workbench.js"', `"./pet_workbench.js?v=${version}"`)
-  .replaceAll('"./runtime_picker.js"', `"./runtime_picker.js?v=${version}"`)
-  .replaceAll('"./task_agents.js"', `"./task_agents.js?v=${version}"`)
-  .replaceAll('"./task_composer.js"', `"./task_composer.js?v=${version}"`)
-  .replaceAll('"./task_filters.js"', `"./task_filters.js?v=${version}"`)
-  .replaceAll('"./hardware_panel.js"', `"./hardware_panel.js?v=${version}"`)
-  .replaceAll('"./desktop_panel.js"', `"./desktop_panel.js?v=${version}"`)
-  .replaceAll('"./hardware_terminal.js"', `"./hardware_terminal.js?v=${version}"`)
-  .replaceAll('"./task_tools.js"', `"./task_tools.js?v=${version}"`)
-  .replaceAll('"./markdown.js"', `"./markdown.js?v=${version}"`)
-  .replaceAll('"./conversation_ui.js"', `"./conversation_ui.js?v=${version}"`)
-  .replaceAll('"./assistant.js"', `"./assistant.js?v=${version}"`)
-  .replaceAll('"./backends.js"', `"./backends.js?v=${version}"`);
-const versionedAppWithHelpers = versionedApp
-  .replaceAll('"./ui_helpers.js"', `"./ui_helpers.js?v=${version}"`)
-  .replaceAll('"./model_health.js"', `"./model_health.js?v=${version}"`)
-  .replaceAll('"./prompt_admin.js"', `"./prompt_admin.js?v=${version}"`)
-  .replaceAll('"./proxy_settings.js"', `"./proxy_settings.js?v=${version}"`)
-  .replaceAll('"./data_retention.js"', `"./data_retention.js?v=${version}"`)
-  .replaceAll('"./sync_settings.js"', `"./sync_settings.js?v=${version}"`)
-  .replaceAll('"./codex_accounts.js"', `"./codex_accounts.js?v=${version}"`)
-  .replaceAll('"./hardware_resources.js"', `"./hardware_resources.js?v=${version}"`);
-const versionedAppWithKnowledge = versionedAppWithHelpers
-  .replaceAll('"./knowledge_workspace.js"', `"./knowledge_workspace.js?v=${version}"`)
-  .replaceAll('"./channels.js"', `"./channels.js?v=${version}"`)
-  .replaceAll('"./resources.js"', `"./resources.js?v=${version}"`)
-  .replaceAll('"./mail_task.js"', `"./mail_task.js?v=${version}"`)
-  .replaceAll('"./mail_cards.js"', `"./mail_cards.js?v=${version}"`)
-  .replaceAll('"./mail_resources.js"', `"./mail_resources.js?v=${version}"`);
-await writeFile(appPath, versionedAppWithKnowledge);
-// runtime_picker is loaded by both app.js and task_agents.js; point its backend
-// labels at the same versioned backends module so there is one catalog instance.
-const runtimePickerPath = resolve(output, "runtime_picker.js");
-const versionedRuntimePicker = (await readFile(runtimePickerPath, "utf8"))
-  .replaceAll('"./backends.js"', `"./backends.js?v=${version}"`);
-await writeFile(runtimePickerPath, versionedRuntimePicker);
-const agentsPath = resolve(output, "task_agents.js");
-const versionedAgents = (await readFile(agentsPath, "utf8"))
-  .replaceAll('"./icons.js"', `"./icons.js?v=${version}"`)
-  .replaceAll('"./runtime_picker.js"', `"./runtime_picker.js?v=${version}"`);
-await writeFile(agentsPath, versionedAgents);
-const conversationPath = resolve(output, "conversation_ui.js");
-const versionedConversation = (await readFile(conversationPath, "utf8"))
-  .replaceAll('"./icons.js"', `"./icons.js?v=${version}"`)
-  .replaceAll('"./mail_cards.js"', `"./mail_cards.js?v=${version}"`)
-  .replaceAll('"./markdown.js"', `"./markdown.js?v=${version}"`)
-  .replaceAll('"./task_agents.js"', `"./task_agents.js?v=${version}"`);
-await writeFile(conversationPath, versionedConversation);
-const taskComposerPath = resolve(output, "task_composer.js");
-const versionedTaskComposer = (await readFile(taskComposerPath, "utf8"))
-  .replaceAll('"./icons.js"', `"./icons.js?v=${version}"`)
-  .replaceAll('"./i18n.js"', `"./i18n.js?v=${version}"`);
-await writeFile(taskComposerPath, versionedTaskComposer);
-const taskToolsPath = resolve(output, "task_tools.js");
-const versionedTaskTools = (await readFile(taskToolsPath, "utf8"))
-  .replaceAll('"./icons.js"', `"./icons.js?v=${version}"`)
-  .replaceAll('"./hardware_panel.js"', `"./hardware_panel.js?v=${version}"`)
-  .replaceAll('"./desktop_panel.js"', `"./desktop_panel.js?v=${version}"`)
-  .replaceAll('"./task_agents.js"', `"./task_agents.js?v=${version}"`);
-await writeFile(taskToolsPath, versionedTaskTools);
-const hardwarePanelPath = resolve(output, "hardware_panel.js");
-const versionedHardwarePanel = (await readFile(hardwarePanelPath, "utf8"))
-  .replaceAll('"./api.js"', `"./api.js?v=${version}"`)
-  .replaceAll('"./icons.js"', `"./icons.js?v=${version}"`)
-  .replaceAll('"./hardware_terminal.js"', `"./hardware_terminal.js?v=${version}"`);
-await writeFile(hardwarePanelPath, versionedHardwarePanel);
-const hardwareResourcesPath = resolve(output, "hardware_resources.js");
-const versionedHardwareResources = (await readFile(hardwareResourcesPath, "utf8"))
-  .replaceAll('"./api.js"', `"./api.js?v=${version}"`)
-  .replaceAll('"./icons.js"', `"./icons.js?v=${version}"`);
-await writeFile(hardwareResourcesPath, versionedHardwareResources);
-const mailCardsPath = resolve(output, "mail_cards.js");
-const versionedMailCards = (await readFile(mailCardsPath, "utf8"))
-  .replaceAll('"./icons.js"', `"./icons.js?v=${version}"`);
-await writeFile(mailCardsPath, versionedMailCards);
-const mailResourcesPath = resolve(output, "mail_resources.js");
-const versionedMailResources = (await readFile(mailResourcesPath, "utf8"))
-  .replaceAll('"./api.js"', `"./api.js?v=${version}"`)
-  .replaceAll('"./icons.js"', `"./icons.js?v=${version}"`)
-  .replaceAll('"./mail_cards.js"', `"./mail_cards.js?v=${version}"`);
-await writeFile(mailResourcesPath, versionedMailResources);
-const mailTaskPath = resolve(output, "mail_task.js");
-const versionedMailTask = (await readFile(mailTaskPath, "utf8"))
-  .replaceAll('"./api.js"', `"./api.js?v=${version}"`)
-  .replaceAll('"./icons.js"', `"./icons.js?v=${version}"`)
-  .replaceAll('"./mail_cards.js"', `"./mail_cards.js?v=${version}"`);
-await writeFile(mailTaskPath, versionedMailTask);
-const resourcesPath = resolve(output, "resources.js");
-const versionedResources = (await readFile(resourcesPath, "utf8"))
-  .replaceAll('"./icons.js"', `"./icons.js?v=${version}"`)
-  .replaceAll('"./hardware_resources.js"', `"./hardware_resources.js?v=${version}"`)
-  .replaceAll('"./mail_resources.js"', `"./mail_resources.js?v=${version}"`);
-await writeFile(resourcesPath, versionedResources);
-const desktopPanelPath = resolve(output, "desktop_panel.js");
-const versionedDesktopPanel = (await readFile(desktopPanelPath, "utf8"))
-  .replaceAll('"./api.js"', `"./api.js?v=${version}"`)
-  .replaceAll('"./icons.js"', `"./icons.js?v=${version}"`);
-await writeFile(desktopPanelPath, versionedDesktopPanel);
-const promptAdminPath = resolve(output, "prompt_admin.js");
-const versionedPromptAdmin = (await readFile(promptAdminPath, "utf8"))
-  .replaceAll('"./api.js"', `"./api.js?v=${version}"`);
-await writeFile(promptAdminPath, versionedPromptAdmin);
-const proxySettingsPath = resolve(output, "proxy_settings.js");
-const versionedProxySettings = (await readFile(proxySettingsPath, "utf8"))
-  .replaceAll('"./api.js"', `"./api.js?v=${version}"`)
-  .replaceAll('"./icons.js"', `"./icons.js?v=${version}"`);
-await writeFile(proxySettingsPath, versionedProxySettings);
-// data_retention.js must import the same versioned i18n.js URL as app.js so
-// both share one locale singleton.
-const dataRetentionPath = resolve(output, "data_retention.js");
-const versionedDataRetention = (await readFile(dataRetentionPath, "utf8"))
-  .replaceAll('"./i18n.js"', `"./i18n.js?v=${version}"`);
-await writeFile(dataRetentionPath, versionedDataRetention);
-const syncSettingsPath = resolve(output, "sync_settings.js");
-const versionedSyncSettings = (await readFile(syncSettingsPath, "utf8"))
-  .replaceAll('"./api.js"', `"./api.js?v=${version}"`)
-  .replaceAll('"./icons.js"', `"./icons.js?v=${version}"`);
-await writeFile(syncSettingsPath, versionedSyncSettings);
-const codexAccountsPath = resolve(output, "codex_accounts.js");
-const versionedCodexAccounts = (await readFile(codexAccountsPath, "utf8"))
-  .replaceAll('"./api.js"', `"./api.js?v=${version}"`)
-  .replaceAll('"./icons.js"', `"./icons.js?v=${version}"`);
-await writeFile(codexAccountsPath, versionedCodexAccounts);
-const knowledgeWorkspacePath = resolve(output, "knowledge_workspace.js");
-const versionedKnowledgeWorkspace = (await readFile(knowledgeWorkspacePath, "utf8"))
-  .replaceAll('"./api.js"', `"./api.js?v=${version}"`)
-  .replaceAll('"./icons.js"', `"./icons.js?v=${version}"`)
-  .replaceAll('"./i18n.js"', `"./i18n.js?v=${version}"`)
-  .replaceAll('"./markdown.js"', `"./markdown.js?v=${version}"`);
-await writeFile(knowledgeWorkspacePath, versionedKnowledgeWorkspace);
-const channelsPath = resolve(output, "channels.js");
-const versionedChannels = (await readFile(channelsPath, "utf8"))
-  .replaceAll('"./api.js"', `"./api.js?v=${version}"`)
-  .replaceAll('"./icons.js"', `"./icons.js?v=${version}"`);
-await writeFile(channelsPath, versionedChannels);
-const assistantPath = resolve(output, "assistant.js");
-const versionedAssistant = (await readFile(assistantPath, "utf8"))
-  .replaceAll('"./api.js"', `"./api.js?v=${version}"`)
-  .replaceAll('"./pet_bubble.js"', `"./pet_bubble.js?v=${version}"`)
-  .replaceAll('"./pet_navigation.js"', `"./pet_navigation.js?v=${version}"`);
-await writeFile(assistantPath, versionedAssistant);
-const indexPath = resolve(output, "index.html");
-const versionedIndex = (await readFile(indexPath, "utf8"))
-  .replace('href="/vendor/xterm.css"', `href="/vendor/xterm.css?v=${version}"`)
-  .replace('href="/styles.css"', `href="/styles.css?v=${version}"`)
-  .replace('src="/vendor/xterm.js"', `src="/vendor/xterm.js?v=${version}"`)
-  .replace('src="/app.js"', `src="/app.js?v=${version}"`);
-await writeFile(indexPath, versionedIndex);
-console.log(`Built ${output}`);
+const moduleNames = ["api", "i18n", "icons", "types", "pet_bubble", "pet_navigation", "pet_approvals", "pet_workbench", "runtime_picker", "task_agents", "task_composer", "task_filters", "hardware_terminal", "hardware_panel", "hardware_resources", "mail_cards", "mail_editor", "mail_resources", "mail_task", "resources", "desktop_panel", "task_tools", "markdown", "conversation_ui", "ui_helpers", "model_health", "prompt_admin", "proxy_settings", "data_retention", "sync_settings", "codex_accounts", "knowledge_workspace", "channels", "assistant", "backends", "main"];
+
+async function writeAssets(target) {
+  await mkdir(resolve(target, "vendor"), {recursive: true});
+  await cp(resolve(source, "src", "assets", "assistant"), resolve(target, "assets", "assistant"), {recursive: true});
+  await copyFile(resolve(root, "assets", "aha-logo.svg"), resolve(target, "assets", "aha-logo.svg"));
+  await copyFile(resolve(root, "assets", "aha2-logo.png"), resolve(target, "assets", "aha2-logo.png"));
+  await copyFile(resolve(root, "assets", "aha2.ico"), resolve(target, "favicon.ico"));
+  for (const name of ["xterm.js", "xterm.css", "xterm.LICENSE"]) {
+    await copyFile(resolve(source, "vendor", name), resolve(target, "vendor", name));
+  }
+}
+
+async function buildModules() {
+  await rm(modulesOutput, {recursive: true, force: true});
+  await mkdir(modulesOutput, {recursive: true});
+  await writeAssets(modulesOutput);
+
+  for (const name of moduleNames) {
+    const input = await readFile(resolve(source, "src", `${name}.ts`), "utf8");
+    const transformed = stripTypeScriptTypes(input, {mode: "transform", sourceMap: false});
+    const outputName = name === "main" ? "app" : name;
+    await writeFile(resolve(modulesOutput, `${outputName}.js`), transformed);
+  }
+  await copyFile(resolve(source, "index.html"), resolve(modulesOutput, "index.html"));
+  const styles = await readFile(resolve(source, "src", "styles.css"), "utf8");
+  const mailStyles = await readFile(resolve(source, "src", "mail.css"), "utf8");
+  await writeFile(resolve(modulesOutput, "styles.css"), `${styles}\n${mailStyles}`);
+
+  // A single build version keeps every shared singleton module on the exact
+  // same URL; two URLs would instantiate api.js twice and drop the CSRF token.
+  const versionSource = await Promise.all([
+    ...moduleNames.map(name => readFile(resolve(modulesOutput, `${name === "main" ? "app" : name}.js`))),
+    readFile(resolve(modulesOutput, "styles.css")),
+    readFile(resolve(modulesOutput, "vendor", "xterm.js")),
+    readFile(resolve(modulesOutput, "vendor", "xterm.css")),
+  ]);
+  const version = createHash("sha256").update(Buffer.concat(versionSource)).digest("hex").slice(0, 12);
+
+  // Rewrite each module's relative imports to the versioned URLs of the modules
+  // that hold shared state. Missing a rewrite here duplicates a singleton at
+  // runtime, so the list stays explicit per file.
+  const importers = {
+    "app.js": ["api", "i18n", "icons", "pet_approvals", "pet_workbench", "runtime_picker", "task_agents", "task_composer", "task_filters", "hardware_panel", "desktop_panel", "hardware_terminal", "task_tools", "markdown", "conversation_ui", "assistant", "backends", "ui_helpers", "model_health", "prompt_admin", "proxy_settings", "data_retention", "sync_settings", "codex_accounts", "hardware_resources", "knowledge_workspace", "channels", "resources", "mail_task", "mail_cards", "mail_resources"],
+    "runtime_picker.js": ["backends"],
+    "task_agents.js": ["icons", "runtime_picker"],
+    "conversation_ui.js": ["icons", "mail_cards", "markdown", "task_agents"],
+    "task_composer.js": ["icons", "i18n"],
+    "task_tools.js": ["icons", "hardware_panel", "desktop_panel", "task_agents"],
+    "hardware_panel.js": ["api", "icons", "hardware_terminal"],
+    "hardware_resources.js": ["api", "icons"],
+    "mail_cards.js": ["icons"],
+    "mail_resources.js": ["api", "icons", "mail_cards"],
+    "mail_task.js": ["api", "icons", "mail_cards"],
+    "resources.js": ["icons", "hardware_resources", "mail_resources"],
+    "desktop_panel.js": ["api", "icons"],
+    "prompt_admin.js": ["api"],
+    "proxy_settings.js": ["api", "icons"],
+    "data_retention.js": ["i18n"],
+    "sync_settings.js": ["api", "icons"],
+    "codex_accounts.js": ["api", "icons"],
+    "knowledge_workspace.js": ["api", "icons", "i18n", "markdown"],
+    "channels.js": ["api", "icons"],
+    "assistant.js": ["api", "pet_bubble", "pet_navigation"],
+  };
+  for (const [file, dependencies] of Object.entries(importers)) {
+    const path = resolve(modulesOutput, file);
+    let text = await readFile(path, "utf8");
+    for (const dependency of dependencies) {
+      text = text.replaceAll(`"./${dependency}.js"`, `"./${dependency}.js?v=${version}"`);
+    }
+    await writeFile(path, text);
+  }
+
+  const indexPath = resolve(modulesOutput, "index.html");
+  const indexText = await readFile(indexPath, "utf8");
+  const versionedIndex = indexText
+    .replace('href="/vendor/xterm.css"', `href="/vendor/xterm.css?v=${version}"`)
+    .replace('href="/styles.css"', `href="/styles.css?v=${version}"`)
+    .replace('src="/vendor/xterm.js"', `src="/vendor/xterm.js?v=${version}"`)
+    .replace('src="/app.js"', `src="/app.js?v=${version}"`);
+  await writeFile(indexPath, versionedIndex);
+  return version;
+}
+
+async function buildProduction() {
+  await rm(output, {recursive: true, force: true});
+  await mkdir(output, {recursive: true});
+  await writeAssets(output);
+
+  const js = await esbuild.build({
+    entryPoints: [resolve(source, "src", "main.ts")],
+    bundle: true,
+    write: false,
+    format: "esm",
+    platform: "browser",
+    target: "esnext",
+    minify: true,
+    charset: "utf8",
+    legalComments: "none",
+    logLevel: "silent",
+  });
+  const jsText = js.outputFiles[0].text;
+  const jsHash = contentHash(jsText);
+  await writeFile(resolve(output, `app.${jsHash}.js`), jsText);
+
+  const styles = await readFile(resolve(source, "src", "styles.css"), "utf8");
+  const mailStyles = await readFile(resolve(source, "src", "mail.css"), "utf8");
+  const css = await esbuild.transform(`${styles}\n${mailStyles}`, {
+    loader: "css",
+    minify: true,
+    charset: "utf8",
+    legalComments: "none",
+  });
+  const cssHash = contentHash(css.code);
+  await writeFile(resolve(output, `styles.${cssHash}.css`), css.code);
+
+  const template = await readFile(resolve(source, "index.html"), "utf8");
+  const appURL = `/app.${jsHash}.js?v=${jsHash}`;
+  // The query keeps the existing contract used by hardware_panel.ts when it
+  // builds /vendor/xterm.js URLs; the filename hash drives immutable caching.
+  const index = template
+    .replace(
+      '<link rel="stylesheet" href="/styles.css">',
+      `<link rel="stylesheet" href="/styles.${cssHash}.css">\n  <link rel="modulepreload" href="${appURL}">`,
+    )
+    .replace('<script type="module" src="/app.js"></script>', `<script type="module" src="${appURL}"></script>`);
+  if (index === template) throw new Error("index.html template no longer matches the build entry points");
+  await writeFile(resolve(output, "index.html"), index);
+  return {jsHash, cssHash};
+}
+
+function contentHash(text) {
+  return createHash("sha256").update(text).digest("hex").slice(0, 12);
+}
+
+await buildModules();
+const production = await buildProduction();
+console.log(`Built ${modulesOutput} and ${output}`);
+console.log(`Production assets: app.${production.jsHash}.js styles.${production.cssHash}.css`);

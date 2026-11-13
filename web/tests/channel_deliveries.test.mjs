@@ -5,7 +5,7 @@ import {resolve} from "node:path";
 import {pathToFileURL} from "node:url";
 
 const root = resolve(import.meta.dirname, "..");
-const channels = await import(pathToFileURL(resolve(root, "dist", "channels.js")).href);
+const channels = await import(pathToFileURL(resolve(root, "build", "channels.js")).href);
 
 const delivery = (id, state, extra = {}) => ({
   id, instance_id: "channel-1", stream_sequence: 1, replay_generation: 0, semantic_payload: {}, state,

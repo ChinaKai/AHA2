@@ -11,7 +11,7 @@ const {chromium} = await import(pathToFileURL(resolve(tools, "node_modules/playw
 const {default: binary} = await import(pathToFileURL(resolve(tools, "node_modules/@sparticuz/chromium/build/index.js")));
 const output = resolve(tools, "screenshots");
 await mkdir(output, {recursive: true});
-const toolsSource = await readFile(resolve(root, "web/dist/task_tools.js"), "utf8");
+const toolsSource = await readFile(resolve(root, "web/build/task_tools.js"), "utf8");
 const desktopImport = toolsSource.match(/from "(\.\/desktop_panel\.js[^"]*)"/)[1].replace("./", "/");
 const csp = (await readFile(resolve(root, "internal/httpapi/server.go"), "utf8")).match(/Set\("Content-Security-Policy", "([^"]+)"\)/)[1];
 const bootstrap = `
@@ -42,7 +42,7 @@ const server = createServer(async (request, response) => {
       const allowed = /^\/[a-z0-9_]+\.(?:js|css)$/.test(name);
       if (!allowed) { response.writeHead(404).end(); return; }
       response.setHeader("Content-Type", name.endsWith(".css") ? "text/css" : "text/javascript");
-      response.end(await readFile(resolve(root, "web/dist", name.slice(1))));
+      response.end(await readFile(resolve(root, "web/build", name.slice(1))));
     }
   } catch { response.writeHead(404).end(); }
 });

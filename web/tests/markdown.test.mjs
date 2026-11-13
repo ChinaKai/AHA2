@@ -7,7 +7,7 @@ import {pathToFileURL} from "node:url";
 const root = resolve(import.meta.dirname, "..");
 
 async function markdownModule() {
-  return import(pathToFileURL(resolve(root, "dist", "markdown.js")));
+  return import(pathToFileURL(resolve(root, "build", "markdown.js")));
 }
 
 test("markdown renders the supported block and inline syntax", async () => {
@@ -78,7 +78,7 @@ test("markdown keeps underscores inside words and still renders real emphasis", 
 });
 
 test("conversation preview and full message share the safe markdown renderer", async () => {
-  const {renderConversationList} = await import(pathToFileURL(resolve(root, "dist", "conversation_ui.js")));
+  const {renderConversationList} = await import(pathToFileURL(resolve(root, "build", "conversation_ui.js")));
   const summary = `# Preview\n\n[unsafe](javascript:alert(1)) ${"long ".repeat(190)}`;
   const html = renderConversationList([{
     id: "message-1",
@@ -100,8 +100,8 @@ test("conversation preview and full message share the safe markdown renderer", a
 });
 
 test("built conversation module uses the versioned markdown module", async () => {
-  const conversation = await readFile(resolve(root, "dist", "conversation_ui.js"), "utf8");
-  const markdown = await readFile(resolve(root, "dist", "markdown.js"), "utf8");
+  const conversation = await readFile(resolve(root, "build", "conversation_ui.js"), "utf8");
+  const markdown = await readFile(resolve(root, "build", "markdown.js"), "utf8");
   assert.match(conversation, /\.\/markdown\.js\?v=[a-f0-9]{12}/);
   assert.match(markdown, /function renderMarkdown/);
 });

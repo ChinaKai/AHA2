@@ -90,7 +90,7 @@ const server = createServer(async (request, response) => {
     } else {
       if (!/^\/[a-z0-9_]+\.(?:js|css)$/.test(name)) { response.writeHead(404).end(); return; }
       response.setHeader("Content-Type", name.endsWith(".css") ? "text/css" : "text/javascript");
-      response.end(await readFile(resolve(root, "web/dist", name.slice(1))));
+      response.end(await readFile(resolve(root, "web/build", name.slice(1))));
     }
   } catch { response.writeHead(404).end(); }
 });

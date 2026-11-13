@@ -1,8 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {readFile} from "node:fs/promises";
+import {readFile, readdir} from "node:fs/promises";
 import {resolve} from "node:path";
 import {pathToFileURL} from "node:url";
+import {gzipSync} from "node:zlib";
 
 test("interactive region state restores scroll, focus, controls, and expansion", async () => {
   const previous = {
@@ -67,7 +68,7 @@ test("interactive region state restores scroll, focus, controls, and expansion",
     globalThis.HTMLElement = FakeElement;
     const oldTree = tree(false);
     globalThis.document = {activeElement: oldTree.search};
-    const helpers = await import(pathToFileURL(resolve(import.meta.dirname, "..", "dist", "ui_helpers.js")));
+    const helpers = await import(pathToFileURL(resolve(import.meta.dirname, "..", "build", "ui_helpers.js")));
     const state = helpers.captureInteractiveRegion(oldTree.root);
     const newTree = tree(true);
     globalThis.document.activeElement = null;
@@ -150,12 +151,12 @@ test("testing the current proxy never persists or switches settings", async () =
     querySelectorAll() { return []; },
   };
   const root = resolve(import.meta.dirname, "..");
-  const proxySource = await readFile(resolve(root, "dist", "proxy_settings.js"), "utf8");
+  const proxySource = await readFile(resolve(root, "build", "proxy_settings.js"), "utf8");
   const apiVersion = proxySource.match(/\.\/api\.js(\?v=[^"]+)?/i)?.[1] || "";
-  const apiURL = pathToFileURL(resolve(root, "dist", "api.js"));
+  const apiURL = pathToFileURL(resolve(root, "build", "api.js"));
   apiURL.search = apiVersion;
   const apiModule = await import(apiURL);
-  const proxyModule = await import(pathToFileURL(resolve(root, "dist", "proxy_settings.js")));
+  const proxyModule = await import(pathToFileURL(resolve(root, "build", "proxy_settings.js")));
   const originalUpdate = apiModule.api.updateProxySettings;
   const originalTest = apiModule.api.testProxySettings;
   let writes = 0;
@@ -226,7 +227,7 @@ test("task channel selector explains and confirms occupied destination takeover"
 
 test("channel lifecycle renders active and retired actions with guarded purge", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const module = await import(pathToFileURL(resolve(root, "dist", "channels.js")));
+  const module = await import(pathToFileURL(resolve(root, "build", "channels.js")));
   const context = {models: [], accounts: [], projects: [], workspaces: [], knowledge: [], libraries: []};
   const instance = {
     id: "channel-1",
@@ -356,7 +357,7 @@ test("channel lifecycle API and archived projects share the purge path", async (
 });
 
 test("channel reauthorization explains menu preservation and separate creation", async () => {
-  const channels = await readFile(resolve(import.meta.dirname, "..", "dist", "channels.js"), "utf8");
+  const channels = await readFile(resolve(import.meta.dirname, "..", "build", "channels.js"), "utf8");
   assert.match(channels, /initial.mode === "existing_app"/);
   assert.match(channels, /不修改已有菜单/);
   assert.match(channels, /AHA 运行时菜单可独立勾选，不修改飞书后台已有菜单/);
@@ -366,7 +367,7 @@ test("channel reauthorization explains menu preservation and separate creation",
 
 test("workspace detection renders inaccessible, Git, and backend probe states", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const {renderWorkspaceDetection} = await import(pathToFileURL(resolve(root, "dist", "ui_helpers.js")));
+  const {renderWorkspaceDetection} = await import(pathToFileURL(resolve(root, "build", "ui_helpers.js")));
   const base = {id: "workspace-1", project_id: "project-1", name: "Workspace", locality: "local", transport: "native", root_path: "C:/repo", ssh_password_configured: false, health: "degraded"};
   const unavailable = renderWorkspaceDetection({
     ...base,
@@ -447,9 +448,9 @@ test("workspace detection renders inaccessible, Git, and backend probe states", 
 
 test("Agent API is automatic and read-only in the normal Workspace UI", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const script = await readFile(resolve(root, "dist", "app.js"), "utf8");
-  const api = await readFile(resolve(root, "dist", "api.js"), "utf8");
-  const styles = await readFile(resolve(root, "dist", "styles.css"), "utf8");
+  const script = await readFile(resolve(root, "build", "app.js"), "utf8");
+  const api = await readFile(resolve(root, "build", "api.js"), "utf8");
+  const styles = await readFile(resolve(root, "build", "styles.css"), "utf8");
 
   // The normal Workspace dialog shows only the selected result. Mode and URL
   // controls are gone because choosing either by hand is what broke remote
@@ -484,8 +485,8 @@ test("Agent API is automatic and read-only in the normal Workspace UI", async ()
 
 test("advanced settings expose independent Backend idle and turn timeouts", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const script = await readFile(resolve(root, "dist", "app.js"), "utf8");
-  const api = await readFile(resolve(root, "dist", "api.js"), "utf8");
+  const script = await readFile(resolve(root, "build", "app.js"), "utf8");
+  const api = await readFile(resolve(root, "build", "api.js"), "utf8");
   for (const marker of ["backend-settings-form", "idle_timeout_minutes", "turn_timeout_hours", "Codex / Claude 统一生效"]) {
     assert.match(script, new RegExp(marker));
   }
@@ -496,7 +497,7 @@ test("advanced settings expose independent Backend idle and turn timeouts", asyn
 
 test("task list refreshes after round terminal events", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const {eventRefreshesTaskList} = await import(pathToFileURL(resolve(root, "dist", "ui_helpers.js")));
+  const {eventRefreshesTaskList} = await import(pathToFileURL(resolve(root, "build", "ui_helpers.js")));
   assert.equal(eventRefreshesTaskList("turn_succeeded"), true);
   assert.equal(eventRefreshesTaskList("round_completed"), true);
   assert.equal(eventRefreshesTaskList("round_failed"), true);
@@ -507,7 +508,7 @@ test("list refresh scheduler coalesces bursts, stays single-flight, and defers o
   // (The test body below is async so resolved refresh promises can settle
   // between simulated timer advances.)
   const root = resolve(import.meta.dirname, "..");
-  const {createListRefreshScheduler} = await import(pathToFileURL(resolve(root, "dist", "ui_helpers.js")));
+  const {createListRefreshScheduler} = await import(pathToFileURL(resolve(root, "build", "ui_helpers.js")));
 
   let now = 0;
   let nextHandle = 1;
@@ -622,7 +623,7 @@ test("list refresh scheduler coalesces bursts, stays single-flight, and defers o
 
 test("continuous SSE stream is bounded by maxWait instead of the debounce gap", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const {createListRefreshScheduler} = await import(pathToFileURL(resolve(root, "dist", "ui_helpers.js")));
+  const {createListRefreshScheduler} = await import(pathToFileURL(resolve(root, "build", "ui_helpers.js")));
   let now = 0;
   let nextHandle = 1;
   const timers = new Map();
@@ -673,7 +674,7 @@ test("continuous SSE stream is bounded by maxWait instead of the debounce gap", 
 
 test("resource loader dedupes cached and in-flight requests before counting them", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const {createResourceLoader} = await import(pathToFileURL(resolve(root, "dist", "ui_helpers.js")));
+  const {createResourceLoader} = await import(pathToFileURL(resolve(root, "build", "ui_helpers.js")));
   const states = {mcp: {loading: false, loaded: false, error: "", updatedAt: 0}};
   let started = 0;
   const load = createResourceLoader({
@@ -713,7 +714,7 @@ test("resource loader dedupes cached and in-flight requests before counting them
 
 test("startup prefetch is idle-only and never chains secondary views", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const script = await readFile(resolve(root, "dist", "app.js"), "utf8");
+  const script = await readFile(resolve(root, "build", "app.js"), "utf8");
   assert.match(script, /function prefetchSecondaryData\(\)/);
   assert.match(script, /function cancelSecondaryPrefetch\(\)/);
   assert.match(script, /requestIdleCallback/);
@@ -735,8 +736,8 @@ test("startup prefetch is idle-only and never chains secondary views", async () 
 
 test("opt-in perf panel reports timing metrics with copy and close controls", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const script = await readFile(resolve(root, "dist", "app.js"), "utf8");
-  const styles = await readFile(resolve(root, "dist", "styles.css"), "utf8");
+  const script = await readFile(resolve(root, "build", "app.js"), "utf8");
+  const styles = await readFile(resolve(root, "build", "styles.css"), "utf8");
   // Only the persistent preference (or `?perf=1`) reaches the panel; a normal
   // visit leaves the sample buffer null and never creates DOM.
   assert.match(script, /if \(perfEnabled\) startPerfPanel\(\)/);
@@ -821,7 +822,7 @@ test("opt-in perf panel reports timing metrics with copy and close controls", as
 
 test("API request timings are opt-in, query-free, and bounded in the perf panel", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const apiModule = await import(pathToFileURL(resolve(root, "dist", "api.js")));
+  const apiModule = await import(pathToFileURL(resolve(root, "build", "api.js")));
   const originalFetch = globalThis.fetch;
   const samples = [];
   const requested = [];
@@ -857,8 +858,8 @@ test("API request timings are opt-in, query-free, and bounded in the perf panel"
     globalThis.fetch = originalFetch;
   }
 
-  const script = await readFile(resolve(root, "dist", "app.js"), "utf8");
-  const styles = await readFile(resolve(root, "dist", "styles.css"), "utf8");
+  const script = await readFile(resolve(root, "build", "app.js"), "utf8");
+  const styles = await readFile(resolve(root, "build", "styles.css"), "utf8");
   // The startup decision (URL shortcut or stored preference) is the only path
   // that constructs the panel and the section without going through the switch.
   assert.match(script, /if \(perfEnabled\) startPerfPanel\(\)/);
@@ -880,7 +881,7 @@ test("API request timings are opt-in, query-free, and bounded in the perf panel"
 
 test("perf panel preference persists across loads and degrades safely", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const perf = await import(pathToFileURL(resolve(root, "dist", "ui_helpers.js")));
+  const perf = await import(pathToFileURL(resolve(root, "build", "ui_helpers.js")));
   const store = new Map();
   const storage = {
     getItem: key => store.has(key) ? store.get(key) : null,
@@ -912,7 +913,7 @@ test("perf panel preference persists across loads and degrades safely", async ()
 
 test("perf panel starts, closes, and toggles through advanced settings", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const script = await readFile(resolve(root, "dist", "app.js"), "utf8");
+  const script = await readFile(resolve(root, "build", "app.js"), "utf8");
   // `?perf=1` writes the preference before the URL cleanup; startup then treats
   // either the shortcut or the stored preference as enabled.
   assert.match(script, /if \(perfRequestedByURL\) writePerfPanelPreference\(true\)/);
@@ -942,7 +943,7 @@ test("perf panel starts, closes, and toggles through advanced settings", async (
 
 test("perf panel English copy matches split text nodes after trimming", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const i18n = await import(pathToFileURL(resolve(root, "dist", "i18n.js")));
+  const i18n = await import(pathToFileURL(resolve(root, "build", "i18n.js")));
   const previous = {
     document: globalThis.document,
     NodeFilter: globalThis.NodeFilter,
@@ -990,11 +991,11 @@ test("perf panel English copy matches split text nodes after trimming", async ()
 
 test("mail phase two keeps navigation stable, one mail entry, and table tools", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const script = await readFile(resolve(root, "dist", "app.js"), "utf8");
-  const taskTools = await readFile(resolve(root, "dist", "task_tools.js"), "utf8");
-  const mailCards = await readFile(resolve(root, "dist", "mail_cards.js"), "utf8");
-  const mailResources = await readFile(resolve(root, "dist", "mail_resources.js"), "utf8");
-  const styles = await readFile(resolve(root, "dist", "styles.css"), "utf8");
+  const script = await readFile(resolve(root, "build", "app.js"), "utf8");
+  const taskTools = await readFile(resolve(root, "build", "task_tools.js"), "utf8");
+  const mailCards = await readFile(resolve(root, "build", "mail_cards.js"), "utf8");
+  const mailResources = await readFile(resolve(root, "build", "mail_resources.js"), "utf8");
+  const styles = await readFile(resolve(root, "build", "styles.css"), "utf8");
 
   // perf=1 turns the persistent preference on at boot, then only the perf
   // parameter is removed while the hash and other parameters stay; the stored
@@ -1040,7 +1041,7 @@ test("mail phase two keeps navigation stable, one mail entry, and table tools", 
 
 test("SSE list refresh is debounced and deferred while a task detail is open", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const script = await readFile(resolve(root, "dist", "app.js"), "utf8");
+  const script = await readFile(resolve(root, "build", "app.js"), "utf8");
   assert.match(script, /debounceMs: 350/);
   assert.match(script, /maxWaitMs: 1000/);
   assert.match(script, /canRefresh: \(\)=>Boolean\(state\.auth\?\.authenticated\) && !document\.hidden && !state\.selectedTask && !openingTaskID/);
@@ -1055,7 +1056,7 @@ test("SSE list refresh is debounced and deferred while a task detail is open", a
 
 test("read-only task history opens on the latest page and lazily loads older rows", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const script = await readFile(resolve(root, "dist", "app.js"), "utf8");
+  const script = await readFile(resolve(root, "build", "app.js"), "utf8");
   assert.match(script, /summary\?\.read_only\s*\?\s*\[\s*"chat",\s*"update",\s*"error"\s*\]/);
   assert.doesNotMatch(script, /summary\?\.read_only\s*\?\s*\[[^\]]*"mail"/);
   assert.match(script, /agentConversation\(taskID,\s*"main",\s*\{\s*limit:\s*initialConversationPageSize,\s*categories\s*\}/);
@@ -1067,8 +1068,8 @@ test("read-only task history opens on the latest page and lazily loads older row
 
 test("sidebar shows service version and live uptime", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const script = await readFile(resolve(root, "dist", "app.js"), "utf8");
-  const styles = await readFile(resolve(root, "dist", "styles.css"), "utf8");
+  const script = await readFile(resolve(root, "build", "app.js"), "utf8");
+  const styles = await readFile(resolve(root, "build", "styles.css"), "utf8");
   assert.match(script, /class="system-meta"/);
   assert.match(script, /id="system-uptime"/);
   assert.match(script, /state\.system\.web_version \|\| state\.system\.version \|\| "dev"/);
@@ -1105,10 +1106,10 @@ test("sidebar shows service version and live uptime", async () => {
 
 test("task detail can bind one primary private or group channel", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const script = await readFile(resolve(root, "dist", "app.js"), "utf8");
-  const api = await readFile(resolve(root, "dist", "api.js"), "utf8");
-  const conversation = await readFile(resolve(root, "dist", "conversation_ui.js"), "utf8");
-  const styles = await readFile(resolve(root, "dist", "styles.css"), "utf8");
+  const script = await readFile(resolve(root, "build", "app.js"), "utf8");
+  const api = await readFile(resolve(root, "build", "api.js"), "utf8");
+  const conversation = await readFile(resolve(root, "build", "conversation_ui.js"), "utf8");
+  const styles = await readFile(resolve(root, "build", "styles.css"), "utf8");
   for (const marker of ["task-channel-route-form", "disconnect-task-channel", "task-channel-contacts-form", "群聊成员", "可 @ 联调人", "保存联调人"]) {
     assert.match(script, new RegExp(marker));
   }
@@ -1148,36 +1149,36 @@ test("task channel saves preserve drafts and stale loads cannot overwrite curren
 
 test("built web contains responsive application", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const script = await readFile(resolve(root, "dist", "app.js"), "utf8");
-  const api = await readFile(resolve(root, "dist", "api.js"), "utf8");
-  const runtimePicker = await readFile(resolve(root, "dist", "runtime_picker.js"), "utf8");
-  const agents = await readFile(resolve(root, "dist", "task_agents.js"), "utf8");
-  const taskComposer = await readFile(resolve(root, "dist", "task_composer.js"), "utf8");
-  const taskTools = await readFile(resolve(root, "dist", "task_tools.js"), "utf8");
-  const hardwarePanel = await readFile(resolve(root, "dist", "hardware_panel.js"), "utf8");
-  const hardwareResources = await readFile(resolve(root, "dist", "hardware_resources.js"), "utf8");
-  const resources = await readFile(resolve(root, "dist", "resources.js"), "utf8");
-  const mailResources = await readFile(resolve(root, "dist", "mail_resources.js"), "utf8");
-  const mailTask = await readFile(resolve(root, "dist", "mail_task.js"), "utf8");
-  const mailCards = await readFile(resolve(root, "dist", "mail_cards.js"), "utf8");
-  const hardwareTerminal = await readFile(resolve(root, "dist", "hardware_terminal.js"), "utf8");
-  const conversation = await readFile(resolve(root, "dist", "conversation_ui.js"), "utf8");
-  const helpers = await readFile(resolve(root, "dist", "ui_helpers.js"), "utf8");
-  const promptAdmin = await readFile(resolve(root, "dist", "prompt_admin.js"), "utf8");
-  const proxySettings = await readFile(resolve(root, "dist", "proxy_settings.js"), "utf8");
-  const syncSettings = await readFile(resolve(root, "dist", "sync_settings.js"), "utf8");
-  const channels = await readFile(resolve(root, "dist", "channels.js"), "utf8");
+  const script = await readFile(resolve(root, "build", "app.js"), "utf8");
+  const api = await readFile(resolve(root, "build", "api.js"), "utf8");
+  const runtimePicker = await readFile(resolve(root, "build", "runtime_picker.js"), "utf8");
+  const agents = await readFile(resolve(root, "build", "task_agents.js"), "utf8");
+  const taskComposer = await readFile(resolve(root, "build", "task_composer.js"), "utf8");
+  const taskTools = await readFile(resolve(root, "build", "task_tools.js"), "utf8");
+  const hardwarePanel = await readFile(resolve(root, "build", "hardware_panel.js"), "utf8");
+  const hardwareResources = await readFile(resolve(root, "build", "hardware_resources.js"), "utf8");
+  const resources = await readFile(resolve(root, "build", "resources.js"), "utf8");
+  const mailResources = await readFile(resolve(root, "build", "mail_resources.js"), "utf8");
+  const mailTask = await readFile(resolve(root, "build", "mail_task.js"), "utf8");
+  const mailCards = await readFile(resolve(root, "build", "mail_cards.js"), "utf8");
+  const hardwareTerminal = await readFile(resolve(root, "build", "hardware_terminal.js"), "utf8");
+  const conversation = await readFile(resolve(root, "build", "conversation_ui.js"), "utf8");
+  const helpers = await readFile(resolve(root, "build", "ui_helpers.js"), "utf8");
+  const promptAdmin = await readFile(resolve(root, "build", "prompt_admin.js"), "utf8");
+  const proxySettings = await readFile(resolve(root, "build", "proxy_settings.js"), "utf8");
+  const syncSettings = await readFile(resolve(root, "build", "sync_settings.js"), "utf8");
+  const channels = await readFile(resolve(root, "build", "channels.js"), "utf8");
   // The scope picker must read the index endpoint, not the entries page: a page
   // is recency-ordered, so filtering it silently drops every project whose
   // knowledge has not changed recently, and those projects then cannot be granted.
   assert.match(api, /knowledgeIndexes\(\)/);
   assert.match(api, /\/api\/v1\/knowledge\/indexes/);
   assert.ok(!/options\.context\.knowledge\b/.test(channels), "scope UI must not read the entries page");
-  const codexAccounts = await readFile(resolve(root, "dist", "codex_accounts.js"), "utf8");
-  const knowledgeWorkspace = await readFile(resolve(root, "dist", "knowledge_workspace.js"), "utf8");
-  const css = await readFile(resolve(root, "dist", "styles.css"), "utf8");
+  const codexAccounts = await readFile(resolve(root, "build", "codex_accounts.js"), "utf8");
+  const knowledgeWorkspace = await readFile(resolve(root, "build", "knowledge_workspace.js"), "utf8");
+  const css = await readFile(resolve(root, "build", "styles.css"), "utf8");
   const index = await readFile(resolve(root, "dist", "index.html"), "utf8");
-  const i18n = await readFile(resolve(root, "dist", "i18n.js"), "utf8");
+  const i18n = await readFile(resolve(root, "build", "i18n.js"), "utf8");
   assert.match(script, /api\.authStatus/);
   assert.match(promptAdmin, /内置只读模板/);
   assert.doesNotMatch(promptAdmin, /协议由代码管理/);
@@ -1672,8 +1673,9 @@ test("built web contains responsive application", async () => {
   assert.match(css, /body\.composer-focused \.task-screen \{[^}]*position:\s*fixed[^}]*top:\s*var\(--visual-viewport-offset-top\)[^}]*bottom:\s*var\(--visual-viewport-bottom-inset\)/);
   assert.match(css, /body\.task-view-active/);
   assert.match(css, /overscroll-behavior: contain/);
-  assert.match(index, /app\.js\?v=[a-f0-9]{12}/);
-  assert.match(index, /styles\.css\?v=[a-f0-9]{12}/);
+  assert.match(index, /app\.[a-f0-9]{12}\.js\?v=[a-f0-9]{12}/);
+  assert.match(index, /styles\.[a-f0-9]{12}\.css/);
+  assert.match(index, /rel="modulepreload" href="\/app\.[a-f0-9]{12}\.js\?v=[a-f0-9]{12}"/);
   assert.match(index, /class="boot-spinner"/);
   assert.doesNotMatch(index, /正在连接服务/);
   assert.match(css, /\.boot-loading \.boot-spinner/);
@@ -1716,7 +1718,7 @@ test("built web contains responsive application", async () => {
 });
 
 test("composer agent selector stays populated while task detail loads", async () => {
-  const composer = await import(pathToFileURL(resolve(import.meta.dirname, "..", "dist", "task_composer.js")));
+  const composer = await import(pathToFileURL(resolve(import.meta.dirname, "..", "build", "task_composer.js")));
   const loading = composer.renderComposerAgentOptions({agents: []}, "main");
   assert.match(loading, /value="main"/);
   assert.match(loading, /加载中/);
@@ -1730,7 +1732,7 @@ test("composer agent selector stays populated while task detail loads", async ()
 
 test("hardware tool title renders the active hardware group switcher", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const {normalizePinnedTaskTool, renderTaskToolPanel} = await import(pathToFileURL(resolve(root, "dist", "task_tools.js")));
+  const {normalizePinnedTaskTool, renderTaskToolPanel} = await import(pathToFileURL(resolve(root, "build", "task_tools.js")));
   const group = (id, description, position) => ({
     task_id: "task-hardware-title",
     id,
@@ -1772,7 +1774,7 @@ test("hardware tool title renders the active hardware group switcher", async () 
 
 test("knowledge workspace defaults to actionable updates", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const {renderKnowledgeWorkspace} = await import(pathToFileURL(resolve(root, "dist", "knowledge_workspace.js")));
+  const {renderKnowledgeWorkspace} = await import(pathToFileURL(resolve(root, "build", "knowledge_workspace.js")));
   const html = renderKnowledgeWorkspace({
     projects: [{id: "project-1", name: "AHA2", description: "", project_type: "git", knowledge_policy: "enabled", knowledge_revision: 3, updated_at: ""}],
     workspaces: [{id: "workspace-1", project_id: "project-1", name: "Native", locality: "local", transport: "native", root_path: "C:/repo", ssh_password_configured: false, health: "ready"}],
@@ -1824,7 +1826,7 @@ test("knowledge workspace defaults to actionable updates", async () => {
   assert.doesNotMatch(html, /knowledge-section-rail|data-knowledge-section=/);
   assert.doesNotMatch(html, /data-knowledge-back/);
   assert.doesNotMatch(html, /graph-canvas|knowledge-graph/);
-  const source = await readFile(resolve(root, "dist", "knowledge_workspace.js"), "utf8");
+  const source = await readFile(resolve(root, "build", "knowledge_workspace.js"), "utf8");
   assert.match(source, /portal\("project"/);
   assert.match(source, /portal\("navigation"/);
   assert.match(source, /portal\("settings"/);
@@ -1832,7 +1834,7 @@ test("knowledge workspace defaults to actionable updates", async () => {
 
 test("task agent config selects skills explicitly", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const {renderAgentConfigDialog} = await import(pathToFileURL(resolve(root, "dist", "task_agents.js")));
+  const {renderAgentConfigDialog} = await import(pathToFileURL(resolve(root, "build", "task_agents.js")));
   const html = renderAgentConfigDialog({
     task: {id: "task-1", project_id: "project-1", workspace_id: "workspace-1", title: "Task", original_request: "", current_goal: "", status: "active", isolation: "inplace", collaboration_mode: "auto", max_agents: 3, knowledge_policy: "inherit", skill_ids: ["skill-1"], total_tokens: 0, created_at: "", updated_at: ""},
     agents: [{agent_id: "main", role: "main", title: "Main", backend: "codex", model_source: "env", model_id: "model-1", reasoning_effort: "high", filesystem: "workspace-write", approval: "never", proxy_enabled: false}],
@@ -1844,7 +1846,7 @@ test("task agent config selects skills explicitly", async () => {
 
 test("task memory renders a bounded chronological goal timeline", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const {renderTaskMemory} = await import(pathToFileURL(resolve(root, "dist", "task_agents.js")));
+  const {renderTaskMemory} = await import(pathToFileURL(resolve(root, "build", "task_agents.js")));
   const goal_history = Array.from({length: 21}, (_, index) => ({
     sequence: index + 1,
     id: `goal-${index + 1}`,
@@ -1869,7 +1871,7 @@ test("task memory renders a bounded chronological goal timeline", async () => {
 // stored snapshot, and gated on the Backend that is selected right now.
 test("agent config offers the Codex fast tier and follows the backend", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const {renderAgentConfigDialog} = await import(pathToFileURL(resolve(root, "dist", "task_agents.js")));
+  const {renderAgentConfigDialog} = await import(pathToFileURL(resolve(root, "build", "task_agents.js")));
   const dialog = (backend, fastMode) => renderAgentConfigDialog({
     task: {id: "task-1", project_id: "project-1", workspace_id: "workspace-1", title: "Task", original_request: "", current_goal: "", status: "active", isolation: "inplace", collaboration_mode: "auto", max_agents: 3, knowledge_policy: "inherit", skill_ids: [], total_tokens: 0, created_at: "", updated_at: ""},
     agents: [{agent_id: "main", role: "main", title: "Main", backend, model_source: "env", model_id: "model-1", reasoning_effort: "high", filesystem: "workspace-write", approval: "never", proxy_enabled: false, fast_mode: fastMode}],
@@ -1892,7 +1894,7 @@ test("agent config offers the Codex fast tier and follows the backend", async ()
 // must ignore it instead of rendering a hidden or disabled switch.
 test("agent config does not expose the live inbox switch", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const {renderAgentConfigDialog, renderConversationWithOrchestration} = await import(pathToFileURL(resolve(root, "dist", "task_agents.js")));
+  const {renderAgentConfigDialog, renderConversationWithOrchestration} = await import(pathToFileURL(resolve(root, "build", "task_agents.js")));
   const dialog = backendName => renderAgentConfigDialog({
     task: {id: "task-1", project_id: "project-1", workspace_id: "workspace-1", title: "Task", original_request: "", current_goal: "", status: "active", isolation: "inplace", collaboration_mode: "auto", max_agents: 3, knowledge_policy: "inherit", skill_ids: [], total_tokens: 0, created_at: "", updated_at: ""},
     agents: [{agent_id: "main", role: "main", title: "Main", backend: backendName, model_source: "env", model_id: "model-1", reasoning_effort: "high", filesystem: "workspace-write", approval: "never", proxy_enabled: false, fast_mode: false, stream_input: true}],
@@ -1921,7 +1923,7 @@ test("agent config does not expose the live inbox switch", async () => {
 // "experimental" wording in English.
 test("removed live inbox switch copy has no translation", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const i18n = await import(pathToFileURL(resolve(root, "dist", "i18n.js")));
+  const i18n = await import(pathToFileURL(resolve(root, "build", "i18n.js")));
   i18n.applyLocale("en-US");
   try {
     for (const legacy of ["实验性：Turn 内 live inbox 投递", "开启（实验性）"]) {
@@ -1934,7 +1936,7 @@ test("removed live inbox switch copy has no translation", async () => {
 
 test("round card reports uncached turn input and hides ambiguous cache usage", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const {renderAgentTurnCard} = await import(pathToFileURL(resolve(root, "dist", "task_agents.js")));
+  const {renderAgentTurnCard} = await import(pathToFileURL(resolve(root, "build", "task_agents.js")));
   const html = renderAgentTurnCard({
     task: {id: "task-1", project_id: "project-1", workspace_id: "workspace-1", title: "Task", original_request: "", current_goal: "", status: "active", isolation: "inplace", collaboration_mode: "single", max_agents: 1, knowledge_policy: "inherit", skill_ids: [], total_tokens: 0, created_at: "", updated_at: ""},
     latest_round: {id: "round-1", task_id: "task-1", sequence: 2, status: "running", created_at: ""},
@@ -1957,7 +1959,7 @@ test("round card reports uncached turn input and hides ambiguous cache usage", a
 
 test("codex accounts render compact weekly quota", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const {renderCodexAccounts} = await import(pathToFileURL(resolve(root, "dist", "codex_accounts.js")));
+  const {renderCodexAccounts} = await import(pathToFileURL(resolve(root, "build", "codex_accounts.js")));
   const html = renderCodexAccounts([{
     id: "account-1",
     label: "工作账号",
@@ -2012,7 +2014,7 @@ test("codex accounts render compact weekly quota", async () => {
 
 test("runtime picker separates Env and Official Codex models", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const {resolveReasoningEffort, runtimeFieldsHTML} = await import(pathToFileURL(resolve(root, "dist", "runtime_picker.js")));
+  const {resolveReasoningEffort, runtimeFieldsHTML} = await import(pathToFileURL(resolve(root, "build", "runtime_picker.js")));
   assert.equal(resolveReasoningEffort(["low", "medium", "high"], "high", "low", false), "high");
   assert.equal(resolveReasoningEffort(["low", "medium", "high"], "high", "low", true), "low");
   assert.equal(resolveReasoningEffort(["low", "medium", "high"], "", "low", false), "low");
@@ -2069,7 +2071,7 @@ test("runtime picker separates Env and Official Codex models", async () => {
 
 test("knowledge update list keeps proposal bodies folded behind details", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const {renderUpdates} = await import(pathToFileURL(resolve(root, "dist", "knowledge_workspace.js")));
+  const {renderUpdates} = await import(pathToFileURL(resolve(root, "build", "knowledge_workspace.js")));
   const html = renderUpdates([], [{
     id: "proposal-1", entry_id: "", base_revision: 0, status: "pending",
     title: "运行时实践", body: "PROPOSAL_BODY_MUST_STAY_FOLDED", scope: "global",
@@ -2084,7 +2086,7 @@ test("knowledge update list keeps proposal bodies folded behind details", async 
 
 test("knowledge proposal history marks automatic and manual review", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const {renderUpdates} = await import(pathToFileURL(resolve(root, "dist", "knowledge_workspace.js")));
+  const {renderUpdates} = await import(pathToFileURL(resolve(root, "build", "knowledge_workspace.js")));
   const html = renderUpdates([], [
     {id: "auto", entry_id: "auto-entry", base_revision: 0, status: "pending", review_mode: "auto", title: "Auto", body: "body", scope: "global", created_at: "2026-09-07T10:00:00Z"},
     {id: "manual", entry_id: "manual-entry", base_revision: 0, status: "pending", review_mode: "manual", title: "Manual", body: "body", scope: "global", created_at: "2026-09-07T09:00:00Z"},
@@ -2096,7 +2098,7 @@ test("knowledge proposal history marks automatic and manual review", async () =>
 
 test("message send clears draft state before awaiting the request", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const script = await readFile(resolve(root, "dist", "app.js"), "utf8");
+  const script = await readFile(resolve(root, "build", "app.js"), "utf8");
   const clearAt = script.indexOf('state.taskDrafts[agentID] = ""');
   const sendAt = script.indexOf("await api.agentMessage(taskID, agentID");
   const acceptedAt = script.indexOf("accepted = true", sendAt);
@@ -2112,7 +2114,7 @@ test("message send clears draft state before awaiting the request", async () => 
 
 test("pending knowledge libraries fit mobile width", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const styles = await readFile(resolve(root, "dist", "styles.css"), "utf8");
+  const styles = await readFile(resolve(root, "build", "styles.css"), "utf8");
   assert.match(styles, /@media \(max-width: 760px\)[\s\S]*?\.knowledge-library-grid \{[^}]*grid-template-columns:\s*minmax\(0,1fr\);[^}]*overflow:\s*hidden/);
   assert.match(styles, /\.knowledge-library-card > footer label \{[^}]*grid-template-columns:\s*1fr;[^}]*white-space:\s*normal/);
   assert.match(styles, /\.knowledge-library-card > footer button \{[^}]*width:\s*100%/);
@@ -2120,7 +2122,7 @@ test("pending knowledge libraries fit mobile width", async () => {
 
 test("conversation renders agent config, channel outreach, and turn duration cards", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const {renderConversationList} = await import(pathToFileURL(resolve(root, "dist", "conversation_ui.js")));
+  const {renderConversationList} = await import(pathToFileURL(resolve(root, "build", "conversation_ui.js")));
   const items = [{
     sequence: 1, id: "config-1", task_id: "task-1", agent_id: "aha", stream_agent_id: "main",
     category: "update", kind: "agent_config_updated", summary: "main 配置已更新",
@@ -2230,7 +2232,7 @@ test("conversation renders agent config, channel outreach, and turn duration car
 
 test("channel route cards map provider acceptance without claiming read receipts", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const {renderConversationWithOrchestration} = await import(pathToFileURL(resolve(root, "dist", "task_agents.js")));
+  const {renderConversationWithOrchestration} = await import(pathToFileURL(resolve(root, "build", "task_agents.js")));
   const render = (kind, payload) => renderConversationWithOrchestration([{
     sequence: 1, id: "card-1", task_id: "task-1", agent_id: "aha", stream_agent_id: "main",
     category: "update", kind, summary: "渠道消息",
@@ -2264,8 +2266,8 @@ test("channel route cards map provider acceptance without claiming read receipts
 
 test("stalled turns explain that backend streaming is silent", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const agents = await readFile(resolve(root, "dist", "task_agents.js"), "utf8");
-  const styles = await readFile(resolve(root, "dist", "styles.css"), "utf8");
+  const agents = await readFile(resolve(root, "build", "task_agents.js"), "utf8");
+  const styles = await readFile(resolve(root, "build", "styles.css"), "utf8");
   assert.match(agents, /等待 Backend 流事件/);
   assert.match(agents, /模型推理、网络重连或上游排队/);
   assert.match(styles, /\.turn-stalled-note/);
@@ -2273,7 +2275,7 @@ test("stalled turns explain that backend streaming is silent", async () => {
 
 test("conversation replaces irrecoverable legacy progress mojibake", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const {renderConversationList} = await import(pathToFileURL(resolve(root, "dist", "conversation_ui.js")));
+  const {renderConversationList} = await import(pathToFileURL(resolve(root, "build", "conversation_ui.js")));
   const html = renderConversationList([{
     id: "broken-update", task_id: "task-1", agent_id: "main", category: "update", kind: "agent_progress",
     summary: "???????????? v0.4.3 ??????", created_at: "2026-09-06T09:00:00Z",
@@ -2284,7 +2286,7 @@ test("conversation replaces irrecoverable legacy progress mojibake", async () =>
 
 test("hardware terminal accepts WebView Blob binary frames", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const {terminalFrameBytes} = await import(pathToFileURL(resolve(root, "dist", "hardware_terminal.js")));
+  const {terminalFrameBytes} = await import(pathToFileURL(resolve(root, "build", "hardware_terminal.js")));
   const expected = new Uint8Array([0x1b, 0x5b, 0x33, 0x32, 0x6d]);
   assert.deepEqual(await terminalFrameBytes(expected.buffer), expected);
   assert.deepEqual(await terminalFrameBytes(new Blob([expected])), expected);
@@ -2292,7 +2294,7 @@ test("hardware terminal accepts WebView Blob binary frames", async () => {
 
 test("message collapse uses Unicode character count", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const {renderConversationList} = await import(pathToFileURL(resolve(root, "dist", "conversation_ui.js")));
+  const {renderConversationList} = await import(pathToFileURL(resolve(root, "build", "conversation_ui.js")));
   const item = summary => ({
     id: "message-1",
     task_id: "task-1",
@@ -2311,7 +2313,7 @@ test("message collapse uses Unicode character count", async () => {
 
 test("tool events render as message bubbles", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const {renderConversationList} = await import(pathToFileURL(resolve(root, "dist", "conversation_ui.js")));
+  const {renderConversationList} = await import(pathToFileURL(resolve(root, "build", "conversation_ui.js")));
   const html = renderConversationList([{
     sequence: 1,
     id: "tool-1",
@@ -2333,7 +2335,7 @@ test("tool events render as message bubbles", async () => {
 
 test("tool lifecycle events render as one completed message", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const {coalesceToolConversationItems, renderConversationList} = await import(pathToFileURL(resolve(root, "dist", "conversation_ui.js")));
+  const {coalesceToolConversationItems, renderConversationList} = await import(pathToFileURL(resolve(root, "build", "conversation_ui.js")));
   const base = {
     task_id: "task-1", turn_id: "turn-42", agent_id: "main", stream_agent_id: "main", category: "tool",
     summary: "go test ./...", created_at: "2026-09-03T00:00:00Z",
@@ -2363,8 +2365,8 @@ test("tool lifecycle events render as one completed message", async () => {
 
 test("hardware SSH requires explicit host fingerprint trust", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const panel = await readFile(resolve(root, "dist", "hardware_panel.js"), "utf8");
-  const api = await readFile(resolve(root, "dist", "api.js"), "utf8");
+  const panel = await readFile(resolve(root, "build", "hardware_panel.js"), "utf8");
+  const api = await readFile(resolve(root, "build", "api.js"), "utf8");
   assert.match(panel, /ssh_host_key_unknown/);
   assert.match(panel, /SHA256 指纹/);
   assert.match(panel, /window\.confirm/);
@@ -2374,7 +2376,7 @@ test("hardware SSH requires explicit host fingerprint trust", async () => {
 
 test("conversation renders uploaded images and downloadable files", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const {renderConversationList} = await import(pathToFileURL(resolve(root, "dist", "conversation_ui.js")));
+  const {renderConversationList} = await import(pathToFileURL(resolve(root, "build", "conversation_ui.js")));
   const html = renderConversationList([{
     id: "message-attachment", task_id: "task-1", agent_id: "owner", category: "chat", kind: "user_message",
     summary: "See attachments", created_at: "2026-09-05T00:00:00Z",
@@ -2395,7 +2397,7 @@ test("conversation renders uploaded images and downloadable files", async () => 
 
 test("global knowledge opens as a virtual index document with described links", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const {renderKnowledgeDocumentWorkspace} = await import(pathToFileURL(resolve(root, "dist", "knowledge_workspace.js")));
+  const {renderKnowledgeDocumentWorkspace} = await import(pathToFileURL(resolve(root, "build", "knowledge_workspace.js")));
   const base = {scope: "global", status: "verified", confidence: .9, revision: 1, helped_count: 0, stale_count: 0, created_at: "", updated_at: "", sort_order: 0};
   const html = renderKnowledgeDocumentWorkspace([
       {...base, id: "root", is_index: true, type: "navigation", title: "Global index", slug: "index", body: "# Entry\nChoose a child."},
@@ -2431,14 +2433,14 @@ test("global knowledge opens as a virtual index document with described links", 
   assert.doesNotMatch(html, />verified</i);
   assert.doesNotMatch(html, />revision/i);
 
-  const source = await readFile(resolve(root, "dist", "knowledge_workspace.js"), "utf8");
+  const source = await readFile(resolve(root, "build", "knowledge_workspace.js"), "utf8");
   assert.match(source, /managedGlobalKnowledgeIDs/);
   assert.match(source, /globalTechnicalLessonsKnowledgeID/);
 });
 
 test("project navigation opens as an index document with child links", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const {renderKnowledgeDocumentWorkspace} = await import(pathToFileURL(resolve(root, "dist", "knowledge_workspace.js")));
+  const {renderKnowledgeDocumentWorkspace} = await import(pathToFileURL(resolve(root, "build", "knowledge_workspace.js")));
   const base = {scope: "project", project_id: "project-1", status: "verified", confidence: .9, revision: 1, helped_count: 0, stale_count: 0, created_at: "", updated_at: "", sort_order: 0, is_index: false};
   const html = renderKnowledgeDocumentWorkspace([
     {...base, id: "intro", parent_id: "root", type: "navigation", title: "Project introduction", slug: "overview", body: "Introduction"},
@@ -2469,22 +2471,22 @@ test("project navigation opens as an index document with child links", async () 
   assert.match(projectHtml, /Build it/);
   assert.doesNotMatch(projectHtml, /class="panel knowledge-tree"/);
 
-  const source = await readFile(resolve(root, "dist", "knowledge_workspace.js"), "utf8");
+  const source = await readFile(resolve(root, "build", "knowledge_workspace.js"), "utf8");
   assert.match(source, /projectNavigationEntryIDs/);
   assert.match(source, /navigationIDs\.has\(item\.id\)/);
   assert.match(source, /knowledgeHomeBody/);
   assert.match(source, /knowledgeIndexSummary/);
   assert.doesNotMatch(source, /data-knowledge-search-open|data-knowledge-search-clear/);
   assert.match(source, /renderKnowledgeDocumentWorkspace\(filterEntries\(entries\), [^,]+, "project", false, sourceLabelFor/);
-  const styles = await readFile(resolve(root, "dist", "styles.css"), "utf8");
+  const styles = await readFile(resolve(root, "build", "styles.css"), "utf8");
   assert.match(styles, /\.knowledge-document-layout\.linked-index \{[^}]*display:\s*block/);
   assert.match(styles, /\.markdown-body \.knowledge-index-link \{[^}]*display:\s*inline/);
 });
 
 test("knowledge libraries support pending browse, bind, and unbind", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const workspace = await readFile(resolve(root, "dist", "knowledge_workspace.js"), "utf8");
-  const api = await readFile(resolve(root, "dist", "api.js"), "utf8");
+  const workspace = await readFile(resolve(root, "build", "knowledge_workspace.js"), "utf8");
+  const api = await readFile(resolve(root, "build", "api.js"), "utf8");
   for (const marker of ["data-knowledge-library-open", "data-knowledge-library-bind", "data-knowledge-library-unbind", "data-knowledge-library-delete", "data-knowledge-library-back"]) {
     assert.match(workspace, new RegExp(marker));
   }
@@ -2498,7 +2500,7 @@ test("knowledge libraries support pending browse, bind, and unbind", async () =>
   assert.match(workspace, /data-project-knowledge-delete/);
   assert.match(api, /detachProjectKnowledge/);
   assert.match(api, /deleteProjectKnowledge/);
-  const styles = await readFile(resolve(root, "dist", "styles.css"), "utf8");
+  const styles = await readFile(resolve(root, "build", "styles.css"), "utf8");
   assert.match(styles, /\.knowledge-library-card > footer \{[^}]*flex-wrap:\s*wrap/);
   assert.match(styles, /\.knowledge-library-card > footer label \{[^}]*grid-template-columns:\s*max-content minmax\(180px,1fr\)[^}]*white-space:\s*nowrap/);
   assert.match(styles, /\.knowledge-library-card \{[^}]*grid-template-rows:\s*auto auto auto;[^}]*align-content:\s*start;[^}]*height:\s*auto/);
@@ -2508,7 +2510,7 @@ test("knowledge libraries support pending browse, bind, and unbind", async () =>
 
 test("project settings is a secondary page with a project entry back action", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const source = await readFile(resolve(root, "dist", "knowledge_workspace.js"), "utf8");
+  const source = await readFile(resolve(root, "build", "knowledge_workspace.js"), "utf8");
   assert.match(source, /function renderSettings[\s\S]*?data-knowledge-back[\s\S]*?knowledge-setting-card/);
   assert.match(source, /knowledgeReaderOpen\s*&&\s*projectMode\s*&&\s*activeSection\s*!==\s*"overview"/);
   assert.match(source, /activeSection\s*=\s*entry\s*===\s*"settings"\s*\?\s*"settings"/);
@@ -2516,7 +2518,7 @@ test("project settings is a secondary page with a project entry back action", as
 
 test("project knowledge keeps a merged view while exposing source labels and filters", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const module = await import(pathToFileURL(resolve(root, "dist", "knowledge_workspace.js")));
+  const module = await import(pathToFileURL(resolve(root, "build", "knowledge_workspace.js")));
   const sources = module.projectKnowledgeSources(
     {id: "project-1", name: "Project One"},
     [
@@ -2531,8 +2533,8 @@ test("project knowledge keeps a merged view while exposing source labels and fil
     {id: "library-1", label: "Imported Library（外部引用）", count: 1, external: true},
   ]);
 
-  const source = await readFile(resolve(root, "dist", "knowledge_workspace.js"), "utf8");
-  const styles = await readFile(resolve(root, "dist", "styles.css"), "utf8");
+  const source = await readFile(resolve(root, "build", "knowledge_workspace.js"), "utf8");
+  const styles = await readFile(resolve(root, "build", "styles.css"), "utf8");
   for (const marker of ["data-knowledge-source-filter", "knowledge-source-badge", "knowledge-source-settings"]) assert.match(source, new RegExp(marker));
   assert.ok(source.includes("\\u9879\\u76ee\\u81ea\\u6709\\u77e5\\u8bc6"));
   assert.ok(source.includes("\\u7ed1\\u5b9a\\u77e5\\u8bc6\\u5e93"));
@@ -2543,8 +2545,8 @@ test("project knowledge keeps a merged view while exposing source labels and fil
 
 test("knowledge library bindings distinguish collaboration from external reference", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const workspace = await readFile(resolve(root, "dist", "knowledge_workspace.js"), "utf8");
-  const api = await readFile(resolve(root, "dist", "api.js"), "utf8");
+  const workspace = await readFile(resolve(root, "build", "knowledge_workspace.js"), "utf8");
+  const api = await readFile(resolve(root, "build", "api.js"), "utf8");
   for (const marker of ["data-knowledge-library-mode", "data-knowledge-library-mode-save", "bindingModeLabel"]) {
     assert.match(workspace, new RegExp(marker));
   }
@@ -2556,9 +2558,9 @@ test("knowledge library bindings distinguish collaboration from external referen
 
 test("startup renders immediately and CRUD actions refresh local state with progress", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const main = await readFile(resolve(root, "dist", "app.js"), "utf8");
+  const main = await readFile(resolve(root, "build", "app.js"), "utf8");
   const index = await readFile(resolve(root, "dist", "index.html"), "utf8");
-  const knowledge = await readFile(resolve(root, "dist", "knowledge_workspace.js"), "utf8");
+  const knowledge = await readFile(resolve(root, "build", "knowledge_workspace.js"), "utf8");
   assert.match(index, /boot-loading/);
   assert.doesNotMatch(index, /<script defer src="\/vendor\/xterm\.js/);
   assert.match(main, /state\.hydrating = true;\s*render\(\);\s*await loadCoreData\(\)/);
@@ -2588,8 +2590,8 @@ test("route resources load silently and only surface failures", async () => {
 
 test("task creation supports manual draft and explicit start", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const main = await readFile(resolve(root, "dist", "app.js"), "utf8");
-  const api = await readFile(resolve(root, "dist", "api.js"), "utf8");
+  const main = await readFile(resolve(root, "build", "app.js"), "utf8");
+  const api = await readFile(resolve(root, "build", "api.js"), "utf8");
   assert.match(main, /name="start_mode" value="manual"/);
   assert.match(main, /name="start_mode" value="immediate"/);
   assert.match(main, /id="start-task"/);
@@ -2609,7 +2611,7 @@ test("task creation supports manual draft and explicit start", async () => {
 
 test("system-managed resources are read-only and normal tasks exclude pet MCP", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const main = await readFile(resolve(root, "dist", "app.js"), "utf8");
+  const main = await readFile(resolve(root, "build", "app.js"), "utf8");
   const catalog = await readFile(resolve(root, "..", "internal", "httpapi", "catalog_handlers.go"), "utf8");
   const tasks = await readFile(resolve(root, "..", "internal", "httpapi", "task_handlers.go"), "utf8");
   const service = await readFile(resolve(root, "..", "internal", "app", "service.go"), "utf8");
@@ -2627,8 +2629,8 @@ test("system-managed resources are read-only and normal tasks exclude pet MCP", 
 
 test("model detection fetches the catalog, supports multi-select and an add dialog", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const main = await readFile(resolve(root, "dist", "app.js"), "utf8");
-  const api = await readFile(resolve(root, "dist", "api.js"), "utf8");
+  const main = await readFile(resolve(root, "build", "app.js"), "utf8");
+  const api = await readFile(resolve(root, "build", "api.js"), "utf8");
   assert.match(main, /api\.detectModels\(\{/);
   assert.match(main, /provider_id: providerID/);
   assert.match(main, /new AbortController\(\)/);
@@ -2664,9 +2666,9 @@ test("model detection fetches the catalog, supports multi-select and an add dial
 
 test("pet events share the page global event stream", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const main = await readFile(resolve(root, "dist", "app.js"), "utf8");
-  const assistant = await readFile(resolve(root, "dist", "assistant.js"), "utf8");
-  const api = await readFile(resolve(root, "dist", "api.js"), "utf8");
+  const main = await readFile(resolve(root, "build", "app.js"), "utf8");
+  const assistant = await readFile(resolve(root, "build", "assistant.js"), "utf8");
+  const api = await readFile(resolve(root, "build", "api.js"), "utf8");
   assert.match(main, /handlePetStreamEvent/);
   assert.match(main, /type === "pet_state"/);
   assert.match(assistant, /export function handlePetStreamEvent/);
@@ -2676,8 +2678,8 @@ test("pet events share the page global event stream", async () => {
 
 test("same-page live renders preserve page interaction state", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const main = await readFile(resolve(root, "dist", "app.js"), "utf8");
-  const helpers = await readFile(resolve(root, "dist", "ui_helpers.js"), "utf8");
+  const main = await readFile(resolve(root, "build", "app.js"), "utf8");
+  const helpers = await readFile(resolve(root, "build", "ui_helpers.js"), "utf8");
   assert.match(main, /const preservePageUI = app\.dataset\.uiScope === nextUIScope/);
   assert.match(main, /const previousAppUI = preservePageUI \? captureRegionUI\(app\) : null/);
   assert.match(main, /restoreRegionUI\(app, previousAppUI, false\)/);
@@ -2696,8 +2698,8 @@ test("same-page live renders preserve page interaction state", async () => {
 
 test("large catalogs use independent route resources and cursor pages", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const main = await readFile(resolve(root, "dist", "app.js"), "utf8");
-  const api = await readFile(resolve(root, "dist", "api.js"), "utf8");
+  const main = await readFile(resolve(root, "build", "app.js"), "utf8");
+  const api = await readFile(resolve(root, "build", "api.js"), "utf8");
   assert.match(main, /const initialListPageSize = 50/);
   assert.match(main, /data-load-more=/);
   assert.match(main, /loadNextPage/);
@@ -2725,9 +2727,9 @@ test("task list protects clicks from live refresh and reports open failures", as
 
 test("task list filters combine multi-select project, status, and device choices", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const main = await readFile(resolve(root, "dist", "app.js"), "utf8");
-  const styles = await readFile(resolve(root, "dist", "styles.css"), "utf8");
-  const filters = await import(pathToFileURL(resolve(root, "dist", "task_filters.js")));
+  const main = await readFile(resolve(root, "build", "app.js"), "utf8");
+  const styles = await readFile(resolve(root, "build", "styles.css"), "utf8");
+  const filters = await import(pathToFileURL(resolve(root, "build", "task_filters.js")));
   const local = {id: "local", project_id: "p1", status: "active", read_only: false};
   const remoteA = {id: "remote-a", project_id: "p1", status: "completed", read_only: true, owner_device_id: "device-a"};
   const remoteB = {id: "remote-b", project_id: "p2", status: "failed", read_only: true, owner_device_id: "device-b"};
@@ -2801,8 +2803,8 @@ test("task list filters combine multi-select project, status, and device choices
 
 test("stale knowledge action means keeping the current content", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const source = await readFile(resolve(root, "dist", "knowledge_workspace.js"), "utf8");
-  const styles = await readFile(resolve(root, "dist", "styles.css"), "utf8");
+  const source = await readFile(resolve(root, "build", "knowledge_workspace.js"), "utf8");
+  const styles = await readFile(resolve(root, "build", "styles.css"), "utf8");
   assert.ok(source.includes("\\u786e\\u8ba4\\u4ecd\\u6709\\u6548"));
   assert.ok(!source.includes("\\u91cd\\u65b0\\u786e\\u8ba4"));
   assert.match(styles, /grid-template-columns:\s*repeat\(3,minmax\(0,1fr\)\)/);
@@ -2810,8 +2812,8 @@ test("stale knowledge action means keeping the current content", async () => {
 
 test("knowledge proposals keep three approval actions on one mobile row", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const source = await readFile(resolve(root, "dist", "knowledge_workspace.js"), "utf8");
-  const styles = await readFile(resolve(root, "dist", "styles.css"), "utf8");
+  const source = await readFile(resolve(root, "build", "knowledge_workspace.js"), "utf8");
+  const styles = await readFile(resolve(root, "build", "styles.css"), "utf8");
   for (const marker of ["data-knowledge-proposal-view", "data-knowledge-proposal-approve", "data-knowledge-proposal-reject"]) assert.match(source, new RegExp(marker));
   for (const label of ["\\u67e5\\u770b\\u8be6\\u60c5", "\\u6279\\u51c6\\u66f4\\u65b0", "\\u62d2\\u7edd"]) assert.ok(source.includes(label));
   assert.match(styles, /@media \(max-width: 760px\)[\s\S]*?\.knowledge-proposal-actions \{[^}]*grid-template-columns:\s*repeat\(3,minmax\(0,1fr\)\)/);
@@ -2821,7 +2823,7 @@ test("knowledge proposals keep three approval actions on one mobile row", async 
 
 test("sync settings put status first and omit the static domain explainer", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const {bindSyncSettings, isSyncSettingsFormEditing, renderSyncSettings, syncPreviewMessage, syncSettingsPayload} = await import(pathToFileURL(resolve(root, "dist", "sync_settings.js")));
+  const {bindSyncSettings, isSyncSettingsFormEditing, renderSyncSettings, syncPreviewMessage, syncSettingsPayload} = await import(pathToFileURL(resolve(root, "build", "sync_settings.js")));
   const html = renderSyncSettings({scope: "default", enabled: false, endpoint: "", device_id: "", device_name: "device", interval_seconds: 300, token_configured: false, passphrase_configured: false}, {scope: "default", cursor: "", last_error: ""}, 0, [], {running: true, phase: "pulling", detail: "第 3 页 · 收到 20 项", completed: 5, total: 10}, true, "2026-10-30T01:00:00Z");
   assert.doesNotMatch(html, /sync-domain-grid|sync-dependency-note|界面按项目/);
   assert.ok(html.indexOf("同步状态") < html.indexOf("连接设置"));
@@ -2886,8 +2888,8 @@ test("sync settings put status first and omit the static domain explainer", asyn
 
 test("sync view loads local state without blocking on a remote preview", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const main = await readFile(resolve(root, "dist", "app.js"), "utf8");
-  const sync = await readFile(resolve(root, "dist", "sync_settings.js"), "utf8");
+  const main = await readFile(resolve(root, "build", "app.js"), "utf8");
+  const sync = await readFile(resolve(root, "build", "sync_settings.js"), "utf8");
   const coreLoad = main.indexOf("api.syncSettings()", main.indexOf('view === "sync"'));
   const coreRendered = main.indexOf("render();", main.indexOf("state.syncNextRunAt", coreLoad));
   assert.ok(coreLoad >= 0 && coreRendered > coreLoad);
@@ -2910,8 +2912,8 @@ test("sync view loads local state without blocking on a remote preview", async (
 
 test("remote workspace and task mirrors expose explicit local takeover", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const main = await readFile(resolve(root, "dist", "app.js"), "utf8");
-  const api = await readFile(resolve(root, "dist", "api.js"), "utf8");
+  const main = await readFile(resolve(root, "build", "app.js"), "utf8");
+  const api = await readFile(resolve(root, "build", "api.js"), "utf8");
   for (const marker of ["data-takeover-workspace", "workspace-takeover-form", "task-takeover-form", "reuse_remote_credential"]) {
     assert.match(main, new RegExp(marker));
   }
@@ -3055,7 +3057,7 @@ test("pet workbench follows tab exposes unfollow and ignore actions", async () =
 
 test("pet workbench actions cover unfollowed, followed, ignored, and restored rows", async () => {
   const root = resolve(import.meta.dirname, "..");
-  const {petWatchActionKeys} = await import(pathToFileURL(resolve(root, "dist", "ui_helpers.js")));
+  const {petWatchActionKeys} = await import(pathToFileURL(resolve(root, "build", "ui_helpers.js")));
   // An unfollowed row offers follow and ignore without a prior follow.
   assert.deepEqual(petWatchActionKeys({watched: false, ignored: false}), ["follow", "ignore"]);
   // A followed row keeps unfollow plus ignore.
@@ -3267,14 +3269,14 @@ test("the app shell, tab and tray share the AHA2 brand mark", async () => {
   assert.match(logo, /stroke="#38bdf8"/);
   assert.match(logo, /M12 48 22 17 32 48 42 17 52 48/);
   assert.match(build, /copyFile\(resolve\(root, "assets", "aha-logo\.svg"\)/);
-  assert.match(build, /copyFile\(resolve\(root, "assets", "aha2\.ico"\), resolve\(output, "favicon\.ico"\)/);
+  assert.match(build, /copyFile\(resolve\(root, "assets", "aha2\.ico"\), resolve\(target, "favicon\.ico"\)/);
 });
 
 test("i18n catalogs and language preference are wired into the shell", async () => {
   const root = resolve(import.meta.dirname, "..");
   const main = await readFile(resolve(root, "src", "main.ts"), "utf8");
   const api = await readFile(resolve(root, "src", "api.ts"), "utf8");
-  const i18n = await import(pathToFileURL(resolve(root, "dist", "i18n.js")).href);
+  const i18n = await import(pathToFileURL(resolve(root, "build", "i18n.js")).href);
 
   i18n.applyLocale("en-US");
   assert.equal(i18n.t("nav.projects"), "Projects");
@@ -3293,7 +3295,7 @@ test("i18n catalogs and language preference are wired into the shell", async () 
 });
 
 test("list pagination clamps pages and keeps counts visible", async () => {
-  const {paginateItems, paginationHTML, textMatchesQuery} = await import(pathToFileURL(resolve(import.meta.dirname, "..", "dist", "ui_helpers.js")).href);
+  const {paginateItems, paginationHTML, textMatchesQuery} = await import(pathToFileURL(resolve(import.meta.dirname, "..", "build", "ui_helpers.js")).href);
   const empty = paginateItems([], 3, 8);
   assert.deepEqual(empty, {items: [], page: 1, pages: 1, total: 0});
   const items = Array.from({length: 17}, (_, index) => index);
@@ -3376,4 +3378,43 @@ test("knowledge page filters projects and skills, exposes skill details and auto
   assert.match(knowledge, /knowledgeProposals\(\{status: "all"/);
   assert.match(main, /includeProposals: false/);
   assert.match(main, /knowledgeProposals\(\{status: "pending", limit: 0\}\)/);
+});
+
+test("boot starts auth and general settings in parallel", async () => {
+  const source = await readFile(resolve(import.meta.dirname, "..", "src", "main.ts"), "utf8");
+  const authStart = source.indexOf("const authRequest = api.authStatus()");
+  const generalStart = source.indexOf("const generalRequest = api.generalSettings()");
+  const awaitAuth = source.indexOf("await authRequest");
+  // Both GETs must be in flight before either response is awaited; the locale
+  // is still applied only after the session reports an authenticated owner.
+  assert.ok(authStart >= 0, "auth request start is missing");
+  assert.ok(generalStart > authStart, "general settings must start right after auth");
+  assert.ok(awaitAuth > generalStart, "the boot must not await auth before starting settings");
+  assert.match(source, /if \(state\.auth\.authenticated\) \{\s*const general = await generalRequest;/);
+});
+
+test("production web ships one hashed bundle within the transfer budget", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  const dist = resolve(root, "dist");
+  const index = await readFile(resolve(dist, "index.html"), "utf8");
+  const scripts = [...index.matchAll(/<(?:script|link)\b[^>]*\b(?:src|href)="([^"]*\.js[^"]*)"/g)].map(match => match[1]);
+  // A modulepreload plus the module script, both on the same URL: one fetch.
+  assert.equal(scripts.length, 2, "first screen must request a single JS bundle");
+  assert.equal(new Set(scripts).size, 1);
+  assert.match(scripts[0], /^\/app\.[a-f0-9]{12}\.js\?v=[a-f0-9]{12}$/);
+  const bundleName = scripts[0].slice(1).split("?")[0];
+  const bundle = await readFile(resolve(dist, bundleName), "utf8");
+  assert.ok(bundle.includes("/api/v1/auth/status"), "bundle is missing the boot API");
+  assert.equal((bundle.match(/^import\s/mg) || []).length, 0, "bundle still has unbundled imports");
+  assert.doesNotThrow(() => new Function(bundle));
+  // Go's compress/gzip DefaultCompression lands within a few KiB of level 5;
+  // the budget is the actual first-screen transfer, not the build-time size.
+  const gzipped = gzipSync(Buffer.from(bundle), {level: 5}).length;
+  assert.ok(gzipped <= 250 * 1024, `first-screen JS gzip is ${gzipped} bytes`);
+  const entries = await readdir(dist);
+  assert.deepEqual(entries.filter(name => name.endsWith(".js")), [bundleName], "dist must not ship per-module scripts");
+  const stylesheet = index.match(/rel="stylesheet" href="([^"]+)"/)?.[1];
+  assert.match(stylesheet, /^\/styles\.[a-f0-9]{12}\.css$/);
+  assert.equal((index.match(/<script\b/g) || []).length, 1, "index must load one module script");
+  assert.ok(!index.includes('src="/app.js"'));
 });

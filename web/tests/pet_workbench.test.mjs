@@ -2,8 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {readFile} from "node:fs/promises";
 import {resolve} from "node:path";
-import {createPetApprovalCounter, petPendingApprovalBadge} from "../dist/pet_approvals.js";
-import {bindPetDocEditorButtons, createPetWorkbenchLoader, createPetWorkbenchPageKeeper, PET_APPROVAL_MAX_LIMIT, petApprovalMatches, petApprovalPage, renderPetApprovalLoadMore, renderPetInspectionSummary, renderPetWorkbenchLoadError, swapPetWorkbenchPage} from "../dist/pet_workbench.js";
+import {createPetApprovalCounter, petPendingApprovalBadge} from "../build/pet_approvals.js";
+import {bindPetDocEditorButtons, createPetWorkbenchLoader, createPetWorkbenchPageKeeper, PET_APPROVAL_MAX_LIMIT, petApprovalMatches, petApprovalPage, renderPetApprovalLoadMore, renderPetInspectionSummary, renderPetWorkbenchLoadError, swapPetWorkbenchPage} from "../build/pet_workbench.js";
 
 const root = resolve(import.meta.dirname, "../..");
 

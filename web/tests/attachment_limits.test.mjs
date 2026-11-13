@@ -4,13 +4,13 @@ import {readFileSync} from "node:fs";
 import {resolve} from "node:path";
 import {pathToFileURL} from "node:url";
 
-const dist = resolve(import.meta.dirname, "..", "dist");
-const composer = await import(pathToFileURL(resolve(dist, "task_composer.js")));
-const mailTask = await import(pathToFileURL(resolve(dist, "mail_task.js")));
+const modulesDir = resolve(import.meta.dirname, "..", "build");
+const composer = await import(pathToFileURL(resolve(modulesDir, "task_composer.js")));
+const mailTask = await import(pathToFileURL(resolve(modulesDir, "mail_task.js")));
 
 const MiB = 1024 * 1024;
-const appSource = readFileSync(resolve(dist, "app.js"), "utf8");
-const mailSource = readFileSync(resolve(dist, "mail_task.js"), "utf8");
+const appSource = readFileSync(resolve(modulesDir, "app.js"), "utf8");
+const mailSource = readFileSync(resolve(modulesDir, "mail_task.js"), "utf8");
 
 test("Task attachment hint and pre-upload validation use the 8 / 200MiB limit", () => {
   assert.equal(composer.TASK_ATTACHMENT_MAX_COUNT, 8);

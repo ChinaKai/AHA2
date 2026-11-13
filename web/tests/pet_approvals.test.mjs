@@ -6,7 +6,7 @@ import {pathToFileURL} from "node:url";
 
 const root = resolve(import.meta.dirname, "..");
 const {parsePetApprovalPayload, petApprovalOptions, petApprovalOptionLabel, renderPetApprovalOptionPicker, selectedPetApprovalOption} = await import(
-  pathToFileURL(resolve(root, "dist", "pet_approvals.js")).href
+  pathToFileURL(resolve(root, "build", "pet_approvals.js")).href
 );
 
 const pending = (payload, extra = {}) => ({kind: "owner_decision", status: "pending", payload, ...extra});
@@ -74,6 +74,6 @@ test("approval cards wire the picker into approve and keep reject/cancel paths",
   assert.match(main, /const showApprovalError = \(button: HTMLButtonElement, message: string\) => \{/);
   assert.match(main, /data-pet-approval-error/);
   assert.match(main, /showApprovalError\(button, error instanceof Error \? error\.message : String\(error\)\)/);
-  const app = await readFile(resolve(root, "dist", "app.js"), "utf8");
+  const app = await readFile(resolve(root, "build", "app.js"), "utf8");
   assert.match(app, /\.\/pet_approvals\.js\?v=[a-f0-9]{12}/);
 });

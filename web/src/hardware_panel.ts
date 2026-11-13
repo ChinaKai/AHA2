@@ -86,7 +86,9 @@ function setHardwareAutoCopy(enabled: boolean): void {
 function loadTerminalAssets(): Promise<void> {
   if (window.Terminal) return Promise.resolve();
   if (terminalAssetsPromise) return terminalAssetsPromise;
-  const appScript = document.querySelector<HTMLScriptElement>('script[src*="/app.js"]');
+  // The production bundle has a content-hashed name (app.<hash>.js) and a
+  // matching ?v= query; the query versions the vendor files loaded below.
+  const appScript = document.querySelector<HTMLScriptElement>('script[type="module"][src*="/app"]');
   const version = appScript ? new URL(appScript.src, location.href).search : "";
   const stylesheet = document.createElement("link");
   stylesheet.rel = "stylesheet";

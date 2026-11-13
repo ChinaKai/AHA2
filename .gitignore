@@ -16,3 +16,4 @@ internal/webassets/dist/*
 
 # AHA runtime context (prompts, scratch, shared agent proxy helper).
 .aha2-context/
+web/build/

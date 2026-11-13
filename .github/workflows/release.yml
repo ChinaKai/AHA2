@@ -25,6 +25,7 @@ jobs:
 
       - name: Build and test Web
         run: |
+          npm ci --prefix web
           node scripts/build-web.mjs
           node --test web/tests/*.test.mjs
 
@@ -70,6 +71,7 @@ jobs:
       - name: Build embedded Web
         shell: powershell
         run: |
+          npm ci --prefix web
           node scripts/build-web.mjs
           New-Item -ItemType Directory -Force internal\webassets\dist | Out-Null
           Get-ChildItem internal\webassets\dist -Force | Remove-Item -Recurse -Force
@@ -138,6 +140,7 @@ jobs:
 
       - name: Build embedded Web
         run: |
+          npm ci --prefix web
           node scripts/build-web.mjs
           rm -rf internal/webassets/dist
           mkdir -p internal/webassets/dist
@@ -192,6 +195,7 @@ jobs:
 
       - name: Build embedded Web
         run: |
+          npm ci --prefix web
           node scripts/build-web.mjs
           rm -rf internal/webassets/dist
           mkdir -p internal/webassets/dist

@@ -4,7 +4,7 @@ import {resolve} from "node:path";
 import {pathToFileURL} from "node:url";
 
 const {computeSpeechBubblePlacement, petBubbleRectsOverlap} = await import(
-  pathToFileURL(resolve(import.meta.dirname, "..", "dist", "pet_bubble.js")).href
+  pathToFileURL(resolve(import.meta.dirname, "..", "build", "pet_bubble.js")).href
 );
 
 function assertClearOfPet(pet, placement, width, height, viewportWidth, viewportHeight) {

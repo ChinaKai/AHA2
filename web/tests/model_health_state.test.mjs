@@ -8,7 +8,7 @@ import {pathToFileURL} from "node:url";
 
 const root = resolve(import.meta.dirname, "..");
 const {createModelHealthState, forgetAllModelHealth, forgetModelHealth, runModelHealthCheck} = await import(
-  pathToFileURL(resolve(root, "dist", "model_health.js"))
+  pathToFileURL(resolve(root, "build", "model_health.js"))
 );
 
 function deferred() {

@@ -8,7 +8,7 @@ import {resolve} from "node:path";
 import {pathToFileURL} from "node:url";
 
 const root = resolve(import.meta.dirname, "..");
-const {renderWorkspaceDetection} = await import(pathToFileURL(resolve(root, "dist", "ui_helpers.js")));
+const {renderWorkspaceDetection} = await import(pathToFileURL(resolve(root, "build", "ui_helpers.js")));
 
 function workspace(overrides = {}) {
   return {
@@ -40,7 +40,7 @@ test("the tunnel and direct labels are unchanged", () => {
 });
 
 test("the settings page renders no stdio switch and saves only the override", async () => {
-  const app = await readFile(resolve(root, "dist", "app.js"), "utf8");
+  const app = await readFile(resolve(root, "build", "app.js"), "utf8");
   assert.doesNotMatch(app, /name="stdio_proxy"/, "the removed stdio switch is still rendered");
   assert.doesNotMatch(app, /formCheckbox\(form, "stdio_proxy"\)/, "the settings save still reads a removed field");
   assert.doesNotMatch(app, /stdio_proxy: stdioProxy/, "the settings save still sends a removed field");
@@ -48,7 +48,7 @@ test("the settings page renders no stdio switch and saves only the override", as
 });
 
 test("a direct load of the other settings view fetches the agent api settings", async () => {
-  const app = await readFile(resolve(root, "dist", "app.js"), "utf8");
+  const app = await readFile(resolve(root, "build", "app.js"), "utf8");
   // The Agent API panel lives on "other", but only the "advanced" view used to
   // load its data. A refresh straight into #other therefore rendered defaults
   // and never asked the server.

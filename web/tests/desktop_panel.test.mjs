@@ -5,7 +5,7 @@ import {resolve} from "node:path";
 import {pathToFileURL} from "node:url";
 
 const root = resolve(import.meta.dirname, "..");
-const moduleURL = pathToFileURL(resolve(root, "dist/desktop_panel.js"));
+const moduleURL = pathToFileURL(resolve(root, "build/desktop_panel.js"));
 const desktop = await import(moduleURL);
 const source = await readFile(moduleURL, "utf8");
 const apiURL = new URL(source.match(/from "(\.\/api\.js[^"]*)"/)[1], moduleURL);
@@ -196,7 +196,7 @@ test("transient capture or enumeration contention preserves the displayed frame 
 });
 
 test("browser tool keeps its persisted ID and renders shared control, not a placeholder", async () => {
-  const tools = await import(pathToFileURL(resolve(root, "dist/task_tools.js")));
+  const tools = await import(pathToFileURL(resolve(root, "build/task_tools.js")));
   assert.equal(tools.taskToolTitle("browser"), "共享控制");
   assert.match(tools.renderTaskToolButtons("browser"), /data-task-tool="browser"[^>]+title="共享控制"/);
   const html = tools.renderTaskToolContent("browser", detail("render-test"), "");
@@ -1380,7 +1380,7 @@ const sharedTargets = {
 };
 
 test("real task tool renderer contains one header and two persistent control rows", async () => {
-  const {renderTaskToolPanel} = await import(pathToFileURL(resolve(root, "dist/task_tools.js")));
+  const {renderTaskToolPanel} = await import(pathToFileURL(resolve(root, "build/task_tools.js")));
   const html = renderTaskToolPanel("browser", detail("real-header"), "main", "", "split");
   assert.equal((html.match(/class="task-tool-panel-head desktop-task-header"/g) || []).length, 1);
   assert.equal((html.match(/<h3>共享控制<\/h3>/g) || []).length, 1);
@@ -1584,7 +1584,7 @@ test("generic key input rejects cross-desktop chords but allows Run", async () =
 });
 
 test("shared header has focus and Stop without handoff icons", async () => {
-  const {renderTaskToolPanel} = await import(pathToFileURL(resolve(root, "dist/task_tools.js")));
+  const {renderTaskToolPanel} = await import(pathToFileURL(resolve(root, "build/task_tools.js")));
   const html = renderTaskToolPanel("browser", detail("left-controls"), "main", "", "split");
   const header = html.slice(html.indexOf("<header"), html.indexOf("</header>"));
   for (const marker of ['id="desktop-stop"', 'id="desktop-focus"']) {

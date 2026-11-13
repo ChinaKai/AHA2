@@ -1480,10 +1480,16 @@ async function bootstrap(): Promise<void> {
     if (savedView) state.view = savedView;
   }
   try {
-    state.auth = await api.authStatus();
+    // generalSettings is a plain GET that does not depend on the auth response,
+    // so start both requests together and only await settings once the session
+    // says the owner is signed in. The catch keeps a 401 for anonymous screens
+    // from surfacing as an unhandled rejection.
+    const authRequest = api.authStatus();
+    const generalRequest = api.generalSettings().catch(() => null);
+    state.auth = await authRequest;
     api.setCSRF(state.auth.csrf_token);
     if (state.auth.authenticated) {
-      const general = await api.generalSettings().catch(() => null);
+      const general = await generalRequest;
       if (general?.general) {
         state.generalSettings = general.general;
         applyLocale(general.general.language);

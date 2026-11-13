@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {resolve} from "node:path";
 import {pathToFileURL} from "node:url";
 
-const moduleURL = pathToFileURL(resolve(import.meta.dirname, "..", "dist", "pet_navigation.js")).href;
+const moduleURL = pathToFileURL(resolve(import.meta.dirname, "..", "build", "pet_navigation.js")).href;
 const {createPetNavigationClaimer} = await import(moduleURL);
 
 function fakeClock() {

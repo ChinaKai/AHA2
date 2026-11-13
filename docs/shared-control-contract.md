@@ -150,6 +150,7 @@ periodic reads must not tear down the control surface or invalidate UI focus.
 Use the repository Go toolchain. Keep temporary files inside the workspace.
 
 ```sh
+npm ci --prefix web   # pinned esbuild used by the Web build
 node scripts/build-web.mjs
 node --test web/tests/*.test.mjs
 .tools/go/bin/go test ./...

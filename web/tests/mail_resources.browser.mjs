@@ -115,7 +115,7 @@ const server = createServer(async (request, response) => {
       response.end(bootstrap);
     } else {
       if (!/^\/(?:vendor\/)?[a-z0-9_]+\.(?:js|css)$/.test(name)) { response.writeHead(404).end(); return; }
-      const file = name.startsWith("/vendor/") ? resolve(root, "web", name.slice(1)) : resolve(root, "web/dist", name.slice(1));
+      const file = name.startsWith("/vendor/") ? resolve(root, "web", name.slice(1)) : resolve(root, "web/build", name.slice(1));
       response.setHeader("Content-Type", name.endsWith(".css") ? "text/css" : "text/javascript");
       response.end(await readFile(file));
     }
