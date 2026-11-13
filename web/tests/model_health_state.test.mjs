@@ -1,0 +1,100 @@
+// Behavioral tests for the per-model health state machine: clearing a result
+// must also invalidate a request that was already in flight, so an old "可用"
+// cannot reappear after the model or Provider was edited.
+import test from "node:test";
+import assert from "node:assert/strict";
+import {resolve} from "node:path";
+import {pathToFileURL} from "node:url";
+
+const root = resolve(import.meta.dirname, "..");
+const {createModelHealthState, forgetAllModelHealth, forgetModelHealth, runModelHealthCheck} = await import(
+  pathToFileURL(resolve(root, "dist", "model_health.js"))
+);
+
+function deferred() {
+  let resolvePromise;
+  let rejectPromise;
+  const promise = new Promise((resolve, reject) => {
+    resolvePromise = resolve;
+    rejectPromise = reject;
+  });
+  return {promise, resolve: resolvePromise, reject: rejectPromise};
+}
+
+test("a check shows 检测中 and a second click is ignored while it is running", async () => {
+  const state = createModelHealthState();
+  const pending = deferred();
+  let calls = 0;
+  const first = runModelHealthCheck(state, "model-1", () => {
+    calls++;
+    return pending.promise;
+  });
+  assert.equal(state.modelHealth["model-1"].status, "checking");
+  // The row's button is disabled, but the guard protects a programmatic second
+  // click or a re-render that replays the action.
+  await runModelHealthCheck(state, "model-1", () => {
+    calls++;
+    return Promise.resolve({status: "ok"});
+  });
+  assert.equal(calls, 1);
+  pending.resolve({status: "ok"});
+  await first;
+  assert.equal(state.modelHealth["model-1"].status, "ok");
+});
+
+test("forgetting a model discards a response that was already in flight", async () => {
+  const state = createModelHealthState();
+  const pending = deferred();
+  const running = runModelHealthCheck(state, "model-1", () => pending.promise);
+  assert.equal(state.modelHealth["model-1"].status, "checking");
+  forgetModelHealth(state, "model-1");
+  assert.equal(state.modelHealth["model-1"], undefined);
+  pending.resolve({status: "ok"});
+  await running;
+  assert.equal(state.modelHealth["model-1"], undefined, "a stale response resurrected a cleared result");
+});
+
+test("an older response cannot overwrite a newer check after a clear", async () => {
+  const state = createModelHealthState();
+  const older = deferred();
+  const newer = deferred();
+  const first = runModelHealthCheck(state, "model-1", () => older.promise);
+  forgetModelHealth(state, "model-1");
+  const second = runModelHealthCheck(state, "model-1", () => newer.promise);
+  newer.resolve({status: "ok"});
+  await second;
+  older.resolve({status: "quota_exhausted", detail: "stale"});
+  await first;
+  assert.equal(state.modelHealth["model-1"].status, "ok", "the older request won");
+  assert.equal(state.modelHealth["model-1"].detail, undefined);
+});
+
+test("a forced refresh clears and invalidates every model's in-flight check", async () => {
+  const state = createModelHealthState();
+  const first = deferred();
+  const second = deferred();
+  const runningA = runModelHealthCheck(state, "model-a", () => first.promise);
+  const runningB = runModelHealthCheck(state, "model-b", () => second.promise);
+  forgetAllModelHealth(state);
+  assert.deepEqual(state.modelHealth, {});
+  first.resolve({status: "ok"});
+  second.resolve({status: "unauthorized"});
+  await Promise.all([runningA, runningB]);
+  assert.deepEqual(state.modelHealth, {}, "a stale response repopulated a cleared table");
+});
+
+test("a failed request stays local to the row as 检测失败", async () => {
+  const state = createModelHealthState();
+  await runModelHealthCheck(state, "model-1", () => Promise.reject(new Error("network down")));
+  assert.equal(state.modelHealth["model-1"].status, "error");
+  assert.equal(state.modelHealth["model-1"].detail, "network down");
+});
+
+test("onChange fires for the progress state and the final state", async () => {
+  const state = createModelHealthState();
+  const changes = [];
+  await runModelHealthCheck(state, "model-1", () => Promise.resolve({status: "rate_limited", retry_after_seconds: 5}), () => {
+    changes.push(state.modelHealth["model-1"]?.status);
+  });
+  assert.deepEqual(changes, ["checking", "rate_limited"]);
+});

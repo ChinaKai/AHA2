@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -240,16 +241,38 @@ func checkModelHealthEndpoint(ctx context.Context, client *http.Client, endpoint
 	return health
 }
 
-// modelHealthRequiresStreaming reports whether the 400 evidence points at a
-// streaming-only model rather than a generic parameter/schema rejection.
+// modelHealthRequiresStreaming reports whether the 400 evidence explicitly
+// says the model must be called in streaming mode. Matching a bare "stream" is
+// too broad: an "invalid stream_options parameter" rejection is an ordinary
+// request error, and retrying it would double-charge and hide the real cause.
 func modelHealthRequiresStreaming(detail string) bool {
-	return strings.Contains(strings.ToLower(detail), "stream")
+	text := strings.ToLower(detail)
+	for _, phrase := range []string{
+		"requires streaming", "require streaming", "streaming mode",
+		"must be streamed", "must use streaming", "streaming is required",
+		"streaming required", "stream is required", "only supports streaming",
+		"only support streaming", "only available with streaming",
+		"必须使用流式", "只能使用流式", "仅支持流式", "需要流式", "必须以流式",
+	} {
+		if strings.Contains(text, phrase) {
+			return true
+		}
+	}
+	return false
 }
 
 // modelHealthRequest sends one request and returns the classified result,
 // the HTTP status (0 for transport failures), and the classified detail.
 func modelHealthRequest(ctx context.Context, client *http.Client, endpoint string, headers map[string]string, body []byte, stream bool, apiKey string) (ModelHealth, int, string) {
 	result := ModelHealth{CheckedAt: time.Now().UTC(), Endpoint: probeRedact(endpoint, apiKey)}
+	if stream {
+		// Connection, response headers and the SSE read share one deadline, so
+		// a gateway that opens a stream and then goes silent cannot hold the
+		// health check open until the caller's overall timeout.
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, probeStreamTimeout)
+		defer cancel()
+	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		result.Status = ModelHealthUnavailable
@@ -271,18 +294,18 @@ func modelHealthRequest(ctx context.Context, client *http.Client, endpoint strin
 	result.RetryAfterSeconds = modelHealthRetryAfter(response.Header)
 	if code >= 200 && code < 300 {
 		if stream {
-			data, readErr := readFirstSSEDataLine(response.Body)
+			status, detail, readErr := readModelHealthSSE(response.Body, apiKey)
 			if readErr != nil {
 				result.Status = ModelHealthInconclusive
 				result.Detail = probeRedact(readErr.Error(), apiKey)
 				return result, code, result.Detail
 			}
-			if status, message := modelHealthSSEErrorStatus(data); status != "" {
-				// A 200 SSE response can carry the real failure in an error
-				// event; reporting that as "ok" would tell the Owner a model
-				// works while every Task fails with the same quota message.
+			if status != "" {
+				// A 200 SSE response can carry the real failure in a
+				// response.failed / error event; reporting that as "ok" would
+				// tell the Owner a model works while every Task fails.
 				result.Status = status
-				result.Detail = probeRedact(message, apiKey)
+				result.Detail = detail
 				result.RetryAfterSeconds = 0
 				return result, code, result.Detail
 			}
@@ -301,63 +324,127 @@ func modelHealthRequest(ctx context.Context, client *http.Client, endpoint strin
 	return result, code, detail
 }
 
-// readFirstSSEDataLine reads until the first SSE data line and returns its
-// payload. Comment/heartbeat lines do not count. A stream that closes without
-// data is an error, matching the protocol probe's definition of a live stream.
-func readFirstSSEDataLine(body io.Reader) (string, error) {
+// errModelHealthStreamWithoutTerminal means the stream closed before either a
+// failure or a terminal success event. The first "response.created" proves the
+// endpoint opened a stream, not that the request completed, so it is not ok.
+var errModelHealthStreamWithoutTerminal = errors.New("stream closed before a terminal SSE event")
+
+// readModelHealthSSE reads SSE events until a decidable failure or a terminal
+// success, bounded by 64 KiB and the stream timeout. A standard Responses
+// failure nests its error at response.failed.response.error, and a failure can
+// also arrive after an initial response.created; stopping at the first data
+// line would miss both.
+func readModelHealthSSE(body io.Reader, apiKey string) (status, detail string, err error) {
 	reader := bufio.NewReader(io.LimitReader(body, probeStreamReadLimit))
 	for {
-		line, err := reader.ReadString('\n')
+		line, readErr := reader.ReadString('\n')
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "data:") {
-			return strings.TrimSpace(strings.TrimPrefix(trimmed, "data:")), nil
+			payload := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
+			if payload != "" {
+				if eventStatus, text, decided := modelHealthSSEEvent(payload); decided {
+					if eventStatus == "" {
+						return "", "", nil
+					}
+					// Reuse the HTTP-body evidence formatter so the SSE detail is
+					// collapsed, redacted and rune-truncated the same way.
+					return eventStatus, probeResponseSnippet(strings.NewReader(text), apiKey), nil
+				}
+			}
 		}
 		switch {
-		case err == nil:
+		case readErr == nil:
 			continue
-		case err == io.EOF:
-			return "", errProbeStreamWithoutEvents
+		case readErr == io.EOF:
+			return "", "", errModelHealthStreamWithoutTerminal
 		default:
-			return "", err
+			return "", "", readErr
 		}
 	}
 }
 
-// modelHealthSSEErrorStatus inspects the first SSE data payload. A non-error
-// event returns ("", ""). An error event is classified with the same quota /
-// auth / model wording as an HTTP body, because gateways sometimes report an
-// exhausted balance or a revoked key as HTTP 200 plus an SSE error.
-func modelHealthSSEErrorStatus(payload string) (string, string) {
+// modelHealthSSEEvent classifies one SSE data payload. decided=false keeps
+// reading. A terminal success returns status "" with decided=true; a failure
+// returns a health status plus the text used as evidence.
+func modelHealthSSEEvent(payload string) (status, text string, decided bool) {
+	if strings.TrimSpace(payload) == "[DONE]" {
+		return "", "", true
+	}
 	var event map[string]any
 	if err := json.Unmarshal([]byte(payload), &event); err != nil {
-		return "", ""
+		return "", "", false
 	}
 	typeName, _ := event["type"].(string)
-	errorValue, hasError := event["error"]
-	if !hasError && !strings.EqualFold(strings.TrimSpace(typeName), "error") {
-		return "", ""
+	typeName = strings.ToLower(strings.TrimSpace(typeName))
+
+	failed := typeName == "response.failed" || typeName == "error" || typeName == "error.event"
+	var parts []string
+	if errorValue, ok := event["error"]; ok && errorValue != nil {
+		parts = append(parts, modelHealthErrorStrings(errorValue)...)
+		failed = true
 	}
-	text := payload
-	if details, ok := errorValue.(map[string]any); ok {
-		parts := make([]string, 0, 3)
-		for _, name := range []string{"message", "code", "type"} {
-			if value, ok := details[name].(string); ok && strings.TrimSpace(value) != "" {
-				parts = append(parts, value)
+	if response, ok := event["response"].(map[string]any); ok {
+		if errorValue, ok := response["error"]; ok && errorValue != nil {
+			parts = append(parts, modelHealthErrorStrings(errorValue)...)
+			failed = true
+		}
+	}
+	if failed {
+		evidence := strings.TrimSpace(strings.Join(parts, " "))
+		if evidence == "" {
+			evidence = payload
+		}
+		return modelHealthSSEErrorClass(evidence), evidence, true
+	}
+	switch typeName {
+	case "response.completed", "response.done", "response.incomplete", "message_stop":
+		return "", "", true
+	default:
+		return "", "", false
+	}
+}
+
+// modelHealthErrorStrings extracts human-readable fields from an error object.
+func modelHealthErrorStrings(value any) []string {
+	switch item := value.(type) {
+	case string:
+		if trimmed := strings.TrimSpace(item); trimmed != "" {
+			return []string{trimmed}
+		}
+		return nil
+	case map[string]any:
+		var parts []string
+		for _, name := range []string{"code", "type", "message", "detail", "reason"} {
+			if text, ok := item[name].(string); ok && strings.TrimSpace(text) != "" {
+				parts = append(parts, text)
 			}
 		}
-		if len(parts) > 0 {
-			text = strings.Join(parts, " ")
+		if len(parts) == 0 {
+			if raw, err := json.Marshal(item); err == nil {
+				parts = append(parts, string(raw))
+			}
 		}
+		return parts
+	default:
+		if raw, err := json.Marshal(item); err == nil {
+			return []string{string(raw)}
+		}
+		return nil
 	}
+}
+
+// modelHealthSSEErrorClass applies the same quota/auth/model wording as an
+// HTTP error body; an unrecognized error stays inconclusive, never ok.
+func modelHealthSSEErrorClass(text string) string {
 	switch {
 	case modelHealthQuotaExhausted(text):
-		return ModelHealthQuotaExhausted, text
+		return ModelHealthQuotaExhausted
 	case modelHealthAuthError(text):
-		return ModelHealthUnauthorized, text
+		return ModelHealthUnauthorized
 	case modelHealthModelMissing(text):
-		return ModelHealthModelNotFound, text
+		return ModelHealthModelNotFound
 	default:
-		return ModelHealthInconclusive, text
+		return ModelHealthInconclusive
 	}
 }
 

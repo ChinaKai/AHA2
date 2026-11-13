@@ -14,7 +14,7 @@ await copyFile(resolve(root, "assets", "aha-logo.svg"), resolve(output, "assets"
 await copyFile(resolve(root, "assets", "aha2-logo.png"), resolve(output, "assets", "aha2-logo.png"));
 await copyFile(resolve(root, "assets", "aha2.ico"), resolve(output, "favicon.ico"));
 
-for (const name of ["api", "i18n", "icons", "types", "pet_bubble", "pet_navigation", "pet_approvals", "pet_workbench", "runtime_picker", "task_agents", "task_composer", "task_filters", "hardware_terminal", "hardware_panel", "hardware_resources", "mail_cards", "mail_editor", "mail_resources", "mail_task", "resources", "desktop_panel", "task_tools", "markdown", "conversation_ui", "ui_helpers", "prompt_admin", "proxy_settings", "data_retention", "sync_settings", "codex_accounts", "knowledge_workspace", "channels", "assistant", "main"]) {
+for (const name of ["api", "i18n", "icons", "types", "pet_bubble", "pet_navigation", "pet_approvals", "pet_workbench", "runtime_picker", "task_agents", "task_composer", "task_filters", "hardware_terminal", "hardware_panel", "hardware_resources", "mail_cards", "mail_editor", "mail_resources", "mail_task", "resources", "desktop_panel", "task_tools", "markdown", "conversation_ui", "ui_helpers", "model_health", "prompt_admin", "proxy_settings", "data_retention", "sync_settings", "codex_accounts", "knowledge_workspace", "channels", "assistant", "main"]) {
   const input = await readFile(resolve(source, "src", `${name}.ts`), "utf8");
   const transformed = stripTypeScriptTypes(input, {mode: "transform", sourceMap: false});
   const outputName = name === "main" ? "app" : name;
@@ -54,6 +54,7 @@ const versionSource = await Promise.all([
   readFile(resolve(output, "markdown.js")),
   readFile(resolve(output, "conversation_ui.js")),
   readFile(resolve(output, "ui_helpers.js")),
+  readFile(resolve(output, "model_health.js")),
   readFile(resolve(output, "prompt_admin.js")),
   readFile(resolve(output, "proxy_settings.js")),
   readFile(resolve(output, "data_retention.js")),
@@ -87,6 +88,7 @@ const versionedApp = (await readFile(appPath, "utf8"))
   .replaceAll('"./assistant.js"', `"./assistant.js?v=${version}"`);
 const versionedAppWithHelpers = versionedApp
   .replaceAll('"./ui_helpers.js"', `"./ui_helpers.js?v=${version}"`)
+  .replaceAll('"./model_health.js"', `"./model_health.js?v=${version}"`)
   .replaceAll('"./prompt_admin.js"', `"./prompt_admin.js?v=${version}"`)
   .replaceAll('"./proxy_settings.js"', `"./proxy_settings.js?v=${version}"`)
   .replaceAll('"./data_retention.js"', `"./data_retention.js?v=${version}"`)

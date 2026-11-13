@@ -95,16 +95,20 @@ test("editing a model or provider clears stale health results", async () => {
   assert.match(app, /forgetModelHealth\(id\);/, "model edits/deletes do not clear the old health result");
   assert.match(app, /forgetAllModelHealth\(\);/, "provider edits do not clear old health results");
   // A response that was in flight when the result was cleared must not win.
-  assert.match(app, /state\.modelHealthSeq\[id\] !== seq/, "an old health response can overwrite cleared state");
+  // That generation guard lives in the extracted state module.
+  const stateModule = await readFile(resolve(root, "dist", "model_health.js"), "utf8");
+  assert.match(stateModule, /state\.modelHealthSeq\[modelID\] !== seq/, "an old health response can overwrite cleared state");
   assert.match(app, /if \(force\) forgetAllModelHealth\(\);/, "a forced refresh keeps stale health results");
 });
 
 test("the model page wires the per-row check without a global error path", async () => {
   const app = await readFile(resolve(root, "dist", "app.js"), "utf8");
-  assert.match(app, /api\.checkModelHealth\(id\)/, "the row action no longer calls the health endpoint");
+  assert.match(app, /api\.checkModelHealth\(modelID\)/, "the row action no longer calls the health endpoint");
+  assert.match(app, /runModelHealthCheck\(state, id/, "the row action no longer uses the health state machine");
   assert.match(app, /data-check-model/, "the row no longer renders a check button");
   assert.match(app, /target\.closest\("\[data-check-model\]"\)/, "the delegated click handler lost the check action");
-  assert.match(app, /if \(!id \|\| state\.modelHealth\[id\]\?\.status === "checking"\) return;/, "a second click while checking is not blocked");
+  const stateModule = await readFile(resolve(root, "dist", "model_health.js"), "utf8");
+  assert.match(stateModule, /state\.modelHealth\[modelID\]\?\.status === "checking"\) return;/, "a second click while checking is not blocked");
   const api = await readFile(resolve(root, "dist", "api.js"), "utf8");
   assert.match(api, /\/api\/v1\/models\/\$\{encodeURIComponent\(id\)\}\/health-check/);
 });

@@ -17,6 +17,7 @@ import {bindTaskMailPanel, renderTaskMailPanel} from "./mail_task.js";
 import type {MailResourcesData} from "./mail_resources.js";
 import {bindDesktopPanel, desktopPanelInteracting, refreshDesktopPanel, stopDesktopPanel} from "./desktop_panel.js";
 import {renderMarkdown} from "./markdown.js";
+import {forgetAllModelHealth as clearAllModelHealth, forgetModelHealth as clearModelHealth, runModelHealthCheck} from "./model_health.js";
 import {bindPromptAdmin, loadPromptCatalog, renderPromptAdmin} from "./prompt_admin.js";
 import {bindProxySettings, renderProxySettings} from "./proxy_settings.js";
 import {formatBytes, purgeEnabled, renderDatabasePanel, retentionFormError, skipReasonText} from "./data_retention.js";
@@ -3238,42 +3239,22 @@ function openEditModelDialog(id: string): void {
 
 // checkModelHealthByID runs one model row's health check. Progress and the
 // result stay in that row: other rows keep their own state and stay clickable,
-// and a failure must not raise a global error banner. A per-model sequence
-// makes an in-flight answer unable to overwrite a result that was cleared by an
-// edit or a forced refresh.
+// and a failure must not raise a global error banner. The state machine lives in
+// model_health.ts so clearing and request generations are behavior-tested.
 async function checkModelHealthByID(id: string): Promise<void> {
-  if (!id || state.modelHealth[id]?.status === "checking") return;
-  const seq = (state.modelHealthSeq[id] || 0) + 1;
-  state.modelHealthSeq[id] = seq;
-  state.modelHealth[id] = {status: "checking"};
-  refreshModelResults();
-  let next: ModelHealthView;
-  try {
-    const result = await api.checkModelHealth(id);
-    next = result.health;
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error || "检测请求失败");
-    next = {status: "error", detail: message};
-  }
-  if (state.modelHealthSeq[id] !== seq) return;
-  state.modelHealth[id] = next;
-  refreshModelResults();
+  await runModelHealthCheck(state, id, async modelID => (await api.checkModelHealth(modelID)).health, refreshModelResults);
 }
 
 // forgetModelHealth clears one model's result and invalidates any request that
 // is still in flight for it.
 function forgetModelHealth(id: string): void {
-  delete state.modelHealth[id];
-  state.modelHealthSeq[id] = (state.modelHealthSeq[id] || 0) + 1;
+  clearModelHealth(state, id);
 }
 
 // forgetAllModelHealth is for Provider changes and forced reloads, where the
 // stored credential or endpoint can change for every model at once.
 function forgetAllModelHealth(): void {
-  state.modelHealth = {};
-  for (const id of Object.keys(state.modelHealthSeq)) {
-    state.modelHealthSeq[id] += 1;
-  }
+  clearAllModelHealth(state);
 }
 
 function deleteModelByID(id: string, button: HTMLElement | null): void {

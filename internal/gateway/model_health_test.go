@@ -40,13 +40,16 @@ func TestCheckModelHealthStatusMapping(t *testing.T) {
 		wantRetry  int
 	}{
 		{name: "ok", code: http.StatusOK, body: `{"id":"chatcmpl-1"}`, wantStatus: ModelHealthOK},
+		{name: "ok empty body", code: http.StatusOK, body: "", wantStatus: ModelHealthOK},
 		{name: "rate limited", code: http.StatusTooManyRequests, body: `{"error":{"message":"slow down"}}`, headers: http.Header{"Retry-After": []string{"42"}}, wantStatus: ModelHealthRateLimited, wantRetry: 42},
+		{name: "rate limited without retry-after", code: http.StatusTooManyRequests, body: `{"error":{"message":"slow down"}}`, wantStatus: ModelHealthRateLimited, wantRetry: 0},
 		{name: "unauthorized", code: http.StatusUnauthorized, body: `{"error":{"message":"invalid key"}}`, wantStatus: ModelHealthUnauthorized},
 		{name: "forbidden", code: http.StatusForbidden, body: `{"error":{"message":"no access"}}`, wantStatus: ModelHealthUnauthorized},
 		{name: "payment required", code: http.StatusPaymentRequired, body: `{"error":{"message":"pay up"}}`, wantStatus: ModelHealthQuotaExhausted},
 		{name: "400 quota keyword", code: http.StatusBadRequest, body: `{"error":{"message":"insufficient_quota: 账户余额不足，请充值"}}`, wantStatus: ModelHealthQuotaExhausted},
 		{name: "400 quota with echoed key", code: http.StatusBadRequest, body: `{"error":{"message":"billing hard limit reached","api_key":"` + secret + `"}}`, wantStatus: ModelHealthQuotaExhausted},
 		{name: "400 rejected parameters", code: http.StatusBadRequest, body: `{"error":{"message":"invalid max_tokens: must be >= 16"}}`, wantStatus: ModelHealthRejected},
+		{name: "400 empty body", code: http.StatusBadRequest, body: "", wantStatus: ModelHealthRejected},
 		{name: "400 model missing", code: http.StatusBadRequest, body: `{"error":{"message":"The model ` + "`gpt-x`" + ` does not exist"}}`, wantStatus: ModelHealthModelNotFound},
 		{name: "404 model missing", code: http.StatusNotFound, body: `{"error":{"message":"model not found"}}`, wantStatus: ModelHealthModelNotFound},
 		{name: "500 unavailable", code: http.StatusInternalServerError, body: `{"error":{"message":"boom"}}`, wantStatus: ModelHealthUnavailable},
@@ -310,7 +313,7 @@ func TestCheckModelHealthStreamingRetryKeepsRealTaskSemantics(t *testing.T) {
 		if stream, _ := payload["stream"].(bool); !stream {
 			return healthJSONResponse(http.StatusBadRequest, `{"error":{"message":"this model requires streaming"}}`, nil), nil
 		}
-		return probeSSEResponse("event: response.created\ndata: {\"type\":\"response.created\"}\n\n"), nil
+		return probeSSEResponse("event: response.created\ndata: {\"type\":\"response.created\"}\n\nevent: response.completed\ndata: {\"type\":\"response.completed\"}\n\n"), nil
 	})}
 	health := CheckModelHealth(context.Background(), client, "https://gateway.example/v1", "", "secret-key",
 		"bearer", "codex", "model-x", "responses", 5*time.Second)
@@ -476,6 +479,111 @@ func TestCheckModelHealthUsesRuntimeAuthHeader(t *testing.T) {
 				t.Fatalf("unexpected %s header %q", other, got.Get(other))
 			}
 		})
+	}
+}
+
+// TestCheckModelHealthSSEResponseFailed covers the standard Responses failure
+// envelope, whose error sits at response.failed.response.error rather than at
+// the top level.
+func TestCheckModelHealthSSEResponseFailed(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name       string
+		errorJSON  string
+		wantStatus string
+		wantDetail string
+	}{
+		{name: "quota", errorJSON: `{"code":"insufficient_quota","message":"You exceeded your current quota"}`, wantStatus: ModelHealthQuotaExhausted, wantDetail: "insufficient_quota"},
+		{name: "auth", errorJSON: `{"code":"invalid_api_key","message":"Invalid API key"}`, wantStatus: ModelHealthUnauthorized, wantDetail: "invalid_api_key"},
+		{name: "model", errorJSON: `{"code":"model_not_found","message":"The model gpt-x does not exist"}`, wantStatus: ModelHealthModelNotFound, wantDetail: "model_not_found"},
+	}
+	for _, testCase := range cases {
+		testCase := testCase
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			client := &http.Client{Transport: probeRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+				var payload map[string]any
+				_ = json.NewDecoder(request.Body).Decode(&payload)
+				if stream, _ := payload["stream"].(bool); !stream {
+					return healthJSONResponse(http.StatusBadRequest, `{"error":{"message":"this model requires streaming"}}`, nil), nil
+				}
+				return probeSSEResponse("event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"id\":\"resp_1\",\"status\":\"failed\",\"error\":" + testCase.errorJSON + "}}\n\n"), nil
+			})}
+			health := CheckModelHealth(context.Background(), client, "https://gateway.example/v1", "", "secret-key",
+				"bearer", "codex", "model-x", "responses", 5*time.Second)
+			if health.Status != testCase.wantStatus {
+				t.Fatalf("status=%q want %q (detail=%q)", health.Status, testCase.wantStatus, health.Detail)
+			}
+			if !strings.Contains(health.Detail, testCase.wantDetail) {
+				t.Fatalf("detail lost %q: %q", testCase.wantDetail, health.Detail)
+			}
+		})
+	}
+}
+
+// TestCheckModelHealthSSEAfterCreated keeps reading past a successful first
+// event: the quota failure arrives only after response.created.
+func TestCheckModelHealthSSEAfterCreated(t *testing.T) {
+	t.Parallel()
+	client := &http.Client{Transport: probeRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		var payload map[string]any
+		_ = json.NewDecoder(request.Body).Decode(&payload)
+		if stream, _ := payload["stream"].(bool); !stream {
+			return healthJSONResponse(http.StatusBadRequest, `{"error":{"message":"streaming mode is required"}}`, nil), nil
+		}
+		body := "event: response.created\ndata: {\"type\":\"response.created\"}\n\n" +
+			"event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"code\":\"insufficient_quota\",\"message\":\"余额不足\"}}}\n\n"
+		return probeSSEResponse(body), nil
+	})}
+	health := CheckModelHealth(context.Background(), client, "https://gateway.example/v1", "", "secret-key",
+		"bearer", "codex", "model-x", "responses", 5*time.Second)
+	if health.Status != ModelHealthQuotaExhausted {
+		t.Fatalf("status=%q want quota_exhausted (detail=%q)", health.Status, health.Detail)
+	}
+}
+
+func TestCheckModelHealthStreamWithoutTerminalIsInconclusive(t *testing.T) {
+	t.Parallel()
+	client := &http.Client{Transport: probeRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		var payload map[string]any
+		_ = json.NewDecoder(request.Body).Decode(&payload)
+		if stream, _ := payload["stream"].(bool); !stream {
+			return healthJSONResponse(http.StatusBadRequest, `{"error":{"message":"must be streamed"}}`, nil), nil
+		}
+		return probeSSEResponse("event: response.created\ndata: {\"type\":\"response.created\"}\n\n"), nil
+	})}
+	health := CheckModelHealth(context.Background(), client, "https://gateway.example/v1", "", "secret-key",
+		"bearer", "codex", "model-x", "responses", 5*time.Second)
+	if health.Status != ModelHealthInconclusive {
+		t.Fatalf("status=%q want inconclusive (detail=%q)", health.Status, health.Detail)
+	}
+	if !strings.Contains(health.Detail, "terminal") {
+		t.Fatalf("detail does not explain the missing terminal event: %q", health.Detail)
+	}
+}
+
+// TestCheckModelHealthStreamOptions400IsNotRetried pins the review finding: a
+// 400 that merely mentions a stream-related parameter is an ordinary rejection,
+// not "this model requires streaming".
+func TestCheckModelHealthStreamOptions400IsNotRetried(t *testing.T) {
+	t.Parallel()
+	var mu sync.Mutex
+	requests := 0
+	client := &http.Client{Transport: probeRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		mu.Lock()
+		requests++
+		mu.Unlock()
+		return healthJSONResponse(http.StatusBadRequest, `{"error":{"message":"invalid stream_options parameter"}}`, nil), nil
+	})}
+	health := CheckModelHealth(context.Background(), client, "https://gateway.example/v1", "", "secret-key",
+		"bearer", "codex", "model-x", "responses", 5*time.Second)
+	if health.Status != ModelHealthRejected {
+		t.Fatalf("status=%q want rejected (detail=%q)", health.Status, health.Detail)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if requests != 1 {
+		t.Fatalf("stream_options 400 was retried: requests=%d", requests)
 	}
 }
 
